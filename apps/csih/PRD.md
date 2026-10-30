@@ -145,6 +145,14 @@ agent 模式新增 `/help`、`/status`、`/clear`，均只在本地处理、不�
 - **第十批已落地（2026-10-29）**：忙碌行。原来执行命令时一直显示「等模型」；现在收到 exec 行（命令执行前发出）就显示 `跑命令 <命令>`，下一次请求在途（`net_in_flight()`）时切回「等模型」。文案从 `请求中 等模型 3秒 7745词元 上传 32839字节 已收 574字节 hit 1152 miss 6561` 改为 `⏳ 等模型 3秒 · 7745词元 · ↑32.1KB 已收574B · 缓存命中15%`，保留「已收」二字（已有断言依赖它）。selftest：`busy line names the running command and reads sizes`；tmux 实测已见切换。原来 exec 同步执行时秒数不走、界面不刷新，第十一批已解决。
 - **第四十二批已落地（2026-10-29）**：状态行上色：`✓` 绿、`◐` 黄、`✗` 和 `│ blocked:` 红、`项目>` 青。颜色只在写终端时加（`tui_put_line`），帧本身仍是纯文本，宽度计算、差量比较和所有读取帧的测试都不受影响；差量刷新改用 tui 自己的循环，`render.cx` 的 `frame_diff` 没动。遵守 `NO_COLOR`，也可以用 `CSIH_COLOR=0` 关闭。写屏缓冲按每行 32 字节预留，满屏彩色行也放得下。selftest：`status rows are coloured on output, frames stay plain`（设了 NO_COLOR 时打印 skip）；tmux `capture-pane -e` 实测 `◐` 行带 `ESC[33m`。
   - 观察（不是本批改动引起）：一道不用工具的算术题，这次评审判为「未验证」（理由是没有工具记录可核实）；之前同类问题判过「已验收（answer_only）」。评审对纯问答的判法不稳定，第四十三批处理。
+- **第六十八批已落地（2026-10-30）**：把 csih.com 当真正的 harness 用，0.1.2。
+  - 做法：在临时项目里实际驱动 csih.com，做了这些事：修一个 bug；加测试并运行；`/exit` 后重开，问它之前改了什么；`/diff`、`/undo`；在 apps/csih 里做代码导航；错误 key、没有 key。
+  - 发现并修复：
+    - edit/write 改完文件会丢掉可执行位，模型每次都得自己再 chmod。现在已存在的文件保留原权限；软链接仍按原样整体替换，不顺着链接写（work 档按路径做检查）。
+    - 没有非交互模式。新增 `csih -p PROMPT`（不带参数时从 stdin 读）：stdout 只有答复，执行过程走 stderr；完成退出 0、未完成 1、提示词为空 64。和 TUI 共用按目录分开的会话记录。
+    - 没有 key 时原来报 "http 401"，看起来像 key 写错了。现在直接说明缺什么。
+  - 测试：新增探针 `probes/print_mode.cx` 和合同 `print-mode`（5 项，对接 agent-stub）；file_cli selftest 加了一条，验证改写 0750 的脚本后仍是 0750。
+  - 以下在 csih.com 本身上实测通过：改完的脚本直接就能运行；`-p` 答复正确、退出 0。会话恢复、`/diff`、`/undo` 原来就能用。
 - **第六十七批已落地（2026-10-30）**：信号真注册，产品闭包零 libc 直调，CLI 和探针跟进。
   - 终端恢复改走 `sys.sig`（rt_sigaction）。pty 实测：SIGTERM 后 termios 回到启动前、退出码 143；旧二进制停在原始模式。agent 撤销清理改 `sy_atexit`：真 DeepSeek 改文件后 `/exit`，新版删掉 `~/.csih/undo/PID-1.bak`，旧版留着（前导 atexit 表按单元，从没跑过）。`home.cx` 用 `sy_symlink`；run/agent 启动改走 `csih_home_bind`，旧 `~/.cdsh` 终于会被链上。
   - f781d1ca4d 把 tui.cx 的 use 推到 40 条（上限 32，产品编不过）：8 个 reload 模块改经 `tui_reload.cx` 转发，去掉 5 条无调用的 use，现 28 条。

@@ -52,7 +52,7 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
   - 目标机第一次运行时，用 `gzip -dc` 解到 `~/.cache/csih/csih-<key>`，以后直接用缓存。
   - 压缩器单独检查：`sh ./unisacc.com tools/check-cx-deflate.cx`。
   - ape-pack 不带 `--deflate` 时，输出和原来逐字节相同。
-- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.1（0.1.0 → 0.1.1 的变化见 PRD 第六十七批）。
+- **版本**：只有一个来源，就是 `apps/csih/tui.cx` 里的 `CSIH_VERSION`，现在是 0.1.2（0.1.0 → 0.1.1 见 PRD 第六十七批，0.1.1 → 0.1.2 见第六十八批：新增 `-p`，编辑后保留文件权限）。
   - pack 从源码读出它，写进 PE 的 VERSIONINFO 和清单的 `version` 行。
   - verify 会拿清单里的版本和源码对照。
   - `csih -v`、`--version`、`version` 打印同一行。
@@ -66,10 +66,18 @@ sh ./unisacc.com tools/csih-ape.cx -- smoke
 
 ```
 sh apps/csih/csih.com            # 不带参数即 agent（与 csih.sh 相同；d8eafebcee 之前直接跑会只打印用法）
-sh apps/csih/csih.com -v         # csih 0.1.1
+sh apps/csih/csih.com -v         # csih 0.1.2
+sh apps/csih/csih.com -p "修好 sum.sh 并运行验证"   # 跑一轮就退出（给脚本和 CI 用，见下）
+echo "提示词" | sh apps/csih/csih.com -p             # 不带参数时，提示词从 stdin 读
 sh apps/csih/csih.com selftest
 sh apps/csih/csih.com keyprobe
 ```
+
+`-p`（也可以写 `print`）不进 TUI，在当前目录跑一轮 agent 就退出：
+- stdout 只有最终答复，执行过程（exec/file 各步和它们的输出）都打到 stderr。
+- 评审验收通过时退出码为 0；没有完成为 1，原因打到 stderr；提示词为空时为 64。
+- 和 TUI 共用 endpoint、模型、工作目录，也共用按目录分开的会话记录，所以 `-p` 和交互模式接着的是同一段对话。
+- 没有 DeepSeek key 时直接说明缺什么，不会发出请求再收到一个 401。
 
 csih.com 是自包含的二进制，不需要 `apps/csih` 源码树，也不读 `csih.sh` 的产物戳。在 macOS 上和 unisacc.com 一样，要用 `sh csih.com` 启动（直接 `execve` 一个 APE 会得到 ENOEXEC）。
 
