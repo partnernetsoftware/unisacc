@@ -6,7 +6,7 @@
 
 ## 产品面（2026-10-30）
 
-对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，驱动对象重编后再接原来的 `exec.o` 和 `src/hostnative.o`，944191 字节，sha256 `4fa89d4c5fde27d988db25dd4ece2d561076a2af4ef1daa266bf29eb96b77bc2`。上一只是 939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。这只新入口没有整表重跑。语料前 100 格没有重跑。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。自身尾部候选在第 151 节，文件在 `out/grk-self-01/candidate`。库调用对拍在第 152 节。e2 四项分解在第 153 节。模块边界五项在第 154 节。`-l`/`-L`/`-x` 这一刀在第 155 节。候选构造在第 156 节。hello、fib、库接口、dev-run 和 12 面没有在这只入口上重跑。
+对照已装产品的入口路径。三档：已通、骨架、未做。没实跑的不写已通。临时入口是 `/tmp/grk-cx-line/entry-o2`，驱动对象重编后再接原来的 `exec.o` 和 `src/hostnative.o`，944191 字节，sha256 `4fa89d4c5fde27d988db25dd4ece2d561076a2af4ef1daa266bf29eb96b77bc2`。上一只是 939895 字节，sha256 `600ae023cafa6ef4194ac9b7d5824dd5ce992635bb896bedf05334836bddf9f0`。已装产品 3035300 字节。12 面那张表是上一只 873487 字节入口的，`out/grk-face-01/cx-entry-matrix-2026-10-30.tsv`：表头加 48 行，48 行都是 SAME，进度起点 100、下一格 148。按面计 SAME：ar 5、as 7、nm 3、objdump 4、-c 2、tape 2、tapebin 2、cx-plan 6、cx-interface 2、dump-tokens 1、emit-host-symbols 2、-O1 2、-O2 2、-D 7、lib 1。候选整表在第 157 节，139 格 SAME。上一只整表仍是 `/tmp/grk-cx-line/o2mx/cx-entry-matrix-2026-10-30.tsv`，第 143 节。对象抽查在 `out/grk-obj-01/recheck.tsv`，第 145 节。12 面在第 146 节。摘要这一刀在第 147 节。目录行这一刀在第 148 节。解码这一刀在第 149 节，对拍表是 `out/grk-tapebin-02/cmp.tsv`。热循环这一刀在第 150 节。自身尾部候选在第 151 节，文件在 `out/grk-self-01/candidate`。库调用对拍在第 152 节。e2 四项分解在第 153 节。模块边界五项在第 154 节。`-l`/`-L`/`-x` 这一刀在第 155 节。候选构造在第 156 节。整表和自举第一步在第 157 节。
 
 - **ar：已通。** 检查器五行和产品相同：用法、`ar z`、缺成员、空归档、两成员。空归档 8 字节，两成员 146 字节，权限都是 0644。大归档、替换成员、符号表没跑。
 - **as：已通。** 七行相同：用法、`-z`、坏 `-b`、头和 `-b` 冲突、一行汇编、加 `ret`、缺文件。一行汇编 728 字节，加 `ret` 744 字节，权限 0644。缺文件两边 stderr 都是 86 字节。Mach-O、COFF、大汇编没跑。
@@ -1979,6 +1979,25 @@ flowchart TD
   link --> cat
   cat --> one["OUT/candidate"]
   one --> again["同一输入再造一次，五个文件逐字节相同"]
+```
+
+## 157. 2026-10-30 候选整表，第二代停在 drive.o
+
+候选是 `out/grk-entry-build-01/candidate`，2580211 字节，sha256 `ccb79895952219323f9236253f00aa2067565996ab47463cfe294751e15783ba`。检查器是 `tools/check-cx-entry.cx`。每一片外层是 `tools/bound 55`。格子里面仍是普通 12 秒，`dev-run.cx` 18 秒。子进程的 cwd 是 `/tmp/notrepo`，环境里去掉 `UNISA_CONTAINER`。候选直接执行。表是 `out/grk-cand-mx-01/cx-entry-matrix-2026-10-30.tsv`，表头加 148 行。进度文件是 0 和 148。stdout 最后一行是 `LEFT:0`。一共 20 片，片与片的间隔最长 27 秒，最后一片约 6 秒。没有一片被外层 55 秒杀掉。
+
+139 行 SAME。这 139 格按上面的候选 sha 记已通。前 100 格是 91 个 SAME、8 个 TIMEOUT、1 个 DIFF。后面 12 面 48 行全是 SAME。
+
+8 个 TIMEOUT 都是 `dev-run.cx`：`-S`、`-run`，再加 `lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 的 `-o`。候选退出码都是 142，墙钟大约 18.05 秒。产品都在 18 秒内结束。`-S` 产品用了 4.326 秒。六个 `-o` 里产品最慢的是 `osx/x86_64`，8.321 秒。`dev-run.cx -E` 两边退出 1，stdout 是 0，stderr 是 67 字节，判 SAME。热循环没改。`dup.c -run` 是 DIFF：产品退出 3，候选退出 127。这是 `strdup` 转发，这轮没改。
+
+`tools/entry-build.cx` 可以多带一个构造器。不带时仍用 `sh` 启动仓库根的 `unisacc.com`。带上路径就直接执行那个文件。这轮没有再跑不带构造器的那条。第二代目录是 `out/grk-entry-build-03`。构造器就是上面那只候选。P3 仍是仓库根 `unisacc.com`，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`。`drive.o` 这一步走 `tools/bound 55`，退出 142，耗时 55049618747 纳秒。收据里这一步是 TIMEOUT。目录里没有 `drive.o`、`exec.o`、`hostnative.o`、`entry.elf`。没有和第一代比字节。停住的相位是 `drive.o` 编译。没有换掉已装产品，没有改五份旧构造脚本，bound 没有加长。
+
+```mermaid
+flowchart TD
+  cand["候选 sha ccb79895"] --> mx["148 格，外层 bound 55"]
+  mx --> same["139 SAME"]
+  mx --> red["dev-run 八格超时，dup.c 退出 127"]
+  cand --> gen2["候选再编译 drive.o"]
+  gen2 --> stop["55 秒退出 142，没有第二代对象"]
 ```
 
 ## 64. 2026-10-29 编译器纯拒绝接到 bindhost
