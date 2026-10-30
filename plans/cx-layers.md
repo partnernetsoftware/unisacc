@@ -2,8 +2,23 @@
 
 主人口径：CX 底层要有 libc 与 POSIX 的专用对接包；上层不再直接用 malloc、memcpy 这类操作。
 
+## 目录
 ## 层
 
+- 已落地（按时间，可回归）：
+  1. [cli.cx 模块内带界比较替代 strcmp/strncmp](#已落地cli-cx-用模块内-static-带界比较替代-strcmpstrncmp2026-10-30cc)
+  2. [cx/text 补 tx_eqz/tx_prefixz](#已落地cx-text-补-tx_eqz--tx_prefixzz-string-无-cap-带界比较2026-10-30cc)
+  3. [cx/sys 补 sy_pipe](#已落地cx-sys-补-sy_pipe带-cloexec-的裸管道原语2026-10-30cc)
+  4. [sy_pipe 消费者接线 check-stream-output](#已落地sy_pipe-的第一个消费者接线toolscheck-stream-outputcx2026-10-30cc)
+  5. [cx/mem 补 grow（Vec）](#已落地cx-mem-补-grow可增长所有权缓冲区c-的-vecu82026-10-30cc)
+  6. [mem.grow 消费者 read-all](#已落地mem-grow-的第一个生产消费者接线toolsread-allcx2026-10-30cc)
+  7. [上层库 text.build（String）](#已落地上层库结构-textbuildrust-string--node-buffer-对应物2026-10-30cc)
+  8. [cx/sys 补 sy_unsetenv + 消费者](#已落地cx-sys-补-sy_unsetenv--消费者接线toolsrun-startup-benchcx2026-10-30cc)
+  9. [cxmod 命名空间冲突验收锁定](#已落地cxmod-命名空间冲突检测的验收锁定testscx-namespacecx2026-10-30cc)
+  10. [text.build 补 sb_join](#已落地text-build-扩充-sb_joinrust-slicejoin--arrayjoin2026-10-30cc)
+  11. [cx/runtime/stream_output 迁移 sys.fs](#已落地cx-runtimestream_outputcx-迁移到-sysfsl1-产品模块去裸-libc2026-10-30cc)
+  12. [mem.grow 补 mg_move/mg_take（所有权）](#已落地mem-grow-补-mg_move--mg_takerust-式所有权转移2026-10-30cc)
+  13. [cx/core/sparse 迁移 mem.heap](#已落地cx-coresparsecx-迁移到-memheap执行器稀疏表去裸-libc2026-10-30cc)
 | 层 | 路径 | 可直接调用 libc/POSIX | 职责 |
 |---|---|---|---|
 | L0 宿主对接 | `cx/sys/`、`cx/mem/`、`cx/text/`，以及 `tests/cxraw-layers.tsv` 列出的现有适配器（`src/host.cx`、`src/hostnative.cx`、`cx/runtime/process*.cx`、`cx/runtime/winprocess.cx`） | 是 | 文件、目录、进程、时间、环境、映射内存；带所有者的内存与有界字节/文本操作 |
@@ -87,3 +102,30 @@
    - 棘轮现状：上层直接调用 19634 次（初始 22847；去掉符号链接重复计数，再把检查工具的字符串比较改走 `tx_eq`），这次实跑 629 个已跟踪文件，0 项超基线，0 项低于基线。
 3. 迁移按调用密度：`cx/runtime`（memcpy/strlen 为主）→ `cx/driver`（strcmp 为主）→ `cx/core`（分配器已是注入式，改为注入 `cx/mem`）→ `src/`（与 grk 协调，等第二代自举后）→ tools/tests/apps。
 4. `#pragma unisa` 增加层声明：L0 模块才获得 libc 前导，上层前导只含 L0 接口；上层直接调用 libc 在模块检查时具名拒绝。此步改 `cxmod`，等入口自举稳定后做；它同时缩小上层单元的 E2 前导（瓶颈 B1 的乘数）。
+1. `cx/driver/cli.cx` 加 `#pragma unisa use text.text` 需要 `cx/driver/text -> ../text` 软链（use 按「点号=子目录」在使用者同目录解析）。
+## 已落地：cli.cx 用模块内 static 带界比较替代 strcmp/strncmp（2026-10-30，cc）
+上一节「迁移试点阻塞」的症结是跨目录 `use text.text` 要软链，而软链归一又依赖已装产品缺的 `sy_realpath`。改走**不引入 use 的模块内 static 辅助**，绕开软链，同时保持 `cli.cx` 的「过渡 C 调用者可直接 paste、无依赖」性质（它本就设计成无 use）。
+- 取舍：这是模块内实现而非复用 `cx/text` 的 `tx_eq`。cli.cx 是「过渡 C paste、无 use」的特殊模块，复用 L0 会引入跨目录 use（撞软链归一）。待产品重编带上 `sy_realpath` 后，可再评估收敛到 `cx/text`；当前消除 libc 依赖、棘轮下降是第一步。
+## 已落地：cx/text 补 tx_eqz / tx_prefixz（z-string 无 cap 带界比较，2026-10-30，cc）
+## 已落地：cx/sys 补 sy_pipe（带 CLOEXEC 的裸管道原语，2026-10-30，cc）
+## 已落地：sy_pipe 的第一个消费者接线（tools/check-stream-output.cx，2026-10-30，cc）
+- 验收：`sh ./unisacc.com tools/check-stream-output.cx` → `CXSTREAM_OUTPUT failed=0`（11 用例全 PASS，pipe-open/pipe-write/pipe-content 语义不变）。这是单一消费者场景，`tools/sys -> ../cx/sys` 软链存在，use 解析到 `tools/sys/proc.cx`，不撞「两个不同路径 use 同一模块」的软链归一（那个只在多模块程序里两个目录各 use 同一模块时发生）。
+- 意义：这是本 goal 第一个「新接口 + 真实消费者接线 + 独立检查通过」的闭环，证明 L0 接口（cx/sys）被上层（tools）通过 `use` 消费，而非模块内自造 static。软链归一缺陷（已装产品缺 `sy_realpath`）只阻多模块跨目录 use，单消费者接线不受影响。
+## 已落地：cx/mem 补 grow（可增长所有权缓冲区，C 的 Vec<u8>，2026-10-30，cc）
+## 已落地：mem.grow 的第一个生产消费者接线（tools/read-all.cx，2026-10-30，cc）
+## 已落地：上层库结构 text.build（Rust String / Node Buffer 对应物，2026-10-30，cc）
+- `cx/text/build.cx` 新增 `sb`（`typedef mg_buf sb`）与 `sb_new/sb_free/sb_len/sb_puts/sb_putn/sb_cstr`。它 `use mem.grow`+`use mem.heap`（跨目录 edge），不重复造 Vec，直接包装 mg_buf：长度容量随 builder 走，append 倍增扩容（速度面与 grow 一致，O(总字节)），释放一次。`sb_cstr` 只在需要时补 NUL（reserve len+1 再写 0），不每次 realloc。`sb_puts` 内联带界 z-string 长度（不依赖 text.text，避免库目录内互引的多路径软链）。
+- 需要 `cx/text/mem -> ../mem` 软链（build.cx 跨目录 use mem.grow）。这是「库目录内模块 use 跨目录 L0」的既定软链约定（src/ 早已如此）。
+## 已落地：cx/sys 补 sy_unsetenv + 消费者接线（tools/run-startup-bench.cx，2026-10-30，cc）
+## 已落地：cxmod 命名空间冲突检测的验收锁定（tests/cx-namespace.cx，2026-10-30，cc）
+- `tests/cx-namespace.cx`（40 行）：在临时目录写三组负例 fixture + 一组正例，用 `sy_run` 跑真实产品 `-cx-plan`，断言 rc 与具名诊断：
+## 已落地：text.build 扩充 sb_join（Rust slice::join / Array.join，2026-10-30，cc）
+## 已落地：cx/runtime/stream_output.cx 迁移到 sys.fs（L1 产品模块去裸 libc，2026-10-30，cc）
+- 需要 cx/runtime/sys -> ../sys 软链（跨目录 use）。单一消费者（check-stream-output use sys.proc，不 use sys.fs），不撞软链归一。
+## 已落地：mem.grow 补 mg_move / mg_take（Rust 式所有权转移，2026-10-30，cc）
+## 已落地：cx/core/sparse.cx 迁移到 mem.heap（执行器稀疏表去裸 libc，2026-10-30，cc）
+- 需要 `cx/core/mem -> ../mem` 软链（跨目录 use）。
+## prd.md 索引（2026-10-30，cc）
+按主人「prd.md 要做好索引」的要求，把 CX 分层重构接进现有索引体系：
+- `docs/cx/prd.md` 索引段新增 `plans/cx-layers.md`（底层/上层分层重构）。
+- `plans/cx-layers.md` 开头新增「目录」小节，列出设计节 + 13 个已落地项的可回归索引。
