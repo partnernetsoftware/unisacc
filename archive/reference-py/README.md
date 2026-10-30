@@ -15,11 +15,13 @@
 
    `exec/**/*-manifest.tsv` 开头的 `#! base build/parsebase.py` 是历史元数据，manifest 本身仍是构造与测试的数据，留在原处。
 2. ~~18 网内核生成器 `python3 -m unisa emit-kernel`~~：2026-10-30 起由 `tools/kernel-emit.cx` 原生写出 `kernel/` 的 41 个文件，与 Python 逐字节相同（e98caea11e）。`tools/net-built-private.cx`、`tools/pp-built-private.cx` 已改调它（1c372d2b43），活路径不再执行 `unisa`。
-   `unisa/` 暂不归档，因为它仍被当作数据或身份输入读取：
-   - `unisa/ckernel.py` 的 KERNEL_BODY 由 `tools/kernel-emit.cx`、`tools/table-kernel-export.cx` 按标记截取；
-   - `unisa/*.py` 的哈希进入 `kernel/` 的溯源注释，以及 `tools/net-material.cx`、`tools/pp-gold-material.cx`、`tools/carried-header-export.cx`、`tests/pp-constructed.cx`、`tests/pp-gold-controls.cx` 的身份绑定。
+   同日 `unisa/` 的 36 个文件归档 31 个，见清单。活路径只留 5 个，它们已不再执行，只作数据或身份输入：
+   - `unisa/ckernel.py`：KERNEL_BODY 由 `tools/kernel-emit.cx`、`tools/table-kernel-export.cx`、`tools/pp-gold-material.cx` 按标记截取；
+   - `unisa/gold.py`：`tools/net-material.cx` 从中解析词表元组；
+   - `unisa/gold.py`、`unisa/catalog.py`、`unisa/front/lex.py`、`unisa/ckernel.py`：哈希进入 `kernel/` 的溯源注释（`exec/facts/kernel-emit.tsv` 的 modelsrc），以及各材料工具与测试的身份绑定；
+   - `unisa/libneed.py`：仍有一处字符串引用。
    
-   归档前要先把 KERNEL_BODY 挪成数据文件，并重定这些身份绑定。
+   这 5 个要归档，得先把上述内容挪成数据文件，并在下一次慢车道纪元重定身份绑定。归档后，`kernel-emit --check` 41/41、`facts-gen --check` 31/31 均不变。
 3. `release/`：2026-10-30 按调用链清理。
    - **已归档：** 18 个 `.py`，连同只服务于它们、且引用已归档文件因而早已跑不起来的 `.sh`/`.cx`（macOS 打包、提交门禁、旧候选链、发布队列与预热、裁定台账报告）。
    - **仍留 2 个，由 GitHub 手动发布 workflow 调用：**
@@ -315,6 +317,37 @@
 - release/tools/unsigned_receipt.py
 - release/tools/whyrerun.py
 - research/tools/c38-decomp.py
+- unisa/__init__.py
+- unisa/__main__.py
+- unisa/bits.py
+- unisa/construct.py
+- unisa/control/__init__.py
+- unisa/control/net.py
+- unisa/control/rng.py
+- unisa/control/train.py
+- unisa/control/uns1.py
+- unisa/driver.py
+- unisa/emit_arm.py
+- unisa/emit_x86.py
+- unisa/exec_target.py
+- unisa/fp.py
+- unisa/front/__init__.py
+- unisa/front/parse.py
+- unisa/front/pp.py
+- unisa/front/sema.py
+- unisa/image/__init__.py
+- unisa/image/elf.py
+- unisa/image/macho.py
+- unisa/image/pe.py
+- unisa/intnet.py
+- unisa/ir.py
+- unisa/linalg.py
+- unisa/lower.py
+- unisa/oracle.py
+- unisa/padded.py
+- unisa/tape.py
+- unisa/tsvgold.py
+- unisa/vm.py
 - release/macosbundle.py
 - release/tools/apple-sign.sh
 - release/tools/release_prep.sh
