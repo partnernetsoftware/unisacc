@@ -1,0 +1,62 @@
+#pragma unisa module poll
+#pragma unisa use time
+/* L0 sys/poll: wait on several fds at once (plans/cx-layers.md).
+   L0 exception (agreed for cx/sys/ only): <poll.h> is not in the implicit
+   prelude; it is included here and nowhere above L0. Callers see only
+   sy_pollfd_t, the SY_POLL* bits and sy_poll: an enum and a typedef are
+   exported by `#pragma unisa use sys.poll`, a #define is not.
+   The bit values are the same on Linux and macOS (poll.h there); the
+   entries are copied into the system's struct pollfd, so no layout is
+   assumed. Windows has no poll here: -ENOSYS. 0 or a value on success,
+   -errno on failure. */
+#include <poll.h>
+
+enum {
+    SY_POLLIN = 0x001,    /* data to read (or a peer hang-up to read as end of stream) */
+    SY_POLLPRI = 0x002,
+    SY_POLLOUT = 0x004,   /* writing will not block */
+    SY_POLLERR = 0x008,   /* revents only */
+    SY_POLLHUP = 0x010,   /* revents only */
+    SY_POLLNVAL = 0x020,  /* revents only: the fd is not open */
+    SY_POLL_MAX = 64      /* most entries one sy_poll takes */
+};
+
+/* One entry: FD (negative: ignored, revents stays 0), the EVENTS asked for,
+   the REVENTS sy_poll found. */
+typedef struct { int fd; short events; short revents; } sy_pollfd_t;
+
+static int syl_poll(sy_pollfd_t *f, int n, int ms) {
+#if defined(_WIN32)
+    (void)f; (void)n; (void)ms;
+    return -ENOSYS;
+#else
+    struct pollfd p[64];
+    int i, r;
+    for (i = 0; i < n; i++) { p[i].fd = f[i].fd; p[i].events = f[i].events; p[i].revents = 0; }
+    errno = 0;
+    r = poll(p, (nfds_t)n, ms);
+    if (r < 0) return errno ? -errno : -EIO;
+    for (i = 0; i < n; i++) f[i].revents = p[i].revents;
+    return r;
+#endif
+}
+
+/* Wait up to MS milliseconds (negative: forever) until one of the N entries
+   of FDS is ready; N 0 just sleeps. Each revents is set. The number of
+   ready entries, 0 when the time ran out, or -errno (-EINVAL: N outside
+   0..SY_POLL_MAX). An interruption resumes for what is left of MS. An fd
+   that is not open is not an error: its revents is SY_POLLNVAL. */
+int sy_poll(sy_pollfd_t *fds, int n, long ms) {
+    long end = ms < 0 ? 0 : sy_now_ms() + ms, left = ms;
+    int i, r;
+    if (n < 0 || n > SY_POLL_MAX || (n > 0 && !fds)) return -EINVAL;
+    for (i = 0; i < n; i++) fds[i].revents = 0;
+    for (;;) {
+        r = syl_poll(fds, n, left < 0 ? -1 : (int)(left > 2000000000L ? 2000000000L : left));
+        if (r != -EINTR) return r;
+        if (ms >= 0) {
+            left = end - sy_now_ms();
+            if (left < 0) left = 0;
+        }
+    }
+}

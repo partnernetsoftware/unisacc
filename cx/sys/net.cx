@@ -1,15 +1,17 @@
 #pragma unisa module net
 #pragma unisa use time
 #pragma unisa use fs
-/* L0 sys/net: loopback TCP for local servers, stubs and their clients
-   (plans/cx-layers.md). Every address is 127.0.0.1.
-   L0 exception (agreed for cx/sys/ only): <sys/socket.h>, <netinet/in.h> and
-   <arpa/inet.h> are not in the implicit prelude; the carried headers hold the
+/* L0 sys/net: TCP for local servers, stubs and their clients
+   (plans/cx-layers.md). Listening and sy_tcp_connect are 127.0.0.1 only;
+   sy_tcp_dial and sy_resolve4 reach any IPv4 host the system resolver knows.
+   L0 exception (agreed for cx/sys/ only): <sys/socket.h>, <netinet/in.h>,
+   <arpa/inet.h> and <netdb.h> are not in the implicit prelude; the carried headers hold the
    per-target socket code, so they are included in this one L0 unit. Waiting
    is sys/time's sy_readable. 0 or a value on success, -errno on failure.
    Writes use send(MSG_NOSIGNAL): this runtime's signal() cannot ignore
    SIGPIPE, so a plain write to a peer that has gone would kill the process. */
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
@@ -99,6 +101,135 @@ long sy_recv(int fd, void *buf, long n) {
     do k = recv(fd, buf, (size_t)n, 0);
     while (k < 0 && errno == EINTR);
     return k < 0 ? -errno : (long)k;
+}
+
+/* Send what one send(MSG_NOSIGNAL) takes of the N bytes at BUF. The count
+   (possibly fewer than N), or -errno (-EPIPE: the peer went away). EINTR is
+   retried. sy_send_all loops until all are sent. */
+long sy_send(int fd, const void *buf, long n) {
+    ssize_t k;
+    if (n < 0 || (n > 0 && !buf)) return -EINVAL;
+    do k = send(fd, buf, (size_t)n, MSG_NOSIGNAL);
+    while (k < 0 && errno == EINTR);
+    return k < 0 ? -errno : (long)k;
+}
+
+/* ---- names: IPv4 TCP to any host the system resolver knows ----
+   The resolver's failures are not errno values: they are returned as
+   SY_EAI_BASE minus the resolver's own code (sign dropped), always at or
+   below SY_EAI_BASE, so they never collide with -errno. sy_net_error gives
+   the text for either kind. */
+enum { SY_EAI_BASE = -4096 };
+
+static int syn_eai(int g) { return SY_EAI_BASE - (g < 0 ? -g : g); }
+
+/* The resolver's own code back from an SY_EAI_BASE value (negative on glibc, positive elsewhere). */
+static int syn_gai_code(int rc) {
+    int k = SY_EAI_BASE - rc;
+    return EAI_NONAME < 0 ? -k : k;
+}
+
+/* getaddrinfo for HOST:PORT, IPv4 stream sockets only. 0 with *RES set, or an sy_net_error code. */
+static int syn_lookup(const char *host, int port, struct addrinfo **res) {
+    struct addrinfo hints;
+    char serv[16];
+    int g;
+    *res = NULL;
+    if (!host || !host[0] || port < 0 || port > 65535) return -EINVAL;
+    if (cx_fmt(serv, sizeof serv, "%d", port)) return -EINVAL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    errno = 0;
+    g = getaddrinfo(host, serv, &hints, res);
+    if (g != 0) { *res = NULL; return syn_eai(g); }
+    return *res ? 0 : syn_eai(EAI_NONAME);
+}
+
+/* Try each address of RES in order; the first connected fd, or the last -errno. */
+static int syn_dial(struct addrinfo *res) {
+#if defined(_WIN32)
+    (void)res;
+    return -ENOSYS;   /* a Winsock SOCKET is not an fd: not offered here */
+#else
+    struct addrinfo *p;
+    int last = -EHOSTUNREACH;
+    for (p = res; p; p = p->ai_next) {
+        int s = socket(p->ai_family, p->ai_socktype, p->ai_protocol), e;
+        if (s < 0) { last = -errno; continue; }
+        if (connect(s, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) return s;
+        e = errno;
+        close(s);
+        last = e ? -e : -EIO;
+    }
+    return last;
+#endif
+}
+
+/* Resolve HOST to its first IPv4 address, written dotted ("127.0.0.1") into
+   IP (CAP bytes). The number of IPv4 addresses found (1 or more), or an
+   sy_net_error code: an SY_EAI_BASE value for a name the resolver does not
+   know, -ERANGE when IP is too small, -EINVAL for a bad argument. */
+int sy_resolve4(const char *host, char *ip, int cap) {
+    struct addrinfo *res, *p;
+    const unsigned char *b;
+    int r, n = 0;
+    if (!ip || cap < 1) return -EINVAL;
+    ip[0] = 0;
+    r = syn_lookup(host, 0, &res);
+    if (r != 0) return r;
+    for (p = res; p; p = p->ai_next) if (p->ai_family == AF_INET && p->ai_addr) n++;
+    for (p = res; p && !(p->ai_family == AF_INET && p->ai_addr); p = p->ai_next) {}
+    if (!p) { freeaddrinfo(res); return syn_eai(EAI_NONAME); }
+    b = (const unsigned char *)&((const struct sockaddr_in *)p->ai_addr)->sin_addr;
+    r = cx_fmt(ip, (size_t)cap, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    freeaddrinfo(res);
+    if (r) { ip[0] = 0; return -ERANGE; }
+    return n;
+}
+
+/* Connect to HOST:PORT over IPv4 TCP, trying each resolved address in turn.
+   The fd (close with sy_close), or an sy_net_error code (-ECONNREFUSED:
+   nothing listens; an SY_EAI_BASE value: the name is unknown). No timeout
+   beyond the system's own. Windows: -ENOSYS. */
+int sy_tcp_dial(const char *host, int port) {
+    struct addrinfo *res;
+    int r;
+    if (port < 1) return -EINVAL;
+    r = syn_lookup(host, port, &res);
+    if (r != 0) return r;
+    r = syn_dial(res);
+    freeaddrinfo(res);
+    return r;
+}
+
+/* The carried strerror knows only the file-system codes (include/stdio.h);
+   the socket codes get their (glibc) text here. */
+static const char *syn_errtext(int e) {
+    if (e == EPIPE) return "Broken pipe";
+    if (e == ECONNREFUSED) return "Connection refused";
+    if (e == ECONNRESET) return "Connection reset by peer";
+    if (e == ECONNABORTED) return "Software caused connection abort";
+    if (e == ETIMEDOUT) return "Connection timed out";
+    if (e == EHOSTUNREACH) return "No route to host";
+    if (e == ENETUNREACH) return "Network is unreachable";
+    if (e == EADDRINUSE) return "Address already in use";
+    if (e == EADDRNOTAVAIL) return "Cannot assign requested address";
+    if (e == ENOTCONN) return "Transport endpoint is not connected";
+    if (e == ENOTSOCK) return "Socket operation on non-socket";
+    if (e == EINPROGRESS) return "Operation now in progress";
+    if (e == EAGAIN) return "Resource temporarily unavailable";
+    if (e == EINTR) return "Interrupted system call";
+    if (e == ENOSYS) return "Function not implemented";
+    return strerror(e);
+}
+
+/* The text for a code from any sy_* call: the resolver's message for an
+   SY_EAI_BASE value, the errno text for -errno, "ok" for 0 or more. Static text. */
+const char *sy_net_error(int rc) {
+    if (rc >= 0) return "ok";
+    if (rc <= SY_EAI_BASE) return gai_strerror(syn_gai_code(rc));
+    return syn_errtext(-rc);
 }
 
 /* Closing a socket is sys/fs sy_close (this module uses fs). */

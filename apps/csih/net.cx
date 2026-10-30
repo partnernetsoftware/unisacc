@@ -712,22 +712,26 @@ net_response net_http(const char *method, const char *url,
         "Connection: close\r\n"
         "Content-Length: %lu\r\n"
         "%s%s\r\n"
-        "\r\n"
-        "%s",
+        "\r\n",
         method, u.path, u.host,
         (unsigned long)blen,
         blen ? "Content-Type: " : "",
-        blen ? (content_type ? content_type : "application/octet-stream") : "",
-        body ? body : "");
+        blen ? (content_type ? content_type : "application/octet-stream") : "");
 
     if (reqlen >= sizeof req) { net_socket_close(fd); r.err = NET_REFUSED_URL; return r; }
 
+    /* the header from req, then the body from the caller's buffer: the body is
+     * not copied into req, so a plaintext request is not capped at its size */
     {
-        size_t off = 0;
-        while (off < reqlen) {
-            long w = net_socket_send(fd, req + off, reqlen - off);
-            if (w < 0) { if (errno == EINTR) continue; r.err = errno; net_socket_close(fd); return r; }
-            off += (size_t)w;
+        int part;
+        for (part = 0; part < 2; part++) {
+            const char *p = part ? body : req;
+            size_t n = part ? blen : reqlen, off = 0;
+            while (off < n) {
+                long w = net_socket_send(fd, p + off, n - off);
+                if (w < 0) { if (errno == EINTR) continue; r.err = errno; net_socket_close(fd); return r; }
+                off += (size_t)w;
+            }
         }
     }
 

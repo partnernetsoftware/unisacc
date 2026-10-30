@@ -1,0 +1,171 @@
+#pragma unisa use retry_stub
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/*
+ * deepseek_proxy.cx — deepseek-proxy.cx (the cx port of deepseek-proxy.py) end to end.
+ *   cd apps/csih && sh ../../unisacc.com probes/deepseek_proxy.cx
+ *
+ * The proxy is compiled once into out/deepseek-proxy-probe/, then run three
+ * times on 127.0.0.1 with CSIH_PROXY_UPSTREAM pointed at a scripted local stub
+ * (retry_stub.cx, script "503,200,200,200"), HOME in a scratch directory, and
+ * a fake key in DEEPSEEK_API_KEY (the stub is not api.deepseek.com, so net.cx
+ * never sends it). Cases, each against the .py's behaviour:
+ *   upstream 503 passes through, status and body
+ *   upstream 200 passes through; the stub saw the request body byte for byte
+ *   /chat/completions is forwarded too; the header split over two sends
+ *   a 200 KiB body is forwarded whole
+ *   another path is 404, a GET is 501 (both before any upstream call)
+ *   no key anywhere (no env, empty HOME) is 500
+ *   upstream down is 502
+ * Nothing here reaches the network. No #include, no direct libc call.
+ */
+
+#define DIR "../../out/deepseek-proxy-probe"
+#define CAP (1 << 18)
+
+static int bad, okn;
+
+static void ok(int c, const char *what) {
+    printf("  %s  %s\n", c ? "ok  " : "FAIL", what);
+    if (c) okn++; else bad++;
+}
+
+static long zlen(const char *s) { return tx_len(s, CAP); }
+static int has(const char *s, const char *w) { return tx_find(s, zlen(s), w, zlen(w)) >= 0; }
+
+/* One request to 127.0.0.1:PORT, sent as HEAD then BODY (a pause inside HEAD
+   when SPLIT). The status into *st, the response body into OUT. 0, or -1. */
+static int ask(int port, const char *head, const char *body, long blen, int split, int *st, char *out, long cap) {
+    static char resp[CAP];
+    long have = 0, h = zlen(head), at;
+    int c = sy_tcp_connect(port), i;
+    *st = 0;
+    out[0] = 0;
+    if (c < 0) return -1;
+    if (split) {
+        sy_send_all(c, head, h / 2);
+        rs_sleep_ms(200);
+        sy_send_all(c, head + h / 2, h - h / 2);
+    } else sy_send_all(c, head, h);
+    if (blen) sy_send_all(c, body, blen);
+    for (;;) {
+        long k;
+        if (sy_readable(c, 15000) <= 0) break;
+        k = sy_recv(c, resp + have, CAP - 1 - have);
+        if (k <= 0) break;
+        have += k;
+    }
+    sy_close(c);
+    resp[have] = 0;
+    if (have < 12 || !tx_prefix(resp, have, "HTTP/1.", 7)) return -1;
+    for (i = 9; i < 12; i++) *st = *st * 10 + (resp[i] - '0');
+    at = tx_find(resp, have, "\r\n\r\n", 4);
+    if (at >= 0) tx_copy(out, cap, resp + at + 4, have - at - 4 < cap - 1 ? have - at - 4 : cap - 1);
+    return 0;
+}
+
+static int post(int port, const char *path, const char *body, long blen, int split, int *st, char *out, long cap) {
+    char head[512];
+    if (cx_fmt(head, sizeof head, "POST %s HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %ld\r\n\r\n",
+               path, blen)) return -1;
+    return ask(port, head, body, blen, split, st, out, cap);
+}
+
+/* the proxy binary on PORT with UPSTREAM; KEY 0 leaves DEEPSEEK_API_KEY unset.
+   Its pid once a GET is answered (501), or -1. */
+static int start(int port, const char *upstream, const char *home, int key) {
+    char ps[16], up[300], hm[700];
+    char *av[] = { "env", "-u", "DEEPSEEK_API_KEY", hm, up, key ? "DEEPSEEK_API_KEY=sk-probe-not-a-key" : "CSIH_PROBE=1", DIR "/proxy", ps, 0 };
+    int pid;
+    long end = rs_now_ms() + 10000;
+    if (cx_fmt(ps, sizeof ps, "%d", port) || cx_fmt(up, sizeof up, "CSIH_PROXY_UPSTREAM=%s", upstream) ||
+        cx_fmt(hm, sizeof hm, "HOME=%s", home)) return -1;
+    pid = sy_spawn(av);
+    if (pid < 0) return -1;
+    while (rs_now_ms() < end) {
+        char out[128];
+        int st;
+        if (ask(port, "GET /ready HTTP/1.0\r\n\r\n", "", 0, 0, &st, out, sizeof out) == 0 && st == 501) return pid;
+        rs_sleep_ms(100);
+    }
+    sy_kill(pid);
+    return -1;
+}
+
+/* 1 when file PATH holds exactly B[0..n) */
+static int file_is(const char *path, const char *b, long n) {
+    size_t sn = 0;
+    char *s = cx_read(path, &sn);
+    return s && tx_same(s, (long)sn, b, n);
+}
+
+int main(void) {
+    static char out[CAP], big[200 * 1024], logp[400], reqp[420], home[400];
+    char upstream[128];
+    int base = 20000 + rs_pid() % 20000, stub, px, st, rc;
+    long i, t0 = rs_now_ms(), bn = (long)sizeof big;
+    const char *b1 = "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"one\"}]}";
+    const char *b2 = "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"\\u4f60\\u597d two\"}]}";
+
+    sy_mkdir("../../out", 0755);
+    sy_mkdir(DIR, 0755);
+    if (cx_fmt(home, sizeof home, "%s/home", DIR) || cx_fmt(logp, sizeof logp, "%s/stub.log", DIR)) return 2;
+    sy_mkdir(home, 0700);
+    {
+        char *av[] = { "sh", "../../unisacc.com", "deepseek-proxy.cx", "-o", DIR "/proxy", 0 };
+        char buf[4096];
+        rc = rs_run(av, buf, sizeof buf);
+        ok(rc == 0 && sy_exists(DIR "/proxy") == 1, "deepseek-proxy.cx compiles");
+        if (rc != 0) { printf("%s\n", buf); return 1; }
+    }
+    printf("  note  compile %ldms\n", rs_now_ms() - t0);
+
+    cx_write(logp, "", 0);
+    stub = rs_stub_start(base, "503,200,200,200", logp);
+    ok(stub > 0, "stub upstream starts");
+    if (cx_fmt(upstream, sizeof upstream, "http://127.0.0.1:%d/v1/chat/completions", base)) return 2;
+
+    px = start(base + 1, upstream, home, 1);
+    ok(px > 0, "proxy listens (a GET answers 501)");
+    if (px > 0) {
+        rc = post(base + 1, "/v1/chat/completions", b1, zlen(b1), 0, &st, out, CAP);
+        ok(rc == 0 && st == 503, "upstream 503 passes through as 503");
+        rc = post(base + 1, "/v1/chat/completions", b2, zlen(b2), 0, &st, out, CAP);
+        ok(rc == 0 && st == 200 && has(out, "\"choices\""), "upstream 200 passes through with the stub's body");
+        if (cx_fmt(reqp, sizeof reqp, "%s.req1", logp)) return 2;
+        ok(file_is(reqp, b2, zlen(b2)), "the stub received the request body byte for byte");
+        rc = post(base + 1, "/chat/completions", b1, zlen(b1), 1, &st, out, CAP);
+        ok(rc == 0 && st == 200, "/chat/completions is forwarded; a header split over two sends is read");
+        for (i = 0; i < bn; i++) big[i] = (char)('a' + i % 26);
+        big[0] = '"';
+        big[bn - 1] = '"';
+        rc = post(base + 1, "/v1/chat/completions", big, bn, 0, &st, out, CAP);
+        if (cx_fmt(reqp, sizeof reqp, "%s.req3", logp)) return 2;
+        ok(rc == 0 && st == 200 && file_is(reqp, big, bn), "a 200 KiB body is forwarded whole");
+        rc = post(base + 1, "/v2/other", b1, zlen(b1), 0, &st, out, CAP);
+        ok(rc == 0 && st == 404 && has(out, "only /v1/chat/completions is proxied"), "another path is 404 with the .py's message");
+        rc = ask(base + 1, "GET /v1/chat/completions HTTP/1.1\r\nHost: x\r\n\r\n", "", 0, 0, &st, out, CAP);
+        ok(rc == 0 && st == 501, "a GET is 501");
+        sy_kill(px);
+    }
+
+    px = start(base + 2, upstream, home, 0);
+    if (px > 0) {
+        rc = post(base + 2, "/v1/chat/completions", b1, zlen(b1), 0, &st, out, CAP);
+        ok(rc == 0 && st == 500 && has(out, "DEEPSEEK_API_KEY not set"), "no key (no env, empty HOME) is 500");
+        sy_kill(px);
+    } else ok(0, "keyless proxy listens");
+
+    if (cx_fmt(upstream, sizeof upstream, "http://127.0.0.1:%d/v1/chat/completions", base + 9)) return 2;
+    px = start(base + 3, upstream, home, 1);
+    if (px > 0) {
+        rc = post(base + 3, "/v1/chat/completions", b1, zlen(b1), 0, &st, out, CAP);
+        ok(rc == 0 && st == 502 && has(out, "upstream error"), "upstream down is 502");
+        sy_kill(px);
+    } else ok(0, "proxy with a dead upstream listens");
+
+    rs_stop(stub);
+    printf("  note  total %ldms\n", rs_now_ms() - t0);
+    printf("deepseek_proxy: %s (%d ok, %d fail)\n", bad ? "FAIL" : "PASS", okn, bad);
+    return bad ? 1 : 0;
+}

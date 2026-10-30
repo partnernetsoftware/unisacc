@@ -1,5 +1,5 @@
 #pragma unisa module time
-/* L0 sys/time: clocks, sleeping and file times (plans/cx-layers.md).
+/* L0 sys/time: clocks, local-time text, sleeping and file times (plans/cx-layers.md).
    L0 exception (agreed for cx/sys/ only): <time.h>, <poll.h> and <sys/time.h>
    are not in the implicit prelude, and the carried headers already hold the
    per-target code (Linux syscalls, macOS gettimeofday, Windows calls). They
@@ -23,6 +23,49 @@ long sy_wall_s(void) {
     struct timespec t;
     if (clock_gettime(CLOCK_REALTIME, &t) != 0) return -1;
     return (long)t.tv_sec;
+}
+
+/* A clock reading: whole seconds and nanoseconds (0..999999999). */
+typedef struct { long sec; long nsec; } sy_ts_t;
+
+static int syt_clock(int id, sy_ts_t *t) {
+    struct timespec s;
+    if (!t) return -EINVAL;
+    errno = 0;
+    if (clock_gettime(id, &s) != 0) return errno ? -errno : -EIO;
+    t->sec = (long)s.tv_sec;
+    t->nsec = (long)s.tv_nsec;
+    return 0;
+}
+
+/* The monotonic clock (same origin and grain as sy_now_ms) into T. 0, or -errno. */
+int sy_mono(sy_ts_t *t) { return syt_clock(CLOCK_MONOTONIC, t); }
+
+/* The wall clock (since the epoch) into T. 0, or -errno. */
+int sy_wall(sy_ts_t *t) { return syt_clock(CLOCK_REALTIME, t); }
+
+/* TO minus FROM in milliseconds (negative when TO is earlier), rounded toward zero. */
+long sy_ts_ms(const sy_ts_t *from, const sy_ts_t *to) {
+    long ns;
+    if (!from || !to) return 0;
+    ns = (to->sec - from->sec) * 1000000000L + (to->nsec - from->nsec);
+    return ns / 1000000L;
+}
+
+/* SEC (seconds since the epoch) as local time, formatted by strftime FMT into
+   OUT (CAP bytes, NUL-terminated). The length, -ERANGE when it does not fit,
+   -EINVAL for a bad argument or a time localtime cannot represent. */
+int sy_local_fmt(char *out, int cap, const char *fmt, long sec) {
+    struct tm tm;
+    time_t t = (time_t)sec;
+    size_t n;
+    if (!out || cap < 1 || !fmt) return -EINVAL;
+    out[0] = 0;
+    if (!localtime_r(&t, &tm)) return -EINVAL;
+    if (!fmt[0]) return 0;
+    n = strftime(out, (size_t)cap, fmt, &tm);
+    if (n == 0) { out[0] = 0; return -ERANGE; }
+    return (int)n;
 }
 
 /* Sleep MS milliseconds (poll with no fds); an interruption resumes for

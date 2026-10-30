@@ -1,0 +1,60 @@
+#pragma unisa module tty
+#pragma unisa use posix
+/* L0 sys/tty: raw mode and window size (plans/cx-layers.md). Saving and
+   restoring modes is sys/posix (sy_tty_t, sy_tty_get, sy_tty_set, sy_tty_same);
+   this module adds what a full-screen program needs on top.
+   L0 exception (agreed for cx/sys/ only): <termios.h> and <sys/ioctl.h> are
+   not in the implicit prelude. The carried <termios.h> holds the kernel's
+   layout (the same one sy_tty_get reads: TCGETS on Linux, TIOCGETA on macOS)
+   and a cfmakeraw that does what each host's libc does bit for bit, so it is
+   used here instead of restating the flags. Windows: its console is a
+   separate column, every call is -ENOSYS. 0 on success, -errno on failure. */
+#include <sys/ioctl.h>
+#include <termios.h>
+
+static int syy_raw(unsigned char *b, int cap) {
+#if defined(_WIN32)
+    (void)b; (void)cap;
+    return -ENOSYS;
+#else
+    struct termios t;
+    if ((int)sizeof t > cap) return -EOVERFLOW;
+    { void *cx_kept = memcpy(&t, b, sizeof t); (void)cx_kept; }   /* bounded: sizeof t <= cap */
+    cfmakeraw(&t);
+    { void *cx_kept = memcpy(b, &t, sizeof t); (void)cx_kept; }
+    return 0;
+#endif
+}
+
+static int syy_size(int fd, int *rows, int *cols) {
+#if defined(_WIN32)
+    (void)fd; (void)rows; (void)cols;
+    return -ENOSYS;
+#else
+    struct winsize w;
+    memset(&w, 0, sizeof w);
+    errno = 0;
+    if (ioctl(fd, TIOCGWINSZ, &w) != 0) return errno ? -errno : -EIO;
+    *rows = (int)w.ws_row;
+    *cols = (int)w.ws_col;
+    return 0;
+#endif
+}
+
+/* Turn the modes in T (filled by sy_tty_get) into raw mode as cfmakeraw does:
+   no echo, no line editing, no signal keys, no CR/NL translation, no output
+   processing, 8-bit characters, a read returns after 1 byte. Only T changes;
+   apply it with sy_tty_set. 0, or -EINVAL. */
+int sy_tty_raw(sy_tty_t *t) {
+    if (!t) return -EINVAL;
+    return syy_raw(t->b, (int)sizeof t->b);
+}
+
+/* The size of the terminal on FD in character cells. 0, or -errno
+   (-ENOTTY: not a terminal, -EBADF: not open). A terminal that reports
+   0 x 0 (some ptys before a size is set) gives 0 with ROWS and COLS 0. */
+int sy_tty_size(int fd, int *rows, int *cols) {
+    if (!rows || !cols) return -EINVAL;
+    *rows = *cols = 0;
+    return syy_size(fd, rows, cols);
+}

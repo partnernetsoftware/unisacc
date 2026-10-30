@@ -1,0 +1,190 @@
+#pragma unisa module deepseek-proxy
+#pragma unisa use net
+#pragma unisa use sys.net
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+/*
+ * deepseek-proxy.cx — the optional plaintext hop, ported from deepseek-proxy.py
+ * (archived at archive/reference-py/apps/csih/). Not required for TLS: csih
+ * POSTs https://api.deepseek.com itself (net.cx). This stays for a caller that
+ * still speaks only http://127.0.0.1 and wants the key injected on the way out
+ * (moltbaby's bin/rawcsih).
+ *
+ *     caller (plaintext)  ──>  127.0.0.1:PORT  ──>  https://api.deepseek.com
+ *
+ * Usage (from apps/csih):
+ *     sh ../../unisacc.com deepseek-proxy.cx -- [PORT] [--max N]    (default 8080)
+ *
+ * As the .py: only POST /v1/chat/completions (or /chat/completions) is
+ * forwarded, anything else is 404, a GET is 501; no key is 500; the upstream
+ * status and body are passed through; a transport failure is 502. The key is
+ * the one csih uses (DEEPSEEK_API_KEY, else ~/env.jsonl), added by net.cx only
+ * on the way to api.deepseek.com. One connection at a time, like HTTPServer.
+ * CSIH_PROXY_UPSTREAM replaces the upstream URL (the probe points it at a stub).
+ * --max N exits after N requests (bounded tests). Upper layer: no #include.
+ */
+
+typedef struct {
+    int ok; int err; int status; long body_bytes; int chunked;
+    char header[16384];
+    char body[65536];
+} net_response;
+
+net_response net_http(const char *method, const char *url,
+                      const char *content_type, const char *body);
+int          net_deepseek_key_probe(int *len);
+
+#define DP_UPSTREAM "https://api.deepseek.com/v1/chat/completions"
+#define DP_HEAD 16384
+#define DP_BODY (4 << 20)
+#define DP_IDLE_MS 30000
+
+static char dp_req[DP_HEAD + DP_BODY + 1];
+
+static int dp_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static long dp_len(const char *s) {
+    long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+/* 1 when S starts with P, ignoring ASCII case in S (P is lower case) */
+static int dp_iprefix(const char *s, const char *p) {
+    for (; *p; s++, p++) {
+        char c = *s >= 'A' && *s <= 'Z' ? (char)(*s + 32) : *s;
+        if (c != *p) return 0;
+    }
+    return 1;
+}
+
+static const char *dp_reason(int st) {
+    switch (st) {
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 402: return "Payment Required";
+    case 404: return "Not Found";
+    case 413: return "Payload Too Large";
+    case 422: return "Unprocessable Entity";
+    case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    default: return "Status";
+    }
+}
+
+static void dp_send(int c, int st, const char *body, long n) {
+    char head[256];
+    if (cx_fmt(head, sizeof head, "HTTP/1.0 %d %s\r\nContent-Type: application/json\r\nContent-Length: %ld\r\n\r\n",
+               st, dp_reason(st), n)) return;
+    if (sy_send_all(c, head, dp_len(head)) == 0 && n > 0) sy_send_all(c, body, n);
+}
+
+static void dp_error(int c, int st, const char *msg) {
+    char b[512];
+    if (cx_fmt(b, sizeof b, "{\"error\": \"%s\"}", msg)) return;
+    dp_send(c, st, b, dp_len(b));
+}
+
+/* Read one request into dp_req: the header end offset into *hend, the body
+   length into *blen, the body NUL-terminated. 0; -2 when the body is over
+   DP_BODY; -1 when the peer stalls, closes early or the header is too long. */
+static int dp_read(int c, long *hend, long *blen) {
+    long have = 0, want = 0, seen = 0, i;
+    *hend = -1;
+    *blen = 0;
+    for (;;) {
+        long k;
+        if (*hend < 0) {
+            /* resume the terminator scan 3 bytes before the old end: a read may split it */
+            for (i = seen >= 3 ? seen - 3 : 0; i + 3 < have; i++)
+                if (dp_req[i] == '\r' && dp_req[i + 1] == '\n' && dp_req[i + 2] == '\r' && dp_req[i + 3] == '\n') { *hend = i + 4; break; }
+            if (*hend >= 0) {
+                long p = 0;
+                while (p < *hend) {
+                    long e = p;
+                    while (e < *hend && dp_req[e] != '\n') e++;
+                    if (dp_iprefix(dp_req + p, "content-length:")) {
+                        long q = p + 15, v = 0;
+                        while (dp_req[q] == ' ') q++;
+                        while (dp_req[q] >= '0' && dp_req[q] <= '9' && v <= DP_BODY) v = v * 10 + (dp_req[q++] - '0');
+                        want = v;
+                    }
+                    p = e + 1;
+                }
+                if (want > DP_BODY) return -2;
+            } else if (have >= DP_HEAD) return -1;
+        }
+        if (*hend >= 0 && have - *hend >= want) { *blen = want; dp_req[*hend + want] = 0; return 0; }
+        if (sy_readable(c, DP_IDLE_MS) <= 0) return -1;
+        k = sy_recv(c, dp_req + have, (long)sizeof dp_req - 1 - have);
+        if (k <= 0) return -1;
+        seen = have;
+        have += k;
+    }
+}
+
+static void dp_serve(int c, const char *upstream) {
+    static net_response r;
+    char method[16], path[256];
+    long hend, blen, i = 0, j = 0;
+    int keylen = 0, rc = dp_read(c, &hend, &blen);
+    if (rc == -2) { dp_error(c, 413, "request body over 4 MiB"); return; }
+    if (rc != 0) return;
+    while (i < hend && dp_req[i] != ' ' && j < (long)sizeof method - 1) method[j++] = dp_req[i++];
+    method[j] = 0;
+    j = 0;
+    if (i < hend) i++;
+    while (i < hend && dp_req[i] != ' ' && dp_req[i] != '\r' && j < (long)sizeof path - 1) path[j++] = dp_req[i++];
+    path[j] = 0;
+    if (!dp_eq(method, "POST")) { dp_error(c, 501, "Unsupported method"); return; }
+    if (!net_deepseek_key_probe(&keylen)) { dp_error(c, 500, "DEEPSEEK_API_KEY not set"); return; }
+    if (!dp_eq(path, "/v1/chat/completions") && !dp_eq(path, "/chat/completions")) {
+        dp_error(c, 404, "only /v1/chat/completions is proxied");
+        return;
+    }
+    r = net_http("POST", upstream, "application/json", dp_req + hend);
+    if (!r.ok) {
+        char msg[128];
+        if (cx_fmt(msg, sizeof msg, "upstream error: net err %d", r.err)) msg[0] = 0;
+        dp_error(c, 502, msg);
+        return;
+    }
+    if (r.chunked || r.body_bytes < 0 || r.body_bytes >= (long)sizeof r.body) {
+        dp_error(c, 502, r.chunked ? "upstream error: chunked body not decoded" : "upstream error: body over 64 KiB");
+        return;
+    }
+    dp_send(c, r.status, r.body, r.body_bytes);
+}
+
+int main(int argc, char **argv) {
+    const char *up = sy_env("CSIH_PROXY_UPSTREAM");
+    long served = 0, max = -1;
+    int port = 8080, i, s;
+    for (i = 1; i < argc; i++) {
+        if (dp_eq(argv[i], "--max") && i + 1 < argc) max = atol(argv[++i]);
+        else port = atoi(argv[i]);
+    }
+    if (!up || !up[0]) up = DP_UPSTREAM;
+    if (port <= 0 || port > 65535) { fprintf(stderr, "deepseek-proxy: bad port\n"); return 2; }
+    s = sy_tcp_listen(port, 16);
+    if (s < 0) { fprintf(stderr, "deepseek-proxy: cannot listen on 127.0.0.1:%d (errno %d)\n", port, -s); return 1; }
+    printf("deepseek-proxy listening on http://127.0.0.1:%d -> %s\n", port, up);
+    fflush(stdout);
+    while (max < 0 || served < max) {
+        int c = sy_tcp_accept(s, -1);
+        if (c < 0) continue;
+        dp_serve(c, up);
+        sy_close(c);
+        served++;
+    }
+    sy_close(s);
+    return 0;
+}

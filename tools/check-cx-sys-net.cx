@@ -1,0 +1,220 @@
+/* Checks the cx/sys interfaces csih needs instead of its own socket, netdb, poll,
+   termios, ioctl and time includes: sh ./unisacc.com tools/check-cx-sys-net.cx
+   (from the repo root: the tty case re-runs this file under script(1), "-- child tty PATH",
+   so that its stdin is a pty).
+   - net:  sy_tcp_dial, sy_send, sy_resolve4, sy_net_error (with sy_tcp_listen/port/accept, sy_recv);
+   - poll: sy_poll, sy_pollfd_t, SY_POLL*;
+   - tty:  sy_tty_raw, sy_tty_size (with posix sy_tty_get/sy_tty_set/sy_tty_same);
+   - time: sy_mono, sy_wall, sy_ts_ms, sy_local_fmt.
+   Every case runs for real on this machine (loopback sockets, the system resolver, a pty).
+   Prints "PASS name" / "FAIL name" (and "UNMEASURED name: reason"), then CX_SYS_NET<TAB>failed=N;
+   exit 1 on any FAIL. An L3 tool: no #include and no direct libc call (cx/sys, cx/text and cx_*). */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.net
+#pragma unisa use sys.poll
+#pragma unisa use sys.posix
+#pragma unisa use sys.tty
+#pragma unisa use text.text
+static int n_ok, n_bad;
+static void ok(int c, const char *name) { printf("%s %s\n", c ? "PASS" : "FAIL", name); if (c) n_ok++; else n_bad++; }
+static int has(const char *s, const char *needle) { return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 256)) >= 0; }
+
+/* This file's own path (run from the repo root), for the child run under script(1). */
+static const char *self = "tools/check-cx-sys-net.cx";
+
+/* Child "tty": stdin is a pty. Save the modes, make them raw, apply, read back,
+   restore, and write "rows cols" into PATH. Exit 0, or the number of the step that failed. */
+static int child_tty(const char *path) {
+    sy_tty_t saved, raw, raw2, back;
+    int rows = -1, cols = -1, fd, r;
+    char line[64];
+    if (sy_tty_get(0, &saved) != 0) return 11;
+    raw = saved;
+    if (sy_tty_raw(&raw) != 0) return 12;
+    if (sy_tty_same(&raw, &saved)) return 13;            /* raw mode must change a cooked pty */
+    raw2 = raw;
+    if (sy_tty_raw(&raw2) != 0 || !sy_tty_same(&raw, &raw2)) return 14;   /* idempotent */
+    if (sy_tty_set(0, &raw, 0) != 0) return 15;
+    if (sy_tty_get(0, &back) != 0 || !sy_tty_same(&back, &raw)) return 16;   /* the kernel kept it */
+    if (sy_tty_set(0, &saved, 1) != 0) return 17;
+    if (sy_tty_get(0, &back) != 0 || !sy_tty_same(&back, &saved)) return 18;
+    r = sy_tty_size(0, &rows, &cols);
+    if (r != 0 || rows < 0 || cols < 0) return 19;
+    if (cx_fmt(line, sizeof line, "%d %d\n", rows, cols)) return 20;
+    fd = sy_openat(sy_at_fdcwd(), path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || sy_write_all(fd, line, tx_len(line, 64)) != 0) return 21;
+    sy_close(fd);
+    return 0;
+}
+
+static void check_time(void) {
+    sy_ts_t a, b, w;
+    sy_ts_t x = { 1, 900000000L }, y = { 3, 100000000L };
+    long t0, ws;
+    char out[64], tiny[4], want[64];
+    int r, cut;
+    ok(sy_mono(&a) == 0 && a.nsec >= 0 && a.nsec < 1000000000L, "time: sy_mono reads the monotonic clock (nsec in range)");
+    t0 = sy_now_ms();
+    sy_sleep_ms(30);
+    ok(sy_mono(&b) == 0 && sy_ts_ms(&a, &b) >= 25 && sy_ts_ms(&a, &b) <= sy_now_ms() - t0 + 50,
+       "time: sy_mono advances with sy_now_ms across a 30ms sleep");
+    ws = sy_wall_s();
+    ok(sy_wall(&w) == 0 && w.sec >= ws - 1 && w.sec <= ws + 1 && w.nsec >= 0 && w.nsec < 1000000000L,
+       "time: sy_wall agrees with sy_wall_s");
+    ok(sy_ts_ms(&x, &y) == 1200 && sy_ts_ms(&y, &x) == -1200, "time: sy_ts_ms carries nanoseconds (1.9s -> 3.1s = 1200ms, reversed -1200)");
+    ok(sy_mono(0) == -EINVAL && sy_wall(0) == -EINVAL, "time: a null reading is -EINVAL");
+    r = sy_local_fmt(out, sizeof out, "%Y-%m-%d %H:%M:%S", 1700000000L);
+    {
+        /* oracle: GNU date(1) in the same environment (same TZ) */
+        char *av[] = { "date", "-d", "@1700000000", "+%Y-%m-%d %H:%M:%S", 0 };
+        int st = sy_run(av, want, sizeof want, &cut);
+        long n = tx_len(want, sizeof want);
+        if (st == 0 && n > 0 && want[n - 1] == '\n') want[n - 1] = 0;
+        if (st != 0) printf("UNMEASURED time: sy_local_fmt against date(1): date -d exited %d\n", st);
+        else ok(r == 19 && tx_eq(out, want, sizeof want), "time: sy_local_fmt(1700000000) equals date(1) local time");
+        printf("  local: %s (date: %s)\n", out, st == 0 ? want : "-");
+    }
+    ok(sy_local_fmt(out, sizeof out, "%Y", 1700000000L) == 4 && tx_eq(out, "2023", 8), "time: sy_local_fmt %Y of 1700000000 is 2023 in any zone");
+    ok(sy_local_fmt(tiny, sizeof tiny, "%Y-%m-%d", 1700000000L) == -ERANGE && tiny[0] == 0, "time: sy_local_fmt into 4 bytes is -ERANGE with an empty result");
+    ok(sy_local_fmt(out, sizeof out, 0, 0) == -EINVAL && sy_local_fmt(0, 8, "%Y", 0) == -EINVAL, "time: sy_local_fmt with no format or no buffer is -EINVAL");
+}
+
+static void check_poll(void) {
+    int sv[2], r;
+    long t0;
+    char buf[8];
+    sy_pollfd_t p[2];
+    if (sy_socketpair(sv) != 0) { ok(0, "poll: socketpair for the poll cases"); return; }
+    p[0].fd = sv[0]; p[0].events = SY_POLLIN;
+    t0 = sy_now_ms();
+    r = sy_poll(p, 1, 0);
+    ok(r == 0 && p[0].revents == 0, "poll: nothing to read, 0ms -> 0 and revents 0");
+    r = sy_poll(p, 1, 50);
+    ok(r == 0 && sy_now_ms() - t0 >= 45, "poll: nothing to read waits the 50ms out -> 0");
+    p[0].events = SY_POLLOUT;
+    r = sy_poll(p, 1, 0);
+    ok(r == 1 && (p[0].revents & SY_POLLOUT), "poll: an empty socket is writable (SY_POLLOUT)");
+    sy_write_all(sv[1], "x", 1);
+    p[0].events = SY_POLLIN; p[1].fd = -1; p[1].events = SY_POLLIN; p[1].revents = 77;
+    r = sy_poll(p, 2, 1000);
+    ok(r == 1 && (p[0].revents & SY_POLLIN) && p[1].revents == 0, "poll: one byte written -> readable; a negative fd is ignored (revents 0)");
+    ok(sy_read(sv[0], buf, sizeof buf) == 1 && buf[0] == 'x', "poll: the byte reads back");
+    sy_close(sv[1]);
+    r = sy_poll(p, 1, 1000);
+    ok(r == 1 && (p[0].revents & (SY_POLLIN | SY_POLLHUP)), "poll: peer closed -> ready (in or hang-up)");
+    sy_close(sv[0]);
+    p[0].fd = sv[0]; p[0].events = SY_POLLIN;
+    r = sy_poll(p, 1, 0);
+    ok(r == 1 && (p[0].revents & SY_POLLNVAL), "poll: a closed fd is ready with SY_POLLNVAL (not an error)");
+    t0 = sy_now_ms();
+    ok(sy_poll(0, 0, 30) == 0 && sy_now_ms() - t0 >= 25, "poll: no fds sleeps for the time given");
+    ok(sy_poll(p, SY_POLL_MAX + 1, 0) == -EINVAL && sy_poll(p, -1, 0) == -EINVAL && sy_poll(0, 1, 0) == -EINVAL,
+       "poll: n above SY_POLL_MAX, negative n, or no array -> -EINVAL");
+}
+
+static void check_net(void) {
+    int lfd = sy_tcp_listen(0, 4), port = lfd >= 0 ? sy_tcp_port(lfd) : -1, cfd, afd, cfd2, afd2, r, i;
+    char buf[64], ip[32];
+    sy_pollfd_t p;
+    long t0;
+    ok(lfd >= 0 && port > 0, "net: listen on a free loopback port (getsockname port > 0)");
+    if (lfd < 0 || port <= 0) return;
+    cfd = sy_tcp_dial("127.0.0.1", port);
+    afd = cfd >= 0 ? sy_tcp_accept(lfd, 1000) : -1;
+    ok(cfd >= 0 && afd >= 0, "net: sy_tcp_dial 127.0.0.1:port connects; the listener accepts");
+    if (cfd < 0 || afd < 0) return;
+    ok(sy_send(cfd, "hello", 5) == 5, "net: sy_send returns the count sent");
+    p.fd = afd; p.events = SY_POLLIN;
+    ok(sy_poll(&p, 1, 1000) == 1 && (p.revents & SY_POLLIN), "net: the accepted side polls readable");
+    r = (int)sy_recv(afd, buf, sizeof buf);
+    ok(r == 5 && tx_same(buf, 5, "hello", 5), "net: sy_recv gets the 5 bytes");
+    ok(sy_send_all(afd, "pong", 4) == 0 && sy_recv(cfd, buf, sizeof buf) == 4 && tx_same(buf, 4, "pong", 4), "net: reply flows back");
+    cfd2 = sy_tcp_dial("localhost", port);
+    afd2 = cfd2 >= 0 ? sy_tcp_accept(lfd, 1000) : -1;
+    ok(cfd2 >= 0 && afd2 >= 0, "net: sy_tcp_dial resolves localhost through the system resolver");
+    if (cfd2 >= 0) sy_close(cfd2);
+    if (afd2 >= 0) sy_close(afd2);
+    /* the peer goes away: sends fail with -EPIPE/-ECONNRESET, the process is not killed */
+    sy_close(afd);
+    r = 0;
+    for (i = 0; i < 50 && r >= 0; i++) { r = (int)sy_send(cfd, "data", 4); if (r >= 0) sy_sleep_ms(5); }
+    ok((r == -EPIPE && tx_eq(sy_net_error(r), "Broken pipe", 32)) || (r == -ECONNRESET && has(sy_net_error(r), "reset")),
+       "net: sending to a closed peer is -EPIPE or -ECONNRESET (with its text), no SIGPIPE");
+    printf("  peer gone after %d sends: %s\n", i, sy_net_error(r));
+    sy_close(cfd);
+    ok(sy_send(cfd, "x", 1) == -EBADF && sy_recv(cfd, buf, 1) == -EBADF, "net: send/recv on a closed fd -> -EBADF");
+    ok(sy_send(-1, "x", 1) == -EBADF && sy_tcp_port(-1) == -EBADF, "net: send and getsockname on fd -1 -> -EBADF");
+    ok(sy_send(lfd, 0, 3) == -EINVAL, "net: sy_send with no buffer -> -EINVAL");
+    sy_close(lfd);
+    r = sy_tcp_dial("127.0.0.1", port);
+    ok(r == -ECONNREFUSED && has(sy_net_error(r), "refused"), "net: dial after the listener closed -> -ECONNREFUSED, text says refused");
+    if (r >= 0) sy_close(r);
+    ok(sy_tcp_dial("127.0.0.1", 0) == -EINVAL && sy_tcp_dial("127.0.0.1", 70000) == -EINVAL && sy_tcp_dial("", 80) == -EINVAL,
+       "net: dial port 0, port 70000 or an empty host -> -EINVAL");
+    /* DNS */
+    r = sy_resolve4("localhost", ip, sizeof ip);
+    ok(r >= 1 && tx_prefix(ip, tx_len(ip, 32), "127.", 4), "dns: localhost resolves to a 127.x address");
+    printf("  localhost -> %s (%d IPv4)\n", ip, r);
+    ok(sy_resolve4("127.0.0.1", ip, sizeof ip) == 1 && tx_eq(ip, "127.0.0.1", 32), "dns: a numeric address resolves to itself");
+    ok(sy_resolve4("127.0.0.1", ip, 4) == -ERANGE && ip[0] == 0, "dns: an output too small for the address -> -ERANGE");
+    ok(sy_resolve4("", ip, sizeof ip) == -EINVAL && sy_resolve4("localhost", 0, 8) == -EINVAL, "dns: empty host or no buffer -> -EINVAL");
+    t0 = sy_now_ms();
+    r = sy_resolve4("no-such-host.invalid", ip, sizeof ip);
+    ok(r <= SY_EAI_BASE && ip[0] == 0 && sy_net_error(r)[0] && !tx_eq(sy_net_error(r), "ok", 4),
+       "dns: an unknown host -> a resolver code (<= SY_EAI_BASE) with its own text");
+    printf("  no-such-host.invalid -> %d \"%s\" in %ld ms\n", r, sy_net_error(r), sy_now_ms() - t0);
+    r = sy_tcp_dial("no-such-host.invalid", 80);
+    ok(r <= SY_EAI_BASE, "dns: dialing an unknown host -> a resolver code");
+    ok(tx_eq(sy_net_error(0), "ok", 4) && has(sy_net_error(-EBADF), "ad file"), "net: sy_net_error gives ok for 0 and strerror for -errno");
+}
+
+static void check_tty(void) {
+    int sv[2], rows = 7, cols = 7, st, cut, fd;
+    char out[256], path[128], cmd[512], got[64];
+    long n;
+    sy_stat_t s;
+    if (sy_socketpair(sv) == 0) {
+        ok(sy_tty_size(sv[0], &rows, &cols) == -ENOTTY && rows == 0 && cols == 0, "tty: size of a socket -> -ENOTTY (rows and cols 0)");
+        sy_close(sv[0]); sy_close(sv[1]);
+    } else ok(0, "tty: socketpair for the refusal case");
+    ok(sy_tty_size(-1, &rows, &cols) == -EBADF, "tty: size of fd -1 -> -EBADF");
+    ok(sy_tty_raw(0) == -EINVAL && sy_tty_size(0, 0, &cols) == -EINVAL, "tty: null arguments -> -EINVAL");
+    {
+        char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
+        if (sy_run(probe, out, sizeof out, &cut) != 0) {
+            printf("UNMEASURED tty: raw mode and size on a pty: no util-linux script(1) here\n");
+            return;
+        }
+    }
+    if (sy_stat("out", &s) != 0 || s.kind != 'd') sy_mkdir("out", 0755);
+    if (cx_fmt(path, sizeof path, "out/cx-sys-net-%d.tty", sy_pid())) { ok(0, "tty: path"); return; }
+    /* stty sets the pty to 37 rows x 101 columns first, so sy_tty_size has known values to read */
+    if (cx_fmt(cmd, sizeof cmd, "script -qec 'stty rows 37 cols 101 && sh %s -run %s -- child tty %s' /dev/null >/dev/null 2>&1",
+               sy_env_or("UNISACC", "./unisacc.com"), self, path)) { ok(0, "tty: command"); return; }
+    {
+        char *av[] = { "sh", "-c", cmd, 0 };
+        st = sy_run(av, out, sizeof out, &cut);
+    }
+    fd = sy_openat(sy_at_fdcwd(), path, O_RDONLY, 0);
+    n = fd >= 0 ? sy_read(fd, got, sizeof got - 1) : -1;
+    if (fd >= 0) sy_close(fd);
+    got[n > 0 ? n : 0] = 0;
+    ok(st == 0 && n > 0, "tty: on a pty, raw mode changes the modes, is idempotent, is kept by the kernel, and the saved modes come back");
+    if (st != 0) printf("  child step that failed: %d (see child_tty)\n", st);
+    ok(n > 0 && tx_eq(got, "37 101\n", 16), "tty: sy_tty_size on the pty reads the 37 x 101 that stty set");
+    if (n > 0) printf("  pty size rows cols: %s", got);
+    sy_unlink(path);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && tx_eq(argv[1], "child", 8) && tx_eq(argv[2], "tty", 4)) return child_tty(argv[3]);
+    check_time();
+    check_poll();
+    check_net();
+    check_tty();
+    printf("CX_SYS_NET\tfailed=%d\n", n_bad);
+    return n_bad ? 1 : 0;
+}
