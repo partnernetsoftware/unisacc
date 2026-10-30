@@ -3651,6 +3651,172 @@ static void enc_x86(Ob *o) {
     for (i = 0; i < 4; i++) { ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\n"); }
 }
 
+/* exec/facts/export.py _esc: backslash, tab and newline escaped. */
+static void el_esc(Ob *o, const char *s) {
+    for (; *s; s++) {
+        if (*s == '\\') ob_z(o, "\\\\");
+        else if (*s == '\t') ob_z(o, "\\t");
+        else if (*s == '\n') ob_z(o, "\\n");
+        else ob_put(o, s, 1);
+    }
+}
+/* Python int(s, 0) for a non-negative literal; refused like Python for anything else. */
+static long el_int0(const char *s) {
+    int base = 10;
+    long v = 0, n = tx_len(s, 64), i = 0;
+    if (n >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; i = 2; }
+    else if (n >= 2 && s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; i = 2; }
+    else if (n >= 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; i = 2; }
+    else if (n >= 2 && s[0] == '0') fg_die("int(x, 0) refuses a leading zero", s);
+    if (i >= n) fg_die("not an integer literal", s);
+    for (; i < n; i++) {
+        int d = s[i] >= '0' && s[i] <= '9' ? s[i] - '0' : s[i] >= 'a' && s[i] <= 'f' ? s[i] - 'a' + 10 : s[i] >= 'A' && s[i] <= 'F' ? s[i] - 'A' + 10 : 99;
+        if (d >= base) fg_die("not an integer literal", s);
+        v = v * base + d;
+    }
+    return v;
+}
+static const char *el_winapi(const char *op) { const char *w = el_get("winapi", op); return w && !tx_eq(w, "none", 8) ? w : 0; }
+/* gold abi/enc of one target: op -> fields, first position kept, last row wins (a Python dict). */
+typedef struct { int n; char *op[256]; char **f[256]; } ElAbi;
+static void el_abi(ElAbi *a, const char *os, const char *arch) {
+    static Rows R;
+    static List F;
+    static int ready;
+    int i, j;
+    if (!ready) { fg_gold("abi", &R, &F, 0, 0); ready = 1; }
+    a->n = 0;
+    for (i = 0; i < R.n; i++) {
+        if (R.nc[i] < 3 || !tx_eq(R.c[i][1], os, 8) || !tx_eq(R.c[i][2], arch, 16)) continue;
+        if (R.nc[i] != 16) fg_die("gold abi row is not 16 cells", R.c[i][0]);
+        for (j = 0; j < a->n && !tx_eq(a->op[j], R.c[i][0], 256); j++) ;
+        if (j == a->n) { if (a->n == 256) fg_die("too many abi ops", 0); a->op[a->n++] = R.c[i][0]; }
+        a->f[j] = R.c[i] + 3;
+    }
+}
+static const char *el_enc(const char *os, const char *arch, const char *op) {   /* gold enc form, last row wins; 0 when absent */
+    static Rows R;
+    static List F;
+    static int ready;
+    const char *got = 0;
+    int i;
+    if (!ready) { fg_gold("enc", &R, &F, 0, 0); ready = 1; }
+    for (i = 0; i < R.n; i++)
+        if (R.nc[i] >= 4 && tx_eq(R.c[i][0], op, 256) && tx_eq(R.c[i][1], os, 8) && tx_eq(R.c[i][2], arch, 16)) got = R.c[i][3];
+    return got;
+}
+static void el_val(Ob *o, const char *v) {   /* export.py val(): a leading quote on none and on digit-led values */
+    if (tx_eq(v, "none", 8) || (v[0] >= '0' && v[0] <= '9')) ob_z(o, "'");
+    el_esc(o, v);
+}
+static void el_arg(Ob *o, int idx, const char *kind, long value, const char *reg, int stack, long stackoff) {
+    ob_z(o, "{\"idx\": "); ob_int(o, idx); ob_z(o, ", \"kind\": "); ob_str(o, kind); ob_z(o, ", \"value\": "); ob_int(o, value);
+    ob_z(o, ", \"reg\": "); ob_str(o, reg);
+    if (stack) { ob_z(o, ", \"stackoffset\": "); ob_int(o, stackoff); }
+}
+static void lower_abi(Ob *o) {
+    static const char *oses[3] = {"lnx", "osx", "win"}, *arches[2] = {"x86_64", "arm64"};
+    Ob rows = {0, 0, 0}, sel = {0, 0, 0}, om = {0, 0, 0}, pm = {0, 0, 0};
+    Lines S = fg_lines("exec/lower/code-abi-sources.tsv");
+    char *sm_[256], *ssh[256], *sk[256], *sv[256];
+    long sysa = el_int("lower", "SYSA");
+    int ns = 0, oi, ai, i, mode;
+    static const char *omhead = "\ttarget:str\top:str\tmode:int\tprev:int\tfirst:json\tlast:json\tsyscall:json\thassysno:json\t"
+        "sysnoint:str\tnrreg:str\tret:str\tgate:str\tform:str\tcarry:str\twinapi:str\tsysnoval:str\tretconv:str\t"
+        "winimp:str\tmems:json\ttprev:json\ttrail:json\n";
+    for (i = 0; i < S.n; i++) {
+        char *c[8], *line = fg_dupz(S.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, c, 8) != 4 || ns == 256) fg_die("bad code-abi-sources row", S.l[i]);
+        sm_[ns] = c[0]; ssh[ns] = c[1]; sk[ns] = c[2]; sv[ns] = c[3]; ns++;
+    }
+    ob_z(o, "@abiops\ttarget:str\top:str\n");
+    ob_z(&rows, "@abi\ttarget:str\top:str\tsysno:str\targs:json\tret:str\tgate:str\tnrreg:str\targshape:str\tretconv:str\twinimp:str\twinapi:str\tform:str\tselected:int\n");
+    ob_z(&sel, "@abisel\ttarget:str\top:str\n");
+    ob_z(&om, "@opmodes"); ob_z(&om, omhead);
+    ob_z(&pm, "@private_modes"); ob_z(&pm, omhead);
+    for (oi = 0; oi < 3; oi++) for (ai = 0; ai < 2; ai++) {
+        const char *os = oses[oi], *arch = arches[ai];
+        char t[32];
+        ElAbi A;
+        int eg = 0;
+        cx_fmt(t, sizeof t, "%s/%s", os, arch);
+        el_abi(&A, os, arch);
+        for (i = 0; i < A.n; i++) { ob_z(o, "\t"); ob_z(o, t); ob_z(o, "\t"); el_esc(o, A.op[i]); ob_z(o, "\n"); eg |= tx_eq(A.op[i], "exit_group", 16); }
+        if (!eg) { ob_z(o, "\t"); ob_z(o, t); ob_z(o, "\texit_group\n"); }
+        for (i = 0; i < A.n; i++) {
+            char **f = A.f[i];
+            const char *op = A.op[i], *w = el_winapi(op), *form = el_enc(os, arch, op);
+            int selected = !tx_eq(f[0], "none", 8) || (oi == 2 && w && !tx_eq(f[12], "none", 8)), k;
+            ob_z(&rows, "\t"); ob_z(&rows, t); ob_z(&rows, "\t"); el_esc(&rows, op); ob_z(&rows, "\t"); el_esc(&rows, f[0]); ob_z(&rows, "\t[");
+            for (k = 1; k <= 6; k++) { if (k > 1) ob_z(&rows, ", "); ob_str(&rows, f[k]); }
+            ob_z(&rows, "]");
+            for (k = 7; k <= 12; k++) { ob_z(&rows, "\t"); el_esc(&rows, f[k]); }
+            ob_z(&rows, "\t"); ob_z(&rows, w ? w : "none"); ob_z(&rows, "\t"); el_esc(&rows, form ? form : ""); ob_z(&rows, "\t"); ob_int(&rows, selected); ob_z(&rows, "\n");
+            if (!selected) continue;
+            ob_z(&sel, "\t"); ob_z(&sel, t); ob_z(&sel, "\t"); el_esc(&sel, op); ob_z(&sel, "\n");
+            for (mode = 0; mode < 5; mode++) {
+                int sm = tx_eq(op, "syscall", 16) && mode == 1 ? 5 : mode, nsrc = 0, j, nprev = -1, npend = 0, nmems = 0;
+                const char *srck[16];
+                long srcv[16];
+                Ob mems = {0, 0, 0}, pend = {0, 0, 0}, line = {0, 0, 0};
+                for (j = 0; j < ns; j++) {
+                    char *end;
+                    long m = strtol(sm_[j], &end, 10);
+                    if (*end || m != sm || !(tx_eq(ssh[j], "*", 4) || tx_eq(ssh[j], f[10], 256))) continue;
+                    if (nsrc == 16) fg_die("too many argument sources", op);
+                    srck[nsrc] = sk[j];
+                    if (tx_prefix(sv[j], tx_len(sv[j], 64), "SYSA", 4) && sv[j][4] >= '0' && sv[j][4] <= '5' && !sv[j][5]) srcv[nsrc] = sysa + 8 * (sv[j][4] - '0');
+                    else { srcv[nsrc] = strtol(sv[j], &end, 10); if (end == sv[j] || *end) fg_die("bad source value", sv[j]); }
+                    nsrc++;
+                }
+                if (!nsrc) fg_die("new argument shape requires migration", f[10]);
+                ob_z(&mems, "[");
+                ob_z(&pend, "[");
+                for (j = 0; j < nsrc; j++) {
+                    const char *reg;
+                    int stack = mode == 1 && oi != 2;
+                    if (1 + j > 12) fg_die("argument index beyond the abi row", op);
+                    reg = f[1 + j];
+                    if (tx_eq(reg, "none", 8)) { if (oi == 2) break; fg_die("unsupported stack syscall argument", op); }
+                    if (tx_eq(srck[j], "imm", 8)) {
+                        if (npend++) ob_z(&pend, ", ");
+                        el_arg(&pend, j, srck[j], srcv[j], reg, stack, srcv[j] - sysa); ob_z(&pend, "}");
+                    } else {
+                        if (nmems++) ob_z(&mems, ", ");
+                        el_arg(&mems, j, srck[j], srcv[j], reg, stack, srcv[j] - sysa);
+                        ob_z(&mems, ", \"imms\": "); ob_put(&mems, pend.p, pend.n); ob_z(&mems, "]");
+                        ob_z(&mems, ", \"prev\": ");
+                        if (nprev < 0) ob_z(&mems, "[]"); else { ob_z(&mems, "[{\"idx\": "); ob_int(&mems, nprev); ob_z(&mems, "}]"); }
+                        ob_z(&mems, "}");
+                        pend.n = 0; ob_z(&pend, "["); npend = 0;
+                        nprev = j;
+                    }
+                }
+                ob_z(&mems, "]");
+                ob_z(&pend, "]");
+                ob_z(&line, "\t"); ob_z(&line, t); ob_z(&line, "\t"); el_esc(&line, op);
+                ob_z(&line, "\t"); ob_int(&line, mode); ob_z(&line, "\t"); ob_int(&line, mode - 1);
+                ob_z(&line, mode == 0 ? "\t[1]" : "\t[]"); ob_z(&line, mode == 4 ? "\t[1]" : "\t[]");
+                ob_z(&line, tx_eq(op, "syscall", 16) ? "\t[1]" : "\t[]");
+                ob_z(&line, !tx_eq(f[0], "none", 8) && !tx_eq(op, "syscall", 16) ? "\t[1]" : "\t[]");
+                ob_z(&line, "\t"); if (!tx_eq(f[0], "none", 8)) ob_int(&line, el_int0(f[0]));
+                ob_z(&line, "\t"); el_esc(&line, f[9]); ob_z(&line, "\t"); el_esc(&line, f[7]); ob_z(&line, "\t"); el_esc(&line, f[8]);
+                ob_z(&line, "\t"); el_esc(&line, form ? form : ""); ob_z(&line, oi == 1 ? "\ttrue" : "\tfalse");
+                ob_z(&line, "\t"); ob_z(&line, w ? w : "none");
+                ob_z(&line, "\t"); el_val(&line, f[0]); ob_z(&line, "\t"); el_val(&line, f[11]); ob_z(&line, "\t"); el_val(&line, f[12]);
+                ob_z(&line, "\t"); el_esc(&line, mems.p);
+                ob_z(&line, "\t"); if (nprev < 0) ob_z(&line, "[]"); else { ob_z(&line, "[{\"idx\": "); ob_int(&line, nprev); ob_z(&line, "}]"); }
+                ob_z(&line, "\t"); el_esc(&line, pend.p); ob_z(&line, "\n");
+                ob_put(&om, line.p, line.n);
+                if (mode == 1 && oi != 2) ob_put(&pm, line.p, line.n);
+            }
+        }
+    }
+    ob_put(o, rows.p, rows.n); ob_put(o, sel.p, sel.n); ob_put(o, om.p, om.n); ob_put(o, pm.p, pm.n);
+    ob_z(o, "=none\tjson\t[]\n=zero\tint\t0\n=eight\tint\t8\n");
+}
+
 static void enc_arm(Ob *o) {
     Krow *k[256];
     char *sop[512], *sshape[512], *meta[64], *imp[64], *v[256];
@@ -3795,6 +3961,8 @@ static const Table fg_tables[] = {
                  "exec/facts/enc-armfp-specs.tsv", "exec/facts/enc-tins-meta.tsv", "exec/facts/enc-arminput-keys.tsv",
                  "exec/facts/enc-armlayout-headers.tsv", "exec/facts/enc-armlayout-targets.tsv",
                  "exec/facts/enc-armwin-keys.tsv", "exec/facts/enc-armwin-reset.tsv", "tools/facts-gen.cx", 0}, enc_arm},
+    {"lower-abi", {"exec/facts/enc-literals.tsv", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv",
+                   "tools/facts-gen.cx", 0}, lower_abi},
     {0, {0}, 0}
 };
 
