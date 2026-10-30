@@ -64,9 +64,12 @@
 
 ## 实现进度（2026-10-31，bdy，在 gcc_cx/clang_cx 宿主链上）
 
-已在 `src/cxmod.c` 落地三块，均重编 gcc_cx/clang_cx 验证：
+已在 `src/cxmod.c` 完整落地符号级别名，端到端工作：
 1. **解析**：`use NAME::sym as alias`（cxm_directive + cxm_adduse，新增 cxm_usym/cxm_ualias）。
 2. **冲突消解**：cxm_collisions 函数分支加 reach + cxm_aliased 检查，同名函数被别名后不冲突。
 3. **CXIF 声明改名**：cxm_text(sym,alias) + cxm_on_rename（token 级改名）+ cxm_renpool + cxm_inc 负值编码。
+4. **函数体符号改名**：cxm_rewrite 对被别名 use 的模块生成 `#define sym alias` 头的改名源码，cxm_planprint 输出改名源码路径（cxm_bodysrc）。
 
-**剩余（函数体符号改名）**：别名改了 CXIF 声明，但模块本身的函数体（`int clash(...)`）编译出的符号仍是原名 `clash`，链接时两个模块的 clash 重复。要让 `use a::clash as clash_a` 端到端工作，cxmod 还要对「被别名 use 的模块」生成改名源码（头部 `#define clash clash_a`，或源码级符号替换），cxm_planprint 输出改名源码路径，cxcc 编译它。难点是「模块被多个单元用不同别名 use」需要多份改名源码（多版本模块编译），是架构级改动。
+验收（gcc_cx 和 clang_cx 都过）：`use a::clash as clash_a` + `use b::clash as clash_b`，clash_a()=1、clash_b()=2、main 返回 3；两个宿主编译器编译通过、运行返回 3。无别名单模块 use 无回归。
+
+**已知边界**：一个模块被多个单元用**不同**别名 use 时，cxm_bodysrc 只存一份改名源码（单版本假设），多版本模块编译尚未做。这是罕见场景，需要时再扩。
