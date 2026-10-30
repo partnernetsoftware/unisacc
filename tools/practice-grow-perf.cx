@@ -10,49 +10,41 @@
    tools/practice-grow-perf.cx */
 static int bad;
 static void ok(int c, const char *n) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", n); if (!c) bad = 1; }
+/* Count cap changes while pushing: each cap change is one realloc.  This is a
+   deterministic metric (independent of wall-clock noise), so it reproduces on
+   every machine and run. */
+static long count_reallocs(long n, int reserve) {
+    mg_buf b; long i, cap, last, reallocs = 0;
+    mg_init(&b);
+    if (reserve) { mg_reserve(&b, n); last = b.cap; }
+    else last = 0;
+    for (i = 0; i < n; i++) { mg_push(&b, (int)(i & 255)); cap = b.cap; if (cap != last) { reallocs++; last = cap; } }
+    mg_free(&b);
+    return reallocs;
+}
+
 int main(void) {
     mg_buf g;
-    long i, cap0, t0, t1, t2;
-    const long N = 2000000;
+    long i, cap0;
+    const long N = 2000000, M = 1000000;
     mg_init(&g);
-    t0 = sy_now_ms();
     for (i = 0; i < N; i++) if (mg_push(&g, (int)(i & 255))) bad = 1;
-    t1 = sy_now_ms();
     cap0 = g.cap;
     mg_clear(&g);
-    t2 = sy_now_ms();
     for (i = 0; i < N; i++) if (mg_push(&g, (int)(i & 255))) bad = 1;
     {
-        long cold = t1 - t0, reuse = sy_now_ms() - t2;
-        sy_printf("PERF\tcold_ms=%ld reuse_ms=%ld cap=%ld (N=%ld)\n", cold, reuse, cap0, N);
+        long reallocs_reserve = count_reallocs(M, 1), reallocs_grow = count_reallocs(M, 0);
+        sy_printf("PERF\treserve_reallocs=%ld grow_reallocs=%ld (M=%ld)\n", reallocs_reserve, reallocs_grow, M);
+        /* reserve up front means zero reallocs during push; grow-on-demand pays
+           log2(M/16) doublings.  Deterministic, reproduces on every run. */
+        ok(reallocs_reserve == 0, "reserve-push-never-reallocs");
+        ok(reallocs_grow >= 16 && reallocs_grow <= 20, "grow-reallocs-are-doublings");
+        ok(reallocs_reserve < reallocs_grow, "reserve-pays-far-fewer-reallocs");
         ok(g.cap == cap0, "reuse-keeps-capacity");
         ok(g.len == N, "reuse-refills");
-        ok(reuse <= cold + 5, "reuse-not-slower-than-cold");
         ok(cap0 >= N && cap0 < N * 2, "doubling-reached-N-without-overshoot");
     }
     mg_free(&g);
-    {
-        /* reserve up front vs grow-on-demand, best of 3 runs (min is the least
-           noisy wall-clock estimate): reserve pays one realloc and must not be
-           slower; the capacity is exact-requested (>= N), not doubled past it */
-        mg_buf a, b; long ra, rb, run; int best_ra = 2147483647, best_rb = 2147483647;
-        const long M = 1000000;
-        for (run = 0; run < 3; run++) {
-            long a0 = sy_now_ms();
-            mg_init(&a); mg_reserve(&a, M);
-            for (i = 0; i < M; i++) mg_push(&a, (int)(i & 255));
-            ra = sy_now_ms() - a0;
-            long b0 = sy_now_ms();
-            mg_init(&b);
-            for (i = 0; i < M; i++) mg_push(&b, (int)(i & 255));
-            rb = sy_now_ms() - b0;
-            if (ra < best_ra) best_ra = (int)ra;
-            if (rb < best_rb) best_rb = (int)rb;
-            mg_free(&a); mg_free(&b);
-        }
-        sy_printf("PERF\treserve_ms=%d grow_ms=%d (best of 3, M=%ld)\n", best_ra, best_rb, M);
-        ok((long)best_ra <= (long)best_rb + 5, "reserve-not-slower-than-grow");
-    }
     sy_printf("PRACTICE_GROW_PERF\tfailed=%d\n", bad);
     return bad;
 }
