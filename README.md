@@ -66,22 +66,25 @@ three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.
 retain the exact historical candidates, hashes and build lineage. They do not
 qualify the current candidate.
 
-Current bounded development steps are documented in [native kernel construction](tools/kernels.md)
-and [package refresh and product construction](tools/packages.md): run
-`tools/kernel-build.cx`, `tools/package-refresh.cx` and `tools/product-build.cx`
-through `sh ./unisacc.com FILE.cx -- ARGS` using their documented material and
-identity checks. `tests/selfhost.cx ROOT PRIOR_GENERATION PRIOR_PACKAGE FRESH_GENERATION FRESH_PACKAGE`
-checks both generations' source and material receipts before and after comparing
-the native artifacts, including the complete product; it does not
-establish the host-seed three-stage chain or native foreign-host qualification.
-`unisacc-next.com` is only a build-directory output name.
+The installed `unisacc.com` is still a product of the old C chain. The CX entry
+(`src/unisacc.cx`) is built by `tools/entry-build.cx` as an `lnx/x86_64` ELF candidate
+with the installed P3 package. It matches the installed product on all 148
+entry cells, but it is not yet the product. The steps from that candidate to
+a five-slice APE product are listed, not yet executed, in
+[candidate to product](plans/candidate-to-product-2026-10-30.md). As of
+2026-10-30, `lnx/arm64` objects compile, but `osx/*` and `win/x86_64` do not:
+the model driver's `-c -b` does not yet reach non-Linux targets.
 
-Package refresh still requires the pinned frozen model baseline and verifies
-constructor-input equality before retaining its model bytes. Host C bootstrap
-dependencies for the independent reference and watchdog, and Python construction
-coordination debt, remain; this development path does not establish their removal.
-The historical `exec/c/buildcompiler.sh` compatibility path is not the current
-acceptance entry point.
+`tools/product-build.cx`, `tools/hostseed-step*.cx`, `tools/selfhost-mixed.cx`,
+`exec/c/buildcompiler.sh` and the Makefile's model/seed/comb targets still
+compile or link the archived C reference or Python, so they cannot run. They
+retire with the switch; see the retirement table in that plan.
+`tools/kernel-build.cx` ([kernels](tools/kernels.md)) does not reference archived
+sources. `tools/package-refresh.cx` ([packages](tools/packages.md)) still compares
+`exec/c/core.c`, which is archived, so it too must be reworked before the
+switch's package refresh. `unisacc-next.com` is only a build-directory output
+name. The live Python left on any path is listed in
+[python residue](plans/python-residue-2026-10-30.md).
 
 Published versions, their sizes, SHA-256 and acceptance receipts:
 [GitHub releases](https://github.com/partnernetsoftware/unisacc/releases), with
