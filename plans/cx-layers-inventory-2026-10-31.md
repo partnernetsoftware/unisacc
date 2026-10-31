@@ -2670,3 +2670,22 @@ rc=7 成功**（隐式声明 → 链接期命中 `b` 侧定义）。
 5. `unclassified` 一律不算覆盖：它出现在总完成集合里即为配置错误（非零）。
 
 未改 `cx-context-preflight-2026-10-31.md`（写权仍在 go），未运行测量。
+
+### 19.23 preflight 修订已落地（go 临时移交期间，写权已归还）
+
+§19.21 / §19.22 的结论已写入 `plans/cx-context-preflight-2026-10-31.md`，提交
+`26b3d07678`、`aa2f91adef`、`2bff886eb4`。交付 sha256 `077226bc…da6a`，490 行。
+
+| 原问题 | 落地形态 |
+|---|---|
+| `production` 用 recipe 即"证明" | 拆 `participation=declared/observed`；`NOT-CAPTURED` 时只能 `declared` |
+| `S1\S2` 称联合根成员 | 改 `scope=build-instance`、`joint_id` 必须为空；§14.1 增 `scope` 取值域 |
+| `S3\S2` 直推 stale | 新增 §4.2a 三分：`no-main-by-design` / `prepared-template` / `absent-from-tree`（仅末者候选 STALE） |
+| §5 环检测用祖先栈却配 BFS | 建图（BFS，已见集只做边去重）+ 判环（三色 DFS / Tarjan SCC）分两阶段；报 `cycle_path`；未实现前 `cycles` UNMEASURED |
+| §7 "分别入队"vs"只停该边" | 唯一规则：入队（`contexts_queued`）与生成 pair（仅同 realpath 组）分离；diff 只记账 |
+| `pair_peak` 混量 | 四个字段：`context_queue_len_peak`/`pair_queue_len_peak`/`work_queue_len_peak`/`pair_verify_depth_peak`；`NOT_APPLICABLE≠UNMEASURED≠0` |
+| §9 聚合只绑 production | 每类别一行；必需集合固定 `{production, tool, batch-positive}`；仅 production 完成只能 `production_measurement_complete`；全必需才 `aggregate_measurement_complete`；`unclassified` 禁止入必需集 |
+| `unknown-known`/`unknown-unexpected` 无定义 | §4.5 增白名单，二者之和必须等于 `unknown` |
+
+仍未变：**未建工具、未建 roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`**；全部字段在算法定稿前
+为 UNKNOWN / UNMEASURED / NOT_APPLICABLE，本修订不构成测量资格。写权已交还 go。
