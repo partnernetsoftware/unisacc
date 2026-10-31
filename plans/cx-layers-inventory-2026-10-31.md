@@ -2689,3 +2689,23 @@ rc=7 成功**（隐式声明 → 链接期命中 `b` 侧定义）。
 
 仍未变：**未建工具、未建 roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`**；全部字段在算法定稿前
 为 UNKNOWN / UNMEASURED / NOT_APPLICABLE，本修订不构成测量资格。写权已交还 go。
+
+### 19.24 层 A 工具已换代：`A-INCOMPLETE` 行号与收据文本同步状态
+
+`tools/check-cx-layers.cx` 现为 sha256 `3e6c1ab9b04ec5b783c2775037a4df82054231547231723fde79b794289ff4fb`，887 行，
+最近三次提交 `1ef8428444`（同步 A-INCOMPLETE 文本）、`74297e6cba`（ifdef/条件重复 use/容量拒绝）、
+`d07081728a`（manifest unescape 与末次观测窗）。工作区无未提交改动。
+
+**行号更正**：§19.23 之前引用的 `:433`（自增）/ `:555`（`return 3`）对应的是**旧版本**。现行位置：
+
+| 事实 | 现行行号 | 内容 |
+|---|---|---|
+| A-INCOMPLETE 打印 | `:455` | `sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12 and named-fixtures-30 not implemented (U reconciliation is implemented)\n")` |
+| 无条件自增 | `:456` | `cl_und_lex++; cl_und_total++;` |
+| rc=3 判据 | `:615` | `if (cl_und_lex + cl_und_recon + cl_und_meta + cl_und_io) return 3;` |
+
+**仍存在的不一致（静态可查，未重跑）**：收据文本写 `named-fixtures-30`，而 `fx_note(` 调用点静态计数为
+**16**（`fx_note` 定义在 `:634`，自增在 `:635`；共 17 处出现减 1 处定义），与 §19.23 实测 `checks=16` 一致
+⇒ 文本数字应改为 16 或改为不写数字。`U reconciliation is implemented` 这一半已由 `1ef8428444` 修正。
+
+`run-batch` 判 PASS 写死 `rc0:` 前缀的问题未变（层 A 归 go，批次基建不在本刀授权内），仍待裁定。
