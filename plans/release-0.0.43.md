@@ -75,7 +75,7 @@ STATE43：**当前状态（cc 维护，2026-10-31 中午；下面的流水记录
 STATE43：已装 0.0.43 = `43fbbb81`（10-31 01:19，4,631,130 字节，五片，冻结 rev c98f757f）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
 STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
-STATE43：[ ] 3 **RI 迁移（头号，挡 QUALIFIED）**：防呆 fb89faddde 在源码里，已装版没有；第二步 grk 进行中，顺序是严格重放、捕获、trace 与 multi；验收是 resources、ri-trace、ri-trace-output、ri-multi 四个批次在新构造的入口上变绿，然后装入并登记 rf-capture-guard。
+STATE43：[ ] 3 **RI 迁移（头号，挡 QUALIFIED）**：防呆 fb89faddde 在源码里，已装版没有；第二步 grk 进行中，顺序是严格重放、捕获、trace 与 multi；验收是 resources、ri-trace、ri-trace-output、ri-multi 四个批次在新构造的入口上变绿，然后装入并登记 rf-capture-guard。**进展（db6938d868）：resources 批次在新入口 `/tmp/ri-whole/entry.elf`（sha f286319a…，工作区整包构造，内容与该提交一致）上 75 条断言 0 失败，cc 独立复跑确认（12 秒）；同一测试对已装 43fbbb81 是 rc2、捕获不写文件，对照成立。ri-trace、ri-trace-output、ri-multi 还没跑。**
 STATE43：[ ] 4 两代比较：用新装的 43fbbb81 重编 lnx 片，与第一代逐字节相同（lnx 改走 whole-o 之后还没做过两代）。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
 STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
