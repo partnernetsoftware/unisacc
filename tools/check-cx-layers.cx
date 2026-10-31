@@ -730,8 +730,8 @@ static void fx_case_start(const char *name) {
     fx_reset();
     cl_nwl = 0;
     cx_fmt(fx_base, sizeof fx_base, "%s/%s", fx_base0, name);
-    fx_mkdirp("");
     cx_fmt(cl_root, sizeof cl_root, "%s", fx_base);
+    fx_mkdirp("");
 }
 static int fx_load_wl(void) {
     char p[CL_PATH];
@@ -840,6 +840,37 @@ static void cl_fixtures(void) {
     {
         int pc = fx_plan_count("cx/sys/q.cx");
         fx_note(pc < 0, "h-compiler-refuses-conditional");
+    }
+    /* I: lexical-12 on the single-buffer collector */
+    fx_case_start("i-lex");
+    fx_write("basic.cx", "#pragma unisa use a\nint basic_x(void){return 0;}\n");
+    fx_write("comment.cx", "/* #pragma unisa use fake */\n#pragma unisa use b\nint comment_x(void){return 0;}\n");
+    fx_write("string.cx", "int string_x(void){ char *s = \"#pragma unisa use fake\"; return s[0]; }\n");
+    fx_write("splice.cx", "#pragma unisa use \\\n c\nint splice_x(void){return 0;}\n");
+    fx_write("tokens.cx", "#pragma/**/ unisa/**/ use/**/ d\nint tokens_x(void){return 0;}\n");
+    fx_write("ifdef.cx", "#ifdef X\n#pragma unisa use e\n#endif\nint ifdef_x(void){return 0;}\n");
+    fx_write("if0.cx", "#if 0\n#pragma unisa use f\n#endif\nint if0_x(void){return 0;}\n");
+    fx_write("dup.cx", "#pragma unisa use g\n#if 0\n#pragma unisa use g\n#endif\nint dup_x(void){return 0;}\n");
+    fx_write("alias.cx", "#pragma unisa use h::x as y\nint alias_x(void){return 0;}\n");
+    fx_write("late.cx", "int late_v;\n#pragma unisa use i\nint late_x(void){return 0;}\n");
+    fx_write("unknown.cx", "#pragma unisa nonsense\nint unknown_x(void){return 0;}\n");
+    fx_write("lines.cx", "/* one\ntwo */\n#pragma unisa use j\nint lines_x(void){return 0;}\n");
+    {
+        char q[CL_PATH];
+#define LEX(P) do { cl_scan_path[0] = 0; cx_fmt(q, sizeof q, "%s/%s", fx_base, (P)); cl_lex_uses(q); } while (0)
+        LEX("basic.cx");   fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "a") && cl_uses[0].line == 1 && cl_uses[0].cond == 0, "lex-basic");
+        LEX("comment.cx"); fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "b") && cl_uses[0].line == 2, "lex-block-comment");
+        LEX("string.cx");  fx_note(cl_nuses == 0, "lex-string-ignored");
+        LEX("splice.cx");  fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "c") && cl_uses[0].line == 1, "lex-splice");
+        LEX("tokens.cx");  fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "d"), "lex-token-comments");
+        LEX("ifdef.cx");   fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "e") && cl_uses[0].cond == 1, "lex-ifdef-conditional");
+        LEX("if0.cx");     fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "f") && cl_uses[0].cond == 1, "lex-if0-conditional");
+        LEX("dup.cx");     fx_note(cl_nuses == 2 && cl_eq(cl_uses[0].mod, "g") && cl_eq(cl_uses[1].mod, "g") && cl_uses[1].cond == 1, "lex-duplicate-conditional");
+        LEX("alias.cx");   fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "h") && cl_uses[0].cond == 0, "lex-alias-module");
+        LEX("late.cx");    fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "i") && cl_uses[0].line == 2, "lex-after-declaration-line");
+        LEX("unknown.cx"); fx_note(cl_nuses == 0, "lex-unknown-pragma");
+        LEX("lines.cx");   fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "j") && cl_uses[0].line == 3, "lex-physical-line");
+#undef LEX
     }
     sy_printf("CX_LAYERS_FIXTURES\tchecks=%d\tfailed=%d\n", fx_checks, fx_fail);
     cx_fmt(cl_root, sizeof cl_root, "%s", cl_reporoot);
