@@ -172,7 +172,9 @@ static void cl_lex_uses(const char *path) {
             if (nl) { i = j; bol = 1; continue; }
             a = j; b2 = cl_ident(cl_src, n, j);
             j = cl_gap(cl_src, n, b2, &nl);
-            if (!nl && b2 - a == 2 && tx_prefix(cl_src + a, b2 - a, "if", 2)) depth++;
+            if (!nl && ((b2 - a == 2 && tx_prefix(cl_src + a, b2 - a, "if", 2)) ||
+                        (b2 - a == 5 && tx_prefix(cl_src + a, b2 - a, "ifdef", 5)) ||
+                        (b2 - a == 6 && tx_prefix(cl_src + a, b2 - a, "ifndef", 6)))) depth++;
             else if (!nl && b2 - a == 5 && tx_prefix(cl_src + a, b2 - a, "endif", 5)) { if (depth > 0) depth--; }
             else if (!nl && b2 - a == 6 && tx_prefix(cl_src + a, b2 - a, "pragma", 6)) {
                 long u, v, m, e;
@@ -182,8 +184,12 @@ static void cl_lex_uses(const char *path) {
                     if (!nl && v - u == 3 && tx_prefix(cl_src + u, v - u, "use", 3)) {
                         u = j; m = cl_ident(cl_src, n, u); e = m;
                         if (cl_nuses < 256 && e > u) {
-                            long q = 0; while (u + q < e && q < 127) { cl_uses[cl_nuses].mod[q] = cl_src[u + q]; q++; }
-                            cl_uses[cl_nuses].mod[q] = 0; cl_uses[cl_nuses].line = start; cl_uses[cl_nuses].cond = depth > 0; cl_nuses++;
+                            long q = 0;
+                            if (e - u >= 127) cl_uses_overflow = 1;
+                            else {
+                                while (u + q < e && q < 127) { cl_uses[cl_nuses].mod[q] = cl_src[u + q]; q++; }
+                                cl_uses[cl_nuses].mod[q] = 0; cl_uses[cl_nuses].line = start; cl_uses[cl_nuses].cond = depth > 0; cl_nuses++;
+                            }
                         } else if (e > u) cl_uses_overflow = 1;
                         j = cl_gap(cl_src, n, m, &nl);
                     }
@@ -202,7 +208,8 @@ static void cl_locate(const char *srcpath, const char *mod, int *line, int *cond
     int k;
     *line = 0; *cond = 0;
     cl_lex_uses(srcpath);
-    for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod)) { *line = cl_uses[k].line; *cond = cl_uses[k].cond; return; }
+    for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod) && cl_uses[k].cond) { *line = cl_uses[k].line; *cond = 1; return; }
+    for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod)) { *line = cl_uses[k].line; *cond = 0; return; }
 }
 #if 0
 static void cl_locate_old(const char *srcpath, const char *mod, int *line, int *cond) {
@@ -508,7 +515,7 @@ static int cl_audit(void) {
                           if (!(cl_isid((unsigned char)c) || c == '.')) break;
                           umod[nu][m++] = c; w++;
                       }
-                      if (nu >= 128) { too = 1; }
+                      if (nu >= 128 || m >= 127) { too = 1; }
                       else { umod[nu][m] = 0; nu++; }
                   }
                   q = e2 + 1;
