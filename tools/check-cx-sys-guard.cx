@@ -12,6 +12,26 @@ static int steps;
 static void body_ok(void *ud) { (void)ud; steps++; }
 static void deep(int n) { if (n == 0) sy_guard_fail(); deep(n - 1); steps += 100; }
 static void body_fail(void *ud) { steps++; deep(*(int *)ud); steps += 1000; }
+/* A caller-held environment for a named callback: the guard lends UD to FN for
+   the call and keeps no reference afterwards. The fields read after a failure
+   are volatile-qualified (the setjmp lives in sy_guard, and inlining must not
+   turn their values indeterminate); the caller still owns and resets them. */
+struct env { volatile int in, out, steps, magic; };
+static void env_body(void *ud) {
+    struct env *e = ud;
+    if (e->magic != 0x51) { e->magic = -1; return; }
+    e->steps = e->steps + 1;
+    e->out = e->in * 3 + 1;
+}
+static void env_body_fail(void *ud) {
+    struct env *e = ud;
+    if (e->magic != 0x51) { e->magic = -1; sy_guard_fail(); }
+    e->steps = e->steps + 1;
+    e->out = e->in + 100;
+    sy_guard_fail();
+    e->steps = 99;
+    e->out = -1;
+}
 static int inner_rc;
 static void body_outer(void *ud) {
     int d = 3;
@@ -36,6 +56,20 @@ int main(int argc, char **argv) {
 
     inner_rc = -9; rc = sy_guard(body_outer_fail, 0);
     ck(rc == 1 && inner_rc == 0 && !sy_guard_active(), "outer-catches-after-inner-returned");
+
+    {   struct env e;
+        int r;
+        e.in = 7; e.out = 0; e.steps = 0; e.magic = 0x51;
+        r = sy_guard(env_body, &e);
+        ck(r == 0 && e.steps == 1 && e.out == 22 && e.magic == 0x51, "env-normal-writeback");
+        /* the caller keeps ownership: the same object is reset and reused */
+        e.in = 2; e.out = 0; e.steps = 0;
+        r = sy_guard(env_body, &e);
+        ck(r == 0 && e.steps == 1 && e.out == 7 && e.magic == 0x51, "env-reused-by-caller");
+        e.in = 5; e.out = 0; e.steps = 0; e.magic = 0x51;
+        r = sy_guard(env_body_fail, &e);
+        ck(r == 1 && e.steps == 1 && e.out == 105 && e.magic == 0x51, "env-fail-early-exit-writes-visible");
+    }
 
     ck(sy_guard(0, 0) == -EINVAL, "null-body-refused");
 
