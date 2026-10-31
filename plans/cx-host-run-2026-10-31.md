@@ -44,7 +44,7 @@ Windows 裁定与证据边界：`tools/cxcc-hostinc/spawn.h:236-250` 把 `GetExi
 
 当前阻塞（实施方报告）：共享工作区 `cx/sys/fs.cx` 有其他车道的未提交变更，已装编译器在 `tests/sys/fs.cx:44` 报 `not covered: member access`，最新 W-7 协调器改动尚不能在该工作区取得实跑证据。不要改动或还原他人文件，也不重复运行该已报失败。若在仓外固定 commit 快照叠加本刀补丁进行验证，须绑定快照、补丁、产品及工具链身份；隔离结果不代表当前工作区或已装产品通过。
 
-隔离局部证据（实施方报告，提交 `0b8deb4b96`）：以 `1f4129d306…` 的 archive 和本刀测试 overlay 在仓外运行，`out/cx-w7-isolated-1793437777/test.log` 两驱动均出现 `spawn-failure-*`、`coordinator-controller-clean`、release 行的 PASS，并以 `CX_HOST_RUN failed=0` 收尾。`inputs.sha` 记录 fs、驱动源码与测试 overlay 摘要，`toolchain.txt` 记录 gcc 11.4.0 和 clang 15.0.7；实施方另报告外置产品 sha `fc1d4513…`。测试日志本身未记录退出码；异常覆盖、进程终态与完整输入身份仍待独立复核。不据此消除共享工作区阻塞，不安装或授予跨平台资格。
+隔离局部证据（实施方报告，提交 `0b8deb4b96`）：以 `1f4129d306…` 的 archive 和本刀测试 overlay 在 `out/cx-w7-isolated-1793437777/snap` 独立副本运行；该目录位于仓库忽略的 `out/` 内，并非仓库外。其 `test.log` 两驱动均出现 `spawn-failure-*`、`coordinator-controller-clean`、release 行的 PASS，并以 `CX_HOST_RUN failed=0` 收尾。`inputs.sha` 记录 fs、驱动源码与测试 overlay 摘要，`toolchain.txt` 记录 gcc 11.4.0 和 clang 15.0.7；实施方另报告外置产品 sha `fc1d4513…`。测试日志本身未记录退出码；异常覆盖、进程终态与完整输入身份仍待独立复核。不据此消除共享工作区阻塞，不安装或授予跨平台资格。
 
 macOS、Windows、ARM 需对应宿主实跑后单列证据；只能写出构件或缺可用系统时标未验证。Windows 路径、`.exe`、CreateProcess 命令行转义与文件占用需要独立覆盖。保持六格 APE 的发布要求不等于本地 shell 包装已是 APE。
 
