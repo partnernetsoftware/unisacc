@@ -144,13 +144,13 @@
 1. `command -v bwrap`；若存在，运行 dry-run：
    `bwrap --unshare-all --die-with-parent --ro-bind SNAP /work --bind OUT /out --tmpfs /tmp --proc /proc --dev /dev --chdir /work sh -c 'touch /work/probe 2>/dev/null; test $? -ne 0 && touch /out/probe && test -f /out/probe'`
    同时验证 `/product` 只读可见、所需解释器/库可加载、宿主工作区路径不可见。全部成功→`ENFORCEMENT=bwrap-ro-bind`。
-2. 若无 bwrap，尝试 rootless mount namespace：
-   `unshare --user --map-root-user --mount sh -c 'mkdir -p /tmp/probe-snap /tmp/probe-out; mount --bind SNAP /tmp/probe-snap; mount -o remount,ro,bind /tmp/probe-snap; touch /tmp/probe-snap/x 2>/dev/null; test $? -ne 0; touch /tmp/probe-out/x'`
+2. 若无 bwrap，尝试 rootless mount namespace（含 private propagation）：
+   `unshare --user --map-root-user --mount --propagation private sh -c 'mkdir -p /tmp/probe-snap /tmp/probe-out; mount --bind SNAP /tmp/probe-snap; mount -o remount,bind,ro /tmp/probe-snap; touch /tmp/probe-snap/x 2>/dev/null; test $? -ne 0; touch /tmp/probe-out/x'`
    只有“只读 bind 拒绝写 + OUT 可写 + 宿主路径不可见”三项同时成立才记 `ENFORCEMENT=unshare-ro-bind`；单 `unshare --user --map-root-user true` 成功不算。
 3. 任一命令缺失/权限拒绝/挂载失败/无法验证隔离→`ENFORCEMENT=none`，本次 preflight UNKNOWN；不得退化为 chmod/permission-only 后称只读。
 4. 记录每条探针命令、退出码、mount 表（若可读）、产品 `file`/`ldd` 与所需只读绑定清单；探针失败不阻塞设计评审，但阻塞测量。
 
-本机当前观察（仅探针，不是 preflight）：`command -v bwrap` 退出1（未找到）；`unshare --user --map-root-user true` 退出0，只证明可建该用户命名空间，不证明 mount namespace/只读 bind/运行时挂载可用。因此当前 `ENFORCEMENT` 未定，测量必须 UNKNOWN，直到第 1 或第 2 条完整通过。
+本机当前观察（仅探针，不是 preflight）：`command -v bwrap` 退出1（未找到）；`unshare --user --map-root-user true` 退出0；另一次独立探针在自有 out/cx-ro-probe-FUiMLX 下用 `unshare --user --map-root-user --mount --propagation private` 对 bind 后 remount,bind,ro，触摸得到 `Read-only file system` 并打印 READONLY_WRITE_REFUSED、rc0。这只证明当前 Linux 用户+mount namespace 的只读 bind 可用；尚未证明运行 cx 工具所需解释器/库/产品依赖齐全、其他路径不可写/工作区不可见、快照合同完整。因此 `ENFORCEMENT` 仍不是完整通过，测量保持 UNKNOWN，直到第 1/2 条完整 dry-run（含依赖与隔离）通过。
 
 ## 14. 根分区与作用域
 
