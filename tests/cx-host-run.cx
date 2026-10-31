@@ -47,11 +47,43 @@ static void fixture(const char *dir) {
     tx_snprintf(p, sizeof p, "%s/sig15.cx", dir);
     write_text(p, "int main(void) { raise(15); return 0; }\n");
     tx_snprintf(p, sizeof p, "%s/barrier.cx", dir);
-    write_text(p, "int main(int argc, char **argv) { char tmp[512]; FILE *f; int i; if (argc < 3) return 3; snprintf(tmp, sizeof tmp, \"%s.tmp.%ld\", argv[1], (long)getpid()); f = fopen(tmp, \"w\"); if (!f) return 4; if (fprintf(f, \"[0]=<%s>\", argv[0]) < 0 || fclose(f) != 0) { remove(tmp); return 4; } if (rename(tmp, argv[1]) != 0) { remove(tmp); return 6; } for (i = 0; i < (argc > 3 ? atoi(argv[3]) : 2000); i++) { if (access(argv[2], 0) == 0) return 0; usleep(10000); } return 5; }\n");
+    write_text(p, "int main(int argc, char **argv) { char tmp[512]; FILE *f; int i; if (argc < 3) return 3; snprintf(tmp, sizeof tmp, \"%s.tmp.%ld\", argv[1], (long)getpid()); f = fopen(tmp, \"w\"); if (!f) return 4; if (fprintf(f, \"[0]=<%s>\", argv[0]) < 0 || fclose(f) != 0) { remove(tmp); return 4; } if (argc > 4 && strcmp(argv[4], \"nopublish\") == 0) remove(tmp); else if (rename(tmp, argv[1]) != 0) { remove(tmp); return 6; } if (argc > 5) { snprintf(tmp, sizeof tmp, \"%s.tmp.%ld\", argv[5], (long)getpid()); f = fopen(tmp, \"w\"); if (!f) return 4; if (fprintf(f, \"[0]=<%s>\", argv[0]) < 0 || fclose(f) != 0) { remove(tmp); return 4; } if (rename(tmp, argv[5]) != 0) { remove(tmp); return 6; } } for (i = 0; i < (argc > 3 ? atoi(argv[3]) : 2000); i++) { if (access(argv[2], 0) == 0) return 0; usleep(10000); } return 5; }\n");
     tx_snprintf(p, sizeof p, "%s/bad.cx", dir);
     write_text(p, "int main(void) { this is not C\n");
     tx_snprintf(p, sizeof p, "%s/declare.cx", dir);
     write_text(p, "int declared(void);\n");
+    tx_snprintf(p, sizeof p, "%s/coord.sh", dir);
+    write_text(p,
+      "#!/bin/sh\n"
+      "drv=$1; src=$2; dir=$3; tag=$4\n"
+      "r1=$dir/cr1-$tag; r2=$dir/cr2-$tag; gate=$dir/cgate-$tag\n"
+      "p1=$dir/cp1-$tag; p2=$dir/cp2-$tag; f1=$dir/cf1-$tag; f2=$dir/cf2-$tag\n"
+      "setsid -w sh -c 'echo $$ > \"$0\"; exec \"$1\" -run \"$2\" -- \"$3\" \"$4\" 2000 >\"$5\" 2>\"$6\"' \"$p1\" \"$drv\" \"$src\" \"$r1\" \"$gate\" \"$dir/c1o-$tag\" \"$dir/c1e-$tag\" &\n"
+      "setsid -w sh -c 'echo $$ > \"$0\"; exec \"$1\" -run \"$2\" -- \"$3\" \"$4\" 2000 nopublish \"$5\" >\"$6\" 2>\"$7\"' \"$p2\" \"$drv\" \"$src\" \"$r2\" \"$gate\" \"$f2\" \"$dir/c2o-$tag\" \"$dir/c2e-$tag\" &\n"
+      "n=0; while { [ ! -s \"$p1\" ] || [ ! -s \"$p2\" ]; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
+      "n=0; while { [ ! -f \"$r1\" ] || [ ! -f \"$r2\" ]; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
+      "pid1=$(cat \"$p1\" 2>/dev/null); pid2=$(cat \"$p2\" 2>/dev/null)\n"
+      "pg1=$(ps -o pgid= -p \"$pid1\" 2>/dev/null | tr -d ' '); pg2=$(ps -o pgid= -p \"$pid2\" 2>/dev/null | tr -d ' ')\n"
+      "badpg=0; [ -n \"$pid1\" ] && [ \"$pg1\" = \"$pid1\" ] || badpg=1; [ -n \"$pid2\" ] && [ \"$pg2\" = \"$pid2\" ] || badpg=1\n"
+      "timeout=1; [ -f \"$r1\" ] && [ -f \"$r2\" ] && timeout=0\n"
+      "k1=1; k2=1\n"
+      "if [ $timeout -eq 1 ]; then\n"
+      "  kill -TERM -\"$pg1\" 2>/dev/null; k1=$?\n"
+      "  kill -TERM -\"$pg2\" 2>/dev/null; k2=$?\n"
+      "  n=0; while { kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
+      "  if kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; then kill -KILL -\"$pg1\" 2>/dev/null; kill -KILL -\"$pg2\" 2>/dev/null; sleep 0.5; fi\n"
+      "fi\n"
+      "alive=0; { kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; } && alive=1\n"
+      "desc=0; pgrep -g \"$pg1\" >/dev/null 2>&1 && desc=1; pgrep -g \"$pg2\" >/dev/null 2>&1 && desc=1\n"
+      "clean=1\n"
+      "for f in \"$r1\" \"$f2\"; do\n"
+      "  [ -f \"$f\" ] || continue\n"
+      "  q=$(sed 's/^\\[0\\]=<//; s/>.*//' \"$f\")\n"
+      "  case \"$q\" in /tmp/cxcc-run*/prog) rm -f \"$q\"; rmdir \"${q%/prog}\" || clean=0;; *) clean=0;; esac\n"
+      "done\n"
+      "g=0; [ -e \"$gate\" ] && g=1\n"
+      "echo W7TIMEOUT=$timeout W7PG=$badpg W7KILL=$k1,$k2 W7ALIVE=$alive W7DESC=$desc W7CLEAN=$clean W7GATE=$g\n");
+    sy_chmod(p, 0755);
     tx_snprintf(p, sizeof p, "%s/rsp.txt", dir);
     { char body[512]; tx_snprintf(body, sizeof body, "-o %s/rsp-out\n", dir); write_text(p, body); }
 }
@@ -258,7 +290,7 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
         "( setsid -w %s -run %s/barrier.cx -- %s %s >%s/c2.out 2>%s/c2.err ) & b=$!; "
         "n=0; while [ ! -f %s ] || [ ! -f %s ]; do n=$((n+1)); [ $n -gt 200 ] && break; kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null || break; sleep 0.1; done; "
         "ok=0; if [ $n -le 200 ] && [ -f %s ] && [ -f %s ] && kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null; then "
-        "  : > %s; ok=1; else kill -TERM -- -$a -$b 2>/dev/null; fi; "
+        "  : > %s; ok=1; else kill -TERM $a $b 2>/dev/null; fi; "
         "wait $a; e1=$?; wait $b; e2=$?; echo W7R1:$e1; echo W7R2:$e2; echo W7OK:$ok",
         drv, dir, r1, gate, dir, dir, drv, dir, r2, gate, dir, dir, r1, r2, r1, r2, gate);
       o = 0; n = 0; rc = runsh(cmd, &o, &n);
@@ -288,6 +320,13 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
         mm_free(a); }
       mm_free(o);
     }
+
+    tx_snprintf(name, sizeof name, "%s.coordinator-timeout", tag);
+    tx_snprintf(cmd, sizeof cmd, "sh %s/coord.sh %s %s/barrier.cx %s %s 2>&1", dir, drv, dir, dir, tag);
+    o = 0; n = 0; rc = runsh(cmd, &o, &n);
+    ck(rc == 0 && tx_suffix(o, (long)n,
+         "W7TIMEOUT=1 W7PG=0 W7KILL=0,0 W7ALIVE=0 W7DESC=0 W7CLEAN=1 W7GATE=0\n", 68), name);
+    mm_free(o);
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
     v[0] = (char *)drv; tx_snprintf(p, sizeof p, "%s/plain.cx", dir); v[1] = p;
