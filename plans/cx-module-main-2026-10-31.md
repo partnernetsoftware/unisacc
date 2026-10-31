@@ -11,14 +11,13 @@ CX-M-2：库模块不得定义 main。当前三源（src/cxmod.c:652、cx/compil
 - 与 CX-M-2 字面合同冲突。
 （身份只能绑定各自实际执行产物；不跨替换假定。）
 
-## 真实根盘点（working tree，排除 out/archive/ujs）
-- apps/csih 24（其他车道，需其主人迁移）
-- tools 35（本仓工具，多数是生成/构造脚本）
-- tests 16（夹具/测试程序）
-- archive 2（不迁移）
-- src/release/examples/bench 0
-合计非 archive 75 个 tracked 文件同时含 module pragma 与 main。
+## 真实根盘点（枚举域 vs 报告域）
 
+- 枚举域：`git ls-files '*.cx'` 中排除 `out/`、`archive/`、`ujs/`；判定为“同一文件同时有 `^#pragma unisa module` 行与 `int main`”。
+- 报告域：`archive/` 不迁移，`ujs/` 不属本树；csih 为独立车道。固定输入为 working tree 当前文件，清单见 `plans/cx-module-main-inventory-2026-10-31.tsv`（列 path/module/used_by/lane）。
+- 清单当前 28 行：apps/csih 23、tests 5；其中 used_by>0 的 5 个（均在 csih）。先前口头“tools 35”是宽 grep 命中注释/别名的错误计数，已废弃，以 TSV 为准。
+- 每个文件需先用 `tools/refactor.cx sites`/`use` 引用核验：used_by>0 的不能直接删 module 行；used_by=0 的还须核是否多根调用/外部合约，再逐文件构建验证。不得把“含 main”无条件当纯独立入口。
+- 三源 main 检查改动只增加投影后的拒绝，不改变 cxm_norm、路径解析、realpath 去重或 canonical 选择；需在提案验收中单独证明。
 ## 修复方案（待核准）
 1. 三源在扫描/投影后，对**所有**声明了 `module` 的 .cx 单元检查顶层 main 定义，不再受 `cxm_lib` 限制；诊断统一为 `module NAME defines main (a library module)`。
 2. 已被 use 的模块仍拒绝；位置/条件/未知 pragma 既有检查不变。
