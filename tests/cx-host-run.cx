@@ -140,8 +140,13 @@ static void clean_temp_record(const char *file, int *clean) {
 
 static void drain_fd(int fd) {
     char b[256];
+    long budget = 65536;
     if (fd < 0) return;
-    while (sy_readable(fd, 0) > 0) { if (sy_read(fd, b, sizeof b) <= 0) break; }
+    while (budget > 0 && sy_readable(fd, 0) > 0) {
+        long n = sy_read(fd, b, sizeof b);
+        if (n <= 0) break;
+        budget -= n;
+    }
     sy_close(fd);
 }
 
@@ -192,10 +197,10 @@ static void coordinator_spawn_failure(const char *drv, const char *tag, const ch
         if (pg1 == pid1) kterm = sy_killpg(pg1, 15);
         else kterm = sy_signal(pid1, 15);
         s = (kterm == 0) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
-        if (s <= 0 && pg1 == pid1) {
+        if (s == 0 && pg1 == pid1) {
             kkill = sy_killpg(pg1, 9);
             s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
-        } else if (s <= 0) {
+        } else if (s == 0) {
             kkill = sy_signal(pid1, 9);
             s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
         }
@@ -329,7 +334,7 @@ static void coordinator_case(const char *drv, const char *tag, const char *dir) 
     ck(k1 == 0 && k2 == 0, "coordinator-kill");
     ck(s1 == 1 && s2 == 1 && er1 == 0 && er2 == 0, "coordinator-reaped");
     ck(g1 == 0 && g2 == 0, "coordinator-groups-gone");
-    ck(clean == 1, "coordinator-clean");
+    ck(clean == 1, "coordinator-controller-clean");
     ck(path_state(gate) == 0, "coordinator-no-gate");
     sy_printf("COORD\tc1=%d sg1=%d c2=%d sg2=%d\n", c1, sg1, c2, sg2);
 }
@@ -701,6 +706,7 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
     }
 
     coordinator_case(drv, tag, dir);
+    coordinator_spawn_failure(drv, tag, dir);
     coordinator_release_case(drv, tag, dir);
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
