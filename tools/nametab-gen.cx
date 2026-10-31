@@ -14,10 +14,13 @@
  *   module   the module name; the files are cx/compiler/<module>.cx and, with rtprefix, cx/runtime/<module>.cx
  *   prefix   the compiler-side prefix: <prefix>_count(void) and <prefix>_at(int index, <one out-pointer per field>)
  *   rtprefix the runtime-side prefix (same table, its own copy), or - for no runtime side
- *   source   a TSV fact table (repo path); lines starting with # and empty lines are skipped
+ *   source   a TSV fact table (repo path); lines starting with # and empty lines are skipped.  PATH@SECTION takes
+ *            only the rows under the "@SECTION<TAB>..." header up to the next '@' line (their first column is empty,
+ *            so data starts at column 1); PATH@ takes the rows before the first '@' header.  Nested cells (JSON lists,
+ *            objects) are kept as their text, up to 4095 bytes
  *   fields   comma list of NAME=COL[:TRANSFORM][#i]: COL is a 0-based column; #i makes the field a long long (64
  *            bits on every target; else const char *); TRANSFORM is unquote (a JSON string: drop the surrounding
- *            double quotes, decode \\ and \"), after/ (text after the last '/'), before/ (text before the first '/')
+ *            double quotes, decode \\ and \"), after<c> (text after the last c, e.g. after/ or after=), before<c> (text before the first c)
  *   mode     all (every row, file order) or distinct (first-seen rows by the whole field tuple)
  *   filter   - or COL=VALUE or COL!=VALUE or COL~TEXT (the raw column contains TEXT)
  *   note     one sentence for the module comment, or -
@@ -38,7 +41,8 @@ static const char *g_spec = "tools/nametabs.tsv", *g_out = "cx";   /* --spec FIL
 #define MAXF 6
 #define MAXROWS 4096
 
-typedef struct { char name[32]; int col, is_int, tf; } Field;   /* tf: 0 none, 1 unquote, 2 after/, 3 before/ */
+typedef struct { char name[32]; int col, is_int, tf; char sep; } Field;   /* tf: 0 none, 1 unquote, 2 after<sep>, 3 before<sep> */
+#define CELL 4096   /* one cell, e.g. a nested JSON list kept as text */
 typedef struct { char module[64], prefix[32], rtprefix[32], source[256], mode[16], filter[128], note[512]; Field f[MAXF]; int nf; } Spec;
 typedef struct { char *p; long n, cap; } Out;
 
@@ -69,7 +73,7 @@ static int parse_fields(const char *s, long n, Spec *sp) {
         f->tf = 0;
         if (colon >= 0) {
             const char *t = s + colon + 1; long tn = e - colon - 1;
-            if (tx_same(t, tn, "unquote", 7)) f->tf = 1; else if (tx_same(t, tn, "after/", 6)) f->tf = 2; else if (tx_same(t, tn, "before/", 7)) f->tf = 3; else return -1;
+            if (tx_same(t, tn, "unquote", 7)) f->tf = 1; else if (tn == 6 && tx_prefix(t, tn, "after", 5)) { f->tf = 2; f->sep = t[5]; } else if (tn == 7 && tx_prefix(t, tn, "before", 6)) { f->tf = 3; f->sep = t[6]; } else return -1;
         }
         f->is_int = hash >= 0 && tx_same(s + hash, c - hash, "#i", 2);
         if (hash >= 0 && !f->is_int) return -1;
@@ -116,8 +120,8 @@ static int value(const char *s, long n, const Field *f, char *v, long cap) {
         v[o] = 0;
         return 0;
     }
-    else if (f->tf == 2) { long r = tx_rchr(s + off, len, '/'); if (r >= 0) { off += r + 1; len -= r + 1; } }
-    else if (f->tf == 3) { long c = tx_chr(s + off, len, '/'); if (c >= 0) len = c; }
+    else if (f->tf == 2) { long r = tx_rchr(s + off, len, f->sep); if (r >= 0) { off += r + 1; len -= r + 1; } }
+    else if (f->tf == 3) { long c = tx_chr(s + off, len, f->sep); if (c >= 0) len = c; }
     return tx_copy(v, cap, s + off, len) ? -1 : 0;
 }
 
@@ -150,19 +154,29 @@ static void cstr(Out *o, const char *v) {   /* a C string literal */
 }
 
 static void gen(const Spec *sp, const char *prefix, Out *o) {
-    size_t n; char *t = cx_read(sp->source, &n), line[512]; long at = 0; int rows = 0, k, r;
+    /* SOURCE may be PATH@SECTION: only the rows after the "@SECTION<TAB>..." header line, up to the next line
+       starting with '@' (PATH@ alone: the rows before the first '@' header); columns count as written */
+    char path[256], want[64], cur[64]; long sl = tx_len(sp->source, 256), atc = tx_rchr(sp->source, sl, '@'); int sectioned = atc > 0;
+    size_t n; char *t, line[512]; long at = 0; int rows = 0, k, r;
     static char seen[MAXROWS][256]; int nseen = 0;
+    static char v[MAXF][CELL];
     Out body = {0, 0, 0};
-    if (!t) die("cannot read source", sp->source);
+    if (tx_copy(path, sizeof path, sp->source, sectioned ? atc : sl) || (sectioned && tx_copy(want, sizeof want, sp->source + atc + 1, sl - atc - 1))) die("bad source", sp->source);
+    cur[0] = 0;
+    t = cx_read(path, &n);
+    if (!t) die("cannot read source", path);
     while (at < (long)n) {
         long e = tx_chr(t + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e; const char *s = t + at;
-        char v[MAXF][256], key[256]; long kn = 0;
+        char key[256]; long kn = 0;
         at += l + 1;
-        if (!l || s[0] == '#' || !keep(s, l, sp->filter)) continue;
+        if (!l || s[0] == '#') continue;
+        if (sectioned && s[0] == '@') { long tb = tx_chr(s, l, '\t'); if (tx_copy(cur, sizeof cur, s + 1, (tb < 0 ? l : tb) - 1)) die("section name", path); continue; }
+        if (sectioned && !tx_eqz(cur, want)) continue;
+        if (!keep(s, l, sp->filter)) continue;
         for (k = 0; k < sp->nf; k++) if (value(s, l, &sp->f[k], v[k], sizeof v[k])) die("missing column in", sp->source);
         if (tx_eqz(sp->mode, "distinct")) {
             key[0] = 0;
-            for (k = 0; k < sp->nf; k++) { long vn = tx_len(v[k], 256); if (kn + vn + 2 >= (long)sizeof key) die("key too long", sp->module); tx_copy(key + kn, sizeof key - kn, v[k], vn); kn += vn; key[kn++] = '\t'; key[kn] = 0; }
+            for (k = 0; k < sp->nf; k++) { long vn = tx_len(v[k], CELL); if (kn + vn + 2 >= (long)sizeof key) die("key too long", sp->module); tx_copy(key + kn, sizeof key - kn, v[k], vn); kn += vn; key[kn++] = '\t'; key[kn] = 0; }
             for (r = 0; r < nseen; r++) if (tx_eqz(seen[r], key)) break;
             if (r < nseen) continue;
             if (nseen == MAXROWS) die("too many rows", sp->module);
@@ -207,7 +221,7 @@ static int gaps(const Spec *sp, int ns) {
         at += pl + 1;
         if (!pl || tx_find(p, pl, "-cases", 6) >= 0 || tx_find(p, pl, "-result", 7) >= 0 || tx_find(p, pl, "-manifest", 9) >= 0 ||
             tx_find(p, pl, "-byte", 5) >= 0 || tx_find(p, pl, "-fresh", 6) >= 0 || tx_find(p, pl, "-template", 9) >= 0) continue;
-        for (i = 0; i < ns && !hit; i++) hit = tx_same(sp[i].source, tx_len(sp[i].source, 256), p, pl);
+        for (i = 0; i < ns && !hit; i++) hit = tx_prefix(sp[i].source, tx_len(sp[i].source, 256), p, pl) && (sp[i].source[pl] == 0 || sp[i].source[pl] == '@');
         if (!hit && gn) hit = tx_find(gens, (long)gn, p, pl) >= 0;
         if (!hit) { sy_printf("GAP\t%.*s\n", (int)pl, p); n++; }
     }
