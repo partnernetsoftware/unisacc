@@ -220,10 +220,18 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
       tx_snprintf(script, sizeof script, "%s/%s", fd, cc);
       tx_snprintf(started, sizeof started, "%s/fake-%s.started", dir, cc);
       tx_snprintf(cmd, sizeof cmd,
-                  "STARTED=%s MARK=%s.mark2 PATH=%s:$PATH %s -run -I @%s/rsp.txt %s/plain.cx 2>&1; echo $?",
+                  "STARTED=%s MARK=%s.mark2 PATH=%s:$PATH %s -run -I @%s/rsp.txt %s/plain.cx 2>&1; echo W7RC:$?",
                   started, started, fd, drv, dir, dir);
       o = 0; n = 0; rc = runsh(cmd, &o, &n);
-      ck(rc == 0 && has(o, n, "response file") && has(o, n, "2") && sy_exists(started) == 0, name);
+      ck(rc == 0 && has(o, n, "response file") && tx_suffix(o, (long)n, "W7RC:2\n", 7) &&
+         sy_exists(started) == 0, name);
+      mm_free(o);
+      tx_snprintf(cmd, sizeof cmd,
+                  "STARTED=%s MARK=%s.mark3 PATH=%s:$PATH %s -run -include @%s/rsp.txt %s/plain.cx 2>&1; echo W7RC:$?",
+                  started, started, fd, drv, dir, dir);
+      o = 0; n = 0; rc = runsh(cmd, &o, &n);
+      ck(rc == 0 && has(o, n, "response file") && tx_suffix(o, (long)n, "W7RC:2\n", 7) &&
+         sy_exists(started) == 0, "response-as-include-value");
       mm_free(o);
     }
 
@@ -288,8 +296,17 @@ int main(void) {
     char *o = 0; size_t n = 0;
     int rc;
     char gbin[256], cbin[256];
-    tx_snprintf(dir, sizeof dir, "out/cx-host-run-%ld", (long)sy_pid());
-    { char cmd[512]; tx_snprintf(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s", dir, dir); runsh(cmd, 0, 0); }
+    { int tryn, made = 0;
+      for (tryn = 0; tryn < 100 && !made; tryn++) {
+          int rc2;
+          tx_snprintf(dir, sizeof dir, "out/cx-host-run-%ld-%d", (long)sy_pid(), tryn);
+          rc2 = sy_mkdir(dir, 0700);
+          if (rc2 == 0) made = 1;
+          else if (rc2 != -EEXIST) break;
+      }
+      ck(made, "exclusive-test-directory");
+      if (!made) { sy_printf("CX_HOST_RUN\tfailed=%d\n", failed + 1); return 1; }
+    }
     fixture(dir);
     rc = build_driver("gcc", "gcc_cx", dir, gbin, sizeof gbin);
     ck(rc == 0, "build-gcc-driver");
