@@ -19,3 +19,4 @@
 | `-run` 的用户程序在地址限制下 malloc 失败 | 用户程序在 `ulimit -v` 限制下分配失败时，运行时把 mmap 的 -ENOMEM 当成地址，程序崩溃（退出 139）而不是看到 NULL；分配器在包里的 `stdlib.h`（`_unisa_map`），修它要新包 | C44-MALLOC-01 |
 | `-Werror` | 旗标被解析但没人读，警告仍是警告，退出码 0 | C44-WERROR-01 |
 | 独立单流容器 | 非产品构建，0.0.43 不随发；每流行为通过产品的路线覆盖 | C44-STREAM-CONTAINER-01 |
+| 阶段位置格 | Darwin carry、Windows gate 保存/恢复、ARM narrowing 不在产品镜像里；`-S` 拒绝 Mach-O/COFF；没有独立整镜像编码器 | C44-STAGE-POS-01 |
