@@ -1,0 +1,206 @@
+/* tests/elf-x86-image.cx -- product lnx/x86_64 image, two checks.
+ *
+ *   sh ./unisacc.com tests/elf-x86-image.cx
+ *
+ * Oracles are Intel encodings, not bytes copied from a previous image:
+ *   mov eax, 7; ret          B8 07 00 00 00 C3
+ *   call rel32               E8 rel32, rel32 = target - (next)
+ *   jcc rel8                 70+cc rel8
+ *   mov r32, [rip+disp32]    [REX] 8B modrm=00 reg rm=101 disp32
+ * k() and int g=7 live in one unit. main, in the other, calls k and reads g.
+ * The call must stay a 5-byte E8 even when its displacement fits in a signed
+ * byte, and a short jcc must sit just before that call. mov eax,7 may sit a
+ * few bytes after the call target (the prologue), not flush against ret.
+ * elf.pos.relocations is not asserted here: the linked RW PT_LOAD has a
+ * zero file size, so the initializer is not in the file. Prints ELF_X86
+ * once. Exit 0 only when nothing failed.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static char rec[4096];
+static long recn;
+static int assertions, failures;
+static unsigned char img[1048576];
+
+static void die(const char *s) {
+    sy_eprintf("elf-x86-image: REFUSE %s\n", s);
+    sy_exit(2);
+}
+
+static void ck(int ok, const char *name) {
+    char line[192];
+    long n;
+    assertions++;
+    if (ok) sy_printf("PASS\telf-x86-image.%s\n", name);
+    else { failures++; sy_printf("FAIL\telf-x86-image.%s\n", name); }
+    if (cx_fmt(line, sizeof line, "%s\telf-x86-image.%s\n", ok ? "PASS" : "FAIL", name)) die("rec line");
+    n = tx_len(line, (long)sizeof line);
+    if (n < 0 || recn + n >= (long)sizeof rec) die("rec bound");
+    if (cx_fmt(rec + recn, (size_t)((long)sizeof rec - recn), "%s", line)) die("rec copy");
+    recn += n;
+}
+
+static void write_new(const char *path, const void *bytes, long n) {
+    int fd = sy_open_new(path, 0644);
+    if (fd < 0) die("create");
+    if (sy_write_all(fd, bytes, n) || sy_close(fd)) die("write");
+}
+
+static unsigned u32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static unsigned long long u16(const unsigned char *p) {
+    return (unsigned long long)p[0] | ((unsigned long long)p[1] << 8);
+}
+
+static unsigned long long u64(const unsigned char *p) {
+    unsigned long long v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+static int span_ok(long n, unsigned long long at, unsigned long long len) {
+    return at <= (unsigned long long)n && len <= (unsigned long long)n - at;
+}
+
+static int mov_eax7(const unsigned char *b, long n, long at) {
+    return at >= 0 && at + 5 <= n && b[at] == 0xB8 && b[at + 1] == 7 &&
+           b[at + 2] == 0 && b[at + 3] == 0 && b[at + 4] == 0;
+}
+
+/* The call lands on the function entry. mov eax,7 follows the prologue. */
+static int call_hits_k(const unsigned char *b, long n, long tgt) {
+    long d;
+    for (d = 0; d <= 16; d++) if (mov_eax7(b, n, tgt + d)) return 1;
+    return 0;
+}
+
+static void scan(const unsigned char *b, long n, unsigned long long off, unsigned long long va,
+                 unsigned long long filesz, int *call_near, int *short_jcc) {
+    long i, end;
+    if (!span_ok(n, off, filesz)) return;
+    end = (long)off + (long)filesz;
+    for (i = (long)off; i + 5 <= end; i++) {
+        long rel, tgt_off, k;
+        unsigned long long pc;
+        if (b[i] != 0xE8) continue;
+        rel = (int)u32(b + i + 1);
+        pc = va + (unsigned long long)(i - (long)off);
+        tgt_off = i + 5 + rel;
+        if (!call_hits_k(b, n, tgt_off)) continue;
+        if (rel < -128 || rel > 127) continue;
+        *call_near += 1;
+        for (k = i - 32; k < i; k++) {
+            if (k < (long)off) continue;
+            if (b[k] >= 0x70 && b[k] <= 0x7F) *short_jcc += 1;
+        }
+        (void)pc;
+    }
+}
+
+static void decode(long n) {
+    unsigned long long ph, phn, entry, i;
+    unsigned long long rx_off = 0, rx_va = 0, rx_fs = 0;
+    int rx = 0, rw = 0, call_near = 0, short_jcc = 0, entry_in = 0;
+    ck(n >= 64 && img[0] == 0x7f && img[1] == 'E' && img[2] == 'L' && img[3] == 'F' &&
+       img[4] == 2 && img[5] == 1 && img[6] == 1, "elf64-le");
+    if (n < 64) return;
+    ck(u16(img + 16) == 2, "et-exec");
+    ck(u16(img + 18) == 62, "em-x86-64");
+    ph = u64(img + 32);
+    phn = u16(img + 56);
+    entry = u64(img + 24);
+    ck(u16(img + 54) == 56 && phn > 0 && phn <= 64 && span_ok(n, ph, phn * 56), "phdr-bounds");
+    if (!(phn > 0 && phn <= 64 && span_ok(n, ph, phn * 56))) return;
+    for (i = 0; i < phn; i++) {
+        const unsigned char *q = img + (long)ph + (long)i * 56;
+        unsigned long long type = u32(q), flags = u32(q + 4);
+        unsigned long long off = u64(q + 8), va = u64(q + 16), fs = u64(q + 32);
+        if (type != 1) continue;
+        if (flags == 5) { rx++; rx_off = off; rx_va = va; rx_fs = fs; if (entry >= va && entry - va < fs) entry_in = 1; }
+        if (flags == 6) rw++;
+    }
+    ck(rx == 1 && rx_va == 0x400000, "text-vaddr");
+    ck(rw == 1, "one-rw-load");
+    ck(entry_in, "entry-in-text");
+    scan(img, n, rx_off, rx_va, rx_fs, &call_near, &short_jcc);
+    ck(call_near > 0, "call-stays-rel32");
+    ck(short_jcc > 0, "short-jcc");
+}
+
+static int product(char **args, const char *tag) {
+    char *v[20];
+    char why[512];
+    np_result r;
+    int n = 0, i;
+    v[n++] = bound; v[n++] = "12"; v[n++] = "env"; v[n++] = "-u"; v[n++] = "UNISA_CONTAINER";
+    v[n++] = "sh"; v[n++] = com;
+    for (i = 0; args[i]; i++) { if (n >= 19) die("argv"); v[n++] = args[i]; }
+    v[n] = 0;
+    if (np_run(v, root, 0, 16, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, tag);
+    if (r.rc != 0 && r.err && r.errn > 0) sy_write_all(2, r.err, (long)r.errn);
+    np_free(&r);
+    return failures;
+}
+
+int main(void) {
+    static const char k_text[] = "int g=7;int k(void){return 7;}\n";
+    static const char m_text[] =
+        "extern int g;int k(void);int main(int argc){if(argc)return k();return g;}\n";
+    char kc[4600], mc[4600], ko[4600], mo[4600], out[4600], res[4800];
+    char *ak[9], *am[9], *al[5];
+    int pid = sy_pid();
+    long kn = tx_len(k_text, 80), mn = tx_len(m_text, 160);
+    int fd, before;
+    long n;
+    if (kn < 0 || mn < 0) die("source length");
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/elfx86-%d", root, pid)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) != 0) die("work exists");
+    if (sy_mkdir(work, 0700)) die("mkdir work");
+    if (cx_fmt(kc, sizeof kc, "%s/k.c", work) || cx_fmt(mc, sizeof mc, "%s/m.c", work) ||
+        cx_fmt(ko, sizeof ko, "%s/k.o", work) || cx_fmt(mo, sizeof mo, "%s/m.o", work) ||
+        cx_fmt(out, sizeof out, "%s/m.elf", work)) die("leaf");
+    write_new(kc, k_text, kn);
+    write_new(mc, m_text, mn);
+    ak[0] = "-O0"; ak[1] = "-c"; ak[2] = "-funit"; ak[3] = "-b"; ak[4] = "lnx/x86_64";
+    ak[5] = kc; ak[6] = "-o"; ak[7] = ko; ak[8] = 0;
+    am[0] = "-O0"; am[1] = "-c"; am[2] = "-funit"; am[3] = "-b"; am[4] = "lnx/x86_64";
+    am[5] = mc; am[6] = "-o"; am[7] = mo; am[8] = 0;
+    before = failures;
+    product(ak, "compile-k");
+    if (failures == before) product(am, "compile-m");
+    if (failures == before) {
+        al[0] = ko; al[1] = mo; al[2] = "-o"; al[3] = out; al[4] = 0;
+        product(al, "link");
+    }
+    if (failures == before) {
+        fd = sy_open_read(out);
+        if (fd < 0) die("open image");
+        n = sy_reg_size(fd);
+        ck(n >= 64 && n <= (long)sizeof img, "image-size");
+        if (n >= 64 && n <= (long)sizeof img) {
+            if (sy_read_full(fd, img, n)) die("read image");
+            if (sy_close(fd)) die("close image");
+            decode(n);
+        } else if (sy_close(fd)) die("close image");
+    }
+    if (cx_fmt(res, sizeof res, "%s/results.tsv", work)) die("results");
+    write_new(res, rec, recn);
+    sy_printf("ELF_X86\tassertions=%d\tfailed=%d\treceipt=out/elfx86-%d/results.tsv\n",
+              assertions, failures, pid);
+    sy_exit(failures ? 1 : 0);
+    return 1;
+}
