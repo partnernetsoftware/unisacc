@@ -1,0 +1,106 @@
+/* tests/loader-faults.cx -- the package loader refuses a damaged package by name, on every route.
+ *
+ *   sh ./unisacc.com tests/loader-faults.cx            (from the repo root; works in out/loader-faults-batch/)
+ *
+ * Each case copies the installed unisacc.com and damages ONE thing in its P3 package:
+ *   trailing-package-data  one extra byte after the last row, with the UNIPKG1 footer length rewritten to include it
+ *   m-stored-length-out-of-range  the first model row's stored length digits become 9999...
+ *   m-raw-length-out-of-range     the same row's raw length becomes 9999999
+ *   f-length-garbled       the first resource row's key length is not a number
+ * The damaged copy is run on -run, -S, -c -funit and five -b TARGET routes (lnx/arm64, osx/arm64, osx/x86_64,
+ * win/x86_64, win/arm64).  Every run must exit nonzero (not 0, not the fixture's 7, not the 142 deadline), print nothing on
+ * stdout, name the refusal with "model driver:" on stderr and leave no output file.  An intact copy first proves the
+ * harness: -run of the fixture exits 7.
+ * Prints PASS/FAIL per case and LOADER_FAULTS<TAB>assertions=N<TAB>failed=M; exit 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+static unsigned char *img; static long imgn, po, pl, fo;
+
+static void die(const char *s) { sy_eprintf("loader-faults: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\tloader-faults.%s\n", name); else { failures++; sy_printf("FAIL\tloader-faults.%s\n", name); } }
+
+/* write work/NAME.com: the installed file; trailing != 0 inserts one byte before the footer and fixes its length */
+static void variant(const char *name, int trailing, long patch_at, const char *patch, long patchn) {
+    long total = imgn + (trailing ? 1 : 0), i; unsigned char *o = mm_alloc(total + 1); char p[4600];
+    if (!o) die("alloc");
+    mm_copy(o, total, img, fo);
+    if (trailing) { o[fo] = 'x'; mm_copy(o + fo + 1, 16, img + fo, 16); for (i = 0; i < 8; i++) o[fo + 1 + 8 + i] = (unsigned char)((pl + 1) >> (8 * i)); }
+    else mm_copy(o + fo, 16, img + fo, 16);
+    if (patchn) mm_copy(o + po + patch_at, patchn, patch, patchn);
+    if (cx_fmt(p, sizeof p, "%s/%s.com", work, name) || cx_write(p, (char *)o, (size_t)total)) die("write");
+    sy_chmod(p, 0755); mm_free(o);
+}
+static long row(const char *tag) { long at = tx_find((const char *)img + po, pl, tag, 3); if (at < 0) die("package row not found"); return at + 3; }   /* first byte of the first length field */
+
+/* first byte of the raw-length field (the second number) of the first M row */
+static long rawfield(void) { long at = row("\nM "); while (img[po + at] != ' ') at++; return at + 1; }
+
+/* COM with ARGS under tools/bound; returns the result */
+static np_result run(const char *name, char **args) {
+    char *v[24], cp[4600], why[1024]; int n = 0, k; np_result r;
+    if (cx_fmt(cp, sizeof cp, "%s/%s.com", work, name)) die("path");
+    v[n++] = bound; v[n++] = "20"; v[n++] = "sh"; v[n++] = cp;
+    for (k = 0; args[k] && n < 23; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, 0, 40, &r, why, sizeof why)) die(why);
+    return r;
+}
+
+int main(void) {
+    char p[4600]; int c, rt; size_t sn; np_result r;
+    static const char *names[] = {"trailing-package-data", "m-stored-length-out-of-range", "m-raw-length-out-of-range", "f-length-garbled"};
+    static const char *rn[] = {"run", "S", "c-funit", "o-lnx-arm64", "o-osx-arm64", "o-osx-x86_64", "o-win-x86_64", "o-win-arm64"};
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/loader-faults-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work");
+    img = (unsigned char *)cx_read(com, &sn); imgn = (long)sn;
+    if (!img || imgn < 16 || tx_find((const char *)img + imgn - 16, 8, "UNIPKG1\n", 8) != 0) die("no UNIPKG1 footer in the installed product");
+    for (c = 7, pl = 0; c >= 0; c--) pl = (pl << 8) | img[imgn - 8 + c];
+    fo = imgn - 16; po = fo - pl; if (pl <= 0 || po < 0) die("footer length");
+    if (cx_fmt(p, sizeof p, "%s/ok.c", work) || cx_write(p, "int main(void){return 7;}\n", 26)) die("fixture");
+
+    variant("intact", 0, 0, "", 0);
+    {   char *a[] = {"-run", "ok.c", 0}; r = run("intact", a); ck(r.rc == 7, "control-intact-copy-exits-7"); np_free(&r); }
+
+    variant(names[0], 1, 0, "", 0);
+    variant(names[1], 0, row("\nM "), "9999", 4);
+    variant(names[2], 0, rawfield(), "9999999", 7);
+    variant(names[3], 0, row("\nF "), "z", 1);
+
+    for (c = 0; c < 4; c++) {
+        char *r0[] = {"-run", "ok.c", 0};
+        char *r1[] = {"-O0", "-b", "lnx/x86_64", "-S", "ok.c", "-o", "fault.out", 0};
+        char *r2[] = {"-O0", "-b", "lnx/x86_64", "-c", "-funit", "ok.c", "-o", "fault.out", 0};
+        char *r3[] = {"-O0", "-b", "lnx/arm64", "ok.c", "-o", "fault.out", 0};
+        char *r4[] = {"-O0", "-b", "osx/arm64", "ok.c", "-o", "fault.out", 0};
+        char *r5[] = {"-O0", "-b", "osx/x86_64", "ok.c", "-o", "fault.out", 0};
+        char *r6[] = {"-O0", "-b", "win/x86_64", "ok.c", "-o", "fault.out", 0};
+        char *r7[] = {"-O0", "-b", "win/arm64", "ok.c", "-o", "fault.out", 0};
+        char **routes[8]; char name[96]; int bad = 0;
+        routes[0] = r0; routes[1] = r1; routes[2] = r2; routes[3] = r3; routes[4] = r4; routes[5] = r5; routes[6] = r6; routes[7] = r7;
+        for (rt = 0; rt < 8; rt++) {
+            char op[4600]; sy_stat_t st; int fail;
+            if (cx_fmt(op, sizeof op, "%s/fault.out", work)) die("path");
+            sy_unlink(op);
+            r = run(names[c], routes[rt]);
+            fail = r.rc == 0 || r.rc == 7 || r.rc == 142 || r.outn != 0 || tx_find(r.err, (long)r.errn, "model driver:", 13) < 0 || sy_lstat(op, &st) != -ENOENT;
+            if (fail) { bad++; sy_printf("  %s on %s: rc=%d out=%zu err=%.60s\n", names[c], rn[rt], r.rc, (size_t)r.outn, r.err ? r.err : ""); }
+            np_free(&r);
+        }
+        if (cx_fmt(name, sizeof name, "%s-refused-by-name-on-all-eight-routes", names[c])) die("name");
+        ck(!bad, name);
+    }
+    sy_printf("LOADER_FAULTS\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
