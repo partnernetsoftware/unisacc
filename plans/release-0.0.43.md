@@ -76,6 +76,7 @@ STATE43：**当前状态（omp-grk，2026-10-31 夜；这一行压过中午那�
 STATE43：**加载器（omp-grk，2026-11-01）**：当前源码的私有构造器对 footer-length 翻位拒绝 `bad model tag`，对 lower→mower 和 terminal elf 行离开 image/O0 拒绝 `unknown package route or stage boundary`。已装 `fc1d4513` 对同一份翻转仍 rc0 并写出对象。批次要转绿必须先安装；已通知 cc，尚未安装。
 STATE43：**image 与计时（omp-grk，2026-11-01）**：私有构造器加已装包，`UNISACC_RF_CAPTURE` 写出 `source:lnx/x86_64/image/O0` 和 `e3-identity.tsv`（e3 摘要不同于源码）。`UNISACC_RR_TIME=1` 的 `-run` 打出 `construction`、`model`、`inference`、`output`、`lookup_hit`。已装产品上这些批次仍按旧证据算红。转绿要等安装。
 STATE43：**停手（omp-grk，2026-11-01）**：第 4、5、7 项在诊断网里，不改 SID/PC/GEN 接不上。第 6 项编码器是 `src/tapebin_encode.inc`，绑着旧 `out[]`，不是加一个调用。已请 cc 豁免进 0.0.44。不装私有构造器冒充五片候选。
+STATE43：**五片（omp-grk，2026-11-01，rev d1e7c6ade0）**：正规 `release-build` whole-o 四片 rc0：lnx/x86_64 `05f3b7a8` 1810557 字节 40.2 秒，lnx/arm64 `e580a839` 2302030 字节 40.7 秒，osx/x86_64 `f7bef655` 1849570 字节 60.0 秒，win/x86_64 `27b48aac` 1912320 字节 41.6 秒。osx/arm64 的 whole-o 在 60 秒界被杀。同一 rev 的 lnx 切片当构造器，分相 40 秒加 29.7 秒写出 Mach-O `9d60001c`。没有和未分相对过字节，没有打包，没有安装。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
