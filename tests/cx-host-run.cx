@@ -46,6 +46,8 @@ static void fixture(const char *dir) {
     write_text(p, "int main(void) { return 143; }\n");
     tx_snprintf(p, sizeof p, "%s/sig15.cx", dir);
     write_text(p, "int main(void) { raise(15); return 0; }\n");
+    tx_snprintf(p, sizeof p, "%s/barrier.cx", dir);
+    write_text(p, "int main(int argc, char **argv) { FILE *f; int i; if (argc < 3) return 3; f = fopen(argv[1], \"w\"); if (!f) return 4; fprintf(f, \"[0]=<%s>\", argv[0]); fclose(f); for (i = 0; i < 2000; i++) { if (access(argv[2], 0) == 0) return 0; usleep(10000); } return 5; }\n");
     tx_snprintf(p, sizeof p, "%s/bad.cx", dir);
     write_text(p, "int main(void) { this is not C\n");
     tx_snprintf(p, sizeof p, "%s/declare.cx", dir);
@@ -245,22 +247,27 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
       mm_free(o);
     }
 
-    tx_snprintf(name, sizeof name, "%s.concurrent-launch-clean", tag);
-    tx_snprintf(cmd, sizeof cmd,
-             "( %s -run %s/args.cx -- one >%s/c1.out 2>/dev/null ) & a=$!; "
-             "( %s -run %s/args.cx -- two >%s/c2.out 2>/dev/null ) & b=$!; "
-             "wait $a; r1=$?; wait $b; r2=$?; echo W7R1:$r1; echo W7R2:$r2",
-             drv, dir, dir, drv, dir, dir);
-    o = 0; n = 0; rc = runsh(cmd, &o, &n);
-    { size_t on = n; char *a, *b; size_t an = 0, bn = 0;
-      tx_snprintf(p, sizeof p, "%s/c1.out", dir);
-      a = cx_read(p, &an);
-      tx_snprintf(q, sizeof q, "%s/c2.out", dir); b = cx_read(q, &bn);
-      ck(rc == 0 && tx_suffix(o, (long)on, "W7R1:0\nW7R2:0\n", 14) &&
-         a && b && has(a, an, "<one>") && has(b, bn, "<two>") &&
-         gone_temp(a, an) && gone_temp(b, bn), name);
-      mm_free(a); mm_free(b); }
-    mm_free(o);
+    tx_snprintf(name, sizeof name, "%s.concurrent-barrier-clean", tag);
+    { char r1[256], r2[256], gate[256];
+      tx_snprintf(r1, sizeof r1, "%s/w7r1", dir);
+      tx_snprintf(r2, sizeof r2, "%s/w7r2", dir);
+      tx_snprintf(gate, sizeof gate, "%s/w7gate", dir);
+      tx_snprintf(cmd, sizeof cmd,
+        "( %s -run %s/barrier.cx -- %s %s >%s/c1.out 2>%s/c1.err ) & a=$!; "
+        "( %s -run %s/barrier.cx -- %s %s >%s/c2.out 2>%s/c2.err ) & b=$!; "
+        "n=0; while [ ! -f %s ] || [ ! -f %s ]; do n=$((n+1)); [ $n -gt 200 ] && break; sleep 0.1; done; "
+        "if kill -0 $a 2>/dev/null && kill -0 $b 2>/dev/null; then : > %s; fi; "
+        "wait $a; e1=$?; wait $b; e2=$?; echo W7R1:$e1; echo W7R2:$e2",
+        drv, dir, r1, gate, dir, dir, drv, dir, r2, gate, dir, dir, r1, r2, gate);
+      o = 0; n = 0; rc = runsh(cmd, &o, &n);
+      { size_t on = n; char *a = cx_read(r1, &n); size_t an = n; char *b;
+        n = 0; b = cx_read(r2, &n); size_t bn = n;
+        ck(rc == 0 && tx_suffix(o, (long)on, "W7R1:0\nW7R2:0\n", 14) &&
+           a && b && an > 1 && bn > 1 && !(an == bn && tx_same(a, (long)an, b, (long)bn)) &&
+           gone_temp(a, an) && gone_temp(b, bn), name);
+        mm_free(a); mm_free(b); }
+      mm_free(o);
+    }
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
     v[0] = (char *)drv; tx_snprintf(p, sizeof p, "%s/plain.cx", dir); v[1] = p;
