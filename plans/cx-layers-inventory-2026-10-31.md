@@ -2315,3 +2315,74 @@ cdx 指出我为说明「同文件不同 use 名」举的例子 `use a/b` / `use
 - 只核了 `cxmod.cx` 入口；`cx/cx0/plan.cx` 与其它入口未跑，不外推。
 - 审计器口径：`U` 多重集按**词法名字**对账，与编译器按 **realpath 单元**去重是两套判定键，
   **不应强行相等**；差异单列报告（本节即其取证方式），不作为 PASS 依据。
+
+### 19.17 收紧 §19.16 的「`::sym` 不限制可见性」：改判为「隐式声明 + 合并体」诊断分叉
+
+cdx 的收紧成立，我 §19.16 那句推断越界。已按「只读核 CX-U 规定 + 直看生成的 CXIF/plan + 比对
+gcc_cx/clang_cx 诊断」重做，**未重跑**已报告过的 caseA/caseB，**未改 spec**。
+
+#### A. CX-U 的规定是什么（`cx/spec.md`）
+
+| 条款 | 原文 |
+|---|---|
+| **CX-U-2**（`:121`） | `NAME::sym` 只引入 `sym`，**不得引入其余公开符号** |
+| **CX-U-1**（`:120`） | 整模块导入把该模块当前公开集引入本单元 |
+| **CX-U-5**（`:124`） | 间接可见不得给原型；用到哪个模块就必须直接 `use` |
+| **CX-U-6**（`:125`） | 现行编译把被 `use` 的函数体**编进当前 `-funit` 对象** |
+
+⇒ CX-U-2 是**导入/接口**约束（"引入哪些符号"），**不是**"C 层强制私有访问"的约束。CX-U-6 明说函数体
+进同一对象，因此"被排除的符号在 C 层是否仍可达"从来不是 CX-U-2 规定的对象。我把两者混为一谈是错的。
+
+#### B. 直接证据一：生成的 CXIF 确实只含被导入的符号（CX-U-2 在接口层成立）
+
+`-cx-interface` 需要放**在源文件之前**（放在 `--` 之后会被当程序参数，我第一次就踩了这个）。
+
+| 消费者 | plan 第 2 行 | CXIF 内容 |
+|---|---|---|
+| `use m.s::x` | `/tmp/ua-bodysrc12345678.cx`（合成体） | `int x(void);` |
+| `use m.s`（整模块） | `/tmp/m/s.cx`（真实路径） | `int x(void); int y(void);` |
+
+`::x` 的 CXIF 头 `module s x as` 且**只有 `int x(void);`** ⇒ CX-U-2 在接口层**已落实**。
+
+#### C. 直接证据二：`y` 在消费者作用域**未声明**（三个前端一致）
+
+| 用例 | 本产品 `unisacc.com` | `gcc_cx.com` | `clang_cx.com` |
+|---|---|---|---|
+| `&y`（v2） | rc=1 `error: unknown identifier` | rc=1 `'y' undeclared (first use in this function)` | rc=1 `use of undeclared identifier 'y'` |
+
+⇒ `y` 不是声明过的符号。**这直接否掉我 §19.16 的推断**。
+
+#### D. `rc=22` 的真实来源：隐式函数声明，前端之间分叉
+
+| 用例 | 本产品 | `gcc_cx.com` | `clang_cx.com` |
+|---|---|---|---|
+| `y()`（v1） | **rc=22，无诊断** | rc=1 `implicit declaration of function 'y' [-Werror=implicit-function-declaration]` | rc=1 `call to undeclared function 'y'; ISO C99 and later do not support implicit function declarations` |
+| `y(1,2,3)`（v4） | rc=22，无诊断 | — | — |
+
+`y(1,2,3)` 被接受 ⇒ 没有原型参与 ⇒ 是**隐式声明**路径（C89 规则），不是 `::sym` 把 `y` 声明出来。
+合并体 `ua-bodysrc` 首行 `#define y ua_sym_<md>`（`cx/compiler/cxmod.cx:820`，注释明说目的是
+"so the functions not imported by this symbol-level use do not clash at link time"）。
+
+⇒ `rc=22` 只证明：**该执行路径接受并调用了 `y`**。它既不证明 CXIF 未过滤，也不证明其它入口同样接受。
+
+#### E. 由此得到的真实发现（与我原结论不同）
+
+**本产品前端容忍对被排除符号的隐式声明，并把它解析到合并体；`gcc_cx`/`clang_cx` 一律拒绝。**
+这是**前端诊断分叉**，单列为独立风险：
+
+| 面 | 状态 |
+|---|---|
+| CXIF/CX-U-2 接口过滤 | 成立（B 段直接证据） |
+| 本产品对隐式函数声明 | 接受（v1/v4） |
+| gcc_cx / clang_cx 对同一输入 | 拒绝（D 段原文） |
+| `-Werror` 能否对齐 | **不能**：`-Werror` 对 v1 仍 rc=22；`-Werror=implicit-function-declaration` 报 `option not migrated` |
+| 调用最终绑定到哪个符号 | **UNKNOWN**（未看生成的 C/目标符号表） |
+
+⇒ 结论改写为：**CX-U-2 在接口层已实现；`::sym` 排除的符号在本产品默认运行路径下仍可被隐式声明调用，
+而 gcc_cx/clang_cx 拒绝——这是诊断一致性问题，不是过滤失效。** 后者须单独列，不得用它推断
+"其它入口也接受"或"CXIF 未过滤"。
+
+#### F. 未做
+
+未改 `cx/spec.md`、未改编译器、未重跑 caseA/caseB、未把本条当 PASS。实测夹具在仓外
+`/tmp/symtest`（用完即删）。
