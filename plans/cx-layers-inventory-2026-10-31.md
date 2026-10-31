@@ -1528,3 +1528,169 @@ A 侧只加一条收据要求：`digest=afalg|soft` 之外再记 `digest_reason`
 输出 ⇒ 畸形行连 shard 缺失都一起吞掉）。
 
 清理：`rm -rf /tmp/cxrc3`。
+
+### 17.9 修正：`digest_reason` 三分类撤回（cdx 裁定）
+
+我上一条提的 `digest_reason=ok|no-afalg|hash-fail` **不成立**，撤回。理由（cdx 判、与静态事实一致）：
+`sy_sha256_hex` 的全部失败路径都只 `return 1;`（`cx/sys/sha.cx` 7 处），调用方拿到的只是一个正 1，
+**没有错误原因**。于是「本平台不支持 AF_ALG」与「本次 write/read 失败」在 A 的视角下不可区分；
+用平台宏（`__linux__`/`__x86_64__`）去推断运行时原因，是用编译期条件冒充运行时观测，属超范围。
+A 的收据只允许记录**可观察事实**，不得输出貌似确定的三分类。
+
+改为三个**可数、可复核**的观察量（都是计数器，不是原因判定）：
+
+| 字段 | 含义 | 取值 |
+|---|---|---|
+| `digest_afalg_ok` | 调了 `sy_sha256_hex` 且返回 0，直接采用其 hex | 次数 |
+| `digest_afalg_nonzero` | 调了 `sy_sha256_hex` 且返回非零 ⇒ 已软回退到 `cx_sha256_hex` | 次数 |
+| `digest_soft_direct` | 未经尝试就直接用软实现（例如按预定的尺寸阈值走软路径） | 次数 |
+
+约束：
+- **小块直接走 soft 不计入失败**，只计 `digest_soft_direct`；不得把「没用 AF_ALG」写成失败或未决。
+- 三者之和必须等于本次实际取 digest 的次数（`DIGEST-SUM` 自检，不等即 rc1，与既有 `UNDECIDED-SUM`
+  同属自检失败，不进 rc3）。
+- 若将来 L0 提供明确负码，再单独定义原因字段；届时改版本号，不复用本组计数。
+- `scanned_and_hashed_same_buffer=1`（§17.2 #2 修好后为 1）；`enforcement`/`window` 仍各按 §16.4。
+- 不改 spec、不改 L0、不改 `cx/sys/sha.cx`。这属于 A 的收据格式，不是 L0 缺陷修复。
+
+## 18. CX 上下文 preflight：根域落地障碍（只读梳理，无实施）
+
+对象：`plans/cx-context-preflight-2026-10-31.md`（sha256 `7a5f8cdeee24be9842a870c11938921919e2deb2a1cf448ad9bba9d78e90cfdc`）。
+本节只列**测量前必须先解决/先声明**的事实与缺口，不建 `roots.tsv`、不写预检工具、不开测、
+不改 cxmod/entry-build/spec、不给目录定层号。
+
+### 18.1 身份基线（本节所有数字的绑定）
+
+| 项 | 值 |
+|---|---|
+| commit | `9cdfaae7442151d300265611adc134795e4666a6` |
+| 产品 | `/home/devali/repos/unisacc/unisacc.com`，`unisacc 0.0.43`，sha256 `fc1d4513fb1363c8506df8afa08444882337e615bf38d82dd42f022e2c23dc6f` |
+| 索引快照 | `out/cx-layers-index/manifest.tsv`，sha256 `8e452be0372008ac150608485987504795ff194e9ece2e5739d0f9580b979e1f`，1908 行，1935 shard |
+| 盘点工具 | `tools/check-cx-layers.cx`（`lint sha256 93619a0a…`，go 在途，本基线取 `8361c3cf6b` 版） |
+
+注意：manifest 由**工作区**生成（含他人未提交改动），本节 `git grep` 对的是 **commit 树**。两者
+在当前时刻对 `main` 判定完全一致（见 18.2），但这不是结构保证；正式测量必须以 §2 的快照+快照索引
+重算，不能引用本节数字。
+
+### 18.2 可复用清单与索引：`D main` 与文本 `main` 的一致性（实测）
+
+| 口径 | 数量 |
+|---|---|
+| 索引中带 `D main` 的 manifest path | **847** |
+| commit 树中文本 `main` 定义（`git grep '^ *(int\|void) main *('`） | **847** |
+| 索引有、文本无 | **0** |
+| 文本有、索引无 | **0** |
+
+847 中 `archive/` 占 216，`archive/` 外 **631**。按前缀：
+
+| 前缀 | 数量 | 归属 |
+|---|---|---|
+| `tools/` | 330 | 本车道 |
+| `tests/` | 176 | 本车道 |
+| `apps/csih/` | 95 | **csih 车道**（AGENTS.md 规定，改动须先发信封） |
+| `ujs/` | 15 | **论文 B 车道**（unisacc 侧不碰） |
+| `release/` | 4 | 本车道 |
+| `examples/` | 3 | 本车道 |
+| `cx/` | 2 | `cx/check_memory.cx`、`cx/check_owned.cx`（仓内手工检查程序，非入口层） |
+| `exec/` | 2 | `exec/c/qprefixcheck.cx`、`exec/parse2/librarycallsitecheck.cx` |
+| `adapter/` | 2 | 本车道 |
+| `src/` | 1 | 产品入口 |
+| `research/` | 1 | `research/c43-resourceflow-probe-draft.cx`（草案探针） |
+
+⇒ **可以**用 `D main` 作候选入口的发现手段（当前零差）；**不可以**用它宣称「全集」：
+它只覆盖 manifest 里存在的 path，而 manifest 明确缺 31 个 path（18.3），且它的判定来自索引实现，
+一旦索引降级（DEFERRED/不完整）就会静默变少。
+
+### 18.3 索引**不**覆盖的部分（不能从 symindex main 宣称全集的三条理由）
+
+1. **31 个 mode 120000 的 `.cx` 软链完全不在 manifest 里。** 实测：非 archive 的 tracked `.cx`
+   1651 个，非 archive 的 manifest 行 1620 个，差 **31**，逐一对上"全部是 mode 120000"。
+   例：`tests/cxlib/allsession.cx → ../../tools/cxlib/allsession.cx`、
+   `cx/runtime/compiler/bindstage.cx → ../../compiler/bindstage.cx`、
+   `ujs/native/compiler_min.cx → ../seed/stage0/compiler_min.cx`。
+   缓解：这 31 个**没有任何一个**声明 `main`（逐个解析 target 后 grep），且真正的目标文件本身在
+   manifest 里 ⇒ **当前不丢根**。但这是巧合级的缓解，不是合同：若将来新增一个「指向含 main 文件」
+   的 `.cx` 软链，`D main` 枚举会静默漏掉它。
+   ⇒ 候选集必须**并上** §4 规则 3 的 `tests/batches.tsv` SOURCE，并在 roots.tsv 里对
+   「软链形式的根」显式声明；不得只跑 `D main`。
+2. **manifest 含 288 行 `archive/`**，`tools/check-cx-layers.cx` 主动跳过 `archive/`、`out/`。
+   preflight 若直接吃同一索引，会把 archive 计入候选而工具不计，两个数不可比。
+3. **索引可 DEFERRED**（45 s 上限）。一旦出现，`D main` 会少行且**不报错**；preflight §3 已要求
+   该情形整次 UNKNOWN，本节确认该要求是必须的，不是保守。
+
+### 18.4 正负批次：`batch-negative` 无法从 `batches.tsv` 生成
+
+实测 `tests/batches.tsv`：345 行 = 1 头 + **344 行数据，12 列**，`expect` 列 **344 行全是 `rc0:*`，
+零条负期望**。⇒ §4 的 `batch-negative`（「SOURCE 属故意拒绝/缺模块/运行时生成的夹具」）在
+`batches.tsv` 里**没有任何行可依据**：该表的语义是「这条批次整体应该 rc0」，负例是**程序内部**
+的行为（例如 `tools/check-cx-layers.cx --fixtures` 里自己写 `cx/sys/q.cx` 再造 `FAIL
+PARSE-CONDITIONAL`）。
+
+后果与要求：
+- **不得**把 `batches.tsv` 的 SOURCE 里"看起来像负例"的行归进 `batch-negative` 并因此缩短其展开；
+  它们都是正常 rc0 批次，全部属 `batch-positive`。
+- 负例的真实来源只有两类：① 运行时在 `out/` 下生成的夹具（`generated`，expect=unknown-ok）；
+  ② 仓内已提交、但设计上就不该被当作产品入口的文件（`cx/check_memory.cx`、`exec/*check.cx`、
+  `research/*-draft.cx`），归 `unclassified` 而不是 `negative-known`，除非逐行写明理由。
+- 因此 `negative-known` 的上限是 **0 行**（当前证据下），不是任意行。要引入必须新增具名清单并说明
+  「该文件为什么是负例」；不能用泛化分类代替。
+
+### 18.5 生产入口 / 工具入口的可辩护边界
+
+- `production`（可进入产品构建图）：`src/` **1** 个 + `release/` **4** 个 + `examples/` **3** 个
+  合计 **8** 个候选（本车道）。`apps/csih/` 95 个与 `ujs/` 15 个**不能**由本车道直接列为
+  production 根：前者须 csih 车道确认其入口集合，后者按 AGENTS.md 不碰。可先列为
+  `unclassified`+UNKNOWN，或由 owner 提供清单后并入，二选一须显式。
+- `tool`：`tools/` 330 个含 main 中，只有 214 个是 `batches.tsv` 的 SOURCE（全局唯一批次数 214）。
+  ⇒ `tools/` 里**约 116 个含 main 但无批次**。这批既不能算 production，也不能默认算 tool：
+  必须逐项落 `tool`（有明确人工用途）或 `unclassified`。这是 preflight 里**最大的一块未知**，
+  且不能靠"在 tools/ 下"推断类别。
+- 交叉核对：`main` 含 631 个、batch source 214 个，二者完全包含（214 ⊂ 631，无 batch source 缺 main）。
+  非批次但含 main 的 **417** 个：`tools` 215、`apps`(csih) 95、`tests` 78、`ujs` 15、`release` 4、
+  `examples` 3、`exec` 2、`adapter` 2、`cx` 1、`src` 1。
+
+### 18.6 显式 joint root 与分账
+
+- 现状：`src/` 只有 1 个含 main 文件，`tools/`/`tests/` 各自单源码批次占绝对多数 ⇒ **今天没有
+  真实的多源码联合根**。`joint_id`/`double_count` 因此是**未来位**，不是当下缺失的测量。
+- 但仍要现在就定死两条，否则将来加第一条联合根时会静默重复计量：
+  - 同一 `joint_id` 的多行，`contexts_total`/`edges_total` **只在联合根内求和一次**；成员单根若也
+    出现在表中，必须 `double_count=1` 且聚合时**只取其一**（建议取联合根，成员行仅作报告）。
+  - 跨根 `unique_contexts` 只能报「跨根按字面路径去重的规模」，不得作为任一根的峰门，也不得触发
+    身份比较（§14 已写，本节只确认它必须落到字段而不是注释）。
+- `pair_peak`：各根独立，跨根求和不是峰值。
+
+### 18.7 最小可审验收清单（只读，不建正式文件）
+
+用于评审「这份 preflight 结果是否可信」，不用于授权测量。任一不满足即整次 UNKNOWN：
+
+1. **输入身份**：commit 完整 sha；`git ls-tree -rz` 原始输出及其 sha256；`git archive` tar 与
+   解出清单 sha256；三者互相可复核。
+2. **产品身份**：显式绝对路径 + `unisacc 0.0.43` + sha256（本节基线
+   `fc1d4513…2dc6f`）；不得从 PATH 猜、不得不记录。
+3. **实现身份**：`implementation_source_sha` + `implementation_binary_sha` + `policy_doc_sha`
+   三者齐；缺一不得出数字。
+4. **索引完备**：无 `DEFERRED`；`--in` 清单 sha 记录；`--verify` 通过。
+5. **根清单**：候选全集由「树 `.cx` ∩ `D main`」∪「batches.tsv SOURCE」生成；roots.tsv 缺行 →
+   `ROOTS incomplete` 非零；多行 → `ROOTS stale` 单列。**软链根须显式声明**（18.3）。
+6. **类别可核**：每行 `category` 只能取 18.4/18.5 定义的值；`negative-known` 当前应为 0 行，
+   出现即须附逐行理由。
+7. **只读强制**：`ENFORCEMENT` 只能是 `bwrap-ro-bind`/`unshare-ro-bind`；`permission-only`
+   一律 UNKNOWN（§11/§13 既有结论，本节确认不可放宽）。
+8. **未决不冒充**：`pairs_proxy=1` 不得进峰门；`measurement_complete` 不得简写为 `complete`；
+   `unclassified` 的 UNKNOWN 不能计入生产覆盖。
+9. **跨入口对拍**：夹具覆盖 `./`、空段、`a/../b`、目录软链+`..`，preflight 键与编译器
+   `cxm_norm` 逐项一致，否则设计不通过（§5 既有）。
+10. **残差披露**：31 个软链 `.cx` 的处置（排除/UNKNOWN）必须写进回执；不得只写「全集已覆盖」。
+
+### 18.8 结论
+
+- **可复用**：commit 树 + `git archive` 快照、`symindex --in … update --verify` 索引、
+  `tools/check-cx-layers.cx` 的 manifest/shard 读取与 `cl_locate` 词法（作为负例与交叉核对源）、
+  `tests/batches.tsv` 的 214 个批次源码集合、以及 §15.6/§18.1 的身份基线。
+- **不可复用/不可宣称**：不得用 `D main` 单独宣称入口全集（18.3）；不得从 `batches.tsv` 生成
+  负例（18.4）；不得把 `apps/csih/`、`ujs/` 直接列为本车道 production 根（18.5）；不得把
+  `tools/` 里 116 个无批次的含 main 文件默认归 `tool`（18.5）。
+- **最大未知**：`tools/` 116 个无批次含 main 文件的类别归属；`apps/csih` 95 + `ujs` 15 的入口集合；
+  只读强制（当前 `bwrap` 缺失、`unshare` 只证明了 remount,ro 单点）。
+- 本节不产生任何 PASS；未建 `roots.tsv`、未写预检工具、未开测、未改 cxmod/entry-build/spec。
