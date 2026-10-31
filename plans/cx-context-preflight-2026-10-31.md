@@ -64,7 +64,7 @@
 - 环：目标字面路径已在当前展开栈上→计 cycle 边、不再展开、根 UNKNOWN（编译器既有 cycle 拒绝另记）。
 - 缺失模块=unresolved+UNKNOWN；ENOTDIR/EACCES/读失败/路径规范化失败（过长/段数）=INVALID+UNKNOWN；不截断、不降级。
 - U 事实：由快照索引 shard 读取；context 的 realpath 映射回 tracked path/sha 后取 shard；alias 软链用 realpath 查，但 context 身份仍是字面路径。未映射/未跟踪→UNKNOWN。
-- 清单：按 context 词法目录+尾名读 cxpack；ENOENT/无匹配行=全集；EACCES/ENOTDIR/读失败/超长/非法行→UNKNOWN；仅测量有效集存在，不在此实现比较或拒绝。
+- 清单：按 context 词法目录+尾名读 cxpack；ENOENT/无匹配行=全集；EACCES/ENOTDIR/读失败/超长/非法行→UNKNOWN。有效公开集的比较只按第 7 节的 pair 策略执行；比较结果与计数见该节，§5 本身不另做拒绝。
 - 跨入口对拍（开测前必须）：夹具覆盖 `./`、空段、`a/../b`、目录软链+`..`、绝对/相对；preflight 键与 unisacc 当前入口、gcc_cx/clang_cx 实际解析路径逐项一致，否则设计不通过。
 
 ## 6. 计数口径
@@ -84,7 +84,10 @@
 - 方向：单向 canonical→candidate；memo 键 `(canonical context ID, candidate context ID)`；每个 candidate 对照其组 canonical 执行递归核验（依赖递归同样用该组最新选定的 canonical）。
 - 遍历：显式工作队列，按上述顺序；不递归 C 栈。记录 `pairs_visited_total`（首次进入的 memo 对）与 `pair_peak`（队列/核验栈同时存活的对数高水位）。
 - 第二策略 `pair-policy-v1r`：同一根仅把兄弟 use 行序逆序，其余同 v1；单独报告 visited/peak。明确只覆盖两种顺序，不等于所有排列。
-- 若实现无法执行该实际遍历，只能输出 `pairs_proxy` 并不得用于每根 pair 峰门。
+有效公开集比较与计数策略（v1 全遍历）：
+- 每个 pair 比较 canonical 与 candidate 的有效公开集（按 §5 的清单规则，逐名集合；无清单/无匹配行=全部非 static）。记录 `pairs_public_equal`、`pairs_public_diff`、`pairs_errors`。
+- v1 **不因差异或错误停止遍历**：差异只记录，错误把根标 UNKNOWN 并计入 `pairs_errors`，结构遍历继续。`pairs_visited_total`/`pair_peak` 是该全遍历策略的值，不是“首次差异即停”的生产算法值；若未来生产算法在首差异中止，本值只能作为上界。
+- 若实现没有执行有效集比较，只能输出 `pairs_proxy`，不得称实际递归核验，也不得用于 pair 峰门。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
 
 ## 8. 测量上限与 deadline（独立于产品）
@@ -113,7 +116,17 @@
 
 ## 11. 测中不写快照的强制措施
 
-- 首选：在独立 mount namespace 中以只读 bind 挂载快照，例如 `bwrap --unshare-all --ro-bind SNAP /work --tmpfs /tmp --dev /dev --proc /proc ...`，工具 cwd=/work，索引/日志/临时目录都指向快照外；若 `bwrap` 或等价只读挂载不可用，本次测量状态 UNKNOWN，不用“前后复核”冒充强制只读。
+- 首选：独立 mount namespace + 只读 bind。示意（细节须先做 dry-run 验证）：
+  bwrap --unshare-all --die-with-parent --chdir /work \
+    --ro-bind SNAP /work --ro-bind PRODUCT /product \
+    --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
+    --bind OUT /out --tmpfs /tmp --proc /proc --dev /dev \
+    --setenv TMPDIR /tmp --setenv UNISACC_RUN_CACHE 0 \
+    /product/unisacc.com /work/tools/cx-context-preflight.cx -- ... --out /out/report
+  其中 SNAP 与 PRODUCT 外置且只读；OUT 是快照外唯一可写处；索引 /out/index、日志 /out/logs、临时 /tmp。cwd=/work，工具只接收 /work 或 /out 下的显式路径；宿主工作区不挂载。
+  动态产品需要的解释器/库按实际 ldd 单独 ro-bind；不把整个 / 暴露为可写。
+- 先证明方案可用：测量前做 dry-run（bwrap 启动、/work 只读写失败、/out 可写、看得到 /product 与所需 libs、宿主工作区不可见）；任一失败→UNKNOWN，不进入测量。
+- 若 `bwrap` 或等价只读挂载不可用，本次测量状态 UNKNOWN，不用“前后复核”冒充强制只读。
 - 次选：`chmod -R a-w SNAP` 并记录所有目录/文件 mode；这只是同用户可逆的约束，不构成强制；采用时明确标 `enforcement=permission-only`，不能称只读保证。
 - 快照外目录：`out/context-preflight/<epoch>/{index,logs,tmp,report}`；`TMPDIR`、索引路径、工具输出均显式指向这里。
 - 已装产品：记录绝对路径、版本、sha256；`UNISACC_RUN_CACHE=0` 只作为候选设置，不能证明无写入。若使用产品 `-run` 执行工具，另设只读 bind/沙箱；否则改为预先构建的工具二进制并用显式产品身份绑定。任何对快照的写入或无法排除的写路径→`SNAPSHOT-WRITE-UNKNOWN`，聚合 UNKNOWN。
@@ -122,4 +135,4 @@
 ## 12. 根清单与 pair-policy 文件身份
 
 - 根清单：未来 `tests/cx-context-roots.tsv` 的 sha256 与 commit 一并记录；本文件只给生成规则与核对门，不内嵌未生成的根行。
-- pair-policy 身份：`pair-policy-v1` 的定义即本文件第 7 节；测量时记录本文件 sha256，写作 `pair-policy=v1@plans/cx-context-preflight-2026-10-31.md:<sha256>`。规则变更必须改版本号，不复用 v1 数字。
+- pair-policy 身份：`pair-policy-v1` 的定义即本文件第 7 节；记录三个独立字段：`policy_doc_sha`（本文件 sha256）、`implementation_source_sha`（实际 preflight .cx 源 sha）、`implementation_binary_sha`（实际执行二进制/产物 sha）。本文件 sha 只是提案身份，不能替代实现身份；测量数字必须绑定后两者。规则或实现变更必须改版本号，不复用 v1 数字。
