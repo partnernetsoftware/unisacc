@@ -968,3 +968,81 @@ M 100644 b6802534…d746 1<TAB>three.cx\0   （冲突时三行，stage 1/2/3）
 3. 全量审计 scope 行新增 `au=`/`sw=`/`view_sha=`/`view_bytes=`；`view_bytes==0` 直接 rc3。
 4. 其余同 §11.6：收据只写「可观测点上未观测到漂移」；超时 rc3；spec 与三源不动；
    G-3 不裁；`OPEN-LEX-LINE` 未决；补边、shard GC 另案。
+
+## 13. 方案 B 第六次修订：对象 ID 长度绑定 `--show-object-format`、路径只在首个 TAB 切分（未施工）
+
+两处 cdx 指出属实，本节改正 §12.2 的解析规则。实测：`git version 2.34.1`。
+
+### 13.1 对象 ID 长度不是常量
+
+实测对比（两个仓外独占临时仓）：
+
+| 仓 | `git rev-parse --show-object-format` | `git ls-files -s` 第二字段长度 |
+|---|---|---|
+| `/tmp/objfmt/sha1repo`（`git init`） | `sha1` | **40** |
+| `/tmp/objfmt/s256repo`（`git init --object-format=sha256`） | `sha256` | **64** |
+| **本检出** | `sha1`（`--show-object-format=storage`/`=input` 同为 `sha1`） | **40** |
+
+**本检出是 SHA-1 仓 ⇒ §12.2 固定 64 位会把 1944 条合法行全部判成 `GIT-PARSE`。** 改正：
+
+1. 先跑 `git rev-parse --show-object-format`（实测本仓 rc0、输出 `sha1`，≈2 ms）。
+2. 映射：`sha1` → 40；`sha256` → 64。其它值、空输出、rc≠0（旧 git 无此选项）→
+   `UNDECIDED GIT-OBJECT-FORMAT value=<raw>` → rc3。**不得**猜测或回退到尾行长度推断。
+3. 每条记录的对象 ID 必须全为小写十六进制且长度等于上表值；不符 → `GIT-PARSE`。
+   （40/64 二选一，不做「40 或 64」的宽松匹配——宽松匹配会把截断/拼接的记录放过。）
+4. **两个哈希不得混用**：`git ls-files` 给出的是 **Git 对象名（blob id）**，算法由仓格式
+   决定；我们自己算的是 **源内容 SHA-256**（§11.2）。scope 行分别用
+   `objfmt=sha1|sha256`、`blob_id_len=40|64`、`digest=afalg|soft` 标注，绝不比较两者，
+   也不把 blob id 当作「内容一致」的证据。manifest 里的 sha256 同理不能代替 blob id。
+
+### 13.2 `-z` 路径：只在首个 TAB 切分，其余字节原样
+
+实测（`/tmp/gitflags`，仓外独占仓）：
+
+```
+b'H 100644 975f...4ac 0\tbs\\path.cx'       ← 反斜杠原样，不转义
+b'H 100644 bca7...9ff 0\tt\tb.cx'           ← 路径内含 TAB，原样穿过
+b'H 100644 587b...6cb 0\tone.cx'
+```
+
+- `-z` 下路径是**原始字节**：TAB、换行、反斜杠都不做 C 风格转义。因此：
+  **只在第一个 TAB 处切分元数据段与路径**；元数据段（tag/mode/id/stage）内不含 TAB，
+  故切分唯一；**路径里后续的 TAB 是合法路径字节，不能描述为「元数据错误」**。
+  §12.2 里「除首个 TAB 外不得再出现 TAB」一句**作废**。
+- 唯一仍算 `GIT-PARSE` 的情形：**首个 TAB 之前**的元数据段字段数≠4、tag 非法、mode 非
+  6 位十六进制、ID 长度不符（§13.1）、stage 不在 0..3、路径为空（首个 TAB 后立刻 `\0`）。
+- 路径字节里不可能有 `\0`（`-z` 以 `\0` 分隔），故工具内的 C 字符串处理对 TAB/换行安全。
+- 仍存的两处**表示**问题，必须显式处理而非默默丢行：
+
+| 位置 | 现状（实测/读码） | 方案 |
+|---|---|---|
+| manifest 读入 | `symindex.putesc` 把路径中 `\t`/`\n`/`\\` 写成两字节转义（实测仓库里 `t<TAB>b.cx` 写成 `t\tb.cx`），而 `check-cx-layers.cx:347` **原样拷贝、无逆变换** ⇒ 去 stat 一个不存在的路径，误判 | 在 `cl_audit` 读 manifest 时实现**逆变换**（仅这 3 个转义，可完全还原）；遇非法转义（如 `\q`、末尾孤立 `\`）→ `UNDECIDED MANIFEST-PARSE path=<escaped>`；`MANIFEST-PARSE` 不丢行、不猜 |
+| 工具输出 | `FAIL ... %s` 直接拼接路径（`check-cx-layers.cx:186`），路径含 TAB/换行会破坏下游单行 TSV | 输出路径用**同一套可逆转义**（`\t`/`\n`/`\\`），保证单行且可还原；这不是 UNSUPPORTED-PATH，因为无损 |
+| 路径长度 | `path[CL_PATH]`（4400），超长会被静默截断 | 长度 ≥ `CL_PATH-1` → `UNDECIDED PATH-TOO-LONG len=<n>`，**不截断继续**；这是唯一需要 `UNSUPPORTED-PATH` 语义的残余情形 |
+
+- 当前共享仓实测：1944 条 tracked `.cx` 中**非可打印路径 0 条、含反斜杠 0 条**，故这些
+  分支目前是**潜伏**而非现症；但不得因此省掉，否则第一个带 TAB 的文件名就会静默漏审。
+
+### 13.3 代价
+
+新增一次 `git rev-parse --show-object-format` ≈2 ms（已并入 §12.4 的 git 5 s 上限）。
+manifest 逆变换为单趟字节扫描（≤ `CL_CAP`），输出转义仅作用于命中行，均不计入热点。
+
+### 13.4 夹具（在 §12.5 的 +36 之外，总 +40）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-objfmt-sha256` | 仓外 `git init --object-format=sha256`，放入一个 `.cx` | `objfmt=sha256`、`blob_id_len=64`，行被接受、边正常 |
+| `k-objfmt-bad` | 解析器喂入 40 位 ID 而声明 `sha256`（或反之） | `UNDECIDED GIT-PARSE` 或 `GIT-OBJECT-FORMAT`，rc3 |
+| `k-path-tab-real` | 仓外仓里建**真实文件名**含 `TAB`、换行、反斜杠三个 `.cx` | 三条都被审计（边计入）；输出单行且逆变换还原为原名；`au/sw` 不影响 |
+| `k-path-too-long` | 路径长度 ≥ `CL_PATH-1` | `UNDECIDED PATH-TOO-LONG`，不截断、不丢行 |
+
+`k-path-tab-real` 必须用真实文件名（`fx_write` 传含 `\t` 的路径），不得用伪造的字节流喂解析器
+代替——否则测不到 `git` 与文件系统这一段。
+
+### 13.5 验收（追加到 §12.6）
+
+5. `--fixtures` 总数 **+40**；`k-path-tab-real` 的三条路径在收据里各出现一次（不重不漏）。
+6. 全量审计 scope 行含 `objfmt=`、`blob_id_len=`；本仓应为 `objfmt=sha1 blob_id_len=40`。
+7. 其余不变：仓外独占夹具、收据只写「可观测点上未观测到漂移」、超时 rc3、
+   spec/三源不动、G-3 不裁、`OPEN-LEX-LINE` 未决、补边与 shard GC 另案。
