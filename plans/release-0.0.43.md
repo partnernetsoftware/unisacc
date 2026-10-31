@@ -91,7 +91,7 @@ STATE43：C 宏展开列号 → 建议挪 0.0.44，发布说明写一句。依�
 STATE43：(a) 的更正：library invalid-options 不放进 (a)（产品里没有库路线，随 A 走）；phase-timing 在 lnx 上是 6 格（host.phase-report 的 win/arm64 一格属于 B）；resources MAXSTEPS 一格，runexec.cx:11,71 里有具名拒绝文本，但 cc 在已装 fc1d4513 上实测 UNISA_MAXSTEPS 为 abc、-1、0 时 -run 照常 rc7、-S 照常 rc0，没有拒绝，所以要查那段检查为什么没走到。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
 STATE43：[ ] 6 **测试到 QUALIFIED**。判定（tests/run.cx:28-33）：`tests/run.cx -- --all` = 本地 smoke 加 `tests/all-aggregate.cx` 对一次 `tools/all-waves.cx` 会话的汇总，要求每个 IMPLEMENTED 批次在**同一个候选**上有 PASS 回执，且没有未满足或未解决的覆盖行。矩阵头也写着：COVERED_LOCAL 的证据是候选专属的，旧候选（@94b549d1、@da4e7ef1、79fb84e6 等标签）的证据只是历史，不盖当前候选。所以步骤（cc 2026-10-31 理的）：
-STATE43：6a 把还缺的格做完：当前必需 768 格，已覆盖 519，缺 126，待产品改 9，待外平台 73（grk 在做 stream-e3、elf、lower，我做 library 剩余、resources、ri、interfaces、negative）。
+STATE43：6a 把还缺的格做完：当前必需 768 格，已覆盖 542，缺 103，待产品改 9，待外平台 73（grk 在做 stream-e3、elf、lower，我做 library 剩余、resources、ri、interfaces、negative）。
 STATE43：6b 产品小改攒成一个候选（resources 2、phase-timing 6），**这是最后一个候选**：之后冻结。
 STATE43：6c 实现 19 个 `full-*` 汇总批次（现在是 PLANNED、NOT_READY，tests/pending 里文件还不存在；每个负责一个域：该域所有必需格都是 COVERED_LOCAL，外平台格都有同候选的 CI 观察）。cc 来写一个通用的 `tests/full-domain.cx DOMAIN`，读矩阵、逐格报哪些没盖上。
 STATE43：6d 对冻结候选跑一次完整的 `all-waves` 会话：314 个 IMPLEMENTED 批次（其中有一批要先准备材料，176 个标 UNPREPARED），每个批次一次作业 60 秒内，轻量批次一轮四个并发；然后用 `matrix-flip-gen --migrate` 把证据标签从旧候选迁到冻结候选。这一步会跑一两个小时，机器要独占。
