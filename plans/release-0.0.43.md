@@ -112,6 +112,7 @@ STATE43：**183070c9b2 的 osx/arm64 第二次（omp-grk，2026-11-01）**：同
 STATE43：**183070c9b2 的 osx/arm64 空闲重试（omp-grk，2026-11-01）**：机器空闲再编一次，bound 60 退出 142，没有镜像。两次出界。第一次 59.96 秒不能当定点。安装门仍不满足。没有安装。
 STATE43：**osx/arm64 相位（omp-grk，2026-11-01）**：`UNISACC_RR_TIME=1` 在 elf 推理前被 bound 60 杀死。两遍 e3 各 11.9 秒，e2 合计 12.8 秒，lower 6.1 秒。设 `UNISACC_PHASE_OUT` 后第一次 59.30 秒 rc0，与 `c1aad3b5` 逐字节相同；第二次 bound 60 退出 142。不是定点。没有安装。
 STATE43：**osx/arm64 分相（omp-grk，2026-11-01）**：`7f3d7d2405` 的构造器，`PHASE=A` 17.85 秒写出帧后退出，没有镜像。`PHASE=B` 28.64 秒写出的 Mach-O 与 whole-o `c1aad3b5` 逐字节相同。两步都在 60 秒内。还没接进 `release-build`，没有安装。
+STATE43：**release-build 分相（omp-grk，2026-11-01，未安装）**：`release-build.cx` 对 osx/arm64 改走 PHASE=A/B，构造器是已建的 `slice-lnx-x86_64`。rev `7f3d7d2405` 跑两次，都是 rc0，sha `00675463`，2344930 字节，约 47 秒。没有替换 `./unisacc.com`。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
