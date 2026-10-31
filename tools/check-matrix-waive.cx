@@ -1,0 +1,30 @@
+/* tools/check-matrix-waive.cx -- the 0.0.43 known-gap record (tests/waivers-0.0.43.tsv) and the domain matrices agree.
+ *
+ *   sh ./unisacc.com tools/check-matrix-waive.cx            (from the repo root)
+ *
+ * Runs tools/matrix-waive.cx --check on the tracked record: every waiver matches rows, every matched row that is not
+ * covered is required=no with its marker, and no matrix row carries a "[waived " marker without a waiver.  Also checks
+ * that the check fails when a waived row is made required again (a copy of a matrix in out/ with one row edited).
+ * Prints PASS/FAIL and CHECK_MATRIX_WAIVE<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-matrix-waive.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-matrix-waive.%s\n", name); } }
+
+int main(void) {
+    char out[4096]; int cut;
+    char *a1[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", ".", "tests/waivers-0.0.43.tsv", "--check", 0};
+    ck(sy_run(a1, out, sizeof out, &cut) == 0 && tx_find(out, tx_len(out, sizeof out), "disagree=0", 10) >= 0, "record-and-matrices-agree");
+    {   /* negative control: a root whose hosts matrix has one waived row turned back to required */
+        char *s1[] = {"sh", "-c", "rm -rf out/check-matrix-waive && mkdir -p out/check-matrix-waive/tests && cp tests/*-domain-matrix.tsv tests/waivers-0.0.43.tsv out/check-matrix-waive/tests/ && "
+                      "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"win/arm64\" && $2==\"version-0.0.43\" {$3=\"yes\"} {print}' tests/hosts-domain-matrix.tsv > out/check-matrix-waive/tests/hosts-domain-matrix.tsv", 0};
+        char *s2[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", "out/check-matrix-waive", "out/check-matrix-waive/tests/waivers-0.0.43.tsv", "--check", 0};
+        int r1 = sy_run(s1, out, sizeof out, &cut), r2 = sy_run(s2, out, sizeof out, &cut);
+        ck(r1 == 0 && r2 == 1 && tx_find(out, tx_len(out, sizeof out), "version-0.0.43", 14) >= 0, "a-waived-row-made-required-is-caught");
+    }
+    sy_printf("CHECK_MATRIX_WAIVE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
