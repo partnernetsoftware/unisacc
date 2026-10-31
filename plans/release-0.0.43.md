@@ -95,6 +95,7 @@ STATE43：**预处理三批（omp-grk，2026-11-01，影子根）**：`a97d5889`
 STATE43：**资源四批（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `resources` 79/0，`ri-trace` 15/0，`ri-trace-output` 17/0，`ri-multi` 10/0。
 STATE43：**tapebin（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `tapebin-roundtrip` 4/4。四条 C 源能跑，`-S --tapebin` 编码四条都失败。这是还没豁免落地的 C44-TAPEBIN-01。
 STATE43：**原 bdy 红批（omp-grk，2026-11-01，影子根，未改他们的文件）**：`a97d5889` 上 `cx-unit-graph` 11/0，`cx-l0-sys` 125/0，`cx0-unit` 28/0。普查时的失败是已装产品上的。
+STATE43：**再四批（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `cx-model-lifetime`、`cx-model-decode`、`cx-driver-input` failed=0，`cx-funit-host` 10/0。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
