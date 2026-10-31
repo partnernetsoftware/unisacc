@@ -155,3 +155,51 @@ G1+G2+G4+G6 估计二分循环体从 39 条降到约 20 条；再加 G3 接近 g
 - G1 没有现成落点：tape 没有移位立即数操作（opinfo 操作表里无 shli/shri），编码器也不跟踪寄存器常量。要么给 tape 加立即数移位操作并让 E4 折叠 `imm`+移位，要么在 lower 做“上一条是 imm 且该寄存器随后死亡”的融合。
 - G2 的落点是 lower：x86 的 `slt64` 走 isel `setl`，`jumpz` 单独编码；需要在 lower 里对“比较 + 紧随的 jumpz 且比较结果随后死亡”做融合，输出带条件的跳转。lower 已有 ARM 的有界 dead-after 扫描与立即数融合，可复用其扫描方式。
 - 以上每项都要重建 E4 或 lower/elf 模型（六目标），并在全部目标上重新对拍，属慢车道工作量；按项单独私有包验证后再合并。
+## 六、冷启/热启时间构成（2026-10-31 复测，bun 为基线）
+
+只记实测。产品 = 仓库根 unisacc.com（5025194 字节）。候选 = 用 tools/entry-build.cx 在 out/hotfix1 重建的 candidate：33 个键对象逐个 --only 编译，再手动 -b lnx/x86_64 链接并拼接 p3 包尾（entry-build 自带 link 有 45 秒上限，本机不够）。干净环境（剔除所有 UNISA* 变量），多跑取 p50。输入 int main(){return 0;}。
+
+### 6.1 热启（run-cache 命中）
+
+| 谁 | p50 | min | 证据 |
+|---|---:|---:|---|
+| 已装产品（经 sh） | 57.5 ms | 55.8 ms | 冷启 285 ms 与它差 5 倍，确为命中 |
+| 重建候选 | 3.1 ms | 2.8 ms | strace 只见一次 execveat 转发到已存镜像 |
+| bun 1.4.4（bun -e 0） | 11 ms | 10 ms | |
+
+热启目标（p50 优于 bun 10 ms）两条路径都已达成，候选是 bun 的 3.2 倍快。
+
+### 6.2 冷启（run-cache 目录全新）
+
+缓存目录是 TMPDIR/unisacc-e3cache-<uid>，不在 HOME。只换 HOME 测出 3 ms，是旧目录命中；必须同时换 TMPDIR 且目录事先不存在。
+
+| 谁 | p50 | min |
+|---|---:|---:|
+| 已装产品（经 sh） | 285 ms | 271 ms |
+| 重建候选 | 144 ms | 140 ms |
+| bun | 11 ms | 10 ms |
+
+候选冷启比产品快一半，但仍为 bun 的 13 倍。
+
+### 6.3 候选冷启 144 ms 的构成（逐段实测）
+
+| 段 | 墙钟 | 测法 |
+|---|---:|---|
+| 壳启动 | 1.4 ms | --version |
+| 编译器模型装载 + 预处理就绪 | 60 ms | -E 空文件 61 ms，-cx-plan 1 ms |
+| 生成到汇编 | 70 ms | -S 131 ms 减 -E 61 ms |
+| 汇编 + 链接 + 运行 | 13 ms | 全流程 144 ms 减 -S 131 ms |
+
+装载为纯用户态解码：strace 全程 syscall 合计 0.9 ms（14 次 read、20 次 mmap、0 次 brk）。
+瓶颈是 2 039 850 字节的 p3 包体是文本格式（包头 P 3 32 1479 77），逐字符走 num()，
+二进制快路（首 8 字节 UNINETB1，src/runtime/model_decode.cx:348）从未被产品包触发。
+
+### 6.4 冷启追平 bun 的动作（按收益排序）
+
+C1 二进制包（60 ms → 约 5 ms）。生成器同时产出 UNINETB1 包，装载直接按元素宽度搬字节。已有写者：tools/source-package-pack.cx、tools/cxlib/sourcepackage.cx；缺的是把现状 p3 包换过去并让生成的 .com 装载它。收益最大、风险最低。
+
+C2 生成 70 ms。属 E4/lower 代码质量，与 B2 同源（自身 -O2 的压栈/出栈），慢车道。
+
+C3 装载结果按包 SHA 预展开缓存。与 B3 的已解码模型缓存是同一件事，命中仍须核包身份。
+
+C1 之后理论冷启约 90 ms，仍是 bun 的 8 倍；要进 20 ms 档必须叠加 C2 与 C3。
