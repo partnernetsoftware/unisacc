@@ -1453,3 +1453,30 @@ CX_LAYERS_SCOPE coverage=manifest-only symlinks=UNKNOWN shard_body_verified=0
 - #4 会把「哈希后端不可用」伪装成「源码全被改过」，在跨平台/新内核上产生整树 rc3，污染所有未决统计。
 - 建议顺序：#2（单读单缓冲）→ #1（NA + 独立 SUM）→ #4（回退 + `digest=`）→ #5/#6/#7（类别与静默洞）
   → #8（scope 补齐）→ #9（夹具）→ 词法/对账/转义/末次重读。
+
+### 17.6 复查补证（哈希后端与截断风险，实测）
+
+用本机空跑一个小程序（`/tmp/shaprobe/shaq.cx`，仓外，模块经软链指向 `cx/sys`、`cx/text`）：
+
+```
+sy_sha256_hex("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  rc=0
+cx_sha256_hex("abc") = 同上                                                              equal=1
+```
+
+结论与对 §17.2 的修正：
+
+- **软回退确实存在且无需新增依赖**：`cx_sha256_hex(const void *, size_t, char[65])` 是
+  **隐式 prelude 的 static**（`include/cx-flat.h:7582` 声明、`:7802` 定义 → `unisa_sha256_hex`），
+  任何 `.cx` 不写 `#pragma unisa use` 就能调；实测与 AF_ALG 路径逐字节相同（FIPS 向量相符）。
+  因此 §17.2 #4 的处理是**一行**：
+  `if (sy_sha256_hex(...) != 0) cx_sha256_hex(...);` 并可据此打 `digest=afalg|soft`。
+- **`cx/sys/sha.cx:8` 的注释点名 `cx_sha256_hex` 是准确的**（早先怀疑其不存在是错误的）：
+  软实现由 prelude 提供，`cx/crypto/sha256.cx` 的 `cs_sha256_hex` 是另一条等价实现，二选一即可。
+- **`sy_sha256_hex` 在非 Linux x86_64 目标上恒返回 1**（`sy_sha256_af` 的 `#else` 分支直接
+  `return 1`），所以缺回退时**整树**判 `SOURCE-CHANGED` ⇒ rc3；本批次声明 `lnx/x86_64`，CI 上
+  不触发，但任何跨平台运行都会全红。回退是跨平台前的**前置条件**，不只是健壮性。
+- **截断风险当前为 0**：13,432,673 B / 1613 个 tracked `.cx` 中最大为 `cx/runtime/lopm.cx` 与
+  `cx/compiler/lopm.cx` 各 **587,351 B**，远低于 `CL_CAP-1 = 1,048,575`；0 字节 tracked `.cx` 数 **0**。
+  故 §17.2 #5 属**将来**风险（文件长到 1 MiB 才触发），仍应显式分支而非依赖概率。
+
+清理：`rm -rf /tmp/shaprobe /tmp/shaq.cx`。
