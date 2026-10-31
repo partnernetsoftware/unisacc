@@ -17,10 +17,10 @@ static void path(char *p, size_t cap, const char *a, const char *b) { int n = sn
 static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
 static void check(int ok, const char *label, const char *detail) { fprintf(res, "%s\tlink.undef-function-refusal.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); if (ok) npass++; else nfail++; }
 static int prod(char *const extra[], np_result *r) { char *v[16]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 15) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, outdir, 0, 20, r, why, sizeof why); }
-static void refusal(const char *label, char *const argv[], const char *img) { np_result r; if (prod(argv, &r)) { check(0, label, "transport"); return; }
+static void refusal(const char *label, char *const argv[], const char *img, int fail) { np_result r; if (prod(argv, &r)) { check(0, label, "transport"); return; }
     char p[4400]; path(p, sizeof p, outdir, img); struct stat st; int absent = lstat(p, &st) && errno == ENOENT; if (!absent && errno != 0 && lstat(p, &st)) die("lstat");
     int named = r.errn && strstr(r.err, "undefined reference to used") != 0; char d[320]; { if (cx_fmt(d, sizeof d, "rc=%d image-absent=%d named=%d stderr=%.*s", r.rc, absent, named, (int)(r.errn > 120 ? 120 : r.errn), r.err)) { fprintf(stderr, "link-undefined-function: text too long for d\n"); exit(2); } } for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
-    check(r.rc && absent && named, label, d);
+    check(fail ? (r.rc && absent && named) : (!r.rc && !absent && !named), label, d);
     if (!absent) { if (chmod(p, 0700)) die("chmod"); char *e[] = { bound, "5", p, 0 }; np_result x; char why[1024]; if (!np_run(e, outdir, 0, 7, &x, why, sizeof why)) { fprintf(res, "INFO\tlink.undef-function-refusal.%s.image-run\trc=%d (crash expected while the defect stands)\n", label, x.rc); np_free(&x); } }
     np_free(&r); }
 
@@ -32,9 +32,13 @@ int main(int argc, char **argv) {
     const char *M = "int used(void);int main(void){return used()+2;}\n", *U = "int unused(void){return 99;}\n"; char p[4400];
     path(p, sizeof p, outdir, "main.c"); saved(p, M, strlen(M)); path(p, sizeof p, outdir, "unused.c"); saved(p, U, strlen(U));
     { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "main.o", "main.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("main.o"); np_free(&r); char *w[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "unused.o", "unused.c", 0 }; if (prod(w, &r) || r.rc) die("unused.o"); np_free(&r); char *a[] = { "ar", "rcs", "none.a", "unused.o", 0 }; if (prod(a, &r) || r.rc) die("none.a"); np_free(&r); }
-    { char *v[] = { "-o", "img", "main.o", 0 }; refusal("object-only", v, "img"); }
-    { char *v[] = { "-o", "img2", "main.o", "none.a", 0 }; refusal("archive-without-definition", v, "img2"); }
-    { char *v[] = { "-o", "img3", "main.c", 0 }; refusal("direct-c-route", v, "img3"); }
+    { char *v[] = { "-o", "img", "main.o", 0 }; refusal("object-only", v, "img", 1); }
+    { char *v[] = { "-o", "img2", "main.o", "none.a", 0 }; refusal("archive-without-definition", v, "img2", 1); }
+    { char *v[] = { "-o", "img3", "main.c", 0 }; refusal("direct-c-route", v, "img3", 1); }
+    /* a.c prototypes used and calls it; b.c defines it. -o of both must link, not report undefined reference. */
+    { path(p, sizeof p, outdir, "a.c"); saved(p, "int used(void);int main(void){return used();}\n", 46);
+      path(p, sizeof p, outdir, "b.c"); saved(p, "int used(void){return 7;}\n", 26);
+      char *v[] = { "-o", "imgm", "a.c", "b.c", 0 }; refusal("multi-file-defined", v, "imgm", 0); }
     /* cross-archive order (found 2026-10-28): m2 needs outer (in A.a); outer needs inner (in B.a). `m2.o A.a B.a` works
        (106); `m2.o B.a A.a` must be refused the same way (inner never pulled: archives are scanned once, in order,
        like ld) -- today it links a crashing image. The working order is asserted so the row is not vacuous. */

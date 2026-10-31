@@ -244,3 +244,188 @@ int fw_undef_line(const char *name, int n, char *out, int cap) {
     out[at] = 0;
     return 0;
 }
+
+/* A side-car name is a link error when the primary source itself prototypes
+   it and never defines it. A call whose declaration arrives only from a
+   header stays a host forward: that declaration is not in this file.
+   Only a declarator at brace depth 0 counts. The span has already taken
+   the input buffer, so the source is read again from its path. */
+static int uu_id(int c) {
+    if (c >= 'A' && c <= 'Z') return 1;
+    if (c >= 'a' && c <= 'z') return 1;
+    if (c == '_') return 1;
+    if (c >= '0' && c <= '9') return 1;
+    return 0;
+}
+static int uu_sp(int c) {
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f') return 1;
+    return 0;
+}
+static int uu_role(const char *s, long n, const char *name, int nl) {
+    long i;
+    int depth, proto, defn;
+    i = 0;
+    depth = 0;
+    proto = 0;
+    defn = 0;
+    while (i < n) {
+        char c;
+        c = s[i];
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            else i = n;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char q;
+            q = c;
+            i++;
+            while (i < n && s[i] != q) {
+                if (s[i] == '\\' && i + 1 < n) i += 2;
+                else if (s[i] == '\n') break;
+                else i++;
+            }
+            if (i < n && s[i] == q) i++;
+            continue;
+        }
+        if (c == '{') { depth++; i++; continue; }
+        if (c == '}') { if (depth) depth--; i++; continue; }
+        if (depth == 0 && uu_id((unsigned char)c)) {
+            long st, j;
+            int match, k, par, word;
+            st = i;
+            while (i < n && uu_id((unsigned char)s[i])) i++;
+            match = (i - st == (long)nl);
+            k = 0;
+            while (match && k < nl) {
+                if (s[st + k] != name[k]) match = 0;
+                k++;
+            }
+            if (!match) continue;
+            j = i;
+            while (j < n && uu_sp((unsigned char)s[j])) j++;
+            if (j >= n || s[j] != '(') continue;
+            par = 0;
+            while (j < n) {
+                char d;
+                d = s[j];
+                if (d == '"' || d == '\'' || (d == '/' && j + 1 < n && (s[j + 1] == '/' || s[j + 1] == '*'))) break;
+                if (d == '(') { par++; j++; continue; }
+                if (d == ')') { par--; j++; if (par == 0) break; continue; }
+                j++;
+            }
+            if (par != 0) continue;
+            word = 0;
+            while (j < n) {
+                char d;
+                d = s[j];
+                if (d == '/' && j + 1 < n && s[j + 1] == '/') {
+                    while (j < n && s[j] != '\n') j++;
+                    continue;
+                }
+                if (d == '/' && j + 1 < n && s[j + 1] == '*') {
+                    j += 2;
+                    while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) j++;
+                    if (j + 1 < n) j += 2;
+                    else j = n;
+                    continue;
+                }
+                if (uu_sp((unsigned char)d)) {
+                    if (d == '\n' && word) break;
+                    j++;
+                    continue;
+                }
+                if (d == '(') {
+                    par = 1;
+                    j++;
+                    while (j < n && par) {
+                        if (s[j] == '(') par++;
+                        else if (s[j] == ')') par--;
+                        j++;
+                    }
+                    continue;
+                }
+                if (d == ';' || d == ',') { proto = 1; break; }
+                if (d == '{') { defn = 1; break; }
+                if (uu_id((unsigned char)d)) {
+                    word = 1;
+                    while (j < n && uu_id((unsigned char)s[j])) j++;
+                    continue;
+                }
+                j++;
+            }
+            continue;
+        }
+        i++;
+    }
+    if (defn) return 2;
+    if (proto) return 1;
+    return 0;
+}
+static void uu_say(const char *name, int nl) {
+    char msg[1200];
+    const char *pre;
+    int k, i;
+    int sy_write_all(int, const void *, long);
+    pre = "link: undefined reference to ";
+    k = 0;
+    while (pre[k] && k < 1100) { msg[k] = pre[k]; k++; }
+    i = 0;
+    while (i < nl && k < 1196) { msg[k] = name[i]; k++; i++; }
+    msg[k] = '\n';
+    k++;
+    sy_write_all(2, msg, (long)k);
+}
+int uu_user_undef(const char *src, const unsigned char *b, unsigned long long n,
+                  unsigned long long at, unsigned long long cnt, char *why, int cap) {
+    char *text;
+    long sz, tn;
+    int fd;
+    unsigned long long r;
+    int sy_open_read(const char *);
+    long sy_reg_size(int);
+    int sy_read_full(int, void *, long);
+    int sy_close(int);
+    void *mm_alloc(long);
+    void mm_free(void *);
+    if (!src || !src[0] || (src[0] == '-' && src[1] == 0) || !b) return 0;
+    fd = sy_open_read(src);
+    if (fd < 0) return 0;
+    sz = sy_reg_size(fd);
+    if (sz < 0 || sz > 1048576L) { sy_close(fd); return 0; }
+    text = (char *)mm_alloc(sz + 1);
+    if (!text) { sy_close(fd); return 0; }
+    if (sz > 0 && sy_read_full(fd, text, sz)) { sy_close(fd); mm_free(text); return 0; }
+    sy_close(fd);
+    text[sz] = 0;
+    tn = sz;
+    r = 0;
+    while (r < cnt) {
+        unsigned long long nl, sl;
+        const char *nm;
+        int role;
+        if (us_fw_u64(b, n, &at, &nl) || nl > 1024 || nl > n - at) { mm_free(text); return 0; }
+        nm = (const char *)(b + at);
+        at += nl;
+        if (us_fw_u64(b, n, &at, &sl) || sl > n - at) { mm_free(text); return 0; }
+        at += sl;
+        if (nl > 0 && nl <= 1024) {
+            role = uu_role(text, tn, nm, (int)nl);
+            if (role == 1) {
+                uu_say(nm, (int)nl);
+                if (why && cap > 0) why[0] = 0;
+                mm_free(text);
+                return 1;
+            }
+        }
+        r++;
+    }
+    mm_free(text);
+    return 0;
+}
