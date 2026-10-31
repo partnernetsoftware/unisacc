@@ -2055,3 +2055,68 @@ int sy_realpath(const char *path, char *dst, int cap) {
 `33 TU = build-instance ≠ 一次多根 cxm 调用`（§19.7）不变；单根 preflight 不蕴含构造级身份一致
 （§19.8）不变。**真实 argv 与运行数据仍未捕获** ⇒ 上述所有计数在当前只能是**源码推导的字段设计**，
 不是实测值，记 UNMEASURED；不得写成运行验证。
+
+### 19.12 再更正：`identity_verified` 命名越界；fallback 是标志不是分区
+
+两处按 cdx 裁定改。
+
+#### A. 删掉 `build_units_identity_verified` / `_unverified`
+
+这两个名字声称了**能力**（身份已验证），而 realpath 成功只能证明**路径解析**，不能证明：
+
+- 不同词法入口的**依赖闭包**一致；
+- 不同词法入口的**有效公开集**一致；
+- 同一物理文件的两个词法名字之间的 canonical 选择一致。
+
+改为只陈述可观察事实的成对计数：
+
+| 字段 | 含义（只陈述发生了什么） |
+|---|---|
+| `unit_path_resolved` | 该接纳项的 `eb_real` 调 `sy_realpath` **成功** |
+| `unit_path_fallback` | 该接纳项的 `eb_real` **失败并回退**到词法路径 |
+
+`unit_path_resolved + unit_path_fallback == build_units`（这是同一分区的划分，成立）。
+
+#### B. 单个新项的 realpath 成功，不能排除**先前**比较键不可靠
+
+`eb_real` 是逐项调用的；`root_hits`/`closure_hits` 的判定是"新项的 `rp` vs 既有 `eb_rootreal[]`/
+`eb_creal[]` 逐个比较"。若**先前**某个根或闭包项回退成了词法路径，则：
+
+- 新项即便 `unit_path_resolved`，与那个不可靠键的比较结果**仍然无效**（可能该合并未合并；
+  也可能把两条词法路径当成不同项）。
+- 因此判断"本次去重是否可信"必须看**比较双方**，而不只是新项自己。
+
+可观察的记法只有一个标志，不是计数分区：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `compare_set_has_fallback_key` | 0/1 标志 | 本次 `dup` 比较集合（`eb_rootreal[0..33)` ∪ `eb_creal[0..ncl)`）中**存在**至少一个回退键 |
+| `construction_identity` | 枚举 | 恒为 `UNKNOWN`（当前无任何手段把它升为已核） |
+
+即：`compare_set_has_fallback_key=1` ⇒ 所有依赖该集合的重复判定都不可信；`=0` 也**只**说明
+"本次比较的键都来自成功的 realpath"，仍不证明闭包/公开集一致 ⇒ `construction_identity` 仍是 UNKNOWN。
+
+#### C. `plan_realpath_fallback_rows` 是**标志/子集**，不进互斥等式
+
+§19.11 A 的行级等式
+
+```
+plan_output_rows == malformed + invalid_len + root_hits + closure_hits + build_units
+```
+
+**保持原样，不加 `fallback` 项**。理由：回退行分散在上述五个分区内部（一条回退行可能既是
+`root_hits`、又是 `closure_hits` 或 `build_units`），是**横切标志**而不是互斥类别。若加进等式会
+双重计数，等式必然不等。
+
+正确用法：
+
+- `plan_realpath_fallback_rows` 单独报告，作为上述等式**之外的**横切量；
+- 语义上它应等于 `plan_output_rows` 中 `eb_real` 回退的行数，与五个分区**不相交求和**无关；
+- 若要自检它与分区的关系，只能写不等式：`plan_realpath_fallback_rows <= plan_output_rows`。
+
+#### D. 未变
+
+- 33 TU = build-instance，不是一次多根 cxm 调用（§19.7）。
+- 单根 preflight 合格不蕴含构造级身份一致（§19.8）。
+- `sy_realpath` 在 `cx/sys/fs.cx:95` 且符合 CX-Y-4（§19.11 B）；问题是 `eb_real` 吞错。
+- **真实 argv 与所有运行计数继续 UNMEASURED**；本节全部是字段设计，不是实测值。
