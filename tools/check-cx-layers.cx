@@ -445,6 +445,16 @@ static int cl_unesc(const char *in, long n, char *out, long cap) {
     out[o] = 0;
     return 0;
 }
+static void cl_recon(char (*smod)[128], int ns, char (*umod)[128], int nu, const char *path) {
+    int i, j, used[128];
+    for (i = 0; i < nu && i < 128; i++) used[i] = 0;
+    for (i = 0; i < ns && i < 128; i++) {
+        int hit = 0;
+        for (j = 0; j < nu && j < 128; j++) if (!used[j] && cl_eq(smod[i], umod[j])) { used[j] = 1; hit = 1; break; }
+        if (!hit) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tMISSING-U\t%s\t%s\n", path, smod[i]); }
+    }
+    for (j = 0; j < nu && j < 128; j++) if (!used[j]) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tEXTRA-U\t%s\t%s\n", path, umod[j]); }
+}
 static int cl_audit(void) {
     long n, i, a, b;
     char mp[CL_PATH], idx[CL_PATH];
@@ -547,17 +557,7 @@ static int cl_audit(void) {
           }
           if (cl_uses_overflow) too = 1;
           if (too) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tTOO-MANY-USES\t%s\n", path); }
-          for (i2 = 0; i2 < nu && i2 < 128; i2++) used[i2] = 0;
-          for (i2 = 0; i2 < ns && i2 < 128; i2++) {
-              int hit = 0;
-              for (j2 = 0; j2 < nu && j2 < 128; j2++) {
-                  if (!used[j2] && cl_eq(smod[i2], umod[j2])) { used[j2] = 1; hit = 1; break; }
-              }
-              if (!hit) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tMISSING-U\t%s\t%s\n", path, smod[i2]); }
-          }
-          for (j2 = 0; j2 < nu && j2 < 128; j2++) {
-              if (!used[j2]) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tEXTRA-U\t%s\t%s\n", path, umod[j2]); }
-          }
+          cl_recon(smod, ns, umod, nu, path);
         }
         cl_domain++; cl_bytes += (long)tx_len(path, CL_PATH);
         cl_shard_file(path, sha);
@@ -871,6 +871,26 @@ static void cl_fixtures(void) {
         LEX("unknown.cx"); fx_note(cl_nuses == 0, "lex-unknown-pragma");
         LEX("lines.cx");   fx_note(cl_nuses == 1 && cl_eq(cl_uses[0].mod, "j") && cl_uses[0].line == 3, "lex-physical-line");
 #undef LEX
+    }
+    /* J: manifest unescape + U multiset (12 named checks) */
+    { char a[4][128], b[4][128], out[64]; int rc2;
+      tx_copy(a[0], 128, "a", 1); tx_copy(a[1], 128, "a", 1);
+      tx_copy(b[0], 128, "a", 1); tx_copy(b[1], 128, "a", 1);
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 2, b, 2, "fx"); fx_note(cl_und_recon == 0, "u-equal-duplicate");
+      tx_copy(b[1], 128, "c", 1); cl_und_recon = cl_und_total = 0; cl_recon(a, 2, b, 2, "fx");
+      fx_note(cl_und_recon == 2, "u-same-count-different-name");
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 1, b, 2, "fx"); fx_note(cl_und_recon == 1, "u-extra");
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 2, b, 1, "fx"); fx_note(cl_und_recon == 1, "u-missing");
+      tx_copy(b[0], 128, "a", 1); tx_copy(b[1], 128, "b", 1);
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 1, b, 1, "fx"); fx_note(cl_und_recon == 0, "u-prefix-match");
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 0, b, 0, "fx"); fx_note(cl_und_recon == 0, "u-empty");
+      cl_und_recon = cl_und_total = 0; cl_recon(a, 1, b, 2, "fx"); fx_note(cl_und_total == 1, "u-sum-total");
+      rc2 = cl_unesc("a\\tb\\nc\\\\d", 10, out, sizeof out);
+      fx_note(rc2 == 0 && tx_eqz(out, "a\tb\nc\\d"), "manifest-unescape-mixed");
+      rc2 = cl_unesc("plain", 5, out, sizeof out); fx_note(rc2 == 0 && tx_eqz(out, "plain"), "manifest-unescape-plain");
+      rc2 = cl_unesc("abc", 3, out, 3); fx_note(rc2 < 0, "manifest-unescape-too-long");
+      rc2 = cl_unesc("\\q", 2, out, sizeof out); fx_note(rc2 == 0 && tx_eqz(out, "\\q"), "manifest-unescape-unknown-kept");
+      rc2 = cl_unesc("", 0, out, sizeof out); fx_note(rc2 == 0 && out[0] == 0, "manifest-unescape-empty");
     }
     sy_printf("CX_LAYERS_FIXTURES\tchecks=%d\tfailed=%d\n", fx_checks, fx_fail);
     cx_fmt(cl_root, sizeof cl_root, "%s", cl_reporoot);
