@@ -86,7 +86,8 @@
 - 第二策略 `pair-policy-v1r`：同一根仅把兄弟 use 行序逆序，其余同 v1；单独报告 visited/peak。明确只覆盖两种顺序，不等于所有排列。
 有效公开集比较与计数策略（v1 全遍历）：
 - 每个 pair 比较 canonical 与 candidate 的有效公开集（按 §5 的清单规则，逐名集合；无清单/无匹配行=全部非 static）。记录 `pairs_public_equal`、`pairs_public_diff`、`pairs_errors`。
-- v1 **不因差异或错误停止遍历**：差异只记录，错误把根标 UNKNOWN 并计入 `pairs_errors`，结构遍历继续。`pairs_visited_total`/`pair_peak` 是该全遍历策略的值，不是“首次差异即停”的生产算法值；若未来生产算法在首差异中止，本值只能作为上界。
+- v1 **不因差异或错误停止遍历**：差异只记录，错误把根标 UNKNOWN 并计入 `pairs_errors`，结构遍历继续。`pairs_visited_total`/`pair_peak` 只是该全遍历策略的测量值，不是任意生产算法的值。
+- 不能对“任意首差异即停算法”声称上界：只有当生产算法与 v1 使用**相同的配对生成、去重键、canonical 选择和工作队列调度**，且停止仅裁剪同一条遍历时，全遍历值才可作该算法的条件上界；canonical 或调度不同可能使 peak 更大。除此之外一律 UNKNOWN，不比较、不外推。
 - 若实现没有执行有效集比较，只能输出 `pairs_proxy`，不得称实际递归核验，也不得用于 pair 峰门。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
 
