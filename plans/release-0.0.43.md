@@ -345,6 +345,7 @@ STATE43：**21782dd5 干净 nets 会话一百四十二批（omp-grk，2026-11-01
 STATE43：**21782dd5 干净 nets 官方门（omp-grk，2026-11-01）**：再 4/4 PASS：`cx-funit-host`、`cx-library-build-check`、`cx-library-payload`、`capsule-export`。`tests/run.cx -- --all out/tb/sess-nets2` 烟测 16/0。聚合 `pass=146 missing=204 fail=0 unknown=0 refused=0`，覆盖 `satisfied=188 unsatisfied=142`。`ALL NOT_QUALIFIED`，rc 1。会话仍被接受，`nets` 没被改。不跑 `net-controls`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 干净 nets 会话一百四十八批（omp-grk，2026-11-01）**：再 PASS：`commit-own`、`cx-host-run`。官方聚合 `pass=148 missing=202 fail=0 refused=0`，覆盖 `satisfied=190 unsatisfied=140`。会话仍被接受。不跑 `net-controls`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 全材料会话（omp-grk，2026-11-01）**：新开会话 `out/tb/sess-full`。材料图一次带齐 8 份：`objects`、`pp-gold`、`kernel-route`、`ri-chain` 指冻结副本，`nets` 指未改的 `frozen-nets-20261101`，另加 `hostar`、`hostld`、`e2model`。八份都已登记。`objects-link` PASS，`nets` PASS。不跑 `net-controls`。`sess-nets2` 的 148 个 PASS 不并进这份会话。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 全材料会话十一批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 PASS：`census`、`full-domain-check`、`smoke`、`ratchets-tool`、`pp-gold-controls`、`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。加上 `objects-link` 和 `nets`，11 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
