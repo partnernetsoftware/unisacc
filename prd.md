@@ -649,6 +649,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 **0.0.45 已登记需求（主人2026-10-24）**：继续改良流＋网范式的模块边界，使模块成为外部可调用、可共享的工具能力；支持不同`.com`程序动态共用这些模块和权重，构建更丰富的测试及应用功能。当前仅登记，具体接口和共享机制待设计；见[0.0.45计划](plans/v0.0.45.md#registered-requirements)，不加入0.0.43发布前置。
 
+**0.0.44 由 0.0.43 已知缺口转入的编号（cc 按主人「你来安排」2026-10-31 登记，正文在 [plans/v0.0.44.md](plans/v0.0.44.md)，豁免记录在 `tests/waivers-0.0.43.tsv`）**：C44-WIN-ARM64-01、C44-LIBUNISACC-01、C44-DIAG-COLUMN-01（R1–R3）；C44-STREAM-CONTAINER-01（R4、R7、R8）；C44-MALLOC-01（R5）；C44-BUDGET-01（R6）；C44-HOSTSYM-01（R9）；C44-LOADER-SEMANTIC-01（R10）；C44-WERROR-01、C44-ASLIMIT-01（known-gaps 小行为）。
 进入0.1.x前，自有构造、构建、自举、测试、队列、缓存、报告及发布工具链迁到C/.cx；在没有Python、外部cc和shell的环境中，由上一版unisacc.com构建下一版并达到自举不动点、完成本地适用测试。外部对照编译器仅作可关闭的预言机。不得改后缀、藏脚本或由.cx调用Python/shell冒充完成；按依赖族迁移，保留原检查、失败语义、故障注入及新旧对拍。归档不等于删除未端口义务，archive/ujs等范围逐项清点，不默认豁免。
 
 **0.0.46 已登记需求（主人2026-10-31）**：基于 `unisacc.com`、`gcc_cx.com`、`clang_cx.com` 与 cx 架构，做对标 agent harness 的工具：`cx-csih`（参考 Pi／`badlogic/pi-mono` 的最小 harness 路线）、`cx-csih-full`（参考 OMP／`oh-my-pi` 的厚工具面路线），两者共用同一套会话与工具合同及 cx 模块。命名已裁定不借用他人产品名（CSIH = c-based super intelligence harness）。另登记 **cx 原生 TLS**：不卡在编译器，卡在密码学原语面，按原语分片实现，SHA-256／HMAC-SHA-256 已落地并过向量，其余分片见[cx 原生 TLS 计划](plans/cx-l0-tls.md)。harness 本体**未实现**；不构成 0.0.43 收口前置，范围及验收方向见[0.0.46计划](plans/v0.0.46.md#registered-requirements)。
