@@ -115,7 +115,7 @@ static const char *cl_ln(int l) {
     if (l == 3) return "L3"; if (l == 4) return "AMB"; return "OUT";
 }
 typedef struct { char mod[128]; int line; int cond; } cl_Use;
-static cl_Use cl_uses[256]; static int cl_nuses;
+static cl_Use cl_uses[256]; static int cl_nuses; static int cl_uses_overflow;
 static char cl_uses_path[CL_PATH];
 
 /* Skip spaces/comments/line splices inside one directive. Returns new index;
@@ -145,7 +145,7 @@ static void cl_lex_uses(const char *path) {
     long n, i = 0; int line = 1, depth = 0, bol = 1; int nl;
     if (cl_eq(path, cl_uses_path)) return;
     cx_fmt(cl_uses_path, sizeof cl_uses_path, "%s", path);
-    cl_nuses = 0;
+    cl_nuses = 0; cl_uses_overflow = 0;
     n = (cl_scan_path[0] && cl_eq(path, cl_scan_path)) ? cl_scan_len : cl_read(path, cl_src, CL_CAP);
     if (n <= 0) return;
     while (i < n) {
@@ -184,7 +184,7 @@ static void cl_lex_uses(const char *path) {
                         if (cl_nuses < 256 && e > u) {
                             long q = 0; while (u + q < e && q < 127) { cl_uses[cl_nuses].mod[q] = cl_src[u + q]; q++; }
                             cl_uses[cl_nuses].mod[q] = 0; cl_uses[cl_nuses].line = start; cl_uses[cl_nuses].cond = depth > 0; cl_nuses++;
-                        }
+                        } else if (e > u) cl_uses_overflow = 1;
                         j = cl_gap(cl_src, n, m, &nl);
                     }
                 }
@@ -429,7 +429,7 @@ static int cl_audit(void) {
     cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
     cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
     cl_domain = 0; cl_bytes = 0; cl_dig = 0; cl_man_dig = 0;
-    sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12/U-reconciliation/fixtures-30 not implemented\n");
+    sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12 and named-fixtures-30 not implemented (U reconciliation is implemented)\n");
     cl_und_lex++; cl_und_total++;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
     cl_join(idx, sizeof idx, cl_root, cl_idx);
@@ -492,7 +492,7 @@ static int cl_audit(void) {
           }
         }
         { char sp[CL_PATH], shp[CL_PATH]; long scn, z; int inblock = 0;
-          char smod[128][128], umod[128][128]; int ns = 0, nu = 0, i2, j2, used[128];
+          char smod[128][128], umod[128][128]; int ns = 0, nu = 0, i2, j2, used[128], too = 0;
           cl_join(sp, sizeof sp, cl_root, path);
           cx_fmt(shp, sizeof shp, "%s/%s.tsv", cl_idx, sha);
           scn = cl_read(shp, cl_shard, CL_CAP);
@@ -508,18 +508,21 @@ static int cl_audit(void) {
                           if (!(cl_isid((unsigned char)c) || c == '.')) break;
                           umod[nu][m++] = c; w++;
                       }
-                      umod[nu][m] = 0;
-                      if (nu < 128) nu++;
+                      if (nu >= 128) { too = 1; }
+                      else { umod[nu][m] = 0; nu++; }
                   }
                   q = e2 + 1;
               }
           }
           cl_lex_uses(path);
-          for (z = 0; z < cl_nuses && z < 128; z++) {
-              long q = 0; while (cl_uses[z].mod[q] && q < 127) { smod[ns][q] = cl_uses[z].mod[q]; q++; }
+          for (z = 0; z < cl_nuses; z++) {
+              long q = 0;
+              if (ns >= 128) { too = 1; break; }
+              while (cl_uses[z].mod[q] && q < 127) { smod[ns][q] = cl_uses[z].mod[q]; q++; }
               smod[ns][q] = 0; ns++;
           }
-          if (ns > 128 || nu > 128) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tTOO-MANY-USES\t%s\n", path); }
+          if (cl_uses_overflow) too = 1;
+          if (too) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tTOO-MANY-USES\t%s\n", path); }
           for (i2 = 0; i2 < nu && i2 < 128; i2++) used[i2] = 0;
           for (i2 = 0; i2 < ns && i2 < 128; i2++) {
               int hit = 0;
