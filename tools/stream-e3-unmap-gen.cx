@@ -1,0 +1,126 @@
+/* tools/stream-e3-unmap-gen.cx -- e3.ref.unmapped-limitation.
+ * Rank 8 is accepted. Rank 9 is the declared shape refusal
+ * "not covered: array rank" (exec/parse2/shape-reject.tsv), with a
+ * location, empty stdout, and no tape. --check does not compile.
+ *   sh ./unisacc.com tools/stream-e3-unmap-gen.cx -- --check
+ *   sh ./unisacc.com tools/stream-e3-unmap-gen.cx --
+ * The no-argument form uses the repo and out/e3unmap-<pid>. This tool does not edit the product.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char root[4096], outdir[4200], bound[4400], product[4400];
+static int npass, nfail, rf;
+static void die(const char *s) { sy_eprintf("stream-e3-unmap: REFUSE %s\n", s); sy_exit(2); }
+static void path(char *p, long cap, const char *a, const char *b) {
+    int n = tx_snprintf(p, (size_t)cap, "%s/%s", a, b);
+    if (n < 0 || (long)n >= cap) die("path");
+}
+static void saved(const char *p, const char *s, long n) {
+    int f = sy_open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (f < 0) die("exclusive create");
+    if (sy_write_all(f, s, n)) die("write");
+    if (sy_close(f)) die("close");
+}
+static int runv(char *const argv[], int secs, np_result *r) {
+    char why[1024], sec[16], *v[24]; int n = 0;
+    tx_snprintf(sec, sizeof sec, "%d", secs);
+    v[n++] = bound; v[n++] = sec;
+    for (int i = 0; argv[i]; i++) { if (n >= 22) die("argv"); v[n++] = argv[i]; }
+    v[n] = 0;
+    return np_run(v, root, 0, secs + 2, r, why, sizeof why);
+}
+static int has(const char *s, long n, const char *lit) {
+    long L = tx_len(lit, 200), i;
+    if (!s || L < 0 || L > n) return 0;
+    for (i = 0; i + L <= n; i++) {
+        char tmp[200];
+        if (tx_copy(tmp, (long)sizeof tmp, s + i, L)) return 0;
+        if (tx_eqz(tmp, lit)) return 1;
+    }
+    return 0;
+}
+static void row(const char *cell, const char *label, int ok) {
+    char line[256];
+    int z = tx_snprintf(line, sizeof line, "%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label);
+    if (z < 0 || (size_t)z >= sizeof line || sy_write_all(rf, line, z)) die("results");
+    sy_printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label);
+    if (ok) npass++; else nfail++;
+}
+static void write_rank(const char *p, int dims) {
+    char buf[256];
+    long n = 0; int i, z;
+    z = tx_snprintf(buf, sizeof buf, "int main(void){ int a");
+    if (z < 0) die("rank");
+    n = z;
+    for (i = 0; i < dims; i++) {
+        z = tx_snprintf(buf + n, sizeof buf - (size_t)n, "[1]");
+        if (z < 0 || (size_t)z >= sizeof buf - (size_t)n) die("rank");
+        n += z;
+    }
+    z = tx_snprintf(buf + n, sizeof buf - (size_t)n, "; return 0; }\n");
+    if (z < 0 || (size_t)z >= sizeof buf - (size_t)n) die("rank");
+    n += z;
+    saved(p, buf, n);
+}
+static int compile_s(const char *src, const char *out, np_result *r) {
+    char *v[] = {"sh", product, (char *)src, "-O0", "-S", "-o", (char *)out, 0};
+    return runv(v, 15, r);
+}
+static int nonempty(const char *p) {
+    size_t n = 0; char *x = cx_read(p, &n);
+    return x && n > 0;
+}
+static int absent(const char *p) {
+    size_t n = 0; char *x = cx_read(p, &n);
+    return !x;
+}
+
+int main(int argc, char **argv) {
+    int check = argc >= 2 && tx_eqz(argv[1], "--check");
+    char r8[4400], r9[4400], t8[4400], t9[4400], res[4400];
+    if (argc != 1 && !check) { sy_eprintf("usage: [--check]\n"); return 2; }
+    if (sy_realpath(".", root, (int)sizeof root) < 0) die("root");
+    if (check) { sy_printf("CHECK\tstream-e3-unmap\tok=1\n"); return 0; }
+    {
+        int z = tx_snprintf(outdir, sizeof outdir, "%s/out/e3unmap-%d", root, (int)sy_pid());
+        if (z < 0 || (size_t)z >= sizeof outdir) die("out");
+    }
+    if (sy_mkdir(outdir, 0700)) die("out exists or unusable");
+    path(bound, (long)sizeof bound, root, "tools/bound");
+    path(product, (long)sizeof product, root, "unisacc.com");
+    path(r8, (long)sizeof r8, outdir, "rank8.c");
+    path(r9, (long)sizeof r9, outdir, "rank9.c");
+    path(t8, (long)sizeof t8, outdir, "rank8.tape");
+    path(t9, (long)sizeof t9, outdir, "rank9.tape");
+    path(res, (long)sizeof res, outdir, "results.tsv");
+    write_rank(r8, 8);
+    write_rank(r9, 9);
+    rf = sy_open(res, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (rf < 0) die("results");
+    {
+        np_result r;
+        int bad = compile_s(r8, t8, &r);
+        int ok = !bad && r.rc == 0 && !r.outn && !r.errn && nonempty(t8);
+        row("e3.ref.unmapped-limitation", "rank8-accepts", ok);
+        np_free(&r);
+    }
+    {
+        np_result r;
+        int bad = compile_s(r9, t9, &r);
+        int ok = !bad && r.rc == 1 && !r.outn && absent(t9)
+            && has(r.err, r.errn, "rank9.c:1:")
+            && has(r.err, r.errn, "error: not covered: array rank")
+            && has(r.err, r.errn, "1 error generated");
+        row("e3.ref.unmapped-limitation", "rank9-located-stops", ok);
+        np_free(&r);
+    }
+    if (sy_close(rf)) die("results");
+    sy_printf("STREAM_E3_UNMAP\tassertions=%d\tfailed=%d\n", npass + nfail, nfail);
+    return nfail ? 1 : 0;
+}
