@@ -28,7 +28,7 @@ CX 保持 C99 受检查子集与 `#pragma unisa` 配置：底层对接 libc、PO
 
 长期目标：明确包身份、包内模块路径、公开接口与构建实例；源路径是解析输入而不是未经讨论的跨机器稳定身份。模块解析、对象所有权和链接应共用一个明确依赖图。直接 `use`、符号过滤与别名、私有符号及类型可见性都要有一致的可观察规则。CXIF v0 是类型与原型文本，不是结构化 ABI 或所有权证明。未来接口格式需明确目标 ABI、类型布局、版本及校验方式；声明与证明分开。
 
-已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。修复前 `sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。旧 `tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径，与已生效 CX-G-1 冲突。实施方提交候选 `66e086b293`，改为检测任意 `unisa` pragma 并报告两宿主入口回归通过；候选局部证据不等于所有语法及平台资格。
+已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。修复前 `sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。旧 `tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径，与已生效 CX-G-1 冲突。实施方提交候选 `66e086b293`，预检意图覆盖所有 `unisa` pragma，并报告两宿主入口局部回归通过。该候选预检按原始空白切词，而 cxmod 先把注释变空白；`#pragma/**/ unisa nonsense` 是否漏检尚待隔离候选对照实证，不能声称所有形式已拦截。局部证据也不授予平台资格。
 
 另有 CX-M-2 字面合同与实现的根单元冲突：实施方的 `modonly.cx` 同时声明 `module modonly` 并定义 `main`，宿主入口编译接受；我对该源码以当时的 `./unisacc.com -cx-plan` 实跑，输出单元、退出 0。此次执行未同步固定并核验产品摘要，只能归属于当时进程所见二进制；正式候选须固定身份后核验。规格称库模块不得定义 main；三源源码当前主要对被 `use` 单元实施该检查。真实根消费者和迁移影响已派实施方盘点，此项与 CX-G-1、W-7 分开，不改 spec，不把根 plan 接受冒充所有运行路径已验证。
 
