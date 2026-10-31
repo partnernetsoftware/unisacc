@@ -1,0 +1,230 @@
+/* tools/nametab-gen.cx -- one generator for every "fact table -> name table" module, driven by tools/nametabs.tsv.
+ *
+ *   sh ./unisacc.com tools/nametab-gen.cx [-- --check [MODULE]]     regenerate in memory and compare (the default)
+ *   sh ./unisacc.com tools/nametab-gen.cx -- --write [MODULE]        write the module file(s)
+ *   sh ./unisacc.com tools/nametab-gen.cx -- --list                  one line per spec row
+ *   --spec FILE and --out DIR (before the mode) read another spec and write/compare under DIR/compiler and
+ *   DIR/runtime instead of cx/compiler and cx/runtime, for trials
+ *
+ * tools/nametabs.tsv, one row per module (# comments; columns separated by TAB):
+ *   module   the module name; the files are cx/compiler/<module>.cx and, with rtprefix, cx/runtime/<module>.cx
+ *   prefix   the compiler-side prefix: <prefix>_count(void) and <prefix>_at(int index, <one out-pointer per field>)
+ *   rtprefix the runtime-side prefix (same table, its own copy), or - for no runtime side
+ *   source   a TSV fact table (repo path); lines starting with # and empty lines are skipped
+ *   fields   comma list of NAME=COL[:TRANSFORM][#i]: COL is a 0-based column; #i makes the field a long long (64
+ *            bits on every target; else const char *); TRANSFORM is unquote (a JSON string: drop the surrounding
+ *            double quotes, decode \\ and \"), after/ (text after the last '/'), before/ (text before the first '/')
+ *   mode     all (every row, file order) or distinct (first-seen rows by the whole field tuple)
+ *   filter   - or COL=VALUE or COL!=VALUE or COL~TEXT (the raw column contains TEXT)
+ *   note     one sentence for the module comment, or -
+ * The module: `#pragma unisa module`, a comment naming the source and this row, <prefix>_count returning the row
+ * count, <prefix>_at returning 4 for a null out-pointer, 2 for an index outside 0..count-1, else 0 with the fields
+ * set.  Strings are C-escaped.  --check prints NAMETAB<TAB>side/module<TAB>ok|differs|missing per file and
+ * NAMETABS<TAB>rows=N<TAB>ok=K<TAB>bad=M; exit 1 when M > 0.  One spec row replaces one hand-written -gen.cx.
+ * An L3 tool: no #include, no direct libc call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *g_spec = "tools/nametabs.tsv", *g_out = "cx";   /* --spec FILE, --out DIR (DIR/compiler, DIR/runtime) */
+#define MAXF 6
+#define MAXROWS 4096
+
+typedef struct { char name[32]; int col, is_int, tf; } Field;   /* tf: 0 none, 1 unquote, 2 after/, 3 before/ */
+typedef struct { char module[64], prefix[32], rtprefix[32], source[256], mode[16], filter[128], note[512]; Field f[MAXF]; int nf; } Spec;
+typedef struct { char *p; long n, cap; } Out;
+
+static void die(const char *a, const char *b) { sy_eprintf("nametab-gen: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
+
+static void put(Out *o, const char *s, long n) {
+    if (o->n + n + 1 > o->cap) { long c = (o->n + n + 1) * 2 + 256; char *g = o->p ? mm_grow(o->p, c) : mm_alloc(c); if (!g) die("out of memory", 0); o->p = g; o->cap = c; }
+    tx_copy(o->p + o->n, o->cap - o->n, s, n); o->n += n;
+}
+static void puts0(Out *o, const char *s) { put(o, s, tx_len(s, 1 << 16)); }
+
+/* the IDX-th TAB field of line s[0..n) into *off/*len; 0 or -1 */
+static int col(const char *s, long n, int idx, long *off, long *len) { return tx_field(s, n, '\t', idx, off, len); }
+
+static int parse_fields(const char *s, long n, Spec *sp) {
+    long k = 0;
+    while (k < n && sp->nf < MAXF) {
+        long c = k, eq, colon = -1, hash = -1, e; Field *f = &sp->f[sp->nf];
+        while (c < n && s[c] != ',') c++;
+        eq = tx_chr(s + k, c - k, '='); if (eq <= 0) return -1;
+        if (tx_copy(f->name, sizeof f->name, s + k, eq)) return -1;
+        e = c;
+        { long h = tx_chr(s + k, c - k, '#'); if (h >= 0) { hash = k + h; e = hash; } }
+        { long q = tx_chr(s + k + eq + 1, e - (k + eq + 1), ':'); if (q >= 0) colon = k + eq + 1 + q; }
+        {   char num[16]; long ce = colon >= 0 ? colon : e;
+            if (ce - (k + eq + 1) <= 0 || tx_copy(num, sizeof num, s + k + eq + 1, ce - (k + eq + 1))) return -1;
+            f->col = (int)tx_strtol(num, 0, 10); }
+        f->tf = 0;
+        if (colon >= 0) {
+            const char *t = s + colon + 1; long tn = e - colon - 1;
+            if (tx_same(t, tn, "unquote", 7)) f->tf = 1; else if (tx_same(t, tn, "after/", 6)) f->tf = 2; else if (tx_same(t, tn, "before/", 7)) f->tf = 3; else return -1;
+        }
+        f->is_int = hash >= 0 && tx_same(s + hash, c - hash, "#i", 2);
+        if (hash >= 0 && !f->is_int) return -1;
+        sp->nf++; k = c + 1;
+    }
+    return sp->nf > 0 ? 0 : -1;
+}
+
+static int load_specs(Spec *sp, int cap) {
+    size_t n; char *t = cx_read(g_spec, &n); long at = 0; int ns = 0;
+    if (!t) die("cannot read", g_spec);
+    while (at < (long)n) {
+        long e = tx_chr(t + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e, off, len; const char *s = t + at; Spec *x;
+        at += l + 1;
+        if (!l || s[0] == '#') continue;
+        if (ns == cap) die("too many rows", g_spec);
+        x = &sp[ns]; mm_fill(x, sizeof *x, 0, sizeof *x);
+        if (col(s, l, 0, &off, &len) || tx_copy(x->module, sizeof x->module, s + off, len) ||
+            col(s, l, 1, &off, &len) || tx_copy(x->prefix, sizeof x->prefix, s + off, len) ||
+            col(s, l, 2, &off, &len) || tx_copy(x->rtprefix, sizeof x->rtprefix, s + off, len) ||
+            col(s, l, 3, &off, &len) || tx_copy(x->source, sizeof x->source, s + off, len) ||
+            col(s, l, 4, &off, &len) || parse_fields(s + off, len, x) ||
+            col(s, l, 5, &off, &len) || tx_copy(x->mode, sizeof x->mode, s + off, len) ||
+            col(s, l, 6, &off, &len) || tx_copy(x->filter, sizeof x->filter, s + off, len) ||
+            col(s, l, 7, &off, &len) || tx_copy(x->note, sizeof x->note, s + off, len)) die("bad spec row", s);
+        if (!tx_eqz(x->mode, "all") && !tx_eqz(x->mode, "distinct")) die("mode is all or distinct", x->module);
+        ns++;
+    }
+    mm_free(t);
+    return ns;
+}
+
+/* the field value of one source line, transformed, into v (cap) */
+static int value(const char *s, long n, const Field *f, char *v, long cap) {
+    long off, len;
+    if (col(s, n, f->col, &off, &len)) return -1;
+    if (f->tf == 1 && len >= 2 && s[off] == '"' && s[off + len - 1] == '"') {   /* a JSON string: \\ and \" decode */
+        long i, o = 0;
+        for (i = off + 1; i < off + len - 1; i++) {
+            if (s[i] == '\\' && i + 1 < off + len - 1 && (s[i + 1] == '\\' || s[i + 1] == '"')) i++;
+            if (o + 1 >= cap) return -1;
+            v[o++] = s[i];
+        }
+        v[o] = 0;
+        return 0;
+    }
+    else if (f->tf == 2) { long r = tx_rchr(s + off, len, '/'); if (r >= 0) { off += r + 1; len -= r + 1; } }
+    else if (f->tf == 3) { long c = tx_chr(s + off, len, '/'); if (c >= 0) len = c; }
+    return tx_copy(v, cap, s + off, len) ? -1 : 0;
+}
+
+static int keep(const char *s, long n, const char *filter) {
+    long fl = tx_len(filter, 128), eq = tx_chr(filter, fl, '='), tl = tx_chr(filter, fl, '~'), off, len, c; int neg; char num[16];
+    if (tx_eqz(filter, "-")) return 1;
+    if (tl > 0 && (eq < 0 || tl < eq)) {   /* COL~TEXT: the column contains TEXT */
+        if (tx_copy(num, sizeof num, filter, tl)) die("bad filter", filter);
+        if (col(s, n, (int)tx_strtol(num, 0, 10), &off, &len)) return 0;
+        return tx_find(s + off, len, filter + tl + 1, fl - tl - 1) >= 0;
+    }
+    if (eq <= 0) die("bad filter", filter);
+    neg = filter[eq - 1] == '!';
+    if (tx_copy(num, sizeof num, filter, neg ? eq - 1 : eq)) die("bad filter", filter);
+    c = tx_strtol(num, 0, 10);
+    if (col(s, n, (int)c, &off, &len)) return 0;
+    return tx_same(s + off, len, filter + eq + 1, tx_len(filter + eq + 1, 128)) != neg;
+}
+
+static void cstr(Out *o, const char *v) {   /* a C string literal */
+    long i, n = tx_len(v, 4096);
+    puts0(o, "\"");
+    for (i = 0; i < n; i++) {
+        char c = v[i], b[8];
+        if (c == '"' || c == '\\') { b[0] = '\\'; b[1] = c; put(o, b, 2); }
+        else if ((unsigned char)c < 32 || (unsigned char)c > 126) { cx_fmt(b, sizeof b, "\\%03o", (unsigned char)c); puts0(o, b); }
+        else put(o, &c, 1);
+    }
+    puts0(o, "\"");
+}
+
+static void gen(const Spec *sp, const char *prefix, Out *o) {
+    size_t n; char *t = cx_read(sp->source, &n), line[512]; long at = 0; int rows = 0, k, r;
+    static char seen[MAXROWS][256]; int nseen = 0;
+    Out body = {0, 0, 0};
+    if (!t) die("cannot read source", sp->source);
+    while (at < (long)n) {
+        long e = tx_chr(t + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e; const char *s = t + at;
+        char v[MAXF][256], key[256]; long kn = 0;
+        at += l + 1;
+        if (!l || s[0] == '#' || !keep(s, l, sp->filter)) continue;
+        for (k = 0; k < sp->nf; k++) if (value(s, l, &sp->f[k], v[k], sizeof v[k])) die("missing column in", sp->source);
+        if (tx_eqz(sp->mode, "distinct")) {
+            key[0] = 0;
+            for (k = 0; k < sp->nf; k++) { long vn = tx_len(v[k], 256); if (kn + vn + 2 >= (long)sizeof key) die("key too long", sp->module); tx_copy(key + kn, sizeof key - kn, v[k], vn); kn += vn; key[kn++] = '\t'; key[kn] = 0; }
+            for (r = 0; r < nseen; r++) if (tx_eqz(seen[r], key)) break;
+            if (r < nseen) continue;
+            if (nseen == MAXROWS) die("too many rows", sp->module);
+            tx_copy(seen[nseen++], 256, key, kn);
+        }
+        if (cx_fmt(line, sizeof line, "    if (index == %d) { ", rows)) die("line", sp->module);
+        puts0(&body, line);
+        for (k = 0; k < sp->nf; k++) {
+            puts0(&body, "*"); puts0(&body, sp->f[k].name); puts0(&body, " = ");
+            if (sp->f[k].is_int) { long x; char *end = 0; x = tx_strtol(v[k], &end, 0); if (!v[k][0] || (end && *end)) die("not an integer", v[k]); cx_fmt(line, sizeof line, "%lldLL", (long long)x); puts0(&body, line); }
+            else cstr(&body, v[k]);
+            puts0(&body, "; ");
+        }
+        puts0(&body, "return 0; }\n");
+        rows++;
+    }
+    mm_free(t);
+    if (cx_fmt(line, sizeof line, "#pragma unisa module %s\n", sp->module)) die("line", sp->module); puts0(o, line);
+    puts0(o, "/* Generated by tools/nametab-gen.cx from "); puts0(o, sp->source); puts0(o, " (tools/nametabs.tsv row "); puts0(o, sp->module); puts0(o, ").\n");
+    puts0(o, "   Do not edit by hand.");
+    if (!tx_eqz(sp->note, "-")) { puts0(o, " "); puts0(o, sp->note); }
+    puts0(o, "\n   A null out-pointer returns 4. An index outside 0..count-1 returns 2.\n   No libc and no include. */\n");
+    if (cx_fmt(line, sizeof line, "int %s_count(void) {\n    return %d;\n}\n", prefix, rows)) die("line", sp->module); puts0(o, line);
+    if (cx_fmt(line, sizeof line, "int %s_at(int index", prefix)) die("line", sp->module); puts0(o, line);
+    for (k = 0; k < sp->nf; k++) { puts0(o, sp->f[k].is_int ? ", long long *" : ", const char **"); puts0(o, sp->f[k].name); }
+    puts0(o, ") {\n    if (");
+    for (k = 0; k < sp->nf; k++) { if (k) puts0(o, " || "); puts0(o, "!"); puts0(o, sp->f[k].name); }
+    puts0(o, ") return 4;\n");
+    put(o, body.p ? body.p : "", body.n);
+    puts0(o, "    return 2;\n}\n");
+    if (body.p) mm_free(body.p);
+}
+
+int main(int argc, char **argv) {
+    static Spec sp[256]; int ns, i, ok = 0, bad = 0, mode = 0; const char *only = 0;
+    while (argc >= 3 && (tx_eqz(argv[1], "--spec") || tx_eqz(argv[1], "--out"))) {   /* for trials and checks */
+        if (tx_eqz(argv[1], "--spec")) g_spec = argv[2]; else g_out = argv[2];
+        argv += 2; argc -= 2;
+    }
+    ns = load_specs(sp, 256);
+    if (argc >= 2) {
+        if (tx_eqz(argv[1], "--check")) mode = 0; else if (tx_eqz(argv[1], "--write")) mode = 1; else if (tx_eqz(argv[1], "--list")) mode = 2;
+        else { sy_eprintf("usage: nametab-gen.cx [--check|--write [MODULE] | --list]\n"); return 2; }
+        if (argc >= 3) only = argv[2];
+    }
+    for (i = 0; i < ns; i++) {
+        int side;
+        if (only && !tx_eqz(sp[i].module, only)) continue;
+        if (mode == 2) { sy_printf("%s\t%s\t%s\t%s\tfields=%d\t%s\n", sp[i].module, sp[i].prefix, sp[i].rtprefix, sp[i].source, sp[i].nf, sp[i].mode); continue; }
+        for (side = 0; side < 2; side++) {   /* 0: compiler/<module>.cx with prefix; 1: runtime/<module>.cx with rtprefix */
+            char path[4400], tag[96]; Out o = {0, 0, 0}; size_t fn; char *f; const char *pre = side ? sp[i].rtprefix : sp[i].prefix;
+            if (side && tx_eqz(pre, "-")) continue;
+            if (cx_fmt(path, sizeof path, "%s/%s/%s.cx", g_out, side ? "runtime" : "compiler", sp[i].module)) die("path", sp[i].module);
+            if (cx_fmt(tag, sizeof tag, "%s/%s", side ? "runtime" : "compiler", sp[i].module)) die("tag", sp[i].module);
+            gen(&sp[i], pre, &o);
+            if (mode == 1) { if (cx_write(path, o.p, (size_t)o.n)) die("cannot write", path); sy_printf("NAMETAB\t%s\twritten\tbytes=%ld\n", tag, o.n); ok++; }
+            else {
+                f = cx_read(path, &fn);
+                if (!f) { sy_printf("NAMETAB\t%s\tmissing\n", tag); bad++; }
+                else if ((long)fn == o.n && tx_same(f, (long)fn, o.p, o.n)) { sy_printf("NAMETAB\t%s\tok\n", tag); ok++; }
+                else { sy_printf("NAMETAB\t%s\tdiffers\n", tag); bad++; }
+                if (f) mm_free(f);
+            }
+            mm_free(o.p);
+        }
+    }
+    if (mode != 2) sy_printf("NAMETABS\trows=%d\tok=%d\tbad=%d\n", ns, ok, bad);
+    return bad ? 1 : 0;
+}
