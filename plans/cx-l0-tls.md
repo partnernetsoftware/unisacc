@@ -1,6 +1,6 @@
 # cx 原生 TLS：卡点、分片与验收
 
-状态：T2.1–T2.7 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305、X25519、P-256 ECDSA 验签），另加 `cs_ct_eq`/`cs_ct_wipe`、`crypto.bn`（大整数/Montgomery 模幂）与 `crypto.der`（严格 DER 读取器，X.509 解析的第一步）；T2.5 已落地并过向量（AES-128/256-GCM），T2.8（X.509 部分）、T2.9、T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
+状态：T2.1–T2.7 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305、X25519、P-256 ECDSA 验签），另加 `cs_ct_eq`/`cs_ct_wipe`、`crypto.bn`（大整数/Montgomery 模幂）与 `crypto.der`（严格 DER 读取器，X.509 解析的第一步）；T2.5 已落地并过向量（AES-128/256-GCM），T2.8 已落地并过向量（严格 DER 读取器、RSA PKCS#1 v1.5 验签、X.509 解析/有效期/basicConstraints/链签名/DNS 匹配），T2.9、T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
 
 ## 一句话回答"卡在哪个环节"
 
@@ -60,7 +60,7 @@ T1 不新增密码学，但它是 T2 能替换进来的前提。
 | T2.5 | AES-128/256-GCM | FIPS-197 C.1/C.3 分组向量；SP 800-38D case 2/3/4/5/9/13/14/16（12、8、60 字节 IV，含与不含 AAD，空明文与整块明文）；篡改 tag/密文/AAD/nonce、截短密文、192 位密钥全部拒绝，且坏 tag 不写明文。**已过**（`cx/crypto/aes.cx`、`cx/crypto/gcm.cx`，批次 `cx-l0-crypto-aesgcm`）；tag 固定 16 字节，截断 tag 不支持，TLS 1.3 也不使用 |
 | T2.6 | X25519 | RFC 7748 §5.2 两例 + 1/1000 次迭代、§6.1 DH 对与双方公钥；低阶点（全零、1、p-1）返 `-EINVAL`。**已过**（`cx/crypto/x25519.cx`，批次 `cx-l0-crypto-x25519`） |
 | T2.7 | P-256 ECDSA 验签 | 用 Python `cryptography` 生成的公钥/签名做对照（非 cx 自身结果）：验签通过、错摘要与篡改拒绝；r=0、s=0、r≥n、负整数、非最小 DER、尾随字节拒绝；非曲线点、压缩非平方、混合前缀、零点、零长拒绝；2G/3G/4G/5G 与 `nG`/`0G` 无穷远对照。只做验签：标量公开，不做常数时间梯子，不提供签名。**已过**（`cx/crypto/p256.cx`，批次 `cx-l0-crypto-p256`） |
-| T2.8 | ASN.1 DER + X.509 最小解析 | DER 读取器已过（`cx/crypto/der.cx`，批次 `cx-l0-crypto-der`：不定长/非最小长/多字节 tag/非最小或负或零 INTEGER/BIT STRING 未用位/BOOLEAN 非 0x00-0xFF/越界长度/尾随字节全拒绝）；X.509 解析与证书链验证未做，验收仍看真实证书链（宿主 `ca-certificates.crt` 抽样）：签名验证、有效期、basicConstraints、hostname 匹配；畸形 DER 必须拒绝而不是越界 |
+| T2.8 | ASN.1 DER + X.509 最小解析 | **已过**。DER 读取器：`cx/crypto/der.cx`，批次 `cx-l0-crypto-der`（不定长/非最小长/多字节 tag/非最小或负或零 INTEGER/BIT STRING 未用位/BOOLEAN 非 0x00-0xFF/越界长度/尾随字节全拒绝）。验签：`cx/crypto/rsa.cx`，批次 `cx-l0-crypto-rsa`（重建 EMSA 再逐字节比较，挡 Bleichenbacher '06；改摘要/改签/短签/非最小/`s == n`/错指数全拒绝）。证书：`cx/crypto/x509.cx`，批次 `cx-l0-crypto-x509`（人工链 RSA-2048 与 P-256、过期证、通配符 SAN、篡改 TBS、截短/尾随字节、真实根 Amazon Root CA 1 自验）。**不做**：name constraints、policy、CRL/OCSP、pathLen 强制、RSA-PSS、SHA-1 签名、P-384/P-521、信任锚判定——链策略留给上层。 |
 | T2.9 | TLS 1.3 握手 | RFC 8446 Appendix A 简化握手轨迹；`Finished` 校验失败必须拒绝；transcript hash 与 reference 一致 |
 | T2.10 | 记录层与会话 | 与 libcurl 对同一站点对拍：应用数据字节相等；重协商/会话票据失败路径有测试 |
 
