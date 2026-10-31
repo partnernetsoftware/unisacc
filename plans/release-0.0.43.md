@@ -211,6 +211,7 @@ STATE43：**21782dd5 门会话重跑（omp-grk，2026-11-01）**：`out/tb/sess-
 STATE43：**21782dd5 门会话重跑四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`callback-wrapper-index`、`capsule-export`、`com-tree`。加上 `affected-tool`，重跑 4/4。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`commit-own`、`core-compat`。重跑 6/6。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑十批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-attribute-frame`、`cx-bounded`、`cx-codec`、`cx-core-alu`。重跑 10/10。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话重跑十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-core-bytes`、`cx-core-output`。重跑 12/12。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
