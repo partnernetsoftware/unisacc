@@ -338,6 +338,7 @@ STATE43：**21782dd5 干净 nets 会话九十三批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 干净 nets 会话一百零一批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 8/8 PASS：`link-edge-cases`、`matrix-stale`、`nametab-gen`、`optimization-native`、`optimization-run`、`optimization-tape`、`out-gc`、`owned`。会话里 101 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 干净 nets 会话一百零九批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 8/8 PASS：`phase-timing-external`、`pp-cli-macros`、`pp-cli-targets`、`pp-header-locations`、`properties`、`refactor-tool`、`register-tool`、`resources`。会话里 109 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 干净 nets 会话一百一十七批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 8/8 PASS：`ri-multi`、`ri-route-refuse`、`ri-trace`、`ri-trace-output`、`route-chains`、`snapshot-run-tool`、`stale-tool`、`tape-neg`。会话里 117 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 干净 nets 会话一百二十七批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 10/10 PASS：`tape-gap-tool`、`use-path`、`symindex-tool`、`own-diff-tool`、`stream-e3-unmap`、`stream-prune-route`、`stream-e3-gold`、`stream-e3-pos`、`stream-e3-ref`、`stream-e3-scope`。会话里 127 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
