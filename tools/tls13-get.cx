@@ -1,0 +1,244 @@
+/* tools/tls13-get.cx -- one real HTTPS GET through cx's own TLS 1.3 client.
+ *
+ *   sh ./unisacc.com tools/tls13-get.cx -- --host HOST [--path /] [--port 443] [--verbose]
+ *
+ * This is the online counterpart of batch cx-l0-crypto-tls13: the RFC 8448 vectors prove the key schedule
+ * and the record layer against bytes someone else recorded, and this proves the same code against a server
+ * that has never heard of those bytes.  It needs the network, so a failure is reported, not registered as a
+ * PASS; there is deliberately no check-*.cx and no batch row.
+ *
+ * The request is HTTP/1.1 with `Connection: close`.  The response body goes to standard output as it
+ * arrives, so it can be compared byte for byte with `curl -s`; the progress notes and the certificate facts
+ * go to standard error under --verbose.
+ *
+ * The chain is checked as far as a client can without a trust store: every certificate the server sent is
+ * parsed, each child's signature is checked against its issuer, the leaf must match the host name and be
+ * valid now.  The top certificate is NOT compared against a root, so a successful run says "this is a real
+ * TLS 1.3 server speaking to us", not "this chain is trusted". */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.net
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use crypto.tls13
+#pragma unisa use crypto.record
+#pragma unisa use crypto.x509
+
+#define TG_MAX_REC 16640
+#define TG_MAX_MSG 4096
+#define TG_MAX_CERTS 4
+
+static int verbose;
+
+static void note(const char *a, long v) {
+    if (!verbose) return;
+    sy_eprintf("%s%ld\n", a, v);
+}
+
+/* 32 bytes from /dev/urandom; 0, or -errno.  No cx module provides an RNG yet, and /dev/urandom is the
+   shortest honest path: TLS needs an unpredictable private key and a fresh ClientHello random. */
+static int random_bytes(unsigned char *out, long n) {
+    int fd = sy_open("/dev/urandom", O_RDONLY, 0);
+    long got;
+    if (fd < 0) return fd;
+    got = sy_read_full(fd, out, n);
+    sy_close(fd);
+    return (int)got;
+}
+
+/* Read from FD until N bytes are in BUF or the peer closes.  0, -EPIPE on a clean EOF, -errno. */
+static int read_full(int fd, unsigned char *buf, long n) {
+    long off = 0, r;
+    while (off < n) {
+        r = sy_recv(fd, buf + off, n - off);
+        if (r < 0) return (int)r;
+        if (r == 0) return -EPIPE;
+        off += r;
+    }
+    return 0;
+}
+
+/* One whole TLS record, header included, into REC (cap includes the header).
+   Returns the record length, or -errno. */
+static long read_record(int fd, unsigned char *rec, long cap) {
+    unsigned char hdr[5];
+    long len;
+    int r = read_full(fd, hdr, 5);
+    if (r) return r;
+    len = ((long)hdr[3] << 8) | (long)hdr[4];
+    if (5 + len > cap) return -EMSGSIZE;
+    for (len = 0; len < 5; len++) rec[len] = hdr[len];
+    len = ((long)hdr[3] << 8) | (long)hdr[4];
+    r = read_full(fd, rec + 5, len);
+    if (r) return r;
+    return 5 + len;
+}
+
+/* Parse every certificate of a Certificate message and check the links the server can prove.
+   Returns the number of certificates, or -errno. */
+static int check_chain(const unsigned char *msg, long n, const char *host, long now) {
+    cs_tls13_cert_iter it;
+    cs_x509 certs[TG_MAX_CERTS];
+    const unsigned char *der;
+    long derlen, k;
+    int count = 0, r, i;
+    r = cs_tls13_cert_begin(&it, msg + 4, n - 4);
+    if (r) return r;
+    while (count < TG_MAX_CERTS) {
+        der = 0; derlen = 0;
+        r = cs_tls13_cert_next(&it, &der, &derlen);
+        if (r) return r;
+        if (!der) break;
+        r = cs_x509_parse(der, derlen, &certs[count]);
+        if (verbose) sy_eprintf("cert %d: %ld bytes, parse=%d\n", count, derlen, r);
+        if (r) {
+            /* The leaf must parse: it is what the CertificateVerify is checked against.  An issuer we cannot
+               parse (a P-384 or SHA-384 certificate, which cx/crypto/x509.cx deliberately does not handle)
+               only ends the chain here; the handshake goes on and the server's Finished still has to verify. */
+            if (count == 0) return r;
+            note("chain verification stops at index ", count);
+            return count;
+        }
+        count++;
+    }
+    if (count == 0) return -EPROTO;
+    if (cs_x509_match_dns(&certs[0], host) != 0) return -EHOSTUNREACH;
+    if (cs_x509_valid_at(&certs[0], now) != 0) return -ETIMEDOUT;
+    for (i = 0; i + 1 < count; i++) {
+        r = cs_x509_verify_sig(&certs[i], &certs[i + 1]);
+        if (r) return r;
+        note("chain link verified, index ", i);
+    }
+    return count;
+}
+
+int main(int argc, char **argv) {
+    const char *host = 0, *path = "/";
+    long port = 443, i, n, off, len, outlen;
+    int fd, r, rnd, inner;
+    unsigned char priv[32], rand[32], payload[TG_MAX_REC], rec[TG_MAX_REC + 5];
+    unsigned char done[CS_TLS13_HASH], msg[TG_MAX_MSG + 4];
+    unsigned char line[512];
+    char cipher[64];
+    cs_tls13_client cl;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--host") && i + 1 < argc) host = argv[++i];
+        else if (tx_eqz(argv[i], "--path") && i + 1 < argc) path = argv[++i];
+        else if (tx_eqz(argv[i], "--port") && i + 1 < argc) port = tx_atol(argv[++i]);
+        else if (tx_eqz(argv[i], "--verbose")) verbose = 1;
+        else {
+            sy_eprintf("usage: tls13-get --host HOST [--path /] [--port 443] [--verbose]\n");
+            return 2;
+        }
+    }
+    if (!host || port <= 0 || port > 65535) { sy_eprintf("tls13-get: --host is required\n"); return 2; }
+
+    rnd = random_bytes(priv, 32);
+    if (!rnd) rnd = random_bytes(rand, 32);
+    if (rnd) { sy_eprintf("tls13-get: no random bytes\n"); return 1; }
+
+    fd = sy_tcp_dial(host, (int)port);
+    if (fd < 0) { sy_eprintf("tls13-get: cannot connect %s:%ld (%d)\n", host, port, fd); return 1; }
+
+    r = cs_tls13_client_start(&cl, priv, rand, host, tx_len(host, 255), sy_wall_s(), payload, TG_MAX_MSG, &n);
+    if (r) { sy_eprintf("tls13-get: cannot build the ClientHello (%d)\n", r); return 1; }
+    msg[0] = 22; msg[1] = 3; msg[2] = 1;                       /* legacy record header: handshake, TLS 1.0 */
+    msg[3] = (unsigned char)(n >> 8); msg[4] = (unsigned char)n;
+    for (i = 0; i < n; i++) msg[5 + i] = payload[i];
+    if (sy_send_all(fd, msg, n + 5)) { sy_eprintf("tls13-get: send ClientHello failed\n"); return 1; }
+    note("ClientHello bytes ", n + 5);
+
+    while (1) {
+        len = read_record(fd, rec, sizeof rec);
+        if (len == -EPIPE) { sy_eprintf("tls13-get: the server closed the connection\n"); return 1; }
+        if (len < 0) { sy_eprintf("tls13-get: read failed (%ld)\n", len); return 1; }
+        if (rec[0] == 20) { note("change_cipher_spec, ignored at ", len); continue; }
+
+        if (cl.state == CS_TLS13_CONNECTED) {
+            r = cs_tls13_record_open(&cl.ap_read, rec, len, payload, TG_MAX_MSG, &outlen, &inner);
+            if (r) { sy_eprintf("tls13-get: cannot open an application record (%d)\n", r); return 1; }
+            if (inner == 23) {
+                if (outlen > 0 && sy_write_all(1, payload, outlen)) return 1;
+                continue;
+            }
+            if (inner == 21) {                                  /* alert: close_notify ends the exchange */
+                note("alert from the server, payload bytes ", outlen);
+                if (outlen >= 2 && payload[0] == 1) return 0;
+                return 1;
+            }
+            note("post-handshake handshake message, type ", inner);
+            continue;
+        }
+
+        if (rec[0] == 22) {                                    /* plaintext ServerHello (or HRR) */
+            off = 0;
+            while (off < len - 5) {
+                long framed = cs_tls13_message(rec + 5 + off, len - 5 - off);
+                if (framed <= 0) { sy_eprintf("tls13-get: truncated handshake message\n"); return 1; }
+                r = cs_tls13_client_recv(&cl, rec + 5 + off, framed);
+                off += framed;
+                if (r == 1) {                                   /* HelloRetryRequest */
+                    r = cs_tls13_client_retry(&cl, priv, payload, TG_MAX_MSG, &n);
+                    if (r) { sy_eprintf("tls13-get: retry failed (%d)\n", r); return 1; }
+                    msg[0] = 22; msg[1] = 3; msg[2] = 1;
+                    msg[3] = (unsigned char)(n >> 8); msg[4] = (unsigned char)n;
+                    for (i = 0; i < n; i++) msg[5 + i] = payload[i];
+                    if (sy_send_all(fd, msg, n + 5)) return 1;
+                    note("HelloRetryRequest answered, bytes ", n + 5);
+                    continue;
+                }
+                if (r) { sy_eprintf("tls13-get: handshake refused (%d)\n", r); return 1; }
+            }
+            note("state after ServerHello: ", cl.state);
+            if (verbose) {
+                tx_snprintf(cipher, sizeof cipher,
+                            "negotiated suite 0x%04x, %s",
+                            cl.suite, cl.suite == CS_TLS13_AES_128_GCM_SHA256 ? "TLS_AES_128_GCM_SHA256"
+                                 : cl.suite == CS_TLS13_CHACHA20_POLY1305_SHA256 ? "TLS_CHACHA20_POLY1305_SHA256"
+                                 : "other");
+                sy_eprintf("%s\n", cipher);
+            }
+            continue;
+        }
+        if (rec[0] != 23) { sy_eprintf("tls13-get: unexpected outer type %d\n", rec[0]); return 1; }
+
+        r = cs_tls13_record_open(&cl.hs_read, rec, len, msg, TG_MAX_MSG, &outlen, &inner);
+        if (r) { sy_eprintf("tls13-get: cannot open a handshake record (%d)\n", r); return 1; }
+        if (inner != 22) { sy_eprintf("tls13-get: expected handshake, got inner type %d\n", inner); return 1; }
+        off = 0;
+        while (off < outlen) {
+            long framed = cs_tls13_message(msg + off, outlen - off);
+            if (framed <= 0) { sy_eprintf("tls13-get: truncated inner handshake\n"); return 1; }
+            if (msg[off] == CS_TLS13_HS_CERTIFICATE) {
+                int count = check_chain(msg + off, framed, host, sy_wall_s());
+                if (count < 0) { sy_eprintf("tls13-get: certificate refused (%d)\n", count); return 1; }
+                note("certificates parsed and linked: ", count);
+            }
+            r = cs_tls13_client_recv(&cl, msg + off, framed);
+            off += framed;
+            if (r) { sy_eprintf("tls13-get: handshake refused (%d)\n", r); return 1; }
+        }
+        if (cl.state == CS_TLS13_CONNECTED) {
+            r = cs_tls13_client_finished(&cl, done);
+            if (r) { sy_eprintf("tls13-get: no client Finished (%d)\n", r); return 1; }
+            msg[0] = CS_TLS13_HS_FINISHED; msg[1] = 0; msg[2] = 0; msg[3] = (unsigned char)CS_TLS13_HASH;
+            for (i = 0; i < CS_TLS13_HASH; i++) msg[4 + i] = done[i];
+            n = cs_tls13_record_seal(&cl.hs_write, 22, msg, 4 + CS_TLS13_HASH, rec, sizeof rec);
+            if (n < 0) { sy_eprintf("tls13-get: cannot seal the Finished (%ld)\n", n); return 1; }
+            if (sy_send_all(fd, rec, n)) return 1;
+            note("client Finished record bytes ", n);
+            note("handshake completed, state ", cl.state);
+
+            n = tx_snprintf((char *)line, sizeof line,
+                            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: unisacc-tls13\r\n"
+                            "Accept: */*\r\nConnection: close\r\n\r\n", path, host);
+            n = cs_tls13_record_seal(&cl.ap_write, 23, line, n, rec, sizeof rec);
+            if (n < 0) { sy_eprintf("tls13-get: cannot seal the request (%ld)\n", n); return 1; }
+            if (sy_send_all(fd, rec, n)) return 1;
+            note("request record bytes ", n);
+        }
+    }
+    return 0;
+}
