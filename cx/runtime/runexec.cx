@@ -679,6 +679,28 @@ static int ex_jobs(void) {
     return n;
 }
 
+/* Run mode binds argv before the model. A strict or capture run is not a
+   tape or image route, so return 2 here. The caller returns that code and
+   does not add the argv line. */
+int ex_ri_die(const char *route, int mode) {
+    int jobs;
+    if (!ex_strict && !ex_cap_want) return 0;
+    jobs = ex_jobs();
+    if (jobs > 1) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=%d (capture and strict multi-source runs need UNISA_JOBS=1)\n", jobs);
+        return 2;
+    }
+    if ((mode == 2 && ex_has(route, "/tape/O")) || (mode == 0 && ex_has(route, "/image/O"))) return 0;
+    sy_eprintf("unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route ? route : "-");
+    return 2;
+}
+
+int ex_ri_argv(int code) {
+    if (code) return code;
+    sy_eprintf("unisacc: model driver: argv\n");
+    return 1;
+}
+
 /* Hash the source bytes the driver already read. Stage is e3: plus the
    route text (lnx/x86_64/tape/O0). Tape and image pass; other routes
    refuse before the model runs. Return 2 on a named refusal, else 0. */
@@ -750,13 +772,35 @@ int ex_ri_say(const char *fmt, const char *text) {
     return 0;
 }
 
-/* Finish before the first output byte. 2 is the trace refusal, already
-   on stderr. 1 is a write failure, also already on stderr. */
-int ex_ri_emit(const char *path, const unsigned char *data, long n, char *why, int cap) {
+/* Finish before the first output byte. A tape run with a symbol path
+   writes the 12-byte empty UNISYM1 contract after that check and before
+   the primary bytes. 2 is the trace refusal and creates neither file.
+   1 is a write failure, already on stderr. */
+int ex_ri_emit(const char *path, const unsigned char *data, long n, char *why, int cap, const char *symbols, int target) {
     int hs_write_out(const char *, const unsigned char *, long, char *, int);
+    unsigned char head[12];
     int wr;
     wr = ex_ri_finish();
     if (wr) return wr;
+    if (symbols && symbols[0]) {
+        head[0] = 'U';
+        head[1] = 'N';
+        head[2] = 'I';
+        head[3] = 'S';
+        head[4] = 'Y';
+        head[5] = 'M';
+        head[6] = '1';
+        head[7] = '\n';
+        head[8] = (unsigned char)target;
+        head[9] = 0;
+        head[10] = 0;
+        head[11] = 0;
+        wr = hs_write_out(symbols, head, 12, why, cap);
+        if (wr) {
+            sy_eprintf("unisacc: model driver: %s\n", why && why[0] ? why : "cannot open output");
+            return 1;
+        }
+    }
     wr = hs_write_out(path, data, n, why, cap);
     if (!wr) return 0;
     sy_eprintf("unisacc: model driver: %s\n", why && why[0] ? why : "cannot open output");
