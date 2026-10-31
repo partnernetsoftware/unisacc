@@ -2467,3 +2467,54 @@ cdx 补充的更正成立。§17.7 里"并保留「失败时 `hex[0]=0`」的既
 - 一致：`src_rel` 实际 **33 项**（`[0..32]`，全唯一）；33 TU 中 22 个经目录软链到达；`D main` 不覆盖
   120000 软链。手稿"文件软链入口被索引跳过"成立（@C 42 个 `.cx` 软链，目标均无 main，11 个悬空）。
 - 需更正（我已在本文件与 preflight 内改）：原先写的"35 键 / 33 唯一 TU"是把声明与下标使用计入，非赋值条数。
+
+### 19.20 多命令行根**有**历史收据；`use` 折叠与多根折叠不是同一机制
+
+cdx 指出 `out/cx-cb-identity-01/logs/roots.txt` 已有双根观察。我读了该目录（只读，未跑、未改），
+并用独立夹具复现，结论分三层。
+
+#### A. 历史收据（他人当次身份，`2026-10-31 15:41–15:47`，`out/` 不入库）
+
+| 日志 | 内容 |
+|---|---|
+| `roots.txt` | 双根 `plan a,b` **rc0**，列 4 个单元（`a/one.cx`、`b/one.cx`、`a/m.cx`、`b/m.cx`）；双根 `funit` **rc1** `reject: multiple definitions of this function`；gcc **rc2**、clang **rc74**，均为 `ld: multiple definition of 'one_x'` |
+| `identity.txt` | `realpath a/one` 与 `realpath b/one` **相同**；`a/cxpack` 限制为 `one_x`，`b/cxpack` 缺失 |
+| `public-set.txt` | `a/one` CXIF 只有 `one_x`，`b/one` 有 `one_x`+`one_y`；**`top_y_a` 与 `top_y_b` 默认运行都是 rc=7**；gcc/clang 均报 `implicit declaration of 'one_y'` |
+
+⇒ 只绑定该次运行；不据此授当前候选资格（与我上次"双根 UNMEASURED"相比，这是**有观察但不可外推**，
+我已把 §19.19 U4 的口径改为这个）。
+
+#### B. 复现（仓外 `/tmp/idprobe3`，用完即删）
+
+| 探针 | 输入 | 结果 |
+|---|---|---|
+| Q1 | `a/one.cx → ../a/one.cx`… 实为两软链指同一 `a/one.cx`；`a/cxpack` 限 `one_x`，`b` 无 | `-cx-plan a/one.cx b/one.cx` → **rc0，2 个单元**（`a/one.cx`、`b/one.cx` 全留，无 CXIF 头） |
+| Q2 | 同上 | `-run a/one.cx b/one.cx` → **rc1** `reject: multiple definitions of this function` |
+| Q3 | `use a.one` + `use b.one`（两个词法入口，同 realpath，cxpack 不同） | `-cx-plan c.cx` → **rc0，只剩 `a/one.cx` 一行** ⇒ `use` 路径**静默折叠** |
+| Q4 | `one_y()` 调用者，两种导入顺序 | 两次 `-run` 都 **rc=7** |
+
+⇒ **Q3 修正我 §19.19 P1 的表述**：`use` 到同 realpath 的折叠是**按 realpath 且与清单无关**——
+cxpack 不同也照样折叠，只留首入。**不是**"内容相同才折叠"。
+⇒ **Q1/Q2 说明多命令行根是另一机制**：显式根不被折叠，重复定义在**单元阶段**拒绝，不是静默取首。
+
+#### C. CXIF 不能当有效公开集的代理（实证，非推断）
+
+Q3/Q4 + `public-set.txt` 共同给出：`a/one` 的 CXIF **缺** `one_y`，`b/one` 有；但 `one_y()` 在**两种
+导入顺序下都 rc=7 成功**（产品对缺失声明走隐式声明，链接期命中 `b` 侧定义）。
+
+⇒ 1. **CXIF 文本不同 ⇏ 行为不同**：本例 CXIF 明确不同，运行结果完全相同。
+⇒ 2. **CXIF 文本相同 ⇏ 有效公开集相同**：隐式声明使"未声明"与"已声明"在当前路径上不可区分。
+⇒ 3. 因此 §19.19 C/U1 里"两侧各出 CXIF 比名集合"的建议**必须降级**：CXIF 只可作**诊断差异候选**，
+不可作核验判据；判据必须来自编译器自己认的有效集（未实现）或对**全调用点**的行为观察。
+⇒ 4. 反过来说：这也解释了为什么"public set 不一致"至今没有可观测后果——它从未被强制。
+
+#### D. 由此对身份方案的硬约束（建议，非裁定）
+
+1. **两个折叠点必须分开设计**：`use` 可达模块的 realpath 折叠（Q3，静默、首入胜）与显式多根的重复定义
+   拒绝（Q2，单元阶段）现在是两套行为；方案若只写"按 realpath 合并"，会漏掉 Q2 已存在的拒绝。
+2. "合并前拒绝"若指 Q3 那种折叠，则现状**没有任何拒绝**，Q4 证明后果可观测（只是本例两边同值）。
+3. 预算四项（上下文 / pair / 边 / 路径字节）互不同量纲，不可互相折算；cdx 已列全，我同意，此前只列两项。
+4. `funit` rc1 与 gcc/clang 的 ld 错误**不是同一检测点**：前者在单元合并，后者在链接。方案不得把
+   "链接期 duplicate symbol" 当作身份核验。
+
+未改 `cx-identity-handoff`、未重构造、未建 roots、未改 `entry-build`/`cxmod`/`spec`。
