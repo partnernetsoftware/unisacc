@@ -104,6 +104,7 @@ STATE43：**delta-loader（omp-grk，2026-11-01，影子根）**：`a97d5889` �
 STATE43：**已装构造器再试（omp-grk，2026-11-01）**：`fc1d4513` 未分相编 osx/arm64，bound 60 退出 142，没有镜像。安装门仍然不满足。
 STATE43：**棘轮（omp-grk，2026-11-01）**：当前树 `tools/ratchets.cx` 7/7，fail=0。安装仍只卡在已装构造器编不完 osx/arm64。
 STATE43：**包拒绝（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `cx-package-refusals` failed=0。第一次 rc2 是影子根没有 `exec/`。
+STATE43：**loader-faults（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 5/0，八条路线都具名拒绝坏包。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
