@@ -631,7 +631,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 进入0.1.x前，自有构造、构建、自举、测试、队列、缓存、报告及发布工具链迁到C/.cx；在没有Python、外部cc和shell的环境中，由上一版unisacc.com构建下一版并达到自举不动点、完成本地适用测试。外部对照编译器仅作可关闭的预言机。不得改后缀、藏脚本或由.cx调用Python/shell冒充完成；按依赖族迁移，保留原检查、失败语义、故障注入及新旧对拍。归档不等于删除未端口义务，archive/ujs等范围逐项清点，不默认豁免。
 
-**0.0.46 已登记需求（主人2026-10-31）**：基于 `unisacc.com`、`gcc_cx.com`、`clang_cx.com` 与 cx 架构，做对标 agent harness 的工具：`cx-pi` 对标 Pi（`badlogic/pi-mono` 最小 harness 路线）、`cx-omp` 对标 OMP（`oh-my-pi` 带工具面的路线），两者共用同一套会话与工具合同及 cx 模块。当前仅登记，尚未设计或实现，不构成 0.0.43 收口前置；范围及验收方向见[0.0.46计划](plans/v0.0.46.md#registered-requirements)。
+**0.0.46 已登记需求（主人2026-10-31）**：基于 `unisacc.com`、`gcc_cx.com`、`clang_cx.com` 与 cx 架构，做对标 agent harness 的工具：`cx-pi` 对标 Pi（`badlogic/pi-mono` 最小 harness 路线）、`cx-omp` 对标 OMP（`oh-my-pi` 带工具面的路线），两者共用同一套会话与工具合同及 cx 模块。已给出设计与里程碑，**未实现**；不构成 0.0.43 收口前置，范围及验收方向见[0.0.46计划](plans/v0.0.46.md#registered-requirements)。
 种子仍按两个代际命名：unisacc-seed.com与unisacc.com；C种子构造器和声明规格的完整性必须有同源实证，Python保留为对照不冒称已退役。
 
 ### 5.1 libc与前级冻结
