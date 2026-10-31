@@ -56,6 +56,9 @@
 | [`cx/driver/`](driver) | 驱动：`cli`/`args`/`input`/`output`/`path`/`env`/`compat`/`route`/`archive`/`deps` | — |
 | [`cx/cx0/`](cx0/README.md) | 权威 CX 解析器 + 经典 C 兼容投影 + 不可变单元束 | `cx0/README.md` |
 | [`cx/workspace/`](workspace/README.md) | 包图、构建、严格续构、声明资源目录闭包 | `workspace/README.md` |
+| [`cx/crypto/`](crypto) | 密码学原语：目前 `crypto.sha256`（SHA-256 + HMAC-SHA-256，纯计算、无宿主库）；TLS 分片见 `plans/cx-l0-tls.md` | — |
+
+`cx/crypto/` 是**上层**：它不碰 libc，只做整数运算与调用方提供的缓冲区。放在 `cx/text/` 之外是因为它不是文本工具；放在 L0 之外是因为它不需要任何宿主对接。将来若用 Linux AF_ALG 加速 AEAD，加速路径按 `cx/sys/sha.cx` 的形状放进 `cx/sys/`，导出函数仍不带条件编译。
 
 ### 2.3 分层铁律
 

@@ -1,0 +1,114 @@
+/* Checks cx/crypto/sha256.cx: sh ./unisacc.com tools/check-crypto-sha256.cx
+   Vectors: FIPS 180-4 Appendix B (SHA-256) and RFC 4231 §4 (HMAC-SHA-256). Prints PASS/FAIL per case,
+   exit 1 on any FAIL.  No libc: sy_printf only. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.sha256
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+static int hexis(const char *got, const char *want) { return tx_eqz(got, want); }
+
+int main(void) {
+    char hex[65];
+    unsigned char md[32];
+    cs_sha256_t s;
+    long i;
+    char big[1000];
+
+    /* FIPS 180-4 B.1: the empty message. */
+    ok(cs_sha256_hex("", 0, hex) == 0
+       && hexis(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "empty");
+
+    /* FIPS 180-4 B.1: "abc". */
+    ok(cs_sha256_hex("abc", 3, hex) == 0
+       && hexis(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "abc");
+
+    /* FIPS 180-4 B.2: the 56-byte two-block message. */
+    ok(cs_sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, hex) == 0
+       && hexis(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"), "two-blocks");
+
+    /* FIPS 180-4 B.3: one million 'a' (the spec's long message). */
+    for (i = 0; i < 1000; i++) big[i] = 'a';
+    if (!cs_sha256_init(&s)) {
+        for (i = 0; i < 1000; i++) cs_sha256_update(&s, big, 1000);
+        ok(cs_sha256_final(&s, md) == 0 && cs_sha256_hex(0, 0, hex) == 0, "million-setup");
+        {   /* hex of the 32 raw bytes, rebuilt here so the one-shot path is not what is being tested */
+            static const char digits[16] = "0123456789abcdef";
+            char h[65];
+            int k;
+            for (k = 0; k < 32; k++) { h[2 * k] = digits[md[k] >> 4]; h[2 * k + 1] = digits[md[k] & 15]; }
+            h[64] = 0;
+            ok(hexis(h, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"), "million-a");
+        }
+    } else ok(0, "million-init");
+
+    /* Padding edges: 55 bytes stays in one block, 56 needs a second, 63/64/65 cross the block. */
+    for (i = 0; i < 200; i++) big[i] = (char)('a' + (i % 26));
+    {   /* the same bytes fed in 1-byte updates must equal the one-shot digest */
+        unsigned char a[32], b[32];
+        int same = 1, k;
+        cs_sha256_init(&s);
+        for (k = 0; k < 65; k++) cs_sha256_update(&s, big + k, 1);
+        cs_sha256_final(&s, a);
+        cs_sha256(big, 65, b);
+        for (k = 0; k < 32; k++) if (a[k] != b[k]) same = 0;
+        ok(same, "incremental-equals-one-shot");
+    }
+    ok(cs_sha256_hex(big, 55, hex) == 0 && cs_sha256_hex(big, 56, hex) == 0
+       && cs_sha256_hex(big, 63, hex) == 0 && cs_sha256_hex(big, 64, hex) == 0 && cs_sha256_hex(big, 65, hex) == 0,
+       "padding-edges-no-crash");
+    ok(cs_sha256_hex(big, 55, hex) == 0 && cs_sha256_hex(big, 56, hex) == 0
+       && !tx_eqz(hex, ""), "different-lengths-differ");
+    {   char h55[65], h56[65];
+        cs_sha256_hex(big, 55, h55);
+        cs_sha256_hex(big, 56, h56);
+        ok(!tx_eqz(h55, h56), "length-is-domain-separating");
+    }
+
+    /* Bad arguments refuse instead of reading: null buffer with n > 0, negative n, null out. */
+    ok(cs_sha256(0, 5, md) != 0 && cs_sha256("a", -1, md) != 0 && cs_sha256("a", 1, 0) != 0, "sha-bad-args");
+    ok(cs_sha256_hex("a", 1, 0) == -1, "hex-null-out");
+    ok(cs_sha256_update(0, "a", 1) != 0 && cs_sha256_init(0) != 0 && cs_sha256_final(0, md) != 0, "state-bad-args");
+    ok(cs_sha256_init(&s) == 0 && cs_sha256_update(&s, 0, 0) == 0, "zero-length-update-ok");
+
+    /* RFC 4231 §4 test cases. */
+    {   /* case 1: key = 0x0b x 20, data = "Hi There" */
+        char key[20];
+        for (i = 0; i < 20; i++) key[i] = 0x0b;
+        ok(cs_hmac_sha256_hex(key, 20, "Hi There", 8, hex) == 0
+           && hexis(hex, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "hmac-1");
+    }
+    /* case 2: key = "Jefe", data = "what do ya want for nothing?" */
+    ok(cs_hmac_sha256_hex("Jefe", 4, "what do ya want for nothing?", 28, hex) == 0
+       && hexis(hex, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "hmac-2");
+    {   /* case 3: key = 0xaa x 20, data = 0xdd x 50 */
+        char key[20], data[50];
+        for (i = 0; i < 20; i++) key[i] = (char)0xaa;
+        for (i = 0; i < 50; i++) data[i] = (char)0xdd;
+        ok(cs_hmac_sha256_hex(key, 20, data, 50, hex) == 0
+           && hexis(hex, "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"), "hmac-3");
+    }
+    {   /* case 6: key = 0xaa x 131 (longer than the block, so hashed first) */
+        char key[131];
+        for (i = 0; i < 131; i++) key[i] = (char)0xaa;
+        ok(cs_hmac_sha256_hex(key, 131, "Test Using Larger Than Block-Size Key - Hash Key First", 54, hex) == 0
+           && hexis(hex, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"), "hmac-6-long-key");
+        /* case 7: same long key, long data */
+        ok(cs_hmac_sha256_hex(key, 131,
+              "This is a test using a larger than block-size key and a larger than block-size data. "
+              "The key needs to be hashed before being used by the HMAC algorithm.", 152, hex) == 0
+           && hexis(hex, "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2"), "hmac-7-long-both");
+    }
+    /* HMAC with an empty key and empty data is defined, not refused. */
+    ok(cs_hmac_sha256_hex("", 0, "", 0, hex) == 0
+       && hexis(hex, "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"), "hmac-empty");
+    ok(cs_hmac_sha256_hex(0, 0, "", 0, hex) == 0, "hmac-null-key-zero-len-ok");
+    ok(cs_hmac_sha256(0, 1, "a", 1, md) != 0 && cs_hmac_sha256("k", 1, 0, 1, md) != 0
+       && cs_hmac_sha256("k", -1, "a", 1, md) != 0 && cs_hmac_sha256("k", 1, "a", 1, 0) != 0, "hmac-bad-args");
+
+    sy_printf("CHECK_CRYPTO_SHA256\tfailed=%d\n", bad);
+    (void)hexis;
+    return bad;
+}
