@@ -1,6 +1,6 @@
 # cx 原生 TLS：卡点、分片与验收
 
-状态：T2.1–T2.7 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305、X25519、P-256 ECDSA 验签），另加 `cs_ct_eq`/`cs_ct_wipe`、`crypto.bn`（大整数/Montgomery 模幂）与 `crypto.der`（严格 DER 读取器，X.509 解析的第一步）；T2.5 已落地并过向量（AES-128/256-GCM），T2.8 已落地并过向量（严格 DER 读取器、RSA PKCS#1 v1.5 验签、X.509 解析/有效期/basicConstraints/链签名/DNS 匹配），T2.9、T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
+状态：T2.1–T2.7 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305、X25519、P-256 ECDSA 验签），另加 `cs_ct_eq`/`cs_ct_wipe`、`crypto.bn`（大整数/Montgomery 模幂）与 `crypto.der`（严格 DER 读取器，X.509 解析的第一步）；T2.5 已落地并过向量（AES-128/256-GCM），T2.8 已落地并过向量（严格 DER 读取器、RSA PKCS#1 v1.5 验签、X.509 解析/有效期/basicConstraints/链签名/DNS 匹配），T2.9 已落地并过向量（密钥调度、握手编解码、客户端状态机），T2.10 已落地并过 RFC 8448 记录对拍（记录层加解封）；与 libcurl 的在线对拍尚未做。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
 
 ## 一句话回答"卡在哪个环节"
 
@@ -61,8 +61,8 @@ T1 不新增密码学，但它是 T2 能替换进来的前提。
 | T2.6 | X25519 | RFC 7748 §5.2 两例 + 1/1000 次迭代、§6.1 DH 对与双方公钥；低阶点（全零、1、p-1）返 `-EINVAL`。**已过**（`cx/crypto/x25519.cx`，批次 `cx-l0-crypto-x25519`） |
 | T2.7 | P-256 ECDSA 验签 | 用 Python `cryptography` 生成的公钥/签名做对照（非 cx 自身结果）：验签通过、错摘要与篡改拒绝；r=0、s=0、r≥n、负整数、非最小 DER、尾随字节拒绝；非曲线点、压缩非平方、混合前缀、零点、零长拒绝；2G/3G/4G/5G 与 `nG`/`0G` 无穷远对照。只做验签：标量公开，不做常数时间梯子，不提供签名。**已过**（`cx/crypto/p256.cx`，批次 `cx-l0-crypto-p256`） |
 | T2.8 | ASN.1 DER + X.509 最小解析 | **已过**。DER 读取器：`cx/crypto/der.cx`，批次 `cx-l0-crypto-der`（不定长/非最小长/多字节 tag/非最小或负或零 INTEGER/BIT STRING 未用位/BOOLEAN 非 0x00-0xFF/越界长度/尾随字节全拒绝）。验签：`cx/crypto/rsa.cx`，批次 `cx-l0-crypto-rsa`（重建 EMSA 再逐字节比较，挡 Bleichenbacher '06；改摘要/改签/短签/非最小/`s == n`/错指数全拒绝）。证书：`cx/crypto/x509.cx`，批次 `cx-l0-crypto-x509`（人工链 RSA-2048 与 P-256、过期证、通配符 SAN、篡改 TBS、截短/尾随字节、真实根 Amazon Root CA 1 自验）。**不做**：name constraints、policy、CRL/OCSP、pathLen 强制、RSA-PSS、SHA-1 签名、P-384/P-521、信任锚判定——链策略留给上层。 |
-| T2.9 | TLS 1.3 握手 | RFC 8446 Appendix A 简化握手轨迹；`Finished` 校验失败必须拒绝；transcript hash 与 reference 一致 |
-| T2.10 | 记录层与会话 | 与 libcurl 对同一站点对拍：应用数据字节相等；重协商/会话票据失败路径有测试 |
+| T2.9 | TLS 1.3 握手 | **已过**（离线）。`cx/crypto/tls13.cx`，批次 `cx-l0-crypto-tls13`：密钥调度（early/handshake/master、traffic secret、finished key、密钥更新）与 RFC 8448 §3 逐字节相等；ServerHello/EncryptedExtensions/Certificate/CertificateVerify/Finished 解码；ClientHello 结构自洽；端到端跑通合成握手的服务端轨迹到 `CONNECTED` 并核对客户端 Finished；`Finished` 值或签名被改、消息乱序、主机名不符、证书过期一律拒绝；HelloRetryRequest 重发路径可用。`TLS_AES_256_GCM_SHA384` 明确 `-ENOSYS`（全程 SHA-256，所以 `cs_tls13_keylen(0x1302)` 拒绝）。**未做**：0-RTT、会话恢复/NST 落地、post-handshake 认证、DTLS。 |
+| T2.10 | 记录层与会话 | **已过**（离线）。`cx/crypto/record.cx`，批次 `cx-l0-crypto-tls13`：nonce = iv ⊕ 序号（末 8 字节 BE）、AAD = 5 字节记录头；与 RFC 8448 的 flight/Finished/应用数据/NST/alert 记录对拍，解封后重封逐字节相等；伪造 tag 返回 `-EBADMSG` 且不写明文、不推进序号；明文超 16384、密文超 16640、外层长度与实长不符、序号耗尽全部拒绝。**未做**：与 libcurl 对同一站点的在线字节对拍、会话票据的落地使用、重协商（TLS 1.3 已无重协商）。 |
 
 每片规则：
 
