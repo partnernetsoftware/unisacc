@@ -174,40 +174,41 @@ static int path_state(const char *p) {
     return e;   /* 1 present, 0 absent, negative I/O error */
 }
 
-static void coordinator_spawn_failure(const char *drv, const char *tag, const char *dir) {
+static void dispose_pid(int pid) {
+    int p, s;
+    if (pid <= 0) return;
+    p = (int)sy_getpgid(pid);
+    if (p == pid) (void)sy_killpg(p, 15); else (void)sy_signal(pid, 15);
+    s = wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
+    if (s == 0) {
+        if (p == pid) (void)sy_killpg(p, 9); else (void)sy_signal(pid, 9);
+        (void)wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
+    }
+}
+
+static void coordinator_spawn_failure(const char *drv, const char *tag, const char *dir, int bad_first) {
     char r1[256], gate[256], bad[256];
     int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1, g, s, clean = 1;
     tx_snprintf(r1, sizeof r1, "%s/sr1-%s", dir, tag);
     tx_snprintf(gate, sizeof gate, "%s/sgate-%s", dir, tag);
     tx_snprintf(bad, sizeof bad, "%s/no-such-driver-%s", dir, tag);
     { char src[256]; tx_snprintf(src, sizeof src, "%s/barrier.cx", dir);
-      char *v1[] = {(char *)drv, "-run", src, "--", r1, gate, "2000", 0};
-      char *v2[] = {bad, "-run", src, "--", r1, gate, "2000", 0};
+      char *v1[] = {bad_first ? bad : (char *)drv, "-run", src, "--", r1, gate, "2000", 0};
+      char *v2[] = {bad_first ? (char *)drv : bad, "-run", src, "--", r1, gate, "2000", 0};
       pid1 = sy_spawn_pipe(v1, 0, 8, &o1, &e1);
       pid2 = sy_spawn_pipe(v2, 0, 8, &o2, &e2);
     }
-    ck(pid1 > 0 && pid2 < 0, "spawn-failure-second");
-    if (pid1 > 0) {
-        long dl = sy_now_ms() + 3000;
-        while (time_before(dl) > 0 && path_state(r1) != 1) snooze(20);
-        ck(path_state(r1) == 1, "spawn-failure-path");
-        pg1 = (int)sy_getpgid(pid1);
-        ck(pg1 == pid1, "spawn-failure-pgid");
-        int kterm = -1, kkill = 1;
-        if (pg1 == pid1) kterm = sy_killpg(pg1, 15);
-        else kterm = sy_signal(pid1, 15);
-        s = (kterm == 0) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
-        if (s == 0 && pg1 == pid1) {
-            kkill = sy_killpg(pg1, 9);
-            s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
-        } else if (s == 0) {
-            kkill = sy_signal(pid1, 9);
-            s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
-        }
-        ck(s == 1 && kterm == 0, "spawn-failure-reaped");
-        g = (pg1 == pid1) ? sy_killpg(pg1, 0) : -1;
-        ck(g == -ESRCH, "spawn-failure-group-gone");
-        drain_fd(o1); drain_fd(e1);
+    ck(bad_first ? (pid1 < 0 && pid2 > 0) : (pid1 > 0 && pid2 < 0), "spawn-failure-side");
+    { int live = pid1 > 0 ? pid1 : pid2;
+      long dl = sy_now_ms() + 3000;
+      while (time_before(dl) > 0 && path_state(r1) != 1) snooze(20);
+      ck(path_state(r1) == 1, "spawn-failure-path");
+      if (live > 0) {
+          int p = (int)sy_getpgid(live);
+          ck(p == live, "spawn-failure-pgid");
+          dispose_pid(live);
+          ck(sy_killpg(p, 0) == -ESRCH, "spawn-failure-group-gone");
+      }
     }
     drain_fd(o1); drain_fd(e1); drain_fd(o2); drain_fd(e2);
     clean_temp_record(r1, &clean);
@@ -254,18 +255,12 @@ static void coordinator_case(const char *drv, const char *tag, const char *dir) 
         if (pid1 > 0) {
             pg = sy_getpgid(pid1);
             if (pg == (long)pid1) sy_killpg((int)pg, 15); else sy_signal(pid1, 15);
-            if (wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0) <= 0) {
-                if (pg == (long)pid1) sy_killpg((int)pg, 9); else sy_signal(pid1, 9);
-                wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0);
-            }
+            { int w = wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0); if (w == 0) { if (pg == (long)pid1) sy_killpg((int)pg, 9); else sy_signal(pid1, 9); wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0); } }
         }
         if (pid2 > 0) {
             pg = sy_getpgid(pid2);
             if (pg == (long)pid2) sy_killpg((int)pg, 15); else sy_signal(pid2, 15);
-            if (wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0) <= 0) {
-                if (pg == (long)pid2) sy_killpg((int)pg, 9); else sy_signal(pid2, 9);
-                wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0);
-            }
+            { int w = wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0); if (w == 0) { if (pg == (long)pid2) sy_killpg((int)pg, 9); else sy_signal(pid2, 9); wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0); } }
         }
         if (o1 >= 0) sy_close(o1); if (e1 >= 0) sy_close(e1);
         if (o2 >= 0) sy_close(o2); if (e2 >= 0) sy_close(e2);
@@ -706,7 +701,8 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
     }
 
     coordinator_case(drv, tag, dir);
-    coordinator_spawn_failure(drv, tag, dir);
+    coordinator_spawn_failure(drv, tag, dir, 0);
+    coordinator_spawn_failure(drv, tag, dir, 1);
     coordinator_release_case(drv, tag, dir);
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
