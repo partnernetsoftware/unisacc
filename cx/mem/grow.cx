@@ -61,12 +61,31 @@ int mg_push(mg_buf *b, int c) {
 }
 
 int mg_append(mg_buf *b, const void *p, long n) {
+    void *tmp = 0;
+    long need;
     if (!b || n < 0 || (n > 0 && !p)) return -1;
     if (n == 0) return 0;
-    if (b->len + n < b->len) return -1;               /* overflow */
-    if (b->len + n > b->cap && mg_growto(b, b->len + n)) return -1;
-    { int r = mm_move(b->data + b->len, b->cap - b->len, p, n); (void)r; }
-    b->len = b->len + n;
+    if (n > 0x7fffffffffffffffL - b->len) return -1;   /* no signed overflow */
+    need = b->len + n;
+    if (need > b->cap) {
+        /* p may point into the block being grown.  realloc may move it, so
+           copy the source before growing; a fresh block never overlaps p. */
+        unsigned long long base = (unsigned long long)(size_t)b->data;
+        unsigned long long src = (unsigned long long)(size_t)p;
+        if (b->data && src >= base && src < base + (unsigned long long)b->cap) {
+            tmp = mm_alloc(n);
+            if (!tmp) return -1;
+            if (mm_copy(tmp, n, p, n) != 0) { mm_free(tmp); return -1; }
+            p = tmp;
+        }
+        if (mg_growto(b, need)) { if (tmp) mm_free(tmp); return -1; }
+    }
+    if (mm_move(b->data + b->len, b->cap - b->len, p, n) != 0) {
+        if (tmp) mm_free(tmp);
+        return -1;
+    }
+    if (tmp) mm_free(tmp);
+    b->len = need;
     return 0;
 }
 
