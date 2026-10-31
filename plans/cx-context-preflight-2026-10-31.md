@@ -57,7 +57,13 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 不得合并成一个"已核"的根。
 
 类别（不得由目录名推断，见 §4.1）：
-- `production`：**经配方或捕获 argv 证明**参与产品构造的单元。
+- `production`：参与产品构造的单元。**必须另带 `participation` 取值**，二者不可互相顶替：
+  - `declared`：只在配方（`origin=recipe`）出现，**未捕获本次 argv**。只证明"被配方列出"，**不证明实际参与**；
+  - `observed`：有该**构造实例**的捕获 argv，且该单元确实出现在其中，才可写"实际参与"。
+  `recipe_argv_status=NOT-CAPTURED` 时，所有 `production` 行只能是 `declared`，不得写"已证明参与"。
+  理由（源码事实，实测 UNMEASURED）：构造器接受可重复 `--only KEY`（`tools/entry-build.cx:408-411`，≤33）
+  与 `--link-only`（`:395`），`:485-495` 比对、`:505` 按 `eb_wanted` 跳过未选中根 ⇒ 一次构造 argv 只编
+  一个根也是合法调用 ⇒「参与」是**每个构造实例**的性质，不是静态成员属性。
 - `tool`：不属于产品构造、且**已确认**为独立可执行入口的单元。
 - `batch-positive` / `batch-negative`：来自 `tests/batches.tsv` SOURCE。
 - `generated`：路径由测试运行时生成或不在 tracked 树中的入口；expect=unknown-ok。
@@ -100,12 +106,27 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
    | 差集(@C) | 数量 | 处理 |
    |---|---|---|
    | `S2 \ S3` | 634 | 逐项落 `tool`/`unclassified`；**默认 unclassified** |
-   | `S3 \ S2` | 0 | 非零时按 `STALE-SOURCE` 复核，不直接采信 |
-   | `S1 \ S2` | 32 | **正常**：配方成员无 main，按联合根成员处理 |
+   | `S3 \ S2` | 0 | 非零时**按行三分**（见 §4.2a），不得由"不在 S2"直推 STALE |
+   | `S1 \ S2` | 32 | **正常**：配方成员无 main。属 **build-instance 的独立计划成员**（`scope=build-instance`、`joint_id` 留空），**不是联合根成员** |
    | `S2 \ S1` | 849 | 报出，不算错 |
+
+   `S1 \ S2` 不得称"联合根成员"：§14.1 的联合根是**同一次调用**的显式多根；`entry-build` 的
+   `eb_plan`/`eb_compile` 每次调用只追加**一个** src（`:151-166`、`:227-245`，循环 `:508-523`/`:527-533`），
+   33 个 TU 是 **33 次独立调用 + 一次链接**。跨计划 realpath 去重发生在 `ncl`/`eb_creal` 域（`:521`、
+   `:558-570`），是构造级合并，不是一张图。
 
 5. 每个候选必须在 roots.tsv 出现，缺失→`ROOTS incomplete`、聚合 UNKNOWN/非零；多余行→`ROOTS stale`
    单列；候选数超 ROOTS 上限→UNKNOWN/非零，不截断。
+
+#### 4.2a `S3 \ S2` 的三分（不得由"不在 S2"直推陈旧）
+
+| 行特征 | 记法 | 根状态 | 是否算 STALE |
+|---|---|---|---|
+| `mode=SOURCE`，源是模块/夹具/负例，本就不定义 main | `no-main-by-design` | UNKNOWN（无根） | 否 |
+| `mode=PREPARED`，`entry` 是模板占位（如 `{nets}/nets.cx`、`{assembler}/contracts.cx`），材料未展开 | `prepared-template` | UNKNOWN | 否 |
+| `mode=SOURCE`，源本应定义 main 但树中不存在 | `absent-from-tree` | UNKNOWN | **候选** STALE，需人工复核后才可记 |
+
+另：`S2` 本身是**发现集**——不含 mode 120000 软链、不含 manifest 外路径 ⇒ "不在 S2"与"陈旧"无因果关系。
 
 **S2 是发现集，不是全集**：`D main` 只覆盖索引 manifest 内路径；mode 120000 文件软链**不进 manifest**，
 其目标即使含 main 也不在 S2。
@@ -157,8 +178,20 @@ platform 10 / library 8 / product 7）。
 - 注意并记录：`x/..` 按词法折叠，不按“x 是软链时 OS 解析到目标父目录”；这是现行编译器实际语义。preflight 只测量，不修正。
 - 每条 `use` 从父 context 目录解析；模块名语法同编译器；`std` 按现行处理；不 realpath 合并 context。
 - 同一根内相同规范化字面路径只展开一次；不同根分别展开；聚合再按字面路径去重。
-- 环：目标规范化字面路径已在当前根的展开栈上→计 cycle 边、不再展开、该根标 UNKNOWN（编译器既有 module cycle 拒绝另记，不混报）。
-- 依赖目标比较：两边 use 目标经 cxm_norm 后 stat/realpath 比较；缺失=unresolved，ENOTDIR/EACCES/读失败=UNKNOWN；目标不同记 `pairs_dependency_diff`，不误记为 public set。
+- 环：**建图与判环分两个阶段**，不得用"已见即跳过"承担判环。
+  1. **建图阶段（BFS）**：每条 `use` 的规范化字面目标各作为一个 context 入队（`context_queue_len_peak`）；
+     "已见即跳过"**只**用于 **context/边去重**，产生去重后的邻接表，不产出任何环结论；
+  2. **判环阶段（独立算法）**：对去重邻接表做三色 DFS 或 Tarjan SCC，报 `cycles` 与至少一条具体环路径
+     （`cycle_path`，形如 `b -> c -> b`）。只有该阶段可写 `cycles`。
+  理由：§7 的遍历是 BFS 队列，没有"当前展开栈"；BFS 用已见集时**交叉边**环检测不到。
+  实例（仓外夹具，已删）：`A→B, A→C, B→C, C→B` 时 BFS 父链 `parent(b)=A`、`parent(c)=A`，`b→c`/`c→b`
+  目标均已见 ⇒ 按已见集得 `cycles=0`；同夹具下编译器 DFS 报 `cx: module cycle: b -> c -> b`（rc1，
+  换根报 `p.b -> c -> p.b`、`p.c -> b -> p.c`）⇒ 已见集**漏报**。
+  编译器既有 module cycle 拒绝另记，不混报；判环阶段未实现前 `cycles` 一律 UNMEASURED、不得写 0。
+- 环只计**图**上的环（同一根内）；跨根的同一 realpath 不构成环（§14 分区）。
+- 依赖目标比较：两边 use 目标经 cxm_norm 后 stat/realpath 比较；缺失=unresolved，ENOTDIR/EACCES/读失败=UNKNOWN。
+  **两侧 realpath 不同 ⇒ 二者是不同身份，不是同一个 `canonical→candidate` 核验对**：分别作为 context 入图
+  继续探索、只记 `pairs_dependency_diff`，互相不生成 pair，也不互比公开集（详见 §7）。
 - 缺失模块=unresolved+UNKNOWN；ENOTDIR/EACCES/读失败/路径规范化失败（过长/段数）=INVALID+UNKNOWN；不截断、不降级。
 - U 事实：由快照索引 shard 读取；context 的 realpath 映射回 tracked path/sha 后取 shard；alias 软链用 realpath 查，但 context 身份仍是字面路径。未映射/未跟踪→UNKNOWN。
 - 清单：按 context 词法目录+尾名读 cxpack；ENOENT/无匹配行=全集；EACCES/ENOTDIR/读失败/超长/非法行→UNKNOWN。有效公开集的比较只按第 7 节的 pair 策略执行；比较结果与计数见该节，§5 本身不另做拒绝。
@@ -172,7 +205,8 @@ platform 10 / library 8 / product 7）。
 - `max_group`：同一 realpath 的 context 组最大成员数；同 realpath 只用于报告与 pair，不用于展开去重。
 - `unresolved`、`cycles`、`manifest_errors`、`invalid` 分别计数。
 - `std_edges`：`use std`/`std.cx` 的边数（不建 context、不展开）；`use std.X` 按编译器具名拒绝，单列。
-- `pairs_dependency_diff`：同 pair 两侧直接目标 realpath 不同的计数；按状态机处理。
+- `pairs_dependency_diff`：同一条 `use` 的多个字面目标解析到**不同 realpath** 的计数。**它们不构成 pair**；
+  两侧分别入图探索，本计数只记账，不影响入队（§7）。
 - 聚合：各根累计求和 + 跨根 unique_contexts（按字面路径去重）；不把求和冒充全局同时峰值。
 
 ## 7. pair-policy v1（测量策略，不是生产算法）
@@ -181,11 +215,22 @@ platform 10 / library 8 / product 7）。
 
 - canonical 选择：**根内**每 realpath 组按“BFS 层序 → use 行序”首个 context 为 canonical；roots.tsv 行序只决定报告遍历，不能跨根选 canonical（见 §14）。联合根必须显式标记，联合根内部才共享一个图。
 - 方向：单向 canonical→candidate；memo 键 `(canonical context ID, candidate context ID)`；每个 candidate 对照其组 canonical 执行递归核验（依赖递归同样用该组最新选定的 canonical）。
-- 遍历：显式工作队列，按上述顺序；不递归 C 栈。记录 `pairs_visited_total`（首次进入的 memo 对）与 `pair_peak`（队列/核验栈同时存活的对数高水位）。
-- 第二策略 `pair-policy-v1r`：同一根仅把兄弟 use 行序逆序，其余同 v1；单独报告 visited/peak。明确只覆盖两种顺序，不等于所有排列。
+- 遍历：显式工作队列，按上述顺序；不递归 C 栈。`pairs_visited_total` 记首次进入的 memo 对。
+- **队列与栈按元素单位分开计峰**（不得相加，不得互相顶替）：
+
+  | 字段 | 元素单位 | 可为数 | 否则 |
+  |---|---|---|---|
+  | `context_queue_len_peak` | context（待探索模块入口） | 队列确有 context 单元 | — |
+  | `pair_queue_len_peak` | pair（同 realpath 组 canonical→candidate） | 队列确有 pair 单元 | 实现只有一个混合队列 ⇒ **NOT_APPLICABLE**，不得用混合长度顶替 |
+  | `work_queue_len_peak` | 混合，单位须在收据显式声明（如 `context+pair`） | 实现确用单一工作队列 | 纯 pair 队列 ⇒ NOT_APPLICABLE |
+  | `pair_verify_depth_peak` | 栈帧（单次核验的递归/显式栈深度） | 算法确有核验栈 | **纯迭代、无验证栈 ⇒ NOT_APPLICABLE**，不填 0、不虚构深度 |
+
+  `NOT_APPLICABLE`（算法结构里不存在该量）≠ `UNMEASURED`（结构存在但未测）≠ `0`（测到零），三值不互换。
+  需要总数只用 `sum_` 前缀（§14.1），不同单位不相加。
+- 第二策略 `pair-policy-v1r`：同一根仅把兄弟 use 行序逆序，其余同 v1；单独报告 visited 与四个 peak。明确只覆盖两种顺序，不等于所有排列。
 有效公开集比较与计数策略（v1 全遍历）：
 - 每个 pair 比较 canonical 与 candidate 的有效公开集（按 §5 的清单规则，逐名集合；无清单/无匹配行=全部非 static）。记录 `pairs_public_equal`、`pairs_public_diff`、`pairs_errors`。
-- v1 **不因差异或错误停止遍历**：有效集差异只记录；上下文/清单/目标解析错误计入 `pairs_errors`，该出错边不入队继续展开，其他边继续；根标 UNKNOWN。`pairs_visited_total`/`pair_peak` 只是该全遍历策略的测量值，不是任意生产算法的值。
+- v1 **不因差异或错误停止遍历**：有效集差异只记录；上下文/清单/目标解析错误计入 `pairs_errors`，该出错边不入队继续展开，其他边继续；根标 UNKNOWN。`pairs_visited_total`/四个 peak 只是该全遍历策略的测量值，不是任意生产算法的值。
 - 不能对“任意首差异即停算法”声称上界：只有当生产算法与 v1 使用**相同的配对生成、去重键、canonical 选择和工作队列调度**，且停止仅裁剪同一条遍历时，全遍历值才可作该算法的条件上界；canonical 或调度不同可能使 peak 更大。除此之外一律 UNKNOWN，不比较、不外推。
 - 遇错状态机（必须逐条实现）：
   | 事件 | 计数 | 入队/展开 | 根状态 |
@@ -194,12 +239,22 @@ platform 10 / library 8 / product 7）。
   | public set 不等 | public_diff++ | 不因 diff 停；依赖子 pair 仍可入队 | 不变（纯测量） |
   | 清单 EACCES/ENOTDIR/读失败/非法 | pairs_errors++、manifest_errors++ | 该 context 出边不入队 | UNKNOWN |
   | use 目标缺失 | unresolved++、pairs_errors++ | 不入队 | UNKNOWN |
-  | 目标 realpath 不同 | dependency_diff++ | 各按字面目标分别入队，diff 只记账 | UNKNOWN |
+  | 目标 realpath 不同 | dependency_diff++ | 两侧**各自作为 context 入图**（`contexts_queued++`）继续探索；**互相不生成 pair、不互比公开集**；diff 只记账，不阻止任何入队 | UNKNOWN（该 use 边身份不明） |
   | 规范化失败 | invalid++、pairs_errors++ | 不入队 | UNKNOWN |
-  | proxy=1 | equal/diff/errors 必须为空/禁用峰门 | — | 不得 measurement_complete |
-  `pairs_visited_total` 含首次进入 memo 的出错 pair；差异只停该边展开，不停全局遍历。
+  | proxy=1 | equal/diff/errors 必须为空/禁用峰门 | — | 该根只能 `UNKNOWN`，不得写任何 measurement_complete 形式 |
+  `pairs_visited_total` 含首次进入 memo 的出错 pair。
+  **入队与生成 pair 是两件事**（消除原"各按字面目标分别入队"与"差异只停该边展开"的互斥）：
+
+  | 动作 | 触发 | 计数 |
+  |---|---|---|
+  | 图探索入队 | 每条 `use` 的字面目标各自作为 context 入队列（用于建邻接与 realpath 组） | `contexts_queued` |
+  | 生成 pair | **仅当** candidate 与 canonical **同 realpath 组**（同身份兄弟 context） | `pairs_visited_total`（memo 去重后） |
+  | `pairs_dependency_diff` | 同一 `use` 的多个字面目标指向不同 realpath | 只记账，既不生成 pair，也不阻止入队 |
+
+  某侧解析失败走 `unresolved`/`invalid` 行，仍不入 pair。
 - 若实现没有执行有效集比较，只能输出 `pairs_proxy=1`，不得称实际递归核验，也不得用于 pair 峰门。
-- 输出字段统一：`pairs_visited_total`、`pair_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_dependency_diff`、`pairs_errors`、`pairs_proxy`（0/1）、`std_edges`；v1r 另列 `pairs_visited_total_v1r`、`pair_peak_v1r`。
+- 输出字段统一：`pairs_visited_total`、`contexts_queued`、`context_queue_len_peak`、`pair_queue_len_peak`、`work_queue_len_peak`、`pair_verify_depth_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_dependency_diff`、`pairs_errors`、`pairs_proxy`（0/1）、`std_edges`；v1r 另列 `pairs_visited_total_v1r`、`contexts_queued_v1r` 与上述四个 peak 的 `_v1r` 版本。
+  **不设单一 `pair_peak` 字段**：它同时暗示"只数 pair"和"队列与栈合一"，两者都不成立。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
 
 ## 8. 测量上限与 deadline（独立于产品）
@@ -215,9 +270,35 @@ platform 10 / library 8 / product 7）。
 ## 9. 输出与状态
 
 每根：
-`ROOT<TAB>joint_id<TAB>double_count<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>pair_peak<TAB>pairs_visited_total_v1r<TAB>pair_peak_v1r<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
-聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 measurement_complete/unknown-known/unknown-unexpected 计数。
-状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 measurement_complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
+`ROOT<TAB>joint_id<TAB>scope<TAB>double_count<TAB>category<TAB>participation<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>contexts_queued<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>context_queue_len_peak<TAB>pair_queue_len_peak<TAB>work_queue_len_peak<TAB>pair_verify_depth_peak<TAB>pairs_visited_total_v1r<TAB>contexts_queued_v1r<TAB>context_queue_len_peak_v1r<TAB>pair_queue_len_peak_v1r<TAB>work_queue_len_peak_v1r<TAB>pair_verify_depth_peak_v1r<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>cycle_path<TAB>manifest_errors<TAB>invalid<TAB>sha256`
+聚合（**每类别一行，不合并**）：
+`AGGREGATE<TAB>category=<c><TAB>total=<n><TAB>measurement_complete=<n><TAB>unknown=<n><TAB>unknown_known=<n><TAB>unknown_unexpected=<n><TAB>status=<s>`
+逐 `production` / `tool` / `batch-positive` / `batch-negative` / `generated` / `unclassified` 各一行；
+缺行即 `AGGREGATE incomplete`（rc 非零），不得只出 production 一行。
+
+**总完成的类别集合事先固定**（发布后只能加门、不能减门；减门须另立版本并重跑）：
+
+| 类别 | 是否计入总完成 | 说明 |
+|---|---|---|
+| `production` | 是 | 核心 |
+| `tool` | 是 | 含 main 的可执行入口，**不得**因已知难测而移出（`tools/` 下 216 个无批次单元属此类） |
+| `batch-positive` | 是 | 测试登记的阳性入口 |
+| `batch-negative` | 否（单列） | UNKNOWN 不算生产覆盖，也不阻塞；计数仍须报 |
+| `generated` | 否 | 永久不计 |
+| `unclassified` | **禁止** | 出现在必需集合即为配置错误（rc 非零），它不算覆盖 |
+
+状态命名规则：
+- 只有**必需集合全部** `measurement_complete`、且无 `ROOTS incomplete`、无触限/超时，才可写
+  **`aggregate_measurement_complete`**；
+- 若仅 `production` 完成而其他必需类别未完成，只能写 **`production_measurement_complete`**，
+  **不得**写 `aggregate_measurement_complete`，也不得写无前缀的 `measurement_complete`；
+- 一律不写裸 `complete`，避免被读成全仓/规范通过；未达条件 → `UNKNOWN` 且 rc 非零。
+
+两个 UNKNOWN 计数的定义（此前全文未定义）：
+- `unknown_known`：UNKNOWN 根的 `reason` 命中**预登记白名单**（§4.5 的 PREPARED、无清单按全集、
+  软链悬空、`recipe_argv_status=NOT-CAPTURED` 等已在文档中列明的原因）；
+- `unknown_unexpected`：其余一切 UNKNOWN。
+每个 UNKNOWN 根二者择一，且 `unknown_known + unknown_unexpected = unknown`；不满足即聚合 rc 非零。
 
 ## 10. 拟路径与所有权
 
@@ -239,7 +320,7 @@ platform 10 / library 8 / product 7）。
   动态产品需要的解释器/库按实际 ldd 单独 ro-bind；不把整个 / 暴露为可写。
 - 先证明方案可用：完整 dry-run 清单：bwrap 启动；/work 写失败 errno；/out 写成功；/product 只读可见；所需解释器/库可加载；宿主工作区路径探测失败；可见路径白名单核对。任一失败→UNKNOWN，不进入测量。
 - 若 `bwrap` 或等价只读挂载不可用，本次测量状态 UNKNOWN，不用“前后复核”冒充强制只读。
-- 次选：`chmod -R a-w SNAP` 并记录 mode；这只是同用户可逆约束，不构成强制。采用时 `enforcement=permission-only`，强制状态必须 UNKNOWN，不得 measurement_complete。
+- 次选：`chmod -R a-w SNAP` 并记录 mode；这只是同用户可逆约束，不构成强制。采用时 `enforcement=permission-only`，强制状态必须 UNKNOWN，不得写任何 measurement_complete 形式。
 - 快照外目录：`out/context-preflight/<epoch>/{index,logs,tmp,report}`；`TMPDIR`、索引路径、工具输出均显式指向这里。
 - 已装产品：记录绝对路径、版本、sha256；`UNISACC_RUN_CACHE=0` 只作为候选设置，不能证明无写入。若使用产品 `-run` 执行工具，另设只读 bind/沙箱；否则改为预先构建的工具二进制并用显式产品身份绑定。任何对快照的写入或无法排除的写路径→`SNAPSHOT-WRITE-UNKNOWN`，聚合 UNKNOWN。
 - 结束复核仍是检测而非原子保证；只有强制只读措施成功才标 `enforcement=readonly-mount`。
@@ -280,6 +361,9 @@ platform 10 / library 8 / product 7）。
 | **单次调用** single-call | 一次 `cxm`/产品调用的根集合（通常一个 src） | 该次 argv（未捕获则 UNKNOWN） | 该调用内部的 context/pair 峰值 |
 | **联合根** joint | 同一次调用中显式多根，共享一张图，`joint_id` 标记 | 该次 argv + roots.tsv 标记 | 联合根内部的 realpath 组与 pair |
 | **build-instance** | 一个构造/链接实例：多次计划调用 + 一次链接 | 构造器源码行为；实际 argv 未捕获=UNKNOWN | 构造级候选与去重，**不是**任何一次调用的图 |
+
+roots.tsv 的 `scope` 列只取 `single-call` / `joint` / `build-instance`；`joint_id` 仅 `scope=joint` 时非空。
+`S1 \ S2`（配方成员）全部为 `scope=build-instance`，**`joint_id` 必须为空**。
 
 三条硬规则：
 1. **单根/单调用合格不蕴含 build-instance 身份一致**，反之亦然；三者结论不得互相引用为证据。
@@ -369,3 +453,25 @@ roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`。**
   输出格式，须 cdx 先裁定（已在回执中指出候选位置）。
 - `recipe` 只表示源码声明；实际 argv 未捕获 ⇒ `recipe_argv_status=NOT-CAPTURED`、
   `construction_identity=UNKNOWN`。所有权与强制只读仍 UNKNOWN。
+
+## 16.1 第二轮书面修订：§4/§5/§6/§7/§9/§14 一致性（omp-ds 代笔，go 授权临时移交）
+
+基线核对：接手时文件 sha256 = `e9a413e2b8f7a6c6d77a2bb6d71f7c17190747cf0393c3ac659f7d4090948c39`（371 行，
+`fab357760d` 之后）。已先核实际身份与他人改动并保留，未回退 go 回报的旧基线（`1734336427`/`7a5f…`）。
+**未建工具、未建 roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`；本轮结束归还 go 写权。**
+
+| 位置 | 改动 | 起因 |
+|---|---|---|
+| §4 类别 `production` | 拆分 `participation=declared|observed`；`NOT-CAPTURED` 时只能 `declared`，不得写"已证明参与" | 原文「经配方或捕获 argv 证明」与同节「recipe 不是 argv」冲突；`--only`/`--link-only` 使参与成为实例性质 |
+| §4.2 `S1 \ S2` | 改称 **build-instance 独立计划成员**（`scope=build-instance`、`joint_id` 留空），删除"联合根成员" | 与 §14.1 联合根定义冲突（每次 `eb_plan` 只传 1 个 src） |
+| §4.2 `S3 \ S2` + 新增 §4.2a | 三分为 `no-main-by-design` / `prepared-template` / `absent-from-tree`（仅末者候选 STALE） | 批次源可无 main；PREPARED 的 entry 是模板；S2 不含软链与 manifest 外路径 |
+| §5 环 | 建图（BFS，已见集只做边去重）与判环（三色 DFS / Tarjan SCC）分两阶段；报 `cycles` + `cycle_path`；未实现前 `cycles` UNMEASURED | 原文是 DFS 祖先栈语义却配 BFS 遍历，交叉边环漏检（夹具实测） |
+| §5/§6 `pairs_dependency_diff` | 明确两侧 realpath 不同 ⇒ 不同身份，不构成 pair，分别入图，只记账 | cdx 裁定；原文"同 pair 两侧目标不同"自相矛盾 |
+| §7 状态机 | 表格与表后句的"分别入队"vs"差异只停该边展开"合并为唯一规则：入队（`contexts_queued`）与生成 pair（仅同 realpath 组）分离 | 两处对同一事件给相反动作 |
+| §7 峰值 | 删除单一 `pair_peak`，改 `context_queue_len_peak` / `pair_queue_len_peak` / `work_queue_len_peak` / `pair_verify_depth_peak`（各按元素单位），并定义 `NOT_APPLICABLE ≠ UNMEASURED ≠ 0` | 原字段把队列长度与栈深混成一个量，且名字暗示只数 pair |
+| §9 每根 | 加 `scope`、`participation`、`contexts_queued`、`cycle_path` 与四个 peak（含 `_v1r`） | 与上述字段对齐 |
+| §9 聚合 | 每类别一行；**事先固定**必需集合 `{production, tool, batch-positive}`；仅 production 完成只能写 `production_measurement_complete`；全必需完成才 `aggregate_measurement_complete`；`unclassified` 禁止入必需集；定义 `unknown_known`/`unknown_unexpected` 且二者之和等于 `unknown` | 原文只绑 production 却是无范围"测量完成"；两个 UNKNOWN 计数全文未定义 |
+| §14.1 | 增 `scope` 取值域与 `joint_id` 唯一性（仅 `scope=joint` 非空） | 承接 `S1 \ S2` 归属 |
+
+状态：全部字段与规则在算法定稿/实现前一律 **UNKNOWN 或 UNMEASURED / NOT_APPLICABLE**，不写 0、不写覆盖率；
+本修订**不是实施授权**，不构成对任何测量的资格。§16 的"未连动 §6/§7/§9"一句由本节取代。
