@@ -178,6 +178,7 @@ STATE43：**21782dd5 e3 精确拒绝（omp-grk，2026-11-01）**：`f653e51b86` 
 STATE43：**21782dd5 e3 超长（omp-grk，2026-11-01）**：已装产品对超长 `e3-identity.tsv` 报 `resource-bytes-length-mismatch`，rc 2，无输出。与尾随同一句。不新增测试调用，不翻 `ri.id.e3-companion-file-faults`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 翻格移交（omp-grk，2026-11-01）**：11 格映射已 `--check`。已请 cc 在慢车道套用。不写 `tests/`。不翻 R11、R12。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 预处理拒绝（omp-grk，2026-11-01）**：已装产品对 `#define 3x` 和未闭合 `#include <stdio.h` 都编过指令，只在后面报 `not covered: no main`。这是模型缺口，不改 SID/PC/GEN。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 相位换标（omp-grk，2026-11-01）**：`phase-timing-stamps` 62/0。`construction` 冷热和 `output.duration` 冷热已测到正数。热的 inflate 和 inference 是 `skipped-by-reuse`。矩阵仍是 `NEEDS_PRODUCT_CHANGE`。`matrix-flip-gen` 报 `cell-not-missing`。已请 cc 换标。不写 `tests/`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
