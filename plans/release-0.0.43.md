@@ -256,6 +256,7 @@ STATE43：**21782dd5 材料会话六十一批（omp-grk，2026-11-01）**：`out
 STATE43：**21782dd5 材料会话六十九批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`cx-driver-input`、`cx-driver-output`、`cx-driver-path`、`cx-driver-route`、`cx-l0-arena`、`cx-l0-crypto-aesgcm`、`cx-l0-crypto-b64`、`cx-l0-crypto-bn`。会话里 69 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话七十七批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`cx-l0-crypto-chacha20poly1305`、`cx-l0-crypto-ct`、`cx-l0-crypto-der`、`cx-l0-crypto-hkdf`、`cx-l0-crypto-p256`、`cx-l0-crypto-rsa`、`cx-l0-crypto-sha256`、`cx-l0-text`。会话里 77 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话八十五批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`cx-l0-crypto-tls13`、`cx-l0-crypto-x25519`、`cx-l0-crypto-x509`、`cx-l0-fmt`、`cx-l0-sys-net`、`cx-l0-sys-guard`、`cx-l0-sys-ffi`、`cx-l0-sys-spawn`。会话里 85 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话九十三批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`cx-model-allocation`、`cx-model-decode`、`cx-model-lifetime`、`cx-model-number`、`cx-model-number-runtime`、`cx-model-payload`、`cx-model-reference`、`cx-network-structure`。会话里 93 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
