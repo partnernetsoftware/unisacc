@@ -231,6 +231,7 @@ STATE43：**21782dd5 门会话重跑七十八批（omp-grk，2026-11-01）**：`
 STATE43：**21782dd5 门会话重跑八十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-library-payload`、`cx-model-lifetime`、`cx-model-lifetime-runtime`、`cx-network-structure`。重跑 82/82。身份 STABLE。旧会话已绿、当前还没有回执的还剩 38。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑八十六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-model-allocation`、`cx-model-reference`、`cx-process-group-osx`、`ledger-parser-compare`。重跑 86/86。身份 STABLE。旧会话已绿、当前还没有回执的还剩 34。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑九十批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-model-decode`、`cx-package-decode`、`cx-package-lifetime`、`cx-l0-text`。重跑 90/90。身份 STABLE。旧会话已绿、当前还没有回执的还剩 30。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话重跑九十四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-sys-net`、`cx-l0-sys-guard`、`cx-l0-sys-ffi`、`cx-l0-sys-spawn`。重跑 94/94。身份 STABLE。旧会话已绿、当前还没有回执的还剩 26。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
