@@ -1907,3 +1907,74 @@ P §6 写「不把求和冒充全局同时峰值」，§14 写「跨根求和只
 
 本节不含任何 PASS；未改 P、未建 roots/工具、未动 cxmod/entry-build/spec。身份与 epoch 沿用 §18.1，
 不外推到其它 commit。
+
+### 19.7 重要更正：33 TU 是**构造/链接组**，不是一次 33 根 cxm 调用
+
+cdx 指出的区别成立，且我 §18.9 C3 的措辞会误导。核 `tools/entry-build.cx`：
+
+| 事实 | 位置 |
+|---|---|
+| `eb_plan` 的 argv 逐字为 `[bound, "50", (sh), ctor, "-cx-plan", src]`，**只追加一个 src** | `:151-166` |
+| `eb_compile` 的 argv 为 `[bound, "55", (sh), ctor, opt, "-c", "-b", triple, "-funit", "-o", obj, src]`，**同样只一个 src** | `:227-245` |
+| 33 个 TU 由 `while (i < 33) eb_compile(...)` 逐个调用 | `:508-523` |
+| 计划阶段也是 `while (i < 33) eb_plan(...)` 逐个调用，每 src 一次 | `:527-533` |
+
+⇒ 源码层面**支持**「产品构造组含多单元、每次计划/编译单根」的模型。**但这是源码事实，不是运行证据**：
+未捕获实际 argv，不能排除 via_sh 分支、`only_keys` 子集、或其它调用者走不同形状。故：
+
+- 33 路**不得**自动构成一个 cxm 多根图；单次调用的 context/canonical/pair 峰值默认**按调用隔离**。
+- 产品构造组要作为独立范围（下称 **build-instance**）另立，不得与"同一次 cxm 调用的多根"混用同一套
+  计数字段（参见 19.5）。
+
+### 19.8 构造级跨计划合并：确有其事，且比单根风险更隐蔽
+
+`tools/entry-build.cx:521-582`：33 次 `eb_plan` 的输出**全部进入同一个 `ncl`/`eb_creal` 去重域**：
+
+| 行 | 行为 |
+|---|---|
+| `:521` | `ncl = 0`（整个计划阶段共享一个计数） |
+| `:566-570` | 新候选的 realpath `rp` 与 `eb_creal[0..ncl)` 逐个比较，命中即 `dup=1` **跳过编译** |
+| `:571` | `ncl >= EB_MAXC` → `eb_die("closure-cap")`（上限拒绝，非静默） |
+| `:573-582` | 未重复者追加 `eb_csrc`/`eb_creal`，编号 `m%ld.o` |
+| `:587-594` | 对 `ncl` 个条目**逐个** `eb_compile`（同样是单 src 调用） |
+| `:604-606` | `ncl` 个目标文件一起 `eb_link` |
+
+即：**跨 33 个 plan 调用做 realpath 去重，结果并进一次链接**。这不是一次 cxm 多根调用，却是独立的
+**构造级跨 root 合并**风险：
+
+- 单根 preflight 合格（每根展开正确）**不能**推出构造级身份一致：两个根若解析到同一物理文件，
+  构造期只编译一次、只算一个目标；而 preflight 若按词法根分别展开并**分别求和**，会**多计**；
+  若按 realpath 合并后**只报一份**，又无法区分"同一根内重复"与"跨根合并"。
+- 反过来，`dup` 判定用的是 `eb_real`（见 19.9），失败时回退词法路径 ⇒ 同一物理文件在两次计划里
+  若一次 `sy_realpath` 成功、一次失败，会被当成**两个**不同单元（漏合并、链接期重复符号或双份对象）。
+- 因此 build-instance 必须有**自己的**去重域与计数：`build_units`（去重后编译单元数，对应 `ncl`）、
+  `build_plan_calls`（计划调用次数，理想 33）、`build_dedup_hits`（被 `dup` 跳过的候选数）。
+  三者关系 `build_plan_calls = build_units + build_dedup_hits` 可作为构造级自检（不等则构造图不自洽）。
+- 该自检只能证明**构造脚本**自洽，不能证明产品身份一致，也不能替代单次 cxm 的 pair 统计。
+
+### 19.9 `eb_real` 的回退：错误类别未区分（源码事实，单列风险）
+
+```c
+static void eb_real(const char *p, char *dst, int cap) {
+    if (sy_realpath(p, dst, cap) >= 0) return;
+    eb_copy_tok(dst, cap, p);      /* :346-349 */
+}
+```
+
+- `sy_realpath` 的任何失败（`ENOENT` 悬空、`EACCES`、`ENOTDIR`、路径过长、`ELOOP`）都**同样**退回
+  词法路径，调用方拿到一个"看起来成功"的字符串，**没有错误类别**。
+- 后果：① 19.8 的 `dup` 判定在失败回退下可能把两条词法路径当两个单元、或把二次失败当不同；
+  ② 后续 `eb_compile` 若对这条件失败，报错点会落在编译而非路径解析，诊断指向错误的位置。
+- 与 CX-Y-4 无关（`sy_realpath` 在 `cx/sys/posix.cx`，确实返回负 errno）；问题在**调用方吞掉**了返回值。
+- 本节**只记录**：不改 `tools/entry-build.cx`，不授 W-1，不把该行为当作 CX-Y 类违规。
+
+### 19.10 对 P 的追加修订（并入 19.1–19.6）
+
+| 编号 | 追加内容 |
+|---|---|
+| 19.1+ | 根的 `origin` 增加 `build-instance:<id>`；`physical` 必须来自**捕获到的** realpath，回退词法路径时置空 + UNKNOWN |
+| 19.2+ | 回执增 `build_instance_id`、`build_plan_calls`、`build_units`、`build_dedup_hits`；`build_argv=NOT-CAPTURED` 时这四个只能记 UNMEASURED/UNKNOWN |
+| 19.5+ | 明确三层，互不替代：**单调用**（一次 cxm 的根，context/pair 峰值按调用隔离）／**联合根**（同一次调用多根，`joint_id`）／**build-instance**（跨调用、跨计划去重的构造组）。三层各自的求和域与峰值域分开命名，禁止跨层比较 |
+| 新 | 单根 preflight 通过 **不蕴含** build-instance 身份一致；反之亦然。两者结论不得互相引用作为证据 |
+
+本节不含 PASS；未改 P、未改 `entry-build.cx`、未建 roots/工具、未开测。身份沿用 §18.1，不外推。
