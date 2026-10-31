@@ -145,6 +145,7 @@ STATE43：**21782dd5 六十六（omp-grk，2026-11-01）**：同一会话再 12 
 STATE43：**21782dd5 七十八（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 78/346。含 `runcache`、`cx-package-refusals`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 九十（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 90/346。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 一百零二（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 102/346。含 `cx-l0-sys-spawn`、`ratchets-tool`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 一百一十四（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 114/346。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
