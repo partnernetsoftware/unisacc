@@ -116,6 +116,7 @@ STATE43：**release-build 分相（omp-grk，2026-11-01，未安装）**：`rele
 STATE43：**五片（omp-grk，2026-11-01，rev 7f3d7d2405，未完成）**：正规 `release-build`：lnx/x86_64 `c8981dae` 1810571 字节 40.8 秒，win/x86_64 `d953f40f` 1912832 字节 43.3 秒，lnx/arm64 `d9f5ee70` 2302044 字节 41.9 秒。osx/x86_64 还在跑。osx/arm64 用分相。没有安装。
 STATE43：**五片打包（omp-grk，2026-11-01，rev 7f3d7d2405，未安装）**：lnx/x86_64 `c8981dae`，lnx/arm64 `d9f5ee70`，win/x86_64 `d953f40f`，osx/x86_64 `9448000f`（分相 44.6 秒），osx/arm64 `00675463`（分相 45.0 秒）。包 `out/tb/rel4/ape/unisacc-next.com` sha `4e40d38a`，smoke 5/5。osx/x86_64 的 whole-o 在 60 秒界被杀，所以两片 osx 都走分相。没有替换 `./unisacc.com`。
 STATE43：**第二代（omp-grk，2026-11-01，未安装）**：正式 lnx 切片 `c8981dae` 再编 lnx/x86_64、win/x86_64、lnx/arm64，都与第一代逐字节相同。osx/x86_64 分相再跑一次，sha `9448000f` 相同。osx/arm64 分相三次都是 `00675463`。包仍是 `4e40d38a`。没有替换 `./unisacc.com`。
+STATE43：**4e40d38a 检查（omp-grk，2026-11-01，影子根，未安装）**：`check-install-fixes` failed=0。`resources-limits` 20/0。`negative-model-loader` core 99/0，terminal 22/0。没有替换 `./unisacc.com`。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
