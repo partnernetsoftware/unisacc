@@ -1,0 +1,111 @@
+/* tests/compile-as-limit.cx -- res.mem.compile-as-limit on the installed product.
+ *
+ *   sh ./unisacc.com tests/compile-as-limit.cx
+ *
+ * -c, -S and -b lnx/x86_64 -o under ulimit -v 100000 must print
+ * "run: out of memory", exit 2, and leave no output. The same three
+ * routes under ulimit -v 800000 must match an unlimited run byte for byte.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("compile-as-limit: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    assertions++;
+    if (ok) sy_printf("PASS\tcompile-as-limit.%s\n", name);
+    else { failures++; sy_printf("FAIL\tcompile-as-limit.%s\n", name); }
+}
+static int has(const np_result *r, const char *s) {
+    return tx_find(r->err, (long)r->errn, s, tx_len(s, 64)) >= 0;
+}
+static np_result limited(const char *limit, char **args) {
+    char *v[16], script[96]; int n = 0, k; char why[256]; np_result r;
+    if (cx_fmt(script, sizeof script, "ulimit %s; exec sh \"$0\" \"$@\"", limit)) die("script");
+    v[n++] = bound; v[n++] = "25"; v[n++] = "sh"; v[n++] = "-c"; v[n++] = script; v[n++] = com;
+    for (k = 0; args[k] && n < 15; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, 0, 40, &r, why, sizeof why)) die(why);
+    return r;
+}
+static np_result plain(char **args) {
+    char *v[16]; int n = 0, k; char why[256]; np_result r;
+    v[n++] = bound; v[n++] = "25"; v[n++] = "sh"; v[n++] = com;
+    for (k = 0; args[k] && n < 15; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, 0, 40, &r, why, sizeof why)) die(why);
+    return r;
+}
+static int absent(const char *leaf) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", work, leaf)) die("path");
+    return sy_exists(p) == 0;
+}
+static int same(const char *leaf, const char *base, size_t n) {
+    char p[4600]; size_t gn = 0; char *got;
+    if (cx_fmt(p, sizeof p, "%s/%s", work, leaf)) die("path");
+    got = cx_read(p, &gn);
+    if (!got) return 0;
+    if (gn == n && mm_same(got, base, (long)n)) { mm_free(got); return 1; }
+    mm_free(got);
+    return 0;
+}
+
+int main(void) {
+    char src[4600];
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/compile-as-limit-batch", root)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(src, sizeof src, "%s/t.c", work)) die("src");
+    if (cx_write(src, "int main(void){return 7;}\n", 26)) die("write");
+
+    { char *a[] = {"-c", "t.c", "-o", "u.o", 0}; char *b[] = {"-c", "t.c", "-o", "lo.o", 0}; char *c[] = {"-c", "t.c", "-o", "hi.o", 0};
+      size_t n = 0; char p[4600], *base; np_result r = plain(a);
+      ck(r.rc == 0, "c-unlimited-rc0"); np_free(&r);
+      if (cx_fmt(p, sizeof p, "%s/u.o", work) || !(base = cx_read(p, &n)) || !n) die("c-base");
+      r = limited("-v 100000", b);
+      ck(r.rc == 2 && !r.outn && has(&r, "run: out of memory") && absent("lo.o"), "c-low-named-refusal");
+      np_free(&r);
+      r = limited("-v 800000", c);
+      ck(r.rc == 0 && same("hi.o", base, n), "c-high-bytes-equal");
+      np_free(&r); mm_free(base); }
+
+    { char *a[] = {"-S", "t.c", "-o", "u.s", 0}; char *b[] = {"-S", "t.c", "-o", "lo.s", 0}; char *c[] = {"-S", "t.c", "-o", "hi.s", 0};
+      size_t n = 0; char p[4600], *base; np_result r = plain(a);
+      ck(r.rc == 0, "S-unlimited-rc0"); np_free(&r);
+      if (cx_fmt(p, sizeof p, "%s/u.s", work) || !(base = cx_read(p, &n)) || !n) die("S-base");
+      r = limited("-v 100000", b);
+      ck(r.rc == 2 && !r.outn && has(&r, "run: out of memory") && absent("lo.s"), "S-low-named-refusal");
+      np_free(&r);
+      r = limited("-v 800000", c);
+      ck(r.rc == 0 && same("hi.s", base, n), "S-high-bytes-equal");
+      np_free(&r); mm_free(base); }
+
+    { char *a[] = {"-b", "lnx/x86_64", "-o", "u.com", "t.c", 0};
+      char *b[] = {"-b", "lnx/x86_64", "-o", "lo.com", "t.c", 0};
+      char *c[] = {"-b", "lnx/x86_64", "-o", "hi.com", "t.c", 0};
+      size_t n = 0; char p[4600], *base; np_result r = plain(a);
+      ck(r.rc == 0, "b-unlimited-rc0"); np_free(&r);
+      if (cx_fmt(p, sizeof p, "%s/u.com", work) || !(base = cx_read(p, &n)) || !n) die("b-base");
+      r = limited("-v 100000", b);
+      ck(r.rc == 2 && !r.outn && has(&r, "run: out of memory") && absent("lo.com"), "b-low-named-refusal");
+      np_free(&r);
+      r = limited("-v 800000", c);
+      ck(r.rc == 0 && same("hi.com", base, n), "b-high-bytes-equal");
+      np_free(&r); mm_free(base); }
+
+    sy_printf("COMPILE_AS_LIMIT\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
