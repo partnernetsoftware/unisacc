@@ -80,7 +80,7 @@ STATE43：**五片（omp-grk，2026-11-01，rev d1e7c6ade0）**：正规 `releas
 STATE43：**两代（omp-grk，2026-11-01，rev d1e7c6ade0）**：用第一代 lnx 切片 `05f3b7a8` 再编，四片与第一代逐字节相同：lnx/x86_64、lnx/arm64、osx/x86_64、win/x86_64。osx/arm64 没有未分相的第二代，不能算五片两代相同。
 STATE43：**osx/arm64 分相定点（omp-grk，2026-11-01）**：同一 lnx 切片再跑分相，帧文件和 Mach-O `9d60001c` 都与第一次逐字节相同。这只证明分相路线自己稳定，不是未分相的两代比较。
 STATE43：**osx/arm64 未分相（omp-grk，2026-11-01）**：第一代 lnx 切片 `05f3b7a8` 未分相编 osx/arm64，59.61 秒 rc0，Mach-O 与分相产物逐字节相同，sha `9d60001c`，2344930 字节。已装构造器的 whole-o 仍在 60 秒界被杀，所以没有已装构造器对这一片的两代对照。
-STATE43：**打包（omp-grk，2026-11-01，未安装）**：`out/tb/rel/unisacc-next.com` sha `e4589382`，5128330 字节，五片是 rev `d1e7c6ade0` 的 whole-o（osx/arm64 用未分相 `9d60001c`）。`release-ape smoke` 5/5：版本 0.0.43、C 程序退出 7、`-S` 出磁带、宿主库调用、srcshape。没有装到 `./unisacc.com`，没有签名，没有 Draft/Latest。
+STATE43：**打包（omp-grk，2026-11-01，未安装）**：第一包 `e4589382` 的地址下限 245760 KB 挡不住崩溃（280000 仍 rc139）。下限改到 300000 后重打 `out/tb/rel/ape/unisacc-next.com` sha `a97d5889`。280000 拒绝 `run: out of memory` rc2、无输出；320000 编出对象 rc0。
 STATE43：**候选探针（omp-grk，2026-11-01，未安装）**：`e4589382` 对 footer-length 翻位拒绝 `bad model tag`，对 lower→mower 拒绝 `unknown package route or stage boundary`。image 捕获写出 `source:lnx/x86_64/image/O0` 和 `e3-identity.tsv`。`-run` 打出 construction/model/inference/output。正式批次仍要求 `ROOT/unisacc.com`，这些还不是已装产品上的绿。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
