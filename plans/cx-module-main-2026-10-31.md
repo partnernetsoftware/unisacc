@@ -25,10 +25,10 @@ CX-M-2：库模块不得定义 main。当前三源（src/cxmod.c:652、cx/compil
 4. 单一权威解析：三源同诊断、同位置；已装产品与候选分别取实际执行身份。
 
 ## 迁移
-- tools 35：独立入口删除 `#pragma unisa module`（保留 main），或用单独的库模块承载函数；逐文件用已装产品构建验证。
-- tests 16：夹具改为库模块无 main + 消费者，或删除 module 行；保留 CX-M-2 负例。
-- apps/csih 24：其他车道，发信封由主人迁移；不具备前置条件前不启用全局拒绝。
-- archive 2 不迁移；src/release 0。
+- 以 plans/cx-module-main-inventory-2026-10-31.tsv 为准（本次 working tree 观察，28 行：csih 23、tests 5；used_by>0 共 5，均在 csih）。不得把“含 main”推断为纯独立入口；每个文件先核 use/多根/外部构建。
+- tests 5：夹具改为库模块无 main + 消费者，或删除 module 行；保留 CX-M-2 负例。
+- apps/csih 23：其他车道，发信封由主人迁移；未证迁移前不启用全局拒绝。
+- archive 不迁移；tools/src/release 在本清单中无同时匹配 `^#pragma unisa module` 与 `int main` 的行；清单不外推非行首 pragma 或其他 main 拼写。
 - 产品构建 entry-build/库清单中若有 module+main，按同规则先清点。
 
 ## 验收
