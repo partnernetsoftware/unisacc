@@ -151,3 +151,11 @@
 4. 记录每条探针命令、退出码、mount 表（若可读）、产品 `file`/`ldd` 与所需只读绑定清单；探针失败不阻塞设计评审，但阻塞测量。
 
 本机当前观察（仅探针，不是 preflight）：`command -v bwrap` 退出1（未找到）；`unshare --user --map-root-user true` 退出0，只证明可建该用户命名空间，不证明 mount namespace/只读 bind/运行时挂载可用。因此当前 `ENFORCEMENT` 未定，测量必须 UNKNOWN，直到第 1 或第 2 条完整通过。
+
+## 14. 根分区与作用域
+
+- 每个根代表独立编译图。context ID、canonical 选择、pair memo 与 pair 统计都以根身份分区：ID 含 root 前缀，或每个根独立编号后加 root；不得跨根按同一 realpath 合并、比较或声称会合并——它们未必在同一链接图。
+- roots.tsv 的行序只决定报告/遍历顺序，不能把另一根的消费结果当本根 canonical，也不能用根序推断跨根合并。
+- 多源码同一命令是“联合根”场景，必须显式加 category/joint 标记；一个联合根的图内可以有自己的 realpath 组与 pair，但不等于把多个独立根合计后再比较。
+- 各根 pair_visited/peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
+- 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
