@@ -36,13 +36,13 @@
 
 ## 二、底层 / 上层两棵树
 
-`cx/` 按「离 libc 的距离」分两层，上层不得直接调 libc/POSIX，只能经底层 L0 接口。这条边界由 `tests/cxraw.cx`（裸 libc 调用）与 `tests/cxinclude.cx`（上层 `#include`）两个棘轮强制：**只降不升，新文件必须为 0**。
+`cx/` 按「离 libc 的距离」分两层，上层不得直接调 libc/POSIX，只能经底层 L0 接口。**层就是目录**：`cx/sys/`、`cx/mem/`、`cx/text/` 三个目录整体是 L0，其余目录是上层。这条边界由两个棘轮强制，**只降不升，新文件必须为 0**：`tests/cxraw.cx`（裸 libc 调用，扫描面含 `cx/**/*.c`、`*.h`、`*.c.in`）与 `tests/cxinclude.cx`（上层 `#include`，同一扫描面）。
 
 ### 2.1 底层（L0 宿主对接，唯一可碰 libc/POSIX）
 
 | 目录 | 模块 | 对接内容 | 对应 Rust/Node |
 |---|---|---|---|
-| [`cx/sys/`](sys/README.md) | `sys.env` `sys.fs` `sys.proc` `sys.time` `sys.net` `sys.posix` `sys.mem` `sys.dl` `sys.sha` `sys.guard` `sys.ffi` `sys.io` `sys.fd` `sys.poll` `sys.tty` `sys.sig` | 文件/目录、进程、时间、环境、映射内存、动态装载、摘要、信号、poll/tty；一律返回 `-errno` | `std::fs` `std::process` `std::env` |
+| [`cx/sys/`](sys/README.md) | `sys.env` `sys.fs` `sys.proc` `sys.time` `sys.net` `sys.posix` `sys.mem` `sys.dl` `sys.sha` `sys.guard` `sys.ffi` `sys.io` `sys.fd` `sys.poll` `sys.tty` `sys.sig`，进程组与进程事实 `kernel` `process` `process_group` `process_group_osx`，以及 `lnx-x86_64.c`（Linux 进程组 `__syscall6` 提供者） | 文件/目录、进程、进程组、时间、环境、映射内存、动态装载、摘要、信号、poll/tty；一律返回 `-errno` | `std::fs` `std::process` `std::env` |
 | [`cx/mem/`](mem/README.md) | `mem.heap` `mem.bytes` `mem.arena` `mem.grow` `mem.slice` | malloc/calloc 显式长度封装、带界 copy/move/fill/compare、句柄式分组分配、可增长缓冲区、借用切片 | `Vec<u8>` `&[u8]` `Bump` |
 | [`cx/text/`](text/README.md) | `text.text` `text.build` `text.deflate` `text.fmt` `text.num` | 带界 z-string/span、字符串构造器、deflate 压缩、格式化、数字 | `str` `String` `Buffer` `zlib` |
 
@@ -51,21 +51,29 @@
 | 目录 | 职责 | 索引 |
 |---|---|---|
 | [`cx/core/`](core/memory.md) | 执行器：ALU、栈、稀疏表、过渡、执行核、输出；按实例拥有的缓冲区、move/drop | `core/memory.md` |
-| [`cx/compiler/`](compiler) | 编译器各阶段：`cxmod`（模块解析）、`tapegate`/`tapelink`（tape）、`bindstage`/`bindgate` 等（绑定）、`fwd*`（前向）、`streamname`/`netname`（七流十八网名表） | — |
-| [`cx/runtime/`](runtime/README.md) | 运行时：包装载/解码/生命周期、模型装载、路由（`routestep`/`routespan`/`routetime`）、进程（`process`/`winprocess`）、流输出 | `runtime/README.md` |
+| [`cx/compiler/`](compiler) | 编译器各阶段：`cxmod`（模块解析）、`tapegate`/`tapelink`（tape）、`bindstage`/`bindgate` 等（绑定）、`fwd*`（前向）、`streamname`/`netname`（七流十八网名表）、`winprocess`（当前进程 PE 页走查，纯整数计算） | — |
+| [`cx/runtime/`](runtime/README.md) | 运行时：包装载/解码/生命周期、模型装载、路由（`routestep`/`routespan`/`routetime`）、流输出 | `runtime/README.md` |
 | [`cx/driver/`](driver) | 驱动：`cli`/`args`/`input`/`output`/`path`/`env`/`compat`/`route`/`archive`/`deps` | — |
 | [`cx/cx0/`](cx0/README.md) | 权威 CX 解析器 + 经典 C 兼容投影 + 不可变单元束 | `cx0/README.md` |
 | [`cx/workspace/`](workspace/README.md) | 包图、构建、严格续构、声明资源目录闭包 | `workspace/README.md` |
 
 ### 2.3 分层铁律
 
-- **只有底层能 `#include`** 对接 libc/POSIX 头；上层用隐式前导 + `#pragma unisa use`。名单在 `tests/cxinclude-boundary.tsv`。
+- **只有底层能 `#include`** 对接 libc/POSIX 头；上层用隐式前导 + `#pragma unisa use`。允许的目录前缀与逐个精确例外（连同理由）在 `tests/cxinclude-boundary.tsv`。
 - **上层不直调 libc**：printf/malloc/strcmp/open 等一律改走 L0 的 `sy_*`、`mm_*`、`tx_*`。
 - **上层不写平台 `#if`**（`__linux__`/`_WIN32`/`__APPLE__` 等），也不写 `__syscallN`；平台差异只放 L0 的 `_os` 静态帮手或表里。
 - **errno 每编译单元一份**：跨模块错误码只走返回值（`-errno`），不依赖全局 errno。
 - **间接可见函数无原型**：A use mid、mid use text.fmt，A 调 tx_snprintf 会错；约定用到哪个模块的函数就直接 use 那个模块。
 
-详见 [`plans/cx-layers.md`](../plans/cx-layers.md)（分层设计与 17 条已落地记录）。
+两个棘轮的扫描面是 `git ls-files -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'`：`cx/` 下的宿主 C 与 `.c.in` 投影同样受约束，`src/`、`exec/`、`tools/` 的宿主 C 不在分层叙事内、不扫。
+
+| 表 | 管什么 | 形式 |
+|---|---|---|
+| `tests/cxraw-layers.tsv` | 谁可以裸调 libc/POSIX | 目录前缀（`cx/sys/` `cx/mem/` `cx/text/`）+ 少量精确例外，每条附理由 |
+| `tests/cxinclude-boundary.tsv` | 谁可以 `#include` | 目录前缀 + 逐个精确例外（`FILE<TAB>理由`） |
+| `tests/cxraw.tsv`、`tests/cxinclude.tsv` | 存量基线 | 每文件一行计数，只降不升 |
+
+详见 [`plans/cx-layers.md`](../plans/cx-layers.md)（分层设计与已落地记录）。
 
 ## 三、当前状态与边界
 
