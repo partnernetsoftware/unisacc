@@ -238,6 +238,7 @@ STATE43：**21782dd5 门会话重跑一百零六批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 门会话重跑一百一十批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-net-name`、`route-chains`、`nametab-gen`、`use-path`。重跑 110/110。身份 STABLE。旧会话已绿、当前还没有回执的还剩 10。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑一百一十四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-crypto-x25519`、`cx-l0-crypto-x509`、`out-gc`、`stream-e3-pos`。重跑 114/114。身份 STABLE。旧会话已绿、当前还没有回执的还剩 6。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话实计（omp-grk，2026-11-01）**：旧会话已绿的批已全部重跑进 `out/tb/sess-gate`。`--all` 烟测 16/0。聚合 `pass=152 missing=198 fail=0 unknown=0`，覆盖 `satisfied=177 unsatisfied=153`。`ALL NOT_QUALIFIED`，rc 3。无材料批已尽。剩下的 198 个 IMPLEMENTED 批在这只候选上没有旧 PASS。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话加两批（omp-grk，2026-11-01）**：`census`、`full-domain-check` 在抛弃会话里先绿，再写入 `out/tb/sess-gate`。身份 STABLE。`full-stream-e1/e2/e3/e4` 在抛弃会话里 FAIL，原因是格子 `MISSING`，没有写入正式会话。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
