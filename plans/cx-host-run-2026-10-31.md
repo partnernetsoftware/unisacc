@@ -46,6 +46,8 @@ Windows 裁定与证据边界：`tools/cxcc-hostinc/spawn.h:236-250` 把 `GetExi
 
 隔离局部证据（实施方报告，提交 `0b8deb4b96`）：以 `1f4129d306…` 的 archive 和本刀测试 overlay 在 `out/cx-w7-isolated-1793437777/snap` 独立副本运行；该目录位于仓库忽略的 `out/` 内，并非仓库外。其 `test.log` 两驱动均出现 `spawn-failure-*`、`coordinator-controller-clean`、release 行的 PASS，并以 `CX_HOST_RUN failed=0` 收尾。`inputs.sha` 记录 fs、驱动源码与测试 overlay 摘要，`toolchain.txt` 记录 gcc 11.4.0 和 clang 15.0.7；实施方另报告外置产品 sha `fc1d4513…`。测试日志本身未记录退出码；异常覆盖、进程终态与完整输入身份仍待独立复核。不据此消除共享工作区阻塞，不安装或授予跨平台资格。
 
+独立复核 `0b8deb4b96`：测试 overlay 与提交 blob 一致，次侧 spawn 失败、自清观察和控制器代清日志各有两驱动断言；但收据未独立记录外层退出码、产品摘要、基底与调用参数。gate 后单侧挂起、`ESRCH`、时钟／等待错误和排空超预算没有对应故障注入证据；`coordinator_case` 的单侧 spawn 失败分支仍在 wait 错误时升级信号。提交后的其他改动须另绑身份和复验，不能迁移本次日志。
+
 macOS、Windows、ARM 需对应宿主实跑后单列证据；只能写出构件或缺可用系统时标未验证。Windows 路径、`.exe`、CreateProcess 命令行转义与文件占用需要独立覆盖。保持六格 APE 的发布要求不等于本地 shell 包装已是 APE。
 
 永久测试只测试消费者可见行为和真实拒绝，不照抄进程调用转发或打印模板。测试输入在运行期间不可变，单次命令及子进程均有独立上限；新测试按仓库现有批次登记。成功的局部验收不自动修改 CX-W-7 生效状态、安装候选或授权完整平台发布。
