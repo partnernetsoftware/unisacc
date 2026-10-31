@@ -89,7 +89,13 @@ STATE43：B win/arm64 → 建议挪 0.0.44，并把矩阵必需主机集合改�
 STATE43：C 宏展开列号 → 建议挪 0.0.44，发布说明写一句。依据：spec.md 里没有 A-40 正文条款，只有 197 行脚本摘要一行；exec/pipeline/formats.md:126-128 明文禁止按 token 文本回找位置，所以没有不触 SID 的小做法；唯一的做法是 plans/dev-methodology-2026-10-28.md:60 的三步，约一天加一次纪元换证。现状行号正确，列号和摘录行按展开后文本。发布说明一句：宏展开内的诊断列号与摘录行按展开后文本计数（行号正确），0.0.44 改为用户源码位置。
 STATE43：(a) 的更正：library invalid-options 不放进 (a)（产品里没有库路线，随 A 走）；phase-timing 在 lnx 上是 6 格（host.phase-report 的 win/arm64 一格属于 B）；resources MAXSTEPS 一格，runexec.cx:11,71 里有具名拒绝文本，但 cc 在已装 fc1d4513 上实测 UNISA_MAXSTEPS 为 abc、-1、0 时 -run 照常 rc7、-S 照常 rc0，没有拒绝，所以要查那段检查为什么没走到。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
-STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
+STATE43：[ ] 6 **测试到 QUALIFIED**。判定（tests/run.cx:28-33）：`tests/run.cx -- --all` = 本地 smoke 加 `tests/all-aggregate.cx` 对一次 `tools/all-waves.cx` 会话的汇总，要求每个 IMPLEMENTED 批次在**同一个候选**上有 PASS 回执，且没有未满足或未解决的覆盖行。矩阵头也写着：COVERED_LOCAL 的证据是候选专属的，旧候选（@94b549d1、@da4e7ef1、79fb84e6 等标签）的证据只是历史，不盖当前候选。所以步骤（cc 2026-10-31 理的）：
+STATE43：6a 把还缺的格做完：当前必需 768 格，已覆盖 519，缺 126，待产品改 9，待外平台 73（grk 在做 stream-e3、elf、lower，我做 library 剩余、resources、ri、interfaces、negative）。
+STATE43：6b 产品小改攒成一个候选（resources 2、phase-timing 6），**这是最后一个候选**：之后冻结。
+STATE43：6c 实现 19 个 `full-*` 汇总批次（现在是 PLANNED、NOT_READY，tests/pending 里文件还不存在；每个负责一个域：该域所有必需格都是 COVERED_LOCAL，外平台格都有同候选的 CI 观察）。cc 来写一个通用的 `tests/full-domain.cx DOMAIN`，读矩阵、逐格报哪些没盖上。
+STATE43：6d 对冻结候选跑一次完整的 `all-waves` 会话：314 个 IMPLEMENTED 批次（其中有一批要先准备材料，176 个标 UNPREPARED），每个批次一次作业 60 秒内，轻量批次一轮四个并发；然后用 `matrix-flip-gen --migrate` 把证据标签从旧候选迁到冻结候选。这一步会跑一两个小时，机器要独占。
+STATE43：6e 五个外平台（osx/x86_64、osx/arm64、lnx/arm64、win/x86_64 加 CI 上的 lnx）在同一候选上实机观察，需要把候选推到 CI（主人已批准推送）；73 格。
+STATE43：6f 最后 `tests/run.cx -- --all` 输出 QUALIFIED。
 STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
 STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格、约 580 个模块，产品还没用）、通用工具、体积优化，都是 0.0.44 的准备，见 [v0.0.44.md](v0.0.44.md)。
 **已安装（2026-10-31 01:19）：** `./unisacc.com` sha=43fbbb81…，4631130 字节，冻结 rev c98f757f，五片都走 whole-o，P3 是 aec1a0bf；check-install-fixes 4/4、`--smoke` 16/16、release-ape smoke 5/5、七个棘轮全绿。旧版备份在 out/unisacc.com.79fb84e6。
