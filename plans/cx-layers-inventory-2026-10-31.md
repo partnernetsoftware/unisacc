@@ -2565,16 +2565,29 @@ rc=7 成功**（隐式声明 → 链接期命中 `b` 侧定义）。
 - 表后一句：「差异只停该边展开，不停全局遍历」
 
 ⇒ 「分别入队」与「停该边展开」互斥：若两个字面目标都入队，就没有"该边"被停；若停在边，第二个目标就不会入队。
-最小一致规则（二选一，建议前者）：
-1. **按字面目标各自生成 pair**：canonical 的每条 use 目标都生成 `(canonical, cand_i)`；memo 命中则跳过；
-   `dependency_diff` 只记账，**不影响任何入队**。删除"差异只停该边展开"。
-2. 若坚持"停边"，则必须写明"哪一条边算被停"（首差异？全部？），并接受第二个目标不入队 ⇒
-   该根 `dependency_diff` 与"覆盖完整"不可同时成立。
 
-`pair_peak` 现在是「队列/核验栈同时存活的对数高水位」——把两个量纲写成一个字段。必须有：
-- `pair_queue_len_peak`：显式工作队列长度高水位；
-- `pair_verify_depth_peak`：单次核验的递归/显式栈深度高水位；
+**cdx 更正（已收下，我上一版第 1 条建议是错的）**：目标 realpath 不同 ⇒ 二者**不同身份**，
+不能被叫作同一个 `canonical→candidate` 核验对。§7 自己的 canonical 规则是"**每 realpath 组**内选首个 context"，
+所以 pair 只能在同一 realpath 组内生成。据此把"入队"与"生成 pair"拆成两件事：
+
+| 动作 | 触发 | 计数 |
+|---|---|---|
+| 图探索入队 | 每条 use 的字面目标各自作为一个 context 进队列（用于建邻接、建组） | `contexts_queued` |
+| 生成 pair | **仅当** target 与 canonical **同 realpath 组**（即同身份的兄弟 context） | `pairs_visited_total`（memo 去重后） |
+| `dependency_diff` | 同一条 use 的多个字面目标指向不同 realpath | 只记账，**既不生成 pair，也不阻止入队** |
+
+最小一致规则（唯一，删除原二选一）：
+1. `dependency_diff++` 只记账；两侧真实目标**分别作为 context 入图**继续探索（各自再按自己的组找兄弟）；
+2. 这两侧**互相不构成 pair**，也不与对方组的 canonical 比较公开集；
+3. 删除"差异只停该边展开"——它描述的是另一套（同身份）语义，与 dependency_diff 无关；
+4. 若某侧目标解析失败，走 `unresolved`/`invalid` 行，仍不入 pair。
+
+`pair_peak` 现在是「队列/核验栈同时存活的对数高水位」——把两个量纲写成一个字段。须按实际算法分别定义：
+- `pair_queue_len_peak`：显式工作队列（待处理 context/pair）长度高水位；
+- `pair_verify_depth_peak`：单次核验的递归或显式栈深度高水位；
 - 需要总数时只加 `sum_` 前缀（§14.1），**不得**把二者相加成 `pair_peak`，也不得互相替代。
+
+上述规则与 C 项均为**提案，不是施工许可**；未实现前相关字段一律 UNMEASURED。
 
 #### C. §5/§7 环检测：算法未定，不可声称"当前祖先链覆盖所有环"
 
