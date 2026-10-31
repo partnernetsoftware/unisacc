@@ -138,6 +138,7 @@ STATE43：**d2850df079 osx/x86_64（omp-grk，2026-11-01）**：分相 rc0，sha
 STATE43：**已安装 21782dd5（omp-grk，2026-11-01）**：`./unisacc.com` 换成 `21782dd5`，rev `d2850df079`。旧版备份 `out/unisacc.com.c0cfdace`。五片：lnx/x86_64 `6ba762d9`，win `30811c48`，lnx/arm64 `3c5f8430`，osx/x86_64 `06f9c8e0`，osx/arm64 `20923b71`。装前干净父进程 fd 计数 0，`spawn_inherit` 通过。装后 smoke 5/5。没有签名，没有公开。
 STATE43：**21782dd5 会话（omp-grk，2026-11-01）**：`out/tb/sess-2178`，6/346 PASS：`resources-limits`、`cx-l0-sys`、`smoke`、`negative-model-loader`、`ri-image-single`、`phase-timing-stamps`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 续（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 18/346。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 三十（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 30/346。含 `pp-cli-includes`、`resources`、`ri-trace`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
