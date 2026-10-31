@@ -2263,3 +2263,55 @@ U 多重集成员）。当前代码把两者塞进同一个 128 数组。
 3. **超预算必须具名非成功**：不得静默截断后继续报 PASS/undecided。
 4. 49 的负例证明：**索引会收录编译器拒绝的输入**（`main49.cx` 超过 48 上限）⇒ 索引域 ⊋ 可编译域，
    任何"索引里的 U 行数即编译器接受的 use 数"的推理都不成立。
+
+### 19.16 实证（本机运行）：同 realpath 的重复 `use` 不吃 `MAXUSE` 预算
+
+cdx 指出我为说明「同文件不同 use 名」举的例子 `use a/b` / `use ../x/b` **不合文法**——正确：
+`cxm_goodname`（`cx/compiler/cxmod.cx:321`）要求 `seg = [a-z_][a-z0-9_]*`、`NAME = seg(.seg)*`，
+`/` 与 `..` 都不合法（`cx/spec.md:54` 同）。改用合法形式重做实验，**已实际运行**：
+
+#### 夹具（仓外 `/tmp/duptest2`）
+
+- `m/a00.cx … m/a46.cx`：47 个互不相同的模块。
+- `m/p.cx`：真实文件；`m/q.cx → p.cx` 符号链接（`realpath` 折叠为同一路径）。
+- `caseA.cx`：**49 条** `use` 行 = 47 个不同模块 + `m.p` + `m.q`（**48 个不同 realpath**）。
+- `caseB.cx`：**49 条** `use` 行 = 47 个不同模块 + `m.p` + `m.r`（**49 个不同 realpath**）。
+
+#### 结果
+
+| 用例 | use 行数 | 不同 realpath | rc | stderr |
+|---|---|---|---|---|
+| `caseA` | 49 | **48** | **0** | 空 |
+| `caseB` | 49 | **49** | 1 | `cx: caseB.cx:49: more than 48 uses in one unit` |
+
+⇒ **`cxm` 在 `MAXUSE` 预算检查之前就按 realpath 去重**：两条指向同一物理文件的 `use` 只算 1 条预算。
+`caseB` 的报错文本与 `cx/compiler/cxmod.cx:385` 完全一致，故本次运行走的是 `cxmod.cx`（`CXM_MAXUSE 48`），
+不是 `cx/cx0/plan.cx`（32）。
+
+#### 同时证实的另一件事：索引域 ⊋ 可编译域
+
+`caseB` 会被编译器**拒绝**，而 `tools/symindex.cx:243` 仍会为它写出 **49 条 `U` 行**。这就是
+`tools/install-fixes/uses48/main49.cx`（49 条 `use`，索引实测最大 49）的真实含义：索引收录了编译器
+不接受输入。故任何"索引 U 行数 = 编译器接受的 use 数"的推理**不成立**（与 §19.15 D 一致，此处升级为运行证据）。
+
+#### `::sym` 在本构建里**不限制可见性**（实测，限制了我能做的推断）
+
+| 用例 | 内容 | rc | 说明 |
+|---|---|---|---|
+| `sym_restrict` | `use m.s::x`，调用 `y()` | 22 | `y()` 可见 ⇒ 符号过滤未生效 |
+| `sym_norestrict` | `use m.s::x`，调用 `x()` | 11 | 对照 |
+| `dup_sym_other` | `use m.s::x` + `use m.u::y`（`u.cx→s.cx`），调用 `y()` | 22 | 编译通过 |
+
+⚠️ 由此得出一条**注意**：`rc` 与被编译程序的返回值同域。`sym_restrict` 的 rc=22 是 `y()` 的返回值，
+不是错误；真正的编译错误是 rc=1 **且** stderr 有 `cx: file:line: …`（对照 `bad.cx`：
+`error: undefined function`，rc=1）。只看 rc 会把"程序返回 2"误判成"编译失败"——我在本轮先踩了一次
+（把 `bar()` 返回 2 当成错误），已在实验里用 stderr 区分。
+
+#### 因此不能断言的部分
+
+- 由于 `::sym` 不限制可见性，**"重复 use 的第二条符号被 `adduse` 的去重早退丢弃"这一后果无法用
+  可见性探测**；只能停留在源码层（`cxmod.cx:384` 早退在 `cxm_cpyn(cxm_usym…)` 之前），记 UNKNOWN，
+  不当作已证事实。
+- 只核了 `cxmod.cx` 入口；`cx/cx0/plan.cx` 与其它入口未跑，不外推。
+- 审计器口径：`U` 多重集按**词法名字**对账，与编译器按 **realpath 单元**去重是两套判定键，
+  **不应强行相等**；差异单列报告（本节即其取证方式），不作为 PASS 依据。
