@@ -1,0 +1,77 @@
+/* tools/check-out-gc.cx -- the two keys of out-cg: no deletion without an explicit age, and a dry run touches nothing.
+ *
+ *   sh ./unisacc.com tools/check-out-gc.cx
+ *
+ * Runs tools/out-gc.cx as a child over a scratch root, so the real out/ is never read for the decision and never
+ * written.  What is asserted is the refusal contract, not the byte counts (those are the report, and a report is
+ * not a fact to pin).  Prints CHECK_OUT_GC ok=N fail=M and exits non-zero on any failure. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int okc, failc;
+static char root[512], keep[600], gone[600];
+
+static void ok(int cond, const char *what) {
+    if (cond) { okc++; sy_printf("PASS\t%s\n", what); }
+    else { failc++; sy_printf("FAIL\t%s\n", what); }
+}
+
+static int touch(const char *path) {
+    int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fd;
+    sy_close(fd);
+    return 0;
+}
+
+/* Run tools/out-gc.cx with the given argv; the exit code, or -EPIPE when it cannot start. */
+static int gc(char **av) {
+    int pid = sy_spawn(av);
+    if (pid < 0) return -EPIPE;
+    return sy_wait(pid, 0);
+}
+
+int main(int argc, char **argv) {
+    int n;
+    (void)argc; (void)argv;
+    tx_snprintf(root, sizeof root, "out/check-out-gc-scratch-%d", (int)sy_pid());
+    tx_snprintf(keep, sizeof keep, "%s/fresh", root);
+    tx_snprintf(gone, sizeof gone, "%s/old", root);
+    n = sy_mkdir(root, 0755);
+    ok(n == 0 || n == -EEXIST, "scratch root is made");
+    ok(touch(keep) == 0, "a fresh entry exists");
+    ok(sy_spawn(0) == -EINVAL, "spawn of a null argv is -EINVAL");
+    ok(sy_spawn((char *[]){ 0 }) == -EINVAL, "spawn of an empty argv is -EINVAL");
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", root, 0 };
+        ok(gc(av) == 0, "a report over the scratch root succeeds");
+    }
+    ok(sy_exists(keep) == 1, "a report without --delete removed nothing");
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", root, "--delete", 0 };
+        ok(gc(av) == 2, "--delete without --older-than is refused with 2");
+    }
+    ok(sy_exists(keep) == 1, "the refused run removed nothing");
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", root, "--older-than", "0", "--delete", 0 };
+        ok(gc(av) == 2, "--older-than 0 is refused: an age of zero is every entry");
+    }
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", root, "--older-than", "1", "--delete", 0 };
+        ok(gc(av) == 0, "--older-than 1 over an entry made just now succeeds");
+    }
+    ok(sy_exists(keep) == 1, "an entry younger than the age survives");
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", "out/no-such-root-7f3a", 0 };
+        ok(gc(av) == 1, "a missing root is exit 1, not a silent empty report");
+    }
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--bogus", 0 };
+        ok(gc(av) == 2, "an unknown flag is exit 2");
+    }
+    ok(cx_rmtree(root) == 0, "the scratch root is removed through the deletion guard");
+    sy_printf("CHECK_OUT_GC\tok=%d\tfail=%d\n", okc, failc);
+    return failc ? 1 : 0;
+}

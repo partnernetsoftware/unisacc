@@ -70,6 +70,7 @@
 | 核对一只现成 PE 的结构 | `sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE` | 与 `ROOT ABS_OUT` 同一套 PE/COFF 判据，写到标准输出：节区、导入、重定位、load config、入口。不放宽判据，不编译夹具。`ROOT ABS_OUT` 仍是 8 只夹具。见 [plans/osx-win-whole-o-2026-10-30.md](plans/osx-win-whole-o-2026-10-30.md)。 |
 | 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | `cxpack.tsv` 将模块名钉到路径。已装 e955 的 CXIF 在存在匹配文件行时只导出公开列表中的非 static 函数；清单缺席或无匹配行仍保留全部非 static 函数的兼容行为。清单超限、目录或其他读取错误具名拒绝，不扩大公开接口。类型声明仍沿用文本 CXIF v0，尚非结构化 ABI 或编译期所有权。见 [plans/cx-pack.md](plans/cx-pack.md) 与 [缺陷证据](plans/defects-c43.md)。 |
 | 核对 CXIF v0 文本 | `sh ./unisacc.com -run tests/cxif.cx -- --fixtures` | 现场 `-cx-interface` 必须是 banner、守卫、类型、原型和 `#endif`。函数体、`static`、缺 `#endif`、版本不是 v0 都退出 1。效果、布局和所有权字段不在 v0 里。见 [plans/cxif-v0.md](plans/cxif-v0.md)。 |
+| 回收 `out/` 临时产物 | `sh ./unisacc.com tools/out-gc.cx -- --older-than 7 --delete` | 默认只报告：每个一级条目的最新 mtime 与递归字节数，外加 <3d/3-7d/7-30d/>30d 分桶。删要两把钥匙（`--delete` 必须配 `--older-than>0`），因为 `out/` 里有他人正在构造的目录；`--root DIR` 供 `tools/check-out-gc.cx` 在临时根上验证拒绝合同 |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 

@@ -1,0 +1,123 @@
+/* tools/out-gc.cx -- report what is in out/ and, only when told twice, remove the old parts of it.
+ *
+ *   sh ./unisacc.com tools/out-gc.cx                 report: one line per top-level entry, then age buckets
+ *   sh ./unisacc.com tools/out-gc.cx -- --older-than 30 --delete
+ *   sh ./unisacc.com tools/out-gc.cx -- --root out/x ...   the same over another root (tools/check-out-gc.cx)
+ *
+ * out/ is the ignored scratch root: build products, register runs, logs.  Nothing in it is a source of truth,
+ * but it is also where another agent's in-flight reconstruction writes, so the default is read-only and even
+ * --delete needs --older-than as a second key.  The age is the newest mtime found anywhere under the entry,
+ * not the directory's own: a directory whose last child changed yesterday is in flight whatever its own date
+ * says.
+ *
+ * The report is the input to the decision; the tool never guesses.  A path that cannot be stat'ed is listed
+ * with ERR and never deleted.  Deleting goes through cx_rmtree, the deletion guard. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use text.fmt
+
+#define GC_MAX_ENTRY 512
+#define GC_MAX_PATH 4096
+
+static long buckets[5];        /* bytes: <3d, 3-7d, 7-30d, >30d, unknown */
+static long counts[5];
+static long total_bytes, total_entries, doomed_bytes, doomed_entries, deleted;
+
+/* Newest mtime under PATH (PATH itself included); *bytes gets the recursive size.  -errno on a stat failure. */
+static int newest(const char *path, long *bytes, long *mtime, int depth) {
+    sy_stat_t st;
+    int fd, n, i, off;
+    long b = 0, m = 0;
+    char names[1 << 16];        /* on the stack: a static one would be clobbered by the recursion below */
+    char child[GC_MAX_PATH];
+    if (sy_lstat(path, &st) != 0) return -EIO;
+    if (st.mtime > m) m = st.mtime;
+    if (st.kind != 'd' || depth > 6) { *bytes = st.size; *mtime = m; return 0; }
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+    n = sy_dir_names(fd, names, sizeof names);
+    sy_close(fd);
+    if (n < 0) return n;
+    off = 0;
+    for (i = 0; i < n; i++) {
+        long cb = 0, cm = 0;
+        int plen = tx_len(path, GC_MAX_PATH), nlen = tx_len(names + off, GC_MAX_ENTRY);
+        if (plen + nlen + 2 > GC_MAX_PATH) { off += nlen + 1; continue; }
+        tx_snprintf(child, sizeof child, "%s/%s", path, names + off);
+        off += nlen + 1;
+        if (newest(child, &cb, &cm, depth + 1) != 0) continue;      /* a racing removal is not a failure */
+        b += cb;
+        if (cm > m) m = cm;
+    }
+    *bytes = b;
+    *mtime = m;
+    return 0;
+}
+
+static int bucket_of(long age_days) {
+    if (age_days < 0) return 4;
+    if (age_days < 3) return 0;
+    if (age_days < 7) return 1;
+    if (age_days < 30) return 2;
+    return 3;
+}
+
+int main(int argc, char **argv) {
+    sy_stat_t dir, st;
+    long older = -1, now, bytes, mtime, age, i;
+    int del = 0, fd, n, off, k;
+    const char *root = "out";
+    static char names[1 << 18];
+    char path[GC_MAX_PATH];
+    static const char *label[5] = { "<3d", "3-7d", "7-30d", ">30d", "unknown" };
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--older-than") && i + 1 < argc) older = tx_atol(argv[++i]);
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--delete")) del = 1;
+        else { sy_eprintf("usage: out-gc [--root DIR] [--older-than DAYS --delete]\n"); return 2; }
+    }
+    if (del && older <= 0) { sy_eprintf("out-gc: --delete needs --older-than DAYS>0 as a second key\n"); return 2; }
+    if (sy_stat(root, &dir) != 0 || dir.kind != 'd') { sy_eprintf("out-gc: no %s directory\n", root); return 1; }
+    fd = sy_open(root, O_RDONLY, 0);
+    if (fd < 0) { sy_eprintf("out-gc: cannot open %s\n", root); return 1; }
+    n = sy_dir_names(fd, names, sizeof names);
+    sy_close(fd);
+    if (n < 0) { sy_eprintf("out-gc: cannot list %s\n", root); return 1; }
+    now = sy_wall_s();
+    sy_printf("%-8s %-10s %s\n", "AGE", "BYTES", "ENTRY");
+    off = 0;
+    for (i = 0; i < n; i++) {
+        int nlen = tx_len(names + off, GC_MAX_ENTRY);
+        int b;
+        tx_snprintf(path, sizeof path, "%s/%s", root, names + off);
+        off += nlen + 1;
+        mtime = 0;
+        if (newest(path, &bytes, &mtime, 0) != 0) {
+            sy_eprintf("ERR\t%s\n", path);
+            buckets[4]++; counts[4]++;
+            continue;
+        }
+        age = (now - mtime) / 86400;
+        b = bucket_of(age);
+        buckets[b] += bytes; counts[b]++;
+        total_bytes += bytes; total_entries++;
+        sy_printf("%-8ld %-10ld %s\n", age, bytes, path);
+        if (older > 0 && age >= older) {
+            doomed_bytes += bytes; doomed_entries++;
+            if (del && cx_rmtree(path) == 0) { deleted++; sy_printf("DELETED\t%s\n", path); }
+            else if (del) sy_eprintf("REFUSED\t%s\n", path);
+        }
+    }
+    for (k = 0; k < 5; k++)
+        sy_printf("BUCKET\t%s\tentries=%ld\tbytes=%ld\n", label[k], counts[k], buckets[k]);
+    sy_printf("TOTAL\tentries=%ld\tbytes=%ld\n", total_entries, total_bytes);
+    if (older > 0) sy_printf("CANDIDATE\tolder-than=%ld\tdays\tentries=%ld\tbytes=%ld\tdeleted=%ld\n",
+                             older, doomed_entries, doomed_bytes, deleted);
+    else sy_printf("CANDIDATE\tnone\tpass --older-than DAYS [--delete]\n");
+    (void)st;
+    return 0;
+}
