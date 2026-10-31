@@ -658,6 +658,27 @@ int ex_ri_note(const unsigned char *key, int n, int rc, unsigned char **bytes, i
     return rc;
 }
 
+/* Unset UNISA_JOBS is the old default of 8. A value above 1 refuses
+   capture and strict before any ledger row or capture directory. */
+static int ex_jobs(void) {
+    const char *sy_env(const char *);
+    const char *t;
+    int n;
+    int any;
+    t = sy_env("UNISA_JOBS");
+    if (!t) return 8;
+    while (*t == ' ' || *t == '\t' || *t == '+') t = t + 1;
+    any = 0;
+    n = 0;
+    while (*t >= '0' && *t <= '9') {
+        any = 1;
+        if (n <= 214748364) n = n * 10 + (*t - '0');
+        t = t + 1;
+    }
+    if (!any) return 0;
+    return n;
+}
+
 /* Hash the source bytes the driver already read. Stage is e3: plus the
    route text (lnx/x86_64/tape/O0). Tape and image pass; other routes
    refuse before the model runs. Return 2 on a named refusal, else 0. */
@@ -666,7 +687,13 @@ int ex_ri_arm(const char *route, int mode, const unsigned char *bytes, long n) {
     char err[512];
     int i;
     int k;
+    int jobs;
     if (!ex_strict && !ex_cap_want) return 0;
+    jobs = ex_jobs();
+    if (jobs > 1) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-capture-parallel-unsupported UNISA_JOBS=%d (capture and strict multi-source runs need UNISA_JOBS=1)\n", jobs);
+        return 2;
+    }
     if (!((mode == 2 && ex_has(route, "/tape/O")) || (mode == 0 && ex_has(route, "/image/O")))) {
         sy_eprintf("unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route ? route : "-");
         return 2;
@@ -699,6 +726,41 @@ int ex_ri_arm(const char *route, int mode, const unsigned char *bytes, long n) {
         ex_started = 1;
     }
     return 0;
+}
+
+/* A strict trace that never armed, or that still has rows, dies here.
+   A map ledger and a capture-only run return 0. */
+int ex_ri_finish(void) {
+    if (ex_strict && ex_led.trace) {
+        if (!ex_started) {
+            sy_eprintf("unisacc: INTERFACE_ERROR resource-trace-not-started\n");
+            return 2;
+        }
+        if (ex_led.cursor != ex_led.n) {
+            sy_eprintf("unisacc: INTERFACE_ERROR resource-trace-unconsumed event=%d remaining=%d\n", ex_led.cursor, ex_led.n - ex_led.cursor);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+int ex_ri_say(const char *fmt, const char *text) {
+    if (ex_ri_finish()) return 2;
+    sy_printf(fmt, text);
+    return 0;
+}
+
+/* Finish before the first output byte. 2 is the trace refusal, already
+   on stderr. 1 is a write failure, also already on stderr. */
+int ex_ri_emit(const char *path, const unsigned char *data, long n, char *why, int cap) {
+    int hs_write_out(const char *, const unsigned char *, long, char *, int);
+    int wr;
+    wr = ex_ri_finish();
+    if (wr) return wr;
+    wr = hs_write_out(path, data, n, why, cap);
+    if (!wr) return 0;
+    sy_eprintf("unisacc: model driver: %s\n", why && why[0] ? why : "cannot open output");
+    return 1;
 }
 
 void ex_alu_note(int rc) {
