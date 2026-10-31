@@ -76,7 +76,7 @@ STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片�
 STATE43：[x] 1 hostnative（28d0cba49c）。
 STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
 STATE43：[x] 3 **RI 迁移**（fb89faddde 防呆、db6938d868 严格重放与捕获、fbd9cb64c7 与 f6c3ef3dd0 trace 与 multi）：已装的 fc1d4513 上，tools/affected.cx 跑 resources、ri-trace、ri-trace-output、ri-multi 四个批次 4/4 PASS（断言 74、15、17、10，全部 0 失败），cc 独立复跑确认。旧产品对同一测试 rc2、捕获不写文件，对照成立。rf-capture-guard 作废（见文末），不登记。
-STATE43：[ ] 4 两代比较：**lnx/x86_64 已对上**——第一代（构造器 79fb84e6）与第二代（构造器已装的 fc1d4513，冻结 rev cd1a95ebcc，空闲机器上 tools/bound 60 内编完，镜像耗时 53.2 秒）都是 0ae1986b…，1,764,230 字节，逐字节相同，cc 独立 cmp 确认。还差其余四片的第二代：lnx/arm64、osx/x86_64、osx/arm64、win/x86_64（各用 fc1d4513 交叉编译，与第一代比；osx 约 55 秒，贴着界，一次只跑一个、机器空闲时）。之后量 -O1、-O2（C44-SPEED-01）。
+STATE43：[x] 4 **两代比较，五片全部逐字节相同**（冻结 rev cd1a95ebcc；第一代构造器 79fb84e6，第二代构造器已装的 fc1d4513，各片 tools/bound 60 内编完，空闲机器上只跑一次）：lnx/x86_64 0ae1986b（53.2 秒）、lnx/arm64 14abd693（54.9 秒）、osx/x86_64 d4e43786（56.8 秒）、osx/arm64 16b6dd58（58.9 秒，离界只差 1 秒）、win/x86_64 1b0c3353（39.0 秒）。cc 对五对文件逐一 cmp 确认。注意 osx 两片已经贴着 60 秒界，构造器再慢就编不完，这是 C44-SPEED-01 的急事。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
 STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
 STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
