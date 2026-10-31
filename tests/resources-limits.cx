@@ -1,0 +1,80 @@
+/* tests/resources-limits.cx -- resource boundaries of the installed product, one case per matrix cell (resources domain).
+ *
+ *   sh ./unisacc.com tests/resources-limits.cx            (from the repo root; works in out/resources-limits-batch/)
+ *
+ * Every case runs the product (ROOT/unisacc.com through sh, as users do) on a fixture in the work directory:
+ *   res.disk.output-full      -o /dev/full: rc nonzero, stderr names the output, no rc 0
+ *   res.disk.output-eacces    -o into a read-only directory: rc nonzero, "cannot open output" (not "no such file")
+ *   res.fd.no-leak-to-program a program started by -run finds only fds 0, 1 and 2 open (fcntl on 3..63)
+ *   res.time.user-infinite-loop  -run of for(;;); under tools/bound 2 ends rc 142 (deadline) in under 8 s, no loop
+ *                             process is left behind, and a clean -run afterwards returns 7
+ * Not here, because the product fails them today (product gaps in plans/release-0.0.43.md): a compile under
+ * RLIMIT_AS below about 225 MB dies with SIGSEGV instead of a named refusal, and a -run program whose malloc fails
+ * under RLIMIT_AS crashes the runtime instead of seeing NULL.
+ * Prints PASS/FAIL per case and RESOURCES_LIMITS<TAB>assertions=N<TAB>failed=M; exit 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("resources-limits: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\tresources-limits.%s\n", name); else { failures++; sy_printf("FAIL\tresources-limits.%s\n", name); } }
+static void put(const char *leaf, const char *s) { char p[4600]; if (cx_fmt(p, sizeof p, "%s/%s", work, leaf) || cx_write(p, s, (size_t)tx_len(s, 4096))) die(leaf); }
+static int has(const np_result *r, const char *s) { return tx_find(r->err, (long)r->errn, s, tx_len(s, 256)) >= 0; }
+
+/* the product with ARGS (0-terminated) under tools/bound SECS, cwd = the work directory */
+static np_result prod(int secs, char **args) {
+    char *v[20], sb[8]; int n = 0, k; char why[1024]; np_result r;
+    if (cx_fmt(sb, sizeof sb, "%d", secs)) die("secs");
+    v[n++] = bound; v[n++] = sb; v[n++] = "sh"; v[n++] = com;
+    for (k = 0; args[k] && n < 19; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, 0, secs + 12, &r, why, sizeof why)) die(why);
+    return r;
+}
+
+int main(void) {
+    np_result r; char p[4600];
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/resources-limits-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work");
+    put("ok.c", "int main(void){return 7;}\n");
+
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "/dev/full", 0}; r = prod(20, a);
+        ck(r.rc != 0 && r.rc != 142 && r.errn && has(&r, "output"), "disk-output-full-refused"); np_free(&r); }
+
+    if (sy_euid() != 0) {
+        if (cx_fmt(p, sizeof p, "%s/ro", work) || sy_mkdir(p, 0555)) die("ro dir");
+        {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "ro/x.out", 0}; r = prod(20, a);
+            ck(r.rc != 0 && has(&r, "cannot open output") && !has(&r, "no such file") && !has(&r, "ENOENT"), "disk-output-eacces-refused"); np_free(&r); }
+        sy_chmod(p, 0700);
+    } else ck(0, "disk-output-eacces-refused-needs-non-root");
+
+    put("fds.c", "#include <fcntl.h>\nint main(void){int n=0,i;for(i=3;i<64;i++)if(fcntl(i,F_GETFD)!=-1)n++;return n;}\n");
+    {   char *a[] = {"-run", "fds.c", 0}; r = prod(30, a); ck(r.rc == 0 && !r.errn, "fd-no-leak-to-program"); np_free(&r); }
+
+    put("loop.c", "int main(void){for(;;);return 0;}\n");
+    {   char *a[] = {"-run", "loop.c", 0}; long t0 = sy_now_ms(), ms; char *ps[] = {"sh", "-c", "ps -eo args | grep -c '[l]oop\\.c'; true", 0};   /* grep -c exits 1 on a count of 0 */ char out[64]; int cut, left;
+        r = prod(2, a); ms = sy_now_ms() - t0;
+        ck(r.rc == 142 && ms < 8000, "time-user-infinite-loop-deadline-142"); np_free(&r);
+        left = -1;   /* bounded wait for the kernel to finish reaping the killed group: up to 6 looks, 400 ms apart */
+        for (int look = 0; look < 6 && left != 0; look++) {
+            sy_sleep_ms(400);
+            left = sy_run(ps, out, sizeof out, &cut) == 0 ? (int)tx_strtol(out, 0, 10) : -1;
+        }
+        ck(left == 0, "time-user-infinite-loop-no-descendant-left");
+        {   char *b[] = {"-run", "ok.c", 0}; r = prod(30, b); ck(r.rc == 7, "time-user-infinite-loop-clean-rerun-returns-7"); np_free(&r); } }
+
+    sy_printf("RESOURCES_LIMITS\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
