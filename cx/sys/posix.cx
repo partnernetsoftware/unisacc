@@ -181,20 +181,23 @@ int sy_flock(int fd, int op) { return (int)syp(syp_flock, fd, op, 0, 0, 0); }
 /* A POSIX record lock over all of FD (the lockf/fcntl kind, not flock's):
    WRITE 1 exclusive / 0 shared, WAIT 1 to block. Unlock with sy_unlockf.
    0, or -errno (-EAGAIN or -EACCES when held elsewhere and not waiting). */
-int sy_lockf(int fd, int write, int wait) {
+/* Windows has no fcntl or struct flock in its prelude: both are -ENOSYS there (the same
+   shape as sy_mkfifo); an unguarded struct flock made every Windows image that links
+   sys.posix fail to compile ("incomplete struct"). */
+static int syp_lockf_os(int fd, int kind, int wait) {   /* kind 0 shared, 1 exclusive, 2 unlock */
+#ifdef _WIN32
+    (void)fd; (void)kind; (void)wait;
+    return -ENOSYS;
+#else
     struct flock l;
     memset(&l, 0, sizeof l);
-    l.l_type = write ? F_WRLCK : F_RDLCK;
+    l.l_type = kind == 2 ? F_UNLCK : kind ? F_WRLCK : F_RDLCK;
     l.l_whence = SEEK_SET;
     errno = 0;
     return fcntl(fd, wait ? F_SETLKW : F_SETLK, &l) == 0 ? 0 : (errno ? -errno : -EIO);
+#endif
 }
 
-int sy_unlockf(int fd) {
-    struct flock l;
-    memset(&l, 0, sizeof l);
-    l.l_type = F_UNLCK;
-    l.l_whence = SEEK_SET;
-    errno = 0;
-    return fcntl(fd, F_SETLK, &l) == 0 ? 0 : (errno ? -errno : -EIO);
-}
+int sy_lockf(int fd, int write, int wait) { return syp_lockf_os(fd, write ? 1 : 0, wait); }
+
+int sy_unlockf(int fd) { return syp_lockf_os(fd, 2, 0); }
