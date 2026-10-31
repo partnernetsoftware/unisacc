@@ -5,9 +5,13 @@
  * Direct `#pragma unisa use` edges only. Facts come from the existing
  * tools/symindex.cx index (manifest + per-content shard `U` lines); the
  * target is resolved the compiler's way: beside the using file, dots are
- * directories, then sy_realpath. Source entries are the tracked paths, so
- * two lexical entries of one physical source can resolve different deps;
- * nothing is deduplicated by physical source.
+ * directories, then sy_realpath. Source entries are the manifest entries
+ * that symindex indexed, not all tracked paths: mode 120000 file symlinks and
+ * unindexed tracked sources are outside this manifest domain. Two lexical
+ * entries of one physical source can resolve different deps; nothing is
+ * deduplicated by physical source. Tracked/symlink reconciliation is B and
+ * is reported as UNKNOWN here; fixtures only prove capability, not real-tree
+ * coverage.
  *
  * Layers are the CX-S prefixes: L0 cx/sys mem text; L1 cx/core runtime;
  * L2 cx/driver cx/compiler src; L3 tools tests apps. cx/cx0, cx/workspace,
@@ -56,7 +60,7 @@ static int cl_amb_out, cl_io, cl_cur_line, cl_cond;
 static int cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_und_total;
 static int cl_domain; static long cl_bytes;
 static char cl_scan_path[CL_PATH]; static long cl_scan_len;
-static int cl_dig_backend; /* 0 afalg only, 1 soft used, 2 both */
+static int cl_dig; /* bit 1 soft used, bit 2 AF used; 0 none, 3 mixed */
 static char cl_cur_mod[128];
 static struct { char path[CL_PATH]; char mod[128]; char why[256]; int used; } cl_wl[CL_WL];
 static int cl_nwl;
@@ -332,7 +336,7 @@ static int cl_audit(void) {
     int w;
     cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
     cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
-    cl_domain = 0; cl_bytes = 0; cl_dig_backend = 0;
+    cl_domain = 0; cl_bytes = 0; cl_dig = 0;
     sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12/U-reconciliation/fixtures-30 not implemented\n");
     cl_und_lex++; cl_und_total++;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
@@ -379,16 +383,16 @@ static int cl_audit(void) {
           cl_scan_path[0] = 0; cl_scan_len = 0;
           if (sy_stat(sp, &sst) < 0) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-UNREADABLE\t%s\n", path); }
           else if (sst.size == 0) {
-              cx_sha256_hex("", 0, hex); if (cl_dig_backend == 0) cl_dig_backend = 1;
-              else if (!cl_eq(hex, sha)) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-CHANGED\t%s\n", path); }
+              cx_sha256_hex("", 0, hex); cl_dig |= 1;
+              if (!cl_eq(hex, sha)) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-CHANGED\t%s\n", path); }
           } else {
               sn = cl_read(sp, cl_src, CL_CAP);
               if (sn <= 0) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-UNREADABLE\t%s\n", path); }
               else if (sn == CL_CAP - 1) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-TOO-LONG\t%s\n", path); }
               else {
-                  if (sn < 65536) { cx_sha256_hex(cl_src, (size_t)sn, hex); if (cl_dig_backend == 0) cl_dig_backend = 1; }
-                  else if (sy_sha256_hex(cl_src, sn, hex) != 0) { cx_sha256_hex(cl_src, (size_t)sn, hex); if (cl_dig_backend == 0) cl_dig_backend = 1; }
-                  else if (cl_dig_backend == 1) cl_dig_backend = 2;
+                  if (sn < 65536) { cx_sha256_hex(cl_src, (size_t)sn, hex); cl_dig |= 1; }
+                  else if (sy_sha256_hex(cl_src, sn, hex) != 0) { cx_sha256_hex(cl_src, (size_t)sn, hex); cl_dig |= 1; }
+                  else cl_dig |= 2;
                   if (!cl_eq(hex, sha)) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-CHANGED\t%s\n", path); }
                   else { cx_fmt(cl_scan_path, sizeof cl_scan_path, "%s", path); cl_scan_len = sn; }
               }
@@ -709,7 +713,7 @@ int main(int argc, char **argv) {
               cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail,
               cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io);
     { char dhex[65]; sy_sha256_hex(cl_man, cl_man_n, dhex); dhex[16] = 0;
-      sy_printf("CX_LAYERS_SCOPE_DETAIL\tdomain=%d\tbytes=%ld\tmanifest_sha16=%s\tdigest_backend=%s\n", cl_domain, cl_bytes, dhex, cl_dig_backend == 2 ? "mixed" : cl_dig_backend ? "soft" : "afalg"); }
+      sy_printf("CX_LAYERS_SCOPE_DETAIL\tdomain=%d\tbytes=%ld\tmanifest_sha16=%s\tdigest_backend=%s\n", cl_domain, cl_bytes, dhex, cl_dig == 3 ? "mixed" : cl_dig == 1 ? "soft" : cl_dig == 2 ? "afalg" : "none"); }
     if (cl_amb || cl_out) sy_printf("UNKNOWN\tamb=%d\tout=%d\tnot-a-pass\n", cl_amb, cl_out);
     (void)idxdir; (void)v0; (void)shard; (void)real;
     return rc;
