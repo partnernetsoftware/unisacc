@@ -26,6 +26,8 @@ CX 保持 C99 受检查子集与 `#pragma unisa` 配置：底层对接 libc、PO
 
 长期目标：明确包身份、包内模块路径、公开接口与构建实例；源路径是解析输入而不是未经讨论的跨机器稳定身份。模块解析、对象所有权和链接应共用一个明确依赖图。直接 `use`、符号过滤与别名、私有符号及类型可见性都要有一致的可观察规则。CXIF v0 是类型与原型文本，不是结构化 ABI 或所有权证明。未来接口格式需明确目标 ABI、类型布局、版本及校验方式；声明与证明分开。
 
+已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。`sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。`tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径；这与已生效 CX-G-1 冲突，不是新增 pragma 或 W-7 问题。已派实施方调查无 `use` 的统一指令检查，未修复，不以此单例推断其他形式全失效。
+
 已实证的身份风险（Linux x86-64，已装 `fc1d4513…`）：`cx/compiler/cxmod.cx` 以使用方的词法路径所在目录解析 `use`，再以 realpath 比较合并模块；`tools/entry-build.cx` 也按 realpath 对闭包去重。`out/cx-cb-identity-01/real/one.cx:2` 的 `use m` 经 `a/one.cx` 与 `b/one.cx` 两条软链指向同一文件，却分别解析到返回 11 的 `a/m.cx` 与返回 22 的 `b/m.cx`。同一图先导入 a 后 b 时默认运行退出 11；反序退出 22；gcc_cx 和 clang_cx 的同一探针亦如此。`a/cxpack.tsv` 限制 `one_x`，b 无清单则公开 `one_x`、`one_y`，同一源码哈希的 CXIF 因词法入口而不同。证据 `out/cx-cb-identity-01/logs/{identity,entry1,entry2,entry3,public-set}.txt`。命令行双根的图与经 `use` 折叠也不同：前者计划接受、后续因重复定义拒绝，见 `roots.txt`。
 
 建议先完成解析上下文的一致性合同：真实文件相同不等于依赖和公开集相同；合并前验证各入口的解析结果与有效公开集一致，不一致具名拒绝，保持相同上下文的软链去重。无清单的默认公开集与显式清单如果实际导出相同函数，应按有效集相等处理，而不是仅比较清单有无。不能只比较源哈希或入口父目录，也不能只比一层真实目标：两个入口的 `use m` 可以指向同一物理 m，而 m 再按不同词法路径解析 `use leaf` 时仍可分叉；须保留每个到达的词法上下文，直到递归依赖闭包完成检查。递归核验缓存应区分两侧的词法上下文对，规定上下文和边的明确预算与超限拒绝，不能假设物理单元数量能界定词法上下文数量。双命令行根的去重将改变现行行为，须另列迁移和裁定。清单读取错误、环与 `module` 命名差异的处理及三源一致性仍待核对；本段不改变 CX-W-1/CX-U-4 或宣称修复。包根（CX-W-6）与宿主 `-run`（CX-W-7）另刀。
