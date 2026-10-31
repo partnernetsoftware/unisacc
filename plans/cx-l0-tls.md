@@ -1,6 +1,6 @@
 # cx 原生 TLS：卡点、分片与验收
 
-状态：T2.1 片（SHA-256/HMAC）已落地并过向量；其余分片未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
+状态：T2.1–T2.4 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305），另加 `cs_ct_eq`/`cs_ct_wipe`；T2.5–T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
 
 ## 一句话回答"卡在哪个环节"
 
@@ -53,10 +53,10 @@ T1 不新增密码学，但它是 T2 能替换进来的前提。
 
 | 片 | 内容 | 验收向量 |
 |---|---|---|
-| T2.1 | SHA-256 + HMAC-SHA-256 | FIPS 180-4 B.1–B.3、RFC 4231 §4；已过，并与 `sha256sum`/`openssl` 对拍 |
-| T2.2 | base64 / hex 编解码 | RFC 4648 §10 向量（含拒绝：非法字符、长度 mod 4 == 1） |
-| T2.3 | HKDF-SHA256 | RFC 5869 A.1–A.3（含 `L` 边界：0、>255·HashLen 拒绝） |
-| T2.4 | ChaCha20 + Poly1305 + AEAD | RFC 8439 §2.3.2、§2.5.2、§2.6.2、§2.8.2（含 nonce 复用拒绝由调用方保证，模块只记约束） |
+| T2.1 | SHA-256 + HMAC-SHA-256 | FIPS 180-4 B.1–B.3、RFC 4231 §4；**已过**，与 `sha256sum`/`openssl` 对拍（`cx/crypto/sha256.cx`，批次 `cx-l0-crypto-sha256`） |
+| T2.2 | base64 / hex 编解码 | RFC 4648 §10 向量；拒绝非法字符、长度 mod 4 ≠ 0、非规范填充位、中段填充、奇数 hex 长度；容量精确边界。**已过**（`cx/crypto/b64.cx`，批次 `cx-l0-crypto-b64`） |
+| T2.3 | HKDF-SHA256 + TLS1.3 Expand-Label | RFC 5869 A.1–A.3（含 82 字节跨三块、空 salt/info）；Expand-Label 值与独立 HKDF-Expand 对拍；`L`=0 与 >255·HashLen、label>249、context>255 拒绝。**已过**（`cx/crypto/hkdf.cx`，批次 `cx-l0-crypto-hkdf`） |
+| T2.4 | ChaCha20 + Poly1305 + AEAD | RFC 8439 §2.4.2 块函数、§2.5.2 与 A.3（r=0／s=0／r=2）、§2.8.2 seal/open 与伪造 tag/aad/长度/nonce 拒绝、原地 open、空明文与空 aad。**已过**（`cx/crypto/chacha20poly1305.cx`，批次 `cx-l0-crypto-chacha20poly1305`） |
 | T2.5 | AES-128/256-GCM | NIST GCM 测试向量（16/12/8/4 字节 nonce，tag 截断拒绝） |
 | T2.6 | X25519 | RFC 7748 §5.2、§6.1；低阶点拒绝 |
 | T2.7 | P-256 ECDSA 验签 | NIST CAVP 向量；DER 签名编码与 r/s 越界拒绝 |
