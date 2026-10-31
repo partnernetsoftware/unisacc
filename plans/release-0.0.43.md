@@ -127,6 +127,7 @@ STATE43：**all-waves 46（omp-grk，2026-11-01，`4e40d38a`）**：再 10 个 P
 STATE43：**all-waves 58（omp-grk，2026-11-01，`4e40d38a`）**：再 12 个 PASS，累计 58/346。含 `link-undefined-function`、`formats-macho-pe`、`phase-timing-external`。两个 full-stream FAIL 仍粘住。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**all-waves 70（omp-grk，2026-11-01，`4e40d38a`）**：再 12 个 PASS，累计 70/346。含 `runcache`、`ledger-parser-compare`。两个 full-stream FAIL 仍粘住。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**all-waves 82（omp-grk，2026-11-01，`4e40d38a`）**：再 12 个 PASS，累计 82/346。含 `cx-package-refusals`。两个 full-stream FAIL 仍粘住。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**cx-l0-sys（omp-grk，2026-11-01）**：已装 `4e40d38a` 上 `spawn_inherit` FAIL，124 过 1 败，FAIL 粘在会话里。原因是 `-run` 把父进程留下的 fd 也关了。源码修复 `host` 只关启动后新开的 fd。私有构造器上干净父进程的 fd 计数是 0，`spawn_inherit` 通过。还没重装。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
