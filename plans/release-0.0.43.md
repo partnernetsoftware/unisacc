@@ -72,7 +72,7 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 ## 进度（grk 每完成一步，在这里写上提交号）
 
 STATE43：**当前状态（cc 维护，2026-10-31 中午；下面的流水记录是历史，以这一块为准）**
-STATE43：**当前状态（omp-grk，2026-10-31 夜；这一行压过中午那块）**：候选整单普查在 `out/priv-full/out/census3` 进行中，已见的非 PASS 只有 19 个 `full-*`。`cx-l0-sys-ffi` 与 `phase-timing-stamps` 在候选上已绿（`811c8775e5`、`ab090348ad`）。`elf-winargs` 批次在候选 `46435b9b` 上 PASS，格 `elf.pos.windows-args-template` 等安装后翻。R13 豁免 Darwin carry、Windows gate、ARM narrowing、独立整镜像 sha（`c366b651a0`，`matrix-waive --check` disagree=0）。外平台 73 格和 `all-waves` 还没跑。公开仍等 `tests/run.cx -- --all` 输出 QUALIFIED；主人目标已包含公开，但没有 QUALIFIED 之前不签名、不发 Draft/Latest。
+STATE43：**当前状态（omp-grk，2026-10-31 夜；这一行压过中午那块）**：候选整单普查在 `out/priv-full/out/census3`，148/170，非 PASS 是 19 个 `full-*` 加 5 个私有根工具红（`affected-tool`、`doc-links-tool`、`snapshot-run-tool`、`stale-tool`、`commit-own`；同一候选在真实检出里 `stale`/`doc-links` 是 failed=0）。`cx-l0-sys-ffi`、`phase-timing-stamps`、加载器和 image 批次在候选 `46435b9b` 上已绿。`elf-winargs` 4/0。R13 已记（`c366b651a0`）。外平台 73 格和 `all-waves` 还没跑。没有 `QUALIFIED` 之前不签名、不发 Draft/Latest。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
