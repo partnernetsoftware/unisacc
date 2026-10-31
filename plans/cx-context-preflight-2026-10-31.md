@@ -44,24 +44,97 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 ## 4. 根清单：来源、分类与核对门
 
 拟提交 `tests/cx-context-roots.tsv`（未建），列：
-`root<TAB>joint_id<TAB>double_count<TAB>category<TAB>provenance<TAB>expect<TAB>sha256`
+`root<TAB>joint_id<TAB>double_count<TAB>category<TAB>origin<TAB>provenance<TAB>expect<TAB>sha256`
 
-类别：
-- `production`：`src/**`、`release/**` 中 tracked 且含 main 定义的入口。
-- `tool`：`tools/**` 中 tracked 且含 main 定义的入口。
-- `batch-positive`：tests/batches.tsv 中 SOURCE，且该批次 coverage 预期为正常完成。
-- `batch-negative`：SOURCE 属故意拒绝/缺模块/运行时生成的夹具；必须逐行给出 expect=negative-known 与理由。
+`origin` 必填，只取四值之一，指明该行**由哪个来源产生**，不代表已捕获执行身份：
+- `recipe`：来自构造配方的**源码声明**（`tools/entry-build.cx` 的 `src_rel`/`keys` 表）。
+- `tree-main`：来自 commit C 树中 `.cx` ∩ 索引 `D main`。
+- `batch`：来自 `tests/batches.tsv` SOURCE（批次 id 记于 provenance）。
+- `generated`：测试运行时生成或不在 tracked 树中。
+
+**四源不得互相顶替**：`recipe` 是源码声明，**不是实际 argv**；`tree-main` 是**索引发现集**，**不是全集**；
+`batch` 是测试登记，不是构造成员。每行只允许一个 `origin`；跨源重合另起行或显式 `double_count`，
+不得合并成一个"已核"的根。
+
+类别（不得由目录名推断，见 §4.1）：
+- `production`：**经配方或捕获 argv 证明**参与产品构造的单元。
+- `tool`：不属于产品构造、且**已确认**为独立可执行入口的单元。
+- `batch-positive` / `batch-negative`：来自 `tests/batches.tsv` SOURCE。
 - `generated`：路径由测试运行时生成或不在 tracked 树中的入口；expect=unknown-ok。
-- `unclassified`：未归类的候选；不算覆盖，聚合 UNKNOWN。
+- `unclassified`：未归类；不算覆盖，聚合 UNKNOWN。
 
-候选全集生成规则（核对门，不静默）：
-1. 从 commit C 的树清单取所有 mode 100644/100755 的 `.cx`；
-2. 用固定同一 commit 的 symindex 索引查 `main` 定义（D main），得到入口候选；
-3. 并上 tests/batches.tsv 的 SOURCE 去重；
-4. 每个候选必须出现在 roots.tsv；缺失→`ROOTS incomplete`，聚合 UNKNOWN/非零；
-5. roots.tsv 中不存在于候选全集的行→`ROOTS stale`，单列；
-6. 候选数超过测量 ROOTS 上限→UNKNOWN/非零，不截断。
-产品/工具根逐项由 1–2 生成后再人工固定 category/provenance；负例逐行固定，不用泛化分类代替。
+### 4.1 分类不靠目录猜（基线绑定 commit，不得沿用）
+
+基线：**C = `fc628a0403a788c0b5cd18d31f2d1e6f6f70b9f3`**，`tests/batches.tsv` sha256
+`504eadce9d167af72eb8d9a78a4a746e848da12f58083790d4e29d61ae072222`。
+下表由该 commit 的树直接算出（不读工作区）：
+
+| 观测（@C） | 值 |
+|---|---|
+| 树中 mode 100644/100755 的 `.cx` | 1911 |
+| 树中 mode 120000 的 `.cx` | 42（不进 `--in`） |
+| 含 main 定义的 `.cx`（S2，文本口径） | 850 |
+| `tools/` 含 main | 330 |
+| 其中登记为批次 SOURCE | 114 |
+| **无任何批次** | **216** |
+| `src/` 含 main | **仅 `src/unisacc.cx`** |
+| 配方 `src_rel` | 35 键 / **33 唯一 TU** |
+
+⇒ 1. `tools/**` 中 216 个含 main 的单元**既不能默认算 tool、也不算 production**，只能落
+`unclassified` 直至逐个确认；按目录批量归为 `tool` 会把一块未知伪装成覆盖。
+⇒ 2. `src/**` 若按"含 main"选根会**漏掉 32 个配方成员**。产品根必须由 `origin=recipe` 提供，
+不能由 `tree-main` 反推，也不能由目录名反推。
+
+**数字是绑定 C 的观测值，不是合同，也不是当前工作区值**（`tests/batches.tsv` 每轮都在变：同为
+`layer=contract` 已从 133 涨到 136）。每次测量必须按实际 C 重算并重报，禁止沿用本表。
+
+### 4.2 候选全集：三源并集 + 差集分报
+
+1. **S1 = recipe**：`tools/entry-build.cx` 的 `src_rel[0..34]`（33 唯一 TU）。同时记
+   `recipe_argv_status=captured:<sha256>|NOT-CAPTURED`；`NOT-CAPTURED` 时 S1 只表示"配方**声明**"，
+   **不等于实际 argv**，不得据此称已捕获执行身份。
+2. **S2 = tree-main**：commit C 树中 mode 100644/100755 的 `.cx` ∩ 索引 `D main`。
+3. **S3 = batch**：`tests/batches.tsv` 的 SOURCE 去重（@C 为 216 个唯一值）。
+4. 候选 = S1 ∪ S2 ∪ S3；差集**分列报告**，不合并、不互相顶替：
+
+   | 差集(@C) | 数量 | 处理 |
+   |---|---|---|
+   | `S2 \ S3` | 634 | 逐项落 `tool`/`unclassified`；**默认 unclassified** |
+   | `S3 \ S2` | 0 | 非零时按 `STALE-SOURCE` 复核，不直接采信 |
+   | `S1 \ S2` | 32 | **正常**：配方成员无 main，按联合根成员处理 |
+   | `S2 \ S1` | 849 | 报出，不算错 |
+
+5. 每个候选必须在 roots.tsv 出现，缺失→`ROOTS incomplete`、聚合 UNKNOWN/非零；多余行→`ROOTS stale`
+   单列；候选数超 ROOTS 上限→UNKNOWN/非零，不截断。
+
+**S2 是发现集，不是全集**：`D main` 只覆盖索引 manifest 内路径；mode 120000 文件软链**不进 manifest**，
+其目标即使含 main 也不在 S2。故"树内 `.cx` 已全覆盖"不成立，S2 缺口的实际数量
+**须在测量时按 C 重算**（本文不引用旧值）。
+
+### 4.3 `batch-negative` 只能由 `layer` 列判定
+
+实测 @C（345 数据行）：`implementation` 全 IMPLEMENTED，`expect` **全为 `rc0:*`**；`run-batch` 判 PASS
+只查"无超时 + rc0 + 候选标识前后一致 + 标记行恰一次"，**不涉及被测内容正负**。
+正负信号只在 `layer` 列（contract 136 / interfaces 107 / **negative 62** / properties 15 /
+platform 10 / library 8 / product 7）。
+⇒ 不得由 `expect` 或批次 id 推断负例；反例：id 含 `negative` 的 `full-negative`，其 source 为
+`tests/full-domain.cx`、`layer=product`。`batch-negative` 只作报告分组（`layer=negative` 投影），
+不参与覆盖计量；`negative-known` 当前上限 0 行（逐行理由未给出）。
+
+### 4.4 计数单位：按行，不按调用
+
+本节所有候选/对照计数以 **roots.tsv 数据行**为单位：一个候选一行，一行只归一个 category 与一个
+`origin`。不得用"调用次数"或"编译单元数"充作候选数；构造级的调用/对象计数见 §14.3，两者不换算、
+不相加。`double_count` 仅在联合根成员与独立根同时出现时置 1，聚合只取联合根那份，否则核对门拒绝。
+
+### 4.5 §4 新增的 UNKNOWN
+
+| 项 | 状态 |
+|---|---|
+| 实际构造 argv / 执行身份 | **NOT-CAPTURED / UNKNOWN**（S1 只是源码声明） |
+| 216 个无批次 `tools/` 含 main 单元归 tool 还是 product | **UNKNOWN**（未逐个确认） |
+| S2 对 120000 软链目标的覆盖 | **不覆盖**，缺口数 UNKNOWN 待按 C 重算 |
+| `mode=PREPARED` 的 2 行（entry `{nets}/nets.cx`、`{assembler}/contracts.cx`） | 材料占位，**根身份 UNKNOWN**，不记覆盖 |
 
 ## 5. 词法展开语义
 
@@ -185,7 +258,99 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 - 各根 pair_visited/peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
 - 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
 
+### 14.1 三个身份/计数域，互不替代
+
+| 域 | 定义 | 事实来源 | 只可断言 |
+|---|---|---|---|
+| **单次调用** single-call | 一次 `cxm`/产品调用的根集合（通常一个 src） | 该次 argv（未捕获则 UNKNOWN） | 该调用内部的 context/pair 峰值 |
+| **联合根** joint | 同一次调用中显式多根，共享一张图，`joint_id` 标记 | 该次 argv + roots.tsv 标记 | 联合根内部的 realpath 组与 pair |
+| **build-instance** | 一个构造/链接实例：多次计划调用 + 一次链接 | 构造器源码行为；实际 argv 未捕获=UNKNOWN | 构造级候选与去重，**不是**任何一次调用的图 |
+
+三条硬规则：
+1. **单根/单调用合格不蕴含 build-instance 身份一致**，反之亦然；三者结论不得互相引用为证据。
+2. 每个域的求和域与峰值域**分开命名**：`*_total` 累计和只能进 `AGGREGATE`，`peak`/`max_*` 只在该域内部成立；跨域比较一律 UNKNOWN。
+3. `sum_` 前缀只用于跨域/跨 joint 统计，且不得写成任何 `peak`/`max_*`。
+
+### 14.2 build-instance：跨计划 realpath 去重（源码事实；实测 UNMEASURED）
+
+核 `tools/entry-build.cx`：
+
+| 事实 | 位置 |
+|---|---|
+| `eb_plan` argv 只追加**一个** src | `:151-166` |
+| `eb_compile` 同样只追加**一个** src | `:227-245` |
+| 33 个 TU 分别 `while (i < 33) eb_compile/eb_plan` 逐个调用 | `:508-523`、`:527-533` |
+| 33 次 plan 输出**全部**进同一 `ncl`/`eb_creal` 去重域 | `:521`、`:558-570` |
+| 超 `EB_MAXC` → `eb_die("closure-cap")`（中止，非静默） | `:571` |
+| 接纳后逐个 `eb_compile`，最后一次 `eb_link` | `:589`、`:606` |
+
+⇒ 这是**构造级跨 root 合并**：两个不同词法根若 realpath 命中同一键，构造期只编译一次。单根 preflight
+按词法根分别求和会**多计**；按 realpath 合并只报一份又**无法区分**"同根内重复"与"跨根合并"。
+
+`eb_real`（`:346-349`）在任何 `sy_realpath` 失败（ENOENT/EACCES/ENOTDIR/ELOOP/过长）时**静默回退**
+词法路径，调用方拿不到错误类别 ⇒ 同一物理文件可能被视为两个单元（漏合并），也可能两次都回退而
+"看起来未重复"。`sy_realpath` 本身在 `cx/sys/fs.cx:95`，成功返回长度、失败 `-errno`；L0 正确，
+问题在调用方吞错。
+
+因此：
+- 参与比较的根键曾回退词法路径 ⇒ `compare_set_has_fallback_key=1`，该构造实例
+  `construction_identity=UNKNOWN`；某个新项自身 realpath 成功**不能**排除先前键不可靠。
+- 不用 `identity_verified` 之类命名，只记可观察事实 `unit_path_resolved` / `unit_path_fallback`，
+  两者之和 = 接纳项数；命名不声称依赖闭包或有效公开集一致。
+- `plan_realpath_fallback_rows` 是**横切标志**（分散在各分区内部），不进任何互斥行等式，只记不等式
+  `plan_realpath_fallback_rows <= plan_output_rows`。
+
+### 14.3 计数单位：行、调用、对象分开
+
+`tools/entry-build.cx:534-596` 的出口互斥，计数必须按各自单位分立：
+
+| 字段 | 单位 | 含义 |
+|---|---|---|
+| `build_plan_calls` | 调用 | 成功返回的 `eb_plan` 次数（理想 33；`only_n` 时为 0） |
+| `plan_output_rows` | 行 | plan 输出的非空行总数 |
+| `plan_malformed_rows` | 行 | 无 TAB 行（`:546` 静默 `continue`，现无计数） |
+| `plan_invalid_len_rows` | 行 | 长度 `<=0` 或 `>=576`（`:551` 静默 `continue`，现无计数） |
+| `plan_root_hits` | 行 | 命中 33 根 realpath（`:561-563`） |
+| `plan_closure_hits` | 行 | 命中既有闭包（`:565-567`、`:570`） |
+| `build_units`（= `ncl`） | 对象 | 接纳的**新增闭包对象**，**不含 33 根** |
+| `plan_fatal` | 次 | `plan-path` / `closure-cap` 中止 |
+
+唯一可断言的等式，**且仅当** `plan_fatal=0` 且每行分类互斥完备：
+
+```
+plan_output_rows == plan_malformed_rows + plan_invalid_len_rows
+                  + plan_root_hits + plan_closure_hits + build_units
+```
+
+不满足只报原值 + `closure_selfcheck=UNKNOWN`；不得为凑等式把畸形/越界行塞进"重复"。`closure-cap`
+是**中止**不是接纳 ⇒ `closure_complete=0`、`build_units` 不完整，只能 UNKNOWN。`build_plan_calls`
+与 `build_units` **不可**相加成等式（单位不同）。
+
+### 14.4 本节 UNKNOWN 清单（不得升格）
+
+| 项 | 状态 |
+|---|---|
+| 实际构造 argv / 执行身份 | **NOT-CAPTURED / UNKNOWN** |
+| `construction_identity` | **UNKNOWN**（当前无手段升为已核） |
+| `unit_path_fallback` 行的真实依赖是否同一 | **UNKNOWN** |
+| `build_*` 全部字段的实测值 | **UNMEASURED**（本节是字段设计，非测量结果） |
+| `D main` 是否覆盖全部 tracked 入口 | **否**（见 §4.2） |
+
+未捕获即不得写"运行验证"、不得当 PASS。本节不建工具，不改 `entry-build`/`cxmod`/`spec`。
 
 ## 15. 本轮状态（csr 复审 4559d89ca6 后）
 
 csr 判定项 3/4/5/6/8b 闭合，项 2/7/8a 主体闭合；本轮补：§5 cxm_norm 行号 113/143/163；§4 TSV 增 joint_id/double_count；§9 ROOT 增 v1r 列、AGGREGATE/category 统一 measurement_complete；§7 统一字段补 dependency_diff/std_edges；§1 声明 diff>0 非一致证明。仍未建工具/根清单、未开测；需 csr 对 4559 的硬残留再确认。
+
+## 16. §4/§14 书面修订（omp-ds 代笔，cdx 临时移交写权）
+
+修订范围仅 §4（新增 4.1–4.5，含 `origin` 列、三源差集、按行计数）与 §14（新增 14.1–14.4，含三域
+分立、跨计划 realpath 去重与出错 UNKNOWN、行/调用/对象分立、UNKNOWN 清单）。**未建工具、未建
+roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`。**
+
+- 数字全部绑定 **C = `fc628a0403a788c0b5cd18d31f2d1e6f6f70b9f3`**（`batches.tsv` sha256
+  `504eadce…2222`），每次测量须按实际 C 重算，不沿用。
+- 未连动 §6/§7/§9：§14.3 的 `build_*` 字段属**构造实例**报告，不进每根 `ROOT` 行；如需并入 §9
+  输出格式，须 cdx 先裁定（已在回执中指出候选位置）。
+- `recipe` 只表示源码声明；实际 argv 未捕获 ⇒ `recipe_argv_status=NOT-CAPTURED`、
+  `construction_identity=UNKNOWN`。所有权与强制只读仍 UNKNOWN。
