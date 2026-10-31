@@ -16,9 +16,14 @@
    is OUT/candidate. The receipt is OUT/receipt.txt. This does not replace
    ROOT/unisacc.com and does not call the old construction scripts.
    One object per small closure. drive is src/unisacc.cx.
+   -funit now compiles only the command-line unit; each root's `use`
+   closure is planned with -cx-plan, deduplicated by sy_realpath and
+   compiled once as its own -O2 object, then all objects are linked.
+   This depends on the constructor's per-unit -funit semantics.
    UNISACC_RR_TIME=1. Each step keeps stderr in OUT/<name>.rr. The receipt
    records wall time and the slowest RR_TIME line (inference, inflate, or other). */
 #pragma unisa use sys.process
+#pragma unisa use sys.fs
 #pragma unisa use runtime.packagefooter
 #pragma unisa use sys.time
 
@@ -143,6 +148,45 @@ static int eb_run(char **argv, const char *cwd, int secs, long long *dt, char *w
     return 0;
 }
 
+/* Run the constructor's -cx-plan on one root and keep stdout. A plan path is
+   relative to ROOT (the workspace cwd) unless it is absolute. */
+static int eb_plan(const char *bound, const char *ctor, int via_sh, const char *src, const char *cwd, char *buf, int cap, char *why, int wl) {
+    char *v[8];
+    int n;
+    int pr;
+    np_result r;
+    n = 0;
+    v[n++] = (char *)bound;
+    v[n++] = "50";
+    if (via_sh) v[n++] = "sh";
+    v[n++] = (char *)ctor;
+    v[n++] = "-cx-plan";
+    v[n++] = (char *)src;
+    v[n] = 0;
+    pr = np_run(v, cwd, 0, 50, &r, why, (size_t)wl);
+    if (pr) return -1;
+    if (r.rc) {
+        if (r.err && r.errn && sy_write_all(2, r.err, (long)r.errn) < 0) {
+            np_free(&r);
+            return -1;
+        }
+        np_free(&r);
+        return r.rc;
+    }
+    if (r.outn < 0 || r.outn >= cap) {
+        np_free(&r);
+        return 2;
+    }
+    if (r.outn) {
+        int k;
+        k = 0;
+        while (k < (int)r.outn) { buf[k] = r.out[k]; k = k + 1; }
+    }
+    buf[r.outn] = 0;
+    np_free(&r);
+    return 0;
+}
+
 /* Six drive units that run once per build are -O1. --o1-drivers selects
    the same six. Inflate, model decode and the executor stay at -O2: -O0
    made that code about 45% slower at run time. */
@@ -202,9 +246,13 @@ static int eb_compile(const char *bound, const char *ctor, int via_sh, const cha
 }
 
 static int eb_link(const char *bound, const char *ctor, int via_sh, const char *triple, char **objs, int nobj, const char *elf, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
-    char *v[64];
+    char *v[160];
     int n;
     int i;
+    if (nobj < 0 || nobj + 8 >= 160) {
+        why[0] = 0;
+        return -1;
+    }
     n = 0;
     v[n++] = (char *)bound;
     v[n++] = "40";
@@ -216,7 +264,7 @@ static int eb_link(const char *bound, const char *ctor, int via_sh, const char *
     v[n++] = (char *)elf;
     i = 0;
     while (i < nobj) {
-        if (n >= 63) eb_die("argv");
+        if (n >= 159) eb_die("argv");
         v[n++] = objs[i];
         i = i + 1;
     }
@@ -252,12 +300,12 @@ static void eb_splice(const char *elf, const char *p3, const char *dst, long *po
     *dt = eb_ns() - t0;
 }
 
-static void eb_line_slow(FILE *f, const char *k, const char *sha, long n, long long ns, const char *rr) {
+static void eb_line_slow(FILE *f, const char *k, const char *sha, long n, long long ns, const char *rr, const char *src) {
     char kind[32];
     char line[512];
     long long sn;
     eb_slow(rr, kind, 32, line, 512, &sn);
-    fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\tslow_kind=%s\tslow_ns=%lld\tslow_line=%s\n", k, sha, n, ns, kind, sn, line);
+    fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\tslow_kind=%s\tslow_ns=%lld\tslow_line=%s\tsrc=%s\n", k, sha, n, ns, kind, sn, line, src ? src : "-");
 }
 
 static void eb_open_head(FILE *rf, const char *root, const char *p3, const char *hp, const char *ctor, const char *hc, long nk, int via_sh) {
@@ -278,6 +326,26 @@ static void eb_fail_close(FILE *rf, const char *phase, const char *rr, int rc, l
     if (fclose(rf)) eb_die("receipt close");
     fprintf(stderr, "entry-build: %s %s rc %d\n", phase, cls, rc);
     if (why && why[0]) fprintf(stderr, "%s\n", why);
+}
+
+/* Closure modules planned for the roots: one object each, deduplicated by
+   sy_realpath. The cap is a refusal, not an assumption. */
+#define EB_MAXC 128
+#define EB_REALW 1024
+static char eb_csrc[EB_MAXC][576];
+static char eb_cobj[EB_MAXC][576];
+static char eb_crr[EB_MAXC][576];
+static char eb_ckey[EB_MAXC][64];
+static char eb_csha[EB_MAXC][65];
+static char eb_creal[EB_MAXC][EB_REALW];
+static char eb_rootreal[33][EB_REALW];
+static char eb_pbuf[262144];
+static long long eb_cns[EB_MAXC];
+static long eb_cbytes[EB_MAXC];
+
+static void eb_real(const char *p, char *dst, int cap) {
+    if (sy_realpath(p, dst, cap) >= 0) return;
+    eb_copy_tok(dst, cap, p);
 }
 
 int main(int argc, char **argv) {
@@ -302,12 +370,13 @@ int main(int argc, char **argv) {
     const char *rmode;
     const char *target;
     char *objp[33];
+    char *objall[160];
     long nbytes[33];
-    long nf, nc, np, nk;
+    long nf, nc, np, nk, ncl;
     long poff, plen;
     long long nss[33];
     long long tl, ts;
-    int via_sh, rc, i, o1_drivers, link_only, only_n, w, a, found, k, target_set;
+    int via_sh, rc, i, j, na, o1_drivers, link_only, only_n, w, a, found, k, target_set;
     FILE *rf;
     target = "lnx/x86_64";
     target_set = 0;
@@ -445,13 +514,96 @@ int main(int argc, char **argv) {
             return 1;
         }
         eb_sha(objs_b[i], shas[i], &nbytes[i]);
-        eb_line_slow(rf, keys[i], shas[i], nbytes[i], nss[i], rrs_b[i]);
+        eb_line_slow(rf, keys[i], shas[i], nbytes[i], nss[i], rrs_b[i], 0);
         if (fflush(rf)) eb_die("receipt");
         i = i + 1;
     }
+    ncl = 0;
     if (!only_n) {
+        i = 0;
+        while (i < 33) { eb_real(srcs_b[i], eb_rootreal[i], EB_REALW); i = i + 1; }
+        i = 0;
+        while (i < 33) {
+            int p;
+            why[0] = 0;
+            rc = eb_plan(bound, ctor, via_sh, srcs_b[i], root, eb_pbuf, (int)sizeof eb_pbuf, why, (int)sizeof why);
+            if (rc) {
+                eb_fail_close(rf, "cx-plan", rrs_b[i], rc, 0, why);
+                return 1;
+            }
+            p = 0;
+            while (eb_pbuf[p]) {
+                int at, e, f2, g, len, k2, dup, rn2, z;
+                char rel[576];
+                char full[576];
+                char rp[EB_REALW];
+                at = p;
+                while (eb_pbuf[p] && eb_pbuf[p] != '\n') p = p + 1;
+                e = p;
+                if (eb_pbuf[p] == '\n') p = p + 1;
+                f2 = at;
+                while (f2 < e && eb_pbuf[f2] != '\t') f2 = f2 + 1;
+                if (f2 >= e) continue;
+                f2 = f2 + 1;
+                g = f2;
+                while (g < e && eb_pbuf[g] != '\t') g = g + 1;
+                len = g - f2;
+                if (len <= 0 || len >= 576) continue;
+                k2 = 0;
+                while (k2 < len) { rel[k2] = eb_pbuf[f2 + k2]; k2 = k2 + 1; }
+                rel[len] = 0;
+                if (rel[0] == '/') rn2 = cx_fmt(full, sizeof full, "%s", rel);
+                else rn2 = cx_fmt(full, sizeof full, "%s/%s", root, rel);
+                if (rn2 < 0 || rn2 >= (int)sizeof full) eb_die("plan-path");
+                eb_real(full, rp, EB_REALW);
+                dup = 0;
+                k2 = 0;
+                while (k2 < 33 && !dup) {
+                    if (eb_same(rp, eb_rootreal[k2])) dup = 1;
+                    k2 = k2 + 1;
+                }
+                k2 = 0;
+                while (k2 < ncl && !dup) {
+                    if (eb_same(rp, eb_creal[k2])) dup = 1;
+                    k2 = k2 + 1;
+                }
+                if (dup) continue;
+                if (ncl >= EB_MAXC) eb_die("closure-cap");
+                z = 0;
+                while (full[z] && z < 575) { eb_csrc[ncl][z] = full[z]; z = z + 1; }
+                eb_csrc[ncl][z] = 0;
+                z = 0;
+                while (rp[z] && z < EB_REALW - 1) { eb_creal[ncl][z] = rp[z]; z = z + 1; }
+                eb_creal[ncl][z] = 0;
+                cx_fmt(eb_ckey[ncl], sizeof eb_ckey[ncl], "m%ld.o", (long)ncl);
+                eb_join(eb_cobj[ncl], 576, out, eb_ckey[ncl]);
+                z = cx_fmt(eb_crr[ncl], 576, "%s/%s.rr", out, eb_ckey[ncl]);
+                if (z < 0 || z >= 576) eb_die("path");
+                ncl = ncl + 1;
+            }
+            i = i + 1;
+        }
+        j = 0;
+        while (j < ncl) {
+            why[0] = 0;
+            rc = eb_compile(bound, ctor, via_sh, "-O2", target, eb_csrc[j], eb_cobj[j], root, eb_crr[j], &eb_cns[j], why, (int)sizeof why);
+            if (rc) {
+                eb_fail_close(rf, eb_ckey[j], eb_crr[j], rc, eb_cns[j], why);
+                return 1;
+            }
+            eb_sha(eb_cobj[j], eb_csha[j], &eb_cbytes[j]);
+            eb_line_slow(rf, eb_ckey[j], eb_csha[j], eb_cbytes[j], eb_cns[j], eb_crr[j], eb_csrc[j]);
+            j = j + 1;
+        }
+    }
+    if (!only_n) {
+        na = 0;
+        i = 0;
+        while (i < 33) { objall[na] = objp[i]; na = na + 1; i = i + 1; }
+        i = 0;
+        while (i < ncl) { objall[na] = eb_cobj[i]; na = na + 1; i = i + 1; }
         why[0] = 0;
-        rc = eb_link(bound, ctor, via_sh, target, objp, 33, elf, root, rr_link, &tl, why, (int)sizeof why);
+        rc = eb_link(bound, ctor, via_sh, target, objall, na, elf, root, rr_link, &tl, why, (int)sizeof why);
         if (rc) {
             eb_fail_close(rf, "entry.elf", rr_link, rc, tl, why);
             return 1;
@@ -460,8 +612,8 @@ int main(int argc, char **argv) {
         eb_sha(elf, hf, &nf);
         eb_sha(cand, hc, &nc);
         fprintf(rf, "package_offset\t%ld\npackage_bytes\t%ld\n", poff, plen);
-        eb_line_slow(rf, "entry.elf", hf, nf, tl, rr_link);
-        eb_line_slow(rf, "candidate", hc, nc, ts, 0);
+        eb_line_slow(rf, "entry.elf", hf, nf, tl, rr_link, 0);
+        eb_line_slow(rf, "candidate", hc, nc, ts, 0, 0);
     }
     if (fclose(rf)) eb_die("receipt close");
     if (only_n) printf("entry-build objects=%d\n", only_n);
