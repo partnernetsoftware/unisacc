@@ -1,0 +1,289 @@
+#pragma unisa module bn
+/* crypto/bn -- fixed-capacity unsigned big integers and Montgomery modular arithmetic.
+   Pure cx: 32-bit limbs held in 64-bit accumulators, no libc, no allocation; every routine works on a
+   caller-provided struct whose capacity is known at compile time.
+
+     cs_bn  { unsigned v[BN_LIMBS]; int n; }     little-endian limbs, n <= BN_LIMBS
+     cs_bn_from_bytes(a, p, len)                 big-endian bytes, leading zeros allowed; -ERANGE past capacity
+     cs_bn_to_bytes(a, p, len)                   big-endian, zero-padded to len; -ERANGE when a does not fit
+     cs_bn_cmp(a, b)                             -1 / 0 / 1
+     cs_bn_add(r, a, b) / cs_bn_sub(r, a, b)     returns 0, or -ERANGE when the result wraps
+     cs_bn_mul(r, a, b)                          r must be a separate buffer than a and b
+     cs_bn_is_zero(a) / cs_bn_is_odd(a)
+     cs_bn_modexp(r, base, exp, mod)             base < mod, mod odd and non-zero; r < mod
+     cs_bn_from_mont(r, a, mod) / cs_bn_to_mont(r, a, mod)   convert in and out of Montgomery form
+     cs_bn_mont_mul(r, a, b, mod)                a * b * R^-1 mod mod, with a, b already in Montgomery form
+     cs_bn_shr1(r, a)                            a / 2
+
+   BN_LIMBS is 72 limbs (2304 bits), which holds a 2048-bit RSA modulus with room for the products and
+   interim values.  The routines that take a modulus require it to be odd: Montgomery arithmetic has no
+   representation otherwise, and every prime field and every RSA modulus used here is odd.
+
+   None of this is constant time and none of it claims to be.  It exists to check signatures, where the
+   numbers are public.  A secret exponent must not be passed to cs_bn_modexp; the X25519 ladder in
+   crypto.x25519 is the constant-time path for agreement. */
+
+enum { BN_LIMBS = 72 };
+enum { BN_MAXBITS = BN_LIMBS * 32 };
+
+typedef struct {
+    unsigned v[BN_LIMBS];
+    int n;
+} cs_bn;
+
+/* Drop leading zero limbs so that two values have a single representation. */
+static void cs_bn_trim(cs_bn *a) { while (a->n > 0 && a->v[a->n - 1] == 0) a->n--; }
+
+int cs_bn_from_bytes(cs_bn *a, const unsigned char *p, long len) {
+    long i;
+    int limb = 0;
+    unsigned acc = 0, shift = 0;
+    if (!a || len < 0 || (!p && len > 0)) return -EINVAL;
+    if (len > (long)BN_MAXBITS) return -ERANGE;
+    for (i = 0; i < BN_LIMBS; i++) a->v[i] = 0;
+    a->n = 0;
+    for (i = len - 1; i >= 0; i--) {
+        acc |= (unsigned)p[i] << shift;
+        shift += 8;
+        if (shift == 32) { a->v[limb++] = acc; acc = 0; shift = 0; }
+    }
+    if (shift) a->v[limb++] = acc;
+    a->n = limb;
+    cs_bn_trim(a);
+    return 0;
+}
+
+int cs_bn_to_bytes(const cs_bn *a, unsigned char *p, long len) {
+    long i;
+    int limb;
+    if (!a || !p || len < 0) return -EINVAL;
+    if ((long)a->n * 4 > len) return -ERANGE;     /* more limbs than the destination can hold */
+    for (i = 0; i < len; i++) p[i] = 0;
+    for (limb = 0; limb < a->n; limb++) {
+        unsigned x = a->v[limb];
+        long base = len - 4 * (long)(limb + 1);
+        int k;
+        for (k = 0; k < 4; k++) {
+            unsigned char b = (unsigned char)(x >> (8 * k));
+            long at = base + (3 - k);
+            if (at >= 0 && at < len) p[at] = b;
+        }
+    }
+    return 0;
+}
+
+int cs_bn_cmp(const cs_bn *a, const cs_bn *b) {
+    int i;
+    if (a->n != b->n) return a->n < b->n ? -1 : 1;
+    for (i = a->n - 1; i >= 0; i--) if (a->v[i] != b->v[i]) return a->v[i] < b->v[i] ? -1 : 1;
+    return 0;
+}
+
+int cs_bn_is_zero(const cs_bn *a) { return a->n == 0; }
+int cs_bn_is_odd(const cs_bn *a) { return a->n > 0 && (a->v[0] & 1); }
+
+int cs_bn_add(cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    unsigned long long c = 0;
+    int i, n = a->n > b->n ? a->n : b->n;
+    for (i = 0; i < n || c; i++) {
+        unsigned long long s = c;
+        if (i < a->n) s += a->v[i];
+        if (i < b->n) s += b->v[i];
+        if (i >= BN_LIMBS) return -ERANGE;
+        r->v[i] = (unsigned)s;
+        c = s >> 32;
+    }
+    r->n = i;
+    cs_bn_trim(r);
+    return 0;
+}
+
+/* r = a - b; caller guarantees a >= b. */
+int cs_bn_sub(cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    long long c = 0;
+    int i, n = a->n;
+    for (i = 0; i < n; i++) {
+        long long s = (long long)a->v[i] - (i < b->n ? b->v[i] : 0) - c;   /* c is the borrow in */
+        c = s < 0;
+        r->v[i] = (unsigned)(s + (c << 32));
+    }
+    r->n = n;
+    cs_bn_trim(r);
+    return c ? -EINVAL : 0;
+}
+
+/* Schoolbook product.  R must not alias A or B: the first loop clears it. */
+int cs_bn_mul(cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    int i, j, lo = a->n + b->n;
+    if (lo > BN_LIMBS) return -ERANGE;
+    for (i = 0; i < BN_LIMBS; i++) r->v[i] = 0;
+    for (i = 0; i < a->n; i++) {
+        unsigned long long c = 0;
+        for (j = 0; j < b->n; j++) {
+            unsigned long long t = (unsigned long long)a->v[i] * b->v[j] + r->v[i + j] + c;
+            r->v[i + j] = (unsigned)t;
+            c = t >> 32;
+        }
+        r->v[i + b->n] = (unsigned)c;             /* the slot is untouched: the previous row stopped one
+                                                     short of it, so the carry needs no propagation */
+    }
+    r->n = lo;
+    cs_bn_trim(r);
+    return 0;
+}
+
+int cs_bn_shr1(cs_bn *r, const cs_bn *a) {
+    int i;
+    unsigned carry = 0;
+    r->n = a->n;
+    for (i = a->n - 1; i >= 0; i--) {
+        unsigned x = a->v[i];
+        r->v[i] = (x >> 1) | (carry << 31);
+        carry = x & 1;
+    }
+    cs_bn_trim(r);
+    return 0;
+}
+
+/* ---- Montgomery arithmetic: R = 2^(32 n), modulus M odd with n limbs. ---- */
+
+/* -M[0]^-1 mod 2^32 by Newton iteration: x <- x * (2 - m0 * x), doubling the correct bits each step. */
+static unsigned cs_bn_m0inv(const cs_bn *m) {
+    unsigned x = 1, m0 = m->v[0];
+    int i;
+    for (i = 0; i < 5; i++) x *= 2u - m0 * x;     /* 1 -> 2 -> 4 -> 8 -> 16 -> 32 correct bits */
+    return (unsigned)(0u - x);
+}
+
+/* CIOS: r = a * b * R^-1 mod m.  Both inputs are n-limb and less than m; the accumulator is n + 2 limbs. */
+int cs_bn_mont_mul(cs_bn *r, const cs_bn *a, const cs_bn *b, const cs_bn *m) {
+    unsigned t[BN_LIMBS + 2];
+    unsigned m0inv;
+    int i, j, n = m->n;
+    if (n <= 0 || n > BN_LIMBS - 2) return -EINVAL;
+    if (!cs_bn_is_odd(m)) return -EINVAL;         /* Montgomery form needs an odd modulus */
+    m0inv = cs_bn_m0inv(m);
+    for (i = 0; i < n + 2; i++) t[i] = 0;
+    for (i = 0; i < n; i++) {
+        unsigned long long c = 0;
+        for (j = 0; j < n; j++) {
+            unsigned long long s = (unsigned long long)(i < a->n ? a->v[i] : 0) * (j < b->n ? b->v[j] : 0)
+                                   + t[j] + c;
+            t[j] = (unsigned)s;
+            c = s >> 32;
+        }
+        {   unsigned long long s = t[n] + c;
+            t[n] = (unsigned)s;
+            t[n + 1] += (unsigned)(s >> 32);
+        }
+        {   unsigned u = t[0] * m0inv;               /* only the low 32 bits of the product matter */
+            unsigned long long s = (unsigned long long)u * m->v[0] + t[0];
+            c = s >> 32;
+            for (j = 1; j < n; j++) {
+                s = (unsigned long long)u * m->v[j] + t[j] + c;
+                t[j - 1] = (unsigned)s;
+                c = s >> 32;
+            }
+            s = t[n] + c;
+            t[n - 1] = (unsigned)s;
+            t[n] = t[n + 1] + (unsigned)(s >> 32);
+            t[n + 1] = 0;
+        }
+    }
+    /* the result may be one modulus too large: subtract once if so */
+    {   cs_bn out;
+        int borrow = 0;
+        for (i = 0; i < n; i++) {
+            long long s = (long long)t[i] - (long long)m->v[i] - borrow;
+            borrow = s < 0;
+            out.v[i] = (unsigned)(s + (borrow << 32));
+        }
+        if (t[n] != 0 || !borrow) {               /* no borrow out means t >= m: keep the subtraction */
+            out.n = n;
+            cs_bn_trim(&out);
+        } else {
+            for (i = 0; i < n; i++) out.v[i] = t[i];
+            out.n = n;
+            cs_bn_trim(&out);
+        }
+        for (i = 0; i < BN_LIMBS; i++) r->v[i] = i < out.n ? out.v[i] : 0;
+        r->n = out.n;
+    }
+    return 0;
+}
+
+/* a * R mod m, computed as mont_mul(a, R^2 mod m); R^2 comes from 2n doublings of 1. */
+int cs_bn_to_mont(cs_bn *r, const cs_bn *a, const cs_bn *m) {
+    cs_bn r2, t;
+    int i, n = m->n;
+    if (n <= 0 || n > BN_LIMBS - 2) return -EINVAL;
+    if (!cs_bn_is_odd(m)) return -EINVAL;
+    for (i = 0; i < BN_LIMBS; i++) r2.v[i] = 0;
+    r2.v[0] = 1;
+    r2.n = 1;
+    for (i = 0; i < 32 * n; i++) {                /* r2 = 2^(32n) mod m */
+        unsigned long long c = 0;
+        int j;
+        for (j = 0; j < r2.n; j++) {
+            unsigned long long s = ((unsigned long long)r2.v[j] << 1) | c;
+            r2.v[j] = (unsigned)s;
+            c = s >> 32;
+        }
+        if (c) r2.v[r2.n++] = (unsigned)c;
+        if (cs_bn_cmp(&r2, m) >= 0) cs_bn_sub(&r2, &r2, m);
+    }
+    for (i = 0; i < 32 * n; i++) {                /* r2 = 2^(64n) mod m, i.e. R^2 mod m */
+        unsigned long long c = 0;
+        int j;
+        for (j = 0; j < r2.n; j++) {
+            unsigned long long s = ((unsigned long long)r2.v[j] << 1) | c;
+            r2.v[j] = (unsigned)s;
+            c = s >> 32;
+        }
+        if (c) r2.v[r2.n++] = (unsigned)c;
+        if (cs_bn_cmp(&r2, m) >= 0) cs_bn_sub(&r2, &r2, m);
+    }
+    cs_bn_mont_mul(&t, a, &r2, m);
+    for (i = 0; i < BN_LIMBS; i++) r->v[i] = t.v[i];
+    r->n = t.n;
+    return 0;
+}
+
+/* a * 1 * R^-1 = a / R, which undoes cs_bn_to_mont. */
+int cs_bn_from_mont(cs_bn *r, const cs_bn *a, const cs_bn *m) {
+    cs_bn one;
+    int i;
+    for (i = 0; i < BN_LIMBS; i++) one.v[i] = 0;
+    one.v[0] = 1;
+    one.n = 1;
+    return cs_bn_mont_mul(r, a, &one, m);
+}
+
+/* r = base^exp mod m, with base < m.  The exponent is scanned from its top set bit down; this is not
+   constant time, by design (see the module comment). */
+int cs_bn_modexp(cs_bn *r, const cs_bn *base, const cs_bn *exp, const cs_bn *m) {
+    cs_bn acc, b;
+    int i, bit, top = -1;
+    if (m->n <= 0 || !cs_bn_is_odd(m)) return -EINVAL;
+    if (cs_bn_cmp(base, m) >= 0) return -EINVAL;
+    if (cs_bn_to_mont(&acc, base, m)) return -EINVAL;   /* acc starts at base in Montgomery form */
+    for (i = exp->n - 1; i >= 0 && top < 0; i--)
+        if (exp->v[i]) { int k; for (k = 31; k >= 0; k--) if ((exp->v[i] >> k) & 1) { top = 32 * i + k; break; } }
+    if (top < 0) {                                /* x^0 = 1 */
+        for (i = 0; i < BN_LIMBS; i++) r->v[i] = 0;
+        r->v[0] = 1;
+        r->n = 1;
+        return 0;
+    }
+    for (i = 0; i < BN_LIMBS; i++) b.v[i] = 0;
+    b.v[0] = 1;
+    b.n = 1;
+    cs_bn_to_mont(&b, &b, m);                     /* b = 1 in Montgomery form */
+    for (i = top; i >= 0; i--) {
+        cs_bn_mont_mul(&b, &b, &b, m);
+        bit = (exp->v[i >> 5] >> (i & 31)) & 1;
+        if (bit) cs_bn_mont_mul(&b, &b, &acc, m);
+    }
+    cs_bn_from_mont(r, &b, m);
+    return 0;
+}

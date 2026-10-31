@@ -1,0 +1,132 @@
+/* Checks cx/crypto/bn.cx: sh ./unisacc.com tools/check-crypto-bn.cx
+   Values: byte-exact expected results computed independently (Python big integers) before this file was
+   written.  Cases: 256-bit modular exponentiation, a 2048-bit modulus (the size an RSA signature check
+   uses), exponent 0 and 1, plus the Montgomery round trip and refusal paths. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.bn
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+static cs_bn A, B, C, D, E, F, G;
+
+/* Parse HEX into X; returns 0 on success. */
+static int from_hex(cs_bn *x, const char *hex) {
+    unsigned char raw[256];
+    int n = tx_len(hex, 1024);
+    if (n <= 0 || n % 2 || n / 2 > 256) return -EINVAL;
+    if (cs_hex_decode(hex, n, raw, sizeof raw) != n / 2) return -EINVAL;
+    return cs_bn_from_bytes(x, raw, n / 2);
+}
+
+/* Compare X with the big-endian hex string WANT of LEN bytes. */
+static int hex_is(const cs_bn *x, const char *want, int len) {
+    unsigned char buf[256], raw[256];
+    int i;
+    if (len > 256) return 0;
+    if (cs_bn_to_bytes(x, buf, len)) return 0;
+    if (cs_hex_decode(want, tx_len(want, 1024), raw, sizeof raw) != len) return 0;
+    for (i = 0; i < len; i++) if (buf[i] != raw[i]) return 0;
+    return 1;
+}
+
+int main(void) {
+    /* Case 1: 3^0xdeadbeefcafe1234 mod (2^256 - 159). */
+    ok(from_hex(&A, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff61") == 0, "parse-m1");
+    ok(from_hex(&B, "0000000000000000000000000000000000000000000000000000000000000003") == 0, "parse-b1");
+    ok(from_hex(&C, "000000000000000000000000000000000000000000000000deadbeefcafe1234") == 0, "parse-e1");
+    ok(cs_bn_modexp(&D, &B, &C, &A) == 0, "modexp1-ok");
+    ok(hex_is(&D, "f33f6ea3030c92394155698299df8ed6902470ce75c857b2447e49f63cc890ea", 32), "modexp-256");
+
+    /* Exponent 0 gives 1, exponent 1 gives the base back. */
+    ok(from_hex(&E, "0000000000000000000000000000000000000000000000000000000000000000") == 0, "parse-zero");
+    ok(from_hex(&F, "0000000000000000000000000000000000000000000000000000000000000001") == 0, "parse-one");
+    ok(cs_bn_modexp(&D, &B, &E, &A) == 0 && hex_is(&D, "0000000000000000000000000000000000000000000000000000000000000001", 32),
+       "modexp-exp-0");
+    ok(cs_bn_modexp(&D, &B, &F, &A) == 0 && hex_is(&D, "0000000000000000000000000000000000000000000000000000000000000003", 32),
+       "modexp-exp-1");
+
+    /* Montgomery round trip: to_mont then from_mont is the identity for a value below the modulus. */
+    {   cs_bn t;
+        ok(cs_bn_to_mont(&t, &B, &A) == 0, "to-mont-ok");
+        ok(cs_bn_from_mont(&D, &t, &A) == 0 && cs_bn_cmp(&D, &B) == 0, "mont-round-trip");
+        ok(cs_bn_mont_mul(&D, &t, &t, &A) == 0, "mont-mul-ok");
+        ok(cs_bn_from_mont(&D, &D, &A) == 0, "mont-mul-back-ok");
+        {   /* 3 * 3 = 9 confirmed after leaving Montgomery form */
+            cs_bn nine;
+            from_hex(&nine, "0000000000000000000000000000000000000000000000000000000000000009");
+            ok(cs_bn_cmp(&D, &nine) == 0, "mont-mul-value");
+        }
+    }
+
+    /* Case 2: a 2048-bit modulus, 0x1234567890abcdef ^ 65537.  This is the shape a PKCS#1 v1.5 check uses. */
+    ok(from_hex(&A,
+        "400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000444444400000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000086a1c9358e747") == 0, "parse-m2");
+    ok(from_hex(&B,
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000001234567890abcdef") == 0, "parse-b2");
+    ok(from_hex(&C,
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000010001") == 0, "parse-e2");
+    ok(cs_bn_modexp(&D, &B, &C, &A) == 0, "modexp2-ok");
+    ok(hex_is(&D,
+        "168d93da286e053b081661f0a6a237f48800d7fa2a8742f95a0b1122e9d764fd36690ab4f66d5294a25803abfac23f4f"
+        "4a65bcee50e74a84052c72d405c405b0d9db1ba2a8bc3982b9cf40e80e0a760d03c49f32b04d0f19371c429fc2519255"
+        "101c2311a3b0c9774925068547e89ad527a51f9eb286790ee836f128c11151ca510a1d309c81ff4385df7fbc08e52e8e"
+        "fcbbc7fe7111fd7d173752e466238bccfb7709cb7da925d70ad16c2b0437bd26ba9087e5e222314ba0f4c9e59ef0338e"
+        "92822f37dcec877c661231dcd5fe618e490296b3451856a937031c0c015f2bad75edab0a1902e10eb0bdb325ebbb0bd4"
+        "13910476e1024e63e088d0cf11bf7cb9", 256), "modexp-2048");
+
+    /* Arithmetic basics on values that cross limb boundaries. */
+    {   cs_bn x, y, z;
+        ok(from_hex(&x, "ffffffffffffffffffffffffffffffff") == 0, "parse-x");
+        ok(from_hex(&y, "00000000000000000000000000000001") == 0, "parse-y");
+        ok(cs_bn_add(&z, &x, &y) == 0, "add-carry");
+        ok(hex_is(&z, "0000000000000000000000000000000100000000000000000000000000000000", 32), "add-carry-value");
+        ok(cs_bn_sub(&z, &z, &y) == 0 && cs_bn_cmp(&z, &x) == 0, "sub-back");
+        ok(cs_bn_mul(&z, &x, &x) == 0, "mul-wide");
+        ok(hex_is(&z, "fffffffffffffffffffffffffffffffe00000000000000000000000000000001", 32), "mul-wide-value");
+        ok(cs_bn_is_odd(&y) == 1 && cs_bn_is_odd(&x) == 1, "is-odd");
+        ok(cs_bn_is_zero(&y) == 0, "is-zero-false");
+        {   cs_bn zz;
+            from_hex(&zz, "00000000000000000000000000000000");
+            ok(cs_bn_is_zero(&zz) == 1, "is-zero-true");
+        }
+        ok(cs_bn_cmp(&x, &y) == 1 && cs_bn_cmp(&y, &x) == -1 && cs_bn_cmp(&x, &x) == 0, "cmp");
+        ok(cs_bn_shr1(&z, &y) == 0 && cs_bn_is_zero(&z) == 1, "shr1-one-to-zero");
+        ok(cs_bn_shr1(&z, &x) == 0, "shr1-wide");
+        ok(hex_is(&z, "000000000000000000000000000000007fffffffffffffffffffffffffffffff", 32) ||
+           hex_is(&z, "7fffffffffffffffffffffffffffffff", 16), "shr1-wide-value");
+    }
+
+    /* Refusals: an even modulus, a base at or above the modulus, and a zero modulus. */
+    {   cs_bn even, zero;
+        ok(from_hex(&even, "0000000000000000000000000000000000000000000000000000000000000004") == 0, "parse-even");
+        ok(cs_bn_modexp(&D, &B, &C, &even) == -EINVAL, "refuse-even-modulus");
+        ok(cs_bn_mont_mul(&D, &B, &C, &even) == -EINVAL, "refuse-even-mont");
+        ok(cs_bn_to_mont(&D, &B, &even) == -EINVAL, "refuse-even-to-mont");
+        ok(from_hex(&zero, "0000000000000000000000000000000000000000000000000000000000000000") == 0, "parse-zero2");
+        ok(cs_bn_modexp(&D, &B, &C, &zero) == -EINVAL, "refuse-zero-modulus");
+        ok(cs_bn_modexp(&D, &A, &C, &B) == -EINVAL, "refuse-base-not-below-modulus");
+        ok(cs_bn_from_bytes(&A, 0, 4) == -EINVAL, "from-bytes-null");
+        ok(cs_bn_to_bytes(&B, 0, 4) == -EINVAL, "to-bytes-null");
+    }
+
+    sy_printf("CHECK_CRYPTO_BN\tfailed=%d\n", bad);
+    return bad;
+}
