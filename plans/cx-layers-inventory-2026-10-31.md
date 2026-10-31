@@ -2629,3 +2629,44 @@ rc=7 成功**（隐式声明 → 链接期命中 `b` 侧定义）。
 闭包行也**不含**"由哪次 plan 汇入"。故"分别记录 plan、编译、链接及副作用"在当前回执格式下不可观测。
 
 未改 `cx-context-preflight-2026-10-31.md`、未重构造、未建 roots、未改 `entry-build`/`cxmod`/`spec`。
+
+### 19.22 preflight §9 聚合门：只绑 production 却是无范围"测量完成"
+
+只读，未改该计划、未运行测量、未建 roots。
+
+#### A. 现文（`:219-220`）
+
+> 聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 measurement_complete/unknown-known/unknown-unexpected 计数。
+> …仅当 **production** 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才
+> measurement_complete；否则 UNKNOWN 非零。
+
+⇒ 缺陷三条：
+
+1. **门只绑一个类别**。`tool`、`batch-positive`、`batch-negative`、`generated` 全部 UNKNOWN 时，
+   聚合仍可写 `measurement_complete` ⇒ 该词读起来像"整个 preflight 测完了"，但实际只完成了一类。
+   而 §4.1 明说 `tools/**` 有 **216** 个含 main 的单元只能落 `unclassified` 直至逐个确认
+   ⇒ 这是**已知会全部 UNKNOWN** 的类别，却不在门里。
+2. **要求的类别集合没有事先固定**。§9 只写"仅当 production"，未列"总完成 = {哪些类别}"，
+   也没有常量/表固定 ⇒ 事后可以改由哪些类别决定总完成（移动球门），与 §4「四源不得互相顶替」
+   的立场不一致：类别的**允许集合**没有门，等于允许用子集冒充全集。
+3. **两个计数名未定义**。全文只有 `:219` 一处出现 `unknown-known`/`unknown-unexpected`，
+   没有任何地方定义二者区别（推测是"预期内 UNKNOWN"vs"意外 UNKNOWN"），却已要求输出 ⇒
+   同一输入可被任意归类，计数不可复核。
+
+#### B. 最小改法（提案，非施工许可）
+
+1. **每类别分行报完整性**，不合并：
+   `AGGREGATE<TAB>category=<c><TAB>total=<n><TAB>measurement_complete=<n><TAB>unknown=<n><TAB>status=<...>`
+   逐 `production` / `tool` / `batch-positive` / `batch-negative` / `generated` / `unclassified` 各一行；
+   缺行即 `AGGREGATE incomplete`。
+2. **状态名带范围**。若确实只要求 production，状态字段必须写
+   `production_measurement_complete`，不得写 `measurement_complete`；要写无前缀的那个，必须满足下条。
+3. **事先固定总完成类别集合**，写死在文档（建议 `{production, tool, batch-positive}`；
+   `generated` 永久不计、`unclassified` 恒为不计覆盖、`batch-negative` 单列不阻塞）。
+   该集合一旦发布，新增类别只能**加门**不能**减门**；减门须另立版本并重跑。
+4. **定义两个 UNKNOWN 计数**：`unknown-known` = 已在 §4.5 预登记为 UNKNOWN 的原因
+   （PREPARED/无清单/软链悬空等）且 `reason` 命中白名单；`unknown-unexpected` = 其余一切。
+   一个根的 UNKNOWN 必须二者择一，且 `unknown-known + unknown-unexpected = unknown`。
+5. `unclassified` 一律不算覆盖：它出现在总完成集合里即为配置错误（非零）。
+
+未改 `cx-context-preflight-2026-10-31.md`（写权仍在 go），未运行测量。
