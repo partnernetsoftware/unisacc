@@ -1,5 +1,7 @@
 #pragma unisa module holdframe
 #pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
 /* First-pass unit frames and their attribute table. Plain bytes, no handles.
    Upper layer: no #include, no libc. Allocation is mm_*. */
 static unsigned char *hf_fr;
@@ -50,10 +52,64 @@ int hf_keep(const unsigned char *fr, long frn, const unsigned char *at, long atn
     hf_frn = frn;
     hf_at = cp;
     hf_atn = atn;
+    {
+        const char *path;
+        int fd;
+        unsigned char nb[8];
+        long i;
+        unsigned long v;
+        path = sy_env("UNISACC_PHASE_OUT");
+        if (path && path[0]) {
+            fd = sy_open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+            if (fd >= 0) {
+                v = (unsigned long)hf_frn;
+                i = 0;
+                while (i < 4) { nb[i] = (unsigned char)((v >> (8 * i)) & 255); i = i + 1; }
+                v = (unsigned long)hf_atn;
+                while (i < 8) { nb[i] = (unsigned char)((v >> (8 * (i - 4))) & 255); i = i + 1; }
+                if (sy_write_all(fd, nb, 8) == 0) sy_write_all(fd, hf_fr, hf_frn);
+                if (hf_atn > 0) sy_write_all(fd, hf_at, hf_atn);
+                sy_close(fd);
+            }
+        }
+    }
+    return 0;
+}
+
+static int hf_load(void) {
+    const char *path;
+    int fd;
+    unsigned char nb[8];
+    long frn;
+    long atn;
+    unsigned char *fr;
+    unsigned char *at;
+    path = sy_env("UNISACC_PHASE_IN");
+    if (!path || !path[0]) return 1;
+    fd = sy_open_read(path);
+    if (fd < 0) return 1;
+    if (sy_read_full(fd, nb, 8)) { sy_close(fd); return 1; }
+    frn = (long)nb[0] | ((long)nb[1] << 8) | ((long)nb[2] << 16) | ((long)nb[3] << 24);
+    atn = (long)nb[4] | ((long)nb[5] << 8) | ((long)nb[6] << 16) | ((long)nb[7] << 24);
+    if (frn <= 0 || atn < 0) { sy_close(fd); return 1; }
+    fr = mm_alloc(frn);
+    at = atn ? mm_alloc(atn) : 0;
+    if (!fr || (atn && !at) || sy_read_full(fd, fr, frn) || (atn && sy_read_full(fd, at, atn))) {
+        mm_free(fr);
+        mm_free(at);
+        sy_close(fd);
+        return 1;
+    }
+    sy_close(fd);
+    hf_fr = fr;
+    hf_frn = frn;
+    hf_at = at;
+    hf_atn = atn;
     return 0;
 }
 
 unsigned char *hf_frames(long *n) {
+    if (!hf_fr) hf_load();
     if (n) *n = hf_frn;
     return hf_fr;
 }
@@ -61,4 +117,11 @@ unsigned char *hf_frames(long *n) {
 unsigned char *hf_attrs(long *n) {
     if (n) *n = hf_atn;
     return hf_at;
+}
+
+int hf_phase_b(void) {
+    const char *e;
+    e = sy_env("UNISACC_PHASE");
+    if (!e || e[0] != 'B' || e[1] != 0) return 0;
+    return hf_frames(0) != 0;
 }
