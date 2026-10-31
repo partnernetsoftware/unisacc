@@ -3,6 +3,7 @@
  *   sh ./unisacc.com tools/nametab-gen.cx [-- --check [MODULE]]     regenerate in memory and compare (the default)
  *   sh ./unisacc.com tools/nametab-gen.cx -- --write [MODULE]        write the module file(s)
  *   sh ./unisacc.com tools/nametab-gen.cx -- --list                  one line per spec row
+ *   sh ./unisacc.com tools/nametab-gen.cx -- --gaps                  fact tables no spec row or -gen.cx covers yet
  *   sh ./unisacc.com tools/nametab-gen.cx -- --adopt [MODULE]        compare only the code (from the first `int `
  *       line) with the existing file: to move a module made by a hand-written -gen.cx onto a spec row -- add the
  *       row, --adopt must say code-same on every side, then --write (only the comment changes) and delete the -gen.cx
@@ -195,6 +196,25 @@ static void gen(const Spec *sp, const char *prefix, Out *o) {
     if (body.p) mm_free(body.p);
 }
 
+/* --gaps: tracked exec/facts and exec/pipeline TSV fact tables that no spec row names as its source and no
+   tools/*-gen.cx mentions (case/result/manifest/byte/fresh/template tables are not name sources) */
+static int gaps(const Spec *sp, int ns) {
+    char *list = 0, *gens = 0; size_t ln = 0, gn = 0; long at = 0; int n = 0, i;
+    if (cx_run("git ls-files -z -- 'exec/facts/*.tsv' 'exec/pipeline/*.tsv'", &list, &ln) || !list) die("git ls-files failed", 0);
+    if (cx_run("cat tools/*-gen.cx", &gens, &gn) || !gens) gn = 0;
+    while (at < (long)ln) {
+        const char *p = list + at; long pl = tx_len(p, (long)ln - at), hit = 0;
+        at += pl + 1;
+        if (!pl || tx_find(p, pl, "-cases", 6) >= 0 || tx_find(p, pl, "-result", 7) >= 0 || tx_find(p, pl, "-manifest", 9) >= 0 ||
+            tx_find(p, pl, "-byte", 5) >= 0 || tx_find(p, pl, "-fresh", 6) >= 0 || tx_find(p, pl, "-template", 9) >= 0) continue;
+        for (i = 0; i < ns && !hit; i++) hit = tx_same(sp[i].source, tx_len(sp[i].source, 256), p, pl);
+        if (!hit && gn) hit = tx_find(gens, (long)gn, p, pl) >= 0;
+        if (!hit) { sy_printf("GAP\t%.*s\n", (int)pl, p); n++; }
+    }
+    sy_printf("NAMETAB_GAPS\tgaps=%d\n", n);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     static Spec sp[256]; int ns, i, ok = 0, bad = 0, mode = 0; const char *only = 0;
     while (argc >= 3 && (tx_eqz(argv[1], "--spec") || tx_eqz(argv[1], "--out"))) {   /* for trials and checks */
@@ -205,6 +225,7 @@ int main(int argc, char **argv) {
     if (argc >= 2) {
         if (tx_eqz(argv[1], "--check")) mode = 0; else if (tx_eqz(argv[1], "--write")) mode = 1; else if (tx_eqz(argv[1], "--list")) mode = 2;
         else if (tx_eqz(argv[1], "--adopt")) mode = 3;
+        else if (tx_eqz(argv[1], "--gaps")) return gaps(sp, ns);
         else { sy_eprintf("usage: nametab-gen.cx [--check|--write|--adopt [MODULE] | --list]\n"); return 2; }
         if (argc >= 3) only = argv[2];
     }
