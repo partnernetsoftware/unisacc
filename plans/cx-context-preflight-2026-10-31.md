@@ -6,6 +6,7 @@
 
 测同一 commit 下，从显式根集合展开的**词法上下文**规模：contexts、edges、path bytes、单向 pair 遍历的 visited/peak；为未来身份一致性预算提供观察值。
 
+dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identity 通过。
 明确不覆盖：
 - 不证明现有仓低于任何产品上限；测量上限不是产品预算。
 - 不实施合并前拒绝，不替代超限负例。
@@ -43,7 +44,7 @@
 ## 4. 根清单：来源、分类与核对门
 
 拟提交 `tests/cx-context-roots.tsv`（未建），列：
-`root<TAB>category<TAB>provenance<TAB>expect<TAB>sha256`
+`root<TAB>joint_id<TAB>double_count<TAB>category<TAB>provenance<TAB>expect<TAB>sha256`
 
 类别：
 - `production`：`src/**`、`release/**` 中 tracked 且含 main 定义的入口。
@@ -64,7 +65,7 @@
 
 ## 5. 词法展开语义
 
-- context 键：对“父 context 词法路径目录 + 模块名点转斜杠 + `.cx`”执行与编译器**同一 cxm_norm**（src/cxmod.c:112；cx/cx0/plan.cx:162；cx/compiler/cxmod.cx:??）：去除空段/`.`，`x/..` 词法折叠，不做文件系统查询。不得自创仅压缩斜杠。
+- context 键：对“父 context 词法路径目录 + 模块名点转斜杠 + `.cx`”执行与编译器**同一 cxm_norm**（src/cxmod.c:113；cx/cx0/plan.cx:163；cx/compiler/cxmod.cx:143）：去除空段/`.`，`x/..` 词法折叠，不做文件系统查询。不得自创仅压缩斜杠。
 - 注意并记录：`x/..` 按词法折叠，不按“x 是软链时 OS 解析到目标父目录”；这是现行编译器实际语义。preflight 只测量，不修正。
 - 每条 `use` 从父 context 目录解析；模块名语法同编译器；`std` 按现行处理；不 realpath 合并 context。
 - 同一根内相同规范化字面路径只展开一次；不同根分别展开；聚合再按字面路径去重。
@@ -110,7 +111,7 @@
   | proxy=1 | equal/diff/errors 必须为空/禁用峰门 | — | 不得 measurement_complete |
   `pairs_visited_total` 含首次进入 memo 的出错 pair；差异只停该边展开，不停全局遍历。
 - 若实现没有执行有效集比较，只能输出 `pairs_proxy=1`，不得称实际递归核验，也不得用于 pair 峰门。
-- 输出字段统一：`pairs_visited_total`、`pair_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_errors`、`pairs_proxy`（0/1）。
+- 输出字段统一：`pairs_visited_total`、`pair_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_dependency_diff`、`pairs_errors`、`pairs_proxy`（0/1）、`std_edges`；v1r 另列 `pairs_visited_total_v1r`、`pair_peak_v1r`。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
 
 ## 8. 测量上限与 deadline（独立于产品）
@@ -126,7 +127,7 @@
 ## 9. 输出与状态
 
 每根：
-`ROOT<TAB>joint_id<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>pair_peak<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
+`ROOT<TAB>joint_id<TAB>double_count<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>pair_peak<TAB>pairs_visited_total_v1r<TAB>pair_peak_v1r<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
 聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 complete/unknown-known/unknown-unexpected 计数。
 状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
 
@@ -185,7 +186,6 @@
 - 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
 
 
-## 15. 待 csr 复审后的修订项（本轮记录）
+## 15. 本轮状态（csr 复审 4559d89ca6 后）
 
-本轮已改：根内 canonical、measurement_complete 命名、public_equal/diff/errors/proxy 字段、std_edges、错误边不入队、依赖目标差异字段、环按根栈。
-仍需 csr 完整八项复审：快照/gitlink 对拍细节、pair 错误边界、软链环、joint root、来源/产品/实现身份与只读隔离；未获复审前不建工具/根清单、不开测。
+csr 判定项 3/4/5/6/8b 闭合，项 2/7/8a 主体闭合；本轮补：§5 cxm_norm 行号 113/143/163；§4 TSV 增 joint_id/double_count；§9 ROOT 增 v1r 列、AGGREGATE/category 统一 measurement_complete；§7 统一字段补 dependency_diff/std_edges；§1 声明 diff>0 非一致证明。仍未建工具/根清单、未开测；需 csr 对 4559 的硬残留再确认。
