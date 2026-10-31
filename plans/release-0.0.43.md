@@ -307,6 +307,7 @@ STATE43：**21782dd5 冻结会话一百四十二批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 冻结会话一百四十六批（omp-grk，2026-11-01）**：再 4/4 PASS：`formats-elf-ape`、`negative-diagnostics`、`negative-model-loader-terminal`、`stdio-close`。会话里 146 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百四十七批（omp-grk，2026-11-01）**：`phase-timing-stamps` PASS。会话里 147 个 PASS。`full-interfaces`、`full-properties`、`full-resources` 在这个会话 FAIL，rc 1，原因是覆盖格 MISSING，不是批次崩溃。不记 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结材料四份登记（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再登记冻结副本 `nets`、`pp-gold`、`kernel-route`、`ri-chain`，都是 PREPARED-identity-only。`nets` PASS，`pp-gold-controls` PASS。会话里 149 个 PASS。`net-controls` FAIL，原因 `material-changed-during-batch`，这份 `nets` 副本被该批改过，后续依赖 `nets` 的批不能再在这个会话跑。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结会话一百五十二批（omp-grk，2026-11-01）**：再 PASS：`kernel-route-encoding`、`pp-source-constructed`、`ri-chain-valid`。会话里 152 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
