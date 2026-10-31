@@ -862,3 +862,109 @@ deadline 规则（不许用缩范围换取时间）：
    `srcshape` 记录该工具新增静态内存（+260 KiB `cl_dig`）与新增 `#pragma unisa use sys.sha`
    （第 8 条，远低于 48 上限）。
 5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 未决；补边另案；shard GC 另案。
+
+## 12. 方案 B 第五次修订：`-s` 不承载跳过标志、索引视图改为 `-s -v`、夹具必须仓外独占（未施工）
+
+**§11.1 关于「assume-unchanged / skip-worktree 已体现在视图里」的断言是错的，本节推翻它。**
+以下全部为实测，`git version 2.34.1`。
+
+### 12.1 `git ls-files -s` 不携带任何跳过标志
+
+在 `/tmp/gitflags`（仓外独占临时仓）实测：
+
+```
+git update-index --assume-unchanged one.cx
+git update-index --skip-worktree  two.cx
+git ls-files -s -z   →  100644 <sha> 0<TAB>one.cx   （与普通文件逐字节同形，无标志）
+git ls-files -v      →  h one.cx / H three.cx / S two.cx
+```
+
+- 小写 = assume-unchanged（`h`），大写 = 未设（`H`）；`S` = skip-worktree；
+  `M` = unmerged（配 stage 1/2/3）；`R` = deleted、`C` = modified，但**只有显式给
+  `--deleted` / `--modified` 才出现**——只给 `-v` 时，工作树里已删掉的
+  `sub/four.cx` 仍输出 `H`。
+- 因此：**视图能判 assume-unchanged / skip-worktree / unmerged，不能判工作树删除或修改**。
+  删除/修改仍由工具自己的 `lstat` 与读取发现；不得从视图推断。
+
+### 12.2 改为单次 `git ls-files -s -v -z`：标志、stage、路径一次取齐
+
+实测 `-s` 与 `-v` 可同时给，且格式稳定：
+
+```
+<tag> <mode> <sha> <stage>\t<path>\0
+H 120000 6ee58760…7094 0<TAB>link.cx\0
+M 100644 b6802534…d746 1<TAB>three.cx\0   （冲突时三行，stage 1/2/3）
+```
+
+- `-z` 输出的是**原始路径字节**，不做 C 风格转义：实测路径含 `TAB`、换行
+  （`we ird\tna\nme.cx`）时字节原样穿过；元数据段不含 `TAB`，所以**只在第一个 `TAB` 切分**。
+- 解析规则（任一不满足 → `UNDECIDED GIT-PARSE path`，最多列 8 条 → rc3）：
+  tag 必须是 `{H,S,M,R,C,K,?}` 的大小写之一；mode 6 位十六进制；sha 64 位十六进制；
+  stage ∈ {0,1,2,3}；path 非空；记录内除首个 `TAB` 外不得再出现 `TAB`（否则元数据段被污染）。
+  **未知 tag 必须报错，不得当作 `H`**。
+- 任一 stage ≠ 0 → `UNDECIDED GIT-UNMERGED path`；tag 为 `M` 而 stage 为 0 属矛盾 →
+  `GIT-PARSE`。
+- 小写 tag 或 `S/s` → 记 `au=<n> sw=<n>` 进 scope。**这不是错误**：我们的内容 sha 来自
+  自己的读取，不依赖 index 的 stat 缓存；但它意味着「index 元数据不可用于变更检测」，
+  所以更不能用元数据代替内容哈希（与 §11.2 一致）。
+- 当前共享树实测：两趟连续执行字节完全相同，`sha8=9fd8f60d286c8298`、**155534 B**
+  （`-s` 单独为 151646 B）；flag 直方图 **1944 H**，无 au/sw/unmerged。
+- **pathspec 相对 cwd**：实测在 `out/cx-layers-fixtures-2536959/` 里执行
+  `git ls-files -s -z -- '*.cx'` 返回 **0 条**，而 `git rev-parse --show-toplevel` 仍是共享仓根。
+  故 git 必须以 `cwd = cl_root`（或 `git -C cl_root`）调用；返回 0 条必须先判
+  `UNDECIDED EMPTY-VIEW` 再继续，**不得**当成「0 条边」的正常结果。
+
+索引视图身份随之改为：**`git ls-files -s -v -z -- '*.cx'` 原始字节的 sha256**，首尾各一次；
+`.git/index` 文件哈希仍作辅助跳变探针。两者任一变化 → rc3。
+
+### 12.3 会写 index 的夹具必须仓外独占
+
+实测：夹具目录在共享检出内，`git rev-parse --show-toplevel` 指向共享仓根 ⇒ 在那里跑
+`git update-index`/`git merge` 会**直接改共享 index**，是事故。
+
+夹具协议（`k-unmerged`、`k-index-view-change` 及任何会写 index 的用例）：
+
+1. 目录用 `$TMPDIR/cxlayers-fx-<pid>-<seq>/`（`sy_pid()`，`sy_mkdir`；`sy_mkdtemp` 当前
+   `cx/sys` 无此入口，不新增）。`$TMPDIR` 未设时退到 `/tmp`；创建失败 → `FAIL FIXTURE-SETUP`。
+2. `git init -q`，用 `-c user.email=… -c user.name=…` 显式提交，不读全局配置；
+   同时设 `GIT_CEILING_DIRECTORIES=<父目录>`，实测可阻止向上发现共享仓
+   （`/tmp/gitfx/sub` 解析仍得 `/tmp/gitfx/r`）。
+3. **开跑前自检**：该目录里 `git rev-parse --show-toplevel` 必须等于夹具根，否则
+   `FAIL FIXTURE-SCOPE` 并停止，绝不继续写 index。
+4. 结束 `rm -rf` 该目录；清理失败只记 `fixture_cleanup=FAIL path`，不改用例判定
+   （`out/` 之外的残留也不留在共享树）。
+5. 夹具内**禁止**设置 `GIT_INDEX_FILE` 指向共享 `.git/index`，也禁止在 `cl_root` 下执行
+   任何写型 git 子命令。
+
+### 12.4 代价与 deadline 的更正
+
+- 之前把 AF_ALG/软件吞吐外推说成「预算足够」是**成本估计，不是整批上限保证**。真实超时
+  一律 `UNDECIDED DEADLINE phase=…` → rc3，不缩范围、不抽样。
+- 实测 git 调用成本：`ls-files -s -v -z -- '*.cx'` ≈**6 ms/次**（5 次 32 ms）、
+  `rev-parse --git-path index` ≈**2 ms/次**（5 次 9 ms）；四次调用合计 ≈16 ms。
+- **新发现的 deadline 隐患**：现有 `cl_spawn` 用 `np_run(..., 50, ...)`，单次 spawn 上限
+  50 s；四次 git spawn 最坏可达 200 s，远超批次 55 s。必须给 git 调用单独的 5 s 上限，
+  超时 → `UNDECIDED DEADLINE phase=git`，不得沿用 50 s。
+- 哈希成本沿用 §11.4 实测（两趟 26.9 MB：AF_ALG ≈0.19 s / 软件 ≈3.1 s）；软件路径 3.1 s
+  已占 `CL_DEADLINE_MS=40000` 的 8%，属可接受，但不得据此宣称「一定不超时」。
+
+### 12.5 夹具（在 §11.5 的 +31 之外，总 +36）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-au-flag` | 仓外临时仓，`update-index --assume-unchanged` 一个 `.cx` | 视图解析出 `au=1`，该文件**仍被哈希并审计**，rc 不变 |
+| `k-sw-flag` | 同上，`--skip-worktree` | `sw=1`，仍审计，rc 不变 |
+| `k-view-cwd` | 从子目录调用，pathspec 相对 cwd | `EMPTY-VIEW` 或按 `cl_root` 调用后非空；**不得**静默 0 条 |
+| `k-parse-tag` | 伪造未知 tag（如 `Z`）喂给解析器 | `UNDECIDED GIT-PARSE`、rc3 |
+| `k-path-tab` | 仓外临时仓里建含 `TAB`/换行的 `.cx` | 路径原样解析、不误判为 `GIT-PARSE` |
+
+（`k-unmerged`、`k-index-view-change` 保留，但按 §12.3 改为仓外独占仓执行。）
+
+### 12.6 验收（替代 §11.6 第 1 条）
+
+1. `--fixtures`：`checks` = 原值 + 36，`failed=0`；跑完 `git status --porcelain` 证明
+   共享 index 未被夹具改动（运行前后各取 `.git/index` 的 size/mtime/ino + sha，必须相同）。
+2. `k-au-flag`/`k-sw-flag` 断言「标志被识别」且「文件照常审计」，防止把 au/sw 当成跳过理由。
+3. 全量审计 scope 行新增 `au=`/`sw=`/`view_sha=`/`view_bytes=`；`view_bytes==0` 直接 rc3。
+4. 其余同 §11.6：收据只写「可观测点上未观测到漂移」；超时 rc3；spec 与三源不动；
+   G-3 不裁；`OPEN-LEX-LINE` 未决；补边、shard GC 另案。
