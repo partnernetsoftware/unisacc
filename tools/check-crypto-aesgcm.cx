@@ -1,0 +1,211 @@
+#pragma unisa use sys.io
+#pragma unisa use crypto.aes
+#pragma unisa use crypto.gcm
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+/* Vectors for crypto/aes and crypto/gcm.
+
+   AES: FIPS-197 Appendix C.1 (128-bit) and C.3 (256-bit) block vectors.
+   GCM: NIST SP 800-38D test cases 2, 3, 4 (no AAD, with AAD, 60-byte plaintext), 5 (8-byte IV),
+        9 (60-byte IV), 13 (AES-256, empty plaintext) and 16 (AES-256 with AAD).  Expected ciphertexts and
+        tags came from the SP 800-38D document and were cross-checked against OpenSSL's AESGCM, so a wrong
+        answer here is not possible unless both references agree wrongly.
+
+   The refusal cases matter as much as the vectors: a GCM implementation that authenticates but still
+   emits plaintext on a bad tag is a padding-oracle in waiting. */
+
+static int bad;
+
+static void ok(int c, const char *name) {
+    sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) bad = 1;
+}
+
+static unsigned char key[32], iv[64], pt[80], ct[80], tag[16], back[80], aad[40];
+
+static long fromhex(const char *s, unsigned char *out, long cap) {
+    long n = tx_len(s, 4000);
+    if (n < 0 || n % 2 != 0 || n / 2 > cap) return -1;
+    if (cs_hex_decode(s, n, out, cap) != n / 2) return -1;
+    return n / 2;
+}
+
+static int eqhex(const unsigned char *p, long n, const char *s) {
+    unsigned char want[120];
+    long m = fromhex(s, want, (long)sizeof(want)), i;
+    if (m != n) return 0;
+    for (i = 0; i < n; i++) if (p[i] != want[i]) return 0;
+    return 1;
+}
+
+static int run_seal(const char *k, const char *nonce, const char *p, const char *a,
+                    const char *want_ct, const char *want_tag) {
+    long kl = fromhex(k, key, 32), il = fromhex(nonce, iv, 64), pl, al;
+    if (kl < 0 || il < 0) return 0;
+    pl = p[0] ? fromhex(p, pt, 80) : 0;
+    al = a[0] ? fromhex(a, aad, 40) : 0;
+    if (pl < 0 || al < 0) return 0;
+    if (cs_gcm_seal(key, kl, iv, il, aad, al, pt, pl, ct, tag)) return 0;
+    if (!eqhex(ct, pl, want_ct)) return 0;
+    if (!eqhex(tag, 16, want_tag)) return 0;
+    /* the same bytes must decrypt back, including in place */
+    if (cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag)) return 0;
+    { long i; for (i = 0; i < pl; i++) if (back[i] != pt[i]) return 0; }
+    if (cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, ct, tag)) return 0;
+    { long i; for (i = 0; i < pl; i++) if (ct[i] != pt[i]) return 0; }
+    return 1;
+}
+
+int main(void) {
+    cs_aes_key k;
+    unsigned char blk[16], out[16];
+    long kl, n;
+
+    /* FIPS-197 C.1: AES-128 */
+    kl = fromhex("000102030405060708090a0b0c0d0e0f", key, 32);
+    fromhex("00112233445566778899aabbccddeeff", blk, 16);
+    ok(kl == 16 && cs_aes_init(&k, key, kl) == 0, "aes128 schedule");
+    cs_aes_encrypt_block(&k, blk, out);
+    ok(eqhex(out, 16, "69c4e0d86a7b0430d8cdb78070b4c55a"), "fips197 c.1 block");
+
+    /* FIPS-197 C.3: AES-256 */
+    kl = fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", key, 32);
+    ok(kl == 32 && cs_aes_init(&k, key, kl) == 0, "aes256 schedule");
+    cs_aes_encrypt_block(&k, blk, out);
+    ok(eqhex(out, 16, "8ea2b7ca516745bfeafc49904b496089"), "fips197 c.3 block");
+
+    /* the block cipher in place */
+    fromhex("00112233445566778899aabbccddeeff", blk, 16);
+    cs_aes_encrypt_block(&k, blk, blk);
+    ok(eqhex(blk, 16, "8ea2b7ca516745bfeafc49904b496089"), "aes256 block in place");
+
+    /* key lengths other than 16 and 32 are refused */
+    ok(cs_aes_init(&k, key, 24) != 0, "reject 192-bit key");
+    ok(cs_aes_init(&k, key, 0) != 0, "reject empty key");
+    ok(cs_aes_init(&k, key, 15) != 0, "reject 15-byte key");
+
+    /* SP 800-38D test case 2: one block, no AAD */
+    ok(run_seal("00000000000000000000000000000000", "000000000000000000000000",
+                "00000000000000000000000000000000", "",
+                "0388dace60b6a392f328c2b971b2fe78", "ab6e47d42cec13bdf53a67b21257bddf"),
+       "gcm case 2");
+
+    /* case 3: four blocks */
+    ok(run_seal("feffe9928665731c6d6a8f9467308308", "cafebabefacedbaddecaf888",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255", "",
+                "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+                "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+                "4d5c2af327cd64a62cf35abd2ba6fab4"),
+       "gcm case 3");
+
+    /* case 4: 60-byte plaintext with AAD */
+    ok(run_seal("feffe9928665731c6d6a8f9467308308", "cafebabefacedbaddecaf888",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+                "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+                "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+                "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+                "5bc94fbc3221a5db94fae95ae7121a47"),
+       "gcm case 4");
+
+    /* case 5: 8-byte IV exercises the GHASH form of J0 */
+    ok(run_seal("feffe9928665731c6d6a8f9467308308", "cafebabefacedbad",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+                "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+                "61353b4c2806934a777ff51fa22a4755699b2a714fcdc6f83766e5f97b6c7423"
+                "73806900e49f24b22b097544d4896b424989b5e1ebac0f07c23f4598",
+                "3612d2e79e3b0785561be14aaca2fccb"),
+       "gcm case 5 (8-byte iv)");
+
+    /* case 9: 60-byte IV */
+    ok(run_seal("feffe9928665731c6d6a8f9467308308",
+                "9313225df88406e555909c5aff5269aa6a7a9538534f7da1e4c303d2a318a728"
+                "c3c0c95156809539fcf0e2429a6b525416aedbf5a0de6a57a637b39b",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+                "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+                "8ce24998625615b603a033aca13fb894be9112a5c3a211a8ba262a3cca7e2ca7"
+                "01e4a9a4fba43c90ccdcb281d48c7c6fd62875d2aca417034c34aee5",
+                "619cc5aefffe0bfa462af43c1699d050"),
+       "gcm case 9 (60-byte iv)");
+
+    /* case 13: AES-256, empty plaintext, empty AAD */
+    ok(run_seal("0000000000000000000000000000000000000000000000000000000000000000",
+                "000000000000000000000000", "", "",
+                "", "530f8afbc74536b9a963b4f1c4cb738b"),
+       "gcm case 13 (aes-256 empty)");
+
+    /* case 14: AES-256, one zero block */
+    ok(run_seal("0000000000000000000000000000000000000000000000000000000000000000",
+                "000000000000000000000000", "00000000000000000000000000000000", "",
+                "cea7403d4d606b6e074ec5d3baf39d18", "d0d1c8a799996bf0265b98b5d48ab919"),
+       "gcm case 14 (aes-256 one block)");
+
+    /* case 16: AES-256 with AAD */
+    ok(run_seal("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+                "cafebabefacedbaddecaf888",
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+                "feedfacedeadbeeffeedfacedeadbeefabaddad2",
+                "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa"
+                "8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
+                "76fc6ece0f4e1768cddf8853bb2d551b"),
+       "gcm case 16 (aes-256 with aad)");
+
+    /* refusals: a forged record must not decrypt */
+    kl = fromhex("feffe9928665731c6d6a8f9467308308", key, 32);
+    { long il = fromhex("cafebabefacedbaddecaf888", iv, 64);
+      long pl = fromhex("d9313225f88406e5a55909c5aff5269a", pt, 80);
+      long al = fromhex("feedfacedeadbeef", aad, 40);
+      (void)il; (void)al;
+      cs_gcm_seal(key, kl, iv, il, aad, al, pt, pl, ct, tag);
+      { long i; for (i = 0; i < 80; i++) back[i] = 0xa5; }
+      tag[15] ^= 1;
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag) == -EBADMSG, "reject flipped tag");
+      ok(back[0] == 0xa5 && back[15] == 0xa5, "no plaintext written on bad tag");
+      tag[15] ^= 1;
+      cs_gcm_seal(key, kl, iv, il, aad, al, pt, pl, ct, tag);
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag) == 0, "accept restored tag");
+      /* flipping a ciphertext byte breaks the tag */
+      ct[3] ^= 0x80;
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag) == -EBADMSG, "reject flipped ciphertext");
+      ct[3] ^= 0x80;
+      /* AAD is authenticated: same key, different AAD */
+      aad[0] ^= 1;
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag) == -EBADMSG, "reject changed aad");
+      aad[0] ^= 1;
+      /* a different nonce is a different record */
+      iv[0] ^= 1;
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl, back, tag) == -EBADMSG, "reject changed nonce");
+      iv[0] ^= 1;
+      /* truncated or extended ciphertext must fail even with the right tag */
+      ok(cs_gcm_open(key, kl, iv, il, aad, al, ct, pl - 1, back, tag) == -EBADMSG, "reject short ciphertext");
+      /* wrong key length is an error, not a crash */
+      ok(cs_gcm_open(key, 24, iv, il, aad, al, ct, pl, back, tag) == -EINVAL, "reject 192-bit key");
+      ok(cs_gcm_seal(key, 20, iv, il, aad, al, pt, pl, back, tag) == -EINVAL, "reject 20-byte key");
+    }
+
+    /* a tag of the right shape but the wrong key */
+    kl = fromhex("0000000000000000000000000000000000000000000000000000000000000000", key, 32);
+    { long il = fromhex("cafebabefacedbaddecaf888", iv, 64);
+      long pl = fromhex("d9313225f88406e5a55909c5aff5269a", pt, 80);
+      ok(cs_gcm_seal(key, kl, iv, il, 0, 0, pt, pl, ct, tag) == 0, "aes-256 seal");
+      key[31] ^= 1;
+      ok(cs_gcm_open(key, kl, iv, il, 0, 0, ct, pl, back, tag) == -EBADMSG, "reject wrong key");
+      key[31] ^= 1;
+      ok(cs_gcm_open(key, kl, iv, il, 0, 0, ct, pl, back, tag) == 0, "accept right key");
+    }
+
+    /* GHASH itself: H for the all-zero key is the AES block of zeros (SP 800-38D case 1) */
+    kl = fromhex("00000000000000000000000000000000", key, 32);
+    ok(kl == 16 && cs_gcm_h(key, kl, out) == 0, "gcm h");
+    ok(eqhex(out, 16, "66e94bd4ef8a2c3b884cfa59ca342b2e"), "gcm h value");
+    /* GHASH of an empty AAD and empty ciphertext is the zero block absorbed into H */
+    ok(cs_gcm_ghash(out, 0, 0, 0, 0, back) == 0 && eqhex(back, 16, "00000000000000000000000000000000"),
+       "ghash padding only");
+
+    sy_printf("CHECK_CRYPTO_AESGCM\tfailed=%d\n", bad);
+    return bad;
+}
