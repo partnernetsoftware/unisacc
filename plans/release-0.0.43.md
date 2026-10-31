@@ -90,6 +90,7 @@ STATE43：**候选批次（omp-grk，2026-11-01，影子根，未替换）**：`
 STATE43：**再一批（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `tests/run.cx --smoke` 16/0，`negative-diagnostics` 211/0（known_gaps=1）。不是已装产品上的矩阵翻格。
 STATE43：**elf-winargs 与 objects（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `elf-winargs` 4/0，`formats-objects` 21/0。先前 elf-winargs 把目录当成编译器，那次不算。
 STATE43：**link 与 includes（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `link-malformed-input` 11/0，含 unknown opcode。`pp-cli-includes` 18/0，known_gaps=1，是已豁免的 `-nostdinc`。
+STATE43：**未定义函数与敌意输入（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `link-undefined-function` 6/0，`negative-hostile` 181/0。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
