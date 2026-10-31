@@ -1,0 +1,98 @@
+/* tests/mem-recovery.cx -- res.mem.recovery on the installed product.
+ *
+ *   sh ./unisacc.com tests/mem-recovery.cx
+ *
+ * An unlimited -c is the baseline. ulimit -v 100000 must refuse with
+ * "run: out of memory", rc 2, and no output. The next unlimited -c
+ * must match the baseline byte for byte.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("mem-recovery: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    assertions++;
+    if (ok) sy_printf("PASS\tmem-recovery.%s\n", name);
+    else { failures++; sy_printf("FAIL\tmem-recovery.%s\n", name); }
+}
+static np_result go(const char *limit, char **args) {
+    char *v[16], script[96]; int n = 0, k; char why[256]; np_result r;
+    v[n++] = bound; v[n++] = "25"; v[n++] = "sh";
+    if (limit) {
+        if (cx_fmt(script, sizeof script, "ulimit %s; exec sh \"$0\" \"$@\"", limit)) die("script");
+        v[n++] = "-c"; v[n++] = script;
+    }
+    v[n++] = com;
+    for (k = 0; args[k] && n < 15; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, work, 0, 40, &r, why, sizeof why)) die(why);
+    return r;
+}
+static char *read_out(const char *leaf, size_t *n) {
+    char p[4600];
+    if (cx_fmt(p, sizeof p, "%s/%s", work, leaf)) die("path");
+    return cx_read(p, n);
+}
+
+int main(void) {
+    char src[4600];
+    char *base_args[] = {"-c", "t.c", "-o", "base.o", 0};
+    char *low_args[] = {"-c", "t.c", "-o", "low.o", 0};
+    char *again_args[] = {"-c", "t.c", "-o", "again.o", 0};
+    size_t bn = 0, an = 0;
+    char *base, *again;
+    np_result r;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/mem-recovery-batch", root)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(src, sizeof src, "%s/t.c", work)) die("src");
+    if (cx_write(src, "int main(void){return 7;}\n", 26)) die("write");
+    r = go(0, base_args);
+    ck(r.rc == 0, "baseline-rc0");
+    np_free(&r);
+    base = read_out("base.o", &bn);
+    if (!base || !bn) die("baseline");
+    r = go("-v 100000", low_args);
+    ck(r.rc == 2 && !r.outn && r.errn && tx_find(r.err, (long)r.errn, "run: out of memory", 18) >= 0, "low-named-refusal");
+    np_free(&r);
+    { char p[4600]; if (cx_fmt(p, sizeof p, "%s/low.o", work)) die("path"); ck(sy_exists(p) == 0, "low-no-output"); }
+    r = go(0, again_args);
+    ck(r.rc == 0, "rerun-rc0");
+    np_free(&r);
+    again = read_out("again.o", &an);
+    ck(again && an == bn && mm_same(again, base, (long)bn), "rerun-bytes-equal-baseline");
+    if (again) mm_free(again);
+    mm_free(base);
+    { char *b0[] = {"-S", "t.c", "-o", "base.s", 0}; char *bl[] = {"-S", "t.c", "-o", "low.s", 0}; char *ba[] = {"-S", "t.c", "-o", "again.s", 0};
+      size_t n0 = 0, n1 = 0; char *x, *y; char p[4600];
+      r = go(0, b0); ck(r.rc == 0, "S-baseline-rc0"); np_free(&r);
+      x = read_out("base.s", &n0); if (!x || !n0) die("S-base");
+      r = go("-v 100000", bl); ck(r.rc == 2 && !r.outn && tx_find(r.err, (long)r.errn, "run: out of memory", 18) >= 0, "S-low-named-refusal"); np_free(&r);
+      if (cx_fmt(p, sizeof p, "%s/low.s", work)) die("path"); ck(sy_exists(p) == 0, "S-low-no-output");
+      r = go(0, ba); ck(r.rc == 0, "S-rerun-rc0"); np_free(&r);
+      y = read_out("again.s", &n1); ck(y && n1 == n0 && mm_same(y, x, (long)n0), "S-rerun-bytes-equal"); if (y) mm_free(y); mm_free(x); }
+    { char *b0[] = {"-b", "lnx/x86_64", "-o", "base.com", "t.c", 0}; char *bl[] = {"-b", "lnx/x86_64", "-o", "low.com", "t.c", 0}; char *ba[] = {"-b", "lnx/x86_64", "-o", "again.com", "t.c", 0};
+      size_t n0 = 0, n1 = 0; char *x, *y; char p[4600];
+      r = go(0, b0); ck(r.rc == 0, "b-baseline-rc0"); np_free(&r);
+      x = read_out("base.com", &n0); if (!x || !n0) die("b-base");
+      r = go("-v 100000", bl); ck(r.rc == 2 && !r.outn && tx_find(r.err, (long)r.errn, "run: out of memory", 18) >= 0, "b-low-named-refusal"); np_free(&r);
+      if (cx_fmt(p, sizeof p, "%s/low.com", work)) die("path"); ck(sy_exists(p) == 0, "b-low-no-output");
+      r = go(0, ba); ck(r.rc == 0, "b-rerun-rc0"); np_free(&r);
+      y = read_out("again.com", &n1); ck(y && n1 == n0 && mm_same(y, x, (long)n0), "b-rerun-bytes-equal"); if (y) mm_free(y); mm_free(x); }
+
+    sy_printf("MEM_RECOVERY\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
