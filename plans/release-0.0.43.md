@@ -243,6 +243,7 @@ STATE43：**21782dd5 对象材料探针（omp-grk，2026-11-01）**：`out/tb/pr
 STATE43：**21782dd5 对象材料六批（omp-grk，2026-11-01）**：`out/tb/probe-obj` 再 PASS：`objects-mixed-target`、`objects-duplicate-definition`、`objects-old-unit-version`、`objects-unsupported-osx-x86_64`。加上前两批，对象材料 6/6。身份 STABLE。还不能并进 `sess-gate`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 对象材料九批（omp-grk，2026-11-01）**：`out/tb/probe-obj` 再 PASS：`objects-unsupported-osx-arm64`、`objects-unsupported-win-x86_64`、`objects-unsupported-win-arm64`。对象材料 9/9。身份 STABLE。还不能并进 `sess-gate`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话（omp-grk，2026-11-01）**：新开会话 `out/tb/sess-qual`，材料表 10 条，从一开始就能带材料。已登记 `objects`。`objects-link`、`census`、`full-domain-check`、`smoke`、`ratchets-tool` PASS。身份 STABLE。`sess-gate` 继续作无材料证据，不并表。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话十一批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 PASS：`objects-missing-definition`、`objects-mixed-target`、`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。会话里 11 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
