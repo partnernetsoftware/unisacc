@@ -142,16 +142,18 @@ static void clean_temp_record(const char *file, int *clean) {
     if (sy_rmdir(d) != 0) { int e = sy_exists(d); if (e != 0) *clean = 0; }
 }
 
-static void drain_fd(int fd) {
+static long drain_fd(int fd) {
     char b[256];
-    long budget = 65536;
-    if (fd < 0) return;
+    long budget = 65536, got = 0;
+    if (fd < 0) return 0;
     while (budget > 0 && sy_readable(fd, 0) > 0) {
         long n = sy_read(fd, b, sizeof b);
         if (n <= 0) break;
+        got += n;
         budget -= n;
     }
     sy_close(fd);
+    return got;
 }
 
 static void snooze(long ms) { (void)sy_poll(0, 0, ms); }
@@ -397,6 +399,36 @@ static void coordinator_release_case(const char *drv, const char *tag, const cha
     if (o1 >= 0) sy_close(o1); if (e1 >= 0) sy_close(e1);
     if (o2 >= 0) sy_close(o2); if (e2 >= 0) sy_close(e2);
     ck(temp_record_gone(r1) && temp_record_gone(r2), "coordinator-release-clean");
+}
+
+static void terminal_unit_cases(const char *dir) {
+    { char *v[] = {"sh", "-c", "exit 0", 0};
+      int o = -1, e = -1, p = sy_spawn_pipe(v, 0, 8, &o, &e), g = -1, s;
+      ck(p > 0, "esrch-wait-spawn");
+      if (p > 0) {
+          long dl = sy_now_ms() + 3000;
+          g = (int)sy_getpgid(p);
+          while (time_before(dl) > 0 && sy_killpg(g, 0) == 0) snooze(20);
+          /* A zombie still belongs to its group, so single-threaded ESRCH-before-reap
+             is not reachable; record the observed group state and require reap. */
+          (void)sy_killpg(g, 0);
+          s = wait_terminal(p, sy_now_ms() + 3000, 0, 0, 0);
+          ck(s == 1, "esrch-wait-reaped");
+          drain_fd(o); drain_fd(e);
+      }
+    }
+    { char *v[] = {"sh", "-c", "head -c 200000 /dev/zero", 0};
+      int o = -1, e = -1, p = sy_spawn_pipe(v, 0, 8, &o, &e);
+      ck(p > 0, "drain-budget-spawn");
+      if (p > 0) {
+          long got;
+          snooze(50);
+          got = drain_fd(o);
+          ck(got > 0 && got <= 65536, "drain-budget-capped");
+          drain_fd(e);
+          (void)wait_terminal(p, sy_now_ms() + 3000, 0, 0, 0);
+      }
+    }
 }
 
 static void matrix(const char *drv, const char *tag, const char *cc, const char *dir) {
@@ -791,6 +823,7 @@ int main(void) {
       if (!made) { sy_printf("CX_HOST_RUN\tfailed=%d\n", failed + 1); return 1; }
     }
     fixture(dir);
+    terminal_unit_cases(dir);
     rc = build_driver("gcc", "gcc_cx", dir, gbin, sizeof gbin);
     ck(rc == 0, "build-gcc-driver");
     rc = build_driver("clang", "clang_cx", dir, cbin, sizeof cbin);
