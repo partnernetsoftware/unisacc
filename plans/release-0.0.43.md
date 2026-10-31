@@ -264,6 +264,7 @@ STATE43：**21782dd5 材料会话一百二十五批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 材料会话一百三十三批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`library-cells`、`link-edge-cases`、`matrix-stale`、`nametab-gen`、`optimization-native`、`optimization-run`、`optimization-tape`、`out-gc`。会话里 133 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话一百四十一批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`own-diff-tool`、`owned`、`phase-timing-external`、`pp-cli-macros`、`pp-cli-targets`、`pp-header-locations`、`properties`、`refactor-tool`。会话里 141 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话一百四十九批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`register-tool`、`resources`、`ri-multi`、`ri-route-refuse`、`ri-trace`、`ri-trace-output`、`route-chains`、`snapshot-run-tool`。会话里 149 个 PASS。还差 14 个旧绿批没重跑。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话重跑完成（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 14/14 PASS，旧无材料会话的 154 个 PASS 已全部重跑进来。另有对象材料 9/9。会话里 163 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
