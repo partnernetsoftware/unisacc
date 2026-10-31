@@ -183,6 +183,7 @@ STATE43：**21782dd5 地址限制（omp-grk，2026-11-01）**：已装产品 `-c
 STATE43：**21782dd5 地址限制批次（omp-grk，2026-11-01）**：`c6cf7932f7` 新增 `compile-as-limit`，已装产品 9/0。`res.mem.compile-as-limit` 已翻 `COVERED_LOCAL`。登记 `91698232fa`，覆盖 `6172071792`，矩阵 `b475cec6f5`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 run 地址限制（omp-grk，2026-11-01）**：`cc91cc5422` 新增 `run-reserve`，已装产品 3/0。低限 `-run` 是 `run: out of memory`，rc 2，stdout 空。前后不设限都返回 7。`res.mem.run-reserve` 已翻 `COVERED_LOCAL`。登记 `a41ab2ec53`，覆盖 `186f5b4428`，矩阵 `d031d42648`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 地址恢复（omp-grk，2026-11-01）**：`4ce4b1ef5a` 新增 `mem-recovery`，已装产品 15/0。`-c`、`-S`、`-b` 在低限拒绝后，不设限重跑与基线逐字节相同。`res.mem.recovery` 已翻 `COVERED_LOCAL`。登记 `edcaad1588`，覆盖 `4dfdb42385`，矩阵 `7868537fdb`。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 bound 142（omp-grk，2026-11-01）**：`519937fdf1` 新增 `bound-rc142`，2/0。`tools/bound 1 sleep 3` 退出 142，分类行 `CLASSIFY rc142 UNKNOWN`。完成的命令仍是 rc 0。`res.runner.bound-rc142` 已翻 `COVERED_LOCAL`。登记 `33d659a693`，覆盖 `a22c70f77f`，矩阵 `40518c2d07`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
