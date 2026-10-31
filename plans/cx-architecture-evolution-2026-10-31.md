@@ -2,6 +2,8 @@
 
 状态：设计提案，不改变 `cx/spec.md` 已生效条款，不代表实现、安装或发布资格。现状以 `cx/spec.md`、`cx/prd.md`、根 `prd.md` 为准；施工以具体计划及其候选身份为准。
 
+首刀现状（2026-10-31）：源码提交 `b393ac30bc`；`out/link-unit-4/receipt.txt` 显示正式 `entry-build` 在 `entry.elf` 失败，未完成首刀验收。`out/link-unit-3/evidence.txt` 的候选 `66a632ff…` 使用 `dl-stub` 手工链接，仅作隔离探针，不是可安装的正式候选。未解决 `dlopen` 等宿主符号的真实绑定前，不更改 CX-W-1 状态；已派 omp-go 修复，禁止用桩替代产品行为。
+
 ## 目标与边界
 
 CX 保持 C99 受检查子集与 `#pragma unisa` 配置：底层对接 libc、POSIX 和平台 API；向 Rust 学习模块边界、所有权与借用；向 Bun/Node.js 学习开箱即用的库、工作区和包管理体验。不是照搬 Rust 语法或 JavaScript 动态模块，也不以运行期句柄或模块检查冒称编译期内存安全。
