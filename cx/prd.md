@@ -1,6 +1,6 @@
 # cx — 结构化主线：pragma 扩展、底层/上层两棵树
 
-> 本篇是 `cx/` 树的总索引。模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)），不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。目录归属总览见 [`ARCHITECTURE.md`](../ARCHITECTURE.md)。
+> 本篇是 `cx/` 树的总索引。对外条款在 [`spec.md`](spec.md)（编号只增不改）。模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)），不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。目录归属总览见 [`ARCHITECTURE.md`](../ARCHITECTURE.md)。
 
 ## 一、`#pragma unisa` 扩展
 

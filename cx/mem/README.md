@@ -16,7 +16,7 @@
 ## 所有权生命周期（grow）
 
 `mg_init`（出生）→ `mg_push/mg_append`（增长）→ `mg_move/mg_take`（转移/交出）→ `mg_free`（终结）。
-`mg_move` 后旧句柄失效，`mg_take` 后调用者成为唯一所有者。借用视图见 `mem.slice`（不拥有、只读）。
+`mg_move` 是 Rust 赋值：先释放占用的 `dst`，再转移，`src` 清零。`mg_take` 后调用者成为唯一所有者。借用视图见 `mem.slice`（不拥有、只读）。
 尾部操作 `mg_pop`（Vec::pop，返回值不悬垂）、`mg_truncate`（Vec::truncate，原地缩短）、
 `mg_clear`（Vec::clear，保留分配）都不 realloc，是 O(1)。中段操作 `mg_insert`（Vec::insert）、
 `mg_remove`（Vec::remove）按 index 位移尾段，O(len - index)，插入可触发倍增扩容。
@@ -29,5 +29,5 @@
 
 ## 检查
 
-- `tools/check-cx-grow.cx`（22 用例）、`tools/check-cx-slice.cx`（12 用例）、`tools/check-cx-arena.cx`。
+- `tools/check-cx-grow.cx`（占用 dst 的 move 先释放；pop/truncate/clear/insert/remove）、`tools/check-cx-slice.cx`、`tools/check-cx-arena.cx`。
 - 棘轮 `tests/cxraw.cx`：`cx/mem/` 在 L0 白名单，不计；上层经 use 消费。

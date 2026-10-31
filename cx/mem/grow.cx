@@ -17,7 +17,7 @@
      mg_insert(b, i, c)  insert byte c at i, shift tail right (Vec::insert)
      mg_remove(b, i, &c) remove byte at i into c, shift tail left (Vec::remove)
      mg_free(b)          free the block and zero the struct
-     mg_move(dst, src)    transfer ownership src -> dst; src zeroed (Rust move)
+     mg_move(dst, src)    drop dst if occupied, then transfer src -> dst (Rust assign)
      mg_take(b, &p, &n, &c) hand the block out; b zeroed (Vec::into_raw_parts)
    Speed: reserve doubles the capacity (16, 32, 64, ...), so N pushes cost O(N)
    total, matching Rust's Vec growth.  The block is never shrunk in place. */
@@ -76,14 +76,15 @@ void mg_free(mg_buf *b) {
     mg_init(b);
 }
 
-/* Move the block from SRC to DST: DST takes the data, len and cap, and SRC is
-   zeroed, so a later mg_free(SRC) is a no-op and DST is the sole owner.  This is
-   Rust's move (and Vec's ownership transfer): after the move the old handle is
-   invalidated, not aliased.  DST must not already own a block (it is overwritten;
-   call mg_free first if it does).  0, or -1 (neither changed). */
+/* Move the block from SRC to DST.  Occupied DST is dropped first (Rust
+   assignment: the live destination is released before the overwrite).  SRC is
+   then zeroed, so a later mg_free(SRC) is a no-op and DST is the sole owner.
+   dst == src is a no-op.  0, or -1 (neither changed, except a failed null
+   check). */
 int mg_move(mg_buf *dst, mg_buf *src) {
     if (!dst || !src) return -1;
     if (dst == src) return 0;
+    mg_free(dst);
     *dst = *src;
     mg_init(src);
     return 0;

@@ -1,6 +1,6 @@
 CX结构化主线：以module/use、公开接口、私有实例、显式构建输入及生命周期合同组织编译器；原生目标是结构化类型/符号/ABI与所有权接口，而非将include藏进工具。
 
-**论文归属：** 模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)）；不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。
+**论文归属：** 模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)）；不塞进 Paper A。对外条款 [`spec.md`](spec.md)。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。
 
 - `mem/README.md`：内存库（heap/bytes/arena/grow/slice，Rust 所有权/借用体系）。
 - `text/README.md`：文本库（text/build/deflate，Rust str / Node Buffer 体系）。

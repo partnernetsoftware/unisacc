@@ -49,6 +49,16 @@ int main(void) {
         mg_free(&d);
         ok(mg_move(&d, &d) == 0, "move-self-noop");
         ok(mg_move(0, &s) == -1 && mg_move(&d, 0) == -1, "move-null-refused");
+        {
+            /* occupied dst is dropped first (Rust assignment, not a leak) */
+            mg_buf a, c;
+            mg_init(&a); mg_init(&c);
+            mg_append(&a, "ab", 2);
+            mg_append(&c, "xyz", 3);
+            ok(mg_move(&c, &a) == 0 && c.len == 2 && c.data[0] == 'a' && c.data[1] == 'b', "move-drops-occupied-dst");
+            ok(a.data == 0 && a.len == 0, "move-drops-zeros-src");
+            mg_free(&c);
+        }
     }
     {
         /* mg_take: hand the block out, caller becomes the owner */
@@ -59,6 +69,21 @@ int main(void) {
         ok(t.data == 0 && t.len == 0 && t.cap == 0, "take-zeros");
         ok(mg_take(&t, 0, &n, &c) == -1, "take-null-refused");
         if (p) mm_free(p);
+    }
+    {
+        mg_buf t; int c;
+        mg_init(&t);
+        mg_append(&t, "abcd", 4);
+        ok(mg_pop(&t, &c) == 0 && c == 'd' && t.len == 3, "pop-last");
+        ok(mg_truncate(&t, 2) == 0 && t.len == 2 && t.data[0] == 'a', "truncate");
+        ok(mg_truncate(&t, 9) == -1 && t.len == 2, "truncate-over-refused");
+        ok(mg_clear(&t) == 0 && t.len == 0 && t.cap >= 2, "clear-keeps-cap");
+        ok(mg_pop(&t, &c) == -1, "pop-empty-refused");
+        mg_append(&t, "ace", 3);
+        ok(mg_insert(&t, 1, 'b') == 0 && t.len == 4 && t.data[1] == 'b' && t.data[3] == 'e', "insert-middle");
+        ok(mg_remove(&t, 1, &c) == 0 && c == 'b' && t.len == 3 && t.data[1] == 'c', "remove-middle");
+        ok(mg_insert(&t, 9, 'z') == -1 && t.len == 3, "insert-oob-refused");
+        mg_free(&t);
     }
     mg_free(&b);
     printf("%s\tcheck-cx-grow\n", bad ? "FAIL" : "PASS");
