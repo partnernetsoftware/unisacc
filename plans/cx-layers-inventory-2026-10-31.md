@@ -1200,3 +1200,118 @@ B 的夹具 = `k-not-indexed`、`k-unmerged`、`k-index-view-change`、`k-au-fla
    `tools/affected.cx` → `ratchets` → 提交。
 3. B 落地前，A 的 scope 行与 `prd.md` 能力速查同时标 `symlinks=UNKNOWN`；
    B 落地后把该常量替换为 B 收据的真值，并复查 A 的 `coverage=` 是否可升级。
+
+## 15. A 刀移交 omp-go：所有权、marker 改名消费者、夹具边界、记账口径（未施工）
+
+### 15.1 移交决定：是，且附条件
+
+**是。** 主人裁定代码由 omp-go 实施，A 刀（`tools/check-cx-layers.cx` 的修改）的**写入所有权
+临时移交 omp-go**；本刀退出写入，只保留只读审查。条件：
+
+1. **未移交前 omp-go 不碰该文件。** 本封只是方案移交，不是移交本身；移交生效以 cdx 批准 +
+   本刀打下基线（下条）为准。
+2. **基线由本刀在移交时点记录**：`git rev-parse HEAD` + `tools/check-cx-layers.cx` 的 sha256
+   （本封写作时 HEAD `32744f7421`，工具当前 rc0、`edges=2413`，见 15.5 实测）。移交后任何
+   改动都相对这个基线审查。
+3. **审查通道**：本刀只读 review，意见走 `1:omp-cdx` 信封或 `write agent://…`，不直接改文件、
+   不 `git add` 该路径、不替 omp-go 提交。
+4. **范围锁**：A 刀只改 `tools/check-cx-layers.cx`（+ 它自己的 `--fixtures` 用例）。不得顺手
+   改 `tools/symindex.cx`、`cx/*`、`tests/run-batch.cx`、spec；索引漏续行 use 属另案。
+5. **回退权**：若 A 刀改动引入既有 FAIL 类减少、覆盖缩减或断言放宽，本刀有权要求回退到基线，
+   冲突由 cdx 裁。
+6. **B 不随本次授权**：`tools/cx-layers-domain.cx` 未获实施授权，B 侧一行都不写。
+
+### 15.2 marker 改名的全部直接消费者（实测 grep，非推测）
+
+全仓 `grep -rn CX_LAYERS`（排除 `out/`）命中 **3 个文件**：本文档、`tests/batches.tsv`、
+`tools/check-cx-layers.cx` 自身。逐个核：
+
+| 消费者 | 现状 | 改名影响 | 处理 |
+|---|---|---|---|
+| `tests/batches.tsv:332` 第 12 列 | `rc0:CX_LAYERS` | 不改则 A 的 scope 行不被认，改后仍严格要求 scope 行存在 | 改 `rc0:CX_LAYERS_SCOPE` |
+| `tests/run-batch.cx:23` `marker()` | 整行**前缀**匹配且其后必须为 `TAB` 或行尾 | `want=CX_LAYERS` 时 `CX_LAYERS_SCOPE` 行在 `p[at+10]=='_'` 处失败 ⇒ **不会双匹配**；反之亦然 | 不改代码，语义已严 |
+| `tests/run-batch.cx:36` PASS 条件 | `!rc && candidate 未变 && marker(...)==1` | 要求 scope 行**恰好一行** | A 必须在正常返回路径打印且仅打印一次 |
+| `tests/run-batch.cx:39` | `ok?PASS:timed_out?UNKNOWN:FAIL` | 不变 | — |
+| `tools/cxlib/allsession.cx:292` `as_verdict` | 只看 rc（0/1/3），不看 marker | 不变；rc 三档已定 | — |
+| `tests/coverage.tsv:312` | 描述文本，`IMPLEMENTED_SEPARATE_BATCH` | 不改也能过；但描述应与新语义一致 | 追加「收据含 `CX_LAYERS_SCOPE`，`coverage=manifest-only`」一句，字段不变 |
+| `prd.md:32` 能力速查 | 描述工具用途 | 需补 scope/coverage 与软链 UNKNOWN | 追加「A 另印 `CX_LAYERS_SCOPE`，声明 `coverage=manifest-only symlinks=UNKNOWN`；软链与 tracked 对账属 B」 |
+| `tests/run.cx` smoke 通道 | `smoke_row_valid` 只认 `id==smoke` / `product.*` | **不受影响**（cx-layers 不在 smoke 名单） | 无需改 |
+| `tools/affected.cx` | 按 `source`/`entry` 字段做影响面 | 字段不改，仅 marker 变 | 无需改 |
+
+**验收证据随之变化**：PASS 从「rc0 + `CX_LAYERS` 出现一次」变成「rc0 + `CX_LAYERS_SCOPE` 出现
+一次」。因为没有 scope 行就必然 FAIL，**沉默不再能通过**。
+
+### 15.3 keyed 行归属
+
+`tests/batches.tsv`、`tests/coverage.tsv`、`prd.md` 是多人同改文件，一律
+`tools/commit-own.cx --keyed`（实现见 `tools/commit-own.cx:3-11`：私有索引 + 只带含 key 的
+changed 行）：
+
+| 文件 | key | 只带的行 |
+|---|---|---|
+| `tests/batches.tsv` | `cx-layers` | 第 332 行 |
+| `tests/coverage.tsv` | `contract.cx-layers` | 第 312 行 |
+| `prd.md` | `能力速查`（该行含工具路径 `tools/check-cx-layers.cx`，用它做 key） | 第 32 行 |
+
+`tools/check-cx-layers.cx` 用 `--whole`（整文件属 A 刀）。不得用 `git add` 整文件提交共享
+tsv；不得 `stash/clean/reset/checkout` 他人路径。
+
+### 15.4 既有夹具边界
+
+- **现有 `--fixtures` 的 16 条 checker 全部保留**，期望值与诊断行号一字不改；A–H 用例一个不删。
+  实测当前输出 `CX_LAYERS_FIXTURES checks=16 failed=0`、耗时 4.4 s。
+- 新增 30 条（§14.2），总数变 **46**。按当前 0.27 s/check 估算约 12–13 s；`--fixtures` 不在
+  批次 55 s 预算内，但仍须单次 ≤60 s 命令上限内跑完，否则拆成两组入口（`--fixtures lex`
+  / `--fixtures recon`），**不得**靠减少用例省时间。
+- 旧夹具的 `FAIL` 行（`UNRES-ENOTDIR`、`UNRES-EACCES`、`PARSE-CONDITIONAL`）是**预期输出**，
+  不是失败；`failed=0` 才算过。改名后这些类名不变。
+- A 的夹具树 `out/cx-layers-fixtures-<pid>/` 在共享检出内但**不在 `out/` 之外写盘**；A 的夹具
+  **不得**执行任何写型 git 子命令（现在只 spawn `symindex`）。新增一条免费自检：`--fixtures`
+  前后共享 `.git/index` 的 size/mtime/ino + sha256 必须相同（B 的仓外仓要求同源条款）。
+
+### 15.5 记账口径：sha 相等不是原子证明，三类未决分列
+
+- **「源 sha == manifest sha」只说明**：在可观测点上，本次读到的字节与写 manifest 时被哈希的
+  字节相同。它**不**证明窗口内未发生 A→B→A，**不**证明 shard 未损坏，**不**证明 git 索引
+  视图一致。措辞沿用 §11.3/§14.4：只许「在可观测点 `{首读哈希, 末次重读哈希}` 上未观测到漂移」。
+- **shard 完整性不在 A 的范围**：只断言「被引用 sha 的 shard 存在」（`MISSING-SHARD`）。文件
+  内容与文件名是否一致**未校验**；本版不承诺，scope 记 `shard_body_verified=0`。要加校验（重算
+  shard 的 sha256 并与文件名比）须另行提案。
+- **三类独立记账，不许合并成一个数**，scope 行分列：
+
+```
+undecided_lex=<n>     词法未决：PARSE-CONDITIONAL、未知指令形状、行号未决(OPEN-LEX-LINE)
+undecided_recon=<n>   对账未决：MISSING-U（源有 use、索引无 U）、EXTRA-U（索引有 U、源无该 use）
+undecided_meta=<n>    元数据未决：MANIFEST-PARSE、PATH-TOO-LONG、MANIFEST-CHANGED
+undecided_io=<n>      I/O 未决：UNREADABLE、SOURCE-CHANGED、SOURCE-CHANGED-AFTER-READ、空读
+```
+  `MISSING-U` 与 `EXTRA-U` **各自计数、不互相抵消**：一方多、一方少不许写成「净差 0」。
+  四个分项之和必须等于 `undecided` 总数（`UNDECIDED-SUM` 自检，不等即 rc3）。
+- `MISSING-U` 仍**不补边**（补边会改 `edges` 冒充覆盖提升），只记 rc3。
+
+### 15.6 A 刀实测基线（供 omp-go 与验收比对）
+
+本机、当前共享树、`HEAD 32744f7421`（工作区含他人改动）：
+
+| 指标 | 值 |
+|---|---|
+| 全量审计 rc | 0 |
+| 全量审计耗时 | **10,442 ms** |
+| `CX_LAYERS` 行 | `edges=2413 same=771 down=1510 up=0 amb=82 out=50 unres=5 io=0 failed=0` |
+| `UNKNOWN` 行 | `amb=82 out=50 not-a-pass` |
+| `--fixtures` | `checks=16 failed=0`，**4,400 ms** |
+
+A 施工后的判据：`up==0` 与 `failed==0` 必须保持；`edges` 允许变化但**每次变化必须给出原因**
+（改词法定位会修正误报/漏报，`same/down/up/amb/out` 五项之和必须仍等于 `edges`）；
+审计耗时允许 +3–5 s（两趟哈希）；`undecided_*` 四项须为 0 或逐条解释。
+
+### 15.7 交付清单（A 刀）
+
+1. 改 `tools/check-cx-layers.cx`：`cl_locate`/`cl_process_use` 按 §7 的 12 条词法重写、
+   新增 `cl_lex_uses`、`cl_dig`（+261 KiB）、双向对账、scope 行、四个 `undecided_*`、
+   `UNDECIDED-SUM`、rc 三档、manifest 逆变换、输出转义、`PATH-TOO-LONG`。
+2. `--fixtures` 46 条全绿（16 旧 + 30 新），并记录 `.git/index` 前后一致。
+3. 全量审计与 §15.6 逐项比对，差异给原因。
+4. `tools/affected.cx --files tools/check-cx-layers.cx --run`；`tools/ratchets.cx`。
+5. 提交：`--whole tools/check-cx-layers.cx` + 三个 keyed 行（15.3）；批次 marker 一并改，
+   **同一提交内**完成，避免出现「marker 已改、工具未改」的中间态把共享 main 变红。
