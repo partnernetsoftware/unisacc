@@ -303,12 +303,17 @@ L0 库补齐 Rust 的 O(1) 尾部操作与 str 后缀/裁剪（不受 closure-on
 - `tools/practice-grow-perf.cx` 改为确定性 realloc 计数度量（reserve=0 vs grow=17 次，跨机器复现，去墙钟噪声），不再依赖 sy_now_ms。
 - 验收：七个棘轮全绿（`RATCHETS ok=7 fail=0`）；check-cx-sys 的 dl 段段错误是 grk 的 release-build 中间态（按地址直调 glibc dlopen），归 grk，非本目标引入。
 
+## 已落地：text.build 补 sb_insert（String::insert_str）+ 确定性度量 + gcc/clang 宿主修复（2026-10-31，bdy）
 ## 三个坑（cc 2026-10-30 提醒，本目标设计须遵守）
 
 1. **坑一，模块经两条软链路径进入**：`cx/text/mem` 软链让 build.cx 经 `cx/text/mem/grow.cx` 引 mem.grow；若使用方同时经 `tools/mem` 再 `use mem.*`，已装产品报 "defined twice"（复现 out/rf-dedupe）。grk 的 modid 候选已修，未安装。本目标的 build.cx 已用 `void* inner` 消除 CXIF 的 mg_buf 类型泄漏，但「直接 use mem.grow + use text.build」仍撞软链归一（已装产品缺 sy_realpath）。**2026-10-30 实测验证**：`out/grk-modid/candidate`（modid 候选，含 sy_realpath）跑 `tools/practice-vec.cx`（use mem.grow + use text.build）→ `PRACTICE_VEC failed=0`（10 用例全 PASS），跑 `check-driver-cli`（use text.text）→ `CXC failed=0`，跑 `check-cx-build` → `CX_BUILD failed=0`。即软链归一修复**已存在且可用**，只差 grk 把 modid 候选 install/promote 成已装产品。产品重编后，cli.cx 收敛 use text.text、practice-vec 转正都可直接落地。
 2. **坑二，间接可见函数无原型**：A use mid，mid use text.fmt，A 调 tx_snprintf/tx_strtod 会调错甚至段错误。约定：用到哪个模块的函数就直接 use 那个模块。见 plans/indirect-proto-2026-10-30.md。本目标的 consumers（read-all/check-*）都直接 use 了所用模块，遵守此约定。
 3. **坑三，errno 每编译单元一份**：跨模块错误码只能走返回值。见 plans/errno-per-unit-2026-10-30.md。本目标的 cx/sys 接口全部显式返回 -errno，不依赖 errno 跨模块，遵守此约定。
 
+- `cx/text/build.cx` 补 `int sb_insert(sb *b, long index, const char *s, long n)`：在 index 插入 n 字节、尾部右移（Rust `String::insert_str`；Node 无直接对应，这是 buffer splice）。O(len-index) 尾移；失败（越界、空指针、分配失败）时 b 不变。加 `#pragma unisa use mem.bytes` 用 `mm_move`/`mm_copy`（带界，不裸 memmove/memcpy）。
+- `tools/check-cx-build.cx` 补 8 个 sb_insert 用例（尾插/头插/中插/零插/越界/负下标/空指针/空 builder），`CX_BUILD failed=0`（24 用例全 PASS）。
+- `tools/practice-grow-perf.cx` 补 sb_insert 头插确定性度量：K=100000 次 `sb_insert(s,0,"x",1)` 移动 `K(K-1)/2 = 4,999,950,000` 字节（O(K²) 尾移，与 mg_insert 的 Vec::insert 度量对称），`sb_insert_head_bytes_moved=4999950000`。
+- 棘轮 `tests/cxraw.cx -- --check`：1472 文件、14614 调用，0 超基线、93 低于基线（sb_insert 走 mm_move/mm_copy，零新增 libc）。
 
 ## 收敛阻塞更正：cli.cx 是 closure-once，不是软链归一（grk 2026-10-30）
 
