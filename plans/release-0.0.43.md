@@ -141,6 +141,7 @@ STATE43：**21782dd5 续（omp-grk，2026-11-01）**：同一会话再 12 个 PA
 STATE43：**21782dd5 三十（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 30/346。含 `pp-cli-includes`、`resources`、`ri-trace`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 四十二（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 42/346。含 `negative-diagnostics`、`formats-objects`、`ri-image-multi`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 五十四（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 54/346。含 `link-undefined-function`、`negative-hostile`、`formats-macho-pe`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 六十六（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 66/346。含 `link-malformed-input`。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
