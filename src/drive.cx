@@ -1286,7 +1286,7 @@ int dv_main(int argc, char **argv) {
     char preason[128];
     long long t0;
     long long t1;
-    int ex_touch(void); int ex_cap_gate(int);
+    int ex_touch(void); int ex_cap_gate(int *, char **); int ex_ri_arm(const char *, int, const unsigned char *, long); void ex_alu_note(int); int sy_setenv(const char *, const char *, int);
     int pm_open(const unsigned char *, long, char *, int);
     int pm_close(void);
     int pm_model(const char *, const char *, const unsigned char **, long *, int *, unsigned *, int *);
@@ -1351,7 +1351,7 @@ int dv_main(int argc, char **argv) {
     src = 0;
     nsrc = 0;
     argstart = argc;
-    if ((kind = ex_cap_gate(argc)) != 0) return kind == 2 ? 2 : dv_fail(bx_src_why(0));
+    if ((kind = ex_cap_gate(&argc, argv)) != 0) return kind == 2 ? 2 : dv_fail(bx_src_why(0));
     kind = dv_word(argv[1], 0);
     if (kind == 1) return dv_ar(argc, argv);
     if (kind == 2) return dv_as(argc, argv);
@@ -1667,14 +1667,14 @@ int dv_main(int argc, char **argv) {
             gotn = textn;
             as_tape = 1;
         }
+        sy_setenv("UNISA_CONTAINER", opts.pkg ? opts.pkg : "", opts.pkg && opts.pkg[0] ? 1 : 0);
         if (hs_container(cont, 512, argv[0], preason, 128)) {
             free(gotb);
             fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
             return 1;
         }
-        /* Before the package is read. A single-source hit is the forward
-           ELF from the image route; exec it and skip the models. Pass 2
-           does not look. A miss arms the include receipts for the store. */
+        /* A cache hit execs the image and skips models. Pass 2 does not look.
+           A miss arms the include receipts for the store. */
         if (mode2 == 3 && nsrc >= 1 && !dv_fwd_pass) {
             int ready;
             unsigned char *cached;
@@ -1697,10 +1697,10 @@ int dv_main(int argc, char **argv) {
             }
             if (ready) (void)rc_arm();
         }
-        if (ex_touch()) {
+        if ((rc = ex_ri_arm(route, mode2, gotb, gotn)) != 0 || ex_touch()) {
             free(gotb);
-            fputs("unisacc: model driver: alu\n", stderr);
-            return 1;
+            ex_alu_note(rc);
+            return rc ? rc : 1;
         }
         if (bd_touch()) {
             free(gotb);
@@ -1781,11 +1781,11 @@ int dv_main(int argc, char **argv) {
         }
         st_attr_reset();
         st_extra_reset();
-        /* -c -funit is a unit object. Without these resources e3 reports
-           every call defined in another unit as an undefined function.
-           These stay under the process slots; a replay does not push them again. */
         if ((obj && st_extra_put("\0cli/object", 11, &dv_one, 1)) ||
             (opts.funit && st_extra_put("\0cli/funit", 10, &dv_one, 1)) ||
+            (dv_defs_n > 0 && st_extra_put("\0cli/defines", 12, dv_defs, (int)dv_defs_n)) ||
+            (dv_forced_n > 0 && !dv_cx(src) && st_extra_put("\0cli/includes", 13, dv_forced, (int)dv_forced_n)) ||
+            (opts.nostd && st_extra_put("\0cli/nostdinc", 13, &dv_one, 1)) ||
             st_dirs(dv_incdir, (int)dv_incdir_n, dv_quotedir, (int)dv_quotedir_n)) {
             pm_close();
             free(pkg);
