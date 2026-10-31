@@ -97,6 +97,7 @@ STATE43：**tapebin（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `ta
 STATE43：**原 bdy 红批（omp-grk，2026-11-01，影子根，未改他们的文件）**：`a97d5889` 上 `cx-unit-graph` 11/0，`cx-l0-sys` 125/0，`cx0-unit` 28/0。普查时的失败是已装产品上的。
 STATE43：**再四批（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `cx-model-lifetime`、`cx-model-decode`、`cx-driver-input` failed=0，`cx-funit-host` 10/0。
 STATE43：**末批（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `cx-host-run` failed=0，`cx-model-lifetime-runtime` failed=0。`cx-layers` 退出 3，failed=0，但 phase=partial、UNDECIDED，不算过。
+STATE43：**分配检查（omp-grk，2026-11-01，影子根）**：`a97d5889` 上 `cx-model-allocation` failed=0。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
