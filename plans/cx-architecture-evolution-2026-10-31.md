@@ -2,7 +2,7 @@
 
 状态：设计提案，不改变 `cx/spec.md` 已生效条款，不代表实现、安装或发布资格。现状以 `cx/spec.md`、`cx/prd.md`、根 `prd.md` 为准；施工以具体计划及其候选身份为准。
 
-首刀现状（2026-10-31）：源码提交 `b393ac30bc`；早期 `66a632ff…` 使用 `dl-stub` 手工链接，只是隔离探针。后续提交 `e4a1542b30`、`82ca853dfd` 的 `out/link-unit-8/candidate`（sha256 `81c500835235e77b18c5655a74cabbf5e8531cac0dbfd40ca423765109cc0920`）由 entry-build 无桩链接，模块与单独的 `sys.dlcall` 探针证据见 `out/link-unit-8/evidence.txt`。但该证据同时说明静态产品的 memory 路由发布零 process/dl 槽，真实 `.hostaddr` 使用失败；独立 `sys.dlcall` 探针不能证明产品自身宿主绑定能力未回归。已派 omp-go 对照已装产品和候选的真实宿主绑定消费者，若退化须恢复功能；CX-W-1 不标生效，候选未安装，跨平台未验。
+首刀现状（2026-10-31）：源码提交 `b393ac30bc`；早期 `66a632ff…` 使用 `dl-stub` 手工链接，只是隔离探针。后续 `out/link-unit-8/candidate`（sha256 `81c500835235e77b18c5655a74cabbf5e8531cac0dbfd40ca423765109cc0920`）由 entry-build 无桩链接。其 memory 路由发布零 process/dl 槽；同一 Linux 本机输入对照已装产品与候选，dlopen 成功与缺失库、strfry、asprintf、缺失函数和 `-o` 路径的退出码及输出一致，见 `out/link-unit-8/evidence.txt`。这是具名路径证据，不证明 `.hostaddr` 全域或其他平台行为；已派 omp-go 核实持久行为回归及调用者迁移。CX-W-1 不标生效，候选未安装，跨平台未验。
 
 ## 目标与边界
 
