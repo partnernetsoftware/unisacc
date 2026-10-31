@@ -72,6 +72,8 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 ## 进度（grk 每完成一步，在这里写上提交号）
 
 STATE43：**当前状态（cc 维护，2026-10-31 中午；下面的流水记录是历史，以这一块为准）**
+STATE43：**当前状态（omp-grk，2026-10-31 夜；这一行压过中午那块）**：候选整单普查在 `out/priv-full/out/census3` 进行中，已见的非 PASS 只有 19 个 `full-*`。`cx-l0-sys-ffi` 与 `phase-timing-stamps` 在候选上已绿（`811c8775e5`、`ab090348ad`）。`elf-winargs` 批次在候选 `46435b9b` 上 PASS，格 `elf.pos.windows-args-template` 等安装后翻。R13 豁免 Darwin carry、Windows gate、ARM narrowing、独立整镜像 sha（`c366b651a0`，`matrix-waive --check` disagree=0）。外平台 73 格和 `all-waves` 还没跑。公开仍等 `tests/run.cx -- --all` 输出 QUALIFIED；主人目标已包含公开，但没有 QUALIFIED 之前不签名、不发 Draft/Latest。
+
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
 STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
@@ -100,14 +102,18 @@ STATE43：6e 五个外平台（osx/x86_64、osx/arm64、lnx/arm64、win/x86_64 �
 STATE43：6f 最后 `tests/run.cx -- --all` 输出 QUALIFIED。
 STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
 STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格、约 580 个模块，产品还没用）、通用工具、体积优化，都是 0.0.44 的准备，见 [v0.0.44.md](v0.0.44.md)。
+
 **已安装（2026-10-31 01:19）：** `./unisacc.com` sha=43fbbb81…，4631130 字节，冻结 rev c98f757f，五片都走 whole-o，P3 是 aec1a0bf；check-install-fixes 4/4、`--smoke` 16/16、release-ape smoke 5/5、七个棘轮全绿。旧版备份在 out/unisacc.com.79fb84e6。
+
 **头号待办（cc 复核时发现，挡第 4 步 QUALIFIED）：** CX 入口还没迁移资源身份（RI）。
 - `--strict-resource-flow` 和 `--resource-ledger` 报 "model driver: option not migrated"（src/entrybind.cx:86）。
 - 设置了 `UNISACC_RF_CAPTURE`，编译照常 rc0，却一个文件都不写，等于悄悄绕过账本，违反 ri 合同。
 - resources、ri-trace、ri-trace-output、ri-multi 四个批次在新产品上全红。ri、resources 两个矩阵里的 COVERED_LOCAL 证据都是在 79fb84e6 上实跑的，新产品上不成立。
 要做的：把 RI 的选项、捕获和严格重放迁移进 CX 入口；在迁移完成之前，带 `UNISACC_RF_CAPTURE` 的运行必须按名字拒绝，不能悄悄忽略。
 已作废：rf-capture-guard 是 RI 迁移完成之前的防呆（设了 UNISACC_RF_CAPTURE 就按名字拒绝），捕获迁移之后它的断言不再成立（设了就真的捕获；空值等于没设，和 resources.cx 的用法一致），2026-10-31 删除，不登记；捕获的拒绝路径由 resources 批次覆盖。
+
 **裁定（cc，2026-10-31，主人授权 cc 决定）：先做完发布链，CX 面的广度铺设移到 0.0.44（C44-CX-SURFACE-01）。** 已经落地的 stream-gen、net-gen、sys.fd 保留。从现在起，grk 只推第 2 步剩下的部分，顺序是：osx/x86_64 和 win/x86_64 收进 release-build 并做第二代 → lnx/arm64 和 osx/arm64 两片 → seed/ape 包装 → 安装（`check-install-fixes` 四项全绿）；然后是第 3、4 步。src/stream.cx 和 src/network.cx 在安装之后用 `--write-src` 收尾。
+
 - [x] 1 hostnative 28d0cba49c（sy_reg_size 与 check-cx-sys 那一行 sy_eprintf 在 08da2e8863，索引竞态先被别的提交带走；precommit blocked=0）
 - [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
   lnx/x86_64 一片已跑通，route=33 个对象。P3 只拼在 candidate 上，entry.elf 是链接结果。osx/win、其余四片、wrap、安装未开始。candidate 直接 --version 打印 unisacc 0.0.43，rc=0。runcache 未跑。
@@ -131,6 +137,7 @@ STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格�
   ARM64-SLICE：lnx/arm64 走 33 个对象，osx/arm64 走 route=whole-o。冻结 rev=5ed7ba69bf9e86b91843c608ce00a1daff231dc8。工具写收据。外层不再套 bound。
   ARM64-SLICE：lnx/arm64 entry.elf sha=dabcfa2337de8036b47c528210c4d851128d8f0e011fe33815e49258d9c3bee0 bytes=1385808。candidate sha=8b138088558666154bec3ac59aa3ecbb5dad10f8b2f397f6aa55f24789e69170 bytes=3425658，已按 entry-build 拼上 P3（p3 sha=aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf bytes=2039850）。六只 -O1 ns=25754945902，27 只 ns=23086225727，link ns=8472766756，rc=0。
   ARM64-SLICE：osx/arm64 sha=2a6c571cf24d62494ca403049e8b233e772a7b41a9da925ea363d264a5c182ab bytes=1981666 ns=37489425891 rc=0。镜像不带 P3。
+  APE-PACK：tools/release-ape.cx 照 csih-ape 的 pack。五片是 release-build 的输出：lnx 两片用 entry.elf，不用 candidate；osx 两片和 win 用 whole-o。pack 写出启动器加五片后，在末尾追加冻结 P3（aec1a0bf27b9d1f2e26a1b86b52cb3694bc66a906415bcc0435c11278c6deabf）和 16 字节 UNIPKG1。verify 调 release/apeinspect.cx，对 package_sha256 和包尾是否在最后 16 字节。子作业 tools/bound 55。这一步不安装。
   WHOLE-O-LNX：cc 裁定 0.0.43 的 lnx/x86_64 与 lnx/arm64 也走 route=whole-o，rev=c98f757f4c93ea9cfe91bef18fd88a929ad7ba96。收据写 route=whole-o，镜像不带 P3。lnx/x86_64 sha=477393de82de27764b714502db8cc410e3f5daf213afa99cc278b3ca2b1ce49a bytes=1537472 ns=35346772463 rc=0。lnx/arm64 sha=75d2d4b7659e8cfa91acfbd6bf775762d79e7f56c896216a807a8813d975e1ba bytes=1959313 ns=36257376370 rc=0。pack：out/release-ape-c98/unisacc-next.com sha=43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00 bytes=4631130。smoke ok=4 failed=1（hostc.cx 写在 out/release-ape-smoke/，use 在该文件旁边找 sys/io.cx）。同一源放在 cx/ 下再跑，打印 release-ape-hostc，rc=0。未安装。
   INSTALL-C98：已装 ./unisacc.com sha=43fbbb819aae028e8151a9f8eec621514a1264259d1b7a926d85f7dd952a5f00 bytes=4631130 mode=755。备份 out/unisacc.com.79fb84e6 sha=79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32 bytes=3035300。check-install-fixes failed=0（dupmod、dedupe、iproto、uses48）。tests/run.cx --smoke assertions=16 failed=0。
 - [ ] 3 object 模型步
