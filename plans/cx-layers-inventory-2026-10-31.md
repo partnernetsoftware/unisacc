@@ -1046,3 +1046,157 @@ manifest 逆变换为单趟字节扫描（≤ `CL_CAP`），输出转义仅作�
 6. 全量审计 scope 行含 `objfmt=`、`blob_id_len=`；本仓应为 `objfmt=sha1 blob_id_len=40`。
 7. 其余不变：仓外独占夹具、收据只写「可观测点上未观测到漂移」、超时 rc3、
    spec/三源不动、G-3 不裁、`OPEN-LEX-LINE` 未决、补边与 shard GC 另案。
+
+## 14. 拆成 A/B 两项独立交付：边界、真实调用、可验证状态、维护成本（未施工）
+
+结论：**可以安全拆分**。原因不是妥协，而是两条事实：
+
+1. `cl_audit` 的域**本来就是 manifest 行**（`cl_audit` 只 `cl_read` manifest，按前缀跳过
+   `archive/`、`out/`），今天从不读 `git ls-files`；tracked 对账是 B 新增的能力。
+2. A 需要的「内容未漂移」只需**自算 sha 与 manifest 行的 sha 比**：二者相等时 shard 的
+   `U` 行（内容寻址）必然属于该内容。**这条推理不需要 git**。§12/§13 的全部复杂度
+   （object-format、`-s -v`、`-z` 路径字节、仓外仓、ceiling dirs）都只服务「域是哪些文件」，
+   而那正是 B 的问题。
+
+### 14.1 边界
+
+| | A（`tools/check-cx-layers.cx`，改现有） | B（`tools/cx-layers-domain.cx`，新文件） |
+|---|---|---|
+| 问题 | 已审计的每个 `use` 是否被正确词法定位，manifest 的 `U` 行与源码是否双向对账 | 域到底是什么：tracked 入口、软链、manifest 是否覆盖 tracked |
+| 输入 | manifest.tsv + `<sha>.tsv` + 源文件本身 | `git ls-files -s -v -z`、`git rev-parse`、manifest 路径集合 |
+| 是否读 git | **否** | 是（全部 git 逻辑只在这里） |
+| 是否读源 | 是（词法 + sha） | 否（只 `lstat` 判断存在性） |
+| 输出 | `CX_LAYERS` / `CX_LAYERS_SCOPE` / `FAIL` / `UNDECIDED` | `CX_LAYERS_DOMAIN` / `FAIL` / `UNDECIDED` |
+| rc | 0 / 1 / 3 | 0 / 1 / 3（同一三档语义，见 14.4） |
+| 不得声称 | 全仓覆盖、软链覆盖 | 任何层方向结论（它不看 `use`） |
+| 现有断言 | **全部保留**：编号向上 FAIL、白名单双向、`CLASS-OVERLAP`/`CLASS-SUM`、`PARSE-CONDITIONAL`、`SHARD`、`SYMINDEX` | 无既有断言，全新 |
+
+A 修的是**判定正确性**（§7 的 12 条词法 + §8/§9 的双向对账 + §11 的摘要绑定）；
+B 新增的是**域完整性**（§10 的 tracked/manifest 等式、§12 的 flag 与 cwd、§13 的 object-format）。
+
+### 14.2 A 的真实调用与可验证状态
+
+调用不变：
+
+```
+sh ./unisacc.com tools/check-cx-layers.cx -- [PRODUCT]
+sh ./unisacc.com tools/check-cx-layers.cx -- --fixtures
+```
+
+内部仍是：spawn `symindex update` → `cl_audit`。不新增 git 调用，故 §12.4 的 50 s×4 隐患
+在 A 上**不存在**；A 的 spawn 仍只有 symindex 一次。
+
+可验证状态（每个都能被一条断言或一条收据字段钉住）：
+
+| 状态 | 证据 |
+|---|---|
+| 词法定位与编译器同源 | §7.5 的 12 条夹具，逐条断言 `cl_fail`/`cl_edges` 与诊断行号 |
+| `U` 行双向对账 | §9.6 的 7 条（缺 U / 多 U / 注释内 / 同行多模块 / 别名 / 续行） |
+| 摘要绑定被扫描字节 | `k-digest-buffer`：期望值来自外部 `sha256sum` |
+| 漂移可观测性 | `k-aba`：rc0 且收据只写「未观测到漂移」；`k-source-changed`：rc3 |
+| shard 缺失 | `k-missing-shard` → 非零；`k-orphan-shard` → rc 不变 |
+| 路径表示无损 | `k-manifest-escape`（真实文件名含 TAB）+ `k-path-too-long` |
+| 未决即非成功 | 任一 `UNDECIDED` → rc3；`run-batch` 只有 rc0 才 PASS |
+
+A 的夹具 = §7.5(12) + §8.6(5) + §9.6(7) + `k-orphan-shard` + `k-missing-shard` +
+`k-digest-buffer` + `k-aba` + `k-manifest-escape` + `k-path-too-long` = **30 条**。
+
+`k-manifest-escape` 用真实文件名（fixture 树里 `fx_write("t\tb.cx", …)` 后 `fx_dump` 点名），
+这样测到的是 `symindex` 写转义 + A 读转义的正反两段，不是伪造字节流。
+
+scope 行改为：
+
+```
+CX_LAYERS_SCOPE coverage=manifest-only symlinks=UNKNOWN tracked_reconciliation=NOT-DONE(B)
+                 domain=<n> bytes=<n> digest=afalg|soft window=STABLE|MOVED
+                 au_sw_relevance=none
+```
+
+**`coverage=manifest-only` 与 `symlinks=UNKNOWN` 是常量，不是计数**：A 没有 git 就不可能
+知道软链数量，写数字就是编造。B 交付后由 B 的收据提供真值，A 的这两项才可改写。
+
+### 14.3 B 的真实调用与可验证状态
+
+调用：
+
+```
+sh ./unisacc.com tools/cx-layers-domain.cx -- [ROOT]
+sh ./unisacc.com tools/cx-layers-domain.cx -- --fixtures
+```
+
+内部：`git rev-parse --show-object-format` → `git ls-files -s -v -z -- '*.cx'`（cwd=ROOT，
+5 s 上限）→ 解析 → 与 manifest 路径集合做集合运算 → 打收据。**不读源、不读 shard、不看 `use`。**
+
+可验证状态：
+
+| 状态 | 证据 |
+|---|---|
+| 三分区 `T = R ⊎ S` | mode 120000 与其余分离，逐个列出 |
+| 软链解析 | 每个软链给 `-> target` 与 `resolved|broken`；broken 逐个列出（今天 11 个，全在 `archive/`） |
+| manifest 覆盖 tracked | `R∖M` 逐个列 `NOT-INDEXED`；`M∖R` 仅允许 `out/` 行，否则 `DOMAIN-MISMATCH` |
+| 域外 | `archive/`、`out/` 计入 `excluded=`，不参与等式 |
+| 解析健壮性 | `k-parse-tag`、`k-path-tab`、`k-objfmt-sha256`、`k-objfmt-bad`、`k-view-cwd` |
+| 不误报 | `k-au-flag`、`k-sw-flag`（标志识别但仍计入域）、`k-orphan-shard` 类不适用 |
+| 不写共享检出 | 夹具前后共享 `.git/index` 的 size/mtime/ino+sha 必须相同 |
+| 身份 | scope 打 `objfmt=`、`blob_id_len=`、`view_sha=`、`view_bytes=`、`index_sha=` |
+
+B 的夹具 = `k-not-indexed`、`k-unmerged`、`k-index-view-change`、`k-au-flag`、`k-sw-flag`、
+`k-view-cwd`、`k-parse-tag`、`k-path-tab`、`k-objfmt-sha256`、`k-objfmt-bad` = **10 条**。
+30 + 10 = 40，与 §13.4 的总数一致，没有一条被丢掉。
+
+### 14.4 共享合同（不可拆）
+
+- rc 三档：0 全清 / 1 `failed>0` / 3 `undecided>0` 或分区破裂。`tools/cxlib/allsession.cx:292`
+  对其它值判 UNKNOWN，故两工具必须同语义，否则下游把 rc3 读成 UNKNOWN。
+- 收据措辞：只许「在可观测点 `{首读哈希, 末次重读哈希}` 上未观测到漂移」。B 不读源，
+  不得借用这句；B 只声明「在视图 `[首次 ls-files, 末次 ls-files]` 上未观测到域变化」。
+- 既有 `UNKNOWN amb/out not-a-pass` 行**保留且不改语义**：AMB/OUT 是无 spec 编号的既定
+  状态，不是新未决。新的未决（`UNDECIDED *`）一律 rc3。两者不得混用同一个词。
+
+### 14.5 不能安全拆分的反例：无
+
+逐条查过，没有「B 未交付则 A 无法判定」的情形，也没有「A 改坏 B」的共享状态：
+
+- A 判 `use` 方向，不依赖域是否完整；域不全只会让 A 少审计几个文件，而这**正是今天的
+  现状**，不是 A 引入的退化。
+- A 的 `U` 行对账不依赖 tracked：manifest 有行就有 sha，有 sha 就有 shard。
+- B 不读 shard、不读源，A 的改写不会改变 B 的输入；B 只依赖 manifest 的**路径列**。
+- 唯一耦合是 manifest 的**转义规则**：A 需要逆变换，B 也需要（比较路径集合）。因此把
+  转义/逆变换的函数与夹具放在 A（先交付），B 复用它——这是单向依赖，可接受；若 B 先生，
+  则 A 必须等，故顺序固定为 **A → B**。
+
+### 14.6 风险与缓解（必须写进交付说明）
+
+1. **A 的 rc0 不等于全仓覆盖。** 今天就有实证：`tests/runner-faults.cx` 存在且 6680 B，
+   但当时的 manifest 没有它（`R∖M` 恰 1 条），A 对此**完全无感**。缓解：把批次行的
+   marker 从 `CX_LAYERS` 改成 `CX_LAYERS_SCOPE`，使「没有 scope 行」本身不能通过门禁；
+   `coverage=manifest-only` 与 `symlinks=UNKNOWN` 为常量，A 不能靠沉默过关。
+2. **A 与 `symindex update` 代际错位会假失败而非假通过**：manifest 若是上一代（`DEFERRED`
+   保留旧行），A 自算 sha 与旧 sha 不等 → 该行 `UNDECIDED SOURCE-CHANGED` → rc3。
+   这是安全的失败方向，但会让重活窗口后的第一批变红，需在批次说明里写明「先让
+   `symindex update` 完整跑完」。
+3. **软链覆盖在 B 交付前恒为 UNKNOWN**：manifest 不含 mode 120000 条目，A 无从发现，
+   故 A 只能打印常量 UNKNOWN；`prd.md` 能力速查同时记这一行，避免后来者把 A 当成全仓。
+
+### 14.7 维护成本
+
+| | A | B |
+|---|---|---|
+| 代码量 | 改现有 700 行中的约 250 行（`cl_locate`/`cl_process_use`/新增 `cl_lex_uses`/`cl_dig`/scope） | 新文件约 200 行（git spawn/解析/集合运算/收据），无词法 |
+| 新静态内存 | `cl_dig` 261 KiB + 现有三缓冲（`cl_src`/`cl_shard`/`cl_man`） | 仅视图缓冲（当前 155 KiB）+ 结果映射，**可复用 `cl_man` 大小上限** |
+| 新增 `#pragma unisa use` | 1 条 `sys.sha`（第 8 条，上限 48） | 2–3 条（`sys.fs`/`sys.io`/`sys.proc`），需 `cxlib.netpack` 跑 git |
+| 夹具数 | 30 | 10 |
+| 新增批次 | 无（沿用第 332 行，仅改 marker） | 1 行 `cx-layers-domain`，用 `tools/register.cx` 登记 |
+| 失败面 | 只扩不缩：既有 FAIL 类全留 | 全新，不影响 A |
+| 回归风险 | 中（改动集中在定位与对账，夹具可覆盖） | 低（独立文件，A 的收据不变） |
+| 依赖顺序 | 先 | 后（复用 A 的转义函数） |
+
+### 14.8 交付顺序与门禁
+
+1. A：改 `tools/check-cx-layers.cx` → `--fixtures` 30 条全绿 → 全量审计与上一次同输入
+   收据逐项比对 → `tools/affected.cx --files tools/check-cx-layers.cx --run` →
+   `tools/ratchets.cx` → `tools/commit-own.cx`（批次行只改自己的那一行）。
+2. B：新文件 + `--fixtures` 10 条 → `tools/register.cx` 登记 `cx-layers-domain` 批次 →
+   `tools/affected.cx` → `ratchets` → 提交。
+3. B 落地前，A 的 scope 行与 `prd.md` 能力速查同时标 `symlinks=UNKNOWN`；
+   B 落地后把该常量替换为 B 收据的真值，并复查 A 的 `coverage=` 是否可升级。
