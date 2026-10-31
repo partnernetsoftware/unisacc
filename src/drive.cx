@@ -2,6 +2,7 @@
 #pragma unisa use text.text
 #pragma unisa use runcache
 #pragma unisa use sys.env
+#pragma unisa use runtime.holdframe
 /* Layouts match cx/driver/cli.cx, compat.cx, and route.cx. Those modules
    are other objects; this file only names their functions. */
 typedef struct {
@@ -481,14 +482,6 @@ static const char *dv_dl_key[4] = {
 static char **dv_runargs;
 /* One byte 1. The product publishes this for \0cli/object and \0cli/funit. */
 static unsigned char dv_one = 1;
-/* First-pass unit frames and their attribute table. The restart splices
-   the stub unit in and retargets the records; it does not compile the
-   original units again. */
-static unsigned char *dv_hold_fr;
-static long dv_hold_frn;
-static unsigned char *dv_hold_at;
-static long dv_hold_atn;
-
 static void dv_move(unsigned char *d, const unsigned char *s, long n) {
     long i;
     if (!d || !s || n <= 0) return;
@@ -498,15 +491,8 @@ static void dv_move(unsigned char *d, const unsigned char *s, long n) {
         i = i + 1;
     }
 }
-
 static void dv_hold_drop(void) {
-    void hs_free(void *);
-    hs_free(dv_hold_fr);
-    hs_free(dv_hold_at);
-    dv_hold_fr = 0;
-    dv_hold_frn = 0;
-    dv_hold_at = 0;
-    dv_hold_atn = 0;
+    hf_drop();
 }
 
 static void dv_why(char *why, int cap, const char *s) {
@@ -541,14 +527,10 @@ static void dv_recs_free(unsigned char **recs, int *rcnt, int *fill, int nu) {
 /* Copy the framed units and the attribute table from before e3. */
 static int dv_fwd_keep(const unsigned char *fr, long frn) {
     unsigned char *ab;
-    unsigned char *cp;
-    unsigned char *fp;
     long an;
     long ac;
     long saved;
     int st_attr_exchange(unsigned char **, long *, long *);
-    void *hs_alloc(long);
-    void hs_free(void *);
     ab = 0;
     an = 0;
     ac = 0;
@@ -556,29 +538,11 @@ static int dv_fwd_keep(const unsigned char *fr, long frn) {
     if (!fr || frn <= 0) return 1;
     if (st_attr_exchange(&ab, &an, &ac)) return 1;
     saved = an;
-    cp = 0;
-    if (saved > 0) {
-        cp = hs_alloc(saved);
-        if (!cp) {
-            st_attr_exchange(&ab, &an, &ac);
-            return 1;
-        }
-        dv_move(cp, ab, saved);
-    }
-    if (st_attr_exchange(&ab, &an, &ac)) {
-        hs_free(cp);
+    if (hf_keep(fr, frn, saved > 0 ? ab : 0, saved)) {
+        st_attr_exchange(&ab, &an, &ac);
         return 1;
     }
-    fp = hs_alloc(frn);
-    if (!fp) {
-        hs_free(cp);
-        return 1;
-    }
-    dv_move(fp, fr, frn);
-    dv_hold_fr = fp;
-    dv_hold_frn = frn;
-    dv_hold_at = cp;
-    dv_hold_atn = saved;
+    if (st_attr_exchange(&ab, &an, &ac)) return 1;
     return 0;
 }
 
@@ -681,6 +645,10 @@ static int dv_fwd_splice(const char *tgt, int nsrc, unsigned char **out, long *o
     long head;
     long stubn;
     long total;
+    unsigned char *dv_hold_fr;
+    long dv_hold_frn;
+    unsigned char *dv_hold_at;
+    long dv_hold_atn;
     int st_attr_reset(void);
     int st_attr_exchange(unsigned char **, long *, long *);
     int st_extra_put(const char *, int, const unsigned char *, int);
@@ -690,6 +658,8 @@ static int dv_fwd_splice(const char *tgt, int nsrc, unsigned char **out, long *o
     void hs_free(void *);
     *out = 0;
     *outn = 0;
+    dv_hold_fr = hf_frames(&dv_hold_frn);
+    dv_hold_at = hf_attrs(&dv_hold_atn);
     nu = nsrc - 1;
     if (!dv_hold_fr || dv_hold_frn < 8 || nu < 1 || nu > 63) {
         dv_why(why, cap, "forwarding stub");
@@ -1927,7 +1897,7 @@ dv_replay:
                     hs_free(pkg);
                     return dv_fail(why2);
                 }
-                if (dv_hold_fr) {
+                if (hf_frames(0)) {
                     pr = dv_fwd_splice(tgt, nsrc, &gotb, &gotn, preason, 128);
                     if (!pr)
                         pr = st_span(route, tgt, src, dv_cx(src), 0, 0, 0, gotb, gotn, &body, &bodyn, preason, 128);
