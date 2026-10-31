@@ -121,3 +121,69 @@ fixtures 全绿；负例诊断逐条命名；候选身份与实测日志落 `out
 实际 `cx/core/memory.cx`（`src/core` 是软链）第 2–3 行是
 `#pragma unisa use mem.heap` / `use mem.bytes`，调用 `mm_zalloc`、`mm_free`、`mm_move`。
 文档已过期，应改由 `cx/core` 的当前编辑者同步；本刀不改。
+
+## 6. `#` 后空格的指令定位分歧（2026-10-31 只读证据；与 CX-G-3 条款裁定分开）
+
+本节只记录分层工具的**指令词法**与编译器/索引不一致的事实和方案，不改判定、
+不改 spec、不改白名单。CX-G-3「条件为真」与现行「任意嵌套即拒」的差异是另一
+个裁定，本节不涉及、也不作为其依据。
+
+事实（源码）：
+
+- 定位点 `tools/check-cx-layers.cx:123` 的 `cl_src[a + 1] != ' '`：`#` 后紧跟
+  一个空格时，该行被整行跳过——既不增/减 `cond`，也不给出诊断行号。
+- 两个对照实现都跳过 `#` 后的空白再取词：`cx/cx0/plan.cx` 的 `cxm_id`
+  （跳过 `<=32` 的字节）、其投影 `src/cxmod.c` 同形、`tools/symindex.cx` 的
+  `directive()`（`skip_blank` 后 `dir_word`）。
+- 因此 `#if`/`#ifdef`/`#ifndef`/`#endif`/`#pragma` 在 `#` 后带空白时：编译器与
+  索引当作指令，分层工具当作普通行。
+
+实跑证据（探针树 `/tmp/cxlprobe.o1YEsz`，真 `unisacc.com`，非模拟；探针源与
+`tests/b.cx` 同目录，模块名等于文件主干名）：
+
+| 探针源 | 分层工具 | 产品编译器 |
+|---|---|---|
+| `#if 0` + `use b` | `FAIL PARSE-CONDITIONAL :3` | `unisa pragma inside conditional` |
+| `#ifdef NOPE` + `use b` | `FAIL PARSE-CONDITIONAL :3` | 同上拒绝 |
+| `#ifndef NOPE` + `use b` | `FAIL PARSE-CONDITIONAL :3` | 同上拒绝 |
+| `# if 0` + `use b` | **无 FAIL，`edges` 16→17，`failed=0`** | `unisa pragma inside conditional` |
+| `# pragma unisa use b` | **无 FAIL，边照计，行号 0** | 接受（进入后续编译） |
+| `#if 0` / `# if 1` / `use b` | `FAIL PARSE-CONDITIONAL :4` | 拒绝 `:4` |
+| `#\tif 0` + `use b` | `FAIL PARSE-CONDITIONAL :3` | 拒绝 |
+| `#if 0` 内写 `# pragma unisa use b` | **无 FAIL，边照计** | 拒绝 |
+| `#iffy 0` … `#endif` | **`FAIL PARSE-CONDITIONAL :3`**（前缀匹配把 `#iffy` 当 `#if`） | `#endif without #if` |
+| `/*` 块注释内 `#if 0` `*/` 后 `use b` | **`FAIL PARSE-CONDITIONAL :5`** | 接受（注释内不算指令） |
+
+结论：两个方向都偏离，且只有**空格**能触发欠计（Tab 不触发，因为守卫只排除
+`' '`）。
+
+- 欠计（漏报）：`#` 后一个空格的 `if/ifdef/ifndef/endif`，其内的 `#pragma unisa
+  use` 被当作合规边计入，`PARSE-CONDITIONAL` 消失，`rc` 仍 0。
+- 过计（误报）：指令词用前缀匹配（`#iffy` 命中 `if`）；无块注释/字符串状态机，
+  块注释里的 `#if` 会被计入 `cond`。
+- 影响面：只影响 `PARSE-CONDITIONAL` 与条件内 pragma 判定；层向
+  （same/down/up）仍由 symindex 的 `U` 行算出，不受影响。被漏报的 pragma 会
+  额外产生 1 条边（探针 `edges` 16→17）。
+- 覆盖边界：`cl_locate` 只对 `U` 行（`use`）调用；`#pragma unisa module` 位于
+  条件内时工具完全不查（`M` 行不进入判定）；行接续 `\` 未处理、未测。
+
+现网可达性（只读统计，HEAD 树）：
+
+- `git grep -cE '^[[:space:]]*#[[:space:]]+(if|ifdef|ifndef|endif|pragma)\b' -- '*.cx'`
+  命中 0 个文件；`if`/`ifdef`/`ifndef`/`endif`/`pragma` 五类空形各 0。
+- 结论：当前树不可触发，且 16:56 的审计收据（`failed=0`）不受影响；`#if` 共
+  254 行、162 个文件（非归档 141、archive 21）。manifest 收录的源里不存在
+  「条件内 pragma」——由该收据 `failed=0` 反推，不是直接测量；archive 不在审计
+  范围。「块注释内 `#if` + 后续 `use`」同理未直接测量。
+
+方案（不施工，须 cdx/主人批准；三者均保持「任意嵌套即拒」，只对齐词法）：
+
+- A 最小：`cl_locate:123` 改为「`#` 后跳空白再比关键词」，并把前缀匹配改为整词
+  匹配；补夹具 `h-space-conditional`（`# if 0` 包 `use`，断言
+  `PARSE-CONDITIONAL`）与 `h-comment-conditional`（块注释内 `#if`，断言不报）。
+- B 在 A 之上加块注释/字符串状态机，与 `tools/symindex.cx` 的 `parse` 对齐。
+- C 让 `symindex` 输出 `cond` 字段由工具消费（改索引格式，最大改动，本版不推荐）。
+
+验收（若批准）：`sh ./unisacc.com tools/check-cx-layers.cx -- --fixtures` 的
+`checks` 增加且 `failed=0`；全量审计 `edges` 不变、`failed=0`、`amb/out/unres`
+不变；探针 `# if 0`/`# pragma` 两种形状必须报 `PARSE-CONDITIONAL`。
