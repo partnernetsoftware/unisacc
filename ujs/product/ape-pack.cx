@@ -86,6 +86,7 @@ static void sha256hex(const unsigned char *p, long n, char *out16) {
 
 static const char *NAME[4] = {"Linux|x86_64", "Linux|aarch64", "Darwin|x86_64", "Darwin|arm64"};
 static int embedded;   /* --payload: the script exports UNISA_CONTAINER */
+static long ape_need;  /* --need KB: only then the launcher checks ulimit -v */
 static const char *ape_tool = "ujs"; /* --tool NAME; default keeps the ujs.com shell text */
 static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
     char line[256]; int i;
@@ -107,10 +108,25 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
            made the extraction fail instead of falling back. (ujs's text was this
            one with ujs for TOOL.) */
         char rest[1024];
-        int rn = snprintf(rest, sizeof rest,
+        int rn;
+        if (!ape_need) rn = snprintf(rest, sizeof rest,
             "  *) echo \"%s.com: no slice for $u\" >&2; exit 1;;\n"
             "esac\n"
-            "need=228845\n"
+            "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/%s\"\n"
+            "if [ -z \"$HOME\" ] || ! mkdir -p \"$d\" 2>/dev/null || [ ! -w \"$d\" ]; then\n"
+            "  d=\"${TMPDIR:-/tmp}/%s-$(id -u)\"\n"
+            "  mkdir -m 700 \"$d\" 2>/dev/null\n"
+            "  if [ -L \"$d\" ] || [ ! -d \"$d\" ] || [ ! -O \"$d\" ] || [ ! -w \"$d\" ]; then echo \"%s.com: cache dir $d is not a private writable directory\" >&2; exit 1; fi\n"
+            "fi\n"
+            "t=\"$d/%s-$k\"\n"
+            "if [ ! -x \"$t\" ]; then\n"
+            "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
+            "fi\n",
+            ape_tool, ape_tool, ape_tool, ape_tool, ape_tool);
+        else rn = snprintf(rest, sizeof rest,
+            "  *) echo \"%s.com: no slice for $u\" >&2; exit 1;;\n"
+            "esac\n"
+            "need=%ld\n"
             "d=\"${XDG_CACHE_HOME:-$HOME/.cache}/%s\"\n"
             "if [ -z \"$HOME\" ] || ! mkdir -p \"$d\" 2>/dev/null || [ ! -w \"$d\" ]; then\n"
             "  d=\"${TMPDIR:-/tmp}/%s-$(id -u)\"\n"
@@ -123,7 +139,7 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
             "fi\n"
             "lim=$(ulimit -v 2>/dev/null || true)\n"
             "case $lim in ''|unlimited) ;; *) [ \"$need\" -gt 0 ] && [ \"$lim\" -lt \"$need\" ] && { echo \"run: out of memory\" >&2; exit 2; } ;; esac\n",
-            ape_tool, ape_tool, ape_tool, ape_tool, ape_tool);
+            ape_tool, ape_need, ape_tool, ape_tool, ape_tool, ape_tool);
         if (rn < 0 || rn >= (int)sizeof rest) { fprintf(stderr, "ape: tool script too long\n"); exit(1); }
         put(s, rest, rn);
         if (embedded) put(s, "UNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n", 45);
@@ -275,9 +291,18 @@ int main(int argc, char **argv) {
             }
             ape_tool = t; argv += 2; argc -= 2;
         }
+        else if (argv[1][2] == 'n' && argv[1][3] == 'e' && argv[1][4] == 'e' && argv[1][5] == 'd' && !argv[1][6] && argc > 2) {
+            const char *t = argv[2]; long v = 0; int k;
+            if (!t[0]) { fprintf(stderr, "ape: bad --need\n"); return 2; }
+            for (k = 0; t[k]; k++) {
+                if (t[k] < '0' || t[k] > '9' || v > 2000000000L) { fprintf(stderr, "ape: bad --need\n"); return 2; }
+                v = v * 10 + (t[k] - '0');
+            }
+            ape_need = v; argv += 2; argc -= 2;
+        }
         else break;
     }
-    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] [--deflate] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
+    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] [--need KB] [--deflate] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
     if (payload) {
         pkg = slurp(payload); embedded = 1;
         if (pkg.n < 4 || (memcmp(pkg.p, "P 1 ", 4) && memcmp(pkg.p, "P 2 ", 4) && memcmp(pkg.p, "P 3 ", 4))) { fprintf(stderr, "ape: embedded payload must be a model package\n"); return 1; }
