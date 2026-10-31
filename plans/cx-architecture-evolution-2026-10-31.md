@@ -28,7 +28,7 @@ CX 保持 C99 受检查子集与 `#pragma unisa` 配置：底层对接 libc、PO
 
 已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。修复前 `sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。旧 `tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径，与已生效 CX-G-1 冲突。实施方提交候选 `66e086b293`，改为检测任意 `unisa` pragma 并报告两宿主入口回归通过；候选局部证据不等于所有语法及平台资格。
 
-另有 CX-M-2 字面合同与实现的根单元冲突：实施方的 `modonly.cx` 同时声明 `module modonly` 并定义 `main`，宿主入口编译接受；我对该源码以已装产品 `-cx-plan` 实跑，输出单元、退出 0。规格称库模块不得定义 main；三源源码当前主要对被 `use` 单元实施该检查。真实根消费者和迁移影响已派实施方盘点，此项与 CX-G-1、W-7 分开，不改 spec，不把根 plan 接受冒充所有运行路径已验证。
+另有 CX-M-2 字面合同与实现的根单元冲突：实施方的 `modonly.cx` 同时声明 `module modonly` 并定义 `main`，宿主入口编译接受；我对该源码以当时的 `./unisacc.com -cx-plan` 实跑，输出单元、退出 0。此次执行未同步固定并核验产品摘要，只能归属于当时进程所见二进制；正式候选须固定身份后核验。规格称库模块不得定义 main；三源源码当前主要对被 `use` 单元实施该检查。真实根消费者和迁移影响已派实施方盘点，此项与 CX-G-1、W-7 分开，不改 spec，不把根 plan 接受冒充所有运行路径已验证。
 
 已实证的身份风险（Linux x86-64，已装 `fc1d4513…`）：`cx/compiler/cxmod.cx` 以使用方的词法路径所在目录解析 `use`，再以 realpath 比较合并模块；`tools/entry-build.cx` 也按 realpath 对闭包去重。`out/cx-cb-identity-01/real/one.cx:2` 的 `use m` 经 `a/one.cx` 与 `b/one.cx` 两条软链指向同一文件，却分别解析到返回 11 的 `a/m.cx` 与返回 22 的 `b/m.cx`。同一图先导入 a 后 b 时默认运行退出 11；反序退出 22；gcc_cx 和 clang_cx 的同一探针亦如此。`a/cxpack.tsv` 限制 `one_x`，b 无清单则公开 `one_x`、`one_y`，同一源码哈希的 CXIF 因词法入口而不同。证据 `out/cx-cb-identity-01/logs/{identity,entry1,entry2,entry3,public-set}.txt`。命令行双根的图与经 `use` 折叠也不同：前者计划接受、后续因重复定义拒绝，见 `roots.txt`。
 
