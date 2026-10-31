@@ -54,6 +54,7 @@ static char cl_line[CL_PATH];
 static int cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_fail;
 static int cl_amb_out, cl_io, cl_cur_line, cl_cond;
 static int cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_und_total;
+static int cl_domain; static long cl_bytes;
 static char cl_cur_mod[128];
 static struct { char path[CL_PATH]; char mod[128]; char why[256]; int used; } cl_wl[CL_WL];
 static int cl_nwl;
@@ -328,6 +329,9 @@ static int cl_audit(void) {
     int w;
     cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
     cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
+    cl_domain = 0; cl_bytes = 0;
+    sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12/U-reconciliation/fixtures-30 not implemented\n");
+    cl_und_lex++; cl_und_total++;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
     cl_join(idx, sizeof idx, cl_root, cl_idx);
     cl_join(mp, sizeof mp, idx, "manifest.tsv");
@@ -375,6 +379,38 @@ static int cl_audit(void) {
               cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-CHANGED\t%s\n", path);
           }
         }
+        { char sp[CL_PATH], shp[CL_PATH]; long scn, u = 0, su = 0, z; int inblock = 0;
+          cl_join(sp, sizeof sp, cl_root, path);
+          cx_fmt(shp, sizeof shp, "%s/%s.tsv", cl_idx, sha);
+          scn = cl_read(shp, cl_shard, CL_CAP);
+          if (scn <= 0) { cl_fail++; sy_eprintf("FAIL\tSHARD\t%s\n", sha); }
+          else {
+              long q = 0;
+              while (q < scn) { long e2 = q; while (e2 < scn && cl_shard[e2] != '\n') e2++; if (e2 - q >= 2 && cl_shard[q] == 'U' && cl_shard[q + 1] == '\t') u++; q = e2 + 1; }
+          }
+          scn = cl_read(sp, cl_src, CL_CAP);
+          if (scn > 0) {
+              for (z = 0; z < scn; z++) {
+                  if (inblock) { if (z + 1 < scn && cl_src[z] == '*' && cl_src[z + 1] == '/') { inblock = 0; z++; } continue; }
+                  if (z + 1 < scn && cl_src[z] == '/' && cl_src[z + 1] == '*') { inblock = 1; z++; continue; }
+                  if (z + 1 < scn && cl_src[z] == '/' && cl_src[z + 1] == '/') { while (z < scn && cl_src[z] != '\n') z++; continue; }
+                  if ((z == 0 || cl_src[z - 1] == '\n') && cl_src[z] == '#') {
+                      long w = z + 1;
+                      while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
+                      if (w + 6 <= scn && tx_prefix(cl_src + w, scn - w, "pragma", 6)) {
+                          w += 6; while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
+                          if (w + 5 <= scn && tx_prefix(cl_src + w, scn - w, "unisa", 5)) {
+                              w += 5; while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
+                              if (w + 3 <= scn && tx_prefix(cl_src + w, scn - w, "use", 3)) su++;
+                          }
+                      }
+                  }
+              }
+          }
+          if (su > u) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tMISSING-U\t%s\tsource=%ld shard=%ld\n", path, su, u); }
+          else if (u > su) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tEXTRA-U\t%s\tsource=%ld shard=%ld\n", path, su, u); }
+        }
+        cl_domain++; cl_bytes += (long)tx_len(path, CL_PATH);
         cl_shard_file(path, sha);
     }
     for (w = 0; w < cl_nwl; w++) if (!cl_wl[w].used) {
@@ -657,6 +693,8 @@ int main(int argc, char **argv) {
     sy_printf("CX_LAYERS_SCOPE\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tcoverage=manifest-only\tsymlinks=UNKNOWN\ttracked_reconciliation=NOT-DONE(B)\tshard_body_verified=0\tundecided_lex=%d\tundecided_recon=%d\tundecided_meta=%d\tundecided_io=%d\twindow=OBSERVED-NOT-ATOMIC\n",
               cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail,
               cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io);
+    { char dhex[65]; sy_sha256_hex(cl_man, cl_man_n, dhex); dhex[16] = 0;
+      sy_printf("CX_LAYERS_SCOPE_DETAIL\tdomain=%d\tbytes=%ld\tdigest=%s\n", cl_domain, cl_bytes, dhex); }
     if (cl_amb || cl_out) sy_printf("UNKNOWN\tamb=%d\tout=%d\tnot-a-pass\n", cl_amb, cl_out);
     (void)idxdir; (void)v0; (void)shard; (void)real;
     return rc;
