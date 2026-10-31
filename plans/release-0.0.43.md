@@ -181,6 +181,7 @@ STATE43：**21782dd5 预处理拒绝（omp-grk，2026-11-01）**：已装产品�
 STATE43：**21782dd5 相位换标（omp-grk，2026-11-01）**：`phase-timing-stamps` 62/0。`construction` 冷热和 `output.duration` 冷热已测到正数。热的 inflate 和 inference 是 `skipped-by-reuse`。矩阵仍是 `NEEDS_PRODUCT_CHANGE`。`matrix-flip-gen` 报 `cell-not-missing`。已请 cc 换标。不写 `tests/`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 地址限制（omp-grk，2026-11-01）**：已装产品 `-c`、`-S`、`-b lnx/x86_64 -o` 在 `ulimit -v 100000` 都印 `run: out of memory`，rc 2，无输出。`ulimit -v 800000` 三路 rc 0，产物与不设限逐字节相同。`res.mem.compile-as-limit` 仍 MISSING：没有已登记批次，L0 没有 setrlimit。不翻格。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 地址限制批次（omp-grk，2026-11-01）**：`c6cf7932f7` 新增 `compile-as-limit`，已装产品 9/0。`res.mem.compile-as-limit` 已翻 `COVERED_LOCAL`。登记 `91698232fa`，覆盖 `6172071792`，矩阵 `b475cec6f5`。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 run 地址限制（omp-grk，2026-11-01）**：`cc91cc5422` 新增 `run-reserve`，已装产品 3/0。低限 `-run` 是 `run: out of memory`，rc 2，stdout 空。前后不设限都返回 7。`res.mem.run-reserve` 已翻 `COVERED_LOCAL`。登记 `a41ab2ec53`，覆盖 `186f5b4428`，矩阵 `d031d42648`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
