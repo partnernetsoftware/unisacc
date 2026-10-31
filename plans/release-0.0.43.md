@@ -108,6 +108,7 @@ STATE43：**loader-faults（omp-grk，2026-11-01，影子根）**：`a97d5889` �
 STATE43：**fd 泄漏（omp-grk，2026-11-01）**：`a97d5889` 的 `resources-limits` 20 条里 `fd-no-leak-to-program` 失败，`-run` 退出 2，漏了 fd 33 和 35。源码修复 `183070c9b2`，私有构造器上同一程序退出 0。还没重新打包。
 STATE43：**重打包（omp-grk，2026-11-01，未安装）**：rev `183070c9b2` 五片打进 `out/tb/rel2/ape/unisacc-next.com` sha `148c1cae`。smoke 5/5。`resources-limits` 20/0，fd 泄漏已消失。osx/arm64 仍是新 lnx 切片编的，已装构造器对照仍没有。没有替换 `./unisacc.com`。
 STATE43：**183070c9b2 的 lnx 两代（omp-grk，2026-11-01，未安装）**：新 lnx 切片再编一次 lnx/x86_64，41.04 秒 rc0，与打包切片逐字节相同，sha `23ef481b`。osx/arm64 第二次还在跑。没有替换 `./unisacc.com`。
+STATE43：**183070c9b2 的 osx/arm64 第二次（omp-grk，2026-11-01）**：同一新 lnx 切片再编，bound 60 退出 142，没有镜像。第一次是 59.96 秒 rc0，sha `c1aad3b5`。余量不够，不能当两代定点。没有安装。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
