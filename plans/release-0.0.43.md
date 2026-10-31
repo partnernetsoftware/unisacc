@@ -277,6 +277,7 @@ STATE43：**21782dd5 材料会话 ri-chain 四批（omp-grk，2026-11-01）**：
 STATE43：**21782dd5 材料会话 ri-chain 六批（omp-grk，2026-11-01）**：`ri-chain-missingnet`、`ri-chain-symlinknet` 写入 `out/tb/sess-qual` PASS。`ri-chain-fiforeceipt` 探针已绿，还没写入正式会话。会话里 181 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话 ri-chain 七批（omp-grk，2026-11-01）**：`ri-chain-fiforeceipt` 写入 `out/tb/sess-qual` PASS。ri-chain 七批都在这个会话里。会话里 182 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话 hostar（omp-grk，2026-11-01）**：`formats-archive-ar` 先在 `out/tb/probe-host` 绿，再登记 `hostar` 进 `out/tb/sess-qual` 并 PASS。会话里 183 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话 hostld（omp-grk，2026-11-01）**：`formats-object-ld` 先在探针绿，再登记 `hostld` 进 `out/tb/sess-qual` 并 PASS。会话里 184 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
