@@ -355,6 +355,7 @@ STATE43：**21782dd5 全材料会话五十九批（omp-grk，2026-11-01）**：`
 STATE43：**21782dd5 全材料会话六十三批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 4/4 PASS：`cx-l0-crypto-tls13`、`cx-l0-crypto-x25519`、`cx-l0-crypto-x509`、`cx-l0-sys-ffi`。会话里 63 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 全材料会话七十一批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`cx-l0-sys-spawn`、`cx-model-allocation`、`cx-model-decode`、`cx-model-lifetime`、`cx-model-number`、`cx-model-number-runtime`、`cx-model-payload`、`cx-model-reference`。会话里 71 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 全材料会话七十九批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`cx-net-name`、`cx-network-structure`、`cx-package-decode`、`cx-package-lifetime`、`cx-package-structure`、`cx-packagefooter`、`cx-process-group-osx`、`cx-source-frame`。会话里 79 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 全材料会话八十七批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`cx-stream-attributes`、`cx-stream-name`、`cx-stream-output`、`cx-stream-resource`、`cx-unit-graph`、`cx0-unit`、`delta-loader`、`doc-links-tool`。会话里 87 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
