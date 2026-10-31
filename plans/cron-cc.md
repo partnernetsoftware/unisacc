@@ -1,4 +1,4 @@
-# cc 每 10 分钟巡检
+# cc 每 10 分钟巡检（已退役：主人 2026-10-31 夜裁定 cc 下线，巡检由 omp-grk 按 [cron-omp-grk.md](cron-omp-grk.md) 接手）
 
 定时器只发一句"按 plans/cron-cc.md 执行一轮"。要改巡检内容，就改这个文件。
 
