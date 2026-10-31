@@ -21,7 +21,9 @@
  *   fields   comma list of NAME=COL[:TRANSFORM][#i]: COL is a 0-based column; #i makes the field a long long (64
  *            bits on every target; else const char *); TRANSFORM is unquote (a JSON string: drop the surrounding
  *            double quotes, decode \\ and \"), after<c> (text after the last c, e.g. after/ or after=), before<c> (text before the first c)
- *   mode     all (every row, file order) or distinct (first-seen rows by the whole field tuple)
+ *   mode     all (every row, file order), distinct (first-seen rows by the whole field tuple), or explode (one output
+ *            row per column from the LAST field's column to the end of the line, the other fields repeating: a
+ *            vocabulary row "vocab<TAB>NAME<TAB>w1<TAB>w2..." with fields vocab=1,word=2 gives (NAME,w1),(NAME,w2),...)
  *   filter   - or COL=VALUE or COL!=VALUE or COL~TEXT (the raw column contains TEXT) or #=N / #!=N (the line has /
  *            has not exactly N columns: a section whose rows come in two widths takes one spec row per width)
  *   note     one sentence for the module comment, or -
@@ -39,7 +41,7 @@
 #pragma unisa use mem.bytes
 
 static const char *g_spec = "tools/nametabs.tsv", *g_out = "cx";   /* --spec FILE, --out DIR (DIR/compiler, DIR/runtime) */
-#define MAXF 16   /* fields per row: enc-arm @specs has 10 */
+#define MAXF 24   /* fields per row: enc-arm @specs has 10, lower-abi @opmodes 22 */
 #define MAXROWS 4096
 
 typedef struct { char name[32]; int col, is_int, tf; char sep; } Field;   /* tf: 0 none, 1 unquote, 2 after<sep>, 3 before<sep> */
@@ -100,7 +102,7 @@ static int load_specs(Spec *sp, int cap) {
             col(s, l, 5, &off, &len) || tx_copy(x->mode, sizeof x->mode, s + off, len) ||
             col(s, l, 6, &off, &len) || tx_copy(x->filter, sizeof x->filter, s + off, len) ||
             col(s, l, 7, &off, &len) || tx_copy(x->note, sizeof x->note, s + off, len)) die("bad spec row", s);
-        if (!tx_eqz(x->mode, "all") && !tx_eqz(x->mode, "distinct")) die("mode is all or distinct", x->module);
+        if (!tx_eqz(x->mode, "all") && !tx_eqz(x->mode, "distinct") && !tx_eqz(x->mode, "explode")) die("mode is all, distinct or explode", x->module);
         ns++;
     }
     mm_free(t);
@@ -179,7 +181,14 @@ static void gen(const Spec *sp, const char *prefix, Out *o) {
         if (sectioned && s[0] == '@') { long tb = tx_chr(s, l, '\t'); if (tx_copy(cur, sizeof cur, s + 1, (tb < 0 ? l : tb) - 1)) die("section name", path); continue; }
         if (sectioned && !tx_eqz(cur, want)) continue;
         if (!keep(s, l, sp->filter)) continue;
-        for (k = 0; k < sp->nf; k++) if (value(s, l, &sp->f[k], v[k], sizeof v[k])) die("missing column in", sp->source);
+        {   /* explode: one output row per column from the last field's column on (a vocabulary row "vocab NAME w1 w2 ..."
+               becomes (NAME, w1), (NAME, w2), ...); every other mode: one row per line */
+            int reps = 1, rep; Field fx[MAXF];
+            if (tx_eqz(sp->mode, "explode")) { reps = (int)tx_fields(s, l, '\t') - sp->f[sp->nf - 1].col; if (reps < 0) reps = 0; }
+        for (rep = 0; rep < reps; rep++) {
+        for (k = 0; k < sp->nf; k++) fx[k] = sp->f[k];
+        fx[sp->nf - 1].col += rep;
+        for (k = 0; k < sp->nf; k++) if (value(s, l, &fx[k], v[k], sizeof v[k])) die("missing column in", sp->source);
         if (tx_eqz(sp->mode, "distinct")) {
             key[0] = 0;
             for (k = 0; k < sp->nf; k++) { long vn = tx_len(v[k], CELL); if (kn + vn + 2 >= (long)sizeof key) die("key too long", sp->module); tx_copy(key + kn, sizeof key - kn, v[k], vn); kn += vn; key[kn++] = '\t'; key[kn] = 0; }
@@ -198,6 +207,8 @@ static void gen(const Spec *sp, const char *prefix, Out *o) {
         }
         puts0(&body, "return 0; }\n");
         rows++;
+        }
+        }
     }
     mm_free(t);
     if (cx_fmt(line, sizeof line, "#pragma unisa module %s\n", sp->module)) die("line", sp->module); puts0(o, line);
