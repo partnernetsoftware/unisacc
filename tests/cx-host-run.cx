@@ -174,24 +174,30 @@ static int path_state(const char *p) {
     return e;   /* 1 present, 0 absent, negative I/O error */
 }
 
-static void dispose_pid(int pid) {
-    int p, s;
-    if (pid <= 0) return;
+static int dispose_pid(int pid, int *term_rc, int *kill_rc, int *wait_rc) {
+    int p, w = -1;
+    if (term_rc) *term_rc = -1;
+    if (kill_rc) *kill_rc = -1;
+    if (wait_rc) *wait_rc = -1;
+    if (pid <= 0) return 0;
     p = (int)sy_getpgid(pid);
-    if (p == pid) (void)sy_killpg(p, 15); else (void)sy_signal(pid, 15);
-    s = wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
-    if (s == 0) {
-        if (p == pid) (void)sy_killpg(p, 9); else (void)sy_signal(pid, 9);
-        (void)wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
+    if (term_rc) *term_rc = (p == pid) ? sy_killpg(p, 15) : sy_signal(pid, 15);
+    w = wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
+    if (w == 0) {
+        if (kill_rc) *kill_rc = (p == pid) ? sy_killpg(p, 9) : sy_signal(pid, 9);
+        w = wait_terminal(pid, sy_now_ms() + 2000, 0, 0, 0);
     }
+    if (wait_rc) *wait_rc = w;
+    return w == 1;
 }
 
 static void coordinator_spawn_failure(const char *drv, const char *tag, const char *dir, int bad_first) {
     char r1[256], gate[256], bad[256];
     int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1, g, s, clean = 1;
-    tx_snprintf(r1, sizeof r1, "%s/sr1-%s", dir, tag);
-    tx_snprintf(gate, sizeof gate, "%s/sgate-%s", dir, tag);
-    tx_snprintf(bad, sizeof bad, "%s/no-such-driver-%s", dir, tag);
+    tx_snprintf(r1, sizeof r1, "%s/sr1-%s-%d", dir, tag, bad_first);
+    tx_snprintf(gate, sizeof gate, "%s/sgate-%s-%d", dir, tag, bad_first);
+    tx_snprintf(bad, sizeof bad, "%s/no-such-driver-%s-%d", dir, tag, bad_first);
+    ck(path_state(r1) == 0 && path_state(gate) == 0, "spawn-failure-paths-fresh");
     { char src[256]; tx_snprintf(src, sizeof src, "%s/barrier.cx", dir);
       char *v1[] = {bad_first ? bad : (char *)drv, "-run", src, "--", r1, gate, "2000", 0};
       char *v2[] = {bad_first ? (char *)drv : bad, "-run", src, "--", r1, gate, "2000", 0};
@@ -204,10 +210,12 @@ static void coordinator_spawn_failure(const char *drv, const char *tag, const ch
       while (time_before(dl) > 0 && path_state(r1) != 1) snooze(20);
       ck(path_state(r1) == 1, "spawn-failure-path");
       if (live > 0) {
-          int p = (int)sy_getpgid(live);
+          int p = (int)sy_getpgid(live), tr = -1, kr = -1, wr = -1;
           ck(p == live, "spawn-failure-pgid");
-          dispose_pid(live);
+          ck(dispose_pid(live, &tr, &kr, &wr), "spawn-failure-reaped");
+          ck(tr == 0, "spawn-failure-term");
           ck(sy_killpg(p, 0) == -ESRCH, "spawn-failure-group-gone");
+          sy_printf("SPAWNFAIL\ttr=%d kr=%d wr=%d\n", tr, kr, wr);
       }
     }
     drain_fd(o1); drain_fd(e1); drain_fd(o2); drain_fd(e2);
