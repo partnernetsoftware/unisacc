@@ -224,6 +224,7 @@ STATE43：**21782dd5 门会话重跑四十八批（omp-grk，2026-11-01）**：`
 STATE43：**21782dd5 门会话重跑五十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx0-unit`、`pp-cli-targets`、`pp-cli-macros`、`pp-header-locations`。重跑 52/52。身份 STABLE。旧会话已绿、当前还没有回执的还剩 68。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑五十七批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`kernel-link`、`owned`、`resources`、`ri-trace`、`ri-trace-output`。重跑 57/57。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑六十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`ri-multi`、`ri-route-refuse`、`optimization-native`、`optimization-run`、`optimization-tape`。重跑 62/62。身份 STABLE。旧会话已绿、当前还没有回执的还剩 58。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话重跑六十六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`formats`、`library-abi`、`library-cells`、`stdio-close`。重跑 66/66。身份 STABLE。旧会话已绿、当前还没有回执的还剩 54。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
