@@ -1,6 +1,6 @@
 # cx 原生 TLS：卡点、分片与验收
 
-状态：T2.1–T2.4 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305），另加 `cs_ct_eq`/`cs_ct_wipe`；T2.5–T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
+状态：T2.1–T2.4、T2.6、T2.7 已落地并过向量（SHA-256/HMAC、base64/hex、HKDF-SHA256、ChaCha20-Poly1305、X25519、P-256 ECDSA 验签），另加 `cs_ct_eq`/`cs_ct_wipe`、`crypto.bn`（大整数/Montgomery 模幂）与 `crypto.der`（严格 DER 读取器，X.509 解析的第一步）；T2.5、T2.8–T2.10 未实现。本文替代"cx 没有 TLS，所以用 libcurl"这种一句话结论。
 
 ## 一句话回答"卡在哪个环节"
 
@@ -58,9 +58,9 @@ T1 不新增密码学，但它是 T2 能替换进来的前提。
 | T2.3 | HKDF-SHA256 + TLS1.3 Expand-Label | RFC 5869 A.1–A.3（含 82 字节跨三块、空 salt/info）；Expand-Label 值与独立 HKDF-Expand 对拍；`L`=0 与 >255·HashLen、label>249、context>255 拒绝。**已过**（`cx/crypto/hkdf.cx`，批次 `cx-l0-crypto-hkdf`） |
 | T2.4 | ChaCha20 + Poly1305 + AEAD | RFC 8439 §2.4.2 块函数、§2.5.2 与 A.3（r=0／s=0／r=2）、§2.8.2 seal/open 与伪造 tag/aad/长度/nonce 拒绝、原地 open、空明文与空 aad。**已过**（`cx/crypto/chacha20poly1305.cx`，批次 `cx-l0-crypto-chacha20poly1305`） |
 | T2.5 | AES-128/256-GCM | NIST GCM 测试向量（16/12/8/4 字节 nonce，tag 截断拒绝） |
-| T2.6 | X25519 | RFC 7748 §5.2、§6.1；低阶点拒绝 |
-| T2.7 | P-256 ECDSA 验签 | NIST CAVP 向量；DER 签名编码与 r/s 越界拒绝 |
-| T2.8 | ASN.1 DER + X.509 最小解析 | 真实证书链（宿主 `ca-certificates.crt` 抽样）：签名验证、有效期、basicConstraints、hostname 匹配；畸形 DER 必须拒绝而不是越界 |
+| T2.6 | X25519 | RFC 7748 §5.2 两例 + 1/1000 次迭代、§6.1 DH 对与双方公钥；低阶点（全零、1、p-1）返 `-EINVAL`。**已过**（`cx/crypto/x25519.cx`，批次 `cx-l0-crypto-x25519`） |
+| T2.7 | P-256 ECDSA 验签 | 用 Python `cryptography` 生成的公钥/签名做对照（非 cx 自身结果）：验签通过、错摘要与篡改拒绝；r=0、s=0、r≥n、负整数、非最小 DER、尾随字节拒绝；非曲线点、压缩非平方、混合前缀、零点、零长拒绝；2G/3G/4G/5G 与 `nG`/`0G` 无穷远对照。只做验签：标量公开，不做常数时间梯子，不提供签名。**已过**（`cx/crypto/p256.cx`，批次 `cx-l0-crypto-p256`） |
+| T2.8 | ASN.1 DER + X.509 最小解析 | DER 读取器已过（`cx/crypto/der.cx`，批次 `cx-l0-crypto-der`：不定长/非最小长/多字节 tag/非最小或负或零 INTEGER/BIT STRING 未用位/BOOLEAN 非 0x00-0xFF/越界长度/尾随字节全拒绝）；X.509 解析与证书链验证未做，验收仍看真实证书链（宿主 `ca-certificates.crt` 抽样）：签名验证、有效期、basicConstraints、hostname 匹配；畸形 DER 必须拒绝而不是越界 |
 | T2.9 | TLS 1.3 握手 | RFC 8446 Appendix A 简化握手轨迹；`Finished` 校验失败必须拒绝；transcript hash 与 reference 一致 |
 | T2.10 | 记录层与会话 | 与 libcurl 对同一站点对拍：应用数据字节相等；重协商/会话票据失败路径有测试 |
 
