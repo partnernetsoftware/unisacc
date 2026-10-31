@@ -1300,6 +1300,7 @@ undecided_io=<n>      I/O 未决：UNREADABLE、SOURCE-CHANGED、SOURCE-CHANGED-
 | `CX_LAYERS` 行 | `edges=2413 same=771 down=1510 up=0 amb=82 out=50 unres=5 io=0 failed=0` |
 | `UNKNOWN` 行 | `amb=82 out=50 not-a-pass` |
 | `--fixtures` | `checks=16 failed=0`，**4,400 ms** |
+| 工具基线 sha256 | `93619a0a4109e946b9bd95707fc485be187ccbbf8030f53ca5b54ab78fe67180` |
 
 A 施工后的判据：`up==0` 与 `failed==0` 必须保持；`edges` 允许变化但**每次变化必须给出原因**
 （改词法定位会修正误报/漏报，`same/down/up/amb/out` 五项之和必须仍等于 `edges`）；
