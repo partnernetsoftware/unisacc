@@ -71,6 +71,16 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 
 ## 进度（grk 每完成一步，在这里写上提交号）
 
+STATE43：**当前状态（cc 维护，2026-10-31 中午；下面的流水记录是历史，以这一块为准）**
+STATE43：已装 0.0.43 = `43fbbb81`（10-31 01:19，4,631,130 字节，五片，冻结 rev c98f757f）。结构和体积用 `tools/com-tree.cx` 看。
+STATE43：[x] 1 hostnative（28d0cba49c）。
+STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
+STATE43：[ ] 3 **RI 迁移（头号，挡 QUALIFIED）**：防呆 fb89faddde 在源码里，已装版没有；第二步 grk 进行中，顺序是严格重放、捕获、trace 与 multi；验收是 resources、ri-trace、ri-trace-output、ri-multi 四个批次在新构造的入口上变绿，然后装入并登记 rf-capture-guard。
+STATE43：[ ] 4 两代比较：用新装的 43fbbb81 重编 lnx 片，与第一代逐字节相同（lnx 改走 whole-o 之后还没做过两代）。
+STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
+STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
+STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
+STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格、约 580 个模块，产品还没用）、通用工具、体积优化，都是 0.0.44 的准备，见 [v0.0.44.md](v0.0.44.md)。
 **已安装（2026-10-31 01:19）：** `./unisacc.com` sha=43fbbb81…，4631130 字节，冻结 rev c98f757f，五片都走 whole-o，P3 是 aec1a0bf；check-install-fixes 4/4、`--smoke` 16/16、release-ape smoke 5/5、七个棘轮全绿。旧版备份在 out/unisacc.com.79fb84e6。
 **头号待办（cc 复核时发现，挡第 4 步 QUALIFIED）：** CX 入口还没迁移资源身份（RI）。
 - `--strict-resource-flow` 和 `--resource-ledger` 报 "model driver: option not migrated"（src/entrybind.cx:86）。
