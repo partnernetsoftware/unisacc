@@ -78,7 +78,7 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 | 其中登记为批次 SOURCE | 114 |
 | **无任何批次** | **216** |
 | `src/` 含 main | **仅 `src/unisacc.cx`** |
-| 配方 `src_rel` | 35 键 / **33 唯一 TU** |
+| 配方 `src_rel` | **33 项**（`src_rel[0..32]`，全唯一） |
 
 ⇒ 1. `tools/**` 中 216 个含 main 的单元**既不能默认算 tool、也不算 production**，只能落
 `unclassified` 直至逐个确认；按目录批量归为 `tool` 会把一块未知伪装成覆盖。
@@ -90,7 +90,7 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 
 ### 4.2 候选全集：三源并集 + 差集分报
 
-1. **S1 = recipe**：`tools/entry-build.cx` 的 `src_rel[0..34]`（33 唯一 TU）。同时记
+1. **S1 = recipe**：`tools/entry-build.cx` 的 `src_rel[0..32]`（33 项，无重复）。同时记
    `recipe_argv_status=captured:<sha256>|NOT-CAPTURED`；`NOT-CAPTURED` 时 S1 只表示"配方**声明**"，
    **不等于实际 argv**，不得据此称已捕获执行身份。
 2. **S2 = tree-main**：commit C 树中 mode 100644/100755 的 `.cx` ∩ 索引 `D main`。
