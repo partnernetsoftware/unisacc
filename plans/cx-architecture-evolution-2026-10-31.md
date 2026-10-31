@@ -30,7 +30,7 @@ CX 保持 C99 受检查子集与 `#pragma unisa` 配置：底层对接 libc、PO
 
 长期目标：明确包身份、包内模块路径、公开接口与构建实例；源路径是解析输入而不是未经讨论的跨机器稳定身份。模块解析、对象所有权和链接应共用一个明确依赖图。直接 `use`、符号过滤与别名、私有符号及类型可见性都要有一致的可观察规则。CXIF v0 是类型与原型文本，不是结构化 ABI 或所有权证明。未来接口格式需明确目标 ABI、类型布局、版本及校验方式；声明与证明分开。
 
-已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。修复前 `sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。旧 `tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径，与已生效 CX-G-1 冲突。实施方后续提交候选 `d2d4834b68`，报告两宿主入口对未知指令、注释分隔、跨行块注释、注释及字符串内伪指令的局部对拍通过。候选未安装；这些探针不能证明全部词法形式、平台或发布资格，CX-G-3 条件语义另账。
+已生效语法合同缺口（Linux x86-64，本机根入口，2026-10-31）：`out/cx-unknown-pragma-review.cx` 只有 `#pragma unisa nonsense` 和返回 0 的 `main`，没有 `use`。修复前 `sh ./unisacc.com -cx-plan ...` 报 `unknown unisa pragma`、退出 1；`sh ./gcc_cx.com ... -o out/cx-unknown-pragma-gcc` 与 clang 对应命令均编译成功、退出 0。旧 `tools/cxcc.cx` 仅在 `has_use` 为真时进入模块展开，故无 `use` 的未知指令落到宿主忽略路径，与已生效 CX-G-1 冲突。实施方候选 `d26fd15136` 报告两宿主入口对未知指令、注释、字符串及两种词间续行的局部对拍通过；`test5.log` 显示两驱动的两种续行断言通过。词内续行不按理想 C 拼接，保持 cxmod 现行行为。候选未安装；这些探针不能证明全部词法形式、平台或发布资格，CX-G-3 条件语义另账。
 
 另有 CX-G-3 条款与实现的范围差异：规格写 `#if` 条件为真的分支；omp-csr 静态复核三源只计算条件嵌套深度、不求真假，现有 `#if 0` 夹具也要求拒绝。是否将合同明确为所有条件分支都禁止，还是实现真正的活跃分支判定，须另行裁定及评估兼容性；不以当前夹具通过冒充规格语义一致，不并入 CX-G-1/W-7。
 

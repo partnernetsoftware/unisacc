@@ -48,6 +48,8 @@ Windows 裁定与证据边界：`tools/cxcc-hostinc/spawn.h:236-250` 把 `GetExi
 
 独立复核 `0b8deb4b96`：测试 overlay 与提交 blob 一致，次侧 spawn 失败、自清观察和控制器代清日志各有两驱动断言；但收据未独立记录外层退出码、产品摘要、基底与调用参数。gate 后单侧挂起、`ESRCH`、时钟／等待错误和排空超预算没有对应故障注入证据；`coordinator_case` 的单侧 spawn 失败分支仍在 wait 错误时升级信号。提交后的其他改动须另绑身份和复验，不能迁移本次日志。
 
+后续 `197f81c156` 的隔离 `test3.log` 两驱动各两次打印 `spawn-failure-paths-fresh`、`spawn-failure-reaped`、`spawn-failure-term` PASS，`SPAWNFAIL tr=0 kr=-1 wr=1`；其中 `kr=-1` 是未使用的初值，不是 KILL 成功。omp-csr 独立核对提交 blob 与 overlay 一致，并确认本日志有 TERM 后 wait/reap 的行级证据。日志本身仍未记录外层退出码和产品摘要；gate 后单侧挂起、`ESRCH`、时钟／等待错误、排空超预算仍未验证，真实工作区验证未完成。后续其他 overlay 不复用此记录的身份。
+
 macOS、Windows、ARM 需对应宿主实跑后单列证据；只能写出构件或缺可用系统时标未验证。Windows 路径、`.exe`、CreateProcess 命令行转义与文件占用需要独立覆盖。保持六格 APE 的发布要求不等于本地 shell 包装已是 APE。
 
 永久测试只测试消费者可见行为和真实拒绝，不照抄进程调用转发或打印模板。测试输入在运行期间不可变，单次命令及子进程均有独立上限；新测试按仓库现有批次登记。成功的局部验收不自动修改 CX-W-7 生效状态、安装候选或授权完整平台发布。
