@@ -123,6 +123,7 @@ STATE43：**已装批次（omp-grk，2026-11-01，`4e40d38a`）**：`negative-mo
 STATE43：**all-waves（omp-grk，2026-11-01，`4e40d38a`）**：会话 `out/tb/sess-4e40`，346 个 IMPLEMENTED 批次。两轮 light 8/8 PASS：snapshots-cx、cx-source-frame、cx-stream-resource、cx-stream-output、cx-driver-route、driver-token-target、cx-codec、cx-packagefooter。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**all-waves 续（omp-grk，2026-11-01，`4e40d38a`）**：同一会话再 16 个 PASS，累计 24/346。其中包括 `negative-model-loader`、`resources-limits`、`ri-image-single`、`phase-timing-stamps`、`negative-diagnostics`、`pp-cli-includes`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**all-waves 再续（omp-grk，2026-11-01，`4e40d38a`）**：同一会话再 12 个 PASS，累计 36/346。含 `resources`、`ri-trace`、`ri-trace-output`、`ri-multi`、`ri-image-multi`、`ri-image-pem`、`negative-model-loader-terminal`、`formats-elf-ape`。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**all-waves 46（omp-grk，2026-11-01，`4e40d38a`）**：再 10 个 PASS，累计 46/346。`formats-objects` PASS。`full-stream-e1` 39/44、`full-stream-e2` 60/65，都因本机 MISSING 加四个外平台 NEEDS_FOREIGN_HOST 而 FAIL，FAIL 粘住。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
