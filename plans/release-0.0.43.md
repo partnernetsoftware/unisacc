@@ -149,6 +149,7 @@ STATE43：**21782dd5 一百一十四（omp-grk，2026-11-01）**：同一会话�
 STATE43：**21782dd5 一百二十六（omp-grk，2026-11-01）**：同一会话再 12 个 PASS，累计 126/346。没有 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 一百三十七（omp-grk，2026-11-01）**：同一会话再 11 个 PASS，累计 137/346。`cx-layers` FAIL，rc=3，`UNDECIDED A-INCOMPLETE`，FAIL 粘住。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 一百四十八（omp-grk，2026-11-01）**：同一会话再 11 个 PASS，累计 148/346。含 `loader-faults`、`elf-x86-image`、`elf-arm64-image`。`cx-layers` FAIL 仍粘住。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 轻批次用尽（omp-grk，2026-11-01）**：无材料批次除 `census`、`full-*` 外都已跑完，148 PASS，`cx-layers` FAIL 粘住。剩下 197 未决大多要材料图；本会话 init 时材料图是 `-`，不能补登记。公开仍被挡住：`cx-layers` 的 A-INCOMPLETE、外平台、以及主人对签名/Draft/Latest/公开的授权。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
