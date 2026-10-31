@@ -199,6 +199,7 @@ STATE43：**21782dd5 宿主发射（omp-grk，2026-11-01）**：本机测试已�
 STATE43：**21782dd5 宿主会话（omp-grk，2026-11-01）**：登记批次要 `candidate-profile`。当前没有对 `21782dd5` 的 profile。SHA 模式 13/0 不进 `all-waves`。不造 profile。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 资格门（omp-grk，2026-11-01）**：`tests/run.cx -- --all out/tb/sess-2178` 烟测 16/0，聚合拒绝 `session-registry-mismatch` 和 `session-harness-mismatch`。`ALL NOT_QUALIFIED`，rc 2。旧会话对不上当前登记。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 空会话门（omp-grk，2026-11-01）**：`out/tb/sess-gate` 对上当前 harness。`--all` 烟测 16/0。聚合 `pass=0 missing=350 unsatisfied=330`。`ALL NOT_QUALIFIED`，rc 3。不把已知会粘住的失败批跑进这个会话。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 第一波 4/4 PASS：`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。身份 STABLE。其余 346 个 IMPLEMENTED 批次仍无回执。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
