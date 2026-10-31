@@ -136,3 +136,18 @@
 
 - 根清单：未来 `tests/cx-context-roots.tsv` 的 sha256 与 commit 一并记录；本文件只给生成规则与核对门，不内嵌未生成的根行。
 - pair-policy 身份：`pair-policy-v1` 的定义即本文件第 7 节；记录三个独立字段：`policy_doc_sha`（本文件 sha256）、`implementation_source_sha`（实际 preflight .cx 源 sha）、`implementation_binary_sha`（实际执行二进制/产物 sha）。本文件 sha 只是提案身份，不能替代实现身份；测量数字必须绑定后两者。规则或实现变更必须改版本号，不复用 v1 数字。
+
+## 13. 只读强制能力探针（先探测，后谈测量）
+
+独立探针只回答“本机能否强制快照只读且隔离宿主工作区”，不读源码、不建索引、不做 preflight 测量。步骤与判定：
+
+1. `command -v bwrap`；若存在，运行 dry-run：
+   `bwrap --unshare-all --die-with-parent --ro-bind SNAP /work --bind OUT /out --tmpfs /tmp --proc /proc --dev /dev --chdir /work sh -c 'touch /work/probe 2>/dev/null; test $? -ne 0 && touch /out/probe && test -f /out/probe'`
+   同时验证 `/product` 只读可见、所需解释器/库可加载、宿主工作区路径不可见。全部成功→`ENFORCEMENT=bwrap-ro-bind`。
+2. 若无 bwrap，尝试 rootless mount namespace：
+   `unshare --user --map-root-user --mount sh -c 'mkdir -p /tmp/probe-snap /tmp/probe-out; mount --bind SNAP /tmp/probe-snap; mount -o remount,ro,bind /tmp/probe-snap; touch /tmp/probe-snap/x 2>/dev/null; test $? -ne 0; touch /tmp/probe-out/x'`
+   只有“只读 bind 拒绝写 + OUT 可写 + 宿主路径不可见”三项同时成立才记 `ENFORCEMENT=unshare-ro-bind`；单 `unshare --user --map-root-user true` 成功不算。
+3. 任一命令缺失/权限拒绝/挂载失败/无法验证隔离→`ENFORCEMENT=none`，本次 preflight UNKNOWN；不得退化为 chmod/permission-only 后称只读。
+4. 记录每条探针命令、退出码、mount 表（若可读）、产品 `file`/`ldd` 与所需只读绑定清单；探针失败不阻塞设计评审，但阻塞测量。
+
+本机当前观察（仅探针，不是 preflight）：`command -v bwrap` 退出1（未找到）；`unshare --user --map-root-user true` 退出0，只证明可建该用户命名空间，不证明 mount namespace/只读 bind/运行时挂载可用。因此当前 `ENFORCEMENT` 未定，测量必须 UNKNOWN，直到第 1 或第 2 条完整通过。
