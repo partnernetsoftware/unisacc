@@ -175,6 +175,7 @@ STATE43：**21782dd5 相位打点（omp-grk，2026-11-01）**：`phase-timing-st
 STATE43：**21782dd5 哈希探针（omp-grk，2026-11-01）**：已装产品对同长翻转报 `resource-hash-mismatch`，rc 2，无输出。把该断言写进 `ri-image-single.cx` 时，precommit 因 libc 调用数超过基线拒绝。树内测试未改。不翻格。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 哈希断言（omp-grk，2026-11-01）**：`b03b361c9c` 把同长翻转收进 `ri-image-single`，已装产品 30/0，精确句 `resource-hash-mismatch`。映射 `plans/flip-hash-21782dd5.tsv`，`--check` 通过。工具不写 `tests/`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 e3 精确拒绝（omp-grk，2026-11-01）**：`f653e51b86` 把缺文件、尾随、符号链接收成单一精确句。已装产品 `ri-image-single` 30/0。over-size 仍无断言，`ri.id.e3-companion-file-faults` 不翻。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 e3 超长（omp-grk，2026-11-01）**：已装产品对超长 `e3-identity.tsv` 报 `resource-bytes-length-mismatch`，rc 2，无输出。与尾随同一句。不新增测试调用，不翻 `ri.id.e3-companion-file-faults`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
