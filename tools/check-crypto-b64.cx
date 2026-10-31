@@ -1,0 +1,108 @@
+/* Checks cx/crypto/b64.cx: sh ./unisacc.com tools/check-crypto-b64.cx
+   Vectors: RFC 4648 §10 for both alphabets.  Prints PASS/FAIL per case, exit 1 on any FAIL. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+/* Encode IN, then compare with WANT and NUL-termination. */
+static int enc_is(const char *in, long n, const char *want) {
+    char out[128];
+    long need = cs_b64_len(n);
+    int r;
+    if (need < 0 || need > 127) return 0;
+    r = cs_b64_encode(in, n, out, sizeof out);
+    return r == tx_len(want, 64) && tx_eqz(out, want);
+}
+
+/* Decode IN and compare the bytes with WANT of length WN. */
+static int dec_is(const char *in, long n, const char *want, long wn) {
+    unsigned char out[64];
+    int r = cs_b64_decode(in, n, out, sizeof out);
+    long i;
+    if (r != (int)wn) return 0;
+    for (i = 0; i < wn; i++) if (out[i] != (unsigned char)want[i]) return 0;
+    return 1;
+}
+
+int main(void) {
+    char out[128];
+    unsigned char bin[64];
+    char hex[128];
+    int i;
+
+    /* RFC 4648 §10 vectors for base64. */
+    ok(enc_is("", 0, "") && dec_is("", 0, "", 0), "empty");
+    ok(enc_is("f", 1, "Zg=="), "f");
+    ok(enc_is("fo", 2, "Zm8="), "fo");
+    ok(enc_is("foo", 3, "Zm9v"), "foo");
+    ok(enc_is("foob", 4, "Zm9vYg=="), "foob");
+    ok(enc_is("fooba", 5, "Zm9vYmE="), "fooba");
+    ok(enc_is("foobar", 6, "Zm9vYmFy"), "foobar");
+    ok(dec_is("Zg==", 4, "f", 1) && dec_is("Zm8=", 4, "fo", 2) && dec_is("Zm9v", 4, "foo", 3), "roundtrip-short");
+    ok(dec_is("Zm9vYg==", 8, "foob", 4) && dec_is("Zm9vYmE=", 8, "fooba", 5) && dec_is("Zm9vYmFy", 8, "foobar", 6),
+       "roundtrip-long");
+
+    /* Every byte value survives a round trip; the all-zero group is the one that exposes a wrong shift. */
+    for (i = 0; i < 64; i++) bin[i] = (unsigned char)i;
+    ok(cs_b64_encode(bin, 64, out, sizeof out) == 88 && cs_b64_decode(out, 88, bin, sizeof bin) == 64, "roundtrip-all-bytes");
+    {   /* RFC 4648 §10 also gives a 64-byte binary vector; check its first and last groups. */
+        unsigned char z[32];
+        for (i = 0; i < 32; i++) z[i] = 0;
+        ok(cs_b64_encode(z, 3, out, sizeof out) == 4 && tx_eqz(out, "AAAA"), "three-zero-bytes");
+    }
+
+    /* Decoder refusals: bad alphabet, wrong length, non-canonical padding bits. */
+    ok(cs_b64_decode("Zg=", 3, bin, sizeof bin) == -EINVAL, "refuse-len-3");
+    ok(cs_b64_decode("Z", 1, bin, sizeof bin) == -EINVAL, "refuse-len-1");
+    ok(cs_b64_decode("Zm9v-", 5, bin, sizeof bin) == -EINVAL, "refuse-bad-char");
+    ok(cs_b64_decode("Zm9$", 4, bin, sizeof bin) == -EINVAL, "refuse-dollar");
+    ok(cs_b64_decode("Zg==Zg==", 8, bin, sizeof bin) == -EINVAL, "refuse-mid-input-padding");
+    ok(cs_b64_decode("Zh==", 4, bin, sizeof bin) == -EINVAL, "refuse-nonzero-padding-bits-1");
+    ok(cs_b64_decode("Zm9=", 4, bin, sizeof bin) == -EINVAL, "refuse-nonzero-padding-bits-2");
+    ok(cs_b64_decode("=Zg=", 4, bin, sizeof bin) == -EINVAL, "refuse-leading-padding");
+    ok(cs_b64_decode("Zg===", 5, bin, sizeof bin) == -EINVAL, "refuse-three-equals");
+    ok(cs_b64_decode(0, 4, bin, sizeof bin) == -EINVAL && cs_b64_decode("Zg==", -1, bin, 4) == -EINVAL,
+       "decode-bad-args");
+    ok(cs_b64_decode("Zm9v", 4, bin, 2) == -ERANGE, "decode-outcap-small");
+    ok(cs_b64_decode("Zm9v", 4, 0, 8) == -EINVAL, "decode-null-out");
+
+    /* Encoder capacity is exact: one byte short is refused, exact fits. */
+    ok(cs_b64_encode("abc", 3, out, 5) == 4 && tx_eqz(out, "YWJj"), "encode-exact-cap");
+    ok(cs_b64_encode("abc", 3, out, 4) == -ERANGE, "encode-cap-one-short");
+    ok(cs_b64_encode(0, 3, out, sizeof out) == -EINVAL && cs_b64_encode("abc", -1, out, sizeof out) == -EINVAL,
+       "encode-bad-args");
+    ok(cs_b64_encode("", 0, out, 1) == 0 && out[0] == 0, "encode-empty-writes-nul");
+    ok(cs_b64_len(0) == 1 && cs_b64_len(1) == 5 && cs_b64_len(3) == 5 && cs_b64_len(4) == 9, "b64-len");
+
+    /* Hex, RFC 4648 §10. */
+    ok(cs_hex_encode("foobar", 6, hex, sizeof hex) == 12 && tx_eqz(hex, "666f6f626172"), "hex-encode");
+    ok(cs_hex_decode("666f6f626172", 12, bin, sizeof bin) == 6 && bin[0] == 'f' && bin[5] == 'r', "hex-decode");
+    ok(cs_hex_decode("666F6F626172", 12, bin, sizeof bin) == 6 && bin[1] == 'o', "hex-decode-upper");
+    ok(cs_hex_decode("123", 3, bin, sizeof bin) == -EINVAL, "hex-refuse-odd");
+    ok(cs_hex_decode("12zz", 4, bin, sizeof bin) == -EINVAL, "hex-refuse-non-hex");
+    ok(cs_hex_decode("12", 2, bin, 0) == -ERANGE, "hex-outcap");
+    ok(cs_hex_encode("a", 1, hex, 3) == 2 && tx_eqz(hex, "61"), "hex-exact-cap");
+    ok(cs_hex_encode("a", 1, hex, 2) == -ERANGE, "hex-cap-short");
+    ok(cs_hex_decode("", 0, bin, sizeof bin) == 0, "hex-empty");
+    ok(cs_hex_len(0) == 1 && cs_hex_len(6) == 13, "hex-len");
+
+    /* The two codecs agree through bytes: hex -> base64 -> hex is the identity. */
+    {   unsigned char mid[64];
+        char h1[128], h2[128], b[128];
+        long k;
+        for (k = 0; k < 17; k++) bin[k] = (unsigned char)(255 - k * 7);
+        cs_hex_encode(bin, 17, h1, sizeof h1);
+        cs_hex_decode(h1, 34, mid, sizeof mid);
+        i = cs_b64_encode(mid, 17, b, sizeof b);
+        if (i > 0) {
+            int back = cs_b64_decode(b, i, mid, sizeof mid);
+            ok(back == 17 && cs_hex_encode(mid, 17, h2, sizeof h2) == 34 && tx_eqz(h1, h2), "hex-b64-hex-identity");
+        } else ok(0, "hex-b64-hex-identity");
+    }
+
+    sy_printf("CHECK_CRYPTO_B64\tfailed=%d\n", bad);
+    return bad;
+}

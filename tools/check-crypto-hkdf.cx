@@ -1,0 +1,135 @@
+/* Checks cx/crypto/hkdf.cx: sh ./unisacc.com tools/check-crypto-hkdf.cx
+   Vectors: RFC 5869 Appendix A.1, A.2, A.3 for extract/expand/one-shot, plus an independent expand-only
+   value for the TLS 1.3 Expand-Label wrapper.  Prints PASS/FAIL per case, exit 1 on any FAIL. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.hkdf
+#pragma unisa use crypto.sha256
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+/* Lowercase hex of N bytes into HEX (2N + 1).  Local to the check so the module under test is not used
+   to print its own result. */
+static void hexof(const unsigned char *b, int n, char *hex) {
+    static const char d[16] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < n; i++) { hex[2 * i] = d[b[i] >> 4]; hex[2 * i + 1] = d[b[i] & 15]; }
+    hex[2 * n] = 0;
+}
+
+int main(void) {
+    unsigned char ikm[80], salt[80], info[80], okm[82], prk[32];
+    char hex[200];
+    int i;
+
+    /* RFC 5869 A.1: IKM = 0x0b x 22, salt = 0x00..0x0c, info = 0xf0..0xf9, L = 42. */
+    {
+        unsigned char k[22], s[13], f[10];
+        for (i = 0; i < 22; i++) k[i] = 0x0b;
+        for (i = 0; i < 13; i++) s[i] = (unsigned char)i;
+        for (i = 0; i < 10; i++) f[i] = (unsigned char)(0xf0 + i);
+        ok(cs_hkdf_extract_sha256(s, 13, k, 22, prk) == 0, "a1-extract-ok");
+        hexof(prk, 32, hex);
+        ok(tx_eqz(hex, "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5"), "a1-prk");
+        ok(cs_hkdf_expand_sha256(prk, 32, f, 10, okm, 42) == 0, "a1-expand-ok");
+        hexof(okm, 42, hex);
+        ok(tx_eqz(hex, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"),
+           "a1-okm");
+        ok(cs_hkdf_sha256(s, 13, k, 22, f, 10, okm, 42) == 0, "a1-oneshot");
+        hexof(okm, 42, hex);
+        ok(tx_eqz(hex, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"),
+           "a1-oneshot-value");
+    }
+
+    /* RFC 5869 A.2: 80-byte inputs (0x00.., 0x60.., 0xb0..), L = 82: more than two blocks, so the
+       T(i-1) chaining is exercised. */
+    for (i = 0; i < 80; i++) { ikm[i] = (unsigned char)i; salt[i] = (unsigned char)(0x60 + i); info[i] = (unsigned char)(0xb0 + i); }
+    ok(cs_hkdf_sha256(salt, 80, ikm, 80, info, 80, okm, 82) == 0, "a2-ok");
+    hexof(okm, 82, hex);
+    ok(tx_eqz(hex, "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c"
+                   "59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71"
+                   "cc30c58179ec3e87c14c01d5c1f3434f1d87"), "a2-okm-long-inputs");
+
+    /* RFC 5869 A.3: zero-length salt and info. */
+    {
+        unsigned char k[22];
+        for (i = 0; i < 22; i++) k[i] = 0x0b;
+        ok(cs_hkdf_sha256("", 0, k, 22, "", 0, okm, 42) == 0, "a3-ok");
+        hexof(okm, 42, hex);
+        ok(tx_eqz(hex, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"),
+           "a3-okm-empty-salt-info");
+        /* a null salt with length 0 is the same as the empty salt */
+        ok(cs_hkdf_sha256(0, 0, k, 22, 0, 0, okm, 42) == 0, "a3-null-salt-ok");
+        hexof(okm, 42, hex);
+        ok(tx_eqz(hex, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"),
+           "a3-null-salt-same");
+    }
+
+    /* TLS 1.3 Expand-Label: PRK = 0xab x 32, label "c ap traffic", empty context, 32 bytes.
+       Expected value comes from an independent HKDF-Expand implementation, not from this module:
+       info = 00 20 12 || "tls13 c ap traffic" || 00. */
+    {
+        unsigned char p[32], out[32];
+        for (i = 0; i < 32; i++) p[i] = 0xab;
+        ok(cs_hkdf_expand_label_sha256(p, 32, "c ap traffic", 12, 0, 0, out, 32) == 0, "label-ok");
+        hexof(out, 32, hex);
+        ok(tx_eqz(hex, "28af95835fcebca1c800d43aa05e024dc1103d5ce063316b76f84720d2549ef6"), "label-value");
+        /* The same call spelled as a manual info string must agree: this pins the wrapper's byte layout. */
+        {   static const unsigned char want_info[21] = {
+                0x00, 0x20, 0x12, 't', 'l', 's', '1', '3', ' ', 'c', ' ', 'a', 'p', ' ', 't', 'r', 'a', 'f', 'f', 'i', 'c'};
+            unsigned char info2[22], out2[32];
+            int k;
+            for (k = 0; k < 21; k++) info2[k] = want_info[k];
+            info2[21] = 0;                        /* empty context length */
+            int same = 1;
+            ok(cs_hkdf_expand_sha256(p, 32, info2, 22, out2, 32) == 0, "label-manual-info-ok");
+            for (k = 0; k < 32; k++) if (out2[k] != out[k]) same = 0;
+            ok(same, "label-matches-manual-info");
+            hexof(out2, 32, hex);
+            ok(tx_eqz(hex, "28af95835fcebca1c800d43aa05e024dc1103d5ce063316b76f84720d2549ef6"),
+               "label-manual-info-value");
+        }
+        /* A label that needs more than 255 bytes for "tls13 " + label is refused, and the boundary 249 is taken. */
+        {   char longlabel[250];
+            for (i = 0; i < 249; i++) longlabel[i] = 'a';
+            ok(cs_hkdf_expand_label_sha256(p, 32, longlabel, 249, 0, 0, out, 32) == 0, "label-max-249");
+            ok(cs_hkdf_expand_label_sha256(p, 32, longlabel, 250, 0, 0, out, 32) == -EINVAL, "label-refuse-250");
+        }
+        {   unsigned char ctx[256];
+            for (i = 0; i < 256; i++) ctx[i] = (unsigned char)i;
+            ok(cs_hkdf_expand_label_sha256(p, 32, "finished", 8, ctx, 255, out, 32) == 0, "context-255");
+            ok(cs_hkdf_expand_label_sha256(p, 32, "finished", 8, ctx, 256, out, 32) == -EINVAL, "context-refuse-256");
+        }
+    }
+
+    /* Refusals: the expand counter is one byte, so 255 blocks is the ceiling; one more block is refused. */
+    {
+        unsigned char big[32 * 255 + 1], p[32];
+        for (i = 0; i < 32; i++) p[i] = 0x11;
+        ok(cs_hkdf_expand_sha256(p, 32, "x", 1, big, 32 * 255) == 0, "expand-max-255-blocks");
+        ok(cs_hkdf_expand_sha256(p, 32, "x", 1, big, 32 * 255 + 1) == -EINVAL, "expand-refuse-256-blocks");
+        ok(cs_hkdf_expand_sha256(p, 32, "x", 1, 0, 0) == 0, "expand-zero-length-ok");
+        ok(cs_hkdf_expand_sha256(p, 32, "x", 1, 0, 1) == -EINVAL, "expand-null-out-nonzero");
+        ok(cs_hkdf_expand_sha256(p, -1, "x", 1, big, 1) == -EINVAL, "expand-bad-plen");
+        ok(cs_hkdf_expand_sha256(0, 32, "x", 1, big, 1) == -EINVAL, "expand-null-prk");
+        ok(cs_hkdf_extract_sha256(0, 1, "a", 1, prk) == -EINVAL, "extract-null-salt-nonzero");
+        ok(cs_hkdf_extract_sha256("s", 1, 0, 1, prk) == -EINVAL, "extract-null-ikm-nonzero");
+        ok(cs_hkdf_extract_sha256("s", 1, "a", 1, 0) == -EINVAL, "extract-null-prk");
+    }
+
+    /* The first 32 bytes of any expand are T(1) = HMAC(PRK, info || 0x01): an independent shape check
+       that a one-block output is exactly the first chaining block. */
+    {
+        unsigned char p[32], info3[3], a[32], b[32], cat[4];
+        info3[0] = 'a'; info3[1] = 'b'; info3[2] = 'c';
+        for (i = 0; i < 32; i++) p[i] = (unsigned char)(i * 3);
+        cs_hkdf_expand_sha256(p, 32, info3, 3, a, 32);
+        cat[0] = 'a'; cat[1] = 'b'; cat[2] = 'c'; cat[3] = 1;
+        cs_hmac_sha256(p, 32, cat, 4, b);
+        ok(a[0] == b[0] && a[15] == b[15] && a[31] == b[31], "first-block-is-hmac-of-info-and-01");
+    }
+
+    sy_printf("CHECK_CRYPTO_HKDF\tfailed=%d\n", bad);
+    return bad;
+}

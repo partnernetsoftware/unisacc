@@ -1,0 +1,152 @@
+#pragma unisa module b64
+/* crypto/b64 -- base64 (RFC 4648 §4) and hex codecs, pure cx.  Both directions are length-checked:
+   the destination capacity is tested before a byte is written, and the decoder refuses malformed
+   input instead of guessing.  No libc call, no allocation.
+
+     cs_b64_encode(in, n, out, outcap)   bytes written without the NUL, or -EINVAL / -ERANGE.
+                                         outcap must be at least 4 * ((n + 2) / 3) + 1; the NUL is written.
+     cs_b64_decode(in, n, out, outcap)   bytes written, or -EINVAL (bad char, bad padding, n % 4 == 1,
+                                         outcap too small).  Exactly one of the three padded forms is accepted.
+     cs_hex_encode(in, n, out, outcap)   2n bytes and a NUL, or -EINVAL / -ERANGE; outcap >= 2n + 1.
+     cs_hex_decode(in, n, out, outcap)   n / 2 bytes, or -EINVAL (odd length, non-hex byte, outcap small).
+
+   The decoders accept only the canonical alphabet, so two encodings never decode to the same bytes;
+   this is what makes a base64 signature comparison meaningful.  Padding bits in the final group must
+   be zero (RFC 4648 §3.5): "Zh==" is refused even though it is a valid character sequence. */
+
+static const char cs_b64_alpha[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* Value of a base64 character, or -1.  The table is checked by index, not by a scan, so a NUL in the
+   middle of the input is a refusal like any other non-alphabet byte. */
+static int cs_b64_val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* Needed output capacity for cs_b64_encode: 4 groups, NUL included. */
+long cs_b64_len(long n) { return n < 0 ? -1 : 4 * ((n + 2) / 3) + 1; }
+
+int cs_b64_encode(const void *in, long n, char *out, long outcap) {
+    const unsigned char *b = (const unsigned char *)in;
+    long i, o = 0, need;
+    if (n < 0 || !out) return -EINVAL;
+    if (!b && n > 0) return -EINVAL;
+    need = cs_b64_len(n);
+    if (need < 0 || outcap < need) return -ERANGE;
+    for (i = 0; i + 2 < n; i += 3) {
+        out[o++] = cs_b64_alpha[b[i] >> 2];
+        out[o++] = cs_b64_alpha[((b[i] & 3) << 4) | (b[i + 1] >> 4)];
+        out[o++] = cs_b64_alpha[((b[i + 1] & 15) << 2) | (b[i + 2] >> 6)];
+        out[o++] = cs_b64_alpha[b[i + 2] & 63];
+    }
+    if (i < n) {                                  /* one or two trailing bytes: pad with '=' */
+        int rest = (int)(n - i);
+        out[o++] = cs_b64_alpha[b[i] >> 2];
+        if (rest == 1) {
+            out[o++] = cs_b64_alpha[(b[i] & 3) << 4];
+            out[o++] = '=';
+            out[o++] = '=';
+        } else {
+            out[o++] = cs_b64_alpha[((b[i] & 3) << 4) | (b[i + 1] >> 4)];
+            out[o++] = cs_b64_alpha[(b[i + 1] & 15) << 2];
+            out[o++] = '=';
+        }
+    }
+    out[o] = 0;
+    return (int)o;
+}
+
+/* Decode with canonical alphabet and canonical padding.  A trailing group of 2 chars carries 4 bits of
+   real data in the top of the second sextet; the low 2 must be zero.  A group of 3 carries 2 real bits;
+   the low 4 of the third sextet must be zero.  Otherwise two texts decode to one byte string. */
+int cs_b64_decode(const char *in, long n, void *out, long outcap) {
+    unsigned char *b = (unsigned char *)out;
+    long i, o = 0, data, rem;
+    if (n < 0 || !b) return -EINVAL;
+    if (!in && n > 0) return -EINVAL;
+    if (n % 4 != 0) return -EINVAL;               /* RFC 4648 §3.2: padded form only */
+    /* Count the trailing padding: "=" or "==", and only at the very end. */
+    data = n;
+    if (n > 0 && in[n - 1] == '=') data = (n > 1 && in[n - 2] == '=') ? n - 2 : n - 1;
+    for (i = 0; i + 4 <= data; i += 4) {          /* whole groups before the tail */
+        int a = cs_b64_val((unsigned char)in[i]), c = cs_b64_val((unsigned char)in[i + 1]);
+        int d = cs_b64_val((unsigned char)in[i + 2]), e = cs_b64_val((unsigned char)in[i + 3]);
+        if (a < 0 || c < 0 || d < 0 || e < 0) return -EINVAL;
+        if (o + 3 > outcap) return -ERANGE;
+        b[o++] = (unsigned char)((a << 2) | (c >> 4));
+        b[o++] = (unsigned char)(((c & 15) << 4) | (d >> 2));
+        b[o++] = (unsigned char)(((d & 3) << 6) | e);
+    }
+    rem = data - i;                               /* 0..3 data characters left, then the padding */
+    if (rem == 0) return (n - data) == 0 ? (int)o : -EINVAL;  /* padding with nothing to carry */
+    if (rem == 2) {
+        /* 1 byte in 2 chars: the second sextet keeps 4 real bits, its low 4 are padding and must be 0. */
+        int a = cs_b64_val((unsigned char)in[i]), c = cs_b64_val((unsigned char)in[i + 1]);
+        if (a < 0 || c < 0) return -EINVAL;
+        if (n - data != 2) return -EINVAL;        /* this shape takes exactly "==" */
+        if (c & 15) return -EINVAL;
+        if (o + 1 > outcap) return -ERANGE;
+        b[o++] = (unsigned char)((a << 2) | (c >> 4));
+        return (int)o;
+    }
+    if (rem == 3) {
+        /* 2 bytes in 3 chars: the third sextet keeps 2 real bits, its low 4 must be 0. */
+        int a = cs_b64_val((unsigned char)in[i]), c = cs_b64_val((unsigned char)in[i + 1]);
+        int d = cs_b64_val((unsigned char)in[i + 2]);
+        if (a < 0 || c < 0 || d < 0) return -EINVAL;
+        if (n - data != 1) return -EINVAL;        /* this shape takes exactly "=" */
+        if (d & 3) return -EINVAL;
+        if (o + 2 > outcap) return -ERANGE;
+        b[o++] = (unsigned char)((a << 2) | (c >> 4));
+        b[o++] = (unsigned char)(((c & 15) << 4) | (d >> 2));
+        return (int)o;
+    }
+    return -EINVAL;                               /* a single leftover character is never valid */
+}
+
+/* Needed output capacity for cs_hex_encode: two chars per byte plus the NUL. */
+long cs_hex_len(long n) { return n < 0 ? -1 : 2 * n + 1; }
+
+int cs_hex_encode(const void *in, long n, char *out, long outcap) {
+    static const char digits[16] = "0123456789abcdef";
+    const unsigned char *b = (const unsigned char *)in;
+    long i, need;
+    if (n < 0 || !out) return -EINVAL;
+    if (!b && n > 0) return -EINVAL;
+    need = cs_hex_len(n);
+    if (need < 0 || outcap < need) return -ERANGE;
+    for (i = 0; i < n; i++) {
+        out[2 * i] = digits[b[i] >> 4];
+        out[2 * i + 1] = digits[b[i] & 15];
+    }
+    out[2 * n] = 0;
+    return (int)(2 * n);
+}
+
+/* One hex digit, or -1.  Upper case is accepted on input: hex case carries no information. */
+static int cs_hex_val(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int cs_hex_decode(const char *in, long n, void *out, long outcap) {
+    unsigned char *b = (unsigned char *)out;
+    long i;
+    if (n < 0 || !b) return -EINVAL;
+    if (!in && n > 0) return -EINVAL;
+    if (n % 2 != 0) return -EINVAL;               /* half a byte is a refusal, not a truncation */
+    if (n / 2 > outcap) return -ERANGE;
+    for (i = 0; i < n; i += 2) {
+        int hi = cs_hex_val((unsigned char)in[i]), lo = cs_hex_val((unsigned char)in[i + 1]);
+        if (hi < 0 || lo < 0) return -EINVAL;
+        b[i / 2] = (unsigned char)((hi << 4) | lo);
+    }
+    return (int)(n / 2);
+}

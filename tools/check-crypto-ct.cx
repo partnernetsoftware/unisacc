@@ -1,0 +1,41 @@
+/* Checks cx/crypto/ct.cx: sh ./unisacc.com tools/check-crypto-ct.cx
+   The comparison must be total (every byte read), so the cases below cover equal, first-byte,
+   last-byte and middle mismatches, plus the degenerate lengths.  No timing is measured: the claim under
+   test is the shape of the loop, and a timing test on this host would be noise. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.ct
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+int main(void) {
+    unsigned char a[16], b[16], w[8];
+    int i;
+
+    for (i = 0; i < 16; i++) { a[i] = (unsigned char)(i * 7 + 1); b[i] = a[i]; }
+
+    ok(cs_ct_eq(a, b, 16) == 1, "equal");
+    ok(cs_ct_eq(a, a, 16) == 1, "same-buffer");
+    b[0] ^= 1; ok(cs_ct_eq(a, b, 16) == 0, "mismatch-first"); b[0] ^= 1;
+    b[15] ^= 1; ok(cs_ct_eq(a, b, 16) == 0, "mismatch-last"); b[15] ^= 1;
+    b[8] ^= 0x80; ok(cs_ct_eq(a, b, 16) == 0, "mismatch-middle"); b[8] ^= 0x80;
+    ok(cs_ct_eq(a, b, 16) == 1, "restored");
+    ok(cs_ct_eq(a, b, 0) == 1, "zero-length");
+    ok(cs_ct_eq(0, 0, 0) == 1, "zero-length-null");
+    ok(cs_ct_eq(0, b, 4) == 0 && cs_ct_eq(a, 0, 4) == 0, "null-arg");
+    ok(cs_ct_eq(a, b, -1) == 0, "negative-length");
+    /* A prefix of equal bytes is not equality unless n says so. */
+    ok(cs_ct_eq("abc", "abd", 2) == 1, "prefix-only");
+    ok(cs_ct_eq("abc", "abd", 3) == 0, "full-length-mismatch");
+
+    for (i = 0; i < 8; i++) w[i] = (unsigned char)(0xa0 + i);
+    cs_ct_wipe(w, 8);
+    ok(w[0] == 0 && w[7] == 0, "wipe-all-zero");
+    cs_ct_wipe(0, 4);                              /* must not fault on a null buffer */
+    cs_ct_wipe(w, -1);
+    ok(1, "wipe-null-and-negative-noop");
+
+    sy_printf("CHECK_CRYPTO_CT\tfailed=%d\n", bad);
+    return bad;
+}
