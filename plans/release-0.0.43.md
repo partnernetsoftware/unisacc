@@ -202,6 +202,7 @@ STATE43：**21782dd5 空会话门（omp-grk，2026-11-01）**：`out/tb/sess-gat
 STATE43：**21782dd5 门会话四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 第一波 4/4 PASS：`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。身份 STABLE。其余 346 个 IMPLEMENTED 批次仍无回执。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话八批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 4/4 PASS：`negative-model-loader`、`resources-limits`、`loader-faults`、`runner-faults`。身份 STABLE。会话里 8 个 PASS 回执。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 4/4 PASS：`ri-image-single`、`phase-timing-stamps`、`negative-diagnostics`、`smoke`。身份 STABLE。会话里 12 个 PASS 回执。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话十六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 4/4 PASS：`elf-x86-image`、`elf-arm64-image`、`link-undefined-function`、`formats-objects`。身份 STABLE。会话里 16 个 PASS 回执。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
