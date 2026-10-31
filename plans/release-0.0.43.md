@@ -77,6 +77,11 @@ STATE43：[x] 1 hostnative（28d0cba49c）。
 STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
 STATE43：[x] 3 **RI 迁移**（fb89faddde 防呆、db6938d868 严格重放与捕获、fbd9cb64c7 与 f6c3ef3dd0 trace 与 multi）：已装的 fc1d4513 上，tools/affected.cx 跑 resources、ri-trace、ri-trace-output、ri-multi 四个批次 4/4 PASS（断言 74、15、17、10，全部 0 失败），cc 独立复跑确认。旧产品对同一测试 rc2、捕获不写文件，对照成立。rf-capture-guard 作废（见文末），不登记。
 STATE43：[x] 4 **两代比较，五片全部逐字节相同**（冻结 rev cd1a95ebcc；第一代构造器 79fb84e6，第二代构造器已装的 fc1d4513，各片 tools/bound 60 内编完，空闲机器上只跑一次）：lnx/x86_64 0ae1986b（53.2 秒）、lnx/arm64 14abd693（54.9 秒）、osx/x86_64 d4e43786（56.8 秒）、osx/arm64 16b6dd58（58.9 秒，离界只差 1 秒）、win/x86_64 1b0c3353（39.0 秒）。cc 对五对文件逐一 cmp 确认。注意 osx 两片已经贴着 60 秒界，构造器再慢就编不完，这是 C44-SPEED-01 的急事。
+STATE43：**待产品改 20 格分诊（cc，2026-10-31，grk 列的清单）**：
+STATE43：(a) 小改，攒成一个候选一起做（0.0.43 内）：resources 2 格（UNISA_MAXSTEPS 的 abc、-1、0 要按名字拒绝；输出限额比镜像小要报错而不是留下截断文件还报成功）、phase-timing 7 格（构造冷热、热路径写明跳过了模型解压和推理、输出耗时冷热，都是往 RR_TIME 里补行，不能拖慢）、library 的 invalid-options 1 格（私有运行时已修，要进产品）。
+STATE43：(b) 位置映射，看改动大小再定：stream-e3 与 negative 各 1 格（宏展开里的错误，列号要指到用户源码上的列，现在钉在展开后的 5:34，合同要 5:24）。
+STATE43：(c) 库产品（libunisacc）3 格：递归回调签名、union/位域/long double 过 API、恰好导出 29 个 US_API 符号的产物。活实现缺失，是整块工作，**待主人定范围**。
+STATE43：(d) win/arm64 原生 6 格（host.phase-report、host.diag-and-loader-corpus、ci.native、ri.windows-snapshot-and-e3-companion 的 win/x86_64 与 win/arm64 两条、E12.native-chain）：产品现在发布的五个目标是 win/x86_64、lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64，没有原生 ARM64 PE；矩阵要求的外平台主机集合含 win/arm64。**待主人定：做原生 ARM64 PE，还是把必需主机集合改成产品真正发布的五个目标。** 在主人定之前不改矩阵。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
 STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
 STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
