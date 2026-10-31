@@ -1,0 +1,645 @@
+/* tools/check-cx-layers.cx -- module-layer direction audit.
+ *
+ *   sh ./unisacc.com tools/check-cx-layers.cx -- [PRODUCT]
+ *
+ * Direct `#pragma unisa use` edges only. Facts come from the existing
+ * tools/symindex.cx index (manifest + per-content shard `U` lines); the
+ * target is resolved the compiler's way: beside the using file, dots are
+ * directories, then sy_realpath. Source entries are the tracked paths, so
+ * two lexical entries of one physical source can resolve different deps;
+ * nothing is deduplicated by physical source.
+ *
+ * Layers are the CX-S prefixes: L0 cx/sys mem text; L1 cx/core runtime;
+ * L2 cx/driver cx/compiler src; L3 tools tests apps. cx/cx0, cx/workspace,
+ * cx/crypto and cx/<file>.cx are AMB; any other top directory is OUT.
+ *
+ * Assertions (the only permanent ones):
+ *   1. a numbered-layer upward edge is refused, naming file, line and the
+ *      target realpath;
+ *   2. an unresolved module is allowed only by an exact row of
+ *      tests/cxlayers-unresolved.tsv (path, module, reason); an extra
+ *      unresolved use or an unused row fails; ENOENT is the only allowed
+ *      unresolved class, ENOTDIR/EACCES/other I/O fail;
+ *   3. same/down/up/amb/out partition every resolved edge and sum to the
+ *      direct-edge total; AMB and OUT edges are reported as UNKNOWN, not
+ *      as a pass. A single edge that is both AMB and OUT is an overlap and
+ *      fails.
+ *
+ * Observed counts are printed for the receipt; they are not assertions.
+ * No spec clause is added and no AMB layer number is assigned.
+ * Host parsing: sy_* and cx_* only, no libc names. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+
+#define CL_CAP 1048576
+#define CL_PATH 4400
+#define CL_WL 32
+
+static char cl_root[CL_PATH];
+static char cl_reporoot[CL_PATH];
+static char cl_prod[CL_PATH];
+static char cl_idx[CL_PATH];
+static char cl_wlpath[CL_PATH];
+static char cl_man[CL_CAP];
+static long cl_man_n;
+static char cl_shard[CL_CAP];
+static char cl_src[CL_CAP];
+static char cl_line[CL_PATH];
+static int cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_fail;
+static int cl_amb_out, cl_io, cl_cur_line, cl_cond;
+static char cl_cur_mod[128];
+static struct { char path[CL_PATH]; char mod[128]; char why[256]; int used; } cl_wl[CL_WL];
+static int cl_nwl;
+
+static int cl_eq(const char *a, const char *b) { return a && b && tx_eqz(a, b); }
+static int cl_at(const char *s, const char *pre) {
+    long n;
+    if (!s || !pre) return 0;
+    n = tx_len(pre, CL_PATH);
+    return n > 0 && tx_prefix(s, tx_len(s, CL_PATH), pre, n);
+}
+static int cl_isid(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+/* read a whole file into BUF; >0 length, -errno on open/read failure. */
+static long cl_read(const char *path, char *buf, long cap) {
+    int fd;
+    long got;
+    long k;
+    fd = sy_open_read(path);
+    if (fd < 0) return fd;
+    got = 0;
+    while (got < cap - 1) {
+        k = sy_read(fd, buf + got, cap - 1 - got);
+        if (k < 0) { sy_close(fd); return k; }
+        if (k == 0) break;
+        got = got + k;
+    }
+    if (sy_close(fd)) return -1;
+    buf[got] = 0;
+    return got;
+}
+static void cl_join(char *dst, long cap, const char *a, const char *b) {
+    if (cx_fmt(dst, (size_t)cap, "%s/%s", a, b)) sy_exit(2);
+}
+static int cl_layer(const char *real) {
+    if (cl_at(real, "cx/sys/") || cl_at(real, "cx/mem/") || cl_at(real, "cx/text/")) return 0;
+    if (cl_at(real, "cx/core/") || cl_at(real, "cx/runtime/")) return 1;
+    if (cl_at(real, "cx/driver/") || cl_at(real, "cx/compiler/") || cl_at(real, "src/")) return 2;
+    if (cl_at(real, "tools/") || cl_at(real, "tests/") || cl_at(real, "apps/")) return 3;
+    if (cl_at(real, "cx/")) return 4;
+    return 5;
+}
+static void cl_rel(const char *real, char *out, long cap) {
+    long rl = tx_len(cl_root, CL_PATH), l = tx_len(real, CL_PATH);
+    if (l > rl && tx_prefix(real, l, cl_root, rl) && real[rl] == '/') { long i = 0; real += rl + 1; while (real[i] && i < cap - 1) { out[i] = real[i]; i = i + 1; } out[i] = 0; }
+    else { long i = 0; while (real[i] && i < cap - 1) { out[i] = real[i]; i = i + 1; } out[i] = 0; }
+}
+static const char *cl_ln(int l) {
+    if (l == 0) return "L0"; if (l == 1) return "L1"; if (l == 2) return "L2";
+    if (l == 3) return "L3"; if (l == 4) return "AMB"; return "OUT";
+}
+/* line of the first `use NAME` pragma and whether it sits under #if; source is
+   read only for a diagnostic, never to decide an edge. */
+static void cl_locate(const char *srcpath, const char *mod, int *line, int *cond) {
+    long n, i, a, b;
+    int lno, depth, ml;
+    *line = 0; *cond = 0;
+    ml = (int)tx_len(mod, 128);
+    n = cl_read(srcpath, cl_src, CL_CAP);
+    if (n <= 0) return;
+    i = 0; lno = 1; depth = 0;
+    while (i < n) {
+        a = i;
+        while (i < n && cl_src[i] != '\n') i = i + 1;
+        b = i;
+        if (i < n) i = i + 1;
+        while (a < b && (cl_src[a] == ' ' || cl_src[a] == '\t')) a = a + 1;
+        if (a < b && cl_src[a] == '#' && a + 1 < b && cl_src[a + 1] != ' ') {
+            long j = a + 1;
+            while (j < b && (cl_src[j] == ' ' || cl_src[j] == '\t')) j = j + 1;
+            if (cl_at(cl_src + j, "if")) depth = depth + 1;
+            else if (cl_at(cl_src + j, "endif")) { if (depth > 0) depth = depth - 1; }
+            else if (cl_at(cl_src + j, "pragma")) {
+                long k = j + 6, u, m, e;
+                while (k < b && (cl_src[k] == ' ' || cl_src[k] == '\t')) k = k + 1;
+                if (!cl_at(cl_src + k, "unisa")) { lno = lno + 1; continue; }
+                u = k + 5;
+                while (u < b && (cl_src[u] == ' ' || cl_src[u] == '\t')) u = u + 1;
+                if (!cl_at(cl_src + u, "use")) { lno = lno + 1; continue; }
+                m = u + 3;
+                while (m < b && (cl_src[m] == ' ' || cl_src[m] == '\t')) m = m + 1;
+                e = m;
+                while (e < b && (cl_src[e] == '.' || cl_isid((unsigned char)cl_src[e]))) e = e + 1;
+                if (e - m == ml && tx_prefix(cl_src + m, e - m, mod, ml) && !*line) { *line = lno; *cond = depth > 0; }
+            }
+        }
+        lno = lno + 1;
+    }
+}
+static int cl_wl_load(const char *path) {
+    long n, i, a, b, f, e;
+    int k;
+    cl_nwl = 0;
+    n = cl_read(path, cl_src, CL_CAP);
+    if (n < 0) return -1;
+    i = 0;
+    while (i < n) {
+        a = i;
+        while (i < n && cl_src[i] != '\n') i = i + 1;
+        b = i;
+        if (i < n) i = i + 1;
+        if (a >= b || cl_src[a] == '#') continue;
+        if (cl_nwl >= CL_WL) return -1;
+        f = a;
+        while (f < b && cl_src[f] != '\t') f = f + 1;
+        if (f >= b) return -1;
+        k = 0;
+        while (a < f && k < CL_PATH - 1) cl_wl[cl_nwl].path[k++] = cl_src[a++];
+        cl_wl[cl_nwl].path[k] = 0;
+        e = f + 1;
+        while (e < b && cl_src[e] != '\t') e = e + 1;
+        k = 0;
+        while (f + 1 < e && k < 127) cl_wl[cl_nwl].mod[k++] = cl_src[++f];
+        cl_wl[cl_nwl].mod[k] = 0;
+        k = 0;
+        while (e < b && cl_src[e] == '\t') e = e + 1;
+        while (e < b && k < 255) cl_wl[cl_nwl].why[k++] = cl_src[e++];
+        cl_wl[cl_nwl].why[k] = 0;
+        cl_wl[cl_nwl].used = 0;
+        cl_nwl = cl_nwl + 1;
+    }
+    return 0;
+}
+static int cl_wl_find(const char *path, const char *mod) {
+    int i;
+    for (i = 0; i < cl_nwl; i++) if (cl_eq(cl_wl[i].path, path) && cl_eq(cl_wl[i].mod, mod)) return i;
+    return -1;
+}
+static void cl_failf(const char *kind, const char *src, int line, const char *mod, const char *real, const char *why) {
+    cl_fail = cl_fail + 1;
+    sy_eprintf("FAIL\t%s\t%s:%d\tuse %s\t%s%s\n", kind, src, line, mod, real ? real : "-", why ? why : "");
+}
+/* absolute path of a lexical tracked path */
+static void cl_edgefile(char *out, long cap, const char *relpath) { cl_join(out, cap, cl_root, relpath); }
+/* one resolved direct edge. SRCPATH is the lexical tracked path, SRCREAL its
+   realpath, DSTREAL the target realpath. */
+static void cl_edge(const char *srcpath, const char *dstreal) {
+    int sl, tl;
+    char sr[CL_PATH], dr[CL_PATH];
+    char srcabs[CL_PATH];
+    cl_edgefile(srcabs, sizeof srcabs, srcpath);
+    cl_rel(srcabs, sr, sizeof sr);
+    cl_rel(dstreal, dr, sizeof dr);
+    sl = cl_layer(sr);
+    tl = cl_layer(dr);
+    cl_edges = cl_edges + 1;
+    if (sl < 4 && tl < 4) {
+        if (sl == tl) { cl_same = cl_same + 1; return; }
+        if ((sl == 3 && (tl == 2 || tl == 1 || tl == 0)) || (sl == 2 && (tl == 1 || tl == 0)) || (sl == 1 && tl == 0)) {
+            cl_down = cl_down + 1;
+            return;
+        }
+        cl_up = cl_up + 1;
+        cl_failf("UP", srcpath, cl_cur_line, cl_cur_mod, dstreal, "");
+        return;
+    }
+    if (sl == 4 || tl == 4) {
+        cl_amb = cl_amb + 1;
+        if (tl == 5) cl_amb_out = cl_amb_out + 1;
+        if (tl == 4 || sl == 4) return;
+    }
+    cl_out = cl_out + 1;
+}
+static void cl_unresolved(const char *srcpath, const char *mod, int err) {
+    int w;
+    if (err != -ENOENT) {
+        cl_io = cl_io + 1;
+        cl_failf(err == -ENOTDIR ? "UNRES-ENOTDIR" : err == -EACCES ? "UNRES-EACCES" : "UNRES-IO", srcpath, 0, mod, "", "");
+        return;
+    }
+    w = cl_wl_find(srcpath, mod);
+    if (w < 0) {
+        cl_unres = cl_unres + 1;
+        cl_failf("UNRES", srcpath, 0, mod, "", "(no exact whitelist row)");
+        return;
+    }
+    cl_wl[w].used = 1;
+    cl_unres = cl_unres + 1;
+}
+/* resolve one `use MOD` of SRC_ABS (its lexical tracked path is SRC_REL) and
+   record the edge or the refusal. DIR_ABS is the using file's real directory. */
+static void cl_process_use(const char *src_rel, const char *src_abs, const char *dir_abs, const char *mod) {
+    char cand[CL_PATH], dst[CL_PATH];
+    char rel[CL_PATH];
+    long o = 0, k = 0;
+    int line, cond;
+    sy_stat_t st;
+    int rc;
+    cl_locate(src_abs, mod, &line, &cond);
+    cl_cur_line = line; cx_fmt(cl_cur_mod, sizeof cl_cur_mod, "%s", mod);
+    if (cond) { cl_failf("PARSE-CONDITIONAL", src_rel, line, mod, "", ""); return; }
+    if (cl_eq(mod, "std") || cl_eq(mod, "std.cx")) return;
+    if (cl_at(mod, "std.")) { cl_unresolved(src_rel, mod, -ENOENT); return; }
+    while (mod[k] && o < CL_PATH - 5) {
+        if (mod[k] == '.') rel[o++] = '/';
+        else if (cl_isid((unsigned char)mod[k])) rel[o++] = mod[k];
+        else break;
+        k = k + 1;
+    }
+    rel[o++] = '.'; rel[o++] = 'c'; rel[o++] = 'x'; rel[o] = 0;
+    if (cx_fmt(cand, sizeof cand, "%s/%s", dir_abs, rel)) { cl_failf("PATH", src_rel, line, mod, "", ""); return; }
+    rc = sy_stat(cand, &st);
+    if (rc < 0) { cl_unresolved(src_rel, mod, rc); return; }
+    if (sy_realpath(cand, dst, sizeof dst) < 0) { cl_failf("REALPATH", src_rel, line, mod, cand, ""); return; }
+    cl_edge(src_rel, dst);
+}
+/* one shard file for one source path */
+static void cl_shard_file(const char *srcpath, const char *sha) {
+    long n, i, a, b;
+    char cand[CL_PATH], dir[CL_PATH], abs[CL_PATH];
+    char seen[128][CL_PATH];
+    int nseen;
+    cl_join(abs, sizeof abs, cl_root, srcpath);
+    cl_join(dir, sizeof dir, cl_root, srcpath);
+    i = tx_rchr(dir, tx_len(dir, CL_PATH), '/');
+    if (i > 0) dir[i] = 0; else cx_fmt(dir, sizeof dir, "%s", cl_root);
+    if (sy_realpath(dir, cand, sizeof cand) < 0) { cl_failf("DIR-IO", srcpath, 0, "-", "", ""); return; }
+    cl_join(dir, sizeof dir, cl_root, cl_idx);
+    if (cx_fmt(cand, sizeof cand, "%s/%s.tsv", dir, sha)) { cl_failf("SHARD", srcpath, 0, "-", "", ""); return; }
+    n = cl_read(cand, cl_shard, CL_CAP);
+    if (n <= 0) { cl_failf("SHARD", srcpath, 0, "-", "", ""); return; }
+    nseen = 0;
+    i = 0;
+    while (i < n) {
+        long dirlen;
+        char d[CL_PATH];
+        a = i;
+        while (i < n && cl_shard[i] != '\n') i = i + 1;
+        b = i;
+        if (i < n) { i = i + 1; cl_shard[b] = 0; }
+        if (b - a < 3 || cl_shard[a] != 'U' || cl_shard[a + 1] != '\t') continue;
+        cl_join(d, sizeof d, cl_root, srcpath);
+        dirlen = tx_rchr(d, tx_len(d, CL_PATH), '/');
+        if (dirlen > 0) d[dirlen] = 0; else cx_fmt(d, sizeof d, "%s", cl_root);
+        if (sy_realpath(d, cand, sizeof cand) < 0) { cl_failf("DIR-IO", srcpath, 0, cl_shard + a + 2, "", ""); continue; }
+        {
+            char dst[CL_PATH];
+            int rc2;
+            sy_stat_t st2;
+            char rel[CL_PATH];
+            long o = 0, k = a + 2;
+            while (cl_shard[k] && o < CL_PATH - 5) {
+                if (cl_shard[k] == '.') rel[o++] = '/';
+                else if (cl_isid((unsigned char)cl_shard[k])) rel[o++] = cl_shard[k];
+                else break;
+                k = k + 1;
+            }
+            if (cl_eq(cl_shard + a + 2, "std") || cl_eq(cl_shard + a + 2, "std.cx")) continue;
+            if (cl_at(cl_shard + a + 2, "std.")) { cl_unresolved(srcpath, cl_shard + a + 2, -ENOENT); continue; }
+            rel[o++] = '.'; rel[o++] = 'c'; rel[o++] = 'x'; rel[o] = 0;
+            if (cx_fmt(dst, sizeof dst, "%s/%s", cand, rel)) { cl_failf("PATH", srcpath, 0, cl_shard + a + 2, "", ""); continue; }
+            rc2 = sy_stat(dst, &st2);
+            if (rc2 < 0) { cl_unresolved(srcpath, cl_shard + a + 2, rc2); continue; }
+            if (sy_realpath(dst, dst, sizeof dst) < 0) { cl_failf("REALPATH", srcpath, 0, cl_shard + a + 2, "", ""); continue; }
+            {
+                int kk, dup = 0;
+                for (kk = 0; kk < nseen; kk++) if (cl_eq(seen[kk], dst)) { dup = 1; break; }
+                if (dup) continue;
+                if (nseen < 128) { int z = 0; while (dst[z] && z < CL_PATH - 1) { seen[nseen][z] = dst[z]; z = z + 1; } seen[nseen][z] = 0; nseen++; }
+            }
+            cl_locate(abs, cl_shard + a + 2, &cl_cur_line, &cl_cond);
+            if (cl_cond) { cl_failf("PARSE-CONDITIONAL", srcpath, cl_cur_line, cl_shard + a + 2, "", ""); continue; }
+            cx_fmt(cl_cur_mod, sizeof cl_cur_mod, "%s", cl_shard + a + 2);
+            cl_edge(srcpath, dst);
+        }
+    }
+}
+static int cl_audit(void) {
+    long n, i, a, b;
+    char mp[CL_PATH], idx[CL_PATH];
+    int w;
+    cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
+    for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
+    cl_join(idx, sizeof idx, cl_root, cl_idx);
+    cl_join(mp, sizeof mp, idx, "manifest.tsv");
+    n = cl_read(mp, cl_man, CL_CAP);
+    if (n <= 0) { sy_eprintf("FAIL\tMANIFEST\t%s\n", mp); cl_fail++; return 1; }
+    cl_man_n = n;
+    i = 0;
+    while (i < n) {
+        char path[CL_PATH], sha[128];
+        long f, e, k;
+        a = i;
+        while (i < n && cl_man[i] != '\n') i = i + 1;
+        b = i;
+        if (i < n) i = i + 1;
+        if (a >= b || cl_man[a] == '#') continue;
+        f = a;
+        while (f < b && cl_man[f] != '\t') f = f + 1;
+        if (f >= b) continue;
+        k = 0;
+        while (a < f && k < CL_PATH - 1) path[k++] = cl_man[a++];
+        path[k] = 0;
+        if (tx_prefix(path, k, "archive/", 8) || tx_prefix(path, k, "out/", 4)) continue;
+        e = f + 1;
+        while (e < b && cl_man[e] != '\t') e = e + 1;
+        if (e >= b) continue;
+        e = e + 1;
+        while (e < b && cl_man[e] != '\t') e = e + 1;
+        if (e >= b) continue;
+        e = e + 1;
+        while (e < b && cl_man[e] != '\t') e = e + 1;
+        if (e >= b) continue;
+        e = e + 1;
+        while (e < b && cl_man[e] != '\t') e = e + 1;
+        if (e >= b) continue;
+        e = e + 1;
+        k = 0;
+        while (e < b && k < 127) sha[k++] = cl_man[e++];
+        sha[k] = 0;
+        if (k != 64) continue;
+        cl_shard_file(path, sha);
+    }
+    for (w = 0; w < cl_nwl; w++) if (!cl_wl[w].used) {
+        cl_fail++;
+        sy_eprintf("FAIL\tWHITELIST-STALE\t%s\tuse %s\t%s\n", cl_wl[w].path, cl_wl[w].mod, cl_wl[w].why);
+    }
+    if (cl_amb_out) {
+        cl_fail++;
+        sy_eprintf("FAIL\tCLASS-OVERLAP\tamb_and_out=%d\n", cl_amb_out);
+    }
+    if (cl_edges != cl_same + cl_down + cl_up + cl_amb + cl_out) {
+        cl_fail++;
+        sy_eprintf("FAIL\tCLASS-SUM\tedges=%d sum=%d\n", cl_edges, cl_same + cl_down + cl_up + cl_amb + cl_out);
+    }
+    return cl_fail ? 1 : 0;
+}
+static int cl_spawn(char **v, const char *cwd) {
+    np_result r = {0};
+    char why[512];
+    int rc;
+    int tr = np_run(v, cwd, 0, 50, &r, why, sizeof why);
+    if (tr) { sy_eprintf("FAIL\tSPAWN\t%s\n", why); np_free(&r); return 1; }
+    rc = r.rc;
+    if (rc && r.errn) sy_write_all(2, r.err, r.errn);
+    np_free(&r);
+    return rc;
+}
+
+/* ---------------- fixtures ---------------- */
+static int fx_checks, fx_fail;
+static char fx_base[CL_PATH];
+static char fx_base0[CL_PATH];
+static void fx_note(int ok, const char *name) {
+    fx_checks++;
+    if (!ok) fx_fail++;
+    sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+static void fx_mkdirp(const char *rel) {
+    char p[CL_PATH];
+    long i, n;
+    cx_fmt(p, sizeof p, "%s/%s", cl_root, rel);
+    n = tx_len(p, CL_PATH);
+    for (i = 1; i <= n; i++) if (i == n || p[i] == '/') {
+        char c = p[i];
+        p[i] = 0;
+        if (sy_mkdir(p, 0755) && !sy_exists(p)) { sy_eprintf("fx mkdir %s\n", p); sy_exit(2); }
+        p[i] = c;
+    }
+}
+static void fx_write(const char *rel, const char *text) {
+    char p[CL_PATH], d[CL_PATH];
+    long i;
+    cx_fmt(p, sizeof p, "%s/%s", cl_root, rel);
+    cx_fmt(d, sizeof d, "%s", rel);
+    i = tx_rchr(d, tx_len(d, CL_PATH), '/');
+    if (i > 0) { d[i] = 0; fx_mkdirp(d); }
+    if (cx_write(p, text, (size_t)tx_len(text, CL_CAP))) { sy_eprintf("fx write %s\n", p); sy_exit(2); }
+}
+static void fx_link(const char *target, const char *rel) {
+    char p[CL_PATH], d[CL_PATH];
+    long i;
+    cx_fmt(p, sizeof p, "%s/%s", cl_root, rel);
+    cx_fmt(d, sizeof d, "%s", rel);
+    i = tx_rchr(d, tx_len(d, CL_PATH), '/');
+    if (i > 0) { d[i] = 0; fx_mkdirp(d); }
+    if (sy_symlink(target, p)) { sy_eprintf("fx symlink %s\n", p); sy_exit(2); }
+}
+static void fx_reset(void) {
+    cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
+}
+/* run symindex dump on one fixture file and feed its U lines to the resolver */
+static int fx_dump(const char *rel) {
+    char abs[CL_PATH], dir[CL_PATH], idx[CL_PATH];
+    char *v[10];
+    np_result r = {0};
+    char why[512];
+    long i, a, b;
+    int n = 0, tr;
+    cx_fmt(abs, sizeof abs, "%s/%s", cl_root, rel);
+    cx_fmt(dir, sizeof dir, "%s", rel);
+    i = tx_rchr(dir, tx_len(dir, CL_PATH), '/');
+    if (i > 0) dir[i] = 0; else cx_fmt(dir, sizeof dir, ".");
+    {
+        char dd[CL_PATH];
+        cx_fmt(dd, sizeof dd, "%s/%s", cl_root, dir);
+        cx_fmt(dir, sizeof dir, "%s", dd);
+    }
+    cx_fmt(idx, sizeof idx, "%s/out/cx-layers-index", cl_reporoot);
+    v[n++] = "sh"; v[n++] = cl_prod; v[n++] = "tools/symindex.cx"; v[n++] = "--";
+    v[n++] = "--index"; v[n++] = idx; v[n++] = "dump"; v[n++] = abs; v[n] = 0;
+    tr = np_run(v, cl_reporoot, 0, 50, &r, why, sizeof why);
+    if (tr || r.rc) { np_free(&r); return 1; }
+    i = 0;
+    while (i < (long)r.outn) {
+        a = i;
+        while (i < (long)r.outn && r.out[i] != '\n') i = i + 1;
+        b = i;
+        if (i < (long)r.outn) { i = i + 1; r.out[b] = 0; }
+        if (b - a >= 3 && r.out[a] == 'U' && r.out[a + 1] == '\t') {
+            cl_process_use(rel, abs, dir, (const char *)(r.out + a + 2));
+        }
+    }
+    np_free(&r);
+    return 0;
+}
+static int fx_plan_count(const char *rel) {
+    char abs[CL_PATH];
+    char *v[8];
+    np_result r = {0};
+    char why[512];
+    int n = 0, tr, cnt;
+    cx_fmt(abs, sizeof abs, "%s/%s", cl_root, rel);
+    v[n++] = "sh"; v[n++] = cl_prod; v[n++] = "-cx-plan"; v[n++] = abs; v[n] = 0;
+    tr = np_run(v, cl_reporoot, 0, 50, &r, why, sizeof why);
+    if (tr || r.rc) { np_free(&r); return -1; }
+    cnt = 0;
+    {
+        long i = 0, tabs = 0;
+        while (i < (long)r.outn && r.out[i] != '\n') {
+            if (r.out[i] == '\t') tabs++;
+            i = i + 1;
+        }
+        cnt = (int)tabs - 2;   /* index, path, cx.h, then interfaces */
+    }
+    np_free(&r);
+    return cnt;
+}
+static void fx_case_start(const char *name) {
+    fx_reset();
+    cl_nwl = 0;
+    cx_fmt(fx_base, sizeof fx_base, "%s/%s", fx_base0, name);
+    fx_mkdirp("");
+    cx_fmt(cl_root, sizeof cl_root, "%s", fx_base);
+}
+static int fx_load_wl(void) {
+    char p[CL_PATH];
+    cx_fmt(p, sizeof p, "%s/tests/cxlayers-unresolved.tsv", fx_base);
+    return cl_wl_load(p);
+}
+static void cl_fixtures(void) {
+    char base0[CL_PATH];
+    int i, c, rc;
+    cx_fmt(base0, sizeof base0, "%s/out/cx-layers-fixtures-%ld", cl_reporoot, (long)sy_pid());
+    if (sy_mkdir(base0, 0755) && !sy_exists(base0)) { sy_eprintf("fx base\n"); sy_exit(2); }
+    cx_fmt(fx_base0, sizeof fx_base0, "%s", base0);
+    cx_fmt(fx_base, sizeof fx_base, "%s", base0);
+    /* A: positive same/down, alias, comment ignored; compiler cross-check */
+    fx_case_start("a-ok");
+    fx_write("cx/sys/b.cx", "#pragma unisa module b\nint b_x(void) { return 1; }\n");
+    fx_write("cx/sys/a.cx", "#pragma unisa module a\n/* #pragma unisa use b */\n#pragma unisa use b\nint a_x(void) { return b_x(); }\n");
+    fx_write("cx/core/c.cx", "#pragma unisa module c\n#pragma unisa use sys.a\nint c_x(void) { return a_x(); }\n");
+    fx_write("cx/compiler/d.cx", "#pragma unisa module d\n#pragma unisa use core.c\nint d_x(void) { return c_x(); }\n");
+    fx_write("src/e.cx", "#pragma unisa module e\n#pragma unisa use compiler.d\nint e_x(void) { return d_x(); }\n");
+    fx_write("tools/f.cx", "#pragma unisa use src.e\n#pragma unisa use sys.a::a_x as ax\nint f_x(void) { return e_x() + ax(); }\n");
+    fx_link("../sys", "cx/core/sys");
+    fx_link("../core", "cx/compiler/core");
+    fx_link("../cx/compiler", "src/compiler");
+    fx_link("../src", "tools/src");
+    fx_link("../cx/sys", "tools/sys");
+    fx_dump("cx/sys/a.cx"); fx_dump("cx/sys/b.cx"); fx_dump("cx/core/c.cx");
+    fx_dump("cx/compiler/d.cx"); fx_dump("src/e.cx"); fx_dump("tools/f.cx");
+    fx_note(cl_edges == 6 && cl_same == 2 && cl_down == 4 && cl_up == 0 && cl_fail == 0, "a-positive-edges");
+    c = fx_plan_count("cx/sys/a.cx") + fx_plan_count("cx/sys/b.cx") + fx_plan_count("cx/core/c.cx") +
+        fx_plan_count("cx/compiler/d.cx") + fx_plan_count("src/e.cx") + fx_plan_count("tools/f.cx");
+    fx_note(c == 6, "a-compiler-direct-count");
+    fx_note(fx_plan_count("tools/f.cx") == 2, "a-alias-plan-count");
+    /* B: numbered upward */
+    fx_case_start("b-up");
+    fx_write("cx/core/y.cx", "#pragma unisa module y\nint y_x(void) { return 1; }\n");
+    fx_write("cx/sys/x.cx", "#pragma unisa module x\n#pragma unisa use core.y\nint x_y(void) { return y_x(); }\n");
+    fx_link("../core", "cx/sys/core");
+    fx_dump("cx/sys/x.cx");
+    fx_note(cl_up == 1 && cl_fail >= 1, "b-up-refused");
+    /* C: missing module, no whitelist */
+    fx_case_start("c-missing");
+    fx_write("tools/m.cx", "#pragma unisa use nosuch_mod_zz\nint m_x(void) { return 0; }\n");
+    fx_dump("tools/m.cx");
+    fx_note(cl_unres == 1 && cl_fail >= 1, "c-missing-refused");
+    /* D1: exact whitelist row, D2: extra unresolved, D3: stale row */
+    fx_case_start("d-exact");
+    fx_write("tools/m.cx", "#pragma unisa use nosuch_mod_zz\nint m_x(void) { return 0; }\n");
+    fx_write("tests/cxlayers-unresolved.tsv", "tools/m.cx\tnosuch_mod_zz\tfixture missing module\n");
+    fx_note(fx_load_wl() == 0, "d-whitelist-load");
+    fx_dump("tools/m.cx");
+    fx_note(cl_unres == 1 && cl_fail == 0 && cl_wl[0].used, "d-exact-allowed");
+    fx_write("tools/n.cx", "#pragma unisa use other_missing\nint n_x(void) { return 0; }\n");
+    fx_reset(); fx_dump("tools/n.cx");
+    fx_note(cl_fail >= 1, "d-extra-refused");
+    fx_case_start("d-stale");
+    fx_write("tests/cxlayers-unresolved.tsv", "tools/zz.cx\tghost\tstale row\n");
+    fx_note(fx_load_wl() == 0, "d2-whitelist-load");
+    fx_reset();
+    for (i = 0; i < cl_nwl; i++) if (!cl_wl[i].used) { cl_fail++; }
+    fx_note(cl_fail == 1, "d-stale-refused");
+    /* E: ENOTDIR and EACCES are I/O refusals, not unresolved */
+    fx_case_start("e-io");
+    fx_write("tools/afile", "not a directory\n");
+    fx_write("tools/e1.cx", "#pragma unisa use afile.b\nint e1_x(void) { return 0; }\n");
+    fx_dump("tools/e1.cx");
+    fx_note(cl_io >= 1 && cl_fail >= 1, "e-enotdir-refused");
+    fx_reset();
+    fx_write("tools2/locked/mod.cx", "#pragma unisa module mod\nint mod_x(void) { return 1; }\n");
+    fx_write("tools2/e2.cx", "#pragma unisa use locked.mod\nint e2_x(void) { return mod_x(); }\n");
+    sy_chmod("out", 0755);
+    {
+        char lp[CL_PATH];
+        cx_fmt(lp, sizeof lp, "%s/tools2/locked", fx_base);
+        sy_chmod(lp, 0);
+        fx_dump("tools2/e2.cx");
+        sy_chmod(lp, 0755);
+    }
+    fx_note(cl_io >= 1 && cl_fail >= 1, "e-eacces-refused");
+    /* F: one physical source, two entries, different resolution: both edges */
+    fx_case_start("f-entries");
+    fx_write("real/one.cx", "#pragma unisa use m\nint one_x(void) { return m_x(); }\n");
+    fx_write("A/m.cx", "#pragma unisa module m\nint m_x(void) { return 11; }\n");
+    fx_write("B/m.cx", "#pragma unisa module m\nint m_x(void) { return 22; }\n");
+    fx_link("../real/one.cx", "A/one.cx");
+    fx_link("../real/one.cx", "B/one.cx");
+    fx_reset(); fx_dump("A/one.cx");
+    c = cl_edges;
+    fx_reset(); fx_dump("B/one.cx");
+    fx_note(c == 1 && cl_edges == 1 && cl_fail == 0, "f-two-entries-two-edges");
+    /* G: AMB and OUT are reported, not failed */
+    fx_case_start("g-unknown");
+    fx_write("cx/crypto/w.cx", "#pragma unisa module w\nint w_x(void) { return 1; }\n");
+    fx_write("src/z.cx", "#pragma unisa use crypto.w\nint z_x(void) { return w_x(); }\n");
+    fx_write("examples/q.cx", "#pragma unisa use src.z\nint q_x(void) { return z_x(); }\n");
+    fx_link("../cx/crypto", "src/crypto");
+    fx_link("../src", "examples/src");
+    fx_dump("src/z.cx"); fx_dump("examples/q.cx");
+    fx_note(cl_amb == 1 && cl_out == 1 && cl_fail == 0, "g-unknown-reported");
+    /* H: pragma under #if is a compiler refusal, and plan refuses too */
+    fx_case_start("h-conditional");
+    fx_write("cx/sys/b.cx", "#pragma unisa module b\nint b_x(void) { return 1; }\n");
+    fx_write("cx/sys/q.cx", "#pragma unisa module q\n#if 0\n#pragma unisa use b\n#endif\nint q_x(void) { return 1; }\n");
+    fx_dump("cx/sys/q.cx");
+    fx_note(cl_fail >= 1, "h-conditional-refused");
+    {
+        int pc = fx_plan_count("cx/sys/q.cx");
+        fx_note(pc < 0, "h-compiler-refuses-conditional");
+    }
+    sy_printf("CX_LAYERS_FIXTURES\tchecks=%d\tfailed=%d\n", fx_checks, fx_fail);
+    cx_fmt(cl_root, sizeof cl_root, "%s", cl_reporoot);
+}
+
+int main(int argc, char **argv) {
+    char idxdir[CL_PATH], wlp[CL_PATH], v0[CL_PATH], shard[CL_PATH];
+    char *upd[10];
+    int n, rc;
+    char real[CL_PATH];
+    if (argc > 2) { sy_eprintf("usage: tools/check-cx-layers.cx [PRODUCT|--fixtures]\n"); return 2; }
+    if (sy_realpath(".", cl_root, sizeof cl_root) < 0) return 2;
+    cx_fmt(cl_reporoot, sizeof cl_reporoot, "%s", cl_root);
+    if (argc == 2 && cl_eq(argv[1], "--fixtures")) {
+        cl_join(cl_prod, sizeof cl_prod, cl_root, "unisacc.com");
+        cl_fixtures();
+        return fx_fail ? 1 : 0;
+    }
+    if (argc == 2) { if (sy_realpath(argv[1], cl_prod, sizeof cl_prod) < 0) return 2; }
+    else cl_join(cl_prod, sizeof cl_prod, cl_root, "unisacc.com");
+    cx_fmt(cl_idx, sizeof cl_idx, "out/cx-layers-index");
+    if (sy_mkdir("out", 0755) && !sy_exists("out")) return 2;
+    if (sy_mkdir(cl_idx, 0755) && !sy_exists(cl_idx)) return 2;
+    n = 0;
+    upd[n++] = "sh"; upd[n++] = cl_prod; upd[n++] = "tools/symindex.cx"; upd[n++] = "--";
+    upd[n++] = "--index"; upd[n++] = cl_idx; upd[n++] = "update"; upd[n] = 0;
+    rc = cl_spawn(upd, cl_root);
+    if (rc) { sy_eprintf("FAIL\tSYMINDEX\tupdate rc=%d\n", rc); return 1; }
+    cl_join(wlp, sizeof wlp, cl_root, "tests/cxlayers-unresolved.tsv");
+    rc = cl_wl_load(wlp);
+    if (rc < 0) { sy_eprintf("FAIL\tWHITELIST\tparse %s\n", wlp); return 1; }
+    rc = cl_audit();
+    sy_printf("CX_LAYERS\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tscope=numbered-direct-use\n",
+              cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail);
+    if (cl_amb || cl_out) sy_printf("UNKNOWN\tamb=%d\tout=%d\tnot-a-pass\n", cl_amb, cl_out);
+    (void)idxdir; (void)v0; (void)shard; (void)real;
+    return rc;
+}
