@@ -12,6 +12,9 @@ typedef struct {
     int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), 's' socket, 'p' fifo, '?' other */
     long uid;       /* owner */
     unsigned long dev;   /* device. Linux and macOS: (dev, ino) names one file. Windows leaves both 0. */
+    long ctime;     /* status-change time, seconds. POSIX: last inode change, not settable by the
+                       owner. Windows: creation time (a rewritten file keeps it only when the
+                       bytes are written in place). */
 } sy_stat_t;
 
 static int sy_fail(void) { return errno ? -errno : -1; }
@@ -25,6 +28,7 @@ static void sy_fill(const struct stat *s, sy_stat_t *out) {
               : S_ISSOCK(s->st_mode) ? 's' : S_ISFIFO(s->st_mode) ? 'p' : '?';
     out->uid = (long)s->st_uid;
     out->dev = (unsigned long)s->st_dev;
+    out->ctime = (long)s->st_ctime;
 }
 
 /* fstat FD into OUT. 0, or -errno. */
@@ -340,6 +344,8 @@ static int sy_stat_os(const char *path, sy_stat_t *out) {
     out->uid = 0;
     out->ino = 0;
     out->dev = 0;
+    ticks = ((__u_word)d[4] << 32) | (__u_word)d[3];
+    out->ctime = ticks > 116444736000000000LL ? (long)((ticks - 116444736000000000LL) / 10000000LL) : 0;
     return 0;
 #else
     struct stat s;
