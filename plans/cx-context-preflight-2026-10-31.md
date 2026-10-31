@@ -61,7 +61,8 @@
 - 注意并记录：`x/..` 按词法折叠，不按“x 是软链时 OS 解析到目标父目录”；这是现行编译器实际语义。preflight 只测量，不修正。
 - 每条 `use` 从父 context 目录解析；模块名语法同编译器；`std` 按现行处理；不 realpath 合并 context。
 - 同一根内相同规范化字面路径只展开一次；不同根分别展开；聚合再按字面路径去重。
-- 环：目标字面路径已在当前展开栈上→计 cycle 边、不再展开、根 UNKNOWN（编译器既有 cycle 拒绝另记）。
+- 环：目标规范化字面路径已在当前根的展开栈上→计 cycle 边、不再展开、该根标 UNKNOWN（编译器既有 module cycle 拒绝另记，不混报）。
+- 依赖目标比较：两边 use 目标经 cxm_norm 后 stat/realpath 比较；缺失=unresolved，ENOTDIR/EACCES/读失败=UNKNOWN；目标不同只入 pairs_public? no — 记 `pairs_dependency_diff`（新增输出字段），不误记为 public set。
 - 缺失模块=unresolved+UNKNOWN；ENOTDIR/EACCES/读失败/路径规范化失败（过长/段数）=INVALID+UNKNOWN；不截断、不降级。
 - U 事实：由快照索引 shard 读取；context 的 realpath 映射回 tracked path/sha 后取 shard；alias 软链用 realpath 查，但 context 身份仍是字面路径。未映射/未跟踪→UNKNOWN。
 - 清单：按 context 词法目录+尾名读 cxpack；ENOENT/无匹配行=全集；EACCES/ENOTDIR/读失败/超长/非法行→UNKNOWN。有效公开集的比较只按第 7 节的 pair 策略执行；比较结果与计数见该节，§5 本身不另做拒绝。
@@ -80,15 +81,16 @@
 
 版本标识：`pair-policy-v1`。若生产算法改变，另立版本，不复用此数。
 
-- canonical 选择：每 realpath 组按“roots.tsv 行序 → BFS 层序 → use 行序”首个 context 为 canonical。
+- canonical 选择：**根内**每 realpath 组按“BFS 层序 → use 行序”首个 context 为 canonical；roots.tsv 行序只决定报告遍历，不能跨根选 canonical（见 §14）。联合根必须显式标记，联合根内部才共享一个图。
 - 方向：单向 canonical→candidate；memo 键 `(canonical context ID, candidate context ID)`；每个 candidate 对照其组 canonical 执行递归核验（依赖递归同样用该组最新选定的 canonical）。
 - 遍历：显式工作队列，按上述顺序；不递归 C 栈。记录 `pairs_visited_total`（首次进入的 memo 对）与 `pair_peak`（队列/核验栈同时存活的对数高水位）。
 - 第二策略 `pair-policy-v1r`：同一根仅把兄弟 use 行序逆序，其余同 v1；单独报告 visited/peak。明确只覆盖两种顺序，不等于所有排列。
 有效公开集比较与计数策略（v1 全遍历）：
 - 每个 pair 比较 canonical 与 candidate 的有效公开集（按 §5 的清单规则，逐名集合；无清单/无匹配行=全部非 static）。记录 `pairs_public_equal`、`pairs_public_diff`、`pairs_errors`。
-- v1 **不因差异或错误停止遍历**：差异只记录，错误把根标 UNKNOWN 并计入 `pairs_errors`，结构遍历继续。`pairs_visited_total`/`pair_peak` 只是该全遍历策略的测量值，不是任意生产算法的值。
+- v1 **不因差异或错误停止遍历**：有效集差异只记录；上下文/清单/目标解析错误计入 `pairs_errors`，该出错边不入队继续展开，其他边继续；根标 UNKNOWN。`pairs_visited_total`/`pair_peak` 只是该全遍历策略的测量值，不是任意生产算法的值。
 - 不能对“任意首差异即停算法”声称上界：只有当生产算法与 v1 使用**相同的配对生成、去重键、canonical 选择和工作队列调度**，且停止仅裁剪同一条遍历时，全遍历值才可作该算法的条件上界；canonical 或调度不同可能使 peak 更大。除此之外一律 UNKNOWN，不比较、不外推。
-- 若实现没有执行有效集比较，只能输出 `pairs_proxy`，不得称实际递归核验，也不得用于 pair 峰门。
+- 若实现没有执行有效集比较，只能输出 `pairs_proxy=1`，不得称实际递归核验，也不得用于 pair 峰门。
+- 输出字段统一：`pairs_visited_total`、`pair_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_errors`、`pairs_proxy`（0/1）。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
 
 ## 8. 测量上限与 deadline（独立于产品）
@@ -104,9 +106,9 @@
 ## 9. 输出与状态
 
 每根：
-`ROOT<TAB>category<TAB>status=complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>pairs_v1<TAB>pair_peak_v1<TAB>pairs_v1r<TAB>pair_peak_v1r<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
+`ROOT<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>pairs_v1<TAB>pair_peak_v1<TAB>pairs_v1r<TAB>pair_peak_v1r<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
 聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 complete/unknown-known/unknown-unexpected 计数。
-仅当 production 类全部 complete、无 ROOTS incomplete、无触限/超时，聚合才 complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
+状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
 
 ## 10. 拟路径与所有权
 
@@ -160,3 +162,9 @@
 - 多源码同一命令是“联合根”场景，必须显式加 category/joint 标记；一个联合根的图内可以有自己的 realpath 组与 pair，但不等于把多个独立根合计后再比较。
 - 各根 pair_visited/peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
 - 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
+
+
+## 15. 待 csr 复审后的修订项（本轮记录）
+
+本轮已改：根内 canonical、measurement_complete 命名、public_equal/diff/errors/proxy 字段、std_edges、错误边不入队、依赖目标差异字段、环按根栈。
+仍需 csr 完整八项复审：快照/gitlink 对拍细节、pair 错误边界、软链环、joint root、来源/产品/实现身份与只读隔离；未获复审前不建工具/根清单、不开测。
