@@ -1694,3 +1694,89 @@ PARSE-CONDITIONAL`）。
 - **最大未知**：`tools/` 116 个无批次含 main 文件的类别归属；`apps/csih` 95 + `ujs` 15 的入口集合；
   只读强制（当前 `bwrap` 缺失、`unshare` 只证明了 remount,ro 单点）。
 - 本节不产生任何 PASS；未建 `roots.tsv`、未写预检工具、未开测、未改 cxmod/entry-build/spec。
+
+### 18.9 修正：§18.4/§18.5/§18.6 的三处推断不成立（cdx 裁定后实算）
+
+三处都是我拿集合减法**推**出来的，不是实算；逐条改正。
+
+#### C1 `tools/` 未登记数：**215**，不是 116
+
+我用 `330 − 214 = 116` 是错的：214 是**全表** SOURCE 唯一值，其中 99 个不在 `tools/` 下，
+相减等于把两个不同论域的集合硬减。实算：
+
+| 集合 | 数量 |
+|---|---|
+| `tools/` 含 main | 330 |
+| `tools/` 含 main ∩ batches SOURCE | **115** |
+| `tools/` 含 main **但不登记批次** | **215** |
+| batches SOURCE 唯一值 | 214 |
+| SOURCE − `tools/`-含-main | **99**（`tests/` 98 + `cx/` 1） |
+
+⇒ SOURCE 214 = `tools` 115 + `tests` 98 + `cx` 1。未登记规模比原先说的大近一倍，未知块更重。
+
+#### C2 `expect=rc0` 不证明源码图是正例：真正的信号在 `layer` 列
+
+`tests/batches.tsv` 344 行：`implementation` **344 行全 IMPLEMENTED**，`expect` **344 行全 `rc0:*`**。
+但 `run-batch` 判 PASS 的条件仅四条（`tests/run-batch.cx` 末段）：
+
+```
+ok = !transport && !result.rc && tx_eqz(before, after) && expect 前缀 "rc0:" && marker(...)==1
+```
+
+即「子进程没超时 + rc0 + 候选二进制前后 sha 不变 + 标记行恰好出现 1 次」。**没有任何一条**断言
+被测源码图、被生成材料或被测配置是正例。把 rc0 读成"该批次内容为正例"是超读。
+
+实际的正负信号是 `layer` 列（第 3 列）：
+
+| layer | 行数 |
+|---|---|
+| contract | 133 |
+| interfaces | 108 |
+| **negative** | **63** |
+| properties | 15 |
+| platform | 10 |
+| library | 8 |
+| product | 7 |
+
+`layer=negative` 63 行、24 个唯一 SOURCE（`tests/ri-flow-controls.cx` 9、`tests/objects.cx` 8、
+`tests/hostseed-controls.cx` 8、`tests/ri-material-controls.cx` 7、`tests/ri-chain-controls.cx` 7 …）。
+它们**仍是 rc0 批次**：程序内部跑负例，程序本身必须成功退出。
+
+第二维是 `mode`：342 `SOURCE` + **2 `PREPARED`**。两条 PREPARED（`nets`、`assembler`）的 `entry`
+是材料占位而非仓内路径：`{nets}/nets.cx`、`{assembler}/contracts.cx`，`source` 是 `tests/nets.cx`、
+`tests/assembler.cx`。**未提供对应材料时，其根身份只能是 UNKNOWN**，不能算已解析根。
+
+⇒ 分类至少要三维，缺一即错：① 行级 `layer=negative` ？② 行级 `mode`（SOURCE/PREPARED）？
+③ 运行时是否生成材料？`batch-positive`/`batch-negative` 不能由 `expect` 单列得出，更不能由批次 id
+命名（`full-negative` 的 source 是 `tests/full-domain.cx`，layer 是 product，不是 negative）推断。
+
+#### C3 联合根**今天就存在**：产品本身就是 33 TU / 1 main
+
+我原写「`src/` 只有 1 个含 main 文件 ⇒ 今天没有真实联合根」——错。查 recipe（`tools/entry-build.cx`）：
+
+- `src_rel[0..34]` 共 35 个键、**33 个唯一 TU**；其中**只有 `src/unisacc.cx` 声明 main**。
+- 33 个 TU 里 **22 个**经目录软链到达：`src/runtime → ../cx/runtime`、`src/compiler → ../cx/compiler`、
+  `src/core → ../cx/core`、`src/driver → ../cx/driver`、`src/sys → ../cx/sys`、`src/text → ../cx/text`。
+- 全树 tracked **目录软链 59 个**（另有 §18.3 的 31 个文件软链）。
+- `git ls-files src` 只看到 **29 个条目**、其中 **15 个 `.cx`**——目录软链被 git 折叠成一个条目，
+  所以按 tracked 路径枚举产品输入会**漏掉 22 个 TU**（它们物理上是 `cx/**` 的已跟踪文件）。
+
+⇒ 这就是 cdx 说的形态：链接/构建同时提供多个 `.cx` 根、只有一处 `main`。两条后果：
+
+1. `joint_id`/`double_count` **不是未来位**，现在就要对产品成立；而且联合根成员**不能**从 `D main`
+   或 `git ls-files` 枚举，只能从 recipe（或真实 argv）取。
+2. 若 preflight 只按「树 `.cx` ∩ `D main`」定根，产品根会被记成 1 个文件、其 32 个 TU 的依赖边
+   会全部丢失或被错误地挂到 `cx/**` 物理路径上（两套路径并存 ⇒ 同一边可能算两次）。
+   ⇒ roots 表必须显式区分 **recipe 成员（lexical 路径）** 与 **物理文件**，并对二者建立 `double_count`。
+
+当前状态：recipe 已核（33 TU / 1 main / 22 经目录软链），**真实 argv 未核**（未抓取构建实际传入的
+命令行）。在抓到 argv 前，产品根成员的完备性记为 **JOINT-UNKNOWN**，不写成已定。
+
+#### 修正后的最小约定
+
+- 本节所有数字绑定 commit `9cdfaae744…`；manifest 由工作区生成，与 commit 树在 `D main` 上当前零差，
+  但**不作为** preflight 输入，preflight 必须用快照+快照索引重算。
+- `D main` 只能做**发现**；根全集 = recipe/argv 成员 ∪ 「树 `.cx` ∩ `D main`」∪ batches SOURCE，
+  三者的差集分别报告（缺 → incomplete，多 → stale）。
+- 未核项显式标 UNKNOWN：产品真实 argv、`apps/csih` 入口集合、`ujs` 入口集合、215 个 tools 无批次
+  文件的类别、只读强制。
