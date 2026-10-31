@@ -1,0 +1,51 @@
+/* tools/check-commit-own.cx -- tools/commit-own.cx keeps the shared index in sync even when another git process
+ * holds .git/index.lock (an agent's git status refreshes the index).  Before the fix, update-index failed silently
+ * and a NEW file showed up as `D  path` plus `?? path` right after the commit (penoff, macbyt).
+ *
+ *   sh ./unisacc.com tools/check-commit-own.cx            (from the repo root; works in out/check-commit-own/)
+ *
+ * In a throwaway local clone with a copy of the working-tree commit-own.cx and the installed unisacc.com:
+ *   lock    a new file is committed while .git/index.lock is held for 4 s: COMMIT_OWN says index_unsynced=0, the
+ *           file's index entry is the committed blob and git status shows nothing for it;
+ *   nolock  the same without a lock, as a control.
+ * Prints PASS/FAIL per case and CHECK_COMMIT_OWN<TAB>failed=N; exit 1 when N > 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-commit-own.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-commit-own.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-commit-own: REFUSE %s\n", s); sy_exit(2); }
+
+/* sh -c SCRIPT in the clone; stdout+stderr into OUT */
+static int sh(const char *script, char *out, int cap) {
+    char *av[] = {"sh", "-c", (char *)script, 0}; int cut;
+    return sy_run(av, out, cap, &cut);
+}
+
+static void case_(const char *name, int lock_s) {
+    char out[8192], script[2048];
+    if (cx_fmt(script, sizeof script,
+        "cd out/check-commit-own/clone && printf 'n\\n' > %s.txt && "
+        "if [ %d -gt 0 ]; then ( touch .git/index.lock; sleep %d; rm -f .git/index.lock ) & sleep 0.3; fi; "
+        "sh ./unisacc.com tools/commit-own.cx -- -m %s --whole %s.txt 2>&1 | tail -1; wait; "
+        "echo STATUS; git status --short -- %s.txt; echo ENTRY; git ls-files -s -- %s.txt | cut -c1-6",
+        name, lock_s, lock_s, name, name, name, name)) die("script");
+    sh(script, out, sizeof out);
+    {   const char *a = "index_unsynced=0", *b = "STATUS\nENTRY\n100644";
+        ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 && tx_find(out, tx_len(out, sizeof out), b, tx_len(b, 64)) >= 0, name); }
+}
+
+int main(void) {
+    char out[8192];
+    if (sh("rm -rf out/check-commit-own && mkdir -p out/check-commit-own && git clone -q --local . out/check-commit-own/clone && "
+           "cp unisacc.com out/check-commit-own/clone/ && cp tools/commit-own.cx out/check-commit-own/clone/tools/ && "
+           "mkdir -p out/check-commit-own/clone/out && cd out/check-commit-own/clone && git config user.email t@t && git config user.name t", out, sizeof out) != 0)
+        die("cannot prepare the clone");
+    case_("nolock", 0);
+    case_("lock", 4);
+    sy_printf("CHECK_COMMIT_OWN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

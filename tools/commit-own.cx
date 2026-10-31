@@ -11,10 +11,13 @@
  * staged that path) or a blob the path had in one of its last 50 commits (a stale, already-committed version --
  * leaving it would let a later plain `git commit` put the old file back); an entry that already is the new blob
  * is left silently; any other staged version is someone's work, left alone, and a NOTE line says so.
- * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M.  Exit 0, 1 when git refuses, 2 on usage. */
+ * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
+ * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 
@@ -65,7 +68,7 @@ static int committed_before(const char *path, const char *blob) {
 }
 
 int main(int argc, char **argv) {
-    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0;
+    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0;
     char idx[400], blob[CO_MAX][64], out[8192], root[4096];
     while (a < argc) {
         if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
@@ -119,10 +122,23 @@ int main(int argc, char **argv) {
             if (ib[0] && tx_eqz(ib, blob[k])) continue;   /* already the committed blob */
             if (!ib[0] || tx_eqz(ib, old[k]) || committed_before(path[k], ib)) {
                 if (tx_snprintf(info, sizeof info, "%s,%s,%s", im[0] ? im : "100644", blob[k], path[k]) >= (int)sizeof info) continue;
-                {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; run(v, out, sizeof out); }
+                /* git update-index fails when another git process holds .git/index.lock (an agent's git status
+                   refreshes the index): retry, then check the entry really is the committed blob.  Ignoring the
+                   failure left new files staged as deletions (penoff, macbyt: the last paths of a batch). */
+                {   int tries, good = 0;
+                    for (tries = 0; tries < 12 && !good; tries++) {
+                        char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; char nb[48], nm[8];
+                        if (tries) sy_sleep_ms(150 + 100 * tries);
+                        run(v, out, sizeof out);
+                        entry(0, path[k], nb, nm);
+                        good = nb[0] && tx_eqz(nb, blob[k]);
+                    }
+                    if (!good) { sy_printf("NOTE\t%s\tthe shared index could not be updated after 12 tries (index.lock?); run: git update-index --add --cacheinfo %s\n", path[k], info); lost++; }
+                }
             } else printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
         }
-        printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\n", newc, np, kept);
+        printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
+        if (lost) return 1;   /* committed, but the shared index still shows these paths as staged deletions */
     }
     return 0;
 }
