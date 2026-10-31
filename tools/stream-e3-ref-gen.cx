@@ -1,0 +1,176 @@
+/* tools/stream-e3-ref-gen.cx -- e3.ref.hostile, e3.ref.missing-input, e3.rec.after-refusal.
+ * One process writes the fixtures, runs them, then checks the return-7 tape
+ * after each refusal. The oracle file is tools/stream-e3-return7.tape, the same
+ * 592 bytes as tape_oracle in tests/interfaces-lnx-x86_64.cx.
+ * --check does not compile.
+ *   sh ./unisacc.com tools/stream-e3-ref-gen.cx -- --check
+ *   sh ./unisacc.com tools/stream-e3-ref-gen.cx --
+ * The no-argument form uses the repo and out/e3ref-<pid>. This tool does not edit the product.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char root[4096], outdir[4200], bound[4400], product[4400];
+static int npass, nfail, rf;
+static void die(const char *s) { sy_eprintf("stream-e3-ref: REFUSE %s\n", s); sy_exit(2); }
+static void path(char *p, long cap, const char *a, const char *b) {
+    int n = tx_snprintf(p, (size_t)cap, "%s/%s", a, b);
+    if (n < 0 || (long)n >= cap) die("path");
+}
+static void saved(const char *p, const char *s, long n) {
+    int f = sy_open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (f < 0) die("exclusive create");
+    if (sy_write_all(f, s, n)) die("write");
+    if (sy_close(f)) die("close");
+}
+static void savedz(const char *p, const char *s) {
+    long n = tx_len(s, 400);
+    if (n < 0) die("text length");
+    saved(p, s, n);
+}
+static int runv(char *const argv[], int secs, np_result *r) {
+    char why[1024], sec[16], *v[24]; int n = 0;
+    tx_snprintf(sec, sizeof sec, "%d", secs);
+    v[n++] = bound; v[n++] = sec;
+    for (int i = 0; argv[i]; i++) { if (n >= 22) die("argv"); v[n++] = argv[i]; }
+    v[n] = 0;
+    return np_run(v, root, 0, secs + 2, r, why, sizeof why);
+}
+static int has(const char *s, long n, const char *lit) {
+    long L = tx_len(lit, 200), i;
+    if (!s || L < 0 || L > n) return 0;
+    for (i = 0; i + L <= n; i++) {
+        char tmp[200];
+        if (tx_copy(tmp, (long)sizeof tmp, s + i, L)) return 0;
+        if (tx_eqz(tmp, lit)) return 1;
+    }
+    return 0;
+}
+static void row(const char *cell, const char *label, int ok) {
+    char line[256];
+    int z = tx_snprintf(line, sizeof line, "%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label);
+    if (z < 0 || (size_t)z >= sizeof line || sy_write_all(rf, line, z)) die("results");
+    sy_printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label);
+    if (ok) npass++; else nfail++;
+}
+static void write_paren(const char *p) {
+    static char buf[4096];
+    long n = 0; int i;
+    const char *head = "int main(void) { return ";
+    const char *mid = "10-3";
+    const char *tail = "; }\n";
+    int z = tx_snprintf(buf, sizeof buf, "%s", head);
+    if (z < 0) die("paren");
+    n = z;
+    for (i = 0; i < 1000; i++) { if (n + 1 >= (long)sizeof buf) die("paren"); buf[n++] = '('; }
+    z = tx_snprintf(buf + n, sizeof buf - (size_t)n, "%s", mid);
+    if (z < 0 || (size_t)z >= sizeof buf - (size_t)n) die("paren");
+    n += z;
+    for (i = 0; i < 1000; i++) { if (n + 1 >= (long)sizeof buf) die("paren"); buf[n++] = ')'; }
+    z = tx_snprintf(buf + n, sizeof buf - (size_t)n, "%s", tail);
+    if (z < 0 || (size_t)z >= sizeof buf - (size_t)n) die("paren");
+    n += z;
+    saved(p, buf, n);
+}
+/* Both sides must be the 592-byte return-7 tape from tests/interfaces-lnx-x86_64.cx. */
+static int file_eq(const char *a, const char *b) {
+    size_t na = 0, nb = 0; char *x = cx_read(a, &na), *y = cx_read(b, &nb); long i;
+    if (!x || !y || na != 592 || nb != 592) return 0;
+    for (i = 0; i < 592; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+static int tape_of(const char *src, const char *out) {
+    np_result r; char *v[] = {"sh", product, (char *)src, "-O0", "-S", "-o", (char *)out, 0};
+    int bad = runv(v, 15, &r) || r.rc;
+    np_free(&r);
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    int check = argc >= 2 && tx_eqz(argv[1], "--check");
+    char okc[4400], self[4400], trunc[4400], paren[4400], adir[4400], miss[4400];
+    char oracle[4400], reftape[4400], a1[4400], a2[4400], a3[4400], a4[4400], res[4400];
+    if (argc != 1 && !check) { sy_eprintf("usage: [--check]\n"); return 2; }
+    if (sy_realpath(".", root, (int)sizeof root) < 0) die("root");
+    if (check) { sy_printf("CHECK\tstream-e3-ref\tok=3\n"); return 0; }
+    {
+        int z = tx_snprintf(outdir, sizeof outdir, "%s/out/e3ref-%d", root, (int)sy_pid());
+        if (z < 0 || (size_t)z >= sizeof outdir) die("out");
+    }
+    if (sy_mkdir(outdir, 0700)) die("out exists or unusable");
+    path(bound, (long)sizeof bound, root, "tools/bound");
+    path(product, (long)sizeof product, root, "unisacc.com");
+    path(okc, (long)sizeof okc, outdir, "ok.c");
+    path(self, (long)sizeof self, outdir, "self.c");
+    path(trunc, (long)sizeof trunc, outdir, "trunc.c");
+    path(paren, (long)sizeof paren, outdir, "paren.c");
+    path(adir, (long)sizeof adir, outdir, "adir.c");
+    path(miss, (long)sizeof miss, outdir, "missing.c");
+    path(oracle, (long)sizeof oracle, outdir, "oracle.tape");
+    path(reftape, (long)sizeof reftape, root, "tools/stream-e3-return7.tape");
+    path(a1, (long)sizeof a1, outdir, "after-self.tape");
+    path(a2, (long)sizeof a2, outdir, "after-trunc.tape");
+    path(a3, (long)sizeof a3, outdir, "after-missing.tape");
+    path(a4, (long)sizeof a4, outdir, "after-dir.tape");
+    path(res, (long)sizeof res, outdir, "results.tsv");
+    savedz(okc, "int main(void){return 7;}\n");
+    savedz(self, "struct S { struct S inner; };\nint main(void){return 0;}\n");
+    savedz(trunc, "int main(void) { return 0;\n");
+    write_paren(paren);
+    if (sy_mkdir(adir, 0700)) die("directory fixture");
+    rf = sy_open(res, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (rf < 0) die("results");
+    if (tape_of(okc, oracle)) die("oracle tape");
+    row("e3.rec.after-refusal", "clean-equals-literal", file_eq(oracle, reftape));
+    {
+        np_result r; char *v[] = {"sh", product, "-run", paren, 0};
+        int bad = runv(v, 20, &r);
+        int ok = !bad && r.rc == 7 && !r.outn && !r.errn;
+        row("e3.ref.hostile", "paren-1000-exit7", ok);
+        np_free(&r);
+    }
+    {
+        np_result r; char *v[] = {"sh", product, "-run", self, 0};
+        int bad = runv(v, 15, &r);
+        int ok = !bad && r.rc == 1 && !r.outn && has(r.err, r.errn, "not covered: a struct member of struct type");
+        row("e3.ref.hostile", "self-struct-named", ok);
+        np_free(&r);
+        ok = !tape_of(okc, a1) && file_eq(a1, reftape);
+        row("e3.rec.after-refusal", "after-self-struct", ok);
+    }
+    {
+        np_result r; char *v[] = {"sh", product, "-run", trunc, 0};
+        int bad = runv(v, 15, &r);
+        int ok = !bad && r.rc == 1 && !r.outn && has(r.err, r.errn, "this is not the start of an expression");
+        row("e3.ref.hostile", "truncated-named", ok);
+        np_free(&r);
+        ok = !tape_of(okc, a2) && file_eq(a2, reftape);
+        row("e3.rec.after-refusal", "after-truncated", ok);
+    }
+    {
+        np_result r; char *v[] = {"sh", product, "-run", miss, 0};
+        int bad = runv(v, 15, &r);
+        int ok = !bad && r.rc == 1 && !r.outn && has(r.err, r.errn, "ENOENT");
+        row("e3.ref.missing-input", "missing-enoent", ok);
+        np_free(&r);
+        ok = !tape_of(okc, a3) && file_eq(a3, reftape);
+        row("e3.rec.after-refusal", "after-missing", ok);
+    }
+    {
+        np_result r; char *v[] = {"sh", product, "-run", adir, 0};
+        int bad = runv(v, 15, &r);
+        int ok = !bad && r.rc != 0 && !r.outn && has(r.err, r.errn, "cannot read") && has(r.err, r.errn, "cannot read input");
+        row("e3.ref.missing-input", "directory-named", ok);
+        np_free(&r);
+        ok = !tape_of(okc, a4) && file_eq(a4, reftape);
+        row("e3.rec.after-refusal", "after-directory", ok);
+    }
+    if (sy_close(rf)) die("results");
+    sy_printf("STREAM_E3_REF\tassertions=%d\tfailed=%d\n", npass + nfail, nfail);
+    return nfail ? 1 : 0;
+}
