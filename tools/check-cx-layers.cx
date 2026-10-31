@@ -61,6 +61,7 @@ static int cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_und_total;
 static int cl_domain; static long cl_bytes;
 static char cl_scan_path[CL_PATH]; static long cl_scan_len;
 static int cl_dig; /* bit 1 soft used, bit 2 AF used; 0 none, 3 mixed */
+static int cl_window_moved;
 static int cl_man_dig;
 static char cl_cur_mod[128];
 static struct { char path[CL_PATH]; char mod[128]; char why[256]; int used; } cl_wl[CL_WL];
@@ -429,13 +430,28 @@ static void cl_shard_file(const char *srcpath, const char *sha) {
         }
     }
 }
+static int cl_unesc(const char *in, long n, char *out, long cap) {
+    long i = 0, o = 0;
+    while (i < n) {
+        if (o + 1 >= cap) return -1;
+        if (in[i] == '\\' && i + 1 < n) {
+            char c = in[i + 1];
+            if (c == 't') { out[o++] = '\t'; i += 2; continue; }
+            if (c == 'n') { out[o++] = '\n'; i += 2; continue; }
+            if (c == '\\') { out[o++] = '\\'; i += 2; continue; }
+        }
+        out[o++] = in[i++];
+    }
+    out[o] = 0;
+    return 0;
+}
 static int cl_audit(void) {
     long n, i, a, b;
     char mp[CL_PATH], idx[CL_PATH];
     int w;
     cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
     cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
-    cl_domain = 0; cl_bytes = 0; cl_dig = 0; cl_man_dig = 0;
+    cl_domain = 0; cl_bytes = 0; cl_dig = 0; cl_man_dig = 0; cl_window_moved = 0;
     sy_eprintf("UNDECIDED\tA-INCOMPLETE\tlexical-12 and named-fixtures-30 not implemented (U reconciliation is implemented)\n");
     cl_und_lex++; cl_und_total++;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
@@ -457,9 +473,7 @@ static int cl_audit(void) {
         while (f < b && cl_man[f] != '\t') f = f + 1;
         if (f >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         if (f - a >= CL_PATH - 1) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tPATH-TOO-LONG\t%.80s\n", cl_man + a); continue; }
-        k = 0;
-        while (a < f && k < CL_PATH - 1) path[k++] = cl_man[a++];
-        path[k] = 0;
+        if (cl_unesc(cl_man + a, f - a, path, CL_PATH)) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tPATH-TOO-LONG\t%.80s\n", cl_man + a); continue; }
         if (tx_prefix(path, k, "archive/", 8) || tx_prefix(path, k, "out/", 4)) continue;
         e = f + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
@@ -510,13 +524,16 @@ static int cl_audit(void) {
                   long e2 = q; while (e2 < scn && cl_shard[e2] != '\n') e2++;
                   if (e2 - q >= 2 && cl_shard[q] == 'U' && cl_shard[q + 1] == '\t') {
                       long w = q + 2, m = 0;
-                      while (w < e2 && m < 127) {
-                          char c = cl_shard[w];
-                          if (!(cl_isid((unsigned char)c) || c == '.')) break;
-                          umod[nu][m++] = c; w++;
+                      if (nu >= 128) { too = 1; }
+                      else {
+                          while (w < e2 && m < 127) {
+                              char c = cl_shard[w];
+                              if (!(cl_isid((unsigned char)c) || c == '.')) break;
+                              umod[nu][m++] = c; w++;
+                          }
+                          if (m >= 127) too = 1;
+                          else { umod[nu][m] = 0; nu++; }
                       }
-                      if (nu >= 128 || m >= 127) { too = 1; }
-                      else { umod[nu][m] = 0; nu++; }
                   }
                   q = e2 + 1;
               }
@@ -544,6 +561,39 @@ static int cl_audit(void) {
         }
         cl_domain++; cl_bytes += (long)tx_len(path, CL_PATH);
         cl_shard_file(path, sha);
+    }
+    {   /* last observation: manifest and every source must still match the first read */
+        char mp2[CL_PATH]; long n2, q2 = 0;
+        cl_join(mp2, sizeof mp2, idx, "manifest.tsv");
+        n2 = cl_read(mp2, cl_shard, CL_CAP);
+        if (n2 != cl_man_n || (n2 > 0 && !tx_same(cl_shard, n2, cl_man, cl_man_n))) {
+            cl_und_meta++; cl_und_total++; cl_window_moved = 1;
+            sy_eprintf("UNDECIDED\tMANIFEST-CHANGED\t%s\n", mp2);
+        }
+        if (n2 > 0) {
+            while (q2 < n2) {
+                long a2 = q2, b2, f2, e2, k2; char p2[CL_PATH], h2[65], hex2[65];
+                while (q2 < n2 && cl_shard[q2] != '\n') q2++;
+                b2 = q2; if (q2 < n2) q2++;
+                if (a2 >= b2 || cl_shard[a2] == '#') continue;
+                f2 = a2; while (f2 < b2 && cl_shard[f2] != '\t') f2++;
+                if (f2 >= b2 || f2 - a2 >= CL_PATH - 1) continue;
+                if (cl_unesc(cl_shard + a2, f2 - a2, p2, CL_PATH)) continue;
+                e2 = f2 + 1; { int sk = 0; while (e2 < b2 && sk < 4) { while (e2 < b2 && cl_shard[e2] != '\t') e2++; if (e2 < b2) { e2++; sk++; } } }
+                if (e2 >= b2) continue;
+                k2 = 0; while (e2 < b2 && k2 < 64) h2[k2++] = cl_shard[e2++]; h2[k2] = 0;
+                if (k2 != 64) continue;
+                { char sp2[CL_PATH]; long sn2; sy_stat_t st2;
+                  cl_join(sp2, sizeof sp2, cl_root, p2);
+                  if (sy_stat(sp2, &st2) < 0 || st2.size == 0) continue;
+                  sn2 = cl_read(sp2, cl_src, CL_CAP);
+                  if (sn2 <= 0 || sn2 == CL_CAP - 1) { cl_und_io++; cl_und_total++; cl_window_moved = 1; continue; }
+                  if (sn2 < 65536) cx_sha256_hex(cl_src, (size_t)sn2, hex2);
+                  else if (sy_sha256_hex(cl_src, sn2, hex2) != 0) cx_sha256_hex(cl_src, (size_t)sn2, hex2);
+                  if (!cl_eq(hex2, h2)) { cl_und_io++; cl_und_total++; cl_window_moved = 1; sy_eprintf("UNDECIDED\tSOURCE-CHANGED-AFTER-READ\t%s\n", p2); }
+                }
+            }
+        }
     }
     for (w = 0; w < cl_nwl; w++) if (!cl_wl[w].used) {
         cl_fail++;
@@ -822,9 +872,9 @@ int main(int argc, char **argv) {
     rc = cl_wl_load(wlp);
     if (rc < 0) { sy_eprintf("FAIL\tWHITELIST\tparse %s\n", wlp); return 1; }
     rc = cl_audit();
-    sy_printf("CX_LAYERS_SCOPE\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tcoverage=manifest-only\tsymlinks=UNKNOWN\ttracked_reconciliation=NOT-DONE(B)\tshard_body_verified=0\tundecided_lex=%d\tundecided_recon=%d\tundecided_meta=%d\tundecided_io=%d\tphase=partial\twindow=UNMEASURED\n",
+    sy_printf("CX_LAYERS_SCOPE\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tcoverage=manifest-only\tsymlinks=UNKNOWN\ttracked_reconciliation=NOT-DONE(B)\tshard_body_verified=0\tundecided_lex=%d\tundecided_recon=%d\tundecided_meta=%d\tundecided_io=%d\tphase=partial\twindow=%s\n",
               cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail,
-              cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io);
+              cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_window_moved ? "MOVED" : "STABLE");
     { char dhex[65]; dhex[0] = 0;
       if (cl_man_n < 65536) { cx_sha256_hex(cl_man, (size_t)cl_man_n, dhex); cl_man_dig |= 1; }
       else if (sy_sha256_hex(cl_man, cl_man_n, dhex) != 0) { cx_sha256_hex(cl_man, (size_t)cl_man_n, dhex); cl_man_dig |= 1; }
