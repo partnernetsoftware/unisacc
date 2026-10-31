@@ -290,6 +290,7 @@ STATE43：**21782dd5 冻结会话二十五批（omp-grk，2026-11-01）**：`out
 STATE43：**21782dd5 冻结会话三十三批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 8/8 PASS：`matrix-waive`、`cx-bounded`、`cx-codec`、`cx-core-alu`、`cx-core-bytes`、`cx-core-output`、`cx-core-sparse`、`cx-core-stack`。会话里 33 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话四十一批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 8/8 PASS：`cx-core-stack-empty`、`cx-core-transition`、`cx-driver-archive`、`cx-driver-args`、`cx-driver-cli`、`cx-driver-compat`、`cx-driver-deps`、`cx-driver-environment`。会话里 41 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话四十九批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 8/8 PASS：`cx-driver-input`、`cx-driver-output`、`cx-driver-path`、`cx-driver-route`、`cx-l0-arena`、`cx-l0-text`、`cx-l0-fmt`、`cx-l0-sys`。会话里 49 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结会话五十七批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 8/8 PASS：`cx-l0-crypto-b64`、`cx-l0-crypto-bn`、`cx-l0-crypto-ct`、`cx-l0-crypto-der`、`cx-l0-crypto-hkdf`、`cx-l0-crypto-sha256`、`cx-l0-sys-net`、`cx-l0-sys-guard`。会话里 57 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
