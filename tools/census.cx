@@ -1,0 +1,118 @@
+/* tools/census.cx -- run every materials-free IMPLEMENTED lnx/x86_64 batch once against the installed product and keep a
+ * resumable census.  This is a survey for finding batches pinned to behaviour the product no longer has; it is NOT a
+ * qualification (no session, no receipts, nothing cached counts as PASS: tools/all-waves.cx + tests/all-aggregate.cx decide that).
+ *
+ *   sh ./unisacc.com tools/census.cx -- ROOT OUTDIR [--seconds N] [--max K] [--only ID,ID] [--redo ID,ID]
+ *   sh ./unisacc.com tools/census.cx -- ROOT OUTDIR --report
+ *
+ * OUTDIR is a directory below ROOT/out (created when absent); results.tsv in it holds one line per batch run:
+ *   ID<TAB>STATUS<TAB>RC<TAB>MS     STATUS = the BATCH_RUN status (PASS|FAIL|UNKNOWN) or NOEXEC when no BATCH_RUN line came back
+ * and log/ID.log the first 4 KiB of stdout+stderr of a batch that was not PASS.  A rerun skips ids already in results.tsv
+ * (--redo removes them first), runs the registry rows in registry order one at a time, each under tools/bound with the
+ * batch's own budget, and stops when --seconds (default 3000) of wall time are used or --max batches ran.  Batches with
+ * declared materials, other platforms and non-IMPLEMENTED rows are counted, never run.  --report prints the counts and the
+ * non-PASS ids.  Prints CENSUS<TAB>ran=N<TAB>pass=P<TAB>fail=F<TAB>unknown=U<TAB>left=L<TAB>skipped_materials=M. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.sig
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+static char root[4096], outdir[4400], results[4600];
+
+static void die(const char *s) { sy_eprintf("census: REFUSE %s\n", s); sy_exit(2); }
+static int col(const char *s, long n, int idx, char *out, long cap) { long off, len; if (tx_field(s, n, '\t', idx, &off, &len) || tx_copy(out, cap, s + off, len)) return 0; return 1; }
+
+/* 1 when ID is in the comma list LIST (0 list = never) */
+static int in_list(const char *list, const char *id) {
+    long il = tx_len(id, 128), at = 0, n; if (!list) return 0; n = tx_len(list, 4096);
+    while (at <= n) { long e = tx_chr(list + at, n - at, ','), l = e < 0 ? n - at : e; if (l == il && tx_same(list + at, l, id, il)) return 1; at += l + 1; }
+    return 0;
+}
+/* 1 when results text T has a line whose first field is ID */
+static int done(const char *t, long n, const char *id) {
+    long at = 0, il = tx_len(id, 128);
+    while (at < n) { long e = tx_chr(t + at, n - at, '\n'), l = e < 0 ? n - at : e, tab = tx_chr(t + at, l, '\t'); if (tab == il && tx_same(t + at, tab, id, il)) return 1; at += l + 1; }
+    return 0;
+}
+static void append(const char *line) {
+    size_t n = 0; char *t = sy_exists(results) == 1 ? cx_read(results, &n) : 0; long ll = tx_len(line, 600); char *o = mm_alloc((long)n + ll + 1);
+    if (!o) die("alloc");
+    if (t) mm_copy(o, (long)n + ll + 1, t, (long)n);
+    mm_copy(o + n, ll + 1, line, ll);
+    if (cx_write(results, o, n + (size_t)ll)) die("write results");
+    mm_free(o); if (t) mm_free(t);
+}
+
+int main(int argc, char **argv) {
+    const char *only = 0, *redo = 0; long limit_s = 3000, max = 1 << 30, t0 = sy_now_ms(); int report = 0, i;
+    char reg[4700], bound[4500], com[4500], runb[4500], parent[4700], logd[4700]; size_t rn, tn = 0; char *r, *t;
+    long at = 0, ran = 0, pass = 0, fail = 0, unknown = 0, left = 0, skipped = 0;
+    if (argc < 3 || argv[1][0] != '/' ) die("usage ROOT(abs) OUTDIR(abs) [--seconds N] [--max K] [--only ..] [--redo ..] | --report");
+    tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096)); tx_copy(outdir, sizeof outdir, argv[2], tx_len(argv[2], 4096));
+    for (i = 3; i < argc; i++) {
+        if (tx_eqz(argv[i], "--report")) report = 1;
+        else if (tx_eqz(argv[i], "--seconds") && i + 1 < argc) limit_s = tx_strtol(argv[++i], 0, 10);
+        else if (tx_eqz(argv[i], "--max") && i + 1 < argc) max = tx_strtol(argv[++i], 0, 10);
+        else if (tx_eqz(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+        else if (tx_eqz(argv[i], "--redo") && i + 1 < argc) redo = argv[++i];
+        else die("unknown option");
+    }
+    if (cx_fmt(reg, sizeof reg, "%s/tests/batches.tsv", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(runb, sizeof runb, "%s/tests/run-batch.cx", root)
+        || cx_fmt(results, sizeof results, "%s/results.tsv", outdir) || cx_fmt(parent, sizeof parent, "%s/run", outdir) || cx_fmt(logd, sizeof logd, "%s/log", outdir)) die("paths");
+    if (sy_exists(outdir) != 1 && sy_mkdir(outdir, 0755)) die("outdir");
+    if (sy_exists(parent) != 1 && sy_mkdir(parent, 0755)) die("run dir");
+    if (sy_exists(logd) != 1 && sy_mkdir(logd, 0755)) die("log dir");
+    if (redo) {   /* drop the listed ids from results.tsv (and their run directories) */
+        size_t n = 0; char *old = sy_exists(results) == 1 ? cx_read(results, &n) : 0; long a = 0; char *o = mm_alloc((long)n + 1); long q = 0;
+        if (!o) die("alloc");
+        while (old && a < (long)n) { long e = tx_chr(old + a, (long)n - a, '\n'), l = e < 0 ? (long)n - a : e, tab = tx_chr(old + a, l, '\t'); char id[128];
+            if (tab > 0 && tab < 127 && !tx_copy(id, sizeof id, old + a, tab) && in_list(redo, id)) { char d[4800]; if (!cx_fmt(d, sizeof d, "%s/%s", parent, id) && sy_exists(d) == 1) cx_rmtree(d); }
+            else { mm_copy(o + q, (long)n - q + 1, old + a, l); q += l; o[q++] = '\n'; }
+            a += l + 1; }
+        if (cx_write(results, o, (size_t)q)) die("rewrite results");
+        mm_free(o); if (old) mm_free(old);
+    }
+    r = cx_read(reg, &rn); if (!r) die("read registry");
+    t = sy_exists(results) == 1 ? cx_read(results, &tn) : 0;
+    while (at < (long)rn) {
+        long e = tx_chr(r + at, (long)rn - at, '\n'), l = e < 0 ? (long)rn - at : e; const char *s = r + at; char id[128], impl[32], plat[32], bud[16], mat[512];
+        at += l + 1;
+        if (!l || !col(s, l, 0, id, sizeof id) || tx_eqz(id, "id") || !col(s, l, 1, impl, sizeof impl) || !col(s, l, 5, plat, sizeof plat) || !col(s, l, 6, bud, sizeof bud) || !col(s, l, 7, mat, sizeof mat)) continue;
+        if (!tx_eqz(impl, "IMPLEMENTED") || !tx_eqz(plat, "lnx/x86_64")) continue;
+        if (!tx_eqz(mat, "-")) { skipped++; continue; }
+        if (only && !in_list(only, id)) continue;
+        if (report || (t && done(t, (long)tn, id)) || ran >= max || sy_now_ms() - t0 > limit_s * 1000 - (tx_strtol(bud, 0, 10) + 15) * 1000) { if (!report && !(t && done(t, (long)tn, id))) left++; continue; }
+        {   char *v[10], sb[16], line[600], head[4096]; np_result res; char why[1024]; long b0 = sy_now_ms(), ms; const char *st = "NOEXEC"; long hp;
+            if (cx_fmt(sb, sizeof sb, "%s", bud)) die("budget");
+            v[0] = bound; v[1] = sb; v[2] = "sh"; v[3] = com; v[4] = runb; v[5] = "--"; v[6] = root; v[7] = parent; v[8] = id; v[9] = 0;
+            if (np_run(v, root, 0, (int)tx_strtol(bud, 0, 10) + 10, &res, why, sizeof why)) { res.rc = -1; res.out = 0; res.outn = 0; res.err = 0; res.errn = 0; }
+            ms = sy_now_ms() - b0;
+            hp = res.out ? tx_find(res.out, (long)res.outn, "BATCH_RUN\tid=", 13) : -1;
+            if (hp >= 0) { long sp = tx_find(res.out + hp, (long)res.outn - hp, "status=", 7);
+                if (sp >= 0) { const char *x = res.out + hp + sp + 7; st = !tx_same(x, 4, "PASS", 4) ? (!tx_same(x, 4, "FAIL", 4) ? (!tx_same(x, 7, "UNKNOWN", 7) ? "NOEXEC" : "UNKNOWN") : "FAIL") : "PASS"; } }
+            if (cx_fmt(line, sizeof line, "%s\t%s\t%d\t%ld\n", id, st, res.rc, ms)) die("line");
+            append(line); ran++;
+            if (tx_eqz(st, "PASS")) pass++; else { char lp[4900]; long hn = 0;
+                if (tx_eqz(st, "FAIL")) fail++; else unknown++;
+                if (res.out) { long c = res.outn < 3000 ? (long)res.outn : 3000; mm_copy(head, sizeof head, res.out, c); hn = c; }
+                if (res.err && hn < 4000) { long c = res.errn < 1000 ? (long)res.errn : 1000; mm_copy(head + hn, sizeof head - hn, res.err, c); hn += c; }
+                if (!cx_fmt(lp, sizeof lp, "%s/%s.log", logd, id)) cx_write(lp, head, (size_t)hn); }
+            if (res.out || res.err) np_free(&res);
+        }
+    }
+    if (t) mm_free(t);
+    {   size_t n = 0; char *rs = sy_exists(results) == 1 ? cx_read(results, &n) : 0; long a = 0, p2 = 0, f2 = 0, u2 = 0, tot = 0;
+        while (rs && a < (long)n) { long e = tx_chr(rs + a, (long)n - a, '\n'), l = e < 0 ? (long)n - a : e; char st[16];
+            if (col(rs + a, l, 1, st, sizeof st)) { tot++; if (tx_eqz(st, "PASS")) p2++; else { if (tx_eqz(st, "FAIL")) f2++; else u2++; if (report) sy_printf("NONPASS\t%.*s\n", (int)l, rs + a); } }
+            a += l + 1; }
+        if (rs) mm_free(rs);
+        sy_printf("CENSUS\tran=%ld\tpass=%ld\tfail=%ld\tunknown=%ld\tleft=%ld\tskipped_materials=%ld\ttotal_recorded=%ld\n", ran, p2, f2, u2, left, skipped, tot);
+    }
+    (void)pass; (void)fail; (void)unknown;
+    return 0;
+}

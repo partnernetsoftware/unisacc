@@ -1,0 +1,81 @@
+/* tools/matrix-stale.cx -- demote domain-matrix cells whose COVERED_LOCAL evidence cites a batch that is red on the installed
+ * product (found by tools/census.cx): state COVERED_LOCAL -> MISSING, evidence = "STALE-RED(REASON): " + the old evidence, so
+ * the cell stops counting as covered and the old evidence stays readable.  A re-run of the batch on the final candidate and
+ * tools/matrix-flip-gen.cx (MISSING -> COVERED_LOCAL) bring the cell back.
+ *
+ *   sh ./unisacc.com tools/matrix-stale.cx -- ROOT MAP.tsv OUT_DIR            write OUT_DIR/<matrix>-domain-matrix.tsv
+ *   sh ./unisacc.com tools/matrix-stale.cx -- ROOT MAP.tsv --check [OUT_DIR]  verify the map only (and, with OUT_DIR, that its files
+ *                                                                            equal a fresh generation)
+ * MAP rows: matrix<TAB>cell<TAB>reason.  Every row must match exactly one cell of tests/<matrix>-domain-matrix.tsv (column 2)
+ * whose state (column 4) is COVERED_LOCAL.  Rows that are not mapped are copied byte for byte.  Never writes into tests/. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXM 64
+typedef struct { char matrix[48], cell[128], reason[400]; int used; } Row;
+static Row rows[MAXM]; static int nrows;
+static char root[4096];
+
+static void die(const char *s, const char *d) { sy_eprintf("matrix-stale: REFUSE %s%s%s\n", s, d ? " " : "", d ? d : ""); sy_exit(2); }
+static int col(const char *s, long n, int idx, char *out, long cap) { long off, len; if (tx_field(s, n, '\t', idx, &off, &len) || tx_copy(out, cap, s + off, len)) return 0; return 1; }
+static void put(char **o, long *on, long *cap, const char *s, long n) {
+    if (*on + n + 1 > *cap) { char *g = mm_alloc(*cap * 2 + n + 1); if (!g) die("alloc", 0); mm_copy(g, *cap * 2 + n + 1, *o, *on); mm_free(*o); *o = g; *cap = *cap * 2 + n + 1; }
+    mm_copy(*o + *on, *cap - *on, s, n); *on += n;
+}
+
+int main(int argc, char **argv) {
+    size_t mn, n; char *map, *outbuf, mp[4600], in[4700]; int check, k, any = 0; const char *outdir;
+    char names[MAXM][48]; int nnames = 0;
+    if (argc < 4 || argv[1][0] != '/') die("usage ROOT(abs) MAP.tsv OUT_DIR | ROOT MAP.tsv --check [OUT_DIR]", 0);
+    tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096));
+    check = tx_eqz(argv[3], "--check"); outdir = check ? (argc > 4 ? argv[4] : 0) : argv[3];
+    map = cx_read(argv[2], &mn); if (!map) die("map", argv[2]);
+    for (long at = 0; at < (long)mn;) {
+        long e = tx_chr(map + at, (long)mn - at, '\n'), l = e < 0 ? (long)mn - at : e; const char *s = map + at; at += l + 1;
+        if (!l || s[0] == '#' || tx_same(s, 7, "matrix\t", 7)) continue;
+        if (nrows == MAXM) die("map size", 0);
+        if (!col(s, l, 0, rows[nrows].matrix, 48) || !col(s, l, 1, rows[nrows].cell, 128) || !col(s, l, 2, rows[nrows].reason, 400)) die("map row", 0);
+        nrows++;
+    }
+    for (k = 0; k < nrows; k++) { int j = 0; while (j < nnames && !tx_eqz(names[j], rows[k].matrix)) j++; if (j == nnames) { tx_copy(names[nnames], 48, rows[k].matrix, tx_len(rows[k].matrix, 48)); nnames++; } }
+    for (k = 0; k < nnames; k++) {
+        char *s; long on = 0, cap; if (cx_fmt(in, sizeof in, "%s/tests/%s-domain-matrix.tsv", root, names[k])) die("path", 0);
+        s = cx_read(in, &n); if (!s) die("matrix read", in);
+        cap = (long)n + 4096; outbuf = mm_alloc(cap); if (!outbuf) die("alloc", 0);
+        for (long at = 0; at < (long)n;) {
+            long e = tx_chr(s + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e; const char *ln = s + at; char cell[128], state[64]; int hit = -1, i;
+            if (l && ln[0] != '#' && col(ln, l, 1, cell, sizeof cell) && col(ln, l, 3, state, sizeof state))
+                for (i = 0; i < nrows; i++) if (tx_eqz(rows[i].matrix, names[k]) && tx_eqz(rows[i].cell, cell)) hit = i;
+            if (hit < 0) put(&outbuf, &on, &cap, ln, l);
+            else {
+                char head[512], buf[4096]; long off, len, c, nc = tx_fields(ln, l, '\t');
+                if (!tx_eqz(state, "COVERED_LOCAL")) die("cell is not COVERED_LOCAL:", rows[hit].cell);
+                if (rows[hit].used++) die("cell mapped twice:", rows[hit].cell);
+                for (c = 0; c < nc; c++) {
+                    if (tx_field(ln, l, '\t', c, &off, &len)) die("row columns", rows[hit].cell);
+                    if (c) put(&outbuf, &on, &cap, "\t", 1);
+                    if (c == 3) put(&outbuf, &on, &cap, "MISSING", 7);
+                    else if (c == 4) { if (cx_fmt(head, sizeof head, "STALE-RED(%s): ", rows[hit].reason)) die("reason too long", rows[hit].cell); put(&outbuf, &on, &cap, head, tx_len(head, sizeof head)); put(&outbuf, &on, &cap, ln + off, len); }
+                    else put(&outbuf, &on, &cap, ln + off, len);
+                }
+                (void)buf; any++;
+            }
+            if (e >= 0) put(&outbuf, &on, &cap, "\n", 1);
+            at += l + 1;
+        }
+        if (outdir) {
+            char op[4800]; if (cx_fmt(op, sizeof op, "%s/%s-domain-matrix.tsv", outdir, names[k])) die("path", 0);
+            if (check) { size_t gn; char *g = cx_read(op, &gn); if (!g || (long)gn != on || !mm_same(g, outbuf, on)) die("stale-output", op); mm_free(g); }
+            else { if (sy_exists(outdir) != 1 && sy_mkdir(outdir, 0700)) die("out dir", outdir); if (cx_write(op, outbuf, (size_t)on)) die("write", op); }
+        }
+        mm_free(outbuf); mm_free(s);
+    }
+    for (k = 0; k < nrows; k++) if (!rows[k].used) die("map row matches no COVERED_LOCAL cell:", rows[k].cell);
+    sy_printf("MATRIX_STALE\tmode=%s\tmapped=%d\tdemoted=%d\n", check ? "check" : "gen", nrows, any);
+    return 0;
+}
