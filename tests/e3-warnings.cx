@@ -1,0 +1,123 @@
+/* tests/e3-warnings.cx -- -Wall and -Wextra on the installed product.
+ *
+ *   sh ./unisacc.com tests/e3-warnings.cx
+ *
+ * -Werror is not a pass condition (C44-WERROR-01). The quiet compile must
+ * write an image and emit none of the four tags. Each warned compile must
+ * exit 0 and emit the tag from the warning tables:
+ *   [-Wreturn-type] [-Wint-conversion] [-Wunused-variable] [-Wformat]
+ * -Wall and -Wextra are separate compiles of the same source. Prints
+ * E3_WARNINGS once. Exit 0 only when nothing failed.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static char rec[4096];
+static long recn;
+static int assertions, failures;
+
+static void die(const char *s) {
+    sy_eprintf("e3-warnings: REFUSE %s\n", s);
+    sy_exit(2);
+}
+
+static void ck(int ok, const char *name) {
+    char line[192];
+    long n;
+    assertions++;
+    if (ok) sy_printf("PASS\te3-warnings.%s\n", name);
+    else { failures++; sy_printf("FAIL\te3-warnings.%s\n", name); }
+    if (cx_fmt(line, sizeof line, "%s\te3-warnings.%s\n", ok ? "PASS" : "FAIL", name)) die("rec line");
+    n = tx_len(line, (long)sizeof line);
+    if (n < 0 || recn + n >= (long)sizeof rec) die("rec bound");
+    if (cx_fmt(rec + recn, (size_t)((long)sizeof rec - recn), "%s", line)) die("rec copy");
+    recn += n;
+}
+
+static void write_new(const char *path, const void *bytes, long n) {
+    int fd = sy_open_new(path, 0644);
+    if (fd < 0) die("create");
+    if (sy_write_all(fd, bytes, n) || sy_close(fd)) die("write");
+}
+
+static int has_bytes(const char *b, long n, const char *s) {
+    long sn = tx_len(s, 80), i;
+    if (!b || sn < 0 || sn > n) return 0;
+    for (i = 0; i + sn <= n; i++) if (tx_same(b + i, sn, s, sn)) return 1;
+    return 0;
+}
+
+static void compile(const char *flag, const char *src, const char *out, const char *tag) {
+    char *v[16], why[512], name[64];
+    np_result r;
+    int n = 0;
+    v[n++] = bound; v[n++] = "12"; v[n++] = "env"; v[n++] = "-u"; v[n++] = "UNISA_CONTAINER";
+    v[n++] = "sh"; v[n++] = com; v[n++] = "-O0"; v[n++] = "-b"; v[n++] = "lnx/x86_64";
+    if (flag) v[n++] = (char *)flag;
+    v[n++] = "-o"; v[n++] = (char *)out; v[n++] = (char *)src; v[n] = 0;
+    if (np_run(v, root, 0, 16, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, tag);
+    if (flag) {
+        if (cx_fmt(name, sizeof name, "%s-return-type", tag)) die("name");
+        ck(has_bytes(r.err, (long)r.errn, "[-Wreturn-type]"), name);
+        if (cx_fmt(name, sizeof name, "%s-int-conversion", tag)) die("name");
+        ck(has_bytes(r.err, (long)r.errn, "[-Wint-conversion]"), name);
+        if (cx_fmt(name, sizeof name, "%s-unused", tag)) die("name");
+        ck(has_bytes(r.err, (long)r.errn, "[-Wunused-variable]"), name);
+        if (cx_fmt(name, sizeof name, "%s-format", tag)) die("name");
+        ck(has_bytes(r.err, (long)r.errn, "[-Wformat]"), name);
+    } else {
+        ck(r.errn == 0, "quiet-no-stderr");
+        ck(!has_bytes(r.err, (long)r.errn, "[-W"), "quiet-no-warning-tag");
+    }
+    if (cx_fmt(name, sizeof name, "%s-stdout", tag)) die("name");
+    ck(r.outn == 0, name);
+    if (r.rc != 0 && r.err && r.errn > 0) sy_write_all(2, r.err, (long)r.errn);
+    np_free(&r);
+    if (cx_fmt(name, sizeof name, "%s-image", tag)) die("name");
+    ck(sy_exists(out) == 1, name);
+}
+
+int main(void) {
+    static const char quiet_text[] = "int main(void){return 7;}\n";
+    static const char warn_text[] =
+        "int printf(const char *, ...);\n"
+        "int missing_return(void) { }\n"
+        "int main(void) {\n"
+        "  int unused_name;\n"
+        "  int *p;\n"
+        "  p = 1;\n"
+        "  printf(\"%s\\n\", 1);\n"
+        "  return missing_return();\n"
+        "}\n";
+    char qs[4600], ws[4600], qo[4600], wo[4600], xo[4600], res[4800];
+    int pid = sy_pid();
+    long qn = tx_len(quiet_text, 80), wn = tx_len(warn_text, 400);
+    if (qn < 0 || wn < 0) die("source length");
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/e3warn-%d", root, pid)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) != 0) die("work exists");
+    if (sy_mkdir(work, 0700)) die("mkdir work");
+    if (cx_fmt(qs, sizeof qs, "%s/quiet.c", work) || cx_fmt(ws, sizeof ws, "%s/warn.c", work) ||
+        cx_fmt(qo, sizeof qo, "%s/quiet.elf", work) || cx_fmt(wo, sizeof wo, "%s/wall.elf", work) ||
+        cx_fmt(xo, sizeof xo, "%s/wextra.elf", work)) die("leaf");
+    write_new(qs, quiet_text, qn);
+    write_new(ws, warn_text, wn);
+    compile(0, qs, qo, "quiet");
+    compile("-Wall", ws, wo, "wall");
+    compile("-Wextra", ws, xo, "wextra");
+    if (cx_fmt(res, sizeof res, "%s/results.tsv", work)) die("results");
+    write_new(res, rec, recn);
+    sy_printf("E3_WARNINGS\tassertions=%d\tfailed=%d\treceipt=out/e3warn-%d/results.tsv\n",
+              assertions, failures, pid);
+    sy_exit(failures ? 1 : 0);
+    return 1;
+}
