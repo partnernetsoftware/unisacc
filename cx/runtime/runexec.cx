@@ -701,6 +701,145 @@ int ex_ri_argv(int code) {
     return 1;
 }
 
+int st_gap(int mode, int level, char *out, int cap) {
+    const char *name;
+    int i;
+    if (!out || cap <= 0) return 4;
+    if (mode == 1) name = "e2";
+    else if (mode == 4) name = "tokens";
+    else if (mode == 5) name = "object";
+    else if (mode == 2 && level <= 0) name = "tapecheck";
+    else if (mode == 2) name = "e4";
+    else if (mode == 3) name = "memory";
+    else name = "elf";
+    i = 0;
+    while (name[i] && i + 1 < cap) { out[i] = name[i]; i = i + 1; }
+    out[i] = 0;
+    return 0;
+}
+static int ex_ri_e3(const char *route, const unsigned char *bytes, long n) {
+    char stage[160];
+    char err[512];
+    char line[512];
+    char hex[65];
+    char row[1280];
+    char path[4096];
+    char got_stage[160];
+    char got_hex[65];
+    unsigned char key[15];
+    unsigned char *fileb;
+    size_t filen;
+    int i;
+    int k;
+    int ln;
+    int rowc;
+    CxLedgerRow *r;
+    key[0] = 0;
+    i = 0;
+    while (i < 14) { key[i + 1] = (unsigned char)"ri/e3-identity"[i]; i = i + 1; }
+    if (!route || ex_zlen(route) + 4 > 160 || n < 0 || n > 2147483647L || (n && !bytes)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR capture-stage-label\n");
+        return 2;
+    }
+    stage[0] = 'e'; stage[1] = '3'; stage[2] = ':';
+    i = 0; k = 3;
+    while (route[i]) { stage[k] = route[i]; k = k + 1; i = i + 1; }
+    stage[k] = 0;
+    if (!cxsf_stage_label(stage)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR capture-stage-label\n");
+        return 2;
+    }
+    ex_hex_u(bytes ? bytes : (const unsigned char *)"", (int)n, hex);
+    if (cxsf_cap_idline(line, 512, stage, hex)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR capture-stage-label\n");
+        return 2;
+    }
+    ln = ex_zlen(line);
+    if (ex_cap_want) {
+        if (!ex_cap_active) {
+            sy_eprintf("unisacc: INTERFACE_ERROR capture-session-not-initialized\n");
+            return 2;
+        }
+        if (cxsf_cap_full(ex_cap_n, 4096)) {
+            sy_eprintf("unisacc: INTERFACE_ERROR capture-capacity-exceeded\n");
+            return 2;
+        }
+        i = 0; while (i < 512) { err[i] = 0; i = i + 1; }
+        if (ex_cap_new(ex_cap_live, "e3-identity.tsv", (const unsigned char *)line, ln, err, 512)) {
+            sy_eprintf("unisacc: %s\n", err[0] ? err : "INTERFACE_ERROR capture-ledger-write");
+            return 2;
+        }
+        ex_hex_u((const unsigned char *)line, ln, hex);
+        if (cxsf_cap_hex(path, 65, key, 15) || cxsf_cap_row(row, 1280, 1, path, "e3-identity.tsv", ln, hex)) {
+            sy_eprintf("unisacc: INTERFACE_ERROR capture-row-too-long\n");
+            return 2;
+        }
+        if (cxsf_cap_join(path, 4096, ex_cap_live, "resources.tsv") ||
+            ex_cap_append(path, (const unsigned char *)row, ex_zlen(row), 0, err, 512)) {
+            sy_eprintf("unisacc: %s\n", err[0] ? err : "INTERFACE_ERROR capture-ledger-write");
+            return 2;
+        }
+        ex_cap_n = ex_cap_n + 1;
+        return 0;
+    }
+    if (!ex_strict) return 0;
+    if (cxsf_e3_ready(ex_started, ex_led.trace, ex_dir[0] != 0, ex_led.cursor, ex_led.n)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-absent\n");
+        return 2;
+    }
+    r = &ex_led.rows[ex_led.cursor];
+    rowc = cxsf_e3_row(r->kn, 15, r->key, key, r->present, r->value != 0, r->blob);
+    if (rowc == 2) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n");
+        return 2;
+    }
+    if (rowc) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-absent\n");
+        return 2;
+    }
+    fileb = ex_file(0, "e3-identity.tsv", &filen);
+    if (!fileb) {
+        if (cxsf_e3_line(err, 512, ex_errno == 2 ? 0 : 5, ex_errno))
+            sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-absent\n");
+        else sy_eprintf("unisacc: %s\n", err);
+        return 2;
+    }
+    if (!cxsf_companion(fileb, (int)filen, got_stage, 160, got_hex)) {
+        k = cxsf_e3_tail(fileb, (int)filen, (const unsigned char *)line, ln);
+        if (cxsf_e3_cmp_line(err, 512, k == 1 ? 1 : 0, 0, 0))
+            sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-malformed\n");
+        else sy_eprintf("unisacc: %s\n", err);
+        ex_release(fileb);
+        return 2;
+    }
+    if (cxsf_e3_match(fileb, (int)filen, (const unsigned char *)line, ln) ||
+        cxsf_e3_id(got_stage, stage, got_hex, hex)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-identity-mismatch input e3-second\n");
+        ex_release(fileb);
+        return 2;
+    }
+    if (cxsf_e3_same(r->value, r->vn, fileb, (int)filen)) {
+        sy_eprintf("unisacc: INTERFACE_ERROR resource-e3-identity-inconsistent\n");
+        ex_release(fileb);
+        return 2;
+    }
+    ex_release(fileb);
+    ex_led.cursor = ex_led.cursor + 1;
+    return 0;
+}
+int ex_ri_before(const char *route, const char *stage, const unsigned char *bytes, long n) {
+    if (!ex_strict && !ex_cap_want) return 0;
+    if (!stage || stage[0] != 'e' || stage[1] != '3' || stage[2]) return 0;
+    if (cxsf_route_e3(0, route)) return 0;
+    return ex_ri_e3(route, bytes, n);
+}
+int ex_ri_exec(const char *route, const char *stage, unsigned char *in, int inn, const char *src, unsigned char **ob, long *on, char *why, int cap) {
+    int ex_exec(unsigned char *, int, const char *, unsigned char **, long *, char *, int);
+    int tip;
+    tip = ex_ri_before(route, stage, in, (long)inn);
+    if (tip) return tip;
+    return ex_exec(in, inn, src, ob, on, why, cap);
+}
 /* Hash the source bytes the driver already read. Stage is e3: plus the
    route text (lnx/x86_64/tape/O0). Tape and image pass; other routes
    refuse before the model runs. Return 2 on a named refusal, else 0. */
@@ -710,6 +849,8 @@ int ex_ri_arm(const char *route, int mode, const unsigned char *bytes, long n) {
     int i;
     int k;
     int jobs;
+    const char *pre;
+    int plen;
     if (!ex_strict && !ex_cap_want) return 0;
     jobs = ex_jobs();
     if (jobs > 1) {
@@ -720,15 +861,16 @@ int ex_ri_arm(const char *route, int mode, const unsigned char *bytes, long n) {
         sy_eprintf("unisacc: INTERFACE_ERROR resource-route-unsupported %s (strict and capture cover tape and image routes only)\n", route ? route : "-");
         return 2;
     }
-    if (!route || ex_zlen(route) + 4 > 160 || n < 0 || n > 2147483647L || (n > 0 && !bytes)) {
+    if (mode == 0 && ex_has(route, "/image/")) { pre = "source:"; plen = 7; }
+    else { pre = "e3:"; plen = 3; }
+    if (!route || ex_zlen(route) + plen >= 160 || n < 0 || n > 2147483647L || (n > 0 && !bytes)) {
         sy_eprintf("unisacc: INTERFACE_ERROR capture-stage-label\n");
         return 2;
     }
-    stage[0] = 'e';
-    stage[1] = '3';
-    stage[2] = ':';
     i = 0;
-    k = 3;
+    k = 0;
+    while (pre[i]) { stage[k] = pre[i]; k = k + 1; i = i + 1; }
+    i = 0;
     while (route[i]) { stage[k] = route[i]; k = k + 1; i = i + 1; }
     stage[k] = 0;
     if (!cxsf_stage_label(stage)) {
