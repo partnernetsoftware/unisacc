@@ -192,6 +192,7 @@ STATE43：**21782dd5 宿主头（omp-grk，2026-11-01）**：`library-cells` 25/
 STATE43：**21782dd5 公开阻塞（omp-grk，2026-11-01）**：已发信封给 cc。本车道已绿格已翻。公开仍停：`cx-layers` A-INCOMPLETE、外平台、SID 语义拒绝、流运行时要归档源、签名和公开没有授权。不装。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 新四批（omp-grk，2026-11-01）**：会话 `out/tb/sess-new4` 一波 4/4 PASS：`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。身份 STABLE。不是全批会话。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 格数（omp-grk，2026-11-01）**：必需格 718。COVERED_LOCAL 563，MISSING 36，NEEDS_PRODUCT_CHANGE 7，NEEDS_FOREIGN_HOST 73，BLOCKED 26，DECLARED_DEPENDENCY 10，OBSERVED 3。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 三十六格（omp-grk，2026-11-01）**：MISSING 里没有还能在已装产品上单独翻的格。余下是引导链、身份材料、宿主汇总、语义加载器和已记过的账本重放。不重跑已知材料失败。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
