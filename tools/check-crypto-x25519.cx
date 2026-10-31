@@ -1,0 +1,119 @@
+/* Checks cx/crypto/x25519.cx: sh ./unisacc.com tools/check-crypto-x25519.cx
+   Vectors: RFC 7748 §5.2 (two scalarmult cases, including the iterated 1 and 1000 cases), §6.1 (the
+   Diffie-Hellman pair) and the base-point public keys from the same section.  Low-order points must be
+   refused. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.x25519
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+/* Decode HEX into B (at most CAP bytes) and return its length, or -1. */
+static int unhex(const char *hex, unsigned char *b, int cap) {
+    int n = tx_len(hex, 200);
+    if (n < 0 || n % 2 || n / 2 > cap) return -1;
+    return cs_hex_decode(hex, n, b, cap);
+}
+
+static int eq_bytes(const unsigned char *a, const unsigned char *b, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+int main(void) {
+    unsigned char k[32], u[32], want[32], got[32], pub[32];
+    unsigned char alice[32], bob[32], shared[32];
+    char hex[80];
+    int i;
+
+    /* RFC 7748 §5.2 case 1: scalar a546e3.., u e6db68.. */
+    ok(unhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", k, 32) == 32, "decode-k1");
+    ok(unhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", u, 32) == 32, "decode-u1");
+    ok(cs_x25519(k, u, got) == 0, "x25519-1-ok");
+    ok(unhex("c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552", want, 32) == 32, "decode-w1");
+    ok(eq_bytes(got, want, 32), "x25519-5.2-1");
+
+    /* §5.2 case 2 */
+    ok(unhex("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", k, 32) == 32, "decode-k2");
+    ok(unhex("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493", u, 32) == 32, "decode-u2");
+    ok(cs_x25519(k, u, got) == 0, "x25519-2-ok");
+    ok(unhex("95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957", want, 32) == 32, "decode-w2");
+    ok(eq_bytes(got, want, 32), "x25519-5.2-2");
+
+    /* §5.2 iterated test: k = u = base point 9, then 1000 rounds of k,u = X25519(k, u), k. */
+    for (i = 0; i < 32; i++) { k[i] = 0; u[i] = 0; }
+    k[0] = u[0] = 9;
+    ok(cs_x25519(k, u, got) == 0, "iter-1-ok");
+    ok(unhex("422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079", want, 32) == 32, "decode-iter1");
+    ok(eq_bytes(got, want, 32), "x25519-iter-1");
+    {   unsigned char kk[32], uu[32], next[32];
+        for (i = 0; i < 32; i++) { kk[i] = k[i]; uu[i] = u[i]; }   /* both are 9 here */
+        for (i = 0; i < 1000; i++) {               /* k, u = X25519(k, u), k */
+            if (cs_x25519(kk, uu, next)) { ok(0, "iter-1000-step"); break; }
+            for (int j = 0; j < 32; j++) { uu[j] = kk[j]; kk[j] = next[j]; }
+        }
+        for (i = 0; i < 32; i++) got[i] = kk[i];
+        ok(unhex("684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51", want, 32) == 32, "decode-iter1000");
+        ok(eq_bytes(got, want, 32), "x25519-iter-1000");
+    }
+
+    /* §6.1: both public keys and the shared secret of one pair. */
+    ok(unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", alice, 32) == 32, "decode-alice");
+    ok(cs_x25519_base(alice, pub) == 0, "alice-base-ok");
+    ok(unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", want, 32) == 32, "decode-apub");
+    ok(eq_bytes(pub, want, 32), "alice-public");
+    ok(unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", bob, 32) == 32, "decode-bob");
+    ok(cs_x25519_base(bob, pub) == 0, "bob-base-ok");
+    ok(unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", want, 32) == 32, "decode-bpub");
+    ok(eq_bytes(pub, want, 32), "bob-public");
+    cs_x25519_base(bob, u);                       /* Bob's public key is Alice's u */
+    ok(cs_x25519(alice, u, shared) == 0, "shared-ok");
+    ok(unhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", want, 32) == 32, "decode-shared");
+    ok(eq_bytes(shared, want, 32), "shared-secret");
+    /* The other direction must agree: agreement is not one-sided. */
+    {   unsigned char back[32];
+        cs_x25519_base(alice, u);
+        ok(cs_x25519(bob, u, back) == 0 && eq_bytes(back, shared, 32), "shared-secret-symmetric");
+    }
+
+    /* Clamping is what the ladder applies to a copy: the same scalar with its low three bits, top bit
+       and bit 254 forced must give the same result, and the clamped form must be idempotent. */
+    {   unsigned char c1[32], c2[32];
+        for (i = 0; i < 32; i++) { c1[i] = alice[i]; c2[i] = alice[i]; }
+        c2[0] &= 248; c2[31] &= 127; c2[31] |= 64;
+        cs_x25519_base(c1, pub);
+        cs_x25519_base(c2, u);
+        ok(eq_bytes(pub, u, 32), "clamped-scalar-same-public");
+        cs_x25519_clamp(c1);
+        ok(eq_bytes(c1, c2, 32), "clamp-form");
+        cs_x25519_clamp(c1);
+        ok(eq_bytes(c1, c2, 32), "clamp-idempotent");
+        ok((c1[0] & 7) == 0 && (c1[31] & 128) == 0 && (c1[31] & 64) != 0, "clamp-bits");
+    }
+
+    /* Low-order points: all zero, one, and p-1 all give a zero shared secret, which is refused. */
+    {   static const char *lo[] = {
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"};
+        int t;
+        for (t = 0; t < 3; t++) {
+            ok(unhex(lo[t], u, 32) == 32, "decode-lo");
+            ok(cs_x25519(alice, u, got) == -EINVAL, "refuse-low-order-point");
+        }
+    }
+    /* Argument checks. */
+    {   ok(cs_x25519(0, u, got) == -EINVAL, "x25519-null-scalar");
+        ok(cs_x25519(k, 0, got) == -EINVAL, "x25519-null-u");
+        ok(cs_x25519(k, u, 0) == -EINVAL, "x25519-null-out");
+        ok(cs_x25519_base(0, got) == -EINVAL, "base-null-scalar");
+        cs_x25519_clamp(0);                       /* must not fault */
+        ok(1, "clamp-null-noop");
+    }
+
+    sy_printf("CHECK_CRYPTO_X25519\tfailed=%d\n", bad);
+    return bad;
+}
