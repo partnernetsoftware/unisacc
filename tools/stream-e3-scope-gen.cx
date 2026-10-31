@@ -1,0 +1,280 @@
+/* tools/stream-e3-scope-gen.cx -- e3.gold.scope-30 from weights/gold/scope.tsv.
+ * One -O0 lnx/x86_64 image. Each gold row is one binding check and must print PASS.
+ *   sh ./unisacc.com tools/stream-e3-scope-gen.cx -- --check
+ *   sh ./unisacc.com tools/stream-e3-scope-gen.cx -- ROOT TABLE ABS_OUT
+ *   sh ./unisacc.com tools/stream-e3-scope-gen.cx --
+ * The no-argument form uses the repo as ROOT, weights/gold/scope.tsv,
+ * and a fresh out/e3scope-<pid> directory. --check reads the table and does not compile.
+ * A row whose action is not the table's y is REFUSE. This tool does not edit the product.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static char root[4096], table[4200], outdir[4200], bound[4400], product[4400];
+static void die(const char *s) { sy_eprintf("stream-e3-scope: REFUSE %s\n", s); sy_exit(2); }
+static void path(char *p, long cap, const char *a, const char *b) {
+    int n = tx_snprintf(p, (size_t)cap, "%s/%s", a, b);
+    if (n < 0 || (long)n >= cap) die("path");
+}
+static void saved(const char *p, const char *s, long n) {
+    int f = sy_open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (f < 0) die("exclusive create");
+    if (sy_write_all(f, s, n)) die("write");
+    if (sy_close(f)) die("close");
+}
+
+#define NROW 30
+static const char *expect[NROW] = {
+    "top\ttype_kw\ttype_name",
+    "top\tid\tbind_global",
+    "top\ttypedef_id\ttype_name",
+    "top\tstar\tlookup",
+    "top\tlparen\tfn_name",
+    "param\ttype_kw\tlookup",
+    "param\tid\tbind_param",
+    "param\ttypedef_id\tlookup",
+    "param\tstar\tlookup",
+    "param\tlparen\tlookup",
+    "local\ttype_kw\ttype_name",
+    "local\tid\tbind_local",
+    "local\ttypedef_id\ttype_name",
+    "local\tstar\tlookup",
+    "local\tlparen\tlookup",
+    "expr\ttype_kw\tlookup",
+    "expr\tid\tlookup",
+    "expr\ttypedef_id\tlookup",
+    "expr\tstar\tlookup",
+    "expr\tlparen\tlookup",
+    "sizeof\ttype_kw\ttype_name",
+    "sizeof\tid\tlookup",
+    "sizeof\ttypedef_id\ttype_name",
+    "sizeof\tstar\tlookup",
+    "sizeof\tlparen\tlookup",
+    "field\ttype_kw\tlookup",
+    "field\tid\tfield",
+    "field\ttypedef_id\tlookup",
+    "field\tstar\tlookup",
+    "field\tlparen\tlookup"
+};
+
+static const char *prog[] = {
+    "#include <stdio.h>",
+    "static int fail;",
+    "static void ck(const char *n, int ok) {",
+    "  printf(\"%s %s\\n\", ok ? \"PASS\" : \"FAIL\", n);",
+    "  if (!ok) fail++;",
+    "}",
+    "int g_top_type = 3;",
+    "int g_top_id = 11;",
+    "typedef int Tid_top;",
+    "Tid_top g_top_td = 13;",
+    "int g_top_star = 17;",
+    "int *p_top_star = &g_top_star;",
+    "int (f_top_lp)(void) { return 19; }",
+    "int f_param_tk(int a) { return a; }",
+    "int shadow_param = 1;",
+    "int f_param_id(int shadow_param) { return shadow_param; }",
+    "typedef int Tid_param;",
+    "int f_param_td(Tid_param a) { return a; }",
+    "int f_param_star(int *a) { return *a; }",
+    "int f_param_lp(int (a)) { return a; }",
+    "int f_local_tk(void) { int v = 3; return v == 3 && sizeof(v) == 4; }",
+    "int shadow_local = 1;",
+    "int f_local_id(void) { int shadow_local = 9; return shadow_local; }",
+    "int f_local_td(void) { typedef int Tloc; Tloc v = 5; return v == 5 && sizeof(Tloc) == 4; }",
+    "int f_local_star(void) { int g = 4; int *p = &g; return *p == 4; }",
+    "int f_local_lp(void) { int (v) = 6; return v == 6; }",
+    "int f_expr_tk(void) { return (int)12 == 12 && sizeof((int)12) == 4; }",
+    "int g_expr_id = 12;",
+    "int f_expr_id(void) { return g_expr_id; }",
+    "typedef int Tid_expr;",
+    "int f_expr_td(void) { return (Tid_expr)8 == 8 && sizeof((Tid_expr)8) == 4; }",
+    "int f_expr_star(void) { int g = 4; int *p = &g; return *p == 4; }",
+    "int f_expr_lp(void) { return (1 + 2) == 3; }",
+    "int f_sz_tk(void) { return sizeof(int) == 4; }",
+    "int g_sz_id = 3;",
+    "int f_sz_id(void) { return sizeof(g_sz_id) == 4; }",
+    "typedef int Tid_sz;",
+    "int f_sz_td(void) { return sizeof(Tid_sz) == 4; }",
+    "int g_sz_star = 1;",
+    "int *p_sz_star = &g_sz_star;",
+    "int f_sz_star(void) { return sizeof(*p_sz_star) == 4; }",
+    "int f_sz_lp(void) { return sizeof(g_sz_id) == 4; }",
+    "struct Sf_tk { int a; };",
+    "int f_field_tk(void) { struct Sf_tk s; s.a = 2; return s.a == 2 && sizeof(s.a) == 4; }",
+    "int member_name = 1;",
+    "struct Sf_id { int member_name; };",
+    "int f_field_id(void) { struct Sf_id s; s.member_name = 9; return s.member_name == 9; }",
+    "typedef int Tid_field;",
+    "struct Sf_td { Tid_field a; };",
+    "int f_field_td(void) { struct Sf_td s; s.a = 4; return s.a == 4 && sizeof(s.a) == 4; }",
+    "struct Sf_star { int *a; };",
+    "int f_field_star(void) { int g = 7; struct Sf_star s; s.a = &g; return *s.a == 7; }",
+    "struct Sf_lp { int (a); };",
+    "int f_field_lp(void) { struct Sf_lp s; s.a = 8; return s.a == 8; }",
+    "int main(void) {",
+    "  ck(\"top/type_kw/type_name\", g_top_type == 3 && sizeof(g_top_type) == 4);",
+    "  ck(\"top/id/bind_global\", g_top_id == 11);",
+    "  ck(\"top/typedef_id/type_name\", g_top_td == 13 && sizeof(Tid_top) == 4);",
+    "  ck(\"top/star/lookup\", *p_top_star == 17);",
+    "  ck(\"top/lparen/fn_name\", f_top_lp() == 19);",
+    "  ck(\"param/type_kw/lookup\", f_param_tk(21) == 21 && sizeof(int) == 4);",
+    "  ck(\"param/id/bind_param\", f_param_id(9) == 9 && shadow_param == 1);",
+    "  ck(\"param/typedef_id/lookup\", f_param_td(22) == 22);",
+    "  { int v = 23; ck(\"param/star/lookup\", f_param_star(&v) == 23); }",
+    "  ck(\"param/lparen/lookup\", f_param_lp(24) == 24);",
+    "  ck(\"local/type_kw/type_name\", f_local_tk());",
+    "  ck(\"local/id/bind_local\", f_local_id() == 9 && shadow_local == 1);",
+    "  ck(\"local/typedef_id/type_name\", f_local_td());",
+    "  ck(\"local/star/lookup\", f_local_star());",
+    "  ck(\"local/lparen/lookup\", f_local_lp());",
+    "  ck(\"expr/type_kw/lookup\", f_expr_tk());",
+    "  ck(\"expr/id/lookup\", f_expr_id() == 12);",
+    "  ck(\"expr/typedef_id/lookup\", f_expr_td());",
+    "  ck(\"expr/star/lookup\", f_expr_star());",
+    "  ck(\"expr/lparen/lookup\", f_expr_lp());",
+    "  ck(\"sizeof/type_kw/type_name\", f_sz_tk());",
+    "  ck(\"sizeof/id/lookup\", f_sz_id());",
+    "  ck(\"sizeof/typedef_id/type_name\", f_sz_td());",
+    "  ck(\"sizeof/star/lookup\", f_sz_star());",
+    "  ck(\"sizeof/lparen/lookup\", f_sz_lp());",
+    "  ck(\"field/type_kw/lookup\", f_field_tk());",
+    "  ck(\"field/id/field\", f_field_id() && member_name == 1);",
+    "  ck(\"field/typedef_id/lookup\", f_field_td());",
+    "  ck(\"field/star/lookup\", f_field_star());",
+    "  ck(\"field/lparen/lookup\", f_field_lp());",
+    "  printf(\"SUMMARY fail=%d\\n\", fail);",
+    "  return fail ? 1 : 0;",
+    "}",
+    0
+};
+
+static int load_table(const char *p) {
+    size_t n; char *s = cx_read(p, &n); long at = 0; int nrows = 0;
+    if (!s) die("table");
+    while (at < (long)n) {
+        long e = tx_chr(s + at, (long)n - at, '\n');
+        long ln = e < 0 ? (long)n - at : e;
+        char line[80];
+        if (ln > 0 && s[at] != '#' && tx_find(s + at, ln, "=>", 2) < 0) {
+            if (nrows >= NROW) die("row count");
+            if (ln >= (long)sizeof line) die("row bound");
+            if (tx_copy(line, (long)sizeof line, s + at, ln)) die("row bound");
+            if (!tx_eqz(line, expect[nrows])) die("row differs from scope action");
+            nrows++;
+        }
+        at += ln + (e < 0 ? 0 : 1);
+        if (e < 0) break;
+    }
+    if (nrows != NROW) die("row count");
+    return nrows;
+}
+
+static void emit(const char *p) {
+    static char buf[8192];
+    long n = 0;
+    int i;
+    for (i = 0; prog[i]; i++) {
+        int z = tx_snprintf(buf + n, sizeof buf - (size_t)n, "%s\n", prog[i]);
+        if (z < 0 || (size_t)z >= sizeof buf - (size_t)n) die("emit");
+        n += z;
+    }
+    saved(p, buf, n);
+}
+
+static int runv(char *const argv[], int secs, np_result *r) {
+    char why[1024], sec[16], *v[24]; int n = 0;
+    tx_snprintf(sec, sizeof sec, "%d", secs);
+    v[n++] = bound; v[n++] = sec;
+    for (int i = 0; argv[i]; i++) { if (n >= 22) die("argv"); v[n++] = argv[i]; }
+    v[n] = 0;
+    return np_run(v, root, 0, secs + 2, r, why, sizeof why);
+}
+
+static int tally(const char *s, long n, int *pass, int *fail) {
+    long at = 0; int saw = 0;
+    *pass = 0; *fail = 0;
+    while (at < n) {
+        long e = tx_chr(s + at, n - at, '\n');
+        long ln = e < 0 ? n - at : e;
+        if (ln >= 5 && tx_prefixz(s + at, "PASS ", 5)) (*pass)++;
+        if (ln >= 5 && tx_prefixz(s + at, "FAIL ", 5)) (*fail)++;
+        if (ln >= 14 && tx_prefixz(s + at, "SUMMARY fail=0", 14)) saw = 1;
+        at += ln + (e < 0 ? 0 : 1);
+        if (e < 0) break;
+    }
+    return saw && *pass == NROW && *fail == 0;
+}
+
+int main(int argc, char **argv) {
+    int check = argc >= 2 && tx_eqz(argv[1], "--check");
+    if (!check && argc != 1 && argc != 4) {
+        sy_eprintf("usage: [--check] | ROOT TABLE ABS_OUT\n");
+        return 2;
+    }
+    if (check || argc == 1) {
+        if (sy_realpath(".", root, (int)sizeof root) < 0) die("root");
+        path(table, (long)sizeof table, root, "weights/gold/scope.tsv");
+    } else {
+        if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+        if (sy_realpath(argv[2], table, (int)sizeof table) < 0) die("table");
+    }
+    load_table(table);
+    if (check) { sy_printf("CHECK\tstream-e3-scope\tok=%d\n", NROW); return 0; }
+    if (argc == 1) {
+        int z = tx_snprintf(outdir, sizeof outdir, "%s/out/e3scope-%d", root, (int)sy_pid());
+        if (z < 0 || (size_t)z >= sizeof outdir) die("out");
+    } else {
+        long n = tx_len(argv[3], (long)sizeof outdir);
+        if (argv[3][0] != '/' || n < 0) die("absolute out");
+        if (tx_copy(outdir, (long)sizeof outdir, argv[3], n)) die("absolute out");
+    }
+    if (sy_mkdir(outdir, 0700)) die("out exists or unusable");
+    path(bound, (long)sizeof bound, root, "tools/bound");
+    path(product, (long)sizeof product, root, "unisacc.com");
+    {
+        char src[4400], elf[4400], res[4400];
+        np_result cr, rr;
+        int pass = 0, fail = 0, ok;
+        path(src, (long)sizeof src, outdir, "prog.c");
+        path(elf, (long)sizeof elf, outdir, "prog.elf");
+        path(res, (long)sizeof res, outdir, "results.tsv");
+        emit(src);
+        {
+            char *cv[] = {"sh", product, src, "-O0", "-b", "lnx/x86_64", "-o", elf, 0};
+            if (runv(cv, 40, &cr) || cr.rc) {
+                sy_eprintf("stream-e3-scope: compile rc=%d\n", cr.rc);
+                if (cr.errn) {
+                    long m = cr.errn > 800 ? 800 : cr.errn;
+                    sy_write_all(2, cr.err, m);
+                    sy_write_all(2, "\n", 1);
+                }
+                return 1;
+            }
+            np_free(&cr);
+        }
+        {
+            char *av[] = {elf, 0};
+            if (runv(av, 5, &rr)) die("run");
+            ok = rr.rc == 0 && tally(rr.out, rr.outn, &pass, &fail);
+            {
+                int rf = sy_open(res, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+                char line[128];
+                int z;
+                if (rf < 0) die("results");
+                z = tx_snprintf(line, sizeof line, "%s\te3.gold.scope-30\tpass=%d\tfail=%d\n",
+                                ok ? "PASS" : "FAIL", pass, fail);
+                if (z < 0 || (size_t)z >= sizeof line || sy_write_all(rf, line, z) || sy_close(rf)) die("results");
+            }
+            sy_printf("%s\te3.gold.scope-30\tpass=%d\tfail=%d\n", ok ? "PASS" : "FAIL", pass, fail);
+            sy_printf("STREAM_E3_SCOPE\tassertions=%d\tfailed=%d\n", pass + fail, fail);
+            np_free(&rr);
+            return ok ? 0 : 1;
+        }
+    }
+}
