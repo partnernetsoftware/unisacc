@@ -114,9 +114,99 @@ static const char *cl_ln(int l) {
     if (l == 0) return "L0"; if (l == 1) return "L1"; if (l == 2) return "L2";
     if (l == 3) return "L3"; if (l == 4) return "AMB"; return "OUT";
 }
+typedef struct { char mod[128]; int line; int cond; } cl_Use;
+static cl_Use cl_uses[256]; static int cl_nuses;
+static char cl_uses_path[CL_PATH];
+
+/* Skip spaces/comments/line splices inside one directive. Returns new index;
+   *nl is set when a newline ended the directive. */
+static long cl_gap(const char *b, long n, long i, int *nl) {
+    *nl = 0;
+    for (;;) {
+        if (i >= n) return i;
+        if (b[i] == '\\' && i + 1 < n && b[i + 1] == '\n') { i += 2; continue; }
+        if (b[i] == '\n') { *nl = 1; return i; }
+        if (b[i] == ' ' || b[i] == '\t' || b[i] == '\r') { i++; continue; }
+        if (b[i] == '/' && i + 1 < n && b[i + 1] == '*') {
+            long j = i + 2;
+            while (j + 1 < n && !(b[j] == '*' && b[j + 1] == '/')) { if (b[j] == '\n') { *nl = 1; return i; } j++; }
+            if (j + 1 >= n) return n;
+            i = j + 2; continue;
+        }
+        if (b[i] == '/' && i + 1 < n && b[i + 1] == '/') { while (i < n && b[i] != '\n') i++; continue; }
+        return i;
+    }
+}
+static long cl_ident(const char *b, long n, long i) {
+    while (i < n && (cl_isid((unsigned char)b[i]) || b[i] == '.')) i++;
+    return i;
+}
+static void cl_lex_uses(const char *path) {
+    long n, i = 0; int line = 1, depth = 0, bol = 1; int nl;
+    if (cl_eq(path, cl_uses_path)) return;
+    cx_fmt(cl_uses_path, sizeof cl_uses_path, "%s", path);
+    cl_nuses = 0;
+    n = (cl_scan_path[0] && cl_eq(path, cl_scan_path)) ? cl_scan_len : cl_read(path, cl_src, CL_CAP);
+    if (n <= 0) return;
+    while (i < n) {
+        char c = cl_src[i];
+        if (c == '\n') { line++; i++; bol = 1; continue; }
+        if (c == '\\' && i + 1 < n && cl_src[i + 1] == '\n') { line++; i += 2; continue; }
+        if (c == '/' && i + 1 < n && cl_src[i + 1] == '*') {
+            long j = i + 2; int nl2 = 0;
+            while (j + 1 < n && !(cl_src[j] == '*' && cl_src[j + 1] == '/')) { if (cl_src[j] == '\n') { line++; nl2 = 1; } j++; }
+            i = (j + 1 < n) ? j + 2 : n;
+            if (nl2) bol = 1;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && cl_src[i + 1] == '/') { while (i < n && cl_src[i] != '\n') i++; continue; }
+        if (c == '"' || c == '\'') {
+            int q = c; i++;
+            while (i < n && cl_src[i] != q) { if (cl_src[i] == '\\' && i + 1 < n) i++; if (cl_src[i] == '\n') line++; i++; }
+            if (i < n) i++;
+            bol = 0; continue;
+        }
+        if (bol && c == '#') {
+            long j = i + 1, a, b2; int start = line;
+            j = cl_gap(cl_src, n, j, &nl);
+            if (nl) { i = j; bol = 1; continue; }
+            a = j; b2 = cl_ident(cl_src, n, j);
+            j = cl_gap(cl_src, n, b2, &nl);
+            if (!nl && b2 - a == 2 && tx_prefix(cl_src + a, b2 - a, "if", 2)) depth++;
+            else if (!nl && b2 - a == 5 && tx_prefix(cl_src + a, b2 - a, "endif", 5)) { if (depth > 0) depth--; }
+            else if (!nl && b2 - a == 6 && tx_prefix(cl_src + a, b2 - a, "pragma", 6)) {
+                long u, v, m, e;
+                u = j; v = cl_ident(cl_src, n, u); j = cl_gap(cl_src, n, v, &nl);
+                if (!nl && v - u == 5 && tx_prefix(cl_src + u, v - u, "unisa", 5)) {
+                    u = j; v = cl_ident(cl_src, n, u); j = cl_gap(cl_src, n, v, &nl);
+                    if (!nl && v - u == 3 && tx_prefix(cl_src + u, v - u, "use", 3)) {
+                        u = j; m = cl_ident(cl_src, n, u); e = m;
+                        if (cl_nuses < 256 && e > u) {
+                            long q = 0; while (u + q < e && q < 127) { cl_uses[cl_nuses].mod[q] = cl_src[u + q]; q++; }
+                            cl_uses[cl_nuses].mod[q] = 0; cl_uses[cl_nuses].line = start; cl_uses[cl_nuses].cond = depth > 0; cl_nuses++;
+                        }
+                        j = cl_gap(cl_src, n, m, &nl);
+                    }
+                }
+            }
+            i = j; bol = 0; continue;
+        }
+        if (bol) { if (c > 32) bol = 0; }
+        i++;
+    }
+}
+
 /* line of the first `use NAME` pragma and whether it sits under #if; source is
    read only for a diagnostic, never to decide an edge. */
 static void cl_locate(const char *srcpath, const char *mod, int *line, int *cond) {
+    int k;
+    *line = 0; *cond = 0;
+    cl_lex_uses(srcpath);
+    for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod)) { *line = cl_uses[k].line; *cond = cl_uses[k].cond; return; }
+}
+#if 0
+static void cl_locate_old(const char *srcpath, const char *mod, int *line, int *cond) {
+
     long n, i, a, b;
     int lno, depth, ml;
     *line = 0; *cond = 0;
@@ -153,6 +243,7 @@ static void cl_locate(const char *srcpath, const char *mod, int *line, int *cond
         lno = lno + 1;
     }
 }
+#endif
 static int cl_wl_load(const char *path) {
     long n, i, a, b, f, e;
     int k;
@@ -357,23 +448,24 @@ static int cl_audit(void) {
         if (a >= b || cl_man[a] == '#') continue;
         f = a;
         while (f < b && cl_man[f] != '\t') f = f + 1;
-        if (f >= b) continue;
+        if (f >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
+        if (f - a >= CL_PATH - 1) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tPATH-TOO-LONG\t%.80s\n", cl_man + a); continue; }
         k = 0;
         while (a < f && k < CL_PATH - 1) path[k++] = cl_man[a++];
         path[k] = 0;
         if (tx_prefix(path, k, "archive/", 8) || tx_prefix(path, k, "out/", 4)) continue;
         e = f + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
-        if (e >= b) continue;
+        if (e >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         e = e + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
-        if (e >= b) continue;
+        if (e >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         e = e + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
-        if (e >= b) continue;
+        if (e >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         e = e + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
-        if (e >= b) continue;
+        if (e >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         e = e + 1;
         k = 0;
         while (e < b && k < 127) sha[k++] = cl_man[e++];
@@ -399,36 +491,46 @@ static int cl_audit(void) {
               }
           }
         }
-        { char sp[CL_PATH], shp[CL_PATH]; long scn, u = 0, su = 0, z; int inblock = 0;
+        { char sp[CL_PATH], shp[CL_PATH]; long scn, z; int inblock = 0;
+          char smod[128][128], umod[128][128]; int ns = 0, nu = 0, i2, j2, used[128];
           cl_join(sp, sizeof sp, cl_root, path);
           cx_fmt(shp, sizeof shp, "%s/%s.tsv", cl_idx, sha);
           scn = cl_read(shp, cl_shard, CL_CAP);
           if (scn <= 0) { cl_fail++; sy_eprintf("FAIL\tSHARD\t%s\n", sha); }
           else {
               long q = 0;
-              while (q < scn) { long e2 = q; while (e2 < scn && cl_shard[e2] != '\n') e2++; if (e2 - q >= 2 && cl_shard[q] == 'U' && cl_shard[q + 1] == '\t') u++; q = e2 + 1; }
-          }
-          scn = cl_read(sp, cl_src, CL_CAP);
-          if (scn > 0) {
-              for (z = 0; z < scn; z++) {
-                  if (inblock) { if (z + 1 < scn && cl_src[z] == '*' && cl_src[z + 1] == '/') { inblock = 0; z++; } continue; }
-                  if (z + 1 < scn && cl_src[z] == '/' && cl_src[z + 1] == '*') { inblock = 1; z++; continue; }
-                  if (z + 1 < scn && cl_src[z] == '/' && cl_src[z + 1] == '/') { while (z < scn && cl_src[z] != '\n') z++; continue; }
-                  if ((z == 0 || cl_src[z - 1] == '\n') && cl_src[z] == '#') {
-                      long w = z + 1;
-                      while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
-                      if (w + 6 <= scn && tx_prefix(cl_src + w, scn - w, "pragma", 6)) {
-                          w += 6; while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
-                          if (w + 5 <= scn && tx_prefix(cl_src + w, scn - w, "unisa", 5)) {
-                              w += 5; while (w < scn && (cl_src[w] == ' ' || cl_src[w] == '\t')) w++;
-                              if (w + 3 <= scn && tx_prefix(cl_src + w, scn - w, "use", 3)) su++;
-                          }
+              while (q < scn) {
+                  long e2 = q; while (e2 < scn && cl_shard[e2] != '\n') e2++;
+                  if (e2 - q >= 2 && cl_shard[q] == 'U' && cl_shard[q + 1] == '\t') {
+                      long w = q + 2, m = 0;
+                      while (w < e2 && m < 127) {
+                          char c = cl_shard[w];
+                          if (!(cl_isid((unsigned char)c) || c == '.')) break;
+                          umod[nu][m++] = c; w++;
                       }
+                      umod[nu][m] = 0;
+                      if (nu < 128) nu++;
                   }
+                  q = e2 + 1;
               }
           }
-          if (su > u) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tMISSING-U\t%s\tsource=%ld shard=%ld\n", path, su, u); }
-          else if (u > su) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tEXTRA-U\t%s\tsource=%ld shard=%ld\n", path, su, u); }
+          cl_lex_uses(path);
+          for (z = 0; z < cl_nuses && z < 128; z++) {
+              long q = 0; while (cl_uses[z].mod[q] && q < 127) { smod[ns][q] = cl_uses[z].mod[q]; q++; }
+              smod[ns][q] = 0; ns++;
+          }
+          if (ns > 128 || nu > 128) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tTOO-MANY-USES\t%s\n", path); }
+          for (i2 = 0; i2 < nu && i2 < 128; i2++) used[i2] = 0;
+          for (i2 = 0; i2 < ns && i2 < 128; i2++) {
+              int hit = 0;
+              for (j2 = 0; j2 < nu && j2 < 128; j2++) {
+                  if (!used[j2] && cl_eq(smod[i2], umod[j2])) { used[j2] = 1; hit = 1; break; }
+              }
+              if (!hit) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tMISSING-U\t%s\t%s\n", path, smod[i2]); }
+          }
+          for (j2 = 0; j2 < nu && j2 < 128; j2++) {
+              if (!used[j2]) { cl_und_recon++; cl_und_total++; sy_eprintf("UNDECIDED\tEXTRA-U\t%s\t%s\n", path, umod[j2]); }
+          }
         }
         cl_domain++; cl_bytes += (long)tx_len(path, CL_PATH);
         cl_shard_file(path, sha);
