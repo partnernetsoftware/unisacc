@@ -7,6 +7,8 @@
  * Green today: truncated-to-100-bytes object (`carries no unit tape`), tapebin with a flipped byte / truncated header /
  * corrupted minor (`invalid tapebin or origin target mismatch`), tape with an unknown opcode, binary garbage as tape. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.heap
 
 static char root[4096], outdir[4096], product[4400]; static int npass, nfail; static FILE *res;
 static void die(const char *s) { fprintf(stderr, "link-malformed-input: REFUSE %s errno=%d\n", s, errno); exit(2); }
@@ -28,7 +30,8 @@ int main(int argc, char **argv) {
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
     char p[4400]; const char *M = "int main(void){return 7;}\n"; path(p, sizeof p, outdir, "m.c"); saved(p, M, strlen(M));
-    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); char *w[] = { "-S", "--tapebin", "-o", "t.tapebin", "m.c", 0 }; if (prod(w, &r) || r.rc) die("t.tapebin"); np_free(&r); }
+    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "m.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); /* the 0.0.43 product decodes UTAPEBIN but has no encoder (C44-TAPEBIN-01): the real package is a frozen fixture written by 79fb84e6 */
+      char fx[4400]; size_t fxn; char *fb; path(fx, sizeof fx, root, "tests/fixtures/tapebin/return7.tapebin"); fb = cx_read(fx, &fxn); if (!fb || fxn < 64 || !tx_same(fb, 8, "UTAPEBIN", 8)) die("tapebin fixture"); path(p, sizeof p, outdir, "t.tapebin"); saved(p, fb, fxn); mm_free(fb); }
     derive("u.o", "trunc.o", 100, -1, 0); derive("u.o", "badmagic.o", 0, 0, 'X'); derive("u.o", "half.o", 2000, -1, 0);
     derive("t.tapebin", "tb-flip.tapebin", 0, 100, 0xff); derive("t.tapebin", "tb-trunc.tapebin", 64, -1, 0); derive("t.tapebin", "tb-minor.tapebin", 0, 10, 7);
     const char *bad = "_start:\n  bogus r9, r0\n  ret\n", *noret = "_start:\n  imm r0, 7\n", *bin = "\0\1\2garbage\n";
