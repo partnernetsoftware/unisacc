@@ -1,0 +1,369 @@
+#pragma unisa module x509
+#pragma unisa use der
+#pragma unisa use bn
+#pragma unisa use rsa
+#pragma unisa use p256
+#pragma unisa use sha256
+/* crypto/x509 -- just enough X.509 to verify a certificate chain, without allocation or copies.
+
+     cs_x509                             one parsed certificate; every field points into the caller's DER
+     cs_x509_parse(der, len, &c)          parse a Certificate; trailing bytes are refused
+     cs_x509_valid_at(&c, now)            now in seconds since the epoch inside [notBefore, notAfter]?
+     cs_x509_verify_sig(&child, &issuer)  does the issuer's key verify the child's signature?
+     cs_x509_ca(&c)                       1 when basicConstraints says cA = TRUE
+     cs_x509_cn(&c, &p, &n)               the subject CN as raw bytes
+     cs_x509_san_dns(&c, i, &p, &n)       the i'th dNSName, -ENOENT past the end
+     cs_x509_match_dns(&c, host)          1 when the certificate names this host (SAN, else CN)
+
+   Checked: the outer SEQUENCE is consumed exactly, the version is v1..v3, both Time forms parse, the SPKI
+   algorithm is rsaEncryption or id-ecPublicKey on prime256v1, basicConstraints is read, and the signature
+   is verified by crypto.rsa (PKCS#1 v1.5 with SHA-256, the strict EMSA check) or crypto.p256 (ECDSA with
+   SHA-256).  Absent on purpose: name constraints, policy processing, CRL/OCSP revocation, path-length
+   enforcement, RSA-PSS and SHA-1 signatures, P-384/P-521, and any notion of trust -- a chain verifier on
+   top of this still owns its own path rules and decides which roots it believes.  Nothing here ever says
+   "trusted", because nothing here can know it.
+
+   Times are seconds since the 1970 epoch, computed from the calendar fields without a library call, so an
+   expiry check is a comparison and not a timezone surprise. */
+
+typedef struct {
+    const unsigned char *der;
+    long derlen;
+
+    const unsigned char *tbs;      long tbslen;
+    long version;                  /* 1, 2 or 3 */
+    const unsigned char *serial;   long seriallen;
+
+    const unsigned char *issuer;   long issuerlen;   /* Name content octets */
+    const unsigned char *subject;  long subjectlen;
+
+    long not_before;               /* epoch seconds */
+    long not_after;
+
+    int is_rsa;                    /* subjectPublicKeyInfo algorithm */
+    int is_ec256;
+    cs_bn rsa_n, rsa_e;            /* when is_rsa */
+    const unsigned char *ec_point; long ec_pointlen;  /* when is_ec256 */
+
+    int has_bc;                    /* basicConstraints present */
+    int is_ca;                     /* and says cA = TRUE */
+    const unsigned char *san; long sanlen;            /* subjectAltName extnValue, 0 when absent */
+
+    const unsigned char *sigalg;   long sigalglen;   /* signature algorithm OID content */
+    const unsigned char *sig;      long siglen;
+} cs_x509;
+
+/* DER OID contents (without tag and length). */
+static const unsigned char cs_x509_oid_rsa[]       = {0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x01};
+static const unsigned char cs_x509_oid_ec[]        = {0x2a,0x86,0x48,0xce,0x3d,0x02,0x01};
+static const unsigned char cs_x509_oid_p256[]      = {0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07};
+static const unsigned char cs_x509_oid_sha256rsa[] = {0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x0b};
+static const unsigned char cs_x509_oid_ecdsa256[]  = {0x2a,0x86,0x48,0xce,0x3d,0x04,0x03,0x02};
+static const unsigned char cs_x509_oid_basic[]     = {0x55,0x1d,0x13};
+static const unsigned char cs_x509_oid_san[]       = {0x55,0x1d,0x11};
+static const unsigned char cs_x509_oid_cn[]        = {0x55,0x04,0x03};
+
+static int cs_x509_oid_is(const unsigned char *p, long n, const unsigned char *want, long wlen) {
+    long i;
+    if (n != wlen) return 0;
+    for (i = 0; i < n; i++) if (p[i] != want[i]) return 0;
+    return 1;
+}
+
+/* Days since 1970-01-01 from a proleptic Gregorian date (Howard Hinnant's civil algorithm). */
+static long cs_x509_days(long y, long m, long d) {
+    long era, yoe, doy, doe;
+    y -= (m <= 2);
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static int cs_x509_digits(const unsigned char *p, long n, long *out) {
+    long i, v = 0;
+    for (i = 0; i < n; i++) {
+        if (p[i] < '0' || p[i] > '9') return -EINVAL;
+        v = v * 10 + (p[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+/* UTCTime is YYMMDDHHMMSSZ with YY >= 50 meaning 19YY; GeneralizedTime is YYYYMMDDHHMMSSZ.  Fractional
+   seconds and offsets other than Z are refused: they are not DER and they are ambiguous as a deadline. */
+static int cs_x509_time(unsigned tag, const cs_der *body, long *out) {
+    const unsigned char *p = body->p;
+    long n = body->n, y, mo, d, hh, mi, ss;
+    if (n == 13 && tag == 0x17 && p[12] == 'Z') {
+        if (cs_x509_digits(p, 2, &y)) return -EINVAL;
+        if (y >= 50) y += 1900; else y += 2000;
+        if (cs_x509_digits(p + 2, 2, &mo) || cs_x509_digits(p + 4, 2, &d) ||
+            cs_x509_digits(p + 6, 2, &hh) || cs_x509_digits(p + 8, 2, &mi) ||
+            cs_x509_digits(p + 10, 2, &ss)) return -EINVAL;
+    } else if (n == 15 && tag == 0x18 && p[14] == 'Z') {
+        if (cs_x509_digits(p, 4, &y) || cs_x509_digits(p + 4, 2, &mo) || cs_x509_digits(p + 6, 2, &d) ||
+            cs_x509_digits(p + 8, 2, &hh) || cs_x509_digits(p + 10, 2, &mi) ||
+            cs_x509_digits(p + 12, 2, &ss)) return -EINVAL;
+    } else {
+        return -EINVAL;
+    }
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 60) return -EINVAL;
+    *out = cs_x509_days(y, mo, d) * 86400 + hh * 3600 + mi * 60 + ss;
+    return 0;
+}
+
+/* subjectPublicKeyInfo: SEQUENCE { AlgorithmIdentifier, BIT STRING publicKey }. */
+static int cs_x509_spki(cs_x509 *c, cs_der *spki) {
+    cs_der alg, params, f;
+    const unsigned char *oidp, *keyp;
+    long oidn, keyn;
+    if (cs_der_expect(spki, 0x30, &alg)) return -EINVAL;
+    if (cs_der_oid(&alg, &oidp, &oidn)) return -EINVAL;
+    if (cs_x509_oid_is(oidp, oidn, cs_x509_oid_rsa, (long)sizeof(cs_x509_oid_rsa))) {
+        cs_der rsakey;
+        if (cs_der_expect(&alg, 0x05, &params)) return -EINVAL;    /* NULL parameters */
+        if (!cs_der_at_end(&alg)) return -EINVAL;
+        if (cs_der_bits(spki, &keyp, &keyn) || !cs_der_at_end(spki)) return -EINVAL;
+        rsakey.p = keyp; rsakey.n = keyn;
+        if (cs_der_expect(&rsakey, 0x30, &f)) return -EINVAL;
+        if (cs_der_int(&f, &c->rsa_n)) return -EINVAL;
+        if (cs_der_int(&f, &c->rsa_e)) return -EINVAL;
+        if (!cs_der_at_end(&f)) return -EINVAL;
+        c->is_rsa = 1;
+        return 0;
+    }
+    if (cs_x509_oid_is(oidp, oidn, cs_x509_oid_ec, (long)sizeof(cs_x509_oid_ec))) {
+        const unsigned char *curvep;
+        long curven;
+        if (cs_der_oid(&alg, &curvep, &curven)) return -EINVAL;
+        if (!cs_x509_oid_is(curvep, curven, cs_x509_oid_p256, (long)sizeof(cs_x509_oid_p256)))
+            return -ENOSYS;                                        /* P-384 and P-521 are not implemented */
+        if (!cs_der_at_end(&alg)) return -EINVAL;
+        if (cs_der_bits(spki, &c->ec_point, &c->ec_pointlen) || !cs_der_at_end(spki)) return -EINVAL;
+        c->is_ec256 = 1;
+        return 0;
+    }
+    return -ENOSYS;
+}
+
+/* basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }.
+   A present BOOLEAN is meaningless here (DER says DEFAULT values are absent, and every real CA cert
+   spells TRUE), so the flag is read and anything else is refused. */
+static int cs_x509_basic(cs_x509 *c, const unsigned char *p, long n) {
+    cs_der v, seq;
+    int ca = 0;
+    v.p = p; v.n = n;
+    if (cs_der_expect(&v, 0x30, &seq)) return -EINVAL;
+    c->has_bc = 1;
+    if (!cs_der_at_end(&seq)) {
+        if (seq.p[0] != 0x01) return -EINVAL;                     /* must start with cA or pathLen */
+        if (cs_der_bool(&seq, &ca)) return -EINVAL;
+    }
+    c->is_ca = ca;
+    return 0;                                                    /* pathLenConstraint is not enforced */
+}
+
+/* extensions [3] EXPLICIT SEQUENCE OF Extension ::= SEQUENCE { extnID, critical BOOLEAN OPTIONAL,
+   extnValue OCTET STRING }.  Unknown extensions are skipped; a known one that fails to parse is an error,
+   because silently ignoring a basicConstraints that does not decode would turn a CA into a leaf. */
+static int cs_x509_extensions(cs_x509 *c, cs_der *ext3) {
+    cs_der list, one;
+    if (cs_der_expect(ext3, 0xa3, &list)) return -EINVAL;
+    if (cs_der_expect(&list, 0x30, &one)) return -EINVAL;
+    if (!cs_der_at_end(&list)) return -EINVAL;
+    while (!cs_der_at_end(&one)) {
+        cs_der ext;
+        const unsigned char *oidp, *valp;
+        long oidn, valn;
+        if (cs_der_expect(&one, 0x30, &ext)) return -EINVAL;
+        if (cs_der_oid(&ext, &oidp, &oidn)) return -EINVAL;
+        if (ext.n > 0 && ext.p[0] == 0x01) {
+            int crit;
+            if (cs_der_bool(&ext, &crit)) return -EINVAL;
+        }
+        if (cs_der_octets(&ext, &valp, &valn)) return -EINVAL;
+        if (!cs_der_at_end(&ext)) return -EINVAL;
+        if (cs_x509_oid_is(oidp, oidn, cs_x509_oid_basic, (long)sizeof(cs_x509_oid_basic))) {
+            if (cs_x509_basic(c, valp, valn)) return -EINVAL;
+        } else if (cs_x509_oid_is(oidp, oidn, cs_x509_oid_san, (long)sizeof(cs_x509_oid_san))) {
+            c->san = valp;
+            c->sanlen = valn;
+        }
+    }
+    return 0;
+}
+
+int cs_x509_parse(const unsigned char *der, long len, cs_x509 *c) {
+    cs_der in, cert, tbs, f;
+    const unsigned char *tbs_start, *p;
+    unsigned tag;
+    long n;
+    if (!der || !c || len <= 0) return -EINVAL;
+    c->der = der; c->derlen = len;
+    c->version = 1;
+    c->is_rsa = 0; c->is_ec256 = 0;
+    c->has_bc = 0; c->is_ca = 0;
+    c->san = 0; c->sanlen = 0;
+    in.p = der; in.n = len;
+    if (cs_der_expect(&in, 0x30, &cert)) return -EINVAL;
+    if (!cs_der_at_end(&in)) return -EINVAL;                      /* trailing bytes: not one certificate */
+
+    tbs_start = cert.p;
+    if (cs_der_expect(&cert, 0x30, &tbs)) return -EINVAL;
+    c->tbs = tbs_start;
+    c->tbslen = (long)(tbs.p - tbs_start) + tbs.n;
+
+    if (tbs.n > 0 && tbs.p[0] == 0xa0) {                          /* [0] EXPLICIT version INTEGER */
+        cs_der ver, vi;
+        if (cs_der_expect(&tbs, 0xa0, &ver)) return -EINVAL;
+        if (cs_der_next(&ver, &tag, &vi) || tag != 0x02) return -EINVAL;
+        if (vi.n != 1 || vi.p[0] > 2) return -EINVAL;
+        c->version = (long)vi.p[0] + 1;
+        if (!cs_der_at_end(&ver)) return -EINVAL;
+    }
+    if (cs_der_next(&tbs, &tag, &f) || tag != 0x02) return -EINVAL;
+    c->serial = f.p; c->seriallen = f.n;
+    if (cs_der_skip(&tbs)) return -EINVAL;                        /* tbs signature AlgorithmIdentifier */
+    if (cs_der_expect(&tbs, 0x30, &f)) return -EINVAL;            /* issuer Name */
+    c->issuer = f.p; c->issuerlen = f.n;
+    if (cs_der_expect(&tbs, 0x30, &f)) return -EINVAL;            /* validity */
+    if (cs_der_next(&f, &tag, &in) || (tag != 0x17 && tag != 0x18)) return -EINVAL;
+    if (cs_x509_time(tag, &in, &c->not_before)) return -EINVAL;
+    if (cs_der_next(&f, &tag, &in) || (tag != 0x17 && tag != 0x18)) return -EINVAL;
+    if (cs_x509_time(tag, &in, &c->not_after)) return -EINVAL;
+    if (!cs_der_at_end(&f) || c->not_after < c->not_before) return -EINVAL;
+    if (cs_der_expect(&tbs, 0x30, &f)) return -EINVAL;            /* subject Name */
+    c->subject = f.p; c->subjectlen = f.n;
+    if (cs_der_expect(&tbs, 0x30, &f)) return -EINVAL;            /* subjectPublicKeyInfo */
+    if (cs_x509_spki(c, &f)) return -EINVAL;
+    if (tbs.n > 0 && tbs.p[0] == 0xa3) {
+        if (cs_x509_extensions(c, &tbs)) return -EINVAL;
+    }
+    if (!cs_der_at_end(&tbs)) return -EINVAL;                     /* an unread TBS field is a gap */
+
+    if (cs_der_expect(&cert, 0x30, &f)) return -EINVAL;           /* outer AlgorithmIdentifier */
+    if (cs_der_oid(&f, &c->sigalg, &c->sigalglen)) return -EINVAL;
+    while (!cs_der_at_end(&f)) if (cs_der_skip(&f)) return -EINVAL;   /* parameters: NULL, or none */
+    if (cs_der_bits(&cert, &p, &n)) return -EINVAL;
+    c->sig = p; c->siglen = n;
+    if (!cs_der_at_end(&cert)) return -EINVAL;
+    return 0;
+}
+
+int cs_x509_valid_at(const cs_x509 *c, long now) {
+    if (!c) return -EINVAL;
+    return now >= c->not_before && now <= c->not_after ? 1 : 0;
+}
+
+int cs_x509_ca(const cs_x509 *c) { return c && c->has_bc && c->is_ca; }
+
+int cs_x509_verify_sig(const cs_x509 *child, const cs_x509 *issuer) {
+    unsigned char hash[32];
+    if (!child || !issuer || !child->sig || child->siglen <= 0) return -EINVAL;
+    if (cs_x509_oid_is(child->sigalg, child->sigalglen, cs_x509_oid_sha256rsa,
+                       (long)sizeof(cs_x509_oid_sha256rsa))) {
+        if (!issuer->is_rsa) return -EINVAL;
+        if (cs_sha256(child->tbs, child->tbslen, hash)) return -EINVAL;
+        return cs_rsa_verify_pkcs1_v15(&issuer->rsa_n, &issuer->rsa_e, hash, 32, child->sig, child->siglen);
+    }
+    if (cs_x509_oid_is(child->sigalg, child->sigalglen, cs_x509_oid_ecdsa256,
+                       (long)sizeof(cs_x509_oid_ecdsa256))) {
+        cs_p256_t ctx;
+        cs_p256_pt q;
+        if (!issuer->is_ec256) return -EINVAL;
+        if (cs_sha256(child->tbs, child->tbslen, hash)) return -EINVAL;
+        if (cs_p256_init(&ctx)) return -EINVAL;
+        if (cs_p256_point_parse(&ctx, issuer->ec_point, issuer->ec_pointlen, &q)) return -EINVAL;
+        return cs_p256_verify(&ctx, &q, hash, child->sig, child->siglen);
+    }
+    return -ENOSYS;                                               /* SHA-1, RSA-PSS, everything else */
+}
+
+/* Walk the subject's RDNSequence for the first CN.  An RDN is SET OF { OID, value }; the value of a CN is
+   a PrintableString or UTF8String, so its raw bytes are handed back rather than decoded. */
+int cs_x509_cn(const cs_x509 *c, const unsigned char **out, long *n) {
+    cs_der name;
+    if (!c || !out || !n) return -EINVAL;
+    name.p = c->subject; name.n = c->subjectlen;
+    while (!cs_der_at_end(&name)) {
+        cs_der set, atv;
+        if (cs_der_expect(&name, 0x31, &set)) return -EINVAL;
+        while (!cs_der_at_end(&set)) {
+            unsigned tag;
+            cs_der val;
+            const unsigned char *oidp;
+            long oidn;
+            if (cs_der_expect(&set, 0x30, &atv)) return -EINVAL;
+            if (cs_der_oid(&atv, &oidp, &oidn)) return -EINVAL;
+            if (cs_der_next(&atv, &tag, &val)) return -EINVAL;
+            if ((tag == 0x0c || tag == 0x13 || tag == 0x16) &&
+                cs_x509_oid_is(oidp, oidn, cs_x509_oid_cn, (long)sizeof(cs_x509_oid_cn))) {
+                *out = val.p; *n = val.n;
+                return 0;
+            }
+        }
+    }
+    return -ENOENT;
+}
+
+/* subjectAltName ::= SEQUENCE OF GeneralName, dNSName = [2] IA5String = tag 0x82. */
+int cs_x509_san_dns(const cs_x509 *c, int index, const unsigned char **out, long *n) {
+    cs_der san, seq;
+    int seen = 0;
+    if (!c || !out || !n) return -EINVAL;
+    if (!c->san) return -ENOENT;
+    san.p = c->san; san.n = c->sanlen;
+    if (cs_der_expect(&san, 0x30, &seq)) return -EINVAL;
+    while (!cs_der_at_end(&seq)) {
+        unsigned tag;
+        cs_der val;
+        if (cs_der_next(&seq, &tag, &val)) return -EINVAL;
+        if (tag != 0x82) continue;
+        if (seen++ == index) { *out = val.p; *n = val.n; return 0; }
+    }
+    return -ENOENT;
+}
+
+static int cs_x509_ascii_lower(int ch) {
+    return (ch >= 'A' && ch <= 'Z') ? ch + 32 : ch;
+}
+
+/* Case-insensitive comparison of a DNS name in the certificate against a host name.  The certificate
+   name may begin with "*." which stands for exactly one non-empty label: "*.example.com" matches
+   "www.example.com" and not "a.b.example.com", and not the bare "example.com". */
+static int cs_x509_dns_match(const unsigned char *pat, long pn, const char *host, long hn) {
+    long i, j;
+    if (pn > 2 && pat[0] == '*' && pat[1] == '.') {
+        long skip = 0;
+        while (skip < hn && host[skip] != '.') skip++;
+        if (skip == 0 || skip == hn) return 0;                    /* no label, or no dot after it */
+        if (hn - skip - 1 != pn - 2) return 0;
+        for (i = 0; i < pn - 2; i++)
+            if (cs_x509_ascii_lower(pat[2 + i]) != cs_x509_ascii_lower(host[skip + 1 + i])) return 0;
+        for (j = 0; j < skip; j++) if (host[j] == 0) return 0;
+        return 1;
+    }
+    if (pn != hn) return 0;
+    for (i = 0; i < pn; i++)
+        if (cs_x509_ascii_lower(pat[i]) != cs_x509_ascii_lower(host[i])) return 0;
+    return 1;
+}
+
+int cs_x509_match_dns(const cs_x509 *c, const char *host) {
+    const unsigned char *p;
+    long n, hn;
+    int i;
+    if (!c || !host) return 0;
+    hn = 0;
+    while (host[hn]) hn++;
+    if (hn == 0 || hn > 255) return 0;
+    for (i = 0; i < 1000; i++) {
+        if (cs_x509_san_dns(c, i, &p, &n) != 0) break;
+        if (cs_x509_dns_match(p, n, host, hn)) return 1;
+    }
+    if (c->san) return 0;                    /* a SAN without a dNSName means IP-only: do not fall back */
+    if (cs_x509_cn(c, &p, &n) == 0) return cs_x509_dns_match(p, n, host, hn);
+    return 0;
+}

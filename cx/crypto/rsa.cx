@@ -1,0 +1,77 @@
+#pragma unisa module rsa
+#pragma unisa use bn
+#pragma unisa use ct
+/* crypto/rsa -- RSA signature checking for X.509, in the PKCS#1 v1.5 encoding.
+
+     cs_rsa_verify_pkcs1_v15(&n, &e, hash, hashlen, sig, siglen)   1 when the signature verifies, else an error
+
+   Only verification: an RSA public operation is a modular exponentiation with the public exponent, which
+   is what cs_bn_modexp already does.  Private operations would need blinding and a constant-time
+   exponentiation and are not part of a TLS client -- there is nothing here to sign with.
+
+   The encoded message is rebuilt and compared byte by byte:
+
+     00 01 FF FF ... FF 00 || DigestInfo(algorithm, hash)
+
+   with at least eight 0xFF bytes of padding, and DigestInfo checked against the exact DER prefix for the
+   hash in use.  Checking the padding structure rather than decrypting and "looking for the hash" is what
+   stops the Bleichenbacher '06 signature forgery: a message that merely contains the hash somewhere, or
+   that ends after a short padding run, is refused.
+
+   Modulus size is bounded by crypto.bn: up to 2048-bit keys, which covers every chain the host trust
+   store needs here.  Larger keys are refused with -ERANGE instead of being truncated. */
+
+enum { RSA_MAXBYTES = BN_LIMBS * 4 };
+
+/* DigestInfo prefixes: SEQUENCE { SEQUENCE { OID, NULL }, OCTET STRING }, followed by the digest. */
+static const unsigned char cs_rsa_di_sha256[] = {
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20};
+static const unsigned char cs_rsa_di_sha1[] = {
+    0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14};
+
+/* The byte length of n's minimal big-endian encoding, i.e. the modulus length in octets. */
+static long cs_rsa_modbytes(const cs_bn *n) {
+    unsigned top;
+    int bits = 0;
+    if (n->n <= 0) return 0;
+    top = n->v[n->n - 1];
+    while (top) { bits++; top >>= 1; }
+    return (long)(n->n - 1) * 4 + (bits + 7) / 8;
+}
+
+/* Compare the recovered encoded message against EMSA-PKCS1-v1_5(hash) of length k. */
+static int cs_rsa_check_em(const unsigned char *em, long k, const unsigned char *hash, long hlen) {
+    const unsigned char *di;
+    long dilen, i, pad;
+    if (hlen == 32) { di = cs_rsa_di_sha256; dilen = (long)sizeof(cs_rsa_di_sha256); }
+    else if (hlen == 20) { di = cs_rsa_di_sha1; dilen = (long)sizeof(cs_rsa_di_sha1); }
+    else return -EINVAL;
+    if (k < dilen + hlen + 11) return -EINVAL;    /* the encoding cannot fit: k >= tLen + 11 */
+    if (em[0] != 0x00 || em[1] != 0x01) return -EINVAL;
+    pad = k - dilen - hlen - 3;
+    if (pad < 8) return -EINVAL;
+    for (i = 0; i < pad; i++) if (em[2 + i] != 0xff) return -EINVAL;
+    if (em[2 + pad] != 0x00) return -EINVAL;
+    for (i = 0; i < dilen; i++) if (em[3 + pad + i] != di[i]) return -EINVAL;
+    /* the digest itself compared without an early exit */
+    if (!cs_ct_eq(em + 3 + pad + dilen, hash, hlen)) return -EINVAL;
+    return 0;
+}
+
+int cs_rsa_verify_pkcs1_v15(const cs_bn *n, const cs_bn *e, const unsigned char *hash, long hlen,
+                            const unsigned char *sig, long siglen) {
+    cs_bn s, m;
+    unsigned char em[RSA_MAXBYTES];
+    long k;
+    if (!n || !e || !hash || !sig || siglen <= 0) return -EINVAL;
+    if (cs_bn_is_zero(n) || cs_bn_is_zero(e) || !cs_bn_is_odd(n)) return -EINVAL;
+    k = cs_rsa_modbytes(n);
+    if (k <= 0 || k > RSA_MAXBYTES) return -ERANGE;
+    if (siglen > k) return -EINVAL;               /* an RSA signature is at most the modulus length */
+    if (cs_bn_from_bytes(&s, sig, siglen)) return -EINVAL;
+    if (cs_bn_cmp(&s, n) >= 0) return -EINVAL;    /* s must be in [0, n-1] */
+    if (cs_bn_modexp(&m, &s, e, n)) return -EINVAL;
+    if (cs_bn_to_bytes(&m, em, k)) return -ERANGE;
+    return cs_rsa_check_em(em, k, hash, hlen);    /* 0 on success */
+}

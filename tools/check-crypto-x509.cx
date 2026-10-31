@@ -1,0 +1,155 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use crypto.x509
+#pragma unisa use crypto.bn
+#pragma unisa use text.text
+/* Vectors for crypto/x509, using DER fixtures under tests/fixtures/x509/.
+
+   The fixtures were made once with Python's cryptography package and are committed, so the test does not
+   depend on a key generator at run time:
+     rsa-root.der    self-signed CA, RSA-2048, SHA-256, CN=unisacc test root, 2020-01-01..2040-01-01
+     rsa-leaf.der    RSA-2048, issued by rsa-root, SAN dNSName www.example.com
+     rsa-wild.der    RSA-2048, issued by rsa-root, SAN dNSName *.example.com
+     ec-root.der     self-signed CA, P-256, SHA-256, CN=unisacc ec root
+     ec-leaf.der     P-256, issued by ec-root, SAN dNSName test.example.org
+     expired.der     RSA-2048, issued by rsa-root, 2000-01-01..2001-01-01
+     host-root.der   a real root (Amazon Root CA 1) from the host trust store
+
+   What is asserted: field parsing (version, serial, validity as epoch seconds, subject CN), signature
+   verification in both directions and across the wrong issuer, expiry, DNS matching including the
+   wildcard rules, a tampered TBS, trailing bytes, and a real root certificate verifying against itself.
+   Trust is not asserted anywhere: these pieces verify signatures, they do not decide who to believe. */
+
+static int bad;
+
+static void ok(int c, const char *name) {
+    sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) bad = 1;
+}
+
+/* Each certificate keeps pointers into its own buffer: a shared buffer would be overwritten by the next
+   fixture and every Name, key and signature pointer would silently change meaning. */
+enum { BUF = 2048 };
+static unsigned char der_root[BUF], der_leaf[BUF], der_wild[BUF];
+static unsigned char der_eroot[BUF], der_eleaf[BUF], der_expired[BUF], der_host[BUF], der_scratch[BUF];
+
+static long load(const char *path, unsigned char *buf, long cap) {
+    int fd = sy_open_read(path);
+    long size;
+    if (fd < 0) return -1;
+    size = sy_reg_size(fd);
+    if (size <= 0 || size > cap || sy_read_full(fd, buf, size)) {
+        sy_close(fd);
+        return -1;
+    }
+    sy_close(fd);
+    return size;
+}
+
+static int bytes_eq(const unsigned char *p, long n, const char *s) {
+    long i, m = tx_len(s, 512);
+    if (n != m) return 0;
+    for (i = 0; i < n; i++) if (p[i] != (unsigned char)s[i]) return 0;
+    return 1;
+}
+
+/* now = 2020-09-13T12:26:40Z: inside every fixture validity except the expired pair. */
+enum { NOW = 1600000000 };
+
+int main(void) {
+    static cs_x509 root, leaf, wild, eroot, eleaf, expired, host;
+    const unsigned char *p;
+    long n, len;
+
+    /* --- RSA root --- */
+    len = load("tests/fixtures/x509/rsa-root.der", der_root, sizeof(der_root));
+    ok(len > 0, "load rsa-root");
+    ok(cs_x509_parse(der_root, len, &root) == 0, "parse rsa-root");
+    ok(root.version == 3, "rsa-root version 3");
+    ok(root.is_rsa && !root.is_ec256, "rsa-root key is rsa");
+    ok(root.is_ca && root.has_bc, "rsa-root is a ca");
+    ok(root.seriallen == 2 && root.serial[0] == 0x10 && root.serial[1] == 0x01, "rsa-root serial");
+    ok(root.not_before == 1577836800, "rsa-root notBefore");
+    ok(root.not_after == 2208988800, "rsa-root notAfter");
+    ok(cs_x509_valid_at(&root, NOW) == 1, "rsa-root valid at now");
+    ok(cs_x509_cn(&root, &p, &n) == 0 && bytes_eq(p, n, "unisacc test root"), "rsa-root cn");
+    ok(cs_x509_verify_sig(&root, &root) == 0, "rsa-root self-signature");
+
+    /* --- RSA leaf issued by the root --- */
+    len = load("tests/fixtures/x509/rsa-leaf.der", der_leaf, sizeof(der_leaf));
+    ok(cs_x509_parse(der_leaf, len, &leaf) == 0, "parse rsa-leaf");
+    ok(cs_x509_cn(&leaf, &p, &n) == 0 && bytes_eq(p, n, "www.example.com"), "rsa-leaf cn");
+    ok(!cs_x509_ca(&leaf), "rsa-leaf is not a ca");
+    ok(leaf.issuerlen == root.subjectlen, "leaf issuer names the root subject length");
+    { long i; int same = 1; for (i = 0; i < leaf.issuerlen; i++) if (leaf.issuer[i] != root.subject[i]) same = 0;
+      ok(same, "leaf issuer equals root subject"); }
+    ok(cs_x509_verify_sig(&leaf, &root) == 0, "leaf verifies against root");
+    ok(cs_x509_verify_sig(&leaf, &leaf) != 0, "leaf does not verify against itself");
+    ok(cs_x509_verify_sig(&root, &leaf) != 0, "root does not verify against the leaf key");
+    ok(cs_x509_match_dns(&leaf, "www.example.com") == 1, "leaf matches its san");
+    ok(cs_x509_match_dns(&leaf, "WWW.EXAMPLE.COM") == 1, "san match is case insensitive");
+    ok(cs_x509_match_dns(&leaf, "example.com") == 0, "leaf does not match the parent domain");
+    ok(cs_x509_match_dns(&leaf, "a.www.example.com") == 0, "leaf does not match a deeper name");
+    ok(cs_x509_match_dns(&leaf, "") == 0, "empty host matches nothing");
+
+    /* --- wildcard --- */
+    len = load("tests/fixtures/x509/rsa-wild.der", der_wild, sizeof(der_wild));
+    ok(cs_x509_parse(der_wild, len, &wild) == 0, "parse rsa-wild");
+    ok(cs_x509_match_dns(&wild, "api.example.com") == 1, "wildcard matches one label");
+    ok(cs_x509_match_dns(&wild, "example.com") == 0, "wildcard does not match the bare domain");
+    ok(cs_x509_match_dns(&wild, "a.b.example.com") == 0, "wildcard does not cross a dot");
+    ok(cs_x509_verify_sig(&wild, &root) == 0, "wildcard verifies against root");
+
+    /* --- EC chain --- */
+    len = load("tests/fixtures/x509/ec-root.der", der_eroot, sizeof(der_eroot));
+    ok(cs_x509_parse(der_eroot, len, &eroot) == 0, "parse ec-root");
+    ok(eroot.is_ec256 && !eroot.is_rsa, "ec-root key is ec p-256");
+    ok(eroot.is_ca, "ec-root is a ca");
+    ok(cs_x509_verify_sig(&eroot, &eroot) == 0, "ec-root self-signature");
+    len = load("tests/fixtures/x509/ec-leaf.der", der_eleaf, sizeof(der_eleaf));
+    ok(cs_x509_parse(der_eleaf, len, &eleaf) == 0, "parse ec-leaf");
+    ok(eleaf.is_ec256, "ec-leaf key is ec p-256");
+    ok(cs_x509_verify_sig(&eleaf, &eroot) == 0, "ec-leaf verifies against ec-root");
+    ok(cs_x509_verify_sig(&eleaf, &root) != 0, "ec-leaf does not verify against the rsa root");
+    ok(cs_x509_match_dns(&eleaf, "test.example.org") == 1, "ec-leaf matches its san");
+    ok(cs_x509_match_dns(&eleaf, "test.example.com") == 0, "ec-leaf does not match another name");
+
+    /* --- expiry --- */
+    len = load("tests/fixtures/x509/expired.der", der_expired, sizeof(der_expired));
+    ok(cs_x509_parse(der_expired, len, &expired) == 0, "parse expired");
+    ok(cs_x509_valid_at(&expired, NOW) == 0, "expired certificate is not valid now");
+    ok(cs_x509_valid_at(&expired, 950000000) == 1, "expired certificate was valid in 2000");
+    ok(cs_x509_valid_at(&expired, 946684799) == 0, "one second before notBefore is not valid");
+    ok(cs_x509_valid_at(&expired, 978307201) == 0, "one second after notAfter is not valid");
+    ok(cs_x509_valid_at(&expired, 946684800) == 1, "notBefore itself is valid");
+    ok(cs_x509_valid_at(&expired, 978307200) == 1, "notAfter itself is valid");
+
+    /* --- a real root from the host trust store --- */
+    len = load("tests/fixtures/x509/host-root.der", der_host, sizeof(der_host));
+    ok(len > 0 && cs_x509_parse(der_host, len, &host) == 0, "parse host-root");
+    ok(host.is_rsa && host.is_ca, "host-root is an rsa ca");
+    ok(cs_x509_verify_sig(&host, &host) == 0, "host-root self-signature");
+    ok(cs_x509_cn(&host, &p, &n) == 0 && n > 0, "host-root has a cn");
+
+    /* --- tampering: flipping a byte in the TBS breaks the signature --- */
+    len = load("tests/fixtures/x509/rsa-leaf.der", der_scratch, sizeof(der_scratch));
+    ok(cs_x509_parse(der_scratch, len, &leaf) == 0, "parse rsa-leaf again");
+    der_scratch[100] ^= 0x01;
+    ok(cs_x509_verify_sig(&leaf, &root) != 0, "tampered tbs fails verification");
+    der_scratch[100] ^= 0x01;
+    ok(cs_x509_verify_sig(&leaf, &root) == 0, "restored tbs verifies");
+
+    /* --- malformed input --- */
+    len = load("tests/fixtures/x509/rsa-leaf.der", der_scratch, sizeof(der_scratch));
+    ok(cs_x509_parse(der_scratch, len - 1, &leaf) != 0, "truncated certificate is refused");
+    der_scratch[len] = 0;
+    ok(cs_x509_parse(der_scratch, len + 1, &leaf) != 0, "trailing byte is refused");
+    ok(cs_x509_parse(der_scratch, 0, &leaf) != 0, "empty input is refused");
+    ok(cs_x509_parse(0, 10, &leaf) != 0, "null input is refused");
+    der_scratch[0] = 0x31;
+    ok(cs_x509_parse(der_scratch, len, &leaf) != 0, "wrong outer tag is refused");
+    der_scratch[0] = 0x30;
+
+    sy_printf("CHECK_CRYPTO_X509\tfailed=%d\n", bad);
+    return bad;
+}

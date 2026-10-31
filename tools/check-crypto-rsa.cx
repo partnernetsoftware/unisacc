@@ -1,0 +1,91 @@
+#pragma unisa use sys.io
+#pragma unisa use crypto.rsa
+#pragma unisa use crypto.b64
+#pragma unisa use crypto.bn
+#pragma unisa use text.text
+/* Vectors for crypto/rsa: PKCS#1 v1.5 signature verification with SHA-256.
+
+   One real 2048-bit key, one digest and one real signature over it (made with Python's cryptography; s^e
+   mod n was checked to be 00 01 FF...FF 00 30 31 30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20 ||
+   digest).  Then the rejections that matter: a changed digest, a changed signature byte, a signature that
+   is too short or too long, a signature equal to the modulus, and the wrong public exponent.  The re-encoded
+   EMSA is compared byte for byte inside cs_rsa_verify_pkcs1_v15, which is what refuses the Bleichenbacher
+   '06 ladder: an attacker free to choose the padding's contents would otherwise pick a short integer whose
+   tail happens to match the digest. */
+
+static int bad;
+
+static void ok(int c, const char *name) {
+    sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) bad = 1;
+}
+
+static const char n_hex[] =
+    "9e1c3c3fa4e5527ded885add8671fe8d9332310d6a211acb3afc1ae5ca8e186b"
+    "6f5e672ecec916302e0da619e39a89a5d89dcea92fd9636537020af59507646c"
+    "e98dac3e69127cf62a3c73211f712b90fade1d7bcd1d7a77f5c07939982062fa"
+    "9c3dd87c999fcb7b531fe07b12ce002275a6746bb6ca62b645fee926cf1b1c67"
+    "566fad9cc5e7eb81f0cbeafadd6df595f2b1606eb6305e8727fcded748221ba5"
+    "d9e4d81de8d5ee294650b36b3be67a1299cf03f42856f7f0242c57967d07009b"
+    "666225d89abd4e5a11660f92b76d96faf8dd083f2e8a8e7c97a7861f49061846"
+    "71b2844a1c900fd34bb659864924e2a3fabfb99a434dfb2e47919878e0fcc7a7";
+
+static const char sig_hex[] =
+    "38462f062152a6900003136b06ef26704b85113b79e5386c04fd446dde6f0272"
+    "ae538149430d1d2009b822e7c6c9b7744749376e8c8497037c435c5ae2df9021"
+    "2ebb38b4786961f6d8e688fd29d01bea1dfe4c592206ba2b8ab3e9d570fb6a98"
+    "f7754e9ca67ac51e8a29a03da3cc5da42513ed25b21eb823617fca111be6e2ad"
+    "925563c2d017605a2f6002f2cbcd5ac08b39daf5c4f32a5ab7a1153086702fd5"
+    "7e6e362fd1a0276e95d0dee037ce0e9a8d569c20cc028acf98ba109a7f87af96"
+    "14d8ffe541be8061f770965d0ab95c1ccd4d9a034fcb727e970efb2a0a636693"
+    "de469a43ca1d09176b9f508881ace2f863fdf95dd4faeb59302630c2fd7bfc99";
+
+static const char hash_hex[] = "230b107db41883e3dc8c114e49ae6c75178914db90150632f0ac7abb0b433f33";
+
+static unsigned char nbuf[256], ebuf[4], sig[300], alt[300], hash[32];
+
+int main(void) {
+    cs_bn n, e, wrong;
+    long nn = 0, sn = 0, i;
+
+    nn = cs_hex_decode(n_hex, tx_len(n_hex, 2048), nbuf, sizeof(nbuf));
+    ok(nn == 256, "decode modulus");
+    sn = cs_hex_decode(sig_hex, tx_len(sig_hex, 2048), sig, sizeof(sig));
+    ok(sn == 256, "decode signature");
+    ebuf[0] = 0x01; ebuf[1] = 0x00; ebuf[2] = 0x01;
+    ok(cs_bn_from_bytes(&n, nbuf, 256) == 0, "load modulus");
+    ok(cs_bn_from_bytes(&e, ebuf, 3) == 0, "load exponent 65537");
+    ok(cs_hex_decode(hash_hex, 64, hash, sizeof(hash)) == 32, "decode the digest");
+
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, sn) == 0, "signature verifies");
+
+    hash[0] ^= 0x80;
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, sn) != 0, "changed digest is refused");
+    hash[0] ^= 0x80;
+
+    sig[128] ^= 0x01;
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, sn) != 0, "changed signature byte is refused");
+    sig[128] ^= 0x01;
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, sn) == 0, "restored signature verifies");
+
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, sn - 1) != 0, "short signature is refused");
+
+    alt[0] = 0;
+    for (i = 0; i < sn; i++) alt[i + 1] = sig[i];
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, alt, sn + 1) != 0, "non-minimal signature is refused");
+
+    for (i = 0; i < 256; i++) alt[i] = nbuf[i];               /* s = n: out of range */
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, alt, 256) != 0, "signature equal to the modulus is refused");
+
+    ok(cs_bn_from_bytes(&wrong, ebuf, 3) == 0, "load a second exponent");
+    ok(cs_rsa_verify_pkcs1_v15(&n, &wrong, hash, 32, sig, sn) == 0, "same exponent still verifies");
+    ebuf[2] = 0x03;                                            /* 65539 instead of 65537 */
+    ok(cs_bn_from_bytes(&wrong, ebuf, 3) == 0, "load a wrong exponent");
+    ok(cs_rsa_verify_pkcs1_v15(&n, &wrong, hash, 32, sig, sn) != 0, "wrong exponent is refused");
+
+    ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 16, sig, sn) != 0, "short digest length is refused");
+    ok(cs_rsa_verify_pkcs1_v15(0, &e, hash, 32, sig, sn) != 0, "missing modulus is refused");
+
+    sy_printf("CHECK_CRYPTO_RSA\tfailed=%d\n", bad);
+    return bad;
+}
