@@ -43,6 +43,17 @@ static np_result prod(int secs, char **args) {
     return r;
 }
 
+/* the product with ARGS under `ulimit LIMIT` (e.g. "-n 10"), through tools/bound SECS, cwd = DIR */
+static np_result limited(const char *limit, int secs, const char *dir, char **args) {
+    char *v[24], sb[8], script[128]; int n = 0, k; char why[1024]; np_result r;
+    if (cx_fmt(sb, sizeof sb, "%d", secs) || cx_fmt(script, sizeof script, "ulimit %s; exec sh \"$0\" \"$@\"", limit)) die("limited");
+    v[n++] = bound; v[n++] = sb; v[n++] = "sh"; v[n++] = "-c"; v[n++] = script; v[n++] = com;
+    for (k = 0; args[k] && n < 23; k++) v[n++] = args[k];
+    v[n] = 0;
+    if (np_run(v, dir, 0, secs + 12, &r, why, sizeof why)) die(why);
+    return r;
+}
+
 int main(void) {
     np_result r; char p[4600];
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
@@ -75,6 +86,26 @@ int main(void) {
             if (cx_fmt(p, sizeof p, "%s/fsd/fsz.out", work)) die("path");
             ck(r.rc == 0 && sy_exists(p) == 1, "disk-output-fsize-unconstrained-rerun-writes-image"); np_free(&r); } }
 
+
+    /* res.fd.compile-nofile-limit: RLIMIT_NOFILE 64 is accepted with the exact baseline result; 10 is below what the sh launcher
+       needs (it opens fd 3 for its own read) and ends as a refusal, never a crash: rc 1..127, empty stdout, a stderr line,
+       no image; the unconstrained rerun after it succeeds.  The refusal wording at 10 is the shell's ("Invalid argument"). */
+    {   char *c64[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "nf64.out", 0}, *c10[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "nf10.out", 0}, *r64[] = {"-run", "ok.c", 0};
+        r = limited("-n 64", 20, work, c64); if (cx_fmt(p, sizeof p, "%s/nf64.out", work)) die("path");
+        ck(r.rc == 0 && sy_exists(p) == 1, "fd-nofile-64-compile-accepted"); np_free(&r);
+        r = limited("-n 64", 30, work, r64); ck(r.rc == 7, "fd-nofile-64-run-accepted"); np_free(&r);
+        r = limited("-n 10", 20, work, c10); if (cx_fmt(p, sizeof p, "%s/nf10.out", work)) die("path");
+        ck(r.rc > 0 && r.rc < 128 && r.rc != 7 && !r.outn && r.errn && sy_exists(p) != 1, "fd-nofile-10-refused-not-crashed"); np_free(&r);
+        r = prod(20, c10); ck(r.rc == 0 && sy_exists(p) == 1, "fd-nofile-unconstrained-rerun-writes-image"); np_free(&r); }
+
+    /* res.time.cpu-limit: RLIMIT_CPU 1 s kills a heavy compile (src/drive.cx at -O2) with a signal (rc >= 128): that is a
+       resource kill, classified UNKNOWN -- not a product verdict, not PASS -- and leaves no image under the name */
+    {   char *a[] = {"-O2", "-b", "lnx/x86_64", 0, "-o", "cpu.out", 0}; char sp[4600];
+        if (cx_fmt(sp, sizeof sp, "%s/src/drive.cx", root) || cx_fmt(p, sizeof p, "%s/cpu.out", work)) die("path");
+        a[3] = sp;
+        r = limited("-t 1", 30, work, a);
+        sy_printf("UNKNOWN\tresources-limits.time-cpu-limit-compile-killed\trc=%d (resource kill, not a verdict)\n", r.rc);
+        ck(r.rc >= 128 && r.rc != 142 && sy_exists(p) != 1, "time-cpu-limit-kill-is-signal-no-image-classified-unknown"); np_free(&r); }
 
     put("fds.c","#include <fcntl.h>\nint main(void){int n=0,i;for(i=3;i<64;i++)if(fcntl(i,F_GETFD)!=-1)n++;return n;}\n");
     {   char *a[] = {"-run", "fds.c", 0}; r = prod(30, a); ck(r.rc == 0 && !r.errn, "fd-no-leak-to-program"); np_free(&r); }
