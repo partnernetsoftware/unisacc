@@ -451,3 +451,158 @@ UNDECIDED  <KIND>  <path>:<line>  <detail>          （每条形一条，逐条�
 4. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
 5. 提交：`tools/commit-own.cx --whole tools/check-cx-layers.cx` + 批次/覆盖两行。
 6. spec 与三源不动；CX-G-3 另案；`OPEN-LEX-LINE` 保持未决。
+
+## 9. 方案 B 第二次修订：绑定索引实际合同、域等式动态推导、输入身份（未施工）
+
+回应 cdx 三点：数量不得钉死、先实证索引是否去重、源/manifest 同一输入且漂移须
+UNDECIDED。**§8.7 验收里的 1613/1902/1901/42/288/1 一律降级为 `1f4129d306` 那次
+收据，不再是断言值。**
+
+所有探针在仓外固定快照 `/tmp/pinH`（`git archive 1f4129d306`）上跑：`cx/{sys,mem,text,
+core,runtime}` 与 `tools/{symindex,check-cx-layers,cxlib/netpack}.cx` 全部来自快照，
+不使用当前工作区（工作区 `cx/sys/fs.cx` 有他人未提交变更，已按 cdx 指示不再触碰、
+不重跑该失败路径）。探针树 `/tmp/cxlprobe.o1YEsz`，每个文件先 `git add`/`commit` 再让
+工具看见。
+
+### 9.1 索引实际合同（实测，决定对账怎么比）
+
+`tools/symindex.cx` 的 `directive()` 逐行处理，**不做任何去重**；只在行首（跳过
+`<= 32` 字节后）遇到 `#` 才进入指令解析。实测：
+
+| 探针 | 源 | `dump` 的 U 行 | 编译器 `-cx-plan` / 编译 |
+|---|---|---|---|
+| m1 | `use b` 两行相同 | `U b` ×2 | 含 `tests/b.cx` |
+| m5 | `use b::b_x as ax`、`use b`、`use b::b_y as ay` | `U b` ×3 | 含 `b.cx` |
+| m2 | `use b::b_x as ax`、`use b::b_y as ay` | `U b` ×2 | 含 `b.cx` |
+| m4 | `use b`、`use b::b_x as ax` | `U b` ×2 | 含 `b.cx` |
+| e1 | `use b as bb`（无 `::`） | `U b` | 含 `b.cx` |
+| e2 | `use b::b_x` | `U b` | 含 `b.cx` |
+| f5 | 三行完全相同的 `use b` | `U b` ×3，**shard 内也是 3 行** | 含 `b.cx` |
+| f1 | 块注释与 `//` 内各一条 `use b` | **0 行** | 不含 `b.cx` |
+| g1 | 行首 `/* start`，其内 `#pragma unisa use b` | 0 行 | 不含 |
+| g4 | 行中 `int zz; /* start` 跨行的注释内 `use` | 0 行 | 不含 |
+| g2 | `#if 0` 内的块注释内的 `use` | 0 行 | 不含 |
+| g6 | `/* one-line */ #pragma unisa use b` | `U b` | **含 `b.cx`**（与索引一致） |
+| e4 | 行中 `int zz(void){return 1;} #pragma unisa use b` | 0 行 | 不含 |
+| f3 | `#ifdef NOPE` 内 `use b` | `U b` | 不含（条件为假） |
+| c4 | `use b\` + 空行 | `U b` | 含 |
+| c5 | CRLF 行尾 | `U b` | 含 |
+| c6 | `#pragma⇥unisa⇥use⇥b` | `U b` | 含 |
+
+**结论**：多重集对账安全——索引保留同模块多次 `use`（含不同 `::sym`/`as`），不会把
+合法重复压成一条，因此「表比 U 多」不会因去重被误判成 MISSING-U。`::` 之前取主名、
+`as` 别名忽略，与 §7.2 规则 11 一致。`g6` 说明「`#` 前只有空白/注释残骸」算行首
+（`<= 32` 字节不清行首），工具必须照此实现，否则会对 g6 类输入报 EXTRA-U。
+
+唯一实测出的单向差异在**续行拆词**：
+
+| 探针 | 源 | 索引 | 编译器 |
+|---|---|---|---|
+| c1 | `#pragma unisa \` 换行 `use b` | **0 U 行** | 含 `b.cx` |
+| c2 | `#pragma \` 换行 `unisa use b` | **0 U 行** | 含 `b.cx` |
+| c3 | `#pragma unisa use \` 换行 `b` | **0 U 行** | 含 `b.cx` |
+
+即索引按物理行取词、不拼接续行；cxmod 先把 `\`+`\n` 变 `0x01`+`\n` 再解析，故能看见。
+这类输入今天的层审计**完全无边**（`edges` 低报）。现网实测：tracked `.cx` 中
+`^[[:space:]]*#[[:space:]]*pragma.*\\$` 命中 **0 个文件**，`#pragma unisa use ...\`
+同样是 0——是实测值，不是恒等式。
+
+### 9.2 对账绑定索引合同（三重判定，边数只增不减）
+
+每源一次词法扫描得 `scan[mod] = {occurrences, min_cond_line}`；与 shard 的 `U` 行比：
+
+| 判定 | 含义 | 边计数 | 状态 |
+|---|---|---|---|
+| `OK` | 次数相等 | 按 §7.4 判 cond | — |
+| `MISSING-U` | 词法多于索引（续行拆词类） | **保持按 U 行计边，不新增** | `UNDECIDED MISSING-U path:line use M` → rc3 |
+| `MISSING-U-CONDITIONAL` | 同上且该次出现 `cond>0` | 计边不变；本应 FAIL 的漏掉了 | `UNDECIDED` → rc3 |
+| `EXTRA-U` | 索引多于词法 | 按 U 行计边不变 | `UNDECIDED EXTRA-U` → rc3（未观测到，但不假定为零） |
+
+要点：MISSING-U **不**悄悄补边（补边会改变 `edges` 收据让人误以为覆盖提升），也**不**删
+索引事实；它只把「覆盖不完整」变成非零退出并逐条命名。补边属于另案（扩展事实源），
+需单独批准。
+
+### 9.3 域等式动态推导（不钉数字）
+
+输入三份，同一身份：`manifest.tsv`、shard 目录、`git ls-files -s -z -- '*.cx'`
+（先例：`tools/affected.cx:441`）。运行期求集合：
+
+- `T` = git 列出的 tracked `.cx`；`S` = `T` 中 mode `120000` 的子集；`R = T ∖ S`；
+- `M` = manifest 行路径集合；`G = M ∖ R`（生成物，须全在 `out/` 下）；
+- `D = M ∖ archive/ ∖ out/`（审计域）。
+
+检查并打印（任一不成立 → `UNDECIDED <KIND>` → rc3，绝不静默）：
+
+1. `|T| = |R| + |S|`，且 `R ∩ S = ∅`（集合相等，不是数量相等）；
+2. `|M| = |R| + |G|`，`R ∩ G = ∅`，且 `G ⊆ out/`；`R ∖ M = ∅`（tracked regular 全在
+   manifest）。若有 `R ∖ M` 非空或 `G ⊄ out/` → `UNDECIDED DOMAIN-MISMATCH` 并列出前 8 条。
+3. `D` 中每个路径都有对应 shard 文件；shard 目录里每个 `*.tsv`（除 `manifest.tsv`）
+   都被某个 manifest 行引用，否则 `UNDECIDED ORPHAN-SHARD`。
+4. `git` 不可用 / 非仓 → `UNDECIDED NO-GIT`（不降级为「跳过」）。
+
+`CX_LAYERS_SCOPE` 打**实算值**：
+
+```
+CX_LAYERS_SCOPE tracked=<|T|> regular=<|R|> symlink=<|S|> manifest=<|M|> generated=<|G|>
+                 archive=<|M∩archive|> out=<|M∩out|> domain=<|D|> partition=OK|MISMATCH
+```
+
+`1f4129d306` 上的实算值是 `1943/1901/42/1902/1/288/1/1613`，仅作该快照的收据；
+共享树变化后应随之变化，等式仍须成立。
+
+### 9.4 输入身份与漂移
+
+- **源**：`cl_scan` 读取源文件时顺带 `cx_sha256_hex`，与 manifest 该行 sha 比较；不等
+  → `UNDECIDED SOURCE-CHANGED path manifest=<sha8> read=<sha8>`，rc3，且该源不参与边计数
+  之外的任何推断（已扫结果保留但标记）。
+- **manifest**：读取前 `sy_stat` 记 size/mtime/ino，审计结束后再 `sy_stat` 比对；变化 →
+  `UNDECIDED MANIFEST-CHANGED`，rc3。
+- **索引与源同一输入**：工具在审计前自己跑 `symindex update`（`main` 现状），故 manifest
+  与源来自同一时刻；上面的 sha 比对覆盖「update 之后、逐源读取之前」的漂移窗口。
+- 身份字段全部打印在 `CX_LAYERS_SCOPE` 与 `UNDECIDED` 行，不进入 PASS 判据之外的隐含状态。
+
+### 9.5 盲区表述（不得写成 reconcile=OK 即全覆盖）
+
+- 若索引与词法**同时**漏同一 `use`，对账仍 `OK`。词法镜像 `cxm_load`/`cxm_scan`，因此
+  该盲区等于「编译器自己也看不见」；但工具只能声称：**在该输入上未观测到分歧**，
+  且 `partition=OK ∧ identity 稳定 ∧ undecided=0`。不得表述为「全仓 `.cx` 层向覆盖完整」。
+- 软链 `S`（当前 42 个）不在 manifest 也不在审计域；它们指向的目标文件本身在域内。
+  scope 行必须显式给出 `symlink=`，不得省略。
+- 被忽略的工作树 `.cx`（当前 2 个）不在 `T`；若选择扫描须单列 `UNDECIDED IGNORED-SOURCE`。
+- 续行拆词（c1–c3）属 MISSING-U：既证明索引会漏，也证明「光看 U 行」不可靠；但补边
+  另案，本次仍以 U 行为边事实源，只是不再宣称覆盖完整。
+
+### 9.6 夹具（在 §8.6 的 5 条之外，总 +12 → +24）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-multi-same` | 三行相同 `use b` | `undecided==0`、`edges` 计 1（realpath 去重）、rc0 |
+| `k-multi-alias` | `b::b_x as ax` + `b::b_y as ay` | 索引 2 U、词法 2 次、对账 OK、`edges` 1、rc0 |
+| `k-index-gap` | `#pragma unisa \` 换行 `use b` | `UNDECIDED MISSING-U`、`edges` 与无该行时相同、rc3 |
+| `k-index-gap-cond` | 同上但位于 `#if 0` 内 | `MISSING-U-CONDITIONAL`、rc3、不产生 FAIL |
+| `k-comment-only` | 只有注释里的 `use b` | 0 U、0 次、对账 OK、`edges==0`、rc0 |
+| `k-trailing-comment` | `/* x */ #pragma unisa use b` | 对账 OK（`#` 前只有空白算行首）、`edges==1`、rc0 |
+| `k-source-changed` | 写入→dump→改写→直接调 `cl_shard_file` | `UNDECIDED SOURCE-CHANGED`、rc3 |
+
+测试点：`k-multi-*` 证明多重集不会把合法重复误判；`k-index-gap*` 证明漏 U 非零退出；
+`k-trailing-comment` 钉住 `<= 32` 不清行首这一条（g6 实测）。
+
+### 9.7 状态与退出码（沿用 §8.1，补充 KIND 清单）
+
+`rc0`：`failed==0 ∧ undecided==0 ∧ partition==OK ∧ identity 稳定`。
+`rc1`：`failed>0`。`rc3`：`failed==0` 且（`undecided>0 ∨ partition!=OK ∨ identity 不稳`）。
+
+`UNDECIDED` 的 KIND 全集：`MISSING-U`、`MISSING-U-CONDITIONAL`、`EXTRA-U`、
+`TOO-MANY-MODULES`、`LONG-MODULE-NAME`、`UNREADABLE`、`SOURCE-CHANGED`、
+`MANIFEST-CHANGED`、`DOMAIN-MISMATCH`、`ORPHAN-SHARD`、`NO-GIT`、`IGNORED-SOURCE`。
+每条形 `UNDECIDED\t<KIND>\t<path>:<line>\t<detail>`，同时计入 `undecided=`。
+
+### 9.8 验收（替代 §8.7）
+
+1. `--fixtures`：`checks` = 原值 + 24，`failed=0`；`k-*` 各自断言命中（含 rc3 类）。
+2. 全量审计：`CX_LAYERS_SCOPE` 的实算值与本快照收据的**等式**成立（数量可变，等式不可
+   破）；`undecided` 打实测值，>0 即本次交付不是 PASS；`edges/same/down/up/amb/out/unres`
+   与 `1f4129d306` 收据逐项比对，差异须有来源说明。
+3. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
+4. `tools/commit-own.cx --whole tools/check-cx-layers.cx` + 批次/覆盖两行。
+5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 保持未决；补边（MISSING-U 转正）另案。
