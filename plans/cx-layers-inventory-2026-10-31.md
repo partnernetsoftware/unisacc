@@ -2582,12 +2582,22 @@ rc=7 成功**（隐式声明 → 链接期命中 `b` 侧定义）。
 3. 删除"差异只停该边展开"——它描述的是另一套（同身份）语义，与 dependency_diff 无关；
 4. 若某侧目标解析失败，走 `unresolved`/`invalid` 行，仍不入 pair。
 
-`pair_peak` 现在是「队列/核验栈同时存活的对数高水位」——把两个量纲写成一个字段。须按实际算法分别定义：
-- `pair_queue_len_peak`：显式工作队列（待处理 context/pair）长度高水位；
-- `pair_verify_depth_peak`：单次核验的递归或显式栈深度高水位；
-- 需要总数时只加 `sum_` 前缀（§14.1），**不得**把二者相加成 `pair_peak`，也不得互相替代。
+`pair_peak` 现在是「队列/核验栈同时存活的对数高水位」——把两个量纲写成一个字段。须按实际算法分别定义，
+且**按元素单位命名**（cdx 第二轮限定，已收下）：
 
-上述规则与 C 项均为**提案，不是施工许可**；未实现前相关字段一律 UNMEASURED。
+| 字段 | 元素单位 | 何时可为数 | 何时必须别的值 |
+|---|---|---|---|
+| `context_queue_len_peak` | **context**（待探索的模块入口） | 队列里确有 context 单元 | — |
+| `pair_queue_len_peak` | **pair**（同 realpath 组的 canonical→candidate） | 队列里确有 pair 单元 | 若实现只有一个混合队列，此字段 **NOT_APPLICABLE**，不得用混合长度顶替 |
+| `work_queue_len_peak` | **混合**（元素单位须在收据里显式声明，如 `context+pair`） | 实现确实用单一工作队列 | 纯 pair 队列时应为 NOT_APPLICABLE |
+| `pair_verify_depth_peak` | **栈帧**（单次核验的递归/显式栈深度） | 算法确有核验栈 | **纯迭代算法（无验证栈）⇒ NOT_APPLICABLE**，不填 0、不虚构深度 |
+
+- 需要总数时只加 `sum_` 前缀（§14.1），**不得**把不同单位的字段相加，也不得互相替代；
+- `NOT_APPLICABLE`（该算法的结构里不存在此量）与 `UNMEASURED`（结构存在但未测）与 `0`（测到零）
+  是三个不同值，收据里不得互换；
+- 上述字段集合**待算法定稿**；定稿前全部为 UNMEASURED/NOT_APPLICABLE，不写数字、不作实施授权。
+
+上述规则与 C 项均为**提案，不是施工许可**；未实现前相关字段一律 UNMEASURED 或 NOT_APPLICABLE，不填 0。
 
 #### C. §5/§7 环检测：算法未定，不可声称"当前祖先链覆盖所有环"
 
