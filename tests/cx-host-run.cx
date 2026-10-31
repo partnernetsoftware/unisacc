@@ -51,7 +51,7 @@ static void fixture(const char *dir) {
     tx_snprintf(p, sizeof p, "%s/declare.cx", dir);
     write_text(p, "int declared(void);\n");
     tx_snprintf(p, sizeof p, "%s/rsp.txt", dir);
-    write_text(p, "-o out/should-not-exist\n");
+    { char body[512]; tx_snprintf(body, sizeof body, "-o %s/rsp-out\n", dir); write_text(p, body); }
 }
 
 static int runv(char **v, char **out, size_t *n) { return cx_runv_timeout(v, 20, out, n); }
@@ -123,9 +123,9 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
     rc = runsh(cmd, 0, 0);
     tx_snprintf(p, sizeof p, "%s/s15.err", dir);
     o = cx_read(p, &n);
-    tx_snprintf(q, sizeof q, "program killed by signal 15");
-    { int nl = 0; size_t i; for (i = 0; o && i < n; i++) if (o[i] == '\n') nl++;
-      ck(rc == 143 && o && has(o, n, q) && nl == 1, name); }
+    tx_snprintf(q, sizeof q, "%s_cx: program killed by signal 15\n", tag);
+    ck(rc == 143 && o && n == (size_t)tx_len(q, 1L << 20) &&
+       tx_same(o, (long)n, q, tx_len(q, 1L << 20)), name);
     mm_free(o);
 
     tx_snprintf(name, sizeof name, "%s.env-io-cwd", tag);
@@ -148,18 +148,19 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
 
     tx_snprintf(name, sizeof name, "%s.conflicts", tag);
     { int ok = 1;
-      char out[256];
+      char out[256], rsp[256];
       const char *fixed[][2] = {
         {"-c", "-c"}, {"-E", "-E"}, {"-S", "-S"}, {"-shared", "-shared"}
       };
       size_t k;
       tx_snprintf(out, sizeof out, "%s/conflict-out", dir);
-      if (sy_exists(out) == 1) ok = 0;
+      tx_snprintf(rsp, sizeof rsp, "%s/rsp-out", dir);
+      if (sy_exists(out) != 0 || sy_exists(rsp) != 0) ok = 0;
       for (k = 0; k < 5 + sizeof fixed / sizeof fixed[0]; k++) {
         if (k == 0) tx_snprintf(cmd, sizeof cmd, "%s -run -o %s %s/plain.cx 2>&1", drv, out, dir);
         else if (k == 1) tx_snprintf(cmd, sizeof cmd, "%s -run -o%s %s/plain.cx 2>&1", drv, out, dir);
         else if (k == 2) tx_snprintf(cmd, sizeof cmd, "%s -run -Wl,--output=%s %s/plain.cx 2>&1", drv, out, dir);
-        else if (k == 3) tx_snprintf(cmd, sizeof cmd, "%s -run -Xlinker %s/plain.cx 2>&1", drv, dir);
+        else if (k == 3) tx_snprintf(cmd, sizeof cmd, "%s -run -Xlinker --output=%s %s/plain.cx 2>&1", drv, out, dir);
         else if (k == 4) tx_snprintf(cmd, sizeof cmd, "%s -run @%s/rsp.txt %s/plain.cx 2>&1", drv, dir, dir);
         else tx_snprintf(cmd, sizeof cmd, "%s -run %s %s/plain.cx 2>&1", drv, fixed[k - 5][0], dir);
         o = 0; n = 0; rc = runsh(cmd, &o, &n);
@@ -170,7 +171,7 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
         else if (!has(o, n, fixed[k - 5][1])) ok = 0;
         mm_free(o);
       }
-      if (sy_exists(out) == 1) ok = 0;
+      if (sy_exists(out) != 0 || sy_exists(rsp) != 0) ok = 0;
       ck(ok, name);
     }
 
@@ -244,18 +245,19 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
       mm_free(o);
     }
 
-    tx_snprintf(name, sizeof name, "%s.concurrency-clean", tag);
+    tx_snprintf(name, sizeof name, "%s.concurrent-launch-clean", tag);
     tx_snprintf(cmd, sizeof cmd,
              "( %s -run %s/args.cx -- one >%s/c1.out 2>/dev/null ) & a=$!; "
              "( %s -run %s/args.cx -- two >%s/c2.out 2>/dev/null ) & b=$!; "
-             "wait $a; r1=$?; wait $b; r2=$?; echo $r1:$r2",
+             "wait $a; r1=$?; wait $b; r2=$?; echo W7R1:$r1; echo W7R2:$r2",
              drv, dir, dir, drv, dir, dir);
     o = 0; n = 0; rc = runsh(cmd, &o, &n);
     { size_t on = n; char *a, *b; size_t an = 0, bn = 0;
       tx_snprintf(p, sizeof p, "%s/c1.out", dir);
       a = cx_read(p, &an);
       tx_snprintf(q, sizeof q, "%s/c2.out", dir); b = cx_read(q, &bn);
-      ck(rc == 0 && has(o, on, "0:0") && a && b && has(a, an, "<one>") && has(b, bn, "<two>") &&
+      ck(rc == 0 && tx_suffix(o, (long)on, "W7R1:0\nW7R2:0\n", 14) &&
+         a && b && has(a, an, "<one>") && has(b, bn, "<two>") &&
          gone_temp(a, an) && gone_temp(b, bn), name);
       mm_free(a); mm_free(b); }
     mm_free(o);
