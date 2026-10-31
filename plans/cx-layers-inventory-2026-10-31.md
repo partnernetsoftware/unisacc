@@ -2120,3 +2120,46 @@ plan_output_rows == malformed + invalid_len + root_hits + closure_hits + build_u
 - 单根 preflight 合格不蕴含构造级身份一致（§19.8）。
 - `sy_realpath` 在 `cx/sys/fs.cx:95` 且符合 CX-Y-4（§19.11 B）；问题是 `eb_real` 吞错。
 - **真实 argv 与所有运行计数继续 UNMEASURED**；本节全部是字段设计，不是实测值。
+
+### 19.13 只读实测：A 注册批次当前在共享 main 上为 FAIL（登记合同与 rc3 冲突）
+
+以 commit `49446c3e9e`（HEAD 时的工具版）实跑，两条独立收据：
+
+| 命令 | 结果 |
+|---|---|
+| `sh ./unisacc.com tools/check-cx-layers.cx` | 11.31 s，`edges=2451 same=773 down=1546 up=0 amb=82 out=50 unres=5 io=0 failed=0`，`undecided_lex=1 recon=0 meta=0 io=0`，`domain=1620 bytes=37015 manifest_sha16=0ea934b862088dd6 manifest_backend=afalg digest_backend=mixed`，**rc=3** |
+| `sh ./unisacc.com tools/check-cx-layers.cx -- --fixtures` | 4.30 s，`checks=16 failed=0`，**rc=0** |
+| `sh ./unisacc.com tests/run-batch.cx <root> <out> cx-layers` | 18.86 s，`BATCH_RUN id=cx-layers status=FAIL rc=3 marker=CX_LAYERS_SCOPE candidate=fc1d4513…`，**rc=1** |
+
+⇒ **`tests/batches.tsv:332` 登记的 `cx-layers` 批次现在是红的**（`expect=rc0:CX_LAYERS_SCOPE`）。
+
+根因是两条事实叠加，不是工具算错：
+
+1. `tools/check-cx-layers.cx:433` 在每次审计开始**无条件** `cl_und_lex++`（并打印
+   `UNDECIDED A-INCOMPLETE …`），`:555` 又把 `undecided_*` 之和 > 0 一律 `return 3`。
+   于是 rc=3 **与测量结果无关**，是常量。
+2. `tests/run-batch.cx` 判 PASS 写死了 `expect` 前缀 `"rc0:"` 且要求 `result.rc == 0`。
+   ⇒ 一个**永远** rc3 的工具，无论实现多完整，都被登记合同判 FAIL。
+
+这与 §17 记的"`cl_und_lex` 恒 0 的死检查"是同一枚硬币的另一面：从"恒 0 假清白"翻成"恒 1 假负债"，
+两态都无法区分进展与回归。§16 定的三档 rc 因此**无法接入现有批次合同**。
+
+三条出路，任一条都要改本刀无权碰的文件：
+
+| 选项 | 改动 | 代价 |
+|---|---|---|
+| (a) 让 undecided 真由缺口驱动 | 缺口清零后 `cl_und_lex` 自然为 0，rc 回 0 | 需要真做完 lexical-12 / fixtures-30；但"未实现"本身不该每次审计都算未决 |
+| (b) 扩 `run-batch` 的 expect 语法 | `tests/run-batch.cx` 支持 `rc3:` 等前缀 | 改测试基建；且必须区分"rc3 是未决"与"rc3 是允许" |
+| (c) 把 A 移出批次登记 | `tests/batches.tsv:332` 行改 implementation 或删除 | 等于放弃批次门;新体系按网/流/接口分层，删批次会留覆盖空洞 |
+
+我的建议是 **(a) 为主 + 最小 (b)**：`UNDECIDED A-INCOMPLETE` 那次自增应改成**由缺失能力表驱动**
+（当前 3 项中只有 lexical-12 与 fixtures-30 未做，U-reconciliation 已实现且本次 recon=0），
+并在全部缺口关闭后自然 rc0；同时 `run-batch` 允许显式 `rc3:` 前缀，使"未决"可被登记而不冒充 PASS。
+
+另记一条**收据自洽问题**（不改代码）：`UNDECIDED A-INCOMPLETE` 的文本仍写
+「lexical-12/U-reconciliation/fixtures-30 not implemented」，但 `undecided_recon=0` 且
+`:433` 之后的 U 对账代码已实际运行（MISSING-U/EXTRA-U 分支可达）⇒ 文本把"已实现且无发现"和
+"未实现"混在一句里。收据文本应与实际缺口集合同步，否则又是一处"看起来确定"的错误陈述。
+fixtures 实测 16 项（非 30），同样与文本不符。
+
+本节是实跑收据（三条命令均实际执行，时间与输出如上）；未改工具、未改批次表、未改 run-batch。
