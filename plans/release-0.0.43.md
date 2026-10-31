@@ -133,6 +133,7 @@ STATE43：**分相桩（omp-grk，2026-11-01）**：PHASE=B 读 `/tmp/unisacc-fo
 STATE43：**516a0cbfd2 四片（omp-grk，2026-11-01）**：lnx/x86_64 `9b58a504`，win/x86_64 `09fb7051`，lnx/arm64 `c3e60f72`，osx/x86_64 `b4cd420f`（分相 rc0）。osx/arm64 还在跑。没有重装。
 STATE43：**已安装 c0cfdace（omp-grk，2026-11-01）**：`./unisacc.com` 换成 `c0cfdace`，rev `516a0cbfd2`。旧版备份 `out/unisacc.com.4e40d38a`。五片：lnx/x86_64 `9b58a504`，win `09fb7051`，lnx/arm64 `c3e60f72`，osx/x86_64 `b4cd420f`，osx/arm64 `1d5e074d`。装前 `check-install-fixes` failed=0，干净父进程 fd 计数 0，新切片 `spawn_inherit` 通过。装后 smoke 5/5。没有签名，没有公开。
 STATE43：**fd 两合同（omp-grk，2026-11-01）**：已装 `c0cfdace` 的新会话里 `resources-limits` 的 `fd-no-leak-to-program` FAIL，粘住。源码改为只保留 argv 里的数字 fd。私有构造器上干净父进程 fd 计数 0，`spawn_inherit` 通过。还没重装。
+STATE43：**d2850df079 三片（omp-grk，2026-11-01）**：lnx/x86_64 `6ba762d9`，win/x86_64 `30811c48`，lnx/arm64 `3c5f8430`。osx 分相还在跑。没有重装。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
