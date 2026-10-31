@@ -1780,3 +1780,130 @@ ok = !transport && !result.rc && tx_eqz(before, after) && expect 前缀 "rc0:" &
   三者的差集分别报告（缺 → incomplete，多 → stale）。
 - 未核项显式标 UNKNOWN：产品真实 argv、`apps/csih` 入口集合、`ujs` 入口集合、215 个 tools 无批次
   文件的类别、只读强制。
+
+## 19. 给 omp-go 的 preflight 文档最小修订建议
+
+对象：`plans/cx-context-preflight-2026-10-31.md`（下称 P）。本节只给**差分**，不重写 P，不改
+cxmod/entry-build/spec，不建 roots/工具，不开测。每条都附锚点与证据，go 可逐条采纳或驳回。
+
+### 19.1 根身份必须四件分离（P §3 §4 §14）
+
+P 现在把「根」当成一个 path 字符串，加 `joint_id`/`double_count` 两个修饰列。实际有四个**不同**
+可观测对象，混在一个字段里会导致（a）产品 33 TU 只记 1 个根、（b）同一边因词法/物理两条路径算两次：
+
+| 编号 | 对象 | 来源 | 现在的 P 里 |
+|---|---|---|---|
+| R1 | recipe 声明成员 | `tools/entry-build.cx` 的 `src_rel[0..34]`（35 键 / 33 唯一） | **无字段** |
+| R2 | 实际捕获 argv | 构建真实命令行（未捕获） | **无字段** |
+| R3 | 词法入口 | 传给编译器的 path 文本（如 `src/runtime/routestep.cx`） | `root` 列 |
+| R4 | realpath | R3 在快照里解析后的物理文件（如 `cx/runtime/routestep.cx`） | 只在 §5 讲 realpath 组 |
+
+建议列改（P §4 的 TSV）：
+
+```
+root        # R3 词法入口，原样
+joint_id    # 空=独立根；非空=联合根
+double_count
+category
+provenance  # 只能取下方枚举，不由 batch id 推断
+origin      # NEW: recipe|argv|tree-main|batch-source（可多值逗号分隔）
+physical    # NEW: R4 realpath（快照内相对路径）；无法解析留空 + UNKNOWN
+expect
+sha256
+```
+
+- `origin=recipe` 的行必须附 `joint_id`，且 `physical` 必须填；`physical` 落在别的目录域（如
+  `cx/runtime/**`）时**不得**因为"跨域"就拒绝——那是合法的 recipe 成员，只影响层号报告。
+- 只有 R1 与 R2 同时存在且成员一致，才能把联合根记 `measurement_complete`。R2 未捕获 ⇒
+  `joint_root=JOINT-UNKNOWN`，此时仍可展开 R1 报规模，但**不得**作为产品覆盖证据。
+
+### 19.2 `argv` 未捕获：显式状态，不用推断补
+
+P §3 的回执字段里有产品身份，但没有构建命令身份。建议加两字段：
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `build_recipe` | `recipe:<path>@<sha256>` | 至少要能指回 `tools/entry-build.cx` 的具体版本 |
+| `build_argv` | `captured:<sha256(规范化argv)>` 或 `NOT-CAPTURED` | 未捕获就是 `NOT-CAPTURED` |
+
+约束：
+- `build_argv=NOT-CAPTURED` ⇒ 联合根状态只能是 `JOINT-UNKNOWN`，且聚合行里
+  `joint_members_verified=0`（计数，不是布尔），不得写"联合根已核"。
+- **不得**从 `git ls-files src`、`D main`、目录软链形态或 `entry-build.cx` 里**别的**函数推断
+  argv；那是 recipe，不是 argv。
+- 抓 argv 属于开测前置，本轮不做（cdx 已定：不再构造/开测）。
+
+### 19.3 分类不能用 `expect` 或 batch id 推断（P §4 类别表）
+
+实测证据（§18.4/§18.9 C2）：344 行 `implementation` 全 IMPLEMENTED、`expect` 全 `rc0:*`；
+判 PASS 只查「无超时 + rc0 + 候选二进制前后 sha 相同 + 标记行恰 1 次」，**不涉及**被测内容正负。
+`layer` 列才是正负信号（contract 133 / interfaces 108 / **negative 63** / properties 15 /
+platform 10 / library 8 / product 7），`mode` 列区分 `SOURCE` 342 / `PREPARED` 2。
+反例：`full-negative` 这个批次 id 的 source 是 `tests/full-domain.cx`、layer=`product`——
+按 id 命名推断必然错。
+
+建议把 P §4 的类别语义改成**三维可核**，并删掉 `batch-negative` 的"由 expect 推定"路径：
+
+| 类别 | 判定条件（全部可核，不含推断） |
+|---|---|
+| `production` | `origin` 含 `recipe`/`argv`（且非 UNKNOWN）；或 `src/**` 直接含 main |
+| `tool` | `tools/**` 含 main 且**登记在 `tests/batches.tsv` SOURCE**（115 个） |
+| `batch` | 登记在 `tests/batches.tsv`，`mode=SOURCE`；正负另用 `batch_layer` 记录 `layer` 列原值 |
+| `batch-prepared` | `mode=PREPARED`（2 行：`nets`、`assembler`）；未供材料 ⇒ UNKNOWN |
+| `generated` | 运行时生成、不在 commit 树中；`expect=unknown-ok` |
+| `unclassified` | 其余候选（含 `tools/**` 含 main 但**无批次**的 215 个） |
+
+- `provenance` 只允许：`recipe`、`argv`、`tree-main`、`batch:<id>`、`generated:<test>`。**禁止**用
+  批次 id、文件名里的 `negative`/`refuse`/`fault` 之类词充当原因。
+- 若要保留 `batch-negative` 这个名字，只能作为**报告分组**（`layer=negative` 的投影），
+  不能参与覆盖计量，也不能缩短展开。
+- `negative-known` 的上限维持 0 行（§18.4），引入须新增具名清单 + 逐行理由。
+
+### 19.4 候选全集三向对齐（P §4 核对门）
+
+P 现在只有两源（树∩`D main`、batches SOURCE）。建议改为三源**分别**报告：
+
+```
+S1 = recipe/argv 成员（R1，若 R2 缺失则只报 R1 并标 UNKNOWN）
+S2 = 树 .cx ∩ D main（P 现有规则 1–2）
+S3 = tests/batches.tsv SOURCE
+候选 = S1 ∪ S2 ∪ S3
+```
+
+差集必须分开写，不允许合并成"缺失数"：
+
+| 差集 | 含义 | 处置 |
+|---|---|---|
+| `S2 \ S3` = 417 | 有 main 但无批次 | 逐项落 `tool`/`unclassified` |
+| `S3 \ S2` = 0 | 有批次但无 main | 当前为空，出现即 `ROOTS STALE-SOURCE` |
+| `S1 \ S2` | recipe 成员但索引里无 main | **正常**（TU 无 main），必须按联合根成员处理，不算缺失 |
+| `S2 \ S1` | 索引有 main 但 recipe 不用 | 报出，不算错 |
+
+实测（§18.2）：`S2` 847 = `D main` 847，双向零差；`S3` 214；`S2∩S3` 214。
+另外必须声明：**`D main` 只覆盖 manifest 里的 path**，31 个 mode 120000 的 `.cx` 软链不在内
+（当前不含 main，属巧合级缓解），所以 S2 是"发现集"而非"全集"（§18.3）。
+
+### 19.5 跨根只做统计，不混峰值（P §6 §14 已写，补一句可执行定义）
+
+P §6 写「不把求和冒充全局同时峰值」，§14 写「跨根求和只作统计量」。建议加一句把边界钉死：
+
+> 联合根内部的 `pairs_visited`/`pair_peak` **只在该 `joint_id` 内求和一次**；成员单根若同时出现在
+> 表中必须 `double_count=1` 且聚合时**只取联合根那一份**（成员行仅作报告）。不同 `joint_id`
+> 之间、以及独立根之间的求和只能进 `AGGREGATE`，字段名必须带 `sum_` 前缀（如
+> `sum_edges`），不得写入任何 `peak`/`max_*` 字段。
+
+理由：未来一旦新增联合根，`double_count` 语义若只写在散文里，聚合代码会静默双计；提前钉成字段
+前缀是最小成本的可核约束。
+
+### 19.6 采纳顺序建议（给 go 的优先级）
+
+| 优先级 | 项 | 理由 |
+|---|---|---|
+| P0 | 19.2 `build_argv=NOT-CAPTURED` + `JOINT-UNKNOWN` | 现在是错的默认：P 未声明 argv 缺失，读者会当成"根已确定" |
+| P0 | 19.1 `physical` 列 + recipe 成员不算缺失 | 不做则产品 32 个 TU 会成为隐形缺口或有重复边 |
+| P1 | 19.3 类别三维化、删 expect 推定 | 直接影响 `negative-known=0` 与覆盖计量 |
+| P1 | 19.4 三源差集分报 | 现在 `S1` 完全缺席 |
+| P2 | 19.5 `sum_` 前缀约定 | 未来联合根才会触发，但改字段名要趁早 |
+
+本节不含任何 PASS；未改 P、未建 roots/工具、未动 cxmod/entry-build/spec。身份与 epoch 沿用 §18.1，
+不外推到其它 commit。
