@@ -1,0 +1,277 @@
+#pragma unisa module chacha20poly1305
+/* crypto/chacha20poly1305 -- ChaCha20 (RFC 8439 §2.3-2.4), Poly1305 (§2.5) and the AEAD construction
+   (§2.8).  Pure cx: 32-bit words, 64-bit products, no libc, no allocation, all lengths checked first.
+
+     cs_chacha20_block(key32, nonce12, counter, out64)      one 64-byte keystream block.
+     cs_chacha20_xor(key32, nonce12, counter, in, out, n)   in may equal out; counter runs per block.
+     cs_poly1305_init(ctx, key32) / cs_poly1305_update(ctx, m, n) / cs_poly1305_final(ctx, tag16)
+          the one-time MAC; the context is caller-owned and may be copied after init.
+     cs_chacha20poly1305_seal(key32, nonce12, aad, alen, in, n, out, tag16)
+          encrypt: keystream starts at counter 1, the Poly1305 key is block 0.  in may equal out.
+     cs_chacha20poly1305_open(key32, nonce12, aad, alen, in, n, out, tag16)
+          0 on success, -EBADMSG when the tag does not match; out is written only after the tag is good.
+
+   Tag comparison goes through cs_ct_eq, never a byte-wise early return.  Nothing here zeroises the
+   caller's key; cs_ct_wipe is available for that.  A nonce must never be reused with one key: sealing
+   two messages under the same key and nonce breaks both, and no check here can detect it. */
+
+#pragma unisa use ct
+
+/* Poly1305 accumulator: five 26-bit limbs of h and r, the four pad words, and a partial block. */
+typedef struct {
+    unsigned r[5];
+    unsigned h[5];
+    unsigned pad[4];
+    unsigned left;
+    unsigned char buf[16];
+} cs_poly1305_t;
+
+
+static unsigned cs_rotl32(unsigned x, unsigned n) { return (x << n) | (x >> (32 - n)); }
+
+static unsigned cs_ld32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static void cs_st32(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+/* One quarter round on four words held in x[]. */
+static void cs_qr(unsigned *x, int a, int b, int c, int d) {
+    x[a] += x[b]; x[d] = cs_rotl32(x[d] ^ x[a], 16);
+    x[c] += x[d]; x[b] = cs_rotl32(x[b] ^ x[c], 12);
+    x[a] += x[b]; x[d] = cs_rotl32(x[d] ^ x[a], 8);
+    x[c] += x[d]; x[b] = cs_rotl32(x[b] ^ x[c], 7);
+}
+
+/* §2.3 the ChaCha block: constants, key, counter, nonce; ten double rounds; add the input state. */
+void cs_chacha20_block(const unsigned char key[32], const unsigned char nonce[12], unsigned counter,
+                       unsigned char out[64]) {
+    static const char sigma[16] = {'e', 'x', 'p', 'a', 'n', 'd', ' ', '3',
+                                   '2', '-', 'b', 'y', 't', 'e', ' ', 'k'};
+    unsigned x[16], s[16];
+    int i, r;
+    for (i = 0; i < 4; i++) s[i] = cs_ld32((const unsigned char *)sigma + 4 * i);
+    for (i = 0; i < 8; i++) s[4 + i] = cs_ld32(key + 4 * i);
+    s[12] = counter;
+    for (i = 0; i < 3; i++) s[13 + i] = cs_ld32(nonce + 4 * i);
+    for (i = 0; i < 16; i++) x[i] = s[i];
+    for (r = 0; r < 10; r++) {                    /* column rounds then diagonal rounds */
+        cs_qr(x, 0, 4, 8, 12); cs_qr(x, 1, 5, 9, 13); cs_qr(x, 2, 6, 10, 14); cs_qr(x, 3, 7, 11, 15);
+        cs_qr(x, 0, 5, 10, 15); cs_qr(x, 1, 6, 11, 12); cs_qr(x, 2, 7, 8, 13); cs_qr(x, 3, 4, 9, 14);
+    }
+    for (i = 0; i < 16; i++) cs_st32(out + 4 * i, x[i] + s[i]);
+}
+
+/* XOR IN with the keystream starting at COUNTER.  in and out may be the same buffer. */
+int cs_chacha20_xor(const unsigned char key[32], const unsigned char nonce[12], unsigned counter,
+                    const unsigned char *in, unsigned char *out, long n) {
+    unsigned char blk[64];
+    long done = 0, k;
+    if (!key || !nonce || !out) return -EINVAL;
+    if (n < 0) return -EINVAL;
+    if (!in && n > 0) return -EINVAL;
+    while (done < n) {
+        long take = n - done;
+        if (take > 64) take = 64;
+        cs_chacha20_block(key, nonce, counter, blk);
+        for (k = 0; k < take; k++) out[done + k] = in[done + k] ^ blk[k];
+        done += take;
+        counter++;
+    }
+    return 0;
+}
+
+/* ---- Poly1305 (§2.5): five 26-bit limbs, 64-bit products, after poly1305-donna-32. ---- */
+
+void cs_poly1305_init(cs_poly1305_t *st, const unsigned char key[32]) {
+    unsigned t0 = cs_ld32(key) & 0x0fffffffu;
+    unsigned t1 = cs_ld32(key + 4) & 0x0ffffffcu;
+    unsigned t2 = cs_ld32(key + 8) & 0x0ffffffcu;
+    unsigned t3 = cs_ld32(key + 12) & 0x0ffffffcu;
+    int i;
+    st->r[0] = t0 & 0x3ffffffu;
+    st->r[1] = ((t0 >> 26) | (t1 << 6)) & 0x3ffffffu;
+    st->r[2] = ((t1 >> 20) | (t2 << 12)) & 0x3ffffffu;
+    st->r[3] = ((t2 >> 14) | (t3 << 18)) & 0x3ffffffu;
+    st->r[4] = (t3 >> 8) & 0x3ffffffu;
+    for (i = 0; i < 5; i++) st->h[i] = 0;
+    for (i = 0; i < 4; i++) st->pad[i] = cs_ld32(key + 16 + 4 * i);
+    st->left = 0;
+}
+
+/* Absorb whole 16-byte blocks.  FULL says whether the implicit high bit of each block is set: it is 1
+   for every block of the message proper and 0 only for a zero-padded final partial block. */
+static void cs_poly_blocks(cs_poly1305_t *st, const unsigned char *m, long bytes, unsigned hibit) {
+    unsigned long long h0 = st->h[0], h1 = st->h[1], h2 = st->h[2], h3 = st->h[3], h4 = st->h[4];
+    unsigned long long r0 = st->r[0], r1 = st->r[1], r2 = st->r[2], r3 = st->r[3], r4 = st->r[4];
+    unsigned long long s1 = r1 * 5u, s2 = r2 * 5u, s3 = r3 * 5u, s4 = r4 * 5u;  /* 2^130 = 5 mod p */
+    unsigned long long d0, d1, d2, d3, d4, c;
+    while (bytes >= 16) {
+        h0 += cs_ld32(m) & 0x3ffffffu;
+        h1 += (cs_ld32(m + 3) >> 2) & 0x3ffffffu;
+        h2 += (cs_ld32(m + 6) >> 4) & 0x3ffffffu;
+        h3 += (cs_ld32(m + 9) >> 6) & 0x3ffffffu;
+        h4 += (cs_ld32(m + 12) >> 8) | hibit;
+        d0 = (h0 * r0) + (h1 * s4) + (h2 * s3) + (h3 * s2) + (h4 * s1);
+        d1 = (h0 * r1) + (h1 * r0) + (h2 * s4) + (h3 * s3) + (h4 * s2);
+        d2 = (h0 * r2) + (h1 * r1) + (h2 * r0) + (h3 * s4) + (h4 * s3);
+        d3 = (h0 * r3) + (h1 * r2) + (h2 * r1) + (h3 * r0) + (h4 * s4);
+        d4 = (h0 * r4) + (h1 * r3) + (h2 * r2) + (h3 * r1) + (h4 * r0);
+        c = d0 >> 26; h0 = d0 & 0x3ffffffu;
+        d1 += c; c = d1 >> 26; h1 = d1 & 0x3ffffffu;
+        d2 += c; c = d2 >> 26; h2 = d2 & 0x3ffffffu;
+        d3 += c; c = d3 >> 26; h3 = d3 & 0x3ffffffu;
+        d4 += c; c = d4 >> 26; h4 = d4 & 0x3ffffffu;
+        h0 += (c * 5); c = h0 >> 26; h0 &= 0x3ffffffu; h1 += c;
+        m += 16;
+        bytes -= 16;
+    }
+    st->h[0] = (unsigned)h0; st->h[1] = (unsigned)h1; st->h[2] = (unsigned)h2;
+    st->h[3] = (unsigned)h3; st->h[4] = (unsigned)h4;
+}
+
+int cs_poly1305_update(cs_poly1305_t *st, const void *m, long n) {
+    const unsigned char *p = (const unsigned char *)m;
+    long i;
+    if (!st || n < 0) return -EINVAL;
+    if (!p && n > 0) return -EINVAL;
+    if (st->left) {                               /* finish the block the previous call left open */
+        while (n > 0 && st->left < 16) { st->buf[st->left++] = *p++; n--; }
+        if (st->left < 16) return 0;
+        cs_poly_blocks(st, st->buf, 16, 1u << 24);
+        st->left = 0;
+    }
+    if (n >= 16) {
+        long whole = n & ~15L;
+        cs_poly_blocks(st, p, whole, 1u << 24);
+        p += whole;
+        n -= whole;
+    }
+    for (i = 0; i < n; i++) st->buf[i] = p[i];    /* tail: at most 15 bytes, kept for the next call */
+    st->left = (unsigned)n;
+    return 0;
+}
+
+int cs_poly1305_final(cs_poly1305_t *st, unsigned char tag[16]) {
+    unsigned long long h0, h1, h2, h3, h4, c, f;
+    unsigned g0, g1, g2, g3, g4, mask;
+    if (!st || !tag) return -EINVAL;
+    if (st->left) {                               /* the last block is short: 0x01 then zeros, no hibit */
+        st->buf[st->left] = 1;
+        for (c = st->left + 1; c < 16; c++) st->buf[c] = 0;
+        cs_poly_blocks(st, st->buf, 16, 0);
+        st->left = 0;
+    }
+    h0 = st->h[0]; h1 = st->h[1]; h2 = st->h[2]; h3 = st->h[3]; h4 = st->h[4];
+    /* carry h into range, folding the overflow of h4 back into h0 */
+    c = h1 >> 26; h1 &= 0x3ffffffu; h2 += c;
+    c = h2 >> 26; h2 &= 0x3ffffffu; h3 += c;
+    c = h3 >> 26; h3 &= 0x3ffffffu; h4 += c;
+    c = h4 >> 26; h4 &= 0x3ffffffu; h0 += c * 5;
+    c = h0 >> 26; h0 &= 0x3ffffffu; h1 += c;
+    /* compute h + -p in 32-bit limbs so the underflow of the top limb is visible in bit 31, then keep
+       h + -p only when h >= p.  A 64-bit g4 would underflow silently and the select would be wrong. */
+    g0 = (unsigned)h0 + 5u; c = g0 >> 26; g0 &= 0x3ffffffu;
+    g1 = (unsigned)h1 + (unsigned)c; c = g1 >> 26; g1 &= 0x3ffffffu;
+    g2 = (unsigned)h2 + (unsigned)c; c = g2 >> 26; g2 &= 0x3ffffffu;
+    g3 = (unsigned)h3 + (unsigned)c; c = g3 >> 26; g3 &= 0x3ffffffu;
+    g4 = (unsigned)h4 + (unsigned)c - (1u << 26);
+    mask = (g4 >> 31) - 1u;                       /* bit 31 set means h < p: mask 0 keeps h */
+    g0 &= mask; g1 &= mask; g2 &= mask; g3 &= mask; g4 &= mask;
+    mask = ~mask;
+    h0 = (h0 & mask) | g0; h1 = (h1 & mask) | g1; h2 = (h2 & mask) | g2;
+    h3 = (h3 & mask) | g3; h4 = (h4 & mask) | g4;
+    /* back to four 32-bit words: h = h mod 2^128 */
+    h0 = (h0 | (h1 << 26)) & 0xffffffffu;
+    h1 = ((h1 >> 6) | (h2 << 20)) & 0xffffffffu;
+    h2 = ((h2 >> 12) | (h3 << 14)) & 0xffffffffu;
+    h3 = ((h3 >> 18) | (h4 << 8)) & 0xffffffffu;
+    /* tag = (h + pad) mod 2^128 */
+    f = h0 + st->pad[0]; h0 = f & 0xffffffffu;
+    f = h1 + st->pad[1] + (f >> 32); h1 = f & 0xffffffffu;
+    f = h2 + st->pad[2] + (f >> 32); h2 = f & 0xffffffffu;
+    f = h3 + st->pad[3] + (f >> 32); h3 = f & 0xffffffffu;
+    cs_st32(tag, (unsigned)h0); cs_st32(tag + 4, (unsigned)h1);
+    cs_st32(tag + 8, (unsigned)h2); cs_st32(tag + 12, (unsigned)h3);
+    return 0;
+}
+
+/* One-shot Poly1305 over M. */
+int cs_poly1305(const unsigned char key[32], const void *m, long n, unsigned char tag[16]) {
+    cs_poly1305_t st;
+    if (!key) return -EINVAL;
+    cs_poly1305_init(&st, key);
+    if (cs_poly1305_update(&st, m, n)) return -EINVAL;
+    return cs_poly1305_final(&st, tag);
+}
+
+/* ---- AEAD (§2.8): MAC over aad || pad16 || ct || pad16 || len(aad) || len(ct). ---- */
+
+static void cs_le64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) p[i] = (unsigned char)(v >> (8 * i));
+}
+
+/* Feed the MAC with the zero padding that rounds LEN up to a multiple of 16. */
+static void cs_pad16(cs_poly1305_t *st, long len) {
+    static const unsigned char z[16] = {0};
+    long pad = (16 - (len & 15)) & 15;
+    if (pad) cs_poly1305_update(st, z, pad);
+}
+
+/* MAC over aad, ciphertext and the two lengths; POLYKEY is the first 32 bytes of block 0. */
+static int cs_aead_mac(const unsigned char *polykey, const void *aad, long alen,
+                       const void *ct, long clen, unsigned char tag[16]) {
+    cs_poly1305_t st;
+    unsigned char lens[16];
+    cs_poly1305_init(&st, polykey);
+    if (cs_poly1305_update(&st, aad, alen)) return -EINVAL;
+    cs_pad16(&st, alen);
+    if (cs_poly1305_update(&st, ct, clen)) return -EINVAL;
+    cs_pad16(&st, clen);
+    cs_le64(lens, (unsigned long long)alen);
+    cs_le64(lens + 8, (unsigned long long)clen);
+    if (cs_poly1305_update(&st, lens, 16)) return -EINVAL;
+    return cs_poly1305_final(&st, tag);
+}
+
+int cs_chacha20poly1305_seal(const unsigned char key[32], const unsigned char nonce[12],
+                             const void *aad, long alen, const void *in, long n,
+                             void *out, unsigned char tag[16]) {
+    unsigned char block[64], polykey[32];
+    int r;
+    if (!key || !nonce || !out || !tag) return -EINVAL;
+    if (alen < 0 || n < 0) return -EINVAL;
+    if ((!aad && alen > 0) || (!in && n > 0)) return -EINVAL;
+    cs_chacha20_block(key, nonce, 0, block);       /* block 0 supplies the Poly1305 key only */
+    { int i; for (i = 0; i < 32; i++) polykey[i] = block[i]; }
+    if (cs_chacha20_xor(key, nonce, 1, (const unsigned char *)in, (unsigned char *)out, n)) {
+        cs_ct_wipe(polykey, 32);
+        return -EINVAL;
+    }
+    r = cs_aead_mac(polykey, aad, alen, out, n, tag);
+    cs_ct_wipe(polykey, 32);
+    return r;
+}
+
+int cs_chacha20poly1305_open(const unsigned char key[32], const unsigned char nonce[12],
+                             const void *aad, long alen, const void *in, long n,
+                             void *out, const unsigned char tag[16]) {
+    unsigned char block[64], polykey[32], want[16];
+    int r;
+    if (!key || !nonce || !out || !tag) return -EINVAL;
+    if (alen < 0 || n < 0) return -EINVAL;
+    if ((!aad && alen > 0) || (!in && n > 0)) return -EINVAL;
+    cs_chacha20_block(key, nonce, 0, block);
+    { int i; for (i = 0; i < 32; i++) polykey[i] = block[i]; }
+    r = cs_aead_mac(polykey, aad, alen, in, n, want);
+    cs_ct_wipe(polykey, 32);
+    if (r) return r;
+    if (!cs_ct_eq(want, tag, 16)) return -EBADMSG;  /* no plaintext on a forged tag */
+    return cs_chacha20_xor(key, nonce, 1, (const unsigned char *)in, (unsigned char *)out, n);
+}
+
+

@@ -1,0 +1,174 @@
+/* Checks cx/crypto/chacha20poly1305.cx: sh ./unisacc.com tools/check-crypto-chacha20poly1305.cx
+   Vectors: RFC 8439 §2.4.2 (block function), §2.5.2 (Poly1305), §2.8.2 (AEAD seal and open, plus a
+   forged tag).  The long vectors were also produced with an independent implementation before being
+   written here; the module is never used to compute its own expectation. */
+#pragma unisa use sys.io
+#pragma unisa use crypto.chacha20poly1305
+#pragma unisa use crypto.ct
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+
+static int bad;
+static void ok(int c, const char *name) { sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad = 1; }
+
+static void hexof(const unsigned char *b, int n, char *hex) {
+    static const char d[16] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < n; i++) { hex[2 * i] = d[b[i] >> 4]; hex[2 * i + 1] = d[b[i] & 15]; }
+    hex[2 * n] = 0;
+}
+
+int main(void) {
+    unsigned char key[32], nonce[12], out[64], tag[16], ct[128], back[128];
+    char hex[300];
+    int i, r;
+
+    /* RFC 8439 §2.4.2: key 0x00..0x1f, nonce 00 00 00 09 00 00 00 4a 00 00 00 00, counter 1. */
+    for (i = 0; i < 32; i++) key[i] = (unsigned char)i;
+    nonce[0] = nonce[1] = nonce[2] = 0; nonce[3] = 9;
+    nonce[4] = nonce[5] = nonce[6] = 0; nonce[7] = 0x4a;
+    nonce[8] = nonce[9] = nonce[10] = nonce[11] = 0;
+    cs_chacha20_block(key, nonce, 1, out);
+    hexof(out, 64, hex);
+    ok(tx_eqz(hex, "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e"
+                   "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"),
+       "block-2.4.2");
+
+    /* The same block through cs_chacha20_xor over a zero buffer must produce the keystream, and xor is
+       its own inverse; a length that is not a multiple of 64 exercises the partial final block. */
+    {   unsigned char zero[70], ks[70];
+        for (i = 0; i < 70; i++) zero[i] = 0;
+        ok(cs_chacha20_xor(key, nonce, 1, zero, ks, 70) == 0, "xor-ok");
+        ok(ks[0] == out[0] && ks[63] == out[63], "xor-first-block");
+        ok(cs_chacha20_xor(key, nonce, 1, ks, ks, 70) == 0 && ks[64] == 0 && ks[69] == 0, "xor-inplace-inverse");
+    }
+
+    /* §2.5.2 Poly1305 over one 34-byte message. */
+    {   static const unsigned char pkey[32] = {
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5, 0x06, 0xa8,
+            0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf, 0x41, 0x49, 0xf5, 0x1b};
+        static const char msg[34] = {'C','r','y','p','t','o','g','r','a','p','h','i','c',' ','F','o','r','u','m',
+                                     ' ','R','e','s','e','a','r','c','h',' ','G','r','o','u','p'};
+        ok(cs_poly1305(pkey, msg, 34, tag) == 0, "poly-ok");
+        hexof(tag, 16, hex);
+        ok(tx_eqz(hex, "a8061dc1305136c6c22b8baf0c0127a9"), "poly-2.5.2");
+        /* A streamed update in three pieces and a one-shot must agree: this covers the leftover path. */
+        {   cs_poly1305_t st;
+            unsigned char t2[16];
+            cs_poly1305_init(&st, pkey);
+            cs_poly1305_update(&st, msg, 7);
+            cs_poly1305_update(&st, msg + 7, 16);
+            cs_poly1305_update(&st, msg + 23, 11);
+            cs_poly1305_final(&st, t2);
+            ok(cs_ct_eq(tag, t2, 16) == 1, "poly-streamed-equals-oneshot");
+            cs_poly1305_init(&st, pkey);
+            cs_poly1305_final(&st, t2);            /* empty message: the block is just 0x01 and zeros */
+            ok(cs_poly1305(pkey, "", 0, tag) == 0 && cs_ct_eq(tag, t2, 16) == 1, "poly-empty");
+        }
+    }
+
+    /* RFC 8439 A.3 #2 and #3: the same 375-byte message with r = 0 (so the tag is the pad) and then with
+       s = 0 (so the tag is the reduced accumulator alone).  Together they pin the two halves of the
+       final step, which is where a 32-bit limb implementation usually goes wrong. */
+    {   static const char m375[] =
+            "Any submission to the IETF intended by the Contributor for publication as all or part of an "
+            "IETF Internet-Draft or RFC and any statement made within the context of an IETF activity is "
+            "considered an \"IETF Contribution\". Such statements include oral statements in IETF "
+            "sessions, as well as written and electronic communications made at any time or place, which "
+            "are addressed to";
+        static const unsigned char r36[16] = {0x36,0xe5,0xf6,0xb5,0xc5,0xe0,0x60,0x70,
+                                              0xf0,0xef,0xca,0x96,0x22,0x7a,0x86,0x3e};
+        int n375 = 0;
+        while (m375[n375]) n375++;
+        for (i = 0; i < 16; i++) key[i] = 0;
+        for (i = 0; i < 16; i++) key[16 + i] = r36[i];
+        ok(cs_poly1305(key, m375, n375, tag) == 0, "a3-2-ok");
+        hexof(tag, 16, hex);
+        ok(tx_eqz(hex, "36e5f6b5c5e06070f0efca96227a863e"), "a3-2-tag-is-the-pad");
+        for (i = 0; i < 16; i++) key[i] = r36[i];
+        for (i = 0; i < 16; i++) key[16 + i] = 0;
+        ok(cs_poly1305(key, m375, n375, tag) == 0, "a3-3-ok");
+        hexof(tag, 16, hex);
+        ok(tx_eqz(hex, "f3477e7cd95417af89a6b8794c310cf0"), "a3-3-tag");
+        /* r = 2 against sixteen 0xff bytes: the block is 2^129 - 1, and (2^130 - 2) mod p = 3. */
+        for (i = 0; i < 32; i++) key[i] = 0;
+        key[0] = 2;
+        {   unsigned char ff[16];
+            for (i = 0; i < 16; i++) ff[i] = 0xff;
+            ok(cs_poly1305(key, ff, 16, tag) == 0, "r2-ff-ok");
+            hexof(tag, 16, hex);
+            ok(tx_eqz(hex, "03000000000000000000000000000000"), "r2-ff-tag");
+        }
+    }
+
+    /* §2.8.2 AEAD.  Key 0x80..0x9f, nonce 07 00 00 00 40 41 42 43 44 45 46 47, aad 50 51 52 53 c0 c1 c2 c3
+       c4 c5 c6 c7, the 114-byte sunscreen sentence. */
+    {   static const char pt[114] =
+            "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, "
+            "sunscreen would be it.";
+        static const unsigned char aad[12] = {0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7};
+        for (i = 0; i < 32; i++) key[i] = (unsigned char)(0x80 + i);
+        nonce[0] = 0x07; nonce[1] = 0; nonce[2] = 0; nonce[3] = 0;
+        nonce[4] = 0x40; nonce[5] = 0x41; nonce[6] = 0x42; nonce[7] = 0x43;
+        nonce[8] = 0x44; nonce[9] = 0x45; nonce[10] = 0x46; nonce[11] = 0x47;
+        ok(cs_chacha20poly1305_seal(key, nonce, aad, 12, pt, 114, ct, tag) == 0, "seal-ok");
+        hexof(ct, 114, hex);
+        ok(tx_eqz(hex, "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+                       "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+                       "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+                       "3ff4def08e4b7a9de576d26586cec64b6116"), "seal-ciphertext-2.8.2");
+        hexof(tag, 16, hex);
+        ok(tx_eqz(hex, "1ae10b594f09e26a7e902ecbd0600691"), "seal-tag-2.8.2");
+
+        ok(cs_chacha20poly1305_open(key, nonce, aad, 12, ct, 114, back, tag) == 0, "open-ok");
+        ok(tx_eqz((const char *)back, pt), "open-plaintext");
+        /* in place: open over the ciphertext buffer itself */
+        ok(cs_chacha20poly1305_open(key, nonce, aad, 12, ct, 114, ct, tag) == 0, "open-inplace-ok");
+        ok(tx_eqz((const char *)ct, pt), "open-inplace-plaintext");
+
+        /* A single flipped tag bit, a flipped ciphertext bit and a different aad are all refused. */
+        {   unsigned char t2[16];
+            int k;
+            for (k = 0; k < 16; k++) t2[k] = tag[k];
+            t2[0] ^= 1;
+            ok(cs_chacha20poly1305_open(key, nonce, aad, 12, ct, 114, back, t2) == -EBADMSG, "open-refuse-bad-tag");
+            ok(cs_chacha20poly1305_open(key, nonce, aad, 12, pt, 114, back, tag) == -EBADMSG,
+               "open-refuse-plaintext-as-ciphertext");
+            ok(cs_chacha20poly1305_open(key, nonce, aad, 11, pt, 114, back, tag) == -EBADMSG, "open-refuse-short-aad");
+            ok(cs_chacha20poly1305_open(key, nonce, aad, 12, pt, 113, back, tag) == -EBADMSG, "open-refuse-short-ct");
+            {   unsigned char n2[12];
+                for (k = 0; k < 12; k++) n2[k] = nonce[k];
+                n2[11] ^= 1;
+                ok(cs_chacha20poly1305_open(key, n2, aad, 12, pt, 114, back, tag) == -EBADMSG, "open-refuse-other-nonce");
+            }
+        }
+
+        /* Empty plaintext and empty aad are legal AEAD inputs. */
+        {   unsigned char t3[16];
+            const void *noaad = 0;
+            ok(cs_chacha20poly1305_seal(key, nonce, noaad, 0, "", 0, ct, t3) == 0, "seal-empty-ok");
+            ok(cs_chacha20poly1305_open(key, nonce, noaad, 0, "", 0, back, t3) == 0, "open-empty-ok");
+        }
+    }
+
+    /* Two codecs meet: base64 over the sealed ciphertext and back must be the same bytes. */
+    {   char b64[256];
+        unsigned char again[128];
+        int n = cs_b64_encode(ct, 114, b64, sizeof b64);
+        ok(n > 0 && cs_b64_decode(b64, n, again, sizeof again) == 114 && cs_ct_eq(again, ct, 114) == 1,
+           "b64-proxy-of-inplace-result");
+    }
+
+    /* Refusals on arguments. */
+    {   unsigned char t[16];
+        ok(cs_chacha20_xor(key, nonce, 0, 0, out, 4) == -EINVAL, "xor-null-in");
+        ok(cs_chacha20_xor(key, nonce, 0, out, out, -1) == -EINVAL, "xor-negative-len");
+        ok(cs_chacha20poly1305_seal(key, nonce, 0, 4, "x", 1, out, t) == -EINVAL, "seal-null-aad");
+        ok(cs_chacha20poly1305_seal(key, nonce, 0, 0, "x", -1, out, t) == -EINVAL, "seal-negative-len");
+        ok(cs_chacha20poly1305_seal(key, nonce, 0, 0, "x", 1, 0, t) == -EINVAL, "seal-null-out");
+        ok(cs_poly1305(0, "x", 1, t) == -EINVAL, "poly-null-key");
+    }
+
+    sy_printf("CHECK_CRYPTO_CHACHA20POLY1305\tfailed=%d\n", bad);
+    return bad;
+}
