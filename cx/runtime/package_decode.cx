@@ -45,6 +45,45 @@ static char *word(CxPackageDecode *d) {
     long n=d->at-start;if(!n){bad(d,"missing package name");return 0;}
     char *v=getmem(d,(size_t)n+1);if(v){if(mm_copy(v,(long)n+1,d->bytes+start,(long)n)){bad(d,"out of memory");return 0;}v[n]=0;}return v;
 }
+static int pk_eq(const char *a, const char *b) {
+    int i;
+    if (!a || !b) return 0;
+    for (i = 0; i < 64; i++) {
+        if (a[i] != b[i]) return 0;
+        if (!a[i]) return 1;
+    }
+    return 0;
+}
+static int pk_image(const char *s) {
+    int i, j;
+    const char *n = "/image/";
+    if (!s) return 0;
+    for (i = 0; i < 128 && s[i]; i++) {
+        for (j = 0; n[j] && s[i + j] == n[j]; j++) {}
+        if (!n[j]) return 1;
+    }
+    return 0;
+}
+/* An image route must still name lower and end on elf. A one-byte stage
+   rename or an elf row that left the route is not a route. */
+static int image_open(CxPackage *p) {
+    int i, k, seen, lower;
+    const char *last;
+    for (i = 0; i < p->s; i++) {
+        if (!pk_image(p->stages[i].route)) continue;
+        seen = 0;
+        for (k = 0; k < i; k++) if (pk_eq(p->stages[k].route, p->stages[i].route)) seen = 1;
+        if (seen) continue;
+        lower = 0;
+        last = 0;
+        for (k = i; k < p->s; k++) if (pk_eq(p->stages[k].route, p->stages[i].route)) {
+            last = p->stages[k].name;
+            if (pk_eq(last, "lower")) lower = 1;
+        }
+        if (!lower || !pk_eq(last, "elf")) return 1;
+    }
+    return 0;
+}
 static int decode(CxPackageDecode *d) {
     CxPackage *p=&d->package;int ver,pm,ps,nr=0;
     int bx_stage_model_ok(int, int);
@@ -52,6 +91,7 @@ static int decode(CxPackageDecode *d) {
     int bx_stage_present(const char *, const char *, const char *const *, const char *const *, int);
     int bx_stage_join(const char *, const char *);
     p->b=(unsigned char *)d->bytes;p->n=(int)d->length;
+    if (!d->length || !d->bytes || d->bytes[0] != 'P') return bad(d, "bad model tag");
     if(tag(d,'P')||integer(d,&ver))return 1;
     if(ver<1||ver>3)return bad(d,"unknown package version");p->ver=ver;
     if(integer(d,&pm)||integer(d,&ps)||(ver>=2&&integer(d,&nr)))return 1;
@@ -81,6 +121,7 @@ static int decode(CxPackageDecode *d) {
         }
         if(previous>=0&&bx_stage_join(p->stages[previous].out,s->in)!=0)return bad(d,"package format mismatch");
     }
+    if (image_open(p)) return bad(d, "unknown package route or stage boundary");
     for(int i=0;i<pm;i++){
         int n;if(tag(d,'M')||integer(d,&n))return 1;p->raw[i]=n;p->crc[i]=0;
         if(ver==3){int codec;long long sum;if(integer(d,&p->raw[i])||integer(d,&codec)||number(d,&sum))return 1;
