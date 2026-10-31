@@ -1316,3 +1316,83 @@ A 施工后的判据：`up==0` 与 `failed==0` 必须保持；`edges` 允许变�
 4. `tools/affected.cx --files tools/check-cx-layers.cx --run`；`tools/ratchets.cx`。
 5. 提交：`--whole tools/check-cx-layers.cx` + 三个 keyed 行（15.3）；批次 marker 一并改，
    **同一提交内**完成，避免出现「marker 已改、工具未改」的中间态把共享 main 变红。
+
+## 16. A 刀移交生效与最终验收合同（cdx 批准，未施工）
+
+cdx 已批准 §15 的临时移交并通知 omp-go。本节是**生效后的唯一验收合同**，与 §15 冲突处以本节为准。
+
+### 16.1 生效与边界
+
+- 生效：本刀对 `tools/check-cx-layers.cx` **只读复核 + 冲突升级**；不改该文件、不 `git add`、
+  不代提交。基线见 §15.6（HEAD `32744f7421`，工具 sha256 `93619a0a…e67180`）。
+- **B 未授权**：`tools/cx-layers-domain.cx` 一行不写，软链覆盖维持 `UNKNOWN`。
+- 冲突升级路径：本刀只读意见 → `1:omp-cdx` 信封；不得以「修一行就行」绕过移交。
+
+### 16.2 `checks` 数是收据，不是断言（已核实现行代码）
+
+读码确认 `fx_checks` 在 `tools/check-cx-layers.cx` 中**只自增、只打印**（`:396` 声明、`:400`
+自增、`:609` 打印），**没有任何 `==`/`<`/`>` 断言**；`--fixtures` 的 rc 只由 `fx_fail`
+决定（`cl_fixtures` 返回 `fx_fail ? 1 : 0`，`main` 直传）。因此：
+
+- 新增用例**必须**靠各自的具名断言（`fx_note(cond, "name")`）失败，**不得**加
+  「`checks == 46`」之类计数断言——那会把「加用例」变成「改断言」。
+- 收据里仍打 `checks=<实际>`，作为本次运行的观测值；数量变化不构成失败。
+- A 刀**不得**反向删除任何既有具名断言；16 条 checker 的语义与期望值一字不改。
+
+### 16.3 具名断言清单：原有 16 条（语义不变）
+
+`--fixtures` 现有 16 条 checker 全部保留。按当前输出，被检的具名项至少含：
+
+| 类别 | 具名项（现状） |
+|---|---|
+| 正例/向上 | 合法分层、编号层向上必拒（文件:行 + 目标 realpath） |
+| 未解析 | `UNRES-ENOTDIR`、`UNRES-EACCES`、精确白名单行、多余未解析 |
+| 词法 | 注释内 `use`、`#if 0` 内 `use`（`PARSE-CONDITIONAL`）、别名 `b::b_x as ax` |
+| 编译器交叉 | `-cx-plan` 直接计数比对、`h-compiler-refuses-conditional` |
+
+（具体 16 个 `fx_note` 名字以工具正文为准；本节只锁「数量不减、语义不改、名字不换」。）
+新增 30 条见 §14.2，逐条具名，预期总数 46 —— **这是收据预期，不是断言**。
+
+### 16.4 scope 行必含三项显式未知
+
+```
+CX_LAYERS_SCOPE coverage=manifest-only symlinks=UNKNOWN shard_body_verified=0
+                 domain=<n> bytes=<n> digest=afalg|soft window=STABLE|MOVED
+                 undecided_lex=<n> undecided_recon=<n> undecided_meta=<n> undecided_io=<n>
+```
+
+三项为**常量**，不得写成计数：A 无 git 不知软链真值（现 42 条 tracked 软链、11 条 broken，
+全部在 `archive/` 之外不被 manifest 收录）；A 不校验 shard 内容与文件名一致。
+
+### 16.5 rc 语义（最终）
+
+| 情形 | rc |
+|---|---|
+| 无 `failed`、无 `undecided` | **0** |
+| `failed > 0`（编号层向上、白名单失配、`CLASS-OVERLAP`/`CLASS-SUM`、`SHARD` 缺失、`SYMINDEX` 失败、`UNDECIDED-SUM` 自检不等） | **1** |
+| `failed == 0` 且仅 `undecided > 0` | **3** |
+| 两者同时 | **1**（失败优先） |
+
+`tools/cxlib/allsession.cx:292` 对 0/1/3 之外的 rc 判 UNKNOWN，故不得引入第 4 个值。
+`AMB/OUT` 的 `UNKNOWN … not-a-pass` 行**保持原状**，不参与上述计数。
+
+### 16.6 提交纪律
+
+- 工具本体 + `tests/batches.tsv` 的 marker 行 + `tests/coverage.tsv`/`prd.md` 的 keyed 行
+  **必须在同一次精确提交内**；允许分批的只有 `plans/` 文档。
+- 提交用 `tools/commit-own.cx`：`--whole tools/check-cx-layers.cx` +
+  `--keyed tests/batches.tsv cx-layers` + `--keyed tests/coverage.tsv contract.cx-layers`
+  + `--keyed prd.md tools/check-cx-layers.cx`。
+- 提交前 `tools/own-diff.cx` 自查，确认工作区里他人路径不被裹入。
+
+### 16.7 外来改动与重测试窗口
+
+- **`cx/sys/fs.cx` 是他人在途改动**，会连带影响已装编译器（omp-go 报
+  `tests/sys/fs.cx:44 not covered: member access`）。A 刀验收若该失败仍在，**不得**据此判定
+  A 回归，也不得重跑它来「确认」；记录为外来阻塞，A 的证据只用 `--fixtures` + 全量审计 +
+  `affected`/`ratchets` 中与该文件无关的部分。
+- 全量审计是重活：单机同时只跑一组，且与 `symindex update` 的代际耦合见 §14.6-2
+  （先让 `update` 完整跑完，否则第一批会因 `SOURCE-CHANGED` 变红——安全的假失败）。
+- 命令上限 60 s：全量审计实测 10.4 s、`--fixtures` 4.4 s；新增 30 条后预计 `--fixtures`
+  12–13 s，仍在限内；若逼近 60 s，拆 `--fixtures lex` / `--fixtures recon` 两个入口，
+  **不得**删用例或放宽断言。
