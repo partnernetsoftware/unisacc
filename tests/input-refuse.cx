@@ -1,0 +1,113 @@
+/* tests/input-refuse.cx -- installed product refuses a missing or non-regular input by name.
+ *
+ *   sh ./unisacc.com tests/input-refuse.cx
+ *
+ * Four compiles of the installed unisacc.com. Each exits 1, writes nothing to stdout,
+ * and leaves no image. Stderr is the whole current sentence, not a substring:
+ *   absent path                          unisacc: error: cannot open PATH: ENOENT
+ *   a regular file with an extra component  unisacc: error: cannot open PATH: ENOTDIR
+ *   mode 000 file                        unisacc: error: cannot open PATH: EACCES
+ *   a directory                          run: cannot read PATH / run: cannot read input
+ * The four sentences differ. When euid is 0 the mode-000 case cannot happen, so that
+ * item is a failure (eacces-needs-non-root), never a PASS. Prints INPUT_REFUSE once.
+ * Writes out/inref-<pid>/results.tsv. Exit 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4096], work[4400], com[4400], bound[4400], modepath[4600];
+static char rec[8192];
+static long recn;
+static int assertions, failures, mode_locked;
+
+static void die(const char *s) {
+    if (mode_locked) sy_chmod(modepath, 0644);
+    sy_eprintf("input-refuse: REFUSE %s\n", s);
+    sy_exit(2);
+}
+
+static void ck(int ok, const char *name) {
+    char line[192];
+    long n;
+    assertions++;
+    if (ok) sy_printf("PASS\tinput-refuse.%s\n", name);
+    else { failures++; sy_printf("FAIL\tinput-refuse.%s\n", name); }
+    if (cx_fmt(line, sizeof line, "%s\tinput-refuse.%s\n", ok ? "PASS" : "FAIL", name)) die("rec line");
+    n = tx_len(line, (long)sizeof line);
+    if (n < 0 || recn + n >= (long)sizeof rec) die("rec bound");
+    if (cx_fmt(rec + recn, (size_t)((long)sizeof rec - recn), "%s", line)) die("rec copy");
+    recn += n;
+}
+
+static int exact_err(const np_result *r, const char *s) {
+    long n = tx_len(s, 4800);
+    return n >= 0 && r->err && tx_same(r->err, (long)r->errn, s, n);
+}
+
+static int distinct4(const char *a, const char *b, const char *c, const char *d) {
+    long an = tx_len(a, 4800), bn = tx_len(b, 4800), cn = tx_len(c, 4800), dn = tx_len(d, 4800);
+    if (an < 0 || bn < 0 || cn < 0 || dn < 0) return 0;
+    if (tx_same(a, an, b, bn) || tx_same(a, an, c, cn) || tx_same(a, an, d, dn)) return 0;
+    if (tx_same(b, bn, c, cn) || tx_same(b, bn, d, dn) || tx_same(c, cn, d, dn)) return 0;
+    return 1;
+}
+
+static void one(const char *name, const char *src, const char *exact) {
+    char out[4600], label[64], why[512];
+    char *v[12];
+    np_result r;
+    if (cx_fmt(out, sizeof out, "%s/%s.elf", work, name)) die("out path");
+    v[0] = bound; v[1] = "12"; v[2] = "env"; v[3] = "-u"; v[4] = "UNISA_CONTAINER";
+    v[5] = "sh"; v[6] = com; v[7] = "-o"; v[8] = out; v[9] = (char *)src; v[10] = 0;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why)) die(why);
+    ck(r.rc == 1, name);
+    if (cx_fmt(label, sizeof label, "%s-stdout", name)) die("label");
+    ck(r.outn == 0, label);
+    if (cx_fmt(label, sizeof label, "%s-absent", name)) die("label");
+    ck(sy_exists(out) == 0, label);
+    if (cx_fmt(label, sizeof label, "%s-named", name)) die("label");
+    ck(exact_err(&r, exact), label);
+    np_free(&r);
+}
+
+int main(void) {
+    char reg[4600], absent[4600], nest[4600], dir[4600], res[4800];
+    char exp_enoent[4800], exp_enotdir[4800], exp_eacces[4800], exp_dir[4800];
+    int pid = sy_pid();
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/inref-%d", root, pid)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) != 0) die("work exists");
+    if (sy_mkdir(work, 0700)) die("mkdir work");
+    if (cx_fmt(reg, sizeof reg, "%s/regdir", work) || sy_mkdir(reg, 0700)) die("mkdir regdir");
+    if (cx_fmt(reg, sizeof reg, "%s/regdir/reg.c", work) || cx_write(reg, "int main(void){return 7;}\n", 26)) die("reg");
+    if (cx_fmt(dir, sizeof dir, "%s/adir", work) || sy_mkdir(dir, 0700)) die("mkdir adir");
+    if (cx_fmt(absent, sizeof absent, "%s/absent.c", work)) die("absent");
+    if (cx_fmt(nest, sizeof nest, "%s/regdir/reg.c/x.c", work)) die("nest");
+    if (cx_fmt(modepath, sizeof modepath, "%s/noperm.c", work)) die("noperm");
+    if (cx_fmt(exp_enoent, sizeof exp_enoent, "unisacc: error: cannot open %s: ENOENT\n", absent)) die("expect");
+    if (cx_fmt(exp_enotdir, sizeof exp_enotdir, "unisacc: error: cannot open %s: ENOTDIR\n", nest)) die("expect");
+    if (cx_fmt(exp_eacces, sizeof exp_eacces, "unisacc: error: cannot open %s: EACCES\n", modepath)) die("expect");
+    if (cx_fmt(exp_dir, sizeof exp_dir, "run: cannot read %s\nrun: cannot read input\n", dir)) die("expect");
+    ck(distinct4(exp_enoent, exp_enotdir, exp_eacces, exp_dir), "wording-distinct");
+
+    one("enoent", absent, exp_enoent);
+    one("enotdir", nest, exp_enotdir);
+    if (sy_euid() != 0) {
+        if (cx_write(modepath, "int main(void){return 7;}\n", 26) || sy_chmod(modepath, 0)) die("noperm");
+        mode_locked = 1;
+        one("eacces", modepath, exp_eacces);
+        if (sy_chmod(modepath, 0644)) die("chmod restore");
+        mode_locked = 0;
+    } else ck(0, "eacces-needs-non-root");
+    one("directory", dir, exp_dir);
+
+    if (cx_fmt(res, sizeof res, "%s/results.tsv", work) || cx_write(res, rec, (size_t)recn)) die("results");
+    sy_printf("INPUT_REFUSE\tassertions=%d\tfailed=%d\treceipt=out/inref-%d/results.tsv\n", assertions, failures, pid);
+    sy_exit(failures ? 1 : 0);
+    return 1;
+}
