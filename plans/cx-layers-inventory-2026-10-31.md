@@ -1396,3 +1396,60 @@ CX_LAYERS_SCOPE coverage=manifest-only symlinks=UNKNOWN shard_body_verified=0
 - 命令上限 60 s：全量审计实测 10.4 s、`--fixtures` 4.4 s；新增 30 条后预计 `--fixtures`
   12–13 s，仍在限内；若逼近 60 s，拆 `--fixtures lex` / `--fixtures recon` 两个入口，
   **不得**删用例或放宽断言。
+
+## 17. `8361c3cf6b` 只读审查（局部，不记 A 完成）
+
+对象：`8361c3cf6b`（`check-cx-layers: A scope marker, digest binding, rc3 skeleton`，4 文件 +25/−7）。
+方式：静态读码 + 与 §15.6 基线比对；**未重跑**（go 已报 rc0/16 通过，按「他人观测即事实」不重复确认）。
+结论：**局部绿，A 未完成**（与 go 自述一致）。新逻辑**零夹具覆盖**，且 SHA 未绑定被扫描的字节。
+
+### 17.1 逐项回答 cdx 四问
+
+| 问 | 答 | 证据 |
+|---|---|---|
+| 16 条断言是否保留 | **保留**；`cl_fixtures` 区一字未改，`fx_note` 调用数 17→17，`checks=16` 不变 | `git diff 8361^ 8361 -- tools/check-cx-layers.cx` 26 行，全在 `cl_audit`/静态量/`main` 的 printf |
+| 四类 undecided 分区 / rc 优先级 | 优先级**正确**（`:396` fail 优先 `return 1`，`:397` 纯 undecided `return 3`）；分区**骨架正确但两个分区空转**，`UNDECIDED-SUM` 是**恒真死检查** | 见 17.2 |
+| SHA 是否绑定实际扫描字节 / window 措辞 | **否**：digest 绑定「读取 #1」，词法定位用「读取 #2」，同一文件被重读 N 次；无末次重读、无 `MANIFEST-CHANGED`；`window=` 是**常量字符串**不是观测 | 见 17.3 |
+| marker / keyed 协议 | 四文件**同一次提交**，各自只改自己的行；`marker()` 前缀+TAB 匹配不会双匹配；`CX_LAYERS` 行整体消失，仓内无其它消费者 | 见 17.4 |
+
+### 17.2 事实表（按严重度）
+
+| # | 事实（含行号） | 影响 | 处置 |
+|---|---|---|---|
+| 1 | `cl_und_total` 只在 `cl_und_meta`/`cl_und_io` 自增的 3 处同步自增（`:369`、`:373`、`:375`），`cl_und_lex`/`cl_und_recon` **全文无自增** | `:392` 的等式恒成立 ⇒ `UNDECIDED-SUM` 永不触发，是**死断言**；且 `undecided_lex=0 undecided_recon=0` 是**假清白**（词法与 U 对账根本没实现） | 未实现的分区打 `NA`（或 scope 加 `phase=partial`），别打 0；`cl_und_total` 应=四个分项之和由**独立来源**校验，不能由同源自增 |
+| 2 | digest 读 `cl_src`（`:372`）→ `cl_eq` 比较（`:374`）；随后 `cl_shard_file` → `cl_locate` **再 `cl_read(srcpath, cl_src, CL_CAP)`**（`:116`），词法扫描用的正是这次读到的字节 | digest 与**被扫描的字节**不是同一份；每个 `U` 行触发一次整文件重读，一个文件内可能读到 N 种内容 | 同 §11.2：一次读 → `cl_clean` → 取 digest → 在**同一缓冲**上扫描；或扫描前重算 digest 并要求相等 |
+| 3 | 无末次重读、无 `cl_dig` 存储、无 `MANIFEST-CHANGED`；`window=OBSERVED-NOT-ATOMIC` 是字面常量（`:657`） | 无法区分「观测到稳定」与「根本没观测」；§11.3 的措辞因此没有证据支撑（但也没有虚假宣称原子） | 加末次重读与 manifest 重哈希，`window=STABLE\|MOVED` 由观测导出；常量只可作为未实现期占位，且须同时打 `phase=partial` |
+| 4 | `sy_sha256_hex(cl_src,sn,hex) != 0 \|\| !cl_eq(hex,sha)`（`:374`）把**哈希失败**并入 `SOURCE-CHANGED` | 无 AF_ALG/无 `CONFIG_CRYPTO_USER_API_HASH` 的宿主上**全树**判 SOURCE-CHANGED ⇒ rc3；两个不同原因混记，与「独立记账」冲突 | 哈希失败单独计数（`undecided_meta`）+ 软回退 `cx_sha256_hex` + scope 打 `digest=afalg\|soft` |
+| 5 | `sn <= 0` 只覆盖读失败/空文件（`:373`）；`sn == CL_CAP-1` 截断无分支 | 1 MiB−1 字节以上文件被哈希**截断字节** ⇒ 误判 SOURCE-CHANGED（类别错，不会假绿）；0 字节文件被判 SOURCE-UNREADABLE（当前 tracked `.cx` 中 0 字节文件 = **0**，未触发） | 截断 → `PATH-TOO-LONG`/`SOURCE-UNREADABLE` 明确记 undecided；空文件按合法输入处理 |
+| 6 | `cl_locate` 内 `n <= 0` 直接 `return`（`:117`），`line=0`、`cond=0`，调用方照常 `cl_edge` | 窗口内被删除/不可读的源 ⇒ 边以 `line=0` 计入且 `rc0`；这是双读引入的**新静默洞** | 第二次读失败必须记 undecided 并抑制该行 |
+| 7 | `k != 64` 直接 `continue`（`:369`） | 丢行（不调用 `cl_shard_file`）；有 undecided 兜底不会假绿，但与「不丢行不猜」不符 | 记 undecided 后仍走完行处理，或在 scope 记 `rows_dropped=` |
+| 8 | scope 缺 `digest=`、`domain=`、`bytes=` 三个 §16.4 约定字段 | 收据无法表达哈希后端与域规模 | 补齐 |
+| 9 | 新增逻辑 **零夹具**：无任何 `fx_note` 引用 `cl_und_*`，无任何夹具断言 `rc==3`，也无 `MANIFEST-PARSE`/`SOURCE-CHANGED` 用例 | digest 绑定、rc3、自检、未决分区全部只有「真实树上观察到 0」这一种证据 | 这些必须在 30 条新夹具中逐条具名，且 rc3 要有一条真实触发 |
+
+### 17.3 基线可比性
+
+`8361` 报表 `edges=2402 same=770 down=1500 up=0 amb=82 out=50 unres=5` 来自**隔离 archive + fresh index**，
+与 §15.6 的共享树 `edges=2413 same=771 down=1510` 不是同一输入；`down` 差 10、`same` 差 1
+**未解释**。要求：用同一输入（同一工作区、同一索引）跑 A 前后两次对比，差值逐项给原因；
+`same+down+up+amb+out==edges` 与 `up==0`、`failed==0` 仍为硬判据。
+
+### 17.4 marker / keyed 协议核查（通过）
+
+- 同一次提交内改：`prd.md:32` 能力速查、`tests/batches.tsv:332` 第 12 列 → `rc0:CX_LAYERS_SCOPE`、
+  `tests/coverage.tsv:312` 描述、工具本体。四文件各自只动自己的行（`git show` 逐行核）。
+- `tests/run-batch.cx:23 marker()` 整行前缀 + 其后须 TAB/行尾 ⇒ `CX_LAYERS` 与 `CX_LAYERS_SCOPE`
+  互不误匹配；`:36` 要求恰一行 ⇒ 工具确实只在 `main` 打印一次（`:657`），且 `cl_wl_load` 失败先 `return 1`
+  （`FAIL WHITELIST` 路径不打印 scope ⇒ 批次 FAIL，方向正确）。
+- `CX_LAYERS` 行被整体删除：全仓（排除 `out/`）无其它按该行解析的消费者；`tests/run.cx` smoke
+  只认 `smoke`/`product.*`；`tools/affected.cx` 读 `source`/`entry` 字段。**无破坏**。
+- 一个下游语义提醒：纯 undecided 时 `rc3`，而 `tests/run-batch.cx:39` 把非 0 rc 记 `FAIL`（不是 UNKNOWN）。
+  这是合同要的「非成功」，但读日志的人不能把该 FAIL 当编译/断言失败。
+
+### 17.5 对后续的妨碍（必须继续 A 前先修 #2 #1）
+
+- #2 一旦 30 条词法夹具落地，`cl_locate` 会整段重写；**现在就把「读一次、哈希同一缓冲、在同缓冲扫描」定下来**，
+  否则词法实现会把双读固化成结构。
+- #1 的空转分区若带着 `0` 进入最终收据，后续实现者补计数时容易忘记独立的 SUM 来源，形成永久死检查。
+- #4 会把「哈希后端不可用」伪装成「源码全被改过」，在跨平台/新内核上产生整树 rc3，污染所有未决统计。
+- 建议顺序：#2（单读单缓冲）→ #1（NA + 独立 SUM）→ #4（回退 + `digest=`）→ #5/#6/#7（类别与静默洞）
+  → #8（scope 补齐）→ #9（夹具）→ 词法/对账/转义/末次重读。
