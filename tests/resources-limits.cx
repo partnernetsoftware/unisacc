@@ -5,6 +5,7 @@
  * Every case runs the product (ROOT/unisacc.com through sh, as users do) on a fixture in the work directory:
  *   res.disk.output-full      -o /dev/full: rc nonzero, stderr names the output, no rc 0
  *   res.disk.output-eacces    -o into a read-only directory: rc nonzero, "cannot open output" (not "no such file")
+ *   res.disk.output-fsize     RLIMIT_FSIZE 1 KiB with SIGXFSZ ignored: "short output write", nothing under the name, no temp left, rerun writes
  *   res.fd.no-leak-to-program a program started by -run finds only fds 0, 1 and 2 open (fcntl on 3..63)
  *   res.time.user-infinite-loop  -run of for(;;); under tools/bound 2 ends rc 142 (deadline) in under 8 s, no loop
  *                             process is left behind, and a clean -run afterwards returns 7
@@ -60,7 +61,22 @@ int main(void) {
         sy_chmod(p, 0700);
     } else ck(0, "disk-output-eacces-refused-needs-non-root");
 
-    put("fds.c", "#include <fcntl.h>\nint main(void){int n=0,i;for(i=3;i<64;i++)if(fcntl(i,F_GETFD)!=-1)n++;return n;}\n");
+    /* res.disk.output-fsize: RLIMIT_FSIZE of 1 KiB with SIGXFSZ ignored (a write fails short instead of killing the product):
+       a named refusal, nothing under the output name, no temporary left in the directory; an unconstrained rerun writes the image */
+    {   char *v[20], why[1024], d[4600], listing[256]; int n = 0, cut;
+        if (cx_fmt(d, sizeof d, "%s/fsd", work) || sy_mkdir(d, 0700)) die("fsd");
+        put("fsd/fsz.c", "int main(void){return 7;}\n");
+        v[n++] = bound; v[n++] = "20"; v[n++] = "sh"; v[n++] = "-c"; v[n++] = "ulimit -f 1; trap '' XFSZ; exec sh \"$0\" -O0 -b lnx/x86_64 fsz.c -o fsz.out"; v[n++] = com; v[n] = 0;
+        if (np_run(v, d, 0, 32, &r, why, sizeof why)) die(why);
+        {   char *ls[] = {"ls", "-A", d, 0}; int ok = sy_run(ls, listing, sizeof listing, &cut) == 0 && tx_same(listing, tx_len(listing, 256), "fsz.c\n", 6);
+            ck(r.rc != 0 && r.rc != 142 && has(&r, "short output write") && ok, "disk-output-fsize-refused-no-image-no-temp-left"); }
+        np_free(&r);
+        {   char *a[] = {"-O0", "-b", "lnx/x86_64", "fsd/fsz.c", "-o", "fsd/fsz.out", 0}; r = prod(20, a);
+            if (cx_fmt(p, sizeof p, "%s/fsd/fsz.out", work)) die("path");
+            ck(r.rc == 0 && sy_exists(p) == 1, "disk-output-fsize-unconstrained-rerun-writes-image"); np_free(&r); } }
+
+
+    put("fds.c","#include <fcntl.h>\nint main(void){int n=0,i;for(i=3;i<64;i++)if(fcntl(i,F_GETFD)!=-1)n++;return n;}\n");
     {   char *a[] = {"-run", "fds.c", 0}; r = prod(30, a); ck(r.rc == 0 && !r.errn, "fd-no-leak-to-program"); np_free(&r); }
 
     put("loop.c", "int main(void){for(;;);return 0;}\n");
