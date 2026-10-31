@@ -14,7 +14,8 @@
 | `sys.net` | `net.cx` | TCP（sy_tcp_connect/listen/accept/send_all/recv） |
 | `sys.posix` | `posix.cx` | 补充 POSIX（sy_flock/sy_lockf/sy_socketpair 等） |
 | `sys.mem` | `mem.cx` | 映射内存（sy_map_none/sy_protect_rw/sy_protect_rx/sy_unmap） |
-| `sys.dl` | `dl.cx` | 动态装载（sy_dl_addr/sy_dlclose） |
+| `sys.dl` | `dl.cx` | 映射地址（sy_dl_addr/sy_rtld_now），无宿主符号 |
+| `sys.dlcall` | `dlcall.cx` | 宿主装载调用（sy_dlopen/sy_dlsym/sy_dlclose）；静态 33 对象产品不得拉入 |
 | `sys.sha` | `sha.cx` | 摘要（sy_sha） |
 | `sys.guard` | `guard.cx` | setjmp/longjmp（sy_guard/sy_guard_fail） |
 | `sys.ffi` | `ffi.cx` | 外来调用（sy_ffi_call） |
