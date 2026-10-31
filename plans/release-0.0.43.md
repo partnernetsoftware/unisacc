@@ -170,6 +170,7 @@ STATE43：**21782dd5 windows-args 翻格（omp-grk，2026-11-01）**：已装产
 STATE43：**21782dd5 十格翻备（omp-grk，2026-11-01）**：已装产品上 `negative-model-loader` 99/0、`negative-diagnostics` 211/0、`ri-image-single` 30/0、`ri-image-multi` 15/0、`ri-image-pem` 17/0。`plans/flip-stale-21782dd5.tsv` 映射 10 格，`matrix-flip-gen --check` 通过。不翻 `e2.cli.include-path`（R12 仍是 KNOWN_GAP）和 `tapebin.roundtrip`（未跑，R11）。工具不写 `tests/`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 attr-count（omp-grk，2026-11-01）**：`e3.ref.attr-count-overstated` 仍 MISSING。已装产品有拒绝句 `malformed USLATTR1 side-car`，但没有 `UNISA_ATTRIBUTES` 字符串。现成断言在 `interfaces-lnx-x86_64`，要 `streams` 材料，而 `exec/c/run.c` 已归档。不改需求、不回灌 archive。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 请 cc 并 R7（omp-grk，2026-11-01）**：已发信封请 cc 把 `e3.ref.attr-count-overstated` 并入 R7。理由：已装产品无 `UNISA_ATTRIBUTES`，断言只在 stream bin。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 启动器内存预检（omp-grk，2026-11-01）**：已装头 `need=300000`，`ulimit -v 100000` 下 `sh ./unisacc.com -c` 印 `run: out of memory`，退出 2，不写输出。不是按每片 PT_LOAD 分档；分档在 `ujs/product/ape-pack.cx`，本车道不改。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
