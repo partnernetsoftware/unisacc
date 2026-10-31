@@ -164,6 +164,7 @@ STATE43：**21782dd5 kernel-route（omp-grk，2026-11-01）**：`tools/kernel-ro
 STATE43：**21782dd5 kernel-route 再三（omp-grk，2026-11-01）**：`out/tb/sess-kr` 再 3 个 PASS：`kernel-route-route-refusal`、`kernel-route-route-recovery`、`kernel-route-pins`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 kernel-route 完成（omp-grk，2026-11-01）**：`out/tb/sess-kr` 再 4 个 PASS：`kernel-route-pin-mutation`、`kernel-route-coverage`、`kernel-route-relocation`、`kernel-route-object`。9 个 kernel-route 批次都过。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 assembler-cache（omp-grk，2026-11-01）**：把 `out/c43-native-kernel-13` 当 `kernels` 跑，`assembler-cache` FAIL 粘住。产品拒绝的是 `source identity failed` / `cannot open directory: unisa`，不是测试要的 cache digest 句。旧代不是当前材料。不重跑。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 nets（omp-grk，2026-11-01）**：`tools/net-material.cx` PREPARED。`out/tb/sess-nets` 上 `nets` PASS。`net-controls` FAIL 粘住，原因 `material-changed-during-batch`，不重跑。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
