@@ -102,26 +102,88 @@ static void clean_temp_record(const char *file, int *clean) {
     q[e - p] = 0;
     mm_free(x);
     if (!temp_path_ok(q)) { *clean = 0; return; }
-    if (sy_unlink(q) != 0 && sy_exists(q) == 1) *clean = 0;
+    if (sy_unlink(q) != 0) { int e = sy_exists(q); if (e != 0) *clean = 0; }
     k = 0;
     for (j = 0; q[j]; j++) if (q[j] == '/') k = j;
     if (k == 0) { *clean = 0; return; }
     for (j = 0; j < k; j++) d[j] = q[j];
     d[k] = 0;
-    if (sy_rmdir(d) != 0 && sy_exists(d) == 1) *clean = 0;
+    if (sy_rmdir(d) != 0) { int e = sy_exists(d); if (e != 0) *clean = 0; }
+}
+
+static int wait_terminal(int pid, long deadline, int *code, int *sig, int *err) {
+    int ex = 0, cd = 0, sg = 0;
+    long r;
+    if (err) *err = 0;
+    while (sy_now_ms() < deadline) {
+        r = sy_wait_status(pid, 1, &ex, &cd, &sg);
+        if (r > 0) { if (code) *code = cd; if (sig) *sig = sg; return 1; }
+        if (r < 0) { if (err) *err = (int)r; return -1; }
+        sy_sleep_ms(20);
+    }
+    return 0;
+}
+
+static int path_state(const char *p) {
+    int e = sy_exists(p);
+    return e;   /* 1 present, 0 absent, negative I/O error */
+}
+
+static void coordinator_spawn_failure(const char *drv, const char *tag, const char *dir) {
+    char r1[256], gate[256], bad[256];
+    int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1, g, s, clean = 1;
+    tx_snprintf(r1, sizeof r1, "%s/sr1-%s", dir, tag);
+    tx_snprintf(gate, sizeof gate, "%s/sgate-%s", dir, tag);
+    tx_snprintf(bad, sizeof bad, "%s/no-such-driver-%s", dir, tag);
+    { char src[256]; tx_snprintf(src, sizeof src, "%s/barrier.cx", dir);
+      char *v1[] = {(char *)drv, "-run", src, "--", r1, gate, "2000", 0};
+      char *v2[] = {bad, "-run", src, "--", r1, gate, "2000", 0};
+      pid1 = sy_spawn_pipe(v1, 0, 8, &o1, &e1);
+      pid2 = sy_spawn_pipe(v2, 0, 8, &o2, &e2);
+    }
+    ck(pid1 > 0 && pid2 < 0, "spawn-failure-second");
+    if (pid1 > 0) {
+        long dl = sy_now_ms() + 3000;
+        while (sy_now_ms() < dl && path_state(r1) != 1) sy_sleep_ms(20);
+        ck(path_state(r1) == 1, "spawn-failure-path");
+        pg1 = (int)sy_getpgid(pid1);
+        ck(pg1 == pid1, "spawn-failure-pgid");
+        int kterm = -1, kkill = 1;
+        if (pg1 == pid1) kterm = sy_killpg(pg1, 15);
+        else kterm = sy_signal(pid1, 15);
+        s = (kterm == 0) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
+        if (s <= 0 && pg1 == pid1) {
+            kkill = sy_killpg(pg1, 9);
+            s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
+        } else if (s <= 0) {
+            kkill = sy_signal(pid1, 9);
+            s = (kkill == 0 || kkill == -ESRCH) ? wait_terminal(pid1, sy_now_ms() + 3000, 0, 0, 0) : -1;
+        }
+        ck(s == 1 && kterm == 0, "spawn-failure-reaped");
+        g = (pg1 == pid1) ? sy_killpg(pg1, 0) : -1;
+        ck(g == -ESRCH, "spawn-failure-group-gone");
+        if (s == 1) { char b[256]; while (sy_read(o1, b, sizeof b) > 0) {} }
+        if (s == 1 && e1 >= 0) { char b[256]; while (sy_read(e1, b, sizeof b) > 0) {} }
+    }
+    if (o1 >= 0) sy_close(o1); if (e1 >= 0) sy_close(e1);
+    if (o2 >= 0) sy_close(o2); if (e2 >= 0) sy_close(e2);
+    clean_temp_record(r1, &clean);
+    ck(clean == 1 && path_state(gate) == 0, "spawn-failure-clean");
 }
 
 static void coordinator_case(const char *drv, const char *tag, const char *dir) {
     char r1[256], r2[256], gate[256], f2[256];
-    int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1, pg2;
-    int badpg, timeout, k1 = -1, k2 = -1, s1 = 0, s2 = 0, g1 = 0, g2 = 0, clean = 1;
+    int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1 = -1, pg2 = -1;
+    int badpg, timeout = 1, expired = 0, k1 = -99, k2 = -99, s1 = 0, s2 = 0;
+    int c1 = -1, c2 = -1, sg1 = -1, sg2 = -1, er1 = 0, er2 = 0;
+    int g1 = 2, g2 = 2, clean = 1, fr1, fr2, fg, seen1 = 0, seen2 = 0, seenf = 0;
     long deadline;
     tx_snprintf(r1, sizeof r1, "%s/cr1-%s", dir, tag);
     tx_snprintf(r2, sizeof r2, "%s/cr2-%s", dir, tag);
     tx_snprintf(gate, sizeof gate, "%s/cgate-%s", dir, tag);
     tx_snprintf(f2, sizeof f2, "%s/cf2-%s", dir, tag);
-    ck(sy_exists(r1) == 0 && sy_exists(r2) == 0 && sy_exists(gate) == 0 && sy_exists(f2) == 0,
-       "coordinator-paths-fresh");
+    fr1 = path_state(r1); fr2 = path_state(r2); fg = path_state(gate); seenf = path_state(f2);
+    ck(fr1 == 0 && fr2 == 0 && fg == 0 && seenf == 0, "coordinator-paths-fresh");
     { char src[256]; tx_snprintf(src, sizeof src, "%s/barrier.cx", dir);
       char *v1[] = {(char *)drv, "-run", src, "--", r1, gate, "2000", 0};
       char *v2[] = {(char *)drv, "-run", src, "--", r2, gate, "2000", "nopublish", f2, 0};
@@ -129,50 +191,93 @@ static void coordinator_case(const char *drv, const char *tag, const char *dir) 
       pid2 = sy_spawn_pipe(v2, 0, 8, &o2, &e2);
     }
     if (pid1 <= 0 || pid2 <= 0) {
+        long pg;
         ck(0, "coordinator-spawn");
-        if (pid1 > 0) { sy_killpg(pid1, 15); sy_wait(pid1, 0); }
-        if (pid2 > 0) { sy_killpg(pid2, 15); sy_wait(pid2, 0); }
+        if (pid1 > 0) {
+            pg = sy_getpgid(pid1);
+            if (pg == (long)pid1) sy_killpg((int)pg, 15); else sy_signal(pid1, 15);
+            if (wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0) <= 0) {
+                if (pg == (long)pid1) sy_killpg((int)pg, 9); else sy_signal(pid1, 9);
+                wait_terminal(pid1, sy_now_ms() + 2000, 0, 0, 0);
+            }
+        }
+        if (pid2 > 0) {
+            pg = sy_getpgid(pid2);
+            if (pg == (long)pid2) sy_killpg((int)pg, 15); else sy_signal(pid2, 15);
+            if (wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0) <= 0) {
+                if (pg == (long)pid2) sy_killpg((int)pg, 9); else sy_signal(pid2, 9);
+                wait_terminal(pid2, sy_now_ms() + 2000, 0, 0, 0);
+            }
+        }
+        if (o1 >= 0) sy_close(o1); if (e1 >= 0) sy_close(e1);
+        if (o2 >= 0) sy_close(o2); if (e2 >= 0) sy_close(e2);
         return;
     }
     pg1 = (int)sy_getpgid(pid1);
     pg2 = (int)sy_getpgid(pid2);
     badpg = !(pg1 == pid1 && pg2 == pid2);
-    deadline = sy_now_ms() + 5000;
-    while (sy_now_ms() < deadline && !(sy_exists(r1) == 1 && sy_exists(f2) == 1)) sy_sleep_ms(50);
-    timeout = (sy_exists(r1) == 1 && sy_exists(r2) == 1) ? 0 : 1;
-    if (badpg == 0 && timeout == 1) {
+    { long t0 = sy_now_ms();
+      deadline = t0 + 5000;
+      while (sy_now_ms() < deadline) {
+          int e;
+          if (!seen1) { e = path_state(r1); if (e == 1) seen1 = 1; else if (e < 0) break; }
+          if (!seen2) { e = path_state(r2); if (e == 1) seen2 = 1; else if (e < 0) break; }
+          if (!seenf) { e = path_state(f2); if (e == 1) seenf = 1; else if (e < 0) break; }
+          /* Dual-ready is r1+f2. That is not completion and must not end the wait. */
+          if (seen1 && seen2) break;
+          sy_sleep_ms(20);
+      }
+      expired = (sy_now_ms() >= t0 + 5000);
+    }
+    timeout = 0;
+    if (badpg == 0 && expired && seen1 && seenf && !seen2 && path_state(r2) == 0
+        && sy_killpg(pg1, 0) == 0 && sy_killpg(pg2, 0) == 0)
+        timeout = 1;
+    if (timeout == 1) {
         k1 = sy_killpg(pg1, 15);
         k2 = sy_killpg(pg2, 15);
-        deadline = sy_now_ms() + 5000;
-        while (sy_now_ms() < deadline) {
-            if (!s1 && sy_wait_status(pid1, 1, 0, 0, 0) > 0) s1 = 1;
-            if (!s2 && sy_wait_status(pid2, 1, 0, 0, 0) > 0) s2 = 1;
-            if (s1 && s2) break;
-            sy_sleep_ms(50);
-        }
-        if (!s1) { sy_killpg(pg1, 9); sy_wait_status(pid1, 0, 0, 0, 0); s1 = 1; }
-        if (!s2) { sy_killpg(pg2, 9); sy_wait_status(pid2, 0, 0, 0, 0); s2 = 1; }
+    } else if (badpg != 0) {
+        k1 = sy_signal(pid1, 15);
+        k2 = sy_signal(pid2, 15);
     } else {
-        s1 = sy_wait_status(pid1, 1, 0, 0, 0) > 0;
-        s2 = sy_wait_status(pid2, 1, 0, 0, 0) > 0;
+        k1 = sy_signal(pid1, 15);
+        k2 = sy_signal(pid2, 15);
+    }
+    deadline = sy_now_ms() + 5000;
+    s1 = wait_terminal(pid1, deadline, &c1, &sg1, &er1);
+    s2 = wait_terminal(pid2, deadline, &c2, &sg2, &er2);
+    if (s1 <= 0) {
+        int kr = (badpg == 0) ? sy_killpg(pg1, 9) : sy_signal(pid1, 9);
+        if (kr == 0) s1 = wait_terminal(pid1, sy_now_ms() + 3000, &c1, &sg1, &er1);
+        else er1 = kr;
+    }
+    if (s2 <= 0) {
+        int kr = (badpg == 0) ? sy_killpg(pg2, 9) : sy_signal(pid2, 9);
+        if (kr == 0) s2 = wait_terminal(pid2, sy_now_ms() + 3000, &c2, &sg2, &er2);
+        else er2 = kr;
     }
     if (badpg == 0) {
-        g1 = (sy_killpg(pg1, 0) == 0);
-        g2 = (sy_killpg(pg2, 0) == 0);
+        int r = sy_killpg(pg1, 0);
+        g1 = (r == -ESRCH) ? 0 : (r == 0 ? 1 : 2);
+        r = sy_killpg(pg2, 0);
+        g2 = (r == -ESRCH) ? 0 : (r == 0 ? 1 : 2);
     }
-    if (o1 >= 0) { char b[256]; while (sy_read(o1, b, sizeof b) > 0) {} sy_close(o1); }
-    if (e1 >= 0) { char b[256]; while (sy_read(e1, b, sizeof b) > 0) {} sy_close(e1); }
-    if (o2 >= 0) { char b[256]; while (sy_read(o2, b, sizeof b) > 0) {} sy_close(o2); }
-    if (e2 >= 0) { char b[256]; while (sy_read(e2, b, sizeof b) > 0) {} sy_close(e2); }
+    if (s1 == 1) { char b[256]; while (sy_read(o1, b, sizeof b) > 0) {} }
+    if (s1 == 1 && e1 >= 0) { char b[256]; while (sy_read(e1, b, sizeof b) > 0) {} }
+    if (s2 == 1) { char b[256]; while (sy_read(o2, b, sizeof b) > 0) {} }
+    if (s2 == 1 && e2 >= 0) { char b[256]; while (sy_read(e2, b, sizeof b) > 0) {} }
+    if (o1 >= 0) sy_close(o1); if (e1 >= 0) sy_close(e1);
+    if (o2 >= 0) sy_close(o2); if (e2 >= 0) sy_close(e2);
     clean_temp_record(r1, &clean);
     clean_temp_record(f2, &clean);
-    ck(timeout == 1, "coordinator-timeout");
-    ck(badpg == 0 && pg1 == pid1 && pg2 == pid2, "coordinator-pgid");
+    ck(timeout == 1 && expired, "coordinator-timeout");
+    ck(badpg == 0, "coordinator-pgid");
     ck(k1 == 0 && k2 == 0, "coordinator-kill");
-    ck(s1 && s2, "coordinator-reaped");
+    ck(s1 == 1 && s2 == 1 && er1 == 0 && er2 == 0, "coordinator-reaped");
     ck(g1 == 0 && g2 == 0, "coordinator-groups-gone");
     ck(clean == 1, "coordinator-clean");
-    ck(sy_exists(gate) == 0, "coordinator-no-gate");
+    ck(path_state(gate) == 0, "coordinator-no-gate");
+    sy_printf("COORD\tc1=%d sg1=%d c2=%d sg2=%d\n", c1, sg1, c2, sg2);
 }
 
 static void matrix(const char *drv, const char *tag, const char *cc, const char *dir) {
@@ -387,6 +492,7 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
     }
 
     coordinator_case(drv, tag, dir);
+    coordinator_spawn_failure(drv, tag, dir);
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
     v[0] = (char *)drv; tx_snprintf(p, sizeof p, "%s/plain.cx", dir); v[1] = p;
