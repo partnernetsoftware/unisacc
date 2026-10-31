@@ -300,6 +300,20 @@ int cxm_goodname(char *w, int n) {
     }
     return st == 0;
 }
+/* Same file when the text matches, or when sy_realpath folds both names
+   to one. sy_stat_t has no device number, so the inode is not compared.
+   Command-line units and use units both go through this. The body stays
+   in the drive object (runcache uses sys.fs). This unit does not: -funit
+   would copy sys.fs in and the link would report sy_fstat twice. */
+int cxm_samefile(char *a, char *b) {
+    char ra[4096]; char rb[4096];
+    extern char *realpath(const char *, char *);
+    if (cxm_eq(a, b)) return 1;
+    if (!realpath(a, ra) || !realpath(b, rb)) return 0;
+    if (cxm_eq(ra, rb)) return 1;
+    return 0;
+}
+/* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
 int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, int an) {
     char cand[CXM_PATHW]; char norm[CXM_PATHW]; int dl; int k; int v; int p;
@@ -316,7 +330,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     k = 0; while (k < n) { cand[p] = w[k] == '.' ? '/' : w[k]; p = p + 1; k = k + 1; }
     cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
-    v = 0; while (v < cxm_n && !cxm_eq(cxm_path[v], norm)) v = v + 1;
+    v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
     if (v == cxm_n) {
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
             cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm); return cxm_fail();
@@ -685,14 +699,15 @@ int cxm_project(int u, int lib) {
     k = 0;
     while (k < cxm_nitem) {
         if (cxm_ikind[k] == 2) {
-            int pub;
+            int pub; int fb;
             cxm_dname(s, cxm_ib[k], cxm_ibody[k], &nb, &nl, &isfn);
             pub = cxm_listed(u, s + nb, nl);
             if (pub < 0) return 1;
             if (pub == 0) { k = k + 1; continue; }
-            if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 0, 0, 0)) return 1;
+            fb = cxm_nift;
             if (cxm_emit(cxm_ib[k], cxm_ibody[k]) || cxm_nift >= CXM_IFMAX - 2) { cxm_start(u, cxm_iline[k]); cxm_m("interface too large"); return cxm_fail(); }
             cxm_ift[cxm_nift] = ';'; cxm_ift[cxm_nift + 1] = '\n'; cxm_nift = cxm_nift + 2;
+            if (cxm_addsym(s + nb, nl, u, cxm_iline[k], 0, fb, cxm_nift)) return 1;
         }
         k = k + 1;
     }
@@ -713,7 +728,18 @@ int cxm_text(int u, int full, char *sym, char *alias) {
     cxm_o("#ifndef CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
     cxm_o("#define CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
     cxm_on2(cxm_ift + cxm_tb[u], cxm_te[u] - cxm_tb[u]);
-    if (full) cxm_on_rename(cxm_ift, cxm_fb[u], cxm_fe[u], sym ? sym : "", alias ? alias : "");
+    if (full) {
+        if (sym && sym[0]) {
+            k = 0;
+            while (k < cxm_nsym) {
+                if (cxm_symu[k] == u && cxm_symk[k] == 0 && cxm_eq(cxm_sym[k], sym))
+                    cxm_on_rename(cxm_ift, cxm_symb[k], cxm_syme[k], sym, alias ? alias : "");
+                k = k + 1;
+            }
+        } else {
+            cxm_on_rename(cxm_ift, cxm_fb[u], cxm_fe[u], "", "");
+        }
+    }
     cxm_o("#endif\n");
     return cxm_nout >= CXM_IFMAX;
 }
@@ -740,13 +766,25 @@ int cxm_rewrite(int v, char *sym, char *alias, char *out) {
     char *td; int n; int k; int p;
     n = cxm_rd(cxm_arg[v], cxm_cmp, CXM_IFMAX);
     if (n < 0) return 1;
-    td = getenv("TMPDIR"); if (td == 0 || td[0] == 0) td = "/tmp";
+    td = getenv("TMPDIR"); if (td == 0 || td[0] == 0) td = getenv("TEMP");   /* TEMP: Windows, as the forwarding unit */
+    if (td == 0 || td[0] == 0) td = "/tmp";
     p = cxm_cpy(out, td, CXM_PATHW - 40);
     k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
     k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
     out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
     cxm_nout = 0;
-    cxm_o("#define "); cxm_o(sym); cxm_o(" "); cxm_o(alias); cxm_o("\n");
+    if (sym && sym[0]) {
+        if (alias && alias[0]) { cxm_o("#define "); cxm_o(sym); cxm_o(" "); cxm_o(alias); cxm_o("\n"); }
+        /* every other exported function of v gets a per-symbol unique name, so the
+           functions not imported by this symbol-level use do not clash at link time. */
+        k = 0;
+        while (k < cxm_nsym) {
+            if (cxm_symu[k] == v && cxm_symk[k] == 0 && !cxm_eq(cxm_sym[k], sym)) {
+                cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n");
+            }
+            k = k + 1;
+        }
+    }
     cxm_on2(cxm_cmp, n);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
@@ -795,9 +833,22 @@ int cxm_aliased(int w, int v, char *sym) {
     }
     return 0;
 }
-/* 1 when unit w can see module v's exports (direct use or through its use closure) */
-int cxm_sees(int w, int v) {
-    return w == v || cxm_reach[w][v];
+/* 1 when unit w imports symbol SYM of module v: w is v itself, or w directly uses
+   v (full import, or a symbol-level import that names SYM), or w reaches v
+   transitively (a transitive symbol-level filter is not tracked). */
+int cxm_imports(int w, int v, char *sym) {
+    int k;
+    if (w == v) return 1;
+    k = 0;
+    while (k < cxm_nuse[w]) {
+        if (cxm_use[w][k] == v) {
+            if (!cxm_usym[w][k][0]) return 1;
+            if (cxm_eq(cxm_usym[w][k], sym)) return 1;
+            return 0;
+        }
+        k = k + 1;
+    }
+    return cxm_reach[w][v];
 }
 int cxm_collisions(void) {
     int a; int b; int w; int seen;
@@ -809,7 +860,7 @@ int cxm_collisions(void) {
                 if (cxm_symk[a] == 0 && cxm_symk[b] == 0) {
                     w = 0; seen = 0;
                     while (w < cxm_n && !seen) {
-                        if (cxm_sees(w, cxm_symu[a]) && cxm_sees(w, cxm_symu[b])) {
+                        if (cxm_imports(w, cxm_symu[a], cxm_sym[a]) && cxm_imports(w, cxm_symu[b], cxm_sym[b])) {
                             if (!cxm_aliased(w, cxm_symu[a], cxm_sym[a]) && !cxm_aliased(w, cxm_symu[b], cxm_sym[b])) seen = 1;
                         }
                         w = w + 1;
@@ -861,7 +912,7 @@ int cxm_plan(char **paths, int n) {
     cxm_n = n;
     u = 0;
     while (u < cxm_n) {                              /* breadth-first: the list grows while it is walked */
-        cxm_full[u][0] = 0; cxm_typ[u][0] = 0; cxm_ninc[u] = 0; cxm_color[u] = 0;
+        cxm_full[u][0] = 0; cxm_typ[u][0] = 0; cxm_ninc[u] = 0; cxm_color[u] = 0; cxm_bodysrc[u][0] = 0;
         k = 0; while (k < CXM_MAXU) { cxm_reach[u][k] = 0; k = k + 1; }
         if (cxm_iscx[u]) {
             r = cxm_load(cxm_arg[u], u);
@@ -918,7 +969,7 @@ int cxm_plan(char **paths, int n) {
                     int uk; direct = 0; uk = 0;
                     k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) { direct = 1; uk = k; } k = k + 1; }
                     if (direct) {
-                        if (cxm_usym[u][uk][0] && cxm_ualias[u][uk][0]) {
+                        if (cxm_usym[u][uk][0]) {
                             if (cxm_text(v, 1, cxm_usym[u][uk], cxm_ualias[u][uk]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
                             cxm_cpy(cxm_ren[u][uk], cxm_renpool[cxm_nren], CXM_PATHW);
                             cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;

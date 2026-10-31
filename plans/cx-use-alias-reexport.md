@@ -64,12 +64,16 @@
 
 ## 实现进度（2026-10-31，bdy，在 gcc_cx/clang_cx 宿主链上）
 
-已在 `src/cxmod.c` 完整落地符号级别名，端到端工作：
-1. **解析**：`use NAME::sym as alias`（cxm_directive + cxm_adduse，新增 cxm_usym/cxm_ualias）。
-2. **冲突消解**：cxm_collisions 函数分支加 reach + cxm_aliased 检查，同名函数被别名后不冲突。
-3. **CXIF 声明改名**：cxm_text(sym,alias) + cxm_on_rename（token 级改名）+ cxm_renpool + cxm_inc 负值编码。
-4. **函数体符号改名**：cxm_rewrite 对被别名 use 的模块生成 `#define sym alias` 头的改名源码，cxm_planprint 输出改名源码路径（cxm_bodysrc）。
+已在三源（权威 `cx/cx0/plan.cx` 的 `CX0_COMPAT_BODY`、投影 `src/cxmod.c`、产品模块 `cx/compiler/cxmod.cx`）落地符号级导入 + 别名，端到端工作：
+1. **解析**：`use NAME::sym [as alias]`（cxm_directive + cxm_adduse，新增 cxm_usym/cxm_ualias）。
+2. **冲突消解**：cxm_collisions 函数分支加 cxm_imports（符号可见性）+ cxm_aliased（改名）检查，同名函数被别名或未被符号级导入时不冲突。
+3. **CXIF 声明改名/过滤**：cxm_text(sym,alias) + cxm_on_rename（token 级改名）+ cxm_renpool + cxm_inc 负值编码；符号级导入时只输出匹配 sym 的原型（cxm_project 记录每个函数原型在 cxm_ift 的边界到 cxm_symb/syme）。
+4. **函数体符号改名**：cxm_rewrite 生成 `#define sym alias` 头的改名源码，符号级导入时把未导入的导出函数改成 `ua_sym_<n>` 唯一名避免链接重复；cxm_planprint 输出改名源码路径（cxm_bodysrc）。
 
-验收（gcc_cx 和 clang_cx 都过）：`use a::clash as clash_a` + `use b::clash as clash_b`，clash_a()=1、clash_b()=2、main 返回 3；两个宿主编译器编译通过、运行返回 3。无别名单模块 use 无回归。
+验收（gcc_cx 和 clang_cx 都过）：`use a::clash as clash_a` + `use b::clash as clash_b` 返回 3；`use aa::other` + `use bb::clash`（纯符号级导入，无别名）返回 9。`cx0-extract --check` 报 `EXACT`。`tests/cx-namespace.cx` 加 `alias-renames-away-clash` 与 `symbol-import-filters-unused` 两用例。
 
-**已知边界**：一个模块被多个单元用**不同**别名 use 时，cxm_bodysrc 只存一份改名源码（单版本假设），多版本模块编译尚未做。这是罕见场景，需要时再扩。
+**已知边界**：
+- 一个模块被多个单元用**不同**别名 use 时，cxm_bodysrc 只存一份改名源码（单版本假设），多版本模块编译尚未做。这是罕见场景，需要时再扩。
+- 符号级导入的「未导入函数改 ua_sym_* 唯一名」只是让它们不参与链接冲突，函数体仍被编译（未做「只编译目标函数」的瘦身）；这是 closure-once 落地前的折中，等模块只进一只对象后再收紧。
+- 传递 use 的符号级过滤不追踪（cxm_imports 对传递 reach 按全导入），即 `a use b::x` + `c use a` 时 c 仍看到 b 的其余符号；重导出（本方案第 3 部分）落地后再补。
+- 产品侧 `unisacc.com` 尚未重编（33 对象 whole-o 链接的 `dlopen` 阻塞属 C44-ENTRY-HOSTIMPORT-01），故两个新用例在已装产品上暂 FAIL，重编后 PASS。

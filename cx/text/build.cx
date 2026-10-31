@@ -1,6 +1,7 @@
 #pragma unisa module build
 #pragma unisa use mem.grow
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 /* L1 text/build: an owned string builder (a C String, Rust's String, Node's
    Buffer built by appends).  It wraps mem.grow's mg_buf behind an opaque
    pointer, so the inner Vec type never appears in build's public interface:
@@ -18,6 +19,7 @@
      sb_clear(b)         drop every byte, keep the block (String::clear); 0, or -1
      sb_reserve(b, n)    ensure capacity >= n (String::reserve); 0, or -1
      sb_truncate(b, n)   shorten to n bytes, no shrink (String::truncate); 0, or -1
+     sb_insert(b, i, s, n) insert n bytes at i, shift tail right (String::insert_str); 0, or -1
      sb_cstr(b)          a NUL-terminated view (0 on allocation failure); valid until next append
      sb_join(b, s, n, sep) append s[0..n) joined by sep (Rust slice::join / Array.join)
    Speed: sb_puts/sb_putn never shrink and only reserve when the capacity is
@@ -109,5 +111,24 @@ int sb_join(sb *b, const char *const *s, long n, const char *sep) {
         if (i && sep && sb_puts(b, sep)) return -1;
         if (sb_puts(b, s[i])) return -1;
     }
+    return 0;
+}
+
+/* Insert exactly N bytes from S at INDEX, shifting the tail right (Rust
+   String::insert_str; Node has no direct counterpart, this is the buffer
+   splice).  INDEX may be 0..=len (inserting at len is an append).  O(len - index)
+   for the tail shift.  0, or -1 (bad args, or allocation failure with b unchanged). */
+int sb_insert(sb *b, long index, const char *s, long n) {
+    mg_buf *g;
+    long tail;
+    if (!b || !b->inner || index < 0 || n < 0 || (n > 0 && !s)) return -1;
+    g = sb_g(b);
+    if (index > g->len) return -1;
+    if (n == 0) return 0;
+    if (mg_reserve(g, g->len + n)) return -1;    /* growth only; b unchanged on failure */
+    tail = g->len - index;
+    if (tail > 0) { int r = mm_move(g->data + index + n, g->cap - index - n, g->data + index, tail); if (r) return -1; }
+    { int r = mm_copy(g->data + index, g->cap - index, s, n); if (r) return -1; }
+    g->len = g->len + n;
     return 0;
 }
