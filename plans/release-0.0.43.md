@@ -152,6 +152,7 @@ STATE43：**21782dd5 一百四十八（omp-grk，2026-11-01）**：同一会话�
 STATE43：**21782dd5 轻批次用尽（omp-grk，2026-11-01）**：无材料批次除 `census`、`full-*` 外都已跑完，148 PASS，`cx-layers` FAIL 粘住。剩下 197 未决大多要材料图；本会话 init 时材料图是 `-`，不能补登记。公开仍被挡住：`cx-layers` 的 A-INCOMPLETE、外平台、以及主人对签名/Draft/Latest/公开的授权。
 STATE43：**21782dd5 材料会话（omp-grk，2026-11-01）**：新会话 `out/tb/sess-mat` 登记 `e2model`=`unisacc.com`，`cx0-bundle` PASS。`out/tb/sess-host` 登记系统 `ar`/`ld`/`gcc`，`formats-archive-ar`、`formats-object-ld` PASS。流材料构造被挡住：`tools/stream-runtime.c` 要的 `exec/c/run.c` 只在 archive。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 hostcc 差分（omp-grk，2026-11-01）**：`out/tb/sess-host` 再 4 个 PASS：`optimization-ccdiff`、`optimization-ccdiff-2`、`optimization-ccdiff-3`、`optimization-ccdiff-4`。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 hostcc 拒绝（omp-grk，2026-11-01）**：`pp-differential` PASS。`pp-negative` FAIL 粘住，2 条：`macro-name-not-identifier`、`header-name-unclosed`。`c-negative` FAIL 粘住，至少 20 条语义拒绝产品没做。不是一小时可补的缺口。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
