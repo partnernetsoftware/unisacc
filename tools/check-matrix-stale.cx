@@ -1,0 +1,58 @@
+/* tools/check-matrix-stale.cx -- tools/matrix-stale.cx demotes exactly the mapped COVERED_LOCAL cells and refuses the rest.
+ *
+ *   sh ./unisacc.com tools/check-matrix-stale.cx            (from the repo root; works in out/check-matrix-stale/)
+ *
+ * A fixture root holds one three-row matrix (a COVERED_LOCAL cell, a MISSING cell, a second COVERED_LOCAL cell):
+ *   demote      mapping the first cell gives MISSING + "STALE-RED(reason): old evidence" on that row and the other rows byte for byte
+ *   not-covered mapping the MISSING cell is refused (rc 2)
+ *   unmatched   mapping a cell the matrix does not have is refused (rc 2)
+ *   check-ok    --check OUT_DIR accepts its own generation
+ *   check-stale --check OUT_DIR refuses the generation once one byte of it is changed
+ * Prints PASS/FAIL per case and CHECK_MATRIX_STALE<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], base[4400], tool[4500];
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-matrix-stale.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-matrix-stale.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-matrix-stale: REFUSE %s\n", s); sy_exit(2); }
+static void put(const char *leaf, const char *s) { char p[4700]; if (cx_fmt(p, sizeof p, "%s/%s", base, leaf) || cx_write(p, s, (size_t)tx_len(s, 4096))) die(leaf); }
+
+int main(void) {
+    char out[4096], map[4700], outd[4700], com[4500], mp[4700], rt[4700], gen[4700]; int cut, rc; size_t n; char *g;
+    const char *row0 = "hdr\tcell\treq\tstate\tevidence\trequirement\n";
+    const char *rowA = "lnx/x86_64\tx.alpha\tyes\tCOVERED_LOCAL\tbatch-a:alpha\talpha works\tsrc\n";
+    const char *rowB = "lnx/x86_64\tx.beta\tyes\tMISSING\tNONE\tbeta works\tsrc\n";
+    const char *rowC = "lnx/x86_64\tx.gamma\tyes\tCOVERED_LOCAL\tbatch-c:gamma\tgamma works\tsrc\n";
+    char all[1024];
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(base, sizeof base, "%s/out/check-matrix-stale", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/matrix-stale.cx", root)) die("paths");
+    if (sy_exists(base) == 1 && cx_rmtree(base)) die("old work");
+    if (sy_mkdir(base, 0700) || cx_fmt(rt, sizeof rt, "%s/tests", base) || sy_mkdir(rt, 0700)) die("work");
+    if (cx_fmt(all, sizeof all, "%s%s%s%s", row0, rowA, rowB, rowC)) die("rows");
+    put("tests/x-domain-matrix.tsv", all);
+    if (cx_fmt(map, sizeof map, "%s/map.tsv", base) || cx_fmt(outd, sizeof outd, "%s/out", base) || cx_fmt(gen, sizeof gen, "%s/out/x-domain-matrix.tsv", base)) die("paths");
+
+    put("map.tsv", "x\tx.alpha\tred on the candidate\n");
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut);
+        g = rc == 0 ? cx_read(gen, &n) : 0;
+        {   char want[1024]; int ok = 0;
+            if (g && !cx_fmt(want, sizeof want, "%s%s%s%s", row0, "lnx/x86_64\tx.alpha\tyes\tMISSING\tSTALE-RED(red on the candidate): batch-a:alpha\talpha works\tsrc\n", rowB, rowC)) ok = n == (size_t)tx_len(want, sizeof want) && tx_same(g, (long)n, want, tx_len(want, sizeof want));
+            ck(ok, "demote-only-the-mapped-cell-others-byte-for-byte"); } if (g) mm_free(g); }
+    put("map.tsv", "x\tx.beta\tr\n");
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2 && tx_find(out, tx_len(out, sizeof out), "COVERED_LOCAL", 13) >= 0, "refuses-a-cell-that-is-not-covered"); }
+    put("map.tsv", "x\tx.nothing\tr\n");
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2, "refuses-an-unmatched-cell"); }
+    put("map.tsv", "x\tx.alpha\tred on the candidate\n");
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}, *c[] = {"sh", com, tool, "--", base, map, "--check", outd, 0};
+        rc = sy_run(a, out, sizeof out, &cut); if (rc) die("regenerate");
+        rc = sy_run(c, out, sizeof out, &cut); ck(rc == 0, "check-accepts-its-own-generation");
+        g = cx_read(gen, &n); if (!g || n < 10) die("read generation"); g[n - 3] ^= 1; if (cx_write(gen, g, n)) die("alter"); mm_free(g);
+        rc = sy_run(c, out, sizeof out, &cut); ck(rc == 2, "check-refuses-an-altered-generation"); }
+    sy_printf("CHECK_MATRIX_STALE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,41 @@
+/* tools/check-census.cx -- tools/census.cx runs a batch once, resumes without rerunning it, redoes on request and reports.
+ *
+ *   sh ./unisacc.com tools/check-census.cx            (from the repo root; works in out/check-census/)
+ *
+ * One cheap registered batch (cx-bounded) is the subject:
+ *   first       --only cx-bounded: ran=1, results.tsv has a "cx-bounded<TAB>PASS" line
+ *   resume      the same command again: ran=0 (the id is already recorded), still one line
+ *   redo        --redo cx-bounded --only cx-bounded: ran=1, still one line
+ *   report      --report: prints CENSUS with fail=0 and runs nothing
+ *   bad-option  an unknown option is refused (rc 2)
+ * Prints PASS/FAIL per case and CHECK_CENSUS<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-census.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-census.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-census: REFUSE %s\n", s); sy_exit(2); }
+static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 4096), w, tx_len(w, 128)) >= 0; }
+static int lines(const char *path) { size_t n; char *t = sy_exists(path) == 1 ? cx_read(path, &n) : 0; int c = 0; size_t i; if (!t) return -1; for (i = 0; i < n; i++) if (t[i] == '\n') c++; mm_free(t); return c; }
+
+int main(void) {
+    char root[4096], com[4500], tool[4500], od[4500], res[4600], out[4096]; int cut, rc;
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/census.cx", root) || cx_fmt(od, sizeof od, "%s/out/check-census", root) || cx_fmt(res, sizeof res, "%s/results.tsv", od)) die("paths");
+    if (sy_exists(od) == 1 && cx_rmtree(od)) die("old work");
+    {   char *a[] = {"sh", com, tool, "--", root, od, "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+        ck(rc == 0 && has(out, "ran=1\tpass=1") && lines(res) == 1, "first-run-records-one-pass"); }
+    {   char *a[] = {"sh", com, tool, "--", root, od, "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+        ck(rc == 0 && has(out, "ran=0") && lines(res) == 1, "resume-does-not-rerun"); }
+    {   char *a[] = {"sh", com, tool, "--", root, od, "--redo", "cx-bounded", "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+        ck(rc == 0 && has(out, "ran=1") && lines(res) == 1, "redo-reruns-and-keeps-one-line"); }
+    {   char *a[] = {"sh", com, tool, "--", root, od, "--report", 0}; rc = sy_run(a, out, sizeof out, &cut);
+        ck(rc == 0 && has(out, "ran=0") && has(out, "fail=0") && has(out, "total_recorded=1"), "report-runs-nothing"); }
+    {   char *a[] = {"sh", com, tool, "--", root, od, "--bogus", 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2, "bad-option-refused"); }
+    sy_printf("CHECK_CENSUS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
