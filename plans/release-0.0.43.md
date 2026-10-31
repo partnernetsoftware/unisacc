@@ -219,6 +219,7 @@ STATE43：**21782dd5 门会话重跑二十八批（omp-grk，2026-11-01）**：`
 STATE43：**21782dd5 门会话重跑三十二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-arena`、`cx-l0-crypto-aesgcm`、`cx-l0-crypto-b64`、`cx-l0-crypto-bn`。重跑 32/32。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑三十六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-crypto-chacha20poly1305`、`cx-l0-crypto-ct`、`cx-l0-crypto-der`、`cx-l0-crypto-hkdf`。重跑 36/36。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑四十批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-crypto-p256`、`cx-l0-crypto-rsa`、`cx-l0-crypto-sha256`、`cx-l0-crypto-tls13`。重跑 40/40。身份 STABLE。旧会话已绿、当前还没有回执的还剩 80。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话重跑四十四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`snapshots-cx`、`cx-source-frame`、`cx-stream-resource`、`cx-stream-output`。重跑 44/44。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
