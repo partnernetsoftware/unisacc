@@ -326,3 +326,128 @@ fixtures 全绿；负例诊断逐条命名；候选身份与实测日志落 `out
    确认 `srcshape` 只降不升。
 5. `tools/commit-own.cx --whole tools/check-cx-layers.cx` + 批次/覆盖表各一行。
 6. `cx/spec.md` 与三源**不动**；CX-G-3 仍另案。
+
+## 8. 方案 B 修订：状态门禁、全源对账、上限与行号（2026-10-31，未施工）
+
+本节覆盖 §7 中被指出的四处缺口；§7 其余条款（词法 12 条、复用、判据不裁 G-3）不变。
+实施仍归本刀路径，批次登记与 omp-go 协调。
+
+### 8.1 状态模型：UNKNOWN 必须是非零退出，不能靠文本
+
+现行批次门禁链路（实测读码）：
+
+- `tests/batches.tsv:332` 的 `expect=rc0:CX_LAYERS`；
+- `tests/run-batch.cx:39`：`ok = !transport && rc==0 && candidate 未变 && expect 前缀 rc0:
+  && marker 恰好出现 1 次`；`ok` 才写 `status=PASS`，否则 `FAIL`（只有 transport 超时才
+  `UNKNOWN`），进程返回 `ok?0:timed_out?3:1`。
+
+因此只打印文本 `UNKNOWN` 仍会 `rc=0` → 被记 PASS。改为三档退出：
+
+| rc | 条件 | 批次判定 |
+|---|---|---|
+| 0 | `failed==0 && undecided==0` | PASS |
+| 1 | `failed>0`（层向、白名单、PARSE-CONDITIONAL、I/O） | FAIL |
+| 3 | `failed==0 && undecided>0`（词法覆盖不完整 / 对账不一致） | FAIL |
+
+`rc=3` 与 `rc=1` 在 `BATCH_RUN` 行的 `rc=` 字段可区分，原因由 stdout 的
+`UNDECIDED` 行给出；**不给 `status=UNKNOWN`**，因为 `run-batch` 只在超时时写它，
+与其冲突会制造假 UNKNOWN。`--fixtures` 模式同一规则。
+
+新增必打行（审计与 `--fixtures` 都打）：
+
+```
+CX_LAYERS_SCOPE  sources=<审计域源数> manifest=<manifest 行> tracked_regular=<数> symlink_skipped=<数> archive_excluded=<数> out_excluded=<数> reconcile=OK|MISMATCH|UNDECIDED
+UNDECIDED  <KIND>  <path>:<line>  <detail>          （每条形一条，逐条命名）
+```
+
+`CX_LAYERS` 行追加 `undecided=<数>`，保持既有字段顺序。
+
+### 8.2 全源双向对账（可执行，不用 U 行当唯一事实）
+
+问题：`#pragma unisa \` 续行时 `symindex` 实测无 `U` 行（`tests/splice.cx` 的 `dump`
+只有 `M`/`D`），编译器却接受该文件 ⇒ 该 `use` 的边与条件检查全部缺失，且**只消费
+`U` 行永远发现不了**。
+
+做法：把 `cl_locate` 的「按 `U` 行查源码」改为「每源一次扫描，按模块名建表」，再与
+`U` 行做双向多重集合对账。
+
+每源一次扫描 `cl_scan(abs)`（词法同 §7.2）：
+
+- 产出 `modtab[k] = {name, occurrences, min_cond_line}`，`k < 128`；
+- 溢出（同文件不同模块数 > 128）→ `UNDECIDED TOO-MANY-MODULES`，不静默截断。
+  上限依据实测：非归档 tracked `.cx` 中单文件 `use` 行最多 49
+  （`tools/install-fixes/uses48/main49.cx`），候选每单元上限 48；128 留两倍余量。
+
+对账（`cl_shard_file` 内，用同一份 `U` 行）：
+
+| 情形 | 输出 | 边计数 |
+|---|---|---|
+| `U` 行在表中有对应 occurrence | 正常，按 §7.4 判 `cond` | 不变 |
+| `U` 行次数 > 表中次数（EXTRA-U） | `UNDECIDED EXTRA-U` | **仍按现行计边**（不缩覆盖），但 `undecided++` |
+| 表中 occurrence 多于 `U` 行（MISSING-U） | `UNDECIDED MISSING-U path:line use M` | 该次出现无边（现状如此），`undecided++` |
+| MISSING-U 且该次出现 `cond>0` | `UNDECIDED MISSING-U-CONDITIONAL path:line use M` | 同上 |
+| 源不可读 / 超过 `CL_CAP` | `UNDECIDED UNREADABLE` | `undecided++` |
+
+对账域与身份（`4df9cd59ed` 工作树，全部实测）：
+
+- tracked `.cx` **1943**；其中 mode 120000 软链 **42**；regular **1901**。
+- `manifest.tsv` 行 **1902** = 1901 regular + 1 行生成物 `out/` 源。
+- regular 中 `archive/` **288**；审计域 **1613** = 1901 − 288 = 1902 − 288 − 1。
+- 软链 42 个不在 manifest，也不在审计域；它们是 `cx/sys`、`cx/mem` 等的别名视点，
+  目标文件本身已被审计。工具须在 `CX_LAYERS_SCOPE` 里把它们记为 `symlink_skipped`，
+  不得表述为「全仓 `.cx` 已覆盖」。
+- 另有工作树中 2 个被忽略的 `.cx`（不在 `git ls-files`），明确排除并计入
+  `UNDECIDED IGNORED-SOURCE`（若实现选择扫描）。
+
+盲区（明确不保证）：若 `symindex` 与词法扫描**同时**漏掉同一 `use`，对账仍一致。
+词法镜像的是编译器（`cxm_load`/`cxm_scan`），故该盲区等价于「编译器自己也看不见」，
+但**不能**由此宣称完整对齐；资格状态取决于 `reconcile=OK` 这一实测项。
+
+### 8.3 上限：显式拒绝，不静默少扫
+
+废除 §7.3 的「同模块 >8 次返回负值」。改为：
+
+- 每个 `(源, 模块)` 的出现次数不设上限（扫描是流式的，只累计计数与最小条件行，不存列表）；
+- 只有**不同模块数**有 128 上限，超限 → `UNDECIDED TOO-MANY-MODULES` + `rc=3`；
+- 模块名长度上限仍为 128（与 `cl_cur_mod` 一致），超长 → `UNDECIDED LONG-MODULE-NAME` + `rc=3`。
+
+### 8.4 重复 `use` 与别名的边合同不变
+
+- 同一模块出现多次：`U` 行多次；边仍按 `seen[]` 的 `realpath` 去重（现行
+  `cl_shard_file` 行为），**不改**；
+- `#pragma unisa use m::sym as alias`：`U` 行与词法扫描都取 `::` 之前的主模块名；
+- 唯一新增判定：**任一** occurrence 处于 `cond>0` 即 `FAIL PARSE-CONDITIONAL`，
+  诊断行取最小的条件内物理行。理由见 §7.1（`dbl` 实测：编译器拒 `:4`，现行工具
+  `failed=0` 且计 1 边）。
+
+### 8.5 行号未决项（独立，不改编译器）
+
+记为未决条目 `OPEN-LEX-LINE`：`cxm_directive` 在含续行的指令里不增 `line`，实测
+`#if \` 换行 `0` 的 pragma 编译器报 `:3`、物理第 4 行。本方案报**物理行**，与编译器
+诊断差 1。两条路都不在本次范围：镜像编译器（改工具）或改 `cxm_directive`（改三源，
+禁止）。当前处置：工具报物理行，并在 `plans/` 记该差异；谁消费行号谁必须知道差 1。
+不修编译器、不改 spec。
+
+### 8.6 夹具补充（在 §7.5 的 12 条之外）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-missing-u` | `#pragma unisa \` 换行 `use b`（索引无 `U`） | `undecided>=1`、`failed==0`、rc==3 |
+| `k-extra-u` | 构造函数里 `U` 行有、源码注释内才有的模块 | `undecided>=1`、rc==3、`edges` 不缩 |
+| `k-missing-u-cond` | 续行 `use` 位于 `#if 0` 内 | `UNDECIDED MISSING-U-CONDITIONAL`、rc==3 |
+| `k-many-modules` | 129 个不同模块的 `use` | `UNDECIDED TOO-MANY-MODULES`、rc==3 |
+| `k-scope` | 任一正例 | `CX_LAYERS_SCOPE` 的六个计数与实际目录一致 |
+
+`--fixtures` 的 `checks` 由「+12」改为「+17」，`failed=0`，且至少一条正例断言
+`reconcile=OK`。
+
+### 8.7 验收（更新 §7.8）
+
+1. `--fixtures`：`checks` = 原值 + 17，`failed=0`；`k-*` 五条各自 rc==3 或断言命中。
+2. 全量审计：`edges`/`amb`/`out`/`unres`/`failed` 与上一收据（`4df9cd59ed` 工作树，
+   `edges=2401 … failed=0`）逐项比对；`undecided` 打印**实测值**（预期 0，但不预写）；
+   若 `undecided>0` 则本次交付**不是** PASS，须先解释每条形。
+3. `CX_LAYERS_SCOPE` 六项计数须与本节的 1613/1902/1901/42/288/1 一致才算对账成功。
+4. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
+5. 提交：`tools/commit-own.cx --whole tools/check-cx-layers.cx` + 批次/覆盖两行。
+6. spec 与三源不动；CX-G-3 另案；`OPEN-LEX-LINE` 保持未决。
