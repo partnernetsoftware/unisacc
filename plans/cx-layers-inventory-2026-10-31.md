@@ -1978,3 +1978,80 @@ static void eb_real(const char *p, char *dst, int cap) {
 | 新 | 单根 preflight 通过 **不蕴含** build-instance 身份一致；反之亦然。两者结论不得互相引用作为证据 |
 
 本节不含 PASS；未改 P、未改 `entry-build.cx`、未建 roots/工具、未开测。身份沿用 §18.1，不外推。
+
+### 19.11 更正：§19.8 的计数等式单位错误；`sy_realpath` 文件位置也写错
+
+cdx 指出的两处，逐项改正。
+
+#### A. `build_plan_calls = build_units + build_dedup_hits` **不成立**
+
+`ncl` 的单位是**接纳的闭包对象**，`eb_plan` 的单位是**调用**；一次调用输出**多行**，每行各自做去重
+判定。把三者的加法写成等式是量纲错。核 `tools/entry-build.cx:534-583` 的实际分支：
+
+| 行 | 条件 | 结局 |
+|---|---|---|
+| `:548` | `f2 >= e`（无 TAB ⇒ 畸形行） | `continue`，**不计入任何接纳** |
+| `:552` | `len <= 0 \|\| len >= 576` | `continue`，同上 |
+| `:556` | `cx_fmt` 溢出 | `eb_die("plan-path")`，**整次构造中止** |
+| `:557` | `eb_real(full, rp, …)` | 可能回退词法路径（见 §19.9） |
+| `:560-563` | `rp` 命中 33 个根的 realpath | `dup=1` ⇒ **根命中** |
+| `:564-568` | `rp` 命中既有 `eb_creal[0..ncl)` | `dup=1` ⇒ **闭包重复** |
+| `:571` | `ncl >= EB_MAXC` | `eb_die("closure-cap")`，中止 |
+| `:573-582` | 以上皆否 | **接纳**，`ncl++` |
+
+正确做法是**七个分立的计数**（单位各自声明），不是一个等式：
+
+| 计数 | 单位 | 含义 |
+|---|---|---|
+| `build_plan_calls` | 调用 | 实际成功返回的 `eb_plan` 次数（理想 33，`only_n` 时为 0） |
+| `plan_output_rows` | 行 | 所有 plan 输出的非空行总数 |
+| `plan_malformed_rows` | 行 | `:548` 无 TAB |
+| `plan_invalid_len_rows` | 行 | `:552` 长度越界 |
+| `plan_root_hits` | 行 | `:560-563` 命中 33 根 realpath |
+| `plan_closure_hits` | 行 | `:564-568` 命中既有闭包 |
+| `build_units`（= `ncl`） | 对象 | `:573-582` 接纳的**新增闭包对象**；**不含** 33 个根 |
+| `plan_fatal` | 次 | `plan-path` / `closure-cap` 中止 |
+
+**唯一可断言的等式**（且仅在无 `plan_fatal`、且每行分类互斥完备时）：
+
+```
+plan_output_rows == plan_malformed_rows + plan_invalid_len_rows
+                  + plan_root_hits + plan_closure_hits + build_units
+```
+
+任一不满足（有 fatal、或出现未归类行）⇒ 该式**不成立**，只能报各计数原值 + `closure_selfcheck=UNKNOWN`。
+**不得**为了凑等式把 `malformed`/`invalid_len` 塞进"重复"。
+
+另两条 cdx 点出的陷阱，写进约束：
+
+- **budget 命中（`closure-cap`）不是接纳**：它是中止，`build_units` 不是一个完整数，此后 `ncl` 既不
+  增长也不代表闭包大小；该次构造只能记 `closure_complete=0` + UNKNOWN。
+- **realpath 回退不是接纳理由**：`eb_real` 失败退回词法路径时，`root_hits`/`closure_hits` 的判定
+  基于**不可靠的键**——同物理文件可能被算作两个不同单元（漏合并），也可能因两次都回退而"看起来
+  未重复"。此类行必须单列 `plan_realpath_fallback_rows`，其归类为 **UNKNOWN**，不得计入
+  `build_units` 的"已核"部分（只能算"已接纳但身份未核"）。
+
+⇒ 因此 `build_units` 要拆成两个可审计的数：`build_units_identity_verified` 与
+`build_units_identity_unverified`（后者 ≥ `plan_realpath_fallback_rows` 对应行）。
+
+#### B. `sy_realpath` 不在 `cx/sys/posix.cx`，在 `cx/sys/fs.cx:95`
+
+§19.9 的括号注释写错文件。实测：
+
+```c
+/* cx/sys/fs.cx:92-95 */
+/* The canonical absolute path of PATH ... Its length, or -errno (-ENAMETOOLONG when it does not fit). */
+int sy_realpath(const char *path, char *dst, int cap) {
+```
+
+- 成功返回**长度**（`>= 0`），失败返回 `-errno`（`-EINVAL`/`-ENAMETOOLONG`/`sy_fail()`）；**符合
+  CX-Y-4**，没有任何正 `1`。
+- 故 §19.9 的结论不变、定性更明确：**完全正确**的 L0 函数，被调用方 `eb_real`（`entry-build.cx:346-349`）
+  用 `>= 0` 判成功、失败即静默回退词法路径，**丢弃了 -errno 的全部区分**。这是上层吞错，与 L0 无关。
+- `cx/sys/fs.cx` 当前有他人未提交改动，本节只读，不触碰。
+
+#### C. 未变项
+
+`33 TU = build-instance ≠ 一次多根 cxm 调用`（§19.7）不变；单根 preflight 不蕴含构造级身份一致
+（§19.8）不变。**真实 argv 与运行数据仍未捕获** ⇒ 上述所有计数在当前只能是**源码推导的字段设计**，
+不是实测值，记 UNMEASURED；不得写成运行验证。
