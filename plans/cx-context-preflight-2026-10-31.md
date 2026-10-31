@@ -128,8 +128,8 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 
 每根：
 `ROOT<TAB>joint_id<TAB>double_count<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>pair_peak<TAB>pairs_visited_total_v1r<TAB>pair_peak_v1r<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
-聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 complete/unknown-known/unknown-unexpected 计数。
-状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
+聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 measurement_complete/unknown-known/unknown-unexpected 计数。
+状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 measurement_complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
 
 ## 10. 拟路径与所有权
 
