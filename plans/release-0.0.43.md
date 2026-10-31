@@ -313,6 +313,7 @@ STATE43：**21782dd5 冻结会话一百五十六批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 冻结会话一百五十八批（omp-grk，2026-11-01）**：再 PASS：`kernel-route-pins`、`kernel-route-route-refusal`。会话里 158 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百六十批（omp-grk，2026-11-01）**：再 PASS：`ri-chain-missingnet`、`ri-chain-symlinknet`。会话里 160 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百六十二批（omp-grk，2026-11-01）**：再 PASS：`ri-chain-fiforeceipt`、`ri-chain-nnflip`。会话里 162 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结会话一百六十四批（omp-grk，2026-11-01）**：再 PASS：`ri-chain-tableflip`、`ri-chain-receiptflip`。会话里 164 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
