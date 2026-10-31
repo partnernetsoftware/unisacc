@@ -1,0 +1,225 @@
+/* tests/elf-arm64-image.cx -- product image for -b lnx/arm64.
+ *
+ *   sh ./unisacc.com tests/elf-arm64-image.cx
+ *
+ * Two -c -funit compiles, then a link, of the installed unisacc.com.
+ * The oracle is the ARM ARM
+ * bit fields, not bytes taken from a previous image:
+ *   MOVZ sf,opc=10,100101,hw,imm16,Rd
+ *   MOVK sf,opc=11,100101,hw,imm16,Rd
+ *   BL   100101 imm26, target = pc + sign_extend(imm26) * 4
+ *   RET  D65F0000 with Rn in bits 9..5 (not only the x30 alias)
+ * The source returns k()+0x12345678, so the text must contain MOVZ/MOVK
+ * of that constant and a BL whose target is the entry of the MOVZ #7
+ * function (the MOVZ may sit a few instructions after the prologue).
+ * Prints ELF_ARM64 once. Exit 0 only when nothing failed.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static char rec[4096];
+static long recn;
+static int assertions, failures;
+static unsigned char img[1048576];
+
+static void die(const char *s) {
+    sy_eprintf("elf-arm64-image: REFUSE %s\n", s);
+    sy_exit(2);
+}
+
+static void ck(int ok, const char *name) {
+    char line[192];
+    long n;
+    assertions++;
+    if (ok) sy_printf("PASS\telf-arm64-image.%s\n", name);
+    else { failures++; sy_printf("FAIL\telf-arm64-image.%s\n", name); }
+    if (cx_fmt(line, sizeof line, "%s\telf-arm64-image.%s\n", ok ? "PASS" : "FAIL", name)) die("rec line");
+    n = tx_len(line, (long)sizeof line);
+    if (n < 0 || recn + n >= (long)sizeof rec) die("rec bound");
+    if (cx_fmt(rec + recn, (size_t)((long)sizeof rec - recn), "%s", line)) die("rec copy");
+    recn += n;
+}
+
+static void write_new(const char *path, const void *bytes, long n) {
+    int fd = sy_open_new(path, 0644);
+    if (fd < 0) die("create");
+    if (sy_write_all(fd, bytes, n) || sy_close(fd)) die("write");
+}
+
+static unsigned u32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static unsigned long long u16(const unsigned char *p) {
+    return (unsigned long long)p[0] | ((unsigned long long)p[1] << 8);
+}
+
+static unsigned long long u64(const unsigned char *p) {
+    unsigned long long v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+/* ARM ARM C6: MOVZ opc=10, MOVK opc=11, fixed 100101. */
+static unsigned a64_mov(int opc, int sf, int hw, unsigned imm, int rd) {
+    return ((unsigned)sf << 31) | ((unsigned)opc << 29) | (0x25u << 23) |
+           ((unsigned)hw << 21) | ((imm & 0xffffu) << 5) | (unsigned)rd;
+}
+
+static int span_ok(long n, unsigned long long at, unsigned long long len) {
+    return at <= (unsigned long long)n && len <= (unsigned long long)n - at;
+}
+
+static void scan_text(const unsigned char *b, long n, unsigned long long off,
+                      unsigned long long va, unsigned long long filesz,
+                      int *kfn, int *bl_hit, int *pair_hit) {
+    unsigned long long kaddr[8];
+    long count, i, kn = 0;
+    if (!span_ok(n, off, filesz) || (filesz & 3) || (off & 3)) return;
+    count = (long)(filesz / 4);
+    for (i = 0; i < count; i++) {
+        unsigned w = u32(b + (long)off + i * 4);
+        int sf, hit = 0;
+        long j;
+        for (sf = 0; sf < 2; sf++) if (w == a64_mov(2, sf, 0, 7, 0)) hit = 1;
+        if (!hit) continue;
+        for (j = i + 1; j < count && j <= i + 8; j++) {
+            if ((u32(b + (long)off + j * 4) & 0xFFFFFC1Fu) == 0xD65F0000u) {
+                if (kn < 8) kaddr[kn++] = va + (unsigned long long)i * 4;
+                break;
+            }
+        }
+    }
+    *kfn += (int)kn;
+    for (i = 0; i < count; i++) {
+        unsigned w = u32(b + (long)off + i * 4);
+        int sf, rd;
+        long j;
+        if ((w >> 26) == 0x25u) {
+            unsigned imm = w & 0x03ffffffu;
+            long long simm = (long long)imm;
+            unsigned long long pc = va + (unsigned long long)i * 4;
+            long long tgt;
+            int k;
+            if (imm & 0x02000000u) simm -= 0x04000000LL;
+            tgt = (long long)pc + (simm << 2);
+            for (k = 0; k < kn; k++) {
+                long long delta = (long long)kaddr[k] - tgt;
+                if (delta >= 0 && delta <= 32) *bl_hit += 1;
+            }
+        }
+        for (sf = 0; sf < 2; sf++) for (rd = 0; rd < 31; rd++) {
+            if (w != a64_mov(2, sf, 0, 0x5678, rd)) continue;
+            for (j = i + 1; j < count && j <= i + 4; j++) {
+                if (u32(b + (long)off + j * 4) == a64_mov(3, sf, 1, 0x1234, rd)) *pair_hit += 1;
+            }
+        }
+    }
+}
+
+static void decode(long n) {
+    unsigned long long ph, phn, entry;
+    int loads_rx = 0, kfn = 0, bl_hit = 0, pair_hit = 0, entry_in = 0;
+    unsigned long long i;
+    ck(n >= 64 && img[0] == 0x7f && img[1] == 'E' && img[2] == 'L' && img[3] == 'F' &&
+       img[4] == 2 && img[5] == 1 && img[6] == 1, "elf64-le");
+    if (n < 64) return;
+    ck(u16(img + 16) == 2, "et-exec");
+    ck(u16(img + 18) == 183, "em-aarch64");
+    ck(u16(img + 54) == 56, "phdr-size");
+    ph = u64(img + 32);
+    phn = u16(img + 56);
+    entry = u64(img + 24);
+    ck(phn > 0 && phn <= 64 && span_ok(n, ph, phn * 56), "phdr-bounds");
+    if (!(phn > 0 && phn <= 64 && span_ok(n, ph, phn * 56))) return;
+    for (i = 0; i < phn; i++) {
+        const unsigned char *q = img + (long)ph + (long)i * 56;
+        unsigned long long type = u32(q), flags = u32(q + 4);
+        unsigned long long off = u64(q + 8), va = u64(q + 16), fs = u64(q + 32);
+        if (type != 1 || flags != 5) continue;
+        loads_rx++;
+        ck(va == 0x400000, "text-vaddr");
+        if (entry >= va && entry - va < fs) entry_in = 1;
+        scan_text(img, n, off, va, fs, &kfn, &bl_hit, &pair_hit);
+    }
+    ck(loads_rx == 1, "one-rx-load");
+    ck(entry_in, "entry-in-text");
+    ck(kfn > 0, "movz-7-then-ret");
+    ck(bl_hit > 0, "bl-displacement");
+    ck(pair_hit > 0, "movz-movk-12345678");
+}
+
+/* Two units, so the call is a real BL after the link and not an inlined add. */
+static int product(char **args, const char *tag) {
+    char *v[20], why[512];
+    np_result r;
+    int n = 0, i;
+    v[n++] = bound; v[n++] = "12"; v[n++] = "env"; v[n++] = "-u"; v[n++] = "UNISA_CONTAINER";
+    v[n++] = "sh"; v[n++] = com;
+    for (i = 0; args[i]; i++) { if (n >= 19) die("argv"); v[n++] = args[i]; }
+    v[n] = 0;
+    if (np_run(v, root, 0, 16, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, tag);
+    if (r.rc != 0 && r.err && r.errn > 0) sy_write_all(2, r.err, (long)r.errn);
+    np_free(&r);
+    return failures;
+}
+
+int main(void) {
+    static const char k_text[] = "int k(void){return 7;}\n";
+    static const char m_text[] = "int k(void);int main(void){return k()+0x12345678;}\n";
+    char kc[4600], mc[4600], ko[4600], mo[4600], out[4600], res[4800];
+    char *ak[9], *am[9], *al[5];
+    int pid = sy_pid();
+    long kn = tx_len(k_text, 80), mn = tx_len(m_text, 120);
+    int fd;
+    long n;
+    int before;
+    if (kn < 0 || mn < 0) die("source length");
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/elfarm-%d", root, pid)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (sy_exists(work) != 0) die("work exists");
+    if (sy_mkdir(work, 0700)) die("mkdir work");
+    if (cx_fmt(kc, sizeof kc, "%s/k.c", work) || cx_fmt(mc, sizeof mc, "%s/m.c", work) ||
+        cx_fmt(ko, sizeof ko, "%s/k.o", work) || cx_fmt(mo, sizeof mo, "%s/m.o", work) ||
+        cx_fmt(out, sizeof out, "%s/k.elf", work)) die("leaf");
+    write_new(kc, k_text, kn);
+    write_new(mc, m_text, mn);
+    ak[0] = "-O0"; ak[1] = "-c"; ak[2] = "-funit"; ak[3] = "-b"; ak[4] = "lnx/arm64";
+    ak[5] = kc; ak[6] = "-o"; ak[7] = ko; ak[8] = 0;
+    am[0] = "-O0"; am[1] = "-c"; am[2] = "-funit"; am[3] = "-b"; am[4] = "lnx/arm64";
+    am[5] = mc; am[6] = "-o"; am[7] = mo; am[8] = 0;
+    before = failures;
+    product(ak, "compile-k");
+    if (failures == before) product(am, "compile-m");
+    if (failures == before) {
+        al[0] = ko; al[1] = mo; al[2] = "-o"; al[3] = out; al[4] = 0;
+        product(al, "link");
+    }
+    if (failures == before) {
+        fd = sy_open_read(out);
+        if (fd < 0) die("open image");
+        n = sy_reg_size(fd);
+        ck(n >= 64 && n <= (long)sizeof img, "image-size");
+        if (n >= 64 && n <= (long)sizeof img) {
+            if (sy_read_full(fd, img, n)) die("read image");
+            if (sy_close(fd)) die("close image");
+            decode(n);
+        } else if (sy_close(fd)) die("close image");
+    }
+    if (cx_fmt(res, sizeof res, "%s/results.tsv", work)) die("results");
+    write_new(res, rec, recn);
+    sy_printf("ELF_ARM64\tassertions=%d\tfailed=%d\treceipt=out/elfarm-%d/results.tsv\n",
+              assertions, failures, pid);
+    sy_exit(failures ? 1 : 0);
+    return 1;
+}
