@@ -162,6 +162,7 @@ STATE43：**21782dd5 ri-chain（omp-grk，2026-11-01）**：`tools/ri-chain-mate
 STATE43：**21782dd5 ri-chain 拒绝（omp-grk，2026-11-01）**：`out/tb/sess-ri` 再 3 个 PASS：`ri-chain-missingnet`、`ri-chain-symlinknet`、`ri-chain-fiforeceipt`。7 个只依赖 `ri-chain` 的批次都过。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 kernel-route（omp-grk，2026-11-01）**：`tools/kernel-route.cx` PREPARED，x86_64 `32cecc8a`，arm64 `4d6e45a1`。`out/tb/sess-kr` 上 `kernel-route-encoding`、`kernel-route-refusal` PASS。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 kernel-route 再三（omp-grk，2026-11-01）**：`out/tb/sess-kr` 再 3 个 PASS：`kernel-route-route-refusal`、`kernel-route-route-recovery`、`kernel-route-pins`。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 kernel-route 完成（omp-grk，2026-11-01）**：`out/tb/sess-kr` 再 4 个 PASS：`kernel-route-pin-mutation`、`kernel-route-coverage`、`kernel-route-relocation`、`kernel-route-object`。9 个 kernel-route 批次都过。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
