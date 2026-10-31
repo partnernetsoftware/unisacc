@@ -236,6 +236,7 @@ STATE43：**21782dd5 门会话重跑九十八批（omp-grk，2026-11-01）**：`
 STATE43：**21782dd5 门会话重跑一百零二批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`own-diff-tool`、`symindex-tool`、`cx-l0-sys-sig`、`doc-links-tool`。重跑 102/102。身份 STABLE。旧会话已绿、当前还没有回执的还剩 18。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑一百零六批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`snapshot-run-tool`、`stale-tool`、`tape-neg`、`cx-stream-name`。重跑 106/106。身份 STABLE。旧会话已绿、当前还没有回执的还剩 14。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 门会话重跑一百一十批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-net-name`、`route-chains`、`nametab-gen`、`use-path`。重跑 110/110。身份 STABLE。旧会话已绿、当前还没有回执的还剩 10。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 门会话重跑一百一十四批（omp-grk，2026-11-01）**：`out/tb/sess-gate` 再 PASS：`cx-l0-crypto-x25519`、`cx-l0-crypto-x509`、`out-gc`、`stream-e3-pos`。重跑 114/114。身份 STABLE。旧会话已绿、当前还没有回执的还剩 6。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
