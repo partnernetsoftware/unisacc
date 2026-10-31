@@ -1,0 +1,162 @@
+/* tools/use-path.cx -- rewrite the module path of `#pragma unisa use` lines, nothing else.
+ *
+ *   sh ./unisacc.com tools/use-path.cx -- OLD NEW [FILE...|--tracked]
+ *
+ * A line starting (after optional blanks) with `#pragma unisa use OLD` has OLD replaced by NEW when
+ * OLD is followed by a blank, ':' or the line end; `#pragma unisa use OLD::sym as a` therefore
+ * becomes `#pragma unisa use NEW::sym as a`.  Comments and string literals are never matched, and no
+ * other line is rewritten.  A `#pragma unisa use` line that names OLD but does not fit the canonical
+ * spacing (one blank after the keyword) is refused with rc 2 and nothing is written.
+ * --tracked reads `git ls-files -s -z -- '*.cx' ':(exclude)archive/'` once.
+ * One line per changed file: USE-PATH<TAB>path<TAB>OLD<TAB>NEW, then USE-PATH<TAB>files=N<TAB>changed=M.
+ * For moving a module to another directory: change the path here, then let tests/cxraw.cx and
+ * tests/cxinclude.cx ratchet their baselines down.
+ */
+#pragma unisa use text.text
+#pragma unisa use mem.arena
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+
+#define UP_CAP (1L << 24)
+#define UP_MAXFILES 8192
+#define UP_KEY "#pragma unisa use "
+#define UP_KEYN 18
+
+static int up_ws(int c) { return c == ' ' || c == '\t'; }
+
+/* The line s[0..n) is a `unisa use` line that starts OLD at *pre and ends OLD at the return value,
+   or -1 when the line is not that.  *pre is set only on a match. */
+static long up_match(const char *s, long n, const char *old, long oldn, long *pre) {
+    long k, w = 0, at;
+    while (w < n && up_ws(s[w])) w++;
+    if (n - w < UP_KEYN) return -1;
+    if (!tx_prefix(s + w, n - w, UP_KEY, UP_KEYN)) return -1;
+    at = w + UP_KEYN;
+    if (at + oldn > n) return -1;
+    if (!tx_same(s + at, oldn, old, oldn)) return -1;
+    if (at + oldn < n && !(up_ws(s[at + oldn]) || s[at + oldn] == ':' || s[at + oldn] == '\r')) return -1;
+    *pre = at;
+    return at + oldn;
+}
+
+/* 1 when FILE names OLD as the module of a `unisa use` line that up_match did not match. */
+static int up_refuse(const char *b, long n, const char *old, long oldn) {
+    long i = 0, e, pre;
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (up_match(b + i, e - i, old, oldn, &pre) < 0) {
+            long at = 0, len = e - i, u, m;
+            while (at < len && up_ws(b[i + at])) at++;              /* leading blanks */
+            if (len - at >= 7 && tx_prefix(b + i + at, len - at, "#pragma", 7)) {
+                u = tx_find(b + i + at, len - at, "unisa", 5);
+                if (u >= 0) {                                        /* a unisa pragma line */
+                    m = tx_find(b + i + at + u, len - at - u, "use", 3);
+                    if (m >= 0) {                                    /* ... with a use directive */
+                        long p = at + u + m + 3;
+                        while (p < len && up_ws(b[i + p])) p++;
+                        if (p + oldn <= len && tx_same(b + i + p, oldn, old, oldn)
+                            && (p + oldn == len || !(b[i + p + oldn] == '_' || (b[i + p + oldn] >= 'a' && b[i + p + oldn] <= 'z')
+                                                     || (b[i + p + oldn] >= '0' && b[i + p + oldn] <= '9'))))
+                            return 1;
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static char *up_rewrite(int arena, const char *b, long n, const char *old, const char *nu, long *outn, int *hits) {
+    long oldn = tx_len(old, UP_CAP), nun = tx_len(nu, UP_CAP), i = 0, e, pre, after, h = 0, on = 0;
+    char *o;
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (up_match(b + i, e - i, old, oldn, &pre) >= 0) h++;
+        i = e + 1;
+    }
+    *hits = (int)h;
+    o = ar_alloc(arena, n + 1 + (h > 0 && nun > oldn ? h * (nun - oldn) : 0));
+    if (!o) return 0;
+    i = 0;
+    while (i < n) {
+        long k;
+        e = i; while (e < n && b[e] != '\n') e++;
+        after = up_match(b + i, e - i, old, oldn, &pre);
+        if (after < 0) {
+            for (k = 0; k < e - i; k++) o[on++] = b[i + k];
+        } else {
+            for (k = 0; k < pre; k++) o[on++] = b[i + k];
+            for (k = 0; k < nun; k++) o[on++] = nu[k];
+            for (k = after; k < e - i; k++) o[on++] = b[i + k];
+        }
+        if (e < n) o[on++] = '\n';
+        i = e + 1;
+    }
+    o[on] = 0;
+    *outn = on;
+    return o;
+}
+
+int main(int argc, char **argv) {
+    int arena, i, changed = 0, nf = 0;
+    const char *old, *nu;
+    char **files;
+    if (argc < 3) { sy_eprintf("usage: use-path.cx -- OLD NEW [FILE...|--tracked]\n"); return 2; }
+    old = argv[1]; nu = argv[2];
+    arena = ar_new(1L << 30);
+    files = ar_alloc(arena, (long)UP_MAXFILES * sizeof *files);
+    if (!files) { sy_eprintf("use-path: out of memory\n"); return 2; }
+    if (argc == 4 && tx_eqz(argv[3], "--tracked")) {
+        char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", ":(exclude)archive/", 0};
+        char *list = 0, chunk[65536];
+        size_t ln = 0;
+        int ofd, pid;
+        long r, len = 0, at = 0;
+        pid = sy_spawn_pipe(gv, 0, 0, &ofd, 0);
+        if (pid < 0) { sy_eprintf("use-path: cannot run git ls-files\n"); return 2; }
+        {
+            size_t cap = 0;
+            while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) {
+                if (len + r + 1 > (long)cap) { long c = (len + r + 1) * 2; char *t = ar_alloc(arena, c); if (!t) return 2; for (i = 0; i < len; i++) t[i] = list[i]; list = t; cap = (size_t)c; }
+                for (i = 0; i < r; i++) list[len + i] = chunk[i];
+                len += r;
+            }
+        }
+        sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+        if (list) list[len] = 0;
+        while (at < len) {   /* "MODE SHA STAGE\tPATH\0" */
+            char *e = list + at;
+            long n = tx_len(e, len - at), tab = tx_chr(e, n, '\t');
+            if (n < 0) break;
+            if (tab > 0 && !tx_prefix(e, n, "120000", 6)) files[nf++] = e + tab + 1;
+            at += n + 1;
+        }
+        ln = (size_t)len;
+        (void)ln;
+    } else {
+        for (i = 3; i < argc && nf < UP_MAXFILES; i++) files[nf++] = argv[i];
+    }
+    if (nf == 0) { sy_eprintf("use-path: no files\n"); return 2; }
+    for (i = 0; i < nf; i++) {
+        size_t n = 0;
+        char *b = cx_read(files[i], &n);
+        long outn = 0;
+        int hits = 0;
+        char *o;
+        if (!b) continue;   /* not a regular readable file: nothing to say */
+        if (up_refuse(b, (long)n, old, tx_len(old, UP_CAP))) {
+            sy_eprintf("use-path: %s: a unisa use line names %s but does not fit the canonical form\n", files[i], old);
+            return 2;
+        }
+        o = up_rewrite(arena, b, (long)n, old, nu, &outn, &hits);
+        if (!o) { sy_eprintf("use-path: out of memory\n"); return 2; }
+        if (hits == 0) continue;
+        if (cx_write(files[i], o, (size_t)outn) < 0) { sy_eprintf("use-path: cannot write %s\n", files[i]); return 2; }
+        sy_printf("USE-PATH\t%s\t%s\t%s\n", files[i], old, nu);
+        changed++;
+    }
+    sy_printf("USE-PATH\tfiles=%d\tchanged=%d\n", nf, changed);
+    return 0;
+}

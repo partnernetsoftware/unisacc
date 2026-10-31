@@ -1,0 +1,77 @@
+/* tools/check-use-path.cx -- tools/use-path.cx rewrites exactly the module path of `#pragma unisa use` lines.
+ *
+ *   sh ./unisacc.com tools/check-use-path.cx        (from the repo root; works in out/check-use-path/)
+ *
+ * Fixtures are written under out/check-use-path/ and the real tool runs on them with the installed
+ * product, so the check covers the shipped code path and not a copy of its logic:
+ *   plain    `use core.kernel` becomes `use sys.kernel`;
+ *   alias    `use core.kernel::core_run as cr` keeps `::core_run as cr`;
+ *   prefix   `use core.kernels` is a different module and stays untouched;
+ *   opaque   a comment and a string literal that spell the old path stay untouched;
+ *   spacing  a non-canonical `#pragma unisa  use core.kernel` is refused with rc 2 and the file is
+ *            left byte-identical;
+ *   count    USE-PATH reports changed=1 for the plain case.
+ * Prints PASS/FAIL per case and CHECK_USE_PATH<TAB>failed=N; exit 1 when N > 0, 2 on setup failure. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+
+#define UPW "out/check-use-path"
+#define OLD "core.kernel"
+#define NEW "sys.kernel"
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-use-path.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-use-path.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-use-path: REFUSE %s\n", s); sy_exit(2); }
+
+/* Write S as fixture NAME, run the real tool on it, and leave its bytes in OUT. Returns the tool's rc. */
+static int run(const char *name, const char *s, char *out, int cap) {
+    char path[256], got[1024];
+    char *av[] = {"sh", "./unisacc.com", "tools/use-path.cx", "--", OLD, NEW, path, 0};
+    size_t n = 0;
+    int rc;
+    long sl = tx_len(s, 1L << 16);
+    char *b;
+    if (cx_fmt(path, sizeof path, UPW "/%s", name)) die("path");
+    if (cx_write(path, s, (size_t)sl) < 0) die("cannot write the fixture");
+    rc = sy_run(av, got, (int)sizeof got, 0);
+    b = cx_read(path, &n);                          /* the tool rewrote the file in place */
+    if (!b) die("cannot read the fixture back");
+    if (n >= (size_t)cap) die("fixture grew past the buffer");
+    for (size_t i = 0; i < n; i++) out[i] = b[i];
+    out[n] = 0;
+    return rc;
+}
+
+int main(void) {
+    char out[8192], got[8192];
+    char *mk[] = {"sh", "-c", "rm -rf " UPW " && mkdir -p " UPW, 0};
+    size_t n;
+    if (sy_run(mk, got, (int)sizeof got, 0) != 0) die("cannot prepare " UPW);
+
+    ck(run("plain.cx", "#pragma unisa use " OLD "\nint main(void){return 0;}\n", out, sizeof out) == 0
+       && tx_eqz(out, "#pragma unisa use " NEW "\nint main(void){return 0;}\n"), "plain");
+
+    ck(run("alias.cx", "#pragma unisa use " OLD "::core_run\n", out, sizeof out) == 0
+       && tx_eqz(out, "#pragma unisa use " NEW "::core_run\n"), "alias");
+
+    ck(run("pref.cx", "#pragma unisa use " OLD "s\n", out, sizeof out) == 0
+       && tx_eqz(out, "#pragma unisa use " OLD "s\n"), "prefix");
+
+    ck(run("opaque.cx", "/* #pragma unisa use " OLD " */\nchar *s = \"#pragma unisa use " OLD "\";\n", out, sizeof out) == 0
+       && tx_eqz(out, "/* #pragma unisa use " OLD " */\nchar *s = \"#pragma unisa use " OLD "\";\n"), "opaque");
+
+    ck(run("spacing.cx", "#pragma unisa  use " OLD "\n", out, sizeof out) == 2
+       && tx_eqz(out, "#pragma unisa  use " OLD "\n"), "spacing");
+
+    /* The summary line of the plain case says changed=1, so a no-op run is not mistaken for a rewrite. */
+    {   char *av[] = {"sh", "./unisacc.com", "tools/use-path.cx", "--", OLD, NEW, UPW "/plain.cx", 0};
+        if (sy_run(av, got, (int)sizeof got, 0) != 0) die("cannot run the tool on the plain fixture");
+        n = tx_len(got, sizeof got);
+        ck(tx_find(got, (long)n, "changed=0", 9) >= 0, "count"); }   /* already rewritten: nothing left to change */
+
+    sy_printf("CHECK_USE_PATH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

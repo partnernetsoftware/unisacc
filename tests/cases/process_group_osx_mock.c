@@ -12,7 +12,7 @@ static long mock_result, number, args[5];
 static long __syscall6(long n,long a,long b,long c,long d,long e) {
     number=n;args[0]=a;args[1]=b;args[2]=c;args[3]=d;args[4]=e;return mock_result;
 }
-#include "../../cx/runtime/process_group_osx.cx"
+#include "../../cx/sys/process_group_osx.cx"
 int main(void) {
 #ifdef MOCK_ARM
     const long want=82;

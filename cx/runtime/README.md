@@ -10,7 +10,7 @@ No undefined function is silently forwarded to host libc.
 From the repository root, with a fresh absolute output directory:
 
 ```
-tools/bound 55 sh ./unisacc.com tools/cx-runtime.cx -- "$PWD/include" "$PWD/out/runtime-new" "$PWD/unisacc.com" --abi cx/runtime/lnx-x86_64.c tools/cx-driver.cx cx/cx0/bundle.cx cx/cx0/plan.cx cx/runtime/process.cx tests/preprocess/runtime-native.cx tests/preprocess/runtime_native_state.cx
+tools/bound 55 sh ./unisacc.com tools/cx-runtime.cx -- "$PWD/include" "$PWD/out/runtime-new" "$PWD/unisacc.com" --abi cx/sys/lnx-x86_64.c tools/cx-driver.cx cx/cx0/bundle.cx cx/cx0/plan.cx cx/sys/process.cx tests/preprocess/runtime-native.cx tests/preprocess/runtime_native_state.cx
 ```
 
 The explicitly named bootstrap product only preprocesses an identifier-demand
@@ -38,13 +38,13 @@ yet implement protected module privacy, compile-time ownership or arbitrary C99
 header projection. Conditional body branches with inconsistent brace shapes,
 unbalanced lexical constructs and oversized output are explicitly refused.
 
-`lnx-x86_64.c` supplies the native Linux process-group syscall previously left
-as an undefined host-forwarded declaration. It uses the same negative-syscall
-return/errno convention as the carried runtime. Other platforms and general
-host-library replacement remain unimplemented.
+`cx/sys/lnx-x86_64.c` supplies the native Linux process-group syscall previously
+left as an undefined host-forwarded declaration. It uses the same
+negative-syscall return/errno convention as the carried runtime. Other platforms
+and general host-library replacement remain unimplemented.
 
-`process_group_osx.cx` is a separate Darwin provider for explicitly linked
-units. Its syscall number is 82 in [XNU's syscall table](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/syscalls.master);
+`cx/sys/process_group_osx.cx` is a separate Darwin provider for explicitly
+linked units. Its syscall number is 82 in [XNU's syscall table](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/syscalls.master);
 the x86-64 form carries the BSD syscall class. The two calling conventions have
 host-side mocked tests, and both macOS architectures have been cross-linked
 with a lifecycle-module consumer. Native macOS execution is not measured.
@@ -71,7 +71,8 @@ runtime demand. Imported constructor/destructor attributes are removed from
 declarations and retained only on the provider definition; the independently
 executed three-case provider batch is in `out/c43-runtime-provider-03/`.
 
-`process.cx` is the small process capture module used by the source driver.
+`cx/sys/process.cx` is the small process capture module used by the source
+driver.
 Its private buffer/error helpers and public `np_run`/`np_free` retain the old
 netpack process contract, including environment replacement, independent output
 channels and bounded descendant termination. Construction/packing algorithms

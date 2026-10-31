@@ -93,11 +93,11 @@ static int load_boundary(void) {
         if (e > i && b[i] != '#') {
             char *line = b + i, *tab = line;
             while (*tab && *tab != '\t') tab++;
-            if (*tab) {   /* one exact .cx file with a mandatory reason: FILE<TAB>REASON */
+            if (*tab) {   /* one exact docking unit with a mandatory reason: FILE<TAB>REASON */
                 size_t pl = (size_t)(tab - line);
                 if (nexact == MAXEXACT) { fprintf(stderr, "cxinclude: %s: too many exact entries\n", BOUNDARY); return -1; }   /* rc 2 exits */
-                if (pl < 4 || pl >= sizeof exact[0] || line[pl - 3] != '.' || line[pl - 2] != 'c' || line[pl - 1] != 'x' || !tab[1]) {
-                    fprintf(stderr, "cxinclude: exact boundary entry must be FILE.cx<TAB>reason: %s\n", line); return -1;
+                if (pl < 2 || pl >= sizeof exact[0] || !tab[1] || !(line[pl - 1] == 'x' || line[pl - 1] == 'c' || line[pl - 1] == 'h' || line[pl - 1] == 'n')) {
+                    fprintf(stderr, "cxinclude: exact boundary entry must be a .cx/.c/.h/.c.in FILE<TAB>reason: %s\n", line); return -1;
                 }
                 { size_t q; for (q = 0; q < pl; q++) exact[nexact][q] = line[q]; exact[nexact][pl] = 0; }
                 nexact++;
@@ -182,11 +182,12 @@ int main(int argc, char **argv) {
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxinclude: run from the repo root\n"); return 2; }
     if (load_boundary() < 0) return 2;
     if (load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", &list, &ln);
+    rc = cx_run("git ls-files -s -z -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'", &list, &ln);
     if (rc != 0 || !list) { fprintf(stderr, "cxinclude: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
-        append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked .cx module its include directives.\n");
-        append(&out, &olen, &ocap, "# A .cx module must not use #include. Rows are debt and only go down. No row means 0.\n");
+        append(&out, &olen, &ocap, "# tests/cxinclude.tsv -- written by tests/cxinclude.cx --write; per tracked unit its include directives.\n");
+        append(&out, &olen, &ocap, "# Every .cx module, plus the .c/.h/.c.in cx/ keeps under a directory. A module must not use\n");
+        append(&out, &olen, &ocap, "# #include. Rows are debt and only go down. No row means 0.\n");
         append(&out, &olen, &ocap, "# The bottom layer in tests/cxinclude-boundary.tsv (include/, tools/cxcc-hostinc/, cx/sys/) docks libc/POSIX and has no rows here.\n");
         append(&out, &olen, &ocap, "# --write refuses a new row or a higher count and leaves this file unchanged.\n");
         append(&out, &olen, &ocap, "# path\tincludes\n");
@@ -207,7 +208,7 @@ int main(int argc, char **argv) {
         if (r) r->used = 1;
         if (c > (r ? r->count : 0)) {
             if (r) printf("cxinclude: module %s has %d include lines, baseline %d\n", p, c, r->count);
-            else printf("cxinclude: module %s has %d include lines and no baseline row (a .cx module must not use #include)\n", p, c);
+            else printf("cxinclude: module %s has %d include lines and no baseline row (an upper-layer unit must not use #include)\n", p, c);
             over++;
         } else if (r && c < r->count) under++;
         if (!check && c > 0 && c <= (r ? r->count : 0)) {
@@ -220,9 +221,9 @@ int main(int argc, char **argv) {
     bfiles += hfiles; binc += hinc;
     for (k = 0; k < nrows; k++) {
         base_total += rows[k].count;
-        if (!rows[k].used) printf("cxinclude: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
+        if (!rows[k].used) printf("cxinclude: stale row %s (not a tracked unit; --write drops it)\n", rows[k].path);
     }
-    printf("cxinclude: %s: %d .cx modules, %d include lines (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+    printf("cxinclude: %s: %d units, %d include lines (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
            over ? "FAIL" : "ok", files, total, base_total, over, under);
     printf("cxinclude: boundary: %d docking headers, %d include lines allowed\n", bfiles, binc);
     if (!check) {
@@ -233,7 +234,7 @@ int main(int argc, char **argv) {
         }
         if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxinclude: cannot write %s\n", BASELINE); return 2; }
         free(out);
-        printf("cxinclude: wrote %s: %d .cx modules, %d include lines\n", BASELINE, files, total);
+        printf("cxinclude: wrote %s: %d units, %d include lines\n", BASELINE, files, total);
     }
     return over ? 1 : 0;
 }

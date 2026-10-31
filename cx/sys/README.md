@@ -22,6 +22,18 @@
 | `sys.tty` | `tty.cx` | 终端（sy_tty_raw/sy_tty_size 等） |
 | `sys.fd` | `fd.cx` | 描述符复制（sy_dup/sy_dup2；Windows 上 sy_dup2 为 -ENOSYS） |
 
+## 非 `sys.*` 的 L0 文件
+
+同目录下还有四个不带 `sys.` 名字的模块和一个 C 文件，它们直接对接宿主、因此属于 L0：
+
+| 文件 | 用途 |
+|---|---|
+| `kernel.cx` | 执行核事实表（模块 `kernel`，`.cx` 入口经 `use sys.kernel` 消费） |
+| `process.cx` | 进程捕获（`np_run`/`np_free`，源驱动器用） |
+| `process_group.cx` | Linux 进程组（`setpgid` 等的对接实现） |
+| `process_group_osx.cx` | Darwin 进程组提供者（x86-64 与 arm64 的 syscall 号 82） |
+| `lnx-x86_64.c` | Linux `setpgid` 的 `__syscall6` 提供者；`cx/` 下唯一的分层内 C 文件 |
+
 ## 契约
 
 - 错误码显式：所有接口返回 0 或 -errno（或 -EINVAL/-ENOMEM 等），不依赖 errno 跨模块（坑三）。
