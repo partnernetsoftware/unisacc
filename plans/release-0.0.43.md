@@ -302,6 +302,7 @@ STATE43：**21782dd5 冻结会话一百一十七批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 冻结会话一百二十一批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 4/4 PASS：`tape-gap-tool`、`use-path`、`symindex-tool`、`own-diff-tool`。会话里 121 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百二十七批（omp-grk，2026-11-01）**：`out/tb/sess-frozen` 再 6/6 PASS：`stream-e3-unmap`、`stream-prune-route`、`stream-e3-gold`、`stream-e3-pos`、`stream-e3-ref`、`stream-e3-scope`。会话里 127 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话官方门（omp-grk，2026-11-01）**：`tests/run.cx -- --all out/tb/sess-frozen` 烟测 16/0。聚合 `pass=127 missing=223 fail=0 unknown=0 refused=0`，覆盖 `satisfied=150 unsatisfied=180`。`ALL NOT_QUALIFIED`，rc 1。`batches.tsv` 里的 127 个无材料批都已在这个会话 PASS，身份 STABLE。223 个未跑的是要材料或未进轻量清单的批。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结会话一百三十五批（omp-grk，2026-11-01）**：官方门之后再 8/8 PASS：`callback-wrapper-index`、`com-tree`、`commit-own`、`cx-l0-sys-sig`、`snapshots-cx`、`core-compat`、`cx-l0-crypto-chacha20poly1305`、`cx-l0-crypto-p256`。会话里 135 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
