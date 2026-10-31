@@ -1,0 +1,187 @@
+#pragma unisa use sys.io
+#pragma unisa use crypto.p256
+#pragma unisa use crypto.bn
+#pragma unisa use crypto.b64
+#pragma unisa use text.text
+/* Vectors for crypto/p256.  The public key, signature and message hash come from Python's `cryptography`
+   (an independent P-256 implementation); the scalar multiples of the base point were derived with Python
+   big integers.  Nothing in this file is taken from cx itself.
+
+   Covered: signature acceptance, and rejection of a wrong digest, a tampered signature, r or s out of
+   range, zero scalars, a negative integer, non-minimal DER, trailing bytes, a point that is not on the
+   curve, a compressed x whose right-hand side is not a square, a wrong prefix, a wrong length, and the
+   point at infinity. */
+
+static int bad;
+
+static void ok(int c, const char *name) {
+    sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) bad = 1;
+}
+
+/* Decode a hex string into out.  cs_hex_decode returns the number of bytes it wrote, so success is the
+   expected count, not zero. */
+static long unhex(const char *hex, unsigned char *out, long cap) {
+    long n = tx_len(hex, 4096);
+    long want;
+    if (n < 0 || n % 2 != 0 || (want = n / 2) > cap) return -1;
+    if (cs_hex_decode(hex, n, out, cap) != want) return -1;
+    return want;
+}
+
+static int hexeq(const unsigned char *got, const char *hex) {
+    unsigned char want[80];
+    long n = unhex(hex, want, 80), i;
+    if (n < 0) return 0;
+    for (i = 0; i < n; i++) if (got[i] != want[i]) return 0;
+    return 1;
+}
+
+static cs_p256_t c;
+static cs_p256_pt pub, pubc, tmp;
+static unsigned char hash[32];
+static unsigned char der[80];
+static unsigned char key[80];
+static unsigned char got[32];
+static long derlen, keylen;
+
+static const char HASH[] = "cc46bec2366ef6f1e8ce880872270572ca55283f8e1dfc0a812c05584e6b5535";
+static const char SIG[] =
+    "3046022100fda4bd0aecd89f7ca91db382db69f2f84bf82714520365d56666f9fafc4ac05f022100b980c8ec4460d9f1634d66d298c6ccfd548ba6ebf886f760df4b259096050650";
+static const char SIG2[] =
+    "3045022100b27b344ac5c6e9c2cb3c2ec93cfe8f390f3f91a166544f5f02d47b33d867393f02202853442cbb04550f637d47fdc968313dcb553ffecef3c66012bacba8454a3d3c";
+static const char SIG_TRAIL[] =
+    "3046022100fda4bd0aecd89f7ca91db382db69f2f84bf82714520365d56666f9fafc4ac05f022100b980c8ec4460d9f1634d66d298c6ccfd548ba6ebf886f760df4b25909605065000";
+static const char SIG_NONMIN[] =
+    "304702220000fda4bd0aecd89f7ca91db382db69f2f84bf82714520365d56666f9fafc4ac05f022100b980c8ec4460d9f1634d66d298c6ccfd548ba6ebf886f760df4b259096050650";
+static const char SIG_R_GE_N[] =
+    "30250220ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551020105";
+static const char SIG_S_ZERO[] = "3006020101020100";
+static const char SIG_S_NEG[] = "3006020101020185";
+static const char PUB[] =
+    "04221bfa5f6a18ee967895eae860e62224d89d6a64ca8e2e7143da5d6d22f599c08ddcf8be5c6448a6fa7bf3261e0322511660418aef66dd807df90485b2cae603";
+static const char PUB_COMP[] = "03221bfa5f6a18ee967895eae860e62224d89d6a64ca8e2e7143da5d6d22f599c0";
+static const unsigned char GP[] =
+    "\x03\x6b\x17\xd1\xf2\xe1\x2c\x42\x47\xf8\xbc\xe6\xe5\x63\xa4\x40\xf2\x77\x03\x7d\x81\x2d\xeb\x33\xa0\xf4\xa1\x39\x45\xd8\x98\xc2\x96";
+static const char ORDER[] = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+
+int main(void) {
+    cs_bn k, n_;
+    if (cs_p256_init(&c)) { sy_printf("FAIL\tinit\n"); return 1; }
+    ok(1, "init");
+
+    keylen = unhex(PUB, key, sizeof(key));
+    ok(keylen == 65, "pub key length");
+    ok(cs_p256_point_parse(&c, key, keylen, &pub) == 0, "point parse uncompressed");
+    ok(cs_p256_point_parse(&c, key, keylen, &tmp) == 0, "point parse repeated");
+
+    keylen = unhex(PUB_COMP, key, sizeof(key));
+    ok(keylen == 33, "compressed key length");
+    ok(cs_p256_point_parse(&c, key, keylen, &pubc) == 0, "point parse compressed");
+    ok(cs_p256_point_x(&c, got, &pubc) == 0 && hexeq(got, PUB_COMP + 2),
+       "compressed x round trip");
+
+    unhex(HASH, hash, sizeof(hash));
+    derlen = unhex(SIG, der, sizeof(der));
+    ok(derlen == 72, "sig length");
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) == 0, "verify signature");
+    ok(cs_p256_verify(&c, &pubc, hash, der, derlen) == 0, "verify with compressed key");
+
+    derlen = unhex(SIG2, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) == 0, "verify second signature");
+
+    /* a different digest must fail */
+    hash[0] ^= 1;
+    derlen = unhex(SIG, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject wrong digest");
+    hash[0] ^= 1;
+
+    /* a one-bit change in s must fail */
+    derlen = unhex(SIG, der, sizeof(der));
+    der[derlen - 1] ^= 1;
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject tampered signature");
+
+    /* the same x with the other parity prefix parses (y -> p - y) and must not verify the signature */
+    keylen = unhex(PUB_COMP, key, sizeof(key));
+    key[0] = 0x02;
+    ok(cs_p256_point_parse(&c, key, 33, &tmp) == 0, "parse opposite parity prefix");
+    ok(cs_p256_point_x(&c, got, &tmp) == 0 && hexeq(got, PUB_COMP + 2), "opposite parity keeps x");
+    derlen = unhex(SIG, der, sizeof(der));
+    ok(cs_p256_verify(&c, &tmp, hash, der, derlen) != 0, "reject negated key");
+
+    /* signature encodings that must be refused outright */
+    derlen = unhex(SIG_TRAIL, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject trailing bytes");
+    derlen = unhex(SIG_NONMIN, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject non-minimal integer");
+    derlen = unhex(SIG_R_GE_N, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject r >= n");
+    derlen = unhex(SIG_S_ZERO, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject s = 0");
+    derlen = unhex(SIG_S_NEG, der, sizeof(der));
+    ok(cs_p256_verify(&c, &pub, hash, der, derlen) != 0, "reject negative integer");
+    ok(cs_p256_verify(&c, &pub, hash, der, 0) != 0, "reject empty signature");
+
+    /* public keys that must be refused */
+    keylen = unhex(PUB, key, sizeof(key));
+    key[64] ^= 1;
+    ok(cs_p256_point_parse(&c, key, keylen, &tmp) != 0, "reject point off the curve");
+    keylen = unhex(PUB, key, sizeof(key));
+    key[0] = 0x06;
+    ok(cs_p256_point_parse(&c, key, keylen, &tmp) != 0, "reject hybrid prefix");
+    keylen = unhex(PUB, key, sizeof(key));
+    ok(cs_p256_point_parse(&c, key, 64, &tmp) != 0, "reject short key");
+    keylen = unhex(PUB, key, sizeof(key));
+    key[1] = 0xff; key[2] = 0xff; key[3] = 0xff; key[4] = 0xff;
+    ok(cs_p256_point_parse(&c, key, keylen, &tmp) != 0, "reject x beyond p");
+    /* x = 1 gives x^3 - 3x + b with no square root */
+    {   long i;
+        for (i = 0; i < 33; i++) key[i] = 0;
+        key[0] = 0x02;
+        key[32] = 1;
+    }
+    ok(cs_p256_point_parse(&c, key, 33, &tmp) != 0, "reject compressed non-square");
+    /* the all-zero point is not on the curve */
+    keylen = unhex(PUB, key, sizeof(key));
+    key[0] = 0x04;
+    { long i; for (i = 1; i < 65; i++) key[i] = 0; }
+    ok(cs_p256_point_parse(&c, key, 65, &tmp) != 0, "reject zero point");
+
+    /* scalar multiples of G, checked in affine form */
+    keylen = unhex(PUB, key, sizeof(key));
+    ok(cs_p256_point_parse(&c, key, keylen, &pub) == 0, "reparse key");
+    {   cs_p256_pt g;
+        /* G is not on the wire here, so rebuild it from the domain constants through a signature-free path:
+           parse the compressed base point */
+        ok(cs_p256_point_parse(&c, (const unsigned char *)
+            "\x03\x6b\x17\xd1\xf2\xe1\x2c\x42\x47\xf8\xbc\xe6\xe5\x63\xa4\x40\xf2\x77\x03\x7d\x81\x2d\xeb\x33\xa0\xf4\xa1\x39\x45\xd8\x98\xc2\x96", 33, &g) == 0,
+           "parse base point");
+        k.v[0] = 2; k.n = 1;
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0 && cs_p256_point_x(&c, got, &tmp) == 0 &&
+           hexeq(got, "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978"), "2G");
+        k.v[0] = 3;
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0 && cs_p256_point_x(&c, got, &tmp) == 0 &&
+           hexeq(got, "5ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c"), "3G");
+        k.v[0] = 4;
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0 && cs_p256_point_x(&c, got, &tmp) == 0 &&
+           hexeq(got, "e2534a3532d08fbba02dde659ee62bd0031fe2db785596ef509302446b030852"), "4G");
+        k.v[0] = 5;
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0 && cs_p256_point_x(&c, got, &tmp) == 0 &&
+           hexeq(got, "51590b7a515140d2d784c85608668fdfef8c82fd1f5be52421554a0dc3d033ed"), "5G");
+        /* n * G is infinity: the affine x must be refused */
+        {   unsigned char nb[32];
+            unhex(ORDER, nb, sizeof(nb));
+            cs_bn_from_bytes(&n_, nb, 32);
+            k = n_;
+        }
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0, "nG computes");
+        ok(cs_p256_point_x(&c, got, &tmp) != 0, "nG is infinity");
+        /* 0 * G is infinity too */
+        k.v[0] = 0; k.n = 0;
+        ok(cs_p256_point_mul(&c, &k, &g, &tmp) == 0 && cs_p256_point_x(&c, got, &tmp) != 0,
+           "0G is infinity");
+    }
+
+    sy_printf("CHECK_CRYPTO_P256\tfailed=%d\n", bad);
+    return bad;
+}

@@ -1,0 +1,382 @@
+#pragma unisa module p256
+#pragma unisa use bn
+#pragma unisa use der
+#pragma unisa use sha256
+/* crypto/p256 -- NIST P-256 (prime256v1) point arithmetic and ECDSA verification.
+   Pure cx on top of crypto.bn (Montgomery multiplication) and crypto.der (signature and key parsing).
+
+     cs_p256_init(c)                          load the domain parameters into a caller-owned context
+     cs_p256_point_parse(c, buf, len, pt)     SEC1 public key (0x04 || X || Y, or 0x02/0x03 || X)
+     cs_p256_verify(c, q, hash32, der, len)   ECDSA verification of a DER ECDSA-Sig-Value
+     cs_p256_verify_digest(c, q, e, r, s)     the same with e, r and s already parsed
+
+   Everything takes the context rather than touching module state, so two verifications can run at once.
+   The arithmetic is not constant time -- the scalars are public in a signature check.  Signing would need
+   a constant-time ladder and is deliberately absent.
+
+   Point and signature checks that matter for safety:
+     - a public key is rejected unless it is on the curve; the point at infinity is not a key;
+     - r and s must be in [1, n-1];
+     - the recovered x is reduced modulo n before it is compared with r (FIPS 186-4 §6.4.2);
+     - an intermediate sum that lands on infinity is a verification failure, not a crash;
+     - a DER signature with trailing bytes, a negative integer or a non-minimal encoding is refused. */
+
+typedef struct {
+    cs_bn p;         /* field modulus, normal form (add and sub compare against it) */
+    cs_bn n;         /* group order, normal form */
+    cs_bn b;         /* curve constant b, normal form */
+    cs_bn bm;        /* b in Montgomery form */
+    cs_bn gx, gy;    /* base point, Montgomery form */
+    cs_bn sqrt_exp;  /* (p + 1) / 4, for the compressed-point square root */
+    int ready;
+} cs_p256_t;
+
+/* A point in Jacobian coordinates; Z == 0 encodes infinity.  X, Y, Z are in Montgomery form. */
+typedef struct {
+    cs_bn x, y, z;
+} cs_p256_pt;
+
+static const unsigned char cs_p256_p_be[32] = {
+    0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
+static const unsigned char cs_p256_n_be[32] = {
+    0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xbc,0xe6,0xfa,0xad,0xa7,0x17,0x9e,0x84,0xf3,0xb9,0xca,0xc2,0xfc,0x63,0x25,0x51};
+static const unsigned char cs_p256_b_be[32] = {
+    0x5a,0xc6,0x35,0xd8,0xaa,0x3a,0x93,0xe7,0xb3,0xeb,0xbd,0x55,0x76,0x98,0x86,0xbc,
+    0x65,0x1d,0x06,0xb0,0xcc,0x53,0xb0,0xf6,0x3b,0xce,0x3c,0x3e,0x27,0xd2,0x60,0x4b};
+static const unsigned char cs_p256_gx_be[32] = {
+    0x6b,0x17,0xd1,0xf2,0xe1,0x2c,0x42,0x47,0xf8,0xbc,0xe6,0xe5,0x63,0xa4,0x40,0xf2,
+    0x77,0x03,0x7d,0x81,0x2d,0xeb,0x33,0xa0,0xf4,0xa1,0x39,0x45,0xd8,0x98,0xc2,0x96};
+static const unsigned char cs_p256_gy_be[32] = {
+    0x4f,0xe3,0x42,0xe2,0xfe,0x1a,0x7f,0x9b,0x8e,0xe7,0xeb,0x4a,0x7c,0x0f,0x9e,0x16,
+    0x2b,0xce,0x33,0x57,0x6b,0x31,0x5e,0xce,0xcb,0xb6,0x40,0x68,0x37,0xbf,0x51,0xf5};
+
+/* Small constant helpers: a cs_bn holding VALUE. */
+static void cs_small(cs_bn *r, unsigned value) {
+    int i;
+    for (i = 0; i < BN_LIMBS; i++) r->v[i] = 0;
+    r->v[0] = value;
+    r->n = value ? 1 : 0;
+}
+
+/* ---- field helpers: all inputs and outputs in [0, p) ---- */
+
+/* r = a + b mod p.  p < 2^256, so a + b < 2^257 and one conditional subtraction is enough. */
+static void cs_f_add(cs_p256_t *c, cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    cs_bn t;
+    cs_bn_add(&t, a, b);
+    if (cs_bn_cmp(&t, &c->p) >= 0) cs_bn_sub(&t, &t, &c->p);
+    *r = t;
+}
+
+/* r = a - b mod p, adding p first when the subtraction would borrow. */
+static void cs_f_sub(cs_p256_t *c, cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    cs_bn t;
+    if (cs_bn_cmp(a, b) >= 0) { cs_bn_sub(&t, a, b); *r = t; return; }
+    cs_bn_sub(&t, &c->p, b);                        /* p - b, no borrow since b < p */
+    cs_bn_add(&t, &t, a);
+    if (cs_bn_cmp(&t, &c->p) >= 0) cs_bn_sub(&t, &t, &c->p);   /* (p-b)+a < 2p */
+    *r = t;
+}
+
+static void cs_f_mul(cs_p256_t *c, cs_bn *r, const cs_bn *a, const cs_bn *b) { cs_bn_mont_mul(r, a, b, &c->p); }
+static void cs_f_sqr(cs_p256_t *c, cs_bn *r, const cs_bn *a) { cs_bn_mont_mul(r, a, a, &c->p); }
+
+/* r = a^(p-2), the field inverse.  Both sides are in normal form: the exponentiation in crypto.bn works
+   on normal-domain values, so a Montgomery-form argument would be read as a different number. */
+static void cs_f_inv(cs_p256_t *c, cs_bn *r, const cs_bn *a) {
+    cs_bn e, two;
+    cs_small(&two, 2);
+    cs_bn_sub(&e, &c->p, &two);                     /* e = p - 2 */
+    cs_bn_modexp(r, a, &e, &c->p);
+}
+
+/* r = a * b mod n, for scalar arithmetic mod the group order. */
+static void cs_n_mul(cs_p256_t *c, cs_bn *r, const cs_bn *a, const cs_bn *b) {
+    cs_bn am, bm, t;
+    if (cs_bn_to_mont(&am, a, &c->n)) { cs_small(r, 0); return; }
+    if (cs_bn_to_mont(&bm, b, &c->n)) { cs_small(r, 0); return; }
+    cs_bn_mont_mul(&t, &am, &bm, &c->n);
+    cs_bn_from_mont(r, &t, &c->n);
+}
+
+/* ---- point arithmetic, Jacobian coordinates, curve parameter a = -3 ---- */
+
+static void cs_pt_inf(cs_p256_pt *r) {
+    cs_small(&r->x, 0);
+    cs_small(&r->y, 0);
+    cs_small(&r->z, 0);
+}
+
+static int cs_pt_is_inf(const cs_p256_pt *a) { return cs_bn_is_zero(&a->z); }
+
+static void cs_pt_copy(cs_p256_pt *r, const cs_p256_pt *a) { r->x = a->x; r->y = a->y; r->z = a->z; }
+
+/* dbl-2001-b: doubling for a = -3. */
+static void cs_pt_double(cs_p256_t *c, cs_p256_pt *r, const cs_p256_pt *a) {
+    cs_bn delta, gamma, beta, alpha, t, t2, x3, y3, z3;
+    if (cs_pt_is_inf(a) || cs_bn_is_zero(&a->y)) { cs_pt_inf(r); return; }
+    cs_f_sqr(c, &delta, &a->z);                     /* delta = Z^2 */
+    cs_f_sqr(c, &gamma, &a->y);                     /* gamma = Y^2 */
+    cs_f_mul(c, &beta, &a->x, &gamma);              /* beta  = X*gamma */
+    cs_f_sub(c, &t, &a->x, &delta);
+    cs_f_add(c, &t2, &a->x, &delta);
+    cs_f_mul(c, &alpha, &t, &t2);
+    cs_f_add(c, &t, &alpha, &alpha);
+    cs_f_add(c, &alpha, &t, &alpha);                /* alpha = 3 (X^2 - Z^4) */
+    cs_f_sqr(c, &x3, &alpha);
+    cs_f_add(c, &t, &beta, &beta);
+    cs_f_add(c, &t, &t, &t);
+    cs_f_add(c, &t, &t, &t);                        /* 8 beta */
+    cs_f_sub(c, &x3, &x3, &t);                      /* X3 = alpha^2 - 8 beta */
+    cs_f_add(c, &t, &a->y, &a->z);
+    cs_f_sqr(c, &z3, &t);
+    cs_f_sub(c, &z3, &z3, &gamma);
+    cs_f_sub(c, &z3, &z3, &delta);                  /* Z3 = (Y+Z)^2 - gamma - delta */
+    cs_f_add(c, &t, &beta, &beta);
+    cs_f_add(c, &t, &t, &t);                        /* 4 beta */
+    cs_f_sub(c, &t, &t, &x3);
+    cs_f_mul(c, &y3, &alpha, &t);
+    cs_f_sqr(c, &t, &gamma);
+    cs_f_add(c, &t, &t, &t);
+    cs_f_add(c, &t, &t, &t);                        /* 4 gamma^2 */
+    cs_f_add(c, &t, &t, &t);                        /* 8 gamma^2 */
+    cs_f_sub(c, &y3, &y3, &t);                      /* Y3 = alpha(4 beta - X3) - 8 gamma^2 */
+    r->x = x3; r->y = y3; r->z = z3;
+}
+
+/* add-1998-cmo, Jacobian + Jacobian. */
+static void cs_pt_add(cs_p256_t *c, cs_p256_pt *r, const cs_p256_pt *a, const cs_p256_pt *b) {
+    cs_bn z1z1, z2z2, u1, u2, s1, s2, h, rr, i_, j_, v, t, x3, y3, z3, two_h;
+    if (cs_pt_is_inf(a)) { cs_pt_copy(r, b); return; }
+    if (cs_pt_is_inf(b)) { cs_pt_copy(r, a); return; }
+    cs_f_sqr(c, &z1z1, &a->z);
+    cs_f_sqr(c, &z2z2, &b->z);
+    cs_f_mul(c, &u1, &a->x, &z2z2);
+    cs_f_mul(c, &u2, &b->x, &z1z1);
+    cs_f_mul(c, &t, &b->z, &z2z2);
+    cs_f_mul(c, &s1, &a->y, &t);                    /* S1 = Y1 Z2^3 */
+    cs_f_mul(c, &t, &a->z, &z1z1);
+    cs_f_mul(c, &s2, &b->y, &t);                    /* S2 = Y2 Z1^3 */
+    cs_f_sub(c, &h, &u2, &u1);
+    cs_f_sub(c, &rr, &s2, &s1);
+    cs_f_add(c, &rr, &rr, &rr);                     /* r = 2 (S2 - S1) */
+    if (cs_bn_is_zero(&h)) {
+        if (cs_bn_is_zero(&rr)) { cs_pt_double(c, r, a); return; }   /* the same point twice */
+        cs_pt_inf(r);                               /* same x, opposite y: infinity */
+        return;
+    }
+    cs_f_add(c, &two_h, &h, &h);
+    cs_f_sqr(c, &i_, &two_h);                       /* I = (2H)^2 */
+    cs_f_mul(c, &j_, &h, &i_);                      /* J = H I */
+    cs_f_mul(c, &v, &u1, &i_);                      /* V = U1 I */
+    cs_f_sqr(c, &x3, &rr);
+    cs_f_sub(c, &x3, &x3, &j_);
+    cs_f_add(c, &t, &v, &v);                        /* 2V */
+    cs_f_sub(c, &x3, &x3, &t);                      /* X3 = r^2 - J - 2V */
+    cs_f_sub(c, &t, &v, &x3);
+    cs_f_mul(c, &y3, &rr, &t);
+    cs_f_mul(c, &t, &s1, &j_);
+    cs_f_add(c, &t, &t, &t);
+    cs_f_sub(c, &y3, &y3, &t);                      /* Y3 = r (V - X3) - 2 S1 J */
+    cs_f_add(c, &t, &a->z, &b->z);
+    cs_f_sqr(c, &z3, &t);
+    cs_f_sub(c, &z3, &z3, &z1z1);
+    cs_f_sub(c, &z3, &z3, &z2z2);
+    cs_f_mul(c, &z3, &z3, &h);                      /* Z3 = ((Z1+Z2)^2 - Z1^2 - Z2^2) H */
+    r->x = x3; r->y = y3; r->z = z3;
+}
+
+/* k * P by left-to-right double-and-add.  Not constant time: k is public in every caller here. */
+static void cs_pt_mul(cs_p256_t *c, cs_p256_pt *r, const cs_bn *k, const cs_p256_pt *p) {
+    cs_p256_pt acc;
+    int i, b, top = -1;
+    cs_pt_inf(&acc);
+    for (i = k->n - 1; i >= 0 && top < 0; i--)
+        for (b = 31; b >= 0; b--) if ((k->v[i] >> b) & 1) { top = 32 * i + b; break; }
+    for (i = top; i >= 0; i--) {
+        cs_pt_double(c, &acc, &acc);
+        if ((k->v[i >> 5] >> (i & 31)) & 1) cs_pt_add(c, &acc, &acc, p);
+    }
+    cs_pt_copy(r, &acc);
+}
+
+/* x = X/Z^2 in normal form; returns -EINVAL when the point is infinity. */
+static int cs_pt_affine_x(cs_p256_t *c, cs_bn *x, const cs_p256_pt *a) {
+    cs_bn t, tn, inv, zinv;
+    if (cs_pt_is_inf(a)) return -EINVAL;
+    cs_f_sqr(c, &t, &a->z);                         /* Z^2, Montgomery form */
+    cs_bn_from_mont(&tn, &t, &c->p);
+    cs_f_inv(c, &inv, &tn);                         /* 1/Z^2, normal form */
+    if (cs_bn_to_mont(&zinv, &inv, &c->p)) return -EINVAL;
+    cs_f_mul(c, &t, &a->x, &zinv);
+    return cs_bn_from_mont(x, &t, &c->p);
+}
+
+/* Public wrappers over the internal point routines: a scalar multiple and the affine x of a point.  They
+   exist so that callers (and the checked vectors) can exercise the group law without the ladder being
+   part of the ECDSA code path. */
+int cs_p256_point_mul(cs_p256_t *c, const cs_bn *k, const cs_p256_pt *p, cs_p256_pt *out) {
+    if (!c || !k || !p || !out) return -EINVAL;
+    if (!c->ready && cs_p256_init(c)) return -EINVAL;
+    cs_pt_mul(c, out, k, p);
+    return 0;
+}
+
+int cs_p256_point_add(cs_p256_t *c, const cs_p256_pt *a, const cs_p256_pt *b, cs_p256_pt *out) {
+    if (!c || !a || !b || !out) return -EINVAL;
+    if (!c->ready && cs_p256_init(c)) return -EINVAL;
+    cs_pt_add(c, out, a, b);
+    return 0;
+}
+
+int cs_p256_point_x(cs_p256_t *c, unsigned char out[32], const cs_p256_pt *p) {
+    cs_bn x;
+    if (!c || !out || !p) return -EINVAL;
+    if (!c->ready && cs_p256_init(c)) return -EINVAL;
+    if (cs_pt_affine_x(c, &x, p)) return -EINVAL;
+    return cs_bn_to_bytes(&x, out, 32);
+}
+
+/* ---- context ---- */
+
+int cs_p256_init(cs_p256_t *c) {
+    cs_bn one, pm, gx, gy;
+    if (!c) return -EINVAL;
+    if (cs_bn_from_bytes(&c->p, cs_p256_p_be, 32)) return -EINVAL;
+    if (cs_bn_from_bytes(&c->n, cs_p256_n_be, 32)) return -EINVAL;
+    if (cs_bn_from_bytes(&c->b, cs_p256_b_be, 32)) return -EINVAL;
+    cs_small(&one, 1);
+    cs_bn_add(&pm, &c->p, &one);                    /* p + 1 */
+    cs_bn_shr1(&pm, &pm);
+    cs_bn_shr1(&c->sqrt_exp, &pm);                  /* (p + 1) / 4; p = 3 mod 4 makes this a square root */
+    if (cs_bn_to_mont(&c->bm, &c->b, &c->p)) return -EINVAL;
+    if (cs_bn_from_bytes(&gx, cs_p256_gx_be, 32)) return -EINVAL;
+    if (cs_bn_from_bytes(&gy, cs_p256_gy_be, 32)) return -EINVAL;
+    if (cs_bn_to_mont(&c->gx, &gx, &c->p)) return -EINVAL;
+    if (cs_bn_to_mont(&c->gy, &gy, &c->p)) return -EINVAL;
+    c->ready = 1;
+    return 0;
+}
+
+/* ---- public keys ---- */
+
+/* On-curve test in Montgomery form: y^2 == x^3 - 3x + b. */
+static int cs_pt_on_curve(cs_p256_t *c, const cs_bn *xm, const cs_bn *ym) {
+    cs_bn lhs, rhs, t, three;
+    cs_f_sqr(c, &lhs, ym);
+    cs_f_sqr(c, &rhs, xm);
+    cs_f_mul(c, &rhs, &rhs, xm);
+    cs_small(&three, 3);
+    cs_bn_to_mont(&three, &three, &c->p);
+    cs_f_mul(c, &t, &three, xm);
+    cs_f_sub(c, &rhs, &rhs, &t);
+    cs_f_add(c, &rhs, &rhs, &c->bm);
+    return cs_bn_cmp(&lhs, &rhs) == 0;
+}
+
+/* Parse a SEC1 point: uncompressed (0x04 || X || Y) or compressed (0x02/0x03 || X).  The hybrid forms
+   0x06/0x07 are not used by TLS and are refused. */
+int cs_p256_point_parse(cs_p256_t *c, const unsigned char *buf, long len, cs_p256_pt *pt) {
+    cs_bn x, y, xm, ym, rhs, t, z;
+    if (!c || !buf || !pt) return -EINVAL;
+    if (!c->ready && cs_p256_init(c)) return -EINVAL;
+    if (len == 65 && buf[0] == 0x04) {
+        if (cs_bn_from_bytes(&x, buf + 1, 32)) return -EINVAL;
+        if (cs_bn_from_bytes(&y, buf + 33, 32)) return -EINVAL;
+        if (cs_bn_cmp(&x, &c->p) >= 0 || cs_bn_cmp(&y, &c->p) >= 0) return -EINVAL;
+        if (cs_bn_to_mont(&xm, &x, &c->p)) return -EINVAL;
+        if (cs_bn_to_mont(&ym, &y, &c->p)) return -EINVAL;
+        if (!cs_pt_on_curve(c, &xm, &ym)) return -EINVAL;
+    } else if (len == 33 && (buf[0] == 0x02 || buf[0] == 0x03)) {
+        if (cs_bn_from_bytes(&x, buf + 1, 32)) return -EINVAL;
+        if (cs_bn_cmp(&x, &c->p) >= 0) return -EINVAL;
+        if (cs_bn_to_mont(&xm, &x, &c->p)) return -EINVAL;
+        /* rhs = x^3 - 3x + b, computed in Montgomery form, then brought back to normal form because the
+           square root below is a plain modular exponentiation over the normal representation */
+        cs_f_sqr(c, &rhs, &xm);
+        cs_f_mul(c, &rhs, &rhs, &xm);
+        cs_small(&t, 3);
+        cs_bn_to_mont(&t, &t, &c->p);
+        cs_f_mul(c, &t, &t, &xm);
+        cs_f_sub(c, &rhs, &rhs, &t);
+        cs_f_add(c, &rhs, &rhs, &c->bm);
+        cs_bn_from_mont(&rhs, &rhs, &c->p);
+        cs_bn_modexp(&y, &rhs, &c->sqrt_exp, &c->p);       /* y = rhs^((p+1)/4) */
+        if (cs_bn_cmp(&y, &c->p) >= 0) return -EINVAL;
+        if (cs_bn_is_zero(&y)) return -EINVAL;            /* y = 0 has order 2: not on P-256 */
+        if ((y.v[0] & 1u) != (unsigned)(buf[0] & 1)) cs_bn_sub(&y, &c->p, &y);
+        if (cs_bn_to_mont(&ym, &y, &c->p)) return -EINVAL;
+        if (!cs_pt_on_curve(c, &xm, &ym)) return -EINVAL;  /* a non-square rhs lands here */
+    } else {
+        return -EINVAL;
+    }
+    pt->x = xm; pt->y = ym;
+    cs_small(&z, 1);
+    cs_bn_to_mont(&pt->z, &z, &c->p);               /* Z = 1 in Montgomery form */
+    return 0;
+}
+
+/* ---- ECDSA ---- */
+
+static int cs_p256_scalar_ok(cs_p256_t *c, const cs_bn *v) {
+    return !cs_bn_is_zero(v) && cs_bn_cmp(v, &c->n) < 0;
+}
+
+/* Parse an ECDSA-Sig-Value: SEQUENCE { r INTEGER, s INTEGER } with nothing before or after. */
+int cs_p256_sig_parse(const unsigned char *der, long len, cs_bn *r, cs_bn *s) {
+    cs_der in, seq;
+    if (!der || len <= 0 || !r || !s) return -EINVAL;
+    in.p = der; in.n = len;
+    if (cs_der_expect(&in, 0x30, &seq)) return -EINVAL;
+    if (!cs_der_at_end(&in)) return -EINVAL;        /* trailing bytes are a second encoding of the same
+                                                       signature, so they are refused */
+    if (cs_der_int(&seq, r)) return -EINVAL;
+    if (cs_der_int(&seq, s)) return -EINVAL;
+    if (!cs_der_at_end(&seq)) return -EINVAL;
+    return 0;
+}
+
+/* u1 = e w, u2 = r w with w = s^-1 mod n, then check (u1 G + u2 Q).x mod n == r.  Returns 0 when the
+   signature is valid and -EINVAL otherwise; there is no partial credit and no output on failure. */
+int cs_p256_verify_digest(cs_p256_t *c, const cs_p256_pt *q, const cs_bn *e, const cs_bn *r, const cs_bn *s) {
+    cs_bn w, u1, u2, x, em;
+    cs_p256_pt p1, p2, sum;
+    cs_p256_pt g;
+    if (!c || !q || !e || !r || !s) return -EINVAL;
+    if (!c->ready && cs_p256_init(c)) return -EINVAL;
+    if (cs_pt_is_inf(q)) return -EINVAL;
+    if (!cs_p256_scalar_ok(c, r) || !cs_p256_scalar_ok(c, s)) return -EINVAL;
+    {   cs_bn n2, ex;
+        cs_small(&n2, 2);
+        cs_bn_sub(&ex, &c->n, &n2);                 /* s^-1 = s^(n-2) mod n */
+        cs_bn_modexp(&w, s, &ex, &c->n);
+    }
+    if (cs_bn_is_zero(&w)) return -EINVAL;
+    /* e is a hash: it may exceed n, so reduce it once (n > 2^255 and e < 2^256, so one subtraction) */
+    em = *e;
+    if (cs_bn_cmp(&em, &c->n) >= 0) cs_bn_sub(&em, &em, &c->n);
+    cs_n_mul(c, &u1, &em, &w);
+    cs_n_mul(c, &u2, r, &w);
+    g.x = c->gx; g.y = c->gy;
+    cs_small(&g.z, 1);
+    cs_bn_to_mont(&g.z, &g.z, &c->p);
+    cs_pt_mul(c, &p1, &u1, &g);
+    cs_pt_mul(c, &p2, &u2, q);
+    cs_pt_add(c, &sum, &p1, &p2);
+    if (cs_pt_is_inf(&sum)) return -EINVAL;
+    if (cs_pt_affine_x(c, &x, &sum)) return -EINVAL;
+    if (cs_bn_cmp(&x, &c->n) >= 0) cs_bn_sub(&x, &x, &c->n);
+    return cs_bn_cmp(&x, r) == 0 ? 0 : -EINVAL;
+}
+
+/* The whole check: hash, parse the DER signature, verify. */
+int cs_p256_verify(cs_p256_t *c, const cs_p256_pt *q, const unsigned char hash[32],
+                   const unsigned char *der, long len) {
+    cs_bn r, s, e;
+    if (!hash) return -EINVAL;
+    if (cs_p256_sig_parse(der, len, &r, &s)) return -EINVAL;
+    if (cs_bn_from_bytes(&e, hash, 32)) return -EINVAL;
+    return cs_p256_verify_digest(c, q, &e, &r, &s);
+}

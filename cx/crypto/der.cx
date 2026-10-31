@@ -1,0 +1,141 @@
+#pragma unisa module der
+#pragma unisa use bn
+/* crypto/der -- a bounded ASN.1 DER reader.
+   Pure cx, no allocation: every read is checked against the bytes the caller handed in, so a length
+   field that claims more than is there is a refusal, never an over-read.
+
+     cs_der { const unsigned char *p; long n; }    the bytes not yet consumed
+     cs_der_next(in, tag, body)                    read one TLV, body = its contents, in advanced past it
+     cs_der_expect(in, tag, body)                  cs_der_next plus a tag check
+     cs_der_at_end(in)                             no bytes left
+     cs_der_int(in, out)                           a strict positive INTEGER into a cs_bn
+     cs_der_bits(in, bits, len)                    a BIT STRING, refusing any unused-bit count but zero
+     cs_der_octets(in, bits, len)                  an OCTET STRING
+     cs_der_oid(in, bits, len)                     an OBJECT IDENTIFIER, returned as its content octets
+     cs_der_bool(in, *out)                         a BOOLEAN, refusing any value but 0x00 and 0xFF
+     cs_der_skip(in)                               consume one TLV of any tag
+
+   DER, not BER: the indefinite length form is refused, long-form lengths must be minimal (no leading
+   zero), a tag must be a single byte, and an INTEGER must be minimally encoded and positive.  These are
+   the rules that make an encoding canonical; accepting the other forms would mean two byte strings
+   decode to the same value, which is exactly the ambiguity signature checks must not have. */
+
+typedef struct {
+    const unsigned char *p;
+    long n;
+} cs_der;
+
+static int cs_der_len(cs_der *in, long *out) {
+    unsigned first;
+    long n = 0;
+    int k, i;
+    if (in->n < 1) return -EINVAL;
+    first = in->p[0];
+    in->p++; in->n--;
+    if (first < 0x80) { *out = (long)first; return 0; }
+    k = (int)(first & 0x7f);
+    if (k == 0) return -EINVAL;                   /* indefinite length is BER, not DER */
+    if (k > 4) return -EINVAL;                    /* no object here is longer than 4 GiB */
+    if (in->n < k) return -EINVAL;
+    if (in->p[0] == 0) return -EINVAL;            /* long form must be minimal */
+    for (i = 0; i < k; i++) { n = (n << 8) | (long)in->p[i]; if (n < 0) return -ERANGE; }
+    in->p += k; in->n -= k;
+    if (n < 0x80) return -EINVAL;                 /* should have used the short form */
+    *out = n;
+    return 0;
+}
+
+int cs_der_next(cs_der *in, unsigned *tag, cs_der *body) {
+    unsigned t;
+    long len;
+    if (!in || !tag || !body) return -EINVAL;
+    if (in->n < 1) return -EINVAL;
+    t = in->p[0];
+    if ((t & 0x1f) == 0x1f) return -EINVAL;       /* multi-byte tags are not used by X.509 or by ECDSA */
+    in->p++; in->n--;
+    if (cs_der_len(in, &len)) return -EINVAL;
+    if (len > in->n) return -EINVAL;              /* the declared body runs past the input: refuse */
+    *tag = t;
+    body->p = in->p;
+    body->n = len;
+    in->p += len; in->n -= len;
+    return 0;
+}
+
+int cs_der_expect(cs_der *in, unsigned tag, cs_der *body) {
+    unsigned t;
+    if (cs_der_next(in, &t, body)) return -EINVAL;
+    return t == tag ? 0 : -EINVAL;
+}
+
+int cs_der_at_end(const cs_der *in) { return !in || in->n == 0; }
+
+int cs_der_skip(cs_der *in) {
+    unsigned t;
+    cs_der body;
+    return cs_der_next(in, &t, &body);
+}
+
+/* A strict positive INTEGER: minimal two's complement, so no leading 0x00 unless the next byte would
+   otherwise read as negative, and never a leading 0xFF.  Zero and negatives are refused: every INTEGER
+   this module is used for (an ECDSA r or s, a serial number, a version) is positive. */
+int cs_der_int(cs_der *in, cs_bn *out) {
+    unsigned t;
+    cs_der body;
+    long i = 0;
+    if (!in || !out) return -EINVAL;
+    if (cs_der_next(in, &t, &body)) return -EINVAL;
+    if (t != 0x02) return -EINVAL;
+    if (body.n < 1) return -EINVAL;
+    if (body.p[0] & 0x80) return -EINVAL;         /* negative */
+    while (i < body.n && body.p[i] == 0) i++;     /* count leading zeros */
+    if (i > 1) return -EINVAL;                    /* two or more is not minimal */
+    if (i == 1 && (i == body.n || (body.p[i] & 0x80) == 0)) return -EINVAL;  /* a needless zero byte */
+    if (i == body.n) return -EINVAL;              /* zero */
+    return cs_bn_from_bytes(out, body.p + i, body.n - i);
+}
+
+int cs_der_bits(cs_der *in, const unsigned char **bits, long *len) {
+    unsigned t;
+    cs_der body;
+    if (!in || !bits || !len) return -EINVAL;
+    if (cs_der_next(in, &t, &body)) return -EINVAL;
+    if (t != 0x03 || body.n < 1) return -EINVAL;
+    if (body.p[0] != 0) return -EINVAL;           /* a partial final octet has no meaning here */
+    *bits = body.p + 1;
+    *len = body.n - 1;
+    return 0;
+}
+
+int cs_der_octets(cs_der *in, const unsigned char **bits, long *len) {
+    unsigned t;
+    cs_der body;
+    if (!in || !bits || !len) return -EINVAL;
+    if (cs_der_next(in, &t, &body)) return -EINVAL;
+    if (t != 0x04) return -EINVAL;
+    *bits = body.p;
+    *len = body.n;
+    return 0;
+}
+
+int cs_der_oid(cs_der *in, const unsigned char **bits, long *len) {
+    unsigned t;
+    cs_der body;
+    if (!in || !bits || !len) return -EINVAL;
+    if (cs_der_next(in, &t, &body)) return -EINVAL;
+    if (t != 0x06 || body.n < 1) return -EINVAL;
+    *bits = body.p;
+    *len = body.n;
+    return 0;
+}
+
+int cs_der_bool(cs_der *in, int *out) {
+    unsigned t;
+    cs_der body;
+    if (!in || !out) return -EINVAL;
+    if (cs_der_next(in, &t, &body)) return -EINVAL;
+    if (t != 0x01 || body.n != 1) return -EINVAL;
+    if (body.p[0] != 0x00 && body.p[0] != 0xff) return -EINVAL;
+    *out = body.p[0] == 0xff;
+    return 0;
+}
