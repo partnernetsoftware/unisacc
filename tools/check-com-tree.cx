@@ -1,0 +1,45 @@
+/* tools/check-com-tree.cx -- tools/com-tree.cx on the installed unisacc.com: the tree's top-level rows add up to the
+ * file size, the package row matches apeinspect's package extent, and the package row names models and resources.
+ *
+ *   sh ./unisacc.com tools/check-com-tree.cx            (from the repo root)
+ *
+ * Reads ./unisacc.com (whatever is installed) and prints PASS/FAIL per check and CHECK_COM_TREE<TAB>failed=N.
+ * An L3 tool: no #include, no direct libc call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.num
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-com-tree.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-com-tree.%s\n", name); } }
+
+int main(void) {
+    char tree[16384], insp[4096]; int cut;
+    char *a1[] = {"sh", "./unisacc.com", "tools/com-tree.cx", "--", "--models", 0};
+    char *a2[] = {"sh", "./unisacc.com", "release/apeinspect.cx", "--", "unisacc.com", 0};
+    long size, sum = 0, at = 0, pkglen = 0, treepkg = -1;
+    size_t n; char *f = cx_read("unisacc.com", &n);
+    if (!f) { sy_eprintf("check-com-tree: cannot read unisacc.com\n"); return 2; }
+    size = (long)n;
+    ck(sy_run(a1, tree, sizeof tree, &cut) == 0, "tree-runs");
+    ck(sy_run(a2, insp, sizeof insp, &cut) == 0, "apeinspect-runs");
+    {   long p = tx_find(insp, tx_len(insp, sizeof insp), "\"package_length\": ", 18);
+        if (p >= 0) pkglen = tx_strtol(insp + p + 18, 0, 10); }
+    /* top-level rows start with "├─ " or "└─ " (UTF-8); their byte column is the first number after the label */
+    while (at < (long)tx_len(tree, sizeof tree)) {
+        long e = tx_chr(tree + at, (long)tx_len(tree, sizeof tree) - at, '\n'), l = e < 0 ? (long)tx_len(tree, sizeof tree) - at : e;
+        const char *s = tree + at;
+        if (tx_prefix(s, l, "\xe2\x94\x9c\xe2\x94\x80 ", 7) || tx_prefix(s, l, "\xe2\x94\x94\xe2\x94\x80 ", 7)) {
+            long q, w, v; char *end = 0, b[24];
+            /* the bytes column: the first run of digits that follows a blank, after the label */
+            for (q = 7; q < l; q++) if (s[q] >= '0' && s[q] <= '9' && s[q - 1] == ' ') { w = 0; while (q + w < l && s[q + w] >= '0' && s[q + w] <= '9') w++; if (tx_copy(b, sizeof b, s + q, w) == 0) { v = tx_strtol(b, &end, 10); sum += v; if (tx_find(s, l, "package (P3)", 12) >= 0) treepkg = v; break; } }
+        }
+        at += l + 1;
+    }
+    ck(sum == size, "rows-add-up-to-the-file");
+    ck(treepkg == pkglen + 16, "package-row-matches-apeinspect");
+    ck(tx_find(tree, tx_len(tree, sizeof tree), "models", 6) >= 0 && tx_find(tree, tx_len(tree, sizeof tree), "resources", 9) >= 0, "models-and-resources-named");
+    sy_printf("CHECK_COM_TREE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

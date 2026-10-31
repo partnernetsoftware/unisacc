@@ -1,0 +1,193 @@
+/* tools/com-tree.cx -- print the structure tree of a unisacc.com (or any APE built by ujs/product/ape-pack.cx
+ * --payload): where every byte of the file goes.
+ *
+ *   sh ./unisacc.com tools/com-tree.cx [-- [FILE] [--models] [--res N] [--stages]]       (FILE defaults to ./unisacc.com)
+ *
+ * The tree has, in file order:
+ *   head      the leading PE image (win/x86_64, stored raw) with its shell launcher in the DOS stub
+ *   slices    one gzip member per Unix target, found from the launcher's `o=OFFSET n=LENGTH` lines: stored size,
+ *             inflated size (the gzip trailer), ratio
+ *   package   the P3 model package (runtime.packagefooter locates it): NM models (stored/raw bytes, the stages that
+ *             use each one), ND stage-routing lines (D rows), NR resources (F rows: key and value bytes, grouped by
+ *             key prefix), then the 16-byte UNIPKG1 footer
+ *   padding   the bytes between the parts
+ * Percentages are of the whole file.  --models lists every model, --res N the N largest resources (default 8),
+ * --stages every route's stage chain.  Exit 2 when FILE is not an APE with a package.  An L3 tool. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+#define MAXM 64
+#define MAXG 32
+#define MAXR 4096
+
+static long total;
+static void die(const char *a, const char *b) { sy_eprintf("com-tree: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
+static void pct(long n, char *out, int cap) { long t10 = total ? n * 1000 / total : 0; cx_fmt(out, cap, "%ld.%ld%%", t10 / 10, t10 % 10); }
+static void row(const char *indent, const char *what, long bytes, const char *note) {
+    char p[16]; pct(bytes, p, sizeof p);
+    sy_printf("%s%-34s %10ld  %6s  %s\n", indent, what, bytes, p, note ? note : "");
+}
+
+typedef struct { const unsigned char *p; long n; } Fld;
+/* next line of d[0..n) from *at split on blanks into f (max), returns the count or -1 */
+static int line(const unsigned char *d, long n, long *at, Fld *f, int max) {
+    long i = *at, end, k = 0;
+    if (i >= n) return -1;
+    end = i; while (end < n && d[end] != '\n') end++;
+    if (end >= n) return -1;
+    *at = end + 1;
+    while (i < end) {
+        while (i < end && (d[i] == ' ' || d[i] == '\t')) i++;
+        if (i >= end) break;
+        if (k == max) return -1;
+        f[k].p = d + i; while (i < end && d[i] != ' ' && d[i] != '\t') i++;
+        f[k].n = (d + i) - f[k].p; k++;
+    }
+    return (int)k;
+}
+static long num(Fld f) { char b[24]; if (f.n <= 0 || f.n > 20 || tx_copy(b, sizeof b, (const char *)f.p, f.n)) return -1; return tx_strtol(b, 0, 10); }
+
+typedef struct { char label[48]; long off, len; } Slice;
+/* the launcher's "LABEL) o=OFF n=LEN" lines in the first 16 KB */
+static int slices_of(const unsigned char *d, long n, Slice *s, int max) {
+    long lim = n < 16384 ? n : 16384, i; int k = 0;
+    for (i = 0; i + 4 < lim && k < max; i++) {
+        long a, b, ls, le;
+        if (!(d[i] == ')' && d[i + 1] == ' ' && d[i + 2] == 'o' && d[i + 3] == '=')) continue;
+        ls = i; while (ls > 0 && d[ls - 1] != '\n') ls--;
+        while (ls < i && (d[ls] == ' ' || d[ls] == '\t')) ls++;
+        le = i; if (tx_copy(s[k].label, sizeof s[k].label, (const char *)d + ls, le - ls)) continue;
+        a = i + 4; b = a; while (b < lim && d[b] >= '0' && d[b] <= '9') b++;
+        { char t[24]; if (b - a > 20 || tx_copy(t, sizeof t, (const char *)d + a, b - a)) continue; s[k].off = tx_strtol(t, 0, 10) - 1; }
+        while (b < lim && d[b] != 'n') b++;
+        if (b + 1 >= lim || d[b + 1] != '=') continue;
+        a = b + 2; b = a; while (b < lim && d[b] >= '0' && d[b] <= '9') b++;
+        { char t[24]; if (b - a > 20 || tx_copy(t, sizeof t, (const char *)d + a, b - a)) continue; s[k].len = tx_strtol(t, 0, 10); }
+        k++;
+    }
+    return k;
+}
+
+typedef struct { char key[96]; long klen, vlen; } Res;
+typedef struct { char grp[64]; long count, bytes; } Grp;
+static Res res[MAXR]; static int nres;
+static Grp grp[MAXG]; static int ngrp;
+static long mstored[MAXM], mraw[MAXM]; static char mstages[MAXM][96];
+
+static void add_stage(int m, Fld stage) {
+    char w[40]; long have;
+    if (m < 0 || m >= MAXM || stage.n >= (long)sizeof w || tx_copy(w, sizeof w, (const char *)stage.p, stage.n)) return;
+    have = tx_len(mstages[m], 96);
+    { char probe[48]; if (cx_fmt(probe, sizeof probe, " %s ", w)) return;
+      char hay[100]; if (cx_fmt(hay, sizeof hay, " %s ", mstages[m])) return;
+      if (tx_find(hay, tx_len(hay, 100), probe, tx_len(probe, 48)) >= 0) return; }
+    if (have + 1 + tx_len(w, 40) + 1 < 96) { if (have) mstages[m][have++] = ' '; tx_copy(mstages[m] + have, 96 - have, w, tx_len(w, 40)); }
+}
+
+int main(int argc, char **argv) {
+    const char *file = "unisacc.com"; int i, want_models = 0, want_stages = 0, topn = 8, nslice, nm, ndl, nrs;
+    size_t sz; unsigned char *d; PackageFooter foot; static Slice sl[8]; long at, pkg, pkglen, headend, prev;
+    const unsigned char *pd; Fld f[8]; int nf; long dpos, nd;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--models")) want_models = 1;
+        else if (tx_eqz(argv[i], "--stages")) want_stages = 1;
+        else if (tx_eqz(argv[i], "--res") && i + 1 < argc) topn = (int)tx_strtol(argv[++i], 0, 10);
+        else if (argv[i][0] != '-') file = argv[i];
+        else { sy_eprintf("usage: com-tree.cx [FILE] [--models] [--res N] [--stages]\n"); return 2; }
+    }
+    d = (unsigned char *)cx_read(file, &sz); if (!d) die("cannot read", file);
+    total = (long)sz;
+    if (!packagefooter_locate_bytes(d, total, &foot)) die("no UNIPKG1 package footer in", file);
+    pkg = foot.package_offset; pkglen = foot.package_length;
+    nslice = slices_of(d, total, sl, 8);
+    pd = d + pkg;
+
+    {   char h[65]; cx_sha256_hex((const char *)d, sz, h); sy_printf("%s  %ld bytes  sha256 %s\n", file, total, h); }
+    headend = nslice ? sl[0].off : pkg;
+    row("├─ ", d[0] == 'M' && d[1] == 'Z' ? "head: PE image + shell launcher" : "head", headend, "win/x86_64 stored raw; the DOS stub holds the sh launcher");
+    prev = headend;
+    for (i = 0; i < nslice; i++) {
+        long isz = 0, gz = sl[i].len; char note[96];
+        if (sl[i].off + gz <= total && gz >= 4) { const unsigned char *t = d + sl[i].off + gz - 4; isz = (long)t[0] | ((long)t[1] << 8) | ((long)t[2] << 16) | ((long)t[3] << 24); }
+        if (sl[i].off > prev) row("├─ ", "(padding)", sl[i].off - prev, 0);
+        cx_fmt(note, sizeof note, "gzip; inflates to %ld bytes (%ld%%)", isz, isz ? gz * 100 / isz : 0);
+        { char nm2[64]; cx_fmt(nm2, sizeof nm2, "slice %s", sl[i].label); row("├─ ", nm2, gz, note); }
+        prev = sl[i].off + gz;
+    }
+    if (pkg > prev) row("├─ ", "(padding)", pkg - prev, 0);
+
+    /* the package: P 3 NM ND NR, ND D lines, NM M lines each followed by its stored bytes, NR F rows */
+    at = 0;
+    if ((nf = line(pd, pkglen, &at, f, 8)) != 5 || f[0].n != 1 || f[0].p[0] != 'P' || f[1].p[0] != '3') die("not a P3 package at the footer's span in", file);
+    nm = (int)num(f[2]); ndl = (int)num(f[3]); nrs = (int)num(f[4]);
+    if (nm <= 0 || nm > MAXM || ndl <= 0 || nrs < 0) die("bad package counts in", file);
+    dpos = at;
+    for (nd = 0; nd < ndl; nd++) {
+        if (line(pd, pkglen, &at, f, 8) != 6) die("bad D row in", file);
+        add_stage((int)num(f[5]), f[2]);
+    }
+    { long dbytes = at - dpos, mtotal = 0, rtotal = 0, i2;
+      long mat = at;
+      for (i2 = 0; i2 < nm; i2++) {
+          if (line(pd, pkglen, &at, f, 8) != 5) die("bad M row in", file);
+          mstored[i2] = num(f[1]); mraw[i2] = num(f[2]);
+          at += mstored[i2]; mtotal += mstored[i2];
+      }
+      mtotal += at - mat - mtotal;   /* the M rows themselves count with the models */
+      { long rstart = at;
+      for (i2 = 0; i2 < nrs; i2++) {
+          long kl, vl, q, cp; char disp[96], g[64]; long cut = 0;
+          if (line(pd, pkglen, &at, f, 8) != 3) die("bad F row in", file);
+          kl = num(f[1]); vl = num(f[2]);
+          cp = kl < 95 ? kl : 95;   /* the key is bytes, often starting with NUL: show NUL as '@', other control bytes as '?' */
+          for (q = 0; q < cp; q++) { unsigned char c = pd[at + q]; disp[q] = c == 0 ? '@' : (c < 32 || c > 126) ? '?' : (char)c; }
+          disp[cp] = 0;
+          if (nres < MAXR) { tx_copy(res[nres].key, sizeof res[nres].key, disp, cp); res[nres].klen = kl; res[nres].vlen = vl; nres++; }
+          for (q = 0; q < cp && q < 63; q++) if (disp[q] == '/') { cut = q + 1; break; }   /* group: up to the first '/' */
+          if (!cut) cut = cp < 63 ? cp : 63;
+          tx_copy(g, sizeof g, disp, cut);
+          for (q = 0; q < ngrp; q++) if (tx_eqz(grp[q].grp, g)) break;
+          if (q == ngrp && ngrp < MAXG) { tx_copy(grp[ngrp].grp, sizeof grp[ngrp].grp, g, tx_len(g, 64)); ngrp++; }
+          if (q < ngrp) { grp[q].count++; grp[q].bytes += kl + vl; }
+          at += kl + vl;
+      }
+      rtotal = at - rstart; }   /* F rows included: their text lines count with the resources */
+      { char note[96]; cx_fmt(note, sizeof note, "P 3; %d models, %d stage rows, %d resources", nm, ndl, nrs); row("└─ ", "package (P3)", pkglen + 16, note); }
+      row("   ├─ ", "stage routing (D rows)", dbytes, 0);
+      { char note[64]; cx_fmt(note, sizeof note, "%d models, deflated", nm); row("   ├─ ", "models", mtotal, note); }
+      for (i2 = 0; want_models && i2 < nm; i2++) {
+          char what[48], note[120]; cx_fmt(what, sizeof what, "model %ld", i2);
+          cx_fmt(note, sizeof note, "raw %ld bytes; stages: %s", mraw[i2], mstages[i2]);
+          row("   │  ", what, mstored[i2], note);
+      }
+      { char note[64]; cx_fmt(note, sizeof note, "%d resources (keys + values)", nrs); row("   ├─ ", "resources", rtotal, note); }
+      for (i2 = 0; i2 < ngrp; i2++) {
+          char what[80], note[48]; cx_fmt(what, sizeof what, "%s*", grp[i2].grp); cx_fmt(note, sizeof note, "%ld files", grp[i2].count);
+          row("   │  ", what, grp[i2].bytes, note);
+      }
+      for (i2 = 0; i2 < topn && i2 < nres; i2++) {   /* the topn largest resources, by selection */
+          long best = -1, q; static unsigned char used[MAXR];
+          for (q = 0; q < nres; q++) if (!used[q] && (best < 0 || res[q].vlen > res[best].vlen)) best = q;
+          if (best < 0) break;
+          used[best] = 1;
+          row(i2 ? "   │      " : "   │  largest: ", res[best].key, res[best].klen + res[best].vlen, 0);
+      }
+      row("   └─ ", "footer UNIPKG1", 16, "8-byte magic + 8-byte package length");
+      if (want_stages) {
+          long a2 = dpos; char cur[96]; cur[0] = 0; sy_printf("\nroutes (stage -> model):\n");
+          for (nd = 0; nd < ndl; nd++) {
+              if (line(pd, pkglen, &a2, f, 8) != 6) break;
+              { char r[96]; tx_copy(r, sizeof r, (const char *)f[1].p, f[1].n);
+                if (!tx_eqz(r, cur)) { sy_printf("  %s:", r); tx_copy(cur, sizeof cur, r, tx_len(r, 96)); sy_printf("\n"); }
+                sy_printf("    %.*s -> model %.*s\n", (int)f[2].n, f[2].p, (int)f[5].n, f[5].p); }
+          }
+      }
+    }
+    mm_free(d);
+    return 0;
+}
