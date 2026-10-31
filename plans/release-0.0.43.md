@@ -72,11 +72,11 @@ cc	ri,resources,negative,hosts,library,interfaces,properties
 ## 进度（grk 每完成一步，在这里写上提交号）
 
 STATE43：**当前状态（cc 维护，2026-10-31 中午；下面的流水记录是历史，以这一块为准）**
-STATE43：已装 0.0.43 = `43fbbb81`（10-31 01:19，4,631,130 字节，五片，冻结 rev c98f757f）。结构和体积用 `tools/com-tree.cx` 看。
+STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
 STATE43：[x] 2 构造链：release-build 五片、release-ape 打包与冒烟、安装（check-install-fixes 4/4，`--smoke` 16/16，冒烟 5/5）。
-STATE43：[ ] 3 **RI 迁移（头号，挡 QUALIFIED）**：防呆 fb89faddde 在源码里，已装版没有；第二步 grk 进行中，顺序是严格重放、捕获、trace 与 multi；验收是 resources、ri-trace、ri-trace-output、ri-multi 四个批次在新构造的入口上变绿，然后装入并登记 rf-capture-guard。**进展（db6938d868）：resources 批次在新入口 `/tmp/ri-whole/entry.elf`（sha f286319a…，工作区整包构造，内容与该提交一致）上 75 条断言 0 失败，cc 独立复跑确认（12 秒）；同一测试对已装 43fbbb81 是 rc2、捕获不写文件，对照成立。ri-trace、ri-trace-output、ri-multi 还没跑。更新（f6c3ef3dd0）：新入口 `/tmp/ri-fix/entry.elf`（sha c686f372…）上 resources 75/0、`--trace` 16/0、`--multi` 11/0、`--trace-output` 18/0，四个批次全绿，cc 独立复跑确认。下一步：冻结 rev 造五片完整候选、打包、冒烟，再装。**
-STATE43：[ ] 4 两代比较：用新装的 43fbbb81 重编 lnx 片，与第一代逐字节相同（lnx 改走 whole-o 之后还没做过两代）。
+STATE43：[x] 3 **RI 迁移**（fb89faddde 防呆、db6938d868 严格重放与捕获、fbd9cb64c7 与 f6c3ef3dd0 trace 与 multi）：已装的 fc1d4513 上，tools/affected.cx 跑 resources、ri-trace、ri-trace-output、ri-multi 四个批次 4/4 PASS（断言 74、15、17、10，全部 0 失败），cc 独立复跑确认。旧产品对同一测试 rc2、捕获不写文件，对照成立。rf-capture-guard 作废（见文末），不登记。
+STATE43：[ ] 4 两代比较（grk 下一步）：用新装的 fc1d4513 重编 lnx/x86_64 整程序，与第一代 0ae1986b 逐字节比较；之后量 -O1、-O2（C44-SPEED-01）。
 STATE43：[ ] 5 object 模型步（lnx 回到 33 对象依赖 C44-ENTRY-HOSTIMPORT-01，不挡 0.0.43）。
 STATE43：[ ] 6 测试到 QUALIFIED：发布矩阵 825 格，已覆盖 497，缺 177，待外平台 79（要 CI），待产品改 20；RI 迁移之后，ri 与 resources 里的 COVERED_LOCAL 要在新产品上重跑确认。
 STATE43：[ ] 7 主人授权发布（签名、Draft、Latest、公开）。目前一律不碰，等 0.0.43 做完再安排。
@@ -87,7 +87,7 @@ STATE43：不计入 0.0.43 完成度：名表铺设（nametab-gen 290 行规格�
 - 设置了 `UNISACC_RF_CAPTURE`，编译照常 rc0，却一个文件都不写，等于悄悄绕过账本，违反 ri 合同。
 - resources、ri-trace、ri-trace-output、ri-multi 四个批次在新产品上全红。ri、resources 两个矩阵里的 COVERED_LOCAL 证据都是在 79fb84e6 上实跑的，新产品上不成立。
 要做的：把 RI 的选项、捕获和严格重放迁移进 CX 入口；在迁移完成之前，带 `UNISACC_RF_CAPTURE` 的运行必须按名字拒绝，不能悄悄忽略。
-待登记：rf-capture-guard（等第二步有批次在新入口上变绿，装好之后登记）
+已作废：rf-capture-guard 是 RI 迁移完成之前的防呆（设了 UNISACC_RF_CAPTURE 就按名字拒绝），捕获迁移之后它的断言不再成立（设了就真的捕获；空值等于没设，和 resources.cx 的用法一致），2026-10-31 删除，不登记；捕获的拒绝路径由 resources 批次覆盖。
 **裁定（cc，2026-10-31，主人授权 cc 决定）：先做完发布链，CX 面的广度铺设移到 0.0.44（C44-CX-SURFACE-01）。** 已经落地的 stream-gen、net-gen、sys.fd 保留。从现在起，grk 只推第 2 步剩下的部分，顺序是：osx/x86_64 和 win/x86_64 收进 release-build 并做第二代 → lnx/arm64 和 osx/arm64 两片 → seed/ape 包装 → 安装（`check-install-fixes` 四项全绿）；然后是第 3、4 步。src/stream.cx 和 src/network.cx 在安装之后用 `--write-src` 收尾。
 - [x] 1 hostnative 28d0cba49c（sy_reg_size 与 check-cx-sys 那一行 sy_eprintf 在 08da2e8863，索引竞态先被别的提交带走；precommit blocked=0）
 - [ ] 2 release-build：P3 / 五片 / wrap / 二代 / 安装
