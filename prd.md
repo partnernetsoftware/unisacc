@@ -39,6 +39,7 @@
 | 多轮批量改写（一次一轮，可续跑） | `refactor.cx -- sweep RULES JOBS (FILE... \| --tracked) -- 'CHECK {file}'` | find --auto 加 apply 合成一步，整次调用不超过 60 秒；SKIP 和 REVERT 的文件记进 `out/refactor-verify/skip-<规则>.txt`，不再重试。退出 3 表示还有剩余，同一条命令再跑一遍；退出 0 表示做完；退出 1 表示有回退。取代手写的 shell 循环驱动。 |
 | 改名（标识符，全仓） | `refactor.cx -- rename [--auto] OLD NEW (FILE... \| --tracked) > C.tsv`，再 `apply` 同上 | 定义、函数指针、调用、类型、宏里的 OLD 都改；注释、字符串、更长的标识符不动；保留路径判 skip。行与 find 同格式，apply 照样逐文件核验并可还原。 |
 | 按行段替换（断言两端） | `sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT` | 首末行前缀不符就拒绝、不写盘；适合搬移整段。 |
+| 改模块路径（搬目录后改引用） | `sh ./unisacc.com tools/use-path.cx -- OLD NEW [FILE...\|--tracked]` | 只改 `#pragma unisa use` 行的模块名，保留 `::sym as alias` 后缀；注释与字面量不动，非规范间距（`#pragma unisa  use`）拒绝且不写盘。`core.kernel`→`sys.kernel` 这类搬迁引用一次改完。检查：batch `use-path`。 |
 | 查某目标不能 lower 的系统调用／ccw 桩 | `sh ./unisacc.com tools/tape-gap.cx -- TAPE TARGET` | 一遍对 `exec/facts/lower-abi.tsv` 的 `@abi` 行，列出无行或 selected 0 的 `.sys` op 与 `__ccw_` 标号；退出 1 表示有缺口。检查：batch `tape-gap-tool`。 |
 | 共享文件里哪些改动不是我的 | `sh ./unisacc.com tools/own-diff.cx -- [--emit OUT] [--base F] FILE KEY...` | 相对 HEAD 的增删行里，不含任何 KEY 的列为 FOREIGN，有就退出 1；`--emit` 写出"HEAD 加上我的改动"。检查：batch `own-diff-tool`。 |
 | 只提交自己的文件和自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...` | 在私有 index 里提交，不碰别人暂存的条目，别人追加的行留在工作区；提交后只在共享 index 无人暂存该路径时同步条目。用于 tests/batches.tsv、tests/coverage.tsv、prd.md 这类多人同改的文件。 |
