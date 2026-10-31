@@ -606,3 +606,133 @@ CX_LAYERS_SCOPE tracked=<|T|> regular=<|R|> symlink=<|S|> manifest=<|M|> generat
 3. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
 4. `tools/commit-own.cx --whole tools/check-cx-layers.cx` + 批次/覆盖两行。
 5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 保持未决；补边（MISSING-U 转正）另案。
+
+## 10. 方案 B 第三次修订：非原子快照的可观测边界、git index 身份、shard 缓存合同（未施工）
+
+回应三点：不得把「update 后逐源比 sha」说成同一时刻；`git ls-files -s` 读的是共享
+index + 工作树，不是 commit 树；内容寻址缓存允许旧 shard 残留，ORPHAN-SHARD 不能当错误。
+**§9.3 的「集合等式 + ORPHAN-SHARD 为错」在此被取代。**
+
+本节所有数字都是**当前共享工作树**的观测值（HEAD `32744f7421`，工作区有他人改动），
+只作当次收据，不进断言。
+
+### 10.1 快照不可原子：只做可观测的漂移检测
+
+`symindex update` 与逐源审计不是一个事务，中间任何时刻其他源都可能变。而且还叠了
+`index_one` 的 stat 预过滤：
+
+```c
+if (m >= 0 && !verify && man[m].size == st.size && man[m].mtime == st.mtime
+    && man[m].ino == st.ino && man[m].dev == st.dev)   /* 直接沿用旧 sha，不读文件 */
+```
+
+`mtime` 只有秒粒度（`sy_stat_t` 自带注释），所以「同秒内同尺寸改写」会被判为未变，
+manifest 里的 sha 与实际内容不符。因此工具**必须自己算 sha**，不能信 manifest 的 sha。
+
+记录与判定（全部可观测，不涉及任何假想冻结）：
+
+| 观测 | 时机 | 不成立时 |
+|---|---|---|
+| manifest 的 `size/mtime/ino/dev` + 自身 sha256 | 读取前、审计结束后各一次 | `UNDECIDED MANIFEST-CHANGED` → rc3 |
+| 每源 `lstat` 元组（size/mtime/ino/dev） | 读前、读后各一次 | 两次不等 → `UNDECIDED SOURCE-CHANGED`（读期间被改） |
+| 每源内容 sha256 | 读取后 | ≠ manifest 该行 sha，且元组与 manifest 行相同 → `UNDECIDED PREFILTER-STALE`（预过滤说谎）；元组也不同 → `UNDECIDED SOURCE-CHANGED` |
+| 全审计域 `lstat` 元组复检 | 审计结束后 | 与读时不同 → `UNDECIDED SOURCE-CHANGED-AFTER-READ` → rc3 |
+| 交付前的最终复核 | 打印 `CX_LAYERS` 之前 | 任一源变更 → 整体降级为 rc3，`CX_LAYERS` 行加 `window=MOVED` |
+
+措辞纪律：工具只能声明
+
+> 在该次运行的可观测窗口 `[首个源读取, 末次复检]` 内，未观测到源/manifest 漂移
+
+**不得**写「索引与源同一时刻」「快照冻结」「原子视图」。窗口之外（工具退出之后、
+或某源在其自身复检之后又变）无法观测，写入 `plans/` 的收据必须带窗口与 HEAD。
+
+另外两条已读码确认的陈旧来源：
+
+- `save_manifest` 在 `dirty` 为假时**完全不重写** manifest，因此 manifest 的
+  `mtime/ino` 与树无关，可能是上一次有脏变更时的产物；
+- `update` 因 45 s 上限 `DEFERRED` 时，`save_manifest` 会**保留旧行**给这次没走到的
+  条目（`n_deferred` 分支），即 manifest 可含上一代的行；`symindex` 对未完成索引的查询
+  以 rc3 退出，`check-cx-layers` 的 `rc` 分支已经把它变成 `FAIL SYMINDEX`——保持该行为，
+  不降级。
+
+### 10.2 `git ls-files -s` 的身份：index + 工作树，不是 commit 树
+
+`symindex` 的文件集来自 `git ls-files -s -z -- '*.cx'`（`set_tracked`），工具端的域等式也
+只能取同一来源。它是**共享检出**的 index 视图，会随他人 `git add` 变化，且不反映工作树
+是否被改。因此：
+
+- 记录 `git rev-parse --git-path index` 得到的 index 路径，读前/读后各取一次
+  `size/mtime/ino`；变化 → `UNDECIDED GIT-INDEX-CHANGED` → rc3。
+- 记录 `HEAD`（`git rev-parse HEAD`）仅供收据，**不作为域的定义**；打印
+  `tree_source=index+worktree`，禁止出现 `commit tree`/`HEAD tree` 字样。
+- index 条目 ≠ 工作树文件：`git ls-files` 会列出被 `rm` 但未 `git add -u` 的路径。
+  今天实测：`R∖M` 恰 1 条 `tests/runner-faults.cx`（**文件实际存在、6680 字节**，
+  只是 manifest 来自更早一次运行）——这正是「manifest 不是当前树」的实证。
+  分类：
+  - `R∖M` 且文件存在 → `UNDECIDED NOT-INDEXED path`（真实覆盖缺口）→ rc3；
+  - `R∖M` 且文件不存在 → `UNDECIDED INDEX-ONLY path` → rc3（不得计为已审计）；
+  - 若文件在 `archive/` 或 `out/`（域外）则记入 scope 的 `excluded=` 而非 undecided。
+- `git` 失败 / 非仓 → `UNDECIDED NO-GIT`，不降级为「跳过」。
+- `assume-unchanged` / `skip-worktree` 条目今天的检测不可靠：记 UNKNOWN，不声称已覆盖。
+
+### 10.3 shard 缓存合同：内容寻址、写一次、不回收
+
+读码与实测确认（`tools/symindex.cx` 头注释与 `index_one`/`write_atomic`）：
+
+- shard 名为 `SHA256.tsv`，**按内容寻址**；只有在该 sha 的 shard 不存在时才解析并写
+  （`if (r == 0) { parse(...); write_atomic(...) }`），写用临时文件 + `rename`；
+- **没有任何 GC / 删除 / 清扫路径**（全文无 `unlink` 针对 shard 的调用）；
+- 因此历史内容版本的 shard 会永久留存。
+
+当前实测：manifest 1902 行、唯一 sha **1896**（6 行共享内容，例如
+`tools/cxlib/pytempfile.cx` 与 `archive/.../pytempfile.cx` 同内容）、shard 文件 **1916**
+⇒ **20 个未被引用的 shard**，最旧的可追溯到更早的源版本。这是**合同允许的正常状态**。
+
+据此定判定（替代 §9.3 第 3 条）：
+
+| 观测 | 判定 |
+|---|---|
+| 被引用 sha 的 shard 缺失 | `UNDECIDED MISSING-SHARD path` → rc3（现行 `cl_shard_file` 已 `FAIL SHARD`，保留） |
+| 目录里存在未被引用 shard | `cache_orphans=N`，仅信息，**不影响 rc**，不得报错 |
+| shard 行数与 manifest 引用数不一致 | 正常（多对一 + 残留），不参与等式断言 |
+
+即：不对「每个 shard 必须被引用」做任何断言；只对「每个被引用 sha 必须有 shard」断言。
+
+同源纠正：`manifest` 会出现**生成物行**。实测当前有 1 行
+`out/cx-layers-fixtures-2985674/h-conditional/cx/sys/q.cx`，这是 `symindex dump FILE`
+把命令行点名的文件加入索引所致（头注释明写「files named on the command line are added」），
+`check-cx-layers` 的 `fx_dump` 正是这么调的。因此 `M∖R` 允许含 `out/` 行；只有出现在
+`out/` 之外的 `M∖R` 才 `UNDECIDED DOMAIN-MISMATCH`。
+
+### 10.4 更新的 scope 行
+
+```
+CX_LAYERS_SCOPE tree_source=index+worktree head=<HEAD> tracked=<|T|> regular=<|R|> symlink=<|S|>
+                 symlink_broken=<n> manifest=<|M|> generated_out=<n> stale_rows=<n>
+                 archive=<n> out=<n> domain=<|D|> cache_orphans=<n> window=<STABLE|MOVED>
+```
+
+各字段均为实算值，不做等式断言；等式只用于**跳变检测**（上一节的三条规则改成"发现不一致就
+UNDECIDED 并列出前 8 条"，不再要求固定数量）。
+
+### 10.5 夹具（在 §9.6 的 +24 之外，总 +27）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-not-indexed` | 写文件但不入索引（模拟 manifest 早于树） | `UNDECIDED NOT-INDEXED`、rc3、该文件不计边 |
+| `k-orphan-shard` | 索引目录里多放一个未被引用的 `SHA.tsv` | `cache_orphans>=1`、`undecided==0`、**rc 不变** |
+| `k-missing-shard` | 删除某被引用 sha 的 shard | `FAIL SHARD`（或 `UNDECIDED MISSING-SHARD`）→ 非零 |
+
+`k-orphan-shard` 是本次唯一"必须证明不误报"的用例：旧 shard 存在时结果必须与不存在时
+完全一致（`edges`/`failed`/rc 全同）。
+
+### 10.6 验收（替代 §9.8）
+
+1. `--fixtures`：`checks` = 原值 + 27，`failed=0`；`k-orphan-shard` 与去掉该 shard 的
+   对照用例结果逐字段相同。
+2. 全量审计：`CX_LAYERS_SCOPE` 打实算值 + `window=STABLE`；`undecided` 实测值 >0 即非
+   PASS；`edges` 与上一次同输入收据比对，差异须给来源。
+3. 收据文字必须带：HEAD、可观测窗口、`tree_source=index+worktree`、`cache_orphans`，
+   并注明「漂移检测，非原子冻结」。
+4. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
+5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 未决；补边另案；shard GC 另案（不在本工具）。
