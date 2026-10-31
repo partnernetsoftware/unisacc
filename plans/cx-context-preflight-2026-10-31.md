@@ -19,9 +19,14 @@
 - 选定 commit C（完整 sha）。共享 index 的 `git ls-files` 不作为真值。
 - 树清单：`git ls-tree -rz --full-tree C`，保留 mode/type/object/path；原始输出保存并记 sha256。
 - 快照：`git archive --format=tar C | tar -xf - -C out/context-preflight/<epoch>/snap`；tar 与解出文件清单各记 sha256。
-- 核对门：树清单与 archive 解出集合逐项比对（path、mode、blob 内容 hash）。缺失/多余/不一致→`SNAPSHOT-MISMATCH`，相关根 UNKNOWN、聚合非零。
-- 160000 gitlink/submodule：无法由 archive 展开→该路径 UNKNOWN，不递归工作区。
-- 120000 软链：单列其词法 path/target；只在快照内解析；绝对目标、逃出快照、悬空、成环→UNKNOWN；禁止回读工作区/仓外。普通文件与软链分开，不把软链送入 `--in`。
+- 核对门分类：
+  | mode | 对拍键 | 结果 |
+  |---|---|---|
+  | 100644/100755 | path + mode + 解出文件 sha256（也记录 tree blob id） | 缺失/多余/内容或 mode 不同→SNAPSHOT-MISMATCH |
+  | 120000 | path + mode + target 字节（不解析后比较） | 目标字节不同→MISMATCH |
+  | 160000 | ls-tree 记录，archive 允许无该 path | GITLINK-UNEXPANDED + 相关根 UNKNOWN，不升格 MISMATCH；若解出同 path 常规文件→MISMATCH |
+  保存 ls-tree 原始、extract 清单、分类计数。
+- 120000 软链：按 target 字节单列；解析限快照内，累计 seen_paths（规范化词法相对 SNAP）；再遇已见→symlink-cycle；绝对目标、`..` 逃出 SNAP、悬空分 reason→UNKNOWN；禁止回读工作区/仓外。目录软链+词法 `..` 不等于 OS 父目录，不标 symlink-cycle，按多 context 计数。软链不进 `--in`。
 - 路径无法无损表达（换行/回车/NUL、以 `#` 开头等）→具名拒绝/UNKNOWN。
 - 快照可变：所有实际读取文件、每级解析与 symlink 目标在结束时复核 sha/identity；检测到变化→该根 UNKNOWN，不称原子只读。
 
@@ -31,7 +36,9 @@
 - 在快照根执行：`sh <PRODUCT_ABS> tools/symindex.cx -- --index <OUT>/index --in <OUT>/in.lst update --verify`。
 - `PRODUCT_ABS` 是显式传入的已装产品绝对路径，记录 sha256 与版本；不从 PATH/仓库根自动猜。当前示例：`/home/devali/repos/unisacc/unisacc.com`，`unisacc 0.0.43`，sha256 `fc1d4513fb1363c8506df8afa08444882337e615bf38d82dd42f022e2c23dc6f`；实际测量必须重新显式绑定，不继承示例。
 - 索引出现 `DEFERRED`（45s 上限停止）或 manifest 不完整→本次 UNKNOWN，不当完整索引。
-- 记录：commit、ls-tree 原始 sha、archive sha、解出清单 sha、in.lst sha、index manifest sha、product sha。
+- 测量回执强制字段：`C, lstree_sha, archive_sha, extract_sha, in_sha, index_sha, product_path, product_sha, policy_doc_sha, implementation_source_sha, implementation_binary_sha, ENFORCEMENT, roots_tsv_sha`。
+- cxm_norm 实际行号：src/cxmod.c:113、cx/compiler/cxmod.cx:143、cx/cx0/plan.cx:163（以当前文件为准复核对拍）。
+- 根生成依赖 symindex `D main`，前提是索引完备；索引 DEFERRED/未完成即 UNKNOWN。
 
 ## 4. 根清单：来源、分类与核对门
 
@@ -62,7 +69,7 @@
 - 每条 `use` 从父 context 目录解析；模块名语法同编译器；`std` 按现行处理；不 realpath 合并 context。
 - 同一根内相同规范化字面路径只展开一次；不同根分别展开；聚合再按字面路径去重。
 - 环：目标规范化字面路径已在当前根的展开栈上→计 cycle 边、不再展开、该根标 UNKNOWN（编译器既有 module cycle 拒绝另记，不混报）。
-- 依赖目标比较：两边 use 目标经 cxm_norm 后 stat/realpath 比较；缺失=unresolved，ENOTDIR/EACCES/读失败=UNKNOWN；目标不同只入 pairs_public? no — 记 `pairs_dependency_diff`（新增输出字段），不误记为 public set。
+- 依赖目标比较：两边 use 目标经 cxm_norm 后 stat/realpath 比较；缺失=unresolved，ENOTDIR/EACCES/读失败=UNKNOWN；目标不同记 `pairs_dependency_diff`，不误记为 public set。
 - 缺失模块=unresolved+UNKNOWN；ENOTDIR/EACCES/读失败/路径规范化失败（过长/段数）=INVALID+UNKNOWN；不截断、不降级。
 - U 事实：由快照索引 shard 读取；context 的 realpath 映射回 tracked path/sha 后取 shard；alias 软链用 realpath 查，但 context 身份仍是字面路径。未映射/未跟踪→UNKNOWN。
 - 清单：按 context 词法目录+尾名读 cxpack；ENOENT/无匹配行=全集；EACCES/ENOTDIR/读失败/超长/非法行→UNKNOWN。有效公开集的比较只按第 7 节的 pair 策略执行；比较结果与计数见该节，§5 本身不另做拒绝。
@@ -75,6 +82,8 @@
 - `path_bytes_total`：该根所有 context 规范化字面路径长度+1 的累计和；另报 longest_path。
 - `max_group`：同一 realpath 的 context 组最大成员数；同 realpath 只用于报告与 pair，不用于展开去重。
 - `unresolved`、`cycles`、`manifest_errors`、`invalid` 分别计数。
+- `std_edges`：`use std`/`std.cx` 的边数（不建 context、不展开）；`use std.X` 按编译器具名拒绝，单列。
+- `pairs_dependency_diff`：同 pair 两侧直接目标 realpath 不同的计数；按状态机处理。
 - 聚合：各根累计求和 + 跨根 unique_contexts（按字面路径去重）；不把求和冒充全局同时峰值。
 
 ## 7. pair-policy v1（测量策略，不是生产算法）
@@ -89,6 +98,17 @@
 - 每个 pair 比较 canonical 与 candidate 的有效公开集（按 §5 的清单规则，逐名集合；无清单/无匹配行=全部非 static）。记录 `pairs_public_equal`、`pairs_public_diff`、`pairs_errors`。
 - v1 **不因差异或错误停止遍历**：有效集差异只记录；上下文/清单/目标解析错误计入 `pairs_errors`，该出错边不入队继续展开，其他边继续；根标 UNKNOWN。`pairs_visited_total`/`pair_peak` 只是该全遍历策略的测量值，不是任意生产算法的值。
 - 不能对“任意首差异即停算法”声称上界：只有当生产算法与 v1 使用**相同的配对生成、去重键、canonical 选择和工作队列调度**，且停止仅裁剪同一条遍历时，全遍历值才可作该算法的条件上界；canonical 或调度不同可能使 peak 更大。除此之外一律 UNKNOWN，不比较、不外推。
+- 遇错状态机（必须逐条实现）：
+  | 事件 | 计数 | 入队/展开 | 根状态 |
+  |---|---|---|---|
+  | public set 相等 | public_equal++ | pair 已访 | 不变 |
+  | public set 不等 | public_diff++ | 不因 diff 停；依赖子 pair 仍可入队 | 不变（纯测量） |
+  | 清单 EACCES/ENOTDIR/读失败/非法 | pairs_errors++、manifest_errors++ | 该 context 出边不入队 | UNKNOWN |
+  | use 目标缺失 | unresolved++、pairs_errors++ | 不入队 | UNKNOWN |
+  | 目标 realpath 不同 | dependency_diff++ | 各按字面目标分别入队，diff 只记账 | UNKNOWN |
+  | 规范化失败 | invalid++、pairs_errors++ | 不入队 | UNKNOWN |
+  | proxy=1 | equal/diff/errors 必须为空/禁用峰门 | — | 不得 measurement_complete |
+  `pairs_visited_total` 含首次进入 memo 的出错 pair；差异只停该边展开，不停全局遍历。
 - 若实现没有执行有效集比较，只能输出 `pairs_proxy=1`，不得称实际递归核验，也不得用于 pair 峰门。
 - 输出字段统一：`pairs_visited_total`、`pair_peak`、`pairs_public_equal`、`pairs_public_diff`、`pairs_errors`、`pairs_proxy`（0/1）。
 - pair 数字只说明该策略的测量值，不作为生产实现上限或产品预算证明。
@@ -106,7 +126,7 @@
 ## 9. 输出与状态
 
 每根：
-`ROOT<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>pairs_v1<TAB>pair_peak_v1<TAB>pairs_v1r<TAB>pair_peak_v1r<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
+`ROOT<TAB>joint_id<TAB>category<TAB>status=measurement_complete|UNKNOWN<TAB>reason<TAB>contexts_total<TAB>edges_total<TAB>std_edges<TAB>pairs_visited_total<TAB>pair_peak<TAB>pairs_public_equal<TAB>pairs_public_diff<TAB>pairs_dependency_diff<TAB>pairs_errors<TAB>pairs_proxy<TAB>path_bytes_total<TAB>longest_path<TAB>max_group<TAB>unresolved<TAB>cycles<TAB>manifest_errors<TAB>invalid<TAB>sha256`
 聚合：`AGGREGATE<TAB>status<TAB>...` + 每类别 complete/unknown-known/unknown-unexpected 计数。
 状态字段用 `measurement_complete`，不写裸 `complete`，避免被读成全仓/规范通过。仅当 production 类全部 measurement_complete、无 ROOTS incomplete、无触限/超时，聚合才 complete；否则 UNKNOWN 非零。negative-known 的 UNKNOWN 单列，不算生产覆盖，也不阻塞汇总为“测量完成”。
 
@@ -128,9 +148,9 @@
     /product/unisacc.com /work/tools/cx-context-preflight.cx -- ... --out /out/report
   其中 SNAP 与 PRODUCT 外置且只读；OUT 是快照外唯一可写处；索引 /out/index、日志 /out/logs、临时 /tmp。cwd=/work，工具只接收 /work 或 /out 下的显式路径；宿主工作区不挂载。
   动态产品需要的解释器/库按实际 ldd 单独 ro-bind；不把整个 / 暴露为可写。
-- 先证明方案可用：测量前做 dry-run（bwrap 启动、/work 只读写失败、/out 可写、看得到 /product 与所需 libs、宿主工作区不可见）；任一失败→UNKNOWN，不进入测量。
+- 先证明方案可用：完整 dry-run 清单：bwrap 启动；/work 写失败 errno；/out 写成功；/product 只读可见；所需解释器/库可加载；宿主工作区路径探测失败；可见路径白名单核对。任一失败→UNKNOWN，不进入测量。
 - 若 `bwrap` 或等价只读挂载不可用，本次测量状态 UNKNOWN，不用“前后复核”冒充强制只读。
-- 次选：`chmod -R a-w SNAP` 并记录所有目录/文件 mode；这只是同用户可逆的约束，不构成强制；采用时明确标 `enforcement=permission-only`，不能称只读保证。
+- 次选：`chmod -R a-w SNAP` 并记录 mode；这只是同用户可逆约束，不构成强制。采用时 `enforcement=permission-only`，强制状态必须 UNKNOWN，不得 measurement_complete。
 - 快照外目录：`out/context-preflight/<epoch>/{index,logs,tmp,report}`；`TMPDIR`、索引路径、工具输出均显式指向这里。
 - 已装产品：记录绝对路径、版本、sha256；`UNISACC_RUN_CACHE=0` 只作为候选设置，不能证明无写入。若使用产品 `-run` 执行工具，另设只读 bind/沙箱；否则改为预先构建的工具二进制并用显式产品身份绑定。任何对快照的写入或无法排除的写路径→`SNAPSHOT-WRITE-UNKNOWN`，聚合 UNKNOWN。
 - 结束复核仍是检测而非原子保证；只有强制只读措施成功才标 `enforcement=readonly-mount`。
@@ -159,6 +179,7 @@
 
 - 每个根代表独立编译图。context ID、canonical 选择、pair memo 与 pair 统计都以根身份分区：ID 含 root 前缀，或每个根独立编号后加 root；不得跨根按同一 realpath 合并、比较或声称会合并——它们未必在同一链接图。
 - roots.tsv 的行序只决定报告/遍历顺序，不能把另一根的消费结果当本根 canonical，也不能用根序推断跨根合并。
+- roots.tsv 增列 `joint_id`：空=独立根；同一 `joint_id` 的多行组成一个联合根，成员 root 行可重复。无 joint_id 的多 path 行拒绝。联合根与成员单根同时存在时须显式 `double_count=1`，否则核对门拒绝重复计量。
 - 多源码同一命令是“联合根”场景，必须显式加 category/joint 标记；一个联合根的图内可以有自己的 realpath 组与 pair，但不等于把多个独立根合计后再比较。
 - 各根 pair_visited/peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
 - 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
