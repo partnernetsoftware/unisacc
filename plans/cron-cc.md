@@ -25,6 +25,6 @@ grk 收工，或者政委、主人叫停，就用 CronDelete 停掉定时器，�
 ## 底线
 
 - 只提交自己的文件。
-- 别的车道发信封，不动它们的文件：src/ 和产品层归 grk，cx/* 归 bdy，apps/csih/ 归 csih，ujs/ 不碰。
+- 别的车道发信封，不动它们的文件：src/ 和产品层归 grk，cx/* 归 bdy（tmux 窗口名 omp-bdy，发信用 1:omp-bdy），apps/csih/ 归 csih，ujs/ 不碰。
 - 技术细节自己定，不问主人。
 - 每条命令 60 秒以内。
