@@ -32,6 +32,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.netpack
@@ -52,6 +53,7 @@ static char cl_src[CL_CAP];
 static char cl_line[CL_PATH];
 static int cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_fail;
 static int cl_amb_out, cl_io, cl_cur_line, cl_cond;
+static int cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_und_total;
 static char cl_cur_mod[128];
 static struct { char path[CL_PATH]; char mod[128]; char why[256]; int used; } cl_wl[CL_WL];
 static int cl_nwl;
@@ -325,6 +327,7 @@ static int cl_audit(void) {
     char mp[CL_PATH], idx[CL_PATH];
     int w;
     cl_edges = cl_same = cl_down = cl_up = cl_amb = cl_out = cl_unres = cl_fail = cl_amb_out = cl_io = 0;
+    cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
     cl_join(idx, sizeof idx, cl_root, cl_idx);
     cl_join(mp, sizeof mp, idx, "manifest.tsv");
@@ -363,7 +366,15 @@ static int cl_audit(void) {
         k = 0;
         while (e < b && k < 127) sha[k++] = cl_man[e++];
         sha[k] = 0;
-        if (k != 64) continue;
+        if (k != 64) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\t%s\n", path); continue; }
+        { char sp[CL_PATH], hex[65]; long sn;
+          cl_join(sp, sizeof sp, cl_root, path);
+          sn = cl_read(sp, cl_src, CL_CAP);
+          if (sn <= 0) { cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-UNREADABLE\t%s\n", path); }
+          else if (sy_sha256_hex(cl_src, sn, hex) != 0 || !cl_eq(hex, sha)) {
+              cl_und_io++; cl_und_total++; sy_eprintf("UNDECIDED\tSOURCE-CHANGED\t%s\n", path);
+          }
+        }
         cl_shard_file(path, sha);
     }
     for (w = 0; w < cl_nwl; w++) if (!cl_wl[w].used) {
@@ -378,7 +389,13 @@ static int cl_audit(void) {
         cl_fail++;
         sy_eprintf("FAIL\tCLASS-SUM\tedges=%d sum=%d\n", cl_edges, cl_same + cl_down + cl_up + cl_amb + cl_out);
     }
-    return cl_fail ? 1 : 0;
+    if (cl_und_total != cl_und_lex + cl_und_recon + cl_und_meta + cl_und_io) {
+        cl_fail++;
+        sy_eprintf("FAIL\tUNDECIDED-SUM\n");
+    }
+    if (cl_fail) return 1;
+    if (cl_und_lex + cl_und_recon + cl_und_meta + cl_und_io) return 3;
+    return 0;
 }
 static int cl_spawn(char **v, const char *cwd) {
     np_result r = {0};
@@ -637,8 +654,9 @@ int main(int argc, char **argv) {
     rc = cl_wl_load(wlp);
     if (rc < 0) { sy_eprintf("FAIL\tWHITELIST\tparse %s\n", wlp); return 1; }
     rc = cl_audit();
-    sy_printf("CX_LAYERS\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tscope=numbered-direct-use\n",
-              cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail);
+    sy_printf("CX_LAYERS_SCOPE\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\tunres=%d\tio=%d\tfailed=%d\tcoverage=manifest-only\tsymlinks=UNKNOWN\ttracked_reconciliation=NOT-DONE(B)\tshard_body_verified=0\tundecided_lex=%d\tundecided_recon=%d\tundecided_meta=%d\tundecided_io=%d\twindow=OBSERVED-NOT-ATOMIC\n",
+              cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_io, cl_fail,
+              cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io);
     if (cl_amb || cl_out) sy_printf("UNKNOWN\tamb=%d\tout=%d\tnot-a-pass\n", cl_amb, cl_out);
     (void)idxdir; (void)v0; (void)shard; (void)real;
     return rc;
