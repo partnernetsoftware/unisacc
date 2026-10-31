@@ -736,3 +736,129 @@ UNDECIDED 并列出前 8 条"，不再要求固定数量）。
    并注明「漂移检测，非原子冻结」。
 4. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`。
 5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 未决；补边另案；shard GC 另案（不在本工具）。
+
+## 11. 方案 B 第四次修订：内容摘要绑定实际扫描字节、索引内容身份、ABA 限制与代价（未施工）
+
+回应三点：manifest 与共享 git index 不能只靠元数据；sha 必须算在被词法扫描的同一份
+缓冲上且结束重读；两端哈希一致也排除不了中间 ABA。本节给出可执行方案、实测代价、
+权限与 deadline，不用缩范围或静态计数掩盖。
+
+### 11.1 三个身份，都要内容摘要
+
+| 身份 | 取法 | 前后各一次 | 不一致 |
+|---|---|---|---|
+| manifest 内容 | `cl_read` 到 `cl_man` 后**立刻**对 `cl_man[0..n)` 做 sha256（解析前） | 结束后重读整文件再哈希 | `UNDECIDED MANIFEST-CHANGED` → rc3 |
+| git 索引视图 | 我们消费的 `git ls-files -s -z -- '*.cx'` **原始字节**做 sha256（当前 151646 B） | 结束后重新 spawn 一次同一命令再哈希 | `UNDECIDED GIT-INDEX-VIEW-CHANGED` → rc3 |
+| git 索引文件 | `$(git rev-parse --git-path index)` 整文件哈希（当前 967484 B ≤ `CL_CAP`） | 结束后重读重哈希 | `UNDECIDED GIT-INDEX-CHANGED` → rc3 |
+
+关于「索引视图」作为主身份的理由（写进代码注释，避免后来者误读）：工具的域不是
+index 二进制，而是它经 `git` 解析后交给我们的那份列表；列表字节就是工具真正消费的内容。
+索引文件哈希是补充的跳变探针，`assume-unchanged`/`skip-worktree`/合并标记都会改变列表
+输出，因此列表哈希覆盖得更直接。两者都记录，任一变化即 rc3。
+
+索引侧还须显式判定的解析事实（现在的 `symindex` 只取 mode、不读 stage，所以工具必须自己判）：
+
+| 观测 | 判定 |
+|---|---|
+| `git ls-files -s -z` 退出码非 0 | `UNDECIDED NO-GIT`（附 rc 与 stderr 前 200 B） |
+| 任一记录 stage ≠ 0（未合并条目） | `UNDECIDED GIT-UNMERGED path`，最多列 8 条 |
+| 记录字段数 ≠ 3、mode 非 6 位、sha 非 64 位十六进制、路径为空 | `UNDECIDED GIT-PARSE path`，最多列 8 条 |
+| 索引文件 `size > CL_CAP` | `index_file_sha=TOO-LARGE`，以视图哈希为主身份，**在 scope 行显式写出**，不静默省略 |
+| 索引文件 EACCES/其他读错误 | `UNDECIDED GIT-INDEX-UNREADABLE errno`（不得当作「跳过」） |
+| `.git/index` 被替换（ino/dev 变但内容同） | 不算漂移：内容哈希相同即视为同一输入；但把 `index_ino_changed=1` 打进 scope 供审计 |
+
+### 11.2 sha 绑定实际被扫描的字节
+
+顺序固定为：`cl_read` → **哈希原始 `cl_src[0..n)`** → `cl_clean(n)` 原地清洗 → 词法扫描。
+
+- 清洗只把字节替换成空格/`0x01`，长度与换行位置不变，所以哈希取清洗前即可代表
+  「这份被扫描的字节」；不得对清洗后的缓冲再哈希（那哈希的是派生数据，不是输入）。
+- `n == CL_CAP - 1` 表示被截断 → `UNDECIDED UNREADABLE path source-over-1MiB`，不得
+  截断后继续扫描。
+- 同一次循环内记录 `lstat` 元组（size/mtime/ino/dev）读前值；哈希后不再用它判断
+  「内容未变」——元数据只能发现一部分漂移（同尺寸同秒改写、`mtime` 还原都会绕过）。
+
+**结束重读**（不能只有 lstat）：审计主循环把每个域源的 64 位十六进制摘要存进
+`static char cl_dig[4096][65]`（4096 × 65 = 260 KiB 静态；现域 1613，manifest 1902），
+超过 4096 → `UNDECIDED TOO-MANY-SOURCES` → rc3。主循环结束后**重新 open 并读每个域源**，
+哈希后与 `cl_dig` 比：
+
+- 不等 → `UNDECIDED SOURCE-CHANGED-AFTER-READ path`（同时给出两个 sha 前 12 位）；
+- 重读失败 → `UNDECIDED UNREADABLE`；
+- 相等 → 记为该次运行「在该源上未观测到内容漂移」。
+
+第二次读必须走 `sy_open_read` 重新打开，不得复用第一次的缓冲内容。
+
+### 11.3 只声称可观测漂移，不给原子证明
+
+即便首尾两端哈希一致，也排除不了窗口内的 A→B→A：工具在这两点之间没有任何观测点。
+因此措辞上限固定为：
+
+> 在本次运行的可观测点 `{首读哈希, 末次重读哈希}` 上，未观测到该源的内容漂移。
+
+不得写「冻结」「原子」「同一时刻」「内容未变」。写入 `plans/`/收据时必须同时给出
+HEAD、域规模、两次哈希所用算法路径（`digest=afalg|soft`）与窗口标记 `window=`。
+`AF_ALG` 路径本身也可能失败（非 Linux、内核未编 `CONFIG_CRYPTO_USER_API_HASH`）→
+退回 `cx_sha256_hex` 并在 scope 行写 `digest=soft`，不得因此跳过校验。
+
+### 11.4 代价、权限、deadline（实测，绑定 `/tmp/pinH` = `1f4129d306` 快照与本机）
+
+实测（本机，`unisacc.com` 解释执行）：
+
+| 路径 | 块 | 次数 | 总字节 | 耗时 | 吞吐 |
+|---|---|---|---|---|---|
+| `sy_sha256_hex`（AF_ALG） | 587351 | 20 | 11.75 MB | 65 ms | ≈181 MB/s |
+| `sy_sha256_hex`（AF_ALG） | 8328 | 3226 | 26.9 MB | 188 ms | ≈143 MB/s（≈58 µs/次） |
+| `cx_sha256_hex`（软件） | 587351 | 20 | 11.75 MB | 1365 ms | ≈8.6 MB/s |
+| `cx_sha256_hex`（软件） | 8328 | 3226 | 26.9 MB | 3072 ms | ≈8.7 MB/s |
+
+域实测（当前共享树 manifest，仅当次收据）：1613 文件 / 13,432,673 B，均值 8328 B，最大
+587,351 B。两趟（首读 + 末次重读）合计哈希 **26.9 MB**：
+
+- AF_ALG：≈0.19 s；
+- 软件回退：≈3.1 s（最坏情形，非 Linux）。
+
+另加：manifest 两趟 ≈0.4 MB（可忽略）、索引文件 967 KB × 2（AF_ALG ≈11 ms / 软件 ≈0.23 s）、
+`git ls-files` 视图 151 KB × 2 + 两次 spawn（各 ~10–20 ms）。
+合计新增最坏 ≈3.5–4 s，批次 `budget_seconds=55` 足够。
+
+deadline 规则（不许用缩范围换取时间）：
+
+- 内部常量 `CL_DEADLINE_MS = 40000`（批次 55 s 的余量）；
+- 在四个相位边界检查：`symindex update` 后、主循环每 256 个源、末次重读每 256 个源、
+  打印前；
+- 超限 → `UNDECIDED DEADLINE phase=<update|scan|redigest|report>` → rc3；
+- **不允许**为了不超时而跳过末次重读、抽样哈希、或用文件计数代替摘要。
+
+权限：
+
+- 全部读取用 `sy_open_read`（无 `O_NOFOLLOW` 变化，保持现状），只读共享树；不写除
+  `out/cx-layers-index/`（既有）之外的任何路径；
+- `.git/index` 只需读权限；CI 上常见 0644；EACCES 必须报 errno，不得降级为跳过；
+- `git` 只读子命令（`rev-parse`、`ls-files`），不写 index、不取锁；若 `git` 报
+  `index.lock` 存在也不影响只读命令。
+
+### 11.5 夹具（在 §10.5 的 +27 之外，总 +31）
+
+| id | 形状 | 断言 |
+|---|---|---|
+| `k-digest-buffer` | 源里同时含 `/*`、`"#'`、`#if 0` 等清洗敏感形状 | 摘要取清洗前字节：与直接 `sha256sum` 该文件一致（用编译期期望值写死） |
+| `k-unmerged` | 构造 3 个 stage 的索引条目（`git update-index --index-info`） | `UNDECIDED GIT-UNMERGED`、rc3 |
+| `k-index-view-change` | 两次 `git ls-files` 之间 `git add` 一个新文件 | `GIT-INDEX-VIEW-CHANGED`、rc3 |
+| `k-aba` | 记录首读摘要后改文件再改回（同内容） | **rc0**，且收据只能写「未观测到漂移」，不得写「未变」 |
+
+`k-aba` 是本次唯一「必须证明不能声称更强结论」的用例：断言是「不报警」与
+「收据措辞受限」，不是断言内容未变。
+
+### 11.6 验收（替代 §10.6）
+
+1. `--fixtures`：`checks` = 原值 + 31，`failed=0`；`k-aba` 断言 rc0 且 scope 行含
+   `window=`；`k-digest-buffer` 的期望值来自外部 `sha256sum`（在 `plans/` 记一次）。
+2. 全量审计：scope 行须含 `man_sha=<12>`、`index_view_sha=<12>`、`index_file_sha=<12>`、
+   `digest=afalg|soft`、`window=STABLE|MOVED`、`cache_orphans=`；`undecided` 实测值 >0
+   即非 PASS。
+3. 收据文字受 §11.3 约束：只写「可观测点上未观测到漂移」。
+4. `tools/affected.cx --files tools/check-cx-layers.cx --run`、`tools/ratchets.cx`；
+   `srcshape` 记录该工具新增静态内存（+260 KiB `cl_dig`）与新增 `#pragma unisa use sys.sha`
+   （第 8 条，远低于 48 上限）。
+5. spec 与三源不动；G-3 不裁；`OPEN-LEX-LINE` 未决；补边另案；shard GC 另案。
