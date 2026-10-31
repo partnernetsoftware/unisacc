@@ -1,85 +1,62 @@
 # cx — 结构化主线：pragma 扩展、底层/上层两棵树
 
-> 本篇是 `cx/` 树的总索引。对外条款在 [`spec.md`](spec.md)（编号只增不改）。模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)），不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。目录归属总览见 [`ARCHITECTURE.md`](../ARCHITECTURE.md)。
+> 本篇是 `cx/` 树的总索引，不是第二份规格。对外条款在 [`spec.md`](spec.md)（编号只增不改）。pragma 扩展说明在 §2.1，分层功能树在 §13.1；这两节是导航。语言与模块是 §1–§7（`CX-L`…`CX-P`）；目录架构是 §13（`CX-S-1`…`CX-S-10`）；分层许可、L0 形状、运行期所有权、棘轮是 §8–§11（`CX-Y` `CX-A` `CX-O` `CX-R`）。未落地的不在效力范围（§12 `CX-W`）。模块化与内存安全叙事归 **Paper D**（[`research/paper-d-intent.md`](../research/paper-d-intent.md)），不塞进 Paper A。现行产品阅读见 [`docs/cx/prd.md`](../docs/cx/prd.md)。目录归属总览见 [`ARCHITECTURE.md`](../ARCHITECTURE.md)。
 
 ## 一、`#pragma unisa` 扩展
 
-`.cx` 不新增 C 关键字。模块声明、导入和符号级操作都压在 `#pragma unisa` 这一行内，宿主 gcc/clang 会忽略整行 pragma（这正是 `gcc_cx.com`/`clang_cx.com` 靠宿主编译器工作的前提）。解析器是同一份，三源一致（见 §1.4）。
+说明与语法树在 [`spec.md` §2.1](spec.md)。条款是 **CX-L-1** **CX-L-2**、**CX-G-1**…**CX-G-4**、**CX-M-***、**CX-U-***、**CX-N-***。重导出 `export` 未生效（**CX-W-3**）。过程记录在 [`plans/cx-use-alias-reexport.md`](../plans/cx-use-alias-reexport.md)。
 
-### 1.1 两个指令
+## 二、目录架构
 
-| 指令 | 语法 | 语义 |
-|---|---|---|
-| `module` | `#pragma unisa module NAME` | 声明本文件为库模块；`NAME` 必须等于文件名 stem，否则拒绝 |
-| `use` | `#pragma unisa use NAME [::sym [as alias]]` | 导入模块；`NAME = seg(.seg)*`，点号=子目录，在使用者同目录解析 |
+规范在 [`spec.md` §13](spec.md)。功能树在 [`§13.1`](spec.md)。下表只作导航，冲突时以条款为准。
 
-### 1.2 `use` 的三个粒度
-
-1. **整模块导入**：`use text.text` — 导入该模块全部公开符号。
-2. **符号级导入**：`use a::other` — 只导入 `other`，不导入 a 的其余符号。消解「只想用 a 的一个函数、却撞上 a 与 b 的同名符号」场景。
-3. **符号级导入 + 别名**：`use a::clash as ca` — 导入 `clash` 但改名为 `ca`，把同名符号彻底分开（对齐 Rust `use a::b::c as d`）。
-
-### 1.3 约束与校验
-
-- `::`、`as` 只在 pragma 行内出现，不进入 C 表达式，不新增 C 关键字。
-- `use` 必须在所有声明之前（否则 `unisa pragma after first declaration`），不能在 `#if` 条件内（`unisa pragma inside conditional`）。
-- **命名空间冲突拒绝**：两个模块导出同名符号报 `clash exported by both a and b`，除非被符号级过滤或别名消解；模块循环（`a→b→a` 或自循环）硬拒绝 `module cycle`。锁定在 [`tests/cx-namespace.cx`](../tests/cx-namespace.cx)（8 用例）。
-- **CXIF v0 生成**：direct use 给 full 接口，transitive use 只给 type part；符号级导入只输出匹配 sym 的原型。
-
-### 1.4 三源一致性
-
-解析逻辑单一权威源 `cx/cx0/plan.cx`（`CX0_COMPAT_BODY_BEGIN/END` 之间），经 `tools/cx0-extract.cx` 投影成 `src/cxmod.c`（gcc_cx/clang_cx 宿主链用），并独立移植到产品模块 `cx/compiler/cxmod.cx`（unisacc.com 链用）。`cx0-extract -- --check` 保证投影逐字一致（`EXACT`）。**改 use 语法先改 plan.cx，再重新投影；cxmod.cx 单独移植同一逻辑。** 详见 [`plans/cx-use-alias-reexport.md`](../plans/cx-use-alias-reexport.md)。
-
-### 1.5 尚未实现
-
-**重导出 `export`**（Rust `pub use`）：`a use b` + `a export b`，让使用方 `use a` 自动看到 b 的符号。已登记在方案第三部分，未落地。
-
-## 二、底层 / 上层两棵树
-
-`cx/` 按「离 libc 的距离」分两层，上层不得直接调 libc/POSIX，只能经底层 L0 接口。**层就是目录**：`cx/sys/`、`cx/mem/`、`cx/text/` 三个目录整体是 L0，其余目录是上层。这条边界由两个棘轮强制，**只降不升，新文件必须为 0**：`tests/cxraw.cx`（裸 libc 调用，扫描面含 `cx/**/*.c`、`*.h`、`*.c.in`）与 `tests/cxinclude.cx`（上层 `#include`，同一扫描面）。
-
-### 2.1 底层（L0 宿主对接，唯一可碰 libc/POSIX）
-
-| 目录 | 模块 | 对接内容 | 对应 Rust/Node |
+| 层 | 路径 | 条款 | 索引 |
 |---|---|---|---|
-| [`cx/sys/`](sys/README.md) | `sys.env` `sys.fs` `sys.proc` `sys.time` `sys.net` `sys.posix` `sys.mem` `sys.dl` `sys.sha` `sys.guard` `sys.ffi` `sys.io` `sys.fd` `sys.poll` `sys.tty` `sys.sig`，进程组与进程事实 `kernel` `process` `process_group` `process_group_osx`，以及 `lnx-x86_64.c`（Linux 进程组 `__syscall6` 提供者） | 文件/目录、进程、进程组、时间、环境、映射内存、动态装载、摘要、信号、poll/tty；一律返回 `-errno` | `std::fs` `std::process` `std::env` |
-| [`cx/mem/`](mem/README.md) | `mem.heap` `mem.bytes` `mem.arena` `mem.grow` `mem.slice` | malloc/calloc 显式长度封装、带界 copy/move/fill/compare、句柄式分组分配、可增长缓冲区、借用切片 | `Vec<u8>` `&[u8]` `Bump` |
-| [`cx/text/`](text/README.md) | `text.text` `text.build` `text.deflate` `text.fmt` `text.num` | 带界 z-string/span、字符串构造器、deflate 压缩、格式化、数字 | `str` `String` `Buffer` `zlib` |
+| L0 | [`cx/sys/`](sys/README.md) [`cx/mem/`](mem/README.md) [`cx/text/`](text/README.md) | **CX-S-1** **CX-A-1**…**CX-A-5** **CX-Y-4** | 文件/进程/时间/环境/映射/装载；带长度的堆与字节；带界文本。模块名单在各 README，不钉进条款 |
+| L1 | [`cx/core/`](core/memory.md) [`cx/runtime/`](runtime/README.md) | **CX-S-2** **CX-O-1**…**CX-O-6** | 执行器、包装载/解码、路由、流输出 |
+| L2 | [`cx/driver/`](driver) [`cx/compiler/`](compiler) `src/`（引导例外除外） | **CX-S-3** **CX-S-7** **CX-S-8** | CLI、tape、绑定、`cxmod`；`winprocess` 留在 compiler；名表只经生成器 |
+| L3 | `tools/` `tests/` `apps/` | **CX-S-4** **CX-S-10** | 构造与验证。`apps/csih/`、`ujs/` 不由本树条款授权改写 |
+| 解析 / 包图 / 密码 | [`cx/cx0/`](cx0/README.md) [`cx/workspace/`](workspace/README.md) [`cx/crypto/`](crypto) | **CX-S-6** **CX-S-7** **CX-Y-5** **CX-G-4** | cx0 不是 L0；crypto 是上层纯计算 |
 
-### 2.2 上层（L1/L2，经 L0 消费，不碰 libc）
+许可不在目录散文里开：裸 libc 只看 `tests/cxraw-layers.tsv`，`#include` 只看 `tests/cxinclude-boundary.tsv`（**CX-S-5** **CX-Y-1** **CX-Y-2**）。扫描面见 **CX-S-9**。棘轮 ID 见 **CX-R-1**…**CX-R-7**，一次跑 `tools/ratchets.cx`。
 
-| 目录 | 职责 | 索引 |
-|---|---|---|
-| [`cx/core/`](core/memory.md) | 执行器：ALU、栈、稀疏表、过渡、执行核、输出；按实例拥有的缓冲区、move/drop | `core/memory.md` |
-| [`cx/compiler/`](compiler) | 编译器各阶段：`cxmod`（模块解析）、`tapegate`/`tapelink`（tape）、`bindstage`/`bindgate` 等（绑定）、`fwd*`（前向）、`streamname`/`netname`（七流十八网名表）、`winprocess`（当前进程 PE 页走查，纯整数计算） | — |
-| [`cx/runtime/`](runtime/README.md) | 运行时：包装载/解码/生命周期、模型装载、路由（`routestep`/`routespan`/`routetime`）、流输出 | `runtime/README.md` |
-| [`cx/driver/`](driver) | 驱动：`cli`/`args`/`input`/`output`/`path`/`env`/`compat`/`route`/`archive`/`deps` | — |
-| [`cx/cx0/`](cx0/README.md) | 权威 CX 解析器 + 经典 C 兼容投影 + 不可变单元束 | `cx0/README.md` |
-| [`cx/workspace/`](workspace/README.md) | 包图、构建、严格续构、声明资源目录闭包 | `workspace/README.md` |
-| [`cx/crypto/`](crypto) | 密码学原语：目前 `crypto.sha256`（SHA-256 + HMAC-SHA-256，纯计算、无宿主库）；TLS 分片见 `plans/cx-l0-tls.md` | — |
+分层铁律（全文在 spec，这里只列 ID）：
 
-`cx/crypto/` 是**上层**：它不碰 libc，只做整数运算与调用方提供的缓冲区。放在 `cx/text/` 之外是因为它不是文本工具；放在 L0 之外是因为它不需要任何宿主对接。将来若用 Linux AF_ALG 加速 AEAD，加速路径按 `cx/sys/sha.cx` 的形状放进 `cx/sys/`，导出函数仍不带条件编译。
+| 铁律 | 条款 |
+|---|---|
+| 只有 L0 与白名单可以 `#include` | **CX-Y-1** **CX-S-5** |
+| 上层不直调 libc/POSIX，走 `sy_*` / `mm_*` / `tx_*` | **CX-Y-2** |
+| 上层不写平台 `#if`，不写 `__syscallN` | **CX-Y-3** |
+| 跨模块错误只走返回值 `-errno` | **CX-Y-4** |
+| 间接可见函数无原型 | **CX-U-5** |
+| 名表手改无效 | **CX-S-8** |
 
-### 2.3 分层铁律
-
-- **只有底层能 `#include`** 对接 libc/POSIX 头；上层用隐式前导 + `#pragma unisa use`。允许的目录前缀与逐个精确例外（连同理由）在 `tests/cxinclude-boundary.tsv`。
-- **上层不直调 libc**：printf/malloc/strcmp/open 等一律改走 L0 的 `sy_*`、`mm_*`、`tx_*`。
-- **上层不写平台 `#if`**（`__linux__`/`_WIN32`/`__APPLE__` 等），也不写 `__syscallN`；平台差异只放 L0 的 `_os` 静态帮手或表里。
-- **errno 每编译单元一份**：跨模块错误码只走返回值（`-errno`），不依赖全局 errno。
-- **间接可见函数无原型**：A use mid、mid use text.fmt，A 调 tx_snprintf 会错；约定用到哪个模块的函数就直接 use 那个模块。
-
-两个棘轮的扫描面是 `git ls-files -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'`：`cx/` 下的宿主 C 与 `.c.in` 投影同样受约束，`src/`、`exec/`、`tools/` 的宿主 C 不在分层叙事内、不扫。
-
-| 表 | 管什么 | 形式 |
-|---|---|---|
-| `tests/cxraw-layers.tsv` | 谁可以裸调 libc/POSIX | 目录前缀（`cx/sys/` `cx/mem/` `cx/text/`）+ 少量精确例外，每条附理由 |
-| `tests/cxinclude-boundary.tsv` | 谁可以 `#include` | 目录前缀 + 逐个精确例外（`FILE<TAB>理由`） |
-| `tests/cxraw.tsv`、`tests/cxinclude.tsv` | 存量基线 | 每文件一行计数，只降不升 |
-
-详见 [`plans/cx-layers.md`](../plans/cx-layers.md)（分层设计与已落地记录）。
+设计过程与已落地记录在 [`plans/cx-layers.md`](../plans/cx-layers.md)，不是条款。
 
 ## 三、当前状态与边界
 
 - 已装产品仍用原驱动，`cx` 结构化入口（`cxmod`/CXIF v0）是迁移桥；编译期所有权（Rust 式 borrow checker）尚未实现，运行期句柄检查 ≠ 编译期所有权。
 - `src/cxmod.c` 是活的生成兼容输入（投影），`exec/c` 执行核仍服务新链；旧 C 只在生产/构造/测试全不读它后才归档。
-- `cx/compiler/`、`cx/runtime/` 下有大量由 `tools/nametab-gen.cx` 从 `tools/nametabs.tsv` 生成的 `*name.cx`/`*.cx` 名表（`elfname`/`x86*`/`k*`/`l*` 等），手改会被生成器覆盖；改它们要走「事实表 → 生成器（带 `--check`）→ 表」。
+- 名表手改无效，合同是 **CX-S-8**。`elfname` / `x86*` / `k*` / `l*` 等在生成器覆盖范围内。
+
+## 四、扩展约定（分析，不是条款）
+
+2026-10-31。不改 [`spec.md`](spec.md)。下面不是 **CX-L** / **CX-G** 的改写，也不把「能跟 Rust、Bun、Node 竞争」写成已生效目标。
+
+用 `#pragma` 扩 C、而且做成了的，是规范，不是某个单仓语言。OpenMP（`#pragma omp`）和 OpenACC（`#pragma acc`）是存在证明：C 标准要求不认识的 pragma 忽略，所以宿主不用改。Cilk Plus 的 `#pragma simd` 已死，能力进了 OpenMP。GitHub 上最近的安全扩 C 是 [checkedc/checkedc](https://github.com/checkedc/checkedc)（2026-10-30 仍在动）；它用 `_Ptr`、`_Array_ptr`，不走 pragma，要改 clang。没找到另一个还在维护、用宿主忽略的 pragma 做模块加所有权的公开语言。
+
+能跟宿主共存的约定只有三条：
+
+| 约定 | 宿主行为 | 适合挂什么 | 本树 |
+|---|---|---|---|
+| `#pragma` / `_Pragma` | 不认识就忽略 | 一行一个指令：`module`、`use` | 现行路。契约在文件里，`gcc_cx` / `clang_cx` 不改宿主 |
+| C23 `[[unisa::...]]`，以及 gcc `__attribute__` | 不认识的属性忽略 | 贴在声明上：所有权、借用、生命周期 | 唯一值得以后加的第二条。pragma 贴不住单个声明。现在不加 |
+| 旁路文件 | 完全看不见 | 层号、生成表、不属于语法的事实 | 已在用：本索引、`spec.md`、tsv。不能代替文件里的 `use`，两份会漂 |
+
+不能当本树约定的：
+
+- 新关键字：宿主直接编译失败，除非改编译器或先剥掉再交 gcc。`gcc_cx` / `clang_cx` 的前提就没了。
+- 宏库：宿主能编，加不出模块、所有权和链接合同。
+- 注释里的契约：宿主忽略，但注释不进语法，工具和人都会漏。
+
+决定：语言扩展继续只走 pragma。声明级事实将来可以加属性，现在不加，也不为此改 spec。旁路只放层号、表和条款，不放 `use`。选哪条约定，都不构成跟 Rust、Bun、Node 竞争的资格。

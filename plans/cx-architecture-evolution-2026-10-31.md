@@ -68,7 +68,7 @@ L0 错误码与失败输出待核：`CX-Y-4` 要求 L0 失败返回 `-errno` 或
 
 每个资源 API 需写出拥有者、可否按值复制、转移规则、借用范围及失效点、错误和失败后状态。既有 `mg_buf` 的 move/take/free、`ms_slice` 的借用及 `cm_*` 的世代/借用检查按 CX-O 实施。不得按值复制拥有中的资源结构；当前这属于调用方合同，不是语言已强制的事实。扩容可能使借用失效，具体接口应写明；禁止使用已经失效的借用。
 
-`mg_append` 扩容重叠缺陷已实测（Linux x86-64，已装产品默认运行）：`out/cdx-grow-overlap-fyeCulVs/overlap.cx` 先写入 16 字节，再从自身偏移 2 处追加 8 字节，并在期间持有另一堆分配以尝试触发搬迁；输出 `GROW_OVERLAP rc=0 moved=1 content=0`、进程退出 1。原有 `tools/check-cx-grow.cx` 的重叠用例不触发扩容，不能覆盖此路径。产品 sha256 `fc1d4513fb1363c8506df8afa08444882337e615bf38d82dd42f022e2c23dc6f`，`cx/mem/grow.cx` 为 `39aec7b8d01a54500da982dcd5c681cbd4398acd6377e818ef2e662fde2d3585`，探针为 `f743d91945470865a915c29ccbcf1419841fb028850129e196129bf736db4f3f`；执行前后摘要相同仅是端点观测，不排除 ABA。源码中扩容后继续使用调用方原 `p` 是候选原因；有符号加法结果比较的溢出检查仍属未实证风险。须按 `cx/mem` 所有权协调修复；保留既有重叠、失败原子性和真实搬迁验收，不以禁止重叠、减断言或未搬迁路径代替。
+`mg_append` 扩容重叠缺陷已实测（Linux x86-64，已装产品默认运行）：`out/cdx-grow-overlap-fyeCulVs/overlap.cx` 先写入 16 字节，再从自身偏移 2 处追加 8 字节，并在期间持有另一堆分配以尝试触发搬迁；输出 `GROW_OVERLAP rc=0 moved=1 content=0`、进程退出 1。原有 `tools/check-cx-grow.cx` 的重叠用例不触发扩容，不能覆盖此路径。产品 sha256 `fc1d4513fb1363c8506df8afa08444882337e615bf38d82dd42f022e2c23dc6f`，缺陷时 `cx/mem/grow.cx` 为 `39aec7b8d01a54500da982dcd5c681cbd4398acd6377e818ef2e662fde2d3585`，探针为 `f743d91945470865a915c29ccbcf1419841fb028850129e196129bf736db4f3f`；执行前后摘要相同仅是端点观测，不排除 ABA。源码中扩容后继续使用调用方原 `p` 是候选原因。**源码修复**（2026-10-31）：commit `93e8959c13`——有符号溢出先拒；源落在 `data..data+cap` 且需要扩容时先拷到临时堆块再 `mg_growto`，失败路径释放临时块且缓冲区不变；非扩容重叠仍 `mm_move`；`tools/check-cx-grow.cx` 增 `append-overlap-grow/content`（16→再 append `data+2` 共 8）。旧失败探针不复跑。此为源码刀关闭，**不**等于已装产品重测或发布资格；产品 sha 仍须所有者核验。
 
 安全能力按证据分账：
 

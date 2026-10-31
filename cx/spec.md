@@ -1,7 +1,7 @@
 # `.cx` 规格
 
 > 对外条款。编号只增不改；废弃条款保留 ID 并标「废弃」。
-> 当前状态与路线在 [`prd.md`](prd.md)；语言远景在 [`docs/cx-spec-draft.md`](../docs/cx-spec-draft.md)。未列入本文件的草案句子不在效力范围内。
+> 当前状态与路线在 [`prd.md`](prd.md)。pragma 扩展说明在 §2.1；分层功能树在 §13.1。这两节是导航，不是新条款。语言远景在 [`docs/cx-spec-draft.md`](../docs/cx-spec-draft.md)。未列入本文件的草案句子不在效力范围内。
 > 本文件不替代仓库根 [`spec.md`](../spec.md)（那是流／网／编译器条款）。模块化与内存安全叙事归 Paper D。
 
 RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOULD / MAY。
@@ -21,6 +21,7 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 | `CX-A` | L0 合同 |
 | `CX-O` | 运行期所有权 |
 | `CX-R` | 棘轮 |
+| `CX-S` | 目录架构 |
 | `CX-W` | 未生效（保留，不在效力范围） |
 
 **[CX-L-0]** 条款分两栏：正文是规范；「未生效」节不得被实现或测试写成已交付。运行期句柄检查不得称为编译期所有权。
@@ -51,6 +52,36 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 ## 2. pragma 文法 [CX-G]
 
 词法：`NAME = seg(.seg)*`，`seg = [a-z_][a-z0-9_]*`。`::` 与 `as` 只出现在 pragma 行内，不得进入 C 表达式。
+
+### 2.1 扩展说明（导航，不是新条款）
+
+`.cx` 不新增 C 关键字。模块声明与导入都压在一行 `#pragma unisa` 里。宿主 gcc/clang 忽略未知 pragma；展开在驱动内完成（**CX-L-1** **CX-L-2**）。
+
+```text
+#pragma unisa
+├─ module NAME                         库模块；NAME = 文件 stem          CX-M-1 CX-M-2
+└─ use NAME[::sym [as alias]]          导入；NAME = seg(.seg)*           CX-U-1…CX-U-4
+   ├─ use text.text                    整模块：当前公开集
+   ├─ use a::other                     只引入 other，其余公开符号不进本单元
+   └─ use a::clash as ca               引入并改名；表达式写 ca，不写 clash
+```
+
+位置与拒绝（诊断文本在对应条款里）：
+
+| 约束 | 条款 |
+|---|---|
+| `::` 与 `as` 只在 pragma 行内，不进 C 表达式 | 本节词法；**CX-L-1** |
+| 任何声明之前 | **CX-G-2** |
+| 不得在 `#if` 为真的分支内 | **CX-G-3** |
+| 未知指令拒绝 | **CX-G-1** |
+| 同名函数或类型拒绝，除非符号级过滤或别名拆开可见名 | **CX-N-1** **CX-N-3** |
+| 本单元不得再定义已被 `use` 导出的函数名 | **CX-N-2** |
+| 模块图无环 | **CX-M-3** |
+| 间接 `use` 不给原型；用到的模块必须直接 `use` | **CX-U-5** |
+| 重导出 `export` 未生效 | **CX-W-3** |
+
+三源：权威是 `cx/cx0/plan.cx` 的 `CX0_COMPAT_BODY`；`src/cxmod.c` 是投影，必须逐字一致；`cx/compiler/cxmod.cx` 实现同一文法。改文法先改 `plan.cx`（**CX-G-4**）。
+
 
 | ID | 条款 |
 |---|---|
@@ -213,7 +244,7 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 
 | ID | 内容 | 状态 |
 |---|---|---|
-| **CX-W-1** | `use` 只留引用；每个模块只编一只对象，链接共享。不定 `STB_WEAK`。 | 已裁定，未落地 |
+| **CX-W-1** | `-c -funit` 只编命令行文件的函数体；直接 `use` 只给声明。整程序 `-run` / 一次 `-o` 仍每个模块嵌入一份。产品链接按 realpath 把闭包各编一只再链。不定 `STB_WEAK`。见 `plans/cx-link-unit-2026-10-31.md`。 | 已裁定，未落地 |
 | **CX-W-2** | `.cx` 中 `#include` 为前端具名拒绝（CX3） | 未落地；现为棘轮 |
 | **CX-W-3** | `export`（Rust `pub use`） | 未落地；现禁止间接原型已足够 |
 | **CX-W-4** | 编译期所有权／借用检查（草案 §5） | 未落地 |
@@ -223,3 +254,57 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-W-8** | CXIF 效果／布局／所有权字段（v1 schema） | 未落地 |
 
 宿主驱动 `gcc_cx.com` / `clang_cx.com` 的产物是普通 C，不授予已检查身份。
+
+---
+
+## 13. 目录架构 [CX-S]
+
+本节钉目录归属与生成物边界。谁可以碰 libc 或 `#include` 仍以 **CX-Y** 与两张白名单为准，不在这里另开许可。
+
+| ID | 条款 |
+|---|---|
+| **CX-S-1** | 层就是目录，不由文件内注释或临时路径决定。L0 只有 `cx/sys/`、`cx/mem/`、`cx/text/`。 |
+| **CX-S-2** | L1 机制是 `cx/core/`、`cx/runtime/`：执行器、包装载、模型装载、路由、资源账本。不得直接调用 libc/POSIX。 |
+| **CX-S-3** | L2 是 `cx/driver/`、`cx/compiler/`，以及 `src/` 里除引导例外以外的产品面。CLI、绑定、tape、模块展开在这一层。 |
+| **CX-S-4** | L3 是 `tools/`、`tests/`、`apps/`：构造、验证、应用。与 L1/L2 一样不得直接调用 libc/POSIX，除非白名单精确例外。 |
+| **CX-S-5** | 精确例外只来自 `tests/cxraw-layers.tsv` 与 `tests/cxinclude-boundary.tsv`。表外文件不得因“暂时”“引导”“探针”获得许可。每条精确例外必须带理由。引导期 `src/host.cx`、`src/hostnative.cx` 若仍在表内，只以表内那一行为准。 |
+| **CX-S-6** | `cx/cx0/` 是解析权威与兼容投影，不是 L0。文法以 **CX-G-4** 为准。`cx/workspace/` 是包图与构建，属上层。 |
+| **CX-S-7** | `cx/crypto/` 属上层纯计算，合同见 **CX-Y-5**。`cx/compiler/winprocess.cx` 是编译器侧的整数与 PE 页走查，不是宿主对接，不得迁回 `cx/sys/`。 |
+| **CX-S-8** | `cx/compiler/` 与 `cx/runtime/` 下由 `tools/nametab-gen.cx` 按 `tools/nametabs.tsv` 生成的名表，手改无效。改名表只走「事实表 → 生成器 `--check` → `--write`」。生成器未覆盖的手写模块不在此条。 |
+| **CX-S-9** | 分层棘轮扫描面是已跟踪的 `*.cx`，加上 `cx/**/*.c`、`cx/**/*.h`、`cx/**/*.c.in`，排除 `archive/`。`src/`、`exec/`、`tools/` 的宿主 C 不在此扫描面。已跟踪符号链接不得重复计数。 |
+| **CX-S-10** | `apps/csih/` 与 `ujs/` 不由本架构条款授权改写。测携带头本身的表面探针只以 include 边界表的精确条目存在，不得按目录放行。 |
+
+L0 各目录的模块名单以该目录 README 为导航，不钉进条款；增删模块不改本表 ID。
+
+### 13.1 分层功能树（导航，不是新条款）
+
+增删模块不改 ID。逐函数表在各目录 README（**CX-A-5**）。冲突时以 **CX-S** / **CX-Y** / **CX-A** 为准。
+
+```text
+cx
+├─ L0  唯一可对接 libc/POSIX                         CX-S-1 CX-Y-1 CX-Y-2
+│  ├─ sys    文件 目录 进程 进程组 时间 环境 网络
+│  │          映射 动态装载 摘要 信号守卫 ffi poll tty fd   CX-A-1
+│  │          另有 kernel / process / process_group（无 sys. 前缀，仍是 L0）
+│  ├─ mem    heap 带长度分配；bytes 带界 copy/move/fill/compare
+│  │          arena 分组释放；grow = Vec<u8>；slice = &[u8]   CX-A-2 CX-O
+│  └─ text   text 带界 z-string/span；build = String
+│             deflate；fmt 格式化；num 数字                 CX-A-3
+├─ L1  机制，经 L0，不碰 libc                         CX-S-2
+│  ├─ core      执行器：ALU、栈、稀疏表、过渡、输出；cm_* 句柄   CX-O-6
+│  └─ runtime   包装载/解码/生命周期、模型装载、路由、流输出
+├─ L2  驱动与编译器                                  CX-S-3
+│  ├─ driver    cli args input output path env compat route
+│  ├─ compiler  cxmod、tape、绑定、前向；名表只经生成器       CX-S-8 CX-G-4
+│  │             winprocess：PE 页走查，不是宿主对接           CX-S-7
+│  └─ src/      产品六层入口；引导例外只以白名单那一行为准     CX-S-5
+├─ 上层其它（不是 L0）                                CX-S-6 CX-Y-5
+│  ├─ cx0         解析权威 + 经典 C 投影 + 单元束
+│  ├─ workspace   包图、构建、声明资源闭包
+│  └─ crypto      纯计算：摘要、AEAD、曲线、RSA/X.509、TLS 1.3 记录与客户端
+│                 不 #include 宿主密码库；加速若要系统接口必须进 sys
+└─ L3  tools / tests / apps                         CX-S-4 CX-S-10
+   构造、验证、应用。csih 与 ujs 不由本树授权改写
+```
+
+调用方向只允许向下：L3/L2/L1 → L0 的 `sy_*` / `mm_*` / `tx_*`，或同层已 `use` 的公开符号。不得跨层读全局 `errno`（**CX-Y-4**）。平台 `#if` 与 `__syscallN` 只出现在 L0（**CX-Y-3**）。

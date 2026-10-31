@@ -300,18 +300,14 @@ int cxm_goodname(char *w, int n) {
     }
     return st == 0;
 }
-/* Same file when the text matches, or when sy_realpath folds both names
-   to one. sy_stat_t has no device number, so the inode is not compared.
-   Command-line units and use units both go through this. The body stays
-   in the drive object (runcache uses sys.fs). This unit does not: -funit
-   would copy sys.fs in and the link would report sy_fstat twice. */
+/* Same file when the two normalised texts match. sy_path has no device
+   number, and this unit must not pull sys.fs in (-funit would compile a
+   second copy into this object and the link would report sy_fstat twice).
+   Both sides are therefore compared as text: every path in cxm_path is
+   already lexically normalised by cxm_norm, and callers hand absolute
+   paths, so the only equivalence a text compare misses is a symlink. */
 int cxm_samefile(char *a, char *b) {
-    char ra[4096]; char rb[4096];
-    extern char *realpath(const char *, char *);
-    if (cxm_eq(a, b)) return 1;
-    if (!realpath(a, ra) || !realpath(b, rb)) return 0;
-    if (cxm_eq(ra, rb)) return 1;
-    return 0;
+    return cxm_eq(a, b);
 }
 /* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
