@@ -1,0 +1,85 @@
+/* tests/runner-faults.cx -- tests/run-batch.cx classifies a child that overruns, floods, forks or crashes.
+ *
+ *   sh ./unisacc.com tests/runner-faults.cx            (from the repo root; works in out/runner-faults-batch/)
+ *
+ * A private root (a copy of the installed unisacc.com, a five-row tests/batches.tsv, a one-row tests/coverage.tsv and
+ * five fixture programs) is run through the real tests/run-batch.cx, one batch per case:
+ *   ok       prints the marker, exits 0                      -> BATCH_RUN status=PASS, exit 0   (harness control)
+ *   sleeper  sleeps far past its 2 s budget                  -> status=UNKNOWN transport=-1, exit 3, never PASS/FAIL
+ *   chatty   writes output without pause past the budget     -> the same, still within budget + startup + 0.25 s slack
+ *   grand    starts a grandchild (sleep 61) and ends         -> UNKNOWN, and no grandchild survives the runner
+ *   crash    dereferences NULL                               -> status=FAIL rc=-11 (the signal named), exit 1, not UNKNOWN
+ * The aggregate side (an UNKNOWN receipt keeps --all unresolved) is tests/all-aggregate-controls.cx.
+ * Prints PASS/FAIL per case and RUNNER_FAULTS<TAB>assertions=N<TAB>failed=M; exit 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], rr[4600], com[4400], bound[4400], runb[4400], marker[64];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("runner-faults: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\trunner-faults.%s\n", name); else { failures++; sy_printf("FAIL\trunner-faults.%s\n", name); } }
+static void put(const char *rel, const char *s) { char p[4800]; if (cx_fmt(p, sizeof p, "%s/%s", rr, rel) || cx_write(p, s, (size_t)tx_len(s, 4096))) die(rel); }
+static int has(const np_result *r, const char *s) { return tx_find(r->out, (long)r->outn, s, tx_len(s, 256)) >= 0; }
+
+/* run-batch ID against the private root; *ms is the wall time */
+static np_result batch(const char *id, long *ms) {
+    char *v[16], pp[4800], why[1024]; int n = 0; np_result r; long t0 = sy_now_ms();
+    if (cx_fmt(pp, sizeof pp, "%s/out/p", rr)) die("parent");
+    v[n++] = bound; v[n++] = "30"; v[n++] = "sh"; v[n++] = com; v[n++] = runb; v[n++] = "--"; v[n++] = rr; v[n++] = pp; v[n++] = (char *)id; v[n] = 0;
+    if (np_run(v, root, 0, 40, &r, why, sizeof why)) die(why);
+    *ms = sy_now_ms() - t0; return r;
+}
+
+int main(void) {
+    np_result r; long ms; char p[4800], img[4800]; size_t sn; char *bytes; int look, left;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/runner-faults-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(runb, sizeof runb, "%s/tests/run-batch.cx", root)) die("paths");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700) || cx_fmt(rr, sizeof rr, "%s/root", work) || sy_mkdir(rr, 0700)) die("work");
+    if (cx_fmt(p, sizeof p, "%s/tests", rr) || sy_mkdir(p, 0700) || cx_fmt(p, sizeof p, "%s/out", rr) || sy_mkdir(p, 0700) || cx_fmt(p, sizeof p, "%s/out/p", rr) || sy_mkdir(p, 0700)) die("dirs");
+    bytes = cx_read(com, &sn); if (!bytes || cx_fmt(img, sizeof img, "%s/unisacc.com", rr) || cx_write(img, bytes, sn)) die("copy product");
+    if (cx_fmt(marker, sizeof marker, "rfgrand%ld", sy_now_ms())) die("marker");
+
+    put("tests/coverage.tsv", "id\tlayer\timplementation\texpected_or_gap\tsource\nfx.cov\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttests/ok.cx\n");
+    put("tests/batches.tsv", "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n"
+        "ok\tIMPLEMENTED\tcontract\ttests/ok.cx\tSOURCE\tlnx/x86_64\t5\t-\ttests/ok.cx\t-\tfx.cov\trc0:FX\n"
+        "sleeper\tIMPLEMENTED\tcontract\ttests/sleeper.cx\tSOURCE\tlnx/x86_64\t2\t-\ttests/sleeper.cx\t-\tfx.cov\trc0:FX\n"
+        "chatty\tIMPLEMENTED\tcontract\ttests/chatty.cx\tSOURCE\tlnx/x86_64\t2\t-\ttests/chatty.cx\t-\tfx.cov\trc0:FX\n"
+        "grand\tIMPLEMENTED\tcontract\ttests/grand.cx\tSOURCE\tlnx/x86_64\t2\t-\ttests/grand.cx\t-\tfx.cov\trc0:FX\n"
+        "crash\tIMPLEMENTED\tcontract\ttests/crash.cx\tSOURCE\tlnx/x86_64\t5\t-\ttests/crash.cx\t-\tfx.cov\trc0:FX\n");
+    put("tests/ok.cx", "#include <stdio.h>\nint main(void){ puts(\"FX\"); return 0; }\n");
+    put("tests/sleeper.cx", "#include <unistd.h>\nint main(void){ sleep(30); return 0; }\n");
+    put("tests/chatty.cx", "#include <stdio.h>\nint main(void){ for(;;) puts(\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"); return 0; }\n");
+    {   char g[512]; if (cx_fmt(g, sizeof g, "#include <stdlib.h>\nint main(void){ system(\"sleep 61 # %s\"); return 0; }\n", marker)) die("grand"); put("tests/grand.cx", g); }
+    put("tests/crash.cx", "int main(void){ *(volatile int*)0 = 1; return 0; }\n");
+
+    r = batch("ok", &ms); ck(r.rc == 0 && has(&r, "status=PASS"), "control-ok-batch-passes"); np_free(&r);
+
+    r = batch("sleeper", &ms);
+    ck(r.rc == 3 && has(&r, "status=UNKNOWN") && has(&r, "transport=-1") && !has(&r, "status=PASS") && !has(&r, "status=FAIL"), "timeout-is-unknown-not-pass-or-fail-exit-3"); np_free(&r);
+
+    r = batch("chatty", &ms);
+    ck(r.rc == 3 && has(&r, "status=UNKNOWN") && !has(&r, "status=PASS"), "wall-deadline-output-flood-is-unknown");
+    ck(ms >= 2000 && ms < 9000, "wall-deadline-flood-ends-within-budget-plus-startup"); np_free(&r);
+
+    r = batch("grand", &ms); ck(r.rc == 3 && has(&r, "status=UNKNOWN"), "descendant-batch-times-out-unknown"); np_free(&r);
+    {   char cmd[300], out[64]; int cut; char *ps[4]; if (cx_fmt(cmd, sizeof cmd, "ps -eo args | grep -c '[s]leep 61 # %s'; true", marker)) die("ps");   /* grep -c exits 1 on a count of 0 */
+        ps[0] = "sh"; ps[1] = "-c"; ps[2] = cmd; ps[3] = 0; left = -1;
+        for (look = 0; look < 6 && left != 0; look++) { sy_sleep_ms(400); left = sy_run(ps, out, sizeof out, &cut) == 0 ? (int)tx_strtol(out, 0, 10) : -1; }
+        ck(left == 0, "descendant-cleanup-no-grandchild-survives"); }
+
+    r = batch("crash", &ms);
+    ck(r.rc == 1 && has(&r, "status=FAIL") && has(&r, "rc=-11") && !has(&r, "status=UNKNOWN"), "signal-is-fail-with-signal-named"); np_free(&r);
+
+    sy_printf("RUNNER_FAULTS\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
