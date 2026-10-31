@@ -1480,3 +1480,51 @@ cx_sha256_hex("abc") = 同上                                                   
   故 §17.2 #5 属**将来**风险（文件长到 1 MiB 才触发），仍应显式分支而非依赖概率。
 
 清理：`rm -rf /tmp/shaprobe /tmp/shaq.cx`。
+
+### 17.7 CX-Y-4 与 `sy_sha256_hex`：静态冲突确认（A 不改 L0/spec）
+
+cdx 指出的冲突**成立**，逐项核过：
+
+| 项 | 事实 |
+|---|---|
+| spec 条款 | `cx/spec.md:184`（CX-Y-4）：「L0 失败必须返回 `-errno`（或已文档化的负码）；空指针／空路径／负长度应当 `-EINVAL`；失败不得留下半开 fd」 |
+| 实现 | `cx/sys/sha.cx:51` `int sy_sha256_hex(...) { return sy_sha256_af(...); }`；`sy_sha256_af`（`:14`）在 socket/bind/accept/短写/短读/参数非法处一律 `return 1;`（共 7 处 `return 1;`，**0 处** `return -E*`） |
+| 文档化？ | 模块头（`:5-8`）写的是「Any failure returns non-zero and leaves hex empty」。这是**非零**，既不是 `-errno`，也不是文档化的**负码** ⇒ 与 CX-Y-4 字面冲突 |
+| 是否孤例 | **是**。`cx/sys/` 全部 21 个模块中，只有 `sha.cx` 是 `-E*`=0、`return 1;`=7；其余（`fs.cx` 38、`proc.cx` 15、`posix.cx` 14、`sig.cx` 11、`net.cx` 9、`mem.cx` 7、`time.cx` 7 …）都用负 errno |
+| 半开 fd | **当前无**：bind 失败关 sfd、accept 失败关 sfd、短写关两个、短读在两个 `close` 之后才判 `got != 32` ⇒ 失败路径不泄漏 fd（CX-Y-4 这一条已满足） |
+
+ABI 面（只做静态事实，判定归 go）：
+
+| 项 | 事实 |
+|---|---|
+| 是否在裁剪 libc 符号表 | **否**：`kernel/unisa_headers.inc` 中 `sy_sha256_hex` 出现 0 次 |
+| 是否在隐式 prelude | **否**：`include/cx-flat.h` 中 0 次（`cx_sha256_hex` 才是 prelude 里的） |
+| 可达方式 | 仅 `#pragma unisa use sys.sha`，或手写前置声明：`cx/runtime/runexec.cx:242`、`src/runcache.cx:218`（签名一致） |
+| 树内调用点 | 5 文件 6 处：`cx/runtime/runexec.cx:245`（真值）、`src/runcache.cx:229`（`== 0`）、`tools/symindex.cx:451`（`== 0`）、`tools/check-cx-sys.cx:378/381/388`（只断成功 `af_rc == 0`）、`tools/check-cx-layers.cx:395/718`（`!= 0`，go 在途） |
+
+**结论（对 A 的影响：零）**：所有调用点只区分「零 / 非零」，负码仍是非零 ⇒ 若 go 把
+`return 1;` 改成 `return -errno;`（短写无 errno，需文档化负码如 `-EIO`；参数非法 `-EINVAL`），
+并保留「失败时 `hex[0]=0`」的既有行为，A 的 `!=0` + `cx_sha256_hex` 回退**一行都不用改**。
+
+A 侧只加一条收据要求：`digest=afalg|soft` 之外再记 `digest_reason`（`ok` / `no-afalg` /
+`hash-fail`）。理由：`sy_sha256_hex` 无法区分「本平台不支持」与「本次写/读失败」，没有这个字段时
+一次瞬时失败会静默降级成软哈希，事后无法分辨。此项只改 A 的收据，不动 L0、不动 spec。
+
+### 17.8 rc 分档实测（仓外夹具，`8361c3cf6b` 工具本体）
+
+构造：`/tmp/cxrc3` 一个假根，软链 `sys`/`text`/`cxlib` 到真实模块，`unisacc.com` 换成只把预置
+`manifest.tsv` + 一个 shard 拷进 `out/cx-layers-index/` 的 stub，绕开 `symindex update`。
+源码 `src/a.cx` 内容 `one line\n`；四个场景各跑一次。
+
+| 场景 | manifest 内容 | 输出 | rc |
+|---|---|---|---|
+| A 正常 | sha = 文件真实 sha，shard 存在，`U` 行仅 `#symindex v1` | `edges=0 failed=0`，四项 undecided 全 0 | **0** |
+| B 纯未决 | sha 全 0（≠ 文件），shard 存在 | `UNDECIDED SOURCE-CHANGED`，`undecided_io=1`，`failed=0` | **3** |
+| C 畸形行 | sha 长 63 | `UNDECIDED MANIFEST-PARSE`，`undecided_meta=1`，`failed=0` | **3** |
+| D 失败+未决 | sha 全 0 且无 shard | `UNDECIDED SOURCE-CHANGED` + `FAIL SHARD`，`failed=1` | **1** |
+
+由此确认（**实跑收据**，非推断）：rc 三档与「失败优先」在单根场景下按设计工作。同时复现了 §17.2
+的两条：#4（哈希不匹配与不可读同归 `SOURCE-CHANGED`+#B）、#7（C 场景 `continue` 后**没有** `FAIL SHARD`
+输出 ⇒ 畸形行连 shard 缺失都一起吞掉）。
+
+清理：`rm -rf /tmp/cxrc3`。
