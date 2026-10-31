@@ -1,0 +1,766 @@
+#pragma unisa module tls13
+#pragma unisa use sha256
+#pragma unisa use hkdf
+#pragma unisa use ct
+#pragma unisa use x25519
+#pragma unisa use x509
+#pragma unisa use p256
+#pragma unisa use rsa
+/* crypto/tls13 -- the TLS 1.3 (RFC 8446) client handshake above the record layer: the key schedule,
+   the transcript hash, the handshake messages a client builds or checks, and the client state machine.
+
+     cs_tls13_transcript_init(t) / _add(t, p, n) / _hash(t, out32)
+          the running SHA-256 of every handshake message, headers included, in both directions.
+
+     cs_tls13_early_secret(psk32, out32)      HKDF-Extract(0^32, psk); pass 32 zero bytes for no PSK
+     cs_tls13_derived(secret32, out32)        Derive-Secret(secret, "derived", Hash(""))
+     cs_tls13_handshake_secret(derived32, shared32, out32)
+     cs_tls13_master_secret(derived32, out32)
+     cs_tls13_traffic_secret(secret32, label, thash32, out32)
+                                              label is "c hs traffic", "s hs traffic", "c ap traffic" or
+                                              "s ap traffic"; the "tls13 " prefix is added by hkdf.
+     cs_tls13_finished_key(secret32, out32)   the 32-byte Finished key of a traffic secret
+     cs_tls13_finished_value(finished_key32, thash32, out32)
+                                              HMAC(finished_key, thash): the verify_data to send
+     cs_tls13_finished_check(secret32, thash32, value, n)
+                                              0 when the peer's Finished is right, -EBADMSG otherwise
+     cs_tls13_traffic_keys(secret32, suite, keys)
+                                              AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305 keys and iv
+     cs_tls13_traffic_secret_update(secret32, next32)   the KeyUpdate "traffic upd" derivation
+     cs_tls13_keylen(suite)                   the AEAD key length, or -ENOSYS for a suite not implemented
+
+     cs_tls13_client_hello(out, cap, random32, keyshare32, sni, snilen)
+                                              the ClientHello this module's client sends, or a negative
+                                              error; returns the message length including the 4-byte header
+     cs_tls13_parse_server_hello(body, n, sh) / cs_tls13_parse_ee(body, n, &alpn, &alpnlen)
+     cs_tls13_cert_begin(it, body, n) / cs_tls13_cert_next(it, &der, &derlen)
+                                              a strict reader over a Certificate message's chain
+     cs_tls13_parse_cert_verify(body, n, cv)
+     cs_tls13_check_cert_verify(&leaf, cv, thash32)
+                                              the server's signature over the handshake context, verified
+                                              with the leaf's key: ECDSA P-256, RSA PKCS#1 v1.5 SHA-256 or
+                                              RSA-PSS SHA-256 (salt length 32).  Anything else -ENOSYS.
+     cs_tls13_message(p, avail)               the framed length of the message at p, or -EAGAIN
+
+     cs_tls13_client_start(c, priv32, random32, sni, snilen, now, out, cap, &outlen)
+     cs_tls13_client_retry(c, priv32, out, cap, &outlen)
+                                              the second ClientHello after a HelloRetryRequest
+     cs_tls13_client_recv(c, msg, msglen)     feed one complete handshake message
+     cs_tls13_client_finished(c, out32)       the client's Finished verify_data, once CONNECTED
+
+   What this is not: no PSK or 0-RTT resumption, no client certificates, no HelloRetryRequest second round
+   beyond x25519, no P-256/P-384 key exchange (the reader would need a matching ECDH) and no SHA-384
+   suites, because the key schedule here is SHA-256 throughout.  A suite this module cannot protect data
+   with is refused at ServerHello time instead of being negotiated and then failing to encrypt. */
+
+enum {
+    CS_TLS13_AES_128_GCM_SHA256 = 0x1301,
+    CS_TLS13_AES_256_GCM_SHA384 = 0x1302,
+    CS_TLS13_CHACHA20_POLY1305_SHA256 = 0x1303
+};
+enum {
+    CS_TLS13_HS_CLIENT_HELLO = 1,
+    CS_TLS13_HS_SERVER_HELLO = 2,
+    CS_TLS13_HS_NEW_SESSION_TICKET = 4,
+    CS_TLS13_HS_ENCRYPTED_EXTENSIONS = 8,
+    CS_TLS13_HS_CERTIFICATE = 11,
+    CS_TLS13_HS_CERTIFICATE_REQUEST = 13,
+    CS_TLS13_HS_CERTIFICATE_VERIFY = 15,
+    CS_TLS13_HS_FINISHED = 20,
+    CS_TLS13_HS_KEY_UPDATE = 24,
+    CS_TLS13_HS_MESSAGE_HASH = 254
+};
+enum { CS_TLS13_HASH = 32 };
+enum { CS_TLS13_MAX_CERT = 4096 };    /* the leaf DER copied into a client, and so its lifetime is owned */
+
+/* ---- transcript hash ------------------------------------------------------------------------ */
+
+typedef struct {
+    cs_sha256_t h;
+} cs_tls13_transcript;
+
+void cs_tls13_transcript_init(cs_tls13_transcript *t) { cs_sha256_init(&t->h); }
+
+int cs_tls13_transcript_add(cs_tls13_transcript *t, const unsigned char *p, long n) {
+    return cs_sha256_update(&t->h, p, n);
+}
+
+/* The hash does not consume the state: cs_sha256_final() is applied to a copy, so the transcript keeps
+   absorbing messages after a hash was taken. */
+int cs_tls13_transcript_hash(const cs_tls13_transcript *t, unsigned char out[CS_TLS13_HASH]) {
+    cs_sha256_t c = t->h;
+    return cs_sha256_final(&c, out);
+}
+
+/* ---- key schedule --------------------------------------------------------------------------- */
+
+int cs_tls13_early_secret(const unsigned char psk[CS_TLS13_HASH], unsigned char out[CS_TLS13_HASH]) {
+    static const unsigned char zero[CS_TLS13_HASH] = {0};
+    if (!psk || !out) return -EINVAL;
+    return cs_hkdf_extract_sha256(zero, CS_TLS13_HASH, psk, CS_TLS13_HASH, out);
+}
+
+/* Derive-Secret(secret, "derived", "") -- the context is Hash(""), not the empty context. */
+int cs_tls13_derived(const unsigned char secret[CS_TLS13_HASH], unsigned char out[CS_TLS13_HASH]) {
+    static const char label[7] = {'d', 'e', 'r', 'i', 'v', 'e', 'd'};
+    unsigned char empty_hash[CS_TLS13_HASH];
+    if (!secret || !out) return -EINVAL;
+    if (cs_sha256("", 0, empty_hash)) return -EINVAL;
+    return cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, label, 7, empty_hash, CS_TLS13_HASH, out,
+                                       CS_TLS13_HASH);
+}
+
+int cs_tls13_handshake_secret(const unsigned char derived[CS_TLS13_HASH],
+                              const unsigned char shared[CS_TLS13_HASH],
+                              unsigned char out[CS_TLS13_HASH]) {
+    if (!derived || !shared || !out) return -EINVAL;
+    return cs_hkdf_extract_sha256(derived, CS_TLS13_HASH, shared, CS_TLS13_HASH, out);
+}
+
+int cs_tls13_master_secret(const unsigned char derived[CS_TLS13_HASH], unsigned char out[CS_TLS13_HASH]) {
+    static const unsigned char zero[CS_TLS13_HASH] = {0};
+    if (!derived || !out) return -EINVAL;
+    return cs_hkdf_extract_sha256(derived, CS_TLS13_HASH, zero, CS_TLS13_HASH, out);
+}
+
+int cs_tls13_traffic_secret(const unsigned char secret[CS_TLS13_HASH], const char *label,
+                            const unsigned char thash[CS_TLS13_HASH], unsigned char out[CS_TLS13_HASH]) {
+    long n = 0;
+    if (!secret || !label || !thash || !out) return -EINVAL;
+    while (n < 64 && label[n]) n++;
+    if (n == 0 || n > 48) return -EINVAL;
+    return cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, label, n, thash, CS_TLS13_HASH, out,
+                                       CS_TLS13_HASH);
+}
+
+int cs_tls13_finished_key(const unsigned char secret[CS_TLS13_HASH], unsigned char out[CS_TLS13_HASH]) {
+    static const char label[8] = {'f', 'i', 'n', 'i', 's', 'h', 'e', 'd'};
+    if (!secret || !out) return -EINVAL;
+    return cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, label, 8, 0, 0, out, CS_TLS13_HASH);
+}
+
+int cs_tls13_finished_value(const unsigned char finished_key[CS_TLS13_HASH],
+                            const unsigned char thash[CS_TLS13_HASH],
+                            unsigned char out[CS_TLS13_HASH]) {
+    if (!finished_key || !thash || !out) return -EINVAL;
+    return cs_hmac_sha256(finished_key, CS_TLS13_HASH, thash, CS_TLS13_HASH, out);
+}
+
+int cs_tls13_finished_check(const unsigned char secret[CS_TLS13_HASH],
+                            const unsigned char thash[CS_TLS13_HASH],
+                            const unsigned char *value, long n) {
+    unsigned char key[CS_TLS13_HASH], want[CS_TLS13_HASH];
+    int r;
+    if (!secret || !thash || !value || n != CS_TLS13_HASH) return -EINVAL;
+    if ((r = cs_tls13_finished_key(secret, key))) return r;
+    if ((r = cs_tls13_finished_value(key, thash, want))) return r;
+    cs_ct_wipe(key, CS_TLS13_HASH);
+    return cs_ct_eq(want, value, CS_TLS13_HASH) ? 0 : -EBADMSG;
+}
+
+/* The two WriteKey/ReadKey blocks the record layer needs.  seq is the record sequence number and counts
+   from zero for every key set, including after a KeyUpdate. */
+typedef struct {
+    int suite;
+    long keylen;
+    unsigned char key[32];
+    unsigned char iv[12];
+    unsigned long seq;
+} cs_tls13_keys;
+
+int cs_tls13_keylen(int suite) {
+    if (suite == CS_TLS13_AES_128_GCM_SHA256) return 16;
+    if (suite == CS_TLS13_AES_256_GCM_SHA384) return -ENOSYS;    /* SHA-384 schedule not implemented */
+    if (suite == CS_TLS13_CHACHA20_POLY1305_SHA256) return 32;
+    return -ENOSYS;
+}
+
+int cs_tls13_traffic_keys(const unsigned char secret[CS_TLS13_HASH], int suite, cs_tls13_keys *k) {
+    static const char lkey[3] = {'k', 'e', 'y'};
+    static const char liv[2] = {'i', 'v'};
+    int n = cs_tls13_keylen(suite);
+    int r;
+    if (n < 0) return n;
+    if (!secret || !k) return -EINVAL;
+    if ((r = cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, lkey, 3, 0, 0, k->key, n))) return r;
+    if ((r = cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, liv, 2, 0, 0, k->iv, 12))) {
+        cs_ct_wipe(k->key, 32);
+        return r;
+    }
+    k->suite = suite;
+    k->keylen = n;
+    k->seq = 0;
+    return 0;
+}
+
+int cs_tls13_traffic_secret_update(const unsigned char secret[CS_TLS13_HASH],
+                                   unsigned char next[CS_TLS13_HASH]) {
+    static const char label[11] = {'t', 'r', 'a', 'f', 'f', 'i', 'c', ' ', 'u', 'p', 'd'};
+    if (!secret || !next) return -EINVAL;
+    return cs_hkdf_expand_label_sha256(secret, CS_TLS13_HASH, label, 11, 0, 0, next, CS_TLS13_HASH);
+}
+
+/* ---- handshake message framing -------------------------------------------------------------- */
+
+/* The declared length of the message at p, header included, or -EAGAIN while it is still incomplete. */
+long cs_tls13_message(const unsigned char *p, long avail) {
+    long len;
+    if (!p || avail < 0) return -EINVAL;
+    if (avail < 4) return -EAGAIN;
+    len = ((long)p[1] << 16) | ((long)p[2] << 8) | (long)p[3];
+    if (len > 0x40000L) return -EINVAL;          /* no handshake message is that large */
+    if (avail < 4 + len) return -EAGAIN;
+    return 4 + len;
+}
+/* ---- ClientHello ------------------------------------------------------------------------------ */
+
+/* The body length depends on the SNI name, so the message is laid out in one pass into the caller's
+   buffer: legacy_version 0x0303, a 32-byte random, an empty legacy_session_id, the two suites this
+   client can protect data with, null compression, and these extensions in this order:
+
+     server_name          the SNI, host_name type
+     supported_groups     x25519, secp256r1, secp384r1, secp521r1, the ffdhe groups
+     key_share            x25519 only: this module has no other group's key exchange
+     supported_versions   0x0304 only
+     signature_algorithms ecdsa_secp256r1_sha256, the RSA PSS and PKCS#1 schemes, then the older ones
+
+   Nothing resumption-shaped is offered (no session_ticket, no psk_key_exchange_modes, no PSK), because
+   this client has no ticket store.  AES-256-GCM-SHA384 is not offered either: the key schedule here is
+   SHA-256 throughout, so the suite would be negotiated and then fail to protect a record.  Offering a
+   suite the client cannot complete is exactly the mistake that shows up only against the server that
+   picks it.  The legacy session id is empty; a real client often sends a random one for middlebox
+   compatibility, and the state machine echoes whatever was sent, so empty is legal here. */
+
+static const unsigned char cs_tls13_sigalgs[30] = {
+    0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x02, 0x03, 0x08, 0x04,
+    0x08, 0x05, 0x08, 0x06, 0x04, 0x01, 0x05, 0x01, 0x06, 0x01,
+    0x02, 0x01, 0x04, 0x02, 0x05, 0x02, 0x06, 0x02, 0x02, 0x02};
+
+static const unsigned char cs_tls13_groups[18] = {
+    0x00, 0x1d, 0x00, 0x17, 0x00, 0x18, 0x00, 0x19, 0x01, 0x00,
+    0x01, 0x01, 0x01, 0x02, 0x01, 0x03, 0x01, 0x04};
+
+static long cs_tls13_put16(unsigned char *p, long v) {
+    p[0] = (unsigned char)(v >> 8);
+    p[1] = (unsigned char)v;
+    return 2;
+}
+
+static long cs_tls13_ext(unsigned char *p, long type, long len) {
+    p[0] = (unsigned char)(type >> 8);
+    p[1] = (unsigned char)type;
+    return 2 + cs_tls13_put16(p + 2, len);
+}
+
+long cs_tls13_client_hello(unsigned char *out, long cap, const unsigned char random[32],
+                           const unsigned char keyshare[32], const char *sni, long snilen) {
+    static const unsigned char suites[4] = {0x13, 0x01, 0x13, 0x03};
+    long extlen, body, n, i;
+    if (!out || !random || !keyshare || !sni) return -EINVAL;
+    if (snilen <= 0 || snilen > 255) return -EINVAL;       /* a host name, not an empty string */
+    extlen = 4 + 2 + 3 + snilen                            /* server_name */
+           + 4 + 2 + 18                                    /* supported_groups */
+           + 4 + 2 + 4 + 32                                /* key_share */
+           + 4 + 3                                         /* supported_versions */
+           + 4 + 2 + 30;                                   /* signature_algorithms */
+    body = 2 + 32 + 1 + 2 + 4 + 1 + 1 + 2 + extlen;
+    if (4 + body > cap) return -ENOBUFS;
+    n = 4;
+    out[0] = CS_TLS13_HS_CLIENT_HELLO;
+    out[1] = (unsigned char)(body >> 16);
+    out[2] = (unsigned char)(body >> 8);
+    out[3] = (unsigned char)body;
+    n += cs_tls13_put16(out + n, 0x0303);                  /* legacy_version */
+    for (i = 0; i < 32; i++) out[n++] = random[i];
+    out[n++] = 0;                                          /* legacy_session_id length */
+    n += cs_tls13_put16(out + n, 4);
+    for (i = 0; i < 4; i++) out[n++] = suites[i];
+    out[n++] = 1;                                          /* legacy_compression_methods length */
+    out[n++] = 0;                                          /* null */
+    n += cs_tls13_put16(out + n, extlen);
+
+    n += cs_tls13_ext(out + n, 0x0000, 2 + 3 + snilen);    /* server_name */
+    n += cs_tls13_put16(out + n, 3 + snilen);              /* the list length */
+    out[n++] = 0;                                          /* host_name */
+    n += cs_tls13_put16(out + n, snilen);
+    for (i = 0; i < snilen; i++) out[n++] = (unsigned char)sni[i];
+
+    n += cs_tls13_ext(out + n, 0x000a, 2 + 18);            /* supported_groups */
+    n += cs_tls13_put16(out + n, 18);
+    for (i = 0; i < 18; i++) out[n++] = cs_tls13_groups[i];
+
+    n += cs_tls13_ext(out + n, 0x0033, 2 + 4 + 32);        /* key_share */
+    n += cs_tls13_put16(out + n, 4 + 32);                  /* the list length */
+    n += cs_tls13_put16(out + n, 0x001d);                  /* x25519 */
+    n += cs_tls13_put16(out + n, 32);
+    for (i = 0; i < 32; i++) out[n++] = keyshare[i];
+
+    n += cs_tls13_ext(out + n, 0x002b, 3);                 /* supported_versions */
+    out[n++] = 2;
+    n += cs_tls13_put16(out + n, 0x0304);
+
+    n += cs_tls13_ext(out + n, 0x000d, 2 + 30);            /* signature_algorithms */
+    n += cs_tls13_put16(out + n, 30);
+    for (i = 0; i < 30; i++) out[n++] = cs_tls13_sigalgs[i];
+    return n;
+}
+
+/* ---- ServerHello, EncryptedExtensions, Certificate, CertificateVerify ----------------------- */
+
+/* The HelloRetryRequest is a ServerHello whose random is this constant (RFC 8446 §4.1.3). */
+static const unsigned char cs_tls13_hrr_random[32] = {
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c};
+
+typedef struct {
+    int hrr;
+    int suite;
+    int ks_group;                       /* the selected group; in a retry, the group to send instead */
+    const unsigned char *ks_key;        /* the peer's key exchange, absent in a retry */
+    long ks_key_len;
+    const unsigned char *session_id;
+    long session_id_len;
+    int has_keyshare;
+    int has_version;
+} cs_tls13_sh;
+
+static int cs_tls13_eq(const unsigned char *a, const unsigned char *b, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+int cs_tls13_parse_server_hello(const unsigned char *body, long n, cs_tls13_sh *sh) {
+    const unsigned char *p = body, *end;
+    long sidlen, extlen;
+    if (!body || !sh || n < 2 + 32 + 1 + 2 + 1 + 2) return -EINVAL;
+    sh->hrr = 0;
+    sh->suite = 0;
+    sh->ks_group = 0;
+    sh->ks_key = 0;
+    sh->ks_key_len = 0;
+    sh->session_id = 0;
+    sh->session_id_len = 0;
+    sh->has_keyshare = 0;
+    sh->has_version = 0;
+    end = body + n;
+    if (p[0] != 0x03 || p[1] != 0x03) return -EINVAL;      /* legacy_version is fixed at TLS 1.2 */
+    sh->hrr = cs_tls13_eq(p + 2, cs_tls13_hrr_random, 32) ? 1 : 0;
+    p += 34;
+    sidlen = *p++;
+    if (sidlen > 32 || p + sidlen > end) return -EINVAL;
+    sh->session_id = p;
+    sh->session_id_len = sidlen;
+    p += sidlen;
+    if (p + 3 > end) return -EINVAL;
+    sh->suite = ((int)p[0] << 8) | (int)p[1];
+    p += 2;
+    if (*p++ != 0) return -EINVAL;                          /* legacy_compression_method must be 0 */
+    if (p + 2 > end) return -EINVAL;
+    extlen = ((long)p[0] << 8) | (long)p[1];
+    p += 2;
+    if (p + extlen != end) return -EINVAL;                  /* extensions must fill the message exactly */
+    while (p < end) {
+        long type, len;
+        if (p + 4 > end) return -EINVAL;
+        type = ((long)p[0] << 8) | (long)p[1];
+        len = ((long)p[2] << 8) | (long)p[3];
+        p += 4;
+        if (len > end - p) return -EINVAL;
+        if (type == 0x002b) {                               /* supported_versions */
+            if (len != 2 || ((long)p[0] << 8) + (long)p[1] != 0x0304) return -EINVAL;
+            if (sh->has_version) return -EINVAL;
+            sh->has_version = 1;
+        } else if (type == 0x0033) {                        /* key_share */
+            if (sh->has_keyshare) return -EINVAL;
+            sh->has_keyshare = 1;
+            if (sh->hrr) {
+                if (len != 2) return -EINVAL;
+                sh->ks_group = ((int)p[0] << 8) | (int)p[1];
+            } else {
+                if (len < 4) return -EINVAL;
+                sh->ks_group = ((int)p[0] << 8) | (int)p[1];
+                sh->ks_key_len = ((long)p[2] << 8) | (long)p[3];
+                if (sh->ks_key_len != len - 4) return -EINVAL;
+                sh->ks_key = p + 4;
+            }
+        } else if (type == 0x0029) {                        /* pre_shared_key was never offered */
+            return -EINVAL;
+        }
+        p += len;
+    }
+    if (!sh->has_version) return -EINVAL;
+    return 0;
+}
+
+/* EncryptedExtensions: only the extension list is validated; ALPN is surfaced for the caller because a
+   client that offers one must check the server chose it.  Any other extension is ignored. */
+int cs_tls13_parse_ee(const unsigned char *body, long n, const unsigned char **alpn, long *alpnlen) {
+    const unsigned char *p = body, *end;
+    if (alpn) *alpn = 0;
+    if (alpnlen) *alpnlen = 0;
+    if (!body || n < 2) return -EINVAL;
+    end = body + n;
+    p = body;
+    if ((long)(((long)p[0] << 8) | (long)p[1]) != n - 2) return -EINVAL;
+    p += 2;
+    while (p < end) {
+        long type, len;
+        if (p + 4 > end) return -EINVAL;
+        type = ((long)p[0] << 8) | (long)p[1];
+        len = ((long)p[2] << 8) | (long)p[3];
+        p += 4;
+        if (len > end - p) return -EINVAL;
+        if (type == 0x0010 && len >= 3) {                   /* ALPN */
+            long listlen = ((long)p[0] << 8) | (long)p[1];
+            if (listlen != len - 2 || listlen < 3) return -EINVAL;
+            if ((long)p[2] != listlen - 3) return -EINVAL;  /* exactly one protocol name */
+            if (alpn) *alpn = p + 3;
+            if (alpnlen) *alpnlen = listlen - 3;
+        }
+        p += len;
+    }
+    return 0;
+}
+
+typedef struct {
+    const unsigned char *ctx;
+    long ctxlen;
+    const unsigned char *p;
+    const unsigned char *end;
+} cs_tls13_cert_iter;
+
+int cs_tls13_cert_begin(cs_tls13_cert_iter *it, const unsigned char *body, long n) {
+    const unsigned char *p = body;
+    long ctxlen, listlen;
+    if (!it || !body || n < 4) return -EINVAL;
+    ctxlen = (long)p[0];
+    p += 1;
+    if (1 + ctxlen + 3 > n) return -EINVAL;
+    it->ctx = p;
+    it->ctxlen = ctxlen;
+    p += ctxlen;
+    listlen = ((long)p[0] << 16) | ((long)p[1] << 8) | (long)p[2];
+    p += 3;
+    if (listlen != n - 1 - ctxlen - 3) return -EINVAL;
+    it->p = p;
+    it->end = p + listlen;
+    return 0;
+}
+
+/* 0 with *der pointing at the next certificate, 1 at the end of the chain, negative on a malformed one. */
+int cs_tls13_cert_next(cs_tls13_cert_iter *it, const unsigned char **der, long *derlen) {
+    long clen, extlen;
+    if (der) *der = 0;
+    if (derlen) *derlen = 0;
+    if (!it) return -EINVAL;
+    if (it->p >= it->end) return 1;
+    if (it->end - it->p < 3) return -EINVAL;
+    clen = ((long)it->p[0] << 16) | ((long)it->p[1] << 8) | (long)it->p[2];
+    if (clen <= 0 || clen > it->end - it->p - 3) return -EINVAL;
+    *der = it->p + 3;
+    *derlen = clen;
+    it->p += 3 + clen;
+    if (it->end - it->p < 2) return -EINVAL;
+    extlen = ((long)it->p[0] << 8) | (long)it->p[1];
+    it->p += 2;
+    if (extlen > it->end - it->p) return -EINVAL;
+    it->p += extlen;
+    return 0;
+}
+
+typedef struct {
+    int sigalg;
+    const unsigned char *sig;
+    long siglen;
+} cs_tls13_cv;
+
+int cs_tls13_parse_cert_verify(const unsigned char *body, long n, cs_tls13_cv *cv) {
+    long len;
+    if (!body || !cv || n < 4) return -EINVAL;
+    cv->sigalg = ((int)body[0] << 8) | (int)body[1];
+    len = ((long)body[2] << 8) | (long)body[3];
+    if (len != n - 4) return -EINVAL;
+    cv->sig = body + 4;
+    cv->siglen = len;
+    return 0;
+}
+
+/* The signed content of a CertificateVerify (RFC 8446 §4.4.3):
+        64 * 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || Transcript-Hash
+   hashed once more with the signature's hash, which for all three algorithms here is SHA-256. */
+static const char cs_tls13_cv_context[33] = {
+    'T', 'L', 'S', ' ', '1', '.', '3', ',', ' ', 's', 'e', 'r', 'v', 'e', 'r', ' ', 'C',
+    'e', 'r', 't', 'i', 'f', 'i', 'c', 'a', 't', 'e', 'V', 'e', 'r', 'i', 'f', 'y'};
+
+static int cs_tls13_cv_digest(const unsigned char thash[CS_TLS13_HASH],
+                              unsigned char out[CS_TLS13_HASH]) {
+    unsigned char buf[64 + 33 + 1 + CS_TLS13_HASH];
+    long i, n = 0;
+    for (i = 0; i < 64; i++) buf[n++] = 0x20;
+    for (i = 0; i < 33; i++) buf[n++] = (unsigned char)cs_tls13_cv_context[i];
+    buf[n++] = 0;
+    for (i = 0; i < CS_TLS13_HASH; i++) buf[n++] = thash[i];
+    return cs_sha256(buf, n, out);
+}
+
+int cs_tls13_check_cert_verify(const cs_x509 *leaf, const cs_tls13_cv *cv,
+                               const unsigned char thash[CS_TLS13_HASH]) {
+    unsigned char digest[CS_TLS13_HASH];
+    cs_p256_t ec;
+    cs_p256_pt q;
+    if (!leaf || !cv || !thash) return -EINVAL;
+    if (cs_tls13_cv_digest(thash, digest)) return -EINVAL;
+    if (cv->sigalg == 0x0403) {                         /* ecdsa_secp256r1_sha256 */
+        if (!leaf->is_ec256 || !leaf->ec_point) return -EINVAL;
+        if (cs_p256_init(&ec)) return -EINVAL;
+        if (cs_p256_point_parse(&ec, leaf->ec_point, leaf->ec_pointlen, &q)) return -EINVAL;
+        return cs_p256_verify(&ec, &q, digest, cv->sig, cv->siglen);
+    }
+    if (cv->sigalg == 0x0401) {                         /* rsa_pkcs1_sha256, TLS 1.2 only */
+        if (!leaf->is_rsa) return -EINVAL;
+        return cs_rsa_verify_pkcs1_v15(&leaf->rsa_n, &leaf->rsa_e, digest, 32, cv->sig, cv->siglen);
+    }
+    if (cv->sigalg == 0x0804) {                         /* rsa_pss_rsae_sha256 */
+        if (!leaf->is_rsa) return -EINVAL;
+        return cs_rsa_verify_pss_sha256(&leaf->rsa_n, &leaf->rsa_e, digest, cv->sig, cv->siglen);
+    }
+    return -ENOSYS;
+}
+/* ---- client state machine -------------------------------------------------------------------- */
+
+enum {
+    CS_TLS13_START = 0,
+    CS_TLS13_WAIT_SERVER_HELLO = 1,
+    CS_TLS13_WAIT_ENCRYPTED_EXTENSIONS = 2,
+    CS_TLS13_WAIT_CERTIFICATE = 3,
+    CS_TLS13_WAIT_CERTIFICATE_VERIFY = 4,
+    CS_TLS13_WAIT_FINISHED = 5,
+    CS_TLS13_CONNECTED = 6,
+    CS_TLS13_FAILED = 7
+};
+
+/* One connection.  The x25519 private key and the handshake secrets live here for the whole handshake;
+   the leaf certificate is copied into the struct (CS_TLS13_MAX_CERT bytes) instead of pointing into the
+   decrypted record the caller handed in, because that buffer is transient and the parsed cs_x509 is not.
+   A failure moves the client to CS_TLS13_FAILED and no later message is accepted. */
+typedef struct {
+    int state;
+    int suite;
+    int hrr_count;
+    int retry_pending;
+    long now;                              /* seconds since the epoch, for the certificate dates */
+    const char *sni;                       /* NUL-terminated, owned by the caller */
+    long snilen;
+    unsigned char priv[32], pub[32], shared[32], random[32];
+    cs_tls13_transcript tr;
+    unsigned char hs_secret[32], master[32];
+    unsigned char c_hs[32], s_hs[32], c_ap[32], s_ap[32];
+    cs_tls13_keys hs_read, hs_write, ap_read, ap_write;
+    unsigned char leaf[CS_TLS13_MAX_CERT];
+    long leaflen;
+    cs_x509 cert;
+    unsigned char finished[32];
+} cs_tls13_client;
+
+static int cs_tls13_failed(cs_tls13_client *c, int rc) {
+    if (c) c->state = CS_TLS13_FAILED;
+    return rc ? rc : -EPROTO;
+}
+
+static const unsigned char cs_tls13_zero[32] = {0};
+
+int cs_tls13_client_start(cs_tls13_client *c, const unsigned char priv[32],
+                          const unsigned char random[32], const char *sni, long snilen, long now,
+                          unsigned char *out, long cap, long *outlen) {
+    long n, i;
+    int r;
+    if (outlen) *outlen = 0;
+    if (!c || !priv || !random || !sni || !out) return -EINVAL;
+    if (snilen <= 0 || snilen > 255 || sni[snilen] != 0) return -EINVAL;
+    c->state = CS_TLS13_START;
+    c->suite = 0;
+    c->hrr_count = 0;
+    c->retry_pending = 0;
+    c->now = now;
+    c->leaflen = 0;
+    for (i = 0; i < 32; i++) {
+        c->priv[i] = priv[i];
+        c->random[i] = random[i];
+    }
+    c->sni = sni;
+    c->snilen = snilen;
+    if ((r = cs_x25519_base(c->priv, c->pub))) return cs_tls13_failed(c, r);
+    cs_tls13_transcript_init(&c->tr);
+    n = cs_tls13_client_hello(out, cap, c->random, c->pub, sni, snilen);
+    if (n < 0) return cs_tls13_failed(c, (int)n);
+    if ((r = cs_tls13_transcript_add(&c->tr, out, n))) return cs_tls13_failed(c, r);
+    c->state = CS_TLS13_WAIT_SERVER_HELLO;
+    if (outlen) *outlen = n;
+    return 0;
+}
+
+/* The second ClientHello of a HelloRetryRequest: same random, same SNI, the key share the server asked
+   for.  Only x25519 is retried, so the caller passes a new x25519 private key. */
+int cs_tls13_client_retry(cs_tls13_client *c, const unsigned char priv[32],
+                          unsigned char *out, long cap, long *outlen) {
+    long n, i;
+    int r;
+    if (outlen) *outlen = 0;
+    if (!c || !priv || !out) return -EINVAL;
+    if (c->state != CS_TLS13_WAIT_SERVER_HELLO || !c->retry_pending) return -EINVAL;
+    for (i = 0; i < 32; i++) c->priv[i] = priv[i];
+    if ((r = cs_x25519_base(c->priv, c->pub))) return cs_tls13_failed(c, r);
+    n = cs_tls13_client_hello(out, cap, c->random, c->pub, c->sni, c->snilen);
+    if (n < 0) return cs_tls13_failed(c, (int)n);
+    if ((r = cs_tls13_transcript_add(&c->tr, out, n))) return cs_tls13_failed(c, r);
+    c->retry_pending = 0;
+    if (outlen) *outlen = n;
+    return 0;
+}
+static int cs_tls13_on_server_hello(cs_tls13_client *c, const unsigned char *msg, long n) {
+    cs_tls13_sh sh;
+    unsigned char h[CS_TLS13_HASH], mh[4 + CS_TLS13_HASH];
+    int r, i;
+    if (msg[0] != CS_TLS13_HS_SERVER_HELLO) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_parse_server_hello(msg + 4, n - 4, &sh))) return cs_tls13_failed(c, -EPROTO);
+    if (sh.hrr) {
+        if (c->hrr_count) return cs_tls13_failed(c, -EPROTO);        /* a second HelloRetryRequest */
+        if (cs_tls13_keylen(sh.suite) < 0) return cs_tls13_failed(c, -ENOSYS);
+        if (c->suite && c->suite != sh.suite) return cs_tls13_failed(c, -EPROTO);
+        if (sh.ks_group != 0x001d) return cs_tls13_failed(c, -ENOSYS);  /* only x25519 is retried */
+        /* CH1 is replaced by message_hash(CH1), a synthetic 0xfe message (RFC 8446 §4.4.1). */
+        if ((r = cs_tls13_transcript_hash(&c->tr, h))) return cs_tls13_failed(c, r);
+        mh[0] = CS_TLS13_HS_MESSAGE_HASH;
+        mh[1] = 0;
+        mh[2] = 0;
+        mh[3] = CS_TLS13_HASH;
+        for (i = 0; i < CS_TLS13_HASH; i++) mh[4 + i] = h[i];
+        cs_tls13_transcript_init(&c->tr);
+        if ((r = cs_tls13_transcript_add(&c->tr, mh, 4 + CS_TLS13_HASH))) return cs_tls13_failed(c, r);
+        if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+        c->hrr_count = 1;
+        c->retry_pending = 1;
+        c->suite = sh.suite;
+        return 1;                                                    /* the caller sends ClientHello2 */
+    }
+    if (c->retry_pending) return cs_tls13_failed(c, -EPROTO);         /* ClientHello2 was not sent */
+    if (sh.session_id_len != 0) return cs_tls13_failed(c, -EPROTO);   /* we sent an empty session id */
+    if (c->suite && c->suite != sh.suite) return cs_tls13_failed(c, -EPROTO);
+    if (cs_tls13_keylen(sh.suite) < 0) return cs_tls13_failed(c, -ENOSYS);
+    if (sh.ks_group != 0x001d || sh.ks_key_len != 32) return cs_tls13_failed(c, -ENOSYS);
+    if ((r = cs_x25519(c->priv, sh.ks_key, c->shared))) return cs_tls13_failed(c, r);
+    if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+    c->suite = sh.suite;
+    {
+        unsigned char early[CS_TLS13_HASH], derived[CS_TLS13_HASH], th[CS_TLS13_HASH];
+        r = cs_tls13_early_secret(cs_tls13_zero, early);
+        if (!r) r = cs_tls13_derived(early, derived);
+        if (!r) r = cs_tls13_handshake_secret(derived, c->shared, c->hs_secret);
+        cs_ct_wipe(early, CS_TLS13_HASH);
+        cs_ct_wipe(derived, CS_TLS13_HASH);
+        if (!r) r = cs_tls13_transcript_hash(&c->tr, th);
+        if (!r) r = cs_tls13_traffic_secret(c->hs_secret, "c hs traffic", th, c->c_hs);
+        if (!r) r = cs_tls13_traffic_secret(c->hs_secret, "s hs traffic", th, c->s_hs);
+        if (!r) r = cs_tls13_traffic_keys(c->c_hs, c->suite, &c->hs_write);
+        if (!r) r = cs_tls13_traffic_keys(c->s_hs, c->suite, &c->hs_read);
+        if (r) return cs_tls13_failed(c, r);
+    }
+    c->state = CS_TLS13_WAIT_ENCRYPTED_EXTENSIONS;
+    return 0;
+}
+
+static int cs_tls13_on_ee(cs_tls13_client *c, const unsigned char *msg, long n) {
+    int r;
+    if (msg[0] != CS_TLS13_HS_ENCRYPTED_EXTENSIONS) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_parse_ee(msg + 4, n - 4, 0, 0))) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+    c->state = CS_TLS13_WAIT_CERTIFICATE;
+    return 0;
+}
+
+static int cs_tls13_on_certificate(cs_tls13_client *c, const unsigned char *msg, long n) {
+    cs_tls13_cert_iter it;
+    const unsigned char *der;
+    long derlen, i;
+    int r;
+    if (msg[0] == CS_TLS13_HS_CERTIFICATE_REQUEST) return cs_tls13_failed(c, -ENOSYS);  /* no client cert */
+    if (msg[0] != CS_TLS13_HS_CERTIFICATE) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_cert_begin(&it, msg + 4, n - 4))) return cs_tls13_failed(c, -EPROTO);
+    if (it.ctxlen != 0) return cs_tls13_failed(c, -EPROTO);   /* we never sent a CertificateRequest */
+    r = cs_tls13_cert_next(&it, &der, &derlen);
+    if (r != 0 || derlen <= 0 || derlen > CS_TLS13_MAX_CERT) return cs_tls13_failed(c, -EPROTO);
+    for (i = 0; i < derlen; i++) c->leaf[i] = der[i];
+    c->leaflen = derlen;
+    if ((r = cs_x509_parse(c->leaf, c->leaflen, &c->cert))) return cs_tls13_failed(c, -EPROTO);
+    if (!cs_x509_valid_at(&c->cert, c->now)) return cs_tls13_failed(c, -EPROTO);
+    if (!cs_x509_match_dns(&c->cert, c->sni)) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+    c->state = CS_TLS13_WAIT_CERTIFICATE_VERIFY;
+    return 0;
+}
+
+static int cs_tls13_on_certificate_verify(cs_tls13_client *c, const unsigned char *msg, long n) {
+    cs_tls13_cv cv;
+    unsigned char th[CS_TLS13_HASH];
+    int r;
+    if (msg[0] != CS_TLS13_HS_CERTIFICATE_VERIFY) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_parse_cert_verify(msg + 4, n - 4, &cv))) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_transcript_hash(&c->tr, th))) return cs_tls13_failed(c, r);
+    if ((r = cs_tls13_check_cert_verify(&c->cert, &cv, th))) return cs_tls13_failed(c, r);
+    if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+    c->state = CS_TLS13_WAIT_FINISHED;
+    return 0;
+}
+
+static int cs_tls13_on_finished(cs_tls13_client *c, const unsigned char *msg, long n) {
+    unsigned char th[CS_TLS13_HASH], th2[CS_TLS13_HASH], fk[CS_TLS13_HASH];
+    unsigned char derived[CS_TLS13_HASH];
+    int r;
+    if (msg[0] != CS_TLS13_HS_FINISHED) return cs_tls13_failed(c, -EPROTO);
+    if (n != 4 + CS_TLS13_HASH) return cs_tls13_failed(c, -EPROTO);
+    if ((r = cs_tls13_transcript_hash(&c->tr, th))) return cs_tls13_failed(c, r);
+    /* -EBADMSG here means the peer does not hold the handshake traffic secret it claimed to. */
+    if ((r = cs_tls13_finished_check(c->s_hs, th, msg + 4, CS_TLS13_HASH))) return cs_tls13_failed(c, r);
+    if ((r = cs_tls13_transcript_add(&c->tr, msg, n))) return cs_tls13_failed(c, r);
+    if ((r = cs_tls13_transcript_hash(&c->tr, th2))) return cs_tls13_failed(c, r);
+    r = cs_tls13_derived(c->hs_secret, derived);
+    if (!r) r = cs_tls13_master_secret(derived, c->master);
+    cs_ct_wipe(derived, CS_TLS13_HASH);
+    if (!r) r = cs_tls13_traffic_secret(c->master, "c ap traffic", th2, c->c_ap);
+    if (!r) r = cs_tls13_traffic_secret(c->master, "s ap traffic", th2, c->s_ap);
+    if (!r) r = cs_tls13_traffic_keys(c->c_ap, c->suite, &c->ap_write);
+    if (!r) r = cs_tls13_traffic_keys(c->s_ap, c->suite, &c->ap_read);
+    if (!r) r = cs_tls13_finished_key(c->c_hs, fk);
+    if (!r) r = cs_tls13_finished_value(fk, th2, c->finished);
+    cs_ct_wipe(fk, CS_TLS13_HASH);
+    if (r) return cs_tls13_failed(c, r);
+    c->state = CS_TLS13_CONNECTED;
+    return 0;
+}
+
+/* Feed one complete handshake message, header included.  0 means it was accepted and the state moved on;
+   1 is the HelloRetryRequest case, where the caller must send the ClientHello built by
+   cs_tls13_client_retry(); a negative errno means the connection is failed and stays failed. */
+int cs_tls13_client_recv(cs_tls13_client *c, const unsigned char *msg, long n) {
+    long framed;
+    if (!c || !msg || n <= 0) return -EINVAL;
+    if (c->state == CS_TLS13_FAILED || c->state == CS_TLS13_START) return -EPROTO;
+    if (c->state == CS_TLS13_CONNECTED) return -EPROTO;
+    framed = cs_tls13_message(msg, n);
+    if (framed < 0 || framed != n) return -EINVAL;       /* exactly one message per call */
+    if (c->state == CS_TLS13_WAIT_SERVER_HELLO) return cs_tls13_on_server_hello(c, msg, n);
+    if (c->state == CS_TLS13_WAIT_ENCRYPTED_EXTENSIONS) return cs_tls13_on_ee(c, msg, n);
+    if (c->state == CS_TLS13_WAIT_CERTIFICATE) return cs_tls13_on_certificate(c, msg, n);
+    if (c->state == CS_TLS13_WAIT_CERTIFICATE_VERIFY) return cs_tls13_on_certificate_verify(c, msg, n);
+    if (c->state == CS_TLS13_WAIT_FINISHED) return cs_tls13_on_finished(c, msg, n);
+    return -EPROTO;
+}
+
+int cs_tls13_client_finished(const cs_tls13_client *c, unsigned char out[CS_TLS13_HASH]) {
+    long i;
+    if (!c || !out) return -EINVAL;
+    if (c->state != CS_TLS13_CONNECTED) return -EPROTO;
+    for (i = 0; i < CS_TLS13_HASH; i++) out[i] = c->finished[i];
+    return 0;
+}

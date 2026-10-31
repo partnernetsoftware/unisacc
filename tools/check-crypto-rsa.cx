@@ -3,11 +3,16 @@
 #pragma unisa use crypto.b64
 #pragma unisa use crypto.bn
 #pragma unisa use text.text
+#pragma unisa use crypto.sha256
 /* Vectors for crypto/rsa: PKCS#1 v1.5 signature verification with SHA-256.
 
    One real 2048-bit key, one digest and one real signature over it (made with Python's cryptography; s^e
    mod n was checked to be 00 01 FF...FF 00 30 31 30 0D 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20 ||
-   digest).  Then the rejections that matter: a changed digest, a changed signature byte, a signature that
+   digest).  The second half is the PSS encoding that TLS 1.3 uses (rsa_pss_rsae_sha256): real signatures over
+   a digest with a 32-byte salt at 1024 and 2048 bits, and the refusals that matter there: a 20-byte salt,
+   a signature over another digest, and a signature one byte short or long.
+
+   Then the rejections that matter: a changed digest, a changed signature byte, a signature that
    is too short or too long, a signature equal to the modulus, and the wrong public exponent.  The re-encoded
    EMSA is compared byte for byte inside cs_rsa_verify_pkcs1_v15, which is what refuses the Bleichenbacher
    '06 ladder: an attacker free to choose the padding's contents would otherwise pick a short integer whose
@@ -43,6 +48,50 @@ static const char sig_hex[] =
 static const char hash_hex[] = "230b107db41883e3dc8c114e49ae6c75178914db90150632f0ac7abb0b433f33";
 
 static unsigned char nbuf[256], ebuf[4], sig[300], alt[300], hash[32];
+
+static const char pss1_n[] =
+    "9325fbd772ff7f1f9f6c358703be0560d469eeaa9b45d277a8105176aadcb2a9"
+    "51dea1e42fa21abd5f13ecb37604a58dcf39227fcb78537978383d601ef38843"
+    "a13f0fbfee527145c9583014f1411945dc9736a6683856423bd05e4300d29ed2"
+    "d9faad894de0f0a55233745582366a63dd9c6d36aab1cf1878fe54bebb8e89c1";
+
+static const char pss1_sig[] =
+    "083f09691b1a795312b8d64cb0c55f9d503415ca12a07df3cf8020ee10769a90"
+    "11cbb6ae73e70f2485896c3e0bab8f37ead4f5f194a50b63c451cafd8be2c7aa"
+    "6e81e992e894d6b81d1770302774679606790c4b0ed2136732ce53cb629b031b"
+    "e6d6b9fd1e596ed150e8323d774cf7b1766b51a68541b24c09a6f35e2a2cefa2";
+
+static const char pss1_sig20[] =
+    "4eec0fa74462b58709c70f40f478deb7c928d59a862e15e7f6493dd6450ac1cf"
+    "5a4d0263eb1a7efb3dc765f329b5ed1cf32a6d794e4d5dc1b46be44f8c9798b6"
+    "7533a252064746f390e324e46eb72a91ed69d2f6a6bf38c32184bd4ac7ca3668"
+    "ba90432448e7cd3a7e54467caab9ab7b16daa37fb0437a5c95d97bb30d493691";
+
+static const char pss1_sigother[] =
+    "527275933bebcb63e57ae2eaae0fbe781c4fa05e7c1b0eeaf33d796ed73ce324"
+    "95c76da1453f02919f794937e0f8771d27668f89cb4938082aecde65e0882387"
+    "ec908b9a004f5f4d9ea500688458c298651892881d36a727e2159e4b664ff341"
+    "cb67cbb0f05033b7fe6d2515ea25c6b2641687035511d428b0b658f800782d6f";
+
+static const char pss2_n[] =
+    "8c2e4a0c1951e9672da1811fd1e4a27d7465f2a48e89e03bac5e279e8b6e4402"
+    "62f723ba76c34281b7615f3742abf7602bd1985a44317ab5bf90dabc854c24bb"
+    "71b71d1df482c1e0f083aa47003bd20c0c47dd6b858039c33d23e6a1d9b9f4e1"
+    "3109f6c404e47c9f8a789cd2229d8568a16f4596a4785ce61004a24dd6ad7dd9"
+    "82886f9b0f2929cf124f9b0842634e1bfd167fab4ceae1f0ba9db31af7490b99"
+    "f1d28a927c29a867b413bc03949d6fd8d293b7c2e5ccab887565012a8abdb053"
+    "c742bbf46a24a1e64010629f92ac04042f2862d18f2500ddbaa65105cc63ed11"
+    "dccd97c92c96f3cc46a133a64682a041a81b970ac3f89127544085eaabb52f55";
+
+static const char pss2_sig[] =
+    "7e061a6a3d9d1d8bb1b3b34a4a307bccdb8fdf6bc2d124ff633b888d32852748"
+    "b534ce0e8e251a717b8b7344a8572e3dea6531215c3f9a7c81ee67141d5c8e09"
+    "eb1381a7ade67fc1e461e9340c1577c9d20be464b1c12674565d9e007949cafa"
+    "e14cdd48cb1b2912764ea4b3d8c73554cce4a6de624333bed61b1bbf269b5876"
+    "86a2dc53156e27ceb8f5531cdf40797c3ac8752d6222e84d65b71f2176125888"
+    "078d39b9e5d70001411182296ec54b207bcf96eda76fdd03c3927c3d894b4d77"
+    "5cc3603d62385b9a002a69d7e3f263aa89556b43d7afcf17107e701299053f45"
+    "85b7cfd3a8ce26c01e3bb11726d7211d9b5c17db5144d5b6bf62140fe7eb54d4";
 
 int main(void) {
     cs_bn n, e, wrong;
@@ -85,6 +134,40 @@ int main(void) {
 
     ok(cs_rsa_verify_pkcs1_v15(&n, &e, hash, 16, sig, sn) != 0, "short digest length is refused");
     ok(cs_rsa_verify_pkcs1_v15(0, &e, hash, 32, sig, sn) != 0, "missing modulus is refused");
+
+
+    /* ---- PSS: rsa_pss_rsae_sha256, the encoding a TLS 1.3 CertificateVerify uses ---- */
+    {
+        cs_bn pn, pe;
+        unsigned char pnbuf[256], sigbuf[256], sigbuf2[256], h2[32];
+        long pnlen, s1len = 128, s2len = 256;
+        static const char pssmsg[] = "unisacc pss check";
+        ok(cs_sha256((const unsigned char *)pssmsg, 17, h2) == 0, "hash the PSS message");
+        ok(cs_hex_decode(pss1_n, 2 * 128, pnbuf, sizeof(pnbuf)) == 128, "decode the 1024-bit PSS modulus");
+        ok(cs_bn_from_bytes(&pn, pnbuf, 128) == 0, "load the 1024-bit PSS modulus");
+        ebuf[2] = 0x01;                                      /* the PKCS#1 block above left 0x03 there */
+        ok(cs_bn_from_bytes(&pe, ebuf, 3) == 0, "load the PSS exponent");
+        ok(cs_hex_decode(pss1_sig, 2 * 128, sigbuf, sizeof(sigbuf)) == 128, "decode the PSS signature");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s1len) == 0, "PSS signature verifies");
+        h2[0] ^= 0x01;
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s1len) != 0, "PSS with a changed digest is refused");
+        h2[0] ^= 0x01;
+        sigbuf[64] ^= 0x80;
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s1len) != 0, "PSS with a changed signature byte is refused");
+        sigbuf[64] ^= 0x80;
+        ok(cs_hex_decode(pss1_sig20, 2 * 128, sigbuf2, sizeof(sigbuf2)) == 128, "decode the 20-byte-salt PSS signature");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf2, s1len) != 0, "PSS with a salt shorter than 32 is refused");
+        ok(cs_hex_decode(pss1_sigother, 2 * 128, sigbuf2, sizeof(sigbuf2)) == 128, "decode the other-message PSS signature");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf2, s1len) != 0, "PSS over another message is refused");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s1len - 1) != 0, "a short PSS signature is refused");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s1len + 1) != 0, "a long PSS signature is refused");
+        pnlen = 256;
+        ok(cs_hex_decode(pss2_n, 2 * 256, pnbuf, sizeof(pnbuf)) == 256, "decode the 2048-bit PSS modulus");
+        ok(cs_bn_from_bytes(&pn, pnbuf, 256) == 0, "load the 2048-bit PSS modulus");
+        ok(cs_hex_decode(pss2_sig, 2 * 256, sigbuf, sizeof(sigbuf)) == 256, "decode the 2048-bit PSS signature");
+        ok(cs_rsa_verify_pss_sha256(&pn, &pe, h2, sigbuf, s2len) == 0, "a 2048-bit PSS signature verifies");
+        (void)pnlen;
+    }
 
     sy_printf("CHECK_CRYPTO_RSA\tfailed=%d\n", bad);
     return bad;

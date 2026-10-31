@@ -1,0 +1,458 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use crypto.tls13
+#pragma unisa use crypto.record
+#pragma unisa use crypto.x25519
+#pragma unisa use crypto.b64
+#pragma unisa use crypto.sha256
+#pragma unisa use crypto.x509
+/* The TLS 1.3 handshake and record layer against RFC 8448 §3, plus a synthetic handshake whose
+   fixtures were built from this module's own ClientHello so the state machine is exercised end to end.
+
+   Two layers, deliberately:  the RFC trace pins the key schedule, the transcript hashes, the message
+   parsers and the record format to bytes outside this repository;  the synthetic trace pins the client
+   state machine, because the RFC's ClientHello is not the one a client of this module sends (that one
+   offers a suite this module cannot protect data with, and resumption extensions it does not implement). */
+
+static int bad;
+static void ok(int c, const char *name) {
+    sy_printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
+    if (!c) bad = 1;
+}
+
+static long load(const char *path, unsigned char *buf, long cap) {
+    int fd = sy_open_read(path);
+    long size;
+    if (fd < 0) return -1;
+    size = sy_reg_size(fd);
+    if (size <= 0 || size > cap || sy_read_full(fd, buf, size)) { sy_close(fd); return -1; }
+    sy_close(fd);
+    return size;
+}
+
+/* does b[0..n) equal the hex string? */
+static int hexeq(const unsigned char *b, long n, const char *hex) {
+    unsigned char tmp[256];
+    long hlen = 0, i;
+    while (hex[hlen]) hlen++;
+    if (hlen != 2 * n || n > 256) return 0;
+    if (cs_hex_decode(hex, hlen, tmp, 256) != n) return 0;
+    for (i = 0; i < n; i++) if (tmp[i] != b[i]) return 0;
+    return 1;
+}
+
+static int equ(const unsigned char *a, const unsigned char *b, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static unsigned char f_ch[512], f_sh[512], f_ee[512], f_cert[1024], f_cv[512], f_fin[512];
+static unsigned char f_rec[1024], f_cfin[512], f_appc[512], f_apps[512], f_alert[512], f_nst[512], f_salert[512];
+static unsigned char f_syn_ch[512], f_syn_sh[512], f_syn_ee[512], f_syn_cert[1024], f_syn_cv[512];
+static unsigned char f_syn_fin[512], f_syn_cfin[512], f_syn_other[1024], f_syn_exp[1024];
+static long n_ch, n_sh, n_ee, n_cert, n_cv, n_fin, n_rec, n_cfin, n_appc, n_apps, n_alert, n_nst, n_salert;
+static long n_syn_ch, n_syn_sh, n_syn_ee, n_syn_cert, n_syn_cv, n_syn_fin, n_syn_cfin, n_syn_other, n_syn_exp;
+
+static const unsigned char server_priv[32] = {
+    0xb1, 0x58, 0x0e, 0xea, 0xdf, 0x6d, 0xd5, 0x89, 0xb8, 0xef, 0x4f, 0x2d, 0x56, 0x52, 0x57, 0x8c,
+    0xc8, 0x10, 0xe9, 0x98, 0x01, 0x91, 0xec, 0x8d, 0x05, 0x83, 0x08, 0xce, 0xa2, 0x16, 0xa2, 0x1e};
+static const unsigned char client_pub[32] = {
+    0x99, 0x38, 0x1d, 0xe5, 0x60, 0xe4, 0xbd, 0x43, 0xd2, 0x3d, 0x8e, 0x43, 0x5a, 0x7d, 0xba, 0xfe,
+    0xb3, 0xc0, 0x6e, 0x51, 0xc1, 0x3c, 0xae, 0x4d, 0x54, 0x13, 0x69, 0x1e, 0x52, 0x9a, 0xaf, 0x2c};
+
+/* the synthetic handshake's fixed inputs; cs_tls13_client_start must rebuild syn-ch.bin from these */
+static const unsigned char syn_priv[32] = {
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
+static const unsigned char syn_rand[32] = {
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f};
+static const long syn_now = 1700000000L;   /* 2023-11-14, inside the synthetic leaf's validity */
+
+int main(int argc, char **argv) {
+    unsigned char shared[32], early[32], der_hs[32], hs[32], th[32], th2[32], z[32];
+    unsigned char c_hs[32], s_hs[32], master[32], c_ap[32], s_ap[32];
+    unsigned char fk[32], fv[32], tmp[256];
+    cs_tls13_transcript tr;
+    cs_tls13_keys ks;
+    long i;
+    int r;
+
+    n_ch = load("tests/fixtures/tls/rfc-ch.bin", f_ch, 512);
+    n_sh = load("tests/fixtures/tls/rfc-sh.bin", f_sh, 512);
+    n_ee = load("tests/fixtures/tls/rfc-ee.bin", f_ee, 512);
+    n_cert = load("tests/fixtures/tls/rfc-cert.bin", f_cert, 1024);
+    n_cv = load("tests/fixtures/tls/rfc-cv.bin", f_cv, 512);
+    n_fin = load("tests/fixtures/tls/rfc-finished.bin", f_fin, 512);
+    n_rec = load("tests/fixtures/tls/rfc-flight.rec", f_rec, 1024);
+    n_cfin = load("tests/fixtures/tls/rfc-cfin.rec", f_cfin, 512);
+    n_appc = load("tests/fixtures/tls/rfc-appc.rec", f_appc, 512);
+    n_apps = load("tests/fixtures/tls/rfc-apps.rec", f_apps, 512);
+    n_alert = load("tests/fixtures/tls/rfc-alertc.rec", f_alert, 512);
+    n_nst = load("tests/fixtures/tls/rfc-nst.rec", f_nst, 512);
+    n_salert = load("tests/fixtures/tls/rfc-alerts.rec", f_salert, 512);
+    n_syn_ch = load("tests/fixtures/tls/syn-ch.bin", f_syn_ch, 512);
+    n_syn_sh = load("tests/fixtures/tls/syn-sh.bin", f_syn_sh, 512);
+    n_syn_ee = load("tests/fixtures/tls/syn-ee.bin", f_syn_ee, 512);
+    n_syn_cert = load("tests/fixtures/tls/syn-cert.bin", f_syn_cert, 1024);
+    n_syn_cv = load("tests/fixtures/tls/syn-cv.bin", f_syn_cv, 512);
+    n_syn_fin = load("tests/fixtures/tls/syn-finished.bin", f_syn_fin, 512);
+    n_syn_cfin = load("tests/fixtures/tls/syn-cfin.bin", f_syn_cfin, 512);
+    n_syn_other = load("tests/fixtures/tls/syn-cert-other.bin", f_syn_other, 1024);
+    n_syn_exp = load("tests/fixtures/tls/syn-cert-expired.bin", f_syn_exp, 1024);
+    ok(n_syn_ch == 178 && n_syn_sh == 90 && n_syn_ee == 6 && n_syn_cv > 70 && n_syn_fin == 36 &&
+       n_syn_cfin == 36 && n_syn_cert > 200, "synthetic fixtures load");
+    ok(n_ch == 196 && n_sh == 90 && n_ee == 40 && n_cert == 445 && n_cv == 136 && n_fin == 36 &&
+       n_rec == 679 && n_cfin == 58 && n_appc == 72 && n_apps == 72 && n_alert == 24, "rfc fixtures load");
+
+    /* ---- key schedule, RFC 8448 §3 ---- */
+    ok(cs_x25519(server_priv, client_pub, shared) == 0 &&
+       hexeq(shared, 32, "8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"),
+       "x25519 shared secret");
+    for (i = 0; i < 32; i++) z[i] = 0;
+    ok(cs_tls13_early_secret(z, early) == 0 &&
+       hexeq(early, 32, "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a"), "early secret");
+    ok(cs_tls13_derived(early, der_hs) == 0 &&
+       hexeq(der_hs, 32, "6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba"), "derived (early)");
+    ok(cs_tls13_handshake_secret(der_hs, shared, hs) == 0 &&
+       hexeq(hs, 32, "1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"), "handshake secret");
+
+    /* ---- transcript ---- */
+    cs_tls13_transcript_init(&tr);
+    cs_tls13_transcript_add(&tr, f_ch, n_ch);
+    cs_tls13_transcript_add(&tr, f_sh, n_sh);
+    ok(cs_tls13_transcript_hash(&tr, th) == 0 &&
+       hexeq(th, 32, "860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8"),
+       "transcript after ServerHello");
+    /* the hash above must not have consumed the running hash */
+    cs_tls13_transcript_add(&tr, f_ee, n_ee);
+    cs_tls13_transcript_add(&tr, f_cert, n_cert);
+    cs_tls13_transcript_add(&tr, f_cv, n_cv);
+    ok(cs_tls13_transcript_hash(&tr, th2) == 0 &&
+       hexeq(th2, 32, "edb7725fa7a3473b031ec8ef65a2485493900138a2b91291407d7951a06110ed"),
+       "transcript after CertificateVerify");
+    cs_tls13_transcript_add(&tr, f_fin, n_fin);
+    ok(cs_tls13_transcript_hash(&tr, th) == 0 &&
+       hexeq(th, 32, "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13"),
+       "transcript after server Finished");
+
+    /* ---- traffic secrets and keys ---- */
+    cs_tls13_transcript_init(&tr);
+    cs_tls13_transcript_add(&tr, f_ch, n_ch);
+    cs_tls13_transcript_add(&tr, f_sh, n_sh);
+    cs_tls13_transcript_hash(&tr, th);
+    ok(cs_tls13_traffic_secret(hs, "c hs traffic", th, c_hs) == 0 &&
+       hexeq(c_hs, 32, "b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"),
+       "client handshake traffic secret");
+    ok(cs_tls13_traffic_secret(hs, "s hs traffic", th, s_hs) == 0 &&
+       hexeq(s_hs, 32, "b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38"),
+       "server handshake traffic secret");
+    ok(cs_tls13_traffic_keys(s_hs, CS_TLS13_AES_128_GCM_SHA256, &ks) == 0 &&
+       hexeq(ks.key, 16, "3fce516009c21727d0f2e4e86ee403bc") && hexeq(ks.iv, 12, "5d313eb2671276ee13000b30") &&
+       ks.seq == 0, "server handshake key and iv");
+    ok(cs_tls13_traffic_keys(c_hs, CS_TLS13_AES_128_GCM_SHA256, &ks) == 0 &&
+       hexeq(ks.key, 16, "dbfaa693d1762c5b666af5d950258d01") && hexeq(ks.iv, 12, "5bd3c71b836e0b76bb73265f"),
+       "client handshake key and iv");
+
+    /* ---- Finished ---- */
+    cs_tls13_transcript_init(&tr);
+    cs_tls13_transcript_add(&tr, f_ch, n_ch);
+    cs_tls13_transcript_add(&tr, f_sh, n_sh);
+    cs_tls13_transcript_hash(&tr, th);
+    cs_tls13_traffic_secret(hs, "s hs traffic", th, s_hs);
+    ok(cs_tls13_finished_key(s_hs, fk) == 0 &&
+       hexeq(fk, 32, "008d3b66f816ea559f96b537e885c31fc068bf492c652f01f288a1d8cdc19fc8"), "server finished key");
+    cs_tls13_transcript_add(&tr, f_ee, n_ee);
+    cs_tls13_transcript_add(&tr, f_cert, n_cert);
+    cs_tls13_transcript_add(&tr, f_cv, n_cv);
+    cs_tls13_transcript_hash(&tr, th);
+    ok(cs_tls13_finished_value(fk, th, fv) == 0 &&
+       hexeq(fv, 32, "9b9b141d906337fbd2cbdce71df4deda4ab42c309572cb7fffee5454b78f0718"), "server Finished value");
+    ok(cs_tls13_finished_check(s_hs, th, f_fin + 4, 32) == 0, "server Finished message verifies");
+    fv[31] ^= 0x01;
+    ok(cs_tls13_finished_check(s_hs, th, fv, 32) == -EBADMSG, "a beaten Finished value is refused");
+
+    /* ---- master secret and application keys ---- */
+    ok(cs_tls13_derived(hs, der_hs) == 0 &&
+       hexeq(der_hs, 32, "43de77e0c77713859a944db9db2590b53190a65b3ee2e4f12dd7a0bb7ce254b4"),
+       "derived(hs) matches the transcript that produced the master secret");
+    ok(cs_tls13_master_secret(der_hs, master) == 0 &&
+       hexeq(master, 32, "18df06843d13a08bf2a449844c5f8a478001bc4d4c627984d5a41da8d0402919"), "master secret");
+    cs_tls13_transcript_init(&tr);
+    cs_tls13_transcript_add(&tr, f_ch, n_ch);
+    cs_tls13_transcript_add(&tr, f_sh, n_sh);
+    cs_tls13_transcript_add(&tr, f_ee, n_ee);
+    cs_tls13_transcript_add(&tr, f_cert, n_cert);
+    cs_tls13_transcript_add(&tr, f_cv, n_cv);
+    cs_tls13_transcript_add(&tr, f_fin, n_fin);
+    cs_tls13_transcript_hash(&tr, th);
+    ok(hexeq(th, 32, "9608102a0f1ccc6db6250b7b7e417b1a000eaada3daae4777a7686c9ff83df13"), "transcript, rebuilt");
+    ok(cs_tls13_traffic_secret(master, "c ap traffic", th, c_ap) == 0 &&
+       hexeq(c_ap, 32, "9e40646ce79a7f9dc05af8889bce6552875afa0b06df0087f792ebb7c17504a5"),
+       "client application traffic secret");
+    ok(cs_tls13_traffic_secret(master, "s ap traffic", th, s_ap) == 0 &&
+       hexeq(s_ap, 32, "a11af9f05531f856ad47116b45a950328204b4f44bfb6b3a4b4f1f3fcb631643"),
+       "server application traffic secret");
+    ok(cs_tls13_traffic_keys(c_ap, CS_TLS13_AES_128_GCM_SHA256, &ks) == 0 &&
+       hexeq(ks.key, 16, "17422dda596ed5d9acd890e3c63f5051") && hexeq(ks.iv, 12, "5b78923dee08579033e523d9"),
+       "client application key and iv");
+    ok(cs_tls13_traffic_keys(s_ap, CS_TLS13_AES_128_GCM_SHA256, &ks) == 0 &&
+       hexeq(ks.key, 16, "9f02283b6c9c07efc26bb9f2ac92e356") && hexeq(ks.iv, 12, "cf782b88dd83549aadf1e984"),
+       "server application key and iv");
+    ok(cs_tls13_keylen(CS_TLS13_AES_256_GCM_SHA384) < 0, "AES-256-GCM-SHA384 is refused, not half-supported");
+    r = 0;
+    (void)r;
+    /* ---- framing ---- */
+    {
+        unsigned char big[5];
+        ok(cs_tls13_message(f_ch, n_ch) == n_ch, "framing: a complete message");
+        ok(cs_tls13_message(f_ch, n_ch - 1) == -EAGAIN, "framing: a short buffer is -EAGAIN, not an error");
+        ok(cs_tls13_message(f_ch, n_ch + 1) == n_ch, "framing: trailing bytes are the next message");
+        big[0] = 1; big[1] = 0x04; big[2] = 0x00; big[3] = 0x01; big[4] = 0;
+        ok(cs_tls13_message(big, 5) == -EINVAL, "framing: a body over 256 KiB is refused");
+    }
+
+    /* ---- ServerHello ---- */
+    {
+        cs_tls13_sh sh;
+        ok(cs_tls13_parse_server_hello(f_sh + 4, n_sh - 4, &sh) == 0 && sh.suite == 0x1301 &&
+           sh.ks_group == 0x001d && sh.ks_key_len == 32 &&
+           hexeq(sh.ks_key, 32, "c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f"),
+           "ServerHello: suite and x25519 key share");
+        ok(sh.session_id_len == 0 && sh.hrr == 0 && sh.has_keyshare && sh.has_version,
+           "ServerHello: echoed session id, no retry, both extensions present");
+        ok(cs_tls13_parse_server_hello(f_sh + 4, n_sh - 5, &sh) < 0, "ServerHello: a truncated body is refused");
+        for (i = 0; i < n_sh - 4; i++) tmp[i] = f_sh[4 + i];
+        tmp[1] = 0x01;                                  /* legacy_version 0x0301 */
+        ok(cs_tls13_parse_server_hello(tmp, n_sh - 4, &sh) < 0, "ServerHello: legacy_version 0x0301 refused");
+        tmp[1] = 0x03;
+        /* a body that is well-formed except for a pre_shared_key extension the client never offered */
+        cs_hex_decode("0303"
+                      "0000000000000000000000000000000000000000000000000000000000000000"
+                      "00" "1301" "00" "0006" "0029000200" "00", 4 + 64 + 2 + 4 + 2 + 4 + 12, tmp, 256);
+        ok(cs_tls13_parse_server_hello(tmp, 2 + 32 + 1 + 2 + 1 + 2 + 6, &sh) < 0,
+           "ServerHello: an unsolicited pre_shared_key is refused");
+    }
+
+    /* ---- EncryptedExtensions, Certificate, CertificateVerify ---- */
+    {
+        const unsigned char *alpn = 0, *der = 0;
+        long alpnlen = -1, derlen = 0;
+        cs_tls13_cert_iter it;
+        cs_x509 leaf;
+        cs_tls13_cv cv;
+        ok(cs_tls13_parse_ee(f_ee + 4, n_ee - 4, &alpn, &alpnlen) == 0 && alpnlen == 0,
+           "EncryptedExtensions: parses, no ALPN offered");
+        ok(cs_tls13_cert_begin(&it, f_cert + 4, n_cert - 4) == 0 && it.ctxlen == 0, "Certificate: empty context");
+        ok(cs_tls13_cert_next(&it, &der, &derlen) == 0 && derlen == 432 && der[0] == 0x30 && der[1] == 0x82,
+           "Certificate: one 432-byte DER leaf");
+        ok(cs_tls13_cert_next(&it, &der, &derlen) != 0, "Certificate: exactly one entry");
+        der = f_cert + 11; derlen = 432;              /* cert_next clears them at the end of the list */
+        ok(cs_x509_parse(der, derlen, &leaf) == 0 && cs_x509_match_dns(&leaf, "rsa") &&
+           cs_x509_valid_at(&leaf, 1600000000L), "Certificate: the leaf parses, matches and is dated");
+        ok(cs_tls13_parse_cert_verify(f_cv + 4, n_cv - 4, &cv) == 0 && cv.sigalg == 0x0804 && cv.siglen == 128,
+           "CertificateVerify: rsa_pss_rsae_sha256, 128-byte signature");
+        {
+            /* the signature covers the transcript through the Certificate message, not through itself */
+            cs_tls13_transcript t3;
+            unsigned char thc[32];
+            cs_tls13_transcript_init(&t3);
+            cs_tls13_transcript_add(&t3, f_ch, n_ch);
+            cs_tls13_transcript_add(&t3, f_sh, n_sh);
+            cs_tls13_transcript_add(&t3, f_ee, n_ee);
+            cs_tls13_transcript_add(&t3, f_cert, n_cert);
+            cs_tls13_transcript_hash(&t3, thc);
+            ok(hexeq(thc, 32, "764d6632b3c35c3f3205e3499ac3edbaabb88295fba751461d3678e2e5ea0687"),
+               "transcript through Certificate");
+            ok(cs_tls13_check_cert_verify(&leaf, &cv, thc) == 0, "CertificateVerify: RSA-PSS signature verifies");
+        {
+            cs_tls13_cv beaten = cv;
+            for (i = 0; i < cv.siglen; i++) tmp[i] = cv.sig[i];
+            tmp[0] ^= 0x80;
+            beaten.sig = tmp;
+            ok(cs_tls13_check_cert_verify(&leaf, &beaten, thc) != 0,
+               "CertificateVerify: a beaten signature fails");
+        }
+        }
+    }
+
+    /* ---- ClientHello builder ---- */
+    {
+        unsigned char pub[32], hello[512];
+        long n;
+        ok(cs_x25519_base(syn_priv, pub) == 0, "client: x25519 public key");
+        n = cs_tls13_client_hello(hello, 512, syn_rand, pub, "example.com", 11);
+        ok(n == 178 && n == n_syn_ch && equ(hello, f_syn_ch, n), "ClientHello: the fixture's exact bytes");
+        ok(hello[4] == 0x03 && hello[5] == 0x03 && hello[39] == 0x00 && hello[40] == 0x04 &&
+           hello[41] == 0x13 && hello[42] == 0x01 && hello[43] == 0x13 && hello[44] == 0x03,
+           "ClientHello: legacy_version 0x0303 and exactly the two supported suites");
+        ok(hello[45] == 0x01 && hello[46] == 0x00, "ClientHello: only null compression");
+        ok(cs_tls13_client_hello(hello, 100, syn_rand, pub, "example.com", 11) == -ENOBUFS,
+           "ClientHello: a small buffer is refused, not truncated");
+        ok(cs_tls13_client_hello(hello, 512, syn_rand, pub, "example.com", 0) == -EINVAL,
+           "ClientHello: an empty host name is refused");
+    }
+
+    /* ---- record layer ---- */
+    {
+        cs_tls13_keys s, c, aps, apc;
+        unsigned char plain[256], out[1024], out2[1024], forged[128];
+        long plen;
+        int type;
+        cs_tls13_traffic_keys(s_hs, CS_TLS13_AES_128_GCM_SHA256, &s);
+        cs_tls13_traffic_keys(c_hs, CS_TLS13_AES_128_GCM_SHA256, &c);
+        cs_tls13_traffic_keys(s_ap, CS_TLS13_AES_128_GCM_SHA256, &aps);
+        cs_tls13_traffic_keys(c_ap, CS_TLS13_AES_128_GCM_SHA256, &apc);
+        r = cs_tls13_record_open(&s, f_rec, n_rec, out, 1024, &plen, &type);
+        ok(r == 0 && type == 22 && plen == 657, "record: the server flight opens to 657 handshake bytes");
+        ok(equ(out, f_ee, n_ee) && equ(out + n_ee, f_cert, n_cert) &&
+           equ(out + n_ee + n_cert, f_cv, n_cv) && equ(out + n_ee + n_cert + n_cv, f_fin, n_fin),
+           "record: the plaintext is the four handshake messages in order");
+        r = cs_tls13_record_open(&c, f_cfin, n_cfin, out, 1024, &plen, &type);
+        ok(r == 0 && type == 22 && plen == 36 && out[0] == CS_TLS13_HS_FINISHED &&
+           hexeq(out + 4, 32, "a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61"),
+           "record: the client Finished record and its verify_data");
+        c.seq = 0;
+        ok(cs_tls13_record_seal(&c, 22, out, plen, out2, 1024) == n_cfin && equ(out2, f_cfin, n_cfin),
+           "record: sealing that Finished reproduces the RFC record byte for byte");
+        r = cs_tls13_record_open(&apc, f_appc, n_appc, out, 1024, &plen, &type);
+        ok(r == 0 && type == 23 && plen == 50 && out[0] == 0x00 && out[49] == 0x31,
+           "record: the client's application data");
+        apc.seq = 0;
+        ok(cs_tls13_record_seal(&apc, 23, out, plen, out2, 1024) == n_appc && equ(out2, f_appc, n_appc),
+           "record: re-sealing the application data reproduces the RFC record");
+        r = cs_tls13_record_open(&aps, f_nst, n_nst, out, 1024, &plen, &type);
+        ok(r == 0 && type == 22 && plen == 205 && out[0] == CS_TLS13_HS_NEW_SESSION_TICKET, "record: the server's NewSessionTicket record");
+        r = cs_tls13_record_open(&aps, f_apps, n_apps, out, 1024, &plen, &type);
+        ok(r == 0 && type == 23 && plen == 50 && out[0] == 0x00 && out[49] == 0x31,
+           "record: the server's application data at sequence number one");
+        r = cs_tls13_record_open(&aps, f_salert, n_salert, out, 1024, &plen, &type);
+        ok(r == 0 && type == 21 && plen == 2 && out[0] == 1 && out[1] == 0 && aps.seq == 3,
+           "record: the server's close_notify at sequence number two");
+        apc.seq = 1;                                   /* the alert is the second record under this key */
+        r = cs_tls13_record_open(&apc, f_alert, n_alert, out, 1024, &plen, &type);
+        ok(r == 0 && type == 21 && plen == 2 && out[0] == 1 && out[1] == 0,
+           "record: close_notify at sequence number one");
+        for (i = 0; i < n_appc; i++) forged[i] = f_appc[i];
+        forged[n_appc - 1] ^= 0x01;
+        apc.seq = 0;
+        for (i = 0; i < 64; i++) out[i] = 0xAA;
+        plen = -1;
+        ok(cs_tls13_record_open(&apc, forged, n_appc, out, 1024, &plen, &type) == -EBADMSG,
+           "record: a beaten tag is -EBADMSG");
+        ok(apc.seq == 0 && plen == 0 && out[0] == 0xAA,
+           "record: a forgery advances no sequence number and writes no plaintext");
+        ok(cs_tls13_record_open(&apc, f_appc, n_appc - 1, out, 1024, &plen, &type) == -EINVAL,
+           "record: a length that disagrees with the buffer is refused");
+        forged[0] = 0x16;
+        ok(cs_tls13_record_open(&apc, forged, n_appc, out, 1024, &plen, &type) == -EINVAL,
+           "record: an outer type other than application_data is refused");
+        ok(cs_tls13_record_open(&apc, f_appc, n_appc, out, 40, &plen, &type) == -ENOBUFS,
+           "record: an output buffer smaller than the plaintext is refused");
+        ok(cs_tls13_record_seal(&apc, 20, out, 4, out2, 1024) == -EINVAL,
+           "record: sealing a change_cipher_spec inner type is refused");
+        {
+            cs_tls13_keys ov = apc;
+            ov.seq = 0xffffffffffffffffUL;
+            ok(cs_tls13_record_seal(&ov, 23, out, 4, out2, 1024) == -EOVERFLOW,
+               "record: the sequence number cannot wrap");
+        }
+        {
+            cs_tls13_keys c32, r32;
+            long sealed;
+            cs_tls13_traffic_keys(c_ap, CS_TLS13_CHACHA20_POLY1305_SHA256, &c32);
+            r32 = c32;
+            sealed = cs_tls13_record_seal(&c32, 23, f_syn_ch, 16, out2, 1024);
+            ok(sealed == 5 + 16 + 1 + 16 &&
+               cs_tls13_record_open(&r32, out2, sealed, out, 1024, &plen, &type) == 0 &&
+               type == 23 && plen == 16 && equ(out, f_syn_ch, 16),
+               "record: ChaCha20-Poly1305 round trip");
+        }
+        {
+            static const unsigned char ccs[6] = {0x14, 0x03, 0x03, 0x00, 0x01, 0x01};
+            ok(cs_tls13_record_is_ccs(ccs, 6) == 1 && cs_tls13_record_is_ccs(f_rec, n_rec) == 0,
+               "record: a plaintext compatibility ChangeCipherSpec is recognised");
+        }
+    }
+
+    /* ---- the client state machine against the synthetic handshake ---- */
+    {
+        cs_tls13_client cl;
+        unsigned char hello[512], out[256], fin[32];
+        long hn, plen;
+        int type;
+        /* the wrong order is fatal, not ignored */
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0 &&
+           hn == n_syn_ch && equ(hello, f_syn_ch, hn), "client: the first flight is the fixture ClientHello");
+        ok(cl.state == CS_TLS13_WAIT_SERVER_HELLO, "client: waiting for ServerHello");
+        ok(cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) < 0 && cl.state == CS_TLS13_FAILED,
+           "client: an out-of-order message fails the connection");
+
+        /* the full handshake */
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0,
+           "client: start again");
+        ok(cs_tls13_client_recv(&cl, f_syn_sh, n_syn_sh) == 0 && cl.state == CS_TLS13_WAIT_ENCRYPTED_EXTENSIONS,
+           "client: ServerHello accepted, handshake keys derived");
+        ok(cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) == 0 && cl.state == CS_TLS13_WAIT_CERTIFICATE,
+           "client: EncryptedExtensions accepted");
+        ok(cs_tls13_client_recv(&cl, f_syn_cert, n_syn_cert) == 0 && cl.state == CS_TLS13_WAIT_CERTIFICATE_VERIFY &&
+           cl.leaflen > 0 && cl.leaflen == n_syn_cert - 13,
+           "client: the certificate chain is checked and the leaf copied out of the message");
+        ok(cs_tls13_client_recv(&cl, f_syn_cv, n_syn_cv) == 0 && cl.state == CS_TLS13_WAIT_FINISHED,
+           "client: CertificateVerify accepted");
+        ok(cs_tls13_client_finished(&cl, fin) != 0, "client: no Finished value before the server's Finished");
+        ok(cs_tls13_client_recv(&cl, f_syn_fin, n_syn_fin) == 0 && cl.state == CS_TLS13_CONNECTED,
+           "client: server Finished verified, connection established");
+        ok(cs_tls13_client_finished(&cl, fin) == 0 && equ(fin, f_syn_cfin + 4, 32),
+           "client: the Finished value it must send is the fixture's");
+        ok(cs_tls13_client_recv(&cl, f_syn_fin, n_syn_fin) < 0, "client: nothing is accepted after CONNECTED");
+        /* the application keys derived from that handshake protect a record */
+        {
+            cs_tls13_keys w = cl.ap_write, rr = cl.ap_write;
+            r = cs_tls13_record_seal(&w, 23, f_syn_ch, 16, out, 256);
+            ok(r > 0 && cs_tls13_record_open(&rr, out, r, out + 64, 128, &plen, &type) == 0 &&
+               type == 23 && plen == 16 && equ(out + 64, f_syn_ch, 16),
+               "client: the application keys from this handshake seal and open a record");
+        }
+
+        /* a beaten server Finished */
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_sh, n_syn_sh) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_cert, n_syn_cert) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_cv, n_syn_cv) == 0, "client: replayed up to the Finished");
+        for (i = 0; i < n_syn_fin; i++) tmp[i] = f_syn_fin[i];
+        tmp[n_syn_fin - 1] ^= 0x01;
+        ok(cs_tls13_client_recv(&cl, tmp, n_syn_fin) == -EBADMSG && cl.state == CS_TLS13_FAILED,
+           "client: a beaten server Finished is -EBADMSG and fails the connection");
+
+        /* a broken CertificateVerify */
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_sh, n_syn_sh) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_cert, n_syn_cert) == 0, "client: replayed up to CertificateVerify");
+        for (i = 0; i < n_syn_cv; i++) tmp[i] = f_syn_cv[i];
+        tmp[n_syn_cv - 1] ^= 0x01;
+        ok(cs_tls13_client_recv(&cl, tmp, n_syn_cv) < 0 && cl.state == CS_TLS13_FAILED,
+           "client: a beaten CertificateVerify fails the connection");
+
+        /* the certificate chain of another host, and an expired one */
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_sh, n_syn_sh) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) == 0, "client: replayed up to Certificate");
+        ok(cs_tls13_client_recv(&cl, f_syn_other, n_syn_other) < 0 && cl.state == CS_TLS13_FAILED,
+           "client: a certificate for another host fails the connection");
+        ok(cs_tls13_client_start(&cl, syn_priv, syn_rand, "example.com", 11, syn_now, hello, 512, &hn) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_sh, n_syn_sh) == 0 &&
+           cs_tls13_client_recv(&cl, f_syn_ee, n_syn_ee) == 0, "client: replayed again");
+        ok(cs_tls13_client_recv(&cl, f_syn_exp, n_syn_exp) < 0 && cl.state == CS_TLS13_FAILED,
+           "client: an expired certificate fails the connection");
+    }
+
+    sy_printf("CHECK_TLS13\tfailed=%d\n", bad);
+    return bad;
+}
+
+
+

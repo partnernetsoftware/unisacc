@@ -1,9 +1,11 @@
 #pragma unisa module rsa
 #pragma unisa use bn
 #pragma unisa use ct
-/* crypto/rsa -- RSA signature checking for X.509, in the PKCS#1 v1.5 encoding.
+#pragma unisa use sha256
+/* crypto/rsa -- RSA signature checking for X.509 and TLS 1.3, PKCS#1 v1.5 and PSS.
 
-     cs_rsa_verify_pkcs1_v15(&n, &e, hash, hashlen, sig, siglen)   1 when the signature verifies, else an error
+     cs_rsa_verify_pkcs1_v15(&n, &e, hash, hashlen, sig, siglen)   0 when the signature verifies, else an error
+     cs_rsa_verify_pss_sha256(&n, &e, hash32, sig, siglen)         0 when it verifies; MGF1-SHA-256, salt 32
 
    Only verification: an RSA public operation is a modular exponentiation with the public exponent, which
    is what cs_bn_modexp already does.  Private operations would need blinding and a constant-time
@@ -19,7 +21,14 @@
    that ends after a short padding run, is refused.
 
    Modulus size is bounded by crypto.bn: up to 2048-bit keys, which covers every chain the host trust
-   store needs here.  Larger keys are refused with -ERANGE instead of being truncated. */
+   store needs here.  Larger keys are refused with -ERANGE instead of being truncated.
+
+   PSS (RFC 8017 §9.1.2) is what a TLS 1.3 server signs a CertificateVerify with when its certificate
+   holds an rsaEncryption key (rsa_pss_rsae_sha256).  It uses MGF1-SHA-256 and a salt of exactly the hash
+   length, which is what TLS 1.3 fixes; any other salt length is refused rather than accepted loosely.
+   The recovered message must fit emBits = modBits-1 bytes, the leftmost slack bits of maskedDB must be
+   zero, and the recovered DB must be zero padding, a 0x01 separator and the salt.  H' is then rebuilt
+   from mHash and the recovered salt and compared in full. */
 
 enum { RSA_MAXBYTES = BN_LIMBS * 4 };
 
@@ -74,4 +83,72 @@ int cs_rsa_verify_pkcs1_v15(const cs_bn *n, const cs_bn *e, const unsigned char 
     if (cs_bn_modexp(&m, &s, e, n)) return -EINVAL;
     if (cs_bn_to_bytes(&m, em, k)) return -ERANGE;
     return cs_rsa_check_em(em, k, hash, hlen);    /* 0 on success */
+}
+
+/* Bit length of n: the position of the highest set bit.  0 for zero. */
+static unsigned cs_rsa_modbits(const cs_bn *n) {
+    unsigned top, bits = 0;
+    if (n->n <= 0) return 0;
+    top = n->v[n->n - 1];
+    while (top) { bits++; top >>= 1; }
+    return (unsigned)(n->n - 1) * 32 + bits;
+}
+
+/* MGF1 with SHA-256 (RFC 8017 §B.2.1): out = SHA256(seed || I2OSP(counter, 4)) for counter 0, 1, ... */
+static int cs_rsa_mgf1_sha256(const unsigned char seed[32], unsigned char *out, long len) {
+    unsigned char t[36], h[32];
+    unsigned ctr = 0;
+    long off = 0, i;
+    if (len < 0 || (!out && len > 0)) return -EINVAL;
+    while (off < len) {
+        for (i = 0; i < 32; i++) t[i] = seed[i];
+        t[32] = (unsigned char)(ctr >> 24);
+        t[33] = (unsigned char)(ctr >> 16);
+        t[34] = (unsigned char)(ctr >> 8);
+        t[35] = (unsigned char)ctr;
+        if (cs_sha256(t, 36, h)) return -EINVAL;
+        for (i = 0; i < 32 && off < len; i++) out[off++] = h[i];
+        ctr++;
+    }
+    return 0;
+}
+
+int cs_rsa_verify_pss_sha256(const cs_bn *n, const cs_bn *e, const unsigned char hash[32],
+                             const unsigned char *sig, long siglen) {
+    cs_bn s, m;
+    unsigned char em[RSA_MAXBYTES], db[RSA_MAXBYTES], mask[RSA_MAXBYTES];
+    unsigned char hp[8 + 32 + 32], want[32];
+    unsigned bits, slack;
+    long k, emlen, dblen, sep = -1, saltlen, i;
+    if (!n || !e || !hash || !sig || siglen <= 0) return -EINVAL;
+    if (cs_bn_is_zero(n) || cs_bn_is_zero(e) || !cs_bn_is_odd(n)) return -EINVAL;
+    bits = cs_rsa_modbits(n);
+    k = cs_rsa_modbytes(n);
+    if (k <= 0 || k > RSA_MAXBYTES) return -ERANGE;
+    emlen = ((long)bits - 1 + 7) / 8;
+    if (emlen < 32 + 32 + 2 || emlen > RSA_MAXBYTES) return -ERANGE;   /* emLen >= hLen + sLen + 2 */
+    if (siglen > k) return -EINVAL;
+    if (cs_bn_from_bytes(&s, sig, siglen)) return -EINVAL;
+    if (cs_bn_cmp(&s, n) >= 0) return -EINVAL;
+    if (cs_bn_modexp(&m, &s, e, n)) return -EINVAL;
+    if (cs_bn_to_bytes(&m, em, emlen)) return -EINVAL;   /* m >= 2^emBits: inconsistent signature */
+    if (em[emlen - 1] != 0xbc) return -EINVAL;           /* trailer field */
+    dblen = emlen - 32 - 1;
+    slack = (unsigned)(8 * emlen - (bits - 1));
+    if (slack && (em[0] >> (8 - slack)) != 0) return -EINVAL;   /* maskedDB top bits must be zero */
+    if (cs_rsa_mgf1_sha256(em + dblen, mask, dblen)) return -EINVAL;
+    for (i = 0; i < dblen; i++) db[i] = (unsigned char)(em[i] ^ mask[i]);
+    if (slack) db[0] &= (unsigned char)(0xff >> slack);          /* clear the slack bits */
+    for (i = 0; i < dblen; i++) {                                /* DB = zero padding || 0x01 || salt */
+        if (db[i] == 0x01) { sep = i; break; }
+        if (db[i] != 0x00) return -EINVAL;
+    }
+    if (sep < 0) return -EINVAL;
+    saltlen = dblen - sep - 1;
+    if (saltlen != 32) return -EINVAL;                   /* TLS 1.3 fixes the salt at the hash length */
+    for (i = 0; i < 8; i++) hp[i] = 0;                   /* M' = 0x00 * 8 || mHash || salt */
+    for (i = 0; i < 32; i++) hp[8 + i] = hash[i];
+    for (i = 0; i < 32; i++) hp[40 + i] = db[sep + 1 + i];
+    if (cs_sha256(hp, 72, want)) return -EINVAL;
+    return cs_ct_eq(want, em + dblen, 32) ? 0 : -EINVAL;
 }

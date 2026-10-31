@@ -1,0 +1,140 @@
+#pragma unisa module record
+#pragma unisa use tls13
+#pragma unisa use gcm
+#pragma unisa use chacha20poly1305
+#pragma unisa use ct
+/* crypto/record -- the TLS 1.3 record protection layer (RFC 8446 §5.2, §5.3).
+
+     cs_tls13_record_seal(&keys, inner_type, in, n, out, cap)
+          writes one protected record to out and returns its length, or a negative error.  On success the
+          key set's sequence number has moved by one.
+     cs_tls13_record_open(&keys, rec, rlen, out, cap, &outlen, &inner_type)
+          0 with the plaintext in out and the inner content type reported, -EBADMSG when the tag does not
+          verify, -EPROTO for a well-formed record whose inner type is not handshake, alert or
+          application_data.  Nothing is written to out unless the tag verified.
+     cs_tls13_record_is_ccs(rec, rlen)
+          1 for a plaintext compatibility ChangeCipherSpec record, 0 otherwise, negative if malformed.
+          A TLS 1.3 peer may send one between ClientHello and Finished; it carries no information and
+          must be dropped without being treated as an error or as data.
+
+   The wire format of every protected record is
+
+        23 03 03 <length>                  TLSCiphertext: application_data, 0x0303, length
+        <ciphertext>                       AEAD(k, nonce, aad = the 5 header bytes)
+        <tag>                              16 bytes
+
+   and the plaintext is the content followed by one byte of inner content type.  The nonce is the write
+   iv with the record sequence number XORed into its last eight bytes, big-endian (§5.3); the associated
+   data is the five-byte header, which is why the length has to be written before the tag is computed.
+   The sequence number counts from zero per key set and per direction and is not on the wire, so a
+   record that is dropped or reordered breaks the stream at once rather than silently.
+
+   Limits are enforced, not assumed: a protected record longer than 2^14 + 256 bytes, a handshake record
+   whose content exceeds the same bound before sealing, and a key set whose key length disagrees with its
+   suite are all refused.  What is not done here: no anti-replay window for early data (there is no 0-RTT),
+   and no padding beyond the inner type byte. */
+
+enum { CS_TLS13_MAX_PLAIN = 16384 };
+enum { CS_TLS13_MAX_CIPHERTEXT = 16384 + 256 };
+enum { CS_TLS13_TAG = 16 };
+
+/* nonce = iv XOR seq, with seq in the last eight bytes, big-endian. */
+static int cs_tls13_nonce(const unsigned char iv[12], unsigned long seq, unsigned char out[12]) {
+    long i;
+    for (i = 0; i < 12; i++) out[i] = iv[i];
+    for (i = 0; i < 8; i++) out[11 - i] ^= (unsigned char)(seq >> (8 * i));
+    return 0;
+}
+
+static int cs_tls13_aead_seal(const cs_tls13_keys *k, const unsigned char nonce[12],
+                              const unsigned char aad[5], const unsigned char *in, long n,
+                              unsigned char *out, unsigned char tag[16]) {
+    if (k->suite == CS_TLS13_AES_128_GCM_SHA256) {
+        return cs_gcm_seal(k->key, k->keylen, nonce, 12, aad, 5, in, n, out, tag);
+    }
+    if (k->suite == CS_TLS13_CHACHA20_POLY1305_SHA256) {
+        return cs_chacha20poly1305_seal(k->key, nonce, aad, 5, in, n, out, tag);
+    }
+    return -ENOSYS;
+}
+
+static int cs_tls13_aead_open(const cs_tls13_keys *k, const unsigned char nonce[12],
+                              const unsigned char aad[5], const unsigned char *in, long n,
+                              unsigned char *out, const unsigned char tag[16]) {
+    if (k->suite == CS_TLS13_AES_128_GCM_SHA256) {
+        return cs_gcm_open(k->key, k->keylen, nonce, 12, aad, 5, in, n, out, tag);
+    }
+    if (k->suite == CS_TLS13_CHACHA20_POLY1305_SHA256) {
+        return cs_chacha20poly1305_open(k->key, nonce, aad, 5, in, n, out, tag);
+    }
+    return -ENOSYS;
+}
+
+int cs_tls13_record_seal(cs_tls13_keys *k, int inner_type, const unsigned char *in, long n,
+                         unsigned char *out, long cap) {
+    unsigned char nonce[12];
+    long i, total;
+    int r;
+    if (!k || !out) return -EINVAL;
+    if (n < 0 || (n > 0 && !in)) return -EINVAL;
+    if (n > CS_TLS13_MAX_PLAIN) return -EMSGSIZE;
+    if (cs_tls13_keylen(k->suite) != k->keylen) return -EINVAL;
+    if (k->seq == ~0UL) return -EOVERFLOW;                /* the record sequence number is exhausted */
+    if (inner_type != 21 && inner_type != 22 && inner_type != 23) return -EINVAL;
+    total = 5 + n + 1 + CS_TLS13_TAG;
+    if (total > cap) return -ENOBUFS;
+    out[0] = 23;                                          /* TLSCiphertext.type = application_data */
+    out[1] = 0x03;
+    out[2] = 0x03;
+    out[3] = (unsigned char)((n + 1 + CS_TLS13_TAG) >> 8);
+    out[4] = (unsigned char)(n + 1 + CS_TLS13_TAG);
+    for (i = 0; i < n; i++) out[5 + i] = in[i];           /* the plaintext goes into the output buffer */
+    out[5 + n] = (unsigned char)inner_type;
+    if (cs_tls13_nonce(k->iv, k->seq, nonce)) return -EINVAL;
+    /* in place: both AEADs here read and write one byte at a time */
+    r = cs_tls13_aead_seal(k, nonce, out, out + 5, n + 1, out + 5, out + 5 + n + 1);
+    if (r) return r;
+    k->seq++;
+    return total;
+}
+
+int cs_tls13_record_open(cs_tls13_keys *k, const unsigned char *rec, long rlen,
+                         unsigned char *out, long cap, long *outlen, int *inner_type) {
+    unsigned char nonce[12];
+    long len, n;
+    int r, type;
+    if (outlen) *outlen = 0;
+    if (inner_type) *inner_type = 0;
+    if (!k || !rec || !out) return -EINVAL;
+    if (rlen < 5 + 1 + CS_TLS13_TAG) return -EINVAL;
+    if (rec[0] != 23 || rec[1] != 0x03 || rec[2] != 0x03) return -EINVAL;
+    len = ((long)rec[3] << 8) | (long)rec[4];
+    if (len != rlen - 5) return -EINVAL;                  /* trailing or missing bytes */
+    if (len < 1 + CS_TLS13_TAG || len > CS_TLS13_MAX_CIPHERTEXT) return -EINVAL;
+    if (cs_tls13_keylen(k->suite) != k->keylen) return -EINVAL;
+    if (cap < len - CS_TLS13_TAG) return -ENOBUFS;        /* the plaintext may be cap bytes at most */
+    if (k->seq == ~0UL) return -EOVERFLOW;
+    if (cs_tls13_nonce(k->iv, k->seq, nonce)) return -EINVAL;
+    n = len - CS_TLS13_TAG;
+    /* Decrypt into out only after the tag verifies: a forged record writes no plaintext.  The AEADs
+       verify the tag before they decrypt, and out may alias rec + 5. */
+    r = cs_tls13_aead_open(k, nonce, rec, rec + 5, n, out, rec + 5 + n);
+    if (r) return r;                                      /* -EBADMSG */
+    type = out[n - 1];
+    if (type != 21 && type != 22 && type != 23) return -EPROTO;   /* no change_cipher_spec inside */
+    k->seq++;
+    /* The content type byte at out[n-1] is left in place, outside the reported plaintext length. */
+    if (outlen) *outlen = n - 1;
+    if (inner_type) *inner_type = type;
+    return 0;
+}
+
+/* A plaintext compatibility ChangeCipherSpec record: 14 03 03 00 01 01 (RFC 8446 §5). */
+int cs_tls13_record_is_ccs(const unsigned char *rec, long rlen) {
+    if (!rec || rlen < 0) return -EINVAL;
+    if (rlen == 0) return 0;
+    if (rlen < 6) return 0;                               /* could still be one, but not complete */
+    if (rec[0] == 20 && rec[1] == 0x03 && rec[2] == 0x03 && rec[3] == 0x00 && rec[4] == 0x01 &&
+        rec[5] == 0x01) return 1;
+    return 0;
+}
