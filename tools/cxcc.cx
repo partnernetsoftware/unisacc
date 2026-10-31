@@ -37,6 +37,7 @@ static int copy_str(char *dst, size_t cap, const char *src) {
 }
 
 static void cxcc_too_many(const char *cmd);
+static int cxcc_samez(const char *a, const char *b);
 static int is_repo(const char *dir) {
     char p[CXCC_PATH];
     int n = snprintf(p, sizeof p, "%s/include/cx.h", dir);
@@ -66,7 +67,7 @@ static int walk_up(char *dir) {
         if (is_repo(dir)) return 0;
         if (copy_str(prev, sizeof prev, dir)) return -1;
         dirname_inplace(dir);
-        if (!strcmp(prev, dir)) return -1;
+        if (cxcc_samez(prev, dir)) return -1;
     }
 }
 
@@ -1081,19 +1082,11 @@ static int cxcc_is_output_override(const char *a) {
 }
 
 static int cxcc_run_paths(char *dir, size_t dcap, char *exe, size_t ecap) {
+    (void)dir; (void)dcap; (void)exe; (void)ecap;
 #ifdef _WIN32
-    char tmpl[CXCC_PATH];
-    int tries, j, n;
-    if (cxcc_temp_template(tmpl, sizeof tmpl)) return -1;
-    n = 0; while (tmpl[n]) n++;
-    for (tries = 0; tries < 100; tries++) {
-        unsigned long v = (unsigned long)(uintptr_t)&tries * 2654435761UL + (unsigned long)tries;
-        for (j = n - 6; j < n; j++) { tmpl[j] = (char)('a' + (int)(v % 26)); v = v / 26 + 17; }
-        if (cxcc_ensure_dir(tmpl) == 0) {
-            if (copy_str(dir, dcap, tmpl)) return -1;
-            return cxcc_cat(exe, ecap, dir, "\\prog", ".exe");
-        }
-    }
+    /* No verified private temporary directory: the current shim ignores the
+       mode and EEXIST would need an exclusive-create contract. -run refuses
+       on Windows instead of reusing a directory it does not own. */
     return -1;
 #else
     char tmpl[] = "/tmp/cxcc-runXXXXXX";
@@ -1105,7 +1098,7 @@ static int cxcc_run_paths(char *dir, size_t dcap, char *exe, size_t ecap) {
 
 static void cxcc_run_cleanup(const char *cmd, const char *dir, const char *exe) {
     int bad = 0;
-    if (exe[0] && remove(exe)) bad = 1;
+    if (exe[0]) remove(exe);           /* ENOENT is expected when compile failed early */
     if (remove(dir)) bad = 1;
     if (bad) cxcc_say(cmd, "-run cleanup could not remove ", dir);
 }
@@ -1119,6 +1112,7 @@ static int cxcc_run_main(int argc, char **argv, int run_at, int dd, const char *
     extern int cxproc_run_raw(char **argv, char **envp, int *kind, int *code);
     dir[0] = 0; exe[0] = 0;
     for (i = 1; i < stop; i++) {
+        if (skip) { skip = 0; continue; }
         if (argv[i][0] == '@') {
             cxcc_say(cmd, "-run does not take response files before -- (", argv[i]);
             return 2;
@@ -1127,18 +1121,17 @@ static int cxcc_run_main(int argc, char **argv, int run_at, int dd, const char *
             cxcc_say(cmd, "-run does not take linker options before -- (", argv[i]);
             return 2;
         }
-        if (!skip && cxcc_is_output_override(argv[i])) {
+        if (cxcc_is_output_override(argv[i])) {
             cxcc_say(cmd, "-run cannot be combined with an output override (", argv[i]);
             return 2;
         }
-        if (!skip && (cxcc_samez(argv[i], "-c") || cxcc_samez(argv[i], "-E") ||
-                      cxcc_samez(argv[i], "-S") || cxcc_samez(argv[i], "-shared"))) {
+        if (takes_arg(argv[i])) { skip = 1; continue; }
+        if (cxcc_samez(argv[i], "-c") || cxcc_samez(argv[i], "-E") ||
+            cxcc_samez(argv[i], "-S") || cxcc_samez(argv[i], "-shared")) {
             cxcc_say(cmd, "-run cannot be combined with ", argv[i]);
             return 2;
         }
-        if (skip) { skip = 0; continue; }
         if (cxcc_samez(argv[i], "-run")) { nruns++; continue; }
-        if (takes_arg(argv[i])) { skip = 1; continue; }
         if (argv[i][0] != '-' && ends_with(argv[i], ".cx")) nsrc++;
     }
     if (nruns != 1) {
@@ -1155,7 +1148,7 @@ static int cxcc_run_main(int argc, char **argv, int run_at, int dd, const char *
     }
     cargv[cargc++] = argv[0];
     for (i = 1; i < stop; i++) {
-        if (i == run_at || cxcc_samez(argv[i], "-run")) continue;
+        if (i == run_at) continue;
         if (cargc + 3 >= CXCC_ARGS) {
             cxcc_say(cmd, "-run has too many arguments", 0);
             cxcc_run_cleanup(cmd, dir, "");
@@ -1167,7 +1160,7 @@ static int cxcc_run_main(int argc, char **argv, int run_at, int dd, const char *
     cargv[cargc++] = exe;
     cargv[cargc] = 0;
     rc = cxcc_drive_os(cargc, cargv, compiler, cmd);
-    if (rc != 0) { cxcc_run_cleanup(cmd, dir, ""); return rc; }
+    if (rc != 0) { cxcc_run_cleanup(cmd, dir, exe); return rc; }
     if (access(exe, 0) != 0) {
         cxcc_say(cmd, "-run failed to start: no executable was produced", 0);
         cxcc_run_cleanup(cmd, dir, exe);
@@ -1213,10 +1206,12 @@ static int cxcc_drive_os(int argc, char **argv, const char *compiler, const char
     int nsrc = 0;
     int i, n, rc, skip, repo;
     {
-        int run_at = -1, dd = -1, q;
+        int run_at = -1, dd = -1, q, skip = 0;
         for (q = 1; q < argc; q++) {
-            if (cxcc_samez(argv[q], "--")) { dd = q; break; }
-            if (cxcc_samez(argv[q], "-run") && run_at < 0) run_at = q;
+            if (!skip && cxcc_samez(argv[q], "--")) { dd = q; break; }
+            if (!skip && cxcc_samez(argv[q], "-run") && run_at < 0) run_at = q;
+            if (!skip && takes_arg(argv[q])) skip = 1;
+            else skip = 0;
         }
         if (run_at >= 0) return cxcc_run_main(argc, argv, run_at, dd, compiler, cmd);
     }
