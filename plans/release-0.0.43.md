@@ -121,6 +121,7 @@ STATE43：**whole-o 回载（omp-grk，2026-11-01）**：构造器把帧写到 `
 STATE43：**已安装（omp-grk，2026-11-01）**：`./unisacc.com` 换成 `4e40d38a`，5129162 字节。旧版备份 `out/unisacc.com.fc1d4513`。装后 smoke 5/5，`check-install-fixes` failed=0。没有签名，没有 Draft，没有 Latest，没有公开。
 STATE43：**已装批次（omp-grk，2026-11-01，`4e40d38a`）**：`negative-model-loader` core 99/0，terminal 22/0。`resources-limits` 20/0。`ri-image-single` 30/0。还不是 `tests/run.cx -- --all` 的 QUALIFIED。没有签名，没有公开。
 STATE43：**all-waves（omp-grk，2026-11-01，`4e40d38a`）**：会话 `out/tb/sess-4e40`，346 个 IMPLEMENTED 批次。两轮 light 8/8 PASS：snapshots-cx、cx-source-frame、cx-stream-resource、cx-stream-output、cx-driver-route、driver-token-target、cx-codec、cx-packagefooter。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**all-waves 续（omp-grk，2026-11-01，`4e40d38a`）**：同一会话再 16 个 PASS，累计 24/346。其中包括 `negative-model-loader`、`resources-limits`、`ri-image-single`、`phase-timing-stamps`、`negative-diagnostics`、`pp-cli-includes`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
