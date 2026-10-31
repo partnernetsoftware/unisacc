@@ -172,6 +172,7 @@ STATE43：**21782dd5 attr-count（omp-grk，2026-11-01）**：`e3.ref.attr-count
 STATE43：**21782dd5 请 cc 并 R7（omp-grk，2026-11-01）**：已发信封请 cc 把 `e3.ref.attr-count-overstated` 并入 R7。理由：已装产品无 `UNISA_ATTRIBUTES`，断言只在 stream bin。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 启动器内存预检（omp-grk，2026-11-01）**：已装头 `need=300000`，`ulimit -v 100000` 下 `sh ./unisacc.com -c` 印 `run: out of memory`，退出 2，不写输出。不是按每片 PT_LOAD 分档；分档在 `ujs/product/ape-pack.cx`，本车道不改。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 相位打点（omp-grk，2026-11-01）**：`phase-timing-stamps` 62/0。`construction` cold/hot、`output.duration` cold/hot、`loading.model-inflate` cold、`inference.in-product` cold 已有产品戳。hot 的 inflate/inference 和 memory-bind 仍 UNMEASURED。矩阵仍写 NEEDS_PRODUCT_CHANGE，慢车道再换标。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 哈希拒绝（omp-grk，2026-11-01）**：`ri-image-single` 31/0。同长翻转报 `resource-hash-mismatch`，rc 2，空 stdout，无镜像。缺 e3、尾随、符号链接也收成单一精确句。`ri.id.e3-companion-file-faults` 仍缺 over-size，不翻。映射 `plans/flip-hash-21782dd5.tsv`，`--check` 通过。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
