@@ -167,6 +167,7 @@ STATE43：**21782dd5 assembler-cache（omp-grk，2026-11-01）**：把 `out/c43-
 STATE43：**21782dd5 nets（omp-grk，2026-11-01）**：`tools/net-material.cx` PREPARED。`out/tb/sess-nets` 上 `nets` PASS。`net-controls` FAIL 粘住，原因 `material-changed-during-batch`，不重跑。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 ref 阻塞（omp-grk，2026-11-01）**：`tools/build_ref.sh` 失败，`unisacc.c` 不在，系统 cc 链 `safedel.cx` 缺 `tx_eqz`。不重跑。`net-controls` 子进程自己是 3/3 PASS，被材料指纹变化判 FAIL。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 windows-args 翻格（omp-grk，2026-11-01）**：已装产品 `elf-winargs` 4/0，hits=1。`matrix-flip-gen` 已生成并 `--check` 通过，映射在 `plans/flip-winargs-21782dd5.tsv`。工具不写 `tests/`，慢车道再套用。另外 4 个剩格已是 R13 豁免。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 十格翻备（omp-grk，2026-11-01）**：已装产品上 `negative-model-loader` 99/0、`negative-diagnostics` 211/0、`ri-image-single` 30/0、`ri-image-multi` 15/0、`ri-image-pem` 17/0。`plans/flip-stale-21782dd5.tsv` 映射 10 格，`matrix-flip-gen --check` 通过。不翻 `e2.cli.include-path`（R12 仍是 KNOWN_GAP）和 `tapebin.roundtrip`（未跑，R11）。工具不写 `tests/`。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
