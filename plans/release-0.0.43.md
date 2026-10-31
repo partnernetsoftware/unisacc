@@ -267,6 +267,7 @@ STATE43：**21782dd5 材料会话一百四十九批（omp-grk，2026-11-01）**�
 STATE43：**21782dd5 材料会话重跑完成（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 14/14 PASS，旧无材料会话的 154 个 PASS 已全部重跑进来。另有对象材料 9/9。会话里 163 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话 nets（omp-grk，2026-11-01）**：`nets` 先在 `out/tb/probe-nets` 绿，再登记进 `out/tb/sess-qual` 并 PASS。会话里 164 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话 pp-gold（omp-grk，2026-11-01）**：`pp-source-constructed`、`pp-gold-controls` 先在 `out/tb/probe-pp` 绿，再登记进 `out/tb/sess-qual` 并 PASS。会话里 166 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话 kernel-route（omp-grk，2026-11-01）**：`kernel-route-encoding` 先在 `out/tb/probe-kr` 绿，再登记进 `out/tb/sess-qual` 并 PASS。会话里 167 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
