@@ -148,20 +148,29 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
 
     tx_snprintf(name, sizeof name, "%s.conflicts", tag);
     { int ok = 1;
-      const char *bad[][2] = {
-        {"-o", "output override"}, {"-oZ", "output override"},
-        {"-Wl,--output=Z", "linker options"}, {"-Xlinker", "linker options"},
-        {"@rsp", "response files"}, {"-c", "-c"}, {"-E", "-E"}, {"-S", "-S"},
-        {"-shared", "-shared"}
+      char out[256];
+      const char *fixed[][2] = {
+        {"-c", "-c"}, {"-E", "-E"}, {"-S", "-S"}, {"-shared", "-shared"}
       };
       size_t k;
-      for (k = 0; k < sizeof bad / sizeof bad[0]; k++) {
-        tx_snprintf(cmd, sizeof cmd, "%s -run %s %s/plain.cx 2>&1", drv, bad[k][0], dir);
+      tx_snprintf(out, sizeof out, "%s/conflict-out", dir);
+      if (sy_exists(out) == 1) ok = 0;
+      for (k = 0; k < 5 + sizeof fixed / sizeof fixed[0]; k++) {
+        if (k == 0) tx_snprintf(cmd, sizeof cmd, "%s -run -o %s %s/plain.cx 2>&1", drv, out, dir);
+        else if (k == 1) tx_snprintf(cmd, sizeof cmd, "%s -run -o%s %s/plain.cx 2>&1", drv, out, dir);
+        else if (k == 2) tx_snprintf(cmd, sizeof cmd, "%s -run -Wl,--output=%s %s/plain.cx 2>&1", drv, out, dir);
+        else if (k == 3) tx_snprintf(cmd, sizeof cmd, "%s -run -Xlinker %s/plain.cx 2>&1", drv, dir);
+        else if (k == 4) tx_snprintf(cmd, sizeof cmd, "%s -run @%s/rsp.txt %s/plain.cx 2>&1", drv, dir, dir);
+        else tx_snprintf(cmd, sizeof cmd, "%s -run %s %s/plain.cx 2>&1", drv, fixed[k - 5][0], dir);
         o = 0; n = 0; rc = runsh(cmd, &o, &n);
-        if (rc != 2 || !has(o, n, bad[k][1])) ok = 0;
+        if (rc != 2) ok = 0;
+        if (k == 0 || k == 1) { if (!has(o, n, "output override")) ok = 0; }
+        else if (k == 2 || k == 3) { if (!has(o, n, "linker options")) ok = 0; }
+        else if (k == 4) { if (!has(o, n, "response files")) ok = 0; }
+        else if (!has(o, n, fixed[k - 5][1])) ok = 0;
         mm_free(o);
       }
-      if (sy_exists("Z") == 1) ok = 0;
+      if (sy_exists(out) == 1) ok = 0;
       ck(ok, name);
     }
 
@@ -242,10 +251,11 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
              "wait $a; r1=$?; wait $b; r2=$?; echo $r1:$r2",
              drv, dir, dir, drv, dir, dir);
     o = 0; n = 0; rc = runsh(cmd, &o, &n);
-    tx_snprintf(p, sizeof p, "%s/c1.out", dir);
-    { char *a = cx_read(p, &n); size_t an = n; char *b; size_t bn = 0;
+    { size_t on = n; char *a, *b; size_t an = 0, bn = 0;
+      tx_snprintf(p, sizeof p, "%s/c1.out", dir);
+      a = cx_read(p, &an);
       tx_snprintf(q, sizeof q, "%s/c2.out", dir); b = cx_read(q, &bn);
-      ck(rc == 0 && has(o, n, "0:0") && a && b && has(a, an, "<one>") && has(b, bn, "<two>") &&
+      ck(rc == 0 && has(o, on, "0:0") && a && b && has(a, an, "<one>") && has(b, bn, "<two>") &&
          gone_temp(a, an) && gone_temp(b, bn), name);
       mm_free(a); mm_free(b); }
     mm_free(o);
