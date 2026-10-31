@@ -349,6 +349,7 @@ STATE43：**21782dd5 全材料会话十一批（omp-grk，2026-11-01）**：`out
 STATE43：**21782dd5 全材料会话十九批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`negative-model-loader`、`resources-limits`、`loader-faults`、`runner-faults`、`elf-x86-image`、`elf-arm64-image`、`link-undefined-function`、`formats-objects`。会话里 19 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 全材料会话二十七批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`pp-cli-includes`、`ri-image-single`、`ri-image-multi`、`ri-image-pem`、`elf-winargs`、`cx-package-refusals`、`ucn-identities`、`input-refuse`。会话里 27 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 全材料会话三十五批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`matrix-waive`、`cx-bounded`、`cx-codec`、`cx-core-alu`、`cx-core-bytes`、`cx-core-output`、`cx-core-sparse`、`cx-core-stack`。会话里 35 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 全材料会话四十三批（omp-grk，2026-11-01）**：`out/tb/sess-full` 再 8/8 PASS：`cx-core-stack-empty`、`cx-core-transition`、`cx-driver-archive`、`cx-driver-args`、`cx-driver-cli`、`cx-driver-compat`、`cx-driver-deps`、`cx-driver-environment`。会话里 43 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
