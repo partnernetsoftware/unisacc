@@ -305,6 +305,7 @@ STATE43：**21782dd5 冻结会话官方门（omp-grk，2026-11-01）**：`tests/
 STATE43：**21782dd5 冻结会话一百三十五批（omp-grk，2026-11-01）**：官方门之后再 8/8 PASS：`callback-wrapper-index`、`com-tree`、`commit-own`、`cx-l0-sys-sig`、`snapshots-cx`、`core-compat`、`cx-l0-crypto-chacha20poly1305`、`cx-l0-crypto-p256`。会话里 135 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百四十二批（omp-grk，2026-11-01）**：再 PASS：`cx-l0-crypto-aesgcm`、`cx-l0-crypto-rsa`、`cx-funit-host`、`cx-library-build-check`、`cx-library-payload`、`capsule-export`、`cx-host-run`（第一次 24 秒子时限 UNKNOWN，加长后重跑 PASS）。会话里 142 个 PASS。`cx-layers` 在这个会话 FAIL，rc 3，`symlinks=UNKNOWN`，`not-a-pass`，不记 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话一百四十六批（omp-grk，2026-11-01）**：再 4/4 PASS：`formats-elf-ape`、`negative-diagnostics`、`negative-model-loader-terminal`、`stdio-close`。会话里 146 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结会话一百四十七批（omp-grk，2026-11-01）**：`phase-timing-stamps` PASS。会话里 147 个 PASS。`full-interfaces`、`full-properties`、`full-resources` 在这个会话 FAIL，rc 1，原因是覆盖格 MISSING，不是批次崩溃。不记 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
