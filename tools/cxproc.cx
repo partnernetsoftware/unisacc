@@ -3,7 +3,9 @@
    depend on this file. Linux: a null envp is an empty environment, not the
    caller's. Windows: a null envp is inherit. The libc prototype stays inside
    a static function. The export has no file-scope declaration and no #if.
-   The result is an ordinary C call. It is not a checked build. */
+   The result is an ordinary C call. It is not a checked build.
+   cxproc_run_raw keeps the terminal category (exit vs signal) instead of
+   folding both into one integer; cxproc_run keeps its existing result. */
 #ifdef _WIN32
 static int cxproc_spawn(char **argv, char **envp, pid_t *pid) {
     return posix_spawnp(pid, argv[0], 0, 0, argv, envp);
@@ -19,15 +21,34 @@ static int cxproc_spawn(char **argv, char **envp, pid_t *pid) {
 #endif
 
 int cxproc_run(char **argv, char **envp, int *status) {
+    int kind = 0, code = 0;
+    int spr;
+    extern int cxproc_run_raw(char **argv, char **envp, int *kind, int *code);
+    spr = cxproc_run_raw(argv, envp, &kind, &code);
+    if (spr != 0) return spr;
+    if (!status) return 2;
+    if (kind == 0) *status = code;
+    else if (kind == 1) *status = 128 + code;
+    else *status = 2;
+    return 0;
+}
+
+/* Same spawn and wait as cxproc_run, but keeps the terminal category:
+   *kind = 0 normal exit with *code = exit status; 1 killed by signal with
+   *code = signal; 2 any other terminal state. Returns 0 when the child
+   terminal state was decoded, 127 when it could not be started, 2 otherwise.
+   On the current Windows shim a normal exit is (code & 0xff) << 8, so KIND is
+   always 0 there and CODE carries only the low 8 bits; that path is unrun. */
+int cxproc_run_raw(char **argv, char **envp, int *kind, int *code) {
     pid_t pid = 0;
     int st = 0;
     int spr;
+    if (!kind || !code) return 2;
     spr = cxproc_spawn(argv, envp, &pid);
     if (spr != 0) return 127;
     if (waitpid(pid, &st, 0) < 0) return 2;
-    if (!status) return 2;
-    if (WIFEXITED(st)) *status = WEXITSTATUS(st);
-    else if (WIFSIGNALED(st)) *status = 128 + WTERMSIG(st);
-    else *status = 2;
+    if (WIFEXITED(st)) { *kind = 0; *code = WEXITSTATUS(st); }
+    else if (WIFSIGNALED(st)) { *kind = 1; *code = WTERMSIG(st); }
+    else { *kind = 2; *code = 0; }
     return 0;
 }
