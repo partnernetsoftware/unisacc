@@ -2,7 +2,7 @@
 
 状态：设计提案，不改变 `cx/spec.md` 已生效条款，不代表实现、安装或发布资格。现状以 `cx/spec.md`、`cx/prd.md`、根 `prd.md` 为准；施工以具体计划及其候选身份为准。
 
-首刀现状（2026-10-31）：源码提交 `b393ac30bc`；`out/link-unit-4/receipt.txt` 显示正式 `entry-build` 在 `entry.elf` 失败，未完成首刀验收。`out/link-unit-3/evidence.txt` 的候选 `66a632ff…` 使用 `dl-stub` 手工链接，仅作隔离探针，不是可安装的正式候选。未解决 `dlopen` 等宿主符号的真实绑定前，不更改 CX-W-1 状态；已派 omp-go 修复，禁止用桩替代产品行为。
+首刀现状（2026-10-31）：源码提交 `b393ac30bc`；早期 `66a632ff…` 使用 `dl-stub` 手工链接，只是隔离探针。后续提交 `e4a1542b30`、`82ca853dfd` 的 `out/link-unit-8/candidate`（sha256 `81c500835235e77b18c5655a74cabbf5e8531cac0dbfd40ca423765109cc0920`）由 entry-build 无桩链接，模块与单独的 `sys.dlcall` 探针证据见 `out/link-unit-8/evidence.txt`。但该证据同时说明静态产品的 memory 路由发布零 process/dl 槽，真实 `.hostaddr` 使用失败；独立 `sys.dlcall` 探针不能证明产品自身宿主绑定能力未回归。已派 omp-go 对照已装产品和候选的真实宿主绑定消费者，若退化须恢复功能；CX-W-1 不标生效，候选未安装，跨平台未验。
 
 ## 目标与边界
 
