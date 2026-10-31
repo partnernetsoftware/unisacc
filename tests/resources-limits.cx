@@ -23,6 +23,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.num
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 
 static char root[4096], work[4400], com[4400], bound[4400];
 static int assertions, failures;
@@ -54,6 +55,17 @@ static np_result limited(const char *limit, int secs, const char *dir, char **ar
     return r;
 }
 
+/* res.recovery.after-budget: after each refusal or kill above, the unconstrained baseline compile is run again in the same batch and
+   must give exactly the bytes of the first baseline image; the product file itself is hashed at start and end */
+static char *base_img, sha_start[65]; static size_t base_n;
+static void recovered(const char *tag) {
+    char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "rec.out", 0}; char p[4600], name[96], *got; size_t gn = 0; np_result r;
+    if (cx_fmt(p, sizeof p, "%s/rec.out", work)) die("path");
+    sy_unlink(p); r = prod(20, a); got = r.rc == 0 ? cx_read(p, &gn) : 0;
+    if (cx_fmt(name, sizeof name, "recovery-after-%s-baseline-bytes-exact", tag)) die("name");
+    ck(got && gn == base_n && mm_same(got, base_img, (long)gn), name); if (got) mm_free(got); np_free(&r);
+}
+
 int main(void) {
     np_result r; char p[4600];
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
@@ -61,15 +73,18 @@ int main(void) {
     if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
     if (sy_mkdir(work, 0700)) die("work");
     put("ok.c", "int main(void){return 7;}\n");
+    {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "base.out", 0}; size_t pn = 0; char *prodbytes = cx_read(com, &pn);
+        if (!prodbytes) die("read product"); cx_sha256_hex(prodbytes, pn, sha_start); mm_free(prodbytes);
+        r = prod(20, a); if (r.rc != 0 || cx_fmt(p, sizeof p, "%s/base.out", work) || !(base_img = cx_read(p, &base_n)) || !base_n) die("baseline image"); np_free(&r); }
 
     {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "/dev/full", 0}; r = prod(20, a);
-        ck(r.rc != 0 && r.rc != 142 && r.errn && has(&r, "output"), "disk-output-full-refused"); np_free(&r); }
+        ck(r.rc != 0 && r.rc != 142 && r.errn && has(&r, "output"), "disk-output-full-refused"); np_free(&r); recovered("output-full"); }
 
     if (sy_euid() != 0) {
         if (cx_fmt(p, sizeof p, "%s/ro", work) || sy_mkdir(p, 0555)) die("ro dir");
         {   char *a[] = {"-O0", "-b", "lnx/x86_64", "ok.c", "-o", "ro/x.out", 0}; r = prod(20, a);
             ck(r.rc != 0 && has(&r, "cannot open output") && !has(&r, "no such file") && !has(&r, "ENOENT"), "disk-output-eacces-refused"); np_free(&r); }
-        sy_chmod(p, 0700);
+        sy_chmod(p, 0700); recovered("output-eacces");
     } else ck(0, "disk-output-eacces-refused-needs-non-root");
 
     /* res.disk.output-fsize: RLIMIT_FSIZE of 1 KiB with SIGXFSZ ignored (a write fails short instead of killing the product):
@@ -84,7 +99,7 @@ int main(void) {
         np_free(&r);
         {   char *a[] = {"-O0", "-b", "lnx/x86_64", "fsd/fsz.c", "-o", "fsd/fsz.out", 0}; r = prod(20, a);
             if (cx_fmt(p, sizeof p, "%s/fsd/fsz.out", work)) die("path");
-            ck(r.rc == 0 && sy_exists(p) == 1, "disk-output-fsize-unconstrained-rerun-writes-image"); np_free(&r); } }
+            ck(r.rc == 0 && sy_exists(p) == 1, "disk-output-fsize-unconstrained-rerun-writes-image"); np_free(&r); recovered("output-fsize"); } }
 
 
     /* res.fd.compile-nofile-limit: RLIMIT_NOFILE 64 is accepted with the exact baseline result; 10 is below what the sh launcher
@@ -96,7 +111,7 @@ int main(void) {
         r = limited("-n 64", 30, work, r64); ck(r.rc == 7, "fd-nofile-64-run-accepted"); np_free(&r);
         r = limited("-n 10", 20, work, c10); if (cx_fmt(p, sizeof p, "%s/nf10.out", work)) die("path");
         ck(r.rc > 0 && r.rc < 128 && r.rc != 7 && !r.outn && r.errn && sy_exists(p) != 1, "fd-nofile-10-refused-not-crashed"); np_free(&r);
-        r = prod(20, c10); ck(r.rc == 0 && sy_exists(p) == 1, "fd-nofile-unconstrained-rerun-writes-image"); np_free(&r); }
+        r = prod(20, c10); ck(r.rc == 0 && sy_exists(p) == 1, "fd-nofile-unconstrained-rerun-writes-image"); np_free(&r); recovered("nofile"); }
 
     /* res.time.cpu-limit: RLIMIT_CPU 1 s kills a heavy compile (src/drive.cx at -O2) with a signal (rc >= 128): that is a
        resource kill, classified UNKNOWN -- not a product verdict, not PASS -- and leaves no image under the name */
@@ -105,7 +120,7 @@ int main(void) {
         a[3] = sp;
         r = limited("-t 1", 30, work, a);
         sy_printf("UNKNOWN\tresources-limits.time-cpu-limit-compile-killed\trc=%d (resource kill, not a verdict)\n", r.rc);
-        ck(r.rc >= 128 && r.rc != 142 && sy_exists(p) != 1, "time-cpu-limit-kill-is-signal-no-image-classified-unknown"); np_free(&r); }
+        ck(r.rc >= 128 && r.rc != 142 && sy_exists(p) != 1, "time-cpu-limit-kill-is-signal-no-image-classified-unknown"); np_free(&r); recovered("cpu-limit"); }
 
     put("fds.c","#include <fcntl.h>\nint main(void){int n=0,i;for(i=3;i<64;i++)if(fcntl(i,F_GETFD)!=-1)n++;return n;}\n");
     {   char *a[] = {"-run", "fds.c", 0}; r = prod(30, a); ck(r.rc == 0 && !r.errn, "fd-no-leak-to-program"); np_free(&r); }
@@ -120,7 +135,10 @@ int main(void) {
             left = sy_run(ps, out, sizeof out, &cut) == 0 ? (int)tx_strtol(out, 0, 10) : -1;
         }
         ck(left == 0, "time-user-infinite-loop-no-descendant-left");
-        {   char *b[] = {"-run", "ok.c", 0}; r = prod(30, b); ck(r.rc == 7, "time-user-infinite-loop-clean-rerun-returns-7"); np_free(&r); } }
+        {   char *b[] = {"-run", "ok.c", 0}; r = prod(30, b); ck(r.rc == 7, "time-user-infinite-loop-clean-rerun-returns-7"); np_free(&r); recovered("deadline-kill"); } }
+
+    {   size_t pn = 0; char *prodbytes = cx_read(com, &pn), sha_end[65]; if (!prodbytes) die("read product"); cx_sha256_hex(prodbytes, pn, sha_end); mm_free(prodbytes);
+        ck(tx_eqz(sha_start, sha_end), "recovery-product-sha-unchanged-after-every-refusal"); }
 
     sy_printf("RESOURCES_LIMITS\tassertions=%d\tfailed=%d\n", assertions, failures);
     return failures ? 1 : 0;
