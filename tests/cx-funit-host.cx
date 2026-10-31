@@ -1,0 +1,128 @@
+/* ROOT PRODUCT NEW_OUTDIR [direct]. Persistent behaviour regression for
+ * per-unit -funit linking and host forwarding:
+ *   - diamond use graph: top -> left,right -> leaf; each unit is one
+ *     -funit object, leaf is linked once, the executable runs to 8;
+ *     - dropping leaf.o is still a named undefined reference;
+ *   - -run of a real forwarded host function succeeds (exit 0);
+ *   - -run of an absent host function is refused by name (rc 127).
+ * PRODUCT is run through sh unless the fourth argument is "direct"
+ * (a raw candidate ELF). Linux x86-64 only. L3: no libc names. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+static char root[4096], product[4096], bound[4400], out[4096];
+static int failures, unverified, checks;
+
+static int contains(const char *b, long n, const char *w) {
+    long wl;
+    if (!b || !w) return 0;
+    wl = tx_len(w, 4096);
+    return wl >= 0 && tx_find(b, n, w, wl) >= 0;
+}
+static int run(char **v, int expected, const char *label, const char *want_out, const char *want_err) {
+    np_result r = {0};
+    char why[512];
+    int tr = np_run(v, root, 0, 50, &r, why, sizeof why);
+    int unknown = tr || r.rc < 0 || r.rc >= 128;
+    int ok = !unknown && r.rc == expected;
+    if (ok && want_out) ok = contains((const char *)r.out, r.outn, want_out);
+    if (ok && want_err) ok = contains((const char *)r.err, r.errn, want_err);
+    checks++;
+    if (unknown) unverified++;
+    else if (!ok) failures++;
+    sy_printf("%s\t%s\n", unknown ? "UNVERIFIED" : ok ? "PASS" : "FAIL", label);
+    if (!ok) {
+        if (tr) sy_eprintf("%s: %s\n", label, why);
+        else {
+            if (r.errn) sy_write_all(2, r.err, r.errn);
+            if (want_out || want_err) sy_eprintf("%s: unexpected output/rc=%d\n", label, r.rc);
+        }
+    }
+    np_free(&r);
+    return ok;
+}
+int main(int argc, char **argv) {
+    char top[4400], left[4400], right[4400], leaf[4400];
+    char hostok[4400], hostmiss[4400];
+    char obj[4][4400], gelf[4400], missing[4400];
+    int direct, ready;
+    const char *names[4] = {"top", "left", "right", "leaf"};
+    int i;
+    if ((argc != 4 && argc != 5) || sy_realpath(argv[1], root, sizeof root) < 0 || sy_realpath(argv[2], product, sizeof product) < 0 ||
+        argv[3][0] != '/' || tx_len(argv[3], 4096) >= (int)sizeof out) {
+        sy_eprintf("usage: ROOT PRODUCT NEW_OUTDIR [direct]\n");
+        return 2;
+    }
+    direct = argc == 5 && tx_eqz(argv[4], "direct");
+    if (argc == 5 && !direct) { sy_eprintf("usage: ROOT PRODUCT NEW_OUTDIR [direct]\n"); return 2; }
+    if (cx_fmt(out, sizeof out, "%s", argv[3])) return 2;
+    if (sy_mkdir(out, 0700) && !sy_exists(out)) return 2;
+    if (cx_path_join(bound, sizeof bound, root, "tools/bound")) return 2;
+    if (cx_path_join(top, sizeof top, root, "tests/cases/cx-funit-host/top.cx") ||
+        cx_path_join(left, sizeof left, root, "tests/cases/cx-funit-host/left.cx") ||
+        cx_path_join(right, sizeof right, root, "tests/cases/cx-funit-host/right.cx") ||
+        cx_path_join(leaf, sizeof leaf, root, "tests/cases/cx-funit-host/leaf.cx") ||
+        cx_fmt(hostok, sizeof hostok, "%s/host_ok.cx", out) ||
+        cx_fmt(hostmiss, sizeof hostmiss, "%s/host_missing.cx", out)) return 2;
+    {
+        const char *ok_src = "char *strfry(char *);\nint main(void) { char b[] = \"abc\"; return strfry(b) ? 0 : 1; }\n";
+        const char *bad_src = "int cx_no_such_host_7f3a(void);\nint main(void) { return cx_no_such_host_7f3a(); }\n";
+        if (cx_write(hostok, ok_src, (size_t)tx_len(ok_src, 512)) || cx_write(hostmiss, bad_src, (size_t)tx_len(bad_src, 512))) return 2;
+    }
+    {
+        const char *src[4];
+        src[0] = top; src[1] = left; src[2] = right; src[3] = leaf;
+        for (i = 0; i < 4; i++) {
+            char *v[16];
+            int n = 0;
+            if (cx_fmt(obj[i], sizeof obj[i], "%s/%s.o", out, names[i])) return 2;
+            v[n++] = bound; v[n++] = "45";
+            if (!direct) v[n++] = "sh";
+            v[n++] = product; v[n++] = "-c"; v[n++] = "-funit"; v[n++] = "-b"; v[n++] = "lnx/x86_64";
+            v[n++] = (char *)src[i]; v[n++] = "-o"; v[n++] = obj[i]; v[n] = 0;
+            if (n >= 16) return 2;
+            if (!run(v, 0, names[i], 0, 0)) break;
+        }
+    }
+    ready = i == 4;
+    if (cx_fmt(missing, sizeof missing, "%s/missing.elf", out) || cx_fmt(gelf, sizeof gelf, "%s/diamond.elf", out)) return 2;
+    if (ready) {
+        char *v[16];
+        int n = 0;
+        v[n++] = bound; v[n++] = "45";
+        if (!direct) v[n++] = "sh";
+        v[n++] = product; v[n++] = obj[0]; v[n++] = obj[1]; v[n++] = obj[2]; v[n++] = "-o"; v[n++] = missing; v[n] = 0;
+        if (n >= 16) return 2;
+        run(v, 1, "missing-leaf", 0, "undefined reference to leaf_value");
+        checks++;
+        if (sy_exists(missing)) failures++;
+        sy_printf("%s\tmissing-output\n", sy_exists(missing) ? "FAIL" : "PASS");
+        n = 0;
+        v[n++] = bound; v[n++] = "45";
+        if (!direct) v[n++] = "sh";
+        v[n++] = product; v[n++] = obj[0]; v[n++] = obj[1]; v[n++] = obj[2]; v[n++] = obj[3]; v[n++] = "-o"; v[n++] = gelf; v[n] = 0;
+        if (n >= 16) return 2;
+        if (run(v, 0, "diamond-link", 0, 0)) {
+            char *r[4];
+            int m = 0;
+            r[m++] = bound; r[m++] = "20"; r[m++] = gelf; r[m] = 0;
+            run(r, 8, "diamond-run", 0, 0);
+        } else unverified++;
+    } else unverified++;
+    {
+        char *v[16];
+        int n = 0;
+        v[n++] = bound; v[n++] = "45";
+        if (!direct) v[n++] = "sh";
+        v[n++] = product; v[n++] = "-run"; v[n++] = hostok; v[n] = 0;
+        run(v, 0, "host-forward-ok", 0, 0);
+        n = 0;
+        v[n++] = bound; v[n++] = "45";
+        if (!direct) v[n++] = "sh";
+        v[n++] = product; v[n++] = "-run"; v[n++] = hostmiss; v[n] = 0;
+        run(v, 127, "host-missing-refused", 0, "no host function cx_no_such_host_7f3a");
+    }
+    sy_printf("CX_FUNIT_HOST\tchecks=%d\tfailed=%d\tunverified=%d\tcandidate=%s\n", checks, failures, unverified, product);
+    return failures ? 1 : unverified ? 3 : 0;
+}
