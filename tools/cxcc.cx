@@ -140,34 +140,71 @@ static size_t cxcc_idword(const unsigned char *s, size_t n, size_t i, size_t *wb
 }
 
 static int has_unisa(const unsigned char *s, size_t n) {
-    size_t i = 0, bol = 1, a, b, j;
+    size_t i = 0, j, a, b;
+    int bol = 1;
     while (i < n) {
         if (s[i] == '\n') { bol = 1; i++; continue; }
-        if (bol) {
-            j = cxcc_skip_blanks(s, n, i);
-            if (j > i) {
-                if (s[j] == '#') { i = j; continue; }
-                if (s[j] == '\n' || j >= n) { bol = 1; i = j; continue; }
-                bol = 0;
-                i = j;
-                continue;
-            }
-            if (s[i] == '#') {
-                i = cxcc_skip_blanks(s, n, i + 1);
-                b = cxcc_idword(s, n, i, &a);
-                if (cxcc_eq(s, a, b, "pragma")) {
-                    i = cxcc_skip_blanks(s, n, b);
-                    b = cxcc_idword(s, n, i, &a);
-                    if (cxcc_eq(s, a, b, "unisa") &&
-                        (b >= n || s[b] == '\n' || s[b] <= 32 || s[b] == '/'))
-                        return 1;
-                }
-                while (i < n && s[i] != '\n') i++;
-                bol = 0;
-                continue;
-            }
-            if (s[i] > 32) bol = 0;
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+            int nl = 0;
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) { if (s[i] == '\n') nl = 1; i++; }
+            if (i + 1 < n) i += 2;
+            if (nl) bol = 1;
+            continue;
         }
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') i++;
+            continue;
+        }
+        if (s[i] == '"' || s[i] == '\'') {
+            int q = s[i];
+            i++;
+            while (i < n && s[i] != q) { if (s[i] == '\\' && i + 1 < n) i++; i++; }
+            if (i < n) i++;
+            bol = 0;
+            continue;
+        }
+        if (bol && s[i] == '#') {
+            i++;
+            for (;;) {
+                while (i < n && s[i] != '\n' && s[i] <= 32) i++;
+                if (i >= n || s[i] == '\n') break;
+                if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+                    j = i + 2;
+                    while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) { if (s[j] == '\n') { j = n; break; } j++; }
+                    if (j >= n) { i = n; break; }
+                    i = j + 2;
+                    continue;
+                }
+                b = cxcc_idword(s, n, i, &a);
+                if (b == a) { i = b; break; }
+                if (cxcc_eq(s, a, b, "pragma")) {
+                    i = b;
+                    for (;;) {
+                        while (i < n && s[i] != '\n' && s[i] <= 32) i++;
+                        if (i >= n || s[i] == '\n') break;
+                        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+                            j = i + 2;
+                            while (j + 1 < n && !(s[j] == '*' && s[j + 1] == '/')) { if (s[j] == '\n') { j = n; break; } j++; }
+                            if (j >= n) { i = n; break; }
+                            i = j + 2;
+                            continue;
+                        }
+                        b = cxcc_idword(s, n, i, &a);
+                        if (cxcc_eq(s, a, b, "unisa") &&
+                            (b >= n || s[b] == '\n' || s[b] <= 32 || s[b] == '/'))
+                            return 1;
+                        break;
+                    }
+                    break;
+                }
+                break;
+            }
+            while (i < n && s[i] != '\n') i++;
+            bol = 0;
+            continue;
+        }
+        if (bol && s[i] > 32) bol = 0;
         i++;
     }
     return 0;
