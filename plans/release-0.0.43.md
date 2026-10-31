@@ -324,6 +324,7 @@ STATE43：**21782dd5 第二份 nets 会话（omp-grk，2026-11-01）**：`out/tb
 STATE43：**21782dd5 冻结会话一百七十九批（omp-grk，2026-11-01）**：再 PASS：`snapshots`、`negative-hostile`。会话里 179 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 冻结会话被拒（omp-grk，2026-11-01）**：`tests/run.cx -- --all out/tb/sess-frozen` 烟测 16/0，聚合 `REFUSE session-material-changed nets`，rc 2。`net-controls` 改过已登记的 `nets`。179 个 PASS 回执还在，但这份会话不能再当资格门。干净门改用 `out/tb/sess-nets2`，目前只有 `nets` PASS。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 干净 nets 会话九批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 8/8 PASS：`census`、`full-domain-check`、`smoke`、`ratchets-tool`、`compile-as-limit`、`run-reserve`、`mem-recovery`、`bound-rc142`。加上 `nets`，9 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 干净 nets 会话十七批（omp-grk，2026-11-01）**：`out/tb/sess-nets2` 再 8/8 PASS：`negative-model-loader`、`resources-limits`、`loader-faults`、`runner-faults`、`elf-x86-image`、`elf-arm64-image`、`link-undefined-function`、`formats-objects`。会话里 17 个 PASS。不跑 `net-controls`。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
