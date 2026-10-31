@@ -1,0 +1,39 @@
+/* tools/check-full-domain.cx -- tests/full-domain.cx judges a domain matrix the way its header says.
+ *
+ *   sh ./unisacc.com tools/check-full-domain.cx            (from the repo root; works in out/check-full-domain/)
+ *
+ * Builds a fixture root with one small matrix and checks the roll-up on it:
+ *   all-satisfied  COVERED_LOCAL, OBSERVED and DECLARED_DEPENDENCY required cells only: PASS, exit 0
+ *   open-states    a MISSING, a NEEDS_FOREIGN_HOST, a NEEDS_PRODUCT_CHANGE and a BLOCKED:reason cell: each is an OPEN line,
+ *                  open=4, exit 1
+ *   waived         a required=no cell with state MISSING is not counted: PASS
+ *   absent         a domain with no matrix: exit 2
+ * Prints PASS/FAIL per case and CHECK_FULL_DOMAIN<TAB>failed=N. An L3 tool: no #include, no direct libc call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-full-domain.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-full-domain.%s\n", name); } }
+static void put(const char *name, const char *text) { char p[256]; if (cx_fmt(p, sizeof p, "out/check-full-domain/tests/%s-domain-matrix.tsv", name) || cx_write(p, text, (size_t)tx_len(text, 8192))) { sy_eprintf("check-full-domain: cannot write %s\n", p); sy_exit(2); } }
+static int run(const char *domain, char *out, int cap) {
+    char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", "out/check-full-domain", (char *)domain, 0}; int cut;
+    return sy_run(av, out, cap, &cut);
+}
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 4096), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    char out[4096]; int rc;
+    { char *av[] = {"sh", "-c", "rm -rf out/check-full-domain && mkdir -p out/check-full-domain/tests", 0}; int cut; if (sy_run(av, out, sizeof out, &cut)) return 2; }
+    put("fx-all", "# fixture\nlnx/x86_64\ta\tyes\tCOVERED_LOCAL\te\tr\nosx/arm64\tb\tyes\tOBSERVED\te\tr\nlnx/x86_64\tc\tyes\tDECLARED_DEPENDENCY\te\tr\n");
+    rc = run("fx-all", out, sizeof out); ck(rc == 0 && has(out, "required=3\tsatisfied=3\topen=0\tPASS") && !has(out, "OPEN\t"), "all-satisfied");
+    put("fx-open", "lnx/x86_64\ta\tyes\tMISSING\te\tneeds a thing\nosx/arm64\tb\tyes\tNEEDS_FOREIGN_HOST\te\tr\nlnx/x86_64\tc\tyes\tNEEDS_PRODUCT_CHANGE\te\tr\nlnx/x86_64\td\tyes\tBLOCKED:owner-ruling\te\tr\nlnx/x86_64\te\tyes\tCOVERED_LOCAL\te\tr\n");
+    rc = run("fx-open", out, sizeof out); ck(rc == 1 && has(out, "open=4\tOPEN") && has(out, "OPEN\tlnx/x86_64\ta\tMISSING\tneeds a thing") && has(out, "BLOCKED:owner-ruling"), "open-states");
+    put("fx-waived", "lnx/x86_64\ta\tno\tMISSING\te\tr [waived R1: x]\nlnx/x86_64\tb\tyes\tCOVERED_LOCAL\te\tr\n");
+    rc = run("fx-waived", out, sizeof out); ck(rc == 0 && has(out, "required=1\tsatisfied=1\topen=0\tPASS"), "waived");
+    rc = run("fx-absent", out, sizeof out); ck(rc == 2, "absent");
+    sy_printf("CHECK_FULL_DOMAIN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

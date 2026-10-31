@@ -1,0 +1,52 @@
+/* tests/full-domain.cx -- the roll-up of one domain matrix: every required cell is satisfied.
+ *
+ *   sh ./unisacc.com tests/full-domain.cx -- ROOT DOMAIN        (DOMAIN: the name in tests/DOMAIN-domain-matrix.tsv)
+ *
+ * Reads ROOT/tests/DOMAIN-domain-matrix.tsv.  A required cell (column 3 `yes`) is satisfied when its state (column 4)
+ * is COVERED_LOCAL (a registered batch asserts it on lnx/x86_64), OBSERVED (the same candidate was observed on the
+ * host) or DECLARED_DEPENDENCY (a host dependency that is declared and accepted on purpose).  Everything else is open:
+ * MISSING, NEEDS_PRODUCT_CHANGE, NEEDS_FOREIGN_HOST, BLOCKED[:reason].  A cell waived by tools/matrix-waive.cx is
+ * required=no and is not counted (tools/matrix-waive.cx --check keeps that honest).
+ * Prints one OPEN line per open cell (host, id, state, the first 90 bytes of the requirement) and
+ *   FULL_DOMAIN<TAB>DOMAIN<TAB>required=R<TAB>satisfied=S<TAB>open=O<TAB>PASS|OPEN
+ * Exit 0 only when open is 0.  It judges the matrix as recorded; the evidence behind COVERED_LOCAL is the business of
+ * the batches and of the all-waves aggregator.  An L3 tool: no #include, no direct libc call. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static void die(const char *a, const char *b) { sy_eprintf("full-domain: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
+
+static int col(const char *s, long n, int idx, char *out, long cap) {
+    long off, len;
+    if (tx_field(s, n, '\t', idx, &off, &len)) return 0;
+    if (len >= cap) len = cap - 1;
+    tx_copy(out, cap, s + off, len);
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    char path[4400]; size_t n; char *t; long at = 0; int required = 0, satisfied = 0, open = 0;
+    if (argc != 3) { sy_eprintf("usage: full-domain.cx ROOT DOMAIN\n"); return 2; }
+    if (tx_len(argv[2], 64) < 1 || tx_chr(argv[2], tx_len(argv[2], 64), '/') >= 0) die("bad domain name", argv[2]);
+    if (cx_fmt(path, sizeof path, "%s/tests/%s-domain-matrix.tsv", argv[1], argv[2])) die("path too long", argv[2]);
+    t = cx_read(path, &n); if (!t) die("cannot read", path);
+    while (at < (long)n) {
+        long e = tx_chr(t + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e; const char *s = t + at;
+        char host[32], id[128], req[8], state[64], text[128];
+        at += l + 1;
+        if (!l || s[0] == '#') continue;
+        if (!col(s, l, 0, host, sizeof host) || !col(s, l, 1, id, sizeof id) || !col(s, l, 2, req, sizeof req) || !col(s, l, 3, state, sizeof state)) continue;
+        if (!tx_eqz(req, "yes")) continue;
+        required++;
+        if (tx_eqz(state, "COVERED_LOCAL") || tx_eqz(state, "OBSERVED") || tx_eqz(state, "DECLARED_DEPENDENCY")) { satisfied++; continue; }
+        open++;
+        text[0] = 0; col(s, l, 5, text, 91);
+        sy_printf("OPEN\t%s\t%s\t%s\t%s\n", host, id, state, text);
+    }
+    mm_free(t);
+    sy_printf("FULL_DOMAIN\t%s\trequired=%d\tsatisfied=%d\topen=%d\t%s\n", argv[2], required, satisfied, open, open ? "OPEN" : "PASS");
+    return open ? 1 : 0;
+}
