@@ -44,7 +44,10 @@ dependency_diff>0 或 public_diff>0 均表示未证明一致，不能称 identit
 ## 4. 根清单：来源、分类与核对门
 
 拟提交 `tests/cx-context-roots.tsv`（未建），列：
-`root<TAB>joint_id<TAB>double_count<TAB>category<TAB>origin<TAB>provenance<TAB>expect<TAB>sha256`
+`root<TAB>joint_id<TAB>scope<TAB>double_count<TAB>category<TAB>participation<TAB>origin<TAB>provenance<TAB>expect<TAB>sha256`
+
+- `scope` 必填：`single-call` / `joint` / `build-instance`（§14.1）；`joint_id` **仅** `scope=joint` 时非空。
+- `participation` 仅 `category=production` 必填：`declared` / `observed`；其他类别留空。
 
 `origin` 必填，只取四值之一，指明该行**由哪个来源产生**，不代表已捕获执行身份：
 - `recipe`：来自构造配方的**源码声明**（`tools/entry-build.cx` 的 `src_rel`/`keys` 表）。
@@ -171,6 +174,12 @@ platform 10 / library 8 / product 7）。
 | 216 个无批次 `tools/` 含 main 单元归 tool 还是 product | **UNKNOWN**（未逐个确认） |
 | S2 对 120000 软链目标的覆盖 | **不覆盖**，缺口数 UNKNOWN 待按 C 重算 |
 | `mode=PREPARED` 的 2 行（entry `{nets}/nets.cx`、`{assembler}/contracts.cx`） | 材料占位，**根身份 UNKNOWN**，不记覆盖 |
+| `S1 \ S2` 中 32 个配方成员的 `joint_id` | **必须为空**（`scope=build-instance`）；标成 joint 即口径错误 |
+| `cycles` / `cycle_path` | 判环阶段未实现 ⇒ **UNMEASURED**，不得写 0 或"无环" |
+
+**UNKNOWN 白名单（决定 §9 的 `unknown_known`）**：上表各行原因、以及 §5 的 `unresolved`/`manifest` 读失败/
+软链悬空/`recipe_argv_status=NOT-CAPTURED` 等**已在本文件列明**的原因，记 `unknown_known`；
+其余一切 UNKNOWN 记 `unknown_unexpected`。二者之和必须等于 `unknown`。
 
 ## 5. 词法展开语义
 
@@ -294,11 +303,9 @@ platform 10 / library 8 / product 7）。
   **不得**写 `aggregate_measurement_complete`，也不得写无前缀的 `measurement_complete`；
 - 一律不写裸 `complete`，避免被读成全仓/规范通过；未达条件 → `UNKNOWN` 且 rc 非零。
 
-两个 UNKNOWN 计数的定义（此前全文未定义）：
-- `unknown_known`：UNKNOWN 根的 `reason` 命中**预登记白名单**（§4.5 的 PREPARED、无清单按全集、
-  软链悬空、`recipe_argv_status=NOT-CAPTURED` 等已在文档中列明的原因）；
-- `unknown_unexpected`：其余一切 UNKNOWN。
-每个 UNKNOWN 根二者择一，且 `unknown_known + unknown_unexpected = unknown`；不满足即聚合 rc 非零。
+两个 UNKNOWN 计数的定义（此前全文未定义，白名单见 §4.5）：
+`unknown_known` = `reason` 命中 §4.5 白名单；`unknown_unexpected` = 其余一切。每个 UNKNOWN 根二者择一，
+且 `unknown_known + unknown_unexpected = unknown`；不满足即聚合 rc 非零。
 
 ## 10. 拟路径与所有权
 
@@ -351,7 +358,7 @@ platform 10 / library 8 / product 7）。
 - roots.tsv 的行序只决定报告/遍历顺序，不能把另一根的消费结果当本根 canonical，也不能用根序推断跨根合并。
 - roots.tsv 增列 `joint_id`：空=独立根；同一 `joint_id` 的多行组成一个联合根，成员 root 行可重复。无 joint_id 的多 path 行拒绝。联合根与成员单根同时存在时须显式 `double_count=1`，否则核对门拒绝重复计量。
 - 多源码同一命令是“联合根”场景，必须显式加 category/joint 标记；一个联合根的图内可以有自己的 realpath 组与 pair，但不等于把多个独立根合计后再比较。
-- 各根 pair_visited/peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
+- 各根 `pairs_visited_total` 与四个 peak 的作用域仅该根（或显式联合根）；跨根求和只作统计量，不能作为任一图的峰值或产品上限证据。
 - 跨根 aggregate 的 unique_contexts 也只用于规模统计，不触发身份比较或拒绝。
 
 ### 14.1 三个身份/计数域，互不替代
@@ -462,7 +469,7 @@ roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`。**
 
 | 位置 | 改动 | 起因 |
 |---|---|---|
-| §4 类别 `production` | 拆分 `participation=declared|observed`；`NOT-CAPTURED` 时只能 `declared`，不得写"已证明参与" | 原文「经配方或捕获 argv 证明」与同节「recipe 不是 argv」冲突；`--only`/`--link-only` 使参与成为实例性质 |
+| §4 类别 `production` | 拆分 `participation` = `declared` / `observed`；`NOT-CAPTURED` 时只能 `declared`，不得写"已证明参与" | 原文「经配方或捕获 argv 证明」与同节「recipe 不是 argv」冲突；`--only`/`--link-only` 使参与成为实例性质 |
 | §4.2 `S1 \ S2` | 改称 **build-instance 独立计划成员**（`scope=build-instance`、`joint_id` 留空），删除"联合根成员" | 与 §14.1 联合根定义冲突（每次 `eb_plan` 只传 1 个 src） |
 | §4.2 `S3 \ S2` + 新增 §4.2a | 三分为 `no-main-by-design` / `prepared-template` / `absent-from-tree`（仅末者候选 STALE） | 批次源可无 main；PREPARED 的 entry 是模板；S2 不含软链与 manifest 外路径 |
 | §5 环 | 建图（BFS，已见集只做边去重）与判环（三色 DFS / Tarjan SCC）分两阶段；报 `cycles` + `cycle_path`；未实现前 `cycles` UNMEASURED | 原文是 DFS 祖先栈语义却配 BFS 遍历，交叉边环漏检（夹具实测） |
@@ -472,6 +479,9 @@ roots.tsv、未测量、未改 `cxmod`/`entry-build`/`spec`。**
 | §9 每根 | 加 `scope`、`participation`、`contexts_queued`、`cycle_path` 与四个 peak（含 `_v1r`） | 与上述字段对齐 |
 | §9 聚合 | 每类别一行；**事先固定**必需集合 `{production, tool, batch-positive}`；仅 production 完成只能写 `production_measurement_complete`；全必需完成才 `aggregate_measurement_complete`；`unclassified` 禁止入必需集；定义 `unknown_known`/`unknown_unexpected` 且二者之和等于 `unknown` | 原文只绑 production 却是无范围"测量完成"；两个 UNKNOWN 计数全文未定义 |
 | §14.1 | 增 `scope` 取值域与 `joint_id` 唯一性（仅 `scope=joint` 非空） | 承接 `S1 \ S2` 归属 |
+
+取代关系：§15 中「AGGREGATE/category 统一 measurement_complete」、§16 中「未连动 §6/§7/§9」两句，
+均由本节取代（§9 现按类别分行并要求范围化状态名；§6/§7/§9 已连动）。
 
 状态：全部字段与规则在算法定稿/实现前一律 **UNKNOWN 或 UNMEASURED / NOT_APPLICABLE**，不写 0、不写覆盖率；
 本修订**不是实施授权**，不构成对任何测量的资格。§16 的"未连动 §6/§7/§9"一句由本节取代。
