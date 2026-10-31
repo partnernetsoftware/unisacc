@@ -251,6 +251,7 @@ STATE43：**21782dd5 材料会话二十七批（omp-grk，2026-11-01）**：`out
 STATE43：**21782dd5 材料会话三十二批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 PASS：`objects-unsupported-win-x86_64`、`negative-hostile`、`negative-model-loader-terminal`、`formats-elf-ape`、`formats-macho-pe`。会话里 32 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话三十七批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 PASS：`objects-unsupported-win-arm64`、`link-malformed-input`、`runcache`、`cx-l0-sys`、`ri-image-multi`。对象材料 9/9 已在这个会话里。会话里 37 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话四十五批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`ri-image-pem`、`elf-winargs`、`cx-package-refusals`、`ucn-identities`、`input-refuse`、`matrix-waive`、`affected-tool`、`core-compat`。会话里 45 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 材料会话五十三批（omp-grk，2026-11-01）**：`out/tb/sess-qual` 再 8/8 PASS：`cx-attribute-frame`、`cx-bounded`、`cx-codec`、`cx-core-alu`、`cx-core-bytes`、`cx-core-output`、`cx-core-sparse`、`cx-core-stack`。会话里 53 个 PASS。身份 STABLE。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
