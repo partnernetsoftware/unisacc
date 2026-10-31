@@ -283,6 +283,7 @@ STATE43：**21782dd5 材料探针拒绝（omp-grk，2026-11-01）**：`assembler
 STATE43：**21782dd5 c-negative 探针（omp-grk，2026-11-01）**：`c-negative` 在宿主 gcc 上 FAIL，23 条产品拒绝没盖住，包括 `assign-to-const`、`case-outside-switch`、`struct-redefinition`。没有写入 `sess-qual`。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 材料会话被拒（omp-grk，2026-11-01）**：`tests/run.cx -- --all out/tb/sess-qual` 烟测 16/0，聚合 `REFUSE session-material-changed nets`，rc 2。`out/tb/mat-nets/netcore.cx` 在登记后被改过（mtime 06:08）。这个会话不能再当资格门。`sess-gate` 仍是无材料的 154 PASS 证据。还不是 QUALIFIED。没有签名，没有公开。
 STATE43：**21782dd5 无材料门复测（omp-grk，2026-11-01）**：`out/tb/sess-gate` `--all` 烟测 16/0。聚合 `pass=154 missing=196 fail=0 unknown=0 refused=0`，覆盖 `satisfied=179 unsatisfied=151`。`ALL NOT_QUALIFIED`，rc 3。已把当时的 `mat-nets` 复制到 `out/tb/frozen-nets-20261101`，避免再被共享树改掉。还不是 QUALIFIED。没有签名，没有公开。
+STATE43：**21782dd5 冻结材料会话（omp-grk，2026-11-01）**：新开会话 `out/tb/sess-frozen`，材料是私有副本，不指共享 `mat-nets`。已登记 `objects`。`objects-link` PASS。身份 STABLE。旧的 `sess-qual` 仍是被拒会话，不再当门。还不是 QUALIFIED。没有签名，没有公开。
 
 STATE43：已装 0.0.43 = `fc1d4513`（10-31 14:19，5,025,194 字节，五片都是整程序 -o，冻结 rev cd1a95ebcc，P3 aec1a0bf；上一版 43fbbb81 备份在 out/unisacc.com.43fbbb81，再上一版 79fb84e6 在 out/）。结构和体积用 `tools/com-tree.cx` 看。
 STATE43：[x] 1 hostnative（28d0cba49c）。
