@@ -9,6 +9,8 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
 #pragma unisa use mem.heap
 
 static int failed;
@@ -52,38 +54,6 @@ static void fixture(const char *dir) {
     write_text(p, "int main(void) { this is not C\n");
     tx_snprintf(p, sizeof p, "%s/declare.cx", dir);
     write_text(p, "int declared(void);\n");
-    tx_snprintf(p, sizeof p, "%s/coord.sh", dir);
-    write_text(p,
-      "#!/bin/sh\n"
-      "drv=$1; src=$2; dir=$3; tag=$4\n"
-      "r1=$dir/cr1-$tag; r2=$dir/cr2-$tag; gate=$dir/cgate-$tag\n"
-      "p1=$dir/cp1-$tag; p2=$dir/cp2-$tag; f1=$dir/cf1-$tag; f2=$dir/cf2-$tag\n"
-      "setsid -w sh -c 'echo $$ > \"$0\"; exec \"$1\" -run \"$2\" -- \"$3\" \"$4\" 2000 >\"$5\" 2>\"$6\"' \"$p1\" \"$drv\" \"$src\" \"$r1\" \"$gate\" \"$dir/c1o-$tag\" \"$dir/c1e-$tag\" &\n"
-      "setsid -w sh -c 'echo $$ > \"$0\"; exec \"$1\" -run \"$2\" -- \"$3\" \"$4\" 2000 nopublish \"$5\" >\"$6\" 2>\"$7\"' \"$p2\" \"$drv\" \"$src\" \"$r2\" \"$gate\" \"$f2\" \"$dir/c2o-$tag\" \"$dir/c2e-$tag\" &\n"
-      "n=0; while { [ ! -s \"$p1\" ] || [ ! -s \"$p2\" ]; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
-      "n=0; while { [ ! -f \"$r1\" ] || [ ! -f \"$r2\" ]; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
-      "pid1=$(cat \"$p1\" 2>/dev/null); pid2=$(cat \"$p2\" 2>/dev/null)\n"
-      "pg1=$(ps -o pgid= -p \"$pid1\" 2>/dev/null | tr -d ' '); pg2=$(ps -o pgid= -p \"$pid2\" 2>/dev/null | tr -d ' ')\n"
-      "badpg=0; [ -n \"$pid1\" ] && [ \"$pg1\" = \"$pid1\" ] || badpg=1; [ -n \"$pid2\" ] && [ \"$pg2\" = \"$pid2\" ] || badpg=1\n"
-      "timeout=1; [ -f \"$r1\" ] && [ -f \"$r2\" ] && timeout=0\n"
-      "k1=1; k2=1\n"
-      "if [ $timeout -eq 1 ]; then\n"
-      "  kill -TERM -\"$pg1\" 2>/dev/null; k1=$?\n"
-      "  kill -TERM -\"$pg2\" 2>/dev/null; k2=$?\n"
-      "  n=0; while { kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; } && [ $n -lt 50 ]; do n=$((n+1)); sleep 0.1; done\n"
-      "  if kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; then kill -KILL -\"$pg1\" 2>/dev/null; kill -KILL -\"$pg2\" 2>/dev/null; sleep 0.5; fi\n"
-      "fi\n"
-      "alive=0; { kill -0 \"$pid1\" 2>/dev/null || kill -0 \"$pid2\" 2>/dev/null; } && alive=1\n"
-      "desc=0; pgrep -g \"$pg1\" >/dev/null 2>&1 && desc=1; pgrep -g \"$pg2\" >/dev/null 2>&1 && desc=1\n"
-      "clean=1\n"
-      "for f in \"$r1\" \"$f2\"; do\n"
-      "  [ -f \"$f\" ] || continue\n"
-      "  q=$(sed 's/^\\[0\\]=<//; s/>.*//' \"$f\")\n"
-      "  case \"$q\" in /tmp/cxcc-run*/prog) rm -f \"$q\"; rmdir \"${q%/prog}\" || clean=0;; *) clean=0;; esac\n"
-      "done\n"
-      "g=0; [ -e \"$gate\" ] && g=1\n"
-      "echo W7TIMEOUT=$timeout W7PG=$badpg W7KILL=$k1,$k2 W7ALIVE=$alive W7DESC=$desc W7CLEAN=$clean W7GATE=$g\n");
-    sy_chmod(p, 0755);
     tx_snprintf(p, sizeof p, "%s/rsp.txt", dir);
     { char body[512]; tx_snprintf(body, sizeof body, "-o %s/rsp-out\n", dir); write_text(p, body); }
 }
@@ -108,6 +78,101 @@ static int gone_temp(const char *o, size_t n) {
     for (i = 0; i < b; i++) q[i] = p[i];
     q[b] = 0;
     return sy_exists(p) == 0 && sy_exists(q) == 0;
+}
+
+static int temp_path_ok(const char *q) {
+    size_t n = (size_t)tx_len(q, 1L << 20), i;
+    if (n != 24) return 0;
+    if (!tx_prefix(q, (long)n, "/tmp/cxcc-run", 13)) return 0;
+    if (!tx_suffix(q, (long)n, "/prog", 5)) return 0;
+    for (i = 13; i < 19; i++) if (q[i] == '/') return 0;
+    return 1;
+}
+
+static void clean_temp_record(const char *file, int *clean) {
+    char *x; size_t n; long p, e; char q[512], d[512]; size_t k, j;
+    x = cx_read(file, &n);
+    if (!x) { *clean = 0; return; }
+    p = tx_find(x, (long)n, "[0]=<", 5);
+    if (p < 0) { mm_free(x); *clean = 0; return; }
+    p += 5; e = p;
+    while (e < (long)n && x[e] != '>') e++;
+    if (e >= (long)n || e - p + 1 >= (long)sizeof q) { mm_free(x); *clean = 0; return; }
+    for (k = 0; k < (size_t)(e - p); k++) q[k] = x[p + (long)k];
+    q[e - p] = 0;
+    mm_free(x);
+    if (!temp_path_ok(q)) { *clean = 0; return; }
+    if (sy_unlink(q) != 0 && sy_exists(q) == 1) *clean = 0;
+    k = 0;
+    for (j = 0; q[j]; j++) if (q[j] == '/') k = j;
+    if (k == 0) { *clean = 0; return; }
+    for (j = 0; j < k; j++) d[j] = q[j];
+    d[k] = 0;
+    if (sy_rmdir(d) != 0 && sy_exists(d) == 1) *clean = 0;
+}
+
+static void coordinator_case(const char *drv, const char *tag, const char *dir) {
+    char r1[256], r2[256], gate[256], f2[256];
+    int o1 = -1, e1 = -1, o2 = -1, e2 = -1, pid1, pid2, pg1, pg2;
+    int badpg, timeout, k1 = -1, k2 = -1, s1 = 0, s2 = 0, g1 = 0, g2 = 0, clean = 1;
+    long deadline;
+    tx_snprintf(r1, sizeof r1, "%s/cr1-%s", dir, tag);
+    tx_snprintf(r2, sizeof r2, "%s/cr2-%s", dir, tag);
+    tx_snprintf(gate, sizeof gate, "%s/cgate-%s", dir, tag);
+    tx_snprintf(f2, sizeof f2, "%s/cf2-%s", dir, tag);
+    ck(sy_exists(r1) == 0 && sy_exists(r2) == 0 && sy_exists(gate) == 0 && sy_exists(f2) == 0,
+       "coordinator-paths-fresh");
+    { char src[256]; tx_snprintf(src, sizeof src, "%s/barrier.cx", dir);
+      char *v1[] = {(char *)drv, "-run", src, "--", r1, gate, "2000", 0};
+      char *v2[] = {(char *)drv, "-run", src, "--", r2, gate, "2000", "nopublish", f2, 0};
+      pid1 = sy_spawn_pipe(v1, 0, 8, &o1, &e1);
+      pid2 = sy_spawn_pipe(v2, 0, 8, &o2, &e2);
+    }
+    if (pid1 <= 0 || pid2 <= 0) {
+        ck(0, "coordinator-spawn");
+        if (pid1 > 0) { sy_killpg(pid1, 15); sy_wait(pid1, 0); }
+        if (pid2 > 0) { sy_killpg(pid2, 15); sy_wait(pid2, 0); }
+        return;
+    }
+    pg1 = (int)sy_getpgid(pid1);
+    pg2 = (int)sy_getpgid(pid2);
+    badpg = !(pg1 == pid1 && pg2 == pid2);
+    deadline = sy_now_ms() + 5000;
+    while (sy_now_ms() < deadline && !(sy_exists(r1) == 1 && sy_exists(f2) == 1)) sy_sleep_ms(50);
+    timeout = (sy_exists(r1) == 1 && sy_exists(r2) == 1) ? 0 : 1;
+    if (badpg == 0 && timeout == 1) {
+        k1 = sy_killpg(pg1, 15);
+        k2 = sy_killpg(pg2, 15);
+        deadline = sy_now_ms() + 5000;
+        while (sy_now_ms() < deadline) {
+            if (!s1 && sy_wait_status(pid1, 1, 0, 0, 0) > 0) s1 = 1;
+            if (!s2 && sy_wait_status(pid2, 1, 0, 0, 0) > 0) s2 = 1;
+            if (s1 && s2) break;
+            sy_sleep_ms(50);
+        }
+        if (!s1) { sy_killpg(pg1, 9); sy_wait_status(pid1, 0, 0, 0, 0); s1 = 1; }
+        if (!s2) { sy_killpg(pg2, 9); sy_wait_status(pid2, 0, 0, 0, 0); s2 = 1; }
+    } else {
+        s1 = sy_wait_status(pid1, 1, 0, 0, 0) > 0;
+        s2 = sy_wait_status(pid2, 1, 0, 0, 0) > 0;
+    }
+    if (badpg == 0) {
+        g1 = (sy_killpg(pg1, 0) == 0);
+        g2 = (sy_killpg(pg2, 0) == 0);
+    }
+    if (o1 >= 0) { char b[256]; while (sy_read(o1, b, sizeof b) > 0) {} sy_close(o1); }
+    if (e1 >= 0) { char b[256]; while (sy_read(e1, b, sizeof b) > 0) {} sy_close(e1); }
+    if (o2 >= 0) { char b[256]; while (sy_read(o2, b, sizeof b) > 0) {} sy_close(o2); }
+    if (e2 >= 0) { char b[256]; while (sy_read(e2, b, sizeof b) > 0) {} sy_close(e2); }
+    clean_temp_record(r1, &clean);
+    clean_temp_record(f2, &clean);
+    ck(timeout == 1, "coordinator-timeout");
+    ck(badpg == 0 && pg1 == pid1 && pg2 == pid2, "coordinator-pgid");
+    ck(k1 == 0 && k2 == 0, "coordinator-kill");
+    ck(s1 && s2, "coordinator-reaped");
+    ck(g1 == 0 && g2 == 0, "coordinator-groups-gone");
+    ck(clean == 1, "coordinator-clean");
+    ck(sy_exists(gate) == 0, "coordinator-no-gate");
 }
 
 static void matrix(const char *drv, const char *tag, const char *cc, const char *dir) {
@@ -321,12 +386,7 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
       mm_free(o);
     }
 
-    tx_snprintf(name, sizeof name, "%s.coordinator-timeout", tag);
-    tx_snprintf(cmd, sizeof cmd, "sh %s/coord.sh %s %s/barrier.cx %s %s 2>&1", dir, drv, dir, dir, tag);
-    o = 0; n = 0; rc = runsh(cmd, &o, &n);
-    ck(rc == 0 && tx_suffix(o, (long)n,
-         "W7TIMEOUT=1 W7PG=0 W7KILL=0,0 W7ALIVE=0 W7DESC=0 W7CLEAN=1 W7GATE=0\n", 68), name);
-    mm_free(o);
+    coordinator_case(drv, tag, dir);
 
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
     v[0] = (char *)drv; tx_snprintf(p, sizeof p, "%s/plain.cx", dir); v[1] = p;
