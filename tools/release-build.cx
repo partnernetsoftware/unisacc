@@ -12,10 +12,12 @@
    resource \0hdr/cx-flat.h must then match that include/cx-flat.h byte for
    byte. Models are not rebuilt and package-refresh is not called.
 
-   slice runs one child under tools/bound 60, except osx/arm64. That target
-   uses the already built OUT/slice-lnx-x86_64 as the constructor: PHASE=A
-   writes the frames and stops, PHASE=B writes the image. Each child is
-   bounded. The image matches a whole-o of the same sources and has no P3.
+   slice has two routes. whole-o (osx, win): one child under tools/bound 60,
+   except osx/arm64, which uses the already built OUT/slice-lnx-x86_64 as the
+   constructor: PHASE=A writes the frames and stops, PHASE=B writes the image.
+   Each child is bounded; the image matches a whole-o of the same sources and
+   has no P3. objects (lnx): one child under tools/bound RB_OBJ_WALL (the
+   entry-build wall clock; its own compiles are each bound 55/45/50).
    The tool writes OUT/receipt.txt. Other targets are refused.
    This does not install and does not wrap. */
 #pragma unisa use runtime.package_decode
@@ -32,11 +34,16 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
 #pragma unisa use sys.time
+#pragma unisa use sys.poll
 #pragma unisa use text.text
 
 #define RB_FILES 128
 #define RB_REL 192
 #define RB_FULL 512
+/* objects route whole-run hang ceiling (ms). entry-build already bounds each
+   child (compile 55, link 45, plan 50); this is only the outer "the whole
+   entry-build never finishes" guard, not a per-job limit. */
+#define RB_OBJ_DEADLINE_MS 240000
 
 typedef struct { unsigned char *p; long n, cap; } RbBuf;
 typedef struct { char rel[RB_REL]; char full[RB_FULL]; } RbFile;
@@ -460,14 +467,13 @@ static const char *rb_whole_src[33] = {
 };
 
 static int rb_is_whole(const char *t) {
-    return tx_eqz(t, "osx/x86_64") || tx_eqz(t, "osx/arm64") || tx_eqz(t, "win/x86_64")
-        || tx_eqz(t, "lnx/x86_64") || tx_eqz(t, "lnx/arm64");
+    return tx_eqz(t, "osx/x86_64") || tx_eqz(t, "osx/arm64") || tx_eqz(t, "win/x86_64");
 }
 
-/* 0.0.43: no slice uses the 33-object route. Host import is 0.0.44. */
+/* lnx slices use the entry-build object route (67 objects <= 96 link inputs).
+   osx/win stay whole-o and are BLOCKED on UNITOK2 64 (C44-UNITOK2-CAP-01). */
 static int rb_is_objects(const char *t) {
-    (void)t;
-    return 0;
+    return tx_eqz(t, "lnx/x86_64") || tx_eqz(t, "lnx/arm64");
 }
 
 static const char *rb_whole_slug(const char *t) {
@@ -699,6 +705,7 @@ static int rb_slice(int argc, char **argv) {
     char bound[RB_FULL], tool[RB_FULL];
     RbBuf cap;
     sy_ts_t t0, t1;
+    long t0_ms;
     int n, i, fd, pid, exited, code;
     char sha_line[160];
     const char *target;
@@ -713,34 +720,66 @@ static int rb_slice(int argc, char **argv) {
     if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
     argv[4] = rb_out_abs;
     if (sy_mono(&t0)) rb_die("clock");
-    rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
+    t0_ms = sy_now_ms();
     rb_cat(tool, RB_FULL, argv[2], 1, "tools/entry-build.cx");
-    n = 0;
-    v[n++] = bound;
-    v[n++] = "55";
-    v[n++] = "sh";
-    v[n++] = "unisacc.com";
+    {
+        const char *ctor = sy_env("UNISACC_CTOR");
+        unsigned char hdr[4];
+        int is_elf = 0;
+        int cfd;
+        if (!ctor || !ctor[0]) rb_die("UNISACC_CTOR (a constructor that links 96 inputs, e.g. the M4 candidate) is required for the lnx object route");
+        cfd = sy_open(ctor, O_RDONLY, 0);
+        if (cfd < 0) rb_die("UNISACC_CTOR open");
+        if (sy_read_full(cfd, hdr, 4) || sy_close(cfd)) rb_die("UNISACC_CTOR read");
+        is_elf = hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F';
+        n = 0;
+        if (!is_elf) v[n++] = "sh";
+        v[n++] = (char *)ctor;
+    }
     v[n++] = tool;
     v[n++] = "--";
     v[n++] = argv[2];
     v[n++] = argv[3];
     v[n++] = argv[4];
+    /* pass the same constructor as entry-build's explicit constructor (its 4th
+       positional arg) so the link itself runs under the 96-cap product, not
+       the frozen 83343ec1 copy. */
+    v[n++] = (char *)sy_env("UNISACC_CTOR");
     for (i = 5; i < argc; i++) v[n++] = argv[i];
     v[n] = 0;
     pid = sy_spawn_pipe(v, argv[2], SY_SPAWN_NO_PATH, &fd, 0);
     if (pid < 0) rb_die("spawn");
+    if (sy_fd_nonblock(fd, 1)) rb_die("nonblock");
     cap.p = 0;
     cap.n = 0;
     cap.cap = 0;
     for (;;) {
-        char tmp[4096];
-        long k = sy_read(fd, tmp, 4096);
-        if (k < 0) rb_die("read child");
-        if (k == 0) break;
-        rb_put(&cap, tmp, k);
+        sy_pollfd_t pfd;
+        long k;
+        pfd.fd = fd;
+        pfd.events = 1;   /* readable */
+        pfd.revents = 0;
+        if (sy_poll(&pfd, 1, 200) < 0) rb_die("poll");
+        if (pfd.revents & 1) {
+            char tmp[4096];
+            k = sy_read(fd, tmp, 4096);
+            if (k > 0) rb_put(&cap, tmp, k);
+            /* k==0 (EOF) or EAGAIN/EINTR: fall through to the reaped check */
+        }
+        /* entry-build itself reaped? then drain one last time and stop, even if
+           a stray grandchild still holds the pipe (the candidate is already on
+           disk by then). */
+        exited = 0;
+        if (sy_wait_status(pid, 1, &exited, &code, 0) < 0) rb_die("wait");
+        if (exited) break;
+        if (sy_now_ms() - t0_ms > RB_OBJ_DEADLINE_MS) {
+            sy_kill(pid);
+            sy_close(fd);
+            rb_die("objects route: entry-build deadline exceeded (hang)");
+        }
     }
     if (sy_close(fd)) rb_die("close child");
-    if (sy_wait_status(pid, 0, &exited, &code, 0) < 0) rb_die("wait");
+    /* the loop already reaped pid (nohang) and set exited/code on break */
     rb_put(&cap, "", 1);
     sy_printf("%s", (char *)cap.p);
     mm_free(cap.p);
