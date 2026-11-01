@@ -40,7 +40,12 @@ static __u_word _unisa_left = 0;
 static char *_unisa_map(__u_word __u_n) {
     __u_word __u_r;
     __u_r = (__u_word)_UNISA_MAP(__u_n);
-    if (__u_r == 0 - 1 || __u_r == 0) return NULL;
+    /* The gate reports failure the way the OS does: the raw syscall result on
+     * Linux is -errno (-ENOMEM is -12), VirtualAlloc gives 0, and a libc that
+     * returns MAP_FAILED gives -1. Every one of those is <= 0, and no mapping
+     * is ever address 0, so this covers all three. Testing only -1 let -ENOMEM
+     * through as a pointer and wrote the block header to 0xFFFFFFFFFFFFFFF4. */
+    if (__u_r <= 0) return NULL;
     return (char *)__u_r;
 }
 #endif
