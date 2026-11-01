@@ -62,3 +62,11 @@
 - 未改 `cx/runtime/stream_*` 空壳行为。
 - 未改 `cx/cx0`、`cx/workspace`、`cx/crypto` 的 AMB 记法。
 - 本轮只落地两件事：棘轮 `move FROM TO N` 记账（`tests/cxlibc.cx`、`tests/cxraw.cx`，提交 `a0704c4703`）；本提案（提交 `bc86b013c3`）。
+
+## C44-DRIVE-TYPES-01（登记，慢车道）
+
+- 现象：`src/drive.cx` 为保持与 `cli.o`/`compat.o` 的对象隔离，逐字节复制了 `CxcResources`、`CxcOps`、`CxcState`、`CxpState`；第三刀 `driveargs` 想 `use driver.cli` 时触发 `type CxcResources ... defined twice`。
+- 目标：删除 `drive.cx` 的复制类型，统一 `use driver.cli` / `use driver.compat`，让真实类型只定义一次。
+- 影响：改 `drive.o` 的 use 闭包与对象隔离边界，需评估 33 keys / SID；可能动链接拓扑。归慢车道，与 dock pragma 同批。
+- 验收：两代五片逐字节相同；`check-cx-layers` rc0（新边只能是 same/down）；七棘轮 ok；`tools/check-driver-cli.cx` 的 ABI 断言仍过；受影响批次实跑。
+- 不阻塞当前 `C44-PACKAGE-01` 的机械拆分；第三刀按 A 保留局部 extern 原型。
