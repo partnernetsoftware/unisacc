@@ -60,8 +60,9 @@
 **A：冻结基线（已完成，作为 fallback）**
 
 - 固定语料：tiny、模块链、多符号、cxpack、realpath；同一机器记录冷/热各 10 次中位数。
-- 当前基线：unisacc 唯一源约 450ms 冷、同路径缓存约 11ms 热；`-c` 约 403ms；`-cx-plan` 约 6ms；gcc_cx 46/73；clang_cx 85/128。
-- A 只记录，不改产品；不把 11ms 缓存命中写成冷路径达标。
+- 当前基线：unisacc 唯一源冷 10 次共 4347ms（约 435ms/次），同路径热 10 次共 116ms（约 11.6ms/次）；`-c` 约 403ms；`-cx-plan` 约 6ms；gcc_cx 46/73；clang_cx 85/128。
+- 一次 `UNISACC_RR_TIME=1 -run` 的构造阶段：construction 74.5ms；model inflate e2/e1/e3/prune/lower/elf 合计约 115ms；inference 合计约 204ms；output 0.06ms。冷路径主要不是缓存失效。
+- A 只记录，不改产品；不把 11.6ms 缓存命中写成冷路径达标。B 的首个候选方向是减少每进程重复的 model inflate/构造，而不是再改 run-cache 命中逻辑。
 
 **B：仓外性能实验（未开始）**
 
