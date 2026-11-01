@@ -57,8 +57,6 @@ int cxm_tb[CXM_MAXU]; int cxm_te[CXM_MAXU]; int cxm_fb[CXM_MAXU]; int cxm_fe[CXM
 char cxm_sha[CXM_MAXU][17];
 char cxm_full[CXM_MAXU][CXM_PATHW]; char cxm_typ[CXM_MAXU][CXM_PATHW];
 int cxm_inc[CXM_MAXU][CXM_MAXU]; int cxm_ninc[CXM_MAXU];
-/* per-use alias projection: cxm_ren[u][k] is the renamed full CXIF path when use k has an alias, else empty */
-char cxm_ren[CXM_MAXU][CXM_MAXDECL][CXM_PATHW];
 /* renamed-CXIF path pool; cxm_inc[u][k] < 0 means cxm_renpool[-(x)-1] */
 char cxm_renpool[CXM_MAXU * CXM_MAXDECL][CXM_PATHW]; int cxm_nren;
 /* body-symbol rename: cxm_bodysrc[v] is a rewritten source of module v ("#define sym alias" head),
@@ -1088,7 +1086,6 @@ int cxm_plan(char **paths, int n) {
                             while (k < cxm_nuse[u]) {
                                 if (cxm_use[u][k] == v && cxm_usym[u][k][0]) {
                                     if (cxm_text(v, 1, cxm_usym[u][k], cxm_ualias[u][k]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
-                                    cxm_cpy(cxm_ren[u][k], cxm_renpool[cxm_nren], CXM_PATHW);
                                     cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
                                 }
                                 k = k + 1;
