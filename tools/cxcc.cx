@@ -558,7 +558,7 @@ static int cxcc_deps_store(const char *obj, const char *depfile, const char *src
    0: caller compiles, then may store `cached`.
    -1: cache unavailable. fields[0] is the plan index, fields[1] the source. */
 static int cxcc_cache_open(const char *root, const char *compiler, const char *cxh,
-                           char **cflags, int nc, char **fields, int nf,
+                           char **cflags, int nc, char **fields, int nf, int trim,
                            const unsigned char *src, size_t sn,
                            char *cached, size_t cap) {
     unsigned char acc[32];
@@ -572,6 +572,7 @@ static int cxcc_cache_open(const char *root, const char *compiler, const char *c
     cxcc_fold_str(acc, cxcc_cid);
     cxcc_fold_str(acc, "-std=c99");
     cxcc_fold_str(acc, "-Werror=implicit-function-declaration");
+    if (trim) cxcc_fold_str(acc, "-D__UNISA_FTRIM_LIBC=1");
     if (cxcc_fold_cflags(acc, cflags, nc)) return -1;
     if (cxcc_fold_file(acc, cxh)) return -1;
     k = snprintf(dir, sizeof dir, "%s/include/unisa_sha256.h", root);
@@ -726,6 +727,27 @@ static int cxcc_push_prelude(char **av, int n, int cap, char *hostinc, size_t ho
     return n;
 }
 
+/* Prelude toolkit bodies are static and dominate gcc's cold parse cost.
+   A unit that names no cx_* helper cannot call one, so trimming the bodies is
+   observationally neutral for it and keeps the prototypes in place. */
+static int cxcc_uses_toolkit(const unsigned char *buf, size_t n) {
+    size_t i;
+    for (i = 0; i + 3 <= n; i++)
+        if (buf[i] == 'c' && buf[i + 1] == 'x' && buf[i + 2] == '_') return 1;
+    return 0;
+}
+
+/* Carried headers trim their own wrappers under the same macro. A source that
+   includes anything may name one of those, so keep the full prelude there. */
+static int cxcc_has_include(const unsigned char *buf, size_t n) {
+    size_t i;
+    for (i = 0; i + 8 <= n; i++)
+        if (buf[i] == '#' && buf[i + 1] == 'i' && buf[i + 2] == 'n' &&
+            buf[i + 3] == 'c' && buf[i + 4] == 'l' && buf[i + 5] == 'u' &&
+            buf[i + 6] == 'd' && buf[i + 7] == 'e') return 1;
+    return 0;
+}
+
 static int cxcc_expand(int argc, char **argv, const char *compiler, const char *cmd,
                        const char *root, const char *cxh, int *src_at, int nsrc) {
     char *paths[CXCC_SRCS];
@@ -856,6 +878,7 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
                 char cached[CXCC_PATH];
                 char dep[CXCC_TMP];
                 int cache;
+                int trim;
                 if (cxcc_with_line(fields[1], buf, bn, &lined, &ln)) {
                     fprintf(stderr, "%s: out of memory\n", cmd);
                     free(buf);
@@ -867,7 +890,8 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
                 free(buf);
                 buf = lined;
                 bn = ln;
-                cache = cxcc_cache_open(root, compiler, cxh, cflags, nc, fields, nf,
+                trim = !cxcc_uses_toolkit(buf, bn) && !cxcc_has_include(buf, bn);
+                cache = cxcc_cache_open(root, compiler, cxh, cflags, nc, fields, nf, trim,
                                         buf, bn, cached, sizeof cached);
                 int reuse = 0;
                 if (write_temp(buf, bn, srcs[nunit], CXCC_TMP)) {
@@ -900,6 +924,16 @@ static int cxcc_expand(int argc, char **argv, const char *compiler, const char *
                         cxcc_unlink_paths(objs, nunit + 1);
                         free(plan);
                         return 2;
+                    }
+                    if (trim) {
+                        if (n + 2 >= CXCC_PLANARGS) {
+                            cxcc_too_many(cmd);
+                            cxcc_unlink_paths(srcs, nunit + 1);
+                            cxcc_unlink_paths(objs, nunit + 1);
+                            free(plan);
+                            return 2;
+                        }
+                        av[n++] = "-D__UNISA_FTRIM_LIBC=1";
                     }
                     for (k = 0; k < nc; k++) {
                         if (n + 8 >= CXCC_PLANARGS) {
