@@ -124,3 +124,13 @@
 
 - B' 还需一个前提：constructor 必须同时具备「链接 96 + cxmod 96」。当前 `release-build` 把 `ROOT/unisacc.com`（83343ec1，双 64）复制进快照当第一代构造器，所以 **必须先安装 M4**（或让 release-build 支持显式 constructor 覆盖），否则 lnx 对象路线在链接阶段就 64 上限失败。
 - 顺序建议：C3 先安装 M4（两代已同）→ 开 `rb_is_objects(lnx/*)=true` → 出 lnx 两片 → osx/win 等 `C44-UNITOK2-CAP-01`。不放宽 60s 时限。
+
+### UNITOK2 边界精确值（M4 实测，2026-11-01）
+
+| 单元总数（含 main） | 结果 |
+|---|---|
+| 64（63 模块 + main.cx） | rc0 |
+| 65（64 模块 + main.cx） | rc1 `reject: not covered: malformed unit frame` |
+
+即上限是「总单元 ≤ 64」；`CXM_MAXU 96` 已不再是瓶颈（63 模块单独 `-cx-plan` 通过）。
+whole-o 的 67 单元因此必挂；entry-build 逐对象编译（每对象 1 单元）+ 链接 96 输入，绕开本层。
