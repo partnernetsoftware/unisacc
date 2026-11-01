@@ -53,3 +53,12 @@
 - 不动 `nametab-gen` 生成的表内容，只动路径与说明。
 - 不删任何生成物；`--check` 是唯一真源。
 - 两代逐字节相同与 `check-cx-layers` 每步都要跑。
+
+## 本轮未改的边界（2026-11-01）
+
+- `tools/nametab-gen.cx` 与它的 `--check` 未动；生成物仍在 `cx/compiler/`、`cx/runtime/` 顶层。
+- 未新增 `generated/` 子目录；CX 解析器仍是 beside-file，没有第二查找路径。
+- 未删任何零调用生成物；它们仍是 `--check` 的必检对象。
+- 未改 `cx/runtime/stream_*` 空壳行为。
+- 未改 `cx/cx0`、`cx/workspace`、`cx/crypto` 的 AMB 记法。
+- 本轮只落地两件事：棘轮 `move FROM TO N` 记账（`tests/cxlibc.cx`、`tests/cxraw.cx`，提交 `a0704c4703`）；本提案（提交 `bc86b013c3`）。
