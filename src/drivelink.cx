@@ -1,0 +1,236 @@
+/* Object and archive join. src/unisacc.cx does not use this file.
+   drive.cx calls dv_link_objects by name and passes its source vector, so
+   this object keeps no view of the driver's argument list. tapelink (tl_*),
+   archive (cxr_member), and path (cxp_archive_path) stay in their own
+   objects; the host input phrases (cxi_read, bx_read_*) stay in drive.o and
+   are named inside the function that calls them. The tape bytes are handed
+   to the caller on success; the caller owns them. One link at a time. */
+#pragma unisa module drivelink
+
+/* Tape bytes emitted by tapelink. Handed to the caller on success. */
+static unsigned char *dv_linkb;
+static long dv_linkn;
+static long dv_linkcap;
+
+static int dv_link_emit(int c) {
+    unsigned char *nb;
+    long cap;
+    if (dv_linkn < 0 || dv_linkn >= dv_linkcap) {
+        if (dv_linkcap > 1073741824L) {
+            fputs("link: out of memory\n", stderr);
+            exit(1);
+        }
+        cap = dv_linkcap > 0 ? dv_linkcap * 2 : 4096;
+        if (cap <= dv_linkn) cap = dv_linkn + 64;
+        nb = (unsigned char *)realloc(dv_linkb, (size_t)cap);
+        if (!nb) {
+            fputs("link: out of memory\n", stderr);
+            exit(1);
+        }
+        dv_linkb = nb;
+        dv_linkcap = cap;
+    }
+    dv_linkb[dv_linkn] = (unsigned char)(c & 255);
+    dv_linkn = dv_linkn + 1;
+    return 0;
+}
+
+static int dv_link_die(char *m) {
+    if (m) fputs(m, stderr);
+    exit(1);
+    return 1;
+}
+
+/* Same sentences as the product when the formatted line is unavailable. */
+static int dv_take_unit(char *t, long tl, int u) {
+    void tl_adopt_first(void);
+    int tl_target_differs(void);
+    const char *tl_first_text(void);
+    const char *tl_target_text(void);
+    int tl_unitver(char *, int);
+    int tl_unit(char *, int, int);
+    int tl_note_links(char *, long);
+    if (tl < 0 || tl > 2147483647L) {
+        fputs("link: malformed unit tape payload\n", stderr);
+        exit(1);
+    }
+    if (u == 0) tl_adopt_first();
+    else if (tl_target_differs()) {
+        fprintf(stderr, "unisacc: error: the objects were compiled for different targets (%s, %s)\n",
+                tl_first_text(), tl_target_text());
+        return 1;
+    }
+    tl_unitver(t, (int)tl);
+    tl_unit(t, (int)tl, u);
+    tl_note_links(t, tl);
+    return 0;
+}
+
+static unsigned char *dv_load(const char *path, long *n) {
+    unsigned char *b;
+    long bn;
+    char reason[128];
+    char line[512];
+    int rc;
+    int act;
+    int cxi_read(const char *, unsigned char **, long *, char *, long);
+    int bx_read_act(int);
+    int bx_read_open_line(const char *, const char *, char *, int);
+    int bx_read_stdin(const char *);
+    int bx_read_fail_line(const char *, char *, int);
+    const char *bx_read_die(int);
+    const char *shown;
+    b = 0;
+    bn = 0;
+    reason[0] = 0;
+    rc = cxi_read(path, &b, &bn, reason, 128);
+    act = bx_read_act(rc);
+    if (act == 1) {
+        if (bx_read_open_line(path, reason, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", path, reason[0] ? ": " : "", reason);
+        exit(1);
+    }
+    if (act == 2) {
+        shown = bx_read_stdin(path) == 1 ? "stdin" : path;
+        if (bx_read_fail_line(shown, line, 512) == 0) fputs(line, stderr);
+        else fprintf(stderr, "run: cannot read %s\n", shown);
+        fputs("run: cannot read input\n", stderr);
+        exit(1);
+    }
+    if (act || bn > 2147483647L) {
+        fprintf(stderr, "run: %s\n", bx_read_die(act ? act : 4));
+        free(b);
+        exit(1);
+    }
+    *n = bn;
+    return b;
+}
+
+/* Product link_objects: every object, then archive members that resolve a name.
+   srcs holds the n inputs the driver selected; the first one names the link. */
+int dv_link_objects(int n, const char **srcs, unsigned char **out, long *outn) {
+    int tl_bind(int (*)(int), int (*)(char *));
+    int tl_begin(void);
+    char *tl_tape(char *, long, long *);
+    int tl_needs(char *, long);
+    int tl_check_undef(void);
+    int tl_entry_missing(void);
+    int tl_os(char *, int);
+    int tl_num(int);
+    int cxr_member(char *, long, int, char *, long, char **, long *, char *, long);
+    int cxp_archive_path(const char *);
+    const char *bx_read_die(int);
+    int p;
+    int u;
+    int k;
+    int i;
+    int rc;
+    int changed;
+    long bn;
+    long tl;
+    long ml;
+    unsigned char *b;
+    char *t;
+    char *m;
+    char *used;
+    char nm[256];
+    char why[128];
+    dv_linkn = 0;
+    if (tl_bind(dv_link_emit, dv_link_die) || tl_begin()) return 1;
+    u = 0;
+    p = 0;
+    while (p < n) {
+        if (cxp_archive_path(srcs[p])) {
+            p = p + 1;
+            continue;
+        }
+        b = dv_load(srcs[p], &bn);
+        tl = 0;
+        t = tl_tape((char *)b, bn, &tl);
+        if (!t) {
+            fprintf(stderr, "unisacc: error: %s carries no unit tape (compile it with -c -b os/arch -funit; objects from other compilers are not linked yet)\n", srcs[p]);
+            free(b);
+            return 1;
+        }
+        if (dv_take_unit(t, tl, u)) {
+            free(b);
+            return 1;
+        }
+        u = u + 1;
+        free(b);
+        p = p + 1;
+    }
+    p = 0;
+    while (p < n) {
+        if (!cxp_archive_path(srcs[p])) {
+            p = p + 1;
+            continue;
+        }
+        b = dv_load(srcs[p], &bn);
+        used = (char *)calloc(65536, 1);
+        if (!used) {
+            free(b);
+            fprintf(stderr, "run: %s\n", bx_read_die(6));
+            exit(1);
+        }
+        changed = 1;
+        while (changed) {
+            changed = 0;
+            i = 0;
+            while (i < 65536) {
+                m = 0;
+                ml = 0;
+                rc = cxr_member((char *)b, bn, i, nm, 256, &m, &ml, why, 128);
+                if (rc == 1) break;
+                if (rc) {
+                    fputs(why, stderr);
+                    free(used);
+                    free(b);
+                    return 1;
+                }
+                if (!used[i]) {
+                    tl = 0;
+                    t = tl_tape(m, ml, &tl);
+                    if (t && tl_needs(t, tl)) {
+                        if (dv_take_unit(t, tl, u)) {
+                            free(used);
+                            free(b);
+                            return 1;
+                        }
+                        u = u + 1;
+                        used[i] = 1;
+                        changed = 1;
+                    }
+                }
+                i = i + 1;
+            }
+        }
+        free(used);
+        free(b);
+        p = p + 1;
+    }
+    if (!u) {
+        fprintf(stderr, "link: no input unit selected from %s\n", srcs[0]);
+        return 1;
+    }
+    if (tl_check_undef()) return 1;
+    if (tl_entry_missing()) {
+        fprintf(stderr, "link: missing _start entry in %s\n", srcs[0]);
+        return 1;
+    }
+    tl_os("__init:\n", 8);
+    k = 0;
+    while (k < u) {
+        tl_os("  call __init_u", 15);
+        tl_num(k);
+        tl_os("\n", 1);
+        k = k + 1;
+    }
+    tl_os("  ret\n", 6);
+    *out = dv_linkb;
+    *outn = dv_linkn;
+    dv_linkb = 0;
+    dv_linkn = 0;
+    dv_linkcap = 0;
+    return 0;
+}
