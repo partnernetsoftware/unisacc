@@ -3,11 +3,21 @@
    Integer widths are explicit 64-bit words, including LLP64. */
 typedef long long us_i64;
 typedef unsigned long long us_u64;
+#define AT_MAXS 262144
+#define AT_MAXT 16777216                       /* text, data, tape: bytes */
+#define AT_MAXI 2097152
+#define AT_HASH 524288
+#define AT_MAXP 8388608                        /* symbol name pool: bytes */
 static int (*at_emit)(char *, long);
 int at_bind(int (*emit)(char *, long)) {
     if (!emit) return 1;
     at_emit = emit; return 0;
 }
+/* Lazy one-shot allocation of the large tables, so the entry object does not
+   reserve ~213MB of static BSS (which fails under a tight RLIMIT_AS). Called
+   as the very first step of at_dis and at_asm; a failure names out-of-memory. */
+static int at_tab_on;
+static int at_tables(void);
 static int at_wr(char *p, long n) {
     if (!at_emit || n < 0) return 1;
     return at_emit(p, n);
@@ -158,15 +168,12 @@ int at_expr(char *s, int n) {
    sect: 0 undefined, 1 .text, 2 .data, 3 .bss.  In the disassembler's check
    (at_dismode) names are not looked up: `.L<hex>` is that text offset,
    `.Ldata`/`.Lbss` the section starts, anything else undefined. */
-#define AT_MAXS 262144
-#define AT_MAXT 16777216                       /* text, data, tape: bytes */
-static int at_nsym; static int at_sname[AT_MAXS]; static int at_snl[AT_MAXS]; static int at_ssect[AT_MAXS]; static us_i64 at_sval[AT_MAXS];
-static char at_sglob[AT_MAXS]; static char at_sref[AT_MAXS]; static char at_sdef[AT_MAXS]; static char at_splaced[AT_MAXS];
+static int at_nsym; static int *at_sname; static int *at_snl; static int *at_ssect; static us_i64 *at_sval;
+static char *at_sglob; static char *at_sref; static char *at_sdef; static char *at_splaced;
 static int at_unk;                              /* the target is a text label not yet placed (first layout round) */
 static int at_lround; static us_i64 at_fwd;                      /* layout round; how far this item moved since the last round */
-static char at_pool[8388608]; static int at_pooln;
-#define AT_HASH 524288
-static int at_hash[AT_HASH];                           /* symbol index + 1 */
+static char *at_pool; static int at_pooln;
+static int *at_hash;                           /* symbol index + 1 */
 static int at_dismode;
 int at_hfind(char *s, int n) {
     us_u64 h; int k; int i;
@@ -183,7 +190,7 @@ int at_sym(char *s, int n) {                    /* find or create */
     int i; int j;
     i = at_hfind(s, n);
     if (at_hash[i]) return at_hash[i] - 1;
-    if (at_nsym >= AT_MAXS || at_pooln + n + 1 >= 8388608) { at_err = "as: too many symbols"; return 0 - 1; }
+    if (at_nsym >= AT_MAXS || at_pooln + n + 1 >= AT_MAXP) { at_err = "as: too many symbols"; return 0 - 1; }
     j = at_nsym; at_nsym = at_nsym + 1;
     at_sname[j] = at_pooln; at_snl[j] = n;
     { int k; k = 0; while (k < n) { at_pool[at_pooln] = s[k]; at_pooln = at_pooln + 1; k = k + 1; } }
@@ -785,10 +792,10 @@ int at_xname(int cls, int r, int rexp) {
 /* relocation context for the instruction being decoded */
 static us_i64 at_dbase;                                  /* text offset of the instruction */
 static int at_drel; static us_i64 at_drelo; static int at_dtype; static int at_dsym; static us_i64 at_dadd;   /* a reloc in it */
-static char *at_dsnm[AT_MAXS]; static int at_dsnl[AT_MAXS];   /* ELF symbol names, by index */
-static int at_dsshn[AT_MAXS]; static us_i64 at_dsval[AT_MAXS];
+static char **at_dsnm; static int *at_dsnl;   /* ELF symbol names, by index */
+static int *at_dsshn; static us_i64 *at_dsval;
 static char *at_tx; static us_i64 at_txl;                       /* the text being decoded */
-static char at_tgt[AT_MAXT]; static char at_bnd[AT_MAXT]; /* label wanted at (1 branch target, 2 symbol); instruction starts at */
+static char *at_tgt; static char *at_bnd; /* label wanted at (1 branch target, 2 symbol); instruction starts at */
 /* print a target: section+offset, an ELF symbol, or a text label */
 int at_ltgt(int sym, us_i64 add) {
     if (sym == 1 && add >= 0 && add <= at_txl) at_tgt[add] = at_tgt[add] | 1;   /* a label is printed there */
@@ -1513,7 +1520,7 @@ int at_secto(char *o, us_i64 n, int i, us_i64 *off, us_i64 *size, us_i64 shoff) 
     return 1;
 }
 /* check the instruction just printed: assembled again it must give these bytes */
-static us_i64 at_rofs[262144]; static int at_rty[262144]; static int at_rsy[262144]; static us_i64 at_rad[262144]; static int at_nrel;
+static us_i64 *at_rofs; static int *at_rty; static int *at_rsy; static us_i64 *at_rad; static int at_nrel;
 int at_verify(us_i64 off, int len) {
     int got; int k;
     at_dismode = 1;
@@ -1577,6 +1584,7 @@ int at_decode(us_i64 off) {
 int at_dis(char *o, us_i64 n) {
     us_i64 shoff; int shnum; us_i64 toff; us_i64 dsz; us_i64 doff; us_i64 bsz; us_i64 roff; us_i64 rsz; us_i64 soff; us_i64 ssz; us_i64 stoff; us_i64 stsz; us_i64 tpoff; us_i64 tpsz; us_i64 x;
     int i; int nsym; int nloc; us_i64 off;
+    if (at_tables()) { at_err = "out of memory"; return 1; }
     at_err = 0; at_on = 0; at_nfall = 0;
     if (n < 64 || at_rd(o, 4) != 0x464C457F || (o[4] & 255) != 2 || at_rd(o + 16, 2) != 1) { at_err = "not an ELF relocatable object"; return 1; }
     x = (us_i64)at_rd(o + 18, 2);
@@ -1703,7 +1711,7 @@ int at_dis(char *o, us_i64 n) {
 }
 
 /* ==== nm: the symbol table, as GNU/LLVM nm prints it (R18-4, 0.0.18) ==== */
-static int at_nmord[AT_MAXS];
+static int *at_nmord;
 int at_nmlt(int a, int b) {                    /* name a sorts before name b (bytes) */
     int k; k = 0;
     while (k < at_dsnl[a] && k < at_dsnl[b]) {
@@ -1752,12 +1760,12 @@ int at_nm(char *o, us_i64 n) {
 /* ==== the assembler ==== */
 /* items: one per text line that emits (instruction or bytes) or defines a label */
 #define AT_MAXI 2097152
-static char *at_il[AT_MAXI]; static int at_ilen[AT_MAXI]; static int at_iline[AT_MAXI]; static us_i64 at_iaddr[AT_MAXI]; static char at_ik[AT_MAXI]; static char at_ilong[AT_MAXI]; static int at_isym[AT_MAXI]; static int at_isz[AT_MAXI];
+static char **at_il; static int *at_ilen; static int *at_iline; static us_i64 *at_iaddr; static char *at_ik; static char *at_ilong; static int *at_isym; static int *at_isz;
 static int at_ni;
-static char at_ttext[AT_MAXT]; static us_i64 at_tn;              /* final text */
-static char at_tdata[AT_MAXT]; static us_i64 at_dn; static us_i64 at_bn;
-static char at_ttape[AT_MAXT]; static us_i64 at_tpn;
-static us_i64 at_aoff[262144]; static int at_atype[262144]; static int at_asect[262144]; static int at_asym[262144]; static us_i64 at_aadd[262144]; static int at_nar;
+static char *at_ttext; static us_i64 at_tn;              /* final text */
+static char *at_tdata; static us_i64 at_dn; static us_i64 at_bn;
+static char *at_ttape; static us_i64 at_tpn;
+static us_i64 *at_aoff; static int *at_atype; static int *at_asect; static int *at_asym; static us_i64 *at_aadd; static int at_nar;
 static int at_cursec;                                  /* 1 text 2 data 3 bss 4 tape */
 static int at_lineno;
 int at_aerr(char *m) { at_err = m; return 1; }
@@ -2071,7 +2079,7 @@ int at_w64(us_i64 v) { at_w32(v & 4294967295L); at_w32((v >> 32) & 4294967295L);
 int at_wz(us_i64 n) { while (n > 0) { at_wb(0); n = n - 1; } return 0; }
 int at_wstr(char *s, int n) { int k; k = 0; while (k < n) { at_wb(s[k]); k = k + 1; } return 0; }
 us_i64 at_round(us_i64 v, us_i64 a) { return (v + a - 1) / a * a; }
-static int at_kind[AT_MAXS]; static int at_pos[AT_MAXS];
+static int *at_kind; static int *at_pos;
 int at_elf(void) {
     us_i64 L; us_i64 bss; us_i64 tend; us_i64 doff; us_i64 roff; us_i64 soff; us_i64 stoff; us_i64 shsoff; us_i64 shoff; us_i64 nsym; us_i64 strl; us_i64 tlen; us_i64 toff8;
     int j; int kind; int n1; int n2; int n3; us_i64 name; int k;
@@ -2172,6 +2180,7 @@ int at_header_arch(char *src, us_i64 n) {
 /* assemble src[0..n) for arch (0 x86-64, 1 arm64); the object goes through at_wr */
 int at_asm(char *src, us_i64 n, int arch) {
     int k;
+    if (at_tables()) { at_err = "out of memory"; return 1; }
     at_err = 0; at_arch = arch; at_nsym = 0; at_pooln = 0;
     k = 0; while (k < AT_HASH) { at_hash[k] = 0; k = k + 1; }
     /* the -S header names the target */
@@ -2188,3 +2197,74 @@ int at_asm(char *src, us_i64 n, int arch) {
 
 const char *at_error(void) { return at_err ? at_err : ""; }
 int at_line(void) { return at_lineno; }
+
+/* Lazy one-shot allocation of the large tables (see the forward declaration
+   near at_bind). Placed after every table declaration so the pointers are in
+   scope. mm_zalloc is a local prototype: cx/compiler has no mem symlink and
+   this file is reached both as cx/compiler/asmtext.cx and src/compiler/
+   asmtext.cx (same inode), so `use mem.heap` would resolve beside the wrong
+   path. mem/heap.cx is already in the driveface closure; a missing symbol is
+   a link-time error. */
+static int at_tables(void) {
+    void *mm_zalloc(long);
+    if (at_tab_on) return 0;
+    at_sname = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_snl = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_ssect = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_sval = mm_zalloc((long)AT_MAXS * (long)sizeof(us_i64));
+    at_sglob = mm_zalloc((long)AT_MAXS);
+    at_sref = mm_zalloc((long)AT_MAXS);
+    at_sdef = mm_zalloc((long)AT_MAXS);
+    at_splaced = mm_zalloc((long)AT_MAXS);
+    at_pool = mm_zalloc((long)AT_MAXP);
+    at_hash = mm_zalloc((long)AT_HASH * (long)sizeof(int));
+    at_dsnm = mm_zalloc((long)AT_MAXS * (long)sizeof(char *));
+    at_dsnl = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_dsshn = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_dsval = mm_zalloc((long)AT_MAXS * (long)sizeof(us_i64));
+    at_tgt = mm_zalloc((long)AT_MAXT);
+    at_bnd = mm_zalloc((long)AT_MAXT);
+    at_rofs = mm_zalloc(262144L * (long)sizeof(us_i64));
+    at_rty = mm_zalloc(262144L * (long)sizeof(int));
+    at_rsy = mm_zalloc(262144L * (long)sizeof(int));
+    at_rad = mm_zalloc(262144L * (long)sizeof(us_i64));
+    at_il = mm_zalloc((long)AT_MAXI * (long)sizeof(char *));
+    at_ilen = mm_zalloc((long)AT_MAXI * (long)sizeof(int));
+    at_iline = mm_zalloc((long)AT_MAXI * (long)sizeof(int));
+    at_iaddr = mm_zalloc((long)AT_MAXI * (long)sizeof(us_i64));
+    at_ik = mm_zalloc((long)AT_MAXI);
+    at_ilong = mm_zalloc((long)AT_MAXI);
+    at_isym = mm_zalloc((long)AT_MAXI * (long)sizeof(int));
+    at_isz = mm_zalloc((long)AT_MAXI * (long)sizeof(int));
+    at_ttext = mm_zalloc((long)AT_MAXT);
+    at_tdata = mm_zalloc((long)AT_MAXT);
+    at_ttape = mm_zalloc((long)AT_MAXT);
+    at_aoff = mm_zalloc(262144L * (long)sizeof(us_i64));
+    at_atype = mm_zalloc(262144L * (long)sizeof(int));
+    at_asect = mm_zalloc(262144L * (long)sizeof(int));
+    at_asym = mm_zalloc(262144L * (long)sizeof(int));
+    at_aadd = mm_zalloc(262144L * (long)sizeof(us_i64));
+    at_nmord = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_kind = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    at_pos = mm_zalloc((long)AT_MAXS * (long)sizeof(int));
+    if (!at_sname || !at_snl || !at_ssect || !at_sval || !at_sglob || !at_sref || !at_sdef || !at_splaced ||
+        !at_pool || !at_hash || !at_dsnm || !at_dsnl || !at_dsshn || !at_dsval || !at_tgt || !at_bnd ||
+        !at_rofs || !at_rty || !at_rsy || !at_rad || !at_il || !at_ilen || !at_iline || !at_iaddr ||
+        !at_ik || !at_ilong || !at_isym || !at_isz || !at_ttext || !at_tdata || !at_ttape ||
+        !at_aoff || !at_atype || !at_asect || !at_asym || !at_aadd || !at_nmord || !at_kind || !at_pos)
+        return 1;
+    /* Touch the first byte of each table so an overcommit failure surfaces
+       here as out-of-memory, not later as a SIGSEGV on the first real write. */
+    *(char *)at_sname = 0; *(char *)at_snl = 0; *(char *)at_ssect = 0; *(char *)at_sval = 0;
+    *(char *)at_sglob = 0; *(char *)at_sref = 0; *(char *)at_sdef = 0; *(char *)at_splaced = 0;
+    *(char *)at_pool = 0; *(char *)at_hash = 0; *(char *)at_dsnm = 0; *(char *)at_dsnl = 0;
+    *(char *)at_dsshn = 0; *(char *)at_dsval = 0; *(char *)at_tgt = 0; *(char *)at_bnd = 0;
+    *(char *)at_rofs = 0; *(char *)at_rty = 0; *(char *)at_rsy = 0; *(char *)at_rad = 0;
+    *(char *)at_il = 0; *(char *)at_ilen = 0; *(char *)at_iline = 0; *(char *)at_iaddr = 0;
+    *(char *)at_ik = 0; *(char *)at_ilong = 0; *(char *)at_isym = 0; *(char *)at_isz = 0;
+    *(char *)at_ttext = 0; *(char *)at_tdata = 0; *(char *)at_ttape = 0;
+    *(char *)at_aoff = 0; *(char *)at_atype = 0; *(char *)at_asect = 0; *(char *)at_asym = 0; *(char *)at_aadd = 0;
+    *(char *)at_nmord = 0; *(char *)at_kind = 0; *(char *)at_pos = 0;
+    at_tab_on = 1;
+    return 0;
+}
