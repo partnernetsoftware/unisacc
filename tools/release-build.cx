@@ -2,6 +2,11 @@
    sh ./unisacc.com tools/release-build.cx -- [--rev REV] p3 ROOT SRC_PKG OUT_PKG
    sh ./unisacc.com tools/release-build.cx -- [--rev REV] slice ROOT PKG OUT [--target TARGET]
 
+   p3 writes P 4 by default (every \0hdr/ header deflated, 2.04MB -> 1.44MB,
+   46.33s vs 46.98s); --no-compress-resources writes the input's version
+   unchanged (P3, raw F rows) for the fixed-P3 consumers in tests/batches.tsv.
+   --no-compress-flat keeps cx-flat.h raw while the rest still compresses.
+
    REV defaults to HEAD. Sources and include/ come from `git archive` of that
    commit (out/release-snap-<sha10>/, reused when the marker matches), not from
    the shared worktree. The installed ROOT/unisacc.com is copied in as the
@@ -275,20 +280,24 @@ static int rb_p3(int argc, char **argv) {
     long line_end, res_at, kept, i, pack_n;
     int fd, nr, compress, compress_flat, out_ver;
     unsigned char tail[16];
-    compress = 0;
+    compress = 1;
     /* Default packs every @hdr header including cx-flat.h (P4 is smaller and
-       reads faster); --no-compress-flat falls back to non-flat only. */
+       reads faster: 46.33s vs 46.98s wall, 2.04MB -> 1.44MB);
+       --no-compress-resources falls back to P3, --no-compress-flat to
+       non-flat only. */
     compress_flat = 1;
     {
         int ai;
         for (ai = 5; ai < argc; ai++) {
+            if (tx_eqz(argv[ai], "--no-compress-resources")) { compress = 0; continue; }
+            /* Accepted for scripts written before the default changed; a no-op now. */
             if (tx_eqz(argv[ai], "--compress-resources")) { compress = 1; continue; }
             if (tx_eqz(argv[ai], "--compress-flat")) { compress_flat = 1; continue; }
             if (tx_eqz(argv[ai], "--no-compress-flat")) { compress_flat = 0; continue; }
-            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources] [--no-compress-flat]");
+            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--no-compress-resources] [--no-compress-flat]");
         }
     }
-    if (argc < 5) rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources] [--no-compress-flat]");
+    if (argc < 5) rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--no-compress-resources] [--no-compress-flat]");
     if (sy_mono(&t0)) rb_die("clock");
     file = cx_read(argv[3], &zn);
     if (!file || zn > 2147483647UL) rb_die("read package");
@@ -321,6 +330,11 @@ static int rb_p3(int argc, char **argv) {
     for (i = 0; i < pkg->nr; i++) if (!rb_hdr(body + pkg->res[i].name, pkg->res[i].n)) kept++;
     nr = (int)kept + rb_nfiles;
     out_ver = compress ? 4 : pkg->ver;
+    /* P4 means "supports the codec field", not "every row is compressed":
+       the include/ headers below are deflated, but resources already in the
+       package are carried verbatim (see the emit loop), so a P4 file can hold
+       codec=0 rows. Default writes P4; --no-compress-resources keeps the
+       input version for the fixed-P3 consumers in tests/batches.tsv. */
     if (cx_fmt(line, sizeof line, "P %d %d %d %d\n", out_ver, pkg->m, pkg->s, nr)) rb_die("package head");
     out.p = 0;
     out.n = 0;
@@ -333,6 +347,9 @@ static int rb_p3(int argc, char **argv) {
     rb_put(&out, body + line_end, res_at - line_end);
     for (i = 0; i < pkg->nr; i++) {
         if (rb_hdr(body + pkg->res[i].name, pkg->res[i].n)) continue;
+        /* Resources already in the package are carried as they are. P3->P4 only
+           deflates the include/ headers this tool rewrites; an existing F row
+           keeps codec 0 here, so a P4 package is not "every row compressed". */
         if (pkg->ver >= 4)
             rb_emit_verbatim(&out, body + pkg->res[i].name, pkg->res[i].n, body + pkg->res[i].data, pkg->res[i].len,
                              pkg->res[i].rawlen, pkg->res[i].codec, pkg->res[i].crc);
@@ -351,7 +368,13 @@ static int rb_p3(int argc, char **argv) {
         if (reln && mm_copy(key + 5, (long)sizeof key - 5, rb_files[i].rel, reln)) rb_die("include name");
         bytes = cx_read(rb_files[i].full, &fn);
         if (!bytes) rb_die("include read");
-        rb_emit_packed(&out, key, 5 + reln, (const unsigned char *)bytes, (long)fn, compress && fn > 0 && (compress_flat || !rb_flat_key(key, 5 + reln)));
+        /* --no-compress-resources writes P3, whose F rows have no codec field:
+           emit the header raw then. Otherwise pack (or fall back to raw when
+           deflate does not shrink). */
+        if (!compress)
+            rb_emit_raw(&out, key, 5 + reln, (const unsigned char *)bytes, (long)fn);
+        else
+            rb_emit_packed(&out, key, 5 + reln, (const unsigned char *)bytes, (long)fn, fn > 0 && (compress_flat || !rb_flat_key(key, 5 + reln)));
         mm_free(bytes);
     }
     cxpl_release(pkg, rb_drop);
