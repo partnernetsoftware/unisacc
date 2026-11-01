@@ -49,6 +49,7 @@
 #pragma unisa module allsession
 #pragma unisa use netpack
 #pragma unisa use testplan
+#pragma unisa use kernelsha
 
 typedef struct {char candidate[65],batches[65],coverage[65],registry[65],sid[65],harness[65];} as_ident;
 typedef struct {char name[128],path[4096],content[65],fingerprint[65];long entries;int kind;} as_material;
@@ -98,7 +99,10 @@ char *as_read(const char *p,int follow,size_t *n,char *why,size_t cap){
  char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||b.st_ino!=a.st_ino||b.st_size!=a.st_size;int closed=close(fd);
  if(z!=0||changed||closed){free(s);as_bad(why,cap,"file-changed-while-read",p,0);return 0;}s[*n]=0;return s;
 }
-int as_sha_file(const char *p,int follow,char hex[65],long long *bytes,char *why,size_t cap){size_t n;char *s=as_read(p,follow,&n,why,cap);if(!s)return -1;cx_sha256_hex(s,n,hex);if(bytes)*bytes=(long long)n;free(s);return 0;}
+/* The harness tree is ~16 MB; the kernel AF_ALG path is an order of magnitude
+   faster than the software primitive. Large inputs go through the kernel,
+   small ones stay on cx_sha256_hex. Mirrors src/runcache.cx rc_hex_file. */
+int as_sha_file(const char *p,int follow,char hex[65],long long *bytes,char *why,size_t cap){size_t n;char *s=as_read(p,follow,&n,why,cap);if(!s)return -1;if(n<65536||ks_sha256_hex(s,n,hex)!=0)cx_sha256_hex(s,n,hex);if(bytes)*bytes=(long long)n;free(s);return 0;}
 
 /* ---- tree digests: content (sha of every regular file) or stat fingerprint ---------------------- */
 typedef struct {np_buf rec;long entries;int content;char *why;size_t cap;} as_walker;
