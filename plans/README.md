@@ -6,11 +6,10 @@
 
 - [v0.0.43.md](v0.0.43.md)：本版主计划。
   - [v0.0.43-units.md](v0.0.43-units.md)：单元化重构，CX0 → E2 边界。
-  - [v0.0.43-finish-line.md](v0.0.43-finish-line.md)：历史终点线的入口。
 - [v0.0.44.md](v0.0.44.md)、[v0.0.45.md](v0.0.45.md)：下两版的需求与验收方向。
 - [dev-methodology-2026-10-28.md](dev-methodology-2026-10-28.md)：快车道和慢车道，AGENTS.md 引用。
-- [candidate-to-product-2026-10-30.md](candidate-to-product-2026-10-30.md)：把候选换成产品的慢车道步骤。
-- [HANDOFF.md](HANDOFF.md)：交接入口。
+- [candidate-to-product-2026-10-30.md](../archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)：已归档，内容已被 release-build 取代。
+- [../archive/plans/2026-11-01/HANDOFF.md](../archive/plans/2026-11-01/HANDOFF.md)：交接入口。
 
 ## 架构与语言设计
 

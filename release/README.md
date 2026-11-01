@@ -1,6 +1,6 @@
 # 发布签名：契约与配置
 
-> 现状（2026-10-02）：Windows 企业 Authenticode 签名与 Apple 签名、公证都已在发布流程中常规执行（自 0.0.10 起；最近一次 v0.0.20，回执 research/r20-release-acceptance.json）。`signing-policy.json` 为 `required`。操作步骤见 [RELEASE-PIPELINE.md](RELEASE-PIPELINE.md)；本文只保留收据格式、身份配置、检查脚本与 keychain 边界。0.0.9–0.0.10 的“延期 / 资格”叙述已移到 [archive/release/README-0009-0010.md](../archive/release/README-0009-0010.md)。
+> 现状（2026-10-02）：Windows 企业 Authenticode 签名与 Apple 签名、公证都已在发布流程中常规执行（自 0.0.10 起；最近一次 v0.0.20，回执 research/r20-release-acceptance.json）。`signing-policy.json` 为 `required`。操作步骤见已归档的 [RELEASE-PIPELINE.md](../archive/plans/2026-11-01/RELEASE-PIPELINE.md)（只对旧 C 链有效）；本文只保留收据格式、身份配置、检查脚本与 keychain 边界。0.0.9–0.0.10 的“延期 / 资格”叙述已移到 [archive/release/README-0009-0010.md](../archive/release/README-0009-0010.md)。
 
 ## Windows 签名
 

@@ -1,6 +1,6 @@
 # 0.0.43 resource admission group disposition
 
-This records the existing [preauthorised RESOURCE_UNKNOWN disposition](../release/preauth.tsv) for the [R10/M7 classified exit](../plans/v0.0.43-finish-line.md). It does not declare the release ready. The final complete exit table determines actual members/counts. Earlier partial queues observed seedparse2-1/2, seedgen, seedgen-2 and com-seedgen with their own required-memory UNKNOWN refusal; these historical observations are not transferred into the current freeze.
+This records the existing [preauthorised RESOURCE_UNKNOWN disposition](../release/preauth.tsv) for the [R10/M7 classified exit](../archive/plans/2026-11-01/v0.0.43-finish-line.md). It does not declare the release ready. The final complete exit table determines actual members/counts. Earlier partial queues observed seedparse2-1/2, seedgen, seedgen-2 and com-seedgen with their own required-memory UNKNOWN refusal; these historical observations are not transferred into the current freeze.
 
 The disposition for this measurement-identity group is to retain RESOURCE_UNKNOWN and its unexecuted obligation, preserve the raw refusals and incomplete measurements, and use the existing classified M7 criterion once the whole final plan has finished. No member is PASS or77 on that basis. No admission constant, time limit, classifier match, H1 name or unrelated failure is changed. A different error, output mismatch or unlisted timeout follows the existing NEEDS_RULING path.
 

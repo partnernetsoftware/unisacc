@@ -30,7 +30,7 @@
 `Makefile` 的 `make com` 仍走 `exec/c/buildcompiler.sh`，该链因 Python 与参考 C
 归档已起不来（见 [python-residue](archive/plans/2026-10-30/python-residue-2026-10-30.md) 第 5 行）；经典回退
 `classic-com` 已不在 `Makefile` 中。新入口换成产品的步骤见
-[candidate-to-product](plans/candidate-to-product-2026-10-30.md)。模型拒绝不隐式改走经典路线。规范入口是
+[candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)。模型拒绝不隐式改走经典路线。规范入口是
 [prd §0.3 当前流水线](prd.md#pipeline-design)，当前字节账见
 [模型功能与物理字节账](prd.md#model-function-bytes)。
 
@@ -38,7 +38,7 @@
 |---|---|
 | 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md#current-plans)，每个版本带签后大小、SHA-256 与验收收据 |
 
-平台验收按当前候选分别记证，完整状态见 [PRD 思维树](prd.md#work-tree)，发布证据边界见 [发布流水线](release/RELEASE-PIPELINE.md)。历史 macOS/Rosetta、Lima/UTM 实跑与 Windows 双目标自举只证明当时的输入与环境，不代表当前候选六平台通过。
+平台验收按当前候选分别记证，完整状态见 [PRD 思维树](prd.md#work-tree)，发布证据边界见 [发布流水线](archive/plans/2026-11-01/RELEASE-PIPELINE.md)。历史 macOS/Rosetta、Lima/UTM 实跑与 Windows 双目标自举只证明当时的输入与环境，不代表当前候选六平台通过。
 历史单次 memory 计时、身份与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)及下列 S-17 迁移档案。
 共享网络数与阶段行数**不在此重述**：权威是 [prd 的模型字节账](prd.md#model-function-bytes)（生成自
 `research/model-bytes.json`）；模板、库源码、核与平台驱动另计，
@@ -113,7 +113,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 `src/` 里其余 `.cx`（`driveface`、`driveroute`、`entrybind`、`entryexec`、`hostnative`、`runcache` 等）以及软链 `src/driver`、`src/runtime`、`src/core`、`src/compiler`（指向 `cx/` 同名目录）是入口用到的其他对象。完整对象清单（33 个）写在 [`tools/entry-build.cx`](tools/entry-build.cx) 里。`src/version.h` 是产品版本声明。
 
-**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](plans/candidate-to-product-2026-10-30.md)；该计划写明截至 2026-10-30 入口候选只覆盖 lnx/x86_64，尚未换成产品。当前状态以 [prd.md](prd.md) 的思维树为准。
+**构造**：`sh ./unisacc.com tools/entry-build.cx -- ROOT P3 OUT [CONSTRUCTOR] [--target T] [--only KEY]... [--link-only]`。每个对象与链接都在 `tools/bound` 下跑；产物是 `OUT/candidate`（链接出的映像后接 P3 包），收据是 `OUT/receipt.txt`。它不替换 `ROOT/unisacc.com`，也不调用旧构造脚本。五个目标切片、APE 封装与安装的步骤见 [candidate-to-product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)；该计划写明截至 2026-10-30 入口候选只覆盖 lnx/x86_64，尚未换成产品。当前状态以 [prd.md](prd.md) 的思维树为准。
 
 ## 3　CX 工具与分层
 

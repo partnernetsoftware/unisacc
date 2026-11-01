@@ -75,6 +75,8 @@
 | 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | `cxpack.tsv` 将模块名钉到路径。已装 e955 的 CXIF 在存在匹配文件行时只导出公开列表中的非 static 函数；清单缺席或无匹配行仍保留全部非 static 函数的兼容行为。清单超限、目录或其他读取错误具名拒绝，不扩大公开接口。类型声明仍沿用文本 CXIF v0，尚非结构化 ABI 或编译期所有权。见 [plans/cx-pack.md](plans/cx-pack.md) 与 [缺陷证据](plans/defects-c43.md)。 |
 | 核对 CXIF v0 文本 | `sh ./unisacc.com -run tests/cxif.cx -- --fixtures` | 现场 `-cx-interface` 必须是 banner、守卫、类型、原型和 `#endif`。函数体、`static`、缺 `#endif`、版本不是 v0 都退出 1。效果、布局和所有权字段不在 v0 里。见 [plans/cxif-v0.md](plans/cxif-v0.md)。 |
 | 回收 `out/` 临时产物 | `sh ./unisacc.com tools/out-gc.cx -- --older-than 7 --delete` | 默认只报告：每个一级条目的最新 mtime 与递归字节数，外加 <3d/3-7d/7-30d/>30d 分桶。删要两把钥匙（`--delete` 必须配 `--older-than>0`），因为 `out/` 里有他人正在构造的目录；`--root DIR` 供 `tools/check-out-gc.cx` 在临时根上验证拒绝合同 |
+| 外平台格（`NEEDS_FOREIGN_HOST`）怎么关 | 只能在**该原生宿主**上跑同一候选；`sh ./unisacc.com tests/full-domain.cx -- ROOT DOMAIN` 的每条 OPEN 行现在带 `CLOSE-BY=native-run-on-HOST-only;no-emulation` | 模拟、容器、缺席客机一律 BLOCKED/NOT_RUN，永远不算 PASS（19 张矩阵头部都写了这条）。跑法与逐格 oracle 见 [外宿主测试手册](plans/foreign-host-runbook-cc.md)；原生 runner 见 [.github/workflows/candidate-native.yml](.github/workflows/candidate-native.yml)（ubuntu-24.04 / ubuntu-24.04-arm / macos-15-intel / macos-15 / windows-2025 / windows-11-arm） |
+| 同候选 CI 的七个身份参数 | `tools/bound 20 sh ./unisacc.com tools/ci-candidate-check.cx -- --plan-sha ROOT` 出 `plan_sha256`；`sh ./unisacc.com seed/ident.c -- ROOT` 出 `source_sha256`；`sha256sum unisacc.com` 出 `com_sha256`；`git rev-parse HEAD` 出 `verification_commit` | 合同见 [0.0.43 同候选 CI 输入草稿](docs/c43-candidate-ci.md)；工件产出走 `candidate-raw-export.yml`，准入走 `candidate-native.yml`（两者都是手动 dispatch，不带 push/定时/上传/签名） |
 
 新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
 
@@ -635,7 +637,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 - 新合同按网、流、接口、产品、库/ABI和平台分账，当前覆盖见[tests/coverage.tsv](tests/coverage.tsv)，批次见[tests/batches.tsv](tests/batches.tsv)；[归档层次](archive/testing-c43-legacy/tests/GATE-LAYERS.md)只保留历史义务。局部绿不代全链，未覆盖不计通过。
 - 清单、来源身份、实际受试字节与原始结果分别可核；旧C99条款与原失败见[归档条款账本](archive/testing-c43-legacy/tests/c99/clauses.tsv)，当前入口是 `sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`。[旧清单](archive/testing-c43-legacy/tests/INVENTORY.md)不恢复调度。
 - 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程材料见[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)、[release/README.md](release/README.md)。当前明确禁止签名、Draft、Latest及公开；历史授权不沿用。先完成新清单与同候选平台证据，再按明确新授权处理发布；旧队列不恢复（见§2）。
+- 发布流程材料见[release/README.md](release/README.md)；旧 [RELEASE-PIPELINE.md](archive/plans/2026-11-01/RELEASE-PIPELINE.md) 只描述已归档的旧 C 链，已归档不再作为入口。当前明确禁止签名、Draft、Latest及公开；历史授权不沿用。先完成新清单与同候选平台证据，再按明确新授权处理发布；旧队列不恢复（见§2）。
 
 ## 5. 路线
 

@@ -41,7 +41,7 @@
 ## 6. 协作与命令边界
 
 - 一机一主刀：同一时刻只有一个 agent 改产品输入或写证据；其他 agent 的交付是可独立复现的 `diff + 生成器 + 探针 + README`，由主刀串行审入。
-- 每个 agent 的暂存改动在 `plans/HANDOFF.md` 登记所有权与状态，会话中断时他人可接。
+- 每个 agent 的暂存改动在 `archive/plans/2026-11-01/HANDOFF.md` 登记所有权与状态，会话中断时他人可接。
 - 60 秒规则适用于测试与未知命令；**正规构造链（`source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`）内部已逐作业 bound，允许一次调用跑完一个相位**，不再拆成几十次 harness 调用。
 
 ## 7. 两周目标与指标

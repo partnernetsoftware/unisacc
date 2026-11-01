@@ -71,7 +71,7 @@ The installed `unisacc.com` is still a product of the old C chain. The CX entry
 with the installed P3 package. It matches the installed product on all 148
 entry cells, but it is not yet the product. The steps from that candidate to
 a five-slice APE product are listed, not yet executed, in
-[candidate to product](plans/candidate-to-product-2026-10-30.md). As of
+[candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md). As of
 2026-10-30, `lnx/arm64` objects compile, but `osx/*` and `win/x86_64` do not:
 the model driver's `-c -b` does not yet reach non-Linux targets.
 
@@ -173,7 +173,7 @@ not replace `ROOT/unisacc.com`. The full usage, including `--target`, `--only`
 and `--link-only` for splitting a build into bounded batches, is in the comment
 at the top of the tool. Turning that candidate into the six-target product
 (five slices, APE wrap, install) is a list of steps in
-[plans/candidate-to-product-2026-10-30.md](plans/candidate-to-product-2026-10-30.md);
+[archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md);
 as of 2026-10-30 the candidate covers lnx/x86_64 only and the installed
 `unisacc.com` has not been replaced.
 
