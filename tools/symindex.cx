@@ -752,26 +752,27 @@ static void collect_defs(int e) {
    With a non-empty ROOTS set, the graph is the subgraph around those files:
    their forward use closure, their reverse users, and the use/call edges among
    that set (epoch-marks them, same mechanism as cmd_users). */
+/* sub[i]=1 when entry i is in the subgraph around ROOTS: the roots, their forward use
+   closure, and every listed file whose use closure reaches a root.  Allocates the array. */
+static int *mark_subgraph(int *roots, int nroots) {
+    int nl = nent, f, m, *sub = mm_zalloc((long)nl * (long)sizeof(int));
+    if (!sub) die("out of memory");
+    epoch++;                                  /* forward closure from each root, one epoch */
+    for (m = 0; m < nroots; m++) closure(roots[m]);
+    for (f = 0; f < nl; f++) if (ent[f].mark == epoch) sub[f] = 1;
+    for (f = 0; f < nl; f++) {                /* reverse users: a listed file reaching a root */
+        if (!ent[f].listed || sub[f]) continue;
+        epoch++; closure(f);
+        for (m = 0; m < nroots; m++) if (ent[roots[m]].mark == epoch) { sub[f] = 1; break; }
+    }
+    return sub;
+}
+
 static int cmd_graph(int *roots, int nroots) {
     Buf o = {0, 0, 0};
     int e, nodes = 0, edges = 0;
     long t1 = sy_now_ms();
-    int *sub = 0;   /* 1 when the entry is in the subgraph (only when nroots) */
-    if (nroots) {
-        int nl = nent, f, m;
-        sub = mm_zalloc((long)nl * (long)sizeof(int));
-        if (!sub) die("out of memory");
-        /* forward closure from each root (all under one epoch) */
-        epoch++;
-        for (e = 0; e < nroots; e++) closure(roots[e]);
-        for (f = 0; f < nl; f++) if (ent[f].mark == epoch) sub[f] = 1;
-        /* reverse users: a listed file whose closure reaches any root is also in the subgraph */
-        for (f = 0; f < nl; f++) {
-            if (!ent[f].listed || sub[f]) continue;
-            epoch++; closure(f);
-            for (m = 0; m < nroots; m++) if (ent[roots[m]].mark == epoch) { sub[f] = 1; break; }
-        }
-    }
+    int *sub = nroots ? mark_subgraph(roots, nroots) : 0;   /* 1 when the entry is in the subgraph */
     /* header + nodes */
     puts_(&o, "V\ttoolgraph-v1\n");
     for (e = 0; e < nent; e++) {
@@ -836,6 +837,22 @@ static int cmd_graph(int *roots, int nroots) {
         if (write_atomic(gpath, o.p, o.n)) die("cannot write graph");
     }
     printf("GRAPH\tfiles=%d\tnodes=%d\tedges=%d\telapsed_ms=%ld\n", nent, nodes, edges, sy_now_ms() - t1);
+    return 0;
+}
+
+/* delta: I changed ROOTS[0..nroots): which files are affected (their forward use closure and
+   reverse users), one DELTA line each, then a DELTA_SUMMARY.  This is the "change this -> who
+   is in the blast radius" query; the same mark_subgraph gives graph its subgraph. */
+static int cmd_delta(int *roots, int nroots) {
+    int e, cnt = 0;
+    long t1 = sy_now_ms();
+    int *sub = mark_subgraph(roots, nroots);
+    for (e = 0; e < nent; e++) {
+        if (!sub[e] || ent[e].ok != 1) continue;
+        printf("DELTA\t%s\n", ent[e].path);
+        cnt++;
+    }
+    printf("DELTA_SUMMARY\troots=%d\taffected=%d\telapsed_ms=%ld\n", nroots, cnt, sy_now_ms() - t1);
     return 0;
 }
 
@@ -1118,7 +1135,7 @@ static int cmd_external(int *callers, int nc, int names_mode) {
 
 static void usage(void) {
     fprintf(stderr, "usage: symindex.cx [--index DIR] [--in LIST] (update [--verify] | def NAME | calls NAME[,NAME...] [--tracked | FILE...]"
-                    " | uses FILE | users FILE | graph | undeclared (--tracked | FILE...) | external [--names] (--tracked | FILE...) | dump FILE)\n");
+                    " | uses FILE | users FILE | graph [FILE...] | delta FILE... | undeclared (--tracked | FILE...) | external [--names] (--tracked | FILE...) | dump FILE)\n");
     exit(2);
 }
 
@@ -1172,8 +1189,9 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(cmd, "uses") || tx_eqz(cmd, "users") || tx_eqz(cmd, "dump")) {
             if (argc - a != 1) usage();
             named[nn++] = entry_for(argv[a], 0);
-        } else if (tx_eqz(cmd, "graph")) {
+        } else if (tx_eqz(cmd, "graph") || tx_eqz(cmd, "delta")) {
             for (; a < argc; a++) { if (nn == 4096) die("too many files"); named[nn++] = entry_for(argv[a], 0); }
+            if (tx_eqz(cmd, "delta") && nn == 0) usage();
         } else if (tx_eqz(cmd, "undeclared") || tx_eqz(cmd, "external")) {
             if (tx_eqz(cmd, "external") && a < argc && tx_eqz(argv[a], "--names")) { names_mode = 1; a++; }
             if (argc - a < 1) usage();
@@ -1187,6 +1205,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(cmd, "def")) return cmd_def(argv[a]);
         if (tx_eqz(cmd, "dump")) return cmd_dump(named[0]);
         if (tx_eqz(cmd, "graph")) return cmd_graph(named, nn);
+        if (tx_eqz(cmd, "delta")) return cmd_delta(named, nn);
         if (tx_eqz(cmd, "uses")) return cmd_uses(named[0]);
         if (tx_eqz(cmd, "users")) return cmd_users(named[0]);
         if (tx_eqz(cmd, "calls")) {
