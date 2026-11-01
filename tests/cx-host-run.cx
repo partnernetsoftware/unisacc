@@ -98,6 +98,10 @@ static void fixture(const char *dir) {
     write_text(p, "#pragma unisa use m::x\n#pragma unisa use m\nint main(void) { return x() + y(); }\n");
     tx_snprintf(p, sizeof p, "%s/ms3.cx", dir);
     write_text(p, "#pragma unisa use m\n#pragma unisa use m::x\nint main(void) { return x() + y(); }\n");
+    tx_snprintf(p, sizeof p, "%s/aliasmod.cx", dir);
+    write_text(p, "#pragma unisa module amod\nint ax(void) { return 1; }\n");
+    tx_snprintf(p, sizeof p, "%s/alias.cx", dir);
+    write_text(p, "#pragma unisa use amod::ax as ay\nint main(void) { return ay(); }\n");
     tx_snprintf(p, sizeof p, "%s/real-one.cx", dir);
     write_text(p, "#pragma unisa module one\n#pragma unisa use m\nint one_x(void) { return m_x(); }\n");
     { char d1[256], d2[256], q[256];
@@ -940,6 +944,43 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
     mm_free(o);
 }
 
+static void unisacc_parity(const char *gbin, const char *dir) {
+    const char *okf[] = {"ms1.cx", "ms2.cx", "ms3.cx", "alias.cx", "top_ab.cx", "top_ba.cx", "cxpack/use.cx"};
+    int i, cases = 0, diffs = 0;
+    for (i = 0; i < (int)(sizeof okf / sizeof okf[0]); i++) {
+        char f[256]; char *g = 0, *u = 0; size_t gn = 0, un = 0;
+        int rg, ru, gh, uh, rh, ruh;
+        char *gv[4], *uv[5];
+        tx_snprintf(f, sizeof f, "%s/%s", dir, okf[i]);
+        gv[0] = (char *)gbin; gv[1] = "-cx-plan"; gv[2] = f; gv[3] = 0;
+        rg = runv(gv, &g, &gn);
+        uv[0] = "sh"; uv[1] = "./unisacc.com"; uv[2] = "-cx-plan"; uv[3] = f; uv[4] = 0;
+        ru = runv(uv, &u, &un);
+        gh = count_sub(g, gn, "ua-cxif");
+        uh = count_sub(u, un, "ua-cxif");
+        cases++;
+        if (rg != ru || gh != uh) {
+            diffs++;
+            sy_printf("DIFF\tunisacc-plan-%s\tgcc_rc=%d\tunisacc_rc=%d\tgcc_headers=%d\tunisacc_headers=%d\n",
+                      okf[i], rg, ru, gh, uh);
+        } else {
+            sy_printf("MATCH\tunisacc-plan-%s\theaders=%d\n", okf[i], gh);
+        }
+        mm_free(g); mm_free(u);
+        gv[1] = "-run"; gv[2] = f; gv[3] = 0;
+        rh = runv(gv, 0, 0);
+        uv[2] = f; uv[3] = 0;
+        ruh = runv(uv, 0, 0);
+        if (rh != ruh) {
+            diffs++;
+            sy_printf("DIFF\tunisacc-run-%s\tgcc_rc=%d\tunisacc_rc=%d\n", okf[i], rh, ruh);
+        } else {
+            sy_printf("MATCH\tunisacc-run-%s\tint_rc=%d\n", okf[i], rh);
+        }
+    }
+    sy_printf("CX_HOST_PARITY\tcases=%d\tdiffs=%d\n", cases, diffs);
+}
+
 static int build_driver(const char *cc, const char *cmd, const char *dir, char *bin, size_t cap) {
     char mod[256], o1[256], o2[256], o3[256], src[256];
     char *v[16];
@@ -1027,6 +1068,7 @@ int main(void) {
     ck(rc == 0, "build-clang-driver");
     if (sy_exists(gbin) == 1 && sy_exists(cbin) == 1) {
         parity_cases(gbin, cbin, dir);
+        unisacc_parity(gbin, dir);
         matrix(gbin, "gcc", "gcc", dir);
         matrix(cbin, "clang", "clang", dir);
     } else ck(0, "drivers-present");
