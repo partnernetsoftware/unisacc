@@ -69,6 +69,7 @@
 - 在 `~/repos/unisacc-p3-b` 用同一 rev 的 `git archive` 独立克隆做实验，不碰共享 main、不开 worktree。
 - 先拆构造/编译阶段；只改已测瓶颈；每次保留 A/B 同机同源冷热对比。
 - 目标：热默认运行 ≤90ms、冷 ≤150ms；宿主不退化。
+- B 设计已写入仓外 `~/repos/unisacc-p3-b/plans/p3-model-cache-2026-11-01.md`：缓存明文 stage，键绑定压缩字节/raw/CRC/decoder，读回必须重算 CRC 和魔数；L2 绑定缓存回调，L1 `routestep` 不碰文件系统。
 - B 只在 Pareto 改善且 P0–P2/P4 全绿时按路径搬回 main；否则丢弃，A 保持 fallback。
 
 验收：A/B 同语料 10 次冷热中位数、内存/启动数字；B 不得用缓存命中替代冷测；未达目标记 UNKNOWN，不记 PASS。
