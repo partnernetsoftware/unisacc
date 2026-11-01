@@ -309,7 +309,15 @@ int cxm_goodname(char *w, int n) {
    already lexically normalised by cxm_norm, and callers hand absolute
    paths, so the only equivalence a text compare misses is a symlink. */
 int cxm_samefile(char *a, char *b) {
-    return cxm_eq(a, b);
+#ifdef CXM_HOST_REALPATH
+    char ra[512], rb[512];
+    extern char *realpath(const char *, char *);
+#endif
+    if (cxm_eq(a, b)) return 1;
+#ifdef CXM_HOST_REALPATH
+    if (realpath(a, ra) && realpath(b, rb) && cxm_eq(ra, rb)) return 1;
+#endif
+    return 0;
 }
 /* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */

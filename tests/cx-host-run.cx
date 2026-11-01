@@ -98,6 +98,22 @@ static void fixture(const char *dir) {
     write_text(p, "#pragma unisa use m::x\n#pragma unisa use m\nint main(void) { return x() + y(); }\n");
     tx_snprintf(p, sizeof p, "%s/ms3.cx", dir);
     write_text(p, "#pragma unisa use m\n#pragma unisa use m::x\nint main(void) { return x() + y(); }\n");
+    tx_snprintf(p, sizeof p, "%s/real-one.cx", dir);
+    write_text(p, "#pragma unisa module one\n#pragma unisa use m\nint one_x(void) { return m_x(); }\n");
+    { char d1[256], d2[256], q[256];
+      tx_snprintf(d1, sizeof d1, "%s/a", dir); tx_snprintf(d2, sizeof d2, "%s/b", dir);
+      tx_snprintf(q, sizeof q, "mkdir -p %s %s", d1, d2); runsh(q, 0, 0);
+      tx_snprintf(q, sizeof q, "%s/a/m.cx", dir);
+      write_text(q, "#pragma unisa module m\nint m_x(void) { return 11; }\n");
+      tx_snprintf(q, sizeof q, "%s/b/m.cx", dir);
+      write_text(q, "#pragma unisa module m\nint m_x(void) { return 22; }\n");
+      tx_snprintf(q, sizeof q, "%s/a/one.cx", dir); sy_symlink("../real-one.cx", q);
+      tx_snprintf(q, sizeof q, "%s/b/one.cx", dir); sy_symlink("../real-one.cx", q);
+    }
+    tx_snprintf(p, sizeof p, "%s/top_ab.cx", dir);
+    write_text(p, "#pragma unisa use a.one\n#pragma unisa use b.one\nint main(void) { return one_x(); }\n");
+    tx_snprintf(p, sizeof p, "%s/top_ba.cx", dir);
+    write_text(p, "#pragma unisa use b.one\n#pragma unisa use a.one\nint main(void) { return one_x(); }\n");
     tx_snprintf(p, sizeof p, "%s/bad.cx", dir);
     write_text(p, "int main(void) { this is not C\n");
     tx_snprintf(p, sizeof p, "%s/declare.cx", dir);
@@ -895,6 +911,19 @@ static void matrix(const char *drv, const char *tag, const char *cc, const char 
       mm_free(o);
     }
 
+    { const char *cf[] = {"top_ab.cx", "top_ba.cx"};
+      int want[] = {11, 22}; int ci;
+      for (ci = 0; ci < 2; ci++) {
+        char f[256];
+        tx_snprintf(name, sizeof name, "%s.dual-entry-%s", tag, cf[ci]);
+        tx_snprintf(f, sizeof f, "%s/%s", dir, cf[ci]);
+        v[0] = (char *)drv; v[1] = "-run"; v[2] = f; v[3] = 0;
+        o = 0; n = 0; rc = runv(v, &o, &n);
+        ck(rc == want[ci], name);
+        mm_free(o);
+      }
+    }
+
     tx_snprintf(name, sizeof name, "%s.old-o", tag);
     v[0] = (char *)drv; tx_snprintf(p, sizeof p, "%s/plain.cx", dir); v[1] = p;
     tx_snprintf(q, sizeof q, "%s/old.out", dir); v[2] = "-o"; v[3] = q; v[4] = 0;
@@ -913,7 +942,7 @@ static int build_driver(const char *cc, const char *cmd, const char *dir, char *
     tx_snprintf(o3, sizeof o3, "%s/main.o", dir);
     tx_snprintf(bin, cap, "%s/%s_cx", dir, cmd);
     v[0] = (char *)cc; v[1] = "-std=c99"; v[2] = "-Werror=implicit-function-declaration";
-    v[3] = "-include"; v[4] = "stdlib.h"; v[5] = "-c"; v[6] = "src/cxmod.c"; v[7] = "-o"; v[8] = mod; v[9] = 0;
+    v[3] = "-include"; v[4] = "stdlib.h"; v[5] = "-DCXM_HOST_REALPATH"; v[6] = "-c"; v[7] = "src/cxmod.c"; v[8] = "-o"; v[9] = mod; v[10] = 0;
     if (runv(v, &o, &n) != 0) { if (o) sy_write_all(2, o, (long)n); mm_free(o); return -1; }
     mm_free(o); o = 0;
     v[0] = (char *)cc; v[1] = "-std=c99"; v[2] = "-Werror=implicit-function-declaration";
@@ -937,7 +966,7 @@ static int build_driver(const char *cc, const char *cmd, const char *dir, char *
 }
 
 static void parity_cases(const char *gbin, const char *cbin, const char *dir) {
-    const char *okf[] = {"ms1.cx", "ms2.cx", "ms3.cx"};
+    const char *okf[] = {"ms1.cx", "ms2.cx", "ms3.cx", "top_ab.cx", "top_ba.cx"};
     const char *badf[] = {"unk.cx", "cond.cx", "cmt1.cx", "splice1.cx"};
     int i;
     for (i = 0; i < (int)(sizeof okf / sizeof okf[0]); i++) {
