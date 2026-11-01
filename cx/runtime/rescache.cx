@@ -1,31 +1,40 @@
 #pragma unisa module rescache
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use codec
+#pragma unisa use package_lifetime
 /* Resource content cache: repeat fetches of an immutable package resource
-   (\0hdr/NAME etc.) skip the pm_res scan. Upper layer: no #include, no libc;
-   allocation is mm_*. The key is deep-copied (the caller's key buffer is
-   reused every round). The value p is borrowed (P3 package pointer, owned=0)
-   or owned (host-allocated, owned=1); owned entries are not freed here --
-   the host owns their lifetime, only the key copy is cache-owned. */
+   (\0hdr/NAME etc.) skip the pm_res scan and the inflate. Upper layer: no
+   no include, no libc; allocation is mm_*. The key is deep-copied (the caller's
+   key buffer is reused every round). A raw resource is stored borrowed
+   (owned=0, P3 package pointer); a compressed resource is inflated once here
+   and stored owned=1, released by rescache_release() (called by
+   src/unisacc.cx main; any new exit() path must release separately). */
 typedef struct { unsigned char *key; int kn; const unsigned char *p; int n; int owned; } RsEntry;
 static RsEntry *rs_e;
 static int rs_n, rs_cap;
 
+static int rs_find(const unsigned char *key, int n) {
+    int i;
+    for (i = 0; i < rs_n; i++)
+        if (rs_e[i].kn == n && mm_same(rs_e[i].key, key, (long)n)) return i;
+    return -1;
+}
+
 int rescache_get(const unsigned char *key, int n, const unsigned char **bytes, int *len) {
     int i;
     if (!key || n <= 0 || !bytes || !len) return 0;
-    for (i = 0; i < rs_n; i++)
-        if (rs_e[i].kn == n && mm_same(rs_e[i].key, key, (long)n)) {
-            *bytes = rs_e[i].p;
-            *len = rs_e[i].n;
-            return 1;
-        }
-    return 0;
+    i = rs_find(key, n);
+    if (i < 0) return 0;
+    *bytes = rs_e[i].p;
+    *len = rs_e[i].n;
+    return 1;
 }
 
 int rescache_put(const unsigned char *key, int n, const unsigned char *val, int len, int owned) {
     unsigned char *k;
     if (!key || n <= 0 || !val || len < 0) return 1;
+    if (rs_find(key, n) >= 0) return 0;
     if (rs_n == rs_cap) {
         long nc = rs_cap ? (long)rs_cap * 2 : 16;
         RsEntry *g = mm_grow(rs_e, nc * (long)sizeof(RsEntry));
@@ -42,4 +51,73 @@ int rescache_put(const unsigned char *key, int n, const unsigned char *val, int 
     rs_e[rs_n].owned = owned;
     rs_n = rs_n + 1;
     return 0;
+}
+
+/* Fetch with inflate: hit returns borrowed/owned bytes; miss resolves via
+   pm_res_meta, inflates a codec==1 resource, verifies crc, then caches. */
+int rescache_fetch(const unsigned char *key, int n, unsigned char **bytes, int *len) {
+    int i;
+    int stored, rawlen, codec;
+    unsigned crc;
+    const unsigned char *p;
+    unsigned char *raw;
+    CxCodecCrc c;
+    uint32_t actual;
+    int rc;
+    const CxPackage *pm_package(void);
+    void core_host_panic(const char *);
+    const CxPackage *pkg;
+    int ri;
+    if (!key || n <= 0 || !bytes || !len) core_host_panic("INTERFACE_ERROR resource-fetch");
+    i = rs_find(key, n);
+    if (i >= 0) {
+        *bytes = (unsigned char *)rs_e[i].p;
+        *len = rs_e[i].n;
+        return 1;
+    }
+    pkg = pm_package();
+    if (!pkg) return 0;
+    p = 0;
+    for (ri = 0; ri < pkg->nr; ri++) {
+        const CxPackageResource *r = &pkg->res[ri];
+        if (r->n == n && mm_same(pkg->b + r->name, key, (long)n)) {
+            p = pkg->b + r->data;
+            stored = r->len;
+            rawlen = r->rawlen;
+            codec = r->codec;
+            crc = r->crc;
+            break;
+        }
+    }
+    if (!p) return 0;
+    if (codec == 0) {
+        (void)rescache_put(key, n, p, stored, 0);
+        *bytes = (unsigned char *)p;
+        *len = stored;
+        return 1;
+    }
+    if (rawlen > 2147483647) core_host_panic("resource too large");
+    raw = mm_alloc((long)rawlen);
+    if (!raw) core_host_panic("out of memory");
+    rc = cxcodec_inflate(raw, (unsigned long)rawlen, p, (unsigned long)stored);
+    if (rc) { mm_free(raw); core_host_panic("bad compressed resource"); }
+    cxcodec_crc_init(&c);
+    rc = cxcodec_crc(&c, (const char *)raw, rawlen, &actual);
+    if (rc || actual != crc) { mm_free(raw); core_host_panic("bad compressed resource"); }
+    (void)rescache_put(key, n, raw, rawlen, 1);
+    *bytes = raw;
+    *len = rawlen;
+    return 1;
+}
+
+void rescache_release(void) {
+    int i;
+    for (i = 0; i < rs_n; i++) {
+        mm_free(rs_e[i].key);
+        if (rs_e[i].owned) mm_free((void *)rs_e[i].p);
+    }
+    mm_free(rs_e);
+    rs_e = 0;
+    rs_n = 0;
+    rs_cap = 0;
 }

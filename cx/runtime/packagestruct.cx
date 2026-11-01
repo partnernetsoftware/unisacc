@@ -65,11 +65,11 @@ static int stage_conflict(const unsigned char *d, long n, long at, int count, Cx
     }
     return seen && !same(last, in);
 }
-static int key_conflict(const unsigned char *d, long n, long at, int count, const unsigned char *key, long keylen) {
+static int key_conflict(const unsigned char *d, long n, long at, int count, const unsigned char *key, long keylen, int ver) {
     int i;
     for (i = 0; i < count; i++) {
         CxpsField f[8]; int nf = 0; unsigned long long a, b; long keyat;
-        if (!line(d, n, &at, f, 8, &nf) || nf != 3 || !tag(f[0], 'F')) return -1;
+        if (!line(d, n, &at, f, 8, &nf) || nf != (ver >= 4 ? 5 : 3) || !tag(f[0], 'F')) return -1;
         if (at > n || !u64(&f[1], (unsigned long long)(n - at), &a) || !u64(&f[2], (unsigned long long)(n - at), &b)) return -1;
         if (a > (unsigned long long)(n - at) || b > (unsigned long long)(n - at - (long)a)) return -1;
         keyat = at;
@@ -85,7 +85,7 @@ static int walk(const unsigned char *data, long length, int *version,
     unsigned long long nm, nd, nr, cap;
     if (!version || length < 0 || (length > 0 && !data)) return 1;
     if (!line(data, length, &at, f, 8, &nf) || nf < 2 || !tag(f[0], 'P')) return 2;
-    if (f[1].n != 1 || f[1].p[0] < '1' || f[1].p[0] > '3') return 2;
+    if (f[1].n != 1 || f[1].p[0] < '1' || f[1].p[0] > '4') return 2;
     ver = f[1].p[0] - '0';
     if (nf != (ver == 1 ? 4 : 5)) return 2;
     if (!u64(&f[2], (unsigned long long)length, &nm) || !u64(&f[3], (unsigned long long)length, &nd)) return 2;
@@ -106,9 +106,9 @@ static int walk(const unsigned char *data, long length, int *version,
     for (i = 0; i < (int)nm; i++) {
         unsigned long long stored, rawlen, codec, sum;
         if (!line(data, length, &at, f, 8, &nf) || !tag(f[0], 'M')) return 5;
-        if (nf != (ver == 3 ? 5 : 2)) return 5;
+        if (nf != (ver >= 3 ? 5 : 2)) return 5;
         if (at > length || !u64(&f[1], (unsigned long long)(length - at), &stored) || stored == 0) return 5;
-        if (ver == 3) {
+        if (ver >= 3) {
             if (!u64(&f[2], 2147483647ULL, &rawlen) || rawlen == 0) return 5;
             if (!u64(&f[3], 1, &codec) || codec != 1) return 5;
             if (!u64(&f[4], 4294967295ULL, &sum)) return 5;
@@ -123,11 +123,17 @@ static int walk(const unsigned char *data, long length, int *version,
     res_at = at;
     for (i = 0; i < (int)nr; i++) {
         unsigned long long keylen, vallen; int conflict;
-        if (!line(data, length, &at, f, 8, &nf) || nf != 3 || !tag(f[0], 'F')) return 6;
+        if (!line(data, length, &at, f, 8, &nf) || nf != (ver >= 4 ? 5 : 3) || !tag(f[0], 'F')) return 6;
         if (at > length || !u64(&f[1], (unsigned long long)(length - at), &keylen) || keylen == 0) return 6;
         if (!u64(&f[2], (unsigned long long)(length - at), &vallen)) return 6;
+        if (ver >= 4) {
+            unsigned long long rawlen, codec, sum;
+            if (!u64(&f[3], 2147483647ULL, &rawlen) || !u64(&f[4], 1, &codec) || !u64(&f[5], 4294967295ULL, &sum)) return 6;
+            if (codec == 1 && (vallen == 0 || rawlen == 0)) return 6;
+            if (codec == 0 && rawlen != vallen) return 6;
+        }
         if (keylen > (unsigned long long)(length - at) || vallen > (unsigned long long)(length - at - (long)keylen)) return 6;
-        conflict = key_conflict(data, length, res_at, i, data + at, (long)keylen);
+        conflict = key_conflict(data, length, res_at, i, data + at, (long)keylen, ver);
         if (conflict) return 6;
         at += (long)keylen + (long)vallen;
     }

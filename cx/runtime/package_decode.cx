@@ -93,10 +93,11 @@ static int decode(CxPackageDecode *d) {
     p->b=(unsigned char *)d->bytes;p->n=(int)d->length;
     if (!d->length || !d->bytes || d->bytes[0] != 'P') return bad(d, "bad model tag");
     if(tag(d,'P')||integer(d,&ver))return 1;
-    if(ver<1||ver>3)return bad(d,"unknown package version");p->ver=ver;
+    if(ver<1||ver>4)return bad(d,"unknown package version");p->ver=ver;
     if(integer(d,&pm)||integer(d,&ps)||(ver>=2&&integer(d,&nr)))return 1;
     if(nr<0||nr>p->n/5)return bad(d,"bad resource count");
     p->res=getmem(d,sizeof(CxPackageResource)*(size_t)nr);if(!p->res)return 1;p->nr=nr;
+    mm_fill(p->res, sizeof(CxPackageResource)*(size_t)nr, 0, sizeof(CxPackageResource)*(size_t)nr);
     if(pm<=0||ps<=0||pm>p->n/8||ps>p->n/10)return bad(d,"bad package count");
     p->off=getmem(d,sizeof(int)*(size_t)pm);if(!p->off)return 1;
     p->len=getmem(d,sizeof(int)*(size_t)pm);if(!p->len)return 1;
@@ -124,16 +125,25 @@ static int decode(CxPackageDecode *d) {
     if (image_open(p)) return bad(d, "unknown package route or stage boundary");
     for(int i=0;i<pm;i++){
         int n;if(tag(d,'M')||integer(d,&n))return 1;p->raw[i]=n;p->crc[i]=0;
-        if(ver==3){int codec;long long sum;if(integer(d,&p->raw[i])||integer(d,&codec)||number(d,&sum))return 1;
+        if(ver>=3){int codec;long long sum;if(integer(d,&p->raw[i])||integer(d,&codec)||number(d,&sum))return 1;
             if(p->raw[i]<=0||codec!=1||sum<0||sum>4294967295LL)return bad(d,"bad compressed model header");p->crc[i]=(uint32_t)sum;}
         if(d->at>=d->length||d->bytes[d->at++]!=10||n<=0||n>d->length-d->at)return bad(d,"bad package model extent");
         if(ver<3&&d->bytes[d->at]!='N')return bad(d,"package requires networks");
         p->off[i]=(int)d->at;p->len[i]=n;d->at+=n;
     }
     for(int i=0;i<nr;i++){
-        int n,len;if(tag(d,'F')||integer(d,&n)||integer(d,&len))return 1;
+        int n,len;int rawlen=0;int codec=0;long long sum=0;
+        if(tag(d,'F')||integer(d,&n)||integer(d,&len))return 1;
+        if(ver>=4){
+            if(integer(d,&rawlen)||integer(d,&codec)||number(d,&sum))return 1;
+            if(codec==1){if(len<=0||rawlen<=0||sum<0||sum>4294967295LL)return bad(d,"bad compressed resource header");}
+            else if(codec==0){if(rawlen!=len)return bad(d,"raw resource rawlen mismatch");}
+            else return bad(d,"bad resource codec");
+        }
         if(d->at>=d->length||d->bytes[d->at++]!=10||n<=0||len<0||n>d->length-d->at||len>d->length-d->at-n)return bad(d,"bad resource extent");
         p->res[i].name=(int)d->at;p->res[i].n=n;p->res[i].data=(int)d->at+n;p->res[i].len=len;
+        if(ver>=4){p->res[i].rawlen=rawlen;p->res[i].codec=codec;p->res[i].crc=(unsigned)sum;}
+        else{p->res[i].rawlen=len;p->res[i].codec=0;p->res[i].crc=0;}
         for(int j=0;j<i;j++)if(p->res[j].n==n&&mm_same(d->bytes+p->res[j].name,d->bytes+d->at,(long)n))return bad(d,"duplicate resource name");
         d->at+=n+len;
     }
