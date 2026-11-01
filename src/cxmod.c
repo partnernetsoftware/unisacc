@@ -26,7 +26,7 @@ int cxm_say(int fd, char *s, int n);
 
 #define CXM_MAXU 96
 #define CXM_MAXUSE 48
-#define CXM_MAXDECL 96
+#define CXM_MAXDECL 48
 #define CXM_PATHW 512
 #define CXM_NAMEW 128
 #define CXM_SRCMAX 1048576
