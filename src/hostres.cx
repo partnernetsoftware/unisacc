@@ -1,0 +1,76 @@
+/* hs_file split out of src/host.cx (C44-SIZE-01); same bootstrap layer, libc as there. */
+#pragma unisa module hostres
+
+void core_host_panic(const char *reason);
+
+/* Set while a run-cache compile wants include receipts. NULL the rest of the time.
+   present is 1 after a full read, 0 when the open failed with ENOENT only. */
+static void (*hs_file_note)(const char *path, int present);
+
+int hs_file_note_set(void (*fn)(const char *, int)) {
+    hs_file_note = fn;
+    return 0;
+}
+
+int hs_file(const unsigned char *p, int n, unsigned char **bytes, int *len) {
+    char path[4096];
+    unsigned char *b;
+    unsigned char *nb;
+    long room;
+    long nroom;
+    long gotn;
+    size_t got;
+    FILE *f;
+    const char *perr;
+    int i;
+    if (n < 0 || n >= 4096) return 0;
+    i = 0;
+    while (i < n) {
+        if (p[i] == 0) return 0;
+        path[i] = (char)p[i];
+        i = i + 1;
+    }
+    path[n] = 0;
+    f = fopen(path, "rb");
+    if (!f) {
+        if (errno == ENOENT) {
+            if (hs_file_note) hs_file_note(path, 0);
+            return 0;
+        }
+        core_host_panic("cannot open input");
+    }
+    b = 0;
+    gotn = 0;
+    room = 0;
+    for (;;) {
+        if (gotn == room) {
+            if (room > 1073741824L) { perr = "file too large"; goto fail; }
+            nroom = room ? room * 2 : 4096;
+            nb = realloc(b, (size_t)nroom);
+            if (!nb) { perr = "out of memory"; goto fail; }
+            b = nb;
+            room = nroom;
+        }
+        got = fread(b + gotn, 1, (size_t)(room - gotn), f);
+        gotn = gotn + (long)got;
+        if (got == 0) break;
+    }
+    if (ferror(f)) { perr = "cannot read input"; goto fail; }
+    if (fclose(f)) {
+        free(b);
+        core_host_panic("cannot close input");
+    }
+    if (gotn > 2147483647L) {
+        free(b);
+        core_host_panic("file too large");
+    }
+    *bytes = b ? b : (unsigned char *)realloc(0, 1);
+    if (!*bytes) core_host_panic("out of memory");
+    *len = (int)gotn;
+    if (hs_file_note) hs_file_note(path, 1);
+    return 2;
+fail:
+    free(b);
+    fclose(f);
+    core_host_panic(perr);
+}
