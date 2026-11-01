@@ -1,4 +1,5 @@
 /* Execute one validated registry row. No PASS cache or preparation shortcut. */
+#pragma unisa use sys.sha
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
@@ -15,7 +16,11 @@ static void batch(const tp_batch_view *v,void *opaque){(void)opaque;if(!tx_eqz(v
  copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);selected.source_present=v->source_present;}
 static void coverage(const tp_coverage_view *v,void *opaque){(void)v;(void)opaque;}
 static char *read_regular(const char *p,size_t *n){struct stat st;errno=0;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die("regular input required");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input read extent");return s;}
-static void digest(const char *p,char h[65]){size_t n;char *s=read_regular(p,&n);cx_sha256_hex(s,n,h);free(s);}
+/* The candidate is ~5 MB and every batch digests it twice; the software
+   primitive runs at ~9 MB/s, the kernel's AF_ALG at ~55 MB/s. Use AF_ALG for
+   large inputs and keep the software path as the fallback, same shape as
+   src/runcache.cx's rc_hex_file. */
+static void digest(const char *p,char h[65]){size_t n;char *s=read_regular(p,&n);if(n<65536||sy_sha256_hex(s,(long)n,h)!=0)cx_sha256_hex(s,n,h);free(s);}
 static void parse_materials(void){const char *at=selected.materials;tp_material_decl d;int rc;while((rc=tp_material_next(&at,&d))>0){if(nmaterial==32)die("material inventory");Material *m=&material[nmaterial];copy(m->name,sizeof m->name,d.name);m->kind=d.kind;nmaterial++;}if(rc<0)die("material inventory");}
 static void supplied(int argc,char **argv){if(argc-4!=nmaterial)die("material argument count");for(int i=4;i<argc;i++){char *eq=strchr(argv[i],'=');if(!eq||eq==argv[i]||!eq[1]||strchr(eq+1,'='))die("material assignment");size_t n=(size_t)(eq-argv[i]);int found=-1;for(int j=0;j<nmaterial;j++)if(strlen(material[j].name)==n&&!memcmp(material[j].name,argv[i],n)){found=j;break;}if(found<0||material[found].supplied)die("unknown or duplicate material");Material *m=material+found;if(!tp_material_value(m->kind,eq+1))die("material typed value");if(m->kind==2)copy(m->path,sizeof m->path,eq+1);else{struct stat st;errno=0;if(lstat(eq+1,&st))die(errno==ENOENT?"material path absent":"material path stat");if(!S_ISREG(st.st_mode)&&!S_ISDIR(st.st_mode))die("material path kind");if(!realpath(eq+1,m->path)||!tx_eqz(eq+1, m->path))die("material canonical path");}m->supplied=1;}for(int i=0;i<nmaterial;i++)if(!material[i].supplied)die("missing material");}
 static const char *binding(const char *s,size_t n){if(n==4&&!memcmp(s,"root",4))return root;if(n==3&&!memcmp(s,"out",3))return work;if(n==9&&!memcmp(s,"candidate",9))return candidate;for(int i=0;i<nmaterial;i++)if(strlen(material[i].name)==n&&!memcmp(s,material[i].name,n))return material[i].path;die("unbound placeholder");return 0;}
