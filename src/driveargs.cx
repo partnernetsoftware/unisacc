@@ -1,0 +1,65 @@
+/* Argument walk: command line -> srcv/nsrc/src/argstart or early-exit code.
+   opts/compat are void* (Cxc/Cxp layouts duplicated in drive.cx + cli/compat;
+   C44-DRIVE-TYPES-01); runit/defrun are the fields read. cxc_step/cxp_step are
+   local prototypes; fail is drive.cx's dv_fail. */
+#pragma unisa module driveargs
+
+#pragma unisa use entrybind
+#pragma unisa use compiler.cxmod
+
+int dv_word(const char *word, int is_object) {
+    int tool, cli, src;
+    if (!word) return 4;
+    tool = bx_tool(word);
+    if (tool == 4) return 4;
+    if (tool == 1 || tool == 2 || tool == 3) return tool;
+    cli = bx_cli_word(word);
+    if (cli == 4) return 4;
+    if (cli == 1) return 11;
+    if (cli == 2) return 12;
+    if (cli == 3) return 13;
+    src = bx_more_src(word, is_object);
+    if (src == 4) return 4;
+    if (src == 1) return 20;
+    return 0;
+}
+
+static int dv_compat_word(const char *a) { return a && a[0] == '-' && (a[1] == 'l' || a[1] == 'L' || a[1] == 'x'); }
+
+int dv_parse_args(void *opts, void *compat, char **srcv, int *nsrc, const char **src,
+                  int *argstart, char *why, int argc, char **argv,
+                  int runit, int defrun, int (*fail)(const char *)) {
+    int cxc_step(void *, char **, int, int *, char *, long);
+    int cxp_step(void *, char **, int, int *, char *, long);
+    int i, next, parsed, kind;
+    i = 1;
+    while (i < argc) {
+        next = i;
+        parsed = cxc_step(opts, argv, argc, &next, why, 128);
+        if (parsed == 0) { i = next; continue; }
+        if (parsed == 5 || parsed == 7) return fail(why);
+        if (parsed != 1) return fail(why);
+        kind = dv_word(argv[i], 0);
+        if (kind == 11) return 11;
+        if (kind == 12) return 12;
+        if (kind == 13) { if (runit) *argstart = i + 1; break; }
+        if (runit && *src && kind != 20 && !dv_compat_word(argv[i])) { *argstart = i; break; }
+        if (dv_compat_word(argv[i])) {
+            const char *cwhy;
+            next = i;
+            parsed = cxp_step(compat, argv, argc, &next, why, 128);
+            cwhy = bx_compat_why(parsed, defrun, *src);
+            if (cwhy) return fail(cwhy);
+            if (parsed == 0) { i = next; continue; }
+            if (parsed != 1) return fail(why);
+        }
+        if (cxm_flag(argv[i])) { i = i + 1; continue; }
+        if (bx_opt_dash(argv[i]) == 1) return fail(bx_opt_why(defrun, *src));
+        if (*nsrc >= 64) return fail("too many sources");
+        srcv[*nsrc] = argv[i];
+        if (!*src) *src = argv[i];
+        *nsrc = *nsrc + 1;
+        i = i + 1;
+    }
+    return 0;
+}
