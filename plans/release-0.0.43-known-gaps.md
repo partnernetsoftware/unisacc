@@ -10,6 +10,8 @@
 
 另有一条措辞上的已知差异，不算缺口（格是覆盖的）：结构体里含自己（`struct S{struct S inner;};`）按拒绝处理，报 `not covered: a struct member of struct type`，退出码 1、无输出，不是标准 C99 6.7.2.1p2 的 `incomplete type` 措辞。改措辞要改 e3 模型的拒绝表（exec/parse2/control-reject.tsv），会动 SID 走慢车道，列入 0.0.44（跟 C44-DIAG-COLUMN-01 一起做）。另外 `directory-input`（目录当输入文件）退出码是 1，旧版 79fb84e6 是 2，和缺文件一致。
 
+不属于用户可见缺口、但影响本版测试覆盖：`tools/hostseed-step.cx` 无法被产品编译（`reject: tape domain: unknown opcode`），因此 hostseed-* 的 61 批材料链造不出来，这些批次在 0.0.43 记 UNPREPARED 而不是 PASS。同目录 `object-material.cx`、`net-material.cx` 能正常编过，说明这是该文件独有的构造；诊断在 `plans/release-0.0.43.md`。用户可见功能不受影响。
+
 不属于缺口、但仍然开着的：`ri.windows-snapshot-and-e3-companion` 的 win/x86_64 一条（Windows 快照和 E3 伴随目前是不支持平台的桩，要在 Windows 实机上做）。
 
 另有三条小的已知行为（都有 0.0.44 编号，不单列为缺口）：
