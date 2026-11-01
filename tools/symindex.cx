@@ -746,6 +746,70 @@ static void collect_defs(int e) {
         }
     }
 }
+
+/* graph: one-shot graph into out/toolgraph/v1/graph.tsv. Nodes = files (dedup by realpath),
+   edges = use (from resolve_uses) and call (C rows joined to the def table). */
+static int cmd_graph(void) {
+    Buf o = {0, 0, 0};
+    int e, nodes = 0, edges = 0;
+    long t1 = sy_now_ms();
+    /* header + nodes: every listed file, plus any file reached only through a use (indexed this run) */
+    puts_(&o, "V\ttoolgraph-v1\n");
+    for (e = 0; e < nent; e++) {
+        const char *s, *end; char *f[4]; const char *module = "-";
+        if (!ent[e].listed && !ent[e].mark) continue;
+        if (ent[e].ok != 1) continue;
+        load_shard(e);
+        s = ent[e].shard; end = s + ent[e].shn;
+        for (; s < end; s = next_row(s, end)) if (*s == 'M' && fields(s, end, row, sizeof row, f, 4) >= 2) { module = zkeep(f[1]); break; }
+        puts_(&o, "N\t"); putesc(&o, ent[e].path, tx_len(ent[e].path, CAP)); put(&o, "\t", 1);
+        putesc(&o, module, tx_len(module, CAP)); put(&o, "\t", 1); puts_(&o, ent[e].sha); put(&o, "\n", 1);
+        nodes++;
+    }
+    /* use edges (reached files get mark so they are also nodes) */
+    for (e = 0; e < nent; e++) {
+        int k;
+        if (!ent[e].listed || ent[e].ok != 1) continue;
+        resolve_uses(e);
+        for (k = 0; k < ent[e].nuse; k++) {
+            puts_(&o, "E\t"); putesc(&o, ent[e].path, tx_len(ent[e].path, CAP)); put(&o, "\t", 1);
+            putesc(&o, ent[ent[e].use[k]].path, tx_len(ent[ent[e].use[k]].path, CAP));
+            puts_(&o, "\tuse\t-\n");
+            edges++;
+        }
+    }
+    /* call edges: collect all non-static D from listed+reached files, then join every C row by name */
+    {
+        int n;
+        for (e = 0; e < nent; e++) if ((ent[e].listed || ent[e].mark) && ent[e].ok == 1) collect_defs(e);
+        for (e = 0; e < nent; e++) {
+            const char *s, *end;
+            if (!ent[e].listed || ent[e].ok != 1) continue;
+            load_shard(e);
+            s = ent[e].shard; end = s + ent[e].shn;
+            for (; s < end; s = next_row(s, end)) {
+                const char *nm, *ln; long nn, lnn; int d;
+                if (*s != 'C') continue;
+                nn = field_at(s, end, 1, &nm);
+                if ((d = def_head(nm, nn)) < 0) continue;
+                if (defs[d].e == e) continue;   /* same-file call: not a cross-module edge */
+                lnn = field_at(s, end, 2, &ln);
+                puts_(&o, "E\t"); putesc(&o, ent[e].path, tx_len(ent[e].path, CAP)); put(&o, "\t", 1);
+                putesc(&o, ent[defs[d].e].path, tx_len(ent[defs[d].e].path, CAP));
+                puts_(&o, "\tcall\t"); put(&o, ln, lnn); put(&o, "\n", 1);
+                edges++;
+            }
+        }
+    }
+    /* write atomically beside the index (graph is rebuilt from the same shards, so it lives in the index dir) */
+    {   char gpath[4096];
+        if (cx_fmt(gpath, sizeof gpath, "%s/graph.tsv", idx)) die("path too long");
+        if (write_atomic(gpath, o.p, o.n)) die("cannot write graph");
+    }
+    printf("GRAPH\tfiles=%d\tnodes=%d\tedges=%d\telapsed_ms=%ld\n", nent, nodes, edges, sy_now_ms() - t1);
+    return 0;
+}
+
 /* 1 when caller E itself has a D, P or X named S */
 static int declares(int e, const char *s, long n) {
     const char *p = ent[e].shard, *end = p + ent[e].shn;
@@ -1025,7 +1089,7 @@ static int cmd_external(int *callers, int nc, int names_mode) {
 
 static void usage(void) {
     fprintf(stderr, "usage: symindex.cx [--index DIR] [--in LIST] (update [--verify] | def NAME | calls NAME[,NAME...] [--tracked | FILE...]"
-                    " | uses FILE | users FILE | undeclared (--tracked | FILE...) | external [--names] (--tracked | FILE...) | dump FILE)\n");
+                    " | uses FILE | users FILE | graph | undeclared (--tracked | FILE...) | external [--names] (--tracked | FILE...) | dump FILE)\n");
     exit(2);
 }
 
@@ -1079,6 +1143,8 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(cmd, "uses") || tx_eqz(cmd, "users") || tx_eqz(cmd, "dump")) {
             if (argc - a != 1) usage();
             named[nn++] = entry_for(argv[a], 0);
+        } else if (tx_eqz(cmd, "graph")) {
+            if (argc - a != 0) usage();
         } else if (tx_eqz(cmd, "undeclared") || tx_eqz(cmd, "external")) {
             if (tx_eqz(cmd, "external") && a < argc && tx_eqz(argv[a], "--names")) { names_mode = 1; a++; }
             if (argc - a < 1) usage();
@@ -1091,6 +1157,7 @@ int main(int argc, char **argv) {
         if (n_deferred) { fprintf(stderr, "symindex: the index is unfinished; run update again\n"); return 3; }
         if (tx_eqz(cmd, "def")) return cmd_def(argv[a]);
         if (tx_eqz(cmd, "dump")) return cmd_dump(named[0]);
+        if (tx_eqz(cmd, "graph")) return cmd_graph();
         if (tx_eqz(cmd, "uses")) return cmd_uses(named[0]);
         if (tx_eqz(cmd, "users")) return cmd_users(named[0]);
         if (tx_eqz(cmd, "calls")) {

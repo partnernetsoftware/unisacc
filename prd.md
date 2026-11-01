@@ -29,9 +29,10 @@
 
 ## 1. unisacc.com 是什么
 
-**一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），在 {Linux, macOS, Windows} × {x86-64, arm64} 六目标上运行，用同一份可执行文件：
+**一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
-- 自己写出六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）；
+- **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
+- **自身运行在五原生切片 + win/arm64 系统模拟**（注意）：文件里只有 5 个原生执行切片（win/x86_64、lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64），**没有 win/arm64 原生切片**——Windows on ARM 上靠 win/x86_64 PE 的系统模拟运行。win/arm64 原生入口是已知缺口 C44-WIN-ARM64-01（0.0.44 待做，见 §9.4）。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
 - **自举**：宿主构建 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。
 
@@ -190,7 +191,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | negative | 30 | 具名拒绝、坏输入、语义级坏包 |
 | product | 22 | 产品端到端（编译/运行/镜像字节） |
 | library | 11 | 库/ABI（libunisacc、头布局） |
-| platform | 6 | 跨平台（六目标原生宿主） |
+| platform | 6 | 跨平台（六目标写程序；原生宿主只有 5 切片 + win/arm64 模拟，见 §1） |
 | properties | 9 | 优化/property 性质 |
 
 ### 7.4 19 张域矩阵（tests/*-domain-matrix.tsv）

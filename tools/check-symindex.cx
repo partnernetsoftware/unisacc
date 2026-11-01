@@ -171,6 +171,26 @@ int main(void) {
     rc = si(0, "update", 0, 0, 0);
     ck(rc == 0 && has(out, "SYMINDEX\tfiles=5\treparsed=0\thashed=0\tstale=0"), "warm-update-reads-nothing");
 
+    rc = si(0, "graph", 0, 0, 0);
+    ck(rc == 0 && has(out, "GRAPH\tfiles=5\tnodes=") && has(out, "\tedges="), "graph-runs");
+    {   /* the graph file is written beside the index (idx/graph.tsv) */
+        char gpath[512]; size_t gn; char *g;
+        if (cx_fmt(gpath, sizeof gpath, "%s/graph.tsv", idx)) return 2;
+        g = cx_read(gpath, &gn);
+        if (!g || gn >= CAPOUT) return 2;
+        {   /* g is process-lifetime (cx_read); no free, same as the cx_read on line ~225 */
+            ck(has(g, "V\ttoolgraph-v1\n") && has(g, "\nN\t" FX "facts.cx\tfacts\t"), "graph-header-and-node");
+            ck(has(g, "\nE\t" PR "user.cx\t" PR "mid.cx\tuse\t"), "graph-use-edge-user-mid");
+            ck(has(g, "\nE\t" PR "user.cx\t" PR "lib.cx\tcall\t"), "graph-call-edge-user-lib");
+            ck(has(g, "\nE\t" PR "direct.cx\t" PR "lib.cx\tcall\t"), "graph-call-edge-direct-lib");
+            {   /* no self-loop: same-file calls are not cross-module edges */
+                char needle[640];
+                if (cx_fmt(needle, sizeof needle, "\nE\t%s\t%s\t", PR "lib.cx", PR "lib.cx")) return 2;
+                ck(!has(g, needle), "graph-no-self-loop");
+            }
+        }
+    }
+
     rc = si(0, "dump", FX "facts.cx", 0, 0);
     ck(rc == 0 && tx_prefix(out, CAPOUT, "FILE\t" FX "facts.cx\t", tx_len("FILE\t" FX "facts.cx\t", 256)) && tx_eqz(body(out), facts_rows), "dump-facts-exact");
     rc = si(0, "dump", PR "lib.cx", 0, 0);
