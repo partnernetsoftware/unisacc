@@ -25,7 +25,7 @@ int cxm_wr(char *path, char *buf, int n);
 int cxm_say(int fd, char *s, int n);
 
 #define CXM_MAXU 64
-#define CXM_MAXUSE 32
+#define CXM_MAXUSE 48
 #define CXM_MAXDECL 96
 #define CXM_PATHW 512
 #define CXM_NAMEW 128
@@ -361,7 +361,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     { int distinct = 0, z = 0;
       while (z < cxm_nuse[u]) { int q = 0, seen = 0; while (q < z) { if (cxm_use[u][q] == cxm_use[u][z]) { seen = 1; break; } q++; } if (!seen) distinct++; z++; }
       if (v == cxm_n || distinct < CXM_MAXUSE) { }
-      else if (distinct >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 32 uses in one unit"); return cxm_fail(); }
+      else if (distinct >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 48 uses in one unit"); return cxm_fail(); }
     }
     if (cxm_nuse[u] >= CXM_MAXDECL) { cxm_start(u, line); cxm_m("too many use declarations in one unit"); return cxm_fail(); }
     cxm_use[u][cxm_nuse[u]] = v;
