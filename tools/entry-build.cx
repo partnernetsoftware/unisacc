@@ -316,6 +316,8 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
 /* Six drive units that run once per build are -O1. --o1-drivers selects
    the same six. Inflate, model decode and the executor stay at -O2: -O0
    made that code about 45% slower at run time. */
+static long long eb_sha_total;
+static long long eb_rec_total;
 static int eb_same(const char *a, const char *b) {
     int i;
     if (!a || !b) return 0;
@@ -508,9 +510,17 @@ static int eb_compile_parallel(eb_job *jobs, int njobs, const char *bound, const
                     }
                     return 1;
                 }
-                eb_sha(jobs[job].obj, jobs[job].sha_out, jobs[job].bytes_out);
-                eb_line_slow(rf, jobs[job].key, jobs[job].sha_out, *(jobs[job].bytes_out), dt, jobs[job].rr, line_extra);
-                if (fflush(rf)) eb_die("receipt");
+                {
+                    long long tsha = eb_ns();
+                    eb_sha(jobs[job].obj, jobs[job].sha_out, jobs[job].bytes_out);
+                    eb_sha_total += eb_ns() - tsha;
+                }
+                {
+                    long long trec = eb_ns();
+                    eb_line_slow(rf, jobs[job].key, jobs[job].sha_out, *(jobs[job].bytes_out), dt, jobs[job].rr, line_extra);
+                    if (fflush(rf)) eb_die("receipt");
+                    eb_rec_total += eb_ns() - trec;
+                }
             }
         }
     }
@@ -923,6 +933,7 @@ int main(int argc, char **argv) {
         eb_line_slow(rf, "candidate", hc, nc, ts, 0, 0);
     }
     fprintf(rf, "ENTRY_BUILD_PARALLEL\tjobs=%d\twall_ns=%lld\n", EB_JOBS, tpar_wall);
+    fprintf(rf, "ENTRY_BUILD_SHA\tsha_ns=%lld\trec_ns=%lld\n", eb_sha_total, eb_rec_total);
     if (fclose(rf)) eb_die("receipt close");
     if (only_n) printf("entry-build objects=%d\n", only_n);
     else printf("entry-build candidate=%s bytes=%ld\n", hc, nc);
