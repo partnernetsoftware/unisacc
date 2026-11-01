@@ -190,6 +190,30 @@ static int write_temp(const unsigned char *s, size_t n, char *path, size_t path_
    The driver does not run unisacc.com. Each unit keeps the includes from its
    own plan row. The result is ordinary C, not a checked build. */
 #define CXCC_UNITS 64
+static char **cxcc_environ(void) {
+#ifndef __UNISA__
+    return environ;
+#else
+    static char *v[2];
+    static char b[4096];
+    const char *p;
+    long i, n;
+    if (!v[0]) {
+        p = getenv("PATH");
+        if (p) {
+            b[0] = 'P'; b[1] = 'A'; b[2] = 'T'; b[3] = 'H'; b[4] = '=';
+            i = 5; n = 0;
+            while (p[n] && i < 4095) { b[i++] = p[n++]; }
+            b[i] = 0;
+            v[0] = b;
+        }
+        v[1] = 0;
+    }
+    return v;
+#endif
+}
+
+
 #define CXCC_PLANARGS 256
 #define CXCC_TMP 260
 
@@ -197,7 +221,7 @@ static int cxcc_exec(const char *cmd, const char *what, char **av) {
     int st = 0;
     int spr;
     extern int cxproc_run(char **argv, char **envp, int *status);
-    spr = cxproc_run(av, environ, &st);
+    spr = cxproc_run(av, cxcc_environ(), &st);
     if (spr == 127) {
         fprintf(stderr, "%s: cannot run %s\n", cmd, what);
         return 127;
@@ -754,6 +778,7 @@ static int cxcc_push_prelude(char **av, int n, int cap, char *hostinc, size_t ho
     int clang;
     (void)hostinc;
     (void)hostcap;
+#ifndef __UNISA__
     if (trim && cxcc_trim_pch(root, compiler, pch_header, sizeof pch_header,
                               pch_file, sizeof pch_file, &clang)) {
         if (n + 4 >= cap) return -1;
@@ -761,6 +786,11 @@ static int cxcc_push_prelude(char **av, int n, int cap, char *hostinc, size_t ho
         av[n++] = clang ? pch_file : pch_header;
         return n;
     }
+#else
+    (void)pch_header;
+    (void)pch_file;
+    (void)clang;
+#endif
     (void)root;
     if (n + 2 >= cap) return -1;
 #endif
@@ -1241,7 +1271,7 @@ static int cxcc_run_main(int argc, char **argv, int run_at, int dd, const char *
         }
     }
     pargv[pargc] = 0;
-    spr = cxproc_run_raw(pargv, environ, &kind, &code);
+    spr = cxproc_run_raw(pargv, cxcc_environ(), &kind, &code);
     if (spr != 0) {
         cxcc_say(cmd, "-run failed to start", 0);
         cxcc_run_cleanup(cmd, dir, exe);
