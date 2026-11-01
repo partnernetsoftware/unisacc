@@ -24,7 +24,7 @@ int cxm_rd(char *path, char *buf, int cap);
 int cxm_wr(char *path, char *buf, int n);
 int cxm_say(int fd, char *s, int n);
 
-#define CXM_MAXU 64
+#define CXM_MAXU 96
 #define CXM_MAXUSE 48
 #define CXM_MAXDECL 96
 #define CXM_PATHW 512
@@ -389,7 +389,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
             cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm); return cxm_fail();
         }
-        if (cxm_n >= CXM_MAXU) { cxm_start(u, line); cxm_m("more than 64 units in one program"); return cxm_fail(); }
+        if (cxm_n >= CXM_MAXU) { cxm_start(u, line); cxm_m("more than 96 units in one program"); return cxm_fail(); }
         cxm_cpy(cxm_path[v], norm, CXM_PATHW); cxm_arg[v] = cxm_keep(norm);
         if (cxm_arg[v] == 0) { cxm_start(u, line); cxm_m("too many module paths in one process"); return cxm_fail(); }
         cxm_cpyn(cxm_name[v], w, n, CXM_NAMEW); cxm_stemof(norm, cxm_stem[v]);
@@ -1007,7 +1007,7 @@ int cxm_plan(char **paths, int n) {
     cxm_n = 0; cxm_on = 1; cxm_nsym = 0; cxm_nift = 0; cxm_ntopo = 0; cxm_nstk = 0; cxm_nren = 0;
     u = 0;
     while (u < n) {
-        if (u >= CXM_MAXU) { cxm_start(0 - 1, 0); cxm_m("more than 64 units in one program"); cxm_on = 0; return cxm_fail(); }
+        if (u >= CXM_MAXU) { cxm_start(0 - 1, 0); cxm_m("more than 96 units in one program"); cxm_on = 0; return cxm_fail(); }
         cxm_arg[u] = paths[u];
         if (cxm_norm(paths[u], cxm_path[u])) cxm_cpy(cxm_path[u], paths[u], CXM_PATHW);
         cxm_stemof(paths[u], cxm_stem[u]); cxm_cpy(cxm_name[u], cxm_stem[u], CXM_NAMEW);
