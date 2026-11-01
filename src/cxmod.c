@@ -318,6 +318,21 @@ int cxm_samefile(char *a, char *b) {
 #endif
     return 0;
 }
+/* Conservative identity test for a second lexical path to one physical
+   module: only a module with no use directive can merge.  Any "use" token
+   (even in a comment) keeps the ambiguity visible instead of guessing which
+   directory should resolve it. */
+int cxm_has_use(char *path) {
+    int n, k;
+    n = cxm_rd(path, cxm_cmp, CXM_IFMAX);
+    if (n < 0) return 1;
+    k = 0;
+    while (k + 3 <= n) {
+        if (cxm_cmp[k] == 'u' && cxm_cmp[k + 1] == 's' && cxm_cmp[k + 2] == 'e') return 1;
+        k = k + 1;
+    }
+    return 0;
+}
 /* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
 int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, int an) {
@@ -338,9 +353,9 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
-    if (v < cxm_n && !cxm_eq(cxm_path[v], norm)) {
+    if (v < cxm_n && !cxm_eq(cxm_path[v], norm) && cxm_has_use(cxm_path[v])) {
         cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(" has two lexical entries: ");
-        cxm_m(cxm_path[v]); cxm_m(" and "); cxm_m(norm); return cxm_fail();
+        cxm_m(cxm_path[v]); cxm_m(" and "); cxm_m(norm); cxm_m(" with use dependencies"); return cxm_fail();
     }
     if (v == cxm_n) {
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
