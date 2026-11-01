@@ -31,9 +31,11 @@ static const char cxraw_sample[] = "/* malloc( */ x = \"memcpy(\"; n = strlen (s
 static char *bottom[64];
 static int nbottom;
 
-typedef struct { char *path; int count; int used; } Row;
+typedef struct { char *path; int count; int used; int cur; } Row;
 static Row rows[MAXROWS];
 static int nrows;
+#define MAXMOVES 128
+static char *mv_from[MAXMOVES], *mv_to[MAXMOVES]; static int mv_n[MAXMOVES], nmv;
 
 static int is_id(int c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9');
@@ -128,6 +130,19 @@ static int load_baseline(void) {
         if (e > i && b[e - 1] == '\r') b[e - 1] = 0;
         if (e > i && b[i] != '#') {
             char *line = b + i, *tab, *end; long v, off = tx_chr(line, (long)(e - i), '\t');
+            if (off == 4 && line[0] == 'm' && line[1] == 'o' && line[2] == 'v' && line[3] == 'e') {
+                long t2 = tx_chr(line + 5, (long)(e - i) - 5, '\t'), t3;
+                char *f1 = line + 5, *f2, *f3;
+                if (t2 < 1 || nmv == MAXMOVES) { fprintf(stderr, "cxraw: %s: bad move row\n", BASELINE); return -1; }
+                f2 = f1 + t2;
+                t3 = tx_chr(f2 + 1, (long)(e - i) - (t2 + 5) - 1, '\t');
+                if (t3 < 1) { fprintf(stderr, "cxraw: %s: bad move row\n", BASELINE); return -1; }
+                f3 = f2 + 1 + t3;
+                *f2 = 0; *f3 = 0; v = strtol(f3 + 1, &end, 10);
+                if (end == f3 + 1 || *end || v < 0) { fprintf(stderr, "cxraw: %s: bad move count\n", BASELINE); return -1; }
+                mv_from[nmv] = keep(f1, (long)t2); mv_to[nmv] = keep(f2 + 1, (long)t3); mv_n[nmv] = (int)v; nmv++;
+                i = e + 1; continue;
+            }
             tab = off < 0 ? 0 : line + off;
             if (!tab || nrows == MAXROWS) { fprintf(stderr, "cxraw: %s: bad row '%s'\n", BASELINE, line); return -1; }
             *tab = 0; v = strtol(tab + 1, &end, 10);
@@ -137,6 +152,9 @@ static int load_baseline(void) {
         }
         i = e + 1;
     }
+    { int z; for (z = 0; z < nmv; z++) if (find_row(mv_to[z]) == 0) {
+        rows[nrows].path = mv_to[z]; rows[nrows].count = mv_n[z]; rows[nrows].used = 0; nrows++;
+    } }
     return 0;                          /* b lives for the process */
 }
 
@@ -187,7 +205,7 @@ int main(int argc, char **argv) {
     if (load_layers() < 0) return 2;
     rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxraw: run from the repo root\n"); return 2; }
-    if (check && load_baseline() < 0) return 2;
+    if (load_baseline() < 0) return 2;
     rc = cx_run("git ls-files -s -z -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only; C files are counted where cx/ keeps them */
     if (rc != 0 || !list) { fprintf(stderr, "cxraw: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
@@ -206,7 +224,7 @@ int main(int argc, char **argv) {
         files++; total += c;
         if (check) {
             r = find_row(p);
-            if (r) r->used = 1;
+            if (r) { r->used = 1; r->cur = c; }
             if (c > (r ? r->count : 0)) {
                 if (r) printf("cxraw: %s has %d calls, baseline %d\n", p, c, r->count);
                 else printf("cxraw: %s has %d calls and no baseline row (a new unit must have 0)\n", p, c);
@@ -218,12 +236,25 @@ int main(int argc, char **argv) {
         }
     }
     if (!check) {
+        for (k = 0; k < nmv; k++) {
+            if (cx_fmt(line, sizeof line, "move\t%s\t%s\t%d\n", mv_from[k], mv_to[k], mv_n[k]) || append(&out, &olen, &ocap, line) < 0) { fprintf(stderr, "cxraw: move row too long\n"); return 2; }
+        }
         if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxraw: cannot write %s\n", BASELINE); return 2; }
         printf("cxraw: wrote %s: %d units, %d calls\n", BASELINE, files, total);
         return 0;
     }
+    for (k = 0; k < nrows; k++) base_total += rows[k].count;
+    if (check && total > base_total) {
+        printf("cxraw: total debt %d exceeds baseline %d\n", total, base_total);
+        over++;
+    }
+    for (k = 0; check && k < nmv; k++) {
+        Row *f = find_row(mv_from[k]), *t = find_row(mv_to[k]);
+        if (!f || !t) { printf("cxraw: move row names an unknown file: %s -> %s\n", mv_from[k], mv_to[k]); over++; continue; }
+        if (t->count != mv_n[k]) { printf("cxraw: move target %s baseline %d != move %d\n", mv_to[k], t->count, mv_n[k]); over++; }
+        if (t->cur != t->count) { printf("cxraw: move target %s has %d calls, baseline %d\n", mv_to[k], t->cur, t->count); over++; }
+    }
     for (k = 0; k < nrows; k++) {
-        base_total += rows[k].count;
         if (!rows[k].used) printf("cxraw: stale row %s (not a tracked unit; --write drops it)\n", rows[k].path);
     }
     printf("cxraw: %s: %d units, %d calls (baseline %d); %d above baseline, %d below (--write ratchets down)\n",

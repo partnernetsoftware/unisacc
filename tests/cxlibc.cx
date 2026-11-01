@@ -30,9 +30,11 @@
 static const char *bottom[80];
 static int nbottom;
 
-typedef struct { const char *path; long count; int used; } Row;
+typedef struct { const char *path; long count; int used; long cur; } Row;
 static Row rows[MAXROWS];
 static int nrows, hrow[HN];
+#define MAXMOVES 128
+static const char *mv_from[MAXMOVES], *mv_to[MAXMOVES]; static long mv_n[MAXMOVES]; static int nmv;
 typedef struct { const char *path; long count; } Ext;
 static Ext ext[MAXROWS];
 static int next_, hext[HN];
@@ -93,6 +95,19 @@ static int load_baseline(void) {
         line[ln] = 0;
         if (ln > 0 && line[ln - 1] == '\r') line[--ln] = 0;
         if (ln > 0 && line[0] != '#') {
+            if (ln > 5 && line[0] == 'm' && line[1] == 'o' && line[2] == 'v' && line[3] == 'e' && line[4] == '\t') {
+                long t2 = tx_chr(line + 5, ln - 5, '\t'), t3;
+                char *f1 = line + 5, *f2, *f3;
+                if (t2 < 1 || nmv == MAXMOVES) { sy_eprintf("cxlibc: %s: bad move row\n", BASELINE); return -1; }
+                f2 = f1 + t2;
+                t3 = tx_chr(f2 + 1, ln - (t2 + 5) - 1, '\t');
+                if (t3 < 1) { sy_eprintf("cxlibc: %s: bad move row\n", BASELINE); return -1; }
+                f3 = f2 + 1 + t3;
+                *f2 = 0; *f3 = 0; v = tx_strtol(f3 + 1, &end, 10);
+                if (end == f3 + 1 || *end || v < 0) { sy_eprintf("cxlibc: %s: bad move count\n", BASELINE); return -1; }
+                mv_from[nmv] = f1; mv_to[nmv] = f2 + 1; mv_n[nmv] = v; nmv++;
+                i += ln + 1; continue;
+            }
             tab = tx_chr(line, ln, '\t');
             if (tab <= 0 || nrows == MAXROWS) { sy_eprintf("cxlibc: %s: bad row '%s'\n", BASELINE, line); return -1; }
             line[tab] = 0; v = tx_strtol(line + tab + 1, &end, 10);
@@ -103,6 +118,10 @@ static int load_baseline(void) {
         }
         i += ln + 1;
     }
+    { int z; for (z = 0; z < nmv; z++) if (row_find(mv_to[z], 0, 0) < 0) {
+        rows[nrows].path = mv_to[z]; rows[nrows].count = mv_n[z]; rows[nrows].used = 0; rows[nrows].cur = -1;
+        row_find(mv_to[z], 1, nrows); nrows++;
+    } }
     return 0;
 }
 
@@ -199,7 +218,7 @@ int main(int argc, char **argv) {
         c = x >= 0 ? ext[x].count : 0;
         files++; total += c;
         r = row_find(p, 0, 0);
-        if (r >= 0) rows[r].used = 1;
+        if (r >= 0) { rows[r].used = 1; rows[r].cur = c; }
         if (!init && c > (r >= 0 ? rows[r].count : 0)) {
             if (r >= 0) sy_printf("cxlibc: %s has %ld calls, baseline %ld\n", p, c, rows[r].count);
             else sy_printf("cxlibc: %s has %ld calls and no baseline row (a new .cx must have 0)\n", p, c);
@@ -210,12 +229,26 @@ int main(int argc, char **argv) {
             if (cx_fmt(line, sizeof line, "%s\t%ld\n", p, c) || put(&out, line)) { sy_eprintf("cxlibc: row too long: %s\n", p); return 2; }
         }
     }
+    for (k = 0; k < nrows; k++) base_total += rows[k].count;
+    if (check && total > base_total) {
+        sy_printf("cxlibc: total debt %ld exceeds baseline %ld\n", total, base_total);
+        over++;
+    }
+    for (k = 0; check && k < nmv; k++) {
+        int fi = row_find(mv_from[k], 0, 0), ti = row_find(mv_to[k], 0, 0);
+        if (fi < 0 || ti < 0) { sy_printf("cxlibc: move row names an unknown file: %s -> %s\n", mv_from[k], mv_to[k]); over++; continue; }
+        if (rows[ti].count != mv_n[k]) { sy_printf("cxlibc: move target %s baseline %ld != move %ld\n", mv_to[k], rows[ti].count, mv_n[k]); over++; }
+        if (rows[ti].cur != rows[ti].count) { sy_printf("cxlibc: move target %s has %ld calls, baseline %ld\n", mv_to[k], rows[ti].cur, rows[ti].count); over++; }
+    }
     for (k = 0; k < nrows; k++) {
-        base_total += rows[k].count;
         if (!rows[k].used) sy_printf("cxlibc: stale row %s (not a scanned upper-layer .cx; --write drops it)\n", rows[k].path);
     }
     if (!check) {
         if (over) { sy_printf("cxlibc: FAIL: --write refuses: %d files above their row or without one (it only ratchets down)\n", over); return 1; }
+        for (k = 0; k < nmv; k++) {
+            char mline[4200];
+            if (cx_fmt(mline, sizeof mline, "move\t%s\t%s\t%ld\n", mv_from[k], mv_to[k], mv_n[k]) || put(&out, mline)) { sy_eprintf("cxlibc: move row too long\n"); return 2; }
+        }
         if (cx_write(BASELINE, out.p, (size_t)out.n) != 0) { sy_eprintf("cxlibc: cannot write %s\n", BASELINE); return 2; }
         sy_printf("cxlibc: wrote %s: %d .cx files, %ld calls (baseline was %ld)\n", BASELINE, files, total, base_total);
         return 0;
