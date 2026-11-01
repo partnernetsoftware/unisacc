@@ -1,0 +1,55 @@
+#pragma unisa use mem.heap
+#pragma unisa use compiler.tapebin
+#pragma unisa use compiler.tapegate
+/* Round-trip check for the v1 UTAPEBIN encoder (C44-TAPEBIN-01, R11).
+   Decodes tests/fixtures/tapebin/return7.tapebin with the existing tapegate
+   reader, re-encodes the recovered text with compiler.tapebin, and requires the
+   two byte strings to match. That is the strongest statement available without
+   re-deriving the fixture: it holds the encoder to the frozen 0.0.43 product
+   byte for byte, and it also proves the encoder and the reader are inverses.
+   The fixture header fixes the parameters: minor 0, origin 1, 3 sections.
+   sh ./unisacc.com tools/check-tapebin.cx */
+int main(void) {
+    unsigned char *fx;
+    long fxn;
+    int minor, nsec, i, end, aligned, bad;
+    long long roff, rlen, rcnt;
+    int soff[4], slen[4], scnt[4];
+    char *text;
+    int textn;
+    unsigned char *enc;
+    long encn;
+    unsigned char *raw;
+    size_t rawn;
+    raw = (unsigned char *)cx_read("tests/fixtures/tapebin/return7.tapebin", &rawn);
+    if (!raw) { printf("FAIL\tfixture-read\n"); return 1; }
+    fx = raw; fxn = (long)rawn;
+    
+    minor = 0; nsec = 0;
+    if (tb2_magic(fx, (int)fxn) || tb2_fixed(fx, (int)fxn, &minor) || tb2_nsec(fx, (int)fxn, &nsec)) {
+        printf("FAIL\theader\n"); return 1;
+    }
+    
+    end = 64 + 24 * nsec; bad = 0; i = 0;
+    while (i < nsec && !bad) {
+        aligned = tb2_align(end);
+        if (aligned < 0 || tb2_row(fx, (int)fxn, i, aligned, &roff, &rlen, &rcnt)) { bad = 1; break; }
+        soff[i] = (int)roff; slen[i] = (int)rlen; scnt[i] = (int)rcnt;
+        end = (int)roff + (int)rlen;
+        i = i + 1;
+    }
+    if (bad) { printf("FAIL\tsection-table\n"); return 1; }
+    text = 0; textn = 0;
+    if (tb2_text(fx, (int)fxn, minor, soff, slen, scnt, &text, &textn)) { printf("FAIL\tdecode\n"); return 1; }
+    
+    enc = 0; encn = 0;
+    if (!tb_encode(text, (long)textn, 1, &enc, &encn)) { printf("FAIL\tencode\n"); return 1; }
+    
+    if (encn != fxn) { printf("FAIL\tsize\tenc=%ld\tfixture=%ld\n", encn, fxn); return 1; }
+    i = 0;
+    while (i < (int)fxn) { if (enc[i] != fx[i]) break; i = i + 1; }
+    if (i == (int)fxn) printf("PASS\tbyte-identical\tbytes=%ld\n", fxn);
+    else printf("FAIL\tbyte-diff\tat=%d\n", i);
+    printf("TAPEBIN_ROUND\tfailed=%d\n", i == (int)fxn ? 0 : 1);
+    return i == (int)fxn ? 0 : 1;
+}
