@@ -37,6 +37,7 @@
 #pragma unisa use sys.poll
 #pragma unisa use text.text
 #pragma unisa use text.deflate
+#pragma unisa use runtime.codec
 
 #define RB_FILES 128
 #define RB_REL 192
@@ -272,17 +273,19 @@ static int rb_p3(int argc, char **argv) {
     char line[64], sha[65], incdir[RB_FULL];
     const unsigned char *body;
     long line_end, res_at, kept, i, pack_n;
-    int fd, nr, compress, out_ver;
+    int fd, nr, compress, compress_flat, out_ver;
     unsigned char tail[16];
     compress = 0;
+    compress_flat = 0;
     {
         int ai;
         for (ai = 5; ai < argc; ai++) {
             if (tx_eqz(argv[ai], "--compress-resources")) { compress = 1; continue; }
-            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources]");
+            if (tx_eqz(argv[ai], "--compress-flat")) { compress_flat = 1; continue; }
+            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources] [--compress-flat]");
         }
     }
-    if (argc < 5) rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources]");
+    if (argc < 5) rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--compress-resources] [--compress-flat]");
     if (sy_mono(&t0)) rb_die("clock");
     file = cx_read(argv[3], &zn);
     if (!file || zn > 2147483647UL) rb_die("read package");
@@ -345,7 +348,7 @@ static int rb_p3(int argc, char **argv) {
         if (reln && mm_copy(key + 5, (long)sizeof key - 5, rb_files[i].rel, reln)) rb_die("include name");
         bytes = cx_read(rb_files[i].full, &fn);
         if (!bytes) rb_die("include read");
-        rb_emit_packed(&out, key, 5 + reln, (const unsigned char *)bytes, (long)fn, compress && fn > 0 && !rb_flat_key(key, 5 + reln));
+        rb_emit_packed(&out, key, 5 + reln, (const unsigned char *)bytes, (long)fn, compress && fn > 0 && (compress_flat || !rb_flat_key(key, 5 + reln)));
         mm_free(bytes);
     }
     cxpl_release(pkg, rb_drop);
@@ -366,8 +369,24 @@ static int rb_p3(int argc, char **argv) {
         for (i = 0; i < c->nr; i++) {
             if (!rb_flat_key(out.p + c->res[i].name, c->res[i].n)) continue;
             found = 1;
-            if ((long)fn != c->res[i].len || !mm_same(out.p + c->res[i].data, flat, (long)fn))
-                rb_die("cx-flat.h mismatch");
+            if (c->res[i].codec == 1) {
+                unsigned char *rb_raw;
+                if (c->res[i].rawlen != (int)fn) rb_die("cx-flat.h mismatch");
+                rb_raw = mm_alloc((long)fn);
+                if (!rb_raw) rb_die("cx-flat.h alloc");
+                if (cxcodec_inflate(rb_raw, (unsigned long)fn, out.p + c->res[i].data, (unsigned long)c->res[i].len)) {
+                    mm_free(rb_raw);
+                    rb_die("cx-flat.h inflate");
+                }
+                if (!mm_same(rb_raw, flat, (long)fn)) {
+                    mm_free(rb_raw);
+                    rb_die("cx-flat.h mismatch");
+                }
+                mm_free(rb_raw);
+            } else {
+                if ((long)fn != c->res[i].len || !mm_same(out.p + c->res[i].data, flat, (long)fn))
+                    rb_die("cx-flat.h mismatch");
+            }
         }
         if (!found) rb_die("cx-flat.h missing");
     }
