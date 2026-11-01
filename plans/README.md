@@ -42,4 +42,3 @@
 - [dev-tools-2026-10-30.md](dev-tools-2026-10-30.md)：开发工具清单与待建项。每个工具的用法见 prd.md 能力速查。
 - [refactor-tool-2026-10-30.md](refactor-tool-2026-10-30.md)、[symindex-design-2026-10-30.md](symindex-design-2026-10-30.md)：两大批量工具的设计和实测记录。
 - [ci-bootstrap-2026-10-30.md](ci-bootstrap-2026-10-30.md)：CI 取已发布的 unisacc.com。0.0.43 发布后要把它钉进去。
-- [cron-cc.md](cron-cc.md)：cc 每 5 分钟巡检的执行清单。
