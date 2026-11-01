@@ -134,3 +134,11 @@
 
 即上限是「总单元 ≤ 64」；`CXM_MAXU 96` 已不再是瓶颈（63 模块单独 `-cx-plan` 通过）。
 whole-o 的 67 单元因此必挂；entry-build 逐对象编译（每对象 1 单元）+ 链接 96 输入，绕开本层。
+
+### lnx 对象路线的 constructor 来源（裁 C，2026-11-01）
+
+- 事实：`out/c44-m4/entry.elf` 是静态链接 x86-64 裸 ELF（`no section header`），实测 `./entry.elf --version` rc0、`./entry.elf /tmp/t7.cx -o /tmp/t7.bin` 产出可执行后 `run=7`。它**不需要 APE shell 启动器**。
+- 裁：rb 的对象路线在 lnx/* 上用**直接 exec 的裸 ELF**作 constructor，不再 `sh unisacc.com`。理由：`sh unisacc.com` 是 whole-o 时代的历史遗留（当时 constructor 是 APE，需要 sh 前缀）；lnx 裸 ELF 可直接 exec。
+- 拒绝 A：正式 APE 安装需要五片，osx/win BLOCKED，只能出残缺 APE，不叫安装。
+- 拒绝 B（作为用户入口）：不给 release-build 加 `--constructor` CLI 参数；但允许 rb 内部用固定路径（快照内 `entry.elf`，或 ROOT 指定的既有对象路线构造器）。
+- 落地形状：`rb_objects` 用快照里由 `rb_freeze` 复制进来的构造器文件，若该文件是 ELF 就直接 exec；若是 APE/shell 包装才 `sh`。判据用 ELF magic 前 4 字节 `\x7fELF`，不靠扩展名。
