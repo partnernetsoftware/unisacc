@@ -78,6 +78,31 @@ static char *run(const char *arg, int off, long *ms) {
     if (rc) { fprintf(stderr, "runcache-test: compiler rc %d\n", rc); return ""; }
     return out ? out : "";
 }
+
+/* Compile the same source through a writing mode (-o image, -c object).  Both
+   share the image cache with -run and the key carries the mode, so a second
+   call must not store anything new and must still write the same bytes. */
+static char *compile_out(const char *mode, const char *outp, long *ms) {
+    char *v[32], env[2300], *out = 0;
+    size_t n = 0;
+    int k = 0, i, rc;
+    long t0;
+    v[k++] = "env";
+    if (cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", cache)) die("env-bound");
+    v[k++] = env;
+    for (i = 0; i < ncompiler; i++) v[k++] = compiler[i];
+    v[k++] = "-I"; v[k++] = inc1; v[k++] = "-I"; v[k++] = inc2;
+    if (same(mode, "-c")) {
+        v[k++] = "-c"; v[k++] = "-b"; v[k++] = "lnx/x86_64"; v[k++] = "-funit";
+    }
+    v[k++] = "-o"; v[k++] = outp;
+    v[k++] = src; v[k] = 0;
+    t0 = sy_now_ms();
+    rc = cx_runv_timeout(v, 55, &out, &n);
+    *ms = sy_now_ms() - t0;
+    if (rc) return "";
+    return out ? out : "";
+}
 static int same(const char *a, const char *b) { return tx_eq(a, b, CAP); }
 
 static const char *prog =
@@ -131,6 +156,27 @@ int main(int argc, char **argv) {
     put(src, prog3);
     ck(same(run("x", 0, &ms), "7 x\n"), "middle-changed");
     ck(same(run("z", 1, &ms), "7 z\n"), "disabled-output");
+    {   /* -o and -c write a file instead of exec; both reuse the same cache. */
+        char img[2200], obj[2200], after1[CAP];
+        long ms2;
+        if (cx_fmt(img, 2200, "%s/out.bin", work) || cx_fmt(obj, 2200, "%s/out.o", work)) die("path-bound");
+        tx_copy(before, CAP, fingerprint(0), tx_len(fingerprint(0), CAP) + 1);
+        ck(sy_exists(img) == 0, "image-absent-before");
+        (void)compile_out("-o", img, &ms2);
+        ck(sy_exists(img) == 1, "image-written");
+        tx_copy(after1, CAP, fingerprint(1), tx_len(fingerprint(1), CAP) + 1);
+        ck(!same(before, after1), "image-store-on-miss");
+        ck(cx_remove(img) == 0, "image-removed");
+        (void)compile_out("-o", img, &ms2);
+        ck(sy_exists(img) == 1, "image-from-cache");
+        ck(same(after1, fingerprint(1)), "image-hit-stores-nothing");
+        ck(cx_remove(img) == 0, "image-removed-2");
+        (void)compile_out("-c", obj, &ms2);
+        ck(sy_exists(obj) == 1, "object-written");
+        ck(cx_remove(obj) == 0, "object-removed");
+        (void)compile_out("-c", obj, &ms2);
+        ck(sy_exists(obj) == 1, "object-from-cache");
+    }
     ck(sy_exists(cache_off) == 0, "disabled-makes-no-cache");
 
     printf("TIMING\tcold_ms=%ld\thit_ms=%ld\tphases=UNMEASURED\n", cold, hit);
