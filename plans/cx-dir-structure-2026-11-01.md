@@ -79,3 +79,30 @@
 - 证据：`tools/check-link-cap.cx` 96 输入不报 cap、97 输入 rc1 具名 `too many sources`；M1 自举候选 7b108210…（63 对象）实测 96 通过/97 拒绝。
 - 提交：`b2f0961fc0`。
 - 未登记批次：`register` 会用已装 64 上限产品跑，96 必然 FAIL；等 C3 产品升到 96 后再登记并实跑。
+## C44-MAXU-01（评估：CXM_MAXU 64 -> 96）
+
+### 事实（实跑，2026-11-01）
+- 已装产品 83343ec1：64 个 .cx 模块 rc0；65 个 `unisacc: model driver: too many sources`（drive 96 前旧值，先撞 64 单元）。
+- M2/m2 候选 233f059f：63 模块 ok，**64 模块就 `cx: more than 64 units in one program`**（`cxm_n >= CXM_MAXU`），65 同。
+- 65 个独立 `.c` 源在 M2 上也是 `reject: not covered: malformed unit frame`——K2 units 网 `units-result.tsv:4` 的 `CMPI unit 64`，即 `formats.md:259` "LE32 unit count (1..64)"。
+- release-build 的整程序 `-o` 路由（`rb_whole`）正是 33 个根 + 全部 use 闭包一起交给一个 `-cx-plan`；加 7 新模块后闭包 67 单元 > 64。
+
+### 冲突与依赖
+1. **三源同步**：`cx/cx0/plan.cx:77`（权威）、`src/compiler/cxmod.cx:28`、`src/cxmod.c:27` 必须同改；`src/cxmod.c` 是 `tools/cx0-extract.cx` 的生成投影，只能由 `cx/cx0/plan.cx` 生成，不得手改。
+2. **生成器锚点**：`tests/preprocess/projection.cx:34` 用字符串 `"#define CXM_MAXU 64\n"` 作插入锚点；`tools/cx0-extract.cx:27` 用 `memcmp(a,"#define CXM_MAXU ",17)` 作私有体边界。两处都按前缀匹配，改数字不破；但若改成别的写法会破。
+3. **消息文本**：`more than 64 units in one program` 是硬编码字符串，改上限时必须改数字，否则输出说谎。
+4. **K2 units 网的 64 是另一层**：`exec/parse2/units-result.tsv:4` `CMPI unit 64`，对应 `formats.md:259` UNITOK2 单元数 1..64。只改 `CXM_MAXU` 不能让 65 个 `.c` 通过，因为 `.c` 走 UNITOK2 单元计数，不走 cxmod 模块图。
+5. **内存**：`cxm_usym`/`cxm_ualias` 各 `[MAXU][96][64]`，64→96 从 2×384KiB 到 2×576KiB，静态 +384KiB；`cxm_reach` 64²→96² char 从 4KiB 到 9KiB。可接受，但要实测二进制增长与全程序时间。
+6. **release-build 与 entry-build 是两条路**：`entry-build` 逐对象 + 链接走 96 链接输入；`release-build` 整程序 `-o` 走 64 模块单元。二者上限不能互相替代。
+
+### 最小可执行切片（建议顺序）
+1. `cx/cx0/plan.cx` 改 96（`#define` + 两处消息数字），`tools/cx0-extract.cx` 重新生成 `src/cxmod.c`，`src/compiler/cxmod.cx` 手工同步（它不进投影，是独立三源之一）。
+2. 用 `tools/check-install-fixes.cx` 同款方式新增 `check-maxu.cx`：96 个 `.cx` 模块 rc0、97 个 rc1 具名 `more than 96 units in one program`。
+3. K2 units 网 64 若也要到 96：改 `exec/parse2/units-result.tsv` 的 `CMPI unit 64` → 96，并同步 `exec/pipeline/formats.md:259`。这走"事实表 → 生成器 → 表"的规矩，需要确认 `units-result.tsv` 是手写事实还是生成物（当前 `tools/facts-gen.cx` 只读它，不写它 → 需查其上游 writer）。
+4. 验收：两代五片逐字节（release-build whole-o），七棘轮 ok，`check-cx-layers` rc0，全程序时间仍 <60s（当前 33 源 40.3s，67 源估计 ~80s → 必须分相，或改走 entry-build 对象路线）。
+
+### 结论与建议
+- 方向 **A（升 CXM_MAXU）必要但不充分**：它只解 cxmod 模块图 64；`67 个 .c/.cx 一起 -o` 还有 UNITOK2 单元 64 和 60s 时限两层。
+- 更稳的次序：先做 A（三源 + 具名拒绝用例），再量 67 单元整程序时间；若超 60s，就按 `rb_phase` 同款对 lnx 也分相，而不是把时限放宽。
+- 方向 B（release-build 改走 entry-build 对象路线）工作量更大，但它绕过 UNITOK2 64 和整程序时间，长期更合理；建议在 0.0.44 的 host import 一起做，不在 0.0.43 收尾阶段切。
+- 现在 C3 五片不阻塞于 MAXU：可以先用 **entry-build 对象路线**出 lnx 片做 C3 证据，五片 whole-o 等 MAXU 落地。
