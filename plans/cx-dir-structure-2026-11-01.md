@@ -159,3 +159,16 @@ whole-o 的 67 单元因此必挂；entry-build 逐对象编译（每对象 1 �
 - 关键约束：`sy_spawn_pipe` 的子进程已经在自己的进程组里（`cx/sys/proc.cx:186` `setpgid(0,0)`），所以 rb 的总 deadline 用 `sy_kill(pid)`（组杀）即可。
 - 时限值：总 deadline 用 **240s**（67 对象实测 90s，约 2.6× 余量），只作「整体挂起」兜底，不参与任何单作业判定；单作业仍由 entry-build 内层 bound 决定。
 - 禁止：不把 `bg_seconds` 上限从 60 改大（全仓基础设施，影响所有批次）。
+
+## C44-PACKAGE-01 阶段收尾（裁 B，2026-11-01）
+
+- 已落：六刀源码拆分（驱动侧 7 模块独立）+ 三个上限（链接输入 96 `b2f0961fc0`、模块单元 96 `804ce58833`、lnx 对象路线 `e0ca07ea55`）+ 40 keys entry-build（`f00154cb36`）。
+- lnx 两片（对象路线，constructor = M4 `18eae940`）：
+  - `out/c44-five-lnx` rev 1e06e6fbe6 → candidate `18eae940…`（3584633 字节）
+  - `out/c44-five-lnx-arm` rev e0ca07ea55 → candidate `ff5e7c4a…`（3584577 字节）
+  - 两 rev 之间只有 `tools/release-build.cx` 不同（`git diff --name-only 1e06e6fbe6 e0ca07ea55` 仅此一项），产品源完全相同。
+- **不动点证据（强）**：lnx/x86_64 片以 M4 为 constructor 产出的 candidate 与 M4 逐字节相同（`18eae940…`）→ M4 是自身不动点，自举链闭合。
+- lnx/arm64 只证明「同输入同字节」，未做「以 ff5e7c4a 为 constructor 重编重得 ff5e7c4a」的不动点验证；记 UNMEASURED，不冒充。
+- osx/x86_64、osx/arm64、win/x86_64：BLOCKED，卡 `C44-UNITOK2-CAP-01`（单元总数 ≤64，编进模型，需事实表→生成器→模型重建）。
+- 因此 `release-ape` 完整打包不可做（缺 osx 两片 + win 一片）；不产残缺 APE 冒充安装。
+- 下一阶段：转 `C44-SPEED-01`（0.0.44 第一优先级），先量完整分相基线。
