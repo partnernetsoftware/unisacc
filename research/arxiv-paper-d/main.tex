@@ -1,0 +1,166 @@
+% Paper D position draft. Not a results paper; not submitted.
+\documentclass[11pt]{article}
+\pdfoutput=1
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hyphens]{url}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue!50!black]{hyperref}
+\usepackage{microtype}
+\setlength{\parskip}{0.5em}
+\linespread{1.08}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single,
+  columns=fullflexible,keepspaces=true,showstringspaces=false}
+
+\title{Module Boundaries and Gradual Memory Safety on a C99-Compatible\\
+Compiler Architecture}
+\author{Yunzuo Chen\\
+PartnerNet Software Pty Ltd, Australia\\
+\texttt{wanjochan@partnernetsoftware.com}}
+\date{Position draft, October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This position paper describes the \texttt{.cx} architecture: a POSIX C99-compatible
+source surface with explicit module declarations, checked public interfaces, and a
+build graph that can be audited without relying on implicit \texttt{\#include}
+coupling. The architecture is intended to serve three execution backends from one
+module contract: the native \texttt{unisacc} compiler and the host drivers
+\texttt{gcc\_cx}/\texttt{clang\_cx}. We separate module boundaries from memory
+safety, and separate deterministic checks from optional finite-network inference.
+The paper is an intent and design record, not a claim that Rust-style compile-time
+ownership, complete memory safety, or release qualification has been achieved.
+\end{abstract}
+
+\section{Position and non-goals}
+
+The target is not a new language. The source remains POSIX C99; \texttt{.cx} adds
+module, import, public-set, and package declarations through a pragma/config
+surface. The host compilers ignore unknown pragmas; expansion belongs to the
+driver. The native compiler and the host drivers must agree on module visibility,
+refusal diagnostics, and the build graph.
+
+Non-goals of this document are: (i) claiming that runtime handle checks are
+compile-time ownership; (ii) claiming a soundness proof that does not exist;
+(iii) replacing the Paper~A stream/network pipeline; (iv) treating a green local
+test as release qualification.
+
+\section{Two layers}
+
+\begin{longtable}{@{}p{0.22\textwidth}p{0.35\textwidth}p{0.35\textwidth}@{}}
+\toprule
+Layer & Claim & Evidence direction \\
+\midrule
+\textbf{A: \texttt{.cx} architecture} &
+Module/use graph, exported and private names, explicit resources, build closure,
+and staged ownership/borrowing contracts. &
+\texttt{cx/}, \texttt{tests/cx*.cx}, \texttt{plans/cx-modules.md}; native and host
+drivers must share one contract. \\
+\textbf{B: classic C99 optional node} &
+Without editing source lines: model-assisted annotation, deterministic checker,
+and graded compile/tape fallback. &
+Separate v0.1.3 study; not the main \texttt{.cx} claim. \\
+\bottomrule
+\end{longtable}
+
+Module boundaries are a precondition for a safety contract, not the contract
+itself. A clear boundary does not prove the absence of use-after-free or
+out-of-bounds access.
+
+\section{Division of labour}
+
+\begin{longtable}{@{}p{0.27\textwidth}p{0.31\textwidth}p{0.32\textwidth}@{}}
+\toprule
+Work & Owner & Reason \\
+\midrule
+Module graph and exports & deterministic compiler/driver & Parsing, public sets,
+package manifests, cache invalidation; dependencies are not guessed by weights. \\
+Optional shape/ownership inference & finite key$\to$class network & Same shape
+as Paper~A tables; a wrong inference may only request a runtime check or a named
+refusal, never turn an unproved case into ``proved''. \\
+Safety-contract validation & deterministic checker & The source of the guarantee;
+a table/network cannot replace soundness of the checking rules. \\
+Unproved fallback & runtime check or refusal & Unproved input is either checked or
+explicitly rejected; strict mode emits no false receipt. \\
+\bottomrule
+\end{longtable}
+
+The goal is zero false negatives under an explicitly declared language subset and
+threat model. That proof does not yet exist. False positives and runtime overhead
+are measurable, versioned metrics, not safety claims. Runtime handle isolation
+(e.g.\ the \texttt{owned} prototype) and compile-time Rust-style ownership are
+separate qualifications.
+
+\section{Staged deliverables}
+
+\begin{enumerate}
+\item \textbf{Verifiable module surface.} No new module \texttt{\#include}
+  ratchet; package manifest and CXIF; explicit build closure; native and host
+  drivers reject the same malformed module graphs.
+\item \textbf{Minimal safety contract.} Use-after-release, out-of-bounds, handle
+  generation/drop; positive and negative fixtures; a ratchet that only decreases.
+  Start with runtime constraints, then a compile-time checking slice.
+\item \textbf{Optional inference node.} Annotate only declared contracts; compare
+  the provable fraction and runtime overhead against unchanged C99, Lua, SQLite,
+  and miniz vectors if the classic-C layer is studied.
+\item \textbf{Consistent grading.} The same function has the same observable
+  semantics under ``proved'', ``runtime-checked'', and ``refused''; bypassing a
+  check cannot produce a valid receipt.
+\end{enumerate}
+
+\section{Theory questions}
+
+\begin{itemize}
+\item Module boundaries: export set, cross-module calls, and
+  \texttt{static}/manifest consistency.
+\item Soundness of annotations and borrow rules: checker acceptance implies no
+  error in the declared threat model, with an explicit assumption list.
+\item Inference domain: is the key space finite? How are tables split when it is
+  too large, following the Paper~A construction discipline?
+\item Graded compilation: correctness and non-forgeable receipts for each mode.
+\end{itemize}
+
+\section{Experiments and reproducibility}
+
+The CX evidence should be generated by gates and referenced, not hand-copied:
+ratchet counts, package/CXIF fixtures, ownership red-case matrices, and
+native-vs-host parity. A single green fixture does not imply complete memory
+safety. Every backend experiment must record compiler identity, input bytes, cold/hot
+conditions, and the failure/refusal domain.
+
+\section{Related work and risks}
+
+Rust rewrites the source and uses compile-time borrow checking. Checked~C and
+Cyclone rely on manual annotations. Fil-C, CHERI, and tape-safety modes are
+fallback mechanisms; a proved path should return to native speed. The primary
+risks are (i) presenting runtime prototypes as compile-time qualification,
+(ii) presenting module progress as memory-safety progress, (iii) an inference
+domain that is not actually finite, and (iv) alias/VLA assumptions expanding
+without bound.
+
+\section{Index}
+
+\begin{itemize}
+\item \texttt{cx/README.md}: structured CX entry.
+\item \texttt{docs/cx/prd.md}: current product reading.
+\item \texttt{plans/cx-modules.md}: module and safety ratchet stages.
+\item \texttt{plans/v0.0.44.md}: C44-CX-MODULE and C44-CX-MEMORY registration.
+\item \texttt{docs/cx-spec-draft.md}: language draft.
+\item \texttt{research/paper-c-intent.md}: pipeline method.
+\item \texttt{research/unisacc-paper.md}: Paper~A, stream/network pipeline.
+\end{itemize}
+
+\section*{Status}
+
+This file is a position draft generated from
+\texttt{research/paper-d-intent.md}. It contains no measured safety result, no
+soundness proof, and no release claim. The Markdown intent remains the source of
+truth until the paper is independently reviewed.
+\end{document}
