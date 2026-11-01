@@ -150,3 +150,12 @@ whole-o 的 67 单元因此必挂；entry-build 逐对象编译（每对象 1 �
 - 裁：对象路线外层 `bound 300`。理由：67 对象实测 90s，最慢单项 `drivelink.o` 类大文件约 2.6s/对象量级，300s 给 ~3.3× 余量且仍能拦住整体挂起。不做「作业数 × 55」的动态算式（过度设计，且会让上限随配置漂移）。
 - 常量形状：不写字面量 300 两处，提一个 `RB_OBJ_WALL` 宏，附一句注释说明它是总墙钟不是单作业。
 - 验收：`release-build slice lnx/x86_64` rc0、`route\tentry-build`、receipt 有 40 行具名对象 + `entry.elf` + `candidate`，且 candidate 与 M4（18eae940）逐字节相同。
+
+### 修正：bound 硬上限 60，外层不能 300（2026-11-01）
+
+- 实测：`./tools/bound 300 true` → `usage: bound [--status FILE] SECONDS(1..60) ...`，rc2；`./tools/bound 60 true` rc0。`cx/compiler/boundgate.cx:22` `if (seconds > 60) return 0;` 确认是产品合同，不是可调参数。
+- 所以上一条「rb_objects 外层 bound 300」作废。
+- 正确形状（选 A）：对象路线**不再套 bound**。`rb_objects` 直接 spawn `ctor tools/entry-build.cx -- ROOT P3 OUT CTOR`，由 entry-build 内部的逐作业 bound 看门（`eb_run` 传 secs 58/55、`eb_link` 45、plan 50），rb 自己用 `sy_poll` + 总 deadline 兜底整轮挂起。
+- 关键约束：`sy_spawn_pipe` 的子进程已经在自己的进程组里（`cx/sys/proc.cx:186` `setpgid(0,0)`），所以 rb 的总 deadline 用 `sy_kill(pid)`（组杀）即可。
+- 时限值：总 deadline 用 **240s**（67 对象实测 90s，约 2.6× 余量），只作「整体挂起」兜底，不参与任何单作业判定；单作业仍由 entry-build 内层 bound 决定。
+- 禁止：不把 `bg_seconds` 上限从 60 改大（全仓基础设施，影响所有批次）。
