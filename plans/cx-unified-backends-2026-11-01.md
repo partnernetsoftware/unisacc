@@ -9,16 +9,18 @@
 
 验收不是“两边都能跑”，而是同一输入得到同一语义和可接受的诊断；日常运行速度有明确预算。
 
-## 2. 当前事实
+## 2. 当前事实（2026-11-01 更新）
 
 | 事实 | 证据 |
 |---|---|
-| 宿主多符号导入比未重建的 unisacc 新 | 同源 `use m::x; use m::y`：host `-cx-plan` 两个 CXIF 头，unisacc 一个 |
-| 投影已漂移 | `sh ./unisacc.com tools/cx0-extract.cx -- --check` 当前 rc2：`expected-unique-compatibility-anchor` |
-| 宿主补丁不在权威 body | `src/cxmod.c` 的 `CXM_HOST_REALPATH` 与 symbol-aware dedup 未出现在 `cx/cx0/plan.cx` 的 `CX0_COMPAT_BODY` |
-| 三处 MAXUSE 不一致 | `src/cxmod.c`=32 且按 distinct target；`cx/cx0/plan.cx`=32 按原始 use；`cx/compiler/cxmod.cx`=48 |
-| 默认运行速度 | unisacc 151ms/次热、约 460ms/次冷；gcc_cx 43/73；clang_cx 85/128 |
-| 现有回归 | `cx-host-run` PASS；host suite 11 units×2 drivers `fails=0`；`cx-layers` PASS |
+| P0–P2 已落地 | `tests/cx-host-run.cx` 对拍与 realpath 夹具；`cx0-extract --check` 为 `EXACT` |
+| 三源已合一 | realpath、symbol-aware 去重、distinct-use、multi-rewrite 进入 `cx/cx0/plan.cx`；`src/cxmod.c` 由它投影；`cx/compiler/cxmod.cx` 同步；MAXUSE=48 |
+| realpath 身份 | 叶模块/依赖一致的双入口合并；依赖不同的双入口具名拒绝 |
+| 默认运行速度 | unisacc 唯一源约 450ms 冷；同路径缓存约 11ms 热；`-c` 约 403ms；`-cx-plan` 约 6ms |
+| 宿主速度 | gcc_cx 约 46ms 热 / 73ms 冷；clang_cx 约 85/128 |
+| 当前候选 | `out/p5-rebuild/ape/unisacc-next.com` sha `552c5f96…`，release smoke 5/5、check-install-fixes 0、候选 smoke 16/0；未安装 |
+| 已装产品 | `unisacc.com` 仍为 sha `21782dd5…`；不能用候选结果冒充已装身份 |
+| 现有回归 | `cx-host-run` PASS；host suite 11×2 fails=0；`cx0-unit 28/0`；`cx-funit-host 10/0`；`cx-layers` PASS；ratchets 7/0 |
 
 ## 3. 原则
 
@@ -53,14 +55,22 @@
 
 验收：拒绝行含两个入口与冲突模块；一致用例两边运行结果相同；`cx-host-run` 覆盖。
 
-### P3：速度预算
+### P3：速度预算（A/B 分开做）
 
-- 先测 unisacc 默认运行的阶段（启动、解析、CXIF、执行），把 151ms 热路径拆开；未测相位记 UNMEASURED。
-- 目标先定可测预算：热默认运行 ≤ 宿主 gcc_cx 的 2 倍（约 ≤90ms），冷运行 ≤150ms；达到后再收紧。
-- 宿主保持当前预算：gcc 冷 ≤100ms、热 ≤50ms；clang 冷 ≤150ms、热 ≤90ms。
-- 只优化已测瓶颈；每次改动保留冷/热两组数字，禁止用缓存命中替代冷测。
+**A：冻结基线（已完成，作为 fallback）**
 
-验收：同一语料 10 次冷/热中位数；优化前后同机同源对比；失败路径不进缓存。
+- 固定语料：tiny、模块链、多符号、cxpack、realpath；同一机器记录冷/热各 10 次中位数。
+- 当前基线：unisacc 唯一源约 450ms 冷、同路径缓存约 11ms 热；`-c` 约 403ms；`-cx-plan` 约 6ms；gcc_cx 46/73；clang_cx 85/128。
+- A 只记录，不改产品；不把 11ms 缓存命中写成冷路径达标。
+
+**B：仓外性能实验（未开始）**
+
+- 在 `~/repos/unisacc-p3-b` 用同一 rev 的 `git archive` 独立克隆做实验，不碰共享 main、不开 worktree。
+- 先拆构造/编译阶段；只改已测瓶颈；每次保留 A/B 同机同源冷热对比。
+- 目标：热默认运行 ≤90ms、冷 ≤150ms；宿主不退化。
+- B 只在 Pareto 改善且 P0–P2/P4 全绿时按路径搬回 main；否则丢弃，A 保持 fallback。
+
+验收：A/B 同语料 10 次冷热中位数、内存/启动数字；B 不得用缓存命中替代冷测；未达目标记 UNKNOWN，不记 PASS。
 
 ### P4：测试与门禁
 
@@ -68,14 +78,18 @@
 - 新增对拍批次登记到 `tests/batches.tsv`，标记真实预算；不伪造 PASS。
 - `tools/ratchets.cx` 七项通过；文档写清未覆盖平台和编译期所有权边界。
 
-### P5：产品候选
+### P5：产品候选（候选已完成，安装未做）
 
-- 重建 `unisacc.com` 候选，核身份后再安装；未重建不得用源码结果推断产品。
-- 安装后重复 P0/P2/P3 的关键用例；跨平台仍按独立平台证据，不外推。
+- 已按 `tools/release-build.cx` 生成 P3 包、五片并 `tools/release-ape.cx pack`：
+  `out/p5-rebuild/ape/unisacc-next.com` sha `552c5f96…`。
+- 已过 `release-ape smoke` 5/5、`check-install-fixes` failed=0、候选自身 smoke 16/0。
+- **未替换 `./unisacc.com`**；安装仍需两代五片逐字节相同及安装授权。
+- 安装后重复 P0/P2/P3 的关键用例；跨平台按独立证据，不外推。
 
 ## 5. 依赖与风险
 
-- P0 必须先于 P1/P3；P1 完成前不改宿主新功能，否则继续扩大分叉。
-- 最大风险是 `src/cxmod.c` 被生成器覆盖；P1 前禁止再手改投影。
-- MAXUSE/realpath 的语义要在 spec 合同下落定，不能只求测试变绿。
+- P0–P2 已完成；P4 门禁已跑过同一候选前源码。P3-B 必须用独立克隆，避免污染 P0–P2 的共享 main。
+- 生成投影只经 `tools/cx0-extract.cx`；禁止手改 `src/cxmod.c`。`--check` 现在为 `EXACT`。
+- MAXUSE 已统一为 48；realpath 依赖一致才合并，冲突具名拒绝。
+- P5 候选已存在但未安装；安装前必须完成两代五片比较，未安装不得声称产品身份。
 - 编译期所有权、包管理/workspace 集成不在本计划；运行期句柄检查不得称为所有权。
