@@ -1,0 +1,358 @@
+#pragma unisa module tapebin
+#pragma unisa use tapeshape
+/* L1 compiler/tapebin: v1 text-tape -> UTAPEBIN encoder (docs/tapebin-v1.md).
+   The C reference is src/tapebin_encode.inc + exec/c/tapebin_emit.h; this is
+   the model-product encoder, all buffers lazily allocated (no static large
+   array, so the product BSS does not grow 41 MB). The opcode names/shapes come
+   from compiler.tapeshape (single source, generated from exec/facts/
+   tape-shape.tsv). SHA-256 is the prelude cx_sha256.
+   tb_encode copies nothing: the caller owns the text tape; the output buffer
+   is allocated here and returned in *out (caller frees with mm_free). */
+#define TB_MAXOUT 33554432
+#define TB_MAXPOOL 262144
+#define TB_CONSTCAP 4194304
+#define TB_LITCAP 1048576
+
+static char *tb_file;             /* output, mm_alloc(TB_MAXOUT) */
+static int tb_outpos;
+static char *tb_constdata;        /* const pool bytes, mm_alloc(TB_CONSTCAP) */
+static int tb_constused;
+static char *tb_lit;              /* one literal, mm_alloc(TB_LITCAP) */
+static int *tb_name_at;           /* name offsets into the input tape */
+static int *tb_name_len;
+static int tb_nn;
+static int *tb_const_at;          /* const offsets into tb_constdata */
+static int *tb_const_len;
+static int tb_nc;
+static int tb_rec_count;
+static int tb_bad;
+static int tb_minor;
+
+static int tb_fail(void) { tb_bad = 1; return 0; }
+
+static int tb_emit(int c) {
+    if (tb_outpos >= TB_MAXOUT) return tb_fail();
+    tb_file[tb_outpos] = (char)c; tb_outpos = tb_outpos + 1; return 1;
+}
+
+static int tb_emit_bytes(const char *s, int n) {
+    int i;
+    if (n < 0 || n > TB_MAXOUT - tb_outpos) return tb_fail();
+    for (i = 0; i < n; i++) if (!tb_emit(s[i] & 255)) return 0;
+    return 1;
+}
+
+static int tb_emit_u(unsigned long v) {
+    while (v >= 128) { if (!tb_emit((int)(v & 127) | 128)) return 0; v = v >> 7; }
+    return tb_emit((int)v);
+}
+
+static int tb_emit_s(long v) {
+    int b, done;
+    do {
+        b = (int)(v & 127); v = v >> 7;
+        done = (v == 0 && b < 64) || (v == -1 && b >= 64);
+        if (!tb_emit(b | (done ? 0 : 128))) return 0;
+    } while (!done);
+    return !tb_bad;
+}
+
+static int tb_wle(int at, unsigned long v, int n) {
+    int i;
+    for (i = 0; i < n; i++) { tb_file[at + i] = (char)(v & 255); v = v >> 8; }
+    return 0;
+}
+
+static int tb_wsame(const char *a, const char *b, int n) {
+    int i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int tb_bk_hex(int c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    c = c | 32;
+    return (c >= 97 && c <= 102) ? c - 87 : -1;
+}
+
+/* Name pool: register the name at input[at..at+len) if new, return its index.
+   Rejects NUL/space/tab/newline/CR/colon inside a name. */
+static int tb_name_index(const char *in, int at, int len) {
+    int i;
+    if (len <= 0 || tb_nn >= TB_MAXPOOL) return tb_fail();
+    for (i = 0; i < len; i++) {
+        int c = in[at + i] & 255;
+        if (c == 0 || c == 32 || c == 9 || c == 10 || c == 13 || c == 58) return tb_fail();
+    }
+    for (i = 0; i < tb_nn; i++) {
+        if (len == tb_name_len[i] && tb_wsame(in + at, in + tb_name_at[i], len)) return i;
+    }
+    tb_name_at[tb_nn] = at; tb_name_len[tb_nn] = len;
+    tb_nn = tb_nn + 1;
+    return tb_nn - 1;
+}
+
+/* Const pool: register tb_lit[0..len) if new, return its index. */
+static int tb_const_index(int len) {
+    int i;
+    if (len < 0 || tb_nc >= TB_MAXPOOL) return tb_fail();
+    for (i = 0; i < tb_nc; i++) {
+        if (len == tb_const_len[i] && tb_wsame(tb_lit, tb_constdata + tb_const_at[i], len)) return i;
+    }
+    if (len > TB_CONSTCAP - tb_constused) return tb_fail();
+    tb_const_at[tb_nc] = tb_constused; tb_const_len[tb_nc] = len;
+    for (i = 0; i < len; i++) { tb_constdata[tb_constused] = tb_lit[i]; tb_constused = tb_constused + 1; }
+    tb_nc = tb_nc + 1;
+    return tb_nc - 1;
+}
+
+static int tb_ws(int c) { return c == 32 || c == 9 || c == 44 || c == 91 || c == 93; }
+
+static int tb_skip(const char *in, int p, int end) {
+    while (p < end && tb_ws(in[p] & 255)) p = p + 1;
+    return p;
+}
+
+static int tb_token_end(const char *in, int p, int end) {
+    while (p < end && !tb_ws(in[p] & 255) && in[p] != 59) p = p + 1;
+    return p;
+}
+
+static int tb_number(const char *in, int at, int end, unsigned long *value, int *negative) {
+    int p, base, digit;
+    unsigned long v;
+    p = at; *negative = 0; v = 0; base = 10;
+    if (p < end && (in[p] == 45 || in[p] == 43)) { *negative = in[p] == 45; p = p + 1; }
+    if (p + 1 < end && in[p] == 48 && (in[p + 1] == 120 || in[p + 1] == 88)) { base = 16; p = p + 2; }
+    if (p >= end) return tb_fail();
+    while (p < end) {
+        int c = in[p] & 255;
+        if (c >= 48 && c <= 57) digit = c - 48;
+        else if (base == 16 && (c | 32) >= 97 && (c | 32) <= 102) digit = (c | 32) - 87;
+        else return tb_fail();
+        if (digit >= base || v > (~0UL - (unsigned long)digit) / (unsigned long)base) return tb_fail();
+        v = v * (unsigned long)base + (unsigned long)digit; p = p + 1;
+    }
+    if (*negative && v > (1UL << 63)) return tb_fail();
+    *value = v;
+    return 1;
+}
+
+/* One string literal in[0..end): unescape into tb_lit, return its length. */
+static int tb_literal(const char *in, int start, int end) {
+    int p, n, c;
+    p = start; n = 0;
+    if (p >= end || in[p] != 34) return tb_fail();
+    p = p + 1;
+    while (p < end && in[p] != 34) {
+        c = in[p] & 255;
+        if (c == 92) {
+            p = p + 1; if (p >= end) return tb_fail();
+            c = in[p] & 255;
+            if (c == 120) {
+                if (p + 2 >= end) return tb_fail();
+                c = tb_bk_hex(in[p + 1] & 255) * 16 + tb_bk_hex(in[p + 2] & 255);
+                p = p + 2;
+            } else if (c == 110) c = 10;
+            else if (c == 116) c = 9;
+            else if (c == 114) c = 13;
+            else if (c == 48) c = 0;
+        }
+        if (n >= TB_LITCAP) return tb_fail();
+        tb_lit[n] = (char)c; n = n + 1; p = p + 1;
+    }
+    if (p >= end || in[p] != 34) return tb_fail();
+    p = p + 1;
+    while (p < end) { if (in[p] != 32 && in[p] != 9) return tb_fail(); p = p + 1; }
+    return n;
+}
+
+/* One pass over the text tape. pass==0 collects pools and counts records;
+   pass==1 emits the RECORDS section bytes. */
+static int tb_text_pass(const char *in, int pass, int textlen) {
+    int line, end, next, p, q, op, i, idx, name, unit, gdef, nr;
+    int regs[8], isname[8];
+    unsigned long values[8];
+    int neg[8];
+    const char *shape;
+    line = 0; tb_rec_count = 0; unit = 0; gdef = 0;
+    while (line < textlen && !tb_bad) {
+        end = line; while (end < textlen && in[end] != 10) end = end + 1;
+        next = end + 1;
+        p = line;
+        while (p < end) {
+            if (in[p] == 34) { do { p++; } while (p < end && in[p] != 34); if (p < end) p++; continue; }
+            if (in[p] == 59) { end = p; break; }
+            p = p + 1;
+        }
+        while (end > line && (in[end - 1] == 32 || in[end - 1] == 9 || in[end - 1] == 13)) end = end - 1;
+        p = line; while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
+        if (p == end) { line = next; continue; }
+        tb_rec_count = tb_rec_count + 1;
+        if (end - p >= 6 && tb_wsame(in + p, ".unit", 5) && (in[p + 5] == 32 || in[p + 5] == 9)) {
+            p = p + 6; while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
+            q = tb_token_end(in, p, end);
+            if (tb_rec_count != 1 || q - p != 1 || in[p] != 50 || tb_skip(in, q, end) != end) return tb_fail();
+            unit = 1;
+            if (pass) { if (!tb_emit(6) || !tb_emit_u(2)) return 0; }
+        } else if (end - p >= 7 &&
+                   ((end - p >= 8 && (tb_wsame(in + p, ".global", 7) || tb_wsame(in + p, ".extern", 7)) && (in[p + 7] == 32 || in[p + 7] == 9)) ||
+                    (tb_wsame(in + p, ".gdef", 5) && (in[p + 5] == 32 || in[p + 5] == 9)))) {
+            int rk;
+            rk = in[p + 1] == 103 && in[p + 2] == 108 ? 4 : (in[p + 1] == 101 ? 5 : 7);
+            p = p + (rk == 7 ? 6 : 8);
+            while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
+            q = tb_token_end(in, p, end);
+            i = q; while (i < end && (in[i] == 32 || in[i] == 9)) i = i + 1;
+            if (q == p || i != end) return tb_fail();
+            i = p;
+            while (i < q) {
+                int c = in[i];
+                if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+                    || (i > p && ((c >= 48 && c <= 57) || c == 46 || c == 36)))) return tb_fail();
+                i = i + 1;
+            }
+            name = tb_name_index(in, p, q - p);
+            if (rk == 7) gdef = 1;
+            if (pass) { if (!tb_emit(rk) || !tb_emit_u((unsigned long)name)) return 0; }
+        } else if (end - p >= 5 && tb_wsame(in + p, ".str ", 5)) {
+            p = p + 5; q = tb_token_end(in, p, end);
+            name = tb_name_index(in, p, q - p);
+            p = q; while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
+            idx = tb_literal(in, p, end); if (tb_bad) return 0;
+            i = tb_const_index(idx);
+            if (pass) { if (!tb_emit(1) || !tb_emit_u((unsigned long)name) || !tb_emit_u((unsigned long)i)) return 0; }
+        } else if (end - p >= 5 && tb_wsame(in + p, ".bss ", 5)) {
+            unsigned long v; int nneg;
+            p = p + 5; q = tb_token_end(in, p, end);
+            name = tb_name_index(in, p, q - p);
+            p = tb_skip(in, q, end); q = tb_token_end(in, p, end);
+            tb_number(in, p, q, &v, &nneg);
+            if (tb_bad || nneg || v > 9223372036854775807UL || tb_skip(in, q, end) != end) return tb_fail();
+            if (pass) { if (!tb_emit(2) || !tb_emit_u((unsigned long)name) || !tb_emit_u(v)) return 0; }
+        } else if (in[end - 1] == 58) {
+            name = tb_name_index(in, p, end - p - 1);
+            if (pass) { if (!tb_emit(0) || !tb_emit_u((unsigned long)name)) return 0; }
+        } else {
+            q = tb_token_end(in, p, end);
+            op = 0;
+            while (op < 72) {
+                const char *on = tape_shape_name(op);
+                int oplen = 0;
+                while (on[oplen]) oplen = oplen + 1;
+                if (q - p == oplen && tb_wsame(in + p, on, q - p)) break;
+                op = op + 1;
+            }
+            if (op >= 72) return tb_fail();
+            shape = tape_shape(op);
+            p = q; nr = 0; i = 0;
+            while (shape[i]) {
+                p = tb_skip(in, p, end); q = tb_token_end(in, p, end);
+                if (q <= p) return tb_fail();
+                if (shape[i] == 114) {
+                    if (q - p > 2 && in[p] == 114 && (in[p + 2] == 43 || in[p + 2] == 45)) q = p + 2;
+                    if (q - p != 2 || in[p] != 114 || in[p + 1] < 48 || in[p + 1] > 55) return tb_fail();
+                    regs[nr] = in[p + 1] - 48; nr = nr + 1;
+                } else if (shape[i] == 105) {
+                    tb_number(in, p, q, &values[i], &neg[i]); isname[i] = 0;
+                } else {
+                    isname[i] = 1; values[i] = (unsigned long)tb_name_index(in, p, q - p);
+                }
+                if (tb_bad || i >= 7 || nr > 8) return tb_fail();
+                p = q; i = i + 1;
+            }
+            p = tb_skip(in, p, end);
+            if (p < end && in[p] != 59) return tb_fail();
+            if (pass) {
+                int regcount = 0;
+                if (!tb_emit(3) || !tb_emit(op)) return 0;
+                while (regcount < nr) {
+                    int hi = regcount + 1 < nr ? regs[regcount + 1] : 15;
+                    if (!tb_emit(regs[regcount] | (hi << 4))) return 0;
+                    regcount = regcount + 2;
+                }
+                i = 0;
+                while (shape[i]) {
+                    if (shape[i] == 105) {
+                        if (neg[i]) {
+                            if (!tb_emit(0) || !tb_emit_s(0 - (long)(values[i] - 1) - 1)) return 0;
+                        } else if (values[i] < (1UL << 63)) {
+                            if (!tb_emit(0) || !tb_emit_s((long)values[i])) return 0;
+                        } else {
+                            if (!tb_emit(1) || !tb_emit_u(values[i])) return 0;
+                        }
+                    } else if (shape[i] != 114) {
+                        if (!tb_emit(1) || !tb_emit_u(values[i])) return 0;
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+        line = next;
+    }
+    if (gdef && !unit) return tb_fail();
+    if (pass && unit != tb_minor) return tb_fail();
+    if (!pass) tb_minor = unit;
+    return !tb_bad;
+}
+
+/* Encode text[0..textlen) into a UTAPEBIN buffer. origin 0..6 (0 unknown).
+   Returns the byte length on success (>= 136), 0 on failure. *out is the
+   allocated buffer on success (caller frees with mm_free). */
+int tb_encode(const char *text, long textlen, int origin,
+              unsigned char **out, long *outn) {
+    void *mm_alloc(long);
+    void mm_free(void *);
+    int i, p, at1, at2, at3, end1, end2, nr;
+    unsigned char digest[32];
+    if (!text || textlen < 0 || textlen >= TB_MAXOUT || origin < 0 || origin > 6 || !out || !outn) return 0;
+    *out = 0; *outn = 0;
+    tb_bad = 0; tb_nn = 0; tb_nc = 0; tb_constused = 0; tb_minor = 0; tb_outpos = 0;
+    tb_file = mm_alloc(TB_MAXOUT);
+    tb_constdata = mm_alloc(TB_CONSTCAP);
+    tb_lit = mm_alloc(TB_LITCAP);
+    tb_name_at = mm_alloc((long)TB_MAXPOOL * (long)sizeof(int));
+    tb_name_len = mm_alloc((long)TB_MAXPOOL * (long)sizeof(int));
+    tb_const_at = mm_alloc((long)TB_MAXPOOL * (long)sizeof(int));
+    tb_const_len = mm_alloc((long)TB_MAXPOOL * (long)sizeof(int));
+    if (!tb_file || !tb_constdata || !tb_lit || !tb_name_at || !tb_name_len || !tb_const_at || !tb_const_len) goto bad;
+    if (!tb_text_pass(text, 0, (int)textlen)) goto bad;
+    nr = tb_rec_count;
+    tb_outpos = 64 + 3 * 24;
+    at1 = tb_outpos;
+    if (!tb_emit_u((unsigned long)tb_nn)) goto bad;
+    for (i = 0; i < tb_nn; i++) {
+        if (!tb_emit_u((unsigned long)tb_name_len[i]) || !tb_emit_bytes(text + tb_name_at[i], tb_name_len[i])) goto bad;
+    }
+    end1 = tb_outpos;
+    while (tb_outpos % 8) if (!tb_emit(0)) goto bad;
+    at2 = tb_outpos;
+    if (!tb_emit_u((unsigned long)tb_nc)) goto bad;
+    for (i = 0; i < tb_nc; i++) {
+        if (!tb_emit_u((unsigned long)tb_const_len[i]) || !tb_emit_bytes(tb_constdata + tb_const_at[i], tb_const_len[i])) goto bad;
+    }
+    end2 = tb_outpos;
+    while (tb_outpos % 8) if (!tb_emit(0)) goto bad;
+    at3 = tb_outpos;
+    if (!tb_emit_u((unsigned long)nr)) goto bad;
+    if (!tb_text_pass(text, 1, (int)textlen) || tb_rec_count != nr || tb_bad) goto bad;
+    p = tb_outpos;
+    for (i = 0; i < 64; i++) tb_file[i] = 0;
+    for (i = 0; i < 8; i++) tb_file[i] = "UTAPEBIN"[i];
+    tb_wle(8, 1, 2); tb_wle(10, (unsigned long)tb_minor, 2); tb_wle(12, 1, 2); tb_wle(20, 3, 4); tb_wle(24, 64, 4); tb_wle(60, (unsigned long)origin, 4);
+    tb_wle(64, 1, 2); tb_wle(66, 1, 2); tb_wle(68, (unsigned long)at1, 8); tb_wle(76, (unsigned long)(end1 - at1), 8);
+    tb_wle(84, (unsigned long)tb_nn, 4);
+    tb_wle(88, 2, 2); tb_wle(90, 1, 2); tb_wle(92, (unsigned long)at2, 8); tb_wle(100, (unsigned long)(end2 - at2), 8); tb_wle(108, (unsigned long)tb_nc, 4);
+    tb_wle(112, 3, 2); tb_wle(114, 1, 2); tb_wle(116, (unsigned long)at3, 8); tb_wle(124, (unsigned long)(p - at3), 8); tb_wle(132, (unsigned long)nr, 4);
+    cx_sha256(tb_file + 64, (size_t)(p - 64), digest);
+    for (i = 0; i < 32; i++) tb_file[28 + i] = (char)digest[i];
+    *out = (unsigned char *)tb_file;
+    *outn = (long)p;
+    mm_free(tb_constdata); mm_free(tb_lit); mm_free(tb_name_at); mm_free(tb_name_len); mm_free(tb_const_at); mm_free(tb_const_len);
+    tb_constdata = 0; tb_lit = 0; tb_name_at = 0; tb_name_len = 0; tb_const_at = 0; tb_const_len = 0; tb_file = 0;
+    return (int)p;
+bad:
+    mm_free(tb_file); mm_free(tb_constdata); mm_free(tb_lit); mm_free(tb_name_at); mm_free(tb_name_len); mm_free(tb_const_at); mm_free(tb_const_len);
+    tb_file = 0; tb_constdata = 0; tb_lit = 0; tb_name_at = 0; tb_name_len = 0; tb_const_at = 0; tb_const_len = 0;
+    return 0;
+}
