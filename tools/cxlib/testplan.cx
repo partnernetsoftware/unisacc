@@ -3,10 +3,11 @@
  * parser buffers. Only scalar counts escape. Declared materials stay UNPREPARED
  * until an actual executor explicitly verifies supplied material identities. */
 #pragma unisa module testplan
+#pragma unisa use text.text
 typedef struct {
  int batches;int implemented_batches;int planned_batches;int unprepared_batches;
  int planned_missing_sources;int coverage_rows;int implemented_coverage;
- int unresolved_coverage;int unmapped_unresolved;int executed_batches;
+ int unresolved_coverage;int unmapped_unresolved;int declared_coverage;int executed_batches;
 } tp_summary;
 /* Read-only borrowed views, valid only during their callback. All rows have
  * passed the same complete validation before any callback occurs. Views and
@@ -27,7 +28,7 @@ static int tp_layer(const char *s){return !strcmp(s,"contract")||!strcmp(s,"prod
 static int tp_platform(const char *s,int planned){return !strcmp(s,"lnx/x86_64")||!strcmp(s,"lnx/arm64")||!strcmp(s,"osx/x86_64")||!strcmp(s,"osx/arm64")||!strcmp(s,"win/x86_64")||!strcmp(s,"win/arm64")||(planned&&!strcmp(s,"all-six"));}
 static int tp_budget(const char *s){int n=0;if(!*s||*s=='0')return 0;while(*s){int d=*s++-'0';if(d<0||d>9||n>(55-d)/10)return 0;n=n*10+d;}return n>=1&&n<=55;}
 static int tp_implemented(const char *s){return !strcmp(s,"IMPLEMENTED")||!strcmp(s,"IMPLEMENTED_SEPARATE_BATCH");}
-static int tp_coverage_state(const char *s){return tp_implemented(s)||!strcmp(s,"NOT_READY")||!strcmp(s,"NOT_IMPLEMENTED")||!strcmp(s,"PLANNED");}
+static int tp_coverage_state(const char *s){return tp_implemented(s)||!strcmp(s,"NOT_READY")||!strcmp(s,"NOT_IMPLEMENTED")||!strcmp(s,"PLANNED")||tx_eqz(s,"DECLARED_DEPENDENCY");}
 static int tp_table(char *s,size_t n,const char *header,int cols,char **fields,int limit,int *rows,char *why,size_t cap){
  size_t at,hn=strlen(header),i;int count=0;
  if(!n||n>4194304||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))return tp_bad(why,cap,"table-wire",0,0);
@@ -65,7 +66,7 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
  for(i=0;i<nc;i++){
   char **v=cf+i*5;if(!tp_name(v[0])||!tp_layer(v[1])){tp_bad(why,cap,"coverage-shape",i+1,v[0]);goto done;}if(!tp_coverage_state(v[2])){tp_bad(why,cap,"coverage-state",i+1,v[0]);goto done;}
   for(j=0;j<i;j++)if(!strcmp(v[0],cf[j*5])){tp_bad(why,cap,"duplicate-coverage",i+1,v[0]);goto done;}
-  if(tp_implemented(v[2]))summary.implemented_coverage++;else summary.unresolved_coverage++;
+  if(tp_implemented(v[2]))summary.implemented_coverage++;else if(tx_eqz(v[2],"DECLARED_DEPENDENCY"))summary.declared_coverage++;else summary.unresolved_coverage++;
  }
  for(i=0;i<nb;i++){
   char **v=bf+i*12;int planned=!strcmp(v[1],"PLANNED");char full[5200];struct stat st;
@@ -87,7 +88,7 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
   const char *at=v[10];while(*at){const char *end=strchr(at,',');size_t len=end?(size_t)(end-at):strlen(at);int found=-1;if(!len||len>127){tp_bad(why,cap,"coverage-list",i+1,v[0]);goto done;}for(j=0;j<nc;j++)if(strlen(cf[j*5])==len&&!memcmp(cf[j*5],at,len)){found=j;break;}if(found<0){tp_bad(why,cap,"unknown-coverage",i+1,v[0]);goto done;}if(last[found]==i+1){tp_bad(why,cap,"duplicate-batch-coverage",i+1,v[0]);goto done;}last[found]=i+1;mapped[found]=1;if(!planned)implemented[found]=1;if(!end)break;at=end+1;if(!*at){tp_bad(why,cap,"coverage-list",i+1,v[0]);goto done;}}
   if(planned)summary.planned_batches++;else{summary.implemented_batches++;if(strcmp(v[7],"-"))summary.unprepared_batches++;}
  }
- for(i=0;i<nc;i++){if(tp_implemented(cf[i*5+2])&&!implemented[i]){tp_bad(why,cap,"implemented-coverage-unmapped",i+1,cf[i*5]);goto done;}if(!tp_implemented(cf[i*5+2])&&!mapped[i])summary.unmapped_unresolved++;}
+ for(i=0;i<nc;i++){if(tx_eqz(cf[i*5+2],"DECLARED_DEPENDENCY"))continue;if(tp_implemented(cf[i*5+2])&&!implemented[i]){tp_bad(why,cap,"implemented-coverage-unmapped",i+1,cf[i*5]);goto done;}if(!tp_implemented(cf[i*5+2])&&!mapped[i])summary.unmapped_unresolved++;}
  summary.batches=nb;summary.coverage_rows=nc;*out=summary;rc=0;
  if(emit){for(i=0;i<nb;i++){char **v=bf+i*12;const char *state=!strcmp(v[1],"PLANNED")?"PLANNED":strcmp(v[7],"-")?"UNPREPARED":"NOT_RUN";printf("BATCH\t%s\t%s\timplementation=%s\tlayer=%s\tsource=%s\tsource_state=%s\tmode=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tentry=%s\targs=%s\tcoverage=%s\texpect=%s\n",v[0],state,v[1],v[2],v[3],source_present[i]?"PRESENT":"MISSING",v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11]);}
   for(i=0;i<nc;i++)printf("COVERAGE\t%s\t%s\tmapped=%d\timplemented_batch=%d\toracle=%s\n",cf[i*5],cf[i*5+2],mapped[i],implemented[i],cf[i*5+3]);}
