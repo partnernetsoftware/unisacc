@@ -4,6 +4,7 @@
 #pragma unisa use sys.env
 #pragma unisa use runtime.holdframe
 #pragma unisa use drivelink
+#pragma unisa use drivetapebin
 /* Layouts match cx/driver/cli.cx, compat.cx, and route.cx. Those modules
    are other objects; this file only names their functions. */
 typedef struct {
@@ -145,18 +146,6 @@ static int dv_fail(const char *s) {
     }
     fprintf(stderr, "unisacc: model driver: %s\n", s);
     return 1;
-}
-static int dv_tapebin_sha_bad(const unsigned char *b, long n) {
-    unsigned char dig[32];
-    int i;
-    if (!b || n < 136) return 1;
-    cx_sha256(b + 64, (size_t)(n - 64), dig);
-    i = 0;
-    while (i < 32) {
-        if (dig[i] != b[28 + i]) return 1;
-        i = i + 1;
-    }
-    return 0;
 }
 static int dv_cx(const char *s) {
     int n;
@@ -1336,92 +1325,8 @@ int dv_main(int argc, char **argv) {
                 return 1;
             }
         }
-        if (cxp_tapebin_path(src)) {
-            int tb2_magic(const unsigned char *, int);
-            int tb2_fixed(const unsigned char *, int, int *);
-            int tb2_nsec(const unsigned char *, int, int *);
-            int tb2_origin(const unsigned char *, int, int, int);
-            int tb2_align(int);
-            int tb2_row(const unsigned char *, int, int, int, long long *, long long *, long long *);
-            int tb2_zeros(const unsigned char *, int, int, int);
-            int tb2_extra(int, long long, long long);
-            int tb2_end(int, int);
-            int tb2_text(const unsigned char *, int, int, const int *, const int *, const int *, char **, int *);
-            int origin;
-            int magic;
-            int k;
-            const char *mag;
-            origin = cxp_tapebin_target(tgt);
-            mag = "UTAPEBIN";
-            magic = gotn >= 136 && gotb != 0;
-            k = 0;
-            while (magic && k < 8) {
-                if (gotb[k] != mag[k]) magic = 0;
-                k = k + 1;
-            }
-            int minor;
-            int nsec;
-            int aligned;
-            int end;
-            int i;
-            int bad;
-            int textn;
-            int soff[4];
-            int slen[4];
-            int scnt[4];
-            long long roff;
-            long long rlen;
-            long long rcnt;
-            char *text;
-            minor = 0;
-            nsec = 0;
-            bad = 0;
-            text = 0;
-            textn = 0;
-            /* magic, fixed fields, section count, origin, digest, then
-               every directory row. Records that fail also use the product
-               sentence. Text that passes replaces the bytes and follows
-               the tape route. */
-            if (!origin || !magic || gotn > 33554432L) bad = 1;
-            else if (tb2_magic(gotb, (int)gotn) || tb2_fixed(gotb, (int)gotn, &minor) ||
-                     tb2_nsec(gotb, (int)gotn, &nsec) ||
-                     tb2_origin(gotb, (int)gotn, origin, 0) ||
-                     dv_tapebin_sha_bad(gotb, gotn)) bad = 1;
-            else {
-                end = 64 + 24 * nsec;
-                i = 0;
-                while (i < nsec && !bad) {
-                    aligned = tb2_align(end);
-                    roff = -1;
-                    rlen = -1;
-                    rcnt = -1;
-                    if (aligned < 0 || tb2_row(gotb, (int)gotn, i, aligned, &roff, &rlen, &rcnt) ||
-                        rcnt < 0 || rcnt > gotn || roff > 2147483647LL || rlen > 2147483647LL ||
-                        tb2_zeros(gotb, (int)gotn, end, (int)roff)) bad = 1;
-                    else {
-                        soff[i] = (int)roff;
-                        slen[i] = (int)rlen;
-                        scnt[i] = (int)rcnt;
-                        end = (int)roff + (int)rlen;
-                    }
-                    i = i + 1;
-                }
-                if (!bad && (i != nsec ||
-                             tb2_extra(nsec, nsec == 4 ? rlen : 0, nsec == 4 ? rcnt : 0) ||
-                             tb2_end(end, (int)gotn) ||
-                             tb2_text(gotb, (int)gotn, minor, soff, slen, scnt, &text, &textn)))
-                    bad = 1;
-            }
-            if (bad) {
-                free(text);
-                free(gotb);
-                return dv_fail("invalid tapebin or origin target mismatch");
-            }
-            free(gotb);
-            gotb = (unsigned char *)text;
-            gotn = textn;
-            as_tape = 1;
-        }
+        if (cxp_tapebin_path(src) && dv_tapebin_check(src, tgt, &gotb, &gotn, &as_tape))
+            return dv_fail("invalid tapebin or origin target mismatch");
         sy_setenv("UNISA_CONTAINER", opts.pkg ? opts.pkg : "", opts.pkg && opts.pkg[0] ? 1 : 0);
         if (hs_container(cont, 512, argv[0], preason, 128)) {
             free(gotb);
