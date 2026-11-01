@@ -106,3 +106,21 @@
 - 更稳的次序：先做 A（三源 + 具名拒绝用例），再量 67 单元整程序时间；若超 60s，就按 `rb_phase` 同款对 lnx 也分相，而不是把时限放宽。
 - 方向 B（release-build 改走 entry-build 对象路线）工作量更大，但它绕过 UNITOK2 64 和整程序时间，长期更合理；建议在 0.0.44 的 host import 一起做，不在 0.0.43 收尾阶段切。
 - 现在 C3 五片不阻塞于 MAXU：可以先用 **entry-build 对象路线**出 lnx 片做 C3 证据，五片 whole-o 等 MAXU 落地。
+
+## C44-UNITOK2-CAP-01（新发现，第三层，未落）
+
+- 现象：M4（cxmod 96、链接 96）上 40 个 src 根整程序 `-o` 在 21s 报 `reject: not covered: malformed unit frame`；-cx-plan 显示 40 根展开 67 个单元。
+- 定位：K2 units 网 `exec/parse2/units-result.tsv:4` `["CMPI","unit",64]`，对应 `exec/pipeline/formats.md:259`「LE32 unit count (1..64)」与 `exec/c/PACKAGE.md:253`「validates up to 64 frames」。与 `CXM_MAXU`（cxmod 模块图）是两层。
+- 实证边界（M4）：63 模块 rc0、64 模块 rc0、65 模块 rc1 `malformed unit frame`；96/97 输入是 drive 的 `too many sources`（另一层）。
+- 代价：该网编进模型；改它必须走「事实表 → 生成器 → 表 → 模型重建」慢车道（`exec/build/gen.py parse2/units`，参考实现已归档），不是手改 tsv 就能生效。
+- 影响：`release-build` 的 whole-o 路线（osx/win 五片）在 67 单元下必然失败；lnx 可绕开（见下）。
+
+## 五片路线裁定（2026-11-01）
+
+| 片 | 路线 | 依据 |
+|---|---|---|
+| lnx/x86_64、lnx/arm64 | **B'：`rb_is_objects` 对 lnx 返回 true**，走既有 `tools/entry-build.cx`（40 keys + 27 L0 = 67 对象 ≤ 96 链接输入） | M4/M5 两代逐字节已证明该路线成立；entry-build 对 lnx/* 的 `-funit` 实测 rc0 |
+| osx/x86_64、osx/arm64、win/x86_64 | 暂 **BLOCKED** | `-funit --target osx|win` 实测 `NOT_IMPLEMENTED object`，不能走对象路线；whole-o 又卡 UNITOK2 64 与 60s |
+
+- B' 还需一个前提：constructor 必须同时具备「链接 96 + cxmod 96」。当前 `release-build` 把 `ROOT/unisacc.com`（83343ec1，双 64）复制进快照当第一代构造器，所以 **必须先安装 M4**（或让 release-build 支持显式 constructor 覆盖），否则 lnx 对象路线在链接阶段就 64 上限失败。
+- 顺序建议：C3 先安装 M4（两代已同）→ 开 `rb_is_objects(lnx/*)=true` → 出 lnx 两片 → osx/win 等 `C44-UNITOK2-CAP-01`。不放宽 60s 时限。
