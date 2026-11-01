@@ -1,0 +1,94 @@
+/* tests/user-malloc-null.cx -- res.mem.user-malloc-null (R5 / C44-MALLOC-01).
+ *
+ *   sh ./unisacc.com tests/user-malloc-null.cx
+ *
+ * A user program under -run asks for a block far larger than the address-space
+ * limit. The allocator must hand back NULL, the program must observe it, print
+ * its own marker, and exit with its own code -- the runtime must not turn the
+ * failed map into a pointer and die. Before C44-MALLOC-01 the Linux __mmap gate
+ * returned -ENOMEM (-12) and include/stdlib.h _unisa_map accepted it as a valid
+ * address, so the process died on the first large allocation instead.
+ *
+ * Unlimited is the baseline: the same request succeeds and the program prints
+ * its success marker.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], com[4400], bound[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("user-malloc-null: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    assertions++;
+    if (ok) sy_printf("PASS\tuser-malloc-null.%s\n", name);
+    else { failures++; sy_printf("FAIL\tuser-malloc-null.%s\n", name); }
+}
+static np_result go(const char *limit, char **args) {
+    char *v[16], script[96]; int n = 0, k; char why[256]; np_result r;
+    v[n++] = bound; v[n++] = "40"; v[n++] = "sh";
+    if (limit) {
+        if (cx_fmt(script, sizeof script, "ulimit %s; exec sh \"$0\" \"$@\"", limit)) die("script");
+        v[n++] = "-c"; v[n++] = script;
+    }
+    v[n++] = com;
+    for (k = 0; args[k] && n < 15; k++) v[n++] = args[k];
+    v[n] = 0;
+    /* Run from the repository root: -run resolves the runtime and module
+       closure relative to the cwd, and from a scratch directory it takes a
+       different route that does not carry the user program's own allocator.
+       The source path stays absolute, so the fixture still lives in work. */
+    if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
+    return r;
+}
+static int has(const char *s, long n, const char *w) {
+    if (!s || n <= 0) return 0;
+    return tx_find(s, n, w, tx_len(w, 64)) >= 0;
+}
+
+int main(void) {
+    char src[4600];
+    char *big[3];
+    np_result r;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/user-malloc-null-batch", root)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(src, sizeof src, "%s/big.c", work)) die("src");
+    /* 4 GiB: above any limit this test imposes, below the allocator's own
+       TB-style caps. The program prints NULL then its own exit code 3. */
+    {
+        const char *s =
+            "int main(void){void *p=malloc(4294967296UL);"
+            "if(p){printf(\"GOT-PTR\\n\");return 4;}"
+            "printf(\"NULL-SEEN\\n\");return 3;}\n";
+        long n = 0; while (s[n]) n = n + 1;
+        if (cx_write(src, s, (size_t)n)) die("write");
+    }
+
+    big[0] = "-run"; big[1] = src; big[2] = 0;
+
+    /* Baseline: no limit, the request succeeds. */
+    r = go(0, big);
+    ck(r.rc == 4 && has(r.out, r.outn, "GOT-PTR"), "unlimited-succeeds");
+    np_free(&r);
+
+    /* Under a limit far below 4 GiB the allocator returns NULL. The program
+       must see it and return 3; a signal death (rc >= 128) is the old bug. */
+    r = go("-v 307200", big);
+    ck(r.rc == 3, "limited-rc3");
+    ck(has(r.out, r.outn, "NULL-SEEN"), "limited-null-seen");
+    ck(!has(r.out, r.outn, "GOT-PTR"), "limited-no-pointer");
+    np_free(&r);
+
+    sy_printf("USER_MALLOC_NULL\tassertions=%d\tfailures=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
