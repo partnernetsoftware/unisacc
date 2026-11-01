@@ -1,0 +1,45 @@
+#pragma unisa module rescache
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* Resource content cache: repeat fetches of an immutable package resource
+   (\0hdr/NAME etc.) skip the pm_res scan. Upper layer: no #include, no libc;
+   allocation is mm_*. The key is deep-copied (the caller's key buffer is
+   reused every round). The value p is borrowed (P3 package pointer, owned=0)
+   or owned (host-allocated, owned=1); owned entries are not freed here --
+   the host owns their lifetime, only the key copy is cache-owned. */
+typedef struct { unsigned char *key; int kn; const unsigned char *p; int n; int owned; } RsEntry;
+static RsEntry *rs_e;
+static int rs_n, rs_cap;
+
+int rescache_get(const unsigned char *key, int n, const unsigned char **bytes, int *len) {
+    int i;
+    if (!key || n <= 0 || !bytes || !len) return 0;
+    for (i = 0; i < rs_n; i++)
+        if (rs_e[i].kn == n && mm_same(rs_e[i].key, key, (long)n)) {
+            *bytes = rs_e[i].p;
+            *len = rs_e[i].n;
+            return 1;
+        }
+    return 0;
+}
+
+int rescache_put(const unsigned char *key, int n, const unsigned char *val, int len, int owned) {
+    unsigned char *k;
+    if (!key || n <= 0 || !val || len < 0) return 1;
+    if (rs_n == rs_cap) {
+        long nc = rs_cap ? (long)rs_cap * 2 : 16;
+        RsEntry *g = mm_grow(rs_e, nc * (long)sizeof(RsEntry));
+        if (!g) return 1;
+        rs_e = g;
+        rs_cap = (int)nc;
+    }
+    k = mm_alloc((long)n);
+    if (!k || mm_copy(k, (long)n, key, (long)n)) { mm_free(k); return 1; }
+    rs_e[rs_n].key = k;
+    rs_e[rs_n].kn = n;
+    rs_e[rs_n].p = val;
+    rs_e[rs_n].n = len;
+    rs_e[rs_n].owned = owned;
+    rs_n = rs_n + 1;
+    return 0;
+}
