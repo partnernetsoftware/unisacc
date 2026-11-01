@@ -24,8 +24,19 @@
    records wall time and the slowest RR_TIME line (inference, inflate, or other). */
 #pragma unisa use sys.process
 #pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.poll
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use runtime.packagefooter
 #pragma unisa use sys.time
+
+/* Compile parallelism (EB_JOBS children at once). Plan and link stay serial.
+   The curve measured 4.16x at 8; 16 saturates and fights the link for cores. */
+#define EB_JOBS 8
+#define EB_JOBS_MAX 16
 
 static char eb_rr_env[] = "UNISACC_RR_TIME=1";
 
@@ -245,6 +256,152 @@ static int eb_compile(const char *bound, const char *ctor, int via_sh, const cha
     return eb_run(v, cwd, 58, dt, why, wl, errpath);
 }
 
+/* One parallel compile job: its argv (bound 55 [sh] ctor opt -c -b triple -funit
+   -o obj src), the rr path for its stderr, and where to record dt/sha/bytes. */
+typedef struct eb_job {
+    const char *opt;
+    const char *src;
+    const char *obj;
+    const char *rr;
+    const char *key;
+    long long *dt;
+    char *sha_out;
+    long *bytes_out;
+} eb_job;
+
+/* Run up to EB_JOBS children at once; each child is still `bound 55`. Collect
+   each stderr into its rr, sha the object, and record the receipt line in the
+   parent. On any failure, group-kill every live child (sy_kill) and name it. */
+static int eb_compile_parallel(eb_job *jobs, int njobs, const char *bound, const char *ctor,
+                               int via_sh, const char *triple, const char *cwd,
+                               char *why, int wl, FILE *rf, const char *line_extra) {
+    int pid[EB_JOBS_MAX];
+    int fd[EB_JOBS_MAX];
+    int slot_of[EB_JOBS_MAX];
+    long long t0[EB_JOBS_MAX];
+    char *errb[EB_JOBS_MAX];
+    long errn[EB_JOBS_MAX], errcap[EB_JOBS_MAX];
+    int running;
+    int next;
+    int done;
+    int i;
+    int j;
+    if (njobs < 0) return -1;
+    if (njobs == 0) return 0;
+    for (i = 0; i < EB_JOBS_MAX; i++) { pid[i] = -1; fd[i] = -1; errb[i] = 0; errn[i] = 0; errcap[i] = 0; }
+    running = 0;
+    next = 0;
+    done = 0;
+    while (done < njobs) {
+        /* spawn until the cap, then reap one round */
+        while (running < EB_JOBS && next < njobs) {
+            int s = -1;
+            int n = 0;
+            char *v[16];
+            for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] < 0) { s = i; break; }
+            if (s < 0) eb_die("slot");
+            v[n++] = (char *)bound;
+            v[n++] = "55";
+            if (via_sh) v[n++] = "sh";
+            v[n++] = (char *)ctor;
+            v[n++] = (char *)jobs[next].opt;
+            v[n++] = "-c";
+            v[n++] = "-b";
+            v[n++] = (char *)triple;
+            v[n++] = "-funit";
+            v[n++] = "-o";
+            v[n++] = (char *)jobs[next].obj;
+            v[n++] = (char *)jobs[next].src;
+            v[n] = 0;
+            {
+                int ofd = -1;
+                int efd = -1;
+                int pr = sy_spawn_pipe(v, cwd, SY_SPAWN_NO_PATH | SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+                if (pr < 0) { why[0] = 0; return -1; }
+                pid[s] = pr;
+                sy_close(ofd);   /* stdout is dropped */
+                fd[s] = efd;
+                if (sy_fd_nonblock(fd[s], 1)) return -1;
+            }
+            slot_of[s] = next;
+            t0[s] = eb_ns();
+            errn[s] = 0;
+            next = next + 1;
+            running = running + 1;
+        }
+        /* poll all live children */
+        {
+            sy_pollfd_t pf[EB_JOBS_MAX];
+            int np = 0;
+            int map[EB_JOBS_MAX];
+            for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) { pf[np].fd = fd[i]; pf[np].events = 1; pf[np].revents = 0; map[np] = i; np = np + 1; }
+            if (sy_poll(pf, np, 100) < 0) { for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) sy_kill(pid[i]); return -1; }
+            for (j = 0; j < np; j++) {
+                int s = map[j];
+                if (pf[j].revents & 1) {
+                    char tmp[4096];
+                    long k = sy_read(fd[s], tmp, 4096);
+                    if (k > 0) {
+                        if (errn[s] + k + 1 > errcap[s]) {
+                            long nc = errcap[s] ? errcap[s] * 2 : 4096;
+                            char *g = mm_alloc(nc);
+                            if (!g) { for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) sy_kill(pid[i]); return -1; }
+                            if (errn[s]) mm_copy(g, errb[s], errn[s]);
+                            mm_free(errb[s]);
+                            errb[s] = g;
+                            errcap[s] = nc;
+                        }
+                        mm_copy(errb[s] + errn[s], tmp, k);
+                        errn[s] = errn[s] + k;
+                    }
+                }
+            }
+        }
+        /* reap any finished child, record it, spawn the next */
+        for (i = 0; i < EB_JOBS_MAX; i++) {
+            int ex = 0, code = 0;
+            if (pid[i] < 0) continue;
+            ex = 0;
+            if (sy_wait_status(pid[i], 1, &ex, &code, 0) < 0) continue;
+            if (!ex) continue;
+            {
+                int s = i;
+                int job = slot_of[s];
+                long long dt = eb_ns() - t0[s];
+                FILE *ef;
+                if (jobs[job].dt) *(jobs[job].dt) = dt;
+                if (errb[s] && errn[s]) {
+                    ef = fopen(jobs[job].rr, "wb");
+                    if (ef) { fwrite(errb[s], 1, (size_t)errn[s], ef); fclose(ef); }
+                }
+                mm_free(errb[s]);
+                errb[s] = 0;
+                errn[s] = 0;
+                errcap[s] = 0;
+                sy_close(fd[s]);
+                fd[s] = -1;
+                pid[s] = -1;
+                running = running - 1;
+                done = done + 1;
+                if (code) {
+                    if (errb[s]) { }
+                    for (j = 0; j < EB_JOBS_MAX; j++) if (pid[j] >= 0) sy_kill(pid[j]);
+                    {
+                        char nm[64];
+                        cx_fmt(nm, sizeof nm, "%s", jobs[job].key);
+                        eb_fail_close(rf, nm, jobs[job].rr, code, dt, why);
+                    }
+                    return 1;
+                }
+                eb_sha(jobs[job].obj, jobs[job].sha_out, jobs[job].bytes_out);
+                eb_line_slow(rf, jobs[job].key, jobs[job].sha_out, *(jobs[job].bytes_out), dt, jobs[job].rr, line_extra);
+                if (fflush(rf)) eb_die("receipt");
+            }
+        }
+    }
+    return 0;
+}
+
 static int eb_link(const char *bound, const char *ctor, int via_sh, const char *triple, char **objs, int nobj, const char *elf, const char *cwd, const char *errpath, long long *dt, char *why, int wl) {
     char *v[160];
     int n;
@@ -376,7 +533,7 @@ int main(int argc, char **argv) {
     long nf, nc, np, nk, ncl;
     long poff, plen;
     long long nss[EB_OBJ];
-    long long tl, ts;
+    long long tl, ts, tpar_wall;
     int via_sh, rc, i, j, na, o1_drivers, link_only, only_n, w, a, found, k, target_set;
     FILE *rf;
     target = "lnx/x86_64";
@@ -508,23 +665,34 @@ int main(int argc, char **argv) {
         fprintf(rf, "object_level\tmode=o1-drivers\tdrive.o=-O1\thost.o=-O1\tdriveface.o=-O1\tdriveroute.o=-O1\tcxmod.o=-O1\ttapegate.o=-O1\tother=-O2\ttarget=%s\n", target);
     else
         fprintf(rf, "object_level\tmode=default\tall=-O2\ttarget=%s\n", target);
-    i = 0;
-    while (i < EB_OBJ) {
-        if (link_only || !eb_wanted(keys[i], only_keys, only_n)) {
-            nss[i] = 0;
+    tpar_wall = eb_ns();
+    {
+        eb_job jobs[EB_OBJ];
+        int nj = 0;
+        i = 0;
+        while (i < EB_OBJ) {
+            if (link_only || !eb_wanted(keys[i], only_keys, only_n)) {
+                nss[i] = 0;
+                i = i + 1;
+                continue;
+            }
+            jobs[nj].opt = eb_opt_for(keys[i], o1_drivers);
+            jobs[nj].src = srcs_b[i];
+            jobs[nj].obj = objs_b[i];
+            jobs[nj].rr = rrs_b[i];
+            jobs[nj].key = keys[i];
+            jobs[nj].dt = &nss[i];
+            jobs[nj].sha_out = shas[i];
+            jobs[nj].bytes_out = &nbytes[i];
+            nj = nj + 1;
             i = i + 1;
-            continue;
         }
-        why[0] = 0;
-        rc = eb_compile(bound, ctor, via_sh, eb_opt_for(keys[i], o1_drivers), target, srcs_b[i], objs_b[i], root, rrs_b[i], &nss[i], why, (int)sizeof why);
-        if (rc) {
-            eb_fail_close(rf, keys[i], rrs_b[i], rc, nss[i], why);
-            return 1;
+        if (nj) {
+            why[0] = 0;
+            if (eb_compile_parallel(jobs, nj, bound, ctor, via_sh, target, root, why, (int)sizeof why, rf, 0)) {
+                return 1;
+            }
         }
-        eb_sha(objs_b[i], shas[i], &nbytes[i]);
-        eb_line_slow(rf, keys[i], shas[i], nbytes[i], nss[i], rrs_b[i], 0);
-        if (fflush(rf)) eb_die("receipt");
-        i = i + 1;
     }
     ncl = 0;
     if (!only_n) {
@@ -591,19 +759,31 @@ int main(int argc, char **argv) {
             }
             i = i + 1;
         }
-        j = 0;
-        while (j < ncl) {
-            why[0] = 0;
-            rc = eb_compile(bound, ctor, via_sh, "-O2", target, eb_csrc[j], eb_cobj[j], root, eb_crr[j], &eb_cns[j], why, (int)sizeof why);
-            if (rc) {
-                eb_fail_close(rf, eb_ckey[j], eb_crr[j], rc, eb_cns[j], why);
-                return 1;
+        {
+            eb_job cjobs[EB_MAXC];
+            int cnj = 0;
+            j = 0;
+            while (j < ncl) {
+                cjobs[cnj].opt = "-O2";
+                cjobs[cnj].src = eb_csrc[j];
+                cjobs[cnj].obj = eb_cobj[j];
+                cjobs[cnj].rr = eb_crr[j];
+                cjobs[cnj].key = eb_ckey[j];
+                cjobs[cnj].dt = &eb_cns[j];
+                cjobs[cnj].sha_out = eb_csha[j];
+                cjobs[cnj].bytes_out = &eb_cbytes[j];
+                cnj = cnj + 1;
+                j = j + 1;
             }
-            eb_sha(eb_cobj[j], eb_csha[j], &eb_cbytes[j]);
-            eb_line_slow(rf, eb_ckey[j], eb_csha[j], eb_cbytes[j], eb_cns[j], eb_crr[j], eb_csrc[j]);
-            j = j + 1;
+            if (cnj) {
+                why[0] = 0;
+                if (eb_compile_parallel(cjobs, cnj, bound, ctor, via_sh, target, root, why, (int)sizeof why, rf, 0)) {
+                    return 1;
+                }
+            }
         }
     }
+    tpar_wall = eb_ns() - tpar_wall;
     if (!only_n) {
         na = 0;
         i = 0;
@@ -623,6 +803,7 @@ int main(int argc, char **argv) {
         eb_line_slow(rf, "entry.elf", hf, nf, tl, rr_link, 0);
         eb_line_slow(rf, "candidate", hc, nc, ts, 0, 0);
     }
+    fprintf(rf, "ENTRY_BUILD_PARALLEL\tjobs=%d\twall_ns=%lld\n", EB_JOBS, tpar_wall);
     if (fclose(rf)) eb_die("receipt close");
     if (only_n) printf("entry-build objects=%d\n", only_n);
     else printf("entry-build candidate=%s bytes=%ld\n", hc, nc);
