@@ -1,793 +1,290 @@
-# unisacc —— 当前状态、架构与路线
+# unisacc —— 产品与项目总览
 
-> prd 只写**当前与将来**；发布身份与过程记录在 [历史索引](archive/prd-release-and-development-history-20261001.md)。条款全文在 [spec.md](spec.md)（代码注释引用的 `[S-9]`、`[W-16]` 等编号都在那里，只增不改）；未排期构想见§5，旧稿在 [archive/plans/ideas.md](archive/plans/ideas.md)；已发布版本的计划、叙事与证据在 [archive/](archive/)；目录归属见 [ARCHITECTURE.md](ARCHITECTURE.md)。新知识和决定先写进这里再做别的。
-
-## 当前导航
-
-- **[概念与术语](#0-概念与术语先读歧义以本节为准)**：§0，流 / 网 / 段 / 阶段四个词各只有一个意思；六条常见误解逐条对照。
-- **[流/网合同三表与可核验进度](#flow-net-contracts)**：七流、十八网、关系表及是否封存；有封不等于已冻。
-- **[思维树](#work-tree) → [记忆宫殿](#memory-palace)**：先取目标、当前节点、事实与下一动作。
-- **[已实现能力速查](#implemented-usage)**：默认动态执行、tape 输入、六目标镜像、`.cx` 依赖计划。
-- [当前版本与有效计划](#current-plans) · [当前架构](#pipeline-design)
-- [路线](#5-路线) · [未解决问题](#6-未解决问题) · [归档索引](#7-归档索引)
-- [0.1.x：其他 C 编译器接入 `.cx`](#53-01x其他-c-编译器接入-cx)
-- **[cx 模式](docs/cx/prd.md)**：`gcc_cx.com` 与 `clang_cx.com` 是 APE 六格。现行阅读含宿主 `-o`、模块 lint、包清单与 CXIF v0。
-- **[`use` 符号级导入 + 别名](plans/cx-use-alias-reexport.md)**：`use NAME::sym as alias` 消解同名符号冲突，对齐 Rust `use a::b as c`；三源一致（plan.cx / src/cxmod.c / cxmod.cx），gcc_cx+clang_cx 验证。
-- **[cx 树总索引](cx/prd.md)**：`#pragma unisa` 扩展（module/use 三粒度）与底层/上层两棵 cx 树的分层铁律，及各子目录 README 入口。对外条款 [`cx/spec.md`](cx/spec.md)。
-- **[cx 分层与底层/上层重构](plans/cx-layers.md)**：L0 `cx/sys`·`cx/mem`·`cx/text` 对接 libc/POSIX，L1 去裸 libc，Rust 式 Vec/String/所有权（`mem.grow`、`text.build`）、带界 z-string、`cxraw` 棘轮。
-- **[论文五线](research/README.md)**：A 流网换逻辑；B＝`ujs/`；C 管道方法；**D＝`.cx` 模块化＋内存安全**；E 系统构表。CX 叙事归 D，不塞进 A。
-
-<a id="implemented-usage"></a>
-
-## 已实现能力速查
-
-下表是现有产品入口，不是待研究路线。开始工具开发、替代脚本或派发子代理前，先按这里选择现成用法；需要核对的是具体输入的结果与覆盖边界，不重复研究这些入口是否存在。
-
-| 动作 | 现成用法 | 说明与既有依据 |
-|---|---|---|
-| 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认就是 `-run`；`.c` 同样适用。见本篇§3.11、[README 用法](README.md)及[`.cx` 草案](docs/cx-spec-draft.md)。 |
-| 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法；日常推进直接执行源码。 |
-| 从 tape／tapebin 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口。支持域及具名拒绝仍生效；见 [README](README.md)、[驱动](archive/reference-c/exec/c/compiler.c)及[当前优化Tape合同](tests/optimization.cx)。 |
-| 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标为 `lnx`／`osx`／`win` × `x86_64`／`arm64`；跨目标写出与目标机器原生执行分别记证。 |
-| 查模块层向（编号层直接 use） | `sh ./unisacc.com tools/check-cx-layers.cx` | 另印 `CX_LAYERS_SCOPE`，声明 `coverage=manifest-only symlinks=UNKNOWN shard_body_verified=0`；软链/tracked 对账属 B。 只查编号层 L0–L3 的直接 `use`；编号层向上边按名拒绝（文件:行 + 目标 realpath），未解析只放行 `tests/cxlayers-unresolved.tsv` 五条精确行，分项加总必须等于直接边；`cx/cx0`、`cx/workspace`、`cx/crypto`、`cx/<file>.cx` 与 CX-S 外目录只报 UNKNOWN，不是全仓分层资格。设计见 [分层盘点](plans/cx-layers-inventory-2026-10-31.md)。当前 audit 在 `up=0`、`failed=0`、四个 `undecided_*` 全为 0 时 rc0，`cx-layers` 批次按 rc0 PASS；`AMB/OUT` 仍只报 UNKNOWN，B 的软链/tracked 对账仍未完成，rc0 不授予全仓分层资格。历史未完成说明见同候选证据更新。 |
-| 查看 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 复用现有模块入口与[当前模块ABI用例](tests/library-abi.cx)，不另造模块扫描器。模块循环（`a→b→a` 或自循环）硬拒绝，报 `module cycle`（Rust mod-graph 规则，spec §3）；命名空间冲突与循环拒绝的验收锁定见 [tests/cx-namespace.cx](tests/cx-namespace.cx)。 |
-| 用系统 GCC／Clang 把 `.cx` 编成普通可执行文件 | `sh ./gcc_cx.com FILE.cx -o OUT`；Clang 用 `sh ./clang_cx.com`。Windows 上是 `gcc_cx.com FILE.cx -o OUT` | PATH 上的 gcc 或 clang 由 `tools/build-cxcc-host.cx` 在该机链出驱动，不入库。Linux 与 OSX 用 `sh ./gcc_cx.com`；Windows 的 `gcc_cx.com` 是本机程序。本机只跑过 Linux。不调用 `unisacc.com`。抹掉首行 `#!`。无 `use` 时一次执行系统 `gcc` 或 `clang -std=c99 -x c -include include/cx.h`；没有后续非选项输入时不追加 `-x none`。有 `#pragma unisa use` 时在驱动进程里按 `src/cxmod.c` 展开，再按每个单元编译链接；支持 `use NAME::sym as alias` 符号级导入 + 别名（消解同名符号冲突，见 [plans/cx-use-alias-reexport.md](plans/cx-use-alias-reexport.md)）。`-run` 尚未做。`gcc_cx.com` 1606288 字节，`clang_cx.com` 1606304 字节，是六格 APE。本机这次构建跑过 Linux x86-64 那一格；其余四份切片只写出。进程 API 是按需模块 `tools/cxproc.cx`。不授予已检查身份。见 §5.3。 |
-| 拒新的模块 `#include` | `sh ./unisacc.com -run tests/cxinclude.cx -- --check` | 模块 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`--write` 遇到新行或更高计数就拒绝落盘。`include/` 与 `tools/cxcc-hostinc/` 仍可用 `#include`。见 [plans/cx-include-lint.md](plans/cx-include-lint.md)。 |
-| 上层禁 libc/POSIX（全名单） | `sh ./unisacc.com tests/cxlibc.cx -- --check`；明细 `sh ./unisacc.com tools/symindex.cx -- external [--names] (--tracked｜FILE...)` | 名单不手写：调用名在任何 .cx 都没有定义时，按前导 `include/cx-flat.h` 分类。前导里有定义、原型或宏的记 libc，都没有的记 host，`_`／`cx_` 开头的记 runtime（暂允许，只计数），va_start、offsetof 这类记 lang（不计）。每个文件 libc+host 计一个数。`tests/cxlibc.tsv` 每行都是债，只降不升；新文件必须为 0；`--write` 遇到超基线或缺行就拒绝。豁免 `tests/cxraw-layers.tsv`、`include/`、`tools/cxcc-hostinc/`，不扫 archive/、ujs/；apps/csih 的行记为 csih 的债。2026-10-30 初始：722 个文件、23462 次，其中 8954 次不在 cxraw 的 70 名单里。见 [plans/cxlibc-2026-10-30.md](plans/cxlibc-2026-10-30.md)。 |
-| 查调用点（全仓一次） | `sh ./unisacc.com tools/refactor.cx -- sites NAME[,NAME...] --tracked`（或给文件列表） | 跳过注释与字面量，嵌套调用也列出，输出 `FILE:LINE<TAB>调用`；全仓 3 个名字约 5 秒。用它代替成百次手工 grep。检查：batch `refactor-tool`。 |
-| 符号索引（查定义、调用点、use 闭包、漏 use） | `sh ./unisacc.com tools/symindex.cx -- (update [--verify] \| def NAME \| calls NAME[,NAME...] [--tracked] \| uses FILE \| users FILE \| undeclared (--tracked \| FILE...) \| dump FILE)` | 每个跟踪 `.cx` 的事实按内容 sha256 存到 `out/symindex/v1/`，先用 lstat 的 size/mtime(秒)/ino/dev 预筛。冷建约 2.4 秒，无改动查询约 250 ms，改一个文件只重解析这一个。`calls` 与 `refactor.cx sites` 结果相同。`undeclared` 找经中间模块才可见的调用，可变参数或返回 double 的标 DANGER。不信时间戳就用 `update --verify`。检查：batch `symindex-tool`。见 [plans/symindex-design-2026-10-30.md](plans/symindex-design-2026-10-30.md)。 |
-| 批量机械改写 | `refactor.cx -- find [--auto] RULES FILE... > C.tsv`，再 `refactor.cx -- apply C.tsv JOBS [--range A N] 'CHECK {file}'` | 规则 TSV 见 `tools/refactor/*.tsv`（列 id call prefix argc template use class [context [where]]）。每个文件改前跑两次检查、改后一次，输出不同即逐字节还原；检查常用 `sh ./unisacc.com -c -b lnx/x86_64 {file} -o /dev/null`，不能 `-c` 的用 `-o` 构建或 `--verify-from tests/batches.tsv`。`ujs/ apps/csih/ archive/ kernel/ src/ cx/` 默认保留不动，车道主人用 `REFACTOR_ALLOW=cx/driver/:src/` 打开自己的路径（ujs/、archive/ 始终关闭）。strcmp 直接改成 tx_eqz 的规则在 `tools/refactor/strcmp-eqz.tsv`；libc 堆调用改走 mem.heap 的规则在 `tools/refactor/heap.tsv`（free 判 safe；malloc、realloc 遇到 0 字节时语义不同，判 review）。`find --auto-review` 连 review 行也接受，由调用方自己验证（例如做一次候选构建）。见 [plans/refactor-tool-2026-10-30.md](plans/refactor-tool-2026-10-30.md)。 |
-| 多轮批量改写（一次一轮，可续跑） | `refactor.cx -- sweep RULES JOBS (FILE... \| --tracked) -- 'CHECK {file}'` | find --auto 加 apply 合成一步，整次调用不超过 60 秒；SKIP 和 REVERT 的文件记进 `out/refactor-verify/skip-<规则>.txt`，不再重试。退出 3 表示还有剩余，同一条命令再跑一遍；退出 0 表示做完；退出 1 表示有回退。取代手写的 shell 循环驱动。 |
-| 改名（标识符，全仓） | `refactor.cx -- rename [--auto] OLD NEW (FILE... \| --tracked) > C.tsv`，再 `apply` 同上 | 定义、函数指针、调用、类型、宏里的 OLD 都改；注释、字符串、更长的标识符不动；保留路径判 skip。行与 find 同格式，apply 照样逐文件核验并可还原。 |
-| 按行段替换（断言两端） | `sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT` | 首末行前缀不符就拒绝、不写盘；适合搬移整段。 |
-| 改模块路径（搬目录后改引用） | `sh ./unisacc.com tools/use-path.cx -- OLD NEW [FILE...\|--tracked]` | 只改 `#pragma unisa use` 行的模块名，保留 `::sym as alias` 后缀；注释与字面量不动，非规范间距（`#pragma unisa  use`）拒绝且不写盘。`core.kernel`→`sys.kernel` 这类搬迁引用一次改完。检查：batch `use-path`。 |
-| 查某目标不能 lower 的系统调用／ccw 桩 | `sh ./unisacc.com tools/tape-gap.cx -- TAPE TARGET` | 一遍对 `exec/facts/lower-abi.tsv` 的 `@abi` 行，列出无行或 selected 0 的 `.sys` op 与 `__ccw_` 标号；退出 1 表示有缺口。检查：batch `tape-gap-tool`。 |
-| 共享文件里哪些改动不是我的 | `sh ./unisacc.com tools/own-diff.cx -- [--emit OUT] [--base F] FILE KEY...` | 相对 HEAD 的增删行里，不含任何 KEY 的列为 FOREIGN，有就退出 1；`--emit` 写出"HEAD 加上我的改动"。检查：batch `own-diff-tool`。 |
-| 只提交自己的文件和自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...` | 在私有 index 里提交，不碰别人暂存的条目，别人追加的行留在工作区；提交后只在共享 index 无人暂存该路径时同步条目。用于 tests/batches.tsv、tests/coverage.tsv、prd.md 这类多人同改的文件。 |
-| 登记一个检查为测试批次 | `sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "覆盖说明" "文件" [LAYER]` | 追加 batches／coverage 各一行、跑 `--list` 与 `run-batch`；失败只撤回自己追加的两行。已有 ID、缺文件、空 MARKER、字段含 TAB 直接拒绝（退出 2）。检查：batch `register-tool`。 |
-| 由事实表生成七流正式名 | `sh ./unisacc.com tools/stream-gen.cx -- --check`；写下用 `--write` | 读 `exec/pipeline/image-stages.tsv` 的 `official` 列，生成 `cx/compiler/streamname.cx`。`--check` 对照字节，不一致退出 1，不写盘。`--write` 只写这一份。`--write-src` 拒绝，`src/stream.cx` 等安装后再生成。检查：batch `cx-stream-name`。 |
-| 由金表生成十八网名字 | `sh ./unisacc.com tools/net-gen.cx -- --check`；写下用 `--write` | 顺序读 `exec/pipeline/gold-stages.tsv`，并核对 `weights/gold/名字.tsv` 首行是 gold-export 出来的。生成 `cx/compiler/netname.cx`。`--check` 对照字节，不一致退出 1，不写盘。`--write` 只写这一份。`--write-src` 拒绝，`src/network.cx` 等安装后再生成。lexcls 和 lexword 不在这 18 个里。检查：batch `cx-net-name`。 |
-| 看某个域还差什么（汇总批次） | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN`（DOMAIN 是 tests/DOMAIN-domain-matrix.tsv 的名字，比如 stream-e3、ri、hosts） | 逐格读矩阵：必需格的状态是 COVERED_LOCAL、OBSERVED、DECLARED_DEPENDENCY 算满足，MISSING、NEEDS_PRODUCT_CHANGE、NEEDS_FOREIGN_HOST、BLOCKED 都是开着的，每个开着的格印一行 `OPEN`，最后一行 `FULL_DOMAIN`，开着的数为 0 才退出 0。19 个 `full-<域>` 批次就是它（原来是 PLANNED、NOT_READY，现在 IMPLEMENTED）：这些批次在所有必需格都盖上之前会失败，这正是汇总器要的闸。豁免的格（required=no）不计。检查：batch `full-domain-check`。 |
-| 普查：已装产品上每个无材料批次实跑一遍，找被旧行为钉死的红批次 | `sh ./unisacc.com tools/census.cx -- $PWD $PWD/out/census [--seconds N] [--max K] [--only ID,..] [--redo ID,..]`；看结果 `... --report` | 只在已装产品上逐个跑 IMPLEMENTED lnx/x86_64 且无材料声明的批次（一次一个，各自用批次预算），可续跑（`results.tsv` 记 ID/状态/退出码/毫秒，非 PASS 的头 4 KiB 写进 `log/ID.log`）；有材料声明的只计数。这是找回归的普查，不是资格：PASS 不缓存、不代表发布，资格仍走 all-waves + all-aggregate。2026-10-31 首次普查发现 ri-image-single/multi/pem 在 fc1d4513 上红。 |
-| 记录已知缺口（豁免必需格） | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.43.tsv --check`；应用用 `... OUT_DIR`（写到 OUT_DIR/<矩阵>-domain-matrix.tsv，再复制进 tests/） | 豁免记录 `tests/waivers-0.0.43.tsv`：`R` 行是理由（谁批的、挪到哪个 0.0.44 编号、发布说明写什么），`W` 行是豁免谁（矩阵、主机、格或整台主机 `*`）。被豁免的格留在矩阵里，状态和证据不动，必需列改 `no`，要求文字末尾带 `[waived Rn: 理由]` 标记；已覆盖的格不动。`--check` 保证记录和矩阵一致，没有标记不带豁免、没有豁免不匹配。发布说明见 [plans/release-0.0.43-known-gaps.md](plans/release-0.0.43-known-gaps.md)。检查：batch `matrix-waive`。 |
-| 看 unisacc.com 的组成结构树 | `sh ./unisacc.com tools/com-tree.cx [-- FILE] [--models] [--res N] [--stages]` | 按文件顺序打印：头部（win/x86_64 可执行文件加 shell 启动器）、四片 gzip 的 Unix 编译器（压缩前后大小）、P3 模型包（模型数、阶段路由行数、资源数；每个模型的压缩前后大小和用到它的阶段；资源按键前缀分组，最大的 N 个）、16 字节包尾、填充，每行带占整个文件的百分比。检查：batch `com-tree`（各行相加等于文件大小，包的字节数与 apeinspect 一致）。 |
-| 名表通用生成器（一行规格换一个 -gen.cx） | `sh ./unisacc.com tools/nametab-gen.cx`（默认 `--check`）；`-- --write [MODULE]` 写入，`-- --list` 列出规格；试验时在模式前加 `--spec FILE --out DIR` | 规格表 `tools/nametabs.tsv` 每行一张名表：module、prefix、rtprefix（`-` 表示没有 runtime 侧）、源事实表、字段 `NAME=COL[:unquote\|after/\|before/][#i]`（`#i` 是 64 位 long long；unquote 按 JSON 解 `\\` 和 `\"`）、all 或 distinct、过滤 `- \| COL=V \| COL!=V \| COL~TEXT`、注释。生成 `cx/compiler/<module>.cx`，有 rtprefix 时再生成 `cx/runtime/<module>.cx`。复现 levelname 时两侧代码和 level-gen 的产物逐字节相同。新名表加一行规格即可，不要再新写专用的 -gen.cx。检查：batch `nametab-gen`。 |
-| 改了文件该重跑哪些批次 | `sh ./unisacc.com tools/affected.cx -- --since REV｜--files F...｜--ids ID... [--run -j N]`；反查 `-- --users FILE` | 按 source／`use` 传递闭包（realpath）／根源码字符串字面量点名的路径算受影响批次，约 0.3 秒；`--run` 经 run-batch 并行跑，45 秒后不再启动、余下 `DEFERRED` 用 `--ids` 续跑。检查：batch `affected-tool`。 |
-| 在某个提交的干净快照里跑命令（独立复核） | `sh ./unisacc.com tools/snapshot-run.cx -- [--rev REV] [--cwd SUB] [--seconds N] -- CMD...` | 用 git archive 导出到 `out/snapshot-<sha10>/`，同一提交的快照可复用；别人未提交的改动不会在运行中改掉输入，结果只对应那个提交。检查：batch `snapshot-run-tool`。 |
-| 找归档候选（没人引用的旧文件） | `sh ./unisacc.com tools/stale.cx -- [--days N] [--refs-max K] PREFIX...` | 列出仓内没有任何活文件按名字提到的文件，以及各自最后一次提交距今的天数。只认名字引用：按目录读的表、经 `use a.b` 引用的模块看不到，所以代码候选移动前要先人工看一眼。移走后用 doc-links `--fix-moved` 修链。检查：batch `stale-tool`。 |
-| 文档里的断链（归档后常见） | `sh ./unisacc.com tools/doc-links.cx -- [--fix-moved] (FILE.md... \| --tracked [--skip archive/:ujs/:apps/csih/])` | 检查 Markdown 行内链接指向的仓内路径，跳过代码块和外链。`--fix-moved` 会把断链改到该文件名在仓内唯一的新位置（比如归档后的路径），用的是相对路径。检查：batch `doc-links-tool`。 |
-| 七个仓级棘轮一次跑完 | `sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]` | 并行跑 cxraw／cxinclude／cxapis／cxtrunc／cxlibc／cxplatform／srcshape 的 `--check`（srcshape：每个 src/*.cx 的行数、最长顶层块、if 数以及 src/ 总行数只降不升，见 plans/src-slim-2026-10-30.md），每个一行 RATCHET，只列超基线或缺行的文件（不列 stale 与 below）；全 ok 才退出 0。检查：batch `ratchets-tool`。 |
-| 算 SHA-256／HMAC-SHA-256（无宿主库） | `#pragma unisa use crypto.sha256`，然后 `cs_sha256_hex(data, n, hex65)`、`cs_hmac_sha256_hex(key, klen, data, dlen, hex65)`；增量用 `cs_sha256_init/update/final` | 纯 cx（`cx/crypto/sha256.cx`），常量表是 `const`，无模块级可变状态，两份摘要可并行。FIPS 180-4 与 RFC 4231 向量 + 与 `sha256sum`／`openssl` 对拍。未实现的 TLS 分片见 [plans/cx-l0-tls.md](plans/cx-l0-tls.md)。检查：batch `cx-l0-crypto-sha256`。 |
-| 算 base64／hex（无宿主库） | `#pragma unisa use crypto.b64`，然后 `cs_b64_encode(in, n, out, outcap)`、`cs_b64_decode(in, n, out, outcap)`、`cs_hex_encode/decode`；容量先问 `cs_b64_len(n)`／`cs_hex_len(n)` | 纯 cx（`cx/crypto/b64.cx`）。只收 RFC 4648 §4 严格带填充形式：拒绝非法字符、长度不是 4 的倍数、非规范填充位（`Zh==`）、中段填充、奇数 hex 长度；编码器容量含 NUL 且不足即 `-ERANGE`。检查：batch `cx-l0-crypto-b64`。 |
-| 派生密钥（HKDF-SHA256 与 TLS1.3 Expand-Label） | `#pragma unisa use crypto.hkdf`，然后 `cs_hkdf_sha256(salt, slen, ikm, ilen, info, ilen2, out, outlen)`、`cs_hkdf_expand_label_sha256(secret, slen, label, llen, ctx, clen, out, outlen)` | 纯 cx（`cx/crypto/hkdf.cx`）叠在 sha256 上；`outlen` 上限 255·32，`info` 上限 1024，label ≤ 249、context ≤ 255，越界 `-EINVAL` 而不是截断。RFC 5869 A.1–A.3 与独立 HKDF-Expand 对拍。检查：batch `cx-l0-crypto-hkdf`。 |
-| 对称加密（ChaCha20-Poly1305 AEAD） | `#pragma unisa use crypto.chacha20poly1305`，然后 `cs_chacha20poly1305_seal(key32, nonce12, aad, alen, in, n, out, tag16)`、`cs_chacha20poly1305_open(...)`；裸流用 `cs_chacha20_xor`，MAC 用 `cs_poly1305` | 纯 cx（`cx/crypto/chacha20poly1305.cx`），原地可用。open 先在 `cs_ct_eq` 里比标签，伪造 tag／错 aad／错长度／错 nonce 一律 `-EBADMSG` 且不写明文。nonce 复用无法在模块内检测，由调用方保证。RFC 8439 §2.4.2／§2.5.2／A.3／§2.8.2 向量。检查：batch `cx-l0-crypto-chacha20poly1305`。 |
-| 对称加密（AES-128/256-GCM） | `#pragma unisa use crypto.gcm`，然后 `cs_gcm_seal(key, klen, nonce, nlen, aad, alen, in, n, out, tag16)`、`cs_gcm_open(...)`；分组用 `#pragma unisa use crypto.aes` 的 `cs_aes_init/encrypt_block` | 纯 cx（`cx/crypto/aes.cx`、`cx/crypto/gcm.cx`），无表驱动、无分配、可并行。open 先按密文算 tag 再 `cs_ct_eq` 比较，伪造记录不写一个明文字节。klen 只收 16/32；GCM 的 (key, nonce) 复用无法在无状态函数里检测，由调用方（TLS 1.3 隐式 nonce）保证。FIPS-197 C.1/C.3 与 SP 800-38D case 2–5、9、13、14、16，与 OpenSSL AESGCM 交叉核对。检查：batch `cx-l0-crypto-aesgcm`。 |
-| 比对 MAC／tag、擦除密钥 | `#pragma unisa use crypto.ct`，然后 `cs_ct_eq(a, b, n)`、`cs_ct_wipe(p, n)` | 纯 cx（`cx/crypto/ct.cx`）。`cs_ct_eq` 全量读、单累加器、不提前返回，所以不泄漏首个不同字节的位置；`mm_same` 会提前返回，不能用于 MAC/tag。`cs_ct_wipe` 走 volatile 指针，防止尾调用后被优化掉。检查：batch `cx-l0-crypto-ct`。 |
-| X25519 椭圆曲线 Diffie-Hellman | `#pragma unisa use crypto.x25519`，然后 `cs_x25519(out32, scalar32, u32)`、`cs_x25519_base(out32, scalar32)`；clamp 用 `cs_x25519_clamp(scalar32)` | 纯 cx（`cx/crypto/x25519.cx`），16 位 limb、固定 255 轮梯子，不看标量比特分支。输出全零（低阶点）返 `-EINVAL`，不返回共享秘密。RFC 7748 §5.2 两例 + 1000 次迭代、§6.1 DH 对与双方公钥。检查：batch `cx-l0-crypto-x25519`。 |
-| 大整数与 Montgomery 模幂（RSA 验签所需） | `#pragma unisa use crypto.bn`，然后 `cs_bn_from_bytes/to_bytes/cmp/add/sub/mul/shr1`、`cs_bn_mont_mul/to_mont/from_mont`、`cs_bn_modexp(r, base, exp, mod)` | 纯 cx（`cx/crypto/bn.cx`），固定容量 `BN_LIMBS=72`（2304 位），无分配、无模块级状态。`modexp` 拒绝偶模、零模、`base>=mod`、指数为空以外的一切越界；256 位与 2048 位模幂字节精确。检查：batch `cx-l0-crypto-bn`。 |
-| 读 ASN.1 DER（严格） | `#pragma unisa use crypto.der`，然后 `cs_der_expect(in, tag, &body)`、`cs_der_int/bits/octets/oid/bool/skip/at_end` | 纯 cx（`cx/crypto/der.cx`），每次读都对着调用方给的长度检查，声明长度超出即拒绝、绝不过读。只收 DER：不定长、非最小长形式、多字节 tag、非最小或负或零 INTEGER、BIT STRING 未用位、BOOLEAN 非 0x00/0xFF、尾随字节全部拒绝——这些正是同一值可以有第二种字节串的地方。检查：batch `cx-l0-crypto-der`。 |
-| P-256 (prime256v1) ECDSA 验签 | `#pragma unisa use crypto.p256`（另需 `crypto.bn` 用其类型），然后 `cs_p256_init(&c)`、`cs_p256_point_parse(&c, buf, len, &q)`、`cs_p256_verify(&c, &q, hash32, der, derlen)`；`cs_p256_point_mul/point_add/point_x` 供测试与后续 ECDH | 纯 cx（`cx/crypto/p256.cx`），Jacobian 坐标 + Montgomery 域运算，叠在 bn 与 der 上；上下文由调用方持有，无模块级状态。只做验签：标量公开，梯子非常数时间；签名需常数时间梯子，故意不提供。公钥必须落在曲线上，`r`/`s` 必须在 [1,n-1]，恢复的 x 先按 n 归约再比较；`nG`/`0G` 的无穷远点是失败而非崩溃。检查：batch `cx-l0-crypto-p256`。 |
-| RSA 签名验签（PKCS#1 v1.5 与 PSS） | `#pragma unisa use crypto.rsa`（另需 `crypto.bn` 提供类型），`cs_rsa_verify_pkcs1_v15(&n, &e, hash, 32, sig, siglen)`、`cs_rsa_verify_pss_sha256(&n, &e, hash32, sig, siglen)` | 纯 cx（`cx/crypto/rsa.cx`），只做 2048 位以内的 SHA-256 验签，无分配、无模块级状态。做法是重建整个 EMSA-PKCS1-v1_5 编码再逐字节比较，而不是解密后去找哈希尾巴：这正是挡 Bleichenbacher '06 伪造的地方。签名整数必须先小于模数，签名长度超限或非最小编码一律拒绝。私钥运算故意不提供：TLS 客户端不需要签名；PSS 侧按 RFC 8017 §9.1.2 重建 H' 后整段比较，salt 固定 32 字节（`rsa_pss_rsae_sha256` 只有这一种），短 salt、别的摘要、长度不符一律拒绝。，盲化与常数时间指数不在本版。检查：batch `cx-l0-crypto-rsa`。 |
-| 解析与校验 X.509 证书 | `#pragma unisa use crypto.x509`，然后 `cs_x509_parse(der, len, &c)`、`cs_x509_valid_at(&c, now)`、`cs_x509_verify_sig(&child, &issuer)`、`cs_x509_ca`、`cs_x509_cn`、`cs_x509_match_dns` | 纯 cx（`cx/crypto/x509.cx`），零拷贝：所有字段指向调用方的 DER，缓冲必须活到证书用完为止。只收 v1–v3、UTCTime 与 GeneralizedTime（必须 Z、不带小数）、rsaEncryption 与 prime256v1 公钥；签名只认 SHA-256 的 RSA PKCS#1 v1.5 与 ECDSA。明确不做 name constraints、policy、CRL/OCSP、pathLen 强制、RSA-PSS、SHA-1 签名、P-384/P-521，也不判断“可信根”——链策略与信任锚留给上层。时间换算成 epoch 秒，过期判断是一次比较。检查：batch `cx-l0-crypto-x509`。 |
-| TLS 1.3 客户端握手 | `#pragma unisa use crypto.tls13`，`cs_tls13_client_start(&c, priv, random, sni, snilen, now, out, cap, &outlen)` 拿到 ClientHello；收到服务端记录后 `cs_tls13_client_recv(&c, msg, n)`，返回 `CS_TLS13_WAIT_*` 就继续收，负数即失败；遇 HelloRetryRequest 用 `cs_tls13_client_retry(&c, priv, out, cap, &outlen)` 重发；连上后 `cs_tls13_client_finished(&c, out)` 取客户端 Finished，读写上下文在 `c.hs_read/hs_write/ap_read/ap_write` | 纯 cx（`cx/crypto/tls13.cx`），零分配：`cs_tls13_client` 由调用方提供，内含 4096 字节叶证书缓冲，更大的证书 `-ERANGE`。只做 TLS 1.3 且只用 SHA-256，所以只提供 `TLS_AES_128_GCM_SHA256` 与 `TLS_CHACHA20_POLY1305_SHA256`，`TLS_AES_256_GCM_SHA384` 返回 `-ENOSYS` 且 ClientHello 不列它。密钥调度（early→handshake→master、traffic secret、finished key、密钥更新）与 RFC 8448 §3 逐字节对齐；CertificateVerify 用“含 Certificate、不含自身”的 transcript hash，接受 ECDSA P-256、RSA PKCS#1 v1.5、RSA-PSS 三种签名。叶证书经 `crypto.x509` 解析并做主机名与有效期检查，不判信任锚、不做 OCSP/CRL。检查：batch `cx-l0-crypto-tls13`。**生产传输仍走 libcurl**（`apps/csih/net.cx` + `sys.ffi`），本模块是可选的 cx 内实现与在线对拍证据（`tools/tls13-get.cx`），不用于替换。 |
-| TLS 1.3 记录层加解封 | `#pragma unisa use crypto.record`，`cs_tls13_record_seal(&keys, inner_type, in, n, out, cap)`、`cs_tls13_record_open(&keys, rec, rlen, out, cap, &outlen, &inner_type)`、`cs_tls13_record_is_ccs(rec, rlen)` | 纯 cx（`cx/crypto/record.cx`），AEAD 由 `crypto.gcm`／`crypto.chacha20poly1305` 提供。nonce 是 iv 与 64 位序号的后 8 字节异或，AAD 是 5 字节记录头（类型、版本、长度），上限明文 16384、密文 16640、tag 16。先验 tag 再写明文：伪造记录返回 `-EBADMSG` 且不写调用方缓冲、不推进序号；明文超限、外层类型或版本不符、外层长度与实长不一致都在解密前拒绝；内层类型只可能是 21/22/23，否则解密后返回 `-EPROTO`。检查：batch `cx-l0-crypto-tls13`。 |
-| 核对一只现成 PE 的结构 | `sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE` | 与 `ROOT ABS_OUT` 同一套 PE/COFF 判据，写到标准输出：节区、导入、重定位、load config、入口。不放宽判据，不编译夹具。`ROOT ABS_OUT` 仍是 8 只夹具。见 [plans/osx-win-whole-o-2026-10-30.md](plans/osx-win-whole-o-2026-10-30.md)。 |
-| 包清单与导入身份 | `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures` | `cxpack.tsv` 将模块名钉到路径。已装 e955 的 CXIF 在存在匹配文件行时只导出公开列表中的非 static 函数；清单缺席或无匹配行仍保留全部非 static 函数的兼容行为。清单超限、目录或其他读取错误具名拒绝，不扩大公开接口。类型声明仍沿用文本 CXIF v0，尚非结构化 ABI 或编译期所有权。见 [plans/cx-pack.md](plans/cx-pack.md) 与 [缺陷证据](plans/defects-c43.md)。 |
-| 核对 CXIF v0 文本 | `sh ./unisacc.com -run tests/cxif.cx -- --fixtures` | 现场 `-cx-interface` 必须是 banner、守卫、类型、原型和 `#endif`。函数体、`static`、缺 `#endif`、版本不是 v0 都退出 1。效果、布局和所有权字段不在 v0 里。见 [plans/cxif-v0.md](plans/cxif-v0.md)。 |
-| 回收 `out/` 临时产物 | `sh ./unisacc.com tools/out-gc.cx -- --older-than 7 --delete` | 默认只报告：每个一级条目的最新 mtime 与递归字节数，外加 <3d/3-7d/7-30d/>30d 分桶。删要两把钥匙（`--delete` 必须配 `--older-than>0`），因为 `out/` 里有他人正在构造的目录；`--root DIR` 供 `tools/check-out-gc.cx` 在临时根上验证拒绝合同 |
-| 外平台格（`NEEDS_FOREIGN_HOST`）怎么关 | 只能在**该原生宿主**上跑同一候选；`sh ./unisacc.com tests/full-domain.cx -- ROOT DOMAIN` 的每条 OPEN 行现在带 `CLOSE-BY=native-run-on-HOST-only;no-emulation` | 模拟、容器、缺席客机一律 BLOCKED/NOT_RUN，永远不算 PASS（19 张矩阵头部都写了这条）。跑法与逐格 oracle 见 [外宿主测试手册](plans/foreign-host-runbook-cc.md)；原生 runner 见 [.github/workflows/candidate-native.yml](.github/workflows/candidate-native.yml)（ubuntu-24.04 / ubuntu-24.04-arm / macos-15-intel / macos-15 / windows-2025 / windows-11-arm） |
-| 同候选 CI 的七个身份参数 | `tools/bound 20 sh ./unisacc.com tools/ci-candidate-check.cx -- --plan-sha ROOT` 出 `plan_sha256`；`sh ./unisacc.com seed/ident.c -- ROOT` 出 `source_sha256`；`sha256sum unisacc.com` 出 `com_sha256`；`git rev-parse HEAD` 出 `verification_commit` | 合同见 [0.0.43 同候选 CI 输入草稿](docs/c43-candidate-ci.md)；工件产出走 `candidate-raw-export.yml`，准入走 `candidate-native.yml`（两者都是手动 dispatch，不带 push/定时/上传/签名） |
-
-新动态逻辑优先由 `unisacc.com + .cx` 完成，减少 `.sh`，不新增临时 `.py`。旧脚本尚未迁移的部分如实记为依赖，不把 `.cx` 转调脚本记成迁移完成。经典 C 参考与模型产品是不同实现；对拍前确认实际两端身份，不能笼统判成“对自身验证”。入口已实现不等于任意输入已验证，继续保留原断言、拒绝和预算。
-
-本机开发控制器可用 `tools/dev-run tests/run-batch.cx -- ROOT ABS_OUT BATCH_ID` 复用原生 ELF 代码；它每次仍调用已装产品实际运行所选 SOURCE 批，不能把它产生的开发速度当作产品默认 `-run` 提速或发布资格。新检出先按 `plans/v0.0.43.md` 重建忽略的启动 ELF；当前仅 Linux/x86_64 可用。
+本文回答五个问题：unisacc.com **是什么**、**有什么功能**、**结构组成**、**测试套件怎么设计**、**项目目录与文件结构**。术语歧义以 §0 为准；历史流水与逐版收口在 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md)（完整旧版），不在这里重复。
 
 ## 0. 概念与术语（先读；歧义以本节为准）
 
-> 本节只做一件事：让「流 / 网 / 段 / 阶段」四个词各自只有一个意思。详细版与逐处核实见 [docs/glossary.md](docs/glossary.md)。
-
-### 0.1 五层，每层只有一个名字
+「流 / 网 / 段 / 阶段」四个词各只有一个意思。详细版与逐处核实见 [docs/glossary.md](docs/glossary.md)。
 
 | 层 | 唯一名 | 含义 | 数量 | 真源 |
 |---|---|---|---|---|
-| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf）· m4/ujs **4**（lex/front/select/encode）· tdesc **3**（declare/context/size） | `exec/pipeline/image-stages.tsv` · `adapter/ujswasm/tables/contract.tsv`（原 `m4/contract.py FLOWS`，已归档） · `flownet/tdesc/contract.tsv` |
-| L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键）· **10**（3677 键）· **3** | `weights/gold/*.tsv`（权威；规则形式 `seed/gold_<阶段>_label.c`，由 `tools/gold-table.cx --check` 核对）· `adapter/ujswasm/ujsgold.cx` → `adapter/ujswasm/tables/*.gold.tsv`（原 `unisa/gold.py`、`ujs/seed/construct/gold.py`，均已归档） |
-| L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | `archive/reference-py/unisa/control/segment.py`（负结果证据，已归档） |
-| L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` 的 `phase` 行 |
-| L5 | **Release phase** | 发布流程阶段 | 10 | `archive/reference-py/release/tools/stagelog.py`（2026-10-30 随发布队列链归档） |
+| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf） | `exec/pipeline/image-stages.tsv` |
+| L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键） | `weights/gold/*.tsv`（权威；规则形式 `seed/gold_<阶段>_label.c`，由 `tools/gold-table.cx --check` 核对） |
+| L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | 负结果证据已归档 |
+| L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` |
+| L5 | **Release phase** | 发布流程阶段 | 10 | 已归档 |
 
-### 0.2 六条常见误解（逐条对照，不要按直觉读）
+**六条常见误解**（不要按直觉读）：
 
-| 如果你这样理解 | 正确的是 | 为什么容易错 |
-|---|---|---|
-| 「7 流」与「18 网」是同一批东西的两种叫法 | 流是**字节管道阶段**，网是 **ask 事实表** | 旧句「勿混」只否定了互换，没说明二者各是什么 |
-| `class Stage`（`unisa/gold.py`，已归档到 `archive/reference-py/`）表示流 | 它表示**网**（18 张的规格定义） | 类名抢占了「流」的词 |
-| `unisa/control/net.py`（已归档）的 `Net` 是事实网 | 它是**神经网络模型**（TableNet / StageNet / UnisaNet） | `net` 一词被两处占用 |
-| m4 的「4 流」指 4 张决策网（lex/parse/isel/enc） | 4 流是**四个字节段**：lex / front / select / encode；决策网恰好也是 4 张，是数字巧合 | 两个「4」属不同维度 |
-| 所有 `phase` 都是编译阶段 | 三义：**book phase**（记账）/ **release phase**（发布）/ 历史 `compiler phase`（实为 segment） | 同一个词三次入场 |
-| `STAGE_NETS` 是「所有与流相关的网」 | 仅 **isel、abi** 两张不在 `TABLES` 里的网（15 + 2 + 1 = 18） | 名字里的 stage 是历史包袱 |
+1. 「7 流」与「18 网」不是同一批东西的两种叫法——流是**字节管道阶段**，网是 **ask 事实表**。
+2. `class Stage`（旧 `unisa/gold.py`）表示**网**，不是流。
+3. 旧 `unisa/control/net.py` 的 `Net` 是**神经网络模型**，不是事实网。
+4. m4 的「4 流」是**四个字节段**（lex/front/select/encode），不是 4 张决策网。
+5. `phase` 三义：book phase（记账）/ release phase（发布）/ 历史 compiler phase（实为 segment）。
+6. `STAGE_NETS` 只是 isel、abi 两张不在 `TABLES` 里的网（15+2+1=18）。
 
-### 0.3 禁用写法
+**禁用写法**：裸 `stage` 一律写 `stream-stage`（流）或 `net`（网）；用 `net` 指神经网络一律写 `model`。
 
-- 裸 `stage`：一律写 `stream-stage`（指流）或 `net`（指网）
-- 用 `net` 指神经网络：一律写 `model` / `neural net`
-- 用裸 `PHASES` 指发布阶段：写 `release phase`（代码侧待改 `RELEASE_PHASES`）
-- 单说「4 流」：必须带上下文——「m4 的四个字节段」或「4 张决策网」
+**RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
-### 0.4 与 §3 的关系
+## 1. unisacc.com 是什么
 
-§3.0a 七流表、§3.0b 十八网表、§3.0c 关系总表都以本节定义为前提；三表与本节冲突时，**以本节为准**，并同步修表。
+**一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），在 {Linux, macOS, Windows} × {x86-64, arm64} 六目标上运行，用同一份可执行文件：
 
-### 0.5 一句话
+- 自己写出六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）；
+- 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
+- **自举**：宿主构建 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。
 
-**流 = stream，网 = net，训练合并 = segment，记账 = book phase，发布 = release phase。**
+**语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度按逐条款账本 [archive/testing-c43-legacy/tests/c99/clauses.tsv](archive/testing-c43-legacy/tests/c99/clauses.tsv)，缺口在 [README.md](README.md) 限制表逐条点名。
 
-### 0.6 RI 的固定含义
+**方法**（论文 A 的范式）：编译器里每个**表状决策**（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答——权重从真值表派生，在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。范式一句话：
 
-本文的 **RI 是 ResourceInput（具名资源输入）**，对应exec/c/run.c中的ResourceInput及RI/NRI，包含名称、字节和长度、存在性／空值及跨流身份绑定。不是“runtime integrity”的缩写。模型加载器的坏头／越界／非法动作拒绝另属负例与运行完整性合同，仍须测试，不能拿资源接口测试代替。新清单原ri行的英文说明误写为runtime integrity，现纠正；完整覆盖义务不减少。
-
-## 1. 命题与产品
-
-- **产品**：一个文件 `unisacc.com`（APE），在 {Linux, macOS, Windows} × {x86-64, arm64} 上运行，自己写出六个目标的可执行文件（ELF、Mach-O、PE；映像不经汇编器和链接器），0.0.17 起参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；当前模型产品对象输出只支持Linux两目标，Mach-O/COFF对象逐项具名拒绝（§3.15及README边界），并能自举：宿主构建的 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。两代产品只叫 `unisacc-seed.com` 与 `unisacc.com`。
-- **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度来自逐条款账本 [归档条款账本](archive/testing-c43-legacy/tests/c99/clauses.tsv)（仅历史覆盖义务，不再调旧gate；当前入口见[新清单](tests/coverage.tsv)），不作主张；缺口在 README 限制表逐条点名。
-- **方法**：编译器里每个表状决策（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答，权重从真值表派生、在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。两条路线：C 参考编译器（`unisacc.c` + `src/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍（`exec-chain`、`closure`、`stages`、difftest 两侧）。
-- **零 Python 依赖（硬目标；主人 2026-10-24 再次重申）**：构建、闸、验证链中 **100% 不依赖 Python**，牢固使用自己的 `unisacc.com + .cx` 体系；新增与修复路径优先原生实现，不新增 Python 算法或调用点。历史候选曾完成N22三SHA相等；当前重构候选完整三阶段链仍待验，依赖清零也尚未完成：归档依赖审计 `archive/testing-c43-legacy/tests/zeropython.tsv` 记直接调用声明 **1771**（真实执行标记1739、数据32；解析入口复用使静态标记少4，原外部参考依赖未消除）、`import unisa` 文件 **92** 个、`.py` **409** 个。仅用 `.cx` 分批调用原 Python 只算调度改进，不算消除运行依赖；原生替换须实际自举运行，并保留完整行为与拒绝、恢复合同。三者同时清零后，`unisa/` 才移入 `archive/`（不删，仅作人工参考，不参与任何链）。
-- **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
-- **公开入口仓**（主人 2026-10-05，拟注册商标 UNISA）：[partnernetsoftware/unisa](https://github.com/partnernetsoftware/unisa)，只收副本：unisacc、ujs 的最终发行包（`releases/`，定期从本仓 release 抄过去），产品介绍（`docs/`）与论文（`papers/`，不定时抄）；以后做 unisacc 的包管理入口和 agenterm 的“插件与应用”入口。开发不在那里。
-
-### 范式层：表、执行器、流推导与晚绑定接线
-
-unisacc 的设计应按可组合的范式组织，而不只按编译器特例记账：**表表达决策，共用执行器提供机制，显式流接口连接阶段，晚绑定合同隔离声明需求与宿主供给。** 各刀优先补强这四者之间可核验、可复用的边界；具体语法或平台修复仍须完成，但应说明它修复了哪类共同规则，避免复制分支替代抽象。
-
-```text
-范式与复用
-├─ 有限表：阶段的决策、控制、目标规则与拒绝定义
-│  └─ 构造与对拍：有限决策域可穷举，不等于完整语言域已穷举
-├─ 共用执行器：定宽运算、栈/存储、字节/帧、资源与接受/拒绝
-│  └─ 机制共用，语言、ABI与布局语义仍由阶段规则拥有
-├─ 显式流接口：主字节流 + 位置/属性 + 具名资源 + 状态/诊断
-│  └─ 串联 / 验域后变换 / 有序pass链；版本、状态作用域与提交点明确
-└─ 晚绑定接线：声明需求 → 稳定ID/未绑定片段 → 供给核验与实例化
-   └─ 可复用需求合同；地址、handle和运行上下文按实例管理
+```
+事实表 → 生成器 → 网 → 一个通用执行器 + 按包跑阶段
 ```
 
-**流推导的复用单位是阶段合同，不只是统一读写函数。** 合同应说明输入/输出格式与版本、目标/模式/能力、位置与属性、资源依赖、状态生命周期及失败出口。接线检查格式和前置不变量相容；上游接受不保证下游成功，Tape验域接受后仍可由lower按目标能力拒绝。通道共用不合并语义所有者，非法输入、合法未覆盖、绑定失败、机制故障与预算耗尽应保留各自归属。流式接口也不要求立即外发字节；先沿用接受后提交输出的规则，避免末段失败时已承诺成功前缀。
+四条范式支柱：**有限表表达决策**、**共用执行器提供机制**、**显式流接口连接阶段**、**晚绑定合同隔离声明需求与宿主供给**。
 
-**晚绑定是可固化的接线层。** 名字、kind、类型/签名、extent、权限、ABI和生命周期需求属于可复用合同；provider地址及计划handle属于绑定实例。argv、mapping等运行上下文另由运行适配器显式提供。宿主负责资源取得、内存与平台机制，不能替核心隐式选择语言或ABI语义；将地址藏进资源或清零后保留供给派生状态，都不构成解耦。
+**两条实现路线**：C 参考编译器（`archive/reference-c/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍。
 
-**判定不变量（接线检查依此判定，2026-10-15 cc 据 cc3 对照补）。**
-1. 终态穷尽：每个阶段对所有合法输入都有已声明的终态——接受、合法未覆盖（not-covered）、语义拒绝三者之一；机制故障、预算耗尽、宿主超时另列，不算终态。
-2. 未覆盖不是通过：not-covered 不得记为 PASS，不得当成非法输入，也不得静默回退到另一实现。
-3. 链成功是合取：一条链成功 = 每个单元都接受 且 末端提交完成；中间单元的接受只是该单元的事实。
-4. 见证不授资格：一次见证只说明一次观察；派生哈希、生成清单或单次资源观测不授予审阅、测量或全覆盖的资格。
-5. 拒绝归属：语言级拒绝归声明该终态的阶段；运行层失败（provider 缺失、IO、预算、宿主超时）归绑定层或运行适配器，不得改记为阶段拒绝，反之亦然。
-6. 有限表 ≠ 有限处理器：表的决策域有限可穷举，但栈、索引存储与输入帧不受界，表穷举不推出处理器对全部输入已覆盖。
-7. 目标显式：target 是显式输入字段并由表声明能力；不得由宿主环境（uname、路径、环境变量）隐式选择。
+## 2. 有什么功能（已实现能力速查）
 
-**非目标。** 不做万能前端、统一错误码、自动回退到另一实现或并发调度；“流”不意味着立即逐字节外发；不以统一接口或新增总表本身计进展。
+| 动作 | 现成用法 | 说明 |
+|---|---|---|
+| 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认即 `-run`；`.c` 同样适用 |
+| 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法 |
+| 从 tape 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口 |
+| 写六目标程序 | `./unisacc.com FILE.c -b OS/ARCH -o OUTPUT` | 目标 `lnx/osx/win` × `x86_64/arm64` |
+| 查 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 模块循环硬拒绝，报 `module cycle` |
+| 用系统 GCC/Clang 编 `.cx` | `sh ./gcc_cx.com FILE.cx -o OUT` / `sh ./clang_cx.com` | 六格 APE 宿主驱动，不调 unisacc.com |
+| 查模块层向 | `sh ./unisacc.com tools/check-cx-layers.cx` | 编号层 L0–L3 直接 `use` |
+| 拒新的模块 `#include` | `sh ./unisacc.com -run tests/cxinclude.cx -- --check` | 新模块必须 0 |
+| 上层禁 libc/POSIX | `sh ./unisacc.com tests/cxlibc.cx -- --check` | 名单不手写，按前导分类 |
+| 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
+| 符号索引 | `sh ./unisacc.com tools/symindex.cx -- def NAME` | 冷建 ~2.4s，查询 ~250ms |
+| 批量机械改写 | `refactor.cx -- find/apply/sweep` | 每文件改前改后验证，不过即还原 |
+| 看某域还差什么 | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN` | 逐格读矩阵，印 OPEN 行 |
+| 普查红批次 | `sh ./unisacc.com tools/census.cx -- $PWD out/census` | 无材料批次逐个实跑找回归 |
+| 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.43.tsv --check` | R 行理由 + W 行豁免 |
+| 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
+| 七个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape |
+| 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
+| 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |
+| 只提交自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed PATH KEY` | 多人同改文件（prd/batches/coverage） |
 
-**刀口服务范式复用。** 选刀先问：是否消除一类隐式输入或重复接线，能否复用现有表/原语/协议，拒绝和所有权是否更清楚，有没有跨形状正例及边界反例。只有名字相似、却有不同语义或生命周期的路径不强行合并。优先小切面见证，再提公共合同，再逐路迁移；不以统一接口或新增总表本身计进展。
+纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
 
-**现状与证据分账。** 本节提升设计方向，不宣称所有路径已纯化、可重入或具备同一完整合同。表、执行器和部分帧协议已有实现；晚绑定按类别迁移，剩余typed/variadic/callback与运行桥等以主线账本为准。相同完整输入的阶段重放、有序pass组合及合同分层仍须逐项取得证据；单次资源观测只证明该次执行，哈希/生成清单不替代审阅、ABI核验或产品测试。具体路由和实现边界见§3，条款以spec为准。
+完整入口清单（含每条的说明、既有依据与覆盖边界）见 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md) 的「已实现能力速查」；这里只列常用入口，具体输入结果与覆盖边界以实际核对为准。
 
-### 0.0.43 拒绝域裁定（机房主任代裁，2026-10-14）
+<a id="model-function-bytes"></a>
+## 3. 结构组成（unisacc.com 的内部）
 
-选择方案 **A：前置 Tape 验域**。raw 字节先经显式验域，lower 只接与同一输入绑定的已验流；目标 syscall/ABI/外部能力拒绝仍属于 lower。raw `.tape` 是产品承诺；NEG-001 `?\n` 在 `-S`/`-c` 下 rc0 原样输出已裁为产品缺陷，须经前置验域返回 rc1 与具名诊断，不能以末端编码器拒绝或上游保证改记通过。
+用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前已装 `83343ec1`（5,145,706 字节，rev `edc2c7700b`）组成：
 
-Windows `.hostcall`/`.hostaddr` 是有意的**库模式合同**，须显式输入模式/目标/调用能力，并使参考承认同一合同；该一致性证据未齐前，Windows 接受不得记产品绿。条款全文见 [spec.md 的 TP-7／TP-8／L-4](spec.md#c43-refusal-ruling)。归属与承诺已裁，实现与补验仍未完成；E3及lower接受样本不扩为完整拒绝域资格。历史待裁提案与观测保留在 [裁定摘要](research/c43-refusal-ruling-summary.md)。本裁定不授签名、Latest或公开，不改变7000历史结果或env-pin。
+```
+unisacc.com  5,145,706 B  sha 83343ec1…
+├─ head: PE 镜像 + shell 启动器      1,924,096 (37.3%)  win/x86_64 原样存；DOS stub 放 sh 启动器
+├─ slice lnx/x86_64                    290,976 ( 5.6%)  gzip → 解出 1,818,965 B
+├─ slice lnx/arm64                     281,840 ( 5.4%)  gzip → 解出 2,318,630 B
+├─ slice osx/x86_64                    307,100 ( 5.9%)  gzip → 解出 1,866,082 B
+├─ slice osx/arm64                     301,825 ( 5.8%)  gzip → 解出 2,361,442 B
+└─ package (P3)                      2,039,850 (39.6%)  32 模型 + 1479 阶段路由行 + 77 资源
+   ├─ stage routing (D rows)             83,948
+   ├─ models                          1,125,834        32 模型（deflate）
+   └─ resources                         830,037        77 资源
+      └─ @hdr/*（69 个头文件，未压缩）  814,573 (15.8%)  ← 0.0.44 体积优化头号线索
+```
 
-机房主任追加代裁：Tape 整数字面量为 64 位字，范围 `[-2^63, 2^64−1]`；超出由前置验域具名拒绝（integer 与行号），模型与 Python 参考同步，不复制 Python 的 4300 位宿主转换上限。负号先于进制前缀，适用于十进制/十六进制；保留既有 Python/模型二进制、八进制拼写同样的字范围。此前4301位分歧在实现与对拍后应消除，不能靠调宿主环境计绿。下划线整数当前仍为已登记未覆盖，固定动态 C 用例单列，不冒充产品接受。
+四片 gzip 的 Unix 编译器 + win/x86_64 PE 头 + 一份共用 P3 模型包（32 个网络模型、1479 行阶段路由、77 个资源）。
 
-实施接线采用独立 `exec/tapecheck` 有限转移模型：成功才透传整条原始输入，失败不输出字节、诊断标明原因与行号；包内普通/warning/multi/object 路由在 E3 后插入该阶段；forwarding 的 E3 side-car 先由现有适配器抽出/合并 Tape 再验域；公共 raw Tape/Tapebin 在任何输出之前单独调用同一模型。缺少包内 tapecheck 阶段时 driver 显式拒绝，不复用旧包或信任源后缀；构造与打包两实现须同拍；Windows 库模式参考暂列待证，不顺手扩为产品绿。
+<a id="pipeline-design"></a>
+## 4. 架构：模型流水线
 
-### 0.0.43 晚绑定首刀授权（机房主任代裁，2026-10-14）
+<a id="flow-net-contracts"></a>
+### 4.0 七流（字节管道）
 
-已授开工：先将 lower 的外部合同符号流与宿主 provider 解析分离，并落绑定负例。首刀不以未声明签名冒充已验证 ABI；缺 provider 的具名拒绝与签名不匹配证据分账。设计入口见 [晚绑定首刀](research/c43-late-binding-first-cut.md)。驱动准备/执行与 Tapebin 超时结构债可并行拆提案，但内外步骤仍不超过 60 秒，缓存准备不算测试通过。开发树与封存候选闭包不同须按 CI 工作流解释，不当作产品回归；此授权不授重启 7000、签名、Latest 或公开。
+真源 `exec/pipeline/image-stages.tsv`：
 
-### 0.0.43 晚绑定与前级冻结边界（现行摘要）
+| 流名 | 输入 → 输出 | 功能 | 主要网 |
+|---|---|---|---|
+| **e2** | `src.c` → `pp.text` | 预处理：续行/注释/指令/宏/条件/include | pp |
+| **e1** | `pp.text` → `tokens.typed` | 词法：关键字/标识/算符/字面量最长匹配 | lex |
+| **e3** | `tokens.typed` → `tape.text` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | parse, type, scope, irsel, tyinfo, pfconv, binsel, prec |
+| **e4** | `tape.text` → `tape.text` | opt：peephole / 栈→寄存器类改写 | opinfo, peep |
+| **prune** | `tape.text` → `tape.text` | 按根/导出剪不可达整函数 | （无 18 网，政策在代码） |
+| **lower** | `tape.text` → `target.text` | ABI/regmap/syscall/布局/reloc 降到目标 ops | abi, regmap, reloc |
+| **elf** | `target.text` → `image.bytes` | 编码 + ELF/Mach-O/PE 写出 | enc |
 
-- 普通函数归属由 librarypartition / USLSEL1 决定；宿主层只解帧、按span绑定。provider只在绑定时查询，缺失不降级旧路；无地址片段不冒称整流无地址。
-- 合同/归属/片段与编译态一起提交或回滚，禁止新合同配旧Tape。getter只观测已产出的代际收据，不惰性启动lower；缺provider不等于已有可调用镜像。
-- 数据需求的稳定ID、类型/extent/权限显式入流；只读写拒绝归未绑定lower，供给资格和missing-provider归绑定层。typed/data/callback及运行桥迁移范围各自记账，完整条款见[spec.md](spec.md)的LB系列。
-- 库实现与provider应独立于声明头；前级P/M不随库实现变更，禁止无pp表/模型变更实证而随库刀reseal，头内实现扩张暂缓。单标量非变参boundary-r1只获具名范围，不能扩成全libc迁移或发布绿。
-- 字节流阶段各自保留语义与拒绝归属，资源和target显式；地址/provider/宿主路径不进入核心流。当前W/2c2/S的过程收据见归档，是否完成按具名实际证据核，不按历史窗口“已授”字样推定。
+### 4.1 十八网（ask 事实表）
+
+真源 `weights/gold/*.tsv`（`tools/gold-table.cx --check` 核对）：pp、lex、parse、type、scope、irsel、enc、reloc、tyinfo、pfconv、regmap、isel、abi、combo、binsel、prec、opinfo、peep。每张是「有限表 + 全键穷举 exact」，由 `seed/gold_<阶段>_label.c` 规则形式构造。isel/combo 是**对照臂**（不出货主脊），其余 16 张是出货主脊。
+
+### 4.2 构造链
+
+```
+有限表（.tsv）→ 生成器（tools/*-gen.cx，带 --check）→ 网权重 → 通用执行器（cx/core/kernel.cx 的 UNIKERN1）
+```
+
+- 有限表只经「事实表 → 生成器（--check）→ 表」修改，不手改。
+- 通用执行器：定宽运算、栈/存储、字节/帧、资源与接受/拒绝。语言、ABI 与布局语义仍由阶段规则拥有。
+- 模型包 P3 = 32 模型 + 阶段路由 + 资源，装载由 `cx/runtime/model_decode.cx` / `packagemodel` 处理。
+
+## 5. 源码结构（src/ 六层 + cx/ 树）
+
+`src/unisacc.cx` 是入口，`use drive`。六层（`src/` 共 15 文件、5352 行）：
+
+| 层 | 文件 | 职责 |
+|---|---|---|
+| host | `host.cx`、`hostnative.cx` | 平台胶水（mmap/dlopen/进程），只在 L0 `cx/sys` 之下 |
+| packmodel | `packmodel.cx` | 装载 P3 包、解压模型 |
+| executor | `executor.cx` | 调 `core.kernel` 的 `core_run`（UNIKERN1 汇编核心） |
+| stages | `stages.cx` | 按包里的阶段装模型，交给 `core_run` |
+| drive | `drive.cx`、`driveroute.cx`、`driveface.cx`、`runcache.cx` | 驱动、路由、缓存 |
+| bind | `bind.cx`、`entrybind.cx`、`entryexec.cx` | 入口绑定、晚绑定 |
+
+`src/core`、`src/runtime` 是指向 `cx/` 的符号链接。
+
+**cx/ 树**（`.cx` 模块体系，`#pragma unisa module/use`）：
+
+- `cx/sys/`（L0，23 文件）：对接 libc/POSIX 的唯一层（env/fs/proc/time/net/poll/tty/posix/sha/mem/dl/sig…）。
+- `cx/mem/`（L0）：所有者缓冲、arena、slice（Rust 式 Vec/String/所有权）。
+- `cx/text/`（L0）：带长度字节串比较/格式化/拼接（`tx_*`）。
+- `cx/crypto/`（L0）：纯 cx 密码学（sha256/b64/hkdf/aes-gcm/chacha20poly1305/x25519/bn/der/p256/rsa/x509/tls13）。
+- `cx/core/`（L1）：执行器（kernel/execute/stack/output/bytes/memory）。
+- `cx/driver/`（L1）：path/compat/args/output/deps/cli/route。
+- `cx/runtime/`（L1）：model_decode/package_*/stream_*/source_frame 等。
+- `cx/compiler/`（L1）：cxmod（模块解析）/asmtext（汇编文本）/streamname/netname 等名表。
+
+分层铁律：L0 才对接 libc/POSIX，上层禁 `#include` 和裸 libc（`tests/cxinclude.cx`、`tests/cxlibc.cx`、`tests/cxraw.cx` 三个棘轮，只降不升）。
+
+## 6. 事实表与权重（exec/ 与 weights/ 与 seed/）
+
+- `exec/facts/`（226 文件）：编译各阶段的**事实表**（pp-targets、lex-consts、lower-abi、image-elf/macho/pe…），经 `tools/facts-gen.cx` 生成，只经「事实表 → 生成器 → 表」修改。
+- `exec/`（enc/lex/lower/opt/parse/pp/prune/tapecheck…）：各阶段网络的事实与构造（含 `exec/c/` 旧 C 参考，只供对照）。
+- `weights/gold/`：十八网金表；`weights/*.f32/i8.unisa`：构造出的权重。
+- `seed/`：C 种子构造器（`gold_<阶段>_label.c` 规则形式、`ident.c` 身份、`ape.c` 打包）。
+
+## 7. 测试套件设计
+
+### 7.1 入口
+
+```
+sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
+```
+
+- `--smoke`：16 条本地冒烟（product 层 smoke 批次）。
+- `--list`：列全部批次 + 覆盖行 + 计划计数。
+- `--all ABS_SESSION`：全量资格判定（`tools/all-waves.cx` 会话 + `tests/all-aggregate.cx` 聚合）。
+
+### 7.2 注册表（两份 TSV）
+
+- `tests/batches.tsv`（350 行）：每个测试批次一行——id、implementation、layer、source、mode、platform、budget、materials、entry、args、coverage、expect。`IMPLEMENTED` 才进 QUALIFIED，`PLANNED` 不进。
+- `tests/coverage.tsv`（331 行）：每个覆盖行一行——id、layer、implementation、expected_or_gap、source。一行被至少一个 IMPLEMENTED 批次 PASS 即 satisfied。
+
+### 7.3 分层（coverage.tsv 的 layer 列）
+
+| 层 | 覆盖行数 | 内容 |
+|---|---|---|
+| contract | 140 | 语言/流/网合同（正反例、拒绝） |
+| interfaces | 112 | 流间接口、模块接口、L0 接口 |
+| negative | 30 | 具名拒绝、坏输入、语义级坏包 |
+| product | 22 | 产品端到端（编译/运行/镜像字节） |
+| library | 11 | 库/ABI（libunisacc、头布局） |
+| platform | 6 | 跨平台（六目标原生宿主） |
+| properties | 9 | 优化/property 性质 |
+
+### 7.4 19 张域矩阵（tests/*-domain-matrix.tsv）
+
+每张矩阵是一个「域」的逐格合同：`bootstrap`、`candidate`、`formats`、`hosts`、`interfaces`、`library`、`negative`、`optimization`、`phase-timing`、`properties`、`resources`、`ri`、`stream-e1/e2/e3/e4`、`stream-elf`、`stream-lower`、`stream-prune`。
+
+格状态：`COVERED_LOCAL`（本机批次断言了）/ `OBSERVED`（原生宿主观测）/ `DECLARED_DEPENDENCY`（有意声明的宿主依赖）= 满足；`MISSING` / `NEEDS_PRODUCT_CHANGE` / `NEEDS_FOREIGN_HOST` / `BLOCKED` = 开着的。
+
+- `full-domain.cx -- . DOMAIN` 逐格判域 PASS（开着的格为 0 才 rc0），19 个 `full-<域>` 批次就是它。
+- **外平台格**（`NEEDS_FOREIGN_HOST`）只能在**该原生宿主**上跑同一候选关掉——模拟/容器/缺席客机一律 BLOCKED/NOT_RUN，永远不算 PASS。逐格 oracle 见 [plans/foreign-host-runbook-cc.md](plans/foreign-host-runbook-cc.md)，原生 runner 见 [.github/workflows/candidate-native.yml](.github/workflows/candidate-native.yml)（ubuntu-24.04 / ubuntu-24.04-arm / macos-15-intel / macos-15 / windows-2025 / windows-11-arm）。
+- **已知缺口豁免**：`tests/waivers-0.0.43.tsv`（R 行理由 + W 行豁免），`matrix-waive.cx --check` 保证记录和矩阵一致。
+
+### 7.5 QUALIFIED 判定
+
+`--all` 跑 `tests/all-aggregate.cx`，QUALIFIED = **每个 IMPLEMENTED 批次有同候选 PASS 收据 + 0 unsatisfied + 0 unresolved 覆盖行**。材料身份绑定候选（换候选须重构造材料）。FAIL/REFUSED 粘住会话。
+
+## 8. 目录与文件结构（顶层）
+
+| 路径 | 内容 |
+|---|---|
+| `src/` | 产品六层入口（15 文件，5352 行，srcshape 棘轮只降不升） |
+| `cx/` | `.cx` 模块树（sys/mem/text/crypto = L0；core/driver/runtime/compiler = L1） |
+| `exec/` | 各阶段事实与构造（facts/enc/lex/lower/opt/parse/pp/prune/tapecheck；c/ 旧 C 参考） |
+| `weights/` | 十八网金表 + 构造权重 |
+| `seed/` | C 种子构造器（gold label 规则、ident.c 身份、ape 打包） |
+| `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
+| `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
+| `tools/` | 开发工具（326 个 .cx：生成器/棘轮/refactor/symindex/all-waves…） |
+| `plans/` | 活跃计划（v0.0.4x 路线 + 架构/分层/缺陷；已完成的归档到 archive/plans） |
+| `docs/` | 规格/术语（spec.md 在根、docs/glossary.md、docs/cx/） |
+| `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
+| `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、prd 历史 |
+| `apps/csih/` | csih 车道（归 csih 主人） |
+| `ujs/` | 论文 B（归论文 B 主人，unisacc 侧不碰） |
+| `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
+| `out/` | 临时产物（gitignore，日志/候选/材料/会话） |
+| `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
 
 <a id="current-plans"></a>
-## 2. 当前版本与有效计划
-
-STATEPRD：**版本状态（cc 维护，2026-10-31）**：已装的是 0.0.43 `43fbbb81`（五平台一个 `unisacc.com`，4.4 MB，结构用 `tools/com-tree.cx` 看）；离发布还差 RI 迁移、两代比较、全量测试到 QUALIFIED，再由主人授权发布。详细清单在 [release-0.0.43.md](plans/release-0.0.43.md) 的「当前状态」。0.0.44 的需求总览在 [v0.0.44.md](plans/v0.0.44.md) 最前面。下面两段「当前入口」是历史记录，入口路线现在是 whole-o，以 release-0.0.43.md 为准。
-**2026-10-25 主人重新裁定：0.0.43 现在重构。** 旧1333项测试套件整体归档，退出开发和发布的主验收路径；新套件按产品合同重新设计，直接由 `unisacc.com + .cx` 驱动。此项属于本版，不等待0.0.44。保留现有产品、源码、夹具及原始结果作为历史和迁移依据，不把旧结果自动计入新验收。
-
-**Python 归档（2026-10-30，cc，`a755ce969c`）：** 191 个已无活调用方的 `.py` 及会执行 `python3` 的旧 `.sh` 原路径挪入 `archive/reference-py/`（清单与依据见其 README）。活路径剩 94 个 `.py`：事实表生成器 `exec/facts/export.py` 与 `python3 -m unisa emit-kernel` 的实测闭包 42 个（原生替代前不能归档），`release/` 18 属其域；`apps/csih` 原有 34 个，2026-10-30 分两批归档 33 个到 `archive/reference-py/apps/csih/`；探针改用 `.cx` 桩和私有 tmux 见证，`check.cx` probes-net 6/0、loop 加 probes-e2e 8/0。只剩 `deepseek-proxy.py`，调用方是仓外的 rawcsih。另有 7 个缺失的系统接口和 `signal()`，在 0.0.43 上实测仍然缺，要走产品慢车道（`apps/csih/docs/python-debt.md`）。归档前后 `export.py --check` 行为不变、emit-kernel 产物逐字节相同、`tests/run.cx --list` 计数不变。第二批 `59948f29c8`、`af185e7069` 归档依赖已归档代码的旧 shell、`plans/pending` 与 `exec/pipeline/stages.tsv`。`42d03b6c0a` 让事实表生成器改读 `exec/facts/statics.tsv` 的 MAXTOK、不再读已归档的 `src/front_pp.c`，并重写 30 张表：29 张只变摘要头，`pp-autoinc-gen.tsv` 有 4 个 cx.h 函数依赖槽此前未随 cx.h 更新；现 `--check` 30/0。`kernel/` 里 40 个文件仍由 `python3 -m unisa emit-kernel` 生成，`unisa_headers.inc` 已改由原生 `tools/carried-header-export.cx` 生成。`.cx` 旧检查暂不归档：`tests/cxinclude|cxapis|cxtrunc` 三份棘轮在 HEAD 已红（51/71/167 行超基线），挪动会再改路径键。**更新（同日）：** 事实表生成器已全部移植为 `tools/facts-gen.cx`（30 张，加 bank 归属检查，`--check` 31/0），`export.py` 归档于 `07432e3ae3`，其导入闭包 7 个 `.py` 归档于 `e0bee5e42d`。仍在活路径执行的 Python 只剩 `python3 -m unisa emit-kernel` 的闭包，由 `tools/net-built-private.cx` 和 `tools/pp-built-private.cx` 调用；`4b9cc0ea95` 让它跳过生成物 `include/cx-flat.h`。
-
-**当前入口（2026-10-30）：** `src/executor.cx` 改用 `core.kernel`，`core_run` 走包里的 UNIKERN1 汇编核心。`tools/entry-build.cx` 编 33 只 `-funit` 对象，unit tape 接成文本后链成 `entry.elf`，再接已装产品尾部的 P3。第一代 `out/grk-entry-build-12` 由已装产品经 `sh` 构造，候选 2631060 字节，sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`。第二代 `out/grk-entry-build-13` 直接执行这只候选，33 只对象、`entry.elf` 和候选与第一代逐字节相同。候选侧最慢对象是 `driveface.o`，ns=11794761865，最慢相位 e4 推理 ns=5386000902。上一只 CX 核心候选编同一对象是 ns=34415356768。`dup.c -run` 在这只候选和已装产品上都退出 3。`hello.c -run` 两边都退出 0，stdout 是 `from hello.c`。build-13 上 148 格是 143 SAME、5 DIFF、0 TIMEOUT，记在 [plans/cx-modules.md](plans/cx-modules.md) 第 160 节。转发那一刀的候选是 `out/grk-entry-build-14/candidate`（sha256 `0989b4fdda853103b1f2a45e991654ca1b17d6e9b424d5b53192d989f4679c13`）。它的 56 格 SAME 记在第 161 节，不能挪到现在这只上。上一只运行缓存候选是 build-15（sha256 `5a9cb1b4bbf188119a48b80b59910f40a36b7c4cced45a71f0576827254aa02a`），单源命中 506 ms，当时没有宿主调用的程序只跳过 e3。运行缓存那只是 `out/grk-entry-build-17/candidate`，2717972 字节，权限 0755，sha256 `a051997fdf52304bfffd285cca02474b1f4743012abaf26e1a7b1f2439f3f2b9`。单源且 side-car 没有宿主槽时也存转发 ELF，命中后直接执行。候选整文件（含 P3）里 64 KiB 及以上的哈希走内核 AF_ALG，失败再回退软件实现。`tests/runcache.cx` 对这只是 12/0，首次 546 ms，命中 40 ms。细节在第 163 节。这只混合候选是显式 `--o1-drivers` 编出来的。148 格全 SAME 之后，`tools/entry-build.cx` 不带旗标也把 drive、host、driveface、driveroute、cxmod、tapegate 编成 `-O1`，`--o1-drivers` 仍接受。无旗标只重编了 tapegate.o 和 path.o（`out/grk-opt2-default`）：tapegate.o 与这只候选逐字节相同，path.o 与全 `-O2` 候选逐字节相同。整只候选没有按新默认重编。两次构造是同一份 `tools/entry-build.cx`（sha256 `f7231608fb6d2f0dc5fef01e00dc9aa84ab246be915e5ad259fe56ecae0e98a3`），各拆成三批。对象加链接 61448 ms → 52768 ms。混合候选是 `out/grk-opt2-o1/candidate`，2959636 字节，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。`tests/runcache.cx` 12/0，首次 515 ms，命中 41 ms。`tools/dev-run.cx` 不带参数的冷 `-run` 编译加上一次用法拒绝，6112 ms，退出 2。这不是 dev-run 自己的运行时间。和全 `-O2` 候选对同一份小程序的 `-run`，stdout 和 stderr 逐字节相同。数字在 [plans/perf-bottlenecks-2026-10-30.md](plans/perf-bottlenecks-2026-10-30.md) 的 B5。已装产品仍是 3035300 字节，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`。这不是产品安装。`76085cb99d` 给 entry-build 加了 `--target`，省略仍是 lnx/x86_64。不带该参数重编的 path.o、tapegate.o 与改前逐字节相同。四目标只编对象的结果在 [plans/entry-target-probe-2026-10-30.md](archive/plans/2026-10-30/entry-target-probe-2026-10-30.md)：lnx/arm64 的 33 个对象出了 ELF；osx 两个目标和 win/x86_64 各 33 个被已装产品拒绝。没有链接，没有安装。
+## 9. 当前状态与路线
 
 <a id="work-tree"></a>
-### 思维树
+### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点（2026-10-31）。已装 `./unisacc.com` 是 5145706 字节，sha `83343ec111521d731da6df41072ab0784b754833b98fc440ea68e7ea590ea775`，权限 755（rev edc2c7700b；上一版 33273544 在 `out/unisacc.com.33273544`）。备份 `out/unisacc.com.79fb84e6`。CX 面：`tools/surface-gen.cx`（提交 `a1394d6a5f`）按 `exec/pipeline/image-stages.tsv` 和 `gold-stages.tsv` 生成七流、十八网。compiler 与 runtime 两侧都有 stream 和 net。流步骤返回 0，`_in`、`_out`、`_model` 返回事实表的输入、输出、模型。网步骤返回 0。窄检查打出 `CX_SURFACE ok=25 formats=7 failed=0` 和 `CX_RUNTIME_SURFACE ok=25 formats=7 failed=0`。这两项没登记进 `tests/batches.tsv`，不记套件通过。sys 的 16 个模块原本就在，L0 未改。六格目标表：`tools/target-gen.cx`（提交 `05b682aa39`）按 `exec/facts/pp-targets.tsv` 生成 `cx/compiler/targetname.cx` 和 `cx/runtime/targetname.cx`。窄检查 `CX_TARGET ok=6 failed=0`，没登记，不记套件通过。声明金表：`tools/declared-gen.cx`（提交 `15dd0d0902`）按 `weights/gold/lexcls.tsv` 和 `lexword.tsv` 的表头生成两侧骨架，步骤返回 0，阶段名来自表头。窄检查 `CX_DECLARED ok=2 failed=0`。这两张不在十八网里。没登记，不记套件通过。包路线表：`tools/route-gen.cx`（提交 `4e46be302b`）按 `exec/c/compiler-routes.tsv` 生成两侧 `routename`。十行是 pp、tape、image、run。窄检查 `CX_ROUTE ok=10 failed=0`。后缀含 `/`，所以是名字表。这不是 `st_gap`。没登记，不记套件通过。镜像种类：`tools/image-gen.cx`（提交 `c3f7f553aa`）读六份编码器清单里相同的 `#! flags` 行，生成两侧 `image/` 下的 elf、macho、pe、object。步骤返回 0，`_kind` 返回这个名字。窄检查 `CX_IMAGE ok=4 failed=0`。这不是 `st_gap`。没登记，不记套件通过。格式名表：`tools/format-gen.cx`（提交 `0b6ff9ea89`）按 `exec/pipeline/image-stages.tsv` 的输入列和输出列，按第一次出现的顺序生成两侧 `formatname`。六行是 src.c、pp.text、tokens.typed、tape.text、target.text、image.bytes。模型文件那一列不是格式。名字里有点，所以是一张表。窄检查 `CX_FORMAT ok=6 failed=0`。没登记，不记套件通过。模型文件名表：`tools/model-gen.cx`（提交 `5565681e55`）按同一张表的模型文件列生成两侧 `modelname`。七行是 e2.net、e1.net、e3.net、e4.net、prune.net、lower.net、elf.net。每行都是阶段码加 `.net`。名字里有点，所以是一张表。窄检查 `CX_MODEL ok=7 failed=0`。没登记，不记套件通过。优化档名表：`tools/opt-gen.cx`（提交 `9d98126bd3`）按 `exec/c/compiler-routes.tsv` 的优化档列，按第一次出现生成两侧 `optname`。三行是 none、O1、O2。名字里有大写，所以是一张表。窄检查 `CX_OPT ok=3 failed=0`。这不是 `st_gap`。没登记，不记套件通过。路线组名表：`tools/group-gen.cx`（提交 `0860846cc0`）按 `exec/c/compiler-routes.tsv` 的后缀，取 `/` 前一段，没有 `/` 就取整段，按第一次出现生成两侧 `groupname`。四行是 pp、tape、image、run。`pp` 已是网模块的文件名，所以是一张表。窄检查 `CX_GROUP ok=4 failed=0`。十个后缀仍在 `routename`。这不是 `st_gap`。没登记，不记套件通过。系统名和架构名：`tools/axis-gen.cx`（提交 `4e3a8a702a`）按 `exec/facts/pp-targets.tsv` 的两列，按第一次出现生成两侧 `osname` 和 `archname`。系统三行是 lnx、osx、win。架构两行是 x86_64、arm64。窄检查 `CX_OS ok=3 failed=0` 和 `CX_ARCH ok=2 failed=0`。六格对子仍在 `targetname`。没登记，不记套件通过。后缀档名表：`tools/level-gen.cx`（提交 `f947fc00b3`）按 `exec/c/compiler-routes.tsv` 的后缀，取 `/` 后一段，按第一次出现生成两侧 `levelname`。三行是 O0、O1、O2。`pp` 没有这一段。`O0` 那一行的优化档列仍是 none。窄检查 `CX_LEVEL ok=3 failed=0`。没登记，不记套件通过。路线终点名表：`tools/end-gen.cx`（提交 `e5d3d671d6`）按 `exec/c/compiler-routes.tsv` 的最后阶段列，按第一次出现生成两侧 `endname`。五行是 e2、e3、e4、elf、lower。窄检查对上 `streamname` 的七个阶段码，有两个不在这张表里，打出 `CX_END ok=5 outside=2 failed=0`。这不是 `st_gap`。没登记，不记套件通过。非终点阶段名表：`tools/rest-gen.cx`（提交 `cd01e58d28`）按 `exec/pipeline/image-stages.tsv` 的阶段码，去掉 `endname` 里已有的最后阶段，按文件顺序生成两侧 `restname`。两行是 e1、prune。窄检查对上 `streamname` 和 `endname`，打出 `CX_REST ok=2 failed=0`。这不是 `st_gap`。没登记，不记套件通过。正式名表：`tools/official-gen.cx`（提交 `a4e5c9c48c`）按 `exec/pipeline/image-stages.tsv` 的正式名列，按文件顺序生成两侧 `officialname`。七行是 preprocess、lex、parse、opt、prune、lowering、encode。窄检查对上 `streamname` 的正式名，打出 `CX_OFFICIAL ok=7 failed=0`。`lex`、`parse`、`opt`、`prune` 已是模块文件名，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。阶段码表：`tools/code-gen.cx`（提交 `30b603c315`）按 `exec/pipeline/image-stages.tsv` 的阶段码列，按文件顺序生成两侧 `codename`。七行是 e2、e1、e3、e4、prune、lower、elf。窄检查对上 `streamname` 的阶段码，并核对这七行正好是 `endname` 加 `restname`，打出 `CX_CODE ok=7 failed=0`。`elf` 和 `prune` 已是模块文件名，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。runtime 网名表：`tools/netrt-gen.cx`（提交 `17b6f164bf`）按 `exec/pipeline/gold-stages.tsv` 生成 `cx/runtime/netname.cx`。十八行是 pp、lex、parse、type、scope、irsel、enc、reloc、regmap、tyinfo、pfconv、peep、opinfo、prec、binsel、isel、abi、combo。窄检查对上 compiler 的 `nn_at`，打出 `CX_NETRT ok=18 failed=0`。`lexcls` 和 `lexword` 不在这张表里。compiler 的 `netname` 没改。这不是 `st_gap`。没登记，不记套件通过。声明名表：`tools/declname-gen.cx`（提交 `11b425c1dd`）读 `weights/gold/lexcls.tsv` 和 `lexword.tsv` 的表头，生成两侧 `declname`。两行是 lexcls、lexword。窄检查对上两侧 `netname`，这两行都不在十八网里，打出 `CX_DECL ok=2 nets=18 failed=0`。骨架仍是原来的声明金表。这不是 `st_gap`。没登记，不记套件通过。runtime 流名对：`tools/streamrt-gen.cx`（提交 `e7b21f57f7`）按 `exec/pipeline/image-stages.tsv` 的正式名列和阶段码列，按文件顺序生成 `cx/runtime/streamname.cx`。七行是 preprocess/e2、lex/e1、parse/e3、opt/e4、prune/prune、lowering/lower、encode/elf。窄检查对上 compiler 的 `sn_at`，也对上 runtime 的 `officialname` 和 `codename`，打出 `CX_STREAMRT ok=7 failed=0`。compiler 的 `streamname` 没改。这不是 `st_gap`。没登记，不记套件通过。金表名册：`tools/goldname-gen.cx`（提交 `f02266519c`）先按 `exec/pipeline/gold-stages.tsv`，再接 lexcls 和 lexword 的表头，生成两侧 `goldname`。二十行。窄检查对上两侧 `netname` 和 `declname`，打出 `CX_GOLD ok=20 nets=18 decl=2 failed=0`。不是 `tools/gold-table.cx` 的字母序，那个文件没改。这不是 `st_gap`。没登记，不记套件通过。规则形名表：`tools/rule-gen.cx`（提交 `ff45dff882`）在这二十行里，留下有 `seed/gold_<阶段>_label.c` 的名字，生成两侧 `rulename`。十一行是 pp、lex、parse、type、scope、irsel、reloc、peep、opinfo、prec、binsel。窄检查对上 `goldname`，打出 `CX_RULE ok=11 outside=9 failed=0`。不是 `tools/gold-table.cx` 里的字母序，那个文件没改。这不是 `st_gap`。没登记，不记套件通过。没有规则形的金表：`tools/plain-gen.cx`（提交 `ea3f42e635`）在二十行名册里去掉有规则形的十一行，按原顺序生成两侧 `plainname`。九行是 enc、regmap、tyinfo、pfconv、isel、abi、combo、lexcls、lexword。窄检查对上 `goldname` 和 `rulename`，打出 `CX_PLAIN ok=9 rules=11 failed=0`。这不是 `st_gap`。没登记，不记套件通过。六格合成名：`tools/cell-gen.cx`（提交 `753b7bf420`）按 `exec/facts/pp-targets.tsv` 的行序，把系统名、斜杠、架构名合成两侧 `cellname`。六行是 lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64。窄检查对上两侧 `targetname`，打出 `CX_CELL ok=6 failed=0`。名字里有斜杠，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。预定义宏名表：`tools/predef-gen.cx`（提交 `f5f2b680dc`）按 `exec/pp/predefines.tsv` 的文件顺序生成两侧 `predefname`。八行。系统三行的选择子对上 `osname`，架构两行对上 `archname`。lnx 是 __linux__、__unix__、__ELF__。osx 是 __APPLE__、__MACH__、__unix__。win 是 _WIN32、_WIN64。x86_64 是 __x86_64__。arm64 是 __aarch64__。lnx 和 osx 的数据模型是 __LP64__。公共宏是 __UNISA__。窄检查打出 `CX_PREDEF ok=8 failed=0`。名字里有大写和下划线，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。自动引入头文件名表：`tools/hdr-gen.cx`（提交 `7eb624297f`）按 `exec/facts/pp-autoinc.tsv` 的文件顺序生成两侧 `hdrname`。六行是 assert.h、ctype.h、stdlib.h、string.h、wchar.h、stdio.h。窄检查对上两侧 `formatname`，这六行都不在格式名里，打出 `CX_HDR ok=6 formats=6 failed=0`。名字里有点，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。标准宏名表：`tools/std-gen.cx`（提交 `789bc91e6c`）按 `exec/facts/pp-standard.tsv` 的文件顺序生成两侧 `stdname`。三行是 __STDC__、__STDC_VERSION__、__STDC_HOSTED__，值带着事实表里的引号，分别是 "1"、"199901L"、"1"。窄检查对上两侧 `predefname`，这三行都不在预定义宏里，打出 `CX_STD ok=3 predef=8 failed=0`。名字里有大写和下划线，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。保留拼写名表：`tools/word-gen.cx`（提交 `05e769f889`）按 `exec/facts/pp-init.tsv` 的文件顺序生成两侧 `wordname`。十三行。dir 三行是 pragma、line、error。intern 十行是 _Pragma、push_macro、pop_macro、"0"、"1"、defined、printf、__VA_ARGS__、__LINE__、__FILE__。窄检查对上两侧 `stdname`，这些词都不在标准宏里，打出 `CX_WORD ok=13 dir=3 intern=10 std=3 failed=0`。名字里有大写、下划线和引号，所以是一张表。这不是 `st_gap`。没登记，不记套件通过。字节类、转义和布局：`tools/nametab-gen.cx`（提交 `c8860b5c4f`）按 `tools/nametabs.tsv` 三行生成两侧 `bytname`、`escname`、`layname`。字节类两行是 alpha、digit。转义十一行，含 "0"，反斜杠的值是 92，引号的值是 34。布局六十一行，跳过文件中段的注释，PMSTACK 是 35184372088832。`--check` 六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。运算符、词法类和语法词：`tools/nametab-gen.cx`（提交 `91e3a94a36`）按 `tools/nametabs.tsv` 再加三行，生成两侧 `opname`、`tokname`、`prsname`。运算符二十五行，第一行是左括号，码 1。词法类六行，EOF 的值是 256。语法词六十六行，引号已去掉，分组还在。`--check` 连前三张一共十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。镜像常数：`tools/nametab-gen.cx`（提交 `798e404acf`）按 `tools/nametabs.tsv` 再加三行，生成两侧 `elfname`、`macname`、`pename`。ELF 八行，VADDR 是 4194304。Mach-O 三十行，跳过十六进制字节行，VMADDR 是 4294967296。PE 三十六行，值列有数字也有名字，所以保持原文，IMAGEBASE 是 5368709120，DLL 是 KERNEL32.dll。`--check` 连前面一共十八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。地址和 ARM 绑定十二张：`tools/nametab-gen.cx`（提交 `24534af613`）再生成两侧 `adbind` 8 行、`adlnx` 4 行、`addyn` 4 行、`adosx` 4 行、`adwin` 5 行、`abrbd` 5 行、`afpbd` 11 行、`ainbd` 2 行、`alabd` 26 行、`amemb` 18 行、`aobjb` 2 行、`awinb` 3 行。都是名字加 long long。`--check` 连前面一共四十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。ARM 列和段十五张：`tools/nametab-gen.cx`（提交 `e4f553bc38`）再生成两侧十张多列或单列：`abrlb` 16、`abrsc` 6、`ainnm` 32、`aintlb` 12、`aitos` 11、`alaynm` 62、`amemlb` 22、`aobjmv` 6、`awinnm` 62、`awiarg` 34。`enc-arm.tsv` 分段五张：`armconst` 5、`armconstx` 2、`armspec` 77、`armreg` 31、`armitoa` 3。`armspec` 现已收齐十列。八段：`armmeta` 15、`armimp` 22、`armink` 18、`armhdr` 10、`armwky` 17、`armrst` 7、`armtgt` 3、`armput` 4。`--check` 连前面一共八十八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。x86 十五张：`tools/nametab-gen.cx`（提交 `a7f2af12c6`）再生成两侧 `x86const` 51、`x86constx` 2、`x86wi` 17、`x86wimp` 22、`x86cls` 70、`x86reg` 16、`x86ids` 35、`x86meta` 11、`x86wmeta` 7、`x86put` 4、`x86iarg` 3、`x86irip` 3、`x86objb` 1、`x86objm` 4、`x86wari` 5。`x86const` 第一行是 OPC，值 70000000。`--check` 连前面一共一百一十八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `a125b98dcd`）再生成两侧 `x86wbind` 1、`x86wfield` 11、`x86wmrow` 7、`x86wop` 11、`x86wreg` 8、`x86wstdh` 3、`x86warg` 93、`x86itoa` 4、`x86wval` 5。`x86wbind` 第一行是 IMP，值 65970697666560。`x86itoa` 和 `x86wval` 的值列保持原文。`--check` 连前面一共一百三十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `53e67d74fc`）再生成两侧 `hbabody` 30、`hbawin` 36、`hbgar` 12、`hbgx64` 12、`hblib` 1、`hbres` 3、`hbbind` 2、`hbxbody` 112、`hbxwin` 167。`hbbind` 第一行是 armfn，值 2852127728。守卫和库的格子保持原文。`--check` 连前面一共一百五十四份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `49addd7bfb`）再生成两侧 `fpname` 40、`fpval` 2、`libsym` 1、`libsymx` 7、`mldl` 4、`mlimp` 22、`mlres` 5、`mllay` 3、`objplan` 15、`unitbox` 7、`shaconst` 2、`shak` 64、`shah` 8。`objplan` 第一行是 OBJ_RELOCS，值 274877906944000。`fpval`、`libsymx`、`mllay` 的值列保持原文。`--check` 连前面一共一百八十份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `2588d8333a`）再生成两侧 `pefconst` 16、`pefha` 105、`pefhta` 1、`pefhx` 105、`pefhtx` 1、`pefimp` 61、`pefimt` 1、`pefbyt` 44、`pefnam` 26。`pefconst` 第一行是 DATA，值 1099511627776。`pefimp` 最长行 5376。value 和 lead 保持原文。`--check` 连前面一共一百九十八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `5b976e233d`）再生成两侧 `peconst` 16、`pearmh` 105、`pearmt` 1、`pex86h` 105、`pex86t` 1、`peimps` 53、`peimpt` 1、`pebyte` 43、`penoff` 22。`peconst` 的 cookie_at 是 896。`peimps` 最长行 4656。value 和 lead 保持原文。`--check` 连前面一共二百一十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `43df9fe5d8`）再生成两侧 `maconst` 11、`macha` 139、`machta` 1、`macsa` 26、`machosigt` 1、`machosigk` 1、`machx` 139、`machtx` 1、`macsx` 26、`macstx` 1、`macpre` 1、`macbind` 1、`macbyt` 44。`maconst` 的 page_mask 是 -16384。`machosigk` 是 HDRS_x86_64，值保持原文 1020。`--check` 连前面一共二百四十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `4813462ce8`）再生成两侧 `elfconst` 8、`elfiat` 22、`elfiatt` 1、`elfdls` 4、`elfdlst` 1、`elfdst` 1、`elfdstk` 1、`elfsar` 29、`elfsart` 1、`elfdar` 93、`elfdart` 1、`elfdark` 1、`elfsx` 29、`elfsxt` 1、`elfdx` 93、`elfdxt` 1、`elfrel` 4、`elfbyt` 33。`elfconst` 的 DATA 是 1099511627776。`elfdstk` 是 HDRS_arm64，`elfdark` 是 HDRS_x86_64，值都保持原文 176。`@dynslots` 只有段头、没有数据行，不生成。`--check` 连前面一共二百七十八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `93c337cd39`）再生成两侧 `aggret` 1、`aggfail` 1、`afuse` 46、`btfld` 24、`boolc` 3、`ccint` 3、`condn` 11、`digts` 1、`enumt` 12、`errcn` 1、`fltcc` 2、`fwdrc` 2、`fntyp` 27、`iwarn` 1。`ccint` 的 PROTO 是 253987186016256。`iwarn` 的警告原文带着引号。json 保持原文。`--check` 连前面一共三百零六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `5a24501519`）再生成两侧 `kcall` 13、`kcexj` 2、`kcexi` 1、`kctrl` 5、`kerms` 11、`kertx` 3、`kcfa` 1、`kcfb` 1、`kcfc` 1、`kflo` 6、`kfmt` 2、`kfcv` 9、`kfwd` 2。`kcexi` 的 SKIPS 是 469762048。`kerms` 是五列，`kertx` 是三列。json 保持原文。`--check` 连前面一共三百三十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `3dc2a3209f`）再生成两侧 `toknj` 1、`tokni` 10、`gnint` 7、`gnjso` 42、`laykf` 1、`ldat2` 1、`ldata` 61、`lenvf` 7、`kdreg` 23、`klreg` 8、`limps` 1、`lmapm` 3、`lmodm` 6、`lresm` 6、`mctrl` 7。`gnjso` 只记名字和类别，不选值列。`tyrows` 那格 166237 字节，`typewords` 那格 522 字节，都没进表。`tokni` 的上限能放进 long long。`--check` 连前面一共三百六十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `2df8978065`）再生成两侧 `kpaf` 1、`kpar` 4、`kqfa` 1、`kqfb` 1、`kqfc` 1、`kqfd` 1、`kqfe` 1、`kqff` 1、`kqfg` 1、`ksij` 1、`ksjs` 20、`ksta` 5、`ksts` 3、`ksii` 1、`kssj` 3。`ksij` 的 VS 是 7000000。`ksii` 的 TK_STR 是 104。`k2-printfallback.tsv` 没有数据行，不生成。`--check` 连前面一共三百九十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `984cf20375`）再生成两侧 `ktlm` 1、`ktcv` 1、`ktru` 5、`kuny` 4、`kulc` 1、`kumd` 2、`kunr` 5、`kucb` 7、`kvf1` 6、`kval` 2。`kulc` 的 MAPS 是 53876069761024。`kumd` 的 DECL 是 252887674388480。`kucb` 是 call_bytes 七行。`--check` 连前面一共四百一十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `61d11f11f7`）再生成两侧 `kutp` 2、`kuql` 5、`kutk` 21、`kuti` 10、`kutj` 1、`kuts` 3、`kulen` 4、`kuct` 5、`kusp` 2、`kutl` 7、`kuky` 257、`kuki` 3。`kutp` 的 N 选了，26195 字节。`kuki` 的 STATIC 是 1099511627776。`k2-units-tokens` 各段一次铺完。`--check` 连前面一共四百三十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `8109f5f8b6`）再生成两侧 `kevoc` 364、`kepair` 33、`keenc` 5、`labop` 528、`labi` 522、`labsel` 155、`lopm` 775、`lpvm` 133、`lpvj` 1、`lpvi` 2。`kevoc` 用 explode，从第 3 列起一词一行。`lopm` 二十一列，mode 和 prev 是 long long，prev 可以是 -1。`lpvi` 的 zero 是 0、eight 是 8。`--check` 连前面一共四百五十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。`tools/nametab-gen.cx`（提交 `df0217a820`）再生成两侧 `layft` 27、`lxdom` 3、`lxgen` 11、`lxins` 9、`lcbg` 3、`libdt` 5、`lbtyp` 1、`lvf1` 1、`lvf3` 1、`lvf4` 1、`lvf5` 1、`locn` 1。`lxgen` 只记名字和类别。`IDPFX` 那格 103954 字节，没进表。`lbtyp` 的 FRAME 是 87960930222080。`--check` 连前面一共四百八十份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。lower 从 armfuse 到 print-width 十四张在两侧：`lafne` 1、`lafsh` 53、`lcint` 23、`lcjso` 2、`lcwrd` 2076、`lcenv` 1、`ldint` 21、`ldjso` 1、`llib` 21、`llex` 22、`llmd` 31、`lofw` 77、`lofc` 5、`lprn` 2。`lcenv` 只记名字和类别，`codeenv` 那格 153037 字节没进表。`--check` 连前面一共五百零八份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。规格表现在 254 行，上限 256，下一组最多再加两行。native-abi、numeric、objectdefinitions 九张在两侧：`nabrg` 3、`nabi` 9、`nuins` 2、`nunam` 17、`odint` 4、`odgvh` 1、`odgva` 1、`odfnh` 1、`odfna` 1。`nabi` 的值都进了表，最大一格 genfresh 是 14614 字节。objectdefinitions 顶上 4 个整数和四段一起铺。`--check` 连前面一共五百二十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。规格表现在 263 行，上限 1024。opt 和 pp 十张在两侧：`oanam` 48、`ogpep` 1、`ogjso` 6、`oppnm` 106、`oprnd` 56、`prnfd` 2、`p2ini` 2、`pakey` 1、`pajso` 6、`ppgso` 11。peepinit 那格 94089 字节，keys 那格 107708 字节，只记名字和类别。`--check` 连前面一共五百四十六份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。规格表现在 273 行，上限 1024。printf、signature、structreturn 八张在两侧：`pfbfk` 3、`pcf1` 2、`pcf2` 2、`pcctl` 8、`rwtxt` 8、`sigly` 1、`srrea` 1、`srsr` 1。SIG_RADIX 是 16384，sr 的 loc 是 1000000。`--check` 连前面一共五百六十二份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。规格表现在 281 行，上限 1024。top、unused、vla 九张在两侧：`tlpci` 1、`tlptx` 2、`tmcbk` 8、`tmcct` 1、`tmsbk` 24、`tmsct` 1、`uwtxt` 2、`uwbnk` 8、`vlajs` 2。POLICY 是 1。`--check` 连前面一共五百八十份 ok，bad=0。两侧 `-c -funit` 编过。没登记，不记套件通过。这不是 `st_gap`。规格表现在 290 行，上限 1024。入口路由名仍是 `src/stages.cx` 的 `st_gap` 手写链，没有事实表。RI 迁移和两代对照仍待办，只记账。下面代码块是 2026-10-30 的记录。逐刀旧账在 [plans/cx-modules.md](plans/cx-modules.md)；10-30 之前的原文在 [归档](archive/prd-c43-history-20261030.md)。
+当前节点（2026-11-01）。已装 `./unisacc.com` = `83343ec1`（5,145,706 B，rev `edc2c7700b`，0.0.43）。上一版 `33273544` 在 `out/unisacc.com.33273544`。
 
 ```text
-0.0.43
-├─ 测试体系重建（主人 10-25）：tests/run.cx --list（2026-10-30）289 批 / 270 已实现；覆盖 269 / 已实现 250；未准备 176；19 宽合同未解；--all 从未在一个候选上完整执行
-├─ CX 结构重写 unisacc.com（主人 10-29）
-│  ├─ 旧 C 已归档 archive/reference-c/（只供对照）；新入口 src/unisacc.cx 六层：host / packmodel / executor / stages / drive / bind
-│  ├─ 候选：tools/entry-build.cx 33 只对象 → out/grk-entry-build-12/candidate（sha 11b7a23a…，自带已装 P3）；13 与 12 逐字节相同
-│  ├─ 对拍：build-14 sha 0989b4fd 的 56 格 SAME 只属于那只。运行缓存候选 build-17 sha a051997f；tests/runcache.cx 12/0（首次 546 ms，命中 40 ms）。out/grk-opt2-o1 sha e477a4c7 上 148 格全 SAME，表在 out/grk-opt2-mx（不提交），见第 164 节。正式构造不带旗标也是这六只 -O1
-│  ├─ 自举：第二代 13 已编完 33 只对象并链上，最慢 driveface.o 11.8s，低于 55s
-│  ├─ 未切换：旧构造脚本 exec/c/buildcompiler.sh 等仍指向已归档 C；已装产品未换
-│  ├─ 四目标对象探针（2026-10-30，已装产品，不算通过）：lnx/arm64 33 个对象都是 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 个编译失败，第一条诊断都是 model driver 还没把 -c -b 接到非 Linux。没有链接，没有 wrap。见 plans/entry-target-probe-2026-10-30.md
-│  ├─ host 的 include（2026-10-30）：`src/host.cx` 不再写 `#include`。mmap、mprotect、munmap 在 `cx/sys/mem.cx`；dlopen、dlsym、dlclose、dlerror 的地址在 `cx/sys/dl.cx`。open 的 flag 仍走前导。`tools/check-cx-sys.cx` 实跑 PASS，ok=100，fail=0。`tests/cxinclude.cx --check` 不再报 `src/host.cx`（整次仍因 apps/csih 失败）。`tests/cxraw.cx --check` 是 629 个已跟踪文件、19634 次，0 超基线。候选 `out/grk-host-sys/candidate`，2963732 字节，sha256 `9fb93c137363b210295870853fcf01b6693414270bc57f5c1438779c197535bf`；entry.elf 1327712 字节，sha256 `da3f42daed4faef32ac550b67856eade8eb344effaafca9a5ea0cb3c3c09facd`。runcache 12/0（冷 586 ms，命中 40 ms）。对拍前 10 格 SAME（do.c 的 -E/-S/-run，以及 -o 的 lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，再加 fact.c -E）。这一片写到 22 格全 SAME 就停，LEFT 126。不能装。
-│  ├─ lnx/arm64 第二片（2026-10-30，不算通过）：`out/grk-arm64-link/entry.elf` 1315376 字节，sha256 `c0adf34a…`，ELF aarch64。`--version` 和 x86_64 的 `entry.elf` 标准输出、标准错误逐字节相同（`unisacc 0.0.43\n`）。接了 P3 的候选 `-run` 在 qemu 下 memfd 回 ENOSYS（errno 38）。`hs_forward_exec` 没有落盘回退，待补，这一刀不改。改测 `-o`：同一只 `entry.elf` 在 qemu 里 `-b lnx/arm64 -o hello`，编出的 hello 打出 `from hello.c`，和 x86_64 的 hello 标准输出、标准错误逐字节相同。见 plans/entry-arm64-smoke-2026-10-30.md
-│  ├─ osx/win 的 -c（2026-10-30，只查不改）：不带 `-funit` 在 `src/driver/route.cx` 第 336 行拒绝。带 `-funit` 在 `src/drive.cx` 第 1939 行报 `NOT_IMPLEMENTED object`。单文件 `-o` 能出 Mach-O 和 PE。见 plans/osx-win-object-2026-10-30.md
-│  ├─ osx/win 整程序 -o（2026-10-30）：去掉 `hostnative.cx` 后 osx/x86_64 写出 Mach-O，没有 P3（包在 wrap 时才接）。`readlink` 和 `getuid` 已收进 `cx/sys`（`78bc1b53c4`，`host.cx` 在 `6c3ede8ea7`）。`sy_stat` 的 Windows 分支用 `GetFileAttributesExA`，ino 和 dev 填 0。32 源 win `-o`（`out/grk-win3-o`）13.745 秒停在 e3，只剩 `undefined function 'stat'`。`lstat` 再收进 `sy_lstat`、`sy_exists`、`sy_is_reg` 后，`out/grk-win3-o2` 13.840 秒仍是这一条。调用者是前导 `cx_read` 的 Windows 目录检查，不是 `sys.time`。改成 `GetFileAttributesExA` 后，`out/grk-win3-o3` 的 units 和 e3 都过，lower 拒绝 `win/x86_64 lowering`，没有 PE。这句是 `code-shell` 的兜底，生成期写进模型；已装产品不读 `exec/lower` 的表。`{op}` 不是生成期环境键，写进 `@rej` 只会留下字面量。失败边改为诊断流打出操作码，有操作数时再打第一个。`.sys poll` 的 win 带是这句拒绝，osx 带出 Mach-O；`__ccw_0:` 的 win 带也是这句，osx 带出 Mach-O。32 源的 tape 在 `out/grk-win-gap/slice.tape`（7821279 字节）。`.sys` 和 win 门 0 的交集只有 `hs_fx` 里的 `.sys6 syscall`，没有 `__ccw_`。`hs_ns` 不再写 `#include`，改 `#pragma unisa use sys.time`，用 `sy_mono` 换成纳秒。`cx/sys/time.cx` 不进 32 源清单。`hs_fx` 在 Windows 上返回 -1：`-run` 和运行缓存里的 forward ELF 会失败并提示改用 `-o`，`-o` 本身不靠它。`out/grk-pe-sy/slice-win.com` 是 PE32+，1569280 字节，sha256 `031e8594b020de07047f336577cbcd3ef759e0d2bf44ee524945c67b6f9f5bde`，`--pe` 判据 12/0，没有 P3。osx 32 源仍是 Mach-O（`out/grk-pe-osx/slice-osx.com`，1535842 字节）。候选 `out/grk-pe-cand/candidate`，3013188 字节，sha256 `4167af03…`。对象链接缺 `utimes`，由 `hostnative.cx` 的 `utimensat` 补上。runcache 12/0（冷 526 ms，命中 41 ms）。对拍前 10 格 SAME，这一片 22 格全 SAME，LEFT 126。`cxinclude --check` 为 ok。PE 已出、结构已验、未在 Windows 上运行。没有安装。见 plans/osx-win-whole-o-2026-10-30.md
-│  ├─ 模块身份（2026-10-30，候选，未装）：同一个文件从两条软链进来时，用 `sy_realpath` 折成一条再比，不再报 defined twice。`sy_stat_t` 没有设备号，不比 inode；硬链接的两个真名仍算两个模块。`cxmod` 不 `use sys.fs`，只在函数里声明 `sy_realpath`：`-funit` 会把 `sys.fs` 再编进 `cxmod.o`，和 `drive.o`（经 `runcache`）里的 `sy_fstat` 重复。候选 `out/grk-modid/candidate` 2976044 字节，sha256 `d903d2258641dc17141cef736f36b3fc8501b169ce704f6d81923eaa1dc7bb88`。`out/modrepro` 编过并输出 `1`。`tests/cxclash` 仍报 `exported by both`。`cxdir_main` 退出 35，`cxnest_main` 退出 36，`tests/cxcycle/ping.cx` 报循环，`cxpriv_ok` 退出 42，`cxpriv_bad` 报 `cxpriv_hidden`。已装产品仍是旧的，这条要等换产品才生效
-│  ├─ 宿主转发和单独编译（2026-10-30，设计如此，不改源）：`-S` 和不带 `-b` 的 `-c` 留在 tape，不建宿主桩，`setpgid` 报 undefined function。`-c -b lnx/x86_64 -o FILE.o` 能编过，符号留成未定义；再链接报 `undefined reference to setpgid`。能跑的程序仍从源码 `-o` 或 `-run`。见 plans/host-forward-compile-2026-10-30.md
-│  ├─ 间接原型（2026-10-30，候选，未装）：调用方单元里没有声明、别的单元又定义了这个函数，就报 `call to undeclared function`，同一文件里的调用都报，并点名函数、声明它的模块和本文件。一个单元最多 48 个 use。没人定义的名字仍留给后面的 undefined function。本版不把原型顺着 use 传出去。候选 `out/grk-iproto/candidate`，3025940 字节，sha256 `4ac3c2d4…`。`out/indirect-proto/main.cx` rc=1，点名 user.cx 的 tx_snprintf 和 tx_strtod。直接 use 的对照 rc=0，输出 `[ab-42] n=5 num=2.250000`。runcache 12/0（冷 536 ms，命中 40 ms）。`src/drive.cx` 对 `sy_env_vec` 直接 `use sys.env`。夹具 `tools/symindex/fixture/proto/user.cx` 故意不补。`tests/cxclash` 仍先报两个 m 都导出。已装产品仍是 79fb84e6。提交 `b2f2e45ef6`、`f781d1ca4d`、`376c2af9fa`。见 plans/indirect-proto-2026-10-30.md
-│  ├─ 闭包进两只对象（2026-10-30，源已交，未再链当前树）：`src/drive.cx` 两处 `strcmp` 改成 `tx_eqz`（`376c2af9fa` 之后，`367ffcb6d5`）。已装产品 `-O1 -c -funit` 编这个文件，退出 0，对象 1326376 字节。`path.cx`、`compat.cx` 仍是 `strcmp`：再 `use text.text` 会把 `tx_*` 再编进 `path.o`、`compat.o`。不带 `-funit` 的 `-c` 对没有 main 的单元报 `not covered: no main`（`path.cx:55`；`tui.cx` 拉进来的 `guard.cx:36` 也是这句，和 use 条数无关）。19:35 的候选 `out/grk-iproto/candidate` 仍是 3025940 字节、sha256 `1026a5c5…`，未装，不含其后的提交。见 plans/closure-once-2026-10-30.md
-│  ├─ cx-unit-graph 三处失败归 closure-once（2026-10-31，grk 定：不改断言、不转 NOT_CLAIMED，批次保持红）：`-c -funit` 把 `use` 闭包以全局符号编进单只对象，`nm top.o` 有 `T mid_value`、`T leaf_value`；`top.o`+`mid.o` 链接报 `multiple definitions of mid_value`，`top.o`+`mid.o`+`leaf.o` 与 `(top,mid).o`+`leaf.o` 同因。`missing-leaf` 因此报重复定义而不是 `undefined reference to leaf_value`（缺失模块拒绝与无输出两条仍 PASS）。`cx0-unit` 28 断言 failed=0（`ae357e1ee3`：`cxm_samefile` 改 `cxm_eq`，去掉未定义的 `sy_realpath` 声明）。`cx-host-run` 探针改扫 `/proc/<pid>/stat` 的 pgrp 并跳过 `Z`（`99f0f1c4fd`），failed=0。见 plans/closure-once-2026-10-30.md
-│  ├─ core 四只堆调用（2026-10-30，源，未装）：`cx/core/stack.cx`、`output.cx`、`bytes.cx`、`memory.cx` 不再直接调 realloc、calloc、free、memcpy、memmove、memcmp，改走 `mm_grow`、`mm_zalloc`、`mm_free`、`mm_copy`、`mm_move`、`mm_same`。前三只不够内存仍 fail 后中止；memory 仍返回 `CM_ALLOC`。这四只不在 33 只产品对象里。已装产品实跑：`CXCORE_STACK`、`CXCORE_OUTPUT`、`CXCORE_BYTES` failed=0；`cx/check_memory.cx` 138 条 failed=0；`tests/core-stack-empty.cx` failed=0（弹出空栈退出 37）。没有安装
-│  ├─ runtime 七只字节（2026-10-30，源，未装）：`model_payload`、`network_structure`、`packagestruct`、`package_lifetime`、`package_decode`、`model_decode`、`stream_resource` 的 malloc、free、memcmp、memcpy、memset 改走 `mm_alloc`、`mm_free`、`mm_same`、`mm_copy`、`mm_fill`。`package_lifetime` 的 strcmp 和 `stream_resource` 的 strchr、strlen 留着：再 `use text.text` 会和 `drive.o` 里的 `tx_eqz`，或和检查文件已有的 `tools/text` 路径，变成两份。已装产品窄检查 failed=0：`CXMODEL_PAYLOAD`、`CXNETWORK_STRUCT`、`CXPACKAGE_STRUCT`、`CXSTREAM_RESOURCE`、`CXPACKAGE_LIFETIME`、`CXPACKAGE_DECODE`、`CXMODEL_DECODE`、`CXMODEL_REFERENCE`。没有安装
-│  ├─ cx0 包字节（2026-10-30，源，未装）：`cx/cx0/bundle.cx` 的 malloc、calloc、realloc、free、memcpy、memcmp、memset 改走 `mm_alloc`、`mm_zalloc`、`mm_grow`、`mm_free`、`mm_copy`、`mm_same`、`mm_fill`。strlen、strcmp、strchr、snprintf、memchr 留着。`cx/cx0/mem` 和 `tests/preprocess/mem` 指到已有的 mem。已装产品 `-cx-plan` 两条退出 0；窄探针读 10 字节拒绝 `bundle-size`，读 160 个 0 拒绝 `bundle-version`，打出 `CX0_BUNDLE_NARROW`。整批 cx0-bundle 要 e2model，这次没跑。没有安装
-│  ├─ workspace 释放（2026-10-30，源，未装）：`cx/workspace/driver.cx` 的 21 处 free 改成 `mm_free`，并 `use mem.heap`。malloc、realloc、memcpy、strcmp 没动。`cx/workspace/mem` 指到已有的 mem。已装产品 `-c -funit` 改前改后都退出 0；`tests/workspace.cx` 10 条 failed=0。没有候选构建，没有安装
-│  ├─ 产品层 safe 表（2026-10-30，只扫描，未改源）：对 cx/ 和 src/ 里 72 个文件跑 `find --auto`。没进这 72 个的是 L0（sys、mem、text）、host、hostnative、kernel、process 这几只、execute、plan、source_frame。扫描时 `args.cx`、`output.cx` 工作区有别人的改动，没放进去。事后这两份已干净：`output.cx` 已 `use mem.heap`，没有剩余的 free、malloc、realloc；`args.cx` 有 1 处 realloc，会新加 `mem.heap`，不收。heap、strcmp-eqz、strcmp-eq、strcmp-truth、eqz-fold 的 accept 都是 0。heap 有 139 处 free，全是 skip，因为文件旁边没有 mem。另有 3 处是 workspace 的 malloc 和 realloc，规则写明要 review，这轮不收。strcmp 里 path、compat、workspace、bundle 旁边没有 text；driveface 和 packmodel 会新加 `text.text`，`drive.o` 里已经有 `tx_*`。剩下的 free 在 drive、stages、driveroute、tapegate、driveface、executor、packmodel。这 7 个都是 33 只产品对象。再 `use mem.heap` 会把 `mm_*` 再编一份，和 `input.o` 里那份撞上。没有候选构建，没有安装
-│  ├─ 四只字符串相等（2026-10-30，源，未装）：`path` 7 处、`compat` 5 处、`driveface` 3 处、`packmodel` 3 处，从 `strcmp` 改成各自文件里的静态比较。上限 1<<20，走到头还没有 NUL 就算不相等。没有 `use text.text`，所以不会把 `tx_*` 再编进这四只对象。`path` 的 `strlen` 还在。已装产品 `-c -funit` 四只都退出 0。`check-driver-path` 和 `check-driver-compat` 都是 failed=0。没有候选构建，没有安装
-│  ├─ 四文件再去一层 libc（2026-10-30，源，未装）：`path` 的 `strlen` 改成上限 1<<20 的本地长度，这段里没有 NUL 就不算后缀。`output` 的临时名不再调 `strlen`、`strrchr`、`snprintf`、`getpid`：目录前缀和 `.unisacc-<pid>-<n>.tmp` 在本文件拼出来，pid 用 `sy_pid`，只加了 `use sys.proc`。`output` 不在 33 只产品对象里。`args` 的 `memcmp` 和同一块里向前挪的 `memmove` 改成本地循环，`realloc` 留着。`packmodel` 的 `memset` 和 `memcmp` 改成本地循环，`free` 和 `realloc` 留着。已装产品 `-c -funit` 四只都退出 0。`check-driver-path`、`check-driver-output`、`check-driver-args` 都是 failed=0。`packmodel` 没有窄批次，没跑。工作区五个棘轮实跑 ok=5，cxlibc 23118 次、基线 23462、0 超基线，没有 `--write`。没有候选构建，没有安装
-│  └─ 注册表里仍读旧 C 的批次见 plans/archived-c-batches-2026-10-30.md：比对类 6 个已改指 archive/reference-c，-I exec/c 加 source_frame/codecgate 对象，实跑全 PASS；p3-library-* 待 p3-pack-ctx 材料；旧构造路线（hostseed-*、ri-material-*、package-controls 等）归档还是标不可运行，待主人定
-├─ 性能（plans/perf-bottlenecks-2026-10-30.md）
-│  ├─ B1 E2 每个 #include 整缓冲重扫：前导部分已解（4f4a2ae2b3，include/cx.h → 生成的单文件 cx-flat.h，tools/cx-flatten.cx --check；空 main E2 1.74→0.09 s，候选冷编 facts-gen 40.5→16.8 s）；用户自己的 #include 仍待规则方案
-│  ├─ B2 执行器自编 -O2 代码质量：主人定走汇编。cx/core/kernel.cx（f03c5a940d）接包内 UNIKERN1；入口已切 src/executor.cx use core.kernel。候选编 driveface.o 34.4s→11.8s，e4 推理 14.8s→5.39s
-│  ├─ B3 运行缓存：单源也存转发 ELF，大文件哈希走 AF_ALG。tests/runcache.cx 对 build-17 是 12/0（首次 546 ms，命中 40 ms）。包解析和解压还在
-│  └─ B5 六个驱动对象用 -O1：同一份 entry-build.cx，对象加链接 61.4 s → 52.8 s。混合候选 runcache 12/0（首次 515 ms，命中 41 ms），dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。148 格全 SAME 后，不带旗标也是这六只 -O1
-├─ 去 Python（范围不含 ujs/、apps/csih/）：活路径上已没有 .py，也没有执行 Python 的脚本或 workflow 步骤（逐项见 plans/python-residue-2026-10-30.md）
-│  ├─ 原生替代：事实表由 tools/facts-gen.cx 生成；kernel/ 由 tools/kernel-emit.cx 生成；ujswasm 网表由 iterate/construct/construct.c 生成（9eed33fe1b）
-│  ├─ 已归档：draftfetch.py（defender-scan 改用 gh/jq）、windows-signing 的内联 Python 和 apeinspect.py（改为 release/ci/*.cx，db8048c8b3）、buildcompiler.sh、seal_candidate.sh、precheck.sh
-│  ├─ csih 车道自己迁的：deepseek-proxy.py 改为 deepseek-proxy.cx（b3bf45395b）
-│  └─ 未实跑：两个 workflow 改动都还没在 CI 上跑过；windows-signing 需要检出里有 unisacc.com，现在它被 .gitignore 忽略，怎么提供待主人定
-├─ 分层：plans/cx-layers.md；L0 包 cx/text、cx/mem（arena）、cx/sys（env/fs/proc/time/net/sha/mem/dl，检查 tools/check-cx-sys.cx，这次 PASS ok=100 fail=0），棘轮 tests/cxraw.cx（上层直接 libc/POSIX 调用只降不升）；include/cx.h 与 cx_read/cx_write/cx_run* 收编归 cc
-├─ 卫生：cx 四棘轮不计 archive/ 与已跟踪符号链接（f638c861e5，原把 31 个链接重复计数）；cxraw 这次是 645 个已跟踪 .cx、19329 次调用，基线 19615，超基线 0、低于基线 20（没有 --write）。src/drive.cx、src/driveroute.cx、src/host.cx 里那 4 处 memcpy 已留下返回值。cx/runtime、cx/compiler 的 5 处已标（71c45c265c）
-├─ 新测试入口注册表 289 批次、270 已实现：本轮新登 24 个——21 个原本未登记的模块检查（其中 3 个解码检查原先就坏，缺 use，已修），加 tests/core-stack-empty.cx、tests/driver-environment.cx 两个包装和 tests/runcache.cx；还有 10 个 check 工具要材料或参数，未登记
-└─ 分层棘轮：tests/cxraw.cx（plans/cx-layers.md）——上层 .cx 直接 libc/POSIX 只降不升、新文件须 0；csih 下层封装已入 tests/cxraw-layers.tsv（netwit/tmuxwit/retry_stub/tclock），apps/csih/tests/run.cx 已迁 tx_* 至 0
+0.0.43（收口）
+├─ 已装 83343ec1：五片 win/18d2757f·lnx-x86_64/759c520a·lnx-arm64/6703dd4d·osx-x86_64/581300df·osx-arm64/7e3d267b；两代自举逐字节相同
+├─ 门禁：七棘轮 ok=7、--smoke 16/0、release-ape smoke 5/5
+├─ 提速：镜像缓存 -run 442→12ms、-o 477→13ms；ratchets 16.5→1.5s；AF_ALG 测试 digest 1477→330ms
+├─ phase-timing 域清零：6 flip + 8 migrate + hit=2 amend + memory-bind R14 豁免，open 9→4
+├─ hostseed 豁免到 0.0.44：harness 引入 coverage 层 DECLARED_DEPENDENCY，12 批 PLANNED，5 coverage 行 declared
+├─ 材料重建闭环：object/net/pp-gold/ri-chain 用当前候选重建，19 批 PASS；sess-mat2 收 123 批 PASS（被共享 harness 改动作废）
+├─ QUALIFIED 缺口（不是「没做完」，是结构性阻塞）：
+│  ├─ 73 外平台格（lnx/arm64 19 + osx/arm64 18 + osx/x86_64 18 + win/x86_64 18）→ 需 CI 6 原生 runner，本机物理不可达
+│  └─ ~24 BLOCKED（5 owner-ruling 需主人裁定范围：ri.class.memory/library、ri.route.run-object-supported、library.std.family-classification、resources.time.end-to-end-budget）
+└─ 未签名、未公开（prd 门禁：先 QUALIFIED 再发布）
 ```
 
-已装产品：`unisacc.com` 4,631,130 字节，sha `43fbbb819aae…`，权限 755。备份 `out/unisacc.com.79fb84e6`（3,035,300 字节，sha `79fb84e65a10…`）。旧候选资格、矩阵与安装收据不转授这只。
-
-### 本版重构合同
-
-- **自身体系现在使用。** 日常编辑、构造、调度、校验和数据逻辑直接 `sh ./unisacc.com FILE.cx -- ARGS`；新代码不引入Python或新shell算法。旧独立裁判可作为归档参考；转调旧Python不算原生迁移。
-- **按合同设计，不按旧脚本数量设计。** 用例明确输入、预期输出/拒绝、来源和覆盖范围；材料准备只记PREPARED。分层为网、流、流间接口、产品端到端、库/ABI和跨平台。完整覆盖清单独立于执行调度。
-- **先复用已实现能力。** `.cx` 模块、内容摘要、通用执行器、库API及现成原生构造器先查再用。保留核心NN推理、明确拒绝域、完整RI和既有内存/ABI合同，不能为提速删断言或跳过推理。
-- **先改循环成本。** 同一批用例尽量一次编译/启动；模型构造与用例执行分开，源码/表未变就不再转换权重。材料缓存命中仍核身份，测试结果不能冒充材料缓存。
-- **按相计量。** 分开记录工具启动、构造、装载、推理、输出和校验；冷路径、热路径、准备成功与功能通过分别报告。只对已定位热点动刀，失败实验停止，不将研究数量算进度。
-- **保留完整产品验收。** 新套件必须覆盖七流十八网及其组合、正负例、六目标、实际原生宿主和自举。归档不是通过；旧缺陷、未覆盖项、资源未知和未实跑平台必须迁入新合同缺口表。
-- **归档不打断构建。** 测试树内被产品构建实际依赖的工具迁入独立tools目录；必要兼容入口仅转向原生工具并明确用途，不继续触发旧1333项套件。
-
-### csr/grk 的经验在本版如何采用
-
-| 已有证据 | 本版决定 |
-|---|---|
-| ujs反复构网和外部assembler启动曾占绝大多数时间 | 构造与执行解耦；批处理/常驻复用明确身份的材料和执行上下文 |
-| 去死询问后可只构造实际使用的网 | 核对真实查询与合同再精简；不得裸砍必须存在的模型或跳完整性检查 |
-| 并行与常驻优化有逐字节对照，部分memo无墙钟收益 | 新方案先测实际耗时和正确性；不为并行而并行，不保留无收益缓存 |
-| unisacc无每文件fork外部assembler；本地大输入权重装载合计约0.01秒，E4执行约28秒 | 不移植wabt.js；按七流实测，优化实际重复工作和热点 |
-| 旧C整包约40秒；未修改C执行器改用现成Clang热测38.617773秒且字节同；原生准备22.510912秒0 | 仅作旧链诊断和迁移参考，不把Clang变成日常迭代前提，也不把材料准备当功能通过 |
-
-旧F4在window082停调度：327/1333结证，其中314rc0、6资源UNKNOWN、7原失败，1006待办。完整目录 `/tmp/unisacc-c43-final-e4-20261025` 原样保留；这些数字只描述封存状态，不再代表新0.0.43计划的完成率。现有P7f709产品仍可用作新工具的启动编译器；重构涉及产品输入时须重建并重新核验，不能借用旧候选资格。
-
 <a id="memory-palace"></a>
-### 记忆宫殿
+### 9.2 记忆宫殿（当前事实）
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
-| 新入口 | `src/unisacc.cx` 六层；`src/core`、`src/runtime` 为指向 `cx/` 的符号链接 | plans/cx-modules.md 顶部产品面 |
-| 候选构造 | 当前这只是 `out/grk-host-sys/candidate`，sha256 `9fb93c13…`，2963732 字节。entry.elf 1327712 字节，sha256 `da3f42da…`。已装产品经 `sh` 构造，默认六只 `-O1`，目标 `lnx/x86_64`，P3 仍是 build-14 的 pkg.bin。`e477a4c7` 的 148 格不转到这只。还没装 | plans/cx-layers.md；out/grk-host-sys/receipt.txt |
-| 四目标探针 | 已装产品只编对象：lnx/arm64 33 只 ELF；osx/x86_64、osx/arm64、win/x86_64 各 33 只编译失败，诊断同一句。不记通过。`76085cb99d` 之后不带 `--target` 的 path.o、tapegate.o 与改前逐字节相同。host.cx 改过之后，那批对象里的 host.o 过期 | plans/entry-target-probe-2026-10-30.md |
-| arm64 冒烟 | `--version` 与 x86_64 逐字节相同。`-run` 在 qemu 下 memfd 回 errno 38，没有落盘回退。`-o` 的 hello 在 qemu 下打出 `from hello.c`，与 x86_64 逐字节相同 | plans/entry-arm64-smoke-2026-10-30.md |
-| osx/win 对象 | osx 32 源仍写出 Mach-O（1535842 字节，sha256 `0b506aa6…`），没有 P3。win 32 源写出 PE32+（1569280 字节，sha256 `031e8594…`），`--pe` 12/0，没有 P3。`hs_ns` 走 `sy_mono`。`hs_fx` 在 Windows 上返回 -1，`-run` 降级为让用户 `-o`。候选 `4167af03…`，3013188 字节，runcache 12/0，前 10 格 SAME。PE 已出、结构已验、未在 Windows 上运行 | plans/osx-win-whole-o-2026-10-30.md |
-| 模块身份 | 软链折到同一文件时按 `sy_realpath` 算同一个模块。不比 inode。候选 `d903d225…`，2976044 字节，未装。`out/modrepro` 输出 `1`；两个不同文件的同名导出仍拒绝 | out/grk-modid/receipt.txt |
-| 宿主转发 | `-S` 和不带 `-b` 的 `-c` 报 `undefined function 'setpgid'`。`-c -b lnx/x86_64 -o FILE.o` 能编过，链接这个对象仍缺 `setpgid`。不改源 | plans/host-forward-compile-2026-10-30.md |
-| 间接原型 | 候选 `4ac3c2d4…`，3025940 字节，未装。间接复现 rc=1，直接 use rc=0 且输出 `[ab-42] n=5 num=2.250000`。runcache 12/0（冷 536 ms，命中 40 ms）。已装产品仍是旧的 | plans/indirect-proto-2026-10-30.md |
-| 闭包一次 | `src/drive.cx` 已用 `tx_eqz`（`367ffcb6d5`）。`path.cx`、`compat.cx` 仍是 `strcmp`，再 use 会和 `drive.o` 里的 `tx_eqz` 重复。不带 `-funit` 的 `-c` 对没有 main 的单元报 `not covered: no main`。慢车道定法是 use 只留引用，text/mem/sys 各编一只对象，不用 weak。这轮不改 cxmod，不改 entry-build | plans/closure-once-2026-10-30.md |
-| core 堆 | stack、output、bytes、memory 改走 mem.heap / mem.bytes。窄检查 failed=0。不在 33 只产品对象里。未装 | cx/core/stack.cx、output.cx、bytes.cx、memory.cx |
-| runtime 字节 | 七只小模块的堆和字节比较改走 mem.heap / mem.bytes。strcmp、strchr、strlen 留着。窄检查 failed=0。未装 | cx/runtime/model_payload.cx、network_structure.cx、packagestruct.cx、package_lifetime.cx、package_decode.cx、model_decode.cx、stream_resource.cx |
-| cx0 包 | `bundle.cx` 的堆和字节比较改走 mem.heap / mem.bytes。strlen、strcmp、strchr、snprintf、memchr 留着。窄探针打出 `CX0_BUNDLE_NARROW`。整批要 e2model，没跑。未装 | cx/cx0/bundle.cx |
-| workspace 释放 | `driver.cx` 的 21 处 free 改走 `mm_free`。malloc、realloc 还在。计划检查 10 条 failed=0。未装 | cx/workspace/driver.cx |
-| 产品层 safe 表 | 72 个文件 `find --auto`，accept 0。139 处 free 还在 7 只产品对象里。再加 `mem.heap` 会和 `input.o` 的 `mm_*` 重复。malloc、realloc 仍是 review。没改源，未装 | tools/refactor/heap.tsv |
-| 四只字符串相等 | path、compat、driveface、packmodel 的 `strcmp` 改成文件内静态比较。没有 `use text.text`。path 和 compat 的窄检查 failed=0。`-c -funit` 四只退出 0。未装 | cx/driver/path.cx、compat.cx，src/driveface.cx、packmodel.cx |
-| 四文件再去一层 libc | path 去掉 strlen。output 临时名本地拼，pid 走 sy_pid，加了 use sys.proc。args 去掉 memcmp 和向前的 memmove，realloc 留着。packmodel 去掉 memset 和 memcmp，free 和 realloc 留着。三只窄检查 failed=0。packmodel 没有窄批次。-c -funit 四只退出 0。工作区棘轮 5/5，cxlibc 23118、基线 23462。未装 | cx/driver/path.cx、output.cx、args.cx，src/packmodel.cx |
-| 对拍 | `9fb93c13` 这一片 22 格全 SAME（`out/grk-host-sys-mx`），抽前 10 格也是 SAME，LEFT 126，没有跑完 148。`e477a4c7` 上 148 格全 SAME 只属于那只（`out/grk-opt2-mx`）。这只的 runcache 是 12/0 | out/grk-host-sys-mx；plans/cx-modules.md 第 164 节 |
-| 性能 | 对象加链接 61.4 s → 52.8 s。混合候选 runcache 首次 515 ms、命中 41 ms。dev-run.cx 冷 -run 编译加用法拒绝 6.11 s。runcache 的运行时间没有变快 | plans/perf-bottlenecks-2026-10-30.md 的 B5 |
-| 事实表 | 只经 `sh ./unisacc.com tools/facts-gen.cx -- --write\|--check .`（30 张 + bank 归属，`--check` 31/0） | exec/facts/ |
-| 归档 | 参考 C、参考 Python、旧检查与旧 shell | archive/reference-c/、archive/reference-py/README.md |
-| 已装产品 | 4,631,130 B，sha 43fbbb81…，权限 755；备份 out/unisacc.com.79fb84e6；新测试入口 `sh ./unisacc.com tests/run.cx -- --list` | tests/batches.tsv、tests/coverage.tsv |
-| CX 面骨架 | 七流十八网在 compiler 与 runtime 两侧的 stream 和 net。流有 in/out/model 访问器，步骤返回 0。窄检查 ok=25 formats=7，failed=0。六格目标表在两侧 targetname，窄检查 ok=6 failed=0。lexcls 与 lexword 在两侧 net，窄检查 ok=2 failed=0，不在十八网里。包路线十行在两侧 routename，窄检查 ok=10 failed=0，不是 st_gap。镜像四种 elf、macho、pe、object 在两侧 image，窄检查 ok=4 failed=0。六种管道格式在两侧 formatname，窄检查 ok=6 failed=0。名字里有点，模型文件不在这张表里。七个模型文件在两侧 modelname，窄检查 ok=7 failed=0。三种优化档 none、O1、O2 在两侧 optname，窄检查 ok=3 failed=0，不是 st_gap。四组路线 pp、tape、image、run 在两侧 groupname，窄检查 ok=4 failed=0，十个后缀仍在 routename。系统三行 lnx、osx、win 在两侧 osname，窄检查 ok=3 failed=0。架构两行 x86_64、arm64 在两侧 archname，窄检查 ok=2 failed=0。六格对子仍在 targetname。后缀档 O0、O1、O2 在两侧 levelname，窄检查 ok=3 failed=0。O0 的优化档列仍是 none。路线终点五行 e2、e3、e4、elf、lower 在两侧 endname，窄检查 ok=5 outside=2 failed=0，不是 st_gap。非终点两行 e1、prune 在两侧 restname，窄检查 ok=2 failed=0，不是 st_gap。正式名七行 preprocess、lex、parse、opt、prune、lowering、encode 在两侧 officialname，窄检查 ok=7 failed=0。阶段码七行 e2、e1、e3、e4、prune、lower、elf 在两侧 codename，窄检查 ok=7 failed=0，正好是 endname 加 restname。十八网名字在 runtime 的 netname，窄检查 ok=18 failed=0，对上 compiler 的 nn_。lexcls 和 lexword 仍不在这十八行里。声明名两行 lexcls、lexword 在两侧 declname，窄检查 ok=2 nets=18 failed=0。七对流名在 runtime 的 streamname，窄检查 ok=7 failed=0，对上 compiler 的 sn_。金表名册二十行在两侧 goldname，窄检查 ok=20 nets=18 decl=2 failed=0。规则形十一行在两侧 rulename，窄检查 ok=11 outside=9 failed=0。没有规则形的九行在两侧 plainname，窄检查 ok=9 rules=11 failed=0。六格合成名在两侧 cellname，窄检查 ok=6 failed=0。预定义宏八行在两侧 predefname，窄检查 ok=8 failed=0。自动引入头文件六行在两侧 hdrname，窄检查 ok=6 formats=6 failed=0。标准宏三行在两侧 stdname，窄检查 ok=3 predef=8 failed=0。保留拼写十三行在两侧 wordname，窄检查 ok=13 dir=3 intern=10 std=3 failed=0。字节类两行在两侧 bytname。转义十一行在两侧 escname，含 0、反斜杠和引号。布局六十一行在两侧 layname，PMSTACK 是 35184372088832。运算符二十五行在两侧 opname。词法类六行在两侧 tokname。语法词六十六行在两侧 prsname。ELF 常数八行在两侧 elfname。Mach-O 常数三十行在两侧 macname，十六进制字节行跳过。PE 三十六行在两侧 pename，值保持原文。地址绑定五张、ARM 绑定七张在两侧，共九十二行。ARM 列十张、enc-arm 分段五张在两侧。armspec 收齐十列。八段再加八张。x86 十五张在两侧，常数五十一行加嵌套两行。窗和 itoa 再九张在两侧，值列混杂的两张保持原文。宿主桥九张在两侧，守卫格子保持原文。fp、库符号、内存布局、对象计划、sha256、单元容器十三张在两侧，混杂值列保持原文。PE forward 九张在两侧，imports 最长行 5376。PE 本体九张在两侧，imports 最长行 4656。Mach-O 十三张在两侧，签名尾按列数拆成两行。ELF 十八张在两侧，两处尾按列数拆开，空的 dynslots 不生成。小事实十四张在两侧，json 保持原文。k2 前十三张在两侧，错误行按列数拆开。k2 再十五张在两侧，gnjso 只记名字和类别。parenfold 到 strings 十五张在两侧，ksjs 二十行，空的 printfallback 不生成。tokenlocations 到 valueranks 十张在两侧，kucb 七行。k2-units-tokens 十二张在两侧，kuky 二百五十七行。kernel-emit 三张、lower-abi 七张在两侧，kevoc 三百六十四行。layout、lex、library 十二张在两侧，lxgen 不选值列。lower 十四张在两侧，lcwrd 二千零七十六行，lcenv 不选值列，规格表 254 行，上限 256。native-abi、numeric、objectdefinitions 九张在两侧，nabrg 三行，nabi 的值进了表。规格表 263 行，上限 1024。opt 和 pp 十张在两侧，ogpep 不选值列。规格表 273 行，上限 1024。printf、signature、structreturn 八张在两侧，sigly 一行。规格表 281 行，上限 1024。top、unused、vla 九张在两侧，vlajs 两行。规格表 290 行，上限 1024。均未登记，不记套件通过。sys 16 个模块未改。入口 st_gap、RI、两代仍待办 | tools/surface-gen.cx、tools/target-gen.cx、tools/route-gen.cx、tools/image-gen.cx、tools/format-gen.cx、tools/model-gen.cx、tools/opt-gen.cx、tools/group-gen.cx、tools/axis-gen.cx、tools/level-gen.cx、tools/end-gen.cx、tools/rest-gen.cx、tools/official-gen.cx、tools/code-gen.cx、tools/netrt-gen.cx、tools/declname-gen.cx、tools/streamrt-gen.cx、tools/goldname-gen.cx、tools/rule-gen.cx、tools/plain-gen.cx、tools/cell-gen.cx、tools/predef-gen.cx、tools/hdr-gen.cx、tools/std-gen.cx、tools/word-gen.cx、tools/nametab-gen.cx、plans/v0.0.44.md 的 C44-CX-SURFACE-01 |
-| CX 分层 | L0=`cx/{sys,mem,text}`+layers 表白名单。`src/host.cx` 0 个 include，映射和加载符号在 `cx/sys/mem.cx`、`cx/sys/dl.cx`。check-cx-sys 100/0。cxraw 645 个文件、19329 次、基线 19615、0 超基线、20 低于基线 | plans/cx-layers.md、tests/cxraw-layers.tsv |
-| 旧纪元证据 | 10-30 前的构造链、安装、矩阵收据 | archive/prd-c43-history-20261030.md |
-
-**动态维护规则**：进度、身份、阻塞、决定或下一动作变化时，同步原位更新思维树节点及对应房间；只把当前事实留在这里。每次恢复先读两者，派发任务引用当前节点和确切缺口。原始过程与旧失败保留在证据或Git历史中，不冒充当前状态。
-
-**产品命名**：宿主构建第一代为`unisacc-seed.com`，自举最终产品为`unisacc.com`；`unisacc-next.com`只是构建目录中间名。
-
-<a id="pipeline-design"></a>
-## 3. 当前架构：模型流水线（结构、功能与边界）
-
-本节以 0.0.17 发布基线（`ae3f989`）说明构造器、路由与执行器，后续已验收的变化按相关小节补充；版本身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份)。条款全文在 [spec.md](spec.md)。 旧的“14 个决策点”不等于当前整条流水线的网络数，旧的“走查器不许模型化”不是当前迁移约束。
-
-**阅读顺序**：共同模型结构 → 路由总表 → 各阶段 → 打包/装载 → 字节账 → 验证与现状。详细源码边界另见 [规则来源](exec/rules.md)、[执行机制](exec/c/CORE.md)、[包协议](exec/c/PACKAGE.md)。迁移过程及原始失败记录完整保留在 [S-17 迁移档案](archive/s17-migration-log-20260928.md)，不再混入当前规格。
-
-### 流推导与模块复用口径（政委参考，2026-10-14）
-
-函数调用表达为调模型做流式推导，IO 统一为显式字节流接口（通道形态可类比 iostream，不要求采用 C++ 或依赖其库）。可复用模块由**共用执行器 + 有限表 + 显式流接口**组成；通道共用不合并阶段语义，输入定义域、目标合同、具名拒绝及拒绝归属仍由各阶段保留。流格式、版本、资源依赖与失败出口须可核验；宿主解析/观测与核心流身份分账，不能靠不可复用特例或隐式宿主状态替代合同。本段固化设计方向，不宣称现有路径已全部迁移或获准复用旧测试结果。
-
-<a id="flow-net-contracts"></a>
-### 3.0 流/网合同三表与进度
-
-七流真源：[exec/pipeline/image-stages.tsv](exec/pipeline/image-stages.tsv)；十八网真源：金表 `weights/gold/*.tsv` 本身（由 `tools/gold-table.cx --check` 核对，规则形式在 `seed/gold_<阶段>_label.c`）；原 `unisa/gold.py` 的 STAGES 已归档到 `archive/reference-py/unisa/gold.py`。逻辑完整输入与拆分方案保留在[归档身份义务](archive/testing-c43-legacy/tests/STAGE-IDENTITIES.md)，不作为当前执行入口，本节汇总现有物理管道及观测。
-
-**逻辑边界不等于物理嵌套。** parse/type等逻辑阶段目前集成于e3，enc/image集成于elf，不声称已有独立产物。七流模型并非十八张ask事实网的简单一对一替换；下表消费关系含经典ask定位与产品归属，不能只因同名pp就把有限金表的叶证据当完整E2验证。流级封不推出内嵌每张网有独立封存。出货闸模块口径：**网格** `tests/netseal.cx`，**流格** `tests/streamseal.cx` + 叶内 `cell.tsv`（详见 `tests/SEAL-MODULES.md`）；e1/e4/prune/elf 已挂 streamseal，e2/e3/lower/pp 见该文「暂不合形状」。聚合测套 `./tests/seal-modules.sh`（闸 job `seal-modules`，contract 层，~25s）：manifest+x流×y网适用性检查 + 4 流封 + 17 网封回放；登记表 `tests/seal-modules.manifest.tsv`。
-
-以下三表更新到 tip `25f720ab`（2026-10-21 17:33 AWST 观测）；近窗提交数量是当时记录，不是持续更新仪表。**有封≠已冻**：本次整理重验了被引封件闸（pp-leaf-seal(-negative)、exec-pp-literals、stage-contract-e1e3、lex-e1-seal、opt-e4-seal、elf-seal、prune-seal、middle-flow-e3/lower-accept、17×net-*-seal 各两遍，全部 rc 0），但过闸只证封件自身一致，不证封件范围覆盖了流的全部行为。
-
-**归档边界：** 以下是2026-10-21的历史三表；其中的`tests/seals/`、旧seal模块及闸路径已迁入`archive/testing-c43-legacy/`，不在当前根路径，也不作为0.0.43活动闸。当前以§2、`tests/run.cx`和新清单为准。`exec-net-lex`的144键是独立网格内核×金表证据；不能用它或字节流中一次EOF观测冒充E1流内144个独立(c,peek)观测。当前E1矩阵保留此完整要求为MISSING/oracle缺口；历史“有封”不授本代资格。
-
-<a id="seven-stream-contracts"></a>
-### 3.0a 七流合同表
-
-- tip `25f720ab` · 观测 2026-10-21 17:33 AWST（封件闸当日重验）
-- 真源：`exec/pipeline/image-stages.tsv`
-- **是否封存** = `tests/seals/` 有点名该流的冻结夹具/叶封原件；可标 STALE风险。**有封 ≠ 已冻**。
-
-| 流名 | 输入→输出 | 产品网 | 功能 | 是否封存 | 备注 |
-|------|-----------|--------|------|----------|------|
-| **e2** | `src.c` → `pp.text` | `e2.net` | 预处理：续行/注释/指令/宏/条件/include | **有** · `tests/seals/exec-pp-literals/`（measured leaf；STALE风险：头/资源闭包持续进封件） | 近 tip 常被库头→autoinc→叶封拖动；纯转发原型刀可守冻哨 |
-| **e1** | `pp.text` → `tokens.typed` | `e1.net` | 词法：关键字/标识/算符/字面量最长匹配 | **有** · `tests/seals/exec-lex-e1/` + `cell.tsv`；闸 `lex-e1-seal` 走 **`tests/streamseal.cx`**（gate + reseal 均 `streamseal.cx`） | 流封只证录制样本；另有网级叶 `exec-net-lex/`（内核×金表，非流内 ask） |
-| **e3** | `tokens.typed` → `tape.text` | `e3.net` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | **有** · `stagecontract-e1-e3/` + `middleflow-step0/e3/` + `librarycallbacke3/`（librarytyped* 历史≠PASS→STALE风险） | STAGE-IDENTITIES：parse/type **未拆**仍嵌 e3 |
-| **e4** | `tape.text` → `tape.text` | `e4.net` | opt：tape 上 peephole / 栈→寄存器类改写 | **有** · `tests/seals/exec-opt-e4/` + `cell.tsv`；闸 `opt-e4-seal` 走 **`tests/streamseal.cx`**（gate + reseal 均 `streamseal.cx`） | 前端是输入；另有网级叶 `exec-net-opinfo/`、`exec-net-peep/` |
-| **prune** | `tape.text` → `tape.text` | `prune.net` | 按根/导出剪不可达整函数（公开 tape 路径可跳） | **有** · `tests/seals/exec-prune/` + `cell.tsv`（referee 冻字节；闸 `prune-seal` 走 **`streamseal.cx`**） | 仍**不消费** 18 金网 |
-| **lower** | `tape.text` → `target.text` | `lower.net` | ABI/regmap/syscall/布局/reloc 降到目标 ops | **有** · `stagecontract-tape-lower/` + `middleflow-step0/lower/` + `librarytypedlower/` + `librarycallbacklower/`（历史≠PASS→STALE风险） | tip≈99-commit 窗 **0** 笔改 lower 封/构造；有封且近窗不拖 |
-| **elf** | `target.text` → `image.bytes` | `elf.net` | 编码 + ELF/Mach-O/PE（或内存镜像）写出 | **有** · `tests/seals/exec-elf/` + `cell.tsv`（**仅 lnx/x86_64**；闸 `elf-seal` 走 **`streamseal.cx`**） | Mach-O/PE/内存镜像未封；STAGE-IDENTITIES：enc/image **集成于 elf**；另有网级叶 `exec-net-enc/` |
-
-**汇总**：有封存原件 **7/7**，但范围各异：e1/e4/prune/elf 是对录制输入的点名流封（elf 仅一目标），e2/e3/lower 为此前的叶封/阶段合同封。**有封≠已冻**，更不等于该流全行为已覆盖。勿与「在调 6/7」混读——在调口径含未冻/耦合/未拆，见观测 `seal-count-7x18-1049awst.md`。
-
-<a id="eighteen-net-contracts"></a>
-### 3.0b 十八网合同表
-
-- tip `25f720ab` · 观测 2026-10-21 17:33 AWST
-- 真源：金表 `weights/gold/*.tsv`（`tools/gold-table.cx --check`）；README 的 stages 表是冻结文本；原 `unisa/gold.py` → `STAGES` 已归档
-- **是否封存** = `tests/seals/` 有点名该网的叶封/夹具原件；可标 STALE风险。**有封 ≠ 已冻**。金表 tsv ≠ seal 夹具。
-
-| 网名 | 功能 | 主要落流 | 是否封存 | 备注（出货/对照） |
-|------|------|----------|----------|-------------------|
-| **pp** | dir×defined → take/skip/pop/macro（指令条件） | **e2** | **有** · `tests/seals/exec-pp-literals/`（STALE风险：autoinc/头资源耦合） | 出货主脊；唯一有点名叶封的金网；tip 窗重封多为库存货身份，非 `pp.tsv` 语义行 |
-| **lex** | c×peek → token 类 | **e1** | **有** · `tests/seals/exec-net-lex/`（per-net cell，144 键 144 判定，0 wrong） | 出货主脊；earlystageseal 不验证 E1/lex |
-| **parse** | nt×tok → 归约/动作类 | **e3**（嵌） | **有** · `tests/seals/exec-net-parse/`（per-net cell，340 键 340 判定，0 wrong） | 出货；STAGE-IDENTITIES：无单独产物，集成 e3 |
-| **type** | t1×op×t2 → 结果类型 | **e3**（嵌） | **有** · `tests/seals/exec-net-type/`（per-net cell，4275 键 4275 判定，0 wrong） | 出货；当前集成 e3 |
-| **scope** | ctx×kind → 作用域动作 | **e3**（嵌） | **有** · `tests/seals/exec-net-scope/`（per-net cell，30 键 30 判定，0 wrong） | 出货 |
-| **irsel** | family×flavor → IR 形 | **e3** | **有** · `tests/seals/exec-net-irsel/`（per-net cell，420 键 420 判定，0 wrong） | 出货（ask 在 e3） |
-| **enc** | op×os×arch → 编码类 | **elf**（主嵌）；lower 次要 ask | **有** · `tests/seals/exec-net-enc/`（per-net cell，522 键 522 判定，0 wrong） | 出货；身份合同钉 elf；经典 lowering 仍问 form |
-| **reloc** | kind×arch → 重定位类 | **lower** | **有** · `tests/seals/exec-net-reloc/`（per-net cell，6 键 6 判定，0 wrong） | 出货；决策在 lower，image 只落记录 |
-| **tyinfo** | t → size/uns/narrow | **e3** | **有** · `tests/seals/exec-net-tyinfo/`（per-net cell，48 判定，0 wrong） | 出货（类型旁路） |
-| **pfconv** | conv → 指针/函数转换类 | **e3** | **有** · `tests/seals/exec-net-pfconv/`（per-net cell，9 判定，0 wrong） | 出货 |
-| **regmap** | treg×arch → 机器寄存器 | **lower** | **有** · `tests/seals/exec-net-regmap/`（per-net cell，16 判定，0 wrong） | 出货 |
-| **isel** | op×arch → form/symbol | （构造有；主脊不问） | **有** · `tests/seals/exec-net-isel/`（per-net cell，174 键 348 判定，0 wrong） | **对照**：金表仍构造；lowering **不 ask**（form 由 enc 覆盖） |
-| **abi** | op×os×arch → syscall/形/门… | **lower** | **有** · `tests/seals/exec-net-abi/`（per-net cell，522 键 6786 判定，0 wrong） | 出货；`abi.tsv` 是金表非封存夹具 |
-| **combo** | isel∪abi 对照臂 | 对照 / 非出货主脊 | **有** · `tests/seals/exec-net-combo/`（per-net cell，522 键 7830 判定，0 wrong） | **不出货主脊**；`drive=="combo"` 实验路径；research `seal-combo-*` ≠ 金网夹具 |
-| **binsel** | op×sign → ALU 味 | **e3** | **有** · `tests/seals/exec-net-binsel/`（per-net cell，32 判定，0 wrong） | 出货 |
-| **prec** | op → 优先级 | **e3** | **有** · `tests/seals/exec-net-prec/`（per-net cell，19 判定，0 wrong） | 出货（表达式） |
-| **opinfo** | op → 优化用属性 | **e4** | **有** · `tests/seals/exec-net-opinfo/`（per-net cell，73 键 219 判定，0 wrong） | 出货 |
-| **peep** | a×b×rel → peephole 动作 | **e4** | **有** · `tests/seals/exec-net-peep/`（per-net cell，1632 键 1632 判定，0 wrong） | 出货 |
-
-**汇总**：有点名封存原件 **18/18**（pp 叶封 + 17 个 per-net kernel cell，80eca415/2ebf3f7c/25f720ab，闸 net-<网>-seal）。**范围要读清**：per-net cell 封的是整数内核对该网金表**全域判定**的冻结回放（闭包只有 unisa_core.c + 该网权重字面量 + 该网金表，零 pp 路径），**不**覆盖该网在产品流内的运行时 ask、不覆盖 dense.*.inc、不覆盖权重构造。`weights/gold/*.tsv` / `unisa/gold.py` 本窗仍**无语义行提交**。
-
-<a id="flow-net-relation"></a>
-### 3.0c 流×网关系与边级夹具
-
-- tip `25f720ab` · 观测 2026-10-21 17:33 AWST
-- 真源：`image-stages.tsv`、`gold.STAGES`、`tests/STAGE-IDENTITIES.md`、经典 ask/`inf` 位点、`compilerpack` 路由
-- **勿混**：7 流 = 字节管道（**stream**）；18 网 = ask 事实表（**net**）；名词定义以 §0 为准，同名不可互换。
-
-#### 图例
-
-| 符号 | 含义 |
-|------|------|
-| **✓** | 主消费（出货主脊该段主要承载/查询） |
-| **◐** | 次要/旁路（跨段 ask、构造旁路、或物理未拆的次归属） |
-| **·** | 不相关 |
-| **⊘** | 有金表但不在出货主脊 ask（对照臂） |
-
-#### 1) 关系总表（行=7流，列=18网）
-
-| 流＼网 | pp | lex | parse | type | scope | irsel | enc | reloc | tyinfo | pfconv | regmap | isel | abi | combo | binsel | prec | opinfo | peep |
-|--------|:--:|:---:|:-----:|:----:|:-----:|:-----:|:---:|:-----:|:------:|:------:|:------:|:----:|:---:|:-----:|:------:|:----:|:------:|:----:|
-| **e2** | ✓ | · | · | · | · | · | · | · | · | · | · | ⊘ | · | ⊘ | · | · | · | · |
-| **e1** | · | ✓ | · | · | · | · | · | · | · | · | · | ⊘ | · | ⊘ | · | · | · | · |
-| **e3** | · | · | ✓ | ✓ | ✓ | ✓ | · | · | ✓ | ✓ | · | ⊘ | · | ⊘ | ✓ | ✓ | · | · |
-| **e4** | · | · | · | · | · | · | · | · | · | · | · | ⊘ | · | ⊘ | · | · | ✓ | ✓ |
-| **prune** | · | · | · | · | · | · | · | · | · | · | · | ⊘ | · | ⊘ | · | · | · | · |
-| **lower** | · | · | · | · | · | · | ◐ | ✓ | · | · | ✓ | ⊘ | ✓ | ⊘ | · | · | · | · |
-| **elf** | · | · | · | · | · | · | ✓ | · | · | · | · | ⊘ | · | ⊘ | · | · | · | · |
-
-#### 2) 白话：每流主要网
-
-| 流 | 主要网 | 可能旁路 | 白话 |
-|----|--------|----------|------|
-| **e2** | pp | — | 预处理管道；指令/条件决策查 pp 表。 |
-| **e1** | lex | 构造期旁看 parse.tsv 的 tok 域（非运行时消费 parse 网） | 词法管道；最长匹配/类别查 lex。 |
-| **e3** | parse, type, scope, irsel, tyinfo, pfconv, binsel, prec | — | **一大段未拆**：tokens→tape；语法/类型/作用域/IR/优先级等 ask 全嵌此物理网。 |
-| **e4** | opinfo, peep | — | tape 上 peephole / 属性驱动改写。 |
-| **prune** | （无 18 网） | — | 按导出/根剪函数；**不查金表**，政策在代码。 |
-| **lower** | abi, regmap, reloc | **enc**（经典 lowering 问 form；产品编码段在 elf） | ABI/寄存器/重定位；enc form 经典侧顺带问。 |
-| **elf** | enc（+ image 写出，无独立金网名） | — | 编码+容器；STAGE-IDENTITIES 把 enc/image 钉在 elf。 |
-
-#### 3) 边级「有无夹具」（流×网 主边）
-
-口径：夹具 = `tests/seals/` 点名覆盖该**流段**或该**网**的原件；流级封≠网级叶封。有封 ≠ 已冻；可标 STALE。机器登记表 `tests/seal-edges.tsv`（`sealmodulescheck --edges-only` 校验主边全集/夹具/点名闸，随 `seal-modules` 闸跑）。
-
-| 边（流→网） | 关系 | 有无夹具 | 路径简述 |
-|-------------|------|----------|----------|
-| e2 → pp | ✓ | **有（网级叶 + 流侧）** | `tests/seals/exec-pp-literals/`；STALE风险（头/autoinc） |
-| e1 → lex | ✓ | **有（流侧 + 网级叶）** | `exec-lex-e1/`（录制输入流封）+ `exec-net-lex/`（内核×金表）；边上运行时 ask 仍无点名夹具 |
-| e3 → parse/type/scope/irsel/tyinfo/pfconv/binsel/prec | ✓（嵌） | **有（流级 + 八网网级叶）** | `stagecontract-e1-e3/`、`middleflow-step0/e3/`、`librarycallbacke3/`；八网各有 `exec-net-*`；嵌在 e3 内的运行时 ask 仍无边级点名 |
-| e4 → opinfo, peep | ✓ | **有（流侧 + 网级叶）** | `exec-opt-e4/` + `exec-net-opinfo/`、`exec-net-peep/`；边级 ask 无点名 |
-| prune → ∅ | · | **有（流侧）** | `exec-prune/`（录制 -O2 tape，referee 冻字节）；无金网可封 |
-| lower → abi, regmap, reloc | ✓ | **有（流级 + 网级叶）** | `stagecontract-tape-lower/`、`middleflow-step0/lower/`、`library*lower/` + `exec-net-abi/regmap/reloc`；边级 ask 无点名 |
-| lower → enc | ◐ | **有（网级叶，非边级）** | `exec-net-enc/` 点名 enc 网本身；经典 lowering ask 这条边仍无夹具 |
-| elf → enc | ✓ | **有（流侧 + 网级叶）** | `exec-elf/`（仅 lnx/x86_64）+ `exec-net-enc/`；其余容器目标未封 |
-| * → isel / combo | ⊘ | **有（网级叶）** | `exec-net-isel/`、`exec-net-combo/`（内核×金表）；仍是对照臂，不在出货主脊 ask |
-
-##### 脚注
-
-1. **流级封 ≠ 网级封**：e3/lower 有阶段合同封，只证明该段管道原件存在，**不**等于嵌在内的每张金网已点名冻结。
-2. **网级点名原件 18/18**（25f720ab）：pp 的 `exec-pp-literals` 叶封 + 17 个 `exec-net-*` per-net kernel cell。cell 只冻内核×金表全域判定；**不**替代边级（流内运行时 ask）夹具，该层仍空。
-3. **isel/combo**：矩阵列上对所有流出货主脊标 ⊘（对照/不问或 off ship）；不单独为每行再写夹具行。
-
-#### 4) 物理嵌套（勿读成路由扇出）
-
-- **e3 ⊃** {parse, type, scope, irsel, tyinfo, pfconv, binsel, prec} — 一段流嵌多张网。
-- **elf ⊃** {enc, image} — image 不是 18 金网之一。
-- **e4 ⊃** {opinfo, peep} — 一段两网，仍未拆独立 image-stage。
-- **近 1:1**：e2↔pp，e1↔lex；**prune → ∅**；**lower** 对 abi/regmap/reloc 为一对多路由式。
-
-<a id="flow-net-progress"></a>
-### 3.0d 可核验进度
-
-
-封存清点（tip `9722183c`，2026-10-21 18:30 AWST）：**流 7/7、网 18/18 有点名原件**——这是「有原件」计数，不是处理器完成比例，更不是覆盖率。**有封≠已冻**；余缺照列：① per-net cell 不覆盖该网在流内的运行时 ask（边级原件 **17/17 = 15 键答映射 + 2 产品侧见证**（`tests/edgeseal.py` 参考端规范化键答映射叶 + `tests/edgewitness.sh` 产品侧见证件——后者为 e3→pfconv（唯 `-nostdinc` 可达，参考侧永不问、stages 对它空真）与 elf→enc（elf 流 enc ask 产品侧独有）两条，强度弱于键答映射件、分类计数不混同；各叶双录/双观测判等、三重 sha 钉扎、负例必红；设计/考古/实测收据 research/c43-edge-freeze-design-r1.md），计数入闸 `tests/seal-edges.tsv`；但链条 gold≡weights（net-*-seal）≡DENSE（oracle-cache 闸，22694 问双向，负例实测一字节翻转即红）已闭，且 stages-1*–3* 闸比对 10 网「Python 问过则 C 必问过」（前端 8 网 + prec/binsel，-c -v 打印已扩），后端六边（opinfo/peep/abi/regmap/reloc/enc）由 stages-back 闸以全程路线比对（Python compile_file+optimise -O2+lower vs C 全构建 -v 的 askedline，两探针，负例实测旧源二进制即红）——16 张出货网的「问过」证据至此全部入闸；仍缺的是按探针冻结的边级封存原件（比对式≠冻结回放））；② e1/e4/prune/elf 流封只回放录制输入，elf 仅 lnx/x86_64 一个目标；③ 权重/DENSE 的语义链已闭（net-*-seal：weights≡gold；oracle-cache：DENSE≡weights；kernel 闸：kernel/* 全部 59 件对 emit-kernel 再生逐字节比对），构造工具 build-weights 在 CI 两处跑（ci.yml）；余下的只是 gold→built.json 构造没有本机闸、built.json 无点名封存原件——语义错误会被上述三闸抓住，此条降级为低风险；④ parse/type 等物理仍嵌 e3 未拆；⑤ pp 叶封的 STALE 风险（头/autoinc 耦合）未消。本次封件闸全量重验见 §3.0 开头。
-
-| 发布链三格（2026-10-25动态状态） | 状态 | 证据边界 |
-|---|---|---|
-| ① 源码与发布身份 | 候选SHA／S及不可变封存不变；RC精确绑定cd30109850 | 后续测试／发布修复提交另记新HEAD，不冒充产品来源或旧RC |
-| ② 本轮候选有效闸与收口收据 | **a877旧089停窗；k2b修复后新图1317／954已核，待新正式结证** | 两叶原40秒冷回归、四元数据闸通过；旧源部分结果及失败保留，缺测仍OPEN／非PASS，不迁未知闭包绿 |
-| ③ 发行资产及正式发布 | 本轮未完成；签名／最终字节／公开仍待办 | Latest最后核对为v0.0.42；源码push与签前CI成功不等于0.0.43已发布 |
-
-**根对现状（2026-10-22）**：开发已迁到新 Linux x86_64 宿主（16 核，内存充足，旧机 2.3G 内存压力导致的 seed-gen 卡死不再出现）。根部 `unisacc.com` 为工作树候选（本机由 `make model-com` 各步构建；宿主须有 clang/ld64.lld/llvm-nm 与 zlib 头，exec/c/BUILDING.md 未列，待补），每次表刀后按 `release/derived-map.tsv` + `release/tools/derivedcheck.py` 刷派生物、经 `release/tools/commitgate.sh` 提交。旧机第一至第七次根对重建/归位收据与宿主坑位已归档：[2026-10-22 过程归档](archive/prd-process-notes-20261022.md)。
-
-三格分别记录源码身份、验收及公开资产，不折算为完成率或剩余时间。当前版本见[src/version.h](src/version.h)；Latest于2026-10-24实际只读核对仍为v0.0.42。
-
-查看：[七流表](#seven-stream-contracts) · [十八网表](#eighteen-net-contracts) · [流×网关系及边级夹具](#flow-net-relation)。本节更新状态口径，不改三表原观测数据。
-
-### 3.1 从声明到网络：到底替换了什么
-
-```text
-事实表 weights/gold/*.tsv + 各阶段控制/动作 TSV + 模板/资源
-    → 离线构造器装配有限转移 δ（JSON）
-    → tbl.py 编号化（.tbl，参考与检查格式）
-    → net.py 构造整数阈值网络（.net）
-    → compilerpack/pack 压缩、去重、声明路线（P3）
-    → 通用执行器：字节输入 → 网络选转移 → 执行动作 → 字节输出
-```
-
-**事实表与控制规则必须同时记账。** `weights/gold` 提供词类、类型、优化、ABI、编码等有限决策事实；`exec/*` 邻接 TSV 描述扫描、归约、调用、布局和输出等控制过程。Python 构造器仍负责 trie、名字/状态分配、目标绑定和规则装配，部分编排仍是手写代码。不能说仅靠原有 18 张 gold 表已经自动推导完整 C99 编译器，也不能把构造器的代码量隐藏在“权重”一词里。它们是离线规则来源，不在用户编译路径中执行。
-
-每个控制状态选择一个观察银行，观察值是**输入字节/EOF、续接栈顶或比较结果**。网络输出两个整数：下一控制状态与动作序列编号；并非对任意源码直接作一次分类。数据寄存器、索引内存、intern 字符串、输入帧、续接栈与输出缓冲承载跨步状态；它们不作为一个无限宽向量输入网络。
-
-对一个有限银行的两个输出分别构造：`f(x) = f(lo) + Σ[t≤x](f(t)−f(t−1))`。隐单元是整数阈值 `[x≥t]`，权重是相邻答案差；构造精确，不训练。缺转移也编码为 `(-1,0)`。升序阈值允许只累加激活前缀，仍求同一个网络函数，不转换成答案查表。
-
-**续接返回是声明的通用控制原语。** 栈键银行中共享同一动作序列的 `k→k` 返回由声明返回集合表示，执行核验证成员后恢复续点；其余转移仍由阈值网络回答。字节账包含这些声明，不冒称它们全是数值神经权重。
-
-**执行器边界**：执行核只有定宽整数算术/比较、寄存器与索引内存读写、字节跨度/缓冲、栈和输入帧、intern/blob、资源获取、接受/拒绝等原语。宿主负责文件、OS 分配、平台 API 绑定和进入已生成代码；不调用宿主 C 解析器、优化器或参考镜像 writer。语言相关判定、扫描顺序、ABI 选择和机器字节布局应在阶段规则/动作中。资源模板、Windows argv 机器代码模板及离线手写装配仍明确保留，不能宣称“所有语义均已模型化”。
-
-### 3.2 路由、数据协议与分支
-
-| 逻辑步骤 / 实际阶段名 | 输入 → 输出 | 模型组织 | 路由条件 |
-|---|---|---|---|
-| E2 / `e2` | 源字节 → 预处理文本及位置封装 | 六目标预定义；普通/位置变体 | `-E` 在此结束；宏与头资源来自声明 |
-| E1 / `e1` | 预处理封装 → 带拼写/位置的 token 流 | 共享词法控制网络 | 普通编译保留 E2 映射 |
-| 多单元 / `units` | 独立单元的 token 帧 → 合并 token 与单位映射 | 一个共享隔离/合并网络 | 多文件在 E3 前插入；宏状态不跨单位 |
-| E3 / `e3` | token 流 → tape；另输出诊断 | 普通错误版与错误+告警版 | 正常产品路线也是 located/errors，不只告警才有位置 |
-| E4 / `e4` | tape → tape | O1、O2 两个网络 | O0 省略；优化级别不等于另一种前端 |
-| `prune` | tape → 保守剪枝tape | 共享闭包扫描网络；数据/代码地址根保留 | 镜像/-run在lower前调用，公开-S/-c不调用；超域原文保持 |
-| E5 前段 / `lower` | tape → 目标指令/符号/稀疏数据文本 | 六目标网络，ABI 事实与布局动作 | 所有目标共用 tape 协议 |
-| E5 编码 + E6 / `elf` | 目标文本 → ELF/Mach-O/PE 字节 | 六目标编码及镜像网络 | `elf` 是历史路由名，包含三种镜像格式 |
-| 内存路线 / `target/memory` | 目标文本 + 实际基址资源 → UNIMEM1 | 重用末端网络的内存入口 | `-run` 不落盘执行镜像；一次绑定 |
-
-实际路线来自 [image-stages.tsv](exec/pipeline/image-stages.tsv) 与 [compilerpack.py](archive/reference-py/exec/c/compilerpack.py)，驱动执行见 [compiler.c](archive/reference-c/exec/c/compiler.c)。公开 token dump 另有 `tokenpp/tokenlex`，不等于普通编译的 located E2/E1。`-c` 当前输出 tape，不是原生 `.o`；多个 C 文件一次编译成一个程序，没有普通系统链接器的 `-l/-L` 契约。模型拒绝不能悄悄改走经典编译；经典路线是显式参考/回退构建。
-
-### 3.3 E2：预处理模型
-
-- **输入/输出**：源文件字节；普通输出 `pp.text`，产品输出带文本长度、强制/自动包含信息、续行与包含位置的 `UNIPP1` 封装。`-D/-U/-include/-nostdinc` 由 CLI 资源传入，不由 driver 改写源码。
-- **结构**：先处理 shebang、续行、注释与字面量保护，再进行自动头选择、指令处理和宏重扫。宏记录存名字、正文、参数、可见区间、历史链和隐藏标记；输入帧承载参数/替换正文，显式栈承载条件表达式归约。包含文件拼入后重新规范化。
-- **规则来源**：gold `pp.tsv` 的指令与 defined 判定；[exec/pp](exec/pp/rules.md) 的 text/autoinc/macro/directive/expression/reduce/hash/rescan/pragma/location 声明；目标 `predefines.tsv`；头文本为命名资源。gold 的小表只是指令判定的一部分，不等于整个预处理器。
-- **功能/限制**：对象/函数/变参宏、参数展开、字符串化、覆盖的拼接、条件表达式、包含搜索、macro-stack pragma、位置跟踪。参数上限 MAXP=12（exec/facts/pp-layout.tsv；2026-10-27 cc 裁定，旧值 8 已过时）；一般标点/字面量拼接等尚有限制，E2 自身不生成完整 file:line:col 诊断。
-- **判据**：macro/literal/pragma/location 专项、分片参考字节对照、坏封装与失败路径；位置传输还须经 E1/E3 核对。构造器读取自动头导出名单并装配控制，不能写成这些编排已消失。
-
-### 3.4 E1：词法模型
-
-- **输入/输出**：预处理字节及映射 → typed token 行流，保留标识符/数字/字符串原始拼写。located 输出 `UNITOK1`，携带原始预处理封装与每 token 的源偏移；EOF 是显式观察。
-- **结构**：字节类/前瞻类分派，标识符与运算符 trie、数字/字面量控制状态；MARK/JUMP/跨度动作实现最长前缀，栈处理声明中的平衡跳过。数值求值不是词法阶段的职责。
-- **来源**：gold lex、parse token 词汇，lexcls/lexword/typekw，以及 [词法规则](exec/lex/rules.md) 的 number/literal/ident/entry/output/spelling/count/location。trie 和连接由构造器生成，不运行经典 lexer 补答案。
-- **功能/限制**：关键字、类型词、普通标识符、数字拼写、字符/字符串前缀、注释、最长匹配标点及声明中的 UCN 路径；规则存在不等于完整 Unicode/C99 保证。非法字节和坏封装明确拒绝。
-- **判据**：compare、positioncheck、locationcheck；同时比实际网络与通用动作参考，不把旧独立 lex 实验误认为生产构造路线。
-
-### 3.5 多单元：隔离与合并模型
-
-每个源文件用全新的 E2/E1 机器状态运行，宏与 include guard 不跨单元。driver 只读文件、封装长度/文件名；模型验证帧、扫描并隔离文件级 static 与标签，合并 token，输出 `UNITOK2` 的单位/位置目录。最多 64 帧。E3 在程序范围共享符号、签名、字符串池，并保留声明的单位归属。不是把源文件简单拼接，也不是系统 `.o` 链接。多源 `-E`/token CLI 当前拒绝；部分 aggregate static 声明形式有命名拒绝。判据见 multicheck、multiwarningcheck 与 unitlocationcheck，检查隔离、输入顺序及错误归属。
-
-### 3.6 E3：解析、类型、存储与 tape 模型
-
-- **输入/输出**：UNITOK1/UNITOK2 → `tape.text` 与独立诊断缓冲。tape 包含标签、指令、字符串/BSS、初始化与入口段；是中间协议，不是宿主机器代码。
-- **控制结构**：构造器用状态 label、边上动作、压续点的 call 和栈顶 RET 组织子过程。token-reader 把行流解码成 token 类、intern 名字、跨度/数值；索引内存存符号、作用域撤销、维度、成员、函数签名、标签和字符串池。共享优先级梯子进行表达式调度，不是一次匹配有限个完整程序。
-- **事实与控制来源**：prec/binsel/irsel/type/tyinfo/pfconv 提供优先级、ALU 拼写、共同/结果类型、宽度及转换。`exec/parse2` 的 declaration/scope/operator/ladder/control/member/call/initializer/statics/vla/constexpr 等 TSV 提供控制；tape/text 模板负责输出。`exec/parse/gen.py` 仍被导入作共享组装器；intrinsic 名单来自种子声明。手写构造编排仍在，不称已有通用文法编译器。
-- **功能**：声明与作用域、typedef、整数/浮点/指针、数组、函数指针/签名、struct/union/enum、成员/位域/柔性数组、常量与 VLA 维度、初始化、表达式/转换/更新、sizeof、语句控制/标签/调用及 intrinsic。每项以保留探针中的具体形状为支持范围，不能从名字存在推断任意组合都支持。
-- **浮点字面量**：数字解码通过 32 位 limb 动作形成精确比例并最近偶数舍入，包含次正规数；不是宿主浮点解析回调。160-limb 上限等构造容量单列。
-- **位置、错误、告警**：模型将 token 偏移关联到原文件/行列/上下文；普通版启用 errors，告警版再启用 return/int-conversion/unused/format 规则。部分已映射语法错误允许顶层平衡恢复；未覆盖形式定位后停止。错误非零不得发布 tape。告警规则不称完整控制流/printf 规范分析。
-- **限制**：token 字节跨度 <2^26，数组 rank≤8、struct 池≤128，签名/shape/enum 池有限；部分声明符、类型形状、初始化、struct 返回和异型条件分支仍有拒绝。静态容量与理论无界存储分开。
-- **判据**：固定 probe/keep、floatconst 的系统 cc/表/网络核对、scope/enum/location/diagnostic/error/warning 专项和完整 self-source tape。`parse2/selfcheck.sh` 使用 `.tbl`，其成功不能单独冒称网络自源证明；产品网络与完整路线另有门禁。
-
-### 3.7 E4：优化模型
-
-输入/输出均为 tape，O0 不调用；O1/O2 使用独立控制网络。START 加载 opinfo/peep 事实；扫描、解析、基本块、读写、活跃性、融合和轮次来自 `exec/opt` 的 TSV。O1 在最多四轮内检查有限直线范围，把软件栈保存/恢复替换成 mov。O2 加入基本块/标签、活跃性重扫、死寄存器携值、局部读融合、相邻指令 peep 和复制/目的重定向。它是有界保守改写，不是全程序优化或完整寄存器分配；算法被编码进规则与动作，并未凭网络构造消除算法信息。判据是同一 O0 tape 经模型后与参考 O1/O2 的 tape 字节相等，另有独立执行差分。来源/门禁见 [opt规则清单](exec/opt/gen-manifest.tsv)、exec-e4/exec-e4self。
-
-### 3.7a prune：函数可达闭包模型
-
-输入/输出为tape原文。模型识别受支持的函数prologue，建立调用、跳转及可能贯穿边，从入口、main/__init和代码取址根求闭包；保留所有数据语句和可达原始字节跨度。一个共享阈值网络由 `exec/prune/gen.py` 构造，执行核没有剪枝原语。host ABI、可达间接调用、超2MiB或目录容量、未知/歧义与非LF等输入完整保留。参考分别为 `src/tapeprune.c` 与 `unisa/prune.py`；四个PRUNE_PART门禁对拍，不把保守fallback说成完成全程序分析。
-
-### 3.8 lower：ABI、目标指令与稀疏数据模型
-
-- **输入/输出**：tape → `target.text`，含目标、实际保存的数据、符号、逻辑数据长/BSS/重定位，再接目标寄存器指令、标签、元数据。
-- **结构**：数据扫描与 code 扫描分开。zero-last 排布和 mod-8 对齐由模型动作执行；虚拟长度与保存前缀分离，BSS/对齐推进逻辑长度，不逐字节存零。宽索引命名空间避免大数据偏移撞上其他表。
-- **来源/功能**：regmap/enc/abi/reloc 事实、tape SHAPE、scratch/WinAPI 常量与 code-abi-sources/code-syscall 声明。模型完成入口、参数、软件栈、寄存器映射、POSIX syscall、Darwin carry 与 hostcall/hostaddr、Windows 保存/恢复与返回转换。ARM 窄化/立即数融合及有界 dead-after 扫描也在声明动作中。
-- **限制/判据**：约 2GB 数据/相对寻址边界，不支持的参数形状拒绝，none WinAPI 导入不能当正常导入。普通/ARM/Windows lowering 与 sparsecheck 分开验，稀疏 610MB 布局成功不等于编译 610MB 数组源码已经成功。
-
-### 3.9 E5：指令编码模型
-
-编码与镜像写出在实际 `elf` 阶段同一网络中连接；逻辑区分不代表磁盘有额外一份模型。x86 解析寄存器/操作数/元数据，执行 REX/ModRM/SIB/位移、整数/FP/syscall/Windows 设置与地址打包；先长分支布局再迭代缩短，call 保持 rel32。ARM 两遍测量/解析标签，无分支缩短，call 位移从 BL 实际位置算；执行 MOVZ/MOVK、整数/FP、存取、软件栈、地址和各 OS gate。
-
-opcode、NUM、FP/存取/relocation 字段来自 catalog/emit 的声明；扫描、位打包、分支和地址算法来自 `exec/enc` 控制 TSV。**WINARGS_BODY 是明确保留的机器代码模板**，其中命令行解析还不是 δ；模板大小计入产物。重复/未定义标签、非法元数据、范围越界和破坏 scratch 的别名必须拒绝。check/armcheck/x86wincheck/armwincheck 既比参考字节，也保留手算/独立解码及边界探针；全域转移等价不等于所有 FP/整数指令语义已形式证明。
-
-### 3.10 E6：镜像与内部完整性模型
-
-共享动作解码 payload、应用重定位和裁掉文件零尾；实际内存范围仍保留。ELF 模型计算 ELF64 头、入口、两个 PT_LOAD，区分 p_filesz/p_memsz；Mach-O 模型生成段/section/dyld/LINKEDIT，通过 SHA256 δ 计算页哈希和 ad-hoc CodeDirectory/SuperBlob；PE 模型生成 PE32+、导入、cookie/load-config 与 DIR64 排序去重/页分组。不在运行时调用 Python image writer。
-
-格式常量/模板来自 `unisa.image` 与声明文件；格式控制也有 TSV。Mach-O **ad-hoc 签名只满足镜像运行格式要求，不是 Developer ID、企业发行签名或公证**。PE 重定位的二次插入排序仍是规模限制。imagecheck/armimagecheck/machocheck/shacheck/pecheck 验格式与字节；客机运行、自举及签后运行是另一组证据，不能用“能写六目标”代替“本轮实跑六目标”。
-
-### 3.11 `-run`：一次绑定与宿主装载
-
-**驱动默认模式（主人裁定 2026-10-01）：不带 `-run` 也不带 `-o` 时，`unisacc FILE.c [args]` 就是运行模式**——与 cc 的“静默写 a.out”刻意不同，这是产品的特点，不是兼容缺口。`-o` 才写可执行文件，`-run` 保留为显式写法。0.0.16 及之前的产品按 cc 语义写 a.out；**0.0.17 R17-10 已在两条路线落地**（src/main.c、exec/c/compiler.c：命令行没有任何模式/输出旗标即 `-run`），README 用法、用法行、ccparity（唯一登记的与 cc 差异）与 cli 套件同步。
-
-源码先到 lower，再给 memory 入口传实际 OS 预留地址、容量、argc/argv 和适用的动态导入资源。模型据真实代码/导入长度计算对齐与数据位置，**只生成一次最终绑定的 UNIMEM1**（magic、text/extent/stored/entry 四个 u64 及代码/保存数据）。模型负责布局；宿主 reserve/commit、校验、复制、设置权限、清缓存、进入入口，不解释 C/tape/指令。
-
-预留约 2GB 虚拟区由 OS 选地址，不用 MAP_FIXED；Windows reserve 与原地址 commit 分开。失败和错误地址显式拒绝。`UNISA_MEMORY_TWOPASS=1` 只作同驱动比较基线，不能当默认路线。memorycheck 比同基址镜像、资源/范围失败、loader 边界和 Windows API mock；mock 不是客机实测。当前同身份 calc 五次暖中位为 P2/双遍 205.382ms、P3/双遍 207.770ms、P3/单遍 172.749ms；它是该输入的测量，不外推所有程序。证据见 [集成测量](archive/research/20260928/memory-once-integrated-bench-20260928.json)。
-
-### 3.12 模型包、库与发布边界
-
-P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整数用规范 LEB128/zigzag，字符串按长度保留字节，再逐网络 raw-DEFLATE + 原长/CRC32。按路由只解需要的网络；校验与模型解析完成后释放解压缓冲。构建期保留 SHA256 与全域 check-net，CRC32 仅防损坏，不是企业信任。旧 P1/P2 的兼容路径和未知版本拒绝必须保留测试。
-
-共享索引让同一模型内容只保存一份；Q/C 动作、H 参数和 S 字节声明分别计账，解压后逻辑量不与压缩体相加。头文件库源码是另计资源，当前没有全库 AOT 或全系统 libc 转发；macOS FFI 是有边界的宿主能力，不把它说成六平台都可任意调用系统库。执行器、驱动/OS 适配、模板、库和网络均是产品组成，不能只报纯推理核几 KB。
-
-**产品边界：转发与 cc 互调只走参考路线**（0.0.24 收口 0.0.23 A1/A2，两次顺延已满按原计划兜底砍掉）：产品对 Windows 目标的 `.hostcall/.hostaddr`（libc 转发）和 `__ccx_`/`__ccw_`（cc 互调）保持带位置的按名拒绝，这是正式行为，不再排期；参考编译器两者都支持，forward 与 ccinterop 门禁只测参考路线，所以不设 com-forward、com-ccinterop。
-
-**macOS 发布方案（0.0.13 起实行，每版公证并公开 dmg）**：采用 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
-
-### 七流开发工具的外置模型方向
-
-设计约束（2026-10-24，尚未实现）：通用执行器`.com`与流配置、模型及资源分离。编译语义由模型数据表达；壳负责通用操作集、装载校验、输入输出协议和宿主适配。模型包包含转移、动作及权重，不只是一组数值。编译规则改变时独立重建受影响的模型包；操作码、数据格式、执行器ABI或宿主能力改变时才更新壳。当前七个开发`.com`仍附加各自模型，尚未达到物理分离。
-
-先复用P3的模型／资源身份与范围检查，增加显式外部包入口；流配置声明输入输出格式、模型及资源依赖。权重构造与测试可按模块并行演进：候选包和测试版本各自保持不可变身份，测试独立维护输入／断言／参考，合并时固定壳＋模型＋资源＋测试的配对。按依赖共享资源，缺包、错配或不兼容必须具名拒绝。测试绑定壳SHA、配置／模型／资源SHA及实际输入与环境，只复测受影响闭包，保持独立对照；模型数据命中不等于旧测试PASS可迁用。开发外置与正式单文件封装共用协议。完整外部共享能力在[0.0.45计划](plans/v0.0.45.md)细化，不把重做发行架构变成本版发布前置。
-
-### 3.13 验证分层与当前证据
-
-| 要回答的问题 | 证据 | 不能推出什么 |
-|---|---|---|
-| 网络是否精确实现声明转移 | check-net 全部有限观察，包含缺转移/声明返回 | 声明自身就是 C99 语义 |
-| 阶段是否保持参考行为 | 固定 keep、输出/退出/诊断、边界与失败探针 | 任意程序/未测组合全域等价 |
-| 产品是否完成实际编译/运行 | `.com` 用户命令、cc 可观察差分、真实应用与自举 | 编译器与平台 cc 所有实现定义相同 |
-| 包/宿主是否可靠 | codec、损坏包、资源、内存范围、API 失败 | CRC 已提供企业签名信任 |
-| 发布物是否可分发 | 精确 SHA、来源、签后运行、平台和信任回执 | 旧候选门禁适用于新源码/重签字节 |
-| 真实程序能否编译运行 | `realprog`（kilo/jsmn/cJSON/lua/sqlite 与 cc 同源构建同参运行，棘轮）、`tools`、`corpus` | 未登记的程序/库面 |
-| 目标文件能否被系统工具接受 | `elfobj`（ELF/Mach-O/COFF `.o`：节与重定位集合、与映像的不变量、GNU ld/lld/ld64/lld-link 链接并在 Lima/本机/Windows 虚拟机运行同映像；读 cc `.o` 的数据符号；产品 Linux 对象与参考逐字节同） | 产品的 Mach-O/COFF 对象（0.0.18）、与 cc 的函数互调（0.0.18） |
-| 分开编译与链接是否正确 | `linkunits`（单元单独编译再由 unisacc 链接 = cc = 一步编译；`.a` 只拉所需成员；产品链接与产品 ar 同参考） | 系统链接器链多个单元对象（不支持：初始化链只有 unisacc 会做） |
-| 减法是否安全 | `subtract-safety`（归档文件无外部引用、指令文件可解析） | 行为层面的回归（由各功能门禁负责） |
-
-出货身份以历史发布身份与各版回执为准；旧候选的队列、平台与 Apple 资格不移植到新源码或重签字节。T1是有限转移/网络等价；全程T2和C语义T3仍为独立证明义务。
-
-<a id="model-function-bytes"></a>
-### 3.14 当前模型功能与物理字节账
-
-下账对应 0.0.43 本机开发候选 `75a52ae7f898a6db7ea32b810f250deb9ffda9a2fad2b1d8a6ec81efba4f8972`，不是发布字节。`research/model-bytes.json` 中 SHA `518601e5…` 属 0.0.24 历史候选，不作当前账。只按实际封装内容记物理字节；同一网络被多条阶段行引用时不重复相加。
-
-<!-- model-bytes:begin -->
-快照 SHA-256：`75a52ae7f898a6db7ea32b810f250deb9ffda9a2fad2b1d8a6ec81efba4f8972`；总计 **2,934,337 B**。源码 SID `718017ab98ae13963d0b928496724c0e661990b3972ba452909742ccfa6f6a81`；包 SHA `4d9b8a3a526f340709316f7fb67189603bbd15bcd38dbab5b7997617c505a83e`。
-
-| 物理内容 | 文件内字节 |
-|---|---:|
-| Windows x86_64 PE，含脚本/版本资源；Windows ARM 入口共用 | 687,616 |
-| Linux x86_64 gzip（展开 724,187 B） | 166,772 |
-| Linux arm64 gzip（展开 752,796 B） | 153,761 |
-| macOS x86_64 gzip（展开 726,754 B） | 171,586 |
-| macOS arm64 gzip（展开 759,778 B） | 159,121 |
-| 五片间及尾部对齐 | 56 |
-| P3 `compiler.pkg` | 1,595,409 |
-| `UNIPKG1` 尾 | 16 |
-| **总计** | **2,934,337** |
-
-包内 32 个网络压缩体共 1,088,123 B，74 个资源内容共 420,643 B；其余目录、记录头与键共 86,643 B。七流压缩体共 996,753 B：e3 342,284、lower 320,870、elf 185,908、e2 94,739、e1 28,340、e4 15,481、prune 9,131。阶段行引用网络内容，不另占一份网络体。四个 gzip 成员实际解压 SHA 与本轮四个 ELF/Mach-O 切片逐一相同；当前打包由宿主 GCC + zlib 完成，编译器本身未链接 zlib。五目标写出和本机 smoke 已验，外国宿主原生运行仍待。
-<!-- model-bytes:end -->
-
-旧快照、纠错和计数来源见 [结构测量史](archive/prd-release-and-development-history-20261001.md#结构测量与纠错)。
-
-### 3.15 目标文件、分开编译与链接（0.0.17）
-
-- **对象**：`-c -b os/arch` 写可重定位对象，格式随目标（ELF/Mach-O/COFF）。参考侧三格式都有；产品的 Linux ELF 由模型路由写出（对象专用 lower + ELF 写出 δ，与参考逐字节同），Mach-O/COFF 产品路由在 0.0.18（驱动按名拒绝）。整程序对象可被系统链接器单独链接，并可读 cc 定义的数据符号；与 cc 的函数互调需要调用约定适配（0.0.18）。设计与事实表见 [docs/toolchain.md](docs/toolchain.md)。
-- **单元与链接**：`-funit` 写单元对象（tape 带 `.global/.extern` 链接属性；对象里另有不装载的节存单元 tape）。`unisacc a.o b.o lib.a [-o prog]` 在 tape 级合并（src/tapelink.c：私有名改 `__u<k>_`、全局按名相会、同名全局对象按 C 公共定义合一、各单元 `__init_u` 串成 `__init`），再走普通后端，六目标都可出；`unisacc ar rcs|t|x` 读写系统 `ar` 也认的归档（2026-10-28 cc：archive.product-ar 以宿主 ar 为 oracle 实跑 17/0 @f3705dfa；未定义外部函数的链接拒绝另立格 link.undef-function-refusal，当前为已知缺陷，见 plans/defects-c43.md）。产品驱动复用同一合并核心，编译决策仍全在模型路由。
-- **驱动默认模式**：见 §3.11（裸 `unisacc FILE.c` 即运行）。
-
-## 4. 质量体系
-
-- 新合同按网、流、接口、产品、库/ABI和平台分账，当前覆盖见[tests/coverage.tsv](tests/coverage.tsv)，批次见[tests/batches.tsv](tests/batches.tsv)；[归档层次](archive/testing-c43-legacy/tests/GATE-LAYERS.md)只保留历史义务。局部绿不代全链，未覆盖不计通过。
-- 清单、来源身份、实际受试字节与原始结果分别可核；旧C99条款与原失败见[归档条款账本](archive/testing-c43-legacy/tests/c99/clauses.tsv)，当前入口是 `sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`。[旧清单](archive/testing-c43-legacy/tests/INVENTORY.md)不恢复调度。
-- 当前开发按具名差集及必要合同门推进，准备/构造与测量单列预算；不得因历史流水线描述自动全量打包、重封或恢复旧队列。
-- 发布流程材料见[release/README.md](release/README.md)；旧 [RELEASE-PIPELINE.md](archive/plans/2026-11-01/RELEASE-PIPELINE.md) 只描述已归档的旧 C 链，已归档不再作为入口。当前明确禁止签名、Draft、Latest及公开；历史授权不沿用。先完成新清单与同候选平台证据，再按明确新授权处理发布；旧队列不恢复（见§2）。
-
-## 5. 路线
-
-### 5.0 当前优先与0.0.x退出条件
-
-当前先收口前级/库边界与晚绑定阶段合同，具体刀序和验收只在[0.0.43计划](plans/v0.0.43.md)维护。旧0.0.29–0.0.42时间表已归档，不因版本号推进而宣称义务完成。
-
-**0.0.44 启动提速优先需求（主人2026-10-25）**：`-run`启动偏慢，同一程序第二次启动应有透明复用和实测加速机制，可顺延0.0.44；先拆相测量，缓存须绑定源码/传递依赖/候选/目标/选项，正确失效，每次仍真实执行程序及重新绑定运行资源，不缓存输出或PASS。需求与原C44-RUN-STARTUP-01合并排程；当前仅登记，未实现或宣称提速，详见[启动性能需求](plans/v0.0.44.md#优先启动性能需求主人2026-10-25)。
-
-**0.0.44 体积优化需求（主人2026-10-31）**：`unisacc.com` 优化体积，但速度优先，体积不能拿速度换。0.0.43 装好的 `43fbbb81` 是 4,631,130 字节，比 10-28 的 3,035,300 字节涨了约 53%：头部的 win/x86_64 可执行文件 1.59 MB，四片 gzip 的 Unix 编译器合计 998,419 字节，一份共用的模型包 2,039,850 字节（32 个模型 1,125,834 字节已压缩，1479 行阶段路由 83,948 字节，77 个资源 830,037 字节），其余是对齐。看结构用 `tools/com-tree.cx`。计划编号 C44-SIZE-01，在 [0.0.44计划](plans/v0.0.44.md)。头号线索：77 个资源里的 69 个 `\0hdr/` 头文件原样存放没有压缩，共 814,573 字节，占整个文件 17.5%（cx-flat.h 一个 387,078 字节，gzip -9 后 94 KB；整个 include 约 822 KB 压到约 200 KB）；压缩后每次首次用到某个头文件要多一次解压，要量。涨幅的其余来源还要查（0.0.43 的 lnx 片改走整程序 `-o` 是怀疑项，未证实）；每一刀都要量启动、编译两项耗时，速度退步就撤；不放宽任何检查。
-**0.0.44 已登记需求（主人2026-10-24）**：改进 `.cx` 模块化与内存安全设计，参考Rust等经验；持续把 `.py` 和大部分 `.sh` 改造为 `.cx`，形成自有工具链；改进测试套件结构及端到端速度。当前仅登记，尚未设计或实现，不插入0.0.43收口；范围及验收方向统一见[0.0.44计划](plans/v0.0.44.md#registered-requirements)。
-
-**0.0.45 已登记需求（主人2026-10-24）**：继续改良流＋网范式的模块边界，使模块成为外部可调用、可共享的工具能力；支持不同`.com`程序动态共用这些模块和权重，构建更丰富的测试及应用功能。当前仅登记，具体接口和共享机制待设计；见[0.0.45计划](plans/v0.0.45.md#registered-requirements)，不加入0.0.43发布前置。
-
-**0.0.44 由 0.0.43 已知缺口转入的编号（cc 按主人「你来安排」2026-10-31 登记，正文在 [plans/v0.0.44.md](plans/v0.0.44.md)，豁免记录在 `tests/waivers-0.0.43.tsv`）**：C44-WIN-ARM64-01、C44-LIBUNISACC-01、C44-DIAG-COLUMN-01（R1–R3）；C44-STREAM-CONTAINER-01（R4、R7、R8）；C44-MALLOC-01（R5）；C44-BUDGET-01（R6）；C44-HOSTSYM-01（R9）；C44-LOADER-SEMANTIC-01（R10）；C44-WERROR-01、C44-ASLIMIT-01（known-gaps 小行为）。
-进入0.1.x前，自有构造、构建、自举、测试、队列、缓存、报告及发布工具链迁到C/.cx；在没有Python、外部cc和shell的环境中，由上一版unisacc.com构建下一版并达到自举不动点、完成本地适用测试。外部对照编译器仅作可关闭的预言机。不得改后缀、藏脚本或由.cx调用Python/shell冒充完成；按依赖族迁移，保留原检查、失败语义、故障注入及新旧对拍。归档不等于删除未端口义务，archive/ujs等范围逐项清点，不默认豁免。
-
-**0.0.46 已登记需求（主人2026-10-31）**：基于 `unisacc.com`、`gcc_cx.com`、`clang_cx.com` 与 cx 架构，做对标 agent harness 的工具：`cx-csih`（参考 Pi／`badlogic/pi-mono` 的最小 harness 路线）、`cx-csih-full`（参考 OMP／`oh-my-pi` 的厚工具面路线），两者共用同一套会话与工具合同及 cx 模块。命名已裁定不借用他人产品名（CSIH = c-based super intelligence harness）。另登记 **cx 原生 TLS**：不卡在编译器，卡在密码学原语面，按原语分片实现，SHA-256／HMAC-SHA-256 已落地并过向量，其余分片见[cx 原生 TLS 计划](plans/cx-l0-tls.md)。harness 本体**未实现**；不构成 0.0.43 收口前置，范围及验收方向见[0.0.46计划](plans/v0.0.46.md#registered-requirements)。
-种子仍按两个代际命名：unisacc-seed.com与unisacc.com；C种子构造器和声明规格的完整性必须有同源实证，Python保留为对照不冒称已退役。
-
-### 5.1 libc与前级冻结
-
-优先复用系统libc，按函数族明确“转发/保留/拒绝”，不无限扩头内库体；方向是独立provider/外置运行库与声明头分离。单函数边界刀只换实现时P/M必须不变，头资源输入变化与模型语义变化分账，禁止无pp表/模型实证随库刀reseal。
-
-通用转发/目标装载与ABI资格分别核验；声明有名不等于签名可调用。宿主地址只在绑定层进入。静态/动态不是硬性二选一：纯计算且影响确定性的保留项须具名，其他库实现可独立静态链接；不把静态链接等同于头内实现。允许按需借用合规实现并保留版权/NOTICE，禁止整包内置替代系统libc或无界自研。来源与细账见[libc移交](research/libc-forward-handoff.md)、[历史过程归档](archive/prd-process-notes-20261021.md)。
-
-### 5.2 未排期研究与构想（不自动开工）
-
-- 权重表示及推理成本：优先研究同权阈值段精确聚合、类型化动作模板/银行归一化；分别量权重、运行内存与同身份延迟。包压缩不冒称权重减少，结构统计不冒称真实提速；网络语义及完整接口保持是前提。
-- 可移植Tape包、嵌入式库/API与包管理、wasm第七目标；表解释性/语义完备性与证明；向量化、工具链去脚本及队列改进。已有实施部分归当前计划，不重复排队。
-- DSL 批量重构工具（主人 2026-10-29，仅登记）：设计并制作代码重构工具，范围含迁移。它是 file 工具的增强版，能对指定 DSL 文件批量并发修改，用来提高代码进化速度。当前不设计、不实现，也不插入进行中的 CX 粗迁。
-- **csih C->CX 导出的工具／脚手架缺口（2026-10-29，政委收口；后面再探索改进方案，不自动开工）：** 经验与测据见短结 [apps/csih/docs/c-to-cx-report.md](apps/csih/docs/c-to-cx-report.md)，宫殿已指该文。P0：CX `-run` 跨进程内容寻址缓存（键勿绑 `/tmp/ua-cxif-*`）；正式 `CSIH_BIN`／源摘要变则重建与缺产物具名拒绝。P1：`.c`→`.cx`／`#include`→`use`／残留 `.c` 扫描／下层 include 白名单一条命令；`check.cx` 滚动分桶门禁（输入哈希、嵌套超时与直跑分账）；cc fuzz「库 TU+cx.h／驱动 TU+API.h」配方入文档。P2：CXIF 导出面 diff、`use` 闭包计数与超限诊断、禁上层 include 静态闸；e2e 减 Python（pty 见证 CX 化或最小宿主助手）；`-cx-plan` 可读摘要。P3：测用 native 缓存与产品默认 `-run` 合同分离；`self-iter.md` 等旧 `.c` 路径随手清。与上文 0.0.44 启动复用登记相关但不合并开工；不授 Draft/Latest/签/公开。
-- 原FX-1–FX-8细稿及旧测量完整留在[构想归档](archive/plans/ideas.md)，旧收官排期在[路线图归档](archive/plans/roadmap-0.0.x.md)。构想不构成产品/发布授权。
-
-### 5.3 0.1.x：其他 C 编译器接入 `.cx`
-
-**规划决定（主人 2026-10-24）**：在 0.1.x 制作共用 `.cx` 前端、构建驱动器及必要的编译器插件/适配，使 Clang、GCC、TinyCC 等工具链支持 `.cx`。具体安全语义以 [`.cx` 草案](docs/cx-spec-draft.md) 后续形成的稳定规范为准。`.cx` 继续采用 C99 语法，通过模块接口、契约和受检查的编译配置表达能力，不增加 Rust 式源码关键字。
-
-**已落地的宿主驱动（2026-10-26）**：源码是 `tools/gcc_cx.cx` 与 `tools/clang_cx.cx`（实现在 `tools/cxcc.cx`）。六目标 APE 由 `./unisacc.com -run tools/build-cxcc-ape.cx` 写出，放到仓库根的 `gcc_cx.com` 与 `clang_cx.com`，不入库。五个切片是 `win/x86_64`、`lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`；`win/arm64` 走同一份 x86_64 PE。Unix 上用 `sh ./gcc_cx.com` 启动，shell 按 `uname` 解出切片，缓存名是 `~/.cache/gcc_cx` 或 `~/.cache/clang_cx`，所以从 argv[0] 找不到仓库时要在仓库根启动，或设置 `CX_ROOT`。驱动把首行 `#!` 涂成空格。没有 `#pragma unisa use` 的单元仍一次交给系统 `gcc` 或 `clang`，参数是 `-std=c99 -x c -include <仓库>/include/cx.h`。有 `use` 时，驱动执行本仓库 `unisacc.com -cx-plan`，按每个单元自己的 include 列表分别编译再链接。解析器只有这一份。产物是普通 C，不授予「已通过 `.cx` 检查」的身份，所有权检查仍未实现。Windows 切片用 `posix_spawnp` 启动系统编译器，也用它抓取 `-cx-plan` 的标准输出；临时文件先看 `TMPDIR`，否则用 `GetTempPathA`。本机没有 Windows，该切片只编译进 APE，没有执行。本机有 `/usr/bin/gcc` 和 Ubuntu clang 15.0.7。OSX 切片只写出、未执行。草案中的版本化 CXIF 对象和编译器插件仍未实现；这一步用的是 unisacc 已有的 CXIF v0 文本头。
-
-**宿主驱动（2026-10-27）**：本机 gcc 与 clang 在 `-std=c99` 下碰到 `#pragma unisa use` 会丢掉这一行并退出 0；`-Wall` 才给出 `-Wunknown-pragmas`，编译仍然成功。gcc 要在 `-fplugin` 的 `PLUGIN_PRAGMAS` 回调里 `c_register_pragma("unisa", "use", ...)` 才会执行它；clang 要注册 `PragmaHandler` 到 `unisa` 名字空间。两套插件 ABI 不通用，也不能代替跨文件的模块图。当时的驱动因此仍调用本仓库 `unisacc.com -cx-plan`。未声明的函数现在是错误，跨单元调用文件内函数会被拒绝，导出函数仍可链接。单元目标文件按前奏和源字节缓存在 `out/cxcc-cache/`，不写入 `include/`。产物仍是普通 C，不授予已检查身份。
-
-**宿主驱动（2026-10-28，-o）**：`tools/build-cxcc-host.cx` 用系统 gcc 把 `tools/cxcc.cx`、`src/cxmod.c` 与 `tools/gcc_cx.cx`（clang 同理）链成 `out/cxcc-host/` 里的程序。仓库根 `gcc_cx.com` 与 `clang_cx.com` 是六格 APE，运行时不调用 `unisacc.com`。有 `#pragma unisa use` 时，模块图在驱动进程内展开，再交给系统编译器写出 `-o` 的可执行文件。没有后续非选项输入时不追加 `-x none`；本机 clang 对 `tests/cxcc_one.cx -o OUT` 标准错误为空，程序退出码 5。后面还有目标文件时仍追加 `-x none` 并完成链接。`-run` 尚未做。本机跑过 Linux x86-64 那一格；其余四份切片只写出。`sh ./gcc_cx.com tests/cxhost_main.cx -o OUT` 与 clang 同样得到退出码 42；缺模块、循环和 `std.absent` 在编译器启动前拒绝。`strace` 没有执行 `unisacc.com`。小套件是 `tests/cxcc/units.tsv`，由 `sh ./gcc_cx.com tests/cxcc/suite.cx -o out/cxcc-suite/suite` 编出后执行；gcc 与 clang 各跑一遍。对象缓存除直接 `-include` 外，还按编译器 `-MMD` 列出的头文件字节失效：只改被包含的 `nested.h` 时，两边都从退出码 8 变为 12。行首 `#pragma  unisa use`（pragma 后两个空格）会展开。编译副本前插 `#line 1`，`__FILE__` 与错误行都是原来的 `.cx` 路径和行号，例如 `tests/cxpriv_bad.cx:3`。热 `-o` 三次中位 gcc 38 ms、clang 69 ms，上限 268 ms 和 227 ms。cdx 用当前源码另建 `out/c43-grk-review-{gcc,clang}-02.elf`，日志 `out/c43-grk-review-02.stdout` 为 `REVIEW findings=0 harness_errors=0`：两边 canonical 与双空格 pragma 均为 7，只改 `nested.h` 为 cold 8、warm 12、forced 12，`__FILE__` 为原始 `.cx` 绝对路径。这只关本机这三项，不授其他平台或 `-run`。同日补 win/osx 的构建方式：假定 PATH 上有对应的 gcc 或 clang，`tools/build-cxcc-host.cx` 在那台机器上用该编译器链出驱动，不调用 `unisacc.com`。同机 `tools/build-cxcc-host.cx` 仍可把驱动链到 `out/cxcc-host/`。仓库根的 `.com` 是六格 APE。驱动调用 POSIX 的 `posix_spawnp`、`waitpid` 和 `mkstemp`。Linux 与 OSX 走系统 libc，环境表传 `environ`。Windows 的 `gcc_cx.com` 是本机程序；同一组调用的函数体在 `tools/cxcc-hostinc/spawn.h`，按本仓库 `include/spawn.h` 与 `mkstemp` 的形状用 `CreateProcessA` 和 `open` 实现，不走 `_ux_sym`。`pid_t` 放不下 HANDLE 时用一张小表，空环境在 Windows 上表示继承。编译行加 `-I tools/cxcc-hostinc`，这样 `<spawn.h>` 和 `<sys/wait.h>` 用这一目录，而不是产品头。同一目录还有 POSIX 的 `mkdir` 与 `realpath`。本机用 zig 0.13 交叉编过并链出 `x86_64-windows-gnu` 的 `gcc_cx.exe`、`clang_cx.exe`、`build.exe`，以及 `aarch64-macos` 的驱动和构建器、`x86_64-macos` 的驱动。这些二进制没有在 Windows 或 OSX 上执行。本机 Linux 套件 `fails=0`，热 `-o` 中位 gcc 36 ms、clang 72 ms。`strace` 仍由 PATH 找到 `/usr/bin/gcc`，没有 `-I tools/cxcc-hostinc`，也没有执行 `unisacc.com`，程序退出码 5。`-run` 仍未做。六格 APE 已重打，只跑过 Linux x86-64。
-
-**构建收据（2026-10-26，模块展开之后重打）**：`./unisacc.com -run tools/build-cxcc-ape.cx` 实际 rc 0。`gcc_cx.com` 617424 字节，`clang_cx.com` 617456 字节，`file` 均为 PE32+ console x86-64。构建里 gcc 编出的 `ujs/seed/construct/lex.cx` 对 `ujs/tests/corpus/arith.ujs` 与 `./unisacc.com -run` 逐字节相同；`tests/cxhost_main.cx` 展开 `cxhost_mod` 后退出码 42。同一次构建里 Ubuntu clang 15 编过该扫描器，并编过同一夹具、退出码 42。`-run` 另测：用 gcc 编出的 `gcc_cx` 再编 `tests/cxhost_main.cx`，退出码仍是 42；缺模块 `no_such_mod_zz` 由 unisacc 具名拒绝（rc 1），没有交给 gcc。字符串里的 `#pragma unisa use` 不当作导入。`win/x86_64` 的 `tools/gcc_cx.cx` 只编译通过，没有执行。OSX 切片只写出、未执行。活树棘轮 `tests/cxinclude.cx --check` 与 `tests/cxapis.cx --check` 实际 rc 0：436 个 `.cx`，111 行 include，724 处无界调用。
-
-**use 符号级导入 + 别名（2026-10-31，bdy）**：`#pragma unisa use NAME::sym [as alias]` 落地，对齐 Rust 的 `use a::b::c [as d]`，不新增 C 关键字（`::`、`as` 只在 pragma 行内）。两个功能都完成：① 符号级导入 `use a::other` 只导入 `other`、不导入 a 的其余符号（`cxm_text` 按符号过滤、`cxm_imports` 判断符号可见性、`cxm_rewrite` 把未导入函数改 `ua_sym_*` 唯一名避免链接重复）；② 别名 `use a::clash as ca` + `use b::clash as cb` 把同名符号分别改名。实现分三源（权威 `cx/cx0/plan.cx` 的 `CX0_COMPAT_BODY`、投影 `src/cxmod.c`、产品模块 `cx/compiler/cxmod.cx`），`tools/cx0-extract.cx` 补 cxm_rewrite 的目录投影规则，`tools/cxcc-hostinc/sy_realpath.c` 补宿主驱动的 `sy_realpath` shim（`tools/build-cxcc-host.cx` 链接它）。验收：`gcc_cx`/`clang_cx` 编 `use a::clash as ca`+`use b::clash as cb` 运行返回 3，编 `use aa::other`+`use bb::clash` 运行返回 9；`cx0-extract --check` 报 `EXACT`；`tests/cx-namespace.cx` 加 `alias-renames-away-clash` 与 `symbol-import-filters-unused` 用例。方案见 [plans/cx-use-alias-reexport.md](plans/cx-use-alias-reexport.md)。已知边界：一个模块被多个单元用不同别名 use 时只存一份改名源码（单版本假设）；产品侧 `unisacc.com` 尚未重编（33 对象 whole-o 链接的 `dlopen` 阻塞属 C44-ENTRY-HOSTIMPORT-01），故这两个用例在已装产品上暂 FAIL，重编后 PASS。
-**Windows POSIX／C99（主人 2026-10-26，对照 Cosmopolitan 的目录模板、临时目录和最终路径；未在 Windows 上执行）**：`include/stdlib.h` 的 `mkstemp` 在 Windows 上用 `CreateFileA` 的 `CREATE_NEW`。`realpath` 能打开的路径先问 `GetFinalPathNameByHandleA`（`VOLUME_NAME_DOS`），再去掉 `\\?\`，并把 `\\?\UNC\` 收成 `\\`。目录打不开，因为 `__open` 传不进 `FILE_FLAG_BACKUP_SEMANTICS`；这一路和最终路径失败都退回 `GetFileAttributesA` 加 `GetFullPathNameA`，退回路不解析符号链接。`mkdtemp` 在 Windows 上用 `CreateDirectoryA`，模式忽略；模板必须以 `XXXXXX` 结尾，`EEXIST` 会重试，其它错误和重试耗尽会把 `XXXXXX` 写回去。这些调用展成宿主通道宏，这样当前编译器的库依赖表还没记下新函数时，被调函数也不会被裁掉。本机 Linux 探针实际跑通 `mkstemp`、`mkdtemp` 和 `realpath`；`win/x86_64` 探针只编译通过。`fork`／`execvp` 仍不映射，也不移植 Cosmopolitan 的 Windows `fork`。`include/cx.h` 的 `cx_run`、`cx_run_timeout` 与 `cx_runv_timeout` 在 Windows 上调用 `posix_spawnp`（标准输出经 `mkstemp`），`cx_walk` 调用 `opendir`，`cx_read` 对目录返回 NULL。系统 gcc／clang 没有 `_ux_sym`，所以 `tools/cxcc-hostinc` 提供 `dirent.h`、`spawn.h`（文件动作、`kill`、`usleep`，`open` 加 `O_BINARY`）和 `sys/wait.h`；Windows 编译行在 `-include include/cx.h` 之前加 `-I tools/cxcc-hostinc`。`cx_remove`／`cx_rmtree`／`cx_trash` 仍由 `unisa_safedel` 在 Windows 上拒绝。这些 Windows 路径只做交叉编译，没有在 Windows 上执行。
-
-#### 5.3.1 共用前端与后端分工
-
-优先建立以下接入路径：
-
-```text
-.cx 源码 + 包清单/锁文件 + CXIF 接口与契约
-    → 共用 .cx 前端：模块解析、类型/安全分析、必要的运行期检查插入
-    → 确定性生成的普通 C 编译单元
-    → Clang / GCC / TinyCC 等后端编译与链接
-```
-
-共用前端拥有 `.cx` 规则的权威实现，读取 CXIF 的类型、布局、公开符号、效果契约和来源身份。后端接收显式声明与函数体；从受检程序降为普通 C 必须保持相应语义，不能在降级时丢掉检查或改变模块可见性。自动前奏、模块依赖与构建顺序可先由驱动器实现；所有权、生命周期、初始化、范围及可写别名检查需要类型与控制流分析，并按规范插入必要的运行期检查，不能由后缀、宏或头文件约定代替。
-
-正式模块消费 CXIF，不重放提供者头文件或源码 token。为普通 C 互操作生成的声明头属于显式 C ABI 边界，不能当作 CXIF 的等价替代。未经验证的 C 实现、FFI 与受信任模块须单列契约和信任范围；不能因为后端能编译就把它们算入 `.cx` 安全保证。
-
-#### 5.3.2 编译器插件与适配职责
-
-| 工具链 | 计划接入方式 | 职责边界 |
-|---|---|---|
-| Clang | 先用独立驱动器/检查工具，评估 LibTooling；再按需要提供 pragma、属性、诊断和构建集成插件 | 复用共用契约与检查规则；Clang AST/控制流适配的等价性须验证 |
-| GCC | 共用前端生成 C；后续提供 pragma/属性及分析流程的插件适配 | 插件只承担 GCC 特定的导入、诊断或编译流程接线，不维护另一套独立安全语义 |
-| TinyCC | 共用前端生成 C，由驱动器调用 tcc，或通过 libtcc 嵌入编译执行 | 优先复用其 C 编译后端；若需要内部前端扩展，须独立评估维护成本及接口稳定性 |
-| 其他 C 编译器 | 先提供普通 C 输出与目标 ABI 适配，再决定是否需要专用插件 | 逐个声明支持的版本、目标、C 能力和运行库条件，未验证组合明确拒绝 |
-
-这些入口有现成基础：[Clang 插件](https://clang.llvm.org/docs/ClangPlugins.html)可注册 pragma/属性，[LibTooling](https://clang.llvm.org/docs/LibTooling.html)可构建独立工具；[GCC 插件](https://gcc.gnu.org/onlinedocs/gccint/Plugins-attr.html)可注册 pragma/属性；[libtcc](https://bellard.org/tcc/tcc-doc.html#SEC19)可接收 C 代码作为编译后端。存在扩展入口不代表已经实现 `.cx`，各版本适配及检查能力都须实际验证。
-
-#### 5.3.3 编译约定与检查身份
-
-包清单固定模块名、语言版本、公开集合、依赖、契约和目标；源码中的 `#pragma unisa cx/module/use` 与清单相互核验。严格模式中的未知 pragma、非法 include、缺失依赖、接口不匹配和未支持语义必须产生具名错误并阻止出货。
-
-检查与后端编译必须绑定同一份宏展开后的程序、接口、目标 ABI、编译配置及受信任运行库。生成 C、检查结果和构建收据记录来源映射与内容摘要；缓存键覆盖 CXIF/契约、前端版本、后端工具版本及影响语义的选项。原生编译器可能忽略未知 pragma；绕过驱动器直接把 `.cx` 当普通 C 编译，不能获得“已通过 `.cx` 检查”的身份。仅识别后缀或注入前奏也不授予该身份。
-
-#### 5.3.4 分阶段交付与验收
-
-1. **公共接入基线**：先固化最小语言/模块配置、CXIF 版本与后端协议；实现驱动器、来源映射和普通 C 输出，以小型真实模块程序验证接入。
-2. **检查能力逐片落地**：按草案把初始化、范围、所有权/生命周期、别名及运行期检查拆成可验证交付；每片明确保证域和拒绝域，不从一片通过推定完整内存安全或线程数据竞争排除。
-3. **Clang 插件与工具集成**：复用同一规则和测试语料，验证 pragma/契约接入、诊断位置、IDE 与构建流程；固定首批支持版本。
-4. **GCC、TinyCC 与扩展后端**：完成对应适配和安装包，验证模块、C ABI/FFI、优化与运行库兼容；再扩大版本和目标矩阵。
-
-共同验收要求：合法真实程序在相同目标上的可观测行为及 ABI 一致；共用前端对非法程序的接受/拒绝和具名原因一致；前端输出确定，但不要求不同编译器生成相同机器码。测试须覆盖缺依赖即使碰巧链接也拒绝、接口/目标/宏配置变动使缓存失效、实现变更且接口不变时消费者无需重编、绕过检查不能冒领收据，以及干净机器构建运行。安全结论须同时有规则依据、正反例和降级保持证据，不能只凭编译成功或 sanitizer 没报错。
-
-## 6. 未解决问题
-
-- **论文 A 口径**：表 2/表 4 与 v0.0.9 的数字是绑定旧候选的历史实验；§8 当前能力边界须与 §3.15 对齐。目标文件/分开编译已实现的范围不可再写成“没有 `.o` 工作流”，未完成的是产品 Mach-O/COFF 对象与外部函数 ABI 互调。
-
-- **正确性与诊断**：产品 5 类拒绝缺位置（B1）与 `c_struct_ret` 在 0.0.22 第 4 项；全局复合字面量（A1）已于 0.0.20 闭合；续行前 token 的 `__LINE__`（A2）见 0.1.x 附录。
-- **C99**：复数与三字符组决定不做（账本写明理由）；库函数按“转发 / 保留 / 拒绝”路由表处理（§5.1），不再逐个补函数体。
-- **工具链**：产品侧的 cc 互调、Windows 转发和产品 Mach-O/COFF 对象未闭合（0.0.22 第 1、11 项）。
-- **反复顺延的架构项**：通用 BANK/nativeabi、Windows SEH、us_eval/us_reload 已写入 0.1.x（D1–D3）。
-- **流程**：换工作树续跑整轮作废（指纹含路径）、模拟机误报、候选绑定 main HEAD 导致重封——0.0.22 第 2 项；Linux 客机固定的环境红（4 GiB 内存不够、没有 clang）照旧点名登记。
-
-- **种子层迁移倒退（2026-10-03 实测，主人强烈不满）**：exec/*.py 中直接造转移的手写控制，v0.0.17 为 1,650 处，v0.0.19 1,680，v0.0.20 1,692，v0.0.21 1,725，v0.0.22 1,732，现在 1,735；同期 exec/ 下的 .tsv 声明从 462 个只增加到 464 个。也就是说，最近几轮的产品追平都是在 Python 里加控制，没有写成表。处理：decision-ledger 门禁（只降不升，07dc885）防止继续增长；0.0.23 K 项要求本版迁完（总数 ≤ 200，M3 前不发版）；论文 A 必须如实写明这一点（0.0.23 J）。
-  - **现状（0.0.24，2026-10-04）**：K2 之后阶段专用 .py 为 0；decision-ledger 实测直接造转移的位置只剩 9 处（基线 10，只降不升）；剩下的债是 facts 里的 385 处动作序列（T1e，顺延到 0.0.25）。上面的 1,735 是 0.0.22 之前的历史数字。
-
-- **gettimeofday 在 fork+wait 后跳涨 2^32 微秒（cx-lab 实验副产物，2026-10-09，未修）**：本机 unisacc.com 0.0.35，同一进程里背靠背两次 `gettimeofday()` 相差 0.000000s；但只要中间跑过一次 `fork()+waitpid()`（哪怕子进程只是 `true`），下一次 `gettimeofday()` 立刻比预期多出约 4294.967296s（≈2^32 微秒），像是返回值在 fork 之后被错位多算了一轮 2^32。触发路径：`include/cx.h` 的 `cx_run_timeout`/`cx_runv_timeout`（内部 fork+waitpid）之后，调用方进程自己再调一次 `gettimeofday`。影响：任何“fork 子进程前后各自测一次 gettimeofday 算耗时”的写法都会算出垂圾数字——`examples/cx-lab/time_run.cx` 最初版本就中招，六行计时全变成 ~8589s；已在该 lab 脚本里绕开（让计时发生在被 fork 出来的 bash 子进程内部，用 `TIMEFORMAT=%R` 把耗时当字符串读回来，不再跨 fork 调用自己的 gettimeofday），没有碰 src/ 或运行时实现，产品代码未改。未验证范围：是否只在这台机器/这个版本/`-run` 内触发，是否也影响 `clock_gettime`（include/time.h 两者都映射到同一个宿主 gettimeofday），是否波及任何产品内计时相关功能或套件。
-
-- **`include/cx.h` 缺独立 stderr 捕获（cx-lab 实验副产物，2026-10-09，未修）**：`cx_run`/`cx_run_timeout`/`cx_runv_timeout` 只把子进程 stdout 接进调用方给的缓冲区（`dup2(fd,1)`），stderr 原样继承自父进程，没有单独通道。把 `tests/runtimeiocheck.py` port 成 `examples/cx-lab/runtimeiocheck.cx` 时需要同时断言“stdout 等于某行”和“stderr 为空”（原 Python 版本分别拿 `subprocess.run` 的 `stdout`/`stderr` 两个字段判断），cx.h 现状做不到分别拿到两路输出，只能退一步在命令字符串里 `2>&1` 合流后整体比对期望字符串——如果 stderr 真的非空，合流后的内容就不会精确等于期望行，等价地抓住了错误，但拿不到 stderr 本身的内容用于诊断信息。影响：任何要迁的 `.py` 测试如果像这样既要分别看 stdout 又要分别看 stderr（不少 tests/*.py 用 `subprocess.run(capture_output=True)` 正是这种模式），都会撞上同一个缺口。没有改 include/cx.h；如果 0.0.38–0.0.39 真要批量迁 tests/ 下的 170 个 `.py`（§5 路线），这里需要先补一个 `cx_run_timeout` 的变体（例如把 stderr 另 dup2 到第二个临时文件）。
-
-- **signal() 不向内核注册处理函数（2026-10-29，未修、有复现、csih 已兜底）**：rcg2 报告，unisacc 运行时的 `signal()` 不调用 `rt_sigaction`。`signal(SIGTERM, h)` 返回成功；本进程 `raise(SIGTERM)` 会调用 `h`；外部信号（`kill -TERM`、关 pane 的 SIGHUP）直接杀死进程，`h` 不执行。`-run` 和 `-o` 都这样。复现目录 `out/csih-signal-repro/`（`sigprobe.cx`、`README.txt`）。`strace -e trace=rt_sigaction` 跑 `-o` 编出的二进制，报告里没有 `rt_sigaction`。这次登记没有重跑 strace。影响：csih 被杀掉或崩溃时停在 raw 模式、鼠标上报还开着；csih 自己的 SIGINT 处理也没被外部信号真正调用。csih 已在 `csih.sh` 外层用子进程兜底，信号退出时由 shell 还原 termios。代码在 `apps/csih/term.cx` 的 `term_install_exit_handler`。运行时修好后这条兜底不用改就会走到真正的处理函数。另外 unisacc 头文件没有定义 `SIGBUS`。这次不改运行时。
-
-### 6.1 研究问题立项：表的可解释性与完备性（主人 2026-10-03，立项不打断 K2）
-
-主人原问：① 构造出来的表数据（即使由 LLM 起草）如何具备**可解释性**；② 如何**计算并证明完备性**——现在只靠 TDD 检验，没有机制说明编译器还有多少不完备，“很没底气”；现有推论只挽回一点信心，缺严谨理论推导，需研究补上。
-
-背景（事实）：表→网络是确定性构造，网络=表已全域对拍（E3 全域穷举）；风险在**表本身**是否对——表由 LLM 起草、靠测试逼出，测试没覆盖的组合错了不会被发现。
-
-董秘推论（供研究出发，非定论）：
-- **可解释性三层**：(a) 出处——每行标注 C 标准条款 / 语法构造 / 逼出它的反例，LLM 起草必须填；(b) 见证——每行至少一个最小 C 程序走到它，删掉该行就有输出变错，无见证 = 死数据或盲区；(c) 可反查——编译任意程序能列出走过的表行，输出指令回指表行。
-- **完备性三层**：(a) 语法层——对照 C 标准文法逐条产生式，可算出 N/M；(b) 表层——统计每行 / 状态×输入组合的覆盖率，未走到即待补清单；(c) 语义层——只能逼近：Csmith + 按文法系统生成探针持续与系统 cc 对拍，以每万程序新增缺陷率趋近零为证据。
-- **unisacc 独有条件**：表是有限状态机，局部可穷举——可把 E3 的穷举从“网络 = 表”推广到“表符合文法 / 语义规格”，在局部给出真证明。完整证明 C 编译器完备做不到（CompCert 只证正确、不证完备），需研究的是理论框架。
-- **建议顺序**：先做表行覆盖率 + 见证（便宜，两问共用）→ 文法产生式对照得第一个完备性百分比 → 语义统计常跑。
-
-状态：已立项；0.0.24 只做了逐条目契约（六个阶段，T2）。表行覆盖率加见证排在 0.0.25，与 T2 余项（每个表条目、每个 DSL 操作配独立用例）合并成一项；文法产生式对照与语义统计排在它之后，具体次序等政委定。
-
-### 6.2 论文 A 的条件性理论连接与实现审查
-
-**核心定位与构造方法。** Paper A 的核心是基于神经网络的编译器：编译阶段的控制与决策由网络及通用执行器推进。TSV 声明和展开后的有限转移表，是本文采用的网络构造、审查与验证工具，不是这一类编译器的定义性要求。由规则、程序或 IR 直接构造网络也可以是候选路线，但本文尚未实现或验证这些路线；现有精确构造与穷举验证结论仍限定于本文给定的有限表及执行条件。
-
-论文分工决定：系统构造编译器控制表的方法作为独立衍生论题 **Paper E**（见 [意向书](research/paper-e-intent.md)）。Paper A 聚焦基于神经网络的编译器，本文以给定有限控制表到阈值网络的精确构造及工程实例支持这一定位，不承担完整 C99 控制表的自动合成或语义正确性证明。unisacc 的构造方法继续在实践中改进，成熟结果再支持 Paper E；不以新论文计划冒充已完成能力。
-
-**Paper D 与 `.cx`（2026-10-28 主人裁定）：** 模块化与内存安全的论文叙事归 **Paper D**（[意向书](research/paper-d-intent.md)），以 `.cx` 架构为主载体；流水线上「不改一行 C99」的可选安全节点为对照面。A 正文只可点到工程载体，不写 CX 细则；不另起第六篇。五线总表见 [research/README.md](research/README.md)。工程阅读仍从 [docs/cx/prd.md](docs/cx/prd.md)／[cx/README.md](cx/README.md) 进入。
-
-**Paper A arXiv 主类（2026-10-16，政委）：** 投稿身份主类 **cs.AI**；可选交叉 **cs.PL**。账号默认曾为 cs.PL；CN/EN 与 `research/arxiv-paper-a/` 已对齐。未投稿。
-
-
-当前决定：论文区分 **T2a（同一通用执行器中的控制器替换）** 与 **T2b（独立参考编译器的整程模拟）**。T2a 在相同初始化、有限观察、动作目录、原语语义、全接口、整数范围与逻辑资源预算条件下，以逐步归纳得到轨迹及接受/拒绝/发散等价；这是数学推导，不冒称实际 C/汇编循环已由 Lean 证明。T2b 与源语言语义保持 T3 仍开放。
-
-固定阶段的续点字母表有限，无界栈高度不使返回成为无限决策；声明式返回是完整控制器中的等价因子化。阶段语义由权重、返回数据、动作目录与常量共同承载。整管线组合要求字节、状态、位置及资源元数据全接口一致；字节接口不承诺有界内存或在线输出。
-
-索引：[论文理论连接与只读代码审查](research/paper-a-theory-review.md)。优先改进候选：部署求值器的域/范围证书、通用原语的边界契约、阶段完整接口与可回放轨迹、E3 语义组合与状态不变量。建议仅登记，产品改动由 cc 编排。
-
-## 7. 归档索引
-
-- [2026-10-22过程归档](archive/prd-process-notes-20261022.md)：旧宿主第一至第七次根对重建/归位收据与坑位；仅历史。
-- [2026-10-21过程归档](archive/prd-process-notes-20261021.md)：原PRD完整快照、csih长会话、W44/W45窗、逐日细账及原未提交追加；仅历史，不授恢复或验收。
-- [发布与开发历史](archive/prd-release-and-development-history-20261001.md)：逐版发布身份及旧验收。
-- [早期PRD](archive/prd-history.md)、[迁移日志](archive/s17-migration-log-20260928.md)、[R9/R10回执](archive/prd-r9-r10-receipts-20260929.md)、[问题发现编号](archive/prd-findings-20260929.md)。
-- [R17过程](archive/prd-r17-notes-20261001.md)、[0.0.21后旧条目](archive/prd-notes-20261002.md)、[旧计划](archive/plans/)。
-
-F1 落地补充：现有 glossarycheck 闸扫描全部受跟踪的新文件，须在 gatedeps 中声明受跟踪顶层目录和根文件；只补输入声明，不改规则或豁免。
-
-## 8. 历史收口记录
-
-已移至 [archive/prd-c43-history-20261030.md](archive/prd-c43-history-20261030.md)。
+| 已装产品 | `83343ec1`，5,145,706 B，0.0.43，rev `edc2c7700b` | `tools/com-tree.cx` |
+| 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
+| 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
+| 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
+| 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`·`cx/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
+| 棘轮 | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape，只降不升 | `tools/ratchets.cx` |
+| 事实表 | 只经 `tools/facts-gen.cx --check/--write`；名表经 `tools/nametab-gen.cx` | `exec/facts/` |
+| 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
+
+### 9.3 当前状态（0.0.43 收口）
+
+- 已装 `./unisacc.com` = `83343ec1`（5,145,706 B，rev `edc2c7700b`，0.0.43）。五片：win/x86_64 `18d2757f`、lnx/x86_64 `759c520a`、lnx/arm64 `6703dd4d`、osx/x86_64 `581300df`、osx/arm64 `7e3d267b`；两代自举逐字节相同。
+- 门禁：七棘轮 `ok=7`、`--smoke` 16/0、`release-ape smoke` 5/5。
+- **QUALIFIED 缺口**（详见 [plans/release-0.0.43.md](plans/release-0.0.43.md)）：73 个外平台格（需 CI 6 原生 runner）+ ~24 BLOCKED（5 个 owner-ruling 需主人裁定范围）。本机 linux/x86_64 物理无法实跑其他 OS，故 QUALIFIED 未达成、未签名、未公开。
+
+### 9.4 路线
+
+- **0.0.43**：当前收口（主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
+- **0.0.44**：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
+- **0.0.45 / 0.0.46**：模块外部共享 / agent harness（cx-csih）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
+- **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
+
+## 10. 归档索引
+
+历史 PRD 全文、逐版发布身份、旧测试套件、旧 C/Python 实现、历史计划与过程归档的入口：
+
+- [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md) —— 本文件重写前的完整旧版（含思维树/记忆宫殿全流水、能力速查全文、§3 架构全文、§5 路线全文、§6 未解决问题）。
+- [archive/prd-c43-history-20261030.md](archive/prd-c43-history-20261030.md) —— 0.0.43 历史收口。
+- [archive/prd-release-and-development-history-20261001.md](archive/prd-release-and-development-history-20261001.md) —— 逐版发布身份。
+- [archive/testing-c43-legacy/](archive/testing-c43-legacy/) —— 旧 1333 项测试套件（已停调度）。
+- [archive/reference-c/](archive/reference-c/)、[archive/reference-py/](archive/reference-py/) —— 旧 C/Python 参考实现。
+- [archive/plans/](archive/plans/) —— 历史计划与设计探针。
