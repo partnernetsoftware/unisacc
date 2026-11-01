@@ -338,6 +338,10 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
+    if (v < cxm_n && !cxm_eq(cxm_path[v], norm)) {
+        cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(" has two lexical entries: ");
+        cxm_m(cxm_path[v]); cxm_m(" and "); cxm_m(norm); return cxm_fail();
+    }
     if (v == cxm_n) {
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
             cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm); return cxm_fail();
