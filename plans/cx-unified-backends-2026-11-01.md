@@ -84,7 +84,8 @@
 - 已按 `tools/release-build.cx` 生成 P3 包、五片并 `tools/release-ape.cx pack`：
   `out/p5-rebuild/ape/unisacc-next.com` sha `552c5f96…`。
 - 已过 `release-ape smoke` 5/5、`check-install-fixes` failed=0、候选自身 smoke 16/0。
-- **未替换 `./unisacc.com`**；安装仍需两代五片逐字节相同及安装授权。
+- 已用候选作第二代构造器在 `/tmp/unisacc-gen2` 重建五片：五片 sha 与第一代全部相同；重新打包的 APE 仍是 `552c5f96…`，字节完全相同。
+- **未替换 `./unisacc.com`**；安装仍要 generation/admission 链和授权，不能手工 `cp`。
 - 安装后重复 P0/P2/P3 的关键用例；跨平台按独立证据，不外推。
 
 ## 5. 依赖与风险
