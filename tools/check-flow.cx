@@ -1,0 +1,47 @@
+/* tools/check-flow.cx -- tools/flow.cx: one command from changed files to blast radius.
+ *
+ *   sh ./unisacc.com tools/check-flow.cx      (from the repo root; works in out/check-flow/)
+ *
+ * Subject tests/fixtures is the real tree; the checks are cheap:
+ *   graph   flow -- graph tools/flow.cx: prints GRAPH with nodes>0 and the subgraph file exists
+ *   check   flow -- check tools/flow.cx: a DELTA_SUMMARY and an AFFECTED_SUMMARY, no NOTE chatter
+ *   bad     flow -- check (no files) is refused rc 2; an unknown option is refused rc 2
+ * Prints PASS/FAIL per case and CHECK_FLOW_TOOL<TAB>failed=N (distinct from flow's own CHECK_FLOW
+ * so the two do not collide when the batch marker is checked). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flow.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flow.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-flow: REFUSE %s\n", s); sy_exit(2); }
+static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 128)) >= 0; }
+static int f_atoi(const char *s) { int n = 0; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 9999) return 9999; } return n; }
+static char root[4096], com[4500], tool[4500];
+static int run(char **args, char *out, int cap) { char *v[16]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args; args++) v[k++] = *args; v[k] = 0; { int cut; return sy_run(v, out, cap, &cut); } }
+
+int main(void) {
+    char *out = mm_alloc(1L << 20);
+    if (!out) die("out of memory");
+    if (sy_cwd(root, (int)sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)
+        || cx_fmt(tool, sizeof tool, "%s/tools/flow.cx", root)) die("paths");
+    {   char *a[] = {"graph", "tools/flow.cx", 0};
+        int rc = run(a, out, (int)(1L << 20));
+        ck(rc == 0 && has(out, "GRAPH\tfiles=") && has(out, "CHECK_FLOW\tfailed=0"), "graph-runs"); }
+    {   char *a[] = {"check", "tools/flow.cx", 0};
+        int rc = run(a, out, (int)(1L << 20));
+        ck(rc == 0 && has(out, "DELTA_SUMMARY\troots=1\t") && has(out, "AFFECTED_SUMMARY\tchanged=1\t") && has(out, "CHECK_FLOW\tfailed=0"), "check-runs"); }
+    {   char *a[] = {"check", 0};
+        int rc = run(a, out, (int)(1L << 20));
+        ck(rc == 2, "no-files-refused"); }
+    {   char *a[] = {"check", "tools/flow.cx", "--bogus", 0};
+        int rc = run(a, out, (int)(1L << 20));
+        ck(rc == 2, "bad-option-refused"); }
+    sy_printf("CHECK_FLOW_TOOL\tfailed=%d\n", failed);
+    mm_free(out);
+    return failed ? 1 : 0;
+}

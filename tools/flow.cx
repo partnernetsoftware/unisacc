@@ -1,0 +1,117 @@
+/* tools/flow.cx -- "I changed FILE...; what is the blast radius?" in one command.
+ *
+ *   sh ./unisacc.com tools/flow.cx -- check FILE... [--jobs N] [--run]
+ *   sh ./unisacc.com tools/flow.cx -- graph FILE...
+ *
+ * check: runs symindex --delta on FILEs (affected files: forward use closure + reverse
+ *   users), then affected --files on FILEs (affected test batches), and prints one
+ *   combined report. With --run it also runs the affected batches (parallel via affected).
+ * graph: runs symindex --graph FILEs (subgraph lands in out/symindex/v1/graph.tsv).
+ *
+ * This is the one-shot form of the event workflow; --watch (once cx/sys/watch.cx lands,
+ * cx-architecture lane) feeds the same pipeline from file events.
+ * Prints PASS/FAIL lines and CHECK_FLOW<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tflow.%s\n", name); else { failed++; sy_printf("FAIL\tflow.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("flow: REFUSE %s\n", s); sy_exit(2); }
+static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 128)) >= 0; }
+static void emit(const char *s) {   /* print only report lines; drop NOTE and other tool chatter */
+    const char *p = s;
+    while (*p) {
+        const char *e = p; while (*e && *e != '\n') e++;
+        if (tx_prefix(p, (long)(e - p), "DELTA\t", 6) || tx_prefix(p, (long)(e - p), "DELTA_SUMMARY\t", 14)
+            || tx_prefix(p, (long)(e - p), "AFFECTED\t", 9) || tx_prefix(p, (long)(e - p), "AFFECTED_SUMMARY\t", 17)
+            || tx_prefix(p, (long)(e - p), "N\t", 2) || tx_prefix(p, (long)(e - p), "E\t", 2)
+            || tx_prefix(p, (long)(e - p), "V\t", 2) || tx_prefix(p, (long)(e - p), "GRAPH\t", 6)
+            || tx_prefix(p, (long)(e - p), "BATCH_RUN\t", 10) || tx_prefix(p, (long)(e - p), "AFFECTED_RUN\t", 13)) {
+            fwrite(p, 1, (size_t)(e - p), stdout); fputc('\n', stdout);
+        }
+        p = *e ? e + 1 : e;
+    }
+}
+static int f_atoi(const char *s) { int n = 0; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 999) return 999; } return n; }
+
+static char root[4096], com[4500], si[4600], af[4600];
+
+/* run `sh COM TOOL -- ARGS...` into OUT (cap); returns the tool rc */
+static int tool(const char *path, char **args, char *out, int cap) {
+    char *v[64]; int k = 0;
+    v[k++] = "sh"; v[k++] = com; v[k++] = (char *)path; v[k++] = "--";
+    for (; *args; args++) v[k++] = *args;
+    v[k] = 0;
+    { int cut; return sy_run(v, out, cap, &cut); }
+}
+
+int main(int argc, char **argv) {
+    int a = 1, jobs = 4, run = 0, rc, nf = 0, k;
+    const char *mode;
+    const char *files[256];
+    char **argv2;
+    char jobsbuf[16], *out;
+    if (sy_cwd(root, (int)sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)
+        || cx_fmt(si, sizeof si, "%s/tools/symindex.cx", root) || cx_fmt(af, sizeof af, "%s/tools/affected.cx", root)) die("paths");
+    if (a >= argc) die("usage: check FILE... [--jobs N] [--run] | graph FILE...");
+    mode = argv[a++];
+    if (!tx_eqz(mode, "check") && !tx_eqz(mode, "graph")) die("mode is check or graph");
+    for (; a < argc; a++) {
+        if (tx_eqz(argv[a], "--run")) run = 1;
+        else if (tx_eqz(argv[a], "--jobs") && a + 1 < argc) jobs = f_atoi(argv[++a]);
+        else if (argv[a][0] == '-' && argv[a][1] == '-') die("unknown option");
+        else { if (nf == 256) die("too many files"); files[nf++] = argv[a]; }
+    }
+    if (nf == 0) die("no files");
+    if (cx_fmt(jobsbuf, sizeof jobsbuf, "%d", jobs < 1 ? 1 : jobs > 8 ? 8 : jobs)) die("jobs bound");
+    out = mm_alloc(16L << 20);
+    if (!out) die("out of memory");
+    argv2 = mm_zalloc((long)(nf + 8) * (long)sizeof(char *));
+    if (!argv2) die("out of memory");
+
+    if (tx_eqz(mode, "graph")) {
+        k = 0; argv2[k++] = (char *)"graph";
+        for (a = 0; a < nf; a++) argv2[k++] = (char *)files[a];
+        argv2[k] = 0;
+        rc = tool(si, argv2, out, 16 << 20);
+        ck(rc == 0 && has(out, "GRAPH\t"), "graph-ran");
+        if (rc == 0) emit(out);
+        sy_printf("CHECK_FLOW\tfailed=%d\n", failed);
+        mm_free(out); mm_free(argv2);
+        return failed ? 1 : 0;
+    }
+
+    /* check: delta (files) then affected (batches), then optional run */
+    k = 0; argv2[k++] = (char *)"delta";
+    for (a = 0; a < nf; a++) argv2[k++] = (char *)files[a];
+    argv2[k] = 0;
+    rc = tool(si, argv2, out, 16 << 20);
+    ck(rc == 0 && has(out, "DELTA_SUMMARY\t"), "delta-ran");
+    if (rc == 0) emit(out);
+
+    k = 0; argv2[k++] = (char *)"--files";
+    for (a = 0; a < nf; a++) argv2[k++] = (char *)files[a];
+    argv2[k] = 0;
+    rc = tool(af, argv2, out, 16 << 20);
+    ck(rc == 0 && has(out, "AFFECTED_SUMMARY\t"), "affected-ran");
+    if (rc == 0) emit(out);
+
+    if (run && rc == 0) {
+        k = 0; argv2[k++] = (char *)"--files";
+        for (a = 0; a < nf; a++) argv2[k++] = (char *)files[a];
+        argv2[k++] = (char *)"--run"; argv2[k++] = (char *)"-j"; argv2[k++] = jobsbuf;
+        argv2[k] = 0;
+        rc = tool(af, argv2, out, 16 << 20);
+        ck(rc == 0 || rc == 3, "run-ran");
+        if (rc == 0 || rc == 3) emit(out);
+    }
+    sy_printf("FLOW_SUMMARY\tmode=check\tfiles=%d\trun=%d\tjobs=%d\n", nf, run, jobs);
+    sy_printf("CHECK_FLOW\tfailed=%d\n", failed);
+    mm_free(out); mm_free(argv2);
+    return failed ? 1 : 0;
+}
