@@ -76,6 +76,7 @@ static int cxm_say(int fd,char *s,int n){if(n<0)return 1;return fd==2?cx0_append
 /* CX0_COMPAT_BODY_BEGIN */
 #define CXM_MAXU 64
 #define CXM_MAXUSE 32
+#define CXM_MAXDECL 96
 #define CXM_PATHW 512
 #define CXM_NAMEW 128
 #define CXM_SRCMAX 1048576
@@ -96,9 +97,9 @@ static char cxm_path[CXM_MAXU][CXM_PATHW];
 static char cxm_name[CXM_MAXU][CXM_NAMEW];
 static char cxm_stem[CXM_MAXU][CXM_NAMEW];
 static int cxm_iscx[CXM_MAXU]; static int cxm_lib[CXM_MAXU];
-static int cxm_use[CXM_MAXU][CXM_MAXUSE]; static int cxm_nuse[CXM_MAXU];
+static int cxm_use[CXM_MAXU][CXM_MAXDECL]; static int cxm_nuse[CXM_MAXU];
 /* per use, the imported symbol and its alias (both empty = import the whole module) */
-static char cxm_usym[CXM_MAXU][CXM_MAXUSE][CXM_SYMW]; static char cxm_ualias[CXM_MAXU][CXM_MAXUSE][CXM_SYMW];
+static char cxm_usym[CXM_MAXU][CXM_MAXDECL][CXM_SYMW]; static char cxm_ualias[CXM_MAXU][CXM_MAXDECL][CXM_SYMW];
 static char cxm_reach[CXM_MAXU][CXM_MAXU];
 static int cxm_topo[CXM_MAXU]; static int cxm_ntopo; static int cxm_color[CXM_MAXU]; static int cxm_stk[CXM_MAXU]; static int cxm_nstk;
 static char cxm_ift[CXM_IFMAX + 1]; static int cxm_nift;
@@ -107,9 +108,9 @@ static char cxm_sha[CXM_MAXU][17];
 static char cxm_full[CXM_MAXU][CXM_PATHW]; static char cxm_typ[CXM_MAXU][CXM_PATHW];
 static int cxm_inc[CXM_MAXU][CXM_MAXU]; static int cxm_ninc[CXM_MAXU];
 /* per-use alias projection: cxm_ren[u][k] is the renamed full CXIF path when use k has an alias, else empty */
-static char cxm_ren[CXM_MAXU][CXM_MAXUSE][CXM_PATHW];
+static char cxm_ren[CXM_MAXU][CXM_MAXDECL][CXM_PATHW];
 /* renamed-CXIF path pool; cxm_inc[u][k] < 0 means cxm_renpool[-(x)-1] */
-static char cxm_renpool[CXM_MAXU * CXM_MAXUSE][CXM_PATHW]; static int cxm_nren;
+static char cxm_renpool[CXM_MAXU * CXM_MAXDECL][CXM_PATHW]; static int cxm_nren;
 /* body-symbol rename: cxm_bodysrc[v] is a rewritten source of module v ("#define sym alias" head),
    empty = compile the original source.  One rename per module (the common case). */
 static char cxm_bodysrc[CXM_MAXU][CXM_PATHW];
@@ -125,6 +126,7 @@ static int cxm_tokb; static int cxm_tokl;
 
 static int cxm_len(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 static int cxm_eq(char *a, char *b) { int k; k = 0; while (a[k] && a[k] == b[k]) k = k + 1; return a[k] == b[k]; }
+static int cxm_eqsn(char *a, char *b, int n) { int k = 0; while (a[k]) k++; if (k != n) return 0; for (k = 0; k < n; k++) if (a[k] != b[k]) return 0; return 1; }
 static int cxm_eqn(char *a, int n, char *b) { int k; k = 0; while (k < n && b[k] && a[k] == b[k]) k = k + 1; return k == n && b[k] == 0; }
 static int cxm_idch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 static int cxm_cpy(char *d, char *s, int cap) { int k; k = 0; while (s[k] && k < cap - 1) { d[k] = s[k]; k = k + 1; } d[k] = 0; return k; }
@@ -380,9 +382,7 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
     if (v == cxm_n) {
-        int probe = cxm_rd(norm, cxm_cmp, 1);
-        if (probe == -3) return 1;
-        if (probe == 0 - 1) {
+        if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
             cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm); return cxm_fail();
         }
         if (cxm_n >= CXM_MAXU) { cxm_start(u, line); cxm_m("more than 64 units in one program"); return cxm_fail(); }
@@ -395,8 +395,18 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     } /* cxm_name[v][0] reuse */
     if (!cxm_lib[v]) cxm_cpyn(cxm_name[v], w, n, CXM_NAMEW);   /* a command-line unit used by name takes that name */
     cxm_lib[v] = 1;
-    k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) return 0; k = k + 1; }
-    if (cxm_nuse[u] >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 32 uses in one unit"); return cxm_fail(); }
+    k = 0;
+    while (k < cxm_nuse[u]) {
+        if (cxm_use[u][k] == v && cxm_eqsn(cxm_usym[u][k], sym, sn) &&
+            cxm_eqsn(cxm_ualias[u][k], alias, an)) return 0;
+        k = k + 1;
+    }
+    { int distinct = 0, z = 0;
+      while (z < cxm_nuse[u]) { int q = 0, seen = 0; while (q < z) { if (cxm_use[u][q] == cxm_use[u][z]) { seen = 1; break; } q++; } if (!seen) distinct++; z++; }
+      if (v == cxm_n || distinct < CXM_MAXUSE) { }
+      else if (distinct >= CXM_MAXUSE) { cxm_start(u, line); cxm_m("more than 32 uses in one unit"); return cxm_fail(); }
+    }
+    if (cxm_nuse[u] >= CXM_MAXDECL) { cxm_start(u, line); cxm_m("too many use declarations in one unit"); return cxm_fail(); }
     cxm_use[u][cxm_nuse[u]] = v;
     cxm_cpyn(cxm_usym[u][cxm_nuse[u]], sym, sn, CXM_SYMW);
     cxm_cpyn(cxm_ualias[u][cxm_nuse[u]], alias, an, CXM_SYMW);
@@ -776,8 +786,12 @@ static int cxm_text(int u, int full, char *sym, char *alias) {
     cxm_o("/* CXIF v0 module "); cxm_o(cxm_stem[u]); if (!full) cxm_o(" types");
     if (sym && sym[0]) { cxm_o(" "); cxm_o(sym); cxm_o(" as "); cxm_o(alias); }
     cxm_o(" src-sha256 "); cxm_o(cxm_sha[u]); cxm_o(" -- generated, do not edit */\n");
-    cxm_o("#ifndef CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
-    cxm_o("#define CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]); cxm_o("\n");
+    cxm_o("#ifndef CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]);
+    if (sym && sym[0]) { cxm_o("_"); cxm_o(sym); }
+    cxm_o("\n");
+    cxm_o("#define CXIF_"); cxm_o(g); cxm_o("_"); cxm_o(cxm_sha[u]);
+    if (sym && sym[0]) { cxm_o("_"); cxm_o(sym); }
+    cxm_o("\n");
     cxm_on2(cxm_ift + cxm_tb[u], cxm_te[u] - cxm_tb[u]);
     if (full) {
         if (sym && sym[0]) {
@@ -833,6 +847,41 @@ static int cxm_rewrite(int v, char *sym, char *alias, char *out) {
             }
             k = k + 1;
         }
+    }
+    cxm_on2(cxm_cmp, n);
+    if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
+    return 0;
+}
+static int cxm_rewrite_multi(int u, int v, char *out) {
+    char *td; int n; int k; int p;
+    n = cxm_rd(cxm_arg[v], cxm_cmp, CXM_IFMAX);
+    if (n < 0) return 1;
+    td = cx0_directory;
+    p = cxm_cpy(out, td, CXM_PATHW - 40);
+    k = cxm_cpy(out + p, "/ua-bodysrc-", 12); p = p + k;
+    k = 0; while (k < 8) { out[p] = "0123456789abcdef"[(cxm_nren + k) & 15]; p = p + 1; k = k + 1; }
+    out[p] = '.'; out[p + 1] = 'c'; out[p + 2] = 'x'; out[p + 3] = 0;
+    cxm_nout = 0;
+    k = 0;
+    while (k < cxm_nuse[u]) {
+        if (cxm_use[u][k] == v && cxm_usym[u][k][0]) {
+            if (cxm_ualias[u][k][0]) {
+                cxm_o("#define "); cxm_o(cxm_usym[u][k]); cxm_o(" "); cxm_o(cxm_ualias[u][k]); cxm_o("\n");
+            }
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < cxm_nsym) {
+        int imported = 0, z = 0;
+        if (cxm_symu[k] == v && cxm_symk[k] == 0) {
+            while (z < cxm_nuse[u]) {
+                if (cxm_use[u][z] == v && cxm_usym[u][z][0] && cxm_eq(cxm_usym[u][z], cxm_sym[k])) { imported = 1; break; }
+                z = z + 1;
+            }
+            if (!imported) { cxm_o("#define "); cxm_o(cxm_sym[k]); cxm_o(" ua_sym_"); cxm_md(k); cxm_o("\n"); }
+        }
+        k = k + 1;
     }
     cxm_on2(cxm_cmp, n);
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
@@ -1015,17 +1064,32 @@ static int cxm_plan(char **paths, int n) {
             while (t < cxm_ntopo) {
                 v = cxm_topo[t];
                 if (v != u && cxm_reach[u][v]) {
-                    int uk; direct = 0; uk = 0;
-                    k = 0; while (k < cxm_nuse[u]) { if (cxm_use[u][k] == v) { direct = 1; uk = k; } k = k + 1; }
+                    int direct = 0, full = 0, anysym = 0;
+                    k = 0;
+                    while (k < cxm_nuse[u]) {
+                        if (cxm_use[u][k] == v) {
+                            direct = 1;
+                            if (cxm_usym[u][k][0]) anysym = 1; else full = 1;
+                        }
+                        k = k + 1;
+                    }
                     if (direct) {
-                        if (cxm_usym[u][uk][0]) {
-                            if (cxm_text(v, 1, cxm_usym[u][uk], cxm_ualias[u][uk]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
-                            cxm_cpy(cxm_ren[u][uk], cxm_renpool[cxm_nren], CXM_PATHW);
-                            cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
-                            if (!cxm_bodysrc[v][0]) {
-                                if (cxm_rewrite(v, cxm_usym[u][uk], cxm_ualias[u][uk], cxm_bodysrc[v])) { cxm_on = 0; return 1; }
+                        if (full) {
+                            cxm_inc[u][cxm_ninc[u]] = 2 * v + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
+                        } else if (anysym) {
+                            k = 0;
+                            while (k < cxm_nuse[u]) {
+                                if (cxm_use[u][k] == v && cxm_usym[u][k][0]) {
+                                    if (cxm_text(v, 1, cxm_usym[u][k], cxm_ualias[u][k]) || cxm_put(cxm_renpool[cxm_nren])) { cxm_on = 0; return 1; }
+                                    cxm_cpy(cxm_ren[u][k], cxm_renpool[cxm_nren], CXM_PATHW);
+                                    cxm_inc[u][cxm_ninc[u]] = 0 - (cxm_nren + 1); cxm_nren = cxm_nren + 1; cxm_ninc[u] = cxm_ninc[u] + 1;
+                                }
+                                k = k + 1;
                             }
-                        } else { cxm_inc[u][cxm_ninc[u]] = 2 * v + 1; cxm_ninc[u] = cxm_ninc[u] + 1; }
+                            if (!cxm_bodysrc[v][0]) {
+                                if (cxm_rewrite_multi(u, v, cxm_bodysrc[v])) { cxm_on = 0; return 1; }
+                            }
+                        }
                     }
                     else if (cxm_typ[v][0]) { cxm_inc[u][cxm_ninc[u]] = 2 * v; cxm_ninc[u] = cxm_ninc[u] + 1; }
                 }

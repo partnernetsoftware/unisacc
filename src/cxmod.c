@@ -302,12 +302,11 @@ int cxm_goodname(char *w, int n) {
     }
     return st == 0;
 }
-/* Same file when the two normalised texts match. sy_path has no device
-   number, and this unit must not pull sys.fs in (-funit would compile a
-   second copy into this object and the link would report sy_fstat twice).
-   Both sides are therefore compared as text: every path in cxm_path is
-   already lexically normalised by cxm_norm, and callers hand absolute
-   paths, so the only equivalence a text compare misses is a symlink. */
+/* Same file when the two normalised texts match. sy_path has no device number
+   and this unit must not pull sys.fs in (-funit would copy it and the link
+   would report sy_fstat twice), so both sides are compared as text: every
+   path in cxm_path is already lexically normalised by cxm_norm, and the
+   caller hands absolute paths. */
 int cxm_samefile(char *a, char *b) {
 #ifdef CXM_HOST_REALPATH
     char ra[512], rb[512];
@@ -328,6 +327,8 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     if (n > 4 && w[0] == 's' && w[1] == 't' && w[2] == 'd' && w[3] == '.') {
         cxm_start(u, line); cxm_m("unknown std module "); cxm_mn(w, n); return cxm_fail();
     }
+    v = 0; while (v < cxm_n && !(cxm_name[v][0] && cxm_eqn(w, n, cxm_name[v]))) v = v + 1; /* cxm_name[v][0] */
+    if (v == cxm_n) { /* cxm_name[v][0] */
     dl = cxm_len(cxm_path[u]);
     while (dl > 0 && cxm_path[u][dl - 1] != '/') dl = dl - 1;
     if (dl + n + 4 >= CXM_PATHW) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
@@ -348,6 +349,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
         cxm_iscx[v] = 1; cxm_lib[v] = 0; cxm_nuse[v] = 0;
         cxm_n = cxm_n + 1;
     }
+    } /* cxm_name[v][0] reuse */
     if (!cxm_lib[v]) cxm_cpyn(cxm_name[v], w, n, CXM_NAMEW);   /* a command-line unit used by name takes that name */
     cxm_lib[v] = 1;
     k = 0;
@@ -845,7 +847,6 @@ int cxm_rewrite_multi(int u, int v, char *out) {
     if (cxm_wr(out, cxm_out, cxm_nout)) return 1;
     return 0;
 }
-
 int cxm_srcsha(int u) {
     char hex[65];
     unisa_sha256_hex(cxm_src, (size_t)cxm_nsrc, hex);
