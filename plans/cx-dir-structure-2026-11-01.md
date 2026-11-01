@@ -142,3 +142,11 @@ whole-o 的 67 单元因此必挂；entry-build 逐对象编译（每对象 1 �
 - 拒绝 A：正式 APE 安装需要五片，osx/win BLOCKED，只能出残缺 APE，不叫安装。
 - 拒绝 B（作为用户入口）：不给 release-build 加 `--constructor` CLI 参数；但允许 rb 内部用固定路径（快照内 `entry.elf`，或 ROOT 指定的既有对象路线构造器）。
 - 落地形状：`rb_objects` 用快照里由 `rb_freeze` 复制进来的构造器文件，若该文件是 ELF 就直接 exec；若是 APE/shell 包装才 `sh`。判据用 ELF magic 前 4 字节 `\x7fELF`，不靠扩展名。
+
+### rb_objects 外层总墙钟（裁 300s，2026-11-01）
+
+- 现状：`tools/release-build.cx:719` `v[n++] = "55"`，把整个 entry-build（40 对象编译 + 链接，实测 ~90s）包在 55s 外层 bound 里，链接阶段被杀。
+- 不是放宽单作业时限：entry-build 内部已逐作业 bound（`eb_compile` 55、`eb_link` 45、`-cx-plan` 50）。外层 55 是**总墙钟**兜底，语义与 whole-o 的单作业 60s 不同。
+- 裁：对象路线外层 `bound 300`。理由：67 对象实测 90s，最慢单项 `drivelink.o` 类大文件约 2.6s/对象量级，300s 给 ~3.3× 余量且仍能拦住整体挂起。不做「作业数 × 55」的动态算式（过度设计，且会让上限随配置漂移）。
+- 常量形状：不写字面量 300 两处，提一个 `RB_OBJ_WALL` 宏，附一句注释说明它是总墙钟不是单作业。
+- 验收：`release-build slice lnx/x86_64` rc0、`route\tentry-build`、receipt 有 40 行具名对象 + `entry.elf` + `candidate`，且 candidate 与 M4（18eae940）逐字节相同。
