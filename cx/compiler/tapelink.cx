@@ -10,10 +10,13 @@ int tl_bind(int (*emit)(int), int (*die)(char *)) {
 static int tl_o(int c) { return tl_emit(c); }
 static int tl_fail(char *m) { return tl_die(m); }
 #define TL_HASH 262144
-static int tl_hat[TL_HASH]; static int tl_hlen[TL_HASH]; static int tl_hkind[TL_HASH];   /* per unit: offset+1 into tl_t */
+#define TL_MAXG 65536
+#define TL_GP 1048576
+#define TL_NP 2097152
+static int *tl_hat; static int *tl_hlen; static int *tl_hkind;   /* per unit: offset+1 into tl_t */
 static char *tl_t;
-static char tl_gpool[1048576]; static int tl_gend;                                 /* global objects already defined */
-static int tl_gat[65536]; static int tl_glen[65536]; static int tl_ng;
+static char *tl_gpool; static int tl_gend;                                 /* global objects already defined */
+static int *tl_gat; static int *tl_glen; static int tl_ng;
 static int tl_inits;                                                        /* units that had an __init_u */
 int tl_isid(int c) {
     return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 46 || c == 36;
@@ -93,7 +96,7 @@ int tl_operands(char *t, int p, int e, int u) {
 }
 int tl_word(char *t, int p, int e) { int q; q = p; while (q < e && tl_isid(t[q] & 255)) q = q + 1; return q; }
 int tl_inset(int *at, int *ln, int cnt, char *s, int n); int tl_addname(int *at, int *ln, int *cnt, char *s, int n);
-static int tl_gdef_at[65536]; static int tl_gdef_len[65536]; static int tl_ngdef;    /* R20-3: names some unit gave an initialiser */
+static int *tl_gdef_at; static int *tl_gdef_len; static int tl_ngdef;    /* R20-3: names some unit gave an initialiser */
 /* R20-3: a unit tape's first record must be `.unit 2` (exactly once); an
    object without it predates the initialiser marks and could hide two
    initialised definitions, so it is refused rather than guessed at */
@@ -223,9 +226,9 @@ long tl_ar_dec(char *b, int w, long max) {
 }
 /* link-time name sets, for pulling archive members: names defined (.global)
    and names wanted (.extern) by the units taken so far */
-static char tl_npool[2097152]; static int tl_nend;
-static int tl_def_at[65536]; static int tl_def_len[65536]; static int tl_ndef;
-static int tl_ext_at[65536]; static int tl_ext_len[65536]; static int tl_next;
+static char *tl_npool; static int tl_nend;
+static int *tl_def_at; static int *tl_def_len; static int tl_ndef;
+static int *tl_ext_at; static int *tl_ext_len; static int tl_next;
 static int tl_has_entry;
 int tl_inset(int *at, int *ln, int cnt, char *s, int n) {
     int i; i = 0; while (i < cnt) { if (tl_same(tl_npool + at[i], ln[i], s, n)) return 1; i = i + 1; } return 0;
@@ -389,7 +392,32 @@ malformed:
     tl_fail("link: malformed unit tape payload\n"); return 0;
 }
 
+static int tl_tab_on;
+static int tl_tables(void) {
+    void *mm_zalloc(long);
+    if (tl_tab_on) return 0;
+    tl_hat = mm_zalloc((long)TL_HASH * (long)sizeof(int));
+    tl_hlen = mm_zalloc((long)TL_HASH * (long)sizeof(int));
+    tl_hkind = mm_zalloc((long)TL_HASH * (long)sizeof(int));
+    tl_gpool = mm_zalloc((long)TL_GP);
+    tl_gat = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_glen = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_gdef_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_gdef_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_npool = mm_zalloc((long)TL_NP);
+    tl_def_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_def_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_ext_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    tl_ext_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
+    if (!tl_hat || !tl_hlen || !tl_hkind || !tl_gpool || !tl_gat || !tl_glen ||
+        !tl_gdef_at || !tl_gdef_len || !tl_npool || !tl_def_at || !tl_def_len || !tl_ext_at || !tl_ext_len)
+        return 1;
+    tl_tab_on = 1;
+    return 0;
+}
+
 int tl_begin(void) {
+    if (tl_tables()) { tl_fail("link: out of memory\n"); return 1; }
     tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0;
     return 0;
 }
