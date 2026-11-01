@@ -1,0 +1,57 @@
+/* Check the link-input cap: 96 source arguments pass the walk, 97 are refused
+   with the named "too many sources" sentence. Uses 96/97 fake .o paths so the
+   walk count is what is exercised; the real open fails later (ENOENT) on 96,
+   which is not the cap. C44-LINK-CAP-01 (link inputs 64 -> 96). */
+#pragma unisa use sys.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int g_fail;
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+static int has(const char *s, const char *w) {
+    if (!s) return 0;
+    return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 128)) >= 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], com[4400], bound[4400];
+    char *v[110];
+    char why[512];
+    np_result r;
+    int i;
+    root[0] = 0;
+    if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
+    else {
+        if (sy_cwd(root, 4096) < 0) return 2;
+        if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    }
+    if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+    /* 96 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
+    i = 0;
+    v[i++] = bound; v[i++] = "50"; v[i++] = com;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-96";
+    { int k = 0; while (k < 96) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
+    v[i] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t96-run\n"); return 2; }
+    ck(!has(r.err, "too many sources"), "96-sources-pass-walk");
+    np_free(&r);
+    /* 97 sources: the walk refuses with the named sentence, rc 1. */
+    i = 0;
+    v[i++] = bound; v[i++] = "50"; v[i++] = com;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-97";
+    { int k = 0; while (k < 97) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
+    v[i] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t97-run\n"); return 2; }
+    ck(r.rc == 1 && has(r.err, "too many sources"), "97-sources-refused-named");
+    np_free(&r);
+    printf("CHECK_LINK_CAP\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
