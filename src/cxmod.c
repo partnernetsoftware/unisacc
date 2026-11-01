@@ -318,20 +318,48 @@ int cxm_samefile(char *a, char *b) {
 #endif
     return 0;
 }
-/* Conservative identity test for a second lexical path to one physical
-   module: only a module with no use directive can merge.  Any "use" token
-   (even in a comment) keeps the ambiguity visible instead of guessing which
-   directory should resolve it. */
-int cxm_has_use(char *path) {
-    int n, k;
-    n = cxm_rd(path, cxm_cmp, CXM_IFMAX);
-    if (n < 0) return 1;
+/* Two lexical entries of one physical module resolve their `use` names
+   beside their own directories.  Equal resolved targets may merge; any
+   differing target keeps the ambiguity and is refused by the caller. */
+int cxm_deps_same(char *a, char *b) {
+    char da[CXM_PATHW], db[CXM_PATHW], cand[CXM_PATHW], norm[CXM_PATHW];
+    int n, k, la, lb, p, q;
+    n = cxm_rd(a, cxm_cmp, CXM_IFMAX);
+    if (n < 0) return 0;
+    la = cxm_len(a); while (la > 0 && a[la - 1] != '/') la = la - 1;
+    lb = cxm_len(b); while (lb > 0 && b[lb - 1] != '/') lb = lb - 1;
+    if (la >= CXM_PATHW || lb >= CXM_PATHW) return 0;
+    k = 0; while (k < la) { da[k] = a[k]; k = k + 1; } da[la] = 0;
+    k = 0; while (k < lb) { db[k] = b[k]; k = k + 1; } db[lb] = 0;
     k = 0;
-    while (k + 3 <= n) {
-        if (cxm_cmp[k] == 'u' && cxm_cmp[k + 1] == 's' && cxm_cmp[k + 2] == 'e') return 1;
-        k = k + 1;
+    while (k < n) {
+        int start = k, end, at;
+        while (k < n && cxm_cmp[k] != '\n') k = k + 1;
+        end = k; if (k < n) k = k + 1;
+        at = start; while (at < end && (cxm_cmp[at] == ' ' || cxm_cmp[at] == '\t')) at = at + 1;
+        if (at >= end || cxm_cmp[at] != '#') continue;
+        at = at + 1; while (at < end && (cxm_cmp[at] == ' ' || cxm_cmp[at] == '\t')) at = at + 1;
+        if (at + 6 > end || cxm_cmp[at] != 'p' || cxm_cmp[at + 1] != 'r' || cxm_cmp[at + 2] != 'a' ||
+            cxm_cmp[at + 3] != 'g' || cxm_cmp[at + 4] != 'm' || cxm_cmp[at + 5] != 'a') continue;
+        at = at + 6; while (at < end && (cxm_cmp[at] == ' ' || cxm_cmp[at] == '\t')) at = at + 1;
+        if (at + 5 > end || cxm_cmp[at] != 'u' || cxm_cmp[at + 1] != 'n' || cxm_cmp[at + 2] != 'i' ||
+            cxm_cmp[at + 3] != 's' || cxm_cmp[at + 4] != 'a') continue;
+        at = at + 5; while (at < end && (cxm_cmp[at] == ' ' || cxm_cmp[at] == '\t')) at = at + 1;
+        if (at + 3 > end || cxm_cmp[at] != 'u' || cxm_cmp[at + 1] != 's' || cxm_cmp[at + 2] != 'e') continue;
+        at = at + 3; while (at < end && (cxm_cmp[at] == ' ' || cxm_cmp[at] == '\t')) at = at + 1;
+        { int mb = at; while (at < end && (cxm_cmp[at] == '.' || cxm_idch(cxm_cmp[at] & 255))) at = at + 1;
+          if (at == mb) return 0;
+          p = 0; q = 0; while (p < la) cand[q++] = da[p++];
+          p = mb; while (p < at) { cand[q++] = cxm_cmp[p] == '.' ? '/' : cxm_cmp[p]; p++; }
+          cand[q++] = '.'; cand[q++] = 'c'; cand[q++] = 'x'; cand[q] = 0;
+          if (cxm_norm(cand, norm)) return 0;
+          p = 0; q = 0; while (p < lb) cand[q++] = db[p++];
+          p = mb; while (p < at) { cand[q++] = cxm_cmp[p] == '.' ? '/' : cxm_cmp[p]; p++; }
+          cand[q++] = '.'; cand[q++] = 'c'; cand[q++] = 'x'; cand[q] = 0;
+          if (!cxm_samefile(norm, cand)) return 0;
+        }
     }
-    return 0;
+    return 1;
 }
 /* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
@@ -353,7 +381,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
-    if (v < cxm_n && !cxm_eq(cxm_path[v], norm) && cxm_has_use(cxm_path[v])) {
+    if (v < cxm_n && !cxm_eq(cxm_path[v], norm) && !cxm_deps_same(cxm_path[v], norm)) {
         cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(" has two lexical entries: ");
         cxm_m(cxm_path[v]); cxm_m(" and "); cxm_m(norm); cxm_m(" with use dependencies"); return cxm_fail();
     }
