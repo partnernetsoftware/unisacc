@@ -747,17 +747,37 @@ static void collect_defs(int e) {
     }
 }
 
-/* graph: one-shot graph into out/toolgraph/v1/graph.tsv. Nodes = files (dedup by realpath),
-   edges = use (from resolve_uses) and call (C rows joined to the def table). */
-static int cmd_graph(void) {
+/* graph: one-shot graph into <idx>/graph.tsv. Nodes = files (dedup by realpath),
+   edges = use (from resolve_uses) and call (C rows joined to the def table).
+   With a non-empty ROOTS set, the graph is the subgraph around those files:
+   their forward use closure, their reverse users, and the use/call edges among
+   that set (epoch-marks them, same mechanism as cmd_users). */
+static int cmd_graph(int *roots, int nroots) {
     Buf o = {0, 0, 0};
     int e, nodes = 0, edges = 0;
     long t1 = sy_now_ms();
-    /* header + nodes: every listed file, plus any file reached only through a use (indexed this run) */
+    int *sub = 0;   /* 1 when the entry is in the subgraph (only when nroots) */
+    if (nroots) {
+        int nl = nent, f, m;
+        sub = mm_zalloc((long)nl * (long)sizeof(int));
+        if (!sub) die("out of memory");
+        /* forward closure from each root (all under one epoch) */
+        epoch++;
+        for (e = 0; e < nroots; e++) closure(roots[e]);
+        for (f = 0; f < nl; f++) if (ent[f].mark == epoch) sub[f] = 1;
+        /* reverse users: a listed file whose closure reaches any root is also in the subgraph */
+        for (f = 0; f < nl; f++) {
+            if (!ent[f].listed || sub[f]) continue;
+            epoch++; closure(f);
+            for (m = 0; m < nroots; m++) if (ent[roots[m]].mark == epoch) { sub[f] = 1; break; }
+        }
+    }
+    /* header + nodes */
     puts_(&o, "V\ttoolgraph-v1\n");
     for (e = 0; e < nent; e++) {
         const char *s, *end; char *f[4]; const char *module = "-";
-        if (!ent[e].listed && !ent[e].mark) continue;
+        if (nroots) { if (!sub[e]) continue; }
+        else { if (!ent[e].listed && !ent[e].mark) continue; }
         if (ent[e].ok != 1) continue;
         load_shard(e);
         s = ent[e].shard; end = s + ent[e].shn;
@@ -766,25 +786,33 @@ static int cmd_graph(void) {
         putesc(&o, module, tx_len(module, CAP)); put(&o, "\t", 1); puts_(&o, ent[e].sha); put(&o, "\n", 1);
         nodes++;
     }
-    /* use edges (reached files get mark so they are also nodes) */
+    /* use edges (both endpoints must be in the subgraph when nroots) */
     for (e = 0; e < nent; e++) {
         int k;
         if (!ent[e].listed || ent[e].ok != 1) continue;
+        if (nroots && !sub[e]) continue;
         resolve_uses(e);
         for (k = 0; k < ent[e].nuse; k++) {
+            int d = ent[e].use[k];
+            if (nroots && !sub[d]) continue;
             puts_(&o, "E\t"); putesc(&o, ent[e].path, tx_len(ent[e].path, CAP)); put(&o, "\t", 1);
-            putesc(&o, ent[ent[e].use[k]].path, tx_len(ent[ent[e].use[k]].path, CAP));
+            putesc(&o, ent[d].path, tx_len(ent[d].path, CAP));
             puts_(&o, "\tuse\t-\n");
             edges++;
         }
     }
-    /* call edges: collect all non-static D from listed+reached files, then join every C row by name */
+    /* call edges: collect all non-static D from subgraph files, then join every C row by name */
     {
-        int n;
-        for (e = 0; e < nent; e++) if ((ent[e].listed || ent[e].mark) && ent[e].ok == 1) collect_defs(e);
+        for (e = 0; e < nent; e++) {
+            if (ent[e].ok != 1) continue;
+            if (nroots) { if (!sub[e]) continue; }
+            else { if (!(ent[e].listed || ent[e].mark)) continue; }
+            collect_defs(e);
+        }
         for (e = 0; e < nent; e++) {
             const char *s, *end;
             if (!ent[e].listed || ent[e].ok != 1) continue;
+            if (nroots && !sub[e]) continue;
             load_shard(e);
             s = ent[e].shard; end = s + ent[e].shn;
             for (; s < end; s = next_row(s, end)) {
@@ -793,6 +821,7 @@ static int cmd_graph(void) {
                 nn = field_at(s, end, 1, &nm);
                 if ((d = def_head(nm, nn)) < 0) continue;
                 if (defs[d].e == e) continue;   /* same-file call: not a cross-module edge */
+                if (nroots && !sub[defs[d].e]) continue;
                 lnn = field_at(s, end, 2, &ln);
                 puts_(&o, "E\t"); putesc(&o, ent[e].path, tx_len(ent[e].path, CAP)); put(&o, "\t", 1);
                 putesc(&o, ent[defs[d].e].path, tx_len(ent[defs[d].e].path, CAP));
@@ -1144,7 +1173,7 @@ int main(int argc, char **argv) {
             if (argc - a != 1) usage();
             named[nn++] = entry_for(argv[a], 0);
         } else if (tx_eqz(cmd, "graph")) {
-            if (argc - a != 0) usage();
+            for (; a < argc; a++) { if (nn == 4096) die("too many files"); named[nn++] = entry_for(argv[a], 0); }
         } else if (tx_eqz(cmd, "undeclared") || tx_eqz(cmd, "external")) {
             if (tx_eqz(cmd, "external") && a < argc && tx_eqz(argv[a], "--names")) { names_mode = 1; a++; }
             if (argc - a < 1) usage();
@@ -1157,7 +1186,7 @@ int main(int argc, char **argv) {
         if (n_deferred) { fprintf(stderr, "symindex: the index is unfinished; run update again\n"); return 3; }
         if (tx_eqz(cmd, "def")) return cmd_def(argv[a]);
         if (tx_eqz(cmd, "dump")) return cmd_dump(named[0]);
-        if (tx_eqz(cmd, "graph")) return cmd_graph();
+        if (tx_eqz(cmd, "graph")) return cmd_graph(named, nn);
         if (tx_eqz(cmd, "uses")) return cmd_uses(named[0]);
         if (tx_eqz(cmd, "users")) return cmd_users(named[0]);
         if (tx_eqz(cmd, "calls")) {
