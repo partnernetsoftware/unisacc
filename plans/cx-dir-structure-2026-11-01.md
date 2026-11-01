@@ -70,3 +70,12 @@
 - 影响：改 `drive.o` 的 use 闭包与对象隔离边界，需评估 33 keys / SID；可能动链接拓扑。归慢车道，与 dock pragma 同批。
 - 验收：两代五片逐字节相同；`check-cx-layers` rc0（新边只能是 same/down）；七棘轮 ok；`tools/check-driver-cli.cx` 的 ABI 断言仍过；受影响批次实跑。
 - 不阻塞当前 `C44-PACKAGE-01` 的机械拆分；第三刀按 A 保留局部 extern 原型。
+
+## C44-LINK-CAP-01（已落，2026-11-01）
+
+- 问题：`entry-build` 的链接输入上限 64 与模块图上限 64 共用历史耦合；cut5 后 33 keys + 33 闭包对象 = 66，旧 constructor 链不动，自举死锁。
+- 改动：`src/drive.cx` `dv_srcv[96]` + `fwd_splice nsrc>=96`；`src/driveargs.cx` `*nsrc>=96`；`src/driveplan.cx` `paths[96]`x2 + `n>96`。
+- 模块图不变：`CXM_MAXU` 仍 64；当前闭包 33 单位（加 driverun 后 34）。
+- 证据：`tools/check-link-cap.cx` 96 输入不报 cap、97 输入 rc1 具名 `too many sources`；M1 自举候选 7b108210…（63 对象）实测 96 通过/97 拒绝。
+- 提交：`b2f0961fc0`。
+- 未登记批次：`register` 会用已装 64 上限产品跑，96 必然 FAIL；等 C3 产品升到 96 后再登记并实跑。
