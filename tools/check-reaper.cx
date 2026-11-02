@@ -1,0 +1,242 @@
+#pragma unisa use sys.process
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+/* Checks the tree reaper of cx/sys/process.cx: sy_child_subreaper and
+   sy_kill_tree.
+
+     sh ./unisacc.com tools/check-reaper.cx
+
+   The fixtures are real processes of this file, each a child of this process
+   running in its own session:
+     tree     root + two grandchildren, all sleeping;
+     escape   root -> middle (exits at once) -> detached sleeper: after the
+              middle is gone the sleeper is nobody's descendant, which is the
+              case a process-group kill cannot see.
+   Every fixture writes its pid into out/check-reaper-<pid>/ before it sleeps,
+   so a FAIL can name what was left behind, and cleanup() kills everything it
+   started on the success and the failure path alike.
+
+   The run is capped with RLIMIT_NPROC at (this user's process count + 200)
+   through prlimit, so a runaway fixture chain stops instead of filling the
+   machine. Prints PASS/FAIL lines and CX_REAPER<TAB>ok=N<TAB>failed=N; exit 1
+   on any FAIL. */
+
+#define FX_MAX 16
+
+static int nok, nfail;
+static int all[FX_MAX], nall;
+static char fxdir[256];
+
+static void ok(int c, const char *name) {
+    printf("%s\treaper.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+
+static void remember(int pid) {
+    if (pid > 0 && nall < FX_MAX) all[nall++] = pid;
+}
+
+static int alive(int pid) {
+    return pid > 0 && sy_signal(pid, 0) == 0;
+}
+
+/* "<fxdir>/<name>.pid" into B; its length, or -1. */
+static int pid_path(char *b, int cap, const char *name) {
+    int n = tx_snprintf(b, cap, "%s/%s.pid", fxdir, name);
+    return n > 0 && n < cap ? n : -1;
+}
+
+/* The first decimal in FILE, or -1 (missing, empty, not a number). */
+static int read_pid(const char *path) {
+    char b[64];
+    sy_stat_t st;
+    int fd, n, v = 0, any = 0, i;
+    if (sy_stat(path, &st) != 0) return -1;
+    fd = sy_open_read(path);
+    if (fd < 0) return -1;
+    n = (int)sy_read(fd, b, sizeof b);
+    sy_close(fd);
+    if (n <= 0) return -1;
+    for (i = 0; i < n; i++) {
+        if (b[i] >= '0' && b[i] <= '9') { v = v * 10 + (b[i] - '0'); any = 1; }
+        else if (any) break;
+    }
+    return any ? v : -1;
+}
+
+static int write_pid(const char *name) {
+    char p[512], b[32];
+    int fd, n;
+    if (pid_path(p, sizeof p, name) < 0) return 1;
+    fd = sy_open_new(p, 0644);
+    if (fd < 0) return 2;
+    n = tx_snprintf(b, sizeof b, "%d\n", sy_pid());
+    if (n <= 0 || sy_write_all(fd, b, n) != 0) { sy_close(fd); return 3; }
+    return sy_close(fd) == 0 ? 0 : 4;
+}
+
+/* Wait until NAME's pid file holds a pid (bounded), that pid, or -1. */
+static int await_pid(const char *name) {
+    char p[512];
+    int i, pid;
+    if (pid_path(p, sizeof p, name) < 0) return -1;
+    for (i = 0; i < 500; i++) {
+        pid = read_pid(p);
+        if (pid > 0) return pid;
+        sy_sleep_ms(2);
+    }
+    return -1;
+}
+
+/* ---- fixture bodies (run in the child, after fork_session) --------------- */
+
+static int sleeper(void *ud) {
+    if (write_pid(ud) != 0) return 1;
+    sy_sleep_ms(3000);
+    return 0;
+}
+
+/* Writes its pid only after the middle of the escape chain has exited, so the
+   file appearing means the reparenting already happened. */
+static int late_sleeper(void *ud) {
+    sy_sleep_ms(300);
+    if (write_pid(ud) != 0) return 1;
+    sy_sleep_ms(3000);
+    return 0;
+}
+
+static int nest_root(void *ud) {
+    int fds[2];
+    (void)ud;
+    if (sy_fork_session(sleeper, "g1", fds) <= 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (sy_fork_session(sleeper, "g2", fds) <= 0) return 2;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (write_pid("root") != 0) return 3;
+    sy_sleep_ms(3000);
+    return 0;
+}
+
+/* The middle of the escape chain: starts the detached sleeper and returns at
+   once, so the sleeper loses its parent while it is still running. */
+static int escape_mid(void *ud) {
+    int fds[2];
+    (void)ud;
+    if (sy_fork_session(late_sleeper, "d", fds) <= 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    return 0;
+}
+
+static int escape_root(void *ud) {
+    int fds[2];
+    (void)ud;
+    if (sy_fork_session(escape_mid, 0, fds) <= 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (write_pid("eroot") != 0) return 2;
+    sy_sleep_ms(3000);
+    return 0;
+}
+
+/* ---- the cap and the cleanup -------------------------------------------- */
+
+/* RLIMIT_NPROC at this user's process count + 200 through prlimit: a fixture
+   that spawned without a bound stops at ~200 extra processes instead of
+   filling the machine. Advisory: a host without prlimit prints NOTE. */
+static void cap_nproc(void) {
+    char cmd[256];
+    char *av[] = { "sh", "-c", cmd, 0 };
+    int fd, pid, n, i, done = 0;
+    /* The kernel counts threads against RLIMIT_NPROC, so the budget is the
+       user's thread count + 200, not its process count. */
+    tx_snprintf(cmd, sizeof cmd,
+                "prlimit --pid %d --nproc=$(( $(awk '/^Uid:/{u=$2} "
+                "/^Threads:/{if(u=='$(id -u)')s+=$2} "
+                "END{print s}' /proc/[0-9]*/status) + 200 ))",
+                sy_pid());
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid <= 0) { printf("NOTE\treaper\tprlimit unavailable\n"); return; }
+    for (i = 0; i < 250; i++) {
+        n = sy_wait(pid, 1);
+        if (n != -EAGAIN) { done = 1; break; }
+        sy_sleep_ms(20);
+    }
+    sy_close(fd);
+    if (!done) { sy_kill(pid); printf("NOTE\treaper\tprlimit did not finish\n"); return; }
+    printf("NOTE\treaper\tnproc capped at uid count + 200\n");
+}
+
+/* Kill everything this check started, whichever path reached it. */
+static void cleanup(void) {
+    int i;
+    for (i = 0; i < nall; i++) if (alive(all[i])) sy_kill(all[i]);
+    nall = 0;
+}
+
+int main(int argc, char **argv) {
+    char rep[256];
+    int root, g1, g2, keep_pid, eroot, d, res, dead, fds[2];
+    (void)argc; (void)argv;
+    tx_snprintf(fxdir, sizeof fxdir, "out/check-reaper-%d", sy_pid());
+    {
+        int mk = sy_mkdir(fxdir, 0755);
+        if (mk != 0 && mk != -EEXIST) { printf("CX_REAPER\tok=0\tfailed=1\n"); return 1; }
+    }
+    cap_nproc();
+    ok(sy_child_subreaper() == 0, "child_subreaper: this process adopts the orphans of a job");
+    ok(sy_kill_tree(1, 500, 0, 0, rep, sizeof rep) == -EINVAL, "kill_tree: pid 1 is not a job root");
+
+    /* A pid that already exited has no tree and nothing to prove. */
+    {
+        char *av[] = { "sh", "-c", "exit 0", 0 };
+        dead = sy_spawn(av);
+        if (dead > 0) sy_wait(dead, 0);
+    }
+    ok(dead > 0 && sy_kill_tree(dead, 500, 0, 0, rep, sizeof rep) == 0, "kill_tree: a reaped root is 0 residue");
+
+    /* tree: root, two grandchildren, plus an unrelated child the caller keeps */
+    root = sy_fork_session(nest_root, 0, fds);
+    remember(root);
+    if (root > 0) { sy_close(fds[0]); sy_close(fds[1]); }
+    g1 = await_pid("g1");
+    g2 = await_pid("g2");
+    {
+        int rr = await_pid("root");
+        if (root <= 0) root = rr;
+    }
+    ok(root > 0 && g1 > 0 && g2 > 0 && alive(root) && alive(g1) && alive(g2),
+       "tree: root and two grandchildren are running");
+    {
+        char *av[] = { "sleep", "30", 0 };
+        keep_pid = sy_spawn(av);
+    }
+    remember(keep_pid);
+    ok(alive(keep_pid), "tree: the unrelated child is running");
+    rep[0] = 0;
+    res = sy_kill_tree(root, 1500, &keep_pid, 1, rep, sizeof rep);
+    ok(res == 0 && rep[0] == 0, "tree: kill_tree reports no residue");
+    ok(!alive(root) && !alive(g1) && !alive(g2), "tree: root and both grandchildren are gone");
+    ok(alive(keep_pid), "tree: the kept child survived the kill");
+
+    /* escape: a sleeper that lost its parent before the kill */
+    eroot = sy_fork_session(escape_root, 0, fds);
+    remember(eroot);
+    if (eroot > 0) { sy_close(fds[0]); sy_close(fds[1]); }
+    {
+        int rr = await_pid("eroot");
+        if (eroot <= 0) eroot = rr;
+    }
+    d = await_pid("d");
+    ok(eroot > 0 && d > 0 && alive(eroot) && alive(d), "escape: root and the detached sleeper are running");
+    rep[0] = 0;
+    res = sy_kill_tree(eroot, 1500, 0, 0, rep, sizeof rep);
+    ok(!alive(eroot), "escape: the root is gone");
+    ok(!alive(d), "escape: the detached sleeper is gone");
+    ok(res == 0 && rep[0] == 0, "escape: kill_tree reports no residue");
+    cleanup();
+    printf("CX_REAPER\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

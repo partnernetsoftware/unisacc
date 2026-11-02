@@ -1,6 +1,8 @@
 /* Native process capture module. Extracted from netpack's existing process
- * contract: only np_run/np_free are public operations. Buffers and error
- * rendering remain module-private; returned output belongs to the caller. */
+ * contract: np_run/np_free are the public capture operations; sy_kill_tree and
+ * sy_child_subreaper are the public cleanup operations (see the reaper below).
+ * Buffers and error rendering remain module-private; returned output belongs to
+ * the caller. */
 #pragma unisa module process
 typedef struct np_buf { char *p; size_t n, cap; } np_buf;
 typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; } np_result;
@@ -115,3 +117,261 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
     return 0;
 }
 
+/* ---- reaper: freeze a tree, kill it, report what survived -----------------
+ *
+ * A timed-out job can leave more than one process group: setsid() or a second
+ * fork puts a descendant outside the group, and a kill(-pid) then misses it.
+ * The reaper stops the tree before it kills anything -- a stopped process
+ * cannot fork, so the set of descendants cannot grow between the scan and the
+ * kill -- then kills every stopped pid, and reports the pids that are still
+ * alive afterwards. That count is the proof: 0 means everything the scan saw
+ * is gone; anything else must fail the caller's job instead of being reported
+ * as a clean timeout.
+ *
+ * Identity is pid plus the starttime field of /proc/PID/stat (field 22), so a
+ * pid reused by an unrelated process is not counted as a survivor and not
+ * killed a second time.
+ *
+ * sy_child_subreaper() makes this process the reaper of every orphan the job
+ * leaves behind (Linux PR_SET_CHILD_SUBREAPER). Without it a double-forked
+ * descendant that lost its parent is reparented to init and cannot be seen as
+ * a child any more; the sweep below only looks at children of this process.
+ * Call it once, before the job is spawned. It is 0 on success, -ENOSYS where
+ * the kernel has no such setting.
+ *
+ * Only Linux /proc is scanned. Elsewhere sy_kill_tree answers -ENOSYS and the
+ * caller keeps its previous group kill: a residue it cannot see is not a
+ * residue it may claim clean. */
+
+/* SY_KT_STOP has no name in the carried signal header; the number is platform data,
+   like the syscall numbers below (macOS 17, Linux 19 on every target here). */
+#if defined(__APPLE__)
+#define SY_KT_STOP 17
+#else
+#define SY_KT_STOP 19
+#endif
+#define SY_KT_MAX 1024
+#define SY_KT_FREEZE_ROUNDS 64
+#define SY_KT_SWEEP_ROUNDS 16
+#define SY_KT_ROOT_WAIT 250       /* 2 ms steps: 500 ms for the root to go */
+
+typedef struct { int pid; long long start; } sy_kt_ent;
+
+#if defined(__linux__)
+
+/* Decimal digits of V into B (no padding, no snprintf); its length, or 0 when
+   B cannot hold it. */
+static int kt_dec(char *b, int cap, long long v) {
+    char t[24];
+    int n = 0, i;
+    unsigned long long u = v < 0 ? (unsigned long long)(-v) : (unsigned long long)v;
+    do { t[n++] = (char)('0' + (int)(u % 10)); u /= 10; } while (u);
+    if (v < 0) t[n++] = '-';
+    if (n >= cap) return 0;
+    for (i = 0; i < n; i++) b[i] = t[n - 1 - i];
+    return n;
+}
+
+/* "/proc/<pid>/stat" into B; 0, or -1 when B is too small. Built by hand: a
+   bounded decimal, not a formatting call whose width grows with the pid. */
+static int kt_path(char *b, int cap, int pid) {
+    const char *a = "/proc/", *z = "/stat";
+    int i = 0, j = 0, k;
+    while (a[i] && i < cap - 1) { b[i] = a[i]; i++; }
+    k = kt_dec(b + i, cap - i, pid);
+    if (k <= 0) return -1;
+    i += k;
+    while (z[j] && i < cap - 1) { b[i++] = z[j++]; }
+    b[i] = 0;
+    return 0;
+}
+
+/* /proc/PID/stat: parent, group, starttime and state; 0 when the pid is gone
+   or the record is not the expected shape. */
+static int kt_stat(int pid, int *ppid, int *pgrp, long long *start, char *state) {
+    char path[32], buf[1024];
+    int fd, n, i, last = -1, f = 0;
+    long long nums[19];
+    if (pid <= 0) return -1;
+    if (kt_path(path, sizeof path, pid) != 0) return -1;
+    fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    n = (int)read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    for (i = 0; i < n; i++) if (buf[i] == ')') last = i;   /* comm may hold ')' */
+    if (last < 0 || last + 2 >= n) return -1;
+    if (state) *state = buf[last + 2];
+    i = last + 3;
+    while (i < n && f < 19) {
+        long long v = 0;
+        int any = 0, neg = 0;
+        while (i < n && (buf[i] == ' ' || buf[i] == '\t')) i++;
+        if (i < n && buf[i] == '-') { neg = 1; i++; }   /* tpgid and friends are -1 */
+        while (i < n && buf[i] >= '0' && buf[i] <= '9') { v = v * 10 + (buf[i] - '0'); i++; any = 1; }
+        if (!any) break;
+        nums[f++] = neg ? -v : v;
+    }
+    if (f < 19) return -1;
+    if (ppid) *ppid = (int)nums[0];                       /* field 4 */
+    if (pgrp) *pgrp = (int)nums[1];                       /* field 5 */
+    if (start) *start = nums[18];                         /* field 22 */
+    return 0;
+}
+
+static int kt_held(const sy_kt_ent *e, int n, int pid) {
+    int i;
+    for (i = 0; i < n; i++) if (e[i].pid == pid) return 1;
+    return 0;
+}
+
+static int kt_kept(const int *keep, int nkeep, int pid) {
+    int i;
+    for (i = 0; i < nkeep; i++) if (keep[i] == pid) return 1;
+    return 0;
+}
+
+/* Add every live pid whose parent is already held, or whose group is ROOT's own
+   group, to E and SY_KT_STOP it. One pass; *ADDED is how many were new. */
+static void kt_pass(int *n, sy_kt_ent *e, int rg, int root, const int *keep, int nkeep, int *added) {
+    DIR *d = opendir("/proc");
+    struct dirent *de;
+    *added = 0;
+    if (!d) return;
+    while ((de = readdir(d)) != 0) {
+        int pid, pp = 0, pg = 0;
+        long long st = 0;
+        char stt = 0;
+        if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+        pid = atoi(de->d_name);
+        if (pid <= 1 || pid == (int)getpid()) continue;
+        if (kt_held(e, *n, pid) || kt_kept(keep, nkeep, pid)) continue;
+        if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
+        if (stt == 'Z' || stt == 'X') continue;
+        if (!kt_held(e, *n, pp) && !(rg == root && pg == rg)) continue;
+        if (*n >= SY_KT_MAX) break;
+        kill(pid, SY_KT_STOP);                               /* before the record: a stopped pid cannot fork */
+        e[*n].pid = pid; e[*n].start = st;
+        (*n)++;
+        (*added)++;
+    }
+    closedir(d);
+}
+
+#endif
+
+/* Freeze ROOT and everything under it, then kill all of it. Returns the number
+   of pids still alive with the same starttime (0: clean), -EINVAL for a pid
+   that is not a job root, or -ENOSYS where there is no /proc. REP gets
+   "pid(start) ..." for the survivors, at most CAP bytes. KEEP entries (the
+   caller's other live children) are never stopped, killed or swept. */
+
+static int kt_kill_tree_os(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+#if defined(__linux__)
+    sy_kt_ent e[SY_KT_MAX];
+    int n = 0, rg = 0, rp = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds;
+    long long rst = 0;
+    char rs = 0;
+    if (root <= 1) return -EINVAL;
+    if (rep && cap > 0) rep[0] = 0;
+    if (deadline_ms <= 0) deadline_ms = 2000;
+    if (kt_stat(root, &rp, &rg, &rst, &rs) != 0) return 0; /* already gone: nothing to prove */
+    freeze_rounds = deadline_ms / 4;
+    if (freeze_rounds < 8) freeze_rounds = 8;
+    if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
+    sweep_rounds = deadline_ms / 8;
+    if (sweep_rounds < 4) sweep_rounds = 4;
+    if (sweep_rounds > SY_KT_SWEEP_ROUNDS) sweep_rounds = SY_KT_SWEEP_ROUNDS;
+    kill(root, SY_KT_STOP);
+    e[n].pid = root; e[n].start = rst; n++;
+    for (round = 0; round < freeze_rounds; round++) {
+        kt_pass(&n, e, rg, root, keep, nkeep, &added);
+        if (!added) break;
+        usleep(2000);
+    }
+    for (i = 0; i < n; i++) kill(e[i].pid, SIGKILL);
+    if (rg == root && rg > 1) kill(-rg, SIGKILL);         /* the group, only when it is root's own */
+    round = 0;
+    while (round++ < SY_KT_ROOT_WAIT) {
+        int st = 0;
+        if (waitpid(root, &st, WNOHANG) == root) break;
+        usleep(2000);
+    }
+    /* Orphans stop being descendants when their parent dies: with the subreaper
+       set they are children of this process and carry a starttime not before
+       the root's. Freeze and kill them too, then look again. */
+    for (round = 0; round < sweep_rounds; round++) {
+        int pid = 0;
+        int hits = 0;
+        {
+            DIR *d = opendir("/proc");
+            struct dirent *de;
+            if (!d) break;
+            while ((de = readdir(d)) != 0) {
+                int pp = 0, pg = 0;
+                long long st = 0;
+                char stt = 0;
+                if (de->d_name[0] < '0' || de->d_name[0] > '9') continue;
+                pid = atoi(de->d_name);
+                if (pid <= 1 || pid == (int)getpid()) continue;
+                if (kt_held(e, n, pid) || kt_kept(keep, nkeep, pid)) continue;
+                if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
+                if (stt == 'Z' || stt == 'X') continue;
+                if (pp != (int)getpid() || st < rst) continue;
+                if (n >= SY_KT_MAX) break;
+                kill(pid, SY_KT_STOP);
+                e[n].pid = pid; e[n].start = st; n++;
+                hits++;
+            }
+            closedir(d);
+        }
+        if (hits) for (i = 0; i < n; i++) kill(e[i].pid, SIGKILL);
+        if (!hits) break;
+        usleep(2000);
+    }
+    for (i = 0; i < n; i++) {
+        int st2 = 0, pp = 0, pg = 0;
+        long long st = 0;
+        char stt = 0;
+        while (waitpid(e[i].pid, &st2, WNOHANG) == e[i].pid) ;
+        if (kt_stat(e[i].pid, &pp, &pg, &st, &stt) != 0) continue;
+        if (st != e[i].start || stt == 'Z' || stt == 'X') continue;
+        residue++;
+        if (rep && cap > 0) {
+            int u = (int)strlen(rep), k;
+            if (cap - u > 40) {                           /* room for " -2147483648(-9223372036854775808)" */
+                if (u) rep[u++] = ' ';
+                k = kt_dec(rep + u, cap - u, e[i].pid);
+                u += k;
+                rep[u++] = '(';
+                k = kt_dec(rep + u, cap - u, e[i].start);
+                u += k;
+                rep[u++] = ')';
+                rep[u] = 0;
+            }
+        }
+    }
+    return residue;
+#else
+    (void)root; (void)deadline_ms; (void)keep; (void)nkeep; (void)rep; (void)cap;
+    return -ENOSYS;
+#endif
+}
+
+int sy_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+    return kt_kill_tree_os(root, deadline_ms, keep, nkeep, rep, cap);
+}
+
+static int kt_subreaper_os(void) {
+#if defined(__linux__) && defined(__x86_64__)
+    long r = __syscall6(157, 36 /* PR_SET_CHILD_SUBREAPER */, 1, 0, 0, 0);
+#elif defined(__linux__) && defined(__aarch64__)
+    long r = __syscall6(167, 36, 1, 0, 0, 0);
+#else
+    long r = -1;
+#endif
+    return r == 0 ? 0 : -ENOSYS;
+}
+
+int sy_child_subreaper(void) { return kt_subreaper_os(); }

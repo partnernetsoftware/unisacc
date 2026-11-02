@@ -1,6 +1,6 @@
 # 超时清理缺口修补方案（run-batch / affected / bound）
 
-日期：2026-11-02。状态：方案待 cc 批准，未动代码。审计证据见
+日期：2026-11-02。状态：P1+P5 已落地（cc 批准，2026-11-02）：`tools/check-reaper.cx` 12 条断言全绿，批次 `cx-reaper` 已登记；P2/P3/P4 待 P5 绿后另批。审计证据见
 `plans/cx-selfspawn-audit-2026-11-02.md` 第 2 节。
 
 ## 1. 现存缺口（行号已核对）
@@ -26,7 +26,7 @@
 
 ## 3. 方案
 
-### P1 共享清理原语（`cx/sys/process.cx`，L0）
+### P1 共享清理原语（`cx/sys/process.cx`，L0）— 已落地
 
 - `int sy_child_subreaper(void)`：Linux `prctl(PR_SET_CHILD_SUBREAPER,1)`，其它平台 `return 0`
   （语义：不支持的平台不假装有一个 subreaper）。
@@ -60,7 +60,7 @@
   无法扫 `/proc` → 按现有合同 exit 142。
 - 明确声明：macOS/Windows 的 setsid+双 fork 逃逸仍未实测，只在 Linux 上宣称闭合。
 
-### P5 验证
+### P5 验证 — 已落地（Linux）
 
 - 新 `tools/check-reaper.cx`（登记批次）：
   - 夹具 A：根 fork 子进程，子进程 `setsid` + 双 fork 后长睡；断言 `sy_kill_tree` 返回 0、逃逸 pid 消失、
