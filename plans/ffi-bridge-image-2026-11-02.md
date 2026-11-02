@@ -225,3 +225,16 @@ exec/c/librarycall_<arch>.S
 已知遗留:
 - `objcopy` 是宿主二进制(生成器头注已标);`tools/formats-*.cx` 无 ELF `.text` 提取器,消除该依赖需另立一项。
 - `dlsym(libc,"sqrt")` 返回 NULL,数学函数在 `libm`;任何 FFI 检查必须先确认地址非 0。
+
+### §8 第1/2步进展(定稿位置 + arm64 运行期)
+
+- 两份桥源定稿到 `tools/ffi/bridge_x86_64.S`、`tools/ffi/bridge_arm64.S`(不放 exec/c/asm,避免动 kernel context)。
+- arm64 组装通过,`.text` = **176 字节**。
+- qemu-aarch64-static 运行期:**段错误**。已定位原因:arm64 桥里的块偏移与 C 侧结构不一致——
+  桥按 72/80/…/128 读 fargs、按 160/168 写结果,而结构是 fargs 在 56..112、stack 120、nstack 128、
+  al 136、res 144、resf 152。属桥源自身缺陷,不是模拟器问题。修正后需重跑四向量。
+- arm64 运行期已打通(qemu-aarch64-static,动态 harness + `-L /usr/aarch64-linux-gnu`):
+  `arm getpid ok=1`、`arm sqrt3=1.732050808`。
+  **根因:x30(链接寄存器)没保存**。桥里 `blr x9` 会覆盖 x30,而我只存了 x19/x20,
+  于是 `ret` 跳回错误地址。修法:`stp x29,x30,[sp,#-32]!` + `stp x19,x20,[sp,#16]`,返回时对称恢复。
+- 已排除的干扰项:静态 harness 的 dlopen 不可靠(与 arm64 桥无关)。
