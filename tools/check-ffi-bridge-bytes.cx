@@ -1,0 +1,37 @@
+/* tools/check-ffi-bridge-bytes.cx -- the generator writes, --check passes, and a tampered table fails.
+ *   sh ./unisacc.com tools/check-ffi-bridge-bytes.cx
+ * Uses a fixed fixture in out/, so it does not depend on include/ (that comparison lands with the epoch merge). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+static int assertions, failed;
+static void ok(int c, const char *n) { assertions++; if (!c) failed++; printf("%s\t%s\n", c ? "PASS" : "FAIL", n); }
+int main(void) {
+    char root[4400], raw[4400], hdr[4400], gen[4400], out[512];
+    int rc;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (cx_fmt(raw, sizeof raw, "%s/out/ffi-bytes-test/raw.bin", root) ||
+        cx_fmt(hdr, sizeof hdr, "%s/out/ffi-bytes-test/table.h", root) ||
+        cx_fmt(gen, sizeof gen, "%s/tools/gen-ffi-bridge.cx", root)) return 2;
+    {   /* self-contained fixture: the generator is about bytes, not about a real .text */
+        unsigned char fx[16]; int i;
+        for (i = 0; i < 16; i++) fx[i] = (unsigned char)(0x40 + i);
+        if (sy_exists(raw) != 1) { if (cx_write(raw, fx, 16)) return 2; }
+    }
+    {   char *av[] = { "sh", "unisacc.com", gen, "--", "x86_64", raw, hdr, 0 };
+        out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+        ok(rc == 0 && tx_find(out, "WROTE") >= 0, "generate-writes"); }
+    {   char *av[] = { "sh", "unisacc.com", gen, "--", "--check", "x86_64", raw, hdr, 0 };
+        out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+        ok(rc == 0 && tx_find(out, "CHECK OK") >= 0, "check-passes"); }
+    {   size_t n = 0; char *b = cx_read(hdr, &n);
+        ok(b != 0 && n > 8, "table-nonempty");
+        if (b) { b[n - 1] = ' '; cx_write(hdr, b, n); free(b); }
+        {   char *av[] = { "sh", "unisacc.com", gen, "--", "--check", "x86_64", raw, hdr, 0 };
+            out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+            ok(rc != 0, "tampered-fails"); } }
+    printf("FFI_BYTES\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,49 @@
+/* tools/gen-ffi-bridge.cx -- emit the FFI bridge byte table from a raw .text blob (C44 FFI, §4).
+ *   gen-ffi-bridge [--check] ARCH RAW OUT
+ * The .text comes from `objcopy -O binary --only-section=.text` (LEGACY: objcopy is a host binary;
+ * no .cx section extractor exists today, tools/formats-*.cx only covers Mach-O/PE). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+/* prototype: genffi <arch> <raw.bin> <out.h> | genffi --check <arch> <raw.bin> <out.h> */
+static int same(const char *a, const char *b) { long i = 0; if (!a || !b) return 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
+int main(int argc, char **argv) {
+    int check = 0, i = 1;
+    const char *arch, *raw, *out;
+    size_t n = 0;
+    unsigned char *b;
+    char head[256], body[9000];
+    long at = 0;
+    if (argc > 1 && same(argv[1], "--check")) { check = 1; i = 2; }
+    if (argc < i + 3) { printf("usage: genffi [--check] ARCH RAW OUT\n"); return 2; }
+    arch = argv[i]; raw = argv[i+1]; out = argv[i+2];
+    b = (unsigned char *)cx_read(raw, &n);
+    if (!b || n == 0) { printf("genffi: cannot read %s\n", raw); return 2; }
+    if (cx_fmt(head, sizeof head, "static const unsigned char ffi_bridge_%s[%ld] = {", arch, (long)n)) return 2;
+    at = tx_len(head, sizeof head);
+    for (size_t k = 0; k < n; k++) {
+        char one[8];
+        if (cx_fmt(one, sizeof one, "%s0x%02x", k ? "," : "", b[k])) return 2;
+        long l = tx_len(one, sizeof one);
+        if (at + l + 3 >= (long)sizeof body) return 2;
+        for (long q = 0; q < l; q++) body[at++] = one[q];
+    }
+    body[at++] = '}'; body[at++] = ';'; body[at++] = '\n'; body[at] = 0;
+    {   char full[9200];
+        long f = 0;
+        { long q; for (q = 0; head[q]; q++) full[f++] = head[q]; }
+        { long q; for (q = 0; body[q]; q++) full[f++] = body[q]; }
+        full[f] = 0;
+        if (check) {
+            size_t m = 0; char *old = cx_read(out, &m);
+            if (!old || (long)m != f) { printf("genffi: CHECK FAIL (missing or size)\n"); return 1; }
+            for (long q = 0; q < f; q++) if (old[q] != full[q]) { printf("genffi: CHECK FAIL at %ld\n", q); return 1; }
+            printf("genffi: CHECK OK %s %ld bytes\n", arch, (long)n);
+        } else {
+            if (cx_write(out, full, (size_t)f)) return 2;
+            printf("genffi: WROTE %s %ld bytes\n", out, (long)n);
+        }
+    }
+    free(b);
+    return 0;
+}
