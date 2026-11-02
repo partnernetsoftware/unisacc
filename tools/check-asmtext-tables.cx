@@ -1,0 +1,188 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* Every asmtext entry point that touches a lazily allocated table must call
+   at_tables() first. (C44-ASLIMIT-03)
+ *
+ *   sh ./unisacc.com tools/check-asmtext-tables.cx -- ROOT
+ *
+ * C44-ASLIMIT-01 turned the 38 large asmtext statics into pointers allocated on
+ * first use by at_tables(), and added the call to at_dis and at_asm. at_nm was
+ * missed: nm then indexed at_nmord through NULL and died with SIGSEGV on the
+ * first symbol of every relocatable object. A table that is only allocated is
+ * not a table; the entry has to ask for it.
+ *
+ * Two statements, both from the source of cx/compiler/asmtext.cx:
+ *
+ *   entry-TABLE   an entry point src/ calls touches table T, so its body must
+ *                 mention at_tables(). The entry list below is the set of names
+ *                 src/*.cx resolves to asmtext; a new one has to be added here,
+ *                 which is the point: the miss is a decision, not an oversight.
+ *   alloc-TABLE   at_tables() allocates T, so at_tables() must also null-check
+ *                 T; a table added without the check would return 0 on a
+ *                 failed allocation and the next write would fault.
+ */
+static char root[4096], path[4400];
+static int failures;
+static char *b;
+static long n;
+static char tn[64][64];      /* the table names at_tables() allocates */
+static int tnn;
+
+static void die(const char *s) { sy_eprintf("asmtext-tables: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name, const char *what) {
+    if (ok) sy_printf("PASS\t%s\t%s\n", name, what);
+    else { failures++; sy_printf("FAIL\t%s\t%s\n", name, what); }
+}
+static int ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* first offset of W in [from, n) ending on a non-identifier character, or -1 */
+static long at_word(long from, const char *w) {
+    long wl = tx_len(w, 256), i = from;
+    while (i + wl <= n) {
+        long f = tx_find(b + i, n - i, w, wl);
+        if (f < 0) return -1;
+        f = i + f;
+        if (f > 0 && ident(b[f - 1])) { i = f + 1; continue; }
+        if (f + wl < n && ident(b[f + wl])) { i = f + wl; continue; }
+        return f;
+    }
+    return -1;
+}
+static int has_word(long from, long to, const char *w) {
+    long f = at_word(from, w);
+    return f >= 0 && f < to;
+}
+static long line_end(long at) { long e = at; while (e < n && b[e] != '\n') e = e + 1; return e; }
+static long line_start(long at) { long s = at; while (s > 0 && b[s - 1] != '\n') s = s - 1; return s; }
+static int col0(long at) { return at == 0 || b[at - 1] == '\n'; }
+
+/* the body of the function defined at START: from START to the next column-0
+   line that closes it, or to the next definition start */
+static long body_end(long start) {
+    long i = start, guard = 0;
+    i = line_end(i);
+    while (i < n && guard < 4000) {
+        long s = i + 1, e = line_end(s);
+        if (s >= n) break;
+        if (col0(s)) {
+            long ln = e - s;
+            if (ln > 0 && b[s] == '}' && (ln == 1 || b[s + 1] == '\n')) return s;
+            if (ln > 0 && !(b[s] == ' ' || b[s] == '\t') && tx_find(b + s, ln, "(", 1) >= 0 &&
+                b[e - 1] != ';' && b[s] != '#') return s;
+        }
+        i = e; guard = guard + 1;
+    }
+    return n;
+}
+
+/* the definition whose body covers AT: walk back to the nearest column-0 line
+   that starts a definition */
+static long enclosing(long at) {
+    long s = at;
+    while (s > 0) {
+        s = line_start(s - 1);
+        if (col0(s) && s < n && tx_find(b + s, line_end(s) - s, "(", 1) >= 0 &&
+            b[line_end(s) - 1] != ';' && b[s] != '#' && !(b[s] == ' ' || b[s] == '\t'))
+            return s;
+    }
+    return -1;
+}
+static int name_after(long s, char *out, int cap) {
+    long e = line_end(s), i = s;
+    while (i < e && b[i] != '(') i = i + 1;
+    while (i > s && ident(b[i - 1])) i = i - 1;
+    { int k = 0; while (i < e && ident(b[i]) && k < cap - 1) { out[k] = b[i]; k = k + 1; i = i + 1; } out[k] = 0; return k > 0; }
+}
+
+/* entries src/*.cx resolves to asmtext: the call sites of `at_` there */
+static const char *entries[] = {
+    "at_asm", "at_dis", "at_nm", "at_bind", "at_line", "at_error", "at_wr", "at_rd", 0
+};
+
+int main(int argc, char **argv) {
+    int a = 1;
+    (void)argc; (void)argv;
+    if (argc < 2 || (argv[1][0] == '-' && argv[1][1] == 0)) {
+        if (sy_realpath(".", root, (int)sizeof root) < 0) die("root");
+    } else if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+    a = a + 0;
+    { int k = 0, i = 0;
+      while (root[k]) { path[i] = root[k]; k = k + 1; i = i + 1; }
+      { const char *tail = "/cx/compiler/asmtext.cx";
+        int t = 0; while (tail[t]) { path[i] = tail[t]; i = i + 1; t = t + 1; } }
+      path[i] = 0; }
+    b = (char *)cx_read(path, (size_t *)&n);
+    if (!b) die("cannot read cx/compiler/asmtext.cx");
+
+    /* alloc-*: every T allocated in at_tables must also be null-checked there */
+    {
+        long from = at_word(0, "int at_tables(void) {"), at_t;
+        if (from < 0) die("at_tables is missing");
+        at_t = from;
+        { long f = 0; int seen = 0;
+          while ((f = at_word(f, "mm_zalloc")) >= 0) {
+            long s = f, nm;
+            while (s > 0 && (b[s - 1] == ' ' || b[s - 1] == '\t')) s = s - 1;
+            if (s > 1 && b[s - 1] == '=' && b[s - 2] == ' ') {
+                char name[64]; int k = 0;
+                nm = s - 3;
+                while (nm > 0 && ident(b[nm])) nm = nm - 1;
+                if (ident(b[nm + 1]) && b[nm + 1] == 'a' && b[nm + 2] == 't' && b[nm + 3] == '_') {
+                    long q = nm + 1;
+                    while (q < s && ident(b[q]) && k < 63) { name[k] = b[q]; k = k + 1; q = q + 1; }
+                    name[k] = 0;
+                    if (k > 3) {
+                        long send = body_end(at_t);
+                        { int q3 = 0; while (name[q3] && q3 < 63) { tn[tnn][q3] = name[q3]; q3 = q3 + 1; } tn[tnn][q3] = 0; if (tnn < 63) tnn = tnn + 1; }
+                        char label[128]; int j = 0;
+                        { const char *pre = "alloc-"; int t = 0; while (pre[t]) { label[j] = pre[t]; j = j + 1; t = t + 1; } }
+                        { long q2 = 0; while (name[q2]) { label[j] = name[q2]; j = j + 1; q2 = q2 + 1; } }
+                        label[j] = 0;
+                        ck(has_word(at_t, send, name), label, seen ? "allocated by at_tables" : "allocated by at_tables");
+                        seen = seen + 1;
+                    }
+                }
+            }
+            f = f + 1;
+          }
+          (void)seen; }
+    }
+
+    /* guard-*: an entry that touches table T must call at_tables() */
+    {
+        long i = 0;
+        while (i < n) {
+            long e = line_end(i);
+            if (col0(i) && i < n && b[i] != '#' && !(b[i] == ' ' || b[i] == '\t') &&
+                b[e - 1] != ';' && tx_find(b + i, e - i, "(", 1) >= 0) {
+                char nm[64];
+                if (name_after(i, nm, 64)) {
+                    int e2 = 0, hit = 0;
+                    while (entries[e2]) { if (tx_eqz(nm, entries[e2])) hit = 1; e2 = e2 + 1; }
+                    if (hit) {
+                        long send = body_end(i);
+                        int p = 0, touches = 0;
+                        while (p < tnn) { if (has_word(i, send, tn[p])) touches = 1; p = p + 1; }
+                        if (touches) {
+                            char label[96]; int j = 0;
+                            { const char *pre = "guard-"; int t = 0; while (pre[t]) { label[j] = pre[t]; j = j + 1; t = t + 1; } }
+                            { int t = 0; while (nm[t]) { label[j] = nm[t]; j = j + 1; t = t + 1; } }
+                            label[j] = 0;
+                            ck(has_word(i, send, "at_tables"), label, "touches a lazily allocated table");
+                        }
+                    }
+                }
+            }
+            i = e + 1;
+        }
+    }
+
+    mm_free(b);
+    sy_printf("ASMTEXT_TABLES\tfailed=%d\n", failures);
+    return failures ? 1 : 0;
+}
