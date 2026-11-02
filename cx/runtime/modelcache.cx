@@ -1,0 +1,165 @@
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.io
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+/* cx/runtime/modelcache.cx -- the inflated-model cache (C44-SPEED-01, lever 4).
+
+   Inflating stage models is a fixed cost of every compiler call: measured 78.5 ms for a 26-byte
+   translation unit, and the object route pays it 67 times. rt_open is the one place every stage
+   inflates through, so the cache lives there and src/ is untouched.
+
+   Pure accelerator: a hit and a miss produce the same bytes. The key is the sha256 of the
+   COMPRESSED member -- content addressed, so a different package, stage, model format or compiler
+   misses on its own and nothing has to be invalidated. The file carries its own payload sha, so a
+   truncated or edited cache is a miss. Every failure (no directory, read-only, full disk, corrupt
+   file) falls back to inflating: a cache that can fail a compile is worse than no cache.
+
+   UNISACC_RUN_CACHE=0 disables reads and writes, so a cold measurement stays cold.
+
+   File: "UNIMC1\n" + 64 hex payload sha + "\n" + payload, named mc-<32 hex key>-<len>. Writes go
+   to a ".tmp.<pid>" sibling and are renamed into place, so a concurrent reader sees nothing or a
+   complete file.
+
+   With UNISACC_RR_TIME=1 every lookup prints one line, so hit/miss/corrupt are counted the same
+   way the phase timings are:
+     RR_TIME<TAB>modelcache<TAB>result=hit|miss|corrupt<TAB>bytes=<len> */
+
+#define MC_MAGIC "UNIMC1\n"
+#define MC_HEAD 71
+
+static int mc_off(void) {
+    const char *e;
+    e = sy_env("UNISACC_RUN_CACHE");
+    return e && tx_eq(e, "0", 8) ? 1 : 0;
+}
+
+static void mc_say(const char *result, unsigned long n) {
+    const char *e;
+    e = sy_env("UNISACC_RR_TIME");
+    if (!e || !e[0]) return;
+    sy_eprintf("RR_TIME\tmodelcache\tresult=%s\tbytes=%lu\n", result, n);
+}
+
+static int mc_cat(char *out, int cap, int *at, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*at + 1 >= cap) return 1;
+        out[(*at)++] = s[i++];
+    }
+    return 0;
+}
+
+static int mc_cat_u(char *out, int cap, int *at, unsigned long long v) {
+    char d[24];
+    int n = 0;
+    do { d[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v > 0);
+    while (n > 0) {
+        if (*at + 1 >= cap) return 1;
+        out[(*at)++] = d[--n];
+    }
+    return 0;
+}
+
+/* $UNISACC_E3CACHE or $TMPDIR/unisacc-e3cache-<uid>, created 0700; 1 on failure. */
+static int mc_dir(char *out, int cap) {
+    const char *e, *td;
+    sy_stat_t st;
+    int at = 0, mk;
+    e = sy_env("UNISACC_E3CACHE");
+    if (e && e[0]) {
+        if (mc_cat(out, cap, &at, e)) return 1;
+    } else {
+        td = sy_env("TMPDIR");
+        if (!td || !td[0]) td = "/tmp";
+        if (mc_cat(out, cap, &at, td)) return 1;
+        if (mc_cat(out, cap, &at, "/unisacc-e3cache-")) return 1;
+        if (mc_cat_u(out, cap, &at, (unsigned long long)sy_uid())) return 1;
+    }
+    out[at] = 0;
+    mk = sy_mkdir(out, 0700);
+    if (mk == 0) return 0;
+    if (mk != -EEXIST) return 1;
+    if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
+    return 1;
+}
+
+/* DIR/mc-KEY32-OLEN[SUFFIX]; 1 on overflow. */
+static int mc_path(char *out, int cap, const char *dir, const char key[65], unsigned long olen, const char *suffix) {
+    int at = 0, i;
+    if (mc_cat(out, cap, &at, dir) || mc_cat(out, cap, &at, "/mc-")) return 1;
+    for (i = 0; i < 32; i++) {
+        if (at + 1 >= cap) return 1;
+        out[at++] = key[i];
+    }
+    if (mc_cat(out, cap, &at, "-") || mc_cat_u(out, cap, &at, (unsigned long long)olen)) return 1;
+    if (suffix && mc_cat(out, cap, &at, suffix)) return 1;
+    out[at] = 0;
+    return 0;
+}
+
+/* 1 when PATH holds exactly OLEN payload bytes whose sha matches the header. */
+static int mc_read(const char *path, unsigned char *out, unsigned long olen) {
+    int fd;
+    char head[MC_HEAD], hex[65], back[65];
+    sy_stat_t st;
+    /* the size is the trailing-byte check: a file of any other length is not one this cache wrote */
+    if (sy_lstat(path, &st) != 0 || st.kind != 'f' || st.size != (long)(MC_HEAD + olen)) return 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    /* tx_same, not tx_eq: the header is a fixed-length span with no NUL inside it */
+    if (sy_read_full(fd, head, MC_HEAD) != 0 || !tx_same(head, 6, MC_MAGIC, 6) ||
+        head[70] != '\n' || sy_read_full(fd, out, (long)olen) != 0) { sy_close(fd); return 0; }
+    sy_close(fd);
+    mm_copy(hex, 64, head + 6, 64);
+    hex[64] = 0;
+    if (sy_sha256_hex(out, (long)olen, back) != 0 || !tx_eqz(back, hex)) return 0;
+    return 1;
+}
+
+/* Payload for the compressed member COMP: 1 hit, 0 miss (absent or unusable). */
+int mc_get(const unsigned char *comp, unsigned long clen, unsigned char *out, unsigned long olen) {
+    char hex[65], dir[4096], path[4400];
+    sy_stat_t st;
+    if (mc_off() || !comp || !out || clen == 0 || olen == 0) return 0;
+    if (sy_sha256_hex(comp, (long)clen, hex) != 0) return 0;
+    if (mc_dir(dir, (int)sizeof dir)) return 0;
+    if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return 0;
+    if (mc_read(path, out, olen)) { mc_say("hit", olen); return 1; }
+    /* present but unusable is worth telling apart from absent: it means a damaged cache */
+    if (sy_lstat(path, &st) == 0) mc_say("corrupt", olen);
+    else mc_say("miss", olen);
+    return 0;
+}
+
+/* Best effort: any failure is a miss next time, never an error. */
+void mc_put(const unsigned char *comp, unsigned long clen, const unsigned char *out, unsigned long olen) {
+    char hex[65], back[65], dir[4096], path[4400], tmp[4400], head[MC_HEAD];
+    int fd, at;
+    if (mc_off() || !comp || !out || clen == 0 || olen == 0) return;
+    if (sy_sha256_hex(comp, (long)clen, hex) != 0) return;
+    if (sy_sha256_hex(out, (long)olen, back) != 0) return;
+    if (mc_dir(dir, (int)sizeof dir)) return;
+    if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return;
+    if (mc_path(tmp, (int)sizeof tmp, dir, hex, olen, ".tmp.")) return;
+    /* no pid: two processes writing the same key produce the same bytes, so a shared temp name is
+       harmless -- whoever renames last wins with identical content */
+    {   static unsigned long long seq;
+        at = (int)tx_len(tmp, sizeof tmp);
+        seq = seq + 1;
+        if (mc_cat_u(tmp, (int)sizeof tmp, &at, seq)) return;
+        tmp[at] = 0;
+    }
+    mm_copy(head, 6, MC_MAGIC, 6);
+    mm_copy(head + 6, 64, back, 64);
+    head[70] = '\n';
+    sy_unlink(tmp);
+    fd = sy_open_new(tmp, 0600);
+    if (fd < 0) return;
+    if (sy_write_all(fd, head, MC_HEAD) != 0 || sy_write_all(fd, out, (long)olen) != 0) {
+        sy_close(fd); sy_unlink(tmp); return;
+    }
+    if (sy_fsync(fd) != 0 || sy_close(fd) != 0) { sy_unlink(tmp); return; }
+    if (sy_rename(tmp, path) != 0) sy_unlink(tmp);
+}

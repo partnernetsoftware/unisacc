@@ -1,4 +1,5 @@
 #pragma unisa module routestep
+#pragma unisa use modelcache
 /* One package stage's model bytes and the buffer handoff.
    No libc and no include. Allocation, loadbytes, clocks, and
    execute stay in exec/c/run.c.
@@ -51,9 +52,15 @@ int rt_open(int ver, int cached, const unsigned char *plain, int plain_len,
         rt_say(why, cap, "bad argument");
         return 3;
     }
-    if (inflate(owned, (unsigned long)raw_len, plain, (unsigned long)plain_len)) {
-        rt_say(why, cap, "invalid compressed model");
-        return 2;
+    /* The inflated members are cached by the sha256 of their compressed bytes: a hit skips only
+       the inflate, and the CRC below still runs, so the validation chain is unchanged. */
+    {   if (!mc_get(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len)) {
+            if (inflate(owned, (unsigned long)raw_len, plain, (unsigned long)plain_len)) {
+                rt_say(why, cap, "invalid compressed model");
+                return 2;
+            }
+            mc_put(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len);
+        }
     }
     sum = crc32((char *)owned, raw_len);
     if (sum != expect) {
