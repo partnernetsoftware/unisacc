@@ -201,6 +201,50 @@ static unsigned char dv_one = 1;
    (execf) or the memory-image route builds and runs the image here. Every path
    closes the package first. Split out of dv_main (C44-PACKAGE-01): the caller
    has already established mode2 == 3 && nsrc >= 1. */
+/* Read the source (unless a tape is already present), validate a .tapebin,
+   publish UNISA_CONTAINER from -p, and resolve the container. Any failure prints
+   and asks the caller to exit 1. Split out of dv_main (C44-PACKAGE-01). */
+static int dv_read_input(const char *src, const char *tgt, int *as_tape,
+                         unsigned char **gotb, long *gotn, const char *argv0,
+                         const char *pkg, char *cont, int contcap, char *preason) {
+    /* Local prototypes: a .cx module refuses a top-level declaration it does not define. */
+    long long hs_ns(void); int cxi_read(const char *, unsigned char **, long *, char *, long);
+    int bx_read_act(int); int bx_read_open_line(const char *, const char *, char *, int);
+    int bx_read_stdin(const char *); int bx_read_fail_line(const char *, char *, int);
+    const char *bx_read_die(int); int cxp_tapebin_path(const char *);
+    int dv_tapebin_check(const char *, const char *, unsigned char **, long *, int *);
+    int sy_setenv(const char *, const char *, int); int hs_container(char *, int, const char *, char *, int);
+    int dv_fail(const char *); void dv_time(const char *, long long, long long);
+    if (!*as_tape) {
+        char reason[128]; char line[512]; const char *shown_in;
+        int act; int rc; long long t0; long long t1;
+        t0 = hs_ns(); rc = cxi_read(src, gotb, gotn, reason, 128); t1 = hs_ns();
+        dv_time("read", t0, t1); act = bx_read_act(rc);
+        if (act == 1) {
+            if (bx_read_open_line(src, reason, line, 512) == 0) fputs(line, stderr);
+            else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", src, reason[0] ? ": " : "", reason);
+            return 1;
+        }
+        if (act == 2) {
+            shown_in = bx_read_stdin(src) == 1 ? "stdin" : src;
+            if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
+            else fprintf(stderr, "run: cannot read %s\n", shown_in);
+            fputs("run: cannot read input\n", stderr); return 1;
+        }
+        if (act) { fprintf(stderr, "run: %s\n", bx_read_die(act)); return 1; }
+        if (*gotn > 2147483647L) { free(*gotb); fprintf(stderr, "run: %s\n", bx_read_die(4)); return 1; }
+    }
+    if (cxp_tapebin_path(src) && dv_tapebin_check(src, tgt, gotb, gotn, as_tape))
+        return dv_fail("invalid tapebin or origin target mismatch");
+    sy_setenv("UNISA_CONTAINER", pkg ? pkg : "", pkg && pkg[0] ? 1 : 0);
+    if (hs_container(cont, contcap, argv0, preason, 128)) {
+        free(*gotb);
+        fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
+        return 1;
+    }
+    return 0;
+}
+
 static int dv_run_route(int execf, unsigned char *body, long bodyn, char **runargs,
                         unsigned char *pkg, const char *tgt, const char *src,
                         char *preason, const char *gap) {
@@ -280,8 +324,7 @@ if (mode2 == 2 || mode2 == 0 || (mode2 == 5 && !asmw)) {
        Return 1 is a write failure; its reason is already on stderr. */
     wr = ex_ri_emit(dest, body, bodyn, preason, 128, mode2 == 2 ? symbols : 0, hb_target_id(tgt)); { int rc_store_elf(const unsigned char *, long); (void)((!wr && bodyn >= 4 && body[0] == 127 && body[1] == 'E' && body[2] == 'L' && body[3] == 'F') && (rc_store_elf(body, bodyn), 1)); }
     free(body);
-    if (wr) return wr;
-    return 0;
+    return wr;   /* 0 on success, the writer's code otherwise */
 }
 free(body);
 fprintf(stderr, "route=%s\n", route);
@@ -488,46 +531,7 @@ extern int cxa_cancel(unsigned char **, long *, const char *, char *, long);
         }
         (void)shown;
         (void)obj;
-        if (!as_tape) {
-            char reason[128];
-            char line[512];
-            int act;
-            const char *shown_in;
-            t0 = hs_ns();
-            rc = cxi_read(src, &gotb, &gotn, reason, 128);
-            t1 = hs_ns();
-            dv_time("read", t0, t1);
-            act = bx_read_act(rc);
-            if (act == 1) {
-                if (bx_read_open_line(src, reason, line, 512) == 0) fputs(line, stderr);
-                else fprintf(stderr, "unisacc: error: cannot open %s%s%s\n", src, reason[0] ? ": " : "", reason);
-                return 1;
-            }
-            if (act == 2) {
-                shown_in = bx_read_stdin(src) == 1 ? "stdin" : src;
-                if (bx_read_fail_line(shown_in, line, 512) == 0) fputs(line, stderr);
-                else fprintf(stderr, "run: cannot read %s\n", shown_in);
-                fputs("run: cannot read input\n", stderr);
-                return 1;
-            }
-            if (act) {
-                fprintf(stderr, "run: %s\n", bx_read_die(act));
-                return 1;
-            }
-            if (gotn > 2147483647L) {
-                free(gotb);
-                fprintf(stderr, "run: %s\n", bx_read_die(4));
-                return 1;
-            }
-        }
-        if (cxp_tapebin_path(src) && dv_tapebin_check(src, tgt, &gotb, &gotn, &as_tape))
-            return dv_fail("invalid tapebin or origin target mismatch");
-        sy_setenv("UNISA_CONTAINER", opts.pkg ? opts.pkg : "", opts.pkg && opts.pkg[0] ? 1 : 0);
-        if (hs_container(cont, 512, argv[0], preason, 128)) {
-            free(gotb);
-            fprintf(stderr, "unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
-            return 1;
-        }
+        if (dv_read_input(src, tgt, &as_tape, &gotb, &gotn, argv[0], opts.pkg, cont, 512, preason)) return 1;
         /* A cache hit execs the image and skips models. Pass 2 does not look.
            A miss arms the include receipts for the store. */
         if ((mode2 == 3 || mode2 == 0) && nsrc >= 1 && !dv_fwd_pass && !as_tape && !cxp_tape_path(src)) {
