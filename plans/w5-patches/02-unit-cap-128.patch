@@ -1,0 +1,70 @@
+diff --git a/cx/cx0/bundle.cx b/cx/cx0/bundle.cx
+index 8d6979cb43..37de8cb2e3 100644
+--- a/cx/cx0/bundle.cx
++++ b/cx/cx0/bundle.cx
+@@ -31,7 +31,7 @@ int cxb_read(const void *input,size_t n,cxb_bundle *out,char *why,size_t cap){
+  if(!mm_same(p,"CX0BND1\n",8))return cxb_reject(&b,why,cap,"bundle-version");
+  if(cxb_u32(p+8)!=n||cxb_u32(p+28))return cxb_reject(&b,why,cap,"bundle-header");
+  b.unit_count=(int)cxb_u32(p+12);b.resource_count=(int)cxb_u32(p+16);unsigned tn=cxb_u32(p+20),an=cxb_u32(p+24);
+- if(b.unit_count<1||b.unit_count>64||b.resource_count<0||b.resource_count>4096||!tn||tn>=sizeof b.target||!an||an>=sizeof b.abi||tn+an>end-at||!cxb_hex(p+32))return cxb_reject(&b,why,cap,"bundle-count-or-metadata");
++ if(b.unit_count<1||b.unit_count>128||b.resource_count<0||b.resource_count>4096||!tn||tn>=sizeof b.target||!an||an>=sizeof b.abi||tn+an>end-at||!cxb_hex(p+32))return cxb_reject(&b,why,cap,"bundle-count-or-metadata");
+  char digest[65];cx_sha256_hex(p,end,digest);if(!cxb_hex(p+end)||!mm_same(digest,p+end,64))return cxb_reject(&b,why,cap,"bundle-digest");
+  if(mm_copy(b.model,65,p+32,64))return cxb_reject(&b,why,cap,"bundle-allocation");b.model[64]=0;if(mm_copy(b.target,(long)sizeof b.target,p+at,(long)tn))return cxb_reject(&b,why,cap,"bundle-allocation");b.target[tn]=0;at+=tn;if(mm_copy(b.abi,(long)sizeof b.abi,p+at,(long)an))return cxb_reject(&b,why,cap,"bundle-allocation");b.abi[an]=0;at+=an;
+  if(strlen(b.target)!=tn||strlen(b.abi)!=an||!cxb_target(b.target)||strcmp(b.abi,"unisa-c99-v1"))return cxb_reject(&b,why,cap,"bundle-target-or-abi");
+@@ -68,7 +68,7 @@ static int cxb_resource_id(cxb_resource *r,int count,int kind,const char *name){
+ /* Extras: kind 1 = bundled header name; kind 2 = exact logical file path.
+  * Seal borrows inputs during this call, returns fully owned binary bytes. */
+ cxb_result cxb_seal(char **sources,int count,const char *directory,const cxb_options *options,const cxb_input *extra,int nextra){
+- cxb_result r={0};cx0_result p={0};cxb_resource *res=0;char *plan=0;char *names[64];int units=0,nres=0;
++ cxb_result r={0};cx0_result p={0};cxb_resource *res=0;char *plan=0;char *names[128];int units=0,nres=0;
+  if(!options||!options->target||!options->abi||!options->model||!cxb_target(options->target)||strcmp(options->abi,"unisa-c99-v1")||strlen(options->model)!=64||!cxb_hex((const unsigned char *)options->model)||nextra<0||nextra>4096||(nextra&&!extra)){cxb_fail(&r,"bundle-options");return r;}
+  p=cx0_capture_plan(sources,count,directory);if(p.status){cxb_fail(&r,p.diagnostic?p.diagnostic:"plan-rejected");r.status=p.status;cx0_release(&p);return r;}
+  if(p.bytes<25||!mm_same(p.text,"CX0CAP1\n",8)){cxb_fail(&r,"capture-version");goto done;}unsigned pn=cxb_u32((unsigned char *)p.text+8);
+@@ -82,7 +82,7 @@ cxb_result cxb_seal(char **sources,int count,const char *directory,const cxb_opt
+  cxb_append(&r,header,sizeof header);cxb_append(&r,options->target,strlen(options->target));cxb_append(&r,options->abi,strlen(options->abi));
+  char *at=plan+9;
+  while(*at&&!r.status){
+-  char *end=strchr(at,'\n');if(!end||units==64){cxb_fail(&r,"plan-unit-line");break;}*end=0;char *f[132];int nf=1;f[0]=at;
++  char *end=strchr(at,'\n');if(!end||units==128){cxb_fail(&r,"plan-unit-line");break;}*end=0;char *f[132];int nf=1;f[0]=at;
+   for(char *q=at;*q;q++)if(*q=='\t'){*q=0;if(nf==132){cxb_fail(&r,"plan-fields");break;}f[nf++]=q+1;}if(r.status)break;
+   char num[20];int z=snprintf(num,sizeof num,"%d",units);if(z<0||(size_t)z>=sizeof num||nf<2||strcmp(f[0],num)||!cxb_name((unsigned char *)f[1],strlen(f[1]))){cxb_fail(&r,"plan-unit-index");break;}
+   for(int j=0;j<units;j++)if(!strcmp(names[j],f[1])){cxb_fail(&r,"plan-unit-duplicate");break;}if(r.status)break;names[units]=f[1];
+diff --git a/exec/c/PACKAGE.md b/exec/c/PACKAGE.md
+index d41a10875c..535cc993bb 100644
+--- a/exec/c/PACKAGE.md
++++ b/exec/c/PACKAGE.md
+@@ -249,7 +249,7 @@ source path and fresh runtime state. Thus macros, include guards and header
+ selection do not leak between files. It frames each resulting byte stream as
+ LE32 length plus bytes, without inspecting a token or rewriting a name.
+ `build/gen.py parse2/units` (exec/parse2/units-manifest.tsv) constructs the shared framing/static-isolation network. It
+-validates up to 64 frames, scans file-static declarations, preserves typed
++validates up to 128 frames, scans file-static declarations, preserves typed
+ token bytes and supplies the product's `__uN` suffix for later units. This is
+ a hand-written declaration rule compiled into a network, not a gold-table
+ rule or a reduction in generator code. Inline aggregate static specifiers
+diff --git a/exec/parse2/units-result.tsv b/exec/parse2/units-result.tsv
+index 839c06c326..6104a4cedd 100644
+--- a/exec/parse2/units-result.tsv
++++ b/exec/parse2/units-result.tsv
+@@ -1,7 +1,7 @@
+ # section	state	observation	target	actions
+ main0	START	*	FRAME	[["LDI","unit",0],["LDI","zero",0]]
+ length	$length_step	*	$length_next	[]
+-main2	EXTENT	*	$state0	[["CMPI","unit",64]]
++main2	EXTENT	*	$state0	[["CMPI","unit",128]]
+ main2	$state0	*	COUNT.ok	[]
+ main2	$state0	1,2	DEAD.frame	[]
+ main2	COUNT.ok	*	$state1	[["CMPI","len",0]]
+diff --git a/exec/pipeline/formats.md b/exec/pipeline/formats.md
+index 7b15dc8544..323a539ebd 100644
+--- a/exec/pipeline/formats.md
++++ b/exec/pipeline/formats.md
+@@ -256,7 +256,7 @@ no source/token data. `units.py --locations` reuses the static-declaration
+ scanner, preserving physical qualifiers and multiline adjacent string tokens.
+ Its output is:
+ 
+-- Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..64).
++- Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..128).
+ - In unit order: LE32 filename byte length, filename bytes, LE32 UNIPP1 length,
+   and the exact UNIPP1 envelope (source, splice map and include map).
+ - Typed token stream. Each prefix is `@`, LE32 unit index, LE32 source offset,
