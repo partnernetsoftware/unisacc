@@ -1,0 +1,173 @@
+#pragma unisa module productpkg
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.packagefooter
+/* cxlib/productpkg: which file actually carries the P3 package of an installed product, and
+   what it takes to copy that product somewhere else.
+ *
+ * Two layouts go by the name `unisacc.com` on disk:
+ *
+ *   PP_APE    one self-contained file: the loader, the package and a UNIPKG1 footer at its end.
+ *   PP_SPLIT  a thin launcher plus a directory beside it:
+ *               unisacc.com            launcher (32-bit shell text, execs entry.elf)
+ *               unisacc.com.dev/entry.elf        the loader
+ *               unisacc.com.dev/p3-package.bin   the package
+ *               ape-receipt.txt        NOT_RELEASE + dev-lnx-only + one sha256 per member
+ *
+ * Checks kept reading `unisacc.com` and locating a footer inside it, which is true only for
+ * PP_APE; under PP_SPLIT they got the launcher text and failed with "no package footer" and
+ * friends. The 2026-11-02 wave paid for that twice: eight checks, and one more that copied the
+ * launcher alone and then could not find its entry. Ask here instead of reading the product:
+ * the answer is a path, and a check that needs a self-contained APE says so by name.
+ *
+ *   pp_layout(ROOT)                      PP_APE, PP_SPLIT, or -ENOENT when ROOT holds neither
+ *   pp_layout_name(V)                    "ape" / "split" / "none"
+ *   pp_package_path(ROOT, out, cap)      0, or -ENOENT / -ENAMETOOLONG
+ *   pp_read_package(ROOT, &n)            malloc'd bytes of that file, caller frees; 0 on failure
+ *   pp_copy_product(ROOT, DEST)          0, or -1: DEST gets the launcher and, under PP_SPLIT,
+ *                                        every member the receipt names (or the two default
+ *                                        names when there is no receipt)
+ *
+ * The receipt is the product's own list of what it consists of, so a layout that grows needs no
+ * change here: it grows in the receipt. */
+#define PP_APE 0
+#define PP_SPLIT 1
+
+static const char pp_dev_dir[] = "unisacc.com.dev";
+static const char pp_pkg_name[] = "p3-package.bin";
+
+/* ROOT/NAME into DST; 0, or -ENAMETOOLONG. */
+static int pp_join(const char *root, const char *name, char *dst, int cap) {
+    long rl = 0, nl = 0, i;
+    if (!root || !name || !dst || cap < 2) return -ENAMETOOLONG;
+    while (root[rl]) rl++;
+    while (name[nl]) nl++;
+    if (rl + 1 + nl + 1 > (long)cap) return -ENAMETOOLONG;
+    for (i = 0; i < rl; i++) dst[i] = root[i];
+    dst[rl] = '/';
+    for (i = 0; i <= nl; i++) dst[rl + 1 + i] = name[i];
+    return 0;
+}
+
+/* ROOT/A/B into DST. */
+static int pp_join2(const char *root, const char *a, const char *b, char *dst, int cap) {
+    char mid[4400];
+    if (pp_join(root, a, mid, (int)sizeof mid)) return -ENAMETOOLONG;
+    return pp_join(mid, b, dst, cap);
+}
+
+const char *pp_layout_name(int v) {
+    if (v == PP_APE) return "ape";
+    if (v == PP_SPLIT) return "split";
+    return "none";
+}
+
+/* PP_APE when the single file at PATH carries a UNIPKG1 footer, -ENOENT otherwise. */
+int pp_layout_of_file(const char *path) {
+    size_t n = 0;
+    unsigned char *b;
+    PackageFooter f;
+    int v = -ENOENT;
+    if (!path || sy_exists(path) != 1) return -ENOENT;
+    b = (unsigned char *)cx_read(path, &n);
+    if (!b) return -ENOENT;
+    if (n && n <= 2147483647UL && packagefooter_locate_bytes(b, (long)n, &f)) v = PP_APE;
+    free(b);
+    return v;
+}
+
+/* PP_SPLIT when ROOT/unisacc.com.dev/p3-package.bin exists; PP_APE when ROOT/unisacc.com exists
+   and ends with a UNIPKG1 footer; -ENOENT otherwise. */
+int pp_layout(const char *root) {
+    char p[4400];
+    if (pp_join2(root, pp_dev_dir, pp_pkg_name, p, (int)sizeof p)) return -ENAMETOOLONG;
+    if (sy_exists(p) == 1) return PP_SPLIT;
+    if (pp_join(root, "unisacc.com", p, (int)sizeof p)) return -ENAMETOOLONG;
+    return pp_layout_of_file(p);
+}
+
+/* The file that holds the P3 package. */
+int pp_package_path(const char *root, char *out, int cap) {
+    int l = pp_layout(root);
+    if (l == PP_SPLIT) return pp_join2(root, pp_dev_dir, pp_pkg_name, out, cap);
+    if (l == PP_APE) return pp_join(root, "unisacc.com", out, cap);
+    return l;
+}
+
+char *pp_read_package(const char *root, size_t *n) {
+    char p[4400];
+    if (n) *n = 0;
+    if (pp_package_path(root, p, (int)sizeof p)) return 0;
+    return cx_read(p, n);
+}
+
+/* Copy NAME from SRC to DST, creating or truncating DST/NAME; 0, or -1. */
+static int pp_copy_member(const char *src, const char *dst, const char *name) {
+    char sp[4400], dp[4400];
+    sy_stat_t st;
+    size_t n = 0;
+    char *b;
+    if (pp_join(src, name, sp, (int)sizeof sp) || pp_join(dst, name, dp, (int)sizeof dp)) return -1;
+    b = cx_read(sp, &n);
+    if (!b) return -1;
+    if (cx_write(dp, b, n)) { free(b); return -1; }
+    free(b);
+    /* The launcher and the loader are exec'd by path: a copy that drops their mode bits is not a
+       product, it is a file that says "missing .../entry.elf". Keep the source's bits. */
+    if (sy_stat(sp, &st) == 0) sy_chmod(dp, st.mode & 07777);
+    return 0;
+}
+
+/* NAME is one member named by a receipt line. */
+static int pp_receipt_line(const char *line, long len, char *name, int cap) {
+    long i = 0, k = 0;
+    if (len <= 0 || line[0] == '#') return 0;
+    while (i < len && line[i] != '\t' && line[i] != ' ' && line[i] != '\n') {
+        if (k + 1 >= cap) return 0;
+        name[k++] = line[i++];
+    }
+    name[k] = 0;
+    if (!k) return 0;
+    if (k == 7 && name[0] == 'N' && name[1] == 'O' && name[2] == 'T' && name[3] == '_') return 0;
+    return 1;
+}
+
+/* Copy the installed product from ROOT to DEST. Under PP_SPLIT the launcher goes to DEST and
+   every member the receipt names goes under DEST/unisacc.com.dev/; a receipt that is missing
+   falls back to the two names this file documents. */
+int pp_copy_product(const char *root, const char *dst) {
+    char p[4400], devsrc[4400], devdst[4400], name[256];
+    size_t n = 0;
+    char *r;
+    long at = 0;
+    int l = pp_layout(root), copied = 0;
+    if (l < 0) return -1;
+    if (sy_exists(dst) != 1 && sy_mkdir(dst, 0700)) return -1;
+    if (pp_join2(root, pp_dev_dir, "", devsrc, (int)sizeof devsrc)) return -1;
+    if (pp_join2(dst, pp_dev_dir, "", devdst, (int)sizeof devdst)) return -1;
+    if (pp_copy_member(root, dst, "unisacc.com")) return -1;
+    if (l == PP_APE) return 0;
+    if (sy_exists(devdst) != 1 && sy_mkdir(devdst, 0700)) return -1;
+    if (pp_join(root, "ape-receipt.txt", p, (int)sizeof p)) return -1;
+    r = cx_read(p, &n);
+    if (r) {
+        while (at < (long)n) {
+            long e = at;
+            while (e < (long)n && r[e] != '\n') e++;
+            if (pp_receipt_line(r + at, e - at, name, (int)sizeof name)) {
+                if (!(name[0] == 'u' && name[1] == 'n' && name[2] == 'i' && name[3] == 's' &&
+                      name[4] == 'a' && name[5] == 'c' && name[6] == 'c' && name[7] == '.' &&
+                      name[8] == 'c' && name[9] == 'o' && name[10] == 'm' && name[11] == 0)) {
+                    if (pp_copy_member(devsrc, devdst, name)) { free(r); return -1; }
+                    copied++;
+                }
+            }
+            at = e + 1;
+        }
+        free(r);
+    }
+    if (!copied) {
+        if (pp_copy_member(devsrc, devdst, "entry.elf")) return -1;
+        if (pp_copy_member(devsrc, devdst, pp_pkg_name)) return -1;
+    }
+    return 0;
+}

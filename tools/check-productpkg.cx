@@ -1,0 +1,91 @@
+/* tools/check-productpkg.cx -- the installed product's layout is read, not sniffed.
+ *
+ *   sh ./unisacc.com tools/check-productpkg.cx        (from the repo root)
+ *
+ * Under the dev-lnx layout `unisacc.com` is a thin launcher and the package lives in
+ * unisacc.com.dev/. Eight checks and one product copier assumed the single-file APE and broke
+ * when it changed. cxlib.productpkg answers "which file holds the package" and "what does it
+ * take to copy this product", so those checks can ask instead of reading bytes.
+ *
+ * Cases
+ *   installed-layout        pp_layout(root) is PP_SPLIT for this install (launcher + dev dir)
+ *   package-has-footer      the file it names carries a locatable UNIPKG1 footer and starts with 'P'
+ *   copy-runs               pp_copy_product into a scratch root, then `sh COPY/unisacc.com
+ *                           --version` exits 0 and names 0.0.43 -- the copy is a working product
+ *   copy-has-entry          COPY/unisacc.com.dev/entry.elf exists: the copier took the side dir,
+ *                           which is exactly what the old "cx_read the product, write one file"
+ *                           copier did not
+ *   ape-layout              a real single-file APE still reads as PP_APE (SKIP when no archive
+ *                           copy is around to test against)
+ *
+ * Prints PASS/FAIL/SKIP per case and PRODUCTPKG<TAB>assertions=N<TAB>failed=M;
+ * exit 0 only when nothing failed. */
+#pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.packagefooter
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4400], com[4400], work[4400];
+static int assertions, failed;
+
+static void ok(int cond, const char *name) {
+    assertions++;
+    if (!cond) failed++;
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+}
+
+static void skip(const char *name, const char *why) {
+    printf("SKIP\t%s\t%s\n", name, why);
+}
+
+static void die(const char *what) {
+    fprintf(stderr, "check-productpkg: %s\n", what);
+    exit(2);
+}
+
+int main(void) {
+    char pkg[4400], entry[4400], out[600];
+    size_t n = 0;
+    unsigned char *b;
+    PackageFooter f;
+    int l, rc;
+
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/out/productpkg-batch", root)) die("work");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("product");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work dir");
+
+    l = pp_layout(root);
+    ok(tx_eqz(pp_layout_name(l), "split"), "installed-layout");
+
+    ok(pp_package_path(root, pkg, (int)sizeof pkg) == 0 && sy_exists(pkg) == 1, "package-has-path");
+    b = pp_read_package(root, &n);
+    ok(b && n > 0 && n <= 2147483647UL && packagefooter_locate_bytes(b, (long)n, &f) &&
+       f.package_offset >= 0 && b[f.package_offset] == 'P', "package-has-footer");
+    free(b);
+
+    {   char dst[4400];
+        char *av[] = { "sh", NULL, "--version", 0 };
+        if (cx_fmt(dst, sizeof dst, "%s/copy", work)) die("copy dir");
+        ok(pp_copy_product(root, dst) == 0, "copy-ok");
+        if (cx_fmt(entry, sizeof entry, "%s/unisacc.com", dst)) die("copy launcher");
+        av[1] = entry;
+        out[0] = 0;
+        rc = sy_run(av, out, (int)sizeof out, 0);
+        ok(rc == 0 && tx_find(out, "0.0.43") >= 0, "copy-runs");
+        if (cx_fmt(entry, sizeof entry, "%s/unisacc.com.dev/entry.elf", dst)) die("entry path");
+        ok(sy_exists(entry) == 1, "copy-has-entry");
+    }
+
+    {   char ape[4400];
+        if (cx_fmt(ape, sizeof ape, "%s/out/m4-backup/unisacc.com.83343ec1", root)) die("ape path");
+        if (sy_exists(ape) != 1) skip("ape-layout", "no archived single-file APE");
+        else ok(tx_eqz(pp_layout_name(pp_layout_of_file(ape)), "ape"), "ape-layout");
+    }
+
+    printf("PRODUCTPKG\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
