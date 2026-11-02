@@ -204,6 +204,37 @@ static unsigned char dv_one = 1;
 /* Read the source (unless a tape is already present), validate a .tapebin,
    publish UNISA_CONTAINER from -p, and resolve the container. Any failure prints
    and asks the caller to exit 1. Split out of dv_main (C44-PACKAGE-01). */
+/* Parse the command line, answer --version/--help, and expand the source list.
+   Returns -1 to continue with the routing, or the process exit code (0 for
+   --version/--help, which do stop). Split out of dv_main (C44-PACKAGE-01). */
+static int dv_parse(CxcState *opts, char **argv, int argc, char *why,
+                    const char **srcp, int *nsrcp, int *argstartp) {
+    /* Local prototypes: a .cx module refuses a top-level declaration it does not define. */
+    char **fwd_lib_slot(void); int *fwd_lib_count(void);
+    int dv_parse_args(CxcState *, CxpState *, const char **, int *, const char **, int *, char *, int, char **, int, int, int (*)(const char *));
+    int ex_ri_say(const char *, const char *);
+    int dv_fail(const char *); const char *bx_src_why(const char *);
+    int dv_cx_flags(int, const char **, unsigned char **, int);
+    int cxp_object_path(const char *); int cxp_tapebin_path(const char *); int cxp_tape_path(const char *);
+    int dv_expand(int *, const char **, int);
+    CxpState compat;
+    int kind; int fr; const char *text;
+    compat.libs = fwd_lib_slot(); compat.n = fwd_lib_count(); compat.cap = 16;
+    kind = dv_parse_args(opts, &compat, dv_srcv, nsrcp, srcp, argstartp, why, argc, argv, opts->runit, opts->defrun, dv_fail);
+    /* 11 is --version, 12 is --help: both stop with one line of text. */
+    if (kind == 11 || kind == 12) {
+        text = kind == 11 ? "0.0.43" : "unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S|-c|-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)\n";
+        return kind == 11 ? ex_ri_say("unisacc %s\n", text) : ex_ri_say("%s", text);
+    }
+    if (kind == 1) return 1;
+    if (!*srcp) return dv_fail(bx_src_why(0));
+    fr = dv_cx_flags(*nsrcp, dv_srcv, dv_forced, dv_forced_n);
+    if (fr >= 0) return fr;
+    if (!cxp_object_path(*srcp) && !cxp_tapebin_path(*srcp) && !cxp_tape_path(*srcp))
+        if (dv_expand(nsrcp, dv_srcv, opts->funit)) return 1;
+    return 0 - 1;   /* not an exit code: carry on with the routing */
+}
+
 static int dv_read_input(const char *src, const char *tgt, int *as_tape,
                          unsigned char **gotb, long *gotn, const char *argv0,
                          const char *pkg, char *cont, int contcap, char *preason) {
@@ -377,72 +408,29 @@ extern int st_span(const char *, const char *, const char *, int, unsigned, cons
 extern int ex_ri_hit(const unsigned char *, long, char **); extern int rc_open(const char *, int, char **, const char **, int, const char *, int, int, int, int, int);
 extern int rc_lookup_elf(unsigned char **, long *); extern int rc_arm(void); extern int cxa_record(unsigned char **, long *, long *, const char *, char *, long);
 extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long); extern int cxa_cancel(unsigned char **, long *, const char *, char *, long);
-    src = 0;
-    nsrc = 0;
-    argstart = argc;
+    src = 0; nsrc = 0; argstart = argc;
     if ((kind = ex_cap_gate(&argc, argv)) != 0) return kind == 2 ? 2 : dv_fail(bx_src_why(0));
     kind = dv_word(argv[1], 0);
     if (kind == 1) return dv_ar(argc, argv);
     if (kind == 2) return dv_as(argc, argv);
     if (kind == 3) return dv_view(argc, argv);
     if (cxc_default_run(&opts, argv, argc, why, 128)) return dv_fail(why);
-    dv_defs_n = 0;
-    dv_undefs_n = 0;
-    dv_forced_n = 0;
-    dv_incdir_n = 0;
-    dv_quotedir_n = 0;
-    dv_err_n = 0;
-    dv_ops.record = cxa_record;
-    dv_ops.line = cxa_line;
-    dv_ops.cancel = cxa_cancel;
-    dv_res.defs = &dv_defs;
-    dv_res.undefs = &dv_undefs;
-    dv_res.forced = &dv_forced;
-    dv_res.incdir = &dv_incdir;
-    dv_res.quotedir = &dv_quotedir;
-    dv_res.errorlimit = &dv_errb;
-    dv_res.defs_n = &dv_defs_n;
-    dv_res.undefs_n = &dv_undefs_n;
-    dv_res.forced_n = &dv_forced_n;
-    dv_res.incdir_n = &dv_incdir_n;
-    dv_res.quotedir_n = &dv_quotedir_n;
-    dv_res.error_n = &dv_err_n;
-    dv_res.defs_cap = &dv_defs_cap;
-    dv_res.undefs_cap = &dv_undefs_cap;
-    dv_res.forced_cap = &dv_forced_cap;
-    dv_res.incdir_cap = &dv_incdir_cap;
-    dv_res.quotedir_cap = &dv_quotedir_cap;
-    dv_res.error_cap = &dv_err_cap;
+    dv_defs_n = 0; dv_undefs_n = 0; dv_forced_n = 0;
+    dv_incdir_n = 0; dv_quotedir_n = 0; dv_err_n = 0;
+    /* The parser and the include machinery write through these pointers;
+       both structures are file-scope statics filled once per run. */
+    dv_ops.record = cxa_record; dv_ops.line = cxa_line; dv_ops.cancel = cxa_cancel;
+    dv_res.defs = &dv_defs; dv_res.undefs = &dv_undefs; dv_res.forced = &dv_forced;
+    dv_res.incdir = &dv_incdir; dv_res.quotedir = &dv_quotedir; dv_res.errorlimit = &dv_errb;
+    dv_res.defs_n = &dv_defs_n; dv_res.undefs_n = &dv_undefs_n; dv_res.forced_n = &dv_forced_n;
+    dv_res.incdir_n = &dv_incdir_n; dv_res.quotedir_n = &dv_quotedir_n; dv_res.error_n = &dv_err_n;
+    dv_res.defs_cap = &dv_defs_cap; dv_res.undefs_cap = &dv_undefs_cap; dv_res.forced_cap = &dv_forced_cap;
+    dv_res.incdir_cap = &dv_incdir_cap; dv_res.quotedir_cap = &dv_quotedir_cap; dv_res.error_cap = &dv_err_cap;
     dv_res.last_include = 0;
     opts.res = &dv_res;
     opts.ops = &dv_ops;
-    {
-        CxpState compat;
-        compat.libs = fwd_lib_slot();
-        compat.n = fwd_lib_count();
-        compat.cap = 16;
-        kind = dv_parse_args(&opts, &compat, dv_srcv, &nsrc, &src, &argstart, why, argc, argv, opts.runit, opts.defrun, dv_fail);
-    }
-    if (kind == 11) {
-        text = "0.0.43";
-        /* A strict trace that never armed prints nothing and returns 2. */
-        return ex_ri_say("unisacc %s\n", text);
-    }
-    if (kind == 12) {
-        text = "unisacc FILE [-S|-c|-o FILE|-run]\nDiagnostic, non-stable: --emit-host-symbols FILE (-S/-c/-o, not -run)\nDiagnostic, non-stable: --host-provider FILE (12-byte capability filter; no addresses)\n";
-        /* A map ledger still prints this text. A trace ledger does not. */
-        return ex_ri_say("%s", text);
-    }
-    if (kind == 1) return 1;
-    if (!src) return dv_fail(bx_src_why(0));
-    {
-        int fr;
-        fr = dv_cx_flags(nsrc, dv_srcv, dv_forced, dv_forced_n);
-        if (fr >= 0) return fr;
-    }
-    if (!cxp_object_path(src) && !cxp_tapebin_path(src) && !cxp_tape_path(src)) {
-        if (dv_expand(&nsrc, dv_srcv, opts.funit)) return 1;
-    }
+    i = dv_parse(&opts, argv, argc, why, &src, &nsrc, &argstart);
+    if (i >= 0) return i;
     shown = opts.out;
     gotb = 0;
     gotn = 0;
