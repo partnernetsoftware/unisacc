@@ -21,7 +21,10 @@
  *          takes it back.  Nothing is split or coalesced, so nothing can be
  *          corrupted by it: a block is always exactly its class's size.
  *   large: anything bigger is mapped on its own, rounded to 64 KB, class -1,
- *          and `free` returns it to the OS. */
+ *          and `free` returns it to the OS.
+ * Every failure path sets errno = ENOMEM before returning NULL, the way glibc
+ * does; a successful call leaves errno as the caller set it (ISO C: no library
+ * function resets it on success). */
 #ifdef _WIN32
 #define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 0x3000, 4, 0, 0)
 #else
@@ -45,7 +48,7 @@ static char *_unisa_map(__u_word __u_n) {
      * returns MAP_FAILED gives -1. Every one of those is <= 0, and no mapping
      * is ever address 0, so this covers all three. Testing only -1 let -ENOMEM
      * through as a pointer and wrote the block header to 0xFFFFFFFFFFFFFFF4. */
-    if (__u_r <= 0) return NULL;
+    if (__u_r <= 0) { errno = ENOMEM; return NULL; }
     return (char *)__u_r;
 }
 #endif
@@ -53,7 +56,7 @@ static char *_unisa_map(__u_word __u_n) {
 #if !__UNISA_FTRIM_LIBC || __UN_malloc
 static void *malloc(__u_word __u_n) {
     __u_word __u_sz; int __u_k; char *__u_p;
-    if (__u_n < 0 || __u_n > 0x100000000000) return NULL;
+    if (__u_n < 0 || __u_n > 0x100000000000) { errno = ENOMEM; return NULL; }
     __u_sz = __u_n + 16;
     if (__u_sz > 65536) {
         __u_sz = (__u_sz + 65535) & ~65535;
@@ -110,8 +113,8 @@ static void abort(void) { __exit(134); }
 #if !__UNISA_FTRIM_LIBC || __UN_calloc
 static void *calloc(__u_word __u_n, __u_word __u_sz) {
     __u_word *__u_p; __u_word __u_total; __u_word __u_i;
-    if (__u_n < 0 || __u_sz < 0) return NULL;
-    if (__u_sz != 0 && __u_n > 0x100000000000 / __u_sz) return NULL;
+    if (__u_n < 0 || __u_sz < 0) { errno = ENOMEM; return NULL; }
+    if (__u_sz != 0 && __u_n > 0x100000000000 / __u_sz) { errno = ENOMEM; return NULL; }
     __u_total = __u_n * __u_sz;
     __u_p = (__u_word *)malloc(__u_total);
     if (__u_p == NULL) return NULL;
@@ -127,7 +130,7 @@ static void *calloc(__u_word __u_n, __u_word __u_sz) {
 static void *realloc(void *__u_old, __u_word __u_n) {
     __u_word *__u_p; __u_word *__u_o; __u_word __u_i; __u_word __u_cap;
     if (__u_old == NULL) return malloc(__u_n);
-    if (__u_n < 0) return NULL;
+    if (__u_n < 0) { errno = ENOMEM; return NULL; }
     __u_cap = *(__u_word *)((char *)__u_old - 16) - 16;
     if (__u_n <= __u_cap && (__u_cap <= 65536 || __u_n > __u_cap / 2)) return __u_old;
     __u_p = (__u_word *)malloc(__u_n);
