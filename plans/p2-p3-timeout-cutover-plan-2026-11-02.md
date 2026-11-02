@@ -120,3 +120,15 @@ printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\n", batch[ch[k].bi].id, sv)
 - `sy_child_subreaper()` 是进程级：`run-batch`/`affected` 里除被测子进程外没有别人的子进程，收养范围可控；但一旦某工具在设了 subreaper 的进程里 fork 长驻子进程，它死后会被本进程收养为僵尸，需要显式 `waitpid`——本批两个入口都在退出前关/收全部子进程。
 - `why` 文本追加只发生在 `residue > 0`；`allsession.cx:320` 的按行计数不受影响。
 - 非 Linux 一律 `-ENOSYS`：回退旧组杀，`residue=-1`（未知 ≠ 0），不假称干净。
+
+## 草稿实测补充（2026-11-02，out/p2-draft，未改 cx/、tools/）
+
+`out/p2-draft/` 复制一份 `sys/process.cx` 打上 P2 补丁（`np_result.residue`、超时分支切 `sy_kill_tree(pid,2000,0,0,...)`、`-ENOSYS` 回退组杀、`waitpid WNOHANG`），配 `np-contract.cx` 24 断言全绿（`sh ./unisacc.com out/p2-draft/np-contract.cx`，9.0s）：
+
+- A：`setsid` 逃逸子进程被杀且 `residue=0`；`subprocess.TimeoutExpired: Command '['…']' timed out after 1 seconds` 前缀与时长文本逐字不变；`/proc/self/fd` 计数前后相等（无 fd 泄漏）。
+- B：双 fork 孤儿（`( setsid sleep 300 & )`）在**未设 subreaper** 时被 init 收走，扫描看不见 → `sy_kill_tree` 返回 `residue=0` 而进程仍活。**这就是 residue=0 会说谎的场景**，run-batch 必须 `sy_child_subreaper()`，否则超时后的“干净”判定不可信。
+- B2：同一形状在设了 subreaper 后成为本进程子进程，被 sweep 杀掉，`residue=0` 才是真干净。
+- B3：`keep` 列表内的 pid 不被停/杀/扫，也不计入 residue。
+- D：正常路径不变：退出码 `rc=7` 透传、stdout/stderr 分别捕获、错误 cwd 走 `FileNotFoundError:`、被信号杀死报 `-9`。
+
+结论：P2 的超时分支不必改协议；新增的 `residue` 只有在 `run-batch` 设了 subreaper 后才有“0 即干净”的含义，两者同一提交落地。

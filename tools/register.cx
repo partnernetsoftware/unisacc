@@ -11,13 +11,45 @@
  * lines are taken out again (other lines, even ones appended meanwhile, stay) and the exit is 1; an ID that
  * is already registered, a missing CHECK, or a TAB or newline in a field is refused before anything is
  * written (exit 2).  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
- * The six manual steps (two appends, --list, mkdir, run-batch, read the result) as one call. */
+ * The six manual steps (two appends, --list, mkdir, run-batch, read the result) as one call.
+ *
+ * Two registrations of different batches touch the same two files, so the append-validate span holds an
+ * exclusive flock on tests/.register.lock: without it a concurrent register sees the other's append and the
+ * shared --list validation fails through no fault of either row (observed 2026-11-02, three ROLLED_BACK in a
+ * row).  The batch run itself is outside the lock (it only reads the row) and the rollback takes it back:
+ * a registered check that registers too would otherwise wait on a lock its own parent holds.  Waiting is capped at REGISTER_LOCK_MS (default and maximum 45000) and a timeout is
+ * a named failure, not a silent retry loop.  The lock fd is close-on-exec so run.cx/run-batch cannot inherit
+ * it.  Rollback removes exactly this call's two line contents and leaves every other line alone. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 
 static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+/* the registry lock: exclusive flock on tests/.register.lock, waited for at most REGISTER_LOCK_MS
+   (default 45000, also the maximum: a longer wait means the holder is not making progress and the
+   caller should be told so by name).  Returns the held fd; releases are just sy_flock(UN)+close. */
+#define RG_LOCK "tests/.register.lock"
+static long rg_lock_ms(void) {
+    const char *e = getenv("REGISTER_LOCK_MS"); long v = e ? atol(e) : 45000;
+    return v < 100 ? 100 : v > 45000 ? 45000 : v;
+}
+static int rg_lock(void) {
+    long ms = rg_lock_ms(), waited = 0; int fd = sy_open(RG_LOCK, O_RDWR | O_CREAT, 0666), r;
+    if (fd < 0) rg_die("cannot open lock", RG_LOCK);
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { sy_close(fd); rg_die("cannot mark lock close-on-exec", RG_LOCK); }
+    for (;;) {
+        r = sy_flock(fd, 2 | 4);   /* exclusive, do not wait */
+        if (r == 0) return fd;
+        if (r != -EWOULDBLOCK && r != -EINTR) { sy_close(fd); rg_die("cannot flock", RG_LOCK); }
+        if (waited >= ms) { sy_close(fd); fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", RG_LOCK, ms); exit(2); }
+        sy_sleep_ms(50); waited += 50;
+    }
+}
+static void rg_unlock(int fd) { if (fd >= 0) { sy_flock(fd, 8); sy_close(fd); } }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
 
@@ -77,12 +109,13 @@ static int run(char **argv, char *out, long cap) {
 int main(int argc, char **argv) {
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
     const char *id, *check, *marker, *text, *files, *layer;
-    int rc, okrun; long at;
+    int rc, okrun, lk; long at;
     if (argc != 6 && argc != 7) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER]");
     id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc == 7 ? argv[6] : "interfaces";
     if (!clean(id) || !clean(check) || !clean(marker) || !clean(text) || !clean(files) || !clean(layer) || !*id || !*marker) rg_die("empty field, TAB or newline in a field", 0);
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
+    lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
     if (has_key("tests/batches.tsv", id)) rg_die("batch already registered", id);
     if (has_key("tests/coverage.tsv", cid)) rg_die("coverage row already present", cid);
     if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\n", id, layer, check, check, cid, marker) >= (int)sizeof brow
@@ -92,9 +125,16 @@ int main(int argc, char **argv) {
     {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
         rc = run(v, buf, sizeof buf);
         okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
-        if (!okrun) printf("LIST\trc=%d\tmetadata_valid!=1\n", rc);
+        if (!okrun) {
+            printf("LIST\trc=%d\tmetadata_valid!=1\n", rc);
+            /* --list refuses on stderr (REFUSE<TAB>reason<TAB>detail); the capture is the only copy */
+            { size_t bn = tx_len(buf, sizeof buf); if (bn) { fwrite(buf, 1, bn, stderr); if (buf[bn - 1] != '\n') fputc('\n', stderr); } }
+        }
     }
     if (okrun) {
+        /* The batch run is outside the lock: run.cx/run-batch only read the row, while a check that itself
+           registers (tools/check-register.cx) would otherwise wait on a lock its own parent holds. */
+        rg_unlock(lk); lk = -1;
         if (sy_realpath(".", root, sizeof root) < 0 || tx_snprintf(parent, sizeof parent, "%s/out/register-%s-%d", root, id, sy_pid()) >= (int)sizeof parent
             || sy_mkdir(parent, 0700) != 0) okrun = 0;
         else {
@@ -107,10 +147,14 @@ int main(int argc, char **argv) {
         }
     }
     if (!okrun) {
-        int t1 = take_out("tests/batches.tsv", brow), t2 = take_out("tests/coverage.tsv", crow);
+        int t1, t2;
+        lk = rg_lock();   /* the rollback reads and rewrites both files: take the span back */
+        t1 = take_out("tests/batches.tsv", brow); t2 = take_out("tests/coverage.tsv", crow);
+        rg_unlock(lk);
         printf("REGISTER\tid=%s\tstatus=ROLLED_BACK\trows_removed=%d\n", id, (!t1) + (!t2));
         return 1;
     }
+    if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=REGISTERED\n", id);
     return 0;
 }

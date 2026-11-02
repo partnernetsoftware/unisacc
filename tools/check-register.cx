@@ -1,37 +1,226 @@
-/* Checks tools/register.cx refusals, which write nothing: sh ./unisacc.com tools/check-register.cx
-   An ID already in tests/batches.tsv, a CHECK that does not exist, an empty MARKER and a TAB inside a field
-   are each refused with exit 2, and tests/batches.tsv and tests/coverage.tsv keep their exact bytes.
-   (The append, --list, run-batch and roll-back path changes the registry, so it is not run here; it was
-   exercised by hand when the tool was written: a failing probe was rolled back byte for byte.)
-   Prints PASS/FAIL lines and CHECK_REGISTER<TAB>failed=N. */
+/* tools/check-register.cx -- the registry lock in tools/register.cx.
+ *
+ *   sh ./unisacc.com tools/check-register.cx
+ *
+ * Two registrations overlap on tests/batches.tsv and tests/coverage.tsv; before the lock they saw each
+ * other's half-written registry and rolled back through no fault of either row (2026-11-02, three
+ * ROLLED_BACK in a row).  Cases:
+ *   1. two concurrent registrations of fresh IDs both succeed: exactly one row of each in both files,
+ *      nothing lost, nothing duplicated;
+ *   2. one concurrent registration fails its batch (marker never printed) and rolls back while the other
+ *      succeeds: only the failing call's two lines are gone, the other's row survives;
+ *   3. a held lock makes a caller wait and then fail by name (lock timeout), touching neither file;
+ *   4. after the check removes its own rows both registries are byte-identical to the originals.
+ * The fixture batches are real: tools/register-fixture.cx prints REGISTER_FIXTURE_OK, so run-batch passes.
+ * Rows are removed by exact line content, never by restoring the whole file, so a row someone else
+ * appended meanwhile stays. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 
-static int failed;
-static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tregister.%s\n", ok ? "PASS" : "FAIL", name); }
+static int failed, checks;
+static char root[4096], fx[4400], bpath[4400], cpath[4400];
 
-static int reg(char *id, char *check, char *marker, char *text) {
-    char *argv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", id, check, marker, text, "f", 0};
-    int ofd, efd, pid, ex = 0, code = 0, sig = 0; char junk[4096];
-    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+static void ok(int c, const char *what) {
+    checks++;
+    printf("%s\t%s\n", c ? "PASS" : "FAIL", what);
+    if (!c) failed++;
+}
+
+static void die(const char *a, const char *b) { fprintf(stderr, "check-register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static void pjoin(char *out, size_t cap, const char *a, const char *b) {
+    if (cx_fmt(out, cap, "%s/%s", a, b)) die("path bound", b);
+}
+
+/* number of lines in P that start with PREFIX */
+static long count_lines(const char *p, const char *prefix) {
+    size_t n = 0, pl = strlen(prefix); char *b = cx_read(p, &n), *s; long at = 0, c = 0;
+    if (!b) die("read", p);
+    while (at < (long)n) {
+        s = memchr(b + at, '\n', n - (size_t)at);
+        {   long e = s ? (long)(s - (b + at)) : (long)n - at;
+            if (e >= (long)pl && !memcmp(b + at, prefix, pl)) c++;
+            at += e + 1;
+        }
+    }
+    free(b);
+    return c;
+}
+
+static long count_all(const char *p) {
+    size_t n = 0; char *b = cx_read(p, &n), *s; long at = 0, c = 0;
+    if (!b) die("read", p);
+    while (at < (long)n) { s = memchr(b + at, '\n', n - (size_t)at); at += (s ? (long)(s - (b + at)) : (long)n - at) + 1; c++; }
+    free(b);
+    return c;
+}
+
+/* remove exactly one line equal to LINE (which ends in \n); 0 when found and removed.
+   Every other line, including ones appended meanwhile, is carried over verbatim. */
+static int take_out(const char *path, const char *line) {
+    size_t n = 0, ll = strlen(line); char *b = cx_read(path, &n), *s; long at = 0; int bad = 0;
+    if (!b) return 1;
+    while (at < (long)n) {
+        s = memchr(b + at, '\n', n - (size_t)at);
+        {   long e = s ? (long)(s - (b + at)) : (long)n - at, ln = e + 1;
+            if (ln == (long)ll && !memcmp(b + at, line, ll)) {
+                FILE *f = fopen(path, "wb");
+                if (!f) { free(b); return 1; }
+                if (fwrite(b, 1, (size_t)at, f) != (size_t)at) bad = 1;
+                if (fwrite(b + at + ln, 1, n - (size_t)at - (size_t)ln, f) != n - (size_t)at - (size_t)ln) bad = 1;
+                if (fclose(f) != 0) bad = 1;
+                free(b);
+                return bad;
+            }
+            at += ln;
+        }
+    }
+    free(b);
+    return 1;
+}
+
+/* run ARGV, merged stdout+stderr into OUT (terminated, tail-trimmed by half when full): exit code or -1 */
+static int run(char **argv, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return -1;
-    while (sy_read(ofd, junk, sizeof junk) > 0) {}
-    while (sy_read(efd, junk, sizeof junk) > 0) {}
-    sy_close(ofd); sy_close(efd);
+    for (;;) {
+        if (n == cap - 1) { for (k = 0; k < n - half; k++) out[k] = out[k + half]; n -= half; }
+        r = sy_read(ofd, out + n, cap - 1 - n);
+        if (r <= 0) break;
+        n += r;
+    }
+    out[n] = 0;
+    sy_close(ofd);
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
 
+/* the two registry lines tools/register.cx appends for ID/MARKER/TEXT */
+static void rows(char *b, size_t bn, char *c, size_t cn, const char *id, const char *marker, const char *text) {
+    if (cx_fmt(b, bn, "%s\tIMPLEMENTED\tinterfaces\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\tinterfaces.%s\trc0:%s\n",
+               id, fx, fx, id, marker)) die("row bound", id);
+    if (cx_fmt(c, cn, "interfaces.%s\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", id, text, fx)) die("row bound", id);
+}
+
+/* ARGV for one register call; STORE holds the strings */
+static void reg_argv(char **av, const char **store, const char *id, const char *marker, const char *text) {
+    (void)store;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/register.cx"; av[3] = "--";
+    av[4] = (char *)id; av[5] = fx; av[6] = (char *)marker; av[7] = (char *)text; av[8] = fx; av[9] = "interfaces"; av[10] = 0;
+}
+
 int main(void) {
-    size_t bn0, cn0, bn1, cn1;
-    char *b0 = cx_read("tests/batches.tsv", &bn0), *c0 = cx_read("tests/coverage.tsv", &cn0), *b1, *c1;
-    ck(reg("refactor-tool", "tools/check-refactor.cx", "CHECK_REFACTOR", "t") == 2, "existing-id-refused");
-    ck(reg("register-probe-x", "tools/no-such-check.cx", "X", "t") == 2, "missing-check-refused");
-    ck(reg("register-probe-x", "tools/check-register.cx", "", "t") == 2, "empty-marker-refused");
-    ck(reg("register-probe-x", "tools/check-register.cx", "X", "a\tb") == 2, "tab-in-field-refused");
-    b1 = cx_read("tests/batches.tsv", &bn1); c1 = cx_read("tests/coverage.tsv", &cn1);
-    ck(b0 && c0 && b1 && c1 && tx_same(b0, (long)bn0, b1, (long)bn1) && tx_same(c0, (long)cn0, c1, (long)cn1), "registry-bytes-unchanged");
-    printf("CHECK_REGISTER\tfailed=%d\n", failed);
+    static char abuf[1 << 15], bbuf[1 << 15];
+    char *av0[12], *av1[12], *v[2] = { av0, av1 };
+    const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
+    char rowsb[4][4096], rowsc[4][4096];
+    long before_b, before_c;
+    char orig_hb[65], orig_hc[65];
+    int i, j;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
+    pjoin(bpath, sizeof bpath, root, "tests/batches.tsv");
+    pjoin(cpath, sizeof cpath, root, "tests/coverage.tsv");
+    before_b = count_all(bpath); before_c = count_all(cpath);
+    if (before_b < 1 || before_c < 1) die("empty registry", 0);
+    {   size_t n = 0; char *b = cx_read(bpath, &n); if (!b) die("read", bpath); cx_sha256_hex(b, (long)n, orig_hb); free(b);
+        b = cx_read(cpath, &n); if (!b) die("read", cpath); cx_sha256_hex(b, (long)n, orig_hc); free(b);
+    }
+
+    /* fixture: tools/register-fixture.cx is a real SOURCE entry (registry source paths must be tools/,
+       tests/ or cx/), prints REGISTER_FIXTURE_OK and exits 0 */
+    if (cx_fmt(fx, sizeof fx, "%s", "tools/register-fixture.cx")) die("fixture path", 0);
+    if (!sy_exists(fx)) die("missing fixture", fx);
+
+    /* case 1: both concurrent registrations succeed */
+    rows(rowsb[0], sizeof rowsb[0], rowsc[0], sizeof rowsc[0], "cr-a", "REGISTER_FIXTURE_OK", "concurrent row A");
+    rows(rowsb[1], sizeof rowsb[1], rowsc[1], sizeof rowsc[1], "cr-b", "REGISTER_FIXTURE_OK", "concurrent row B");
+    reg_argv(av0, 0, "cr-a", "REGISTER_FIXTURE_OK", "concurrent row A");
+    reg_argv(av1, 0, "cr-b", "REGISTER_FIXTURE_OK", "concurrent row B");
+    {   int fd[2], pid[2], ex = 0, code = 0, sig = 0, rc0, rc1;
+        pid[0] = sy_spawn_pipe(v[0], 0, 0, &fd[0], 0);
+        pid[1] = sy_spawn_pipe(v[1], 0, 0, &fd[1], 0);
+        {   long n = 0, r; for (;;) { r = sy_read(fd[0], abuf + n, (long)sizeof abuf - 1 - n); if (r <= 0) break; n += r; if (n >= (long)sizeof abuf - 1) break; } abuf[n] = 0; sy_close(fd[0]); }
+        {   long n = 0, r; for (;;) { r = sy_read(fd[1], bbuf + n, (long)sizeof bbuf - 1 - n); if (r <= 0) break; n += r; if (n >= (long)sizeof bbuf - 1) break; } bbuf[n] = 0; sy_close(fd[1]); }
+        sy_wait_status(pid[0], 0, &ex, &code, &sig); rc0 = ex ? code : -1;
+        ex = code = sig = 0; sy_wait_status(pid[1], 0, &ex, &code, &sig); rc1 = ex ? code : -1;
+        ok(rc0 == 0 && rc1 == 0, "two concurrent registrations both exit 0");
+    }
+    ok(strstr(abuf, "status=REGISTERED") && strstr(bbuf, "status=REGISTERED"), "both report REGISTERED");
+    ok(count_lines(bpath, "cr-a\t") == 1 && count_lines(bpath, "cr-b\t") == 1, "each batch row appears exactly once");
+    ok(count_lines(cpath, "interfaces.cr-a\t") == 1 && count_lines(cpath, "interfaces.cr-b\t") == 1, "each coverage row appears exactly once");
+    ok(count_all(bpath) == before_b + 2 && count_all(cpath) == before_c + 2, "no line lost or duplicated in either file");
+
+    /* case 2: one fails its batch, rolls back, the other survives */
+    rows(rowsb[2], sizeof rowsb[2], rowsc[2], sizeof rowsc[2], "cr-c", "NEVER_PRINTED", "rollback row");
+    rows(rowsb[3], sizeof rowsb[3], rowsc[3], sizeof rowsc[3], "cr-d", "REGISTER_FIXTURE_OK", "survivor row");
+    reg_argv(av0, 0, "cr-c", "NEVER_PRINTED", "rollback row");
+    reg_argv(av1, 0, "cr-d", "REGISTER_FIXTURE_OK", "survivor row");
+    {   int fd[2], pid[2], ex = 0, code = 0, sig = 0, rc0, rc1;
+        pid[0] = sy_spawn_pipe(v[0], 0, 0, &fd[0], 0);
+        pid[1] = sy_spawn_pipe(v[1], 0, 0, &fd[1], 0);
+        {   long n = 0, r; for (;;) { r = sy_read(fd[0], abuf + n, (long)sizeof abuf - 1 - n); if (r <= 0) break; n += r; if (n >= (long)sizeof abuf - 1) break; } abuf[n] = 0; sy_close(fd[0]); }
+        {   long n = 0, r; for (;;) { r = sy_read(fd[1], bbuf + n, (long)sizeof bbuf - 1 - n); if (r <= 0) break; n += r; if (n >= (long)sizeof bbuf - 1) break; } bbuf[n] = 0; sy_close(fd[1]); }
+        sy_wait_status(pid[0], 0, &ex, &code, &sig); rc0 = ex ? code : -1;
+        ex = code = sig = 0; sy_wait_status(pid[1], 0, &ex, &code, &sig); rc1 = ex ? code : -1;
+        ok(rc0 == 1 && strstr(abuf, "status=ROLLED_BACK") && strstr(abuf, "rows_removed=2"), "the failing call rolls both rows back");
+        ok(rc1 == 0 && strstr(bbuf, "status=REGISTERED"), "the overlapping call still registers");
+    }
+    ok(count_lines(bpath, "cr-c\t") == 0 && count_lines(cpath, "interfaces.cr-c\t") == 0, "the rolled-back rows are gone");
+    ok(count_lines(bpath, "cr-d\t") == 1 && count_lines(cpath, "interfaces.cr-d\t") == 1, "the survivor row is intact");
+    ok(count_lines(bpath, "cr-a\t") == 1 && count_lines(bpath, "cr-b\t") == 1, "case 1 rows survived the rollback");
+
+    /* case 3: a held lock makes the caller wait, then fail by name, touching neither file */
+    {   char hb1[65], hb2[65];
+        size_t n = 0; char *b = cx_read(bpath, &n); cx_sha256_hex(b, (long)n, hb1); free(b);
+        b = cx_read(cpath, &n); cx_sha256_hex(b, (long)n, hb2); free(b);
+        {   int holder = fork();
+            if (holder == 0) {
+                int fd = sy_open("tests/.register.lock", O_RDWR | O_CREAT, 0666);
+                long z;
+                if (fd < 0 || sy_flock(fd, 2) != 0) _exit(3);
+                for (z = 0; z < 600; z++) usleep(5000);   /* hold for 3 s */
+                _exit(0);
+            }
+            usleep(250000);   /* let the holder take it */
+            {   { char out[1 << 15]; int rc;   /* env(1) carries the shortened wait into register.cx */
+                    char *w[13] = { "env", "REGISTER_LOCK_MS=300", "sh", "./unisacc.com", "tools/register.cx", "--",
+                                    "cr-e", fx, "REGISTER_FIXTURE_OK", "lock timeout row", fx, "interfaces", 0 };
+                    rc = run(w, out, sizeof out);
+                    ok(rc == 2, "a held lock fails the caller with exit 2");
+                    ok(strstr(out, "lock timeout") != 0, "the failure is named (lock timeout)");
+                }
+            }
+            {   int ex = 0, code = 0, sig = 0; sy_wait_status(holder, 0, &ex, &code, &sig); }
+        }
+        ok(count_lines(bpath, "cr-e\t") == 0 && count_lines(cpath, "interfaces.cr-e\t") == 0, "the timed-out call wrote no rows");
+        {   char h[65]; size_t m = 0; char *b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hb1), "batches.tsv is untouched by the timeout"); }
+        {   char h[65]; size_t m = 0; char *b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hb2), "coverage.tsv is untouched by the timeout"); }
+    }
+
+    /* cleanup: remove exactly our own rows, then require the originals back byte for byte */
+    {   int removed = 0;
+        long nb0 = before_b, nc0 = before_c;
+        for (j = 0; j < 4; j++) {
+            if (take_out(bpath, rowsb[j]) == 0) removed++;
+            if (take_out(cpath, rowsc[j]) == 0) removed++;
+        }
+        ok(removed == 6, "cleanup removed exactly the six check rows");
+        ok(count_all(bpath) == nb0 && count_all(cpath) == nc0, "both registries are back to their original length");
+        {   char h[65]; size_t m = 0; char *b = cx_read(bpath, &m); cx_sha256_hex(b, (long)m, h); free(b);
+            ok(!strcmp(h, orig_hb), "batches.tsv restored byte for byte (other lanes' rows intact)"); }
+        {   char h[65]; size_t m = 0; char *b = cx_read(cpath, &m); cx_sha256_hex(b, (long)m, h); free(b);
+            ok(!strcmp(h, orig_hc), "coverage.tsv restored byte for byte (other lanes' rows intact)"); }
+        for (i = 0; i < 4; i++) {
+            if (count_lines(bpath, ids[i]) || count_lines(cpath, ids[i])) { failed++; checks++; printf("FAIL\tresidue row %s\n", ids[i]); break; }
+        }
+    }
+    printf("CX_REGISTER\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;
 }
