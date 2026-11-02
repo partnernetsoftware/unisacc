@@ -70,6 +70,7 @@ static int committed_before(const char *path, const char *blob) {
 int main(int argc, char **argv) {
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0;
     char idx[400], blob[CO_MAX][64], out[8192], root[4096];
+    char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
     while (a < argc) {
         if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--whole")) {
@@ -83,7 +84,9 @@ int main(int argc, char **argv) {
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
     for (k = 0; k < np; k++) {
-        char src[4400];
+        char src[4400]; sy_stat_t st;
+        link[k] = 0;
+        if (sy_lstat(path[k], &st) == 0 && st.kind == 'l') link[k] = 1;
         if (!sy_exists(path[k])) co_die("no such file", path[k]);
         if (keys[k]) {   /* own-diff --emit writes the base with only the KEYed changes */
             char *ov[64], kc[1024], *p = kc; int n = 0;
@@ -95,10 +98,20 @@ int main(int argc, char **argv) {
             if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);
             {   long f = 0, at = tx_find(out, tx_len(out, sizeof out), "foreign=", 8); if (at >= 0) f = strtol(out + at + 8, 0, 10); kept += (int)f; }
         } else tx_copy(src, sizeof src, path[k], tx_len(path[k], 4300));
+        if (link[k]) {   /* a symlink commits as 120000 with the target string as the blob */
+            char lnk[4400]; long n = sy_readlink(path[k], lnk, sizeof lnk);
+            if (n < 0 || n >= (long)sizeof lnk) co_die("readlink failed", path[k]);
+            lnk[n] = 0;
+            if (tx_snprintf(src, sizeof src, "out/commit-own-%d-%d.link", sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
+            {   int fd = sy_open(src, 2 | 64 | 512, 0600); if (fd < 0) co_die("link tmp", src);
+                if (sy_write_all(fd, lnk, n)) { sy_close(fd); co_die("link write", src); }
+                sy_close(fd);
+            }
+        }
         {   char *hv[] = {"git", "hash-object", "-w", "--", src, 0};
             if (run(hv, blob[k], sizeof blob[k]) != 0 || tx_len(blob[k], 64) != 40) co_die("git hash-object failed", src);
         }
-        if (keys[k]) sy_unlink(src);
+        if (keys[k] || link[k]) sy_unlink(src);
     }
     if (tx_snprintf(idx, sizeof idx, "%s/out/commit-own-%d.idx", root, sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64]; int rc;
@@ -108,7 +121,7 @@ int main(int argc, char **argv) {
         for (k = 0; k < np; k++) {
             char info[200], hb[48], hm[8];
             entry("HEAD", path[k], hb, hm);
-            if (tx_snprintf(info, sizeof info, "%s,%s,%s", hm[0] ? hm : "100644", blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
+            if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
         {   char *v[] = {"git", "commit", "-q", "-m", (char *)msg, 0}; rc = run(v, out, sizeof out); }
@@ -121,7 +134,7 @@ int main(int argc, char **argv) {
             entry(0, path[k], ib, im);
             if (ib[0] && tx_eqz(ib, blob[k])) continue;   /* already the committed blob */
             if (!ib[0] || tx_eqz(ib, old[k]) || committed_before(path[k], ib)) {
-                if (tx_snprintf(info, sizeof info, "%s,%s,%s", im[0] ? im : "100644", blob[k], path[k]) >= (int)sizeof info) continue;
+                if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (im[0] ? im : "100644"), blob[k], path[k]) >= (int)sizeof info) continue;
                 /* git update-index fails when another git process holds .git/index.lock (an agent's git status
                    refreshes the index): retry, then check the entry really is the committed blob.  Ignoring the
                    failure left new files staged as deletions (penoff, macbyt: the last paths of a batch). */

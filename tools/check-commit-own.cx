@@ -38,6 +38,21 @@ static void case_(const char *name, int lock_s) {
         ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 && tx_find(out, tx_len(out, sizeof out), b, tx_len(b, 64)) >= 0, name); }
 }
 
+/* a --whole symlink commits as 120000 with the target string as the blob, not as a 100644 copy of its target. */
+static void case_symlink(void) {
+    char out[8192], script[2048];
+    if (cx_fmt(script, sizeof script,
+        "cd out/check-commit-own/clone && ln -sf target.c tools/link.c && "
+        "sh ./unisacc.com tools/commit-own.cx -- -m symlink --whole tools/link.c 2>&1 | tail -1; "
+        "echo MODE; git ls-tree HEAD -- tools/link.c | cut -c1-6; echo TARGET; git cat-file -p HEAD:tools/link.c",
+        0, 0, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    {   const char *a = "index_unsynced=0", *m = "MODE\n120000", *t = "TARGET\ntarget.c";
+        ck(tx_find(out, tx_len(out, sizeof out), a, tx_len(a, 64)) >= 0 &&
+           tx_find(out, tx_len(out, sizeof out), m, tx_len(m, 64)) >= 0 &&
+           tx_find(out, tx_len(out, sizeof out), t, tx_len(t, 64)) >= 0, "symlink-commits-120000-with-target-string"); }
+}
+
 int main(void) {
     char out[8192];
     if (sh("rm -rf out/check-commit-own && mkdir -p out/check-commit-own && git clone -q --local . out/check-commit-own/clone && "
@@ -46,6 +61,7 @@ int main(void) {
         die("cannot prepare the clone");
     case_("nolock", 0);
     case_("lock", 4);
+    case_symlink();
     sy_printf("CHECK_COMMIT_OWN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
