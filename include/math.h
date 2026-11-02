@@ -17,7 +17,11 @@
 
 #define HUGE_VAL (1.0 / 0.0)
 #define INFINITY (1.0f / 0.0f)
-#define NAN (0.0f / 0.0f)
+/* NAN is a quiet NaN with the sign bit CLEAR: `0.0f/0.0f` evaluates to the
+   hardware default on x86, which has the sign bit set, so printf printed
+   "-nan" and signbit(NAN) was true.  Negating that default flips only the
+   sign bit (any NaN stays a NaN), which is what glibc's NAN looks like. */
+#define NAN (-(0.0f / 0.0f))
 #define M_E        2.71828182845904523536
 #define M_LOG2E    1.44269504088896340736
 #define M_LOG10E   0.434294481903251827651

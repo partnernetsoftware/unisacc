@@ -467,6 +467,16 @@ static int fputc(int __u_c, FILE *__u_f) {
 }
 #endif
 
+/* putc is fputc with no extra promise [C99 7.19.7.8]; a program that uses it
+   must not have to know that this library implements only one of the pair.
+   The guard name is new, so the driver's trim table (exec/facts/pp-autoinc-gen.tsv,
+   generated from include/ and baked into the product) has to be rebuilt for putc
+   and its callee fputc to sit in one closure; until then a unit that names only
+   putc still sees it as undefined. */
+#if !__UNISA_FTRIM_LIBC || __UN_putc
+static int putc(int __u_c, FILE *__u_f) { return fputc(__u_c, __u_f); }
+#endif
+
 #if !__UNISA_FTRIM_LIBC || __UN_putchar
 static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 #endif
@@ -1335,6 +1345,21 @@ static int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u
         __u_c = __u_fmt[__u_i];
         __u_i = __u_i + 1;
         if (__u_c == 37) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 37); continue; }
+        if (__u_c == 110) {
+            /* C99 7.19.6.1p8 -- `%n`: the count so far goes through the pointer and
+               nothing is printed.  Without this arm the pointer fell into the integer
+               conversion below, so `%n` printed its own address in decimal, the return
+               value counted those digits, and a fixed buffer could overflow. */
+            void *__u_np;
+            __u_np = va_arg(__u_ap, void *);
+            if (__u_np != NULL) {
+                if (__u_hh == 2) *(signed char *)__u_np = (signed char)__u_n;
+                else { if (__u_hh == 1) *(short *)__u_np = (short)__u_n;
+                       else { if (__u_lng != 0) *(long *)__u_np = (long)__u_n;
+                              else *(int *)__u_np = (int)__u_n; } }
+            }
+            continue;
+        }
         __u_sp = NULL; __u_sign = 0; __u_base = 10; __u_upper = 0; __u_neg = 0;
         if (__u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69 | __u_c == 103 | __u_c == 71 | __u_c == 97 | __u_c == 65) {
             /* %f %e %g: a double -- a float argument was promoted to one */
@@ -1553,6 +1578,62 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
 #endif
         __u_c = __u_fmt[__u_j]; __u_j = __u_j + 1;
         if (__u_width == 0) __u_width = 1000000000;
+        if (__u_c == 110) {
+            /* C99 7.19.7.5p12 -- `%n`: stores the characters consumed so far, consumes
+               no input, skips no white space and does not count as an assignment.  It
+               used to sit after the white-space skip and the end-of-input check, so
+               "%d%n" on "77" returned with the count never stored. */
+            if (__u_skip == 0) {
+                void *__u_np;
+                __u_np = va_arg(__u_ap, void *);
+                if (__u_np != NULL) {
+                    if (__u_lng == 0 - 2) *(char *)__u_np = (char)__u_i;
+                    else { if (__u_lng == 0 - 1) *(short *)__u_np = (short)__u_i;
+                           else { if (__u_lng == 1) *(long *)__u_np = (long)__u_i;
+                                  else { if (__u_lng == 2) *(__u_word *)__u_np = (__u_word)__u_i;
+                                         else *(int *)__u_np = (int)__u_i; } } }
+                }
+            }
+            continue;
+        }
+        if (__u_c == 91) {
+            /* C99 7.19.7.5p12 -- `%[...]`: a scanset.  No white-space skip, a match of
+               at least one character, `^` negates, a leading `]` is a member, `a-z` is a
+               range and `-` first or last is a literal.  The conversion was missing and
+               the format fell through to the unknown-conversion `break`, so `%[a-z]`
+               returned 0 on every input. */
+            __u_word __u_s0; __u_word __u_s1; int __u_negset; int __u_member;
+            __u_negset = 0;
+            if (__u_fmt[__u_j] == 94) { __u_negset = 1; __u_j = __u_j + 1; }
+            __u_s0 = __u_j;
+            if (__u_fmt[__u_j] == 93) __u_j = __u_j + 1;    /* a leading ] is a member */
+            while (__u_fmt[__u_j] != 0) { if (__u_fmt[__u_j] == 93) break; __u_j = __u_j + 1; }
+            __u_s1 = __u_j;
+            if (__u_fmt[__u_j] == 93) __u_j = __u_j + 1;
+            if (__u_skip == 0) __u_sp = va_arg(__u_ap, char *);
+            __u_n = 0;
+            while (__u_n < __u_width) {
+                __u_word __u_q; int __u_ch;
+                if (__u_in[__u_i] == 0) break;
+                __u_ch = __u_in[__u_i] & 255; __u_member = 0; __u_q = __u_s0;
+                while (__u_q < __u_s1) {
+                    if (__u_q + 2 < __u_s1 && __u_fmt[__u_q + 1] == 45) {
+                        if (__u_ch >= (__u_fmt[__u_q] & 255) && __u_ch <= (__u_fmt[__u_q + 2] & 255)) { __u_member = 1; break; }
+                        __u_q = __u_q + 3;
+                    } else {
+                        if (__u_ch == (__u_fmt[__u_q] & 255)) { __u_member = 1; break; }
+                        __u_q = __u_q + 1;
+                    }
+                }
+                if (__u_negset) __u_member = __u_member == 0;
+                if (__u_member == 0) break;
+                if (__u_skip == 0) __u_sp[__u_n] = __u_in[__u_i];
+                __u_i = __u_i + 1; __u_n = __u_n + 1;
+            }
+            if (__u_n == 0) break;                       /* a scanset with nothing in it fails */
+            if (__u_skip == 0) { __u_sp[__u_n] = 0; __u_stored = __u_stored + 1; }
+            continue;
+        }
         if (__u_c == 99) {                                   /* %c: no space skip */
             if (__u_width == 1000000000) __u_width = 1;
             if (__u_in[__u_i] == 0) { if (__u_stored == 0) return EOF; return __u_stored; }
@@ -1630,10 +1711,6 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
                 else { __u_fp = va_arg(__u_ap, float *); *__u_fp = (float)__u_d; }
                 __u_stored = __u_stored + 1;
             }
-            continue;
-        }
-        if (__u_c == 110) {                                  /* %n */
-            if (__u_skip == 0) { __u_ip = va_arg(__u_ap, int *); *__u_ip = (int)__u_i; }
             continue;
         }
         break;                                           /* an unknown conversion ends the scan */
@@ -2516,6 +2593,33 @@ static double strtod(const char *__u_s, char **__u_end) {
     while (__u_s[__u_i] == 32 || (__u_s[__u_i] >= 9 && __u_s[__u_i] <= 13)) __u_i = __u_i + 1;
     if (__u_s[__u_i] == 45) { __u_sign = 0 - 1; __u_i = __u_i + 1; }
     else { if (__u_s[__u_i] == 43) __u_i = __u_i + 1; }
+    /* C99 7.20.1.3p2: INF, INFINITY and NAN are subjects, in any case, and NAN
+       takes an optional `(n-char-seq)`.  None of the three was recognised, so
+       strtod("inf", &e) answered 0.0 with e still on the "i" -- a program reading
+       the word back from a file saw a zero instead of an infinity. */
+    {   const char *__u_p; int __u_k;
+        __u_p = __u_s + __u_i;
+        if ((__u_p[0] | 32) == 105 && (__u_p[1] | 32) == 110 && (__u_p[2] | 32) == 102) {
+            __u_uword __u_bits;
+            __u_k = 3;
+            if ((__u_p[3] | 32) == 105 && (__u_p[4] | 32) == 110 && (__u_p[5] | 32) == 105
+                && (__u_p[6] | 32) == 116 && (__u_p[7] | 32) == 121) __u_k = 8;
+            if (__u_end) *__u_end = (char *)(__u_s + __u_i + __u_k);
+            __u_bits = 9218868437227405312;                    /* 0x7FF0000000000000 */
+            return *(double *)&__u_bits * (double)__u_sign;
+        }
+        if ((__u_p[0] | 32) == 110 && (__u_p[1] | 32) == 97 && (__u_p[2] | 32) == 110) {
+            __u_uword __u_bits; int __u_q;
+            __u_k = 3;
+            if (__u_p[3] == 40) {
+                __u_q = 4;
+                while (__u_p[__u_q] != 0) { if (__u_p[__u_q] == 41) { __u_k = __u_q + 1; break; } __u_q = __u_q + 1; }
+            }
+            if (__u_end) *__u_end = (char *)(__u_s + __u_i + __u_k);
+            __u_bits = 9221120237041090560;                    /* 0x7FF8000000000000: a quiet NaN */
+            return *(double *)&__u_bits * (double)__u_sign;
+        }
+    }
     /* C99 hexadecimal form: 0x hex-digits [. hex-digits] [p [+-] decimal] */
     if (__u_s[__u_i] == 48 && (__u_s[__u_i + 1] | 32) == 120) {
         __u_word __u_k; int __u_d; __u_word __u_be; int __u_hany;
@@ -2624,6 +2728,14 @@ static double strtold(const char *__u_s, char **__u_end) { return strtod(__u_s, 
 static double atof(const char *__u_s) { return strtod(__u_s, 0); }
 #endif
 
+/* C99 7.20.2.1p2 and 7.20.2.2p2: rand() answers values in [0, RAND_MAX] and a
+ * program that never calls srand starts from srand(1).  The SEQUENCE is
+ * implementation-defined, and this one is an LCG; glibc's is the `random`
+ * family, so the numbers differ for the same seed.  That difference is
+ * compliant and deliberate: the sequence is not a portable property of C, and
+ * a program that stores these values or seeds against glibc's will not
+ * reproduce here.  Programs that agree between C libraries only because both
+ * calls are made in the same order are unaffected. */
 static __u_word _unisa_seed = 1;
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
@@ -3914,6 +4026,33 @@ static double strtod(const char *__u_s, char **__u_end) {
     while (__u_s[__u_i] == 32 || (__u_s[__u_i] >= 9 && __u_s[__u_i] <= 13)) __u_i = __u_i + 1;
     if (__u_s[__u_i] == 45) { __u_sign = 0 - 1; __u_i = __u_i + 1; }
     else { if (__u_s[__u_i] == 43) __u_i = __u_i + 1; }
+    /* C99 7.20.1.3p2: INF, INFINITY and NAN are subjects, in any case, and NAN
+       takes an optional `(n-char-seq)`.  None of the three was recognised, so
+       strtod("inf", &e) answered 0.0 with e still on the "i" -- a program reading
+       the word back from a file saw a zero instead of an infinity. */
+    {   const char *__u_p; int __u_k;
+        __u_p = __u_s + __u_i;
+        if ((__u_p[0] | 32) == 105 && (__u_p[1] | 32) == 110 && (__u_p[2] | 32) == 102) {
+            __u_uword __u_bits;
+            __u_k = 3;
+            if ((__u_p[3] | 32) == 105 && (__u_p[4] | 32) == 110 && (__u_p[5] | 32) == 105
+                && (__u_p[6] | 32) == 116 && (__u_p[7] | 32) == 121) __u_k = 8;
+            if (__u_end) *__u_end = (char *)(__u_s + __u_i + __u_k);
+            __u_bits = 9218868437227405312;                    /* 0x7FF0000000000000 */
+            return *(double *)&__u_bits * (double)__u_sign;
+        }
+        if ((__u_p[0] | 32) == 110 && (__u_p[1] | 32) == 97 && (__u_p[2] | 32) == 110) {
+            __u_uword __u_bits; int __u_q;
+            __u_k = 3;
+            if (__u_p[3] == 40) {
+                __u_q = 4;
+                while (__u_p[__u_q] != 0) { if (__u_p[__u_q] == 41) { __u_k = __u_q + 1; break; } __u_q = __u_q + 1; }
+            }
+            if (__u_end) *__u_end = (char *)(__u_s + __u_i + __u_k);
+            __u_bits = 9221120237041090560;                    /* 0x7FF8000000000000: a quiet NaN */
+            return *(double *)&__u_bits * (double)__u_sign;
+        }
+    }
     /* C99 hexadecimal form: 0x hex-digits [. hex-digits] [p [+-] decimal] */
     if (__u_s[__u_i] == 48 && (__u_s[__u_i + 1] | 32) == 120) {
         __u_word __u_k; int __u_d; __u_word __u_be; int __u_hany;
@@ -4022,6 +4161,14 @@ static double strtold(const char *__u_s, char **__u_end) { return strtod(__u_s, 
 static double atof(const char *__u_s) { return strtod(__u_s, 0); }
 #endif
 
+/* C99 7.20.2.1p2 and 7.20.2.2p2: rand() answers values in [0, RAND_MAX] and a
+ * program that never calls srand starts from srand(1).  The SEQUENCE is
+ * implementation-defined, and this one is an LCG; glibc's is the `random`
+ * family, so the numbers differ for the same seed.  That difference is
+ * compliant and deliberate: the sequence is not a portable property of C, and
+ * a program that stores these values or seeds against glibc's will not
+ * reproduce here.  Programs that agree between C libraries only because both
+ * calls are made in the same order are unaffected. */
 static __u_word _unisa_seed = 1;
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
@@ -5396,6 +5543,8 @@ typedef int sig_atomic_t;
 #define SIGQUIT 3
 #define SIGKILL 9
 #define SIGTERM 15
+#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#define SIGUSR2 12
 #define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
@@ -6747,6 +6896,8 @@ typedef int sig_atomic_t;
 #define SIGQUIT 3
 #define SIGKILL 9
 #define SIGTERM 15
+#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#define SIGUSR2 12
 #define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);

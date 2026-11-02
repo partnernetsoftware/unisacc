@@ -22,6 +22,8 @@ typedef int sig_atomic_t;
 #define SIGQUIT 3
 #define SIGKILL 9
 #define SIGTERM 15
+#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#define SIGUSR2 12
 #define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
