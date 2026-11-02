@@ -1,0 +1,107 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* Is `--host-provider FILE` read at all? (C44-HOSTPROV-01)
+ *
+ *   sh ./unisacc.com tools/check-host-provider.cx -- ROOT
+ *
+ * The contract is the reference reader `hb_provider_filter` in
+ * cx/compiler/hostbind.cx: the file is 12 bytes, magic `UHPROV1\n`, a target
+ * byte that must equal the build target, a slot mask with reserved bits clear,
+ * and two zero bytes.  Anything else must be a NAMED refusal before any image
+ * is written; a well-formed file must be accepted.
+ *
+ * Product-driver facts this probe pins (2026-11-02, product 14b906fd/d93c1b24):
+ * the driver only validates the option's MODE/TARGET combination in
+ * `bx_diag_opt` (src/entrybind.cx) and never opens the path, so every malformed
+ * provider below still builds an image with rc 0.  Those five are red until the
+ * driver/链接 path reads the sidecar.
+ *
+ * Ends with CHECK_HOST_PROVIDER failed=N; rc 1 when any case failed.
+ */
+static int g_fail;
+static void die(const char *s) { sy_eprintf("host-provider: REFUSE %s\n", s); exit(2); }
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+static int has(const char *h, long n, const char *needle) {
+    long i, k, m;
+    m = tx_len(needle, 4096);
+    if (!h || m == 0) return 0;
+    i = 0;
+    while (i + m <= n) {
+        k = 0;
+        while (k < m && h[i + k] == needle[k]) k = k + 1;
+        if (k == m) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+static int wr(const char *path, const char *s, long n) {
+    int f;
+    f = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (f < 0) return 1;
+    if (sy_write_all(f, s, n)) { sy_close(f); return 1; }
+    sy_close(f);
+    return 0;
+}
+static int exists(const char *path) { struct stat st; return sy_stat(path, &st) == 0; }
+
+int main(int argc, char **argv) {
+    char root[4096], com[4400], work[4400], pout[4400];
+    char pp[4500], ip[4500], src[4500], why[512], tag[128];
+    char *v[8];
+    char *e[1];
+    np_result r;
+    const char *name[6];
+    const char *cnt[6];
+    long len[6];
+    int refuse[6];
+    int i, c, n, ok;
+    if (argc < 2) die("usage: check-host-provider.cx ROOT");
+    if (cx_fmt(root, sizeof root, "%s", argv[1])) die("root");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(work, sizeof work, "%s/out/check-host-provider", root)) die("work");
+    if (!exists(work)) {
+        if (cx_fmt(pout, sizeof pout, "%s/out", root)) die("out");
+        if (!exists(pout) && sy_mkdir(pout, 0755) != 0 && !exists(pout)) die("mkdir out");
+        if (sy_mkdir(work, 0755) != 0 && !exists(work)) die("mkdir");
+    }
+    name[0] = "absent";   cnt[0] = "";                       len[0] = 0; refuse[0] = 1;
+    name[1] = "badmagic"; cnt[1] = "UHPROV2\n\1\0\0\0";      len[1] = 12; refuse[1] = 1;
+    name[2] = "wrongtgt"; cnt[2] = "UHPROV1\n\4\1\0\0";      len[2] = 12; refuse[2] = 1;
+    name[3] = "bits";     cnt[3] = "UHPROV1\n\1\020\0\0";    len[3] = 12; refuse[3] = 1;
+    name[4] = "trunc";    cnt[4] = "UHPROV1\n";              len[4] = 8;  refuse[4] = 1;
+    name[5] = "valid";    cnt[5] = "UHPROV1\n\1\1\0\0";      len[5] = 12; refuse[5] = 0;
+    if (cx_fmt(src, sizeof src, "%s/prog.cx", work)) die("src");
+    if (wr(src, "int main(void) { return 7; }\n", 29)) die("write src");
+    e[0] = "UNISACC_RUN_CACHE=0";
+    c = 0;
+    while (c < 6) {
+        if (cx_fmt(pp, sizeof pp, "%s/%s.prov", work, name[c])) die("prov path");
+        if (cx_fmt(ip, sizeof ip, "%s/%s.img", work, name[c])) die("img path");
+        (void)sy_unlink(ip);
+        if (len[c] && wr(pp, cnt[c], len[c])) die("write prov");
+        if (!len[c]) (void)sy_unlink(pp);
+        i = 0; v[i++] = com; v[i++] = "--host-provider"; v[i++] = pp;
+        v[i++] = "-o"; v[i++] = ip; v[i++] = src; v[i] = 0;
+        if (np_run(v, root, e, 60, &r, why, sizeof why)) die(why);
+        if (refuse[c]) {
+            ok = r.rc != 0 && r.errn > 0 && has(r.err, (long)r.errn, "provider");
+            printf("NOTE\t%s\trc\t%d\t%.*s", name[c], r.rc,
+                   (int)(r.errn > 200 ? 200 : r.errn), r.err ? r.err : "");
+        } else {
+            ok = r.rc == 0 && exists(ip);
+        }
+        if (!ok && r.rc == 0 && exists(ip)) printf("NOTE\t%s\timage-written\n", name[c]);
+        np_free(&r);
+        if (cx_fmt(tag, sizeof tag, "provider-%s", name[c])) die("tag");
+        ck(ok, tag);
+        c = c + 1;
+    }
+    printf("CHECK_HOST_PROVIDER\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}

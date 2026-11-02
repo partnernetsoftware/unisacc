@@ -143,3 +143,43 @@ gcc：`10`。产品：`signal.h:3(...) error: unknown identifier`，rc 1。
 实现定义两项只写注释，不改行为：`include/stdlib.h` 的 `rand` 段写明"合规、序列与 glibc 不同、依赖具体序列的程序不可移植"；`signal()` 处理器投递后不重置，与本节第五节第 2 条一致。
 
 生成物同步：`exec/facts/pp-autoinc-gen.tsv`（`facts-gen --write`）与 `include/cx-flat.h`（`cx-flatten --write`），`--check` 为 SAME 41 headers；`tools/ratchets.cx` 7/7。
+
+## 八、D8 `--host-provider` 是死参数（驱动/链接，2026-11-02 omp-ds 追加）
+
+`C44-HOSTPROV-01`。上一轮把 #11 记为"宿主导入路径未测"，实测后定性更重：**该参数根本不被读取**。
+
+最小复现（不依赖宿主 gcc）：
+
+```sh
+printf 'int main(void){return 7;}\n' > prog.cx
+printf 'UHPROV2\n\1\0\0\0' > bad.prov        # 坏 magic
+printf 'UHPROV1\n\4\1\0\0' > wrongtgt.prov   # target=4，与 lnx/x86_64 不符
+printf 'UHPROV1\n\1\020\0\0' > bits.prov     # 保留位非零
+printf 'UHPROV1\n' > trunc.prov                 # 8 字节截断
+for p in bad wrongtgt bits trunc; do
+  sh ./unisacc.com --host-provider $p.prov -o $p.img prog.cx
+  echo "$p rc=$? img=$(test -f $p.img && echo yes)"
+done
+```
+
+现装产品（sha256 `d93c1b24…`）实测：四种坏输入全部 `rc=0` 且写出镜像；`--host-provider /nonexistent`
+同样 rc0；合法 `UHPROV1\n\1\1\0\0` 也 rc0。没有任何一条被具名拒绝。
+
+定位：`src/drive.cx:512` 把两个路径交给 `bx_diag_opt`，后者（`src/entrybind.cx:221`）只判断"有 provider
+且 mode/target 组合合法"就返回 0，**从不打开文件**；`cx/compiler/hostbind.cx` 的 `hb_provider_filter` /
+`hb_requirements` 在产品路径没有调用者（只有 `archive/reference-c` 的参考测试调用）。与 #27（33 对象入口
+链接不能导入宿主符号）同源：那条路线自己的导入表也是空的。
+
+判据来源：`hb_provider_filter` 要求 12 字节、magic `UHPROV1\n`、target 字节等于构建目标、`b[9]` 保留位为 0、
+`b[10..11]` 为 0；坏文件必须具名拒绝，合法文件必须被接受。
+
+探针：`tools/check-host-provider.cx`（`-- ROOT`，6 条断言，约 8 秒）。现装跑出
+`CHECK_HOST_PROVIDER failed=5`：`provider-absent`、`provider-badmagic`、`provider-wrongtgt`、
+`provider-bits`、`provider-trunc` 全 FAIL（各带 `NOTE … image-written`），`provider-valid` PASS。
+**故意不登记 `tests/batches.tsv`**：该批当前必红，红批次不进正式清单；等链接/绑定层真的读 sidecar 后再登记并转绿。
+
+修复方向（不在本轮范围，量 M）：`cxt_text` 之后、写镜像之前打开 provider，用 `hb_provider_filter` 校验
+（具名 `invalid-provider framing` / `provider-target differs` / 保留位非零），把 mask 传给链接/绑定层；
+不存在文件报 `cannot open host provider`。若只想先止住"静默接受"，最小改动是读 12 字节校验后仍忽略 mask，
+但那会造出"校验通过却不生效"的假合同，不如等症状入口（#27）一起做。
+

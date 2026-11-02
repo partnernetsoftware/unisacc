@@ -12,12 +12,12 @@
 
 | # | 现象 | 影响面 | 阻塞原因 | 车道 | 证据 | 0.0.44 | 量 | 快车道 |
 |---|---|---|---|---|---|---|---|---|
-| 1 | `*(*q)++=0;` 报 `expected ';'` rc1，系统 cc 接受 | C99 6.5.2.4/6.5.3.1 后缀 ++ 于括号解引用 | 未定位到具体分支；疑似 parse 层后缀处理 | `[未核实]` | v0.0.44: 已确认缺陷 C44-PARSE-POSTINC-01；`out/c44-pointer-postinc.cx` | 修 bug ✓ | S | 待核 |
-| 2 | `sizeof ES[N].name` 进实参报 `not covered: argument list` rc1 | C99 6.5.3.4 sizeof 于带下标+成员后缀 | 关系/逻辑表达式与实参中的 sizeof 后缀未建模 | `[未核实]` | v0.0.44: C44-CX-SIZEOF-POSTFIX-01；`/tmp/unisacc-c43-union-pic-probe/sizeof-arg.cx` | 修 bug ✓ | S–M | 待核 |
+| 1 | `*(*q)++=0;` 报 `expected ';'` rc1，系统 cc 接受 | C99 6.5.2.4/6.5.3.1 后缀 ++ 于括号解引用 | 未定位到具体分支；疑似 parse 层后缀处理 | `[已核实]` 解析域 | v0.0.44: 已确认缺陷 C44-PARSE-POSTINC-01；`out/c44-pointer-postinc.cx` | 修 bug ✓ | S | **否（慢车道）**：omp-ds 2026-11-02 实测仍报 `expected ';'`，该字符串在现树只存在于 `archive/reference-*`，产品解析由权重/事实表驱动 |
+| 2 | `sizeof ES[N].name` 进实参报 `not covered: argument list` rc1 | C99 6.5.3.4 sizeof 于带下标+成员后缀 | 关系/逻辑表达式与实参中的 sizeof 后缀未建模 | `[已核实]` 解析域 | v0.0.44: C44-CX-SIZEOF-POSTFIX-01；`/tmp/unisacc-c43-union-pic-probe/sizeof-arg.cx` | 修 bug ✓ | S–M | **否（慢车道）**：实测仍报 `unknown identifier`（`sizeof ES[N].name` → 宏展开后 `ES[ 4 ].name`），与 #1 同域 |
 | 3 | 已知原型实参个数不查：`f(1)` 对 `f(int,int)` 静默接受 rc0 | C99 6.5.2.2p2 实参数量 | 无固定参数个数诊断；需覆盖可变参数/函数指针/无原型兼容 | 慢（parse2 事实表+函数类型表） | v0.0.44: C44-CALL-ARITY-01 | 修 bug ✓ | M | 否 |
 | 4 | 23 处 C99 约束违反静默接受并产出对象（assign-to-const、discards-const、incompatible-pointer-init、void-value-used、duplicate-case、zero-array-size 等） | C99 6.5.16p2、6.5.6、6.3.2.3、6.1 声明层，共 23 条 | 事实表缺约束行，不是代码分支写错 | 慢（`exec/parse2/*.tsv`→`facts-gen`→`p2ini`） | defects-c43.md `c.negative`；d-class 分析 | 修 bug ✓ | L | 否 |
 | 5 | 2 处预处理约束违反未拒（宏名非标识符、头名未闭合） | C99 6.10.3/6.10.2 | pp 模型域约束行缺失 | 慢 | defects-c43.md `pp.negative`；d-class 第三节 | 修 bug ✓ | M | 否 |
-| 6 | 有效程序被拒：`int vla_fs[(int)1.0 + 0];` | C99 6.7.5.2 VLA 尺寸常量表达式 | 未定位 | `[未核实]` | defects-c43.md:362（观察，低） | 修 bug ✓ | S | 待核 |
+| 6 | 有效程序被拒：`int vla_fs[(int)1.0 + 0];` | C99 6.7.5.2 VLA 尺寸常量表达式 | 未定位 | `[已核实]` 解析域 | defects-c43.md:362（观察，低） | 修 bug ✓ | S | **否（慢车道）**：实测仍报 `not covered: constant expression`，reject 行在 `exec/parse2/constexpr-manifest.tsv` |
 
 ## 二、运行库：`-run` 下用户程序行为错
 
@@ -27,9 +27,9 @@
 | 8 | 分配失败不置 `errno`：`malloc/realloc/calloc` 返回 NULL 后 `errno` 仍是调用前的值（`perror` 打 `malloc: Success`，按 `errno==ENOMEM` 分支走错） | POSIX/C 惯例（与 glibc 对齐）：失败置 ENOMEM，成功不动 errno | **已修**：`_unisa_map` 失败分支 + `malloc`/`calloc`(两条)/`realloc` 的上界与溢出守卫都置 `errno = ENOMEM`；成功路径零改动（不写 0）。`include/cx-flat.h` 由 `tools/cx-flatten.cx --write` 重生成，`--check` SAME | 快车道（`include/stdlib.h` +9/-6，`include/cx-flat.h` 生成物） | HEAD 树：`tools/check-errno.cx` failed=1（`BAD huge p=0x0 errno=0`），fopen/strerror 两项控制 PASS；候选 `865b43f6…`：3/3 PASS，`errno 12` 与 glibc 一致 | 已修（待提交） | S | **是** | 早先 `-ENOMEM` 当地址那条已在树里修掉（`_unisa_map` 的 `<= 0`）；本条是同一族的 errno 漏设。落地仍要新包（旧 `unisacc.com.dev/p3-package.bin` 内的头） |
 | 9 | stdout 重定向到 `/dev/full`：`puts=0 fflush=0 ferror=0`，rc0，写失败无人发现 | C99 7.19.8.1/7.19.8.3 错误状态传播 | `_u_st_raw` 只回短计数不置位；标准流不建 slot，`ferror(stdout)` 恒读到新 0 | `[已核实]`：`include/stdio.h` 的 `_u_st_serr[3]`（按 fd 0/1/2）+ `include/sys/_exit.h` 声明 | v0.0.44: C44-STDIO-01，**已修**于 `93aa6f0d59`（方案 B'：每标准流 err 位，未占 slot） | 已修 ✓ | M | 已核 |
 | 10 | `-Werror` 被解析、`opts.werror` 无人读，警告仍是警告 rc0 | 编译驱动合同（用户构建脚本按它判红） | `stages.cx:199` 每次发布 `cli/werror` 长度 0；补非空改资源=改权重 | 慢 | v0.0.44: C44-WERROR-01 | 修 bug ✓ | S（代码）+ 慢（权重） | 否 |
-| 11 | ~~FFI errno 不桥接~~ 已否证（2026-11-02 实测） | C99 7.5 errno；POSIX 导入边界 | 标准运行库路径**是桥接的**：`open("/nonexistent-…")` 得 -1 且 image 内 `errno==2`；随后 `open("/dev/null")` 得 3、errno 仍为 2（与 glibc "成功后不改 errno" 一致）。原始现象里的 `flock` 在 `.cx` 里根本没有声明（`unknown identifier`），所以那条观察是探针错误，不是缺陷 | `[已核实]` 标准路径正常；`--host-provider` 宿主导入符号路径未测 | v0.0.44: C44-FFI-ERRNO-01 | 待核（宿主导入路径） | S | 否（重定义后） |
+| 11 | ~~FFI errno 不桥接~~ 已否证（2026-11-02 实测） | C99 7.5 errno；POSIX 导入边界 | 标准运行库路径**是桥接的**：`open("/nonexistent-…")` 得 -1 且 image 内 `errno==2`；随后 `open("/dev/null")` 得 3、errno 仍为 2（与 glibc "成功后不改 errno" 一致）。原始现象里的 `flock` 在 `.cx` 里根本没有声明（`unknown identifier`），所以那条观察是探针错误，不是缺陷 | `[已核实]` 标准路径正常；`--host-provider` 实测是**死参数**（2026-11-02）：`bx_diag_opt`（`src/entrybind.cx:221`）只查 mode/target 从不打开路径，`hb_provider_filter` 在产品路径无调用者；坏 magic/错 target/保留位/截断/不存在五例全部 rc0 且写镜像。见 `plans/diff-probe-2026-11-02.md` §八与 `tools/check-host-provider.cx`（6 断言，现 failed=5） | v0.0.44: C44-FFI-ERRNO-01 | 待核（宿主导入路径） | S | 否（重定义后） |
 | 12 | `UNISA_MAXSTEPS` 原先在产品里被忽略：设 `1000` 编译仍 rc0；非法值 `abc` 也 rc0 | 运行器合同（预算门与具名拒绝） | **已修**：`src/executor.cx` 两处 `core_run` 的常量换成 `ex_budget_now()`（三元短路，失败置 `st=2` 走既有出口，净零行、不新增 `if`）；`cx/runtime/runexec.cx` 复用既有 `ex_budget` + 新增 `ex_dec`/`ex_budget_now`/`ex_budget_used`，非法值与零值按文档行拒绝并返回 2，缺省回落 4e11。**范围说明**：预算限的是编译用的模型解释器步数，不约束用户原生程序的死循环 | 快车道（`src/executor.cx` +140/-5，`cx/runtime/runexec.cx` +41） | 候选 `c3ddcef5…`：`tools/check-budget.cx` 3/3、check-stdio 10/10、check-run-tape 18/18；装根仍红 2（待装机） | 已修（待提交） | S | **是** |
-| 13 | 静态表给 lnx/x86_64 切片约 214 MB BSS，RLIMIT_AS <225 MB 即起不来（现靠启动器预检具名拒绝兜底） | 产品在受限环境（容器/CI）可用性 | 静态表未动态化；并入体积/内存工作 | `[未核实]` | v0.0.44: C44-ASLIMIT-01 | 修 bug ✓ | M | 待核 |
+| 13 | 静态表给 lnx/x86_64 切片约 214 MB BSS，RLIMIT_AS <225 MB 即起不来（现靠启动器预检具名拒绝兜底） | 产品在受限环境（容器/CI）可用性 | 静态表未动态化；并入体积/内存工作 | `[已核实]` 证否 | v0.0.44: C44-ASLIMIT-01 | 修 bug ✓ | M | 现状无需修（omp-ds 2026-11-02 实测证否：`prlimit --as=80000000` 下 `int main(void){return 3;}` 仍 rc=3） |
 
 ## 三、驱动、链接与包
 
@@ -41,7 +41,7 @@
 | 17 | `-nostdinc -E` 仍展开包内 `stddef.h` | C99 6.10.2 include 语义 | e2 资源形状问题（`\0hdr/` ABSENT 行被吞） | 慢（e2 模型） | v0.0.44: C44-NOSTDINC-01；批 `pp-cli-includes` 现 KNOWN_GAP | 修 bug ✓ | M | 否 |
 | 18 | 宏展开内诊断列号/摘录按展开文本计（行号正确） | C99 6.10.3；排错体验 | 需 UNIPP1 展开偏移映射 + tokenlocations 读入 + 摘录读原源 | 慢（约 1 天 + 一次纪元换证） | known-gaps R3 = C44-DIAG-COLUMN-01 | 修 bug ✓ | M | 否 |
 | 19 | 结构体自含成员拒绝措辞非 C99 `incomplete type`；目录当输入 rc1（旧版 2） | 6.7.2.1p2；退出码一致性 | 改 e3 拒绝表 → 动 SID | 慢 | known-gaps 措辞段；同 C44-DIAG-COLUMN-01 | 修 bug ✓ | M | 否 |
-| 20 | ~~`--emit-host-symbols` 接受但不写旁文件~~ 已否证（2026-11-02 实测）：`-S --emit-host-symbols F -o x.tape` 确实写出 12 字节 `UNISYM1\n` + `01 00 00 00` | 侧车合同 LB-1/LB-2 | 写出路径存在；则缺口只剩"内容语义是否正确"（零宿主符号时应是空表？12 字节里的 1 待核） | `[已核实]` 文件已写出；语义未核 | v0.0.44: C44-HOSTSYM-01 | 待核（语义） | S | 待核 |
+| 20 | ~~`--emit-host-symbols` 接受但不写旁文件~~ 已否证（2026-11-02 实测）：`-S --emit-host-symbols F -o x.tape` 确实写出 12 字节 `UNISYM1\n` + `01 00 00 00` | 侧车合同 LB-1/LB-2 | 写出路径存在；则缺口只剩"内容语义是否正确"（零宿主符号时应是空表？12 字节里的 1 待核） | `[已核实]` 合契约 | v0.0.44: C44-HOSTSYM-01 | 已定案 | S | **无缺陷**（omp-ds 2026-11-02 定案：`01 00 00 00` = target=1、reserved=0、count=0、indirect=0，合 `cx/compiler/hostbind.cx:57` 契约） |
 
 ## 四、目标平台、APE、加载器与体积
 
@@ -66,5 +66,5 @@
 1. **快车道最优先且最稳的三条**：R15（`-run` 磁带误喂 ELF → 改走 `execf` 执行支，一处判定 + argv 绑定）、C44-STDIO-01（错误状态传播，探针已存在）、C44-PARSE-POSTINC-01 / SIZEOF-POSTFIX（同一地区：后缀表达式解析，两处可一起修）。
 2. **量大但价值明确、必须走慢车道**（cc 2026-11-02 已定排期）：先由 omp-bdy 用 **c-negative 23 处 / pp-negative 2 处**打穿「事实表→facts-gen→p2ini」链路；链路通了再排 C44-WERROR-01、C44-NOSTDINC-01、C44-DIAG-COLUMN-01。
 3. **五条已裁定顺延 0.0.45**（cc 2026-11-02）：C44-LIBUNISACC-01、C44-ASM-TEXT-01、C44-WIN-ARM64-01、C44-STREAM-CONTAINER-01、C44-STAGE-POS-01（#23 #21 #22 #28 #24）。都是功能新增/跨平台资格，不是修 bug；原文保留作记录，不进 0.0.44。
-4. **未核实标记**共 7 处（#1 #2 #6 #9 #11 #12 #13）：定位点没实测，动手前先按各自复现命令确认，不按文档推测施工。
+4. **未核实标记**（omp-ds 2026-11-02 全部实测收敛）：#1 #2 #6 仍红但落在模型/事实表域 → 慢车道，不是快修项；#9 #12 已修（#12 待装机）；#11 的宿主导入路径是死参数（见该行）；#13 实测证否（80 MB 地址空间仍可跑）。
 5. **#7（R15）已由实测改写**：原 `.sys` 归因不成立（去掉 `.sys` 仍 rc139，41 行磁带却能跑），真因是磁带路线 run 时误把成品 ELF 喂给 memory 路线；截断磁带的 rc1 拒绝是该误喂的副产品，不是既有拒绝路径。方案见 `out/` 实测证据。
