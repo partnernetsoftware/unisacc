@@ -1,0 +1,39 @@
+/* core-run-ext-kernel.cx — 外置基座驱动：use sys.kernel（汇编 kernel），
+ * core_host_fetch 拒绝（无内嵌 blob），kn_load 走 UNISA_KERNEL 外部文件 + sha 校验。
+ * core_host_panic 只打印不 abort 之外无特殊逻辑；kn_die 会 abort。
+ * 用法：core-run-ext-kernel.cx CASE
+ * 由 check-base-external.cx spawn，env 设 UNISA_KERNEL / UNISA_KERNEL_SHA。 */
+#pragma unisa use sys.kernel
+#pragma unisa use core_run_spec
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+int core_run(const void *m, unsigned char *input, int inputn, const char *src, long long maxsteps, void *result);
+int core_host_fetch(const unsigned char *key, int keyn, unsigned char **out, int *n) {
+    (void)key; (void)keyn; (void)out; (void)n;
+    return 0;   /* no in-package blob: kn_load falls back to UNISA_KERNEL */
+}
+void core_host_panic(const char *reason) {
+    sy_eprintf("ext-kernel: panic: %s\n", reason ? reason : "?");
+}
+static unsigned char model[2048];
+static unsigned char outcome[256];
+int main(int argc, char **argv) {
+    int ci, in_n = 0;
+    const unsigned char *in;
+    const void *ob, *eb;
+    char oh[65], eh[65];
+    if (argc != 2 || argv[1][0] < '0' || argv[1][0] > '2' || argv[1][1]) { sy_eprintf("usage: core-run-ext-kernel.cx CASE\n"); return 2; }
+    ci = argv[1][0] - '0';
+    in = crs_case(ci, &in_n);
+    if (crs_model_size() > (long)sizeof model || crs_result_size() > (long)sizeof outcome) { sy_eprintf("buffer too small\n"); return 2; }
+    if (crs_fill(model)) { sy_eprintf("model fill\n"); return 2; }
+    {
+        int st = core_run(model, (unsigned char *)in, in_n, crs_src(), 1000, outcome);
+        ob = crs_out_b(outcome); eb = crs_err_b(outcome);
+        sy_sha256_hex(ob ? ob : (const unsigned char *)"", crs_out_n(outcome), oh);
+        sy_sha256_hex(eb ? eb : (const unsigned char *)"", crs_err_n(outcome), eh);
+        sy_printf("EXT_KERNEL case=%d st=%d outn=%ld errn=%ld outsha=%s errsha=%s\n",
+                  ci, st, crs_out_n(outcome), crs_err_n(outcome), oh, eh);
+        return 0;
+    }
+}

@@ -62,15 +62,31 @@ static void kn_load(void) {
     unsigned char *bytes = 0, *code;
     int n = 0, owner;
     long isa, entry, slot, length, mapped, i;
-    owner = core_host_fetch((const unsigned char *)key, (int)sizeof key - 1, &bytes, &n);
-    if (!owner) {
+    /* External base first: when UNISA_KERNEL names a file, load and (optionally)
+       sha-verify it; otherwise fall back to the embedded pack blob. */
+    {
         const char *path = getenv("UNISA_KERNEL");
         size_t fn;
-        if (!path || !*path) kn_die("assembly kernel not specified");
-        bytes = (unsigned char *)cx_read(path, &fn);
-        if (!bytes || fn > 2147483647UL) kn_die("cannot read the assembly kernel");
-        n = (int)fn;
-        owner = 2;
+        if (path && path[0]) {
+            bytes = (unsigned char *)cx_read(path, &fn);
+            if (!bytes || fn > 2147483647UL) kn_die("cannot read the assembly kernel");
+            {
+                const char *want = getenv("UNISA_KERNEL_SHA");
+                if (want && want[0]) {
+                    char got[65];
+                    int k;
+                    if (fn == 0) kn_die("kernel sha256 mismatch");
+                    cx_sha256_hex(bytes, fn, got);
+                    for (k = 0; k < 64; k++) if (want[k] != got[k]) kn_die("kernel sha256 mismatch");
+                }
+            }
+            n = (int)fn;
+            owner = 2;
+        }
+    }
+    if (!owner) {
+        owner = core_host_fetch((const unsigned char *)key, (int)sizeof key - 1, &bytes, &n);
+        if (!owner) kn_die("assembly kernel not specified");
     }
     if (n < 40 || memcmp(bytes, "UNIKERN1", 8)) kn_die("bad kernel header");
     isa = kn_field(bytes + 8); entry = kn_field(bytes + 16);

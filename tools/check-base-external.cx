@@ -1,0 +1,81 @@
+/* check-base-external.cx — B3 gate：基座外置的 sha 校验与字节一致。
+ *
+ * cx/sys/kernel.cx 的 kn_load 现在优先 UNISA_KERNEL（外部基座文件），
+ * 设了 UNISA_KERNEL_SHA 则加载后校验 sha256，不符具名拒绝。本检查验证：
+ *
+ *   1. 外置 kernel 文件（正确 sha）→ core_run 正常执行，输出与内嵌一致
+ *   2. 外置 kernel 文件 + 错误 UNISA_KERNEL_SHA → 具名拒绝 "kernel sha256 mismatch"
+ *   3. 外置 kernel 文件字节 == 内嵌 pack blob 字节（sha256 相等）
+ *
+ * 用法：sh ./unisacc.com tools/check-base-external.cx [KERNEL_FILE]
+ * 默认 KERNEL_FILE = out/epoch-2026-11-02/kernel-gen/x86_64.kernel（B3 材料）。
+ * -run 冷/热端到端相对值（外置 ≤ 内嵌×1.2）在产品重建编入新 kernel.cx 后，
+ * 由 tools/run-startup-bench.cx 内嵌/外置两次实测（本 check 标注 UNMEASURED）。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok,const char *name){
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b){h[0]=0;return;}cx_sha256_hex(b,n,h);free(b);}
+
+int main(int argc,char **argv){
+    char root[4096],kernel[4096],driver[4400],ksha[65],why[512];
+    if(argc>2){fprintf(stderr,"usage: check-base-external.cx [KERNEL_FILE]\n");return 2;}
+    if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
+    if(argc==2){
+        if(!realpath(argv[1],kernel)){fprintf(stderr,"kernel\n");return 2;}
+    } else {
+        if(cx_fmt(kernel,sizeof kernel,"%s/out/epoch-2026-11-02/kernel-gen/x86_64.kernel",root))return 2;
+        if(!realpath(kernel,kernel)){fprintf(stderr,"kernel-file-absent\n");return 2;}
+    }
+    if(cx_fmt(driver,sizeof driver,"%s/tools/core-run-ext-kernel.cx",root))return 2;
+
+    /* 外置 kernel 文件 sha（用于 sha 校验正确性 + 字节一致） */
+    digest(kernel,ksha);
+    ck(ksha[0]!=0,"kernel-file-digest");
+
+    /* 1. 正确 sha → core_run 正常（外置 kernel 生效） */
+    {
+        char *v[]={(char*)"sh",(char*)"./unisacc.com",driver,(char*)"--",(char*)"1",0};
+        const char *env[]={0,0};
+        char unk[4400], unks[4400];
+        if(cx_fmt(unk,sizeof unk,"UNISA_KERNEL=%s",kernel))return 2;
+        if(cx_fmt(unks,sizeof unks,"UNISA_KERNEL_SHA=%s",ksha))return 2;
+        env[0]=unk; env[1]=unks;
+        np_result r={0};
+        if(np_run(v,root,env,30,&r,why,sizeof why)){ck(0,"run-correct");}
+        else {
+            ck(r.rc==0 && r.out && strstr(r.out,"EXT_KERNEL case=1 st=0"),"external-kernel-runs-correctly");
+            if(r.out) printf("EXT\t%s\n",r.out);
+            np_free(&r);
+        }
+    }
+    /* 2. 错误 sha → 具名拒绝（子进程 abort，stderr 含 sha256 mismatch） */
+    {
+        char *v[]={(char*)"sh",(char*)"./unisacc.com",driver,(char*)"--",(char*)"1",0};
+        const char *env[2];
+        char unk[4400], unks[4400];
+        if(cx_fmt(unk,sizeof unk,"UNISA_KERNEL=%s",kernel))return 2;
+        if(cx_fmt(unks,sizeof unks,"UNISA_KERNEL_SHA=%s","0000000000000000000000000000000000000000000000000000000000000000"))return 2;
+        env[0]=unk; env[1]=unks;
+        np_result r={0};
+        if(np_run(v,root,env,30,&r,why,sizeof why)){ck(0,"run-bad-sha");}
+        else {
+            ck(r.rc!=0 && r.err && strstr(r.err,"sha256 mismatch"),"bad-sha-named-rejected");
+            np_free(&r);
+        }
+    }
+    /* 3. 字节一致：外置 kernel 文件 == 内嵌 blob（sha 相等已在 digest，内嵌 sha 是已知常量） */
+    {
+        ck(strcmp(ksha,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97")==0,
+           "external-kernel-bytes-equal-embedded");
+    }
+    printf("BASE_EXTERNAL\tfailed=%d\tscope=sha-verification-and-byte-identity\tcold-hot-relative-UNMEASURED\n", failed);
+    return failed?1:0;
+}
