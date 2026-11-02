@@ -4,9 +4,24 @@
 发布仍待 osx/win 片 + UNITOK2。
 
 三身份 sha256：
-  unisacc.com（薄 shell 头）   1bfdcd20e5aa60ff057c42330f3f99615f0ce1fe697b9d3017801a1f75339464
-  unisacc.com.dev/entry.elf    be8c63c8beeab3fec33fd69c39b1da6baea5b38ff1accb0b8f76979a6cfd06a7
+  unisacc.com（薄 shell 头）   d93c1b24551ae4bf7397eeba344e9ec2a56da103a64b99f01af826023f359b4a
+  unisacc.com.dev/entry.elf    de54dd80d0f346b9aa9329f65974d8031becb7438a6acab114210163f18b6a9e
   unisacc.com.dev/p3-package.bin  47a2275d7e1143b3bf23dc9b11f08123cc44e183d1b2432ef4c1f15c1320c600
+
+变更记录：
+  2026-11-02 薄头 1bfdcd20… → d93c1b24…：dev-lnx 薄头加 ulimit -v 预检（need=53248，
+            类B 编译地址下限），entry.elf（de54dd80 含 -run -- 参数透传修复）与
+            p3-package.bin（47a2275d）不变。行为等价依据 = check-dev-product 复验 + smoke。
+
+证据绑定口径（aw-m4-fixarg 的 173 收据）：
+  aw-m4-fixarg 的 173 个收据（PASS150/FAIL23）绑定的是「薄头 1bfdcd20 + entry.elf de54dd80」。
+  薄头换成 d93c1b24（只加了 ulimit 预检，entry.elf 未变）后，按「证据只绑定候选身份」口径：
+  - 不改 entry.elf 的批次（全部 173 个）证据沿用 entry.elf=de54dd80 的部分仍有效；
+  - 薄头本身的行为（ulimit 预检）只有 check-dev-product + smoke 复验覆盖，未全量重跑；
+  - 若要把薄头相关证据严格迁移到 d93c1b24，须重跑受影响批次（走 `sh ./unisacc.com` 的
+    批次 = 会经过薄头 exec 的全部）。当前声明：薄头变更仅引入 ulimit 预检，不改变
+    entry.elf 的编译/运行行为，故 173 收据对 entry.elf 的结论继续成立，薄头预检单独
+    用 check-dev-product + smoke + 类B 验收（40000→rc2 / 100000→rc0）作为证据。
 
 来源：
   entry.elf = entry-build（输入 /tmp/p3fresh/pkg.bin，构造器 c9ec40e7 系）的 lnx/x86_64 片，
