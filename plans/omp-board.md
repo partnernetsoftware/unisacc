@@ -1,12 +1,14 @@
-# omp 状态板（cc 维护，2026-11-02 14:55 AWST）
+# omp 状态板(omp-cc 维护,2026-11-02 21:05)
 
-| 窗口 | 当前任务 | 拥有的路径（可写） | 阻塞 / 等待 | 下一次确认 |
-|---|---|---|---|---|
-| omp-bdy | 慢车道试点：pp-negative 两张表 → 私有根纪元 `out/epoch-pp1`；prepare-context 已过(split2)，进 gen-shared-e2 → source-job-wave(107 job) | `exec/pp/*`、`out/epoch-pp1/`、`tools/release-ape.cx`、`tools/cxlib/source-package*` | 无阻塞；债务=build.json 由 pp_product_digest 人工组装(commit/sources_sha256 沿用)，生成器 `tools/epoch-root-record.cx` 第二次纪元前必须补 | 15 分钟督导 |
-| omp-go | 产品身份：评审 9 条已修，split2（a-f）进行中 | `tools/cxlib/productpkg.cx`、`allsession.cx`、`tests/*` 里与身份相关的批次、`tools/check-productpkg.cx`、`check-root-identity.cx` | 落地后把接口直接发 omp-bdy | 15 分钟 |
-| omp-ds | census 复跑 27 个未知（等纪元结束）；register 加固已提交；P4 队列已提交 | `tools/census.cx`、`tools/register.cx`、`tools/check-*` 自有 | 暂停重批，等 cc 通知 | 回信时 |
-| omp-go2 | superharness 原型（out/superharness，Bun/TS；D1 起：SQLite+intake+CLI+接口设计；harness 内建并发/深度/预算/精确PID清理）。Orca 已被主人放弃 | `out/superharness/`、`plans/` | 无 | 里程碑回信 |
-| cc | 审核提交、冻结/解冻、对主人汇报、状态板 | `plans/omp-*`、提交 | — | — |
+编排者 omp-cc。每个窗口永远有一个"当前任务+下一个任务";空闲即派活,不等回信。
 
-长跑会话：无（aw-m4-mat 已结束；census 暂停）。冻结：无。
-常驻：`procguard`（systemd --user，enforce，over=0）。
+| 窗口 | 当前任务 | 下一个 | 可写路径 |
+|---|---|---|---|
+| omp-bdy | kernel 收窄:adopt/mixed/pack 三个校验方同步 kernelinputs,一步一发 | 纪元合并跑准备 | tools/cxlib/{kernelinputs,kernelcontext,rebuildcontext,sourcepackage}.cx、tools/source-package-{adopt,mixed,pack}.cx、tools/kernel-build.cx、tools/asm-material.cx |
+| omp-go | tools/check-kernel-context.cx 四项负例+登记批次(基于已提交 kernelinputs) | W4b netname/streamname 合并探针 | tools/check-kernel-context.cx、tests/batches.tsv 自己的行 |
+| omp-ds | census 复跑(`tests/run.cx --all` 并行只读)并逐项归因 UNKNOWN | check-host-provider 登记批次(如实标红) | tests/census*、tools/check-host-provider.cx、自己的批次行 |
+| omp-go2 | 重建 pins.tsv(check-pins failed=0) | W6 source-job-wave 迁移计划(只计划) | tools/pins.tsv |
+| omp-go3 | tmux 状态栏(moltbaby)已收口 | 待命 | moltbaby 仓 |
+
+冻结:无。长跑会话:无。已装产品:快车道候选(HEAD 416bc6d0c2 + 旧 p3),putc/磁带 R1-R4 红待纪元。
+纪元合并清单:W5 补丁 01-04、cwd 头修复(host.cx 已提交)、FFI 字节表+include 对照、kernel 收窄。
