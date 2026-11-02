@@ -1,4 +1,12 @@
-/* tools/check-register.cx -- the registry lock in tools/register.cx.
+/* tools/check-register.cx -- the registry lock in tools/register.cx, on a PRIVATE copy of the tables.
+ *
+ *   sh ./unisacc.com tools/check-register.cx
+ *
+ * The fixture rows never touch tests/batches.tsv and tests/coverage.tsv: the check copies them into
+ * out/check-register-tables-PID/tests, points the register calls at that copy with UNISACC_TABLES, and
+ * asserts byte-for-byte on the copy.  The real tables are asserted unchanged at the end, so a concurrent
+ * registration lane can no longer make this check fail by writing in the same window (2026-11-02: one
+ * such false FAIL).  DRIVER = the register under test (tools/register.cx).
  *
  *   sh ./unisacc.com tools/check-register.cx
  *
@@ -22,7 +30,8 @@
 #pragma unisa use text.fmt
 
 static int failed, checks;
-static char root[4096], fx[4400], bpath[4400], cpath[4400];
+static char root[4096], fx[4400], bpath[4400], cpath[4400], tables[4400], rbpath[4400], rcpath[4400], envtables[4440];
+#define DRIVER "tools/register.cx"
 
 static void ok(int c, const char *what) {
     checks++;
@@ -107,28 +116,60 @@ static void rows(char *b, size_t bn, char *c, size_t cn, const char *id, const c
     if (cx_fmt(c, cn, "interfaces.%s\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", id, text, fx)) die("row bound", id);
 }
 
-/* ARGV for one register call; STORE holds the strings */
+/* copy SRC over DST byte for byte; 0 on success */
+static int copy_file(const char *src, const char *dst) {
+    size_t n = 0; char *b = cx_read(src, &n); FILE *f; int bad = 0;
+    if (!b) return 1;
+    f = fopen(dst, "wb");
+    if (!f) { free(b); return 1; }
+    if (fwrite(b, 1, n, f) != n) bad = 1;
+    if (fclose(f) != 0) bad = 1;
+    free(b);
+    return bad;
+}
+
+/* ARGV for one register call; the environment carries the private table directory into the child
+   (the runtime's setenv is in-process only, so env(1) is the way a child sees a variable). */
 static void reg_argv(char **av, const char **store, const char *id, const char *marker, const char *text) {
     (void)store;
-    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/register.cx"; av[3] = "--";
-    av[4] = (char *)id; av[5] = fx; av[6] = (char *)marker; av[7] = (char *)text; av[8] = fx; av[9] = "interfaces"; av[10] = 0;
+    av[0] = "env"; av[1] = (char *)envtables; av[2] = "sh"; av[3] = "./unisacc.com"; av[4] = DRIVER; av[5] = "--";
+    av[6] = (char *)id; av[7] = fx; av[8] = (char *)marker; av[9] = (char *)text; av[10] = fx; av[11] = "interfaces"; av[12] = 0;
 }
 
 int main(void) {
     static char abuf[1 << 15], bbuf[1 << 15];
-    char *av0[12], *av1[12], *v[2] = { av0, av1 };
+    char *av0[16], *av1[16], *v[2] = { av0, av1 };
     const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
     char rowsb[4][4096], rowsc[4][4096];
     long before_b, before_c;
-    char orig_hb[65], orig_hc[65];
+    char orig_hb[65], orig_hc[65], real_hb[65], real_hc[65];
     int i, j;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
-    pjoin(bpath, sizeof bpath, root, "tests/batches.tsv");
-    pjoin(cpath, sizeof cpath, root, "tests/coverage.tsv");
+    pjoin(rbpath, sizeof rbpath, root, "tests/batches.tsv");
+    pjoin(rcpath, sizeof rcpath, root, "tests/coverage.tsv");
+    {   /* the private table directory: everything below works on this copy, never on the shared tables */
+        char hold[4400];
+        if (cx_fmt(hold, sizeof hold, "%s/out/check-register-tables-%d", root, (int)sy_pid())) die("path bound", "tables");
+        if (cx_fmt(tables, sizeof tables, "%s/tests", hold)) die("path bound", "tables");
+        {   int r = sy_mkdir(hold, 0700); if (r < 0 && r != -EEXIST) die("mkdir", hold); }
+        {   int r = sy_mkdir(tables, 0700); if (r < 0 && r != -EEXIST) die("mkdir", tables); }
+    }
+    pjoin(bpath, sizeof bpath, tables, "batches.tsv");
+    pjoin(cpath, sizeof cpath, tables, "coverage.tsv");
+    {   /* the children run with cwd=root, so a repo-relative table directory is enough and keeps
+           tests/run.cx on its verified relative branch */
+        char rel[4400];
+        if (cx_fmt(rel, sizeof rel, "out/check-register-tables-%d/tests", (int)sy_pid())) die("path bound", "rel");
+        if (cx_fmt(envtables, sizeof envtables, "UNISACC_TABLES=%s", rel)) die("path bound", "env");
+    }
+    if (copy_file(rbpath, bpath) || copy_file(rcpath, cpath)) die("cannot copy the registry", tables);
     before_b = count_all(bpath); before_c = count_all(cpath);
     if (before_b < 1 || before_c < 1) die("empty registry", 0);
     {   size_t n = 0; char *b = cx_read(bpath, &n); if (!b) die("read", bpath); cx_sha256_hex(b, (long)n, orig_hb); free(b);
         b = cx_read(cpath, &n); if (!b) die("read", cpath); cx_sha256_hex(b, (long)n, orig_hc); free(b);
+    }
+    {   size_t n = 0; char *b = cx_read(rbpath, &n); if (!b) die("read", rbpath); cx_sha256_hex(b, (long)n, real_hb); free(b);
+        b = cx_read(rcpath, &n); if (!b) die("read", rcpath); cx_sha256_hex(b, (long)n, real_hc); free(b);
     }
 
     /* fixture: tools/register-fixture.cx is a real SOURCE entry (registry source paths must be tools/,
@@ -180,15 +221,16 @@ int main(void) {
         b = cx_read(cpath, &n); cx_sha256_hex(b, (long)n, hb2); free(b);
         {   int holder = fork();
             if (holder == 0) {
-                int fd = sy_open("tests/.register.lock", O_RDWR | O_CREAT, 0666);
-                long z;
+                char lp[4400]; int fd; long z;
+                pjoin(lp, sizeof lp, tables, ".register.lock");
+                fd = sy_open(lp, O_RDWR | O_CREAT, 0666);
                 if (fd < 0 || sy_flock(fd, 2) != 0) _exit(3);
                 for (z = 0; z < 600; z++) usleep(5000);   /* hold for 3 s */
                 _exit(0);
             }
             usleep(250000);   /* let the holder take it */
             {   { char out[1 << 15]; int rc;   /* env(1) carries the shortened wait into register.cx */
-                    char *w[13] = { "env", "REGISTER_LOCK_MS=300", "sh", "./unisacc.com", "tools/register.cx", "--",
+                    char *w[14] = { "env", "REGISTER_LOCK_MS=300", envtables, "sh", "./unisacc.com", DRIVER, "--",
                                     "cr-e", fx, "REGISTER_FIXTURE_OK", "lock timeout row", fx, "interfaces", 0 };
                     rc = run(w, out, sizeof out);
                     ok(rc == 2, "a held lock fails the caller with exit 2");
@@ -202,6 +244,39 @@ int main(void) {
             ok(!strcmp(h, hb1), "batches.tsv is untouched by the timeout"); }
         {   char h[65]; size_t m = 0; char *b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
             ok(!strcmp(h, hb2), "coverage.tsv is untouched by the timeout"); }
+    }
+
+    /* case 5: refusals exit 2 by name and write nothing -- an existing ID, a missing CHECK, an empty
+       MARKER, a TAB in a field.  These are the interfaces.cx-register coverage row's own assertions (merged
+       from register-tool); the fixture
+       runs them on the private copy, so a refusal can never leave a row behind in the shared tables. */
+    {   char h1[65], h2[65], out[1 << 15]; int rc;
+        size_t n = 0; char *b = cx_read(bpath, &n); cx_sha256_hex(b, (long)n, h1); free(b);
+        b = cx_read(cpath, &n); cx_sha256_hex(b, (long)n, h2); free(b);
+        {   char *a[16] = { "env", envtables, "sh", "./unisacc.com", DRIVER, "--", "cr-a", fx,
+                             "REGISTER_FIXTURE_OK", "duplicate id row", fx, "interfaces", 0 };
+            rc = run(a, out, sizeof out);
+            ok(rc == 2 && strstr(out, "already registered"), "an existing ID is refused by name and exits 2");
+        }
+        {   char *a[16] = { "env", envtables, "sh", "./unisacc.com", DRIVER, "--", "cr-f",
+                             "tools/no-such-check.cx", "REGISTER_FIXTURE_OK", "missing check row", fx, "interfaces", 0 };
+            rc = run(a, out, sizeof out);
+            ok(rc == 2 && strstr(out, "no such check"), "a missing CHECK file is refused by name and exits 2");
+        }
+        {   char *a[16] = { "env", envtables, "sh", "./unisacc.com", DRIVER, "--", "cr-g", fx,
+                             "", "empty marker row", fx, "interfaces", 0 };
+            rc = run(a, out, sizeof out);
+            ok(rc == 2 && strstr(out, "empty field"), "an empty MARKER is refused by name and exits 2");
+        }
+        {   char *a[16] = { "env", envtables, "sh", "./unisacc.com", DRIVER, "--", "cr-h", fx,
+                             "REGISTER_FIXTURE_OK", "bad\tfield", fx, "interfaces", 0 };
+            rc = run(a, out, sizeof out);
+            ok(rc == 2 && strstr(out, "empty field"), "a TAB in a field is refused by name and exits 2");
+        }
+        {   char h[65]; size_t m = 0; char *b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, h1), "no refused call appended a batch row"); }
+        {   char h[65]; size_t m = 0; char *b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, h2), "no refused call appended a coverage row"); }
     }
 
     /* cleanup: remove exactly our own rows, then require the originals back byte for byte */
@@ -219,6 +294,15 @@ int main(void) {
             ok(!strcmp(h, orig_hc), "coverage.tsv restored byte for byte (other lanes' rows intact)"); }
         for (i = 0; i < 4; i++) {
             if (count_lines(bpath, ids[i]) || count_lines(cpath, ids[i])) { failed++; checks++; printf("FAIL\tresidue row %s\n", ids[i]); break; }
+        }
+        {   char h[65]; size_t m = 0; char *b = cx_read(rbpath, &m); cx_sha256_hex(b, (long)m, h); free(b);
+            ok(!strcmp(h, real_hb), "tests/batches.tsv was never written (the fixture used a private copy)"); }
+        {   char h[65]; size_t m = 0; char *b = cx_read(rcpath, &m); cx_sha256_hex(b, (long)m, h); free(b);
+            ok(!strcmp(h, real_hc), "tests/coverage.tsv was never written (the fixture used a private copy)"); }
+        {   char p[4400]; if (!cx_fmt(p, sizeof p, "%s/batches.tsv", tables)) sy_unlink(p);
+            if (!cx_fmt(p, sizeof p, "%s/coverage.tsv", tables)) sy_unlink(p);
+            if (!cx_fmt(p, sizeof p, "%s/.register.lock", tables)) sy_unlink(p);
+            if (sy_rmdir(tables) != 0) { checks++; failed++; printf("FAIL\tprivate copy not removed\n"); }
         }
     }
     printf("CX_REGISTER\tchecks=%d\tfailed=%d\n", checks, failed);

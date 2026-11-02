@@ -19,7 +19,12 @@
  * row).  The batch run itself is outside the lock (it only reads the row) and the rollback takes it back:
  * a registered check that registers too would otherwise wait on a lock its own parent holds.  Waiting is capped at REGISTER_LOCK_MS (default and maximum 45000) and a timeout is
  * a named failure, not a silent retry loop.  The lock fd is close-on-exec so run.cx/run-batch cannot inherit
- * it.  Rollback removes exactly this call's two line contents and leaves every other line alone. */
+ * it.  Rollback removes exactly this call's two line contents and leaves every other line alone.
+ *
+ * UNISACC_TABLES names the table directory (default tests): the two tables, their lock, and the tables that
+ * tests/run.cx --list and tests/run-batch.cx read all move together.  A check that registers fixtures points
+ * it at a private copy, so its fixture rows never meet another lane's writes (the byte-for-byte restore
+ * assertions of tools/check-register.cx cannot hold while a third party appends in the same window). */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
@@ -32,20 +37,26 @@ static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s
 /* the registry lock: exclusive flock on tests/.register.lock, waited for at most REGISTER_LOCK_MS
    (default 45000, also the maximum: a longer wait means the holder is not making progress and the
    caller should be told so by name).  Returns the held fd; releases are just sy_flock(UN)+close. */
-#define RG_LOCK "tests/.register.lock"
+/* The two tables live in tests/ unless UNISACC_TABLES names another directory.  A check that registers
+   fixtures then works on a private copy instead of racing every other registration lane on the real
+   files (the byte-for-byte restore assertions cannot hold while someone else appends). */
+static const char *rg_tdir(void) { const char *e = getenv("UNISACC_TABLES"); return e && *e ? e : "tests"; }
+static const char *rg_bpath(void) { static char p[4400]; if (tx_snprintf(p, sizeof p, "%s/batches.tsv", rg_tdir()) >= (int)sizeof p) rg_die("path bound", "batches.tsv"); return p; }
+static const char *rg_cpath(void) { static char p[4400]; if (tx_snprintf(p, sizeof p, "%s/coverage.tsv", rg_tdir()) >= (int)sizeof p) rg_die("path bound", "coverage.tsv"); return p; }
+static const char *rg_lockpath(void) { static char p[4400]; if (tx_snprintf(p, sizeof p, "%s/.register.lock", rg_tdir()) >= (int)sizeof p) rg_die("path bound", "lock"); return p; }
 static long rg_lock_ms(void) {
     const char *e = getenv("REGISTER_LOCK_MS"); long v = e ? atol(e) : 45000;
     return v < 100 ? 100 : v > 45000 ? 45000 : v;
 }
 static int rg_lock(void) {
-    long ms = rg_lock_ms(), waited = 0; int fd = sy_open(RG_LOCK, O_RDWR | O_CREAT, 0666), r;
-    if (fd < 0) rg_die("cannot open lock", RG_LOCK);
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { sy_close(fd); rg_die("cannot mark lock close-on-exec", RG_LOCK); }
+    long ms = rg_lock_ms(), waited = 0; int fd = sy_open(rg_lockpath(), O_RDWR | O_CREAT, 0666), r;
+    if (fd < 0) rg_die("cannot open lock", rg_lockpath());
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { sy_close(fd); rg_die("cannot mark lock close-on-exec", rg_lockpath()); }
     for (;;) {
         r = sy_flock(fd, 2 | 4);   /* exclusive, do not wait */
         if (r == 0) return fd;
-        if (r != -EWOULDBLOCK && r != -EINTR) { sy_close(fd); rg_die("cannot flock", RG_LOCK); }
-        if (waited >= ms) { sy_close(fd); fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", RG_LOCK, ms); exit(2); }
+        if (r != -EWOULDBLOCK && r != -EINTR) { sy_close(fd); rg_die("cannot flock", rg_lockpath()); }
+        if (waited >= ms) { sy_close(fd); fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", rg_lockpath(), ms); exit(2); }
         sy_sleep_ms(50); waited += 50;
     }
 }
@@ -116,12 +127,12 @@ int main(int argc, char **argv) {
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
-    if (has_key("tests/batches.tsv", id)) rg_die("batch already registered", id);
-    if (has_key("tests/coverage.tsv", cid)) rg_die("coverage row already present", cid);
+    if (has_key(rg_bpath(), id)) rg_die("batch already registered", id);
+    if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
     if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\n", id, layer, check, check, cid, marker) >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
-    if (append("tests/batches.tsv", brow)) rg_die("cannot append", "tests/batches.tsv");
-    if (append("tests/coverage.tsv", crow)) { take_out("tests/batches.tsv", brow); rg_die("cannot append", "tests/coverage.tsv"); }
+    if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());
+    if (append(rg_cpath(), crow)) { take_out(rg_bpath(), brow); rg_die("cannot append", rg_cpath()); }
     {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
         rc = run(v, buf, sizeof buf);
         okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
@@ -149,7 +160,7 @@ int main(int argc, char **argv) {
     if (!okrun) {
         int t1, t2;
         lk = rg_lock();   /* the rollback reads and rewrites both files: take the span back */
-        t1 = take_out("tests/batches.tsv", brow); t2 = take_out("tests/coverage.tsv", crow);
+        t1 = take_out(rg_bpath(), brow); t2 = take_out(rg_cpath(), crow);
         rg_unlock(lk);
         printf("REGISTER\tid=%s\tstatus=ROLLED_BACK\trows_removed=%d\n", id, (!t1) + (!t2));
         return 1;

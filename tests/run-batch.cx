@@ -11,6 +11,15 @@ static char root[4096],parent[4096],work[4400],candidate[4400];
 static void die(const char *s){fprintf(stderr,"run-batch: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void path(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path bound");}
 static void copy(char *out,size_t cap,const char *s){size_t n=strlen(s);if(n>=cap)die("field bound");memcpy(out,s,n+1);}
+/* UNISACC_TABLES names the table directory (default tests).  A check that registers fixtures points it at a
+   private copy, so its fixture rows never meet another lane's registration; the run of every batch then reads
+   the same copy.  Absolute paths are used as given, relative ones are joined to the repository root. */
+static const char *tdir(void){const char *e=getenv("UNISACC_TABLES");return e&&*e?e:"tests";}
+static void table_path(char *out,size_t cap,const char *name){
+    const char *td=tdir();
+    if(td[0]=='/'){if(cx_fmt(out,cap,"%s/%s",td,name))die("path bound");return;}
+    {   char rel[4400];if(cx_fmt(rel,sizeof rel,"%s/%s",td,name))die("path bound");path(out,cap,root,rel);}
+}
 static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
 static void batch(const tp_batch_view *v,void *opaque){(void)opaque;if(!tx_eqz(v->id, selected.id))return;if(selected.found++)die("duplicate selected batch");
  copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);selected.source_present=v->source_present;}
@@ -30,7 +39,7 @@ int main(int argc,char **argv){
  if(argc<4){fputs("usage: ROOT ABS_OUT_PARENT BATCH_ID [material=ABS_PATH ...]\n",stderr);return 2;}
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||!tx_eqz(argv[1], root)||!tx_eqz(argv[2], parent))die("canonical root and output parent");
  char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eqz(parent, canonical))die("output parent must be below root/out");
- copy(selected.id,sizeof selected.id,argv[3]);path(registry,sizeof registry,root,"tests/batches.tsv");path(coverage_path,sizeof coverage_path,root,"tests/coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
+ copy(selected.id,sizeof selected.id,argv[3]);table_path(registry,sizeof registry,"batches.tsv");table_path(coverage_path,sizeof coverage_path,"coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
  if(!tx_eqz(selected.platform, "lnx/x86_64"))die("batch requires another native host");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
  path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];digest(candidate,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
  char entry[4400];if(tx_eqz(selected.mode, "SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
@@ -38,6 +47,9 @@ int main(int argc,char **argv){
  if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-4]);args[na]=storage[na-4];na++;if(!end)break;at=end+1;}}
  if(np_subreaper()<0)fprintf(stderr,"run-batch: no child-subreaper\n");   /* orphans of a killed tree land here, not on init */
  args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds,&result,reason,sizeof reason);digest(candidate,after);
+ /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
+    caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
+ if(transport){int st;while(waitpid(-1,&st,WNOHANG)>0);}
  if(result.outn)fwrite(result.out,1,result.outn,stdout);if(result.errn)fwrite(result.err,1,result.errn,stderr);
  int ok=!transport&&!result.rc&&tx_eqz(before, after)&&!strncmp(selected.expect,"rc0:",4)&&marker(result.out,result.outn,selected.expect+4)==1;
  /* the batch's own bound expired: not a verdict, never PASS; the process group was killed and it must rerun */

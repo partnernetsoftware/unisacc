@@ -132,3 +132,23 @@ printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\n", batch[ch[k].bi].id, sv)
 - D：正常路径不变：退出码 `rc=7` 透传、stdout/stderr 分别捕获、错误 cwd 走 `FileNotFoundError:`、被信号杀死报 `-9`。
 
 结论：P2 的超时分支不必改协议；新增的 `residue` 只有在 `run-batch` 设了 subreaper 后才有“0 即干净”的含义，两者同一提交落地。
+
+## 草稿实测补充 2（2026-11-02，P2b 抽取 + e2stream + netpack）
+
+抽取方案已在 `out/p2-draft/` 落地并各自实跑：`sys/reaper.cx` 承载原 `kt_*` 块（导出 `rp_kill_tree`/`rp_subreaper`），`sys/process.cx` 只留两行包装 `sy_kill_tree`/`sy_child_subreaper`（对外接口不变），`cxlib.netpack.cx` 与 `cxlib.e2stream.cx` 各 `#pragma unisa use reaper`。
+
+- **为什么必须抽模块**：`cxlib.netpack` 与 `sys.process` 同程序不可并存（`np_buf/np_result/np_run` 重复定义，已实测报错），所以 netpack 只能引一个不含 np_* 的第三方模块。裸名 `use reaper` 在 `cx/sys/` 内解析为同目录 `reaper.cx`；`tools/cxlib/netpack.cx` 用文件符号链接 `tools/cxlib/reaper.cx -> ../../cx/sys/reaper.cx`（先例 `tools/cxlib/codec.cx`）。
+- **重复编译无风险**：两模块本就互斥，任何程序只经一条路径引入 reaper；`rp_kill_tree` 不会被链两次。
+- **`check-reaper.cx` 对草稿全绿**：`sh ./unisacc.com out/p2-draft/check-reaper.cx` → `CX_REAPER ok=12 failed=0`，说明抽取是 drop-in。
+- **netpack 草稿**：`out/p2-draft/netpack-contract.cx` 12 断言全绿——子进程 `setpgid`、超时 `rp_kill_tree(pid,2000,0,0,…)`、`np_result.residue`、前缀/时长文本逐字不变、`residue>0` 才追加 ` (pid(start) survived)`、`setsid` 后代被杀、cwd 错误仍走 `FileNotFoundError:`。
+- **e2stream 草稿**：`out/p2-draft/e2-contract.cx` 9 断言全绿（经 `out/p2-draft/e2-child.cx` 实跑）：超时 `e2s_raise` exit 1、前缀/时长不变、无 survivor 后缀、`setsid` 后代被杀、正常路径 rc/stdout/stderr 与"子进程非零 rc 是数据"都不变。**e2stream 原来连进程组都没杀（只有 `kill(pid)`）**，本次同时加上 `setpgid`。
+- **`e2s_*` 前置条件**：`e2s_run` 前必须 `e2s_start(file, prefix, root, cap, td, cap)`；未初始化时捕获文件落在 `/.capture-out` → `PermissionError`。
+
+## 草稿实测补充 3（2026-11-02，P3 affected + 默认并行）
+
+- **默认并行 = 核数（上限 8）**：新增 L0 `sy_ncpu()`（`cx/sys/process.cx` 内 `np_ncpu_os()` 读 `/sys/devices/system/cpu/cpu[0-9]*`，非 Linux 返回 -1，调用方自定回退 4）。实测 `ncpu=16` → `RUN_DIR … jobs=8`，`-j N` 仍是 1..8。
+- **`kill_tree` 换实现**：删掉 `pgrep -P` 广度遍历（`tools/affected.cx:322-341`），改 `sy_kill_tree(pid, 2000, keep, nkeep, rep, cap)`，`keep` = 其余在跑子进程 pid（兄弟作业不会被一次截止误杀），`<0` 回退旧组杀；`hard_deadline` 行的输出只在有残留时多两列：`DEFERRED\tID\tkilled-at-deadline\tresidue=N\tsurvived=pid(start)`，无残留时形状与现在逐字相同（`check-affected.cx` 的 `start-deadline` 断言不受影响）。
+- **`run()` 开头 `sy_child_subreaper()`**：`out/p2-draft/subreaper-probe.cx` 5 断言证明——设了 subreaper 时任务内双 fork 的后代（`setsid sh -c 'sleep 300 &'`）被 reparent 到本进程，被 sweep 杀掉且 `residue=0`；`--no-subreaper` 反向用例给出 `residue=0` 而后代仍活，正是"0 说谎"的实证。
+- **affected 端到端**：`out/p2-draft/affected.cx -- --ids cx-register cx-reaper --run` → `pass=2 fail=0 jobs=8`；`--hard-deadline-ms 1000` → `DEFERRED cx-register killed-at-deadline`（无残留列）+ `AFFECTED_RUN pass=1 fail=1 deferred=1`。
+- **环境噪声（非本改动）**：一次并行跑里 `cx-register` FAIL，原因是**别的车道同时写 `tests/*.tsv`**，`check-register` 的"启动快照逐字节复原"被第三方写入打断；同一命令重跑 `pass=2 fail=0`。切换后跑该批次时不得与其他注册写者并发。
+- **`residue>0` 的输出分支无法构造**（SIGKILL 停不住；冻结后集合不再变大），该分支只有 `sy_kill_tree` 直调用例覆盖（见回归清单 #3），日志列保持 **UNMEASURED**。
