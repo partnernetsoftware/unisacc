@@ -40,6 +40,19 @@ static void skip(const char *name, const char *why) {
     printf("SKIP\t%s\t%s\n", name, why);
 }
 
+/* The "candidate unchanged" guard the suite uses today hashes one path. Under the split layout
+   that path is the 624-byte launcher, so a batch can rewrite the megabyte package and still look
+   unchanged. This case states that as an assertion on purpose: it must FAIL until the identity is
+   the whole member set, and it is the proof that the hole was real. */
+static void file_digest(const char *p, char h[65]) {
+    size_t n = 0;
+    char *s = cx_read(p, &n);
+    h[0] = 0;
+    if (!s) return;
+    cx_sha256_hex(s, n, h);
+    free(s);
+}
+
 static void die(const char *what) {
     fprintf(stderr, "check-productpkg: %s\n", what);
     exit(2);
@@ -78,6 +91,27 @@ int main(void) {
         ok(rc == 0 && tx_find(out, "0.0.43") >= 0, "copy-runs");
         if (cx_fmt(entry, sizeof entry, "%s/unisacc.com.dev/entry.elf", dst)) die("entry path");
         ok(sy_exists(entry) == 1, "copy-has-entry");
+    }
+
+    {   /* step 0 of plans/product-identity-2026-11-02.md: the guard as it exists today */
+        char g[4400], gl[4400], gp[4400], h1[65], h2[65];
+        size_t n = 0;
+        char *b;
+        int copied;
+        if (cx_fmt(g, sizeof g, "%s/guard", work)) die("guard dir");
+        copied = pp_copy_product(root, g) == 0;
+        ok(copied, "guard-copy-ok");
+        if (cx_fmt(gl, sizeof gl, "%s/unisacc.com", g)) die("guard launcher");
+        if (cx_fmt(gp, sizeof gp, "%s/unisacc.com.dev/p3-package.bin", g)) die("guard package");
+        if (!tx_eqz(pp_layout_name(pp_layout(root)), "split")) ok(1, "guard-sees-the-package");
+        else {
+            file_digest(gl, h1);
+            b = cx_read(gp, &n);
+            if (b && n > 1) { b[n / 2] = (char)(b[n / 2] ^ 1); cx_write(gp, b, n); }
+            free(b);
+            file_digest(gl, h2);
+            ok(!tx_eqz(h1, h2), "guard-sees-the-package");
+        }
     }
 
     {   /* A product that ships its receipt must be copied from the receipt, not from the
