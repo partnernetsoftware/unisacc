@@ -1,0 +1,408 @@
+/* coreapi.cx -- ratchet: the frozen core interface (plans/core-interface-2026-11-02.md).
+ *
+ *   sh ./unisacc.com tests/coreapi.cx -- --check | --write | --init | --fixtures   (from the repo root)
+ *
+ * The module set is tests/cx-module-freeze.tsv (the frozen core modules). A module's exported interface is
+ * every top-level definition symindex records as non-static (a D row whose static column is 0): exactly
+ * what `#pragma unisa use` can see. tests/core-interface.tsv holds the contract, one row per exported
+ * symbol:
+ *
+ *   PATH<TAB>SYMBOL<TAB>SIGNATURE<TAB>MARK
+ *
+ * SIGNATURE is the declaration text with whitespace collapsed and the spaces around ',' and '*' dropped,
+ * so `const char *src` and `const char* src` are the same contract. MARK is '-' or
+ *   DUAL-IMPL linked=PATH     one symbol, one signature, two implementations (PATH is the one the product
+ *                             links); tools/check-core-run-diff.cx proves they behave the same
+ *   DEPRECATED-ALIAS sites=N  a compatibility alias: it may be deleted, and no new caller may appear
+ *                             (N is the number of .cx caller files outside its own definition file)
+ *
+ * Three reds, at most one per symbol:
+ *   CORE-MISSING  a baseline row whose symbol no frozen module defines any more (deletion is legal; the
+ *                 row is dropped with --write, which is the audit trail)
+ *   CORE-NEW      a non-static definition with no baseline row (growing the interface needs review)
+ *   CORE-SIG      a symbol whose current signature differs from the baseline text
+ * plus CORE-ALIAS-CALLERS when more .cx files call a DEPRECATED-ALIAS row than its sites=N allows.
+ *
+ * --check fails on any of them. --write rewrites the baseline from the code: it keeps the MARK of every
+ * symbol that survives, prints every row it adds (the review point) and drops rows whose symbol is gone.
+ * --init writes the first baseline and is refused when the file exists. --fixtures builds throwaway
+ * fixture roots under out/ and proves red-then-green for every red, so a green run is never green by
+ * construction. Nothing here caches a verdict. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.num
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.process
+
+#define FREEZE "tests/cx-module-freeze.tsv"
+#define BASE "tests/core-interface.tsv"
+#define MAXMOD 256
+#define MAXSYM 8192
+#define P 4400
+
+typedef struct { char *sym; char *sig; char *path; } Def;
+typedef struct { char *path; char *sym; char *sig; char *mark; int used; } Row;
+static Def defs[MAXSYM]; static int ndefs;
+static Row rows[MAXSYM]; static int nrows;
+static char *mods[MAXMOD]; static int nmods;
+static const char *root = ".";
+static char base[P];   /* absolute repo root: the product and every child path is absolute, so a child cwd never matters */
+static const char *prod = "./unisacc.com";
+static int red_missing, red_new, red_sig, red_alias;
+static int show_reds = 1;
+
+static void die(const char *s) { sy_eprintf("coreapi: %s\n", s); sy_exit(2); }
+static char *dup_n(const char *s, long n) { char *d = mm_alloc((size_t)n + 1); if (!d) die("out of memory"); tx_copy(d, (size_t)n + 1, s, n); d[n] = 0; return d; }
+static char *dup0(const char *s) { return dup_n(s, tx_len(s, 1 << 20)); }
+static char *join2(const char *a, const char *b, char *dst, size_t cap) { if (cx_fmt(dst, cap, "%s/%s", a, b)) die("path too long"); return dst; }
+static char *abs_path(const char *rel, char *dst, size_t cap) { if (cx_fmt(dst, cap, "%s/%s", base, rel)) die("path too long"); return dst; }
+
+/* Shard fields escape TAB, newline and backslash as \t, \n and \\ ; a multi-line declaration is one
+ * signature, so decode before the whitespace collapse. */
+static void unesc(char *dst, size_t cap, const char *s) {
+    size_t o = 0;
+    for (; *s && o + 1 < cap; s++) {
+        if (*s == '\\' && s[1]) {
+            char c = s[1];
+            s++;
+            dst[o++] = c == 't' ? '\t' : c == 'n' ? '\n' : c;
+        } else dst[o++] = *s;
+    }
+    dst[o] = 0;
+}
+
+/* Canonical signature: whitespace collapsed, then no space around ',' and '*'. */
+static void canon(char *dst, size_t cap, const char *s) {
+    char mid[1024]; size_t n = 0, i, o = 0; int space = 0;
+    for (i = 0; s[i] && n + 1 < sizeof mid; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { space = 1; continue; }
+        if (space && n > 0) mid[n++] = ' ';
+        space = 0;
+        mid[n++] = c;
+    }
+    for (i = 0; i < n && o + 1 < cap; i++) {
+        char c = mid[i];
+        if (c == ' ' && i + 1 < n && (mid[i + 1] == ',' || mid[i + 1] == '*')) continue;
+        if (c == ' ' && i > 0 && (mid[i - 1] == ',' || mid[i - 1] == '*')) continue;
+        dst[o++] = c;
+    }
+    dst[o] = 0;
+}
+
+static void load_mods(void) {
+    char path[P], *b; size_t n; long at = 0;
+    b = cx_read(join2(root, FREEZE, path, sizeof path), &n);
+    if (!b) die("cannot read " FREEZE);
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e, t;
+        const char *line = b + at;
+        at += l + 1;
+        if (l == 0 || line[0] == '#') continue;
+        t = tx_chr(line, l, '\t'); if (t > 0) l = t;
+        if (nmods == MAXMOD) die("too many frozen modules");
+        mods[nmods++] = dup_n(line, l);
+    }
+    mm_free(b);
+}
+
+static char *child(char **av, const char *what) {
+    np_result r = {0}; char why[512]; char *out; int tr = np_run((char *const *)av, base, 0, 50, &r, why, sizeof why);
+    if (tr) { sy_eprintf("coreapi: %s: %s\n", what, why); np_free(&r); die("child spawn failed"); }
+    if (r.rc) { if (r.errn) sy_write_all(2, r.err, r.errn); np_free(&r); die(what); }
+    out = dup_n(r.out ? (const char *)r.out : "", (long)r.outn);
+    np_free(&r);
+    return out;
+}
+
+static void dump_module(int mi, const char *idx) {
+    char *av[12]; int n = 0; char tool[P], mrel[P], adx[P], *txt, *line;
+    av[n++] = "sh"; av[n++] = (char *)prod; av[n++] = abs_path("tools/symindex.cx", tool, sizeof tool); av[n++] = "--";
+    av[n++] = "--index"; av[n++] = abs_path(idx, adx, sizeof adx); av[n++] = "dump";
+    av[n++] = join2(root, mods[mi], mrel, sizeof mrel); av[n] = 0;   /* repo-relative: the index key is the tracked path */
+    txt = child(av, mods[mi]);
+    for (line = txt; *line; ) {
+        char *e = line, *f[10]; int nf = 0, more; char *q;
+        while (*e && *e != '\n') e++;
+        more = *e == '\n';
+        f[nf++] = line;
+        for (q = line; q < e && nf < 10; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+        *e = 0;
+        if (nf >= 8 && tx_eqz(f[0], "D") && tx_eqz(f[4], "0")) {
+            char raw[1024], sig[1024], t0[1024], t1[1024];
+            if (ndefs == MAXSYM) die("too many definitions");
+            unesc(t0, sizeof t0, f[6]);
+            unesc(t1, sizeof t1, f[7]);
+            if (cx_fmt(raw, sizeof raw, "%s %s", t0, t1)) die("signature too long");
+            canon(sig, sizeof sig, raw);
+            defs[ndefs].sym = dup0(f[1]);
+            defs[ndefs].sig = dup0(sig);
+            defs[ndefs].path = dup0(mods[mi]);
+            ndefs++;
+        }
+        line = more ? e + 1 : e;
+    }
+    mm_free(txt);
+}
+
+static int row_index(const char *sym) { int k; for (k = 0; k < nrows; k++) if (tx_eqz(rows[k].sym, sym)) return k; return -1; }
+
+static void load_base(void) {
+    char path[P], *b; size_t n; long at = 0;
+    b = cx_read(join2(root, BASE, path, sizeof path), &n);
+    if (!b) return;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e, t0, t1, t2;
+        const char *line = b + at;
+        at += l + 1;
+        if (l == 0 || line[0] == '#') continue;
+        t0 = tx_chr(line, l, '\t'); if (t0 < 0) continue;
+        t1 = tx_chr(line + t0 + 1, l - t0 - 1, '\t'); if (t1 < 0) continue; t1 += t0 + 1;
+        t2 = tx_chr(line + t1 + 1, l - t1 - 1, '\t'); if (t2 < 0) continue; t2 += t1 + 1;
+        if (nrows == MAXSYM) die("too many baseline rows");
+        rows[nrows].path = dup_n(line, t0);
+        rows[nrows].sym = dup_n(line + t0 + 1, t1 - t0 - 1);
+        rows[nrows].sig = dup_n(line + t1 + 1, t2 - t1 - 1);
+        rows[nrows].mark = dup_n(line + t2 + 1, l - t2 - 1);
+        rows[nrows].used = 0;
+        if (row_index(rows[nrows].sym) >= 0) die("duplicate baseline symbol");
+        nrows++;
+    }
+    mm_free(b);
+}
+
+/* .cx caller files of an alias outside its own definition file. */
+static int alias_callers(const char *sym, const char *defpath, const char *idx, const char *inlist) {
+    char *av[14]; int n = 0, callers = 0; char *txt, *line;
+    char adx[P], ali[P];
+    av[n++] = "sh"; av[n++] = (char *)prod; av[n++] = abs_path("tools/symindex.cx", ali, sizeof ali); av[n++] = "--";
+    av[n++] = "--index"; av[n++] = abs_path(idx, adx, sizeof adx);
+    if (inlist) { av[n++] = "--in"; av[n++] = (char *)inlist; }   /* a top-level option: only before the command */
+    av[n++] = "calls"; av[n++] = (char *)sym;
+    if (!inlist) { av[n++] = "--tracked"; }                       /* a calls-level option: only after NAME */
+    av[n] = 0;
+    txt = child(av, sym);
+    for (line = txt; *line; ) {
+        char *e = line, *tab = line; long fl, colon; int mine = 1;
+        while (*e && *e != '\n') e++;
+        while (tab < e && *tab != '\t') tab++;
+        fl = (long)(tab - line);                 /* FILE:LINE, absolute in a fixture root */
+        colon = tx_rchr(line, fl, ':');
+        if (colon > 0) fl = colon;
+        { long dl = tx_len(defpath, 4096);
+          if (fl >= dl && tx_suffix(line, fl, defpath, dl)) mine = 0; }
+        if (mine && tab < e) callers++;
+        line = *e ? e + 1 : e;
+    }
+    mm_free(txt);
+    return callers;
+}
+
+static int eq_mark(const char *mark, const char *key) { return tx_eqz(mark, key) || tx_prefix(mark, tx_len(mark, 4096), key, tx_len(key, 4096)); }
+
+static void compare(const char *idx, const char *inlist) {
+    int k, j;
+    red_missing = red_new = red_sig = red_alias = 0;
+    for (k = 0; k < nrows; k++) {
+        Row *r = &rows[k]; int found = 0, samesig = 0;
+        for (j = 0; j < ndefs; j++) {
+            if (!tx_eqz(defs[j].sym, r->sym)) continue;
+            found = 1;
+            if (tx_eqz(defs[j].sig, r->sig)) samesig = 1;
+        }
+        r->used = found;
+        if (!found) {
+            red_missing++;
+            if (show_reds) sy_printf("CORE-MISSING %s\t%s\t(no non-static definition in any frozen module)\n", r->path, r->sym);
+            continue;
+        }
+        if (!samesig) {
+            red_sig++;
+            if (show_reds) {
+                for (j = 0; j < ndefs; j++) if (tx_eqz(defs[j].sym, r->sym)) break;
+                sy_printf("CORE-SIG %s\t%s\tbaseline %s\tnow %s\n", defs[j].path, r->sym, r->sig, defs[j].sig);
+            }
+        }
+        if (eq_mark(r->mark, "DEPRECATED-ALIAS")) {
+            long at = tx_find(r->mark, tx_len(r->mark, 4096), "sites=", 6);
+            long allowed = at >= 0 ? tx_strtol(r->mark + at + 6, 0, 10) : 0;
+            int have = alias_callers(r->sym, r->path, idx, inlist);
+            if (have > allowed) {
+                red_alias++;
+                if (show_reds) sy_printf("CORE-ALIAS-CALLERS %s\t%s\tcaller files %d > baseline %ld\n", r->path, r->sym, have, allowed);
+            }
+        }
+    }
+    for (j = 0; j < ndefs; j++) {
+        int known = 0;
+        for (k = 0; k < nrows; k++) if (tx_eqz(rows[k].sym, defs[j].sym)) { known = 1; break; }
+        if (!known) {
+            red_new++;
+            if (show_reds) sy_printf("CORE-NEW %s\t%s\t%s\n", defs[j].path, defs[j].sym, defs[j].sig);
+        }
+    }
+}
+
+static void scan(const char *idx) { int k; for (k = 0; k < nmods; k++) dump_module(k, idx); }
+
+static void summary(int mode_write) {
+    int uniq = 0, k;
+    for (k = 0; k < ndefs; k++) {
+        int j, first = 1;
+        for (j = 0; j < k; j++) if (tx_eqz(defs[j].sym, defs[k].sym)) first = 0;
+        uniq += first;
+    }
+    sy_printf("coreapi: %s: %d modules, %d exported symbols (baseline %d); new %d, missing %d, signature %d, alias callers %d%s\n",
+              (red_missing || red_new || red_sig || red_alias) ? "FAIL" : "ok",
+              nmods, uniq, nrows, red_new, red_missing, red_sig, red_alias,
+              mode_write ? " (baseline rewritten)" : " (--write ratchets down)");
+    sy_printf("CORE_INTERFACE\tok=%d\tnew=%d\tmissing=%d\tsignature=%d\talias=%d\n",
+              (red_missing || red_new || red_sig || red_alias) ? 0 : 1, red_new, red_missing, red_sig, red_alias);
+}
+
+/* One baseline row per symbol: definitions of the same symbol in several modules collapse to the first
+ * path in sorted order; a surviving symbol keeps the mark it already had. */
+typedef struct { const char *path; const char *sym; const char *sig; } Ent;
+static void write_base(void) {
+    char *out = mm_alloc(1 << 20); long olen; int k, j, w = 0;
+    static Ent keep[MAXSYM]; static char *seen[MAXSYM]; int ns = 0;
+    const char *hdr = "# tests/core-interface.tsv -- tests/coreapi.cx: the frozen core interface, one row per\n"
+                      "# exported symbol (PATH<TAB>SYMBOL<TAB>SIGNATURE<TAB>MARK).  Only goes down: --write\n"
+                      "# ratchets it, and every row it adds is printed for review.\n";
+    for (k = 0; k < ndefs; k++) {   /* insertion sort by (path, symbol) */
+        int at = w;
+        while (at > 0) {
+            Ent *p = &keep[at - 1]; int c = tx_cmp(p->path, tx_len(p->path, 4096), defs[k].path, tx_len(defs[k].path, 4096));
+            if (c < 0 || (c == 0 && tx_cmp(p->sym, tx_len(p->sym, 4096), defs[k].sym, tx_len(defs[k].sym, 4096)) < 0)) break;
+            keep[at] = keep[at - 1];
+            at--;
+        }
+        keep[at].path = defs[k].path; keep[at].sym = defs[k].sym; keep[at].sig = defs[k].sig;
+        w++;
+    }
+    if (!out) die("out of memory");
+    tx_copy(out, 1 << 20, hdr, tx_len(hdr, 1024));
+    olen = tx_len(out, 1 << 20);
+    for (k = 0; k < w; k++) {
+        char line[2200]; int dup = 0, old; const char *mark = "-";
+        for (j = 0; j < ns; j++) if (tx_eqz(seen[j], keep[k].sym)) dup = 1;
+        if (dup) continue;
+        if (ns == MAXSYM) die("too many symbols");
+        seen[ns++] = (char *)keep[k].sym;
+        old = row_index(keep[k].sym);
+        if (old >= 0) {
+            if (tx_eqz(rows[old].sig, keep[k].sig)) {
+                mark = rows[old].mark;
+            } else {
+                sy_printf("coreapi: signature moved %s\t%s\t%s\t(was %s)\n", keep[k].path, keep[k].sym, keep[k].sig, rows[old].sig);
+            }
+        } else {
+            sy_printf("coreapi: added row %s\t%s\t%s\n", keep[k].path, keep[k].sym, keep[k].sig);
+        }
+        if (cx_fmt(line, sizeof line, "%s\t%s\t%s\t%s\n", keep[k].path, keep[k].sym, keep[k].sig, mark)) die("row too long");
+        { long ll = tx_len(line, sizeof line); if (olen + ll + 1 < (1 << 20)) { tx_copy(out + olen, (1 << 20) - olen, line, ll); olen += ll; } }
+    }
+    { char bp[P]; if (cx_write(join2(root, BASE, bp, sizeof bp), out, (size_t)olen)) die("cannot write " BASE); }
+}
+
+/* ---------------- fixtures ---------------- */
+static int fx_fail;
+static char fx_root[P];
+static void fx_case(const char *name, int reds, int want) {
+    int ok = reds == want;
+    if (!ok) fx_fail++;
+    sy_printf("%s\t%s\treds=%d want=%d\n", ok ? "PASS" : "FAIL", name, reds, want);
+}
+static int fx_reds(void) { return red_missing + red_new + red_sig + red_alias; }
+static void fx_write(const char *rel, const char *text) {
+    char p[P], q[P]; long i, n;
+    abs_path(join2(fx_root, rel, p, sizeof p), q, sizeof q);
+    tx_copy(p, sizeof p, q, tx_len(q, sizeof q) + 1);
+    n = tx_len(p, sizeof p);
+    for (i = 1; i < n; i++) if (p[i] == '/') {
+        char c = p[i];
+        p[i] = 0;
+        { int mk = sy_mkdir(p, 0755), ex = sy_exists(p);
+          if (mk && !ex) { sy_eprintf("coreapi: fixture mkdir %s mk=%d ex=%d\n", p, mk, ex); sy_exit(2); } }
+        p[i] = c;
+    }
+    { int w = cx_write(p, text, tx_len(text, 1 << 20)); if (w) { sy_eprintf("coreapi: fixture write %s rc=%d\n", p, w); sy_exit(2); } }
+}
+static void fx_run(const char *idx, const char *inlist) {
+    ndefs = 0; nrows = 0; nmods = 0;
+    root = fx_root;
+    load_mods(); load_base(); scan(idx);
+    show_reds = 0;
+    compare(idx, inlist);
+    show_reds = 1;
+}
+static void fx_reset_root(void) {
+    char *v[] = {"rm", "-rf", fx_root, 0}; np_result r = {0}; char why[256];
+    cx_fmt(fx_root, sizeof fx_root, "out/coreapi-fixtures-%ld", (long)sy_pid());
+    v[2] = fx_root;
+    np_run((char *const *)v, 0, 0, 30, &r, why, sizeof why);
+    np_free(&r);
+}
+static void fixtures(void) {
+    char idx[P], inlist[P];
+    int reds;
+    fx_reset_root();
+    cx_fmt(idx, sizeof idx, "%s/out/coreapi-fixtures-index", fx_root);
+    cx_fmt(inlist, sizeof inlist, "%s/tests/coreapi-fixture-files.txt", fx_root);
+    fx_write("tests/cx-module-freeze.tsv", "cx/core/a.cx\tfixture frozen module\n");
+    { char l[P]; cx_fmt(l, sizeof l, "%s/cx/core/a.cx\n", fx_root); fx_write("tests/coreapi-fixture-files.txt", l); }
+    fx_write("cx/core/a.cx", "int foo(int x) { return x; }\n");
+    fx_write(BASE, "cx/core/a.cx\tfoo\tint (int x)\t-\n");
+
+    fx_run(idx, inlist); fx_case("green-baseline", fx_reds(), 0);
+
+    fx_write("cx/core/a.cx", "int foo(int x) { return x; }\nint bar(void) { return 1; }\n");
+    fx_run(idx, inlist); fx_case("new-symbol-red", fx_reds(), 1);
+    fx_write(BASE, "cx/core/a.cx\tbar\tint (void)\t-\ncx/core/a.cx\tfoo\tint (int x)\t-\n");
+    fx_run(idx, inlist); fx_case("new-symbol-green-after-row", fx_reds(), 0);
+
+    fx_write("cx/core/a.cx", "int foo(int yy) { return yy; }\nint bar(void) { return 1; }\n");
+    fx_run(idx, inlist); fx_case("signature-text-red", fx_reds(), 1);
+    fx_write("cx/core/a.cx", "int foo(int x) { return x; }\nint bar(void) { return 1; }\n");
+
+    fx_write("cx/core/a.cx", "int bar(void) { return 1; }\n");
+    fx_run(idx, inlist); fx_case("missing-symbol-red", fx_reds(), 1);
+    fx_write(BASE, "cx/core/a.cx\tbar\tint (void)\t-\n");
+    fx_run(idx, inlist); fx_case("missing-symbol-green-after-drop", fx_reds(), 0);
+
+    fx_write("cx/core/a.cx", "int bar(void) { return 1; }\nint alias(void) { return 2; }\n");
+    { char l[P]; cx_fmt(l, sizeof l, "%s/cx/core/a.cx\n%s/tools/caller.cx\n", fx_root, fx_root); fx_write("tests/coreapi-fixture-files.txt", l); }
+    fx_write(BASE, "cx/core/a.cx\talias\tint (void)\tDEPRECATED-ALIAS sites=0\ncx/core/a.cx\tbar\tint (void)\t-\n");
+    fx_write("tools/caller.cx", "int main(void) { return alias(); }\n");
+    fx_run(idx, inlist); fx_case("alias-caller-red", fx_reds(), 1);
+    fx_write(BASE, "cx/core/a.cx\talias\tint (void)\tDEPRECATED-ALIAS sites=1\ncx/core/a.cx\tbar\tint (void)\t-\n");
+    fx_run(idx, inlist); fx_case("alias-caller-green-at-sites", fx_reds(), 0);
+
+    sy_printf("COREAPI_FIXTURES\tfailed=%d\n", fx_fail);
+    sy_exit(fx_fail ? 1 : 0);
+}
+
+int main(int argc, char **argv) {
+    const char *idx = "out/coreapi-index";
+    int mode; char pb[P];
+    if (sy_realpath(".", base, (int)sizeof base) < 0 || !base[0]) die("cannot resolve the repo root");
+    prod = abs_path("unisacc.com", pb, sizeof pb);
+    if (argc == 2 && tx_eqz(argv[1], "--fixtures")) { fixtures(); return 0; }
+    if (argc != 2) { sy_eprintf("usage: coreapi.cx --check | --write | --init | --fixtures\n"); return 2; }
+    mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
+    if (mode < 0) { sy_eprintf("usage: coreapi.cx --check | --write | --init | --fixtures\n"); return 2; }
+    if (mode == 2) { char bp[P]; size_t n; char *b = cx_read(join2(root, BASE, bp, sizeof bp), &n); if (b) { mm_free(b); sy_eprintf("coreapi: --init refused, " BASE " exists\n"); return 2; } }
+    if (mode != 2) { char bp[P]; size_t n; char *b = cx_read(join2(root, BASE, bp, sizeof bp), &n); if (!b) { sy_eprintf("coreapi: cannot read " BASE " (run --init once)\n"); return 2; } mm_free(b); }
+    load_mods(); load_base(); scan(idx);
+    compare(idx, 0);
+    summary(0);
+    if (mode == 0) return (red_missing || red_new || red_sig || red_alias) ? 1 : 0;
+    /* --write records a reviewed addition, signature move or deletion; the reds above stay printed and
+     * every added row is named, so the review point is the human, never the tool. */
+    write_base();
+    sy_printf("coreapi: wrote " BASE " (%d rows)\n", nrows);
+    return 0;
+}
