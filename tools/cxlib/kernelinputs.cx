@@ -1,0 +1,64 @@
+#pragma unisa module kernelinputs
+/* Single source of truth for native-kernel construction inputs: the file
+ * tables and the context-byte layout. The constructor (kernel-build.cx) and
+ * every verifier (kernelcontext.cx, rebuildcontext.cx, sourcepackage.cx,
+ * source-package-{adopt,mixed,pack}.cx) read these tables here; no tool
+ * hard-codes the list again.
+ *
+ * No netpack import: the exported signatures must stay free of np_buf so that
+ * callers that also `use netpack` never see the type twice. */
+static const char *ki_kernel_sources[24] = {
+ "exec/c/asm/transition_x86_64.S","exec/c/asm/arith_x86_64.S","exec/c/asm/buffer_x86_64.S",
+ "exec/c/asm/memory_x86_64.S","exec/c/asm/intern_x86_64.S","exec/c/asm/bytes_x86_64.S",
+ "exec/c/asm/format_x86_64.S","exec/c/asm/stack_x86_64.S","exec/c/asm/action_x86_64.S",
+ "exec/c/asm/run_x86_64.S","exec/c/asm/bridge_x86_64.S",
+ "exec/c/asm/transition_arm64.S","exec/c/asm/arith_arm64.S","exec/c/asm/buffer_arm64.S",
+ "exec/c/asm/memory_arm64.S","exec/c/asm/intern_arm64.S","exec/c/asm/bytes_arm64.S",
+ "exec/c/asm/format_arm64.S","exec/c/asm/stack_arm64.S","exec/c/asm/action_arm64.S",
+ "exec/c/asm/run_arm64.S","exec/c/asm/bridge_arm64.S",
+ "archive/reference-c/src/asmtext.c","src/internal_types.h"
+};
+static const char *ki_context_files[6] = {
+ "tools/kernel-build.cx","tools/asm-source.cx","tools/asm-material.cx",
+ "tools/kernel-link.cx","tools/cxlib/netpack.cx","tools/cxlib/elfkernel.cx"
+};
+/* assembler material inputs (asmtext already archived). tests/assembler*.cx are
+ * contract sources for the assembler material, not kernel inputs. */
+static const char *ki_asm_files[7] = {
+ "archive/reference-c/src/asmtext.c","src/internal_types.h","tools/asm-material.cx",
+ "unisacc.com","tests/assembler.cx","tests/arm-assembler.cx","tests/asm-layout.cx"
+};
+int ki_kernel_source_count(void){ return 24; }
+const char *ki_kernel_source(int i){ return i>=0&&i<24?ki_kernel_sources[i]:0; }
+int ki_context_count(void){ return 6; }
+const char *ki_context_file(int i){ return i>=0&&i<6?ki_context_files[i]:0; }
+int ki_asm_count(void){ return 7; }
+const char *ki_asm_file(int i){ return i>=0&&i<7?ki_asm_files[i]:0; }
+/* kernel-source identity = sha256 over the ordered "<path>\t<sha>\n" rows of
+ * the 24 real kernel inputs. Caller computes each file sha with its own IO and
+ * passes the 24 hashes here in table order. */
+void ki_kernel_source_sha(const char *const file_sha[24],char out[65]){
+ char *buf=malloc(24*4096+1);size_t at=0;int i;
+ if(!buf)exit(2);
+ for(i=0;i<24;i++){const char *p=ki_kernel_sources[i];const char *h=file_sha[i];
+  while(*p){buf[at++]=(*p);p++;}
+  buf[at++]='\t';
+  while(*h){buf[at++]=(*h);h++;}
+  buf[at++]='\n';
+ }
+ cx_sha256_hex(buf,at,out);free(buf);
+}
+/* context body = version + kernel-source identity + the 6 tool rows, written
+ * into the caller's buffer; returns the total bytes written, or -1 on bound.
+ * identity-helper (full-tree SID) is NOT a kernel input and stays out of the
+ * kernel context. */
+long ki_context_body(char *buf,size_t cap,const char *kernel_source,const char *const tool_sha[6]){
+ const char *v="unisacc-native-kernel-context-v3\n";size_t at=0;int i;
+ #define KI_PUT(s) do{const char *q=(s);while(*q){if(at+1>=cap)return -1;buf[at++]=(*q);q++;}}while(0)
+ KI_PUT(v);
+ KI_PUT(kernel_source);
+ KI_PUT("\n");
+ for(i=0;i<6;i++){KI_PUT(ki_context_files[i]);KI_PUT("\t");KI_PUT(tool_sha[i]);KI_PUT("\n");}
+ #undef KI_PUT
+ return (long)at;
+}

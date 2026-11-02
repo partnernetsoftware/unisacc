@@ -3,6 +3,7 @@
  * Each step is a separate <=55-second scheduling unit. Receipts are material
  * identities, never cached test results. Failed partial output is retained. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelinputs
 #pragma unisa use text.text
 static const char *units[]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
 static char root[4096],out[4096],watchdog[4400],product[4400],identity_tool[4400];
@@ -24,11 +25,18 @@ static void source_id(char *sha,int native){
  if(r.rc||r.errn||r.outn!=65||r.out[64]!='\n'){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("source identity failed");}
  memcpy(sha,r.out,64);sha[64]=0;np_free(&r);
 }
+static void kernel_source_sha(char sha[65]){
+ /* Real kernel inputs only: 22 .S + archived asmtext.c + internal_types.h.
+  * No full-tree SID, no tests, no thin head. */
+ char file_sha[24][65];const char *ptrs[24];char p[4400];int i;
+ for(i=0;i<ki_kernel_source_count();i++){path(p,sizeof p,root,ki_kernel_source(i));digest(p,file_sha[i]);ptrs[i]=file_sha[i];}
+ ki_kernel_source_sha(ptrs,sha);
+}
 static void context(char *sha){
- char sid[65];source_id(sid,1);np_buf b={0};np_puts(&b,"unisacc-native-kernel-context-v2\n");np_puts(&b,sid);np_puts(&b,"\n");
- const char *extra[]={"tools/kernel-build.cx","tools/asm-source.cx","tools/asm-material.cx","tools/kernel-link.cx","tools/cxlib/netpack.cx","tools/cxlib/elfkernel.cx","tests/assembler.cx","tests/arm-assembler.cx","tests/asm-layout.cx","unisacc.com"};int i;char p[4400],h[65];
- for(i=0;i<10;i++){path(p,sizeof p,root,extra[i]);digest(p,h);np_puts(&b,extra[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
- digest(identity_tool,h);np_puts(&b,"identity-helper\t");np_puts(&b,h);np_puts(&b,"\n");cx_sha256_hex(b.p,b.n,sha);free(b.p);
+ char ksrc[65];kernel_source_sha(ksrc);char tool_sha[6][65];const char *tptrs[6];char body[4096];long bn;char p[4400];int i;
+ for(i=0;i<ki_context_count();i++){path(p,sizeof p,root,ki_context_file(i));digest(p,tool_sha[i]);tptrs[i]=tool_sha[i];}
+ bn=ki_context_body(body,sizeof body,ksrc,tptrs);if(bn<0)die("context body bound");
+ cx_sha256_hex(body,(size_t)bn,sha);
 }
 static void require_context(char *before){char p[4400];size_t n;context(before);path(p,sizeof p,out,"context.sha256");char *s=read_regular(p,&n);int ok=n==65&&!memcmp(s,before,64)&&s[64]=='\n';free(s);if(!ok)die("source/bootstrap/tool context changed; use a new output directory");}
 static void stable(const char *before){char now[65];context(now);if(!tx_eqz(now, before))die("inputs changed during step");}
