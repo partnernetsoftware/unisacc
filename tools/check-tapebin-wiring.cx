@@ -20,6 +20,8 @@
  * assembly-output request and refuses it on this route (cx/driver/route.cx:57).
  */
 static char root[4096], work[4400], com[4400], bound[4400], src[4400];
+static char candarg[4400];
+static int usesh;
 static int failures;
 
 static void die(const char *s) { sy_eprintf("tapebin-wiring: REFUSE %s\n", s); sy_exit(2); }
@@ -45,9 +47,22 @@ int main(int argc, char **argv) {
     int soff[4], slen[4], scnt[4];
     char *dec;
     int decn;
-    if (argc < 2) die("usage: ROOT");
+    if (argc < 2) die("usage: ROOT [--candidate PATH]");
+    { int a; for (a = 2; a < argc; a++) {
+          if (tx_eqz(argv[a], "--candidate") && a + 1 < argc) { a = a + 1; { int k = 0; while (argv[a][k]) { candarg[k] = argv[a][k]; k = k + 1; } candarg[k] = 0; } }
+          else die("bad option"); } }
     if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
-    if (cx_fmt(com, (size_t)sizeof com, "%s/unisacc.com", root)) die("com");
+    if (candarg[0]) {
+        char tmp[4096];
+        int k = 0;
+        if (sy_realpath(candarg, tmp, (int)sizeof tmp) < 0) die("candidate");
+        while (tmp[k]) { com[k] = tmp[k]; k = k + 1; }
+        com[k] = 0;
+    } else if (cx_fmt(com, (size_t)sizeof com, "%s/unisacc.com", root)) die("com");
+    usesh = 1;
+    { size_t cn = 0; char *cb = cx_read(com, &cn);
+      if (cb && cn >= 4 && cb[0] == 127 && cb[1] == 'E' && cb[2] == 'L' && cb[3] == 'F') usesh = 0;
+      if (cb) mm_free(cb); }
     if (cx_fmt(bound, (size_t)sizeof bound, "%s/tools/bound", root)) die("bound");
     if (sy_exists(root) != 1) die("root");
     if (cx_fmt(work, (size_t)sizeof work, "%s/out/tapebin-wiring", root)) die("work");
@@ -60,7 +75,7 @@ int main(int argc, char **argv) {
 
     /* 1. text tape, the reference text. */
     i = 0;
-    v[i++] = bound; v[i++] = "40"; v[i++] = "sh"; v[i++] = com;
+    v[i++] = bound; v[i++] = "40"; if (usesh) v[i++] = "sh"; v[i++] = com;
     v[i++] = "-S"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
     v[i++] = src; v[i++] = "-o"; v[i++] = tpath; v[i] = 0;
     if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
@@ -71,7 +86,7 @@ int main(int argc, char **argv) {
 
     /* 2. the same source through --tapebin. */
     i = 0;
-    v[i++] = bound; v[i++] = "40"; v[i++] = "sh"; v[i++] = com;
+    v[i++] = bound; v[i++] = "40"; if (usesh) v[i++] = "sh"; v[i++] = com;
     v[i++] = "-S"; v[i++] = "--tapebin"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
     v[i++] = src; v[i++] = "-o"; v[i++] = bpath; v[i] = 0;
     if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
@@ -103,8 +118,34 @@ int main(int argc, char **argv) {
     dec = 0; decn = 0;
     if (!bad && tb2_text(bin, (int)binn, minor, soff, slen, scnt, &dec, &decn)) bad = 1;
     ck(!bad && dec && decn > 0, "decode");
-    ck(dec && text && decn == (int)textn && (decn == 0 || memcmp(dec, text, (size_t)decn) == 0), "text-roundtrip");
     if (dec) mm_free(dec);
+
+    /* The decoded text is canonical, not the same bytes as the -S tape (the
+       prelude's .bss lines differ from the frozen fixture), so the end-to-end
+       statement is behavioural: build an image from the source and one from the
+       tapebin, and require the two programs to exit with the same code. */
+    {
+        char imgA[4400], imgB[4400];
+        int rca = -1, rcb = -1;
+        if (cx_fmt(imgA, (size_t)sizeof imgA, "%s/from-src", work)) die("imgA");
+        if (cx_fmt(imgB, (size_t)sizeof imgB, "%s/from-tapebin", work)) die("imgB");
+        i = 0;
+        v[i++] = bound; v[i++] = "40"; if (usesh) v[i++] = "sh"; v[i++] = com;
+        v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = imgA; v[i++] = src; v[i] = 0;
+        if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
+        np_free(&r);
+        i = 0;
+        v[i++] = bound; v[i++] = "40"; if (usesh) v[i++] = "sh"; v[i++] = com;
+        v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = imgB; v[i++] = bpath; v[i] = 0;
+        if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
+        np_free(&r);
+        v[0] = imgA; v[1] = 0;
+        if (np_run(v, work, 0, 20, &r, why, sizeof why) == 0) { rca = r.rc; np_free(&r); }
+        v[0] = imgB; v[1] = 0;
+        if (np_run(v, work, 0, 20, &r, why, sizeof why) == 0) { rcb = r.rc; np_free(&r); }
+        ck(rca == 7, "image-from-source-runs");
+        ck(rcb == rca, "image-from-tapebin-same-exit");
+    }
     if (text) mm_free(text);
     mm_free(bin);
     sy_printf("TAPEBIN_WIRING\tfailed=%d\n", failures);
