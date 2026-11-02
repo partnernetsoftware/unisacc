@@ -15,8 +15,8 @@
 
 - [cx-modules.md](cx-modules.md)：`.cx` 模块化总设计。
 - [cx-layers.md](cx-layers.md)：L0/L1/L2/L3 分层，只有底层对接 libc/POSIX（bdy 维护）。
-- [cx-pack.md](cx-pack.md)、[cxif-v0.md](cxif-v0.md)：包清单与 CXIF 接口文本。
-- [cx-include-lint.md](cx-include-lint.md)、[cxlibc-2026-10-30.md](cxlibc-2026-10-30.md)：上层禁用 `#include` 和 libc/POSIX 的两个棘轮。
+- [cx-pack.md](../archive/plans/2026-10-28/cx-pack.md)、[cxif-v0.md](../archive/plans/2026-10-28/cxif-v0.md)：包清单与 CXIF 接口文本。
+- [cx-include-lint.md](../archive/plans/2026-10-28/cx-include-lint.md)、[cxlibc-2026-10-30.md](cxlibc-2026-10-30.md)：上层禁用 `#include` 和 libc/POSIX 的两个棘轮。
 - [m4-flownet-cx-module.md](m4-flownet-cx-module.md)：m4 的"流×网"范式做成 `.cx` 模块。
 
 ## L0 接口与合同
@@ -39,7 +39,7 @@
 
 ## 工具与运维
 
-- [dev-tools-2026-10-30.md](dev-tools-2026-10-30.md)：开发工具清单与待建项。每个工具的用法见 prd.md 能力速查。
+- [dev-tools-2026-10-30.md](../archive/plans/2026-10-30/dev-tools-2026-10-30.md)：开发工具清单与待建项。每个工具的用法见 prd.md 能力速查。
 - [refactor-tool-2026-10-30.md](refactor-tool-2026-10-30.md)、[symindex-design-2026-10-30.md](symindex-design-2026-10-30.md)：两大批量工具的设计和实测记录。
-- [ci-bootstrap-2026-10-30.md](ci-bootstrap-2026-10-30.md)：CI 取已发布的 unisacc.com。0.0.43 发布后要把它钉进去。
+- [ci-bootstrap-2026-10-30.md](../archive/plans/2026-10-30/ci-bootstrap-2026-10-30.md)：CI 取已发布的 unisacc.com。0.0.43 发布后要把它钉进去。
 - [root-identity.md](root-identity.md)：根 `unisacc.com` 的身份以 sha256 + 构建收据 + 安装记录为准；`unisacc.com.build.json` 是旧链侧车，新链不写。

@@ -22,11 +22,11 @@
 
 `tools/cxproc.cx` 是按需模块。不写 `#pragma unisa use cxproc` 的程序不依赖它。导出的是 `cxproc_run`。`posix_spawnp` 的原型在 static 函数体内，不在没有函数体的文件作用域声明上。Linux 上，调用者传入的环境交给子进程；空指针换成只以 NULL 结尾的空表，不是继承。驱动自己在 Linux 上传 `environ`。Windows 上把空指针原样传入，CreateProcessA 把它当作继承；驱动在 Windows 上传空指针。这份 Windows 行为编进 `win/x86_64` 切片，没有执行。这个模块的 `.cx` 源没有 `#include`。前奏头文件没有删，也没有改 `include/cx.h`。
 
-模块 `#include` 是 lint。不在对接前缀里的 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`include/` 与 `tools/cxcc-hostinc/` 是 libc／POSIX 对接单元，可以用 `#include`。短记 [plans/cx-include-lint.md](../../plans/cx-include-lint.md)。检查是 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。树上若有别人暂存的新 `#include`，该检查退出 1，这不表示棘轮被抬高。
+模块 `#include` 是 lint。不在对接前缀里的 `.cx` 新文件必须为 0；`tests/cxinclude.tsv` 旧债只降不升。`include/` 与 `tools/cxcc-hostinc/` 是 libc／POSIX 对接单元，可以用 `#include`。短记 [archive/plans/2026-10-28/cx-include-lint.md](../../archive/plans/2026-10-28/cx-include-lint.md)。检查是 `sh ./unisacc.com -run tests/cxinclude.cx -- --check`。树上若有别人暂存的新 `#include`，该检查退出 1，这不表示棘轮被抬高。
 
-包清单把导入身份钉到路径。一个目录一份 `cxpack.tsv`：模块名对应旁边的文件，公开列是该文件非 static 定义的有序子集。短记 [plans/cx-pack.md](../../plans/cx-pack.md)。检查是 `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures`。`src/cxmod.c` 在模块文件同目录有这份清单、且某一行的路径对上该文件时，CXIF 只写出公开列里的函数；没有对上的行仍导出全部非 static。本机用一份 Linux x86-64 探针编过这个源码：公开调用退出 5，调用未公开的 `pack_extra` 被 gcc 拒绝，没有清单的模块夹具退出 42。仓库根的 `.com` 和已安装的 `unisacc.com` 仍是上一份，这次没有重打，所以它们还导出全部非 static。
+包清单把导入身份钉到路径。一个目录一份 `cxpack.tsv`：模块名对应旁边的文件，公开列是该文件非 static 定义的有序子集。短记 [archive/plans/2026-10-28/cx-pack.md](../../archive/plans/2026-10-28/cx-pack.md)。检查是 `sh ./unisacc.com -run tests/cxpack.cx -- --fixtures`。`src/cxmod.c` 在模块文件同目录有这份清单、且某一行的路径对上该文件时，CXIF 只写出公开列里的函数；没有对上的行仍导出全部非 static。本机用一份 Linux x86-64 探针编过这个源码：公开调用退出 5，调用未公开的 `pack_extra` 被 gcc 拒绝，没有清单的模块夹具退出 42。仓库根的 `.com` 和已安装的 `unisacc.com` 仍是上一份，这次没有重打，所以它们还导出全部非 static。
 
-CXIF v0 文本是 banner、守卫、类型、原型和 `#endif`。短记 [plans/cxif-v0.md](../../plans/cxif-v0.md)。检查是 `sh ./unisacc.com -run tests/cxif.cx -- --fixtures`。
+CXIF v0 文本是 banner、守卫、类型、原型和 `#endif`。短记 [archive/plans/2026-10-28/cxif-v0.md](../../archive/plans/2026-10-28/cxif-v0.md)。检查是 `sh ./unisacc.com -run tests/cxif.cx -- --fixtures`。
 
 ## 还没做
 
@@ -50,7 +50,7 @@ spec §5 的所有权没有实现。
 |---|---|
 | [cx/spec.md](../../cx/spec.md) | 对外条款；编号只增不改 |
 | [plans/cx-modules.md](../../plans/cx-modules.md) | 阶段表 CX0–CX4 |
-| [plans/cx-include-lint.md](../../plans/cx-include-lint.md) | 模块 `#include` 只降不升 |
-| [plans/cx-pack.md](../../plans/cx-pack.md) | 包清单与导入身份 |
-| [plans/cxif-v0.md](../../plans/cxif-v0.md) | CXIF v0 文法 |
+| [archive/plans/2026-10-28/cx-include-lint.md](../../archive/plans/2026-10-28/cx-include-lint.md) | 模块 `#include` 只降不升 |
+| [archive/plans/2026-10-28/cx-pack.md](../../archive/plans/2026-10-28/cx-pack.md) | 包清单与导入身份 |
+| [archive/plans/2026-10-28/cxif-v0.md](../../archive/plans/2026-10-28/cxif-v0.md) | CXIF v0 文法 |
 | [docs/cx-spec-draft.md](../cx-spec-draft.md) | 草案，含尚未实现的所有权 |
