@@ -22,6 +22,13 @@ static char root[4096], prod[4400], work[4400];
 static int failures;
 
 static void die(const char *s) { sy_eprintf("dev-product: REFUSE %s\n", s); sy_exit(2); }
+static const char *dirname_of(const char *path, char *buf, int cap) {
+    int i = 0, last = -1;
+    while (path[i]) { if (path[i] == '/') last = i; i = i + 1; }
+    if (last <= 0 || last >= cap) { buf[0] = '.'; buf[1] = 0; return buf; }
+    { int k = 0; while (k < last) { buf[k] = path[k]; k = k + 1; } buf[k] = 0; }
+    return buf;
+}
 static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\t%s\n", name);
     else { failures++; sy_printf("FAIL\t%s\n", name); }
@@ -88,12 +95,28 @@ int main(int argc, char **argv) {
        entry-build takes \0hdr/* from its INPUT PACKAGE, so a candidate built
        against an old package silently ships old headers even when the tree is
        current. The allocator line is the marker: the pre-fix form tests only
-       -1, the fixed one tests <= 0. Only a packaged artifact (candidate or
-       .com) contains the header text; a bare entry.elf does not. */
-    b = (char *)cx_read(prod, &n);
-    if (!b) die("read product again");
-    ck(tx_find(b, (long)n, "if (__u_r <= 0) return NULL;", tx_len("if (__u_r <= 0) return NULL;", 64)) >= 0, "fresh-unisa-map");
-    mm_free(b);
+       -1, the fixed one tests <= 0.
+       The package can live inside one file (an APE polyglot) or beside the
+       launcher (a thin #! head plus DIR/unisacc.com.dev/p3-package.bin), so the
+       search covers the product first and then those two side paths. */
+    {
+        char side1[4400], side2[4400], dir[4096];
+        const char *cand[3];
+        int k, hit = 0;
+        if (cx_fmt(side1, (size_t)sizeof side1, "%s/p3-package.bin", dirname_of(prod, dir, sizeof dir))) die("side1");
+        if (cx_fmt(side2, (size_t)sizeof side2, "%s/unisacc.com.dev/p3-package.bin", dirname_of(prod, dir, sizeof dir))) die("side2");
+        cand[0] = prod; cand[1] = side1; cand[2] = side2;
+        for (k = 0; k < 3 && !hit; k++) {
+            char *pb = (char *)cx_read(cand[k], &n);
+            if (!pb) continue;
+            if (tx_find(pb, (long)n, "if (__u_r <= 0) return NULL;", tx_len("if (__u_r <= 0) return NULL;", 64)) >= 0) {
+                hit = 1;
+                sy_printf("NOTE\tprelude-source\t%s\n", cand[k]);
+            }
+            mm_free(pb);
+        }
+        ck(hit, "fresh-unisa-map");
+    }
 
     sy_printf("DEV_PRODUCT\tfailed=%d\n", failures);
     return failures ? 1 : 0;
