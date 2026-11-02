@@ -25,4 +25,10 @@
 | `p3-member-full.cx` | `tools/p3-member-full.cx` | `5161aa7d709894f136e6619624134f8b73fe56e4bdd9fbeb672aa3260d2b0c7f` |
 | `pp-built-private.cx` | `tools/pp-built-private.cx` | `96aae0e26b38e50c40385b429b7a56a229e43c54158d9374de17a4baf507841e` |
 
-**更正（2026-11-02）**：`tools/precommit.cx` 是 `.git/hooks/pre-commit` 的运行时入口，已由 cc 还原到 `tools/`，不在本归档。归档前必须扫描 `.git/hooks`、CI、systemd、cron 与脚本入口。
+| `pp-fullname-gen.cx` | `tools/pp-fullname-gen.cx` | `f0cafc3df01a9a43ea924fae32ab9a709905c1c99ebd80b321e40729c019f2cc` |
+| `pp-fullname-pack.cx` | `tools/pp-fullname-pack.cx` | `ea7291f69d6afab95ea3fce24d15f5d6d7933d41582e2f32dcdceff625d955fc` |
+| `pp-private-install.cx` | `tools/pp-private-install.cx` | `86f2095cb80239d9575c19a4026e114d8a5030c29ecddfcc444126ec38a73d02` |
+| `practice-slice.cx` | `tools/practice-slice.cx` | `64f79585e55eddf357166ac90588664d7461ad7b7572136cbcd0a3041222729a` |
+| `tapelink-candidate-install.cx` | `tools/tapelink-candidate-install.cx` | `b9688c638aa28223175b220df61b0f0721daa21b0905a7c0a1f84386e007734f` |
+
+**更正（2026-11-02）**：`tools/precommit.cx` 是 `.git/hooks/pre-commit` 的运行时入口，已由 cc 还原到 `tools/`，不在本归档。`ucn-identity-tables.cx` 被 `exec/parse2/ucnidentity-*.tsv` 引用、`runtime-budget-cases.cx` 被 `tests/resources-domain-matrix.tsv` 引用，均已撤回。归档前必须把 `.tsv` 字符串引用与 `.git/hooks`、CI、systemd、cron、脚本入口一起扫描。
