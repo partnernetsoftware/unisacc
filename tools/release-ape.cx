@@ -128,9 +128,14 @@ static int smoke(const char *com) {
 static int devlnx(const char *out, const char *p3, const char *lnxelf) {
     char dir[4400], elfdst[4400], pkgdst[4400], com[4400], rp[4400], receipt[8192], hex[65];
     long at = 0, n = 0; size_t pn; PackageFooter foot;
+    /* Booter head: identify OS/arch via uname, read the side manifest.tsv to
+       locate the external base (kernel), export UNISA_KERNEL(+_SHA) when the
+       external file is present, then hand off to the existing entry ELF.
+       No base is built here; an absent external base falls back to the
+       embedded pack blob through UNISA_KERNEL unset. */
     const char *head =
         "#!/bin/sh\n"
-        "# unisacc.com --dev-lnx-only: thin shell head; execs the side ELF. NOT_RELEASE.\n"
+        "# unisacc.com --dev-lnx-only: booter head; selects base by uname then execs the side ELF. NOT_RELEASE.\n"
         "self=$(readlink -f \"$0\" 2>/dev/null || printf '%s' \"$0\")\n"
         "dir=$(dirname \"$self\")\n"
         "elf=\"$dir/unisacc.com.dev/entry.elf\"\n"
@@ -141,6 +146,25 @@ static int devlnx(const char *out, const char *p3, const char *lnxelf) {
         "[ -x \"$elf\" ] || { echo \"unisacc.com: missing $elf\" >&2; exit 1; }\n"
         "[ -f \"$pkg\" ] || { echo \"unisacc.com: missing $pkg\" >&2; exit 1; }\n"
         "UNISA_CONTAINER=\"$pkg\"; export UNISA_CONTAINER\n"
+        "# booter: uname arch -> base name; read manifest.tsv for sha + path\n"
+        "arch=$(uname -m 2>/dev/null || printf x86_64)\n"
+        "case \"$arch\" in\n"
+        "  x86_64|amd64) base=x86_64 ;;\n"
+        "  aarch64|arm64) base=arm64 ;;\n"
+        "  *) base=x86_64 ;;\n"
+        "esac\n"
+        "manifest=\"$dir/unisacc.com.dev/manifest.tsv\"\n"
+        "kernelfile=\"$dir/unisacc.com.dev/base/$base.kernel\"\n"
+        "if [ -f \"$manifest\" ]; then\n"
+        "  while IFS='\t' read -r name kind arch sha size rest; do\n"
+        "    [ \"$name\" = \"kernel/$base\" ] || continue\n"
+        "    if [ -f \"$kernelfile\" ] && [ -n \"$sha\" ]; then\n"
+        "      UNISA_KERNEL=\"$kernelfile\"; export UNISA_KERNEL\n"
+        "      UNISA_KERNEL_SHA=\"$sha\"; export UNISA_KERNEL_SHA\n"
+        "    fi\n"
+        "    break\n"
+        "  done < \"$manifest\"\n"
+        "fi\n"
         "exec \"$elf\" \"$@\"\n";
     if (sy_mkdir(out, 0755) && sy_exists(out) != 1) ra_die("cannot make", out);
     if (cx_fmt(dir, sizeof dir, "%s/unisacc.com.dev", out)) ra_die("path too long", out);
@@ -161,7 +185,7 @@ static int devlnx(const char *out, const char *p3, const char *lnxelf) {
         mm_free(e);
     }
     sy_chmod(elfdst, 0755);
-    if (cx_write(com, head, (size_t)tx_len(head, 2048))) ra_die("cannot write head", com);
+    if (cx_write(com, head, (size_t)tx_len(head, 4096))) ra_die("cannot write head", com);
     sy_chmod(com, 0755);
     if (cx_fmt(receipt, sizeof receipt, "NOT_RELEASE\tdev-lnx-only\n")) ra_die("receipt", com);
     at = tx_len(receipt, sizeof receipt);

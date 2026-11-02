@@ -1,0 +1,85 @@
+/* check-booter-ape.cx — B4 gate：booter 头（dev-lnx）的字节可重复 + 启动 smoke。
+ *
+ * 验证：
+ *   1. dev-lnx 头生成两次字节相同（确定性，无时间戳/随机）
+ *   2. 生成的头在本机 Linux x86_64 能启动（--version 报 0.0.43）
+ *   3. 头文本含 booter 逻辑（uname 识别 + manifest 读取 + UNISA_KERNEL 导出）
+ *   4. 无 manifest 时回退内嵌（启动正常）
+ *
+ * 外置基座路径生效（设 UNISA_KERNEL 后走外置 kernel）依赖产品重建编入 B3 的
+ * kernel.cx 改动，本 check 标注 PRODUCT_REBUILD_REQUIRED。
+ *
+ * 用法：sh ./unisacc.com tools/check-booter-ape.cx
+ * 输入：out/epoch-2026-11-02/p3/p3-package.bin（P3）+ unisacc.com.dev/entry.elf（旧 ELF）。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok,const char *name){
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b){h[0]=0;return;}cx_sha256_hex(b,n,h);free(b);}
+
+int main(int argc,char **argv){
+    (void)argc; (void)argv;
+    char root[4096],p3[4400],elf[4400],tool[4400],out1[4400],out2[4400];
+    char com1[4400],com2[4400],h1[65],h2[65];
+    if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
+    if(cx_fmt(p3,sizeof p3,"%s/out/epoch-2026-11-02/p3/p3-package.bin",root))return 2;
+    if(cx_fmt(elf,sizeof elf,"%s/unisacc.com.dev/entry.elf",root))return 2;
+    if(cx_fmt(tool,sizeof tool,"%s/tools/release-ape.cx",root))return 2;
+    if(cx_fmt(out1,sizeof out1,"%s/out/booter-ape-1",root))return 2;
+    if(cx_fmt(out2,sizeof out2,"%s/out/booter-ape-2",root))return 2;
+    if(cx_fmt(com1,sizeof com1,"%s/unisacc.com",out1))return 2;
+    if(cx_fmt(com2,sizeof com2,"%s/unisacc.com",out2))return 2;
+
+    /* 清干净 */
+    { sy_stat_t st; if(sy_stat(out1,&st)==0) cx_rmtree(out1); if(sy_stat(out2,&st)==0) cx_rmtree(out2); }
+
+    /* 1. 生成两次，字节相同 */
+    {
+        char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"55",(char*)"sh",(char*)"./unisacc.com",tool,(char*)"--",(char*)"dev-lnx",out1,p3,elf,0};
+        np_result r={0}; char why[512];
+        if(np_run(v,root,0,55,&r,why,sizeof why)){ck(0,"gen-1");}
+        else { ck(r.rc==0,"gen-1-rc"); np_free(&r); }
+    }
+    {
+        char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"55",(char*)"sh",(char*)"./unisacc.com",tool,(char*)"--",(char*)"dev-lnx",out2,p3,elf,0};
+        np_result r={0}; char why[512];
+        if(np_run(v,root,0,55,&r,why,sizeof why)){ck(0,"gen-2");}
+        else { ck(r.rc==0,"gen-2-rc"); np_free(&r); }
+    }
+    digest(com1,h1); digest(com2,h2);
+    ck(h1[0] && h2[0] && strcmp(h1,h2)==0,"head-bytes-identical-twice");
+
+    /* 2. 头文本含 booter 逻辑 */
+    {
+        size_t n; char *b=cx_read(com1,&n);
+        if(!b){ck(0,"head-read");}
+        else {
+            int ok = strstr(b,"uname -m") && strstr(b,"manifest.tsv") && strstr(b,"UNISA_KERNEL_SHA");
+            ck(ok,"head-contains-booter-logic");
+            printf("HEAD_BYTES\t%zu\n",n);
+            free(b);
+        }
+    }
+
+    /* 3. 启动 smoke（无 manifest 回退内嵌） */
+    {
+        char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"30",(char*)"sh",com1,(char*)"--version",0};
+        np_result r={0}; char why[512];
+        if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"run-version");}
+        else {
+            ck(r.rc==0 && r.out && strstr(r.out,"unisacc 0.0.43"),"head-launches-version");
+            np_free(&r);
+        }
+    }
+
+    /* 4. 外置路径生效：PRODUCT_REBUILD_REQUIRED */
+    printf("NOT_CLAIMED\texternal-base-path-requires-product-rebuild-with-B3-kernel.cx\n");
+    printf("BOOTER_APE\tfailed=%d\tscope=deterministic-head-and-launch-linux-x86_64\twin-mac-arm64=CI-ONLY\n", failed);
+    return failed?1:0;
+}
