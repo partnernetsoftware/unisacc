@@ -1,0 +1,192 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* Ten-command behavioural baseline for the src/ refactor (C44-PACKAGE-01).
+ *
+ *   sh ./unisacc.com tools/p1-baseline.cx -- ROOT OUTDIR [--check BASELINE_DIR]
+ *
+ * The byte-identical criterion cannot survive any change that introduces a call
+ * into dv_main (.cx does not inline static functions), so the src/ refactor is
+ * held to behavioural equivalence instead: these ten commands must keep the same
+ * exit code, the same stdout, the same stderr, and the same output artifact
+ * bytes. ROOT/unisacc.com is the product under test.
+ *
+ * Writes one file per case: <case>.rc, <case>.out, <case>.err, and
+ * artifacts.sha256 for the three artifacts. With --check BASELINE_DIR the run is
+ * compared field by field against an earlier baseline and any difference prints
+ * DIFF <case> <field>. Exit 0 only when every case matches.
+ */
+static char root[4096], outdir[4096], base[4096], com[4400], work[4400];
+static int failures, checked;
+
+static void die(const char *a) { sy_eprintf("p1-baseline: REFUSE %s\n", a); sy_exit(2); }
+static void join(char *dst, int cap, const char *a, const char *b) {
+    if (cx_fmt(dst, (size_t)cap, "%s/%s", a, b)) die("path-bound");
+}
+static int put_file(const char *dir, const char *leaf, const char *data, long n) {
+    char p[4400];
+    join(p, (int)sizeof p, dir, leaf);
+    return cx_write(p, data, (size_t)n);
+}
+static int put_rc(const char *dir, const char *leafname, int rc) {
+    char b[32];
+    if (cx_fmt(b, sizeof b, "%d\n", rc)) return 1;
+    return put_file(dir, leafname, b, (long)tx_len(b, 32));
+}
+static char *read_file(const char *dir, const char *leaf, size_t *n) {
+    char p[4400];
+    join(p, (int)sizeof p, dir, leaf);
+    return cx_read(p, n);
+}
+static int same_file(const char *dir, const char *other, const char *leaf) {
+    size_t an = 0, bn = 0;
+    char *a = read_file(dir, leaf, &an), *b = read_file(other, leaf, &bn);
+    int same = a && b && an == bn && (an == 0 || memcmp(a, b, an) == 0);
+    if (a) mm_free(a);
+    if (b) mm_free(b);
+    return same;
+}
+static void note(const char *name, const char *field) {
+    failures++;
+    sy_printf("DIFF\t%s\t%s\n", name, field);
+}
+
+static void leaf(char *dst, int cap, const char *name, const char *ext) {
+    if (cx_fmt(dst, (size_t)cap, "%s.%s", name, ext)) die("leaf-bound");
+}
+
+/* One case: argv run under ROOT; write <case>.rc/.out/.err into outdir. */
+static void one(const char *name, char *const argv[]) {
+    np_result r;
+    char why[512], l[160];
+    if (np_run(argv, root, 0, 40, &r, why, sizeof why)) die(why);
+    leaf(l, sizeof l, name, "rc");
+    if (put_rc(outdir, l, r.rc)) die("rc write");
+    leaf(l, sizeof l, name, "out");
+    if (put_file(outdir, l, r.out ? r.out : "", r.out ? (long)r.outn : 0)) die("out write");
+    leaf(l, sizeof l, name, "err");
+    if (put_file(outdir, l, r.err ? r.err : "", r.err ? (long)r.errn : 0)) die("err write");
+    np_free(&r);
+}
+
+/* Compare one case's rc/out/err against the earlier baseline. */
+static void cmp_one(const char *name) {
+    char l[160];
+    int ok = 1;
+    leaf(l, sizeof l, name, "rc");
+    if (!same_file(outdir, base, l)) { ok = 0; note(name, "rc"); }
+    leaf(l, sizeof l, name, "out");
+    if (!same_file(outdir, base, l)) { ok = 0; note(name, "stdout"); }
+    leaf(l, sizeof l, name, "err");
+    if (!same_file(outdir, base, l)) { ok = 0; note(name, "stderr"); }
+    checked++;
+    if (ok) sy_printf("SAME\t%s\n", name);
+}
+
+int main(int argc, char **argv) {
+    char why[512];
+    char srcp[4400], t1[4400], t2[4400], arp[4400], imgp[4400], ar2p[4400];
+    char *v[18];
+    int checkmode = 0, i;
+    size_t n = 0;
+    char *h;
+    if (argc < 3) die("usage: ROOT OUTDIR [--check BASELINE_DIR]");
+    if (argc >= 5 && tx_eqz(argv[3], "--check")) checkmode = 1;
+    if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+    /* The output directory is created when absent; realpath needs it to exist. */
+    if (sy_exists(argv[2]) != 1 && sy_mkdir(argv[2], 0700)) die("outdir mkdir");
+    if (sy_realpath(argv[2], outdir, (int)sizeof outdir) < 0) die("outdir");
+    if (checkmode) {
+        char tmp[4096];
+        int k = 0;
+        if (sy_realpath(argv[4], tmp, (int)sizeof tmp) < 0) die("baseline dir");
+        while (tmp[k]) { base[k] = tmp[k]; k = k + 1; }
+        base[k] = 0;
+    }
+    join(com, sizeof com, root, "unisacc.com");
+    join(srcp, sizeof srcp, root, "tests/p1-baseline-case.cx");
+    join(t1, sizeof t1, outdir, "t.o");
+    join(t2, sizeof t2, outdir, "t2.o");
+    join(arp, sizeof arp, outdir, "lib.a");
+    join(imgp, sizeof imgp, outdir, "img");
+    join(ar2p, sizeof ar2p, outdir, "lib2.a");
+
+    /* The fixture source: small, exercises printf, malloc, and a return code. */
+    {
+        const char *s = "int main(void){char *p=malloc(64);if(!p)return 9;p[0]='A';"
+                        "printf(\"p1-baseline %d\\n\",(int)p[0]);free(p);return 7;}\n";
+        long sn = 0; while (s[sn]) sn = sn + 1;
+        if (cx_write(srcp, s, (size_t)sn)) die("fixture write");
+    }
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "--version"; v[i] = 0;
+    one("version", v); if (checkmode) cmp_one("version");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "-c"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = srcp; v[i++] = "-o"; v[i++] = t1; v[i] = 0;
+    one("c_object", v); if (checkmode) cmp_one("c_object");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "-S"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = srcp; v[i++] = "-o"; v[i++] = "-"; v[i] = 0;
+    one("S_asm", v); if (checkmode) cmp_one("S_asm");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "-run"; v[i++] = srcp; v[i] = 0;
+    one("run_prog", v); if (checkmode) cmp_one("run_prog");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "-E"; v[i++] = srcp; v[i] = 0;
+    one("E_pre", v); if (checkmode) cmp_one("E_pre");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "as"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = srcp; v[i++] = "-o"; v[i++] = t2; v[i] = 0;
+    one("as_cmd", v); if (checkmode) cmp_one("as_cmd");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "-o"; v[i++] = imgp;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = srcp; v[i] = 0;
+    one("o_image", v); if (checkmode) cmp_one("o_image");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "nm"; v[i++] = t1; v[i] = 0;
+    one("nm_cmd", v); if (checkmode) cmp_one("nm_cmd");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "objdump"; v[i++] = t1; v[i] = 0;
+    one("objdump_cmd", v); if (checkmode) cmp_one("objdump_cmd");
+
+    i = 0;
+    v[i++] = "sh"; v[i++] = com; v[i++] = "ar"; v[i++] = "rcs"; v[i++] = ar2p;
+    v[i++] = t1; v[i] = 0;
+    one("ar_cmd", v); if (checkmode) cmp_one("ar_cmd");
+
+    {   /* artifact hash: the object the compiler produced. Written in both modes
+           into outdir, then compared when checking. */
+        char hex[65];
+        char acc[512];
+        int at = 0;
+        h = cx_read(t1, &n);
+        if (!h) die("t.o read");
+        cx_sha256_hex(h, n, hex);
+        mm_free(h);
+        if (cx_fmt(acc + at, sizeof acc - at, "t.o %s %ld\n", hex, (long)n)) die("acc");
+        at = at + (int)tx_len(acc + at, sizeof acc - at);
+        if (put_file(outdir, "artifacts.sha256", acc, at)) die("artifacts write");
+    }
+    if (checkmode) {
+        if (!same_file(outdir, base, "artifacts.sha256")) note("artifacts", "sha256");
+        sy_printf("BASELINE\tchecked=%d\tfailures=%d\n", checked, failures);
+    } else {
+        sy_printf("WROTE\t%s\n", outdir);
+    }
+    sy_printf(failures ? "P1_BASELINE\tfailed=%d\n" : "P1_BASELINE\tfailed=0\n", failures);
+    return failures ? 1 : 0;
+}
