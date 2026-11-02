@@ -177,53 +177,81 @@ static int pp_is_launcher(const char *name) {
     return pp_cmp(name, "unisacc.com") == 0;
 }
 
-/* Identity of the installed product at ROOT: 0 and HEX, or -1 (missing member, bad layout). */
-int pp_product_digest(const char *root, char hex[65]) {
-    char names[PP_MAX_MEMBERS][PP_NAME];
-    char canon[4096], h[65], p[4400], devsrc[4400], name[PP_NAME];
+/* ROOT's members, sorted by basename: NAMES[][64], SHAS[][65], BYTES[] up to MAX; returns the count
+   or -1 (bad layout, missing member). The launcher is always first in the input and sorted like the
+   rest; under PP_APE the product is a single member. Exported so a check can print or compare the
+   same set pp_product_digest hashes. */
+int pp_member_list(const char *root, char names[][64], char shas[][65], long *bytes, int max) {
+    char nm[PP_NAME], h[65], p[4400], devsrc[4400], name[PP_NAME];
     int n = 0, i, j, l = pp_layout(root);
-    long at = 0, a = 0, rn = 0;
+    long at = 0, rn = 0;
     char *r;
-    if (hex) hex[0] = 0;
-    if (l == PP_APE) return pp_file_hex(root, "unisacc.com", hex);
+    if (max < 1) return -1;
+    if (l == PP_APE) {
+        if (pp_file_hex(root, "unisacc.com", h)) return -1;
+        pp_put(nm, PP_NAME, "unisacc.com");
+        pp_put(names[0], 64, nm);
+        pp_put(shas[0], 65, h);
+        {   sy_stat_t st;
+            bytes[0] = (!pp_join(root, "unisacc.com", p, (int)sizeof p) && sy_stat(p, &st) == 0) ? (long)st.size : 0;
+        }
+        return 1;
+    }
     if (l != PP_SPLIT) return -1;
     if (pp_join2(root, pp_dev_dir, "", devsrc, (int)sizeof devsrc)) return -1;
-    pp_put(names[n], PP_NAME, "unisacc.com"); n++;
-    /* members named by the receipt, else the two names this file documents */
+    pp_put(names[n], 64, "unisacc.com"); n++;
     if (pp_join(root, "ape-receipt.txt", p, (int)sizeof p)) return -1;
     r = cx_read(p, &rn);
     if (r) {
-        while (a < rn && n < PP_MAX_MEMBERS) {
+        long a = 0;
+        while (a < rn && n < max) {
             long e = a;
             while (e < rn && r[e] != '\n') e++;
             if (pp_receipt_line(r + a, e - a, name, PP_NAME) && !pp_is_launcher(name)) {
                 int dup = 0;
                 for (j = 0; j < n; j++) if (pp_cmp(names[j], name) == 0) dup = 1;
-                if (!dup) { pp_put(names[n], PP_NAME, name); n++; }
+                if (!dup) { pp_put(names[n], 64, name); n++; }
             }
             a = e + 1;
         }
         free(r);
     }
     if (n == 1) {
-        pp_put(names[n], PP_NAME, pp_pkg_name); n++;
-        pp_put(names[n], PP_NAME, "entry.elf"); n++;
+        if (max < 3) return -1;
+        pp_put(names[n], 64, pp_pkg_name); n++;
+        pp_put(names[n], 64, "entry.elf"); n++;
     }
-    /* insertion sort by basename */
     for (i = 1; i < n; i++) {
         pp_put(name, PP_NAME, names[i]);
         j = i - 1;
-        while (j >= 0 && pp_cmp(names[j], name) > 0) { pp_put(names[j + 1], PP_NAME, names[j]); j--; }
-        pp_put(names[j + 1], PP_NAME, name);
+        while (j >= 0 && pp_cmp(names[j], name) > 0) { pp_put(names[j + 1], 64, names[j]); j--; }
+        pp_put(names[j + 1], 64, name);
     }
     for (i = 0; i < n; i++) {
         const char *src = pp_is_launcher(names[i]) ? root : devsrc;
-        long bytes = 0;
         sy_stat_t st;
         if (pp_file_hex(src, names[i], h)) return -1;
-        if (!pp_join(src, names[i], p, (int)sizeof p) && sy_stat(p, &st) == 0) bytes = (long)st.size;
-        if (pp_canon_add(canon, (long)sizeof canon - 1, &at, names[i], h, bytes)) return -1;
+        pp_put(shas[i], 65, h);
+        bytes[i] = (!pp_join(src, names[i], p, (int)sizeof p) && sy_stat(p, &st) == 0) ? (long)st.size : 0;
     }
+    (void)at;
+    return n;
+}
+
+/* Identity of the installed product at ROOT: 0 and HEX, or -1 (missing member, bad layout). */
+int pp_product_digest(const char *root, char hex[65]) {
+    static char names[PP_MAX_MEMBERS][64], shas[PP_MAX_MEMBERS][65];
+    static long bytes[PP_MAX_MEMBERS];
+    char canon[4096];
+    int n, i, l = pp_layout(root);
+    long at = 0;
+    if (hex) hex[0] = 0;
+    if (l == PP_APE) return pp_file_hex(root, "unisacc.com", hex);
+    if (l != PP_SPLIT) return -1;
+    n = pp_member_list(root, names, shas, bytes, PP_MAX_MEMBERS);
+    if (n < 1) return -1;
+    for (i = 0; i < n; i++)
+        if (pp_canon_add(canon, (long)sizeof canon - 1, &at, names[i], shas[i], bytes[i])) return -1;
     canon[at] = 0;
     cx_sha256_hex(canon, (size_t)at, hex);
     return 0;

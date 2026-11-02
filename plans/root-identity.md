@@ -3,10 +3,20 @@
 本地根产品 = lnx-only 开发 APE（薄 shell 头 + 旁目录），非发布物（NOT_RELEASE）。
 发布仍待 osx/win 片 + UNITOK2。
 
-三身份 sha256：
-  unisacc.com（薄 shell 头）   d93c1b24551ae4bf7397eeba344e9ec2a56da103a64b99f01af826023f359b4a
-  unisacc.com.dev/entry.elf    de54dd80d0f346b9aa9329f65974d8031becb7438a6acab114210163f18b6a9e
-  unisacc.com.dev/p3-package.bin  47a2275d7e1143b3bf23dc9b11f08123cc44e183d1b2432ef4c1f15c1320c600
+机器可校验的产品身份（本块由 `tools/check-root-identity.cx -- --emit` 写，只含事实；
+判定口径在块外。它登记的批次是 `cx-root-identity`，每次全量都会重算并逐行比对）：
+
+<!-- identity-begin -->
+product_kind	split1
+product_digest	6b95204eb305183301c8e53831944a49e78fd079bb0b44452879634d041a9800
+entry.elf	de54dd80d0f346b9aa9329f65974d8031becb7438a6acab114210163f18b6a9e	1643406
+p3-package.bin	47a2275d7e1143b3bf23dc9b11f08123cc44e183d1b2432ef4c1f15c1320c600	2044114
+unisacc.com	d93c1b24551ae4bf7397eeba344e9ec2a56da103a64b99f01af826023f359b4a	624
+<!-- identity-end -->
+
+三身份 sha256 不在这里另抄一份：上面的生成块就是唯一副本（抄第二份必然漂移）。
+块里的 `product_digest` 是**成员集合**的身份（split 布局下按 basename 排序逐员哈希再合并），
+不是任何一个单文件的 sha；`candidate_kind` 说明用的是哪种定义。
 
 变更记录：
   2026-11-02 薄头 1bfdcd20… → d93c1b24…：dev-lnx 薄头加 ulimit -v 预检（need=53248，

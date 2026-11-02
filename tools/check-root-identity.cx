@@ -1,0 +1,150 @@
+/* tools/check-root-identity.cx -- plans/root-identity.md agrees with the installed product.
+ *
+ *   sh ./unisacc.com tools/check-root-identity.cx -- ROOT [--emit]
+ *
+ * The document used to carry three sha256 lines typed by hand, which nothing could check. It now
+ * carries a block the machine reads and writes:
+ *
+ *   <!-- identity-begin -->
+ *   product_kind<TAB>split1
+ *   product_digest<TAB><hex>
+ *   <member><TAB><sha256><TAB><bytes>
+ *   ...
+ *   <!-- identity-end -->
+ *
+ * That block carries facts only; the judgement prose stays outside it, because prose cannot be
+ * compared line by line. This check is registered as a batch, so "the document can be disproved"
+ * is a claim the suite actually runs -- a design intent that no batch executes is not a check.
+ *
+ *   default   compare the block with ROOT and print PASS/FAIL per line, marker ROOT_IDENTITY
+ *   --emit    rewrite the block body from ROOT (nothing outside the markers is touched)
+ *
+ * Prints ROOT_IDENTITY<TAB>assertions=N<TAB>failed=M; exit 0 only when nothing failed. */
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define RI_MAX 16
+
+static char root[4400], doc[4400];
+static int assertions, failed;
+
+static void ok(int cond, const char *name) {
+    assertions++;
+    if (!cond) failed++;
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+}
+
+static void die(const char *what) {
+    fprintf(stderr, "check-root-identity: %s\n", what);
+    exit(2);
+}
+
+/* offsets of the last occurrence of MARKER in S[0..N); -1 when absent */
+static long find_marker(const char *s, long n, const char *marker) {
+    long ml = tx_len(marker, 200), at = -1, i;
+    for (i = 0; i + ml <= n; i++)
+        if (!memcmp(s + i, marker, (size_t)ml)) at = i;
+    return at;
+}
+
+/* The block body (facts only) for ROOT into OUT; 0, or -1. */
+static int body(char *out, long cap, long *outn) {
+    char names[RI_MAX][64], shas[RI_MAX][65];
+    long bytes[RI_MAX];
+    char line[256];
+    int n, i, k;
+    long at = 0;
+    n = pp_member_list(root, names, shas, bytes, RI_MAX);
+    if (n < 1) return -1;
+    k = tx_snprintf(line, sizeof line, "product_kind\t%s\n", pp_identity_kind(root));
+    if (k < 0 || at + k >= cap) return -1;
+    memcpy(out + at, line, (size_t)k); at += k;
+    {   char dg[65];
+        if (pp_product_digest(root, dg)) return -1;
+        k = tx_snprintf(line, sizeof line, "product_digest\t%s\n", dg);
+        if (k < 0 || at + k >= cap) return -1;
+        memcpy(out + at, line, (size_t)k); at += k;
+    }
+    for (i = 0; i < n; i++) {
+        k = tx_snprintf(line, sizeof line, "%s\t%s\t%ld\n", names[i], shas[i], bytes[i]);
+        if (k < 0 || at + k >= cap) return -1;
+        memcpy(out + at, line, (size_t)k); at += k;
+    }
+    out[at] = 0;
+    if (outn) *outn = at;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *bytes, want[4096];
+    size_t sz = 0;
+    long bn = 0, wn = 0;
+    const char *begin = "<!-- identity-begin -->";
+    const char *endmk = "<!-- identity-end -->";
+    long bl, el;
+    int emit = 0, i;
+    for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--emit")) emit = 1;
+    for (i = 1; i < argc && argv[i][0] != '/'; i++) ;
+    if (i < argc && argv[i][0] == '/') { if (tx_copy(root, sizeof root, argv[i], tx_len(argv[i], sizeof root))) die("root"); }
+    else if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(doc, sizeof doc, "%s/plans/root-identity.md", root)) die("doc path");
+    if (body(want, (long)sizeof want - 1, &wn)) die("no product identity");
+    if (emit) {
+        bytes = cx_read(doc, &sz);
+        bn = (long)sz;
+        if (!bytes) die("doc read");
+        bl = find_marker(bytes, bn, begin);
+        el = find_marker(bytes, bn, endmk);
+        if (bl < 0 || el < 0 || el < bl) die("markers missing");
+        {   long head = bl + tx_len(begin, 64) + 1, tail = el, at = 0;
+            char *o = mm_alloc((size_t)(bn + wn + 16));
+            if (!o) die("alloc");
+            mm_copy(o, (size_t)head, bytes, (size_t)head);
+            at = head;
+            mm_copy(o + at, (size_t)wn, want, (size_t)wn); at += wn;
+            mm_copy(o + at, (size_t)(bn - tail), bytes + tail, (size_t)(bn - tail)); at += bn - tail;
+            if (cx_write(doc, o, (size_t)at)) die("doc write");
+        }
+        printf("ROOT_IDENTITY\temit=ok\tbytes=%ld\n", wn);
+        return 0;
+    }
+    bytes = cx_read(doc, &sz);
+        bn = (long)sz;
+    if (!bytes) die("doc read");
+    bl = find_marker(bytes, bn, begin);
+    el = find_marker(bytes, bn, endmk);
+    ok(bl >= 0 && el > bl, "identity-block-present");
+    if (bl >= 0 && el > bl) {
+        long at = bl + tx_len(begin, 64), len;
+        while (at < el && (bytes[at] == '\n' || bytes[at] == '\r')) at++;   /* the newline after the marker */
+        len = el - at;
+        ok(len == wn && !memcmp(bytes + at, want, (size_t)wn), "identity-block-matches-product");
+        if (!(len == wn && !memcmp(bytes + at, want, (size_t)wn))) {
+            /* show the first differing line, so a red run says what to fix */
+            long a1 = 0, a2 = 0;
+            while (a1 < len && a2 < wn) {
+                long e1 = a1, e2 = a2;
+                while (e1 < len && bytes[at + e1] != '\n') e1++;
+                while (e2 < wn && want[e2] != '\n') e2++;
+                if ((e1 - a1) != (e2 - a2) || memcmp(bytes + at + a1, want + a2, (size_t)(e1 - a1))) {
+                    printf("DIFF\tdoc=%.*s\nDIFF\tproduct=%.*s\n", (int)(e1 - a1), bytes + at + a1, (int)(e2 - a2), want + a2);
+                    break;
+                }
+                a1 = e1 + 1; a2 = e2 + 1;
+            }
+        }
+    }
+    /* the members the block must name, for a reader who only has the FAIL line */
+    {   char names[RI_MAX][64], shas[RI_MAX][65];
+        long bts[RI_MAX];
+        int n = pp_member_list(root, names, shas, bts, RI_MAX);
+        for (i = 0; i < n; i++) printf("MEMBER\t%s\t%s\t%ld\n", names[i], shas[i], bts[i]);
+    }
+    printf("ROOT_IDENTITY\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
