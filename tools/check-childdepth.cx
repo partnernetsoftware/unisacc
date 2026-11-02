@@ -1,0 +1,123 @@
+/* tools/check-childdepth.cx -- the self-restart guard refuses a runaway chain.
+ *
+ *   sh ./unisacc.com tools/check-childdepth.cx        (from the repo root)
+ *
+ * The four self-restarting checks start a child of themselves and the child
+ * recognises its role from argv[1] == "child". The 2026-11-02 incident was that
+ * chain running with no bottom: the product dropped everything after `--`, the
+ * child read argc=1, ran the whole parent flow, and spawned again.
+ * sys.childdepth puts a depth counter in the environment and refuses past it.
+ *
+ * Every case spawns the product on THIS file, so they also assert the
+ * product-side contract the four checks depend on: a child run as
+ * `-run SELF -- child ...` must see its arguments (a product that drops them
+ * makes case parent-depth-zero fail, by design).
+ *
+ * Cases
+ *   parent-depth-zero      no CX_CHILD_DEPTH, `-- child probe`  -> exit 0, DEPTH=1
+ *   refuse-no-child-arg    depth 5 without `child`              -> exit 99, CXCHILD
+ *   refuse-at-max          depth 8 with `child`                 -> exit 99, CXCHILD
+ *   non-numeric-reads-zero CX_CHILD_DEPTH=abc, no `child`       -> not refused (2)
+ *   depth-unset-not-refused depth unset, no `child`             -> not refused (2)
+ *   chain-increments       depth 2, `-- child spawn`            -> DEPTH=3 then 4
+ *
+ * Every child is started with CXCD_NOFLOW, and this file's parent flow exits 2
+ * when it sees that variable. So a child whose arguments did not arrive stops
+ * there instead of running the parent flow and spawning again: a guard that
+ * fails to refuse shows up as 2, never as an unbounded chain. That test-side
+ * backstop is why this checker can be run before the product side is fixed.
+ *
+ * Prints PASS/FAIL per case and CHILD_DEPTH<TAB>assertions=N<TAB>failed=M;
+ * exit 0 only when nothing failed. */
+#pragma unisa use sys.childdepth
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char root[4400], com[4400];
+static const char *self = "tools/check-childdepth.cx";
+static int assertions, failed;
+
+static void ok(int cond, const char *name) {
+    assertions++;
+    if (!cond) failed++;
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+}
+
+static void die(const char *what) {
+    fprintf(stderr, "check-childdepth: %s\n", what);
+    exit(2);
+}
+
+/* Run this file under the product with ARGS after `--`, with CX_CHILD_DEPTH set
+   to DEPTH (or unset). CXCD_NOFLOW is always set, so the child cannot fall
+   through into the parent flow. Returns the exit status, merged output in OUT. */
+static int child_run(const char *depth, char **args, char *out, int cap) {
+    char *av[12];
+    int n = 0, rc;
+    if (depth) setenv("CX_CHILD_DEPTH", depth, 1);
+    else unsetenv("CX_CHILD_DEPTH");
+    setenv("CXCD_NOFLOW", "1", 1);
+    av[n++] = "sh";
+    av[n++] = com;
+    av[n++] = "-run";
+    av[n++] = (char *)self;
+    av[n++] = "--";
+    while (args && *args && n < 10) av[n++] = *args++;
+    av[n] = 0;
+    rc = sy_run(av, out, cap, 0);
+    unsetenv("CXCD_NOFLOW");
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    char out[4400];
+    char *probe[] = { "child", "probe", 0 };
+    char *spawn[] = { "child", "spawn", 0 };
+    int rc;
+    sy_child_guard(argc, argv);
+    if (argc > 0 && argv[0] && argv[0][0]) self = argv[0];
+    if (argc >= 2 && tx_eqz(argv[1], "child")) {
+        printf("DEPTH=%d\n", sy_child_depth());
+        if (argc >= 3 && tx_eqz(argv[2], "spawn")) {
+            char *a[] = { "child", "probe", 0 };
+            out[0] = 0;
+            rc = child_run(0, a, out, (int)sizeof out);
+            printf("GRANDCHILD rc=%d %s", rc, out);
+        }
+        return 0;
+    }
+    /* Reached only when the guard let this process through without it being a
+       child: that is a spawn whose arguments did not arrive. Stop here. */
+    if (sy_env("CXCD_NOFLOW")) return 2;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path");
+
+    out[0] = 0;
+    rc = child_run(0, probe, out, (int)sizeof out);
+    ok(rc == 0 && tx_find(out, "DEPTH=1") >= 0, "parent-depth-zero");
+
+    out[0] = 0;
+    rc = child_run("5", 0, out, (int)sizeof out);
+    ok(rc == 99 && tx_find(out, "CXCHILD") >= 0 && tx_find(out, "depth=5") >= 0, "refuse-no-child-arg");
+
+    out[0] = 0;
+    rc = child_run("8", probe, out, (int)sizeof out);
+    ok(rc == 99 && tx_find(out, "CXCHILD") >= 0 && tx_find(out, "depth=8") >= 0, "refuse-at-max");
+
+    out[0] = 0;
+    rc = child_run("abc", 0, out, (int)sizeof out);
+    ok(rc == 2, "non-numeric-reads-zero");
+
+    out[0] = 0;
+    rc = child_run(0, 0, out, (int)sizeof out);
+    ok(rc == 2, "depth-unset-not-refused");
+
+    out[0] = 0;
+    rc = child_run("2", spawn, out, (int)sizeof out);
+    ok(rc == 0 && tx_find(out, "DEPTH=3") >= 0 && tx_find(out, "GRANDCHILD rc=0") >= 0 &&
+       tx_find(out, "DEPTH=4") >= 0, "chain-increments");
+
+    printf("CHILD_DEPTH\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

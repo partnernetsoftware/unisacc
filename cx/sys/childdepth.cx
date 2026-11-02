@@ -1,0 +1,92 @@
+#pragma unisa module childdepth
+#pragma unisa use env
+#pragma unisa use io
+#pragma unisa use sig
+/* L0 sys/childdepth: the recursion guard for the checks that re-run themselves.
+ *
+ *   A check like tools/check-cx-sys.cx starts a child of itself as
+ *   `sh <product> -run <self> -- child <mode> ...` and the child recognises its
+ *   own role from argv[1]. When the product dropped everything after `--`, the
+ *   child did not recognise "child", ran the whole parent flow again, spawned
+ *   its own child, and the chain only stopped when the machine did. That is a
+ *   check-side assumption ("the product passes my arguments through") with no
+ *   backstop; this is the backstop.
+ *
+ * Contract
+ *   CX_CHILD_DEPTH   decimal; unset or not a number reads as 0
+ *   sy_child_guard(argc, argv) is the first statement of main:
+ *     refuse when depth >= CX_CHILD_MAX
+ *     refuse when depth >= 1 and argv[1] is not exactly "child"
+ *     otherwise set CX_CHILD_DEPTH to depth+1 for this process and its children
+ *   refusal: CXCHILD<TAB>depth-refused<TAB>depth=<n><TAB>argc=<n> on stderr,
+ *   exit 99. A parent that sees 99 knows the child was stopped by the guard,
+ *   not by the thing under test.
+ *
+ * Known boundary: a guarded tool spawned BY another guarded tool is refused,
+ * because it inherits depth >= 1 while its argv[1] is not "child". The four
+ * checks that use this never spawn each other. A tool about to spawn another
+ * guarded tool must clear CX_CHILD_DEPTH around the spawn instead of widening
+ * the rule.
+ *
+ * The environment is inherited across fork/exec here (measured: sy_setenv then
+ * sy_run of {"sh","-c","echo $X"} prints the value), so the counter travels
+ * from parent to child without putting a flag into each check's argv layout. */
+#define CX_CHILD_MAX 8
+#define CX_CHILD_EXIT 99
+
+/* S is exactly "child". */
+static int child_word(const char *s) {
+    static const char w[] = "child";
+    long i;
+    if (!s) return 0;
+    for (i = 0; w[i]; i++) if (s[i] != w[i]) return 0;
+    return s[i] == 0;
+}
+
+/* V as a depth; 0 when V is unset or not a number. Saturates so a long run of
+   digits cannot wrap around below CX_CHILD_MAX. */
+static int child_depth_of(const char *v) {
+    int d = 0;
+    if (!v || !v[0]) return 0;
+    for (; *v >= '0' && *v <= '9'; v++) {
+        d = d * 10 + (*v - '0');
+        if (d > 100000) return 100000;
+    }
+    if (*v) return 0;
+    return d;
+}
+
+/* V written in decimal into DST, NUL-terminated. V is a small non-negative
+   depth; a wider one is clamped, which still reads as >= CX_CHILD_MAX. */
+static void child_put(char *dst, int v) {
+    char tmp[12];
+    int n = 0, i;
+    if (v < 0) v = 0;
+    if (v > 100000) v = 100000;
+    do {
+        tmp[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v > 0);
+    for (i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
+    dst[n] = 0;
+}
+
+/* This process's depth, from CX_CHILD_DEPTH. */
+int sy_child_depth(void) {
+    return child_depth_of(sy_env("CX_CHILD_DEPTH"));
+}
+
+/* Refuse a runaway self-restart; sets CX_CHILD_DEPTH for the children of a
+   process that is allowed to continue. Call it first in main, before any
+   work: a refused child must not have touched anything yet. */
+void sy_child_guard(int argc, char **argv) {
+    int depth = sy_child_depth();
+    int is_child = argc >= 2 && child_word(argv[1]);
+    char next[16];
+    if (depth >= CX_CHILD_MAX || (depth >= 1 && !is_child)) {
+        sy_eprintf("CXCHILD\tdepth-refused\tdepth=%d\targc=%d\n", depth, argc);
+        sy_exit(CX_CHILD_EXIT);
+    }
+    child_put(next, depth + 1);
+    sy_setenv("CX_CHILD_DEPTH", next, 1);
+}
