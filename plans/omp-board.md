@@ -4,7 +4,7 @@
 
 | 窗口 | 当前 | 下一个 | 可写路径 |
 |---|---|---|---|
-| omp-bdy | 私有根预演 D/E/F(补丁05/06/07已提交)、准备 runbook 第7-12步 OUT/超时 | 纪元开跑(等 H 提交+冻结) | out/epoch-*、plans/epoch-*、plans/w5-patches |
+| omp-bdy | 纪元进行中(runbook 第7步起,起点 a824200d77) | 完成后汇报 | out/epoch-2026-11-02 |
 | omp-go | 待命:分层重构首步选择(plans/layering-refactor) | 按选择执行 | 待定 |
 | omp-ds | H(撤销 --host-provider)staged 待提交;实参个数缺陷定位(plans/defect-call-arity) | H 报告后纪元起点 | src/cli/drive/entrybind、tools/check-driver-cli |
 | omp-go2 | W6:pack P1/P2 片预演(compilerpack、ident、tbl、net 已通过) | P3 压缩口径纪元决策 | out/w6-source-job-preview、plans/w6-* |
