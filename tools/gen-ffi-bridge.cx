@@ -1,9 +1,11 @@
-/* tools/gen-ffi-bridge.cx -- emit the FFI bridge byte table from a raw .text blob (C44 FFI, §4).
- *   gen-ffi-bridge [--check] ARCH RAW OUT
- * The .text comes from `objcopy -O binary --only-section=.text` (LEGACY: objcopy is a host binary;
- * no .cx section extractor exists today, tools/formats-*.cx only covers Mach-O/PE). */
+/* tools/gen-ffi-bridge.cx -- emit the FFI bridge byte table from an assembled bridge object (C44 FFI, §4).
+ *   gen-ffi-bridge [--check] ARCH OBJ OUT
+ * OBJ is the ELF64 relocatable object from the product assembler; its .text is taken by tools/formats-elf-text.cx
+ * (run from the current directory = repository root), so no host objcopy is involved. A RAW input that does not
+ * start with the ELF magic is still taken as already-extracted .text bytes (used by check-ffi-bridge-bytes). */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.proc
 #pragma unisa use text.text
 /* prototype: genffi <arch> <raw.bin> <out.h> | genffi --check <arch> <raw.bin> <out.h> */
 static int same(const char *a, const char *b) { long i = 0; if (!a || !b) return 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
@@ -19,6 +21,17 @@ int main(int argc, char **argv) {
     arch = argv[i]; raw = argv[i+1]; out = argv[i+2];
     b = (unsigned char *)cx_read(raw, &n);
     if (!b || n == 0) { printf("genffi: cannot read %s\n", raw); return 2; }
+    if (n >= 4 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        char tmp[4400], log[512];
+        char *av[] = { "sh", "unisacc.com", "tools/formats-elf-text.cx", "--", (char *)raw, tmp, 0 };
+        if (cx_fmt(tmp, sizeof tmp, "%s.text.tmp", out)) return 2;
+        log[0] = 0;
+        if (sy_run(av, log, (int)sizeof log, 0) != 0) { printf("genffi: .text extraction failed: %s\n", log); return 2; }
+        free(b); n = 0;
+        b = (unsigned char *)cx_read(tmp, &n);
+        sy_unlink(tmp);
+        if (!b || n == 0) { printf("genffi: cannot read extracted .text\n"); return 2; }
+    }
     if (cx_fmt(head, sizeof head, "static const unsigned char ffi_bridge_%s[%ld] = {", arch, (long)n)) return 2;
     at = tx_len(head, sizeof head);
     for (size_t k = 0; k < n; k++) {

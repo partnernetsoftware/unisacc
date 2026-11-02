@@ -1,0 +1,60 @@
+/* tools/formats-elf-text.cx -- extract the .text section bytes of an ELF64 little-endian ET_REL object.
+ *   sh ./unisacc.com tools/formats-elf-text.cx -- IN.o [OUT]
+ * Without OUT the bytes go to stdout; with OUT they are written to that file. Prints nothing else on success
+ * when writing to stdout; with OUT prints "elf-text: WROTE OUT N bytes". The result equals
+ * `objcopy --only-section=.text -O binary IN.o OUT` for the same object (x86_64 and arm64 share this one path:
+ * only the section header table and .shstrtab are consulted, never e_machine).
+ * Refused (rc 1, one reason line): not an ELF magic, not 64-bit, not little-endian, not ET_REL, truncated header or
+ * section table, section-name table out of range, no .text PROGBITS section, empty .text, .text outside the file. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+static unsigned long long rd(const unsigned char *p, int n) { unsigned long long v = 0; int i; for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+static int why(const char *m) { printf("elf-text: REFUSED %s\n", m); return 1; }
+/* On success *at/*len locate the .text bytes inside b[0..n). Returns 0, else 1 after printing the reason. */
+static int find_text(const unsigned char *b, size_t n, size_t *at, size_t *len) {
+    unsigned long long shoff, shstr_off, shstr_size, off, size;
+    unsigned shentsize, shnum, shstrndx, i;
+    if (n < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') return why("not an ELF file");
+    if (b[4] != 2) return why("not ELF64");
+    if (b[5] != 1) return why("not little-endian");
+    if (rd(b + 16, 2) != 1) return why("not ET_REL");
+    shoff = rd(b + 40, 8); shentsize = (unsigned)rd(b + 58, 2); shnum = (unsigned)rd(b + 60, 2); shstrndx = (unsigned)rd(b + 62, 2);
+    if (shentsize < 64 || shnum == 0 || shstrndx >= shnum) return why("bad section header table");
+    if (shoff > n || (unsigned long long)shnum * shentsize > n - shoff) return why("truncated section header table");
+    {   const unsigned char *h = b + shoff + (unsigned long long)shstrndx * shentsize;
+        shstr_off = rd(h + 24, 8); shstr_size = rd(h + 32, 8);
+        if (shstr_off > n || shstr_size > n - shstr_off) return why(".shstrtab outside the file"); }
+    for (i = 0; i < shnum; i++) {
+        const unsigned char *h = b + shoff + (unsigned long long)i * shentsize;
+        unsigned long long nm = rd(h, 4);
+        const unsigned char *s;
+        if (nm >= shstr_size || shstr_size - nm < 6) continue;
+        s = b + shstr_off + nm;
+        if (s[0] != '.' || s[1] != 't' || s[2] != 'e' || s[3] != 'x' || s[4] != 't' || s[5] != 0) continue;
+        if (rd(h + 4, 4) != 1) continue;
+        off = rd(h + 24, 8); size = rd(h + 32, 8);
+        if (size == 0) return why("empty .text");
+        if (off > n || size > n - off) return why(".text outside the file");
+        *at = (size_t)off; *len = (size_t)size;
+        return 0;
+    }
+    return why("no .text PROGBITS section");
+}
+int main(int argc, char **argv) {
+    size_t n = 0, at = 0, len = 0;
+    unsigned char *b;
+    if (argc < 2 || argc > 3) { printf("usage: formats-elf-text IN.o [OUT]\n"); return 2; }
+    b = (unsigned char *)cx_read(argv[1], &n);
+    if (!b) { printf("elf-text: cannot read %s\n", argv[1]); return 2; }
+    if (find_text(b, n, &at, &len)) { free(b); return 1; }
+    if (argc == 3) {
+        if (cx_write(argv[2], b + at, len)) { free(b); return 2; }
+        printf("elf-text: WROTE %s %ld bytes\n", argv[2], (long)len);
+    } else {
+        long w = 0; size_t k;
+        for (k = 0; k < len; k++) { if (putchar(b[at + k]) < 0) w = 1; }
+        if (w) { free(b); return 2; }
+    }
+    free(b);
+    return 0;
+}

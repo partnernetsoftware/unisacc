@@ -1,0 +1,90 @@
+/* tools/check-elf-text.cx -- tools/formats-elf-text.cx takes exactly what `objcopy --only-section=.text -O binary` takes.
+ *   sh ./unisacc.com tools/check-elf-text.cx
+ * Fixtures are in the tree: tests/fixtures/elf-text/bridge_{x86_64,arm64}.o (tools/ffi/bridge_<arch>.S through
+ * tools/asm-source.cx + the product assembler) and bridge_<arch>.text.bin (objcopy output recorded once).
+ * Cases: extract-x86_64-bytes / extract-arm64-bytes (equal to the recorded objcopy bytes, length + sha prefix),
+ * generator-from-object-equals-from-raw, three refusals on x86_64 copies: empty-text-refused, no-text-refused,
+ * truncated-refused. Prints PASS/FAIL and ELF_TEXT<TAB>assertions=N<TAB>failed=M. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+static int assertions, failed;
+static void ok(int c, const char *n) { assertions++; if (!c) failed++; printf("%s\t%s\n", c ? "PASS" : "FAIL", n); }
+static unsigned long long rd(const unsigned char *p, int n) { unsigned long long v = 0; int i; for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+static int run_tool(const char *a, const char *b, char *out, int cap) {
+    char *av[] = { "sh", "unisacc.com", "tools/formats-elf-text.cx", "--", (char *)a, (char *)b, 0 };
+    out[0] = 0;
+    return sy_run(av, out, cap, 0);
+}
+/* extract IN to OUT and compare with the recorded ORACLE bytes and sha prefix */
+static int extract_matches(const char *in, const char *oracle, long want_len, const char *sha_prefix, const char *tmp) {
+    char log[512], hex[65];
+    size_t n = 0, m = 0, k;
+    unsigned char *a, *o;
+    int good = 1;
+    if (run_tool(in, tmp, log, (int)sizeof log) != 0) return 0;
+    a = (unsigned char *)cx_read(tmp, &n);
+    o = (unsigned char *)cx_read(oracle, &m);
+    if (!a || !o || n != m || (long)n != want_len) good = 0;
+    else for (k = 0; k < n; k++) if (a[k] != o[k]) { good = 0; break; }
+    if (good) { cx_sha256_hex(a, n, hex); for (k = 0; sha_prefix[k]; k++) if (hex[k] != sha_prefix[k]) good = 0; }
+    free(a); free(o);
+    return good;
+}
+int main(void) {
+    char root[4400], dir[4600], xo[4700], ao[4700], xb[4700], ab[4700], t1[4700], t2[4700], log[512];
+    size_t n = 0, i;
+    unsigned char *b;
+    int rc;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (cx_fmt(dir, sizeof dir, "%s/out/elf-text-check", root) || cx_fmt(xo, sizeof xo, "%s/tests/fixtures/elf-text/bridge_x86_64.o", root) ||
+        cx_fmt(ao, sizeof ao, "%s/tests/fixtures/elf-text/bridge_arm64.o", root) || cx_fmt(xb, sizeof xb, "%s/tests/fixtures/elf-text/bridge_x86_64.text.bin", root) ||
+        cx_fmt(ab, sizeof ab, "%s/tests/fixtures/elf-text/bridge_arm64.text.bin", root) || cx_fmt(t1, sizeof t1, "%s/t1.bin", dir) || cx_fmt(t2, sizeof t2, "%s/t2.bin", dir)) return 2;
+    sy_mkdir(dir, 0755);
+    ok(extract_matches(xo, xb, 221, "9935c68ba921dd42", t1), "extract-x86_64-bytes");
+    ok(extract_matches(ao, ab, 220, "4087560919a4ea2b", t1), "extract-arm64-bytes");
+    {   char h1[4700], h2[4700], *av[8];
+        size_t n1 = 0, n2 = 0; char *p1, *p2; int same = 0;
+        if (cx_fmt(h1, sizeof h1, "%s/from-obj.h", dir) || cx_fmt(h2, sizeof h2, "%s/from-raw.h", dir)) return 2;
+        av[0] = "sh"; av[1] = "unisacc.com"; av[2] = "tools/gen-ffi-bridge.cx"; av[3] = "--"; av[4] = "arm64"; av[5] = ao; av[6] = h1; av[7] = 0;
+        rc = sy_run(av, log, (int)sizeof log, 0);
+        av[5] = ab; av[6] = h2;
+        if (rc == 0) rc = sy_run(av, log, (int)sizeof log, 0);
+        p1 = cx_read(h1, &n1); p2 = cx_read(h2, &n2);
+        if (rc == 0 && p1 && p2 && n1 == n2 && n1 > 8) { same = 1; for (i = 0; i < n1; i++) if (p1[i] != p2[i]) same = 0; }
+        ok(same, "generator-from-object-equals-from-raw");
+        free(p1); free(p2); }
+    b = (unsigned char *)cx_read(xo, &n);
+    if (!b) return 2;
+    {   /* locate the .text section header to blank its size */
+        unsigned long long shoff = rd(b + 40, 8); unsigned shentsize = (unsigned)rd(b + 58, 2), shnum = (unsigned)rd(b + 60, 2), shstrndx = (unsigned)rd(b + 62, 2), s;
+        unsigned long long stroff = rd(b + shoff + (unsigned long long)shstrndx * shentsize + 24, 8);
+        size_t text_hdr = 0;
+        for (s = 0; s < shnum; s++) {
+            const unsigned char *h = b + shoff + (unsigned long long)s * shentsize;
+            const unsigned char *nm = b + stroff + rd(h, 4);
+            if (rd(h + 4, 4) == 1 && nm[0] == '.' && nm[1] == 't' && nm[2] == 'e' && nm[3] == 'x' && nm[4] == 't' && nm[5] == 0) text_hdr = (size_t)(h - b);
+        }
+        if (!text_hdr) return 2;
+        for (i = 0; i < 8; i++) b[text_hdr + 32 + i] = 0;
+        if (cx_write(t1, b, n)) return 2;
+        rc = run_tool(t1, t2, log, (int)sizeof log);
+        ok(rc == 1 && tx_find(log, "empty .text") >= 0, "empty-text-refused");
+        free(b);
+    }
+    b = (unsigned char *)cx_read(xo, &n);
+    if (!b) return 2;
+    for (i = 0; i + 5 < n; i++) if (b[i] == '.' && b[i+1] == 't' && b[i+2] == 'e' && b[i+3] == 'x' && b[i+4] == 't' && b[i+5] == 0) b[i+3] = 'z';
+    if (cx_write(t1, b, n)) return 2;
+    rc = run_tool(t1, t2, log, (int)sizeof log);
+    ok(rc == 1 && tx_find(log, "no .text") >= 0, "no-text-refused");
+    if (cx_write(t1, b, n / 2)) return 2;
+    rc = run_tool(t1, t2, log, (int)sizeof log);
+    ok(rc == 1 && tx_find(log, "REFUSED") >= 0, "truncated-refused");
+    free(b);
+    printf("ELF_TEXT\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
