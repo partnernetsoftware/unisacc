@@ -7,8 +7,8 @@
 判定口径在块外。它登记的批次是 `cx-root-identity`，每次全量都会重算并逐行比对）：
 
 <!-- identity-begin -->
-product_kind	split1
-product_digest	6b95204eb305183301c8e53831944a49e78fd079bb0b44452879634d041a9800
+product_kind	split2
+product_digest	14b906fd0541cee61a617f8d56c00ecaef1f63b9c0106bc82782768c7c710b04
 entry.elf	de54dd80d0f346b9aa9329f65974d8031becb7438a6acab114210163f18b6a9e	1643406
 p3-package.bin	47a2275d7e1143b3bf23dc9b11f08123cc44e183d1b2432ef4c1f15c1320c600	2044114
 unisacc.com	d93c1b24551ae4bf7397eeba344e9ec2a56da103a64b99f01af826023f359b4a	624

@@ -65,7 +65,7 @@ static int main_identity_fail(void) {
     char g[4400], ge[4400];
     if (cx_fmt(g, sizeof g, "%s/guard-fail", work)) die("fail dir");
     if (pp_copy_product(root, g)) die("fail copy");
-    if (!tx_eqz(pp_identity_kind(g), "split1")) return 0;
+    if (!tx_eqz(pp_identity_kind(g), "split2")) return 0;
     if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("fail entry");
     if (sy_unlink(ge)) die("fail unlink");
     {   char h[65];
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
         out[0] = 0;
         rc = sy_run(av, out, (int)sizeof out, 0);
         ok(rc == 0 && tx_find(out, "0.0.43") >= 0, "copy-runs");
-        if (tx_eqz(pp_identity_kind(dst), "split1")) {
+        if (tx_eqz(pp_identity_kind(dst), "split2")) {
             if (cx_fmt(entry, sizeof entry, "%s/unisacc.com.dev/entry.elf", dst)) die("entry path");
             ok(sy_exists(entry) == 1, "copy-has-entry");
         } else ok(sy_exists(entry) != 2, "copy-has-entry");
@@ -129,10 +129,11 @@ int main(int argc, char **argv) {
         if (cx_fmt(g, sizeof g, "%s/guard", work)) die("guard dir");
         copied = pp_copy_product(root, g) == 0;
         ok(copied, "guard-copy-ok");
+        { char _d[4400], _e[4400]; if (!cx_fmt(_d, sizeof _d, "%s/unisacc.com.dev/p3-package.bin", g) && !cx_fmt(_e, sizeof _e, "%s/unisacc.com.dev/entry.elf", g)) fprintf(stderr, "DEBUG guard pkg=%d entry=%d\n", sy_exists(_d), sy_exists(_e)); }
         if (cx_fmt(gp, sizeof gp, "%s/unisacc.com.dev/p3-package.bin", g)) die("guard package");
-        ok(pp_product_digest(g, h1) == 0 && h1[0], "identity-computable");
+        { char _n[16][64], _h[16][65]; long _b[16]; int _k = pp_member_list(g, _n, _h, _b, 16); int _r = pp_product_digest(g, h1); if (_r) fprintf(stderr, "DEBUG guard identity rc=%d members=%d layout=%s\n", _r, _k, pp_layout_name(pp_layout(g))); ok(_r == 0 && h1[0], "identity-computable"); }
         ok(pp_product_digest(g, h2) == 0 && tx_eqz(h1, h2), "identity-stable");
-        if (tx_eqz(pp_identity_kind(g), "split1")) {
+        if (tx_eqz(pp_identity_kind(g), "split2")) {
             b = cx_read(gp, &n);
             if (b && n > 1) { b[n / 2] = (char)(b[n / 2] ^ 1); cx_write(gp, b, n); }
             free(b);
@@ -157,10 +158,72 @@ int main(int argc, char **argv) {
         int copied;
         if (cx_fmt(g, sizeof g, "%s/guard-missing", work)) die("missing dir");
         copied = pp_copy_product(root, g) == 0;
-        if (copied && tx_eqz(pp_identity_kind(g), "split1")) {
+        if (copied && tx_eqz(pp_identity_kind(g), "split2")) {
             if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("missing entry");
             if (sy_unlink(ge)) die("unlink entry");
             ok(pp_product_digest(g, h) != 0 && !h[0], "identity-refuses-a-missing-member");
+        }
+    }
+
+    /* ---- split2 regressions: each of these passed silently under split1 ---------------- */
+
+    {   /* more members than the table holds must be refused, not truncated */
+        char m[4400], rec[4400], body[4096], f[4400];
+        long at = 0;
+        int i, n = 0, built = 1;
+        if (cx_fmt(m, sizeof m, "%s/many", work)) die("many dir");
+        if (pp_copy_product(root, m)) built = 0;
+        if (built) {
+            for (i = 0; i < 18 && built; i++) {
+                if (cx_fmt(f, sizeof f, "%s/unisacc.com.dev/m%02d", m, i)) die("many member");
+                if (cx_write(f, "x", 1)) built = 0;
+            }
+            body[0] = 0; at = 0;
+            {   int z = cx_fmt(body, sizeof body, "NOT_RELEASE\tdev-lnx-only\n");
+                if (z) built = 0; else at = tx_len(body, sizeof body);
+            }
+            for (i = 0; i < 18 && built; i++) {
+                int z = cx_fmt(body + at, (size_t)((long)sizeof body - at), "m%02d\t/tmp/m%02d\tbytes=1\n", i, i);
+                if (z) built = 0; else at += tx_len(body + at, (long)sizeof body - at);
+            }
+            if (cx_fmt(rec, sizeof rec, "%s/ape-receipt.txt", m)) die("many receipt");
+            if (cx_write(rec, body, (size_t)at)) built = 0;
+        }
+        {   char h[65];
+            ok(built && pp_product_digest(m, h) != 0 && !h[0], "too-many-members-refused");
+        }
+        (void)n;
+    }
+
+    {   /* a receipt that names no member is a broken receipt, not "fall back to two names" */
+        char r[4400], rec[4400], f[4400];
+        char *only = "NOT_RELEASE\tdev-lnx-only\n";
+        int built;
+        if (cx_fmt(r, sizeof r, "%s/empty-receipt", work)) die("empty dir");
+        built = pp_copy_product(root, r) == 0;
+        if (built) {
+            if (cx_fmt(rec, sizeof rec, "%s/ape-receipt.txt", r)) die("empty receipt");
+            if (cx_write(rec, only, tx_len(only, 64))) built = 0;
+        }
+        {   char h[65];
+            ok(built && pp_product_digest(r, h) != 0 && !h[0], "empty-receipt-refused");
+        }
+        (void)f;
+    }
+
+    {   /* a member that is a symbolic link: identity must be these bytes, not whatever it points to */
+        char sl[4400], entry2[4400], target[4400];
+        int built, linked = 0;
+        if (cx_fmt(sl, sizeof sl, "%s/symlink-member", work)) die("symlink dir");
+        built = pp_copy_product(root, sl) == 0;
+        if (built && tx_eqz(pp_identity_kind(sl), "split2")) {
+            if (cx_fmt(entry2, sizeof entry2, "%s/unisacc.com.dev/entry.elf", sl)) die("symlink entry");
+            if (cx_fmt(target, sizeof target, "%s/entry-target", sl)) die("symlink target");
+            linked = sy_rename(entry2, target) == 0 && symlink("entry-target", entry2) == 0;
+            if (!linked) { if (sy_rename(target, entry2)) die("symlink restore"); }
+        }
+        {   char h[65];
+            ok(!built || !linked || (pp_product_digest(sl, h) != 0 && !h[0]), "symlink-member-refused");
         }
     }
 

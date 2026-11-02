@@ -64,7 +64,7 @@ typedef struct {int wave,finished,changed,run,superseded;char mode[8],dir[600],i
  /* split attempts: the sealed RUN facts and the SHA of the whole RUN block */
  char run_sha[65],executor[65],runner[65],status_sha[65],out_sha[65],err_sha[65];int bound_rc,status_known,child_status,seconds;long long outn,errn,t0,t1;} as_wave;
 typedef struct {
- char root[4096],map_sha[65];as_ident ident;long long created;int seq;int has_executor;int legacy_no_kind;char exec_sha[65],runner_sha[65];
+ char root[4096],map_sha[65];as_ident ident;long long created;int seq;int has_executor;int legacy_no_kind;int legacy_kind;char exec_sha[65],runner_sha[65];
  as_material *material;int nmaterial;as_ref *ref;int nref;as_wave *wave;int nwave;
  char *bytes;size_t n;
 } as_manifest;
@@ -158,7 +158,7 @@ int as_identity(const char *root,int with_sid,as_ident *id,char *why,size_t cap)
  if(as_copy(id->candidate_kind,sizeof id->candidate_kind,pp_identity_kind(root)))return as_bad(why,cap,"identity-kind",root,0);
  /* "none" means the layout could not be established at all; a session built on that would record a
     digest nobody can reproduce, so it is refused rather than stored. */
- if(strcmp(id->candidate_kind,"ape1")&&strcmp(id->candidate_kind,"split1"))return as_bad(why,cap,"identity-kind","unknown",0);
+ if(strcmp(id->candidate_kind,"ape1")&&strcmp(id->candidate_kind,"split2"))return as_bad(why,cap,"identity-kind","unknown",0);
  if(as_join(p,sizeof p,root,"tests/batches.tsv")||as_sha_file(p,0,id->batches,0,why,cap))return -1;
  if(as_join(p,sizeof p,root,"tests/coverage.tsv")||as_sha_file(p,0,id->coverage,0,why,cap))return -1;
  char reg[200];{int z=snprintf(reg,sizeof reg,"batches\t%s\ncoverage\t%s\n",id->batches,id->coverage);if(z<0||(size_t)z>=sizeof reg){fprintf(stderr,"bound-format\n");exit(2);}};cx_sha256_hex(reg,strlen(reg),id->registry);
@@ -223,6 +223,7 @@ int as_load(const char *session,as_manifest *m,char *why,size_t cap){
     if(nf!=2||strcmp(f[1],"0")){rc=as_bad(why,cap,"manifest-header","END",0);break;}
     /* a v1 manifest has no candidate_kind: its `candidate` is the launcher's sha. Keep it under
        legacy_candidate and label the session, so aggregation can say so instead of pretending. */
+    if(!strcmp(m->ident.candidate_kind,"split1"))m->legacy_kind=1;
     if(!m->ident.candidate_kind[0]){
      /* A v2 manifest promises candidate_kind; its absence is a broken header, not a legacy
         session. Only v1 -- written before the field existed -- is read as ape1 and labelled. */
@@ -235,7 +236,7 @@ int as_load(const char *session,as_manifest *m,char *why,size_t cap){
    else{const char *k=keys[line-1];if(nf!=2||strcmp(f[0],k)){rc=as_bad(why,cap,"manifest-header",k,0);}
     else if(line==1){if(f[1][0]!='/'||as_copy(m->root,sizeof m->root,f[1]))rc=as_bad(why,cap,"manifest-header","root",0);}
     else if(line==9){if(as_digits(f[1],&m->created))rc=as_bad(why,cap,"manifest-header","created_ns",0);}
-    else if(line==10){if(strcmp(f[1],"ape1")&&strcmp(f[1],"split1"))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);else if(as_copy(m->ident.candidate_kind,sizeof m->ident.candidate_kind,f[1]))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);}
+    else if(line==10){if(strcmp(f[1],"ape1")&&strcmp(f[1],"split2")&&strcmp(f[1],"split1"))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);else if(as_copy(m->ident.candidate_kind,sizeof m->ident.candidate_kind,f[1]))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);}
     else{char *dst=line==2?m->ident.candidate:line==3?m->ident.batches:line==4?m->ident.coverage:line==5?m->ident.registry:line==6?m->ident.sid:line==7?m->ident.harness:m->map_sha;if(as_hexfield(dst,f[1]))rc=as_bad(why,cap,"manifest-header",k,0);}}
    line++;continue;}
   line++;
@@ -576,6 +577,6 @@ int as_aggregate(const char *root_arg,const char *session_arg){
   else if(blocking.n||!mapped){unsatisfied++;printf("COVERAGE\t%s\tUNSATISFIED\tblocking=%s\n",cv->id,blocking.n?blocking.p:"no-implemented-batch");}
   else{satisfied++;printf("COVERAGE\t%s\tSATISFIED\n",cv->id);}free(blocking.p);}
  int qualified=implemented>0&&npass==implemented&&!unsatisfied&&!unresolved;
- printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none"));
+ printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.legacy_kind?"legacy-split1":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none")));
  free(st);as_registry_free(&reg);as_free(&m);close(lock);return qualified?0:1;
 }
