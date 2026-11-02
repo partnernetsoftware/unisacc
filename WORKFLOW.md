@@ -65,3 +65,10 @@ INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → 
 
 ## 10 编排者的职责
 写工作项与 gate、回答 `needs`、裁定 BLOCKED、维护 roadmap。不逐窗口转述、不手工转抄状态。人工介入点:gate 设计、BLOCKED 裁决、发布第 7 步(签名/Draft/Latest/公开)、花钱、对外发送。
+
+## 11 归档准则(减少干扰信息)
+- **只归档不删除**:`git mv` 到 `archive/<原目录名>/<日期或版本>/`,保留历史;不改写内容。
+- 可归档判据(须同时给命令证据):① 无入站引用——除 `archive/` 外,被 `tools/ tests/ src/ cx/ prd.md AGENTS.md WORKFLOW.md work/ roles/` 引用次数为 0,或引用已同步改到新路径;② 内容已被取代(有新文档/新工具覆盖)或对应工作项已 DONE/作废;③ 不是生成物、不是测试输入、不是 `tests/batches.tsv`/`coverage.tsv` 登记的 fixture。
+- 禁区:`apps/csih/`、`ujs/`、`kernel/`(生成物)、`include/`、`seed/`、`weights/`、`exec/`、`tests/`、`tools/`(这些只能经各自工作项处理)。
+- 归档后:入口文档(`prd.md` 记忆宫殿、`plans/README`)里的链接同步;`tools/ratchets.cx` 9/9;`tests/run.cx -- --smoke` 不退化。
+- `plans/` 只留当前仍在驱动工作的调查;其余按日期归档。`out/`、`tmp/` 不入库,不属此处。
