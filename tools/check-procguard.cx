@@ -92,6 +92,11 @@ int main(int argc, char **argv) {
     ok(rc == 0, "dry-run exits 0");
     ok(tx_contains(out, tx_len(out, sizeof out), "DRY key=", 8), "dry-run reports the A group");
     ok(tx_contains(out, tx_len(out, sizeof out), "count=6", 7), "dry-run counts 6 A members");
+    {   char lg[8192]; int n = read_file(log, lg, sizeof lg);
+        const char *needle = "pgA.cx:6";
+        ok(n > 0 && tx_contains(lg, n, "top=", 4) && tx_contains(lg, n, needle, tx_len(needle, 16)),
+           "scan log names the largest group");
+    }
     {   int all = 1; for (i = 0; i < np; i++) if (!alive(pids[i])) all = 0; ok(all, "dry-run signals nothing"); }
 
     rc = run_pg("enforce", 5, log, out, sizeof out);
@@ -112,6 +117,22 @@ int main(int argc, char **argv) {
     {   char lg[8192]; int n = read_file(log, lg, sizeof lg);
         ok(n > 0 && tx_contains(lg, n, "ENFORCE key=", 12), "log records the ENFORCE decision");
         ok(n > 0 && !tx_contains(lg, n, "pgB.cx", 6), "log has nothing about the B group");
+    }
+
+    {   /* an oversized log is rotated to .1 and started fresh */
+        char big[1100], bak[1100], cmd[1200], o[2048];
+        int fd;
+        sy_stat_t st;
+        if (cx_fmt(big, sizeof big, "%s/big.log", dir) || cx_fmt(bak, sizeof bak, "%s/big.log.1", dir)) return 2;
+        sy_unlink(big); sy_unlink(bak);
+        fd = sy_open(big, 1 | 0100 | 02000, 0644);
+        ok(fd >= 0 && sy_truncate(fd, 9L * 1024 * 1024) == 0, "oversized log prepared");
+        if (fd >= 0) sy_close(fd);
+        if (cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx --once --dry-run --log '%s'", sy_env_or("UNISACC", "./unisacc.com"), big)) return 2;
+        {   char *av[] = {"sh", "-c", cmd, 0}; int cut = 0; rc = sy_run(av, o, sizeof o, &cut); }
+        ok(rc == 0, "run with an oversized log exits 0");
+        ok(sy_stat(bak, &st) == 0 && st.size == 9L * 1024 * 1024, "oversized log moved to .1");
+        ok(sy_stat(big, &st) == 0 && st.size > 0 && st.size < 4096, "a fresh log was started");
     }
 
     for (i = 6; i < np; i++) { sy_signal(pids[i], 9); sy_wait_status(pids[i], 0, 0, 0, 0); }
