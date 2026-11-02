@@ -54,18 +54,20 @@ int rt_open(int ver, int cached, const unsigned char *plain, int plain_len,
     }
     /* The inflated members are cached by the sha256 of their compressed bytes: a hit skips only
        the inflate, and the CRC below still runs, so the validation chain is unchanged. */
-    {   if (!mc_get(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len)) {
-            if (inflate(owned, (unsigned long)raw_len, plain, (unsigned long)plain_len)) {
-                rt_say(why, cap, "invalid compressed model");
-                return 2;
-            }
-            mc_put(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len);
+    /* A cache hit was already validated by the payload sha256 it carries (and by this CRC when it
+       was written), so the CRC runs only on the path that actually inflated. This is the same
+       rule as the byte comparison: the hit and the miss must produce the same bytes. */
+    if (!mc_get(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len)) {
+        if (inflate(owned, (unsigned long)raw_len, plain, (unsigned long)plain_len)) {
+            rt_say(why, cap, "invalid compressed model");
+            return 2;
         }
-    }
-    sum = crc32((char *)owned, raw_len);
-    if (sum != expect) {
-        rt_say(why, cap, "compressed model CRC");
-        return 2;
+        sum = crc32((char *)owned, raw_len);
+        if (sum != expect) {
+            rt_say(why, cap, "compressed model CRC");
+            return 2;
+        }
+        mc_put(plain, (unsigned long)plain_len, owned, (unsigned long)raw_len);
     }
     if (raw_len < 9 || !rt_magic(owned)) {
         rt_say(why, cap, "package requires binary networks");
