@@ -97,24 +97,43 @@ hex   = sha256(canon)
    聚合遇到 kind 不同必须报 identity 不可比,而不是报 mismatch。
 3. `candidate_stable` 的判定改用它,于是"跑波期间有人换了 entry.elf"会真正被抓到。
 
+#### 旧会话目录:按 `ape1` 解释,标 `legacy-no-kind`
+
+`out/aw-m4/` 与 `out/aw-m4-fixarg/` 已有的收据没有 `candidate_kind` 字段,`candidate_before`
+的值是 624 字节启动器的 sha(实测例:`cx-l0-fmt.receipt` 的 `candidate_before=1bfdcd20…`)。
+**取证用的旧会话必须能读**,规则:
+
+| 情况 | 处理 |
+|---|---|
+| 收据有 `candidate_kind` | 按字段解释;两个 kind 不同 -> **identity 不可比**(不是 mismatch) |
+| 收据无 `candidate_kind` | **按 `ape1` 解释**(该值就是一个文件的整文件哈希),并在聚合输出里标 `legacy-no-kind` |
+| 新旧混在同一聚合 | 允许,但聚合必须显式打印 `identity_scope=legacy-no-kind+split1`(或实际组合),不许静默归一 |
+
+`legacy-no-kind` 是**标注**,不是修补:不回写旧收据、不重算旧值、不把旧值当新 kind 的等价物。
+旧会话的结论成立范围仍然只有那一个文件,这一点在输出里必须看得出来。
+
 ### `root-identity.md`
 
 今天它是一段人手写的三行 sha,机器不可校验。建议:
 
+- 生成块里**只写事实**(kind、成员名、每个成员的 sha256 与字节数),**判定口径的文字留在块外**。
+  块内出现"有效/通过/等价"这类判断词,检查就无法逐行比对,这一条是把文档变成机器可读的前提。
 - 在文档里放一个**生成块**,由 `tools/check-dev-product.cx` 或新工具 `--emit-identity` 写:
 
   ```text
   <!-- identity-begin -->
   product_kind	split1
   product_digest	<pp_product_digest>
-  unisacc.com	<sha>
-  entry.elf	<sha>
-  p3-package.bin	<sha>
+  unisacc.com	<sha>	<bytes>
+  entry.elf	<sha>	<bytes>
+  p3-package.bin	<sha>	<bytes>
   <!-- identity-end -->
   ```
 
 - 一个检查(建议并入 `check-dev-product`)读该块、重算、逐行比对;不一致即 FAIL 并打印差异。
   这样文档不再"只是写着",而是**可被机器否决**。
+- 该检查**登记为批次**(不是随手脚本):只有进注册表,它才会在每次全量里真正跑,
+  否则"可被机器否决"只是一句设计意图。
 - 三身份 sha 仍保留人能读的形式,但**来源**是生成块,不是手抄。
 
 ## 五、两处布局假设修补
@@ -150,6 +169,8 @@ hex   = sha256(canon)
 
 ## 八、实施顺序与风险
 
+0. **先写回归,并确认它今天失败**(改 `p3-package.bin` 一个字节而 `before == after`)。
+   没有这一步,"修好了"就没有对照;这条断言本身就是漏洞的取证。**失败是第 0 步的验收标准。**
 1. `pp_product_digest` + `pp_identity_kind` + `check-productpkg` 两条断言(不动任何调用点,零风险)
 2. 第一波三个闸门点 + `candidate_kind` 字段
 3. 第二波 24 个批次(机械替换,一次一波,每波跑 affected)
