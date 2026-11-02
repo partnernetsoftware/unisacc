@@ -253,3 +253,22 @@ exec/c/librarycall_<arch>.S
   再减 128 也保持对齐 ✓。
   **两端上界差异**:x86_64 侧是动态长度(逐次计算),arm64 侧固定 128 B 上界;调用方需要在 block 里
   按各自上界给参数,超出 arm64 上界会得到 -1 而不是截断。
+
+### §8 第4步设计草案:unisacc_ffi.h 如何用字节表(只设计,不改 include/)
+
+1. **取表**:`#include <ffi_bridge_bytes.h>`(生成物,提供 `ffi_bridge_x86_64[]`/`_len` 与 arm64 对应项)。
+   用 `#if defined(__x86_64__)` / `#elif defined(__aarch64__) || defined(__arm64__)` 选一份;
+   Windows 两支不定义,编译期就不引用(保持"未接通")。
+2. **首次调用映射**(`uffi_bridge_init`,惰性、一次性):
+   `mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)` → `memcpy(code, table, len)`
+   → `mprotect(code, len, PROT_READ|PROT_EXEC)` → 存进静态函数指针。
+   arm64 需要 `__builtin___clear_cache` 覆盖该区间(W^X 平台尤其)。
+3. **时序**:`uffi_call_types` 在 `bridge mode` 分支里先 `uffi_bridge_init()`;
+   成功后用该地址替换"not linked in this build"的拒绝路径;失败则继续具名拒绝。
+4. **失败路径**(全部具名、可测):`mmap` 失败 → `"bridge: cannot map code"`;
+   `mprotect` 失败 → `"bridge: cannot make code executable"`(macOS 硬签名下最可能);
+   `len` 为 0 或目标未提供表 → `"bridge: no byte table for this target"`。
+5. **线程安全**:初始化用"写指针最后一步"的顺序(C11 atomics 或直接接受单线程编译器场景;
+   编译器本身单线程调用 FFI)。并发首调用最坏情况是映射两次、留一个空洞,不影响正确性。
+6. **不变量**:表一旦映射即只读可执行,进程生命周期内不 `munmap`;表内容与 `.text` 逐字节一致,
+   由 `gen-ffi-bridge --check` 保证。
