@@ -7,6 +7,7 @@
 | Windows on ARM64 没有原生入口 | Windows on ARM64 上运行的是 x86_64 的 PE，靠系统模拟；能用，慢一些。`-b win/arm64` 写出的用户镜像是原生 ARM64 | Windows on ARM64 runs the x86_64 PE under system emulation; a native entry is a 0.0.44 target. Images written with `-b win/arm64` are native ARM64. | C44-WIN-ARM64-01 |
 | libunisacc 嵌入式 API（us_*）没有 | `unisacc.com` 本身的所有功能都在（`-run`、`-o`、`-S`、FFI）；库形态的 us_* 接口没有随 0.0.43 发布，历来也没有随任何版本发布 | The libunisacc embedding API (us_*) is a development interface and is not part of the 0.0.43 release. | C44-LIBUNISACC-01 |
 | 宏展开里的诊断列号 | 宏调用内部的错误：行号正确，列号和摘录行按展开后的文本计数 | Diagnostic columns and excerpts inside macro expansions count in the expanded text (line numbers are correct); 0.0.44 reports user-source positions. | C44-DIAG-COLUMN-01 |
+| 无汇编文本输出（`-S -b`） | 0.0.43 产品对 `-S -b lnx/x86_64`（或 `lnx/arm64`）`-o FILE.s` 报 `NOT_IMPLEMENTED object`、退出码 2，不写文件；裸 `-S` 只写 tape IR（`unisacc as` 拒绝该文本）。汇编文本在产品路线里没有对应步：`route=…/object/O{0,1,2}` 的步集只有 e1–e4/lower/prune/units/elf。`-S -b osx/*` 或 `win/*` 另按名拒绝（“written for Linux targets in this version”） | Assembly text (`-S -b os/arch -o FILE.s`) is not on the 0.0.43 product route for any target: Linux targets stop with `NOT_IMPLEMENTED object` (exit 2) and write no file, and the product route has no assembly-text step. The archived reference compiler wrote GNU assembly for all six targets. | C44-ASM-TEXT-01 |
 
 另有一条措辞上的已知差异，不算缺口（格是覆盖的）：结构体里含自己（`struct S{struct S inner;};`）按拒绝处理，报 `not covered: a struct member of struct type`，退出码 1、无输出，不是标准 C99 6.7.2.1p2 的 `incomplete type` 措辞。改措辞要改 e3 模型的拒绝表（exec/parse2/control-reject.tsv），会动 SID 走慢车道，列入 0.0.44（跟 C44-DIAG-COLUMN-01 一起做）。另外 `directory-input`（目录当输入文件）退出码是 1，旧版 79fb84e6 是 2，和缺文件一致。
 
@@ -21,4 +22,4 @@
 | `-run` 的用户程序在地址限制下 malloc 失败 | 用户程序在 `ulimit -v` 限制下分配失败时，运行时把 mmap 的 -ENOMEM 当成地址，程序崩溃（退出 139）而不是看到 NULL；分配器在包里的 `stdlib.h`（`_unisa_map`），修它要新包 | C44-MALLOC-01 |
 | `-Werror` | 旗标被解析但没人读，警告仍是警告，退出码 0 | C44-WERROR-01 |
 | 独立单流容器 | 非产品构建，0.0.43 不随发；每流行为通过产品的路线覆盖 | C44-STREAM-CONTAINER-01 |
-| 阶段位置格 | Darwin carry、Windows gate 保存/恢复、ARM narrowing 不在产品镜像里；`-S` 拒绝 Mach-O/COFF；没有独立整镜像编码器 | C44-STAGE-POS-01 |
+| 阶段位置格 | Darwin carry、Windows gate 保存/恢复、ARM narrowing 不在产品镜像里；`-S -b` 的汇编文本整条路线不在产品里（Linux 目标同样是 `NOT_IMPLEMENTED object`，见上表「无汇编文本输出」行），Mach-O/COFF 另按名拒绝；没有独立整镜像编码器 | C44-STAGE-POS-01 |
