@@ -1,9 +1,9 @@
 /* tools/register.cx -- register a check program as a test batch, validate the registry, run it once.
  *
- *   sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "COVERAGE TEXT" "FILES" [LAYER]
+ *   sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "COVERAGE TEXT" "FILES" [LAYER] [HEADERS]
  *
  * Appends one SOURCE batch row to tests/batches.tsv
- *   ID IMPLEMENTED LAYER CHECK SOURCE lnx/x86_64 55 - CHECK - LAYER.ID rc0:MARKER
+ *   ID IMPLEMENTED LAYER CHECK SOURCE lnx/x86_64 55 - CHECK - LAYER.ID rc0:MARKER HEADERS
  * and one coverage row to tests/coverage.tsv
  *   LAYER.ID LAYER IMPLEMENTED_SEPARATE_BATCH COVERAGE-TEXT FILES
  * (LAYER defaults to interfaces), then runs tests/run.cx --list (metadata_valid=1 required) and
@@ -13,7 +13,9 @@
  * ([A-Z0-9_]+ — register writes the "rc0:" itself, so a full expect would double the prefix) is refused before
  * anything is written (exit 2).  The row is also checked in memory before the appends: twelve TAB fields and a
  * last field exactly "rc0:"+MARKER, the same shape tp_expect accepts, so a malformed row cannot reach the table
- * where tp_visit would then refuse every batch in the registry.  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
+ * where tp_visit would then refuse every batch in the registry.  HEADERS selects the include-search contract
+ * the batch declares: "product" (default) means the packaged candidate's embedded headers only, "tree" means
+ * ROOT/include is added explicitly for checks that inspect this checkout's include layout.  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
  * The six manual steps (two appends, --list, mkdir, run-batch, read the result) as one call.
  *
  * Two registrations of different batches touch the same two files, so the append-validate span holds an
@@ -117,10 +119,12 @@ static int rg_marker_ok(const char *m) {
    that is exactly "rc0:" + MARKER.  A malformed row is refused here instead of surfacing later as a
    metadata_valid!=1 from tests/run.cx --list (or, worse, after a commit, as every batch refusing). */
 static int rg_row_ok(const char *row, const char *marker) {
-    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *last = row;
-    for (; *at; at++) if (*at == '\t') { fields++; last = at + 1; }
-    if (fields != 11 || strncmp(last, "rc0:", 4)) return 0;
-    return strlen(last + 4) == ml + 1 && !memcmp(last + 4, marker, ml) && last[4 + ml] == '\n';
+    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *prev = row, *last = row;
+    for (; *at; at++) if (*at == '\t') { fields++; prev = last; last = at + 1; }
+    /* prev is the expect field, last the headers field: "rc0:" + MARKER + TAB, then product|tree */
+    if (fields != 12 || strncmp(prev, "rc0:", 4) || (size_t)(last - prev) != 4 + ml + 1) return 0;
+    if (memcmp(prev + 4, marker, ml) || last[-1] != '\t') return 0;
+    return tx_eqz(last, "product\n") || tx_eqz(last, "tree\n");
 }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
@@ -180,18 +184,20 @@ static int run(char **argv, char *out, long cap) {
 
 int main(int argc, char **argv) {
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
-    const char *id, *check, *marker, *text, *files, *layer;
+    const char *id, *check, *marker, *text, *files, *layer, *headers;
     int rc, okrun, lk; long at;
-    if (argc != 6 && argc != 7) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER]");
-    id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc == 7 ? argv[6] : "interfaces";
+    if (argc < 6 || argc > 8) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER] [HEADERS]");
+    id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc >= 7 ? argv[6] : "interfaces";
+    headers = argc == 8 ? argv[7] : "product";
     if (!clean(id) || !clean(check) || !clean(marker) || !clean(text) || !clean(files) || !clean(layer) || !*id || !*marker) rg_die("empty field, TAB or newline in a field", 0);
+    if (!tx_eqz(headers, "product") && !tx_eqz(headers, "tree")) rg_die("HEADERS must be product or tree", headers);
     if (!rg_marker_ok(marker)) rg_die("MARKER must be one rc0: tail ([A-Z0-9_]+), register adds the \"rc0:\" itself", marker);
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
     if (has_key(rg_bpath(), id)) rg_die("batch already registered", id);
     if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
-    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\n", id, layer, check, check, cid, marker) >= (int)sizeof brow
+    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\t%s\n", id, layer, check, check, cid, marker, headers) >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
     if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());

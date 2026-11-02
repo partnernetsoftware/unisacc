@@ -5,7 +5,7 @@
 #pragma unisa use cxlib.productpkg
 #pragma unisa use text.text
 typedef struct {char name[128],path[4096];int supplied,kind;} Material;
-typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128];int found,source_present;} Selected;
+typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128],headers[16];int found,source_present;} Selected;
 static Selected selected;
 static Material material[32];static int nmaterial;
 static char root[4096],parent[4096],work[4400],candidate[4400];
@@ -23,7 +23,7 @@ static void table_path(char *out,size_t cap,const char *name){
 }
 static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
 static void batch(const tp_batch_view *v,void *opaque){(void)opaque;if(!tx_eqz(v->id, selected.id))return;if(selected.found++)die("duplicate selected batch");
- copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);selected.source_present=v->source_present;}
+ copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);copy(selected.headers,sizeof selected.headers,v->headers);selected.source_present=v->source_present;}
 static void coverage(const tp_coverage_view *v,void *opaque){(void)v;(void)opaque;}
 static char *read_regular(const char *p,size_t *n){struct stat st;errno=0;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die("regular input required");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input read extent");return s;}
 /* The candidate is ~5 MB and every batch digests it twice; the software
@@ -45,11 +45,16 @@ int main(int argc,char **argv){
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||!tx_eqz(argv[1], root)||!tx_eqz(argv[2], parent))die("canonical root and output parent");
  char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eqz(parent, canonical))die("output parent must be below root/out");
  copy(selected.id,sizeof selected.id,argv[3]);table_path(registry,sizeof registry,"batches.tsv");table_path(coverage_path,sizeof coverage_path,"coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
- if(!tx_eqz(selected.platform, "lnx/x86_64"))die("batch requires another native host");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
+ if(!tx_eqz(selected.platform, "lnx/x86_64"))die("batch requires another native host");if(!tx_eqz(selected.headers, "product")&&!tx_eqz(selected.headers, "tree"))die("batch headers source");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
  path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];product_digest(root,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
  char entry[4400];if(tx_eqz(selected.mode, "SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
- char storage[64][4400],*args[72];int na=0;args[na++]="sh";args[na++]=candidate;args[na++]=entry;args[na++]="--";
- if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-4]);args[na]=storage[na-4];na++;if(!end)break;at=end+1;}}
+ char storage[64][4400],*args[72];int na=0;char incflag[4400];args[na++]="sh";args[na++]=candidate;
+ /* product: the packaged candidate's own embedded headers, nothing from the checkout.
+    tree: the include-layout/carried-header checks need the tree they inspect, so ROOT/include
+    is passed explicitly and no longer found implicitly by looking under the cwd. */
+ if(tx_eqz(selected.headers, "tree")){if(cx_fmt(incflag,sizeof incflag,"-I%s/include",root))die("path bound");args[na++]=incflag;}
+ args[na++]=entry;args[na++]="--";int argbase=na;
+ if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-argbase]);args[na]=storage[na-argbase];na++;if(!end)break;at=end+1;}}
  if(np_subreaper()<0)fprintf(stderr,"run-batch: no child-subreaper\n");   /* orphans of a killed tree land here, not on init */
  args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
@@ -63,6 +68,7 @@ int main(int argc,char **argv){
  int ok=!transport&&!result.rc&&tx_eqz(before, after)&&!strncmp(selected.expect,"rc0:",4)&&marker(result.out,result.outn,selected.expect+4)==1;
  /* the batch's own bound expired: not a verdict, never PASS; the process group was killed and it must rerun */
  int timed_out=transport&&!strncmp(reason,"subprocess.TimeoutExpired",25)&&result.residue==0;   /* a survivor is a FAIL, not UNKNOWN */
- printf("BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\tscope=actual-one-batch-no-cached-result\n",selected.id,ok?"PASS":timed_out?"UNKNOWN":"FAIL",result.rc,transport,selected.expect+4,before);
+ printf("BATCH_HEADERS\t%s\t%s\n",selected.id,selected.headers);
+ printf("BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\theaders=%s\tscope=actual-one-batch-no-cached-result\n",selected.id,ok?"PASS":timed_out?"UNKNOWN":"FAIL",result.rc,transport,selected.expect+4,before,selected.headers);
  if(transport)fprintf(stderr,"run-batch: child transport %s\n",reason);np_free(&result);return ok?0:timed_out?3:1;
 }

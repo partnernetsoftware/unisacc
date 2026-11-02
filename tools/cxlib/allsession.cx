@@ -68,13 +68,13 @@ typedef struct {
  as_material *material;int nmaterial;as_ref *ref;int nref;as_wave *wave;int nwave;
  char *bytes;size_t n;
 } as_manifest;
-typedef struct {char *id,*impl,*source,*mode,*platform,*materials,*entry,*coverage,*expect;int budget;char row[65];} as_batch;
+typedef struct {char *id,*impl,*source,*mode,*platform,*materials,*entry,*coverage,*expect,*headers;int budget;char row[65];} as_batch;
 typedef struct {char *id,*impl;} as_cov;
 typedef struct {as_batch *b;int nb;as_cov *c;int nc;int failed;} as_registry;
 /* Everything a verdict may depend on.  The writer fills it from what it observed; the aggregator
    fills it from the saved receipt files, and the two derivations must agree. */
 typedef struct {
- const char *id,*marker,*candidate;int bound_rc,status_known,child_status;int legacy_identity;
+ const char *id,*marker,*candidate,*headers;int bound_rc,status_known,child_status;int legacy_identity;
  const char *out;size_t outn;const char *err;size_t errn;
  int candidate_stable,identity_stable,inputs_stable,materials_stable;
 } as_facts;
@@ -186,9 +186,9 @@ const char *as_ident_diff(const as_ident *a,const as_ident *b){
 /* ---- registry ------------------------------------------------------------------------------------- */
 typedef struct {as_registry *r;} as_collect;
 static void as_on_batch(const tp_batch_view *v,void *ctx){as_registry *r=((as_collect *)ctx)->r;as_batch *g=realloc(r->b,(size_t)(r->nb+1)*sizeof *r->b);if(!g){r->failed=1;return;}r->b=g;as_batch *b=&r->b[r->nb++];memset(b,0,sizeof *b);
- b->id=as_dup(v->id);b->impl=as_dup(v->implementation);b->source=as_dup(v->source);b->mode=as_dup(v->mode);b->platform=as_dup(v->platform);b->materials=as_dup(v->materials);b->entry=as_dup(v->entry);b->coverage=as_dup(v->coverage);b->expect=as_dup(v->expect);b->budget=atoi(v->budget);}
+ b->id=as_dup(v->id);b->impl=as_dup(v->implementation);b->source=as_dup(v->source);b->mode=as_dup(v->mode);b->platform=as_dup(v->platform);b->materials=as_dup(v->materials);b->entry=as_dup(v->entry);b->coverage=as_dup(v->coverage);b->expect=as_dup(v->expect);b->headers=as_dup(v->headers);b->budget=atoi(v->budget);}
 static void as_on_cov(const tp_coverage_view *v,void *ctx){as_registry *r=((as_collect *)ctx)->r;as_cov *g=realloc(r->c,(size_t)(r->nc+1)*sizeof *r->c);if(!g){r->failed=1;return;}r->c=g;r->c[r->nc].id=as_dup(v->id);r->c[r->nc].impl=as_dup(v->implementation);r->nc++;}
-void as_registry_free(as_registry *r){for(int i=0;i<r->nb;i++){as_batch *b=&r->b[i];free(b->id);free(b->impl);free(b->source);free(b->mode);free(b->platform);free(b->materials);free(b->entry);free(b->coverage);free(b->expect);}for(int i=0;i<r->nc;i++){free(r->c[i].id);free(r->c[i].impl);}free(r->b);free(r->c);memset(r,0,sizeof *r);}
+void as_registry_free(as_registry *r){for(int i=0;i<r->nb;i++){as_batch *b=&r->b[i];free(b->id);free(b->impl);free(b->source);free(b->mode);free(b->platform);free(b->materials);free(b->entry);free(b->coverage);free(b->expect);free(b->headers);}for(int i=0;i<r->nc;i++){free(r->c[i].id);free(r->c[i].impl);}free(r->b);free(r->c);memset(r,0,sizeof *r);}
 int as_registry_load(const char *root,as_registry *r,char *why,size_t cap){
  char bp[4400],cp[4400],tw[1200];size_t bn,cn;memset(r,0,sizeof *r);if(as_join(bp,sizeof bp,root,"tests/batches.tsv")||as_join(cp,sizeof cp,root,"tests/coverage.tsv"))return as_bad(why,cap,"registry-path",root,0);
  char *bt=as_read(bp,0,&bn,why,cap);if(!bt)return -1;char *ct=as_read(cp,0,&cn,why,cap);if(!ct){free(bt);return -1;}
@@ -356,7 +356,7 @@ const char *as_verdict(const as_facts *f,const char **reason){
    for(size_t i=0;i+11<ln;i++)if(!memcmp(last+i,"\tcandidate=",11)){size_t a=i+11,b=a;while(b<ln&&last[b]!='\t')b++;if(b-a==64){memcpy(got,last+a,64);got[64]=0;}break;}
    if(got[0])cand=got;
   }
-  int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\trc=0\ttransport=0\tmarker=%s\tcandidate=%s\tscope=actual-one-batch-no-cached-result",f->id,f->marker,cand);
+  int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\trc=0\ttransport=0\tmarker=%s\tcandidate=%s\theaders=%s\tscope=actual-one-batch-no-cached-result",f->id,f->marker,cand,f->headers?f->headers:"product");
   if(z<0||(size_t)z>=sizeof want||ln!=(size_t)z||memcmp(last,want,ln)){*reason="pass-line-mismatch";return "FAIL";}*reason="batch-pass";return "PASS";}
  char copy[600];if(ln>=sizeof copy){*reason=e==3?"unclassified-exit":"batch-fail";return e==3?"UNKNOWN":"FAIL";}{unsigned char *cxb_d=(unsigned char *)(copy);const unsigned char *cxb_s=(const unsigned char *)(last);size_t cxb_n=(size_t)(ln),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};copy[ln]=0;
  /* run-batch rc3 status=UNKNOWN: the batch's own bound expired (process group killed); never PASS, rerun required */
@@ -428,7 +428,7 @@ int as_finish(const char *root,const char *session,const char *id,const char *no
  if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);const as_snapmat *sm=0;for(int i=0;i<nmat;i++)if(!strcmp(mat[i].name,name))sm=&mat[i];
    char fp[65];if(!x||x->kind!=d.kind){as_bad(why,cap,"material-type-binding",name,0);free(ml.p);goto done;}if(as_material_fp(x,fp,why2,sizeof why2)){ if (cx_fmt(fp, sizeof fp, "%s","0000000000000000000000000000000000000000000000000000000000000000")) { fprintf(stderr, "allsession: text too long for fp\n"); exit(2); } }if(strcmp(fp,x->fingerprint)||!sm||sm->kind!=x->kind||strcmp(sm->fp,x->fingerprint)||strcmp(sm->path,x->path)||strcmp(sm->content,x->content))materials_stable=0;
    np_puts(&ml,"material\t");np_puts(&ml,name);np_puts(&ml,"\t");np_puts(&ml,x->path);np_puts(&ml,"\t");np_puts(&ml,x->content);np_puts(&ml,"\t");np_puts(&ml,x->fingerprint);np_puts(&ml,"\t");np_puts(&ml,fp);as_material_tag(&ml,x->kind);np_puts(&ml,"\n");}}
- as_facts fa;memset(&fa,0,sizeof fa);fa.id=id;fa.marker=b->expect+4;fa.candidate=m.ident.candidate;fa.legacy_identity=m.legacy_no_kind;fa.bound_rc=w->bound_rc;fa.status_known=status_known;fa.child_status=(int)raw;fa.out=out;fa.outn=on;fa.err=err;fa.errn=en;
+ as_facts fa;memset(&fa,0,sizeof fa);fa.id=id;fa.marker=b->expect+4;fa.headers=b->headers;fa.candidate=m.ident.candidate;fa.legacy_identity=m.legacy_no_kind;fa.bound_rc=w->bound_rc;fa.status_known=status_known;fa.child_status=(int)raw;fa.out=out;fa.outn=on;fa.err=err;fa.errn=en;
  fa.candidate_stable=measured&&!strcmp(sv[5],after.candidate)&&!strcmp(sv[5],m.ident.candidate);fa.identity_stable=!changed;fa.inputs_stable=inputs_stable;fa.materials_stable=materials_stable;
  const char *reason;const char *verdict=as_verdict(&fa,&reason);
  np_puts(&r,"ALLRECEIPT\tv1\nbatch\t");np_puts(&r,id);np_puts(&r,"\nwave\t");np_putll(&r,w->wave);np_puts(&r,"\nregistry_row_sha\t");np_puts(&r,b->row);np_puts(&r,"\nregistry_sha\t");np_puts(&r,m.ident.registry);np_puts(&r,"\nsource_sid\t");np_puts(&r,m.ident.sid);np_puts(&r,"\nharness_sha\t");np_puts(&r,m.ident.harness);
@@ -527,7 +527,7 @@ static int as_check_receipt(const char *root,const char *session,const as_manife
  /* split attempts: every executed fact must equal the sealed RUN block, which the receipt names by SHA */
  if(split){const char *bad=as_check_split(session,dir,r->id,wp,(const char *const *)vals[19],(const char *const *)vals[20],(const char *const *)vals[21],cs,s0,s1,brc,status_known,cst,vals[16][2],(long long)sn[0],vals[17][2],(long long)sn[1],vals[18][2]);
   if(bad){free(saved[0]);free(saved[1]);free(text);{int z=snprintf(reason,200,"%s",bad);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return -1;}}
- as_facts fa;memset(&fa,0,sizeof fa);fa.id=r->id;fa.marker=b->expect+4;fa.candidate=m->ident.candidate;fa.legacy_identity=m->legacy_no_kind;fa.bound_rc=(int)brc;fa.status_known=status_known;fa.child_status=(int)cst;fa.out=saved[0];fa.outn=sn[0];fa.err=saved[1];fa.errn=sn[1];
+ as_facts fa;memset(&fa,0,sizeof fa);fa.id=r->id;fa.marker=b->expect+4;fa.headers=b->headers;fa.candidate=m->ident.candidate;fa.legacy_identity=m->legacy_no_kind;fa.bound_rc=(int)brc;fa.status_known=status_known;fa.child_status=(int)cst;fa.out=saved[0];fa.outn=sn[0];fa.err=saved[1];fa.errn=sn[1];
  fa.candidate_stable=!strcmp(vals[7][1],vals[8][1]);fa.identity_stable=!strcmp(vals[9][1],"STABLE");fa.inputs_stable=inputs_stable;fa.materials_stable=materials_stable;
  const char *why_v;const char *v=as_verdict(&fa,&why_v);int agree=!strcmp(v,rv)&&!strcmp(why_v,rr)&&!strcmp(v,r->verdict);free(saved[0]);free(saved[1]);free(text);
  if(!agree){snprintf(reason,200,"receipt-verdict-not-rederivable");return -1;}*verdict=v;{int z=snprintf(reason,200,"%s",why_v);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return 0;
