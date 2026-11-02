@@ -272,3 +272,14 @@ exec/c/librarycall_<arch>.S
    编译器本身单线程调用 FFI)。并发首调用最坏情况是映射两次、留一个空洞,不影响正确性。
 6. **不变量**:表一旦映射即只读可执行,进程生命周期内不 `munmap`;表内容与 `.text` 逐字节一致,
    由 `gen-ffi-bridge --check` 保证。
+
+## 9. 交接状态(2026-11-02 收尾,未提交内容都在 out/)
+
+- 两份桥源:`tools/ffi/bridge_x86_64.S`、`tools/ffi/bridge_arm64.S`(均已提交)。
+- 字节表自检(仅 out/,不提交):x86_64 `.text`=221 sha `9935c68ba921dd42`;arm64 `.text`=220 sha `4087560919a4ea2b`;
+  `gen-ffi-bridge --check` 两份均 OK。产物在 `out/ffi-tables/`。
+- ELF `.text` 提取器(替代 objcopy)已**改派子代理**,我不做、也不动 `tools/gen-ffi-bridge.cx`。
+- 解析范围已探明:ELF64/LE/ET_REL,节头表 + `.shstrtab` → 名为 `.text` 的 PROGBITS 节,取 offset/size;
+  x86_64 与 arm64 同形,只有 `e_machine` 不同。
+- `check-kernel-context.cx` 由 cc 修好并提交(696f528c66),批次 `cx-kernel-context` 已登记;我这边收口。
+- shrink 结论:归档实测 0 个文件、重复断言仅 2 组(<50 行);真正大头是 85k 行体量本身,不能靠删断言。
