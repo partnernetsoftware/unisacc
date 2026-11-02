@@ -55,10 +55,22 @@ static int pp_join2(const char *root, const char *a, const char *b, char *dst, i
     return pp_join(mid, b, dst, cap);
 }
 
+/* 1 when PATH is present, 0 when it is absent, -1 for any other error. Only ENOENT means "not
+   there": EACCES (a directory we may not search) and ENOTDIR (a file used as a directory) are
+   facts about the product we could not determine, and folding them into "absent" turns a broken
+   install into a plausible-looking layout. */
+static int pp_present(const char *path) {
+    struct stat st;
+    errno = 0;
+    if (lstat(path, &st) == 0) return 1;
+    return errno == ENOENT ? 0 : -1;
+}
+
 const char *pp_layout_name(int v) {
     if (v == PP_APE) return "ape";
     if (v == PP_SPLIT) return "split";
-    return "none";
+    if (v == -ENOENT) return "none";
+    return "error";
 }
 
 /* PP_APE when the single file at PATH carries a UNIPKG1 footer, -ENOENT otherwise. */
@@ -67,7 +79,8 @@ int pp_layout_of_file(const char *path) {
     unsigned char *b;
     PackageFooter f;
     int v = -ENOENT;
-    if (!path || sy_exists(path) != 1) return -ENOENT;
+    if (!path) return -ENOENT;
+    if (pp_present(path) != 1) return -ENOENT;
     b = (unsigned char *)cx_read(path, &n);
     if (!b) return -ENOENT;
     if (n && n <= 2147483647UL && packagefooter_locate_bytes(b, (long)n, &f)) v = PP_APE;
@@ -79,9 +92,15 @@ int pp_layout_of_file(const char *path) {
    and ends with a UNIPKG1 footer; -ENOENT otherwise. */
 int pp_layout(const char *root) {
     char p[4400];
+    int e;
     if (pp_join2(root, pp_dev_dir, pp_pkg_name, p, (int)sizeof p)) return -ENAMETOOLONG;
-    if (sy_exists(p) == 1) return PP_SPLIT;
+    e = pp_present(p);
+    if (e < 0) return -EACCES;
+    if (e == 1) return PP_SPLIT;
     if (pp_join(root, "unisacc.com", p, (int)sizeof p)) return -ENAMETOOLONG;
+    e = pp_present(p);
+    if (e < 0) return -EACCES;
+    if (e == 0) return -ENOENT;
     return pp_layout_of_file(p);
 }
 
@@ -147,7 +166,7 @@ static int pp_file_hex(const char *src, const char *name, char hex[65]) {
     char *b;
     if (hex) hex[0] = 0;
     if (pp_join(src, name, p, (int)sizeof p)) return -1;
-    if (sy_exists(p) != 1) return -1;
+    if (pp_present(p) != 1) return -1;
     b = cx_read(p, &n);
     if (!b) return -1;
     cx_sha256_hex(b, n, hex);
