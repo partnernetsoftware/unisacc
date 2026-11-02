@@ -119,9 +119,62 @@ static int smoke(const char *com) {
     return failed ? 1 : 0;
 }
 
+/* --dev-lnx-only: a local-development APE for the host (Linux x86_64 only).
+   A thin shell head plus a side directory (ELF + P3 package) instead of the
+   six-slice ap`e-pack layout, so it never needs ujs/ and cannot be mistaken
+   for a release. The product is unisacc.com + unisacc.com.dev/; the receipt
+   records NOT_RELEASE and both identities. The shell head execs the side ELF
+   with UNISA_CONTAINER pointing at the side P3 package, transparently. */
+static int devlnx(const char *out, const char *p3, const char *lnxelf) {
+    char dir[4400], elfdst[4400], pkgdst[4400], com[4400], rp[4400], receipt[8192], hex[65];
+    long at = 0, n = 0; size_t pn; PackageFooter foot;
+    const char *head =
+        "#!/bin/sh\n"
+        "# unisacc.com --dev-lnx-only: thin shell head; execs the side ELF. NOT_RELEASE.\n"
+        "self=$(readlink -f \"$0\" 2>/dev/null || printf '%s' \"$0\")\n"
+        "dir=$(dirname \"$self\")\n"
+        "elf=\"$dir/unisacc.com.dev/entry.elf\"\n"
+        "pkg=\"$dir/unisacc.com.dev/p3-package.bin\"\n"
+        "need=53248\n"
+        "lim=$(ulimit -v)\n"
+        "[ \"$lim\" -lt \"$need\" ] && { echo \"unisacc.com: run: out of memory (ulimit -v $lim < $need)\" >&2; exit 2; }\n"
+        "[ -x \"$elf\" ] || { echo \"unisacc.com: missing $elf\" >&2; exit 1; }\n"
+        "[ -f \"$pkg\" ] || { echo \"unisacc.com: missing $pkg\" >&2; exit 1; }\n"
+        "UNISA_CONTAINER=\"$pkg\"; export UNISA_CONTAINER\n"
+        "exec \"$elf\" \"$@\"\n";
+    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) ra_die("cannot make", out);
+    if (cx_fmt(dir, sizeof dir, "%s/unisacc.com.dev", out)) ra_die("path too long", out);
+    if (sy_mkdir(dir, 0755) && sy_exists(dir) != 1) ra_die("cannot make", dir);
+    if (cx_fmt(elfdst, sizeof elfdst, "%s/entry.elf", dir) || cx_fmt(pkgdst, sizeof pkgdst, "%s/p3-package.bin", dir)) ra_die("path too long", dir);
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", out) || cx_fmt(rp, sizeof rp, "%s/ape-receipt.txt", out)) ra_die("path too long", out);
+    {   char *b = cx_read(p3, &pn);
+        if (!b || pn > 2147483647UL || !packagefooter_locate_bytes((const unsigned char *)b, (long)pn, &foot)) ra_die("no package footer", p3);
+        if (foot.package_offset < 0 || foot.footer_offset < foot.package_offset || foot.footer_offset + 16 != (long)pn || b[foot.package_offset] != 'P') ra_die("unexpected package span", p3);
+        /* UNISA_CONTAINER reads the whole file: package bytes plus the 16-byte
+           UNIPKG1 footer, so copy the input verbatim (not just the package). */
+        if (cx_write(pkgdst, b, pn)) ra_die("cannot write package", pkgdst);
+        mm_free(b);
+    }
+    {   char *e = cx_read(lnxelf, &n);
+        if (!e || n == 0) ra_die("cannot read slice", lnxelf);
+        if (cx_write(elfdst, e, n)) ra_die("cannot write slice", elfdst);
+        mm_free(e);
+    }
+    sy_chmod(elfdst, 0755);
+    if (cx_write(com, head, (size_t)tx_len(head, 2048))) ra_die("cannot write head", com);
+    sy_chmod(com, 0755);
+    if (cx_fmt(receipt, sizeof receipt, "NOT_RELEASE\tdev-lnx-only\n")) ra_die("receipt", com);
+    at = tx_len(receipt, sizeof receipt);
+    if (receipt_line(receipt, sizeof receipt, &at, "unisacc.com", com) || receipt_line(receipt, sizeof receipt, &at, "entry.elf", elfdst) || receipt_line(receipt, sizeof receipt, &at, "p3-package", pkgdst)) ra_die("cannot hash", com);
+    if (cx_write(rp, receipt, (size_t)at)) ra_die("cannot write", rp);
+    sy_printf("%sRELEASE_APE\tDEV_LNX_PACKED\t%s\n", receipt, com);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 9 && tx_eqz(argv[1], "pack")) return pack(argv + 2);
+    if (argc == 5 && tx_eqz(argv[1], "dev-lnx")) return devlnx(argv[2], argv[3], argv[4]);
     if (argc == 3 && tx_eqz(argv[1], "smoke")) return smoke(argv[2]);
-    sy_eprintf("usage: release-ape.cx pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 | smoke FILE\n");
+    sy_eprintf("usage: release-ape.cx pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 | dev-lnx OUT P3 LNX_ELF | smoke FILE\n");
     return 2;
 }
