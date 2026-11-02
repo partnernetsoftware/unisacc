@@ -9,8 +9,9 @@
 |---|---|
 | 含 64 位十六进制常量的行 | 338（`grep -rE '"[0-9a-f]{64}"'` 的行数），共 420 个 pin 值 |
 | 写死路径字面量（含 `/` 且首段为已知目录） | 2509 处；其中不存在 849 处，去重后带扩展名 137 个 |
-| 自动按邻行配对判 BROKEN | 64 条；人工复核后**真断裂 9 组**，其余为「多 pin 同窗口错配」或产物/自引用 |
+| 自动按邻行配对判 BROKEN | 64 条；人工复核后**真断裂 9 组 + 内容 pin 4 组（§3.1b）**，其余为「多 pin 同窗口错配」或产物/自引用 |
 | 已确认的三种腐烂 | ① `exec/c/*.c` + `src/*.c` 旧 C 源（`e16028ffa1`）② 34 个 `cx/compiler` 门模块（`bb21168edf`）③ 计数 34/107 → 42/131（`5760e9e8a9`）未同步到 verify/adopt/mixed |
+| 断裂提交复核 | 全部按 §1.1 正序逐提交 sha 复核；第一版 `basis_pin` 报的 `fe8028e28e` 已改正为 `a7bc3fc5cb`（§1.2） |
 
 ## 1. 方法
 
@@ -25,6 +26,28 @@ git log --diff-filter=D --format='%h %ad %s' --date=short -2 -- <path>
 
 配对局限：同一窗口里多个 pin 与多个路径时按顺序对齐会错位（典型是 `paths[]`+`pins[]` 数组）。
 下表只列**人工复核过上下文**的条目；标 `待核` 的表示目标判断来自自动配对，未逐句确认。
+
+### 1.1 断裂提交的复核方法（cc 要求，全部条目统一用这一套）
+
+**pin 型（内容 sha）**：逐提交取被钉文件的 blob，算 sha256 与 pin 比较。
+
+```sh
+git rev-list --reverse HEAD -- <被钉文件>          # 旧→新，顺序必须正序
+# 对每个版本：git show REV:<被钉文件> | sha256sum
+```
+
+- 找到**最后一个** sha 等于 pin 的版本 `V`；断裂提交 = `V` 的**后继改动提交**（`git rev-list --reverse V..HEAD -- <文件>` 的第一条）。
+- 若 pin 与任何历史版本都不等 → `PIN-NEVER-MATCHED`（不是断裂，是 pin 本身无来源）。
+
+**删除型（目标已不存在）**：同一正序序列里**最后一个存在该路径的版本**的后继提交（等价于 `git log --diff-filter=D`）。若路径从未出现在历史里 → `NEVER-EXISTED`。
+
+**计数型**：用 `git log -S'<旧值>' -- <权威工具>` 找权威值变更提交；其他工具里的同值自此过期。
+
+### 1.2 纠错记录（第一版错在哪）
+
+第一版对 `basis_pin` 用了 `git log`（默认**新→旧**），并在逆序遍历里判「prev 的 sha==pin 且当前 sha!=pin」，于是命中的是 pin **之前**的那个版本，报出了早一位的 `fe8028e28e`。正序复核后：
+`tools/source-package.cx` 在 `8cecf88208` 的 sha 是 `ddeb0021…`（匹配 pin），后继 `a7bc3fc5cb` 起变成 `77e2cd3c…` → **断裂提交是 `a7bc3fc5cb`**（2026-10-30，`!strcmp(a,b) -> tx_eq` round 4）。
+`fe8028e28e` 是 pin 之前的版本，只作为「该 pin 已经落后于当时的 HEAD」的历史位置，不是断裂提交。
 
 ## 2. 现行构造链（cc 排序，优先处理）
 
@@ -53,10 +76,10 @@ git log --diff-filter=D --format='%h %ad %s' --date=short -2 -- <path>
 
 | 工具 | 行 | 类型 | 目标 | 状态 | 断裂提交 | 修法 |
 |---|---|---|---|---|---|---|
-| `tools/source-package-pack.cx` | 77 | 64hex pin | `tools/source-package.cx`：pin `ddeb0021…`，现 `9a638515…` | **BROKEN** | `fe8028e28e` 2026-10-29 Add cross-target unit model recipes and package routes | 改为派生：打包时读 `source-package.cx` 现 sha 写进记录，或把 pin 换成该文件的 build.json 记录 |
+| `tools/source-package-pack.cx` | 77 | 64hex pin | `tools/source-package.cx`：pin `ddeb0021…`，末次匹配版本 `8cecf88208`，现 `9a638515…` | **BROKEN** | **`a7bc3fc5cb`** 2026-10-30 `!strcmp(a,b) -> tx_eq` round 4（第一版误记 `fe8028e28e`，见 1.2） | 改为派生：打包时读 `source-package.cx` 现 sha 写进记录，或把 pin 换成该文件的 build.json 记录 |
 | `tools/source-package-adopt.cx` | 73,116 | 计数 | 107 jobs / 34 models | **STALE**（权威值 131/42） | `5760e9e8a9` 2026-11-02 source-job-wave 34/107→42/131 | 删字面量，改从 inventory 派生 |
 | `tools/source-package-mixed.cx` | 89,182 | 计数 | 同上 | **STALE** | 同上 | 同上 |
-| `tools/source-package-mixed.cx` | 38 | 64hex pin | `basis_pin=13a58d0e…`（待核目标） | **待核** | 待核 | 同 pack 的 basis 处理 |
+| `tools/source-package-mixed.cx` | 38 | 64hex pin | `basis_pin=13a58d0e…` → `tools/source-package.cx`（末次匹配 `84f1e02b3e`） | **BROKEN** | `fe8028e28e` 2026-10-29 Add cross-target unit model recipes and package routes（此处是后继方向，正序复核一致） | 同 pack 的 basis 处理 |
 | `tools/source-origin-verify.cx` | 173 | 计数 | `jobs!=107||models!=34` | **STALE** | `5760e9e8a9` | 改读 inventory 的 131/42，并在值不符时报 `inventory-count-mismatch` |
 | `tools/asm-material.cx` | 9 | 路径表 `inputs[]` | `src/asmtext.c` 不存在（其余 6 条 OK） | **BROKEN** | `e16028ffa1` | 删该条并把生成注释里的来源改为 `cx/compiler/asmtext.cx`（现存的对应实现） |
 | `tools/cxpack-source-delta.cx` | 35,36,40,41 | 内容 pin | `src/main.c`、`exec/c/compiler.c`、`src/cxmod.c` | **BROKEN**（文件不存在，pin 无法校验） | `e16028ffa1` | 该工具钉旧 C 源，退出链；要保留就改为 `--verify` 现源 |
@@ -65,12 +88,26 @@ git log --diff-filter=D --format='%h %ad %s' --date=short -2 -- <path>
 | `tools/cxlib/rebuildcontext.cx` | 50；`tools/cxlib/sourcepackage.cx` | 195 | 路径 | `src/asmtext.c` | **BROKEN** | `e16028ffa1` | 改 `cx/compiler/asmtext.cx` |
 | `tools/cxlib/e2stream.cx`；`tools/cxlib/riflowmaterial.cx`；`tools/check-model-decode-real.cx` | 258；5；42 | 路径 | `exec/c/run.c` / `exec/c/core.c` | **BROKEN** | `e16028ffa1` | 这两个文件已归档，检查项应改为对 `src/runtime/*.cx` |
 | `tools/cx-driver-build.cx`；`tools/cx-library-build.cx`；`tools/hostseed-step.cx`；`tools/hostseed-step-nativefirst.cx` | 48；252,255；100；63,118 | 路径表 | 34 个 `cx/compiler/*.cx` 旧门模块 + `exec/c/*.c` | **BROKEN** | `bb21168edf` 2026-10-30 / `e16028ffa1` | 这些是旧驱动构造器，退出链；保留则整表改 `src/compiler/bindstage.cx` 等新模块 |
-| `tools/identity-material.cx` | 61,65,67 | 路径 | `cxlib/kernelsha.cx`、`kernelsha.cx`（缺 `tools/` 前缀） | **BROKEN**（实际存在 `tools/cxlib/kernelsha.cx`） | 未定位（可能一直是错字） | 补 `tools/` 前缀 |
-| `tools/cxlib/mixedprofiles.cx` | 22,29 | 产物路径 | `out/epoch-build-01/Root41-bootstrap.com`、`Rootf370-bootstrap.com` | **MISSING**（`out/` 可再生） | 未定位（纪元产物） | 改为按纪元参数传入；禁止默认路径 |
-| `tools/check-cx-entry.cx` | 29,701 | 路径 | `cxstd_main.cx`、`tests/cx-entry-matrix-2026-10-30.tsv` | **MISSING** | 待核 | 改名或删检查 |
-| `tools/cx-flatten.cx` | 262 | 路径 | `cx-nested.h` | **MISSING** | 待核 | 改为参数 |
-| `tools/check-matrix-stale.cx` | 37 | 路径 | `tests/x-domain-matrix.tsv` | **MISSING** | 待核 | 删或改指向现行矩阵 |
-| `tools/cxpack-read-failures.cx` | 9 | 路径 | `cxpack.tsv` | **MISSING** | 待核 | 改为参数 |
+| `tools/identity-material.cx` | 61,65,67 | 路径 | `cxlib/kernelsha.cx`、`kernelsha.cx`（缺 `tools/` 前缀；实际存在 `tools/cxlib/kernelsha.cx`） | **BROKEN** | `13d8cfe478` 2026-10-28 manually git（引入即缺前缀） | 补 `tools/` 前缀 |
+| `tools/cxlib/mixedprofiles.cx` | 22,29 | 产物路径 | `out/epoch-build-01/Root41-bootstrap.com`、`Rootf370-bootstrap.com` | **MISSING**（`out/` 可再生） | `28aaf6cf36` 2026-10-28 Prepare sizeof material role…（引入时即依赖未跟踪的 out 产物） | 改为按纪元参数传入；禁止默认路径 |
+| `tools/check-cx-entry.cx` | 29,701 | 路径 | `cxstd_main.cx`、`tests/cx-entry-matrix-2026-10-30.tsv` | **NEVER-EXISTED**（`git log -- <path>` 全空） | — | 属于从未提交的预期名；改名或删检查 |
+| `tools/cx-flatten.cx` | 262 | 路径 | `cx-nested.h` | **NEVER-EXISTED** | — | 改为参数 |
+| `tools/check-matrix-stale.cx` | 37 | 路径 | `tests/x-domain-matrix.tsv` | **NEVER-EXISTED** | — | 删或改指向现行矩阵 |
+| `tools/cxpack-read-failures.cx` | 9 | 路径 | `cxpack.tsv` | **NEVER-EXISTED** | — | 改为参数 |
+
+### 3.1b 其余内容 pin 的正序复核结果
+
+同一方法（§1.1）：在被钉文件的正序历史里找最后一个 sha==pin 的版本，其后继为断裂提交。
+
+| 工具 | 行 | pin | 被钉文件 | 末次匹配版本 | 断裂提交 | 状态 |
+|---|---|---|---|---|---|---|
+| `source-package-pack.cx`；`source-package-mixed.cx` | 77；38 | `ddeb0021…`；`13a58d0e…` | `tools/source-package.cx` | `8cecf88208`；`84f1e02b3e` | `a7bc3fc5cb`；`fe8028e28e` | BROKEN |
+| `source-package-adopt.cx`；`source-package-mixed.cx` | 25；39 | `origin_basis_pin=9c2e71ef…` | `tools/source-package.cx` | `66d8646a99` | `3ee1091f1b` 2026-10-26 fix(c43): split long source package jobs… | BROKEN |
+| `source-package-adopt.cx`；`source-package-mixed.cx` | 26；40 | `producer_pin=dd6f5e60…` | `tools/source-package-pack.cx` | `6fc7faad8f` | `8c618df133` 2026-10-27 Adapt full source package consumer… | BROKEN |
+| `source-package-adopt.cx`；`source-package-mixed.cx` | 27；41 | `spec_pin=407f5ef7…` | `tools/cxlib/sourcepackage.cx` | `6fc7faad8f` | `02bb4c614d` 2026-10-26 feat: verify frozen source-package origins… | BROKEN |
+| `source-origin-verify.cx`；adopt；mixed | 24；28；42 | `ks_pin=8ad60f90…` | `tools/cxlib/kernelsha.cx` | HEAD | 无（文件自 `6a163e1cb8` 起未变） | **有效** |
+| `source-package-adopt.cx`；`source-package-mixed.cx` | 21；35 | `origin_expected=329cdb70…` | 无文件历史匹配 | — | — | `PIN-NEVER-MATCHED`（非文件 sha，疑为报告内容哈希，未核实） |
+| `source-package-adopt.cx`；`source-package-mixed.cx` | 24；37 | `current_expected=0d59237f…`；`e252e3fe…` | 同上 | — | — | 同上 |
 
 ### 3.2 必然过期（纪元材料 / 钉产物）
 
@@ -105,7 +142,7 @@ pin 是格式常量或材料哈希，邻行 `support[]`/`nninputs.cx` 不是它�
 **应当改为派生（删除字面量）**
 
 1. 所有 34/107 计数：唯一权威是 `source-job-wave.cx` 的 inventory。verify / adopt / mixed 改读 inventory 输出的 `jobs`/`models` 行，不符时报具名错误。否则每次食谱新增都要改三处（本次 `5760e9e8a9` 只改了一处，另三处已腐烂）。
-2. `source-package-pack.cx:77` basis_pin：改为在打包时把 `tools/source-package.cx` 的现 sha 写进记录，校验侧比较「记录 vs 现文件」，不写死。
+2. `source-package-pack.cx:77` basis_pin：改为在打包时把 `tools/source-package.cx` 的现 sha 写进记录，校验侧比较「记录 vs 现文件」，不写死。同类还有 `source-package-mixed.cx:38`（basis）、`adopt:25`/`mixed:39`（origin_basis）、`adopt:26`/`mixed:40`（producer）、`adopt:27`/`mixed:41`（spec），全部改派生；`ks_pin`（adopt:28 / mixed:42 / origin-verify:24）当前有效，改为派生后可保持等价。
 3. 钉产物（`unisacc.com`、`tools/bound`、`out/**`）的 pin：全部改为从 `<product>.build.json` / 纪元记录派生；`--verify` 语义保留。
 4. 自引用 pin（`richain.cx:15`、`libneed-native-profile.cx:23`）：删掉，改运行时 `digest(__FILE__)` 或纯结构校验。
 
@@ -147,8 +184,21 @@ pin 是格式常量或材料哈希，邻行 `support[]`/`nninputs.cx` 不是它�
 
 ## 7. 未核实
 
-- `source-package-mixed.cx:38` `basis_pin` 的目标文件未逐句确认（标待核）。
-- `identity-material.cx` 的 `cxlib/kernelsha.cx` 是否一直是错字（未找到引入提交）。
-- `mixedprofiles.cx` 的 `out/epoch-build-01/*.com` 属于哪个纪元、当前是否仍需（out 已不存在）。
-- `check-cx-entry.cx`、`cx-flatten.cx`、`check-matrix-stale.cx`、`cxpack-read-failures.cx` 的缺失目标是否已改名（待核）。
-- 自动配对出的另外 55 条 BROKEN 未逐条复核，绝大多数为多 pin 同窗口错配。
+- `origin_expected`（adopt:21 / mixed:35）与 `current_expected`（adopt:24 / mixed:37）四个 pin 在任何被钉文件的历史里都无匹配 → 不是文件 sha，疑为 origin 报告/上下文内容哈希；未确认它是按哪个文件哪一段算的。
+- `mixedprofiles.cx` 的 `out/epoch-build-01/*.com` 属于哪个纪元、当前是否仍需（`out/` 已不存在）。
+- 自动配对出的另外 55 条 BROKEN 未逐条复核，按抽查结果绝大多数为多 pin 同窗口错配（`paths[]`+`pins[]` 按索引对应）。
+- `product-build.cx` 是否仍在任何文档化流程里被调用（`prd.md` 无引用；未查全部 `plans/`）。
+
+## 8. 解冻后的实施顺序与要动的工具（headers 列之后）
+
+1. `tests/batches.tsv` + `tests/run-batch.cx` + `cxlib.testplan` 的 `headers` 列（另一计划，先做）。
+2. 新建 `tools/pins.tsv`：把 §2、§3.1、§3.1b 的行录成表，`kind` 分 `pin|count|path|host-dep|epoch`。
+3. 新建 `tools/check-pins.cx`：按 §6.2 实现，登记批次 `pins`；对 `pins.tsv` 未声明的 64hex 常量报 `UNDECLARED_PIN`，对 `"107"`/`"34"` 这类与权威值不符的字面量报 `COUNT_LITERAL`。
+4. 计数改派生（删字面量）：`source-package-adopt.cx:73,116`、`source-package-mixed.cx:89,182`、`source-origin-verify.cx:173` → 统一读 `source-job-wave` 的 inventory 输出。
+5. basis/内容 pin 改派生：`source-package-pack.cx:77`、`source-package-mixed.cx:38`、`source-package-adopt.cx:25,26,27`、`source-package-mixed.cx:39,40,41`。
+6. 旧 C 链退出：`cxpack-source-delta.cx`、`link-source-delta.cx`、`prune-cases-gen.cx`、`cx-driver-build.cx`、`cx-library-build.cx`、`hostseed-step.cx`、`hostseed-step-nativefirst.cx`，以及 `product-build.cx` 的 `exec/c` 分支（:74,76,78）。
+7. 修路径：`asm-material.cx:9`、`cxlib/rebuildcontext.cx:50`、`cxlib/sourcepackage.cx:195`、`cxlib/e2stream.cx:258`、`cxlib/riflowmaterial.cx:5`、`check-model-decode-real.cx:42`、`identity-material.cx:61,65,67`。
+8. 纪元/自引用 pin 处理：`dev-run.cx:77`、`cxlib/richain.cx:15`、`libneed-native-profile.cx:23`、`cxlib/mixedprofiles.cx:22,29`。
+9. host-dep 降级为告警：`hostseed-step.cx:25`、`hostseed-step-nativefirst.cx:37`（zlib 三路径当前 SAME）。
+10. 每步验证：`check-pins` 全绿、`tools/affected.cx` 能映射 `pins` 批次、`tests/run.cx -- --smoke`、棘轮 9/9；涉及构造链的改动按慢车道纪元换标。
+
