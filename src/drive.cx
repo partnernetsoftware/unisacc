@@ -197,6 +197,61 @@ static unsigned char dv_one = 1;
    ex_ri_emit, and every other mode is a named NOT_IMPLEMENTED stop. Split out of
    dv_main (C44-PACKAGE-01): dv_main keeps the routing, this keeps the output
    contract. Returns the process exit code. */
+/* -run finishes on this process: either the forward image is exec'd in place
+   (execf) or the memory-image route builds and runs the image here. Every path
+   closes the package first. Split out of dv_main (C44-PACKAGE-01): the caller
+   has already established mode2 == 3 && nsrc >= 1. */
+static int dv_run_route(int execf, unsigned char *body, long bodyn, char **runargs,
+                        unsigned char *pkg, const char *tgt, const char *src,
+                        char *preason, const char *gap) {
+    /* Local prototypes: a .cx module refuses a top-level function declaration
+       that the module does not define. */
+    int pm_close(void);
+    int hs_reserve(unsigned char **, long *);
+    int hs_release(unsigned char *, long);
+    int dv_store_exec(const unsigned char *, long, char **);
+    int dv_memory(const char *, const char *, int, unsigned char *, long,
+                  unsigned char *, long, char *, int, int *);
+    int dv_cx(const char *);
+    unsigned char *base;
+    long reserved;
+    int code;
+    int mr;
+    if (execf) {
+        code = dv_store_exec(body, bodyn, runargs);
+        pm_close();
+        free(pkg);
+        free(body);
+        return code;
+    }
+    base = 0;
+    reserved = 0;
+    code = 0;
+    if (hs_reserve(&base, &reserved)) {
+        pm_close();
+        free(pkg);
+        free(body);
+        fputs("unisacc: model driver: cannot reserve native memory\n", stderr);
+        return 1;
+    }
+    mr = dv_memory(tgt, src, dv_cx(src), body, bodyn, base, reserved, preason, 128, &code);
+    pm_close();
+    free(pkg);
+    if (mr == 3) {
+        hs_release(base, reserved);
+        fprintf(stderr, "route=%s/memory\n", tgt);
+        fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
+        return 2;
+    }
+    if (mr) {
+        hs_release(base, reserved);
+        fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "memory");
+        fprintf(stderr, "route=%s/memory\n", tgt);
+        return mr == 2 ? 2 : 1;
+    }
+    return code;
+}
+
 static int dv_finish(int mode2, const char *shown, int runit2, int asmw,
                      unsigned char *body, long bodyn, const char *preason,
                      const char *symbols, const char *tgt,
@@ -759,46 +814,8 @@ dv_replay:
                 hs_free(body);
                 return code;
             }
-            if (mode2 == 3 && nsrc >= 1) {
-                if (execf) {
-                    int code;
-                    code = dv_store_exec(body, bodyn, dv_runargs);
-                    pm_close();
-                    free(pkg);
-                    free(body);
-                    return code;
-                }
-                unsigned char *base;
-                long reserved;
-                int code;
-                int mr;
-                base = 0;
-                reserved = 0;
-                code = 0;
-                if (hs_reserve(&base, &reserved)) {
-                    pm_close();
-                    free(pkg);
-                    free(body);
-                    fputs("unisacc: model driver: cannot reserve native memory\n", stderr);
-                    return 1;
-                }
-                mr = dv_memory(tgt, src, dv_cx(src), body, bodyn, base, reserved, preason, 128, &code);
-                pm_close();
-                free(pkg);
-                if (mr == 3) {
-                    hs_release(base, reserved);
-                    fprintf(stderr, "route=%s/memory\n", tgt);
-                    fprintf(stderr, "NOT_IMPLEMENTED %s\n", gap);
-                    return 2;
-                }
-                if (mr) {
-                    hs_release(base, reserved);
-                    fprintf(stderr, "unisacc: model driver: %s\n", preason[0] ? preason : "memory");
-                    fprintf(stderr, "route=%s/memory\n", tgt);
-                    return mr == 2 ? 2 : 1;
-                }
-                return code;
-            }
+            if (mode2 == 3 && nsrc >= 1)
+                return dv_run_route(execf, body, bodyn, dv_runargs, pkg, tgt, src, preason, gap);
             pm_close();
             free(pkg);
             /* mode 4 is the tokens route: tokenpp then tokenlex, on stdout.
