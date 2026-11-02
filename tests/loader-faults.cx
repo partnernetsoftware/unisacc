@@ -21,8 +21,9 @@
 #pragma unisa use text.num
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.productpkg
 
-static char root[4096], work[4400], com[4400], bound[4400];
+static char root[4096], work[4400], com[4400], bound[4400], vdir[4600];
 static int assertions, failures;
 static unsigned char *img; static long imgn, po, pl, fo;
 
@@ -30,6 +31,9 @@ static void die(const char *s) { sy_eprintf("loader-faults: REFUSE %s\n", s); sy
 static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\tloader-faults.%s\n", name); else { failures++; sy_printf("FAIL\tloader-faults.%s\n", name); } }
 
 /* write work/NAME.com: the installed file; trailing != 0 inserts one byte before the footer and fixes its length */
+/* work/NAME/: a copy of the installed product with ONE thing damaged in its P3 package.  The
+   product is a launcher plus a directory under the dev layout, so a damaged product is a
+   directory too: copying the launcher alone would leave nothing to load. */
 static void variant(const char *name, int trailing, long patch_at, const char *patch, long patchn) {
     long total = imgn + (trailing ? 1 : 0), i; unsigned char *o = mm_alloc(total + 1); char p[4600];
     if (!o) die("alloc");
@@ -37,8 +41,12 @@ static void variant(const char *name, int trailing, long patch_at, const char *p
     if (trailing) { o[fo] = 'x'; mm_copy(o + fo + 1, 16, img + fo, 16); for (i = 0; i < 8; i++) o[fo + 1 + 8 + i] = (unsigned char)((pl + 1) >> (8 * i)); }
     else mm_copy(o + fo, 16, img + fo, 16);
     if (patchn) mm_copy(o + po + patch_at, patchn, patch, patchn);
-    if (cx_fmt(p, sizeof p, "%s/%s.com", work, name) || cx_write(p, (char *)o, (size_t)total)) die("write");
-    sy_chmod(p, 0755); mm_free(o);
+    if (cx_fmt(vdir, sizeof vdir, "%s/%s", work, name)) die("variant dir");
+    if (sy_exists(vdir) == 1 && cx_rmtree(vdir)) die("old variant");
+    if (pp_copy_product(root, vdir)) die("copy product");
+    if (pp_package_path(vdir, p, (int)sizeof p)) die("variant package");
+    if (cx_write(p, (char *)o, (size_t)total)) die("write");
+    mm_free(o);
 }
 static long row(const char *tag) { long at = tx_find((const char *)img + po, pl, tag, 3); if (at < 0) die("package row not found"); return at + 3; }   /* first byte of the first length field */
 
@@ -48,7 +56,7 @@ static long rawfield(void) { long at = row("\nM "); while (img[po + at] != ' ') 
 /* COM with ARGS under tools/bound; returns the result */
 static np_result run(const char *name, char **args) {
     char *v[24], cp[4600], why[1024]; int n = 0, k; np_result r;
-    if (cx_fmt(cp, sizeof cp, "%s/%s.com", work, name)) die("path");
+    if (cx_fmt(cp, sizeof cp, "%s/%s/unisacc.com", work, name)) die("path");
     v[n++] = bound; v[n++] = "20"; v[n++] = "sh"; v[n++] = cp;
     for (k = 0; args[k] && n < 23; k++) v[n++] = args[k];
     v[n] = 0;
@@ -61,7 +69,8 @@ int main(void) {
     static const char *names[] = {"trailing-package-data", "m-stored-length-out-of-range", "m-raw-length-out-of-range", "f-length-garbled"};
     static const char *rn[] = {"run", "S", "c-funit", "o-lnx-arm64", "o-osx-arm64", "o-osx-x86_64", "o-win-x86_64", "o-win-arm64"};
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
-    if (cx_fmt(work, sizeof work, "%s/out/loader-faults-batch", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (cx_fmt(work, sizeof work, "%s/out/loader-faults-batch", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (pp_package_path(root, com, (int)sizeof com)) die("no P3 package in the installed product");
     if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
     if (sy_mkdir(work, 0700)) die("work");
     img = (unsigned char *)cx_read(com, &sn); imgn = (long)sn;
