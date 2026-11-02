@@ -1,0 +1,149 @@
+/* check-stage-lower.cx — B2 gate：lower 阶段独立测试台的依赖判定。
+ *
+ * 目标（prd.md:158）：改单个权重文件只重跑该阶段与下游。本检查验证：
+ *
+ *   1. 权重→阶段映射正确（真源 prd.md:128-130 七流表）：lower={abi,regmap,reloc}。
+ *   2. 动态依赖判定（经 tools/affected.cx --files 实际执行）：
+ *      · 改 lower 权重 weights/gold/abi.tsv → stream-lower-domain 批次受影响（重跑该阶段）
+ *      · 改非 lower 权重 weights/gold/pp.tsv → stream-lower-domain 批次**不**受影响（负例）
+ *   3. 七流顺序：lower 在 elf 之前（改 lower 会连带下游 elf，改 elf 不反推 lower）。
+ *
+ * 用法：sh ./unisacc.com tools/check-stage-lower.cx
+ * 只读 weights 与 batches，不构造权重、不跑整包、不改冻结域。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok,const char *name){
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+
+/* 权重名 → 阶段名。真源 prd.md:128-130 七流表「主要网」列。
+ * isel/combo 是对照臂（prd.md:134，不出货主脊），不映射到七流。 */
+typedef struct { const char *net; const char *stage; } NetStage;
+static const NetStage net_stage[] = {
+    {"pp", "e2"},
+    {"lex", "e1"},
+    {"parse", "e3"}, {"type", "e3"}, {"scope", "e3"}, {"irsel", "e3"},
+    {"tyinfo", "e3"}, {"pfconv", "e3"}, {"binsel", "e3"}, {"prec", "e3"},
+    {"opinfo", "e4"}, {"peep", "e4"},
+    {"abi", "lower"}, {"regmap", "lower"}, {"reloc", "lower"},
+    {"enc", "elf"},
+};
+/* isel/combo 是对照臂，不属七流，不参与阶段依赖判定。 */
+#define NET_STAGE_N (sizeof(net_stage)/sizeof(net_stage[0]))
+
+static const char *stage_order[] = {"e2","e1","e3","e4","prune","lower","elf"};
+#define STAGE_ORDER_N (sizeof(stage_order)/sizeof(stage_order[0]))
+
+static int stage_index(const char *s){
+    for (int i = 0; i < (int)STAGE_ORDER_N; i++)
+        if (tx_eqz(stage_order[i], s)) return i;
+    return -1;
+}
+static int net_stage_index(const char *net){
+    for (int i = 0; i < (int)NET_STAGE_N; i++)
+        if (tx_eqz(net_stage[i].net, net)) return stage_index(net_stage[i].stage);
+    return -1;
+}
+static int stage_is_lower(const char *stage){ return tx_eqz(stage, "lower"); }
+static int net_in_lower(const char *net){
+    for (int i = 0; i < (int)NET_STAGE_N; i++)
+        if (tx_eqz(net_stage[i].net, net) && stage_is_lower(net_stage[i].stage)) return 1;
+    return 0;
+}
+static int net_not_lower(const char *net){
+    for (int i = 0; i < (int)NET_STAGE_N; i++)
+        if (tx_eqz(net_stage[i].net, net)) return !stage_is_lower(net_stage[i].stage);
+    return 0;
+}
+
+/* 跑 affected.cx --files FILE --list-only，返回 stdout 全文。 */
+static char *run_affected(const char *root, const char *file){
+    char tool[4400];
+    if (cx_fmt(tool, sizeof tool, "%s/tools/affected.cx", root)) return 0;
+    char *v[] = {(char*)"sh", (char*)"tools/bound", (char*)"55", (char*)"sh",
+                 (char*)"./unisacc.com", tool, (char*)"--", (char*)"--files", (char*)file, (char*)"--list-only", 0};
+    np_result r = {0}; char why[512];
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) return 0;
+    char *out = r.out; r.out = 0;
+    np_free(&r);
+    return out; /* 调用者 free */
+}
+
+/* 在 affected 输出里查是否含某批次 id。 */
+static int has_batch(const char *out, const char *id){
+    if (!out) return 0;
+    long n = tx_len(out, 1 << 20), at = 0, idn = tx_len(id, 128);
+    while (at < n) {
+        long e = at;
+        while (e < n && out[e] != '\n') e++;
+        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9)) {
+            long p = at + 9, q = p;
+            while (q < e && out[q] != '\t') q++;
+            if (q - p == idn && !tx_cmp(out + p, idn, id, idn)) return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc,char **argv){
+    (void)argc; (void)argv;
+    /* --- 静态映射 --- */
+    ck(net_in_lower("abi") && net_in_lower("regmap") && net_in_lower("reloc"),
+       "lower-weights-abi-regmap-reloc");
+    ck(net_not_lower("pp") && net_not_lower("lex") && net_not_lower("enc") && net_not_lower("peep"),
+       "non-lower-weights-excluded");
+    {
+        /* 18 网 = 16 出货主脊（在 net_stage）+ isel/combo 对照臂（不在七流） */
+        static const char *nets18[] = {
+            "pp","lex","parse","type","scope","irsel","enc","reloc","regmap",
+            "tyinfo","pfconv","peep","opinfo","prec","binsel","isel","abi","combo"};
+        static const char *control_arms[] = {"isel","combo"};
+        int ok = 1;
+        for (int i = 0; i < 18; i++) {
+            int hit = 0;
+            for (int j = 0; j < (int)NET_STAGE_N; j++)
+                if (tx_eqz(net_stage[j].net, nets18[i])) { hit = 1; break; }
+            for (int j = 0; j < 2; j++)
+                if (tx_eqz(control_arms[j], nets18[i])) hit = 1;
+            if (!hit) { ok = 0; break; }
+        }
+        ck(ok, "net-stage-mapping-covers-18-nets");
+    }
+    {
+        int ok = 1;
+        for (int i = 0; i < (int)NET_STAGE_N && ok; i++)
+            for (int j = i + 1; j < (int)NET_STAGE_N && ok; j++)
+                if (tx_eqz(net_stage[i].net, net_stage[j].net)) ok = 0;
+        ck(ok, "net-stage-mapping-no-duplicate-net");
+    }
+    {
+        int li = net_stage_index("abi"), ei = net_stage_index("enc");
+        ck(li >= 0 && ei >= 0 && li < ei, "lower-downstream-elf-order");
+    }
+    /* --- 动态依赖判定（经 affected.cx 实际执行） --- */
+    {
+        char root[4096];
+        if (!realpath(".", root)) { ck(0, "root-resolve"); }
+        else {
+            /* 改 lower 权重 → stream-lower-domain 受影响 */
+            char *o = run_affected(root, "weights/gold/abi.tsv");
+            int lo = has_batch(o, "stream-lower-domain-format");
+            free(o);
+            ck(lo, "lower-weight-change-affects-lower-batches");
+            /* 改非 lower 权重 → stream-lower-domain 不受影响（负例） */
+            o = run_affected(root, "weights/gold/pp.tsv");
+            int no = has_batch(o, "stream-lower-domain-format");
+            free(o);
+            ck(!no, "non-lower-weight-change-does-not-affect-lower");
+        }
+    }
+    printf("STAGE_LOWER\tfailed=%d\tscope=weight-to-stage-dependency-no-construction\n", failed);
+    return failed ? 1 : 0;
+}
