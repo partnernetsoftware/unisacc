@@ -143,6 +143,22 @@ unisacc.com  5,145,706 B  sha 83343ec1…
 - 通用执行器：定宽运算、栈/存储、字节/帧、资源与接受/拒绝。语言、ABI 与布局语义仍由阶段规则拥有。
 - 模型包 P3 = 32 模型 + 阶段路由 + 资源，装载由 `cx/runtime/model_decode.cx` / `packagemodel` 处理。
 
+### 4.3 分层:booter / 基座 / 阶段权重 / 资源(架构方向,2026-11-02 主人定)
+
+```
+L0 booter(APE com,极小)   识别 OS/架构 → 按 manifest 找到并校验基座与阶段权重 → 交给基座执行
+L1 基座(每架构一个文件)    通用执行器("权重换逻辑"的机器,即 kernel);外部文件,按内容哈希寻址
+L2 阶段权重(7 流/18 网)    e2/e1/e3/e4/prune/lower/elf 各一个模型文件;外部文件,按内容哈希寻址
+L3 资源                    头文件、事实表等
+```
+
+- **一切按内容哈希寻址;内置 pack 只是 resolver 的另一个来源**,与外部目录行为完全一致。
+- `manifest.tsv`:`name kind(base|stage|resource) arch sha256 size order`。来源顺序:`UNISA_HOME` → com 旁目录 → 用户缓存 → 内嵌 pack(UNIPKG1 footer)。命中必校验 sha256,不符具名拒绝,**不静默回退**到别的来源。
+- **产品身份 = manifest 的 sha256(Merkle 根)**。取代 `pp_product_digest` / `ape-receipt` / `build.json` artifact 段等多处各算一份的口径(见 `plans/identity-inventory-2026-11-02.md`、`plans/identity-unify-2026-11-02.md`)。kernel context 仍独立于它(判断 kernel 可否复用,不随全树变),两代 GEN 互证仍保留。
+- 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节→输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
+- 单文件发布(pack 内嵌)保留;外部目录形态用于开发。启动开销是主要风险(现热 `-run` ≈10ms),每步测量。
+- 进度与分步:见 `work/items.tsv`(B0 P3 explode/implode → B1 resolver → B2 阶段测试台 → B3 基座外置 → B4 booter APE 头 → B5 身份收敛到 manifest)。
+
 ## 5. 源码结构（src/ 六层 + cx/ 树）
 
 `src/unisacc.cx` 是入口，`use drive`。六层（`src/` 共 15 文件、5352 行）：
@@ -249,20 +265,27 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点（2026-11-01）。已装 `./unisacc.com` = `83343ec1`（5,145,706 B，rev `edc2c7700b`，0.0.43）。上一版 `33273544` 在 `out/unisacc.com.33273544`。
+当前节点(2026-11-02 夜)。**已装产品 = 快车道候选**(NOT_RELEASE dev-lnx,entry 648a47ca / p3 436004f0 / split2 身份 41e4660d);上一版 83343ec1 的五片发布产物**在 `out/` 里没找到**(只有 `out/census-83343ec1`),需另查来源。今日(11-02)工作全部落在"0.0.43 收口之后的体系整理",**没有推进 0.0.44 第一优先级(编译加速 C44-SPEED-01)**——这是漂移,下一轮必须纠正。
 
 ```text
-0.0.43（收口）
-├─ 已装 83343ec1：五片 win/18d2757f·lnx-x86_64/759c520a·lnx-arm64/6703dd4d·osx-x86_64/581300df·osx-arm64/7e3d267b；两代自举逐字节相同
-├─ 门禁：七棘轮 ok=7、--smoke 16/0、release-ape smoke 5/5
-├─ 提速：镜像缓存 -run 442→12ms、-o 477→13ms；ratchets 16.5→1.5s；AF_ALG 测试 digest 1477→330ms
-├─ phase-timing 域清零：6 flip + 8 migrate + hit=2 amend + memory-bind R14 豁免，open 9→4
-├─ hostseed 豁免到 0.0.44：harness 引入 coverage 层 DECLARED_DEPENDENCY，12 批 PLANNED，5 coverage 行 declared
-├─ 材料重建闭环：object/net/pp-gold/ri-chain 用当前候选重建，19 批 PASS；sess-mat2 收 123 批 PASS（被共享 harness 改动作废）
-├─ QUALIFIED 缺口（不是「没做完」，是结构性阻塞）：
-│  ├─ 73 外平台格（lnx/arm64 19 + osx/arm64 18 + osx/x86_64 18 + win/x86_64 18）→ 需 CI 6 原生 runner，本机物理不可达
-│  └─ ~24 BLOCKED（5 owner-ruling 需主人裁定范围：ri.class.memory/library、ri.route.run-object-supported、library.std.family-classification、resources.time.end-to-end-budget）
-└─ 未签名、未公开（prd 门禁：先 QUALIFIED 再发布）
+0.0.43 收口 + 体系整理(进行中)
+├─ 慢车道纪元(2026-11-02,起点 a824200d77,omp-bdy 执行,runbook=plans/epoch-runbook-2026-11-02.md)
+│  ├─ [x] 步7 prepare-context  [x] 步8 source-job-wave 131 job + final
+│  ├─ [x] 步9 kernel-build(收窄后字节==旧 blob 32cecc8a/4d6e45a1)
+│  ├─ [~] 步10 source-package-pack(对齐 split2 身份:3 处与 source-package.cx 漏同步已修)
+│  └─ [ ] 步11-18 p3/entry → 两代 GEN selfhost → kind2 安装 → 全批 → 换标
+├─ 合并进纪元的变更:A kernel 收窄(kernelinputs 单一来源) C host.cx cwd 头 D/E/F 补丁 06/05/07 H 撤销 --host-provider  G FFI 字节表入 include/(待做)
+├─ FFI 桥:x86_64 四向量本机通过;arm64 白箱走查+栈参数已写,运行期待 CI arm64 runner;ELF .text 提取器已去 objcopy 依赖
+├─ 下一纪元:实参个数检查(arity,weights/arity + parse E3,预演全绿在 /tmp/arity-impl)
+├─ W6 自身体系迁移:seed/{net,tbl,ident,compilerpack,pack} CX 预演通过(小样本);gen(9051 行)暂缓;P3 压缩口径待决
+├─ 收缩调查结论:tools+tests 86.8k 行,可归档 0、重复断言<50 行——体量真实,靠减用例不可行;大头是身份机制重复(SID/PC/GEN/context/pins/receipts)
+├─ QUALIFIED 缺口(未变):73 外平台格需 CI 6 原生 runner;~24 BLOCKED(5 项需主人裁定范围)
+└─ 未签名、未公开(先 QUALIFIED 再发布)
+
+0.0.44 方向(主人 11-01 定:清理干扰、修 bug、提速;提速第一)
+├─ [ ] C44-SPEED-01 编译加速:今日 0 进展
+├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,纪元后立项
+└─ [ ] 其余见 plans/v0.0.44.md
 ```
 
 <a id="memory-palace"></a>

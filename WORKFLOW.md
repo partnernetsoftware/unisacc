@@ -1,0 +1,67 @@
+# WORKFLOW.md —— unisacc 的开发工作流与管道
+
+本文件是稳定规范:谁都按它干活,换窗口、换模型、换人都不用重新交接。易变的内容各有归处:
+规则 → `AGENTS.md`;产品与架构 → `prd.md`;**当前要做什么 → `work/items.tsv`;做到哪了 → `work/ledger.tsv`**;角色提示词 → `roles/*.md`。
+不再为"交接"单写带日期的 `plans/*.md`;`plans/` 只放调查、设计探针与一次性研究。
+
+## 1 三条原则
+1. **事实由命令产生,判断由模型产生。** 构建、检查、字节比对、棘轮是命令节点,模型不转述其结果;模型只做定位、评审、裁决,且必须引用命令输出。
+2. **闸门是可执行命令。** 每个工作项开工前写好 gate;"完成"=gate 在干净副本上输出约定结果,而不是谁说完成。没有 gate 的工作项不入库。
+3. **改动先在私有副本;只有一个集成者写 main。** 实现节点产出 patch,不直接写共享检出。
+
+## 2 进入一个任务(任何 agent 的开工顺序)
+1. 读 `AGENTS.md`(规则)→ 本文件 → 你的角色文件 `roles/<role>.md` → `work/items.tsv` 里你的那一行。
+2. 只读该行 `context` 列出的文件;要读别的,先在回信 `needs` 里说明。
+3. 在私有副本(`git archive HEAD` 到 `out/work/<id>/`)里做;跑 gate;把输出原样附在回信里。
+
+## 3 工作项 `work/items.tsv`
+制表符分隔,一项一行:
+`id | goal(一句) | role | domain(可写路径,分号分隔) | gate(验收命令) | context(必读路径,分号分隔) | budget(分钟) | deps | state`
+- `domain` 外一律不改;两个工作项 domain 相交则后者排队。
+- `state` ∈ `READY / DOING / VERIFYING / DONE / BLOCKED / REOPENED`;状态以 `work/ledger.tsv` 最新行为准,items 里的 state 只是快照。
+
+## 4 账本 `work/ledger.tsv`(只追加)
+`时间 | id | 事件 | commit | 证据(命令+输出一行或其哈希) | 角色/模型`
+看板、todo、信封里的口头状态一概不作依据;"落后项"=roadmap 里已到期而账本无 DONE 的项。
+
+## 5 节点类型与标准管道
+| 类型 | 谁执行 | 产出 |
+|---|---|---|
+| CMD | pipeline runner(`tools/pipeline.cx`,cx 实现;每步沿用 55/60s bound) | 事实:rc、输出、哈希 |
+| JUDGE | `workflow` 调用:`locator` / `reviewer` / `arbiter` | 固定 JSON 决策(见 §6) |
+| IMPL | `workflow` 调用:`implementer` | patch(私有副本的 diff) |
+| INTEGRATE | 单一集成者 | main 上的提交 + 账本行 |
+
+```
+INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → RATCHET → DRY-EPOCH
+```
+- **LOCATE**:两个不同模型并行给落点(`path:line`)与一条验证命令;一致直通,不一致交 arbiter。
+- **VERIFY**:在**全新副本**上应用 patch,依次:编译受影响 `.cx` → gate → `tools/affected.cx --run` → 声明了的字节等价回归。失败不进 REVIEW;失败输出作为上下文退回 IMPL,最多 2 轮,再败 → BLOCKED 上报。
+- **REVIEW**:输入=patch+VERIFY 输出;查越界、未验证声明、同类漏同步(grep 全部读写点)。只能给 PASS/FAIL+证据,无权批准。
+- **INTEGRATE**:`commit-own` 只带 domain;提交说明写做了什么,不写"更新计划"。
+- **RATCHET**:提交后立即 `tools/ratchets.cx`;红则新提交 revert(不用 reset),账本 BLOCKED。
+- **DRY-EPOCH**:构造输入(`tools/ exec/ cx/ src/ seed/`)有新提交 → 私有根预演慢车道;红则回到最近改该文件的工作项,置 REOPENED。
+
+## 6 模型节点的输出契约(工具侧强制;不符退回重答一次,再不符记 INVALID)
+```json
+{"decision":"一句","why":["path:line 或命令输出"],"rejected":[{"option":"","reason":""}],
+ "risk":"一句","confidence":0.0,"verified":["实际运行/读到的"],"inferred":["未验证的推断"],
+ "next":["可执行命令"],"needs":"需要调用者决定的事,无则空"}
+```
+`verified` 与 `inferred` 分开;没运行过的只能放 `inferred`;总长默认 ≤1200 字符;不含过程叙述。
+
+## 7 提交与集成规矩
+- 提交请求必须含:改了哪些路径、**执行了什么、输出什么**。只有 `git apply --check`/只编译,不算验证。
+- 共享表(`tests/batches.tsv`、`tests/coverage.tsv`、`tests/toolsloc.tsv`)用 `tools/commit-own.cx --keyed`,只带自己的行。
+- 纯文档不单独提交,随下一个实质提交带上;文档提交后不重跑棘轮。
+- `release-build` 取源码用 `git archive HEAD`:没提交的改动不会进构造结果。
+- 构造链每步有硬 bound;构造运行期间不并行跑批次(并行负载会造成假超时)。
+
+## 8 并发与冲突
+读并行、写按 domain 串行;冲突域只有三类:工作树、候选/材料身份、harness。runner 持 `work/locks.tsv`(domain→占用项)。
+
+## 9 度量与淘汰
+每次 JUDGE/IMPL 记录 token、时间、是否 INVALID、`verified` 条数;按"角色×模型"统计产出(DONE 数/消耗),低产组合降级或淘汰。
+
+## 10 编排者的职责
+写工作项与 gate、回答 `needs`、裁定 BLOCKED、维护 roadmap。不逐窗口转述、不手工转抄状态。人工介入点:gate 设计、BLOCKED 裁决、发布第 7 步(签名/Draft/Latest/公开)、花钱、对外发送。
