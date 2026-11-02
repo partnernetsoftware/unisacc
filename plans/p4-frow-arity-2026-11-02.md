@@ -29,7 +29,7 @@ audit P3 rc=0 ver=3       <- 同内容 P3 正常
 
 即：产品运行时能解，结构审计判坏。
 
-## 四处读方的位置与错法
+## 五处读方的位置与错法
 
 | 文件:行 | 现状 | 应为 |
 |---|---|---|
@@ -37,9 +37,20 @@ audit P3 rc=0 ver=3       <- 同内容 P3 正常
 | `cx/runtime/packagestruct.cx:72`（`key_conflict`） | 同样 `(ver >= 4 ? 5 : 3)` | `6` |
 | `tools/package-refresh.cx:53` | `if((fw!=3&&fw!=5) …)`，但本文件 `:54` 自己写的是 6 个 token 的 `"F %lu %lu %lu 0 0"` | 按 `pver`（`:47` 已有）分叉：P3→3，P4→6 |
 | `tools/cxlib/rebuildcontext.cx:65` | `(fw!=3&&fw!=5)` 且 `if(ver>=4&&fw!=5)` | P4→6 |
-| `tools/cxlib/streampack.cx:39` | `(n!=3&&n!=5)`，而 `:30` 已接受 `P 4` 头 | P4→6 |
+| `tools/cxlib/streampack.cx:39` | `(n!=3&&n!=5)`，而 `:30` 已接受 `P 4` 头 | P4→6，**且必须同时改 `:44`**，见下 |
 
 `package-refresh` 这条最能自证：**它自己写 6 个 token，却只肯读 3 或 5**，永远读不回自己的输出。
+
+### streampack 不能只放宽字段数（cc 已采纳方案 1）
+
+`:44` 输出头硬编码 `"P 3 1 1 %d\n"`，而资源段是 `memcpy(body+hn+a->bytes, PK+resource_at, resource_n)` 逐字节照搬。
+若只把 `:39` 放宽到收 6 词，P4 源的 6 词 F 行就被塞进声明为 `P 3` 的包，`cx_sha256_hex` 只算哈希不校验结构，**静默产出无人能解的坏包**。
+
+改法（已采纳）：`:44` 改为 `"P %d 1 1 %d\n", ver, nr`，`ver` 取源包头版本。M 行在 `ver>=3` 下都是 5 词，P3/P4 通用，资源段照搬即自洽。
+- P3 源 → 输出 `P 3`，逐字节与旧行为相同；
+- P4 源 → 输出 `P 4`，`cxpk_decode` 与 `cxps_audit` 同时接受。
+
+未采纳的备选：把资源行重写成 3 词——`codec==1` 的行必须解压才能重写，多一段 inflate，收益为负。
 
 ## 影响面
 
@@ -49,11 +60,18 @@ audit P3 rc=0 ver=3       <- 同内容 P3 正常
 
 ## 与第 3 项的关系
 
-cc 已把「P4 受理正向覆盖」列为第 3 项。**正向覆盖一旦按规范写（6 词行），会直接暴露本条**。所以第 3 项的交付应该包含：
+cc 已把本条定为**队列第 0 项**（先于原 1-5 项）。第 3 项的「P4 受理正向覆盖」依赖它：正向用例一按规范写（6 词行），就会直接暴露本条。
 
-1. 修上面四处字段数（这是被测行为的前提，不是新功能）；
-2. 正向用例：读侧（`check-package-decode`）加 6 词 `codec=0` 与 `codec=1` 两行样本；结构侧（`check-packagestruct`）加合法 P4 `cxps_audit rc=0` 与 `cxps_models` 命中；写侧（`release-build rb_p3`）小样本双模式（`--compress-resources` / `--no-compress-resources`）比对包头与再解码；
-3. 一条反向用例：5 词 P4 行必须被拒（固定住「6 才是规范」这一点，防止再被改回去）。
+第 0 项交付清单（cc 裁定）：
+
+1. 修上表五处字段数（含 `streampack:44` 保版本）；
+2. `check-packagestruct`：6 词合法 P4 → `audit rc=0 ver=4`；5 词 P4 → `rc=6`；
+3. `check-package-decode`：6 词 `codec=0`（`rawlen==len`）与 `codec=1` 各一例，断言 `rawlen/codec/crc`；
+4. 新增独立检查 `tools/check-streampack.cx`（`tools/register.cx` 登记批次）：
+   - P3 源 → 输出与旧行为逐字节相同（头 `P 3`）；
+   - P4 源 → 输出头 `P 4`，且产物同时被 `cxpk_decode` 与 `cxps_audit` 接受；
+5. P3 路径逐字节不变（现有 P3 用例回归：`check-packagestruct.cx:51/52/69/70/101`、`check-cx-library-build.cx:83`、`check-package-decode.cx` 的 `P 1` 样本）；
+6. 验证：`tools/affected.cx --files … --run`、`tools/ratchets.cx`（7/7）、`entry-build` 出新候选但**不自行安装**，先报 cc 与 omp-bdy。
 
 ## 备注
 
