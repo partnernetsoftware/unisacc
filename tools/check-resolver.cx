@@ -1,0 +1,166 @@
+/* check-resolver.cx — B1 gate：resolver 按 manifest 取字节并校验 sha256，
+ * 外部目录与内嵌 pack 两种来源行为一致；篡改/缺文件具名拒绝。
+ *
+ * 用法：sh ./unisacc.com tools/check-resolver.cx
+ * 输入：out/epoch-2026-11-02/p3/p3-package.bin（内嵌 pack）。
+ *
+ * 断言：
+ *   pack-source-sha-ok        内嵌 pack 解析 kernel/x86_64、hdr/stdio.h、predefines/lnx/x86_64 字节 sha 与 manifest 一致
+ *   dir-source-equals-pack    外部目录(按 name 落盘)与 pack 解析逐字节相同
+ *   tampered-dir-rejected     外部目录替换文件内容 → sha256 拒绝具名
+ *   missing-manifest-row      名称不在 manifest → 具名拒绝
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use cxlib.resolver
+
+static int failed;
+static void ck(int ok,const char *name){
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+
+/* 内联 manifest：3 个代表资源（raw kernel、deflate stdio、raw predefines）。 */
+static const char *manifest_text =
+    "kernel/x86_64\tbase\tx86_64\t32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97\t7144\n"
+    "hdr/stdio.h\tresource\t\tb0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046\t73454\n"
+    "predefines/lnx/x86_64\tresource\tx86_64\ta148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2\t57\n";
+
+/* 写 bytes 到 path（含父目录创建）。 */
+static int write_file(const char *path, const unsigned char *b, long n) {
+    int fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, b, n) || sy_close(fd)) return -1;
+    return 0;
+}
+
+/* 递归建目录路径（父目录）。 */
+static int mkdirs(const char *path) {
+    char p[4096];
+    long n = tx_len(path, 4095);
+    long i;
+    if (tx_copy(p, sizeof p, path, n)) return -1;
+    for (i = 1; i < n; i++) {
+        if (p[i] == '/') { p[i] = 0; if (sy_mkdir(p, 0755) && !sy_exists(p)) return -1; p[i] = '/'; }
+    }
+    return 0;
+}
+
+int main(int argc,char **argv){
+    char root[4096],pkg[4400],dir[4400],ext[4400],path[4400],why[512];
+    RsvResolver rs; RsvManifest man;
+    if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
+    if(cx_fmt(pkg,sizeof pkg,"%s/out/epoch-2026-11-02/p3/p3-package.bin",root))return 2;
+    if(cx_fmt(dir,sizeof dir,"%s/out/b1-resolver",root))return 2;
+    if(cx_fmt(ext,sizeof ext,"%s/ext",dir))return 2;
+
+    /* 清干净工作目录 */
+    { sy_stat_t st; if(sy_stat(dir,&st)==0) cx_rmtree(dir); }
+    if(mkdirs(ext))return 2;
+
+    /* 解析 manifest */
+    memset(&man,0,sizeof man);
+    if(rsv_parse_manifest(manifest_text,(long)strlen(manifest_text),&man,why,sizeof why)!=3){
+        ck(0,"manifest-parse");return 1;
+    }
+
+    memset(&rs,0,sizeof rs);
+    rs.manifest=&man;
+    if(tx_copy(rs.pack,sizeof rs.pack,pkg,tx_len(pkg,4095))){ck(0,"pack-path");return 1;}
+    /* UNISA_HOME 指向外部目录 */
+    if(tx_copy(rs.home,sizeof rs.home,ext,tx_len(ext,4095))){ck(0,"home-path");return 1;}
+
+    /* 1. pack 来源解析 + sha 校验（home 为空，只走 pack） */
+    {
+        const char *names[3]={"kernel/x86_64","hdr/stdio.h","predefines/lnx/x86_64"};
+        const char *kinds[3]={"base","resource","resource"};
+        const char *archs[3]={"x86_64","","x86_64"};
+        int ok=1;
+        for(int i=0;i<3;i++){
+            long n; char w[512];
+            unsigned char *b=rsv_resolve(&rs,names[i],kinds[i],archs[i],&n,w,sizeof w);
+            if(!b){ok=0;break;}
+            free(b);
+        }
+        ck(ok,"pack-source-sha-ok");
+    }
+
+    /* 2. 外部目录来源与 pack 一致（逐字节）：
+       两个独立 resolver 实例，一个只配 pack，一个只配 home，互不干扰。 */
+    {
+        RsvResolver rpack, rdir;
+        long n1,n2; char w1[512],w2[512];
+        unsigned char *bpack, *bdir;
+        /* pack 实例：只配 pack，home 空 */
+        memset(&rpack,0,sizeof rpack);
+        rpack.manifest=&man;
+        tx_copy(rpack.pack,sizeof rpack.pack,pkg,tx_len(pkg,4095));
+        /* dir 实例：只配 home，pack 空 */
+        memset(&rdir,0,sizeof rdir);
+        rdir.manifest=&man;
+        tx_copy(rdir.home,sizeof rdir.home,ext,tx_len(ext,4095));
+        /* pack 取 hdr/stdio.h → 写到 home */
+        bpack=rsv_resolve(&rpack,"hdr/stdio.h","resource","",&n1,w1,sizeof w1);
+        if(!bpack){ck(0,"pack-take-for-compare");}
+        else {
+            int ok=0;
+            if(cx_fmt(path,sizeof path,"%s/hdr/stdio.h",ext)){free(bpack);ck(0,"path");}
+            else if(mkdirs(path)||write_file(path,bpack,n1)){free(bpack);ck(0,"write-home");}
+            else {
+                free(bpack);
+                bdir=rsv_resolve(&rdir,"hdr/stdio.h","resource","",&n2,w2,sizeof w2);
+                /* 重新取 pack 基准 */
+                bpack=rsv_resolve(&rpack,"hdr/stdio.h","resource","",&n1,w1,sizeof w1);
+                ok = bdir && bpack && n1==n2 && memcmp(bdir,bpack,(size_t)n1)==0;
+                free(bdir); free(bpack);
+            }
+            ck(ok,"dir-source-equals-pack");
+        }
+        rsv_release(&rpack);
+        rsv_release(&rdir);
+    }
+
+    /* 3. 篡改外部目录文件 → 拒绝具名 */
+    {
+        if(cx_fmt(path,sizeof path,"%s/hdr/stdio.h",ext))return 2;
+        int fd=sy_open(path,O_WRONLY|O_CREAT,0644);
+        if(fd<0){ck(0,"tamper-open");}
+        else{
+            int rfd=sy_open_read(path);
+            if(rfd<0){ck(0,"tamper-read");sy_close(fd);}
+            else{
+                sy_stat_t st; sy_fstat(rfd,&st);
+                unsigned char *buf=malloc(st.size>0?(size_t)st.size:1);
+                sy_read_full(rfd,buf,st.size); sy_close(rfd);
+                buf[0]^=0xff;
+                sy_write_all(fd,buf,st.size); sy_close(fd);
+                free(buf);
+                /* 只配 home 的实例走目录来源，应 sha256 拒绝 */
+                RsvResolver rdir; memset(&rdir,0,sizeof rdir);
+                rdir.manifest=&man;
+                tx_copy(rdir.home,sizeof rdir.home,ext,tx_len(ext,4095));
+                long n2; char w[512];
+                unsigned char *r=rsv_resolve(&rdir,"hdr/stdio.h","resource","",&n2,w,sizeof w);
+                ck(r==0 && strstr(w,"sha256 mismatch"),"tampered-dir-rejected");
+                if(r) free(r);
+                rsv_release(&rdir);
+            }
+        }
+    }
+
+    /* 4. 名称不在 manifest → 具名拒绝 */
+    {
+        long n; char w[512];
+        unsigned char *r=rsv_resolve(&rs,"kernel/arm64","base","arm64",&n,w,sizeof w);
+        ck(r==0 && strstr(w,"not in manifest"),"missing-manifest-row");
+        if(r) free(r);
+    }
+
+    rsv_release(&rs);
+    rsv_manifest_release(&man);
+    printf("RESOLVER\tfailed=%d\n",failed);
+    return failed?1:0;
+}
