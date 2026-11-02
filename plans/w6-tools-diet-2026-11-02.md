@@ -19,7 +19,7 @@
 | `check-cx-sys-fs.cx` | 67 | 0 | 0 | 0 | 归档；README 注明由 `check-cx-sys-*.cx` 覆盖 |
 | `deadloop-guard.cx` | 33 | 0 | 0 | 0 | 归档；仅盘点文档引用 |
 
-## B. 清 check 表后可归档（21 文件；1,128 行；2026-11-02 前 7 个已归档，余 14）
+## B. 清 check 表后可归档（21 文件；1,128 行；2026-11-02 已归档 19，撤回 2）
 
 | 文件 | 行 | check |
 |---|---:|---|
@@ -45,7 +45,7 @@
 | `tapelink-candidate-install.cx` | 34 | cxraw,cxlibc |
 | `ucn-identity-tables.cx` | 82 | cxraw,cxlibc |
 
-注意：`ucn-identity-tables.cx` 同时是 `exec/parse2/ucnidentity-*.tsv` 的生成器；归档时保留生成物，或把生成器移到 `archive/` 并在 README 记明不可复现。
+注意：`ucn-identity-tables.cx` 同时是 `exec/parse2/ucnidentity-*.tsv` 的生成器；`runtime-budget-cases.cx` 被 `tests/resources-domain-matrix.tsv` 引用，二者均**不归档**（2026-11-02 已撤回）。
 
 ## C. 源码引用，先改调用方（1 文件；66 行）
 
