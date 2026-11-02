@@ -256,7 +256,7 @@ no source/token data. `units.py --locations` reuses the static-declaration
 scanner, preserving physical qualifiers and multiline adjacent string tokens.
 Its output is:
 
-- Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..64).
+- Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..128).
 - In unit order: LE32 filename byte length, filename bytes, LE32 UNIPP1 length,
   and the exact UNIPP1 envelope (source, splice map and include map).
 - Typed token stream. Each prefix is `@`, LE32 unit index, LE32 source offset,

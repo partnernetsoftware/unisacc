@@ -249,7 +249,7 @@ source path and fresh runtime state. Thus macros, include guards and header
 selection do not leak between files. It frames each resulting byte stream as
 LE32 length plus bytes, without inspecting a token or rewriting a name.
 `build/gen.py parse2/units` (exec/parse2/units-manifest.tsv) constructs the shared framing/static-isolation network. It
-validates up to 64 frames, scans file-static declarations, preserves typed
+validates up to 128 frames, scans file-static declarations, preserves typed
 token bytes and supplies the product's `__uN` suffix for later units. This is
 a hand-written declaration rule compiled into a network, not a gold-table
 rule or a reduction in generator code. Inline aggregate static specifiers
