@@ -1,0 +1,72 @@
+/* check-archive-refs: every path in archive/ARCHIVE.tsv must be gone from the
+ * live tree and must not be referenced by a live file.
+ * Manifest format: one original repo-relative path per line, '#' comments.
+ * A row fails when the path is still tracked at its old location (git ls-files)
+ * or when git grep finds it in tools/ tests/ src/ cx/ prd.md AGENTS.md
+ * WORKFLOW.md work/ roles/. Only reads; the answer comes from git itself so the
+ * tool cannot drift from the index.
+ *   sh ./unisacc.com tools/check-archive-refs.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define CAP (1L << 16)
+static char out[CAP];
+static int failed, rows;
+
+static int git(char **av) {
+    char *argv[10]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    argv[i++] = "git";
+    for (int k = 0; av[k] && i < 9; k++) argv[i++] = av[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (n < CAP - 1 && (r = sy_read(ofd, out + n, CAP - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int first_line(const char *s, char *dst, long cap) {
+    long n = tx_len(s, CAP), i = 0;
+    while (i < n && s[i] != '\n' && i < cap - 1) { dst[i] = s[i]; i++; }
+    dst[i] = 0;
+    return i;
+}
+
+int main(void) {
+    long mn = 0;
+    char *m = cx_read("archive/ARCHIVE.tsv", &mn);
+    if (!m) { printf("FAIL\tarchive-refs.manifest-missing\nARCHIVE_REFS\tfailed=1\n"); return 1; }
+    long at = 0;
+    while (at < mn) {
+        long e = at; while (e < mn && m[e] != '\n') e++;
+        if (e > at && m[at] != '#') {
+            char p[512]; long pl = e - at < 511 ? e - at : 511, i;
+            for (i = 0; i < pl; i++) p[i] = m[at + i];
+            p[pl] = 0;
+            rows++;
+            char *a1[3]; a1[0] = "ls-files"; a1[1] = "--"; a1[2] = 0;
+            char *a1b[4]; a1b[0] = "ls-files"; a1b[1] = "--"; a1b[2] = p; a1b[3] = 0;
+            (void)a1;
+            git(a1b);
+            int still = out[0] != 0;
+            char *a2[8]; a2[0] = "grep"; a2[1] = "-l"; a2[2] = "-F"; a2[3] = p;
+            a2[4] = "--"; a2[5] = "tools"; a2[6] = "tests"; a2[7] = 0;
+            git(a2);
+            char who[512]; first_line(out, who, sizeof who);
+            int refd = out[0] != 0;
+            if (still || refd) {
+                failed++;
+                printf("FAIL\tarchive-refs.%s\t%s%s%s\n", p, still ? "still-tracked " : "", refd ? "referenced-by:" : "", who);
+            }
+        }
+        at = e + 1;
+    }
+    free(m);
+    printf("ARCHIVE_REFS\trows=%d\tfailed=%d\n", rows, failed);
+    return failed ? 1 : 0;
+}
