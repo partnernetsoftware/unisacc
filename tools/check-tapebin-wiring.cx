@@ -1,0 +1,112 @@
+#pragma unisa use mem.heap
+#pragma unisa use compiler.tapegate
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+/* Does the product's -S --tapebin actually write UTAPEBIN? (C44-TAPEBIN-01 step 2)
+ *
+ *   sh ./unisacc.com tools/check-tapebin-wiring.cx -- ROOT
+ *
+ * Runs the same source twice: once as a text tape (-S -o FILE) and once through
+ * the encoder (-S --tapebin -o FILE.tapebin). The second must start with the
+ * UTAPEBIN magic, decode through the tapegate reader, and recover exactly the
+ * text the first run wrote. That is the end-to-end statement: the wiring reaches
+ * the encoder and the encoder agrees with the writer's own text.
+ *
+ * The output name must not end in ".s": cxt_object treats a ".s" output as an
+ * assembly-output request and refuses it on this route (cx/driver/route.cx:57).
+ */
+static char root[4096], work[4400], com[4400], bound[4400], src[4400];
+static int failures;
+
+static void die(const char *s) { sy_eprintf("tapebin-wiring: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\t%s\n", name);
+    else { failures++; sy_printf("FAIL\t%s\n", name); }
+}
+static char *readf(const char *p, size_t *n) { char *b = cx_read(p, n); return b; }
+
+int main(int argc, char **argv) {
+    np_result r;
+    char why[512];
+    char line[4400];
+    char tpath[4400], bpath[4400];
+    char *v[16];
+    int i;
+    unsigned char *bin;
+    size_t binn;
+    char *text;
+    size_t textn;
+    int minor, nsec, end, aligned, bad;
+    long long roff, rlen, rcnt;
+    int soff[4], slen[4], scnt[4];
+    char *dec;
+    int decn;
+    if (argc < 2) die("usage: ROOT");
+    if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+    if (cx_fmt(com, (size_t)sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, (size_t)sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (sy_exists(root) != 1) die("root");
+    if (cx_fmt(work, (size_t)sizeof work, "%s/out/tapebin-wiring", root)) die("work");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("clean");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(src, (size_t)sizeof src, "%s/t.cx", work)) die("src");
+    if (cx_write(src, "int main(void){ return 7; }\n", 28)) die("write");
+    if (cx_fmt(tpath, (size_t)sizeof tpath, "%s/t.tape", work)) die("tpath");
+    if (cx_fmt(bpath, (size_t)sizeof bpath, "%s/t.tapebin", work)) die("bpath");
+
+    /* 1. text tape, the reference text. */
+    i = 0;
+    v[i++] = bound; v[i++] = "40"; v[i++] = "sh"; v[i++] = com;
+    v[i++] = "-S"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = src; v[i++] = "-o"; v[i++] = tpath; v[i] = 0;
+    if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, "text-tape-rc0");
+    np_free(&r);
+    text = readf(tpath, &textn);
+    ck(text && textn > 0, "text-tape-nonempty");
+
+    /* 2. the same source through --tapebin. */
+    i = 0;
+    v[i++] = bound; v[i++] = "40"; v[i++] = "sh"; v[i++] = com;
+    v[i++] = "-S"; v[i++] = "--tapebin"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = src; v[i++] = "-o"; v[i++] = bpath; v[i] = 0;
+    if (np_run(v, root, 0, 35, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, "tapebin-rc0");
+    if (r.errn > 0 && r.err) { long k = 0; while (k < (long)r.errn && k < (long)sizeof line - 1) { line[k] = r.err[k]; k = k + 1; } line[k] = 0; sy_printf("NOTE\tstderr\t%s", line); }
+    np_free(&r);
+
+    bin = (unsigned char *)readf(bpath, &binn);
+    ck(bin && binn >= 136, "tapebin-present");
+    if (!bin || binn < 136) { sy_printf("TAPEBIN_WIRING\tfailed=%d\n", failures); return failures ? 1 : 0; }
+    ck(bin[0] == 'U' && bin[1] == 'T' && bin[2] == 'A' && bin[3] == 'P' &&
+       bin[4] == 'E' && bin[5] == 'B' && bin[6] == 'I' && bin[7] == 'N', "magic");
+
+    /* 3. decode and compare with the text tape. */
+    minor = 0; nsec = 0; bad = 0;
+    if (tb2_magic(bin, (int)binn) || tb2_fixed(bin, (int)binn, &minor) || tb2_nsec(bin, (int)binn, &nsec)) bad = 1;
+    if (!bad) {
+        end = 64 + 24 * nsec;
+        i = 0;
+        while (i < nsec && !bad) {
+            aligned = tb2_align(end);
+            if (aligned < 0 || tb2_row(bin, (int)binn, i, aligned, &roff, &rlen, &rcnt)) { bad = 1; break; }
+            soff[i] = (int)roff; slen[i] = (int)rlen; scnt[i] = (int)rcnt;
+            end = (int)roff + (int)rlen;
+            i = i + 1;
+        }
+    }
+    ck(!bad, "sections");
+    dec = 0; decn = 0;
+    if (!bad && tb2_text(bin, (int)binn, minor, soff, slen, scnt, &dec, &decn)) bad = 1;
+    ck(!bad && dec && decn > 0, "decode");
+    ck(dec && text && decn == (int)textn && (decn == 0 || memcmp(dec, text, (size_t)decn) == 0), "text-roundtrip");
+    if (dec) mm_free(dec);
+    if (text) mm_free(text);
+    mm_free(bin);
+    sy_printf("TAPEBIN_WIRING\tfailed=%d\n", failures);
+    return failures ? 1 : 0;
+}
