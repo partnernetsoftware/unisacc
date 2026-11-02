@@ -17,4 +17,12 @@
 | `check-cx-unit-graph.cx` | `tools/check-cx-unit-graph.cx` | `ffb7f9b6202dec56e616fc90e3804e93fc6045290df2ba8e19dd66939a339492` |
 | `check-driver-target-long.cx` | `tools/check-driver-target-long.cx` | `3e2425f00de895d65c9a74372c8715e0b68e358fd1c2a051145d490876d88ee8` |
 
+| `cxproc_ask.cx` | `tools/cxproc_ask.cx` | `8a3292780160963d2d031749edc7dbe1f346b2b0056db631ff30835b2f1c26d9` |
+| `driverdiag-candidate-install.cx` | `tools/driverdiag-candidate-install.cx` | `00351b53a773ff1bf612bc115ff3155c292190d8730a0efbf4cc30cf7b940402` |
+| `fifo-candidate-install.cx` | `tools/fifo-candidate-install.cx` | `c4e35c81e85aae6666b94b45416b8310733a2a429e75bfcd5bac6a70bc9d49f6` |
+| `fsize-exec.cx` | `tools/fsize-exec.cx` | `889b38cbf0917c6fe88c56102e013a0d4e2154eebe86ccf9c956c609098e3f40` |
+| `output-file-cases.cx` | `tools/output-file-cases.cx` | `8aed0391123c1cbbe5f58e4fd45d70b95de8210746950876a24c71f2de3d1157` |
+| `p3-member-full.cx` | `tools/p3-member-full.cx` | `5161aa7d709894f136e6619624134f8b73fe56e4bdd9fbeb672aa3260d2b0c7f` |
+| `pp-built-private.cx` | `tools/pp-built-private.cx` | `96aae0e26b38e50c40385b429b7a56a229e43c54158d9374de17a4baf507841e` |
+
 **更正（2026-11-02）**：`tools/precommit.cx` 是 `.git/hooks/pre-commit` 的运行时入口，已由 cc 还原到 `tools/`，不在本归档。归档前必须扫描 `.git/hooks`、CI、systemd、cron 与脚本入口。
