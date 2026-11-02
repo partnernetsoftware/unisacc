@@ -187,3 +187,5 @@ hex   = sha256(canon)
   缓存按 `(path, mtime, size)` 记忆化——但那要先证明是热点,不预先做。
 - **`candidate` 与 `{candidate}` 占位符**:`{candidate}` 仍应是**启动器路径**(给 `sh` 用),
   只有"身份"换成集合哈希。两者不能混。
+## 附:为什么 `tests/library-abi.cx` 没改
+`tests/library-abi.cx:58,76` 的两次 `digest(product,…)` 哈希的是一个**由参数传入的候选**,
