@@ -10,15 +10,14 @@
 
 ## 结论
 
-严格按 `src + batch + check` 全为 0：**3 个**（A 档，168 行），但都有 md 引用，**可无条件归档 0 个**。盘点表的 25 个“完全无引用”候选实际有 22 个被 check 表登记（含 source-job-wave）、3 个仅文档出现。因此归档必须分三档，先清 check 表再移动。
+严格按 `src + batch + check` 全为 0：**3 个**（168 行），但都有 md 引用，**可无条件归档 0 个**；其中 `precommit.cx` 是 `.git/hooks/pre-commit` 运行时入口，**不归档**。有效 A 档为 2 个/100 行。盘点表的 25 个“完全无引用”候选实际有 22 个被 check 表登记（含 source-job-wave）、3 个仅文档出现（含 precommit 运行时入口）。
 
-## A. 可直接归档（仅文档引用；168 行）
+## A. 可归档（仅文档引用；2 个/100 行；2026-11-02 已移至 `archive/tools-w6/`）
 
 | 文件 | 行 | src | batch | check | 处置 |
 |---|---:|---:|---:|---:|---|
 | `check-cx-sys-fs.cx` | 67 | 0 | 0 | 0 | 归档；README 注明由 `check-cx-sys-*.cx` 覆盖 |
 | `deadloop-guard.cx` | 33 | 0 | 0 | 0 | 归档；仅盘点文档引用 |
-| `precommit.cx` | 68 | 0 | 0 | 0 | 归档；已由 `commit-own.cx` 取代 |
 
 ## B. 清 check 表后可归档（21 文件；1,128 行）
 
@@ -86,4 +85,4 @@ tools/{mem,runtime,sys,sysx,text,workspace} -> cx/ 或 ext/
 
 ## G. 首批建议
 
-先做 A 档 3 文件（168 行，风险最低）；B 档按 `p3-member-full`(421)、`cxproc_ask`(92)、`pp-private-install`(26) 分批，每批清 check 表并保留归档证据。C/D 档不动。所有移动只走 `archive/`，不直接删除。
+先做 A 档 2 文件（100 行，风险最低；precommit 保留）；B 档按 `p3-member-full`(421)、`cxproc_ask`(92)、`pp-private-install`(26) 分批，每批清 check 表并保留归档证据。C/D 档不动。所有移动只走 `archive/`，不直接删除。

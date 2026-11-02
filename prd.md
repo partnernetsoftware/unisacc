@@ -70,7 +70,8 @@
 | 普查红批次 | `sh ./unisacc.com tools/census.cx -- $PWD out/census` | 无材料批次逐个实跑找回归 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.43.tsv --check` | R 行理由 + W 行豁免 |
 | 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
-| 七个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape |
+| 九个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc |
+| tools 行数只降不升 | `sh ./unisacc.com tests/toolsloc.cx -- --check`（`--write` 只下调） | tracked regular `tools/*.cx` 总行数，基线 `tests/toolsloc.tsv`；新增 tool 必须先改基线并经 cc 批准 |
 | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
