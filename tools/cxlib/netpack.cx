@@ -40,9 +40,10 @@
    Deletions: none here (callers remove their mkdtemp trees through cxlib.pytempfile's ptf_rmtree).
    No exported objects or macros (CXIF v0). */
 #pragma unisa module netpack
+#pragma unisa use reaper
 
 typedef struct np_buf { char *p; size_t n, cap; } np_buf;
-typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; } np_result;
+typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; } np_result;
 
 /* ---- byte buffers -------------------------------------------------------------------------------------------- */
 void np_put(np_buf *b, const char *s, size_t n) {
@@ -750,11 +751,12 @@ done:
 }
 
 /* ---- subprocess.run(capture_output=True) ---------------------------------------------------------------------- */
-void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; }
+void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; r->residue = 0; }
+int np_subreaper(void) { return rp_subreaper(); }   /* the caller makes orphans its children before np_run */
 int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
     pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
-    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0;
+    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0;
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
     fcntl(pf[1], F_SETFD, FD_CLOEXEC);
     pid = fork();
@@ -805,8 +807,11 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         if (!open_o && !open_e && !reaped) { waitpid(pid, &st, 0); reaped = 1; break; }
         (void)got;
         if (idle >= (long)secs * 1000) {   /* 1 ms ticks, counted with or without output */
-            size_t i;
-            kill(-pid, SIGKILL); kill(pid, SIGKILL); waitpid(pid, &st, 0);
+            size_t i; char rep[256];
+            int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
+            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
+            res->residue = sv;
+            { int w; do { w = waitpid(pid, &st, WNOHANG); } while (w < 0 && errno == EINTR); }
             if (open_o) close(po[0]);
             if (open_e) close(pe[0]);
             free(o.p); free(e.p);
@@ -815,6 +820,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
                 for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
                 np_puts(&l, "]' timed out after ");
                 snprintf(t, sizeof t, "%d seconds", secs); np_puts(&l, t);
+                if (sv > 0) { np_puts(&l, " ("); np_puts(&l, rep); np_puts(&l, " survived)"); }
                 snprintf(why, wl, "%s", l.p); free(l.p);
             }
             return -1;
