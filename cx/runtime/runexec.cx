@@ -1,5 +1,6 @@
 #pragma unisa module runexec
 #pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use sys.posix
 #pragma unisa use source_frame
 /* Execute gate and status lines. No include.
@@ -83,6 +84,46 @@ int ex_budget(int product, const char *budget, long long fallback,
     *steps = parsed;
     if (why && cap > 0) why[0] = 0;
     return 0;
+}
+
+/* The product half of the budget gate: the driver answers UNISA_MAXSTEPS with
+   this. A positive decimal within range becomes the budget; no value keeps the
+   historical fallback; anything else writes the documented line here and
+   returns a negative, and the caller turns that into status 2 without running
+   the model. No unit here calls libc or leaves on its own. */
+static int ex_dec(const char *s, long long *out) {
+    long long v;
+    int i;
+    if (!s || !s[0]) return 0;
+    v = 0;
+    i = 0;
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        if (v > (9223372036854775807LL - (s[i] - '0')) / 10) return 0;
+        v = v * 10 + (s[i] - '0');
+        i = i + 1;
+    }
+    if (v < 1) return 0;
+    *out = v;
+    return 1;
+}
+
+static long long ex_used;
+
+long long ex_budget_used(void) { return ex_used; }
+
+long long ex_budget_now(void) {
+    const char *e;
+    char why[160];
+    long long steps;
+    int r;
+    why[0] = 0;
+    e = sy_env("UNISA_MAXSTEPS");
+    if (e && !e[0]) e = 0;
+    r = ex_budget(0, e, 400000000000LL, ex_dec, &steps, why, (long)sizeof why);
+    if (r == 0) { ex_used = steps; return steps; }
+    if (why[0]) sy_eprintf("%s", why);
+    return 0 - 1;
 }
 
 static long ex_reason_n(const char *reason, int reason_n) {

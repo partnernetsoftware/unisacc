@@ -23,6 +23,14 @@
  *   4  ferror(stdout) is set      8  clearerr(stdout) clears it
  * Under /dev/full the exit code must be 15; on a normal stdout only bit 8 is
  * reachable, so a healthy run exits 8.
+ *
+ * Two further cases cover the same array on the other two write paths: fd 2 on
+ * /dev/full carries the same four bits (15), and a stream opened with fopen on
+ * /dev/full must report its failure where C says it happens. The 16 KiB write
+ * overflows the stdio buffer, so fwrite returns short and ferror is set (3);
+ * fflush then has nothing left to flush and answers 0, and clearerr clears the
+ * indicator - `cc` with glibc on this host answers 3 for the same program, so
+ * 3 is the reference answer, not 7.
  */
 static int g_fail;
 static void die(const char *s) { sy_eprintf("stdio: REFUSE %s\n", s); sy_exit(2); }
@@ -40,6 +48,36 @@ static const char *case_src =
     "    clearerr(stdout);\n"
     "    int d = ferror(stdout);\n"
     "    return (a == -1 ? 1 : 0) + (b == -1 ? 2 : 0) + (c != 0 ? 4 : 0) + (d == 0 ? 8 : 0);\n"
+    "}\n";
+
+/* the same four observations on fd 2 */
+static const char *case_stderr =
+    "int main(void) {\n"
+    "    int a = fputs(\"lost\", stderr);\n"
+    "    int b = fflush(stderr);\n"
+    "    int c = ferror(stderr);\n"
+    "    clearerr(stderr);\n"
+    "    int d = ferror(stderr);\n"
+    "    return (a == -1 ? 1 : 0) + (b == -1 ? 2 : 0) + (c != 0 ? 4 : 0) + (d == 0 ? 8 : 0);\n"
+    "}\n";
+/* an opened stream: the buffer overflow is where the write happens, so fwrite
+   comes back short and sets the indicator; nothing is left for fflush */
+static const char *case_file =
+    "int main(void) {\n"
+    "    static char big[16384];\n"
+    "    FILE *f = fopen(\"/dev/full\", \"w\");\n"
+    "    size_t n;\n"
+    "    int a, b, c, d;\n"
+    "    if (!f) return 100;\n"
+    "    memset((void *)big, 'x', sizeof big);\n"
+    "    n = fwrite(big, 1, sizeof big, f);\n"
+    "    a = (n < sizeof big) ? 1 : 0;\n"
+    "    b = ferror(f) ? 2 : 0;\n"
+    "    c = (fflush(f) == -1) ? 4 : 0;\n"
+    "    clearerr(f);\n"
+    "    d = ferror(f) ? 8 : 0;\n"
+    "    fclose(f);\n"
+    "    return a + b + c + d;\n"
     "}\n";
 
 int main(int argc, char **argv) {
@@ -91,6 +129,45 @@ int main(int argc, char **argv) {
     if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
     ck(r.rc == 8, "normal-stdout-clean");
     if (r.rc != 8) sy_printf("NOTE\texit\t%d\n", r.rc);
+    np_free(&r);
+
+    /* the same four observations on fd 2, on /dev/full */
+    if (cx_fmt(sp, sizeof sp, "%s/case2.c", work)) die("case2");
+    if (cx_fmt(img, sizeof img, "%s/case2.img", work)) die("img2");
+    { int fd = sy_open(sp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd < 0) die("write case2");
+      if (sy_write_all(fd, case_stderr, tx_len(case_stderr, 2048))) die("write case2");
+      sy_close(fd); }
+    i = 0;
+    v[i++] = bound; v[i++] = "50"; v[i++] = com;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = img; v[i++] = sp; v[i] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) die(why);
+    np_free(&r);
+    if (cx_fmt(cmd, sizeof cmd, "exec '%s' 2>/dev/full", img)) die("cmd2");
+    i = 0;
+    v[i++] = "sh"; v[i++] = "-c"; v[i++] = cmd; v[i] = 0;
+    if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+    ck(r.rc == 15, "stderr-full-four");
+    if (r.rc != 15) sy_printf("NOTE\tstderr\texit\t%d\n", r.rc);
+    np_free(&r);
+
+    /* an opened stream on /dev/full: the write happens at the buffer overflow */
+    if (cx_fmt(sp, sizeof sp, "%s/case3.c", work)) die("case3");
+    if (cx_fmt(img, sizeof img, "%s/case3.img", work)) die("img3");
+    { int fd = sy_open(sp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd < 0) die("write case3");
+      if (sy_write_all(fd, case_file, tx_len(case_file, 4096))) die("write case3");
+      sy_close(fd); }
+    i = 0;
+    v[i++] = bound; v[i++] = "50"; v[i++] = com;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = img; v[i++] = sp; v[i] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) die(why);
+    np_free(&r);
+    i = 0;
+    v[i++] = img; v[i] = 0;
+    if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+    ck(r.rc == 3, "file-write-short-and-error");
+    if (r.rc != 3) sy_printf("NOTE\tfile\texit\t%d\n", r.rc);
     np_free(&r);
 
     printf("CHECK_STDIO\tfailed=%d\n", g_fail);
