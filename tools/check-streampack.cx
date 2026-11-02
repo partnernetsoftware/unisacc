@@ -21,10 +21,11 @@ static void fr(void *p) { free(p); }
 static void ck(int ok, const char *n) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
 static void die(const char *s) { fprintf(stderr, "check-streampack: %s\n", s); exit(2); }
 static char *slurp(const char *p, size_t *n) { char *s = cx_read(p, n); if (!s) die(p); return s; }
+static void copy(char *d, size_t *at, const char *s, size_t n) { size_t i; for (i = 0; i < n; i++) d[(*at)++] = s[i]; }
 static void app(char *d, size_t cap, size_t *at, const char *s) {
     size_t n = strlen(s);
     if (*at + n >= cap) die("builder capacity");
-    memcpy(d + *at, s, n); *at += n;
+    copy(d, at, s, n);
 }
 static const char *names[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
 /* build(ver): synthetic source package; fills block offsets and resource offset */
@@ -48,7 +49,7 @@ static char *out_pkg(const char *file, size_t bn, size_t *pn) {
     if (n < bn + 16 || memcmp(s + n - 16, "UNIPKG1\n", 8)) die("output footer");
     *pn = n - bn - 16;
     if (*pn < 4 || s[bn] != 'P' || s[bn + 1] != ' ') die("output package start");
-    p = malloc(*pn); if (!p) die("alloc"); memcpy(p, s + bn, *pn); free(s); return p;
+    p = malloc(*pn); if (!p) die("alloc"); { size_t k = 0; copy(p, &k, s + bn, *pn); } free(s); return p;
 }
 int main(int argc, char **argv) {
     static char src[8192]; size_t model_at[7], res_at, srcn, bn, pn, i; char p[4096], t[256];
@@ -88,9 +89,7 @@ int main(int argc, char **argv) {
             hn = strlen(t);
             at = 0;
             { char *want = malloc(hn + blen + (srcn - res_at)); if (!want) die("alloc");
-              memcpy(want, t, hn);
-              memcpy(want + hn, src + model_at[i], blen);
-              memcpy(want + hn + blen, src + res_at, srcn - res_at);
+              { size_t k = 0; copy(want, &k, t, hn); copy(want, &k, src + model_at[i], blen); copy(want, &k, src + res_at, srcn - res_at); }
               { char label[128]; cx_fmt(label, sizeof label, "p%d.stream%zu-byte-exact", pass, i + 1);
                 ck(pn == hn + blen + (srcn - res_at) && !memcmp(pkg, want, pn), label); }
               free(want); }
@@ -100,7 +99,7 @@ int main(int argc, char **argv) {
         pkg = out_pkg(comfile, bn, &pn);
         { int v = 9, rc = cxps_audit((const unsigned char *)pkg, (long)pn, &v);
           cx_fmt(t, sizeof t, "p%d.audit-accepts", pass); ck(rc == 0 && v == pass, t); }
-        memset(&d, 0, sizeof d); d.allocate = al; d.release = fr;
+        d = (CxPackageDecode){0}; d.allocate = al; d.release = fr;
         { int rc = cxpk_decode(&d, (const unsigned char *)pkg, (long)pn);
           cx_fmt(t, sizeof t, "p%d.decode-accepts", pass); ck(rc == 0 && d.package.ver == pass && d.package.nr == 2, t); if (rc || d.package.ver != pass || d.package.nr != 2) fprintf(stderr, "decode rc=%d ver=%d nr=%d why=%s\n", rc, d.package.ver, d.package.nr, d.why ? d.why : "-");
           cx_fmt(t, sizeof t, "p%d.decode-resource-rows", pass);
