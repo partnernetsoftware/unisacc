@@ -1,0 +1,126 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* Do postfix operators survive a parenthesised operand? (C44-PARSE-POSTINC-01)
+ *
+ *   sh ./unisacc.com tools/check-postfix.cx -- ROOT
+ *
+ * CURRENTLY RED: p1-p3 fail with `expected ';'` on the installed product. This
+ * is C44-PARSE-POSTINC-01, a model-layer parse defect, and it is NOT registered
+ * as a batch - do not register it until the parse fix lands; register would
+ * roll it back. It lives in the tree red so the next person to touch postfix
+ * parsing has both sides of the answer ready. p4-p5 are green controls for
+ * C44-CX-SIZEOF-POSTFIX-01, closed at product 14b906fd.
+ *
+ * `*(p)++ = 0` is C99 6.5.2.4 + 6.5.3.1: postfix ++ binds tighter than the
+ * dereference, so the store goes through the old pointer. The model stopped
+ * the expression right after the `++` and answered `expected ';'` at the `=`,
+ * while `(*q)++` alone parsed - so the defect is the postfix operator on a
+ * parenthesised operand under a prefix dereference, not the parenthesised
+ * operand. The sizeof case is the same region: `sizeof ES[N].name` has to reach
+ * a subscript and a member after the sizeof keyword, including in an argument
+ * list.
+ *
+ * Every case is one whole program that returns 0 only when the construct
+ * parsed, ran and produced the C answer, so a compile error, a wrong value and
+ * a wrong pointer all land on the same named line.
+ */
+static int g_fail;
+static void die(const char *s) { sy_eprintf("postfix: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static char root[4096], com[4400], bound[4400], work[4400];
+static char why[512];
+static np_result r;
+
+static void put(const char *path, const char *text) {
+    int fd;
+    fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) die(path);
+    if (sy_write_all(fd, text, tx_len(text, 4096))) die(path);
+    sy_close(fd);
+}
+
+/* *(p)++ = 0 stores through the old pointer and then steps it */
+static const char *case_p1 =
+    "int main(void) {\n"
+    "    char v[2]; char *p = v;\n"
+    "    v[0] = 9; v[1] = 9;\n"
+    "    *(p)++ = 0;\n"
+    "    return (p == v + 1 && v[0] == 0) ? 0 : 1;\n"
+    "}\n";
+/* the value of *(p)++ is the old pointee, and p still steps */
+static const char *case_p2 =
+    "int main(void) {\n"
+    "    char v[2]; char *p = v; char c;\n"
+    "    v[0] = 5; v[1] = 6;\n"
+    "    c = *(p)++;\n"
+    "    return (c == 5 && p == v + 1) ? 0 : 1;\n"
+    "}\n";
+/* the reported shape: a parenthesised dereference inside the postfix operand */
+static const char *case_p3 =
+    "int main(void) {\n"
+    "    char v[2]; char *p = v; char **q = &p;\n"
+    "    v[0] = 9; v[1] = 9;\n"
+    "    *(*q)++ = 0;\n"
+    "    return (p == v + 1 && v[0] == 0) ? 0 : 1;\n"
+    "}\n";
+/* the original C44-CX-SIZEOF-POSTFIX-01 shape: a relational and a logical
+   expression, then sizeof with a variable subscript and a member, all in one
+   argument list. strlen("item") is 4 and every name is 180, so the expression
+   is 1 and the program returns 0. */
+static const char *case_p4 =
+    "typedef struct { char name[180]; } Entry;\n"
+    "static Entry ES[32];\n"
+    "static int N;\n"
+    "static int check(int v) { return v == 1 ? 0 : 1; }\n"
+    "int main(void) {\n"
+    "    return check(N < 32 && strlen(\"item\") < sizeof ES[N].name);\n"
+    "}\n";
+/* a bare sizeof argument: the value is the member array, 180 */
+static const char *case_p5 =
+    "typedef struct { char name[180]; } Entry;\n"
+    "static Entry ES[32];\n"
+    "static int check(int v) { return v == 180 ? 0 : 1; }\n"
+    "int main(void) {\n"
+    "    int i = 1;\n"
+    "    return check(sizeof ES[i].name);\n"
+    "}\n";
+
+static void one(const char *name, const char *src) {
+    char sp[4400];
+    char *v[8];
+    int i;
+    if (cx_fmt(sp, sizeof sp, "%s/%s.cx", work, name)) die("case");
+    put(sp, src);
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = sp; v[i] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, name);
+    if (r.rc != 0) sy_printf("NOTE\t%s\trc=%d\terr=%.300s\n", name, r.rc, r.err ? r.err : "");
+    np_free(&r);
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(root, 4096, argv[1], tx_len(argv[1], 4096))) die("root"); }
+    else if (sy_cwd(root, 4096) < 0) die("cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (cx_fmt(work, sizeof work, "%s/out/check-postfix", root)) die("work");
+    (void)sy_mkdir(work, 0755);
+    (void)bound;
+    one("p1-assign-through-postfix", case_p1);
+    one("p2-value-of-postfix", case_p2);
+    one("p3-postfix-of-parenthesised-deref", case_p3);
+    one("p4-sizeof-in-relation-argument", case_p4);
+    one("p5-sizeof-bare-argument", case_p5);
+    printf("CHECK_POSTFIX\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}

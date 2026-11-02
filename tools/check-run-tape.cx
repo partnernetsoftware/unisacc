@@ -1,0 +1,194 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* Does -run pass its arguments to a program it runs from a tape? (R15)
+ *
+ *   sh ./unisacc.com tools/check-run-tape.cx -- ROOT
+ *
+ * -run binds argv into the process slots only on the cache branch, and that
+ * branch excludes tapes, so a tape run entered the program with argc 0 and
+ * argv NULL. Plain .c tapes survived it and returned a wrong status; every .cx
+ * tape carries the module prelude, whose _unisa_environ_init computes
+ * environ = argv + argc + 1 and dereferences it, so it faulted at 0x8
+ * (SEGV_MAPERR). The cases below therefore use .cx sources, the shape users
+ * hit, and compare the tape run with the source run of the same program.
+ *
+ * Each case below names one observable: a source route result beside the run
+ * it must equal, so a case cannot pass by both sides being wrong.
+ */
+static int g_fail;
+static void die(const char *s) { sy_eprintf("run-tape: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static const char *src_min = "int main(void){return 0;}\n";
+static const char *src_ret7 = "int main(void){return 7;}\n";
+static const char *src_print =
+    "int main(void){puts(\"hi\");return 3;}\n";
+static const char *src_argv =
+    "int main(int argc, char **argv) {\n"
+    "    if (argc != 3) return 9;\n"
+    "    if (argv[1][0] != 'a' || argv[1][1] != 0) return 10;\n"
+    "    if (argv[2][0] != 'b' || argv[2][1] != 0) return 11;\n"
+    "    return 0;\n"
+    "}\n";
+
+static char root[4096], com[4400], bound[4400], work[4400];
+static char why[512];
+static np_result r;
+
+static void put(const char *path, const char *text) {
+    int fd;
+    fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) die(path);
+    if (sy_write_all(fd, text, tx_len(text, 4096))) die(path);
+    sy_close(fd);
+}
+
+/* product argv: the C source or the tape, then the mode words */
+static int run(char **v) {
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    return r.rc;
+}
+
+static void run_tape(const char *tape, int want, const char *name) {
+    char *v[10];
+    int i, rc;
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = (char *)tape; v[i] = 0;
+    rc = run(v);
+    ck(rc == want, name);
+    if (rc != want) sy_printf("NOTE\t%s\trc=%d\twant=%d\terr=%.200s\n", name, rc, want, r.err ? r.err : "");
+    np_free(&r);
+}
+
+int main(int argc, char **argv) {
+    char sp[4400], tape[4400], img[4400], img2[4400], bad[4400], cmd[9200];
+    char *v[12];
+    int i, src_rc, src_rc2, tape_rc;
+    char *src_out;
+    size_t src_outn;
+    if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(root, 4096, argv[1], tx_len(argv[1], 4096))) die("root"); }
+    else if (sy_cwd(root, 4096) < 0) die("cwd");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("com");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
+    if (cx_fmt(work, sizeof work, "%s/out/check-run-tape", root)) die("work");
+    (void)sy_mkdir(work, 0755);
+
+    /* R1: the smallest -S product must run and report its own status */
+    if (cx_fmt(sp, sizeof sp, "%s/min.cx", work)) die("sp");
+    if (cx_fmt(tape, sizeof tape, "%s/min.tape", work)) die("tape");
+    put(sp, src_min);
+    i = 0;
+    v[i++] = com; v[i++] = "-S"; v[i++] = "-o"; v[i++] = tape; v[i++] = sp; v[i] = 0;
+    ck(run(v) == 0, "s-tape-min");
+    np_free(&r);
+    run_tape(tape, 0, "R1-run-min-tape-rc0");
+
+    /* R2: the tape must carry the program's exit status, not the driver's */
+    if (cx_fmt(sp, sizeof sp, "%s/ret7.cx", work)) die("sp");
+    if (cx_fmt(tape, sizeof tape, "%s/ret7.tape", work)) die("tape");
+    put(sp, src_ret7);
+    i = 0;
+    v[i++] = com; v[i++] = "-S"; v[i++] = "-o"; v[i++] = tape; v[i++] = sp; v[i] = 0;
+    ck(run(v) == 0, "s-tape-ret7");
+    np_free(&r);
+    run_tape(tape, 7, "R2-run-ret7-tape-rc7");
+
+    /* R3: same stdout bytes and same status as the source route */
+    if (cx_fmt(sp, sizeof sp, "%s/print.cx", work)) die("sp");
+    if (cx_fmt(tape, sizeof tape, "%s/print.tape", work)) die("tape");
+    put(sp, src_print);
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = sp; v[i] = 0;
+    src_rc = run(v);
+    src_out = r.out;
+    src_outn = r.outn;
+    r.out = 0;
+    np_free(&r);
+    i = 0;
+    v[i++] = com; v[i++] = "-S"; v[i++] = "-o"; v[i++] = tape; v[i++] = sp; v[i] = 0;
+    ck(run(v) == 0, "s-tape-print");
+    np_free(&r);
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = tape; v[i] = 0;
+    tape_rc = run(v);
+    ck(tape_rc == src_rc, "R3-print-status-equals-source");
+    ck(src_rc == 3, "R3-source-status");
+    ck(r.outn == src_outn && (r.outn == 0 || !memcmp(r.out, src_out, r.outn)), "R3-print-stdout-equals-source");
+    if (r.outn != src_outn || (r.outn && memcmp(r.out, src_out, r.outn)))
+        sy_printf("NOTE\tstdout\ttape=%.40s\tsource=%.40s\n", r.out ? r.out : "", src_out ? src_out : "");
+    free(src_out);
+    np_free(&r);
+
+    /* R4: -run passes its arguments to the program, not to the driver */
+    if (cx_fmt(sp, sizeof sp, "%s/argv.cx", work)) die("sp");
+    if (cx_fmt(tape, sizeof tape, "%s/argv.tape", work)) die("tape");
+    put(sp, src_argv);
+    i = 0;
+    v[i++] = com; v[i++] = "-S"; v[i++] = "-o"; v[i++] = tape; v[i++] = sp; v[i] = 0;
+    ck(run(v) == 0, "s-tape-argv");
+    np_free(&r);
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = tape; v[i++] = "--"; v[i++] = "a"; v[i++] = "b"; v[i] = 0;
+    src_rc2 = run(v);
+    ck(src_rc2 == 0, "R4-tape-argv");
+    if (src_rc2 != 0) sy_printf("NOTE\targv\trc=%d\terr=%.200s\n", src_rc2, r.err ? r.err : "");
+    np_free(&r);
+
+    /* R5: an invariant, not a defect. A tape already carries the finished
+       image, so -o from the tape and -o from its source have always written
+       the same bytes; the sha equality holds before and after the fix, which
+       is what rules out the image itself as the cause. -run shares the same
+       span, so the run must not disturb what -o produces. */
+    if (cx_fmt(img, sizeof img, "%s/from-tape.img", work)) die("img");
+    if (cx_fmt(img2, sizeof img2, "%s/from-src.img", work)) die("img2");
+    i = 0;
+    v[i++] = com; v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = img; v[i++] = tape; v[i] = 0;
+    ck(run(v) == 0, "o-tape-image");
+    np_free(&r);
+    i = 0;
+    v[i++] = com; v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = img2; v[i++] = sp; v[i] = 0;
+    ck(run(v) == 0, "o-src-image");
+    np_free(&r);
+    if (cx_fmt(cmd, sizeof cmd, "sha256sum '%s' '%s' | cut -d' ' -f1", img, img2)) die("sha");
+    i = 0;
+    v[i++] = "sh"; v[i++] = "-c"; v[i++] = cmd; v[i] = 0;
+    if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+    {
+        /* two equal sha lines: 65 bytes each, offset 64 is the newline */
+        int same = r.outn == 130 && !memcmp(r.out, r.out + 65, 64);
+        ck(same, "R5-tape-image-bytes-equal-source");
+        if (!same) sy_printf("NOTE\tsha\t%.200s\n", r.out ? r.out : "");
+    }
+    np_free(&r);
+    /* the image is built from src_argv, so a bare run answers 9 (its argc check) */
+    i = 0;
+    v[i++] = img; v[i] = 0;
+    ck(run(v) == 9, "R5-image-runs");
+
+    /* R6: a truncated tape is a named refusal, never a crash */
+    if (cx_fmt(bad, sizeof bad, "%s/trunc.tape", work)) die("bad");
+    if (cx_fmt(cmd, sizeof cmd, "head -n 880 '%s' > '%s'", tape, bad)) die("cmd");
+    i = 0;
+    v[i++] = "sh"; v[i++] = "-c"; v[i++] = cmd; v[i] = 0;
+    if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, "s-truncate");
+    np_free(&r);
+    i = 0;
+    v[i++] = com; v[i++] = "-run"; v[i++] = bad; v[i] = 0;
+    src_rc = run(v);
+    ck(src_rc != 0, "R6-truncated-tape-refused");
+    ck(src_rc != 139, "R6-truncated-tape-not-a-crash");
+    if (src_rc != 0) sy_printf("NOTE\ttrunc\trc=%d\terr=%.200s\n", src_rc, r.err ? r.err : "");
+    np_free(&r);
+
+    printf("CHECK_RUN_TAPE\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
