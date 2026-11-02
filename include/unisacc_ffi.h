@@ -191,14 +191,44 @@ static void *uffi_type(int __u_kind) {
  * actual ffi_status from ffi_prep_cif[_var].  No call follows a prep error.
  */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_call_types
+/* ---- bridge mode, set from cx (C44 FFI step 1b) -------------------------------------------
+   The C side never reads the environment: cx/sys/ffi.cx parses UNISA_FFI_BRIDGE and calls
+   uffi_set_bridge_mode(). Until the in-tree assembly bridge is linked into the product image,
+   bridge mode refuses every call BY NAME -- never a silently mis-marshalled call. */
+#define UFFI_MODE_UNSET  0
+#define UFFI_MODE_OFF    1
+#define UFFI_MODE_FORCE  2
+#define UFFI_MODE_UNKNOWN 3
+static int __uffi_mode = UFFI_MODE_UNSET;
+static const char *__uffi_err = 0;
+
+void uffi_set_bridge_mode(int m) { __uffi_mode = m; __uffi_err = (m == UFFI_MODE_UNKNOWN) ? "UNISA_FFI_BRIDGE: unknown value" : 0; }
+const char *uffi_last_error(void) { return __uffi_err ? __uffi_err : ""; }
+
 static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
                            void **__u_values, int __u_n, int __u_fixed,
                            void *__u_result) {
     struct uffi_cif __u_cif;
     __u_word __u_args[10] = {0};
     int __u_i; int __u_status;
+    {   int __u_i2;
+        if (__uffi_mode == UFFI_MODE_UNKNOWN) { __uffi_err = "UNISA_FFI_BRIDGE: unknown value"; return 0 - 4; }
+        if (__uffi_mode == UFFI_MODE_FORCE || __uffi_mode == UFFI_MODE_UNSET) {
+            for (__u_i2 = 0; __u_i2 < __u_n; __u_i2++)
+                if (__u_types[__u_i2] == __uffi_types[UFFI_DOUBLE] || __u_types[__u_i2] == __uffi_types[UFFI_FLOAT]) {
+                    __uffi_err = "bridge: floating-point arguments/results not supported";
+                    return 0 - 4;
+                }
+            if (__u_rtype == __uffi_types[UFFI_DOUBLE] || __u_rtype == __uffi_types[UFFI_FLOAT]) {
+                __uffi_err = "bridge: floating-point arguments/results not supported";
+                return 0 - 4;
+            }
+            if (__u_fixed >= 0 && __u_fixed < __u_n) { __uffi_err = "bridge: variadic calls not supported"; return 0 - 4; }
+            if (__uffi_mode == UFFI_MODE_FORCE) { __uffi_err = "bridge: not linked in this build"; return 0 - 4; }
+        }
+    }
     __u_status = uffi_init();
-    if (__u_status != 0) return __u_status;
+    if (__u_status != 0) { __uffi_err = "libffi unavailable"; return __u_status; }
     if (__u_fn == 0 || __u_rtype == 0 || __u_n < 0 || __u_n > UFFI_MAX_ARGS ||
         __u_fixed < 0 - 1 || __u_fixed > __u_n) return 0 - 3;
     if (__u_n != 0 && (__u_types == 0 || __u_values == 0)) return 0 - 3;
