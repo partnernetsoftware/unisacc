@@ -164,7 +164,7 @@ int us_library_bridge_call(const void *entry,
 | `getpid()`(零参、整数返回) | **通过**:`getpid=3106783`,`b.res == getpid()` 成立 |
 | `snprintf("%d %f %d", 1, 2.5, 3)` | **通过**:`[1 2.500000 3]`,浮点入参数通路成立 |
 | `>6` 整数参数走栈 | **通过**(修复后):`[1234567]` |
-| `sqrt(3.0)`(浮点返回) | **仍崩溃**:哑目标未能组装(`movq $imm64,%rax` 不在子集),根因待分离 |
+| `sqrt(3.0)`(浮点返回) | **通过**:`sqrt3=1.732050807569`。先前崩溃不是桥的问题——harness 用 `libc.so.6` 的句柄 `dlsym("sqrt")` 拿到 **NULL**(sqrt/sin 在 libm),调用 0 地址导致 SIGSEGV |
 
 关键修复:**栈 16 字节对齐**。SysV 要求 `call` 前 `rsp%16==0`;桥入口 `rsp%16==8`,
 六个 `push` 之后仍是 8,所以必须在 `call` 前 `subq $8,%rsp`、之后 `addq $8,%rsp`。
@@ -175,3 +175,9 @@ int us_library_bridge_call(const void *entry,
 **第二个根因(栈参数)**:16 字节补位必须放在**栈参数区之上**。原写法先 `subq nstack*8` 再 `subq $8`,
 于是 `(%rsp)` 是补位、参数整体错一槽(实测输出 `123877240488456`);改成先 `subq $8` 再开参数区后,
 `(%rsp)` 就是第 7 个参数,输出恢复 `1234567`。
+
+**第三个结论(harness 侧)**:`dlsym(libc, "sqrt")` 返回 **NULL**(实测 `handle=... sqrt=(nil) sin=(nil)`),
+数学函数在 `libm.so.6`。这不是桥的缺陷,但任何"用 FFI 调数学函数"的检查都必须先确认地址非 0,
+否则得到的是"调用 0 地址"的假崩溃。
+
+至此四条向量全部通过:getpid(零参)、sqrt(浮点入/返回)、snprintf 混合、>6 整数栈参数。
