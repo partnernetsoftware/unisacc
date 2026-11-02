@@ -21,21 +21,32 @@ static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-census.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-census.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-census: REFUSE %s\n", s); sy_exit(2); }
 static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 4096), w, tx_len(w, 128)) >= 0; }
+static int elf(const char *p) { size_t n = 0; char *s = cx_read(p, &n); int r = 0; if (s && n >= 4 && !memcmp(s, "\177ELF", 4)) r = 1; mm_free(s); return r; }
+/* Start the product the way it is shipped: a bare ELF runs itself, a shell-headed
+ * artifact needs sh.  Hardcoding "sh" would break the moment the product is an ELF. */
+static int run(const char *com, const char *tool, const char *root, const char *od, char *const *opt, char *out, size_t cap, int *cut) {
+    char *a[12]; int i = 0, j = 0;
+    if (!elf(com)) a[i++] = "sh";
+    a[i++] = (char *)com; a[i++] = (char *)tool; a[i++] = "--"; a[i++] = (char *)root; a[i++] = (char *)od;
+    while (opt[j] && i < 11) a[i++] = opt[j++];
+    a[i] = 0;
+    return sy_run(a, out, cap, cut);
+}
 static int lines(const char *path) { size_t n; char *t = sy_exists(path) == 1 ? cx_read(path, &n) : 0; int c = 0; size_t i; if (!t) return -1; for (i = 0; i < n; i++) if (t[i] == '\n') c++; mm_free(t); return c; }
 
 int main(void) {
     char root[4096], com[4500], tool[4500], od[4500], res[4600], out[4096]; int cut, rc;
     if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/census.cx", root) || cx_fmt(od, sizeof od, "%s/out/check-census", root) || cx_fmt(res, sizeof res, "%s/results.tsv", od)) die("paths");
     if (sy_exists(od) == 1 && cx_rmtree(od)) die("old work");
-    {   char *a[] = {"sh", com, tool, "--", root, od, "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+    {   char *o[] = {"--only", "cx-bounded", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut);
         ck(rc == 0 && has(out, "ran=1\tpass=1") && lines(res) == 1, "first-run-records-one-pass"); }
-    {   char *a[] = {"sh", com, tool, "--", root, od, "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+    {   char *o[] = {"--only", "cx-bounded", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut);
         ck(rc == 0 && has(out, "ran=0") && lines(res) == 1, "resume-does-not-rerun"); }
-    {   char *a[] = {"sh", com, tool, "--", root, od, "--redo", "cx-bounded", "--only", "cx-bounded", 0}; rc = sy_run(a, out, sizeof out, &cut);
+    {   char *o[] = {"--redo", "cx-bounded", "--only", "cx-bounded", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut);
         ck(rc == 0 && has(out, "ran=1") && lines(res) == 1, "redo-reruns-and-keeps-one-line"); }
-    {   char *a[] = {"sh", com, tool, "--", root, od, "--report", 0}; rc = sy_run(a, out, sizeof out, &cut);
+    {   char *o[] = {"--report", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut);
         ck(rc == 0 && has(out, "ran=0") && has(out, "fail=0") && has(out, "total_recorded=1"), "report-runs-nothing"); }
-    {   char *a[] = {"sh", com, tool, "--", root, od, "--bogus", 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2, "bad-option-refused"); }
+    {   char *o[] = {"--bogus", 0}; rc = run(com, tool, root, od, o, out, sizeof out, &cut); ck(rc == 2, "bad-option-refused"); }
     sy_printf("CHECK_CENSUS\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

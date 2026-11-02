@@ -11,7 +11,8 @@
  * (--redo removes them first), runs the registry rows in registry order one at a time, each under tools/bound with the
  * batch's own budget, and stops when --seconds (default 3000) of wall time are used or --max batches ran.  Batches with
  * declared materials, other platforms and non-IMPLEMENTED rows are counted, never run.  --report prints the counts and the
- * non-PASS ids.  Prints CENSUS<TAB>ran=N<TAB>pass=P<TAB>fail=F<TAB>unknown=U<TAB>left=L<TAB>skipped_materials=M. */
+ * non-PASS ids.  Prints CENSUS<TAB>ran=N<TAB>pass=P<TAB>fail=F<TAB>unknown=U<TAB>left=L<TAB>skipped_materials=M<TAB>skipped_domain=D; full-* domain aggregate batches are counted apart from material-gated rows
+ * because a single host can never satisfy them (five OPEN cells are foreign hosts plus the local MISSING). */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -59,7 +60,10 @@ static void append(const char *line) {
 int main(int argc, char **argv) {
     const char *only = 0, *redo = 0; long limit_s = 3000, max = 1 << 30, t0 = sy_now_ms(); int report = 0, i;
     char reg[4700], bound[4500], com[4500], runb[4500], parent[4700], logd[4700]; size_t rn, tn = 0; char *r, *t;
-    long at = 0, ran = 0, pass = 0, fail = 0, unknown = 0, left = 0, skipped = 0;
+    long at = 0, ran = 0, pass = 0, fail = 0, unknown = 0, left = 0, skipped = 0, skipped_domain = 0;
+    /* run-batch refuses a relative output parent, and the refusal is per batch (every row
+     * becomes NOEXEC); the usage already says OUTDIR(abs), so enforce it once here. */
+    if (argc >= 3 && argv[2][0] != '/') die("OUTDIR must be absolute");
     if (argc < 3 || argv[1][0] != '/' ) die("usage ROOT(abs) OUTDIR(abs) [--seconds N] [--max K] [--only ..] [--redo ..] | --report");
     tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096)); tx_copy(outdir, sizeof outdir, argv[2], tx_len(argv[2], 4096));
     for (i = 3; i < argc; i++) {
@@ -93,6 +97,7 @@ int main(int argc, char **argv) {
         if (!l || !col(s, l, 0, id, sizeof id) || tx_eqz(id, "id") || !col(s, l, 1, impl, sizeof impl) || !col(s, l, 5, plat, sizeof plat) || !col(s, l, 6, bud, sizeof bud) || !col(s, l, 7, mat, sizeof mat)) continue;
         if (!tx_eqz(impl, "IMPLEMENTED") || !tx_eqz(plat, "lnx/x86_64")) continue;
         if (!tx_eqz(mat, "-")) { skipped++; continue; }
+        if (tx_prefix(id, tx_len(id, 128), "full-", 5)) { skipped_domain++; continue; }
         if (only && !in_list(only, id)) continue;
         if (report || (t && done(t, (long)tn, id)) || ran >= max || sy_now_ms() - t0 > limit_s * 1000 - (tx_strtol(bud, 0, 10) + 15) * 1000) { if (!report && !(t && done(t, (long)tn, id))) left++; continue; }
         {   char *v[10], sb[16], line[600], head[4096]; np_result res; char why[1024]; long b0 = sy_now_ms(), ms; const char *st = "NOEXEC"; long hp;
@@ -120,7 +125,7 @@ int main(int argc, char **argv) {
             if (col(rs + a, l, 1, st, sizeof st)) { tot++; if (tx_eqz(st, "PASS")) p2++; else { if (tx_eqz(st, "FAIL")) f2++; else u2++; if (report) sy_printf("NONPASS\t%.*s\n", (int)l, rs + a); } }
             a += l + 1; }
         if (rs) mm_free(rs);
-        sy_printf("CENSUS\tran=%ld\tpass=%ld\tfail=%ld\tunknown=%ld\tleft=%ld\tskipped_materials=%ld\ttotal_recorded=%ld\n", ran, p2, f2, u2, left, skipped, tot);
+        sy_printf("CENSUS\tran=%ld\tpass=%ld\tfail=%ld\tunknown=%ld\tleft=%ld\tskipped_materials=%ld\tskipped_domain=%ld\ttotal_recorded=%ld\n", ran, p2, f2, u2, left, skipped, skipped_domain, tot);
     }
     (void)pass; (void)fail; (void)unknown;
     return 0;
