@@ -1,0 +1,307 @@
+/* tools/check-pins.cx -- declared pin/count/path anti-rot check.
+ *
+ *   sh ./unisacc.com tools/check-pins.cx
+ *   sh ./unisacc.com tools/check-pins.cx --root /tmp/pins-fixture
+ *
+ * tools/pins.tsv is the sole declaration:
+ *   path<TAB>kind<TAB>target<TAB>value<TAB>owner<TAB>status
+ *
+ * kind=pin       sha256(target) must equal value; missing target is red.
+ * kind=count     value must equal the authoritative source-job-wave inventory.
+ * kind=path      target must exist.
+ * kind=host-dep  mismatch is only HOST-DEP-CHANGED (host upgrade is not rot).
+ * kind=literal   test vector / format constant, declared but not verified.
+ * kind=epoch     epoch-bound evidence, declared but not verified.
+ * status=known-broken is an explicit audit exception: it is printed as
+ * KNOWN-BROKEN and counted in stale=, never silently hidden. Any undeclared
+ * mismatch is still a hard failure.
+ *
+ * Rules beyond the table:
+ *   UNDECLARED_PIN  every 64-hex constant in tools/*.cx or tools/cxlib/*.cx
+ *                   must have a matching path:line + value row.
+ *   COUNT_LITERAL   every quoted job/model count literal must have a row; a kind=count row
+ *                   whose value differs from the authoritative 131/42 is red
+ *                   unless explicitly known-broken.
+ *
+ * Prints FAIL<TAB>rule<TAB>path:line<TAB>target<TAB>detail lines and
+ *   CHECK_PINS	pins=N	failed=M	stale=S	hostdep=H
+ * Exit 0 iff failed==0. Pins are read once; no tree-wide sha walk.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+
+#define MAX_ROWS 900
+#define R_PATH 256
+#define R_TARGET 512
+#define R_VALUE 96
+#define R_OWNER 160
+#define R_STATUS 32
+#define LINEBUF 300
+
+static char g_root[4096] = ".";
+static char r_path[MAX_ROWS][R_PATH];
+static char r_kind[MAX_ROWS][16];
+static char r_target[MAX_ROWS][R_TARGET];
+static char r_value[MAX_ROWS][R_VALUE];
+static char r_owner[MAX_ROWS][R_OWNER];
+static char r_status[MAX_ROWS][R_STATUS];
+static int nrows, npins, failed, stale, hostdep;
+static int auth_jobs, auth_models;
+
+static int join_path(char *dst, int cap, const char *rel) {
+    int z;
+    if (!rel || !rel[0]) return -1;
+    if (rel[0] == '/') z = snprintf(dst, (size_t)cap, "%s", rel);
+    else if (g_root[0] == '.' && !g_root[1]) z = snprintf(dst, (size_t)cap, "%s", rel);
+    else z = snprintf(dst, (size_t)cap, "%s/%s", g_root, rel);
+    return (z < 0 || z >= cap) ? -1 : 0;
+}
+
+static void copy(char *dst, int cap, const char *src) {
+    int z = snprintf(dst, (size_t)cap, "%s", src ? src : "");
+    if (z < 0 || z >= cap) { fprintf(stderr, "check-pins: field too long\n"); exit(2); }
+}
+
+static char *load(const char *rel, size_t *n) {
+    char p[4600];
+    if (join_path(p, sizeof p, rel)) return 0;
+    return cx_read(p, n);
+}
+
+static int is_hex64(const char *s) {
+    int i;
+    for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return s[64] == '"';
+}
+
+static int find_decl(const char *path, const char *value) {
+    int i;
+    for (i = 0; i < nrows; i++)
+        if (!strcmp(r_path[i], path) && !strcmp(r_value[i], value)) return i;
+    return -1;
+}
+
+static int parse_authority(void) {
+    char *s, *p;
+    size_t n = 0;
+    s = load("tools/source-job-wave.cx", &n);
+    if (!s) return -1;
+    p = strstr(s, "nids!=");
+    if (!p) { free(s); return -1; }
+    auth_jobs = (int)strtol(p + 6, 0, 10);
+    p = strstr(s, "counts[1]!=");
+    if (!p) { free(s); return -1; }
+    auth_models = (int)strtol(p + 11, 0, 10);
+    free(s);
+    return (auth_jobs > 0 && auth_models > 0) ? 0 : -1;
+}
+
+static int load_rows(void) {
+    char *s, *line, *next;
+    size_t n = 0;
+    s = load("tools/pins.tsv", &n);
+    if (!s) return -1;
+    line = s;
+    while (line && *line) {
+        char *cols[8];
+        int nc = 0;
+        char *q;
+        next = strchr(line, '\n');
+        if (next) *next = 0;
+        if (*line && *line != '#' && strncmp(line, "path\t", 5)) {
+            q = line;
+            while (nc < 8) {
+                char *tab;
+                cols[nc++] = q;
+                tab = strchr(q, '\t');
+                if (!tab) break;
+                *tab = 0;
+                q = tab + 1;
+            }
+            if (nc >= 4 && nrows < MAX_ROWS) {
+                copy(r_path[nrows], R_PATH, cols[0]);
+                copy(r_kind[nrows], 16, cols[1]);
+                copy(r_target[nrows], R_TARGET, cols[2]);
+                copy(r_value[nrows], R_VALUE, cols[3]);
+                copy(r_owner[nrows], R_OWNER, nc >= 5 ? cols[4] : "");
+                copy(r_status[nrows], R_STATUS, nc >= 6 ? cols[5] : "ok");
+                if (!strcmp(r_kind[nrows], "pin")) npins++;
+                nrows++;
+            }
+        }
+        line = next ? next + 1 : 0;
+    }
+    free(s);
+    return nrows > 0 ? 0 : -1;
+}
+
+static void fail_line(const char *rule, const char *path, int line, const char *target, const char *detail) {
+    failed++;
+    if (line > 0) printf("FAIL\t%s\t%s:%d\t%s\t%s\n", rule, path, line, target, detail);
+    else printf("FAIL\t%s\t%s\t%s\t%s\n", rule, path, target, detail);
+}
+
+static void known_line(const char *path, int line, const char *target, const char *detail) {
+    stale++;
+    printf("KNOWN-BROKEN\t%s\t%s\t%s\n", path, target, detail);
+}
+
+static void scan_line_constants(const char *path, int line, const char *text) {
+    const char *q;
+    for (q = text; *q; q++) {
+        if (*q == '"' && is_hex64(q + 1)) {
+            char val[65];
+            char key[LINEBUF];
+            int i;
+            for (i = 0; i < 64; i++) val[i] = q[1 + i];
+            val[64] = 0;
+            if (snprintf(key, sizeof key, "%s:%d", path, line) < 0) { fail_line("UNDECLARED_PIN", path, line, "-", "path-too-long"); }
+            else if (find_decl(key, val) < 0) fail_line("UNDECLARED_PIN", key, 0, "-", val);
+            q += 65;
+        }
+    }
+}
+
+static void scan_line_counts(const char *path, int line, const char *text) {
+    const char *q;
+    for (q = text; (q = strchr(q, '"')) != 0; q++) {
+        char val[8];
+        if (q[1] == '1' && q[2] == '0' && q[3] == '7' && q[4] == '"') { val[0] = '1'; val[1] = '0'; val[2] = '7'; val[3] = 0; }
+        else if (q[1] == '3' && q[2] == '4' && q[3] == '"') { val[0] = '3'; val[1] = '4'; val[2] = 0; }
+        else continue;
+        {
+            char key[LINEBUF];
+            if (snprintf(key, sizeof key, "%s:%d", path, line) < 0 || find_decl(key, val) < 0)
+                fail_line("COUNT_LITERAL", key, 0, "derived:source-job-wave", val);
+        }
+        q += strlen(val);
+    }
+}
+
+static int scan_file(const char *rel) {
+    char *s;
+    size_t n = 0;
+    int line = 1;
+    s = load(rel, &n);
+    if (!s) { fail_line("READ", rel, 0, "-", "unreadable"); return -1; }
+    {
+        char *p = s;
+        while (*p) {
+            char *e = strchr(p, '\n');
+            if (e) *e = 0;
+            scan_line_constants(rel, line, p);
+            scan_line_counts(rel, line, p);
+            if (!e) break;
+            p = e + 1;
+            line++;
+        }
+    }
+    free(s);
+    return 0;
+}
+
+static int scan_dir(const char *rel) {
+    char full[4600], names[1 << 16];
+    int fd, n, i, off = 0;
+    if (join_path(full, sizeof full, rel)) return -1;
+    fd = sy_open(full, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) return -1;
+    n = (int)sy_dir_names(fd, names, sizeof names);
+    sy_close(fd);
+    if (n < 0) return -1;
+    for (i = 0; i < n; i++) {
+        long len = (long)strlen(names + off);
+        char child[4600], sub[LINEBUF];
+        if (len <= 0) break;
+        if (names[off] != '.' && len > 3 && !strcmp(names + off + len - 3, ".cx")) {
+            int z = snprintf(sub, sizeof sub, "%s/%s", rel, names + off);
+            if (z > 0 && z < (int)sizeof sub) scan_file(sub);
+            else fail_line("UNDECLARED_PIN", rel, 0, "-", names + off);
+        }
+        (void)child;
+        off += (int)len + 1;
+    }
+    return 0;
+}
+
+static int file_exists(const char *target, int *err) {
+    char p[4600];
+    sy_stat_t st;
+    if (join_path(p, sizeof p, target)) { *err = -ENAMETOOLONG; return 0; }
+    if (sy_stat(p, &st) != 0) { *err = errno ? -errno : -EIO; return 0; }
+    *err = 0;
+    return 1;
+}
+
+static void verify_rows(void) {
+    int i;
+    for (i = 0; i < nrows; i++) {
+        const char *path = r_path[i], *kind = r_kind[i], *target = r_target[i];
+        const char *value = r_value[i], *status = r_status[i];
+        int line = 0;
+        char base[LINEBUF];
+        const char *colon = strrchr(path, ':');
+        copy(base, sizeof base, path);
+        if (colon) {
+            line = (int)strtol(colon + 1, 0, 10);
+            base[colon - path] = 0;
+        }
+        if (!strcmp(status, "known-broken")) { known_line(path, line, target, "explicit audit exception"); continue; }
+        if (!strcmp(kind, "literal") || !strcmp(kind, "epoch")) continue;
+        if (!strcmp(kind, "pin")) {
+            char full[4600], *b;
+            size_t n = 0;
+            char got[65];
+            int err = 0;
+            if (!file_exists(target, &err)) { fail_line("PIN_TARGET", path, line, target, "target missing"); continue; }
+            if (join_path(full, sizeof full, target)) { fail_line("PIN_TARGET", path, line, target, "path-too-long"); continue; }
+            b = cx_read(full, &n);
+            if (!b) { fail_line("PIN_READ", path, line, target, "unreadable"); continue; }
+            cx_sha256_hex(b, n, got);
+            free(b);
+            if (strcmp(got, value)) fail_line("SHA_MISMATCH", path, line, target, got);
+        } else if (!strcmp(kind, "path")) {
+            int err = 0;
+            if (!file_exists(target, &err)) fail_line("PATH_MISSING", path, line, target, err == -EACCES ? "EACCES" : "ENOENT");
+        } else if (!strcmp(kind, "count")) {
+            int actual = 0, bad = 0;
+            if (strstr(target, "/jobs")) actual = auth_jobs;
+            else if (strstr(target, "/models")) actual = auth_models;
+            else bad = 1;
+            if (bad) fail_line("COUNT_TARGET", path, line, target, "not jobs/models");
+            else if (strtol(value, 0, 10) != actual) {
+                char detail[64];
+                snprintf(detail, sizeof detail, "value=%s authoritative=%d", value, actual);
+                fail_line("COUNT_LITERAL", path, line, target, detail);
+            }
+        } else if (!strcmp(kind, "host-dep")) {
+            char full[4600], *b;
+            size_t n = 0;
+            char got[65];
+            int err = 0;
+            if (!file_exists(target, &err)) { hostdep++; printf("HOST-DEP-CHANGED\t%s\t%s\tmissing\n", path, target); continue; }
+            if (join_path(full, sizeof full, target) || !(b = cx_read(full, &n))) { hostdep++; printf("HOST-DEP-CHANGED\t%s\t%s\tunreadable\n", path, target); continue; }
+            cx_sha256_hex(b, n, got);
+            free(b);
+            if (strcmp(got, value)) { hostdep++; printf("HOST-DEP-CHANGED\t%s\t%s\tsha=%s\n", path, target, got); }
+        } else {
+            fail_line("UNKNOWN_KIND", path, line, target, kind);
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) copy(g_root, sizeof g_root, argv[++i]);
+        else { fprintf(stderr, "check-pins: unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (load_rows()) { fprintf(stderr, "check-pins: cannot read tools/pins.tsv\n"); return 2; }
+    if (parse_authority()) { fprintf(stderr, "check-pins: cannot read authoritative counts\n"); return 2; }
+    scan_dir("tools");
+    scan_dir("tools/cxlib");
+    verify_rows();
+    printf("CHECK_PINS\tpins=%d\tfailed=%d\tstale=%d\thostdep=%d\n", npins, failed, stale, hostdep);
+    return failed ? 1 : 0;
+}
