@@ -1,0 +1,85 @@
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+/* Is a product file installable as ./unisacc.com? (C44-PACKAGE-01 dev product)
+ *
+ *   sh ./unisacc.com tools/check-dev-product.cx -- ROOT PRODUCT
+ *
+ * Three properties decide it, and each one broke a real install attempt:
+ *   1. APE magic "MZqFpD='" at offset 0. A bare ELF candidate also starts with
+ *      \x7fELF and then `sh ./unisacc.com ...` fails with a shell syntax error,
+ *      which breaks every caller in tests/ and tools/ (run-batch spawns
+ *      "sh <product>" unconditionally).
+ *   2. `sh PRODUCT --version` exits 0 and names the version.
+ *   3. PRODUCT compiles a .cx unit with NO UNISA_CONTAINER in the environment.
+ *      A slice without an embedded package answers "unknown package version".
+ */
+static char root[4096], prod[4400], work[4400];
+static int failures;
+
+static void die(const char *s) { sy_eprintf("dev-product: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\t%s\n", name);
+    else { failures++; sy_printf("FAIL\t%s\n", name); }
+}
+
+int main(int argc, char **argv) {
+    np_result r;
+    char why[512];
+    char *v[8];
+    char line[512];
+    size_t n = 0;
+    char *b;
+    char srcp[4400], objp[4400];
+    int i;
+    if (argc < 3) die("usage: ROOT PRODUCT");
+    if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+    if (sy_realpath(argv[2], prod, (int)sizeof prod) < 0) die("product");
+    if (cx_fmt(work, (size_t)sizeof work, "%s/out/dev-product-check", root)) die("work");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("clean");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+
+    /* 1. APE magic: the shell header that makes `sh product` work. */
+    b = (char *)cx_read(prod, &n);
+    if (!b) die("read product");
+    ck(n > 8 && b[0] == 'M' && b[1] == 'Z' && b[2] == 'q' && b[3] == 'F' &&
+       b[4] == 'p' && b[5] == 'D' && b[6] == '=' && b[7] == 39, "ape-magic");
+    mm_free(b);
+
+    /* 2. sh PRODUCT --version */
+    i = 0;
+    v[i++] = "sh"; v[i++] = prod; v[i++] = "--version"; v[i] = 0;
+    if (np_run(v, root, 0, 40, &r, why, sizeof why)) die(why);
+    ck(r.rc == 0, "sh-version-rc0");
+    { long k = 0; while (r.out && k < (long)r.outn && k < (long)sizeof line - 1) { line[k] = r.out[k]; k = k + 1; } line[k] = 0; }
+    ck(tx_find(line, tx_len(line, 512), "unisacc 0.0.43", 14) >= 0, "sh-version-text");
+    np_free(&r);
+
+    /* 3. compile with no UNISA_CONTAINER: proves the package is embedded. */
+    if (cx_fmt(srcp, (size_t)sizeof srcp, "%s/t.cx", work)) die("src");
+    if (cx_fmt(objp, (size_t)sizeof objp, "%s/t.o", work)) die("obj");
+    if (cx_write(srcp, "int main(void){ return 0; }\n", 28)) die("write");
+    /* env -u, not UNISA_CONTAINER="": an empty value would still override the
+       embedded package and make a good product look broken. */
+    i = 0;
+    v[i++] = "env"; v[i++] = "-u"; v[i++] = "UNISA_CONTAINER";
+    v[i++] = "sh"; v[i++] = prod; v[i++] = "-c";
+    v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[8] = 0;
+    { char *w[12];
+      int k = 0;
+      while (k < 8) { w[k] = v[k]; k = k + 1; }
+      w[8] = srcp; w[9] = "-o"; w[10] = objp; w[11] = 0;
+      { int rc = np_run(w, root, 0, 40, &r, why, sizeof why);
+        if (rc) die(why);
+        ck(r.rc == 0, "compile-rc0");
+        np_free(&r); } }
+    ck(sy_exists(objp) == 1, "object-written");
+
+    sy_printf("DEV_PRODUCT\tfailed=%d\n", failures);
+    return failures ? 1 : 0;
+}
