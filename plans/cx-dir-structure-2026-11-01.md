@@ -7,7 +7,7 @@
 | `cx/compiler/` | 331 | 29 | 302 |
 | `cx/runtime/` | 339 | 42 | 297 |
 
-- `cx/compiler` 与 `cx/runtime` 有 314 对同名文件，内容不同（前缀不同），都是 `tools/nametab-gen.cx` 生成：同一张事实表生成 compiler 侧与 runtime 侧两个副本。
+- `cx/compiler` 与 `cx/runtime` 曾有 314 对同名文件（前缀不同），都是 `tools/nametab-gen.cx` 生成。**已于 2026-11-02 停止生成并删除**（580 个文件，零消费者，字节等价验证 entry.elf 648a47ca，见 [w4-dedupe-2026-11-02.md](w4-dedupe-2026-11-02.md)）；删除后 `cx/compiler` 46 项、`cx/runtime` 59 项。
 - 约 600 个文件是 13–20 行的 `*_count`/`*_at` 名字表骨架；真正手写的大模块只有 `asmtext.cx`(2190)、`cxmod.cx`(1256)、`tapegate.cx`(675)、`tapelink.cx`(408)、`bindstage.cx`(92)。
 - 多数生成物当前没有调用者；`cx/runtime/stream_attributes.cx` 等流壳 10–20 行、步骤返回 0。
 - 生成器支持 `--out DIR`，输出路径写死为 `DIR/compiler`、`DIR/runtime`。
@@ -53,6 +53,12 @@
 - 不动 `nametab-gen` 生成的表内容，只动路径与说明。
 - 不删任何生成物；`--check` 是唯一真源。
 - 两代逐字节相同与 `check-cx-layers` 每步都要跑。
+
+## 本轮已做的边界（2026-11-02，W4a）
+
+- `tools/nametab-gen.cx` 与 `tools/nametabs.tsv` 已停止生成并删除；580 个零消费者名表模块（`cx/compiler/` 与 `cx/runtime/` 各 290）已 `git rm`。
+- 字节等价验证：删除前后 entry-build（对象路线）candidate/entry.elf 逐字节相同（entry.elf 648a47ca）；ratchets 7/7、check-cx-layers up=0、p1-baseline failed=0、40 无材料批次抽样全 PASS。
+- 27 个专用生成器模块（axis-gen/model-gen/stream-gen/net-gen/…）未动，两侧仍有消费者。
 
 ## 本轮未改的边界（2026-11-01）
 

@@ -275,7 +275,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
 | 棘轮 | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape，只降不升 | `tools/ratchets.cx` |
-| 事实表 | 只经 `tools/facts-gen.cx --check/--write`；名表经 `tools/nametab-gen.cx` | `exec/facts/` |
+| 事实表 | 只经 `tools/facts-gen.cx --check/--write`（名表生成器 `tools/nametab-gen.cx` 已于 2026-11-02 停止生成并删除，零消费者，字节等价验证 648a47ca，见 [plans/w4-dedupe-2026-11-02.md](plans/w4-dedupe-2026-11-02.md)） | `exec/facts/` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
 ### 9.3 当前状态（0.0.43 收口）
