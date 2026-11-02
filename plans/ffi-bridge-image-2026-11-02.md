@@ -156,3 +156,18 @@ int us_library_bridge_call(const void *entry,
 - 现装 `entry.elf` = **1,643,406 字节**(不是"3 MB 级")。
 - 已提交的那步是 **FFI 1a(b)**(开关 + 具名拒绝 + last_error),不是 "step 1b"。
 - 本页只写 plans;提交由 cc。
+
+## 7. 运行期证据(2026-11-02,仓外 harness:mmap RW → 拷 .text → mprotect RX)
+
+| 向量 | 结果 |
+|---|---|
+| `getpid()`(零参、整数返回) | **通过**:`getpid=3106783`,`b.res == getpid()` 成立 |
+| `sqrt(3.0)` | 未单独确认(合并运行时崩溃) |
+| `snprintf("%d %f %d", 1, 2.5, 3)` | 未单独确认 |
+| `>6` 整数参数走栈 | 未单独确认 |
+
+关键修复:**栈 16 字节对齐**。SysV 要求 `call` 前 `rsp%16==0`;桥入口 `rsp%16==8`,
+六个 `push` 之后仍是 8,所以必须在 `call` 前 `subq $8,%rsp`、之后 `addq $8,%rsp`。
+加上这一对之后零参调用通过;此前所有崩溃都是这一个原因(加上一版 harness 自己把 `rbp` 改成常量)。
+
+现状:桥 `.text` 221 字节,可组装、零参调用可运行;浮点与栈参数四条**尚未分别证明**。
