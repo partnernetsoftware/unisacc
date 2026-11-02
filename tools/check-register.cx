@@ -18,7 +18,10 @@
  *   2. one concurrent registration fails its batch (marker never printed) and rolls back while the other
  *      succeeds: only the failing call's two lines are gone, the other's row survives;
  *   3. a held lock makes a caller wait and then fail by name (lock timeout), touching neither file;
- *   4. after the check removes its own rows both registries are byte-identical to the originals.
+ *   4. a rollback that cannot take the lock at all reports the two left-over rows with their line numbers
+ *      and exits 3 (status=DIRTY), never a bare lock timeout;
+ *   5. a MARKER that already carries "rc0:" is refused and both files stay byte-identical;
+ *   6. after the check removes its own rows both registries are byte-identical to the originals.
  * The fixture batches are real: tools/register-fixture.cx prints REGISTER_FIXTURE_OK, so run-batch passes.
  * Rows are removed by exact line content, never by restoring the whole file, so a row someone else
  * appended meanwhile stays. */
@@ -247,7 +250,7 @@ int main(void) {
     }
 
     /* case 5: refusals exit 2 by name and write nothing -- an existing ID, a missing CHECK, an empty
-       MARKER, a TAB in a field.  These are the interfaces.cx-register coverage row's own assertions (merged
+       MARKER, a TAB in a field, a MARKER that already carries "rc0:".  These are the interfaces.cx-register coverage row's own assertions (merged
        from register-tool); the fixture
        runs them on the private copy, so a refusal can never leave a row behind in the shared tables. */
     {   char h1[65], h2[65], out[1 << 15]; int rc;
@@ -273,10 +276,76 @@ int main(void) {
             rc = run(a, out, sizeof out);
             ok(rc == 2 && strstr(out, "empty field"), "a TAB in a field is refused by name and exits 2");
         }
+        {   char hb[65], hc[65], h[65]; size_t m = 0; char *b2;
+            b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, hb); free(b2);
+            b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, hc); free(b2);
+            {   char *a[16] = { "env", envtables, "sh", "./unisacc.com", DRIVER, "--", "cr-i", fx,
+                                 "rc0:REGISTER_FIXTURE_OK", "doubled prefix row", fx, "interfaces", 0 };
+                rc = run(a, out, sizeof out);
+                /* a full expect as MARKER would become "rc0:rc0:.." and make every batch in the registry
+                   refuse (tp_visit), so it is refused by name before the appends */
+                ok(rc == 2 && strstr(out, "MARKER must be one rc0: tail"), "a MARKER carrying the rc0: prefix is refused by name and exits 2");
+            }
+            b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hb), "the refused MARKER left batches.tsv byte for byte");
+            b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hc), "the refused MARKER left coverage.tsv byte for byte");
+        }
         {   char h[65]; size_t m = 0; char *b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
             ok(!strcmp(h, h1), "no refused call appended a batch row"); }
         {   char h[65]; size_t m = 0; char *b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
             ok(!strcmp(h, h2), "no refused call appended a coverage row"); }
+    }
+
+    /* case 6: the rollback cannot have the lock, so it must say which rows are still where and exit by a
+       dedicated code instead of a bare timeout.  The fixture never prints the registered marker and is slow
+       enough for the holder below to take the lock before the rollback gets there. */
+    {   char hb[65], hc[65]; size_t m = 0; char *b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, hb); free(b2);
+        b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, hc); free(b2);
+        {   char b[4096], c[4096];
+            /* the row this call will append (the slow fixture, not the passing one) */
+            if (cx_fmt(b, sizeof b, "cr-j\tIMPLEMENTED\tinterfaces\ttools/register-fixture-slow.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/register-fixture-slow.cx\t-\tinterfaces.cr-j\trc0:REGISTER_FIXTURE_OK\n")
+                || cx_fmt(c, sizeof c, "interfaces.cr-j\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tdirty rollback row\ttools/register-fixture-slow.cx\n")) die("row bound", "cr-j");
+            int holder = fork();
+            if (holder == 0) {
+                /* Take the lock only once the row is in the table: register holds it across its own appends
+                   and --list, and the batch run that follows is outside it.  Polling for the row makes the
+                   window deterministic instead of a sleep race. */
+                char lp[4400]; int fd, won = 0; long z; size_t m = 0;
+                for (z = 0; z < 200 && !won; z++) {
+                    char *t = cx_read(bpath, &m);
+                    if (t) { won = strstr(t, b) != 0; free(t); }
+                    if (!won) usleep(10000);
+                }
+                if (!won) _exit(4);
+                pjoin(lp, sizeof lp, tables, ".register.lock");
+                fd = sy_open(lp, O_RDWR | O_CREAT, 0666);
+                if (fd < 0 || sy_flock(fd, 2) != 0) _exit(3);
+                for (z = 0; z < 600; z++) usleep(5000);   /* hold 3 s, well past the rollback's 3x300 ms */
+                _exit(0);
+            }
+            {   char out[1 << 15]; int rc;
+                char *w[16] = { "env", "REGISTER_ROLLBACK_LOCK_MS=300", envtables, "sh", "./unisacc.com", DRIVER, "--",
+                                "cr-j", "tools/register-fixture-slow.cx", "REGISTER_FIXTURE_OK", "dirty rollback row",
+                                "tools/register-fixture-slow.cx", "interfaces", 0 };
+                rc = run(w, out, sizeof out);
+                ok(rc == 3, "a rollback that cannot lock exits 3");
+                ok(strstr(out, "tables may be dirty: leftover row cr-j at batches.tsv:") != 0
+                   && strstr(out, "coverage.tsv:") != 0, "the dirty tables are named with the left-over row's line numbers");
+            }
+            {   int ex = 0, code = 0, sig = 0; sy_wait_status(holder, 0, &ex, &code, &sig); }
+        }
+        /* the rows really are there: the message was not a guess; remove them by exact content */
+        {   char b[4096], c[4096]; int removed = 0;
+            if (cx_fmt(b, sizeof b, "cr-j\tIMPLEMENTED\tinterfaces\ttools/register-fixture-slow.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/register-fixture-slow.cx\t-\tinterfaces.cr-j\trc0:REGISTER_FIXTURE_OK\n")
+                || cx_fmt(c, sizeof c, "interfaces.cr-j\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tdirty rollback row\ttools/register-fixture-slow.cx\n")) die("row bound", "cr-j");
+            removed += take_out(bpath, b) == 0; removed += take_out(cpath, c) == 0;
+            ok(removed == 2, "the dirty rows were still in both tables");
+        }
+        {   char h[65]; b2 = cx_read(bpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hb), "batches.tsv is back to its pre-case content"); }
+        {   char h[65]; b2 = cx_read(cpath, &m); cx_sha256_hex(b2, (long)m, h); free(b2);
+            ok(!strcmp(h, hc), "coverage.tsv is back to its pre-case content"); }
     }
 
     /* cleanup: remove exactly our own rows, then require the originals back byte for byte */

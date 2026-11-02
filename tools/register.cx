@@ -9,14 +9,21 @@
  * (LAYER defaults to interfaces), then runs tests/run.cx --list (metadata_valid=1 required) and
  * tests/run-batch.cx for ID into out/register-ID-PID/.  On any refusal or failure exactly the two appended
  * lines are taken out again (other lines, even ones appended meanwhile, stay) and the exit is 1; an ID that
- * is already registered, a missing CHECK, or a TAB or newline in a field is refused before anything is
- * written (exit 2).  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
+ * is already registered, a missing CHECK, a TAB or newline in a field, or a MARKER that is not one rc0: tail
+ * ([A-Z0-9_]+ — register writes the "rc0:" itself, so a full expect would double the prefix) is refused before
+ * anything is written (exit 2).  The row is also checked in memory before the appends: twelve TAB fields and a
+ * last field exactly "rc0:"+MARKER, the same shape tp_expect accepts, so a malformed row cannot reach the table
+ * where tp_visit would then refuse every batch in the registry.  Prints the BATCH_RUN line and REGISTER<TAB>id=..<TAB>status=REGISTERED|ROLLED_BACK.
  * The six manual steps (two appends, --list, mkdir, run-batch, read the result) as one call.
  *
  * Two registrations of different batches touch the same two files, so the append-validate span holds an
  * exclusive flock on tests/.register.lock: without it a concurrent register sees the other's append and the
  * shared --list validation fails through no fault of either row (observed 2026-11-02, three ROLLED_BACK in a
- * row).  The batch run itself is outside the lock (it only reads the row) and the rollback takes it back:
+ * row).  The batch run itself is outside the lock (it only reads the row) and the rollback takes it back
+ * with its own, longer, retried wait (REGISTER_ROLLBACK_LOCK_MS, default 20000, three attempts): if the lock
+ * is still held the rollback prints "tables may be dirty: leftover row <id> at batches.tsv:<line>,
+ * coverage.tsv:<line>", reports status=DIRTY and exits 3, so a refusal can never end in a silent lock
+ * timeout with the rows still in the registry.  A register call's own lock wait is REGISTER_LOCK_MS:
  * a registered check that registers too would otherwise wait on a lock its own parent holds.  Waiting is capped at REGISTER_LOCK_MS (default and maximum 45000) and a timeout is
  * a named failure, not a silent retry loop.  The lock fd is close-on-exec so run.cx/run-batch cannot inherit
  * it.  Rollback removes exactly this call's two line contents and leaves every other line alone.
@@ -48,19 +55,73 @@ static long rg_lock_ms(void) {
     const char *e = getenv("REGISTER_LOCK_MS"); long v = e ? atol(e) : 45000;
     return v < 100 ? 100 : v > 45000 ? 45000 : v;
 }
-static int rg_lock(void) {
-    long ms = rg_lock_ms(), waited = 0; int fd = sy_open(rg_lockpath(), O_RDWR | O_CREAT, 0666), r;
+/* One bounded attempt at the exclusive lock: the held fd, or -1 when the wait ran out.  Anything but
+   "held by someone else" and EINTR is fatal by name. */
+static int rg_try_lock(long ms) {
+    long waited = 0; int fd = sy_open(rg_lockpath(), O_RDWR | O_CREAT, 0666), r;
     if (fd < 0) rg_die("cannot open lock", rg_lockpath());
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) { sy_close(fd); rg_die("cannot mark lock close-on-exec", rg_lockpath()); }
     for (;;) {
         r = sy_flock(fd, 2 | 4);   /* exclusive, do not wait */
         if (r == 0) return fd;
         if (r != -EWOULDBLOCK && r != -EINTR) { sy_close(fd); rg_die("cannot flock", rg_lockpath()); }
-        if (waited >= ms) { sy_close(fd); fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", rg_lockpath(), ms); exit(2); }
+        if (waited >= ms) { sy_close(fd); return -1; }
         sy_sleep_ms(50); waited += 50;
     }
 }
+static int rg_lock(void) {
+    long ms = rg_lock_ms(); int fd = rg_try_lock(ms);
+    if (fd < 0) { fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", rg_lockpath(), ms); exit(2); }
+    return fd;
+}
+/* The rollback's wait is its own and longer, and it retries: a refusal must end either with the two rows
+   gone or with a named dirty table, never with a bare lock timeout (the rows are then still in the registry
+   and every later run sees them).  REGISTER_ROLLBACK_LOCK_MS overrides it for tests. */
+static long rg_rollback_ms(void) {
+    const char *e = getenv("REGISTER_ROLLBACK_LOCK_MS"); long v = e ? atol(e) : 20000;
+    return v < 100 ? 100 : v > 120000 ? 120000 : v;
+}
+static int rg_lock_rollback(void) {
+    int fd = -1, attempt;
+    for (attempt = 0; attempt < 3; attempt++) { fd = rg_try_lock(rg_rollback_ms()); if (fd >= 0) break; }
+    return fd;
+}
+
+/* 1-based line number of the line equal to LINE (which ends in \n) in PATH, 0 when it is not there */
+static long line_of(const char *path, const char *line) {
+    size_t n; char *b = cx_read(path, &n); long at = 0, ll = tx_len(line, 1 << 16), no = 0;
+    if (!b) return 0;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e + 1;
+        no++;
+        if (ln == ll && tx_same(b + at, ln, line, ll)) { free(b); return no; }
+        at += ln;
+    }
+    free(b);
+    return 0;
+}
 static void rg_unlock(int fd) { if (fd >= 0) { sy_flock(fd, 8); sy_close(fd); } }
+
+/* tp_expect in tools/cxlib/testplan.cx accepts "rc0:" followed by [A-Z0-9_]+ only, and tests/run-batch.cx
+   validates the WHOLE registry through tp_visit: one malformed expect makes every batch refuse (2026-11-02:
+   one uncommitted row "rc0:rc0:ROOT_IDENTITY" blocked 27 census rows).  register.cx writes that field as
+   "rc0:" + MARKER, so a MARKER that is already an expect would become a double prefix; refuse it by name
+   before anything is written. */
+static int rg_marker_ok(const char *m) {
+    if (!*m) return 0;
+    for (; *m; m++) if (!((*m >= 'A' && *m <= 'Z') || (*m >= '0' && *m <= '9') || *m == '_')) return 0;
+    return 1;
+}
+
+/* The pre-check of the row about to be appended, in memory: twelve TAB-separated fields and a last field
+   that is exactly "rc0:" + MARKER.  A malformed row is refused here instead of surfacing later as a
+   metadata_valid!=1 from tests/run.cx --list (or, worse, after a commit, as every batch refusing). */
+static int rg_row_ok(const char *row, const char *marker) {
+    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *last = row;
+    for (; *at; at++) if (*at == '\t') { fields++; last = at + 1; }
+    if (fields != 11 || strncmp(last, "rc0:", 4)) return 0;
+    return strlen(last + 4) == ml + 1 && !memcmp(last + 4, marker, ml) && last[4 + ml] == '\n';
+}
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
 
@@ -124,6 +185,7 @@ int main(int argc, char **argv) {
     if (argc != 6 && argc != 7) rg_die("usage", "ID CHECK.cx MARKER \"COVERAGE TEXT\" \"FILES\" [LAYER]");
     id = argv[1]; check = argv[2]; marker = argv[3]; text = argv[4]; files = argv[5]; layer = argc == 7 ? argv[6] : "interfaces";
     if (!clean(id) || !clean(check) || !clean(marker) || !clean(text) || !clean(files) || !clean(layer) || !*id || !*marker) rg_die("empty field, TAB or newline in a field", 0);
+    if (!rg_marker_ok(marker)) rg_die("MARKER must be one rc0: tail ([A-Z0-9_]+), register adds the \"rc0:\" itself", marker);
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
@@ -131,6 +193,7 @@ int main(int argc, char **argv) {
     if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
     if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t-\t%s\trc0:%s\n", id, layer, check, check, cid, marker) >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
+    if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());
     if (append(rg_cpath(), crow)) { take_out(rg_bpath(), brow); rg_die("cannot append", rg_cpath()); }
     {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
@@ -159,8 +222,14 @@ int main(int argc, char **argv) {
     }
     if (parent[0]) sy_rmdir(parent);   /* the trial run's empty reservation: out/register-ID-PID must not pile up */
     if (!okrun) {
-        int t1, t2;
-        lk = rg_lock();   /* the rollback reads and rewrites both files: take the span back */
+        int t1, t2; long bno, cno;
+        lk = rg_lock_rollback();   /* the rollback reads and rewrites both files: take the span back */
+        if (lk < 0) {   /* never a bare timeout: say which rows are still where, and exit by a dedicated code */
+            bno = line_of(rg_bpath(), brow); cno = line_of(rg_cpath(), crow);
+            fprintf(stderr, "register: tables may be dirty: leftover row %s at batches.tsv:%ld, coverage.tsv:%ld\n", id, bno, cno);
+            printf("REGISTER\tid=%s\tstatus=DIRTY\trows_left=2\n", id);
+            return 3;
+        }
         t1 = take_out(rg_bpath(), brow); t2 = take_out(rg_cpath(), crow);
         rg_unlock(lk);
         printf("REGISTER\tid=%s\tstatus=ROLLED_BACK\trows_removed=%d\n", id, (!t1) + (!t2));
