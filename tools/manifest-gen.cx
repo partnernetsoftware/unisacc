@@ -1,0 +1,50 @@
+/* manifest-gen.cx — B5a：从 split2 产品根生成 6 字段 manifest。
+ *
+ *   manifest-gen ROOT OUT_MANIFEST
+ *
+ * ROOT 是 split2 布局的产品根（含 unisacc.com 启动器 + unisacc.com.dev/ 旁目录，
+ * ape-receipt.txt 列成员）。复用 productpkg.cx 的 pp_member_list 枚举成员（与
+ * pp_product_digest 同一成员集，不另写 ape-receipt 解析），输出：
+ *
+ *   name\tkind\tarch\tsha256\tsize\torder\n
+ *
+ * 每行一个成员，order = 0 起整数（成员在 ape-receipt 里的行顺序，即「原包成员序号」，
+ * 仅用于 implode 还原顺序）。kind 按成员类型：启动器 unisacc.com=base，entry.elf=stage，
+ * p3-package=resource。产品身份 = sha256(规范化 manifest 文本)：行按 order 升序、
+ * TAB 分隔、LF 结尾、无尾空行（不做树形 Merkle）。
+ *
+ * 不改 pp_product_digest / resolver；本工具仅新增，输出与 pp_product_digest 的成员集、
+ * 顺序、sha 对齐（gate 逐字节比对本工具两次运行，成员/order/sha 与 pp_product_digest 对齐）。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use cxlib.productpkg
+
+static void die(const char *s){fprintf(stderr,"manifest-gen: %s\n",s);exit(2);}
+
+int main(int argc,char **argv){
+    char root[4096],out[4400],names[16][64],shas[16][65];
+    long bytes[16];
+    if(argc!=3 || argv[1][0]!='/' || argv[2][0]!='/') die("usage ROOT OUT_MANIFEST(absolute)");
+    if(!realpath(argv[1],root)) die("root");
+    int n = pp_member_list(root, names, shas, bytes, 16);
+    if(n < 1) die("pp_member_list");
+    errno=0;
+    { struct stat st; if(!lstat(argv[2],&st)){die("out-exists");} if(errno!=ENOENT){die("out-lstat");} }
+    FILE *f=fopen(argv[2],"wb");
+    if(!f) die("out-open");
+    int bad=0;
+    for(int i=0;i<n && !bad;i++){
+        /* kind 按成员名推断 */
+        const char *kind = "resource";
+        if(!strcmp(names[i],"unisacc.com")) kind="base";
+        else if(!strcmp(names[i],"entry.elf")) kind="stage";
+        /* arch 空（split2 成员无 arch 区分；booter 按 uname 运行时选） */
+        if(fprintf(f,"%s\t%s\t\t%s\t%ld\t%d\n", names[i], kind, shas[i], bytes[i], i)<0) bad=1;
+    }
+    if(fclose(f)) bad=1;
+    if(bad){ unlink(argv[2]); die("write-failed"); }
+    printf("MANIFEST_GEN\troot=%s\tmembers=%d\tout=%s\n", root, n, argv[2]);
+    return 0;
+}
