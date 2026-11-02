@@ -71,3 +71,18 @@
 - 本项改 `exec/pp/*.tsv`、`exec/facts/*.tsv` 及生成物（weights/kernel/候选）。
 - omp-go 改 tools/cxlib/productpkg.cx、tests/*、allsession；不抢文件。
 - 共用文件（若有）先报 cc。
+
+## 8. 补充裁定后（cc 批准直接改表+lint+钉子）
+
+- token 类 oracle（已确认）：宏名合法首字符 = ASCII 65-90(A-Z) 95(_) 97-122(a-z)，
+  与 lexcls.tsv 的 `A` 类一致；数字 = 48-57（`d` 类）。observation 域是 ASCII 字节值
+  （不是 c 类），见 exec/pp/cli-byte.tsv `CLI.D.next 65-90,95,97-122` 同格式。
+- 改法（MFIND 前插拒绝分支）：
+  `MFIND  48-57,0-64,91-94,96,123-127  DEAD  [["REJECT","macro name must be an identifier"]]`
+  （非标识符首字符的全部字节，不含 65-90/95/97-122；具体范围按表 lint 的 observation 区间语法）。
+- 头名闭合（INC.location 前插）：INC.location 观察 EOF/换行（字节 10）而无 `>`（62）时 REJECT。
+- 钉子：新增 check 登记批（记录 macro-byte.tsv / include-location-byte.tsv 的 sha256 +
+  最近变更提交号/理由行），表被改而钉子未更新则失败。
+- 债务：plans/ 记「两表无生成器，待生成器化；触发条件=第二次需改这两张表时必须先生成器化」。
+- 构造步骤：改表 → table-lint → sim --cov（新分支覆盖）→ model-gen --check/--write →
+  kernel-build → release-build → entry-build → out/ 独立候选实跑 pp-negative。
