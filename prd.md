@@ -77,6 +77,7 @@
 | 装前判产品能不能用 | `sh ./unisacc.com tools/check-dev-product.cx -- ROOT PRODUCT` | 六条：shell 头 / `sh --version` / 不带 `UNISA_CONTAINER` 能编译 / 写入产物 / 内嵌包是新头 |
 | 懒分配表有没有漏守卫 | `sh ./unisacc.com tools/check-asmtext-tables.cx -- ROOT` | 碰表的 asmtext 入口必须调 `at_tables()`；删掉守卫即红 |
 | 标准流写失败可见吗 | `sh ./unisacc.com tools/check-stdio.cx -- ROOT` | `/dev/full` 下 `puts`/`fflush`/`ferror` 必须全报，退出码 15 |
+| 失控 `.cx` 进程看门狗 | `sh ./unisacc.com tools/procguard.cx [--once] [--dry-run]` | 每 10s（`PG_TICK_MS`）自己读 `/proc`，按命令行里的 `.cx` 路径分组；同组 >`PG_MAX`(100) 先 SIGSTOP 全组再 SIGKILL，绝不按 pgid/session 杀，不碰 tmux/claude/自身祖先；日志 `~/.cache/procguard/log` |
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
 

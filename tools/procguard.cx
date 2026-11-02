@@ -1,0 +1,321 @@
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+/* tools/procguard.cx -- fork-bomb guard for the unisacc test surface.
+
+   sh ./unisacc.com tools/procguard.cx [--once] [--dry-run|--enforce]
+        [--max N] [--tick-ms N] [--log PATH]
+
+   Every tick it lists /proc itself (sy_dir_names; no external ps), keeps only
+   processes of this real uid whose command line names a .cx file, groups them
+   by that file (last two path components) and, when one group holds more than
+   MAX members, freezes every member with SIGSTOP and then SIGKILLs them.  No
+   process-group or session kill is ever used: only the matching pids and
+   their in-scope descendants (by ppid) are signalled.
+
+   Never touched: this process, its ancestors (walked through /proc stat), any
+   process whose executable or argv[0] is tmux, byobu, claude, bun, omp,
+   chrome, chromium, grok-bot, sshd, python, codex (or systemd/dbus), and any
+   child of a tmux server (a pane's shell).
+
+   Defaults: MAX 100 (env PG_MAX), tick 10000 ms (env PG_TICK_MS), enforce on
+   (--dry-run reports the same decision and signals nothing), log appended to
+   $HOME/.cache/procguard/log (env PG_LOG).  --once scans once and exits; it
+   skips the single-instance lock so a test or a drill can run beside the
+   resident service.  The resident loop holds an exclusive flock on
+   $HOME/.cache/procguard/lock.
+   An L3 tool: no #include and no direct libc call (cx/sys, cx/text, cx_*). */
+
+#define MAXKEYS 512
+#define KEYLEN 192
+#define MAXREC 8192
+#define PATHLEN 4096
+#define NAMEBUF 65536
+#define O_RDONLY_ 0
+#define O_WRONLY_ 1
+#define O_CREAT_ 0100
+#define O_APPEND_ 02000
+#define SIGSTOP_ 19
+#define SIGKILL_ 9
+#define LOCK_EX_NB (2 | 4)
+
+typedef struct {
+    int pid, ppid, uid, keyidx;
+    char state;
+    char prot;      /* never signal this pid */
+    char marked;    /* frozen as a descendant of a runaway key */
+} Rec;
+
+static Rec recs[MAXREC];
+static int nrec;
+static char keys[MAXKEYS][KEYLEN];
+static int kcount[MAXKEYS];
+static int nkeys, nover, killed_total;
+static int tmux_pid[64], ntmux;
+
+static int max_procs = 100;
+static long tick_ms = 10000;
+static int enforce = 1, once = 0;
+static char logpath[PATHLEN];
+static int logfd = -1;
+static int my_uid;
+static int self_pid;
+static int anc[64];
+static int nanc;
+
+static int parse_num(const char *s, long n, long *out) {
+    long v = 0, i;
+    if (n < 1 || n > 9) return -1;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+/* read at most CAP-1 bytes of PATH into BUF, NUL-terminated; the byte count, or -errno */
+static int read_file(const char *path, char *buf, int cap) {
+    int fd, n;
+    if (cap < 1) return -EINVAL;
+    fd = sy_open_read(path);
+    if (fd < 0) return fd;
+    n = (int)sy_read(fd, buf, cap - 1);
+    sy_close(fd);
+    if (n < 0) return n;
+    buf[n] = 0;
+    return n;
+}
+
+/* /proc/PID/stat into PPID and STATE; 0 or -errno */
+static int proc_stat(int pid, int *ppid, char *state) {
+    char path[64], buf[PATHLEN];
+    long n, i;
+    long close = -1;
+    if (cx_fmt(path, sizeof path, "/proc/%d/stat", pid)) return -EINVAL;
+    n = read_file(path, buf, sizeof buf);
+    if (n <= 0) return n < 0 ? (int)n : -ENOENT;
+    for (i = n - 1; i > 0; i--) if (buf[i] == ')') { close = i; break; }
+    if (close < 0 || close + 3 >= n) return -EIO;
+    if (state) *state = buf[close + 2];
+    {   long a = close + 4, e = a, v = 0, k;
+        while (e < n && buf[e] != ' ') e++;
+        for (k = a; k < e; k++) v = v * 10 + (buf[k] - '0');
+        if (ppid) *ppid = (int)v;
+    }
+    return 0;
+}
+
+static int is_prot_name(const char *base) {
+    static const char *names[] = {"tmux", "byobu", "claude", "bun", "omp", "chrome", "chromium",
+                                  "grok-bot", "sshd", "python", "codex", "systemd", "dbus"};
+    int i;
+    for (i = 0; i < (int)(sizeof names / sizeof names[0]); i++)
+        if (tx_prefixz(base, names[i], tx_len(names[i], 64))) return 1;
+    return 0;
+}
+
+static const char *base_of(const char *p) {
+    const char *b = p;
+    if (!p) return "";
+    for (; *p; p++) if (*p == '/') b = p + 1;
+    return b;
+}
+
+/* copy the word around the first ".cx" of CMD (NUL-separated, may hold spaces
+   inside a shell -c string) into OUT, cut to its last two path components;
+   1 when found */
+static int key_from_cmd(const char *cmd, long n, char *out, int cap) {
+    long i;
+    for (i = 0; i + 2 < n; i++) {
+        if (cmd[i] != '.' || cmd[i + 1] != 'c' || cmd[i + 2] != 'x') continue;
+        if (i + 3 < n && ((cmd[i + 3] >= 'a' && cmd[i + 3] <= 'z') || (cmd[i + 3] >= '0' && cmd[i + 3] <= '9') || cmd[i + 3] == '_')) continue;
+        {   long s = i, e = i + 3, last = -1, prev = -1, k, cut;
+            while (s > 0 && cmd[s - 1] && cmd[s - 1] != ' ' && cmd[s - 1] != '"' && cmd[s - 1] != '\'' && cmd[s - 1] != '=') s--;
+            while (e < n && cmd[e] && cmd[e] != ' ' && cmd[e] != '"' && cmd[e] != '\'' && cmd[e] != ';') e++;
+            while (s + 1 < e && cmd[s] == '.' && cmd[s + 1] == '/') s += 2;
+            for (k = s; k < e; k++) if (cmd[k] == '/') { prev = last; last = k; }
+            if (last >= 0 && prev >= 0) s = prev + 1;   /* keep the last two components */
+            cut = e - s;
+            if (cut < 1 || cut >= cap) return 0;
+            {   int c; for (c = 0; c < (int)cut; c++) out[c] = cmd[s + c]; out[cut] = 0; }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int key_index(const char *key) {
+    int i;
+    for (i = 0; i < nkeys; i++) if (tx_eqz(keys[i], key)) return i;
+    if (nkeys >= MAXKEYS) return -1;
+    {   int k; for (k = 0; key[k] && k < KEYLEN - 1; k++) keys[nkeys][k] = key[k]; keys[nkeys][k] = 0; }
+    kcount[nkeys] = 0;
+    return nkeys++;
+}
+
+static void load_ancestors(void) {
+    int pid = self_pid, guard = 0, ppid = 0;
+    nanc = 0;
+    while (pid > 1 && nanc < 63 && guard++ < 128) {
+        anc[nanc++] = pid;
+        if (proc_stat(pid, &ppid, 0) < 0) break;
+        pid = ppid;
+    }
+    anc[nanc++] = 1;
+}
+
+static void scan(void) {
+    char names[NAMEBUF];
+    int dfd, n, i, j;
+    nrec = 0; nkeys = 0; nover = 0; ntmux = 0;
+    dfd = sy_open("/proc", O_RDONLY_, 0);
+    if (dfd < 0) { printf("procguard: cannot open /proc: %d\n", dfd); return; }
+    n = (int)sy_dir_names(dfd, names, sizeof names);
+    sy_close(dfd);
+    if (n < 0) { printf("procguard: cannot list /proc: %d\n", n); return; }
+    {   int at = 0;
+        for (i = 0; i < n && at < (int)sizeof names && nrec < MAXREC; i++) {
+            const char *name = names + at;
+            long nl = tx_len(name, 64), v = 0;
+            at += (int)nl + 1;
+            if (nl < 1 || nl > 9 || parse_num(name, nl, &v) < 0 || v <= 1) continue;
+            {   int pid = (int)v, ppid = 0, keyidx, k;
+                char state = '?', key[KEYLEN], path[64], cmd[PATHLEN], exe[PATHLEN];
+                long cl;
+                int prot = 0;
+                sy_stat_t st;
+                if (proc_stat(pid, &ppid, &state) < 0) continue;
+                if (state == 'Z' || state == 'X') continue;
+                if (cx_fmt(path, sizeof path, "/proc/%d", pid)) continue;
+                if (sy_stat(path, &st) < 0 || (int)st.uid != my_uid) continue;
+                exe[0] = 0;
+                if (!cx_fmt(path, sizeof path, "/proc/%d/exe", pid)) {
+                    long el = sy_readlink(path, exe, sizeof exe - 1);
+                    if (el > 0) exe[el] = 0; else exe[0] = 0;
+                }
+                if (!cx_fmt(path, sizeof path, "/proc/%d/cmdline", pid)) {
+                    cl = read_file(path, cmd, sizeof cmd);
+                } else cl = -1;
+                if (cl <= 0) continue;
+                if (!key_from_cmd(cmd, cl, key, sizeof key)) continue;
+                keyidx = key_index(key);
+                if (keyidx < 0) continue;
+                if (pid == self_pid) prot = 1;
+                for (k = 0; k < nanc; k++) if (anc[k] == pid) prot = 1;
+                if (is_prot_name(base_of(exe))) prot = 1;
+                if (is_prot_name(base_of(cmd))) prot = 1;
+                if (base_of(exe)[0] && tx_prefixz(base_of(exe), "tmux", 4) && ntmux < 64) tmux_pid[ntmux++] = pid;
+                recs[nrec].pid = pid;
+                recs[nrec].ppid = ppid;
+                recs[nrec].uid = (int)st.uid;
+                recs[nrec].state = state;
+                recs[nrec].keyidx = keyidx;
+                recs[nrec].prot = (char)prot;
+                recs[nrec].marked = 0;
+                nrec++;
+                kcount[keyidx]++;
+            }
+        }
+    }
+    /* a pane's shell is a direct child of a tmux server: never signal it */
+    for (i = 0; i < nrec; i++) {
+        for (j = 0; j < ntmux; j++) if (recs[i].ppid == tmux_pid[j]) { recs[i].prot = 1; break; }
+    }
+    for (i = 0; i < nkeys; i++) if (kcount[i] > max_procs) nover++;
+}
+
+static void logline(const char *s) {
+    if (logfd < 0) logfd = sy_open(logpath, O_WRONLY_ | O_CREAT_ | O_APPEND_, 0644);
+    if (logfd >= 0) sy_write_all(logfd, s, tx_len(s, 4096));
+}
+
+static void act(void) {
+    int k, i, pass;
+    for (k = 0; k < nkeys; k++) {
+        int n = 0, first = 0, hits = 0;
+        char line[1024];
+        if (kcount[k] <= max_procs) continue;
+        for (i = 0; i < nrec; i++) if (recs[i].keyidx == k && !recs[i].prot) { n++; if (!first) first = recs[i].pid; }
+        if (!enforce) {
+            printf("procguard: DRY key=%s count=%d would-kill=%d root=%d\n", keys[k], kcount[k], n, first);
+            if (!cx_fmt(line, sizeof line, "ts=%ld DRY key=%s count=%d would-kill=%d root=%d\n", sy_now_ms(), keys[k], kcount[k], n, first)) logline(line);
+            continue;
+        }
+        /* members and their in-scope descendants (three ppid rounds) */
+        for (i = 0; i < nrec; i++) if (recs[i].keyidx == k && !recs[i].prot) recs[i].marked = 1;
+        for (pass = 0; pass < 3; pass++) {
+            int added = 0;
+            for (i = 0; i < nrec; i++) {
+                int j;
+                if (recs[i].marked || recs[i].prot) continue;
+                for (j = 0; j < nrec; j++) if (recs[j].marked && recs[j].pid == recs[i].ppid) { recs[i].marked = 1; added++; break; }
+            }
+            if (!added) break;
+        }
+        /* freeze every member first, then kill: no member can fork in between */
+        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) sy_signal(recs[i].pid, SIGSTOP_);
+        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) { if (sy_signal(recs[i].pid, SIGKILL_) >= 0) hits++; }
+        for (i = 0; i < nrec; i++) recs[i].marked = 0;
+        killed_total += hits;
+        printf("procguard: ENFORCE key=%s count=%d killed=%d root=%d\n", keys[k], kcount[k], hits, first);
+        if (!cx_fmt(line, sizeof line, "ts=%ld ENFORCE key=%s count=%d killed=%d root=%d\n", sy_now_ms(), keys[k], kcount[k], hits, first)) logline(line);
+    }
+}
+
+static void usage(void) {
+    printf("sh ./unisacc.com tools/procguard.cx [--once] [--dry-run|--enforce] [--max N] [--tick-ms N] [--log PATH]\n"
+           "env: PG_MAX (100), PG_TICK_MS (10000), PG_LOG ($HOME/.cache/procguard/log)\n");
+}
+
+int main(int argc, char **argv) {
+    const char *home = sy_env_or("HOME", "/tmp");
+    const char *e;
+    char dir[PATHLEN], lockpath[PATHLEN], line[512];
+    int i, lockfd = -1;
+    long v;
+    self_pid = sy_pid();
+    {   sy_stat_t st; if (sy_stat("/proc/self", &st) < 0) { printf("procguard: cannot stat /proc/self\n"); return 2; } my_uid = (int)st.uid; }
+    e = sy_env_or("PG_MAX", ""); if (e[0] && parse_num(e, tx_len(e, 16), &v) == 0) max_procs = (int)v;
+    e = sy_env_or("PG_TICK_MS", ""); if (e[0] && parse_num(e, tx_len(e, 16), &v) == 0) tick_ms = v;
+    e = sy_env_or("PG_LOG", "");
+    logpath[0] = 0;
+    if (e[0] && cx_fmt(logpath, sizeof logpath, "%s", e)) logpath[0] = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--once")) once = 1;
+        else if (tx_eqz(argv[i], "--dry-run")) enforce = 0;
+        else if (tx_eqz(argv[i], "--enforce")) enforce = 1;
+        else if (tx_eqz(argv[i], "--max") && i + 1 < argc) { if (parse_num(argv[i + 1], tx_len(argv[i + 1], 16), &v) < 0) { usage(); return 2; } max_procs = (int)v; i++; }
+        else if (tx_eqz(argv[i], "--tick-ms") && i + 1 < argc) { if (parse_num(argv[i + 1], tx_len(argv[i + 1], 16), &v) < 0) { usage(); return 2; } tick_ms = v; i++; }
+        else if (tx_eqz(argv[i], "--log") && i + 1 < argc) { if (cx_fmt(logpath, sizeof logpath, "%s", argv[i + 1])) return 2; i++; }
+        else if (tx_eqz(argv[i], "--help") || tx_eqz(argv[i], "-h")) { usage(); return 0; }
+        else { printf("procguard: unknown argument %s\n", argv[i]); usage(); return 2; }
+    }
+    if (max_procs < 1) max_procs = 1;
+    if (tick_ms < 50) tick_ms = 50;
+    if (!logpath[0] && cx_fmt(logpath, sizeof logpath, "%s/.cache/procguard/log", home)) return 2;
+    if (cx_fmt(dir, sizeof dir, "%s/.cache", home)) return 2;
+    {   int r = sy_mkdir(dir, 0755); if (r < 0 && r != -EEXIST) { printf("procguard: cannot make %s: %d\n", dir, r); return 3; } }
+    if (cx_fmt(dir, sizeof dir, "%s/.cache/procguard", home)) return 2;
+    {   int r = sy_mkdir(dir, 0755); if (r < 0 && r != -EEXIST) { printf("procguard: cannot make %s: %d\n", dir, r); return 3; } }
+    load_ancestors();
+    if (!once) {
+        if (cx_fmt(lockpath, sizeof lockpath, "%s/.cache/procguard/lock", home)) return 2;
+        lockfd = sy_open(lockpath, 02 | O_CREAT_, 0644);
+        if (lockfd < 0) { printf("procguard: cannot open lock: %d\n", lockfd); return 3; }
+        if (sy_flock(lockfd, LOCK_EX_NB) < 0) { printf("procguard: another instance holds the lock; exiting\n"); return 0; }
+    }
+    for (;;) {
+        scan();
+        if (!cx_fmt(line, sizeof line, "ts=%ld scan procs=%d keys=%d over=%d max=%d mode=%s\n",
+                    sy_now_ms(), nrec, nkeys, nover, max_procs, enforce ? "enforce" : "dry")) logline(line);
+        if (nover) act();
+        if (once) { printf("procguard: once procs=%d keys=%d over=%d killed=%d mode=%s\n", nrec, nkeys, nover, killed_total, enforce ? "enforce" : "dry"); break; }
+        sy_sleep_ms(tick_ms);
+    }
+    if (lockfd >= 0) sy_close(lockfd);
+    return 0;
+}

@@ -1,0 +1,120 @@
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+/* tools/check-procguard.cx -- checks tools/procguard.cx for real.
+
+     sh ./unisacc.com tools/check-procguard.cx
+
+   Builds two throwaway "test file" symlinks (out/procguard-check-PID/pgA.cx,
+   pgB.cx -> the host sleep) and starts 6 A, 2 B and 4 plain sleep processes
+   (12 children, at most 14 processes at once).  With --max 5 the A group is
+   over the threshold, B and the plain ones are not.  Two scans run:
+   --dry-run must report the A group and signal nothing, --enforce must kill
+   exactly the 6 A members (SIGKILL, checked through wait status) and leave B,
+   the plain sleeps, this process and its ancestors alive.  The log must hold
+   the ENFORCE line and nothing about B.
+   Prints "PASS name" / "FAIL name", then CX_PROCGUARD<TAB>failed=N; exit 1 on
+   any FAIL.  An L3 tool: no #include and no direct libc call. */
+
+static int n_ok, n_bad;
+static void ok(int c, const char *name) { printf("%s %s\n", c ? "PASS" : "FAIL", name); if (c) n_ok++; else n_bad++; }
+
+static int read_file(const char *path, char *buf, int cap) {
+    int fd = sy_open_read(path), n;
+    if (cap < 1) return -EINVAL;
+    if (fd < 0) return fd;
+    n = (int)sy_read(fd, buf, cap - 1);
+    sy_close(fd);
+    if (n < 0) return n;
+    buf[n] = 0;
+    return n;
+}
+
+/* 'Z' for a zombie or gone pid, its /proc stat state otherwise, '?' on error */
+static char proc_state(int pid) {
+    char path[64], buf[512];
+    int n = cx_fmt(path, sizeof path, "/proc/%d/stat", pid);
+    if (n) return '?';
+    n = read_file(path, buf, sizeof buf);
+    if (n <= 0) return 'Z';
+    {   int i; for (i = n - 1; i > 0; i--) if (buf[i] == ')') return i + 2 < n ? buf[i + 2] : '?'; }
+    return '?';
+}
+
+static int alive(int pid) { char s = proc_state(pid); return s != 'Z' && s != '?'; }
+
+static const char *sleep_bin(void) {
+    sy_stat_t st;
+    if (sy_stat("/bin/sleep", &st) == 0 && st.kind == 'f') return "/bin/sleep";
+    if (sy_stat("/usr/bin/sleep", &st) == 0 && st.kind == 'f') return "/usr/bin/sleep";
+    return 0;
+}
+
+/* run procguard through the product, capture stdout */
+static int run_pg(const char *verb, int max, const char *log, char *out, int cap) {
+    char cmd[2048];
+    char *av[4];
+    int cut = 0;
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "PG_LOG='%s' sh %s tools/procguard.cx --once --%s --max %d",
+               log, sy_env_or("UNISACC", "./unisacc.com"), verb, max)) return -EINVAL;
+    return sy_run(av, out, cap, &cut);
+}
+
+int main(int argc, char **argv) {
+    char dir[1024], pa[1100], pb[1100], log[1100];
+    int pids[12], np = 0, i, rc;
+    char out[8192];
+    const char *sb = sleep_bin();
+    int mypid = sy_pid();
+    (void)argc; (void)argv;
+    if (!sb) { printf("FAIL sleep binary\nCX_PROCGUARD\tfailed=1\n"); return 1; }
+    if (cx_fmt(dir, sizeof dir, "out/procguard-check-%d", mypid)) return 2;
+    {   int r = sy_mkdir(dir, 0755);
+        if (r < 0 && r != -EEXIST) { printf("FAIL cannot make %s (%d)\nCX_PROCGUARD\tfailed=1\n", dir, r); return 1; }
+    }
+    if (cx_fmt(pa, sizeof pa, "%s/pgA.cx", dir) || cx_fmt(pb, sizeof pb, "%s/pgB.cx", dir) || cx_fmt(log, sizeof log, "%s/log", dir))
+        return 2;
+    sy_unlink(pa); sy_unlink(pb);
+    if (sy_symlink(sb, pa) < 0 || sy_symlink(sb, pb) < 0) { printf("FAIL cannot link the fixtures\nCX_PROCGUARD\tfailed=1\n"); return 1; }
+
+    /* 6 A, 2 B (same fixture family), 4 plain sleeps that carry no .cx */
+    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+    for (i = 0; i < 2; i++) { char *av[] = {pb, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+    for (i = 0; i < 4; i++) { char *av[] = {"sleep", "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+    ok(np == 12, "spawn: 6 A + 2 B + 4 plain run");
+    sy_sleep_ms(300);
+
+    rc = run_pg("dry-run", 5, log, out, sizeof out);
+    ok(rc == 0, "dry-run exits 0");
+    ok(tx_contains(out, tx_len(out, sizeof out), "DRY key=", 8), "dry-run reports the A group");
+    ok(tx_contains(out, tx_len(out, sizeof out), "count=6", 7), "dry-run counts 6 A members");
+    {   int all = 1; for (i = 0; i < np; i++) if (!alive(pids[i])) all = 0; ok(all, "dry-run signals nothing"); }
+
+    rc = run_pg("enforce", 5, log, out, sizeof out);
+    ok(rc == 0, "enforce exits 0");
+    ok(tx_contains(out, tx_len(out, sizeof out), "ENFORCE key=", 12), "enforce acts on the A group");
+    ok(tx_contains(out, tx_len(out, sizeof out), "killed=6", 8), "enforce kills 6 A members");
+    {   int a_ok = 1, rest = 1;
+        for (i = 0; i < np; i++) {
+            int ex = 0, code = 0, sig = 0, w;
+            if (i < 6) {
+                w = sy_wait_status(pids[i], 0, &ex, &code, &sig);
+                if (w != pids[i] || ex != 0 || sig != 9) a_ok = 0;
+            } else if (!alive(pids[i])) rest = 0;
+        }
+        ok(a_ok, "every A member died by SIGKILL");
+        ok(rest, "B and the plain sleeps are untouched");
+    }
+    {   char lg[8192]; int n = read_file(log, lg, sizeof lg);
+        ok(n > 0 && tx_contains(lg, n, "ENFORCE key=", 12), "log records the ENFORCE decision");
+        ok(n > 0 && !tx_contains(lg, n, "pgB.cx", 6), "log has nothing about the B group");
+    }
+
+    for (i = 6; i < np; i++) { sy_signal(pids[i], 9); sy_wait_status(pids[i], 0, 0, 0, 0); }
+    printf("CX_PROCGUARD\tfailed=%d\n", n_bad);
+    return n_bad ? 1 : 0;
+}
