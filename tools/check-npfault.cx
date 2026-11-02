@@ -1,0 +1,100 @@
+/* tools/check-npfault.cx -- the UNISACC_NP_FAULT test seam in cxlib/netpack.cx np_run.
+ *   sh ./unisacc.com tools/check-npfault.cx
+ * A. default (unset): a timed-out batch is UNKNOWN, residue 0, no survivor suffix, no FAULT_INJECTED;
+ * B. =residue: the same batch is FAIL (a survivor is never UNKNOWN), the suffix names the injection,
+ *    and FAULT_INJECTED is printed on stderr;
+ * C. any other value is refused by name before anything is spawned;
+ * D. the seam does nothing on a batch that never times out (PASS, no injection). */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int bad, checks;
+static char root[4096];
+static void ok(int c, const char *w) { checks++; printf("%s\t%s\n", c ? "PASS" : "FAIL", w); if (!c) bad++; }
+static void die(const char *a) { fprintf(stderr, "check-npfault: %s\n", a); exit(2); }
+
+/* one run-batch invocation; merged into R.  Extra env entries are passed as ENV1/ENV2 (0 when unused). */
+static void batch(const char *id, const char *outdir, const char *env1, const char *env2, np_result *r) {
+    char *v[10]; char *envs[3]; int n = 0; char why[1200];
+    envs[0] = (char *)env1; envs[1] = (char *)env2; envs[2] = 0;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tests/run-batch.cx"; v[n++] = "--";
+    v[n++] = root; v[n++] = (char *)outdir; v[n++] = (char *)id; v[n] = 0;
+    {   int t = np_run(v, root, env1 ? envs : 0, 60, r, why, sizeof why);
+        if (t && !r->errn) { fprintf(stderr, "check-npfault: transport %s\n", why); exit(2); }
+    }
+}
+
+int main(void) {
+    char hold[4400], tabs[4400], rel[4400], envt[4440], bpath[4500], cpath[4500];
+    char ob[4][4500];
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(hold, sizeof hold, "%s/out/npfault-%d", root, (int)sy_pid())) die("path bound");
+    if (cx_fmt(tabs, sizeof tabs, "%s/tests", hold)) die("path bound");
+    if (cx_fmt(rel, sizeof rel, "out/npfault-%d/tests", (int)sy_pid())) die("path bound");
+    {   int r = sy_mkdir(hold, 0700); if (r < 0 && r != -EEXIST) die("mkdir");
+        r = sy_mkdir(tabs, 0700); if (r < 0 && r != -EEXIST) die("mkdir");
+    }
+    if (cx_fmt(envt, sizeof envt, "UNISACC_TABLES=%s", rel)) die("path bound");
+    {   int i;
+        for (i = 0; i < 4; i++) { if (cx_fmt(ob[i], sizeof ob[i], "%s/o%d", hold, i)) die("path bound"); if (sy_mkdir(ob[i], 0700) < 0) die("mkdir out"); }
+    }
+    if (cx_fmt(bpath, sizeof bpath, "%s/batches.tsv", tabs) || cx_fmt(cpath, sizeof cpath, "%s/coverage.tsv", tabs)) die("path bound");
+    {   /* private copy of both tables plus one row whose entry outlives the bound */
+        size_t n = 0; char *b; FILE *f;
+        b = cx_read("tests/batches.tsv", &n); if (!b) die("read batches"); f = fopen(bpath, "wb"); if (!f) die("open batches");
+        if (fwrite(b, 1, n, f) != n) die("write batches");
+        free(b);
+        fputs("zz-npfault-hang\tIMPLEMENTED\tinterfaces\ttools/npfault-hang.cx\tSOURCE\tlnx/x86_64\t5\t-\ttools/npfault-hang.cx\t-\tinterfaces.zz-npfault-hang\trc0:ZZ_NPFAULT_OK\n", f);
+        if (fclose(f) != 0) die("close batches");
+        b = cx_read("tests/coverage.tsv", &n); if (!b) die("read coverage"); f = fopen(cpath, "wb"); if (!f) die("open coverage");
+        if (fwrite(b, 1, n, f) != n) die("write coverage");
+        free(b);
+        fputs("interfaces.zz-npfault-hang\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\ttimeout fixture for the residue test seam\ttools/npfault-hang.cx\n", f);
+        if (fclose(f) != 0) die("close coverage");
+    }
+
+    {   np_result r;
+        batch("zz-npfault-hang", ob[0], envt, 0, &r);
+        ok(strstr(r.out, "status=UNKNOWN") != 0, "A: without the seam a timeout is UNKNOWN");
+        ok(strstr(r.out, "transport=-1") != 0, "A: the batch reports the timeout transport");
+        ok(strstr(r.err, "FAULT_INJECTED") == 0, "A: nothing is injected by default");
+        ok(strstr(r.err, " survived)") == 0, "A: no survivor suffix without a survivor");
+        np_free(&r);
+    }
+    {   char fenv[64], *p; np_result r;
+        if (cx_fmt(fenv, sizeof fenv, "UNISACC_NP_FAULT=residue")) die("path bound");
+        batch("zz-npfault-hang", ob[1], envt, fenv, &r);
+        ok(strstr(r.out, "status=FAIL") != 0, "B: a survivor is FAIL, never UNKNOWN");
+        ok(strstr(r.err, "FAULT_INJECTED") != 0, "B: the seam says FAULT_INJECTED");
+        ok((p = strstr(r.err, " survived)")) != 0, "B: the TimeoutExpired text gains the survivor suffix");
+        ok(p && strstr(r.err, "injected survived)") != 0, "B: the suffix names the injection, not a pid");
+        np_free(&r);
+    }
+    {   np_result r;
+        batch("zz-npfault-hang", ob[2], envt, "UNISACC_NP_FAULT=reisdue", &r);
+        ok(strstr(r.err, "UNISACC_NP_FAULT=reisdue refused (only residue)") != 0, "C: a misspelt value is refused by name");
+        ok(strstr(r.out, "status=FAIL") != 0 && strstr(r.err, "FAULT_INJECTED") == 0, "C: the refusal is a FAIL, not a silent pass");
+        np_free(&r);
+    }
+    {   np_result r;
+        batch("cx-reaper", ob[3], envt, "UNISACC_NP_FAULT=residue", &r);
+        ok(strstr(r.out, "status=PASS") != 0, "D: a batch that never times out is still PASS");
+        ok(strstr(r.err, "FAULT_INJECTED") == 0, "D: no injection without a kill");
+        np_free(&r);
+    }
+    {   /* cleanup: only our private copy and the reserved output names */
+        char p[4500]; int i, left = 0;
+        if (!cx_fmt(p, sizeof p, "%s/batches.tsv", tabs)) sy_unlink(p);
+        if (!cx_fmt(p, sizeof p, "%s/coverage.tsv", tabs)) sy_unlink(p);
+        if (!cx_fmt(p, sizeof p, "%s/.register.lock", tabs)) sy_unlink(p);
+        if (sy_rmdir(tabs) != 0) left++;
+        for (i = 0; i < 4; i++) if (sy_rmdir(ob[i]) != 0) left++;
+        if (sy_rmdir(hold) != 0) left++;
+        ok(left == 0, "E: the private table directory and its output names are removed");
+    }
+    printf("CX_NPFAULT\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

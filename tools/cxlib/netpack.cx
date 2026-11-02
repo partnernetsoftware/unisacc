@@ -759,10 +759,21 @@ void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r-
    waitpid here would steal the caller's own children -- so a caller that wants a pid to be gone from /proc
    reaps them itself after the tree is dead. */
 int np_subreaper(void) { return rp_subreaper(); }
+/* Test seam for the residue path (tools/ only; cx/ and src/ never read it): UNISACC_NP_FAULT=residue makes a
+   timeout report one fake survivor, so the "survived)" suffix and the run-batch FAIL branch can be exercised
+   on a machine where nothing actually survives.  Any other value is refused by name; unset is the normal path. */
+static int np_fault(void) {
+    const char *v = getenv("UNISACC_NP_FAULT");
+    if (!v || !*v) return 0;
+    if (!strcmp(v, "residue")) return 1;
+    return -1;
+}
 int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
     pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
+    int fault = np_fault();
     res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0;
+    if (fault < 0) { snprintf(why, wl, "ValueError: UNISACC_NP_FAULT=%s refused (only residue)", getenv("UNISACC_NP_FAULT")); return -1; }
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
     fcntl(pf[1], F_SETFD, FD_CLOEXEC);
     pid = fork();
@@ -817,6 +828,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
             int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
             if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
             res->residue = sv;
+            if (fault == 1) { res->residue = 1; fputs("FAULT_INJECTED\tresidue\n", stderr); }
             { int w; do { w = waitpid(pid, &st, WNOHANG); } while (w < 0 && errno == EINTR); }
             if (open_o) close(po[0]);
             if (open_e) close(pe[0]);
@@ -826,7 +838,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
                 for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
                 np_puts(&l, "]' timed out after ");
                 snprintf(t, sizeof t, "%d seconds", secs); np_puts(&l, t);
-                if (sv > 0) { np_puts(&l, " ("); np_puts(&l, rep); np_puts(&l, " survived)"); }
+                if (res->residue > 0) { np_puts(&l, " ("); np_puts(&l, sv > 0 ? rep : "injected"); np_puts(&l, " survived)"); }
                 snprintf(why, wl, "%s", l.p); free(l.p);
             }
             return -1;
