@@ -27,6 +27,12 @@
 - predefines：最大样本与原 C 内容 sha `f82465ea…6f43c78`；空对象 rc0、非法 rc2。
 - routes：最大样本 routes.tsv sha `69f9a583…b62d296`（308 行，cmp=0）；空/非法 rc1。
 - compilerpack2 audit+kernel：audit 树相对内容 sha `bd463644…26ec1f`（cmp=0）；空模型/坏 kernel 双方 rc1。
+- pack P1/P2：1 行 sha `cbb7fb6f…b93886`、20 行 sha `884937b3…740960`，与原 C cmp=0；全量 308 行超 60s，瓶颈 `tools/cxlib/netpack.cx:480/734` 的 `np_compact_q`，约 O(总 Q 动作 + 每行前缀重放)，大模型常数高，留纪元后优化。
+
+## P3 压缩口径备选
+- A 复刻 zlib9 比特流：与现 C 字节等价；代价是精确复刻 zlib 编码/CRC，维护面大且需锁定版本。
+- B 改用自带 `cx/text/deflate.cx`：确定性、无宿主 zlib；代价是 P3 字节变，包身份/SID/旧 pin/receipt 全部换标，属纪元决策。
+- 先做 P1/P2 uncompressed 片；P3 选 A 或 B 留纪元裁定，不动手实现。
 
 ## 必须等纪元
 - `wave`/`final` 的替换、`tools/bound` 删除、旧 C 归档：等 W5 慢车道纪元结束。
