@@ -16,6 +16,29 @@ static char root[4096];
 static void ok(int c, const char *w) { checks++; printf("%s\t%s\n", c ? "PASS" : "FAIL", w); if (!c) bad++; }
 static void die(const char *a) { fprintf(stderr, "check-npfault: %s\n", a); exit(2); }
 
+/* COPY SRC into DST, retrying while the source moves under us: register.cx rewrites the real tables under a
+   lock its readers do not take, so a plain single read can catch a truncated file and make every case here
+   fail for a reason that is not this check's subject.  A stable source (same bytes on two reads) is the
+   condition to proceed. */
+static int copy_stable(const char *src, const char *dst) {
+    int attempt;
+    for (attempt = 0; attempt < 40; attempt++) {
+        size_t n1 = 0, n2 = 0; char *a = cx_read(src, &n1), *b; FILE *f; int bad = 0;
+        if (!a) return 1;
+        b = cx_read(src, &n2);
+        if (!b) { free(a); return 1; }
+        if (n1 != n2 || memcmp(a, b, n1)) { free(a); free(b); usleep(20000); continue; }
+        f = fopen(dst, "wb");
+        if (!f) { free(a); free(b); return 1; }
+        if (fwrite(a, 1, n1, f) != n1) bad = 1;
+        if (fclose(f) != 0) bad = 1;
+        free(a); free(b);
+        if (!bad) return 0;
+        usleep(20000);
+    }
+    return 1;
+}
+
 /* one run-batch invocation; merged into R.  Extra env entries are passed as ENV1/ENV2 (0 when unused). */
 static void batch(const char *id, const char *outdir, const char *env1, const char *env2, np_result *r) {
     char *v[10]; char *envs[3]; int n = 0; char why[1200];
@@ -42,19 +65,20 @@ int main(void) {
         for (i = 0; i < 4; i++) { if (cx_fmt(ob[i], sizeof ob[i], "%s/o%d", hold, i)) die("path bound"); if (sy_mkdir(ob[i], 0700) < 0) die("mkdir out"); }
     }
     if (cx_fmt(bpath, sizeof bpath, "%s/batches.tsv", tabs) || cx_fmt(cpath, sizeof cpath, "%s/coverage.tsv", tabs)) die("path bound");
-    {   /* private copy of both tables plus one row whose entry outlives the bound */
-        size_t n = 0; char *b; FILE *f;
-        b = cx_read("tests/batches.tsv", &n); if (!b) die("read batches"); f = fopen(bpath, "wb"); if (!f) die("open batches");
-        if (fwrite(b, 1, n, f) != n) die("write batches");
-        free(b);
-        fputs("zz-npfault-hang\tIMPLEMENTED\tinterfaces\ttools/npfault-hang.cx\tSOURCE\tlnx/x86_64\t5\t-\ttools/npfault-hang.cx\t-\tinterfaces.zz-npfault-hang\trc0:ZZ_NPFAULT_OK\n", f);
-        if (fclose(f) != 0) die("close batches");
-        b = cx_read("tests/coverage.tsv", &n); if (!b) die("read coverage"); f = fopen(cpath, "wb"); if (!f) die("open coverage");
-        if (fwrite(b, 1, n, f) != n) die("write coverage");
-        free(b);
-        fputs("interfaces.zz-npfault-hang\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\ttimeout fixture for the residue test seam\ttools/npfault-hang.cx\n", f);
-        if (fclose(f) != 0) die("close coverage");
+    /* private copy of both tables plus one row whose entry outlives the bound */
+    if (copy_stable("tests/batches.tsv", bpath) || copy_stable("tests/coverage.tsv", cpath)) die("copy tables");
+    {   FILE *f = fopen(bpath, "ab"); int bad = 0;
+        if (!f) die("open batches");
+        if (fputs("zz-npfault-hang\tIMPLEMENTED\tinterfaces\ttools/npfault-hang.cx\tSOURCE\tlnx/x86_64\t5\t-\ttools/npfault-hang.cx\t-\tinterfaces.zz-npfault-hang\trc0:ZZ_NPFAULT_OK\n", f) < 0) bad = 1;
+        if (fclose(f) != 0) bad = 1;
+        if (bad) die("append batches");
+        f = fopen(cpath, "ab");
+        if (!f) die("open coverage");
+        if (fputs("interfaces.zz-npfault-hang\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\ttimeout fixture for the residue test seam\ttools/npfault-hang.cx\n", f) < 0) bad = 1;
+        if (fclose(f) != 0) bad = 1;
+        if (bad) die("append coverage");
     }
+
 
     {   np_result r;
         batch("zz-npfault-hang", ob[0], envt, 0, &r);
