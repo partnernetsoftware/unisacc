@@ -100,6 +100,135 @@ char *pp_read_package(const char *root, size_t *n) {
     return cx_read(p, n);
 }
 
+/* ---- product identity -------------------------------------------------------------------
+ *
+ * "Unchanged" must mean the whole product, not one file. Under PP_SPLIT the launcher is 624
+ * bytes and the package is megabytes, so hashing the launcher alone lets a batch rewrite the
+ * package and still look unchanged -- a gap found while closing the 2026-11-02 structural
+ * failures (plans/product-identity-2026-11-02.md).
+ *
+ * PP_APE degenerates to sha256(whole file), exactly what the old guard computed, so old
+ * evidence is not reinterpreted. PP_SPLIT hashes the member set:
+ *
+ *   members sorted by basename -> one line per member "name<TAB>sha256<TAB>bytes" ->
+ *   sha256(the lines)
+ *
+ * Sorted by name, not by directory order; each member hashed on its own; a missing member is a
+ * named refusal, never a silently shorter set. */
+#define PP_MAX_MEMBERS 16
+#define PP_NAME 256
+
+const char *pp_identity_kind(const char *root) {
+    int l = pp_layout(root);
+    if (l == PP_APE) return "ape1";
+    if (l == PP_SPLIT) return "split1";
+    return "none";
+}
+
+/* TEXT into DST, bounded; returns the length copied. */
+static int pp_put(char *dst, int cap, const char *text) {
+    int i = 0;
+    if (!dst || cap < 1) return 0;
+    while (text && text[i] && i < cap - 1) { dst[i] = text[i]; i++; }
+    dst[i] = 0;
+    return i;
+}
+
+/* STRCMP over NUL-terminated strings. */
+static int pp_cmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+/* 0 and the sha256 hex of SRC/NAME, or -1 when it is missing or unreadable. */
+static int pp_file_hex(const char *src, const char *name, char hex[65]) {
+    char p[4400];
+    size_t n = 0;
+    char *b;
+    if (hex) hex[0] = 0;
+    if (pp_join(src, name, p, (int)sizeof p)) return -1;
+    if (sy_exists(p) != 1) return -1;
+    b = cx_read(p, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    free(b);
+    return 0;
+}
+
+/* "NAME<TAB>HEX<TAB>BYTES\n" appended to CANON at *AT; -1 when it would not fit. */
+static int pp_canon_add(char *canon, long cap, long *at, const char *name, const char *hex, long bytes) {
+    char line[400], num[24];
+    long n = 0, i, v = bytes < 0 ? 0 : bytes;
+    int d = 0;
+    for (i = 0; name[i] && n < 300; i++) line[n++] = name[i];
+    line[n++] = '\t';
+    for (i = 0; hex[i] && n < 340; i++) line[n++] = hex[i];
+    line[n++] = '\t';
+    do { num[d++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+    while (d > 0) line[n++] = num[--d];
+    line[n++] = '\n';
+    if (*at + n > cap) return -1;
+    for (i = 0; i < n; i++) canon[(*at)++] = line[i];
+    return 0;
+}
+
+/* The launcher's basename, which is a member of ROOT itself rather than of the dev directory. */
+static int pp_is_launcher(const char *name) {
+    return pp_cmp(name, "unisacc.com") == 0;
+}
+
+/* Identity of the installed product at ROOT: 0 and HEX, or -1 (missing member, bad layout). */
+int pp_product_digest(const char *root, char hex[65]) {
+    char names[PP_MAX_MEMBERS][PP_NAME];
+    char canon[4096], h[65], p[4400], devsrc[4400], name[PP_NAME];
+    int n = 0, i, j, l = pp_layout(root);
+    long at = 0, a = 0, rn = 0;
+    char *r;
+    if (hex) hex[0] = 0;
+    if (l == PP_APE) return pp_file_hex(root, "unisacc.com", hex);
+    if (l != PP_SPLIT) return -1;
+    if (pp_join2(root, pp_dev_dir, "", devsrc, (int)sizeof devsrc)) return -1;
+    pp_put(names[n], PP_NAME, "unisacc.com"); n++;
+    /* members named by the receipt, else the two names this file documents */
+    if (pp_join(root, "ape-receipt.txt", p, (int)sizeof p)) return -1;
+    r = cx_read(p, &rn);
+    if (r) {
+        while (a < rn && n < PP_MAX_MEMBERS) {
+            long e = a;
+            while (e < rn && r[e] != '\n') e++;
+            if (pp_receipt_line(r + a, e - a, name, PP_NAME) && !pp_is_launcher(name)) {
+                int dup = 0;
+                for (j = 0; j < n; j++) if (pp_cmp(names[j], name) == 0) dup = 1;
+                if (!dup) { pp_put(names[n], PP_NAME, name); n++; }
+            }
+            a = e + 1;
+        }
+        free(r);
+    }
+    if (n == 1) {
+        pp_put(names[n], PP_NAME, pp_pkg_name); n++;
+        pp_put(names[n], PP_NAME, "entry.elf"); n++;
+    }
+    /* insertion sort by basename */
+    for (i = 1; i < n; i++) {
+        pp_put(name, PP_NAME, names[i]);
+        j = i - 1;
+        while (j >= 0 && pp_cmp(names[j], name) > 0) { pp_put(names[j + 1], PP_NAME, names[j]); j--; }
+        pp_put(names[j + 1], PP_NAME, name);
+    }
+    for (i = 0; i < n; i++) {
+        const char *src = pp_is_launcher(names[i]) ? root : devsrc;
+        long bytes = 0;
+        sy_stat_t st;
+        if (pp_file_hex(src, names[i], h)) return -1;
+        if (!pp_join(src, names[i], p, (int)sizeof p) && sy_stat(p, &st) == 0) bytes = (long)st.size;
+        if (pp_canon_add(canon, (long)sizeof canon - 1, &at, names[i], h, bytes)) return -1;
+    }
+    canon[at] = 0;
+    cx_sha256_hex(canon, (size_t)at, hex);
+    return 0;
+}
+
 /* Copy NAME from SRC to DST, creating or truncating DST/NAME; 0, or -1. */
 static int pp_copy_member(const char *src, const char *dst, const char *name) {
     char sp[4400], dp[4400];

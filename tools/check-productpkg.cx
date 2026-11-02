@@ -93,24 +93,37 @@ int main(void) {
         ok(sy_exists(entry) == 1, "copy-has-entry");
     }
 
-    {   /* step 0 of plans/product-identity-2026-11-02.md: the guard as it exists today */
-        char g[4400], gl[4400], gp[4400], h1[65], h2[65];
+    {   /* plans/product-identity-2026-11-02.md: identity is the member set, and the guard must
+           see a rewritten package. Before the identity change this case failed: the old guard
+           hashed only the launcher, so flipping a byte in the megabyte package left it unchanged. */
+        char g[4400], gp[4400], h1[65], h2[65];
         size_t n = 0;
         char *b;
         int copied;
         if (cx_fmt(g, sizeof g, "%s/guard", work)) die("guard dir");
         copied = pp_copy_product(root, g) == 0;
         ok(copied, "guard-copy-ok");
-        if (cx_fmt(gl, sizeof gl, "%s/unisacc.com", g)) die("guard launcher");
         if (cx_fmt(gp, sizeof gp, "%s/unisacc.com.dev/p3-package.bin", g)) die("guard package");
-        if (!tx_eqz(pp_layout_name(pp_layout(root)), "split")) ok(1, "guard-sees-the-package");
-        else {
-            file_digest(gl, h1);
+        ok(pp_product_digest(g, h1) == 0 && h1[0], "identity-computable");
+        ok(pp_product_digest(g, h2) == 0 && tx_eqz(h1, h2), "identity-stable");
+        if (tx_eqz(pp_identity_kind(g), "split1")) {
             b = cx_read(gp, &n);
             if (b && n > 1) { b[n / 2] = (char)(b[n / 2] ^ 1); cx_write(gp, b, n); }
             free(b);
-            file_digest(gl, h2);
-            ok(!tx_eqz(h1, h2), "guard-sees-the-package");
+            ok(pp_product_digest(g, h2) == 0 && !tx_eqz(h1, h2), "identity-sees-a-rewritten-package");
+        }
+    }
+
+    {   /* a member that is missing must be a refusal, not a shorter set */
+        char g[4400], ge[4400];
+        char h[65];
+        int copied;
+        if (cx_fmt(g, sizeof g, "%s/guard-missing", work)) die("missing dir");
+        copied = pp_copy_product(root, g) == 0;
+        if (copied && tx_eqz(pp_identity_kind(g), "split1")) {
+            if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("missing entry");
+            if (sy_unlink(ge)) die("unlink entry");
+            ok(pp_product_digest(g, h) != 0 && !h[0], "identity-refuses-a-missing-member");
         }
     }
 
