@@ -130,16 +130,43 @@ int us_library_bridge_call(const void *entry,
 
 因此 `snprintf("%f", …)` 在 osx/arm64 走的是"浮点进栈"路径,必须单独一个向量覆盖。
 
-## 4. 头文件:单一来源,不复制两份
+## 4. 字节表进 include/:枚举与落点(计划,不改树)
 
-- 否决"复制成 include/librarycall.h"。
-- 优先**符号链接** `include/librarycall.h -> ../exec/c/librarycall.h`;**单一来源**,与
-  `tools/sys -> ../cx/sys` 同一约定。
-- 未核实点(下一步实测):`include/` 的扫描器是否接受符号链接 —— 具体是
-  `tests/cxinclude-boundary.tsv` 的列举方式、以及打包时 `release-build p3` 的 include 根枚举
-  (它会按"每个文件一个资源"处理,链接可能导致同一内容两份或用错路径)。
-- 若链接不可接受,退到**生成**:由生成器从 `exec/c/librarycall.h` 生成 `include/librarycall.h`,
-  带 `--check` 防漂移。两条都是"单一来源",区别只在构建期还是符号链接。
+实测:include/ 当前 **45 个普通文件、0 个符号链接**;`tools/release-build.cx:167` 用
+`sy_dir_names` **动态枚举** include 根(p3 的 receipt 按"每个文件一个资源"记录),所以新增文件会被自动收进去,
+但**符号链接是否被收、按什么路径收未核实**——这是"否决复制两份、改链接"那条路要先解决的问题。
+
+### 需要的文件与落点
+
+| 文件 | 来源 | 落点 | 说明 |
+|---|---|---|---|
+| `include/ffi_bridge_bytes.h` | 生成器 | `include/` | 每个目标两个 `static const unsigned char ffi_bridge_<arch>[]` + 长度;仅被 `unisacc_ffi.h` 引用 |
+| `tools/gen-ffi-bridge.cx` | 手写 | `tools/` | 读 `out/…/*.o` 的 `.text`,按目标产出上面的头;带 `--check` 防漂移 |
+| `tools/check-ffi-bridge-bytes.cx` | 手写 | `tools/` | `--check` 失败即红;登记为批次 |
+| 事实表行 | 手工 | `exec/facts/…` | "目标 → 桥源文件 → 期望长度"一行,供生成器与检查共用 |
+
+### 生成链与 `--check`
+
+```text
+exec/c/librarycall_<arch>.S
+  -> tools/asm-source.cx <arch>            (预处理)
+  -> assembler (out/c43-native-kernel-06 同类产物)
+  -> objcopy -O binary --only-section=.text
+  -> tools/gen-ffi-bridge.cx <arch>        (产出 include/ffi_bridge_bytes.h)
+  -> tools/gen-ffi-bridge.cx --check       (重算并比对,不一致即失败)
+```
+
+### 为什么不用符号链接
+
+单一来源在**语义**上是对的,但链接能否被 p3 的 include 枚举接受**未核实**,而这一步一旦错,
+产品里会少一个资源、表现为运行期"缺定义"。生成 + `--check` 同样保证单一来源(源头是 `.S`),
+且不会引入"枚举器看不看得见链接"这种未知。**结论:用生成,不用链接。**
+
+### 待你审的点
+
+1. 字节表放 `include/` 会**进产品资源**,即产品身份变一次(entry + P3),与 §1 的结论一致;
+2. 是否同意生成器落在 `tools/`(构造链车道)而不是 `cx/`(产品车道);
+3. `--check` 需要在哪个批次里跑(建议与 `check-ffi-bridge` 同批或紧随其后)。
 
 ## 5. 验证与顺序(删掉"每步单独候选")
 
