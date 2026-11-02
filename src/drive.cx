@@ -207,6 +207,27 @@ static unsigned char dv_one = 1;
 /* Parse the command line, answer --version/--help, and expand the source list.
    Returns -1 to continue with the routing, or the process exit code (0 for
    --version/--help, which do stop). Split out of dv_main (C44-PACKAGE-01). */
+/* Object inputs are joined into one tape before the tape route: every source
+   must be an object, then dv_link_objects builds the tape. Split out of dv_main
+   (C44-PACKAGE-01); returns 1 when the caller must stop. */
+static int dv_link_objects_route(const char *src, char **srcv, int *nsrcp,
+                                 unsigned char **gotb, long *gotn, int *as_tape) {
+    /* Local prototypes: a .cx module refuses a top-level declaration it does not define. */
+    int cxp_object_path(const char *); int dv_fail(const char *);
+    int dv_link_objects(int, char **, unsigned char **, long *);
+    int j;
+    j = 0;
+    while (j < *nsrcp) {
+        if (!cxp_object_path(srcv[j]))
+            return dv_fail("mix of objects and sources: compile each source with -c -b os/arch -funit first");
+        j = j + 1;
+    }
+    if (dv_link_objects(*nsrcp, srcv, gotb, gotn)) return 1;
+    *nsrcp = 1;
+    *as_tape = 1;
+    return 0;
+}
+
 static int dv_parse(CxcState *opts, char **argv, int argc, char *why,
                     const char **srcp, int *nsrcp, int *argstartp) {
     /* Local prototypes: a .cx module refuses a top-level declaration it does not define. */
@@ -465,18 +486,7 @@ extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long
             return 1;
         }
         if (rc) return dv_fail(why2);
-        if (cxp_object_path(src)) {
-            int j;
-            j = 0;
-            while (j < nsrc) {
-                if (!cxp_object_path(dv_srcv[j]))
-                    return dv_fail("mix of objects and sources: compile each source with -c -b os/arch -funit first");
-                j = j + 1;
-            }
-            if (dv_link_objects(nsrc, dv_srcv, &gotb, &gotn)) return 1;
-            nsrc = 1;
-            as_tape = 1;
-        }
+        if (cxp_object_path(src) && dv_link_objects_route(src, dv_srcv, &nsrc, &gotb, &gotn, &as_tape)) return 1;
         tgt = opts.target;
         runit2 = opts.runit;
         clear2 = 0;
