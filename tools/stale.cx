@@ -9,7 +9,11 @@
  * file name when that name is unique among tracked files.  Each referencing file counts once.  Age is days
  * since the last commit touching the candidate.  Prints, for refs <= K (default 0) and age >= N (default 0):
  *   CAND<TAB>refs=R<TAB>age_d=A<TAB>PATH<TAB>[first referrer]
- * then STALE<TAB>candidates=C<TAB>listed=L<TAB>scanned_files=F.  It only reports; moving a file to archive/ and
+ * then STALE<TAB>candidates=C<TAB>listed=L<TAB>scanned_files=F<TAB>exempt=E.  A candidate named by the explicit table
+ * below is counted as exempt and not listed: its only references are ones this scanner cannot see (a name built
+ * by snprintf, a platform-convention marker).  The table is not a match relaxation: the reference rules stay as
+ * above, so a new false-positive class needs a new entry with its reason.  tools/stale/fixture/ is deliberately
+ * not exempt (check-stale.cx asserts that its orphan and referrer files are listed).  It only reports; moving a file to archive/ and
  * repairing links (tools/doc-links.cx --fix-moved) is the caller's decision. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -44,8 +48,27 @@ static char *slurp_cmd(char **argv, long *n) {
 static unsigned hash(const char *s, long n) { unsigned h = 2166136261u; long i; for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u; return h & ((1 << 15) - 1); }
 static int closed(const char *p, long n) { return tx_prefix(p, n, "archive/", 8) || tx_prefix(p, n, "ujs/", 4) || tx_prefix(p, n, "apps/csih/", 10); }
 
+/* Explicit exemptions: a candidate here exists despite having no path-like reference, so listing it as stale
+ * would be a false positive.  Every entry states the reason; a trailing "/" exempts the whole directory.
+ * Keep this list short and justified: adding an entry hides a real file, so verify the reference really is
+ * invisible to the token scan before extending it. */
+static const char *exempt[] = {
+    "docs/.nojekyll",   /* GitHub Pages requires this empty marker file; no text ever names it. */
+    "exec/c/asm/",      /* tools/kernel-build.cx composes exec/c/asm/<unit>_<ISA>.S with snprintf, so the whole name never appears. */
+    0
+};
+static int exempted(const char *p, long n) {
+    int i;
+    for (i = 0; exempt[i]; i++) {
+        long e = tx_len(exempt[i], 256);
+        if (e > 0 && exempt[i][e - 1] == '/') { if (tx_prefix(p, n, exempt[i], e)) return 1; }
+        else if (tx_same(p, n, exempt[i], e)) return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    long days = 0, refsmax = 0, ln, at, now = sy_wall_s(), files = 0; int a = 1, k, listed = 0, epoch = 0;
+    long days = 0, refsmax = 0, ln, at, now = sy_wall_s(), files = 0; int a = 1, k, listed = 0, epoch = 0, nexempt = 0;
     char *all, *log;
     while (a < argc && argv[a][0] == '-') {
         if (a + 1 >= argc) st_die("usage: [--days N] [--refs-max K] PREFIX...");
@@ -124,9 +147,10 @@ int main(int argc, char **argv) {
     for (k = 0; k < ncand; k++) {
         long age = cand[k].last ? (now - cand[k].last) / 86400 : -1;
         if (cand[k].refs > refsmax || age < days) continue;
+        if (exempted(cand[k].path, cand[k].pl)) { nexempt++; continue; }
         sy_printf("CAND\trefs=%d\tage_d=%ld\t%.*s\t%s\n", cand[k].refs, age, (int)cand[k].pl, cand[k].path, cand[k].who ? cand[k].who : "-");
         listed++;
     }
-    sy_printf("STALE\tcandidates=%d\tlisted=%d\tscanned_files=%ld\n", ncand, listed, files);
+    sy_printf("STALE\tcandidates=%d\tlisted=%d\tscanned_files=%ld\texempt=%d\n", ncand, listed, files, nexempt);
     return 0;
 }

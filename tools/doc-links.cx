@@ -1,6 +1,6 @@
 /* tools/doc-links.cx -- find Markdown links to repo paths that do not exist.
  *
- *   sh ./unisacc.com tools/doc-links.cx -- (FILE.md... | --tracked [--skip PREFIX[:PREFIX...]])
+ *   sh ./unisacc.com tools/doc-links.cx -- (FILE.md... | --tracked [--skip PREFIX[:PREFIX...]] | --live [--skip ...])
  *
  * Reads every inline link [text](target) of the given Markdown files (--tracked: every tracked *.md),
  * skipping fenced code blocks and inline code spans.  A target with a scheme (http:, https:, mailto:, ...)
@@ -8,7 +8,10 @@
  * space, and the path is resolved against the Markdown file's directory (a leading / against the repo
  * root).  Missing paths print BROKEN<TAB>FILE:LINE<TAB>target; the run ends with
  * DOC_LINKS<TAB>files=N<TAB>links=L<TAB>broken=B and exits 1 when B > 0.  --skip leaves out files under the
- * given prefixes (e.g. archive/:ujs/:apps/csih/). */
+ * given prefixes (e.g. archive/:ujs/:apps/csih/).  --live is --tracked with the skip set frozen to the
+ * prefixes whose links are historical by design (archive/), owned by another lane (ujs/, apps/csih/) or
+ * deliberately broken fixtures (tools/doc-links/fixture/): archive/:ujs/:apps/csih/:tools/doc-links/fixture/.
+ * An explicit --skip after --live overrides that set. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use text.text
@@ -171,17 +174,25 @@ static char *ls_files(const char *pattern, long *n) {
     return list;
 }
 
+/* the prefixes --live freezes: historical archives, another lane's tree, and this tool's own broken fixtures */
+#define LIVE_SKIP "archive/:ujs/:apps/csih/:tools/doc-links/fixture/"
+
 int main(int argc, char **argv) {
-    long files = 0; int k, a = 1;
+    long files = 0; int k, a = 1, live = 0, tracked_mode = 0;
     if (argc >= 2 && tx_eqz(argv[1], "--fix-moved")) {   /* rewrite a broken link whose file name is tracked exactly once */
         fix_mode = 1; a = 2;
         tracked = ls_files(0, &tracked_n);
         if (!tracked) return 2;
     }
-    if (argc > a && tx_eqz(argv[a], "--tracked")) {
-        const char *skip = argc == a + 3 && tx_eqz(argv[a + 1], "--skip") ? argv[a + 2] : 0;
-        long at = 0, ln; char *list = ls_files("*.md", &ln);
-        if (!list || (argc != a + 1 && !skip)) { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES])\n"); return 2; }
+    if (argc > a && tx_eqz(argv[a], "--live")) { live = 1; tracked_mode = 1; a++; }
+    if (!tracked_mode && argc > a && tx_eqz(argv[a], "--tracked")) { tracked_mode = 1; a++; }
+    if (tracked_mode) {
+        const char *skip = 0; long at = 0, ln; char *list;
+        if (argc == a + 2 && tx_eqz(argv[a], "--skip")) skip = argv[a + 1];
+        else if (argc != a) { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES] | --live [--skip PREFIXES])\n"); return 2; }
+        if (live && !skip) skip = LIVE_SKIP;
+        list = ls_files("*.md", &ln);
+        if (!list) { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES] | --live [--skip PREFIXES])\n"); return 2; }
         while (at < ln) {
             const char *p = list + at; long pl = tx_len(p, ln - at);
             if (pl <= 0) break;
@@ -190,7 +201,7 @@ int main(int argc, char **argv) {
         }
     } else if (argc > a) {
         for (k = a; k < argc; k++) { if (scan(argv[k]) < 0) return 2; files++; }
-    } else { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES])\n"); return 2; }
+    } else { fprintf(stderr, "usage: doc-links [--fix-moved] (FILE.md... | --tracked [--skip PREFIXES] | --live [--skip PREFIXES])\n"); return 2; }
     printf("DOC_LINKS\tfiles=%ld\tlinks=%ld\tbroken=%ld\tfixed=%ld\n", files, links, broken, fixed);
     return broken ? 1 : 0;
 }
