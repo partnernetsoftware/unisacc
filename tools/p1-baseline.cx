@@ -21,8 +21,23 @@
  * DIFF <case> <field>. Exit 0 only when every case matches.
  */
 static char root[4096], outdir[4096], base[4096], com[4400], work[4400];
+static char candarg[4400];
+static int usesh;
 static int failures, checked;
 
+/* The product is an APE (a shell script that unpacks itself) while a freshly
+   built candidate is a raw ELF: only the former needs "sh" in front. */
+static int is_elf(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    int yes = b && n >= 4 && b[0] == 127 && b[1] == 'E' && b[2] == 'L' && b[3] == 'F';
+    if (b) mm_free(b);
+    return yes;
+}
+static void add_head(char **v, int *i) {
+    if (usesh) { v[*i] = "sh"; *i = *i + 1; }
+    v[*i] = com; *i = *i + 1;
+}
 static void die(const char *a) { sy_eprintf("p1-baseline: REFUSE %s\n", a); sy_exit(2); }
 static void join(char *dst, int cap, const char *a, const char *b) {
     if (cx_fmt(dst, (size_t)cap, "%s/%s", a, b)) die("path-bound");
@@ -95,7 +110,13 @@ int main(int argc, char **argv) {
     size_t n = 0;
     char *h;
     if (argc < 3) die("usage: ROOT OUTDIR [--check BASELINE_DIR]");
-    if (argc >= 5 && tx_eqz(argv[3], "--check")) checkmode = 1;
+    { int a;
+      for (a = 3; a < argc; a++) {
+          if (tx_eqz(argv[a], "--check") && a + 1 < argc) { checkmode = 1; a = a + 1; }
+          else if (tx_eqz(argv[a], "--candidate") && a + 1 < argc) { a = a + 1; { int k = 0; while (argv[a][k]) { candarg[k] = argv[a][k]; k = k + 1; } candarg[k] = 0; } }
+          else die("bad option");
+      }
+    }
     if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
     /* The output directory is created when absent; realpath needs it to exist. */
     if (sy_exists(argv[2]) != 1 && sy_mkdir(argv[2], 0700)) die("outdir mkdir");
@@ -107,7 +128,10 @@ int main(int argc, char **argv) {
         while (tmp[k]) { base[k] = tmp[k]; k = k + 1; }
         base[k] = 0;
     }
-    join(com, sizeof com, root, "unisacc.com");
+    usesh = 1;
+    if (candarg[0]) { char tmp[4096]; if (sy_realpath(candarg, tmp, (int)sizeof tmp) < 0) die("candidate"); { int k = 0; while (tmp[k]) { com[k] = tmp[k]; k = k + 1; } com[k] = 0; } }
+    else join(com, sizeof com, root, "unisacc.com");
+    if (is_elf(com)) usesh = 0;
     join(srcp, sizeof srcp, root, "tests/p1-baseline-case.cx");
     join(t1, sizeof t1, outdir, "t.o");
     join(t2, sizeof t2, outdir, "t2.o");
@@ -124,47 +148,47 @@ int main(int argc, char **argv) {
     }
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "--version"; v[i] = 0;
+    add_head(v, &i); v[i++] = "--version"; v[i] = 0;
     one("version", v); if (checkmode) cmp_one("version");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "-c"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    add_head(v, &i); v[i++] = "-c"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
     v[i++] = srcp; v[i++] = "-o"; v[i++] = t1; v[i] = 0;
     one("c_object", v); if (checkmode) cmp_one("c_object");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "-S"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    add_head(v, &i); v[i++] = "-S"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
     v[i++] = srcp; v[i++] = "-o"; v[i++] = "-"; v[i] = 0;
     one("S_asm", v); if (checkmode) cmp_one("S_asm");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "-run"; v[i++] = srcp; v[i] = 0;
+    add_head(v, &i); v[i++] = "-run"; v[i++] = srcp; v[i] = 0;
     one("run_prog", v); if (checkmode) cmp_one("run_prog");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "-E"; v[i++] = srcp; v[i] = 0;
+    add_head(v, &i); v[i++] = "-E"; v[i++] = srcp; v[i] = 0;
     one("E_pre", v); if (checkmode) cmp_one("E_pre");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "as"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    add_head(v, &i); v[i++] = "as"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
     v[i++] = srcp; v[i++] = "-o"; v[i++] = t2; v[i] = 0;
     one("as_cmd", v); if (checkmode) cmp_one("as_cmd");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "-o"; v[i++] = imgp;
+    add_head(v, &i); v[i++] = "-o"; v[i++] = imgp;
     v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = srcp; v[i] = 0;
     one("o_image", v); if (checkmode) cmp_one("o_image");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "nm"; v[i++] = t1; v[i] = 0;
+    add_head(v, &i); v[i++] = "nm"; v[i++] = t1; v[i] = 0;
     one("nm_cmd", v); if (checkmode) cmp_one("nm_cmd");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "objdump"; v[i++] = t1; v[i] = 0;
+    add_head(v, &i); v[i++] = "objdump"; v[i++] = t1; v[i] = 0;
     one("objdump_cmd", v); if (checkmode) cmp_one("objdump_cmd");
 
     i = 0;
-    v[i++] = "sh"; v[i++] = com; v[i++] = "ar"; v[i++] = "rcs"; v[i++] = ar2p;
+    add_head(v, &i); v[i++] = "ar"; v[i++] = "rcs"; v[i++] = ar2p;
     v[i++] = t1; v[i] = 0;
     one("ar_cmd", v); if (checkmode) cmp_one("ar_cmd");
 
