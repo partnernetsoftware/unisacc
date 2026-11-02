@@ -1,0 +1,50 @@
+/* check-speed-probe: samples for tools/speed-probe.cx
+ * Two synthetic jobs emit RR_TIME lines; the probe must parse ns -> ms and
+ * rank by total. Samples live in a temp dir under out/, never in the tree. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define CAP (1L << 18)
+static int failed;
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tspeed-probe.%s\n", ok ? "PASS" : "FAIL", n); }
+static char out[CAP];
+
+static int run(char **av) {
+    char *argv[8]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[2048];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/speed-probe.cx"; argv[i++] = "--";
+    for (int k = 0; av[k] && i < 7; k++) argv[i++] = av[k];
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (n < CAP - 1 && (r = sy_read(ofd, out + n, CAP - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 512)) >= 0; }
+/* position of NEEDLE in OUT (or -1); -2 when a later needle is missing */
+static long at(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 256)); }
+
+int main(void) {
+    sy_mkdir("out", 0755); sy_mkdir("out/speed-probe-samples", 0755);
+    /* big: lower 1500 elf 2400; small: lower 100 elf 100 */
+    const char *big = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=750000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=1500000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=2400000000\\n\");return 0;}\n";
+    const char *small = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=lower\\trc=0\\tns=100000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=100000000\\n\");return 0;}\n";
+    if (cx_write("out/speed-probe-samples/big.cx", big, tx_len(big, 4096))) { ck(0, "write-big"); return 1; }
+    if (cx_write("out/speed-probe-samples/small.cx", small, tx_len(small, 4096))) { ck(0, "write-small"); return 1; }
+    const char *jobs = "small\tout/speed-probe-samples/small.cx\nbig\tout/speed-probe-samples/big.cx\n";
+    if (cx_write("out/speed-probe-samples/jobs.tsv", jobs, tx_len(jobs, 4096))) { ck(0, "write-jobs"); return 1; }
+    char *av[3]; av[0] = "out/speed-probe-samples/jobs.tsv"; av[1] = "out/speed-probe-samples/out"; av[2] = 0;
+    int rc = run(av);
+    ck(rc == 0, "exit-zero");
+    ck(at("small\t200\t100\t100\t0\t0") >= 0, "small-parsed");
+    ck(at("big\t4650\t1500\t2400\t750\t0") >= 0, "big-parsed");
+    ck(at("1\tbig") >= 0 && at("1\tbig") < at("2\tsmall"), "ranked-by-total");
+    ck(at("top10\ttotal_ms") >= 0, "top10-header");
+    printf("SPEED_PROBE_CHECKS\tassertions=6\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

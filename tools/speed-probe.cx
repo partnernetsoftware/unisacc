@@ -1,0 +1,125 @@
+/* speed-probe: per-object compile timing on the installed product.
+ * Usage: sh ./unisacc.com tools/speed-probe.cx -- JOBS.tsv OUTDIR
+ * JOBS.tsv: one line per job: NAME<TAB>ARGV... (ARGV executed as
+ *   sh ./unisacc.com <ARGV...> with UNISACC_RR_TIME=1, stderr captured).
+ * Writes OUTDIR/<NAME>.rr and OUTDIR/per-object.tsv with
+ *   name  total_ms  lower_ms  elf_ms  tapecheck_ms  rc
+ * then prints the top 10 by total_ms. No shell, no libc: everything
+ * through sys.fs / sys.proc / text.*.
+ * The default per-object recipe (67 objects of out/c44-five-lnx) is built
+ * by the caller; see plans/speed-hotspots-2026-11-02.md.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.num
+
+#define LINE (1L << 16)
+#define OUTCAP (1L << 20)
+
+static char path_line[LINE];
+static char rrtmp[OUTCAP];
+
+static int die(const char *m) { printf("speed-probe: %s\n", m); return 2; }
+
+/* run one job; returns child exit code or -1 */
+static int run_job(const char *name, char *argvline, const char *rrpath) {
+    char *argv[64]; int i = 0, k = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0;
+    long n = 0, r; char junk[4096];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com";
+    while (argvline[k] && i < 62) {
+        argv[i++] = argvline + k;
+        while (argvline[k] && argvline[k] != ' ') k++;
+        if (argvline[k]) argvline[k++] = 0;
+    }
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (n < OUTCAP - 1 && (r = sy_read(efd, rrtmp + n, OUTCAP - 1 - n)) > 0) n += r;
+    rrtmp[n] = 0;
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    (void)name; (void)rrpath;
+    return code;
+}
+
+/* ns for "RR_TIME<TAB>inference<TAB>stage=KEY<TAB>rc=0<TAB>ns=VALUE"; -1 if absent */
+static long stage_ns(const char *s, const char *stage) {
+    long n = tx_len(s, OUTCAP), at = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (tx_prefix(s + at, e - at, "RR_TIME\t", 8) && tx_find(s + at, e - at, "\tstage=", 7) >= 0) {
+            long p = tx_find(s + at, e - at, "\tstage=", 7) + at + 7;
+            long q = p; while (q < e && s[q] != '\t') q++;
+            if (tx_len(stage, 64) == q - p && !tx_cmp(s + p, q - p, stage, q - p)) {
+                long v = tx_find(s + at, e - at, "\tns=", 4);
+                if (v >= 0) { v += at + 4; long acc = 0;
+                    while (v < e && s[v] >= '0' && s[v] <= '9') acc = acc * 10 + (s[v++] - '0');
+                    return acc; }
+            }
+        }
+        at = e + 1;
+    }
+    return -1;
+}
+
+typedef struct { char name[64]; long total, lower, elf, tchk; int code; } row;
+static row rows[256];
+
+int main(int argc, char **argv) {
+    /* argv[0] is this script's path; user args start at argv[1] */
+    if (argc < 2) return die("usage: -- JOBS.tsv OUTDIR");
+    const char *jobs = argv[1], *outdir = argc > 2 ? argv[2] : "out/speed";
+    long n = tx_len(jobs, 512);
+    { long jn = 0; char *jb = cx_read(jobs, &jn); if (!jb || jn >= LINE) return die("cannot read jobs file"); for (long q = 0; q < jn; q++) path_line[q] = jb[q]; path_line[jn] = 0; free(jb); }
+    (void)n;
+    int nr = 0, i;
+    long at = 0, total_lines = tx_len(path_line, LINE);
+    while (at < total_lines && nr < 256) {
+        long e = at;
+        while (e < total_lines && path_line[e] != '\n') e++;
+        if (e > at) {
+            long t = tx_find(path_line + at, e - at, "\t", 1);
+            if (t > 0) {
+                long nl = t < 63 ? t : 63;
+                for (i = 0; i < nl; i++) rows[nr].name[i] = path_line[at + i];
+                rows[nr].name[nl] = 0;
+                char arg[LINE]; long al = e - at - t - 1;
+                for (i = 0; i < al && i < LINE - 1; i++) arg[i] = path_line[at + t + 1 + i];
+                arg[al < LINE - 1 ? al : LINE - 1] = 0;
+                rows[nr].code = run_job(rows[nr].name, arg, 0);
+                rows[nr].lower = stage_ns(rrtmp, "lower");
+                rows[nr].elf = stage_ns(rrtmp, "elf");
+                rows[nr].tchk = stage_ns(rrtmp, "tapecheck");
+                if (rows[nr].lower < 0) rows[nr].lower = 0;
+                if (rows[nr].elf < 0) rows[nr].elf = 0;
+                if (rows[nr].tchk < 0) rows[nr].tchk = 0;
+                rows[nr].total = rows[nr].lower + rows[nr].elf + rows[nr].tchk;
+                nr++;
+            }
+        }
+        at = e + 1;
+    }
+    /* TSV on stdout; top 10 by total (selection over nr <= 256) */
+    printf("per-object\ttotal_ms\tlower_ms\telf_ms\ttapecheck_ms\trc\n");
+    for (i = 0; i < nr; i++)
+        printf("%s\t%ld\t%ld\t%ld\t%ld\t%d\n", rows[i].name, rows[i].total / 1000000,
+               rows[i].lower / 1000000, rows[i].elf / 1000000, rows[i].tchk / 1000000, rows[i].code);
+    {
+        int used[256]; for (i = 0; i < nr; i++) used[i] = 0;
+        printf("\ntop10\ttotal_ms\tlower_ms\telf_ms\ttapecheck_ms\n");
+        for (int k = 0; k < 10 && k < nr; k++) {
+            int best = -1;
+            for (i = 0; i < nr; i++) if (!used[i] && (best < 0 || rows[i].total > rows[best].total)) best = i;
+            if (best < 0) break;
+            used[best] = 1;
+            printf("%d\t%s\t%ld\t%ld\t%ld\t%ld\n", k + 1, rows[best].name, rows[best].total / 1000000,
+                   rows[best].lower / 1000000, rows[best].elf / 1000000, rows[best].tchk / 1000000);
+        }
+    }
+    (void)outdir;
+    return 0;
+}
