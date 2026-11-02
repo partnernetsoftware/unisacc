@@ -35,7 +35,9 @@ cc 的 5 项队列，窗口内只做定位，不改 `tools/ tests/ cx/ src/`。�
 - 选行块在 `tools/census.cx:88-95`：`col(s,l,0,id,…)` 取 id，之后依次过滤 `IMPLEMENTED` / `lnx/x86_64` / `mat=="-"`。
 - 改：在 `mat` 过滤后加一条前缀判定 `tx_prefix(id, len, "full-", 5)` → 计入新的 `skipped_domain` 计数（不并进 `skipped_materials`，报告里要能分开看）。
 - 理由：`full-*` 是域聚合批，要求同候选全格；单宿主上 5 条 OPEN 固定为外平台 `NEEDS_FOREIGN_HOST` + 本机 `MISSING`，必 FAIL 且不代表回归。上一次普查 19/30 红项来自这一组。
-- 验：`tools/check-census.cx` 全部五例（首跑/resume/redo/report/bad-option）；报告行新增 `skipped_domain=N` 后，原有解析方需同步（`check-census.cx` 与任何 grep `CENSUS\t` 的地方）。
+- 验：`tools/check-census.cx` 全部五例（首跑/resume/redo/report/bad-option）。
+  **解析方已核对**：全仓只有 `tools/census.cx:123` 自己打印、`tools/check-census.cx` 用子串匹配消费（`has(out,"ran=1\tpass=1")`、`has(out,"ran=0")`、`has(out,"fail=0")`、`has(out,"total_recorded=1")`），没有别的程序解析 `CENSUS\t`。因此新增 `skipped_domain=` 字段不会破坏任何现有解析；只需同步 `census.cx:14` 的文件头注释与 `check-census.cx` 里若有逐字段断言的用例（现在没有）。
+- 另发现（同属 harness，窗口内不改）：`tools/check-census.cx:29/32/34/36` 自己也是 `{"sh", com, tool, …}` 固定 `sh` 启动产品，与 `census.cx` 原先同一个毛病。薄头形态下没问题；产品一旦是独立 ELF，`check-census` 会整体失败。第 4 项落地时顺手把 `check-census` 改成同样的文件头判形态，或让它复用 `census.cx` 的判定。
 
 ## 5. 稳定产品上重跑全量 census
 
