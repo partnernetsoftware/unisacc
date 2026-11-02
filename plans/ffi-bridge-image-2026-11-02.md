@@ -208,3 +208,20 @@ exec/c/librarycall_<arch>.S
 否则得到的是"调用 0 地址"的假崩溃。
 
 至此四条向量全部通过:getpid(零参)、sqrt(浮点入/返回)、snprintf 混合、>6 整数栈参数。
+
+## 8. 纪元合并清单(字节表入 include/ 的步骤,待执行)
+
+| # | 步骤 | 谁 | 何时 | 验收 |
+|---|---|---|---|---|
+| 1 | 两个桥源定稿(`bridge_x86_64.s` / `bridge_arm64.s`,单指针调用块,子集内) | omp-go | 纪元合并前 | 两份都用 `asm-source` + assembler 组装 rc=0 |
+| 2 | arm64 桥按子集重写(`stp d8,d9` 等不在子集;改用 `fmov`/`str x`) | omp-go | 同上 | arm64 组装 rc=0;运行期留到有 arm64 主机时 |
+| 3 | 生成 `include/ffi_bridge_bytes.h`(`gen-ffi-bridge` 写,`--check` 校验) | omp-go(工具已提交 dfe4556346) | **只在纪元合并窗口** | `--check` 绿;文件进 include/ 后 p3 资源清单多一项 |
+| 4 | `unisacc_ffi.h` 引用该字节表,FFI 首次调用时 mmap+写入+mprotect RX | omp-go | 同窗口 | `check-ffi-bridge` 四向量在**打包产品**上通过 |
+| 5 | include 对照项启用:`check-ffi-bridge-bytes` 增加"树里的表 == 生成的表"一条 | omp-go | 同窗口 | 批次 `cx-ffi-bytes` 断言数 +1 且绿 |
+| 6 | 身份核对:产品身份变一次(entry + P3),kernel 不变 | omp-cc 审 | 窗口收尾 | `check-productpkg` 的 identity 断言 + 会话 kind=split2 |
+
+顺序约束:1→2 可并行,3 必须在 1/2 之后,4 依赖 3,5 依赖 3,6 最后。
+
+已知遗留:
+- `objcopy` 是宿主二进制(生成器头注已标);`tools/formats-*.cx` 无 ELF `.text` 提取器,消除该依赖需另立一项。
+- `dlsym(libc,"sqrt")` 返回 NULL,数学函数在 `libm`;任何 FFI 检查必须先确认地址非 0。
