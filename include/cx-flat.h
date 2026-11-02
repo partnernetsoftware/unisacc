@@ -342,6 +342,7 @@ static int _unisa_natexit = 0;
 static int _u_st_fd[_U_NST];
 static int _u_st_eof[_U_NST];
 static int _u_st_err[_U_NST];
+static int _u_st_serr[3];                 /* fd 0/1/2 error indicator: standard streams keep no slot */
 static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
 /* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
    descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
@@ -377,6 +378,11 @@ static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
            an I/O failure (also covers the Windows count-only gate). */
         if (__u_r <= 0 || __u_r > __u_n - __u_done) {
             errno = __u_r < 0 ? (int)(0 - __u_r) : EIO;
+            /* a write failure is observable: standard streams keep a per-fd
+               indicator (they never build a slot), every other stream sets its
+               slot's error bit so ferror reports it. */
+            if (__u_fd >= 0 && __u_fd <= 2) _u_st_serr[__u_fd] = 1;
+            else { int __u_j = 0; while (__u_j < _u_st_n) { if (_u_st_fd[__u_j] == __u_fd) _u_st_err[__u_j] = 1; __u_j = __u_j + 1; } }
             return __u_done;
         }
         __u_done = __u_done + __u_r;
@@ -456,7 +462,7 @@ static __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
 #if !__UNISA_FTRIM_LIBC || __UN_fputc
 static int fputc(int __u_c, FILE *__u_f) {
     _unisa_ch = __u_c;
-    _u_st_wput(__u_f, &_unisa_ch, 1);
+    if (_u_st_wput(__u_f, &_unisa_ch, 1) != 1) return 0 - 1;
     return __u_c;
 }
 #endif
@@ -467,16 +473,17 @@ static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 
 #if !__UNISA_FTRIM_LIBC || __UN_fputs
 static int fputs(const char *__u_s, FILE *__u_f) {
-    _u_st_wput(__u_f, __u_s, _unisa_len(__u_s));
+    __u_word __u_n = _unisa_len(__u_s);
+    if (_u_st_wput(__u_f, __u_s, __u_n) != __u_n) return 0 - 1;
     return 0;
 }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_puts
 static int puts(const char *__u_s) {
-    fputs(__u_s, stdout);
+    if (fputs(__u_s, stdout) < 0) return 0 - 1;
     _unisa_ch = 10;
-    __write(1, &_unisa_ch, 1);
+    if (__write(1, &_unisa_ch, 1) != 1) { _u_st_serr[1] = 1; return 0 - 1; }
     return 0;
 }
 #endif
@@ -523,14 +530,20 @@ static int feof(FILE *__u_f) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_ferror
 static int ferror(FILE *__u_f) {
-    int __u_i; __u_i = _u_st_slot(__u_f);
+    int __u_i; int __u_fd;
+    __u_fd = _unisa_fd(__u_f);
+    if (__u_fd >= 0 && __u_fd <= 2) return _u_st_serr[__u_fd];
+    __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return 0;
     return _u_st_err[__u_i];
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_clearerr
 static void clearerr(FILE *__u_f) {
-    int __u_i; __u_i = _u_st_slot(__u_f);
+    int __u_i; int __u_fd;
+    __u_fd = _unisa_fd(__u_f);
+    if (__u_fd >= 0 && __u_fd <= 2) { _u_st_serr[__u_fd] = 0; return; }
+    __u_i = _u_st_slot(__u_f);
     if (__u_i < 0) return;
     _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0;
 }
@@ -973,8 +986,13 @@ static int rename(const char *__u_from, const char *__u_to) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fflush
 static int fflush(FILE *__u_f) {
+    int __u_fd;
     if (__u_f == NULL) { _u_st_flushall(); return 0; }
-    if ((__u_word)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) return 0;
+    if ((__u_word)__u_f >= _UNISA_STDIO_BASE || _unisa_fd(__u_f) <= 2) {
+        __u_fd = _unisa_fd(__u_f);
+        if (__u_fd >= 0 && __u_fd <= 2 && _u_st_serr[__u_fd]) return 0 - 1;
+        return 0;
+    }
     return _u_st_wflush(_u_st_slot(__u_f));
 }
 #endif
@@ -1848,6 +1866,7 @@ static int _unisa_natexit = 0;
 static int _u_st_fd[_U_NST];
 static int _u_st_eof[_U_NST];
 static int _u_st_err[_U_NST];
+static int _u_st_serr[3];                 /* fd 0/1/2 error indicator: standard streams keep no slot */
 static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
 /* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
    descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
@@ -1883,6 +1902,11 @@ static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
            an I/O failure (also covers the Windows count-only gate). */
         if (__u_r <= 0 || __u_r > __u_n - __u_done) {
             errno = __u_r < 0 ? (int)(0 - __u_r) : EIO;
+            /* a write failure is observable: standard streams keep a per-fd
+               indicator (they never build a slot), every other stream sets its
+               slot's error bit so ferror reports it. */
+            if (__u_fd >= 0 && __u_fd <= 2) _u_st_serr[__u_fd] = 1;
+            else { int __u_j = 0; while (__u_j < _u_st_n) { if (_u_st_fd[__u_j] == __u_fd) _u_st_err[__u_j] = 1; __u_j = __u_j + 1; } }
             return __u_done;
         }
         __u_done = __u_done + __u_r;
@@ -3237,6 +3261,7 @@ static int _unisa_natexit = 0;
 static int _u_st_fd[_U_NST];
 static int _u_st_eof[_U_NST];
 static int _u_st_err[_U_NST];
+static int _u_st_serr[3];                 /* fd 0/1/2 error indicator: standard streams keep no slot */
 static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
 /* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
    descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
@@ -3272,6 +3297,11 @@ static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
            an I/O failure (also covers the Windows count-only gate). */
         if (__u_r <= 0 || __u_r > __u_n - __u_done) {
             errno = __u_r < 0 ? (int)(0 - __u_r) : EIO;
+            /* a write failure is observable: standard streams keep a per-fd
+               indicator (they never build a slot), every other stream sets its
+               slot's error bit so ferror reports it. */
+            if (__u_fd >= 0 && __u_fd <= 2) _u_st_serr[__u_fd] = 1;
+            else { int __u_j = 0; while (__u_j < _u_st_n) { if (_u_st_fd[__u_j] == __u_fd) _u_st_err[__u_j] = 1; __u_j = __u_j + 1; } }
             return __u_done;
         }
         __u_done = __u_done + __u_r;

@@ -14,6 +14,7 @@ static int _unisa_natexit = 0;
 static int _u_st_fd[_U_NST];
 static int _u_st_eof[_U_NST];
 static int _u_st_err[_U_NST];
+static int _u_st_serr[3];                 /* fd 0/1/2 error indicator: standard streams keep no slot */
 static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
 /* D3: a 4 KB read buffer per stream.  Bytes are taken from it before the
    descriptor is asked again; fseek/rewind drop it and ftell subtracts what is
@@ -49,6 +50,11 @@ static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
            an I/O failure (also covers the Windows count-only gate). */
         if (__u_r <= 0 || __u_r > __u_n - __u_done) {
             errno = __u_r < 0 ? (int)(0 - __u_r) : EIO;
+            /* a write failure is observable: standard streams keep a per-fd
+               indicator (they never build a slot), every other stream sets its
+               slot's error bit so ferror reports it. */
+            if (__u_fd >= 0 && __u_fd <= 2) _u_st_serr[__u_fd] = 1;
+            else { int __u_j = 0; while (__u_j < _u_st_n) { if (_u_st_fd[__u_j] == __u_fd) _u_st_err[__u_j] = 1; __u_j = __u_j + 1; } }
             return __u_done;
         }
         __u_done = __u_done + __u_r;
