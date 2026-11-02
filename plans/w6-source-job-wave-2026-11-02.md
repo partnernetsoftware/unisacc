@@ -18,10 +18,15 @@
 2. `controller`：用候选 `unisacc.com` 替代 `tools/bound` 编译 `tools/source-package.cx`；`... list` 仍输出 131/42，`check-source-job-count` 绿。
 3. `seed-tool`：逐个把 `seed/{gen,tbl,net,compilerpack,pack}.c` 换成 CX（首选 `cx/compiler/bindstage.cx`/现模块）；每换一个，重跑对应 `wave` 相位并比对 job 输出字节。
 4. `native-input`：把 `exec/c/core.h`、`compiler-routes.tsv`、`pp-gen.tsv` 的读取改为 `cx/runtime`/`cx/core` 接口；`pack`/`declare` 验收用现有 receipt 字节等价。
-5. `identity`：`seed/ident.c` 改为 CX identity helper；`source-package`/`source-origin-verify` 只比对运行时 digest，不再写死 107/34。
+5. `identity`：预演只做 `seed/ident.c` 默认 identity 模式（同根字节比对已过）；`write`/`check`/`manifest` 三子命令与 SID 切换并入纪元，cutover 时 `seed/ident.c` 自身进入 closure 会使 SID 必变。
 6. `count-cutover`：`check-source-job-count` 改读 `source-package.cx` recipes，删除 wave 的 `nids!=131`/`counts[1]!=42` 硬编码。
 7. `archive`：旧 C 链移入 `archive/reference-c/`，删 `tools/bound`；更新 `AGENTS.md`/`CLAUDE.md`/pins.tsv 表行；`ratchets` 9/9、`toolsloc` 只降不升。
 8. `cutover`：W5 结束前只做 1–3 的预演，不替换入口；W5 结束后才做 4–7，并跑完整 `wave` + `final` + 跨目标 smoke。
+
+## 预演证据（仅 out/）
+- predefines：最大样本与原 C 内容 sha `f82465ea…6f43c78`；空对象 rc0、非法 rc2。
+- routes：最大样本 routes.tsv sha `69f9a583…b62d296`（308 行，cmp=0）；空/非法 rc1。
+- compilerpack2 audit+kernel：audit 树相对内容 sha `bd463644…26ec1f`（cmp=0）；空模型/坏 kernel 双方 rc1。
 
 ## 必须等纪元
 - `wave`/`final` 的替换、`tools/bound` 删除、旧 C 归档：等 W5 慢车道纪元结束。
