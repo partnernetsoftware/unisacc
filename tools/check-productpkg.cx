@@ -58,7 +58,23 @@ static void die(const char *what) {
     exit(2);
 }
 
-int main(void) {
+/* argv: child identity-fail  -- build a product copy with a member missing, then ask the guard
+   wrapper for its identity. It must refuse (exit 2), not return an empty string: two empty
+   strings compare equal and the unchanged-guard would pass without measuring anything. */
+static int main_identity_fail(void) {
+    char g[4400], ge[4400];
+    if (cx_fmt(g, sizeof g, "%s/guard-fail", work)) die("fail dir");
+    if (pp_copy_product(root, g)) die("fail copy");
+    if (!tx_eqz(pp_identity_kind(g), "split1")) return 0;
+    if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("fail entry");
+    if (sy_unlink(ge)) die("fail unlink");
+    {   char h[65];
+        pp_digest_or_die(g, h);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
     char pkg[4400], entry[4400], out[600];
     size_t n = 0;
     unsigned char *b;
@@ -67,6 +83,11 @@ int main(void) {
 
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
     if (cx_fmt(work, sizeof work, "%s/out/productpkg-batch", root)) die("work");
+    if (argc >= 3 && tx_eqz(argv[1], "child") && tx_eqz(argv[2], "identity-fail")) {
+        if (sy_exists(work) == 1 && cx_rmtree(work)) die("child old work");
+        if (sy_mkdir(work, 0700)) die("child work");
+        return main_identity_fail();
+    }
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("product");
     if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
     if (sy_mkdir(work, 0700)) die("work dir");
@@ -160,6 +181,14 @@ int main(void) {
         else ok(tx_eqz(pp_layout_name(pp_layout_of_file(ape)), "ape"), "ape-layout");
     }
 
+    {   /* the wrapper must refuse a broken product instead of returning two equal empty strings */
+        char *av[] = { "sh", "unisacc.com", "tools/check-productpkg.cx", "--", "child", "identity-fail", 0 };
+        char out[256];
+        int rc;
+        out[0] = 0;
+        rc = sy_run(av, out, (int)sizeof out, 0);
+        ok(rc == 2, "identity-failure-refuses-not-empty");
+    }
     printf("PRODUCTPKG\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
 }
