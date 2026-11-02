@@ -182,7 +182,7 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 | **CX-Y-2** | 上层不得直接调用 libc/POSIX（`printf`、`malloc`、`strcmp`、`open` 等）。必须走 L0 的 `sy_*`、`mm_*`、`tx_*`。谁可裸调：`tests/cxraw-layers.tsv`。 |
 | **CX-Y-3** | 上层不得写平台 `#if`（`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__` 等），也不得写 `__syscallN`。平台差异只放 L0 的 `_os` 静态帮手或表。导出函数不得包在平台 `#if` 里。 |
 | **CX-Y-4** | 跨模块错误码只走返回值。不得依赖全局 `errno` 在模块之间传递。L0 失败必须返回 `-errno`（或已文档化的负码）；空指针／空路径／负长度应当 `-EINVAL`；失败不得留下半开 fd。 |
-| **CX-Y-5** | `cx/crypto/` 是上层：纯计算、调用方提供缓冲，不得 `#include` 宿主密码库。加速路径若需要系统接口，必须放进 `cx/sys/`，导出仍无条件编译。 |
+| **CX-Y-5** | `ext/crypto/` 是包层（`ext/<package>/`）：纯计算、调用方提供缓冲，不得 `#include` 宿主密码库。加速路径若需要系统接口，必须放进 `cx/sys/`，导出仍无条件编译。 |
 
 `#include` 在模块 `.cx` 里目前是棘轮 lint，不是前端硬拒绝（硬拒绝见 **CX-W-2**）。
 
@@ -269,7 +269,7 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-S-4** | L3 是 `tools/`、`tests/`、`apps/`：构造、验证、应用。与 L1/L2 一样不得直接调用 libc/POSIX，除非白名单精确例外。 |
 | **CX-S-5** | 精确例外只来自 `tests/cxraw-layers.tsv` 与 `tests/cxinclude-boundary.tsv`。表外文件不得因“暂时”“引导”“探针”获得许可。每条精确例外必须带理由。引导期 `src/host.cx`、`src/hostnative.cx` 若仍在表内，只以表内那一行为准。 |
 | **CX-S-6** | `cx/cx0/` 是解析权威与兼容投影，不是 L0。文法以 **CX-G-4** 为准。`cx/workspace/` 是包图与构建，属上层。 |
-| **CX-S-7** | `cx/crypto/` 属上层纯计算，合同见 **CX-Y-5**。`cx/compiler/winprocess.cx` 是编译器侧的整数与 PE 页走查，不是宿主对接，不得迁回 `cx/sys/`。 |
+| **CX-S-7** | `ext/crypto/` 属包层纯计算，合同见 **CX-Y-5**。`cx/compiler/winprocess.cx` 是编译器侧的整数与 PE 页走查，不是宿主对接，不得迁回 `cx/sys/`。 |
 | **CX-S-8** | `cx/compiler/` 与 `cx/runtime/` 下由 `tools/nametab-gen.cx` 按 `tools/nametabs.tsv` 生成的名表，手改无效。改名表只走「事实表 → 生成器 `--check` → `--write`」。生成器未覆盖的手写模块不在此条。 |
 | **CX-S-9** | 分层棘轮扫描面是已跟踪的 `*.cx`，加上 `cx/**/*.c`、`cx/**/*.h`、`cx/**/*.c.in`，排除 `archive/`。`src/`、`exec/`、`tools/` 的宿主 C 不在此扫描面。已跟踪符号链接不得重复计数。 |
 | **CX-S-10** | `apps/csih/` 与 `ujs/` 不由本架构条款授权改写。测携带头本身的表面探针只以 include 边界表的精确条目存在，不得按目录放行。 |

@@ -16,7 +16,7 @@
 | L1 | [`cx/core/`](core/memory.md) [`cx/runtime/`](runtime/README.md) | **CX-S-2** **CX-O-1**…**CX-O-6** | 执行器、包装载/解码、路由、流输出 |
 | L2 | [`cx/driver/`](driver) [`cx/compiler/`](compiler) `src/`（引导例外除外） | **CX-S-3** **CX-S-7** **CX-S-8** | CLI、tape、绑定、`cxmod`；`winprocess` 留在 compiler；名表只经生成器 |
 | L3 | `tools/` `tests/` `apps/` | **CX-S-4** **CX-S-10** | 构造与验证。`apps/csih/`、`ujs/` 不由本树条款授权改写 |
-| 解析 / 包图 / 密码 | [`cx/cx0/`](cx0/README.md) [`cx/workspace/`](workspace/README.md) [`cx/crypto/`](crypto) | **CX-S-6** **CX-S-7** **CX-Y-5** **CX-G-4** | cx0 不是 L0；crypto 是上层纯计算 |
+| 解析 / 包图 / 密码 | [`cx/cx0/`](cx0/README.md) [`cx/workspace/`](workspace/README.md) [`ext/crypto/`](../ext/crypto) | **CX-S-6** **CX-S-7** **CX-Y-5** **CX-G-4** | cx0 不是 L0；crypto 是上层纯计算 |
 
 许可不在目录散文里开：裸 libc 只看 `tests/cxraw-layers.tsv`，`#include` 只看 `tests/cxinclude-boundary.tsv`（**CX-S-5** **CX-Y-1** **CX-Y-2**）。扫描面见 **CX-S-9**。棘轮 ID 见 **CX-R-1**…**CX-R-7**，一次跑 `tools/ratchets.cx`。
 

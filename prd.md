@@ -160,7 +160,7 @@ unisacc.com  5,145,706 B  sha 83343ec1…
 - `cx/sys/`（L0，23 文件）：对接 libc/POSIX 的唯一层（env/fs/proc/time/net/poll/tty/posix/sha/mem/dl/sig…）。
 - `cx/mem/`（L0）：所有者缓冲、arena、slice（Rust 式 Vec/String/所有权）。
 - `cx/text/`（L0）：带长度字节串比较/格式化/拼接（`tx_*`）。
-- `cx/crypto/`（L0）：纯 cx 密码学（sha256/b64/hkdf/aes-gcm/chacha20poly1305/x25519/bn/der/p256/rsa/x509/tls13）。
+- `ext/crypto/`（包层 EXT）：纯 cx 密码学（sha256/b64/hkdf/aes-gcm/chacha20poly1305/x25519/bn/der/p256/rsa/x509/tls13）。
 - `cx/core/`（L1）：执行器（kernel/execute/stack/output/bytes/memory）。
 - `cx/driver/`（L1）：path/compat/args/output/deps/cli/route。
 - `cx/runtime/`（L1）：model_decode/package_*/stream_*/source_frame 等。
@@ -223,7 +223,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 路径 | 内容 |
 |---|---|
 | `src/` | 产品六层入口（15 文件，5352 行，srcshape 棘轮只降不升） |
-| `cx/` | `.cx` 模块树（sys/mem/text/crypto = L0；core/driver/runtime/compiler = L1） |
+| `cx/` | `.cx` 模块树（sys/mem/text = L0；core/driver/runtime/compiler = L1）；包层在 `ext/<package>/`（crypto 在此） |
 | `exec/` | 各阶段事实与构造（facts/enc/lex/lower/opt/parse/pp/prune/tapecheck；c/ 旧 C 参考） |
 | `weights/` | 十八网金表 + 构造权重 |
 | `seed/` | C 种子构造器（gold label 规则、ident.c 身份、ape 打包） |
@@ -271,7 +271,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
-| 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`·`cx/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
+| 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
 | 棘轮 | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape，只降不升 | `tools/ratchets.cx` |
 | 事实表 | 只经 `tools/facts-gen.cx --check/--write`；名表经 `tools/nametab-gen.cx` | `exec/facts/` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
