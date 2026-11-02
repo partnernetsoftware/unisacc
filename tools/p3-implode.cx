@@ -1,0 +1,139 @@
+/* p3-implode.cx — 从「目录 + manifest.tsv」逐字节重建 P3/P4 容器。
+ *
+ * 用法：p3-implode DIR OUT_PKG
+ * 按 manifest 顺序拼接 header/routes/models/resources 原文 + payload，加 footer。
+ *
+ * 具名拒绝（rc=2，不留 OUT_PKG）：
+ *   - 缺 manifest 行 / manifest 格式错
+ *   - model/resource payload 文件缺失
+ *   - payload sha256 与 manifest 声明的 sha 不符（篡改分片）
+ *   - 拼接后 body 长度 != manifest 的 packlen
+ */
+#pragma unisa use text.text
+
+static void die(const char *s){fprintf(stderr,"p3-implode: %s\n",s);exit(2);}
+static void die_bad(const char *why){fprintf(stderr,"p3-implode: %s\n",why);exit(2);}
+
+static long read_all(const char *p,char **out,size_t *on){
+    char *b=cx_read(p,on);
+    if(!b) return -1;
+    *out=b;
+    return 0;
+}
+
+int main(int argc,char **argv){
+    char manifest[4400],path[4400],line[9000],field[9000];
+    if(argc!=3 || argv[2][0]!='/') die("usage DIR OUT_PKG(absolute)");
+    if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",argv[1])) die("path");
+    FILE *mf=fopen(manifest,"rb");
+    if(!mf) die("manifest-missing");
+    errno=0;
+    { struct stat st; if(!lstat(argv[2],&st)){fclose(mf);die("out-exists");}
+      if(errno!=ENOENT){fclose(mf);die("out-lstat");} }
+    FILE *out=fopen(argv[2],"wb");
+    if(!out){fclose(mf);die("out-open");}
+    int bad=0; long long packlen=-1; long models=0,routes=0,resources=0;
+    int saw_header=0;
+    while(!bad && fgets(line,sizeof line,mf)){
+        long ln=(long)strlen(line);
+        if(ln>0 && line[ln-1]=='\n'){ line[--ln]=0; if(ln>0 && line[ln-1]=='\r') line[--ln]=0; }
+        else if(ln>0 && line[ln-1]=='\r') line[--ln]=0;
+        if(!ln) continue;
+        if(!saw_header){
+            if(strcmp(line,"p3-roundtrip-v1")){bad=1;break;}
+            saw_header=1;
+            continue;
+        }
+        char *tab=strchr(line,'\t');
+        if(!tab){bad=1;break;}
+        long kind=(long)(tab-line);
+        const char *rest=tab+1;
+        if(kind==6 && !strncmp(line,"header",6)){
+            if(fprintf(out,"%s\n",rest)<0) bad=1;
+        } else if(kind==5 && !strncmp(line,"route",5)){
+            if(fprintf(out,"%s\n",rest)<0) bad=1;
+            routes++;
+        } else if(kind==5 && !strncmp(line,"model",5)){
+            /* rest = <M 原文>\t<rel path>\t<sha> */
+            char *t2=strchr(rest,'\t');
+            if(!t2){bad=1;break;}
+            long mlen=(long)(t2-rest);
+            if(mlen<=0 || mlen>=(long)sizeof field){bad=1;break;}
+            { void *cx_kept = memcpy(field,rest,(size_t)mlen); (void)cx_kept; } field[mlen]=0;
+            char *t3=strchr(t2+1,'\t');
+            if(!t3){bad=1;break;}
+            *t2=0; *t3=0; const char *rel=t2+1; const char *sha=t3+1;
+            if(fprintf(out,"%s\n",field)<0){bad=1;break;}
+            if(cx_fmt(path,sizeof path,"%s/%s",argv[1],rel)){bad=1;break;}
+            size_t pn; char *p;
+            if(read_all(path,&p,&pn)){fclose(out);fclose(mf);die_bad("model-payload-missing");}
+            char h[65]; cx_sha256_hex(p,(long)pn,h);
+            if(strcmp(h,sha)){free(p);fclose(out);fclose(mf);die_bad("model-payload-sha-mismatch");}
+            if(pn>0 && fwrite(p,1,pn,out)!=pn) bad=1;
+            free(p);
+            models++;
+        } else if(kind==8 && !strncmp(line,"resource",8)){
+            /* rest = <F 原文>\t<res.key>\t<key sha>\t<res.bin>\t<bin sha> */
+            char *t2=strchr(rest,'\t');
+            if(!t2){bad=1;break;}
+            long flen=(long)(t2-rest);
+            if(flen<=0 || flen>=(long)sizeof field){bad=1;break;}
+            { void *cx_kept = memcpy(field,rest,(size_t)flen); (void)cx_kept; } field[flen]=0;
+            char *t3=strchr(t2+1,'\t');
+            if(!t3){bad=1;break;}
+            *t2=0; const char *krel=t2+1;
+            char *t4=strchr(t3+1,'\t');
+            if(!t4){bad=1;break;}
+            *t3=0; const char *ksha=t3+1;
+            char *t5=strchr(t4+1,'\t');
+            if(!t5){bad=1;break;}
+            *t4=0; *t5=0; const char *brel=t4+1; const char *bsha=t5+1;
+            if(fprintf(out,"%s\n",field)<0){bad=1;break;}
+            /* key */
+            if(cx_fmt(path,sizeof path,"%s/%s",argv[1],krel)){bad=1;break;}
+            size_t kn; char *k;
+            if(read_all(path,&k,&kn)){fclose(out);fclose(mf);die_bad("resource-key-missing");}
+            char kh[65]; cx_sha256_hex(k,(long)kn,kh);
+            if(strcmp(kh,ksha)){free(k);fclose(out);fclose(mf);die_bad("resource-key-sha-mismatch");}
+            if(kn>0 && fwrite(k,1,kn,out)!=kn) bad=1;
+            free(k);
+            /* value */
+            if(cx_fmt(path,sizeof path,"%s/%s",argv[1],brel)){bad=1;break;}
+            size_t vn; char *v;
+            if(read_all(path,&v,&vn)){fclose(out);fclose(mf);die_bad("resource-value-missing");}
+            char vh[65]; cx_sha256_hex(v,(long)vn,vh);
+            if(strcmp(vh,bsha)){free(v);fclose(out);fclose(mf);die_bad("resource-value-sha-mismatch");}
+            if(vn>0 && fwrite(v,1,vn,out)!=vn) bad=1;
+            free(v);
+            resources++;
+        } else if(kind==7 && !strncmp(line,"packlen",7)){
+            packlen=strtoll(rest,0,10);
+            if(packlen<=0) bad=1;
+        } else {
+            bad=1;
+        }
+    }
+    if(ferror(mf)) bad=1;
+    fclose(mf);
+    if(!bad){
+        fflush(out);
+        long body=(long)ftell(out);
+        if(packlen!=body) bad=1;
+    }
+    if(!bad){
+        unsigned char foot[16];
+        memcpy(foot,"UNIPKG1\n",8);
+        unsigned long long v=(unsigned long long)packlen;
+        int i;
+        for(i=0;i<8;i++) foot[8+i]=(unsigned char)((v>>(8*i))&255);
+        if(fwrite(foot,1,16,out)!=16) bad=1;
+    }
+    if(fclose(out)) bad=1;
+    if(bad){
+        if(unlink(argv[2])){ /* best-effort */ }
+        die("roundtrip-failed");
+    }
+    printf("IMPLODED\t%s\tmodels=%ld\troutes=%ld\tresources=%ld\tpacklen=%lld\n",
+           argv[2],models,routes,resources,packlen);
+    return 0;
+}

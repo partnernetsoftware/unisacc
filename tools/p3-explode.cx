@@ -1,0 +1,130 @@
+/* p3-explode.cx — 把 P3/P4 容器无损拆成「目录 + manifest.tsv」。
+ *
+ * 用法：p3-explode PKG OUT_DIR
+ * PKG     含 UNIPKG1 footer 的 P3/P4 包。
+ * OUT_DIR 必须不存在；产出 manifest.tsv + models/ + resources/。
+ *
+ * manifest.tsv 行（\t 分隔）：
+ *   p3-roundtrip-v1
+ *   header\t<P 原文行>
+ *   route\t<D 原文行>            × ns
+ *   model\t<M 原文行>\t<models/model-%03d.bin>\t<sha256>   × nm
+ *   resource\t<F 原文行>\t<res-%03d.key>\t<sha>\t<res-%03d.bin>\t<sha>  × nr
+ *   packlen\t<length>
+ * 每个 model/resource 的 payload 单独落文件，manifest 存其 sha256，implode
+ * 据此校验：篡改分片、缺行、长度不符均具名拒绝。
+ */
+#pragma unisa use text.text
+
+static void die(const char *s){fprintf(stderr,"p3-explode: %s\n",s);exit(2);}
+
+/* 读 body[at] 起的一行(到 '\n' 不含)，返回长度；*at 前进到 '\n' 后。失败返回 -1。 */
+static long px_line(const char *d,long n,long *at){
+    long a=*at;
+    if(a>=n) return -1;
+    long e=a;
+    while(e<n && d[e]!='\n') e++;
+    if(e>=n) return -1;
+    *at=e+1;
+    return e-a;
+}
+
+static void write_sha(FILE *mf,const char *data,long len){
+    char h[65];
+    cx_sha256_hex(data,len,h);
+    if(fprintf(mf,"\t%s",h)<0) die("manifest-write");
+}
+
+int main(int argc,char **argv){
+    char manifest[4400],mdir[4400],rdir[4400],path[4400],line[9000];
+    if(argc!=3 || argv[2][0]!='/') die("usage PKG OUT_DIR(absolute)");
+    size_t n; char *d=cx_read(argv[1],&n);
+    if(!d || n<16) die("read-input");
+    if(memcmp(d+n-16,"UNIPKG1\n",8)) die("missing-footer");
+    long long packlen=0; int i;
+    for(i=0;i<8;i++) packlen |= ((unsigned long long)(unsigned char)d[n-16+8+i])<<(8*i);
+    long long body=(long long)n-16;
+    if(packlen!=body) die("packlen-mismatch");
+
+    long at=0;
+    long hl=px_line(d,body,&at);
+    if(hl<=0) die("no-header");
+    if(hl>=(long)sizeof line) die("header-bound");
+    { void *cx_kept = memcpy(line,d,(size_t)hl); (void)cx_kept; } line[hl]=0;
+    /* header: P ver nm ns nr */
+    int ver,nm,ns,nr;
+    if(sscanf(line,"P %d %d %d %d",&ver,&nm,&ns,&nr)!=4) die("bad-header");
+    if(ver<1||ver>4||nm<=0||ns<=0||nr<0||nm>body||ns>body||nr>body/5) die("bad-header-count");
+
+    if(mkdir(argv[2],0700)) die("new-out-dir-required");
+    if(cx_fmt(mdir,sizeof mdir,"%s/models",argv[2])||cx_fmt(rdir,sizeof rdir,"%s/resources",argv[2])) die("path");
+    if(mkdir(mdir,0700)||mkdir(rdir,0700)) die("subdir");
+    if(cx_fmt(manifest,sizeof manifest,"%s/manifest.tsv",argv[2])) die("path");
+    FILE *mf=fopen(manifest,"wb");
+    if(!mf) die("manifest-open");
+    int bad=0;
+
+    if(fprintf(mf,"p3-roundtrip-v1\nheader\t%s\n",line)<0) bad=1;
+
+    /* D 行 */
+    for(long k=0;k<ns && !bad;k++){
+        long ln=px_line(d,body,&at);
+        if(ln<=0 || ln>=(long)sizeof line){bad=1;break;}
+        { void *cx_kept = memcpy(line,d+at-ln-1,(size_t)ln); (void)cx_kept; } line[ln]=0;
+        if(line[0]!='D'||line[1]!=' '){bad=1;break;}
+        if(fprintf(mf,"route\t%s\n",line)<0) bad=1;
+    }
+    /* M 行 */
+    for(long k=0;k<nm && !bad;k++){
+        long ln=px_line(d,body,&at);
+        if(ln<=0 || ln>=(long)sizeof line){bad=1;break;}
+        { void *cx_kept = memcpy(line,d+at-ln-1,(size_t)ln); (void)cx_kept; } line[ln]=0;
+        if(line[0]!='M'||line[1]!=' '){bad=1;break;}
+        long long stored;
+        if(sscanf(line,"M %lld",&stored)!=1 || stored<=0 || stored>body-at){bad=1;break;}
+        if(fprintf(mf,"model\t%s\tmodels/model-%03ld.bin",line,k)<0){bad=1;break;}
+        write_sha(mf,d+at,(long)stored);
+        if(fprintf(mf,"\n")<0){bad=1;break;}
+        if(cx_fmt(path,sizeof path,"%s/models/model-%03ld.bin",argv[2],k)){bad=1;break;}
+        FILE *f=fopen(path,"wb");
+        if(!f){bad=1;break;}
+        if(fwrite(d+at,1,(size_t)stored,f)!=(size_t)stored){fclose(f);bad=1;break;}
+        if(fclose(f)){bad=1;break;}
+        at+=(long)stored;
+    }
+    /* F 行 */
+    for(long k=0;k<nr && !bad;k++){
+        long ln=px_line(d,body,&at);
+        if(ln<=0 || ln>=(long)sizeof line){bad=1;break;}
+        { void *cx_kept = memcpy(line,d+at-ln-1,(size_t)ln); (void)cx_kept; } line[ln]=0;
+        if(line[0]!='F'||line[1]!=' '){bad=1;break;}
+        long long nlen,dlen;
+        if(sscanf(line,"F %lld %lld",&nlen,&dlen)!=2 || nlen<=0 || dlen<0
+           || nlen>body-at || dlen>body-at-(long)nlen){bad=1;break;}
+        if(fprintf(mf,"resource\t%s\tresources/res-%03ld.key",line,k)<0){bad=1;break;}
+        write_sha(mf,d+at,(long)nlen);
+        if(fprintf(mf,"\tresources/res-%03ld.bin",k)<0){bad=1;break;}
+        write_sha(mf,d+at+(long)nlen,(long)dlen);
+        if(fprintf(mf,"\n")<0){bad=1;break;}
+        if(cx_fmt(path,sizeof path,"%s/resources/res-%03ld.key",argv[2],k)){bad=1;break;}
+        FILE *f=fopen(path,"wb");
+        if(!f){bad=1;break;}
+        if(fwrite(d+at,1,(size_t)nlen,f)!=(size_t)nlen){fclose(f);bad=1;break;}
+        if(fclose(f)){bad=1;break;}
+        at+=(long)nlen;
+        if(cx_fmt(path,sizeof path,"%s/resources/res-%03ld.bin",argv[2],k)){bad=1;break;}
+        f=fopen(path,"wb");
+        if(!f){bad=1;break;}
+        if(dlen>0 && fwrite(d+at,1,(size_t)dlen,f)!=(size_t)dlen){fclose(f);bad=1;break;}
+        if(fclose(f)){bad=1;break;}
+        at+=(long)dlen;
+    }
+    if(at!=body) bad=1;
+    if(fprintf(mf,"packlen\t%lld\n",packlen)<0) bad=1;
+    if(fclose(mf)) bad=1;
+    free(d);
+    if(bad){ cx_rmtree(argv[2]); die("parse-or-write-failed"); }
+    printf("EXPLODED\t%s\tmodels=%d\troutes=%d\tresources=%d\tpacklen=%lld\n",
+           argv[1],nm,ns,nr,packlen);
+    return 0;
+}

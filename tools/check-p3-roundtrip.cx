@@ -1,0 +1,140 @@
+/* check-p3-roundtrip.cx — B0 gate。
+ *
+ * 用法：sh ./unisacc.com tools/check-p3-roundtrip.cx [-- PKG...]
+ * 默认两个包：out/epoch-2026-11-02/p3/p3-package.bin 与 unisacc.com.dev/p3-package.bin。
+ *
+ * 断言（对每个包）：
+ *   roundtrip-byte-identical      explode→implode 与源逐字节相同
+ *   tampered-model-rejected       篡改 model-000.bin 后 implode 具名拒绝(rc=2, 含 sha-mismatch)
+ *   tampered-resource-rejected    篡改 res-000.bin 后 implode 具名拒绝(rc=2, 含 sha-mismatch)
+ *   missing-manifest-row-rejected 删 manifest 一个 model 行后 implode 拒绝(rc=2)
+ */
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok,const char *name){
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok) failed++;
+}
+static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b){h[0]=0;return;}cx_sha256_hex(b,n,h);free(b);}
+static np_result call(char **v,const char *root){np_result r={0};char why[512];if(np_run(v,root,0,55,&r,why,sizeof why)){r.rc=2;r.err=(char*)"np_run-failed";return r;}return r;}
+/* 跑工具 ./unisacc.com TOOL -- A B；rc 入 *rc，stderr 入 errb。 */
+static int run_tool(const char *root,const char *tool,const char *a,const char *b,int *rc,char *errb,size_t cap){
+    char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"55",(char*)"sh",(char*)"./unisacc.com",(char*)tool,(char*)"--",(char*)a,(char*)b,0};
+    np_result r=call(v,root);
+    *rc=r.rc;
+    if(errb&&cap){errb[0]=0;if(r.err){strncpy(errb,r.err,cap-1);errb[cap-1]=0;}}
+    np_free(&r);
+    return 0;
+}
+/* 删除 manifest 第一处前缀 pref 且下一字符为 \t 的行。返回 1=删过。 */
+static int delete_first_line(const char *mp,const char *pref){
+    size_t n; char *w=cx_read(mp,&n);
+    if(!w) return 0;
+    FILE *f=fopen(mp,"wb");
+    if(!f){free(w);return 0;}
+    char *cur=w; int deleted=0; long plen=(long)strlen(pref);
+    while(cur < w+n){
+        char *nl=memchr(cur,'\n',(size_t)(w+n-cur));
+        long len = nl ? (long)(nl-cur+1) : (long)(w+n-cur);
+        if(!deleted && len>=plen+1 && !strncmp(cur,pref,plen) && cur[plen]=='\t'){
+            deleted=1;
+        } else {
+            if(fwrite(cur,1,(size_t)len,f)!=(size_t)len){fclose(f);free(w);return 0;}
+        }
+        cur += len;
+        if(!nl) break;
+    }
+    if(fclose(f)){free(w);return 0;}
+    free(w);
+    return deleted;
+}
+
+int main(int argc,char **argv){
+    char root[4096],explode[4400],implode[4400];
+    char dir[4400],rebuilt[4400],before[65],after[65];
+    if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
+    if(cx_fmt(explode,sizeof explode,"%s/tools/p3-explode.cx",root)
+       ||cx_fmt(implode,sizeof implode,"%s/tools/p3-implode.cx",root))return 2;
+    char def1[4400],def2[4400];
+    if(cx_fmt(def1,sizeof def1,"%s/out/epoch-2026-11-02/p3/p3-package.bin",root)
+       ||cx_fmt(def2,sizeof def2,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
+    int np = (argc>2)?(argc-2):2;
+
+    for(int i=0;i<np;i++){
+        const char *src = (argc>2)?argv[2+i]:(i==0?def1:def2);
+        size_t n; char *b=cx_read(src,&n);
+        if(!b){ck(0,"input-absent");continue;}
+        cx_sha256_hex(b,n,before); free(b);
+        if(cx_fmt(dir,sizeof dir,"%s/out/p3-rt-%d",root,i))return 2;
+        if(cx_fmt(rebuilt,sizeof rebuilt,"%s/rebuilt.pkg",dir))return 2;
+        int rc; char errb[512];
+
+        /* clean: 若 dir 存在则删；explode 会自己建 */
+        { struct stat st; if(!lstat(dir,&st)) cx_rmtree(dir); }
+
+        /* --- explode --- */
+        run_tool(root,explode,src,dir,&rc,errb,sizeof errb);
+        ck(rc==0,"explode-rc");
+        if(rc!=0){continue;}
+
+        /* --- implode (clean) --- */
+        run_tool(root,implode,dir,rebuilt,&rc,errb,sizeof errb);
+        ck(rc==0,"implode-rc");
+        if(rc!=0){continue;}
+
+        /* --- roundtrip byte identical --- */
+        { size_t bn; char *rb=cx_read(rebuilt,&bn);
+          if(!rb){ck(0,"rebuilt-read");continue;}
+          cx_sha256_hex(rb,bn,after); free(rb);
+          ck(strcmp(before,after)==0,"roundtrip-byte-identical"); }
+
+        /* --- tamper model-000 --- */
+        { char mp[4400]; if(cx_fmt(mp,sizeof mp,"%s/models/model-000.bin",dir))return 2;
+          FILE *f=fopen(mp,"r+b");
+          if(!f){ck(0,"model-open-for-tamper");}
+          else {
+            fseek(f,0,SEEK_SET); char c='\x00'; fwrite(&c,1,1,f); fclose(f);
+            unlink(rebuilt);
+            run_tool(root,implode,dir,rebuilt,&rc,errb,sizeof errb);
+            ck(rc==2 && strstr(errb,"sha-mismatch"),"tampered-model-rejected");
+          }
+        }
+        /* 恢复：删目录重新 explode */
+        { struct stat st; if(!lstat(dir,&st)) cx_rmtree(dir); }
+        run_tool(root,explode,src,dir,&rc,errb,sizeof errb);
+        if(rc!=0){ck(0,"re-explode-after-model-tamper");continue;}
+
+        /* --- tamper resource res-000.bin --- */
+        { char rp[4400]; if(cx_fmt(rp,sizeof rp,"%s/resources/res-000.bin",dir))return 2;
+          FILE *f=fopen(rp,"r+b");
+          if(!f){ck(0,"resource-open-for-tamper");}
+          else {
+            fseek(f,0,SEEK_SET); char c='\x00'; fwrite(&c,1,1,f); fclose(f);
+            unlink(rebuilt);
+            run_tool(root,implode,dir,rebuilt,&rc,errb,sizeof errb);
+            ck(rc==2 && strstr(errb,"sha-mismatch"),"tampered-resource-rejected");
+          }
+        }
+        /* 恢复 */
+        { struct stat st; if(!lstat(dir,&st)) cx_rmtree(dir); }
+        run_tool(root,explode,src,dir,&rc,errb,sizeof errb);
+        if(rc!=0){ck(0,"re-explode-after-resource-tamper");continue;}
+
+        /* --- missing manifest model row --- */
+        { char mp[4400]; if(cx_fmt(mp,sizeof mp,"%s/manifest.tsv",dir))return 2;
+          int d=delete_first_line(mp,"model");
+          if(!d){ck(0,"manifest-model-row-delete");}
+          else {
+            unlink(rebuilt);
+            run_tool(root,implode,dir,rebuilt,&rc,errb,sizeof errb);
+            ck(rc==2,"missing-manifest-row-rejected");
+          }
+        }
+        /* 收尾清理 */
+        { struct stat st; if(!lstat(dir,&st)) cx_rmtree(dir); }
+    }
+    printf("P3_ROUNDTRIP\tfailed=%d\n",failed);
+    return failed?1:0;
+}
