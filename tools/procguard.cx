@@ -14,7 +14,9 @@
    by that file (last two path components) and, when one group holds more than
    MAX members, freezes every member with SIGSTOP and then SIGKILLs them.  No
    process-group or session kill is ever used: only the matching pids and
-   their in-scope descendants (by ppid) are signalled.
+   their in-scope descendants (by ppid) are signalled.  Each scan line after
+   an ENFORCE carries residue=KEY:N -- how many of that group the fresh scan
+   still sees -- so "collected" is read off the log, not off the kill count.
 
    Two nets, different duties: the NOFLOW backstop stops a check from breeding
    at all (self-restart writing list: plans/v0.0.44.md "自重启类检查写法清单",
@@ -243,6 +245,84 @@ static void logline(const char *s) {
     if (logfd >= 0) sy_write_all(logfd, s, tx_len(s, 4096));
 }
 
+/* ---- residue: what the last ENFORCE left behind -------------------------
+   A kill is only proof when the next scan still cannot see the group. The
+   keys enforced in one tick are kept in PENDING (a file next to the log, so a
+   restarted or --once process sees them too) and the next scan line carries
+   "residue=KEY:N" for each; N counts the survivors still carrying that key.
+   A zombie has no cmdline and is not in the scan, so a killed-but-unreaped
+   process cannot inflate N. */
+#define PEND_MAX 8
+static char pend[PEND_MAX][KEYLEN];
+static int npend;
+static char pendpath[PATHLEN];
+
+static int app(char *b, int cap, const char *s) {   /* append; 1 on overflow */
+    int i = tx_len(b, cap), j;
+    for (j = 0; s[j]; j++) { if (i + j + 1 >= cap) return 1; b[i + j] = s[j]; }
+    b[i + j] = 0;
+    return 0;
+}
+
+static void pend_save(void) {
+    int fd, i;
+    if (!pendpath[0]) return;
+    fd = sy_open(pendpath, O_WRONLY_ | O_CREAT_, 0644);
+    if (fd < 0) return;
+    sy_truncate(fd, 0L);
+    for (i = 0; i < npend; i++) { sy_write_all(fd, pend[i], tx_len(pend[i], KEYLEN)); sy_write_all(fd, "\n", 1); }
+    sy_close(fd);
+}
+
+static void pend_add(const char *key) {
+    int i, c;
+    for (i = 0; i < npend; i++) if (tx_eqz(pend[i], key)) return;
+    if (npend == PEND_MAX) {
+        for (i = 1; i < PEND_MAX; i++) for (c = 0; c < KEYLEN; c++) pend[i - 1][c] = pend[i][c];
+        npend--;
+    }
+    for (c = 0; key[c] && c < KEYLEN - 1; c++) pend[npend][c] = key[c];
+    pend[npend][c] = 0;
+    npend++;
+}
+
+static void pend_load(void) {
+    char buf[PEND_MAX * (KEYLEN + 1) + 64];
+    int n, at = 0;
+    npend = 0;
+    if (!pendpath[0]) return;
+    n = read_file(pendpath, buf, sizeof buf);
+    if (n <= 0) return;
+    while (at < n && npend < PEND_MAX) {
+        int e = at, c;
+        while (e < n && buf[e] != '\n') e++;
+        if (e > at) {
+            for (c = 0; c < e - at && c < KEYLEN - 1; c++) pend[npend][c] = buf[at + c];
+            pend[npend][c] = 0;
+            npend++;
+        }
+        at = e + 1;
+    }
+}
+
+static int key_alive(const char *key) {
+    int i, n = 0;
+    for (i = 0; i < nrec; i++) if (!recs[i].prot && tx_eqz(keys[recs[i].keyidx], key)) n++;
+    return n;
+}
+
+/* " residue=K:N,K:N" from the keys of the last ENFORCE; empty when none */
+static void residue_text(char *res, int cap) {
+    int i, first = 1;
+    res[0] = 0;
+    for (i = 0; i < npend; i++) {
+        char t[KEYLEN + 24];
+        if (cx_fmt(t, sizeof t, "%s%s:%d", first ? "" : ",", pend[i], key_alive(pend[i]))) continue;
+        if (app(res, cap, first ? " residue=" : "") || app(res, cap, t)) return;
+        first = 0;
+    }
+}
+
 /* keep the append-only log bounded: one 8 MiB generation aside */
 static void rotate_log(void) {
     sy_stat_t st;
@@ -284,6 +364,8 @@ static void act(void) {
         killed_total += hits;
         printf("procguard: ENFORCE key=%s count=%d killed=%d root=%d\n", keys[k], kcount[k], hits, first);
         if (!cx_fmt(line, sizeof line, "ts=%ld ENFORCE key=%s count=%d killed=%d root=%d\n", sy_now_ms(), keys[k], kcount[k], hits, first)) logline(line);
+        pend_add(keys[k]);
+        pend_save();
     }
 }
 
@@ -329,12 +411,21 @@ int main(int argc, char **argv) {
         if (lockfd < 0) { printf("procguard: cannot open lock: %d\n", lockfd); return 3; }
         if (sy_flock(lockfd, LOCK_EX_NB) < 0) { printf("procguard: another instance holds the lock; exiting\n"); return 0; }
     }
+    if (cx_fmt(pendpath, sizeof pendpath, "%s.pending", logpath)) pendpath[0] = 0;
     for (;;) {
+        char res[PEND_MAX * (KEYLEN + 24)];
         rotate_log();
+        pend_load();
         scan();
-        if (!cx_fmt(line, sizeof line, "ts=%ld scan procs=%d keys=%d over=%d max=%d top=%s:%d mode=%s\n",
+        residue_text(res, sizeof res);
+        if (!cx_fmt(line, sizeof line, "ts=%ld scan procs=%d keys=%d over=%d max=%d top=%s:%d mode=%s",
                     sy_now_ms(), nrec, nkeys, nover, max_procs, top_key >= 0 ? keys[top_key] : "-", top_n,
-                    enforce ? "enforce" : "dry")) logline(line);
+                    enforce ? "enforce" : "dry")) {
+            app(line, sizeof line, res);
+            logline(line);
+        }
+        if (res[0]) printf("procguard: scan residue%s\n", res);
+        if (npend) { npend = 0; sy_unlink(pendpath); }   /* consumed by this scan line */
         if (nover) act();
         if (once) { printf("procguard: once procs=%d keys=%d over=%d killed=%d mode=%s\n", nrec, nkeys, nover, killed_total, enforce ? "enforce" : "dry"); break; }
         sy_sleep_ms(tick_ms);

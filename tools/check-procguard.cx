@@ -15,7 +15,9 @@
    --dry-run must report the A group and signal nothing, --enforce must kill
    exactly the 6 A members (SIGKILL, checked through wait status) and leave B,
    the plain sleeps, this process and its ancestors alive.  The log must hold
-   the ENFORCE line and nothing about B.
+   the ENFORCE line and nothing about B.  Then two more scans check the
+   residue field: two late A members read back as residue=...:2, and a second
+   enforce followed by a scan reads back 0 (the kill count alone is not proof).
    Prints "PASS name" / "FAIL name", then CX_PROCGUARD<TAB>failed=N; exit 1 on
    any FAIL.  An L3 tool: no #include and no direct libc call. */
 
@@ -66,7 +68,7 @@ static int run_pg(const char *verb, int max, const char *log, char *out, int cap
 
 int main(int argc, char **argv) {
     char dir[1024], pa[1100], pb[1100], log[1100];
-    int pids[12], np = 0, i, rc;
+    int pids[24], np = 0, i, rc;
     char out[8192];
     const char *sb = sleep_bin();
     int mypid = sy_pid();
@@ -118,6 +120,26 @@ int main(int argc, char **argv) {
         ok(n > 0 && tx_contains(lg, n, "ENFORCE key=", 12), "log records the ENFORCE decision");
         ok(n > 0 && !tx_contains(lg, n, "pgB.cx", 6), "log has nothing about the B group");
     }
+
+    /* residue: the next scan counts what the ENFORCE left behind, not what it signalled */
+    for (i = 0; i < 2; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+    sy_sleep_ms(200);
+    rc = run_pg("dry-run", 5, log, out, sizeof out);
+    ok(rc == 0, "residue scan exits 0");
+    ok(tx_contains(out, tx_len(out, sizeof out), "residue=", 8), "next scan carries a residue field");
+    ok(tx_contains(out, tx_len(out, sizeof out), "pgA.cx:2", 8), "residue counts the two late survivors");
+    {   char lg[8192]; int n = read_file(log, lg, sizeof lg);
+        ok(n > 0 && tx_contains(lg, n, "residue=", 8) && tx_contains(lg, n, "pgA.cx:2", 8), "log scan line carries the residue");
+    }
+    for (i = 12; i < np; i++) { sy_signal(pids[i], 9); sy_wait_status(pids[i], 0, 0, 0, 0); }
+    np = 12;
+    /* a clean kill reads back as 0, not as the number of signals sent */
+    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+    sy_sleep_ms(300);
+    rc = run_pg("enforce", 5, log, out, sizeof out);
+    ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "killed=6", 8), "second enforce kills the fresh six");
+    rc = run_pg("dry-run", 5, log, out, sizeof out);
+    ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "pgA.cx:0", 8), "residue reads back 0 when nothing survived");
 
     {   /* an oversized log is rotated to .1 and started fresh */
         char big[1100], bak[1100], cmd[1200], o[2048];
