@@ -112,3 +112,34 @@ cx/runtime/sysx  cx/driver/sysx  cx/workspace/sysx  apps/csih/sysx  release/ci/s
 - **解析面最大的是 B0**:链接少一个,就有一整棵消费树编译失败。B0 必须单独一批、单独验收。
 - `process` 的 23 处里有多处是**构造链工具**(entry-build、release-build、affected),它们本身也在被改;两者顺序要与 cc 对齐。
 - 字符串路径(`process_group*`)改名工具看不见,漏改的表现是"文件找不到",不是编译错误。
+
+## 8. B3 判定清单(cx/sys 剩余模块,实测引用数)
+
+口径同上(realpath 去重,排除 `apps/csih/probes/**`)。`use sys.X` 的引用文件数:
+
+| 模块 | 产品 | tools+tests | csih | 判定 |
+|---|---|---|---|---|
+| `dl` | 1 | 1 | 0 | **core 不动**(cc 裁定) |
+| `dlcall` | 0 | 1 | 0 | **core 不动**(cc 裁定) |
+| `ffi` | 0 | 1 | 2 | **core 不动**(cc 裁定,FFI 是核心能力) |
+| `env` | 6 | 54 | 23 | P0,留 `cx/sys` |
+| `fs` | 7 | 118 | 26 | P0,留 |
+| `io` | 2 | 149 | 42 | P0,留 |
+| `kernel` | 1 | 1 | 0 | P0,留 |
+| `mem` | 1 | 1 | 0 | P0,留 |
+| `posix` | 1 | 13 | 10 | P0,留 |
+| `proc` | 1 | 81 | 12 | P0,留 |
+| `sha` | 2 | 7 | 0 | P0,留 |
+| `time` | 1 | 30 | 9 | P0,留 |
+| `sig` | **0** | 51 | 2 | **待裁定**,见下 |
+
+### `sig` 的两面
+
+- 按"产品 0 引用即迁出"的规则,它符合条件;
+- 但它被 `ext/sysx` 里已经搬过去的 `childdepth`(以及 `process`/`reaper` 一族)依赖,
+  且信号处置与 io/fs/proc 同属"最小平台契约",**产品 0 引用只说明产品不装处理器,不说明它不是契约**。
+
+**建议:留 `cx/sys`**,理由:①它是 `signalfd`/`sigaction` 这类最小平台能力的唯一出口;
+②搬进 sysx 会让 sysx 内部出现"包依赖包"的自我闭包,而没有产品收益;
+③51 个 tools/tests 调用点换来的只是路径变化。
+若 cc 裁定迁出,则按 B1 的同法(先查豁免、计数逐项相等、csih 不动)执行。
