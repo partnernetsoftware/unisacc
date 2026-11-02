@@ -2,6 +2,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
+#pragma unisa use cxlib.productpkg
 #pragma unisa use text.text
 typedef struct {char name[128],path[4096];int supplied,kind;} Material;
 typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128];int found,source_present;} Selected;
@@ -30,6 +31,10 @@ static char *read_regular(const char *p,size_t *n){struct stat st;errno=0;if(lst
    large inputs and keep the software path as the fallback, same shape as
    src/runcache.cx's rc_hex_file. */
 static void digest(const char *p,char h[65]){size_t n;char *s=read_regular(p,&n);if(n<65536||sy_sha256_hex(s,(long)n,h)!=0)cx_sha256_hex(s,n,h);free(s);}
+/* "unchanged" means the whole product: the member set under the split layout, the file itself
+   under an APE. Hashing root/unisacc.com alone was blind to the megabyte package (findings in
+   plans/product-identity-2026-11-02.md). */
+static void product_digest(const char *r,char h[65]){if(pp_product_digest(r,h))die("product identity");}
 static void parse_materials(void){const char *at=selected.materials;tp_material_decl d;int rc;while((rc=tp_material_next(&at,&d))>0){if(nmaterial==32)die("material inventory");Material *m=&material[nmaterial];copy(m->name,sizeof m->name,d.name);m->kind=d.kind;nmaterial++;}if(rc<0)die("material inventory");}
 static void supplied(int argc,char **argv){if(argc-4!=nmaterial)die("material argument count");for(int i=4;i<argc;i++){char *eq=strchr(argv[i],'=');if(!eq||eq==argv[i]||!eq[1]||strchr(eq+1,'='))die("material assignment");size_t n=(size_t)(eq-argv[i]);int found=-1;for(int j=0;j<nmaterial;j++)if(strlen(material[j].name)==n&&!memcmp(material[j].name,argv[i],n)){found=j;break;}if(found<0||material[found].supplied)die("unknown or duplicate material");Material *m=material+found;if(!tp_material_value(m->kind,eq+1))die("material typed value");if(m->kind==2)copy(m->path,sizeof m->path,eq+1);else{struct stat st;errno=0;if(lstat(eq+1,&st))die(errno==ENOENT?"material path absent":"material path stat");if(!S_ISREG(st.st_mode)&&!S_ISDIR(st.st_mode))die("material path kind");if(!realpath(eq+1,m->path)||!tx_eqz(eq+1, m->path))die("material canonical path");}m->supplied=1;}for(int i=0;i<nmaterial;i++)if(!material[i].supplied)die("missing material");}
 static const char *binding(const char *s,size_t n){if(n==4&&!memcmp(s,"root",4))return root;if(n==3&&!memcmp(s,"out",3))return work;if(n==9&&!memcmp(s,"candidate",9))return candidate;for(int i=0;i<nmaterial;i++)if(strlen(material[i].name)==n&&!memcmp(s,material[i].name,n))return material[i].path;die("unbound placeholder");return 0;}
@@ -41,12 +46,12 @@ int main(int argc,char **argv){
  char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eqz(parent, canonical))die("output parent must be below root/out");
  copy(selected.id,sizeof selected.id,argv[3]);table_path(registry,sizeof registry,"batches.tsv");table_path(coverage_path,sizeof coverage_path,"coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
  if(!tx_eqz(selected.platform, "lnx/x86_64"))die("batch requires another native host");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
- path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];digest(candidate,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
+ path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];product_digest(root,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
  char entry[4400];if(tx_eqz(selected.mode, "SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
  char storage[64][4400],*args[72];int na=0;args[na++]="sh";args[na++]=candidate;args[na++]=entry;args[na++]="--";
  if(!tx_eqz(selected.args, "-")){const char *at=selected.args;while(*at){const char *end=strchr(at,';');size_t n=end?(size_t)(end-at):strlen(at);if(na>=69||!n||n>=sizeof storage[0])die("argument bound");char token[4400];memcpy(token,at,n);token[n]=0;expand(token,storage[na-4]);args[na]=storage[na-4];na++;if(!end)break;at=end+1;}}
  if(np_subreaper()<0)fprintf(stderr,"run-batch: no child-subreaper\n");   /* orphans of a killed tree land here, not on init */
- args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds,&result,reason,sizeof reason);digest(candidate,after);
+ args[na]=0;np_result result={0};char reason[1200];int transport=np_run(args,root,0,seconds,&result,reason,sizeof reason);product_digest(root,after);
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
     caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
  if(transport){int st;while(waitpid(-1,&st,WNOHANG)>0);}

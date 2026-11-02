@@ -50,16 +50,21 @@
 #pragma unisa use text.text
 #pragma unisa use netpack
 #pragma unisa use testplan
+#pragma unisa use productpkg
 #pragma unisa use kernelsha
 
-typedef struct {char candidate[65],batches[65],coverage[65],registry[65],sid[65],harness[65];} as_ident;
+/* candidate is the product identity: the member set under the split layout, the whole file under
+   a single-file APE (see cxlib/productpkg, plans/product-identity-2026-11-02.md).
+   candidate_kind is "ape1"/"split1"; empty means the session predates the field, in which case
+   candidate holds the launcher's sha and legacy_candidate is what it is compared on. */
+typedef struct {char candidate[65],candidate_kind[8],legacy_candidate[65],batches[65],coverage[65],registry[65],sid[65],harness[65];} as_ident;
 typedef struct {char name[128],path[4096],content[65],fingerprint[65];long entries;int kind;} as_material;
 typedef struct {char id[128],rel[600],sha[65],verdict[16];int wave;} as_ref;
 typedef struct {int wave,finished,changed,run,superseded;char mode[8],dir[600],ids[1024],nonce[65],snapshot[65];long long start_ns;
  /* split attempts: the sealed RUN facts and the SHA of the whole RUN block */
  char run_sha[65],executor[65],runner[65],status_sha[65],out_sha[65],err_sha[65];int bound_rc,status_known,child_status,seconds;long long outn,errn,t0,t1;} as_wave;
 typedef struct {
- char root[4096],map_sha[65];as_ident ident;long long created;int seq;int has_executor;char exec_sha[65],runner_sha[65];
+ char root[4096],map_sha[65];as_ident ident;long long created;int seq;int has_executor;int legacy_no_kind;char exec_sha[65],runner_sha[65];
  as_material *material;int nmaterial;as_ref *ref;int nref;as_wave *wave;int nwave;
  char *bytes;size_t n;
 } as_manifest;
@@ -69,7 +74,7 @@ typedef struct {as_batch *b;int nb;as_cov *c;int nc;int failed;} as_registry;
 /* Everything a verdict may depend on.  The writer fills it from what it observed; the aggregator
    fills it from the saved receipt files, and the two derivations must agree. */
 typedef struct {
- const char *id,*marker,*candidate;int bound_rc,status_known,child_status;
+ const char *id,*marker,*candidate;int bound_rc,status_known,child_status;int legacy_identity;
  const char *out;size_t outn;const char *err;size_t errn;
  int candidate_stable,identity_stable,inputs_stable,materials_stable;
 } as_facts;
@@ -148,7 +153,9 @@ int as_sid(const char *root,char hex[65],char *why,size_t cap){
 }
 int as_identity(const char *root,int with_sid,as_ident *id,char *why,size_t cap){
  char p[4400];memset(id,0,sizeof *id);
- if(as_join(p,sizeof p,root,"unisacc.com")||as_sha_file(p,0,id->candidate,0,why,cap))return -1;
+ if(as_join(p,sizeof p,root,"unisacc.com")||as_sha_file(p,0,id->legacy_candidate,0,why,cap))return -1;
+ if(pp_product_digest(root,id->candidate))return as_bad(why,cap,"product-identity",root,0);
+ if(as_copy(id->candidate_kind,sizeof id->candidate_kind,pp_identity_kind(root)))return as_bad(why,cap,"identity-kind",root,0);
  if(as_join(p,sizeof p,root,"tests/batches.tsv")||as_sha_file(p,0,id->batches,0,why,cap))return -1;
  if(as_join(p,sizeof p,root,"tests/coverage.tsv")||as_sha_file(p,0,id->coverage,0,why,cap))return -1;
  char reg[200];{int z=snprintf(reg,sizeof reg,"batches\t%s\ncoverage\t%s\n",id->batches,id->coverage);if(z<0||(size_t)z>=sizeof reg){fprintf(stderr,"bound-format\n");exit(2);}};cx_sha256_hex(reg,strlen(reg),id->registry);
@@ -158,7 +165,18 @@ int as_identity(const char *root,int with_sid,as_ident *id,char *why,size_t cap)
 }
 /* First differing identity field name, or 0.  The SID is compared only when both carry one. */
 const char *as_ident_diff(const as_ident *a,const as_ident *b){
- if(strcmp(a->candidate,b->candidate))return "candidate";if(strcmp(a->registry,b->registry)||strcmp(a->batches,b->batches)||strcmp(a->coverage,b->coverage))return "registry";
+ /* Two known and different identity kinds cannot be compared: a member set and a whole-file hash
+    answer different questions. A session from before candidate_kind recorded the launcher's sha,
+    so a legacy side is compared on the launcher it recorded (legacy_candidate), never on the new
+    value -- those receipts are evidence and are not reinterpreted. */
+ {   int la=!a->candidate_kind[0],lb=!b->candidate_kind[0];
+     if(!la&&!lb&&strcmp(a->candidate_kind,b->candidate_kind))return "identity-kind";
+     if(la||lb){
+         const char *ca=a->legacy_candidate[0]?a->legacy_candidate:a->candidate;
+         const char *cb=b->legacy_candidate[0]?b->legacy_candidate:b->candidate;
+         if(strcmp(ca,cb))return "candidate";
+     } else if(strcmp(a->candidate,b->candidate))return "candidate";
+ }if(strcmp(a->registry,b->registry)||strcmp(a->batches,b->batches)||strcmp(a->coverage,b->coverage))return "registry";
  if(strcmp(a->harness,b->harness))return "harness";if(a->sid[0]&&b->sid[0]&&strcmp(a->sid,b->sid))return "sid";return 0;
 }
 
@@ -190,18 +208,24 @@ static int as_digits(const char *s,long long *v){long long x=0;if(!*s||(s[0]=='0
 static int as_relok(const char *s){size_t n=strlen(s);if(!n||n>=600||s[0]=='/'||strstr(s,".."))return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'||s[i]=='/'))return 0;return 1;}
 static int as_inlist(const char *csv,const char *id){size_t n=strlen(id);while(*csv){const char *e=strchr(csv,',');size_t z=e?(size_t)(e-csv):strlen(csv);if(z==n&&!memcmp(csv,id,n))return 1;if(!e)return 0;csv=e+1;}return 0;}
 int as_load(const char *session,as_manifest *m,char *why,size_t cap){
- static const char *keys[9]={"root","candidate_sha","batches_sha","coverage_sha","registry_sha","source_sid","harness_sha","materials_map_sha","created_ns"};
+ static const char *keys[10]={"root","candidate_sha","batches_sha","coverage_sha","registry_sha","source_sid","harness_sha","materials_map_sha","created_ns","candidate_kind"};
  char p[4400];memset(m,0,sizeof *m);if(as_join(p,sizeof p,session,"session.tsv"))return as_bad(why,cap,"manifest-path",session,0);
  m->bytes=as_read(p,0,&m->n,why,cap);if(!m->bytes)return -1;if(!m->n||m->bytes[m->n-1]!='\n'||memchr(m->bytes,0,m->n)||memchr(m->bytes,'\r',m->n)){as_free(m);return as_bad(why,cap,"manifest-wire",p,0);}
  char *t=malloc(m->n+1);if(!t){as_free(m);return as_bad(why,cap,"allocation",p,0);}{unsigned char *cxb_d=(unsigned char *)(t);const unsigned char *cxb_s=(const unsigned char *)(m->bytes);size_t cxb_n=(size_t)(m->n+1),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};
  size_t at=0,blockstart=0;int line=0,inblock=0,blockseq=0,body=0;char kind[16]="";int rc=0;char *f[20];as_wave *runw=0;
  while(at<m->n&&!rc){size_t end=at;while(t[end]!='\n')end++;t[end]=0;char *s=t+at;size_t start=at;at=end+1;int nf=as_split(s,f,20);if(nf<0){rc=as_bad(why,cap,"manifest-fields",s,0);break;}
   if(line<11){
-   if(line==0){if(nf!=2||strcmp(f[0],"ALLSESSION")||strcmp(f[1],"v1"))rc=as_bad(why,cap,"manifest-header","ALLSESSION",0);}
-   else if(line==10){if(nf!=2||strcmp(f[0],"END")||strcmp(f[1],"0"))rc=as_bad(why,cap,"manifest-header","END",0);}
+   if(line==0){if(nf!=2||strcmp(f[0],"ALLSESSION")||(strcmp(f[1],"v1")&&strcmp(f[1],"v2")))rc=as_bad(why,cap,"manifest-header","ALLSESSION",0);}
+   else if(!strcmp(f[0],"END")){
+    if(nf!=2||strcmp(f[1],"0")){rc=as_bad(why,cap,"manifest-header","END",0);break;}
+    /* a v1 manifest has no candidate_kind: its `candidate` is the launcher's sha. Keep it under
+       legacy_candidate and label the session, so aggregation can say so instead of pretending. */
+    if(!m->ident.candidate_kind[0]){m->legacy_no_kind=1;as_copy(m->ident.legacy_candidate,sizeof m->ident.legacy_candidate,m->ident.candidate);as_copy(m->ident.candidate_kind,sizeof m->ident.candidate_kind,"ape1");}
+   }
    else{const char *k=keys[line-1];if(nf!=2||strcmp(f[0],k)){rc=as_bad(why,cap,"manifest-header",k,0);}
     else if(line==1){if(f[1][0]!='/'||as_copy(m->root,sizeof m->root,f[1]))rc=as_bad(why,cap,"manifest-header","root",0);}
     else if(line==9){if(as_digits(f[1],&m->created))rc=as_bad(why,cap,"manifest-header","created_ns",0);}
+    else if(line==10){if(strcmp(f[1],"ape1")&&strcmp(f[1],"split1"))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);else if(as_copy(m->ident.candidate_kind,sizeof m->ident.candidate_kind,f[1]))rc=as_bad(why,cap,"manifest-header","candidate_kind",0);}
     else{char *dst=line==2?m->ident.candidate:line==3?m->ident.batches:line==4?m->ident.coverage:line==5?m->ident.registry:line==6?m->ident.sid:line==7?m->ident.harness:m->map_sha;if(as_hexfield(dst,f[1]))rc=as_bad(why,cap,"manifest-header",k,0);}}
    line++;continue;}
   line++;
@@ -311,7 +335,17 @@ const char *as_verdict(const as_facts *f,const char **reason){
  if(e==2){*reason="runner-refused";return "UNKNOWN";}
  if(e!=0&&e!=1&&e!=3){*reason="unclassified-exit";return "UNKNOWN";}
  if(count!=1||!tail){*reason=e?"unclassified-exit":"batch-line-missing-or-not-last";return e?"UNKNOWN":"FAIL";}
- if(e==0){char want[600];int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\trc=0\ttransport=0\tmarker=%s\tcandidate=%s\tscope=actual-one-batch-no-cached-result",f->id,f->marker,f->candidate);
+ if(e==0){char want[600];const char *cand=f->candidate;char got[65];
+  /* A session written before candidate_kind recorded the launcher's sha in `candidate`, while a
+     current run prints the member-set identity. Those receipts are evidence, so the legacy value
+     is not rewritten; the line is matched on the identity the run itself printed instead, and the
+     aggregate labels the session legacy-no-kind. */
+  if(f->legacy_identity){
+   got[0]=0;
+   for(size_t i=0;i+11<ln;i++)if(!memcmp(last+i,"\tcandidate=",11)){size_t a=i+11,b=a;while(b<ln&&last[b]!='\t')b++;if(b-a==64){memcpy(got,last+a,64);got[64]=0;}break;}
+   if(got[0])cand=got;
+  }
+  int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\trc=0\ttransport=0\tmarker=%s\tcandidate=%s\tscope=actual-one-batch-no-cached-result",f->id,f->marker,cand);
   if(z<0||(size_t)z>=sizeof want||ln!=(size_t)z||memcmp(last,want,ln)){*reason="pass-line-mismatch";return "FAIL";}*reason="batch-pass";return "PASS";}
  char copy[600];if(ln>=sizeof copy){*reason=e==3?"unclassified-exit":"batch-fail";return e==3?"UNKNOWN":"FAIL";}{unsigned char *cxb_d=(unsigned char *)(copy);const unsigned char *cxb_s=(const unsigned char *)(last);size_t cxb_n=(size_t)(ln),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};copy[ln]=0;
  /* run-batch rc3 status=UNKNOWN: the batch's own bound expired (process group killed); never PASS, rerun required */
@@ -383,7 +417,7 @@ int as_finish(const char *root,const char *session,const char *id,const char *no
  if(strcmp(b->materials,"-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);const as_snapmat *sm=0;for(int i=0;i<nmat;i++)if(!strcmp(mat[i].name,name))sm=&mat[i];
    char fp[65];if(!x||x->kind!=d.kind){as_bad(why,cap,"material-type-binding",name,0);free(ml.p);goto done;}if(as_material_fp(x,fp,why2,sizeof why2)){ if (cx_fmt(fp, sizeof fp, "%s","0000000000000000000000000000000000000000000000000000000000000000")) { fprintf(stderr, "allsession: text too long for fp\n"); exit(2); } }if(strcmp(fp,x->fingerprint)||!sm||sm->kind!=x->kind||strcmp(sm->fp,x->fingerprint)||strcmp(sm->path,x->path)||strcmp(sm->content,x->content))materials_stable=0;
    np_puts(&ml,"material\t");np_puts(&ml,name);np_puts(&ml,"\t");np_puts(&ml,x->path);np_puts(&ml,"\t");np_puts(&ml,x->content);np_puts(&ml,"\t");np_puts(&ml,x->fingerprint);np_puts(&ml,"\t");np_puts(&ml,fp);as_material_tag(&ml,x->kind);np_puts(&ml,"\n");}}
- as_facts fa;memset(&fa,0,sizeof fa);fa.id=id;fa.marker=b->expect+4;fa.candidate=m.ident.candidate;fa.bound_rc=w->bound_rc;fa.status_known=status_known;fa.child_status=(int)raw;fa.out=out;fa.outn=on;fa.err=err;fa.errn=en;
+ as_facts fa;memset(&fa,0,sizeof fa);fa.id=id;fa.marker=b->expect+4;fa.candidate=m.ident.candidate;fa.legacy_identity=m.legacy_no_kind;fa.bound_rc=w->bound_rc;fa.status_known=status_known;fa.child_status=(int)raw;fa.out=out;fa.outn=on;fa.err=err;fa.errn=en;
  fa.candidate_stable=measured&&!strcmp(sv[5],after.candidate)&&!strcmp(sv[5],m.ident.candidate);fa.identity_stable=!changed;fa.inputs_stable=inputs_stable;fa.materials_stable=materials_stable;
  const char *reason;const char *verdict=as_verdict(&fa,&reason);
  np_puts(&r,"ALLRECEIPT\tv1\nbatch\t");np_puts(&r,id);np_puts(&r,"\nwave\t");np_putll(&r,w->wave);np_puts(&r,"\nregistry_row_sha\t");np_puts(&r,b->row);np_puts(&r,"\nregistry_sha\t");np_puts(&r,m.ident.registry);np_puts(&r,"\nsource_sid\t");np_puts(&r,m.ident.sid);np_puts(&r,"\nharness_sha\t");np_puts(&r,m.ident.harness);
@@ -482,7 +516,7 @@ static int as_check_receipt(const char *root,const char *session,const as_manife
  /* split attempts: every executed fact must equal the sealed RUN block, which the receipt names by SHA */
  if(split){const char *bad=as_check_split(session,dir,r->id,wp,(const char *const *)vals[19],(const char *const *)vals[20],(const char *const *)vals[21],cs,s0,s1,brc,status_known,cst,vals[16][2],(long long)sn[0],vals[17][2],(long long)sn[1],vals[18][2]);
   if(bad){free(saved[0]);free(saved[1]);free(text);{int z=snprintf(reason,200,"%s",bad);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return -1;}}
- as_facts fa;memset(&fa,0,sizeof fa);fa.id=r->id;fa.marker=b->expect+4;fa.candidate=m->ident.candidate;fa.bound_rc=(int)brc;fa.status_known=status_known;fa.child_status=(int)cst;fa.out=saved[0];fa.outn=sn[0];fa.err=saved[1];fa.errn=sn[1];
+ as_facts fa;memset(&fa,0,sizeof fa);fa.id=r->id;fa.marker=b->expect+4;fa.candidate=m->ident.candidate;fa.legacy_identity=m->legacy_no_kind;fa.bound_rc=(int)brc;fa.status_known=status_known;fa.child_status=(int)cst;fa.out=saved[0];fa.outn=sn[0];fa.err=saved[1];fa.errn=sn[1];
  fa.candidate_stable=!strcmp(vals[7][1],vals[8][1]);fa.identity_stable=!strcmp(vals[9][1],"STABLE");fa.inputs_stable=inputs_stable;fa.materials_stable=materials_stable;
  const char *why_v;const char *v=as_verdict(&fa,&why_v);int agree=!strcmp(v,rv)&&!strcmp(why_v,rr)&&!strcmp(v,r->verdict);free(saved[0]);free(saved[1]);free(text);
  if(!agree){snprintf(reason,200,"receipt-verdict-not-rederivable");return -1;}*verdict=v;{int z=snprintf(reason,200,"%s",why_v);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return 0;
@@ -532,6 +566,6 @@ int as_aggregate(const char *root_arg,const char *session_arg){
   else if(blocking.n||!mapped){unsatisfied++;printf("COVERAGE\t%s\tUNSATISFIED\tblocking=%s\n",cv->id,blocking.n?blocking.p:"no-implemented-batch");}
   else{satisfied++;printf("COVERAGE\t%s\tSATISFIED\n",cv->id);}free(blocking.p);}
  int qualified=implemented>0&&npass==implemented&&!unsatisfied&&!unresolved;
- printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave);
+ printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none"));
  free(st);as_registry_free(&reg);as_free(&m);close(lock);return qualified?0:1;
 }
