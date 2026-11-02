@@ -3,19 +3,27 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.19): `-c -b os/arch` writes a
-relocatable object in the target's own format -- ELF, Mach-O or COFF -- that the
-system linkers (GNU ld, lld, ld64, lld-link) accept, and that may read data
-symbols a C compiler defined; `-c -b os/arch -funit` writes a *unit* object for
-separate compilation, and `unisacc a.o b.o lib.a [-o prog]` links unit objects
-and archives (`unisacc ar rcs|t|x`) for any of the six targets. The
-reference compiler writes objects for all six targets; the shipped `unisacc.com` links
-unit objects, writes archives, and writes `-c -b lnx/ARCH` objects, but refuses `-c -b`
-for osx/win by name (exec/c/compiler.c:510).
-Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU assembly
-(AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
-assembles it -- or hand-written code in the same subset -- back into the
-identical object; `unisacc nm` and `unisacc objdump -d` read the same objects. Assembly text for Mach-O and COFF, Intel syntax and inline `asm` are not scheduled (moved to the 0.1.x appendix). The design and the back-end facts behind it are in
+file, `unisacc.com`. Toolchain status (0.0.43, measured on the installed
+`83343ec1`): `-o` writes a runnable file for all six targets -- ELF, Mach-O with
+an ad-hoc signature, or PE32+ -- and the default `-run` executes in memory;
+relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
+`ET_REL` object; GNU `ld` links that whole-program object into a runnable static
+program on its own, and `cc` cannot (`_start` collides with the crt, and the
+calling convention is not SysV or AAPCS64). `-c -b osx/*|win/*` is refused by
+name: "object output (-c -b) for this target is not on the product route yet
+(Linux targets are); the reference compiler writes Mach-O and COFF objects"
+(exit 1). `-c -b T -funit` writes a *unit* object for the Linux targets and
+stops with `NOT_IMPLEMENTED object` (exit 2) for the other four; `unisacc a.o
+b.a [-o prog]` links unit objects and archives, and `unisacc ar rcs|t|x` writes
+them (measured: two unit objects plus an archive, linked and run). The product
+writes no assembly text: `-S -b lnx/ARCH -o FILE.s` stops with
+`NOT_IMPLEMENTED object` (exit 2), the osx/win names are refused as "written for
+Linux targets in this version", and bare `-S` writes the tape IR, which
+`unisacc as` rejects ("directive not in the subset"). `unisacc nm` and `unisacc
+objdump -d` read the ELF objects. The archived reference compiler is what wrote
+ELF, Mach-O and COFF objects and GNU assembly for all six targets; assembly text
+for Mach-O and COFF, Intel syntax and inline `asm` are not scheduled (moved to
+the 0.1.x appendix). The design and the back-end facts behind it are in
 [docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) (published) and [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) (published). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
@@ -66,14 +74,15 @@ three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.
 retain the exact historical candidates, hashes and build lineage. They do not
 qualify the current candidate.
 
-The installed `unisacc.com` is still a product of the old C chain. The CX entry
-(`src/unisacc.cx`) is built by `tools/entry-build.cx` as an `lnx/x86_64` ELF candidate
-with the installed P3 package. It matches the installed product on all 148
-entry cells, but it is not yet the product. The steps from that candidate to
-a five-slice APE product are listed, not yet executed, in
-[candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md). As of
-2026-10-30, `lnx/arm64` objects compile, but `osx/*` and `win/x86_64` do not:
-the model driver's `-c -b` does not yet reach non-Linux targets.
+The installed `unisacc.com` is built from the CX chain in this tree, not from
+the old C reference: `tools/entry-build.cx` compiles `src/unisacc.cx` per
+target, `tools/release-build.cx` adds the P3 package and one slice, and
+`tools/release-ape.cx` packs the five slices into one APE and smokes it. The
+installed 0.0.43 product is `83343ec1` (rev `edc2c7700b`, 5,145,706 bytes,
+2026-11-01), and its second generation compiled `lnx/x86_64` byte-identical.
+Two steps of the object route are still open: the model driver's `-c -b`
+reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text
+([candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)).
 
 `tools/product-build.cx`, `tools/hostseed-step*.cx` and `tools/selfhost-mixed.cx`
 still compile or link the archived C reference, so they cannot run. They
@@ -109,8 +118,8 @@ machine). The C headers it needs travel inside it.
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
 ./unisacc.com -O2 a.c b.c -b lnx/x86_64 -o prog
 ./unisacc.com -E file.c                     # preprocess only
-./unisacc.com hello.c -S -b lnx/x86_64 -o hello.s  # GNU assembly of the object -c -b would write
-./unisacc.com as hello.s -o hello.o         # assemble it back (also hand-written code in the subset)
+./unisacc.com -c -b lnx/x86_64 -o hello.o   # ELF relocatable object (Linux targets only)
+./unisacc.com -c -b lnx/x86_64 -funit -o unit.o # unit object for separate compilation
 ./unisacc.com hello.c -S --tapebin -o hello.tapebin # write the portable tape container
 ./unisacc.com -run hello.tapebin            # run its recorded program
 ./unisacc.com hello.tapebin -b osx/arm64 -o hello
@@ -143,13 +152,15 @@ machine). The C headers it needs travel inside it.
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
 - **Not a `cc` drop-in yet:** bare `-c` and bare `-S` (no `-b`) write the compiler's
-  intermediate *tape* (so does `-S -b T` without a `.s` output); `-S -b lnx/ARCH -o FILE.s` writes GNU assembly. `unisacc as`
-  takes the subset the back end emits (plus `.text/.data/.bss`, `.globl`,
-  `.byte/.ascii/.zero`); other instructions, Intel syntax and inline `asm` are
-  refused by name (0.0.19). `-c -b os/arch` writes an object (reference compiler):
-  a whole-program object links with the system linker on its own and may read
-  data symbols from cc-compiled objects, but cannot call cc-compiled functions
-  or be called by them yet (the calling convention differs; 0.0.18). Unit
+  intermediate *tape* (so does `-S -b T` without a `.s` output); `-S -b lnx/ARCH -o FILE.s`
+  asks for GNU assembly, which the model product does not write yet (`NOT_IMPLEMENTED
+  object`, exit 2). `unisacc as` takes the subset its own back end defines (plus
+  `.text/.data/.bss`, `.globl`, `.byte/.ascii/.zero`); other instructions, Intel
+  syntax, inline `asm` and the tape text are refused by name. `-c -b lnx/ARCH` writes
+  an ELF object: a whole-program object links with GNU `ld` on its own, while `cc`
+  cannot link it (`_start` collides with the crt and the calling convention is not
+  SysV or AAPCS64); Mach-O and COFF objects are written by the archived reference
+  compiler, not by this product. Unit
   objects (`-funit`) are linked by `unisacc` itself, not by the system linker,
   because only unisacc chains every unit's initialisers. `-l`/`-L` are still
   accepted and ignored; pass archives by path. C11 features and GCC extensions (statement
@@ -171,11 +182,18 @@ objects and links them, each step under `tools/bound`, then appends the P3
 package taken from the file `P3` (usually the installed `unisacc.com`). It does
 not replace `ROOT/unisacc.com`. The full usage, including `--target`, `--only`
 and `--link-only` for splitting a build into bounded batches, is in the comment
-at the top of the tool. Turning that candidate into the six-target product
-(five slices, APE wrap, install) is a list of steps in
-[archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md);
-as of 2026-10-30 the candidate covers lnx/x86_64 only and the installed
-`unisacc.com` has not been replaced.
+at the top of the tool. Turning that candidate into the six-target product is
+one `tools/release-build.cx` run per slice (P3 package plus the slice; `whole-o`
+for osx/win, `objects` for lnx), then `tools/release-ape.cx -- pack` for the
+five-slice APE and `-- smoke` before anyone installs it. The steps are listed in
+[archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md),
+and the installed 0.0.43 `unisacc.com` was built this way:
+
+```bash
+sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
+sh ./unisacc.com tools/release-build.cx -- slice ROOT PKG OUT --target TARGET
+sh ./unisacc.com tools/release-ape.cx -- pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64
+```
 
 The classic route is archived: `unisacc.c`, `src/*.c` and the C sources of the
 old driver are in `archive/reference-c/`; `tests/build_ref.sh`,
