@@ -1,0 +1,94 @@
+/* tools/check-source-job-count.cx -- source-job-wave's hard-coded job counts
+ * must agree with tools/source-package.cx's recipes array and the 5 tools.
+ *
+ *   sh ./unisacc.com tools/check-source-job-count.cx
+ *
+ * Recipe count: inside `static const SpModel recipes[] = { ... };` every
+ *   `{"<id>",` whose id starts with a letter counts as one recipe. Flag
+ *   fields (`{"--typed",0}`) start with '-' and are excluded. Expect exactly
+ *   one recipe per gen/tbl/net triple: jobs = 5 tools + 3 * recipes.
+ * Wave count: `ids[N][128]` (the inventory cap) and `counts[1]!=G` (the
+ *   gen/tbl/net count) in tools/source-job-wave.cx.
+ *
+ * Assertions (exit 0 only when all hold):
+ *   recipes == G  (gen=tbl=net, one each per recipe)
+ *   N == 5 + 3*G
+ *   tools == 5
+ * Adding a recipe without bumping the wave numbers turns this red immediately
+ * instead of failing mid-epoch with "authoritative NNN inventory". */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int failed;
+
+static void ok(int cond, const char *name) {
+    if (!cond) failed++;
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+}
+
+/* whole file with a NUL terminator, for strstr/strchr; 0 on read failure */
+static char *loadz(const char *p, long *n) {
+    size_t zn;
+    char *s = cx_read(p, &zn);
+    char *z;
+    if (!s) return 0;
+    z = malloc(zn + 1);
+    if (!z) { free(s); return 0; }
+    memcpy(z, s, zn);
+    z[zn] = 0;
+    free(s);
+    *n = (long)zn;
+    return z;
+}
+
+/* recipes entries in the SpModel array: {"<letter-starting-id>", ... */
+static long count_recipes(const char *s) {
+    const char *p = strstr(s, "static const SpModel recipes");
+    const char *brace, *q;
+    long cnt = 0;
+    if (!p) return -1;
+    brace = strchr(p, '{');
+    if (!brace) return -1;
+    q = brace + 1;
+    while (*q) {
+        if (q[0] == '{' && q[1] == '"' &&
+            ((q[2] >= 'a' && q[2] <= 'z') || (q[2] >= 'A' && q[2] <= 'Z'))) cnt++;
+        if (q[0] == '}' && q[1] == ';') break;
+        q++;
+    }
+    return cnt;
+}
+
+/* first unsigned decimal after KEY in S, or -1 */
+static long after(const char *s, const char *key) {
+    const char *p = strstr(s, key);
+    long v = 0;
+    int any = 0;
+    if (!p) return -1;
+    p += strlen(key);
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (long)(*p - '0'); p++; any = 1; }
+    return any ? v : -1;
+}
+
+int main(void) {
+    char *r, *w;
+    long rn, wn, recipes, ids, gen, tools;
+    r = loadz("tools/source-package.cx", &rn);
+    w = loadz("tools/source-job-wave.cx", &wn);
+    if (!r || !w) { fprintf(stderr, "check-source-job-count: read failed\n"); return 2; }
+    recipes = count_recipes(r);
+    ids = after(w, "ids[");
+    gen = after(w, "counts[1]!=");
+    tools = after(w, "counts[0]!=");
+    ok(recipes > 0, "recipes-counted");
+    ok(ids > 0, "wave-ids-array-cap");
+    ok(gen > 0, "wave-gen-count");
+    ok(recipes == gen, "recipes-equal-gen-tbl-net-count");
+    ok(ids == 5 + 3 * gen, "ids-cap-equals-5-plus-3-times-recipes");
+    ok(tools == 5, "tools-count-is-5");
+    printf("SOURCE_JOB_COUNT\trecipes=%ld\ttools=5\tgen=tbl=net=%ld\tjobs=%ld\n", recipes, gen, ids);
+    printf("SOURCE_JOB_COUNT\tassertions=6\tfailed=%d\n", failed);
+    free(r);
+    free(w);
+    return failed ? 1 : 0;
+}
