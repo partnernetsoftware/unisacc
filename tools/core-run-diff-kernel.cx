@@ -1,0 +1,40 @@
+#pragma unisa use sys.kernel
+#pragma unisa use core_run_spec
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+/* Other half of the core_run differential (tools/check-core-run-diff.cx): run the assembly
+   kernel of cx/sys/kernel.cx on the same fixed model and print the outcome as one line.  The
+   product package carries the blob inside the executable, so this host has none: core_host_fetch
+   declines and the kernel loads the file named by UNISA_KERNEL, which this driver sets from
+   argv[2].  Same structs (core_run_spec), same prototype, same line -- any ABI or behaviour
+   difference between the two kernels shows up as a different line. */
+int core_run(const void *m, unsigned char *input, int inputn, const char *src, long long maxsteps, void *result);
+int core_host_fetch(const unsigned char *key, int keyn, unsigned char **out, int *n) {
+    (void)key; (void)keyn; (void)out; (void)n;
+    return 0;   /* no in-package blob: kn_load falls back to UNISA_KERNEL */
+}
+static unsigned char model[2048];
+static unsigned char outcome[256];
+static const char empty[1] = {0};
+int main(int argc, char **argv) {
+    int ci, in_n = 0;
+    const unsigned char *in;
+    const void *ob, *eb;
+    char oh[65], eh[65];
+    int st;
+    if (argc != 3 || argv[1][0] < '0' || argv[1][0] > '2' || argv[1][1]) { sy_eprintf("usage: core-run-diff-kernel.cx CASE KERNEL\n"); return 2; }
+    ci = argv[1][0] - '0';
+    in = crs_case(ci, &in_n);
+    if (!in) { sy_eprintf("core-run-diff-kernel: bad case\n"); return 2; }
+    if (crs_model_size() > (long)sizeof model || crs_result_size() > (long)sizeof outcome) { sy_eprintf("core-run-diff-kernel: buffer too small\n"); return 2; }
+    if (crs_fill(model)) { sy_eprintf("core-run-diff-kernel: model fill\n"); return 2; }
+    if (sy_setenv("UNISA_KERNEL", argv[2], 1)) { sy_eprintf("core-run-diff-kernel: cannot set UNISA_KERNEL\n"); return 2; }
+    st = core_run(model, (unsigned char *)in, in_n, crs_src(), 1000, outcome);
+    ob = crs_out_b(outcome); eb = crs_err_b(outcome);
+    sy_sha256_hex(ob ? ob : empty, crs_out_n(outcome), oh);
+    sy_sha256_hex(eb ? eb : empty, crs_err_n(outcome), eh);
+    sy_printf("CORE_RUN case=%d st=%d outn=%d errn=%d outsha=%s errsha=%s\n",
+              ci, st, crs_out_n(outcome), crs_err_n(outcome), oh, eh);
+    return 0;
+}

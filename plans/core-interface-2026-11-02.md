@@ -30,6 +30,11 @@
 - 与现有分工：`check-cx-layers` 判方向（层、包）、`cx-module-freeze.tsv` 判成员、本棘轮判成员说的话、`cx-core-run-diff` 判 `core_run` 两条链接的行为一致。四者都不看语义正确性（那归各自批次）。
 - 成本：26 次 `symindex dump`，热索引实测 11.9s，批次预算 55s。
 - 接进 `tools/ratchets.cx` 作第八项 `coreapi`：七项棘轮一次跑完时一并判红。
+- `core_run` 的两条链接不是靠基线行判定的，基线只记「有一行、两个实现同签名」；行为一致由批次 `cx-core-run-diff` 单独判：
+  - `tools/core_run_spec.cx` 是唯一的模型定义（64 位指针/32 位 int 的 ABI 结构、动作表、三组固定输入）；两个驱动各自只声明 `core_run` 原型并读回结果，因此两边共用同一份模型而不共享符号。
+  - `tools/core-run-diff-cx.cx` 链接 `core.execute` 及其配套 core 模块（transition/alu/sparse/bytes/stack/output/memory）并自备 `core_host_panic`；`tools/core-run-diff-kernel.cx` 链接 `sys.kernel`，`core_host_fetch` 返回 0 让内核回落到 `UNISA_KERNEL`。
+  - 两侧都打印同一行 `CORE_RUN case=… st=… outn=… errn=… outsha=… errsha=…`；`tools/check-core-run-diff.cx ROOT KERNELS` 跑三组固定输入（空、`ab`、0/1/2/127/128/255），要求两侧 rc 都为 0 且整行逐字节相同，末行 `CORE_RUN_DIFF<TAB>cases=3<TAB>failed=N`。
+  - 负向自证：把任一侧打印的 `outn` 加 1，三例全 DIFF；实测 16.6s（批预算 55s），产品批次路径 `BATCH_RUN id=cx-core-run-diff status=PASS`。
 
 ## 四、清单（按模块）
 
@@ -475,7 +480,10 @@ SHA-256 十六进制摘要：Linux x86_64 走 AF_ALG，失败返回非 0 供上�
 sh ./unisacc.com tests/coreapi.cx -- --check            # 基线比对，末行 CORE_INTERFACE
 sh ./unisacc.com tests/coreapi.cx -- --fixtures         # 八例自证，末行 COREAPI_FIXTURES
 sh ./unisacc.com tools/ratchets.cx                      # 八项棘轮，含 coreapi
+sh ./unisacc.com tools/check-core-run-diff.cx -- REPO KERNELS   # core_run 两链接差分，末行 CORE_RUN_DIFF
 sh ./unisacc.com tools/symindex.cx -- dump cx/sys/fs.cx | awk -F'\t' '$1=="D" && $5=="0"'
 ```
+
+`KERNELS` 是含 `x86_64.kernel` 的目录（本文用 `out/c43-native-kernel-06`，x86_64.kernel 的 sha256 为 `32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97`）。
 
 对 `tests/cx-module-freeze.tsv` 的每行路径重复 dump 即可重算本清单：模块 26 个、导出符号 191 个，`static` 定义全部不在其中；`--write` 只用于评审后下调或受控加行。

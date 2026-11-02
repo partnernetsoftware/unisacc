@@ -1,0 +1,76 @@
+/* check-core-run-diff.cx ROOT KERNELS -- the two core_run links must agree byte for byte.
+ *
+ *   sh ./unisacc.com tools/check-core-run-diff.cx -- /repo /repo/out/<generation>
+ *
+ * cx/core/execute.cx (the CX reference kernel) and cx/sys/kernel.cx (the assembly kernel the
+ * product links) are separate programs, so their agreement is observed through two drivers
+ * that share one model definition (tools/core_run_spec.cx) and print one line each:
+ *   CORE_RUN case=N st=S outn=A errn=B outsha=H errsha=H
+ * This check runs both drivers on the three fixed inputs (empty, "ab", every byte class),
+ * requires rc 0 from both and compares the two lines as whole bytes, so a difference in the
+ * status, the extents or the produced bytes is red.  KERNELS is the directory holding
+ * x86_64.kernel (the batch is registered for lnx/x86_64; the file name is the target's own).
+ * Ends with CORE_RUN_DIFF<TAB>cases=3<TAB>failed=N and exits 0 only when all agree. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+static int failed;
+static void die(const char *s) { sy_eprintf("check-core-run-diff: %s\n", s); exit(2); }
+static void join(char *p, size_t cap, const char *a, const char *b) {
+    int n = snprintf(p, cap, "%s/%s", a, b);
+    if (n < 0 || (size_t)n >= cap) die("path bound");
+}
+/* One child: sh PRODUCT DRIVER -- CASES [KERNEL]; returns its stdout line, or 0 on a bad run. */
+static char *side(const char *root, const char *driver, const char *cs, const char *kernel,
+                  size_t *outn, char *why, size_t wl) {
+    char product[4096], script[4096];
+    char *v[7];
+    int k = 0;
+    np_result r;
+    join(product, sizeof product, root, "unisacc.com");
+    join(script, sizeof script, root, driver);
+    v[k++] = (char *)"sh"; v[k++] = product; v[k++] = script; v[k++] = (char *)"--";
+    v[k++] = (char *)cs;
+    if (kernel) v[k++] = (char *)kernel;
+    v[k] = 0;
+    memset(&r, 0, sizeof r);
+    if (np_run(v, root, 0, 45, &r, why, wl)) return 0;
+    if (r.rc != 0) {
+        snprintf(why, wl, "rc=%d err=%.120s", r.rc, r.err ? r.err : "");
+        free(r.out); free(r.err);
+        return 0;
+    }
+    *outn = r.outn;
+    free(r.err);
+    return r.out;
+}
+int main(int argc, char **argv) {
+    char root[4096], kernel[4096];
+    const char *cases[3] = {"0", "1", "2"};
+    int i;
+    if (argc != 3) { sy_eprintf("usage: check-core-run-diff.cx ROOT KERNELS\n"); return 2; }
+    if (!realpath(argv[1], root)) die("root");
+    join(kernel, sizeof kernel, argv[2], "x86_64.kernel");
+    if (!sy_exists(kernel)) { sy_eprintf("check-core-run-diff: no kernel at %s\n", kernel); return 2; }
+    for (i = 0; i < 3; i++) {
+        char why[512] = "";
+        size_t an = 0, bn = 0;
+        char *a = side(root, "tools/core-run-diff-cx.cx", cases[i], 0, &an, why, sizeof why);
+        char *b = 0;
+        if (!a) { sy_printf("CORE_RUN_CASE\tcase=%s\tERROR\tcx: %s\n", cases[i], why); failed++; free(a); continue; }
+        why[0] = 0;
+        b = side(root, "tools/core-run-diff-kernel.cx", cases[i], kernel, &bn, why, sizeof why);
+        if (!b) { sy_printf("CORE_RUN_CASE\tcase=%s\tERROR\tkernel: %s\n", cases[i], why); failed++; free(a); free(b); continue; }
+        if (an == bn && memcmp(a, b, an) == 0) {
+            sy_printf("CORE_RUN_CASE\tcase=%s\tok\t%.*s", cases[i], (int)(an > 200 ? 200 : an), a);
+        } else {
+            sy_printf("CORE_RUN_CASE\tcase=%s\tDIFF\n  cx     %.*s  kernel %.*s", cases[i],
+                      (int)(an > 200 ? 200 : an), a, (int)(bn > 200 ? 200 : bn), b);
+            failed++;
+        }
+        free(a); free(b);
+    }
+    sy_printf("CORE_RUN_DIFF\tcases=3\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
