@@ -2,7 +2,7 @@
 
 | 窗口 | 当前任务 | 拥有的路径（可写） | 阻塞 / 等待 | 下一次确认 |
 |---|---|---|---|---|
-| omp-bdy | 慢车道试点：pp-negative 两张表 → 私有根纪元 `out/epoch-pp1`；工具侧：release-ape 写 build.json、prepare-context 比 product_digest | `exec/pp/*`、`out/epoch-pp1/`、`tools/release-ape.cx`、`tools/cxlib/source-package*` | 等 omp-go 的 split2 接口；gen-shared-e2 报 receipt-bytes-mismatch 在查 | 15 分钟督导 |
+| omp-bdy | 慢车道试点：pp-negative 两张表 → 私有根纪元 `out/epoch-pp1`；prepare-context 已过(split2)，进 gen-shared-e2 → source-job-wave(107 job) | `exec/pp/*`、`out/epoch-pp1/`、`tools/release-ape.cx`、`tools/cxlib/source-package*` | 无阻塞；债务=build.json 由 pp_product_digest 人工组装(commit/sources_sha256 沿用)，生成器 `tools/epoch-root-record.cx` 第二次纪元前必须补 | 15 分钟督导 |
 | omp-go | 产品身份：评审 9 条已修，split2（a-f）进行中 | `tools/cxlib/productpkg.cx`、`allsession.cx`、`tests/*` 里与身份相关的批次、`tools/check-productpkg.cx`、`check-root-identity.cx` | 落地后把接口直接发 omp-bdy | 15 分钟 |
 | omp-ds | census 复跑 27 个未知（等纪元结束）；register 加固已提交；P4 队列已提交 | `tools/census.cx`、`tools/register.cx`、`tools/check-*` 自有 | 暂停重批，等 cc 通知 | 回信时 |
 | omp-go2 | superharness 原型（out/superharness，Bun/TS；D1 起：SQLite+intake+CLI+接口设计；harness 内建并发/深度/预算/精确PID清理）。Orca 已被主人放弃 | `out/superharness/`、`plans/` | 无 | 里程碑回信 |
