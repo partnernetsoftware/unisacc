@@ -1,0 +1,71 @@
+/* tools/check-e2stream.cx -- the contracts on cxlib/e2stream.cx (own process group + reaper).
+ *   sh ./unisacc.com tools/check-e2stream.cx
+ * A. a timed-out job's setsid descendant is dead afterwards (kill(pid) alone misses it);
+ * B. the TimeoutExpired text keeps its prefix and duration;
+ * C. the normal path is untouched (rc, stdout and stderr captured). */
+#pragma unisa use sys.process
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int bad, checks;
+static char root[4096], tmp[4400];
+static void ok(int c, const char *w) { checks++; printf("%s\t%s\n", c ? "PASS" : "FAIL", w); if (!c) bad++; }
+static int read_pid(const char *p) { size_t n = 0; char *b = cx_read(p, &n); int v = -1; if (b) { v = atoi(b); free(b); } return v; }
+static void reap(void) { int st; while (waitpid(-1, &st, WNOHANG) > 0) ; }   /* orphans adopted by the subreaper */
+static int alive(int pid) { char p[64]; if (cx_fmt(p, sizeof p, "/proc/%d/stat", pid)) return 0; return sy_exists(p); }
+static int gone(int pid, long ms) { long w = 0; while (w < ms) { if (!alive(pid)) return 1; usleep(5000); w += 5; } return !alive(pid); }
+
+/* run the child with the given command; returns its exit code, its stderr into ERR */
+static int child(char *const cmd[], char *err, size_t en, char *out, size_t on) {
+    char *v[8]; char why[600]; np_result r; int n = 0, i, t;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/e2stream-child.cx"; v[n++] = "--";
+    for (i = 0; cmd[i]; i++) v[n++] = cmd[i];
+    v[n] = 0;
+    t = np_run(v, root, 0, 40, &r, why, sizeof why);
+    if (t) { cx_fmt(err, en, "transport: %s", why); np_free(&r); return -2; }
+    if (r.errn) { size_t c = r.errn < en - 1 ? r.errn : en - 1; memcpy(err, r.err, c); err[c] = 0; }
+    else err[0] = 0;
+    if (out && on) { if (r.outn) { size_t c = r.outn < on - 1 ? r.outn : on - 1; memcpy(out, r.out, c); out[c] = 0; } else out[0] = 0; }
+    i = r.rc; np_free(&r);
+    return i;
+}
+
+int main(void) {
+    char err[8192], outbuf[8192];
+    if (sy_child_subreaper() < 0) fputs("e2-contract: no child-subreaper\n", stderr);   /* orphans become ours; see check-netpack */
+    if (sy_realpath(".", root, sizeof root) < 0) { fputs("e2-contract: cwd\n", stderr); return 2; }
+    if (cx_fmt(tmp, sizeof tmp, "%s/out/e2-contract-%d", root, (int)sy_pid())) return 2;
+    if (sy_mkdir(tmp, 0700) != 0) { fputs("e2-contract: mkdir\n", stderr); return 2; }
+
+    {   char pidf[4400], script[2048]; int rc, esc;
+        if (cx_fmt(pidf, sizeof pidf, "%s/esc.pid", tmp)) return 2;
+        if (cx_fmt(script, sizeof script, "setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; sleep 300", pidf)) return 2;
+        { char *cmd[] = { "sh", "-c", script, 0 };
+          rc = child(cmd, err, sizeof err, 0, 0);
+          ok(rc == 1, "A: a timeout exits 1 through e2s_raise");
+          ok(!strncmp(err, "subprocess.TimeoutExpired: Command '[", 37), "B: the TimeoutExpired prefix is unchanged");
+          ok(strstr(err, "]' timed out after 1 seconds") != 0, "B: the duration text is unchanged");
+          ok(strstr(err, " survived)") == 0, "A: no survivor suffix on a clean timeout");
+          esc = read_pid(pidf);
+          ok(esc > 10, "A: the setsid descendant reported its pid");
+          reap();
+          ok(gone(esc, 1500), "A: the setsid descendant is dead (the old kill(pid) missed it)");
+          if (esc > 10 && alive(esc)) sy_signal(esc, 9);
+        }
+    }
+    {   char *cmd[] = { "sh", "-c", "printf abc; printf def 1>&2; exit 7", 0 };
+        int rc = child(cmd, err, sizeof err, outbuf, sizeof outbuf);
+        ok(rc == 0, "C: the normal path still returns 0 from the wrapper");
+        ok(strstr(outbuf, "rc=7 out=abc err=def") != 0, "C: the child rc, its stdout and its stderr all arrive");
+    }
+    {   char *cmd[] = { "false", 0 };
+        int rc = child(cmd, err, sizeof err, 0, 0);
+        ok(rc == 0, "C: a child's nonzero rc is data, not a raise");
+    }
+    {   char p[4400]; if (!cx_fmt(p, sizeof p, "%s/esc.pid", tmp)) sy_unlink(p); }
+    sy_rmdir(tmp);
+    printf("CX_E2STREAM\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

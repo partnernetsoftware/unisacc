@@ -47,6 +47,7 @@
    No exported objects or macros (CXIF v0). */
 #pragma unisa module e2stream
 #pragma unisa use pytempfile
+#pragma unisa use reaper
 #pragma unisa use runtimecopy
 
 typedef struct e2s_buf { char *p; size_t n, cap; } e2s_buf;
@@ -149,6 +150,7 @@ int e2s_run(char *const argv[], const char *cwd, double secs, char **out, size_t
     pid = fork();
     if (pid < 0) e2s_raise("OSError: fork failed");
     if (pid == 0) {
+        setpgid(0, 0);   /* own process group: a timeout kills every descendant, not just the leader */
         close(pfd[0]);
         dup2(of, 1); dup2(ef, 2); close(of); close(ef);
         if (cwd && chdir(cwd) != 0) { fail[0] = 1; fail[1] = errno; k = write(pfd[1], fail, sizeof fail); _exit(255); }
@@ -156,6 +158,7 @@ int e2s_run(char *const argv[], const char *cwd, double secs, char **out, size_t
         fail[0] = 2; fail[1] = errno; k = write(pfd[1], fail, sizeof fail); (void)k;
         _exit(255);
     }
+    setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
     close(pfd[1]);
     k = read(pfd[0], fail, sizeof fail);
     close(pfd[0]);
@@ -170,10 +173,14 @@ int e2s_run(char *const argv[], const char *cwd, double secs, char **out, size_t
         if (w == pid) break;
         if (w < 0) e2s_raise("ChildProcessError: wait failed");
         if (polls++ >= limit) {
-            e2s_buf m = { 0, 0, 0 }; char *l = e2s_args_repr(argv);
-            kill(pid, SIGKILL); waitpid(pid, &st, 0); close(of); close(ef);
+            e2s_buf m = { 0, 0, 0 }; char *l = e2s_args_repr(argv); char rep[256];
+            int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
+            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
+            { int w; do { w = waitpid(pid, &st, WNOHANG); } while (w < 0 && errno == EINTR); }
+            close(of); close(ef);
             e2s_puts(&m, "subprocess.TimeoutExpired: Command '"); e2s_puts(&m, l); e2s_puts(&m, "' timed out after ");
             e2s_putl(&m, (long long)secs); e2s_puts(&m, " seconds");
+            if (sv > 0) { e2s_puts(&m, " ("); e2s_puts(&m, rep); e2s_puts(&m, " survived)"); }
             e2s_raise(m.p);
         }
         usleep(2000);

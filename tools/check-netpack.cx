@@ -1,0 +1,62 @@
+/* tools/check-netpack.cx -- the contracts on cxlib/netpack.cx np_run
+ * (own group + rp_kill_tree + np_result.residue).
+ *   sh ./unisacc.com tools/check-netpack.cx
+ * A. a timed-out job's setsid descendant is dead and residue is 0 (kill(-pid) alone misses it);
+ * B. the TimeoutExpired text keeps its prefix and duration, and gains a survivor suffix only when residue > 0;
+ * C. the normal paths are untouched: rc, stdout/stderr capture, cwd OSError, residue 0. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int bad, checks;
+static char root[4096], tmp[4400];
+static void ok(int c, const char *w) { checks++; printf("%s\t%s\n", c ? "PASS" : "FAIL", w); if (!c) bad++; }
+static int read_pid(const char *p) { size_t n = 0; char *b = cx_read(p, &n); int v = -1; if (b) { v = atoi(b); free(b); } return v; }
+static void reap(void) { int st; while (waitpid(-1, &st, WNOHANG) > 0) ; }   /* orphans adopted by the subreaper */
+static int alive(int pid) { char p[64]; if (cx_fmt(p, sizeof p, "/proc/%d/stat", pid)) return 0; return sy_exists(p); }
+static int gone(int pid, long ms) { long w = 0; while (w < ms) { if (!alive(pid)) return 1; usleep(5000); w += 5; } return !alive(pid); }
+
+int main(void) {
+    np_result r; char why[1200];
+    if (np_subreaper() < 0) fputs("netpack-contract: no child-subreaper\n", stderr);   /* an orphan becomes our child, so the sweep sees it */
+    if (sy_realpath(".", root, sizeof root) < 0) { fputs("netpack-contract: cwd\n", stderr); return 2; }
+    if (cx_fmt(tmp, sizeof tmp, "%s/out/netpack-contract-%d", root, (int)sy_pid())) return 2;
+    if (sy_mkdir(tmp, 0700) != 0) { fputs("netpack-contract: mkdir\n", stderr); return 2; }
+
+    {   char pidf[4400], script[2048];
+        if (cx_fmt(pidf, sizeof pidf, "%s/esc.pid", tmp)) return 2;
+        if (cx_fmt(script, sizeof script, "setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; sleep 300", pidf)) return 2;
+        { char *v[] = { "sh", "-c", script, 0 }; int t = np_run(v, root, 0, 1, &r, why, sizeof why), esc;
+          ok(t == -1, "A: the timeout still reports transport failure");
+          ok(!strncmp(why, "subprocess.TimeoutExpired: Command '[", 37), "B: the TimeoutExpired prefix is unchanged");
+          ok(strstr(why, "]' timed out after 1 seconds") != 0, "B: the duration text is unchanged");
+          ok(r.residue == 0, "A: residue is 0 when the whole tree is gone");
+          ok(strstr(why, " survived)") == 0, "B: no survivor suffix on a clean timeout");
+          esc = read_pid(pidf);
+          ok(esc > 10, "A: the setsid descendant reported its pid");
+          reap();
+          ok(gone(esc, 1500), "A: the setsid descendant is dead (the old group kill alone missed it)");
+          if (esc > 10 && alive(esc)) sy_signal(esc, 9);
+          np_free(&r);
+        }
+    }
+    {   char *v[] = { "sh", "-c", "printf abc; printf def 1>&2; exit 7", 0 };
+        int t = np_run(v, root, 0, 5, &r, why, sizeof why);
+        ok(t == 0 && r.rc == 7, "C: the exit code passes through");
+        ok(r.outn == 3 && !memcmp(r.out, "abc", 3), "C: stdout is captured");
+        ok(r.errn == 3 && !memcmp(r.err, "def", 3), "C: stderr is captured");
+        ok(r.residue == 0, "C: residue is 0 on a clean exit");
+        np_free(&r);
+    }
+    {   char *v[] = { "true", 0 };
+        int t = np_run(v, "/no/such/dir/netpack-contract", 0, 5, &r, why, sizeof why);
+        ok(t == -1 && !strncmp(why, "FileNotFoundError:", 18), "C: a bad cwd is the OSError path, not a timeout");
+        np_free(&r);
+    }
+    {   char p[4400]; if (!cx_fmt(p, sizeof p, "%s/esc.pid", tmp)) sy_unlink(p); }
+    sy_rmdir(tmp);
+    printf("CX_NETPACK\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

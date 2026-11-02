@@ -41,6 +41,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
 #pragma unisa use cxlib.testplan
+#pragma unisa use sys.process
 
 #define CAP (1L << 24)
 #define MAXNODE 16384
@@ -319,25 +320,13 @@ static int read_all(char **argv, Buf *out) {
 }
 static long parse_long(const char *s, long n) { long v = 0, i; if (n < 1 || n > 18) return -1; for (i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; v = v * 10 + (s[i] - '0'); } return v; }
 
-/* every descendant of PID (pgrep -P, breadth first), then SIGKILL to each one's group and itself, then PID's */
-static void kill_tree(int pid) {
-    int all[256], n = 1, i = 0, k;
-    all[0] = pid;
-    while (i < n && n < 256) {
-        char ps[32], *gv[] = {"pgrep", "-P", ps, 0}; Buf o = {0, 0, 0}; long a = 0;
-        if (cx_fmt(ps, sizeof ps, "%d", all[i])) break;
-        if (read_all(gv, &o) < 0) { fprintf(stderr, "NOTE\tpgrep\tcannot run\n"); break; }
-        while (a < o.n && n < 256) {
-            long e = a, v;
-            while (e < o.n && o.p[e] != '\n') e++;
-            v = parse_long(o.p + a, e - a);
-            if (v > 1) all[n++] = (int)v;
-            a = e + 1;
-        }
-        i++;
-    }
-    for (k = n - 1; k >= 1; k--) { sy_killpg(all[k], 9); sy_signal(all[k], 9); }
-    sy_kill(pid);
+/* the batch's own tree: freeze it, kill it, re-check what survived, and report the residue (0: everything
+   the scan saw is gone).  KEEP lists the other live children so one deadline cannot take a sibling job with
+   it.  -ENOSYS where /proc is absent: the previous group kill, and a residue no code can vouch for. */
+static int kill_tree(int pid, const int *keep, int nkeep, char *rep, int repcap) {
+    int sv = sy_kill_tree(pid, 2000, keep, nkeep, rep, repcap);
+    if (sv < 0) { sy_killpg(pid, 9); sy_kill(pid); }
+    return sv;
 }
 
 typedef struct { int pid, ofd, efd, bi; Buf out, err; } Child;
@@ -375,6 +364,7 @@ static int run(const int *sel, int nsel, int jobs) {
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
     long t0 = sy_now_ms();
+    sy_child_subreaper();   /* orphans of a killed batch become our children, so the sweep can see them */
     if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
         || cx_fmt(outparent, sizeof outparent, "%s/out/affected-%d", root, sy_pid())) die("path too long");
     {   char od[4400]; int r;
@@ -402,10 +392,15 @@ static int run(const int *sel, int nsel, int jobs) {
         if (!nrun) continue;
         if (now - t_main >= hard_deadline) {
             for (k = 0; k < nrun; k++) {
-                kill_tree(ch[k].pid);
-                if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
-                if (ch[k].efd >= 0) sy_close(ch[k].efd);
-                printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id); deferred++;
+                int keep[MAXJOBS], nkeep = 0; char rep[256];
+                { int j; for (j = 0; j < nrun; j++) if (j != k) keep[nkeep++] = ch[j].pid; }
+                {   int sv = kill_tree(ch[k].pid, keep, nkeep, rep, sizeof rep);
+                    if (ch[k].ofd >= 0) sy_close(ch[k].ofd);
+                    if (ch[k].efd >= 0) sy_close(ch[k].efd);
+                    if (sv > 0) printf("DEFERRED\t%s\tkilled-at-deadline\tresidue=%d\tsurvived=%s\n", batch[ch[k].bi].id, sv, rep);
+                    else printf("DEFERRED\t%s\tkilled-at-deadline\n", batch[ch[k].bi].id);
+                    deferred++;
+                }
             }
             nrun = 0;
             break;
@@ -464,7 +459,7 @@ static void usage(void) {
     exit(2);
 }
 int main(int argc, char **argv) {
-    int a = 1, mode_run = 0, jobs = 1, nch = 0, nsel = 0, k, b, src = 0;
+    int a = 1, mode_run = 0, jobs = 0, nch = 0, nsel = 0, k, b, src = 0;
     static int changed[MAXNODE], sel[MAXBATCH];
     const char *since = 0;
     char **files = 0; int nfiles = 0;
@@ -508,6 +503,7 @@ int main(int argc, char **argv) {
             sel[nsel++] = b;
             printf("SELECTED\t%s\n", batch[b].id);
         }
+        if (!jobs) { int c = sy_ncpu(); jobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }
         return mode_run ? run(sel, nsel, jobs) : 0;
     }
     if (since) {
