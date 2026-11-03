@@ -4,7 +4,7 @@
 
 ## 结论
 
-`tools/source-job-wave.cx` 不是孤立旧文件：它仍在 **omp-bdy W5 慢车道纪元**的正式构造链里（`plans/omp-bdy-handoff-2026-11-02.md:60`、`plans/omp-board.md`：107 job = 5 tool + 34 gen + 34 tbl + 34 net）。  
+`tools/source-job-wave.cx` 不是孤立旧文件：它仍在 **omp-bdy W5 慢车道纪元**的正式构造链里（`../moltbaby/plans/omp-bdy-handoff-2026-11-02.md:60`、`../moltbaby/plans/omp-board.md`：107 job = 5 tool + 34 gen + 34 tbl + 34 net）。
 因此 W6 现在**不能归档**；要先把 `check-source-job-count.cx` 对它的读取解耦，等 W5 结束、bdy 改走 `entry-build` 后，再清表+归档。
 
 ## 调用方清单（只读核对）
@@ -12,8 +12,8 @@
 | 调用方 | 类型 | 现状 | 迁移动作 |
 |---|---|---|---|
 | `tools/check-source-job-count.cx` | 运行期读取 | `loadz("tools/source-job-wave.cx")`，取 `ids[`、`counts[1]!=`、`counts[0]!=`，断言 recipes==gen、ids==5+3*gen、tools==5 | 改为只读 `source-package.cx` 的 recipes，直接算 ids=5+3*recipes；删除 wave 文件读取 |
-| `plans/omp-bdy-handoff-2026-11-02.md` | 运行手册 | 明确 W5 继续跑 `source-job-wave.cx` 107 job | W5 完成后改为 `entry-build`，或保留历史注记 |
-| `plans/omp-board.md` | 状态板 | omp-bdy 当前任务=source-job-wave(107 job) | W5 完成后更新任务行 |
+| `../moltbaby/plans/omp-bdy-handoff-2026-11-02.md` | 运行手册 | 明确 W5 继续跑 `source-job-wave.cx` 107 job | W5 完成后改为 `entry-build`，或保留历史注记 |
+| `../moltbaby/plans/omp-board.md` | 状态板 | omp-bdy 当前任务=source-job-wave(107 job) | W5 完成后更新任务行 |
 | `AGENTS.md` / `CLAUDE.md` | 规则 | 把 `source-job-wave` 列为正规构造链 60s 例外 | 归档后从例外列表移除，换成 `entry-build`（或标注历史） |
 | `tests/cxraw.tsv` / `cxlibc.tsv` / `cxplatform.tsv` | 计数表 | 行：cxraw 36、cxlibc 54、cxplatform 1 | 归档同批删行；表行减少即合法下调 |
 | `tools/source-package.cx` | 配方源 | 提供 `SpModel recipes[]`，是 gen/tbl/net 数量的源头 | 保留；成为新的唯一事实源 |

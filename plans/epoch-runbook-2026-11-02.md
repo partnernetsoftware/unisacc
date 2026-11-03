@@ -4,7 +4,7 @@
 
 ## 前置（冻结，全绿才开跑）
 1. `git diff HEAD -- tools tests cx src include weights exec` 为空（HEAD=工作区）；`git status --short` 无他人 in-flight。
-2. 所有 omp 窗口（bdy/go/ds/go2）提交完毕，`plans/omp-board.md` 无阻塞。
+2. 所有 omp 窗口（bdy/go/ds/go2）提交完毕，`../moltbaby/plans/omp-board.md` 无阻塞。
 3. `sh ./unisacc.com tools/ratchets.cx` 9/9；`sh ./unisacc.com tools/check-source-job-count.cx` 绿；`git ls-tree` 核 kernelinputs 符号链接为 120000。
 4. 记录纪元起点 SHA：`git rev-parse HEAD`。
 

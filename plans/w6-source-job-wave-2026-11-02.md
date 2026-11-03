@@ -2,7 +2,7 @@
 
 ## 现状入口
 - `tools/source-job-wave.cx`：`ROOT CTX BUILD host|list|wave|final`；当前仍是 W5 慢车道 107/131 job 的正规入口。
-- 调用方：`plans/omp-bdy-handoff-2026-11-02.md:60`、`plans/omp-board.md`；检查方 `tools/check-source-job-count.cx`；表行 `tests/cxraw.tsv:370`、`tests/cxlibc.tsv:485`、`tests/cxplatform.tsv:107`。
+- 调用方：`../moltbaby/plans/omp-bdy-handoff-2026-11-02.md:60`、`../moltbaby/plans/omp-board.md`；检查方 `tools/check-source-job-count.cx`；表行 `tests/cxraw.tsv:370`、`tests/cxlibc.tsv:485`、`tests/cxplatform.tsv:107`。
 - 当前计数权威：`nids=131`、`gen/tbl/net=42`、`tools=5`；先由 `source-package.cx` 的 recipes 派生。
 
 ## 旧 C / Python 债（逐路径）
