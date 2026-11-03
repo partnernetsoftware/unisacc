@@ -32,3 +32,21 @@
 ## 待办(下一纪元)
 
 按上述新状态方案实现,端到端实测三用例全部正确(3x 拒、FOO 1 正常、include 正常)+ pp-negative 10/10 + smoke 16/0 + ratchets 9/9。
+
+## header-name-unclosed 缺陷(第二个 pp 缺陷, 2026-11-03)
+
+pp-negative 红第 2 项 `header-name-unclosed`:`#include <stdio.h`(尖括号未闭合 `>`) 应拒但产品 rc=0 展开整个 stdio.h。gcc 报 `missing terminating > character`。
+
+**根因**:`directive-body-byte.tsv` 的 `IN62`(尖括号头名扫描)把 `10(换行)`、`62('>')`、`256(EOF)` 都当"头名结束"→`INC1`(MARK NME + CMPI NINCL),不区分"闭合 >"vs"换行未闭合"。`IN34`(引号头名)同病:`10/34/256` 都→`INC1`。
+
+**修复**(私有副本 F/root 已改 + seed-gen pp 展开验证通过):
+```
+IN62  62      INC1   (正常闭合)
+IN62  10,256  DEAD   [REJECT "missing terminating > character"]
+IN34  34      INC1   (正常闭合)
+IN34  10,256  DEAD   [REJECT "missing terminating quote character"]
+```
+
+展开验证:`IN62 10→DEAD / 62→INC1 / 256→DEAD`,`IN34 10→DEAD / 34→INC1 / 256→DEAD`。
+
+与 macro-name-not-identifier 同属 pp 状态机缺陷,一起走慢车道(完整构造 + pp-negative 10/10 + smoke 16/0)。
