@@ -2,6 +2,8 @@
 
 状态:设计完成,待开发。前身 `out/superharness/` 已归档到 `archive/superharness-exploration-2026-11-02/`。
 
+当前实现状态：只读 scout/reviewer；无法强制写路径隔离，implementer 和 shell 显式拒绝。预算、结构化 think 工具及生成端守卫尚未实现；worker 的推理规范目前仅为提示，不是机器强制。RPC 原始轨迹随记录保存，可能包含敏感信息。下文为目标合同，不代表已实现。
+
 ## 0. 为什么重来
 
 旧 superharness 的问题不是功能少,而是"发明了第二套运行时":自己起 SQLite、自己管 PID/PGID 台账、自己写 watchdog、自己实现 trigger/ticket/dispatch 状态机。它把 omp 当成被调用的 CLI,而不是宿主管线。结果:每加一条流程都要新增一张表、一个状态、一个后台循环,测试只能覆盖 fake RPC。

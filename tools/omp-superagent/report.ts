@@ -1,5 +1,8 @@
 // report 契约:schema + 机器校验。
 // 硬性规则:done 且 verified 空 → INVALID;非 implementer 写 files → INVALID;verified 逐字核对不上 → 降级 inferred。
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep, dirname, basename } from "node:path";
+
 export const REPORT_STATES = ["done", "blocked", "failed"] as const;
 export type ReportState = (typeof REPORT_STATES)[number];
 
@@ -94,11 +97,11 @@ export function parseReport(text: string): CheckResult {
 
 // 逐字核对:evidence 是本次子会话里可取到的工具轨迹/输出拼接体。
 // 命中 → 保留;未命中 → 从 verified 移到 inferred,并返回被降级项。
-export function reconcileVerified(report: Report, evidence: string): CheckResult {
+export function reconcileVerified(report: Report, evidence: string | string[]): CheckResult {
   const kept: string[] = [];
   const dropped: string[] = [];
   for (const v of report.verified) {
-    if (v.length > 0 && evidence.includes(v)) kept.push(v);
+    if (v.trim().length > 0 && (Array.isArray(evidence) ? evidence.some((item) => item.includes(v)) : evidence.includes(v))) kept.push(v);
     else dropped.push(v);
   }
   if (dropped.length === 0) return { ok: true, report, droppedVerified: [] };
@@ -112,27 +115,67 @@ export function reconcileVerified(report: Report, evidence: string): CheckResult
   return { ok: true, report: next, droppedVerified: dropped };
 }
 
-// 角色与路径授权:非 implementer 不许声明改动文件;implementer 的每个 path 必须落在允许前缀内。
-export function checkFiles(role: string, paths: string[] | undefined, report: Report): CheckResult {
+// 将已有祖先解析为真实路径，避免 ..、绝对路径及符号链接绕过边界。
+function canonical(path: string, cwd: string): string {
+  if (!path || path.includes("\0")) throw new Error("路径为空或含 NUL");
+  let current = resolve(cwd, path);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return resolve(realpathSync(current), ...suffix);
+    } catch (e: unknown) {
+      if (!(e instanceof Error) || !("code" in e) || e.code !== "ENOENT") throw e;
+      // 悬空链接不可按普通的尚不存在路径处理。
+      try {
+        lstatSync(current);
+        throw new Error("路径包含悬空符号链接");
+      } catch (statError: unknown) {
+        if (!(statError instanceof Error) || !("code" in statError) || statError.code !== "ENOENT") throw statError;
+      }
+      const parent = dirname(current);
+      if (parent === current) throw e;
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function contains(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+export function checkFiles(role: string, paths: string[] | undefined, report: Report, cwd = process.cwd()): CheckResult {
   if (role !== "implementer") {
     if (report.files.length > 0) return { ok: false, err: `${role} 角色不许声明改动文件` };
     return { ok: true, report };
   }
   if (!paths || paths.length === 0) return { ok: false, err: "implementer 必须给出允许写入的 paths" };
-  for (const f of report.files) {
-    if (!paths.some((p) => f.path === p || f.path.startsWith(p.endsWith("/") ? p : p + "/")))
-      return { ok: false, err: `越界写入: ${f.path}` };
+  try {
+    const root = canonical(".", cwd);
+    const allowed = paths.map((p) => canonical(p, cwd));
+    if (allowed.some((p) => !contains(root, p))) return { ok: false, err: "允许路径超出工作目录" };
+    for (const f of report.files) {
+      const target = canonical(f.path, cwd);
+      if (!contains(root, target) || !allowed.some((p) => contains(p, target)))
+        return { ok: false, err: `越界写入: ${f.path}` };
+    }
+  } catch (e) {
+    return { ok: false, err: `路径无法安全解析: ${String(e)}` };
   }
   return { ok: true, report };
 }
 
-// 并发冲突:两组允许路径前缀是否有重叠(用于同会话多 dispatch 的写冲突域)。
-export function pathsConflict(a: string[], b: string[]): string | undefined {
-  const norm = (p: string) => (p.endsWith("/") ? p : p + "/");
-  for (const x of a) {
-    for (const y of b) {
-      if (x === y || norm(x).startsWith(norm(y)) || norm(y).startsWith(norm(x))) return `${x} ↔ ${y}`;
+// 解析失败时保守判冲突，不能将未知路径当作互不重叠。
+export function pathsConflict(a: string[], b: string[], cwd = process.cwd()): string | undefined {
+  try {
+    for (const x of a) for (const y of b) {
+      const cx = canonical(x, cwd);
+      const cy = canonical(y, cwd);
+      if (contains(cx, cy) || contains(cy, cx)) return `${x} ↔ ${y}`;
     }
+  } catch {
+    return "路径无法安全解析";
   }
   return undefined;
 }

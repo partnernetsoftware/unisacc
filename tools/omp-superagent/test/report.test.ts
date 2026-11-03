@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkFiles, parseReport, pathsConflict, reconcileVerified, type Report } from "../report.ts";
 import { deriveVersion, SA_VERSION } from "../version.ts";
 
@@ -76,6 +79,11 @@ describe("reconcileVerified", () => {
   test("done 且全部核不到则判失败", () => {
     expect(reconcileVerified(rep, "无关日志").ok).toBe(false);
   });
+
+  test("空白和跨工具输出拼接不能作为证据", () => {
+    expect(reconcileVerified({ ...rep, verified: [" "] }, "有 空格").ok).toBe(false);
+    expect(reconcileVerified({ ...rep, verified: ["ab\ncd"] }, ["ab", "cd"]).ok).toBe(false);
+  });
 });
 
 describe("checkFiles", () => {
@@ -109,6 +117,24 @@ describe("pathsConflict", () => {
 
   test("前缀互为父子冲突", () => {
     expect(pathsConflict(["out/a"], ["out/a/b"])).toBeDefined();
+  });
+
+  test("规范化父目录和符号链接后判断冲突", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-path-"));
+    mkdirSync(join(dir, "src"));
+    symlinkSync("src", join(dir, "alias"));
+    expect(pathsConflict(["src/a/.."], ["alias/file"], dir)).toBeDefined();
+    expect(pathsConflict(["src/../other"], ["src/file"], dir)).toBeUndefined();
+  });
+
+  test("拒绝路径穿越和指向外部的符号链接", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-path-"));
+    mkdirSync(join(dir, "src"));
+    symlinkSync(tmpdir(), join(dir, "src", "outside"));
+    const report = { ...good, files: [{ path: "src/../other/file", change: "x" }] } as Report;
+    expect(checkFiles("implementer", ["src"], report, dir).ok).toBe(false);
+    report.files[0].path = "src/outside/file";
+    expect(checkFiles("implementer", ["src"], report, dir).ok).toBe(false);
   });
 });
 

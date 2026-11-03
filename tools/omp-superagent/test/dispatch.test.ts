@@ -5,113 +5,67 @@ import { join } from "node:path";
 import { buildPrompt, recordPath, runDispatch } from "../core.ts";
 
 const fake = join(import.meta.dir, "fake-omp.sh");
+function cwd(): string { return mkdtempSync(join(tmpdir(), "sa-test-")); }
+beforeAll(() => { process.env.SA_OMP_BIN = fake; });
 
-function cwd(): string {
-  return mkdtempSync(join(tmpdir(), "sa-test-"));
+async function dispatch(mode: string) {
+  process.env.FAKE_MODE = mode;
+  return runDispatch({ ticket: "T1", task: "x", role: "scout", cwd: cwd() });
 }
 
-beforeAll(() => {
-  process.env.SA_OMP_BIN = fake;
-});
-
-describe("buildPrompt", () => {
-  test("implementer 必须列出允许路径", () => {
-    const p = buildPrompt({ ticket: "T1", task: "加函数", role: "implementer", paths: ["src/"] });
-    expect(p).toContain("ALLOWED_PATHS: src/");
-    expect(p).toContain("TICKET: T1");
-    expect(p).toContain("【report 协议】");
+describe("RPC dispatch", () => {
+  test("提示包含任务和报告契约", () => {
+    expect(buildPrompt({ ticket: "T1", task: "x", role: "scout" })).toContain("TICKET: T1");
+    expect(buildPrompt({ ticket: "T1", task: "x", role: "scout" })).toContain("禁止用 bash 的 echo/printf");
+    expect(buildPrompt({ ticket: "T1", task: "x", role: "scout" })).toContain("此规范仅靠提示约束");
   });
-
-  test("scout 不给路径,提示未给则禁止写", () => {
-    const p = buildPrompt({ ticket: "T2", task: "查调用点", role: "scout" });
-    expect(p).not.toContain("ALLOWED_PATHS");
-    expect(p).toContain("ROLE: scout");
-  });
-});
-
-describe("runDispatch 终态", () => {
-  test("done:verified 逐字可核,record 落盘", async () => {
-    process.env.FAKE_MODE = "done";
-    const dir = cwd();
-    const r = await runDispatch({ ticket: "T1", task: "x", role: "scout", cwd: dir });
+  test("工具结果可作为证据并保存记录", async () => {
+    const r = await dispatch("done");
     expect(r.state).toBe("done");
     expect(r.report?.verified).toEqual(["VERIFIED-TOKEN"]);
     expect(r.tokens).toBe(7);
-    expect(existsSync(recordPath(r.id, dir))).toBe(true);
-    const saved = JSON.parse(readFileSync(recordPath(r.id, dir), "utf8"));
-    expect(saved.version).toMatch(/^sa-[0-9a-f]{12}$/);
-    expect(saved.ticket).toBe("T1");
+    expect(r.record && existsSync(r.record)).toBe(true);
+    expect(JSON.parse(readFileSync(r.record!, "utf8")).ticket).toBe("T1");
+    expect(JSON.parse(readFileSync(r.record!, "utf8")).trace.stdout).toContain("tool_execution_end");
+    expect(r.record).toBe(recordPath(r.id, r.record!.replace(/\/out\/superagent\/[^/]+$/, "")));
   });
-
-  test("blocked 冒泡原因", async () => {
-    process.env.FAKE_MODE = "blocked";
-    const r = await runDispatch({ ticket: "T2", task: "x", role: "scout", cwd: cwd() });
+  test("blocked 原因冒泡", async () => {
+    const r = await dispatch("blocked");
     expect(r.state).toBe("blocked");
     expect(r.report?.blocked).toBe("需要凭证");
   });
-
-  test("JSON 外有文字 → invalid", async () => {
-    process.env.FAKE_MODE = "noise";
-    const r = await runDispatch({ ticket: "T3", task: "x", role: "scout", cwd: cwd() });
-    expect(r.state).toBe("invalid");
-    expect(r.err).toContain("之外有文字");
-  });
-
-  test("verified 核不到且 done → invalid,并记录降级", async () => {
-    process.env.FAKE_MODE = "unverified";
-    const r = await runDispatch({ ticket: "T4", task: "x", role: "scout", cwd: cwd() });
+  test("报告外文字无效", async () => { expect((await dispatch("noise")).state).toBe("invalid"); });
+  test("未知证据不能自证", async () => {
+    const r = await dispatch("unverified");
     expect(r.state).toBe("invalid");
     expect(r.verifiedDropped).toEqual(["NEVER-IN-OUTPUT"]);
   });
-
-  test("scout 声明改动文件 → invalid", async () => {
-    process.env.FAKE_MODE = "files";
-    const r = await runDispatch({ ticket: "T5", task: "x", role: "scout", cwd: cwd() });
-    expect(r.state).toBe("invalid");
-    expect(r.err).toContain("不许声明改动文件");
+  test("助手消息不是工具证据", async () => { expect((await dispatch("forged")).state).toBe("invalid"); });
+  test("ticket 不匹配无效", async () => { expect((await dispatch("mismatch")).state).toBe("invalid"); });
+  test("只读角色声明文件无效", async () => { expect((await dispatch("files")).state).toBe("invalid"); });
+  test("非零退出不可返回 done", async () => { expect((await dispatch("nonzero")).state).toBe("error"); });
+  test("畸形 RPC 和提前退出不可返回 done", async () => {
+    expect((await dispatch("badjson")).state).toBe("error");
+    expect((await dispatch("crash")).state).toBe("error");
   });
-
-  test("implementer 提交越界文件 → invalid", async () => {
-    process.env.FAKE_MODE = "files";
-    const r = await runDispatch({
-      ticket: "T6",
-      task: "x",
-      role: "implementer",
-      paths: ["tools/"],
-      cwd: cwd(),
-    });
-    expect(r.state).toBe("invalid");
-    expect(r.err).toContain("越界写入");
+  test("不可限制的写角色和工具拒绝执行", async () => {
+    expect((await runDispatch({ ticket: "T1", task: "x", role: "implementer", paths: ["src"], cwd: cwd() })).state).toBe("error");
+    expect((await runDispatch({ ticket: "T1", task: "x", role: "reviewer", tools: "read,bash", cwd: cwd() })).state).toBe("error");
   });
-
-  test("implementer 前缀命中 → done", async () => {
-    process.env.FAKE_MODE = "files";
-    const r = await runDispatch({
-      ticket: "T7",
-      task: "x",
-      role: "implementer",
-      paths: ["src"],
-      cwd: cwd(),
-    });
-    expect(r.state).toBe("done");
-    expect(r.report?.files[0].path).toBe("src/x.ts");
+  test("不存在的进程返回错误", async () => {
+    process.env.SA_OMP_BIN = "/nonexistent/omp";
+    try { expect((await dispatch("done")).state).toBe("error"); }
+    finally { process.env.SA_OMP_BIN = fake; }
   });
-
-  test("implementer 无 paths 直接拒,不起进程", async () => {
-    const r = await runDispatch({ ticket: "T8", task: "x", role: "implementer", cwd: cwd() });
-    expect(r.state).toBe("error");
-    expect(r.err).toContain("必须给出允许写入的 paths");
-  });
-
-  test("进程超时被终止并记 timeout", async () => {
+  test("取消会终止进行中的进程", async () => {
     process.env.FAKE_MODE = "hang";
-    const r = await runDispatch({ ticket: "T9", task: "x", role: "scout", cwd: cwd(), maxTime: 1 });
-    expect(r.state).toBe("timeout");
-  }, 20000);
-
-  test("退出码非 0 但 report 合法 → 仍按 report 判,err 记退出码", async () => {
-    process.env.FAKE_MODE = "other";
-    const r = await runDispatch({ ticket: "T10", task: "x", role: "scout", cwd: cwd() });
-    expect(r.state).toBe("invalid");
+    const controller = new AbortController();
+    const running = runDispatch({ ticket: "T1", task: "x", role: "scout", cwd: cwd(), signal: controller.signal });
+    controller.abort();
+    expect((await running).err).toContain("取消");
   });
+  test("超时终止进程", async () => {
+    process.env.FAKE_MODE = "hang";
+    expect((await runDispatch({ ticket: "T1", task: "x", role: "scout", cwd: cwd(), maxTime: 1 })).state).toBe("timeout");
+  }, 20000);
 });
