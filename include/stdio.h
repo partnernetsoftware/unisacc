@@ -5,16 +5,6 @@
  * pointer's clothing. */
 #ifndef _UNISA_STDIO_H
 #define _UNISA_STDIO_H
-/* SPEED-02 libc unitization: the formatting/IO stack is `static` by default so
-   every TU that includes <stdio.h> encodes its own copy (measured 222 KB and
-   305 ms elf for a 60 B printf caller). __UNISA_LIBC_LINKAGE stays `static` in
-   the default build (byte-identical); __UNISA_LIBC_UNIT defines the one shared
-   unit object (non-static, the body is compiled once); __UNISA_LIBC_EXTERN
-   leaves only declarations for every other TU. Declarations and definitions
-   always carry the same linkage, satisfying the 0.0.35 H1 note (6.2.2p7). */
-#ifndef __UNISA_LIBC_LINKAGE
-#define __UNISA_LIBC_LINKAGE static
-#endif
 #include <stddef.h>
 #include <stdarg.h>
 #include <errno.h>
@@ -46,10 +36,10 @@ typedef struct { __u_word __u_pos; int __u_count; unsigned int __u_wch; } fpos_t
 #define stdout ((FILE *)(_UNISA_STDIO_BASE + 1))
 #define stderr ((FILE *)(_UNISA_STDIO_BASE + 2))
 
-__UNISA_LIBC_LINKAGE int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
+static int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
-__UNISA_LIBC_LINKAGE int _unisa_fd(FILE *__u_f) {
+static int _unisa_fd(FILE *__u_f) {
     __u_word __u_v;
     __u_v = (__u_word)__u_f;
     if (__u_v >= _UNISA_STDIO_BASE) return (int)(__u_v - _UNISA_STDIO_BASE);
@@ -58,7 +48,7 @@ __UNISA_LIBC_LINKAGE int _unisa_fd(FILE *__u_f) {
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_len
-__UNISA_LIBC_LINKAGE __u_word _unisa_len(const char *__u_s) {
+static __u_word _unisa_len(const char *__u_s) {
     __u_word __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
@@ -81,7 +71,7 @@ static char _unisa_ch;
    [R13-0 #06 / N15] */
 #include <sys/_exit.h>
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
-__UNISA_LIBC_LINKAGE int _u_st_slot(FILE *__u_f) {
+static int _u_st_slot(FILE *__u_f) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
     __u_i = 0;
@@ -98,7 +88,7 @@ __UNISA_LIBC_LINKAGE int _u_st_slot(FILE *__u_f) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
-__UNISA_LIBC_LINKAGE __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
+static __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
     if (__u_n <= 0) return 0;
@@ -122,7 +112,7 @@ __UNISA_LIBC_LINKAGE __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_wor
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fputc
-__UNISA_LIBC_LINKAGE int fputc(int __u_c, FILE *__u_f) {
+static int fputc(int __u_c, FILE *__u_f) {
     _unisa_ch = __u_c;
     if (_u_st_wput(__u_f, &_unisa_ch, 1) != 1) return 0 - 1;
     return __u_c;
@@ -144,7 +134,7 @@ static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fputs
-__UNISA_LIBC_LINKAGE int fputs(const char *__u_s, FILE *__u_f) {
+static int fputs(const char *__u_s, FILE *__u_f) {
     __u_word __u_n = _unisa_len(__u_s);
     if (_u_st_wput(__u_f, __u_s, __u_n) != __u_n) return 0 - 1;
     return 0;
@@ -183,7 +173,7 @@ static int puts(const char *__u_s) {
  * trusted, so `done` cannot overflow either.
  * The return is complete elements: done / sz, rounded down. */
 #if !__UNISA_FTRIM_LIBC || __UN_fwrite
-__UNISA_LIBC_LINKAGE __u_word fwrite(const void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f) {
+static __u_word fwrite(const void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f) {
     if (__u_sz <= 0 || __u_n <= 0) return 0;
     if (__u_n > 0x7fffffffffffffff / __u_sz) return 0;
     return _u_st_wput(__u_f, (const char *)__u_p, __u_sz * __u_n) / __u_sz;
@@ -364,7 +354,7 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fgetc
-__UNISA_LIBC_LINKAGE int fgetc(FILE *__u_f) {
+static int fgetc(FILE *__u_f) {
     unsigned char __u_c;
     int __u_i;
     /* a byte pushed back by ungetc comes out before the descriptor does, and
@@ -397,7 +387,7 @@ static int getchar(void) { return fgetc(stdin); }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_vprintf
-__UNISA_LIBC_LINKAGE int vprintf(const char *__u_fmt, va_list __u_ap) {
+static int vprintf(const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
 }
 #endif
@@ -675,7 +665,7 @@ static int fflush(FILE *__u_f) {
  * takes a format at RUN time is written here, in the subset itself. */
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_put
-__UNISA_LIBC_LINKAGE void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_n, FILE *__u_f, int __u_c) {
+static void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_n, FILE *__u_f, int __u_c) {
     char __u_ch;
     if (__u_out != NULL) {
         if (__u_cap < 0 | *__u_n < __u_cap - 1) __u_out[*__u_n] = __u_c;
@@ -688,7 +678,7 @@ __UNISA_LIBC_LINKAGE void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__u_digits
-__UNISA_LIBC_LINKAGE __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_base, int __u_upper) {
+static __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_base, int __u_upper) {
     __u_word __u_i;
     int __u_d;
     __u_i = 24;
@@ -717,7 +707,7 @@ __UNISA_LIBC_LINKAGE __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_
 /* digits of v, most significant first; returns their count, and *x is how
    many of them are before the decimal point (<= 0 for |v| < 1) */
 #if !__UNISA_FTRIM_LIBC || __UN__u_dexp
-__UNISA_LIBC_LINKAGE int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) {
+static int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) {
     __u_uword __u_lim[_U_NL];
     __u_uword __u_m;
     __u_uword __u_t;
@@ -772,7 +762,7 @@ __UNISA_LIBC_LINKAGE int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) 
 /* keep r digits of dig[0..nd), rounding to nearest, ties to even; returns
    the new count, and bumps *x when the rounding carries out (9.99 -> 10.0) */
 #if !__UNISA_FTRIM_LIBC || __UN__u_round
-__UNISA_LIBC_LINKAGE int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
+static int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
     int __u_up;
     int __u_j;
     if (__u_r >= __u_nd) return __u_nd;
@@ -802,7 +792,7 @@ __UNISA_LIBC_LINKAGE int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u
 
 /* the digit at position p of the number (0 = first integer digit) */
 #if !__UNISA_FTRIM_LIBC || __UN__u_dat
-__UNISA_LIBC_LINKAGE int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
+static int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
     if (__u_p < 0) return 48;
     if (__u_p >= __u_nd) return 48;
     return __u_dig[__u_p];
@@ -812,7 +802,7 @@ __UNISA_LIBC_LINKAGE int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p)
 /* %f %e %g (and upper case) of `bits` into out[]; returns the length.
    Sign, width and padding are the caller's. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_ffmt
-__UNISA_LIBC_LINKAGE int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, int __u_prec, int __u_alt) {
+static int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, int __u_prec, int __u_alt) {
     char __u_dig[_U_ND];
     int __u_nd;
     int __u_x;
@@ -934,7 +924,7 @@ __UNISA_LIBC_LINKAGE int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, i
    sent its bytes to FILE * 0, which is descriptor 0 (stdin): a blocked write when nobody reads it, the hang the
    .cx ports met, and a lost vprintf line.  The measuring callers pass a one-byte buffer of capacity 0 instead. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_vfmt
-__UNISA_LIBC_LINKAGE int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+static int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     __u_word __u_n;
     __u_word __u_i;
     __u_word __u_k;
@@ -1136,24 +1126,24 @@ __UNISA_LIBC_LINKAGE int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, c
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_vsprintf
-__UNISA_LIBC_LINKAGE int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
+static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_vsnprintf
-__UNISA_LIBC_LINKAGE int vsnprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, va_list __u_ap) {
+static int vsnprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, va_list __u_ap) {
     char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.12p2) */
     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_vfprintf
-__UNISA_LIBC_LINKAGE int vfprintf(FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+static int vfprintf(FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_sprintf
-__UNISA_LIBC_LINKAGE int sprintf(char *__u_b, const char *__u_fmt, ...) {
+static int sprintf(char *__u_b, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
     __u_r = _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
@@ -1162,7 +1152,7 @@ __UNISA_LIBC_LINKAGE int sprintf(char *__u_b, const char *__u_fmt, ...) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_snprintf
-__UNISA_LIBC_LINKAGE int snprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, ...) {
+static int snprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r; char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.5p2) */
     va_start(__u_ap, __u_fmt);
@@ -1172,7 +1162,7 @@ __UNISA_LIBC_LINKAGE int snprintf(char *__u_b, __u_word __u_cap, const char *__u
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fprintf
-__UNISA_LIBC_LINKAGE int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
+static int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
     __u_r = _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
@@ -1184,7 +1174,7 @@ __UNISA_LIBC_LINKAGE int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
  * fast path, and the common one.  A format that is not a literal cannot be
  * desugared at all, so it becomes an ordinary variadic call on this. */
 #if !__UNISA_FTRIM_LIBC || __UN_printf
-__UNISA_LIBC_LINKAGE int printf(const char *__u_fmt, ...) {
+static int printf(const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
     __u_r = _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
@@ -1381,7 +1371,7 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_sscanf
-__UNISA_LIBC_LINKAGE int sscanf(const char *__u_in, const char *__u_fmt, ...) {
+static int sscanf(const char *__u_in, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
     __u_r = vsscanf(__u_in, __u_fmt, __u_ap);
