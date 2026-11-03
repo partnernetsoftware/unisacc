@@ -286,15 +286,68 @@ int pp_member_list(const char *root, char names[][64], char shas[][65], long *by
     return n;
 }
 
-/* Identity of the installed product at ROOT: 0 and HEX, or -1 (missing member, bad layout). */
+/* B5b: the product identity under PP_SPLIT is sha256 of the SIX-FIELD manifest text
+   (name kind arch sha256 size order), the same shape tools/manifest-gen.cx writes and
+   tools/cxlib/resolver.cx reads. The manifest lives beside the launcher as
+   <root>/manifest.tsv; when it is absent the identity is a named refusal, never a
+   silently different digest. PP_APE still degenerates to sha256(whole file). */
+static int pp_manifest_path(const char *root, char *out, int cap) {
+    return pp_join(root, "manifest.tsv", out, cap);
+}
+
+/* The canonical six-field manifest text for ROOT into CANON: 0, or -1. */
+/* Exported so a check can hash the same text the identity hashes. */
+int pp_manifest_text(const char *root, char *canon, long cap, long *on) {
+    static char names[PP_MAX_MEMBERS][64], shas[PP_MAX_MEMBERS][65];
+    static long bytes[PP_MAX_MEMBERS];
+    int n, i;
+    long at = 0;
+    n = pp_member_list(root, names, shas, bytes, PP_MAX_MEMBERS);
+    if (n < 1) return -1;
+    for (i = 0; i < n; i++) {
+        const char *kind = pp_member_kind(names[i]);
+        int k;
+        for (k = 0; names[i][k] && at < cap - 2; k++) canon[at++] = names[i][k];
+        canon[at++] = '\t';
+        for (k = 0; kind[k] && at < cap - 2; k++) canon[at++] = kind[k];
+        canon[at++] = '\t';
+        canon[at++] = '\t';
+        for (k = 0; shas[i][k] && at < cap - 2; k++) canon[at++] = shas[i][k];
+        canon[at++] = '\t';
+        if (at + 24 >= cap) return -1;
+        at += pp_put_long(canon + at, (int)(cap - at), bytes[i]);
+        canon[at++] = '\t';
+        if (at + 8 >= cap) return -1;
+        at += pp_put_long(canon + at, (int)(cap - at), (long)i);
+        canon[at++] = '\n';
+    }
+    *on = at;
+    return 0;
+}
+
+/* Identity of the installed product at ROOT: 0 and HEX, or -1 (missing member, bad layout).
+   PP_SPLIT: sha256 of the six-field manifest text (B5b). PP_APE: sha256 of the whole file. */
 int pp_product_digest(const char *root, char hex[65]) {
+    char canon[4096];
+    long on = 0;
+    int l = pp_layout(root);
+    if (hex) hex[0] = 0;
+    if (l == PP_APE) return pp_file_hex(root, "unisacc.com", hex);
+    if (l != PP_SPLIT) return -1;
+    if (pp_manifest_text(root, canon, (long)sizeof canon, &on)) return -1;
+    cx_sha256_hex(canon, (size_t)on, hex);
+    return 0;
+}
+
+/* The identity the pre-B5b code computed (sorted member lines "name<TAB>sha<TAB>bytes").
+   Kept so a check can show the two kinds differ and that the new one is the manifest. */
+int pp_legacy_digest(const char *root, char hex[65]) {
     static char names[PP_MAX_MEMBERS][64], shas[PP_MAX_MEMBERS][65];
     static long bytes[PP_MAX_MEMBERS];
     char canon[4096];
     int n, i, l = pp_layout(root);
     long at = 0;
     if (hex) hex[0] = 0;
-    if (l == PP_APE) return pp_file_hex(root, "unisacc.com", hex);
     if (l != PP_SPLIT) return -1;
     n = pp_member_list(root, names, shas, bytes, PP_MAX_MEMBERS);
     if (n < 1) return -1;
