@@ -49,4 +49,6 @@ IN34  10,256  DEAD   [REJECT "missing terminating quote character"]
 
 展开验证:`IN62 10→DEAD / 62→INC1 / 256→DEAD`,`IN34 10→DEAD / 34→INC1 / 256→DEAD`。
 
-与 macro-name-not-identifier 同属 pp 状态机缺陷,一起走慢车道(完整构造 + pp-negative 10/10 + smoke 16/0)。
+**状态(2026-11-03 更正)**:此补丁**只写在 patch 文件和本分析文档里,未应用**——`exec/pp` 事实表未改、未走生成器重建,产品 p3 仍是 `a0daec1f`(旧包字节),说明修复未进产品。pp-negative 批次现仍红(`macro-name-not-identifier` + `header-name-unclosed` 两 FAIL)。
+
+与 macro-name-not-identifier 同属 pp 状态机缺陷,要真修须走「事实表 → 生成器 → 重建」慢车道(下一轮)。本轮不做。
