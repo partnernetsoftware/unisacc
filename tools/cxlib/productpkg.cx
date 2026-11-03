@@ -174,20 +174,24 @@ static int pp_file_hex(const char *src, const char *name, char hex[65]) {
     return 0;
 }
 
-/* "NAME<TAB>HEX\n" appended to CANON at *AT; -1 when it would not fit. Bytes are a display fact
-   (root-identity prints them); they are not part of the identity, which is the bytes themselves. */
-static int pp_canon_add(char *canon, long cap, long *at, const char *name, const char *hex, long bytes) {
-    char line[400];
-    long n = 0, i;
-    (void)bytes;
-    for (i = 0; name[i] && n < 200; i++) line[n++] = name[i];
-    line[n++] = '\t';
-    for (i = 0; hex[i] && n < 330; i++) line[n++] = hex[i];
-    line[n++] = '\n';
-    if (*at + n > cap) return -1;
-    for (i = 0; i < n; i++) canon[(*at)++] = line[i];
-    return 0;
+/* Manifest kind by member name (B5b: identity = sha256 of the 6-field manifest text). */
+static const char *pp_member_kind(const char *name) {
+    if (pp_cmp(name, "unisacc.com") == 0) return "base";
+    if (pp_cmp(name, "entry.elf") == 0) return "stage";
+    return "resource";
 }
+/* LONG into DST, bounded; returns the length copied (decimal, no sign needed: size/order >= 0). */
+static int pp_put_long(char *dst, int cap, long v) {
+    char tmp[24];
+    int n = 0, i;
+    if (v < 0) v = 0;
+    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v && n < 20);
+    if (cap < n + 1) return 0;
+    for (i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
+    dst[n] = 0;
+    return n;
+}
+
 
 /* The launcher's basename, which is a member of ROOT itself rather than of the dev directory. */
 static int pp_is_launcher(const char *name) {
@@ -294,9 +298,24 @@ int pp_product_digest(const char *root, char hex[65]) {
     if (l != PP_SPLIT) return -1;
     n = pp_member_list(root, names, shas, bytes, PP_MAX_MEMBERS);
     if (n < 1) return -1;
-    for (i = 0; i < n; i++)
-        if (pp_canon_add(canon, (long)sizeof canon - 1, &at, names[i], shas[i], bytes[i])) return -1;
-    canon[at] = 0;
+    for (i = 0; i < n; i++) {
+        const char *kind = pp_member_kind(names[i]);
+        int k;
+        /* name \t kind \t \t sha \t size \t order \n  (arch empty, 6 fields) */
+        for (k = 0; names[i][k] && at < (long)sizeof canon - 1; k++) canon[at++] = names[i][k];
+        canon[at++] = '\t';
+        for (k = 0; kind[k] && at < (long)sizeof canon - 1; k++) canon[at++] = kind[k];
+        canon[at++] = '\t';
+        canon[at++] = '\t';
+        for (k = 0; shas[i][k] && at < (long)sizeof canon - 1; k++) canon[at++] = shas[i][k];
+        canon[at++] = '\t';
+        if (at + 24 >= (long)sizeof canon) return -1;
+        at += pp_put_long(canon + at, (int)((long)sizeof canon - at), bytes[i]);
+        canon[at++] = '\t';
+        if (at + 8 >= (long)sizeof canon) return -1;
+        at += pp_put_long(canon + at, (int)((long)sizeof canon - at), (long)i);
+        canon[at++] = '\n';
+    }
     cx_sha256_hex(canon, (size_t)at, hex);
     return 0;
 }
