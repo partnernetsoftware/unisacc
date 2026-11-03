@@ -1,0 +1,137 @@
+/* boot-native.cx -- L3 原生 boot 段(lnx/x86_64 实跑;其余宿主同一源码交叉编译)。
+ *
+ *   sh ./unisacc.com -b lnx/x86_64 tools/lab-loader/boot-native.cx -o OUT/boot-native-lnx-x86_64.com
+ *   运行: boot-native-lnx-x86_64.com [ARGS...]
+ *
+ * 职责(omp-cc-opus 2026-11-03 裁定：校验放原生代码,不依赖宿主 sha256sum):
+ *   1 读自身同目录 manifest.tsv;
+ *   2 按 (kind=base, arch=宿主) 选行;
+ *   3 读 base 文件,用内置 sha256 算摘要,与 manifest 行的 sha256 逐字符比对;
+ *      不符 → 具名拒绝(含 "sha256"),退出非零,**不 exec**;
+ *   4 exec base,argv 原样透传。
+ *
+ * 宿主 arch 由编译期决定(本段本身就是按宿主编出的),不调用 uname:
+ * 平台差异收在自己的代码里,这是 cx L0 的既有口径。
+ */
+#pragma unisa use sys.sha
+#pragma unisa use sys.fs
+
+#if defined(__linux__)
+static const char *bn_os = "lnx";
+#elif defined(__APPLE__)
+static const char *bn_os = "osx";
+#elif defined(_WIN32)
+static const char *bn_os = "win";
+#else
+static const char *bn_os = "unknown";
+#endif
+#if defined(__x86_64__)
+static const char *bn_arch = "x86_64";
+#elif defined(__aarch64__)
+static const char *bn_arch = "arm64";
+#else
+static const char *bn_arch = "unknown";
+#endif
+
+static void bn_die(const char *msg, const char *detail) {
+    fprintf(stderr, "boot: %s%s%s\n", msg, detail ? ": " : "", detail ? detail : "");
+    exit(1);
+}
+
+static char *bn_load(const char *path, size_t *n) {
+    struct stat s;
+    char *b;
+    if (lstat(path, &s) || !S_ISREG(s.st_mode) || s.st_size <= 0 || s.st_size > 268435456)
+        return 0;
+    b = cx_read(path, n);
+    if (!b || (size_t)s.st_size != *n) { free(b); return 0; }
+    return b;
+}
+
+/* arch 列接受三种写法：宿主全串 "os/arch"、裸 arch、以及 "any"。 */
+static int bn_arch_ok(const char *cell, const char *arch) {
+    char want[64];
+    if (!strcmp(cell, "any")) return 1;
+    if (!strcmp(cell, arch)) return 1;
+    if (cx_fmt(want, sizeof want, "%s/%s", bn_os, arch)) return 0;
+    return !strcmp(cell, want);
+}
+
+/* 在 manifest 文本里找 kind=base 且 arch 匹配宿主的行，取第 4 列 sha 与第 1 列 name。 */
+static int bn_select(const char *text, size_t n, const char *arch, char *name, size_t ncap, char *sha) {
+    size_t at = 0;
+    while (at < n) {
+        size_t e = at, col = 0, field = at;
+        char f[6][512];
+        int nf = 0, i;
+        while (e < n && text[e] != '\n') e++;
+        if (e == at) { at = e + 1; continue; }
+        for (i = 0; i < 6; i++) f[i][0] = 0;
+        for (;;) {
+            size_t i2 = field, w = 0;
+            while (i2 < e && text[i2] != '\t') {
+                if (w < 511) f[nf][w++] = text[i2];
+                i2++;
+            }
+            f[nf][w] = 0;
+            nf++;
+            if (i2 >= e || nf >= 6) break;
+            col++;
+            field = i2 + 1;
+        }
+        (void)col;
+        if (nf >= 4 && !strcmp(f[1], "base") && bn_arch_ok(f[2], arch)) {
+            if (snprintf(name, ncap, "%s", f[0]) >= (int)ncap) return -1;
+            if (strlen(f[3]) != 64) return -1;
+            if (cx_fmt(sha, 65, "%s", f[3])) return -1;
+            at = e + 1;
+            return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char selfdir[4096], manifest[4400], path[4400], name[512], want[65], got[65];
+    char *self, *text, *bytes;
+    size_t selfn, textn, bn;
+    long cut;
+
+    if (!realpath(argv[0], selfdir)) bn_die("cannot resolve own path", argv[0]);
+    cut = (long)strlen(selfdir);
+    while (cut > 0 && selfdir[cut - 1] != '/') cut--;
+    selfdir[cut ? cut - 1 : 0] = 0;
+    if (snprintf(manifest, sizeof manifest, "%s/manifest.tsv", selfdir) >= (int)sizeof manifest)
+        bn_die("path too long", "manifest");
+    text = bn_load(manifest, &textn);
+    if (!text) bn_die("cannot read manifest", manifest);
+    {   int rc = bn_select(text, textn, bn_arch, name, sizeof name, want);
+        free(text);
+        if (rc == 0) bn_die("no base row for this host in manifest", bn_arch);
+        if (rc < 0) bn_die("malformed base row", bn_arch);
+    }
+    if (snprintf(path, sizeof path, "%s/%s", selfdir, name) >= (int)sizeof path)
+        bn_die("path too long", name);
+    bytes = bn_load(path, &bn);
+    if (!bytes) bn_die("cannot read base", path);
+    cx_sha256_hex(bytes, bn, got);
+    self = bytes;
+    (void)self; (void)selfn;
+    if (strcmp(got, want)) {
+        fprintf(stderr, "boot: sha256 mismatch for %s: want %s got %s\n", name, want, got);
+        free(bytes);
+        exit(1);
+    }
+    free(bytes);
+    /* 交出控制:exec base,argv 原样透传(替换本进程,不 fork)。 */
+    {   char **av = malloc(sizeof(char *) * (size_t)(argc + 1));
+        if (!av) bn_die("allocation", "argv");
+        av[0] = path;
+        for (int i = 1; i < argc; i++) av[i] = argv[i];
+        av[argc] = 0;
+        execv(path, av);
+        bn_die("exec failed", path);
+    }
+    return 0;
+}

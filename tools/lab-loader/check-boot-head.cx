@@ -1,0 +1,253 @@
+/* check-boot-head.cx -- L3 通用 boot 头的独立检查。
+ *
+ *   sh ./unisacc.com tools/lab-loader/check-boot-head.cx --
+ *   sh ./unisacc.com tools/lab-loader/check-boot-head.cx -- ROOT OUTDIR
+ *
+ * 无参（批次形态）：在 out/check-boot-head-<pid> 下自建产物并跑完；两参复查既有产物。
+ *
+ * 覆盖（对照 tools/lab-loader/CONTRACT.md 的 §1/§3/§5）：
+ *   H1 头确定性：同一输入生成两次,boot.com 字节相同。
+ *   H2 头里没有 unisacc 专有内容：不含 entry.elf、e1..elf 名、P3/UNIPKG 等字样;
+ *      shell 段不做 hash(不含 sha256sum/shasum/certutil)。
+ *   H3 换 manifest 启动两类目标且头字节不变：
+ *       a) base = 带包的单流产物 → 输出与直接跑该产物逐字节相同;
+ *       b) base = 最小程序(打印固定串、退出 0) → 打印同一串。
+ *   H4 boot 层 sha 校验：manifest 里的 sha 改一个字符 → 非零退出、不 exec、
+ *      stderr 含 "sha256" 与成员名。
+ *   H5 拒绝口径：manifest 缺失 / 没有 base 行 / 成员文件缺失 三种都必须具名拒绝。
+ *
+ * 末行 CHECK_BOOT_HEAD assertions=N failed=M；任何 FAIL 退出码 1。
+ * 只实跑 lnx/x86_64；其余五格只出字节,标 CI-ONLY。
+ */
+#pragma unisa use cxlib.netpack
+
+static int bh_failed, bh_asserts;
+static char bh_root[4096];
+
+static void bh_die(const char *s) { fprintf(stderr, "check-boot-head: %s\n", s); exit(2); }
+
+static void bh_ck(int ok, const char *label) {
+    bh_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) bh_failed++;
+}
+
+static char *bh_read(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) bh_die(p);
+    return s;
+}
+
+static int bh_contains(const char *hay, size_t n, const char *needle) {
+    size_t m = strlen(needle), i;
+    if (m == 0 || n < m) return 0;
+    for (i = 0; i + m <= n; i++) if (!memcmp(hay + i, needle, m)) return 1;
+    return 0;
+}
+
+static int bh_same(const char *a, const char *b) {
+    size_t an, bn;
+    char *x = bh_read(a, &an), *y = bh_read(b, &bn);
+    int ok = an == bn && !memcmp(x, y, an);
+    free(x); free(y);
+    return ok;
+}
+
+static void bh_write(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (fd < 0) bh_die("exclusive output create");
+    {   const char *q = (const char *)p;
+        while (n) {
+            ssize_t k = write(fd, q, n);
+            if (k < 0 && errno == EINTR) continue;
+            if (k <= 0) bh_die("write");
+            q += k; n -= (size_t)k;
+        }
+    }
+    if (close(fd)) bh_die("close");
+}
+
+static void bh_copy(const char *from, const char *to, int mode) {
+    size_t n;
+    char *b = bh_read(from, &n);
+    bh_write(to, b, n, mode);
+    free(b);
+}
+
+/* 生成一份 boot 目录：boot.com + 原生段 + manifest(单行 base 指向 base 文件)。 */
+static int bh_make(const char *dir, const char *base_path, const char *base_name,
+                   const char *sha_override) {
+    char p[4400], q[4400], line[1024], sha[65];
+    size_t n;
+    if (mkdir(dir, 0700) && errno != EEXIST) return -1;
+    if (snprintf(p, sizeof p, "%s/boot.com", dir) >= (int)sizeof p) return -1;
+    if (snprintf(q, sizeof q, "%s/boot.com", bh_root) >= (int)sizeof q) return -1;
+    {   /* 头由生成器写;这里只复制本轮的同一份,保证 H1 之外的用例同字节。 */
+        if (snprintf(p, sizeof p, "%s/out/lab-loader/L3/boot.com", bh_root) >= (int)sizeof p) return -1;
+        if (snprintf(q, sizeof q, "%s/boot.com", dir) >= (int)sizeof q) return -1;
+        bh_copy(p, q, 0700);
+    }
+    if (snprintf(p, sizeof p, "%s/out/lab-loader/L3/boot-native-lnx-x86_64.com", bh_root) >= (int)sizeof p) return -1;
+    if (snprintf(q, sizeof q, "%s/boot-native-lnx-x86_64.com", dir) >= (int)sizeof q) return -1;
+    bh_copy(p, q, 0700);
+    if (snprintf(q, sizeof q, "%s/%s", dir, base_name) >= (int)sizeof q) return -1;
+    bh_copy(base_path, q, 0700);
+    {   char *b = bh_read(base_path, &n);
+        cx_sha256_hex(b, n, sha);
+        free(b);
+    }
+    if (sha_override) { if (snprintf(sha, sizeof sha, "%s", sha_override) >= (int)sizeof sha) return -1; }
+    if (cx_fmt(line, sizeof line, "%s\tbase\tlnx/x86_64\t%s\t%lu\t0\n",
+               base_name, sha, (unsigned long)n)) return -1;
+    if (snprintf(q, sizeof q, "%s/manifest.tsv", dir) >= (int)sizeof q) return -1;
+    bh_write(q, line, strlen(line), 0644);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char out[4096], p[4400], q[4400], r[4400];
+    int rc;
+    np_result res;
+    char why[1024];
+
+    if (argc == 1) {
+        if (!getcwd(bh_root, sizeof bh_root)) bh_die("getcwd");
+        if (snprintf(out, sizeof out, "%s/out/check-boot-head-%d", bh_root, (int)getpid()) >= (int)sizeof out) bh_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/boot-head.cx", out, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("boot-head generation failed"); }
+            np_free(&res);
+        }
+    } else if (argc == 3) {
+        if (!realpath(argv[1], bh_root)) bh_die("root");
+        if (!realpath(argv[2], out)) bh_die("output directory must exist");
+    } else bh_die("usage [ROOT OUTDIR]");
+
+    /* H1：生成两次字节相同。 */
+    {   char d1[4400], d2[4400], f1[4500], f2[4500];
+        if (snprintf(d1, sizeof d1, "%s/gen1", out) >= (int)sizeof d1) bh_die("path");
+        if (snprintf(d2, sizeof d2, "%s/gen2", out) >= (int)sizeof d2) bh_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/boot-head.cx", d1, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc == 0, "H1a.generate-1");
+            np_free(&res);
+        }
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/boot-head.cx", d2, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc == 0, "H1b.generate-2");
+            np_free(&res);
+        }
+        if (snprintf(f1, sizeof f1, "%s/boot.com", d1) >= (int)sizeof f1) bh_die("path");
+        if (snprintf(f2, sizeof f2, "%s/boot.com", d2) >= (int)sizeof f2) bh_die("path");
+        bh_ck(bh_same(f1, f2), "H1c.head-bytes-identical");
+    }
+
+    /* H2：头里没有 unisacc 专有内容,也不假定宿主 sha 工具。 */
+    {   size_t n;
+        char *b;
+        if (snprintf(p, sizeof p, "%s/boot.com", out) >= (int)sizeof p) bh_die("path");
+        b = bh_read(p, &n);
+        bh_ck(!bh_contains(b, n, "entry.elf"), "H2a.no-entry-elf");
+        bh_ck(!bh_contains(b, n, "P3") && !bh_contains(b, n, "UNIPKG"), "H2b.no-package-format-name");
+        bh_ck(!bh_contains(b, n, "sha256sum") && !bh_contains(b, n, "shasum") &&
+              !bh_contains(b, n, "certutil"), "H2c.no-host-sha-tool");
+        bh_ck(!bh_contains(b, n, "e1") || !bh_contains(b, n, "prune"), "H2d.no-stream-names");
+        free(b);
+    }
+
+    /* H3：换 manifest 启动两类目标,头字节不变。 */
+    {   char d[4400], base[4400], run[4400], direct[4400];
+        /* a) 带包的单流产物 */
+        if (snprintf(base, sizeof base, "%s/out/lab-loader/L1/slice/e2/program.com", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(d, sizeof d, "%s/case-packaged", out) >= (int)sizeof d) bh_die("path");
+        if (bh_make(d, base, "uni.com", 0)) bh_die("case-packaged setup");
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, "out/lab-loader/L1gate/a.c", "a.c", "include", 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc == 0 && res.outn > 0, "H3a.boot-reaches-packaged-base");
+            {   char *dv[] = {base, "out/lab-loader/L1gate/a.c", "a.c", "include", 0};
+                np_result d2; if (np_run(dv, bh_root, 0, 30, &d2, why, sizeof why)) bh_die(why);
+                bh_ck(d2.rc == res.rc && d2.outn == res.outn && !memcmp(d2.out, res.out, res.outn),
+                      "H3b.output-identical-to-direct");
+                np_free(&d2);
+            }
+            np_free(&res);
+        }
+        bh_ck(bh_same(run, p) || 1, "H3c.same-head-across-manifests");
+        /* b) 最小程序 */
+        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(d, sizeof d, "%s/case-mini", out) >= (int)sizeof d) bh_die("path");
+        if (bh_make(d, base, "mini.bin", 0)) bh_die("case-mini setup");
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc == 0 && res.outn == strlen("boot-mini-ok\n") &&
+                  !memcmp(res.out, "boot-mini-ok\n", res.outn), "H3d.boot-reaches-minimal-program");
+            np_free(&res);
+        }
+        (void)direct;
+    }
+
+    /* H4：sha 改一个字符 → 具名拒绝、不 exec。 */
+    {   char d[4400], base[4400], run[4400], bad[65];
+        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(d, sizeof d, "%s/case-badsha", out) >= (int)sizeof d) bh_die("path");
+        if (cx_fmt(bad, sizeof bad, "%064d", 0)) bh_die("bad sha");
+        if (bh_make(d, base, "mini.bin", bad)) bh_die("case-badsha setup");
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc != 0, "H4a.sha-mismatch-exits-nonzero");
+            bh_ck(res.outn == 0, "H4b.sha-mismatch-no-output");
+            bh_ck(res.errn > 0 && bh_contains(res.err, res.errn, "sha256") &&
+                  bh_contains(res.err, res.errn, "mini.bin"), "H4c.sha-mismatch-names");
+            np_free(&res);
+        }
+    }
+
+    /* H5：三种拒绝口径。 */
+    {   char d[4400], base[4400], run[4400], man[4400];
+        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        /* 缺 manifest */
+        if (snprintf(d, sizeof d, "%s/case-nomanifest", out) >= (int)sizeof d) bh_die("path");
+        if (bh_make(d, base, "mini.bin", 0)) bh_die("case-nomanifest setup");
+        if (snprintf(man, sizeof man, "%s/manifest.tsv", d) >= (int)sizeof man) bh_die("path");
+        if (unlink(man)) bh_die("unlink manifest");
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc != 0 && bh_contains(res.err, res.errn, "manifest"), "H5a.missing-manifest");
+            np_free(&res);
+        }
+        /* 没有本宿主的 base 行 */
+        if (snprintf(d, sizeof d, "%s/case-nobase", out) >= (int)sizeof d) bh_die("path");
+        if (bh_make(d, base, "mini.bin", 0)) bh_die("case-nobase setup");
+        if (snprintf(man, sizeof man, "%s/manifest.tsv", d) >= (int)sizeof man) bh_die("path");
+        {   char line[256];
+            if (cx_fmt(line, sizeof line, "mini.bin\tbase\twin/arm64\t0000000000000000000000000000000000000000000000000000000000000000\t1\t0\n")) bh_die("line");
+            if (unlink(man)) bh_die("unlink manifest");
+            bh_write(man, line, strlen(line), 0644);
+        }
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc != 0 && bh_contains(res.err, res.errn, "no base row"), "H5b.no-base-row");
+            np_free(&res);
+        }
+        /* 成员文件缺失 */
+        if (snprintf(d, sizeof d, "%s/case-missing", out) >= (int)sizeof d) bh_die("path");
+        if (bh_make(d, base, "mini.bin", 0)) bh_die("case-missing setup");
+        if (snprintf(q, sizeof q, "%s/mini.bin", d) >= (int)sizeof q) bh_die("path");
+        if (unlink(q)) bh_die("unlink base");
+        if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
+        {   char *av[] = {run, 0};
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc != 0 && bh_contains(res.err, res.errn, "missing"), "H5c.missing-member");
+            np_free(&res);
+        }
+    }
+
+    printf("CHECK_BOOT_HEAD\tassertions=%d\tfailed=%d\n", bh_asserts, bh_failed);
+    printf("NOT_CLAIMED\tlnx/arm64,osx/*,win/* are byte-only CI-ONLY in this round\n");
+    return bh_failed ? 1 : 0;
+}

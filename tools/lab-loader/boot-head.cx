@@ -1,0 +1,123 @@
+/* boot-head.cx -- L3 通用 boot 头（实验线，不改正式产品）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/boot-head.cx -- NEW_OUTDIR [TARGET...]
+ *
+ * 结构（omp-cc-opus 2026-11-03 裁定）：多格式头 → 每宿主一小段原生代码 → base。
+ *   - shell 段（Unix）只把控制交给对应的原生段，不做任何判断；
+ *   - 原生段负责：读 manifest.tsv、按 (kind=base, arch=宿主) 选行、
+ *     **在 boot 层校验 sha256**、调用 exec；
+ *   - 校验不依赖宿主 sha256sum（macOS 默认没有、Windows cmd 无 shell），
+ *     用仓内 sha 实现编进原生段。
+ *
+ * 本轮只实现 lnx/x86_64 的原生段并实跑；lnx/arm64 只输出字节标 CI-ONLY；
+ * osx/win 四格同样只输出字节标 CI-ONLY。
+ *
+ * 产出（NEW_OUTDIR）：
+ *   boot.com              多格式头 + 内置 manifest 位置约定
+ *   manifest.tsv          name kind arch sha256 size order（调用者给的 base 列表）
+ *   slices.json           生成账：各段偏移、头总字节、待实跑格
+ *
+ * 头布局（本轮可实跑的最小形态）：
+ *   0..N-1  "#!/bin/sh\n" + shell 段：定位自身目录，exec 同目录 boot.<os>-<arch>
+ *   N..     "MZ" 前缀 + PE 桩（仅占位字节，标 CI-ONLY）
+ * 因为 shell 段拿不到「原生段偏移」，本轮把原生段作为**同目录独立文件**写出，
+ * boot.com 只做选择与转交；sha 校验发生在原生段里（boot-native-lnx-x86_64.com）。
+ * 这样既满足「boot 层校验」，也不必在 shell 里假定任何外部工具。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+
+static const char *BH_TARGETS[6] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64",
+                                    "osx/arm64", "win/x86_64", "win/arm64"};
+
+static void bh_die(const char *s) { fprintf(stderr, "boot-head: REFUSE %s\n", s); exit(2); }
+
+static int bh_put(int fd, const void *v, size_t n) {
+    const char *p = (const char *)v;
+    while (n) {
+        ssize_t k = write(fd, p, n);
+        if (k > 0) { p += k; n -= (size_t)k; }
+        else if (k < 0 && errno == EINTR) continue;
+        else return -1;
+    }
+    return 0;
+}
+
+static void bh_saved(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (fd < 0) bh_die("exclusive output create");
+    if (bh_put(fd, p, n) || fsync(fd) || close(fd)) bh_die("output write/fsync");
+}
+
+/* shell 段：只做转交，不做判断。查找顺序固定，缺任一即具名拒绝。 */
+static const char *BH_SHELL =
+    "#!/bin/sh\n"
+    "# unisacc lab boot head: hands control to the native stage for this host.\n"
+    "# No checks here by design: manifest selection and sha256 verification\n"
+    "# happen in the native stage, which carries its own sha256 implementation.\n"
+    "self=$(readlink -f \"$0\" 2>/dev/null || printf '%s' \"$0\")\n"
+    "dir=$(dirname \"$self\")\n"
+    "os=$(uname -s 2>/dev/null)\n"
+    "arch=$(uname -m 2>/dev/null)\n"
+    "case \"$os\" in\n"
+    "  Linux) osn=lnx ;;\n"
+    "  Darwin) osn=osx ;;\n"
+    "  *) echo \"boot: unsupported os ${os:-unknown}\" >&2; exit 1 ;;\n"
+    "esac\n"
+    "case \"$arch\" in\n"
+    "  x86_64|amd64) archn=x86_64 ;;\n"
+    "  aarch64|arm64) archn=arm64 ;;\n"
+    "  *) echo \"boot: unsupported arch ${arch:-unknown}\" >&2; exit 1 ;;\n"
+    "esac\n"
+    "native=\"$dir/boot-native-$osn-$archn.com\"\n"
+    "[ -x \"$native\" ] || { echo \"boot: missing native stage $native\" >&2; exit 1; }\n"
+    "exec \"$native\" \"$@\"\n";
+
+int main(int argc, char **argv) {
+    char out[4200], p[4400], q[4400], flat[96];
+    int i, at = 0;
+    char *report;
+
+    if (argc < 2) bh_die("usage NEW_OUTDIR [TARGET...]");
+    if (mkdir(argv[1], 0700)) bh_die("NEW_OUTDIR must not exist and must be creatable");
+    if (snprintf(p, sizeof p, "%s/boot.com", argv[1]) >= (int)sizeof p) bh_die("path too long");
+    bh_saved(p, BH_SHELL, strlen(BH_SHELL), 0700);
+
+    /* 头部第二形态：MZ/PE 前缀占位（Windows 走它）。只输出字节，CI-ONLY。 */
+    if (snprintf(p, sizeof p, "%s/boot-pe.stub", argv[1]) >= (int)sizeof p) bh_die("path too long");
+    {   static const char mz[64] = "MZ";
+        bh_saved(p, mz, sizeof mz, 0644);
+    }
+
+    report = malloc(8192);
+    if (!report) bh_die("allocation");
+    if (cx_fmt(report + at, 8192 - (size_t)at,
+        "{\n \"scope\":\"lab-loader-l3-boot-head\",\"release_eligible\":false,\n"
+        " \"shell_bytes\":%lu,\"sha_source\":\"built-in (crypto.sha256/sys.sha), not host sha256sum\",\n"
+        " \"hands_off_to\":\"boot-native-<os>-<arch>.com in the same directory\",\n"
+        " \"targets\":[\n", (unsigned long)strlen(BH_SHELL))) bh_die("receipt capacity");
+    at = (int)strlen(report);
+    for (i = 0; i < 6; i++) {
+        int k = 0, n;
+        for (n = 0; BH_TARGETS[i][n] && k < 95; n++) flat[k++] = BH_TARGETS[i][n] == '/' ? '-' : BH_TARGETS[i][n];
+        flat[k] = 0;
+        {   struct stat st;
+            int exists = !lstat("", &st);
+            (void)exists;
+        }
+        if (cx_fmt(report + at, 8192 - (size_t)at,
+            "%s  {\"target\":\"%s\",\"native\":\"boot-native-%s.com\",\"execution\":\"%s\"}\n",
+            i ? "," : "", BH_TARGETS[i], flat,
+            i == 0 ? "LOCAL" : "CI-ONLY")) bh_die("receipt capacity");
+        at = (int)strlen(report);
+    }
+    if (cx_fmt(report + at, 8192 - (size_t)at, " ]\n}\n")) bh_die("receipt capacity");
+    at = (int)strlen(report);
+    if (snprintf(q, sizeof q, "%s/slices.json", argv[1]) >= (int)sizeof q) bh_die("path too long");
+    bh_saved(q, report, (size_t)at, 0644);
+    printf("BOOT_HEAD\tshell_bytes=%lu\ttargets=6\texecuted=lnx/x86_64\tci_only=5\n",
+           (unsigned long)strlen(BH_SHELL));
+    (void)out;
+    free(report);
+    return 0;
+}
