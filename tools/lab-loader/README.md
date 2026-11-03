@@ -77,9 +77,16 @@ utf8.com 四类输入与 oracle 一致；执行器占 99.66%，模板开销 <1ms
 ./unisacc.com -S -c -b lnx/x86_64 -funit SRC -o OBJ.tape   # 逐对象（整程序 -S 不通）
 ```
 同一份与架构无关的 tape 能写出六个目标镜像,这就是「ISA 切片由模型推导出来」的实测依据。
-① 体积:编译器的 43 个对象 tape 合计 **7,941,104B**（合并 gzip 710,138B / xz 325,964B）,
-   对照 `entry.elf` 1,659,974B（gzip 334,334B / xz 196,608B）—— 原始 4.8×、gzip 2.1×。
+① 体积:43 个对象 tape 合计 **7,941,104B**（合并 gzip 710,138B / xz 325,964B）。
+   一份 tape 要替换的是**五个原生切片**,不是一份 entry.elf:四片 Unix 切片合计 8,365,157B
+   （gzip 1,157,093B / xz 676,892B）,加 win/x86_64 701,440B 共 9,066,597B ——
+   所以 xz 后 326KB 的 tape 相对约 677KB 的 Unix 切片净省约 **350KB**,
+   相对五片全量（xz 约 800KB）净省约 **470KB**;用 gzip 的 710KB 则约省 447KB / 90KB。
    整编译器单文件 `-S src/unisacc.cx` 报 `undefined function`（43 对象链接而成,与 UNITOK2-CAP 同根）。
+   重复度:12,412 个函数、唯一函数体 5,557 个;函数体字节 1,121,079,重复 511,986（**45.7%**）——
+   43 个对象各自编进同一套 libc/运行时,与 C44-LIBCUNIT-01 同根;去重能把真实体积再压近一半。
+   tapebin:只支持整文件 `-S`,与 `-c -funit` 在 route 层互斥,对象级产不出;可测样例
+   t3 383B、net-check 207,002B（同为 32% 的文本 tape 体积）。
 ② 物化对拍:t3（592B tape）与 tools/lab-loader 的工具级 tape 都与直接编译逐字节相同。
 ③ 耗时:`ms ≈ 95 + 0.00117 × tape_bytes`（4 点拟合）;t3 76ms、525KB 756ms、845KB 1,050ms。
    外推到整编译器 7.94MB ≈ **9.4s** 首次物化（按对象合并后一次 lower+elf）。
