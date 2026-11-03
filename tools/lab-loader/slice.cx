@@ -1,0 +1,221 @@
+/* slice.cx -- L1 单流去重打包器（实验线,不改正式产品）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/slice.cx -- BASE_COM SOURCE_PKG NEW_OUTDIR [TARGET [LEVEL]]
+ *
+ * 第一步原样交给 cxlib.streampack（它做严格 P3/P4 目录/外延校验、逐字节搬运压缩
+ * 模型记录与资源段），产物目录里先得到七个自含容器。第二步把同一次产物拆成共享片：
+ *
+ *   NEW_OUTDIR/base/<os>-<arch>.bin        基座，每宿主一份
+ *   NEW_OUTDIR/share/resources.bin         资源段，全流共用一份
+ *   NEW_OUTDIR/share/model-<stream>.bin    该流的模型记录（M 行 + 负载）
+ *   NEW_OUTDIR/slice/<stream>/manifest.tsv name kind arch sha256 size order，三行
+ *   NEW_OUTDIR/slice/<stream>/program.com  自含单流容器（与 stream-pack 产物同字节）
+ *   NEW_OUTDIR/slices.json                 每片哈希与字节账
+ *
+ * 去重发生在材料层：基座与资源段只写一次，每流只多一份模型记录；可执行产物保持
+ * 自含，行为不变。组装校验：header + 模型片 + 资源片必须逐字节重建出原包正文，
+ * 否则具名拒绝、不写不一致产物。本工具不改 resolver / manifest-gen / release-ape /
+ * stream-pack，只 use。
+ *
+ * manifest 列语义（与 tools/manifest-gen.cx 的六字段一致）：
+ *   name kind arch sha256 size order
+ *   order 是成员序号 0/1/2，不是字节数；arch 只有 base 随宿主写目标，
+ *   model 与 resources 与架构无关（设计要点 ②），写 any。
+ *
+ * tools/lab-loader/cxlib/streampack.cx 是 ../../cxlib/streampack.cx 的符号链接：
+ * `#pragma unisa use` 只在用者文件旁解析模块名（cx/cx0/README.md 记录的同一规则），
+ * 而这个工具是第一个位于 tools/cxlib 之外、要 use cxlib.streampack 的文件。链接
+ * 只改变模块查找路径，不改任何字节；没有可用 -I 选项能替代它。链接是 mode 120000，
+ * toolsloc 不计其行数。
+ */
+#pragma unisa use cxlib.streampack
+
+static const char *SL_NAMES[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+
+static void sl_die(const char *s) { fprintf(stderr, "slice: REFUSE %s\n", s); exit(2); }
+
+static int sl_put(int fd, const void *v, size_t n) {
+    const char *p = (const char *)v;
+    while (n) {
+        ssize_t k = write(fd, p, n);
+        if (k > 0) { p += k; n -= (size_t)k; }
+        else if (k < 0 && errno == EINTR) continue;
+        else return -1;
+    }
+    return 0;
+}
+
+static void sl_saved(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (fd < 0) sl_die("exclusive output create");
+    if (sl_put(fd, p, n) || fsync(fd) || close(fd)) sl_die("output write/fsync");
+}
+
+static char *sl_load(const char *p, size_t *n) {
+    struct stat s;
+    char *b;
+    if (lstat(p, &s) || !S_ISREG(s.st_mode) || s.st_size <= 0 || s.st_size > 268435456)
+        sl_die("input must be nonempty bounded regular file, no symlink");
+    b = cx_read(p, n);
+    if (!b || (size_t)s.st_size != *n) sl_die("input read/size changed");
+    return b;
+}
+
+/* 从 at 起一行的长度（含 '\n'）；到文件尾没有换行返回 -1。 */
+static long sl_line(const char *b, long n, long at) {
+    long e = at;
+    while (e < n && b[e] != '\n') e++;
+    return e < n ? e - at + 1 : -1;
+}
+
+/* 模型记录行里第一个十进制数：块负载长度。 */
+static long sl_extent(const char *line, long n) {
+    long at = 0, v = 0;
+    int seen = 0;
+    while (at < n && !(line[at] >= '0' && line[at] <= '9')) at++;
+    while (at < n && line[at] >= '0' && line[at] <= '9') { v = v * 10 + (line[at] - '0'); at++; seen = 1; }
+    if (!seen) sl_die("model record header without extent");
+    return v;
+}
+
+/* 单流包正文切三段：[header + D 行][模型记录][资源段]。 */
+static void sl_cut(const char *body, long n, long *head_n, long *model_n, long *res_at) {
+    long h1 = sl_line(body, n, 0), h2, m, ext;
+    if (h1 <= 0) sl_die("package header line");
+    h2 = sl_line(body, n, h1);
+    if (h2 <= 0) sl_die("package stage line");
+    if (body[h1 + h2] != 'M') sl_die("package is not a single-stream container");
+    m = sl_line(body, n, h1 + h2);
+    if (m <= 0) sl_die("model record line");
+    ext = sl_extent(body + h1 + h2, m);
+    if (ext <= 0 || h1 + h2 + m + ext > n) sl_die("model record extent");
+    *head_n = h1 + h2;
+    *model_n = m + ext;
+    *res_at = h1 + h2 + *model_n;
+}
+
+int main(int argc, char **argv) {
+    const char *base_path, *outdir, *target = "lnx/x86_64";
+    char path[4096], flat[96], base_sha[65], res_sha[65];
+    char *base, *res = 0;
+    size_t bn, rn = 0;
+    long base_bytes, sum_com = 0, sum_model = 0;
+    int i, at = 0;
+    char *report;
+    int rc = stream_pack(argc, argv);
+
+    if (rc) return rc;
+    if (argc >= 2 && !strcmp(argv[1], "--")) { argc--; argv++; }
+    if (argc < 4 || argc > 6) sl_die("usage BASE_COM SOURCE_PKG NEW_OUTDIR [TARGET [LEVEL]]");
+    base_path = argv[1];
+    outdir = argv[3];
+    if (argc >= 5) target = argv[4];
+
+    base = sl_load(base_path, &bn);
+    base_bytes = (long)bn;
+    cx_sha256_hex(base, bn, base_sha);
+    {   int k = 0;
+        for (i = 0; target[i] && k < (int)sizeof flat - 1; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
+        flat[k] = 0;
+    }
+    if (snprintf(path, sizeof path, "%s/base", outdir) >= (int)sizeof path) sl_die("path too long");
+    if (mkdir(path, 0700)) sl_die("base dir");
+    if (snprintf(path, sizeof path, "%s/base/%s.bin", outdir, flat) >= (int)sizeof path) sl_die("path too long");
+    sl_saved(path, base, bn, 0700);
+    if (snprintf(path, sizeof path, "%s/share", outdir) >= (int)sizeof path) sl_die("path too long");
+    if (mkdir(path, 0700)) sl_die("share dir");
+    if (snprintf(path, sizeof path, "%s/slice", outdir) >= (int)sizeof path) sl_die("path too long");
+    if (mkdir(path, 0700)) sl_die("slice dir");
+
+    report = malloc(24576);
+    if (!report) sl_die("allocation");
+    at += snprintf(report + at, 24576 - (size_t)at,
+        "{\n \"scope\":\"lab-loader-l1-single-stream-dedup\",\"release_eligible\":false,\n"
+        " \"selected_target\":\"%s\",\"base_sha256\":\"%s\",\"base_bytes\":%ld,\n \"slices\":[\n",
+        target, base_sha, base_bytes);
+
+    for (i = 0; i < 7; i++) {
+        char comf[4200], shard[4400], dirf[4400], manf[4400], prog[4400], man[1400], line[512];
+        char comsha[65], mh[65];
+        char *com, *body, *shard_bytes, *rebuilt;
+        size_t cn;
+        long body_n, head_n = 0, model_n = 0, res_at = 0, res_n;
+        if (snprintf(comf, sizeof comf, "%s/unisacc-stream%d.com", outdir, i + 1) >= (int)sizeof comf) sl_die("path too long");
+        com = sl_load(comf, &cn);
+        if (cn < bn + 16 || memcmp(com + cn - 16, "UNIPKG1\n", 8)) sl_die("container footer");
+        {   long extent = 0;
+            for (int z = 7; z >= 0; z--) extent = (extent << 8) | (unsigned char)com[cn - 8 + z];
+            if (extent <= 0 || (size_t)extent != cn - bn - 16) sl_die("container footer extent");
+        }
+        body = com + base_bytes;
+        body_n = (long)cn - base_bytes - 16;
+        sl_cut(body, body_n, &head_n, &model_n, &res_at);
+        res_n = body_n - res_at;
+        if (!res) {
+            res = malloc((size_t)res_n);
+            if (!res) sl_die("allocation");
+            memcpy(res, body + res_at, (size_t)res_n);
+            rn = (size_t)res_n;
+            cx_sha256_hex(res, rn, res_sha);
+            if (snprintf(path, sizeof path, "%s/share/resources.bin", outdir) >= (int)sizeof path) sl_die("path too long");
+            sl_saved(path, res, rn, 0644);
+        } else if (rn != (size_t)res_n || memcmp(res, body + res_at, rn)) {
+            sl_die("resource section differs between streams");
+        }
+        if (snprintf(shard, sizeof shard, "%s/share/model-%s.bin", outdir, SL_NAMES[i]) >= (int)sizeof shard) sl_die("path too long");
+        sl_saved(shard, body + head_n, (size_t)model_n, 0644);
+        /* 组装校验：header + 模型片 + 资源片必须逐字节重建原包正文。 */
+        rebuilt = malloc((size_t)body_n);
+        if (!rebuilt) sl_die("allocation");
+        {   size_t sn;
+            shard_bytes = sl_load(shard, &sn);
+            if (sn != (size_t)model_n) sl_die("model shard extent");
+        }
+        memcpy(rebuilt, body, (size_t)head_n);
+        memcpy(rebuilt + head_n, shard_bytes, (size_t)model_n);
+        memcpy(rebuilt + head_n + model_n, res, rn);
+        if (memcmp(rebuilt, body, (size_t)body_n)) sl_die("shard assembly does not reproduce the package body");
+        free(shard_bytes);
+        free(rebuilt);
+
+        if (snprintf(dirf, sizeof dirf, "%s/slice/%s", outdir, SL_NAMES[i]) >= (int)sizeof dirf) sl_die("path too long");
+        if (mkdir(dirf, 0700)) sl_die("slice entry dir");
+        cx_sha256_hex(body + head_n, (size_t)model_n, mh);
+        /* order 是成员序号 0/1/2（与 manifest-gen.cx 同义：行序，不是字节数）；
+           arch 只有 base 随宿主，模型与资源架构无关，写 any（设计要点 ②）。 */
+        if (snprintf(man, sizeof man,
+            "base\tbase\t%s\t%s\t%ld\t0\n"
+            "model-%s\tstage\tany\t%s\t%ld\t1\n"
+            "resources\tresource\tany\t%s\t%lu\t2\n",
+            target, base_sha, base_bytes,
+            SL_NAMES[i], mh, model_n,
+            res_sha, (unsigned long)rn) >= (int)sizeof man) sl_die("manifest capacity");
+        if (snprintf(manf, sizeof manf, "%s/manifest.tsv", dirf) >= (int)sizeof manf) sl_die("path too long");
+        sl_saved(manf, man, strlen(man), 0644);
+        if (snprintf(prog, sizeof prog, "%s/program.com", dirf) >= (int)sizeof prog) sl_die("path too long");
+        sl_saved(prog, com, cn, 0700);
+
+        cx_sha256_hex(com, cn, comsha);
+        if (snprintf(line, sizeof line, "SLICE\t%s\tmodel_bytes=%ld\tcontainer_bytes=%lu\tcontainer_sha256=%s\n",
+                     SL_NAMES[i], model_n, (unsigned long)cn, comsha) >= (int)sizeof line) sl_die("line capacity");
+        fputs(line, stdout);
+        at += snprintf(report + at, 24576 - (size_t)at,
+            "%s  {\"stream\":\"%s\",\"model_sha256\":\"%s\",\"model_bytes\":%ld,\"container_bytes\":%lu,\"container_sha256\":\"%s\"}\n",
+            i ? "," : "", SL_NAMES[i], mh, model_n, (unsigned long)cn, comsha);
+        sum_com += (long)cn;
+        sum_model += model_n;
+        free(com);
+    }
+    at += snprintf(report + at, 24576 - (size_t)at,
+        " ],\n \"resources_sha256\":\"%s\",\"resources_bytes\":%lu,\n"
+        " \"shared_bytes\":%ld,\"shared_plus_models_bytes\":%ld,\"naive_container_bytes\":%ld\n}\n",
+        res_sha, (unsigned long)rn, base_bytes + (long)rn, base_bytes + (long)rn + sum_model, sum_com);
+    if (snprintf(path, sizeof path, "%s/slices.json", outdir) >= (int)sizeof path) sl_die("path too long");
+    sl_saved(path, report, (size_t)at, 0644);
+    printf("SLICE_TOTAL\tcontainers=%ld\tshared=%ld\tmodels=%ld\tshared_plus_models=%ld\n",
+           sum_com, base_bytes + (long)rn, sum_model, base_bytes + (long)rn + sum_model);
+    free(report);
+    free(base);
+    free(res);
+    return 0;
+}

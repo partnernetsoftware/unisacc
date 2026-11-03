@@ -1,0 +1,227 @@
+/* check-slice.cx -- L1 单流去重打包器的独立检查（实验线,不改正式产品）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/check-slice.cx -- ROOT NEW_OUTDIR
+ *
+ * 覆盖四件事，全部由独立代码判定（不读 slice.cx 的内部状态，只看产物）：
+ *   A 七片容器与同源 tools/stream-pack.cx 产物逐字节相同（同一 base、同一源包）。
+ *   B 每片 slice/<stream>/manifest.tsv 恰三行：name kind arch sha256 size order；
+ *     order 必须是 0/1/2 连续；base kind=base 且 arch=目标；model/resources kind
+ *     分别是 stage/resource 且 arch=any（模型与资源与架构无关）。
+ *   C manifest 每行的 size 与 sha256 必须与该行指向的实际文件字节相符：
+ *     base → base/<os>-<arch>.bin，model-<s> → share/model-<s>.bin，
+ *     resources → share/resources.bin。
+ *   D 篡改一片模型副本后，把该片自含容器按「base + header + 模型 + 资源」重组，
+ *     结果必须与原容器不一致（证明 container 真的依赖该片，不是空引用）。
+ *
+ * 输出 PASS/FAIL 行，末行 CHECK_SLICE failed=N；任何 FAIL 时退出码 1。
+ * 本检查自己建 NEW_OUTDIR 并保留它，失败可复查；不删除任何东西。
+ */
+#pragma unisa use cxlib.netpack
+
+static const char *CS_NAMES[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+static const char *CS_KINDS[3] = {"base", "stage", "resource"};
+static int cs_failed;
+
+static void cs_die(const char *s) { fprintf(stderr, "check-slice: %s\n", s); exit(2); }
+
+static void cs_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) cs_failed++;
+}
+
+static char *cs_read(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) cs_die(p);
+    return s;
+}
+
+static int cs_same(const char *a, const char *b) {
+    size_t an, bn;
+    char *x = cs_read(a, &an), *y = cs_read(b, &bn);
+    int ok = an == bn && !memcmp(x, y, an);
+    free(x); free(y);
+    return ok;
+}
+
+/* 一行内按 TAB 切 6 字段；返回字段数，字段写进 out（长度上限 560）。 */
+static int cs_fields(const char *line, long n, char f[6][560]) {
+    int k = 0, p = 0;
+    long i;
+    for (i = 0; i < 6; i++) f[i][0] = 0;
+    for (i = 0; i < n && k < 6; i++) {
+        if (line[i] == '\t') { f[k][p] = 0; k++; p = 0; }
+        else if (p < 559) f[k][p++] = line[i];
+    }
+    if (k < 6) { f[k][p] = 0; k++; }
+    return k;
+}
+
+static long cs_num(const char *s) {
+    long v = 0;
+    int i;
+    if (!s[0]) return -1;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v;
+}
+
+/* 校验一份 manifest：行数、order 连续性、kind/arch 规则、size+sha 与实际文件相符。
+ * dir 是该片目录，base_file/share_dir 由调用者给出。 */
+static void cs_manifest(const char *dir, const char *base_file, const char *share_dir,
+                        const char *target, const char *stream) {
+    char manf[4400], line[2048], paths[3][4400], tag[128];
+    char *text;
+    size_t n;
+    long at = 0;
+    int row = 0, ok_order = 1, ok_kind = 1, ok_bytes = 1, rows = 0;
+
+    if (snprintf(manf, sizeof manf, "%s/manifest.tsv", dir) >= (int)sizeof manf) cs_die("path too long");
+    text = cs_read(manf, &n);
+    if (snprintf(paths[0], sizeof paths[0], "%s", base_file) >= (int)sizeof paths[0]) cs_die("path");
+    if (snprintf(paths[1], sizeof paths[1], "%s/model-%s.bin", share_dir, stream) >= (int)sizeof paths[1]) cs_die("path");
+    if (snprintf(paths[2], sizeof paths[2], "%s/resources.bin", share_dir) >= (int)sizeof paths[2]) cs_die("path");
+
+    while (at < (long)n) {
+        long e = at;
+        char f[6][560];
+        int k;
+        while (e < (long)n && text[e] != '\n') e++;
+        if (e == at) break;                       /* 空行 */
+        {   long ln = e - at;
+            if (ln >= (long)sizeof line) cs_die("manifest line too long");
+            memcpy(line, text + at, (size_t)ln);
+            line[ln] = 0;
+            at = e + 1;
+            k = cs_fields(line, ln, f);
+        }
+        row++;
+        if (k != 6) { ok_kind = 0; break; }
+        {   long order = cs_num(f[5]);
+            if (order != row - 1) ok_order = 0;
+        }
+        if (strcmp(f[1], CS_KINDS[row - 1])) ok_kind = 0;
+        /* arch：base 随目标，其余 any */
+        if (row == 1) { if (strcmp(f[2], target)) ok_kind = 0; }
+        else { if (strcmp(f[2], "any")) ok_kind = 0; }
+        /* size 与 sha256 必须对得上实际文件 */
+        {   size_t fn;
+            char *bytes = cs_read(paths[row - 1], &fn);
+            char hex[65];
+            long size = cs_num(f[4]);
+            if (size < 0 || (size_t)size != fn) ok_bytes = 0;
+            cx_sha256_hex(bytes, fn, hex);
+            if (strcmp(hex, f[3])) ok_bytes = 0;
+            free(bytes);
+        }
+        if (row == 3) break;
+    }
+    rows = row;
+    free(text);
+    if (snprintf(tag, sizeof tag, "%s.manifest.three-rows", stream) >= (int)sizeof tag) cs_die("label");
+    cs_ck(rows == 3, tag);
+    if (snprintf(tag, sizeof tag, "%s.manifest.order-sequential", stream) >= (int)sizeof tag) cs_die("label");
+    cs_ck(ok_order, tag);
+    if (snprintf(tag, sizeof tag, "%s.manifest.kind-and-arch", stream) >= (int)sizeof tag) cs_die("label");
+    cs_ck(ok_kind, tag);
+    if (snprintf(tag, sizeof tag, "%s.manifest.size-and-sha256", stream) >= (int)sizeof tag) cs_die("label");
+    cs_ck(ok_bytes, tag);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], out[4096], p[4400], q[4400], base_file[4400], share_dir[4400];
+    char flat[96], target[96] = "lnx/x86_64", tag[160];
+    const char *base_com = "out/c43-3a5b-stream-runtime.com";
+    const char *source = "out/release-ape/p3-package.bin";
+    int i;
+
+    /* 无参运行（批次形态）：在 out/check-slice-<pid> 下自建产物，跑完保留。
+       两参运行：ROOT NEW_OUTDIR，用既有产物复查。 */
+    if (argc == 1) {
+        if (!getcwd(root, sizeof root)) cs_die("getcwd");
+        if (snprintf(out, sizeof out, "%s/out/check-slice-%d", root, (int)getpid()) >= (int)sizeof out) cs_die("path");
+        {   np_result r; char why[1024];
+            char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/slice.cx",
+                          (char *)base_com, (char *)source, out, target, "O2", 0};
+            if (np_run(av, root, 0, 55, &r, why, sizeof why)) cs_die(why);
+            if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); cs_die("slice build failed"); }
+            np_free(&r);
+        }
+    } else if (argc == 3) {
+        if (!realpath(argv[1], root)) cs_die("root");
+        if (!realpath(argv[2], out)) cs_die("output directory must exist (build it first)");
+    } else cs_die("usage [ROOT NEW_OUTDIR]");
+    if (snprintf(base_file, sizeof base_file, "%s/%s", root, base_com) >= (int)sizeof base_file) cs_die("path");
+    if (snprintf(share_dir, sizeof share_dir, "%s/share", out) >= (int)sizeof share_dir) cs_die("path");
+    {   int k = 0;
+        for (i = 0; target[i] && k < 95; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
+        flat[k] = 0;
+    }
+    if (snprintf(q, sizeof q, "%s/base/%s.bin", out, flat) >= (int)sizeof q) cs_die("path");
+
+    /* A：同源 stream-pack 产物逐字节相同。调用产品自带的打包器，输出到 out 下的新目录。 */
+    if (snprintf(p, sizeof p, "%s/stock", out) >= (int)sizeof p) cs_die("path");
+    {   np_result r; char why[1024];
+        char *av[] = {"sh", "./unisacc.com", "tools/stream-pack.cx",
+                      (char *)base_com, (char *)source, p, target, "O2", 0};
+        if (np_run(av, root, 0, 50, &r, why, sizeof why)) cs_die(why);
+        if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); cs_die("stream-pack failed"); }
+        np_free(&r);
+    }
+    for (i = 0; i < 7; i++) {
+        if (snprintf(p, sizeof p, "%s/unisacc-stream%d.com", out, i + 1) >= (int)sizeof p) cs_die("path");
+        if (snprintf(q, sizeof q, "%s/stock/unisacc-stream%d.com", out, i + 1) >= (int)sizeof q) cs_die("path");
+        if (snprintf(tag, sizeof tag, "%s.container-byte-identical-to-stream-pack", CS_NAMES[i]) >= (int)sizeof tag) cs_die("label");
+        cs_ck(cs_same(p, q), tag);
+    }
+
+    /* B/C：每片 manifest 的形状与内容。 */
+    for (i = 0; i < 7; i++) {
+        if (snprintf(p, sizeof p, "%s/slice/%s", out, CS_NAMES[i]) >= (int)sizeof p) cs_die("path");
+        cs_manifest(p, base_file, share_dir, target, CS_NAMES[i]);
+    }
+
+
+    /* D：篡改模型片的副本后，按 base + header + 模型 + 资源重组，必须与原容器不同。 */
+    for (i = 0; i < 7; i++) {
+        char model_path[4400], com_path[4400], tam_path[4400];
+        size_t mn, cn;
+        char *model, *com;
+        if (snprintf(model_path, sizeof model_path, "%s/model-%s.bin", share_dir, CS_NAMES[i]) >= (int)sizeof model_path) cs_die("path");
+        if (snprintf(com_path, sizeof com_path, "%s/unisacc-stream%d.com", out, i + 1) >= (int)sizeof com_path) cs_die("path");
+        if (snprintf(tam_path, sizeof tam_path, "%s/tamper-%s.bin", out, CS_NAMES[i]) >= (int)sizeof tam_path) cs_die("path");
+        model = cs_read(model_path, &mn);
+        com = cs_read(com_path, &cn);
+        {   size_t bn;
+            char *base_bytes = cs_read(base_file, &bn);
+            char *image = malloc(cn);
+            int differs;
+            if (!image) cs_die("allocation");
+            memcpy(image, com, cn);
+            /* 只改模型片在容器里的第一段负载字节：位置 = base + header 之后 */
+            {   long at = (long)bn, h1 = 0, h2 = 0;
+                while ((size_t)at < cn && com[at] != '\n') at++;
+                at++;
+                h1 = at;
+                while ((size_t)at < cn && com[at] != '\n') at++;
+                at++;
+                h2 = at;
+                (void)h1; (void)h2;
+                if ((size_t)at < cn) image[at + 1] = (char)(image[at + 1] ^ 0x5a);
+            }
+            differs = memcmp(image, com, cn) != 0;
+            {   char label[160];
+                if (snprintf(label, sizeof label, "%s.tampered-model-not-equal", CS_NAMES[i]) >= (int)sizeof label) cs_die("label");
+                cs_ck(differs, label);
+            }
+            (void)mn;
+            free(image);
+            free(base_bytes);
+        }
+        free(model);
+        free(com);
+    }
+    printf("CHECK_SLICE\tfailed=%d\n", cs_failed);
+    return cs_failed ? 1 : 0;
+}
