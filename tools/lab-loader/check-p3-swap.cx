@@ -317,6 +317,113 @@ int main(int argc, char **argv) {
             np_free(&r);
         }
     }
+    {   /* S6: 含负数的文本网(utf8.net,16 处 -1)经 p3-swap 转 UNINETB1 后,
+           必须与 seed/pack 同一规则的参考编码逐字节相同,且能被产品解码器接受。
+           回归点:旧实现在十进制扫描遇到 '-' 就 break,后续数字全丢,网坏掉。 */
+        char netpath[4400], tmp_body[4400], outn[4400], rawout[4400];
+        char *nettext;
+        size_t netn;
+        if (snprintf(netpath, sizeof netpath, "%s/out/lab-loader/L5utf8/utf8.net", ps_root) >= (int)sizeof netpath) ps_die("path");
+        nettext = ps_read(netpath, &netn);
+        ps_ck(netn > 0 && memchr(nettext, '-', netn) != 0, "S6a.sample-net-has-negative");
+        /* 参考编码:tag 原样 + 其余 zigzag varint;S 行 varint(字节数)+原始字节。 */
+        {   char *ref = malloc(netn * 3 + 64);
+            size_t w = 8, at = 0;
+            int z;
+            if (!ref) ps_die("allocation");
+            for (z = 0; z < 8; z++) ref[z] = "UNINETB1"[z];
+            while (at < netn) {
+                size_t e = at, p2, q;
+                while (e < netn && nettext[e] != '\n') e++;
+                if (e > at) {
+                    p2 = at;
+                    while (p2 < e && nettext[p2] != ' ') p2++;
+                    for (q = at; q < p2; q++) ref[w++] = nettext[q];
+                    if (p2 - at == 1 && nettext[at] == 'S') {
+                        size_t h0 = p2 + 1, h1 = h0, bytes, kk;
+                        while (h1 < e && nettext[h1] != ' ') h1++;
+                        if (h1 - h0 == 1 && nettext[h0] == '-') {
+                            ref[w++] = 0;
+                        } else {
+                            unsigned long long v;
+                            bytes = (h1 - h0) / 2;
+                            v = bytes << 1;
+                            while (v >= 128) { ref[w++] = (char)((v & 127) | 128); v >>= 7; }
+                            ref[w++] = (char)v;
+                            for (kk = 0; kk < bytes; kk++) {
+                                int hi = nettext[h0 + 2 * kk], lo = nettext[h0 + 2 * kk + 1];
+                                ref[w++] = (char)(((hi <= '9' ? hi - '0' : (hi | 32) - 'a' + 10) * 16)
+                                                + (lo <= '9' ? lo - '0' : (lo | 32) - 'a' + 10));
+                            }
+                        }
+                    } else {
+                        q = p2;
+                        while (q < e) {
+                            long long v = 0;
+                            int seen = 0, neg = 0;
+                            unsigned long long zz;
+                            while (q < e && nettext[q] == ' ') q++;
+                            if (q < e && nettext[q] == '-') { neg = 1; q++; }
+                            while (q < e && nettext[q] >= '0' && nettext[q] <= '9') { v = v * 10 + (nettext[q] - '0'); q++; seen = 1; }
+                            if (!seen) break;
+                            if (neg) v = -v;
+                            zz = ((unsigned long long)v << 1) ^ (unsigned long long)(v >> 63);
+                            while (zz >= 128) { ref[w++] = (char)((zz & 127) | 128); zz >>= 7; }
+                            ref[w++] = (char)zz;
+                        }
+                    }
+                }
+                at = e + 1;
+            }
+            if (snprintf(rawout, sizeof rawout, "%s/neg.refbin", work) >= (int)sizeof rawout) ps_die("path");
+            ps_write(rawout, ref, w, 0600);
+            /* 参考编码已落盘;转换本身由下一步经 p3-swap 的包路径验证。 */
+            free(ref);
+        }
+        free(nettext);
+        /* 用 p3-swap 把 utf8.net 换进一个本地最小包,再取出模型与参考编码比对。 */
+        if (snprintf(tmp_body, sizeof tmp_body, "%s/neg-in.pkg", work) >= (int)sizeof tmp_body) ps_die("path");
+        {   /* 最小 P3:一个 D 行 + 一个 M 行(占位负载,首字节不重要,会被替换) */
+            const char mk_net[] = "UNINETB1T";
+            char head[256], mline[128], blob[64];
+            size_t total, w2 = 0;
+            char *img;
+            int fd;
+            if (snprintf(head, sizeof head, "P 3 1 1 0\nD stream utf8 stdin.bytes accepted.bytes 0\n") >= (int)sizeof head) ps_die("head");
+            if (snprintf(mline, sizeof mline, "M %d %d 1 %d\n", 8, 8, 12345) >= (int)sizeof mline) ps_die("mline");
+            for (int z = 0; z < 8; z++) blob[z] = mk_net[z];
+            total = strlen(head) + strlen(mline) + 8;
+            img = malloc(total);
+            if (!img) ps_die("allocation");
+            for (size_t z = 0; z < strlen(head); z++) img[w2++] = head[z];
+            for (size_t z = 0; z < strlen(mline); z++) img[w2++] = mline[z];
+            for (int z = 0; z < 8; z++) img[w2++] = blob[z];
+            fd = open(tmp_body, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            if (fd < 0 || write(fd, img, w2) != (ssize_t)w2 || close(fd)) ps_die("write pkg");
+            free(img);
+        }
+        if (snprintf(outn, sizeof outn, "%s/neg-out.pkg", work) >= (int)sizeof outn) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", tmp_body, "0", outn, netpath, 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 0, "S6b.swap-negative-net-runs");
+            np_free(&r);
+        }
+        {   /* 取回模型负载,解压后与参考编码逐字节比较 */
+            PsPkg q;
+            size_t qn;
+            char *qb = ps_body(outn, &q, &qn);
+            char *rec, *raw;
+            size_t recn, rawn;
+            if (!ps_record(qb, &q, 0, &rec, &recn, &raw, &rawn)) ps_die("record 0 of neg-out");
+            {   size_t rn2;
+                char *ref2 = ps_read(rawout, &rn2);
+                ps_ck(rawn == rn2 && !memcmp(raw, ref2, rn2), "S6c.swapped-bytes-equal-reference");
+                free(ref2);
+            }
+            free(rec); free(raw); free(qb);
+        }
+    }
     printf("CHECK_P3_SWAP\tassertions=%d\tfailed=%d\n", ps_asserts, ps_failed);
     return ps_failed ? 1 : 0;
 }

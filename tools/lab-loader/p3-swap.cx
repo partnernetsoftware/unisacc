@@ -53,26 +53,29 @@ static size_t sw_varint(char *out, long long x) {
  * 非 S 行:首 token 原样 + 后续每个十进制数 zigzag varint;
  * S 行:varint(字节数) + 原始字节（"-" 表示空串,写 varint 0）。 */
 static char *sw_binary_net(const char *text, size_t n, size_t *on) {
+    /* 逐行:首 token（N/H/Q/S）是单字节 tag,原样写出;其余 token 走 zigzag varint。
+       S 行特例:varint(字节数) + 原始字节,"-" 表示空串。规则与 seed/pack.c binary_encode 相同。 */
     char *out = malloc(n * 3 + 64);
     size_t at = 0, w = 8;
+    int i;
     if (!out) sw_die("allocation");
-    for (int i = 0; i < 8; i++) out[i] = "UNINETB1"[i];
+    for (i = 0; i < 8; i++) out[i] = "UNINETB1"[i];
     while (at < n) {
-        size_t e = at;
+        size_t e = at, p, q;
         while (e < n && text[e] != '\n') e++;
         if (e > at) {
-            size_t p = at;
-            /* 首 token */
+            p = at;
             while (p < e && text[p] != ' ') p++;
+            for (q = at; q < p; q++) out[w++] = text[q];      /* tag 原样 */
             if (p - at == 1 && text[at] == 'S') {
-                size_t q = p + 1, h0 = q, hlen;
-                while (q < e && text[q] != ' ') q++;
-                hlen = q - h0;
-                if (hlen == 1 && text[h0] == '-') {
+                size_t h0 = p + 1, h1 = h0;
+                while (h1 < e && text[h1] != ' ') h1++;
+                if (h1 == h0) sw_die("S line needs a hex field");
+                if (h1 - h0 == 1 && text[h0] == '-') {
                     w += sw_varint(out + w, 0);
                 } else {
-                    size_t bytes = hlen / 2, k;
-                    if (hlen % 2) sw_die("S line needs even hex length");
+                    size_t bytes = (h1 - h0) / 2, k;
+                    if ((h1 - h0) % 2) sw_die("S line needs even hex length");
                     w += sw_varint(out + w, (long long)bytes);
                     for (k = 0; k < bytes; k++) {
                         int hi = text[h0 + 2 * k], lo = text[h0 + 2 * k + 1], hv, lv;
@@ -83,17 +86,15 @@ static char *sw_binary_net(const char *text, size_t n, size_t *on) {
                     }
                 }
             } else {
-                size_t k;
-                for (k = at; k < p; k++) out[w++] = text[k];
-                {   size_t q = p;
-                    while (q < e) {
-                        long long v = 0;
-                        int seen = 0;
-                        while (q < e && text[q] == ' ') q++;
-                        while (q < e && text[q] >= '0' && text[q] <= '9') { v = v * 10 + (text[q] - '0'); q++; seen = 1; }
-                        if (!seen) break;
-                        w += sw_varint(out + w, v);
-                    }
+                q = p;
+                while (q < e) {
+                    long long v = 0;
+                    int seen = 0, neg = 0;
+                    while (q < e && text[q] == ' ') q++;
+                    if (q < e && text[q] == '-') { neg = 1; q++; }
+                    while (q < e && text[q] >= '0' && text[q] <= '9') { v = v * 10 + (text[q] - '0'); q++; seen = 1; }
+                    if (!seen) break;
+                    w += sw_varint(out + w, neg ? -v : v);
                 }
             }
         }
