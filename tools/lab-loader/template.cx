@@ -17,6 +17,7 @@
  * 本轮只实跑 lnx/x86_64；其余五格只出字节、标 CI-ONLY。
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use extx.deflate
 
 static void tp_die(const char *s) { fprintf(stderr, "template: REFUSE %s\n", s); exit(2); }
 
@@ -122,35 +123,61 @@ int main(int argc, char **argv) {
     if (snprintf(q, sizeof q, "%s/manifest.tsv", argv[1]) >= (int)sizeof q) tp_die("path");
     tp_write(q, man, strlen(man), 0644);
 
-    /* 自含模板容器：base + 单流 P2 包（明文模型记录，首字节 N）+ UNIPKG1 footer。
-       换 model.bin 就换掉整个程序的行为，执行器切片不动。 */
-    {   char head[256], mline[128];
-        size_t payload, total;
+    /* 自含模板容器：base + 单流 P3 包 + UNIPKG1 footer。
+       模型槽接受两种输入：
+         a) 原始模型正文（如 utf8.net 的 N 头文本）—— 模板压成 codec=1 记录；
+         b) 已压缩的 M 记录行（"M <compressed> <raw> 1 <crc>\n" + 负载，L1 的
+            share/model-*.bin）—— 原样嵌入，保证与 L1 单流产物逐字节同源。 */
+    {   char head[256], mline[160];
+        unsigned char *comp = 0;
+        long cap = 0, cn = 0;
+        int p2 = 0;
+        unsigned long crc = 0;
+        size_t payload, total, mbn;
         char *image, *mbytes;
-        size_t mbn;
         mbytes = tp_read(argv[2], &mbn);
+        if (mbn > 2 && mbytes[0] == 'M' && mbytes[1] == ' ') {
+            char *e = memchr(mbytes, '\n', mbn);
+            size_t ln = e ? (size_t)(e - mbytes) + 1 : 0;
+            if (!ln || ln >= sizeof mline) tp_die("model record line");
+            for (size_t z = 0; z < ln; z++) mline[z] = mbytes[z];
+            mline[ln] = 0;
+            cn = (long)(mbn - ln);
+            comp = (unsigned char *)(mbytes + ln);
+        } else if (mbn >= 9 && !memcmp(mbytes, "UNINETB1", 8)) {
+            /* 已编码的二进制网正文：压成 codec=1 记录（P3 唯一接受的形态）。 */
+            cap = dz_bound((long)mbn);
+            comp = malloc((size_t)(cap > 0 ? cap : 1));
+            if (!comp) tp_die("deflate allocation");
+            cn = dz_deflate((const unsigned char *)mbytes, (long)mbn, comp, cap);
+            if (cn <= 0) tp_die("deflate");
+            crc = dz_crc32(0, (const unsigned char *)mbytes, (long)mbn);
+            if (snprintf(mline, sizeof mline, "M %ld %lu 1 %lu\n", cn, (unsigned long)mbn, crc) >= (int)sizeof mline)
+                tp_die("model line capacity");
+        } else {
+            /* 文本网（首行 "N ..."）：P2 明文记录，包声明 P 2。 */
+            p2 = 1;
+            cn = (long)mbn;
+            comp = (unsigned char *)mbytes;
+            if (snprintf(mline, sizeof mline, "M %ld\n", cn) >= (int)sizeof mline) tp_die("model line capacity");
+        }
         if (snprintf(head, sizeof head,
-            "P 2 1 1 0\nD stream %s stdin.bytes accepted.bytes 0\n", argv[3]) >= (int)sizeof head) tp_die("head capacity");
-        if (snprintf(mline, sizeof mline, "M %lu\n", (unsigned long)mbn) >= (int)sizeof mline) tp_die("model line capacity");
-        payload = strlen(head) + strlen(mline) + mbn;
+            "P %d 1 1 0\nD stream %s stdin.bytes accepted.bytes 0\n", p2 ? 2 : 3, argv[3]) >= (int)sizeof head)
+            tp_die("head capacity");
+        payload = strlen(head) + strlen(mline) + (size_t)cn;
         total = bn + payload + 16;
         image = malloc(total);
         if (!image) tp_die("allocation");
         if (snprintf(p, sizeof p, "%s/base.bin", argv[1]) >= (int)sizeof p) tp_die("path");
-        {   size_t bbn;
+        {   size_t bbn, at = 0, hlen = strlen(head), mlen = strlen(mline), k;
             char *bb = tp_read(p, &bbn);
-            size_t at = 0;
-            for (size_t z = 0; z < bbn; z++) image[at++] = bb[z];
+            for (k = 0; k < bbn; k++) image[at++] = bb[k];
             free(bb);
-            at = bbn;
-            {   size_t k;
-                size_t hlen = strlen(head), mlen = strlen(mline);
-                for (k = 0; k < hlen; k++) image[at++] = head[k];
-                for (k = 0; k < mlen; k++) image[at++] = mline[k];
-                for (k = 0; k < mbn; k++) image[at++] = mbytes[k];
-            }
+            for (k = 0; k < hlen; k++) image[at++] = head[k];
+            for (k = 0; k < mlen; k++) image[at++] = mline[k];
+            for (k = 0; k < (size_t)cn; k++) image[at++] = (char)comp[k];
             {   long len = (long)payload;
-                memcpy(image + at, "UNIPKG1\n", 8);
+                for (int z = 0; z < 8; z++) image[at + z] = "UNIPKG1\n"[z];
                 at += 8;
                 for (int z = 0; z < 8; z++) { image[at++] = (char)(len & 255); len >>= 8; }
             }
@@ -159,6 +186,7 @@ int main(int argc, char **argv) {
         if (snprintf(q, sizeof q, "%s/%s.com", argv[1], argv[3]) >= (int)sizeof q) tp_die("path");
         tp_write(q, image, total, 0700);
         free(image);
+        if (cap) free(comp);
         free(mbytes);
         printf("TEMPLATE_RUNNABLE\tfile=%s.com\tbytes=%lu\tmodel=%s\n",
                argv[3], (unsigned long)total, argv[3]);
@@ -167,7 +195,7 @@ int main(int argc, char **argv) {
     {   char *report = malloc(8192);
         int at = 0;
         if (!report) tp_die("allocation");
-        at += snprintf(report + at, 8192 - (size_t)at,
+        if (cx_fmt(report + at, 8192 - (size_t)at,
             "{\n \"scope\":\"lab-loader-l5-single-nn-template\",\"release_eligible\":false,\n"
             " \"model_name\":\"%s\",\"models\":1,\"selected_target\":\"%s\",\n"
             " \"executor_sha256\":\"%s\",\"executor_bytes\":%lu,\n"
@@ -175,7 +203,8 @@ int main(int argc, char **argv) {
             " \"boot_sha256\":\"%s\",\"native_sha256\":\"%s\",\n"
             " \"ci_only\":[\"lnx/arm64\",\"osx/x86_64\",\"osx/arm64\",\"win/x86_64\",\"win/arm64\"]\n}\n",
             argv[3], target, base_sha, (unsigned long)bn, model_sha, (unsigned long)mn,
-            boot_sha, native_sha);
+            boot_sha, native_sha)) tp_die("report capacity");
+        at = (int)strlen(report);
         if (snprintf(q, sizeof q, "%s/template.json", argv[1]) >= (int)sizeof q) tp_die("path");
         tp_write(q, report, (size_t)at, 0644);
         printf("TEMPLATE\tmodel=%s\texecutor_bytes=%lu\tmodel_bytes=%lu\texecutor_sha256=%s\n",
