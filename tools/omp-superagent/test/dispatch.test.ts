@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { buildPrompt, recordPath, runDispatch } from "../core.ts";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import worker, { checkWriteCall } from "../worker.ts";
+function schema(): unknown {
+  return new Proxy((): unknown => schema(), { get: () => (): unknown => schema() });
+}
 
 const fake = join(import.meta.dir, "fake-omp.sh");
 function cwd(): string { return mkdtempSync(join(tmpdir(), "sa-test-")); }
@@ -42,6 +45,14 @@ describe("RPC dispatch", () => {
     expect(JSON.parse(readFileSync(r.record!, "utf8")).ticket).toBe("T1");
     expect(JSON.parse(readFileSync(r.record!, "utf8")).trace.stdout).toContain("tool_execution_end");
     expect(r.record).toBe(recordPath(r.id, r.record!.replace(/\/out\/superagent\/[^/]+$/, "")));
+  });
+  test("worker 声称完成但宿主文件验收失败时返回失败", async () => {
+    process.env.FAKE_MODE = "done";
+    const root = cwd();
+    const r = await runDispatch({ ticket: "T1", task, role: "scout", cwd: root, checks: [{ kind: "exists", path: "missing" }] });
+    expect(r.state).toBe("failed");
+    expect(r.acceptance).toMatchObject({ ok: false });
+    expect(r.err).toContain("读取失败");
   });
   test("blocked 原因冒泡", async () => {
     const r = await dispatch("blocked");
@@ -103,7 +114,7 @@ describe("RPC dispatch", () => {
     process.env.SA_WORKER_POLICY = JSON.stringify({ role: "implementer", paths: ["src"], cwd: cwd() });
     try {
       // 测试替身仅实现本扩展使用的 on 接口。
-      worker({ on: (name: string, fn: Function) => { handlers[name] = fn; } } as unknown as ExtensionAPI);
+      worker({ zod: schema(), registerTool() {}, on: (name: string, fn: Function) => { handlers[name] = fn; } } as unknown as ExtensionAPI);
       expect(await handlers.tool_call({ toolName: "write", input: { path: "outside" } })).toMatchObject({ block: true });
       expect(await handlers.tool_call({ toolName: "write", input: { path: "src/a" } })).toBeUndefined();
       expect(await handlers.tool_call({ toolName: "bash", input: { command: "true" } })).toBeUndefined();

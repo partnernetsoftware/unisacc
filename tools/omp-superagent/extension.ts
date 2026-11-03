@@ -27,7 +27,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "派活:起一个子 omp 执行结构化 ticket，implementer 必须提供允许写入的 paths。" +
       "edit/write 检查路径；bash 不隔离，只读及路径边界依赖 worker 协作，不能防恶意命令。" +
-      "done 是 worker 自报且经收据对账，不代表宿主独立验收。原始 RPC 轨迹可能含敏感信息。",
+      "可选 checks 由宿主检查文件，结果仅覆盖所列条件；bash 不隔离，RPC 轨迹可能含敏感信息。",
     parameters: z.object({
       ticket: z.string().min(1).describe("一句话任务名,会话内唯一"),
       task: z.object({
@@ -40,6 +40,10 @@ export default function (pi: ExtensionAPI) {
       model: z.string().optional(),
       tools: z.string().optional().describe("逗号分隔的工具名"),
       paths: z.array(z.string()).optional().describe("implementer 允许写入的路径"),
+      checks: z.array(z.union([
+        z.object({ kind: z.literal("exists"), path: z.string().min(1) }),
+        z.object({ kind: z.literal("text"), path: z.string().min(1), text: z.string() }),
+      ])).min(1).optional().describe("宿主独立文件断言，仅覆盖所列条件"),
       maxTime: z.number().int().positive().optional().describe("秒,缺省 300"),
     }),
     async execute(_callId, params, signal) {
@@ -68,10 +72,10 @@ export default function (pi: ExtensionAPI) {
         live.delete(placeholder);
       }
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ report: r.report, state: r.state, err: r.err, acceptance: "未独立验收；done 仅为 worker 自报并经收据对账" }, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ report: r.report, state: r.state, err: r.err, acceptance: r.acceptance ?? "未独立验收" }, null, 2) }],
         details: {
         ok: r.state === "done" || r.state === "blocked",
-        acceptance: "not_independently_verified",
+        acceptance: r.acceptance ?? "not_independently_verified",
         id: r.id,
         ticket: r.ticket,
         role: r.role,

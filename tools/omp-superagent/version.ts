@@ -10,6 +10,7 @@ export const SA_SOURCE_FILES = [
   "core.ts",
   "extension.ts",
   "worker.ts",
+  "acceptance.ts",
 ] as const;
 
 export function deriveVersion(dir: string): string {

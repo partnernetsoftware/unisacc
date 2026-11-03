@@ -1,5 +1,7 @@
 // 工具调用前检查写入目标；bash 是协作约束，不是安全沙箱。
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { checkFiles, type Report } from "./report.ts";
 
 
@@ -42,6 +44,47 @@ export default function (pi: ExtensionAPI) {
     const parsed = JSON.parse(process.env.SA_WORKER_POLICY ?? "null");
     if (parsed && typeof parsed.role === "string" && typeof parsed.cwd === "string" && Array.isArray(parsed.paths) && parsed.paths.every((p: unknown) => typeof p === "string")) policy = parsed;
   } catch { /* 缺失策略时拒绝写入 */ }
+  const z = pi.zod;
+  pi.registerTool({
+    name: "think",
+    label: "think",
+    description: "记录基于文件逐字证据的推理；未验证的假设单独列出。ref 使用 path:line，quote 必须是该行非空逐字片段。",
+    parameters: z.object({
+      claim: z.string().trim().min(1),
+      steps: z.array(z.object({
+        claim: z.string().trim().min(1),
+        ref: z.string().trim().min(1),
+        quote: z.string().min(1),
+      })).max(8),
+      assumptions: z.array(z.string().trim().min(1)).max(8),
+      confidence: z.number().min(0).max(1),
+    }),
+    async execute(_callId, params) {
+      const { claim, steps, assumptions, confidence } = params;
+      if (steps.length === 0 && assumptions.length === 0)
+        return { content: [{ type: "text" as const, text: "须提供可核证据或未验证假设" }], isError: true };
+      const cwd = policy?.cwd ?? process.cwd();
+      for (const step of steps) {
+        const match = /^(.*):([1-9]\d*)$/.exec(step.ref);
+        if (!match || !match[1] || !step.quote.trim()) {
+          return { content: [{ type: "text" as const, text: `无效引用或空引文: ${step.ref}` }], isError: true };
+        }
+        const line = Number(match[2]);
+        if (!Number.isSafeInteger(line)) {
+          return { content: [{ type: "text" as const, text: `无效行号: ${step.ref}` }], isError: true };
+        }
+        try {
+          const text = await readFile(resolve(cwd, match[1]), "utf8");
+          if (!text.split(/\r?\n/)[line - 1]?.includes(step.quote)) {
+            return { content: [{ type: "text" as const, text: `引用无法逐字核对: ${step.ref}` }], isError: true };
+          }
+        } catch {
+          return { content: [{ type: "text" as const, text: `无法读取引用: ${step.ref}` }], isError: true };
+        }
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify({ claim, steps, assumptions, confidence }) }] };
+    },
+  });
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "write" && event.toolName !== "edit") return;
     const reason = policy ? checkWriteCall(policy, event.toolName, event.input) : "缺少写入授权策略";

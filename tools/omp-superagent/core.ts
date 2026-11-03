@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { checkFiles, parseReport, reconcileVerified, type EvidenceReceipt, type VerifiedEvidence, type Report } from "./report.ts";
+import { checkAcceptance, type AcceptanceCheck, type AcceptanceResult } from "./acceptance.ts";
 import { SA_VERSION } from "./version.ts";
 
 export type Role = "implementer" | "reviewer" | "scout";
@@ -26,6 +27,7 @@ export interface DispatchOpts {
   paths?: string[];
   maxTime?: number; // 秒
   budget?: { maxSteps?: number; maxChars?: number };
+  checks?: AcceptanceCheck[];
   cwd?: string;
   signal?: AbortSignal;
 }
@@ -44,12 +46,13 @@ export interface DispatchResult {
   version: string;
   trace?: { stdout: string; stderr: string };
   verifiedDropped?: VerifiedEvidence[];
+  acceptance?: AcceptanceResult;
 }
 
 const DEFAULT_TOOLS: Record<Role, string> = {
-  scout: "read,grep,glob",
-  reviewer: "read,grep,glob,bash",
-  implementer: "read,grep,glob,bash,edit,write",
+  scout: "read,grep,glob,think",
+  reviewer: "read,grep,glob,bash,think",
+  implementer: "read,grep,glob,bash,edit,write,think",
 };
 
 const ROLE_BRIEF: Record<Role, string> = {
@@ -72,7 +75,7 @@ export function buildPrompt(o: DispatchOpts): string {
     `TICKET: ${o.ticket}`,
     `TASK: ${JSON.stringify(o.task)}`,
   ];
-  lines.push("推理应基于工具返回的逐字证据，区分已验证事实和推断；禁止用 bash 的 echo/printf 等伪造思考或工具证据。当前子进程未提供结构化 think 工具，此规范仅靠提示约束，不能强制执行。");
+  lines.push("推理请调用 think：证据步骤引用 path:line 和逐字 quote，未验证假设放 assumptions；禁止用 bash echo/printf 输出自我推理。");
   if (o.role === "implementer") lines.push(`ALLOWED_PATHS: ${(o.paths ?? []).join(", ") || "(未给,禁止写)"}`);
   lines.push("bash 在宿主直接执行，不是沙箱；必须自行遵守角色只读及授权路径约束，报告检查无法阻止 bash 越界写入。");
   if (o.role === "implementer") lines.push("edit 仅允许结构化单路径 replace/patch 模式；自由格式多文件补丁会被拒绝，请对单个文件使用 write。");
@@ -118,9 +121,9 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
     return { ...base, err: "任务合同必须包含目标、上下文、验收条件和非目标" };
   }
   if (o.role !== "scout" && o.role !== "reviewer" && o.role !== "implementer") return { ...base, err: "未知角色" };
-  const permitted = o.role === "scout" ? ["read", "grep", "glob"] :
-    o.role === "reviewer" ? ["read", "grep", "glob", "bash"] :
-    ["read", "grep", "glob", "bash", "edit", "write"];
+  const permitted = o.role === "scout" ? ["read", "grep", "glob", "think"] :
+    o.role === "reviewer" ? ["read", "grep", "glob", "bash", "think"] :
+    ["read", "grep", "glob", "bash", "edit", "write", "think"];
   const selected = tools.split(",").map((tool) => tool.trim());
   if (selected.some((tool) => !permitted.includes(tool))) return { ...base, err: "角色不允许指定工具" };
   const allowedTools = Object.fromEntries(selected.map((tool) => [tool, true]));
@@ -272,6 +275,9 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
     return finish({ ...base, state: "invalid", ms, err: rec.err, report: rec.report, verifiedDropped: rec.droppedVerified });
   const files = checkFiles(o.role, o.paths, rec.report, cwd);
   if (!files.ok) return finish({ ...base, state: "invalid", ms, err: files.err, report: rec.report });
-  return finish({ ...base, state: rec.report.state, ms,
+  const acceptance = o.checks === undefined ? undefined : checkAcceptance(cwd, o.checks);
+  if (rec.report.state === "done" && acceptance && !acceptance.ok)
+    return finish({ ...base, state: "failed", ms, err: acceptance.err, acceptance, report: rec.report, verifiedDropped: rec.droppedVerified });
+  return finish({ ...base, state: rec.report.state, ms, acceptance,
     report: rec.report, verifiedDropped: rec.droppedVerified });
 }

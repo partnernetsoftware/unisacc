@@ -2,7 +2,7 @@
 
 状态:设计完成,待开发。前身 `out/superharness/` 已归档到 `archive/superharness-exploration-2026-11-02/`。
 
-当前实现状态：scout、reviewer、implementer 均可派发。write/edit 在工具调用前检查授权路径，无法解析的自由格式 edit 拒绝；bash 在宿主执行，不受路径沙箱约束，只读及路径限制依赖协作，不防恶意命令或并发符号链接替换。任务书含目标、上下文、验收条件、非目标；证据关联工具调用 ID，收据标记本身不算证据。自然语言验收未由宿主执行，done 仅表示报告与证据对账通过；token 尚未获取，记 null。结构化 think 和生成端守卫尚未实现；RPC 原始轨迹可能含敏感信息。下文为目标合同，不代表已实现。
+当前实现状态：scout、reviewer、implementer 可派发；worker 提供结构化 think，引用文件行可核对，假设单列。可选 checks 由宿主独立核对工作目录内普通文件存在性或完整文本，失败则 done 转 failed；只证明所列文件检查瞬间的结果，不保证覆盖全部目标，中间目录并发替换仍有 TOCTOU 风险。write/edit 检查授权路径，自由格式 edit 拒绝；bash 在宿主执行，不是沙箱。token 未获取，记 null；RPC 轨迹可能含敏感信息。下文为目标合同，不代表全部已实现。
 
 ## 0. 为什么重来
 
