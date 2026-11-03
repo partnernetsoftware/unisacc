@@ -9,12 +9,13 @@
  *
  * 用法：sh ./unisacc.com tools/check-base-external.cx [KERNEL_FILE]
  * 默认 KERNEL_FILE = out/epoch-2026-11-02/kernel-gen/x86_64.kernel（B3 材料）。
- * -run 冷/热端到端相对值（外置 ≤ 内嵌×1.2）在产品重建编入新 kernel.cx 后，
- * 由 tools/run-startup-bench.cx 内嵌/外置两次实测（本 check 标注 UNMEASURED）。
+ *   4. -run 端到端相对耗时：同一 smoke 各 7 次取中位，外置(UNISA_KERNEL 指向外部文件)
+ *      vs 内嵌(不带 UNISA_KERNEL)，比值 ≤ 1.2。冷启动(清页缓存)标 UNMEASURED，不计 PASS。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sysx.process
+#pragma unisa use sys.time
 #pragma unisa use text.text
 
 static int failed;
@@ -76,6 +77,57 @@ int main(int argc,char **argv){
         ck(strcmp(ksha,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97")==0,
            "external-kernel-bytes-equal-embedded");
     }
-    printf("BASE_EXTERNAL\tfailed=%d\tscope=sha-verification-and-byte-identity\tcold-hot-relative-UNMEASURED\n", failed);
+    /* 4. 外置基座 vs 内嵌基座的端到端相对耗时(中位,各 7 次)。
+       基线 = 产品的 -run(内嵌 pack 取 kernel);外置 = 同一 -run 加 UNISA_KERNEL 指向外部文件。
+       相对值 > 1.2 判 FAIL。冷启动(清页缓存)不在范围,标 UNMEASURED。 */
+    {
+        long emb[7], extm[7];
+        int i, k;
+        long emed, xmed;
+        char smoke[4400], envk[4500];
+        if (cx_fmt(smoke, sizeof smoke, "%s/out/b3-hot-smoke.c", root)) return 2;
+        {
+            int fd = open(smoke, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+            const char *src = "int main(void){return 3;}\n";
+            if (fd < 0 || write(fd, src, strlen(src)) != (ssize_t)strlen(src) || close(fd)) return 2;
+        }
+        if (cx_fmt(envk, sizeof envk, "UNISA_KERNEL=%s", kernel)) return 2;
+        for (i = 0; i < 7; i++) {
+            char *v[] = { "sh", "./unisacc.com", "-run", smoke, 0 };
+            sy_ts_t a, b;
+            np_result r = { 0 };
+            emb[i] = -1;
+            if (sy_mono(&a)) continue;
+            if (np_run(v, root, 0, 30, &r, why, sizeof why)) continue;
+            if (sy_mono(&b)) { np_free(&r); continue; }
+            emb[i] = sy_ts_ms(&a, &b);
+            if (r.rc != 3) emb[i] = -1;
+            np_free(&r);
+        }
+        for (i = 0; i < 7; i++) {
+            char *v[] = { "sh", "./unisacc.com", "-run", smoke, 0 };
+            char *add[] = { envk, 0 };
+            sy_ts_t a, b;
+            np_result r = { 0 };
+            extm[i] = -1;
+            if (sy_mono(&a)) continue;
+            if (np_run(v, root, add, 30, &r, why, sizeof why)) continue;
+            if (sy_mono(&b)) { np_free(&r); continue; }
+            extm[i] = sy_ts_ms(&a, &b);
+            if (r.rc != 3) extm[i] = -1;
+            np_free(&r);
+        }
+        for (i = 0; i < 7; i++) for (k = i + 1; k < 7; k++) {
+            if (emb[k] < emb[i]) { long t = emb[i]; emb[i] = emb[k]; emb[k] = t; }
+            if (extm[k] < extm[i]) { long t = extm[i]; extm[i] = extm[k]; extm[k] = t; }
+        }
+        emed = emb[3]; xmed = extm[3];
+        printf("BASE_EXTERNAL_HOT\tembedded_ms=%ld\texternal_ms=%ld\tratio=%.3f\tcold=UNMEASURED\n",
+               emed, xmed, emed > 0 ? (double)xmed / (double)emed : 0.0);
+        ck(emed > 0 && xmed > 0, "hot-baseline-measured");
+        ck(emed > 0 && xmed > 0 && (double)xmed <= 1.2 * (double)emed, "hot-external-within-1.2x");
+    }
+
+    printf("BASE_EXTERNAL\tfailed=%d\tscope=sha-verification-and-byte-identity-and-hot-ratio\tcold=UNMEASURED\n", failed);
     return failed?1:0;
 }
