@@ -59,7 +59,7 @@ typedef struct { __u_word __u_pos; int __u_count; unsigned int __u_wch; } fpos_t
 
 __UNISA_LIBC_LINKAGE int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
 
-#if (!__UNISA_FTRIM_LIBC || __UN__unisa_fd) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
 __UNISA_LIBC_LINKAGE int _unisa_fd(FILE *__u_f) {
     __u_word __u_v;
     __u_v = (__u_word)__u_f;
@@ -81,7 +81,7 @@ static char _unisa_ch;
 
 /* D3': the stream table and _u_st_wput come before the writers, which all go through it (a 4 KB
    buffer for streams fopen opened; the standard streams are written straight through). */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_st_slot || __UN_setvbuf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_slot || __UN_setvbuf
 /* ---- stream state ------------------------------------------------------
    A FILE* is a descriptor and nothing more (see the top of this file), so
    there is nowhere on the stream to remember that a read hit EOF or failed,
@@ -91,7 +91,7 @@ static char _unisa_ch;
    rather than failing, because a wrong answer from feof() is worse than none.
    [R13-0 #06 / N15] */
 #include <sys/_exit.h>
-#if (!__UNISA_FTRIM_LIBC || __UN__u_st_slot) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
 __UNISA_LIBC_LINKAGE int _u_st_slot(FILE *__u_f) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
@@ -108,7 +108,7 @@ __UNISA_LIBC_LINKAGE int _u_st_slot(FILE *__u_f) {
     return __u_i;
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN__u_st_wput) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_wput
 __UNISA_LIBC_LINKAGE __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_word __u_n) {
     int __u_fd; int __u_i;
     __u_fd = _unisa_fd(__u_f);
@@ -132,7 +132,7 @@ __UNISA_LIBC_LINKAGE __u_word _u_st_wput(FILE *__u_f, const char *__u_p, __u_wor
 }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN_fputc) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_fputc
 __UNISA_LIBC_LINKAGE int fputc(int __u_c, FILE *__u_f) {
     _unisa_ch = __u_c;
     if (_u_st_wput(__u_f, &_unisa_ch, 1) != 1) return 0 - 1;
@@ -154,7 +154,7 @@ static int putc(int __u_c, FILE *__u_f) { return fputc(__u_c, __u_f); }
 static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN_fputs) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_fputs
 __UNISA_LIBC_LINKAGE int fputs(const char *__u_s, FILE *__u_f) {
     __u_word __u_n = _unisa_len(__u_s);
     if (_u_st_wput(__u_f, __u_s, __u_n) != __u_n) return 0 - 1;
@@ -193,7 +193,7 @@ static int puts(const char *__u_s) {
  * answer larger than what was asked is treated as an error rather than
  * trusted, so `done` cannot overflow either.
  * The return is complete elements: done / sz, rounded down. */
-#if (!__UNISA_FTRIM_LIBC || __UN_fwrite) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_fwrite
 __UNISA_LIBC_LINKAGE __u_word fwrite(const void *__u_p, __u_word __u_sz, __u_word __u_n, FILE *__u_f) {
     if (__u_sz <= 0 || __u_n <= 0) return 0;
     if (__u_n > 0x7fffffffffffffff / __u_sz) return 0;
@@ -374,7 +374,7 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
 }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN_fgetc) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_fgetc
 __UNISA_LIBC_LINKAGE int fgetc(FILE *__u_f) {
     unsigned char __u_c;
     int __u_i;
@@ -407,7 +407,7 @@ static int getc(FILE *__u_f) { return fgetc(__u_f); }
 static int getchar(void) { return fgetc(stdin); }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN_vprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_vprintf
 __UNISA_LIBC_LINKAGE int vprintf(const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
 }
@@ -685,7 +685,7 @@ static int fflush(FILE *__u_f) {
  * is the fast path and the one that does not need varargs.  Everything that
  * takes a format at RUN time is written here, in the subset itself. */
 
-#if (!__UNISA_FTRIM_LIBC || __UN__u_put) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_put
 __UNISA_LIBC_LINKAGE void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_n, FILE *__u_f, int __u_c) {
     char __u_ch;
     if (__u_out != NULL) {
@@ -698,7 +698,7 @@ __UNISA_LIBC_LINKAGE void _u_put(char *__u_out, __u_word __u_cap, __u_word *__u_
 }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN__u_digits) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_digits
 __UNISA_LIBC_LINKAGE __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_base, int __u_upper) {
     __u_word __u_i;
     int __u_d;
@@ -727,7 +727,7 @@ __UNISA_LIBC_LINKAGE __u_word _u_digits(char *__u_buf, __u_uword __u_v, int __u_
 
 /* digits of v, most significant first; returns their count, and *x is how
    many of them are before the decimal point (<= 0 for |v| < 1) */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_dexp) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_dexp
 __UNISA_LIBC_LINKAGE int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) {
     __u_uword __u_lim[_U_NL];
     __u_uword __u_m;
@@ -782,7 +782,7 @@ __UNISA_LIBC_LINKAGE int _u_dexp(__u_uword __u_bits, char *__u_dig, int *__u_x) 
 
 /* keep r digits of dig[0..nd), rounding to nearest, ties to even; returns
    the new count, and bumps *x when the rounding carries out (9.99 -> 10.0) */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_round) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_round
 __UNISA_LIBC_LINKAGE int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
     int __u_up;
     int __u_j;
@@ -812,7 +812,7 @@ __UNISA_LIBC_LINKAGE int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u
 #endif
 
 /* the digit at position p of the number (0 = first integer digit) */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_dat) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_dat
 __UNISA_LIBC_LINKAGE int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
     if (__u_p < 0) return 48;
     if (__u_p >= __u_nd) return 48;
@@ -822,7 +822,7 @@ __UNISA_LIBC_LINKAGE int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p)
 
 /* %f %e %g (and upper case) of `bits` into out[]; returns the length.
    Sign, width and padding are the caller's. */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_ffmt) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_ffmt
 __UNISA_LIBC_LINKAGE int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, int __u_prec, int __u_alt) {
     char __u_dig[_U_ND];
     int __u_nd;
@@ -944,7 +944,7 @@ __UNISA_LIBC_LINKAGE int _u_ffmt(char *__u_out, __u_uword __u_bits, int __u_c, i
    exactly one of them.  A caller with neither -- vsnprintf(NULL, 0, ...) measuring, vprintf before 0.0.43 --
    sent its bytes to FILE * 0, which is descriptor 0 (stdin): a blocked write when nobody reads it, the hang the
    .cx ports met, and a lost vprintf line.  The measuring callers pass a one-byte buffer of capacity 0 instead. */
-#if (!__UNISA_FTRIM_LIBC || __UN__u_vfmt) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN__u_vfmt
 __UNISA_LIBC_LINKAGE int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     __u_word __u_n;
     __u_word __u_i;
@@ -1146,24 +1146,24 @@ __UNISA_LIBC_LINKAGE int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, c
 }
 #endif
 
-#if (!__UNISA_FTRIM_LIBC || __UN_vsprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_vsprintf
 __UNISA_LIBC_LINKAGE int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_vsnprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_vsnprintf
 __UNISA_LIBC_LINKAGE int vsnprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, va_list __u_ap) {
     char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.12p2) */
     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_vfprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_vfprintf
 __UNISA_LIBC_LINKAGE int vfprintf(FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_sprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_sprintf
 __UNISA_LIBC_LINKAGE int sprintf(char *__u_b, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -1172,7 +1172,7 @@ __UNISA_LIBC_LINKAGE int sprintf(char *__u_b, const char *__u_fmt, ...) {
     return __u_r;
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_snprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_snprintf
 __UNISA_LIBC_LINKAGE int snprintf(char *__u_b, __u_word __u_cap, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r; char __u_z;
     if (__u_b == NULL) { __u_b = &__u_z; __u_cap = 0; }   /* measure only (C99 7.19.6.5p2) */
@@ -1182,7 +1182,7 @@ __UNISA_LIBC_LINKAGE int snprintf(char *__u_b, __u_word __u_cap, const char *__u
     return __u_r;
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_fprintf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_fprintf
 __UNISA_LIBC_LINKAGE int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -1194,7 +1194,7 @@ __UNISA_LIBC_LINKAGE int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
 /* The compiler desugars `printf` against a STATIC format string [W-9] -- the
  * fast path, and the common one.  A format that is not a literal cannot be
  * desugared at all, so it becomes an ordinary variadic call on this. */
-#if (!__UNISA_FTRIM_LIBC || __UN_printf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_printf
 __UNISA_LIBC_LINKAGE int printf(const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -1391,7 +1391,7 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
     return __u_stored;
 }
 #endif
-#if (!__UNISA_FTRIM_LIBC || __UN_sscanf) && !defined(__UNISA_LIBC_EXTERN)
+#if !__UNISA_FTRIM_LIBC || __UN_sscanf
 __UNISA_LIBC_LINKAGE int sscanf(const char *__u_in, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
