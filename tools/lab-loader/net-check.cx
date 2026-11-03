@@ -1,0 +1,138 @@
+/* net-check.cx -- 通用「网 == 表」穷举核对器（无 C 依赖,走产品同一执行器）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/net-check.cx -- TABLE NET
+ *
+ * TABLE 是 seed-tbl 写出的平坦表（首行 "T ns nq nrg nstr start"）,
+ * NET 是 seed-net 写出的阈值网（首行 "N ns nq nrg nstr start top"）。
+ * 两者都不含语言语义;核对分成三步:
+ *   1 用 cx/runtime/model_decode.cx 解码两份模型（产品同一个解码器）;
+ *   2 结构必须一致:ns/nq/nrg/nstr/start/动作序列/字符串逐字节相同;
+ *   3 对每个状态在它声明的定义域上逐个取观测键,用 cx/core/transition.cx 的
+ *      core_transition（产品同一个转移实现）分别求表与网,比较 next 与 seq。
+ * 第一个不一致处打印 state/key/表值/网值并退出 1。
+ *
+ * 成功的最后一行:NET_CHECK<TAB>observations=N<TAB>states=S<TAB>mode=table-equals-network
+ * 用法之外的一切拒绝都是非零退出 + 一行具名 stderr。
+ */
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.model_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use core.transition
+
+static int nc_failed;
+
+static void nc_die(const char *what, const char *detail) {
+    fprintf(stderr, "net-check: %s%s%s\n", what, detail ? ": " : "", detail ? detail : "");
+    exit(2);
+}
+
+static void *nc_alloc(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static void nc_release(void *p) { free(p); }
+
+static char *nc_slurp(const char *path, size_t *n) {
+    char *s = cx_read(path, n);
+    if (!s) nc_die("cannot read", path);
+    return s;
+}
+
+/* CxModel -> CxTransitionModel（与 src/executor.cx 的 ex_model 同一映射）。 */
+static void nc_bind(CxTransitionModel *t, const CxModel *m) {
+    memset(t, 0, sizeof *t);
+    t->ns = m->ns; t->nq = m->nq; t->nrg = m->nrg; t->start = m->start; t->isnet = (char)m->isnet;
+    t->str = m->str; t->strl = m->strl;
+    t->qoff = m->qoff; t->qlen = m->qlen; t->qa = m->qa;
+    t->mode = m->smode; t->count = m->rowc; t->keys = m->rowk; t->next = m->rown; t->seq = m->rowq;
+    t->lo = m->nlo; t->hi = m->nhi; t->base_next = m->bn; t->base_seq = m->bq;
+    t->ret_seq = m->rets; t->ret_ok = m->retok;
+}
+
+int main(int argc, char **argv) {
+    size_t tn, nn;
+    char *tbl, *net;
+    CxDecode dt, dn;
+    CxTransitionModel tt, tn2;
+    long long observations = 0;
+    int i, k, s, states;
+
+    if (argc != 3) nc_die("usage TABLE NET", 0);
+    tbl = nc_slurp(argv[1], &tn);
+    net = nc_slurp(argv[2], &nn);
+
+    memset(&dt, 0, sizeof dt);
+    dt.allocate = nc_alloc; dt.release = nc_release;
+    if (cxmd_decode(&dt, (const unsigned char *)tbl, (long)tn))
+        nc_die("table refused", dt.why ? dt.why : "invalid model input");
+    memset(&dn, 0, sizeof dn);
+    dn.allocate = nc_alloc; dn.release = nc_release;
+    if (cxmd_decode(&dn, (const unsigned char *)net, (long)nn))
+        nc_die("network refused", dn.why ? dn.why : "invalid model input");
+    free(tbl); free(net);
+
+    if (dt.model.isnet) nc_die("table is a network", argv[1]);
+    if (!dn.model.isnet) nc_die("network is a table", argv[2]);
+    if (dt.model.ns != dn.model.ns || dt.model.nq != dn.model.nq ||
+        dt.model.nrg != dn.model.nrg || dt.model.nstr != dn.model.nstr ||
+        dt.model.start != dn.model.start || dt.model.topmax != dn.model.topmax)
+        nc_die("header dimensions differ", 0);
+    for (i = 0; i < dt.model.nstr; i++) {
+        if (dt.model.strl[i] != dn.model.strl[i] ||
+            memcmp(dt.model.str[i], dn.model.str[i], (size_t)dt.model.strl[i])) {
+            char detail[64];
+            if (cx_fmt(detail, sizeof detail, "string %d", i)) detail[0] = 0;
+            nc_die("network changed strings", detail);
+        }
+    }
+    if (dt.model.nqa != dn.model.nqa ||
+        memcmp(dt.model.qa, dn.model.qa, sizeof(int64_t) * (size_t)dt.model.nqa))
+        nc_die("network changed action declarations", 0);
+    for (i = 0; i < dt.model.nq; i++)
+        if (dt.model.qlen[i] != dn.model.qlen[i]) nc_die("network changed sequence length", 0);
+
+    states = dt.model.ns;
+    nc_bind(&tt, &dt.model);
+    nc_bind(&tn2, &dn.model);
+
+    for (s = 0; s < dt.model.ns; s++) {
+        int lo, hi;
+        if (dt.model.smode[s] != dn.model.smode[s]) {
+            char detail[64];
+            if (cx_fmt(detail, sizeof detail, "state %d", s)) detail[0] = 0;
+            nc_die("network changed observation mode", detail);
+        }
+        lo = dt.model.smode[s] == 1 ? -1 : 0;
+        hi = dt.model.smode[s] == 1 ? dt.model.topmax : 256;
+        if (dn.model.nlo[s] != lo || dn.model.nhi[s] != hi) {
+            char detail[64];
+            if (cx_fmt(detail, sizeof detail, "state %d", s)) detail[0] = 0;
+            nc_die("network bank domain differs", detail);
+        }
+        for (k = lo; k <= hi; k++) {
+            int a = -9, b = -9, c = -9, d = -9;
+            if (core_transition(&tt, s, k, &a, &b)) {
+                char detail[96];
+                if (cx_fmt(detail, sizeof detail, "state %d key %d", s, k)) detail[0] = 0;
+                nc_die("table transition refused", detail);
+            }
+            if (core_transition(&tn2, s, k, &c, &d)) {
+                char detail[96];
+                if (cx_fmt(detail, sizeof detail, "state %d key %d", s, k)) detail[0] = 0;
+                nc_die("network transition refused", detail);
+            }
+            observations++;
+            if (a != c || b != d) {
+                printf("NET_CHECK\tFIRST_DIFFERENCE\tstate=%d\tkey=%d\ttable_next=%d\tnet_next=%d\ttable_seq=%d\tnet_seq=%d\n",
+                       s, k, a, c, b, d);
+                nc_failed = 1;
+                goto done;
+            }
+        }
+    }
+done:
+    cxml_release(&dt.model, nc_release);
+    cxml_release(&dn.model, nc_release);
+    if (nc_failed) return 1;
+    printf("NET_CHECK\tobservations=%lld\tstates=%d\tmode=table-equals-network\n",
+           observations, states);
+    return 0;
+}
