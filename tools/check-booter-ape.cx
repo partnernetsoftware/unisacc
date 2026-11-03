@@ -78,8 +78,71 @@ int main(int argc,char **argv){
         }
     }
 
-    /* 4. 外置路径生效：PRODUCT_REBUILD_REQUIRED */
-    printf("NOT_CLAIMED\texternal-base-path-requires-product-rebuild-with-B3-kernel.cx\n");
+    /* 4. manifest 驱动:在有 manifest.tsv + base/<arch>.kernel 的布局里,
+       booter 头必须自己按 manifest 选出该架构的 base,并把 UNISA_KERNEL(+SHA) 导出到子进程。
+       用 sh -x 观察导出语句,再用一条 bad-sha 反证 enable 条件确实来自 manifest 而不是预置环境。
+       注意:外层 base(已装 entry.elf)尚未编入 B3 的 kernel.cx(strings 无 UNISA_KERNEL),
+       所以「外置基座真正被消费」仍标 NOT_CLAIMED,这里只验头这一侧。 */
+    {
+        char dir[4400], base_dir[4400], kern[4400], man[4400], ksh[65], line[200];
+        char *kb;
+        size_t kn;
+        if(cx_fmt(dir,sizeof dir,"%s/unisacc.com.dev",out1))return 2;
+        if(cx_fmt(base_dir,sizeof base_dir,"%s/base",dir))return 2;
+        if(cx_fmt(kern,sizeof kern,"%s/x86_64.kernel",base_dir))return 2;
+        if(cx_fmt(man,sizeof man,"%s/manifest.tsv",dir))return 2;
+        {   if(sy_mkdir(base_dir,0755) && sy_exists(base_dir)!=1) return 2; }
+        {   char *src=cx_read("out/epoch-2026-11-02/kernel-gen/x86_64.kernel",&kn);
+            if(!src){ck(0,"kernel-material");}
+            else {
+                int fd=sy_open_new(kern,0755);
+                int w=(fd<0)||sy_write_all(fd,src,kn)||sy_close(fd);
+                free(src);
+                ck(w==0,"kernel-material");
+            }
+        }
+        kb=cx_read(kern,&kn);
+        if(!kb){ck(0,"kernel-read");}
+        else {
+            cx_sha256_hex(kb,kn,ksh);
+            free(kb);
+            if(cx_fmt(line,sizeof line,"kernel/x86_64\tbase\tx86_64\t%s\t%lu\t0\n",ksh,(unsigned long)kn))return 2;
+            {   int fd=sy_open_new(man,0644);
+                int w=(fd<0)||sy_write_all(fd,line,tx_len(line,sizeof line))||sy_close(fd);
+                ck(w==0,"manifest-material");
+            }
+            /* sh -x 抓导出行 */
+            {   char *v[]={(char*)"sh",(char*)"-x",com1,(char*)"--version",0};
+                np_result r={0}; char why[512];
+                if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"manifest-export-run");}
+                else {
+                    char want[200];
+                    int ok=0;
+                    if(cx_fmt(want,sizeof want,"UNISA_KERNEL=%s",kern))return 2;
+                    ok = r.err && strstr(r.err,want) && strstr(r.err,ksh);
+                    ck(ok,"head-exports-manifest-kernel");
+                    /* bad sha 反证:manifest 里把 sha 改坏后,头导出的 SHA 必须跟着变 */
+                    if(cx_fmt(line,sizeof line,"kernel/x86_64\tbase\tx86_64\t0000000000000000000000000000000000000000000000000000000000000000\t%lu\t0\n",(unsigned long)kn))return 2;
+                    {   int fd=sy_open(man,O_WRONLY|O_CREAT|O_TRUNC,0644);
+                        int w=(fd<0)||sy_write_all(fd,line,tx_len(line,sizeof line))||sy_close(fd);
+                        ck(w==0,"manifest-rewrite-for-badsha");
+                    }
+                    np_free(&r);
+                    {   char *v2[]={(char*)"sh",(char*)"-x",com1,(char*)"--version",0};
+                        np_result r2={0};
+                        if(np_run(v2,root,0,30,&r2,why,sizeof why)){ck(0,"manifest-export-badsha-run");}
+                        else {
+                            ck(r2.err && strstr(r2.err,"UNISA_KERNEL_SHA=0000"),"head-exports-manifest-sha-verbatim");
+                            np_free(&r2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* 5. 外置路径真正被 base 消费：PRODUCT_REBUILD_REQUIRED */
+    printf("NOT_CLAIMED\texternal-base-consumed-by-base-requires-product-rebuild-with-B3-kernel.cx(strings-no-UNISA_KERNEL)\n");
     printf("BOOTER_APE\tfailed=%d\tscope=deterministic-head-and-launch-linux-x86_64\twin-mac-arm64=CI-ONLY\n", failed);
     return failed?1:0;
 }
