@@ -1,0 +1,218 @@
+/* dry-epoch: rehearse the slow-lane construction chain (runbook steps 7-11) on
+ * a private copy of HEAD, reporting per-step milliseconds. Step 12 (product /
+ * two-generation selfhost) is deliberately out of scope.
+ *
+ *   sh ./unisacc.com tools/dry-epoch.cx -- [--steps 7-11] [--work DIR]
+ *
+ * Every external command runs under tools/bound (55-60 s per child) and never
+ * touches the shared checkout's artifacts. Output lines:
+ *   DRY_STEP step=<n> name=<name> ms=<n> rc=<n>
+ *   DRY_EPOCH_OK steps=<n> ms=<n>      (all requested steps succeeded)
+ *   DRY_EPOCH_FAIL step=<n> name=<name> reason=<text>
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.num
+
+#define CAP (1L << 20)
+#define MAXN 64
+#define ROUTES 6
+
+static char rootfrom[2048] = "out/epoch-2026-11-02/root";
+static char bootsrc[2048] = "out/epoch-2026-11-02/root/Root41-bootstrap.com";
+static char root[2048], boot[2048], work[2048], src[2048], out[4096], ctxp[4096], p3p[4096], pkg[4096];
+static char buf[CAP];
+static const char *recipes[] = { "shared-e2", "shared-e1", "shared-e4", "shared-prune", "lnx-arm64-lower", "lnx-arm64-elf", "lnx-x86_64-lower", "lnx-x86_64-elf", "osx-arm64-lower", "osx-arm64-elf", "osx-x86_64-lower", "osx-x86_64-elf", "win-arm64-lower", "win-arm64-elf", "win-x86_64-lower", "win-x86_64-elf", "warnparse", "errorparse", "warnunits", "warnlex", "tokenpp", "warnpp-shared", "object-lower-arm64", "object-lower-x86_64", "object-enc-arm64", "object-enc-x86_64", "object-lower-osx-x86_64", "object-lower-osx-arm64", "object-lower-win-x86_64", "object-lower-win-arm64", "object-enc-osx-x86_64", "object-enc-osx-arm64", "object-enc-win-x86_64", "object-enc-win-arm64", "tapecheck", "librarycontract", "librarypartition", 0 };
+static const char *route_ids[ROUTES] = { "lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "win/x86_64" };
+
+static int run(const char *argv[]) {
+    char *av[24]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    av[i++] = "tools/bound"; av[i++] = "60";
+    for (int k = 0; argv[k] && i < 22; k++) av[i++] = (char *)argv[k];
+    av[i] = 0;
+    pid = sy_spawn_pipe(av, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (n < CAP - 1 && (r = sy_read(efd, buf + n, CAP - 1 - n)) > 0) n += r;
+    buf[n] = 0;
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static void join(char *dst, long cap, const char *a, const char *b) {
+    long i = 0; while (a[i] && i < cap - 1) { dst[i] = a[i]; i++; }
+    if (i < cap - 1) dst[i++] = '/';
+    for (long k = 0; b[k] && i < cap - 1; k++) dst[i++] = b[k];
+    dst[i] = 0;
+}
+static long now_ms(void) { return sy_now_ms(); }
+
+/* one bounded child; returns 0 when it exits 0 */
+static int step_cmd(const char *what, const char *argv[]) {
+    long t0 = now_ms();
+    int rc = run(argv);
+    long ms = now_ms() - t0;
+    printf("DRY_CMD\t%s\tms=%ld\trc=%d\n", what, ms, rc);
+    if (rc && buf[0]) printf("DRY_ERR\t%s\t%.400s\n", what, buf);
+    return rc;
+}
+
+static int step_export(void) {
+    /* (a) TIMING-ONLY: the private root is a read-only copy of a known epoch root;
+       root-epoch-record identity is out of scope until B5b re-labels. */
+    const char *arm[] = { "rm", "-rf", src, 0 };
+    if (step_cmd("export.fresh", arm)) return 1;
+    const char *a1[] = { "cp", "-a", rootfrom, src, 0 };
+    if (step_cmd("export.copy-root", a1)) return 1;
+    const char *a2[] = { "cp", "-a", "unisacc.com", boot, 0 };
+    return step_cmd("export.thin-head", a2) ? 1 : 0;
+}
+
+static int step_ctx(void) {
+    const char *arm[] = { "rm", "-rf", ctxp, 0 };   /* prepare-context demands a fresh path */
+    if (step_cmd("ctx.fresh", arm)) return 1;
+    const char *a[] = { "sh", "./unisacc.com", "tools/source-package.cx", "--", "prepare-context", src, boot,
+                        "/usr/bin/x86_64-linux-gnu-gcc-11", ctxp, 0 };
+    return step_cmd("ctx.prepare", a) ? 1 : 0;
+}
+
+static int step_wave(void) {
+    /* every verb wants its own fresh BUILD directory */
+    static char bhost[2048], blist[2048], bwave[2048], bfinal[2048];
+    join(bhost, sizeof bhost, work, "wave-host"); join(blist, sizeof blist, work, "wave-list");
+    join(bwave, sizeof bwave, work, "wave-list"); join(bfinal, sizeof bfinal, work, "wave-list");
+    /* BUILD starts as the template build minus the two exclusively-created dirs */
+    static char btpl[2048]; join(btpl, sizeof btpl, rootfrom, "../build");
+    {
+        static char *bd[2];
+        bd[0] = bhost; bd[1] = blist;   /* list/wave/final share one BUILD */
+        for (int i = 0; i < 2; i++) {
+            const char *arm[] = { "rm", "-rf", bd[i], 0 }; step_cmd("wave.seed-clean", arm);
+            sy_mkdir(bd[i], 0755);
+            static const char *files[] = { "Root41-bootstrap.com", "Root41-bootstrap.com.build.json",
+                                           "source-package-O2.elf", "unisacc.com.dev", 0 };
+            for (int f = 0; files[f]; f++) {
+                char from[2300], to[2300];
+                join(from, sizeof from, btpl, files[f]); join(to, sizeof to, bd[i], files[f]);
+                const char *acp[] = { "cp", "-a", from, to, 0 };
+                if (step_cmd(files[f], acp)) return 1;
+            }
+        }
+    }
+    const char *a1[] = { "sh", "./unisacc.com", "tools/source-job-wave.cx", "--", src, ctxp, bhost, "host", 0 };
+    if (step_cmd("wave.host", a1)) return 1;
+    const char *a2[] = { "sh", "./unisacc.com", "tools/source-job-wave.cx", "--", src, ctxp, blist, "list", 0 };
+    if (step_cmd("wave.list", a2)) return 1;
+    /* 5 tools + 42 gen + 42 tbl + 42 net, count<=4 per start/finish pair */
+    static const char *phases[] = { "tool", "gen", "tbl", "net" };
+    static const int counts[] = { 5, 42, 42, 42 };
+    for (int p = 0; p < 4; p++) {
+        int first = 0;
+        while (first < counts[p]) {
+            int n = counts[p] - first > 4 ? 4 : counts[p] - first;
+            char f[8], c[8];
+            cx_fmt(f, sizeof f, "%d", first); cx_fmt(c, sizeof c, "%d", n);
+            const char *as[] = { "sh", "./unisacc.com", "tools/source-job-wave.cx", "--", src, ctxp, bwave, "wave", phases[p], f, c, "start-job", 0 };
+            if (step_cmd(phases[p], as)) return 1;
+            const char *af[] = { "sh", "./unisacc.com", "tools/source-job-wave.cx", "--", src, ctxp, bwave, "wave", phases[p], f, c, "finish-job", 0 };
+            if (step_cmd(phases[p], af)) return 1;
+            first += n;
+        }
+    }
+    const char *a3[] = { "sh", "./unisacc.com", "tools/source-job-wave.cx", "--", src, ctxp, bfinal, "final", 0 };
+    return step_cmd("wave.final", a3) ? 1 : 0;
+}
+
+static int step_kernel(void) {
+    static const char *subs[] = { "bootstrap", "prepare", "prepare-assembler",
+                                  "preprocess-x86_64", "preprocess-arm64",
+                                  "assemble-x86_64", "assemble-arm64",
+                                  "link-x86_64", "link-arm64" };
+    for (int i = 0; i < 9; i++) {
+        const char *a[] = { "sh", "./unisacc.com", "tools/kernel-build.cx", "--", src, out, subs[i], 0 };
+        if (step_cmd(subs[i], a)) return 1;
+    }
+    return 0;
+}
+
+static int step_pack(void) {
+    const char *arm[] = { "rm", "-rf", pkg, 0 };   /* prepare wants a new package dir */
+    if (step_cmd("pack.fresh", arm)) return 1;
+    const char *a1[] = { "sh", "./unisacc.com", "tools/source-package-pack.cx", "--", "prepare", src, ctxp, out, pkg, 0 };
+    if (step_cmd("pack.prepare", a1)) return 1;
+    for (int i = 0; recipes[i]; i++) {
+        const char *a2[] = { "sh", "./unisacc.com", "tools/source-package-pack.cx", "--", "model", src, ctxp, pkg, recipes[i], 0 };
+        if (step_cmd(recipes[i], a2)) return 1;
+    }
+    for (int i = 0; i < ROUTES; i++) {
+        const char *a3[] = { "sh", "./unisacc.com", "tools/source-package-pack.cx", "--", "route", src, ctxp, pkg, route_ids[i], 0 };
+        if (step_cmd(route_ids[i], a3)) return 1;
+    }
+    static const char *tail[] = { "declare", "pack", "seal", "--verify" };
+    for (int i = 0; i < 4; i++) {
+        const char *a4[] = { "sh", "./unisacc.com", "tools/source-package-pack.cx", "--", tail[i], src, ctxp, pkg, 0 };
+        if (step_cmd(tail[i], a4)) return 1;
+    }
+    return 0;
+}
+
+static int step_release(void) {
+    const char *a1[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "p3", src, pkg, p3p, 0 };
+    if (step_cmd("release.p3", a1)) return 1;
+    const char *a2[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "slice", src, pkg, out, 0 };
+    if (step_cmd("release.slice", a2)) return 1;
+    const char *a3[] = { "sh", "./unisacc.com", "tools/entry-build.cx", "--", src, p3p, out, 0 };
+    return step_cmd("entry-build", a3) ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *w = "out/dry-epoch-work"; long lo = 7, hi = 11;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--bootstrap") && i + 1 < argc) { const char *b = argv[++i]; long j = 0; while (b[j] && j < 2047) { bootsrc[j] = b[j]; j++; } bootsrc[j] = 0; }
+        else if (tx_eqz(argv[i], "--work") && i + 1 < argc) w = argv[++i];
+        else if (tx_eqz(argv[i], "--steps") && i + 1 < argc) {
+            const char *s = argv[++i];
+            lo = 0; while (*s >= '0' && *s <= '9') lo = lo * 10 + (*s++ - '0');
+            if (*s == '-') { s++; hi = 0; while (*s >= '0' && *s <= '9') hi = hi * 10 + (*s++ - '0'); } else hi = lo;
+        }
+    }
+    /* refuse any --work outside out/ or tmp/: a bad argument once created a
+       118 MB git-archive copy in the repo root */
+    if (!tx_prefix(w, tx_len(w, 512), "out/", 4) && !tx_prefix(w, tx_len(w, 512), "tmp/", 4)) {
+        printf("DRY_EPOCH_REFUSE reason=work-outside-out\t--work %s (must be out/... or tmp/...)\n", w);
+        return 4;
+    }
+    if (lo <= 7) { const char *arm[] = { "rm", "-rf", w, 0 }; step_cmd("work.fresh", arm); }
+    sy_mkdir(w, 0755);
+    long wn = tx_len(w, 2048);
+    for (long i = 0; i < wn; i++) work[i] = w[i];
+    work[wn] = 0;
+    { char wa[2048]; if (sy_realpath(w, wa, sizeof wa) < 0) return 2;
+      long j = 0; while (wa[j] && j < 2047) { work[j] = wa[j]; j++; } work[j] = 0; }
+    join(src, sizeof src, work, "src"); join(out, sizeof out, work, "build");
+    join(ctxp, sizeof ctxp, work, "ctx"); join(p3p, sizeof p3p, work, "p3"); join(pkg, sizeof pkg, work, "pkg");
+    printf("DRY_EPOCH_TIMING_ONLY\t1\troot=%s\n", rootfrom);
+
+    /* saved thin bootstrap: --bootstrap PATH, else the epoch artifact */
+    if (sy_realpath(bootsrc, boot, sizeof boot) < 0) {
+        printf("DRY_EPOCH_FAIL\tstep=7\treason=no-bootstrap\tpath=%s\n", bootsrc); return 2;
+    }
+    struct { const char *name; int (*fn)(void); } steps[] = {
+        { "export", step_export }, { "ctx", step_ctx }, { "wave", step_wave },
+        { "kernel", step_kernel }, { "pack", step_pack }, { "release", step_release },
+    };
+    long total = now_ms(); int done = 0;
+    for (int i = 0; i < 6; i++) {
+        if (i + 7 < lo || i + 7 > hi) continue;
+        long t0 = now_ms();
+        int rc = steps[i].fn();
+        long ms = now_ms() - t0;
+        printf("DRY_STEP\tstep=%d\tname=%s\tms=%ld\trc=%d\n", i + 7, steps[i].name, ms, rc);
+        if (rc) { printf("DRY_EPOCH_FAIL\tstep=%d\tname=%s\treason=child-failed\n", i + 7, steps[i].name); return 1; }
+        done++;
+    }
+    printf("DRY_EPOCH_OK\tsteps=%d\tms=%ld\n", done, now_ms() - total);
+    return 0;
+}

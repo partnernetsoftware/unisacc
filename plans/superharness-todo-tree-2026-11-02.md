@@ -1,8 +1,9 @@
 # superharness / super-agent 后续 Todo Tree
 
-日期：2026-11-02
-状态：计划。实现仍只在 `out/superharness/`；不碰 `src/`、`cx/`、`kernel/`、`tools/`、`tests/`。
+日期：2026-11-02（2026-11-02 重启）
+状态：开发中。实现仍只在 `out/superharness/`；不碰 `src/`、`cx/`、`kernel/`、`tools/`、`tests/`。
 设计依据：`plans/super-agent-omp-study-2026-11-02.md`（DeepSeek Super-agent 研究 + omp 映射 + D1–D7）。
+重启顺序：先 D3c，再 D5b；每片先 fake/单测，再真实 cheap model 一次。
 
 ## 0. 基线校正
 
@@ -24,11 +25,11 @@ superharness MVP
 ├── P0 基线与文档                         [进行中]
 │   ├── [x] 设计研究写入 plans/super-agent-omp-study-2026-11-02.md
 │   ├── [x] D1–D5a 代码/接口/测试落盘
-│   ├── [ ] 校正 omp-board 状态：D3c/D5b 未完成，不再写“D5 完成”
-│   ├── [ ] 冻结结束后确认 D1–D5 回归基线（bun test + 一次 doctor）
+│   ├── [x] 重启决定：只动 out/superharness，先 D3c
+│   ├── [ ] 跑一次 bun test + doctor，记录重启基线
 │   └── [ ] 明确“不碰 unisacc 产品源”的边界与证据路径
 │
-├── P1 D3c 常驻 RouterRunner                [最高优先]
+├── P1 D3c 常驻 RouterRunner                [进行中]
 │   ├── [ ] D3c-1 循环：new trigger → new_session → prompt → decision → 下一条
 │   ├── [ ] D3c-2 router_session/router_turn 心跳、状态、turn 幂等
 │   ├── [ ] D3c-3 `router --watch` 常驻；`router status`/`router stop`

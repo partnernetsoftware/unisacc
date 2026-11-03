@@ -38,3 +38,8 @@
 - `wave`/`final` 的替换、`tools/bound` 删除、旧 C 归档：等 W5 慢车道纪元结束。
 - 每步验收：`sh ./unisacc.com tools/check-source-job-count.cx`；`sh ./unisacc.com tools/check-pins.cx`；`sh ./unisacc.com tools/ratchets.cx`；涉及批次再跑 `tools/affected.cx --files ... --run`。
 - 迁移期间不缓存 PASS、不删断言、不放宽 60s/精确 PID/预算守卫。
+
+## 裁定(omp-cc,2026-11-02)
+- P3 压缩口径选 B:自带确定性 deflate(cx/text/deflate.cx),不复刻 zlib level9 比特流、不走 zlib FFI。理由:构造字节不得绑定宿主 zlib 版本;解码侧已是自带 inflate,只差压缩器;与"去宿主 C 依赖"方向一致。
+- 代价:P3 压缩字节变化一次=换标,并入"arity 落地"那次纪元(同一身份变更窗口),不单开。
+- seed/gen.c(9051 行)继续暂缓,待 B 落地后再评估是否值得移植。

@@ -1,0 +1,263 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* tests/arity-controls.cx -- ROOT NEW_ABS_OUT.  Negative controls for weights/arity/arity.tsv.
+ *
+ * The arity table is the decision the parse stage makes when a call closes; this batch keeps the
+ * table and its rule form honest.  It does NOT claim the product rejects a wrong argument count:
+ * the parse stage does not consult the table yet, and that wiring is the next change.  What is
+ * tested here is the table contract itself:
+ *
+ *   table-ok          `tools/arity-gen.cx -- --check ROOT` exits 0 and writes nothing to stdout
+ *   table-bytes       ROOT/weights/arity/arity.tsv is untouched by the check
+ *   shadow-ok         a shadow ROOT of symlinks plus a copy of the table also checks clean
+ *   shadow-drop       the same shadow with the last row removed refuses (exit 1)
+ *   shadow-head       the same shadow with the "# stage arity" line altered refuses (exit 1)
+ *   shadow-label      the same shadow with one accept row relabelled too-many-arguments refuses
+ *   call-*            eight boundary keys of the rule form, one label each
+ *
+ * Exit 0 all assertions pass, 1 a FAIL line above, 2 usage or I/O refusal.  The shadow roots live
+ * under NEW_ABS_OUT and are created fresh; nothing outside it is written. */
+#define AC_PATH 4400
+#define AC_CAP 65536
+
+static char root[AC_PATH], outdir[AC_PATH];
+static int assertions, failures;
+
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) failures++;
+    sy_printf("%s\tarity-controls.%s\n", ok ? "PASS" : "FAIL", what);
+}
+
+static void die(const char *what) {
+    sy_eprintf("arity-controls: REFUSE %s\n", what);
+    sy_printf("FAIL\tarity-controls.refuse.%s\n", what);
+    failures++;
+    assertions++;
+}
+
+static size_t slen(const char *s) {
+    size_t i = 0;
+    while (s[i]) i++;
+    return i;
+}
+
+static int startswith(const char *s, size_t n, const char *p) {
+    size_t k = slen(p), i;
+    if (n < k) return 0;
+    for (i = 0; i < k; i++) if (s[i] != p[i]) return 0;
+    return 1;
+}
+
+static int same(const char *a, size_t an, const char *b, size_t bn) {
+    size_t i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static void put(char *d, size_t *o, const char *s, size_t n) {
+    size_t i;
+    for (i = 0; i < n; i++) d[(*o)++] = s[i];
+}
+
+static int line_at(const char *b, size_t n, size_t *at, const char **s, size_t *ln) {
+    size_t i = *at, e;
+    if (i >= n) return 0;
+    e = i;
+    while (e < n && b[e] != '\n') e++;
+    *s = b + i;
+    *ln = e - i;
+    *at = (e < n) ? e + 1 : n;
+    return 1;
+}
+
+/* the rule form's call, for one key */
+static int call_one(const char *p, const char *np, const char *na, char **o, size_t *n) {
+    char prod[AC_PATH], toolp[AC_PATH], bound[AC_PATH];
+    char *v[12];
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) return -1;
+    if (cx_fmt(toolp, sizeof toolp, "%s/tools/arity-gen.cx", root)) return -1;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
+    v[0] = bound; v[1] = "50"; v[2] = "sh"; v[3] = prod; v[4] = toolp; v[5] = "--";
+    v[6] = "call"; v[7] = (char *)p; v[8] = (char *)np; v[9] = (char *)na; v[10] = 0;
+    *o = 0;
+    *n = 0;
+    return cx_runv_timeout(v, 55, o, n);
+}
+
+static int check_root(const char *rd, char **o, size_t *n) {
+    char prod[AC_PATH], toolp[AC_PATH], bound[AC_PATH];
+    char *v[10];
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", rd)) return -1;
+    if (cx_fmt(toolp, sizeof toolp, "%s/tools/arity-gen.cx", rd)) return -1;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", rd)) return -1;
+    v[0] = bound; v[1] = "50"; v[2] = "sh"; v[3] = prod; v[4] = toolp; v[5] = "--";
+    v[6] = "--check"; v[7] = (char *)rd; v[8] = 0;
+    *o = 0;
+    *n = 0;
+    return cx_runv_timeout(v, 55, o, n);
+}
+
+/* a fresh shadow ROOT: unisacc.com, tools and seed are symlinks into ROOT; weights/arity is ours */
+static int shadow(const char *name, char *dst, int cap) {
+    char a[AC_PATH], b[AC_PATH];
+    if (cx_fmt(dst, cap, "%s/%s", outdir, name)) return -1;
+    if (sy_mkdir(dst, 0755)) return -2;
+    if (cx_fmt(a, sizeof a, "%s/unisacc.com", root) || cx_fmt(b, sizeof b, "%s/unisacc.com", dst)) return -1;
+    if (sy_symlink(a, b)) return -3;
+    if (cx_fmt(a, sizeof a, "%s/tools", root) || cx_fmt(b, sizeof b, "%s/tools", dst)) return -1;
+    if (sy_symlink(a, b)) return -3;
+    if (cx_fmt(a, sizeof a, "%s/seed", root) || cx_fmt(b, sizeof b, "%s/seed", dst)) return -1;
+    if (sy_symlink(a, b)) return -3;
+    if (cx_fmt(b, sizeof b, "%s/weights", dst)) return -1;
+    if (sy_mkdir(b, 0755)) return -2;
+    if (cx_fmt(b, sizeof b, "%s/weights/arity", dst)) return -1;
+    if (sy_mkdir(b, 0755)) return -2;
+    return 0;
+}
+
+static int put_table(const char *rd, const char *body, size_t n) {
+    char p[AC_PATH];
+    if (cx_fmt(p, sizeof p, "%s/weights/arity/arity.tsv", rd)) return -1;
+    return cx_write(p, body, n);
+}
+
+/* rebuild the table: drop the last row, restore the header line, or relabel one accept row */
+static int mutate(const char *want, char *dst, size_t *dstn, const char *src, size_t sn) {
+    static char buf[AC_CAP];
+    size_t at = 0, o = 0;
+    const char *s;
+    size_t ln;
+    int rows = 0;
+    if (same(want, slen(want), "drop-last", 9)) {
+        /* count rows first, then copy all but the last */
+        at = 0;
+        while (line_at(src, sn, &at, &s, &ln)) rows++;
+        at = 0;
+        {
+            int i = 0;
+            while (line_at(src, sn, &at, &s, &ln)) {
+                if (i == rows - 1) break;
+                put(buf, &o, s, ln);
+                buf[o++] = '\n';
+                i++;
+            }
+        }
+        buf[o] = 0;
+        put(dst, dstn, buf, o);
+        return 0;
+    }
+    if (same(want, slen(want), "head-line", 9)) {
+        while (line_at(src, sn, &at, &s, &ln)) {
+            if (o == 0 && startswith(s, ln, "# stage arity")) {
+                /* '# stage' -> '# Stage': same length, still one byte off */
+                put(buf, &o, s, 2);
+                buf[o++] = 'S';
+                put(buf, &o, s + 3, ln - 3);
+            } else {
+                put(buf, &o, s, ln);
+            }
+            buf[o++] = '\n';
+        }
+        buf[o] = 0;
+        put(dst, dstn, buf, o);
+        return 0;
+    }
+    if (same(want, slen(want), "relabel", 7)) {
+        while (line_at(src, sn, &at, &s, &ln)) {
+            if (startswith(s, ln, "fixed\t2\t2\taccept")) {
+                put(buf, &o, "fixed\t2\t2\ttoo-many-arguments", 28);
+            } else {
+                put(buf, &o, s, ln);
+            }
+            buf[o++] = '\n';
+        }
+        buf[o] = 0;
+        put(dst, dstn, buf, o);
+        return 0;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    char path[AC_PATH], *table, *o;
+    size_t tn = 0, on = 0;
+    int rc;
+    if (argc != 3) {
+        sy_eprintf("usage: arity-controls ROOT NEW_ABS_OUT\n");
+        return 2;
+    }
+    if (cx_fmt(root, sizeof root, "%s", argv[1]) || cx_fmt(outdir, sizeof outdir, "%s", argv[2])) return 2;
+    if (outdir[0] != '/') {
+        sy_eprintf("arity-controls: NEW_ABS_OUT must be absolute\n");
+        return 2;
+    }
+    /* NEW_ABS_OUT must be a fresh directory: sy_mkdir refuses an existing one, which is the
+       contract that keeps a stale shadow from a previous run out of this batch */
+    if (sy_mkdir(outdir, 0755)) {
+        sy_eprintf("arity-controls: REFUSE out-mkdir (must be new)\n");
+        return 2;
+    }
+    /* 1. the real table */
+    rc = check_root(root, &o, &on);
+    ck(rc == 0, "table-ok");
+    ck(on == 0, "table-ok-quiet");
+    if (cx_fmt(path, sizeof path, "%s/weights/arity/arity.tsv", root)) return 2;
+    table = cx_read(path, &tn);
+    if (!table) {
+        die("table-read");
+        sy_printf("ARITY_CONTROLS\tassertions=%d\tfailures=%d\n", assertions, failures);
+        return failures ? 1 : 0;
+    }
+    ck(tn > 0, "table-bytes");
+    /* 2. the rule form's boundary keys */
+    rc = call_one("fixed", "2", "1", &o, &on);
+    ck(rc == 0 && same(o, on, "too-few-arguments\n", 18), "call-fixed-too-few");
+    rc = call_one("fixed", "2", "2", &o, &on);
+    ck(rc == 0 && same(o, on, "accept\n", 7), "call-fixed-exact");
+    rc = call_one("fixed", "2", "3", &o, &on);
+    ck(rc == 0 && same(o, on, "too-many-arguments\n", 19), "call-fixed-too-many");
+    rc = call_one("fixed", "0", "1", &o, &on);
+    ck(rc == 0 && same(o, on, "too-many-arguments\n", 19), "call-void-prototype-one-arg");
+    rc = call_one("variadic", "1", "0", &o, &on);
+    ck(rc == 0 && same(o, on, "too-few-arguments\n", 18), "call-variadic-zero-args");
+    rc = call_one("variadic", "1", "7", &o, &on);
+    ck(rc == 0 && same(o, on, "accept\n", 7), "call-variadic-tail");
+    rc = call_one("none", "0", "5", &o, &on);
+    ck(rc == 0 && same(o, on, "accept\n", 7), "call-no-prototype-unchecked");
+    rc = call_one("variadic", "0", "5", &o, &on);
+    ck(rc == 0 && same(o, on, "accept\n", 7), "call-c23-bare-ellipsis-unchecked");
+    /* 3. shadow roots: one clean copy, three damaged ones */
+    {
+        const char *names[4] = {"shadow-ok", "shadow-drop", "shadow-head", "shadow-label"};
+        const char *modes[3] = {"drop-last", "head-line", "relabel"};
+        int m;
+        {
+            char sd[AC_PATH];
+            if (shadow(names[0], sd, (int)sizeof sd)) die("shadow-ok-mkdir");
+            if (put_table(sd, table, tn)) die("shadow-ok-table");
+            rc = check_root(sd, &o, &on);
+            ck(rc == 0, "shadow-ok");
+        }
+        for (m = 0; m < 3; m++) {
+            char sd[AC_PATH];
+            static char body[AC_CAP];
+            size_t bn = 0;
+            if (shadow(names[m + 1], sd, (int)sizeof sd)) die("shadow-mkdir");
+            if (mutate(modes[m], body, &bn, table, tn)) die("mutate");
+            if (same(body, bn, table, tn)) die("mutate-noop");
+            if (put_table(sd, body, bn)) die("shadow-table");
+            rc = check_root(sd, &o, &on);
+            ck(rc == 1, names[m + 1]);
+        }
+    }
+    /* 4. the real table survived every read and every shadow write */
+    {
+        char *again = cx_read(path, &tn);
+        ck(again && same(again, tn, table, tn), "table-unmodified");
+    }
+    sy_printf("ARITY_CONTROLS\tassertions=%d\tfailures=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}

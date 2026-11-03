@@ -1,0 +1,1 @@
+hold-omp-ds 位置=/tmp/arity-impl（仓外预演：tools/arity-gen.cx 256 行、tests/arity-controls.cx 263 行、weights/arity/arity.tsv 249 行、seed/gold_arity_label.c；副本内 batches/coverage/prd 已登记） 未提交文件=无（主树仅 plans/arity-impl-2026-11-02.md，已由 cc 提交；其余主树改动属其他车道） 未完成=产物搬进主树 + tools/loc TOTAL 上调 60794 + 产品 parse 接线与 kernel/ 重建重装（均等纪元结束与恢复） 回滚点=主树无我方未提交改动，rm -rf /tmp/arity-impl 即彻底回滚

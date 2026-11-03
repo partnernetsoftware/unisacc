@@ -1,0 +1,908 @@
+diff --git a/seed/gold_arity_label.c b/seed/gold_arity_label.c
+new file mode 100644
+index 0000000000..7f1adc8605
+--- /dev/null
++++ b/seed/gold_arity_label.c
+@@ -0,0 +1,82 @@
++/* seed/gold_arity_label.c -- the arity net's labels in rule form, C99.
++ *
++ *   gold-arity-label table                  "PROTO<TAB>NPAR<TAB>NARGS<TAB>LABEL" for every key
++ *   gold-arity-label call PROTO NPAR NARGS  one line "LABEL" for that key
++ *
++ * The key is what the parse (E3) stage knows when a call closes: which prototype form is in view,
++ * how many parameters the prototype names, and how many arguments the call site wrote.  It is not a
++ * typing question: `weights/gold/type.tsv` answers what `fn call t2` yields and nothing about count,
++ * and `weights/gold/scope.tsv` answers what a name binds to and nothing about count.
++ *
++ * proto:
++ *   none      no prototype in view: `()` empty parameter list (C89 6.5.2.2p1 imposes no parameter
++ *             constraint), a function pointer, or an implicit declaration.  The count is not checked.
++ *   fixed     a prototype with a named parameter list and no `...`.  NPAR must equal NARGS;
++ *             NPAR 0 is `(void)` and accepts only NARGS 0.
++ *   variadic  last parameter is `...`.  C99 6.7.5.3p1 needs at least one named parameter, so NPAR 1
++ *             and up must satisfy NARGS >= NPAR.  NPAR 0 is not a C99 form; it is labelled accept
++ *             and left unchecked rather than inventing a refusal the language does not have yet.
++ * labels: accept, too-few-arguments, too-many-arguments
++ *
++ * The domain is the product front end's fixed head: 3 PROTO x 9 NPAR (0..8) x 9 NARGS (0..8) = 243 keys.
++ * Diagnostics are not here: the reason text lives beside the other diagnostics
++ * (exec/facts/k2-errors.tsv), and the call site's line and column come from the token locations
++ * that the parse stage already records.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static const char *PROTO[] = {"none", "fixed", "variadic"};
++#define NPROTO ((int)(sizeof PROTO / sizeof PROTO[0]))
++#define NCOUNT 9
++
++static int eq(const char *x, const char *y) { return !strcmp(x, y); }
++
++/* arity_label(proto, npar, nargs): the rule the table form must reproduce row for row */
++static const char *arity_label(const char *proto, int npar, int nargs) {
++    if (eq(proto, "none")) return "accept";
++    if (eq(proto, "fixed")) {
++        if (nargs < npar) return "too-few-arguments";
++        if (nargs > npar) return "too-many-arguments";
++        return "accept";
++    }
++    if (eq(proto, "variadic")) {
++        if (npar == 0) return "accept";
++        if (nargs < npar) return "too-few-arguments";
++        return "accept";
++    }
++    return "accept";
++}
++
++static int count(const char *s, int *out) {
++    char *end = 0;
++    long v;
++    if (!s || !*s) return 0;
++    v = strtol(s, &end, 10);
++    if (!end || *end || v < 0 || v >= NCOUNT) return 0;
++    *out = (int)v;
++    return 1;
++}
++
++int main(int argc, char **argv) {
++    int i, j, k;
++    if (argc == 2 && !strcmp(argv[1], "table")) {
++        for (i = 0; i < NPROTO; i++)
++            for (j = 0; j < NCOUNT; j++)
++                for (k = 0; k < NCOUNT; k++)
++                    printf("%s\t%d\t%d\t%s\n", PROTO[i], j, k, arity_label(PROTO[i], j, k));
++        return 0;
++    }
++    if (argc == 5 && !strcmp(argv[1], "call")) {
++        int npar = 0, nargs = 0;
++        if (!count(argv[3], &npar) || !count(argv[4], &nargs)) {
++            fprintf(stderr, "gold-arity-label: count outside 0..%d\n", NCOUNT - 1);
++            return 2;
++        }
++        printf("%s\n", arity_label(argv[2], npar, nargs));
++        return 0;
++    }
++    fprintf(stderr, "usage: gold-arity-label table | call PROTO NPAR NARGS\n");
++    return 2;
++}
+diff --git a/tools/arity-gen.cx b/tools/arity-gen.cx
+new file mode 100644
+index 0000000000..89dddaf6c5
+--- /dev/null
++++ b/tools/arity-gen.cx
+@@ -0,0 +1,256 @@
++#pragma unisa use sys.io
++#pragma unisa use text.text
++/* tools/arity-gen.cx -- the arity table weights/arity/arity.tsv, and its rule form.
++ *
++ *   sh ./unisacc.com tools/arity-gen.cx -- --check ROOT
++ *   sh ./unisacc.com tools/arity-gen.cx -- --write ROOT
++ *   sh ./unisacc.com tools/arity-gen.cx -- call PROTO NPAR NARGS
++ *
++ * The arity key is what the parse (E3) stage knows when a call closes: which prototype form is in
++ * view (none / fixed / variadic), how many parameters the prototype names, and how many arguments
++ * the call site wrote.  The labels are accept, too-few-arguments and too-many-arguments.  The rule
++ * form seed/gold_arity_label.c states the rule; this table is its projection, and --check refuses
++ * when the two disagree or when the table is not the exact cartesian product of its #field lines.
++ *
++ * --check: the six header lines must be the ones below byte for byte, the rows must be exactly the
++ *   cartesian product proto x npar x nargs (proto slowest, 3 x 9 x 9 = 243), every label must be
++ *   one of the #head classes, and the rule form's `table` output must equal the rows byte for byte.
++ * --write: write the header and the rule form's `table` output after the same checks.
++ * call: one line for one key, so a batch can ask a boundary case without reading the table.
++ * Exit 0 good, 1 a difference (named), 2 usage or I/O.
++ *
++ * This table is NOT one of the eighteen gold nets.  tools/net-gen.cx (NNET 18), tools/rule-gen.cx
++ * (NRULE 11) and tools/gold-table.cx keep their counts; this tool owns its own path and its own
++ * rule form.  The parse stage that consults the table is the next change; until it lands, nothing
++ * outside this tool, seed/gold_arity_label.c and tests/arity-controls.cx reads this file.
++ *
++ * No libc and no include. */
++#define AG_TABLE "weights/arity/arity.tsv"
++#define AG_RULE "seed/gold_arity_label.c"
++#define AG_NPROTO 3
++#define AG_NCOUNT 9
++#define AG_KEYS 243
++#define AG_PATH 4400
++#define AG_LINE 256
++#define AG_STAGE "# stage arity: 243 keys, generated by `tools/arity-gen.cx --write` from seed/gold_arity_label.c -- do not edit\n"
++#define AG_F1 "#field\tproto\tnone\tfixed\tvariadic\n"
++#define AG_F2 "#field\tnpar\t0\t1\t2\t3\t4\t5\t6\t7\t8\n"
++#define AG_F3 "#field\tnargs\t0\t1\t2\t3\t4\t5\t6\t7\t8\n"
++#define AG_FH "#head\ty\t-\taccept\ttoo-few-arguments\ttoo-many-arguments\n"
++#define AG_COL "proto\tnpar\tnargs\t=> y\n"
++
++static const char *ag_proto[AG_NPROTO] = {"none", "fixed", "variadic"};
++static const char *ag_head[4] = {"-", "accept", "too-few-arguments", "too-many-arguments"};
++static char ag_root[AG_PATH];
++static int ag_bad;
++
++static int ag_fail(const char *w) {
++    sy_eprintf("arity-gen\tFAIL\t%s\n", w);
++    ag_bad = 1;
++    return 1;
++}
++
++static size_t ag_len(const char *s) {
++    size_t n = 0;
++    while (s[n]) n++;
++    return n;
++}
++
++static int ag_same(const char *a, size_t an, const char *b, size_t bn) {
++    size_t i;
++    if (an != bn) return 0;
++    for (i = 0; i < an; i++) if (a[i] != b[i]) return 0;
++    return 1;
++}
++
++static int ag_eqz(const char *a, size_t an, const char *b) {
++    return ag_same(a, an, b, ag_len(b));
++}
++
++static int ag_app(char *dst, size_t cap, size_t *n, const char *s) {
++    size_t i = 0;
++    while (s[i]) {
++        if (*n + 1 >= cap) return -1;
++        dst[*n] = s[i];
++        *n += 1;
++        i++;
++    }
++    dst[*n] = 0;
++    return 0;
++}
++
++/* one line without its newline; 0 when the buffer is exhausted */
++static int ag_row(const char *b, size_t n, size_t *at, const char **s, size_t *len) {
++    size_t i = *at;
++    if (i >= n) return 0;
++    {
++        size_t e = i;
++        while (e < n && b[e] != '\n') e++;
++        *s = b + i;
++        *len = e - i;
++        *at = (e < n) ? e + 1 : n;
++    }
++    return 1;
++}
++
++/* the rule form's output: words[0] is "table" or "call" plus its arguments */
++static char *ag_rule(int nwords, char **words, size_t *n) {
++    char bound[AG_PATH], com[AG_PATH], src[AG_PATH];
++    char *argv[16];
++    char *out = 0;
++    int rc, i;
++    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", ag_root)
++        || cx_fmt(com, sizeof com, "%s/unisacc.com", ag_root)
++        || cx_fmt(src, sizeof src, "%s/%s", ag_root, AG_RULE))
++        return 0;
++    argv[0] = bound;
++    argv[1] = "50";
++    argv[2] = "sh";
++    argv[3] = com;
++    argv[4] = src;
++    argv[5] = "--";
++    for (i = 0; i < nwords; i++) argv[6 + i] = words[i];
++    argv[6 + nwords] = 0;
++    rc = cx_runv_timeout(argv, 55, &out, n);
++    if (rc != 0 || !out) return 0;
++    return out;
++}
++
++static int ag_head_line(const char *b, size_t n, size_t *at, const char *want, const char *what) {
++    const char *line;
++    size_t ln, wn;
++    if (!ag_row(b, n, at, &line, &ln)) return ag_fail("header-short");
++    wn = ag_len(want);
++    if (wn > 0 && want[wn - 1] == '\n') wn--;      /* the macro carries the newline; the row does not */
++    if (!ag_same(line, ln, want, wn)) return ag_fail(what);
++    return 0;
++}
++
++static int ag_header(const char *b, size_t n, size_t *at) {
++    if (ag_head_line(b, n, at, AG_STAGE, "header-stage")) return 1;
++    if (ag_head_line(b, n, at, AG_F1, "header-field-proto")) return 1;
++    if (ag_head_line(b, n, at, AG_F2, "header-field-npar")) return 1;
++    if (ag_head_line(b, n, at, AG_F3, "header-field-nargs")) return 1;
++    if (ag_head_line(b, n, at, AG_FH, "header-head")) return 1;
++    if (ag_head_line(b, n, at, AG_COL, "header-column")) return 1;
++    return 0;
++}
++
++static int ag_is_head(const char *s, size_t n) {
++    int i;
++    for (i = 0; i < 4; i++) if (ag_eqz(s, n, ag_head[i])) return 1;
++    return 0;
++}
++
++/* the rows of one source must be the cartesian product with a head class label, in key order */
++static int ag_rows(const char *b, size_t n, size_t *at, const char *what) {
++    const char *line;
++    size_t ln;
++    char exp[AG_LINE];
++    int j, k, m;
++    for (j = 0; j < AG_NPROTO; j++) {
++        for (k = 0; k < AG_NCOUNT; k++) {
++            for (m = 0; m < AG_NCOUNT; m++) {
++                size_t en;
++                if (!ag_row(b, n, at, &line, &ln)) return ag_fail(what);
++                if (cx_fmt(exp, sizeof exp, "%s\t%d\t%d\t", ag_proto[j], k, m)) return ag_fail("key-fmt");
++                en = ag_len(exp);
++                if (ln <= en) return ag_fail("row-short");
++                if (!ag_same(line, en, exp, en)) return ag_fail("key-order");
++                if (!ag_is_head(line + en, ln - en)) return ag_fail("label");
++            }
++        }
++    }
++    return 0;
++}
++
++static int ag_no_extra(const char *b, size_t n, size_t *at, const char *what) {
++    const char *line;
++    size_t ln;
++    if (ag_row(b, n, at, &line, &ln)) return ag_fail(what);
++    return 0;
++}
++
++static int ag_check(void) {
++    char path[AG_PATH];
++    char *buf, *rule;
++    size_t n = 0, rn = 0, at = 0, rat = 0, rows_at;
++    char *words[1];
++    if (cx_fmt(path, sizeof path, "%s/%s", ag_root, AG_TABLE)) return ag_fail("path");
++    buf = cx_read(path, &n);
++    if (!buf) return ag_fail("cannot read table");
++    if (ag_header(buf, n, &at)) return 1;
++    rows_at = at;
++    if (ag_rows(buf, n, &at, "row-count")) return 1;
++    if (ag_no_extra(buf, n, &at, "row-count-extra")) return 1;
++    words[0] = "table";
++    rule = ag_rule(1, words, &rn);
++    if (!rule) return ag_fail("rule-run");
++    if (ag_rows(rule, rn, &rat, "rule-row-count")) return 1;
++    if (ag_no_extra(rule, rn, &rat, "rule-row-count-extra")) return 1;
++    if (n - rows_at != rn) return ag_fail("rule-len");
++    if (!ag_same(buf + rows_at, n - rows_at, rule, rn)) return ag_fail("rule-diff");
++    if (!ag_bad) sy_eprintf("arity-gen\tCHECK\tkeys=%d\n", AG_KEYS);
++    return ag_bad;
++}
++
++static int ag_write(void) {
++    char path[AG_PATH];
++    static char whole[65536];
++    size_t on = 0;
++    char *rule, *words[1];
++    size_t rn = 0, rat = 0;
++    size_t i;
++    words[0] = "table";
++    rule = ag_rule(1, words, &rn);
++    if (!rule) return ag_fail("rule-run");
++    if (ag_rows(rule, rn, &rat, "rule-row-count")) return 1;
++    if (ag_no_extra(rule, rn, &rat, "rule-row-count-extra")) return 1;
++    if (ag_app(whole, sizeof whole, &on, AG_STAGE)
++        || ag_app(whole, sizeof whole, &on, AG_F1)
++        || ag_app(whole, sizeof whole, &on, AG_F2)
++        || ag_app(whole, sizeof whole, &on, AG_F3)
++        || ag_app(whole, sizeof whole, &on, AG_FH)
++        || ag_app(whole, sizeof whole, &on, AG_COL))
++        return ag_fail("header-long");
++    for (i = 0; i < rn; i++) {
++        if (on + 1 >= sizeof whole) return ag_fail("table-long");
++        whole[on++] = rule[i];
++    }
++    whole[on] = 0;
++    if (cx_fmt(path, sizeof path, "%s/%s", ag_root, AG_TABLE)) return ag_fail("path");
++    if (cx_write(path, whole, on)) return ag_fail("cannot write table");
++    if (!ag_bad) sy_eprintf("arity-gen\tWRITE\tkeys=%d\n", AG_KEYS);
++    return ag_bad;
++}
++
++static int ag_call(char **words) {
++    char *out;
++    size_t n = 0;
++    out = ag_rule(4, words, &n);
++    if (!out) return ag_fail("rule-run");
++    sy_printf("%s", out);
++    return 0;
++}
++
++int main(int argc, char **argv) {
++    if (argc >= 3 && tx_eqz(argv[1], "--check")) {
++        if (cx_fmt(ag_root, sizeof ag_root, "%s", argv[2])) return 2;
++        return ag_check();
++    }
++    if (argc >= 3 && tx_eqz(argv[1], "--write")) {
++        if (cx_fmt(ag_root, sizeof ag_root, "%s", argv[2])) return 2;
++        return ag_write();
++    }
++    if (argc == 5 && tx_eqz(argv[1], "call")) {
++        char *words[4];
++        if (cx_fmt(ag_root, sizeof ag_root, ".")) return 2;
++        words[0] = "call";
++        words[1] = argv[2];
++        words[2] = argv[3];
++        words[3] = argv[4];
++        return ag_call(words);
++    }
++    sy_eprintf("usage: arity-gen --check ROOT | --write ROOT | call PROTO NPAR NARGS\n");
++    return 2;
++}
+diff --git a/weights/arity/arity.tsv b/weights/arity/arity.tsv
+new file mode 100644
+index 0000000000..7d9da4e10a
+--- /dev/null
++++ b/weights/arity/arity.tsv
+@@ -0,0 +1,249 @@
++# stage arity: 243 keys, generated by `tools/arity-gen.cx --write` from seed/gold_arity_label.c -- do not edit
++#field	proto	none	fixed	variadic
++#field	npar	0	1	2	3	4	5	6	7	8
++#field	nargs	0	1	2	3	4	5	6	7	8
++#head	y	-	accept	too-few-arguments	too-many-arguments
++proto	npar	nargs	=> y
++none	0	0	accept
++none	0	1	accept
++none	0	2	accept
++none	0	3	accept
++none	0	4	accept
++none	0	5	accept
++none	0	6	accept
++none	0	7	accept
++none	0	8	accept
++none	1	0	accept
++none	1	1	accept
++none	1	2	accept
++none	1	3	accept
++none	1	4	accept
++none	1	5	accept
++none	1	6	accept
++none	1	7	accept
++none	1	8	accept
++none	2	0	accept
++none	2	1	accept
++none	2	2	accept
++none	2	3	accept
++none	2	4	accept
++none	2	5	accept
++none	2	6	accept
++none	2	7	accept
++none	2	8	accept
++none	3	0	accept
++none	3	1	accept
++none	3	2	accept
++none	3	3	accept
++none	3	4	accept
++none	3	5	accept
++none	3	6	accept
++none	3	7	accept
++none	3	8	accept
++none	4	0	accept
++none	4	1	accept
++none	4	2	accept
++none	4	3	accept
++none	4	4	accept
++none	4	5	accept
++none	4	6	accept
++none	4	7	accept
++none	4	8	accept
++none	5	0	accept
++none	5	1	accept
++none	5	2	accept
++none	5	3	accept
++none	5	4	accept
++none	5	5	accept
++none	5	6	accept
++none	5	7	accept
++none	5	8	accept
++none	6	0	accept
++none	6	1	accept
++none	6	2	accept
++none	6	3	accept
++none	6	4	accept
++none	6	5	accept
++none	6	6	accept
++none	6	7	accept
++none	6	8	accept
++none	7	0	accept
++none	7	1	accept
++none	7	2	accept
++none	7	3	accept
++none	7	4	accept
++none	7	5	accept
++none	7	6	accept
++none	7	7	accept
++none	7	8	accept
++none	8	0	accept
++none	8	1	accept
++none	8	2	accept
++none	8	3	accept
++none	8	4	accept
++none	8	5	accept
++none	8	6	accept
++none	8	7	accept
++none	8	8	accept
++fixed	0	0	accept
++fixed	0	1	too-many-arguments
++fixed	0	2	too-many-arguments
++fixed	0	3	too-many-arguments
++fixed	0	4	too-many-arguments
++fixed	0	5	too-many-arguments
++fixed	0	6	too-many-arguments
++fixed	0	7	too-many-arguments
++fixed	0	8	too-many-arguments
++fixed	1	0	too-few-arguments
++fixed	1	1	accept
++fixed	1	2	too-many-arguments
++fixed	1	3	too-many-arguments
++fixed	1	4	too-many-arguments
++fixed	1	5	too-many-arguments
++fixed	1	6	too-many-arguments
++fixed	1	7	too-many-arguments
++fixed	1	8	too-many-arguments
++fixed	2	0	too-few-arguments
++fixed	2	1	too-few-arguments
++fixed	2	2	accept
++fixed	2	3	too-many-arguments
++fixed	2	4	too-many-arguments
++fixed	2	5	too-many-arguments
++fixed	2	6	too-many-arguments
++fixed	2	7	too-many-arguments
++fixed	2	8	too-many-arguments
++fixed	3	0	too-few-arguments
++fixed	3	1	too-few-arguments
++fixed	3	2	too-few-arguments
++fixed	3	3	accept
++fixed	3	4	too-many-arguments
++fixed	3	5	too-many-arguments
++fixed	3	6	too-many-arguments
++fixed	3	7	too-many-arguments
++fixed	3	8	too-many-arguments
++fixed	4	0	too-few-arguments
++fixed	4	1	too-few-arguments
++fixed	4	2	too-few-arguments
++fixed	4	3	too-few-arguments
++fixed	4	4	accept
++fixed	4	5	too-many-arguments
++fixed	4	6	too-many-arguments
++fixed	4	7	too-many-arguments
++fixed	4	8	too-many-arguments
++fixed	5	0	too-few-arguments
++fixed	5	1	too-few-arguments
++fixed	5	2	too-few-arguments
++fixed	5	3	too-few-arguments
++fixed	5	4	too-few-arguments
++fixed	5	5	accept
++fixed	5	6	too-many-arguments
++fixed	5	7	too-many-arguments
++fixed	5	8	too-many-arguments
++fixed	6	0	too-few-arguments
++fixed	6	1	too-few-arguments
++fixed	6	2	too-few-arguments
++fixed	6	3	too-few-arguments
++fixed	6	4	too-few-arguments
++fixed	6	5	too-few-arguments
++fixed	6	6	accept
++fixed	6	7	too-many-arguments
++fixed	6	8	too-many-arguments
++fixed	7	0	too-few-arguments
++fixed	7	1	too-few-arguments
++fixed	7	2	too-few-arguments
++fixed	7	3	too-few-arguments
++fixed	7	4	too-few-arguments
++fixed	7	5	too-few-arguments
++fixed	7	6	too-few-arguments
++fixed	7	7	accept
++fixed	7	8	too-many-arguments
++fixed	8	0	too-few-arguments
++fixed	8	1	too-few-arguments
++fixed	8	2	too-few-arguments
++fixed	8	3	too-few-arguments
++fixed	8	4	too-few-arguments
++fixed	8	5	too-few-arguments
++fixed	8	6	too-few-arguments
++fixed	8	7	too-few-arguments
++fixed	8	8	accept
++variadic	0	0	accept
++variadic	0	1	accept
++variadic	0	2	accept
++variadic	0	3	accept
++variadic	0	4	accept
++variadic	0	5	accept
++variadic	0	6	accept
++variadic	0	7	accept
++variadic	0	8	accept
++variadic	1	0	too-few-arguments
++variadic	1	1	accept
++variadic	1	2	accept
++variadic	1	3	accept
++variadic	1	4	accept
++variadic	1	5	accept
++variadic	1	6	accept
++variadic	1	7	accept
++variadic	1	8	accept
++variadic	2	0	too-few-arguments
++variadic	2	1	too-few-arguments
++variadic	2	2	accept
++variadic	2	3	accept
++variadic	2	4	accept
++variadic	2	5	accept
++variadic	2	6	accept
++variadic	2	7	accept
++variadic	2	8	accept
++variadic	3	0	too-few-arguments
++variadic	3	1	too-few-arguments
++variadic	3	2	too-few-arguments
++variadic	3	3	accept
++variadic	3	4	accept
++variadic	3	5	accept
++variadic	3	6	accept
++variadic	3	7	accept
++variadic	3	8	accept
++variadic	4	0	too-few-arguments
++variadic	4	1	too-few-arguments
++variadic	4	2	too-few-arguments
++variadic	4	3	too-few-arguments
++variadic	4	4	accept
++variadic	4	5	accept
++variadic	4	6	accept
++variadic	4	7	accept
++variadic	4	8	accept
++variadic	5	0	too-few-arguments
++variadic	5	1	too-few-arguments
++variadic	5	2	too-few-arguments
++variadic	5	3	too-few-arguments
++variadic	5	4	too-few-arguments
++variadic	5	5	accept
++variadic	5	6	accept
++variadic	5	7	accept
++variadic	5	8	accept
++variadic	6	0	too-few-arguments
++variadic	6	1	too-few-arguments
++variadic	6	2	too-few-arguments
++variadic	6	3	too-few-arguments
++variadic	6	4	too-few-arguments
++variadic	6	5	too-few-arguments
++variadic	6	6	accept
++variadic	6	7	accept
++variadic	6	8	accept
++variadic	7	0	too-few-arguments
++variadic	7	1	too-few-arguments
++variadic	7	2	too-few-arguments
++variadic	7	3	too-few-arguments
++variadic	7	4	too-few-arguments
++variadic	7	5	too-few-arguments
++variadic	7	6	too-few-arguments
++variadic	7	7	accept
++variadic	7	8	accept
++variadic	8	0	too-few-arguments
++variadic	8	1	too-few-arguments
++variadic	8	2	too-few-arguments
++variadic	8	3	too-few-arguments
++variadic	8	4	too-few-arguments
++variadic	8	5	too-few-arguments
++variadic	8	6	too-few-arguments
++variadic	8	7	too-few-arguments
++variadic	8	8	accept
+diff --git a/tests/arity-controls.cx b/tests/arity-controls.cx
+new file mode 100644
+index 0000000000..ecbda51a9f
+--- /dev/null
++++ b/tests/arity-controls.cx
+@@ -0,0 +1,263 @@
++#pragma unisa use sys.io
++#pragma unisa use sys.fs
++#pragma unisa use text.text
++/* tests/arity-controls.cx -- ROOT NEW_ABS_OUT.  Negative controls for weights/arity/arity.tsv.
++ *
++ * The arity table is the decision the parse stage makes when a call closes; this batch keeps the
++ * table and its rule form honest.  It does NOT claim the product rejects a wrong argument count:
++ * the parse stage does not consult the table yet, and that wiring is the next change.  What is
++ * tested here is the table contract itself:
++ *
++ *   table-ok          `tools/arity-gen.cx -- --check ROOT` exits 0 and writes nothing to stdout
++ *   table-bytes       ROOT/weights/arity/arity.tsv is untouched by the check
++ *   shadow-ok         a shadow ROOT of symlinks plus a copy of the table also checks clean
++ *   shadow-drop       the same shadow with the last row removed refuses (exit 1)
++ *   shadow-head       the same shadow with the "# stage arity" line altered refuses (exit 1)
++ *   shadow-label      the same shadow with one accept row relabelled too-many-arguments refuses
++ *   call-*            eight boundary keys of the rule form, one label each
++ *
++ * Exit 0 all assertions pass, 1 a FAIL line above, 2 usage or I/O refusal.  The shadow roots live
++ * under NEW_ABS_OUT and are created fresh; nothing outside it is written. */
++#define AC_PATH 4400
++#define AC_CAP 65536
++
++static char root[AC_PATH], outdir[AC_PATH];
++static int assertions, failures;
++
++static void ck(int ok, const char *what) {
++    assertions++;
++    if (!ok) failures++;
++    sy_printf("%s\tarity-controls.%s\n", ok ? "PASS" : "FAIL", what);
++}
++
++static void die(const char *what) {
++    sy_eprintf("arity-controls: REFUSE %s\n", what);
++    sy_printf("FAIL\tarity-controls.refuse.%s\n", what);
++    failures++;
++    assertions++;
++}
++
++static size_t slen(const char *s) {
++    size_t i = 0;
++    while (s[i]) i++;
++    return i;
++}
++
++static int startswith(const char *s, size_t n, const char *p) {
++    size_t k = slen(p), i;
++    if (n < k) return 0;
++    for (i = 0; i < k; i++) if (s[i] != p[i]) return 0;
++    return 1;
++}
++
++static int same(const char *a, size_t an, const char *b, size_t bn) {
++    size_t i;
++    if (an != bn) return 0;
++    for (i = 0; i < an; i++) if (a[i] != b[i]) return 0;
++    return 1;
++}
++
++static void put(char *d, size_t *o, const char *s, size_t n) {
++    size_t i;
++    for (i = 0; i < n; i++) d[(*o)++] = s[i];
++}
++
++static int line_at(const char *b, size_t n, size_t *at, const char **s, size_t *ln) {
++    size_t i = *at, e;
++    if (i >= n) return 0;
++    e = i;
++    while (e < n && b[e] != '\n') e++;
++    *s = b + i;
++    *ln = e - i;
++    *at = (e < n) ? e + 1 : n;
++    return 1;
++}
++
++/* the rule form's call, for one key */
++static int call_one(const char *p, const char *np, const char *na, char **o, size_t *n) {
++    char prod[AC_PATH], toolp[AC_PATH], bound[AC_PATH];
++    char *v[12];
++    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) return -1;
++    if (cx_fmt(toolp, sizeof toolp, "%s/tools/arity-gen.cx", root)) return -1;
++    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return -1;
++    v[0] = bound; v[1] = "50"; v[2] = "sh"; v[3] = prod; v[4] = toolp; v[5] = "--";
++    v[6] = "call"; v[7] = (char *)p; v[8] = (char *)np; v[9] = (char *)na; v[10] = 0;
++    *o = 0;
++    *n = 0;
++    return cx_runv_timeout(v, 55, o, n);
++}
++
++static int check_root(const char *rd, char **o, size_t *n) {
++    char prod[AC_PATH], toolp[AC_PATH], bound[AC_PATH];
++    char *v[10];
++    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", rd)) return -1;
++    if (cx_fmt(toolp, sizeof toolp, "%s/tools/arity-gen.cx", rd)) return -1;
++    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", rd)) return -1;
++    v[0] = bound; v[1] = "50"; v[2] = "sh"; v[3] = prod; v[4] = toolp; v[5] = "--";
++    v[6] = "--check"; v[7] = (char *)rd; v[8] = 0;
++    *o = 0;
++    *n = 0;
++    return cx_runv_timeout(v, 55, o, n);
++}
++
++/* a fresh shadow ROOT: unisacc.com, tools and seed are symlinks into ROOT; weights/arity is ours */
++static int shadow(const char *name, char *dst, int cap) {
++    char a[AC_PATH], b[AC_PATH];
++    if (cx_fmt(dst, cap, "%s/%s", outdir, name)) return -1;
++    if (sy_mkdir(dst, 0755)) return -2;
++    if (cx_fmt(a, sizeof a, "%s/unisacc.com", root) || cx_fmt(b, sizeof b, "%s/unisacc.com", dst)) return -1;
++    if (sy_symlink(a, b)) return -3;
++    if (cx_fmt(a, sizeof a, "%s/tools", root) || cx_fmt(b, sizeof b, "%s/tools", dst)) return -1;
++    if (sy_symlink(a, b)) return -3;
++    if (cx_fmt(a, sizeof a, "%s/seed", root) || cx_fmt(b, sizeof b, "%s/seed", dst)) return -1;
++    if (sy_symlink(a, b)) return -3;
++    if (cx_fmt(b, sizeof b, "%s/weights", dst)) return -1;
++    if (sy_mkdir(b, 0755)) return -2;
++    if (cx_fmt(b, sizeof b, "%s/weights/arity", dst)) return -1;
++    if (sy_mkdir(b, 0755)) return -2;
++    return 0;
++}
++
++static int put_table(const char *rd, const char *body, size_t n) {
++    char p[AC_PATH];
++    if (cx_fmt(p, sizeof p, "%s/weights/arity/arity.tsv", rd)) return -1;
++    return cx_write(p, body, n);
++}
++
++/* rebuild the table: drop the last row, restore the header line, or relabel one accept row */
++static int mutate(const char *want, char *dst, size_t *dstn, const char *src, size_t sn) {
++    static char buf[AC_CAP];
++    size_t at = 0, o = 0;
++    const char *s;
++    size_t ln;
++    int rows = 0;
++    if (same(want, slen(want), "drop-last", 9)) {
++        /* count rows first, then copy all but the last */
++        at = 0;
++        while (line_at(src, sn, &at, &s, &ln)) rows++;
++        at = 0;
++        {
++            int i = 0;
++            while (line_at(src, sn, &at, &s, &ln)) {
++                if (i == rows - 1) break;
++                put(buf, &o, s, ln);
++                buf[o++] = '\n';
++                i++;
++            }
++        }
++        buf[o] = 0;
++        put(dst, dstn, buf, o);
++        return 0;
++    }
++    if (same(want, slen(want), "head-line", 9)) {
++        while (line_at(src, sn, &at, &s, &ln)) {
++            if (o == 0 && startswith(s, ln, "# stage arity")) {
++                /* '# stage' -> '# Stage': same length, still one byte off */
++                put(buf, &o, s, 2);
++                buf[o++] = 'S';
++                put(buf, &o, s + 3, ln - 3);
++            } else {
++                put(buf, &o, s, ln);
++            }
++            buf[o++] = '\n';
++        }
++        buf[o] = 0;
++        put(dst, dstn, buf, o);
++        return 0;
++    }
++    if (same(want, slen(want), "relabel", 7)) {
++        while (line_at(src, sn, &at, &s, &ln)) {
++            if (startswith(s, ln, "fixed\t2\t2\taccept")) {
++                put(buf, &o, "fixed\t2\t2\ttoo-many-arguments", 28);
++            } else {
++                put(buf, &o, s, ln);
++            }
++            buf[o++] = '\n';
++        }
++        buf[o] = 0;
++        put(dst, dstn, buf, o);
++        return 0;
++    }
++    return -1;
++}
++
++int main(int argc, char **argv) {
++    char path[AC_PATH], *table, *o;
++    size_t tn = 0, on = 0;
++    int rc;
++    if (argc != 3) {
++        sy_eprintf("usage: arity-controls ROOT NEW_ABS_OUT\n");
++        return 2;
++    }
++    if (cx_fmt(root, sizeof root, "%s", argv[1]) || cx_fmt(outdir, sizeof outdir, "%s", argv[2])) return 2;
++    if (outdir[0] != '/') {
++        sy_eprintf("arity-controls: NEW_ABS_OUT must be absolute\n");
++        return 2;
++    }
++    /* NEW_ABS_OUT must be a fresh directory: sy_mkdir refuses an existing one, which is the
++       contract that keeps a stale shadow from a previous run out of this batch */
++    if (sy_mkdir(outdir, 0755)) {
++        sy_eprintf("arity-controls: REFUSE out-mkdir (must be new)\n");
++        return 2;
++    }
++    /* 1. the real table */
++    rc = check_root(root, &o, &on);
++    ck(rc == 0, "table-ok");
++    ck(on == 0, "table-ok-quiet");
++    if (cx_fmt(path, sizeof path, "%s/weights/arity/arity.tsv", root)) return 2;
++    table = cx_read(path, &tn);
++    if (!table) {
++        die("table-read");
++        sy_printf("ARITY_CONTROLS\tassertions=%d\tfailures=%d\n", assertions, failures);
++        return failures ? 1 : 0;
++    }
++    ck(tn > 0, "table-bytes");
++    /* 2. the rule form's boundary keys */
++    rc = call_one("fixed", "2", "1", &o, &on);
++    ck(rc == 0 && same(o, on, "too-few-arguments\n", 18), "call-fixed-too-few");
++    rc = call_one("fixed", "2", "2", &o, &on);
++    ck(rc == 0 && same(o, on, "accept\n", 7), "call-fixed-exact");
++    rc = call_one("fixed", "2", "3", &o, &on);
++    ck(rc == 0 && same(o, on, "too-many-arguments\n", 19), "call-fixed-too-many");
++    rc = call_one("fixed", "0", "1", &o, &on);
++    ck(rc == 0 && same(o, on, "too-many-arguments\n", 19), "call-void-prototype-one-arg");
++    rc = call_one("variadic", "1", "0", &o, &on);
++    ck(rc == 0 && same(o, on, "too-few-arguments\n", 18), "call-variadic-zero-args");
++    rc = call_one("variadic", "1", "7", &o, &on);
++    ck(rc == 0 && same(o, on, "accept\n", 7), "call-variadic-tail");
++    rc = call_one("none", "0", "5", &o, &on);
++    ck(rc == 0 && same(o, on, "accept\n", 7), "call-no-prototype-unchecked");
++    rc = call_one("variadic", "0", "5", &o, &on);
++    ck(rc == 0 && same(o, on, "accept\n", 7), "call-c23-bare-ellipsis-unchecked");
++    /* 3. shadow roots: one clean copy, three damaged ones */
++    {
++        const char *names[4] = {"shadow-ok", "shadow-drop", "shadow-head", "shadow-label"};
++        const char *modes[3] = {"drop-last", "head-line", "relabel"};
++        int m;
++        {
++            char sd[AC_PATH];
++            if (shadow(names[0], sd, (int)sizeof sd)) die("shadow-ok-mkdir");
++            if (put_table(sd, table, tn)) die("shadow-ok-table");
++            rc = check_root(sd, &o, &on);
++            ck(rc == 0, "shadow-ok");
++        }
++        for (m = 0; m < 3; m++) {
++            char sd[AC_PATH];
++            static char body[AC_CAP];
++            size_t bn = 0;
++            if (shadow(names[m + 1], sd, (int)sizeof sd)) die("shadow-mkdir");
++            if (mutate(modes[m], body, &bn, table, tn)) die("mutate");
++            if (same(body, bn, table, tn)) die("mutate-noop");
++            if (put_table(sd, body, bn)) die("shadow-table");
++            rc = check_root(sd, &o, &on);
++            ck(rc == 1, names[m + 1]);
++        }
++    }
++    /* 4. the real table survived every read and every shadow write */
++    {
++        char *again = cx_read(path, &tn);
++        ck(again && same(again, tn, table, tn), "table-unmodified");
++    }
++    sy_printf("ARITY_CONTROLS\tassertions=%d\tfailures=%d\n", assertions, failures);
++    return failures ? 1 : 0;
++}
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -380,3 +380,4 @@
+ cx-base-external	IMPLEMENTED	contract	tools/check-base-external.cx	SOURCE	lnx/x86_64	55	-	tools/check-base-external.cx	-	contract.cx-base-external	rc0:BASE_EXTERNAL	product
+ cx-booter-ape	IMPLEMENTED	contract	tools/check-booter-ape.cx	SOURCE	lnx/x86_64	55	-	tools/check-booter-ape.cx	-	contract.cx-booter-ape	rc0:BOOTER_APE	product
+ cx-manifest	IMPLEMENTED	contract	tools/check-manifest.cx	SOURCE	lnx/x86_64	55	-	tools/check-manifest.cx	-	contract.cx-manifest	rc0:MANIFEST_CHECK	product
++arity-controls	IMPLEMENTED	negative	tests/arity-controls.cx	SOURCE	lnx/x86_64	55	-	tests/arity-controls.cx	{root};{out}	arity.controls	rc0:ARITY_CONTROLS	product
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -360,3 +360,4 @@
+ contract.cx-base-external	contract	IMPLEMENTED_SEPARATE_BATCH	External base (kernel) sha-verification: UNISA_KERNEL external kernel file with correct UNISA_KERNEL_SHA runs core_run correctly; bad sha is named-rejected (kernel sha256 mismatch); external bytes equal embedded pack blob; run cold/hot relative timing UNMEASURED until product rebuild.	tools/check-base-external.cx + tools/core-run-ext-kernel.cx + cx/sys/kernel.cx
+ contract.cx-booter-ape	contract	IMPLEMENTED_SEPARATE_BATCH	Booter head (dev-lnx): deterministic head bytes (generated twice identical); head contains uname/manifest/UNISA_KERNEL_SHA booter logic; launches --version on Linux x86_64; external-base-path effect requires product rebuild with B3 kernel.cx (NOT_CLAIMED); win/mac/arm64 CI-ONLY.	tools/release-ape.cx + tools/check-booter-ape.cx
+ contract.cx-manifest	contract	IMPLEMENTED_SEPARATE_BATCH	Manifest generator determinism: 6-field manifest (name kind arch sha256 size order) from split2 product roots generated twice identical; 6-field shape verified; member set/order/sha aligned with pp_member_list; byte-equal-to-B0-explode NOT-APPLICABLE (different field set).	tools/manifest-gen.cx + tools/check-manifest.cx + tools/cxlib/productpkg.cx
++arity.controls	negative	IMPLEMENTED_SEPARATE_BATCH	arity 表 243 键与规则程序输出逐字节一致;篡改行数/表头/标签的影子根均被拒;8 个边界 call 标签正确;真实表未被检查或影子写入改动	arity-controls.cx;../tools/arity-gen.cx;../seed/gold_arity_label.cx;../weights/arity/arity.tsv
+diff --git a/tests/toolsloc.tsv b/tests/toolsloc.tsv
+--- a/tests/toolsloc.tsv
++++ b/tests/toolsloc.tsv
+@@ -1 +1 @@
+-TOTAL	62213
++TOTAL	62469
+diff --git a/prd.md b/prd.md
+index 971c519120..a0729cf2d2 100644
+--- a/prd.md
++++ b/prd.md
+@@ -73,6 +73,7 @@
+ | 九个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc |
+ | tools 行数只降不升 | `sh ./unisacc.com tests/toolsloc.cx -- --check`（`--write` 只下调） | tracked regular `tools/*.cx` 总行数，基线 `tests/toolsloc.tsv`；新增 tool 必须先改基线并经 cc 批准 |
+ | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
++| arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
+ | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
+ | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
+ | 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |

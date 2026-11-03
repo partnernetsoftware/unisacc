@@ -42,13 +42,22 @@ INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → 
 - **RATCHET**:提交后立即 `tools/ratchets.cx`;红则新提交 revert(不用 reset),账本 BLOCKED。
 - **DRY-EPOCH**:构造输入(`tools/ exec/ cx/ src/ seed/`)有新提交 → 私有根预演慢车道;红则回到最近改该文件的工作项,置 REOPENED。
 
-## 6 模型节点的输出契约(工具侧强制;不符退回重答一次,再不符记 INVALID)
+## 6 模型节点的输出契约:规范化推理(`omp-workflow` 机器校验;不符退回重答一次,再不符记 INVALID)
+推理允许且鼓励,但只能写成**带证据的推理链**,不能写成叙述。
 ```json
-{"decision":"一句","why":["path:line 或命令输出"],"rejected":[{"option":"","reason":""}],
- "risk":"一句","confidence":0.0,"verified":["实际运行/读到的"],"inferred":["未验证的推断"],
+{"decision":"一句结论(≤240字)",
+ "steps":[{"claim":"一句断言(≤140字)","ref":"path:line | cmd","quote":"逐字摘自该处原文(≥4字)"}],
+ "rejected":[{"option":"","reason":""}],"risk":"一句","confidence":0.0,
+ "verified":["实际运行/读到并有输出的"],"inferred":["未验证的推断"],
  "next":["可执行命令"],"needs":"需要调用者决定的事,无则空"}
 ```
-`verified` 与 `inferred` 分开;没运行过的只能放 `inferred`;总长默认 ≤1200 字符;不含过程叙述。
+机器校验项(失败即退回并说明哪一项):
+1. `steps` 1..8 步,前提→推论顺序,最后一步直接支撑 decision;
+2. 每步 `ref`=`path:line`:文件须存在、行号不越界、`quote` 须逐字出现在该行±3 行内(编造引用必被抓);`ref="cmd"` 表示命令输出,计入 `refs_unverified`;
+3. 至少 1 步有可校验的 `path:line`(arbiter 除外);reviewer 的 decision 以 PASS/FAIL 开头;locator 的 next 含验证命令;
+4. 废话词表(开场白、客套、“让我/首先/综上”等)出现即拒;总长 ≤1200 字(×3 字节);
+5. `verified` 与 `inferred` 分开,没运行过的只能放 `inferred`。
+输出自带 `checks:{refs_verified,refs_unverified}`,调用者据此判断可信度;记录落 `out/workflow/*.json` 与 `metrics.tsv`。
 
 ## 7 提交与集成规矩
 - 提交请求必须含:改了哪些路径、**执行了什么、输出什么**。只有 `git apply --check`/只编译,不算验证。

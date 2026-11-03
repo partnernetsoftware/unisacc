@@ -1,0 +1,168 @@
+diff --git a/tools/cxlib/productpkg.cx b/tools/cxlib/productpkg.cx
+index ae70e48f1a..5c8344a59f 100644
+--- a/tools/cxlib/productpkg.cx
++++ b/tools/cxlib/productpkg.cx
+@@ -174,21 +174,25 @@ static int pp_file_hex(const char *src, const char *name, char hex[65]) {
+     return 0;
+ }
+ 
+-/* "NAME<TAB>HEX\n" appended to CANON at *AT; -1 when it would not fit. Bytes are a display fact
+-   (root-identity prints them); they are not part of the identity, which is the bytes themselves. */
+-static int pp_canon_add(char *canon, long cap, long *at, const char *name, const char *hex, long bytes) {
+-    char line[400];
+-    long n = 0, i;
+-    (void)bytes;
+-    for (i = 0; name[i] && n < 200; i++) line[n++] = name[i];
+-    line[n++] = '\t';
+-    for (i = 0; hex[i] && n < 330; i++) line[n++] = hex[i];
+-    line[n++] = '\n';
+-    if (*at + n > cap) return -1;
+-    for (i = 0; i < n; i++) canon[(*at)++] = line[i];
+-    return 0;
++/* Manifest kind by member name (B5b: identity = sha256 of the 6-field manifest text). */
++static const char *pp_member_kind(const char *name) {
++    if (pp_cmp(name, "unisacc.com") == 0) return "base";
++    if (pp_cmp(name, "entry.elf") == 0) return "stage";
++    return "resource";
++}
++/* LONG into DST, bounded; returns the length copied (decimal, no sign needed: size/order >= 0). */
++static int pp_put_long(char *dst, int cap, long v) {
++    char tmp[24];
++    int n = 0, i;
++    if (v < 0) v = 0;
++    do { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v && n < 20);
++    if (cap < n + 1) return 0;
++    for (i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
++    dst[n] = 0;
++    return n;
+ }
+ 
++
+ /* The launcher's basename, which is a member of ROOT itself rather than of the dev directory. */
+ static int pp_is_launcher(const char *name) {
+     return pp_cmp(name, "unisacc.com") == 0;
+@@ -294,9 +298,24 @@ int pp_product_digest(const char *root, char hex[65]) {
+     if (l != PP_SPLIT) return -1;
+     n = pp_member_list(root, names, shas, bytes, PP_MAX_MEMBERS);
+     if (n < 1) return -1;
+-    for (i = 0; i < n; i++)
+-        if (pp_canon_add(canon, (long)sizeof canon - 1, &at, names[i], shas[i], bytes[i])) return -1;
+-    canon[at] = 0;
++    for (i = 0; i < n; i++) {
++        const char *kind = pp_member_kind(names[i]);
++        int k;
++        /* name \t kind \t \t sha \t size \t order \n  (arch empty, 6 fields) */
++        for (k = 0; names[i][k] && at < (long)sizeof canon - 1; k++) canon[at++] = names[i][k];
++        canon[at++] = '\t';
++        for (k = 0; kind[k] && at < (long)sizeof canon - 1; k++) canon[at++] = kind[k];
++        canon[at++] = '\t';
++        canon[at++] = '\t';
++        for (k = 0; shas[i][k] && at < (long)sizeof canon - 1; k++) canon[at++] = shas[i][k];
++        canon[at++] = '\t';
++        if (at + 24 >= (long)sizeof canon) return -1;
++        at += pp_put_long(canon + at, (int)((long)sizeof canon - at), bytes[i]);
++        canon[at++] = '\t';
++        if (at + 8 >= (long)sizeof canon) return -1;
++        at += pp_put_long(canon + at, (int)((long)sizeof canon - at), (long)i);
++        canon[at++] = '\n';
++    }
+     cx_sha256_hex(canon, (size_t)at, hex);
+     return 0;
+ }
+diff --git a/tools/cxlib/rebuildcontext.cx b/tools/cxlib/rebuildcontext.cx
+index e4d4372f6e..39de64a909 100644
+--- a/tools/cxlib/rebuildcontext.cx
++++ b/tools/cxlib/rebuildcontext.cx
+@@ -10,6 +10,7 @@
+ #pragma unisa use adoptedsnapshot
+ #pragma unisa use mixedsnapshot
+ #pragma unisa use kernelinputs
++#pragma unisa use productpkg
+ typedef struct {int own_physical_reads,ni_reads,controller_reads,controller_post_reads,origin_executor_reads,origin_wrapper_reads;} rb_adoption_reads;
+ typedef struct {char mixed_profile[80],mixed_tool_root[4096];char source[65],bootstrap[65],bootstrap_record_source[65],product[65],package[65],kernel_context[65],product_context[65],witness[65],root_product[65],root_native[65],native_receipt[65],package_epoch_artifact[65],package_epoch_record[65],package_epoch_source[65],builder_record[65];int package_kind,source_jobs,source_models,source_physical_reads;long long source_elapsed_ns;int root_has_native,has_native,has_product_record,files,model_inputs,physical_reads,retained_hits;size_t retained_bytes;char adoption_witness[65],adoption_context[65],adoption_kernel_context[65],adoption_origin_source[65],adoption_reader[65],adoption_controller_source[65],adoption_controller_elf[65],adoption_ni_witness[65],adoption_ni_module[65],adoption_netpack[65],adoption_kernelsha[65],adoption_origin_spec[65],adoption_origin_verifier[65],adoption_origin_elf[65],adoption_origin_profile[65],adoption_origin_closure[65],adoption_origin_mapping[65],adoption_report_identity[65],adoption_observed_files[65],adoption_bootstrap_artifact[65],adoption_bootstrap_record[65],adoption_bootstrap_source[65],adoption_foundation[65],adoption_producer[65],mixed_builder_artifact[65],mixed_builder_record[65];char adoption_controller_path[4096],adoption_bootstrap_path[4096],package_epoch_path[4096],package_epoch_logical_path[4096],mixed_builder_path[4096];rb_adoption_reads adoption_reads;} rb_result;
+ typedef struct {char *path,*bytes;size_t n;char hash[65];} rb_retained;
+@@ -43,11 +44,11 @@ static void rb_pair(np_buf *b,const char *key,const char *value){np_puts(b,key);
+ /* The existing ident writer emits these top-level pretty-JSON fields. Values
+  * have no escapes; duplicate, truncated or noncanonical fields are refused. */
+ static int rb_field(const char *s,const char *name,char *value,size_t cap,int optional){char key[120];{ if (cx_fmt(key,sizeof key,"\n  \"%s\": ",name)) { fprintf(stderr, "rebuildcontext: text too long for key\n"); exit(2); } }const char *p=strstr(s,key);if(!p)return optional?0:-1;if(strstr(p+1,key))return -1;p+=strlen(key);if(*p++!='\"')return -1;size_t n=0;while(*p&&*p!='\"'){if((unsigned char)*p<32||*p=='\\'||n+1>=cap)return -1;value[n++]=*p++;}if(*p!='\"'||(p[1]!=','&&p[1]!='\n'))return -1;value[n]=0;return 1;}
+-static int rb_record(rb_context *c,const char *artifact,const char *expected_source,char out_source[65],char out_artifact[65],char native[65],int *has_native){char p[4400],h[65],v[100],bytes[100];size_t an,n;char *a=rb_read_hash(c,artifact,&an,h);if(!a)return -1;free(a);if(snprintf(p,sizeof p,"%s.build.json",artifact)>=(int)sizeof p)return rb_bad(c,"record-path",artifact);char *s=rb_read(c,p,&n);if(!s)return -1;int ok=n<16384&&n>=4&&!memcmp(s,"{\n",2)&&!memcmp(s+n-3,"\n}\n",3)&&!memchr(s,0,n)&&!memchr(s,'\r',n);int nh=rb_field(s,"native_construction_sha256",native,65,1);{ if (cx_fmt(bytes,sizeof bytes,"\n  \"bytes\": %lu,\n",(unsigned long)an)) { fprintf(stderr, "rebuildcontext: text too long for bytes\n"); exit(2); } }
++static int rb_record(rb_context *c,const char *artifact,const char *product_root,const char *expected_source,char out_source[65],char out_artifact[65],char native[65],int *has_native){char p[4400],h[65],v[100],bytes[100];size_t an,n;if(product_root){if(pp_product_digest(product_root,h))return rb_bad(c,"product-identity",product_root);}else{char *a=rb_read_hash(c,artifact,&an,h);if(!a)return -1;free(a);}if(snprintf(p,sizeof p,"%s.build.json",artifact)>=(int)sizeof p)return rb_bad(c,"record-path",artifact);char *s=rb_read(c,p,&n);if(!s)return -1;int ok=n<16384&&n>=4&&!memcmp(s,"{\n",2)&&!memcmp(s+n-3,"\n}\n",3)&&!memchr(s,0,n)&&!memchr(s,'\r',n);int nh=rb_field(s,"native_construction_sha256",native,65,1);{ if (cx_fmt(bytes,sizeof bytes,"\n  \"bytes\": %lu,\n",(unsigned long)an)) { fprintf(stderr, "rebuildcontext: text too long for bytes\n"); exit(2); } }
+  ok=ok&&np_count(s,n,"\n  \"bytes\": ",strlen("\n  \"bytes\": "))==1&&np_count(s,n,"\n  \"schema\": ",strlen("\n  \"schema\": "))==1&&np_count(s,n,"\n  \"settings\": ",strlen("\n  \"settings\": "))==1&&strstr(s,bytes)&&strstr(s,"\n  \"schema\": 1,\n")&&strstr(s,"\n  \"settings\": {}")&&rb_field(s,"artifact_sha256",out_artifact,65,0)==1&&!strcmp(out_artifact,h)&&rb_field(s,"sources_sha256",out_source,65,0)==1&&rb_hex(out_source,64)&&(!expected_source||!strcmp(out_source,expected_source))&&rb_field(s,"commit",v,sizeof v,0)==1&&rb_hex(v,40)&&nh>=0&&(!nh||rb_hex(native,64));if(ok){char canonical[1200];int z;if(nh)z=snprintf(canonical,sizeof canonical,"{\n  \"artifact_sha256\": \"%s\",\n  \"bytes\": %lu,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\",\n  \"native_construction_sha256\": \"%s\"\n}\n",out_artifact,(unsigned long)an,v,out_source,native);else z=snprintf(canonical,sizeof canonical,"{\n  \"artifact_sha256\": \"%s\",\n  \"bytes\": %lu,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\"\n}\n",out_artifact,(unsigned long)an,v,out_source);ok=z>=0&&(size_t)z==n&&!memcmp(canonical,s,n);}free(s);if(!ok)return rb_bad(c,"build-record-identity-or-settings",p);*has_native=nh==1;return 0;}
+ static int rb_source(rb_context *c,rb_result *r){char h[65],helper[4400],bound[4400],why[1024];if(rb_digest(c,c->gen,"identity-helper",h,0)||rb_expect(c,c->gen,"identity-helper.sha256",h,64,"identity-helper-digest")||rb_path(c,helper,c->gen,"identity-helper")||rb_path(c,bound,c->root,"tools/bound"))return -1;char *args[]={bound,"12",helper,(char *)c->root,0};np_result result;if(np_run(args,c->root,0,15,&result,why,sizeof why))return rb_bad(c,"source-helper-execution",why);int ok=!result.rc&&!result.errn&&result.outn==65&&result.out[64]=='\n';if(ok){memcpy(r->source,result.out,64);r->source[64]=0;ok=rb_hex(r->source,64);}np_free(&result);return ok?0:rb_bad(c,"source-helper-result",helper);}
+ static int rb_kernel_context(rb_context *c,rb_result *r){char h[65],boot_source[65],boot_native[65];int has_boot_native;
+- if(rb_record(c,c->bootstrap,0,boot_source,r->bootstrap,boot_native,&has_boot_native))return -1;strcpy(r->bootstrap_record_source,boot_source);char file_sha[24][65];const char *fptrs[24];char tool_sha[6][65];const char *tptrs[6];char body[4096];long bn;int i,rc=-1;for(i=0;i<24;i++){if(rb_digest(c,c->root,ki_kernel_source(i),file_sha[i],0))goto done;fptrs[i]=file_sha[i];}char ksrc[65];ki_kernel_source_sha(fptrs,ksrc);for(i=0;i<6;i++){if(rb_digest(c,c->root,ki_context_file(i),tool_sha[i],0))goto done;tptrs[i]=tool_sha[i];}bn=ki_context_body(body,sizeof body,ksrc,tptrs);if(bn<0)goto done;if(rb_hash(c,body,(size_t)bn,r->kernel_context))goto done;char expected[66];{ if (cx_fmt(expected,sizeof expected,"%s\n",r->kernel_context)) { fprintf(stderr, "rebuildcontext: text too long for expected\n"); exit(2); } }rc=rb_expect(c,c->gen,"context.sha256",expected,65,"kernel-context-source-tools");done:return rc;}
++ if(rb_record(c,c->bootstrap,0,0,boot_source,r->bootstrap,boot_native,&has_boot_native))return -1;strcpy(r->bootstrap_record_source,boot_source);char file_sha[24][65];const char *fptrs[24];char tool_sha[6][65];const char *tptrs[6];char body[4096];long bn;int i,rc=-1;for(i=0;i<24;i++){if(rb_digest(c,c->root,ki_kernel_source(i),file_sha[i],0))goto done;fptrs[i]=file_sha[i];}char ksrc[65];ki_kernel_source_sha(fptrs,ksrc);for(i=0;i<6;i++){if(rb_digest(c,c->root,ki_context_file(i),tool_sha[i],0))goto done;tptrs[i]=tool_sha[i];}bn=ki_context_body(body,sizeof body,ksrc,tptrs);if(bn<0)goto done;if(rb_hash(c,body,(size_t)bn,r->kernel_context))goto done;char expected[66];{ if (cx_fmt(expected,sizeof expected,"%s\n",r->kernel_context)) { fprintf(stderr, "rebuildcontext: text too long for expected\n"); exit(2); } }rc=rb_expect(c,c->gen,"context.sha256",expected,65,"kernel-context-source-tools");done:return rc;}
+ static int rb_assembler(rb_context *c,rb_result *r){const char *outputs[]={"assembler.cx","contracts.cx"};np_buf b={0};char h[65],source[65],binary[65],name[100],dir[4400];size_t n;int i,rc=-1;if(rb_path(c,dir,c->gen,"assembler"))return -1;np_puts(&b,"unisacc-asm-material-v3\nstatus\tPREPARED\nscope\tsource-preserving-C-assembler-transition\nroot\t");np_puts(&b,c->root);np_puts(&b,"\n");for(i=0;i<7;i++){const char *in=ki_asm_file(i);if(i==3&&!c->kernel_live_product){char *s=rb_read_hash(c,c->bootstrap,&n,h);if(!s)goto done;free(s);}else if(rb_digest(c,c->root,in,h,&n))goto done;np_puts(&b,i==3?"compiler-input\t":"source-input\t");np_puts(&b,in);np_puts(&b,"\t");np_putll(&b,(long long)n);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}for(i=0;i<2;i++){if(rb_digest(c,dir,outputs[i],h,&n))goto done;if(!i){ if (cx_fmt(source, sizeof source, "%s",h)) { fprintf(stderr, "rebuildcontext: text too long for source\n"); exit(2); } }np_puts(&b,"material\t");np_puts(&b,outputs[i]);np_puts(&b,"\t");np_putll(&b,(long long)n);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}if(rb_expect(c,dir,"material.tsv",b.p,b.n,"assembler-material-receipt"))goto done;free(b.p);memset(&b,0,sizeof b);if(rb_digest(c,c->gen,"assembler-native",binary,0))goto done;np_puts(&b,"native-assembler-cache-v1\nflags\t-O2 -fno-trim-libc\ncontext\t");np_puts(&b,r->kernel_context);np_puts(&b,"\nsource\t");np_puts(&b,source);np_puts(&b,"\nartifact\t");np_puts(&b,binary);np_puts(&b,"\n");rc=rb_expect(c,c->gen,"assembler-native.tsv",b.p,b.n,"assembler-cache-receipt");done:free(b.p);return rc;}
+ static unsigned long long rb_little(const char *p){unsigned long long v=0;int i;for(i=7;i>=0;i--)v=(v<<8)|(unsigned char)p[i];return v;}
+ static int rb_files(rb_context *c){const char *arches[]={"arm64","x86_64"},*exts[]={"s","o"};char h[65],name[100],receipt[100],p[4400];int a,e,i;for(a=0;a<2;a++){for(e=0;e<2;e++){np_buf b={0};np_puts(&b,"unisacc-native-kernel-files-v1\n");for(i=0;i<11;i++){{ if (cx_fmt(name,sizeof name,"%s/%s.%s",arches[a],rb_units[i],exts[e])) { fprintf(stderr, "rebuildcontext: text too long for name\n"); exit(2); } }if(rb_digest(c,c->gen,name,h,0)){free(b.p);return -1;}rb_pair(&b,name,h);}{ if (cx_fmt(receipt,sizeof receipt,"%s-%s.tsv",arches[a],e?"objects":"sources")) { fprintf(stderr, "rebuildcontext: text too long for receipt\n"); exit(2); } }int rc=rb_expect(c,c->gen,receipt,b.p,b.n,"kernel-files-receipt");free(b.p);if(rc)return -1;}{ if (cx_fmt(name,sizeof name,"%s.kernel",arches[a])) { fprintf(stderr, "rebuildcontext: text too long for name\n"); exit(2); } }if(rb_path(c,p,c->gen,name))return -1;size_t n;char *s=rb_read_hash(c,p,&n,h);if(!s)return -1;int ok=n>=48&&!memcmp(s,"UNIKERN1",8)&&rb_little(s+8)==(unsigned)a+1&&rb_little(s+32)==n-40&&rb_little(s+16)<n-40&&rb_little(s+24)<=n-48&&!(rb_little(s+24)%8);if(ok)ok=rb_little(s+40+(size_t)rb_little(s+24))==0;free(s);if(!ok)return rb_bad(c,"kernel-header-service-slot",name);{ if (cx_fmt(receipt,sizeof receipt,"%s-kernel.sha256",arches[a])) { fprintf(stderr, "rebuildcontext: text too long for receipt\n"); exit(2); } }if(rb_expect(c,c->gen,receipt,h,64,"kernel-digest-receipt"))return -1;}return 0;}
+@@ -74,7 +75,7 @@ static int rb_package_source(rb_context *c,rb_result *r,int compare_product){
+  if(sp_verify_package_snapshot(c->root,c->pkg,r->source,55,&s,why,sizeof why)){rb_bad(c,"source-package-canonical-snapshot",why);goto done;}
+  if(rb_path(c,p,c->pkg,"compiler.pkg"))goto done;pkg=rb_read_hash(c,p,&n,r->package);if(!pkg||strcmp(r->package,s.artifact)||rb_package_parse(c,pkg,n,1,&prefix,preserved)){if(!c->failed)rb_bad(c,"source-package-artifact-identity",p);goto done;}
+  if(rb_digest(c,c->pkg,"package.tsv",h,0)||strcmp(h,s.receipt)||rb_digest(c,c->pkg,"model-inputs.tsv",h,0)||strcmp(h,s.manifest)){if(!c->failed)rb_bad(c,"source-package-manifest-receipt-identity",c->pkg);goto done;}
+- if(rb_record(c,s.epoch_path,0,r->package_epoch_source,epoch_artifact,native,&nh)||strcmp(epoch_artifact,s.epoch_artifact)){if(!c->failed)rb_bad(c,"source-package-epoch-artifact",s.epoch_path);goto done;}
++ if(rb_record(c,s.epoch_path,0,0,r->package_epoch_source,epoch_artifact,native,&nh)||strcmp(epoch_artifact,s.epoch_artifact)){if(!c->failed)rb_bad(c,"source-package-epoch-artifact",s.epoch_path);goto done;}
+  if(snprintf(p,sizeof p,"%s.build.json",s.epoch_path)>=(int)sizeof p){rb_bad(c,"source-package-epoch-record-path",s.epoch_path);goto done;}size_t rn;char *record=rb_read_hash(c,p,&rn,h);if(!record)goto done;free(record);if(strcmp(h,s.epoch_record)){rb_bad(c,"source-package-epoch-record",p);goto done;}
+  if(compare_product){if(rb_path(c,p,c->gen,"unisacc-next.com"))goto done;product=rb_read_hash(c,p,&bn,r->product);if(!product||rb_embedded(c,product,bn,&embedded,&pn))goto done;if(pn!=n||memcmp(embedded,pkg,n)){rb_bad(c,"product-prepared-package-bytes",p);goto done;}}
+  strcpy(r->package_epoch_artifact,s.epoch_artifact);strcpy(r->package_epoch_record,s.epoch_record);r->package_kind=2;r->source_jobs=s.jobs;r->source_models=s.models;r->source_physical_reads=s.physical_reads;r->source_elapsed_ns=s.elapsed_ns;
+@@ -95,7 +96,7 @@ static int rb_adoption_origin_epoch(rb_context *c,rb_result *r,const as_result *
+  if(at!=n||strcmp(x->v[0],"VERIFIED-origin-DAG-not-current-construction-no-test-result")||strcmp(x->v[1],c->root)||strcmp(x->v[5],c->root)||strcmp(x->v[8],a->origin_spec)||strcmp(x->v[9],a->origin_verifier)||strcmp(x->v[10],a->origin_elf)||strcmp(x->v[11],a->origin_profile)||strcmp(x->v[12],a->origin_execution_closure)||strcmp(x->v[13],a->origin_mapping)||strcmp(x->v[15],a->origin_source)||strcmp(x->v[25],a->origin_verifier)||strcmp(x->v[26],a->kernelsha)||strcmp(x->v[27],"107")||strcmp(x->v[28],"34")||strcmp(x->v[29],"1004")||strcmp(x->v[23],"dd6f5e6068289d04346f202035fb1ae3c84a10e254630c7ba5a650c7a06deb46")||strcmp(x->v[24],"9c2e71ef2094773bcada4c27a39871f3d0f5947555eb3ebe338aaddf203427ba")||!rb_hex(x->v[20],64)||!rb_hex(x->v[21],64)){rb_bad(c,"adopted-origin-bound-identity",p);goto done;}
+  if(rb_adoption_path(c,x->v[2],1))goto done;size_t ln=strlen(x->v[1]),en=strlen(x->v[22]);if(en<=ln||en>=sizeof r->package_epoch_logical_path||strncmp(x->v[22],x->v[1],ln)||x->v[22][ln]!='/'||strpbrk(x->v[22],"\r\n\t")||strstr(x->v[22],"//")){rb_bad(c,"adopted-origin-epoch-logical-root",x->v[22]);goto done;}
+  int z=snprintf(p,sizeof p,"%s%s",x->v[2],x->v[22]+ln);if(z<0||(size_t)z>=sizeof p||rb_adoption_path(c,p,0))goto done;strcpy(r->package_epoch_logical_path,x->v[22]);strcpy(r->package_epoch_path,p);
+- if(rb_record(c,p,0,r->package_epoch_source,artifact,native,&nh)||strcmp(artifact,x->v[20])){if(!c->failed)rb_bad(c,"adopted-origin-epoch-artifact",p);goto done;}char metadata[4400];z=snprintf(metadata,sizeof metadata,"%s.build.json",p);if(z<0||(size_t)z>=sizeof metadata||rb_adoption_path(c,metadata,0)){if(!c->failed)rb_bad(c,"adopted-origin-epoch-record-path",p);goto done;}size_t rn;char *record=rb_read_hash(c,metadata,&rn,h);if(!record)goto done;free(record);if(strcmp(h,x->v[21])){rb_bad(c,"adopted-origin-epoch-original-record",metadata);goto done;}strcpy(r->package_epoch_artifact,x->v[20]);strcpy(r->package_epoch_record,x->v[21]);strcpy(r->adoption_foundation,x->v[24]);strcpy(r->adoption_producer,x->v[23]);rb_pair(&c->witness,"adopted-origin.tsv",origin_hash);rc=0;
++ if(rb_record(c,p,0,0,r->package_epoch_source,artifact,native,&nh)||strcmp(artifact,x->v[20])){if(!c->failed)rb_bad(c,"adopted-origin-epoch-artifact",p);goto done;}char metadata[4400];z=snprintf(metadata,sizeof metadata,"%s.build.json",p);if(z<0||(size_t)z>=sizeof metadata||rb_adoption_path(c,metadata,0)){if(!c->failed)rb_bad(c,"adopted-origin-epoch-record-path",p);goto done;}size_t rn;char *record=rb_read_hash(c,metadata,&rn,h);if(!record)goto done;free(record);if(strcmp(h,x->v[21])){rb_bad(c,"adopted-origin-epoch-original-record",metadata);goto done;}strcpy(r->package_epoch_artifact,x->v[20]);strcpy(r->package_epoch_record,x->v[21]);strcpy(r->adoption_foundation,x->v[24]);strcpy(r->adoption_producer,x->v[23]);rb_pair(&c->witness,"adopted-origin.tsv",origin_hash);rc=0;
+  done:free(s);free(x);return rc;
+ }
+ static int rb_package_adopted(rb_context *c,rb_result *r,int compare_product){
+@@ -105,7 +106,7 @@ static int rb_package_adopted(rb_context *c,rb_result *r,int compare_product){
+  if(rb_path(c,p,c->pkg,"compiler.pkg"))goto done;pkg=rb_read_hash(c,p,&n,r->package);if(!pkg||strcmp(r->package,a.artifact)||rb_package_parse(c,pkg,n,1,&prefix,preserved)){if(!c->failed)rb_bad(c,"adopted-package-actual-P3-kernels",p);goto done;}
+  if(rb_digest(c,c->pkg,"model-inputs.tsv",h,0)||strcmp(h,a.manifest)||rb_digest(c,c->pkg,"package.tsv",h,0)||strcmp(h,a.receipt)||rb_digest(c,c->pkg,"context.tsv",h,0)||strcmp(h,a.context)){if(!c->failed)rb_bad(c,"adopted-package-manifest-receipt-context",c->pkg);goto done;}
+  if(rb_adoption_origin_epoch(c,r,&a))goto done;
+- char artifact[65],native[65];int nh;if(rb_adoption_path(c,a.controller_bootstrap_path,0)||rb_record(c,a.controller_bootstrap_path,0,r->adoption_bootstrap_source,artifact,native,&nh)||strcmp(artifact,a.controller_bootstrap_artifact)){if(!c->failed)rb_bad(c,"adopted-controller-bootstrap-artifact",a.controller_bootstrap_path);goto done;}int z=snprintf(p,sizeof p,"%s.build.json",a.controller_bootstrap_path);if(z<0||(size_t)z>=sizeof p||rb_adoption_path(c,p,0)){if(!c->failed)rb_bad(c,"adopted-controller-bootstrap-record-path",a.controller_bootstrap_path);goto done;}size_t rn;char *record=rb_read_hash(c,p,&rn,h);if(!record)goto done;free(record);if(strcmp(h,a.controller_bootstrap_record)){rb_bad(c,"adopted-controller-bootstrap-original-record",p);goto done;}
++ char artifact[65],native[65];int nh;if(rb_adoption_path(c,a.controller_bootstrap_path,0)||rb_record(c,a.controller_bootstrap_path,0,0,r->adoption_bootstrap_source,artifact,native,&nh)||strcmp(artifact,a.controller_bootstrap_artifact)){if(!c->failed)rb_bad(c,"adopted-controller-bootstrap-artifact",a.controller_bootstrap_path);goto done;}int z=snprintf(p,sizeof p,"%s.build.json",a.controller_bootstrap_path);if(z<0||(size_t)z>=sizeof p||rb_adoption_path(c,p,0)){if(!c->failed)rb_bad(c,"adopted-controller-bootstrap-record-path",a.controller_bootstrap_path);goto done;}size_t rn;char *record=rb_read_hash(c,p,&rn,h);if(!record)goto done;free(record);if(strcmp(h,a.controller_bootstrap_record)){rb_bad(c,"adopted-controller-bootstrap-original-record",p);goto done;}
+  if(compare_product){if(rb_path(c,p,c->gen,"unisacc-next.com"))goto done;product=rb_read_hash(c,p,&bn,r->product);if(!product||rb_embedded(c,product,bn,&embedded,&pn))goto done;if(pn!=n||memcmp(embedded,pkg,n)){rb_bad(c,"product-prepared-adopted-package-bytes",p);goto done;}}
+  r->package_kind=3;r->source_jobs=a.jobs;r->source_models=a.models;r->source_physical_reads=a.origin_physical_reads;r->source_elapsed_ns=a.own_elapsed_ns;
+  strcpy(r->adoption_witness,a.witness);
+@@ -160,7 +161,7 @@ static int rb_package(rb_context *c,rb_result *r){int kind=rb_package_kind(c);if
+  * actual generation builder have distinct path/raw/original-record roles. */
+ static int rb_product_context_adopted(rb_context *c,rb_result *r){
+  const char *tools[]={"tools/product-build.cx","tools/cxlib/rebuildcontext.cx","tools/cxlib/adoptedsnapshot.cx","tools/source-package-adopt.cx","tools/cxlib/nninputs.cx","tools/cxlib/sourcepackage.cx","tools/source-origin-verify.cx","tools/cxlib/kernelsha.cx","tools/cxlib/kernelcontext.cx","tools/cxlib/netpack.cx","seed/ape.c"};
+- np_buf b={0};char h[65],p[4400],native[65],source[65];int nh,rc=-1;if(rb_record(c,c->bootstrap,0,source,r->bootstrap,native,&nh))goto done;strcpy(r->bootstrap_record_source,source);int z=snprintf(p,sizeof p,"%s.build.json",c->bootstrap);if(z<0||(size_t)z>=sizeof p){rb_bad(c,"adopted-product-builder-record-path",c->bootstrap);goto done;}size_t n;char *record=rb_read_hash(c,p,&n,r->builder_record);if(!record)goto done;free(record);
++ np_buf b={0};char h[65],p[4400],native[65],source[65];int nh,rc=-1;if(rb_record(c,c->bootstrap,0,0,source,r->bootstrap,native,&nh))goto done;strcpy(r->bootstrap_record_source,source);int z=snprintf(p,sizeof p,"%s.build.json",c->bootstrap);if(z<0||(size_t)z>=sizeof p){rb_bad(c,"adopted-product-builder-record-path",c->bootstrap);goto done;}size_t n;char *record=rb_read_hash(c,p,&n,r->builder_record);if(!record)goto done;free(record);
+  np_puts(&b,"native-product-construction-v3\n");rb_pair(&b,"source",r->source);rb_pair(&b,"package-kind","source-package-adoption-v1");rb_pair(&b,"builder-path",c->bootstrap);rb_pair(&b,"builder",r->bootstrap);rb_pair(&b,"builder-record",r->builder_record);rb_pair(&b,"builder-record-source",r->bootstrap_record_source);rb_pair(&b,"generation-kernel-context",r->kernel_context);rb_pair(&b,"original-NN-epoch-artifact",r->package_epoch_artifact);rb_pair(&b,"original-NN-epoch-record",r->package_epoch_record);rb_pair(&b,"original-NN-epoch-source",r->package_epoch_source);
+  rb_pair(&b,"adoption_witness",r->adoption_witness);
+  rb_pair(&b,"adoption_context",r->adoption_context);
+@@ -199,7 +200,7 @@ static int rb_product_context_mixed(rb_context *c,rb_result *r){
+  const char *tools[]={"tools/product-build.cx","tools/cxlib/rebuildcontext.cx","tools/cxlib/mixedsnapshot.cx","tools/source-package-mixed.cx","tools/cxlib/sourcepackage.cx","tools/source-origin-verify.cx","tools/cxlib/kernelsha.cx","tools/cxlib/kernelcontext.cx","tools/cxlib/netpack.cx","seed/ape.c","src/version.h"};
+  const char *material[]={"compiler.pkg","package.tsv","model-inputs.tsv","context.tsv","origin.tsv","selection.tsv","current-union.tsv","kernel-state.tsv","headers.tsv","code.tsv","phases/declare/record.tsv","phases/pack/record.tsv"};
+  np_buf b={0};char h[65],p[4400],native[65],source[65];int nh,rc=-1;
+- if(!r->mixed_builder_path[0]||rb_record(c,r->mixed_builder_path,0,source,h,native,&nh))goto done;
++ if(!r->mixed_builder_path[0]||rb_record(c,r->mixed_builder_path,0,0,source,h,native,&nh))goto done;
+  if(strcmp(h,r->bootstrap)||strcmp(h,r->mixed_builder_artifact)||strcmp(source,r->bootstrap_record_source)){rb_bad(c,"mixed-saved-and-root-builder-identity",r->mixed_builder_path);goto done;}
+  int z=snprintf(p,sizeof p,"%s.build.json",r->mixed_builder_path);if(z<0||(size_t)z>=sizeof p){rb_bad(c,"mixed-builder-record-path",r->mixed_builder_path);goto done;}size_t n;char *record=rb_read_hash(c,p,&n,h);if(!record)goto done;free(record);
+  if(strcmp(h,r->mixed_builder_record)||(r->builder_record[0]&&strcmp(h,r->builder_record))){rb_bad(c,"mixed-saved-and-root-builder-record",p);goto done;}strcpy(r->builder_record,h);
+@@ -214,7 +215,7 @@ static int rb_product_context_hash(rb_context *c,rb_result *r){
+  const char *new_tools[]={"tools/product-build.cx","tools/cxlib/rebuildcontext.cx","tools/cxlib/sourcepackage.cx","tools/cxlib/kernelsha.cx","tools/source-package.cx","tools/source-package-pack.cx","tools/cxlib/kernelcontext.cx","tools/cxlib/netpack.cx","seed/ape.c"};
+  const char *material[]={"compiler.pkg","package.tsv","model-inputs.tsv"};np_buf b={0};char h[65],p[4400];int rc=-1;
+  if(r->package_kind==2){
+-  char source[65],native[65];int nh;if(rb_record(c,c->bootstrap,0,source,r->bootstrap,native,&nh))goto done;strcpy(r->bootstrap_record_source,source);
++  char source[65],native[65];int nh;if(rb_record(c,c->bootstrap,0,0,source,r->bootstrap,native,&nh))goto done;strcpy(r->bootstrap_record_source,source);
+   if(snprintf(p,sizeof p,"%s.build.json",c->bootstrap)>=(int)sizeof p){rb_bad(c,"builder-record-path",c->bootstrap);goto done;}size_t n;char *s=rb_read_hash(c,p,&n,r->builder_record);if(!s)goto done;free(s);
+   np_puts(&b,"native-product-construction-v2\n");rb_pair(&b,"source",r->source);rb_pair(&b,"package-kind","source-package-v1");rb_pair(&b,"builder",r->bootstrap);rb_pair(&b,"builder-record",r->builder_record);rb_pair(&b,"builder-record-source",r->bootstrap_record_source);rb_pair(&b,"kernel-context",r->kernel_context);rb_pair(&b,"package-epoch-artifact",r->package_epoch_artifact);rb_pair(&b,"package-epoch-record",r->package_epoch_record);
+   if(rb_path(c,p,c->root,"include"))goto done;rb_pair(&b,"current-header-dir",p);rb_pair(&b,"slice-flags","-O2 -I current-header-dir");rb_pair(&b,"wrap-flags","builder-run-DAPE_ZLIB-I/usr/include/node-lz-I-current-header-dir-seed/ape.c-controlled-link-and-private-loader-trace-v2");
+@@ -240,14 +241,14 @@ int rb_build_context(const char *root,const char *gen,const char *pkg,const char
+  if(rb_product_context_hash(&c,&r))goto done;r.files=c.files;r.physical_reads=c.physical_reads;r.retained_hits=c.retained_hits;r.retained_bytes=c.retained_bytes;if(rb_hash(&c,c.witness.p,c.witness.n,r.witness))goto done;*out=r;rc=0;
+  done:for(int i=0;i<c.retained_count;i++){free(c.retained[i].path);free(c.retained[i].bytes);}free(c.witness.p);return rc;
+ }
+-static int rb_optional_product_metadata(rb_context *c,rb_result *r){char p[4400],h[65],sid[65],aid[65],native[65];int nh;if(rb_path(c,p,c->gen,"unisacc-next.com.build.json"))return -1;int present=rb_optional(c,p);if(present<0)return -1;if(present){if(rb_path(c,p,c->gen,"unisacc-next.com")||rb_record(c,p,r->source,sid,aid,native,&nh))return -1;r->has_product_record=1;}else nh=0;
++static int rb_optional_product_metadata(rb_context *c,rb_result *r){char p[4400],h[65],sid[65],aid[65],native[65];int nh;if(rb_path(c,p,c->gen,"unisacc-next.com.build.json"))return -1;int present=rb_optional(c,p);if(present<0)return -1;if(present){if(rb_path(c,p,c->gen,"unisacc-next.com")||rb_record(c,p,c->gen,r->source,sid,aid,native,&nh))return -1;r->has_product_record=1;}else nh=0;
+  if(rb_path(c,p,c->gen,"unisacc-next.com.native.tsv"))return -1;present=rb_optional(c,p);if(present<0)return -1;if(!present){if(nh)return rb_bad(c,"missing-claimed-native-receipt",p);return 0;}int explicit_mixed=r->package_kind==4&&mp_explicit_v2(r->mixed_profile);np_buf b={0};np_puts(&b,explicit_mixed?"native-development-construction-v2\nsource\t":"native-development-construction-v1\nsource\t");np_puts(&b,r->source);np_puts(&b,"\nartifact\t");np_puts(&b,r->product);np_puts(&b,"\n");if(explicit_mixed){rb_pair(&b,"material-profile",r->mixed_profile);rb_pair(&b,"source-root",c->root);rb_pair(&b,"tool-root",r->mixed_tool_root);}const char *tools[]={"tools/package-refresh.cx","tools/cxlib/kernelcontext.cx","tools/candidate-install.cx","seed/ape.c"},*files[]={"context.sha256","slice-win-x86_64","slice-lnx-x86_64","slice-lnx-arm64","slice-osx-x86_64","slice-osx-arm64"};int i,rc=-1;for(i=0;i<4;i++){if(rb_digest(c,explicit_mixed&&i<3?r->mixed_tool_root:c->root,tools[i],h,0))goto done;rb_pair(&b,tools[i],h);}for(i=0;i<6;i++){if(rb_digest(c,c->gen,files[i],h,0))goto done;rb_pair(&b,files[i],h);}rb_pair(&b,"package",r->package);if(rb_expect(c,c->gen,"unisacc-next.com.native.tsv",b.p,b.n,"native-development-receipt"))goto done;if(rb_hash(c,b.p,b.n,r->native_receipt))goto done;r->has_native=1;if(nh&&strcmp(native,r->native_receipt)){rb_bad(c,"product-record-native-receipt-digest",p);goto done;}rc=0;done:free(b.p);return rc;}
+ /* bootstrap is explicit: callers supply the saved prior builder or current root
+  * builder. current_bootstrap additionally requires its source/artifact to be
+  * the verified current root. No candidate installation is required. */
+ static int rb_verify_mode(const char *root,const char *generation,const char *packages,const char *bootstrap,int current_bootstrap,int candidate_mode,rb_result *out,char *why,size_t cap){rb_context c;memset(&c,0,sizeof c);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;if(!root||!generation||!packages||!bootstrap||!out||!why||!cap)return -1;c.root=root;c.gen=generation;c.pkg=packages;c.bootstrap=bootstrap;c.why=why;c.cap=cap;rb_result result;memset(&result,0,sizeof result);int rc=-1;char p[4400],source[65];const char *paths[]={root,generation,packages,bootstrap};int i;for(i=0;i<4;i++)if(paths[i][0]!='/'||strpbrk(paths[i],"\t\r\n")){rb_bad(&c,"absolute-clean-path",paths[i]);goto done;}
+  if(candidate_mode){char actual[4400];if(rb_path(&c,p,root,"unisacc.com")||strcmp(p,bootstrap)||!realpath(p,actual)||strcmp(p,actual)){rb_bad(&c,"candidate-builder-must-be-current-root-path",bootstrap);goto done;}int kind=rb_package_kind(&c);int expected=candidate_mode==1?2:candidate_mode==2?1:candidate_mode==3?3:4;if(kind!=expected){rb_bad(&c,candidate_mode==1?"candidate-preinstall-requires-source-package-v1":candidate_mode==2?"legacy-candidate-preinstall-requires-package-refresh":candidate_mode==3?"adopted-candidate-preinstall-requires-source-package-adoption-v1":"mixed-candidate-preinstall-requires-source-package-mixed-v1",packages);goto done;}}
+- if(rb_source(&c,&result)||rb_path(&c,p,root,"unisacc.com")||rb_record(&c,p,candidate_mode?0:result.source,source,result.root_product,result.root_native,&result.root_has_native))goto done;
++ if(rb_source(&c,&result)||rb_path(&c,p,root,"unisacc.com")||rb_record(&c,p,c.root,candidate_mode?0:result.source,source,result.root_product,result.root_native,&result.root_has_native))goto done;
+  /* Mixed candidates use the live root for kernel and assembler inputs, while
+   * the saved package epoch has a separate builder. Validate the canonical
+   * package before taking its builder path, then recompute the kernel context. */
