@@ -1,0 +1,250 @@
+/* check-cx0-slice.cx -- L2 单流 cx0 的独立检查（经典阶段与 NN 流同形承载）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/check-cx0-slice.cx --
+ *   sh ./unisacc.com tools/lab-loader/check-cx0-slice.cx -- ROOT OUTDIR
+ *
+ * 无参（批次形态）：在 out/check-cx0-slice-<pid> 下自建产物，跑完保留。
+ * 两参：用既有产物复查。
+ *
+ * 判定口径（规范化规则见 tools/lab-loader/plan-normalize.md，此处逐条实现，不做静默容差）：
+ *   路 A = `./unisacc.com -cx-plan FILE`（已装产品，经典 C 规划器投影）
+ *   路 B = 单流产物 `OUTDIR/slice/cx0/program.com FILE SOURCE_LABEL`
+ *   规范化：去掉路 B 的 `CX0PLAN1\n` 头；每行第 4 列起的接口路径只保留 basename
+ *   （`.../ua-cxif-HASH.h` → `ua-cxif-HASH.h`）；哈希不动，哈希不同即 FAIL。
+ *   两路是两套独立实现(cx0/README 记录)，不一致照实记 FAIL，不改比对凑绿。
+ *
+ * 覆盖：
+ *   P1 产物形状：manifest 两行、order 0/1 连续、base 行 arch=目标、cx0 行
+ *      kind=stage-classic 且 arch=any、sha+size 与实际文件相符、无 model 行。
+ *   P2/P3/P4 三个通过样例的规范化逐字节比对（单文件无 use、单 use、双 use）。
+ *   P5 拒绝样例（模块循环）：两路都必须非零退出且 stdout 为空。
+ *
+ * 末行 CHECK_CX0_SLICE failed=N；任何 FAIL 退出码 1。
+ */
+#pragma unisa use cxlib.netpack
+
+static int cc_failed;
+static int cc_asserts;
+
+static void cc_die(const char *s) { fprintf(stderr, "check-cx0-slice: %s\n", s); exit(2); }
+
+static void cc_ck(int ok, const char *label) {
+    cc_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) cc_failed++;
+}
+
+static char *cc_read(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) cc_die(p);
+    return s;
+}
+
+/* 规范化：去掉可选首行 "CX0PLAN1\n"；每行按 TAB 切列，列号 >=3 的接口路径
+ * 只保留最后一个 '/' 之后的部分（basename）；哈希不抹。逐行重写，LF 结尾。 */
+static char *cc_normalize(const char *s, size_t n, size_t *on) {
+    char *out = malloc(n + 1);
+    size_t at = 0, w = 0;
+    if (!out) cc_die("allocation");
+    if (n >= 9 && !memcmp(s, "CX0PLAN1\n", 9)) at = 9;
+    while (at < n) {
+        size_t e = at, col = 0, field = at;
+        while (e < n && s[e] != '\n') e++;
+        for (;;) {
+            size_t i = field;
+            while (i < e && s[i] != '\t') i++;
+            if (col >= 3) {
+                size_t k = i;
+                while (k > field && s[k - 1] != '/') k--;
+                for (size_t j = k; j < i; j++) out[w++] = s[j];
+            } else {
+                for (size_t j = field; j < i; j++) out[w++] = s[j];
+            }
+            if (i >= e) { out[w++] = '\n'; break; }
+            out[w++] = '\t';
+            col++;
+            field = i + 1;
+        }
+        at = e + 1;
+    }
+    out[w] = 0;
+    *on = w;
+    return out;
+}
+
+/* 跑路 A。 */
+static int cc_product(const char *root, const char *src, char **out, size_t *on, char **err, size_t *en) {
+    np_result r;
+    char why[1024];
+    char *av[] = {"sh", "./unisacc.com", "-cx-plan", (char *)src, 0};
+    if (np_run(av, root, 0, 30, &r, why, sizeof why)) cc_die(why);
+    *out = r.out; *on = r.outn; *err = r.err; *en = r.errn;
+    return r.rc;
+}
+
+/* 跑路 B。 */
+static int cc_slice(const char *root, const char *com, const char *src, const char *label,
+                    char **out, size_t *on, char **err, size_t *en) {
+    np_result r;
+    char why[1024];
+    char *av[] = {(char *)com, (char *)src, (char *)label, 0};
+    if (np_run(av, root, 0, 30, &r, why, sizeof why)) cc_die(why);
+    *out = r.out; *on = r.outn; *err = r.err; *en = r.errn;
+    return r.rc;
+}
+
+static int cc_case(const char *root, const char *com, const char *src, const char *label) {
+    char *pa, *pb, *ea, *eb, *na, *nb;
+    size_t pn, pn2, en, en2, nn, nn2;
+    int ra, rb, ok;
+    char tag[200];
+    ra = cc_product(root, src, &pa, &pn, &ea, &en);
+    rb = cc_slice(root, com, src, label, &pb, &pn2, &eb, &en2);
+    if (snprintf(tag, sizeof tag, "%s.exit-code", label) >= (int)sizeof tag) cc_die("label");
+    cc_ck(ra == rb, tag);
+    na = cc_normalize(pa, pn, &nn);
+    nb = cc_normalize(pb, pn2, &nn2);
+    if (snprintf(tag, sizeof tag, "%s.normalized-bytes", label) >= (int)sizeof tag) cc_die("label");
+    ok = nn == nn2 && !memcmp(na, nb, nn);
+    cc_ck(ok, tag);
+    if (!ok) {
+        fprintf(stderr, "--- product (%zu) ---\n%.*s--- slice (%zu) ---\n%.*s", nn, (int)nn, na, nn2, (int)nn2, nb);
+    }
+    free(pa); free(pb); free(ea); free(eb); free(na); free(nb);
+    return ok;
+}
+
+static int cc_reject(const char *root, const char *com, const char *src, const char *label) {
+    char *pa, *pb, *ea, *eb;
+    size_t pn, pn2, en, en2;
+    int ra, rb;
+    char tag[200];
+    ra = cc_product(root, src, &pa, &pn, &ea, &en);
+    rb = cc_slice(root, com, src, label, &pb, &pn2, &eb, &en2);
+    if (snprintf(tag, sizeof tag, "%s.both-refuse", label) >= (int)sizeof tag) cc_die("label");
+    cc_ck(ra != 0 && rb != 0, tag);
+    if (snprintf(tag, sizeof tag, "%s.no-partial-plan", label) >= (int)sizeof tag) cc_die("label");
+    cc_ck(pn == 0 && pn2 == 0, tag);
+    if (snprintf(tag, sizeof tag, "%s.diagnostic-present", label) >= (int)sizeof tag) cc_die("label");
+    cc_ck(en > 0 && en2 > 0, tag);
+    if (snprintf(tag, sizeof tag, "%s.diagnostic-identical", label) >= (int)sizeof tag) cc_die("label");
+    cc_ck(en == en2 && !memcmp(ea, eb, en), tag);
+    free(pa); free(pb); free(ea); free(eb);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], out[4096], com[4400], manf[4400], p[4400], q[4400];
+    const char *target = "lnx/x86_64";
+    char flat[96];
+    int i;
+    size_t n;
+    char *text;
+
+    if (argc == 1) {
+        if (!getcwd(root, sizeof root)) cc_die("getcwd");
+        if (snprintf(out, sizeof out, "%s/out/check-cx0-slice-%d", root, (int)getpid()) >= (int)sizeof out) cc_die("path");
+        {   np_result r; char why[1024];
+            char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/cx0-slice.cx", out, 0};
+            if (np_run(av, root, 0, 55, &r, why, sizeof why)) cc_die(why);
+            if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); cc_die("cx0-slice build failed"); }
+            np_free(&r);
+        }
+        if (snprintf(p, sizeof p, "%s/samples", out) >= (int)sizeof p) cc_die("path");
+        if (mkdir(p, 0700)) cc_die("samples directory");
+        if (snprintf(p, sizeof p, "%s/samples/cxlib", out) >= (int)sizeof p) cc_die("path");
+        if (mkdir(p, 0700)) cc_die("samples cxlib");
+    } else if (argc == 3) {
+        if (!realpath(argv[1], root)) cc_die("root");
+        if (!realpath(argv[2], out)) cc_die("output directory must exist (build it first)");
+    } else cc_die("usage [ROOT OUTDIR]");
+
+    if (snprintf(com, sizeof com, "%s/slice/cx0/program.com", out) >= (int)sizeof com) cc_die("path");
+    {   int k = 0;
+        for (i = 0; target[i] && k < 95; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
+        flat[k] = 0;
+    }
+
+    /* P1：manifest 形状。两行，无 model 行，kind/arch/order/sha/size。 */
+    if (snprintf(manf, sizeof manf, "%s/slice/cx0/manifest.tsv", out) >= (int)sizeof manf) cc_die("path");
+    text = cc_read(manf, &n);
+    {   char *lp = text;
+        int rows = 0, ok_rows = 1, ok_order = 1, ok_kind = 1, ok_bytes = 1, has_model = 0;
+        char paths[2][4400];
+        if (snprintf(paths[0], sizeof paths[0], "%s/base/%s.bin", out, flat) >= (int)sizeof paths[0]) cc_die("path");
+        if (snprintf(paths[1], sizeof paths[1], "%s/slice/cx0/program.com", out) >= (int)sizeof paths[1]) cc_die("path");
+        while (lp < text + n) {
+            char *e = lp;
+            char *f[6];
+            int k = 0;
+            while (e < text + n && *e != '\n') e++;
+            if (e == lp) break;
+            {   char *s = lp;
+                f[k++] = s;
+                while (s < e) { if (*s == '\t') { *s = 0; s++; if (k < 6) f[k++] = s; } else s++; }
+                *e = 0;
+            }
+            rows++;
+            if (k != 6) ok_rows = 0;
+            else {
+                if (atoi(f[5]) != rows - 1) ok_order = 0;
+                if (rows == 1) {
+                    if (strcmp(f[1], "base") || strcmp(f[2], target)) ok_kind = 0;
+                } else {
+                    if (strcmp(f[1], "stage-classic") || strcmp(f[2], "any")) ok_kind = 0;
+                }
+                if (!strncmp(f[0], "model-", 6) || !strcmp(f[1], "stage")) has_model = 1;
+                {   size_t fn;
+                    char *bytes = cc_read(paths[rows - 1], &fn);
+                    char hex[65];
+                    if ((size_t)atoi(f[4]) != fn) ok_bytes = 0;
+                    cx_sha256_hex(bytes, fn, hex);
+                    if (strcmp(hex, f[3])) ok_bytes = 0;
+                    free(bytes);
+                }
+            }
+            lp = e + 1;
+        }
+        cc_ck(rows == 2, "cx0.manifest.two-rows");
+        cc_ck(ok_rows, "cx0.manifest.six-fields");
+        cc_ck(ok_order, "cx0.manifest.order-sequential");
+        cc_ck(ok_kind, "cx0.manifest.base-then-stage-classic");
+        cc_ck(!has_model, "cx0.manifest.no-model-row");
+        cc_ck(ok_bytes, "cx0.manifest.size-and-sha256");
+    }
+    free(text);
+
+    /* 样例：写在产物目录下，随产物保留。 */
+    {   char s1[4400], s2[4400], s3[4400], s4[4400], lib[4400];
+        if (snprintf(s1, sizeof s1, "%s/samples/solo.cx", out) >= (int)sizeof s1) cc_die("path");
+        if (snprintf(s2, sizeof s2, "%s/samples/one.cx", out) >= (int)sizeof s2) cc_die("path");
+        if (snprintf(s3, sizeof s3, "%s/samples/two.cx", out) >= (int)sizeof s3) cc_die("path");
+        if (snprintf(s4, sizeof s4, "%s/samples/cyc.cx", out) >= (int)sizeof s4) cc_die("path");
+        if (snprintf(lib, sizeof lib, "%s/samples/cxlib", out) >= (int)sizeof lib) cc_die("path");
+        {   int fd;
+            fd = open(s1, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0 || write(fd, "#pragma unisa module solo\nint solo(void){return 0;}\n", 47) != 47 || close(fd)) cc_die("sample solo");
+            fd = open(s2, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0 || write(fd, "#pragma unisa use cxlib.streampack\nint one(void){return 0;}\n", 60) != 60 || close(fd)) cc_die("sample one");
+            fd = open(s3, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0 || write(fd, "#pragma unisa use cxlib.streampack\n#pragma unisa use cxlib.reaper\nint two(void){return 0;}\n", 93) != 93 || close(fd)) cc_die("sample two");
+            fd = open(s4, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (fd < 0 || write(fd, "#pragma unisa module cyc\n#pragma unisa use cyc\nint cyc(void){return 0;}\n", 70) != 70 || close(fd)) cc_die("sample cyc");
+        }
+        {   const char *mods[3] = {"streampack", "netpack", "reaper"};
+            char from[4400], to[4400];
+            for (i = 0; i < 3; i++) {
+                if (snprintf(from, sizeof from, "%s/tools/cxlib/%s.cx", root, mods[i]) >= (int)sizeof from) cc_die("path");
+                if (snprintf(to, sizeof to, "%s/%s.cx", lib, mods[i]) >= (int)sizeof to) cc_die("path");
+                if (symlink(from, to)) cc_die("sample module link");
+            }
+        }
+        cc_case(root, com, s1, "solo");
+        cc_case(root, com, s2, "one-use");
+        cc_case(root, com, s3, "two-use");
+        cc_reject(root, com, s4, "self-cycle");
+    }
+
+    printf("CHECK_CX0_SLICE\tassertions=%d\tfailed=%d\n", cc_asserts, cc_failed);
+    return cc_failed ? 1 : 0;
+}

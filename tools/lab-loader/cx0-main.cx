@@ -1,0 +1,52 @@
+/* cx0-main.cx -- cx0 单流产物的小壳：把经典规划阶段包成流形态的 CLI。
+ *
+ *   build_root OUT        （由 cx0-slice.cx 调用，产品编译器编译本文件得到 base）
+ *   运行形态：cx0.com [INPUT|-] [SOURCE_LABEL]
+ *   stdout: CX0PLAN1 + 逐单元 TSV；stderr: 诊断；退出码沿用 cx0_plan 的 status。
+ *
+ * 经典阶段没有模型块：这里直接调 cx0_plan，不装载任何 P3 包。
+ * 接口目录取自环境 UNISA_CXIF_DIR；缺省用 <cwd>/out/lab-loader/cxif。
+ */
+#pragma unisa use cx0.plan
+
+static char cxm_ifdir[4096];
+
+static int cxm_interface_dir(const char *given, char *out, size_t cap) {
+    const char *env = getenv("UNISA_CXIF_DIR");
+    if (env && env[0]) {
+        if (snprintf(out, cap, "%s", env) >= (int)cap) return -1;
+        return 0;
+    }
+    if (mkdir(given, 0700) && errno != EEXIST) return -1;
+    if (snprintf(out, cap, "%s", given) >= (int)cap) return -1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char src[4096], label[4096];
+    const char *input = argc > 1 ? argv[1] : "-";
+    const char *source = argc > 2 ? argv[2] : "stdin.c";
+    char *sources[1];
+    cx0_result r;
+    int rc;
+    size_t n;
+
+    if (argc > 3) { fprintf(stderr, "usage: cx0.com [INPUT|-] [SOURCE_LABEL]\n"); return 2; }
+    if (!strcmp(input, "-")) {
+        if (!fgets(src, sizeof src, stdin)) { fprintf(stderr, "cx0: empty stdin\n"); return 2; }
+        n = strlen(src);
+        while (n && (src[n - 1] == '\n' || src[n - 1] == '\r')) src[--n] = 0;
+        if (!n) { fprintf(stderr, "cx0: stdin names no source path\n"); return 2; }
+        input = src;
+    }
+    if (snprintf(label, sizeof label, "%s", source) >= (int)sizeof label) { fprintf(stderr, "cx0: label too long\n"); return 2; }
+    if (cxm_interface_dir("out/lab-loader/cxif", cxm_ifdir, sizeof cxm_ifdir)) { fprintf(stderr, "cx0: interface directory\n"); return 2; }
+    sources[0] = (char *)input;
+    r = cx0_plan(0, sources, 1, 0, 0, cxm_ifdir);
+    rc = r.status;
+    if (r.bytes && fwrite(r.text, 1, r.bytes, stdout) != r.bytes) rc = 2;
+    if (r.diagnostic_bytes && fwrite(r.diagnostic, 1, r.diagnostic_bytes, stderr) != r.diagnostic_bytes) rc = 2;
+    cx0_release(&r);
+    (void)label;
+    return rc;
+}

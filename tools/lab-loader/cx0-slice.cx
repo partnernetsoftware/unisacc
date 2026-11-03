@@ -1,0 +1,124 @@
+/* cx0-slice.cx -- L2:把 cx0(经典 CX 规划阶段)做成与七流同形的单流产物。
+ *
+ *   sh ./unisacc.com tools/lab-loader/cx0-slice.cx -- NEW_OUTDIR [TARGET]
+ *
+ * 产出(全部在 NEW_OUTDIR):
+ *   base/<os>-<arch>.bin     cx0 base:由产品编译器只读编译 cx/cx0/plan.cx + 本目录
+ *                            cx0-main.cx 得到;接受 [INPUT|-] [SOURCE_LABEL]，写出
+ *                            CX0PLAN1 + 逐单元 TSV 到 stdout。
+ *   slice/cx0/manifest.tsv   name kind arch sha256 size order
+ *                            base/base/<target>/<sha>/<size>/0
+ *                            cx0/stage-classic/any/<sha>/<size>/1   ← 无 model 行
+ *   slice/cx0/program.com    base 的副本(经典阶段没有内嵌模型包，见下)
+ *   slices.json              哈希与体积账
+ *
+ * 关键设计(omp-cc-opus 2026-11-03 裁定)：
+ *   cx0 是经典阶段，不构造模型。**不要**为了凑形状写「零 M 块的 P3 包」——
+ *   那会让后来的人以为 P3 允许零模型。正确形态是在 manifest 里用 kind=stage-classic
+ *   表示「这一级是经典可执行，不是 NN 权重」：该行指向 base 可执行本身，没有 model 行；
+ *   资源如需要照常引用。loader 合同因此必须同时承载 NN 流与经典流。
+ *
+ * 与 NN 单流的关系：NN 单流用 program.com = base + 单流 P3 + UNIPKG1；
+ * 经典流 program.com 就是 base(没有包可嵌)，manifest 的 stage-classic 行描述它。
+ * 两种形态在同一目录布局下共存，由 manifest 行区分，不靠约定猜。
+ */
+#pragma unisa use cxlib.netpack
+
+static const char *CS_NAME = "cx0";
+
+static void cs_die(const char *s) { fprintf(stderr, "cx0-slice: REFUSE %s\n", s); exit(2); }
+
+static int cs_put(int fd, const void *v, size_t n) {
+    const char *p = (const char *)v;
+    while (n) {
+        ssize_t k = write(fd, p, n);
+        if (k > 0) { p += k; n -= (size_t)k; }
+        else if (k < 0 && errno == EINTR) continue;
+        else return -1;
+    }
+    return 0;
+}
+
+static void cs_saved(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (fd < 0) cs_die("exclusive output create");
+    if (cs_put(fd, p, n) || fsync(fd) || close(fd)) cs_die("output write/fsync");
+}
+
+static char *cs_read(const char *p, size_t *n) {
+    struct stat s;
+    char *b;
+    if (lstat(p, &s) || !S_ISREG(s.st_mode) || s.st_size <= 0 || s.st_size > 268435456)
+        cs_die("input must be nonempty bounded regular file, no symlink");
+    b = cx_read(p, n);
+    if (!b || (size_t)s.st_size != *n) cs_die("input read/size changed");
+    return b;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], out[4096], flat[96], p[4400], q[4400], sha[65], man[1400];
+    const char *target = "lnx/x86_64";
+    char *base;
+    size_t bn;
+    int i;
+    long at = 0;
+    char *report;
+
+    if (argc < 2 || argc > 4) cs_die("usage NEW_OUTDIR [TARGET]");
+    if (!realpath(".", root)) cs_die("repository root");
+    if (argc == 3) target = argv[2];
+    {   int k = 0;
+        for (i = 0; target[i] && k < 95; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
+        flat[k] = 0;
+    }
+
+    /* cx0 base：产品编译器只读编译 cx/cx0/plan.cx 与 cx0-main.cx。 */
+    if (mkdir(argv[1], 0700)) cs_die("NEW_OUTDIR must not exist and must be creatable");
+    if (snprintf(p, sizeof p, "%s/base", argv[1]) >= (int)sizeof p) cs_die("path too long");
+    if (mkdir(p, 0700)) cs_die("base directory");
+    if (snprintf(q, sizeof q, "%s/base/%s.bin", argv[1], flat) >= (int)sizeof q) cs_die("path too long");
+    {   np_result r; char why[1024];
+        char *av[] = {"sh", "./unisacc.com", "-b", (char *)target,
+                      "tools/lab-loader/cx0-main.cx", "-o", q, 0};
+        if (np_run(av, root, 0, 55, &r, why, sizeof why)) cs_die(why);
+        if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); cs_die("cx0 base build failed"); }
+        np_free(&r);
+    }
+    base = cs_read(q, &bn);
+    cx_sha256_hex(base, bn, sha);
+    {   char bpath[4400];
+        if (snprintf(bpath, sizeof bpath, "%s/base/%s.bin", argv[1], flat) >= (int)sizeof bpath) cs_die("path");
+        if (chmod(bpath, 0700)) cs_die("base chmod");
+    }
+
+    if (snprintf(p, sizeof p, "%s/slice", argv[1]) >= (int)sizeof p) cs_die("path too long");
+    if (mkdir(p, 0700)) cs_die("slice directory");
+    if (snprintf(p, sizeof p, "%s/slice/%s", argv[1], CS_NAME) >= (int)sizeof p) cs_die("path too long");
+    if (mkdir(p, 0700)) cs_die("slice entry directory");
+    if (snprintf(p, sizeof p, "%s/slice/%s/program.com", argv[1], CS_NAME) >= (int)sizeof p) cs_die("path too long");
+    cs_saved(p, base, bn, 0700);
+
+    /* manifest：两行。stage-classic 指向 base 本身，没有 model 行。 */
+    if (snprintf(man, sizeof man,
+        "base\tbase\t%s\t%s\t%lu\t0\n"
+        "%s\tstage-classic\tany\t%s\t%lu\t1\n",
+        target, sha, (unsigned long)bn, CS_NAME, sha, (unsigned long)bn) >= (int)sizeof man) cs_die("manifest capacity");
+    if (snprintf(p, sizeof p, "%s/slice/%s/manifest.tsv", argv[1], CS_NAME) >= (int)sizeof p) cs_die("path too long");
+    cs_saved(p, man, strlen(man), 0644);
+
+    report = malloc(8192);
+    if (!report) cs_die("allocation");
+    at += snprintf(report + at, 8192 - (size_t)at,
+        "{\n \"scope\":\"lab-loader-l2-cx0-classic-stage\",\"release_eligible\":false,\n"
+        " \"selected_target\":\"%s\",\"stage\":\"%s\",\"kind\":\"stage-classic\",\n"
+        " \"base_sha256\":\"%s\",\"base_bytes\":%lu,\"model_rows\":0\n}\n",
+        target, CS_NAME, sha, (unsigned long)bn);
+    if (snprintf(p, sizeof p, "%s/slices.json", argv[1]) >= (int)sizeof p) cs_die("path too long");
+    cs_saved(p, report, (size_t)at, 0644);
+
+    printf("CX0_SLICE\tstage=%s\tkind=stage-classic\tbase_bytes=%lu\tbase_sha256=%s\tmodel_rows=0\n",
+           CS_NAME, (unsigned long)bn, sha);
+    free(report);
+    free(base);
+    return 0;
+}
