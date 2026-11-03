@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
@@ -113,6 +113,71 @@ describe("omp-super2 extension", () => {
       );
       expect(blocked.details?.state).toBe("blocked");
       expect(calls.notices.some(([, type]) => type === "warning")).toBe(true);
+    } finally {
+      if (oldBin === undefined) delete process.env.SA_OMP_BIN; else process.env.SA_OMP_BIN = oldBin;
+      if (oldMode === undefined) delete process.env.FAKE_MODE; else process.env.FAKE_MODE = oldMode;
+    }
+  });
+
+  test("host checks pass and do not inspect unlisted files", async () => {
+    const { tools, ctx } = setup();
+    const oldBin = process.env.SA_OMP_BIN;
+    const oldMode = process.env.FAKE_MODE;
+    process.env.SA_OMP_BIN = join(import.meta.dir, "../../omp-superagent/test/fake-omp.sh");
+    process.env.FAKE_MODE = "done";
+    const dir = mkdtempSync(join(tmpdir(), "sa2-checks-"));
+    writeFileSync(join(dir, "listed.txt"), "PRACTICE-904");
+    try {
+      const checked = await tools.get("dispatch")!.execute(
+        "6",
+        {
+          ticket: "T1",
+          task,
+          role: "implementer",
+          paths: ["listed.txt"],
+          checks: [
+            { kind: "exists", path: "listed.txt" },
+            { kind: "text", path: "listed.txt", text: "PRACTICE-904" },
+          ],
+          cwd: dir,
+        },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(checked.details?.state).toBe("done");
+      expect(checked.details?.acceptance).toBe("passed");
+      // unlisted.txt is absent; the checks must not imply anything about it.
+    } finally {
+      if (oldBin === undefined) delete process.env.SA_OMP_BIN; else process.env.SA_OMP_BIN = oldBin;
+      if (oldMode === undefined) delete process.env.FAKE_MODE; else process.env.FAKE_MODE = oldMode;
+    }
+  });
+
+  test("a failed host check turns done into failed", async () => {
+    const { calls, tools, ctx } = setup();
+    const oldBin = process.env.SA_OMP_BIN;
+    const oldMode = process.env.FAKE_MODE;
+    process.env.SA_OMP_BIN = join(import.meta.dir, "../../omp-superagent/test/fake-omp.sh");
+    process.env.FAKE_MODE = "done";
+    try {
+      const failed = await tools.get("dispatch")!.execute(
+        "7",
+        {
+          ticket: "T1",
+          task,
+          role: "implementer",
+          paths: ["missing.txt"],
+          checks: [{ kind: "exists", path: "missing.txt" }],
+          cwd: mkdtempSync(join(tmpdir(), "sa2-checks-")),
+        },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(failed.details?.state).toBe("failed");
+      expect(String(failed.details?.acceptance)).toContain("missing.txt");
+      expect(calls.notices.some(([, type]) => type === "error")).toBe(true);
     } finally {
       if (oldBin === undefined) delete process.env.SA_OMP_BIN; else process.env.SA_OMP_BIN = oldBin;
       if (oldMode === undefined) delete process.env.FAKE_MODE; else process.env.FAKE_MODE = oldMode;

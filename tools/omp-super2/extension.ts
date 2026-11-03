@@ -124,7 +124,8 @@ export default function (pi: ExtensionAPI) {
     description:
       "派活:起一个子 omp 执行结构化 ticket，implementer 必须提供允许写入的 paths。" +
       "edit/write 检查路径；bash 不隔离，只读及路径边界依赖 worker 协作，不能防恶意命令。" +
-      "可选 checks 由宿主检查文件，结果仅覆盖所列条件；bash 不隔离，RPC 轨迹可能含敏感信息。",
+      "可选 checks 由宿主检查文件，只覆盖列出的条件，不证明其他文件；失败记 failed。" +
+      "bash 非沙箱，路径检查与检查期间中间目录替换存在 TOCTOU；RPC 轨迹可能含敏感信息。",
     parameters: z.object({
       ticket: z.string().min(1).describe("一句话任务名,会话内唯一"),
       task: z.object({
