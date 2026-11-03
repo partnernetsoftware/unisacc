@@ -33,10 +33,27 @@ int main(void) {
     long sn, rn, at; int staged = 0, blocked = 0;
     char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
+    char *fv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "include", "exec/facts", 0};
+    char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
     char *names = slurp(gv, &sn), *rows;
     if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
     for (at = 0; at < sn; ) { long l = tx_len(names + at, sn - at); if (l <= 0) break; staged++; at += l + 1; }
-    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=0\n"); return 0; }
+    /* facts gate: a commit touching include/ or exec/facts/ must leave the generated pp-autoinc-gen table
+       in sync. The FTRIM/libc anchors are baked into that table from every .h's raw #if lines, so an out-of-
+       sync table silently breaks dead-code elimination (see items.tsv FTRIM-ANCHOR). Run facts-gen --check
+       and refuse a DIFF; this is what catches a stale facts table before it rides into main. */
+    { long fsn; char *fnames = slurp(fv, &fsn);
+      if (!fnames) { sy_eprintf("precommit: git diff --cached (facts) failed\n"); return 1; }
+      if (fsn > 0) {
+          char *frows = slurp(fgv, &rn);
+          if (!frows) { sy_eprintf("precommit: tools/facts-gen.cx did not run\n"); return 1; }
+          if (tx_prefix(frows, rn, "DIFF", 4)) {
+              sy_eprintf("precommit: facts-gen --check pp-autoinc-gen DIFF; run tools/facts-gen.cx -- --write ROOT pp-autoinc-gen\n");
+              blocked++;
+          }
+      }
+    }
+    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     rows = slurp(rv, &rn);
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
