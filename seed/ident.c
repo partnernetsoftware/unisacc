@@ -135,6 +135,8 @@ static void identity(char hex[65]) {
     for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", out[i]);
 }
 /* sha256 of a file (absolute or relative to ROOT) and its size */
+/* B5c: HEX may be NULL -- the build record no longer stores the artifact digest,
+   but the size cross-check still needs the byte count. */
 static long file_digest(const char *path, char hex[65]) {
     Sha f; unsigned char buf[1 << 16], dg[32]; long n, total = 0; int i, fd = open(path, O_RDONLY);
     if (fd < 0) die("cannot open", path);
@@ -142,7 +144,7 @@ static long file_digest(const char *path, char hex[65]) {
     while ((n = read(fd, buf, sizeof buf)) > 0) { sha_put(&f, buf, (size_t)n); total += n; }
     if (n < 0) die("read failed", path);
     close(fd); sha_end(&f, dg);
-    for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", dg[i]);
+    if (hex) for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", dg[i]);
     return total;
 }
 static void json_str(FILE *o, const char *v) {
@@ -164,11 +166,11 @@ static void json_str(FILE *o, const char *v) {
 extern char **environ;
 static int env_cmp(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
 static void write_record(const char *root, const char *artifact, const char *expected) {
-    char cur[65], art[65], commit[64] = {0}, cmd[2048], dest[2048], tmp[2100];
+    char cur[65], commit[64] = {0}, cmd[2048], dest[2048], tmp[2100];
     char **set = NULL; size_t ns = 0, i; long bytes; FILE *pp, *o;
     identity(cur);
     if (strcmp(cur, expected)) die("product inputs changed during packaging", artifact);
-    bytes = file_digest(artifact, art);
+    bytes = file_digest(artifact, 0);
     if (strlen(root) > 1000) die("root too long", root);
     sprintf(cmd, "git -C '%s' rev-parse HEAD", root);
     pp = popen(cmd, "r");
@@ -186,7 +188,12 @@ static void write_record(const char *root, const char *artifact, const char *exp
     if (strlen(artifact) > 2000) die("path too long", artifact);
     sprintf(dest, "%s.build.json", artifact); sprintf(tmp, "%s.tmp", dest);
     o = fopen(tmp, "w"); if (!o) die("cannot write", tmp);
-    fprintf(o, "{\n  \"artifact_sha256\": \"%s\",\n  \"bytes\": %ld,\n  \"commit\": ", art, bytes);
+    /* B5c: the artifact section is retired. The product identity is the manifest
+       (six fields, tools/manifest-gen.cx), not sha256(file), so a build record that
+       carried artifact_sha256 could disagree with it -- which is exactly what made
+       source-package.cx refuse with root-epoch-record-shape. `bytes` stays as a
+       cheap size cross-check against the artifact. */
+    fprintf(o, "{\n  \"bytes\": %ld,\n  \"commit\": ", bytes);
     json_str(o, commit);
     fprintf(o, ",\n  \"schema\": 1,\n  \"settings\": ");
     if (!ns) fputs("{}", o);
@@ -230,12 +237,18 @@ static void check_record(const char *artifact) {
         fprintf(stderr, "product freshness: %s: product inputs changed; rebuild with make com\n", artifact); exit(1);
     }
     bytes = file_digest(artifact, art);
+    /* B5c: the artifact section is retired, so only the size cross-check remains.
+       A record that still carries artifact_sha256 is refused by name: silently
+       accepting it would let a stale identity survive the cutover. */
+    if (strstr(text, "\"artifact_sha256\":")) {
+        fprintf(stderr, "product freshness: %s: build record still carries artifact_sha256; rebuild with make com\n", artifact); exit(1);
+    }
     {   char b[32]; sprintf(b, "%ld", bytes);
-        if (!field(text, "artifact_sha256", v, sizeof v) || strcmp(v, art) || !field(text, "bytes", cur, sizeof cur) || strcmp(cur, b)) {
-            fprintf(stderr, "product freshness: %s: artifact differs from its build record\n", artifact); exit(1);
+        if (!field(text, "bytes", cur, sizeof cur) || strcmp(cur, b)) {
+            fprintf(stderr, "product freshness: %s: artifact size differs from its build record\n", artifact); exit(1);
         }
     }
-    printf("product freshness: verified %s\n", art);
+    printf("product freshness: verified %s\n", artifact);
 }
 /* Stage completion records for exec/c/buildcompiler.sh (was its inline Python).
    The key covers the source identity (which includes exec/c/asm) and the
