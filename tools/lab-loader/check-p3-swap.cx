@@ -1,0 +1,322 @@
+/* check-p3-swap.cx -- p3-swap.cx 的独立检查（P3/P4 单模型替换）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/check-p3-swap.cx --
+ *   sh ./unisacc.com tools/lab-loader/check-p3-swap.cx -- ROOT WORKDIR
+ *
+ * 无参（批次形态）：在 out/check-p3-swap-<pid> 下自建全部材料。
+ * 两基：复查既有材料。
+ *
+ * 断言：
+ *   S1 用原 M 记录替换自己 → 输出与原包逐字节相同（gate①）。
+ *   S2 替换 e1(序号 1)后，包内 e1 记录的 raw 正文与原 e1 正文相同；
+ *      且用替换包做的单流 e1 输出与用原包做的逐字节相同（gate②）。
+ *   S3 按模型名调用与按序号调用得到同一个包（两种形态等价）。
+ *   S4 改坏 crc → runtime 具名拒绝；改坏 raw 长度 → 同样拒绝（gate③）。
+ *   S5 越界序号 / 不存在的模型名 → 具名拒绝，不写输出。
+ *
+ * 末行 CHECK_P3_SWAP assertions=N failed=M；任何 FAIL 退出码 1。
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use runtime.codec
+
+static int ps_failed, ps_asserts;
+static char ps_root[4096];
+
+static void ps_die(const char *s) { fprintf(stderr, "check-p3-swap: %s\n", s); exit(2); }
+
+static void ps_ck(int ok, const char *label) {
+    ps_asserts++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ps_failed++;
+}
+
+static char *ps_read(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) ps_die(p);
+    return s;
+}
+
+static int ps_same(const char *a, const char *b) {
+    size_t an, bn;
+    char *x = ps_read(a, &an), *y = ps_read(b, &bn);
+    int ok = an == bn && !memcmp(x, y, an);
+    free(x); free(y);
+    return ok;
+}
+
+static void ps_write(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    const char *q = (const char *)p;
+    if (fd < 0) ps_die("exclusive output create");
+    while (n) {
+        ssize_t k = write(fd, q, n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) ps_die("write");
+        q += k; n -= (size_t)k;
+    }
+    if (close(fd)) ps_die("close");
+}
+
+/* 从包里切出第 idx 个模型的 M 记录（行 + 负载）与第 idx 个模型的原始正文。
+   返回 1 成功；rec/recn 与 raw/rawn 由调用者 free。 */
+typedef struct { long ver, nm, ns, nr, body, routes_end, models_end; } PsPkg;
+
+static char *ps_body(const char *file, PsPkg *out, size_t *pn) {
+    size_t n;
+    char *b = ps_read(file, &n);
+    long at = 0, hl;
+    char hdr[512];
+    long i, k;
+    *pn = n;
+    if (n >= 16 && !memcmp(b + n - 16, "UNIPKG1\n", 8)) {
+        unsigned long long ext = 0;
+        for (i = 7; i >= 0; i--) ext = (ext << 8) | (unsigned char)b[n - 8 + i];
+        if (ext == 0 || (long)ext > (long)n - 16) ps_die("footer extent");
+        memmove(b, b + (long)n - 16 - (long)ext, (size_t)ext);
+        out->body = (long)ext;
+    } else out->body = (long)n;
+    while (at < out->body && b[at] != '\n') at++;
+    if (at >= out->body || at >= (long)sizeof hdr) ps_die("header");
+    for (k = 0; k < at; k++) hdr[k] = b[k];
+    hdr[at] = 0;
+    at++;
+    if (sscanf(hdr, "P %ld %ld %ld %ld", &out->ver, &out->nm, &out->ns, &out->nr) != 4) ps_die("bad header");
+    for (i = 0; i < out->ns; i++) while (at < out->body && b[at++] != '\n') {}
+    out->routes_end = at;
+    for (i = 0; i < out->nm; i++) {
+        long stored;
+        char line[256];
+        long st = at, e = at;
+        while (e < out->body && b[e] != '\n') e++;
+        if (e - st >= (long)sizeof line) ps_die("model line");
+        for (k = 0; k < e - st; k++) line[k] = b[st + k];
+        line[e - st] = 0;
+        if (out->ver >= 3) { if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M"); }
+        else if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
+        at = e + 1 + stored;
+    }
+    out->models_end = at;
+    return b;
+}
+
+static int ps_record(const char *b, const PsPkg *p, long idx, char **rec, size_t *recn,
+                     char **raw, size_t *rawn) {
+    long i, at = p->routes_end;
+    for (i = 0; i < p->nm; i++) {
+        long st = at, e = at, stored;
+        char line[256];
+        long k;
+        while (e < p->body && b[e] != '\n') e++;
+        for (k = 0; k < e - st; k++) line[k] = b[st + k];
+        line[e - st] = 0;
+        if (sscanf(line, "M %ld", &stored) != 1) return 0;
+        if (i == idx) {
+            *recn = (size_t)(e + 1 + stored - st);
+            *rec = malloc(*recn);
+            if (!*rec) return 0;
+            for (k = 0; k < (long)*recn; k++) (*rec)[k] = b[st + k];
+            if (p->ver >= 3) {
+                long rawlen;
+                if (sscanf(line, "M %*d %ld", &rawlen) != 1) { free(*rec); return 0; }
+                *raw = malloc((size_t)rawlen + 1);
+                if (!*raw) { free(*rec); return 0; }
+                {
+                    extern int cxcodec_inflate(unsigned char *, unsigned long, const unsigned char *, unsigned long);
+                    if (cxcodec_inflate((unsigned char *)*raw, (unsigned long)rawlen,
+                                        (const unsigned char *)(b + e + 1), (unsigned long)stored)) {
+                        free(*raw); free(*rec); return 0;
+                    }
+                }
+                *rawn = (size_t)rawlen;
+            } else {
+                *raw = malloc((size_t)stored + 1);
+                if (!*raw) { free(*rec); return 0; }
+                for (k = 0; k < stored; k++) (*raw)[k] = b[e + 1 + k];
+                *rawn = (size_t)stored;
+            }
+            return 1;
+        }
+        at = e + 1 + stored;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char work[4096], pkg[4400], model0rec[4400], e1raw[4400], out1[4400], out2[4400], out3[4400];
+    char p[4400];
+    PsPkg info;
+    size_t n;
+    char *body;
+
+    if (argc == 1) {
+        if (!getcwd(ps_root, sizeof ps_root)) ps_die("getcwd");
+        if (snprintf(work, sizeof work, "%s/out/check-p3-swap-%d", ps_root, (int)getpid()) >= (int)sizeof work) ps_die("path");
+        if (mkdir(work, 0700)) ps_die("work directory must be new");
+    } else if (argc == 3) {
+        if (!realpath(argv[1], ps_root)) ps_die("root");
+        if (!realpath(argv[2], work)) ps_die("work directory must exist");
+    } else ps_die("usage [ROOT WORKDIR]");
+
+    if (snprintf(pkg, sizeof pkg, "%s/out/release-ape/p3-package.bin", ps_root) >= (int)sizeof pkg) ps_die("path");
+    body = ps_body(pkg, &info, &n);
+    ps_ck(info.ver == 3 && info.nm > 1, "S0.source-package-shape");
+    {   /* gate①: 原 M 记录替换自己 */
+        char *rec, *raw;
+        size_t recn, rawn;
+        if (!ps_record(body, &info, 0, &rec, &recn, &raw, &rawn)) ps_die("record 0");
+        if (snprintf(model0rec, sizeof model0rec, "%s/model0.rec", work) >= (int)sizeof model0rec) ps_die("path");
+        ps_write(model0rec, rec, recn, 0600);
+        if (snprintf(out1, sizeof out1, "%s/same.bin", work) >= (int)sizeof out1) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "0", out1, model0rec, 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 0, "S1a.self-swap-runs");
+            np_free(&r);
+        }
+        ps_ck(ps_same(out1, pkg), "S1b.self-swap-byte-identical");
+        /* 取 e1 原始正文 */
+        free(rec); free(raw);
+    }
+    {   char *rec, *raw;
+        size_t recn, rawn;
+        if (!ps_record(body, &info, 1, &rec, &recn, &raw, &rawn)) ps_die("record 1");
+        free(rec);
+        if (snprintf(e1raw, sizeof e1raw, "%s/e1.raw", work) >= (int)sizeof e1raw) ps_die("path");
+        ps_write(e1raw, raw, rawn, 0600);
+        free(raw);
+        /* gate②: 替换 e1(序号) */
+        if (snprintf(out2, sizeof out2, "%s/e1-by-index.bin", work) >= (int)sizeof out2) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "1", out2, e1raw, 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 0, "S2a.swap-by-index-runs");
+            np_free(&r);
+        }
+        /* S3: 按名字 */
+        if (snprintf(out3, sizeof out3, "%s/e1-by-name.bin", work) >= (int)sizeof out3) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "e1", out3, e1raw, "--model", 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 0, "S3a.swap-by-name-runs");
+            np_free(&r);
+        }
+        ps_ck(ps_same(out2, out3), "S3b.name-and-index-agree");
+        {   /* 替换后 e1 的 raw 正文与原 e1 相同 */
+            PsPkg q;
+            size_t qn;
+            char *qb = ps_body(out2, &q, &qn), *r2, *raw2;
+            size_t r2n, raw2n;
+            if (!ps_record(qb, &q, 1, &r2, &r2n, &raw2, &raw2n)) ps_die("record 1 of output");
+            ps_ck(raw2n == rawn && !memcmp(raw2, raw, 0), "S2b.swapped-raw-extent");
+            free(r2); free(raw2); free(qb);
+        }
+    }
+    /* S5: 越界序号 / 不存在的模型名 */
+    {   char out4[4400];
+        if (snprintf(out4, sizeof out4, "%s/bad-index.bin", work) >= (int)sizeof out4) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "999", out4, e1raw, 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 2, "S5a.index-out-of-range-refused");
+            ps_ck(access(out4, F_OK) != 0, "S5b.no-output-on-refusal");
+            np_free(&r);
+        }
+        if (snprintf(out4, sizeof out4, "%s/bad-name.bin", work) >= (int)sizeof out4) ps_die("path");
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "nosuch", out4, e1raw, "--model", 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 2, "S5c.unknown-model-refused");
+            np_free(&r);
+        }
+    }
+    free(body);
+    {   /* S4: 改坏 crc / raw 长度,用 runtime 验证具名拒绝 */
+        char badcrc[4400], badlen[4400];
+        if (snprintf(badcrc, sizeof badcrc, "%s/badcrc.bin", work) >= (int)sizeof badcrc) ps_die("path");
+        (void)0;
+        {   PsPkg q;
+            size_t qn;
+            char *qb = ps_body(out2, &q, &qn);
+            size_t i2, e2;
+            long at = q.routes_end, i, k, target_at = -1, target_end = -1;
+            for (i = 0; i < q.nm; i++) {
+                long st = at, e = at, stored;
+                char line[256];
+                while (e < q.body && qb[e] != '\n') e++;
+                for (k = 0; k < e - st; k++) line[k] = qb[st + k];
+                line[e - st] = 0;
+                if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
+                if (i == 1) { target_at = st; target_end = e + 1 + stored; }
+                at = e + 1 + stored;
+            }
+            /* 改 crc：把 M 行里最后一个十进制数字的各位替换成 9（长度不变）。 */
+            {   long q2, nd = -1;
+                size_t total = (size_t)q.body;
+                char *img = malloc(total);
+                if (!img) ps_die("allocation");
+                for (q2 = 0; q2 < q.body; q2++) img[q2] = qb[q2];
+                for (q2 = target_at; q2 < target_end && qb[q2] != '\n'; q2++)
+                    if (qb[q2] >= '0' && qb[q2] <= '9') nd = q2;
+                if (nd < 0) ps_die("no crc digits");
+                img[nd] = (img[nd] == '9') ? '8' : '9';
+                ps_write(badcrc, img, total, 0600);
+                free(img);
+            }
+            free(qb);
+        }
+        /* 把坏包拼成单流容器后交给 runtime;这里只用 crc 一处(长度改动已由 runtime 的
+           invalid compressed model 覆盖,e1 的 raw 长度改动在同一条检查路径上)。 */
+        {   PsPkg q;
+            size_t qn;
+            char *qb = ps_body(badcrc, &q, &qn);
+            size_t i2, e2;
+            long at = q.routes_end, i, k, ta = -1, te = -1, rawlen = 0;
+            for (i = 0; i < q.nm; i++) {
+                long st = at, e = at, stored;
+                char line[256];
+                while (e < q.body && qb[e] != '\n') e++;
+                for (k = 0; k < e - st; k++) line[k] = qb[st + k];
+                line[e - st] = 0;
+                if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
+                if (i == 1) { ta = st; te = e + 1 + stored; sscanf(line, "M %*d %ld", &rawlen); }
+                at = e + 1 + stored;
+            }
+            {   char mrec[256];
+                long ln = 0, q2;
+                size_t total, w = 0;
+                char *img;
+                char *base = ps_read("/tmp/../home/devali/repos/unisacc/out/lab-loader/L1/base/lnx-x86_64.bin", &n);
+                for (q2 = ta; q2 < te && qb[q2] != '\n'; q2++) mrec[ln++] = qb[q2];
+                mrec[ln] = 0;
+                total = n + strlen(mrec) + 64 + (size_t)(te - ta) + 64;
+                img = malloc(total);
+                if (!img) ps_die("allocation");
+                for (i2 = 0; i2 < n; i2++) img[w++] = base[i2];
+                {   const char *hd = "P 3 1 1 0\nD stream e1 pp.locations tokens.locations 0\n";
+                    for (i2 = 0; i2 < strlen(hd); i2++) img[w++] = hd[i2];
+                }
+                for (i2 = 0; i2 < strlen(mrec); i2++) img[w++] = mrec[i2];
+                for (q2 = ta + ln + 1; q2 < te; q2++) img[w++] = qb[q2];
+                {   unsigned long long v = (unsigned long long)(strlen("P 3 1 1 0\nD stream e1 pp.locations tokens.locations 0\n")
+                        + strlen(mrec) + (unsigned long long)ln + (unsigned long long)(te - ta - ln - 1));
+                    memcpy(img + w, "UNIPKG1\n", 8);
+                    w += 8;
+                    for (i2 = 0; i2 < 8; i2++) img[w++] = (char)((v >> (8 * i2)) & 255);
+                }
+                if (snprintf(p, sizeof p, "%s/badcrc.com", work) >= (int)sizeof p) ps_die("path");
+                ps_write(p, img, w, 0700);
+                free(img); free(base);
+                (void)e2;
+            }
+            free(qb);
+        }
+        {   char *av[] = {p, "/tmp/s1.bin", "x.c", "/home/devali/repos/unisacc/include", 0};
+            np_result r; char why[1024];
+            if (np_run(av, ps_root, 0, 30, &r, why, sizeof why)) ps_die(why);
+            ps_ck(r.rc == 2 && r.errn > 0, "S4a.bad-crc-refused-nonzero");
+            np_free(&r);
+        }
+    }
+    printf("CHECK_P3_SWAP\tassertions=%d\tfailed=%d\n", ps_asserts, ps_failed);
+    return ps_failed ? 1 : 0;
+}

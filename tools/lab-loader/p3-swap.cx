@@ -1,0 +1,310 @@
+/* p3-swap.cx -- P3/P4 单模型替换（开发提速用的私有工具,产品身份不经过它）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/p3-swap.cx -- PKG MODEL OLD OUT NEW_NET
+ *   sh ./unisacc.com tools/lab-loader/p3-swap.cx -- PKG INDEX OUT NEW_NET
+ *
+ * 输入包 PKG 可以是带 UNIPKG1 footer 的容器（P3/P4）,也可以是裸包正文。
+ * MODEL 是包内 D 行的阶段名（如 e1）;INDEX 直接用模型序号（0 起）。
+ * NEW_NET 是新的网:
+ *   - 文本网（首行 "N ..."）→ 按包版本编码（P2 明文;P3 需先转 UNINETB1）;
+ *   - UNINETB1 二进制网 → 原样作为原始正文。
+ * 输出 OUT 是只含新包正文的文件（不含 base、不含 footer）,由调用方拼装容器。
+ *
+ * 编码规则（实测自 archive/reference-c/exec/c/run.c 与 seed/pack.c）:
+ *   P 1/P 2:  M 行只有 2 个数（长度）,负载必须是明文网且首字节 'N';
+ *   P 3/P 4:  M 行 4 个数（压缩长度 原始长度 codec=1 CRC32）,负载是 raw deflate,
+ *             解压后必须以 "UNINETB1" 开头。
+ *   本工具对 P3/P4 使用 ext/textx/deflate.cx 的 dz_deflate/dz_crc32,与 release-build
+ *   同一实现;文本网在 P3 下会被拒绝（须先转 UNINETB1）,不做隐式转换。
+ *
+ * 拒绝:包结构损坏、模型名/序号不存在、新网形态与包版本不符、输出已存在。
+ */
+#pragma unisa use extx.deflate
+#pragma unisa use runtime.codec
+
+static void sw_die(const char *s) { fprintf(stderr, "p3-swap: %s\n", s); exit(2); }
+
+static char *sw_read(const char *p, size_t *n) {
+    char *b = cx_read(p, n);
+    if (!b) sw_die("cannot read input");
+    return b;
+}
+
+/* 读一行（到 '\n' 不含）;成功返回长度并把 *at 推进到下一行开头。 */
+static long sw_line(const char *d, long n, long *at) {
+    long a = *at, e = a;
+    if (a >= n) return -1;
+    while (e < n && d[e] != '\n') e++;
+    if (e >= n) return -1;
+    *at = e + 1;
+    return e - a;
+}
+
+/* zigzag varint,与 seed/pack.c 的 binary_encode 同一编码。 */
+static size_t sw_varint(char *out, long long x) {
+    unsigned long long v = ((unsigned long long)x << 1) ^ (unsigned long long)(x >> 63);
+    size_t w = 0;
+    while (v >= 128) { out[w++] = (char)((v & 127) | 128); v >>= 7; }
+    out[w++] = (char)v;
+    return w;
+}
+
+/* 文本网 → UNINETB1。规则同 seed/pack.c binary_encode:
+ * 非 S 行:首 token 原样 + 后续每个十进制数 zigzag varint;
+ * S 行:varint(字节数) + 原始字节（"-" 表示空串,写 varint 0）。 */
+static char *sw_binary_net(const char *text, size_t n, size_t *on) {
+    char *out = malloc(n * 3 + 64);
+    size_t at = 0, w = 8;
+    if (!out) sw_die("allocation");
+    for (int i = 0; i < 8; i++) out[i] = "UNINETB1"[i];
+    while (at < n) {
+        size_t e = at;
+        while (e < n && text[e] != '\n') e++;
+        if (e > at) {
+            size_t p = at;
+            /* 首 token */
+            while (p < e && text[p] != ' ') p++;
+            if (p - at == 1 && text[at] == 'S') {
+                size_t q = p + 1, h0 = q, hlen;
+                while (q < e && text[q] != ' ') q++;
+                hlen = q - h0;
+                if (hlen == 1 && text[h0] == '-') {
+                    w += sw_varint(out + w, 0);
+                } else {
+                    size_t bytes = hlen / 2, k;
+                    if (hlen % 2) sw_die("S line needs even hex length");
+                    w += sw_varint(out + w, (long long)bytes);
+                    for (k = 0; k < bytes; k++) {
+                        int hi = text[h0 + 2 * k], lo = text[h0 + 2 * k + 1], hv, lv;
+                        hv = hi <= '9' ? hi - '0' : (hi | 32) - 'a' + 10;
+                        lv = lo <= '9' ? lo - '0' : (lo | 32) - 'a' + 10;
+                        if (hv < 0 || hv > 15 || lv < 0 || lv > 15) sw_die("bad hex digit in S line");
+                        out[w++] = (char)(hv * 16 + lv);
+                    }
+                }
+            } else {
+                size_t k;
+                for (k = at; k < p; k++) out[w++] = text[k];
+                {   size_t q = p;
+                    while (q < e) {
+                        long long v = 0;
+                        int seen = 0;
+                        while (q < e && text[q] == ' ') q++;
+                        while (q < e && text[q] >= '0' && text[q] <= '9') { v = v * 10 + (text[q] - '0'); q++; seen = 1; }
+                        if (!seen) break;
+                        w += sw_varint(out + w, v);
+                    }
+                }
+            }
+        }
+        at = e + 1;
+    }
+    *on = w;
+    return out;
+}
+
+int main(int argc, char **argv) {
+    char *pkg, *net;
+    size_t pn, nn;
+    long ver, nm, ns, nr, body;
+    long at = 0, hl;
+    char header[512];
+    long *m_at, *m_len, *m_raw;
+    unsigned long *m_crc;
+    long target = -1, i, k;
+    const char *model_name = 0;
+    long model_index = -1;
+    char outpath[4400];
+
+    /* argv[0] 是源路径,/tmp 或产品会插入的 "--" 若出现在 argv[1] 就剥掉。 */
+    { int shift = (argc >= 2 && !strcmp(argv[1], "--")) ? 1 : 0;
+      if (shift) { argv++; argc--; } }
+    if (argc < 4) sw_die("usage PKG MODEL|INDEX OUT NEW_NET  (MODEL with --model)");
+    /* 两种调用形态:PKG MODEL OUT NEW_NET(--model 隐含) 或 PKG INDEX OUT NEW_NET */
+    {   int has_model_flag = 0;
+        for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--model")) has_model_flag = 1;
+        if (has_model_flag) {
+            if (argc != 6) sw_die("usage PKG MODEL OUT NEW_NET --model");
+            model_name = argv[2];
+            if (cx_fmt(outpath, sizeof outpath, "%s", argv[3])) sw_die("path");
+        } else {
+            if (argc != 5) sw_die("usage PKG INDEX OUT NEW_NET");
+            model_index = strtol(argv[2], 0, 10);
+            if (cx_fmt(outpath, sizeof outpath, "%s", argv[3])) sw_die("path");
+        }
+    }
+    {   /* 新网是最后一个非 --model 参数 */
+        const char *netpath = argv[argc - 1];
+        int has = 0;
+        for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--model")) has = 1;
+        if (has) netpath = argv[argc - 2];
+        else netpath = argv[argc - 1];
+        net = sw_read(netpath, &nn);
+    }
+    pkg = sw_read(argv[1], &pn);
+    body = (long)pn;
+    if (pn >= 16 && !memcmp(pkg + pn - 16, "UNIPKG1\n", 8)) {
+        unsigned long long ext = 0;
+        for (i = 7; i >= 0; i--) ext = (ext << 8) | (unsigned char)pkg[pn - 8 + i];
+        if (ext == 0 || (long)ext > body - 16) sw_die("footer extent");
+        pkg += (long)pn - 16 - (long)ext;
+        body = (long)ext;
+    }
+    hl = sw_line(pkg, body, &at);
+    if (hl <= 0 || hl >= (long)sizeof header) sw_die("bad header line");
+    for (i = 0; i < hl; i++) header[i] = pkg[i];
+    header[hl] = 0;
+    if (sscanf(header, "P %ld %ld %ld %ld", &ver, &nm, &ns, &nr) != 4) sw_die("bad header");
+    if (ver < 1 || ver > 4 || nm <= 0 || ns <= 0 || nr < 0) sw_die("bad header counts");
+    {   long header_end = at;
+        long routes_end;
+        /* D 行：同时记录 D 行原文与模型序号 */
+        for (i = 0; i < ns; i++) {
+            long ln = sw_line(pkg, body, &at);
+            if (ln <= 0) sw_die("truncated routes");
+            if (model_name) {
+                char line[512];
+                long mi;
+                if (ln >= (long)sizeof line) sw_die("route line too long");
+                /* D 行在第 [at-ln-1, at-1) 区间(不含换行) */
+                for (k = 0; k < ln; k++) line[k] = pkg[at - ln - 1 + k];
+                line[ln] = 0;
+                {   char *f[6];
+                    int nf = 0;
+                    char *q = line;
+                    while (nf < 6 && *q) { f[nf++] = q; while (*q && *q != ' ') q++; if (*q) *q++ = 0; }
+                    if (nf == 6 && !strcmp(f[1] + 0, "D") == 0) { }
+                    /* f[0]=D f[1]=route f[2]=name f[3]=in f[4]=out f[5]=model */
+                    if (nf >= 6 && !strcmp(f[0], "D") && !strcmp(f[2], model_name)) {
+                        long idx = strtol(f[5], 0, 10);
+                        if (target >= 0) continue;   /* 同名多路由:取第一条 */
+                        target = idx;
+                    }
+                    (void)mi;
+                }
+            }
+        }
+        routes_end = at;
+        if (model_name && target < 0) sw_die("model name not in package routes");
+        if (model_index >= 0) {
+            if (model_index >= nm) sw_die("model index out of range");
+            target = model_index;
+        }
+        /* M 行：记录每个模型的头部位置与长度 */
+        m_at = calloc((size_t)nm, sizeof(long));
+        m_len = calloc((size_t)nm, sizeof(long));
+        m_raw = calloc((size_t)nm, sizeof(long));
+        m_crc = calloc((size_t)nm, sizeof(unsigned long));
+        if (!m_at || !m_len || !m_raw || !m_crc) sw_die("allocation");
+        for (i = 0; i < nm; i++) {
+            long hstart = at, ln = sw_line(pkg, body, &at), stored;
+            char line[256];
+            if (ln <= 0 || ln >= (long)sizeof line) sw_die("truncated model records");
+            for (k = 0; k < ln; k++) line[k] = pkg[hstart + k];
+            line[ln] = 0;
+            if (ver >= 3) {
+                long raw;
+                unsigned long crc;
+                if (sscanf(line, "M %ld %ld %*d %lu", &stored, &raw, &crc) != 3) sw_die("bad M row");
+                m_raw[i] = raw;
+                m_crc[i] = crc;
+            } else {
+                if (sscanf(line, "M %ld", &stored) != 1) sw_die("bad M row");
+                if (stored <= 0 || at + stored > body) sw_die("bad model extent");
+                if (pkg[at] != 'N') sw_die("P1/P2 model payload must start with 'N'");
+                m_raw[i] = stored;
+                m_crc[i] = 0;
+            }
+            if (stored <= 0 || at + stored > body) sw_die("bad model extent");
+            m_at[i] = hstart;
+            m_len[i] = (at - hstart) + stored;   /* M 行 + 负载 */
+            at += stored;
+        }
+        {   long models_end = at;
+            /* 装配新包 */
+            int need_bin = ver >= 3;
+            int is_text = !(nn >= 9 && !memcmp(net, "UNINETB1", 8));
+            char *raw = 0;
+            size_t rawn = 0;
+            char mline[192];
+            char *blob = 0;
+            size_t blobn = 0;
+            long cap;
+            unsigned long crc = 0;
+            if (need_bin && is_text) {
+                raw = sw_binary_net(net, nn, &rawn);
+            } else {
+                raw = net;
+                rawn = nn;
+            }
+            /* NEW_NET 可以是三种形态,按包版本选择:
+                 a) 已压缩 M 记录(首行 "M c raw 1 crc\n"+负载)  → 原样嵌入,输出与原包逐字节相同;
+                 b) UNINETB1 二进制网正文                     → P3 压成 codec=1 记录;
+                 c) 文本网(首行 "N ...")                      → P2 明文记录(P3 下先转 UNINETB1)。 */
+            {   int is_mrec = nn > 4 && net[0] == 'M' && net[1] == ' ';
+                if (need_bin) {
+                    if (is_mrec) {
+                        char *e2 = memchr(net, '\n', nn);
+                        size_t ln = e2 ? (size_t)(e2 - net) + 1 : 0;
+                        long stored;
+                        if (!ln || ln >= sizeof mline) sw_die("model record line");
+                        for (k = 0; k < (long)ln; k++) mline[k] = net[k];
+                        mline[ln] = 0;
+                        if (sscanf(mline, "M %ld %*d %*d %*u", &stored) != 1) sw_die("bad M record");
+                        if (stored <= 0 || (size_t)stored != nn - ln) sw_die("M record extent");
+                        blobn = (size_t)stored;
+                        blob = (char *)net + ln;
+                    } else {
+                        if (!(rawn >= 9 && !memcmp(raw, "UNINETB1", 8))) sw_die("P3/P4 needs UNINETB1 payload");
+                        cap = dz_bound((long)rawn);
+                        blob = malloc((size_t)(cap > 0 ? cap : 1));
+                        if (!blob) sw_die("allocation");
+                        {   long cn = dz_deflate((const unsigned char *)raw, (long)rawn, (unsigned char *)blob, cap);
+                            if (cn <= 0) sw_die("deflate");
+                            blobn = (size_t)cn;
+                        }
+                        crc = dz_crc32(0, (const unsigned char *)raw, (long)rawn);
+                        if (cx_fmt(mline, sizeof mline, "M %lu %lu 1 %lu\n",
+                                   (unsigned long)blobn, (unsigned long)rawn, crc)) sw_die("model line");
+                    }
+                } else {
+                    if (is_mrec) sw_die("P1/P2 takes a text network, not an M record");
+                    if (rawn < 1 || raw[0] != 'N') sw_die("P1/P2 needs a text network starting with N");
+                    if (cx_fmt(mline, sizeof mline, "M %lu\n", (unsigned long)rawn)) sw_die("model line");
+                }
+            }
+            {   size_t total = (size_t)m_at[target] + strlen(mline)
+                    + (need_bin ? blobn : rawn) + (size_t)(body - (m_at[target] + m_len[target]));
+                char *image = malloc(total);
+                size_t w = 0;
+                if (!image) sw_die("allocation");
+                for (k = 0; k < m_at[target]; k++) image[w++] = pkg[k];
+                for (k = 0; k < (long)strlen(mline); k++) image[w++] = mline[k];
+                if (need_bin) { for (k = 0; k < (long)blobn; k++) image[w++] = blob[k]; }
+                else { for (k = 0; k < (long)rawn; k++) image[w++] = raw[k]; }
+                for (k = m_at[target] + m_len[target]; k < models_end; k++) image[w++] = pkg[k];
+                for (k = models_end; k < body; k++) image[w++] = pkg[k];
+                {   int fd = open(outpath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+                    if (fd < 0) sw_die("exclusive output create");
+                    {   size_t done = 0;
+                        while (done < w) {
+                            ssize_t z = write(fd, image + done, w - done);
+                            if (z < 0 && errno == EINTR) continue;
+                            if (z <= 0) { close(fd); sw_die("write"); }
+                            done += (size_t)z;
+                        }
+                    }
+                    if (close(fd)) sw_die("close");
+                }
+                printf("P3_SWAP\tpkg_version=%ld\tmodel=%ld\tpayload=%lu\tout_bytes=%lu\n",
+                       ver, target, (unsigned long)(need_bin ? blobn : rawn), (unsigned long)w);
+                free(image);
+            }
+            if (need_bin && is_text) free(raw);
+            if (need_bin && blob && !(nn > 4 && net[0] == 'M' && net[1] == ' ')) free(blob);
+        }
+        free(m_at); free(m_len); free(m_raw); free(m_crc);
+    }
+    (void)model_index;
+    return 0;
+}
