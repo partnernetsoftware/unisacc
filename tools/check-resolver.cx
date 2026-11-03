@@ -9,11 +9,16 @@
  *   dir-source-equals-pack    外部目录(按 name 落盘)与 pack 解析逐字节相同
  *   tampered-dir-rejected     外部目录替换文件内容 → sha256 拒绝具名
  *   missing-manifest-row      名称不在 manifest → 具名拒绝
+ *   run-hot-start-ratio       同一 -run smoke 分内嵌 pack / 外部目录两种来源各跑 7 次取中位,
+ *                             与已装产品基线的比值 ≤ 1.2(冷启动标 UNMEASURED,不计 PASS)
+ *
+ * 冒烟输入是写在工作目录的 smoke.c(-run 直接执行,不需要额外材料)。
  */
 #pragma unisa use sysx.process
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sys.env
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use cxlib.resolver
 
@@ -157,6 +162,88 @@ int main(int argc,char **argv){
         unsigned char *r=rsv_resolve(&rs,"kernel/arm64","base","arm64",&n,w,sizeof w);
         ck(r==0 && strstr(w,"not in manifest"),"missing-manifest-row");
         if(r) free(r);
+    }
+
+    /* 5. -run 热启动比值:内嵌 pack 与外部目录两种来源各跑 7 次取中位,
+       与「已装产品内嵌路径」的基线比。基线在同一函数里现量,不写死数字。
+       冷启动(清缓存后首跑)不在本断言范围,输出里标 UNMEASURED。 */
+    {
+        char smoke[4400], base_arg[4400], dir_arg[4400], env_pack[4500], env_dir[4500];
+        sy_ts_t t0, t1;
+        long base_ms[7], pack_ms[7], dir_ms[7];
+        int i, k, npm = 0, ndm = 0;
+        long bmed, pmed, dmed;
+        char why2[512];
+        if (cx_fmt(smoke, sizeof smoke, "%s/smoke.c", dir)) return 2;
+        if (write_file(smoke, (const unsigned char *)"int main(void){return 3;}\n", 26)) { ck(0, "smoke-write"); }
+        else {
+            /* 基线:已装产品自己的内嵌路径(不带任何环境覆盖) */
+            for (i = 0; i < 7; i++) {
+                char *av[] = { "sh", "./unisacc.com", "-run", smoke, 0 };
+                np_result r; char w[512];
+                if (sy_mono(&t0)) { base_ms[i] = -1; continue; }
+                if (np_run(av, root, 0, 30, &r, w, sizeof w)) { base_ms[i] = -1; continue; }
+                if (sy_mono(&t1)) { base_ms[i] = -1; np_free(&r); continue; }
+                base_ms[i] = sy_ts_ms(&t0, &t1);
+                if (r.rc != 3) base_ms[i] = -1;
+                np_free(&r);
+            }
+            /* pack 来源:显式 UNISA_CONTAINER=pkg */
+            if (cx_fmt(env_pack, sizeof env_pack, "UNISA_CONTAINER=%s", pkg)) return 2;
+            for (i = 0; i < 7; i++) {
+                char *av[] = { "sh", "./unisacc.com", "-run", smoke, 0 };
+                char *add[] = { env_pack, 0 };
+                np_result r; char w[512];
+                if (sy_mono(&t0)) { pack_ms[i] = -1; continue; }
+                if (np_run(av, root, add, 30, &r, w, sizeof w)) { pack_ms[i] = -1; continue; }
+                if (sy_mono(&t1)) { pack_ms[i] = -1; np_free(&r); continue; }
+                pack_ms[i] = sy_ts_ms(&t0, &t1);
+                if (r.rc != 3) pack_ms[i] = -1;
+                np_free(&r);
+            }
+            /* 目录来源:UNISA_HOME=外部目录(先按 manifest 把三个成员落盘) */
+            {   const char *names[3] = { "kernel/x86_64", "hdr/stdio.h", "predefines/lnx/x86_64" };
+                const char *kinds[3] = { "base", "resource", "resource" };
+                const char *archs[3] = { "x86_64", "", "x86_64" };
+                for (k = 0; k < 3; k++) {
+                    long nn; char ww[512];
+                    unsigned char *b = rsv_resolve(&rs, names[k], kinds[k], archs[k], &nn, ww, sizeof ww);
+                    if (!b) continue;
+                    if (!cx_fmt(path, sizeof path, "%s/%s", ext, names[k]) && !mkdirs(path))
+                        (void)write_file(path, b, nn);
+                    free(b);
+                }
+            }
+            if (cx_fmt(env_dir, sizeof env_dir, "UNISA_HOME=%s", ext)) return 2;
+            for (i = 0; i < 7; i++) {
+                char *av[] = { "sh", "./unisacc.com", "-run", smoke, 0 };
+                char *add[] = { env_dir, 0 };
+                np_result r; char w[512];
+                if (sy_mono(&t0)) { dir_ms[i] = -1; continue; }
+                if (np_run(av, root, add, 30, &r, w, sizeof w)) { dir_ms[i] = -1; continue; }
+                if (sy_mono(&t1)) { dir_ms[i] = -1; np_free(&r); continue; }
+                dir_ms[i] = sy_ts_ms(&t0, &t1);
+                if (r.rc != 3) dir_ms[i] = -1;
+                np_free(&r);
+            }
+            (void)why2;
+            /* 取中位(自行排序,避免依赖 qsort 比较器) */
+            for (i = 0; i < 7; i++) for (k = i + 1; k < 7; k++) {
+                if (base_ms[k] < base_ms[i]) { long t = base_ms[i]; base_ms[i] = base_ms[k]; base_ms[k] = t; }
+                if (pack_ms[k] < pack_ms[i]) { long t = pack_ms[i]; pack_ms[i] = pack_ms[k]; pack_ms[k] = t; }
+                if (dir_ms[k] < dir_ms[i]) { long t = dir_ms[i]; dir_ms[i] = dir_ms[k]; dir_ms[k] = t; }
+            }
+            bmed = base_ms[3]; pmed = pack_ms[3]; dmed = dir_ms[3];
+            printf("RUN_HOT\tbaseline_ms=%ld\tpack_ms=%ld\tdir_ms=%ld\tpack_ratio=%.3f\tdir_ratio=%.3f\tcold=UNMEASURED\tbase_rc_ok=%d\n",
+                   bmed, pmed, dmed,
+                   bmed > 0 ? (double)pmed / (double)bmed : 0.0,
+                   bmed > 0 ? (double)dmed / (double)bmed : 0.0,
+                   bmed > 0);
+            ck(bmed > 0 && pmed > 0 && dmed > 0, "run-hot-baseline-measured");
+            ck(bmed > 0 && pmed > 0 && (double)pmed <= 1.2 * (double)bmed, "run-hot-pack-within-1.2x");
+            ck(bmed > 0 && dmed > 0 && (double)dmed <= 1.2 * (double)bmed, "run-hot-dir-within-1.2x");
+            (void)npm; (void)ndm;
+        }
     }
 
     rsv_release(&rs);
