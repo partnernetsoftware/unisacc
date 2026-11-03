@@ -80,7 +80,7 @@ target, `tools/release-build.cx` adds the P3 package and one slice, and
 `tools/release-ape.cx` packs the five slices into one APE and smokes it. The
 0.0.43 release product is `83343ec1` (rev `edc2c7700b`, 5,145,706 bytes,
 2026-11-01), and its second generation compiled `lnx/x86_64` byte-identical.
-The current working tree is a dev-lnx stub (`d93c1b24`, 624 B); the 0.0.43
+The current working tree is a dev-lnx stub (`dc0033f4`, 1292 B, B4 booter); the 0.0.43
 release bytes are the historical five-slice APE above.
 Two steps of the object route are still open: the model driver's `-c -b`
 reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text

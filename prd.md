@@ -96,7 +96,7 @@
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。上一发布 0.0.43 = `83343ec1`（5,145,706 字节，rev `edc2c7700b`）组成（当前工作树是 dev-lnx 薄壳 `d93c1b24`，见 §9.1）：
+用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。上一发布 0.0.43 = `83343ec1`（5,145,706 字节，rev `edc2c7700b`）组成（当前工作树是 dev-lnx 薄壳 `dc0033f4`（B4 booter 1292B），见 §9.1）：
 
 ```
 unisacc.com  5,145,706 B  sha 83343ec1…
@@ -268,7 +268,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点(2026-11-02 夜)。**已装产品 = 快车道候选**(NOT_RELEASE dev-lnx,entry 648a47ca / p3 436004f0 / split2 身份 41e4660d);上一版 83343ec1 的五片发布产物**在 `out/` 里没找到**(只有 `out/census-83343ec1`),需另查来源。今日(11-02)工作全部落在"0.0.43 收口之后的体系整理",**没有推进 0.0.44 第一优先级(编译加速 C44-SPEED-01)**——这是漂移,下一轮必须纠正。
+当前节点(2026-11-02 夜)。**已装产品 = 快车道候选**(NOT_RELEASE dev-lnx(B4 booter dc0033f4 1292B),entry 648a47ca / p3 436004f0 / split2 身份 2a1b38e5);上一版 83343ec1 的五片发布产物**在 `out/` 里没找到**(只有 `out/census-83343ec1`),需另查来源。今日(11-02)工作全部落在"0.0.43 收口之后的体系整理",**没有推进 0.0.44 第一优先级(编译加速 C44-SPEED-01)**——这是漂移,下一轮必须纠正。
 
 ```text
 0.0.43 收口 + 体系整理(进行中)
