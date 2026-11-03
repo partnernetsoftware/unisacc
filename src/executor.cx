@@ -1,5 +1,6 @@
 #pragma unisa module executor
 #pragma unisa use sys.kernel
+#pragma unisa use runtime.modelcache
 /* CxModel matches cx/runtime/model_lifetime.cx. CxDecode matches model_decode.cx.
    CxCodecCrc matches cx/runtime/codec.cx. Those bodies are other objects.
    core_run comes from the assembly kernel. core_run_take and core_run_budget
@@ -93,18 +94,26 @@ int ex_pp(const unsigned char *comp, long n, int raw, unsigned crc, int compress
     own = 0;
     rawb = 0;
     if (compressed) {
+        /* SPEED-01: reuse the modelcache that rt_open already uses (one implementation).
+           mc_get fills rawb on a hit; on a miss we inflate and mc_put. The CRC still runs
+           on the miss path only, matching rt_open. */
         rawb = malloc((size_t)raw);
         if (!rawb) { ex_why(why, cap, "out of memory"); return 1; }
         own = 1;
-        if (cxcodec_inflate(rawb, (unsigned long)raw, comp, (unsigned long)n)) {
-            free(rawb);
-            ex_why(why, cap, "inflate");
-            return 1;
-        }
-        if (cxcodec_crc_init(&ctx) || cxcodec_crc(&ctx, (const char *)rawb, raw, &got) || got != (uint32_t)crc) {
-            free(rawb);
-            ex_why(why, cap, "model crc");
-            return 1;
+        if (mc_get(comp, (unsigned long)n, rawb, (unsigned long)raw)) {
+            /* hit: bytes already validated by their payload sha when written */
+        } else {
+            if (cxcodec_inflate(rawb, (unsigned long)raw, comp, (unsigned long)n)) {
+                free(rawb);
+                ex_why(why, cap, "inflate");
+                return 1;
+            }
+            if (cxcodec_crc_init(&ctx) || cxcodec_crc(&ctx, (const char *)rawb, raw, &got) || got != (uint32_t)crc) {
+                free(rawb);
+                ex_why(why, cap, "model crc");
+                return 1;
+            }
+            mc_put(comp, (unsigned long)n, rawb, (unsigned long)raw);
         }
     } else {
         rawb = (unsigned char *)comp;
