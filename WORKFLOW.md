@@ -33,14 +33,14 @@
 | INTEGRATE | 单一集成者 | main 上的提交 + 账本行 |
 
 ```
-INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → RATCHET → DRY-EPOCH
+INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → RATCHET → SLOW-DRYRUN
 ```
 - **LOCATE**:两个不同模型并行给落点(`path:line`)与一条验证命令;一致直通,不一致交 arbiter。
 - **VERIFY**:在**全新副本**上应用 patch,依次:编译受影响 `.cx` → gate → `tools/affected.cx --run` → 声明了的字节等价回归。失败不进 REVIEW;失败输出作为上下文退回 IMPL,最多 2 轮,再败 → BLOCKED 上报。
 - **REVIEW**:输入=patch+VERIFY 输出;查越界、未验证声明、同类漏同步(grep 全部读写点)。只能给 PASS/FAIL+证据,无权批准。
 - **INTEGRATE**:`commit-own` 只带 domain;提交说明写做了什么,不写"更新计划"。
 - **RATCHET**:提交后立即 `tools/ratchets.cx`;红则新提交 revert(不用 reset),账本 BLOCKED。
-- **DRY-EPOCH**:构造输入(`tools/ exec/ cx/ src/ seed/`)有新提交 → 私有根预演慢车道;红则回到最近改该文件的工作项,置 REOPENED。
+- **SLOW-DRYRUN(慢车道预演)**:构造输入(`tools/ exec/ cx/ src/ seed/`)有新提交 → 私有根预演慢车道;红则回到最近改该文件的工作项,置 REOPENED。
 
 ## 6 模型节点的输出契约:规范化推理(`omp-workflow` 机器校验;不符退回重答一次,再不符记 INVALID)
 推理允许且鼓励,但只能写成**带证据的推理链**,不能写成叙述。

@@ -1,0 +1,44 @@
+/* check-slow-dryrun: the work-directory guard refuses anything outside out/ or tmp/.
+ * Two refusals (repo-root relative, absolute /tmp) plus the default path, all
+ * without starting a construction step.
+ *   sh ./unisacc.com tools/check-slow-dryrun.cx
+ */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define CAP (1L << 14)
+static char out[CAP];
+static int failed;
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tslow-dryrun.%s\n", ok ? "PASS" : "FAIL", n); }
+
+static char argbuf[64][256];
+
+static int run(char **av) {
+    char *argv[12]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[2048];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/slow-dryrun.cx"; argv[i++] = "--";
+    /* copy each value: a synthetic system cannot reorder args safely */
+    for (int k = 0; av[k] && i < 10; k++) { long j = 0; while (av[k][j] && j < 255) { argbuf[k][j] = av[k][j]; j++; } argbuf[k][j] = 0; argv[i++] = argbuf[k]; }
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (n < CAP - 1 && (r = sy_read(ofd, out + n, CAP - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    { char *a1[] = { "--steps", "7-7", "--work", "7-7", 0 };
+      int rc1 = run(a1); ck(rc1 == 4 && has("SLOW_DRYRUN_REFUSE"), "refuse-repo-root"); }
+    { char *a2[] = { "--work", "/tmp/x", "--steps", "7-7", 0 };
+      int rc2 = run(a2); ck(rc2 == 4 && has("SLOW_DRYRUN_REFUSE"), "refuse-absolute-tmp"); }
+    { char *a3[] = { "--steps", "7-7", "--work", "out/slow-dryrun-work", 0 };
+      int rc3 = run(a3); ck(rc3 == 0 && has("SLOW_DRYRUN_TIMING_ONLY"), "accepts-out"); }
+    printf("SLOW_DRYRUN_CHECKS\tassertions=3\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -272,14 +272,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 ```text
 0.0.43 收口 + 体系整理(进行中)
-├─ 慢车道纪元(2026-11-02,起点 a824200d77,omp-bdy 执行,runbook=plans/epoch-runbook-2026-11-02.md)
+├─ 本轮慢车道(2026-11-02,起点 a824200d77,omp-bdy 执行,runbook=plans/slowlane-runbook-2026-11-02.md)
 │  ├─ [x] 步7 prepare-context  [x] 步8 source-job-wave 131 job + final
 │  ├─ [x] 步9 kernel-build(收窄后字节==旧 blob 32cecc8a/4d6e45a1)
 │  ├─ [~] 步10 source-package-pack(对齐 split2 身份:3 处与 source-package.cx 漏同步已修)
 │  └─ [ ] 步11-18 p3/entry → 两代 GEN selfhost → kind2 安装 → 全批 → 换标
-├─ 合并进纪元的变更:A kernel 收窄(kernelinputs 单一来源) C host.cx cwd 头 D/E/F 补丁 06/05/07 H 撤销 --host-provider  G FFI 字节表入 include/(待做)
+├─ 并入本轮慢车道的变更:A kernel 收窄(kernelinputs 单一来源) C host.cx cwd 头 D/E/F 补丁 06/05/07 H 撤销 --host-provider  G FFI 字节表入 include/(待做)
 ├─ FFI 桥:x86_64 四向量本机通过;arm64 白箱走查+栈参数已写,运行期待 CI arm64 runner;ELF .text 提取器已去 objcopy 依赖
-├─ 下一纪元:实参个数检查(arity,weights/arity + parse E3,预演全绿在 /tmp/arity-impl)
+├─ 下一轮慢车道:实参个数检查(arity,weights/arity + parse E3,预演全绿在 /tmp/arity-impl)
 ├─ W6 自身体系迁移:seed/{net,tbl,ident,compilerpack,pack} CX 预演通过(小样本);gen(9051 行)暂缓;P3 压缩口径待决
 ├─ 收缩调查结论:tools+tests 86.8k 行,可归档 0、重复断言<50 行——体量真实,靠减用例不可行;大头是身份机制重复(SID/PC/GEN/context/pins/receipts)
 ├─ QUALIFIED 缺口(未变):73 外平台格需 CI 6 原生 runner;~24 BLOCKED(5 项需主人裁定范围)
@@ -287,7 +287,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 0.0.44 方向(主人 11-01 定:清理干扰、修 bug、提速;提速第一)
 ├─ [ ] C44-SPEED-01 编译加速:今日 0 进展
-├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,纪元后立项
+├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,本轮慢车道后立项
 └─ [ ] 其余见 plans/v0.0.44.md
 ```
 
