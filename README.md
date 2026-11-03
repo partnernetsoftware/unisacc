@@ -3,7 +3,7 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.43, measured on the installed
+file, `unisacc.com`. Toolchain status (0.0.43, measured on the 0.0.43 release
 `83343ec1`): `-o` writes a runnable file for all six targets -- ELF, Mach-O with
 an ad-hoc signature, or PE32+ -- and the default `-run` executes in memory;
 relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
@@ -74,12 +74,14 @@ three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.
 retain the exact historical candidates, hashes and build lineage. They do not
 qualify the current candidate.
 
-The installed `unisacc.com` is built from the CX chain in this tree, not from
+The 0.0.43 release `unisacc.com` is built from the CX chain in this tree, not from
 the old C reference: `tools/entry-build.cx` compiles `src/unisacc.cx` per
 target, `tools/release-build.cx` adds the P3 package and one slice, and
 `tools/release-ape.cx` packs the five slices into one APE and smokes it. The
-installed 0.0.43 product is `83343ec1` (rev `edc2c7700b`, 5,145,706 bytes,
+0.0.43 release product is `83343ec1` (rev `edc2c7700b`, 5,145,706 bytes,
 2026-11-01), and its second generation compiled `lnx/x86_64` byte-identical.
+The current working tree is a dev-lnx stub (`d93c1b24`, 624 B); the 0.0.43
+release bytes are the historical five-slice APE above.
 Two steps of the object route are still open: the model driver's `-c -b`
 reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text
 ([candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)).
@@ -187,7 +189,7 @@ one `tools/release-build.cx` run per slice (P3 package plus the slice; `whole-o`
 for osx/win, `objects` for lnx), then `tools/release-ape.cx -- pack` for the
 five-slice APE and `-- smoke` before anyone installs it. The steps are listed in
 [archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md),
-and the installed 0.0.43 `unisacc.com` was built this way:
+and the 0.0.43 release `unisacc.com` was built this way:
 
 ```bash
 sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
