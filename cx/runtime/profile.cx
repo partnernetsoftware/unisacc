@@ -1,0 +1,49 @@
+#pragma unisa module profile
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+/* Per-stage profile for the compiled-model pipeline (C44-PROFILE-01).
+   Off unless UNISACC_PROFILE=1; the switch is read once and cached, so a
+   closed run pays one branch at each stage boundary and nothing else.
+   The op-level split is not here: core_run is the assembly kernel (m27),
+   so the finest grain the cx layers can see is a stage's step count plus
+   its wall time. One line per stage, stderr only, RR_TIME untouched:
+     PROFILE <TAB> stage <TAB> steps <TAB> ns
+   Steps come from ex_budget_used(); ns is the same monotonic clock RR_TIME
+   uses, so the two agree. */
+static int prof_state;
+static int prof_checked;
+static long prof_sec, prof_nsec;
+
+/* 1 when UNISACC_PROFILE=1. Cached after the first call. */
+int prof_enabled(void) {
+    if (!prof_checked) {
+        const char *v = sy_env("UNISACC_PROFILE");
+        prof_state = (v && v[0] == '1' && v[1] == 0) ? 1 : 0;
+        prof_checked = 1;
+    }
+    return prof_state;
+}
+
+/* Start a stage reading: remember the clock so prof_stage can report the
+   span. A failed clock read leaves the previous marks; prof_stage then
+   reports ns=0 rather than a bogus span. */
+void prof_stage_begin(void) {
+    sy_ts_t t;
+    if (!prof_state) return;
+    if (sy_mono(&t) == 0) { prof_sec = t.sec; prof_nsec = t.nsec; }
+    else { prof_sec = 0; prof_nsec = 0; }
+}
+
+/* One PROFILE line for the stage that just ran. */
+void prof_stage(const char *stage, long long steps) {
+    sy_ts_t t;
+    unsigned long long a, b;
+    if (!stage || !prof_state) return;
+    a = b = 0;
+    if (sy_mono(&t) == 0) {
+        b = (unsigned long long)t.sec * 1000000000ULL + (unsigned long long)t.nsec;
+        a = (unsigned long long)prof_sec * 1000000000ULL + (unsigned long long)prof_nsec;
+    }
+    sy_eprintf("PROFILE\t%s\t%lld\t%llu\n", stage, steps, a && b > a ? b - a : 0ULL);
+}
