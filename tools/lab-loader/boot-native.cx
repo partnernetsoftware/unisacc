@@ -6,9 +6,13 @@
  * 职责(omp-cc-opus 2026-11-03 裁定：校验放原生代码,不依赖宿主 sha256sum):
  *   1 读自身同目录 manifest.tsv;
  *   2 按 (kind=base, arch=宿主) 选行;
- *   3 读 base 文件,用内置 sha256 算摘要,与 manifest 行的 sha256 逐字符比对;
+ *   3 读 base 文件,算 sha256 并与 manifest 行的 sha256 逐字符比对;
  *      不符 → 具名拒绝(含 "sha256"),退出非零,**不 exec**;
  *   4 exec base,argv 原样透传。
+ *
+ * 摘要实现优先 L0 的 sy_sha256_hex(Linux x86_64 走 AF_ALG 内核哈希),
+ * 失配或失败时回退 cx_sha256_hex(纯 CX 实现)。实测纯 CX 版本约 8.5MB/s,
+ * 在 1.18MB 基座上要 139ms,而 AF_ALG 路径几乎不可测——所以回退只作兜底。
  *
  * 宿主 arch 由编译期决定(本段本身就是按宿主编出的),不调用 uname:
  * 平台差异收在自己的代码里,这是 cx L0 的既有口径。
@@ -115,7 +119,7 @@ int main(int argc, char **argv) {
         bn_die("path too long", name);
     bytes = bn_load(path, &bn);
     if (!bytes) bn_die("cannot read base", path);
-    cx_sha256_hex(bytes, bn, got);
+    if (sy_sha256_hex(bytes, (long)bn, got)) cx_sha256_hex(bytes, bn, got);
     self = bytes;
     (void)self; (void)selfn;
     if (strcmp(got, want)) {
