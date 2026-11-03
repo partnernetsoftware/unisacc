@@ -1,0 +1,115 @@
+#pragma unisa module cxroot
+/* cxroot -- the `use NAME` file rule of the compiler, for tools that compute use graphs without
+   running the compiler (affected, symindex, check-cx-layers, cxpack, refactor).
+   Same rule as cxm_adduse/cxm_rootfind in cx/cx0/plan.cx (spec CX-U-4, CX-U-7):
+     1 NAME with '.' as '/' plus ".cx", beside the using file;
+     2 when that file does not exist, the nearest ancestor cxroot.tsv ("CXROOT1\n", rows
+       "R<TAB>PREFIX<TAB>DIR\n", '#' and empty lines are comments): the longest PREFIX equal to NAME's
+       leading segments maps NAME to DIR/<rest>.cx; the nearest cxroot.tsv decides alone.
+   A relative using path walks up with "../", as the compiler does; at most 64 levels.
+
+   int cxr_path(const char *user, const char *name, long nn, char *out, long cap)
+     user  the using file as the caller holds it (relative or absolute); borrowed.
+     name  NAME[0..nn); borrowed.  std/std.cx/std.* are the caller's business.
+     out   receives the path the compiler would open: the beside path when it exists, else the
+           root-mapped path when a row covers NAME (whether or not that file exists), else the
+           beside path.  Existence is the caller's check, as before.
+     returns 0, or 1 after printing "cxroot: FILE: WHY" to stderr for a malformed cxroot.tsv, a
+     cxroot.tsv that is not readable, a non-ENOENT failure, or a path longer than cap. */
+#pragma unisa use sys.fs
+
+static int cxr_bad(const char *file, const char *why) { fprintf(stderr, "cxroot: %s: %s\n", file, why); return 1; }
+
+static int cxr_dirok(const char *s, long b, long e) {
+    long k = b, p;
+    if (b >= e || s[b] == '/' || s[e - 1] == '/') return 0;
+    while (k < e) {
+        p = k;
+        while (p < e && s[p] != '/') { if (s[p] == '\t' || (unsigned char)s[p] < 32) return 0; p++; }
+        if (p == k || (p - k == 1 && s[k] == '.') || (p - k == 2 && s[k] == '.' && s[k + 1] == '.')) return 0;
+        k = p + 1;
+    }
+    return 1;
+}
+
+static int cxr_goodname(const char *w, long n) {
+    long i = 0; int st = 1;
+    while (i < n) {
+        char c = w[i];
+        if (st && !((c >= 'a' && c <= 'z') || c == '_')) return 0;
+        if (c == '.') { st = 1; i++; continue; }
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        st = 0; i++;
+    }
+    return n > 0 && !st;
+}
+
+/* rows of one cxroot.tsv: 0 and *bdir/*bdl/*bl set when a row covers NAME, 2 when none does, 1 refused */
+static int cxr_rows(const char *file, const char *s, long len, const char *w, long n, long *bl, long *bdb, long *bde) {
+    long i = 8, ls, le, pb, pe, k;
+    *bl = -1;
+    if (len < 8 || memcmp(s, "CXROOT1\n", 8)) return cxr_bad(file, "first line is not CXROOT1");
+    while (i < len) {
+        ls = i; while (i < len && s[i] != '\n') i++;
+        le = i; if (i < len) i++; else return cxr_bad(file, "last row has no newline");
+        if (le == ls || s[ls] == '#') continue;
+        if (le - ls < 5 || s[ls] != 'R' || s[ls + 1] != '\t') return cxr_bad(file, "row is not R<TAB>PREFIX<TAB>DIR");
+        pb = ls + 2; pe = pb; while (pe < le && s[pe] != '\t') pe++;
+        if (pe >= le) return cxr_bad(file, "row is not R<TAB>PREFIX<TAB>DIR");
+        if (!cxr_goodname(s + pb, pe - pb)) return cxr_bad(file, "bad PREFIX");
+        if (!cxr_dirok(s, pe + 1, le)) return cxr_bad(file, "bad DIR");
+        if (pe - pb < n && w[pe - pb] == '.') {
+            for (k = 0; k < pe - pb && w[k] == s[pb + k]; k++) {}
+            if (k == pe - pb) {
+                if (k == *bl) return cxr_bad(file, "PREFIX given twice");
+                if (k > *bl) { *bl = k; *bdb = pe + 1; *bde = le; }
+            }
+        }
+    }
+    return *bl < 0 ? 2 : 0;
+}
+
+int cxr_path(const char *user, const char *name, long nn, char *out, long cap) {
+    char dir[4096], file[4200]; long dl, k, p, bl = -1, bdb = 0, bde = 0; int depth, e;
+    if (!user || !name || !out || nn <= 0 || cap < 1) return cxr_bad("-", "invalid argument");
+    dl = (long)strlen(user);
+    while (dl > 0 && user[dl - 1] != '/') dl--;
+    if (dl + nn + 4 >= cap || dl >= (long)sizeof dir - 4) return cxr_bad(user, "path too long");
+    for (k = 0; k < dl; k++) out[k] = user[k];
+    for (k = 0; k < nn; k++) out[dl + k] = name[k] == '.' ? '/' : name[k];
+    out[dl + nn] = '.'; out[dl + nn + 1] = 'c'; out[dl + nn + 2] = 'x'; out[dl + nn + 3] = 0;
+    e = sy_exists(out);
+    if (e == 1) return 0;
+    if (e < 0) return cxr_bad(out, "not readable (not ENOENT)");
+    for (k = 0; k < dl; k++) dir[k] = user[k];
+    dir[dl] = 0;
+    for (depth = 0; depth < 64; depth++) {
+        if (cx_fmt(file, sizeof file, "%scxroot.tsv", dir)) return cxr_bad(dir, "path too long");
+        e = sy_exists(file);
+        if (e < 0) return cxr_bad(file, "not readable (not ENOENT)");
+        if (e == 1) {
+            size_t n0; char *s = cx_read(file, &n0); int r;
+            if (!s) return cxr_bad(file, "read error");
+            r = cxr_rows(file, s, (long)n0, name, nn, &bl, &bdb, &bde);
+            if (r == 1) { free(s); return 1; }
+            if (r == 2) { free(s); return 0; }                       /* nearest root has no row: beside stands */
+            p = 0;
+            if (dl + (bde - bdb) + 1 + (nn - bl) + 4 >= cap) { free(s); return cxr_bad(file, "path too long"); }
+            for (k = 0; k < dl; k++) out[p++] = dir[k];
+            for (k = bdb; k < bde; k++) out[p++] = s[k];
+            for (k = bl; k < nn; k++) out[p++] = name[k] == '.' ? '/' : name[k];
+            out[p++] = '.'; out[p++] = 'c'; out[p++] = 'x'; out[p] = 0;
+            free(s);
+            return 0;
+        }
+        if (dl == 1 && dir[0] == '/') return 0;
+        if (dir[0] != '/' && (dl == 0 || (dl >= 3 && dir[dl - 3] == '.' && dir[dl - 2] == '.' && (dl == 3 || dir[dl - 4] == '/')))) {
+            if (dl + 3 >= (long)sizeof dir) return 0;
+            dir[dl] = '.'; dir[dl + 1] = '.'; dir[dl + 2] = '/'; dl += 3;
+        } else {
+            dl--; while (dl > 0 && dir[dl - 1] != '/') dl--;
+        }
+        dir[dl] = 0;
+    }
+    return 0;
+}

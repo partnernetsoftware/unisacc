@@ -402,6 +402,82 @@ static int cxm_deps_same(char *a, char *b) {
     }
     return 1;
 }
+/* Package root (spec CX-U-7).  A use NAME with no file beside the using unit is looked up through the
+   nearest ancestor directory of that unit holding cxroot.tsv: "CXROOT1\n", then rows
+   "R<TAB>PREFIX<TAB>DIR\n" ('#' lines and empty lines are comments).  PREFIX is a module name; DIR is a
+   directory relative to the cxroot.tsv directory: not empty, no leading or trailing '/', no empty, "."
+   or ".." segment, no tab.  The longest PREFIX equal to NAME's leading dot segments maps NAME to
+   DIR/<the remaining segments, '.' as '/'>.cx.  The nearest cxroot.tsv decides alone: a NAME none of its
+   rows covers is not looked up further up.  A malformed file, a malformed row and a PREFIX given twice
+   are refused by name; rows are never skipped.
+   cxm_rootrow and cxm_rootfind return 0 with out set, 1 when no root or no row covers NAME, and -1 after
+   the refusal was reported. */
+static int cxm_rootbad(int u, int line, char *file, char *why) {
+    cxm_start(u, line); cxm_m(file); cxm_m(": "); cxm_m(why); cxm_fail(); return 0 - 1;
+}
+static int cxm_rootrow(int u, int line, char *w, int n, char *dir, int dl, int len, char *file, char *out) {
+    char cand[CXM_PATHW]; char *s; int i; int ls; int le; int pb; int pe; int db; int k; int p;
+    int bl; int bdb; int bde;
+    s = cxm_cmp; bl = 0 - 1; bdb = 0; bde = 0;
+    if (len < 8 || !cxm_eqn(s, 8, "CXROOT1\n")) return cxm_rootbad(u, line, file, "first line is not CXROOT1");
+    i = 8;
+    while (i < len) {
+        ls = i; while (i < len && s[i] != '\n') i = i + 1;
+        le = i; if (i < len) i = i + 1; else return cxm_rootbad(u, line, file, "last row has no newline");
+        if (le == ls || s[ls] == '#') continue;
+        if (le - ls < 5 || s[ls] != 'R' || s[ls + 1] != '\t') return cxm_rootbad(u, line, file, "row is not R<TAB>PREFIX<TAB>DIR");
+        pb = ls + 2; pe = pb; while (pe < le && s[pe] != '\t') pe = pe + 1;
+        if (pe >= le) return cxm_rootbad(u, line, file, "row is not R<TAB>PREFIX<TAB>DIR");
+        if (!cxm_goodname(s + pb, pe - pb)) return cxm_rootbad(u, line, file, "bad PREFIX");
+        db = pe + 1;
+        if (db >= le || s[db] == '/' || s[le - 1] == '/') return cxm_rootbad(u, line, file, "bad DIR");
+        k = db;
+        while (k < le) {                                   /* every DIR segment: not empty, not "." or "..", no tab */
+            p = k; while (p < le && s[p] != '/') { if (s[p] == '\t' || (s[p] & 255) < 32) return cxm_rootbad(u, line, file, "bad DIR"); p = p + 1; }
+            if (p == k || (p - k == 1 && s[k] == '.') || (p - k == 2 && s[k] == '.' && s[k + 1] == '.')) return cxm_rootbad(u, line, file, "bad DIR");
+            k = p + 1;
+        }
+        if (pe - pb < n && w[pe - pb] == '.') {
+            k = 0; while (k < pe - pb && w[k] == s[pb + k]) k = k + 1;
+            if (k == pe - pb) {
+                if (k == bl) return cxm_rootbad(u, line, file, "PREFIX given twice");
+                if (k > bl) { bl = k; bdb = db; bde = le; }
+            }
+        }
+    }
+    if (bl < 0) return 1;
+    if (dl + (bde - bdb) + 1 + (n - bl) + 4 >= CXM_PATHW) return cxm_rootbad(u, line, file, "module path too long");
+    p = 0; k = 0; while (k < dl) { cand[p] = dir[k]; p = p + 1; k = k + 1; }
+    k = bdb; while (k < bde) { cand[p] = s[k]; p = p + 1; k = k + 1; }
+    k = bl; while (k < n) { cand[p] = w[k] == '.' ? '/' : w[k]; p = p + 1; k = k + 1; }
+    cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
+    if (cxm_norm(cand, out)) return cxm_rootbad(u, line, file, "module path too long");
+    return 0;
+}
+static int cxm_rootfind(int u, int line, char *w, int n, char *out) {
+    char dir[CXM_PATHW]; char file[CXM_PATHW]; int dl; int k; int r; int depth;
+    dl = cxm_len(cxm_path[u]);
+    while (dl > 0 && cxm_path[u][dl - 1] != '/') dl = dl - 1;
+    k = 0; while (k < dl) { dir[k] = cxm_path[u][k]; k = k + 1; }
+    dir[dl] = 0; depth = 0;
+    while (depth < 64) {                                   /* a relative unit path walks up with "../" */
+        if (dl + 11 >= CXM_PATHW) return 1;
+        k = 0; while (k < dl) { file[k] = dir[k]; k = k + 1; }
+        cxm_cpy(file + dl, "cxroot.tsv", CXM_PATHW - dl);
+        r = cxm_rd(file, cxm_cmp, CXM_IFMAX);
+        if (r >= 0) return cxm_rootrow(u, line, w, n, dir, dl, r, file, out);
+        if (r == 0 - 2) return cxm_rootbad(u, line, file, "too large");
+        if (r != 0 - 1) return cxm_rootbad(u, line, file, "read error");
+        if (dl == 1 && dir[0] == '/') return 1;            /* "/" searched */
+        if (dir[0] != '/' && (dl == 0 || (dl >= 3 && dir[dl - 3] == '.' && dir[dl - 2] == '.' && (dl == 3 || dir[dl - 4] == '/')))) {
+            dir[dl] = '.'; dir[dl + 1] = '.'; dir[dl + 2] = '/'; dl = dl + 3;
+        } else {
+            dl = dl - 1; while (dl > 0 && dir[dl - 1] != '/') dl = dl - 1;
+        }
+        dir[dl] = 0; depth = depth + 1;
+    }
+    return 1;
+}
 /* `#pragma unisa use NAME` in unit u at line: resolve beside the using file and add the module */
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
 static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, int an) {
@@ -422,6 +498,12 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     cand[p] = '.'; cand[p + 1] = 'c'; cand[p + 2] = 'x'; cand[p + 3] = 0;
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
+    if (v == cxm_n && cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {     /* nothing beside the unit: the package root */
+        char rnorm[CXM_PATHW]; int rr;
+        rr = cxm_rootfind(u, line, w, n, rnorm);
+        if (rr < 0) return 1;
+        if (rr == 0) { cxm_cpy(norm, rnorm, CXM_PATHW); v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1; }
+    }
     if (v < cxm_n && !cxm_eq(cxm_path[v], norm) && !cxm_deps_same(cxm_path[v], norm)) {
         cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(" has two lexical entries: ");
         cxm_m(cxm_path[v]); cxm_m(" and "); cxm_m(norm); cxm_m(" with use dependencies"); return cxm_fail();

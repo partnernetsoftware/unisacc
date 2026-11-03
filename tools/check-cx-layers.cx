@@ -53,6 +53,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.cxroot
 
 #define CL_CAP 1048576
 #define CL_PATH 4400
@@ -246,46 +247,6 @@ static void cl_locate(const char *srcpath, const char *mod, int *line, int *cond
     for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod) && cl_uses[k].cond) { *line = cl_uses[k].line; *cond = 1; return; }
     for (k = 0; k < cl_nuses; k++) if (cl_eq(cl_uses[k].mod, mod)) { *line = cl_uses[k].line; *cond = 0; return; }
 }
-#if 0
-static void cl_locate_old(const char *srcpath, const char *mod, int *line, int *cond) {
-
-    long n, i, a, b;
-    int lno, depth, ml;
-    *line = 0; *cond = 0;
-    ml = (int)tx_len(mod, 128);
-    if (cl_scan_path[0] && cl_eq(srcpath, cl_scan_path)) n = cl_scan_len;
-    else n = cl_read(srcpath, cl_src, CL_CAP);
-    if (n <= 0) return;
-    i = 0; lno = 1; depth = 0;
-    while (i < n) {
-        a = i;
-        while (i < n && cl_src[i] != '\n') i = i + 1;
-        b = i;
-        if (i < n) i = i + 1;
-        while (a < b && (cl_src[a] == ' ' || cl_src[a] == '\t')) a = a + 1;
-        if (a < b && cl_src[a] == '#' && a + 1 < b && cl_src[a + 1] != ' ') {
-            long j = a + 1;
-            while (j < b && (cl_src[j] == ' ' || cl_src[j] == '\t')) j = j + 1;
-            if (cl_at(cl_src + j, "if")) depth = depth + 1;
-            else if (cl_at(cl_src + j, "endif")) { if (depth > 0) depth = depth - 1; }
-            else if (cl_at(cl_src + j, "pragma")) {
-                long k = j + 6, u, m, e;
-                while (k < b && (cl_src[k] == ' ' || cl_src[k] == '\t')) k = k + 1;
-                if (!cl_at(cl_src + k, "unisa")) { lno = lno + 1; continue; }
-                u = k + 5;
-                while (u < b && (cl_src[u] == ' ' || cl_src[u] == '\t')) u = u + 1;
-                if (!cl_at(cl_src + u, "use")) { lno = lno + 1; continue; }
-                m = u + 3;
-                while (m < b && (cl_src[m] == ' ' || cl_src[m] == '\t')) m = m + 1;
-                e = m;
-                while (e < b && (cl_src[e] == '.' || cl_isid((unsigned char)cl_src[e]))) e = e + 1;
-                if (e - m == ml && tx_prefix(cl_src + m, e - m, mod, ml) && !*line) { *line = lno; *cond = depth > 0; }
-            }
-        }
-        lno = lno + 1;
-    }
-}
-#endif
 static int cl_wl_load(const char *path) {
     long n, i, a, b, f, e;
     int k;
@@ -483,12 +444,25 @@ static void cl_unresolved(const char *srcpath, const char *mod, int err) {
     cl_wl[w].used = 1;
     cl_unres = cl_unres + 1;
 }
+/* the path the compiler opens for `use MOD[0..n)` from a file in DIR (cxlib.cxroot); 0, or -1 for
+   a PATH refusal.  A beside path that fails with something other than ENOENT stays the answer, so
+   the caller's sy_stat reports it as UNRES-<errno> as before. */
+static int cl_usepath(const char *dir, const char *mod, long n, char *out, long cap) {
+    char user[CL_PATH];
+    sy_stat_t st;
+    int rc;
+    out[0] = 0;
+    if (cx_fmt(user, sizeof user, "%s/x.cx", dir)) return -1;
+    if (!cxr_path(user, mod, n, out, cap)) return 0;
+    if (!out[0]) return -1;
+    rc = sy_stat(out, &st);
+    return rc < 0 && rc != -ENOENT ? 0 : -1;
+}
 /* resolve one `use MOD` of SRC_ABS (its lexical tracked path is SRC_REL) and
    record the edge or the refusal. DIR_ABS is the using file's real directory. */
 static void cl_process_use(const char *src_rel, const char *src_abs, const char *dir_abs, const char *mod) {
     char cand[CL_PATH], dst[CL_PATH];
-    char rel[CL_PATH];
-    long o = 0, k = 0;
+    long k = 0;
     int line, cond;
     sy_stat_t st;
     int rc;
@@ -497,14 +471,8 @@ static void cl_process_use(const char *src_rel, const char *src_abs, const char 
     if (cond) { cl_failf("PARSE-CONDITIONAL", src_rel, line, mod, "", ""); return; }
     if (cl_eq(mod, "std") || cl_eq(mod, "std.cx")) return;
     if (cl_at(mod, "std.")) { cl_unresolved(src_rel, mod, -ENOENT); return; }
-    while (mod[k] && o < CL_PATH - 5) {
-        if (mod[k] == '.') rel[o++] = '/';
-        else if (cl_isid((unsigned char)mod[k])) rel[o++] = mod[k];
-        else break;
-        k = k + 1;
-    }
-    rel[o++] = '.'; rel[o++] = 'c'; rel[o++] = 'x'; rel[o] = 0;
-    if (cx_fmt(cand, sizeof cand, "%s/%s", dir_abs, rel)) { cl_failf("PATH", src_rel, line, mod, "", ""); return; }
+    while (mod[k] == '.' || cl_isid((unsigned char)mod[k])) k = k + 1;
+    if (cl_usepath(dir_abs, mod, k, cand, sizeof cand)) { cl_failf("PATH", src_rel, line, mod, "", ""); return; }
     rc = sy_stat(cand, &st);
     if (rc < 0) { cl_unresolved(src_rel, mod, rc); return; }
     if (sy_realpath(cand, dst, sizeof dst) < 0) { cl_failf("REALPATH", src_rel, line, mod, cand, ""); return; }
@@ -543,18 +511,11 @@ static void cl_shard_file(const char *srcpath, const char *sha) {
             char dst[CL_PATH];
             int rc2;
             sy_stat_t st2;
-            char rel[CL_PATH];
-            long o = 0, k = a + 2;
-            while (cl_shard[k] && o < CL_PATH - 5) {
-                if (cl_shard[k] == '.') rel[o++] = '/';
-                else if (cl_isid((unsigned char)cl_shard[k])) rel[o++] = cl_shard[k];
-                else break;
-                k = k + 1;
-            }
+            long k = a + 2;
+            while (cl_shard[k] == '.' || cl_isid((unsigned char)cl_shard[k])) k = k + 1;
             if (cl_eq(cl_shard + a + 2, "std") || cl_eq(cl_shard + a + 2, "std.cx")) continue;
             if (cl_at(cl_shard + a + 2, "std.")) { cl_unresolved(srcpath, cl_shard + a + 2, -ENOENT); continue; }
-            rel[o++] = '.'; rel[o++] = 'c'; rel[o++] = 'x'; rel[o] = 0;
-            if (cx_fmt(dst, sizeof dst, "%s/%s", cand, rel)) { cl_failf("PATH", srcpath, 0, cl_shard + a + 2, "", ""); continue; }
+            if (cl_usepath(cand, cl_shard + a + 2, k - (a + 2), dst, sizeof dst)) { cl_failf("PATH", srcpath, 0, cl_shard + a + 2, "", ""); continue; }
             rc2 = sy_stat(dst, &st2);
             if (rc2 < 0) { cl_unresolved(srcpath, cl_shard + a + 2, rc2); continue; }
             if (sy_realpath(dst, dst, sizeof dst) < 0) { cl_failf("REALPATH", srcpath, 0, cl_shard + a + 2, "", ""); continue; }

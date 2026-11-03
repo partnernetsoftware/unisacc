@@ -1,0 +1,68 @@
+/* check-cxroot.cx -- cxlib.cxroot answers the compiler's `use` file rule (spec CX-U-4, CX-U-7).
+   usage: sh ./unisacc.com tools/check-cxroot.cx [-- NEW_ABS_OUT]   (default: a new out/check-cxroot-PID under the cwd)
+   Builds a fixture tree under NEW_ABS_OUT and checks cxr_path: beside wins, root prefix mapping,
+   longest prefix, a module's own use through the root, nearest root decides alone, no row keeps the
+   beside path, a row whose file is missing still names the root path, a relative using path walks up
+   with "../", and malformed cxroot.tsv files are refused (header, "..", duplicate PREFIX, bad row,
+   no final newline).  The same cases are asserted against the parser authority in
+   tests/preprocess/cx0.cx; this check covers the tool-side copy only. */
+#pragma unisa use cxlib.cxroot
+#pragma unisa use sys.fs
+
+static int checks, failed;
+static char work[4096];
+static void die(const char *why) { fprintf(stderr, "check-cxroot: %s errno=%d\n", why, errno); exit(2); }
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\tcxroot.%s\n", ok ? "PASS" : "FAIL", name); }
+static void at(char *out, size_t cap, const char *rel) { if (cx_fmt(out, cap, "%s/%s", work, rel)) die("path-bound"); }
+static void sub(const char *rel) { char p[4400]; at(p, sizeof p, rel); if (mkdir(p, 0700)) die("fixture-directory"); }
+static void put(const char *rel, const char *text) {
+    char p[4400]; at(p, sizeof p, rel); FILE *f = fopen(p, "wx"); if (!f) die("fixture-open");
+    if (fputs(text, f) < 0 || fclose(f)) die("fixture-write");
+}
+static void drop(const char *rel) { char p[4400]; at(p, sizeof p, rel); if (unlink(p)) die("fixture-unlink"); }
+/* cxr_path from USER (relative to work) for NAME; 1 when it returns 0 and the path equals work/WANT */
+static int maps(const char *user, const char *name, const char *want) {
+    char u[4400], w[4400], out[4400]; at(u, sizeof u, user); at(w, sizeof w, want);
+    int r = cxr_path(u, name, (long)strlen(name), out, sizeof out);
+    if (r || strcmp(out, w)) fprintf(stderr, "maps %s %s: r=%d out=%s want=%s\n", user, name, r, out, w);
+    return !r && !strcmp(out, w);
+}
+static int refuses(const char *user, const char *name) {
+    char u[4400], out[4400]; at(u, sizeof u, user);
+    return cxr_path(u, name, (long)strlen(name), out, sizeof out) == 1;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 2 || (argc == 2 && (argv[1][0] != '/' || strlen(argv[1]) >= sizeof work))) die("usage [NEW_ABS_OUT]");
+    if (argc == 2) { if (cx_fmt(work, sizeof work, "%s", argv[1])) die("work-bound"); }
+    else { char cwd[3000]; if (!getcwd(cwd, sizeof cwd) || cx_fmt(work, sizeof work, "%s/out/check-cxroot-%ld", cwd, (long)getpid())) die("work-bound"); }
+    if (mkdir(work, 0700)) die("new-output-required");
+    sub("pr"); sub("pr/pkg"); sub("pr/pkg/lib"); sub("pr/other"); sub("pr/app"); sub("pr/app2"); sub("pr/app2/lib"); sub("pr/inner");
+    put("pr/cxroot.tsv", "CXROOT1\n# comment\n\nR\tlib\tpkg/lib\nR\tlib.deep\tother\nR\tgone\tpkg/none\n");
+    put("pr/pkg/lib/util.cx", "#pragma unisa module util\n");
+    put("pr/other/x.cx", "#pragma unisa module x\n");
+    put("pr/app2/lib/util.cx", "#pragma unisa module util\n");
+    put("pr/inner/cxroot.tsv", "CXROOT1\nR\tsomething\telse\n");
+    ck(maps("pr/app/main.cx", "lib.util", "pr/pkg/lib/util.cx"), "root-maps-prefix-to-directory");
+    ck(maps("pr/pkg/lib/uses.cx", "lib.util", "pr/pkg/lib/util.cx"), "root-module-resolves-its-own-use-through-root");
+    ck(maps("pr/app/deep.cx", "lib.deep.x", "pr/other/x.cx"), "root-longest-prefix-wins");
+    ck(maps("pr/app2/main.cx", "lib.util", "pr/app2/lib/util.cx"), "beside-file-wins-over-root");
+    ck(maps("pr/inner/main.cx", "lib.util", "pr/inner/lib/util.cx"), "nearest-root-decides-alone");
+    ck(maps("pr/app/norow.cx", "nowhere.util", "pr/app/nowhere/util.cx"), "no-row-keeps-beside-path");
+    ck(maps("pr/app/gone.cx", "gone.util", "pr/pkg/none/util.cx"), "row-without-file-names-root-path");
+    {
+        char app[4400], back[4096], out[4400]; at(app, sizeof app, "pr/app");
+        if (!getcwd(back, sizeof back) || chdir(app)) die("chdir-app");
+        int r = cxr_path("main.cx", "lib.util", 8, out, sizeof out);
+        ck(!r && !strcmp(out, "../pkg/lib/util.cx"), "relative-unit-walks-up-to-root");
+        if (chdir(back)) die("chdir-back");
+    }
+    sub("bad"); sub("bad/a");
+    put("bad/cxroot.tsv", "CXROOT2\nR\tlib\tpkg\n"); ck(refuses("bad/a/main.cx", "lib.util"), "root-header-required"); drop("bad/cxroot.tsv");
+    put("bad/cxroot.tsv", "CXROOT1\nR\tlib\t../pkg\n"); ck(refuses("bad/a/main.cx", "lib.util"), "root-dotdot-refused"); drop("bad/cxroot.tsv");
+    put("bad/cxroot.tsv", "CXROOT1\nR\tlib\tpkg\nR\tlib\tpkg2\n"); ck(refuses("bad/a/main.cx", "lib.util"), "root-duplicate-prefix-refused"); drop("bad/cxroot.tsv");
+    put("bad/cxroot.tsv", "CXROOT1\nR\tlib pkg\n"); ck(refuses("bad/a/main.cx", "lib.util"), "root-malformed-row-refused"); drop("bad/cxroot.tsv");
+    put("bad/cxroot.tsv", "CXROOT1\nR\tlib\tpkg"); ck(refuses("bad/a/main.cx", "lib.util"), "root-unterminated-row-refused");
+    printf("CHECK_CXROOT\tassertions=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

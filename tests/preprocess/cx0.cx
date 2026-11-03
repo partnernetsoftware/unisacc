@@ -13,6 +13,17 @@ static void fixture(const char *name,const char *text,char out[4400]){
 }
 static int occurrences(const char *s,const char *word){int n=0;size_t len=strlen(word);while((s=strstr(s,word))){n++;s+=len;}return n;}
 static int refused(const cx0_result *r,int status,const char *reason){return r->status==status&&!r->bytes&&r->diagnostic&&strstr(r->diagnostic,reason);}
+static void sub(const char *rel){char p[4400];path(p,sizeof p,work,rel);if(mkdir(p,0700))die("fixture-directory");}
+/* plan of one root: status, and whether `want` (a path under work) is one of its compile paths */
+static int plans_to(const char *rel,const char *want_rel){
+ char src[4400],want[4400];path(src,sizeof src,work,rel);path(want,sizeof want,work,want_rel);char *v[]={src};
+ cx0_result r=cx0_plan(0,v,1,0,0,interfaces);char needle[4500];int z=snprintf(needle,sizeof needle,"\t%s\t",want);if(z<0||(size_t)z>=sizeof needle)die("needle-bound");
+ int ok=!r.status&&r.text&&strstr(r.text,needle);if(!ok)fprintf(stderr,"plan %s: status=%d %s\n",rel,r.status,r.diagnostic?r.diagnostic:"");cx0_release(&r);return ok;
+}
+static int refuses(const char *rel,const char *reason){
+ char src[4400];path(src,sizeof src,work,rel);char *v[]={src};cx0_result r=cx0_plan(0,v,1,0,0,interfaces);
+ int ok=refused(&r,1,reason);if(!ok)fprintf(stderr,"refusal %s: status=%d %s\n",rel,r.status,r.diagnostic?r.diagnostic:"");cx0_release(&r);return ok;
+}
 static char *root_interface(const char *plan){
  const char *end=strchr(plan,'\n');if(!end)return 0;const char *line=end+1;end=strchr(line,'\n');if(!end)return 0;
  const char *p=strstr(line,interfaces);if(!p||p>=end)return 0;const char *e=p;while(e<end&&*e!='\t')e++;
@@ -83,6 +94,43 @@ int main(int argc,char **argv){
  r=cx0_plan(1,sources,1,0,0,interfaces);check(refused(&r,1,"cxpack.tsv too large"),"manifest-oversize-refused");cx0_release(&r);
  if(unlink(packfile))die("remove-large-manifest");
  r=cx0_plan(1,sources,1,0,0,interfaces);check(!r.status&&r.text&&strstr(r.text,"pack_mark")&&strstr(r.text,"pack_extra"),"manifest-absent-recovery");cx0_release(&r);
+ /* package root (CX-U-7): cxroot.tsv in the nearest ancestor maps a name prefix to a directory */
+ char scratch[4400];
+ sub("pr");sub("pr/pkg");sub("pr/pkg/lib");sub("pr/pkg/lib/deep");sub("pr/other");sub("pr/app");sub("pr/app2");sub("pr/app2/lib");sub("pr/inner");
+ fixture("pr/cxroot.tsv","CXROOT1\n# comment\n\nR\tlib\tpkg/lib\nR\tlib.deep\tother\nR\tgone\tpkg/none\n",scratch);
+ fixture("pr/pkg/lib/util.cx","#pragma unisa module util\nint util_v(void){return 3;}\n",scratch);
+ fixture("pr/pkg/lib/uses.cx","#pragma unisa module uses\n#pragma unisa use lib.util\nint uses_v(void){return util_v();}\n",scratch);
+ fixture("pr/pkg/lib/deep/x.cx","#pragma unisa module x\nint x_shadowed(void){return 1;}\n",scratch);
+ fixture("pr/other/x.cx","#pragma unisa module x\nint x_v(void){return 4;}\n",scratch);
+ fixture("pr/app/main.cx","#pragma unisa use lib.util\nint main(void){return util_v();}\n",scratch);
+ fixture("pr/app/chain.cx","#pragma unisa use lib.uses\nint main(void){return uses_v();}\n",scratch);
+ fixture("pr/app/deep.cx","#pragma unisa use lib.deep.x\nint main(void){return x_v();}\n",scratch);
+ fixture("pr/app/norow.cx","#pragma unisa use nowhere.util\nint main(void){return 0;}\n",scratch);
+ fixture("pr/app/gone.cx","#pragma unisa use gone.util\nint main(void){return 0;}\n",scratch);
+ fixture("pr/app2/lib/util.cx","#pragma unisa module util\nint util_v(void){return 5;}\n",scratch);
+ fixture("pr/app2/main.cx","#pragma unisa use lib.util\nint main(void){return util_v();}\n",scratch);
+ fixture("pr/inner/cxroot.tsv","CXROOT1\nR\tsomething\telse\n",scratch);
+ fixture("pr/inner/main.cx","#pragma unisa use lib.util\nint main(void){return util_v();}\n",scratch);
+ check(plans_to("pr/app/main.cx","pr/pkg/lib/util.cx"),"root-maps-prefix-to-directory");
+ check(plans_to("pr/app/chain.cx","pr/pkg/lib/util.cx"),"root-module-resolves-its-own-use-through-root");
+ check(plans_to("pr/app/deep.cx","pr/other/x.cx"),"root-longest-prefix-wins");
+ check(plans_to("pr/app2/main.cx","pr/app2/lib/util.cx"),"beside-file-wins-over-root");
+ check(refuses("pr/inner/main.cx","no file"),"nearest-root-decides-alone");
+ check(refuses("pr/app/norow.cx","no file"),"no-row-keeps-beside-refusal");
+ { char want[4400];path(want,sizeof want,work,"pr/pkg/none/util.cx");check(refuses("pr/app/gone.cx",want),"row-without-file-names-root-path"); }
+ sub("bad");sub("bad/a");fixture("bad/a/main.cx","#pragma unisa use lib.util\nint main(void){return 0;}\n",scratch);
+ fixture("bad/cxroot.tsv","CXROOT2\nR\tlib\tpkg\n",scratch);check(refuses("bad/a/main.cx","CXROOT1"),"root-header-required");
+ path(scratch,sizeof scratch,work,"bad/cxroot.tsv");if(unlink(scratch))die("remove-root");
+ fixture("bad/cxroot.tsv","CXROOT1\nR\tlib\t../pkg\n",scratch);check(refuses("bad/a/main.cx","bad DIR"),"root-dotdot-refused");
+ if(unlink(scratch))die("remove-root");
+ fixture("bad/cxroot.tsv","CXROOT1\nR\tlib\tpkg\nR\tlib\tpkg2\n",scratch);check(refuses("bad/a/main.cx","PREFIX given twice"),"root-duplicate-prefix-refused");
+ if(unlink(scratch))die("remove-root");
+ fixture("bad/cxroot.tsv","CXROOT1\nR\tlib pkg\n",scratch);check(refuses("bad/a/main.cx","R<TAB>PREFIX<TAB>DIR"),"root-malformed-row-refused");
+ if(unlink(scratch))die("remove-root");
+ fixture("bad/cxroot.tsv","CXROOT1\nR\tlib\tpkg",scratch);check(refuses("bad/a/main.cx","no newline"),"root-unterminated-row-refused");
+ { char app[4400],back[4096];path(app,sizeof app,work,"pr/app");if(!getcwd(back,sizeof back)||chdir(app))die("chdir-app");
+   char rel[]="main.cx";char *v[]={rel};cx0_result rr=cx0_plan(0,v,1,0,0,interfaces);
+   check(!rr.status&&rr.text&&strstr(rr.text,"\t../pkg/lib/util.cx\t"),"relative-unit-walks-up-to-root");cx0_release(&rr);if(chdir(back))die("chdir-back"); }
  puts("NOT_CLAIMED\tfull-CX0-E2-unit-bundle-product-integration-foreign-hosts-static-ownership");
  printf("CX0_UNIT\tassertions=%d\tfailed=%d\tscope=independent-plan-interface-io-recovery\n",checks,failed);return failed?1:0;
 }

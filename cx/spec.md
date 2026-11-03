@@ -60,7 +60,7 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 ```text
 #pragma unisa
 ├─ module NAME                         库模块；NAME = 文件 stem          CX-M-1 CX-M-2
-└─ use NAME[::sym [as alias]]          导入；NAME = seg(.seg)*           CX-U-1…CX-U-4
+└─ use NAME[::sym [as alias]]          导入；NAME = seg(.seg)*           CX-U-1…CX-U-4、CX-U-7
    ├─ use text.text                    整模块：当前公开集
    ├─ use a::other                     只引入 other，其余公开符号不进本单元
    └─ use a::clash as ca               引入并改名；表达式写 ca，不写 clash
@@ -120,9 +120,10 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 | **CX-U-1** | 整模块导入把该模块当前公开集引入本单元。 |
 | **CX-U-2** | `NAME::sym` 只引入 `sym`，不得引入其余公开符号。 |
 | **CX-U-3** | `as alias` 把引入的名字改成 `alias`。C 表达式里写 `alias`，不得写原名。 |
-| **CX-U-4** | `NAME` 的点号是子目录。解析起点是使用方文件所在目录。跨目录消费靠该目录下的目录项（现为指向目标模块目录的符号链接）。 |
+| **CX-U-4** | `NAME` 的点号是子目录。解析起点是使用方文件所在目录：先找 `<使用方目录>/<NAME 点换斜杠>.cx`；该文件不存在时按 **CX-U-7** 查包根。 |
 | **CX-U-5** | 间接可见不得给原型：A `use` mid、mid `use` text.fmt，A 调用 `tx_snprintf` 必须视为未声明。用到哪个模块就必须直接 `use` 那个模块。 |
 | **CX-U-6** | 现行编译把被 `use` 的函数体编进当前 `-funit` 对象。每模块只进一只对象、消费者只留未定义引用，是已裁定未落地的构造合同，见 **CX-W-1**。 |
+| **CX-U-7** | 包根：从使用方文件所在目录逐级向上，最近一个含 `cxroot.tsv` 的目录是包根（相对路径以 `../` 向上，至多 64 级）。文件首行 `CXROOT1`，其后每行 `R<TAB>PREFIX<TAB>DIR`（`#` 行与空行为注释）；`PREFIX` 是模块名，`DIR` 相对包根，不得以 `/` 开头或结尾，不得含空段、`.`、`..` 或 TAB。与 `NAME` 前导段相等的最长 `PREFIX` 把 `NAME` 映射到 `DIR/<其余段点换斜杠>.cx`。最近的包根单独决定：其行都不覆盖 `NAME` 时不再向上找，报旁边路径缺失；覆盖了但文件缺失时报包根路径缺失。首行不符、畸形行、`PREFIX` 重复一律具名拒绝，不跳行。旁边文件存在时总是旁边优先。实现：`cx/cx0/plan.cx` `cxm_rootfind`（权威）、`cx/compiler/cxmod.cx`（产品）、工具侧 `tools/cxlib/cxroot.cx`；仓根 `cxroot.tsv`。 |
 
 验收锁定：`tests/cx-namespace.cx`（含别名消解与符号级过滤）。
 
@@ -249,7 +250,7 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-W-3** | `export`（Rust `pub use`） | 未落地；现禁止间接原型已足够 |
 | **CX-W-4** | 编译期所有权／借用检查（草案 §5） | 未落地 |
 | **CX-W-5** | 层感知前导：L0 才含 libc 声明，上层前导只有 L0 接口 | 未落地 |
-| **CX-W-6** | 包根解析 `use`，取消跨目录软链 | 未落地 |
+| **CX-W-6** | 包根解析 `use`，取消跨目录软链 | 规则已落地（**CX-U-7**）；产品需重建安装后才生效，软链待产品安装后逐目录淘汰 |
 | **CX-W-7** | `gcc_cx` / `clang_cx` 的 `-run` | 未落地 |
 | **CX-W-8** | CXIF 效果／布局／所有权字段（v1 schema） | 未落地 |
 
