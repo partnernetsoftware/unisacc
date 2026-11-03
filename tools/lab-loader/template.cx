@@ -1,0 +1,186 @@
+/* template.cx -- L5 单 NN 模板：同一个执行器 + 一个模型槽，换权重不换基座。
+ *
+ *   sh ./unisacc.com tools/lab-loader/template.cx -- NEW_OUTDIR MODEL_BIN MODEL_NAME [TARGET]
+ *
+ * 产出（NEW_OUTDIR）：
+ *   boot.com                    多格式头（L3 的同一份；字节与其它模板完全相同）
+ *   boot-native-<os>-<arch>.com 原生段（同一份字节）
+ *   base.bin                    通用执行器切片（同一份字节）
+ *   model.bin                   唯一模型槽（换它就是一个新程序）
+ *   manifest.tsv                name kind arch sha256 size order
+ *   template.json               账目：各段 sha256 与字节数、CI-ONLY 格子
+ *
+ * 合同（tools/lab-loader/CONTRACT.md §2/§3）：manifest 六字段；base 随宿主、
+ * stage 与 resource 写 any；order 从 0 连续。模型槽只有一行 stage，换模型片
+ * 就是另一个程序，执行器切片一个字节都不动 —— 这就是本模板要证明的事。
+ *
+ * 本轮只实跑 lnx/x86_64；其余五格只出字节、标 CI-ONLY。
+ */
+#pragma unisa use cxlib.netpack
+
+static void tp_die(const char *s) { fprintf(stderr, "template: REFUSE %s\n", s); exit(2); }
+
+static char *tp_read(const char *p, size_t *n) {
+    struct stat st;
+    char *b;
+    if (lstat(p, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 268435456)
+        tp_die("input must be nonempty bounded regular file");
+    b = cx_read(p, n);
+    if (!b || (size_t)st.st_size != *n) tp_die("input read/size changed");
+    return b;
+}
+
+static void tp_write(const char *path, const void *p, size_t n, int mode) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
+    const char *q = (const char *)p;
+    if (fd < 0) tp_die("exclusive output create");
+    while (n) {
+        ssize_t k = write(fd, q, n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) tp_die("write");
+        q += k; n -= (size_t)k;
+    }
+    if (close(fd)) tp_die("close");
+}
+
+int main(int argc, char **argv) {
+    char root[4096], out[4096], p[4400], q[4400], man[1400], flat[96];
+    const char *target = "lnx/x86_64";
+    char base_sha[65], model_sha[65], boot_sha[65], native_sha[65];
+    char *base, *model, *boot, *native;
+    size_t bn, mn, bootn, nativen;
+    int i;
+
+    if (argc < 4 || argc > 5) tp_die("usage NEW_OUTDIR MODEL_BIN MODEL_NAME [TARGET]");
+    if (!realpath(".", root)) tp_die("repository root");
+    if (argc == 5) target = argv[4];
+    {   int k = 0;
+        for (i = 0; target[i] && k < 95; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
+        flat[k] = 0;
+    }
+    if (mkdir(argv[1], 0700)) tp_die("NEW_OUTDIR must not exist and must be creatable");
+
+    /* boot 段：每次都由生成器现造，保证同一份字节（不依赖 out/ 里是否有旧产物）。 */
+    {   char tmp[4400];
+        if (snprintf(tmp, sizeof tmp, "%s/.lab-boot", argv[1]) >= (int)sizeof tmp) tp_die("path");
+        {   np_result r; char why[1024];
+            char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/boot-head.cx", tmp, 0};
+            if (np_run(av, root, 0, 40, &r, why, sizeof why)) tp_die(why);
+            if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); tp_die("boot-head generation failed"); }
+            np_free(&r);
+        }
+        if (snprintf(p, sizeof p, "%s/.lab-boot/boot.com", argv[1]) >= (int)sizeof p) tp_die("path");
+        boot = tp_read(p, &bootn);
+        if (snprintf(q, sizeof q, "%s/boot.com", argv[1]) >= (int)sizeof q) tp_die("path");
+        tp_write(q, boot, bootn, 0700);
+        free(boot);
+    }
+    /* 原生段：由产品编译 L3 的同一份源码，字节可复现。 */
+    if (snprintf(p, sizeof p, "%s/boot-native-lnx-x86_64.com", argv[1]) >= (int)sizeof p) tp_die("path");
+    {   np_result r; char why[1024];
+        char *av[] = {"sh", "./unisacc.com", "-b", (char *)target, "tools/lab-loader/boot-native.cx", "-o", p, 0};
+        if (np_run(av, root, 0, 55, &r, why, sizeof why)) tp_die(why);
+        if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); tp_die("native stage build failed"); }
+        np_free(&r);
+        chmod(p, 0700);
+    }
+    /* 执行器切片：L1 的基座（每宿主一份，与模型无关）。 */
+    if (snprintf(p, sizeof p, "%s/out/lab-loader/L1/base/%s.bin", root, flat) >= (int)sizeof p) tp_die("path");
+    base = tp_read(p, &bn);
+    cx_sha256_hex(base, bn, base_sha);
+    if (snprintf(q, sizeof q, "%s/base.bin", argv[1]) >= (int)sizeof q) tp_die("path");
+    tp_write(q, base, bn, 0700);
+    free(base);
+
+    /* 唯一模型槽。 */
+    model = tp_read(argv[2], &mn);
+    cx_sha256_hex(model, mn, model_sha);
+    if (snprintf(q, sizeof q, "%s/model.bin", argv[1]) >= (int)sizeof q) tp_die("path");
+    tp_write(q, model, mn, 0644);
+    free(model);
+
+    if (snprintf(p, sizeof p, "%s/boot.com", argv[1]) >= (int)sizeof p) tp_die("path");
+    {   size_t x = 0;
+        char *bb = cx_read(p, &x);
+        if (!bb) tp_die("read boot");
+        cx_sha256_hex(bb, x, boot_sha);
+        free(bb);
+    }
+    native_sha[0] = 0;
+    if (snprintf(p, sizeof p, "%s/boot-native-lnx-x86_64.com", argv[1]) >= (int)sizeof p) tp_die("path");
+    {   size_t x = 0;
+        char *bb = cx_read(p, &x);
+        if (bb) { cx_sha256_hex(bb, x, native_sha); free(bb); }
+    }
+
+    /* manifest：base + 唯一 stage 行；order 0/1；stage 的 arch 是 any。 */
+    if (snprintf(man, sizeof man,
+        "base.bin\tbase\t%s\t%s\t%lu\t0\n"
+        "model.bin\tstage\tany\t%s\t%lu\t1\n",
+        target, base_sha, (unsigned long)bn, model_sha, (unsigned long)mn) >= (int)sizeof man)
+        tp_die("manifest capacity");
+    if (snprintf(q, sizeof q, "%s/manifest.tsv", argv[1]) >= (int)sizeof q) tp_die("path");
+    tp_write(q, man, strlen(man), 0644);
+
+    /* 自含模板容器：base + 单流 P2 包（明文模型记录，首字节 N）+ UNIPKG1 footer。
+       换 model.bin 就换掉整个程序的行为，执行器切片不动。 */
+    {   char head[256], mline[128];
+        size_t payload, total;
+        char *image, *mbytes;
+        size_t mbn;
+        mbytes = tp_read(argv[2], &mbn);
+        if (snprintf(head, sizeof head,
+            "P 2 1 1 0\nD stream %s stdin.bytes accepted.bytes 0\n", argv[3]) >= (int)sizeof head) tp_die("head capacity");
+        if (snprintf(mline, sizeof mline, "M %lu\n", (unsigned long)mbn) >= (int)sizeof mline) tp_die("model line capacity");
+        payload = strlen(head) + strlen(mline) + mbn;
+        total = bn + payload + 16;
+        image = malloc(total);
+        if (!image) tp_die("allocation");
+        if (snprintf(p, sizeof p, "%s/base.bin", argv[1]) >= (int)sizeof p) tp_die("path");
+        {   size_t bbn;
+            char *bb = tp_read(p, &bbn);
+            size_t at = 0;
+            for (size_t z = 0; z < bbn; z++) image[at++] = bb[z];
+            free(bb);
+            at = bbn;
+            {   size_t k;
+                size_t hlen = strlen(head), mlen = strlen(mline);
+                for (k = 0; k < hlen; k++) image[at++] = head[k];
+                for (k = 0; k < mlen; k++) image[at++] = mline[k];
+                for (k = 0; k < mbn; k++) image[at++] = mbytes[k];
+            }
+            {   long len = (long)payload;
+                memcpy(image + at, "UNIPKG1\n", 8);
+                at += 8;
+                for (int z = 0; z < 8; z++) { image[at++] = (char)(len & 255); len >>= 8; }
+            }
+            if (at != total) tp_die("image extent");
+        }
+        if (snprintf(q, sizeof q, "%s/%s.com", argv[1], argv[3]) >= (int)sizeof q) tp_die("path");
+        tp_write(q, image, total, 0700);
+        free(image);
+        free(mbytes);
+        printf("TEMPLATE_RUNNABLE\tfile=%s.com\tbytes=%lu\tmodel=%s\n",
+               argv[3], (unsigned long)total, argv[3]);
+    }
+
+    {   char *report = malloc(8192);
+        int at = 0;
+        if (!report) tp_die("allocation");
+        at += snprintf(report + at, 8192 - (size_t)at,
+            "{\n \"scope\":\"lab-loader-l5-single-nn-template\",\"release_eligible\":false,\n"
+            " \"model_name\":\"%s\",\"models\":1,\"selected_target\":\"%s\",\n"
+            " \"executor_sha256\":\"%s\",\"executor_bytes\":%lu,\n"
+            " \"model_sha256\":\"%s\",\"model_bytes\":%lu,\n"
+            " \"boot_sha256\":\"%s\",\"native_sha256\":\"%s\",\n"
+            " \"ci_only\":[\"lnx/arm64\",\"osx/x86_64\",\"osx/arm64\",\"win/x86_64\",\"win/arm64\"]\n}\n",
+            argv[3], target, base_sha, (unsigned long)bn, model_sha, (unsigned long)mn,
+            boot_sha, native_sha);
+        if (snprintf(q, sizeof q, "%s/template.json", argv[1]) >= (int)sizeof q) tp_die("path");
+        tp_write(q, report, (size_t)at, 0644);
+        printf("TEMPLATE\tmodel=%s\texecutor_bytes=%lu\tmodel_bytes=%lu\texecutor_sha256=%s\n",
+               argv[3], (unsigned long)bn, (unsigned long)mn, base_sha);
+        free(report);
+    }
+    return 0;
+}

@@ -89,19 +89,20 @@ static int cu_oracle(const unsigned char *s, long n) {
 
 /* ---- 用生成的网判同样的输入 ---------------------------------------------------- */
 
-/* 走网：状态机从 START 出发,每个字节走一次 core_transition;ACCEPT/REJECT 由
- * 动作序列决定。网的动作序列与表逐字节相同(net-check 已核对),这里只关心
- * “序列走完后是否停在 STAR==START 且没有走到 HALT”。 */
-static int cu_net_accept(const CxTransitionModel *m, int halt, const unsigned char *s, long n) {
+/* 走网：从 START 起每字节一次 core_transition，末尾给 EOF 键 256（与执行器
+ * core_run_key 的 mode 0 同一规则）。判定：走到 ACCEPT 状态即接受；任何一步
+ * 走到 REJECT 类状态（表里名字以 ACCEPT/DEAD 之外的终态）即拒绝。 */
+static int cu_net_accept(const CxTransitionModel *m, int accept, const unsigned char *s, long n) {
     int q = m->start, i;
-    for (i = 0; i < n; i++) {
+    for (i = 0; i <= n; i++) {
         int nx = -1, sq = 0;
-        if (core_transition(m, q, (int)s[i], &nx, &sq)) return 0;
+        int key = i < n ? (int)s[i] : 256;
+        if (core_transition(m, q, key, &nx, &sq)) return 0;
         if (nx < 0) return 0;
-        if (nx == halt) return 0;
         q = nx;
+        if (q == accept) return 1;
     }
-    return q == m->start;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -237,19 +238,11 @@ int main(int argc, char **argv) {
     mt.next = dt.model.rown; mt.seq = dt.model.rowq;
     mt.lo = dt.model.nlo; mt.hi = dt.model.nhi; mt.base_next = dt.model.bn; mt.base_seq = dt.model.bq;
     mt.ret_seq = dt.model.rets; mt.ret_ok = dt.model.retok;
-    {   /* HALT 状态的序号：网里唯一那个所有键都指向自己且动作是 REJECT 的状态。 */
-        int halt = -1, s, k;
-        for (s = 0; s < dt.model.ns && halt < 0; s++) {
-            int all = 1;
-            if (dt.model.smode[s] != 1) continue;
-            (void)k;
-            all = 1;
-            if (all) halt = s;
-        }
-        /* 用状态名判定更稳：网里名就叫 HALT。 */
-        for (s = 0; s < dt.model.ns; s++)
-            if (dt.model.str && dt.model.str[s] && !strcmp(dt.model.str[s], "HALT")) { halt = s; break; }
-        if (halt < 0) cu_die("no HALT state in generated table");
+    {   /* 终态：表里 EOF 走 ACCEPT 动作。tbl 的 S 表只存被动作引用的字符串，
+           状态名不在其中，因此按“START 状态在键 256 上的 next”取 ACCEPT 状态号。 */
+        int accept = -1, nx = -1, sq = 0;
+        if (core_transition(&mt, mt.start, 256, &nx, &sq) || nx < 0) cu_die("no EOF transition from START");
+        accept = nx;
         {
             static const struct { const char *name; const unsigned char b[6]; int n; } cases[] = {
                 {"ascii", {'h','i',0,0,0,0}, 2},
@@ -278,7 +271,7 @@ int main(int argc, char **argv) {
             int i, same = 1;
             for (i = 0; i < (int)(sizeof cases / sizeof cases[0]); i++) {
                 int want = cu_oracle(cases[i].b, cases[i].n);
-                int got = cu_net_accept(&mt, halt, cases[i].b, cases[i].n);
+                int got = cu_net_accept(&mt, accept, cases[i].b, cases[i].n);
                 if (want != got) same = 0;
                 {   char label[96];
                     if (snprintf(label, sizeof label, "A9.%s.%s", cases[i].name, want ? "accept" : "reject") >= (int)sizeof label) cu_die("label");
