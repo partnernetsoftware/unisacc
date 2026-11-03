@@ -22,7 +22,7 @@
 9. `kernel-build.cx ROOT OUT bootstrap|prepare|prepare-assembler|preprocess-{x86_64,arm64}|assemble-{x86_64,arm64}|link-{x86_64,arm64}`（九步，kernels.md 顺序）。
 10. `source-package-pack.cx prepare/model×34/route×6/declare/pack/seal/--verify`（README.md 构造链段落）。
 11. `release-build.cx p3 ROOT SRC_PKG OUT_PKG` → `release-build.cx slice ROOT PKG OUT` → `entry-build.cx ROOT P3 OUT`。
-12. `product-build.cx` slice×5 + wrap（两代 GEN）：`selfhost-mixed.cx endpoint prior/fresh/after-prior/after-fresh` ×4 + `compare`（固定点，SELFHOST_MIXED failed=0）。
+12. （暂缓）`product-build.cx` slice×5 + wrap（两代 GEN）：`selfhost-mixed.cx endpoint prior/fresh/after-prior/after-fresh` ×4 + `compare`（固定点，SELFHOST_MIXED failed=0）。**product-build.cx / hostseed-step* / selfhost-mixed.cx 仍链已归档 C 参考，不能运行（README §run 承认），本步先跳过，等 33 对象入口链接回归后恢复。**
 13. 回滚点 2：构造链任何一步失败，`OUT` 目录保留供检查，回到回滚点 1 重跑；不静默 promote 旧文件。
 
 ## kind2 / 安装 / 换标

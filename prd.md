@@ -96,7 +96,7 @@
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前已装 `83343ec1`（5,145,706 字节，rev `edc2c7700b`）组成：
+用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。上一发布 0.0.43 = `83343ec1`（5,145,706 字节，rev `edc2c7700b`）组成（当前工作树是 dev-lnx 薄壳 `d93c1b24`，见 §9.1）：
 
 ```
 unisacc.com  5,145,706 B  sha 83343ec1…
@@ -296,7 +296,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
-| 已装产品 | `83343ec1`，5,145,706 B，0.0.43，rev `edc2c7700b` | `tools/com-tree.cx` |
+| 上一发布 0.0.43 | `83343ec1`，5,145,706 B，rev `edc2c7700b`（当前工作树 dev-lnx 薄壳见 §9.1） | `tools/com-tree.cx` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
@@ -307,7 +307,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 ### 9.3 当前状态（0.0.43 收口）
 
-- 已装 `./unisacc.com` = `83343ec1`（5,145,706 B，rev `edc2c7700b`，0.0.43）。五片：win/x86_64 `18d2757f`、lnx/x86_64 `759c520a`、lnx/arm64 `6703dd4d`、osx/x86_64 `581300df`、osx/arm64 `7e3d267b`；两代自举逐字节相同。
+- 上一发布 0.0.43 = `83343ec1`（5,145,706 B，rev `edc2c7700b`）。五片：win/x86_64 `18d2757f`、lnx/x86_64 `759c520a`、lnx/arm64 `6703dd4d`、osx/x86_64 `581300df`、osx/arm64 `7e3d267b`；两代自举逐字节相同。当前工作树是 dev-lnx 薄壳（见 §9.1 当前节点）。
 - 门禁：七棘轮 `ok=7`、`--smoke` 16/0、`release-ape smoke` 5/5。
 - **QUALIFIED 缺口**（详见 [plans/release-0.0.43.md](plans/release-0.0.43.md)）：73 个外平台格（需 CI 6 原生 runner）+ ~24 BLOCKED（5 个 owner-ruling 需主人裁定范围）。本机 linux/x86_64 物理无法实跑其他 OS，故 QUALIFIED 未达成、未签名、未公开。
 
