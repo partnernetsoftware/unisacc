@@ -1,5 +1,5 @@
 // report 契约:schema + 机器校验。
-// 硬性规则:done 且 verified 空 → INVALID;非 implementer 写 files → INVALID;verified 逐字核对不上 → 降级 inferred。
+// 硬性规则:done 且 verified 空 → INVALID;非 implementer 写 files → INVALID;无法绑定调用收据的证据降级。
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep, dirname, basename } from "node:path";
 
@@ -10,25 +10,35 @@ export interface ReportFile {
   path: string;
   change: string;
 }
+export interface VerifiedEvidence {
+  toolCallId: string;
+  kind: "output" | "command" | "path";
+  value: string;
+}
+export interface EvidenceReceipt {
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  output: string;
+}
+
 export interface Report {
   t: "report";
   ticket: string;
   state: ReportState;
   summary: string;
-  verified: string[];
+  verified: VerifiedEvidence[];
   inferred: string[];
   files: ReportFile[];
   blocked: string;
   next: string[];
-  tokens: number;
-  ms: number;
 }
 
 export interface CheckResult {
   ok: boolean;
   err?: string;
   report?: Report;
-  droppedVerified?: string[];
+  droppedVerified?: VerifiedEvidence[];
 }
 
 const MAX_SUMMARY = 400;
@@ -64,7 +74,11 @@ export function parseReport(text: string): CheckResult {
   if (!(REPORT_STATES as readonly string[]).includes(raw.state))
     return { ok: false, err: `state 必须是 ${REPORT_STATES.join("|")}` };
   if (!s(raw.summary, MAX_SUMMARY)) return { ok: false, err: "summary 缺失或过长" };
-  if (!sarr(raw.verified)) return { ok: false, err: "verified 必须是字符串数组" };
+  if (!Array.isArray(raw.verified) || raw.verified.length > 20 || !raw.verified.every((v: unknown) => {
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+    const item = v as Record<string, unknown>;
+    return s(item.toolCallId, 120) && ["output", "command", "path"].includes(item.kind as string) && s(item.value);
+  })) return { ok: false, err: "verified 必须是 {toolCallId, kind, value} 数组" };
   if (!sarr(raw.inferred)) return { ok: false, err: "inferred 必须是字符串数组" };
   if (!Array.isArray(raw.files)) return { ok: false, err: "files 必须是数组" };
   for (const f of raw.files) {
@@ -73,7 +87,7 @@ export function parseReport(text: string): CheckResult {
   }
   if (typeof raw.blocked !== "string") return { ok: false, err: "blocked 必须是字符串" };
   if (!sarr(raw.next)) return { ok: false, err: "next 必须是字符串数组" };
-  if (raw.state === "done" && (raw.verified as string[]).length === 0)
+  if (raw.state === "done" && (raw.verified as VerifiedEvidence[]).length === 0)
     return { ok: false, err: "state=done 但 verified 为空(不许空口完成)" };
   if (raw.state === "blocked" && !s(raw.blocked, MAX_ITEM))
     return { ok: false, err: "state=blocked 必须给出 blocked 原因" };
@@ -89,26 +103,31 @@ export function parseReport(text: string): CheckResult {
       files: raw.files,
       blocked: raw.blocked,
       next: raw.next,
-      tokens: Number.isFinite(raw.tokens) ? Number(raw.tokens) : 0,
-      ms: Number.isFinite(raw.ms) ? Number(raw.ms) : 0,
     },
   };
 }
 
-// 逐字核对:evidence 是本次子会话里可取到的工具轨迹/输出拼接体。
-// 命中 → 保留;未命中 → 从 verified 移到 inferred,并返回被降级项。
-export function reconcileVerified(report: Report, evidence: string | string[]): CheckResult {
-  const kept: string[] = [];
-  const dropped: string[] = [];
+// 证据必须指向成功调用的收据，不能把读到的文本当作实际执行的命令。
+export function reconcileVerified(report: Report, evidence: EvidenceReceipt[]): CheckResult {
+  const kept: VerifiedEvidence[] = [];
+  const dropped: VerifiedEvidence[] = [];
   for (const v of report.verified) {
-    if (v.trim().length > 0 && (Array.isArray(evidence) ? evidence.some((item) => item.includes(v)) : evidence.includes(v))) kept.push(v);
+    const matched = v.value.trim().length > 0 && evidence.some((item) => {
+      if (item.toolCallId !== v.toolCallId) return false;
+      if (v.kind === "output") return item.output.includes(v.value);
+      if (typeof item.args !== "object" || item.args === null || Array.isArray(item.args)) return false;
+      const args = item.args as Record<string, unknown>;
+      if (v.kind === "command") return item.toolName === "bash" && args.command === v.value;
+      return v.kind === "path" && item.toolName === "read" && args.path === v.value;
+    });
+    if (matched) kept.push(v);
     else dropped.push(v);
   }
   if (dropped.length === 0) return { ok: true, report, droppedVerified: [] };
   const next: Report = {
     ...report,
     verified: kept,
-    inferred: [...report.inferred, ...dropped.map((d) => `[未核到] ${d}`)],
+    inferred: [...report.inferred, ...dropped.map((d) => `[未核到] ${JSON.stringify(d)}`)],
   };
   if (next.state === "done" && kept.length === 0)
     return { ok: false, err: "verified 全部无法逐字核对,且 state=done", report: next, droppedVerified: dropped };

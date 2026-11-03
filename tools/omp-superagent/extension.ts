@@ -1,6 +1,6 @@
 // omp-superagent 扩展:把 omp 变成"能派活、能收活"的 super-agent 宿主。
 // 不新造运行时:无自有 DB/守护进程;dispatch 起子 omp,worker 按 report 契约回一条 JSON。
-// 仅支持只读 scout/reviewer；写角色及可执行命令的工具因无法强制隔离而拒绝。
+// 子任务的工具权限和写入隔离由核心执行。
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { pathsConflict } from "./report.ts";
 import { runDispatch, type DispatchOpts, type DispatchResult, type Role } from "./core.ts";
@@ -25,16 +25,21 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch",
     label: "dispatch",
     description:
-      "派活:起一个只读子 omp 执行 ticket,task 必须自包含。" +
-      "当前无法强制隔离写入，拒绝 implementer 和 shell；reviewer 仅做静态评审。" +
-      "证据仅取成功工具结果，原始 RPC stdout/stderr 写入 record（可能含敏感内容）。同一会话 ticket 唯一。",
+      "派活:起一个子 omp 执行 ticket,task 必须自包含。" +
+      "implementer 必须提供允许写入的 paths；证据绑定成功工具调用。" +
+      "done 是 worker 自报且经收据对账，不代表宿主独立验收任务合同。原始 RPC stdout/stderr 写入 record（可能含敏感内容）。同一会话已接纳 ticket 唯一。",
     parameters: z.object({
       ticket: z.string().min(1).describe("一句话任务名,会话内唯一"),
-      task: z.string().min(1).describe("自包含任务书"),
-      role: z.enum(["implementer", "reviewer", "scout"]).optional().describe("缺省 scout；implementer 当前不可用"),
+      task: z.object({
+        goal: z.string().trim().min(1).describe("明确目标"),
+        context: z.array(z.string().trim().min(1)).min(1).describe("上下文及读取路径"),
+        accept: z.array(z.string().trim().min(1)).min(1).describe("验收条件；不适用时写 NOT_APPLICABLE"),
+        nonGoals: z.array(z.string().trim().min(1)).min(1).describe("非目标"),
+      }).describe("结构化任务合同"),
+      role: z.enum(["implementer", "reviewer", "scout"]).optional().describe("缺省 scout"),
       model: z.string().optional(),
-      tools: z.string().optional().describe("只允许 read,grep,glob，逗号分隔"),
-      paths: z.array(z.string()).optional().describe("保留作冲突检查；当前不支持写入"),
+      tools: z.string().optional().describe("逗号分隔的工具名"),
+      paths: z.array(z.string()).optional().describe("implementer 允许写入的路径"),
       maxTime: z.number().int().positive().optional().describe("秒,缺省 300"),
     }),
     async execute(_callId, params, signal) {
@@ -43,7 +48,6 @@ export default function (pi: ExtensionAPI) {
       const fail = (err: string) => ({ content: [{ type: "text" as const, text: err }], isError: true });
       if (tickets.has(opt.ticket)) return fail(`ticket 已派发过: ${opt.ticket}`);
       if (live.size >= MAX_PARALLEL) return fail(`并行上限 ${MAX_PARALLEL}`);
-      if (role === "implementer") return fail("当前无法强制限制写入路径，拒绝 implementer");
       if (opt.paths) {
         for (const [id, l] of live) {
           const c = l.opts.paths ? pathsConflict(opt.paths, l.opts.paths) : undefined;
@@ -55,17 +59,19 @@ export default function (pi: ExtensionAPI) {
       const placeholder = `pending:${opt.ticket}`;
       const promise = runDispatch(opts);
       live.set(placeholder, { opts, promise });
-      let r: DispatchResult;
+      let r: DispatchResult | undefined;
       try {
         r = await promise;
         done.push(r);
       } finally {
+        if (!r?.record || (r.state === "error" && r.err?.startsWith("记录失败:"))) tickets.delete(opt.ticket);
         live.delete(placeholder);
       }
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(r.report ?? { state: r.state, err: r.err }, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ report: r.report, state: r.state, err: r.err, acceptance: "未独立验收；done 仅为 worker 自报并经收据对账" }, null, 2) }],
         details: {
         ok: r.state === "done" || r.state === "blocked",
+        acceptance: "not_independently_verified",
         id: r.id,
         ticket: r.ticket,
         role: r.role,

@@ -3,15 +3,23 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { checkFiles, parseReport, reconcileVerified, type Report } from "./report.ts";
+import { checkFiles, parseReport, reconcileVerified, type EvidenceReceipt, type VerifiedEvidence, type Report } from "./report.ts";
 import { SA_VERSION } from "./version.ts";
 
 export type Role = "implementer" | "reviewer" | "scout";
 
+export interface TaskContract {
+  goal: string;
+  context: string[];
+  accept: string[];
+  nonGoals: string[];
+}
+
 export interface DispatchOpts {
   ticket: string;
-  task: string;
+  task: TaskContract;
   role: Role;
   model?: string;
   tools?: string;
@@ -32,38 +40,37 @@ export interface DispatchResult {
   err?: string;
   record?: string;
   ms: number;
-  tokens: number;
+  tokens: number | null;
   version: string;
   trace?: { stdout: string; stderr: string };
-  verifiedDropped?: string[];
+  verifiedDropped?: VerifiedEvidence[];
 }
 
 const DEFAULT_TOOLS: Record<Role, string> = {
   scout: "read,grep,glob",
-  reviewer: "read,grep,glob",
-  implementer: "",
+  reviewer: "read,grep,glob,bash",
+  implementer: "read,grep,glob,bash,edit,write",
 };
 
 const ROLE_BRIEF: Record<Role, string> = {
   scout: "只读检索:定位事实与落点。禁止改文件,禁止跑会写盘的命令。",
   reviewer: "评审给定补丁/改动:只读,不得改文件。",
-  implementer: "写入能力当前不可安全约束,禁止执行。",
+  implementer: "仅在授权路径内实现任务。",
 };
 
 export const REPORT_PROTOCOL =
   "【report 协议】本轮唯一产出是一个 JSON 对象,不得有任何其它文本/思考块。\n" +
   '{"t":"report","ticket":"<dispatch 给的 ticket>","state":"done|blocked|failed","summary":"一句",' +
-  '"verified":["实际跑过的命令/读过的 path:line 及关键输出(逐字)"],"inferred":["未验证推断"],' +
-  '"files":[{"path":"..","change":".."}],"blocked":"阻塞原因(无则空)","next":["可执行下一步"],' +
-  '"tokens":0,"ms":0}\n' +
+  '"verified":[{"toolCallId":"工具调用 ID","kind":"output|command|path","value":"逐字证据"}],"inferred":["未验证推断"],' +
+  '"files":[{"path":"..","change":".."}],"blocked":"阻塞原因(无则空)","next":["可执行下一步"]}\n' +
   "state=done 时 verified 不得为空;非 implementer 角色 files 必须为空;JSON 之外任何文字都会作废本次 dispatch。\n" +
-  "verified 每项必须是本次成功工具返回文本中逐字出现的非空片段；不得引用助手消息或 stderr。";
+  "verified 必须关联成功工具调用：output 为工具输出逐字片段，command 为 bash 命令，path 为 read 路径。";
 
 export function buildPrompt(o: DispatchOpts): string {
   const lines = [
     `ROLE: ${o.role} — ${ROLE_BRIEF[o.role]}`,
     `TICKET: ${o.ticket}`,
-    `TASK: ${o.task}`,
+    `TASK: ${JSON.stringify(o.task)}`,
   ];
   lines.push("推理应基于工具返回的逐字证据，区分已验证事实和推断；禁止用 bash 的 echo/printf 等伪造思考或工具证据。当前子进程未提供结构化 think 工具，此规范仅靠提示约束，不能强制执行。");
   if (o.role === "implementer") lines.push(`ALLOWED_PATHS: ${(o.paths ?? []).join(", ") || "(未给,禁止写)"}`);
@@ -79,8 +86,8 @@ function record(d: DispatchResult, cwd: string): void {
   const dir = join(cwd, "out", "superagent");
   mkdirSync(dir, { recursive: true });
   const p = recordPath(d.id, cwd);
+  writeFileSync(p, JSON.stringify({ ...d, record: p }, null, 2));
   d.record = p;
-  writeFileSync(p, JSON.stringify(d, null, 2));
 }
 
 // 起一个子 omp 执行 ticket;返回机器校验后的结果。
@@ -98,22 +105,29 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
     model,
     state: "error",
     ms: 0,
-    tokens: 0,
+    tokens: null,
     version: SA_VERSION,
   };
 
-  if (o.role === "implementer") {
-    return { ...base, err: "当前无法强制限制写入路径，拒绝 implementer" };
+  const task = o.task;
+  if (!task || typeof task.goal !== "string" || !task.goal.trim() ||
+      ![task.context, task.accept, task.nonGoals].every((items) =>
+        Array.isArray(items) && items.length > 0 && items.every((item) => typeof item === "string" && item.trim()))) {
+    return { ...base, err: "任务合同必须包含目标、上下文、验收条件和非目标" };
   }
-  if (o.role !== "scout" && o.role !== "reviewer") return { ...base, err: "未知角色" };
-  const allowedTools: Record<string, true> = { read: true, grep: true, glob: true };
-  if (tools.split(",").some((tool) => !Object.hasOwn(allowedTools, tool.trim()))) {
-    return { ...base, err: "只读角色仅允许 read,grep,glob" };
-  }
+  if (o.role !== "scout" && o.role !== "reviewer" && o.role !== "implementer") return { ...base, err: "未知角色" };
+  const permitted = o.role === "scout" ? ["read", "grep", "glob"] :
+    o.role === "reviewer" ? ["read", "grep", "glob", "bash"] :
+    ["read", "grep", "glob", "bash", "edit", "write"];
+  const selected = tools.split(",").map((tool) => tool.trim());
+  if (selected.some((tool) => !permitted.includes(tool))) return { ...base, err: "角色不允许指定工具" };
+  const allowedTools = Object.fromEntries(selected.map((tool) => [tool, true]));
+  if (o.role === "implementer" || selected.includes("bash"))
+    return { ...base, err: "系统缺少可安全隔离宿主 Unix socket 的执行环境，拒绝运行" };
   if (o.budget) return { ...base, err: "当前无法强制执行步骤或字符预算" };
   if (o.signal?.aborted) return { ...base, err: "dispatch 已取消" };
 
-  const args = ["--mode", "rpc", "--no-session", "--no-extensions", "--tools", tools, "--max-time", String(maxTime)];
+  const args = ["--mode", "rpc", "--no-session", "--no-extensions", "-e", fileURLToPath(new URL("./worker.ts", import.meta.url)), "--tools", tools, "--max-time", String(maxTime)];
   if (model) args.push("--model", model);
 
   const child = spawn(process.env.SA_OMP_BIN ?? "omp", args, {
@@ -127,7 +141,9 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
   let stdout = "";
   let stderr = "";
   let text = "";
-  const evidence: string[] = [];
+  const evidence: EvidenceReceipt[] = [];
+  const calls = new Map<string, { toolName: string; args: unknown }>();
+  const seenCalls = new Set<string>();
   let buffer = "";
   let promptCompleted = false;
   let gotText = false;
@@ -163,13 +179,27 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
         kill();
         continue;
       }
-      if (frame.type === "tool_execution_end" && !promptCompleted && frame.isError !== true &&
-          typeof frame.toolName === "string" && Object.hasOwn(allowedTools, frame.toolName) &&
-          typeof frame.result === "object" && frame.result !== null && "content" in frame.result) {
-        const content = frame.result.content;
-        if (Array.isArray(content)) for (const item of content) {
-          if (item && typeof item === "object" && item.type === "text" && typeof item.text === "string")
-            evidence.push(item.text);
+      if (frame.type === "tool_execution_start" && !promptCompleted &&
+          typeof frame.toolCallId === "string" && typeof frame.toolName === "string") {
+        if (seenCalls.has(frame.toolCallId)) {
+          failure ||= "RPC 工具调用 ID 重复";
+          kill();
+        } else {
+          seenCalls.add(frame.toolCallId);
+          if (Object.hasOwn(allowedTools, frame.toolName))
+            calls.set(frame.toolCallId, { toolName: frame.toolName, args: frame.args });
+        }
+      } else if (frame.type === "tool_execution_end" && !promptCompleted &&
+          typeof frame.toolCallId === "string" && typeof frame.toolName === "string") {
+        const call = calls.get(frame.toolCallId);
+        calls.delete(frame.toolCallId);
+        if (call && call.toolName === frame.toolName && frame.isError === false &&
+            typeof frame.result === "object" && frame.result !== null && "content" in frame.result) {
+          const content = frame.result.content;
+          if (Array.isArray(content)) for (const item of content) {
+            if (item && typeof item === "object" && item.type === "text" && typeof item.text === "string")
+              evidence.push({ toolCallId: frame.toolCallId, toolName: call.toolName, args: call.args, output: item.text === `\n[工具收据 ID: ${frame.toolCallId}]` ? "" : item.text });
+          }
         }
       } else if (frame.type === "response" && frame.id === "prompt" && frame.success === false) {
         failure ||= `RPC prompt 失败: ${JSON.stringify(frame.error)}`;
@@ -225,6 +255,6 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
     return finish({ ...base, state: "invalid", ms, err: rec.err, report: rec.report, verifiedDropped: rec.droppedVerified });
   const files = checkFiles(o.role, o.paths, rec.report, cwd);
   if (!files.ok) return finish({ ...base, state: "invalid", ms, err: files.err, report: rec.report });
-  return finish({ ...base, state: rec.report.state, ms, tokens: rec.report.tokens,
+  return finish({ ...base, state: rec.report.state, ms,
     report: rec.report, verifiedDropped: rec.droppedVerified });
 }

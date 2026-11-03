@@ -10,13 +10,11 @@ const good = {
   ticket: "T1",
   state: "done",
   summary: "加了 X",
-  verified: ["bun test -> 3 pass"],
+  verified: [{ toolCallId: "1", kind: "output", value: "3 pass" }],
   inferred: [],
   files: [{ path: "src/a.ts", change: "新增函数" }],
   blocked: "",
   next: [],
-  tokens: 10,
-  ms: 5,
 };
 
 describe("parseReport", () => {
@@ -51,38 +49,54 @@ describe("parseReport", () => {
   test("files 元素形状错误必须失败", () => {
     expect(parseReport(JSON.stringify({ ...good, files: [{ path: "a" }] })).ok).toBe(false);
   });
+
+  test("拒绝旧字符串证据和无效证据类型", () => {
+    expect(parseReport(JSON.stringify({ ...good, verified: ["bun test"] })).ok).toBe(false);
+    expect(parseReport(JSON.stringify({ ...good, verified: [{ toolCallId: "1", kind: "test", value: "ok" }] })).ok).toBe(false);
+    expect(parseReport(JSON.stringify({ ...good, verified: [{ toolCallId: "", kind: "output", value: "ok" }] })).ok).toBe(false);
+  });
+
+  test("报告中的自报 token 不进入宿主报告", () => {
+    const result = parseReport(JSON.stringify({ ...good, tokens: -100, ms: -1 }));
+    expect(result.ok).toBe(true);
+    expect(result.report).not.toHaveProperty("tokens");
+    expect(result.report).not.toHaveProperty("ms");
+  });
 });
 
 describe("reconcileVerified", () => {
-  const rep = {
-    ...good,
-    verified: ["bun test -> 3 pass", "读到 src/a.ts:1"],
-    inferred: [],
-  } as Report;
+  const output = { toolCallId: "1", kind: "output" as const, value: "3 pass" };
+  const path = { toolCallId: "1", kind: "path" as const, value: "src/a.ts" };
+  const command = { toolCallId: "2", kind: "command" as const, value: "bun test" };
+  const rep = { ...good, verified: [output, path, command], inferred: [] } as Report;
+  const receipts = [
+    { toolCallId: "1", toolName: "read", args: { path: "src/a.ts" }, output: "bun test -> 3 pass" },
+    { toolCallId: "2", toolName: "bash", args: { command: "bun test" }, output: "3 pass" },
+  ];
 
-  test("全部逐字命中则原样保留", () => {
-    const ev = "log: bun test -> 3 pass\ncat: 读到 src/a.ts:1";
-    const r = reconcileVerified(rep, ev);
+  test("按调用类型与编号匹配", () => {
+    const r = reconcileVerified(rep, receipts);
     expect(r.ok).toBe(true);
-    expect(r.report?.verified.length).toBe(2);
-    expect(r.droppedVerified?.length).toBe(0);
+    expect(r.report?.verified).toEqual(rep.verified);
   });
 
-  test("未命中项降级到 inferred", () => {
-    const ev = "log: bun test -> 3 pass";
-    const r = reconcileVerified(rep, ev);
-    expect(r.report?.verified).toEqual(["bun test -> 3 pass"]);
-    expect(r.report?.inferred).toEqual(["[未核到] 读到 src/a.ts:1"]);
-    expect(r.droppedVerified).toEqual(["读到 src/a.ts:1"]);
+  test("不能以读取到的文本冒充执行命令", () => {
+    const forged = { ...command, toolCallId: "1" };
+    const r = reconcileVerified({ ...rep, verified: [output, forged] }, receipts);
+    expect(r.report?.verified).toEqual([output]);
+    expect(r.droppedVerified).toEqual([forged]);
+    expect(r.report?.inferred).toEqual([`[未核到] ${JSON.stringify(forged)}`]);
   });
 
-  test("done 且全部核不到则判失败", () => {
-    expect(reconcileVerified(rep, "无关日志").ok).toBe(false);
+  test("不能跨调用匹配或拼接结果", () => {
+    expect(reconcileVerified({ ...rep, verified: [{ ...output, toolCallId: "3" }] }, receipts).ok).toBe(false);
+    expect(reconcileVerified({ ...rep, verified: [{ ...output, value: "pass3" }] }, receipts).ok).toBe(false);
+    expect(reconcileVerified({ ...rep, verified: [{ ...output, value: " " }] }, receipts).ok).toBe(false);
   });
 
-  test("空白和跨工具输出拼接不能作为证据", () => {
-    expect(reconcileVerified({ ...rep, verified: [" "] }, "有 空格").ok).toBe(false);
-    expect(reconcileVerified({ ...rep, verified: ["ab\ncd"] }, ["ab", "cd"]).ok).toBe(false);
+  test("路径和命令必须精确匹配参数", () => {
+    expect(reconcileVerified({ ...rep, verified: [{ ...path, value: "src" }] }, receipts).ok).toBe(false);
+    expect(reconcileVerified({ ...rep, verified: [{ ...command, value: "bun" }] }, receipts).ok).toBe(false);
   });
 });
 
