@@ -13,18 +13,7 @@
    leaves only declarations for every other TU. Declarations and definitions
    always carry the same linkage, satisfying the 0.0.35 H1 note (6.2.2p7). */
 #ifndef __UNISA_LIBC_LINKAGE
-/* __UNISA_LIBC_EXTERN (consumer TU): only declarations, no bodies. __UNISA_LIBC_UNIT
-   (the one shared libc unit): non-static definitions. Default: static, byte-identical. */
-#if defined(__UNISA_LIBC_EXTERN) && defined(__UNISA_LIBC_UNIT)
-#error "define at most one of __UNISA_LIBC_EXTERN / __UNISA_LIBC_UNIT"
-#endif
-#if defined(__UNISA_LIBC_UNIT)
-#define __UNISA_LIBC_LINKAGE   /* non-static: one definition, external linkage */
-#elif defined(__UNISA_LIBC_EXTERN)
-#define __UNISA_LIBC_LINKAGE extern   /* consumer: declaration only (bodies guarded below) */
-#else
 #define __UNISA_LIBC_LINKAGE static
-#endif
 #endif
 #include <stddef.h>
 #include <stdarg.h>
