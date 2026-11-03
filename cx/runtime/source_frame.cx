@@ -1,4 +1,5 @@
 #pragma unisa module source_frame
+#pragma unisa use mem.bytes
 /* A source identity frame contains, in source order, little-endian u32
  * name length, name bytes, u32 source length, and source bytes. Inputs are
  * borrowed. The caller owns the returned block and supplies its allocator.
@@ -18,16 +19,17 @@ int cxsf_encode(int count, const char **names, const unsigned char **bytes,
         if (total > 2147483647u - 8u || (size_t)lengths[i] > 2147483647u - total - 8u) return 2;
         total += 8u + (size_t)lengths[i];
     }
-    unsigned char *block = alloc(0, total ? total : 1);
+    size_t cap = total ? total : 1;
+    unsigned char *block = alloc(0, cap);
     if (!block) return 3;
     unsigned char *p = block;
     for (int i = 0; i < count; i++) {
         size_t name_n = strlen(names[i]);
         for (int j = 0; j < 4; j++) *p++ = (unsigned char)(name_n >> (8 * j));
-        if (name_n) { void *cx_kept = memcpy(p, names[i], name_n); (void)cx_kept; }
+        if (mm_copy(p, (long)(cap - (size_t)(p - block)), names[i], (long)name_n)) return 2;
         p += name_n;
         for (int j = 0; j < 4; j++) *p++ = (unsigned char)((unsigned)lengths[i] >> (8 * j));
-        if (lengths[i]) { void *cx_kept = memcpy(p, bytes[i], (size_t)lengths[i]); (void)cx_kept; }
+        if (mm_copy(p, (long)(cap - (size_t)(p - block)), bytes[i], (long)lengths[i])) return 2;
         p += lengths[i];
     }
     *out = block;
@@ -48,9 +50,9 @@ int cxsf_pair(const unsigned char *first, int first_n,
     unsigned char *block = alloc(0, total);
     if (!block) return 3;
     for (int j = 0; j < 4; j++) block[j] = (unsigned char)((unsigned)first_n >> (8 * j));
-    if (first_n) { void *cx_kept = memcpy(block + 4, first, (size_t)first_n); (void)cx_kept; }
+    if (mm_copy(block + 4, (long)(total - 4u), first, (long)first_n)) return 2;
     for (int j = 0; j < 4; j++) block[4 + first_n + j] = (unsigned char)((unsigned)second_n >> (8 * j));
-    if (second_n) { void *cx_kept = memcpy(block + 8 + first_n, second, (size_t)second_n); (void)cx_kept; }
+    if (mm_copy(block + 8 + first_n, (long)(total - 8u - (size_t)first_n), second, (long)second_n)) return 2;
     *out = block;
     *out_n = (int)total;
     return 0;
@@ -69,7 +71,7 @@ int cxsf_companion(const unsigned char *b, int n, char *stage, size_t cap, char 
     if (end==n-1 || !sn || sn>=cap || n-end-1 != 13+64+1 || memcmp(b+end+1,field,13)) return 0;
     const unsigned char *hash=b+end+14;
     for (int i=0; i<64; i++) if (!((hash[i]>='0' && hash[i]<='9') || (hash[i]>='a' && hash[i]<='f'))) return 0;
-    { void *cx_kept = memcpy(stage,b+11,sn); (void)cx_kept; } stage[sn]=0;
+    if (mm_copy(stage,(long)cap,b+11,(long)sn)) return 0; stage[sn]=0;
     memcpy(hex,hash,64); hex[64]=0;
     return 1;
 }
@@ -103,7 +105,7 @@ int cxsf_ledger_identity(const char *line, char *stage, size_t cap, char *hex) {
     if (strncmp(v,"input_sha256=",13) || strlen(v+13)!=64) return 0;
     v+=13;
     for(int i=0;i<64;i++) if (cxsf_hex_digit((unsigned char)v[i])<0) return 0;
-    { void *cx_kept = memcpy(stage,s+6,sn); (void)cx_kept; }stage[sn]=0;
+    if (mm_copy(stage,(long)cap,s+6,(long)sn)) return 0;stage[sn]=0;
     memcpy(hex,v,64);hex[64]=0;
     return 1;
 }
@@ -119,7 +121,7 @@ int cxsf_ledger_fields(const char *line, char *fields) {
         if(k==4 && t) return -2;
         size_t width=t?(size_t)(t-p):strlen(p);
         if(width>=4096) return -3;
-        { void *cx_kept = memcpy(fields+k*4096,p,width); (void)cx_kept; }
+        if (mm_copy(fields+k*4096,4096,p,(long)width)) return -3;
         fields[k*4096+width]=0;
         p=t?t+1:p+width;
     }
@@ -214,7 +216,7 @@ int cxsf_ledger_view_copy(const void *views,int count,const char *name,
             if (view.n==(size_t)-1 || (view.n && !view.bytes)) return 3;
             unsigned char *b=alloc(0,view.n+1);
             if (!b) return 2;
-            if (view.n) { void *cx_kept = memcpy(b,view.bytes,view.n); (void)cx_kept; }
+            if (mm_copy(b,(long)(view.n+1),view.bytes,(long)view.n)) return 3;
             *out=b;*length=view.n;return 0;
         }
     }
@@ -365,7 +367,7 @@ int cxsf_ledger_parse(const char *dir,void *ledger,char *err,size_t errn,const v
         size_t start=0,width=0;int code=cxsf_ledger_line(b,n,&at,&start,&width);
         if(code!=1){io.release(b);snprintf(err,errn,code==3?"INTERFACE_ERROR resource-row-nul":"INTERFACE_ERROR resource-row-truncated");return 1;}
         char *line=io.alloc(0,width+1);if(!line){io.release(b);return 1;}
-        { void *cx_kept = memcpy(line,b+start,width); (void)cx_kept; }line[width]=0;
+        if(mm_copy(line,(long)(width+1),b+start,(long)width)){io.release(line);io.release(b);return 1;}line[width]=0;
         if(!strncmp(line,"#SC1\t",5)||!strncmp(line,"#SC2\t",5)){
             memcpy(&l,ledger,sizeof l);
             int ok=start==0&&!l.has_id&&cxsf_ledger_identity(line,l.stage,sizeof l.stage,l.input_hex);
@@ -483,9 +485,9 @@ int cxsf_cap_join(char *dst, int cap, const char *dir, const char *name) {
     if (dn > 2147483647u || nn > 2147483647u) return 1;
     need = dn + 1 + nn;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-    { void *cx_kept = memcpy(dst, dir, dn); (void)cx_kept; }
+    if (mm_copy(dst, cap, dir, (long)dn)) return 1;
     dst[dn] = '/';
-    if (nn) { void *cx_kept = memcpy(dst + dn + 1, name, nn); (void)cx_kept; }
+    if (mm_copy(dst + dn + 1, (long)cap - (long)dn - 1, name, (long)nn)) return 1;
     dst[need] = 0;
     return 0;
 }
@@ -502,7 +504,7 @@ int cxsf_cap_stage(char *dst, int cap, const char *dir, long pid) {
     dn = strlen(dir);
     need = dn + 10 + (size_t)(neg + n);
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-    if (dn) { void *cx_kept = memcpy(dst, dir, dn); (void)cx_kept; }
+    if (mm_copy(dst, cap, dir, (long)dn)) return 1;
     memcpy(dst + dn, "/.capture-", 10);
     at = (int)dn + 10;
     if (neg) dst[at++] = '-';
@@ -528,14 +530,14 @@ int cxsf_cap_line(char *err, int errn, int kind, int exists, const char *name) {
         nn = strlen(name);
         need = strlen(head) + nn;
         if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
-        { void *cx_kept = memcpy(err, head, strlen(head)); (void)cx_kept; }
-        if (nn) { void *cx_kept = memcpy(err + strlen(head), name, nn); (void)cx_kept; }
+        if (mm_copy(err, errn, head, (long)strlen(head)) ||
+            mm_copy(err + strlen(head), (long)errn - (long)strlen(head), name, (long)nn)) return 1;
         err[need] = 0;
         return 0;
     } else return 1;
     need = strlen(msg);
     if (need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, msg, need + 1); (void)cx_kept; }
+    if (mm_copy(err, errn, msg, (long)need + 1)) return 1;
     return 0;
 }
 int cxsf_cap_reg(int stat_ok, int is_reg, int require_empty, long long size) {
@@ -603,7 +605,7 @@ int cxsf_cap_row(char *dst, int cap, int present, const char *hex, const char *n
     if (!present) {
         need = hn + 10;
         if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-        if (hn) { void *cx_kept = memcpy(dst, hex, hn); (void)cx_kept; }
+        if (mm_copy(dst, cap, hex, (long)hn)) return 1;
         memcpy(dst + hn, "\t0\t-\t0\t-\n", 10);
         dst[need] = 0;
         return 0;
@@ -615,13 +617,13 @@ int cxsf_cap_row(char *dst, int cap, int present, const char *hex, const char *n
     need = hn + 3 + nn + 1 + (size_t)nd + 1 + sn + 1;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
     at = 0;
-    if (hn) { { void *cx_kept = memcpy(dst + at, hex, hn); (void)cx_kept; } at += (int)hn; }
+    if (mm_copy(dst + at, (long)cap - at, hex, (long)hn)) return 1; at += (int)hn;
     memcpy(dst + at, "\t1\t", 3); at += 3;
-    if (nn) { { void *cx_kept = memcpy(dst + at, name, nn); (void)cx_kept; } at += (int)nn; }
+    if (mm_copy(dst + at, (long)cap - at, name, (long)nn)) return 1; at += (int)nn;
     dst[at++] = '\t';
     for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
     dst[at++] = '\t';
-    if (sn) { { void *cx_kept = memcpy(dst + at, sha, sn); (void)cx_kept; } at += (int)sn; }
+    if (mm_copy(dst + at, (long)cap - at, sha, (long)sn)) return 1; at += (int)sn;
     dst[at++] = '\n';
     dst[at] = 0;
     return 0;
@@ -658,9 +660,9 @@ int cxsf_cap_idline(char *dst, int cap, const char *stage, const char *hex) {
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
     memcpy(dst, "#SC2\tstage=", 11);
     at = 11;
-    if (sn) { { void *cx_kept = memcpy(dst + at, stage, sn); (void)cx_kept; } at += (int)sn; }
+    if (mm_copy(dst + at, (long)cap - at, stage, (long)sn)) return 1; at += (int)sn;
     memcpy(dst + at, "\tinput_sha256=", 14); at += 14;
-    if (hn) { { void *cx_kept = memcpy(dst + at, hex, hn); (void)cx_kept; } at += (int)hn; }
+    if (mm_copy(dst + at, (long)cap - at, hex, (long)hn)) return 1; at += (int)hn;
     dst[at++] = '\n';
     dst[at] = 0;
     return 0;
@@ -683,7 +685,7 @@ int cxsf_cap_dirline(char *err, int errn, int kind) {
     else return 1;
     need = strlen(msg);
     if (need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, msg, need + 1); (void)cx_kept; }
+    if (mm_copy(err, errn, msg, (long)need + 1)) return 1;
     return 0;
 }
 int cxsf_e3_args(int has_dir, int dir_nonempty, int has_out, int has_out_n) {
@@ -718,7 +720,7 @@ int cxsf_e3_line(char *err, int errn, int kind, int errnum) {
         nd = cxsf_dec(num, errnum);
         need = hn + (size_t)nd;
         if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
-        { void *cx_kept = memcpy(err, head, hn); (void)cx_kept; }
+        if (mm_copy(err, errn, head, (long)hn)) return 1;
         at = (int)hn;
         for (i = nd - 1; i >= 0; i--) err[at++] = num[i];
         err[at] = 0;
@@ -726,7 +728,7 @@ int cxsf_e3_line(char *err, int errn, int kind, int errnum) {
     } else return 1;
     need = strlen(msg);
     if (need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, msg, need + 1); (void)cx_kept; }
+    if (mm_copy(err, errn, msg, (long)need + 1)) return 1;
     return 0;
 }
 int cxsf_e3_ready(int started, int has_trace, int has_dir, int cursor, int n) {
@@ -783,17 +785,17 @@ int cxsf_e3_cmp_line(char *err, int errn, int kind, const char *got, const char 
         rn = strlen(run);
         need = hn + gn + mn + rn;
         if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
-        { void *cx_kept = memcpy(err, head, hn); (void)cx_kept; }
+        if (mm_copy(err, errn, head, (long)hn)) return 1;
         at = (int)hn;
-        if (gn) { { void *cx_kept = memcpy(err + at, got, gn); (void)cx_kept; } at += (int)gn; }
-        { void *cx_kept = memcpy(err + at, mid, mn); (void)cx_kept; } at += (int)mn;
-        if (rn) { void *cx_kept = memcpy(err + at, run, rn); (void)cx_kept; }
+        if (mm_copy(err + at, (long)errn - at, got, (long)gn)) return 1; at += (int)gn;
+        if (mm_copy(err + at, (long)errn - at, mid, (long)mn)) return 1; at += (int)mn;
+        if (mm_copy(err + at, (long)errn - at, run, (long)rn)) return 1;
         err[need] = 0;
         return 0;
     } else return 1;
     need = strlen(msg);
     if (need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, msg, need + 1); (void)cx_kept; }
+    if (mm_copy(err, errn, msg, (long)need + 1)) return 1;
     return 0;
 }
 int cxsf_route_gate(int mode, const char *route) {
@@ -821,10 +823,10 @@ int cxsf_route_line(char *err, int errn, int kind, const char *route) {
     rn = strlen(shown);
     need = hn + rn + tn;
     if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, head, hn); (void)cx_kept; }
+    if (mm_copy(err, errn, head, (long)hn)) return 1;
     at = (int)hn;
-    if (rn) { { void *cx_kept = memcpy(err + at, shown, rn); (void)cx_kept; } at += (int)rn; }
-    { void *cx_kept = memcpy(err + at, tail, tn); (void)cx_kept; }
+    if (mm_copy(err + at, (long)errn - at, shown, (long)rn)) return 1; at += (int)rn;
+    if (mm_copy(err + at, (long)errn - at, tail, (long)tn)) return 1;
     err[need] = 0;
     return 0;
 }
@@ -835,9 +837,9 @@ int cxsf_stage_join(char *dst, int cap, const char *stage, const char *route) {
     rn = strlen(route);
     need = sn + 1u + rn;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-    if (sn) { void *cx_kept = memcpy(dst, stage, sn); (void)cx_kept; }
+    if (mm_copy(dst, cap, stage, (long)sn)) return 1;
     dst[sn] = ':';
-    if (rn) { void *cx_kept = memcpy(dst + sn + 1, route, rn); (void)cx_kept; }
+    if (mm_copy(dst + sn + 1, (long)cap - (long)sn - 1, route, (long)rn)) return 1;
     dst[need] = 0;
     if (!cxsf_stage_label(dst)) return 2;
     return 0;
@@ -853,8 +855,8 @@ int cxsf_stage_err(char *err, int errn, int kind, const char *label) {
     ln = strlen(label);
     need = hn + ln;
     if (need > 2147483646u || need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, head, hn); (void)cx_kept; }
-    if (ln) { void *cx_kept = memcpy(err + hn, label, ln); (void)cx_kept; }
+    if (mm_copy(err, errn, head, (long)hn)) return 1;
+    if (mm_copy(err + hn, (long)errn - (long)hn, label, (long)ln)) return 1;
     err[need] = 0;
     return 0;
 }
@@ -868,7 +870,7 @@ int cxsf_snap_line(char *err, int errn) {
     if (!err || errn < 1) return 1;
     need = strlen(msg);
     if (need + 1 > (size_t)errn) return 1;
-    { void *cx_kept = memcpy(err, msg, need + 1); (void)cx_kept; }
+    if (mm_copy(err, errn, msg, (long)need + 1)) return 1;
     return 0;
 }
 int cxsf_snap_slot(const unsigned char *name, int kn, const unsigned char *data, int len,
@@ -892,8 +894,8 @@ int cxsf_fetch_miss(char *dst, int cap, int kind, const char *hex, int event) {
     if (kind == 0) {
         need = hn + xn;
         if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-        { void *cx_kept = memcpy(dst, head, hn); (void)cx_kept; }
-        if (xn) { void *cx_kept = memcpy(dst + hn, hex, xn); (void)cx_kept; }
+        if (mm_copy(dst, cap, head, (long)hn)) return 1;
+        if (mm_copy(dst + hn, (long)cap - (long)hn, hex, (long)xn)) return 1;
         dst[need] = 0;
         return 0;
     }
@@ -901,9 +903,9 @@ int cxsf_fetch_miss(char *dst, int cap, int kind, const char *hex, int event) {
     nd = cxsf_dec(num, event);
     need = hn + xn + 7u + (size_t)nd;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-    { void *cx_kept = memcpy(dst, head, hn); (void)cx_kept; }
+    if (mm_copy(dst, cap, head, (long)hn)) return 1;
     at = (int)hn;
-    if (xn) { { void *cx_kept = memcpy(dst + at, hex, xn); (void)cx_kept; } at += (int)xn; }
+    if (mm_copy(dst + at, (long)cap - at, hex, (long)xn)) return 1; at += (int)xn;
     memcpy(dst + at, " event=", 7);
     at += 7;
     for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
@@ -929,9 +931,9 @@ int cxsf_fetch_mismatch(char *dst, int cap, const char *hex, int event) {
     nd = cxsf_dec(num, event);
     need = hn + xn + 7u + (size_t)nd;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 1;
-    { void *cx_kept = memcpy(dst, head, hn); (void)cx_kept; }
+    if (mm_copy(dst, cap, head, (long)hn)) return 1;
     at = (int)hn;
-    if (xn) { { void *cx_kept = memcpy(dst + at, hex, xn); (void)cx_kept; } at += (int)xn; }
+    if (mm_copy(dst + at, (long)cap - at, hex, (long)xn)) return 1; at += (int)xn;
     memcpy(dst + at, " event=", 7);
     at += 7;
     for (i = nd - 1; i >= 0; i--) dst[at++] = num[i];
@@ -967,7 +969,7 @@ int cxsf_fetch_path(char *dst, int cap, const unsigned char *p, int n, const cha
         for (i = 0; i < sn; i++) if (s[i] == 0) return 2;
         need = (size_t)sn;
         if (need > 2147483646u || need + 1 > (size_t)cap) return 2;
-        if (sn) { void *cx_kept = memcpy(dst, s, need); (void)cx_kept; }
+        if (mm_copy(dst, cap, s, (long)need)) return 2;
         dst[sn] = 0;
         return 0;
     }
@@ -978,9 +980,9 @@ int cxsf_fetch_path(char *dst, int cap, const unsigned char *p, int n, const cha
     if (dn > 2147483646u) return 2;
     need = dn + 1u + (size_t)name_n;
     if (need > 2147483646u || need + 1 > (size_t)cap) return 2;
-    if (dn) { void *cx_kept = memcpy(dst, incdir, dn); (void)cx_kept; }
+    if (mm_copy(dst, cap, incdir, (long)dn)) return 2;
     dst[dn] = '/';
-    if (name_n) { void *cx_kept = memcpy(dst + dn + 1, s + 5, (size_t)name_n); (void)cx_kept; }
+    if (mm_copy(dst + dn + 1, (long)cap - (long)dn - 1, s + 5, (long)name_n)) return 2;
     dst[need] = 0;
     return 0;
 }
@@ -1021,7 +1023,11 @@ int cxsf_file_keep(int record, char **mine, int mine_n, char **other, int other_
         *out_n = mine_n;
         return 3;
     }
-    { void *cx_kept = memcpy(copy, path, pn); (void)cx_kept; }
+    if (mm_copy(copy, (long)pn, path, (long)pn)) {
+        *out_list = list;
+        *out_n = mine_n;
+        return 3;
+    }
     list[mine_n] = copy;
     *out_list = list;
     *out_n = mine_n + 1;
@@ -1070,8 +1076,8 @@ int cxsf_read_err(char *dst, int cap, const char *path) {
     pn = strlen(path);
     need = hn + pn + 1u;
     if (pn > 2147483646u || need > 2147483646u || need + 1u > (size_t)cap) return 1;
-    { void *cx_kept = memcpy(dst, head, hn); (void)cx_kept; }
-    if (pn) { void *cx_kept = memcpy(dst + hn, path, pn); (void)cx_kept; }
+    if (mm_copy(dst, cap, head, (long)hn)) return 1;
+    if (mm_copy(dst + hn, (long)cap - (long)hn, path, (long)pn)) return 1;
     dst[hn + pn] = '\n';
     dst[need] = 0;
     return 0;
