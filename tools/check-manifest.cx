@@ -86,6 +86,73 @@ int main(int argc,char **argv){
         ck(ok,"manifest-six-field-shape");
         free(b);
     }
-    printf("MANIFEST_CHECK\tfailed=%d\tscope=deterministic-gen-and-shape\tbyte-equal-to-B0-explode=NOT-APPLICABLE(different-field-set)\n", failed);
+    /* ape-receipt 一致性：对 epoch root 生成 manifest,把 unisacc.com 行的 sha 与
+       ape-receipt.txt 里同名成员的 sha= 字段逐字比对(d93c1b24 这一行要对上)。
+       这是 B5a 阶段唯一能测的「身份」口径——E0 第 8 步还要等 B5b/B5c 退役 build.json 的
+       artifact 段,那一项记到 B5c。 */
+    {
+        char er[4400], rec[4400], em[4400];
+        if(cx_fmt(er,sizeof er,"%s/out/epoch-2026-11-02/root",root))return 2;
+        if(cx_fmt(rec,sizeof rec,"%s/ape-receipt.txt",er))return 2;
+        if(cx_fmt(em,sizeof em,"%s/out/manifest-epoch.tsv",root))return 2;
+        {   sy_stat_t st;
+            if(sy_stat(em,&st)==0) unlink(em);
+        }
+        if(sy_exists(rec)!=1 || sy_exists(er)!=1) {
+            printf("RECEIPT_CONSISTENCY\tSKIP\tno-epoch-root\n");
+        } else {
+            {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"30",(char*)"sh",(char*)"unisacc.com",
+                          (char*)"tools/manifest-gen.cx",(char*)"--",er,em,0};
+                np_result r={0}; char why[512];
+                if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"epoch-manifest-gen");}
+                else { ck(r.rc==0,"epoch-manifest-gen-rc"); np_free(&r); }
+            }
+            {   size_t rn, mn;
+                char *rb=cx_read(rec,&rn), *mb=cx_read(em,&mn);
+                int ok=0;
+                if(rb && mb){
+                    /* receipt: "<name>	<path>	sha=<hex>	bytes=<n>" ; manifest: "<name>	<kind>	<arch>	<sha>..." */
+                    const char *rn_ptr=rb;
+                    const char *target="unisacc.com";
+                    char want[65]={0};
+                    while(rn_ptr < rb+rn){
+                        const char *nl=memchr(rn_ptr,'\n',(size_t)(rb+rn-rn_ptr));
+                        size_t len=nl?(size_t)(nl-rn_ptr):(size_t)(rb+rn-rn_ptr);
+                        if(len>strlen(target) && !memcmp(rn_ptr,target,strlen(target)) && rn_ptr[strlen(target)]=='\t'){
+                            const char *sh=strstr(rn_ptr,"sha=");
+                            if(sh && sh< rn_ptr+len){ void *cx_kept = memcpy(want,sh+4,64); (void)cx_kept; want[64]=0; }
+                            break;
+                        }
+                        rn_ptr += len+1;
+                    }
+                    /* manifest 行 -> 6 字段；arch 为空时会有连续 TAB，必须按字段切分。 */
+                    const char *mn_ptr=mb;
+                    while(mn_ptr < mb+mn){
+                        const char *nl=memchr(mn_ptr,'\n',(size_t)(mb+mn-mn_ptr));
+                        size_t len=nl?(size_t)(nl-mn_ptr):(size_t)(mb+mn-mn_ptr);
+                        if(len>strlen(target) && !memcmp(mn_ptr,target,strlen(target)) && mn_ptr[strlen(target)]=='\t'){
+                            const char *f[6]; size_t fl[6]; int nf=0;
+                            const char *cur=mn_ptr;
+                            while(cur <= mn_ptr+len && nf<6){
+                                const char *tab=memchr(cur,'\t',(size_t)((mn_ptr+len)-cur));
+                                const char *endp=tab?tab:(mn_ptr+len);
+                                f[nf]=cur; fl[nf]=(size_t)(endp-cur); nf++;
+                                if(!tab) break;
+                                cur=tab+1;
+                            }
+                            if(nf==6 && fl[3]==64 && want[0]) ok = !memcmp(f[3],want,64);
+                            break;
+                        }
+                        mn_ptr += len+1;
+                    }
+                    printf("RECEIPT_CONSISTENCY\tunisacc.com\tsha=%s\n", want[0]?want:"(not-found)");
+                }
+                ck(ok,"manifest-sha-equals-ape-receipt");
+                free(rb); free(mb);
+            }
+        }
+    }
+
+    printf("MANIFEST_CHECK\tfailed=%d\tscope=deterministic-gen-and-shape-and-receipt\tbyte-equal-to-B0-explode=NOT-APPLICABLE(different-field-set)\n", failed);
     return failed?1:0;
 }
