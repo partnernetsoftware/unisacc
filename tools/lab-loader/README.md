@@ -68,6 +68,26 @@ gate：**换权重不换基座**（base/boot/原生段字节相同，只有模�
 utf8.com 四类输入与 oracle 一致；执行器占 99.66%，模板开销 <1ms。
 启示：模板体积由执行器决定（99.66%），模型轻则启动接近 base 自身成本。
 
+## L6 ISA 切片由模型物化（实验,无新工具;命令都是产品现成的）
+
+```
+./unisacc.com -S t3.c -o t3.tape                 # 592B
+./unisacc.com t3.tape -b lnx/x86_64 -o a         # 与直接编 t3.c 逐字节相同
+./unisacc.com t3.tape -b lnx/arm64 -o b          # 同一 tape 得到 aarch64 ELF
+./unisacc.com -S -c -b lnx/x86_64 -funit SRC -o OBJ.tape   # 逐对象（整程序 -S 不通）
+```
+同一份与架构无关的 tape 能写出六个目标镜像,这就是「ISA 切片由模型推导出来」的实测依据。
+① 体积:编译器的 43 个对象 tape 合计 **7,941,104B**（合并 gzip 710,138B / xz 325,964B）,
+   对照 `entry.elf` 1,659,974B（gzip 334,334B / xz 196,608B）—— 原始 4.8×、gzip 2.1×。
+   整编译器单文件 `-S src/unisacc.cx` 报 `undefined function`（43 对象链接而成,与 UNITOK2-CAP 同根）。
+② 物化对拍:t3（592B tape）与 tools/lab-loader 的工具级 tape 都与直接编译逐字节相同。
+③ 耗时:`ms ≈ 95 + 0.00117 × tape_bytes`（4 点拟合）;t3 76ms、525KB 756ms、845KB 1,050ms。
+   外推到整编译器 7.94MB ≈ **9.4s** 首次物化（按对象合并后一次 lower+elf）。
+   注意:此曲线含固定启动约 74ms（空 tape 实测）,净物化约 `0.00117 × bytes`。
+④ 前置条件:整编译器 tape 需要「43 个对象先链接成单一 tape」的能力,当前 `-S` 只处理单编译单元,
+   整程序路线受 `undefined function`（forward-signature）阻塞。可行路径是先链接后 `-S z`,
+   或让物化器直接吃「对象 tape 列表」。二者都不在 lab-loader 现有范围,照实记为缺口。
+
 ## P3 单模型替换（`p3-swap.cx`）
 
 ```
