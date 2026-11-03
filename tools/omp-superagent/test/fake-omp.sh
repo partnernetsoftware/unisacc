@@ -1,5 +1,11 @@
 #!/bin/sh
 # 真实 RPC 形状:先接 prompt，发送事件，等待 get_last_assistant_text。
+if [ "$FAKE_MODE" = nohandshake ]; then
+  IFS= read -r prompt || exit 0
+  touch received-prompt
+  exit 0
+fi
+printf '{"type":"extension_ui_request","method":"notify","message":"sa-worker-ready:%s"}\n' "$SA_WORKER_NONCE"
 IFS= read -r prompt || exit 2
 case "$FAKE_MODE" in
   hang) sleep 30; exit 0 ;;

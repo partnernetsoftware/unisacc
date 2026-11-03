@@ -74,6 +74,8 @@ export function buildPrompt(o: DispatchOpts): string {
   ];
   lines.push("推理应基于工具返回的逐字证据，区分已验证事实和推断；禁止用 bash 的 echo/printf 等伪造思考或工具证据。当前子进程未提供结构化 think 工具，此规范仅靠提示约束，不能强制执行。");
   if (o.role === "implementer") lines.push(`ALLOWED_PATHS: ${(o.paths ?? []).join(", ") || "(未给,禁止写)"}`);
+  lines.push("bash 在宿主直接执行，不是沙箱；必须自行遵守角色只读及授权路径约束，报告检查无法阻止 bash 越界写入。");
+  if (o.role === "implementer") lines.push("edit 仅允许结构化单路径 replace/patch 模式；自由格式多文件补丁会被拒绝，请对单个文件使用 write。");
   lines.push(REPORT_PROTOCOL);
   return lines.join("\n\n");
 }
@@ -122,17 +124,21 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
   const selected = tools.split(",").map((tool) => tool.trim());
   if (selected.some((tool) => !permitted.includes(tool))) return { ...base, err: "角色不允许指定工具" };
   const allowedTools = Object.fromEntries(selected.map((tool) => [tool, true]));
-  if (o.role === "implementer" || selected.includes("bash"))
-    return { ...base, err: "系统缺少可安全隔离宿主 Unix socket 的执行环境，拒绝运行" };
+  if (o.role === "implementer") {
+    const check = checkFiles(o.role, o.paths, { t: "report", ticket: o.ticket, state: "blocked", summary: "预检", verified: [], inferred: [], files: [], blocked: "预检", next: [] }, cwd);
+    if (!check.ok) return { ...base, err: check.err };
+  }
   if (o.budget) return { ...base, err: "当前无法强制执行步骤或字符预算" };
   if (o.signal?.aborted) return { ...base, err: "dispatch 已取消" };
 
   const args = ["--mode", "rpc", "--no-session", "--no-extensions", "-e", fileURLToPath(new URL("./worker.ts", import.meta.url)), "--tools", tools, "--max-time", String(maxTime)];
+  const nonce = randomUUID();
   if (model) args.push("--model", model);
 
   const child = spawn(process.env.SA_OMP_BIN ?? "omp", args, {
     cwd,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, SA_WORKER_POLICY: JSON.stringify({ role: o.role, paths: o.paths ?? [], cwd }), SA_WORKER_NONCE: nonce },
     detached: true,
   });
   let timedOut = false;
@@ -147,12 +153,14 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
   let buffer = "";
   let promptCompleted = false;
   let gotText = false;
+  let workerReady = false;
   const kill = () => {
     if (child.pid) {
       try { process.kill(-child.pid, "SIGKILL"); return; } catch { /* already exited */ }
     }
     child.kill("SIGKILL");
   };
+  const startupTimer = setTimeout(() => { failure ||= "worker 授权握手超时"; kill(); }, 15000);
   const timer = setTimeout(() => { timedOut = true; kill(); }, maxTime * 1000 + 5000);
   const abort = () => { aborted = true; kill(); };
   o.signal?.addEventListener("abort", abort, { once: true });
@@ -177,6 +185,13 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
       } catch {
         failure ||= "RPC 输出不是合法 JSONL";
         kill();
+        continue;
+      }
+      if (frame.type === "extension_ui_request" && frame.method === "notify" &&
+          frame.message === `sa-worker-ready:${nonce}` && !workerReady) {
+        workerReady = true;
+        clearTimeout(startupTimer);
+        send({ id: "prompt", type: "prompt", message: buildPrompt(o) });
         continue;
       }
       if (frame.type === "tool_execution_start" && !promptCompleted &&
@@ -228,8 +243,9 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
   child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
   const { promise: closed, resolve: close } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
   child.on("close", (code, signal) => close({ code, signal }));
-  send({ id: "prompt", type: "prompt", message: buildPrompt(o) });
+  // 只有扩展确认策略已安装后才发送任务。
   const outcome = await closed;
+  clearTimeout(startupTimer);
   clearTimeout(timer);
   o.signal?.removeEventListener("abort", abort);
   const ms = Date.now() - started;
@@ -242,6 +258,7 @@ export async function runDispatch(o: DispatchOpts): Promise<DispatchResult> {
   };
   if (timedOut) return finish({ ...base, state: "timeout", ms, err: `超过 ${maxTime}s 被终止` });
   if (aborted) return finish({ ...base, ms, err: "dispatch 已取消" });
+  if (!workerReady) return finish({ ...base, ms, err: failure || "worker 授权握手未完成" });
   if (failure || outcome.code !== 0 || outcome.signal || !gotText || buffer.trim()) {
     return finish({ ...base, ms, err: failure || `子进程异常退出: code=${outcome.code} signal=${outcome.signal}` });
   }

@@ -25,9 +25,9 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch",
     label: "dispatch",
     description:
-      "派活:起一个子 omp 执行 ticket,task 必须自包含。" +
-      "implementer 必须提供允许写入的 paths；证据绑定成功工具调用。" +
-      "done 是 worker 自报且经收据对账，不代表宿主独立验收任务合同。原始 RPC stdout/stderr 写入 record（可能含敏感内容）。同一会话已接纳 ticket 唯一。",
+      "派活:起一个子 omp 执行结构化 ticket，implementer 必须提供允许写入的 paths。" +
+      "edit/write 检查路径；bash 不隔离，只读及路径边界依赖 worker 协作，不能防恶意命令。" +
+      "done 是 worker 自报且经收据对账，不代表宿主独立验收。原始 RPC 轨迹可能含敏感信息。",
     parameters: z.object({
       ticket: z.string().min(1).describe("一句话任务名,会话内唯一"),
       task: z.object({
@@ -36,7 +36,7 @@ export default function (pi: ExtensionAPI) {
         accept: z.array(z.string().trim().min(1)).min(1).describe("验收条件；不适用时写 NOT_APPLICABLE"),
         nonGoals: z.array(z.string().trim().min(1)).min(1).describe("非目标"),
       }).describe("结构化任务合同"),
-      role: z.enum(["implementer", "reviewer", "scout"]).optional().describe("缺省 scout"),
+      role: z.enum(["implementer", "reviewer", "scout"]).optional().describe("缺省 implementer"),
       model: z.string().optional(),
       tools: z.string().optional().describe("逗号分隔的工具名"),
       paths: z.array(z.string()).optional().describe("implementer 允许写入的路径"),
@@ -44,7 +44,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_callId, params, signal) {
       const opt = params as DispatchOpts;
-      const role: Role = opt.role ?? "scout";
+      const role: Role = opt.role ?? "implementer";
       const fail = (err: string) => ({ content: [{ type: "text" as const, text: err }], isError: true });
       if (tickets.has(opt.ticket)) return fail(`ticket 已派发过: ${opt.ticket}`);
       if (live.size >= MAX_PARALLEL) return fail(`并行上限 ${MAX_PARALLEL}`);
