@@ -234,14 +234,14 @@ export function resultLines(
     head,
     `${theme.fg("muted", "evidence")} verified ${view.verified ?? 0} · files ${view.files ?? 0}`,
   ];
-  if (view.summary) lines.push(clip(view.summary, 100));
   if (view.err) lines.push(theme.fg("error", clip(view.err, 120)));
   if (expanded) {
+    if (view.summary) lines.push(clip(view.summary, 100));
     if (view.acceptance) lines.push(theme.fg("muted", `checks: ${clip(view.acceptance, 100)}`));
     if (view.next?.length) lines.push(theme.fg("muted", `next: ${clip(view.next.join(" · "), 120)}`));
     if (view.record) lines.push(theme.fg("dim", view.record));
-  } else if (view.record) {
-    lines.push(theme.fg("dim", "展开查看 record / next"));
+  } else {
+    lines.push(theme.fg("dim", "展开看 summary / next / record"));
   }
   return lines;
 }

@@ -83,15 +83,20 @@ describe("omp-super2 UI", () => {
   test("result card renders partial and final states", () => {
     const running = resultLines({ ticket: "t", role: "scout", state: "running", startedAt: Date.now() }, false, theme);
     expect(running.join("\n")).toContain("运行中");
-    const final = resultLines({
+    const details = {
       ticket: "t",
       role: "scout",
       state: "done",
-      report: { summary: "ok", verified: [{}, {}], files: [] },
+      report: { summary: "长解释不应默认出现", verified: [{}, {}], files: [] },
       record: "out/superagent/x.json",
       ms: 1_500,
-    }, true, theme);
-    expect(final.join("\n")).toContain("verified 2 · files 0");
+    };
+    const brief = resultLines(details, false, theme);
+    expect(brief.join("\n")).toContain("verified 2 · files 0");
+    expect(brief.join("\n")).not.toContain("长解释");
+    expect(brief.join("\n")).toContain("展开看");
+    const final = resultLines(details, true, theme);
+    expect(final.join("\n")).toContain("长解释");
     expect(final.join("\n")).toContain("out/superagent/x.json");
   });
 
