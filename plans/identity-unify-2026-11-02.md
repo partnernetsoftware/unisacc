@@ -29,3 +29,16 @@
 
 ## 未决(需要裁定)
 - id_tree 的 selector 是否沿用现过滤(含 .py/.sh)还是借机收紧——收紧会换标。
+
+## 身份机制统一的最直接提速收益(2026-11-03 实测)
+
+改 include/stdio.h 一个头文件,只会影响扫描它的 pp(autoinc) 那一张网;但当前整树 SID
+(ident = SHA-256 over exec/unisa/src/kernel/include/weights/seed)让 131 个 job 的 receipt
+全部作废,必须全链重跑(约 12 分钟)。
+
+实测:副本改 stdio.h 后,ident ROOT 从 1eb0ff19(主树)变 fa2b9764(副本),坐实整树 SID 变化。
+
+若改成按内容寻址的逐 job 输入身份(job 身份 = 它实际读取的输入的哈希),这次只需重跑 pp 一个
+job(seed-gen pp → seed-tbl → seed-net,约几十秒),其余 130 个 job 因输入未变而 receipt 命中。
+
+数字对比:整树 SID 全链重跑 12 分钟 vs 逐 job 内容寻址单网重跑约几十秒。
