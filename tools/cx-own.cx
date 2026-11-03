@@ -1,0 +1,1623 @@
+/* tools/cx-own.cx -- route B, first cut: an intraprocedural ownership check of .cx sources that runs
+ * before the compiler.  Its purpose is a measurement: how many findings it has over the tree and how many
+ * of them are false, as evidence for or against a borrow check inside the compiler (spec CX-W-4,
+ * docs/cx-spec-draft.md §5).  It reads plain .cx; there is no new syntax and no annotation.
+ *
+ *   sh ./unisacc.com tools/cx-own.cx -- [--skips] FILE...
+ *   sh ./unisacc.com tools/cx-own.cx -- [--skips] --tracked [PREFIX...]
+ *
+ * --tracked analyses `git ls-files '*.cx'` without archive/ ujs/ examples/ apps/csih/ (symlinks skipped);
+ * PREFIX... restricts the analysed files, the noreturn names below still come from the whole list.
+ * --skips adds one SKIPPED-<WHY><TAB>FILE:LINE<TAB>FUNCTION line per function it gave up on.
+ *
+ * Subjects are the local pointer variables of each function body (pointer parameters included; they start
+ * owning nothing).  A variable owns a block once it is assigned the result of malloc, calloc, realloc,
+ * strdup, cx_read, or of cx/mem/heap.cx mm_alloc, mm_zalloc, mm_grow, mm_strdup (mem.arena blocks are
+ * released as a group by ar_drop and are not tracked).  free and mm_free release.  Ownership leaves the
+ * function -- it is no longer this function's to release -- when the pointer is returned, stored anywhere but
+ * in a plain non-static local pointer (*out = p, x->f = p, x.f = p, a[i] = p, a global, an initializer list),
+ * passed to a function that is not a known borrower, or when its variable's address is taken.  realloc and
+ * mm_grow consume their argument.  q = p and q = p + n make q an alias of the same block.
+ * Known borrowers (read their arguments, keep nothing): the libc string/memory/stdio names listed in kws[],
+ * every tx_ sy_ ms_ dz_ cx_ name, mm_copy mm_move mm_fill mm_same mm_cmp, mg_append mg_push, sb_puts sb_putn
+ * sb_insert, assert.  Any other call, macros included (they are not expanded), may take ownership.
+ *
+ * Findings, one line each, FILE:LINE of the event, the variable, the function:
+ *   DOUBLE-FREE      a release of a block that is already released on this path (no reassignment between)
+ *   USE-AFTER-FREE   a read of the variable -- dereference, argument, operand, comparison, copy, return --
+ *                    after its block was released and before the variable is reassigned (p = 0 reassigns)
+ *   LEAK             a path reaches a return, the end of the function or the end of the block that declares
+ *                    the variable, or overwrites the variable, while it is the last one holding a block it
+ *                    owns (alloc=LINE names the allocation).  Names are block scoped.  On the branch of
+ *                    `if (!p)`, `if (p == NULL)`, ... the block is null and owns nothing.  A path that
+ *                    calls exit, abort, _exit, _Exit, quick_exit, sy_exit, longjmp, siglongjmp, or a function
+ *                    whose body ends in such a call and has no return (found per file, and by majority of the
+ *                    definitions of that name over the whole list), ends there.  Returns of main are exits
+ *                    of the process and are not checked for LEAK.
+ * Paths: if/else, && || ?: and null tests split and refine them; while, do and for iterate to a fixpoint
+ * over the set of path states; switch enters every top-level case label from the switch state.  A
+ * function is skipped (SKIPPED-*) when it has goto, a case label below the top of its switch, setjmp,
+ * asm, a statement expression, more than 64 pointer locals or 32 allocation sites, more than 512 path
+ * states, or a construct this parser does not read.  Functions without an allocation call are analysed
+ * trivially (they own nothing).  Preprocessor lines are skipped; of #if/#else only the first live branch
+ * (#if 0 takes the #else) is read.
+ * The last line is CX_OWN<TAB>files=..<TAB>functions=..<TAB>analyzed=..<TAB>skipped=..<TAB>double_free=..
+ * <TAB>use_after_free=..<TAB>leak=..; the line before it, CX_OWN_DETAIL, splits the skips by reason.
+ * rc 1 when there is any finding, 2 on a usage or read error. */
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+typedef unsigned long long u64;
+
+enum { T_ID = 1, T_NUM, T_STR, T_CHR, T_P };
+enum { P_ARROW = 256, P_INC, P_DEC, P_SHL, P_SHR, P_LE, P_GE, P_EQ, P_NE, P_LAND, P_LOR, P_ELL, P_HH,
+       P_ADDA, P_SUBA, P_MULA, P_DIVA, P_MODA, P_ANDA, P_ORA, P_XORA, P_SHLA, P_SHRA };
+/* name classes; everything from K_IF on is a keyword */
+enum { C_NONE, C_ALLOC, C_REALLOC, C_FREE, C_BORROW, C_NORET, C_SKIPCALL, C_NULL, C_SETJMP, C_ASM, C_ATTR, C_NORETKW,
+       K_IF, K_ELSE, K_WHILE, K_FOR, K_DO, K_SWITCH, K_CASE, K_DEFAULT, K_RETURN, K_BREAK, K_CONTINUE, K_GOTO,
+       K_SIZEOF, K_TYPE, K_SUE, K_QUAL, K_STATIC, K_TYPEDEF };
+enum { SK_GOTO = 1, SK_SWITCH, SK_PARSE, SK_SIZE, SK_STATES, SK_LOOP, SK_STMTEXPR, SK_ASM, SK_SETJMP, SK_N };
+static const char *sk_name[SK_N] = {"", "GOTO", "SWITCH", "PARSE", "SIZE", "STATES", "LOOP", "STMTEXPR", "ASM", "SETJMP"};
+
+typedef struct { const char *s; int c; } Kw;
+static const Kw kws[] = {
+    {"malloc", C_ALLOC}, {"calloc", C_ALLOC}, {"strdup", C_ALLOC}, {"cx_read", C_ALLOC},
+    {"mm_alloc", C_ALLOC}, {"mm_zalloc", C_ALLOC}, {"mm_strdup", C_ALLOC},
+    {"realloc", C_REALLOC}, {"mm_grow", C_REALLOC}, {"free", C_FREE}, {"mm_free", C_FREE},
+    {"exit", C_NORET}, {"abort", C_NORET}, {"_exit", C_NORET}, {"_Exit", C_NORET}, {"quick_exit", C_NORET},
+    {"sy_exit", C_NORET}, {"longjmp", C_NORET}, {"siglongjmp", C_NORET}, {"__builtin_unreachable", C_NORET},
+    {"__builtin_trap", C_NORET},
+    {"NULL", C_NULL}, {"nullptr", C_NULL},
+    {"offsetof", C_SKIPCALL}, {"__builtin_offsetof", C_SKIPCALL}, {"va_arg", C_SKIPCALL}, {"typeof", C_SKIPCALL},
+    {"__typeof__", C_SKIPCALL}, {"__typeof", C_SKIPCALL}, {"_Alignof", C_SKIPCALL}, {"alignof", C_SKIPCALL},
+    {"__alignof__", C_SKIPCALL}, {"_Generic", C_SKIPCALL}, {"__builtin_types_compatible_p", C_SKIPCALL},
+    {"_Static_assert", C_SKIPCALL}, {"static_assert", C_SKIPCALL},
+    {"setjmp", C_SETJMP}, {"_setjmp", C_SETJMP}, {"sigsetjmp", C_SETJMP}, {"__builtin_setjmp", C_SETJMP},
+    {"asm", C_ASM}, {"__asm__", C_ASM}, {"__asm", C_ASM},
+    {"__attribute__", C_ATTR}, {"__attribute", C_ATTR}, {"__declspec", C_ATTR},
+    {"_Noreturn", C_NORETKW}, {"noreturn", C_NORETKW}, {"__noreturn__", C_NORETKW},
+    {"if", K_IF}, {"else", K_ELSE}, {"while", K_WHILE}, {"for", K_FOR}, {"do", K_DO}, {"switch", K_SWITCH},
+    {"case", K_CASE}, {"default", K_DEFAULT}, {"return", K_RETURN}, {"break", K_BREAK}, {"continue", K_CONTINUE},
+    {"goto", K_GOTO}, {"sizeof", K_SIZEOF},
+    {"void", K_TYPE}, {"char", K_TYPE}, {"short", K_TYPE}, {"int", K_TYPE}, {"long", K_TYPE}, {"float", K_TYPE},
+    {"double", K_TYPE}, {"signed", K_TYPE}, {"unsigned", K_TYPE}, {"_Bool", K_TYPE}, {"bool", K_TYPE},
+    {"_Complex", K_TYPE}, {"__int128", K_TYPE},
+    {"struct", K_SUE}, {"union", K_SUE}, {"enum", K_SUE},
+    {"const", K_QUAL}, {"volatile", K_QUAL}, {"restrict", K_QUAL}, {"__restrict", K_QUAL}, {"__restrict__", K_QUAL},
+    {"register", K_QUAL}, {"auto", K_QUAL}, {"inline", K_QUAL}, {"__inline", K_QUAL}, {"__inline__", K_QUAL},
+    {"_Thread_local", K_QUAL}, {"__thread", K_QUAL}, {"__extension__", K_QUAL}, {"_Atomic", K_QUAL},
+    {"static", K_STATIC}, {"extern", K_STATIC}, {"typedef", K_TYPEDEF},
+    {"strlen", C_BORROW}, {"strnlen", C_BORROW}, {"strcmp", C_BORROW}, {"strncmp", C_BORROW},
+    {"strcasecmp", C_BORROW}, {"strncasecmp", C_BORROW}, {"memcmp", C_BORROW}, {"memcpy", C_BORROW},
+    {"memmove", C_BORROW}, {"memset", C_BORROW}, {"memchr", C_BORROW}, {"memrchr", C_BORROW},
+    {"strchr", C_BORROW}, {"strrchr", C_BORROW}, {"strstr", C_BORROW}, {"strspn", C_BORROW},
+    {"strcspn", C_BORROW}, {"strpbrk", C_BORROW}, {"strcpy", C_BORROW}, {"strncpy", C_BORROW},
+    {"strcat", C_BORROW}, {"strncat", C_BORROW}, {"printf", C_BORROW}, {"fprintf", C_BORROW},
+    {"sprintf", C_BORROW}, {"snprintf", C_BORROW}, {"vsnprintf", C_BORROW}, {"vfprintf", C_BORROW},
+    {"vprintf", C_BORROW}, {"vsprintf", C_BORROW}, {"puts", C_BORROW}, {"fputs", C_BORROW},
+    {"fputc", C_BORROW}, {"putc", C_BORROW}, {"putchar", C_BORROW}, {"fwrite", C_BORROW},
+    {"fread", C_BORROW}, {"fgets", C_BORROW}, {"sscanf", C_BORROW}, {"atoi", C_BORROW}, {"atol", C_BORROW},
+    {"atoll", C_BORROW}, {"strtol", C_BORROW}, {"strtoul", C_BORROW}, {"strtoll", C_BORROW},
+    {"strtoull", C_BORROW}, {"strtod", C_BORROW}, {"strtof", C_BORROW}, {"qsort", C_BORROW},
+    {"bsearch", C_BORROW}, {"write", C_BORROW}, {"read", C_BORROW}, {"pread", C_BORROW}, {"pwrite", C_BORROW},
+    {"send", C_BORROW}, {"recv", C_BORROW}, {"perror", C_BORROW}, {"assert", C_BORROW},
+    {"mm_copy", C_BORROW}, {"mm_move", C_BORROW}, {"mm_fill", C_BORROW}, {"mm_same", C_BORROW},
+    {"mm_cmp", C_BORROW}, {"mg_append", C_BORROW}, {"mg_push", C_BORROW}, {"sb_puts", C_BORROW},
+    {"sb_putn", C_BORROW}, {"sb_insert", C_BORROW},
+    {0, 0}};
+static int kwlen[256];
+static const char *borrow_pre[] = {"tx_", "sy_", "ms_", "dz_", "cx_", 0};
+
+/* ---------------- tokens ---------------- */
+typedef struct { int k, c, line, len; long off; } Tok;
+typedef struct { long off; int len, cls, fnoret, var; unsigned h; } Name;
+
+static const char *src;
+static long srcn;
+static Tok *tk;
+static int ntk, tkcap;
+static int *mt, mtcap;
+static Name *nm;
+static int nnm, nmcap;
+static int *nht, nhcap;
+
+static int is_ids(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$'; }
+static int is_idc(int c) { return is_ids(c) || (c >= '0' && c <= '9'); }
+static int is_dig(int c) { return c >= '0' && c <= '9'; }
+
+static int classify(const char *s, int n) {
+    int k;
+    for (k = 0; kws[k].s; k++)
+        if (kwlen[k] == n && kws[k].s[0] == s[0] && tx_same(kws[k].s, n, s, n)) return kws[k].c;
+    for (k = 0; borrow_pre[k]; k++)
+        if (n > 3 && tx_prefix(s, n, borrow_pre[k], 3)) return C_BORROW;
+    return C_NONE;
+}
+
+static unsigned hash_bytes(const char *s, long n) {
+    unsigned h = 2166136261u; long i;
+    for (i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 16777619u;
+    return h;
+}
+
+static int nh_grow(void) {
+    int nc = nhcap ? nhcap * 2 : 1 << 12, i, *g = mm_alloc((long)nc * (long)sizeof(int));
+    if (!g) return -1;
+    for (i = 0; i < nc; i++) g[i] = -1;
+    for (i = 0; i < nnm; i++) {
+        int j = (int)(nm[i].h & (unsigned)(nc - 1));
+        while (g[j] >= 0) j = (j + 1) & (nc - 1);
+        g[j] = i;
+    }
+    mm_free(nht);
+    nht = g; nhcap = nc;
+    return 0;
+}
+
+static int intern(long off, int len) {
+    unsigned h = hash_bytes(src + off, len);
+    int j;
+    if ((nnm + 1) * 2 > nhcap && nh_grow() < 0) return -1;
+    j = (int)(h & (unsigned)(nhcap - 1));
+    while (nht[j] >= 0) {
+        Name *e = &nm[nht[j]];
+        if (e->h == h && e->len == len && tx_same(src + e->off, len, src + off, len)) return nht[j];
+        j = (j + 1) & (nhcap - 1);
+    }
+    if (nnm == nmcap) {
+        int nc = nmcap ? nmcap * 2 : 1024; Name *g = mm_grow(nm, (long)nc * (long)sizeof(Name));
+        if (!g) return -1;
+        nm = g; nmcap = nc;
+    }
+    nm[nnm].off = off; nm[nnm].len = len; nm[nnm].h = h;
+    nm[nnm].cls = classify(src + off, len); nm[nnm].fnoret = -1; nm[nnm].var = 0;
+    nht[j] = nnm;
+    return nnm++;
+}
+
+static void names_reset(void) {
+    int i;
+    nnm = 0;
+    for (i = 0; i < nhcap; i++) nht[i] = -1;
+}
+
+static int tk_add(int k, int c, long off, long len, int line) {
+    if (ntk == tkcap) {
+        int nc = tkcap ? tkcap * 2 : 8192; Tok *g = mm_grow(tk, (long)nc * (long)sizeof(Tok));
+        if (!g) return -1;
+        tk = g; tkcap = nc;
+    }
+    tk[ntk].k = k; tk[ntk].c = c; tk[ntk].off = off; tk[ntk].len = (int)len; tk[ntk].line = line;
+    ntk++;
+    return 0;
+}
+
+/* preprocessor: a stack of #if frames, 0 = this branch is read, 1 = #if 0 waiting for #else,
+   2 = skip to #endif */
+static int pp_st[256], pp_n;
+static int pp_skipping(void) { return pp_n > 0 && pp_st[pp_n - 1] != 0; }
+
+static int word_is(long a, long b, const char *w) {
+    long n = tx_len(w, 32);
+    return b - a == n && tx_same(src + a, n, w, n);
+}
+
+/* the directive whose '#' is at i; returns the index of the '\n' that ends its logical line */
+static long pp_line(long i, int *line) {
+    long j = i + 1, ws, we, e;
+    int zero = 0;
+    while (j < srcn && (src[j] == ' ' || src[j] == '\t')) j++;
+    ws = j;
+    while (j < srcn && is_idc((unsigned char)src[j])) j++;
+    we = j;
+    while (j < srcn && (src[j] == ' ' || src[j] == '\t')) j++;
+    if (j < srcn && src[j] == '0' && (j + 1 >= srcn || !is_idc((unsigned char)src[j + 1]))) zero = 1;
+    e = j;
+    while (e < srcn && src[e] != '\n') {
+        if (src[e] == '\\' && e + 1 < srcn && src[e + 1] == '\n') { e += 2; (*line)++; continue; }
+        if (src[e] == '\\' && e + 2 < srcn && src[e + 1] == '\r' && src[e + 2] == '\n') { e += 3; (*line)++; continue; }
+        if (src[e] == '"' || src[e] == '\'') {
+            int q = src[e];
+            e++;
+            while (e < srcn && src[e] != q && src[e] != '\n') { if (src[e] == '\\' && e + 1 < srcn && src[e + 1] != '\n') e++; e++; }
+            if (e < srcn && src[e] == q) e++;
+            continue;
+        }
+        if (src[e] == '/' && e + 1 < srcn && src[e + 1] == '*') {
+            e += 2;
+            while (e + 1 < srcn && !(src[e] == '*' && src[e + 1] == '/')) { if (src[e] == '\n') (*line)++; e++; }
+            e += 2;
+            continue;
+        }
+        if (src[e] == '/' && e + 1 < srcn && src[e + 1] == '/') { while (e < srcn && src[e] != '\n') e++; break; }
+        e++;
+    }
+    if (e > srcn) e = srcn;
+    if (word_is(ws, we, "if") || word_is(ws, we, "ifdef") || word_is(ws, we, "ifndef")) {
+        if (pp_n < 256) { pp_st[pp_n] = pp_skipping() ? 2 : (word_is(ws, we, "if") && zero ? 1 : 0); pp_n++; }
+    } else if (word_is(ws, we, "elif") || word_is(ws, we, "else")) {
+        if (pp_n) {
+            int *t = &pp_st[pp_n - 1];
+            if (*t == 0) *t = 2;
+            else if (*t == 1) *t = (word_is(ws, we, "elif") && zero) ? 1 : 0;
+        }
+    } else if (word_is(ws, we, "endif")) {
+        if (pp_n) pp_n--;
+    }
+    return e;
+}
+
+static int punct(long i, int *len) {
+    int c = (unsigned char)src[i], c1 = i + 1 < srcn ? src[i + 1] : 0, c2 = i + 2 < srcn ? src[i + 2] : 0;
+    *len = 3;
+    if (c == '<' && c1 == '<' && c2 == '=') return P_SHLA;
+    if (c == '>' && c1 == '>' && c2 == '=') return P_SHRA;
+    if (c == '.' && c1 == '.' && c2 == '.') return P_ELL;
+    *len = 2;
+    if (c == '-' && c1 == '>') return P_ARROW;
+    if (c == '+' && c1 == '+') return P_INC;
+    if (c == '-' && c1 == '-') return P_DEC;
+    if (c == '<' && c1 == '<') return P_SHL;
+    if (c == '>' && c1 == '>') return P_SHR;
+    if (c == '<' && c1 == '=') return P_LE;
+    if (c == '>' && c1 == '=') return P_GE;
+    if (c == '=' && c1 == '=') return P_EQ;
+    if (c == '!' && c1 == '=') return P_NE;
+    if (c == '&' && c1 == '&') return P_LAND;
+    if (c == '|' && c1 == '|') return P_LOR;
+    if (c == '#' && c1 == '#') return P_HH;
+    if (c1 == '=') {
+        if (c == '+') return P_ADDA;
+        if (c == '-') return P_SUBA;
+        if (c == '*') return P_MULA;
+        if (c == '/') return P_DIVA;
+        if (c == '%') return P_MODA;
+        if (c == '&') return P_ANDA;
+        if (c == '|') return P_ORA;
+        if (c == '^') return P_XORA;
+    }
+    *len = 1;
+    if (c && tx_chr("()[]{};,.:?~!%^&*-+=<>/|#", 25, c) >= 0) return c;
+    return -1;
+}
+
+/* tokens of src; 0, or -1 on a byte no C token starts with */
+static int lex(void) {
+    long i = 0;
+    int line = 1, bol = 1;
+    ntk = 0; pp_n = 0;
+    while (i < srcn) {
+        int c = (unsigned char)src[i];
+        if (c == '\n') { line++; bol = 1; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
+        if (c == '\\' && i + 1 < srcn && src[i + 1] == '\n') { i += 2; line++; continue; }
+        if (bol && c == '#') { i = pp_line(i, &line); continue; }
+        if (pp_skipping()) { while (i < srcn && src[i] != '\n') i++; continue; }
+        if (c == '/' && i + 1 < srcn && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < srcn && !(src[i] == '*' && src[i + 1] == '/')) { if (src[i] == '\n') line++; i++; }
+            i += 2;
+            continue;
+        }
+        if (c == '/' && i + 1 < srcn && src[i + 1] == '/') { while (i < srcn && src[i] != '\n') i++; continue; }
+        bol = 0;
+        if (c == '"' || c == '\'') {
+            long j = i + 1;
+            int zero;
+            while (j < srcn && src[j] != c && src[j] != '\n') {
+                if (src[j] == '\\' && j + 1 < srcn) { if (src[j + 1] == '\n') line++; j++; }
+                j++;
+            }
+            zero = c == '\'' && j - i == 3 && src[i + 1] == '\\' && src[i + 2] == '0';
+            if (tk_add(c == '"' ? T_STR : T_CHR, zero, i, j + 1 - i, line) < 0) return -1;
+            i = j + 1;
+            continue;
+        }
+        if (is_ids(c)) {
+            long j = i;
+            int id;
+            while (j < srcn && is_idc((unsigned char)src[j])) j++;
+            if (j < srcn && (src[j] == '"' || src[j] == '\'') &&
+                ((j - i == 1 && (c == 'L' || c == 'u' || c == 'U')) || (j - i == 2 && c == 'u' && src[i + 1] == '8'))) { i = j; continue; }
+            id = intern(i, (int)(j - i));
+            if (id < 0 || tk_add(T_ID, id, i, j - i, line) < 0) return -1;
+            i = j;
+            continue;
+        }
+        if (is_dig(c) || (c == '.' && i + 1 < srcn && is_dig((unsigned char)src[i + 1]))) {
+            long j = i, k;
+            while (j < srcn) {
+                int d = (unsigned char)src[j];
+                if (is_idc(d) || d == '.') { j++; continue; }
+                if ((d == '+' || d == '-') && (src[j - 1] == 'e' || src[j - 1] == 'E' || src[j - 1] == 'p' || src[j - 1] == 'P')) { j++; continue; }
+                break;
+            }
+            k = i;
+            if (k + 1 < j && src[k] == '0' && (src[k + 1] == 'x' || src[k + 1] == 'X')) k += 2;
+            while (k < j && src[k] == '0') k++;
+            while (k < j && (src[k] == 'u' || src[k] == 'U' || src[k] == 'l' || src[k] == 'L')) k++;
+            if (tk_add(T_NUM, c == '0' && k == j, i, j - i, line) < 0) return -1;
+            i = j;
+            continue;
+        }
+        {
+            int len, p = punct(i, &len);
+            if (p < 0) return -1;
+            if (tk_add(T_P, p, i, len, line) < 0) return -1;
+            i += len;
+        }
+    }
+    return 0;
+}
+
+static int isp(int i, int c) { return i >= 0 && i < ntk && tk[i].k == T_P && tk[i].c == c; }
+static int cls_at(int i) { return i >= 0 && i < ntk && tk[i].k == T_ID ? nm[tk[i].c].cls : -1; }
+static int is_open(int i) { return isp(i, '(') || isp(i, '[') || isp(i, '{'); }
+
+static int match_all(void) {
+    static int stk[8192];
+    int sp = 0, i;
+    if (ntk > mtcap) {
+        int *g = mm_grow(mt, (long)ntk * (long)sizeof(int));
+        if (!g) return -1;
+        mt = g; mtcap = ntk;
+    }
+    for (i = 0; i < ntk; i++) {
+        mt[i] = -1;
+        if (tk[i].k != T_P) continue;
+        if (tk[i].c == '(' || tk[i].c == '[' || tk[i].c == '{') { if (sp == 8192) return -1; stk[sp++] = i; }
+        else if (tk[i].c == ')' || tk[i].c == ']' || tk[i].c == '}') {
+            int o, want = tk[i].c == ')' ? '(' : tk[i].c == ']' ? '[' : '{';
+            if (!sp) return -1;
+            o = stk[--sp];
+            if (tk[o].c != want) return -1;
+            mt[o] = i; mt[i] = o;
+        }
+    }
+    return sp ? -1 : 0;
+}
+
+/* ---------------- functions of a file ---------------- */
+typedef struct { int name, lp, rp, lb, rb, noret; } Fn;
+static Fn *fns;
+static int nfn, fncap;
+
+static int find_fns(void) {
+    int i = 0, ds = 0, eq = 0, nk = 0;
+    nfn = 0;
+    while (i < ntk) {
+        Tok *t = &tk[i];
+        if (t->k == T_P && t->c == ';') { i++; ds = i; eq = 0; nk = 0; continue; }
+        if (t->k == T_P && t->c == '=') { eq = 1; i++; continue; }
+        if (t->k == T_ID && nm[t->c].cls == C_NORETKW) nk = 1;
+        if (t->k == T_P && (t->c == '(' || t->c == '[')) {
+            if (t->c == '(' && nk && i > 0 && tk[i - 1].k == T_ID && nm[tk[i - 1].c].cls < K_IF && nm[tk[i - 1].c].cls != C_ATTR)
+                nm[tk[i - 1].c].fnoret = 1;
+            if (t->c == '(' && i > 0 && cls_at(i - 1) == C_ATTR) {
+                int k;
+                for (k = i; k < mt[i]; k++) if (cls_at(k) == C_NORETKW) nk = 1;
+            }
+            i = mt[i] + 1;
+            continue;
+        }
+        if (t->k == T_P && t->c == '{') {
+            int j = i - 1, ok = 0;
+            while (j > ds && isp(j, ')')) {
+                int o = mt[j];
+                if (o > ds && cls_at(o - 1) == C_ATTR) { j = o - 2; continue; }
+                if (o > ds && tk[o - 1].k == T_ID && nm[tk[o - 1].c].cls < K_IF && !eq) {
+                    if (nfn == fncap) {
+                        int nc = fncap ? fncap * 2 : 256; Fn *g = mm_grow(fns, (long)nc * (long)sizeof(Fn));
+                        if (!g) return -1;
+                        fns = g; fncap = nc;
+                    }
+                    fns[nfn].name = o - 1; fns[nfn].lp = o; fns[nfn].rp = j; fns[nfn].lb = i; fns[nfn].rb = mt[i];
+                    fns[nfn].noret = nk;
+                    nfn++;
+                    ok = 1;
+                }
+                break;
+            }
+            i = mt[i] + 1;
+            if (ok) { ds = i; eq = 0; nk = 0; }
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* ---------------- noreturn names over all files ---------------- */
+typedef struct { char *k; int kn, ndef, nret; unsigned h; } GN;
+static GN *gn;
+static int gncap, gnn;
+
+static GN *gn_get(const char *s, int n, int add) {
+    unsigned h = hash_bytes(s, n);
+    int j;
+    if (add && (gnn + 1) * 2 > gncap) {
+        int nc = gncap ? gncap * 2 : 1 << 14, i;
+        GN *g = mm_zalloc((long)nc * (long)sizeof(GN));
+        if (!g) return 0;
+        for (i = 0; i < gncap; i++) if (gn[i].k) {
+            int q = (int)(gn[i].h & (unsigned)(nc - 1));
+            while (g[q].k) q = (q + 1) & (nc - 1);
+            g[q] = gn[i];
+        }
+        mm_free(gn);
+        gn = g; gncap = nc;
+    }
+    if (!gncap) return 0;
+    j = (int)(h & (unsigned)(gncap - 1));
+    while (gn[j].k) {
+        if (gn[j].h == h && gn[j].kn == n && tx_same(gn[j].k, n, s, n)) return &gn[j];
+        j = (j + 1) & (gncap - 1);
+    }
+    if (!add) return 0;
+    gn[j].k = mm_alloc(n + 1);
+    if (!gn[j].k) return 0;
+    if (mm_copy(gn[j].k, n + 1, s, n) != 0) return 0;
+    gn[j].k[n] = 0; gn[j].kn = n; gn[j].h = h; gn[j].ndef = 0; gn[j].nret = 0;
+    gnn++;
+    return &gn[j];
+}
+
+static int name_noret(int id) {
+    GN *g;
+    if (nm[id].fnoret >= 0) return nm[id].fnoret;
+    if (nm[id].cls == C_NORET) return 1;
+    g = gn_get(src + nm[id].off, nm[id].len, 0);
+    return g && g->nret * 2 > g->ndef;
+}
+
+/* a body without return whose last statement calls a noreturn function */
+static int body_noret(const Fn *f) {
+    int k, s;
+    for (k = f->lb + 1; k < f->rb; k++) if (cls_at(k) == K_RETURN) return 0;
+    k = f->rb - 1;
+    if (!isp(k, ';')) return 0;
+    s = k - 1;
+    while (s > f->lb) {
+        if (isp(s, ')') || isp(s, ']')) { s = mt[s] - 1; continue; }
+        if (isp(s, ';') || isp(s, '{') || isp(s, '}')) break;
+        s--;
+    }
+    s++;
+    return tk[s].k == T_ID && isp(s + 1, '(') && mt[s + 1] == k - 1 && name_noret(tk[s].c);
+}
+
+static void local_noret(void) {
+    int i, changed = 1;
+    for (i = 0; i < nfn; i++) {
+        int id = tk[fns[i].name].c;
+        if (nm[id].fnoret < 0 || fns[i].noret) nm[id].fnoret = fns[i].noret;
+    }
+    while (changed) {
+        changed = 0;
+        for (i = 0; i < nfn; i++) {
+            int id = tk[fns[i].name].c;
+            if (!nm[id].fnoret && body_noret(&fns[i])) { nm[id].fnoret = 1; changed = 1; }
+        }
+    }
+}
+
+/* ---------------- path states ---------------- */
+#define MV 64
+#define MO 32
+#define MAXST 512
+enum { OB_NONE, OB_OWN, OB_NN, OB_NULL, OB_FREED, OB_ESC };
+typedef struct { unsigned char b[MV]; unsigned char o[MO]; } St;   /* b: variable -> block slot + 1; o: block state */
+typedef struct { St *v; int n, cap; } Set;
+
+static int g_skip, g_skipline, g_lb, g_rb, g_main, nv, no;
+static int vname[MV], osite[MO], oline[MO];
+
+static void skip(int why, int line) { if (!g_skip) { g_skip = why; g_skipline = line; } }
+
+static void s_init(Set *s) { s->v = 0; s->n = 0; s->cap = 0; }
+static void s_free(Set *s) { mm_free(s->v); s_init(s); }
+static void s_push(Set *s, const St *x) {
+    if (s->n == s->cap) {
+        int nc = s->cap ? s->cap * 2 : 8; St *g;
+        if (nc > 8 * MAXST) { skip(SK_STATES, 0); return; }
+        g = mm_grow(s->v, (long)nc * (long)sizeof(St));
+        if (!g) { skip(SK_SIZE, 0); return; }
+        s->v = g; s->cap = nc;
+    }
+    s->v[s->n++] = *x;
+}
+static void s_canon(St *x) {
+    unsigned char ref[MO];
+    int k;
+    for (k = 0; k < no; k++) ref[k] = 0;
+    for (k = 0; k < nv; k++) if (x->b[k]) ref[x->b[k] - 1] = 1;
+    for (k = 0; k < no; k++) if (!ref[k]) x->o[k] = OB_NONE;
+}
+static unsigned st_hash(const St *x) {
+    unsigned h = 2166136261u; int k;
+    for (k = 0; k < nv; k++) h = (h ^ x->b[k]) * 16777619u;
+    for (k = 0; k < no; k++) h = (h ^ x->o[k]) * 16777619u;
+    return h;
+}
+static int st_eq(const St *a, const St *b) {
+    int k;
+    for (k = 0; k < nv; k++) if (a->b[k] != b->b[k]) return 0;
+    for (k = 0; k < no; k++) if (a->o[k] != b->o[k]) return 0;
+    return 1;
+}
+static unsigned hbuf[8 * MAXST];
+static void s_norm(Set *s) {
+    int i, j, m = 0;
+    for (i = 0; i < s->n; i++) {
+        unsigned h;
+        s_canon(&s->v[i]);
+        h = st_hash(&s->v[i]);
+        for (j = 0; j < m; j++) if (hbuf[j] == h && st_eq(&s->v[j], &s->v[i])) break;
+        if (j < m) continue;
+        if (m != i) s->v[m] = s->v[i];
+        hbuf[m++] = h;
+    }
+    s->n = m;
+    if (m > MAXST) skip(SK_STATES, 0);
+}
+static void s_copy(Set *d, const Set *s) { int i; d->n = 0; for (i = 0; i < s->n; i++) s_push(d, &s->v[i]); }
+static void s_union(Set *d, const Set *s) { int i; for (i = 0; i < s->n; i++) s_push(d, &s->v[i]); s_norm(d); }
+static void s_move(Set *d, Set *s) { s_free(d); *d = *s; s_init(s); }
+
+/* ---------------- findings ---------------- */
+enum { R_DF = 1, R_UAF, R_LEAK };
+typedef struct { int kind, line, var, aline; } Rep;
+static Rep reps[512];
+static int nrep;
+
+static void rep(int kind, int line, int v, int aline) {
+    int i;
+    for (i = 0; i < nrep; i++) if (reps[i].kind == kind && reps[i].line == line && reps[i].var == v) return;
+    if (nrep == 512) return;
+    reps[nrep].kind = kind; reps[nrep].line = line; reps[nrep].var = v; reps[nrep].aline = aline;
+    nrep++;
+}
+
+static int live(int st) { return st == OB_OWN || st == OB_NN; }
+static int other_ref(const St *s, int v, int o) {
+    int u;
+    for (u = 0; u < nv; u++) if (u != v && s->b[u] == o + 1) return 1;
+    return 0;
+}
+static void st_read(St *s, int v, int line) {
+    int o = s->b[v];
+    if (o && s->o[o - 1] == OB_FREED) rep(R_UAF, line, v, 0);
+}
+static void st_escape(St *s, int v, int line) {
+    int o = s->b[v];
+    if (!o) return;
+    o--;
+    if (s->o[o] == OB_FREED) rep(R_UAF, line, v, 0);
+    else if (live(s->o[o])) s->o[o] = OB_ESC;
+}
+static void st_free(St *s, int v, int line) {
+    int o = s->b[v];
+    if (!o) return;
+    o--;
+    if (s->o[o] == OB_FREED) rep(R_DF, line, v, 0);
+    else if (s->o[o] != OB_NULL) s->o[o] = OB_FREED;
+}
+static void st_unbind(St *s, int v, int line) {
+    int o = s->b[v];
+    if (!o) return;
+    o--;
+    if (live(s->o[o]) && !other_ref(s, v, o)) { rep(R_LEAK, line, v, oline[o]); s->o[o] = OB_ESC; }
+    s->b[v] = 0;
+}
+static void st_alloc(St *s, int v, int slot, int line) {
+    int u;
+    st_unbind(s, v, line);
+    for (u = 0; u < nv; u++) if (s->b[u] == slot + 1) s->b[u] = 0;
+    s->o[slot] = OB_OWN;
+    s->b[v] = (unsigned char)(slot + 1);
+}
+static void st_alias(St *s, int v, int w, int line) {
+    int o;
+    if (v == w) return;
+    o = s->b[w];
+    if (o && o == s->b[v]) return;
+    st_unbind(s, v, line);
+    s->b[v] = (unsigned char)o;
+}
+static void leak_exit(Set *S, int line) {
+    int i, k, v;
+    if (g_main) return;
+    for (i = 0; i < S->n; i++) {
+        St *s = &S->v[i];
+        for (k = 0; k < no; k++) {
+            if (!live(s->o[k])) continue;
+            for (v = 0; v < nv; v++) if (s->b[v] == k + 1) break;
+            if (v < nv) rep(R_LEAK, line, v, oline[k]);
+        }
+    }
+}
+static void esc(Set *S, u64 f, int line) {
+    int v, i;
+    for (v = 0; v < nv; v++) if (f >> v & 1) for (i = 0; i < S->n; i++) st_escape(&S->v[i], v, line);
+}
+
+/* block scopes: a declaration hides the outer meaning of its name until its block ends */
+static int sc_id[2048], sc_old[2048], nsc;
+static int *declvar;   /* per body token: the variable the declaration naming it made, + 1 */
+
+/* the declaration of name token tok: a tracked pointer variable (its index) when track, else the name
+   now means no tracked variable (-1); -2 on overflow */
+static int var_decl(int tok, int track) {
+    int id = tk[tok].c, v = -1;
+    if (track) {
+        int *d = declvar && tok >= g_lb && tok <= g_rb ? &declvar[tok - g_lb] : 0;
+        if (d && *d) v = *d - 1;
+        else {
+            if (nv == MV) { skip(SK_SIZE, tk[tok].line); return -2; }
+            v = nv;
+            vname[nv++] = id;
+            if (d) *d = v + 1;
+        }
+    } else if (!nm[id].var) return -1;
+    if (nsc == 2048) { skip(SK_SIZE, tk[tok].line); return -2; }
+    sc_id[nsc] = id; sc_old[nsc] = nm[id].var; nsc++;
+    nm[id].var = v + 1;
+    return v;
+}
+/* the end of a scope opened at mark: its pointer variables give up their blocks (S may be 0: names only) */
+static void scope_pop(int mark, Set *S, int line) {
+    int i;
+    while (nsc > mark) {
+        int id, v;
+        nsc--;
+        id = sc_id[nsc];
+        v = nm[id].var - 1;
+        if (v >= 0 && S) for (i = 0; i < S->n; i++) st_unbind(&S->v[i], v, line);
+        nm[id].var = sc_old[nsc];
+    }
+    if (S) s_norm(S);
+}
+static int tvar(int tok) { return tk[tok].k == T_ID ? nm[tk[tok].c].var - 1 : -1; }
+static int slot_get(int tok) {
+    int k;
+    for (k = 0; k < no; k++) if (osite[k] == tok) return k;
+    if (no == MO) { skip(SK_SIZE, tk[tok].line); return -1; }
+    osite[no] = tok; oline[no] = tk[tok].line;
+    return no++;
+}
+
+/* ---------------- expressions ---------------- */
+enum { N_ID = 1, N_NUM, N_STR, N_NULL, N_SKIP, N_CALL, N_INDEX, N_MEMBER, N_POST, N_PRE, N_UN, N_CAST,
+       N_BIN, N_LAND, N_LOR, N_COND, N_ASSIGN, N_COMMA, N_INIT };
+typedef struct { int t, op, tok, a, b, c, next; } Node;
+static Node *nd;
+static int nnd, ndcap;
+static int *pcache;
+static int px, pe;
+
+static int mk(int t, int op, int tok, int a, int b, int c) {
+    if (nnd == ndcap) {
+        int nc = ndcap ? ndcap * 2 : 4096; Node *g = mm_grow(nd, (long)nc * (long)sizeof(Node));
+        if (!g) { skip(SK_SIZE, 0); return -1; }
+        nd = g; ndcap = nc;
+    }
+    nd[nnd].t = t; nd[nnd].op = op; nd[nnd].tok = tok; nd[nnd].a = a; nd[nnd].b = b; nd[nnd].c = c; nd[nnd].next = -1;
+    return nnd++;
+}
+static int perr(int i) {
+    if (i >= ntk) i = ntk - 1;
+    skip(SK_PARSE, i >= 0 ? tk[i].line : 0);
+    return -1;
+}
+static int bail(int i, int ret) { perr(i); return ret; }
+static int isassign(int i) {
+    return i < pe && tk[i].k == T_P && (tk[i].c == '=' || (tk[i].c >= P_ADDA && tk[i].c <= P_SHRA));
+}
+static int binprec(int i) {
+    if (i >= pe || tk[i].k != T_P) return 0;
+    switch (tk[i].c) {
+    case P_LOR: return 1;
+    case P_LAND: return 2;
+    case '|': return 3;
+    case '^': return 4;
+    case '&': return 5;
+    case P_EQ: case P_NE: return 6;
+    case '<': case '>': case P_LE: case P_GE: return 7;
+    case P_SHL: case P_SHR: return 8;
+    case '+': case '-': return 9;
+    case '*': case '/': case '%': return 10;
+    }
+    return 0;
+}
+static int next_comma(int q, int e) {
+    while (q < e && !isp(q, ',')) q = is_open(q) ? mt[q] + 1 : q + 1;
+    return q;
+}
+static int ends_t(int id) { return nm[id].len > 2 && src[nm[id].off + nm[id].len - 2] == '_' && src[nm[id].off + nm[id].len - 1] == 't'; }
+
+/* '(' at i opens a type name */
+static int is_cast(int i) {
+    int r = mt[i], q, ids = 0, kw = 0, star = 0, lastid = -1, lead = 0, br = 0;
+    if (r < 0 || r == i + 1) return 0;
+    for (q = i + 1; q < r; q++) {
+        Tok *t = &tk[q];
+        if (t->k == T_ID) {
+            int c = nm[t->c].cls;
+            if (c == K_TYPE || c == K_SUE || c == K_QUAL) kw++;
+            else if (c >= K_IF || c == C_NULL) return 0;
+            else { ids++; lastid = t->c; }
+            continue;
+        }
+        if (t->k == T_P && t->c == '*') { if (!ids && !kw) lead = 1; star++; continue; }
+        if ((kw || star) && t->k == T_P && (t->c == '(' || t->c == ')' || t->c == ',')) continue;
+        if ((kw || star) && t->k == T_P && t->c == '[') { br++; continue; }
+        if (br && t->k == T_P && t->c == ']') { br--; continue; }
+        if (br && t->k == T_NUM) continue;
+        return 0;
+    }
+    if (kw) return 1;
+    if (lead) return 0;   /* (*p): a type name starts with its type */
+    if (ids == 1 && star) return 1;
+    if (ids >= 2 && !star) return 1;
+    if (ids == 1 && !star && r + 1 < pe) {
+        Tok *t = &tk[r + 1];
+        if (t->k == T_ID && nm[t->c].cls != K_SIZEOF && nm[t->c].cls >= K_IF) return 0;
+        if (t->k == T_ID || t->k == T_NUM || t->k == T_STR || t->k == T_CHR || (t->k == T_P && t->c == '{')) return 1;
+        if (t->k == T_P && t->c == '(') return ends_t(lastid);
+        if (t->k == T_P && (t->c == '!' || t->c == '~')) return 1;
+        if (t->k == T_P && (t->c == P_INC || t->c == P_DEC) && r + 2 < pe && (tk[r + 2].k == T_ID || isp(r + 2, '('))) return 1;
+    }
+    return 0;
+}
+
+static int px_expr(void);
+static int px_assign(void);
+static int px_unary(void);
+static int px_init(int i);
+
+static int px_sub(int a, int b, int comma) {
+    int sp = px, se = pe, n;
+    px = a; pe = b;
+    n = comma ? px_expr() : px_assign();
+    if (!g_skip && px != pe) n = perr(px);
+    px = sp; pe = se;
+    return n;
+}
+
+static int px_primary(void) {
+    int i = px;
+    Tok *t;
+    if (px >= pe) return perr(i);
+    t = &tk[i];
+    if (t->k == T_ID) {
+        int c = nm[t->c].cls;
+        if (c == C_NULL) { px++; return mk(N_NULL, 0, i, -1, -1, -1); }
+        if (c == C_SKIPCALL) { px++; if (px < pe && isp(px, '(')) px = mt[px] + 1; return mk(N_SKIP, 0, i, -1, -1, -1); }
+        if (c >= K_IF) return perr(i);
+        if (px + 1 < pe && tk[px + 1].k == T_STR) {   /* MACRO "text": a string concatenation */
+            px += 2;
+            while (px < pe && (tk[px].k == T_STR || (tk[px].k == T_ID && px + 1 < pe && tk[px + 1].k == T_STR))) px++;
+            return mk(N_STR, 0, i, -1, -1, -1);
+        }
+        px++;
+        return mk(N_ID, 0, i, -1, -1, -1);
+    }
+    if (t->k == T_NUM || t->k == T_CHR) { px++; return mk(N_NUM, t->c, i, -1, -1, -1); }
+    if (t->k == T_STR) {
+        while (px < pe && (tk[px].k == T_STR || (tk[px].k == T_ID && tk[px - 1].k == T_STR && (px + 1 >= pe || tk[px + 1].k == T_STR || isp(px + 1, ')') || isp(px + 1, ','))))) px++;
+        return mk(N_STR, 0, i, -1, -1, -1);
+    }
+    if (t->k == T_P && t->c == '(') {
+        int r = mt[i], n;
+        if (r < 0 || r >= pe) return perr(i);
+        if (isp(i + 1, '{')) { skip(SK_STMTEXPR, t->line); return -1; }
+        n = px_sub(i + 1, r, 1);
+        px = r + 1;
+        return n;
+    }
+    return perr(i);
+}
+
+static int px_postfix(void) {
+    int n = px_primary();
+    while (n >= 0 && px < pe) {
+        int i = px;
+        if (isp(i, '[')) {
+            int r = mt[i], x = px_sub(i + 1, r, 1);
+            if (x < 0) return -1;
+            n = mk(N_INDEX, 0, i, n, x, -1);
+            px = r + 1;
+        } else if (isp(i, '(')) {
+            int r = mt[i], q = i + 1, head = -1, tail = -1;
+            while (q < r) {
+                int e = next_comma(q, r), a = px_sub(q, e, 0);
+                if (a < 0) return -1;
+                if (tail < 0) head = a; else nd[tail].next = a;
+                tail = a;
+                q = e < r ? e + 1 : e;
+            }
+            n = mk(N_CALL, 0, i, n, head, -1);
+            px = r + 1;
+        } else if (isp(i, '.') || isp(i, P_ARROW)) {
+            if (i + 1 >= pe || tk[i + 1].k != T_ID) return perr(i);
+            n = mk(N_MEMBER, tk[i].c, i, n, -1, -1);
+            px = i + 2;
+        } else if (isp(i, P_INC) || isp(i, P_DEC)) {
+            n = mk(N_POST, tk[i].c, i, n, -1, -1);
+            px++;
+        } else break;
+    }
+    return n;
+}
+
+static int px_unary(void) {
+    int i = px;
+    if (px >= pe) return perr(i);
+    if (isp(i, P_INC) || isp(i, P_DEC)) { int o; px++; o = px_unary(); return o < 0 ? -1 : mk(N_PRE, tk[i].c, i, o, -1, -1); }
+    if (tk[i].k == T_P && (tk[i].c == '*' || tk[i].c == '&' || tk[i].c == '-' || tk[i].c == '+' || tk[i].c == '!' || tk[i].c == '~')) {
+        int o;
+        px++;
+        o = px_unary();
+        return o < 0 ? -1 : mk(N_UN, tk[i].c, i, o, -1, -1);
+    }
+    if (cls_at(i) == K_SIZEOF) {
+        px++;
+        if (px < pe && isp(px, '(')) px = mt[px] + 1;
+        else if (px_unary() < 0) return -1;
+        return mk(N_SKIP, 0, i, -1, -1, -1);
+    }
+    if (isp(i, '(') && is_cast(i)) {
+        int o;
+        px = mt[i] + 1;
+        if (px < pe && isp(px, '{')) { o = px_init(px); px = mt[px] + 1; return o; }
+        o = px_unary();
+        return o < 0 ? -1 : mk(N_CAST, 0, i, o, -1, -1);
+    }
+    return px_postfix();
+}
+
+static int px_bin(int minp) {
+    int l = px_unary();
+    while (l >= 0) {
+        int p = binprec(px), op, ot, r;
+        if (!p || p < minp) break;
+        ot = px; op = tk[px].c; px++;
+        r = px_bin(p + 1);
+        if (r < 0) return -1;
+        l = mk(op == P_LAND ? N_LAND : op == P_LOR ? N_LOR : N_BIN, op, ot, l, r, -1);
+    }
+    return l;
+}
+
+static int px_cond(void) {
+    int c = px_bin(1), a = -1, b, qt;
+    if (c < 0 || px >= pe || !isp(px, '?')) return c;
+    qt = px++;
+    if (!isp(px, ':')) { a = px_expr(); if (a < 0) return -1; }
+    if (px >= pe || !isp(px, ':')) return perr(px);
+    px++;
+    b = px_cond();
+    return b < 0 ? -1 : mk(N_COND, 0, qt, c, a, b);
+}
+
+static int px_assign(void) {
+    int l = px_cond(), ot, r;
+    if (l < 0 || !isassign(px)) return l;
+    ot = px++;
+    r = px_assign();
+    return r < 0 ? -1 : mk(N_ASSIGN, tk[ot].c, ot, l, r, -1);
+}
+
+static int px_expr(void) {
+    int l = px_assign();
+    while (l >= 0 && px < pe && isp(px, ',')) {
+        int ot = px++, r = px_assign();
+        if (r < 0) return -1;
+        l = mk(N_COMMA, 0, ot, l, r, -1);
+    }
+    return l;
+}
+
+/* the initializer list whose '{' is at i */
+static int px_init(int i) {
+    int r = mt[i], q = i + 1, head = -1, tail = -1;
+    while (q < r && !g_skip) {
+        int e = next_comma(q, r), s = q, a = -1;
+        if (isp(s, '.') || isp(s, '[')) {
+            while (s < e && !isp(s, '=')) s = is_open(s) ? mt[s] + 1 : s + 1;
+            s++;
+        }
+        if (s < e) {
+            if (isp(s, '{') && mt[s] == e - 1) a = px_init(s);
+            else { int sp = px, se = pe; px = s; pe = e; a = px_assign(); if (!g_skip && px != pe) a = perr(px); px = sp; pe = se; }
+            if (a < 0) return -1;
+            if (tail < 0) head = a; else nd[tail].next = a;
+            tail = a;
+        }
+        q = e < r ? e + 1 : e;
+    }
+    return g_skip ? -1 : mk(N_INIT, 0, i, head, -1, -1);
+}
+
+static int parse_range(int a, int b, int comma) {
+    int n;
+    if (a >= g_lb && a <= g_rb && pcache[a - g_lb]) return pcache[a - g_lb] - 1;
+    if (isp(a, '{')) n = px_init(a);
+    else { int se = pe; pe = b; n = px_sub(a, b, comma); pe = se; }
+    if (n >= 0 && a >= g_lb && a <= g_rb) pcache[a - g_lb] = n + 1;
+    return n;
+}
+
+/* ---------------- evaluation over a set of path states ---------------- */
+static int strip(int n) { while (n >= 0 && nd[n].t == N_CAST) n = nd[n].a; return n; }
+static int nullc(int n) { n = strip(n); return n >= 0 && (nd[n].t == N_NULL || (nd[n].t == N_NUM && nd[n].op)); }
+static int ctz(u64 f) { int v = 0; while (!(f >> v & 1)) v++; return v; }
+static int line_of(int n) { return tk[nd[n].tok].line; }
+
+static u64 ev(int n, Set *S);
+static void evc(int n, Set *S, Set *T, Set *F);
+
+static u64 ev_call(int n, Set *S) {
+    int cal = nd[n].a, a = nd[n].b, ct = strip(cal), cls = -1, id = -1, line = line_of(n);
+    int i;
+    if (nd[ct].t == N_ID && tvar(nd[ct].tok) < 0) { id = tk[nd[ct].tok].c; cls = nm[id].cls; }
+    else ev(cal, S);
+    if (cls == C_FREE || cls == C_REALLOC) {
+        if (a >= 0) {
+            int m = strip(a), v = nd[m].t == N_ID ? tvar(nd[m].tok) : -1;
+            if (v < 0) ev(a, S);
+            else for (i = 0; i < S->n; i++) {
+                if (cls == C_FREE) st_free(&S->v[i], v, line);
+                else { st_read(&S->v[i], v, line); st_escape(&S->v[i], v, line); }
+            }
+            for (a = nd[a].next; a >= 0; a = nd[a].next) ev(a, S);
+        }
+    } else if (cls == C_ALLOC || cls == C_BORROW) {
+        for (; a >= 0; a = nd[a].next) ev(a, S);
+    } else {
+        for (; a >= 0; a = nd[a].next) esc(S, ev(a, S), line);
+    }
+    if (id >= 0 && name_noret(id)) S->n = 0;
+    return 0;
+}
+
+static void assign_var(int v, int r, Set *S, int line) {
+    int rm = strip(r), i;
+    u64 f;
+    if (nd[rm].t == N_CALL) {
+        int ct = strip(nd[rm].a);
+        if (nd[ct].t == N_ID && tvar(nd[ct].tok) < 0) {
+            int c = nm[tk[nd[ct].tok].c].cls;
+            if (c == C_ALLOC || c == C_REALLOC) {
+                int slot;
+                ev(r, S);
+                slot = slot_get(nd[ct].tok);
+                if (slot < 0) return;
+                for (i = 0; i < S->n; i++) st_alloc(&S->v[i], v, slot, line);
+                return;
+            }
+        }
+    }
+    if (nullc(r)) { for (i = 0; i < S->n; i++) st_unbind(&S->v[i], v, line); return; }
+    f = ev(r, S);
+    if (f && !(f & (f - 1))) { int w = ctz(f); for (i = 0; i < S->n; i++) st_alias(&S->v[i], v, w, line); }
+    else { esc(S, f, line); for (i = 0; i < S->n; i++) st_unbind(&S->v[i], v, line); }
+}
+
+static u64 ev_assign(int n, Set *S) {
+    int l = nd[n].a, r = nd[n].b, op = nd[n].op, line = line_of(n), i;
+    u64 f;
+    if (nd[l].t == N_ID) {
+        int v = tvar(nd[l].tok);
+        if (v >= 0) {
+            if (op != '=') { ev(r, S); for (i = 0; i < S->n; i++) st_read(&S->v[i], v, line); return 1ull << v; }
+            assign_var(v, r, S, line);
+            return 1ull << v;
+        }
+        esc(S, ev(r, S), line);
+        return 0;
+    }
+    f = ev(r, S);
+    ev(l, S);
+    esc(S, f, line);
+    return 0;
+}
+
+static u64 ev(int n, Set *S) {
+    int i, line;
+    Set T, F;
+    if (n < 0 || g_skip) return 0;
+    line = line_of(n);
+    switch (nd[n].t) {
+    case N_ID: {
+        int v = tvar(nd[n].tok);
+        if (v < 0) return 0;
+        for (i = 0; i < S->n; i++) st_read(&S->v[i], v, line);
+        return 1ull << v;
+    }
+    case N_NUM: case N_STR: case N_NULL: case N_SKIP: return 0;
+    case N_CAST: case N_PRE: case N_POST: return ev(nd[n].a, S);
+    case N_UN:
+        if (nd[n].op == '&') {
+            int m = strip(nd[n].a), v = nd[m].t == N_ID ? tvar(nd[m].tok) : -1;
+            if (v >= 0) {
+                for (i = 0; i < S->n; i++) {
+                    St *s = &S->v[i];
+                    if (s->b[v] && live(s->o[s->b[v] - 1])) s->o[s->b[v] - 1] = OB_ESC;
+                    s->b[v] = 0;
+                }
+                return 0;
+            }
+        }
+        ev(nd[n].a, S);
+        return 0;
+    case N_INDEX: ev(nd[n].a, S); ev(nd[n].b, S); return 0;
+    case N_MEMBER: ev(nd[n].a, S); return 0;
+    case N_BIN: {
+        u64 l = ev(nd[n].a, S), r = ev(nd[n].b, S);
+        if (nd[n].op == '+') return l | r;
+        if (nd[n].op == '-') return l;
+        return 0;
+    }
+    case N_LAND: case N_LOR:
+        s_init(&T); s_init(&F);
+        evc(n, S, &T, &F);
+        s_move(S, &T); s_union(S, &F); s_free(&F);
+        return 0;
+    case N_COND: {
+        u64 fa, fb;
+        s_init(&T); s_init(&F);
+        evc(nd[n].a, S, &T, &F);
+        fa = nd[n].b >= 0 ? ev(nd[n].b, &T) : 0;
+        fb = ev(nd[n].c, &F);
+        s_move(S, &T); s_union(S, &F); s_free(&F);
+        return fa | fb;
+    }
+    case N_ASSIGN: return ev_assign(n, S);
+    case N_COMMA: ev(nd[n].a, S); return ev(nd[n].b, S);
+    case N_CALL: return ev_call(n, S);
+    case N_INIT: {
+        int a;
+        for (a = nd[n].a; a >= 0; a = nd[a].next) esc(S, ev(a, S), line);
+        return 0;
+    }
+    }
+    return 0;
+}
+
+/* S (consumed) split into the states where n is true (T) and false (F); T and F start empty */
+static void evc(int n, Set *S, Set *T, Set *F) {
+    Set a, b;
+    int m, i;
+    u64 f;
+    if (g_skip) return;
+    m = strip(n);
+    switch (nd[m].t) {
+    case N_LAND:
+        s_init(&a); s_init(&b);
+        evc(nd[m].a, S, &a, &b);
+        evc(nd[m].b, &a, T, F);
+        s_union(F, &b);
+        s_free(&a); s_free(&b);
+        return;
+    case N_LOR:
+        s_init(&a); s_init(&b);
+        evc(nd[m].a, S, &a, &b);
+        evc(nd[m].b, &b, T, F);
+        s_union(T, &a);
+        s_free(&a); s_free(&b);
+        return;
+    case N_UN:
+        if (nd[m].op == '!') { evc(nd[m].a, S, F, T); return; }
+        break;
+    case N_BIN:
+        if ((nd[m].op == P_EQ || nd[m].op == P_NE) && (nullc(nd[m].a) || nullc(nd[m].b))) {
+            int x = nullc(nd[m].b) ? nd[m].a : nd[m].b;
+            if (nd[m].op == P_EQ) evc(x, S, F, T); else evc(x, S, T, F);
+            return;
+        }
+        break;
+    case N_NUM:
+        if (nd[m].op) s_union(F, S); else s_union(T, S);
+        S->n = 0;
+        return;
+    case N_COMMA:
+        ev(nd[m].a, S);
+        evc(nd[m].b, S, T, F);
+        return;
+    }
+    f = ev(m, S);
+    if ((nd[m].t == N_ID || nd[m].t == N_ASSIGN) && f && !(f & (f - 1))) {
+        int v = ctz(f);
+        for (i = 0; i < S->n; i++) {
+            St *s = &S->v[i], x;
+            int o = s->b[v];
+            if (!o) { s_push(T, s); s_push(F, s); continue; }
+            o--;
+            if (s->o[o] == OB_OWN) {
+                x = *s; x.o[o] = OB_NN; s_push(T, &x);
+                x = *s; x.o[o] = OB_NULL; s_push(F, &x);
+            } else if (s->o[o] == OB_NN) s_push(T, s);
+            else if (s->o[o] == OB_NULL) s_push(F, s);
+            else { s_push(T, s); s_push(F, s); }
+        }
+    } else {
+        for (i = 0; i < S->n; i++) { s_push(T, &S->v[i]); s_push(F, &S->v[i]); }
+    }
+    S->n = 0;
+    s_norm(T); s_norm(F);
+}
+
+/* ---------------- statements ---------------- */
+typedef struct { Set *brk, *cont; } Ctx;
+static Ctx ctx[256];
+static int nctx;
+
+static int stmt_end(int p) {
+    while (p < g_rb && !isp(p, ';')) p = is_open(p) ? mt[p] + 1 : p + 1;
+    return p;
+}
+
+static int is_decl(int p) {
+    int c = cls_at(p), q;
+    if (c == K_TYPE || c == K_SUE || c == K_QUAL || c == K_STATIC || c == K_TYPEDEF || c == C_NORETKW) return 1;
+    if (c < 0 || c >= K_IF || c == C_NULL) return 0;
+    if (tk[p + 1].k == T_ID) { int d = cls_at(p + 1); return d < K_IF || d == K_QUAL || d == K_TYPE; }
+    if (isp(p + 1, '*')) {
+        q = p + 1;
+        while (isp(q, '*') || cls_at(q) == K_QUAL) q++;
+        return tk[q].k == T_ID && cls_at(q) < K_IF && (isp(q + 1, '=') || isp(q + 1, ';') || isp(q + 1, ',') || isp(q + 1, '['));
+    }
+    if (isp(p + 1, '(') && isp(p + 2, '*') && tk[p + 3].k == T_ID && isp(p + 4, ')') && isp(p + 5, '(')) return 1;
+    return 0;
+}
+
+/* the declaration [a, e) */
+static void exec_decl(int a, int e, Set *S) {
+    int q = a, isstatic = 0, have = 0, i;
+    while (q < e && tk[q].k == T_ID) {
+        int c = cls_at(q);
+        if (c == K_TYPEDEF) return;
+        if (c == K_STATIC) { isstatic = 1; q++; continue; }
+        if (c == K_QUAL || c == C_NORETKW) { q++; continue; }
+        if (c == C_ATTR) { q++; if (isp(q, '(')) q = mt[q] + 1; continue; }
+        if (c == K_TYPE) { have = 1; q++; continue; }
+        if (c == K_SUE) {
+            have = 1; q++;
+            if (q < e && tk[q].k == T_ID) q++;
+            if (isp(q, '{')) q = mt[q] + 1;
+            continue;
+        }
+        if (c >= K_IF || c == C_NULL) { perr(q); return; }
+        if (!have) { have = 1; q++; continue; }
+        break;
+    }
+    while (q < e && !g_skip) {
+        int de = next_comma(q, e), d = q, stars = 0, name = -1, isarr = 0, isfn = 0, fnptr = 0, init = -1, line;
+        while (d < de && (isp(d, '*') || cls_at(d) == K_QUAL)) { if (isp(d, '*')) stars++; d++; }
+        if (d < de && isp(d, '(')) {
+            int r = mt[d], k;
+            fnptr = 1;
+            for (k = d + 1; k < r; k++) if (tk[k].k == T_ID && cls_at(k) < K_IF) { name = k; break; }
+            d = r + 1;
+        } else if (d < de && tk[d].k == T_ID) name = d++;
+        else { perr(d); return; }
+        while (d < de && isp(d, '[')) { isarr = 1; d = mt[d] + 1; }
+        if (d < de && isp(d, '(')) { isfn = 1; d = mt[d] + 1; }
+        while (d < de && (cls_at(d) == C_ATTR || cls_at(d) == C_ASM || cls_at(d) == K_QUAL)) { d++; if (isp(d, '(')) d = mt[d] + 1; }
+        if (d < de && isp(d, '=')) {
+            d++;
+            if (d >= de) { perr(d); return; }
+            init = parse_range(d, de, 0);
+            if (init < 0) return;
+            d = de;
+        }
+        if (d != de || name < 0) { perr(d); return; }
+        line = tk[name].line;
+        if (!isfn && !fnptr && !isarr && stars > 0 && !isstatic) {
+            int v = var_decl(name, 1);
+            if (v < 0) return;
+            if (init >= 0) assign_var(v, init, S, line);
+            else for (i = 0; i < S->n; i++) st_unbind(&S->v[i], v, line);
+        } else {
+            if (init >= 0) esc(S, ev(init, S), line);
+            if (!isfn && var_decl(name, 0) == -2) return;
+        }
+        q = de + 1;
+    }
+    s_norm(S);
+}
+
+static int exec(int p, Set *S);
+
+static int exec_expr(int p, Set *S) {
+    int e = stmt_end(p), n;
+    if (e >= g_rb) return bail(p, g_rb);
+    n = parse_range(p, e, 1);
+    if (n >= 0) ev(n, S);
+    s_norm(S);
+    return e + 1;
+}
+
+static void ctx_push(Set *brk, Set *cont) {
+    if (nctx == 256) { skip(SK_SIZE, 0); return; }
+    ctx[nctx].brk = brk; ctx[nctx].cont = cont; nctx++;
+}
+
+#define LOOPMAX 40
+
+/* one loop: cond node c (-1 = true), body at body, step node st (-1 = none), do-while when isdo */
+static int exec_loop(int c, int body, int st, int isdo, int wq, Set *S) {
+    Set head, ex, W, T, F, cont;
+    int q = body, it, before;
+    s_init(&head); s_init(&ex); s_init(&W); s_init(&T); s_init(&F); s_init(&cont);
+    s_copy(&head, S); s_norm(&head);
+    for (it = 0; !g_skip; it++) {
+        if (it == LOOPMAX) { skip(SK_LOOP, tk[body].line); break; }
+        s_copy(&W, &head);
+        if (isdo) {
+            cont.n = 0;
+            ctx_push(&ex, &cont);
+            q = exec(body, &W);
+            nctx--;
+            s_union(&W, &cont);
+            if (c < 0) c = parse_range(wq + 2, mt[wq + 1], 1);
+            if (c < 0) break;
+        }
+        T.n = 0; F.n = 0;
+        if (c >= 0) evc(c, &W, &T, &F); else { s_union(&T, &W); W.n = 0; }
+        s_union(&ex, &F);
+        if (!isdo) {
+            cont.n = 0;
+            ctx_push(&ex, &cont);
+            q = exec(body, &T);
+            nctx--;
+            s_union(&T, &cont);
+            if (st >= 0) ev(st, &T);
+            s_norm(&T);
+        }
+        before = head.n;
+        s_union(&head, &T);
+        if (head.n == before) break;
+    }
+    s_move(S, &ex);
+    s_free(&head); s_free(&W); s_free(&T); s_free(&F); s_free(&cont);
+    return q;
+}
+
+static int case_colon(int q, int end) {
+    int depth = 0;
+    q++;
+    while (q < end) {
+        if (is_open(q)) { q = mt[q] + 1; continue; }
+        if (isp(q, '?')) depth++;
+        else if (isp(q, ':')) { if (!depth) return q; depth--; }
+        q++;
+    }
+    return bail(q, end);
+}
+
+static int exec(int p, Set *S) {
+    int c, r, q;
+    Set T, F;
+    if (g_skip) return g_rb;
+    if (p >= g_rb) return bail(p, g_rb);
+    if (isp(p, '{')) {
+        int mark = nsc;
+        r = mt[p];
+        q = p + 1;
+        while (q < r && !g_skip) q = exec(q, S);
+        scope_pop(mark, p == g_lb ? 0 : S, tk[r].line);
+        return r + 1;
+    }
+    if (isp(p, ';')) return p + 1;
+    c = cls_at(p);
+    switch (c) {
+    case K_IF: {
+        int n;
+        if (!isp(p + 1, '(') || mt[p + 1] == p + 2) return bail(p, g_rb);
+        r = mt[p + 1];
+        n = parse_range(p + 2, r, 1);
+        if (n < 0) return g_rb;
+        s_init(&T); s_init(&F);
+        evc(n, S, &T, &F);
+        q = exec(r + 1, &T);
+        if (cls_at(q) == K_ELSE) q = exec(q + 1, &F);
+        s_move(S, &T); s_union(S, &F); s_free(&F);
+        return q;
+    }
+    case K_WHILE: {
+        int n;
+        if (!isp(p + 1, '(')) return bail(p, g_rb);
+        r = mt[p + 1];
+        n = parse_range(p + 2, r, 1);
+        if (n < 0) return g_rb;
+        return exec_loop(n, r + 1, -1, 0, 0, S);
+    }
+    case K_DO: {
+        int wq;
+        Set probe;
+        s_init(&probe);
+        ctx_push(&probe, &probe);
+        wq = exec(p + 1, &probe);   /* the body's end, on no state */
+        nctx--;
+        s_free(&probe);
+        if (g_skip || cls_at(wq) != K_WHILE || !isp(wq + 1, '(') || !isp(mt[wq + 1] + 1, ';')) return bail(wq, g_rb);
+        exec_loop(-1, p + 1, -1, 1, wq, S);
+        return mt[wq + 1] + 2;
+    }
+    case K_FOR: {
+        int s1, s2, cn = -1, st = -1, mark = nsc;
+        if (!isp(p + 1, '(')) return bail(p, g_rb);
+        r = mt[p + 1];
+        s1 = p + 2;
+        while (s1 < r && !isp(s1, ';')) s1 = is_open(s1) ? mt[s1] + 1 : s1 + 1;
+        s2 = s1 + 1;
+        while (s2 < r && !isp(s2, ';')) s2 = is_open(s2) ? mt[s2] + 1 : s2 + 1;
+        if (s1 >= r || s2 >= r) return bail(p, g_rb);
+        if (s1 > p + 2) {
+            if (is_decl(p + 2)) exec_decl(p + 2, s1, S);
+            else { int n = parse_range(p + 2, s1, 1); if (n < 0) return g_rb; ev(n, S); }
+        }
+        if (s2 > s1 + 1) { cn = parse_range(s1 + 1, s2, 1); if (cn < 0) return g_rb; }
+        if (r > s2 + 1) { st = parse_range(s2 + 1, r, 1); if (st < 0) return g_rb; }
+        q = exec_loop(cn, r + 1, st, 0, 0, S);
+        scope_pop(mark, S, tk[q - 1].line);
+        return q;
+    }
+    case K_SWITCH: {
+        int n, end, hasdef = 0, mark = nsc;
+        Set entry, cur, ex;
+        if (!isp(p + 1, '(')) return bail(p, g_rb);
+        r = mt[p + 1];
+        n = parse_range(p + 2, r, 1);
+        if (n < 0) return g_rb;
+        ev(n, S);
+        if (!isp(r + 1, '{')) { skip(SK_SWITCH, tk[p].line); return g_rb; }
+        end = mt[r + 1];
+        s_init(&entry); s_init(&cur); s_init(&ex);
+        s_copy(&entry, S); s_norm(&entry);
+        ctx_push(&ex, 0);
+        q = r + 2;
+        while (q < end && !g_skip) {
+            int k = cls_at(q);
+            if (k == K_CASE) { q = case_colon(q, end) + 1; s_union(&cur, &entry); continue; }
+            if (k == K_DEFAULT && isp(q + 1, ':')) { q += 2; hasdef = 1; s_union(&cur, &entry); continue; }
+            q = exec(q, &cur);
+        }
+        nctx--;
+        s_union(&ex, &cur);
+        if (!hasdef) s_union(&ex, &entry);
+        s_move(S, &ex);
+        scope_pop(mark, S, tk[end].line);
+        s_free(&entry); s_free(&cur);
+        return end + 1;
+    }
+    case K_RETURN: {
+        int e = stmt_end(p), line = tk[p].line;
+        if (e >= g_rb) return bail(p, g_rb);
+        if (e > p + 1) {
+            int n = parse_range(p + 1, e, 1);
+            if (n < 0) return g_rb;
+            esc(S, ev(n, S), line);
+        }
+        leak_exit(S, line);
+        S->n = 0;
+        return e + 1;
+    }
+    case K_BREAK:
+        if (!nctx || !isp(p + 1, ';')) return bail(p, g_rb);
+        s_union(ctx[nctx - 1].brk, S);
+        S->n = 0;
+        return p + 2;
+    case K_CONTINUE: {
+        int k = nctx - 1;
+        while (k >= 0 && !ctx[k].cont) k--;
+        if (k < 0 || !isp(p + 1, ';')) return bail(p, g_rb);
+        s_union(ctx[k].cont, S);
+        S->n = 0;
+        return p + 2;
+    }
+    case K_GOTO: skip(SK_GOTO, tk[p].line); return g_rb;
+    case K_CASE: case K_DEFAULT: skip(SK_SWITCH, tk[p].line); return g_rb;
+    case K_ELSE: return bail(p, g_rb);
+    case C_ASM: skip(SK_ASM, tk[p].line); return g_rb;
+    case C_ATTR: return stmt_end(p) + 1;
+    }
+    if (tk[p].k == T_ID && c < K_IF && isp(p + 1, ':')) return p + 2;   /* a label */
+    if (tk[p].k == T_ID && is_decl(p)) {
+        int e = stmt_end(p);
+        if (e >= g_rb) return bail(p, g_rb);
+        exec_decl(p, e, S);
+        return e + 1;
+    }
+    return exec_expr(p, S);
+}
+
+/* ---------------- one function ---------------- */
+static int show_skips;
+static long n_files, n_fns, n_analyzed, n_trivial, n_owners, n_bad, n_df, n_uaf, n_leak, n_skip[SK_N];
+static const char *g_path;
+
+static void put_name(int id) { printf("%.*s", nm[id].len, src + nm[id].off); }
+
+static void params(const Fn *f, Set *S) {
+    int q = f->lp + 1;
+    (void)S;
+    while (q < f->rp && !g_skip) {
+        int e = next_comma(q, f->rp), k, name = -1, stars = 0, arr = 0, paren = 0;
+        for (k = q; k < e; k++) {
+            if (isp(k, '(')) { paren = 1; break; }
+            if (isp(k, '[')) { arr = 1; break; }
+            if (isp(k, '*')) stars++;
+            if (tk[k].k == T_ID && cls_at(k) < K_IF && cls_at(k) != C_ATTR) name = k;
+        }
+        if (!paren && name >= 0 && (stars || arr)) var_decl(name, 1);
+        q = e + 1;
+    }
+}
+
+static void analyze(const Fn *f) {
+    int k, has = 0, why = 0, wline = 0;
+    Set S;
+    St z;
+    n_fns++;
+    for (k = f->lb + 1; k < f->rb; k++) {
+        int c = cls_at(k);
+        if ((c == C_ALLOC || c == C_REALLOC) && isp(k + 1, '(')) has = 1;
+        if (!why && c == K_GOTO) why = SK_GOTO;
+        if (!why && c == C_ASM) why = SK_ASM;
+        if (!why && c == C_SETJMP) why = SK_SETJMP;
+        if (!why && isp(k, '(') && isp(k + 1, '{')) why = SK_STMTEXPR;
+        if (why && !wline) wline = tk[k].line;
+    }
+    if (!has) { n_analyzed++; n_trivial++; return; }
+    g_skip = why; g_skipline = wline;
+    g_lb = f->lb; g_rb = f->rb; nv = 0; no = 0; nrep = 0; nnd = 0; nctx = 0; nsc = 0;
+    g_main = nm[tk[f->name].c].len == 4 && tx_same(src + nm[tk[f->name].c].off, 4, "main", 4);
+    pcache = 0;
+    s_init(&S);
+    if (!g_skip) {
+        pcache = mm_zalloc((long)(f->rb - f->lb + 2) * (long)sizeof(int));
+        declvar = mm_zalloc((long)(f->rb - f->lb + 2) * (long)sizeof(int));
+        if (!pcache || !declvar) skip(SK_SIZE, 0);
+    }
+    if (!g_skip) {
+        for (k = 0; k < MV; k++) z.b[k] = 0;
+        for (k = 0; k < MO; k++) z.o[k] = 0;
+        s_push(&S, &z);
+        params(f, &S);
+        exec(f->lb, &S);
+        if (!g_skip) leak_exit(&S, tk[f->rb].line);
+    }
+    for (k = 0; k < nv; k++) nm[vname[k]].var = 0;
+    s_free(&S);
+    mm_free(pcache);
+    mm_free(declvar);
+    pcache = 0;
+    declvar = 0;
+    if (g_skip) {
+        n_skip[g_skip]++;
+        if (show_skips) {
+            printf("SKIPPED-%s\t%s:%d\t", sk_name[g_skip], g_path, g_skipline ? g_skipline : tk[f->name].line);
+            put_name(tk[f->name].c);
+            printf("\n");
+        }
+        return;
+    }
+    n_analyzed++; n_owners++;
+    for (k = 1; k < nrep; k++) {   /* by line */
+        Rep x = reps[k];
+        int j = k - 1;
+        while (j >= 0 && (reps[j].line > x.line || (reps[j].line == x.line && reps[j].kind > x.kind))) { reps[j + 1] = reps[j]; j--; }
+        reps[j + 1] = x;
+    }
+    for (k = 0; k < nrep; k++) {
+        Rep *r = &reps[k];
+        printf("%s\t%s:%d\t", r->kind == R_DF ? "DOUBLE-FREE" : r->kind == R_UAF ? "USE-AFTER-FREE" : "LEAK", g_path, r->line);
+        put_name(vname[r->var]);
+        printf("\tfn=");
+        put_name(tk[f->name].c);
+        if (r->kind == R_LEAK) printf("\talloc=%d", r->aline);
+        printf("\n");
+        if (r->kind == R_DF) n_df++; else if (r->kind == R_UAF) n_uaf++; else n_leak++;
+    }
+}
+
+/* ---------------- files ---------------- */
+static char *g_buf;
+
+static int load(const char *path) {
+    size_t n = 0;
+    mm_free(g_buf);
+    g_buf = cx_read(path, &n);
+    if (!g_buf) return -1;
+    src = g_buf; srcn = (long)n;
+    if (!nhcap && nh_grow() < 0) return -1;
+    names_reset();
+    if (lex() < 0 || match_all() < 0 || find_fns() < 0) return -2;
+    local_noret();
+    return 0;
+}
+
+static void pass1(const char *path) {
+    int i;
+    if (load(path) < 0) return;
+    for (i = 0; i < nfn; i++) {
+        int id = tk[fns[i].name].c;
+        GN *g = gn_get(src + nm[id].off, nm[id].len, 1);
+        if (g) { g->ndef++; g->nret += nm[id].fnoret > 0; }
+    }
+}
+
+static int pass2(const char *path) {
+    int i, r = load(path);
+    if (r == -1) { fprintf(stderr, "cx-own: cannot read %s\n", path); return -1; }
+    n_files++;
+    if (r < 0) { n_bad++; if (show_skips) printf("SKIPPED-FILE\t%s:1\t-\n", path); return 0; }
+    g_path = path;
+    for (i = 0; i < nfn; i++) analyze(&fns[i]);
+    return 0;
+}
+
+static int excluded(const char *p) {
+    static const char *ex[] = {"archive/", "ujs/", "examples/", "apps/csih/", 0};
+    int k;
+    for (k = 0; ex[k]; k++) if (tx_prefixz(p, ex[k], tx_len(ex[k], 64))) return 1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a = 1, i, np = 0, k;
+    char **paths = 0, *list = 0;
+    size_t ln = 0;
+    for (k = 0; kws[k].s; k++) kwlen[k] = (int)tx_len(kws[k].s, 64);
+    if (a < argc && tx_eqz(argv[a], "--skips")) { show_skips = 1; a++; }
+    if (a < argc && tx_eqz(argv[a], "--tracked")) {
+        char *rec, *end;
+        int cap = 0;
+        a++;
+        if (cx_run("git ls-files -s -z -- '*.cx'", &list, &ln) != 0 || !list) { fprintf(stderr, "cx-own: git ls-files failed\n"); return 2; }
+        for (rec = list, end = list + ln; rec < end; rec += tx_len(rec, end - rec) + 1) {
+            char *p = rec;
+            if (tx_prefixz(rec, "120000 ", 7)) continue;
+            while (*p && *p != '\t') p++;
+            if (!*p) continue;
+            p++;
+            if (excluded(p)) continue;
+            if (np == cap) {
+                char **g;
+                cap = cap ? cap * 2 : 1024;
+                g = mm_grow(paths, (long)cap * (long)sizeof(char *));
+                if (!g) return 2;
+                paths = g;
+            }
+            paths[np++] = p;
+        }
+    } else {
+        if (a >= argc) {
+            fprintf(stderr, "usage: tools/cx-own.cx -- [--skips] FILE... | [--skips] --tracked [PREFIX...]\n");
+            return 2;
+        }
+        paths = argv + a;
+        np = argc - a;
+        a = argc;
+    }
+    for (i = 0; i < np; i++) pass1(paths[i]);
+    for (i = 0; i < np; i++) {
+        int sel = a >= argc, j;
+        for (j = a; j < argc && !sel; j++) if (tx_prefixz(paths[i], argv[j], tx_len(argv[j], 4096))) sel = 1;
+        if (sel && pass2(paths[i]) < 0) return 2;
+    }
+    {
+        long sk = 0;
+        for (k = 1; k < SK_N; k++) sk += n_skip[k];
+        printf("CX_OWN_DETAIL\ttrivial=%ld\towners=%ld\tbad_files=%ld", n_trivial, n_owners, n_bad);
+        for (k = 1; k < SK_N; k++) printf("\tskip_%s=%ld", sk_name[k], n_skip[k]);
+        printf("\n");
+        printf("CX_OWN\tfiles=%ld\tfunctions=%ld\tanalyzed=%ld\tskipped=%ld\tdouble_free=%ld\tuse_after_free=%ld\tleak=%ld\n",
+               n_files, n_fns, n_analyzed, sk, n_df, n_uaf, n_leak);
+    }
+    return n_df + n_uaf + n_leak ? 1 : 0;
+}

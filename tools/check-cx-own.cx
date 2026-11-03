@@ -1,0 +1,277 @@
+/* tools/check-cx-own.cx -- fixtures for tools/cx-own.cx, the intraprocedural ownership check.
+ *
+ *   sh ./unisacc.com tools/check-cx-own.cx        (from the repo root; writes out/check-cx-own/)
+ *
+ * Every fixture below is one .cx file.  A finding cx-own must print carries a marker comment on its line,
+ * KIND and variable; a file must have exactly its marked findings, so a file without a marker must have none.
+ * Positive files (df-*, uaf-*, leak-*) hold at least two cases of each finding; the ok-* files hold what must
+ * not be reported: ownership leaving the function (return, *out, a field, an unknown callee), null
+ * branches, release then reassignment, a release on each branch, allocation and release paired in a loop,
+ * paths after exit and after a function that ends in exit, realloc, switch and the returns of main.
+ * skip-goto has a leak inside a function with goto: no finding, one SKIPPED-GOTO line.
+ * The summary line must count the markers, cx-own must exit 1 on the whole set and 0 on the ok-* files.
+ * Prints FAIL lines and, last, CHECK_CX_OWN<TAB>assertions=N<TAB>failed=M; rc 1 when M > 0. */
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define DIR "out/check-cx-own"
+
+typedef struct { const char *name, *text; } Fx;
+static const Fx fx[] = {
+    {"df-twice",
+     "int f(int n) {\n"
+     "    char *p = malloc(n);\n"
+     "    if (!p) return -1;\n"
+     "    free(p);\n"
+     "    free(p); /*!DOUBLE-FREE p*/\n"
+     "    return 0;\n"
+     "}\n"},
+    {"df-branch",
+     "int f(int n, int c) {\n"
+     "    char *p = mm_alloc(n);\n"
+     "    if (c) mm_free(p);\n"
+     "    mm_free(p); /*!DOUBLE-FREE p*/\n"
+     "    return 0;\n"
+     "}\n"},
+    {"df-alias",
+     "void f(void) {\n"
+     "    char *p = strdup(\"x\");\n"
+     "    char *q = p;\n"
+     "    free(p);\n"
+     "    free(q); /*!DOUBLE-FREE q*/\n"
+     "}\n"},
+    {"uaf-deref",
+     "int f(int n) {\n"
+     "    char *p = malloc(n);\n"
+     "    if (!p) return -1;\n"
+     "    p[0] = 1;\n"
+     "    free(p);\n"
+     "    return p[0]; /*!USE-AFTER-FREE p*/\n"
+     "}\n"},
+    {"uaf-arg",
+     "void f(const char *s) {\n"
+     "    char *p = strdup(s);\n"
+     "    free(p);\n"
+     "    printf(\"%s\\n\", p); /*!USE-AFTER-FREE p*/\n"
+     "}\n"},
+    {"uaf-return",
+     "char *f(void) {\n"
+     "    char *p = mm_strdup(\"x\");\n"
+     "    mm_free(p);\n"
+     "    return p; /*!USE-AFTER-FREE p*/\n"
+     "}\n"},
+    {"leak-return",
+     "int f(int n) {\n"
+     "    char *p = malloc(n);\n"
+     "    if (!p) return -1;\n"
+     "    if (n > 8) return 1; /*!LEAK p*/\n"
+     "    free(p);\n"
+     "    return 0;\n"
+     "}\n"},
+    {"leak-overwrite",
+     "void f(void) {\n"
+     "    char *p = mm_alloc(8);\n"
+     "    p = mm_alloc(16); /*!LEAK p*/\n"
+     "    mm_free(p);\n"
+     "}\n"},
+    {"leak-end",
+     "void f(const char *path) {\n"
+     "    size_t n = 0;\n"
+     "    char *b = cx_read(path, &n);\n"
+     "    if (b) printf(\"%d\\n\", b[0]);\n"
+     "} /*!LEAK b*/\n"},
+    {"leak-block",
+     "void f(int n) {\n"
+     "    int i;\n"
+     "    for (i = 0; i < n; i++) {\n"
+     "        char *q = calloc(1, 4);\n"
+     "        if (q) q[0] = 0;\n"
+     "    } /*!LEAK q*/\n"
+     "}\n"},
+    {"ok-return",
+     "char *f(int n) {\n"
+     "    char *p = malloc(n);\n"
+     "    if (!p) return 0;\n"
+     "    p[0] = 0;\n"
+     "    return p;\n"
+     "}\n"},
+    {"ok-out",
+     "int f(char **out) {\n"
+     "    char *p = strdup(\"x\");\n"
+     "    if (!p) return -1;\n"
+     "    *out = p;\n"
+     "    return 0;\n"
+     "}\n"},
+    {"ok-field",
+     "struct s { char *b; };\n"
+     "void f(struct s *x, struct s *y) {\n"
+     "    char *p = mm_alloc(4), *q = mm_alloc(4);\n"
+     "    x->b = p;\n"
+     "    y[0].b = q;\n"
+     "}\n"},
+    {"ok-call",
+     "void keep(char *);\n"
+     "void f(void) {\n"
+     "    char *p = malloc(4);\n"
+     "    keep(p);\n"
+     "}\n"},
+    {"ok-null",
+     "int f(int n) {\n"
+     "    char *a = malloc(4), *b = malloc(8), *c;\n"
+     "    if (!a || !b) { free(a); free(b); return -1; }\n"
+     "    c = malloc(n);\n"
+     "    if (c == NULL) { free(a); free(b); return -1; }\n"
+     "    if (!(a[0] = 0) && n < 0) {}\n"
+     "    free(a); free(b); free(c);\n"
+     "    return 0;\n"
+     "}\n"},
+    {"ok-refree",
+     "void f(void) {\n"
+     "    char *p = malloc(4);\n"
+     "    free(p);\n"
+     "    p = malloc(8);\n"
+     "    if (!p) return;\n"
+     "    p[0] = 1;\n"
+     "    free(p);\n"
+     "    p = NULL;\n"
+     "    if (p) p[0] = 2;\n"
+     "}\n"},
+    {"ok-branches",
+     "int f(int c) {\n"
+     "    char *p = malloc(4);\n"
+     "    if (c) { free(p); return 1; }\n"
+     "    if (c > 2) free(p); else free(p);\n"
+     "    return 0;\n"
+     "}\n"},
+    {"ok-loop",
+     "void f(int n) {\n"
+     "    int i;\n"
+     "    for (i = 0; i < n; i++) { char *q = malloc(8); if (!q) continue; q[0] = 0; free(q); }\n"
+     "    while (n-- > 0) { char *r = strdup(\"x\"); printf(\"%s\", r); free(r); }\n"
+     "    do { char *s = mm_alloc(2); if (!s) break; mm_free(s); } while (n++ < 3);\n"
+     "}\n"},
+    {"ok-noret",
+     "static void die(const char *m) { fprintf(stderr, \"%s\\n\", m); exit(2); }\n"
+     "int f(int n) {\n"
+     "    char *p = malloc(n);\n"
+     "    if (!p) die(\"oom\");\n"
+     "    if (n > 8) { fprintf(stderr, \"big\\n\"); exit(1); }\n"
+     "    p[0] = 0;\n"
+     "    free(p);\n"
+     "    return 0;\n"
+     "}\n"},
+    {"ok-realloc",
+     "int f(int n) {\n"
+     "    char *b = malloc(8), *g;\n"
+     "    if (!b) return -1;\n"
+     "    g = realloc(b, n);\n"
+     "    if (!g) { free(b); return -1; }\n"
+     "    b = g;\n"
+     "    b = mm_grow(b, 2 * n);\n"
+     "    free(b);\n"
+     "    return 0;\n"
+     "}\n"},
+    {"ok-switch",
+     "int f(int k) {\n"
+     "    char *p = malloc(4);\n"
+     "    switch (k) {\n"
+     "    case 0: free(p); return 0;\n"
+     "    case 1: free(p); break;\n"
+     "    default: free(p); break;\n"
+     "    }\n"
+     "    return 1;\n"
+     "}\n"},
+    {"ok-main",
+     "int main(int argc, char **argv) {\n"
+     "    char *p = malloc(4);\n"
+     "    if (!p) return 1;\n"
+     "    return argc > 1 ? 2 : 0;\n"
+     "}\n"},
+    {"skip-goto",
+     "int f(void) {\n"
+     "    char *p = malloc(4);\n"
+     "    if (!p) goto out;\n"
+     "    return 1;\n"
+     "out:\n"
+     "    return 0;\n"
+     "}\n"},
+    {0, 0}};
+
+static int assertions, failed;
+
+static void ck(int ok, const char *name, const char *what) {
+    assertions++;
+    if (!ok) { failed++; printf("FAIL\t%s\t%s\n", name, what); }
+}
+
+static int has(const char *s, long n, const char *w) { return tx_find(s, n, w, tx_len(w, 4096)) >= 0; }
+
+static int is_finding(const char *l, long n) {
+    return tx_prefix(l, n, "DOUBLE-FREE\t", 12) || tx_prefix(l, n, "USE-AFTER-FREE\t", 15) || tx_prefix(l, n, "LEAK\t", 5);
+}
+
+/* finding lines of OUT about PATH */
+static int count_path(const char *out, long n, const char *path) {
+    long at = 0, pn = tx_len(path, 4096);
+    int c = 0;
+    while (at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e, tab = tx_chr(out + at, ln, '\t');
+        if (is_finding(out + at, ln) && tab >= 0 && tx_prefix(out + at + tab + 1, ln - tab - 1, path, pn)
+            && tab + 1 + pn < ln && out[at + tab + 1 + pn] == ':') c++;
+        at += ln + 1;
+    }
+    return c;
+}
+
+int main(void) {
+    char *out = 0, *out2 = 0, path[128], want[256];
+    size_t on = 0, on2 = 0;
+    int k, rc, rc2, ndf = 0, nuaf = 0, nleak = 0, nfiles = 0;
+    if (cx_run("mkdir -p " DIR, 0, 0) != 0) { fprintf(stderr, "check-cx-own: cannot make %s\n", DIR); return 2; }
+    for (k = 0; fx[k].name; k++) {
+        if (cx_fmt(path, sizeof path, DIR "/%s.cx", fx[k].name)) return 2;
+        if (cx_write(path, fx[k].text, (size_t)tx_len(fx[k].text, 1 << 16)) != 0) { fprintf(stderr, "check-cx-own: cannot write %s\n", path); return 2; }
+        nfiles++;
+    }
+    rc = cx_run("sh ./unisacc.com tools/cx-own.cx -- --skips " DIR "/*.cx", &out, &on);
+    rc2 = cx_run("sh ./unisacc.com tools/cx-own.cx -- " DIR "/ok-*.cx", &out2, &on2);
+    if (!out || !out2) { fprintf(stderr, "check-cx-own: cx-own produced no output\n"); return 2; }
+    for (k = 0; fx[k].name; k++) {
+        const char *t = fx[k].text;
+        long tn = tx_len(t, 1 << 16), at = 0;
+        int line = 1, marks = 0;
+        if (cx_fmt(path, sizeof path, DIR "/%s.cx", fx[k].name)) return 2;
+        while (at < tn) {
+            long e = tx_chr(t + at, tn - at, '\n'), ln = e < 0 ? tn - at : e, m = tx_find(t + at, ln, "/*!", 3);
+            if (m >= 0) {
+                long ks = at + m + 3, sp = tx_chr(t + ks, at + ln - ks, ' '), ve, vn;
+                ve = sp < 0 ? -1 : tx_find(t + ks + sp + 1, at + ln - ks - sp - 1, "*/", 2);
+                if (sp < 0 || ve < 0) { ck(0, fx[k].name, "bad marker"); break; }
+                vn = ve;
+                if (cx_fmt(want, sizeof want, "%.*s\t%s:%d\t%.*s\t", (int)sp, t + ks, path, line, (int)vn, t + ks + sp + 1)) return 2;
+                ck(has(out, (long)on, want), fx[k].name, want);
+                if (tx_prefix(t + ks, sp, "DOUBLE-FREE", 11)) ndf++;
+                else if (tx_prefix(t + ks, sp, "USE-AFTER-FREE", 14)) nuaf++;
+                else nleak++;
+                marks++;
+            }
+            at += ln + 1;
+            line++;
+        }
+        ck(count_path(out, (long)on, path) == marks, fx[k].name, "exactly the marked findings");
+    }
+    ck(has(out, (long)on, "SKIPPED-GOTO\t" DIR "/skip-goto.cx:"), "skip-goto", "a SKIPPED-GOTO line");
+    if (cx_fmt(want, sizeof want, "CX_OWN\tfiles=%d\t", nfiles)) return 2;
+    ck(has(out, (long)on, want), "summary", want);
+    if (cx_fmt(want, sizeof want, "\tskipped=1\tdouble_free=%d\tuse_after_free=%d\tleak=%d\n", ndf, nuaf, nleak)) return 2;
+    ck(has(out, (long)on, want), "summary", want);
+    ck(ndf >= 2 && nuaf >= 2 && nleak >= 2, "fixtures", "two positives of each kind");
+    ck(rc == 1, "rc", "exit 1 with findings");
+    ck(rc2 == 0, "rc", "exit 0 on the ok-* files");
+    ck(has(out2, (long)on2, "\tdouble_free=0\tuse_after_free=0\tleak=0\n"), "ok-only", "no finding on the ok-* files");
+    if (failed) printf("%s", out);
+    printf("CHECK_CX_OWN\tassertions=%d\tfailed=%d\n", assertions, failed);
+    mm_free(out);
+    mm_free(out2);
+    return failed ? 1 : 0;
+}
