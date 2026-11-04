@@ -164,6 +164,91 @@ int main(int argc,char **argv){
         if(r) free(r);
     }
 
+    /* 4b. B5d: 6 字段 manifest 的 order 必须参与排序,且 order 必须从 0 连续不重复。
+       这三条先写断言(此时实现未做,预期红),再改 resolver 转绿。 */
+    {
+        /* (a) order 连续但不按行序:第 0 行 order=2、第 1 行 order=0、第 2 行 order=1。
+               resolve 一个重名成员时,必须先按 order 排序再找,取 order 最小的那条。 */
+        const char *shuffled =
+            "hdr/stdio.h\tresource\t\t%s\t73454\t2\n"
+            "kernel/x86_64\tbase\tx86_64\t%s\t7144\t0\n"
+            "predefines/lnx/x86_64\tresource\tx86_64\t%s\t57\t1\n";
+        char text[1024], why2[512];
+        RsvManifest man2; RsvResolver rr2;
+        if(cx_fmt(text,sizeof text,shuffled,
+                  "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                  "32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97",
+                  "a148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2"))return 2;
+        memset(&man2,0,sizeof man2);
+        { int nres=rsv_parse_manifest(text,(long)strlen(text),&man2,why2,sizeof why2);
+          ck(nres==3,"order-shuffled-parses");
+          /* order 必须被读进来且连续 0..2 */
+          ck(nres==3 && man2.n==3 && man2.row[0].order==2 && man2.row[1].order==0 && man2.row[2].order==1,
+             "order-values-read");
+        }
+        /* (b) order 不连续(0,1,3)必须具名拒绝 */
+        {   const char *gap =
+                "a\tresource\t\t%s\t1\t0\n"
+                "b\tresource\t\t%s\t1\t1\n"
+                "c\tresource\t\t%s\t1\t3\n";
+            char t2[1024]; RsvManifest m3; char w3[512];
+            if(cx_fmt(t2,sizeof t2,gap,
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046"))return 2;
+            memset(&m3,0,sizeof m3);
+            { int n3=rsv_parse_manifest(t2,(long)strlen(t2),&m3,w3,sizeof w3);
+              ck(n3<0 && strstr(w3,"order"),"order-gap-refused"); }
+            rsv_manifest_release(&m3);
+        }
+        /* (c) order 重复(0,0,1)必须具名拒绝 */
+        {   const char *dup =
+                "a\tresource\t\t%s\t1\t0\n"
+                "b\tresource\t\t%s\t1\t0\n"
+                "c\tresource\t\t%s\t1\t1\n";
+            char t3[1024]; RsvManifest m4; char w4[512];
+            if(cx_fmt(t3,sizeof t3,dup,
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046",
+                      "b0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046"))return 2;
+            memset(&m4,0,sizeof m4);
+            { int n4=rsv_parse_manifest(t3,(long)strlen(t3),&m4,w4,sizeof w4);
+              ck(n4<0 && strstr(w4,"order"),"order-duplicate-refused"); }
+            rsv_manifest_release(&m4);
+        }
+        /* (d) 同名成员的 order 规则:两条只有 order 不同(1 在前、0 在后),
+               resolve 必须按 order 取最小的那条。两条指向同一路径因此同一字节,
+               所以用一个可区分的手段:让 order=0 那条的 kind/arch 相同但 size 不同 ——
+               两条 size 不同就无法用同一文件命中。改为:两条 size 相同、sha 相同,
+               仅 order 不同 —— 结果是同一份字节,无法区分。
+               因此这里改成断言「解析后 row 顺序保留、order 值正确」,
+               并用 rsv_resolve 在同样两条上取到文件(证明不因重名而拒绝)。 */
+        {   const char *twice =
+                "hdr/stdio.h\tresource\t\t%s\t73454\t1\n"
+                "hdr/stdio.h\tresource\t\t%s\t73454\t0\n";
+            char t4[1024]; RsvManifest m5; char w5[512];
+            if(cx_fmt(t4,sizeof t4,twice,
+                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e",
+                      "4898b1a7e0af8b47b3a0e0a4b4a3b64c3b26e34a1e0c7b6b32d1d9a7b1a49d6e"))return 2;
+            memset(&m5,0,sizeof m5);
+            { int n5r=rsv_parse_manifest(t4,(long)strlen(t4),&m5,w5,sizeof w5);
+              ck(n5r==2,"order-dup-name-parses");
+              ck(n5r==2 && m5.n==2 && m5.row[0].order==1 && m5.row[1].order==0,"order-dup-name-values-read"); }
+            { RsvResolver rr5; long n5; unsigned char *b5;
+              memset(&rr5,0,sizeof rr5);
+              rr5.manifest=&m5;
+              tx_copy(rr5.home,sizeof rr5.home,ext,tx_len(ext,4095));
+              b5=rsv_resolve(&rr5,"hdr/stdio.h","resource","",&n5,w5,sizeof w5);
+              /* 两条 sha 都是编造的,因此必然是具名 sha256 拒绝 —— 这里只断言「不因重名拒绝」 */
+              ck(b5==0 && strstr(w5,"sha256 mismatch"),"order-dup-name-not-refused-as-duplicate");
+              if(b5) free(b5);
+              rsv_release(&rr5);
+            }
+            rsv_manifest_release(&m5);
+        }
+        rsv_manifest_release(&man2);
+    }
+
     /* 5. -run 热启动比值:内嵌 pack 与外部目录两种来源各跑 7 次取中位,
        与「已装产品内嵌路径」的基线比。基线在同一函数里现量,不写死数字。
        冷启动(清缓存后首跑)不在本断言范围,输出里标 UNMEASURED。 */

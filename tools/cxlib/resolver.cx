@@ -18,6 +18,8 @@
 #pragma unisa use codec
 
 /* 单条 manifest 记录。name/kind/arch/sha 是深拷贝；size 是字节数。 */
+#define RSV_MAX_ROWS 4096
+
 typedef struct { char name[512], kind[32], arch[32], sha[65]; long long size, order; } RsvManifestRow;
 typedef struct { RsvManifestRow *row; int n, cap; } RsvManifest;
 
@@ -96,6 +98,22 @@ int rsv_parse_manifest(const char *text, long n, RsvManifest *out, char *why, in
             }
         }
         at += ln + 1;
+    }
+    /* B5d: order must be a permutation of 0..n-1 -- contiguous and unique. A gap or a
+       repeat makes "sorted by order" ambiguous, so it is a named refusal, not a
+       silently re-numbered table. 5-field manifests get order = row index above and
+       therefore pass trivially. */
+    {
+        static unsigned char seen[RSV_MAX_ROWS];
+        long k;
+        if (out->n > RSV_MAX_ROWS) { rsv_why(why, cap, "manifest too many rows", 0); return -1; }
+        for (k = 0; k < out->n; k++) seen[k] = 0;
+        for (k = 0; k < out->n; k++) {
+            long long o = out->row[k].order;
+            if (o < 0 || o >= out->n) { rsv_why(why, cap, "manifest order outside 0..n-1", out->row[k].name); return -1; }
+            if (seen[o]) { rsv_why(why, cap, "manifest duplicate order", out->row[k].name); return -1; }
+            seen[o] = 1;
+        }
     }
     return out->n;
 }
@@ -266,9 +284,13 @@ unsigned char *rsv_resolve(RsvResolver *rs, const char *name, const char *kind, 
     if (!rs || !name || !on) { rsv_why(why, cap, "bad resolve input", 0); return 0; }
     for (i = 0; i < rs->manifest->n; i++) {
         RsvManifestRow *c = &rs->manifest->row[i];
+        /* B5d: when several rows match, the one with the smallest order wins -- the same
+           order the manifest declares as the member sequence, not the file's row order. */
         if (tx_eqz(c->name, name) &&
             (!kind || tx_eqz(c->kind, kind)) &&
-            (!arch || tx_eqz(c->arch, arch))) { r = c; break; }
+            (!arch || tx_eqz(c->arch, arch))) {
+            if (!r || c->order < r->order) r = c;
+        }
     }
     if (!r) { rsv_why(why, cap, "name not in manifest", name); return 0; }
     /* 1. UNISA_HOME */
