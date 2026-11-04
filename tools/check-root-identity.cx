@@ -161,6 +161,44 @@ int main(int argc, char **argv) {
             ok(rb && rn > 0, "build-record-readable");
             ok(!has, "build-record-has-no-artifact-section");
             ok(rb && strstr(rb, "\"sources_sha256\":") != 0, "build-record-keeps-sources");
+            /* B5c follow-up: the record must carry the manifest identity fields that
+               tools/source-package.cx root_epoch_execution_record rebuilds and compares
+               byte for byte.  ident.c writes them; a record without them can never pass
+               prepare-context (fields: product_kind, product_digest). */
+            {
+                char kind_pat[256], dg_pat[256], line[256];
+                long i2;
+                int has_kind = 0, has_dg = 0, kind_eq = 0, dg_eq = 0;
+                char want_dg[65];
+                const char *want_kind = pp_identity_kind(root);
+                if (!want_kind) want_kind = "none";
+                want_dg[0] = 0;
+                if (pp_product_digest(root, want_dg)) want_dg[0] = 0;
+                if (cx_fmt(kind_pat, sizeof kind_pat, "  \"product_kind\": \"%s\"", want_kind)) return 1;
+                if (cx_fmt(dg_pat, sizeof dg_pat, "  \"product_digest\": \"%s\"", want_dg)) return 1;
+                if (rb && rn > 0) {
+                    for (i2 = 0; i2 < (long)rn; i2++) {
+                        long e = i2, l2;
+                        while (e < (long)rn && rb[e] != '\n') e++;
+                        l2 = e - i2;
+                        if (l2 > 0 && l2 < (long)sizeof line) {
+                            memcpy(line, rb + i2, (size_t)l2); line[l2] = 0;
+                            /* a field that is not last carries a trailing comma */
+                            if (l2 > 1 && line[l2 - 1] == ',') line[l2 - 1] = 0;
+                            if (!strcmp(line, kind_pat)) { has_kind = 1; kind_eq = 1; }
+
+                            else if (strstr(line, "\"product_kind\":")) has_kind = 1;
+                            if (!strcmp(line, dg_pat)) { has_dg = 1; dg_eq = 1; }
+                            else if (strstr(line, "\"product_digest\":")) has_dg = 1;
+                        }
+                        i2 = e;
+                    }
+                }
+                ok(has_kind, "build-record-has-product-kind");
+                ok(has_dg, "build-record-has-product-digest");
+                ok(kind_eq, "build-record-kind-matches-manifest");
+                ok(dg_eq, "build-record-digest-matches-manifest");
+            }
             if (has) printf("BUILD_RECORD\tSTILL-HAS-artifact_sha256\t%s\n", rec);
             free(rb);
         }

@@ -165,6 +165,127 @@ static void json_str(FILE *o, const char *v) {
 }
 extern char **environ;
 static int env_cmp(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+
+/* ---- B5c follow-up: the record must carry the manifest identity the verifier
+ * rebuilds (tools/source-package.cx root_epoch_execution_record compares it byte
+ * for byte).  This mirrors tools/cxlib/productpkg.cx pp_identity_kind /
+ * pp_product_digest for the split2 layout:
+ *   product_kind -> "split2" (unisacc.com + unisacc.com.dev are both present)
+ *   product_digest -> sha256 over the member lines
+ *     "<name>	<kind>		<sha256>	<bytes>	<index>
+"
+ *   members sorted by name; the launcher is named "unisacc.com", the other
+ *   members come from ape-receipt.txt when it names them, else the two defaults. */
+#define MF_MAX 16
+#define MF_NAME 256
+static char mf_name[MF_MAX][MF_NAME], mf_sha[MF_MAX][65];
+static long mf_bytes[MF_MAX];
+static int mf_n;
+
+static int mf_present(const char *p) {
+    struct stat st;
+    return lstat(p, &st) == 0;
+}
+static int mf_is_launcher(const char *n) { return strcmp(n, "unisacc.com") == 0; }
+static const char *mf_kind(const char *n) {
+    if (!strcmp(n, "unisacc.com")) return "base";
+    if (!strcmp(n, "entry.elf")) return "stage";
+    return "resource";
+}
+static int mf_cmp(const void *x, const void *y) { return strcmp(*(char *const *)x, *(char *const *)y); }
+static int mf_add(const char *n) {
+    int i;
+    if (mf_n >= MF_MAX || strlen(n) >= MF_NAME) die("too many product members", n);
+    for (i = 0; i < mf_n; i++) if (!strcmp(mf_name[i], n)) return 0;
+    strcpy(mf_name[mf_n], n); mf_n++;
+    return 1;
+}
+/* Fill mf_name[]/mf_sha[]/mf_bytes[] from ROOT.  Returns 0, or -1 when the layout
+   is neither split2 nor a lone unisacc.com. */
+static int manifest_members(const char *root) {
+    char dev[4400], p[4400], rec[1 << 16], name[MF_NAME], *order[MF_MAX];
+    int rec_ok, i, j, n;
+    struct stat st;
+    mf_n = 0;
+    sprintf(dev, "%s/unisacc.com.dev", root);
+    if (stat(dev, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+    mf_add("unisacc.com");
+    sprintf(p, "%s/ape-receipt.txt", root);
+    rec_ok = mf_present(p);
+    if (rec_ok) {
+        int fd = open(p, O_RDONLY); long rn;
+        if (fd < 0) return -1;
+        rn = read(fd, rec, sizeof rec - 1); close(fd);
+        if (rn <= 0) return -1;
+        rec[rn] = 0;
+        {   long a = 0;
+            while (a < rn) {
+                long e = a, st_;
+                while (e < rn && rec[e] != '\n') e++;
+                /* Same rule as tools/cxlib/productpkg.cx pp_receipt_line: skip blank and
+                   NOT_-prefixed marker lines, take the *basename* of the second field. */
+                st_ = a;
+                while (st_ < e && (rec[st_] == ' ' || rec[st_] == '\t')) st_++;
+                {
+                    long end = st_;
+                    while (end < e && rec[end] != '\t' && rec[end] != ' ') end++;
+                    if (end > st_ && !(end - st_ >= 4 && rec[st_] == 'N' && rec[st_ + 1] == 'O' &&
+                                       rec[st_ + 2] == 'T' && rec[st_ + 3] == '_')) {
+                        long p2 = end, q2, base;
+                        while (p2 < e && (rec[p2] == '\t' || rec[p2] == ' ')) p2++;
+                        q2 = p2;
+                        while (q2 < e && rec[q2] != '\t' && rec[q2] != ' ') q2++;
+                        if (q2 == p2) { p2 = st_; q2 = end; }
+                        base = p2;
+                        {   long r2;
+                            for (r2 = p2; r2 < q2; r2++) if (rec[r2] == '/') base = r2 + 1;
+                        }
+                        if (q2 > base && q2 - base < MF_NAME) {
+                            memcpy(name, rec + base, (size_t)(q2 - base)); name[q2 - base] = 0;
+                            if (!mf_is_launcher(name)) mf_add(name);
+                        }
+                    }
+                }
+                a = e + 1;
+            }
+        }
+    } else {
+        mf_add("p3-package.bin");
+        mf_add("entry.elf");
+    }
+    /* sort members 1..n-1 by name (the launcher stays first, as productpkg does) */
+    for (i = 1; i < mf_n; i++) order[i - 1] = mf_name[i];
+    qsort(order, (size_t)(mf_n - 1), sizeof *order, mf_cmp);
+    for (i = 1; i < mf_n; i++) strcpy(mf_name[i], order[i - 1]);
+    for (i = 0; i < mf_n; i++) {
+        const char *src = mf_is_launcher(mf_name[i]) ? root : dev;
+        char mp[4400];
+        sprintf(mp, "%s/%s", src, mf_name[i]);
+        if (lstat(mp, &st) != 0) return -1;
+        if (S_ISLNK(st.st_mode)) return -1;
+        mf_bytes[i] = file_digest(mp, mf_sha[i]);
+    }
+    (void)n; (void)j;
+    return 0;
+}
+/* product_digest: sha256 over the canonical manifest text (see above). */
+static int manifest_digest(const char *root, char hex[65]) {
+    Sha h; unsigned char dg[32];
+    int i, k;
+    char line[MF_NAME + 200];
+    if (manifest_members(root)) return -1;
+    sha_init(&h);
+    for (i = 0; i < mf_n; i++) {
+        int l = snprintf(line, sizeof line, "%s\t%s\t\t%s\t%ld\t%d\n",
+                         mf_name[i], mf_kind(mf_name[i]), mf_sha[i], mf_bytes[i], i);
+        if (l < 0 || (size_t)l >= sizeof line) return -1;
+        sha_put(&h, line, (size_t)l);
+    }
+    sha_end(&h, dg);
+    for (k = 0; k < 32; k++) sprintf(hex + 2 * k, "%02x", dg[k]);
+    return 0;
+}
+
 static void write_record(const char *root, const char *artifact, const char *expected) {
     char cur[65], commit[64] = {0}, cmd[2048], dest[2048], tmp[2100];
     char **set = NULL; size_t ns = 0, i; long bytes; FILE *pp, *o;
@@ -209,7 +330,14 @@ static void write_record(const char *root, const char *artifact, const char *exp
         }
         fputs("  }", o);
     }
-    fprintf(o, ",\n  \"sources_sha256\": \"%s\"\n}\n", cur);
+    {   char pdig[65]; int pdok = manifest_digest(root, pdig) == 0;
+        fprintf(o, ",\n  \"sources_sha256\": \"%s\"", cur);
+        if (pdok) {
+            fprintf(o, ",\n  \"product_kind\": \"split2\"");
+            fprintf(o, ",\n  \"product_digest\": \"%s\"", pdig);
+        }
+        fprintf(o, "\n}\n");
+    }
     if (fclose(o)) die("write failed", tmp);
     if (rename(tmp, dest)) die("cannot rename", tmp);
     free(set);
