@@ -59,6 +59,39 @@ static char *load(const char *p, size_t *n) {
     return b;
 }
 
+/* Next recipe id inside the SpModel table of `src`. Returns 0 at the end. */
+static int a_recipe(const char *src, size_t *at, char out[64]) {
+    const char *p = strstr(src, "static const SpModel recipes[]");
+    if (!p) return 0;
+    const char *end = strstr(p, "\n};");
+    if (!end) return 0;
+    const char *q = p + *at;
+    while (q < end) {
+        if (*q == '"') {
+            const char *e = strchr(q + 1, '"');
+            if (!e || e >= end) return 0;
+            size_t z = (size_t)(e - q - 1);
+            if (z == 0 || z >= 64) return 0;
+            memcpy(out, q + 1, z);
+            out[z] = 0;
+            *at = (size_t)(q - p) + 1;
+            return 1;
+        }
+        q++;
+    }
+    return 0;
+}
+
+/* 0 when both tables list the same recipe ids in the same order. */
+static int same_recipes(const char *a, const char *b) {
+    char x[64], y[64];
+    size_t i = 0, j = 0;
+    while (a_recipe(a, &i, x)) {
+        if (!a_recipe(b, &j, y) || strcmp(x, y)) return 0;
+    }
+    return !a_recipe(b, &j, y);
+}
+
 /* Pull the 64 hex digits that follow `name="` inside the source text. */
 static int pin_of(const char *src, size_t n, const char *name, char out[65]) {
     char needle[64];
@@ -145,6 +178,45 @@ int main(int argc, char **argv) {
         snprintf(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy);
         ok(forwards && !own_copy, labels[i], detail);
         free(b);
+    }
+
+    /* A drift between the producers is what broke candidate install once: the
+     * verifier rebuilt a different argv than the producer wrote. Two guards:
+     * each producer's job_command must forward to the single implementation,
+     * and the recipe tables (which jobs exist at all) must match row by row. */
+    {
+        static const char *prods[] = { "tools/source-package.cx", "tools/source-package-pack.cx" };
+        static const char *labels[] = { "source-package-forwards-argv", "source-package-pack-forwards-argv" };
+        static const char *rl[] = { "tools/cxlib/sourcepackage.cx", "tools/source-package.cx",
+                                    "tools/source-package-pack.cx" };
+        static const char *trl[] = { "read-recipes-cxlib", "read-recipes-source-package", "read-recipes-pack" };
+        char *tabs[3] = { 0, 0, 0 };
+        for (int i = 0; i < 3; i++) {
+            char p[4400];
+            size_t n;
+            pathcat(p, argv[1], rl[i]);
+            tabs[i] = load(p, &n);
+            ok(tabs[i] != 0, trl[i], "table");
+        }
+        for (int i = 0; i < 2; i++) {
+            char p[4400];
+            size_t n;
+            pathcat(p, argv[1], prods[i]);
+            char *b = load(p, &n);
+            if (!b) {
+                ok(0, labels[i], "unreadable");
+                continue;
+            }
+            int forwards = strstr(b, "sp_job_command(") != 0;
+            int own_copy = strstr(b, "v[n++]=\"-std=c99\"") != 0;
+            char detail[64];
+            snprintf(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy);
+            ok(forwards && !own_copy, labels[i], detail);
+            free(b);
+        }
+        if (tabs[0] && tabs[1]) ok(same_recipes(tabs[0], tabs[1]), "recipes-match-source-package", "row-by-row");
+        if (tabs[0] && tabs[2]) ok(same_recipes(tabs[0], tabs[2]), "recipes-match-pack", "row-by-row");
+        for (int i = 0; i < 3; i++) free(tabs[i]);
     }
 
     printf("SOURCEPACKAGE_PINS\tassertions=%d\tfailed=%d\n", assertions, failed);
