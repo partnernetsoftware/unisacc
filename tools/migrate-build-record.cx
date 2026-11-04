@@ -27,6 +27,7 @@
 #define MB_LINE 1024
 
 static char root[4096];
+static const char *g_product = "unisacc.com";
 
 /* One record field, as it appears in the file: KEY (without quotes) and the
    value text (quotes kept for strings). */
@@ -159,9 +160,12 @@ int main(int argc, char **argv) {
     int write = 0, i, nf;
     static Field f[MB_MAXF];
     if (argc < 2) { sy_eprintf("usage: ROOT [--write]\n"); return 2; }
-    for (i = 2; i < argc; i++) if (tx_eq(argv[i], "--write", 8)) write = 1;
+    for (i = 2; i < argc; i++) {
+        if (tx_eq(argv[i], "--write", 8)) write = 1;
+        else if (tx_eq(argv[i], "--product", 10) && i + 1 < argc) g_product = argv[++i];
+    }
     tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096));
-    if (cx_fmt(rec, sizeof rec, "%s/unisacc.com.build.json", root)) return 2;
+    if (cx_fmt(rec, sizeof rec, "%s/%s.build.json", root, g_product)) return 2;
     {
         size_t sz = 0;
         b = cx_read(rec, &sz);
@@ -174,7 +178,32 @@ int main(int argc, char **argv) {
         if (!k) k = "none";
         tx_copy(kind, sizeof kind, k, tx_len(k, 64));
         dg[0] = 0;
-        if (pp_product_digest(root, dg)) { sy_eprintf("migrate: cannot compute product_digest\n"); free(b); return 1; }
+        if (pp_product_digest(root, dg)) {
+            /* A root that is not a split2 layout (e.g. the BUILD template, which
+               carries the bootstrap under a different name) keeps the digest the
+               record already had; nothing to recompute. */
+            int k2;
+            dg[0] = 0;
+            for (k2 = 0; k2 < 65; k2++) dg[k2] = 0;
+            {
+                char pat[96];
+                if (cx_fmt(pat, sizeof pat, "\"product_digest\": \"")) { free(b); return 1; }
+                {
+                    char *hit = strstr(b, pat);
+                    long q = 0;
+                    if (hit) {
+                        hit += strlen(pat);
+                        while (hit[q] && hit[q] != '"' && q < 64) { dg[q] = hit[q]; q++; }
+                        dg[q] = 0;
+                    }
+                }
+            }
+            if (!dg[0]) {
+                sy_eprintf("migrate: cannot compute product_digest and record has none\n");
+                free(b);
+                return 1;
+            }
+        }
     }
     nf = parse_record(b, n, f, MB_MAXF);
     if (nf < 0) { sy_eprintf("migrate: record shape not understood %s\n", rec); free(b); return 1; }
