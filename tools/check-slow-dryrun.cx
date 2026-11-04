@@ -55,32 +55,81 @@ int main(void) {
         } else bad = 1;
         ck(!bad, "route-ids-use-hyphens");
     }
-    /* The pack stage verifies every model-* phase before any route, so the
-       recipe list must cover all 37 recipes; a short list fails much later with
-       an unrelated-looking canonical-input-path-required. */
+    /* The pack stage verifies every model-* phase before any route, so its
+       recipes[] must be exactly the set tools/source-package-pack.cx builds --
+       compared as sets, so a model added or removed there is caught here
+       instead of failing much later with an unrelated-looking error. */
     {
-        size_t sz = 0; char *src = cx_read("tools/slow-dryrun.cx", &sz); int bad = 0, cnt = 0;
-        if (src) {
-            static const char *must[] = { "\"shared-e3\"", "\"shared-o1\"", "\"shared-nativeabi\"",
-                                          "\"lnx-x86_64-elf\"", "\"win-x86_64-elf\"", "\"tokenlex\"",
-                                          "\"hostsymbols\"", 0 };
-            int i;
-            for (i = 0; must[i]; i++)
-                if (tx_find(src, sz, must[i], tx_len(must[i], 32)) < 0) bad = 1;
-            /* count the quoted ids between the recipes[] brace pair */
-            {
-                long a = tx_find(src, sz, "static const char *recipes[]", 27);
-                if (a < 0) bad = 1;
-                else {
-                    long e = a;
-                    while (e < (long)sz && src[e] != '}') e++;
-                    { long k; for (k = a; k < e; k++) if (src[k] == '"') cnt++; }
-                    if (cnt / 2 < 37) bad = 1;
+        static char pk[64][64];
+        static int npk, nsl;
+        size_t sz1 = 0, sz2 = 0;
+        char *pack = cx_read("tools/source-package-pack.cx", &sz1);
+        char *slow = cx_read("tools/slow-dryrun.cx", &sz2);
+        int bad = 0;
+        if (!pack || !slow) bad = 1;
+        else {
+            /* pack: every `{"id",` inside the recipes[] brace pair, skipping --flags */
+            long a = tx_find(pack, (long)sz1, "static const SpModel recipes[]", 29), b;
+            if (a < 0) bad = 1;
+            else {
+                b = a;
+                while (b < (long)sz1 && pack[b] != '\n') b++;
+                while (b < (long)sz1 && (pack[b] == '\n' || pack[b] == ' ')) b++;
+                while (b < (long)sz1 && !(pack[b] == '}' && (b == 0 || pack[b - 1] == '\n'))) b++;
+                {   long k = a;
+                    while (k < b && npk < 64) {
+                        if (pack[k] == '{') {
+                            long q = k + 1;
+                            while (q < b && (pack[q] == ' ' || pack[q] == '\t' || pack[q] == '\n')) q++;
+                            if (q < b && pack[q] == '"') {
+                                long id = ++q, m = 0;
+                                while (q < b && pack[q] != '"') q++;
+                                if (id < q && q - id < 63 && pack[id] != '-') {
+                                    for (m = 0; m < q - id; m++) pk[npk][m] = pack[id + m];
+                                    pk[npk][m] = 0; npk++;
+                                }
+                                k = q;
+                            }
+                        }
+                        k++;
+                    }
                 }
             }
-            free(src);
-        } else bad = 1;
-        ck(!bad, "recipes-cover-all-models");
+            /* slow: quoted ids inside recipes[] */
+            a = tx_find(slow, (long)sz2, "static const char *recipes[]", 28);
+            if (a < 0) bad = 1;
+            else {
+                b = a;
+                while (b < (long)sz2 && slow[b] != '}') b++;
+                nsl = 0;
+                {   long k = a;
+                    while (k < b) {
+                        if (slow[k] == '"') { nsl++; while (k < b && slow[k] != '"') k++; }
+                        k++;
+                    }
+                }
+                nsl /= 2;
+            }
+            if (npk < 8 || nsl != npk) bad = 1;
+            else {
+                /* set equality: each pack id must appear inside slow's recipes[] */
+                int i, j;
+                for (i = 0; i < npk; i++) {
+                    int found = 0;
+                    long aa = tx_find(slow, (long)sz2, "static const char *recipes[]", 28), bb = aa;
+                    char pat[80];
+                    while (bb < (long)sz2 && slow[bb] != '}') bb++;
+                    if (cx_fmt(pat, sizeof pat, "\"%s\"", pk[i])) { bad = 1; break; }
+                    for (j = aa; j + (long)tx_len(pat, 80) <= bb; j++) {
+                        if (!memcmp(slow + j, pat, (size_t)tx_len(pat, 80))) { found = 1; break; }
+                    }
+                    if (!found) { bad = 1; printf("MISSING_IN_SLOW\t%s\n", pk[i]); }
+                }
+            }
+            free(pack); free(slow);
+        }
+        ck(!bad && npk == nsl, "recipes-match-pack-table");
+        printf("SLOW_DRYRUN_RECIPES\tpack=%d\tslow=%d\n", npk, nsl);
     }
     printf("SLOW_DRYRUN_CHECKS\tassertions=5\tfailed=%d\n", failed);
     return failed ? 1 : 0;
