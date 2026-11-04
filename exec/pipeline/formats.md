@@ -45,7 +45,11 @@ to their own frame refusal):
   by `@` in UNITOK1) continues a multi-line string token. Folding by the
   parser (parenfold) and look-ahead do not change N.
 - **UNITOK2:** there is no count line; the input must end right after the
-  final prefixed `eof` record.
+  final prefixed `eof` record. Single-unit frames carry one record per
+  token; the multi-unit map (`DL`, statics `TT`) accepts 1..128 units —
+  128 is the same unit cap as the bundle directory (`UNITOK2\0` header,
+  1..128), so a driver that admits 128 sources also gets its locations
+  frame accepted.
 - A missing, wrong, padded or repeated count line, or any byte after it, is
   refused: located E3 (UNITOK1/UNITOK2, all CLI routes) with
   `reject: not covered: malformed token locations`; the plain E3 with
