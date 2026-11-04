@@ -1,0 +1,127 @@
+/* tools/check-sourcepackage-pins.cx -- the two self-pins in cxlib/sourcepackage.cx
+ * still name the files they claim to name.
+ *
+ *   sh ./unisacc.com tools/check-sourcepackage-pins.cx -- ROOT
+ *
+ * cxlib/sourcepackage.cx pins two repository files by sha256 so a verifier
+ * cannot silently accept a producer it was not built against:
+ *
+ *   basis_pin    == sha256(ROOT/tools/source-package.cx)
+ *   producer_pin == sha256(ROOT/tools/source-package-pack.cx)
+ *
+ * Both are string literals, so every edit to either producer must be paired
+ * with a pin update, and nothing in the compiler notices when that is missed.
+ * This check exists so the suite notices. It reads the pins out of the source
+ * text instead of a second table, so there is exactly one place they live.
+ *
+ * Prints SOURCEPACKAGE_PINS<TAB>assertions=N<TAB>failed=M; exit 0 only when
+ * nothing failed. A missing or unreadable file is a FAIL, never a skip. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int assertions, failed;
+
+static void ok(int cond, const char *name, const char *detail) {
+    assertions++;
+    if (!cond) failed++;
+    printf("%s\t%s\t%s\n", cond ? "PASS" : "FAIL", name, detail ? detail : "");
+}
+
+static void pathcat(char out[4400], const char *base, const char *leaf) {
+    int n = snprintf(out, 4400, "%s/%s", base, leaf);
+    if (n < 0 || n >= 4400) {
+        fprintf(stderr, "check-sourcepackage-pins: path bound\n");
+        exit(2);
+    }
+}
+
+static char *load(const char *p, size_t *n) {
+    struct stat st;
+    if (lstat(p, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > (1 << 20)) return 0;
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    char *b = malloc((size_t)st.st_size + 1);
+    if (!b) {
+        fclose(f);
+        return 0;
+    }
+    size_t z = fread(b, 1, (size_t)st.st_size, f);
+    fclose(f);
+    if (z != (size_t)st.st_size) {
+        free(b);
+        return 0;
+    }
+    b[z] = 0;
+    *n = z;
+    return b;
+}
+
+/* Pull the 64 hex digits that follow `name="` inside the source text. */
+static int pin_of(const char *src, size_t n, const char *name, char out[65]) {
+    char needle[64];
+    int z = snprintf(needle, sizeof needle, "%s=\"", name);
+    if (z < 0 || (size_t)z >= sizeof needle) return -1;
+    const char *a = strstr(src, needle);
+    if (!a) return -1;
+    a += z;
+    if ((size_t)(a - src) + 64 >= n) return -1;
+    for (int i = 0; i < 64; i++) {
+        char c = a[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
+        out[i] = c;
+    }
+    out[64] = 0;
+    return 0;
+}
+
+static void file_sha(const char *p, char out[65], const char *label) {
+    size_t n;
+    char *b = load(p, &n);
+    if (!b) {
+        ok(0, label, "unreadable");
+        out[0] = 0;
+        return;
+    }
+    char hex[65];
+    cx_sha256_hex(b, n, hex);
+    free(b);
+    memcpy(out, hex, 65);
+    ok(1, label, "read");
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fputs("usage: check-sourcepackage-pins.cx ROOT\n", stderr);
+        return 2;
+    }
+    char sp[4400], prod[4400], pack[4400];
+    pathcat(sp, argv[1], "tools/cxlib/sourcepackage.cx");
+    pathcat(prod, argv[1], "tools/source-package.cx");
+    pathcat(pack, argv[1], "tools/source-package-pack.cx");
+
+    size_t sn;
+    char *src = load(sp, &sn);
+    if (!src) {
+        ok(0, "read-cxlib-sourcepackage", "unreadable");
+        printf("SOURCEPACKAGE_PINS\tassertions=%d\tfailed=%d\n", assertions, failed);
+        return 1;
+    }
+    char basis_pin[65], producer_pin[65];
+    ok(pin_of(src, sn, "basis_pin", basis_pin) == 0, "basis_pin-present", basis_pin);
+    ok(pin_of(src, sn, "producer_pin", producer_pin) == 0, "producer_pin-present", producer_pin);
+    free(src);
+
+    char basis_actual[65] = {0}, producer_actual[65] = {0};
+    file_sha(prod, basis_actual, "read-source-package");
+    file_sha(pack, producer_actual, "read-source-package-pack");
+
+    ok(basis_actual[0] && !strcmp(basis_pin, basis_actual), "basis_pin-names-source-package", basis_actual);
+    ok(producer_actual[0] && !strcmp(producer_pin, producer_actual), "producer_pin-names-source-package-pack",
+       producer_actual);
+
+    printf("SOURCEPACKAGE_PINS\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
