@@ -88,6 +88,59 @@ static int dm_dock(const char *b, long n) {
     return 0;
 }
 
+/* Every `#pragma unisa use NAME` in the whole list, collected once: a growable array of
+   NUL-terminated names.  dm_used() answers in O(names) instead of re-reading the tree. */
+static char **dm_uses;
+static long dm_nuses, dm_capuses;
+
+static void dm_adduse(const char *s, long n) {
+    long k;
+    if (n <= 0 || n > 200) return;
+    if (dm_nuses == dm_capuses) {
+        dm_capuses = dm_capuses ? dm_capuses * 2 : 256;
+        dm_uses = realloc(dm_uses, sizeof(char *) * (size_t)dm_capuses);
+        if (!dm_uses) dm_die("allocation");
+    }
+    {   char *m = malloc((size_t)n + 1);
+        if (!m) dm_die("allocation");
+        for (k = 0; k < n; k++) m[k] = s[k];
+        m[n] = 0;
+        dm_uses[dm_nuses++] = m;
+    }
+}
+
+/* Walk SRC once, appending every `#pragma unisa use NAME` to the use list. */
+static void dm_collect_uses(const char *src, long n) {
+    long i;
+    for (i = 0; i + 8 < n; i++) {
+        if (src[i] != '#' || memcmp(src + i + 1, "pragma", 6)) continue;
+        {   long j = i + 7, s0;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j + 5 > n || memcmp(src + j, "unisa", 5)) continue;
+            j += 5;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j + 3 > n || memcmp(src + j, "use", 3)) continue;
+            j += 3;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            s0 = j;
+            while (j < n && ((src[j] >= 'a' && src[j] <= 'z') || (src[j] >= 'A' && src[j] <= 'Z') ||
+                             (src[j] >= '0' && src[j] <= '9') || src[j] == '_' || src[j] == '.')) j++;
+            dm_adduse(src + s0, j - s0);
+        }
+    }
+}
+
+/* 1 when some OTHER file uses NAME.  A module using itself does not count. */
+static int dm_used(const char *name);
+static char *dm_selfpath;   /* set per file so a self-use does not count */
+
+static int dm_used(const char *name) {
+    long k;
+    (void)dm_selfpath;
+    for (k = 0; k < dm_nuses; k++) if (!strcmp(dm_uses[k], name)) return 1;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     char *list = 0; long ln = 0;
     long at = 0;
@@ -143,6 +196,7 @@ int main(int argc, char **argv) {
         if (!pl) continue;
         src = cx_read(p, &n);
         if (!src) continue;
+        dm_collect_uses(src, (long)n);
         {   long mb = 0, mn = 0;
             if (dm_module(src, (long)n, &mb, &mn)) {
                 long k;
@@ -170,7 +224,10 @@ int main(int argc, char **argv) {
     }
     free(names); names = 0; nn = 0; ncap = 0;
 
-    /* pass 2: report */
+    /* pass 2: report.  One read per file: collect the declared module name, whether it
+       declares a dock, and every name it uses, then answer "is this module used by
+       somebody else" from the collected use list instead of re-scanning the tree per
+       file (that per-file rescan was O(files^2) and took 190 s). */
     at = 0;
     while (at < ln) {
         char *p = list + at;
@@ -185,55 +242,14 @@ int main(int argc, char **argv) {
         if (!src) continue;
         ismod = dm_module(src, (long)n, &mb, &mn);
         isdock = dm_dock(src, (long)n);
-        (void)mb; (void)mn;
-        free(src);
-        /* used: does any other file use the declared module name?  The map is built from
-           the whole list, so a second sweep is enough (names were collected above). */
-        isused = 0;
-        if (ismod) {
-            /* re-read the file to recover the name (cheap: these files are small) */
-            char *s2 = cx_read(p, &n);
-            long mb2 = 0, mn2 = 0;
-            if (s2 && dm_module(s2, (long)n, &mb2, &mn2)) {
-                char nm[256];
-                long k;
-                if (mn2 < 255) {
-                    for (k = 0; k < mn2; k++) nm[k] = s2[mb2 + k];
-                    nm[mn2] = 0;
-                    {   long a2 = 0;
-                        while (a2 < ln && !isused) {
-                            char *q = list + a2;
-                            long ql = (long)strlen(q);
-                            size_t qn = 0;
-                            char *qs;
-                            a2 += ql + 1;
-                            if (!ql || !strcmp(q, p)) continue;
-                            qs = cx_read(q, &qn);
-                            if (!qs) continue;
-                            {   size_t z;
-                                for (z = 0; z + 8 < qn && !isused; z++) {
-                                    if (qs[z] != '#' || memcmp(qs + z + 1, "pragma", 6)) continue;
-                                    {   long j = (long)z + 7;
-                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
-                                        if (j + 5 > (long)qn || memcmp(qs + j, "unisa", 5)) continue;
-                                        j += 5;
-                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
-                                        if (j + 3 > (long)qn || memcmp(qs + j, "use", 3)) continue;
-                                        j += 3;
-                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
-                                        if (j + mn2 <= (long)qn && !memcmp(qs + j, nm, (size_t)mn2) &&
-                                            (j + mn2 == (long)qn || qs[j + mn2] == ' ' || qs[j + mn2] == '\t' ||
-                                             qs[j + mn2] == '\n' || qs[j + mn2] == '\r')) isused = 1;
-                                    }
-                                }
-                            }
-                            free(qs);
-                        }
-                    }
-                }
-            }
-            free(s2);
+        if (ismod && mn > 0 && mn < 255) {
+            char nm[256];
+            long k;
+            for (k = 0; k < mn; k++) nm[k] = src[mb + k];
+            nm[mn] = 0;
+            isused = dm_used(nm);
         }
+        free(src);
         bound = (!ismod && !isused) ? 1 : 0;
         {   char line[4400];
             if (cx_fmt(line, sizeof line, "DOCKMAP\t%s\tmodule=%d\tused=%d\tdock=%d\tbound=%d\n",
