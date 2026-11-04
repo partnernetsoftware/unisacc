@@ -66,6 +66,63 @@ static long cd_size(const char *p) {
     return at;
 }
 
+/* Compile SRC straight to an executable (no -c): the default-path control. */
+static int cd_build_exe(const char *cand, const char *p3, const char *src, const char *out) {
+    np_result r;
+    char why[1400];
+    char pack[4600];
+    char *v[8];
+    char *envadd[2];
+    int n = 0, rc;
+    if (cx_fmt(pack, sizeof pack, "UNISA_CONTAINER=%s", p3)) return -1;
+    v[n++] = (char *)cand; v[n++] = (char *)src; v[n++] = "-o"; v[n++] = (char *)out; v[n] = 0;
+    envadd[0] = pack; envadd[1] = 0;
+    if (np_run(v, root, envadd, 55, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
+/* Run a program with no env additions and capture stdout. */
+static int cd_run_capture(const char *prog, char *out, size_t cap, size_t *outn) {
+    np_result r;
+    char why[1400];
+    char *v[2];
+    int rc;
+    v[0] = (char *)prog; v[1] = 0;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (rc == 0 && out && cap) {
+        size_t n = r.outn < cap - 1 ? r.outn : cap - 1;
+        if (r.out) { size_t i; for (i = 0; i < n; i++) out[i] = r.out[i]; }
+        out[n] = 0;
+        if (outn) *outn = n;
+    }
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
+/* Link two unit objects into OUT via the same candidate. */
+static int cd_link(const char *cand, const char *p3, const char *o1, const char *o2, const char *out) {
+    np_result r;
+    char why[1400];
+    char pack[4600];
+    char *v[8];
+    char *envadd[2];
+    int n = 0, rc;
+    if (cx_fmt(pack, sizeof pack, "UNISA_CONTAINER=%s", p3)) return -1;
+    v[n++] = (char *)cand; v[n++] = (char *)o1; v[n++] = (char *)o2;
+    v[n++] = "-o"; v[n++] = (char *)out; v[n] = 0;
+    envadd[0] = pack; envadd[1] = 0;
+    if (np_run(v, root, envadd, 55, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
 /* sha256 prefix (16 hex) of a file, via cxlib bytes hashing. */
 static int cd_sha16(const char *p, char out[17]) {
     long n;
@@ -169,6 +226,45 @@ int main(int argc, char **argv) {
             }
         }
         sy_printf("PASS run default=%ld extern=%ld ratio=%ld%%\n", dsz, esz, esz * 100 / (dsz ? dsz : 1));
+        return 0;
+    }
+    if (tx_eq(argv[2], "link")) {
+        /* ROOT link CANDIDATE P3 HOST_SRC ANCHOR_SRC LINKED_OUT DEFAULT_OUT
+           Builds: EXTERN host.o, UNIT anchor.o, links them, requires the linked
+           program to run and print exactly what the default-path program prints.
+           This is the executable form of gate b's second half. */
+        const char *cand, *p3p, *hsrc, *asrc, *lout, *dout2;
+        char ho[4500], ao[4500];
+        int rc;
+        if (argc < 9) {
+            sy_eprintf("usage: ROOT link CANDIDATE P3 HOST_SRC ANCHOR_SRC LINKED_OUT DEFAULT_OUT\n");
+            return 2;
+        }
+        cand = argv[3]; p3p = argv[4]; hsrc = argv[5]; asrc = argv[6]; lout = argv[7]; dout2 = argv[8];
+        cx_fmt(ho, sizeof ho, "%s.o", lout); cx_fmt(ao, sizeof ao, "%s.anchor.o", lout);
+        rc = cd_compile(cand, p3p, hsrc, "-D__UNISA_LIBC_EXTERN", ho);
+        if (rc != 0) { sy_eprintf("FAIL extern host.o rc=%d\n", rc); return 1; }
+        rc = cd_compile(cand, p3p, asrc, "-D__UNISA_LIBC_UNIT", ao);
+        if (rc != 0) { sy_eprintf("FAIL unit anchor.o rc=%d\n", rc); return 1; }
+        rc = cd_link(cand, p3p, ho, ao, lout);
+        if (rc != 0) { sy_eprintf("FAIL link rc=%d\n", rc); return 1; }
+        rc = cd_build_exe(cand, p3p, hsrc, dout2);
+        if (rc != 0) { sy_eprintf("FAIL default rc=%d\n", rc); return 1; }
+        {
+            static char b1[65536], b2[65536];
+            size_t n1 = 0, n2 = 0;
+            int r1, r2;
+            r1 = cd_run_capture(lout, b1, sizeof b1, &n1);
+            r2 = cd_run_capture(dout2, b2, sizeof b2, &n2);
+            if (r1 != 0 || r2 != 0) {
+                sy_eprintf("FAIL run linked rc=%d default rc=%d\n", r1, r2);
+                return 1;
+            }
+            if (n1 != n2) { sy_eprintf("FAIL stdout len %lu != %lu\n", (unsigned long)n1, (unsigned long)n2); return 1; }
+            { size_t i; for (i = 0; i < n1; i++) if (b1[i] != b2[i]) { sy_eprintf("FAIL stdout differs at %lu\n", (unsigned long)i); return 1; } }
+            sy_printf("PASS link host=%ld anchor=%ld linked=%ld stdout=%lu\n",
+                      cd_size(ho), cd_size(ao), cd_size(lout), (unsigned long)n1);
+        }
         return 0;
     }
     sy_eprintf("FAIL unknown mode %s\n", argv[2]);
