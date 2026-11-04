@@ -160,9 +160,32 @@ static int step_pack(void) {
 }
 
 static int step_release(void) {
-    const char *a1[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "p3", src, pkg, p3p, 0 };
+    /* The private root is not a git checkout, so release-build cannot read a
+       revision from it.  Pass the root's own source identity (the `source`
+       field the context already recorded) as the revision label. */
+    static char sid[65];
+    static char ctxf[4400];
+    sid[0] = 0;
+    snprintf(ctxf, sizeof ctxf, "%s/context.tsv", ctxp);
+    {
+        FILE *f = fopen(ctxf, "r");
+        if (f) {
+            static char line[4600];
+            while (fgets(line, sizeof line, f)) {
+                if (!strncmp(line, "source\t", 7)) {
+                    long k = 7, m = 0;
+                    while (line[k] && line[k] != '\n' && m < 64) sid[m++] = line[k++];
+                    sid[m] = 0;
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
+    if (!sid[0]) { printf("SLOW_DRYRUN_FAIL\tstep=12\treason=no-source-identity\n"); return 1; }
+    const char *a1[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "--rev", sid, "p3", src, pkg, p3p, 0 };
     if (step_cmd("release.p3", a1)) return 1;
-    const char *a2[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "slice", src, pkg, out, 0 };
+    const char *a2[] = { "sh", "./unisacc.com", "tools/release-build.cx", "--", "--rev", sid, "slice", src, pkg, out, 0 };
     if (step_cmd("release.slice", a2)) return 1;
     const char *a3[] = { "sh", "./unisacc.com", "tools/entry-build.cx", "--", src, p3p, out, 0 };
     return step_cmd("entry-build", a3) ? 1 : 0;
