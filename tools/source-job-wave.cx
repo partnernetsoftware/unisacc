@@ -32,6 +32,20 @@ static int call(const char *action,const char *id,const char *label){
  char s[180];checked(cx_fmt(s,sizeof s,"transport\t%d\nrc\t%d\nelapsed_ns\t%lld\n",transport,r.rc,elapsed));evidence(label,"status",s,strlen(s));
  printf("%s transport=%d rc=%d wall_ns=%lld\n",label,transport,r.rc,elapsed);if((transport||r.rc)&&r.errn)fwrite(r.err,1,r.errn,stderr);int bad=transport?3:r.rc?1:0;np_free(&r);return bad;
 }
+/* Reuse probe: for each job of PHASE ask the controller whether its recorded
+ * identity still matches the live inputs. Prints one line per job, "REUSE HIT"
+ * or "REUSE MISS <id>" on stdout, and never touches BUILD or OUT. A caller that
+ * sees only HIT lines knows the whole phase is already up to date and no job
+ * command needs to run. */
+static void reuse(const char *phase,int first,int count){
+ if(count<1||count>4)die("concurrency1..4");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[131],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
+ int hits=0;for(int j=0;j<count;j++){const char *id=ids[selected[first+j]];char *v[]={bound,"55",controller,"reuse-job",root,ctx,(char *)id,0};
+  np_result r={0};char why[1500]={0};char *environment[]={"CPATH=/usr/include/node",library_env,0};int transport=np_run(v,root,environment,58,&r,why,sizeof why);
+  if(transport||r.rc){if(r.errn)fwrite(r.err,r.errn,stderr);printf("REUSE\tMISS\t%s\n",id);}
+  else {hits++;printf("REUSE\tHIT\t%s\n",id);}
+  np_free(&r);}
+ printf("REUSE_PHASE\t%s\tfirst=%d\tcount=%d\thits=%d\n",phase,first,count,hits);
+}
 static void enumerate(void){
  char p[4400];path(p,outer,"list.stdout");size_t n;char *s=load(p,&n);if(memchr(s,0,n)||!n||s[n-1]!=10)die("list wire");
  for(char *line=s;*line;){char *end=strchr(line,'\n');if(!end)die("list LF");*end=0;char *tab=strchr(line,'\t');if(tab){*tab=0;char *state_end=strchr(tab+1,'\t');if(state_end)*state_end=0;if(tx_eqz(tab+1, "IMPLEMENTED_DRAFT_NOT_RUN")){if(nids>=131||strlen(line)>=sizeof ids[0])die("job count/name");for(int i=0;i<nids;i++)if(tx_eqz(ids[i], line))die("duplicate job");{if(cx_fmt(ids[nids],sizeof ids[nids],"%s",line))die("job count/name");nids++;}}}line=end+1;}free(s);
@@ -62,5 +76,6 @@ int main(int argc,char **argv){
  if(argc==5&&tx_eqz(argv[4], "host"))host_libz();
  else if(argc==5&&tx_eqz(argv[4], "list")){if(mkdir(outer,0700))die("fresh outer directory");record_controller();if(call("--list",0,"list"))die("authoritative list failed");enumerate();printf("LIST authoritative_jobs=%d tools=5 gen=42 tbl=42 net=42\n",nids);}
  else if(argc==9&&tx_eqz(argv[4], "wave"))wave(argv[5],number(argv[6]),number(argv[7]),argv[8]);
+ else if(argc==8&&tx_eqz(argv[4], "reuse")){reuse(argv[5],number(argv[6]),number(argv[7]));}
  else if(argc==5&&tx_eqz(argv[4], "final"))final();else die("arguments");return 0;
 }
