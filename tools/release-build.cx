@@ -43,6 +43,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.deflate
 #pragma unisa use runtime.codec
+#pragma unisa use cxlib.netwire
 
 #define RB_FILES 128
 #define RB_REL 192
@@ -266,6 +267,125 @@ static void rb_say(const char *kind, const char *sha, long bytes, long long ns) 
     sy_printf("%s", line);
 }
 
+/* --nets 来源校验: <nets> 是 <ctx>/jobs; ctx 的 context.tsv 记 source SID,
+   现测(bound 6 <ctx>/identity-helper <快照>)必须相同, 否则网来自已漂移的作业链。 */
+static void rb_nets_guard(const char *nets, const char *root) {
+    char ctx[RB_FULL], conf[RB_FULL], helper[RB_FULL], bnd[RB_FULL], got[80] = {0}, want[80] = {0};
+    char *text, *v[6];
+    size_t tn;
+    long i, j;
+    for (i = (long)strlen(nets); i > 1 && nets[i - 1] != '/'; i--) ;
+    if (i <= 1 || i >= RB_FULL) rb_die("--nets path");
+    if (mm_copy(ctx, RB_FULL, nets, i - 1)) rb_die("--nets path");
+    ctx[i - 1] = 0;
+    if (cx_fmt(conf, sizeof conf, "%s/context.tsv", ctx) || !(text = cx_read(conf, &tn))) rb_die("--nets context.tsv");
+    for (i = 0; i + 7 < (long)tn; i++) {
+        if ((i && text[i - 1] != '\n') || memcmp(text + i, "source\t", 7)) continue;
+        for (j = 0, i += 7; i < (long)tn && text[i] != '\n' && j < 64; i++) want[j++] = text[i];
+        want[j] = 0;
+        break;
+    }
+    mm_free(text);
+    if (tx_len(want, 80) != 64) rb_die("--nets context source");
+    if (ctx[0] != '/') { long z = 0; char abs[RB_FULL]; if (sy_realpath(ctx, abs, RB_FULL) < 0) rb_die("--nets ctx"); while (abs[z] && z + 1 < RB_FULL) { ctx[z] = abs[z]; z++; } ctx[z] = 0; }
+    if (cx_fmt(helper, sizeof helper, "%s/identity-helper", ctx)) rb_die("--nets path");
+    if (cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("--nets path");
+    v[0] = "sh"; v[1] = bnd; v[2] = "6"; v[3] = helper; v[4] = (char *)root; v[5] = 0;
+    if (rb_pipe(v, root, got, 80)) rb_die("--nets sid probe");
+    if (tx_len(got, 80) < 64 || memcmp(got, want, 64)) rb_die("--nets SID mismatch");
+}
+
+/* 从包内 D 段与 routes 表推出 model 索引 -> net 名。D 行是
+   "D <route> <stage> <in> <out> <model>", routes.tsv 的 (route, stage) 指向网文件。
+   两者同源, 故不另存静态表(静态表与 routes 漂移就是新的陈旧源)。 */
+static int rb_route_names(const char *routes, const unsigned char *body, long ds, long de,
+                          int m, char names[64][64]) {
+    char *t, *q;
+    size_t tn;
+    long k, a;
+    t = cx_read(routes, &tn);
+    if (!t) return -1;
+    {   long s0 = 0;
+        while (s0 < (long)tn) { if (t[s0] == 10) t[s0] = 0; s0++; }
+        t[tn] = 0;
+    }
+    for (k = ds; k < de; k = a + 1) {
+        char d[512], rt[192], st[64], i1[64], i2[64];
+        long mi = -1;
+        for (a = k; a < de && body[a] != 10; a++) ;
+        if (a - k >= (long)sizeof d) { mm_free(t); return -1; }
+        if (mm_copy(d, (long)sizeof d, body + k, a - k)) { mm_free(t); return -1; }
+        d[a - k] = 0;
+        if (d[0] != 'D' || sscanf(d, "D %191s %63s %63s %63s %ld", rt, st, i1, i2, &mi) != 5) continue;
+        if (mi < 0 || mi >= m) continue;
+        for (q = t; q < t + tn; ) {
+            char *f[5], *z = q;
+            int nf = 0;
+            while (*z && nf < 5) {
+                f[nf++] = z;
+                while (*z && *z != '\t') z++;
+                if (*z) *z++ = 0;
+            }
+            if (nf == 5 && !strcmp(f[0], rt) && !strcmp(f[1], st)) {
+                char *b2 = strrchr(f[4], '/');
+                long n2 = 0;
+                b2 = b2 ? b2 + 1 : f[4];
+                while (b2[n2] && b2[n2] != '.' && n2 < 63) n2++;
+                if (mm_copy(names[mi], 64, b2, n2)) { mm_free(t); return -1; }
+                names[mi][n2] = 0;
+                break;
+            }
+            while (q < t + tn && *q) q++;
+            q++;
+        }
+        if (q >= t + tn) { mm_free(t); return -1; }
+    }
+    mm_free(t);
+    return 0;
+}
+
+static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackage *pkg,
+                           long d_start, long m_start, const char *nets, const char *routes) {
+    static char names[64][64];
+    long at = m_start, i, k = d_start;
+    if (pkg->m != 40 || pkg->m > 64) rb_die("--nets expects 40 model records");
+    /* model 索引 -> net 名取自包内 D 段 + routes 表(两处同源), 不另存静态表。 */
+    if (rb_route_names(routes, body, d_start, m_start, pkg->m, names)) rb_die("--nets routes");
+    for (i = 0; i < pkg->m; i++) if (!names[i][0]) rb_die("--nets unbound model");
+    for (i = 0; i < pkg->m; i++) {
+        char path[RB_FULL], why[200], head[96];
+        size_t tn, bn = 0;
+        long cap, cn, rawlen, hs;
+        unsigned long crc, stored = 0;
+        char *text, *bin;
+        unsigned char *comp;
+        if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("nets path");
+        text = cx_read(path, &tn);
+        if (!text) rb_die(path);
+        bin = nw_binary_net(text, tn, &bn, why, sizeof why);
+        mm_free(text);
+        if (!bin) rb_die(why[0] ? why : "net encode");
+        rawlen = (long)bn;
+        comp = mm_alloc(dz_bound(rawlen));
+        if (!comp) rb_die("deflate alloc");
+        cn = dz_deflate((const unsigned char *)bin, rawlen, comp, cap = dz_bound(rawlen));
+        crc = dz_crc32(0, (const unsigned char *)bin, rawlen);
+        mm_free(bin);
+        if (cn <= 0) rb_die("deflate");
+        if (cx_fmt(head, sizeof head, "M %ld %ld 1 %lu\n", cn, rawlen, crc)) rb_die("model line");
+        rb_put(out, head, (long)strlen(head));
+        rb_put(out, comp, cn);
+        mm_free(comp);
+        {   long k;
+            for (hs = at; hs < pkg->n && body[hs] != 10; hs++) ;
+            for (k = at; k < hs && k - at + 1 < (long)sizeof head; k++) head[k - at] = (char)body[k];
+            head[k - at] = 0;
+            if (hs >= pkg->n || sscanf(head, "M %lu", &stored) != 1 || stored <= 0) rb_die("model head");
+            at = hs + 1 + (long)stored;
+        }
+    }
+}
+
 static int rb_p3(int argc, char **argv) {
     size_t zn, fn;
     char *file, *flat, *inc;
@@ -279,6 +399,7 @@ static int rb_p3(int argc, char **argv) {
     const unsigned char *body;
     long line_end, res_at, kept, i, pack_n;
     int fd, nr, compress, compress_flat, out_ver;
+    const char *nets = 0, *routes = 0;
     unsigned char tail[16];
     compress = 1;
     /* Default packs every @hdr header including cx-flat.h (P4 is smaller and
@@ -294,7 +415,9 @@ static int rb_p3(int argc, char **argv) {
             if (tx_eqz(argv[ai], "--compress-resources")) { compress = 1; continue; }
             if (tx_eqz(argv[ai], "--compress-flat")) { compress_flat = 1; continue; }
             if (tx_eqz(argv[ai], "--no-compress-flat")) { compress_flat = 0; continue; }
-            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--no-compress-resources] [--no-compress-flat]");
+            if (tx_eqz(argv[ai], "--nets") && ai + 1 < argc) { nets = argv[++ai]; continue; }
+            if (tx_eqz(argv[ai], "--routes") && ai + 1 < argc) { routes = argv[++ai]; continue; }
+            rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--nets CTX_JOBS_DIR] [--no-compress-resources] [--no-compress-flat]");
         }
     }
     if (argc < 5) rb_die("usage: p3 ROOT SRC_PKG OUT_PKG [--no-compress-resources] [--no-compress-flat]");
@@ -356,7 +479,16 @@ static int rb_p3(int argc, char **argv) {
         if (hn < 0) rb_die("package head");
         rb_put(&out, line, hn);
     }
-    rb_put(&out, body + line_end, res_at - line_end);
+    if (nets) {
+        if (!routes) rb_die("--nets needs --routes");
+        /* D 段原样拷贝到 M 段起点, M 段由 rb_emit_models 重建. */
+        long m_at = line_end;
+        while (m_at < res_at && m_at < pkg->n && !(body[m_at] == 'M' && m_at + 1 < pkg->n && body[m_at + 1] == ' ')) m_at++;
+        if (m_at >= res_at || body[m_at] != 'M') rb_die("--nets M section");
+        rb_put(&out, body + line_end, m_at - line_end);
+        rb_nets_guard(nets, argv[2]);
+        rb_emit_models(&out, body, pkg, line_end, m_at, nets, routes);
+    } else rb_put(&out, body + line_end, res_at - line_end);
     for (i = 0; i < pkg->nr; i++) {
         if (rb_hdr(body + pkg->res[i].name, pkg->res[i].n)) continue;
         /* Resources already in the package are carried as they are. P3->P4 only

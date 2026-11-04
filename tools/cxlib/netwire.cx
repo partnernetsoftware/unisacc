@@ -1,0 +1,86 @@
+/* netwire.cx -- 文本网 → UNINETB1 二进制网的唯一实现。
+   规则逐条对应 seed/pack.c 的 binary_encode(seed/pack.c:167 varint / :172 binary_encode):
+   非 S 行原样写出单字节 tag(N/H/Q 等),其余每个十进制数写 zigzag varint;
+   S 行写 varint(字节数) + 原始字节,"-" 表示空串(写 varint 0)。
+   调用方: tools/lab-loader/p3-swap.cx(单模型替换) 与 tools/release-build.cx(p3 打包)。
+   这里只做编码,不做包结构解析——包结构仍由各自调用方持有。 */
+#pragma unisa use text.text
+
+/* zigzag varint: v = (x<<1)^(x>>63), 7 位一组小端续位。返回写入字节数。 */
+size_t nw_varint(char *out, long long x) {
+    unsigned long long v = ((unsigned long long)x << 1) ^ (unsigned long long)(x >> 63);
+    size_t w = 0;
+    while (v >= 128) { out[w++] = (char)((v & 127) | 128); v >>= 7; }
+    out[w++] = (char)v;
+    return w;
+}
+
+/* 文本网 → UNINETB1。成功返回新分配的缓冲并把字节数写入 *on(调用方 free);
+   输入形态错误返回 0 并把原因写进 why。 */
+char *nw_binary_net(const char *text, size_t n, size_t *on, char *why, size_t wl) {
+    char *out;
+    size_t at = 0, w = 8;
+    int i;
+    if (why && wl) why[0] = 0;
+    if (!text || n < 2 || text[0] != 'N' || text[1] != ' ') {
+        if (why) snprintf(why, wl, "not a network text (missing 'N ' header)");
+        return 0;
+    }
+    out = malloc(n * 3 + 64);
+    if (!out) { if (why) snprintf(why, wl, "allocation"); return 0; }
+    for (i = 0; i < 8; i++) out[i] = "UNINETB1"[i];
+    while (at < n) {
+        size_t e = at, p, q;
+        while (e < n && text[e] != '\n') e++;
+        if (e > at) {
+            p = at;
+            while (p < e && text[p] != ' ') p++;
+            for (q = at; q < p; q++) out[w++] = text[q];      /* tag 原样 */
+            if (p - at == 1 && text[at] == 'S') {
+                size_t h0 = p + 1, h1 = h0;
+                while (h1 < e && text[h1] != ' ') h1++;
+                if (h1 == h0) {
+                    free(out);
+                    if (why) snprintf(why, wl, "S line needs a hex field");
+                    return 0;
+                }
+                if (h1 - h0 == 1 && text[h0] == '-') {
+                    w += nw_varint(out + w, 0);
+                } else {
+                    size_t bytes = (h1 - h0) / 2, k;
+                    if ((h1 - h0) % 2) {
+                        free(out);
+                        if (why) snprintf(why, wl, "S line needs even hex length");
+                        return 0;
+                    }
+                    w += nw_varint(out + w, (long long)bytes);
+                    for (k = 0; k < bytes; k++) {
+                        int hi = text[h0 + 2 * k], lo = text[h0 + 2 * k + 1], hv, lv;
+                        hv = hi <= '9' ? hi - '0' : (hi | 32) - 'a' + 10;
+                        lv = lo <= '9' ? lo - '0' : (lo | 32) - 'a' + 10;
+                        if (hv < 0 || hv > 15 || lv < 0 || lv > 15) {
+                            free(out);
+                            if (why) snprintf(why, wl, "bad hex digit in S line");
+                            return 0;
+                        }
+                        out[w++] = (char)(hv * 16 + lv);
+                    }
+                }
+            } else {
+                q = p;
+                while (q < e) {
+                    long long v = 0;
+                    int seen = 0, neg = 0;
+                    while (q < e && text[q] == ' ') q++;
+                    if (q < e && text[q] == '-') { neg = 1; q++; }
+                    while (q < e && text[q] >= '0' && text[q] <= '9') { v = v * 10 + (text[q] - '0'); q++; seen = 1; }
+                    if (!seen) break;
+                    w += nw_varint(out + w, neg ? -v : v);
+                }
+            }
+        }
+        at = e + 1;
+    }
+    if (on) *on = w;
+    return out;
+}

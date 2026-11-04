@@ -20,6 +20,7 @@
  * 拒绝:包结构损坏、模型名/序号不存在、新网形态与包版本不符、输出已存在。
  */
 #pragma unisa use extx.deflate
+#pragma unisa use cxlib.netwire
 #pragma unisa use runtime.codec
 
 static void sw_die(const char *s) { fprintf(stderr, "p3-swap: %s\n", s); exit(2); }
@@ -38,70 +39,6 @@ static long sw_line(const char *d, long n, long *at) {
     if (e >= n) return -1;
     *at = e + 1;
     return e - a;
-}
-
-/* zigzag varint,与 seed/pack.c 的 binary_encode 同一编码。 */
-static size_t sw_varint(char *out, long long x) {
-    unsigned long long v = ((unsigned long long)x << 1) ^ (unsigned long long)(x >> 63);
-    size_t w = 0;
-    while (v >= 128) { out[w++] = (char)((v & 127) | 128); v >>= 7; }
-    out[w++] = (char)v;
-    return w;
-}
-
-/* 文本网 → UNINETB1。规则同 seed/pack.c binary_encode:
- * 非 S 行:首 token 原样 + 后续每个十进制数 zigzag varint;
- * S 行:varint(字节数) + 原始字节（"-" 表示空串,写 varint 0）。 */
-static char *sw_binary_net(const char *text, size_t n, size_t *on) {
-    /* 逐行:首 token（N/H/Q/S）是单字节 tag,原样写出;其余 token 走 zigzag varint。
-       S 行特例:varint(字节数) + 原始字节,"-" 表示空串。规则与 seed/pack.c binary_encode 相同。 */
-    char *out = malloc(n * 3 + 64);
-    size_t at = 0, w = 8;
-    int i;
-    if (!out) sw_die("allocation");
-    for (i = 0; i < 8; i++) out[i] = "UNINETB1"[i];
-    while (at < n) {
-        size_t e = at, p, q;
-        while (e < n && text[e] != '\n') e++;
-        if (e > at) {
-            p = at;
-            while (p < e && text[p] != ' ') p++;
-            for (q = at; q < p; q++) out[w++] = text[q];      /* tag 原样 */
-            if (p - at == 1 && text[at] == 'S') {
-                size_t h0 = p + 1, h1 = h0;
-                while (h1 < e && text[h1] != ' ') h1++;
-                if (h1 == h0) sw_die("S line needs a hex field");
-                if (h1 - h0 == 1 && text[h0] == '-') {
-                    w += sw_varint(out + w, 0);
-                } else {
-                    size_t bytes = (h1 - h0) / 2, k;
-                    if ((h1 - h0) % 2) sw_die("S line needs even hex length");
-                    w += sw_varint(out + w, (long long)bytes);
-                    for (k = 0; k < bytes; k++) {
-                        int hi = text[h0 + 2 * k], lo = text[h0 + 2 * k + 1], hv, lv;
-                        hv = hi <= '9' ? hi - '0' : (hi | 32) - 'a' + 10;
-                        lv = lo <= '9' ? lo - '0' : (lo | 32) - 'a' + 10;
-                        if (hv < 0 || hv > 15 || lv < 0 || lv > 15) sw_die("bad hex digit in S line");
-                        out[w++] = (char)(hv * 16 + lv);
-                    }
-                }
-            } else {
-                q = p;
-                while (q < e) {
-                    long long v = 0;
-                    int seen = 0, neg = 0;
-                    while (q < e && text[q] == ' ') q++;
-                    if (q < e && text[q] == '-') { neg = 1; q++; }
-                    while (q < e && text[q] >= '0' && text[q] <= '9') { v = v * 10 + (text[q] - '0'); q++; seen = 1; }
-                    if (!seen) break;
-                    w += sw_varint(out + w, neg ? -v : v);
-                }
-            }
-        }
-        at = e + 1;
-    }
-    *on = w;
-    return out;
 }
 
 int main(int argc, char **argv) {
@@ -227,13 +164,15 @@ int main(int argc, char **argv) {
             int is_text = !(nn >= 9 && !memcmp(net, "UNINETB1", 8));
             char *raw = 0;
             size_t rawn = 0;
+            char whybuf[200];
             char mline[192];
             char *blob = 0;
             size_t blobn = 0;
             long cap;
             unsigned long crc = 0;
             if (need_bin && is_text) {
-                raw = sw_binary_net(net, nn, &rawn);
+                raw = nw_binary_net(net, nn, &rawn, whybuf, sizeof whybuf);
+                if (!raw) sw_die(whybuf[0] ? whybuf : "binary network");
             } else {
                 raw = net;
                 rawn = nn;
