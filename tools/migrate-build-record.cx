@@ -1,0 +1,215 @@
+/* tools/migrate-build-record.cx -- one-shot B5c migration for an installed build record.
+ *
+ *   sh ./unisacc.com tools/migrate-build-record.cx -- ROOT [--write]
+ *
+ * Rewrites ROOT/unisacc.com.build.json to the B5c shape:
+ *   - the retired `"artifact_sha256"` section is dropped;
+ *   - `product_kind` / `product_digest` are set to the manifest identity
+ *     (tools/cxlib/productpkg.cx: split2 -> the member lines
+ *      "name\tkind\t\tsha\tbytes\tindex", digest = sha256 over them),
+ *     replacing whatever value a pre-B5b record carried;
+ *   - every other field keeps its exact bytes and order.
+ *
+ * IDEMPOTENT: a record that already holds the correct product_kind and
+ * product_digest and has no artifact_sha256 section is left untouched (reported
+ * as ALREADY-MIGRATED, exit 0). A record with a *wrong* digest is rewritten.
+ * Comma placement is handled by walking the fields as a list, not by patching
+ * one line, so no doubled separators can be produced.
+ *
+ * Without --write it only reports; a dry run never touches the file. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use cxlib.productpkg
+#pragma unisa use text.text
+
+#define MB_CAP (1L << 20)
+#define MB_MAXF 16
+#define MB_LINE 1024
+
+static char root[4096];
+
+/* One record field, as it appears in the file: KEY (without quotes) and the
+   value text (quotes kept for strings). */
+typedef struct {
+    char key[128];
+    char value[512];
+    int is_last;          /* the field that closed the object had no comma */
+    int drop;             /* artifact_sha256: omitted from the output */
+    int from_manifest;    /* product_kind / product_digest: value replaced */
+} Field;
+
+static int parse_record(char *b, long n, Field *f, int max) {
+    long i = 0;
+    int nf = 0;
+    while (i < n) {
+        long e = i;
+        while (e < n && b[e] != '\n') e++;
+        /* skip the opening brace and anything that is not `  "KEY": ` */
+        {
+            long j = i;
+            while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j < e && b[j] == '"') {
+                long ks = ++j, ke;
+                while (j < e && b[j] != '"') j++;
+                ke = j;
+                if (j < e) j++;                     /* closing quote */
+                while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                if (j < e && b[j] == ':') {
+                    long vs;
+                    int last;
+                    j++;
+                    while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                    if (nf == max) return -1;
+                    if (ke - ks >= (long)sizeof f[nf].key) return -1;
+                    {
+                        long k;
+                        for (k = 0; k < ke - ks; k++) f[nf].key[k] = b[ks + k];
+                        f[nf].key[ke - ks] = 0;
+                    }
+                    vs = j;
+                    last = (e > vs && b[e - 1] == ',') ? 0 : 1;
+                    if (e - vs - (last ? 0 : 1) >= (long)sizeof f[nf].value) return -1;
+                    {
+                        long k, vl = e - vs - (last ? 0 : 1);
+                        for (k = 0; k < vl; k++) f[nf].value[k] = b[vs + k];
+                        f[nf].value[vl] = 0;
+                    }
+                    f[nf].is_last = last;
+                    f[nf].drop = !strcmp(f[nf].key, "artifact_sha256");
+                    f[nf].from_manifest = !strcmp(f[nf].key, "product_kind") ||
+                                           !strcmp(f[nf].key, "product_digest");
+                    nf++;
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return nf;
+}
+
+static int has_field(Field *f, int nf, const char *key, const char *want) {
+    int i;
+    for (i = 0; i < nf; i++) if (!strcmp(f[i].key, key)) {
+        if (!want) return 1;
+        /* compare with the surrounding quotes stripped */
+        {
+            long vl = strlen(f[i].value), wl = strlen(want);
+            if (vl >= 2 && f[i].value[0] == '"' && f[i].value[vl - 1] == '"')
+                return vl - 2 == wl && !memcmp(f[i].value + 1, want, (size_t)wl);
+        }
+        return 0;
+    }
+    return 0;
+}
+
+/* Write the canonical record: the kept fields in their original order, with the
+   manifest fields appended when the record did not have them. */
+static long build_record(const Field *f, int nf, const char *kind, const char *digest,
+                         char *out, long cap) {
+    char *tmp = (char *)malloc((size_t)cap);
+    long w = 0;
+    int i, kept = 0, nk = 0, has_kind = 0, has_dg = 0;
+    if (!tmp) return -1;
+    for (i = 0; i < nf; i++) if (!f[i].drop) { kept++; if (!strcmp(f[i].key, "product_kind")) has_kind = 1; if (!strcmp(f[i].key, "product_digest")) has_dg = 1; }
+    tmp[w++] = '{'; tmp[w++] = '\n';
+    for (i = 0; i < nf; i++) {
+        const char *val;
+        int is_last;
+        long k;
+        if (f[i].drop) continue;
+        nk++;
+        if (!strcmp(f[i].key, "product_kind")) val = kind;
+        else if (!strcmp(f[i].key, "product_digest")) val = digest;
+        else val = 0;
+        /* With no manifest fields to append, the original last field closes the
+           object.  When something IS appended, every kept field takes a comma and
+           the appended field before the closing brace is the only one without. */
+        is_last = (!has_kind && !has_dg && nk == kept);
+        w += (long)snprintf(tmp + w, (size_t)(cap - w), "  \"%s\": ", f[i].key);
+        if (val) w += (long)snprintf(tmp + w, (size_t)(cap - w), "\"%s\"", val);
+        else { for (k = 0; f[i].value[k] && w + 1 < cap; k++) tmp[w++] = f[i].value[k]; }
+        if (!is_last) tmp[w++] = ',';
+        tmp[w++] = '\n';
+    }
+    if (!has_kind) {
+        w += (long)snprintf(tmp + w, (size_t)(cap - w), has_dg ? "  \"product_kind\": \"%s\",\n"
+                                                               : "  \"product_kind\": \"%s\"\n", kind);
+    }
+    if (!has_dg) {
+        /* the first appended field ends with a comma only when another follows */
+        w += (long)snprintf(tmp + w, (size_t)(cap - w), "  \"product_digest\": \"%s\"\n", digest);
+    }
+    /* normalise separators: exactly one field line before the closing brace carries
+       no comma, whichever it is (kept or appended) */
+    {
+        long k = w;
+        while (k > 0 && (tmp[k - 1] == '\n')) k--;
+        if (k > 0 && tmp[k - 1] == ',') { long j; for (j = k - 1; j + 1 < w; j++) tmp[j] = tmp[j + 1]; w--; }
+    }
+    tmp[w++] = '}'; tmp[w++] = '\n';
+    for (i = 0; i < w; i++) out[i] = tmp[i];
+    free(tmp);
+    return w;
+}
+
+int main(int argc, char **argv) {
+    char rec[4400], kind[64], dg[65], oldsha[65], newsha[65];
+    long n = 0, w = 0;
+    char *b, *nw;
+    int write = 0, i, nf;
+    static Field f[MB_MAXF];
+    if (argc < 2) { sy_eprintf("usage: ROOT [--write]\n"); return 2; }
+    for (i = 2; i < argc; i++) if (tx_eq(argv[i], "--write", 8)) write = 1;
+    tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096));
+    if (cx_fmt(rec, sizeof rec, "%s/unisacc.com.build.json", root)) return 2;
+    {
+        size_t sz = 0;
+        b = cx_read(rec, &sz);
+        n = (long)sz;
+    }
+    if (!b || n <= 0) { sy_eprintf("migrate: cannot read %s\n", rec); return 1; }
+    cx_sha256_hex(b, (size_t)n, oldsha);
+    {
+        const char *k = pp_identity_kind(root);
+        if (!k) k = "none";
+        tx_copy(kind, sizeof kind, k, tx_len(k, 64));
+        dg[0] = 0;
+        if (pp_product_digest(root, dg)) { sy_eprintf("migrate: cannot compute product_digest\n"); free(b); return 1; }
+    }
+    nf = parse_record(b, n, f, MB_MAXF);
+    if (nf < 0) { sy_eprintf("migrate: record shape not understood %s\n", rec); free(b); return 1; }
+    /* idempotent stop: no artifact section and both manifest fields already right */
+    if (!has_field(f, nf, "artifact_sha256", 0) &&
+        has_field(f, nf, "product_kind", kind) &&
+        has_field(f, nf, "product_digest", dg)) {
+        sy_printf("MIGRATE\tALREADY-MIGRATED\t%s\n", rec);
+        sy_printf("MIGRATE\tOLD_SHA\t%s\n", oldsha);
+        free(b);
+        return 0;
+    }
+    nw = (char *)malloc((size_t)(n + 512));
+    if (!nw) { free(b); return 1; }
+    w = build_record(f, nf, kind, dg, nw, n + 512);
+    if (w <= 0) { sy_eprintf("migrate: rewrite failed\n"); free(b); free(nw); return 1; }
+    cx_sha256_hex(nw, (size_t)w, newsha);
+    sy_printf("MIGRATE\tOLD_SHA\t%s\n", oldsha);
+    sy_printf("MIGRATE\tNEW_SHA\t%s\n", newsha);
+    sy_printf("MIGRATE\tFIELDS\tkind=%s\tdigest=%s\tbytes=%ld->%ld\n", kind, dg, n, w);
+    if (write) {
+        char tmp[4500];
+        int fd;
+        if (cx_fmt(tmp, sizeof tmp, "%s.tmp", rec)) { free(b); free(nw); return 1; }
+        sy_unlink(tmp);
+        fd = sy_open_new(tmp, 0600);
+        if (fd < 0) { sy_eprintf("migrate: cannot write %s\n", tmp); free(b); free(nw); return 1; }
+        if (sy_write_all(fd, nw, (size_t)w)) { sy_close(fd); free(b); free(nw); return 1; }
+        sy_close(fd);
+        if (rename(tmp, rec)) { sy_eprintf("migrate: cannot rename %s\n", tmp); free(b); free(nw); return 1; }
+        sy_printf("MIGRATE\tWROTE\t%s\n", rec);
+    } else {
+        sy_printf("MIGRATE\tDRY-RUN\t(pass --write to apply)\n");
+    }
+    free(nw);
+    free(b);
+    return 0;
+}
