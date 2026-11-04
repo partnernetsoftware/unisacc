@@ -65,3 +65,27 @@ omp-cc 的提醒成立:同一解释器循环 ≠ 同一热点。五阶段的网/
 3 e2/e1 几乎不随规模变(e2 从 2.4 到 8.8ms 只涨 6.4ms),它们不是热点。
 4 examples/*.c 太小(≤609B),用它们做的阶段分解会把 prune 的斜率优势读成 e3 最大 ——
    后续所有杠杆2 的比较都应该用 ≥5KB 的输入。
+
+## 第三轮:按 gate 协议复测(2026-11-04 晚,INSTALL44 前)
+`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1`,3 次中位:
+  empty.c  inflate 79.00ms  inference 12.26ms
+  host.c   inflate 80.93ms  inference 374.31ms
+对照 §1 基线(78.5 / 11.9 与 85.2 / 430.3):inflate 一致,e3 推理 112.79 vs 记的 108.7(+3.8%)。
+**基线未漂移,后续每刀都以此为准。**
+
+## 杠杆 4(模型解压缓存)已经兑现,不需重做
+计划 §2 的选项 ③(按包 sha 缓存已解压模型)在产品里已接线并生效:
+  cx/runtime/modelcache.cx 的 mc_get/mc_put,调用方 cx/runtime/routestep.cx:60 与 src/executor.cx:103。
+实测 host.c:冷 run 501.2ms(min) vs 热 12.1ms(min),热路径有 `RR_TIME lookup_hit=2`;
+`UNISACC_RUN_CACHE=0` 时 modelcache 行数 0(冷测不读缓存,语义正确)。
+所以杠杆 4 无需再动;单文件冷路径的固定成本已由这条缓存覆盖到热路径。
+
+## 杠杆 2/3 仍缺函数级 profile(非我的写域)
+- `UNISACC_PROFILE=1` 拿不到数据:products 的源表 tools/cx-driver-build.cx 里
+  `profile.cx` 出现 0 次,`grep -c "cx/runtime/profile"` = 0 —— 该模块根本没被编进产品,
+  尽管 cx/runtime/runexec.cx:6 有 `#pragma unisa use profile`。
+  要把 PROFILE 拿起来必须把 profile.cx 加进产品源表并重建。
+- perf 不可用:`/proc/sys/kernel/perf_event_paranoid` = 4,无 sudo。
+- 汇编步数 `%r14` 只用于超时判定,未导出。
+结论:杠杆 2/3 的"按转移占比下刀"在装好带 PROFILE 的产品前无法开展;
+不建议靠猜改 run_x86_64.S(督导已否 A 方案)。
