@@ -166,16 +166,20 @@ int main(int argc, char **argv) {
     int q = D.start; long long steps = 0;
     /* coverage: a flag per (state, key) for b/r, a set for t */
     unsigned char *cov = 0; SMap covt = {0}; if (covpath) { cov = xmalloc((size_t)D.ns * 257); memset(cov, 0, (size_t)D.ns * 257); }
-    int result = -1; const char *rejname = 0;
+    int result = -1; const char *rejname = 0; const char *laststate = 0; int lastkey = -1;
+    int trace = 0;
+    { int ti; for (ti = 1; ti < argc; ti++) if (tx_eqz(argv[ti], "--trace")) trace = 1; }
     for (;;) {
         steps++;
         dl_state *st = &D.s[q]; dl_edge *ed; int key;
+        laststate = st->name;
         if (st->mode == 'b') { key = fr->cur < fr->end ? fr->b[fr->cur] : DL_EOF; ed = &st->byte[key]; }
         else if (st->mode == 't') { const char *top = nst ? stack[nst - 1] : "BOT"; ed = 0; for (int k = 0; k < st->tn; k++) if (tx_eqz(st->tkeys[k], top)) { ed = &st->tedges[k]; break; }
             if (!ed) { fprintf(stderr, "sim: state %s has no edge for stack top %s\n", st->name, top); return 2; }
             if (cov) { char kk[600]; { if (cx_fmt(kk, sizeof kk, "%s\t%s", st->name, top)) { fprintf(stderr, "sim: text too long for kk\n"); exit(2); } } ssets(&covt, kk, 1); } key = -1; }
         else { key = (r >= 0 && r <= 256) ? (int)r : 256; ed = &st->byte[key]; }
-        if (key >= 0) { if (ed->next < 0) { fprintf(stderr, "sim: state %s has no edge for key %d\n", st->name, key); return 2; } if (cov) cov[(long)q * 257 + key] = 1; }
+        if (key >= 0) { lastkey = key; if (trace) fprintf(stderr, "TRACE\t%s\t%d\tcur=%ld\n", st->name, key, fr->cur);
+          if (ed->next < 0) { fprintf(stderr, "sim: state %s has no edge for key %d\n", st->name, key); return 2; } if (cov) cov[(long)q * 257 + key] = 1; }
         q = ed->next; dl_seq *sq = ed->seq;
         for (int ai = 0; ai < sq->n; ai++) {
             dl_act *a = &sq->a[ai];
@@ -248,7 +252,10 @@ done:
         FILE *cf = fopen(covpath, "wb"); if (!cf) die("cannot write coverage"); for (long i = 0; i < li; i++) { fputs(lines[i], cf); fputc('\n', cf); } if (fclose(cf)) die("coverage write");
     }
     if (result == 0) { if (o.n) fwrite(o.s, 1, (size_t)o.n, stdout); if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr); return 0; }
-    if (rejname && *rejname) fprintf(stderr, "reject: %s\n", rejname);
+    if (rejname && *rejname) {
+        if (laststate) fprintf(stderr, "AT\tstate=%s\tobs=%d\tcur=%ld\n", laststate, lastkey, fr->cur);
+        fprintf(stderr, "reject: %s\n", rejname);
+    }
     if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr);
     return 1;
 }
