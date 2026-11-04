@@ -1,0 +1,190 @@
+/* check-bench-gencode.cx -- 生成代码运行时性能三档对照 (C44-SPEED-01 杠杆 5).
+ *
+ *   sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [ROUNDS] [SIZES]
+ *
+ * 同一份 tools/bench-gencode.c 用三档编译器各编一次:
+ *   unisacc (被测对象), gcc -O0 (无优化下限), gcc -O2 (有优化上限)
+ * 每个 (规模, workload) 跑 ROUNDS 次取中位与 cv; 三档的 RESULT 校验值必须
+ * 逐字节相同, 否则该项标 INVALID 并计失败。cv > 10% 标 NOISY, 不下结论。
+ *
+ * 输出: BENCH <size> <workload> <tool> <median_ms> <cv> [NOISY] [INVALID]
+ *        SUMMARY valid=<n> noisy=<n> invalid=<n> failed=<n>
+ * 退出 0 当且仅当 invalid=0 且 failed=0 (NOISY 不算失败)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+#define BK_MAXR 16
+#define BK_CAP 4096
+
+static char root[4096];
+
+static char *bk_read_line(const char *p, char *out, size_t cap, size_t *outn) {
+    int fd = sy_open(p, 0, 0);
+    long z, kept = 0;
+    if (fd < 0) return 0;
+    while (kept < (long)cap - 1) {
+        z = sy_read(fd, out + kept, 1);
+        if (z <= 0) break;
+        if (out[kept] == '\n') break;
+        kept++;
+    }
+    sy_close(fd);
+    if (kept > 0 && out[kept - 1] == '\r') kept--;
+    out[kept] = 0;
+    if (outn) *outn = (size_t)kept;
+    return out;
+}
+
+static int bk_run(char *const argv[], const char *cwd, char *out, size_t cap, size_t *outn, long secs) {
+    np_result r;
+    char why[1400];
+    int rc;
+    if (np_run(argv, cwd, 0, secs, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (out && cap && r.out) {
+        size_t n = r.outn < cap - 1 ? r.outn : cap - 1, i;
+        for (i = 0; i < n; i++) out[i] = r.out[i];
+        out[n] = 0;
+        if (outn) *outn = n;
+    }
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
+/* Parse "RESULT <wl> <checksum> <bytes> <ms>" -> checksum + ms. */
+static int bk_parse(const char *line, char *ck, size_t ckcap, double *ms) {
+    const char *p = line;
+    int field = 0;
+    char tok[128];
+    size_t k = 0;
+    while (*p) {
+        if (*p == ' ' || *p == '\n') {
+            tok[k] = 0;
+            if (field == 2 && ck) { size_t i; for (i = 0; i + 1 < ckcap && tok[i]; i++) ck[i] = tok[i]; ck[i] = 0; }
+            if (field == 4 && ms) *ms = atof(tok);
+            field++; k = 0;
+            if (field > 4) break;
+            if (*p == '\n') break;
+        } else if (k < sizeof tok - 1) tok[k++] = *p;
+        p++;
+    }
+    return field >= 5 ? 0 : 1;
+}
+
+/* Newton sqrt (no libm dependency). */
+static double bk_sqrt(double x) {
+    double g;
+    int i;
+    if (x <= 0) return 0;
+    g = x > 1 ? x : 1;
+    for (i = 0; i < 40; i++) g = 0.5 * (g + x / g);
+    return g;
+}
+
+static long bk_now(void) {
+    sy_ts_t t;
+    if (sy_mono(&t) != 0) return -1;
+    return t.sec * 1000000000L + t.nsec;
+}
+
+int main(int argc, char **argv) {
+    static char prods[3][4096];
+    static const char *names[3] = {"unisacc", "gcc-O0", "gcc-O2"};
+    char src[4400], out[4400];
+    long rounds = 3, sizes[2] = {1, 8}, si;  /* 3 keeps the batch under its 55s bound; pass N explicitly for the formal run */
+    int nsizes = 2, tool, valid = 0, noisy = 0, invalid = 0, failed = 0;
+    /* No argument means the batch runner invoked us: use the current directory. */
+    if (argc < 2) { tx_copy(root, sizeof root, ".", 2); }
+    else tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096));
+    if (argc >= 3) rounds = atol(argv[2]);
+    if (rounds < 1) rounds = 7;
+    if (rounds > BK_MAXR) rounds = BK_MAXR;
+    if (argc >= 4) {
+        if (tx_eq(argv[3], "1", 1)) { sizes[0] = 1; nsizes = 1; }
+        else if (tx_eq(argv[3], "8", 1)) { sizes[0] = 8; nsizes = 1; }
+    }
+    cx_fmt(src, sizeof src, "%s/tools/bench-gencode.c", root);
+    cx_fmt(out, sizeof out, "%s/out/bench-gencode-unisacc", root);
+    {
+        char *v[6];
+        int n = 0;
+        v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/bench-gencode.c";
+        v[n++] = "-o"; v[n++] = out; v[n] = 0;
+        if (bk_run(v, root, 0, 0, 0, 55) != 0) { sy_eprintf("FAIL build unisacc\n"); return 1; }
+    }
+    cx_fmt(prods[0], sizeof prods[0], "%s", out);
+    for (tool = 1; tool < 3; tool++) {
+        char *v[8];
+        int n = 0;
+        size_t cap = sizeof prods[tool];
+        cx_fmt(prods[tool], cap, "%s/out/bench-gencode-%s", root, tool == 1 ? "gcc0" : "gcc2");
+        v[n++] = "gcc"; v[n++] = tool == 1 ? "-O0" : "-O2";
+        v[n++] = "-o"; v[n++] = prods[tool]; v[n++] = src; v[n] = 0;
+        if (bk_run(v, root, 0, 0, 0, 55) != 0) { sy_eprintf("FAIL build %s\n", names[tool]); return 1; }
+    }
+    for (si = 0; si < nsizes; si++) {
+        const char *wls[3] = {"sha", "sort", "memcpy"};
+        int w;
+        for (w = 0; w < 3; w++) {
+            char ck[128] = {0};
+            char baseck[128] = {0};
+            double med[3] = {0, 0, 0}, cv[3] = {0, 0, 0};
+            int ok = 1;
+            for (tool = 0; tool < 3; tool++) {
+                double s[BK_MAXR];
+                long r;
+                int got = 0;
+                for (r = 0; r < rounds; r++) {
+                    char line[BK_CAP];
+                    size_t ln = 0;
+                    char szbuf[16];
+                    char *v[4];
+                    double ms = 0;
+                    cx_fmt(szbuf, sizeof szbuf, "%ld", sizes[si]);
+                    v[0] = prods[tool]; v[1] = szbuf; v[2] = (char *)wls[w]; v[3] = 0;
+                    if (bk_run(v, root, line, sizeof line, &ln, 55) != 0) { ok = 0; break; }
+                    if (bk_parse(line, ck, sizeof ck, &ms) != 0) { ok = 0; break; }
+                    if (r == 0) { size_t i; for (i = 0; i + 1 < sizeof baseck && ck[i]; i++) baseck[i] = ck[i]; baseck[i] = 0; }
+                    else {
+                        size_t i;
+                        for (i = 0; i < sizeof ck && ck[i] && baseck[i]; i++) if (ck[i] != baseck[i]) { ok = 0; break; }
+                    }
+                    s[got++] = ms;
+                }
+                if (!ok || got == 0) { failed++; break; }
+                {
+                    int i, j;
+                    double mean = 0, var = 0;
+                    for (i = 0; i < got; i++) for (j = i + 1; j < got; j++) if (s[j] < s[i]) { double t = s[i]; s[i] = s[j]; s[j] = t; }
+                    med[tool] = s[got / 2];
+                    for (i = 0; i < got; i++) mean += s[i];
+                    mean /= got;
+                    for (i = 0; i < got; i++) var += (s[i] - mean) * (s[i] - mean);
+                    var /= got;
+                    cv[tool] = mean > 0 ? 100.0 * bk_sqrt(var) / mean : 0;
+                }
+                if (tool == 0) {
+                    size_t i; for (i = 0; i + 1 < sizeof ck && ck[i]; i++) baseck[i] = ck[i]; baseck[i] = 0;
+                } else {
+                    size_t i; int same = 1;
+                    for (i = 0; i + 1 < sizeof ck && ck[i] && baseck[i]; i++) if (ck[i] != baseck[i]) { same = 0; break; }
+                    if (!same) { ok = 0; }
+                }
+            }
+            if (failed > 0 && !ok) { sy_printf("BENCH\t%ldMB\t%s\tINVALID\n", sizes[si], wls[w]); invalid++; continue; }
+            for (tool = 0; tool < 3; tool++) {
+                int nz = cv[tool] > 10.0;
+                sy_printf("BENCH\t%ldMB\t%s\t%s\t%.3f\t%.2f%s\n", sizes[si], wls[w], names[tool], med[tool], cv[tool], nz ? "\tNOISY" : "");
+                if (nz) noisy++;
+            }
+            if (!ok) invalid++; else valid++;
+        }
+    }
+    sy_printf("BENCH_GENCODE\tvalid=%d\tnoisy=%d\tinvalid=%d\tfailed=%d\n", valid, noisy, invalid, failed);
+    return (invalid || failed) ? 1 : 0;
+}

@@ -77,6 +77,7 @@
 | 九个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc |
 | tools 行数只降不升 | `sh ./unisacc.com tests/toolsloc.cx -- --check`（`--write` 只下调） | tracked regular `tools/*.cx` 总行数，基线 `tests/toolsloc.tsv`；新增 tool 必须先改基线并经 cc 批准 |
 | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
+| 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
@@ -318,8 +319,24 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 - **0.0.43**：当前收口（主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
 - **0.0.44**：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
-- **0.0.45 / 0.0.46**：模块外部共享 / agent harness（cx-csih）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
+- **0.0.45 / 0.0.46**：模块外部共享（含通用 APE loader 模板 C45-LOADER-01、ujs 复用、编译期所有权路线 C、范式命名）/ agent harness（cx-csih）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
+
+<a id="optimization-leads"></a>
+### 9.5 优化线索（2026-11-03 实测来源，已登记到计划）
+
+| 线索 | 实测 | 去向 |
+|---|---|---|
+| libc 闭包被编进每个对象 | 60B 的 host.c：elf 推理 305ms、lower 135ms（empty.c 2.5ms）；host.o 227,704B 对 empty.o 3,016B，67 个对象各带一份相同的 printf 函数体 | C44-LIBCUNIT-01 |
+| 整树 SID 让无关 job 一起作废 | 改一个头文件只影响 pp 一张网，却要全链重跑约 12 分钟（131 job 9m13s + pack 2m35s） | C44-IDENTITY-JOB-01 |
+| 生成代码运行慢 | 同一 8MB SHA-256：生成代码 0.939s、宿主 0.068s（约 14 倍）、AF_ALG 0.091s | C44-PROFILE-01 |
+| 模型解析也是固定成本 | `-funit` 热缓存后仍约 60ms 在模型解析（sh_apply）；解压由 modelcache 覆盖（`-o` 路线 8f8197c81b，对象路线 d1a6f36d06） | C44-PROFILE-01 之后定刀 |
+| 资源段是最大单块 | 单流去重后资源段占 56.3%（830,037B，69 个头文件），7 个单流产物 8,271,508→1,474,726B（5.6 倍） | C44-SIZE-01、C45-STAGEBENCH-01 |
+| 执行内核很小，周边很大 | UNIKERN 7,144B（arm64 7,096B），而 loader 模板每 ISA 约 406KB（boot 102,886 + base 302,684），重复 libc/sha + O0 runtime | C45-LOADER-01（目标 30–60KB/ISA） |
+| FTRIM 读头文件原文 | 预处理等价的头文件改写会改变裁剪结果 | C44-FTRIM-ANCHOR-01 |
+| 模块符号链接农场 | 约 170 个链接只为"use 只在旁边找"而存在；包根解析已实现（c3ee8ee247） | C44-CX-ROOT-01（待产品安装） |
+| 所有权只靠运行期 | 函数内源码检查覆盖不到产品（产品仅 60 个局部 owner），所有权在字段与包装分配器 | C44-CX-OWN-01 → C45-CX-OWN-C-01 |
+| 文档里的产品事实手写 | 一天内过期两次 | C44-FACTS-DOC-01 |
 
 ## 10. 归档索引
 
