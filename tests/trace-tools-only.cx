@@ -1,0 +1,44 @@
+/* tools/check-trace-tools-only.cx -- sys.trace is a construction-side
+ * observation layer (L0 ptrace). Only tools may use it: a product unit that
+ * reaches it would drag platform tracing into the shipped product, so this
+ * scan walks the product trees directly (not any index, so a brand-new file is
+ * covered the moment it exists) and refuses `use sys.trace` by name.
+ *
+ *   sh ./unisacc.com tools/check-trace-tools-only.cx -- [DIR...]
+ *
+ * Prints TRACE_TOOLS_ONLY<TAB>violations=N; exit 0 only when nothing failed. */
+#pragma unisa use text.text
+static int check(const char *path) {
+    FILE *f = fopen(path, "r"); char line[4096]; int no = 0, bad = 0;
+    if (!f) { fprintf(stderr, "trace-tools-only: cannot read %s\n", path); return 1; }
+    while (fgets(line, sizeof line, f)) {
+        no++;
+        if (strstr(line, "use sys.trace")) { fprintf(stderr, "TRACE-TOOLS-ONLY\t%s:%d\tuse sys.trace\n", path, no); bad++; }
+        if (strstr(line, "use sys.trace,")) { fprintf(stderr, "TRACE-TOOLS-ONLY\t%s:%d\tuse sys.trace\n", path, no); bad++; }
+    }
+    fclose(f);
+    return bad;
+}
+static int walk(const char *dir, int depth) {
+    DIR *d; struct dirent *e; int bad = 0;
+    if (depth > 32 || !(d = opendir(dir))) { fprintf(stderr, "trace-tools-only: cannot open %s\n", dir); return 1; }
+    for (;;) {
+        char path[4096]; struct stat st; int n; size_t z;
+        errno = 0; e = readdir(d);
+        if (!e) { if (errno) { fprintf(stderr, "trace-tools-only: cannot read %s\n", dir); bad++; } break; }
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        n = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (n < 0 || n >= (int)sizeof path || lstat(path, &st)) { fprintf(stderr, "trace-tools-only: stat %s/%s\n", dir, e->d_name); bad++; continue; }
+        if (S_ISDIR(st.st_mode)) bad += walk(path, depth + 1);
+        else if (S_ISREG(st.st_mode)) { z = strlen(path); if (z >= 3 && !strcmp(path + z - 3, ".cx")) bad += check(path); }
+    }
+    if (closedir(d)) { fprintf(stderr, "trace-tools-only: close %s\n", dir); bad++; }
+    return bad;
+}
+int main(int argc, char **argv) {
+    int i, bad = 0;
+    if (argc > 1) { for (i = 1; i < argc; i++) bad += check(argv[i]); }
+    else { bad += walk("src", 0); bad += walk("cx/compiler", 0); bad += walk("cx/driver", 0); bad += walk("cx/runtime", 0); }
+    printf("TRACE_TOOLS_ONLY\tviolations=%d\n", bad);
+    return bad ? 1 : 0;
+}

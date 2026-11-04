@@ -1,0 +1,260 @@
+#pragma unisa module trace
+/* L0 sys/trace: observe the repository files a construction child opens.
+   SPEED-02 evidence: changing exec/parse2/units-result.tsv changed the bytes
+   seed-gen produced, yet the job's recorded identity did not name that file,
+   so a reuse probe still answered "reusable" and a candidate could ship a
+   stale network. A job's identity must therefore come from what the command
+   actually opened, including probes for files that do not exist.
+   Every raw system call and every platform difference stays in this file;
+   callers use sy_trace_* only (AGENTS.md cx direction).
+   Linux x86_64/arm64: the child asks to be traced, the parent follows its
+   events, and descendants are followed too (TRACEFORK|TRACEVFORK|TRACECLONE|
+   TRACEEXEC) because seed-gen starts subtools. Other targets answer
+   sy_trace_available()=0, and a caller MUST read that as "no observation" --
+   never as "nothing was read". macOS ptrace needs its own thread-port protocol
+   and Windows has no ptrace: both compile here and answer "unavailable". */
+
+#if defined(__linux__) && defined(__x86_64__)
+static const long syt_ok = 1, syt_ptrace = 101, syt_wall = 0L;
+static const long syt_sysno_off = 15, syt_a0_off = 14, syt_a1_off = 13, syt_rax_off = 10;
+static const long syt_entering = -38;                       /* rax at a syscall-entry stop */
+static const long syt_openat = 257, syt_newfstatat = 262, syt_faccessat2 = 439,
+                  syt_execveat = 322, syt_readlinkat = 267, syt_statx = 332,
+                  syt_execve = 59, syt_access = 21, syt_stat = 4, syt_lstat = 6;
+static const long syt_at_fdcwd = -100;
+#elif defined(__linux__) && defined(__aarch64__)
+static const long syt_ok = 1, syt_ptrace = 117, syt_wall = 0L;
+static const long syt_sysno_off = 8, syt_a0_off = 0, syt_a1_off = 1, syt_rax_off = 0;
+static const long syt_entering = -38;
+static const long syt_openat = 56, syt_newfstatat = 79, syt_faccessat2 = 439,
+                  syt_execveat = 281, syt_readlinkat = 78, syt_statx = 291,
+                  syt_execve = 221, syt_access = 0, syt_stat = 0, syt_lstat = 6;
+static const long syt_at_fdcwd = -100;
+#else
+static const long syt_ok = 0, syt_ptrace = 0, syt_wall = 0;
+static const long syt_sysno_off = 0, syt_a0_off = 0, syt_a1_off = 0, syt_rax_off = 0, syt_entering = 0;
+static const long syt_openat = 0, syt_newfstatat = 0, syt_faccessat2 = 0,
+                  syt_execveat = 0, syt_readlinkat = 0, syt_statx = 0,
+                  syt_execve = 0, syt_access = 0, syt_stat = 0, syt_lstat = 0;
+static const long syt_at_fdcwd = 0;
+#endif
+
+/* ptrace requests are the same on every Linux architecture. */
+enum {
+    SY_TRACE_TRACEME = 0, SY_TRACE_PEEKDATA = 2, SY_TRACE_SYSCALL = 24,
+    SY_TRACE_GETREGS = 12, SY_TRACE_SETOPTIONS = 16896, SY_TRACE_GETEVENTMSG = 16897,
+    SY_TRACE_O_TRACEFORK = 2, SY_TRACE_O_TRACEVFORK = 4,
+    SY_TRACE_O_TRACECLONE = 8, SY_TRACE_O_TRACEEXEC = 16,
+    SY_TRACE_EVENT_FORK = 1, SY_TRACE_EVENT_VFORK = 2, SY_TRACE_EVENT_CLONE = 3
+};
+
+#define SY_TRACE_MAX 8192
+#define SY_TRACE_PATH 512
+static char syt_paths[SY_TRACE_MAX][SY_TRACE_PATH];
+static int syt_count;
+static int syt_live;
+/* One register set as RAW BYTES: the kernel writes struct user_regs_struct
+   (x86_64: 27 eight-byte words) and the cx type for it is not guaranteed to
+   have the same width, so the bytes are assembled here, never reinterpreted. */
+static unsigned char syt_regbuf[256];
+static long syt_reg(int word) {
+    int i;
+    unsigned long v = 0;
+    if (word < 0 || (word + 1) * 8 > (int)sizeof syt_regbuf) return 0;
+    for (i = 7; i >= 0; i--) v = (v << 8) | (unsigned long)syt_regbuf[word * 8 + i];
+    return (long)v;
+}
+
+/* 1 when sy_trace_* can observe anything on this target. */
+int sy_trace_available(void) { return (int)syt_ok; }
+
+static long syt_call(long req, int pid, long addr, long data) {
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    long r;
+    errno = 0;
+    r = __syscall6(_UNISA_SC(syt_ptrace), req, (long)pid, addr, data, 0);
+    if (r == -1) { int e = errno; return -(e ? e : EIO); }
+    return r;
+#else
+    (void)req; (void)pid; (void)addr; (void)data;
+    return -ENOSYS;
+#endif
+}
+
+/* In the child, after fork and before exec: ask the parent to trace it.
+   0, or -errno; a child that gets an error MUST _exit, never exec untraced. */
+int sy_trace_me(void) { return !syt_ok ? -ENOSYS : (syt_call(SY_TRACE_TRACEME, 0, 0, 0) < 0 ? -EIO : 0); }
+
+/* At the child's first stop: follow syscalls and descendants. 0 or -errno. */
+int sy_trace_follow(int pid) {
+    long r;
+    if (!syt_ok) return -ENOSYS;
+    syt_count = 0;
+    r = syt_call(SY_TRACE_SETOPTIONS, pid, 0,
+                 (long)(SY_TRACE_O_TRACEFORK | SY_TRACE_O_TRACEVFORK |
+                        SY_TRACE_O_TRACECLONE | SY_TRACE_O_TRACEEXEC));
+    if (r < 0) return (int)r;
+    syt_live = 1;
+    r = syt_call(SY_TRACE_SYSCALL, pid, 0, 0);
+    return r < 0 ? (int)r : 0;
+}
+
+static int syt_getregs(int pid) {
+#if defined(__linux__) && defined(__x86_64__)
+    memset(syt_regbuf, 0, sizeof syt_regbuf);
+    return syt_call(SY_TRACE_GETREGS, pid, 0, (long)syt_regbuf) < 0 ? -1 : 0;
+#else
+    (void)pid;
+    return -1;   /* arm64 needs PTRACE_GETREGSET/NT_PRSTATUS: not wired yet */
+#endif
+}
+
+/* Read the child's NUL-terminated string at ADDR into OUT (CAP, always
+   NUL-terminated) through /proc/PID/mem, which a tracer may read for its own
+   tracee (the earlier PTRACE_PEEKDATA form failed with EFAULT on this host).
+   Returns the length, or -1 when nothing could be read. */
+static int syt_read_string(int pid, unsigned long addr, char *out, int cap) {
+    char mem[64], num[24];
+    int n = 0, m = 0, v = pid, fd, at = 0;
+    long off;
+    const char *a = "/proc/", *b = "/mem";
+    if (!addr || cap < 2 || pid <= 0) return -1;
+    while (*a && n < 40) mem[n++] = *a++;
+    while (v > 0 && m < 20) { num[m++] = (char)('0' + v % 10); v /= 10; }
+    while (m > 0 && n < 48) mem[n++] = num[--m];
+    while (*b && n < 56) mem[n++] = *b++;
+    mem[n] = 0;
+    fd = open(mem, O_RDONLY);
+    if (fd < 0) return -1;
+    off = (long)addr;
+    while (at < cap - 1) {
+        long z = pread(fd, out + at, (size_t)(cap - 1 - at), off + (long)at);
+        int k;
+        if (z <= 0) { close(fd); out[at] = 0; return at ? at : -1; }
+        for (k = 0; k < (int)z; k++) {
+            if (!out[at + k]) {
+                out[at + k] = 0;
+                close(fd);
+                return at + k;
+            }
+        }
+        at += (int)z;
+    }
+    close(fd);
+    out[at] = 0;
+    return at;
+}
+
+static int syt_eq(const char *a, const char *b) { int i = 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
+
+static void syt_note(const char *p) {
+    int i, n = 0;
+    for (i = 0; i < syt_count; i++) if (syt_eq(syt_paths[i], p)) return;
+    if (syt_count >= SY_TRACE_MAX) return;
+    while (p[n] && n < SY_TRACE_PATH - 1) { syt_paths[syt_count][n] = p[n]; n++; }
+    syt_paths[syt_count][n] = 0;
+    syt_count++;
+}
+
+/* Absolute path of CHILD's working directory into OUT: 0 or -errno. */
+static int syt_cwd(int pid, char *out, int cap) {
+    char link[64], num[24];
+    int n = 0, m = 0, v = pid, len;
+    const char *a = "/proc/", *b = "/cwd";
+    if (pid <= 0) return -ESRCH;
+    while (*a && n < 40) link[n++] = *a++;
+    while (v > 0 && m < 20) { num[m++] = (char)('0' + v % 10); v /= 10; }
+    while (m > 0 && n < 48) link[n++] = num[--m];
+    while (*b && n < 56) link[n++] = *b++;
+    link[n] = 0;
+    len = (int)readlink(link, out, (size_t)(cap - 1));
+    if (len <= 0 || len >= cap) return -ENOENT;
+    out[len] = 0;
+    return 0;
+}
+
+/* Join CWD and PATH into OUT (dropping "./" segments): 0 or -ENOSPC. */
+static int syt_join(char *out, int cap, const char *cwd, const char *path) {
+    int n = 0, i = 0;
+    if (!path || !path[0]) return -EINVAL;
+    if (path[0] != '/') {
+        while (cwd[i]) { if (n >= cap - 2) return -ENOSPC; out[n++] = cwd[i++]; }
+        if (n >= cap - 2) return -ENOSPC;
+        out[n++] = '/';
+    }
+    for (i = 0; path[i];) {
+        if (path[i] == '.' && path[i + 1] == '/') { i += 2; continue; }
+        if (n >= cap - 2) return -ENOSPC;
+        out[n++] = path[i++];
+    }
+    out[n] = 0;
+    return 0;
+}
+
+/* Path argument offset for SYSNO: arg0/arg1 word offset, or -1 for "no path". */
+static long syt_path_arg(long sysno) {
+    if (sysno == syt_openat || sysno == syt_newfstatat || sysno == syt_faccessat2 ||
+        sysno == syt_execveat || sysno == syt_readlinkat || sysno == syt_statx) return syt_a1_off;
+    if (sysno == syt_execve || sysno == syt_access || sysno == syt_stat || sysno == syt_lstat) return syt_a0_off;
+    return -1;
+}
+
+static void syt_handle(int pid) {
+    long sysno = syt_reg(syt_sysno_off);
+    long at = syt_path_arg(sysno);
+    unsigned long addr;
+    char raw[SY_TRACE_PATH], cwd[SY_TRACE_PATH], joined[SY_TRACE_PATH];
+    if (at < 0) return;
+    addr = (unsigned long)syt_reg(at);
+    if (syt_read_string(pid, addr, raw, (int)sizeof raw) <= 0) return;
+    if (raw[0] == '/') { syt_note(raw); return; }
+    /* A relative path opened against a directory descriptor is resolved
+       against the tracee's own cwd, which is what the shell and libc do. */
+    if (syt_cwd(pid, cwd, (int)sizeof cwd)) return;
+    if (syt_join(joined, (int)sizeof joined, cwd, raw)) return;
+    syt_note(joined);
+}
+
+/* Reap one event. 1 handled, 0 nothing pending, -ECHILD when every traced
+   process is gone, other negative = -errno. STATUS_OUT receives the exit code
+   (or -signal) when the event is a final exit stop; PID_OUT that process. */
+int sy_trace_poll_status(int *status_out,int *pid_out) {
+    int st, ev;
+    pid_t w;
+    long r;
+    if (!syt_ok) return -ENOSYS;
+    if (!syt_live) return -ECHILD;
+    errno = 0;
+    w = waitpid(-1, &st, (int)syt_wall);
+    if (w == 0) return 0;
+    if (w < 0) { if (errno == EINTR) return 0; if (errno == ECHILD) { syt_live = 0; return -ECHILD; } return -errno; }
+    if (WIFEXITED(st) || WIFSIGNALED(st)) {
+        if (pid_out) *pid_out = (int)w;
+        if (status_out) *status_out = WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
+        return 1;
+    }
+    ev = st >> 16;
+    if (ev) {
+        unsigned long msg = 0;
+        if (ev == SY_TRACE_EVENT_FORK || ev == SY_TRACE_EVENT_VFORK || ev == SY_TRACE_EVENT_CLONE) {
+            r = syt_call(SY_TRACE_GETEVENTMSG, w, 0, (long)&msg);
+            if (r >= 0 && msg) syt_call(SY_TRACE_SYSCALL, (int)msg, 0, 0);
+        }
+        syt_call(SY_TRACE_SYSCALL, w, 0, 0);
+        return 1;
+    }
+    if (syt_getregs(w) == 0 && syt_reg(syt_rax_off) == syt_entering) syt_handle(w);
+    syt_call(SY_TRACE_SYSCALL, w, 0, 0);
+    return 1;
+}
+
+/* Same as sy_trace_poll, also reporting the wait status of the stop it
+   handled, so a caller can tell the traced process's real exit code. */
+int sy_trace_poll(void) { return sy_trace_poll_status(0, 0); }
+
+/* Distinct paths observed since the last sy_trace_follow. */
+int sy_trace_count(void) { return syt_count; }
+
+/* The I-th observed absolute path (0 out of range); lives until the next follow. */
+const char *sy_trace_path(int i) { return (i < 0 || i >= syt_count) ? 0 : syt_paths[i]; }
+

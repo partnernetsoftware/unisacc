@@ -10,7 +10,9 @@
 #pragma unisa use kernelsha
 #pragma unisa use kernelinputs
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use productpkg
+#pragma unisa use sys.trace
 /* Read-only, one-endpoint material snapshots. fresh_source MUST come from the
  * caller's actual current seed/ident observation; never pass a saved receipt
  * as fresh evidence. Call again after the operation for a physical reread.
@@ -105,8 +107,8 @@ static char sp_job_out[4400],sp_job_exe[4400],sp_job_src[4400],sp_job_inc[4400],
 static char root[4096],ctx[4096],bootstrap[4096],cc[4096],self[4096],product[4400],bound[4400],ident[4400],helper[4400],netpack[4400],bound_c[4400],jobs[4400];
 static char sid[65],context_sha[65],cc_sha[65],cc_version_sha[65],helper_sha[65],bootstrap_sha[65],product_sha[65],self_sha[65],netpack_sha[65],bound_sha[65],bound_c_sha[65],ident_sha[65];
 static char basis[4400],consumer[4096],consumer_sha[65],pc[4096],kgen[4096];
-static const char *basis_pin="0680f41df33f1a959c6b962dada4b473aaf0e011e7dae14196f1faeb4084c130";
-static const char *origin_basis_pin="9c2e71ef2094773bcada4c27a39871f3d0f5947555eb3ebe338aaddf203427ba";
+static const char *basis_pin="8eb90951e86ee0e27cd7a292ba13f410b0cdc7f7ddb87eaa2f175540f906f87a";
+static const char *origin_basis_pin="8eb90951e86ee0e27cd7a292ba13f410b0cdc7f7ddb87eaa2f175540f906f87a";
 static const char *sp_basis_pin(void){return sp_origin_mode?sp_origin_material.origin_foundation:basis_pin;}
 static void live_root_epoch_bind(void);
 static const char *environment_policy="raw-environ-remove-SEED_GEN_GENERIC-SEED_GEN_TRACE-UNISACC_SEED_TRACE-UNISACC_RF_CAPTURE-UNISA_ATTRIBUTES-v1";
@@ -148,6 +150,26 @@ static void hash_bytes(const void *bytes,size_t n,char h[65]){if(n>=1024)kernel_
 static int forbidden_environment(const char *s){const char *keys[]={"SEED_GEN_GENERIC","SEED_GEN_TRACE","UNISACC_SEED_TRACE","UNISACC_RF_CAPTURE","UNISA_ATTRIBUTES"};for(int i=0;i<5;i++){size_t n=strlen(keys[i]);if(!strncmp(s,keys[i],n)&&s[n]=='=')return 1;}return 0;}
 static void clean_environment(void){size_t n=0;for(char **p=environ;*p;p++)n++;if(n>1048576)die("environment-entry-bound");char **next=malloc((n+1)*sizeof *next);if(!next)die("allocation");size_t at=0;for(char **p=environ;*p;p++)if(!forbidden_environment(*p))next[at++]=*p;next[at]=0;char **old=owned_environment;environ=next;owned_environment=next;free(old);for(char **p=environ;*p;p++)if(forbidden_environment(*p))die("environment-policy-not-applied-to-raw-environ");}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path-bound");}
+/* Join two path parts into P (4400 bytes): 0, or non-zero when the result
+ * does not fit. The one implementation; producers forward to it. */
+int sp_path_join(char p[4400],const char *a,const char *b){return cx_fmt(p,4400,"%s/%s",a,b)?-1:0;}
+/* Read a bounded regular file exactly (no symlink, no growth) into a fresh
+ * buffer; 0 with *N/OUT set, or -1. The one implementation of that read. */
+int sp_load_file(const char *p,char **out,size_t *n){
+ struct stat a,b;int fd;size_t at=0;char *s;
+ if(!p||!out||!n)return -1;
+ errno=0;
+ if(lstat(p,&a))return -1;
+ if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>134217728)return -1;
+ fd=open(p,O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+ if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size){if(fd>=0)close(fd);return -1;}
+ s=malloc((size_t)a.st_size+1);
+ if(!s){close(fd);return -1;}
+ while(at<(size_t)a.st_size){ssize_t k=read(fd,s+at,(size_t)a.st_size-at);if(k<0&&errno==EINTR)continue;if(k<=0){free(s);close(fd);return -1;}at+=(size_t)k;}
+ close(fd);
+ s[a.st_size]=0;*n=(size_t)a.st_size;*out=s;
+ return 0;
+}
 static void clean(const char *p){if(!p[0]||strpbrk(p,"\r\n\t"))die("unclean-path");}
 static int sp_within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
 static void sp_lexical(const char *p){clean(p);size_t n=strlen(p);if(n<2||n>=4096||p[0]!='/'||p[n-1]=='/'||strstr(p,"//"))die("origin-absolute-canonical-spelling");const char *a=p+1;while(*a){const char *e=strchr(a,'/');size_t z=e?(size_t)(e-a):strlen(a);if((z==1&&a[0]=='.')||(z==2&&a[0]=='.'&&a[1]=='.'))die("origin-dot-component");if(!e)break;a=e+1;}}
@@ -176,7 +198,11 @@ static char *sp_load_ephemeral(const char *logical,size_t *n){const char *p=sp_p
 static void digest(const char *p,char h[65]){SpObservedFile *f=sp_observe(p,0);const char *relative=0,*expected=0;if(sp_origin_mode&&mp_host_capture(sp_origin_material.id,p,&relative,&expected)&&(strcmp(f->hash,expected)||f->n!=928584||(f->mode&0111)))die("origin-fixed-host-data-identity");memcpy(h,f->hash,65);}
 static void row(np_buf *b,const char *k,const char *v){np_puts(b,k);np_puts(b,"\t");np_puts(b,v);np_puts(b,"\n");}
 static void digest_identity(np_buf *b){char p[4400],h[65];path(p,root,"tools/cxlib/kernelsha.cx");digest(p,h);if(strcmp(h,digest_module_pin))die("kernel-sha256-module-identity");row(b,"digest-provider",material_digest_provider);row(b,"kernelsha-module",h);}
-static void equal(const char *p,const np_buf *expected){size_t n;char *s=load(p,&n);int ok=n==expected->n&&!memcmp(s,expected->p,n);if(!ok){size_t at=0,limit=n<expected->n?n:expected->n;while(at<limit&&s[at]==expected->p[at])at++;fprintf(stderr,"sourcepackage: receipt mismatch path=%s byte=%lu actual-size=%lu expected-size=%lu\n",p,(unsigned long)at,(unsigned long)n,(unsigned long)expected->n);}free(s);if(!ok)die("receipt-bytes-mismatch");}
+/* 1 when the bytes differ (the caller refuses by name). The message names the
+ * path, the first differing byte and the start of its line, so a mismatch is
+ * diagnosable without re-deriving the record by hand. */
+int sp_equal_bytes(const char *p,const np_buf *expected){size_t n;char *s=load(p,&n);int ok=n==expected->n&&!memcmp(s,expected->p,n);if(!ok){size_t at=0,limit=n<expected->n?n:expected->n,line_begin;while(at<limit&&s[at]==expected->p[at])at++;line_begin=at;while(line_begin>0&&s[line_begin-1]!='\n')line_begin--;fprintf(stderr,"sourcepackage: receipt mismatch path=%s byte=%lu actual-size=%lu expected-size=%lu line-start=%lu\n",p,(unsigned long)at,(unsigned long)n,(unsigned long)expected->n,(unsigned long)line_begin);}free(s);return !ok;}
+static void equal(const char *p,const np_buf *expected){if(sp_equal_bytes(p,expected))die("receipt-bytes-mismatch");}
 static void optional_digest(const char *artifact,char out[65]){char p[4600];int n=snprintf(p,sizeof p,"%s.build.json",artifact);if(n<0||(size_t)n>=sizeof p)die("metadata-path");struct stat st;errno=0;if(lstat(sp_physical(p),&st)){if(errno!=ENOENT)die("metadata-stat");strcpy(out,"ABSENT");return;}digest(p,out);}
 static void observe_inputs(void){digest(cc,cc_sha);digest(helper,helper_sha);digest(bootstrap,bootstrap_sha);pp_product_digest(root,product_sha);digest(self,self_sha);digest(netpack,netpack_sha);digest(bound,bound_sha);digest(bound_c,bound_c_sha);digest(ident,ident_sha);char p[4400];path(p,ctx,"cc.version");digest(p,cc_version_sha);}
 static np_buf context_record(void){clean_environment();np_buf b={0};np_puts(&b,sp_origin_mode&&sp_origin_material.origin_context_version==1?"source-package-context-v1\n":"source-package-context-v2\n");row(&b,"status","PREPARED_CONTEXT_ONLY");row(&b,"environment-policy",environment_policy);row(&b,"root",root);row(&b,"context",ctx);row(&b,"source",sid);row(&b,"bootstrap",bootstrap);row(&b,"bootstrap-sha",bootstrap_sha);char h[65];optional_digest(bootstrap,h);row(&b,"bootstrap-build-record-sha",h);row(&b,"root-product-sha",product_sha);if(sp_origin_mode&&sp_origin_material.origin_context_version==1){optional_digest(product,h);row(&b,"root-build-record-sha",h);}else{char frozen[4400];path(frozen,ctx,"root-epoch.build.json");digest(frozen,h);row(&b,"root-build-record-sha",h);row(&b,"root-epoch-record-path",frozen);}row(&b,"cc",cc);row(&b,"cc-sha",cc_sha);row(&b,"cc-version-sha",cc_version_sha);row(&b,"identity-helper",helper_sha);row(&b,"identity-source",ident_sha);row(&b,"identity-flags",ident_flags);row(&b,"controller",self_sha);row(&b,"netpack",netpack_sha);row(&b,"bound",bound_sha);row(&b,"bound.c",bound_c_sha);row(&b,"host-process","Linux/x86_64-LP64");row(&b,"host-dependencies","CC-subtools-system-headers-linker-libraries-and-zlib-DECLARED-NOT-HERMETICALLY-HASHED");row(&b,"reference-executable","NOT-INVOKED-by-native-seed-C-APIs");row(&b,"scope","root-assisted-initial-source-observation;bootstrap-trusted;no-test-result;no-complete-N22-or-zero-Python-chain-claim");return b;}
@@ -203,7 +229,22 @@ static void sp_require_same_generation(void){
     if(pp_product_digest(root,live))die("live-root-product-digest");
     if(strcmp(recorded,live)){fprintf(stderr,"sourcepackage: REFUSE ctx-root-generation-mismatch ctx=%s live=%s\n",recorded,live);exit(2);}
 }
-static void check_context(void){memset(job_seen,0,sizeof job_seen);free(kernel_observation.p);kernel_observation=(np_buf){0};kernel_observed=0;canonical(ctx);char p[4400];path(p,ctx,"context.tsv");size_t n;char *s=load(p,&n);if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))die("context-wire");extract_path(s,"cc",cc,sizeof cc);extract_path(s,"bootstrap",bootstrap,sizeof bootstrap);free(s);observe_inputs();{ if (cx_fmt(sid, sizeof sid, "%s",supplied_source)) { fprintf(stderr, "sourcepackage: text too long for sid\n"); exit(2); } }np_buf expected=context_record();equal(p,&expected);hash_bytes(expected.p,expected.n,context_sha);free(expected.p);sp_require_same_generation();if(!sp_origin_mode)live_root_epoch_bind();}
+/* One recorded context vs one freshly observed context, without dying: the
+ * caller turns a mismatch into the refusal that names what actually changed. */
+static int equal_same(const char *p,const np_buf *expected){size_t n;char *s=load(p,&n);int ok=n==expected->n&&!memcmp(s,expected->p,n);free(s);return ok;}
+/* The recorded source inside a context record: the value of its "source" row
+ * (a 64-hex SID), copied into OUT. Returns OUT, or "ABSENT". */
+static const char *recorded_field(const np_buf *b,const char *key,char *out,size_t cap){
+ const char *a;size_t k=strlen(key);
+ out[0]=0;
+ if(!b||!b->p)return out;
+ { char needle[80];if(cx_fmt(needle,sizeof needle,"\n%s\t",key))return out;
+   a=strstr(b->p,needle);if(!a)return out;a+=strlen(needle); }
+ { const char *e=strchr(a,'\n');size_t z=e?(size_t)(e-a):strlen(a);if(z>=cap)z=cap-1;memcpy(out,a,z);out[z]=0; }
+ (void)k;
+ return out;
+}
+static void check_context(void){memset(job_seen,0,sizeof job_seen);free(kernel_observation.p);kernel_observation=(np_buf){0};kernel_observed=0;canonical(ctx);char p[4400];path(p,ctx,"context.tsv");size_t n;char *s=load(p,&n);if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))die("context-wire");extract_path(s,"cc",cc,sizeof cc);extract_path(s,"bootstrap",bootstrap,sizeof bootstrap);free(s);observe_inputs();{ if (cx_fmt(sid, sizeof sid, "%s",supplied_source)) { fprintf(stderr, "sourcepackage: text too long for sid\n"); exit(2); } }np_buf expected=context_record();if(!equal_same(p,&expected)){char rec[72];recorded_field(&expected,"source",rec,sizeof rec);fprintf(stderr,"sourcepackage: REFUSE source-sid-changed recorded=%s live=%s\n",rec[0]?rec:"ABSENT",sid);exit(2);}hash_bytes(expected.p,expected.n,context_sha);free(expected.p);sp_require_same_generation();if(!sp_origin_mode)live_root_epoch_bind();}
 typedef struct {int tool,recipe,phase;} SpJob;
 static SpJob find_job(const char *id){SpJob j={-1,-1,-1};for(int i=0;i<5;i++){char name[80];{ if (cx_fmt(name,sizeof name,"tool-%s",tools[i])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name)){j.tool=i;return j;}}const char *phases[]={"gen-","tbl-","net-"};for(int p=0;p<3;p++)for(int m=0;m<(int)(sizeof recipes/sizeof *recipes);m++){char name[160];{ if (cx_fmt(name,sizeof name,"%s%s",phases[p],recipes[m].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name)){j.recipe=m;j.phase=p;return j;}}die("unknown-or-PLANNED-job");return j;}
 static void job_paths(const char *id,SpJob j,char dir[4400],char output[4400],char receipt[4400]){path(dir,jobs,id);path(output,dir,j.tool>=0?"result.exe":j.phase==0?"result.json":j.phase==1?"result.tbl":"result.net");path(receipt,dir,"record.tsv");}
@@ -212,23 +253,231 @@ static int job_command(const char *id,SpJob j,char **v,char output[4400],char ex
  else{char name[160],tool_dir[4400];{ if (cx_fmt(name,sizeof name,"tool-%s",tools[j.phase])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }path(tool_dir,jobs,name);path(executable,tool_dir,"result.exe");v[n++]=executable;if(!j.phase){v[n++]=(char *)recipes[j.recipe].stage;v[n++]=output;for(int i=0;i<4&&recipes[j.recipe].flags[i];i++)v[n++]=(char *)recipes[j.recipe].flags[i];}else{{ if (cx_fmt(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }SpJob dj=find_job(name);char dd[4400],dr[4400];job_paths(name,dj,dd,dependency,dr);v[n++]=dependency;v[n++]=output;}}
  v[n]=0;return n;
 }
-static void verify_job(const char *id,int depth);
+/* The files a job actually opened, recorded at execution time. A hand-kept
+ * list is what let a units-result.tsv change keep a "reusable" verdict, so the
+ * list comes from the traced command instead (SPEED-02). Paths are absolute
+ * and must lie inside ROOT; a job whose list is empty is never reusable. */
+static const char *sp_reads_name="job-reads.before.tsv";
+static char *sp_reads_bytes(const char *p,size_t *n){
+ struct stat a,b;int fd;size_t at=0;char *s;
+ errno=0;
+ if(lstat(p,&a))die(errno==ENOENT?"job-reads-record-absent":"job-reads-record-stat");
+ if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>134217728)die("job-reads-record-shape");
+ fd=open(p,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+ if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino)die("job-reads-record-descriptor");
+ *n=(size_t)a.st_size;
+ s=malloc(*n+1);if(!s)die("allocation");
+ while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("job-reads-record-extent");at+=(size_t)z;}
+ close(fd);s[*n]=0;
+ return s;
+}
+/* The traced run writes one absolute path per line into job-reads.before.tsv.
+   For the identity each path is hashed now; a path that no longer exists is
+   recorded as ABSENT so its appearance later is a change. */
+static void sp_reads_row(np_buf *b,const char *dir){
+ char p[4400];path(p,dir,sp_reads_name);
+ size_t n;char *s=sp_reads_bytes(p,&n);
+ int rows=0;if(!n)die("job-reads-empty");
+ for(size_t at=0;at<n;){const char *e=(const char*)memchr(s+at,'\n',n-at);char line[4400];size_t z;
+  if(!e)die("job-reads-record-wire");
+  z=(size_t)(e-(s+at));if(z>=sizeof line-1)die("job-reads-record-wire");
+  if(mm_copy(line,(long)sizeof line,s+at,(long)z))die("job-reads-line-bound");line[z]=0;at+=(size_t)(e-(s+at))+1;
+  if(!line[0])continue;
+  { char h[65];struct stat st;errno=0;
+    if(lstat(line,&st)==0&&S_ISREG(st.st_mode))digest(line,h);else if(cx_fmt(h,65,"%s","ABSENT"))return;
+    np_puts(b,"read\t");np_puts(b,h);np_puts(b,"\t");np_puts(b,line);np_puts(b,"\n"); }
+  rows++;
+ }
+ free(s);
+ if(!rows)die("job-reads-empty");
+}
+/* Move the traced list beside the record: <evidence>.reads.tsv ->
+ * job-reads.before.tsv. 0 on success; absent or empty is an error, because a
+ * job whose reads were not observed must never look reusable. */
+int sp_reads_install(const char *evidence,const char *dir){
+ char src[4600],dst[4400];size_t z;char *s;int fd,dstfd;size_t at=0;
+ if(!evidence||!dir)return -1;
+ if(cx_fmt(src,sizeof src,"%s.reads.tsv",evidence))return -1;
+ path(dst,dir,sp_reads_name);
+ { struct stat st;errno=0;
+   if(lstat(src,&st)||!S_ISREG(st.st_mode)||st.st_size<=0)return -1; }
+ s=sp_reads_bytes(src,&z);
+ if(!z){free(s);return -1;}
+ dstfd=open(dst,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+ if(dstfd<0){free(s);return -1;}
+ while(at<z){ssize_t k=write(dstfd,s+at,z-at);if(k<0&&errno==EINTR)continue;if(k<=0){free(s);close(dstfd);return -1;}at+=(size_t)k;}
+ free(s);
+ if(fsync(dstfd)||close(dstfd))return -1;
+ return 0;
+}
+/* A job whose read list is absent or empty is never reusable. The list's
+ * content is re-derived by sp_job_record on every verification (each path is
+ * hashed fresh there), so comparing the receipt already catches any change. */
+static int verify_job(const char *id,int depth);
+static int sp_trace_off(void);
+static int sp_dep_invalid;
+static const char *sp_verify_dep;
 static int job_index(SpJob j){int at=j.tool>=0?j.tool:5+j.recipe*3+j.phase;if(SP_JOB_COUNT>1024||at<0||at>=SP_JOB_COUNT)die("job-recipe-capacity");return at;}
 /* Parent-side job-list validation must not call find_job: its existing child
  * refusal uses _exit. No I/O/global observation state is touched here. */
 static int sp_known_job_id(const char *id){char name[160];for(int i=0;i<5;i++){{ if (cx_fmt(name,sizeof name,"tool-%s",tools[i])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name))return 1;}const char *phases[]={"gen","tbl","net"};for(int m=0;m<SP_MODEL_COUNT;m++)for(int p=0;p<3;p++){{ if (cx_fmt(name,sizeof name,"%s-%s",phases[p],recipes[m].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name))return 1;}return 0;}
 static int sp_job_list_valid(const char *const *ids,int n){if(!ids||n<1||n>SP_JOB_COUNT)return 0;for(int i=0;i<n;i++){if(!ids[i]||!*ids[i]||strlen(ids[i])>=160||!sp_known_job_id(ids[i]))return 0;for(int j=0;j<i;j++)if(!strcmp(ids[i],ids[j]))return 0;}return 1;}
-static void dependency(np_buf *b,const char *id,int depth){verify_job(id,depth+1);SpJob j=find_job(id);int at=job_index(j);char dir[4400],out[4400],receipt[4400];job_paths(id,j,dir,out,receipt);row(b,id,job_receipt_sha[at]);row(b,out,job_output_sha[at]);}
-static np_buf job_record_observed(const char *id,SpJob j,int depth,char actual_output_sha[65]){clean_environment();np_buf b={0};np_puts(&b,"source-package-job-v1\n");row(&b,"status","PREPARED-no-test-result");row(&b,"environment-policy",environment_policy);row(&b,"context",context_sha);row(&b,"source",sid);row(&b,"job",id);if(j.tool<0){char name[160];{ if (cx_fmt(name,sizeof name,"tool-%s",tools[j.phase])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }dependency(&b,name,depth);if(j.phase){{ if (cx_fmt(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }dependency(&b,name,depth);}}
- char *v[20],out[4400],exe[4400],src[4400],inc[4400],dep[4400];int n=job_command(id,j,v,out,exe,src,inc,dep);np_buf argv={0};for(int i=0;i<n;i++){char key[32];{ if (cx_fmt(key,sizeof key,"arg-%d",i)) { fprintf(stderr, "sourcepackage: text too long for key\n"); exit(2); } }row(&b,key,v[i]);row(&argv,key,v[i]);}char h[65],dir[4400],receipt[4400],evidence[4400];job_paths(id,j,dir,out,receipt);path(evidence,dir,"command.argv.tsv");equal(evidence,&argv);free(argv.p);np_buf success={0};np_puts(&success,"rc\t0\n");path(evidence,dir,"command.status");equal(evidence,&success);free(success.p);const char *logs[]={"command.argv.tsv","command.stdout","command.stderr","command.status"};for(int i=0;i<4;i++){path(evidence,dir,logs[i]);digest(evidence,h);row(&b,logs[i],h);}if(j.tool>=0){digest(src,h);row(&b,"actual-seed-source",h);}else{digest(exe,h);row(&b,"actual-native-tool",h);}SpObservedFile *observed=sp_observe(out,0);if(!observed->n)die("empty-job-output");if(j.tool>=0){const unsigned char *bytes=observed->prefix;if(observed->prefix_n<64||memcmp(bytes,"\177ELF",4)||bytes[4]!=2||bytes[5]!=1||bytes[18]!=62||bytes[19]||access(sp_physical(out),X_OK))die("native-tool-not-executable-ELF64-x86_64");}memcpy(h,observed->hash,65);row(&b,"output",out);row(&b,"output-sha",h);if(actual_output_sha)strcpy(actual_output_sha,h);return b;
+/* A dependency row is written from the verified ancestor's own record. When the
+ * ancestor does not verify, the record being built is invalidated instead of
+ * killed: the caller answers MISS and reruns, which is the incremental path. */
+static void dependency(np_buf *b,const char *id,int depth){
+ /* Measurement-only runs have no reads, so an ancestor has no identity to
+    verify; the row then names the ancestor's output only. */
+ if(!sp_trace_off()&&verify_job(id,depth+1)){sp_dep_invalid=1;np_puts(b,"dep-invalid\t");np_puts(b,id);np_puts(b,"\n");return;}
+ SpJob j=find_job(id);int at=job_index(j);char dir[4400],out[4400],receipt[4400];
+ job_paths(id,j,dir,out,receipt);row(b,id,job_receipt_sha[at]);row(b,out,job_output_sha[at]);
 }
-static void verify_job(const char *id,int depth){if(depth>12)die("job-dependency-depth");SpJob j=find_job(id);int at=job_index(j);if(job_seen[at])return;char dir[4400],out[4400],receipt[4400];job_paths(id,j,dir,out,receipt);canonical(dir);np_buf b=job_record_observed(id,j,depth,job_output_sha[at]);equal(receipt,&b);hash_bytes(b.p,b.n,job_receipt_sha[at]);job_seen[at]=1;free(b.p);}
+/* Run one job command under observation and record what it opened.
+ * sy_trace_* is the L0 ptrace wrapper; when this target cannot trace, the
+ * result is a named refusal (never "nothing was read"). The list is written to
+ * EVIDENCE+".reads.tsv" as absolute paths, one per line, and is what
+ * job_record_observed turns into the job's read rows. */
+/* Run one job command under observation and record what it opened.
+ * sy_trace_* is the L0 ptrace wrapper; on a target that cannot trace the
+ * answer is a named refusal, never "nothing was read". Absolute paths inside
+ * ROOT_DIR are written to EVIDENCE+".reads.tsv", one per line; that file is
+ * what job_record_observed turns into the job's read rows. */
+int sp_trace_run(char *const v[],const char *root_dir,int secs,const char *evidence,np_result *out,char *why,size_t wl){
+ int pf[2],po[2],pe[2],pid,st,rounds=0,lines=0,cap=0,capn=0,ok=0,status=0,loop_status=-1;
+ char p[4600],buf[4600];
+ np_buf o={0},e={0};
+ (void)secs;
+ if(!v||!v[0]||!out||!root_dir||!evidence){cx_fmt(why,wl,"%s","trace-run-arguments");return -1;}
+ /* UNISACC_TRACE=0 runs the command without observation, for measuring what
+    observation costs. It is never a mode a candidate may be built in: a job
+    without reads has no identity, so the caller writes no reads file and reuse
+    will refuse it (job-reads-empty). */
+ /* UNISACC_TRACE=0 is a measurement-only mode: the command runs unobserved
+    and no read list is written, so its record has no identity and reuse
+    refuses it. Never used to build a candidate. */
+ if(sp_trace_off()){
+  int fd0=open("/dev/null",O_WRONLY),pid,st;
+  if(fd0<0)return -1;
+  pid=fork();
+  if(pid<0){close(fd0);return -1;}
+  if(pid==0){dup2(fd0,1);dup2(fd0,2);close(fd0);if(chdir(root_dir))_exit(126);execvp(v[0],v);_exit(127);}
+  close(fd0);
+  while(waitpid(pid,&st,0)<0&&errno==EINTR){}
+  out->out=0;out->outn=0;out->err=0;out->errn=0;out->residue=0;
+  out->rc=WIFEXITED(st)?WEXITSTATUS(st):-WTERMSIG(st);
+  return 0;
+ }
+ if(!sy_trace_available()){cx_fmt(why,wl,"%s","NOT_RUN trace-unavailable-on-this-target");return -1;}
+ if(pipe(pf)||pipe(po)||pipe(pe)){cx_fmt(why,wl,"%s","OSError: cannot create pipe");return -1;}
+ fcntl(pf[0],F_SETFD,FD_CLOEXEC);fcntl(pf[1],F_SETFD,FD_CLOEXEC);
+ fcntl(po[0],F_SETFD,FD_CLOEXEC);fcntl(pe[0],F_SETFD,FD_CLOEXEC);
+ pid=fork();
+ if(pid<0){close(pf[0]);close(pf[1]);close(po[0]);close(po[1]);close(pe[0]);close(pe[1]);cx_fmt(why,wl,"%s","OSError: fork failed");return -1;}
+ if(pid==0){
+  size_t z;
+  close(pf[0]);close(po[0]);close(pe[0]);
+  dup2(po[1],1);dup2(pe[1],2);close(po[1]);close(pe[1]);
+  if(sy_trace_me()){int er=errno;z=write(pf[1],&er,sizeof er);(void)z;_exit(255);}
+  if(chdir(root_dir)!=0){int er=errno;z=write(pf[1],&er,sizeof er);(void)z;_exit(255);}
+  execvp(v[0],v);
+  {int er=errno;z=write(pf[1],&er,sizeof er);(void)z;}
+  _exit(255);
+ }
+ close(pf[1]);close(po[1]);close(pe[1]);
+ { ssize_t k=read(pf[0],buf,sizeof buf);close(pf[0]);
+   if(k>0&&k<=(ssize_t)sizeof buf){int er=0;if(mm_copy(&er,(long)sizeof er,buf,(long)sizeof er))return -1;if(er){while(waitpid(pid,&st,0)<0&&errno==EINTR){}close(po[0]);close(pe[0]);cx_fmt(why,wl,"OSError: setup errno=%d",er);return -1;}} }
+ waitpid(pid,&st,0);
+ if(sy_trace_follow(pid)){kill(pid,SIGKILL);while(waitpid(pid,&st,0)<0&&errno==EINTR){}close(po[0]);close(pe[0]);cx_fmt(why,wl,"%s","trace-follow-failed");return -1;}
+ fcntl(po[0],F_SETFL,O_NONBLOCK);fcntl(pe[0],F_SETFL,O_NONBLOCK);
+ { int open_o=1,open_e=1;
+   np_put(&o,"",0);np_put(&e,"",0);
+   /* Drain output between trace events; the traced process is stopped by
+      ptrace, not reaped here, so every syscall of every descendant is seen. */
+   for(;;){
+    if(open_o){ssize_t k=read(po[0],buf,sizeof buf);if(k>0)np_put(&o,buf,(size_t)k);else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){open_o=0;close(po[0]);}}
+    if(open_e){ssize_t k=read(pe[0],buf,sizeof buf);if(k>0)np_put(&e,buf,(size_t)k);else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){open_e=0;close(pe[0]);}}
+    if(++rounds>20000000){cx_fmt(why,wl,"%s","trace-round-bound");free(o.p);free(e.p);return -1;}
+    { int rs=-1,who=0; int r=sy_trace_poll_status(&rs,&who); if(rs>=0)loop_status=rs;
+      if(r<0){ if(r==-ECHILD){if(open_o){close(po[0]);open_o=0;}if(open_e){close(pe[0]);open_e=0;}} if(!open_o&&!open_e)break; }
+    }
+   }
+ }
+ out->out=o.p;out->outn=o.n;out->err=e.p;out->errn=e.n;out->residue=0;
+ /* The first waitpid returned the tracee's SIGTRAP stop, not its exit; the
+    trace loop reaps it, so the exit status comes from there. */
+ /* loop_status is the traced process's exit code (0 is a real success), so the
+    "never saw it" marker is the initial -1, not any negative value. */
+ out->rc=loop_status;
+ { int n=sy_trace_count(),i;
+   for(i=0;i<n;i++){const char *q=sy_trace_path(i);size_t z;if(!q)continue;if(strncmp(q,root_dir,strlen(root_dir)))continue;z=strlen(q);if(z>1&&q[z-1]=='.')continue;lines++;} }
+ if(!lines){cx_fmt(why,wl,"%s","trace-read-set-empty");return -1;}
+ (void)cap;(void)capn;(void)ok;(void)status;
+ if(cx_fmt(p,sizeof p,"%s.reads.tsv",evidence))return -1;
+ { int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;np_buf b={0};int i,n=sy_trace_count();
+   if(fd<0){cx_fmt(why,wl,"%s","reads-record-create");return -1;}
+   for(i=0;i<n;i++){const char *q=sy_trace_path(i);size_t z;if(!q)continue;if(strncmp(q,root_dir,strlen(root_dir)))continue;z=strlen(q);if(z>1&&q[z-1]=='.')continue;np_puts(&b,q);np_puts(&b,"\n");}
+   while(at<b.n){ssize_t z=write(fd,b.p+at,b.n-at);if(z<0&&errno==EINTR)continue;if(z<=0){free(b.p);close(fd);cx_fmt(why,wl,"%s","reads-record-write");return -1;}at+=(size_t)z;}
+   free(b.p);fsync(fd);close(fd);}
+ return 0;
+}
+/* A record whose evidence no longer matches can never be verified again: the
+ * caller must treat the job as invalid (MISS) so it runs again. Returning a
+ * pre-filled, unequal receipt keeps every check a pure comparison and lets
+ * sp_job_verified report "record changed" instead of exiting the process. */
+static np_buf sp_invalidate_record(const char *dir){
+ np_buf b={0};np_puts(&b,"source-package-job-invalidated\n");np_puts(&b,dir);np_puts(&b,"\n");return b;
+}
+/* Measurement-only: with UNISACC_TRACE=0 the command ran unobserved and wrote
+ * no read list, so the record carries no read rows. Such a record has no
+ * identity and reuse refuses it (job-reads-empty); it exists only so that a
+ * wall-clock comparison can build every job. */
+static int sp_trace_off(void){const char *o=getenv("UNISACC_TRACE");return o&&!strcmp(o,"0");}
+static void sp_job_dir(const char *id,char out[4400]){path(out,jobs,id);}
+np_buf sp_job_record(const char *id,SpJob j,int depth,char actual_output_sha[65]){clean_environment();sp_dep_invalid=0;np_buf b={0};np_puts(&b,"source-package-job-v1\n");
+row(&b,"status","PREPARED-no-test-result");row(&b,"environment-policy",environment_policy);row(&b,"job",id);if(j.tool<0){char name[160];{ if (cx_fmt(name,sizeof name,"tool-%s",tools[j.phase])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }dependency(&b,name,depth);if(j.phase){{ if (cx_fmt(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }dependency(&b,name,depth);}}
+char *v[20],out[4400],exe[4400],src[4400],inc[4400],dep[4400];int n=job_command(id,j,v,out,exe,src,inc,dep);np_buf argv={0};for(int i=0;i<n;i++){char key[32];{ if (cx_fmt(key,sizeof key,"arg-%d",i)) { fprintf(stderr, "sourcepackage: text too long for key\n"); exit(2); } }row(&b,key,v[i]);row(&argv,key,v[i]);}char h[65],dir[4400],receipt[4400],evidence[4400];job_paths(id,j,dir,out,receipt);path(evidence,dir,"command.argv.tsv");if(sp_equal_bytes(evidence,&argv)){free(argv.p);return sp_invalidate_record(dir);}free(argv.p);
+if(!sp_trace_off()){ char rdir[4400];sp_job_dir(id,rdir);sp_reads_row(&b,rdir); }
+np_buf success={0};np_puts(&success,"rc\t0\n");path(evidence,dir,"command.status");if(sp_equal_bytes(evidence,&success)){free(success.p);return sp_invalidate_record(dir);}free(success.p);const char *logs[]={"command.argv.tsv","command.stdout","command.stderr","command.status"};for(int i=0;i<4;i++){path(evidence,dir,logs[i]);digest(evidence,h);row(&b,logs[i],h);}if(j.tool>=0){digest(src,h);row(&b,"actual-seed-source",h);}else{digest(exe,h);row(&b,"actual-native-tool",h);}SpObservedFile *observed=sp_observe(out,0);if(!observed->n)die("empty-job-output");if(j.tool>=0){const unsigned char *bytes=observed->prefix;if(observed->prefix_n<64||memcmp(bytes,"\177ELF",4)||bytes[4]!=2||bytes[5]!=1||bytes[18]!=62||bytes[19]||access(sp_physical(out),X_OK))die("native-tool-not-executable-ELF64-x86_64");}if(mm_copy(h,65,observed->hash,65))return sp_invalidate_record(dir);row(&b,"output",out);row(&b,"output-sha",h);if(actual_output_sha&&mm_copy(actual_output_sha,65,h,65))return sp_invalidate_record(dir);return b;
+}
+/* Verify one job and every ancestor it depends on. The answer is a verdict,
+ * not an exit: 0 verified, 1 this job's record or read list no longer matches,
+ * 2 an ancestor does (reason names it). A caller deciding about reuse turns any
+ * non-zero answer into a MISS and runs the job again; only a caller asserting
+ * a finished package turns it into a named refusal. */
+static int verify_job(const char *id,int depth){
+ if(depth>12)return 3;
+ SpJob j=find_job(id);int at=job_index(j);
+ if(job_seen[at])return 0;
+ char dir[4400],out[4400],receipt[4400];
+ job_paths(id,j,dir,out,receipt);canonical(dir);
+ { char rp[4400];struct stat st;path(rp,dir,sp_reads_name);errno=0;
+   if(lstat(rp,&st)||!S_ISREG(st.st_mode))return 1; }
+ if(j.tool<0){
+  char name[160];if(cx_fmt(name,sizeof name,"tool-%s",tools[j.phase]))return 2;
+  { int dep=verify_job(name,depth+1);if(dep){sp_verify_dep=name;return 2;} }
+  if(j.phase){
+   if(cx_fmt(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id))return 2;
+   { int dep=verify_job(name,depth+1);if(dep){sp_verify_dep=name;return 2;} }
+  }
+ }
+ np_buf b=sp_job_record(id,j,depth,job_output_sha[at]);
+ { int depinvalid=sp_dep_invalid;size_t n;char *disk=load(receipt,&n);
+   int same=n==b.n&&!memcmp(disk,b.p,n);free(disk);
+   if(!same){free(b.p);return depinvalid?2:1;} }
+ hash_bytes(b.p,b.n,job_receipt_sha[at]);job_seen[at]=1;free(b.p);
+ return 0;
+}
+const char *sp_verify_dep_name(void){return sp_verify_dep?sp_verify_dep:"";}
+/* Public verdict for one job, for a caller that answers MISS instead of
+ * refusing: 0 verified, 1 this job changed, 2 an ancestor changed (named in
+ * sp_verify_dep), 3 depth overrun. */
+int sp_job_verified(const char *id){sp_verify_dep=0;return verify_job(id,0);}
 /* Consumer output remains separate from SOURCE_CTX. Phase receipts are honest
  * source-package-phase-v1 observations, never P7 refresh receipts. */
 static const char *target_ids[]={"lnx-arm64","lnx-x86_64","osx-arm64","osx-x86_64","win-arm64","win-x86_64"};
 static const char *route_ids[]={"lnx/arm64","lnx/x86_64","osx/arm64","osx/x86_64","win/arm64","win/x86_64"};
 static int target_index(const char *s){for(int i=0;i<6;i++)if(!strcmp(s,target_ids[i]))return i;die("unknown-target");return -1;}
-static void model_output(const char *id,int phase,char output[4400]){char job[160],dir[4400],receipt[4400];{ if (cx_fmt(job,sizeof job,"%s-%s",phase==1?"tbl":"net",id)) { fprintf(stderr, "sourcepackage: text too long for job\n"); exit(2); } }verify_job(job,0);job_paths(job,find_job(job),dir,output,receipt);}
+static void model_output(const char *id,int phase,char output[4400]){char job[160],dir[4400],receipt[4400];{ if (cx_fmt(job,sizeof job,"%s-%s",phase==1?"tbl":"net",id)) { fprintf(stderr, "sourcepackage: text too long for job\n"); exit(2); } }if(verify_job(job,0))die("job-not-verified");job_paths(job,find_job(job),dir,output,receipt);}
 static unsigned long long kernel_u64(const char *p){unsigned long long v=0;for(int i=7;i>=0;i--)v=(v<<8)|(unsigned char)p[i];return v;}
 static void kernel_construction(np_buf *out,const char *kernel_context_sha){
  const char *outputs[]={"assembler.cx","contracts.cx"};char p[4400],dir[4400],h[65],assembler_source[65],assembler_binary[65];np_buf material={0};np_puts(&material,"unisacc-asm-material-v3\nstatus\tPREPARED\nscope\tsource-preserving-C-assembler-transition\nroot\t");np_puts(&material,root);np_puts(&material,"\n");for(int i=0;i<7;i++){const char *in=ki_asm_file(i);path(p,root,in);SpObservedFile *f=sp_observe(p,0);size_t n=f->n;memcpy(h,f->hash,65);np_puts(&material,i==3?"compiler-input\t":"source-input\t");np_puts(&material,in);np_puts(&material,"\t");np_putll(&material,(long long)n);np_puts(&material,"\t");np_puts(&material,h);np_puts(&material,"\n");}path(dir,kgen,"assembler");for(int i=0;i<2;i++){path(p,dir,outputs[i]);SpObservedFile *f=sp_observe(p,0);size_t n=f->n;memcpy(h,f->hash,65);if(!i){ if (cx_fmt(assembler_source, sizeof assembler_source, "%s",h)) { fprintf(stderr, "sourcepackage: text too long for assembler_source\n"); exit(2); } }np_puts(&material,"material\t");np_puts(&material,outputs[i]);np_puts(&material,"\t");np_putll(&material,(long long)n);np_puts(&material,"\t");np_puts(&material,h);np_puts(&material,"\n");}path(p,dir,"material.tsv");equal(p,&material);hash_bytes(material.p,material.n,h);row(out,p,h);free(material.p);path(p,kgen,"assembler-native");digest(p,assembler_binary);np_buf native={0};np_puts(&native,"native-assembler-cache-v1\nflags\t-O2 -fno-trim-libc\n");row(&native,"context",kernel_context_sha);row(&native,"source",assembler_source);row(&native,"artifact",assembler_binary);path(p,kgen,"assembler-native.tsv");equal(p,&native);hash_bytes(native.p,native.n,h);row(out,p,h);free(native.p);
@@ -307,12 +556,12 @@ static void sp_write_report(const sp_result *r,int job_set_mode){np_buf b={0};if
  * verify_job remains the original complete argv/status/log/output/ancestor
  * algorithm. The fresh child's seen/read maps only coalesce shared inputs. */
 static void sp_job_union(const char *const *subjects,int n,sp_result *result){
- for(int i=0;i<n;i++)verify_job(subjects[i],0);
+ for(int i=0;i<n;i++)if(verify_job(subjects[i],0))die("job-not-verified");
  np_buf outputs={0},receipts={0};np_puts(&outputs,"source-package-job-union-outputs-v1\n");np_puts(&receipts,"source-package-job-union-receipts-v1\n");row(&outputs,"context",context_sha);row(&receipts,"context",context_sha);row(&outputs,"source",sid);row(&receipts,"source",sid);
  const char *phases[]={"gen","tbl","net"};for(int i=0;i<SP_JOB_COUNT;i++)if(job_seen[i]){char id[160];if(i<5){ if (cx_fmt(id,sizeof id,"tool-%s",tools[i])) { fprintf(stderr, "sourcepackage: text too long for id\n"); exit(2); } }else{int m=(i-5)/3,p=(i-5)%3;snprintf(id,sizeof id,"%s-%s",phases[p],recipes[m].id);if(p==2)result->models++;}row(&outputs,id,job_output_sha[i]);row(&receipts,id,job_receipt_sha[i]);result->jobs++;}
  if(!result->jobs)die("empty-verified-job-union");hash_bytes(outputs.p,outputs.n,result->artifact);hash_bytes(receipts.p,receipts.n,result->receipt);strcpy(result->manifest,context_sha);free(outputs.p);free(receipts.p);
 }
-static void sp_child(const char *r,const char *material,const char *subject,const char *fresh,int job_mode,const SpOriginRequest *origin,const char *const *subjects,int nsubjects){sp_indices_init();if(origin)sp_origin_init(origin);sp_setup_child(r,material,fresh,job_mode);sp_result result;memset(&result,0,sizeof result);if(job_mode==2||job_mode==3){sp_job_union(subjects,nsubjects,&result);}else if(job_mode){verify_job(subject,0);SpJob j=find_job(subject);int at=job_index(j);strcpy(result.artifact,job_output_sha[at]);strcpy(result.receipt,job_receipt_sha[at]);strcpy(result.manifest,context_sha);for(int i=0;i<SP_JOB_COUNT;i++)if(job_seen[i])result.jobs++;result.models=j.tool<0?1:0;}else{np_buf inputs=complete_inputs();np_buf record=package_record(&inputs);char p[4400];pc_file(p,"model-inputs.tsv");equal(p,&inputs);hash_bytes(inputs.p,inputs.n,result.manifest);pc_file(p,"package.tsv");equal(p,&record);hash_bytes(record.p,record.n,result.receipt);pc_file(p,"compiler.pkg");digest(p,result.artifact);free(inputs.p);free(record.p);result.jobs=SP_JOB_COUNT;result.models=SP_MODEL_COUNT;}sp_finish_child(&result);if(sp_origin_mode&&sp_origin_material.origin_context_version==2&&(strcmp(result.artifact,sp_origin_material.origin_package)||strcmp(result.manifest,sp_origin_material.origin_manifest)||strcmp(result.receipt,sp_origin_material.origin_receipt)))die("origin-profile-original-package-identity");if(sp_origin_mode){sp_mapping_witness();sp_execution_check(1);sp_origin_state.material=result;}sp_write_report(&result,job_mode==3?3:job_mode==2);_exit(0);}
+static void sp_child(const char *r,const char *material,const char *subject,const char *fresh,int job_mode,const SpOriginRequest *origin,const char *const *subjects,int nsubjects){sp_indices_init();if(origin)sp_origin_init(origin);sp_setup_child(r,material,fresh,job_mode);sp_result result;memset(&result,0,sizeof result);if(job_mode==2||job_mode==3){sp_job_union(subjects,nsubjects,&result);}else if(job_mode){if(verify_job(subject,0))die("job-not-verified");SpJob j=find_job(subject);int at=job_index(j);memcpy(result.artifact,job_output_sha[at],65);memcpy(result.receipt,job_receipt_sha[at],65);memcpy(result.manifest,context_sha,65);for(int i=0;i<SP_JOB_COUNT;i++)if(job_seen[i])result.jobs++;result.models=j.tool<0?1:0;}else{np_buf inputs=complete_inputs();np_buf record=package_record(&inputs);char p[4400];pc_file(p,"model-inputs.tsv");equal(p,&inputs);hash_bytes(inputs.p,inputs.n,result.manifest);pc_file(p,"package.tsv");equal(p,&record);hash_bytes(record.p,record.n,result.receipt);pc_file(p,"compiler.pkg");digest(p,result.artifact);free(inputs.p);free(record.p);result.jobs=SP_JOB_COUNT;result.models=SP_MODEL_COUNT;}sp_finish_child(&result);if(sp_origin_mode&&sp_origin_material.origin_context_version==2&&(strcmp(result.artifact,sp_origin_material.origin_package)||strcmp(result.manifest,sp_origin_material.origin_manifest)||strcmp(result.receipt,sp_origin_material.origin_receipt)))die("origin-profile-original-package-identity");if(sp_origin_mode){sp_mapping_witness();sp_execution_check(1);sp_origin_state.material=result;}sp_write_report(&result,job_mode==3?3:job_mode==2);_exit(0);}
 static long long sp_clock_ns(void){struct timespec t={0};long rc=__syscall6(228,1,(long)&t,0,0,0);if(_unisa_ret(rc)||t.tv_sec<0||t.tv_nsec<0||t.tv_nsec>=1000000000L||(unsigned long long)t.tv_sec>(unsigned long long)(LLONG_MAX-t.tv_nsec)/1000000000ULL)return -1;return (long long)t.tv_sec*1000000000LL+t.tv_nsec;}
 static int sp_parse_row(char **at,const char *key,char *out,size_t cap){char *line=*at,*end=strchr(line,'\n');size_t k=strlen(key);if(!end||(size_t)(end-line)<=k+1||memcmp(line,key,k)||line[k]!='\t'||memchr(line+k+1,'\t',(size_t)(end-line-k-1)))return -1;size_t n=(size_t)(end-line-k-1);if(n>=cap)return -1;memcpy(out,line+k+1,n);out[n]=0;*at=end+1;return 0;}
 static int sp_small_uint(const char *s,int max){if(!*s)return -1;int n=0;for(;*s;s++){if(*s<'0'||*s>'9'||n>(max-(*s-'0'))/10)return -1;n=n*10+*s-'0';}return n;}
@@ -358,13 +607,28 @@ int sp_verify_package_snapshot(const char *root_arg,const char *packages,const c
 int sp_require_live_generation(void){sp_require_same_generation();return 0;}
 int sp_model_count(void){return SP_MODEL_COUNT;}
 int sp_job_count(void){return SP_JOB_COUNT;}
+/* Bind ROOT and the job directory for the record/verify implementation. The
+ * producer calls this once per process before any job work, so the single
+ * implementation can derive every job path itself. */
+static int sp_copy_field(char *dst,size_t cap,const char *src){
+ size_t z;
+ if(!src)return -1;
+ z=strlen(src);if(z>=cap)return -1;
+ if(mm_copy(dst,(long)cap,src,(long)z))return -1;
+ dst[z]=0;
+ return 0;
+}
+/* Bind ROOT and the job directory for the record/verify implementation. */
+int sp_bind_job_paths(const char *root_arg,const char *jobs_dir,const char *cc_path,const char *bound_path){
+ if(sp_copy_field(root,sizeof root,root_arg)||sp_copy_field(jobs,sizeof jobs,jobs_dir))return -1;
+ if(sp_copy_field(cc,sizeof cc,cc_path)||sp_copy_field(bound,sizeof bound,bound_path))return -1;
+ return 0;
+}
 int sp_job_command(const char *root_arg,const char *jobs_dir,const char *cc_path,const char *bound_path,const char *id,char **v,int *n){
  size_t z;
  if(!root_arg||!jobs_dir||!cc_path||!bound_path||!id||!v||!n)return -1;
- z=strlen(root_arg);if(z>=sizeof root)return -1;memcpy(root,root_arg,z+1);
- z=strlen(jobs_dir);if(z>=sizeof jobs)return -1;memcpy(jobs,jobs_dir,z+1);
- z=strlen(cc_path);if(z>=sizeof cc)return -1;memcpy(cc,cc_path,z+1);
- z=strlen(bound_path);if(z>=sizeof bound)return -1;memcpy(bound,bound_path,z+1);
+ if(sp_copy_field(root,sizeof root,root_arg)||sp_copy_field(jobs,sizeof jobs,jobs_dir))return -1;
+ if(sp_copy_field(cc,sizeof cc,cc_path)||sp_copy_field(bound,sizeof bound,bound_path))return -1;
  SpJob j=find_job(id);
  *n=job_command(id,j,v,sp_job_out,sp_job_exe,sp_job_src,sp_job_inc,sp_job_dep);
  return 0;
