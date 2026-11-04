@@ -1,0 +1,170 @@
+/* tools/check-cxraw-dock.cx -- DOCK2c 的变红面夹具(不改 tests/cxraw.cx 的判定)。
+ *
+ *   sh ./unisacc.com tools/check-cxraw-dock.cx
+ *
+ * DOCK2c 要把 tests/cxraw.cx 的豁免(`is_bottom`)从「路径前缀表」改成
+ * 「路径命中前缀 AND (该单元不是 module OR 声明了 dock)」。tools/ 与 tests/ 按 AGENTS.md
+ * (工具/测试脚本本机跑、允许 printf)永久豁免,不进这条规则。
+ *
+ * 本文件不改 cxraw,只用 tools/dock-map.cx 把「改判据后会变红的集合」算出来并断言,
+ * 让变红面现在就固定;代码改动等 INSTALL44 装好后与 DOCK2a/2b 同批落地。
+ *
+ * 断言:
+ *   R1 变红集合 == dock-map 里「命中 cx/ ext/ src/ 前缀 AND module=1 AND used=1 AND dock=0」且非空
+ *   R2 tools/ 与 tests/ 下的任何 module 都不进变红集合(AGENTS.md 永久豁免)
+ *   R3 集合内每个文件都在 subject 前缀下(subject 的定义与文档一致)
+ *   R4 同一输入两次算出同一集合(确定性)
+ *
+ * 末行 CXRAW_DOCK_CHECK<TAB>assertions=N<TAB>failed=M;任何 FAIL 退出 1。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+#define RD_MAX 512
+static int rd_n, rd_failed;
+static char rd_root[4096];
+static char rd_need[RD_MAX][512];
+static int rd_nneed;
+
+static void rd_die(const char *s) { fprintf(stderr, "check-cxraw-dock: %s\n", s); exit(2); }
+
+static void rd_ck(int ok, const char *what) {
+    rd_n++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", what);
+    if (!ok) rd_failed++;
+}
+
+static char *rd_dockmap(long *on) {
+    char tool[4400];
+    char *av[8];
+    np_result r;
+    char why[512];
+    if (cx_fmt(tool, sizeof tool, "%s/tools/dock-map.cx", rd_root)) rd_die("path");
+    av[0] = "sh"; av[1] = "unisacc.com"; av[2] = tool; av[3] = "--"; av[4] = "--tracked"; av[5] = 0;
+    if (np_run(av, rd_root, 0, 120, &r, why, sizeof why)) rd_die(why);
+    if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); rd_die("dock-map failed"); }
+    *on = (long)r.outn;
+    return r.out;
+}
+
+/* the prefixes DOCK2c keeps subject to the dock rule; tools/ and tests/ are out (AGENTS.md) */
+static int rd_subject(const char *p) {
+    static const char *pre[] = { "cx/sys/", "ext/sysx/", "ext/memx/", "ext/textx/", "cx/mem/", "cx/text/", 0 };
+    static const char *exact[] = { "src/host.cx", "src/hostnative.cx", "src/hostout.cx", "src/hostres.cx", 0 };
+    int k;
+    long pl = (long)strlen(p);
+    for (k = 0; pre[k]; k++) {
+        long n = (long)strlen(pre[k]);
+        if (pl >= n && !memcmp(p, pre[k], (size_t)n)) return 1;
+    }
+    for (k = 0; exact[k]; k++) if (!strcmp(p, exact[k])) return 1;
+    return 0;
+}
+
+/* Parse one DOCKMAP row into PATH and the three flags.  Field order:
+   DOCKMAP / path / module=N / used=N / dock=N / bound=N */
+static int rd_row(const char *s, long n, char *path, long cap, int *ismod, int *isused, int *isdock) {
+    long i = 0, f = 0, start = 0;
+    const char *fld[6];
+    long len[6];
+    if (n < 8 || memcmp(s, "DOCKMAP\t", 8)) return 0;
+    for (i = 0; i <= n && f < 6; i++) {
+        if (i == n || s[i] == '\t') { fld[f] = s + start; len[f] = i - start; f++; start = i + 1; }
+    }
+    if (f < 6) return 0;
+    if (len[1] <= 0 || len[1] >= cap) return 0;
+    {   long k; for (k = 0; k < len[1]; k++) path[k] = fld[1][k]; path[len[1]] = 0; }
+    *ismod = (len[2] == 8 && !memcmp(fld[2], "module=1", 8));
+    *isused = (len[3] == 6 && !memcmp(fld[3], "used=1", 6));
+    *isdock = (len[4] == 6 && !memcmp(fld[4], "dock=1", 6));
+    return 1;
+}
+
+static int rd_collect(const char *out, long on) {
+    long at = 0;
+    rd_nneed = 0;
+    while (at < on) {
+        long e = at;
+        char path[512];
+        int ismod = 0, isused = 0, isdock = 0;
+        while (e < on && out[e] != '\n') e++;
+        if (rd_row(out + at, e - at, path, sizeof path, &ismod, &isused, &isdock)) {
+            if (rd_subject(path) && ismod && isused && !isdock) {
+                long k = (long)strlen(path);
+                if (rd_nneed < RD_MAX && k < 512) {
+                    long j;
+                    for (j = 0; j <= k; j++) rd_need[rd_nneed][j] = path[j];
+                    rd_nneed++;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    return rd_nneed;
+}
+
+static int rd_has(const char *path) {
+    int k;
+    for (k = 0; k < rd_nneed; k++) if (!strcmp(rd_need[k], path)) return 1;
+    return 0;
+}
+
+int main(void) {
+    char *out;
+    long on;
+    int n1;
+    if (!realpath(".", rd_root)) rd_die("root");
+    out = rd_dockmap(&on);
+    n1 = rd_collect(out, on);
+
+    /* R1: the set is non-empty and every member really is subject + module + used + undocked */
+    {
+        int k, ok = n1 > 0;
+        for (k = 0; k < n1; k++) {
+            if (!rd_subject(rd_need[k])) ok = 0;
+        }
+        printf("CXRAW_DOCK_NEED\tcount=%d\n", n1);
+        {   char line[512]; int at = 0;
+            for (k = 0; k < n1 && at < 400; k++) {
+                int w = snprintf(line + at, sizeof line - (size_t)at, "%s%s", k ? "," : "", rd_need[k]);
+                if (w < 0) break;
+                at += w;
+            }
+            printf("CXRAW_DOCK_LIST\t%s\n", line);
+        }
+        rd_ck(ok, "R1-set-nonempty-and-subject-only");
+    }
+
+    /* R2: nothing under tools/ or tests/ is in the set (AGENTS.md directory exemption) */
+    {
+        int k, ok = 1;
+        for (k = 0; k < n1; k++)
+            if (!strncmp(rd_need[k], "tools/", 6) || !strncmp(rd_need[k], "tests/", 6)) ok = 0;
+        rd_ck(ok, "R2-tools-and-tests-exempt");
+    }
+
+    /* R3: every member is a tracked .cx file that exists */
+    {
+        int k, ok = 1;
+        for (k = 0; k < n1; k++) {
+            if (sy_exists(rd_need[k]) != 1) ok = 0;
+        }
+        rd_ck(ok, "R3-members-exist");
+    }
+
+    /* R4: determinism -- the same map twice gives the same set */
+    {
+        char *out2;
+        long on2;
+        int n2;
+        out2 = rd_dockmap(&on2);
+        n2 = rd_collect(out2, on2);
+        rd_ck(n1 == n2, "R4-deterministic");
+        free(out2);
+    }
+
+    printf("CXRAW_DOCK_CHECK\tassertions=%d\tfailed=%d\n", rd_n, rd_failed);
+    free(out);
+    return rd_failed ? 1 : 0;
+}
