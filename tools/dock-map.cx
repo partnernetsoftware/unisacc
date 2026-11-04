@@ -1,0 +1,258 @@
+/* tools/dock-map.cx -- who is a module, and who declares a dock.
+ *
+ *   sh ./unisacc.com tools/dock-map.cx -- [--tracked | FILE...]
+ *
+ * Prints one line per tracked (or given) .cx file:
+ *
+ *   DOCKMAP<TAB>path<TAB>module=0|1<TAB>used=0|1<TAB>dock=0|1<TAB>bound=0|1
+ *
+ *   module=1  the file declares `#pragma unisa module NAME`
+ *   used=1    some other .cx has `#pragma unisa use NAME` for that NAME (a module that
+ *             nobody uses is still subject to the rule: it is a module by declaration)
+ *   dock=1    the file declares `#pragma unisa dock` (bare, or `dock include|libc`)
+ *   bound=1   the file is a docking unit the rule does not ask: it is NOT a module
+ *             (neither declares `#pragma unisa module` nor is used).  A pure script has
+ *             this shape -- plans/cx-dock-pragma.md "脚本不是模块".
+ *
+ * Then a summary line:
+ *
+ *   DOCKMAP_TAB files=N modules=M used=U docked=D scripts=S
+ *
+ * The three layering ratchets (tests/cxinclude.cx, tests/cxlibc.cx, tests/cxraw.cx) read
+ * this map instead of re-deriving "is this a module" each in its own way, and the use graph
+ * is scanned once here instead of three times.
+ *
+ * Reading rule: the pragmas are recognised in the leading line-comment-free region of a
+ * file, the same way cx/cx0/plan.cx and src/cxmod.cx recognise them (a `pragma unisa`
+ * directive inside a conditional is refused by the compiler; here it is simply found).
+ *
+ * rc 0 always unless the usage or git fails (rc 2).
+ */
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+#define DM_CAP (1L << 24)
+static char *dm_out;
+static long dm_on;
+
+static void dm_die(const char *s) { fprintf(stderr, "dock-map: %s\n", s); exit(2); }
+
+static void dm_put(const char *s, long n) {
+    if (dm_on + n >= DM_CAP - 4096) dm_die("output bound");
+    { long k; for (k = 0; k < n; k++) dm_out[dm_on + k] = s[k]; }
+    dm_on += n;
+}
+
+/* Is NAME (n bytes) declared as `#pragma unisa module NAME` anywhere in B?  Also returns the
+   declared name's offset/length through MOD/B and MOD/N. */
+static int dm_module(const char *b, long n, long *modb, long *modn) {
+    long i;
+    *modb = 0; *modn = 0;
+    for (i = 0; i + 8 < n; i++) {
+        if (b[i] != '#' || memcmp(b + i + 1, "pragma", 6) != 0) continue;
+        {
+            long j = i + 7;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j + 5 > n || memcmp(b + j, "unisa", 5) != 0) continue;
+            j += 5;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j + 6 > n || memcmp(b + j, "module", 6) != 0) continue;
+            j += 6;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            {   long s = j;
+                while (j < n && ((b[j] >= 'a' && b[j] <= 'z') || (b[j] >= 'A' && b[j] <= 'Z') ||
+                                 (b[j] >= '0' && b[j] <= '9') || b[j] == '_')) j++;
+                if (j > s) { *modb = s; *modn = j - s; return 1; }
+            }
+        }
+    }
+    return 0;
+}
+
+/* Does B declare `#pragma unisa dock` (bare or with an argument)? */
+static int dm_dock(const char *b, long n) {
+    long i;
+    for (i = 0; i + 8 < n; i++) {
+        if (b[i] != '#' || memcmp(b + i + 1, "pragma", 6) != 0) continue;
+        {
+            long j = i + 7;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j + 5 > n || memcmp(b + j, "unisa", 5) != 0) continue;
+            j += 5;
+            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j + 4 > n || memcmp(b + j, "dock", 4) != 0) continue;
+            if (j + 4 < n && (b[j + 4] >= 'a' && b[j + 4] <= 'z')) continue;   /* dockx, docker */
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0; long ln = 0;
+    long at = 0;
+    char path[4200];
+    long files = 0, modules = 0, used = 0, docked = 0, scripts = 0;
+    int i;
+    char **names = 0; long nn = 0, ncap = 0;
+
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--tracked")) {
+            np_result r;
+            char why[512];
+            char *av[] = { "git", "ls-files", "-z", "*.cx", 0 };
+            if (np_run(av, ".", 0, 50, &r, why, sizeof why)) dm_die(why);
+            if (r.rc) { np_free(&r); dm_die("git ls-files failed"); }
+            list = malloc((size_t)r.outn + 1);
+            if (!list) { np_free(&r); dm_die("allocation"); }
+            { size_t k; for (k = 0; k < r.outn; k++) list[k] = r.out[k]; }
+            list[r.outn] = 0;
+            ln = (long)r.outn;
+            np_free(&r);
+        } else if (argv[i][0] == '-') {
+            dm_die("usage [--tracked | FILE...]");
+        } else {
+            if (nn == ncap) { ncap = ncap ? ncap * 2 : 16; names = realloc(names, sizeof(char *) * (size_t)ncap); }
+            if (!names) dm_die("allocation");
+            names[nn++] = argv[i];
+        }
+    }
+    if (!list) {
+        /* explicit files: build the same NUL-separated list git would give */
+        long cap = 0;
+        for (i = 0; i < nn; i++) cap += (long)strlen(names[i]) + 1;
+        list = malloc((size_t)cap + 1);
+        if (!list) dm_die("allocation");
+        ln = 0;
+        for (i = 0; i < nn; i++) {
+            long k, m = (long)strlen(names[i]);
+            for (k = 0; k < m; k++) list[ln++] = names[i][k];
+            list[ln++] = 0;
+        }
+    }
+    dm_out = malloc((size_t)DM_CAP);
+    if (!dm_out) dm_die("allocation");
+
+    /* pass 1: every declared module name (for the use graph) */
+    while (at < ln) {
+        char *p = list + at;
+        long pl = (long)strlen(p);
+        size_t n = 0;
+        char *src;
+        at += pl + 1;
+        if (!pl) continue;
+        src = cx_read(p, &n);
+        if (!src) continue;
+        {   long mb = 0, mn = 0;
+            if (dm_module(src, (long)n, &mb, &mn)) {
+                long k;
+                if (nn + 1 >= ncap) { ncap = ncap ? ncap * 2 + 16 : 16; names = realloc(names, sizeof(char *) * (size_t)ncap); if (!names) dm_die("allocation"); }
+                {   char *m = malloc((size_t)mn + 1);
+                    if (!m) dm_die("allocation");
+                    for (k = 0; k < mn; k++) m[k] = src[mb + k];
+                    m[mn] = 0;
+                    names[nn++] = m;
+                }
+            }
+        }
+        free(src);
+    }
+    /* the explicit-file names sit at names[0..] too; keep two arrays separate */
+    {   char **mods = 0; long nm = 0, mcap = 0;
+        long k;
+        for (k = 0; k < nn; k++) {
+            const char *nm2 = names[k];
+            if (strstr(nm2, "/") != 0) continue;          /* a path, not a module name */
+            if (nm == mcap) { mcap = mcap ? mcap * 2 : 32; mods = realloc(mods, sizeof(char *) * (size_t)mcap); if (!mods) dm_die("allocation"); }
+            mods[nm++] = names[k];
+        }
+        (void)mods;
+    }
+    free(names); names = 0; nn = 0; ncap = 0;
+
+    /* pass 2: report */
+    at = 0;
+    while (at < ln) {
+        char *p = list + at;
+        long pl = (long)strlen(p);
+        size_t n = 0;
+        char *src;
+        int ismod = 0, isused = 0, isdock = 0, bound = 0;
+        long mb = 0, mn = 0;
+        at += pl + 1;
+        if (!pl) continue;
+        src = cx_read(p, &n);
+        if (!src) continue;
+        ismod = dm_module(src, (long)n, &mb, &mn);
+        isdock = dm_dock(src, (long)n);
+        (void)mb; (void)mn;
+        free(src);
+        /* used: does any other file use the declared module name?  The map is built from
+           the whole list, so a second sweep is enough (names were collected above). */
+        isused = 0;
+        if (ismod) {
+            /* re-read the file to recover the name (cheap: these files are small) */
+            char *s2 = cx_read(p, &n);
+            long mb2 = 0, mn2 = 0;
+            if (s2 && dm_module(s2, (long)n, &mb2, &mn2)) {
+                char nm[256];
+                long k;
+                if (mn2 < 255) {
+                    for (k = 0; k < mn2; k++) nm[k] = s2[mb2 + k];
+                    nm[mn2] = 0;
+                    {   long a2 = 0;
+                        while (a2 < ln && !isused) {
+                            char *q = list + a2;
+                            long ql = (long)strlen(q);
+                            size_t qn = 0;
+                            char *qs;
+                            a2 += ql + 1;
+                            if (!ql || !strcmp(q, p)) continue;
+                            qs = cx_read(q, &qn);
+                            if (!qs) continue;
+                            {   size_t z;
+                                for (z = 0; z + 8 < qn && !isused; z++) {
+                                    if (qs[z] != '#' || memcmp(qs + z + 1, "pragma", 6)) continue;
+                                    {   long j = (long)z + 7;
+                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
+                                        if (j + 5 > (long)qn || memcmp(qs + j, "unisa", 5)) continue;
+                                        j += 5;
+                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
+                                        if (j + 3 > (long)qn || memcmp(qs + j, "use", 3)) continue;
+                                        j += 3;
+                                        while (j < (long)qn && (qs[j] == ' ' || qs[j] == '\t')) j++;
+                                        if (j + mn2 <= (long)qn && !memcmp(qs + j, nm, (size_t)mn2) &&
+                                            (j + mn2 == (long)qn || qs[j + mn2] == ' ' || qs[j + mn2] == '\t' ||
+                                             qs[j + mn2] == '\n' || qs[j + mn2] == '\r')) isused = 1;
+                                    }
+                                }
+                            }
+                            free(qs);
+                        }
+                    }
+                }
+            }
+            free(s2);
+        }
+        bound = (!ismod && !isused) ? 1 : 0;
+        {   char line[4400];
+            if (cx_fmt(line, sizeof line, "DOCKMAP\t%s\tmodule=%d\tused=%d\tdock=%d\tbound=%d\n",
+                       p, ismod, isused, isdock, bound)) dm_die("line capacity");
+            dm_put(line, (long)strlen(line));
+        }
+        files++;
+        if (ismod) modules++;
+        if (isused) used++;
+        if (isdock) docked++;
+        if (bound) scripts++;
+    }
+    {   char sum[256];
+        if (cx_fmt(sum, sizeof sum, "DOCKMAP_TAB\tfiles=%ld\tmodules=%ld\tused=%ld\tdocked=%ld\tscripts=%ld\n",
+                   files, modules, used, docked, scripts)) dm_die("summary capacity");
+        dm_put(sum, (long)strlen(sum));
+    }
+    {   long k; for (k = 0; k < dm_on; k++) putchar(dm_out[k]); }
+    free(dm_out);
+    free(list);
+    return 0;
+}

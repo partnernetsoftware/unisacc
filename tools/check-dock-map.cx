@@ -1,0 +1,129 @@
+/* tools/check-dock-map.cx -- facts for tools/dock-map.cx.
+ *
+ *   sh ./unisacc.com tools/check-dock-map.cx
+ *
+ * Every case builds files under out/check-dock-map-<pid>/ and runs the tool on them, so the
+ * answer does not depend on the tree state:
+ *   D1 a `#pragma unisa module m` unit: module=1, used=0, dock=0, bound=0
+ *   D2 a unit another file `use`s: used=1
+ *   D3 a unit with `#pragma unisa dock`: dock=1
+ *   D4 `dock include` and `dock libc` are docks; `docker` is not (word boundary)
+ *   D5 a plain script (no module, nobody uses it): bound=1 -- scripts are not modules
+ *   D6 the summary counts agree with the rows
+ *   D7 the same input twice gives byte-identical output
+ *
+ * Ends with DOCK_MAP_CHECK<TAB>assertions=N<TAB>failed=M; any FAIL exits 1.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int dmc_failed, dmc_n;
+static char dmc_root[4096];
+
+static void dmc_die(const char *s) { fprintf(stderr, "check-dock-map: %s\n", s); exit(2); }
+
+static void dmc_ck(int ok, const char *what) {
+    dmc_n++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", what);
+    if (!ok) dmc_failed++;
+}
+
+static void dmc_write(const char *path, const char *text) {
+    int fd = sy_open_new(path, 0644);
+    if (fd < 0) dmc_die(path);
+    if (sy_write_all(fd, text, (long)strlen(text)) || sy_close(fd)) dmc_die(path);
+}
+
+static char dmc_tool[4400];
+
+/* run tools/dock-map.cx on the given files; returns its stdout */
+static char *dmc_run(const char *list_names, long *outn) {
+    char *argv[16];
+    np_result r;
+    char why[512];
+    int i = 0, k;
+    argv[i++] = "sh";
+    argv[i++] = "unisacc.com";
+    argv[i++] = dmc_tool;
+    argv[i++] = "--";
+    {   static char buf[8][4600];
+        long pos = 0;
+        while (list_names[pos] && i < 14) {
+            int slot = i - 3, j = 0;
+            while (list_names[pos] && list_names[pos] != '\n' && j < 4598) buf[slot][j++] = list_names[pos++];
+            buf[slot][j] = 0;
+            if (list_names[pos] == '\n') pos++;
+            if (!j) continue;
+            argv[i++] = buf[slot];
+        }
+    }
+    argv[i] = 0;
+    if (np_run(argv, dmc_root, 0, 50, &r, why, sizeof why)) dmc_die(why);
+    if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); dmc_die("dock-map failed"); }
+    *outn = (long)r.outn;
+    return r.out;
+}
+
+static int dmc_has(const char *out, long n, const char *needle) {
+    long m = (long)strlen(needle), i;
+    if (n < m) return 0;
+    for (i = 0; i + m <= n; i++) if (!memcmp(out + i, needle, m)) return 1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char dir[4400], f1[4500], f2[4500], f3[4500], f4[4500], f5[4500];
+    char *out;
+    long on;
+    (void)argc; (void)argv;
+
+    if (!realpath(".", dmc_root)) dmc_die("root");
+    if (cx_fmt(dmc_tool, sizeof dmc_tool, "%s/tools/dock-map.cx", dmc_root)) dmc_die("path");
+    if (cx_fmt(dir, sizeof dir, "%s/out/check-dock-map-%d", dmc_root, (int)getpid())) dmc_die("path");
+    if (sy_mkdir(dir, 0755) && sy_exists(dir) != 1) dmc_die("scratch dir");
+    if (cx_fmt(f1, sizeof f1, "%s/mod.cx", dir)) dmc_die("path");
+    if (cx_fmt(f2, sizeof f2, "%s/user.cx", dir)) dmc_die("path");
+    if (cx_fmt(f3, sizeof f3, "%s/docked.cx", dir)) dmc_die("path");
+    if (cx_fmt(f4, sizeof f4, "%s/docker.cx", dir)) dmc_die("path");
+    if (cx_fmt(f5, sizeof f5, "%s/script.cx", dir)) dmc_die("path");
+    dmc_write(f1, "#pragma unisa module mod\nint mod_f(void){return 1;}\n");
+    dmc_write(f2, "#pragma unisa module user\n#pragma unisa use mod\nint user_f(void){return mod_f();}\n");
+    dmc_write(f3, "#pragma unisa module docked\n#pragma unisa dock include\n#include <stdio.h>\nint docked_f(void){return 0;}\n");
+    dmc_write(f4, "#pragma unisa module docker\n#pragma unisa docker\nint docker_f(void){return 0;}\n");
+    dmc_write(f5, "int main(void){printf(\"hi\\n\");return 0;}\n");
+
+    /* D1..D5 via one run over all five files, given as a newline list */
+    {
+        char list[4096];
+        if (cx_fmt(list, sizeof list, "%s\n%s\n%s\n%s\n%s", f1, f2, f3, f4, f5)) dmc_die("path");
+        out = dmc_run(list, &on);
+        {   char want[4500];
+            if (cx_fmt(want, sizeof want, "DOCKMAP\t%s\tmodule=1\tused=1\tdock=0\tbound=0", f1)) dmc_die("want");
+            dmc_ck(dmc_has(out, on, want), "D1-module-used-by-another-unit");
+            if (cx_fmt(want, sizeof want, "DOCKMAP\t%s\tmodule=1\tused=0\tdock=0\tbound=0", f2)) dmc_die("want");
+            dmc_ck(dmc_has(out, on, want), "D2-user-module-itself-not-used");
+            if (cx_fmt(want, sizeof want, "DOCKMAP\t%s\tmodule=1\tused=0\tdock=1\tbound=0", f3)) dmc_die("want");
+            dmc_ck(dmc_has(out, on, want), "D3-dock-declared");
+            if (cx_fmt(want, sizeof want, "DOCKMAP\t%s\tmodule=1\tused=0\tdock=0\tbound=0", f4)) dmc_die("want");
+            dmc_ck(dmc_has(out, on, want), "D4-docker-is-not-dock");
+            if (cx_fmt(want, sizeof want, "DOCKMAP\t%s\tmodule=0\tused=0\tdock=0\tbound=1", f5)) dmc_die("want");
+            dmc_ck(dmc_has(out, on, want), "D5-script-is-not-a-module");
+            dmc_ck(dmc_has(out, on, "DOCKMAP_TAB\tfiles=5\tmodules=4\tused=1\tdocked=1\tscripts=1"), "D6-summary-counts");
+        }
+        free(out);
+    }
+    /* D7 determinism */
+    {
+        char list[4096];
+        char *a, *b;
+        long an, bn;
+        if (cx_fmt(list, sizeof list, "%s\n%s", f1, f3)) dmc_die("path");
+        a = dmc_run(list, &an);
+        b = dmc_run(list, &bn);
+        dmc_ck(an == bn && !memcmp(a, b, (size_t)an), "D7-deterministic");
+        free(a); free(b);
+    }
+    printf("DOCK_MAP_CHECK\tassertions=%d\tfailed=%d\n", dmc_n, dmc_failed);
+    return dmc_failed ? 1 : 0;
+}
