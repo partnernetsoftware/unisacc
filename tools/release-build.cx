@@ -682,7 +682,9 @@ static void rb_freeze(const char *rev, char **root_slot) {
     sy_printf("%s", cmd);
 }
 
-static const char *rb_whole_src[33] = {
+/* One entry per object entry-build compiles; keep the two lists equal. */
+#define RB_WHOLE_SRC 43
+static const char *rb_whole_src[RB_WHOLE_SRC] = {
     "src/unisacc.cx",
     "src/host.cx",
     "src/stages.cx",
@@ -715,7 +717,13 @@ static const char *rb_whole_src[33] = {
     "src/runtime/compiler/bindstage.cx",
     "src/entryexec.cx",
     "src/hostnative.cx",
-    "src/compiler/tapelink.cx"
+    "src/compiler/tapelink.cx",
+    /* entry-build compiles 43 objects (keys 0..42); whole-o must list the same
+       set or the link misses symbols such as hs_file_note_set. Keep equal. */
+    "src/drivelink.cx", "src/drivetapebin.cx", "src/driveargs.cx",
+    "src/driveplan.cx", "src/driveutil.cx", "src/driveunits.cx",
+    "src/driverun.cx", "src/hostout.cx", "src/hostres.cx",
+    "src/runtime/rescache.cx"
 };
 
 static int rb_is_whole(const char *t) {
@@ -769,9 +777,9 @@ static void rb_wline(int fd, const char *s) {
 
 /* One whole -o. The child is tools/bound 60. osx whole-o was 56-59s under the old 55s cap. The image is not spliced with P3. */
 static int rb_whole(int argc, char **argv, const char *target) {
-    char *v[48];
+    char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
     char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
-    char srcs[33][RB_FULL];
+    char srcs[RB_WHOLE_SRC][RB_FULL];
     char sha[65];
     const char *slug;
     RbBuf cap;
@@ -784,6 +792,13 @@ static int rb_whole(int argc, char **argv, const char *target) {
     if (!slug) rb_die("slice target");
     if (!argv[3] || !argv[3][0] || !sy_exists(argv[3])) rb_die("pkg");
     rb_whole_flags(argc, argv);
+    /* whole-o compiles with the package this run just built, not the snapshot's
+       launcher: without this the child resolves models from the frozen
+       unisacc.com.dev package and e3 rejects on the first real source. */
+    {   char wcont[RB_FULL];
+        if (sy_realpath(argv[3], wcont, RB_FULL) < 0) rb_die("pkg");
+        if (sy_setenv("UNISA_CONTAINER", wcont, 1)) rb_die("env");
+    }
     sy_mkdir(argv[4], 0755);
     if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
     argv[4] = rb_out_abs;
@@ -810,7 +825,7 @@ static int rb_whole(int argc, char **argv, const char *target) {
     v[n++] = (char *)target;
     v[n++] = "-o";
     v[n++] = image;
-    for (i = 0; i < 33; i++) {
+    for (i = 0; i < RB_WHOLE_SRC; i++) {
         rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]);
         v[n++] = srcs[i];
     }
@@ -869,9 +884,9 @@ static int rb_whole(int argc, char **argv, const char *target) {
 /* osx/arm64 whole-o sits on the 60s bound. The lnx slice stops after the
    frames (PHASE=A) and finishes the image in PHASE=B. */
 static int rb_phase(int argc, char **argv, const char *target) {
-    char *v[48];
+    char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
     char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
-    char srcs[33][RB_FULL], ctor[RB_FULL], phase[RB_FULL], cont[RB_FULL];
+    char srcs[RB_WHOLE_SRC][RB_FULL], ctor[RB_FULL], phase[RB_FULL], cont[RB_FULL];
     char sha[65];
     RbBuf cap;
     sy_ts_t t0, t1;
@@ -904,7 +919,7 @@ static int rb_phase(int argc, char **argv, const char *target) {
         v[n++] = (char *)target;
         v[n++] = "-o";
         v[n++] = image;
-        for (i = 0; i < 33; i++) {
+        for (i = 0; i < RB_WHOLE_SRC; i++) {
             rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]);
             v[n++] = srcs[i];
         }
