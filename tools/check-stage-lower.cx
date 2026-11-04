@@ -144,6 +144,36 @@ int main(int argc,char **argv){
             ck(!no, "non-lower-weight-change-does-not-affect-lower");
         }
     }
-    printf("STAGE_LOWER\tfailed=%d\tscope=weight-to-stage-dependency-no-construction\n", failed);
+    /* --- B2 补:items 验收的另一半 —— 「只重跑该阶段与下游」必须能从 affected 的集合上验证。
+       已有两项只问「lower 批次是否被选中」,没问「非下游是否被排除」与「下游是否被包含」。
+       这三条补上;最后一条(实际重跑的耗时对比)仍是 UNMEASURED,见尾行。 --- */
+    {
+        char root[4096];
+        if (!realpath(".", root)) { ck(0, "root-resolve-for-scope"); }
+        else {
+            /* (a) 改 lower 权重 → 必须同时选中 cx-stage-lower(B2 自己的批次) */
+            char *o = run_affected(root, "weights/gold/abi.tsv");
+            ck(has_batch(o, "cx-stage-lower"), "lower-weight-change-selects-own-batch");
+            /* (b) 改 lower 权重 → 不得选中 pp 的批次(上游不该被重跑) */
+            ck(!has_batch(o, "pp-source-constructed") && !has_batch(o, "pp-gold-controls"),
+               "lower-weight-change-excludes-upstream-batches");
+            free(o);
+            /* (c) 改 elf 权重 → lower 的批次是否被选中,取决于 lower 测试台是否消费该表。
+               tests/stream-lower-domain.cx:88 自己字面读 weights/gold/enc.tsv(拿 enc 表校 abi
+               form),所以被选中是正确传播,不是反推。这里断言「selected 的原因可解释」:
+               改 enc 时若选中 cx-stage-lower,则 stream-lower-domain.cx 必须确实引用 enc.tsv;
+               反之若未来它不再引用,选中就应当是反推,断言失败。 */
+            o = run_affected(root, "weights/gold/enc.tsv");
+            {   int selected = has_batch(o, "cx-stage-lower");
+                int consumes = 0;
+                {   size_t sn; char *src = cx_read("tests/stream-lower-domain.cx", &sn);
+                    if (src) { consumes = strstr(src, "weights/gold/enc.tsv") != 0; free(src); }
+                }
+                ck(selected == consumes, "elf-weight-selection-explained-by-lower-consumption");
+            }
+            free(o);
+        }
+    }
+    printf("STAGE_LOWER\tfailed=%d\tscope=weight-to-stage-dependency-no-construction\tweight-change-runtime-saving=UNMEASURED\n", failed);
     return failed ? 1 : 0;
 }
