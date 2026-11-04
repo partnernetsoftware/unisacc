@@ -6,6 +6,7 @@
      sh ./unisacc.com tools/refactor.cx -- sweep RULES JOBS (FILE... | --tracked) -- VERIFY...
      sh ./unisacc.com tools/refactor.cx -- rename [--auto] OLD NEW (FILE... | --tracked)   > CANDIDATES.tsv
      sh ./unisacc.com tools/refactor.cx -- sites NAME[,NAME...] (FILE... | --tracked)
+     sh ./unisacc.com tools/refactor.cx -- inject [--auto] LINE_PREFIX INSERTED_LINE (FILE... | --tracked)
 
    sweep is one resumable round of find --auto + apply (apply's deadline 36 s, so the whole call stays
    under 60 s): files apply SKIPs or REVERTs go on out/refactor-verify/skip-<rules path>.txt and are not
@@ -94,6 +95,7 @@ typedef struct { char *id, *call, *prefix, *tmpl, *use, *cls, *where; int argc, 
 static Rule rules[MAXRULE];
 static int sites_mode;   /* sites: list call sites instead of candidate rows */
 static int rename_rule = -1;   /* rename: the rule whose call is the identifier to rename, its template the new name */
+static int inject_mode;        /* inject: prepend the line-match pass; rules[0].prefix is the line prefix, rules[0].tmpl the inserted line */
 static int nrules;
 static void load_rules(const char *path) {
     size_t n; char *b = cx_read(path, &n), *line, *e, *f[10]; long i = 0; int nf;
@@ -224,8 +226,57 @@ static void render(Buf *o, const char *tmpl, const char *b, long *as, long *ae) 
     }
 }
 
+/* inject: every line that starts with rules[0].prefix becomes one apply row whose
+   original is that whole line and whose replacement is the line plus the inserted
+   text.  Only the first such line per file is taken (a unit declares once); the
+   caller's VERIFY decides whether the edit is acceptable. */
+static int inject_file(Buf *out, const char *file, int autoacc) {
+    size_t sz; char *b = cx_read(file, &sz); long n, i = 0, line = 1;
+    const char *pre = rules[0].prefix; long pl = tx_len(pre, 64);
+    int done = 0;
+    if (!b) { fprintf(stderr, "refactor: cannot read %s\n", file); return -1; }
+    n = (long)sz;
+    while (i < n && !done) {
+        long s = i, e = i;
+        while (e < n && b[e] != '\n') e++;
+        if (e > s && (e - s) >= pl && !memcmp(b + s, pre, (size_t)pl)) {
+            const char *cls = in_reserved(file) ? "skip" : "safe";
+            char num[64];
+            puts_(out, autoacc && tx_eq(cls, "safe", 8) ? "accept" : "-"); put(out, "\t", 1);
+            putesc(out, file, tx_len(file, CAP)); put(out, "\t", 1);
+            if (cx_fmt(num, sizeof num, "%ld\t%ld\t", s, line)) die("format");
+            puts_(out, num); puts_(out, "inject"); put(out, "\t", 1); puts_(out, cls); put(out, "\t", 1);
+            puts_(out, tx_eq(cls, "skip", 8) ? "reserved path" : "inject-after-line"); put(out, "\t", 1);
+            /* original: the whole line including its newline (when there is one) */
+            { long oe = (e < n ? e + 1 : e); putesc(out, b + s, oe - s); }
+            put(out, "\t", 1);
+            /* replacement: original (verbatim) + the inserted line */
+            {
+                long oe = (e < n ? e + 1 : e);
+                Buf rep = {0, 0, 0};
+                /* the original line keeps its newline (or gets one, for the last line without),
+                   then the inserted line is appended with its own newline: the inserted text is a
+                   whole line, so "dockint b;" must not be what lands in the file. */
+                put(&rep, b + s, oe - s);
+                if (oe == e) put(&rep, "\n", 1);
+                puts_(&rep, rules[0].tmpl);
+                put(&rep, "\n", 1);
+                putesc(out, rep.p, rep.n);
+                free(rep.p);
+            }
+            put(out, "\t-\n", 3);
+            done = 1;
+        }
+        i = (e < n ? e + 1 : n);
+        line++;
+    }
+    free(b);
+    return 0;
+}
+
 static int find_file(Buf *out, const char *file, int autoacc) {
     size_t sz; char *b = cx_read(file, &sz); long n, i = 0, line = 1; int mode = 0, count = 0;
+    if (inject_mode) return inject_file(out, file, autoacc);
     if (!b) { fprintf(stderr, "refactor: cannot read %s\n", file); return -1; }
     n = (long)sz;
     while (i < n) {
@@ -717,6 +768,22 @@ int main(int argc, char **argv) {
         sites_mode = 1;
         if (tx_eq(argv[3], "--tracked", 16)) { if (scan_tracked(&out, 0) < 0) return 2; }
         else for (k = 3; k < argc; k++) if (find_file(&out, argv[k], 0) < 0) return 2;
+        return sy_write_all(1, out.p ? out.p : "", out.n) == 0 ? 0 : 2;
+    }
+    if (argc >= 4 && tx_eq(argv[1], "inject", 8)) {
+        /* inject [--auto] LINE_PREFIX INSERTED_LINE (FILE... | --tracked): in each file, the first
+           line that starts with LINE_PREFIX is rewritten as that line followed by INSERTED_LINE, as
+           an apply row verified per file like any rule.  Reserved paths are skip. */
+        int a = 2, autoacc = 0, k; Buf out = {0, 0, 0};
+        if (tx_eq(argv[a], "--auto", 8)) { autoacc = 1; a++; }
+        if (argc < a + 3) die("inject [--auto] LINE_PREFIX INSERTED_LINE (FILE... | --tracked)");
+        rules[0].id = "inject"; rules[0].call = ""; rules[0].prefix = argv[a]; rules[0].argc = -3;
+        rules[0].tmpl = argv[a + 1]; rules[0].use = "-"; rules[0].cls = "safe";
+        rules[0].truth = 0; rules[0].where_arg = 0; rules[0].where = "";
+        nrules = 1; inject_mode = 1;
+        puts_(&out, "# verdict\tfile\toffset\tline\trule\tclass\twhy\toriginal\treplacement\tuse\n");
+        if (tx_eq(argv[a + 2], "--tracked", 16)) { if (scan_tracked(&out, autoacc) < 0) return 2; }
+        else for (k = a + 2; k < argc; k++) if (find_file(&out, argv[k], autoacc) < 0) return 2;
         return sy_write_all(1, out.p ? out.p : "", out.n) == 0 ? 0 : 2;
     }
     if (argc >= 5 && tx_eq(argv[1], "rename", 8)) {
