@@ -16,6 +16,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelsha
 #pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.sourcepackage
 #pragma unisa use text.text
 typedef struct {const char *id,*stage,*flags[4];} SpModel;
 static const SpModel recipes[]={
@@ -104,11 +105,12 @@ static void prepare_context(const char *bootstrap_arg,const char *cc_arg){if(!re
 typedef struct {int tool,recipe,phase;} SpJob;
 static SpJob find_job(const char *id){SpJob j={-1,-1,-1};for(int i=0;i<5;i++){char name[80];snprintf(name,sizeof name,"tool-%s",tools[i]);if(tx_eqz(id, name)){j.tool=i;return j;}}const char *phases[]={"gen-","tbl-","net-"};for(int p=0;p<3;p++)for(int m=0;m<(int)(sizeof recipes/sizeof *recipes);m++){char name[160];snprintf(name,sizeof name,"%s%s",phases[p],recipes[m].id);if(tx_eqz(id, name)){j.recipe=m;j.phase=p;return j;}}die("unknown-or-PLANNED-job");return j;}
 static void job_paths(const char *id,SpJob j,char dir[4400],char output[4400],char receipt[4400]){path(dir,jobs,id);path(output,dir,j.tool>=0?"result.exe":j.phase==0?"result.json":j.phase==1?"result.tbl":"result.net");path(receipt,dir,"record.tsv");}
-static int job_command(const char *id,SpJob j,char **v,char output[4400],char executable[4400],char source[4400],char include[4400],char dependency[4400]){char dir[4400],receipt[4400];job_paths(id,j,dir,output,receipt);int n=0;v[n++]=bound;v[n++]="40";
- if(j.tool>=0){v[n++]=cc;v[n++]="-std=c99";v[n++]="-O2";v[n++]="-w";path(include,root,"seed");v[n++]="-I";v[n++]=include;if(j.tool==4){v[n++]="-I";v[n++]="/usr/include/node";}char name[100];snprintf(name,sizeof name,"seed/%s.c",tools[j.tool]);path(source,root,name);v[n++]=source;v[n++]="-o";v[n++]=output;if(j.tool==4)v[n++]="/usr/lib/x86_64-linux-gnu/libz.so.1.2.11";}
- else{char name[160],tool_dir[4400];snprintf(name,sizeof name,"tool-%s",tools[j.phase]);path(tool_dir,jobs,name);path(executable,tool_dir,"result.exe");v[n++]=executable;if(!j.phase){v[n++]=(char *)recipes[j.recipe].stage;v[n++]=output;for(int i=0;i<4&&recipes[j.recipe].flags[i];i++)v[n++]=(char *)recipes[j.recipe].flags[i];}else{snprintf(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id);SpJob dj=find_job(name);char dd[4400],dr[4400];job_paths(name,dj,dd,dependency,dr);v[n++]=dependency;v[n++]=output;}}
- v[n]=0;return n;
-}
+/* The argv a job runs is decided in exactly one place: cxlib.sourcepackage's
+ * job_command (exported as sp_job_command). A second copy here once omitted
+ * pack's node include and pinned host libz path, so the verifier rebuilt a
+ * different argv than the producer wrote and every candidate install refused
+ * a receipt that was in fact correct. Keep this a thin forwarder. */
+static int job_command(const char *id,SpJob j,char **v,char output[4400],char executable[4400],char source[4400],char include[4400],char dependency[4400]){char dir[4400],receipt[4400];job_paths(id,j,dir,output,receipt);int n=0;if(sp_job_command(root,jobs,cc,bound,id,v,&n))die("job-command-arguments");dependency[0]=0;include[0]=0;if(j.tool>=0){char name[100];snprintf(name,sizeof name,"seed/%s.c",tools[j.tool]);path(source,root,name);}else{snprintf(executable,sizeof((char[4400]){0}),"");char name[160],tool_dir[4400];snprintf(name,sizeof name,"tool-%s",tools[j.phase]);path(tool_dir,jobs,name);path(executable,tool_dir,"result.exe");if(j.phase){snprintf(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id);SpJob dj=find_job(name);char dd[4400],dr[4400];job_paths(name,dj,dd,dependency,dr);}}return n;}
 static void verify_job(const char *id,int depth);
 static void dependency(np_buf *b,const char *id,int depth){verify_job(id,depth+1);SpJob j=find_job(id);char dir[4400],out[4400],receipt[4400],h[65];job_paths(id,j,dir,out,receipt);digest(receipt,h);row(b,id,h);digest(out,h);row(b,out,h);}
 static np_buf job_record(const char *id,SpJob j,int depth){clean_environment();np_buf b={0};np_puts(&b,"source-package-job-v1\n");row(&b,"status","PREPARED-no-test-result");row(&b,"environment-policy",environment_policy);row(&b,"context",context_sha);row(&b,"source",sid);row(&b,"job",id);if(j.tool<0){char name[160];snprintf(name,sizeof name,"tool-%s",tools[j.phase]);dependency(&b,name,depth);if(j.phase){snprintf(name,sizeof name,"%s-%s",j.phase==1?"gen":"tbl",recipes[j.recipe].id);dependency(&b,name,depth);}}
