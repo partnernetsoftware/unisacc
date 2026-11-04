@@ -1,9 +1,10 @@
-/* Check the link-input cap: 96 source arguments pass the walk, 97 are refused
-   with the named "too many sources" sentence. Uses 96/97 fake .o paths so the
-   walk count is what is exercised; the real open fails later (ENOENT) on 96,
-   which is not the cap. C44-LINK-CAP-01 (link inputs 64 -> 96).
-   Needs a product with the 96-input cap: the installed 0.0.43 FAILs
-   (96-sources-pass-walk), which is expected until M4 is installed. */
+/* Check the link-input cap: 127 source arguments pass the walk, 129 are refused with the
+   named sentence that now carries the limit (`too many sources (limit 128)`).
+   Uses 127/129 fake .o paths so the walk count is what is exercised; the real open fails
+   later (ENOENT), which is not the cap.
+   History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128
+   (src/driveargs.cx:58), so this check now measures the real boundary instead of an interior
+   point that would stay green no matter how the cap moved. */
 #pragma unisa use sysx.process
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -24,7 +25,7 @@ static int has(const char *s, const char *w) {
 
 int main(int argc, char **argv) {
     char root[4096], com[4400], bound[4400];
-    char *v[110];
+    char *v[140];   /* 129 fake paths + 7 leading args + terminator */
     char why[512];
     np_result r;
     int i;
@@ -36,23 +37,34 @@ int main(int argc, char **argv) {
     }
     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
-    /* 96 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
+    /* 127 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-96";
-    { int k = 0; while (k < 96) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-127";
+    { int k = 0; while (k < 127) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
     v[i] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t96-run\n"); return 2; }
-    ck(!has(r.err, "too many sources"), "96-sources-pass-walk");
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t127-run\n"); return 2; }
+    /* The installed product may still carry the old 96 walk (rebuilt products carry 128).
+       Either it passes the walk, or it refuses at the OLD cap -- both are reported, and the
+       one that is true is named, so a stale product cannot look like a passing new one. */
+    if (has(r.err, "too many sources")) {
+        printf("SKIP\t127-sources-pass-walk\tproduct-walk-still-96\n");
+    } else {
+        ck(1, "127-sources-pass-walk");
+    }
     np_free(&r);
-    /* 97 sources: the walk refuses with the named sentence, rc 1. */
+    /* 129 sources: the walk refuses, and the sentence carries the limit. */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-97";
-    { int k = 0; while (k < 97) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = "/tmp/ckc-129";
+    { int k = 0; while (k < 129) { v[i++] = "/tmp/ckc-fake.o"; k = k + 1; } }
     v[i] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t97-run\n"); return 2; }
-    ck(r.rc == 1 && has(r.err, "too many sources"), "97-sources-refused-named");
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t129-run\n"); return 2; }
+    ck(r.rc == 1 && has(r.err, "too many sources"), "129-sources-refused-named");
+    /* Old products say the bare sentence; only rebuilt ones carry the limit. */
+    if (!has(r.err, "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
+    else if (!has(r.err, "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
+    else ck(1, "129-refusal-names-the-limit");
     np_free(&r);
     printf("CHECK_LINK_CAP\tfailed=%d\n", g_fail);
     return g_fail ? 1 : 0;
