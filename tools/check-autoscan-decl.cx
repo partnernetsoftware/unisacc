@@ -1,0 +1,155 @@
+/* check-autoscan-decl.cx -- C44-LIBCUNIT gate b 的 autoscan 声明覆盖断言.
+ *
+ *   sh ./unisacc.com tools/check-autoscan-decl.cx -- ROOT table
+ *      静态: exec/parse/autoscan-result.tsv 里第一遍 AU.cl 的 RLD 之后必须同时接受
+ *      '{'(定义) 和 ';'(声明) 两个分支, 都置 AUD=2。缺 ';' 即失败。
+ *
+ *   sh ./unisacc.com tools/check-autoscan-decl.cx -- ROOT run CANDIDATE P3 SRC DEFAULT_OUT EXTERN_OUT
+ *      动态三项:
+ *       1) 默认路径编 SRC 到 DEFAULT_OUT, rc=0;
+ *       2) -D__UNISA_LIBC_EXTERN 编 SRC 到 EXTERN_OUT, rc=0, 打印两者字节数;
+ *       3) 负例: 一个只调用 autoinc 表内名字(printf)却既无声明也无定义的源,
+ *          默认编译必须被拒(rc!=0)。
+ *      失败打印 FAIL 并以 1 退出。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+#define CD_CAP 65536
+
+static char root[4096];
+
+static char *cd_read(const char *p, long *n) {
+    char *b;
+    int fd;
+    long kept = 0;
+    fd = sy_open(p, 0, 0);
+    if (fd < 0) return 0;
+    b = (char *)mm_alloc(CD_CAP);
+    if (!b) { sy_close(fd); return 0; }
+    for (;;) {
+        long z;
+        if (kept >= CD_CAP - 1) { mm_free(b); sy_close(fd); return 0; }
+        z = sy_read(fd, b + kept, CD_CAP - 1 - kept);
+        if (z < 0) { mm_free(b); sy_close(fd); return 0; }
+        if (z == 0) break;
+        kept += z;
+    }
+    sy_close(fd);
+    b[kept] = 0;
+    *n = kept;
+    return b;
+}
+
+static long cd_size(const char *p) {
+    int fd = sy_open(p, 0, 0);
+    long at = 0, z;
+    char c;
+    if (fd < 0) return -1;
+    for (;;) {
+        z = sy_read(fd, &c, 1);
+        if (z <= 0) break;
+        at++;
+    }
+    sy_close(fd);
+    return at;
+}
+
+/* Run CANDIDATE on SRC producing OUT; defs is an extra -D string or 0.
+   Returns the child exit code, or -1 when np_run itself refused. */
+static int cd_compile(const char *candidate, const char *p3, const char *src,
+                      const char *defs, const char *out) {
+    np_result r;
+    char why[1400];
+    char pack[4600];
+    char *v[12];
+    char *envadd[2];
+    int n = 0, rc;
+    if (cx_fmt(pack, sizeof pack, "UNISA_CONTAINER=%s", p3)) return -1;
+    v[n++] = (char *)candidate;
+    if (defs) { v[n++] = (char *)defs; }
+    v[n++] = "-c";
+    v[n++] = "-funit";
+    v[n++] = "-b";
+    v[n++] = "lnx/x86_64";
+    v[n++] = (char *)src;
+    v[n++] = "-o";
+    v[n++] = (char *)out;
+    v[n] = 0;
+    envadd[0] = pack; envadd[1] = 0;
+    if (np_run(v, root, envadd, 55, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (r.errn) { fwrite(r.err, 1, r.errn, stderr); }
+    np_free(&r);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3) {
+        sy_eprintf("usage: ROOT table | ROOT run CANDIDATE P3 SRC DEFAULT_OUT EXTERN_OUT\n");
+        return 2;
+    }
+    tx_copy(root, sizeof root, argv[1], tx_len(argv[1], 4096));
+    if (tx_eq(argv[2], "table")) {
+        char p[4400];
+        long n;
+        char *t;
+        cx_fmt(p, sizeof p, "%s/exec/parse/autoscan-result.tsv", root);
+        t = cd_read(p, &n);
+        if (!t) { sy_eprintf("FAIL read %s\n", p); return 1; }
+        if (!tx_contains(t, n, "AU.def", 6)) {
+            sy_eprintf("FAIL no AU.def (definition branch)\n");
+            return 1;
+        }
+        if (!tx_contains(t, n, "@semicolon", 10)) {
+            sy_eprintf("FAIL no @semicolon branch after the name\n");
+            return 1;
+        }
+        sy_printf("PASS table def=1 decl=1\n");
+        return 0;
+    }
+    if (tx_eq(argv[2], "run")) {
+        char neg[4400];
+        const char *candidate, *p3, *src, *dout, *eout;
+        int rc, rcd;
+        long dsz, esz;
+        if (argc < 8) {
+            sy_eprintf("usage: ROOT run CANDIDATE P3 SRC DEFAULT_OUT EXTERN_OUT\n");
+            return 2;
+        }
+        candidate = argv[3]; p3 = argv[4]; src = argv[5]; dout = argv[6]; eout = argv[7];
+        rcd = cd_compile(candidate, p3, src, 0, dout);
+        if (rcd != 0) { sy_eprintf("FAIL default compile rc=%d\n", rcd); return 1; }
+        rc = cd_compile(candidate, p3, src, "-D__UNISA_LIBC_EXTERN", eout);
+        if (rc != 0) { sy_eprintf("FAIL extern compile rc=%d\n", rc); return 1; }
+        dsz = cd_size(dout);
+        esz = cd_size(eout);
+        if (dsz < 0 || esz < 0) { sy_eprintf("FAIL stat outputs\n"); return 1; }
+        /* Negative: printf used with no declaration and no definition at all. */
+        cx_fmt(neg, sizeof neg, "%s/out/autoscan-neg-under-test.c", root);
+        {
+            int fd = sy_open_new(neg, 0644);
+            const char *body = "int main(void){ printf(\"x\"); return 0; }\n";
+            if (fd < 0) { sy_eprintf("FAIL write %s\n", neg); return 1; }
+            sy_write_all(fd, body, tx_len(body, 256));
+            sy_close(fd);
+        }
+        {
+            char nout[4500];
+            int nrc;
+            cx_fmt(nout, sizeof nout, "%s/out/autoscan-neg-under-test.o", root);
+            nrc = cd_compile(candidate, p3, neg, "-D__UNISA_LIBC_EXTERN", nout);
+            if (nrc == 0) {
+                sy_eprintf("FAIL negative case compiled (expected refusal)\n");
+                return 1;
+            }
+            sy_printf("PASS run default=%ld extern=%ld neg_rc=%d\n", dsz, esz, nrc);
+        }
+        return 0;
+    }
+    sy_eprintf("FAIL unknown mode %s\n", argv[2]);
+    return 2;
+}
