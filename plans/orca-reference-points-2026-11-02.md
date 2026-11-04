@@ -28,7 +28,7 @@
 | 2 | 持久编排模型 | Run（namespace+coordinator inbox）/ Task（pending/ready/dispatched/completed/failed/blocked）/ Dispatch（一次尝试）/ Message（status/dispatch/worker_done/escalation/question/heartbeat）/ Decision gate | harness 的 Ticket/Assignment/Worker/Outbox；cc 的 envelope | 加 `dispatch` 表与 `gate` 表；报告必须带 task+dispatch id；僵死重试不能完成错 dispatch | 中 |
 | 3 | Worker contract | 每个 worker 收 preamble；`worker_done` 只发一次（含 outcome/summary/files）；长任务 heartbeat；用 `ask` 阻塞提问；`worker-read/release/retain` 分离读取与回收 | harness `reportTicket`；omp worker 的 report/ask | 扩展 report schema：`outcome`、`files_modified`、`dispatch_id`、`question`；加 `harness_ask` | 低 |
 | 4 | 底部 usage/状态行 | 状态栏只显示 active account；Usage popover 按最紧 limit 排序；Detailed/Compact；窄窗先隐藏 mini bar，再每 provider 一个百分比，再 `+N` chip；80% warning chip；`% used`/`% remaining` 可选；余额与 limit 并列 | 我们刚做的 `balances` 行 + `/bal` 表 | 加 `% used/remaining` 设置、80% warning、`+N` overflow、按最紧排序；`/bal` 增加状态文案 | 低 |
-| 5 | 状态检测与 hook 端点 | OSC 状态检测（Cursor CLI）；Orca 管理 working/waiting/done hook；端点写盘并每次 hook 重新 source，app 重启后长会话仍可达；Codex hook 只在变化时写，避免反复授权 | omp extension 的 `session_start/turn_end`；harness 的 `SUPERHARNESS_URL` | 扩展改为每次调用读 `out/superharness/endpoint.env`；harness 重启后 worker 仍能回报 | 很低 |
+| 5 | 状态检测与 hook 端点 | OSC 状态检测（Cursor CLI）；Orca 管理 working/waiting/done hook；端点写盘并每次 hook 重新 source，app 重启后长会话仍可达；Codex hook 只在变化时写，避免反复授权 | omp extension 的 `session_start/turn_end`；harness 的 `SUPERHARNESS_URL` | 扩展改为每次调用读 harness 写入的 endpoint.env（路径由 harness 决定，本仓已退役的 superharness 曾用 `out/` 下同名目录）；harness 重启后 worker 仍能回报 | 很低 |
 | 6 | Hibernation + resume | 只在 done、非前台、无按键、可 resume、idle≥30m、无未结算 Dispatch、无 live subagent roster 时休眠；整个 worktree 一起休眠；resume 用捕获的启动命令/env + provider resume flag；失败则新 prompt | harness 的 worker 生命周期；procguard/watchdog | 加 `hibernated` 状态与 `resume_cmd/env`；watchdog 只在安全谓词全满足时暂停 | 中 |
 | 7 | Session history 索引 | 扫描各 agent 的 on-disk transcript；右侧栏 Workspace/Project/All；按 Project/Folder/Agent 分组；搜索 title/cwd/branch/model/preview；Resume 新终端/新 chat；复制 resume 命令/session id/log path；`orca search` CLI | omp 的 `~/.omp/agent/sessions`；harness 的 `sessions/<ticket>` | harness `status` 增加 session 索引：ticket、cwd、last activity、resume 命令 | 低 |
 | 8 | Chat ↔ terminal 分离与 handoff | 结构化 chat 把会话状态放在 Orca；tab/对话可跨重启恢复；`/clear`、`/compact`、rewind、steer/queue、inline diff、background-task strip、plan checklist、goal controls；可在 chat/terminal 之间移动；Hand Off 给另一个 agent | omp 的 TUI/RPC；harness 的 ticket 状态与 worker 会话 | harness 加 `/ticket <id>` 视图与 `handoff <ticket> <worker>`；状态与执行面分离 | 低-中 |
@@ -106,7 +106,7 @@
 
 **对应到我们**：
 - 我们的 harness 扩展若在启动时缓存 `SUPERHARNESS_URL`，harness 重启后会 POST 到死端口。
-- 改成每次工具调用前读 `out/superharness/endpoint.env`（`URL=...`、`TOKEN=...`），harness 启动时原子写。
+- 改成每次工具调用前读 harness 写的 endpoint.env（`URL=...`、`TOKEN=...`），harness 启动时原子写。
 - 这比“让 worker 自己重连”简单，且能覆盖 omp 长会话。
 
 **小步**：扩展加 `resolveEndpoint()`，probe 模拟 endpoint 文件变更。成本：很低（1–2 小时）。
