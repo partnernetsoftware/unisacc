@@ -1,0 +1,59 @@
+#pragma unisa module frames
+/* The framed units the driver hands the multi route, and the per-source framing
+   that builds them. src/driveunits.cx and tools/stagecase.cx both use this: the
+   bytes are produced once, not copied a second time in a tool.
+   A frame is LE32 frame length, then LE32 source-name length, the name, then the
+   source's tape text; the frame's own length covers everything after it.
+   fr_need/fr_le are the growth and little-endian writes driveunits used before
+   the split, byte for byte. Allocation and copying go through L0 mem.heap and
+   mem.bytes, so this module adds no direct libc call. All functions return 0,
+   or 1 when refused. */
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#define FR_MAXN 2147483647L
+#define FR_ROOM 1073741824L
+
+int fr_need(unsigned char **b, long *n, long *cap, long more) {
+    unsigned char *nb;
+    long room;
+    if (more < 0 || *n > FR_MAXN - more) return 1;
+    if (*n + more <= *cap) return 0;
+    room = *cap ? *cap : 4096;
+    while (room < *n + more) {
+        if (room > FR_ROOM) return 1;
+        room = room * 2;
+    }
+    nb = mm_grow(*b, room);
+    if (!nb) return 1;
+    *b = nb;
+    *cap = room;
+    return 0;
+}
+
+void fr_le(unsigned char *b, long at, long v) {
+    int k;
+    k = 0;
+    while (k < 4) {
+        b[at + k] = (unsigned char)((v >> (8 * k)) & 255);
+        k = k + 1;
+    }
+}
+
+/* Append one source's frame. NAME/NAMELEN is the source path the driver saw,
+   TEXT/TEXTN the tape that source produced. */
+int fr_add(unsigned char **b, long *n, long *cap, const char *name, long namelen,
+           const unsigned char *text, long textn) {
+    long framed;
+    if (namelen < 0 || textn < 0 || textn > FR_MAXN - 4 - namelen) return 1;
+    framed = textn + 4 + namelen;
+    if (fr_need(b, n, cap, 4 + framed)) return 1;
+    fr_le(*b, *n, framed);
+    *n = *n + 4;
+    fr_le(*b, *n, namelen);
+    *n = *n + 4;
+    if (namelen > 0 && mm_copy(*b + *n, *cap - *n, name, namelen) != 0) return 1;
+    *n = *n + namelen;
+    if (textn > 0 && mm_copy(*b + *n, *cap - *n, text, textn) != 0) return 1;
+    *n = *n + textn;
+    return 0;
+}

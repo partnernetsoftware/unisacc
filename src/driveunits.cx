@@ -11,6 +11,7 @@
 #pragma unisa use compiler.fwdstub
 #pragma unisa use driveutil
 #pragma unisa use compiler.cxmod
+#pragma unisa use compiler.frames
 
 static int dv_unit_route(char *dst, int cap, const char *tgt) {
     int i;
@@ -34,31 +35,6 @@ static int dv_unit_route(char *dst, int cap, const char *tgt) {
     return 0;
 }
 
-static int dv_need(unsigned char **b, long *n, long *cap, long more) {
-    unsigned char *nb;
-    long room;
-    if (more < 0 || *n > 2147483647L - more) return 1;
-    if (*n + more <= *cap) return 0;
-    room = *cap ? *cap : 4096;
-    while (room < *n + more) {
-        if (room > 1073741824L) return 1;
-        room = room * 2;
-    }
-    nb = realloc(*b, (size_t)room);
-    if (!nb) return 1;
-    *b = nb;
-    *cap = room;
-    return 0;
-}
-
-static void dv_le(unsigned char *b, long at, long v) {
-    int k;
-    k = 0;
-    while (k < 4) {
-        b[at + k] = (unsigned char)((v >> (8 * k)) & 255);
-        k = k + 1;
-    }
-}
 
 int dv_units(const char *tgt, int nsrc, const char **srcv, unsigned char **out, long *outn, char *why, int cap) {
     char uroute[96];
@@ -131,29 +107,12 @@ int dv_units(const char *tgt, int nsrc, const char **srcv, unsigned char **out, 
         }
         cur = next;
         curn = nextn;
-        namelen = dv_len(srcv[j]);
-        framed = curn + 4 + namelen;
-        if (dv_need(&frame, &fn, &fcap, 4 + framed)) {
+        if (fr_add(&frame, &fn, &fcap, srcv[j], dv_len(srcv[j]), cur, curn)) {
             free(cur);
             free(frame);
             if (why && cap > 0) why[0] = 0;
             return 1;
         }
-        dv_le(frame, fn, framed);
-        fn = fn + 4;
-        dv_le(frame, fn, namelen);
-        fn = fn + 4;
-        {
-            int k;
-            k = 0;
-            while (k < namelen) {
-                frame[fn] = (unsigned char)srcv[j][k];
-                fn = fn + 1;
-                k = k + 1;
-            }
-        }
-        if (curn) { void *cx_kept = memcpy(frame + fn, cur, (size_t)curn); (void)cx_kept; }
-        fn = fn + curn;
         free(cur);
         j = j + 1;
     }
@@ -222,7 +181,6 @@ static int dv_compile_frame(const char *tgt, const char *file, unsigned unit,
     char line[512];
     unsigned char *cur;
     unsigned char *next;
-    unsigned char *chunk;
     long srcn;
     long nextn;
     long framed;
@@ -265,24 +223,19 @@ static int dv_compile_frame(const char *tgt, const char *file, unsigned unit,
         return 1;
     }
     framed = nextn + 4 + namelen;
-    chunk = hs_alloc(4 + framed);
-    if (!chunk) {
+    {
+        unsigned char *fb = 0;
+        long fn2 = 0, fc2 = 0;
+        if (fr_add(&fb, &fn2, &fc2, file, namelen, next, nextn)) {
+            hs_free(next);
+            dv_why(why, cap, "out of memory");
+            return 1;
+        }
         hs_free(next);
-        dv_why(why, cap, "out of memory");
-        return 1;
+        *out = fb;
+        *outn = fn2;
+        return 0;
     }
-    dv_le(chunk, 0, framed);
-    dv_le(chunk, 4, (long)namelen);
-    k = 0;
-    while (k < namelen) {
-        chunk[8 + k] = (unsigned char)file[k];
-        k = k + 1;
-    }
-    if (nextn) dv_move(chunk + 8 + namelen, next, nextn);
-    hs_free(next);
-    *out = chunk;
-    *outn = 4 + framed;
-    return 0;
 }
 
 /* Read holdframe + attr table, build per-unit recs; failure frees its own
