@@ -1,0 +1,147 @@
+/* tools/check-fwdmerge-dialect.cx -- 杠杆1 的先失败用例:方言表化前后的判定差。
+ *
+ *   sh ./unisacc.com tools/check-fwdmerge-dialect.cx
+ *
+ * fwm_merge(cx/compiler/fwdmerge.cx:157)今天把合并断言写死成 ELF/x86_64 方言字面量
+ * (`.unit 2`、`main:`、`__init_u:`、`__main_ret:`、`__init:`、`  ret`、`  .exit r0`)。
+ * 因此一段 Mach-O/arm64 形状的磁带必然在第一个断言处返回 0,而 driver 随后整段
+ * units→e3→prune→lower→elf 重跑 —— 这就是要消掉的第二遍 e3。
+ *
+ * 夹具来源:out/fwm-probe/ASSERTIONS.md 的断言链打点表(在 out/ 副本里给每条 goto done
+ * 前插 stage 序号定位)。下面这条 ELF 磁带是**合成**的,不是 driver 实际产出的磁带 ——
+ * 真数据正例要等 INSTALL44 装好、能在 dv_fw_merge 落盘真磁带后再补(C 方案),
+ * 在那之前真数据一项记 NOT_RUN,不记 PASS。
+ *
+ * 本检查用合成磁带直接调 fwm_merge:
+ *   D1 Mach-O/arm64 形状的磁带:今天必须返回 0(失败用例,红);方言表化后应返回 1
+ *      —— 所以断言写成「与当前实现一致」的形式会永远绿,这里刻意断言返回 0,
+ *      表化落地时本文件必须同步改成 1(改动即证据)。
+ *   D2 ELF/x86_64 形状的磁带:前后都必须返回 1(防回归)
+ *   D3 ELF/x86_64 的合并结果逐字节稳定(同一输入两次相同)
+ *   D4 首行不是 `.unit 2` 的磁带一律返回 0(边界,防止把任意文本当磁带)
+ *
+ * 末行 FWDMERGE_DIALECT_CHECK<TAB>assertions=N<TAB>failed=M;任何 FAIL 退出 1。
+ */
+#pragma unisa use compiler.fwdmerge
+#pragma unisa use sys.fs
+
+static int fd_n, fd_failed;
+static char fd_root[4096];
+
+static void fd_die(const char *s) { fprintf(stderr, "check-fwdmerge-dialect: %s\n", s); exit(2); }
+
+static void fd_ck(int ok, const char *what) {
+    fd_n++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", what);
+    if (!ok) fd_failed++;
+}
+
+/* the allocator trio the driver injects (src/driveroute.cx:189-193) */
+static void *fd_alloc(void *p, long long n) { return realloc(p, n ? (size_t)n : 1); }
+static void fd_release(void *p) { free(p); }
+static void fd_fail(char *m) { fprintf(stderr, "fwdmerge: %s\n", m ? m : "failure"); fd_failed++; }
+
+/* Build a tape from a NUL-terminated text; the FwmBuf layout is {b, at, n, cap}. */
+static void fd_tape(const char *text, FwmBuf *out) {
+    size_t n = strlen(text);
+    out->b = (unsigned char *)text;
+    out->at = 0;
+    out->n = (int)n;
+    out->cap = (int)n;
+}
+
+/* ELF/x86_64 shape: the stub carries main:/__init_u:/__main_ret:, the base carries
+   __init:/__main_ret:; both end with "  ret".  fwm_export seeds the symbol list. */
+static const char *fd_elf_unit =
+    ".unit 2\n"
+    ".global helper\n";
+static const char *fd_elf_stub =
+    ".global main\n"
+    ".bss x 8\n"
+    "main:\n"
+    "  call __init_u\n"
+    "  ret\n"
+    "__init_u:\n"
+    "  call exit\n"
+    "  .exit r0\n"
+    "  ret\n"
+    "__main_ret:\n"
+    "  .exit r0\n";
+static const char *fd_elf_base =
+    ".str S0 \"x\"\n"
+    "__init:\n"
+    "  ret\n"
+    "  call helper\n"
+    "__main_ret:\n"
+    "  ret\n";
+
+/* Mach-O/arm64 shape: same structure, different labels -- `_main`, `__init_u` without the
+   trailing colon form the ELF merge expects, and `  bl` instead of `  call`. */
+static const char *fd_macho_unit =
+    ".unit 2\n"
+    ".global _helper\n";
+static const char *fd_macho_stub =
+    ".global _main\n"
+    "_main:\n"
+    "  bl ___init_u\n"
+    "  ret\n"
+    "___init_u:\n"
+    "  bl _exit\n"
+    "  ret\n"
+    "__main_ret:\n"
+    "  ret\n";
+static const char *fd_macho_base =
+    "_init:\n"
+    "  ret\n"
+    "  bl _helper\n"
+    "__main_ret:\n"
+    "  ret\n";
+
+static int fd_run(const char *unit, const char *stub, const char *base, FwmBuf *out) {
+    FwmBuf u, s, bb;
+    fd_tape(unit, &u);
+    fd_tape(stub, &s);
+    fd_tape(base, &bb);
+    memset(out, 0, sizeof *out);
+    out->b = 0;
+    out->at = 0;
+    out->n = 0;
+    out->cap = 0;
+    return fwm_merge(&bb, &s, &u, 0, out);
+}
+
+int main(void) {
+    if (!realpath(".", fd_root)) fd_die("root");
+    if (fwm_bind(fd_alloc, fd_release, fd_fail)) fd_die("fwm_bind");
+    fwm_reset();
+    if (fwm_export((const unsigned char *)"helper", 6)) fd_die("fwm_export helper");
+
+    /* D1: Mach-O/arm64 today must be refused (this is the failure case the dialect table fixes) */
+    {   FwmBuf out;
+        int r = fd_run(fd_macho_unit, fd_macho_stub, fd_macho_base, &out);
+        printf("MACHO_MERGE\tresult=%d\tbytes=%d\n", r, out.n);
+        fd_ck(r == 0, "D1-macho-arm64-refused-today");
+        free(out.b);
+    }
+
+    /* D2 + D3: ELF/x86_64 merges, and twice the same */
+    {   FwmBuf a, b;
+        int r1 = fd_run(fd_elf_unit, fd_elf_stub, fd_elf_base, &a);
+        int r2 = fd_run(fd_elf_unit, fd_elf_stub, fd_elf_base, &b);
+        printf("ELF_MERGE\tresult=%d\tbytes=%d\n", r1, a.n);
+        fd_ck(r1 == 1, "D2a-elf-x86_64-merges");
+        fd_ck(r1 == r2 && a.n == b.n && a.n > 0 && !memcmp(a.b, b.b, (size_t)a.n), "D3-elf-merge-stable");
+        free(a.b); free(b.b);
+    }
+
+    /* D4: a tape that does not start with `.unit 2` is refused whatever else it looks like */
+    {   FwmBuf out;
+        int r = fd_run(".unit 3\n", fd_elf_stub, fd_elf_base, &out);
+        printf("BADUNIT_MERGE\tresult=%d\n", r);
+        fd_ck(r == 0, "D4-non-unit2-refused");
+        free(out.b);
+    }
+
+    printf("FWDMERGE_DIALECT_CHECK\tassertions=%d\tfailed=%d\n", fd_n, fd_failed);
+    return fd_failed ? 1 : 0;
+}
