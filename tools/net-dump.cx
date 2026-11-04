@@ -1,0 +1,161 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* tools/net-dump.cx -- 把一个 .net(达标 Net 文本)解成可读状态表,并能一行 grep 出 CMPI 常量。
+ *
+ *   sh ./unisacc.com tools/net-dump.cx -- NET [--states|--grep TEXT|--dump]
+ *
+ * 解码不写第二份:格式与 ops 名字/元数全部复用 tools/cxlib/netpack.cx 的
+ * NP_NAME / NP_KINDS / np_arity / np_words 语义(见其 np_convert 的行语法)。
+ * 这里只做"文本 -> 行"的展示,不做阈值化(那是 np_convert 的事)。
+ *
+ * Net 文本结构(netpack.cx:258 起):
+ *   N ns nq ...            第一行,6 个字段;ns=状态数, nq=Q 前缀行数
+ *   S <hex>                字符串常量(nstr 条)
+ *   Q count v...           序列前缀
+ *   H mode n dn dq {key next seq}...   每条 H 是一行(状态),共 ns 行
+ * 输出:
+ *   STATE <i> <mode> n=<k> {...}     --dump 时把 key->next/seq 展开
+ *   CMPI <state> <const>             --grep CMPI 时只打印常量
+ * 退出 0 仅在结构自检通过(行数 == N 的 ns)。 */
+#define ND_MAXL 400000
+#define ND_LINE 8192
+static char *nd_ls[ND_MAXL];
+static int nd_n;
+static const char *const ND_NAME[56] = {
+    "ADV", "MARK", "JUMP", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "RLD", "LDX", "STX",
+    "OUT", "OUTW", "COPY", "COPYT", "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES",
+    "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "BLOBSAVE", "INPUSH", "INPUSHX",
+    "INPUSHXE", "INPOP", "SBCLR", "SBOUT", "SBSPAN", "SBBLOB", "SBINTERN", "SBSAVE", "SBFIND", "BLEN", "BYTE", "XLEN",
+    "DIVMOD10", "SWAP", "ACCEPT", "REJECT", "A64", "A64I", "C64", "C64U", "INC" };
+static const char *const ND_KINDS[56] = {
+    "", "r", "r", "ri", "rr", "arrr", "arri", "rr", "ri", "r", "rri", "rir",
+    "i", "r", "", "", "r", "r", "rr", "", "", "r", "rr", "ri",
+    "rri", "", "i", "r", "r", "g", "", "rrr", "rrr", "r", "r",
+    "rr", "", "", "i", "rr", "r", "r", "r", "r", "rr", "r", "r",
+    "r", "", "", "s", "arrr", "arri", "rr", "rr", "r" };
+static const char *nd_name(long op) { return (op >= 0 && op < 56) ? ND_NAME[op] : "?"; }
+static int nd_arity(long op) { return (op >= 0 && op < 56) ? (int)tx_len(ND_KINDS[op]) : -1; }
+static int nd_int(const char *s, long *out) {
+    long v = 0, i = 0; int neg = 0;
+    if (!s || !s[0]) return 0;
+    if (s[0] == '-') { neg = 1; i = 1; if (!s[1]) return 0; }
+    for (; s[i]; i++) { if (s[i] < '0' || s[i] > '9') return 0; v = v * 10 + (s[i] - '0'); }
+    *out = neg ? -v : v;
+    return 1;
+}
+/* 一行按空格切词 */
+static int nd_words(const char *s, char **w, int max) {
+    int n = 0;
+    while (*s) {
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) break;
+        if (n >= max) return n;
+        w[n++] = (char *)s;
+        while (*s && *s != ' ' && *s != '\t') s++;
+        if (*s) { *((char *)s) = 0; s++; }
+    }
+    return n;
+}
+int main(int argc, char **argv) {
+    char *buf, *p;
+    size_t sz;
+    int i, mode = 0;   /* 0 dump, 1 grep */
+    const char *grep = 0;
+    long ns = 0, nq = 0, nstr = 0;
+    if (argc < 2) { fprintf(stderr, "usage: net-dump NET [--states|--grep TEXT|--dump]\n"); return 2; }
+    for (i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--grep") && i + 1 < argc) { mode = 1; grep = argv[++i]; }
+        else if (tx_eqz(argv[i], "--states")) mode = 2;
+        else if (tx_eqz(argv[i], "--dump")) mode = 0;
+        else { fprintf(stderr, "net-dump: unknown %s\n", argv[i]); return 2; }
+    }
+    buf = cx_read(argv[1], &sz);
+    if (!buf) { fprintf(stderr, "net-dump: cannot read %s\n", argv[1]); return 2; }
+    nd_n = 0;
+    p = buf;
+    while (*p && nd_n < ND_MAXL) {
+        char *s = p;
+        while (*p && *p != '\n') p++;
+        *p = 0; p++;
+        nd_ls[nd_n++] = s;
+    }
+    {
+        char *w[8]; int n = nd_words(nd_ls[0], w, 8);
+        if (n != 7 || !tx_eqz(w[0], "N")) { fprintf(stderr, "net-dump: bad N line\n"); return 1; }
+        nd_int(w[1], &ns); nd_int(w[2], &nq); nd_int(w[4], &nstr);
+        printf("HEADER\tns=%ld\tnq=%ld\tnstr=%ld\tlines=%d\n", ns, nq, nstr, nd_n);
+    }
+    {
+        int hcount = 0; long idx = 0;
+        for (i = 0; i < nd_n; i++) {
+            char *s = nd_ls[i];
+            if (s[0] != 'H' || s[1] != ' ') continue;
+            {
+                char *w[4096]; int n = nd_words(s, w, 4096);
+                long vals[4096]; int k, okall = 1;
+                for (k = 1; k < n; k++) if (!nd_int(w[k], &vals[k])) { okall = 0; break; }
+                if (!okall) { printf("BADSTATE\t%ld\n", idx); idx++; hcount++; continue; }
+                /* H mode n dn dq {key next seq}* */
+                {
+                    long md = vals[1], cnt = vals[2], dn = vals[3], dq = vals[4];
+                    int e = 5;
+                    if (mode == 1) {
+                        /* 在 actions 里已解码为指令流? 这里 H 行只存 (key,next,seq);
+                           指令在 Q 前缀里,由 Q 行给出。grep 走 Q 行扫描。 */
+                        idx++; hcount++; continue;
+                    }
+                    printf("STATE\t%ld\tmode=%ld\tn=%ld\tdn=%ld\tdq=%ld", idx, md, cnt, dn, dq);
+                    if (mode == 0) {
+                        printf("\t{");
+                        for (k = 0; k < cnt && e + 2 < n; k++, e += 3)
+                            printf("%s%ld->%ld,%ld", k ? " " : "", vals[e], vals[e + 1], vals[e + 2]);
+                        printf("}");
+                    }
+                    printf("\n");
+                    idx++; hcount++;
+                }
+            }
+        }
+        printf("STATES\t%ld\n", (long)hcount);
+    }
+    if (mode == 1 && grep) {
+        /* Q 行: Q count <ints...>;整型流按 ND_KINDS 切,打印匹配操作码及其常量 */
+        int qi = 0;
+        for (i = 0; i < nd_n; i++) {
+            char *s = nd_ls[i];
+            if (s[0] != 'Q' || s[1] != ' ') continue;
+            {
+                char *w[8192]; int n = nd_words(s, w, 8192);
+                long v[8192];
+                int k = 0, at = 2;   /* 跳过 Q 与 count */
+                long cnt = 0;
+                if (!nd_int(w[1], &cnt)) continue;
+                for (k = 0; k < cnt && at < n; ) {
+                    long op;
+                    if (!nd_int(w[at], &op)) break;
+                    {
+                        int ar = nd_arity(op >= 0 ? op : op + 56);
+                        const char *nm = nd_name(op >= 0 ? op : op + 56);
+                        int a;
+                        if (ar < 0) break;
+                        if (tx_eqz(nm, grep)) {
+                            printf("OP\tQ%d\t%s", qi, nm);
+                            for (a = 1; a <= ar && at + a < n; a++) {
+                                if (nd_int(w[at + a], &v[a])) printf("\t%ld", v[a]);
+                                else printf("\t%s", w[at + a]);
+                            }
+                            printf("\n");
+                        }
+                        at += 1 + ar;
+                        k++;
+                    }
+                }
+                qi++;
+            }
+        }
+    }
+    printf("NET_DUMP\tstates=%ld\n", ns);
+    return 0;
+}

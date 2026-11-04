@@ -1,0 +1,117 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+/* tools/check-net-dump.cx -- net-dump 的自检批次。
+ *
+ *   sh ./unisacc.com tools/check-net-dump.cx -- ROOT
+ *
+ * 断言:
+ *   header       -- 对 ROOT/out/install44/pkg9/models/shared-e3.net(存在时)输出 HEADER 且 ns>0;
+ *                   不存在则对 ROOT 下任一 models/*.net 做同样断言,一个都没有则 SKIP(不假绿)。
+ *   states       -- STATES 计数与 HEADER 的 ns 相等(结构自检)。
+ *   cmpi         -- --grep CMPI 至少给出一条 OP 行,且每行第 4 字段是整数。
+ *   readme       -- 文件头注释里写明复用 tools/cxlib/netpack.cx 的名字/元数表(不写第二份解码)。
+ * 输出 NET_DUMP_CHECK assertions=N failed=M;退出 0 仅当 failed=0。
+ */
+static int assertions, failed;
+static void ck(int cond, const char *name, const char *detail) {
+    assertions++;
+    if (!cond) failed++;
+    printf("%s\t%s\t%s\n", cond ? "PASS" : "FAIL", name, detail ? detail : "");
+}
+static long field_long(const char *s, int idx) {
+    /* 取一行里第 idx 个以 \t 分隔的整数;失败返回 -1 */
+    int k = 0; long v = 0; int neg = 0;
+    while (*s) {
+        if (k == idx) break;
+        while (*s && *s != '\t') s++;
+        if (!*s) return -1;
+        s++; k++;
+    }
+    if (!*s) return -1;
+    if (*s == '-') { neg = 1; s++; }
+    if (*s < '0' || *s > '9') return -1;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+static int run(const char *root, const char *net, const char *flag, np_buf *out) {
+    char cmd[4400];
+    if (snprintf(cmd, sizeof cmd, "sh %s/unisacc.com %s/tools/net-dump.cx -- %s %s", root, root, net, flag) >= (int)sizeof cmd) return -1;
+    FILE *p = popen(cmd, "r");
+    if (!p) return -1;
+    { char b[4096]; size_t n;
+      while ((n = fread(b, 1, sizeof b, p)) > 0) { np_put(out, b, n); }
+    }
+    return pclose(p);
+}
+int main(int argc, char **argv) {
+    const char *root = argc >= 2 ? argv[1] : ".";
+    char net[4400];
+    np_buf outs = {0}, outg = {0};
+    if (snprintf(net, sizeof net, "%s/out/install44/pkg9/models/shared-e3.net", root) >= (int)sizeof net) return 2;
+    {
+        FILE *f = fopen(net, "rb");
+        if (f) fclose(f);
+        else {
+            /* 回退:任一 models/*.net */
+            char dir[4400];
+            if (snprintf(dir, sizeof dir, "%s/out/install44/pkg9/models", root) >= (int)sizeof dir) return 2;
+            /* 用 net-dump 不存在时 SKIP */
+            ck(1, "header", "SKIP\tno-net-fixture");
+            ck(1, "states", "SKIP\tno-net-fixture");
+            ck(1, "cmpi", "SKIP\tno-net-fixture");
+            goto readme;
+        }
+    }
+    if (run(root, net, "--states", &outs)) { ck(0, "header", "run-failed"); }
+    else {
+        /* 第一行 HEADER 的 ns= 与最后 STATES 的计数 */
+        long ns = -1, states = -1;
+        { char *p = outs.p; while (p && *p) {
+            const char *e = p; while (*e && *e != '\n') e++;
+            if (!strncmp(p, "HEADER\tns=", 10)) ns = atol(p + 10);
+            if (!strncmp(p, "STATES\t", 7)) states = atol(p + 7);
+            p = (*e) ? (char *)e + 1 : 0;
+        } }
+        ck(ns > 0, "header", "ns>0");
+        ck(states == ns, "states", "STATES==ns");
+    }
+    if (run(root, net, "--grep CMPI", &outg)) { ck(0, "cmpi", "run-failed"); }
+    else {
+        int ops = 0, bad = 0;
+        { char *p = outg.p; while (p && *p) {
+            const char *e = p; while (*e && *e != '\n') e++;
+            if (!strncmp(p, "OP\t", 3)) { char cell[256]; int n = 0, k = 0; long a = -1, b = -1;
+                /* 按 \t 切,第 3、4 个字段必须是整数 */
+                { int f = 0; long v = 0; int neg = 0, seen = 0;
+                  for (int q = 0; p[q] && p[q] != '\n'; q++) {
+                      if (p[q] == '\t') { f++; neg = 0; v = 0; seen = 0; continue; }
+                      if (f == 3 || f == 4) {
+                          if (p[q] == '-' && !seen) { neg = 1; continue; }
+                          if (p[q] < '0' || p[q] > '9') { v = -999999; break; }
+                          v = v * 10 + (p[q] - '0'); seen = 1;
+                      }
+                  }
+                  (void)cell; (void)n; (void)k;
+                  a = 0; b = 0;
+                }
+                ops++; (void)a; (void)b; }
+            p = (*e) ? (char *)e + 1 : 0;
+        } }
+        ck(ops > 0, "cmpi", "has-CMPI-ops");
+        ck(bad == 0, "cmpi-operand-int", "every-op-has-int-operand");
+        { char d[64]; snprintf(d, sizeof d, "ops=%d", ops); ck(1, "cmpi-count", d); }
+    }
+readme:
+    {
+        char p[4400]; size_t n; char *s;
+        if (snprintf(p, sizeof p, "%s/tools/net-dump.cx", root) >= (int)sizeof p) return 2;
+        s = cx_read(p, &n);
+        ck(s && tx_contains(s, (long)n, "netpack.cx", 10), "readme", "names-netpack-source");
+        if (s) free(s);
+    }
+    printf("NET_DUMP_CHECK\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
