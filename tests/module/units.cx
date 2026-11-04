@@ -1,0 +1,55 @@
+#pragma unisa use compiler.cxmod
+#pragma unisa use runtime.routestep
+#pragma unisa use runtime.stagehandoff
+#pragma unisa use runtime.holdframe
+#pragma unisa use text.fmt
+int dv_expand(int *, const char **, int);
+int dv_fwd_splice(const char *, int, const char **, unsigned char **, long *, char *, int);
+int hs_cxm_rd(char *, char *, int);
+int hs_cxm_wr(char *, char *, int);
+int hs_cxm_say(int, char *, int);
+void hs_cxm_sha(char *, int, char *);
+
+static char names[129][32];
+static char *paths[129];
+static const char *sources[129];
+int main(void) {
+    FILE *table; char line[128], expected[32], forward[32], why[128]; int n, i, failed = 0;
+    unsigned char *out; long outn;
+    if (cxm_bind(hs_cxm_rd, hs_cxm_wr, hs_cxm_say, hs_cxm_sha, "/tmp")) return 2;
+    for (i = 0; i < 129; i++) { tx_snprintf(names[i], sizeof names[i], "unit%d.c", i); paths[i] = names[i]; sources[i] = names[i]; }
+    table = fopen("tests/module/boundary.tsv", "r"); if (!table || !fgets(line, sizeof line, table)) return 2;
+    while (fgets(line, sizeof line, table)) {
+        int plan, expand, count, ok;
+        if (sscanf(line, "%d %31s %31s", &n, expected, forward) != 3 || n < 1 || n > 129) return 2;
+        cxm_set_funit(0); plan = cxm_plan(paths, n); count = n; expand = dv_expand(&count, sources, 0);
+        ok = n <= DV_MAXU ? !plan && cxm_count() == n && !expand && count == n : plan && expand;
+        printf("%s\tunits-%d\tcxmod=%d\tdriveplan=%d\tcount=%d\n", ok ? "PASS" : "FAIL", n, plan, expand, count);
+        if (!ok) failed++;
+        if (n >= 127) {
+            unsigned char frame[8] = {4,0,0,0,0,0,0,0};
+            int rc, admitted = !strcmp(forward, "accept");
+            if (hf_keep(frame, 8, 0, 0)) return 2;
+            sources[1] = "/nonexistent-module-unit-stub.c";
+            why[0] = 0; out = 0; outn = 0;
+            rc = dv_fwd_splice("lnx/x86_64", n + 1, sources, &out, &outn, why, sizeof why);
+            ok = admitted ? rc == 5 : rc == 1 && !strcmp(why, "forwarding stub");
+            printf("%s\tforward-original-%d\tstatus=%d\n", ok ? "PASS" : "FAIL", n, rc);
+            if (!ok) failed++;
+        }
+    }
+    fclose(table);
+    sources[0] = "tests/module/root.cx"; n = 1;
+    i = dv_expand(&n, sources, 0);
+    if (i || n != 2 || !strstr(sources[1], "tests/module/leaf.cx")) { puts("FAIL\tuse-expansion"); failed++; }
+    else puts("PASS\tuse-expansion");
+    sources[0] = "tests/module/root.cx"; n = 1;
+    i = dv_expand(&n, sources, 1);
+    if (i || n != 1) { puts("FAIL\tuse-funit"); failed++; }
+    else puts("PASS\tuse-funit");
+    out = 0; outn = 0; why[0] = 0;
+    i = dv_fwd_splice("lnx/x86_64", 2, sources, &out, &outn, why, sizeof why);
+    if (i != 1 || strcmp(why, "forwarding stub") || out || outn) { puts("FAIL\tforwarding-missing-frame"); failed++; }
+    else puts("PASS\tforwarding-missing-frame");
+    printf("MODULE_UNITS\tfailed=%d\n", failed); return failed ? 1 : 0;
+}
