@@ -116,6 +116,16 @@ static int body_head(const char *t, size_t n, size_t i, size_t *declarator) {
         while (p < n && (t[p] == ' ' || t[p] == '\t' || t[p] == '\n' ||
                         t[p] == '\r' || t[p] == '\f' || t[p] == '\v')) p++;
     }
+    /* A carried body is `static <type> NAME(...) {` at line start, or the
+       __UNISA_LIBC_LINKAGE marker (SPEED-02 libc unitization) in place of the
+       `static` keyword. The marker is a length-20 token: accept it the same way,
+       requiring a non-identifier char right after, and keep *declarator at the
+       marker start so the rest of the head scan is unchanged. */
+    if (n - p >= 20 && !memcmp(t + p, "__UNISA_LIBC_LINKAGE", 20) &&
+        (p + 20 >= n || !ident_char(t[p + 20]))) {
+        *declarator = p;
+        return 1;
+    }
     if (n - p < 6 || memcmp(t + p, "static", 6) ||
         (p + 6 < n && ident_char(t[p + 6]))) return 0;
     *declarator = p;
