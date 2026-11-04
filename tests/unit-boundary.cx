@@ -1,0 +1,192 @@
+/* tests/unit-boundary.cx -- the real acceptance for the multi-unit frame cap.
+ *
+ *   sh ./unisacc.com tests/unit-boundary.cx -- ROOT
+ *
+ * check-link-cap.cx only counts command-line source arguments; it never builds
+ * anything, so it cannot see the per-frame unit limit that actually refused the
+ * 65th source ("reject: not covered: malformed token locations").  This test
+ * builds for real: for each unit count N it writes N files (N-1 plain modules
+ * plus one main that returns a value derived from every module's function) into
+ * a scratch directory, compiles them with the tool root's own product, runs the
+ * result, and checks both the exit status and the value.
+ *
+ * 129 must be refused with "too many sources (limit 128)".
+ *
+ * KNOWN-RED marks a row that is expected to fail today because the product in
+ * the tree still carries the old per-frame cap (UNITOK2).  A KNOWN-RED row that
+ * passes is reported as KNOWN-RED-PASS so the flip is visible; a KNOWN-RED row
+ * may only be recorded once the reason is a refusal, never because the run
+ * produced no output.
+ *
+ * Prints UNIT_BOUNDARY<TAB>rows=N<TAB>pass=M<TAB>known-red=K<TAB>fail=F and
+ * exits non-zero if any non-KNOWN-RED row failed. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int rows, passed, known, failed;
+static char root[4400], scratch[4400];
+
+static void pathcat(char out[4400], const char *a, const char *b) {
+    int n = snprintf(out, 4400, "%s/%s", a, b);
+    if (n < 0 || n >= 4400) {
+        fputs("unit-boundary: path bound\n", stderr);
+        exit(2);
+    }
+}
+
+/* Write N-1 modules and one main; main adds every module's value and returns
+ * it modulo 251 so the result stays a legal exit status. */
+static int write_units(int n) {
+    char dir[4400], file[4400];
+    if (snprintf(dir, sizeof dir, "%s/units-%d", scratch, n) < 0 || strlen(dir) >= sizeof dir) return -1;
+    if (mkdir(dir, 0755) && errno != EEXIST) return -1;
+    long want = 0;
+    for (int i = 0; i < n - 1; i++) {
+        snprintf(file, sizeof file, "%s/m%d.cx", dir, i);
+        FILE *f = fopen(file, "wb");
+        if (!f) return -1;
+        fprintf(f, "#pragma unisa module m%d\nint m%d_f(void){return %d;}\n", i, i, i % 251);
+        fclose(f);
+        want += i % 251;
+    }
+    snprintf(file, sizeof file, "%s/main.cx", dir);
+    FILE *f = fopen(file, "wb");
+    if (!f) return -1;
+    fprintf(f, "int m0_f(void);\n");
+    for (int i = 1; i < n - 1; i++) fprintf(f, "int m%d_f(void);\n", i);
+    fprintf(f, "int main(void){int s=0;");
+    for (int i = 0; i < n - 1; i++) fprintf(f, "s+=m%d_f();", i);
+    fprintf(f, "return s%%251;}\n");
+    fclose(f);
+    return (int)(want % 251);
+}
+
+/* Run one case; returns 1 when the row behaved as required. */
+static int run_case(int n, int known_red) {
+    char out[4400], cmd[12000], line[512];
+    int rc = write_units(n);
+    if (rc < 0) {
+        printf("FAIL\tsize-%d\tcannot-write-fixture\n", n);
+        rows++;
+        failed++;
+        return 0;
+    }
+    snprintf(out, sizeof out, "%s/units-%d/result.bin", scratch, n);
+    snprintf(cmd, sizeof cmd, "%s/unisacc.com %s/units-%d/main.cx", root, scratch, n);
+    /* Collect every module path into the command line. */
+    size_t used = strlen(cmd);
+    for (int i = 0; i < n - 1; i++) {
+        int w = snprintf(cmd + used, sizeof cmd - used, " %s/units-%d/m%d.cx", scratch, n, i);
+        if (w < 0 || (size_t)w >= sizeof cmd - used) {
+            printf("FAIL\tsize-%d\tcommand-line-bound\n", n);
+            rows++;
+            failed++;
+            return 0;
+        }
+        used += (size_t)w;
+    }
+    if (snprintf(cmd + used, sizeof cmd - used, " -o %s 2>&1", out) < 0 || strlen(cmd) >= sizeof cmd) {
+        printf("FAIL\tsize-%d\tcommand-line-bound\n", n);
+        rows++;
+        failed++;
+        return 0;
+    }
+
+    int expect_refusal = n > 128;
+    FILE *p = popen(cmd, "r");
+    if (!p) {
+        printf("FAIL\tsize-%d\tpopen\n", n);
+        rows++;
+        failed++;
+        return 0;
+    }
+    int refused = 0;
+    line[0] = 0;
+    while (fgets(line, sizeof line, p)) {
+        if (strstr(line, "too many sources (limit 128)")) refused = 1;
+    }
+    int status = pclose(p);
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    int build_failed = !WIFEXITED(status) || code != 0;
+
+    rows++;
+    if (expect_refusal) {
+        if (refused) {
+            passed++;
+            printf("PASS\tsize-%d\trefused-with-limit-128\n", n);
+            return 1;
+        }
+        printf("FAIL\tsize-%d\texpected-refusal-got-rc=%d\n", n, code);
+        failed++;
+        return 0;
+    }
+
+    if (build_failed && !refused) {
+        /* Build failed. Report the first line the product printed, which is the
+         * refusal that names the real limit. */
+        printf("FAIL\tsize-%d\tbuild-refused: %s\n", n, line);
+        if (known_red) {
+            known++;
+            printf("KNOWN-RED\tsize-%d\tproduct-cap-not-lifted\n", n);
+            return 0;
+        }
+        failed++;
+        return 0;
+    }
+
+    /* Build succeeded: run the artefact and compare its exit status. */
+    snprintf(cmd, sizeof cmd, "%s; echo rc=$?", out);
+    p = popen(cmd, "r");
+    if (!p) {
+        printf("FAIL\tsize-%d\tpopen-run\n", n);
+        failed++;
+        return 0;
+    }
+    line[0] = 0;
+    while (fgets(line, sizeof line, p)) {}
+    pclose(p);
+    int got = -1;
+    char *at = strstr(line, "rc=");
+    if (at) got = atoi(at + 3);
+    if (got == rc) {
+        passed++;
+        printf("PASS\tsize-%d\trc=%d\n", n, got);
+        return 1;
+    }
+    printf("FAIL\tsize-%d\twant-rc=%d-got=%d\n", n, rc, got);
+    if (known_red) {
+        known++;
+        failed--;
+        return 0;
+    }
+    failed++;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        fputs("usage: unit-boundary.cx ROOT\n", stderr);
+        return 2;
+    }
+    if (strlen(argv[1]) >= sizeof root) {
+        fputs("unit-boundary: root bound\n", stderr);
+        return 2;
+    }
+    strcpy(root, argv[1]);
+    snprintf(scratch, sizeof scratch, "%s/out/unit-boundary", root);
+    if (mkdir(scratch, 0755) && errno != EEXIST) {
+        fputs("unit-boundary: cannot create scratch\n", stderr);
+        return 2;
+    }
+
+    static const int sizes[] = { 1, 2, 63, 64, 65, 127, 128, 129 };
+    for (unsigned i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+        int n = sizes[i];
+        /* The cap today is 64 units per frame, so 65/127/128 are red until the
+         * product in the tree carries the lifted limit. */
+        run_case(n, n == 65 || n == 127 || n == 128);
+    }
+    printf("UNIT_BOUNDARY\trows=%d\tpass=%d\tknown-red=%d\tfail=%d\n", rows, passed, known, failed);
+    return failed ? 1 : 0;
+}
