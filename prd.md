@@ -271,8 +271,8 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点(2026-11-02 夜)。
-本轮慢车道(2026-11-03)收于步11:p3 a0daec1f(1725284B) + entry-build candidate a41f5bf3(3463074B)已产出(未安装/未换标/未跑全批);步12-18 因链依赖已归档 C 未做,恢复步12 的前置是 C44-ENTRY-HOSTIMPORT-01(33 对象入口回归)。**已装产品 = 快车道候选**(NOT_RELEASE dev-lnx(B4 booter dc0033f4 1292B),entry 648a47ca / p3 436004f0 / split2 身份 2a1b38e5);上一版 83343ec1 的五片发布产物**在 `out/` 里没找到**(只有 `out/census-83343ec1`),需另查来源。今日(11-02)工作全部落在"0.0.43 收口之后的体系整理",**没有推进 0.0.44 第一优先级(编译加速 C44-SPEED-01)**——这是漂移,下一轮必须纠正。
+当前节点(2026-11-04 15:30)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
+今日主线:E0 预演步7-11 全通(export 86ms / ctx 4.3s / wave 631s / kernel 39s / pack 264s);步12 release 需 git 检出,另立 E0-RELEASE。**下一步是真实重建+安装 [INSTALL44]**——DOCK 系列、B3/B4、B5c 剩余项都等已装产品认 `#pragma unisa dock` 与新 build.json。0.0.44 第一优先 [SPEED] 已开工(11-02 记的"0 进展"漂移今日纠正)。
 
 ```text
 0.0.43 收口 + 体系整理(进行中)
@@ -290,9 +290,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 └─ 未签名、未公开(先 QUALIFIED 再发布)
 
 0.0.44 方向(主人 11-01 定:清理干扰、修 bug、提速;提速第一)
-├─ [ ] C44-SPEED-01 编译加速:今日 0 进展
-├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,本轮慢车道后立项
-└─ [ ] 其余见 plans/v0.0.44.md
+├─ [~] 提速 [SPEED](omp-go):基线 empty.c 推理 12.2ms / host.c e3 推理 120ms;杠杆1=fwdmerge 方言表化(osx/arm64 免第二遍 e3),先写失败检查
+├─ [~] 重建+安装 [INSTALL44](omp-bdy):E0 预演已通 [E0];安装后解锁下列
+│  ├─ [~] dock 指令 [DOCK1] 已解析;lint 侧 [DOCK2a] [DOCK2b] 判据与夹具备好、代码改动等安装后同批;[DOCK3] 45 行 pragma 清单备好
+│  └─ [~] 基座外置/APE 头 [B3] [B4]、build.json 新格式 [B5c]
+├─ [x] 工具:dock-map(use 图共享)、refactor inject(插 pragma,死循环已修)[REFACTOR-PRAGMA]
+├─ [ ] 寄存器分配 [REGALLOC]:档1 实测 2.9% 不值得,BLOCKED 待主人要性能再开
+├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,未立项
+└─ [ ] 其余见 plans/v0.0.44.md 与 work/items.tsv(DRAFT 项需督导转 READY 才开工)
 ```
 
 <a id="memory-palace"></a>
@@ -300,6 +305,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
+| 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | `83343ec1`，5,145,706 B，rev `edc2c7700b`（当前工作树 dev-lnx 薄壳见 §9.1） | `tools/com-tree.cx` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
