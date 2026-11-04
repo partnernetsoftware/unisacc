@@ -122,6 +122,31 @@ int main(int argc, char **argv) {
     ok(producer_actual[0] && !strcmp(producer_pin, producer_actual), "producer_pin-names-source-package-pack",
        producer_actual);
 
+    /* A drift between the producers is what broke candidate install once: the
+     * verifier rebuilt a different argv than the producer wrote. The durable
+     * guard is structural -- each producer's job_command must forward to the
+     * single implementation (sp_job_command) and must not assemble an argv of
+     * its own. A literal "seed/%s.c" in a producer's argv builder means the
+     * copy is back. */
+    static const char *prods[] = { "tools/source-package.cx", "tools/source-package-pack.cx" };
+    static const char *labels[] = { "source-package-forwards-argv", "source-package-pack-forwards-argv" };
+    for (int i = 0; i < 2; i++) {
+        char p[4400];
+        pathcat(p, argv[1], prods[i]);
+        size_t n;
+        char *b = load(p, &n);
+        if (!b) {
+            ok(0, labels[i], "unreadable");
+            continue;
+        }
+        int forwards = strstr(b, "sp_job_command(") != 0;
+        int own_copy = strstr(b, "v[n++]=\"-std=c99\"") != 0;
+        char detail[64];
+        snprintf(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy);
+        ok(forwards && !own_copy, labels[i], detail);
+        free(b);
+    }
+
     printf("SOURCEPACKAGE_PINS\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
 }
