@@ -87,6 +87,79 @@ int main(int argc,char **argv){
         free(b);
     }
     /* B5a 补 ①:成员集 == ape-receipt 的成员集。
+       receipt 每行 "<name>\t<path>\tsha=..\tbytes=..",首行 NOT_RELEASE 是标记;
+       manifest 每行 <name>\t<kind>\t<arch>\t<sha>\t<size>\t<order>。
+       两边的名字集合必须完全相同(缺一个或多一个都具名拒绝)。 */
+    {
+        char rec[4400], em[4400];
+        int produced = 0, same = 0, missing = 0, extra = 0;
+        if(cx_fmt(rec,sizeof rec,"%s/out/epoch-2026-11-02/root/ape-receipt.txt",root))return 2;
+        if(cx_fmt(em,sizeof em,"%s/out/manifest-epoch.tsv",root))return 2;
+        if(sy_exists(rec)!=1 || sy_exists(em)!=1){
+            printf("MEMBER_SET\tSKIP\tmissing-input\n");
+        } else {
+            size_t rn=0,mn=0;
+            char *rb=cx_read(rec,&rn), *mb=cx_read(em,&mn);
+            if(rb && mb){
+                /* 对每个 receipt 名字,在 manifest 里找同名行 */
+                char *cur=rb;
+                while(cur<rb+rn){
+                    char *nl=memchr(cur,'\n',(size_t)(rb+rn-cur));
+                    long len=nl?(long)(nl-cur):(long)(rb+rn-cur);
+                    if(len>0 && !(len>=11 && !memcmp(cur,"NOT_RELEASE",11))){
+                        char *tab=memchr(cur,'\t',(size_t)len);
+                        long nlen=tab?(long)(tab-cur):len;
+                        /* receipt 用不带扩展名的逻辑名(p3-package),manifest 用落盘文件名
+                           (p3-package.bin);按 manifest-gen 的映射补齐后再比对。 */
+                        char alias[64]; size_t alen=(size_t)nlen;
+                        { size_t z; for(z=0;z<alen;z++) alias[z]=cur[z]; alias[alen]=0; }
+                        if(alen+4<sizeof alias && !strcmp(alias,"p3-package")){ size_t z; const char *lit="p3-package.bin"; for(z=0;z<15;z++) alias[z]=lit[z]; alen=14; }
+                        int found=0;
+                        char *mc=mb;
+                        while(mc<mb+mn){
+                            char *mnl=memchr(mc,'\n',(size_t)(mb+mn-mc));
+                            long mlen=mnl?(long)(mnl-mc):(long)(mb+mn-mc);
+                            char *mtab=memchr(mc,'\t',(size_t)mlen);
+                            long mnlen=mtab?(long)(mtab-mc):mlen;
+                            if(mnlen==(long)alen && !memcmp(mc,alias,alen)){ found=1; break; }
+                            mc += mlen+1;
+                        }
+                        if(found) produced++; else { missing++; printf("MEMBER_SET\tMISSING\t%.*s\n",(int)nlen,cur); }
+                    }
+                    cur += len+1;
+                }
+                /* 反向:manifest 的每个名字也必须在 receipt 里 */
+                {   char *mc=mb;
+                    while(mc<mb+mn){
+                        char *mnl=memchr(mc,'\n',(size_t)(mb+mn-mc));
+                        long mlen=mnl?(long)(mnl-mc):(long)(mb+mn-mc);
+                        char *mtab=memchr(mc,'\t',(size_t)mlen);
+                        long mnlen=mtab?(long)(mtab-mc):mlen;
+                        int found=0;
+                        char *rc2=rb;
+                        while(rc2<rb+rn){
+                            char *rnl=memchr(rc2,'\n',(size_t)(rb+rn-rc2));
+                            long rlen=rnl?(long)(rnl-rc2):(long)(rb+rn-rc2);
+                            char *rtab=memchr(rc2,'\t',(size_t)rlen);
+                            long rnlen=rtab?(long)(rtab-rc2):rlen;
+                            char ralias[64]; size_t ralen=(size_t)rnlen;
+                            { size_t z; for(z=0;z<ralen;z++) ralias[z]=rc2[z]; ralias[ralen]=0; }
+                            if(ralen+4<sizeof ralias && !strcmp(ralias,"p3-package")){ size_t z; const char *lit="p3-package.bin"; for(z=0;z<15;z++) ralias[z]=lit[z]; ralen=14; }
+                            if(ralen==(size_t)mnlen && !memcmp(ralias,mc,(size_t)mnlen)){ found=1; break; }
+                            rc2 += rlen+1;
+                        }
+                        if(!found){ extra++; printf("MEMBER_SET\tEXTRA\t%.*s\n",(int)mnlen,mc); }
+                        mc += mlen+1;
+                    }
+                }
+                same = (missing==0 && extra==0 && produced>0);
+                printf("MEMBER_SET\tmatched=%d\tmissing=%d\textra=%d\n",produced,missing,extra);
+            }
+            ck(same,"member-set-equals-ape-receipt");
+            free(rb); free(mb);
+        }
+    }
+
     /* ape-receipt 一致性：对 epoch root 生成 manifest,把 unisacc.com 行的 sha 与
        ape-receipt.txt 里同名成员的 sha= 字段逐字比对(d93c1b24 这一行要对上)。
        这是 B5a 阶段唯一能测的「身份」口径——E0 第 8 步还要等 B5b/B5c 退役 build.json 的
@@ -121,7 +194,7 @@ int main(int argc,char **argv){
                         size_t len=nl?(size_t)(nl-rn_ptr):(size_t)(rb+rn-rn_ptr);
                         if(len>strlen(target) && !memcmp(rn_ptr,target,strlen(target)) && rn_ptr[strlen(target)]=='\t'){
                             const char *sh=strstr(rn_ptr,"sha=");
-                            if(sh && sh< rn_ptr+len){ void *cx_kept = memcpy(want,sh+4,64); (void)cx_kept; want[64]=0; }
+                            if(sh && sh< rn_ptr+len){ size_t z; for(z=0;z<64;z++) want[z]=sh[4+z]; want[64]=0; }
                             break;
                         }
                         rn_ptr += len+1;
@@ -150,8 +223,87 @@ int main(int argc,char **argv){
                 }
                 ck(ok,"manifest-sha-equals-ape-receipt");
                 free(rb); free(mb);
-    /* B5a 补 ②:篡改一个成员 → 必须报出成员名。
             }
+        }
+    }
+
+    /* B5a 补 ②:篡改一个成员 → 必须报出成员名。
+       在 /tmp 的 split2 副本上做(不碰冻结域 out/epoch-*):先生成基准 manifest,
+       再只改 p3-package.bin 一个字节,重生成,断言该成员行 sha 变了且报出名字;
+       同时断言未被改动的 unisacc.com 行 sha 不变(证明报的是那一个成员,不是整表重写)。 */
+    {
+        char base[4400], t2[4400];
+        if(cx_fmt(base,sizeof base,"%s/out/b5a-tamper-base.tsv",root))return 2;
+        if(cx_fmt(t2,sizeof t2,"%s/out/b5a-tamper-after.tsv",root))return 2;
+        {   sy_stat_t st;
+            if(sy_stat(base,&st)==0) unlink(base);
+            if(sy_stat(t2,&st)==0) unlink(t2);
+        }
+        /* 先把副本恢复成未篡改状态(重复运行必须可重入):从冻结域重新拷三个成员 */
+        {   char *v[]={(char*)"sh",(char*)"-c",
+                      (char*)"cp -f out/epoch-2026-11-02/root/unisacc.com /tmp/tamper-root/ && "
+                      "cp -f out/epoch-2026-11-02/root/unisacc.com.dev/entry.elf out/epoch-2026-11-02/root/unisacc.com.dev/p3-package.bin /tmp/tamper-root/unisacc.com.dev/ && "
+                      "cp -f out/epoch-2026-11-02/root/ape-receipt.txt /tmp/tamper-root/",0};
+            np_result r={0}; char why[512];
+            if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"tamper-reset");}
+            else { ck(r.rc==0,"tamper-reset-rc"); np_free(&r); }
+        }
+        {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"40",(char*)"sh",(char*)"unisacc.com",
+                      (char*)"tools/manifest-gen.cx",(char*)"--",(char*)"/tmp/tamper-root",base,0};
+            np_result r={0}; char why[512];
+            if(np_run(v,root,0,40,&r,why,sizeof why)){ck(0,"tamper-base-gen");}
+            else { ck(r.rc==0,"tamper-base-gen-rc"); np_free(&r); }
+        }
+        /* 改 p3-package.bin 的一个字节 */
+        {   int fd=open("/tmp/tamper-root/unisacc.com.dev/p3-package.bin",O_RDWR);
+            int okw=0;
+            if(fd>=0){ char x='X'; if(lseek(fd,64,SEEK_SET)>=0 && write(fd,&x,1)==1) okw=1; close(fd); }
+            ck(okw,"tamper-member-written");
+        }
+        {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"40",(char*)"sh",(char*)"unisacc.com",
+                      (char*)"tools/manifest-gen.cx",(char*)"--",(char*)"/tmp/tamper-root",t2,0};
+            np_result r={0}; char why[512];
+            if(np_run(v,root,0,40,&r,why,sizeof why)){ck(0,"tamper-after-gen");}
+            else { ck(r.rc==0,"tamper-after-gen-rc"); np_free(&r); }
+        }
+        /* 比对两表:p3-package.bin 的 sha 必须变,unisacc.com 的必须不变 */
+        {   size_t bn=0, an=0;
+            char *bb=cx_read(base,&bn), *ab=cx_read(t2,&an);
+            int pkg_changed=0, base_stable=0, named=0;
+            if(bb && ab){
+                char pkgb[65]={0}, pkga[65]={0}, comb[65]={0}, coma[65]={0};
+                char *cur=bb;
+                while(cur<bb+bn){
+                    char *nl=memchr(cur,'\n',(size_t)(bb+bn-cur));
+                    long len=nl?(long)(nl-cur):(long)(bb+bn-cur);
+                    char *f[6]; int nf=0; char *q=cur;
+                    while(nf<6 && q<cur+len){ f[nf++]=q; char *tab=memchr(q,'\t',(size_t)(cur+len-q)); if(!tab) break; *tab=0; q=tab+1; }
+                    if(nf==6){
+                        if(!strcmp(f[0],"p3-package.bin")){ size_t k; for(k=0;k<64&&f[3][k];k++) pkgb[k]=f[3][k]; }
+                        if(!strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) comb[k]=f[3][k]; }
+                    }
+                    cur += len+1;
+                }
+                cur=ab;
+                while(cur<ab+an){
+                    char *nl=memchr(cur,'\n',(size_t)(ab+an-cur));
+                    long len=nl?(long)(nl-cur):(long)(ab+an-cur);
+                    char *f[6]; int nf=0; char *q=cur;
+                    while(nf<6 && q<cur+len){ f[nf++]=q; char *tab=memchr(q,'\t',(size_t)(cur+len-q)); if(!tab) break; *tab=0; q=tab+1; }
+                    if(nf==6){
+                        if(!strcmp(f[0],"p3-package.bin")){ size_t k; for(k=0;k<64&&f[3][k];k++) pkga[k]=f[3][k]; named=1; }
+                        if(!strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) coma[k]=f[3][k]; }
+                    }
+                    cur += len+1;
+                }
+                pkg_changed = pkgb[0] && pkga[0] && strcmp(pkgb,pkga)!=0;
+                base_stable = comb[0] && coma[0] && !strcmp(comb,coma);
+                if(pkg_changed) printf("TAMPER\tmember=p3-package.bin\tbefore=%s\tafter=%s\n",pkgb,pkga);
+                else printf("TAMPER\tNOT-CHANGED\tmember=p3-package.bin\n");
+            }
+            ck(pkg_changed && named,"tamper-member-reports-name");
+            ck(base_stable,"tamper-untouched-member-stable");
+            free(bb); free(ab);
         }
     }
 
