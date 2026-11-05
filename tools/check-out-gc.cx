@@ -35,12 +35,19 @@ static int gc(char **av) {
 
 int main(int argc, char **argv) {
     int n;
+    char missing[600];
     (void)argc; (void)argv;
-    tx_snprintf(root, sizeof root, "out/check-out-gc-scratch-%d", (int)sy_pid());
-    tx_snprintf(keep, sizeof keep, "%s/fresh", root);
-    tx_snprintf(gone, sizeof gone, "%s/old", root);
-    n = sy_mkdir(root, 0755);
-    ok(n == 0 || n == -EEXIST, "scratch root is made");
+    /* scratch 放在 /tmp 的 mkdtemp 里：cx_rmtree 的白名单含 /tmp，全新克隆没有 out/ 也能跑。 */
+    if (tx_snprintf(root, sizeof root, "/tmp/check-out-gc-XXXXXX") < 0 || !mkdtemp(root)) {
+        sy_printf("FAIL\tscratch root is made\n");
+        sy_printf("CHECK_OUT_GC\tok=%d\tfail=%d\n", okc, failc + 1);
+        return 1;
+    }
+    if (tx_snprintf(keep, sizeof keep, "%s/fresh", root) < 0 ||
+        tx_snprintf(gone, sizeof gone, "%s/old", root) < 0 ||
+        tx_snprintf(missing, sizeof missing, "%s/no-such-root-7f3a", root) < 0) return 2;
+    n = 0;
+    ok(n == 0, "scratch root is made");
     ok(touch(keep) == 0, "a fresh entry exists");
     ok(sy_spawn(0) == -EINVAL, "spawn of a null argv is -EINVAL");
     ok(sy_spawn((char *[]){ 0 }) == -EINVAL, "spawn of an empty argv is -EINVAL");
@@ -64,7 +71,7 @@ int main(int argc, char **argv) {
     }
     ok(sy_exists(keep) == 1, "an entry younger than the age survives");
     {
-        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", "out/no-such-root-7f3a", 0 };
+        char *av[] = { "sh", "./unisacc.com", "tools/out-gc.cx", "--", "--root", missing, 0 };
         ok(gc(av) == 1, "a missing root is exit 1, not a silent empty report");
     }
     {
