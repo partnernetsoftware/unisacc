@@ -9,16 +9,23 @@
 #define NULL 0
 
 #if !__UNISA_FTRIM_LIBC || __UN_strlen
-static __u_word strlen(const char *__u_s) {
+#if defined(RT_EXTERN)
+extern __u_word strlen(const char *__u_s);
+#else
+__UNISA_LIBC_LINKAGE __u_word strlen(const char *__u_s) {
     __u_word __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
     return __u_n;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strcpy
-static char *strcpy(char *__u_d, const char *__u_s) {
+#if defined(RT_EXTERN)
+extern char *strcpy(char *__u_d, const char *__u_s);
+#else
+__UNISA_LIBC_LINKAGE char *strcpy(char *__u_d, const char *__u_s) {
     __u_word __u_i;
     __u_i = 0;
     while (__u_s[__u_i]) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; }
@@ -26,9 +33,13 @@ static char *strcpy(char *__u_d, const char *__u_s) {
     return __u_d;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strncpy
-static char *strncpy(char *__u_d, const char *__u_s, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern char *strncpy(char *__u_d, const char *__u_s, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE char *strncpy(char *__u_d, const char *__u_s, __u_word __u_n) {
     __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; if (__u_s[__u_i] == 0) break; __u_i = __u_i + 1; }
@@ -36,25 +47,37 @@ static char *strncpy(char *__u_d, const char *__u_s, __u_word __u_n) {
     return __u_d;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strcat
-static char *strcat(char *__u_d, const char *__u_s) {
+#if defined(RT_EXTERN)
+extern char *strcat(char *__u_d, const char *__u_s);
+#else
+__UNISA_LIBC_LINKAGE char *strcat(char *__u_d, const char *__u_s) {
     strcpy(__u_d + strlen(__u_d), __u_s);
     return __u_d;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strcmp
-static int strcmp(const char *__u_a, const char *__u_b) {
+#if defined(RT_EXTERN)
+extern int strcmp(const char *__u_a, const char *__u_b);
+#else
+__UNISA_LIBC_LINKAGE int strcmp(const char *__u_a, const char *__u_b) {
     __u_word __u_i;
     __u_i = 0;
     while (__u_a[__u_i]) { if (__u_a[__u_i] != __u_b[__u_i]) break; __u_i = __u_i + 1; }
     return (__u_a[__u_i] & 255) - (__u_b[__u_i] & 255);
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strncmp
-static int strncmp(const char *__u_a, const char *__u_b, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern int strncmp(const char *__u_a, const char *__u_b, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE int strncmp(const char *__u_a, const char *__u_b, __u_word __u_n) {
     __u_word __u_i;
     __u_i = 0;
     while (__u_i < __u_n) {
@@ -65,9 +88,13 @@ static int strncmp(const char *__u_a, const char *__u_b, __u_word __u_n) {
     return 0;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strchr
-static char *strchr(const char *__u_s, int __u_c) {
+#if defined(RT_EXTERN)
+extern char *strchr(const char *__u_s, int __u_c);
+#else
+__UNISA_LIBC_LINKAGE char *strchr(const char *__u_s, int __u_c) {
     __u_word __u_i;
     __u_i = 0;
     while (1) {
@@ -77,9 +104,13 @@ static char *strchr(const char *__u_s, int __u_c) {
     }
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strrchr
-static char *strrchr(const char *__u_s, int __u_c) {
+#if defined(RT_EXTERN)
+extern char *strrchr(const char *__u_s, int __u_c);
+#else
+__UNISA_LIBC_LINKAGE char *strrchr(const char *__u_s, int __u_c) {
     __u_word __u_i;
     char *__u_r;
     __u_i = 0; __u_r = NULL;
@@ -90,9 +121,13 @@ static char *strrchr(const char *__u_s, int __u_c) {
     }
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strstr
-static char *strstr(const char *__u_h, const char *__u_n) {
+#if defined(RT_EXTERN)
+extern char *strstr(const char *__u_h, const char *__u_n);
+#else
+__UNISA_LIBC_LINKAGE char *strstr(const char *__u_h, const char *__u_n) {
     __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_h[__u_i]) {
@@ -104,9 +139,13 @@ static char *strstr(const char *__u_h, const char *__u_n) {
     return NULL;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_memset
-static void *memset(void *__u_p, int __u_c, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern void *memset(void *__u_p, int __u_c, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE void *memset(void *__u_p, int __u_c, __u_word __u_n) {
     char *__u_d; __u_word __u_i;
     __u_d = (char *)__u_p; __u_i = 0;
     if (__u_n >= 16) {   /* D2: eight bytes a step */
@@ -118,9 +157,13 @@ static void *memset(void *__u_p, int __u_c, __u_word __u_n) {
     return __u_p;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_memcpy
-static void *memcpy(void *__u_dst, const void *__u_src, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern void *memcpy(void *__u_dst, const void *__u_src, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE void *memcpy(void *__u_dst, const void *__u_src, __u_word __u_n) {
     char *__u_d; char *__u_s; __u_word __u_i;
     __u_d = (char *)__u_dst; __u_s = (char *)__u_src; __u_i = 0;
     /* D2: eight bytes a step when both pointers share an alignment: bytes up to an 8-byte
@@ -133,9 +176,13 @@ static void *memcpy(void *__u_dst, const void *__u_src, __u_word __u_n) {
     return __u_dst;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_memmove
-static void *memmove(void *__u_dst, const void *__u_src, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern void *memmove(void *__u_dst, const void *__u_src, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE void *memmove(void *__u_dst, const void *__u_src, __u_word __u_n) {
     char *__u_d; char *__u_s; __u_word __u_i;
     __u_d = (char *)__u_dst; __u_s = (char *)__u_src;
     if (__u_d < __u_s) return memcpy(__u_dst, __u_src, __u_n);
@@ -144,9 +191,13 @@ static void *memmove(void *__u_dst, const void *__u_src, __u_word __u_n) {
     return __u_dst;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_memcmp
-static int memcmp(const void *__u_a, const void *__u_b, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern int memcmp(const void *__u_a, const void *__u_b, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE int memcmp(const void *__u_a, const void *__u_b, __u_word __u_n) {
     char *__u_x; char *__u_y; __u_word __u_i;
     __u_x = (char *)__u_a; __u_y = (char *)__u_b; __u_i = 0;
     while (__u_i < __u_n) {
@@ -156,8 +207,12 @@ static int memcmp(const void *__u_a, const void *__u_b, __u_word __u_n) {
     return 0;
 }
 #endif
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_strncat
-static char *strncat(char *__u_d, const char *__u_s, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern char *strncat(char *__u_d, const char *__u_s, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE char *strncat(char *__u_d, const char *__u_s, __u_word __u_n) {
     __u_word __u_i; __u_word __u_j;
     __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
     __u_j = 0;
@@ -166,12 +221,16 @@ static char *strncat(char *__u_d, const char *__u_s, __u_word __u_n) {
     return __u_d;
 }
 #endif
+#endif
 
 /* strtok keeps its place between calls, as the standard says it must; the
    place is one static pointer, which is why strtok is not reentrant. */
 static char *_unisa_tok = 0;
 #if !__UNISA_FTRIM_LIBC || __UN_strtok
-static char *strtok(char *__u_s, const char *__u_delim) {
+#if defined(RT_EXTERN)
+extern char *strtok(char *__u_s, const char *__u_delim);
+#else
+__UNISA_LIBC_LINKAGE char *strtok(char *__u_s, const char *__u_delim) {
     char *__u_start; __u_word __u_k; int __u_isd;
     if (__u_s == 0) __u_s = _unisa_tok;
     if (__u_s == 0) return 0;
@@ -194,9 +253,13 @@ static char *strtok(char *__u_s, const char *__u_delim) {
     return __u_start;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_memchr
-static void *memchr(const void *__u_p, int __u_c, __u_word __u_n) {
+#if defined(RT_EXTERN)
+extern void *memchr(const void *__u_p, int __u_c, __u_word __u_n);
+#else
+__UNISA_LIBC_LINKAGE void *memchr(const void *__u_p, int __u_c, __u_word __u_n) {
     const unsigned char *__u_s; __u_word __u_i;
     __u_s = (const unsigned char *)__u_p;
     __u_i = 0;
@@ -207,9 +270,13 @@ static void *memchr(const void *__u_p, int __u_c, __u_word __u_n) {
     return NULL;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strspn
-static __u_word strspn(const char *__u_s, const char *__u_accept) {
+#if defined(RT_EXTERN)
+extern __u_word strspn(const char *__u_s, const char *__u_accept);
+#else
+__UNISA_LIBC_LINKAGE __u_word strspn(const char *__u_s, const char *__u_accept) {
     __u_word __u_i; __u_word __u_j; int __u_found;
     __u_i = 0;
     while (__u_s[__u_i]) {
@@ -224,9 +291,13 @@ static __u_word strspn(const char *__u_s, const char *__u_accept) {
     return __u_i;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strpbrk
-static char *strpbrk(const char *__u_s, const char *__u_accept) {
+#if defined(RT_EXTERN)
+extern char *strpbrk(const char *__u_s, const char *__u_accept);
+#else
+__UNISA_LIBC_LINKAGE char *strpbrk(const char *__u_s, const char *__u_accept) {
     __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_s[__u_i]) {
@@ -240,9 +311,13 @@ static char *strpbrk(const char *__u_s, const char *__u_accept) {
     return NULL;
 }
 #endif
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_strcspn
-static __u_word strcspn(const char *__u_s, const char *__u_reject) {
+#if defined(RT_EXTERN)
+extern __u_word strcspn(const char *__u_s, const char *__u_reject);
+#else
+__UNISA_LIBC_LINKAGE __u_word strcspn(const char *__u_s, const char *__u_reject) {
     __u_word __u_i; __u_word __u_j;
     __u_i = 0;
     while (__u_s[__u_i]) {
@@ -256,12 +331,17 @@ static __u_word strcspn(const char *__u_s, const char *__u_reject) {
     return __u_i;
 }
 #endif
+#endif
 
 /* The bundled locale has only the C collation order. */
 #if !__UNISA_FTRIM_LIBC || __UN_strcoll
-static int strcoll(const char *__u_a, const char *__u_b) {
+#if defined(RT_EXTERN)
+extern int strcoll(const char *__u_a, const char *__u_b);
+#else
+__UNISA_LIBC_LINKAGE int strcoll(const char *__u_a, const char *__u_b) {
     return strcmp(__u_a, __u_b);
 }
+#endif
 #endif
 
 /* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the system C library on Linux and macOS */
