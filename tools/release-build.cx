@@ -56,7 +56,19 @@
    cap), and tools/bound only accepts 1..60 by design, so the tool owns this
    ceiling itself (same pattern as RB_OBJ_DEADLINE_MS) and kills the child's
    whole process group when it expires. */
-#define RB_WHOLE_DEADLINE_MS 180000
+#define RB_WHOLE_DEADLINE_MS 120000
+
+/* The whole-o ceiling is overridable only so a test can shrink it and watch the
+   timeout path actually fire; a production run never sets it. */
+static long rb_whole_deadline(void) {
+    const char *v = sy_env("UNISACC_RB_WHOLE_MS");
+    long ms = 0;
+    const char *p;
+    if (!v || !v[0]) return RB_WHOLE_DEADLINE_MS;
+    for (p = v; *p >= '0' && *p <= '9'; p++) ms = ms * 10 + (*p - '0');
+    if (*p || ms < 1 || ms > RB_WHOLE_DEADLINE_MS) return RB_WHOLE_DEADLINE_MS;
+    return ms;
+}
 
 typedef struct { unsigned char *p; long n, cap; } RbBuf;
 typedef struct { char rel[RB_REL]; char full[RB_FULL]; } RbFile;
@@ -780,6 +792,37 @@ static void rb_wline(int fd, const char *s) {
     if (n < 0 || sy_write_all(fd, s, n)) rb_die("receipt");
 }
 
+/* Read a child's stdout until it exits or the wall clock expires. Both routes
+   that spawn a bounded child (whole-o and the objects route) use this one loop:
+   poll, drain, reaped-check, deadline. On expiry the child's whole process group
+   dies (sy_kill kills -pid then pid) and *timed_out is set; the caller decides
+   what to unlink and what to print. Returns 0 on a clean exit, 1 on timeout. */
+static int rb_wait_child(int pid, int fd, RbBuf *cap, long deadline_ms,
+                         int *exited, int *code) {
+    long long t0_ms = sy_now_ms();
+    for (;;) {
+        sy_pollfd_t pfd;
+        long k;
+        pfd.fd = fd;
+        pfd.events = 1;   /* readable */
+        pfd.revents = 0;
+        if (sy_poll(&pfd, 1, 200) < 0) rb_die("poll");
+        if (pfd.revents & 1) {
+            char tmp[4096];
+            k = sy_read(fd, tmp, 4096);
+            if (k > 0) rb_put(cap, tmp, k);
+            /* k==0 (EOF) or EAGAIN/EINTR: fall through to the reaped check */
+        }
+        *exited = 0;
+        if (sy_wait_status(pid, 1, exited, code, 0) < 0) rb_die("wait");
+        if (*exited) return 0;
+        if (sy_now_ms() - t0_ms > deadline_ms) {
+            sy_kill(pid);
+            return 1;
+        }
+    }
+}
+
 /* One whole -o. The child is tools/bound 60. osx whole-o was 56-59s under the old 55s cap. The image is not spliced with P3. */
 static int rb_whole(int argc, char **argv, const char *target) {
     char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
@@ -841,37 +884,19 @@ static int rb_whole(int argc, char **argv, const char *target) {
     cap.p = 0;
     cap.n = 0;
     cap.cap = 0;
-    {
-        long long t0_ms = sy_now_ms();
-        int timed_out = 0;
-        for (;;) {
-            sy_pollfd_t pfd;
-            long k;
-            pfd.fd = fd;
-            pfd.events = 1;   /* readable */
-            pfd.revents = 0;
-            if (sy_poll(&pfd, 1, 200) < 0) rb_die("poll");
-            if (pfd.revents & 1) {
-                char tmp[4096];
-                k = sy_read(fd, tmp, 4096);
-                if (k > 0) rb_put(&cap, tmp, k);
-            }
-            exited = 0;
-            if (sy_wait_status(pid, 1, &exited, &code, 0) < 0) rb_die("wait");
-            if (exited) break;
-            if (sy_now_ms() - t0_ms > RB_WHOLE_DEADLINE_MS) { timed_out = 1; break; }
-        }
-        if (timed_out) {
-            /* Kill the child's whole process group, then drop the half image. */
-            sy_kill(pid);
-            sy_close(fd);
-            if (remove(image) && errno != ENOENT) rb_die("timeout unlink");
-            if (cx_fmt(line, sizeof line, "release-build\twhole-o\ttarget=%s\ttimeout after %lds\trc=1\n",
-                       target, RB_WHOLE_DEADLINE_MS / 1000))
-                rb_die("report");
-            sy_printf("%s", line);
-            rb_die("whole-o timeout");
-        }
+    if (rb_wait_child(pid, fd, &cap, rb_whole_deadline(), &exited, &code)) {
+        /* The child's whole group is dead. Say what happened first, then drop
+           whatever half image it left behind (ENOENT is the normal case: the
+           child was killed before it wrote the image). */
+        int urc;
+        sy_close(fd);
+        if (cx_fmt(line, sizeof line, "release-build\twhole-o\ttarget=%s\ttimeout after %ldms\trc=1\n",
+                   target, rb_whole_deadline()))
+            rb_die("report");
+        sy_printf("%s", line);
+        urc = sy_unlink(image);
+        if (urc && urc != -ENOENT) rb_die("timeout unlink");
+        rb_die("whole-o timeout");
     }
     if (sy_close(fd)) rb_die("close child");
     rb_put(&cap, "", 1);
@@ -1013,7 +1038,6 @@ static int rb_slice(int argc, char **argv) {
     char bound[RB_FULL], tool[RB_FULL];
     RbBuf cap;
     sy_ts_t t0, t1;
-    long t0_ms;
     int n, i, fd, pid, exited, code;
     char sha_line[160];
     const char *target;
@@ -1028,7 +1052,6 @@ static int rb_slice(int argc, char **argv) {
     if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
     argv[4] = rb_out_abs;
     if (sy_mono(&t0)) rb_die("clock");
-    t0_ms = sy_now_ms();
     rb_cat(tool, RB_FULL, argv[2], 1, "tools/entry-build.cx");
     {
         const char *ctor = sy_env("UNISACC_CTOR");
@@ -1065,30 +1088,9 @@ static int rb_slice(int argc, char **argv) {
     cap.p = 0;
     cap.n = 0;
     cap.cap = 0;
-    for (;;) {
-        sy_pollfd_t pfd;
-        long k;
-        pfd.fd = fd;
-        pfd.events = 1;   /* readable */
-        pfd.revents = 0;
-        if (sy_poll(&pfd, 1, 200) < 0) rb_die("poll");
-        if (pfd.revents & 1) {
-            char tmp[4096];
-            k = sy_read(fd, tmp, 4096);
-            if (k > 0) rb_put(&cap, tmp, k);
-            /* k==0 (EOF) or EAGAIN/EINTR: fall through to the reaped check */
-        }
-        /* entry-build itself reaped? then drain one last time and stop, even if
-           a stray grandchild still holds the pipe (the candidate is already on
-           disk by then). */
-        exited = 0;
-        if (sy_wait_status(pid, 1, &exited, &code, 0) < 0) rb_die("wait");
-        if (exited) break;
-        if (sy_now_ms() - t0_ms > RB_OBJ_DEADLINE_MS) {
-            sy_kill(pid);
-            sy_close(fd);
-            rb_die("objects route: entry-build deadline exceeded (hang)");
-        }
+    if (rb_wait_child(pid, fd, &cap, RB_OBJ_DEADLINE_MS, &exited, &code)) {
+        sy_close(fd);
+        rb_die("objects route: entry-build deadline exceeded (hang)");
     }
     if (sy_close(fd)) rb_die("close child");
     /* the loop already reaped pid (nohang) and set exited/code on break */
