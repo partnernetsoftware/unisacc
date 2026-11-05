@@ -195,6 +195,64 @@ jobs:
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
           if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:APE_SHA) { Add-Row 'identity' 'FAIL' 1 'candidate changed during the checks' }
           if ($script:failed) { exit 1 }
+      - name: Windows diagnostics (read-only, not part of the verdict)
+        if: always() && matrix.os == 'win'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'candidate/unisacc.com'
+          $diag = Join-Path $PWD 'diagnostics'
+          New-Item -ItemType Directory -Force -Path $diag | Out-Null
+          $logName = 'win-' + $env:TARGET.Replace('/', '-') + '.txt'
+          $log = Join-Path $diag $logName
+          function Say([string]$s) { Write-Output $s; [IO.File]::AppendAllText($log, "$s`n") }
+          function Hex([byte[]]$b, [int]$max) { if (!$b) { return '-' }; $n = [Math]::Min($b.Length, $max); ($b[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ' }
+          function Run-Raw([string]$file, [string[]]$arguments, [string]$label) {
+            $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            foreach ($a in $arguments) { $info.ArgumentList.Add($a) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start(); $ms = [IO.MemoryStream]::new(); $p.StandardOutput.BaseStream.CopyToAsync($ms) | Out-Null
+              $err = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(30000)) { $p.Kill($true); Say "$label timeout"; return }
+              Start-Sleep -Milliseconds 200
+              $out = $ms.ToArray()
+              Say ("{0} exit={1} (0x{2:x8}) stdout_len={3}" -f $label, $p.ExitCode, $p.ExitCode, $out.Length)
+              Say "$label stdout_hex(first 200)= $(Hex $out 200)"
+              Say "$label stderr= $(($err.Result -replace '[\r\n]', ' ').Substring(0, [Math]::Min(300, $err.Result.Length)))"
+            } catch { Say "$label start failed: $_" } finally { $p.Dispose() }
+          }
+          $bytes = [IO.File]::ReadAllBytes($com)
+          Say "file size=$($bytes.Length) sha256=$((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant())"
+          Say "head_hex(64)= $(Hex $bytes 64)"
+          $pe = [BitConverter]::ToUInt32($bytes, 60)
+          Say "e_lfanew=$pe"
+          if ($pe -lt $bytes.Length - 248) {
+            Say ("PE sig=0x{0:x8} machine=0x{1:x4} sections={2} opt_magic=0x{3:x4}" -f [BitConverter]::ToUInt32($bytes, $pe), [BitConverter]::ToUInt16($bytes, $pe + 4), [BitConverter]::ToUInt16($bytes, $pe + 6), [BitConverter]::ToUInt16($bytes, $pe + 24))
+            Say ("entry_rva=0x{0:x8} image_base=0x{1:x16} size_of_image=0x{2:x8} subsystem={3} dll_chars=0x{4:x4}" -f [BitConverter]::ToUInt32($bytes, $pe + 40), [BitConverter]::ToUInt64($bytes, $pe + 48), [BitConverter]::ToUInt32($bytes, $pe + 80), [BitConverter]::ToUInt16($bytes, $pe + 92), [BitConverter]::ToUInt16($bytes, $pe + 94))
+            $nsec = [BitConverter]::ToUInt16($bytes, $pe + 6); $sec = $pe + 24 + [BitConverter]::ToUInt16($bytes, $pe + 20)
+            for ($i = 0; $i -lt [Math]::Min($nsec, 16); $i++) {
+              $o = $sec + 40 * $i
+              Say ("section {0} vsize=0x{1:x} va=0x{2:x} rawsize=0x{3:x} raw=0x{4:x} chars=0x{5:x8}" -f ([Text.Encoding]::ASCII.GetString($bytes, $o, 8).TrimEnd([char]0)), [BitConverter]::ToUInt32($bytes, $o + 8), [BitConverter]::ToUInt32($bytes, $o + 12), [BitConverter]::ToUInt32($bytes, $o + 16), [BitConverter]::ToUInt32($bytes, $o + 20), [BitConverter]::ToUInt32($bytes, $o + 36))
+            }
+          }
+          $exe = Join-Path $PWD 'diagnostics/unisacc.exe'
+          Copy-Item $com $exe
+          Run-Raw $com @('--version') 'direct.com --version'
+          Run-Raw $exe @('--version') 'direct.exe --version'
+          Run-Raw $exe @('--help') 'direct.exe --help'
+          Run-Raw 'cmd.exe' @('/c', $exe, '--version') 'cmd --version'
+          Run-Raw 'pwsh' @('-NoProfile', '-Command', "& '$exe' --version") 'pwsh --version'
+          Get-Content $log | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && matrix.os == 'win'
+        with:
+          name: diagnostics-${{ matrix.os }}-${{ matrix.arch }}
+          path: diagnostics/*.txt
+          if-no-files-found: warn
+          retention-days: 30
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
