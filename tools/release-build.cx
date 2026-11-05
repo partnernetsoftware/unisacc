@@ -52,6 +52,11 @@
    child (compile 55, link 45, plan 50); this is only the outer "the whole
    entry-build never finishes" guard, not a per-job limit. */
 #define RB_OBJ_DEADLINE_MS 240000
+/* whole-o wall clock: 43 sources take ~70s (33 took 56-59s under the old 55s
+   cap), and tools/bound only accepts 1..60 by design, so the tool owns this
+   ceiling itself (same pattern as RB_OBJ_DEADLINE_MS) and kills the child's
+   whole process group when it expires. */
+#define RB_WHOLE_DEADLINE_MS 180000
 
 typedef struct { unsigned char *p; long n, cap; } RbBuf;
 typedef struct { char rel[RB_REL]; char full[RB_FULL]; } RbFile;
@@ -806,8 +811,8 @@ static int rb_whole(int argc, char **argv, const char *target) {
     rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
     if (sy_mono(&t0)) rb_die("clock");
     n = 0;
-    v[n++] = bound;
-    v[n++] = "60";
+    /* No tools/bound here: its ceiling is 1..60 by design and 43 sources need
+       ~70s. RB_WHOLE_DEADLINE_MS below is this route's own watchdog. */
     /* osx/win whole-o must be able to compile with a generation candidate, not
      * only the installed root product: UNISACC_CTOR (the same variable the lnx
      * object route uses) names the compiler binary; unset keeps the historical
@@ -832,18 +837,43 @@ static int rb_whole(int argc, char **argv, const char *target) {
     v[n] = 0;
     pid = sy_spawn_pipe(v, argv[2], SY_SPAWN_NO_PATH, &fd, 0);
     if (pid < 0) rb_die("spawn");
+    if (sy_fd_nonblock(fd, 1)) rb_die("nonblock");
     cap.p = 0;
     cap.n = 0;
     cap.cap = 0;
-    for (;;) {
-        char tmp[4096];
-        long k = sy_read(fd, tmp, 4096);
-        if (k < 0) rb_die("read child");
-        if (k == 0) break;
-        rb_put(&cap, tmp, k);
+    {
+        long long t0_ms = sy_now_ms();
+        int timed_out = 0;
+        for (;;) {
+            sy_pollfd_t pfd;
+            long k;
+            pfd.fd = fd;
+            pfd.events = 1;   /* readable */
+            pfd.revents = 0;
+            if (sy_poll(&pfd, 1, 200) < 0) rb_die("poll");
+            if (pfd.revents & 1) {
+                char tmp[4096];
+                k = sy_read(fd, tmp, 4096);
+                if (k > 0) rb_put(&cap, tmp, k);
+            }
+            exited = 0;
+            if (sy_wait_status(pid, 1, &exited, &code, 0) < 0) rb_die("wait");
+            if (exited) break;
+            if (sy_now_ms() - t0_ms > RB_WHOLE_DEADLINE_MS) { timed_out = 1; break; }
+        }
+        if (timed_out) {
+            /* Kill the child's whole process group, then drop the half image. */
+            sy_kill(pid);
+            sy_close(fd);
+            if (remove(image) && errno != ENOENT) rb_die("timeout unlink");
+            if (cx_fmt(line, sizeof line, "release-build\twhole-o\ttarget=%s\ttimeout after %lds\trc=1\n",
+                       target, RB_WHOLE_DEADLINE_MS / 1000))
+                rb_die("report");
+            sy_printf("%s", line);
+            rb_die("whole-o timeout");
+        }
     }
     if (sy_close(fd)) rb_die("close child");
-    if (sy_wait_status(pid, 0, &exited, &code, 0) < 0) rb_die("wait");
     rb_put(&cap, "", 1);
     sy_printf("%s", (char *)cap.p);
     mm_free(cap.p);
