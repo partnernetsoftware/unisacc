@@ -23,7 +23,8 @@
 - tests/module/（cxmod/driveplan/driveunits 直连单测）、tests/unit-boundary（1/2/63/64/65/127/128/129）、reject-locate、check-limits、check-net-dump、trace-tools-only、stream-pipe(七段管道对产品逐字节)、stages(tests/stages/<段>/ 分段字节用例,正例/拒绝/链/锚点,无拒绝用例的段记 GAP)、kernel-base、facts-current。
 
 ## 已知未完成（发布时删除本段）
-- 跨单元共享 FILE:多源一次编译时,单元 A 写入的缓冲在单元 B fclose 时丢失(RT-SHARED 修复中,将并入本版);修复后多单元产物字节会变。`-c` 分开编再链接的路径本版只给警告,不修(RT-COMMON,0.0.45)。
+- 跨单元共享 FILE 已在 0.0.44 修复：运行库状态(流表、atexit 表、`errno`、`setenv` 的 environ 堆)改为**全程序一份**(`RT_UNIT`/`RT_EXTERN` 三态；默认无宏仍是 `static`，单源产物字节不变)。多单元一次编译的产物字节因此变化：`entry.elf` 3438193B → 3448676B(**+10483B**，本版只共享状态、不去重)。
+- `-c` 分开编再链接的路径本版**只告警不修**：链接输入里有两个及以上自带私有流表的对象时，stderr 输出 `unisacc: warning: 2 objects each carry a private stdio table (cross-unit FILE state is not shared; compile the program in one invocation or link the RT_UNIT entity)`；rc 不变(报错会让今天能链接的程序失败)。真正合并需要 common/weak 符号(RT-COMMON，0.0.45)。
 - tape 入口校验(e4/prune/lower)只检查首行 `_start:` 和末字节换行(STAGE-REJECT 修复中)。tape 没有结束标记,所以截在任一行尾、或缺 `__main_ret` 段的 tape 能通过入口检查,只能靠下游拒绝。实测:一个 stdio 程序的 tape 共 10670 个行尾截断点,逐个喂 prune|lower|elf,10667 个被 elf 以 `a branch to an undefined label` 拒绝;另 3 个只剩开头 1-3 行,能产出可执行文件,但运行 rc 为 127 或 SIGSEGV,没有运行成功而行为错的情况。这种输入只会出现在手工拼的 `stream` 管道里,`-o` 不会产生。加结束标记留 0.0.45(TAPE-END)。手工拼管道时要用 `set -o pipefail` 判断上游失败。
 - 运行库每对象各带一份(约 264KB,ELF 的 15%),去重留 0.0.45(RT-DEDUP)。
 - DOCK2*、ARITY、SRC-SPLIT 为 P2。
