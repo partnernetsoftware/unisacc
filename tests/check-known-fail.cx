@@ -1,0 +1,111 @@
+/* check-known-fail.cx -- rc1 gate 1: every batch the aggregator did not pass is a known FAIL row of the waiver file.
+ *
+ *   sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv
+ *   sh ./unisacc.com tests/check-known-fail.cx -- --self-test
+ *
+ * AGGREGATE.out is the stdout of tests/all-aggregate.cx (or tests/run.cx --all) over one all-waves session:
+ * lines "BATCH<TAB>id<TAB>state<TAB>..." where state is PASS, FAIL, UNKNOWN or MISSING.
+ * WAIVERS.tsv rows "F<TAB>batch<TAB>version<TAB>reason" name the known FAIL batches of the release.
+ * A F row never turns a FAIL into a PASS: it only says the FAIL is known, owned and scheduled.
+ *
+ * Each non-PASS batch prints KNOWN (it has a F row) or UNKNOWN_FAIL (it has none); each F row whose batch
+ * is absent or PASS prints STALE_F (the waiver outlived the failure). The last line is
+ *   KNOWN_FAIL<TAB>batches=B<TAB>not_pass=N<TAB>known=K<TAB>unknown=U<TAB>stale=S
+ * rc 0 only when U and S are both 0 and the aggregate output had at least one BATCH line.
+ * A F row with an empty version or reason is refused (rc 2): an unowned FAIL is not a known FAIL. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define KF_MAX 1024
+
+static char kf_id[KF_MAX][128], kf_state[KF_MAX][16];
+static int kf_n;
+static char ff_id[KF_MAX][128];
+static int ff_n, ff_used[KF_MAX];
+
+static int kf_field(const char *s, long n, int k, char *o, int cap) {
+    long off, len;
+    if (tx_field(s, n, '\t', k, &off, &len) || len >= cap) return 0;
+    mm_copy(o, cap, s + off, len); o[len] = 0;
+    return 1;
+}
+static char *kf_read(const char *p, size_t *n) { return cx_read(p, n); }
+
+static int kf_load_agg(const char *p) {
+    size_t n = 0; long at = 0; char *b = kf_read(p, &n);
+    if (!b) { sy_eprintf("check-known-fail: cannot read %s\n", p); return -1; }
+    kf_n = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        if (e - at > 6 && !mm_cmp(b + at, "BATCH\t", 6) && kf_n < KF_MAX) {
+            if (kf_field(b + at, e - at, 1, kf_id[kf_n], 128) && kf_field(b + at, e - at, 2, kf_state[kf_n], 16)) kf_n++;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return kf_n;
+}
+static int kf_load_f(const char *p) {
+    size_t n = 0; long at = 0; char *b = kf_read(p, &n); char v[64], r[2048];
+    if (!b) { sy_eprintf("check-known-fail: cannot read %s\n", p); return -1; }
+    ff_n = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        if (e - at > 2 && b[at] == 'F' && b[at + 1] == '\t' && ff_n < KF_MAX) {
+            if (!kf_field(b + at, e - at, 1, ff_id[ff_n], 128) || !kf_field(b + at, e - at, 2, v, sizeof v) || !v[0] ||
+                !kf_field(b + at, e - at, 3, r, sizeof r) || !r[0]) {
+                sy_eprintf("check-known-fail: F row without version or reason: %.*s\n", (int)(e - at), b + at);
+                mm_free(b); return -2;
+            }
+            ff_used[ff_n] = 0; ff_n++;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return ff_n;
+}
+static int kf_judge(int quiet) {
+    int i, j, notpass = 0, known = 0, unknown = 0, stale = 0;
+    for (i = 0; i < kf_n; i++) {
+        int hit = -1;
+        if (tx_eqz(kf_state[i], "PASS")) continue;
+        notpass++;
+        for (j = 0; j < ff_n; j++) if (tx_eqz(ff_id[j], kf_id[i])) { hit = j; break; }
+        if (hit >= 0) { ff_used[hit] = 1; known++; if (!quiet) sy_printf("KNOWN\t%s\t%s\n", kf_id[i], kf_state[i]); }
+        else { unknown++; if (!quiet) sy_printf("UNKNOWN_FAIL\t%s\t%s\n", kf_id[i], kf_state[i]); }
+    }
+    for (j = 0; j < ff_n; j++) if (!ff_used[j]) { stale++; if (!quiet) sy_printf("STALE_F\t%s\n", ff_id[j]); }
+    if (!quiet) sy_printf("KNOWN_FAIL\tbatches=%d\tnot_pass=%d\tknown=%d\tunknown=%d\tstale=%d\n", kf_n, notpass, known, unknown, stale);
+    return kf_n > 0 && unknown == 0 && stale == 0 ? 0 : 1;
+}
+/* Self-test: the cases that decide the gate, built in memory. */
+static void kf_set(const char *const *ids, const char *const *st, int n, const char *const *fs, int m) {
+    int i;
+    kf_n = n; for (i = 0; i < n; i++) { tx_copy(kf_id[i], 128, ids[i], tx_len(ids[i], 128)); tx_copy(kf_state[i], 16, st[i], tx_len(st[i], 16)); }
+    ff_n = m; for (i = 0; i < m; i++) { tx_copy(ff_id[i], 128, fs[i], tx_len(fs[i], 128)); ff_used[i] = 0; }
+}
+static int kf_self(void) {
+    int bad = 0;
+    {   const char *ids[] = {"a", "c-negative", "stages"}, *st[] = {"PASS", "FAIL", "FAIL"}, *fs[] = {"c-negative", "stages"};
+        kf_set(ids, st, 3, fs, 2); if (kf_judge(1) != 0) { sy_printf("FAIL\tself.subset-passes\n"); bad++; } else sy_printf("PASS\tself.subset-passes\n"); }
+    {   const char *ids[] = {"a", "b"}, *st[] = {"PASS", "FAIL"}, *fs[] = {"c-negative"};
+        kf_set(ids, st, 2, fs, 1); if (kf_judge(1) == 0) { sy_printf("FAIL\tself.unknown-fail-refused\n"); bad++; } else sy_printf("PASS\tself.unknown-fail-refused\n"); }
+    {   const char *ids[] = {"a", "b"}, *st[] = {"PASS", "UNKNOWN"}, *fs[] = {"x"};
+        kf_set(ids, st, 2, fs, 1); if (kf_judge(1) == 0) { sy_printf("FAIL\tself.unknown-state-refused\n"); bad++; } else sy_printf("PASS\tself.unknown-state-refused\n"); }
+    {   const char *ids[] = {"a", "stages"}, *st[] = {"PASS", "PASS"}, *fs[] = {"stages"};
+        kf_set(ids, st, 2, fs, 1); if (kf_judge(1) == 0) { sy_printf("FAIL\tself.stale-f-refused\n"); bad++; } else sy_printf("PASS\tself.stale-f-refused\n"); }
+    {   kf_set(0, 0, 0, 0, 0); if (kf_judge(1) == 0) { sy_printf("FAIL\tself.empty-aggregate-refused\n"); bad++; } else sy_printf("PASS\tself.empty-aggregate-refused\n"); }
+    sy_printf("CHECK_KNOWN_FAIL\tfailed=%d\n", bad);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (argc - a == 1 && tx_eqz(argv[a], "--self-test")) return kf_self();
+    if (argc - a != 2) { sy_eprintf("usage: check-known-fail.cx AGGREGATE.out WAIVERS.tsv | --self-test\n"); return 2; }
+    if (kf_load_agg(argv[a]) < 0) return 2;
+    if (kf_load_f(argv[a + 1]) < 0) return 2;
+    return kf_judge(0);
+}
