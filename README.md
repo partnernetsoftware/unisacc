@@ -84,7 +84,9 @@ target, `tools/release-build.cx` adds the P3 package and one slice, and
 `lnx` slices take the `objects` route and the `osx`/`win` slices take the `whole-o`
 route. The 0.0.44-rc1 candidate (rev `7266862b08`) is the APE `a76e5fc1`
 (5,494,758 bytes; the `lnx/x86_64` smoke passes); its `lnx/x86_64` candidate
-binary `c3996bd4` came out byte-identical in generations one, two and three.
+binary `c3996bd4` came out byte-identical in generations one, two and three; generation
+two was built by generation one and generation three by generation two (the `constructor`
+field of each receipt; `tests/chain-fixed-point.cx` reports 0 failures).
 The current working tree is a dev-lnx stub. The previous
 release, 0.0.43, is the five-slice APE `83343ec1` (rev `edc2c7700b`, 5,145,706
 bytes, 2026-11-01).
