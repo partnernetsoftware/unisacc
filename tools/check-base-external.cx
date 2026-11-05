@@ -8,7 +8,7 @@
  *   3. 外置 kernel 文件字节 == 内嵌 pack blob 字节（sha256 相等）
  *
  * 用法：sh ./unisacc.com tools/check-base-external.cx [KERNEL_FILE]
- * 默认 KERNEL_FILE = out/epoch-2026-11-02/kernel-gen/x86_64.kernel（B3 材料）。
+ * 默认 KERNEL_FILE:现场用本树 tools/kernel-route.cx 从 exec/c/asm 导出 x86_64 基座(B3 材料,不读 out/ 残留)。
  *   4. -run 端到端相对耗时：同一 smoke 各 7 次取中位，外置(UNISA_KERNEL 指向外部文件)
  *      vs 内嵌(不带 UNISA_KERNEL)，比值 ≤ 1.2。冷启动(清页缓存)标 UNMEASURED，不计 PASS。
  */
@@ -17,6 +17,7 @@
 #pragma unisa use sysx.process
 #pragma unisa use sys.time
 #pragma unisa use text.text
+#pragma unisa use cxlib.resolver
 
 static int failed;
 static void ck(int ok,const char *name){
@@ -32,8 +33,13 @@ int main(int argc,char **argv){
     if(argc==2){
         if(!realpath(argv[1],kernel)){fprintf(stderr,"kernel\n");return 2;}
     } else {
-        if(cx_fmt(kernel,sizeof kernel,"%s/out/epoch-2026-11-02/kernel-gen/x86_64.kernel",root))return 2;
-        if(!realpath(kernel,kernel)){fprintf(stderr,"kernel-file-absent\n");return 2;}
+        char kdir[4400],*kv[10]; int kn=0; np_result kr={0};
+        if(cx_fmt(kdir,sizeof kdir,"%s/out/base-external-kernel-%d",root,(int)getpid()))return 2;
+        { sy_stat_t st; if(sy_stat(kdir,&st)==0) cx_rmtree(kdir); }
+        kv[kn++]="sh"; kv[kn++]="unisacc.com"; kv[kn++]="tools/kernel-route.cx"; kv[kn++]="--"; kv[kn++]=root; kv[kn++]=kdir; kv[kn++]="--isa"; kv[kn++]="x86_64"; kv[kn]=0;
+        if(np_run(kv,root,0,58,&kr,why,sizeof why)||kr.rc){fprintf(stderr,"kernel-route-failed\n");return 2;}
+        np_free(&kr);
+        if(cx_fmt(kernel,sizeof kernel,"%s/x86_64.kernel",kdir))return 2;
     }
     if(cx_fmt(driver,sizeof driver,"%s/tools/core-run-ext-kernel.cx",root))return 2;
 
@@ -72,10 +78,21 @@ int main(int argc,char **argv){
             np_free(&r);
         }
     }
-    /* 3. 字节一致：外置 kernel 文件 == 内嵌 blob（sha 相等已在 digest，内嵌 sha 是已知常量） */
+    /* 3. 字节一致：外置 kernel 文件 == 已装包内嵌 \0kernel/x86_64(resolver 按外置文件的 sha/size 从 pack 取,取到即逐字节相等) */
     {
-        ck(strcmp(ksha,"32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97")==0,
-           "external-kernel-bytes-equal-embedded");
+        char line[256],pkg[4400]; size_t kn2=0; long gn=0; char *kb=cx_read(kernel,&kn2);
+        RsvManifest man; RsvResolver rs; unsigned char *g=0;
+        memset(&man,0,sizeof man); memset(&rs,0,sizeof rs);
+        if(cx_fmt(line,sizeof line,"kernel/x86_64\tbase\tx86_64\t%s\t%ld\n",ksha,(long)kn2))return 2;
+        if(cx_fmt(pkg,sizeof pkg,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
+        if(kb && rsv_parse_manifest(line,(long)strlen(line),&man,why,sizeof why)==1){
+            rs.manifest=&man; tx_copy(rs.pack,sizeof rs.pack,pkg,tx_len(pkg,4095));
+            g=rsv_resolve(&rs,"kernel/x86_64","base","x86_64",&gn,why,sizeof why);
+        }
+        if(kb) free(kb);
+        ck(g!=0 && gn==(long)kn2,"external-kernel-bytes-equal-embedded");
+        if(g) free(g); else printf("WHY\t%s\n",why);
+        rsv_release(&rs); rsv_manifest_release(&man);
     }
     /* 4. 外置基座 vs 内嵌基座的端到端相对耗时(中位,各 7 次)。
        基线 = 产品的 -run(内嵌 pack 取 kernel);外置 = 同一 -run 加 UNISA_KERNEL 指向外部文件。
@@ -128,6 +145,7 @@ int main(int argc,char **argv){
         ck(emed > 0 && xmed > 0 && (double)xmed <= 1.2 * (double)emed, "hot-external-within-1.2x");
     }
 
+    if(argc!=2){ char kd[4400]; if(!cx_fmt(kd,sizeof kd,"%s/out/base-external-kernel-%d",root,(int)getpid())) cx_rmtree(kd); }
     printf("BASE_EXTERNAL\tfailed=%d\tscope=sha-verification-and-byte-identity-and-hot-ratio\tcold=UNMEASURED\n", failed);
     return failed?1:0;
 }
