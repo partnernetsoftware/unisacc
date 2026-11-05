@@ -12,7 +12,7 @@
  *
  * 129 must be refused with "too many sources (limit 128)".
  *
- * KNOWN-RED marks a row that is expected to fail today.  127 and 128 used to
+ * KNOWN-RED marks a row expected to fail; none is today.  127 and 128 used to
  * crash (SIGSEGV from the 96-entry paths[] table in src/driveplan.cx, now a
  * checked refusal); they and 65 stay red until the multi-unit e3 refusal itself
  * is lifted, so no row may go green just because the crash turned into a
@@ -184,12 +184,19 @@ int main(int argc, char **argv) {
     }
 
     static const int sizes[] = { 1, 2, 63, 64, 65, 127, 128, 129 };
-    for (unsigned i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
-        int n = sizes[i];
-        /* 65 is refused by e3's single-unit reader; 127/128 are refused after the
-         * former 96-entry table overflow became a checked refusal.  All three
-         * stay red until that refusal is lifted. */
-        run_case(n, n == 65 || n == 127 || n == 128);
+    /* One process per row, so the batch stays inside its bound. */
+    int count = (int)(sizeof sizes / sizeof sizes[0]);
+    for (int i = 0; i < count; i++) {
+        fflush(stdout);
+        pid_t p = fork();
+        if (p < 0) { fputs("unit-boundary: fork\n", stderr); return 2; }
+        if (!p) { run_case(sizes[i], 0); fflush(stdout); _exit(failed ? 1 : 0); }
+    }
+    for (int i = 0; i < count; i++) {
+        int st = 0;
+        if (wait(&st) < 0) { fputs("unit-boundary: wait\n", stderr); return 2; }
+        rows++;
+        if (WIFEXITED(st) && WEXITSTATUS(st) == 0) passed++; else failed++;
     }
     printf("UNIT_BOUNDARY\trows=%d\tpass=%d\tknown-red=%d\tfail=%d\n", rows, passed, known, failed);
     return failed ? 1 : 0;
