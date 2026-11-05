@@ -1,0 +1,95 @@
+/* tools/model-decode-sha.cx -- one sha per decoded model of a package: the oracle for decoder rewrites.
+ *
+ *   sh ./unisacc.com tools/model-decode-sha.cx -- EXPLODED_DIR [--reps N]
+ *
+ * EXPLODED_DIR is what tools/p3-explode.cx writes (manifest.tsv + models/model-NNN.bin, each a raw-deflate
+ * member).  Every member is inflated to its recorded raw length and decoded with cxmd_decode; the decoded
+ * CxModel is rendered field by field (header, strings, sequences, the qa array, every state with its rows,
+ * returns and direct table -- the same rendering as tools/check-model-decode-real.cx) and hashed.  A change
+ * of the decoder that keeps every MDSHA line is a change that keeps what the executor is given.
+ * --reps N decodes each model N times and reports the summed decode time (inflate excluded), so a speed-up
+ * of cxmd_decode is measured on the same input it is proved equal on.
+ * Prints MDSHA<TAB>model-NNN<TAB>raw=<bytes><TAB>sha=<16 hex> per model, then
+ * MODEL_DECODE_SHA<TAB>models=N<TAB>failed=F<TAB>all=<sha of the per-model lines><TAB>decode_ns=T.
+ * Exit 0, 1 when a member fails to inflate or decode, 2 on usage/IO. */
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.model_lifetime
+#pragma unisa use runtime.codec
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.model_number
+
+static void die(const char *s) { fprintf(stderr, "model-decode-sha: %s\n", s); exit(2); }
+static void *heap(void *p, size_t n) { return realloc(p, n); }
+static void release(void *p) { free(p); }
+typedef struct { char *p; size_t n, cap; } Out;
+static void put(Out *b, const char *s, size_t n) {
+    if (b->n + n > b->cap) { size_t c = b->cap ? b->cap : 4096; while (c < b->n + n) c *= 2; b->p = realloc(b->p, c); if (!b->p) die("out of memory"); b->cap = c; }
+    if (mm_copy(b->p + b->n, (long)(b->cap - b->n), s, (long)n)) die("copy"); b->n += n;
+}
+static void pf(Out *b, const char *fmt, long long a, long long c, long long d, long long e) {
+    char t[256]; int n = snprintf(t, sizeof t, fmt, a, c, d, e); if (n < 0 || n >= (int)sizeof t) die("format"); put(b, t, (size_t)n);
+}
+static void render(const CxModel *m, Out *b) {
+    static const char hex[] = "0123456789abcdef";
+    int i, j;
+    pf(b, "model ns=%lld nq=%lld nrg=%lld nstr=%lld", m->ns, m->nq, m->nrg, m->nstr);
+    pf(b, " start=%lld net=%lld top=%lld nqa=%lld\n", m->start, m->isnet, m->topmax, m->nqa);
+    for (i = 0; i < m->nstr; i++) {
+        pf(b, "str %lld %lld", i, m->strl[i], 0, 0);
+        for (j = 0; j < m->strl[i]; j++) { unsigned c = (unsigned char)m->str[i][j]; char v[3] = {' ', hex[c >> 4], hex[c & 15]}; put(b, v, 3); }
+        put(b, "\n", 1);
+    }
+    for (i = 0; i < m->nq; i++) pf(b, "q %lld %lld %lld\n", i, m->qoff[i], m->qlen[i], 0);
+    put(b, "qa", 2); for (i = 0; i < m->nqa; i++) pf(b, " %lld", (long long)m->qa[i], 0, 0, 0); put(b, "\n", 1);
+    for (i = 0; i < m->ns; i++) {
+        pf(b, "state %lld mode=%lld count=%lld", i, m->smode[i], m->rowc[i], 0);
+        if (m->isnet) pf(b, " lo=%lld hi=%lld bn=%lld bq=%lld", m->nlo[i], m->nhi[i], m->bn[i], m->bq[i]);
+        pf(b, " ret=%lld\n", m->rets[i], 0, 0, 0);
+        if (m->retok[i]) { pf(b, "returns %lld", i, 0, 0, 0); for (j = 0; j < m->ns; j++) if (m->retok[i][j]) pf(b, " %lld", j, 0, 0, 0); put(b, "\n", 1); }
+        if (m->isnet || m->smode[i] == 1) { for (j = 0; j < m->rowc[i]; j++) pf(b, "row %lld %lld %lld %lld\n", i, m->rowk[i][j], m->rown[i][j], m->rowq[i][j]); }
+        else { int dn = m->rown[i][0], dq = m->rowq[i][0]; pf(b, "direct %lld %lld %lld\n", i, dn, dq, 0);
+               for (j = 1; j < 257; j++) if (m->rown[i][j] != dn || m->rowq[i][j] != dq) pf(b, "direct-entry %lld %lld %lld %lld\n", i, j, m->rown[i][j], m->rowq[i][j]); }
+    }
+}
+static long long ns_now(void) { sy_ts_t t; sy_mono(&t); return (long long)t.sec * 1000000000LL + t.nsec; }
+int main(int argc, char **argv) {
+    char man[4400], line[9000], path[4400], h[65];
+    int reps = 1, a, count = 0, failed = 0;
+    long long total = 0;
+    Out all = {0};
+    FILE *f;
+    if (argc < 2) die("usage: EXPLODED_DIR [--reps N]");
+    for (a = 2; a < argc; a++) { if (tx_eqz(argv[a], "--reps") && a + 1 < argc) reps = atoi(argv[++a]); else die("usage: EXPLODED_DIR [--reps N]"); }
+    if (reps < 1 || reps > 1000) die("reps 1..1000");
+    if (cx_fmt(man, sizeof man, "%s/manifest.tsv", argv[1])) die("path");
+    f = fopen(man, "rb"); if (!f) die("manifest");
+    while (fgets(line, sizeof line, f)) {
+        long raw = 0, stored = 0; int id = count; char rel[512];
+        if (strncmp(line, "model\tM ", 8)) continue;   /* model<TAB>M stored raw codec crc<TAB>models/model-NNN.bin<TAB>sha */
+        if (sscanf(line + 8, "%ld %ld %*d %*u\t%511[^\t]", &stored, &raw, rel) != 3 || raw <= 0 || stored <= 0) die("manifest model row");
+        if (cx_fmt(path, sizeof path, "%s/%s", argv[1], rel)) die("path");
+        {   size_t n; unsigned char *z = (unsigned char *)cx_read(path, &n), *u; Out b = {0}; int r, rc = 0; CxDecode d = {0};
+            if (!z) die("member read");
+            u = malloc((size_t)raw); if (!u) die("out of memory");
+            if (cxcodec_inflate(u, (unsigned long)raw, z, (unsigned long)n)) { printf("MDSHA\tmodel-%03d\tinflate-failed\n", id); failed++; free(z); free(u); count++; continue; }
+            d.allocate = heap; d.release = release;
+            for (r = 0; r < reps && !rc; r++) {
+                long long t0 = ns_now();
+                rc = cxmd_decode(&d, u, raw);
+                total += ns_now() - t0;
+                if (!rc && r + 1 < reps) cxml_release(&d.model, release);
+            }
+            if (rc) { printf("MDSHA\tmodel-%03d\tdecode-failed\t%s\n", id, d.why ? d.why : ""); failed++; }
+            else { render(&d.model, &b); cx_sha256_hex(b.p, b.n, h); printf("MDSHA\tmodel-%03d\traw=%ld\tsha=%.16s\n", id, raw, h);
+                   { char t[200]; int k = snprintf(t, sizeof t, "%03d %s\n", id, h); if (k < 0 || k >= (int)sizeof t) die("format"); put(&all, t, (size_t)k); } }
+            cxml_release(&d.model, release); free(b.p); free(z); free(u); count++;
+        }
+    }
+    fclose(f);
+    if (!count) die("no model rows");
+    cx_sha256_hex(all.p ? all.p : "", all.n, h);
+    printf("MODEL_DECODE_SHA\tmodels=%d\tfailed=%d\tall=%.16s\tdecode_ns=%lld\treps=%d\n", count, failed, h, total, reps);
+    return failed ? 1 : 0;
+}

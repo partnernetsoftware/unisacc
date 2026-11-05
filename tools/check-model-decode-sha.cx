@@ -1,0 +1,77 @@
+/* tools/check-model-decode-sha.cx -- tools/model-decode-sha.cx sees every decoded field, and nothing else.
+ *
+ *   sh ./unisacc.com tools/check-model-decode-sha.cx [-- ROOT]
+ *
+ * Builds, in a mkdtemp scratch, an exploded-package layout with two tiny text models (raw-deflated by the
+ * tree's own deflate): A and B differ only in one sequence operand.  Asserts (exit 0 all hold, 1 any
+ * fails, 2 usage/IO):
+ *   1) both decode (models=2 failed=0) and the run is repeatable: two runs print the same all= digest;
+ *   2) the one-operand difference shows: the two MDSHA lines differ;
+ *   3) --reps 3 changes nothing but the time: same per-model shas as --reps 1;
+ *   4) a member that does not decode is reported (decode-failed) and the exit is 1. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use text.deflate
+#pragma unisa use mem.bytes
+
+static int failed;
+static char g_root[4096], work[4096];
+static const char *MA = "T 1 1 0 0 0\nQ 1 1 7\nR 0 0 -1 0\n";
+static const char *MB = "T 1 1 0 0 0\nQ 1 1 8\nR 0 0 -1 0\n";
+static const char *MBAD = "T 1 1 0 0 0\nQ 1 99 7\nR 0 0 -1 0\n";
+
+static void check(int ok, const char *what) { sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+static int member(const char *dir, int id, const char *text, char *row, size_t cap) {
+    unsigned char z[4096]; long zn; char p[4400]; long n = tx_len(text, 4096);
+    zn = dz_deflate((const unsigned char *)text, n, z, (long)sizeof z);
+    if (zn <= 0) return 1;
+    if (cx_fmt(p, sizeof p, "%s/models/model-%03d.bin", dir, id) || cx_write(p, (const char *)z, (size_t)zn)) return 1;
+    return cx_fmt(row, cap, "model\tM %ld %ld 1 0\tmodels/model-%03d.bin\t-\n", zn, n, id) != 0;
+}
+static int layout(const char *dir, const char *a, const char *b) {
+    char m[4400], r1[256], r2[256], all[1024];
+    if (sy_mkdir(dir, 0700) || cx_fmt(m, sizeof m, "%s/models", dir) || sy_mkdir(m, 0700)) return 1;
+    if (member(dir, 0, a, r1, sizeof r1) || member(dir, 1, b, r2, sizeof r2)) return 1;
+    if (cx_fmt(all, sizeof all, "p3-roundtrip-v1\n%s%s", r1, r2) || cx_fmt(m, sizeof m, "%s/manifest.tsv", dir)) return 1;
+    return cx_write(m, all, (size_t)tx_len(all, 1024)) != 0;
+}
+static int run(const char *dir, const char *reps, char *out, size_t cap) {
+    char *av[8] = {"sh", "./unisacc.com", "tools/model-decode-sha.cx", "--", (char *)dir, reps ? "--reps" : 0, (char *)reps, 0};
+    np_result r; char why[256];
+    if (np_run(av, g_root, 0, 55, &r, why, sizeof why)) { sy_eprintf("check-model-decode-sha: %s\n", why); return -2; }
+    { size_t k = r.outn < cap - 1 ? r.outn : cap - 1; if (k) mm_copy(out, (long)cap, r.out, (long)k); out[k] = 0; }
+    return r.rc;
+}
+static const char *field(const char *s, const char *key, char *buf, size_t cap) {   /* text after key up to tab/newline */
+    long at = tx_find(s, tx_len(s, 8192), key, tx_len(key, 64)), k = 0;
+    if (at < 0) { buf[0] = 0; return buf; }
+    at += tx_len(key, 64);
+    while (s[at + k] && s[at + k] != '\t' && s[at + k] != '\n' && (size_t)k + 1 < cap) { buf[k] = s[at + k]; k++; }
+    buf[k] = 0; return buf;
+}
+int main(int argc, char **argv) {
+    char d1[4400], d2[4400], o1[8192], o2[8192], o3[8192], o4[8192], a1[64], a2[64], s0[64], s1[64];
+    int rc1, rc2, rc3, rc4;
+    if (argc > 2) { sy_eprintf("usage: check-model-decode-sha.cx [ROOT]\n"); return 2; }
+    if (argc == 2) { if (!realpath(argv[1], g_root)) return 2; } else if (sy_cwd(g_root, sizeof g_root) < 0) return 2;
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/check-mdsha-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) return 2; }
+    if (cx_fmt(d1, sizeof d1, "%s/ok", work) || cx_fmt(d2, sizeof d2, "%s/bad", work)) return 2;
+    if (layout(d1, MA, MB) || layout(d2, MA, MBAD)) { sy_eprintf("check-model-decode-sha: layout\n"); return 2; }
+    rc1 = run(d1, 0, o1, sizeof o1); rc2 = run(d1, 0, o2, sizeof o2);
+    field(o1, "all=", a1, sizeof a1); field(o2, "all=", a2, sizeof a2);
+    check(rc1 == 0 && rc2 == 0 && tx_contains(o1, tx_len(o1, 8192), "models=2\tfailed=0", 17) && a1[0] && tx_eqz(a1, a2),
+          "decodes-and-repeats");
+    field(o1, "model-000\traw=31\tsha=", s0, sizeof s0); field(o1, "model-001\traw=31\tsha=", s1, sizeof s1);
+    check(s0[0] && s1[0] && !tx_eqz(s0, s1), "one-operand-difference-shows");
+    rc3 = run(d1, "3", o3, sizeof o3);
+    field(o3, "all=", a2, sizeof a2);
+    check(rc3 == 0 && a2[0] && tx_eqz(a2, a1), "reps-change-only-time");
+    rc4 = run(d2, 0, o4, sizeof o4);
+    check(rc4 == 1 && tx_contains(o4, tx_len(o4, 8192), "decode-failed", 13), "bad-member-reported");
+    sy_printf("CHECK_MODEL_DECODE_SHA\tassertions=4\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
