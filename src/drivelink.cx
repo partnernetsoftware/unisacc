@@ -6,6 +6,8 @@
    are named inside the function that calls them. The tape bytes are handed
    to the caller on success; the caller owns them. One link at a time. */
 #pragma unisa module drivelink
+#pragma unisa use compiler.rtsharedname
+#pragma unisa use sys.io
 
 /* Tape bytes emitted by tapelink. Handed to the caller on success. */
 static unsigned char *dv_linkb;
@@ -41,7 +43,34 @@ static int dv_link_die(char *m) {
     return 1;
 }
 
-/* Same sentences as the product when the formatted line is unavailable. */
+/* RT-SHARED: 自带私有流表的对象，tape 里有 `.bss g_<probe> <n>` 定义行（probe 名来自生成物）。
+   链接 ≥2 个这样的对象时跨单元 FILE 状态不共享：出声，但**不改 rc**（报错会让今天能链接的
+   程序失败）。 */
+static int dv_shared_has, dv_shared_warned;
+
+/* a[0..n) == b[0..n)：不用 libc（cxlibc / cxraw 对 src/ 只降不升） */
+static int dv_pre(const char *a, const char *b, long n) { long i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+
+static int dv_has_probe(const char *t, long tl) {
+    int i, n, prov; const char *g, *p, *u, *e;
+    for (i = 0, n = rts_count(); i < n; i++) {
+        long at = 0, pl = 0, j;
+        if (rts_at(i, &g, &p, &prov, &u, &e)) continue;
+        while (p[pl]) pl++;
+        for (at = 0; at < tl; at = j + 1) {
+            for (j = at; j < tl && t[j] != 10; j++) {}
+            if (j - at >= 7 + pl + 1 && dv_pre(t + at, ".bss g_", 7) &&
+                dv_pre(t + at + 7, p, pl) && t[at + 7 + pl] == ' ') return 1;
+        }
+    }
+    return 0;
+}
+
+static void dv_note_shared(const char *t, long tl) {
+    if (!dv_has_probe(t, tl)) return;
+    if (++dv_shared_has == 2 && !dv_shared_warned++) sy_eprintf("unisacc: warning: 2 objects each carry a private stdio table (cross-unit FILE state is not shared; compile the program in one invocation or link the RT_UNIT entity)\n");
+}
+
 static int dv_take_unit(char *t, long tl, int u) {
     void tl_adopt_first(void);
     int tl_target_differs(void);
@@ -63,6 +92,7 @@ static int dv_take_unit(char *t, long tl, int u) {
     tl_unitver(t, (int)tl);
     tl_unit(t, (int)tl, u);
     tl_note_links(t, tl);
+    dv_note_shared(t, tl);
     return 0;
 }
 

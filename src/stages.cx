@@ -1,5 +1,6 @@
 #pragma unisa module stages
 #pragma unisa use runtime.routespan
+#pragma unisa use compiler.rtsharedname
 /* One package route, in package order. rs_reset/rs_take/rs_ok select
    the span, rt_open and sh_apply load each stage, core_run executes it,
    and rt_swap hands the bytes to the next stage. Resources go out only
@@ -34,6 +35,7 @@ int st_touch(void) {
 static unsigned char *st_ab;
 static long st_an;
 static long st_ac;
+static int st_nunit = 1;   /* 本次调用里参与链接的单元数：驱动在进 dv_units 前设，1 表示单源不加宏 */
 static unsigned char st_f1 = 1;
 static const unsigned char st_cxh[] = "cx.h";
 static unsigned char st_inc[64 * 520];
@@ -98,6 +100,8 @@ int st_extra_reset(void) {
     st_xc = 0;
     return 0;
 }
+
+int st_units(int n) { if (n < 0) return 4; st_nunit = n < 1 ? 1 : n; return 0; }
 
 static const unsigned char *st_incdir;
 static int st_incdir_n;
@@ -167,7 +171,28 @@ static int st_key(const char *key, int n, const unsigned char *b, int len) {
     return hs_cli_put((const unsigned char *)key, n, b, len);
 }
 
-static int st_pub(const char *tgt, const char *src, int cx) {
+/* RT-SHARED: 多单元且本次调用自己链接时，按 rt-shared.tsv 的组逐组决定本单元用哪个宏。
+   组、provider 下标、宏名字都来自生成物（compiler.rtsharedname），这里不出现符号字面量。
+   单单元（unit==0 且 nunit==1）不加宏，字节与今天相同。 */
+static int st_rt_shared(unsigned unit, int nunit) {
+    int i, n, prov;
+    const char *grp, *probe, *um, *em;
+    if (nunit <= 1) return 0;
+    n = rts_count();
+    for (i = 0; i < n; i++) {
+        if (rts_at(i, &grp, &probe, &prov, &um, &em)) return 1;
+        {   const char *m = (unit == (unsigned)prov) ? um : em;
+            long L = 0;
+            while (m[L]) L++;
+            /* 一条 define 记录是 "NAME[=VALUE]" 后跟一个 NUL（与 -D 经 cxa_record 的形态相同） */
+            if (L > 0 && st_key("\0cli/defines", 12, (const unsigned char *)m, (int)L + 1)) return 1;
+        }
+    }
+    (void)grp; (void)probe;
+    return 0;
+}
+
+static int st_pub(const char *tgt, const char *src, int cx, unsigned unit) {
     int n;
     int hs_cli_reset(void);
     if (!tgt || !src) return 4;
@@ -195,6 +220,7 @@ static int st_pub(const char *tgt, const char *src, int cx) {
     n = 0;
     while (tgt[n]) n = n + 1;
     if (st_key("\0cli/target", (int)(sizeof "\0cli/target" - 1), (const unsigned char *)tgt, n)) return 1;
+    if (st_rt_shared(unit, st_nunit)) return 1;
     n = 0;
     while (n < st_xc) {
         if (st_key((const char *)st_xk[n], st_xn[n], st_xb[n], st_xl[n])) return 1;
@@ -290,7 +316,7 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
         }
         index = index + 1;
         if (!rs_take(&cur, route, stage, route, first, last)) continue;
-        if (st_pub(tgt, src, cx)) {
+        if (st_pub(tgt, src, cx, unit)) {
             free(curb);
             ex_unload();
             st_put(why, cap, "cli");

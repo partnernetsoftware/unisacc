@@ -1,0 +1,294 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+/* tools/rt-shared-gen.cx -- 把 exec/facts/rt-shared.tsv 编成 cx/compiler/rt-shared-name.cx。
+ *
+ *   sh ./unisacc.com tools/rt-shared-gen.cx -- --check
+ *   sh ./unisacc.com tools/rt-shared-gen.cx -- --write
+ *
+ * 为什么要有这一步：RT-SHARED 的一份运行库状态只有全程序一份才对（跨单元 FILE 丢数据、
+ * errno 看不见、setenv 堆漏内存都是"每单元一份"造成的）。谁出实体、给哪些单元注入什么宏、
+ * 链接诊断用哪个符号判定"对象自带私有流表"，都写在事实表里；驱动和 tapelink 只读生成物，
+ * 不在代码里写死符号名或单元号。
+ *
+ * --check 除了比对生成物，还做一件专门的事：扫 include/ 下所有头文件里文件作用域的
+ * `static` 状态声明（带 = 初始化或在行尾，不含括号），逐个核对它是否出现在表的
+ * state_symbols 里。查不出"头文件里还有没进表的 static 状态"就等于没做到单一来源——
+ * 上一版漏掉 _u_st_wlen/_u_st_ro/_u_st_n 就是这么漏的。带 `static` 的函数与
+ * `static const` 常量不算状态。
+ *
+ * 退出 0 好；1 差异（具名）；2 用法或 IO。 */
+
+#define TSV "exec/facts/rt-shared.tsv"
+#define OUT "cx/compiler/rtsharedname.cx"
+#define HDRDIR "include"
+#define CAP (1 << 22)
+#define MAXG 8
+#define MAXSYM 64
+#define MAXNAM 48
+
+static void die(const char *a, const char *b) {
+    sy_eprintf("rt-shared-gen: %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    sy_exit(2);
+}
+
+static char tsv[CAP];
+static long tsn;
+struct grp { char name[64]; char sym[MAXSYM][MAXNAM]; int nsym; char probe[MAXNAM]; int provider; char unit[32]; char ext[32];
+             char exm[MAXSYM][MAXNAM]; int nex; };
+static struct grp g[MAXG];
+static int ng;
+
+static long split_tabs(char *line, char **f, long max) {
+    long k = 0;
+    f[k++] = line;
+    while (*line && k < max) { if (*line == '\t') { *line = 0; f[k++] = line + 1; } line++; }
+    return k;
+}
+static int split_commas(char *s, char out[MAXSYM][MAXNAM]) {
+    int n = 0;
+    if (!s || !*s) return 0;
+    while (*s && n < MAXSYM) {
+        int k = 0;
+        while (*s && *s != ',' && k < MAXNAM - 1) out[n][k++] = *s++;
+        out[n][k] = 0;
+        if (k) n++;
+        if (*s == ',') s++;
+    }
+    return n;
+}
+static void cpy(char *d, int cap, const char *s) {
+    int k = 0;
+    while (s[k] && k < cap - 1) { d[k] = s[k]; k++; }
+    d[k] = 0;
+}
+
+/* a[0..n) == b[0..n)，不用 libc（cxtrunc 要求新 .cx 的 libc 调用为 0） */
+static int pre(const char *a, const char *b, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static void load(void) {
+    int fd;
+    long at = 0, i;
+    fd = sy_open(TSV, O_RDONLY, 0);
+    if (fd < 0) die("cannot open", TSV);
+    while (at < CAP - 1) {
+        long r = sy_read(fd, tsv + at, CAP - 1 - at);
+        if (r <= 0) break;
+        at += r;
+    }
+    sy_close(fd);
+    tsn = at;
+    tsv[at] = 0;
+    for (i = 0; i < tsn; ) {
+        long e = i;
+        char *f[8];
+        long nf;
+        while (e < tsn && tsv[e] != '\n') e++;
+        tsv[e] = 0;
+        if (tsv[i] && tsv[i] != '#') {
+            nf = split_tabs(tsv + i, f, 8);
+            if (nf < 6) die("row needs 6 fields (7th is the exemption list)", tsv + i);
+            if (ng >= MAXG) die("too many groups", 0);
+            cpy(g[ng].name, 64, f[0]);
+            g[ng].nsym = split_commas(f[1], g[ng].sym);
+            cpy(g[ng].probe, MAXNAM, f[2]);
+            g[ng].provider = (int)strtol(f[3], 0, 10);
+            cpy(g[ng].unit, 32, f[4]);
+            cpy(g[ng].ext, 32, f[5]);
+            g[ng].nex = (nf >= 7) ? split_commas(f[6], g[ng].exm) : 0;
+            ng++;
+        }
+        i = e + 1;
+    }
+    if (ng < 1) die("no rows", TSV);
+}
+
+/* 1 = 表里覆盖，2 = 表里明确豁免（每单元一份无害，理由写在表第 7 列），0 = 未列 */
+static int listed(const char *name) {
+    int i, k;
+    for (i = 0; i < ng; i++)
+        for (k = 0; k < g[i].nsym; k++)
+            if (!strcmp(g[i].sym[k], name)) return 1;
+    for (i = 0; i < ng; i++)
+        for (k = 0; k < g[i].nex; k++)
+            if (!strcmp(g[i].exm[k], name)) return 2;
+    return 0;
+}
+
+/* 扫 include/ 下所有头文件：文件作用域 static 状态声明必须都在表里。 */
+static int scan_headers(void) {
+    int bad = 0;
+    char list[256][160];
+    int n = 0, i;
+    {   /* 头文件清单：include/*.h 与 include/<dir>/*.h，一层子目录足够（本仓就是这样） */
+        DIR *d = opendir(HDRDIR);
+        struct dirent *e;
+        if (!d) die("cannot list", HDRDIR);
+        while ((e = readdir(d)) && n < 200) {
+            char p[512];
+            sy_stat_t st;
+            if (e->d_name[0] == '.') continue;
+            if (cx_fmt(p, sizeof p, "%s/%s", HDRDIR, e->d_name)) continue;
+            if (sy_stat(p, &st) || st.kind != 'f') continue;
+            {   int L = (int)strlen(e->d_name);
+                if (L > 2 && !strcmp(e->d_name + L - 2, ".h")) { cpy(list[n], 160, p); n++; }
+            }
+        }
+        closedir(d);
+        d = opendir(HDRDIR "/sys");
+        if (d) {
+            while ((e = readdir(d)) && n < 250) {
+                char p[512];
+                sy_stat_t st;
+                int L = (int)strlen(e->d_name);
+                if (e->d_name[0] == '.' || L <= 2 || strcmp(e->d_name + L - 2, ".h")) continue;
+                if (cx_fmt(p, sizeof p, "%s/sys/%s", HDRDIR, e->d_name)) continue;
+                if (sy_stat(p, &st) || st.kind != 'f') continue;
+                cpy(list[n], 160, p); n++;
+            }
+            closedir(d);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        size_t sz = 0;
+        char *b = cx_read(list[i], &sz);
+        long at = 0;
+        if (!b) die("cannot read", list[i]);
+        while (at < (long)sz) {
+            long e = at, p;
+            while (e < (long)sz && b[e] != '\n') e++;
+            /* 只看**列 0** 的 static：文件作用域声明才是全程序状态，缩进的一定在函数体内 */
+            p = at;
+            if (b[p] != 's') { at = e + 1; continue; }
+            if (e - p > 7 && pre(b + p, "static ", 7)) {
+                long q = p + 7, nam;
+                int is_fn = 0, is_const = 0;
+                while (q < e && (b[q] == ' ' || b[q] == '\t')) q++;
+                if (e - q > 6 && pre(b + q, "const ", 6)) { is_const = 1; q += 6; }
+                nam = q;
+                while (nam < e && ((b[nam] >= 'a' && b[nam] <= 'z') || (b[nam] >= 'A' && b[nam] <= 'Z') ||
+                                   (b[nam] >= '0' && b[nam] <= '9') || b[nam] == '_')) nam++;
+                if (nam == q) is_fn = 1;                  /* `static void f(...)` 之类，名字前还有类型 */
+                {   long r;
+                    for (r = nam; r < e; r++) if (b[r] == '(') { is_fn = 1; break; }
+                    (void)r;
+                }
+                if (!is_fn && !is_const && nam < e) {
+                    /* 名字可能是类型词（static char x 里的 char），找最后一个标识符 */
+                    long s2 = nam, n2 = nam;
+                    while (s2 < e) {
+                        if ((b[s2] >= 'a' && b[s2] <= 'z') || (b[s2] >= 'A' && b[s2] <= 'Z') || b[s2] == '_') {
+                            long t = s2;
+                            while (t < e && ((b[t] >= 'a' && b[t] <= 'z') || (b[t] >= 'A' && b[t] <= 'Z') ||
+                                             (b[t] >= '0' && b[t] <= '9') || b[t] == '_')) t++;
+                            n2 = s2; s2 = t;
+                        } else if (b[s2] == '[' || b[s2] == '=' || b[s2] == ';' || b[s2] == ',') break;
+                        else s2++;
+                    }
+                    {   long L = 0;
+                        char nm[MAXNAM];
+                        long u = n2;
+                        while (u < e && ((b[u] >= 'a' && b[u] <= 'z') || (b[u] >= 'A' && b[u] <= 'Z') ||
+                                         (b[u] >= '0' && b[u] <= '9') || b[u] == '_') && L < MAXNAM - 1) nm[L++] = b[u++];
+                        nm[L] = 0;
+                        if (L > 0 && listed(nm) == 0) {
+                            sy_printf("FAIL\trt-shared-unlisted-static\t%s\t%s\n", list[i], nm);
+                            bad++;
+                        }
+                    }
+                }
+            }
+            at = e + 1;
+        }
+        free(b);
+    }
+    return bad;
+}
+
+static long emit(char *dst, long cap) {
+    long n = 0;
+    int i, k;
+    char *P = dst;
+    (void)P;
+#define APP(fmt, ...) do { int z = snprintf(dst + n, (size_t)(cap - n), fmt, ##__VA_ARGS__); if (z < 0 || n + z >= cap) die("output too long", 0); n += z; } while (0)
+    APP("#pragma unisa module rtsharedname\n");
+    APP("/* Generated by tools/rt-shared-gen.cx from exec/facts/rt-shared.tsv. Do not edit.\n");
+    APP("   One row is a group of runtime state that must exist once per program: the symbols it\n");
+    APP("   covers, the probe symbol the linker recognises an object's own private copy by, which\n");
+    APP("   unit supplies the entity, and the macros for that unit and for every other unit. */\n");
+    APP("int rts_count(void) { return %d; }\n", ng);
+    APP("int rts_at(int i, const char **group, const char **probe, int *provider,\n");
+    APP("           const char **unit_macro, const char **extern_macro) {\n");
+    APP("    if (!group || !probe || !provider || !unit_macro || !extern_macro) return 4;\n");
+    for (i = 0; i < ng; i++)
+        APP("    if (i == %d) { *group = \"%s\"; *probe = \"%s\"; *provider = %d; *unit_macro = \"%s\"; *extern_macro = \"%s\"; return 0; }\n",
+            i, g[i].name, g[i].probe, g[i].provider, g[i].unit, g[i].ext);
+    APP("    return 2;\n}\n");
+    APP("int rts_symbol_count(int i) {\n");
+    for (i = 0; i < ng; i++) APP("    if (i == %d) return %d;\n", i, g[i].nsym);
+    APP("    return -1;\n}\n");
+    APP("/* 1 when group i covers NAME (no g__ prefix); 0 not covered; 2 index out of range */\n");
+    APP("static int rts_same(const char *a, const char *b) {\n");
+    APP("    int k = 0;\n");
+    APP("    if (!a || !b) return 0;\n");
+    APP("    while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }\n");
+    APP("    return a[k] == b[k];\n");
+    APP("}\n");
+    APP("int rts_covers(int i, const char *name) {\n");
+    APP("    if (!name) return 4;\n");
+    for (i = 0; i < ng; i++) {
+        APP("    if (i == %d) {\n", i);
+        for (k = 0; k < g[i].nsym; k++)
+            APP("        if (rts_same(name, \"%s\")) return 1;\n", g[i].sym[k]);
+        APP("        return 0;\n    }\n");
+    }
+    APP("    return 2;\n}\n");
+#undef APP
+    return n;
+}
+
+int main(int argc, char **argv) {
+    char *dst;
+    long n;
+    int dowrite, fd, bad;
+    if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
+        sy_eprintf("rt-shared-gen: usage --check|--write\n");
+        return 2;
+    }
+    dowrite = !strcmp(argv[1], "--write");
+    load();
+    bad = scan_headers();
+    dst = malloc(CAP);
+    if (!dst) die("alloc", "output");
+    n = emit(dst, CAP);
+    {   size_t on = 0;
+        char *old = cx_read(OUT, &on);
+        int same = 0;
+        if (old && on == (size_t)n) {
+            long q = 0;
+            same = 1;
+            for (q = 0; q < n; q++) if (old[q] != dst[q]) { same = 0; break; }
+        }
+        if (old) free(old);
+        if (same) {
+            sy_printf("RT_SHARED_GEN\tSAME\tgroups=%d\tbytes=%ld\tunlisted=%d\n", ng, n, bad);
+            free(dst);
+            return bad ? 1 : 0;
+        }
+        if (!dowrite) {
+            sy_printf("RT_SHARED_GEN\tDIFFER\tgroups=%d\tbytes=%ld\tunlisted=%d\n", ng, n, bad);
+            free(dst);
+            return 1;
+        }
+        fd = sy_open(OUT, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0 || sy_write_all(fd, dst, n) || sy_close(fd)) die("write", OUT);
+        sy_printf("RT_SHARED_GEN\tWROTE\tgroups=%d\tbytes=%ld\tunlisted=%d\n", ng, n, bad);
+    }
+    free(dst);
+    return bad ? 1 : 0;
+}

@@ -6,7 +6,18 @@
  * 0.0.19: the full POSIX set (dsh 2026-10-01: EINTR et al. were missing). */
 #ifndef _UNISA_ERRNO_H
 #define _UNISA_ERRNO_H
+/* RT-SHARED: `errno` is ONE object for the whole program (see sys/_exit.h).  A unit that
+ * supplies the entity defines it, every other unit only declares it, and without either
+ * macro it stays `static` with the bytes the product has today.  Without this, the supply
+ * unit's fwrite sets its own errno and the caller that checks errno sees 0 (the /dev/full
+ * failure contract). */
+#if defined(RT_UNIT)
+int errno;
+#elif defined(RT_EXTERN)
+extern int errno;
+#else
 static int errno = 0;
+#endif
 #ifdef __APPLE__
 #define EPERM            1
 #define ENOENT           2

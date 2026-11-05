@@ -1,0 +1,105 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+/* tests/stdio-crossunit.cx -- RT-SHARED：运行库状态必须全程序一份。
+ *
+ *   sh ./unisacc.com tests/stdio-crossunit.cx [PRODUCT]
+ *
+ * 三个用例都把 FILE* 从一个单元传给另一个单元（这正是丢数据的那条路径）：
+ *   ab-fclose   A 打开并写 "A"，B 写 "B" 再 fclose → 文件必须是 "AB"
+ *   ab-exit     A 打开并写 "A"，B 写 "B"，不 fclose，靠 main 返回时的 exit 冲刷 → "AB"
+ *   abc-fflush  A 写 "A"，B 写 "B" 后 fflush，A 继续写 "C" → "ABC"
+ * 第四个用例是失败合同（cdx 报的 errno 回归）：
+ *   devfull     fopen("/dev/full","w") 写 1 字节后 errno==0，fflush 必须失败且 errno!=0
+ * 所有材料建在 mkdtemp 的独占目录里：不写仓内 out/，全新克隆可跑。
+ * 输出 STDIO_CROSSUNIT<TAB>failed=N；退出 0 仅当 failed=0。 */
+static char dir[4096], product[4400];
+static int failed, asserts;
+static void ck(int ok, const char *name) {
+    asserts++;
+    if (!ok) failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+static void put(const char *name, const char *body) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name) || cx_write(p, body, (size_t)tx_len(body, 8192))) {
+        sy_eprintf("stdio-crossunit: cannot write %s\n", name);
+        sy_exit(2);
+    }
+}
+static int run(char **v) {
+    np_result r; char why[512];
+    int rc;
+    memset(&r, 0, sizeof r);
+    if (np_run(v, dir, 0, 40, &r, why, sizeof why)) { sy_eprintf("stdio-crossunit: %s\n", why); return -1; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+int main(int argc, char **argv) {
+    char data[4400], out[2200]; size_t n = 0; int rc;
+    const char *td = sy_env("TMPDIR");
+    (void)sy_unsetenv("UNISA_CONTAINER");   /* 别让外层 launcher 的包盖住被测候选 */
+    (void)sy_unsetenv("UNISA_KERNEL");
+    (void)sy_unsetenv("UNISA_KERNEL_SHA");
+    if (argc > 1) { if (!realpath(argv[1], product)) return 2; }
+    else if (cx_fmt(product, sizeof product, "%s/unisacc.com", ".")) return 2;
+    if (cx_fmt(dir, sizeof dir, "%s/stdio-crossunit-XXXXXX", (td && td[0]) ? td : "/tmp")) return 2;
+    if (!mkdtemp(dir)) { sy_eprintf("stdio-crossunit: mkdtemp\n"); return 2; }
+
+    put("a.c", "#include <stdio.h>\n"
+               "FILE *open_a(void){FILE *f=fopen(\"result\",\"w\");if(!f||fwrite(\"A\",1,1,f)!=1)return 0;return f;}\n"
+               "int more_a(FILE *f){return fwrite(\"C\",1,1,f)==1?0:1;}\n");
+    put("b.c", "#include <stdio.h>\n"
+               "int act_b(FILE *f,int mode){if(fwrite(\"B\",1,1,f)!=1)return 1;"
+               "if(mode==0)return fclose(f)!=0;if(mode==2)return fflush(f)!=0;return 0;}\n");
+    put("main.c", "#include <stdio.h>\n"
+                 "FILE *open_a(void); int act_b(FILE*,int); int more_a(FILE*);\n"
+                 "int main(int argc,char **argv){int m=argv[1][0]-'0';FILE *f=open_a();if(!f)return 3;"
+                 "if(act_b(f,m))return 4;if(m==2&&more_a(f))return 5;return m==2?fclose(f)!=0:0;}\n");
+    {   char *v[] = {product, "-o", "probe", "a.c", "b.c", "main.c", 0};
+        rc = run(v);
+        ck(rc == 0, "multi-source-compiles");
+    }
+    {   /* 1/2/3: the three cross-unit byte cases */
+        static const char *mode[3] = {"0", "1", "2"};
+        static const char *want[3] = {"AB", "AB", "ABC"};
+        static const char *name[3] = {"ab-fclose", "ab-exit", "abc-fflush"};
+        int i;
+        for (i = 0; i < 3 && rc == 0; i++) {
+            char *v[] = {"./probe", (char *)mode[i], 0};
+            char *got;
+            char label[64], rm[4400];
+            if (cx_fmt(data, sizeof data, "%s/result", dir)) return 2;
+            if (cx_fmt(rm, sizeof rm, "%s/result", dir)) return 2;
+            sy_unlink(rm);
+            if (cx_fmt(label, sizeof label, "%s-runs", name[i])) return 2;
+            ck(run(v) == 0, label);
+            got = cx_read(data, &n);
+            if (cx_fmt(label, sizeof label, "%s-bytes", name[i])) return 2;
+            ck(got && (size_t)tx_len(want[i], 8) == n && !memcmp(got, want[i], n), label);
+            if (got) free(got);
+        }
+    }
+    {   /* 4: the failure contract -- errno must be the caller's errno too */
+        put("full.c", "#include <stdio.h>\n#include <errno.h>\n"
+                      "int main(void){FILE *f=fopen(\"/dev/full\",\"w\");if(!f)return 1;"
+                      "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
+                      "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
+        {   char *v[] = {product, "-o", "fullprobe", "full.c", 0};
+            ck(run(v) == 0, "devfull-compiles");
+        }
+        {   char *v[] = {"./fullprobe", 0};
+            ck(run(v) == 0, "devfull-errno-visible-to-caller");
+        }
+    }
+    {   char rm[4400];
+        if (cx_fmt(rm, sizeof rm, "%s", dir)) return 2;
+        (void)rm;
+    }
+    printf("STDIO_CROSSUNIT\tassertions=%d\tfailed=%d\n", asserts, failed);
+    return failed ? 1 : 0;
+}
