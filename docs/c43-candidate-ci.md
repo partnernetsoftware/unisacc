@@ -1,3 +1,7 @@
+> **已被取代（2026-11-05）**：现行工作流合同见 `.github/workflows/candidate-native.yml` 与 `tests/candidate-qualify.cx`（输入 APE sha 与 commit，按目标产证据表）。下文只是 0.0.43 草稿的历史记录。
+>
+> **APE 与 commit 的绑定只是声明的**：工作流核的是 APE 字节等于 `ape_sha256`、检出 HEAD 等于 `commit`、已跟踪文件未改；它不证明这个 APE 是由这个 commit 构造出来的。两者的对应关系由提交者声明，资格报告必须原样写出这一点，不能写成"已验证由该 commit 构造"。要证明构造关系，需要在同一 commit 上重新构造并比对 APE 字节（本工作流不做）。
+
 # 0.0.43 同候选 CI 输入草稿
 
 本入口只解决候选输入与身份核验的断链，不是发布资格。当前工作流未触发、工件未上传、六宿主未实跑，统一为 **NOT_RUN**。文件只响应将来另行授权的 `workflow_dispatch`；没有 push、PR、定时、上传、签名、Draft、Latest 或公开动作，原 `ci.yml` 不变。

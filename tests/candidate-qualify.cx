@@ -1,0 +1,257 @@
+/* tests/candidate-qualify.cx -- same-candidate native qualification: per-target cell and six-target table.
+ *
+ *   sh ./unisacc.com tests/candidate-qualify.cx -- cell TARGET APE_SHA COMMIT OUT.tsv
+ *   sh ./unisacc.com tests/candidate-qualify.cx -- aggregate APE_SHA COMMIT DIR OUT.md
+ *
+ * cell runs from a checkout root whose ./unisacc.com is the candidate (POSIX hosts; Windows has its own adapter
+ * in candidate-native.yml writing the same rows).  It first proves identity: HEAD == COMMIT, no tracked file
+ * changed, sha256(./unisacc.com) == APE_SHA, uname == TARGET.  On any mismatch every later check is NOT_RUN and
+ * the exit is 1.  Then, each under its own 55 s process-group bound: --version equals the PRODUCT_VERSION row of
+ * exec/facts/limits.tsv, hello compiles and runs, tests/stdio-crossunit.cx, tests/check-stream-pipe.cx,
+ * tests/run.cx --smoke.  The candidate is hashed again at the end.  rc 0 only when all six rows are PASS.
+ *
+ * Row: target check status rc ms ape_sha commit detail (TAB separated; status PASS, FAIL or NOT_RUN).
+ *
+ * aggregate reads DIR/<os>-<arch>.tsv for all six targets and writes the evidence table.  A missing file, a
+ * missing/duplicate/unknown check, an unknown status or an identity differing from the arguments is INVALID.
+ * Exit: 1 on any FAIL or INVALID; 3 when nothing failed but something is NOT_RUN; 0 only when all 36 cells PASS.
+ * Prints CANDIDATE_QUALIFY<TAB>verdict=..; the verdict is computed, never a constant. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define CQ_CHECKS 6
+#define CQ_ADD(...) do { if (cx_fmt(md + at, cap - at, __VA_ARGS__)) return 2; at += strlen(md + at); } while (0)
+#define CQ_TARGETS 6
+static const char *cq_check[CQ_CHECKS] = {"identity", "version", "hello", "stdio-crossunit", "stream-pipe", "smoke"};
+static const char *cq_target[CQ_TARGETS] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+
+static int cq_hex(const char *s, size_t n) {
+    size_t i;
+    if (strlen(s) != n) return 0;
+    for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int cq_target_ok(const char *t) { int i; for (i = 0; i < CQ_TARGETS; i++) if (tx_eqz(t, cq_target[i])) return 1; return 0; }
+
+/* ---------- cell ---------- */
+static FILE *cq_out;
+static const char *cq_t, *cq_sha, *cq_commit;
+static int cq_failed;
+
+static void cq_row(const char *check, const char *status, int rc, long ms, const char *detail) {
+    char d[400]; size_t i, n = 0;
+    for (i = 0; detail[i] && n + 1 < sizeof d; i++) d[n++] = (detail[i] == '\t' || detail[i] == '\n' || detail[i] == '\r') ? ' ' : detail[i];
+    d[n] = 0;
+    if (fprintf(cq_out, "%s\t%s\t%s\t%d\t%ld\t%s\t%s\t%s\n", cq_t, check, status, rc, ms, cq_sha, cq_commit, n ? d : "-") < 0) { fprintf(stderr, "candidate-qualify: evidence write failed\n"); exit(2); }
+    fflush(cq_out);
+    printf("%s\t%s\t%s\trc=%d\tms=%ld\t%s\n", status, check, cq_t, rc, ms, d);
+    fflush(stdout);
+    if (tx_eqz(status, "FAIL")) cq_failed = 1;
+}
+
+/* Runs argv from the root, 55 s for its whole process group.  Returns rc, or -1 when it could not be observed. */
+static int cq_exec(char **argv, np_result *r, char *why, size_t wl) {
+    memset(r, 0, sizeof *r);
+    why[0] = 0;
+    if (np_run(argv, ".", 0, 55, r, why, wl)) return -1;
+    if (r->residue) { { if (cx_fmt(why, wl, "residue=%d", r->residue)) why[0] = 0; } return -1; }
+    return r->rc;
+}
+
+static char *cq_slurp(const char *p, size_t *n) { return cx_read(p, n); }
+
+static int cq_sha_file(const char *p, char h[65]) {
+    size_t n = 0; char *b = cq_slurp(p, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, h);
+    free(b);
+    return 0;
+}
+
+static char *cq_zout(const np_result *r) {
+    char *z = malloc(r->outn + 1); size_t i;
+    if (!z) return 0;
+    for (i = 0; i < r->outn; i++) z[i] = r->out[i];
+    z[r->outn] = 0;
+    return z;
+}
+
+/* The trailing "<MARKER>...failed=0" a batch prints: must be there, exact. */
+static int cq_marker(const np_result *r, const char *needle) {
+    char *z = cq_zout(r); int found;
+    if (!z) return 0;
+    found = strstr(z, needle) != 0;
+    free(z);
+    return found;
+}
+
+static void cq_batch(const char *check, char **argv, const char *marker) {
+    np_result r; char why[512], detail[500]; long t0 = sy_now_ms(); int rc = cq_exec(argv, &r, why, sizeof why), good;
+    good = rc == 0 && cq_marker(&r, marker);
+    if (good) { if (cx_fmt(detail, sizeof detail, "%s", marker)) detail[0] = 0; }
+    else if (rc < 0) { if (cx_fmt(detail, sizeof detail, "not observed: %s", why)) detail[0] = 0; }
+    else {  /* first FAIL line, else the stderr head: what a reader needs from the table */
+        char *z = cq_zout(&r), *f = 0;
+        if (z) { f = strncmp(z, "FAIL\t", 5) ? strstr(z, "\nFAIL\t") : z; if (f && *f == '\n') f++; }
+        if (f) { char *e = strchr(f, '\n'); if (e) *e = 0; { if (cx_fmt(detail, sizeof detail, "expected rc0 with %s; %.300s", marker, f)) detail[0] = 0; } }
+        else { if (cx_fmt(detail, sizeof detail, "expected rc0 with %s; stderr=%.200s", marker, r.err ? r.err : "")) detail[0] = 0; }
+        free(z);
+    }
+    cq_row(check, good ? "PASS" : "FAIL", rc, sy_now_ms() - t0, detail);
+    if (rc >= 0 || r.out || r.err) np_free(&r);
+}
+
+static int cq_limits_version(char v[64]) {
+    size_t n = 0; char *b = cq_slurp("exec/facts/limits.tsv", &n), *p; int k = 0;
+    if (!b) return -1;
+    p = strstr(b, "\nPRODUCT_VERSION\t");
+    if (p) { p += 17; while (*p && *p != '\t' && k < 63) v[k++] = *p++; v[k] = 0; }
+    free(b);
+    return p && k ? 0 : -1;
+}
+
+static int cq_identity(const char *target, char *why, size_t wl) {
+    np_result r; char w[512], h[65], want[64];
+    {   char *v[] = {"git", "rev-parse", "HEAD", 0}; int rc = cq_exec(v, &r, w, sizeof w), ok = rc == 0 && r.outn >= 40 && !memcmp(r.out, cq_commit, 40);
+        if (rc >= 0) np_free(&r);
+        if (!ok) { { if (cx_fmt(why, wl, "checkout HEAD differs from commit")) why[0] = 0; } return -1; } }
+    {   char *v[] = {"git", "status", "--porcelain", "--untracked-files=no", 0}; int rc = cq_exec(v, &r, w, sizeof w), ok = rc == 0 && r.outn == 0;
+        if (rc >= 0) np_free(&r);
+        if (!ok) { { if (cx_fmt(why, wl, "tracked files changed in the checkout")) why[0] = 0; } return -1; } }
+    if (cq_sha_file("unisacc.com", h)) { { if (cx_fmt(why, wl, "cannot read ./unisacc.com")) why[0] = 0; } return -1; }
+    if (strcmp(h, cq_sha)) { { if (cx_fmt(why, wl, "ape sha actual=%s", h)) why[0] = 0; } return -1; }
+    {   char *v[] = {"uname", "-sm", 0}; int rc = cq_exec(v, &r, w, sizeof w), ok = 0;
+        if (rc == 0) {
+            const char *os = r.outn >= 6 && !memcmp(r.out, "Linux ", 6) ? "lnx" : r.outn >= 7 && !memcmp(r.out, "Darwin ", 7) ? "osx" : "?";
+            const char *arch = (cq_marker(&r, " x86_64") || cq_marker(&r, " amd64")) ? "x86_64" : (cq_marker(&r, " aarch64") || cq_marker(&r, " arm64")) ? "arm64" : "?";
+            { if (cx_fmt(want, sizeof want, "%s/%s", os, arch)) want[0] = 0; }
+            ok = tx_eqz(want, target);
+        } else { if (cx_fmt(want, sizeof want, "unobserved")) want[0] = 0; }
+        if (rc >= 0) np_free(&r);
+        if (!ok) { { if (cx_fmt(why, wl, "host is %s, not %s", want, target)) why[0] = 0; } return -1; } }
+    return 0;
+}
+
+static int cq_cell(const char *target, const char *out) {
+    char why[512], ver[64], line[128]; int i; long t0 = sy_now_ms();
+    if (!cq_target_ok(target)) { fprintf(stderr, "candidate-qualify: unknown target %s\n", target); return 2; }
+    cq_t = target;
+    cq_out = fopen(out, "wb");
+    if (!cq_out) { fprintf(stderr, "candidate-qualify: cannot write %s\n", out); return 2; }
+    if (cq_identity(target, why, sizeof why)) {
+        cq_row("identity", "FAIL", 1, sy_now_ms() - t0, why);
+        for (i = 1; i < CQ_CHECKS; i++) cq_row(cq_check[i], "NOT_RUN", -1, 0, "identity failed");
+        fclose(cq_out);
+        return 1;
+    }
+    cq_row("identity", "PASS", 0, sy_now_ms() - t0, "HEAD, tracked bytes, ape sha and host all agree");
+    if (cq_limits_version(ver)) { fprintf(stderr, "candidate-qualify: no PRODUCT_VERSION row\n"); return 2; }
+    {   char *v[] = {"sh", "./unisacc.com", "--version", 0}; np_result r; char w[512]; long t = sy_now_ms(); int rc = cq_exec(v, &r, w, sizeof w), good;
+        { if (cx_fmt(line, sizeof line, "unisacc %s\n", ver)) line[0] = 0; }
+        good = rc == 0 && r.outn == strlen(line) && !memcmp(r.out, line, r.outn) && r.errn == 0;
+        cq_row("version", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? line : (rc < 0 ? w : (r.out ? r.out : "")));
+        if (rc >= 0) np_free(&r); }
+    {   static const char src[] = "#include <stdio.h>\nint main(void){puts(\"candidate-hello\");return 0;}\n";
+        np_result r; char w[512]; long t = sy_now_ms(); int rc, good = 0;
+        (void)sy_mkdir("out", 0755); (void)sy_mkdir("out/candidate-qualify", 0755);
+        if (cx_write("out/candidate-qualify/hello.c", src, sizeof src - 1)) { fprintf(stderr, "candidate-qualify: cannot write hello.c\n"); return 2; }
+        {   char *v[] = {"sh", "./unisacc.com", "-o", "out/candidate-qualify/hello", "out/candidate-qualify/hello.c", 0}; rc = cq_exec(v, &r, w, sizeof w); }
+        if (rc == 0) {
+            char *v[] = {"./out/candidate-qualify/hello", 0};
+            np_free(&r);
+            rc = cq_exec(v, &r, w, sizeof w);
+            good = rc == 0 && r.outn == 16 && !memcmp(r.out, "candidate-hello\n", 16);
+            cq_row("hello", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? "compiled, ran, exact stdout" : "ran with wrong rc or stdout");
+        } else cq_row("hello", "FAIL", rc, sy_now_ms() - t, rc < 0 ? w : (r.err ? r.err : "compile failed"));
+        if (rc >= 0) np_free(&r); }
+    {   char *v[] = {"sh", "./unisacc.com", "tests/stdio-crossunit.cx", 0}; cq_batch("stdio-crossunit", v, "STDIO_CROSSUNIT\t"); }
+    {   char *v[] = {"sh", "./unisacc.com", "tests/check-stream-pipe.cx", 0}; cq_batch("stream-pipe", v, "CHECK_STREAM_PIPE\tfailed=0"); }
+    {   char *v[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--smoke", 0}; cq_batch("smoke", v, "SMOKE\tassertions=16\tfailed=0"); }
+    {   char h[65];
+        if (cq_sha_file("unisacc.com", h) || strcmp(h, cq_sha)) { fprintf(cq_out, "%s\tidentity\tFAIL\t1\t0\t%s\t%s\tcandidate changed during the checks\n", cq_t, cq_sha, cq_commit); printf("FAIL\tcandidate changed during the checks\n"); cq_failed = 1; } }
+    fclose(cq_out);
+    printf("CANDIDATE_CELL\t%s\t%s\n", target, cq_failed ? "FAIL" : "PASS");
+    return cq_failed ? 1 : 0;
+}
+
+/* ---------- aggregate ---------- */
+static int cq_split(char *line, char **f, int cap) {
+    int n = 0; char *p = line;
+    while (n < cap) { f[n++] = p; p = strchr(p, '\t'); if (!p) break; *p++ = 0; }
+    return p ? -1 : n;
+}
+
+static int cq_aggregate(const char *dir, const char *out) {
+    char cell[CQ_TARGETS][CQ_CHECKS][10]; char detail[4096 * 8]; size_t dn = 0;
+    int pass = 0, failed = 0, not_run = 0, invalid = 0, t, c; FILE *o;
+    char *md; size_t cap = 1 << 16, at = 0;
+    memset(cell, 0, sizeof cell);
+    detail[0] = 0;
+    for (t = 0; t < CQ_TARGETS; t++) {
+        char name[32], path[4400]; size_t n = 0; char *b, *line; int k;
+        { if (cx_fmt(name, sizeof name, "%s", cq_target[t])) name[0] = 0; }
+        for (k = 0; name[k]; k++) if (name[k] == '/') name[k] = '-';
+        if (cx_fmt(path, sizeof path, "%s/%s.tsv", dir, name)) return 2;
+        b = cx_read(path, &n);
+        if (!b) { invalid++; printf("INVALID\t%s\tno evidence file\n", cq_target[t]); continue; }
+        for (line = b; line < b + n && *line; ) {
+            char *e = strchr(line, '\n'), *f[8]; int m;
+            if (e) *e = 0;
+            if (*line) {
+                if (*(line + strlen(line) - 1) == '\r') *(line + strlen(line) - 1) = 0;
+                m = cq_split(line, f, 8);
+                if (m != 8 || !tx_eqz(f[0], cq_target[t]) || strcmp(f[5], cq_sha) || strcmp(f[6], cq_commit)) { invalid++; printf("INVALID\t%s\trow target/identity disagrees\n", cq_target[t]); }
+                else {
+                    int idx = -1;
+                    for (c = 0; c < CQ_CHECKS; c++) if (tx_eqz(f[1], cq_check[c])) idx = c;
+                    if (idx < 0 || !(tx_eqz(f[2], "PASS") || tx_eqz(f[2], "FAIL") || tx_eqz(f[2], "NOT_RUN"))) { invalid++; printf("INVALID\t%s\tunknown check or status %s %s\n", cq_target[t], f[1], f[2]); }
+                    else if (cell[t][idx][0] && !(idx == 0 && tx_eqz(f[2], "FAIL"))) { invalid++; printf("INVALID\t%s\tduplicate %s\n", cq_target[t], f[1]); }
+                    else {
+                        { if (cx_fmt(cell[t][idx], sizeof cell[t][idx], "%s", f[2])) cell[t][idx][0] = 0; }
+                        if (!tx_eqz(f[2], "PASS")) { if (cx_fmt(detail + dn, sizeof detail - dn, "- `%s` %s %s rc=%s: %s\n", cq_target[t], f[1], f[2], f[3], f[7])) return 2; dn += strlen(detail + dn); }
+                    }
+                }
+            }
+            if (!e) break;
+            line = e + 1;
+        }
+        free(b);
+        for (c = 0; c < CQ_CHECKS; c++) if (!cell[t][c][0]) { invalid++; printf("INVALID\t%s\tmissing %s\n", cq_target[t], cq_check[c]); { if (cx_fmt(cell[t][c], sizeof cell[t][c], "MISSING")) cell[t][c][0] = 0; } }
+    }
+    for (t = 0; t < CQ_TARGETS; t++) for (c = 0; c < CQ_CHECKS; c++) {
+        const char *s = cell[t][c];
+        if (tx_eqz(s, "PASS")) pass++; else if (tx_eqz(s, "FAIL")) failed++; else if (tx_eqz(s, "NOT_RUN")) not_run++;
+    }
+    md = malloc(cap);
+    if (!md) return 2;
+    {   const char *verdict = failed || invalid ? "FAIL" : not_run ? "INCOMPLETE" : "QUALIFIED";
+        CQ_ADD("# candidate-native evidence\n\n- ape_sha256: `%s`\n- commit: `%s`\n- verdict: **%s** pass=%d fail=%d not_run=%d invalid=%d\n\n| target |", cq_sha, cq_commit, verdict, pass, failed, not_run, invalid);
+        for (c = 0; c < CQ_CHECKS; c++) CQ_ADD(" %s |", cq_check[c]);
+        CQ_ADD("\n|---|---|---|---|---|---|---|\n");
+        for (t = 0; t < CQ_TARGETS; t++) {
+            CQ_ADD("| %s |", cq_target[t]);
+            for (c = 0; c < CQ_CHECKS; c++) CQ_ADD(" %s |", cell[t][c][0] ? cell[t][c] : "MISSING");
+            CQ_ADD("\n");
+        }
+        if (dn) CQ_ADD("\n## not PASS\n\n%s", detail);
+        o = fopen(out, "wb");
+        if (!o || fwrite(md, 1, at, o) != at || fclose(o)) { fprintf(stderr, "candidate-qualify: cannot write %s\n", out); return 2; }
+        fwrite(md, 1, at, stdout);
+        printf("CANDIDATE_QUALIFY\tverdict=%s\tpass=%d\tfail=%d\tnot_run=%d\tinvalid=%d\n", verdict, pass, failed, not_run, invalid);
+    }
+    free(md);
+    return failed || invalid ? 1 : not_run ? 3 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 6 && tx_eqz(argv[1], "cell")) { cq_sha = argv[3]; cq_commit = argv[4]; }
+    else if (argc == 6 && tx_eqz(argv[1], "aggregate")) { cq_sha = argv[2]; cq_commit = argv[3]; }
+    else { fprintf(stderr, "usage: cell TARGET APE_SHA COMMIT OUT.tsv | aggregate APE_SHA COMMIT DIR OUT.md\n"); return 2; }
+    if (!cq_hex(cq_sha, 64) || !cq_hex(cq_commit, 40)) { fprintf(stderr, "candidate-qualify: APE_SHA must be 64 and COMMIT 40 lowercase hex\n"); return 2; }
+    return tx_eqz(argv[1], "cell") ? cq_cell(argv[2], argv[5]) : cq_aggregate(argv[4], argv[5]);
+}

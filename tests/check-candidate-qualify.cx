@@ -1,0 +1,97 @@
+/* tests/check-candidate-qualify.cx -- the verdict of tests/candidate-qualify.cx and the workflow's shape.
+ *
+ *   sh ./unisacc.com tests/check-candidate-qualify.cx
+ *
+ * Compiles the tool once, then feeds aggregate fixtures: all PASS rc 0; one NOT_RUN rc 3; one FAIL rc 1;
+ * missing target, missing check, wrong ape sha, wrong commit, unknown status and duplicate check rc 1.  A cell
+ * with a wrong ape sha must be rc 1 with every later check NOT_RUN.  The workflow must name the six targets,
+ * contain no C43_ and no unconditional QUALIFICATION NOT_READY.  Prints CHECK_CANDIDATE_QUALIFY<TAB>failed=N. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+
+#define SHA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define COMMIT "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+static const char *targets[6] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+static const char *files[6] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+static const char *checks[6] = {"identity", "version", "hello", "stdio-crossunit", "stream-pipe", "smoke"};
+static char dir[512], tool[600];
+static int failed;
+
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); }
+
+/* every cell PASS, except that target/check TT/CC gets ROW (a whole line, or "" to drop it); TT<0: no change; DROP drops a file */
+static void fixture(int tt, int cc, const char *row, int drop) {
+    int t, c;
+    for (t = 0; t < 6; t++) {
+        char p[700], b[4096]; size_t n = 0;
+        if (cx_fmt(p, sizeof p, "%s/%s.tsv", dir, files[t])) exit(2);
+        b[0] = 0;
+        for (c = 0; c < 6; c++) {
+            if (t == tt && c == cc) { if (cx_fmt(b + n, sizeof b - n, "%s", row)) exit(2); }
+            else if (cx_fmt(b + n, sizeof b - n, "%s\t%s\tPASS\t0\t1\t" SHA "\t" COMMIT "\t-\n", targets[t], checks[c])) exit(2);
+            n += strlen(b + n);
+        }
+        if (cx_write(p, b, n)) exit(2);
+        if (t == drop) sy_unlink(p);
+    }
+}
+
+static int aggregate(void) {
+    char out[700]; np_result r; char why[512]; char *v[] = {tool, "aggregate", SHA, COMMIT, dir, out, 0}; int rc;
+    if (cx_fmt(out, sizeof out, "%s/table.md", dir)) exit(2);
+    memset(&r, 0, sizeof r);
+    if (np_run(v, ".", 0, 20, &r, why, sizeof why)) { printf("aggregate not observed: %s\n", why); return -1; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char row[512];
+    if (cx_fmt(dir, sizeof dir, "/tmp/check-candidate-qualify-XXXXXX") || !mkdtemp(dir)) { fprintf(stderr, "cannot make a scratch directory\n"); return 2; }
+    {   char *v[] = {"sh", "./unisacc.com", "-o", tool, "tests/candidate-qualify.cx", 0}; np_result r; char why[512];
+        if (cx_fmt(tool, sizeof tool, "%s/tool", dir)) return 2;
+        memset(&r, 0, sizeof r);
+        if (np_run(v, ".", 0, 50, &r, why, sizeof why) || r.rc) { fprintf(stderr, "compile failed: %s %s\n", why, r.err ? r.err : ""); return 2; }
+        np_free(&r); }
+    fixture(-1, 0, "", -1); ck(aggregate() == 0, "all-pass-rc0");
+    snprintf(row, sizeof row, "win/arm64\tsmoke\tNOT_RUN\t-1\t0\t" SHA "\t" COMMIT "\tno slice\n");
+    fixture(5, 5, row, -1); ck(aggregate() == 3, "not-run-rc3");
+    snprintf(row, sizeof row, "osx/arm64\thello\tFAIL\t1\t0\t" SHA "\t" COMMIT "\tbad\n");
+    fixture(3, 2, row, -1); ck(aggregate() == 1, "fail-rc1");
+    fixture(-1, 0, "", 1); ck(aggregate() == 1, "missing-target-rc1");
+    fixture(0, 4, "", -1); ck(aggregate() == 1, "missing-check-rc1");
+    snprintf(row, sizeof row, "lnx/x86_64\tsmoke\tPASS\t0\t0\tcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\t" COMMIT "\t-\n");
+    fixture(0, 5, row, -1); ck(aggregate() == 1, "wrong-ape-sha-rc1");
+    snprintf(row, sizeof row, "lnx/x86_64\tsmoke\tPASS\t0\t0\t" SHA "\tcccccccccccccccccccccccccccccccccccccccc\t-\n");
+    fixture(0, 5, row, -1); ck(aggregate() == 1, "wrong-commit-rc1");
+    snprintf(row, sizeof row, "lnx/x86_64\tsmoke\tSKIP\t0\t0\t" SHA "\t" COMMIT "\t-\n");
+    fixture(0, 5, row, -1); ck(aggregate() == 1, "unknown-status-rc1");
+    snprintf(row, sizeof row, "lnx/x86_64\thello\tPASS\t0\t0\t" SHA "\t" COMMIT "\t-\n");
+    fixture(0, 5, row, -1); ck(aggregate() == 1, "duplicate-check-rc1");
+    {   char head[64] = {0}, out[700], *ev; size_t n = 0; np_result r; char why[512], *g[] = {"git", "rev-parse", "HEAD", 0};
+        memset(&r, 0, sizeof r);
+        if (np_run(g, ".", 0, 10, &r, why, sizeof why) || r.rc || r.outn < 40) return 2;
+        memcpy(head, r.out, 40); np_free(&r);
+        if (cx_fmt(out, sizeof out, "%s/cell.tsv", dir)) return 2;
+        {   char *v[] = {tool, "cell", "lnx/x86_64", SHA, head, out, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, ".", 0, 20, &r, why, sizeof why) && r.rc == 1, "cell-identity-failure-rc1"); np_free(&r); }
+        ev = cx_read(out, &n);
+        ck(ev && strstr(ev, "\tidentity\tFAIL\t") && strstr(ev, "\tsmoke\tNOT_RUN\t") && !strstr(ev, "\tPASS\t"), "cell-identity-failure-runs-nothing");
+        free(ev); }
+    {   size_t n = 0; char *y = cx_read(".github/workflows/candidate-native.yml", &n); int i;
+        static const char *runner[6] = {"runner: ubuntu-24.04,", "runner: ubuntu-24.04-arm,", "runner: macos-15-intel,", "runner: macos-15,", "runner: windows-2025,", "runner: windows-11-arm,"};
+        ck(y != 0, "workflow-readable");
+        if (y) {
+            for (i = 0; i < 6; i++) ck(strstr(y, runner[i]) != 0, runner[i]);
+            ck(!strstr(y, "C43_") && !strstr(y, "0.0.43") && !strstr(y, "NOT_READY"), "workflow-no-draft-residue");
+            ck(strstr(y, "tests/candidate-qualify.cx -- cell") && strstr(y, "tests/candidate-qualify.cx -- aggregate"), "workflow-calls-the-tool");
+            free(y);
+        } }
+    printf("CHECK_CANDIDATE_QUALIFY\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
