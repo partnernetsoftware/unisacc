@@ -216,6 +216,7 @@ static void extract_path(const char *s,const char *key,char *dest,size_t cap){ch
  * up later as a receipt that does not match, which is how an old ctx paired
  * with a new tool went unnoticed twice. Pure tightening: no existing contract
  * is relaxed, and the refusal names both digests. */
+static const char *recorded_field(const np_buf *b,const char *key,char *out,size_t cap);
 static void sp_require_same_generation(void){
     if(sp_origin_mode)return;
     if(!ctx[0])return; /* caller has not set a context yet (parent-side entry). */
@@ -223,7 +224,7 @@ static void sp_require_same_generation(void){
     path(p,ctx,"context.tsv");
     size_t n;char *s=load(p,&n);
     if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))die("context-wire");
-    extract_path(s,"root-product-sha",recorded,sizeof recorded);
+    { np_buf rec={s,n,n};recorded_field(&rec,"root-product-sha",recorded,sizeof recorded); }   /* a digest, not a path: extract_path would canonicalise it */
     free(s);
     if(!sp_hex64(recorded))die("ctx-root-product-sha-shape");
     if(pp_product_digest(root,live))die("live-root-product-digest");
@@ -685,6 +686,20 @@ int sp_bind_job_paths(const char *root_arg,const char *jobs_dir,const char *cc_p
  if(sp_copy_field(root,sizeof root,root_arg)||sp_copy_field(jobs,sizeof jobs,jobs_dir))return -1;
  if(sp_copy_field(cc,sizeof cc,cc_path)||sp_copy_field(bound,sizeof bound,bound_path))return -1;
  return 0;
+}
+/* The context record has one writer. tools/source-package.cx (the controller) binds
+ * the paths and the SID it measured; the record's hashes are observed here, by the
+ * same observe_inputs every verifier uses, so a context.tsv cannot be written in one
+ * form and checked in another. Not origin mode: the controller never runs it. */
+np_buf sp_context_record_for(const char *root_arg,const char *ctx_arg,const char *bootstrap_arg,const char *cc_arg,
+                             const char *self_arg,const char *sid_arg){
+ np_buf none={0};
+ if(!root_arg||!ctx_arg||!bootstrap_arg||!cc_arg||!self_arg||!sid_arg||!sp_hex64(sid_arg))return none;
+ if(sp_copy_field(root,sizeof root,root_arg)||sp_copy_field(ctx,sizeof ctx,ctx_arg)||sp_copy_field(bootstrap,sizeof bootstrap,bootstrap_arg)||
+    sp_copy_field(cc,sizeof cc,cc_arg)||sp_copy_field(self,sizeof self,self_arg)||sp_copy_field(sid,sizeof sid,sid_arg))return none;
+ path(product,root,"unisacc.com");path(bound,root,"tools/bound");path(bound_c,root,"tools/bound.c");path(ident,root,"seed/ident.c");
+ path(helper,ctx,"identity-helper");path(netpack,root,"tools/cxlib/netpack.cx");path(jobs,ctx,"jobs");
+ sp_origin_mode=0;observe_inputs();return context_record();
 }
 int sp_job_command(const char *root_arg,const char *jobs_dir,const char *cc_path,const char *bound_path,const char *id,char **v,int *n){
  size_t z;
