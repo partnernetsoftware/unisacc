@@ -1,0 +1,78 @@
+#pragma unisa use core.execute
+#pragma unisa use core.transition
+#pragma unisa use core.alu
+#pragma unisa use core.sparse
+#pragma unisa use core.bytes
+#pragma unisa use core.stack
+#pragma unisa use core.output
+#pragma unisa use core.memory
+#pragma unisa use sys.io
+/* tools/check-sbload.cx -- SBLOAD (opcode 56) reproduces what family C replaces.
+ *
+ *   sh ./unisacc.com tools/check-sbload.cx
+ *
+ * NN-NF-C rewrites a run of CORE_OUT / SBOUT byte actions into one S line plus
+ * SBLOAD (followed by SBBLOB, or by an INPUSH/XLEN/SPAN2/INPOP frame walk).  The
+ * rewrite is only sound if the replacement leaves exactly the same bytes in the
+ * output buffer, so this check runs both forms through the reference kernel on
+ * the same model and compares the bytes.  It also pins the operand meaning: the
+ * second operand is an S-line index, so a register holding another value must
+ * not change what SBLOAD loads.
+ *
+ * Ends with SBL0AD <TAB> assertions=N <TAB> failed=M and exits 0 only when all agree. */
+void core_host_panic(const char *reason) { sy_eprintf("check-sbload: panic: %s\n", reason ? reason : "?"); }
+int core_host_fetch(const unsigned char *k, int n, unsigned char **b, int *len) { (void)k; (void)n; (void)b; (void)len; return 0; }
+int core_run(const void *m, unsigned char *input, int inputn, const char *src, long long maxsteps, void *result);
+typedef struct { long long *b; long long *at; int n, cap; } Buf;
+typedef struct { int ns, nq, nrg, start, isnet; char **str; int *strl;
+    int *qoff, *qlen; long long *qa; int *mode, *count, **keys, **next, **seq;
+    int *lo, *hi, *base_next, *base_seq; int *ret_seq; unsigned char **ret_ok; } Model;
+typedef struct { Buf out, err; const char *reason; int reason_n; } Result;
+static int failed, assertions;
+static char *strs[3]; static int strl[3] = {5, 1, 3};
+static int qoff[1], qlen[1], mode[1], count[1], keys[257], nxt[257], seqv[257];
+static int *kp[1] = {keys}, *np[1] = {nxt}, *sp[1] = {seqv};
+static unsigned char in[1] = {0};
+static unsigned char res[512];
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) { failed++; sy_printf("FAIL\t%s\n", what); }
+    else sy_printf("PASS\t%s\n", what);
+}
+static Result *run(long long *qa, int qn) {
+    Model m; Result *r = (Result *)res; int j;
+    for (j = 0; j < 257; j++) { nxt[j] = -1; seqv[j] = 0; keys[j] = 0; }
+    nxt[256] = 0;
+    memset(&m, 0, sizeof m);
+    memset(res, 0, sizeof res);
+    m.ns = 1; m.nq = 1; m.nrg = 8; m.start = 0; m.isnet = 0;
+    m.str = strs; m.strl = strl;
+    qoff[0] = 0; qlen[0] = qn; m.qoff = qoff; m.qlen = qlen; m.qa = qa;
+    m.mode = mode; m.count = count; m.keys = kp; m.next = np; m.seq = sp;
+    r->reason = core_run(&m, in, 0, "check-sbload", 100, res) ? (const char *)"run failed" : 0;
+    return r;
+}
+static int says(Result *r, const char *lit, int n) {
+    if (!r || r->reason || r->out.n != n) return 0;
+    return n == 0 || !memcmp(r->out.b, lit, (size_t)n);
+}
+int main(void) {
+    /* CORE_OUT x5 versus SBLOAD + INPUSH + XLEN + SPAN2 + INPOP. */
+    long long out5[] = {12,72,12,69,12,76,12,76,12,79,27,1,49};
+    long long span[] = {56,2,0,33,2,46,5,18,4,5,36,49};
+    /* SBOUT x5 versus SBLOAD + SBBLOB over the same scratch. */
+    long long sbout5[] = {37,38,72,38,69,38,76,38,76,38,79,42,4,33,4,46,5,18,6,5,36,49};
+    long long sbblob[] = {37,56,4,0,40,4,33,4,46,5,18,6,5,36,49};
+    /* The second operand is an S index: register 2 holds 99, yet S2 ("XYZ") loads. */
+    long long byidx[] = {56,4,2,33,4,46,5,18,6,5,36,49};
+    long long byreg[] = {3,2,99,56,4,2,33,4,46,5,18,6,5,36,49};
+    strs[0] = (char *)"HELLO"; strs[1] = (char *)""; strs[2] = (char *)"XYZ";
+    ck(says(run(out5, 13), "HELLO", 5), "CORE_OUT x5 writes the five bytes");
+    ck(says(run(span, 12), "HELLO", 5), "SBLOAD+INPUSH+SPAN2 writes the same five bytes");
+    ck(says(run(sbout5, 22), "HELLO", 5), "SBOUT x5 writes the five bytes");
+    ck(says(run(sbblob, 15), "HELLO", 5), "SBLOAD+SBBLOB writes the same five bytes");
+    ck(says(run(byidx, 12), "XYZ", 3), "SBLOAD's second operand addresses the S line, not a register");
+    ck(says(run(byreg, 15), "XYZ", 3), "a register holding 2 does not change which S line loads");
+    sy_printf("SBL0AD\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
