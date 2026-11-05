@@ -5,30 +5,21 @@
 
 ---
 
-## L1 单流去重打包器（`slice.cx`）
+## 已归档（2026-11-05，被 `unisacc stream STAGE` 取代）
 
-```
-sh ./unisacc.com tools/lab-loader/slice.cx -- BASE_COM SOURCE_PKG NEW_OUTDIR [TARGET [LEVEL]]
-sh ./unisacc.com tools/lab-loader/check-slice.cx          # 批次 slice-check
-```
-把 stream-pack 的七个自含容器拆成共享片：`base/<os>-<arch>.bin`、`share/resources.bin`、
-`share/model-<stream>.bin`、`slice/<s>/manifest.tsv`（三行，order 0/1/2，模型与资源 `arch=any`）、
-`slice/<s>/program.com`（与原产物逐字节相同）。
-gate：7/7 容器与同源 stream-pack 逐字节相同；三段样例七流流水线 21/21 段输出相同。
-数字：8,271,508B → 1,474,726B（**5.609×**）；其中 base 302,684 / resources 830,037 / 七模型片 342,005。
-启示：资源段占 56.3%，是最大单块 —— 按需取键比继续压模型更划算。
+L1（`slice.cx`/`check-slice.cx`）、L2（`cx0-slice.cx`/`cx0-main.cx`/`check-cx0-slice.cx`）
+与 L7（`archive/lab-loader-legacy/tools/phase-pipe.cx`/`archive/lab-loader-legacy/tools/stream-runtime.c`/
+`archive/lab-loader-legacy/tools/lab-loader/check-phase-pipe.cx`）已归档到
+[archive/lab-loader-legacy/](../../archive/lab-loader-legacy/)，对应批次退役并逐断言记去向
+（[retired-batches.tsv](../../archive/lab-loader-legacy/retired-batches.tsv)）。
 
-## L2 cx0 经典阶段单流（`cx0-slice.cx` + `cx0-main.cx`）
+分段管道现在是产品子命令 `unisacc stream STAGE`（`src/drivestream.cx`）：
+`e2 e1 e3 e4 prune lower elf tapecheck units` 每个阶段都是一个 stdin→stdout 过滤器，
+跑的是同一份包与同一套网。校验批次是 `tests/check-stream-pipe.cx`（批次 `stream-pipe`，
+与 `-o` 逐字节相同）和 `tests/check-cx-stages`/`tests/check-stages.cx`（批次 `stages`，
+分段用例 + 链式约束 + 锚点）。
 
-```
-sh ./unisacc.com tools/lab-loader/cx0-slice.cx -- NEW_OUTDIR [TARGET]
-sh ./unisacc.com tools/lab-loader/check-cx0-slice.cx      # 批次 cx0-slice-check
-```
-cx0 没有 NN 权重：manifest 用 `kind=stage-classic` 指向 base 可执行本身，**不造零 M 块的 P3**。
-gate：3 个样例与已装产品 `-cx-plan` 规范化后逐字节相同（规则见 [plan-normalize.md](plan-normalize.md)），
-模块循环两路都拒绝且诊断相同；16 项断言。
-启示：loader 合同必须用 kind 区分 NN 流与经典流，不能靠“有没有 model 行”猜。
-
+---
 ## L3 通用 boot 头（`boot-head.cx` + `boot-native.cx`）
 
 ```
@@ -94,47 +85,6 @@ utf8.com 四类输入与 oracle 一致；执行器占 99.66%，模板开销 <1ms
 ④ 前置条件:整编译器 tape 需要「43 个对象先链接成单一 tape」的能力,当前 `-S` 只处理单编译单元,
    整程序路线受 `undefined function`（forward-signature）阻塞。可行路径是先链接后 `-S z`,
    或让物化器直接吃「对象 tape 列表」。二者都不在 lab-loader 现有范围,照实记为缺口。
-
-## L7 阶段管道（`tools/phase-pipe.cx` + `tools/stream-runtime.c`）
-
-```
-sh ./unisacc.com tools/phase-pipe.cx -- ROOT SLICEDIR SOURCE_LIST OUT
-sh ./unisacc.com tools/lab-loader/check-phase-pipe.cx      # 批次 phase-pipe-single
-```
-`SLICEDIR` 是 `slice.cx` 的产物目录（要有 `slice/{e2,e1,units,e3}/program.com`）。
-`SOURCE_LIST` 每行一个源路径，**首行是 main**，顺序与驱动的 `dv_units` 相同。
-每个源各起一次 e2、e1；全部源打完包（`fr_add`）后，一次 units、一次 e3。
-末行 `PIPE_MS<TAB>e2=..<TAB>e1=..<TAB>frame=0<TAB>units=..<TAB>e3=..<TAB>total=..<TAB>sources=N`；
-任何一段非零即打印该段 stderr 并退出 1。
-
-单段也能单独跑（`program.com` 就是切片，读 stdin 写 stdout）：
-
-```
-./tools/bound 20 SLICE/e2/program.com - LABEL < SRC   > pp       # 源 -> 预处理正文
-./tools/bound 20 SLICE/e1/program.com - LABEL < pp    > tape     # 正文 -> USLATTR1+UNITOK1
-./tools/bound 20 SLICE/units/program.com - main.c < frames       # 帧组 -> UNITOK2
-./tools/bound 20 SLICE/e3/program.com - LABEL < tape             # tape -> -S 文本
-```
-第二参数是 `SOURCE_LABEL`（写进 `cli/source`，参与 e2 的行号/诊断）；`-` 表示 stdin。
-**没有第二参数时默认 `stdin.c`，`.c` 与 `.cx` 在驱动里走不同前导**，标签必须与产品一致。
-
-资源清单（`cli/*` 与 `hdr/*` 由调用方供给，不在包里）：
-
-```
-UNISA_STREAM_RESOURCES=LIST ./tools/bound 20 SLICE/e3/program.com - LABEL < tape
-```
-`LIST` 每行 `hex-key<TAB>path`，键是含前导 NUL 的资源名（`cli/source` → `00636c69…`），
-行数以 64 为上限；与产品 `UNISACC_RF_CAPTURE` 写出的 `resources.tsv` 同格式，可直接复用。
-清单项覆盖内置默认项（`cli/f1`、`cli/attributes`、`cli/source`、`cli/target`）。
-缺 `hdr/cx.h` / `hdr/cx-flat.h` 时含 `#include` 的源在 e2 具名失败；缺 `cli/includes` 时
-`.cx` 源不会自动展开 `cx.h`（产品给 `.cx` 的隐式前导就是 `cli/includes="cx.h\0"`）。
-
-阶段边界与产品一致：e1 的 stdout 前面带 `USLATTR1` 属性帧，**units 只吃剥掉该帧后的 UNITOK1 段**
-（`phase-pipe.cx` 用 `cx/runtime/attribute_frame.cx` 的 `cxaf_strip` 剥，不自己拼帧）；
-units 的输出是 `UNITOK2`，e3 直吃它。
-
-gate（批次 `phase-pipe-single`）：单源含 `#include <stdio.h>` 的 `.c` 走完整五段，
-与已装产品 `-S` 同阶段输出**全文逐字节相同**（18,767B，sha `302f6ac1…`），预算 ≤55s。
 
 ## P3 单模型替换（`p3-swap.cx`）
 

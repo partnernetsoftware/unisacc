@@ -190,41 +190,21 @@ int main(int argc, char **argv) {
     }
 
     /* H3：换 manifest 启动两类目标,头字节不变。
-       带包的 base 现场生成：先把已装 p3-package.bin 剥掉 UNIPKG1 footer（slice 只吃裸包），
-       再用本轮编出的裸 runner(mini.bin) 经 tools/lab-loader/slice.cx 打出单流容器。 */
+       带包的 base 直接用已装的 unisacc.com.dev/entry.elf(自带 UNIPKG1 尾部包),
+       不再经 slice.cx 打单流容器。两次调用都带 --version, 好让 rc/输出可比。 */
     {   char d[4400], base[4400], run[4400], direct[4400];
-        char pkg_all[4400], pkg_bare[4400], slout[4400];
-        if (snprintf(pkg_all, sizeof pkg_all, "%s/unisacc.com.dev/p3-package.bin", bh_root) >= (int)sizeof pkg_all) bh_die("path");
-        if (snprintf(pkg_bare, sizeof pkg_bare, "%s/pkg-bare.bin", out) >= (int)sizeof pkg_bare) bh_die("path");
-        if (snprintf(slout, sizeof slout, "%s/slice", out) >= (int)sizeof slout) bh_die("path");
-        if (sy_exists(slout)) cx_rmtree(slout);   /* stream-pack 要求 NEW_OUTDIR 不存在 */
-        {   /* footer: 最后 16 字节 "UNIPKG1\n" + 8 字节 extent（release-ape 写的同一种） */
-            size_t pn = 0;
-            char *pb = bh_read(pkg_all, &pn);
-            long extent = 0;
-            int j;
-            if (pn < 24 || memcmp(pb + pn - 16, "UNIPKG1\n", 8)) { free(pb); bh_die("package footer"); }
-            for (j = 7; j >= 0; j--) extent = (extent << 8) | (unsigned char)pb[pn - 8 + j];
-            if (extent <= 0 || (size_t)extent > pn - 16) { free(pb); bh_die("package footer extent"); }
-            bh_write(pkg_bare, pb, (size_t)extent, 0644);
-            free(pb);
-        }
-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/slice.cx", "--", "out-mini", pkg_bare, slout, "lnx/x86_64", 0};
-            char mo[4400];
-            if (snprintf(mo, sizeof mo, "%s/mini.bin", out) >= (int)sizeof mo) bh_die("path");
-            av[4] = mo;
-            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
-            if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("slice generation failed"); }
-            np_free(&res);
-        }
-        if (snprintf(base, sizeof base, "%s/slice/e2/program.com", slout) >= (int)sizeof base) bh_die("path");
+        char pkg_elf[4400];
+        if (snprintf(pkg_elf, sizeof pkg_elf, "%s/unisacc.com.dev/entry.elf", bh_root) >= (int)sizeof pkg_elf) bh_die("path");
+        if (sy_exists(pkg_elf) != 1) bh_die("installed entry.elf for the packaged base");
+        if (snprintf(base, sizeof base, "%s/uni-base.com", out) >= (int)sizeof base) bh_die("path");
+        bh_copy(pkg_elf, base, 0700);
         if (snprintf(d, sizeof d, "%s/case-packaged", out) >= (int)sizeof d) bh_die("path");
         if (bh_make(d, base, "uni.com", 0)) bh_die("case-packaged setup");
         if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
-        {   char *av[] = {run, 0};
+        {   char *av[] = {run, "--version", 0};
             if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
             bh_ck(res.rc == 0 && res.outn > 0, "H3a.boot-reaches-packaged-base");
-            {   char *dv[] = {base, 0};
+            {   char *dv[] = {base, "--version", 0};
                 np_result d2; if (np_run(dv, bh_root, 0, 30, &d2, why, sizeof why)) bh_die(why);
                 bh_ck(d2.rc == res.rc && d2.outn == res.outn && !memcmp(d2.out, res.out, res.outn),
                       "H3b.output-identical-to-direct");

@@ -9,7 +9,7 @@ The existing stream tests still cover Linux x86_64/O2 unless a test says otherwi
 Run each command separately from the repository root:
 
 ```sh
-tools/bound 55 sh ./unisacc.com -O0 -DUNISA_CX_CODEC -I include -iquote exec/c -b lnx/x86_64 -c -funit tools/stream-runtime.c -o out/stream-runtime-unit.o
+tools/bound 55 sh ./unisacc.com -O0 -DUNISA_CX_CODEC -I include -iquote exec/c -b lnx/x86_64 -c -funit archive/lab-loader-legacy/tools/stream-runtime.c -o out/stream-runtime-unit.o
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/codec.cx -o out/stream-codec-unit.o
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/sys/process_group.cx -o out/stream-process-unit.o
 tools/bound 55 sh ./unisacc.com -O2 -I include -iquote exec/c -b lnx/x86_64 -c -funit cx/runtime/stream_output.cx -o out/stream-output-unit.o

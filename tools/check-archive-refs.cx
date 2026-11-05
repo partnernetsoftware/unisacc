@@ -15,6 +15,26 @@
 static char out[CAP];
 static int failed, rows;
 
+/* A match at C is the archived home when the text just before it is
+   "archive/<one-level-dir>/" and that directory exists in the tree. The
+   manifest records original paths only, so the target cannot be compared
+   line by line; "the reference points at something inside archive/" is the
+   rule, and it covers every archive directory without naming them. */
+static int archived_at(long c) {
+    long d1, d0, k;
+    char dir[512];
+    sy_stat_t st;
+    if (c < 1 || out[c - 1] != '/') return 0;      /* no "dir/" right before the path */
+    d1 = c - 1;                                     /* the slash after the one-level directory */
+    d0 = d1;
+    while (d0 > 0 && out[d0 - 1] != '/') d0--;
+    if (d0 == d1 || d1 - d0 > 500) return 0;        /* empty or oversize directory name */
+    if (d0 < 8 || memcmp(out + d0 - 8, "archive/", 8)) return 0;
+    for (k = 0; k < d1 - d0; k++) dir[k] = out[d0 + k];
+    dir[d1 - d0] = 0;
+    { char full[520]; if (cx_fmt(full, sizeof full, "archive/%s", dir)) return 0;
+      return sy_stat(full, &st) == 0 && st.kind == 'd'; }
+}
 static int git(char **av) {
     char *argv[12]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
     argv[i++] = "git";
@@ -63,6 +83,10 @@ int main(void) {
                 /* ignore audit artifacts and dated notes that name every path by design */
                 int exempt = tx_prefix(f, fl, "work/", 5) || tx_prefix(f, fl, "archive/", 8) || tx_prefix(f, fl, "out/", 4) ||
                              tx_prefix(f, fl, "plans/tools-inventory-", 22) || tx_prefix(f, fl, "ujs/archive/", 12) ||
+                             tx_eqz(f, "plans/lab-loader-archive-2026-11-05.md") ||
+                             tx_eqz(f, "plans/materials-rebuild-2026-11-02.md") ||
+                             tx_eqz(f, "plans/release-0.0.43.md") ||
+                             tx_eqz(f, "tests/waivers-0.0.43.tsv") ||   /* 0.0.43 已发布版的豁免记录 */
                              tx_eqz(f, "plans/defects-c43.md") || tx_eqz(f, "plans/identity-inventory-2026-11-02.md") ||
                              tx_eqz(f, "plans/materials-inventory-2026-11-02.md") || tx_eqz(f, "plans/product-identity-2026-11-02.md") ||
                              tx_eqz(f, "plans/tools-pins-audit-2026-11-02.md") ||
@@ -70,11 +94,11 @@ int main(void) {
                              tx_eqz(f, "plans/v0.0.44.md") || tx_eqz(f, "plans/cxlibc-2026-10-30.md") ||
                              tx_eqz(f, "plans/layout-assumptions-2026-11-02.md") || tx_prefix(f, fl, "plans/w5-patches/", 17) ||
                              tx_eqz(f, "plans/kernel-context-narrow-2026-11-02.md") || tx_eqz(f, "plans/p4-frow-arity-2026-11-02.md");
-                if (!exempt) {   /* a live hit unless every occurrence on the line is the archive/<path> form */
+                if (!exempt) {   /* a live hit unless every occurrence on the line is the archive/<dir>/ form */
                     long c;
                     for (c = fe; c + pn <= le; c++) {
                         if (memcmp(out + c, p, (size_t)pn)) continue;
-                        if (c >= 21 && !memcmp(out + c - 21, "archive/chain-legacy/", 21)) continue;
+                        if (archived_at(c)) continue;
                         refd = 1; break;
                     }
                     if (refd) { for (k = 0; k < fl; k++) who[k] = f[k]; who[fl] = 0; }
