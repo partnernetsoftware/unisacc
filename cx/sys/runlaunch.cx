@@ -1,0 +1,56 @@
+#pragma unisa module runlaunch
+#pragma unisa dock
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+/* L0 sys/runlaunch: the tmpfile -run launch (pp-targets.tsv run_launch=tmpfile, the osx
+   slices). It does not use sys.proc, so a win slice carries no POSIX process code (win has
+   no fork/exec: WIN-RUN-CREATEPROCESS, 0.0.45). A private 0700 directory under TMPDIR
+   holds the image; the child runs and is waited for; file and directory go either way.
+   The child's status is returned (128+N for signal N). */
+
+/* Start PATH with ARGV and wait: its status, or -errno. Only the tmpfile slices have it. */
+static int rl_run_os(const char *path, char **argv) {
+#if defined(__APPLE__)
+    int st, pid = fork();
+    if (pid < 0) return -errno;
+    if (pid == 0) { execv(path, argv); _exit(127); }
+    while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) return -errno;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+#else
+    (void)path; (void)argv;
+    return -ENOSYS;
+#endif
+}
+
+int rl_tmpfile_exec(const unsigned char *image, long n, char **argv) {
+    const char *tmp = sy_env("TMPDIR");
+    char dir[4096], path[4200];
+    char **av;
+    int k, fd, rc;
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    rc = -EEXIST;
+    for (k = 0; k < 16 && rc == -EEXIST; k++) {
+        rc = cx_fmt(dir, sizeof dir, "%s/unisacc-run.%d.%d", tmp, (int)getpid(), (int)((sy_now_ms() + k) & 0xffffff)) ? -ENAMETOOLONG : sy_mkdir(dir, 0700);
+    }
+    if (rc) { fprintf(stderr, "unisacc: -run: cannot make a directory in TMPDIR %s (errno %d); set TMPDIR to a writable directory or write the program with -o\n", tmp, -rc); return 1; }
+    (void)cx_fmt(path, sizeof path, "%s/a.out", dir);   /* dir < 4096 bytes: fits in path */
+    for (k = 0; argv[k]; k++) {}
+    av = malloc(sizeof(char *) * (size_t)(k + 1));
+    fd = av ? sy_open_new(path, 0700) : -ENOMEM;
+    rc = fd < 0 ? fd : sy_write_all(fd, image, n);
+    if (fd >= 0 && sy_close(fd) && !rc) rc = -EIO;
+    if (!rc) rc = sy_chmod(path, 0700);
+    if (!rc) {
+        av[0] = path;
+        for (k = 1; argv[k - 1] && argv[k]; k++) av[k] = argv[k];
+        av[k] = 0;
+        fflush(stdout); fflush(stderr);
+        rc = rl_run_os(path, av);
+        if (rc < 0) fprintf(stderr, "unisacc: -run: cannot execute from TMPDIR %s (errno %d); set TMPDIR to an executable directory or write the program with -o\n", tmp, -rc);
+    } else fprintf(stderr, "unisacc: -run: cannot write the program into TMPDIR %s (errno %d); set TMPDIR to a writable directory or write the program with -o\n", tmp, -rc);
+    free(av);
+    sy_unlink(path);
+    sy_rmdir(dir);
+    return rc < 0 ? 1 : rc;
+}

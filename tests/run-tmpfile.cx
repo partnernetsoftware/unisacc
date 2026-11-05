@@ -1,51 +1,46 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
-#pragma unisa use sys.proc
 #pragma unisa use sys.env
-/* run-tmpfile.cx -- the tmpfile -run launch (src/host.cx hs_tmpfile_exec), driven directly so it
-   runs on any slice.  src/ modules are not on cxroot, so this stages src/host.cx beside a probe in
-   OUT (inside ROOT, so cxroot.tsv still resolves sys.*) and runs the probe; it runs /bin/sh as
-   `sh -c "exit 7"`:
-   1. TMPDIR=OUT/ok writable: status 7, OUT/ok empty afterwards.
-   2. TMPDIR=OUT/ro mode 0500: status 1 with the named stderr error, nothing left.
+#pragma unisa use sys.proc
+/* run-tmpfile.cx -- the tmpfile -run launch (cx/sys/runlaunch.cx rl_tmpfile_exec) on a slice that
+   is not a tmpfile slice (run_launch of exec/facts/pp-targets.tsv is tmpfile only for osx/*).
+   There it must not execute anything: its spawn helper is the -ENOSYS branch, so a slice with
+   another run_launch (lnx memfd, win none) carries no POSIX process code and never runs the image.
+   A probe staged in OUT (inside ROOT, so cxroot.tsv resolves sys.*) calls it twice:
+   1. TMPDIR=OUT/ok writable: status 1, named "cannot execute from TMPDIR ... (errno 38)", OUT/ok empty.
+   2. TMPDIR=OUT/ro mode 0500: status 1 with the named "cannot make a directory" error, nothing left.
+   The executing path is checked on osx by the candidate-native run cell.
    sh ./unisacc.com tests/run-tmpfile.cx -- ROOT OUT   prints RUN_TMPFILE<TAB>ok=2<TAB>failed=0 */
 
 static const char probe[] =
-    "#pragma unisa use sys.io\n#pragma unisa use sys.env\n#pragma unisa use sys.fs\n#pragma unisa use host\n"
+    "#pragma unisa use sys.io\n#pragma unisa use sys.env\n#pragma unisa use sys.fs\n#pragma unisa use sys.proc\n#pragma unisa use sys.runlaunch\n"
     "static int empty(const char *d) {\n"
     "    char c[512], o[64]; char *av[4]; int cut = 0; int sy_run(char **, char *, int, int *);\n"
     "    cx_fmt(c, sizeof c, \"ls -A %s\", d); av[0] = \"sh\"; av[1] = \"-c\"; av[2] = c; av[3] = 0;\n"
     "    return sy_run(av, o, sizeof o, &cut) == 0 && o[0] == 0;\n}\n"
-    "static int one(const char *d, const char *sub, int mode, int want) {\n"
-    "    size_t n = 0; unsigned char *img = (unsigned char *)cx_read(\"/bin/sh\", &n);\n"
-    "    char *av[] = {\"sh\", \"-c\", \"exit 7\", 0, 0}; char t[1024]; int rc, ok;\n"
+    "static int one(const char *d, const char *sub, int mode) {\n"
+    "    unsigned char img[16] = {0x7f, 'E', 'L', 'F'}; char *av[] = {\"x\", 0}; char t[1024]; int rc, ok;\n"
     "    cx_fmt(t, sizeof t, \"%s/%s\", d, sub); sy_mkdir(t, 0700); sy_chmod(t, mode); sy_setenv(\"TMPDIR\", t, 1);\n"
-    "    rc = img ? hs_tmpfile_exec(img, (long)n, av) : -1; sy_printf(\"case\\t%s\\trc=%d\\n\", sub, rc);\n"
-    "    ok = rc == want && empty(t); sy_chmod(t, 0700); sy_rmdir(t); return ok;\n}\n"
+    "    rc = rl_tmpfile_exec(img, (long)sizeof img, av); sy_printf(\"case\\t%s\\trc=%d\\n\", sub, rc);\n"
+    "    ok = rc == 1 && empty(t); sy_chmod(t, 0700); sy_rmdir(t); return ok;\n}\n"
     "int main(int argc, char **argv) {\n"
     "    int ok;\n"
     "    if (argc != 2) return 2;\n"
-    "    ok = one(argv[1], \"ok\", 0700, 7) + one(argv[1], \"ro\", 0500, 1);\n"
+    "    ok = one(argv[1], \"ok\", 0700) + one(argv[1], \"ro\", 0500);\n"
     "    sy_printf(\"RUN_TMPFILE\\tok=%d\\tfailed=%d\\n\", ok, 2 - ok);\n"
     "    return ok != 2;\n}\n";
 
 int main(int argc, char **argv) {
-    size_t n = 0;
-    char src[1100], com[1100], h[1100], p[1100];
-    char *host;
+    char com[1100], p[1100];
     char *av[] = {"/bin/sh", com, p, "--", 0, 0};
     int pid, rc;
     if (argc != 3) { sy_eprintf("usage: run-tmpfile.cx -- ROOT OUT\n"); return 2; }
-    if (cx_fmt(src, sizeof src, "%s/src/host.cx", argv[1]) || cx_fmt(com, sizeof com, "%s/unisacc.com", argv[1]) ||
-        cx_fmt(h, sizeof h, "%s/host.cx", argv[2]) || cx_fmt(p, sizeof p, "%s/probe.cx", argv[2])) return 2;
-    host = cx_read(src, &n);
-    if (!host) { sy_eprintf("RUN_TMPFILE\tFAIL\tread %s\n", src); return 1; }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", argv[1]) || cx_fmt(p, sizeof p, "%s/probe.cx", argv[2])) return 2;
     sy_mkdir(argv[2], 0700);
     av[4] = argv[2];
-    rc = cx_write(h, host, n) || cx_write(p, probe, sizeof probe - 1) ? -EIO : 0;
+    rc = cx_write(p, probe, sizeof probe - 1) ? -EIO : 0;
     pid = rc ? rc : sy_spawn_inherit(av, -1);
     rc = pid < 0 ? pid : sy_wait(pid, 0);
-    sy_unlink(h);
     sy_unlink(p);
     return rc != 0;
 }

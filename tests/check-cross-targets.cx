@@ -1,0 +1,84 @@
+/* tests/check-cross-targets.cx -- the multi-target product units compile for every target.
+ *
+ *   sh ./unisacc.com tests/check-cross-targets.cx [-- ROOT]
+ *
+ * A product unit that one target cannot compile breaks that target's slice, and the lnx-only
+ * object route never notices (rc2 2026-11-06: host.cx began to use sys.proc, whose fcntl calls
+ * had no win/* definition, and only the win whole-o slice failed).  For each target of
+ * exec/facts/pp-targets.tsv this compiles a one-line main together with each listed unit into a
+ * whole program (`-b TARGET -o`), the same route the osx/win slices take; every compile must be
+ * rc 0 with an output file and no "error:" line on stderr (a link error can return rc 0 without
+ * an image: UNDEF-LINK-RC0).  Units are listed in tests/cases/cross-target-units.tsv (one path per
+ * line, relative to ROOT); a unit pulls its `use` closure, so naming host.cx also covers
+ * cx/sys/hostid.cx and cx/sys/runlaunch.cx.  Before changing a product file that more than one target
+ * compiles, run this batch (tools/affected.cx selects it for src/, cx/sys/ and include/).
+ * Each compile is bounded at 55 s.  Last line CROSS_TARGETS<TAB>compiles=N<TAB>failed=K. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int failed, compiles;
+
+static void ck(int ok, const char *target, const char *unit, const char *why) {
+    compiles++;
+    if (!ok) failed++;
+    printf("%s\t%s\t%s\t%s\n", ok ? "PASS" : "FAIL", target, unit, ok ? "-" : why);
+}
+
+/* Field K (0-based, TAB separated) of the line LINE into OUT. */
+static int field(const char *line, long n, int k, char *out, int cap) {
+    long off, len;
+    if (tx_field(line, n, '\t', k, &off, &len) || len >= cap) return -1;
+    memcpy(out, line + off, (size_t)len); out[len] = 0;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], p[4400], work[4400], mainc[4600], img[4600], why[512];
+    char *targets, *units; size_t tn = 0, un = 0; long at, e;
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (!realpath(argc > a ? argv[a] : ".", root)) { fprintf(stderr, "check-cross-targets: root\n"); return 2; }
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/pp-targets.tsv", root) || !(targets = cx_read(p, &tn))) { fprintf(stderr, "check-cross-targets: cannot read %s\n", p); return 2; }
+    if (cx_fmt(p, sizeof p, "%s/tests/cases/cross-target-units.tsv", root) || !(units = cx_read(p, &un))) { fprintf(stderr, "check-cross-targets: cannot read %s\n", p); return 2; }
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/cross-targets-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) { fprintf(stderr, "check-cross-targets: mkdtemp\n"); return 2; } }
+    if (cx_fmt(mainc, sizeof mainc, "%s/main.c", work) || cx_write(mainc, "int main(void){return 0;}\n", 26)) { fprintf(stderr, "check-cross-targets: main.c\n"); return 2; }
+    if (cx_fmt(img, sizeof img, "%s/image", work)) return 2;
+    for (at = 0; at < (long)tn; at = e + 1) {
+        char os[16], arch[16], target[40];
+        long u, f;
+        for (e = at; e < (long)tn && targets[e] != '\n'; e++) {}
+        if (e == at || targets[at] == '#') continue;
+        if (field(targets + at, e - at, 0, os, sizeof os) || field(targets + at, e - at, 1, arch, sizeof arch)) continue;
+        if (cx_fmt(target, sizeof target, "%s/%s", os, arch)) return 2;
+        for (u = 0; u < (long)un; u = f + 1) {
+            char unit[512], up[4600];
+            for (f = u; f < (long)un && units[f] != '\n'; f++) {}
+            if (f == u || units[u] == '#' || f - u >= (long)sizeof unit) continue;
+            memcpy(unit, units + u, (size_t)(f - u)); unit[f - u] = 0;
+            if (cx_fmt(up, sizeof up, "%s/%s", root, unit)) return 2;
+            (void)unlink(img);
+            {   char *v[] = {"sh", "./unisacc.com", "-b", target, "-o", img, mainc, up, 0};
+                np_result r; int bad;
+                memset(&r, 0, sizeof r);
+                bad = np_run(v, root, 0, 55, &r, why, sizeof why);
+                if (bad) { ck(0, target, unit, why); continue; }
+                {   struct stat st; int made = stat(img, &st) == 0 && st.st_size > 0;
+                    int errline = r.errn && r.err && strstr(r.err, "error:") != 0;
+                    const char *msg = "no image";
+                    if (r.rc || errline) { msg = r.errn ? r.err : "nonzero rc"; }
+                    {   char line[512]; long k = 0;
+                        while (msg[k] && msg[k] != '\n' && k + 1 < (long)sizeof line) { line[k] = msg[k]; k++; }
+                        line[k] = 0;
+                        ck(r.rc == 0 && made && !errline, target, unit, line); }
+                }
+                np_free(&r);
+            }
+        }
+    }
+    (void)unlink(img); (void)unlink(mainc); (void)rmdir(work);
+    free(targets); free(units);
+    printf("CROSS_TARGETS\tcompiles=%d\tfailed=%d\n", compiles, failed);
+    return compiles > 0 && !failed ? 0 : 1;
+}

@@ -2,11 +2,9 @@
 #pragma unisa use sys.mem
 #pragma unisa use sys.dl
 #pragma unisa use sys.time
-#pragma unisa use sys.fs
-#pragma unisa use sys.proc
-#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use sys.hostid
+#pragma unisa use sys.runlaunch
 /* Host file and clock. Inherited fds stay open for the user image. */
 
 void hs_why(char *why, int cap, const char *msg) {
@@ -389,42 +387,6 @@ static unsigned long long hs_fd_argv(char **a) {
     return k;
 }
 
-/* tmpfile launch (tn_self_launch, from pp-targets.tsv): a private 0700
-   directory under TMPDIR holds the image; the child runs and is waited
-   for; file and directory go either way. The child's status is returned. */
-int hs_tmpfile_exec(const unsigned char *image, long n, char **argv) {
-    const char *tmp = sy_env("TMPDIR");
-    char dir[4096], path[4200];
-    char **av;
-    int k, fd, rc, pid;
-    if (!tmp || !tmp[0]) tmp = "/tmp";
-    rc = -EEXIST;
-    for (k = 0; k < 16 && rc == -EEXIST; k++) {
-        rc = cx_fmt(dir, sizeof dir, "%s/unisacc-run.%d.%d", tmp, (int)getpid(), (int)((hs_ns() + k) & 0xffffff)) ? -ENAMETOOLONG : sy_mkdir(dir, 0700);
-    }
-    if (rc) { fprintf(stderr, "unisacc: -run: cannot make a directory in TMPDIR %s (errno %d); set TMPDIR to a writable directory or write the program with -o\n", tmp, -rc); return 1; }
-    (void)cx_fmt(path, sizeof path, "%s/a.out", dir);   /* dir < 4096 bytes: fits in path */
-    for (k = 0; argv[k]; k++) {}
-    av = malloc(sizeof(char *) * (size_t)(k + 1));
-    fd = av ? sy_open_new(path, 0700) : -ENOMEM;
-    rc = fd < 0 ? fd : sy_write_all(fd, image, n);
-    if (fd >= 0 && sy_close(fd) && !rc) rc = -EIO;
-    if (!rc) rc = sy_chmod(path, 0700);
-    if (!rc) {
-        av[0] = path;
-        for (k = 1; argv[k - 1] && argv[k]; k++) av[k] = argv[k];
-        av[k] = 0;
-        fflush(stdout); fflush(stderr);
-        pid = sy_spawn_inherit(av, -1);
-        rc = pid < 0 ? pid : sy_wait(pid, 0);
-        if (pid < 0) fprintf(stderr, "unisacc: -run: cannot execute from TMPDIR %s (errno %d); set TMPDIR to an executable directory or write the program with -o\n", tmp, -pid);
-    } else fprintf(stderr, "unisacc: -run: cannot write the program into TMPDIR %s (errno %d); set TMPDIR to a writable directory or write the program with -o\n", tmp, -rc);
-    free(av);
-    sy_unlink(path);
-    sy_rmdir(dir);
-    return rc < 0 ? 1 : rc;
-}
-
 int hs_forward_exec(const unsigned char *image, long n, char **argv) {
     char **envp;
     long fd;
@@ -433,7 +395,7 @@ int hs_forward_exec(const unsigned char *image, long n, char **argv) {
     long done, t0;
     int noloader; int ex_ri_out(int, int, long long);
     if (!image || n < 0 || !argv) return 1;
-    if (tx_eqz(tn_self_launch(), "tmpfile")) return hs_tmpfile_exec(image, n, argv);
+    if (tx_eqz(tn_self_launch(), "tmpfile")) return rl_tmpfile_exec(image, n, argv);
     envp = argv;
     while (*envp) envp = envp + 1;
     envp = envp + 1;
