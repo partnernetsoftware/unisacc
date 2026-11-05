@@ -218,26 +218,42 @@ static void check_setpgid(void) {
 }
 
 static void check_symlink(void) {
-    const char *d = "out/cx-sys-sig", *t = "out/cx-sys-sig/t.txt", *l = "out/cx-sys-sig/l", *g = "out/cx-sys-sig/dangling";
+    char base[4600], d[4700], t[4700], l[4700], g[4700], nodir[4800];
+    const char *td = sy_env("TMPDIR");
     char a[4096], b[4096];
     sy_stat_t s;
     int fd, mk, na, nb;
-    mk = sy_mkdir("out", 0755);
+    if (!td || !td[0]) td = "/tmp";
+    if (snprintf(base, sizeof base, "%s/cx-sys-sig-XXXXXX", td) >= (int)sizeof base || !mkdtemp(base)) {
+        ck(0, "symlink-scratch-ready");
+        return;
+    }
+    /* 相对名与绝对路径两种都要覆盖：先造 base 下的相对视图（cwd 是仓根，故用绝对路径） */
+    if (snprintf(d, sizeof d, "%s", base) >= (int)sizeof d ||
+        snprintf(t, sizeof t, "%s/t.txt", base) >= (int)sizeof t ||
+        snprintf(l, sizeof l, "%s/l", base) >= (int)sizeof l ||
+        snprintf(g, sizeof g, "%s/dangling", base) >= (int)sizeof g ||
+        snprintf(nodir, sizeof nodir, "%s/no/dir/l", base) >= (int)sizeof nodir) {
+        ck(0, "symlink-scratch-ready");
+        return;
+    }
     mk = sy_mkdir(d, 0755);
     sy_unlink(l); sy_unlink(g); sy_unlink(t);
     fd = sy_open_new(t, 0644);
     ck((mk == 0 || mk == -EEXIST) && fd >= 0 && sy_write_all(fd, "t\n", 2) == 0 && sy_close(fd) == 0, "symlink-scratch-ready");
-    ck(sy_symlink("t.txt", l) == 0, "symlink-create");
+    /* 相对目标按符号链接所在目录解析，所以这里用绝对目标名保持原语义。 */
+    ck(sy_symlink(t, l) == 0, "symlink-create");
     ck(sy_lstat(l, &s) == 0 && s.kind == 'l', "symlink-lstat-kind-l");
     ck(sy_stat(l, &s) == 0 && s.kind == 'f' && s.size == 2, "symlink-stat-follows-to-file");
     na = sy_realpath(l, a, sizeof a); nb = sy_realpath(t, b, sizeof b);
     ck(na > 0 && na == nb && tx_eq(a, b, sizeof a), "symlink-realpath-resolves-to-target");
-    ck(sy_symlink("t.txt", l) == -EEXIST && sy_symlink("other", t) == -EEXIST, "symlink-existing-eexist");
-    ck(sy_symlink("", l) == -EINVAL && sy_symlink("t.txt", "") == -EINVAL && sy_symlink(0, l) == -EINVAL
-       && sy_symlink("t.txt", 0) == -EINVAL, "symlink-empty-einval");
+    ck(sy_symlink(t, l) == -EEXIST && sy_symlink("other", t) == -EEXIST, "symlink-existing-eexist");
+    ck(sy_symlink("", l) == -EINVAL && sy_symlink(t, "") == -EINVAL && sy_symlink(0, l) == -EINVAL
+       && sy_symlink(t, 0) == -EINVAL, "symlink-empty-einval");
     ck(sy_symlink("no-such-target", g) == 0 && sy_exists(g) == 1 && sy_stat(g, &s) == -ENOENT, "symlink-dangling-allowed");
-    ck(sy_symlink("t.txt", "out/cx-sys-sig/no/dir/l") == -ENOENT, "symlink-missing-dir-enoent");
+    ck(sy_symlink(t, nodir) == -ENOENT, "symlink-missing-dir-enoent");
     ck(sy_unlink(l) == 0 && sy_unlink(g) == 0 && sy_unlink(t) == 0, "symlink-cleanup");
+    sy_rmdir(d);
 }
 
 int main(int argc, char **argv) {
