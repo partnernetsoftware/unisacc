@@ -34,7 +34,7 @@ DEFLATE gzip implementation when APE_ZLIB is unset, so container construction
 needs neither a new compressor nor host zlib. Its compression bytes differ from
 the historical zlib build. No signature, publication or release is performed.
 
-`tests/package-controls.cx` damages a private copy of a kernel, requires refusal
+the archived package-controls test damages a private copy of a kernel, requires refusal
 before output creation, restores the bytes, and requires preparation to recover.
 It does not modify live generation inputs or cache functional PASS results.
 

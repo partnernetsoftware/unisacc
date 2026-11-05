@@ -86,7 +86,7 @@ Two steps of the object route are still open: the model driver's `-c -b`
 reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text
 ([candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)).
 
-`tools/product-build.cx`, `tools/hostseed-step*.cx` and `tools/selfhost-mixed.cx`
+`tools/product-build.cx`, `tools/hostseed-step*.cx` and `selfhost-mixed` (archived)
 still compile or link the archived C reference, so they cannot run. They
 retire with the switch; see the retirement table in that plan. The Python-running
 `exec/c/buildcompiler.sh` (with the Makefile's `com`, `model-com` and `comboot-*`

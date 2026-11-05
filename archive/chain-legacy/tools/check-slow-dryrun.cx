@@ -1,0 +1,150 @@
+/* check-slow-dryrun: the work-directory guard refuses anything outside out/ or tmp/.
+ * Two refusals (repo-root relative, absolute /tmp) plus the default path, all
+ * without starting a construction step.
+ *   sh ./unisacc.com tools/check-slow-dryrun.cx
+ */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define CAP (1L << 14)
+static char out[CAP];
+static int failed;
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tslow-dryrun.%s\n", ok ? "PASS" : "FAIL", n); }
+
+static char argbuf[64][256];
+
+static int run(char **av) {
+    char *argv[12]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[2048];
+    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/slow-dryrun.cx"; argv[i++] = "--";
+    /* copy each value: a synthetic system cannot reorder args safely */
+    for (int k = 0; av[k] && i < 10; k++) { long j = 0; while (av[k][j] && j < 255) { argbuf[k][j] = av[k][j]; j++; } argbuf[k][j] = 0; argv[i++] = argbuf[k]; }
+    argv[i] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while (n < CAP - 1 && (r = sy_read(ofd, out + n, CAP - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    while (sy_read(efd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    { char *a1[] = { "--steps", "7-7", "--work", "7-7", 0 };
+      int rc1 = run(a1); ck(rc1 == 4 && has("SLOW_DRYRUN_REFUSE"), "refuse-repo-root"); }
+    { char *a2[] = { "--work", "/tmp/x", "--steps", "7-7", 0 };
+      int rc2 = run(a2); ck(rc2 == 4 && has("SLOW_DRYRUN_REFUSE"), "refuse-absolute-tmp"); }
+    { char *a3[] = { "--steps", "7-7", "--work", "out/slow-dryrun-work", 0 };
+      int rc3 = run(a3); ck(rc3 == 0 && has("SLOW_DRYRUN_TIMING_ONLY"), "accepts-out"); }
+    /* The pack stage takes target ids with hyphens (lnx-arm64); a slash form
+       (lnx/arm64) makes source-package-pack die with unknown-target, which cost
+       one full gate run before it was noticed. */
+    {
+        size_t sz = 0; char *src = cx_read("tools/slow-dryrun.cx", &sz); int bad = 0;
+        if (src) {
+            static const char *want[] = { "\"lnx-arm64\"", "\"lnx-x86_64\"", "\"osx-arm64\"",
+                                          "\"osx-x86_64\"", "\"win-arm64\"", "\"win-x86_64\"", 0 };
+            int i;
+            for (i = 0; want[i]; i++)
+                if (tx_find(src, sz, want[i], tx_len(want[i], 32)) < 0) bad = 1;
+            if (tx_find(src, sz, "\"lnx/arm64\"", 12) >= 0) bad = 1;
+            free(src);
+        } else bad = 1;
+        ck(!bad, "route-ids-use-hyphens");
+    }
+    /* The pack stage verifies every model-* phase before any route, so its
+       recipes[] must be exactly the set tools/source-package-pack.cx builds --
+       compared as sets, so a model added or removed there is caught here
+       instead of failing much later with an unrelated-looking error. */
+    {
+        static char pk[64][64];
+        static int npk, nsl;
+        size_t sz1 = 0, sz2 = 0;
+        char *pack = cx_read("tools/source-package-pack.cx", &sz1);
+        char *slow = cx_read("tools/slow-dryrun.cx", &sz2);
+        int bad = 0;
+        if (!pack || !slow) bad = 1;
+        else {
+            /* pack: every `{"id",` inside the recipes[] brace pair, skipping --flags */
+            long a = tx_find(pack, (long)sz1, "static const SpModel recipes[]", 29), b;
+            if (a < 0) bad = 1;
+            else {
+                b = a;
+                while (b < (long)sz1 && pack[b] != '\n') b++;
+                while (b < (long)sz1 && (pack[b] == '\n' || pack[b] == ' ')) b++;
+                while (b < (long)sz1 && !(pack[b] == '}' && (b == 0 || pack[b - 1] == '\n'))) b++;
+                {   long k = a;
+                    while (k < b && npk < 64) {
+                        if (pack[k] == '{') {
+                            long q = k + 1;
+                            while (q < b && (pack[q] == ' ' || pack[q] == '\t' || pack[q] == '\n')) q++;
+                            if (q < b && pack[q] == '"') {
+                                long id = ++q, m = 0;
+                                while (q < b && pack[q] != '"') q++;
+                                if (id < q && q - id < 63 && pack[id] != '-') {
+                                    for (m = 0; m < q - id; m++) pk[npk][m] = pack[id + m];
+                                    pk[npk][m] = 0; npk++;
+                                }
+                                k = q;
+                            }
+                        }
+                        k++;
+                    }
+                }
+            }
+            /* slow: quoted ids inside recipes[] */
+            a = tx_find(slow, (long)sz2, "static const char *recipes[]", 28);
+            if (a < 0) bad = 1;
+            else {
+                b = a;
+                while (b < (long)sz2 && slow[b] != '}') b++;
+                nsl = 0;
+                {   long k = a;
+                    while (k < b) {
+                        if (slow[k] == '"') { nsl++; while (k < b && slow[k] != '"') k++; }
+                        k++;
+                    }
+                }
+                nsl /= 2;
+            }
+            if (npk < 8 || nsl != npk) bad = 1;
+            else {
+                /* set equality: each pack id must appear inside slow's recipes[] */
+                int i, j;
+                for (i = 0; i < npk; i++) {
+                    int found = 0;
+                    long aa = tx_find(slow, (long)sz2, "static const char *recipes[]", 28), bb = aa;
+                    char pat[80];
+                    while (bb < (long)sz2 && slow[bb] != '}') bb++;
+                    if (cx_fmt(pat, sizeof pat, "\"%s\"", pk[i])) { bad = 1; break; }
+                    for (j = aa; j + (long)tx_len(pat, 80) <= bb; j++) {
+                        if (!memcmp(slow + j, pat, (size_t)tx_len(pat, 80))) { found = 1; break; }
+                    }
+                    if (!found) { bad = 1; printf("MISSING_IN_SLOW\t%s\n", pk[i]); }
+                }
+            }
+            free(pack); free(slow);
+        }
+        ck(!bad && npk == nsl, "recipes-match-pack-table");
+        printf("SLOW_DRYRUN_RECIPES\tpack=%d\tslow=%d\n", npk, nsl);
+    }
+    /* release-build needs a git checkout inside ROOT (git rev-parse + git archive),
+       which the private root is not: step 12 must be reported as DRY_SKIP, never as
+       a silent pass and never as a failure. */
+    {
+        size_t sz = 0; char *src = cx_read("tools/slow-dryrun.cx", &sz); int bad = 0;
+        if (!src) bad = 1;
+        else {
+            if (tx_find(src, (long)sz, "DRY_SKIP", 8) < 0 || tx_find(src, (long)sz, "release-build-requires-git-checkout", 35) < 0) bad = 1;
+            /* the git-dependent path must be gone */
+            if (tx_find(src, (long)sz, "\"release-build.cx\"", 20) >= 0) bad = 1;
+            free(src);
+        }
+        ck(!bad, "step12-reports-skip");
+    }
+    printf("SLOW_DRYRUN_CHECKS\tassertions=6\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
