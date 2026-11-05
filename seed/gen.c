@@ -199,6 +199,30 @@ static const char *value_scalar_text(Value *v, char number[64]) {
 static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) {
     size_t i;
     if (!action || action->kind != JARR || !action->n) die("invalid action");
+    /* A table cell may carry ["@bytes","<text>"] -- the same tag the mapseq path expands into one
+       SBOUT per byte.  Without this the tag reached the net as a literal array (the "empty string"
+       symptom of plans/nn-nf-b-prep-2026-11-05.md).  The text keeps embedded NULs ("\u0000cli/x")
+       because a byte sequence may start with a zero, so the length comes from the parsed string. */
+    if (action->n == 2 && action->items[0].value->kind == JSTR &&
+        !strcmp(value_text(action->items[0].value), "@bytes")) {
+        Value *raw = action->items[1].value;
+        const unsigned char *u;
+        size_t len, k; char num[8];
+        if (!raw || raw->kind != JSTR) die("byte action needs a string");
+        u = (const unsigned char *)raw->s;
+        /* the parsed length, never strlen: an empty tag is a mistake in the table (it would emit no
+           bytes at all and silently shrink the image), and strlen on a NUL-prefixed text would read
+           past the zero and pick up the wrong tail. */
+        len = raw->n;
+        if (!len) die("empty byte action");
+        for (k = 0; k < len; k++) {
+            buf_char(b, '['); buf_quote(b, "SBOUT"); buf_char(b, ',');
+            snprintf(num, sizeof num, "%u", (unsigned)u[k]);
+            buf_add(b, num, strlen(num)); buf_char(b, ']');
+            if (k + 1 < len) buf_char(b, ',');
+        }
+        return;
+    }
     buf_char(b, '[');
     for (i = 0; i < action->n; i++) {
         Value *v = action->items[i].value;
