@@ -1,0 +1,57 @@
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use runtime.packagefooter
+/* tests/check-kernel-base.cx -- KERNEL-DRIFT gate (2026-11-05).
+ *   sh ./unisacc.com tests/check-kernel-base.cx -- ROOT PACKAGE
+ * Re-assembles both kernel bases from ROOT's exec/c/asm with tools/kernel-route.cx (into a
+ * fresh directory under ROOT/out) and compares each, byte for byte, with PACKAGE's
+ * \0kernel/<isa> resource.  A package whose execution kernel is not the tree's own kernel
+ * fails here, by name and with both sizes and the first differing byte.
+ * Prints PASS/FAIL lines and CHECK_KERNEL_BASE<TAB>failed=N. */
+static void *grow(void *p,size_t n){return realloc(p,n);}
+static void drop(void *p){free(p);}
+static int failed;
+static void ck(int ok,const char *what,const char *note){printf("%s\tkernel-base.%s\t%s\n",ok?"PASS":"FAIL",what,note?note:"");if(!ok)failed++;}
+int main(int argc,char **argv){
+ static const char *isa[2]={"x86_64","arm64"};
+ char root[4096],pkg[4096],out[4400],bound[4400],dir[4400];
+ /* no arguments (batch form): this checkout and its installed unisacc.com.dev/p3-package.bin */
+ if(argc==1){if(!realpath(".",root)||cx_fmt(dir,sizeof dir,"%s/unisacc.com.dev/p3-package.bin",root)||!realpath(dir,pkg))return 2;}
+ else if(argc!=3){fprintf(stderr,"usage [ROOT PACKAGE]\n");return 2;}
+ else if(!realpath(argv[1],root)||!realpath(argv[2],pkg))return 2;
+ if(cx_fmt(dir,sizeof dir,"%s/out",root)||cx_fmt(out,sizeof out,"%s/out/check-kernel-base-%d",root,(int)getpid())||cx_fmt(bound,sizeof bound,"%s/tools/bound",root))return 2;
+ if(mkdir(dir,0755)&&errno!=EEXIST)return 2;
+ { char *v[]={bound,"55","sh","unisacc.com","tools/kernel-route.cx","--",root,out,"--isa","x86_64","--isa","arm64",0};
+   np_result r={0};char why[512];
+   if(np_run(v,root,0,58,&r,why,sizeof why)||r.rc){fprintf(stderr,"kernel-route failed rc=%d %s\n",r.rc,why);return 2;}
+   np_free(&r); }
+ size_t n;char *bytes=cx_read(pkg,&n);if(!bytes||n>2147483647UL){fprintf(stderr,"cannot read %s\n",pkg);return 2;}
+ CxPackageDecode d={0};d.allocate=grow;d.release=drop;
+ { PackageFooter ft;long off=0,len=(long)n;   /* an installed p3-package.bin carries a UNIPKG1 footer; a bare "P 3/4 " package does not */
+   if(packagefooter_locate_bytes((const unsigned char *)bytes,(long)n,&ft)){off=ft.package_offset;len=ft.package_length;}
+   if(cxpk_decode(&d,(const unsigned char *)bytes+off,len)){fprintf(stderr,"package decode: %s\n",d.why);return 2;} }
+ CxPackage *p=&d.package;
+ for(int j=0;j<2;j++){
+  char kf[4600],note[256];size_t kn;char *kb;int hit=0;long nk=8+(long)strlen(isa[j]);
+  if(cx_fmt(kf,sizeof kf,"%s/%s.kernel",out,isa[j])||!(kb=cx_read(kf,&kn))){fprintf(stderr,"cannot read %s\n",kf);return 2;}
+  for(int i=0;i<p->nr;i++){
+   const unsigned char *nm=p->b+p->res[i].name;
+   if(p->res[i].n!=nk||nm[0]||memcmp(nm+1,"kernel/",7)||memcmp(nm+8,isa[j],(size_t)(nk-8)))continue;
+   hit=1;
+   if(p->res[i].codec){cx_fmt(note,sizeof note,"package resource is compressed (codec %d)",p->res[i].codec);ck(0,isa[j],note);break;}
+   { long len=p->res[i].len,k=0;const unsigned char *a=p->b+p->res[i].data;
+     while(k<len&&k<(long)kn&&a[k]==(unsigned char)kb[k])k++;
+     cx_fmt(note,sizeof note,"package=%ld rebuilt=%ld first-difference=%ld",len,(long)kn,k==len&&k==(long)kn?-1L:k);
+     ck(len==(long)kn&&k==len,isa[j],note); }
+  }
+  if(!hit)ck(0,isa[j],"package has no kernel base resource");
+  free(kb);
+ }
+ { char *rm[]={"rm","-rf",out,0};np_result r={0};char why[64];np_run(rm,root,0,10,&r,why,sizeof why);np_free(&r); }   /* rebuilt kernels are scratch */
+ printf("CHECK_KERNEL_BASE\tfailed=%d\n",failed);
+ return failed?1:0;
+}
