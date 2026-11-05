@@ -6,6 +6,17 @@
 锚点:elf/expect 与 `unisacc -o` 编 e2/a.c 的产物逐字节相同。
 一个段没有拒绝用例就记 GAP(uncovered),检查器 rc 非零,这个段不算通过。
 
+拒绝用例文件:`bad`(主用例)、`bad.trunc`、`bad.magic`、`bad.rand` 各配同名 `.err`;
+四者都必须 rc1 且 stderr 与该 `.err` 逐字节相同。
+
+## 已知边界:行尾截断
+
+`trunc-at-eol` 用例故意把输入截在**换行处**。这类输入本身就是一段语法完整的 tape 前缀,
+只是少了后面几行;`tape.text` 没有长度头也没有结束标记,段的入口状态原则上分不出来。
+检查器对它打印 `GAP` 并写明原因,**不算 PASS,也不让该段 uncovered**(该段已有真实拒绝用例)。
+要拦它得给 tape 加结束标记,那是跨所有段的格式合同,本版不做。
+截在**非换行处**的输入(`bad` / `bad.trunc`)由入口状态拒收。
+
 ## 人工核对记录(2026-11-05,已装 0.0.44:entry 29b44d17 / pkg 8a974386)
 
 | 段 | 输入 → 输出 | 人工核对要点 | 拒绝用例 |
@@ -21,4 +32,8 @@
 | tapecheck | tape route → 592B | 输出 `_start:` 文本 tape,与 `-S` 同一路由 | 垃圾输入 → `unknown opcode` |
 | units | u0.c+u1.c 两单元帧 424B → 500B | 两个单元按顺序合成一个 multi 输入 | 垃圾输入 → `malformed unit frame` |
 
-e4、prune、lower 三段遇到不合法的输入时 rc0 并继续输出,坏输入要到 elf 才被拒。这是产品缺口,不是缺用例:产品补上拒绝之后再加 `bad`。
+e4、prune、lower 三段原先遇到不合法的输入 rc0 并继续输出。现在三段的**网入口状态**会校验:
+tape 文本必须以换行结束(检查动作 XLEN + INPUSHXE + BYTE + CMPI vs 10),否则走
+`DEAD` + `REJECT not covered: malformed tape text`。改动落在
+`exec/opt/setup-result.tsv`、`exec/prune/prune-result.tsv`+`prune-byte.tsv`、
+`exec/lower/data-result.tsv`,不在驱动里写特判。

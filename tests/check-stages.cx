@@ -15,12 +15,17 @@
  *
  * Assertions, one line each:
  *   <stage> positive   rc 0 and stdout == expect
- *   <stage> reject     rc 1 and stderr == bad.err; a stage without bad prints GAP and counts as
- *                      uncovered -- an uncovered stage never passes
+ *   <stage> reject     rc 1 and stderr == <variant>.err, for bad, bad.trunc, bad.magic
+ *                      and bad.rand (each present variant is checked); a stage without
+ *                      bad prints GAP and counts as uncovered -- it never passes
  *   chain <a>-><b>     b/in == a/expect (the image pipe e2 e1 e3 sidecar prune lower elf)
+ *   chain <a>-><b>     the -O1 pipe e4 o1/prune o1/lower o1/elf
  *   anchor elf         elf/expect == PRODUCT -o of e2/a.c (the pipe ends where the product does)
- * The last line is CHECK_STAGES failed=N uncovered=M with per-stage milliseconds above it;
- * rc 1 when either is non-zero.
+ *   anchor o1-elf      o1/elf/expect == PRODUCT -O1 -o of e4/b.c
+ * trunc-at-eol is a known boundary (a cut at a newline is a complete tape prefix; tape.text
+ * has no end marker): it prints GAP with the reason and counts in known_gap, not as a pass.
+ * The last line is CHECK_STAGES failed=N uncovered=M known_gap=K with per-stage milliseconds
+ * above it; rc 1 when failed or uncovered is non-zero.
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.time
@@ -29,7 +34,10 @@
 
 static const char *cs_stage[CS_N] = {"e2", "e1", "e3", "sidecar", "e4", "prune", "lower", "elf", "tapecheck", "units"};
 static const char *cs_chain[] = {"e2", "e1", "e3", "sidecar", "prune", "lower", "elf"};
-static int cs_failed, cs_uncovered;
+/* The -O1 chain: e3(O1) -> sidecar -> e4 -> prune -> lower -> elf. e4/ already
+   runs on the run/O1 route, so the chain continues from its expect. */
+static const char *cs_chain_o1[] = {"e4", "o1/prune", "o1/lower", "o1/elf"};
+static int cs_failed, cs_uncovered, cs_known_gap;
 static char cs_prod[4400], cs_root[4400], cs_dir[4400];
 static char *cs_env[] = {"UNISA_JOBS=1", 0};
 
@@ -104,13 +112,34 @@ static void cs_one(const char *stage) {
         printf("GAP\t%s\tno reject fixture\n", stage);
         cs_uncovered++;
     } else {
-        if (cs_has(stage, "bad.args")) cs_args(stage, "bad.args", args, sizeof args);
-        if (cx_fmt(in, sizeof in, "%s/tests/stages/%s/bad", cs_root, stage) || cx_fmt(tag, sizeof tag, "%s.bad", stage)) cs_die("path");
-        rc = cs_run(stage, args, in, tag, tag);
-        berr = cs_file(stage, "bad.err", &nb);
-        { char nm[80]; cx_fmt(nm, sizeof nm, "%s.err", tag); gerr = cs_scratch(nm, &ng); }
-        cs_ck(rc == 1 && nb > 0 && cs_same(berr, nb, gerr, ng), stage, "reject");
-        free(berr); free(gerr);
+        /* bad is the primary reject; bad.trunc / bad.magic / bad.rand are extra
+           variants, each with its own <name>.err. All of them must reject with
+           exactly that stderr. */
+        static const char *variants[4] = {"bad", "bad.trunc", "bad.magic", "bad.rand"};
+        int v;
+        for (v = 0; v < 4; v++) {
+            char en[80], what[80];
+            const char *nm = variants[v];
+            if (v && !cs_has(stage, nm)) continue;
+            if (cs_has(stage, "bad.args")) cs_args(stage, "bad.args", args, sizeof args);
+            if (cx_fmt(in, sizeof in, "%s/tests/stages/%s/%s", cs_root, stage, nm) || cx_fmt(tag, sizeof tag, "%s.%s", stage, nm)) cs_die("path");
+            rc = cs_run(stage, args, in, tag, tag);
+            if (cx_fmt(en, sizeof en, "%s.err", nm)) cs_die("path");
+            berr = cs_file(stage, en, &nb);
+            { char gn[80]; cx_fmt(gn, sizeof gn, "%s.err", tag); gerr = cs_scratch(gn, &ng); }
+            if (cx_fmt(what, sizeof what, "reject-%s", nm)) cs_die("path");
+            cs_ck(rc == 1 && nb > 0 && cs_same(berr, nb, gerr, ng), stage, what);
+            free(berr); free(gerr);
+        }
+        /* trunc-at-eol is a known boundary: a cut exactly at a newline is a
+           syntactically complete tape prefix, and tape.text carries no length
+           header or end marker, so the entry state cannot tell it apart. It is
+           printed as GAP with the reason but does not make the stage
+           uncovered: the stage has real reject fixtures above. */
+        if (cs_has(stage, "trunc-at-eol")) {
+            printf("GAP\t%s\ttrunc-at-eol: tape.text has no end marker, a cut at a newline is a complete prefix\n", stage);
+            cs_known_gap++;
+        }
     }
     printf("TIME\t%s\tms=%ld\n", stage, cs_ms() - t0);
 }
@@ -123,13 +152,19 @@ int main(int argc, char **argv) {
     if (!realpath(argc > 2 + shift ? argv[2 + shift] : ".", cs_root)) cs_die("root path");
     if (cx_fmt(cs_dir, sizeof cs_dir, "%s/check-stages-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(cs_dir)) cs_die("scratch");
     for (i = 0; i < CS_N; i++) cs_one(cs_stage[i]);
-    for (i = 0; i + 1 < (int)(sizeof cs_chain / sizeof cs_chain[0]); i++) {
-        size_t na = 0, nb = 0;
-        char *a = cs_file(cs_chain[i], "expect", &na), *b = cs_file(cs_chain[i + 1], "in", &nb);
-        char what[80];
-        cx_fmt(what, sizeof what, "%s->%s", cs_chain[i], cs_chain[i + 1]);
-        cs_ck(cs_same(a, na, b, nb), "chain", what);
-        free(a); free(b);
+    {   const char **chains[2];
+        int cn[2], c, k;
+        chains[0] = cs_chain; cn[0] = (int)(sizeof cs_chain / sizeof cs_chain[0]);
+        chains[1] = cs_chain_o1; cn[1] = (int)(sizeof cs_chain_o1 / sizeof cs_chain_o1[0]);
+        for (c = 0; c < 2; c++)
+            for (k = 0; k + 1 < cn[c]; k++) {
+                size_t na = 0, nb = 0;
+                char *a = cs_file(chains[c][k], "expect", &na), *b = cs_file(chains[c][k + 1], "in", &nb);
+                char what[80];
+                cx_fmt(what, sizeof what, "%s->%s", chains[c][k], chains[c][k + 1]);
+                cs_ck(cs_same(a, na, b, nb), "chain", what);
+                free(a); free(b);
+            }
     }
     {   char cmd[9000], cwd[4400];
         char *av[4];
@@ -147,10 +182,27 @@ int main(int argc, char **argv) {
         cs_ck(r.rc == 0 && cs_same(a, na, b, nb), "anchor", "elf-equals-product-o");
         free(a); free(b);
     }
+    {   /* the -O1 chain ends where `unisacc -O1 -o` of e4/b.c ends */
+        char cmd[9000], cwd[4400];
+        char *av[4];
+        np_result r = {0};
+        char why[1024] = {0};
+        size_t na = 0, nb = 0;
+        char *a, *b;
+        if (cx_fmt(cwd, sizeof cwd, "%s/tests/stages/e4", cs_root) ||
+            cx_fmt(cmd, sizeof cmd, "exec %s -O1 -o %s/anchor-o1 b.c", cs_prod, cs_dir)) cs_die("cmd");
+        av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+        if (np_run(av, cwd, cs_env, 20, &r, why, sizeof why)) cs_die("anchor-o1 transport");
+        np_free(&r);
+        a = cs_scratch("anchor-o1", &na);
+        b = cs_file("o1/elf", "expect", &nb);
+        cs_ck(r.rc == 0 && cs_same(a, na, b, nb), "anchor", "o1-elf-equals-product-O1-o");
+        free(a); free(b);
+    }
     {   char cmd[4600];
         if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", cs_dir)) cs_die("cmd");
         if (system(cmd) != 0 || access(cs_dir, F_OK) == 0) cs_ck(0, "scratch", "removed");
     }
-    printf("CHECK_STAGES\tfailed=%d\tuncovered=%d\n", cs_failed, cs_uncovered);
+    printf("CHECK_STAGES\tfailed=%d\tuncovered=%d\tknown_gap=%d\n", cs_failed, cs_uncovered, cs_known_gap);
     return cs_failed || cs_uncovered ? 1 : 0;
 }
