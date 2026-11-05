@@ -1,0 +1,108 @@
+#pragma unisa module streamshape
+#pragma unisa use compiler.streamshape
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+/* Reject input that does not belong to a stage's declared input format
+   before the net runs, so a bad table is named instead of passing through.
+
+     ss_check(stage, in, inn, why, cap)   0 accept, 1 reject (why filled)
+
+   Stage and format names come from the generated table
+   (tools/streamshape-gen.cx over exec/pipeline/image-stages.tsv); the tape
+   opcode list comes from exec/tapecheck/shape.tsv through the same
+   generator. Nothing here is a second copy of either fact table.
+
+   Checks, per input format:
+     src.c          any byte run (an empty unit is legal)
+     pp.text        "UNIPP1" magic
+     tokens.typed   "UNITOK1" magic
+     tape.text      "USLATTRT" carrier or a first record whose opcode is on
+                    the shape table; labels are "name:" and sections are
+                    "__name:" with a trailing colon, and are accepted when
+                    the leading identifier stays within 40 bytes
+     target.text    "@target " first line
+     image.bytes    any byte run (an ELF/APE header is not required here)
+   An unknown stage accepts: the route decides, not this check. */
+
+static int sshape_put(char *out, int cap, const char *s) {
+    int i;
+    if (!out || cap <= 0) return 1;
+    i = 0;
+    if (s) while (s[i] && i + 1 < cap) { out[i] = s[i]; i = i + 1; }
+    out[i] = 0;
+    return 1;
+}
+
+/* 1 when the first whitespace-delimited word is on the opcode table. */
+static int sshape_op_known(const unsigned char *in, long inn) {
+    const char *op;
+    int i;
+    int n;
+    long len;
+    len = 0;
+    while (len < inn && in[len] != ' ' && in[len] != '\t' && in[len] != '\r' && in[len] != '\n') len++;
+    if (len <= 0 || len >= 32) return 0;
+    n = sfs_op_count();
+    for (i = 0; i < n; i++) {
+        if (sfs_op_at(i, &op)) break;
+        if (tx_len(op, 32) == len && tx_prefix((const char *)in, len, op, len)) return 1;
+    }
+    return 0;
+}
+
+/* 1 when the first record is a label ("name:" or "__name:"). */
+static int sshape_label(const unsigned char *in, long inn) {
+    long i;
+    i = 0;
+    while (i < inn && (in[i] == ' ' || in[i] == '\t')) i++;
+    if (i >= inn) return 0;
+    if (!((in[i] >= 'a' && in[i] <= 'z') || (in[i] >= 'A' && in[i] <= 'Z') || in[i] == '_' || in[i] == '.'))
+        return 0;
+    while (i < inn && in[i] != ':' && in[i] != ' ' && in[i] != '\t' && in[i] != '\n') i++;
+    return i < inn && in[i] == ':';
+}
+
+static int sshape_refuse(char *why, int cap, const char *stage, const char *fmt) {
+    char msg[160];
+    tx_snprintf(msg, 160, "reject: %s input is not %s", stage, fmt);
+    return sshape_put(why, cap, msg);
+}
+
+int ss_check(const char *stage, const unsigned char *in, long inn, char *why, int cap) {
+    const char *fmt;
+    const char *s;
+    const char *f;
+    int i;
+    int n;
+    if (why && cap > 0) why[0] = 0;
+    if (!stage || inn < 0 || (inn > 0 && !in)) return 0;
+    fmt = 0;
+    n = sfs_stage_count();
+    for (i = 0; i < n; i++) {
+        if (sfs_stage_at(i, &s, &f)) break;
+        if (tx_eqz(s, stage)) { fmt = f; break; }
+    }
+    if (!fmt) return 0;
+    if (inn == 0) return 0;    /* an empty unit is legal; emptiness is the driver's call */
+    if (tx_eqz(fmt, "src.c")) return 0;
+    if (tx_eqz(fmt, "image.bytes")) return 0;
+    if (tx_eqz(fmt, "pp.text")) {
+        if (inn < 6 || !tx_prefix((const char *)in, 6, "UNIPP1", 6)) return sshape_refuse(why, cap, stage, fmt);
+        return 0;
+    }
+    if (tx_eqz(fmt, "tokens.typed")) {
+        if (inn < 7 || !tx_prefix((const char *)in, 7, "UNITOK1", 7)) return sshape_refuse(why, cap, stage, fmt);
+        return 0;
+    }
+    if (tx_eqz(fmt, "target.text")) {
+        if (inn < 8 || !tx_prefix((const char *)in, 8, "@target ", 8)) return sshape_refuse(why, cap, stage, fmt);
+        return 0;
+    }
+    if (tx_eqz(fmt, "tape.text")) {
+        if (inn >= 8 && tx_prefix((const char *)in, 8, "USLATTRT", 8)) return 0;
+        if (sshape_label(in, inn)) return 0;
+        if (sshape_op_known(in, inn)) return 0;
+        return sshape_refuse(why, cap, stage, fmt);
+    }
+    return 0;
+}

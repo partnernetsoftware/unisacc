@@ -1,0 +1,85 @@
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use compiler.streamshape
+#pragma unisa use streamshape
+/* Unit gate for src/streamshape.cx: every stage/format pair, one accept and
+   one named reject, from the generated table alone.
+
+     sh ./unisacc.com tools/check-streamshape.cx
+     STREAMSHAPE\tcases=N\tfailed=0
+
+   The tapes below are the shapes the route's own stages emit (tape.text from
+   e4/prune/lower, target.text from lower, pp.text from e2, tokens.typed from
+   e1). A reject must name the stage and the format it expected. */
+static int failed;
+
+static void expect(const char *what, int got, int want) {
+    if (got == want) return;
+    sy_printf("STREAMSHAPE\tMISMATCH\t%s\tgot=%d\twant=%d\n", what, got, want);
+    failed = failed + 1;
+}
+
+static int refuses(const char *stage, const char *text) {
+    char why[160];
+    why[0] = 0;
+    if (ss_check(stage, (const unsigned char *)text, (long)tx_len(text, 4096), why, 160) != 1) return 0;
+    if (!tx_contains(why, tx_len(why, 160), "reject: ", 8)) return 0;
+    if (!tx_contains(why, tx_len(why, 160), stage, tx_len(stage, 32))) return 0;
+    return 1;
+}
+
+static int accepts(const char *stage, const char *text) {
+    char why[160];
+    why[0] = 0;
+    return ss_check(stage, (const unsigned char *)text, (long)tx_len(text, 4096), why, 160) == 0;
+}
+
+int main(void) {
+    const char *stage;
+    const char *format;
+    const char *tape;
+    const char *target;
+    const char *pp;
+    const char *tokens;
+    int i;
+    int n;
+    int cases;
+    char label[96];
+    tape = "_start:\n  imm r0, 7\n  ret\n";
+    target = "@target lnx/x86_64\n@data -\n_start:\n";
+    pp = "UNIPP1\0body";
+    tokens = "UNITOK1\0body";
+    cases = 0;
+    n = sfs_stage_count();
+    for (i = 0; i < n; i++) {
+        if (sfs_stage_at(i, &stage, &format)) { failed = failed + 1; break; }
+        tx_snprintf(label, 96, "%s/%s accept", stage, format);
+        if (tx_eqz(format, "src.c")) expect(label, accepts(stage, "int main(void){return 7;}\n"), 1);
+        else if (tx_eqz(format, "pp.text")) expect(label, accepts(stage, pp), 1);
+        else if (tx_eqz(format, "tokens.typed")) expect(label, accepts(stage, tokens), 1);
+        else if (tx_eqz(format, "tape.text")) expect(label, accepts(stage, tape), 1);
+        else if (tx_eqz(format, "target.text")) expect(label, accepts(stage, target), 1);
+        else expect(label, accepts(stage, "any bytes"), 1);
+        cases = cases + 1;
+        tx_snprintf(label, 96, "%s/%s reject", stage, format);
+        if (tx_eqz(format, "src.c") || tx_eqz(format, "image.bytes")) {
+            /* these two formats admit any byte run; no reject to demand */
+            continue;
+        }
+        expect(label, refuses(stage, "garbage not a table"), 1);
+        cases = cases + 1;
+    }
+    /* the four stages the matrix measures, named in the defect report */
+    expect("e4 garbage", refuses("e4", "garbage not a table"), 1);
+    expect("prune garbage", refuses("prune", "garbage not a table"), 1);
+    expect("lower garbage", refuses("lower", "garbage not a table"), 1);
+    /* e2's declared input is src.c, which admits any byte run: every
+       text file is a legal preprocessor input, so no shape reject exists. */
+    expect("e2 accepts any source", accepts("e2", "garbage not a table"), 1);
+    /* an unknown stage is the route's business, not this check's */
+    expect("unknown stage", ss_check("nope", (const unsigned char *)"garbage", 7, 0, 0), 0);
+    if (!failed) sy_printf("STREAMSHAPE\tcases=%d\tfailed=0\n", cases);
+    else sy_printf("STREAMSHAPE\tcases=%d\tfailed=%d\n", cases, failed);
+    return failed ? 1 : 0;
+}
