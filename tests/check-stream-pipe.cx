@@ -1,0 +1,210 @@
+/* check-stream-pipe.cx -- `unisacc stream STAGE` pipelines against the product.
+ *
+ *   sh ./unisacc.com tests/check-stream-pipe.cx                 # product ./unisacc.com
+ *   sh ./unisacc.com tests/check-stream-pipe.cx -- PRODUCT      # another candidate
+ *
+ * Every fixture is written into one mkdtemp scratch under $TMPDIR (default /tmp)
+ * and removed at the end; nothing is read from or written to out/. The product
+ * is run with UNISA_JOBS=1 so the reference takes the single-stream route.
+ *
+ * Assertions (every one a byte compare or an exact rc, no tolerance):
+ *   A  PRODUCT knows `stream` (usage rc 2).
+ *   B  plain.c   -o  == e2|e1|e3|sidecar|prune|lower|elf   (run route then image route)
+ *   C  hello.c   -o  == the same pipe (stdio source; no host slot after e3)
+ *   D  a.c b.c   -o  == per-source e2|e1 (unit route) | frame | units|e3|sidecar | prune|lower|elf
+ *   E  65 sources -S == per-source e2|e1 | frame | units|e3|tapecheck   (multi tape route)
+ *   F  bad.c: product rc 1 and stderr == the e3 stage's stderr; the next stage on an
+ *      empty pipe is rc 1 with the one-line "no input".
+ *   G  the scratch is gone.
+ * Prints PASS/FAIL per assertion and a last line CHECK_STREAM_PIPE failed=N; rc 1 on any FAIL.
+ */
+#pragma unisa use cxlib.netpack
+
+#define SP_N65 65
+
+static char *sp_cat(char *d, const char *s) { char *p = d + strlen(d); while (*s) *p++ = *s++; *p = 0; return d; }
+static int sp_failed;
+static char sp_prod[4400];
+static char sp_dir[4400];
+static char *sp_env[] = {"UNISA_JOBS=1", 0};
+
+static void sp_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) sp_failed++;
+}
+static void sp_die(const char *s) { fprintf(stderr, "check-stream-pipe: %s errno=%d\n", s, errno); exit(2); }
+static void sp_path(char *o, size_t cap, const char *rel) {
+    if (cx_fmt(o, cap, "%s/%s", sp_dir, rel)) sp_die("path");
+}
+static void sp_put(const char *rel, const char *s) {
+    char p[4400];
+    sp_path(p, sizeof p, rel);
+    if (cx_write(p, s, strlen(s))) sp_die(rel);
+}
+/* Run one shell line in the scratch, 20 s bound. Returns the rc (or -1 on transport);
+   stderr is kept in ERR when the caller wants it. */
+static int sp_sh(const char *cmd, char **err, size_t *errn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    t = np_run(av, sp_dir, sp_env, 20, &r, why, sizeof why);
+    if (t) { fprintf(stderr, "check-stream-pipe: transport %s: %s\n", why, cmd); np_free(&r); return -1; }
+    if (err) { *err = r.err; *errn = r.errn; r.err = 0; }
+    np_free(&r);
+    return r.rc;
+}
+static int sp_same(const char *a, const char *b) {
+    char pa[4400], pb[4400];
+    size_t na, nb;
+    char *ba, *bb;
+    int same;
+    sp_path(pa, sizeof pa, a);
+    sp_path(pb, sizeof pb, b);
+    ba = cx_read(pa, &na);
+    bb = cx_read(pb, &nb);
+    same = ba && bb && na > 0 && na == nb && !memcmp(ba, bb, na);
+    free(ba);
+    free(bb);
+    return same;
+}
+/* One stage as a filter: PROD stream STAGE ARGS < IN > OUT. */
+static int sp_stage(const char *stage, const char *args, const char *in, const char *out, char **err, size_t *errn) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "exec %s stream %s %s < %s > %s", sp_prod, stage, args, in, out)) sp_die("cmd");
+    return sp_sh(cmd, err, errn);
+}
+/* The whole single-source image pipe for SRC into OUT; rc of the last stage, or
+   the first non-zero one. STDERR of the e3 stage goes to E3ERR when asked. */
+static int sp_image_pipe(const char *src, const char *out, const char *tag, char **e3err, size_t *e3n) {
+    char a[600], f[8][600];
+    int k, rc;
+    const char *run = "--route lnx/x86_64/run/O0 --res run-forward --source";
+    const char *img = "--route lnx/x86_64/image/O0 --source";
+    for (k = 0; k < 8; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
+    if (cx_fmt(a, sizeof a, "%s %s", run, src)) sp_die("args");
+    if ((rc = sp_stage("e2", a, src, f[0], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("e1", a, f[0], f[1], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("e3", a, f[1], f[2], e3err, e3n)) != 0) return rc;
+    if ((rc = sp_stage("sidecar", "", f[2], f[3], 0, 0)) != 0) return rc;
+    if (cx_fmt(a, sizeof a, "%s %s", img, src)) sp_die("args");
+    if ((rc = sp_stage("prune", a, f[3], f[4], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("lower", a, f[4], f[5], 0, 0)) != 0) return rc;
+    return sp_stage("elf", sp_cat(a, " --raw"), f[5], out, 0, 0);
+}
+/* Per-source e2|e1 on the unit route, then frame. INS collects the --in list. */
+static int sp_units(const char **srcs, int n, const char *frame) {
+    char a[600], in1[600], in2[600];
+    char *cmd;
+    int j, rc;
+    cmd = malloc(200 + (size_t)n * 1300);
+    if (!cmd) sp_die("alloc");
+    if (cx_fmt(cmd, 200 + (size_t)n * 1300, "exec %s stream frame", sp_prod)) sp_die("cmd");
+    for (j = 0; j < n; j++) {
+        if (cx_fmt(a, sizeof a, "--route lnx/x86_64/unit --unit %d --source %s", j, srcs[j]) ||
+            cx_fmt(in1, sizeof in1, "%s.u2", srcs[j]) || cx_fmt(in2, sizeof in2, "%s.u1", srcs[j])) sp_die("args");
+        if ((rc = sp_stage("e2", a, srcs[j], in1, 0, 0)) != 0 || (rc = sp_stage("e1", a, in1, in2, 0, 0)) != 0) { free(cmd); return rc; }
+        sp_cat(cmd, " --in "); sp_cat(cmd, srcs[j]); sp_cat(cmd, "="); sp_cat(cmd, in2);
+    }
+    sp_cat(cmd, " > "); sp_cat(cmd, frame);
+    rc = sp_sh(cmd, 0, 0);
+    free(cmd);
+    return rc;
+}
+static int sp_multi_image(const char *frame, const char *first, const char *out, const char *tag) {
+    char a[600], f[6][600];
+    int k, rc;
+    for (k = 0; k < 6; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/run/O0 --res run-forward --source %s", first)) sp_die("args");
+    if ((rc = sp_stage("units", a, frame, f[0], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("e3", a, f[0], f[1], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("sidecar", "", f[1], f[2], 0, 0)) != 0) return rc;
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/image/O0 --source %s", first)) sp_die("args");
+    if ((rc = sp_stage("prune", a, f[2], f[3], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("lower", a, f[3], f[4], 0, 0)) != 0) return rc;
+    return sp_stage("elf", sp_cat(a, " --raw"), f[4], out, 0, 0);
+}
+static int sp_multi_tape(const char *frame, const char *first, const char *out, const char *tag) {
+    char a[600], f[3][600];
+    int k, rc;
+    for (k = 0; k < 3; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/tape/O0 --source %s", first)) sp_die("args");
+    if ((rc = sp_stage("units", a, frame, f[0], 0, 0)) != 0) return rc;
+    if ((rc = sp_stage("e3", a, f[0], f[1], 0, 0)) != 0) return rc;
+    return sp_stage("tapecheck", sp_cat(a, " --raw"), f[1], out, 0, 0);
+}
+static int sp_ref(const char *flags, const char *out, const char *srcs, char **err, size_t *errn) {
+    char cmd[12000];
+    if (cx_fmt(cmd, sizeof cmd, "exec %s %s %s %s", sp_prod, flags, out, srcs)) sp_die("cmd");
+    return sp_sh(cmd, err, errn);
+}
+
+int main(int argc, char **argv) {
+    static const char *s65[SP_N65];
+    static char names[SP_N65][16];
+    static char list65[SP_N65 * 16];
+    const char *two[2] = {"a.c", "b.c"};
+    const char *tmp = getenv("TMPDIR");
+    char *e_ref = 0, *e_pipe = 0;
+    size_t n_ref = 0, n_pipe = 0;
+    int i, rc, rc2, shift;
+    char line[200];
+    shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0;
+    if (!realpath(argc > 1 + shift ? argv[1 + shift] : "./unisacc.com", sp_prod)) sp_die("product path");
+    if (cx_fmt(sp_dir, sizeof sp_dir, "%s/stream-pipe-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(sp_dir)) sp_die("scratch");
+    sp_put("plain.c", "int f(int x){return x*2;}\nint main(void){return f(21)-42;}\n");
+    sp_put("hello.c", "#include <stdio.h>\nint main(void){printf(\"hi %d\\n\",42);return 0;}\n");
+    sp_put("a.c", "int g(int);\nint main(void){return g(2)-4;}\n");
+    sp_put("b.c", "int g(int x){return x+x;}\n");
+    sp_put("bad.c", "int main(void){return 1\n");
+    list65[0] = 0;
+    for (i = 0; i < SP_N65; i++) {
+        if (cx_fmt(names[i], 16, i == 0 ? "m0.c" : "u%d.c", i)) sp_die("name");
+        s65[i] = names[i];
+        if (i == 0) sp_put(names[i], "int f1(int);\nint main(void){return f1(1)-65;}\n");
+        else {
+            if (i < SP_N65 - 1) cx_fmt(line, sizeof line, "int f%d(int);\nint f%d(int x){return f%d(x+1);}\n", i + 1, i, i + 1);
+            else cx_fmt(line, sizeof line, "int f%d(int x){return x;}\n", i);
+            sp_put(names[i], line);
+        }
+        sp_cat(list65, names[i]); sp_cat(list65, " ");
+    }
+    /* A: the product has the subcommand (usage is rc 2, not "cannot open stream"). */
+    sp_ck(sp_stage("", "", "/dev/null", "/dev/null", 0, 0) == 2, "A stream-subcommand");
+    /* B, C: single source -o. */
+    rc = sp_ref("-o", "plain.ref", "plain.c", 0, 0);
+    rc2 = sp_image_pipe("plain.c", "plain.pipe", "p", 0, 0);
+    sp_ck(rc == 0 && rc2 == 0 && sp_same("plain.ref", "plain.pipe"), "B plain-image-pipe-cmp");
+    rc = sp_ref("-o", "hello.ref", "hello.c", 0, 0);
+    rc2 = sp_image_pipe("hello.c", "hello.pipe", "h", 0, 0);
+    sp_ck(rc == 0 && rc2 == 0 && sp_same("hello.ref", "hello.pipe"), "C hello-stdio-image-pipe-cmp");
+    /* D: two sources -o through frame and units. */
+    rc = sp_ref("-o", "ab.ref", "a.c b.c", 0, 0);
+    rc2 = sp_units(two, 2, "ab.frame");
+    if (rc2 == 0) rc2 = sp_multi_image("ab.frame", "a.c", "ab.pipe", "m");
+    sp_ck(rc == 0 && rc2 == 0 && sp_same("ab.ref", "ab.pipe"), "D two-source-image-pipe-cmp");
+    /* E: 65 sources -S. */
+    rc = sp_ref("-S -o", "s65.ref", list65, 0, 0);
+    rc2 = sp_units(s65, SP_N65, "s65.frame");
+    if (rc2 == 0) rc2 = sp_multi_tape("s65.frame", "m0.c", "s65.pipe", "t");
+    sp_ck(rc == 0 && rc2 == 0 && sp_same("s65.ref", "s65.pipe"), "E 65-source-tape-pipe-cmp");
+    /* F: a reject stops at e3 with the product's diagnostic; the next stage reports the empty pipe. */
+    rc = sp_ref("-o", "bad.ref", "bad.c", &e_ref, &n_ref);
+    rc2 = sp_image_pipe("bad.c", "bad.pipe", "b", &e_pipe, &n_pipe);
+    sp_ck(rc == 1 && rc2 == 1 && n_ref > 0 && n_ref == n_pipe && !memcmp(e_ref, e_pipe, n_ref), "F reject-stderr-and-rc");
+    free(e_pipe); e_pipe = 0;
+    rc2 = sp_stage("sidecar", "", "/dev/null", "/dev/null", &e_pipe, &n_pipe);
+    sp_ck(rc2 == 1 && n_pipe > 0 && !memcmp(e_pipe, "unisacc: stream: sidecar: no input\n", n_pipe), "F empty-pipe-next-stage");
+    free(e_ref); free(e_pipe);
+    /* G: no residue. */
+    {   char cmd[4600];
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", sp_dir)) sp_die("cmd");
+        rc = sp_sh(cmd, 0, 0);
+        sp_ck(rc == 0 && access(sp_dir, F_OK) != 0, "G scratch-removed");
+    }
+    printf("CHECK_STREAM_PIPE\tfailed=%d\n", sp_failed);
+    if (sp_failed) return 1;
+    puts("STREAM_PIPE");
+    return 0;
+}

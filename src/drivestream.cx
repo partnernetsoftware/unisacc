@@ -1,0 +1,406 @@
+/* `unisacc stream STAGE`: one package stage as a filter, stdin -> stdout.
+   The stage runs through the same st_span the compile route uses, with the
+   same package, models and \0cli/* resources, so a shell pipeline of stages
+   is the segmented compiler and nothing else runs the nets.
+
+     unisacc stream STAGE [--target T] [--route R] [--source LABEL] [--unit N]
+                          [--level N] [--multi] [--models PKG]
+                          [--res NAME[=FILE]]... [--raw] < in > out
+     unisacc stream frame --in LABEL=FILE...         (multi-source framing)
+     unisacc stream sidecar                          (drop the USLFW1 side-car)
+
+   STAGE is a package stage name (e2 e1 e3 e4 prune lower elf tapecheck
+   units). The attribute table st_span keeps between stages travels in the
+   byte stream: a USLATTR1 frame on input is stripped under --unit, and a
+   non-empty table leaves as a USLATTRT carrier (magic, LE32 length, table,
+   payload) unless --raw. Diagnostics and rejects print as in a compile. */
+#pragma unisa module drivestream
+#pragma unisa use driver.input
+#pragma unisa use stages
+#pragma unisa use runtime.attribute_frame
+#pragma unisa use compiler.frames
+#pragma unisa use compiler.fwdsig
+#pragma unisa use compiler.cxmod
+#pragma unisa use driveutil
+#pragma unisa use host
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *ds_stage;
+static const char *ds_tgt = "lnx/x86_64";
+static const char *ds_route;
+static const char *ds_src = "stdin.c";
+static const char *ds_models;
+static const char *ds_argv0;
+static const char *ds_in[DV_MAXU];
+static int ds_inn;
+static unsigned ds_unit;
+static int ds_level;
+static int ds_multi;
+static int ds_raw;
+static char ds_routeb[96];
+static unsigned char ds_one = 1;
+static char ds_reskey[8][40];
+static unsigned char *ds_resb[8];
+static long ds_resn[8];
+static int ds_resc;
+static unsigned char *ds_incdir;
+static long ds_incdir_n;
+static unsigned char *ds_quotedir;
+static long ds_quotedir_n;
+static unsigned char *ds_errlim;
+static long ds_errlim_n;
+
+static int ds_usage(void) {
+    sy_eprintf("usage: unisacc stream STAGE [--target T] [--route R] [--source LABEL] [--unit N] [--level N] [--multi] [--models PKG] [--res NAME[=FILE]]... [--raw] < in > out\n"
+               "       unisacc stream frame --in LABEL=FILE...\n"
+               "       unisacc stream sidecar < e3-out > tape\n");
+    return 2;
+}
+
+static int ds_cat(const char *s) {
+    long at;
+    long n;
+    at = tx_len(ds_routeb, 96);
+    n = tx_len(s, 96);
+    if (at < 0 || n < 0 || at + n + 1 > 96) return 1;
+    return tx_copy(ds_routeb + at, 96 - at, s, n);
+}
+
+static void *ds_grow(void *p, size_t n) { return mm_grow(p, (long)n); }
+
+static int ds_num(const char *s, long *v) {
+    long n;
+    int i;
+    if (!s || !s[0]) return 1;
+    n = 0;
+    i = 0;
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9' || n > 100000000L) return 1;
+        n = n * 10 + (s[i] - '0');
+        i = i + 1;
+    }
+    *v = n;
+    return 0;
+}
+
+static int ds_read(const char *path, unsigned char **b, long *n) {
+    char why[128];
+    int rc;
+    rc = cxi_read(path, b, n, why, 128);
+    if (rc) {
+        sy_eprintf("unisacc: stream: cannot read %s: %s\n", path, why);
+        return 1;
+    }
+    return 0;
+}
+
+/* --res NAME[=FILE]: NAME is the \0cli/ key tail. A bare NAME publishes the
+   single byte 1 (object, funit, nostdinc, run-forward, ccw). include-dir,
+   quote-dir and error-limit go through st_dirs; the rest through st_extra_put. */
+static int ds_res(const char *spec) {
+    long eq;
+    long n;
+    unsigned char *b;
+    long bn;
+    char *key;
+    n = tx_len(spec, 4096);
+    if (n <= 0) return 1;
+    eq = tx_chr(spec, n, '=');
+    if (eq == 0 || eq >= 36 || (eq < 0 && n >= 36)) return 1;
+    if (eq < 0) {
+        b = &ds_one;
+        bn = 1;
+    } else if (ds_read(spec + eq + 1, &b, &bn)) return 1;
+    key = ds_reskey[ds_resc < 8 ? ds_resc : 0];
+    key[0] = 0;
+    if (tx_copy(key + 1, 39, "cli/", 4) || tx_copy(key + 5, 35, spec, eq < 0 ? n : eq)) return 1;
+    if (tx_eqz(key + 5, "include-dir")) { ds_incdir = b; ds_incdir_n = bn; return 0; }
+    if (tx_eqz(key + 5, "quote-dir")) { ds_quotedir = b; ds_quotedir_n = bn; return 0; }
+    if (tx_eqz(key + 5, "error-limit")) { ds_errlim = b; ds_errlim_n = bn; return 0; }
+    if (ds_resc >= 8 || bn > 2147483647L) return 1;
+    ds_resb[ds_resc] = b;
+    ds_resn[ds_resc] = bn;
+    ds_resc = ds_resc + 1;
+    return 0;
+}
+
+static int ds_args(int argc, char **argv) {
+    int i;
+    long v;
+    if (argc < 3) return 1;
+    ds_stage = argv[2];
+    i = 3;
+    while (i < argc) {
+        const char *a;
+        const char *val;
+        a = argv[i];
+        val = i + 1 < argc ? argv[i + 1] : 0;
+        if (tx_eqz(a, "--raw")) { ds_raw = 1; i = i + 1; continue; }
+        if (tx_eqz(a, "--multi")) { ds_multi = 1; i = i + 1; continue; }
+        if (!val) return 1;
+        if (tx_eqz(a, "--target")) ds_tgt = val;
+        else if (tx_eqz(a, "--route")) ds_route = val;
+        else if (tx_eqz(a, "--source")) ds_src = val;
+        else if (tx_eqz(a, "--models")) ds_models = val;
+        else if (tx_eqz(a, "--unit")) { if (ds_num(val, &v) || v >= DV_MAXU) return 1; ds_unit = (unsigned)v; }
+        else if (tx_eqz(a, "--level")) { if (ds_num(val, &v) || v > 3) return 1; ds_level = (int)v; }
+        else if (tx_eqz(a, "--res")) { if (ds_res(val)) return 1; }
+        else if (tx_eqz(a, "--in")) { if (ds_inn >= DV_MAXU) return 1; ds_in[ds_inn] = val; ds_inn = ds_inn + 1; }
+        else return 1;
+        i = i + 2;
+    }
+    if (ds_route) return 0;
+    /* The compile route for an image at this level; the unit route for the
+       per-source stages of a multi-source compile. */
+    ds_route = ds_routeb;
+    if (ds_multi && (tx_eqz(ds_stage, "e2") || tx_eqz(ds_stage, "e1")))
+        return ds_cat(ds_tgt) || ds_cat("/unit");
+    return ds_cat(ds_tgt) || ds_cat(ds_multi ? "/multi/image/O" : "/image/O") || ds_cat(ds_level == 0 ? "0" : ds_level == 1 ? "1" : ds_level == 2 ? "2" : "3");
+}
+
+static long ds_le32(const unsigned char *b) {
+    return (long)b[0] | ((long)b[1] << 8) | ((long)b[2] << 16) | ((long)b[3] << 24);
+}
+
+/* Take the attribute table off the front of a stage input: a USLATTRT carrier
+   is the table itself, a USLATTR1 frame is stripped under UNIT. The table
+   lands in st_span's slot through st_attr_exchange. */
+static int ds_attr_in(unsigned char **b, long *n, unsigned unit) {
+    unsigned char *tab;
+    long tn;
+    long tc;
+    int ar;
+    tab = 0;
+    tn = 0;
+    tc = 0;
+    if (*n >= 12 && mm_same(*b, "USLATTRT", 8)) {
+        tn = ds_le32(*b + 8);
+        if (tn < 0 || tn > *n - 12) return 1;
+        tc = tn ? tn : 1;
+        tab = mm_alloc(tc);
+        if (!tab) return 1;
+        if (tn && mm_copy(tab, tc, *b + 12, tn)) return 1;
+        if (mm_move(*b, *n, *b + 12 + tn, *n - 12 - tn)) return 1;
+        *n = *n - 12 - tn;
+    } else {
+        ar = cxaf_strip(&tab, &tn, &tc, *b, n, unit, ds_grow);
+        if (ar != 0 && ar != 1) return 1;
+    }
+    if (st_attr_reset()) return 1;
+    return st_attr_exchange(&tab, &tn, &tc);
+}
+
+/* Write the table carrier (when the table is non-empty and --raw is off)
+   and then the payload to stdout. */
+static int ds_out(const unsigned char *b, long n) {
+    unsigned char *tab;
+    long tn;
+    long tc;
+    unsigned char head[12];
+    int k;
+    tab = 0;
+    tn = 0;
+    tc = 0;
+    if (st_attr_exchange(&tab, &tn, &tc)) return 1;
+    if (tn > 0 && !ds_raw) {
+        mm_copy(head, 12, "USLATTRT", 8);
+        k = 0;
+        while (k < 4) { head[8 + k] = (unsigned char)((tn >> (8 * k)) & 255); k = k + 1; }
+        if (sy_write_all(1, head, 12) || sy_write_all(1, tab, tn)) return 1;
+    }
+    mm_free(tab);
+    if (n > 0 && sy_write_all(1, b, n)) return 1;
+    return 0;
+}
+
+/* Append the records of a USLATTRT carrier at the front of *B to the table
+   (LE32 count, nine-byte records already carrying their unit), then drop
+   the carrier from the input. Returns 1 as cxaf_strip does for a commit. */
+static int ds_tab_add(unsigned char **tab, long *tn, long *tc, unsigned char **b, long *n) {
+    long len;
+    long recs;
+    long old;
+    int k;
+    len = ds_le32(*b + 8);
+    if (len < 4 || len > *n - 12 || (len - 4) % 9) return 2;
+    recs = (len - 4) / 9;
+    old = *tn >= 4 ? ds_le32(*tab) : 0;
+    if (*tn == 0 && fr_need(tab, tn, tc, 4)) return 6;
+    if (*tn == 0) { mm_fill(*tab, *tc, 0, 4); *tn = 4; }
+    if (fr_need(tab, tn, tc, len - 4)) return 6;
+    if (recs > 0 && mm_copy(*tab + *tn, *tc - *tn, *b + 16, len - 4)) return 5;
+    *tn = *tn + len - 4;
+    k = 0;
+    while (k < 4) { (*tab)[k] = (unsigned char)(((old + recs) >> (8 * k)) & 255); k = k + 1; }
+    if (mm_move(*b, *n, *b + 12 + len, *n - 12 - len)) return 5;
+    *n = *n - 12 - len;
+    return 1;
+}
+
+/* frame: each --in LABEL=FILE is one source's e1 output. Its attribute frame
+   is stripped under the source's ordinal, exactly as dv_units does, and the
+   tapes are framed with fr_add. */
+static int ds_frame(void) {
+    unsigned char *frame;
+    long fn;
+    long fcap;
+    unsigned char *tab;
+    long tn;
+    long tc;
+    int j;
+    frame = 0;
+    fn = 0;
+    fcap = 0;
+    tab = 0;
+    tn = 0;
+    tc = 0;
+    if (ds_inn < 1) return ds_usage();
+    j = 0;
+    while (j < ds_inn) {
+        unsigned char *cur;
+        long curn;
+        long eq;
+        long ln;
+        int ar;
+        ln = tx_len(ds_in[j], 4096);
+        eq = ln > 0 ? tx_chr(ds_in[j], ln, '=') : -1;
+        if (eq <= 0) return ds_usage();
+        if (ds_read(ds_in[j] + eq + 1, &cur, &curn)) return 1;
+        if (curn >= 12 && mm_same(cur, "USLATTRT", 8)) ar = ds_tab_add(&tab, &tn, &tc, &cur, &curn);
+        else ar = cxaf_strip(&tab, &tn, &tc, cur, &curn, (unsigned)j, ds_grow);
+        if ((ar != 0 && ar != 1) || fr_add(&frame, &fn, &fcap, ds_in[j], eq, cur, curn)) {
+            sy_eprintf("unisacc: stream: frame: %s\n", ar != 0 && ar != 1 ? "attribute frame" : "framing");
+            return 1;
+        }
+        mm_free(cur);
+        j = j + 1;
+    }
+    if (st_attr_reset() || st_attr_exchange(&tab, &tn, &tc)) return 1;
+    return ds_out(frame, fn);
+}
+
+/* sidecar: an e3 output produced under \0cli/run-forward carries the USLFW1
+   side-car (tape length, host slot count, ccw count, tape, slots). The pipe
+   continues with the bare tape only when there is no host slot; a slot needs
+   the forwarding-stub pass, which is not a stage. */
+static int ds_sidecar(unsigned char *b, long n) {
+    unsigned long long at;
+    unsigned long long tl;
+    unsigned long long cnt;
+    unsigned long long ccwc;
+    unsigned long long un;
+    un = (unsigned long long)n;
+    if (fw_side_head(b, un)) {
+        sy_eprintf("unisacc: model driver: forwarding side-car missing\n");
+        return 1;
+    }
+    at = 7;
+    if (us_fw_u64(b, un, &at, &tl) || us_fw_u64(b, un, &at, &cnt) || us_fw_u64(b, un, &at, &ccwc) ||
+        fw_side_bad(ccwc, tl, un, at) || tl > 2147483647ULL) {
+        sy_eprintf("unisacc: model driver: forwarding side-car malformed\n");
+        return 1;
+    }
+    if (cnt) {
+        sy_eprintf("unisacc: stream: sidecar: %llu host slot(s) need the forwarding-stub pass; not a pipe stage\n", cnt);
+        return 1;
+    }
+    return ds_out(b + at, (long)tl);
+}
+
+static int ds_stage_run(unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
+    char cont[512];
+    char preason[128];
+    unsigned char *pkg;
+    long pkgn;
+    int rc;
+    int k;
+    int pm_open(const unsigned char *, long, char *, int);
+    int pm_close(void);
+    int ex_ri_arm(const char *, int, const unsigned char *, long);
+    int ex_touch(void);
+    int bd_touch(void);
+    preason[0] = 0;
+    if (sy_setenv("UNISA_CONTAINER", ds_models ? ds_models : "", ds_models ? 1 : 0)) return 1;
+    if (hs_container(cont, 512, ds_argv0, preason, 128)) {
+        sy_eprintf("unisacc: model driver: package %s\n", preason[0] ? preason : "cannot open");
+        return 1;
+    }
+    if ((rc = ex_ri_arm(ds_route, 0, in, inn)) != 0) return rc;
+    if (ex_touch() || bd_touch() || st_touch()) {
+        sy_eprintf("unisacc: model driver: stages\n");
+        return 1;
+    }
+    pkg = 0;
+    pkgn = 0;
+    if (hs_read(cont, &pkg, &pkgn, preason, 128)) {
+        sy_eprintf("unisacc: model driver: package cannot open %s; set UNISA_CONTAINER=/path/to/unisacc.com\n", cont);
+        return 1;
+    }
+    if (pm_open(pkg, pkgn, preason, 128)) {
+        mm_free(pkg);
+        sy_eprintf("unisacc: model driver: %s\n", preason[0] ? preason : "package");
+        return 1;
+    }
+    st_extra_reset();
+    k = 0;
+    while (k < ds_resc) {
+        if (st_extra_put(ds_reskey[k], (int)tx_len(ds_reskey[k] + 1, 40) + 1, ds_resb[k], (int)ds_resn[k])) k = ds_resc + 1;
+        else k = k + 1;
+    }
+    if (k > ds_resc || st_dirs(ds_incdir, (int)ds_incdir_n, ds_quotedir, (int)ds_quotedir_n, ds_errlim, (int)ds_errlim_n)) {
+        pm_close();
+        mm_free(pkg);
+        sy_eprintf("unisacc: model driver: cli\n");
+        return 1;
+    }
+    rc = st_span(ds_route, ds_tgt, ds_src, dv_cx(ds_src), ds_unit, ds_stage, ds_stage, in, inn, out, outn, why, cap);
+    pm_close();
+    mm_free(pkg);
+    return rc;
+}
+
+int dv_stream(int argc, char **argv) {
+    unsigned char *in;
+    unsigned char *out;
+    long inn;
+    long outn;
+    int pr;
+    char why[128];
+    ds_argv0 = argv[0];
+    if (ds_args(argc, argv)) return ds_usage();
+    if (tx_eqz(ds_stage, "frame")) return ds_frame();
+    in = 0;
+    inn = 0;
+    if (ds_read("-", &in, &inn)) return 1;
+    /* An upstream stage that refused leaves nothing on the pipe; only e2
+       (a source file) may legitimately be empty. Its refusal is already on stderr. */
+    if (inn == 0 && !tx_eqz(ds_stage, "e2")) {
+        sy_eprintf("unisacc: stream: %s: no input\n", ds_stage);
+        return 1;
+    }
+    if (ds_attr_in(&in, &inn, ds_unit)) {
+        sy_eprintf("unisacc: model driver: malformed USLATTR1 side-car\n");
+        return 1;
+    }
+    if (tx_eqz(ds_stage, "sidecar")) return ds_sidecar(in, inn);
+    out = 0;
+    outn = 0;
+    why[0] = 0;
+    pr = ds_stage_run(in, inn, &out, &outn, why, 128);
+    if (pr == 3) {
+        sy_eprintf("route=%s\nNOT_IMPLEMENTED %s\n", ds_route, ds_stage);
+        return 2;
+    }
+    if (pr) {
+        if (why[0]) sy_eprintf("unisacc: model driver: %s\n", why);
+        return pr == 2 ? 2 : 1;
+    }
+    pr = ds_out(out, outn);
+    mm_free(out);
+    return pr;
+}
