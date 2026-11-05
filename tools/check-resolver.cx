@@ -2,7 +2,7 @@
  * 外部目录与内嵌 pack 两种来源行为一致；篡改/缺文件具名拒绝。
  *
  * 用法：sh ./unisacc.com tools/check-resolver.cx
- * 输入：out/epoch-2026-11-02/p3/p3-package.bin（内嵌 pack）。
+ * 输入：已装的 unisacc.com.dev/p3-package.bin（内嵌 pack）。
  *
  * 断言：
  *   pack-source-sha-ok        内嵌 pack 解析 kernel/x86_64、hdr/stdio.h、predefines/lnx/x86_64 字节 sha 与 manifest 一致
@@ -28,11 +28,28 @@ static void ck(int ok,const char *name){
     if(!ok) failed++;
 }
 
-/* 内联 manifest：3 个代表资源（raw kernel、deflate stdio、raw predefines）。 */
-static const char *manifest_text =
-    "kernel/x86_64\tbase\tx86_64\t32cecc8a48dd6ccb30be186a161325a3537cce743291752eab427046ff262d97\t7144\n"
+/* 内联 manifest：3 个代表资源（raw kernel、deflate stdio、raw predefines）。
+   kernel 行的 sha/size 不 pin:现场用本树 tools/kernel-route.cx 从 exec/c/asm 导出
+   基座再取(与 product.kernel-base 同一独立来源),不读被测包自己的值。 */
+static char manifest_text[1024];
+static const char *manifest_tail =
     "hdr/stdio.h\tresource\t\tb0588a2230cd834d58ac331933f98a77f1145371d886b82cdd41ff529dcb6046\t73454\n"
     "predefines/lnx/x86_64\tresource\tx86_64\ta148c3158186213aceb5123fd2734a8ebd962e4ff011955af23dc1fee66575d2\t57\n";
+
+/* 用 kernel-route 导出 x86_64 基座,写 manifest 的 kernel 行。0 成功。 */
+static int kernel_row(const char *root){
+    char kdir[4400],src[4600],ksh[65],*v[10]; long kn=0; int n=0;
+    np_result kr={0}; char kw[512];
+    if(cx_fmt(kdir,sizeof kdir,"%s/out/resolver-kernel-%d",root,(int)getpid()))return -1;
+    { sy_stat_t st; if(sy_stat(kdir,&st)==0) cx_rmtree(kdir); }
+    v[n++]="sh"; v[n++]="unisacc.com"; v[n++]="tools/kernel-route.cx"; v[n++]="--"; v[n++]=(char*)root; v[n++]=kdir; v[n++]="--isa"; v[n++]="x86_64"; v[n]=0;
+    if(np_run(v,root,0,58,&kr,kw,sizeof kw)||kr.rc)return -1;
+    np_free(&kr);
+    if(cx_fmt(src,sizeof src,"%s/x86_64.kernel",kdir))return -1;
+    { char *kb=cx_read(src,&kn); if(!kb)return -1; cx_sha256_hex(kb,kn,ksh); free(kb); }
+    cx_rmtree(kdir);
+    return cx_fmt(manifest_text,sizeof manifest_text,"kernel/x86_64\tbase\tx86_64\t%s\t%ld\n%s",ksh,kn,manifest_tail)?-1:0;
+}
 
 /* 写 bytes 到 path（含父目录创建）。 */
 static int write_file(const char *path, const unsigned char *b, long n) {
@@ -58,7 +75,7 @@ int main(int argc,char **argv){
     char root[4096],pkg[4400],dir[4400],ext[4400],path[4400],why[512];
     RsvResolver rs; RsvManifest man;
     if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
-    if(cx_fmt(pkg,sizeof pkg,"%s/out/epoch-2026-11-02/p3/p3-package.bin",root))return 2;
+    if(cx_fmt(pkg,sizeof pkg,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
     if(cx_fmt(dir,sizeof dir,"%s/out/b1-resolver",root))return 2;
     if(cx_fmt(ext,sizeof ext,"%s/ext",dir))return 2;
 
@@ -66,7 +83,8 @@ int main(int argc,char **argv){
     { sy_stat_t st; if(sy_stat(dir,&st)==0) cx_rmtree(dir); }
     if(mkdirs(ext))return 2;
 
-    /* 解析 manifest */
+    /* 解析 manifest(kernel 行现场导出) */
+    if(kernel_row(root)){ck(0,"kernel-material");return 1;}
     memset(&man,0,sizeof man);
     if(rsv_parse_manifest(manifest_text,(long)strlen(manifest_text),&man,why,sizeof why)!=3){
         ck(0,"manifest-parse");return 1;
@@ -87,7 +105,7 @@ int main(int argc,char **argv){
         for(int i=0;i<3;i++){
             long n; char w[512];
             unsigned char *b=rsv_resolve(&rs,names[i],kinds[i],archs[i],&n,w,sizeof w);
-            if(!b){ok=0;break;}
+            if(!b){printf("WHY\t%s\t%s\n",names[i],w);ok=0;break;}
             free(b);
         }
         ck(ok,"pack-source-sha-ok");
