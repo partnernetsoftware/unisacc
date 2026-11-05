@@ -1,3 +1,33 @@
+# 0.0.44-rc3(候选)
+
+候选:rc3 APE sha256 `54bb97a2672f5010c8815fb0f6ecfb3ee7bb7ca91af18723007430375cc3bbb8`,5,608,646B,源码 R4=`b1a219cf7d`;lnx/x86_64 候选三代逐字节相同(`45bdf636df1e`,`tests/chain-fixed-point.cx` failed=0)。
+
+## 支持矩阵(GitHub 原生 runner,CI-RUN-6,运行 42092234905)
+
+| 目标 | 状态 |
+|---|---|
+| lnx/x86_64 | 已在原生 runner 验证:identity、version、hello、run、stdio-crossunit、stream-pipe、smoke 7/7 PASS |
+| lnx/arm64 | 已在原生 runner 验证:7/7 PASS |
+| osx/x86_64 | 已在原生 runner 验证:6 项 PASS;stdio-crossunit 的 devfull 用例需要 Linux 的 `/dev/full`,记 NOT_RUN |
+| osx/arm64 | 已在原生 runner 验证:同 osx/x86_64 |
+| win/x86_64 | **已知不可用**:`--version` 退出 1 并输出乱串,编译与 smoke 访问违例(0xC0000005);根因未定位(NATIVE-WIN-PE,见下) |
+| win/arm64 | APE 没有这个片;原生入口留 0.0.45 |
+
+## 修复(rc1 → rc3)与证据
+
+- **默认 `-run` 的宿主目标**(NATIVE-RUN-HOST-TARGET):宿主目标不再写死 `lnx/x86_64`,取本片自身目标(生成的 L0 `cx/sys/hostid.cx`,来源 `exec/facts/pp-targets.tsv`)。证据:CI-RUN-1 里 lnx/arm64 `-run` 报 errno 8,CI-RUN-2 起 `run` 项 PASS。
+- **osx 的 `-run`**(tmpfile 启动,L0 `cx/sys/runlaunch.cx`):osx 片把镜像写进 TMPDIR 下 0700 私有目录再执行、结束即删;win/lnx 片不带这段进程代码。证据:CI-RUN-1 osx `Bad system call: 12`,CI-RUN-2 起 osx 两格 `run` PASS。
+- **`-c` 链接告警误报**(WARN-PROBE-USED):判据由"对象带运行库流表"改为"对象调用了流表入口"(`exec/facts/rt-shared.tsv` 第 8 列)。证据:rc3 候选本机 objects-link 等五批由 FAIL 转 PASS;两个都调用 printf 的对象链接仍告警一次(`tests/cx-unit-graph.cx` 正例)。
+- **APE 首次解包向 stderr 写 `tail: stdout: Broken pipe`**(LOADER-STDERR,macOS):解包改为读尽管道。证据:CI-RUN-3 osx `--version` 的 stderr 为 26 字节该句,CI-RUN-6 osx 两格 version PASS(判据要求 stderr 为空)。
+- **`unisacc stream` 默认目标写死**(STREAM-HOST-TARGET):默认取本片目标。证据:CI-RUN-2 lnx/arm64 与 osx 的 stream-pipe `B plain-image-pipe-cmp` FAIL,CI-RUN-6 三格 PASS。
+- `--emit-host-symbols` 帮助文字(b90f074527)。
+
+## 已知限制(相对 rc1 新增或改写)
+
+- win/x86_64 原生不可用。CI-RUN-3/4/5 的诊断:Linux 交叉编的 argv 探针在 Windows 上 `argc` 读出 `.data` 里的一个常量指针、`argv` 为空;把 PE 头改成固定基址后映像按 ImageBase 加载,行为不变,所以不是"随机基址未重定位"。0.0.45 先补调试手段(WIN-DEBUG-LOOP)。
+- `objects-unsupported-*` 四批仍红:合同要求拒绝 osx/win 的 `-c`,而产品编出了合法的 Mach-O/COFF 对象;合同改为"编出且格式合法"留 0.0.45(OBJ-UNSUPPORTED-CONTRACT)。
+- 其余同下方 rc1「已知限制」。
+
 # 0.0.44-rc1
 
 ## 编译器

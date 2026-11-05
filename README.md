@@ -3,21 +3,26 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.44-rc1, rc1 candidate rev `7266862b08`):
-on GitHub native runners (CI-RUN-1) only `lnx/x86_64` passes. The default `-run`
-does not work on `lnx/arm64`, `osx` or `win` hosts, because the run target is
-fixed to `lnx/x86_64` (fixed in rc2, NATIVE-RUN-HOST-TARGET), and the `win/x86_64`
-slice fails natively (NATIVE-WIN-PE); `osx/*` and `win/x86_64` are built by the
-`whole-o` route and there is no `win/arm64` slice. `-o` writes ELF, Mach-O with an
-ad-hoc signature, or PE32+, and on `lnx/x86_64` the default `-run` executes in memory;
+file, `unisacc.com`. Toolchain status (0.0.44-rc3 candidate, APE `54bb97a2`, source
+`b1a219cf7d`), checked on GitHub native runners (CI-RUN-6, run 42092234905):
+`lnx/x86_64`, `lnx/arm64`, `osx/x86_64` and `osx/arm64` pass identity, version, hello,
+the default `-run`, stream-pipe and smoke (the stdio errno case needs Linux's
+`/dev/full` and is not run on macOS). **`win/x86_64` does not work natively**:
+`--version` prints garbage and compiling crashes (NATIVE-WIN-PE, cause not found
+yet), and there is no `win/arm64` slice. `osx/*` and `win/x86_64` are built by the
+`whole-o` route. `-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+ (a PE
+written on Linux for a small program does run on Windows; the unisacc slice itself
+does not), and the default `-run` executes in memory on Linux and from a private
+temporary file on macOS;
 relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
 `ET_REL` object; GNU `ld` links that whole-program object into a runnable static
 program on its own, and `cc` cannot (`_start` collides with the crt, and the
 calling convention is not SysV or AAPCS64). `-c -b osx/*|win/*` is refused by
 name: "object output (-c -b) for this target is not on the product route yet
 (Linux targets are); the reference compiler writes Mach-O and COFF objects"
-(exit 1). `-c -b T -funit` writes a *unit* object for the Linux targets and
-stops with `NOT_IMPLEMENTED object` (exit 2) for the other four; `unisacc a.o
+(exit 1). `-c -b T -funit` writes a *unit* object for the Linux targets; for
+the other four it is documented as `NOT_IMPLEMENTED object`, but the rc3 product
+in fact writes a Mach-O or COFF object (OBJ-UNSUPPORTED-CONTRACT, 0.0.45); `unisacc a.o
 b.a [-o prog]` links unit objects and archives, and `unisacc ar rcs|t|x` writes
 them (measured: two unit objects plus an archive, linked and run). The product
 writes no assembly text: `-S -b lnx/ARCH -o FILE.s` stops with
@@ -117,9 +122,10 @@ file is the user entry point, not the status page.
 
 ## Use it
 
-`unisacc.com` is a single file that runs on all six targets (Windows reads it
-as a PE; a Unix shell runs it as a script that picks the slice for the
-machine). The C headers it needs travel inside it.
+`unisacc.com` is a single file; a Unix shell runs it as a script that picks the
+slice for the machine (Linux and macOS, x86-64 and arm64). Windows reads it as a
+PE, but that slice does not work yet (see the status above). The C headers it
+needs travel inside it.
 
 ```bash
 ./unisacc.com hello.c [args]                # compile and RUN in memory (the default; not cc's a.out)
