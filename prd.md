@@ -76,12 +76,17 @@
 | 普查红批次 | `sh ./unisacc.com tools/census.cx -- $PWD out/census` | 无材料批次逐个实跑找回归 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.44.tsv --check` | R 行理由 + W 行豁免 |
 | 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
-| 九个仓级棘轮 | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc |
+| 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc/verwriter/aluiwidth/outdep/check-literal（2026-11-06 主树 `RATCHETS ok=13 fail=0`，见 plans/rc1-gates-2026-11-06.md 门槛 2） |
 | tools 行数只降不升 | `sh ./unisacc.com tests/toolsloc.cx -- --check`（`--write` 只下调） | tracked regular `tools/*.cx` 总行数，基线 `tests/toolsloc.tsv`；新增 tool 必须先改基线并经 cc 批准 |
 | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
 | 同候选原生资格（六目标证据表） | `sh ./unisacc.com tests/candidate-qualify.cx -- cell|aggregate ...` | 由 `.github/workflows/candidate-native.yml` 调度；缺证据或身份不符 rc1，有 NOT_RUN rc3，全 PASS 才 rc0 |
 | 单阶段过滤器（分段编译管道） | `./unisacc.com stream STAGE [--route R] [--res NAME[=FILE]] [--models PKG] [--raw] < in > out`；`stream frame --in L=F...`；`stream sidecar` | 同一 st_span/包/`\0cli/*` 跑一个阶段；属性表随流（USLATTRT）；`e2\|e1\|e3\|sidecar\|prune\|lower\|elf` 与 `-o` 逐字节同；校验 `tests/check-stream-pipe.cx`；改表→`tools/lab-loader/p3-swap.cx --model`→`--models` 实测 ≈8s |
 | streams 旧合同壳材料 (unisacc-stream1..7.com) | `sh ./unisacc.com tools/streams-material.cx -- ROOT NEW_OUTDIR [LEVEL [TARGET]]`;校验 `tests/check-streams-material.cx`(批次 streams-material) | 7 个 <=40B 薄壳转调 `unisacc stream STAGE`,分派器 `s` 烘入 ROOT;e1 经 `tools/streams-e1-frame.cx` 把 USLATTRT 转 USLATTR1;收据 streams.json scope=product-stream-shim + NOT_CLAIMED,不是独立 runner,与 streampack 8 容器无关;钉子由 tests/cases/stream_pin.cx `stream_receipt_pin` 取自收据。lower 阶段产品会追加运行库尾部,依赖精确 lower 输出的用例仍红 |
+| 分段单阶段用例（逐段字节 golden） | `sh ./unisacc.com tests/check-stages.cx [-- PRODUCT ROOT]`（批次 `stages`） | `tests/stages/<段>/` 每段 `args/in/expect`，可选 `bad/bad.err/bad.args`，喂 `unisacc stream STAGE`；无拒绝用例的段记 GAP。tape 入口校验撤回，本批如实红（见 CHANGELOG 已知限制） |
+| 两代不动点（读 chain-step 产物） | `sh ./unisacc.com tests/chain-fixed-point.cx`（批次 `chain-fixed-point`，材料 `chain-gen1`、`chain-fixedpoint`） | F1 gen2 sha==gen3 sha；F2/F3 receipt 的 constructor_sha 依次指向上一代，防复制同一文件冒充；不重跑构造。材料必须绑到候选文件而非其父目录（RC1-MATERIAL-BIND） |
+| 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `work/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
+| 已知 FAIL 必须登记 | `sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv`（`-- --self-test`） | rc1 门槛 1：聚合输出里非 PASS 的批次都得是 `tests/waivers-0.0.44.tsv` 的 `F` 行；F 行只说"已知有主有计划"，不把 FAIL 变 PASS |
+| 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
 | syscall 分派表（lower） | `sh ./unisacc.com tools/abidispatch-gen.cx -- --check`（`--write` 重生成）；网行 `tools/decide-gen.cx -- --check --each os=lnx,osx,win --each arch=x86_64,arm64 --sections weights/abi/dispatch.tsv SC SC.ask exec/lower/abidecide-result.tsv` | `weights/abi/dispatch.tsv` 522 键＝op×os×arch，是 `weights/gold/abi.tsv` 的投影（有 sysno／win 有 winimp 的 op 标自身，否则 `fail`）；lower 的 `SYSCALL.base` 不再逐 op CMP 链，而是 prelude 写 `mem[SCIX+sysid_op]=序号+1`，`SC.ask.{os}.{arch}` 一次 RLD 选 `SC.<op>`；每个 lower 网只装自己目标那一节（section os.arch）。批次 `check-decide` |
@@ -170,6 +175,7 @@ L3 资源                    头文件、事实表等
 - 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节→输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
 - 单文件发布(pack 内嵌)保留;外部目录形态用于开发。启动开销是主要风险(现热 `-run` ≈10ms),每步测量。
 - 进度与分步:见 `work/items.tsv`(B0 P3 explode/implode → B1 resolver → B2 阶段测试台 → B3 基座外置 → B4 booter APE 头 → B5 身份收敛到 manifest)。
+- 现状(2026-11-06):L1/L2/L3 的外置与 booter 分离([B3][B4][B5c])未完成,发布形态仍是单文件 APE(尾部一份包);已落地的是 resolver/explode 工具与 `unisacc stream STAGE` 阶段过滤器。三层口径(loader / ISA 切片 / 模型)与 CORE-MIN 见 §9.1。
 
 ## 5. 源码结构（src/ 六层 + cx/ 树）
 
@@ -260,7 +266,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `seed/` | C 种子构造器（gold label 规则、ident.c 身份、ape 打包） |
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
-| `tools/` | 开发工具（326 个 .cx：生成器/棘轮/refactor/symindex/all-waves…） |
+| `tools/` | 开发工具（378 个 .cx，`ls tools/*.cx | wc -l` 2026-11-06：生成器/棘轮/refactor/symindex/all-waves…） |
 | `plans/` | 活跃计划（v0.0.4x 路线 + 架构/分层/缺陷；已完成的归档到 archive/plans） |
 | `docs/` | 规格/术语（spec.md 在根、docs/glossary.md、docs/cx/） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
@@ -277,33 +283,33 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点(2026-11-04 15:30)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
-今日主线:E0 预演步7-11 全通(export 86ms / ctx 4.3s / wave 631s / kernel 39s / pack 264s);步12 release 需 git 检出,另立 E0-RELEASE。**下一步是真实重建+安装 [INSTALL44]**——DOCK 系列、B3/B4、B5c 剩余项都等已装产品认 `#pragma unisa dock` 与新 build.json。0.0.44 第一优先 [SPEED] 已开工(11-02 记的"0 进展"漂移今日纠正)。
+当前节点(2026-11-06,事实取自 CHANGELOG.md 0.0.44-rc1 段、plans/rc1-gates-2026-11-06.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
+今日主线:**0.0.44-rc1**(只发 lnx/x86_64 候选,不打 0.0.44 正式标:两代不动点加六目标同候选证据未达到;不 push、不上传、不签名;CI 没跑,六目标原生证据 0/6)。已装候选(dev-lnx,rev `7266862b08`):`--version` = `unisacc 0.0.44`,entry `0a82f989`(1,789,094B)、包 `7080b53a`(1,659,574B)——2026-11-06 在共享检出用 `sha256sum unisacc.com.dev/*` 复核一致;APE `a76e5fc1`(5,494,758B,lnx/x86_64 冒烟 `RELEASE_APE SMOKE ok=5 failed=0`,取自 rc1-gates 门槛 6,本轮未重跑);lnx/x86_64 候选 `c3996bd4` gen1=gen2=gen3(chain-fixed-point 批次,门槛 4)。门槛现状:2、4 达成,3、6、8 部分/已有证据,1、5、7 待候选(UNMEASURED),9、10 未完——逐条以 plans/rc1-gates-2026-11-06.md 为准。
 
 ```text
-0.0.43 收口 + 体系整理(进行中)
-├─ 本轮慢车道(2026-11-02,起点 a824200d77,omp-bdy 执行,runbook=plans/slowlane-runbook-2026-11-02.md)
-│  ├─ [x] 步7 prepare-context  [x] 步8 source-job-wave 131 job + final
-│  ├─ [x] 步9 kernel-build(收窄后字节==旧 blob 32cecc8a/4d6e45a1)
-│  ├─ [~] 步10 source-package-pack(对齐 split2 身份:3 处与 source-package.cx 漏同步已修)
-│  └─ [ ] 步11-18 p3/entry → 两代 GEN selfhost → kind2 安装 → 全批 → 换标
-├─ 并入本轮慢车道的变更:A kernel 收窄(kernelinputs 单一来源) C host.cx cwd 头 D/E/F 补丁 06/05/07 H 撤销 --host-provider  G FFI 字节表入 include/(待做)
-├─ FFI 桥:x86_64 四向量本机通过;arm64 白箱走查+栈参数已写,运行期待 CI arm64 runner;ELF .text 提取器已去 objcopy 依赖
-├─ 下一轮慢车道:实参个数检查(arity,weights/arity + parse E3,预演全绿在 /tmp/arity-impl)
-├─ W6 自身体系迁移:seed/{net,tbl,ident,compilerpack,pack} CX 预演通过(小样本);gen(9051 行)暂缓;P3 压缩口径待决
-├─ 收缩调查结论:tools+tests 86.8k 行,可归档 0、重复断言<50 行——体量真实,靠减用例不可行;大头是身份机制重复(SID/PC/GEN/context/pins/receipts)
-├─ QUALIFIED 缺口(未变):73 外平台格需 CI 6 原生 runner;~24 BLOCKED(5 项需主人裁定范围)
+0.0.44-rc1 收口(进行中,督导 omp-cc-opus;门槛表 plans/rc1-gates-2026-11-06.md,任务 [RC1-GATES])
+├─ 已装并复核:entry 0a82f989 / pkg 7080b53a / APE a76e5fc1;ROOT_IDENTITY assertions=9 failed=0
+├─ 门槛 1 `--all` FAIL 集合 ⊆ tests/waivers-0.0.44.tsv(用 tests/check-known-fail.cx 判)——UNMEASURED(待仓外干净树+候选)
+├─ 门槛 5/7 `--version`/check-limits/kernel-base/facts-current、146 材料批次 all-waves 全量——UNMEASURED(待会话;
+│  材料必须在最终 rev 上现场重建并在 init 后 diff materials.tsv,见 tools/all-waves.cx 会话要点)
+├─ 已知限制(CHANGELOG 已写):lnx/arm64 仅 qemu 模拟实跑;osx/win NOT_RUN(whole-o 路线);win/arm64 无片;
+│  STAGE-REJECT 已撤回(stages 批次如实红);运行库每对象各带一份;-c 只告警;c-negative 22 项(A 类 12 静默错码,P1→0.0.45);pp-negative 2 项
+├─ QUALIFIED 缺口(未变):外平台格需 CI 6 原生 runner;CI 工作流已改为 ape_sha256+commit 钉身份,仅手动触发,未跑
 └─ 未签名、未公开(先 QUALIFIED 再发布)
 
-0.0.44 方向(主人 11-01 定:清理干扰、修 bug、提速;提速第一)
-├─ [~] 提速 [SPEED](omp-go):基线 empty.c 推理 12.2ms / host.c e3 推理 120ms;杠杆1=fwdmerge 方言表化(osx/arm64 免第二遍 e3),先写失败检查
-├─ [~] 重建+安装 [INSTALL44](omp-bdy):E0 预演已通 [E0];安装后解锁下列
-│  ├─ [~] dock 指令 [DOCK1] 已解析;lint 侧 [DOCK2a] [DOCK2b] 判据与夹具备好、代码改动等安装后同批;[DOCK3] 45 行 pragma 清单备好
-│  └─ [~] 基座外置/APE 头 [B3] [B4]、build.json 新格式 [B5c]
-├─ [x] 工具:dock-map(use 图共享)、refactor inject(插 pragma,死循环已修)[REFACTOR-PRAGMA]
+三层布局与 CORE-MIN(方向:主人 11-05 定 CORE-MIN [P1-0.0.45];实测依据 plans/layout-measure-2026-11-05.md)
+├─ 现状三层:loader(APE 头,识别 OS/ISA、取包) / ISA 切片(每 ISA 一个 entry ELF,全是机器码,lnx/x86_64 entry 1,789,094B)/ 模型(尾部一份 UNIPKG1 包,平台无关,1,659,574B;APE-ONEPKG 已落:APE 8,512,083→5,477,539B 实测,发布 APE 为 5,494,758B)
+├─ CORE-MIN 目标:能流与模型化的都做成流+网,切片只留不能模型化的真核心(执行器、模型解码、解压校验、系统调用层)。已落地的只有 `unisacc stream STAGE` 单阶段过滤器;
+│  按单元搬迁与删除原 .cx 实现([CORE-MIN]/[CORE-MIN-ASMTEXT])、运行库去重([RT-DEDUP])、包懒校验([PKG-LAZY-CHECK],整体校验约 65ms)均为 READY 未做;"切片非常小"的字节目标 UNMEASURED
+├─ "TSV 表达动态逻辑"范式现状:事实表→生成器(带 --check)→表→网 是已成立的路径(见 §4.2、§6;例 tools/facts-gen.cx、arity-gen.cx、abidispatch-gen.cx、rt-shared-gen.cx);
+│  未成立的部分:RT-SHARED 的单元宏注入仍写在驱动里(src/stages.cx st_rt_shared),搬进表/网是 [RT-SHARED-MODEL](P2-0.0.45);fwdmerge 方言表化是 [SPEED] 杠杆1(未完成)
+└─ 提速 [SPEED]:SPEED-02 已落作业身份=声明输入闭包(ptrace 观测),reuse-batch 131 作业 226 s→12.7 s,复用默认仍关(UNISACC_WAVE_REUSE=1);empty.c 12.2ms / host.c e3 120ms 的旧基线本轮未复测(UNMEASURED)
+
+0.0.44 其余方向(主人 11-01 定:清理干扰、修 bug、提速)
+├─ [~] DOCK 系列 [DOCK1]/[DOCK2*]/[DOCK3]、基座外置/APE 头 [B3]/[B4]、build.json 新格式 [B5c]:状态以 items 为准(DOCK2* 在 CHANGELOG 记为 P2)
 ├─ [ ] 寄存器分配 [REGALLOC]:档1 实测 2.9% 不值得,BLOCKED 待主人要性能再开
 ├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,未立项
-└─ [ ] 其余见 plans/v0.0.44.md 与 work/items.tsv(DRAFT 项需督导转 READY 才开工)
+└─ [ ] 其余见 plans/v0.0.44.md、plans/v0.0.45.md 与 work/items.tsv(DRAFT 项需督导转 READY 才开工)
 ```
 
 <a id="memory-palace"></a>
@@ -313,6 +319,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | `83343ec1`，5,145,706 B，rev `edc2c7700b`（当前工作树 dev-lnx 薄壳见 §9.1） | `tools/com-tree.cx` |
+| 当前候选 0.0.44-rc1 | entry `0a82f989`（1,789,094B）、包 `7080b53a`（1,659,574B）、APE `a76e5fc1`（5,494,758B）、rev `7266862b08`；仅 lnx/x86_64，不打正式标 | [CHANGELOG.md](CHANGELOG.md)、[plans/rc1-gates-2026-11-06.md](plans/rc1-gates-2026-11-06.md) |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
@@ -321,16 +328,16 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 事实表 | 只经 `tools/facts-gen.cx --check/--write`（名表生成器 `tools/nametab-gen.cx` 已于 2026-11-02 停止生成并删除，零消费者，字节等价验证 648a47ca，见 [plans/w4-dedupe-2026-11-02.md](plans/w4-dedupe-2026-11-02.md)） | `exec/facts/` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
-### 9.3 当前状态（0.0.43 收口）
+### 9.3 上一发布 0.0.43 的状态（历史；当前状态见 §9.1）
 
 - 上一发布 0.0.43 = `83343ec1`（5,145,706 B，rev `edc2c7700b`）。五片：win/x86_64 `18d2757f`、lnx/x86_64 `759c520a`、lnx/arm64 `6703dd4d`、osx/x86_64 `581300df`、osx/arm64 `7e3d267b`；两代自举逐字节相同。当前工作树是 dev-lnx 薄壳（见 §9.1 当前节点）。
-- 门禁：七棘轮 `ok=7`、`--smoke` 16/0、`release-ape smoke` 5/5。
+- 门禁（0.0.43 当时）：七棘轮 `ok=7`、`--smoke` 16/0、`release-ape smoke` 5/5。0.0.44-rc1 的门禁见 §9.1 与 plans/rc1-gates-2026-11-06.md。
 - **QUALIFIED 缺口**（详见 [plans/release-0.0.43.md](plans/release-0.0.43.md)）：73 个外平台格（需 CI 6 原生 runner）+ ~24 BLOCKED（5 个 owner-ruling 需主人裁定范围）。本机 linux/x86_64 物理无法实跑其他 OS，故 QUALIFIED 未达成、未签名、未公开。
 
 ### 9.4 路线
 
-- **0.0.43**：当前收口（主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
-- **0.0.44**：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
+- **0.0.43**：已发布（历史，主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
+- **0.0.44**（当前为 0.0.44-rc1 收口，见 §9.1）：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
 - **0.0.45 / 0.0.46**：模块外部共享（含通用 APE loader 模板 C45-LOADER-01、ujs 复用、编译期所有权路线 C、范式命名）/ agent harness（cx-csih）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
