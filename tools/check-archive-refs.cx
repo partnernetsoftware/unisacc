@@ -18,7 +18,7 @@ static int failed, rows;
 static int git(char **av) {
     char *argv[12]; int i = 0, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
     argv[i++] = "git";
-    for (int k = 0; av[k] && i < 9; k++) argv[i++] = av[k];
+    for (int k = 0; av[k] && i < 11; k++) argv[i++] = av[k];
     argv[i] = 0;
     pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
     if (pid < 0) return -1;
@@ -29,12 +29,6 @@ static int git(char **av) {
     sy_close(ofd); sy_close(efd);
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
-}
-static int first_line(const char *s, char *dst, long cap) {
-    long n = tx_len(s, CAP), i = 0;
-    while (i < n && s[i] != '\n' && i < cap - 1) { dst[i] = s[i]; i++; }
-    dst[i] = 0;
-    return i;
 }
 
 int main(void) {
@@ -50,25 +44,43 @@ int main(void) {
             for (i = 0; i < pl; i++) p[i] = m[at + i];
             p[pl] = 0;
             rows++;
-            char *a1[3]; a1[0] = "ls-files"; a1[1] = "--"; a1[2] = 0;
             char *a1b[4]; a1b[0] = "ls-files"; a1b[1] = "--"; a1b[2] = p; a1b[3] = 0;
-            (void)a1;
             git(a1b);
             int still = out[0] != 0;
-            char *a2[10]; a2[0] = "grep"; a2[1] = "-l"; a2[2] = "-F"; a2[3] = p;
-            a2[4] = "--"; a2[5] = "."; a2[6] = ":!archive"; a2[7] = ":!out"; a2[8] = ":!work"; a2[9] = 0;
+            /* -n: every matching line, so an archive/<path> mention (the new home) is told apart from
+               a live reference, and every file is judged, not only the first git lists. */
+            /* ujs/ is the paper-B lane's own tree (AGENTS.md lane ownership); its notes are not live unisacc files */
+            char *a2[12]; a2[0] = "grep"; a2[1] = "-n"; a2[2] = "-F"; a2[3] = p;
+            a2[4] = "--"; a2[5] = "."; a2[6] = ":!archive"; a2[7] = ":!out"; a2[8] = ":!work"; a2[9] = ":!ujs"; a2[10] = 0;
             git(a2);
-            char who[512]; first_line(out, who, sizeof who);
-            /* ignore audit artifacts that name every path by design */
-            int refd = out[0] != 0 && !(tx_prefix(who, tx_len(who, 512), "work/", 5) ||
-                                        tx_prefix(who, tx_len(who, 512), "archive/", 8) ||
-                                        tx_prefix(who, tx_len(who, 512), "out/", 4) ||
-                                        tx_prefix(who, tx_len(who, 512), "plans/tools-inventory-", 22) ||
-                                        /* dated notes that record the CHAIN-ARCHIVE moves, exact paths */
-                                        tx_eqz(who, "plans/defects-c43.md") || tx_eqz(who, "plans/identity-inventory-2026-11-02.md") ||
-                                        tx_eqz(who, "plans/materials-inventory-2026-11-02.md") || tx_eqz(who, "plans/product-identity-2026-11-02.md") ||
-                                        tx_eqz(who, "plans/tools-pins-audit-2026-11-02.md") ||
-                                        tx_prefix(who, tx_len(who, 512), "ujs/archive/", 12));
+            char who[512]; who[0] = 0;
+            int refd = 0; long q = 0, pn = tx_len(p, 512);
+            while (out[q] && !refd) {
+                long ls = q, le = q; while (out[le] && out[le] != '\n') le++;
+                long fe = ls; while (fe < le && out[fe] != ':') fe++;
+                long fl = fe - ls < 511 ? fe - ls : 511, k;
+                char f[512]; for (k = 0; k < fl; k++) f[k] = out[ls + k]; f[fl] = 0;
+                /* ignore audit artifacts and dated notes that name every path by design */
+                int exempt = tx_prefix(f, fl, "work/", 5) || tx_prefix(f, fl, "archive/", 8) || tx_prefix(f, fl, "out/", 4) ||
+                             tx_prefix(f, fl, "plans/tools-inventory-", 22) || tx_prefix(f, fl, "ujs/archive/", 12) ||
+                             tx_eqz(f, "plans/defects-c43.md") || tx_eqz(f, "plans/identity-inventory-2026-11-02.md") ||
+                             tx_eqz(f, "plans/materials-inventory-2026-11-02.md") || tx_eqz(f, "plans/product-identity-2026-11-02.md") ||
+                             tx_eqz(f, "plans/tools-pins-audit-2026-11-02.md") ||
+                             /* release plans and dated notes that predate an archive move keep the path as history */
+                             tx_eqz(f, "plans/v0.0.44.md") || tx_eqz(f, "plans/cxlibc-2026-10-30.md") ||
+                             tx_eqz(f, "plans/layout-assumptions-2026-11-02.md") || tx_prefix(f, fl, "plans/w5-patches/", 17) ||
+                             tx_eqz(f, "plans/kernel-context-narrow-2026-11-02.md") || tx_eqz(f, "plans/p4-frow-arity-2026-11-02.md");
+                if (!exempt) {   /* a live hit unless every occurrence on the line is the archive/<path> form */
+                    long c;
+                    for (c = fe; c + pn <= le; c++) {
+                        if (memcmp(out + c, p, (size_t)pn)) continue;
+                        if (c >= 21 && !memcmp(out + c - 21, "archive/chain-legacy/", 21)) continue;
+                        refd = 1; break;
+                    }
+                    if (refd) { for (k = 0; k < fl; k++) who[k] = f[k]; who[fl] = 0; }
+                }
+                q = out[le] ? le + 1 : le;
+            }
             if (still || refd) {
                 failed++;
                 printf("FAIL\tarchive-refs.%s\t%s%s%s\n", p, still ? "still-tracked " : "", refd ? "referenced-by:" : "", who);
