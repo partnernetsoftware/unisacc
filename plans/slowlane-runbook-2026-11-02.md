@@ -32,5 +32,6 @@
 
 ## 全批 + 换标收尾
 17. `sh ./unisacc.com tests/run.cx -- --all`（rc0；覆盖不完整必须非零）。
+17a. all-waves 会话(2026-11-06 rc1 教训):init 前必须先拿到材料负责人的最终 `MAP_READY`(带时间与 map 的 sha256),只用那一份 map init;init 后立刻 `diff 会话/materials.tsv 最终map`,不一致就丢弃会话重来。map 每行按批次参数形态写(目录 / 文件 / 64 位 hex),例如 `p3-pack-ctx` 是目录、`chain-gen1` 是 candidate 文件、`assembler` 是 `kernels/assembler` 子目录;写错形态会让批次读空或拒绝,而不是暴露真根因(RC1-MATERIAL-BIND)。
 18. 棘轮复跑 `tools/ratchets.cx` 9/9 + srcshape 只降不升；记录新 entry+P3 SHA 与慢车道起点 diff。
 19. 需主人：签名/Draft/Latest/公开（发布第 7 步）才请示；技术决定 cc 拍板。
