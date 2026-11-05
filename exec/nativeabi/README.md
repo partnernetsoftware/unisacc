@@ -67,6 +67,14 @@ remain shared/cyclic. Every completely certified fixed node carries proof1;
 original graph bytes/proof bits remain untouched. New local banks480–482 own
 signature IDs, epoch marks and 32-slot frames; recursion is bounded at64.
 
+## Node record layout
+
+modelgraphequality writes, and gen reads, one record per graph node in the FIELDS area (NODE_FIELDS slots,
+variant node or sig) and a walk frame in the FRAME area. The slot of each field is a fact in
+`exec/facts/node-record-layout.tsv` (record.variant, name, slot), turned into `<record>_<variant>_<name>` scalars by
+`tools/facts-gen.cx` (`exec/facts/node-record.tsv`); the tables reference those names. Slots whose meaning is not
+yet verified stay as bare numbers and are listed in that file's header.
+
 ## Natural recursive aggregates
 
 Ordinary struct(tag1) and array(tag3) descriptors retain exact size/alignment,
