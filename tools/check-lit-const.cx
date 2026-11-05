@@ -1,0 +1,54 @@
+/* tools/check-lit-const.cx -- tools/lit-const.cx replaces exactly what it is told to, nothing else.
+ *
+ *   sh ./unisacc.com tools/check-lit-const.cx [-- ROOT]
+ *
+ * In a mkdtemp scratch: a table with two copies of one action, one look-alike that differs only in
+ * its register, and one in another value.  Asserts (exit 0 all hold, 1 any fails, 2 usage/IO):
+ *   1) a dry run reports hits=2 applied=0 and leaves the file byte-identical;
+ *   2) --apply reports hits=2 applied=1 and the file equals the expected text exactly
+ *      (the look-alike and the other value untouched);
+ *   3) an OLD that never occurs exits 1 with hits=0 and leaves the file as it was. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char g_root[4096], work[4096], tab[4200];
+static const char *SRC = "s\tA\t*\tB\t[[\"A64I\",\"and\",\"b\",\"v\",255],[\"A64I\",\"and\",\"c\",\"v\",255],[\"A64I\",\"and\",\"b\",\"v\",255],[\"LDI\",\"v\",8]]\n";
+static const char *WANT = "s\tA\t*\tB\t[[\"A64I\",\"and\",\"b\",\"v\",[\"constant\",\"byte_mask\"]],[\"A64I\",\"and\",\"c\",\"v\",255],[\"A64I\",\"and\",\"b\",\"v\",[\"constant\",\"byte_mask\"]],[\"LDI\",\"v\",8]]\n";
+
+static void check(int ok, const char *what) { sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+static int has(const char *s, const char *p) { return tx_contains(s, tx_len(s, 4096), p, tx_len(p, 4096)); }
+static int same(const char *want) {
+    size_t n; char *b = cx_read(tab, &n); int ok = b && (long)n == tx_len(want, 8192) && mm_same(b, want, (long)n);
+    return ok;
+}
+static int run(const char *old, const char *nw, int apply, char *out, size_t cap) {
+    char *av[9] = {"sh", "./unisacc.com", "tools/lit-const.cx", "--", tab, (char *)old, (char *)nw, apply ? "--apply" : 0, 0};
+    np_result r; char why[256];
+    if (np_run(av, g_root, 0, 55, &r, why, sizeof why)) { sy_eprintf("check-lit-const: %s\n", why); return -2; }
+    { size_t k = r.outn < cap - 1 ? r.outn : cap - 1; if (k) mm_copy(out, (long)cap, r.out, (long)k); out[k] = 0; }
+    return r.rc;
+}
+int main(int argc, char **argv) {
+    char out[512]; int rc;
+    const char *old = "[\"A64I\",\"and\",\"b\",\"v\",255]", *nw = "[\"A64I\",\"and\",\"b\",\"v\",[\"constant\",\"byte_mask\"]]";
+    if (argc > 2) { sy_eprintf("usage: check-lit-const.cx [ROOT]\n"); return 2; }
+    if (argc == 2) { if (!realpath(argv[1], g_root)) return 2; } else if (sy_cwd(g_root, sizeof g_root) < 0) return 2;
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/check-lit-const-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) return 2; }
+    cx_fmt(tab, sizeof tab, "%s/t-result.tsv", work);
+    if (cx_write(tab, SRC, (size_t)tx_len(SRC, 8192))) return 2;
+    rc = run(old, nw, 0, out, sizeof out);
+    check(rc == 0 && has(out, "hits=2\tapplied=0") && same(SRC), "dry-run-counts-and-keeps-file");
+    rc = run(old, nw, 1, out, sizeof out);
+    check(rc == 0 && has(out, "hits=2\tapplied=1") && same(WANT), "apply-replaces-only-exact-action");
+    rc = run("[\"A64I\",\"and\",\"z\",\"v\",255]", nw, 1, out, sizeof out);
+    check(rc == 1 && has(out, "hits=0") && same(WANT), "absent-old-exits-1-unchanged");
+    (void)sy_unlink(tab); (void)sy_rmdir(work);
+    sy_printf("CHECK_LIT_CONST\tassertions=3\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

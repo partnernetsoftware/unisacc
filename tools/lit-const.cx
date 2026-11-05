@@ -1,0 +1,39 @@
+/* tools/lit-const.cx -- turn one bare immediate of a net table into a ["constant",NAME] reference.
+ *
+ *   sh ./unisacc.com tools/lit-const.cx -- FILE OLD NEW [--apply]
+ *
+ * OLD and NEW are exact texts (e.g. ["A64I","and","eo_byte","eo_v",255] and
+ * ["A64I","and","eo_byte","eo_v",["constant","byte_mask"]]).  Every occurrence of OLD in FILE is
+ * counted; with --apply each one is replaced by NEW and the file rewritten.  No pattern language:
+ * the caller names the whole action, so a value that merely looks the same elsewhere stays.
+ * Prints LIT_CONST<TAB>file=..<TAB>hits=N<TAB>applied=0|1.  Exit 0, 1 when OLD never occurs
+ * (a rewrite that finds nothing is a wrong OLD, not a success), 2 on usage/IO. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+int main(int argc, char **argv) {
+    size_t bn; char *b, *out; long n, at, i, hits = 0, ol, nl, olen = 0, cap; int apply;
+    if (argc != 4 && argc != 5) { sy_eprintf("usage: lit-const.cx FILE OLD NEW [--apply]\n"); return 2; }
+    apply = argc == 5 && tx_eqz(argv[4], "--apply");
+    if (argc == 5 && !apply) { sy_eprintf("usage: lit-const.cx FILE OLD NEW [--apply]\n"); return 2; }
+    ol = tx_len(argv[2], 4096); nl = tx_len(argv[3], 4096);
+    if (ol <= 0 || nl <= 0) { sy_eprintf("lit-const: empty OLD or NEW\n"); return 2; }
+    b = cx_read(argv[1], &bn); if (!b) { sy_eprintf("lit-const: cannot read %s\n", argv[1]); return 2; }
+    n = (long)bn;
+    for (at = 0; (i = tx_find(b + at, n - at, argv[2], ol)) >= 0; at += i + ol) hits++;
+    sy_printf("LIT_CONST\tfile=%s\thits=%ld\tapplied=%d\n", argv[1], hits, apply && hits > 0);
+    if (!hits) return 1;
+    if (!apply) return 0;
+    cap = n + hits * (nl > ol ? nl - ol : 0) + 1;
+    out = mm_alloc(cap); if (!out) return 2;
+    for (at = 0; (i = tx_find(b + at, n - at, argv[2], ol)) >= 0; at += i + ol) {
+        if (mm_copy(out + olen, cap - olen, b + at, i)) return 2; olen += i;
+        if (mm_copy(out + olen, cap - olen, argv[3], nl)) return 2; olen += nl;
+    }
+    if (mm_copy(out + olen, cap - olen, b + at, n - at)) return 2; olen += n - at;
+    if (cx_write(argv[1], out, (size_t)olen) != 0) { sy_eprintf("lit-const: cannot write %s\n", argv[1]); return 2; }
+    return 0;
+}
