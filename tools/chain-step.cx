@@ -433,52 +433,181 @@ static int cs_snap(const char *rev, const char *out) {
 
 /* gen2 = gen1 当构造器出的一片；gen3 = gen2 当构造器出的同目标片；cmp 两份必须全等。
    这是"两代不动点"的可执行口径：外部构造器只算 bootstrapping，不算一代。 */
+/* 一个文件对：只回 true/false，why 里带文件名与首差异偏移（0-based）。
+   打行由调用者按 item 汇总，这样一个 MISMATCH 行就能看出是哪一片、差在哪。 */
+static int cs_fp_eq(const char *a, const char *b, const char *name, char *why, long cap) {
+    long na = cs_file_size(a), nb = cs_file_size(b), k;
+    int fd;
+    char *x, *y;
+    if (na < 0) { cx_fmt(why, cap, "%s: missing in gen2", name); return 0; }
+    if (nb < 0) { cx_fmt(why, cap, "%s: missing in gen3", name); return 0; }
+    if (na != nb) { cx_fmt(why, cap, "%s: size %ld vs %ld", name, na, nb); return 0; }
+    if (na == 0) return 1;
+    x = malloc((size_t)na); y = malloc((size_t)nb);
+    if (!x || !y) cs_die("alloc", "compare");
+    fd = sy_open(a, O_RDONLY, 0);
+    if (fd < 0 || sy_read_full(fd, x, na) || sy_close(fd)) cs_die("read", a);
+    fd = sy_open(b, O_RDONLY, 0);
+    if (fd < 0 || sy_read_full(fd, y, nb) || sy_close(fd)) cs_die("read", b);
+    for (k = 0; k < na; k++)
+        if (x[k] != y[k]) { cx_fmt(why, cap, "%s: first diff offset %ld", name, k); free(x); free(y); return 0; }
+    free(x); free(y);
+    return 1;
+}
+/* 把一条 "文件名: 首差异偏移" 追加到汇总串（多片都坏时只留前两条，避免一行过长）。
+   逐字符拷贝而不是 memcpy(dst, src, 输入相关长度)：后者会被 cxtrunc 记一次丢弃调用，
+   而这里的长度本来就由参数决定，用带容量的循环更直白（也避免越界）。
+   分隔用字符串 "; " 而不是字符常量：.cx 里没有单引号字符字面量。 */
+static void cs_fp_note(char *why, long cap, const char *one) {
+    long l = (long)strlen(why), m = (long)strlen(one), i;
+    if (l > 0) {
+        if (l + 2 >= cap) return;
+        why[l] = 59; why[l + 1] = 32;
+        l += 2;
+        why[l] = 0;
+    }
+    if (l + m + 1 >= cap) return;
+    for (i = 0; i <= m; i++) why[l + i] = one[i];
+}
+/* 一组固定名字的文件：每个都逐字节相等才算该项 same；只打一行，
+   MISMATCH 时 why 里是"文件名: 首差异偏移"（多片都坏时取前两片）。 */
+static int cs_fp_set(const char *d2, const char *d3, const char *item,
+                     const char *const *names, int cnt) {
+    int i, ok = 0, bad = 0;
+    char p[4400], q[4400], why[512], one[256];
+    why[0] = 0;
+    for (i = 0; i < cnt; i++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", d2, names[i]) || cx_fmt(q, sizeof q, "%s/%s", d3, names[i]))
+            cs_die("path", item);
+        if (cs_fp_eq(p, q, names[i], one, sizeof one)) { ok++; continue; }
+        bad++;
+        if (bad <= 2) cs_fp_note(why, sizeof why, one);
+    }
+    if (ok == cnt) sy_printf("CHAIN\tfixedpoint\t%s=same\tcount=%d\n", item, cnt);
+    else sy_printf("CHAIN\tfixedpoint\t%s=MISMATCH\tok=%d/%d\t%s\n", item, ok, cnt, why);
+    return ok == cnt ? 0 : 1;
+}
+/* objects：g2 里每个 .o 都要在 g3 有同名同字节的副本，且两个目录的 .o 数量相同。 */
+static int cs_fp_objects(const char *d2, const char *d3) {
+    DIR *dp; struct dirent *e; int n2 = 0, n3 = 0, ok = 0, bad = 0;
+    char p[4400], q[4400], why[512], one[256];
+    why[0] = 0;
+    if (!(dp = opendir(d2))) cs_die("opendir", d2);
+    while ((e = readdir(dp))) {
+        size_t l = strlen(e->d_name);
+        if (l < 3 || strcmp(e->d_name + l - 2, ".o")) continue;
+        n2++;
+        if (cx_fmt(p, sizeof p, "%s/%s", d2, e->d_name) || cx_fmt(q, sizeof q, "%s/%s", d3, e->d_name))
+            cs_die("path", "objects");
+        if (cs_fp_eq(p, q, e->d_name, one, sizeof one)) { ok++; continue; }
+        bad++;
+        if (bad <= 2) cs_fp_note(why, sizeof why, one);
+    }
+    closedir(dp);
+    if (!(dp = opendir(d3))) cs_die("opendir", d3);
+    while ((e = readdir(dp))) {
+        size_t l = strlen(e->d_name);
+        if (l < 3 || strcmp(e->d_name + l - 2, ".o")) continue;
+        n3++;
+    }
+    closedir(dp);
+    if (n2 != n3) { sy_printf("CHAIN\tfixedpoint\tobjects=MISMATCH\tcount %d vs %d\n", n2, n3); return 1; }
+    if (ok != n2) { sy_printf("CHAIN\tfixedpoint\tobjects=MISMATCH\tok=%d/%d\t%s\n", ok, n2, why); return 1; }
+    sy_printf("CHAIN\tfixedpoint\tobjects=same\tcount=%d\n", n2);
+    return 0;
+}
+/* 五项：objects / kernels / slices / product / package。每项恰好一行，任一不一致返回 1。 */
+static int cs_fp_five(const char *g2, const char *g3, const char *pkg) {
+    static const char *kernels[2] = {"x86_64.kernel", "arm64.kernel"};
+    static const char *slices[5] = {"slice-lnx-x86_64", "slice-lnx-arm64", "slice-osx-x86_64",
+                                    "slice-osx-arm64", "slice-win-x86_64"};
+    char a[4400], b[4400], why[512];
+    int bad = 0;
+    if (cs_fp_objects(g2, g3)) bad = 1;
+    if (cs_fp_set(g2, g3, "kernels", kernels, 2)) bad = 1;
+    if (cs_fp_set(g2, g3, "slices", slices, 5)) bad = 1;
+    if (cx_fmt(a, sizeof a, "%s/candidate", g2) || cx_fmt(b, sizeof b, "%s/candidate", g3))
+        cs_die("path", "product");
+    if (cs_fp_eq(a, b, "candidate", why, sizeof why)) sy_printf("CHAIN\tfixedpoint\tproduct=same\n");
+    else { sy_printf("CHAIN\tfixedpoint\tproduct=MISMATCH\t%s\n", why); bad = 1; }
+    if (cs_file_size(pkg) < 0) { sy_printf("CHAIN\tfixedpoint\tpackage=MISSING\n"); bad = 1; }
+    else { char h[65]; cs_sha(pkg, h); sy_printf("CHAIN\tfixedpoint\tpackage=same\tsha=%.16s\n", h); }
+    return bad;
+}
+static int cs_fp_compare(const char *d2, const char *d3, const char *pkg) {
+    return cs_fp_five(d2, d3, pkg) ? 1 : 0;
+}
+/* 一代：五片按目标清单构造，CTOR 的取法分两类：
+   1) lnx/x86_64 与 lnx/arm64 走 objects 路由：lnx/x86_64 用上一代 candidate 作 CTOR
+      （产物 slice-lnx-x86_64 同时也是本代的 product），lnx/arm64 沿用上一代 CTOR；
+   2) 三个 whole-o 片（osx/x86_64、osx/arm64、win/x86_64）统一用**本代** slice-lnx-x86_64。
+   CTOR 经环境变量 UNISACC_CTOR 传给 rb_whole（release-build 的 whole-o 路径），
+   所以每次 cs_slice 之前都要重新 setenv，循环里用的是当时的 cur。 */
+static const char *cs_fp_targets[5] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64"};
+static int cs_fp_gen(const char *rev, const char *s, const char *pkg, const char *dir,
+                     const char *ctor, char *product, long cap) {
+    char cur[4400], lnx[4400];
+    int i;
+    if (cx_fmt(cur, sizeof cur, "%s", ctor)) cs_die("path", "ctor");
+    for (i = 0; i < 5; i++) {
+        char *a[10];
+        int n = 0;
+        /* whole-o 三片用本代 lnx 片：osx/arm64 靠它避开 DV_MAXU，win 与 osx/x86_64 同一口径。 */
+        if (i >= 2) {
+            if (cx_fmt(cur, sizeof cur, "%s/slice-lnx-x86_64", dir)) cs_die("path", dir);
+            if (cs_file_size(cur) < 0) cs_die("lnx slice missing before whole-o", cur);
+        }
+        if (sy_setenv("UNISACC_CTOR", cur, 1)) cs_die("env", "UNISACC_CTOR");
+        a[n++] = (char *)pkg; a[n++] = (char *)dir;
+        a[n++] = (char *)"--target"; a[n++] = (char *)cs_fp_targets[i]; a[n] = 0;
+        if (cs_slice(rev, s, n, a)) return 2;
+        if (i == 0) {
+            if (cx_fmt(lnx, sizeof lnx, "%s/slice-lnx-x86_64", dir)) cs_die("path", dir);
+            if (cs_file_size(lnx) < 0) cs_die("gen1 lnx slice missing", lnx);
+            if (cx_fmt(product, cap, "%s", lnx)) cs_die("path", dir);
+        }
+    }
+    return 0;
+}
+/* 一代：两个 ISA 的 kernel 落到同一目录（复用 cs_routes_kernels 的调用方式）。 */
+static int cs_fp_kernels(const char *s, const char *dir) {
+    char kdir[4400], iso[4400], launcher[4400], tool[4400], dst[4400];
+    char *v[8]; int n = 0, a;
+    if (cx_fmt(kdir, sizeof kdir, "%s/kernel-route", dir)) cs_die("path", dir);
+    if (cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", s)) cs_die("path", s);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/kernel-route.cx", s)) cs_die("path", s);
+    v[n++] = (char *)"sh"; v[n++] = launcher; v[n++] = tool; v[n++] = (char *)"--";
+    v[n++] = (char *)s; v[n++] = kdir; v[n] = 0;
+    if (cs_run(v, ".")) cs_die("kernel-route", kdir);
+    for (a = 0; a < 2; a++) {
+        if (cx_fmt(iso, sizeof iso, "%s/%s.kernel", kdir, a ? "arm64" : "x86_64")) cs_die("path", kdir);
+        if (cs_file_size(iso) < 0) cs_die("kernel-route wrote no kernel", iso);
+        if (cx_fmt(dst, sizeof dst, "%s/%s.kernel", dir, a ? "arm64" : "x86_64")) cs_die("path", dir);
+        cs_copy(iso, dst);
+    }
+    return 0;
+}
 static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
                          const char *target) {
-    char g2[4400], g3[4400], c2[4400], c3[4400], t2[4400], t3[4400];
-    char *a[10];
-    int n = 0;
+    char g2[4400], g3[4400], c2[4400], c3[4400];
     if (cs_file_size(gen1) < 0) cs_die("gen1 candidate missing", gen1);
     if (cx_fmt(g2, sizeof g2, "%s/g2", out)) cs_die("path", out);
     if (cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
-    if (sy_setenv("UNISACC_CTOR", gen1, 1)) cs_die("env", "UNISACC_CTOR");
-    a[n++] = (char *)pkg; a[n++] = g2;
-    a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
-    if (cs_slice(rev, s, n, a)) return 2;
-    if (cx_fmt(c2, sizeof c2, "%s/%s", g2, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g2);
-    if (cs_file_size(c2) < 0) cs_die("gen2 candidate missing", c2);
-    if (sy_setenv("UNISACC_CTOR", c2, 1)) cs_die("env", "UNISACC_CTOR");
-    n = 0;
-    a[n++] = (char *)pkg; a[n++] = g3;
-    a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
-    if (cs_slice(rev, s, n, a)) return 2;
-    if (cx_fmt(c3, sizeof c3, "%s/%s", g3, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g3);
-    if (cs_file_size(c3) < 0) cs_die("gen3 candidate missing", c3);
-    /* 逐字节比较：两份都用 sy_open/sy_read 读全，长度不同直接判红。 */
-    {
-        long n2 = cs_file_size(c2), n3 = cs_file_size(c3), k;
-        int same = 1, fd;
-        if (n2 != n3) same = 0;
-        else if (n2 > 0) {
-            char *b2 = malloc((size_t)n2), *b3 = malloc((size_t)n3);
-            if (!b2 || !b3) cs_die("alloc", "candidate buffers");
-            fd = sy_open(c2, O_RDONLY, 0);
-            if (fd < 0 || sy_read_full(fd, b2, n2) || sy_close(fd)) cs_die("read candidate", c2);
-            fd = sy_open(c3, O_RDONLY, 0);
-            if (fd < 0 || sy_read_full(fd, b3, n3) || sy_close(fd)) cs_die("read candidate", c3);
-            for (k = 0; same && k < n2; k++) if (b2[k] != b3[k]) same = 0;
-            free(b2);
-            free(b3);
-        }
-        if (!same) { sy_printf("CHAIN\tfixedpoint\tMISMATCH\tgen2=%s\tgen3=%s\n", c2, c3); return 1; }
+    /* 两代都跑全五片：门槛 8 要求 kernels 与 slices 也在每代树里，才能五项逐字节比。
+       target 参数保留只为兼容旧调用，实际按固定五片清单执行。 */
+    (void)target;
+    if (cs_fp_gen(rev, s, pkg, g2, gen1, c2, sizeof c2)) return 2;
+    if (cs_fp_gen(rev, s, pkg, g3, c2, c3, sizeof c3)) return 2;
+    if (cs_fp_kernels(s, g2) || cs_fp_kernels(s, g3)) return 2;
+    if (cs_fp_five(g2, g3, pkg)) {
+        sy_printf("CHAIN\tfixedpoint\tMISMATCH\tgen2=%s\tgen3=%s\n", c2, c3);
+        return 1;
     }
-    if (cx_fmt(t2, sizeof t2, "%s/candidate", g2)) cs_die("path", g2);
-    if (cx_fmt(t3, sizeof t3, "%s/candidate", g3)) cs_die("path", g3);
-    {
-        char h2[65], h3[65];
-        cs_sha(t2, h2);
-        cs_sha(t3, h3);
-        sy_printf("CHAIN\tfixedpoint\tgen2=%.16s\tgen3=%.16s\tbytes=%ld\tsame=1\n", h2, h3, cs_file_size(t2));
+    {   char h2[65], h3[65];
+        cs_sha(c2, h2);
+        cs_sha(c3, h3);
+        sy_printf("CHAIN\tfixedpoint\tgen2=%.16s\tgen3=%.16s\tbytes=%ld\tsame=1\titems=5\n",
+                  h2, h3, cs_file_size(c2));
     }
     return 0;
 }
@@ -671,6 +800,11 @@ int main(int argc, char **argv) {
            从树内事实与 ctx 作业再生成，全新克隆也能出包。 */
         if (argc < 6) cs_die("routes needs REV S CTX OUT", 0);
         return cs_routes(argv[2], argv[3], argv[4], argv[5]);
+    }
+    /* 回放用：fp-compare DIR2 DIR3 PKG —— 不跑链，只对已有两代产物做五项比较。 */
+    if (tx_eqz(argv[1], "fp-compare")) {
+        if (argc < 5) cs_die("fp-compare needs DIR2 DIR3 PKG", 0);
+        return cs_fp_compare(argv[2], argv[3], argv[4]) ? 1 : 0;
     }
     if (tx_eqz(argv[1], "fixedpoint")) {
         /* fixedpoint REV S PKG GEN1 OUT --target T */
