@@ -245,6 +245,15 @@ eighteen-net table below is the **decision-network / classic-reference**
 instance (finite key → class at ask points). It does **not** replace the
 seven-stream byte-pipeline contract above.
 
+Each stage can be run on its own with `unisacc stream STAGE [--route R] [--source LABEL] [--raw] < in > out`
+(`stream frame` and `stream sidecar` join and split the multi-unit and side-car forms). A chain such as
+`e2 | e1 | e3 | sidecar | prune | lower | elf` gives the same bytes as `-o`. A stage that rejects exits 1 and
+writes nothing, so the next stage sees an empty pipe and exits 1 with `no input`; in a shell pipeline the
+first failure is only visible with `set -o pipefail` (or by checking every stage's status). The tape entry
+check reads the first line (`_start:`) and the final newline only: a tape cut at a line boundary passes the
+entry check and is caught downstream (measured on a stdio program: 10667 of 10670 line cuts are rejected by
+`elf` as a branch to an undefined label; the other 3 keep only the first 1-3 lines and do not run).
+
 ### Decision nets (classic-reference instance)
 
 <!-- stages:begin -->

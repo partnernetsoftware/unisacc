@@ -24,6 +24,6 @@
 
 ## 已知未完成（发布时删除本段）
 - 跨单元共享 FILE:多源一次编译时,单元 A 写入的缓冲在单元 B fclose 时丢失(RT-SHARED 修复中,将并入本版);修复后多单元产物字节会变。`-c` 分开编再链接的路径本版只给警告,不修(RT-COMMON,0.0.45)。
-- e4/prune/lower 对不合法输入不拒绝(STAGE-REJECT 修复中);截断恰好落在行尾时 tape 入口检查无法识别(格式无结束标记)。
+- tape 入口校验(e4/prune/lower)只检查首行 `_start:` 和末字节换行(STAGE-REJECT 修复中)。tape 没有结束标记,所以截在任一行尾、或缺 `__main_ret` 段的 tape 能通过入口检查,只能靠下游拒绝。实测:一个 stdio 程序的 tape 共 10670 个行尾截断点,逐个喂 prune|lower|elf,10667 个被 elf 以 `a branch to an undefined label` 拒绝;另 3 个只剩开头 1-3 行,能产出可执行文件,但运行 rc 为 127 或 SIGSEGV,没有运行成功而行为错的情况。这种输入只会出现在手工拼的 `stream` 管道里,`-o` 不会产生。加结束标记留 0.0.45(TAPE-END)。手工拼管道时要用 `set -o pipefail` 判断上游失败。
 - 运行库每对象各带一份(约 264KB,ELF 的 15%),去重留 0.0.45(RT-DEDUP)。
 - DOCK2*、ARITY、SRC-SPLIT 为 P2。
