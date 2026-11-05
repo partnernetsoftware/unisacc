@@ -19,6 +19,7 @@
  * Prints PASS/FAIL per assertion and a last line CHECK_STREAM_PIPE failed=N; rc 1 on any FAIL.
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use sys.hostid
 
 #define SP_N65 65
 
@@ -26,6 +27,13 @@ static char *sp_cat(char *d, const char *s) { char *p = d + strlen(d); while (*s
 static int sp_failed;
 static char sp_prod[4400];
 static char sp_dir[4400];
+/* The route target is this slice's own target (cx/sys/hostid.cx, from exec/facts/pp-targets.tsv):
+   the product's `-o` uses its native target, so a hardcoded route would compare two different
+   targets on a non-lnx/x86_64 host.  SP_TGT_OVERRIDE exists so the negative control can prove the
+   comparison is live: a wrong target must make the byte compare fail. */
+static char sp_tgt[64];
+static const char *sp_tgt_override;
+static const char *sp_target(void) { return sp_tgt_override ? sp_tgt_override : sp_tgt; }
 static char *sp_env[] = {"UNISA_JOBS=1", 0};
 
 static void sp_ck(int ok, const char *label) {
@@ -78,10 +86,10 @@ static int sp_stage(const char *stage, const char *args, const char *in, const c
 /* The whole single-source image pipe for SRC into OUT; rc of the last stage, or
    the first non-zero one. STDERR of the e3 stage goes to E3ERR when asked. */
 static int sp_image_pipe(const char *src, const char *out, const char *tag, char **e3err, size_t *e3n) {
-    char a[600], f[8][600];
+    char a[600], f[8][600], run[600], img[600];
     int k, rc;
-    const char *run = "--route lnx/x86_64/run/O0 --res run-forward --source";
-    const char *img = "--route lnx/x86_64/image/O0 --source";
+    if (cx_fmt(run, sizeof run, "--route %s/run/O0 --res run-forward --source", sp_target())) sp_die("args");
+    if (cx_fmt(img, sizeof img, "--route %s/image/O0 --source", sp_target())) sp_die("args");
     for (k = 0; k < 8; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
     if (cx_fmt(a, sizeof a, "%s %s", run, src)) sp_die("args");
     if ((rc = sp_stage("e2", a, src, f[0], 0, 0)) != 0) return rc;
@@ -102,7 +110,7 @@ static int sp_units(const char **srcs, int n, const char *frame) {
     if (!cmd) sp_die("alloc");
     if (cx_fmt(cmd, 200 + (size_t)n * 1300, "exec %s stream frame", sp_prod)) sp_die("cmd");
     for (j = 0; j < n; j++) {
-        if (cx_fmt(a, sizeof a, "--route lnx/x86_64/unit --unit %d --source %s", j, srcs[j]) ||
+        if (cx_fmt(a, sizeof a, "--route %s/unit --unit %d --source %s", sp_target(), j, srcs[j]) ||
             cx_fmt(in1, sizeof in1, "%s.u2", srcs[j]) || cx_fmt(in2, sizeof in2, "%s.u1", srcs[j])) sp_die("args");
         if ((rc = sp_stage("e2", a, srcs[j], in1, 0, 0)) != 0 || (rc = sp_stage("e1", a, in1, in2, 0, 0)) != 0) { free(cmd); return rc; }
         sp_cat(cmd, " --in "); sp_cat(cmd, srcs[j]); sp_cat(cmd, "="); sp_cat(cmd, in2);
@@ -116,11 +124,11 @@ static int sp_multi_image(const char *frame, const char *first, const char *out,
     char a[600], f[6][600];
     int k, rc;
     for (k = 0; k < 6; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
-    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/run/O0 --res run-forward --source %s", first)) sp_die("args");
+    if (cx_fmt(a, sizeof a, "--route %s/multi/run/O0 --res run-forward --source %s", sp_target(), first)) sp_die("args");
     if ((rc = sp_stage("units", a, frame, f[0], 0, 0)) != 0) return rc;
     if ((rc = sp_stage("e3", a, f[0], f[1], 0, 0)) != 0) return rc;
     if ((rc = sp_stage("sidecar", "", f[1], f[2], 0, 0)) != 0) return rc;
-    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/image/O0 --source %s", first)) sp_die("args");
+    if (cx_fmt(a, sizeof a, "--route %s/multi/image/O0 --source %s", sp_target(), first)) sp_die("args");
     if ((rc = sp_stage("prune", a, f[2], f[3], 0, 0)) != 0) return rc;
     if ((rc = sp_stage("lower", a, f[3], f[4], 0, 0)) != 0) return rc;
     return sp_stage("elf", sp_cat(a, " --raw"), f[4], out, 0, 0);
@@ -129,7 +137,7 @@ static int sp_multi_tape(const char *frame, const char *first, const char *out, 
     char a[600], f[3][600];
     int k, rc;
     for (k = 0; k < 3; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sp_die("tag");
-    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/multi/tape/O0 --source %s", first)) sp_die("args");
+    if (cx_fmt(a, sizeof a, "--route %s/multi/tape/O0 --source %s", sp_target(), first)) sp_die("args");
     if ((rc = sp_stage("units", a, frame, f[0], 0, 0)) != 0) return rc;
     if ((rc = sp_stage("e3", a, f[0], f[1], 0, 0)) != 0) return rc;
     return sp_stage("tapecheck", sp_cat(a, " --raw"), f[1], out, 0, 0);
@@ -152,6 +160,9 @@ int main(int argc, char **argv) {
     char line[200];
     shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0;
     if (!realpath(argc > 1 + shift ? argv[1 + shift] : "./unisacc.com", sp_prod)) sp_die("product path");
+    /* This slice's own target, from the generated L0 module.  A null means the slice has no row. */
+    { const char *self = tn_self(); if (!self || !self[0]) sp_die("no self target"); if (cx_fmt(sp_tgt, sizeof sp_tgt, "%s", self)) sp_die("self target bound"); }
+    sp_tgt_override = getenv("SP_TGT_OVERRIDE");   /* negative control only */
     if (cx_fmt(sp_dir, sizeof sp_dir, "%s/stream-pipe-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(sp_dir)) sp_die("scratch");
     sp_put("plain.c", "int f(int x){return x*2;}\nint main(void){return f(21)-42;}\n");
     sp_put("hello.c", "#include <stdio.h>\nint main(void){printf(\"hi %d\\n\",42);return 0;}\n");
@@ -189,6 +200,19 @@ int main(int argc, char **argv) {
     rc2 = sp_units(s65, SP_N65, "s65.frame");
     if (rc2 == 0) rc2 = sp_multi_tape("s65.frame", "m0.c", "s65.pipe", "t");
     sp_ck(rc == 0 && rc2 == 0 && sp_same("s65.ref", "s65.pipe"), "E 65-source-tape-pipe-cmp");
+    /* H: negative control -- the compare must be live.  Force a route target that is NOT this
+       slice's own, rebuild the same pipe, and require the byte compare to FAIL.  On a host whose
+       own target is the only row the pipe cannot be built at all, which is also a non-equal result
+       (rc != 0), so the assertion holds either way; it can never pass by both sides being equal. */
+    {   /* plain.ref came from the product's -o, which uses this slice's own target; pick a route
+           target that is NOT that one, so the two sides must differ. */
+        const char *native = tn_self();
+        const char *other = (native && !strcmp(native, "lnx/x86_64")) ? "lnx/arm64" : "lnx/x86_64";
+        const char *keep = sp_tgt_override;
+        sp_tgt_override = other;
+        rc2 = sp_image_pipe("plain.c", "plain.wrong.pipe", "w", 0, 0);
+        sp_ck(rc2 != 0 || !sp_same("plain.ref", "plain.wrong.pipe"), "H wrong-target-pipe-not-equal");
+        sp_tgt_override = keep;   /* restore this slice's own target (or the env override) */ }
     /* F: a reject stops at e3 with the product's diagnostic; the next stage reports the empty pipe. */
     rc = sp_ref("-o", "bad.ref", "bad.c", &e_ref, &n_ref);
     rc2 = sp_image_pipe("bad.c", "bad.pipe", "b", &e_pipe, &n_pipe);
