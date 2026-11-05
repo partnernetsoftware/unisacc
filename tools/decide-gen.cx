@@ -1,6 +1,6 @@
 /* tools/decide-gen.cx -- compile a finite decision table into net rows.
  *
- *   sh ./unisacc.com tools/decide-gen.cx -- --write|--check [--each FIELD=v1,v2,...] TABLE.tsv PREFIX STATE OUT-result.tsv
+ *   sh ./unisacc.com tools/decide-gen.cx -- --write|--check [--each FIELD=v1,v2,...]... [--select REG] [--sections] TABLE PREFIX STATE OUT-result.tsv
  *
  * TABLE is a weights-style table: "#field NAME v0 v1 ..." lines, then one row per
  * key, fields first and label last.  The key is the mixed-radix number of the field
@@ -15,16 +15,22 @@
  * names the level-1 value in the state it enters), and the key is the mixed-radix
  * number of the remaining fields.  Every listed value must be in FIELD's domain and
  * every key of every listed state must have exactly one row; values not listed are
- * left out of the net (reported on stdout), not silently covered.
+ * left out of the net (reported on stdout), not silently covered.  --each may be
+ * given up to three times (one state STATE.v1.v2 per listed combination).
  *
- * --select REG (with --each) is the dynamic level-1 form: the mechanism holds FIELD's
+ * --select REG (with one --each) is the dynamic level-1 form: the mechanism holds FIELD's
  * domain index in the register it RLDs into STATE and the level-2 key in REG; this tool
  * also writes STATE <index> STATE.<value> [["RLD","REG"]] for every listed value and
- * STATE * PREFIX.out-of-domain [], so both levels are rows T1 checks, not a pool. */
+ * STATE * PREFIX.out-of-domain [], so both levels are rows T1 checks, not a pool.
+ *
+ * --sections (with --each) names each state's section after its level-1 values
+ * (v1.v2 instead of main), so a manifest row can install one section per static
+ * choice (lower: one target's rows per net) from the same generated file. */
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #define DG_MAXF 8
 #define DG_MAXV 128
+#define DG_MAXE 3
 static char *field[DG_MAXF][DG_MAXV]; static int nvals[DG_MAXF], nfield;
 static void die(const char *a, const char *b) { fprintf(stderr, "decide-gen: %s %s\n", a, b); exit(2); }
 static char *slurp(const char *p) {
@@ -39,18 +45,36 @@ static int split(char *s, char **v, int cap) {
     while (*s) { if (*s == '\t') { *s = 0; if (n == cap) die("too many fields", v[0]); v[n++] = s + 1; } s++; }
     return n;
 }
-int main(int argc, char **argv) {
-    int a = 2, each = -1, nsel = 0; char *selname = 0, *sel[DG_MAXV], *selreg = 0;
-    if (argc < 2 || (strcmp(argv[1], "--write") && strcmp(argv[1], "--check"))) die("usage:", "--write|--check [--each FIELD=v,... [--select REG]] TABLE PREFIX STATE OUT");
-    if (argc >= 4 && !strcmp(argv[2], "--each")) {
-        char *eq = strchr(argv[3], '=');
-        if (!eq) die("--each wants FIELD=v1,v2,...", argv[3]);
-        *eq = 0; selname = argv[3];
-        for (eq++; *eq; ) { char *c = strchr(eq, ','); if (nsel == DG_MAXV) die("too many --each values", selname); sel[nsel++] = eq; if (!c) break; *c = 0; eq = c + 1; }
-        a = 4;
-        if (argc >= 6 && !strcmp(argv[4], "--select")) { selreg = argv[5]; a = 6; }
+/* STATE suffix ".v1.v2" and the section name "v1.v2" of listed combination c (slowest --each first). */
+static int neach, nsel[DG_MAXE], each[DG_MAXE]; static char *selname[DG_MAXE], *sel[DG_MAXE][DG_MAXV];
+static void combo(long c, char *suffix, char *section, long cap) {
+    long i, d, part[DG_MAXE]; long s = 0, t = 0;
+    for (i = neach - 1; i >= 0; i--) { part[i] = c % nsel[i]; c /= nsel[i]; }
+    for (i = 0; i < neach; i++) {
+        d = sprintf_n(suffix + s, cap - s, ".%s", sel[i][part[i]]); s += d;
+        d = sprintf_n(section + t, cap - t, "%s%s", i ? "." : "", sel[i][part[i]]); t += d;
     }
-    if (argc != a + 4) die("usage:", "--write|--check [--each FIELD=v,... [--select REG]] TABLE PREFIX STATE OUT");
+    if (!neach) { suffix[0] = 0; sprintf_n(section, cap, "main"); }
+}
+int main(int argc, char **argv) {
+    int a = 2; char *selreg = 0; int sections = 0; long ncombo = 1;
+    if (argc < 2 || (strcmp(argv[1], "--write") && strcmp(argv[1], "--check"))) die("usage:", "--write|--check [--each FIELD=v,...]... [--select REG] [--sections] TABLE PREFIX STATE OUT");
+    while (a < argc && !strncmp(argv[a], "--", 2) && argv[a][2]) {
+        if (!strcmp(argv[a], "--each") && a + 1 < argc) {
+            char *eq = strchr(argv[a + 1], '=');
+            if (!eq) die("--each wants FIELD=v1,v2,...", argv[a + 1]);
+            if (neach == DG_MAXE) die("too many --each", argv[a + 1]);
+            *eq = 0; selname[neach] = argv[a + 1]; each[neach] = -1;
+            for (eq++; *eq; ) { char *c = strchr(eq, ','); if (nsel[neach] == DG_MAXV) die("too many --each values", selname[neach]); sel[neach][nsel[neach]++] = eq; if (!c) break; *c = 0; eq = c + 1; }
+            ncombo *= nsel[neach]; neach++; a += 2;
+        } else if (!strcmp(argv[a], "--select") && a + 1 < argc) { selreg = argv[a + 1]; a += 2; }
+        else if (!strcmp(argv[a], "--sections")) { sections = 1; a++; }
+        else die("unknown option", argv[a]);
+    }
+    if (argc != a + 4) die("usage:", "--write|--check [--each FIELD=v,...]... [--select REG] [--sections] TABLE PREFIX STATE OUT");
+    if ((selreg || sections) && !neach) die("--select and --sections want --each", "");
+    if (selreg && neach != 1) die("--select wants exactly one --each", "");
+    if (ncombo > DG_MAXV) die("too many --each combinations", "");
     char *table = argv[a], *prefix = argv[a + 1], *state = argv[a + 2], *outpath = argv[a + 3];
     char *t = slurp(table), *line; long size = 1, rows = 0, cap = 1 << 22, at = 0, listed = 0, skipped = 0;
     if (!t) die("cannot read", table);
@@ -58,41 +82,45 @@ int main(int argc, char **argv) {
     at += sprintf_n(out + at, cap - at, "# generated by tools/decide-gen.cx from %s; do not edit\n", table);
     at += sprintf_n(out + at, cap - at, "# section\tstate\tobservation\ttarget\tactions\n");
     for (line = t; line && *line; ) {
-        char *nl = strchr(line, '\n'), *v[DG_MAXV + 2]; int n, i, k = 0, s = 0;
+        char *nl = strchr(line, '\n'), *v[DG_MAXV + 2]; int n, i, k = 0, e; long s = 0; char suffix[256], section[256];
         if (nl) *nl = 0;
         if (!strncmp(line, "#field\t", 7)) {
             n = split(line, v, DG_MAXV + 2);
             if (nfield == DG_MAXF || n < 3) die("bad field", line);
             for (i = 2; i < n; i++) field[nfield][i - 2] = v[i];
             nvals[nfield] = n - 2;
-            if (selname && !strcmp(v[1], selname)) each = nfield; else size *= n - 2;
+            for (e = 0; e < neach; e++) if (!strcmp(v[1], selname[e])) break;
+            if (e < neach) each[e] = nfield; else size *= n - 2;
             nfield++;
             if (size > 257) die("domain exceeds one r-mode state", table);
         } else if (*line && *line != '#' && nfield) {
             n = split(line, v, DG_MAXV + 2);
             if (n != nfield + 1 || !strncmp(v[nfield], "=>", 2)) { line = nl ? nl + 1 : 0; continue; }
             for (i = 0; i < nfield; i++) {
-                int x = -1, j;
+                int x = -1, j, se = -1;
                 for (j = 0; j < nvals[i]; j++) if (!strcmp(field[i][j], v[i])) x = j;
                 if (x < 0) die("value out of domain", v[i]);
-                if (i == each) { for (j = 0, s = -1; j < nsel; j++) if (!strcmp(sel[j], v[i])) s = j; }
+                for (e = 0; e < neach; e++) if (each[e] == i) break;
+                if (e < neach) { for (j = 0; j < nsel[e]; j++) if (!strcmp(sel[e][j], v[i])) se = j; if (se < 0) s = -1; else if (s >= 0) s = s * nsel[e] + se; }
                 else k = k * nvals[i] + x;
             }
             if (s < 0) { skipped++; line = nl ? nl + 1 : 0; continue; }
             if (seen[s * 258 + k]) die("repeated key", v[0]);
             seen[s * 258 + k] = 1; rows++;
-            if (each >= 0) at += sprintf_n(out + at, cap - at, "main\t%s.%s\t%d\t%s.%s\t[]\n", state, sel[s], k, prefix, v[nfield]);
-            else at += sprintf_n(out + at, cap - at, "main\t%s\t%d\t%s.%s\t[]\n", state, k, prefix, v[nfield]);
+            combo(s, suffix, section, sizeof suffix);
+            at += sprintf_n(out + at, cap - at, "%s\t%s%s\t%d\t%s.%s\t[]\n", sections ? section : "main", state, suffix, k, prefix, v[nfield]);
         }
         line = nl ? nl + 1 : 0;
     }
-    if (selname && each < 0) die("--each field not in table", selname);
-    for (int j = 0; j < nsel; j++) {
-        int x = -1, q; for (q = 0; q < nvals[each]; q++) if (!strcmp(field[each][q], sel[j])) x = q; if (x < 0) die("--each value out of domain", sel[j]);
-        if (selreg) at += sprintf_n(out + at, cap - at, "main\t%s\t%d\t%s.%s\t[[\"RLD\",\"%s\"]]\n", state, x, state, sel[j], selreg);
+    for (int e = 0; e < neach; e++) {
+        if (each[e] < 0) die("--each field not in table", selname[e]);
+        for (int j = 0; j < nsel[e]; j++) {
+            int x = -1, q; for (q = 0; q < nvals[each[e]]; q++) if (!strcmp(field[each[e]][q], sel[e][j])) x = q; if (x < 0) die("--each value out of domain", sel[e][j]);
+            if (selreg) at += sprintf_n(out + at, cap - at, "main\t%s\t%d\t%s.%s\t[[\"RLD\",\"%s\"]]\n", state, x, state, sel[e][j], selreg);
+        }
     }
     if (selreg) at += sprintf_n(out + at, cap - at, "main\t%s\t*\t%s.out-of-domain\t[]\n", state, prefix);
-    if (each >= 0) { for (int j = 0; j < nsel; j++) at += sprintf_n(out + at, cap - at, "main\t%s.%s\t*\t%s.out-of-domain\t[]\n", state, sel[j], prefix); listed = nsel; }
+    if (neach) { for (long c = 0; c < ncombo; c++) { char suffix[256], section[256]; combo(c, suffix, section, sizeof suffix); at += sprintf_n(out + at, cap - at, "%s\t%s%s\t*\t%s.out-of-domain\t[]\n", sections ? section : "main", state, suffix, prefix); } listed = ncombo; }
     else { at += sprintf_n(out + at, cap - at, "main\t%s\t*\t%s.out-of-domain\t[]\n", state, prefix); listed = 1; }
     if (rows != size * listed) { fprintf(stderr, "decide-gen: %ld rows for %ld keys\n", rows, size * listed); return 2; }
     if (!strcmp(argv[1], "--write")) { FILE *o = fopen(outpath, "wb"); if (!o || fwrite(out, 1, (size_t)at, o) != (size_t)at || fclose(o)) die("cannot write", outpath); }

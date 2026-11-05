@@ -1,26 +1,39 @@
 /* tests/check-decide.cx -- each decision table and its generated net rows agree, key by key. */
 #pragma unisa use cxlib.netpack
-static int one(char *table, char *each, char *prefix, char *state, char *out, char *select) {
-    char *v[14]; int i = 0; np_result r = {0}; char why[512]; int rc;
-    v[i++] = "sh"; v[i++] = "./unisacc.com"; v[i++] = "tools/decide-gen.cx"; v[i++] = "--"; v[i++] = "--check";
-    if (each) { v[i++] = "--each"; v[i++] = each; }
-    if (select) { v[i++] = "--select"; v[i++] = select; }
-    v[i++] = table; v[i++] = prefix; v[i++] = state; v[i++] = out; v[i] = 0;
+static int run(char **v, const char *what) {
+    np_result r = {0}; char why[512]; int rc;
     rc = np_run(v, ".", 0, 40, &r, why, sizeof why);
     if (r.errn) fwrite(r.err, 1, r.errn, stderr);
-    if (rc || r.rc) { printf("DECIDE_CHECK\ttable=%s\tstatus=FAIL\n", table); np_free(&r); return 1; }
+    if (rc || r.rc) { printf("DECIDE_CHECK\ttable=%s\tstatus=FAIL\n", what); np_free(&r); return 1; }
     np_free(&r); return 0;
+}
+/* opts: extra decide-gen options before TABLE (--each FIELD=..., --select REG, --sections), NULL-terminated. */
+static int one(char *table, char **opts, char *prefix, char *state, char *out) {
+    char *v[20]; int i = 0;
+    v[i++] = "sh"; v[i++] = "./unisacc.com"; v[i++] = "tools/decide-gen.cx"; v[i++] = "--"; v[i++] = "--check";
+    for (; opts && *opts; opts++) { if (i >= 14) { printf("DECIDE_CHECK\ttable=%s\tstatus=FAIL\n", table); return 1; } v[i++] = *opts; }
+    v[i++] = table; v[i++] = prefix; v[i++] = state; v[i++] = out; v[i] = 0;
+    return run(v, table);
 }
 int main(void) {
     int bad = 0;
-    bad |= one("weights/arity/arity.tsv", 0, "AR", "AR.ask", "exec/parse2/aritydecide-result.tsv", 0);
-    bad |= one("weights/stmt/stmt.tsv", 0, "S", "STMT.ask", "exec/parse2/stmtdecide-result.tsv", 0);
+    char *peep[] = {"--each", "a=store64,load64,imm,mov,jump,jumpz,alu,other", "--select", "q_t", 0};
+    char *type[] = {"--each", "op=|,^,==,<,<<,>>,+,-,%,*,/", 0};
+    char *abi[] = {"--each", "os=lnx,osx,win", "--each", "arch=x86_64,arm64", "--sections", 0};
+    char *abigen[] = {"sh", "./unisacc.com", "tools/abidispatch-gen.cx", "--", "--check", 0};
+    bad |= one("weights/arity/arity.tsv", 0, "AR", "AR.ask", "exec/parse2/aritydecide-result.tsv");
+    bad |= one("weights/stmt/stmt.tsv", 0, "S", "STMT.ask", "exec/parse2/stmtdecide-result.tsv");
     /* peep.tsv is a(8) x b(17) x rel(12): a is dynamic too, so --select writes the level-1 RLD rows as well (E4, exec/opt). */
-    bad |= one("weights/gold/peep.tsv", "a=store64,load64,imm,mov,jump,jumpz,alu,other", "PX", "PEEP.ask", "exec/opt/peepdecide-result.tsv", "q_t");
+    bad |= one("weights/gold/peep.tsv", peep, "PX", "PEEP.ask", "exec/opt/peepdecide-result.tsv");
     /* type.tsv is t1(15) x op(19) x t2(15): the operator is the static level (one state per operator the
      * net asks, exec/facts/gen2-literals.tsv tyop), the key t1*15+t2 is the r-mode level. */
-    bad |= one("weights/gold/type.tsv", "op=|,^,==,<,<<,>>,+,-,%,*,/", "RESD", "RESD.ask", "exec/parse2/typedecide-result.tsv", 0);
-    bad |= one("weights/gold/type.tsv", "op=|,^,==,<,<<,>>,+,-,%,*,/", "RESF", "RESF.ask", "exec/parse2/typefloat-result.tsv", 0);
+    bad |= one("weights/gold/type.tsv", type, "RESD", "RESD.ask", "exec/parse2/typedecide-result.tsv");
+    bad |= one("weights/gold/type.tsv", type, "RESF", "RESF.ask", "exec/parse2/typefloat-result.tsv");
+    /* dispatch.tsv is op(87) x os(3) x arch(2), projected from weights/gold/abi.tsv by tools/abidispatch-gen.cx
+     * (checked first): os and arch are the static level, one section per target so a lower net carries its own
+     * 88 rows (exec/lower/codeabi-manifest.tsv), the op index (mem SCIX, written by the prelude) is the r-mode key. */
+    bad |= run(abigen, "weights/abi/dispatch.tsv");
+    bad |= one("weights/abi/dispatch.tsv", abi, "SC", "SC.ask", "exec/lower/abidecide-result.tsv");
     if (bad) return 1;
     puts("DECIDE_CHECK\tstatus=PASS"); return 0;
 }
