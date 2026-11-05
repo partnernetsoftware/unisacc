@@ -1,5 +1,7 @@
 # Same-candidate native qualification: one APE (exact sha256) + one commit (exact tests) on every native runner.
 # Manual dispatch only; no push/PR/schedule trigger, release, signing or publication.
+# The candidate comes from a private draft release asset (release_tag, preferred) or a plain https URL (ape_url);
+# either way its identity is ape_sha256. Only the fetch job may read draft releases (contents: write).
 # Cell logic and the evidence table are tests/candidate-qualify.cx; the Windows step is only its host adapter,
 # because that tool needs fork/process groups. COMMIT must contain tests/candidate-qualify.cx.
 # Exit of the report job: 0 all 36 cells PASS, 3 nothing failed but something NOT_RUN, 1 any FAIL or invalid evidence.
@@ -15,10 +17,16 @@ on:
         description: 'Exact 40-character commit supplying tests, never a branch name'
         type: string
         required: true
-      ape_url:
-        description: 'https URL of the APE; transport only, identity is ape_sha256'
+      release_tag:
+        description: 'Tag of a draft release whose asset unisacc.com is the candidate (preferred over ape_url)'
         type: string
-        required: true
+        required: false
+        default: ''
+      ape_url:
+        description: 'https URL of the APE, used only when release_tag is empty; transport only, identity is ape_sha256'
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -37,18 +45,31 @@ jobs:
   fetch:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # A draft release is visible to GITHUB_TOKEN only with contents: write; no other job gets it.
+    permissions:
+      contents: write
     steps:
       - name: Fetch the candidate once and pin its bytes
         env:
           APE_URL: ${{ inputs.ape_url }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -eu
           printf '%s' "$APE_SHA" | grep -Eqx '[0-9a-f]{64}' || { echo "::error::ape_sha256 must be 64 lowercase hex"; exit 1; }
           printf '%s' "$COMMIT" | grep -Eqx '[0-9a-f]{40}' || { echo "::error::commit must be 40 lowercase hex"; exit 1; }
-          printf '%s' "$APE_URL" | grep -Eqx 'https://[A-Za-z0-9./_~%+-]+' || { echo "::error::ape_url must be a plain https URL"; exit 1; }
           mkdir candidate
-          curl --fail --location --silent --show-error --max-time 180 --output candidate/unisacc.com "$APE_URL"
+          if [ -n "$RELEASE_TAG" ]; then
+            printf '%s' "$RELEASE_TAG" | grep -Eqx '[A-Za-z0-9._-]+' || { echo "::error::release_tag must be a plain tag name"; exit 1; }
+            gh release download "$RELEASE_TAG" -p 'unisacc.com' --repo "$GITHUB_REPOSITORY" --dir candidate
+          elif [ -n "$APE_URL" ]; then
+            printf '%s' "$APE_URL" | grep -Eqx 'https://[A-Za-z0-9./_~%+-]+' || { echo "::error::ape_url must be a plain https URL"; exit 1; }
+            curl --fail --location --silent --show-error --max-time 180 --output candidate/unisacc.com "$APE_URL"
+          else
+            echo "::error::give release_tag or ape_url"; exit 1
+          fi
+          [ -f candidate/unisacc.com ] || { echo "::error::no unisacc.com fetched"; exit 1; }
           got=$(sha256sum candidate/unisacc.com | cut -d' ' -f1)
           if [ "$got" != "$APE_SHA" ]; then echo "::error::ape sha256 $got, expected $APE_SHA"; exit 1; fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
