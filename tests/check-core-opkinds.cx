@@ -1,0 +1,297 @@
+/* tests/check-core-opkinds.cx -- the per-opcode operand-kind table must agree with
+ * the switch in cx/core/execute.cx.
+ *
+ *   sh ./unisacc.com tests/check-core-opkinds.cx -- ROOT [KINDS.tsv]
+ *
+ * KINDS.tsv defaults to ROOT/exec/facts/core-opkinds.tsv and has one row per opcode:
+ *   op <TAB> index <TAB> arity <TAB> regs <TAB> imms
+ * where regs/imms list the 1-based operand positions that are a register resp. an
+ * immediate, "-" for none.  The kinds are derived here from the kernel itself:
+ * a position k is a register iff the case body reads R[a[k]], an immediate iff it
+ * reads a[k] without R[...].  Two opcodes use a macro name for their case label
+ * (CORE_OUT for OUT, CORE_BYTE for BYTE) and are matched by that name.
+ *
+ * Opcodes that share one case body read a position differently per opcode:
+ *   case CMP: case CMPI: { ... v = op == CMP ? R[a[2]] : a[2]; ... }
+ * so a[2] is a register for CMP and an immediate for CMPI.  Every ternary
+ * `op == NAME ? A : B` is therefore resolved: a position inside A only belongs to
+ * NAME, inside B only to the other opcodes, outside every ternary to all of them.
+ * Without this the shared body made both sides look like registers and the table
+ * could pass while being wrong (CMPI operand 2 and A64I operand 4 did exactly that).
+ *
+ * Why this matters: NN-NF-C rewrites a run of constant OUT actions into
+ * SBLOAD+INPUSH+XLEN+SPAN2+INPOP, which needs two registers that the same query
+ * neither reads nor writes.  Deciding that on "every operand is a register" is
+ * wrong (most operands are immediates), so the rewrite must be driven by this table.
+ *
+ * Refusals (rc 2): unreadable input, a row whose op/arity disagrees with
+ * exec/facts/core-ops.tsv, an opcode missing from the table, a case body with more
+ * ternaries than this can hold, or a position that appears in both branches of the
+ * same ternary (its kind cannot be decided).  Ends with
+ * CORE_OPKINDS<TAB>ops=N<TAB>assertions=N<TAB>failed=M. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+typedef struct { const char *op; int idx, arity; char regs[64], imms[64]; } Row;
+static int failed, assertions;
+static void ck(int ok, const char *what, const char *detail) {
+    assertions++;
+    if (!ok) { failed++; printf("FAIL\t%s\t%s\n", what, detail ? detail : ""); }
+    else printf("PASS\t%s\t%s\n", what, detail ? detail : "");
+}
+static void die(const char *s) { fprintf(stderr, "check-core-opkinds: REFUSE %s errno=%d\n", s, errno); exit(2); }
+/* read the whole file */
+static char *slurp(const char *p, size_t *n) {
+    char *b = cx_read(p, n);
+    if (!b) die("unreadable input");
+    return b;
+}
+/* does [lo,hi) of the body read R[a[k]]?  (optional spaces are not assumed away) */
+static int has_reg_range(const char *body, size_t lo, size_t hi, int k) {
+    char pat[16];
+    int pl = snprintf(pat, sizeof pat, "R[a[%d]]", k);
+    size_t i;
+    if (pl <= 0 || hi < lo) return 0;
+    for (i = lo; i + (size_t)pl <= hi; i++) if (!memcmp(body + i, pat, (size_t)pl)) return 1;
+    return 0;
+}
+/* does [lo,hi) read a[k] at all (as an immediate or inside R[...])? */
+static int has_operand_range(const char *body, size_t lo, size_t hi, int k) {
+    char pat[16];
+    int pl = snprintf(pat, sizeof pat, "a[%d]", k);
+    size_t i;
+    if (pl <= 0 || hi < lo) return 0;
+    for (i = lo; i + (size_t)pl <= hi; i++) {
+        if (!memcmp(body + i, pat, (size_t)pl)) {
+            /* reject a[10] when looking for a[1] */
+            char next = (i + (size_t)pl < hi) ? body[i + (size_t)pl] : 0;
+            if (next < '0' || next > '9') return 1;
+        }
+    }
+    return 0;
+}
+/* One `op == NAME ? A : B` inside a case body, as absolute source offsets. */
+#define MAXG 8
+typedef struct { size_t gs, ae, be; char name[16]; int nl; } Guard;
+/* Find the ternaries of one case body.  Returns the count, 0 when there are none.
+   A ternary whose `?`/`:` cannot be found is a refusal: a body this tool cannot read
+   must not be judged equal. */
+static int guards_of(const char *body, size_t bs, size_t be, Guard *g) {
+    size_t at = bs;
+    int n = 0;
+    while (at + 5 <= be) {
+        size_t q = at, nl = 0, nameS, nameE, qm, colon = 0, depth = 0, end;
+        if (!(body[q] == 'o' && body[q + 1] == 'p' && body[q + 2] == ' ' && body[q + 3] == '=' && body[q + 4] == '=')) { at++; continue; }
+        q += 5;
+        while (q < be && body[q] == ' ') q++;
+        nameS = q;
+        while (q < be && (body[q] == '_' || (body[q] >= 'A' && body[q] <= 'Z') || (body[q] >= '0' && body[q] <= '9'))) q++;
+        nameE = q;
+        if (nameE == nameS || nameE - nameS >= sizeof g[0].name) die("guard name");
+        while (q < be && body[q] == ' ') q++;
+        if (q >= be || body[q] != '?') { at = nameE; continue; }
+        qm = q;
+        q++;
+        for (; q < be; q++) {
+            if (body[q] == '(' || body[q] == '[') depth++;
+            else if (body[q] == ')' || body[q] == ']') { if (depth) depth--; }
+            else if (body[q] == '?' && depth == 0) { q++; continue; }        /* nested ternary */
+            else if (body[q] == ':' && depth == 0) {
+                /* a nested `?` earlier owns this colon; count them */
+                size_t r, nests = 0;
+                for (r = qm + 1; r < q; r++) if (body[r] == '?') nests++;
+                if (nests) { /* swallow the inner pair: skip this colon, keep looking */ }
+                colon = q; break;
+            }
+        }
+        if (!colon) die("ternary colon");
+        depth = 0;
+        for (end = colon + 1; end < be; end++) {
+            if (body[end] == '(' || body[end] == '[') depth++;
+            else if (body[end] == ')' || body[end] == ']') { if (depth) depth--; }
+            else if (depth == 0 && (body[end] == ';' || body[end] == ',' || body[end] == '\n')) break;
+        }
+        if (end > be) end = be;
+        if (n >= MAXG) die("too many ternaries in one case body");
+        /* branch A starts right after the '?', branch B right after the ':' */
+        g[n].gs = qm + 1; g[n].ae = colon; g[n].be = end; g[n].nl = (int)(nameE - nameS);
+        { size_t j; for (j = 0; j < (size_t)g[n].nl; j++) g[n].name[j] = body[nameS + j]; g[n].name[g[n].nl] = 0; }
+        n++;
+        at = end;
+        (void)nl;
+    }
+    return n;
+}
+int main(int argc, char **argv) {
+    char root[4096], kinds[4400], p[4600];
+    char *ks, *cs, *src;
+    size_t kn = 0, cn = 0, sn = 0;
+    Row rows[64];
+    int nrows = 0, i, j, nops = 0;
+    if (argc > 3 || !realpath(argc >= 2 ? argv[1] : ".", root)) die("usage [ROOT] [KINDS.tsv]");
+    if (cx_fmt(kinds, sizeof kinds, "%s", argc == 3 ? argv[2] : "")) die("path");
+    if (argc < 3 && cx_fmt(kinds, sizeof kinds, "%s/exec/facts/core-opkinds.tsv", root)) die("path");
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/core-ops.tsv", root)) die("path");
+    cs = slurp(p, &cn);
+    if (cx_fmt(p, sizeof p, "%s/cx/core/execute.cx", root)) die("path");
+    src = slurp(p, &sn);
+    ks = slurp(kinds, &kn);
+    /* parse the kinds table */
+    {   size_t at = 0;
+        while (at < kn) {
+            size_t e = at, f = 0, col = 0, st[6] = {0};
+            while (e < kn && ks[e] != '\n') e++;
+            if (at < e && ks[at] != '#') {
+                for (f = at; f < e; f++) if (ks[f] == '\t' && col < 5) { st[col++] = f; }
+                if (col != 4) die("kinds row needs 5 tab-separated fields");
+                if (nrows >= 64) die("kinds table too large");
+                {   Row *r = &rows[nrows];
+                    size_t L = st[0] - at;
+                    if (L == 0 || L >= 16) die("op name length");
+                    r->op = 0;
+                    r->idx = 0;
+                    for (size_t q = st[0] + 1; q < st[1]; q++) { if (ks[q] < '0' || ks[q] > '9') die("index digits"); r->idx = r->idx * 10 + (ks[q] - '0'); }
+                    for (size_t q = st[1] + 1; q < st[2]; q++) { if (ks[q] < '0' || ks[q] > '9') die("arity digits"); r->arity = r->arity * 10 + (ks[q] - '0'); }
+                    {   size_t q = st[2] + 1, o = 0;
+                        while (q < st[3] && o + 1 < sizeof r->regs) r->regs[o++] = ks[q++];
+                        r->regs[o] = 0;
+                    }
+                    {   size_t q = st[3] + 1, o = 0;
+                        while (q < e && o + 1 < sizeof r->imms) r->imms[o++] = ks[q++];
+                        r->imms[o] = 0;
+                    }
+                    /* name: copy out of the (mutable) buffer and NUL-terminate in place */
+                    {   char *nm = (char *)ks + at;
+                        nm[st[0] - at] = 0;
+                        r->op = nm;
+                    }
+                    nrows++;
+                }
+            }
+            at = e + 1;
+        }
+    }
+    printf("INFO\trows=%d\n", nrows);
+    /* cross-check each row against core-ops.tsv (index + arity) */
+    for (i = 0; i < nrows; i++) {
+        Row *r = &rows[i];
+        size_t at = 0;
+        int found = 0;
+        while (at < cn) {
+            size_t e = at, f = 0, col = 0, st[3] = {0};
+            while (e < cn && cs[e] != '\n') e++;
+            if (at < e && cs[at] != '#') {
+                for (f = at; f < e; f++) if (cs[f] == '\t' && col < 3) st[col++] = f;
+                if (col >= 2) {
+                    size_t L = st[0] - at;
+                    if (L == strlen(r->op) && !memcmp(cs + at, r->op, L)) {
+                        int idx = 0, ar = 0;
+                        for (size_t q = st[0] + 1; q < st[1]; q++) idx = idx * 10 + (cs[q] - '0');
+                        for (size_t q = st[1] + 1; q < (col > 2 ? st[2] : e); q++) ar = ar * 10 + (cs[q] - '0');
+                        ck(idx == r->idx, "index", r->op);
+                        ck(ar == r->arity, "arity", r->op);
+                        found = 1;
+                    }
+                }
+            }
+            at = e + 1;
+        }
+        if (!found) { ck(0, "op-in-core-ops", r->op); }
+        nops++;
+    }
+    /* every opcode in core-ops.tsv (except NOP_) must have a row */
+    {   size_t at = 0;
+        while (at < cn) {
+            size_t e = at, f = 0, col = 0, st[3] = {0};
+            while (e < cn && cs[e] != '\n') e++;
+            if (at < e && cs[at] != '#') {
+                for (f = at; f < e; f++) if (cs[f] == '\t' && col < 3) { st[col++] = f; }
+                if (col >= 1) {
+                    size_t L = st[0] - at;
+                    int have = 0;
+                    if (!(L == 4 && !memcmp(cs + at, "NOP_", 4))) {
+                        for (j = 0; j < nrows; j++)
+                            if (strlen(rows[j].op) == L && !memcmp(cs + at, rows[j].op, L)) { have = 1; break; }
+                        ck(have, "row-present", (char *)(cs + at));
+                    }
+                }
+            }
+            at = e + 1;
+        }
+    }
+    /* and the kinds of each row must match what execute.cx actually does */
+    for (i = 0; i < nrows; i++) {
+        Row *r = &rows[i];
+        char label[32];
+        size_t at = 0, blen = 0, bstart = 0;
+        int seen = 0;
+        if (cx_fmt(label, sizeof label, "%s", r->op)) die("label");
+        /* find "case <op>:" then the body up to "break;" or "return 1;".
+           Two opcodes use a macro label: OUT -> CORE_OUT, BYTE -> CORE_BYTE. */
+        {   const char *label2 = !strcmp(r->op, "OUT") ? "CORE_OUT"
+                                : !strcmp(r->op, "BYTE") ? "CORE_BYTE" : 0;
+            char pat[40];
+            int pl = snprintf(pat, sizeof pat, "case %s", r->op);
+            if (pl > 0) for (size_t q = 0; q + (size_t)pl <= sn; q++)
+                if (!memcmp(src + q, pat, (size_t)pl) && (src[q + pl] == ':' || src[q + pl] == ' ')) { at = q + (size_t)pl; seen = 1; break; }
+            if (!seen && label2) {
+                pl = snprintf(pat, sizeof pat, "case %s", label2);
+                if (pl > 0) for (size_t q = 0; q + (size_t)pl <= sn; q++)
+                    if (!memcmp(src + q, pat, (size_t)pl) && (src[q + pl] == ':' || src[q + pl] == ' ')) { at = q + (size_t)pl; seen = 1; break; }
+            }
+        }
+        ck(seen, "case-present", r->op);
+        if (!seen) continue;
+        bstart = at;
+        blen = 0;
+        while (bstart + blen < sn) {
+            if (bstart + blen + 6 <= sn && !memcmp(src + bstart + blen, "break;", 6)) break;
+            if (bstart + blen + 9 <= sn && !memcmp(src + bstart + blen, "return 1;", 9)) break;
+            blen++;
+        }
+        /* the ternary guards decide which branch belongs to this opcode */
+        {   Guard g[MAXG];
+            int ng = guards_of(src, bstart, bstart + blen, g), k;
+            for (k = 1; k <= r->arity; k++) {
+                size_t pos = bstart, q;
+                int reg = 0, any = 0;
+                /* unguarded text: the gaps between the guard spans */
+                for (q = 0; q < ng; q++) {
+                    if (g[q].gs > pos) {
+                        if (has_reg_range(src, pos, g[q].gs, k)) reg = 1;
+                        if (has_operand_range(src, pos, g[q].gs, k)) any = 1;
+                    }
+                    if (g[q].be > pos) pos = g[q].be;
+                }
+                if (pos < bstart + blen) {
+                    if (has_reg_range(src, pos, bstart + blen, k)) reg = 1;
+                    if (has_operand_range(src, pos, bstart + blen, k)) any = 1;
+                }
+                /* only the branch this opcode takes; the other one does not apply */
+                for (q = 0; q < ng; q++) {
+                    int mine = !strcmp(r->op, g[q].name);
+                    size_t lo = mine ? g[q].gs : g[q].ae, hi = mine ? g[q].ae : g[q].be;
+                    if (has_reg_range(src, lo, hi, k)) reg = 1;
+                    if (has_operand_range(src, lo, hi, k)) any = 1;
+                }
+                {   int declared_reg = 0, declared_imm = 0;
+                    const char *s;
+                    for (s = r->regs; *s; ) { int v = 0; while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; } if (v == k) declared_reg = 1; if (*s == ',') s++; else if (*s) s++; }
+                    for (s = r->imms; *s; ) { int v = 0; while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; } if (v == k) declared_imm = 1; if (*s == ',') s++; else if (*s) s++; }
+                    if (reg != declared_reg) {
+                        printf("FAIL\treg-kind\t%s operand %d: kernel=%d table=%d\n", r->op, k, reg, declared_reg);
+                        failed++; assertions++;
+                    } else assertions++;
+                    if (any != (declared_reg || declared_imm)) {
+                        printf("FAIL\timm-kind\t%s operand %d: kernel reads=%d table=%d\n", r->op, k, any, declared_reg || declared_imm);
+                        failed++; assertions++;
+                    } else assertions++;
+                }
+            }
+        }
+    }
+    free(ks); free(cs); free(src);
+    printf("CORE_OPKINDS\tops=%d\tassertions=%d\tfailed=%d\n", nops, assertions, failed);
+    return failed ? 1 : 0;
+}
