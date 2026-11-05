@@ -306,8 +306,12 @@ int main(void) {
             if (holder == 0) {
                 /* Take the lock only once the row is in the table: register holds it across its own appends
                    and --list, and the batch run that follows is outside it.  Polling for the row makes the
-                   window deterministic instead of a sleep race. */
-                char lp[4400]; int fd, won = 0; long z; size_t m = 0;
+                   window deterministic instead of a sleep race.
+                   The lock must cover register's whole batch run *and* its 3x300 ms rollback, so it is
+                   released only after the register child exits: a fixed hold (3 s) was the same order as
+                   register's 2.6-3.0 s total and the case went red on 4 of 6 runs.  A done-file written by
+                   the parent after the child is reaped is the release signal. */
+                char lp[4400], dp[4400]; int fd, won = 0; long z; size_t m = 0;
                 for (z = 0; z < 200 && !won; z++) {
                     char *t = cx_read(bpath, &m);
                     if (t) { won = strstr(t, b) != 0; free(t); }
@@ -317,7 +321,8 @@ int main(void) {
                 pjoin(lp, sizeof lp, tables, ".register.lock");
                 fd = sy_open(lp, O_RDWR | O_CREAT, 0666);
                 if (fd < 0 || sy_flock(fd, 2) != 0) _exit(3);
-                for (z = 0; z < 600; z++) usleep(5000);   /* hold 3 s, well past the rollback's 3x300 ms */
+                pjoin(dp, sizeof dp, tables, ".register.holder-done");
+                for (z = 0; z < 4000 && !sy_exists(dp); z++) usleep(5000);   /* wait for the parent's signal */
                 _exit(0);
             }
             {   char out[1 << 15]; int rc;
@@ -329,7 +334,17 @@ int main(void) {
                 ok(strstr(out, "tables may be dirty: leftover row cr-j at batches.tsv:") != 0
                    && strstr(out, "coverage.tsv:") != 0, "the dirty tables are named with the left-over row's line numbers");
             }
-            {   int ex = 0, code = 0, sig = 0; sy_wait_status(holder, 0, &ex, &code, &sig); }
+            {   int ex = 0, code = 0, sig = 0; char dp[4400];
+                /* The register run above has returned, so its rollback has already tried the lock.
+                   Write the done-file first (that is what releases the holder), then reap it: reaping
+                   first would deadlock, because the child waits for this file.  The lock therefore spans
+                   register's whole batch run plus its 3x300 ms rollback instead of a fixed 3 s. */
+                if (cx_fmt(dp, sizeof dp, "%s/.register.holder-done", tables)) die("path bound", "holder-done");
+                {   FILE *df = fopen(dp, "wb");
+                    if (!df || fputc('x', df) == EOF || fclose(df)) die("holder-done write", dp);
+                }
+                sy_wait_status(holder, 0, &ex, &code, &sig);
+            }
         }
         /* the rows really are there: the message was not a guess; remove them by exact content */
         {   char b[4096], c[4096]; int removed = 0;
@@ -367,6 +382,7 @@ int main(void) {
         {   char p[4400]; if (!cx_fmt(p, sizeof p, "%s/batches.tsv", tables)) sy_unlink(p);
             if (!cx_fmt(p, sizeof p, "%s/coverage.tsv", tables)) sy_unlink(p);
             if (!cx_fmt(p, sizeof p, "%s/.register.lock", tables)) sy_unlink(p);
+            if (!cx_fmt(p, sizeof p, "%s/.register.holder-done", tables)) sy_unlink(p);
             if (sy_rmdir(tables) != 0) { checks++; failed++; printf("FAIL\tprivate copy not removed\n"); }
         }
     }
