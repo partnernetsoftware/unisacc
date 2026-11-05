@@ -89,8 +89,36 @@ sh ./unisacc.com tests/nnc-nets-material.cx -- prepare "$PWD" out/rtl3/ctx/jobs 
 sh ./unisacc.com tests/nnc-nets-material.cx -- --verify "$PWD" out/nncm2
 ```
 
-## 6. 为什么还没动手改
+## 6. cc 裁定与实施位置
 
-改写 42 张网 = 改生成链 = 改**产品输入**。cc 裁定 R 冻结期间不动产品输入，
-且 T 的最终口径由 cc 定。这两条一解开就能按第 2 节的形态落地；本报告给出的上界是
-**文本 352 737 B / 二进制 82 937 B**，落地后按同一批断言复测即可。
+cc 2026-11-06 裁定：
+1. **T ≥ 16**（原语审计与 Q 行口径都支持；T≥8 只多几 KB 但改写面更大，风险不值）。
+2. 验收按**包字节（deflate 后）与装载耗时前后**，不按 wire 字节；装载没改善就降优先级。
+3. **不进 rc2**（rc2 已固定为 NATIVE-RUN-HOST-TARGET / WARN-PROBE-USED / 帮助文字），
+   放 0.0.45 开头、rc2 候选冻结之后；可以在仓外克隆里先做 patch 与 42 网 cmp 报告。
+
+改写点只有一个：**生成链的 net 阶段**（`seed/net.c` 写 Q 行处，`for (j = 1+nstr; j < 1+nstr+nq; j++)
+fprintf(out, "%s\n", lines.v[j]);`）。在那里按 Q 行扫连续 OUT（opcode 12）常量动作，
+≥16 个就把该段替换成
+`SBLOAD r5,idx / INPUSH r5 / XLEN r4 / SPAN2 r4,r4 / INPOP`，
+并把 blob 追加进 S 表（或复用已有同字节的 S 行）。这属于改产品输入，必须等 R 解冻。
+
+### 等价性 oracle 的现状（重要）
+
+要证明"改写后 42 网逐字节等价"，需要把**改写后的文本网**跑起来比输出。我写了一个
+`tests/nnc-run.cx`（把文本网的 S/Q 行装成 flat Model 后调 `cx_run`），但**这条路走不通**：
+这 42 张网是 `isnet=1` 的阈值网，`CoreModel` 需要 `mode/keys/next/seq/lo/hi/base_next/base_seq`
+这些**从 H 行（阈值表）解析出来的字段**，而 `src/executor.cx:44 ex_model` 是从 `CxModel`
+（`cxmd_decode` 的产物）映射的 —— 也就是说必须走 `cxmd_decode` 解码整张网，不能只解 S/Q 行。
+我撤掉了那个半成品（它只能处理 flat delta，对 isnet 网会 segfault）。
+
+**所以实施时的等价性验证应该这样**:用产品自己（`sh ./unisacc.com` + 新包）编同一个源，
+比对**产物字节**（ELF/对象），而不是比对网的中间输出 —— 这正是 `nn-nf-c-report.cx` 的 cmp
+在做的事（网字节等价），而"改网后产物不变"要靠 `tools/core-run-diff.cx` 那一套 +
+新包重跑 42 个构造作业。清单与耗时已写进 `/tmp/wB/rc2-materials-plan.txt`。
+
+### 为什么本次没落地
+
+改写 42 张网 = 改生成链 = 改**产品输入**。cc 裁定它不进 rc2、且 R 冻结期间不动产品输入。
+本报告给出的是**上界**（Q 行口径：文本 339 641 B / 二进制 83 711 B），
+与落地后必须复测的口径（包字节 + 装载耗时），以及唯一的改写点与替换形态。
