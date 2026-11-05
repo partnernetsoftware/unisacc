@@ -1,0 +1,139 @@
+/* tools/check-regmap-lint.cx -- regmap 单射性表 lint。
+ *
+ *   sh ./unisacc.com tools/check-regmap-lint.cx -- [ROOT]
+ *
+ * 判据(依据 plans/gold-mutation-2026-11-05.md 的 S2.A 观测: regmap r0/x86_64
+ * rax->rcx 会让 6 张 x86_64 enc 网生成失败于 seed/gen.c:1172 "overlapping
+ * observation rules", 因为同一 arch 内两个 tape 寄存器映到同一机器寄存器,
+ * 观测规则键撞车):
+ *   A 表头: 首行 "# stage regmap", 两个 #field 行给出 treg/arch 列与各 arch 名。
+ *   B 每行三列, 第二列是已知 arch, 第一列形如 rN。
+ *   C 同一 arch 内机器寄存器名互异: 违例点名冲突的两个 tape 寄存器与共用名。
+ *   D 同一 arch 内 tape 寄存器名不重复出现两次(重复行同样撞键)。
+ * 现表必须 PASS; 把 rax 改成 rcx 的变异必须 FAIL 并点名 r0/r4/rcx。
+ * 末行 CHECK_REGMAP_LINT<TAB>failed=N; 任何 FAIL 退出码 1。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int rl_failed;
+static const char *RL_ARCHS[4];
+static int RL_NARCH;
+
+static void rl_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) rl_failed++;
+}
+static char *rl_read(const char *p, long *n) {
+    size_t z = 0;
+    char *s = cx_read(p, &z);
+    if (!s) { fprintf(stderr, "check-regmap-lint: cannot read %s\n", p); exit(2); }
+    *n = (long)z;
+    return s;
+}
+/* 一行按 TAB 切到 f[8], 返回字段数 */
+static int rl_fields(const char *line, long n, char f[8][96]) {
+    int k = 0, p = 0;
+    long i;
+    for (i = 0; i < 8; i++) f[i][0] = 0;
+    for (i = 0; i < n && k < 8; i++) {
+        if (line[i] == '\t') { f[k][p] = 0; k++; p = 0; }
+        else if (p < 95) f[k][p++] = line[i];
+    }
+    if (k < 8) { f[k][p] = 0; k++; }
+    return k;
+}
+static int rl_eq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+static int rl_arch(const char *s) {
+    int i;
+    for (i = 0; i < RL_NARCH; i++) if (rl_eq(s, RL_ARCHS[i])) return i;
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], path[4400];
+    char *b;
+    long n = 0, at = 0, line0 = 0;
+    char f[8][96];
+    /* 每条 arch 的已用机器寄存器: 最多 16 个 tape 寄存器 */
+    static char seen[4][16][96];
+    static char treg[4][16][96];
+    static int nseen[4];
+    int i, hdr_ok = 1, row_ok = 1, inj_ok = 1, dup_ok = 1;
+
+    if (argc >= 3 && rl_eq(argv[1], "--")) {
+        if (!realpath(argv[2], root)) { fprintf(stderr, "check-regmap-lint: root\n"); return 2; }
+    } else if (argc >= 2 && !rl_eq(argv[1], "--")) {
+        if (!realpath(argv[1], root)) { fprintf(stderr, "check-regmap-lint: root\n"); return 2; }
+    } else if (!getcwd(root, sizeof root)) { fprintf(stderr, "check-regmap-lint: getcwd\n"); return 2; }
+    if (cx_fmt(path, sizeof path, "%s/weights/gold/regmap.tsv", root)) return 2;
+    b = rl_read(path, &n);
+
+    for (i = 0; i < 4; i++) nseen[i] = 0;
+    while (at < n) {
+        char *ln = b + at;
+        long z = 0, fld = 0;
+        while (at + z < n && ln[z] != '\n') z++;
+        ln[z] = 0;
+        line0++;
+        if (z > 0) {
+            fld = rl_fields(ln, z, f);
+            if (ln[0] == '#') {
+                if (fld >= 3 && rl_eq(f[0], "#field") && rl_eq(f[1], "arch")) {
+                    RL_NARCH = 0;
+                    for (i = 2; i < fld && RL_NARCH < 4; i++) RL_ARCHS[RL_NARCH++] = "x";
+                    /* 复制 arch 名: 用静态池 */
+                    { static char pool[4][96]; int k;
+                      for (k = 0; k < RL_NARCH; k++) {
+                          int q = 0;
+                          while (f[k + 2][q] && q < 95) { pool[k][q] = f[k + 2][q]; q++; }
+                          pool[k][q] = 0; RL_ARCHS[k] = pool[k];
+                      } }
+                }
+            } else if (fld >= 3 && !(rl_eq(f[0], "treg") && rl_eq(f[1], "arch"))) {
+                int a = rl_arch(f[1]);
+                if (a < 0) row_ok = 0;
+                else if (nseen[a] < 16) {
+                    int j, clash = -1, dup = -1;
+                    for (j = 0; j < nseen[a]; j++) {
+                        if (rl_eq(seen[a][j], f[2])) clash = j;
+                        if (rl_eq(treg[a][j], f[0])) dup = j;
+                    }
+                    if (clash >= 0) {
+                        inj_ok = 0;
+                        printf("FAIL\tinjective %s %s=%s collides with %s\n", f[1], f[0], f[2], treg[a][clash]);
+                    }
+                    if (dup >= 0) {
+                        dup_ok = 0;
+                        printf("FAIL\tunique-treg %s %s repeats (first %s=%s)\n", f[1], f[0], treg[a][dup], seen[a][dup]);
+                    }
+                    { int q = 0;
+                      while (f[2][q] && q < 95) { seen[a][nseen[a]][q] = f[2][q]; q++; }
+                      seen[a][nseen[a]][q] = 0;
+                      q = 0;
+                      while (f[0][q] && q < 95) { treg[a][nseen[a]][q] = f[0][q]; q++; }
+                      treg[a][nseen[a]][q] = 0;
+                      nseen[a]++; }
+                }
+            }
+        }
+        at += z + 1;
+    }
+    free(b);
+
+    if (RL_NARCH < 2) hdr_ok = 0;
+    rl_ck(hdr_ok, "A header-names-two-arches");
+    rl_ck(row_ok, "B every-row-names-a-known-arch");
+    rl_ck(inj_ok, "C same-arch-machine-registers-distinct");
+    rl_ck(dup_ok, "D same-arch-tape-registers-unique");
+    { char label[128];
+      if (cx_fmt(label, sizeof label, "E rows x86_64=%d arm64=%d", nseen[0], nseen[1])) return 2;
+      rl_ck(nseen[0] == 8 && nseen[1] == 8, label); }
+    printf("CHECK_REGMAP_LINT\tfailed=%d\n", rl_failed);
+    return rl_failed ? 1 : 0;
+}
