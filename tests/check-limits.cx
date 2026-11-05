@@ -1,0 +1,71 @@
+/* tests/check-limits.cx -- FAST-3: one fact, one value, across tables and code.
+ *
+ *   sh ./unisacc.com tests/check-limits.cx [LIMITS.tsv]
+ *
+ * T1 proves each net equals its own table; it cannot see two tables disagreeing.
+ * The 65-source bug was exactly that: one table said 128, another still said 64.
+ * Every row of exec/facts/limits.tsv names a file and the exact text it must
+ * contain; all rows of one name must carry one value.  Also: the whole-o source
+ * list in release-build and the object list in entry-build must be the same set. */
+#pragma unisa use sys.io
+#pragma unisa use text.text
+static int failed;
+static char *slurp(const char *p, size_t *np) {
+    FILE *f = fopen(p, "rb"); size_t cap = 1 << 26, n = 0; char *b;
+    if (!f) return 0;
+    b = malloc(cap); if (!b) { fclose(f); return 0; }
+    n = fread(b, 1, cap - 1, f); fclose(f); b[n] = 0; if (np) *np = n;
+    return b;
+}
+static void bad(const char *what, const char *a, const char *b) { printf("FAIL\t%s\t%s\t%s\n", what, a, b); failed++; }
+static int collect(const char *b, const char *end, char out[][160], int cap) {
+    int n = 0;
+    while (b < end && (b = strstr(b, ".cx\"")) && b < end) {
+        const char *s = b; while (s[-1] != '"') s--;
+        if (n < cap && b + 3 - s < 160) { memcpy(out[n], s, (size_t)(b + 3 - s)); out[n][b + 3 - s] = 0; n++; }
+        b += 4;
+    }
+    return n;
+}
+static int has(char l[][160], int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(l[i], s)) return 1; return 0; }
+static char ra[128][160], eb[128][160];
+int main(int argc, char **argv) {
+    const char *path = argc > 1 ? argv[1] : "exec/facts/limits.tsv";
+    char *t = slurp(path, 0), *line; char name[64] = "", value[32] = ""; int rows = 0;
+    if (!t) { printf("FAIL\tcannot-read\t%s\t-\n", path); return 2; }
+    for (line = t; line && *line; ) {
+        char *nl = strchr(line, '\n'); char *f[4]; int k = 0; char *p = line;
+        if (nl) *nl = 0;
+        if (*line != '#' && *line) {
+            f[k++] = p; while (k < 4 && (p = strchr(p, '\t'))) { *p++ = 0; f[k++] = p; }
+            if (k != 4) { bad("bad-row", line, "-"); }
+            else {
+                char want[256], *o = want; const char *q; char *body;
+                rows++;
+                if (!strcmp(name, f[0]) && strcmp(value, f[1])) bad("value-differs", f[0], f[1]);
+                snprintf(name, sizeof name, "%s", f[0]); snprintf(value, sizeof value, "%s", f[1]);
+                for (q = f[3]; *q && o < want + 200; ) {
+                    if (q[0] == '{' && q[1] == '}') { o += sprintf(o, "%s", f[1]); q += 2; } else *o++ = *q++;
+                }
+                *o = 0;
+                body = slurp(f[2], 0);
+                if (!body) bad("cannot-read", f[2], "-");
+                else if (!strstr(body, want)) bad("site-disagrees", f[2], want);
+                free(body);
+            }
+        }
+        line = nl ? nl + 1 : 0;
+    }
+    char *rb = slurp("tools/release-build.cx", 0), *ep = slurp("tools/entry-build.cx", 0);
+    char *rs = rb ? strstr(rb, "rb_whole_src[RB_WHOLE_SRC] = {") : 0, *re = rs ? strstr(rs, "};") : 0;
+    if (!rs || !re || !ep) bad("object-list-unreadable", "-", "-");
+    else {
+        int a = collect(rs, re, ra, 128), e = collect(ep, ep + strlen(ep), eb, 128);
+        if (a != e) { char n[32]; snprintf(n, sizeof n, "%d/%d", a, e); bad("object-count", "release/entry", n); }
+        for (int i = 0; i < a; i++) if (!has(eb, e, ra[i])) bad("object-only-release", ra[i], "-");
+        for (int i = 0; i < e; i++) if (!has(ra, a, eb[i])) bad("object-only-entry", eb[i], "-");
+    }
+    if (!rows) bad("no-rows", path, "-");
+    if (failed) { printf("LIMITS\tfailed=%d\n", failed); return 1; }
+    printf("LIMITS\trows=%d\tstatus=PASS\n", rows); return 0;
+}
