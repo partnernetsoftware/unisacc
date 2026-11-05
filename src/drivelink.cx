@@ -51,23 +51,37 @@ static int dv_shared_has, dv_shared_warned;
 /* a[0..n) == b[0..n)：不用 libc（cxlibc / cxraw 对 src/ 只降不升） */
 static int dv_pre(const char *a, const char *b, long n) { long i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
 
-static int dv_has_probe(const char *t, long tl) {
-    int i, n, prov; const char *g, *p, *u, *e;
+/* 对象里是否**真的用到**了某一族的运行库状态:tape 里出现 `call <used_symbol>`。
+   只带 `.bss g_<probe>` 而不调用任何 used symbol 的对象不算自带私有流表 ——
+   每个 .cx 单元对象都带运行库预置的 .bss 行,旧判据"表存在"因此对任意两个 .cx 对象都误报。 */
+static int dv_line_has_call(const char *t, long at, long j, const char *sym, long sn) {
+    long k = at;
+    while (k < j && (t[k] == ' ' || t[k] == 9)) k++;
+    if (j - k < 6 || !dv_pre(t + k, "call ", 5)) return 0;
+    k += 5;
+    return j - k == sn && dv_pre(t + k, sym, sn);
+}
+static int dv_used(const char *t, long tl) {
+    int i, n, prov, m, sn; const char *g, *p, *u, *e, *sym;
     for (i = 0, n = rts_count(); i < n; i++) {
-        long at = 0, pl = 0, j;
+        long at = 0, j;
         if (rts_at(i, &g, &p, &prov, &u, &e)) continue;
-        while (p[pl]) pl++;
-        for (at = 0; at < tl; at = j + 1) {
-            for (j = at; j < tl && t[j] != 10; j++) {}
-            if (j - at >= 7 + pl + 1 && dv_pre(t + at, ".bss g_", 7) &&
-                dv_pre(t + at + 7, p, pl) && t[at + 7 + pl] == ' ') return 1;
+        if (rts_used_count(i) <= 0) continue;
+        for (m = 0; m < rts_used_count(i); m++) {
+            sym = rts_used_name(i, m);
+            if (!sym) continue;
+            for (sn = 0; sym[sn]; sn++) {}
+            for (at = 0; at < tl; at = j + 1) {
+                for (j = at; j < tl && t[j] != 10; j++) {}
+                if (dv_line_has_call(t, at, j, sym, sn)) return 1;
+            }
         }
     }
     return 0;
 }
 
 static void dv_note_shared(const char *t, long tl) {
-    if (!dv_has_probe(t, tl)) return;
+    if (!dv_used(t, tl)) return;
     if (++dv_shared_has == 2 && !dv_shared_warned++) sy_eprintf("unisacc: warning: 2 objects each carry a private stdio table (cross-unit FILE state is not shared; compile the program in one invocation or link the RT_UNIT entity)\n");
 }
 

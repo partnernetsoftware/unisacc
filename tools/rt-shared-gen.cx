@@ -18,6 +18,9 @@
  * 上一版漏掉 _u_st_wlen/_u_st_ro/_u_st_n 就是这么漏的。带 `static` 的函数与
  * `static const` 常量不算状态。
  *
+ * 第 8 列 used_symbols 是链接诊断的判据:对象 tape 里必须出现 `call <symbol>`,
+ * 才算这一族真的被这个对象用了。只带 `.bss g_<probe>` 而不调用任何 used symbol 的对象不再告警。
+ *
  * 退出 0 好；1 差异（具名）；2 用法或 IO。 */
 
 #define TSV "exec/facts/rt-shared.tsv"
@@ -36,7 +39,7 @@ static void die(const char *a, const char *b) {
 static char tsv[CAP];
 static long tsn;
 struct grp { char name[64]; char sym[MAXSYM][MAXNAM]; int nsym; char probe[MAXNAM]; int provider; char unit[32]; char ext[32];
-             char exm[MAXSYM][MAXNAM]; int nex; };
+             char exm[MAXSYM][MAXNAM]; int nex; char used[MAXSYM][MAXNAM]; int nused; };
 static struct grp g[MAXG];
 static int ng;
 
@@ -86,13 +89,13 @@ static void load(void) {
     tsv[at] = 0;
     for (i = 0; i < tsn; ) {
         long e = i;
-        char *f[8];
+        char *f[9];
         long nf;
         while (e < tsn && tsv[e] != '\n') e++;
         tsv[e] = 0;
         if (tsv[i] && tsv[i] != '#') {
-            nf = split_tabs(tsv + i, f, 8);
-            if (nf < 6) die("row needs 6 fields (7th is the exemption list)", tsv + i);
+            nf = split_tabs(tsv + i, f, 9);
+            if (nf < 6) die("row needs 6 fields (7th exemption list, 8th used symbols)", tsv + i);
             if (ng >= MAXG) die("too many groups", 0);
             cpy(g[ng].name, 64, f[0]);
             g[ng].nsym = split_commas(f[1], g[ng].sym);
@@ -101,6 +104,7 @@ static void load(void) {
             cpy(g[ng].unit, 32, f[4]);
             cpy(g[ng].ext, 32, f[5]);
             g[ng].nex = (nf >= 7) ? split_commas(f[6], g[ng].exm) : 0;
+            g[ng].nused = (nf >= 8) ? split_commas(f[7], g[ng].used) : 0;
             ng++;
         }
         i = e + 1;
@@ -212,7 +216,7 @@ static int scan_headers(void) {
 
 static long emit(char *dst, long cap) {
     long n = 0;
-    int i, k;
+    int i, j, k;
     char *P = dst;
     (void)P;
 #define APP(fmt, ...) do { int z = snprintf(dst + n, (size_t)(cap - n), fmt, ##__VA_ARGS__); if (z < 0 || n + z >= cap) die("output too long", 0); n += z; } while (0)
@@ -245,6 +249,27 @@ static long emit(char *dst, long cap) {
         APP("    if (i == %d) {\n", i);
         for (k = 0; k < g[i].nsym; k++)
             APP("        if (rts_same(name, \"%s\")) return 1;\n", g[i].sym[k]);
+        APP("        return 0;\n    }\n");
+    }
+    APP("    return 2;\n}\n");
+    APP("const char *rts_used_name(int i, int m) {\n");
+    for (j = 0; j < ng; j++) {
+        APP("    if (i == %d) {\n", j);
+        for (k = 0; k < g[j].nused; k++)
+            APP("        if (m == %d) return \"%s\";\n", k, g[j].used[k]);
+        APP("        return 0;\n    }\n");
+    }
+    APP("    return 0;\n}\n");
+    APP("int rts_used_count(int i) {\n");
+    for (j = 0; j < ng; j++) APP("    if (i == %d) return %d;\n", j, g[j].nused);
+    APP("    return -1;\n}\n");
+    APP("/* 1 when group i is used by an object whose tape calls NAME; 0 not used; 2 out of range */\n");
+    APP("int rts_used(int i, const char *name) {\n");
+    APP("    if (!name) return 4;\n");
+    for (j = 0; j < ng; j++) {
+        APP("    if (i == %d) {\n", j);
+        for (k = 0; k < g[j].nused; k++)
+            APP("        if (rts_same(name, \"%s\")) return 1;\n", g[j].used[k]);
         APP("        return 0;\n    }\n");
     }
     APP("    return 2;\n}\n");
