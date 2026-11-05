@@ -28,7 +28,11 @@ int main(int argc,char **argv){
     char root[4096],p3[4400],elf[4400],tool[4400],out1[4400],out2[4400];
     char com1[4400],com2[4400],h1[65],h2[65];
     if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
-    if(cx_fmt(p3,sizeof p3,"%s/out/epoch-2026-11-02/p3/p3-package.bin",root))return 2;
+    /* 两件输入都取已装 ROOT 与树内现编，不再依赖清盘删掉的 out/epoch-2026-11-02：
+       - P3 包：unisacc.com.dev/p3-package.bin（P4，带 UNIPKG1 footer，release-ape 原样吃整文件）
+       - kernel：tools/kernel-route.cx 现编，与 tests/check-kernel-base.cx 同一来源 */
+    if(cx_fmt(p3,sizeof p3,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
+    if(!sy_exists(p3)){fprintf(stderr,"check-booter-ape: no %s\n",p3);return 2;}
     if(cx_fmt(elf,sizeof elf,"%s/unisacc.com.dev/entry.elf",root))return 2;
     if(cx_fmt(tool,sizeof tool,"%s/tools/release-ape.cx",root))return 2;
     if(cx_fmt(out1,sizeof out1,"%s/out/booter-ape-1",root))return 2;
@@ -92,14 +96,29 @@ int main(int argc,char **argv){
         if(cx_fmt(kern,sizeof kern,"%s/x86_64.kernel",base_dir))return 2;
         if(cx_fmt(man,sizeof man,"%s/manifest.tsv",dir))return 2;
         {   if(sy_mkdir(base_dir,0755) && sy_exists(base_dir)!=1) return 2; }
-        {   char *src=cx_read("out/epoch-2026-11-02/kernel-gen/x86_64.kernel",&kn);
-            if(!src){ck(0,"kernel-material");}
-            else {
-                int fd=sy_open_new(kern,0755);
-                int w=(fd<0)||sy_write_all(fd,src,kn)||sy_close(fd);
-                free(src);
-                ck(w==0,"kernel-material");
+        /* kernel 现编：tools/kernel-route.cx 出两 ISA，取 x86_64。这样这一项既不依赖
+           已删的 out/epoch-*，也和包内基座（CHAIN-ROUTES 之后由同一条路生成）同源。 */
+        {   char kdir[4400], src[4600], *v[10];
+            int n = 0;
+            if(cx_fmt(kdir,sizeof kdir,"%s/out/booter-ape-kernel-%d",root,(int)getpid()))return 2;
+            { sy_stat_t st; if(sy_stat(kdir,&st)==0) cx_rmtree(kdir); }
+            v[n++]="sh"; v[n++]="unisacc.com"; v[n++]="tools/kernel-route.cx"; v[n++]="--"; v[n++]=(char*)root; v[n++]=kdir; v[n++]="--isa"; v[n++]="x86_64"; v[n]=0;
+            {   np_result kr={0}; char kw[512];
+                int bad=np_run(v,root,0,58,&kr,kw,sizeof kw);
+                if(bad||kr.rc){ck(0,"kernel-material");}
+                else np_free(&kr);
             }
+            if(cx_fmt(src,sizeof src,"%s/x86_64.kernel",kdir))return 2;
+            {   char *bytes=cx_read(src,&kn);
+                if(!bytes){ck(0,"kernel-material");}
+                else {
+                    int fd=sy_open_new(kern,0755);
+                    int w=(fd<0)||sy_write_all(fd,bytes,kn)||sy_close(fd);
+                    free(bytes);
+                    ck(w==0,"kernel-material");
+                }
+            }
+            { sy_stat_t st; if(sy_stat(kdir,&st)==0) cx_rmtree(kdir); }
         }
         kb=cx_read(kern,&kn);
         if(!kb){ck(0,"kernel-read");}
