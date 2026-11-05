@@ -92,8 +92,13 @@ win PE 启动代码没正确构造 argv(`winargs` 路径)。unisacc 读到垃圾
 
 | file:line | 代码 | 说明 |
 |---|---|---|
-| `src/drivestream.cx:34` | `static const char *ds_tgt = "lnx/x86_64";` | **STREAM-HOST-TARGET**,本轮新发现 |
-| `cx/driver/route.cx:391` | `if (!tgt) tgt = mode2 ? "lnx/x86_64" : in->native;` | 非 run 模式下 null target 的默认值;`in->native` 已是本片,但 mode2 分支仍写死 |
+| `src/drivestream.cx:34` | `static const char *ds_tgt = "lnx/x86_64";` | **STREAM-HOST-TARGET**,本轮新发现;`unisacc stream` 在非 lnx/x86_64 主机上默认仍按 lnx/x86_64 出 route |
+
+### 6.1b 经复核属有意设计(不改,已立条目跟踪)
+
+| file:line | 代码 | 结论 |
+|---|---|---|
+| `cx/driver/route.cx:391` | `if (!tgt) tgt = mode2 ? "lnx/x86_64" : in->native;` | **有意设计,不是遗漏**。README.md:165-166 写明不带 `-b` 的 `-c`/`-S` 写的是「与目标无关的中间 tape」;实测四种 `-b` 下 tape 的 sha 相同,所以这个默认标签不参与产物。与 stream-pipe 变红无关。是否改为取本机由 **DEFAULT-TARGET-S-C**(0.0.45)先写清设计再动 |
 
 ### 6.2 名字映射/校验(合理,不算缺陷)
 
@@ -122,5 +127,6 @@ win PE 启动代码没正确构造 argv(`winargs` 路径)。unisacc 读到垃圾
 
 `exec/facts/lower-code.tsv`、`exec/facts/pp-gen.tsv` 共 3 处,属事实表内容,不是代码。
 
-**结论**:产品代码里真正的写死默认目标只有 **2 处**(`drivestream.cx:34`、`cx/driver/route.cx:391`),
+**结论**:产品代码里真正的写死默认目标只有 **1 处**(`src/drivestream.cx:34`,STREAM-HOST-TARGET);
+`cx/driver/route.cx:391` 经复核是有意设计(见 §6.1b),是否改动由 **DEFAULT-TARGET-S-C**(0.0.45)先写清设计再定;
 其余 12 处是名字映射/显式限制/生成物,不应改动。
