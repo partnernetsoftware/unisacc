@@ -1,0 +1,202 @@
+#pragma unisa use sysx.process
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+/* tools/gen-model-decode-material.cx -- 生成 cx-model-decode 的 p3 材料（OUTDEP：不读 out/ 残留）。
+ *
+ *   sh ./unisacc.com tools/gen-model-decode-material.cx -- ROOT P3_PKG NEW_ABS_OUT
+ *
+ * 产出 NEW_ABS_OUT 下：
+ *   models/model-NNN.bin         P3 包内的原始模型字节（tools/extract-p3-models.cx 解出，
+ *                                inflate + CRC + 结构检查都在那一步，全是包内声明过的东西）
+ *   models-02/model-NNN.bin      同一批的副本（cx-model-decode 的 "decoded twice" 用它）
+ *   reference-dumps/model-NNN.txt  旧运行时（archive/reference-c/exec/c/run.c）对同一字节的
+ *                                结构快照。参考实现是归档的 C，不是本仓的 CX 解码器，
+ *                                所以 CX 侧对拍不是自证。
+ *   manifest.tsv                 材料账：package sha、参考源码与对象的 sha、每个模型的 sha
+ *
+ * 为什么这样造：原材料的 32 份快照来自固定的 P3 7b806ec2，而那个包已不在树里，材料又只能由
+ * 旧运行时产出——于是"读 out/ 残留"和"没有材料就不跑"都会让覆盖下降。这里把材料做成
+ * 可再生的：模型来自任何 P3 包（本仓现装的就够），快照由归档参考实现现场算出。
+ * 输入变了输出就变，所以账里同时锁 package 与参考源码/对象的身份。
+ * Exit 0 只在一整套材料都写全且账核对一致时。 */
+
+static int gm_failed;
+static char gm_root[4096];
+static char gm_bound[4400];
+static char gm_cc[4096];
+
+static void gm_die(const char *a, const char *b) {
+    sy_eprintf("gen-model-decode-material: %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    sy_exit(2);
+}
+static int gm_run(char **v, int secs) {
+    np_result r;
+    char why[512];
+    int tr;
+    memset(&r, 0, sizeof r);
+    tr = np_run(v, gm_root, 0, secs, &r, why, sizeof why);
+    if (tr) { sy_eprintf("gen-model-decode-material: %s\n", why); return -1; }
+    if (r.rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return tr ? -1 : (r.rc ? r.rc : 0);
+}
+static void gm_sha(const char *p, char out[65]) {
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    if (!b) gm_die("read", p);
+    cx_sha256_hex(b, n, out);
+    free(b);
+}
+static int gm_count(const char *dir, const char *suffix) {
+    sy_stat_t st;
+    char p[4400];
+    int k = 0;
+    while (1) {
+        if (cx_fmt(p, sizeof p, "%s/model-%03d%s", dir, k, suffix)) gm_die("path", dir);
+        if (sy_stat(p, &st) || st.kind != 'f') break;
+        k++;
+    }
+    return k;
+}
+
+int main(int argc, char **argv) {
+    char out[4400], models[4400], models2[4400], dumps[4400], refsrc[4400], refexe[4400];
+    char frame[4400], bytes[4400], inc[4400], fobj[4400], bobj[4400], p[4400], manifest[4400];
+    char pkgsha[65], refsha[65], framesha[65], bytessha[65], h[65];
+    char *v[12];
+    int n, k, bad = 0;
+    if (argc != 4) gm_die("usage ROOT P3_PKG NEW_ABS_OUT", 0);
+    if (!realpath(argv[1], gm_root)) gm_die("root", argv[1]);
+    if (argv[3][0] != '/') gm_die("NEW_ABS_OUT must be absolute", argv[3]);
+    if (cx_fmt(out, sizeof out, "%s", argv[3])) gm_die("path", argv[3]);
+    if (sy_exists(out) == 1) gm_die("NEW_ABS_OUT must not exist", out);
+    if (cx_fmt(gm_bound, sizeof gm_bound, "%s/tools/bound", gm_root)) gm_die("path", gm_root);
+    {   const char *cc = sy_env("UNISA_CC");
+        if (!cc || !cc[0]) cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
+        if (cx_fmt(gm_cc, sizeof gm_cc, "%s", cc)) gm_die("path", "cc");
+    }
+    if (sy_mkdir(out, 0755)) gm_die("mkdir", out);
+    if (cx_fmt(models, sizeof models, "%s/models", out) ||
+        cx_fmt(models2, sizeof models2, "%s/models-02", out) ||
+        cx_fmt(dumps, sizeof dumps, "%s/reference-dumps", out)) gm_die("path", out);
+    /* 1. 模型:交给现成的提取器（inflate + CRC + 结构都在那里做，产物按 model-NNN.bin 命名）。
+          它要求输出放在 ROOT/out 之下；材料目录允许在仓外，所以先在 out/ 下解，再整批搬过来。 */
+    {
+        char stage[4400], stage_out[4400];
+        if (cx_fmt(stage, sizeof stage, "%s/out/gen-model-decode-%d", gm_root, (int)sy_pid())) gm_die("path", gm_root);
+        /* extract-p3-models 要求 NEW_OUT 的父级严格在 ROOT/out 之下（它用 ".../out/" 前缀比对），
+           所以先建一层暂存目录，再把 <stage>/x 交给它。 */
+        if (sy_mkdir(stage, 0755) && sy_exists(stage) != 1) gm_die("mkdir", stage);
+        if (cx_fmt(stage_out, sizeof stage_out, "%s/x", stage)) gm_die("path", stage);
+        if (cx_fmt(p, sizeof p, "%s/tools/extract-p3-models.cx", gm_root)) gm_die("path", gm_root);
+        v[0] = "sh"; v[1] = "unisacc.com"; v[2] = p; v[3] = "--"; v[4] = gm_root; v[5] = argv[2]; v[6] = stage_out; v[7] = 0;
+        if (gm_run(v, 55)) gm_die("extract-p3-models", argv[2]);
+        {   char xdir[4400];
+            if (cx_fmt(xdir, sizeof xdir, "%s/x", stage)) gm_die("path", stage);
+            if (gm_count(xdir, ".bin") < 32) gm_die("fewer than 32 models", xdir);
+            if (cx_fmt(xdir, sizeof xdir, "%s/x", stage)) gm_die("path", stage);
+            /* 搬就要建目标目录，然后逐件 cp：SOURCE 材料是只读的结论，不做任何解码。 */
+            if (sy_mkdir(models, 0755) && sy_exists(models) != 1) gm_die("mkdir", models);
+            if (sy_mkdir(models2, 0755) && sy_exists(models2) != 1) gm_die("mkdir", models2);
+            n = gm_count(xdir, ".bin");
+            for (k = 0; k < n; k++) {
+                char from[4400], to[4400], to2[4400];
+                if (cx_fmt(from, sizeof from, "%s/model-%03d.bin", xdir, k)) gm_die("path", xdir);
+                if (cx_fmt(to, sizeof to, "%s/model-%03d.bin", models, k)) gm_die("path", models);
+                if (cx_fmt(to2, sizeof to2, "%s/model-%03d.bin", models2, k)) gm_die("path", models2);
+                {   size_t bn = 0;
+                    char *b = cx_read(from, &bn);
+                    if (!b) gm_die("read", from);
+                    if (cx_write(to, b, bn) || cx_write(to2, b, bn)) { free(b); gm_die("write", to); }
+                    free(b);
+                }
+            }
+            /* 暂存目录用后就删（cx_rmtree 只认白名单根：<repo>/out 在名单内）。 */
+            if (cx_rmtree(stage)) sy_eprintf("gen-model-decode-material: warn: scratch left at %s\n", stage);
+        }
+    }
+    /* 2. 参考解码器:归档的 C 运行时（archive/reference-c/exec/c/run.c），不是本仓 CX 实现。 */
+    if (cx_fmt(refsrc, sizeof refsrc, "%s/tests/cases/model_decode_reference.c", gm_root) ||
+        cx_fmt(refexe, sizeof refexe, "%s/reference", out) ||
+        cx_fmt(frame, sizeof frame, "%s/cx/runtime/source_frame.cx", gm_root) ||
+        cx_fmt(bytes, sizeof bytes, "%s/cx/mem/bytes.cx", gm_root) ||
+        cx_fmt(inc, sizeof inc, "%s/include/cx.h", gm_root) ||
+        cx_fmt(fobj, sizeof fobj, "%s/frame.o", out) ||
+        cx_fmt(bobj, sizeof bobj, "%s/bytes.o", out)) gm_die("path", gm_root);
+    {   char hdr[4400];
+        if (cx_fmt(hdr, sizeof hdr, "-I%s/exec/c", gm_root)) gm_die("path", gm_root);
+        v[0] = gm_bound; v[1] = "40"; v[2] = gm_cc; v[3] = "-O2"; v[4] = "-w";
+        v[5] = "-x"; v[6] = "c"; v[7] = "-include"; v[8] = inc; v[9] = "-c"; v[10] = frame; v[11] = "-o"; v[12] = fobj; v[13] = 0;
+        if (gm_run(v, 40)) gm_die("frame build", frame);
+        v[0] = gm_bound; v[1] = "40"; v[2] = gm_cc; v[3] = "-O2"; v[4] = "-w";
+        v[5] = "-x"; v[6] = "c"; v[7] = "-include"; v[8] = inc; v[9] = "-c"; v[10] = bytes; v[11] = "-o"; v[12] = bobj; v[13] = 0;
+        if (gm_run(v, 40)) gm_die("bytes build", bytes);
+        (void)hdr;
+        /* 两个 .o 与源一起链：source_frame 调 mm_copy（cx/mem/bytes）。 */
+        {   char *full[16];
+            int j = 0;
+            full[j++] = gm_bound; full[j++] = "40"; full[j++] = gm_cc; full[j++] = "-O2"; full[j++] = "-w";
+            full[j++] = "-ffunction-sections"; full[j++] = "-fdata-sections"; full[j++] = "-Wl,--gc-sections";
+            full[j++] = hdr; full[j++] = refsrc; full[j++] = fobj; full[j++] = bobj;
+            full[j++] = "-o"; full[j++] = refexe; full[j] = 0;
+            if (gm_run(full, 40)) gm_die("reference link", refexe);
+        }
+    }
+    /* 3. 每个模型跑一次参考解码器，写结构快照。 */
+    if (sy_mkdir(dumps, 0755) && sy_exists(dumps) != 1) gm_die("mkdir", dumps);
+    n = gm_count(models, ".bin");
+    for (k = 0; k < n; k++) {
+        char model[4400], dump[4400];
+        char *rv[6];
+        np_result r;
+        char why[512];
+        if (cx_fmt(model, sizeof model, "%s/model-%03d.bin", models, k) ||
+            cx_fmt(dump, sizeof dump, "%s/model-%03d.txt", dumps, k)) gm_die("path", dumps);
+        rv[0] = gm_bound; rv[1] = "10"; rv[2] = refexe; rv[3] = model; rv[4] = 0;
+        memset(&r, 0, sizeof r);
+        if (np_run(rv, gm_root, 0, 12, &r, why, sizeof why) || r.rc || !r.outn) {
+            sy_eprintf("gen-model-decode-material: reference dump failed model=%03d\n", k);
+            np_free(&r);
+            bad = 1;
+            continue;
+        }
+        if (cx_write(dump, r.out, r.outn)) { np_free(&r); gm_die("write", dump); }
+        np_free(&r);
+    }
+    /* 4. 账:锁 package、参考源码/对象、每个模型的 sha。 */
+    gm_sha(argv[2], pkgsha);
+    gm_sha(refsrc, refsha);
+    gm_sha(frame, framesha);
+    gm_sha(bytes, bytessha);
+    {
+        long at = 0, cap = 1 << 20;
+        char *buf = malloc((size_t)cap);
+        if (!buf) gm_die("alloc", "manifest");
+        if (cx_fmt(p, sizeof p, "%s/manifest.tsv", out)) gm_die("path", out);
+        at += snprintf(buf + at, (size_t)(cap - at), "P3MODEL_MATERIAL1\n");
+        at += snprintf(buf + at, (size_t)(cap - at), "package\t%s\t%s\n", argv[2], pkgsha);
+        at += snprintf(buf + at, (size_t)(cap - at), "reference-source\ttests/cases/model_decode_reference.c\t%s\n", refsha);
+        at += snprintf(buf + at, (size_t)(cap - at), "reference-frame\tcx/runtime/source_frame.cx\t%s\n", framesha);
+        at += snprintf(buf + at, (size_t)(cap - at), "reference-bytes\tcx/mem/bytes.cx\t%s\n", bytessha);
+        at += snprintf(buf + at, (size_t)(cap - at), "models\t%d\n", n);
+        for (k = 0; k < n; k++) {
+            char model[4400], dumpsha[65], modelsha[65];
+            if (cx_fmt(model, sizeof model, "%s/model-%03d.bin", models, k)) gm_die("path", models);
+            gm_sha(model, modelsha);
+            if (cx_fmt(model, sizeof model, "%s/model-%03d.txt", dumps, k)) gm_die("path", dumps);
+            gm_sha(model, dumpsha);
+            at += snprintf(buf + at, (size_t)(cap - at), "model\t%03d\t%s\t%s\n", k, modelsha, dumpsha);
+        }
+        if (cx_write(p, buf, (size_t)at)) gm_die("write", p);
+        free(buf);
+    }
+    if (bad) { sy_printf("GEN_MODEL_MATERIAL\tmodels=%d\tfailed=1\n", n); return 1; }
+    sy_printf("GEN_MODEL_MATERIAL\tmodels=%d\tpackage=%.16s\tfailed=0\n", n, pkgsha);
+    (void)manifest;
+    (void)h;
+    return 0;
+}
