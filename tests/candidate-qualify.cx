@@ -96,6 +96,15 @@ static int cq_marker(const np_result *r, const char *needle) {
 static void cq_batch(const char *check, char **argv, const char *marker) {
     np_result r; char why[512], detail[500]; long t0 = sy_now_ms(); int rc = cq_exec(argv, &r, why, sizeof why), good;
     good = rc == 0 && cq_marker(&r, marker);
+    if (rc == 3 && cq_marker(&r, marker) && !cq_marker(&r, "\nFAIL\t")) {   /* the batch ran and some row could not run here */
+        char *z = cq_zout(&r), *f = z ? strstr(z, "NOT_RUN\t") : 0;
+        if (f) { char *e = strchr(f, '\n'); if (e) *e = 0; }
+        { if (cx_fmt(detail, sizeof detail, "rc3: %.300s", f ? f : "a row was NOT_RUN")) detail[0] = 0; }
+        free(z);
+        cq_row(check, "NOT_RUN", rc, sy_now_ms() - t0, detail);
+        np_free(&r);
+        return;
+    }
     if (good) { if (cx_fmt(detail, sizeof detail, "%s", marker)) detail[0] = 0; }
     else if (rc < 0) { if (cx_fmt(detail, sizeof detail, "not observed: %s", why)) detail[0] = 0; }
     else {  /* first FAIL line, else the stderr head: what a reader needs from the table */
@@ -157,7 +166,14 @@ static int cq_cell(const char *target, const char *out) {
     {   char *v[] = {"sh", "./unisacc.com", "--version", 0}; np_result r; char w[512]; long t = sy_now_ms(); int rc = cq_exec(v, &r, w, sizeof w), good;
         { if (cx_fmt(line, sizeof line, "unisacc %s\n", ver)) line[0] = 0; }
         good = rc == 0 && r.outn == strlen(line) && !memcmp(r.out, line, r.outn) && r.errn == 0;
-        cq_row("version", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? line : (rc < 0 ? w : (r.out ? r.out : "")));
+        if (good) cq_row("version", "PASS", rc, sy_now_ms() - t, line);
+        else if (rc < 0) cq_row("version", "FAIL", rc, sy_now_ms() - t, w);
+        else {   /* say which part differed: the row turns newlines into spaces, so the text alone hides it */
+            char d[400]; size_t k;
+            if (cx_fmt(d, sizeof d, "stdout_len=%ld want=%ld stderr_len=%ld stdout_hex=", (long)r.outn, (long)strlen(line), (long)r.errn)) d[0] = 0;
+            for (k = 0; k < (size_t)r.outn && k < 24; k++) if (cx_fmt(d + strlen(d), sizeof d - strlen(d), "%02x", (unsigned char)r.out[k])) break;
+            if (r.errn && cx_fmt(d + strlen(d), sizeof d - strlen(d), " stderr=%.200s", r.err)) {}
+            cq_row("version", "FAIL", rc, sy_now_ms() - t, d); }
         if (rc >= 0) np_free(&r); }
     {   static const char src[] = "#include <stdio.h>\nint main(void){puts(\"candidate-hello\");return 0;}\n";
         np_result r; char w[512]; long t = sy_now_ms(); int rc, good = 0;

@@ -14,10 +14,12 @@
  *   abc-fflush  A 写 "A"，B 写 "B" 后 fflush，A 继续写 "C" → "ABC"
  * 第四个用例是失败合同（cdx 报的 errno 回归）：
  *   devfull     fopen("/dev/full","w") 写 1 字节后 errno==0，fflush 必须失败且 errno!=0
+ *               需要 /dev/full(Linux 设备);主机没有时这两条记 NOT_RUN,不算 PASS。
  * 所有材料建在 mkdtemp 的独占目录里：不写仓内 out/，全新克隆可跑。
- * 输出 STDIO_CROSSUNIT<TAB>failed=N；退出 0 仅当 failed=0。 */
+ * 输出 STDIO_CROSSUNIT<TAB>assertions=N<TAB>failed=K<TAB>not_run=M;退出 1 当 failed>0,
+ * 3 当没有失败但有 NOT_RUN,0 仅当全部 PASS。 */
 static char dir[4096], product[4400];
-static int failed, asserts;
+static int failed, asserts, not_run;
 static void ck(int ok, const char *name) {
     asserts++;
     if (!ok) failed++;
@@ -88,22 +90,30 @@ int main(int argc, char **argv) {
             if (got) free(got);
         }
     }
-    {   /* 4: the failure contract -- errno must be the caller's errno too */
-        put("full.c", "#include <stdio.h>\n#include <errno.h>\n"
-                      "int main(void){FILE *f=fopen(\"/dev/full\",\"w\");if(!f)return 1;"
-                      "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
-                      "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
-        {   char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0};
-            ck(run(v) == 0, "devfull-compiles");
-        }
-        {   char *v[] = {"./fullprobe", 0};
-            ck(run(v) == 0, "devfull-errno-visible-to-caller");
+    {   /* 4: the failure contract -- errno must be the caller's errno too.  It needs /dev/full, a Linux device
+           (macOS has none): without it the two rows are NOT_RUN, counted apart, never PASS. */
+        struct stat st;
+        if (stat("/dev/full", &st) != 0) {
+            not_run += 2;
+            printf("NOT_RUN\tdevfull-compiles\tno /dev/full on this host\n");
+            printf("NOT_RUN\tdevfull-errno-visible-to-caller\tno /dev/full on this host\n");
+        } else {
+            put("full.c", "#include <stdio.h>\n#include <errno.h>\n"
+                          "int main(void){FILE *f=fopen(\"/dev/full\",\"w\");if(!f)return 1;"
+                          "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
+                          "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
+            {   char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0};
+                ck(run(v) == 0, "devfull-compiles");
+            }
+            {   char *v[] = {"./fullprobe", 0};
+                ck(run(v) == 0, "devfull-errno-visible-to-caller");
+            }
         }
     }
     {   char rm[4400];
         if (cx_fmt(rm, sizeof rm, "%s", dir)) return 2;
         (void)rm;
     }
-    printf("STDIO_CROSSUNIT\tassertions=%d\tfailed=%d\n", asserts, failed);
-    return failed ? 1 : 0;
+    printf("STDIO_CROSSUNIT\tassertions=%d\tfailed=%d\tnot_run=%d\n", asserts, failed, not_run);
+    return failed ? 1 : not_run ? 3 : 0;
 }
