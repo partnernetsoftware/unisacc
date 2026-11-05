@@ -269,14 +269,14 @@ int main(int argc, char **argv) {
         }
     }
     free(body);
-    {   /* S4: 改坏 crc / raw 长度,用 runtime 验证具名拒绝 */
-        char badcrc[4400], badlen[4400];
+    {   /* S4a: 把已装开发包里模型 0 的 CRC 改坏一位,再用 side ELF + UNISA_CONTAINER 指这个包,
+           让产品真的走到模型解码;要求非零退出、stderr 具名 "compressed model CRC"、不产出对象。
+           旧版本构造的单流坏包在该路由上到不了解码(产品先报 NOT_IMPLEMENTED),所以记 NOT_RUN。 */
+        char badcrc[4400];
         if (snprintf(badcrc, sizeof badcrc, "%s/badcrc.bin", work) >= (int)sizeof badcrc) ps_die("path");
-        (void)0;
         {   PsPkg q;
             size_t qn;
-            char *qb = ps_body(out2, &q, &qn);
-            size_t i2, e2;
+            char *qb = ps_body(pkg, &q, &qn);
             long at = q.routes_end, i, k, target_at = -1, target_end = -1;
             for (i = 0; i < q.nm; i++) {
                 long st = at, e = at, stored;
@@ -285,10 +285,10 @@ int main(int argc, char **argv) {
                 for (k = 0; k < e - st; k++) line[k] = qb[st + k];
                 line[e - st] = 0;
                 if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
-                if (i == 1) { target_at = st; target_end = e + 1 + stored; }
+                if (i == 0) { target_at = st; target_end = e + 1 + stored; }
                 at = e + 1 + stored;
             }
-            /* 改 crc：把 M 行里最后一个十进制数字的各位替换成 9（长度不变）。 */
+            if (target_at < 0) ps_die("no model 0 record");
             {   long q2, nd = -1;
                 size_t total = (size_t)q.body;
                 char *img = malloc(total);
@@ -303,64 +303,38 @@ int main(int argc, char **argv) {
             }
             free(qb);
         }
-        /* 把坏包拼成单流容器后交给 runtime;这里只用 crc 一处(长度改动已由 runtime 的
-           invalid compressed model 覆盖,e1 的 raw 长度改动在同一条检查路径上)。 */
-        {   PsPkg q;
-            size_t qn;
-            char *qb = ps_body(badcrc, &q, &qn);
-            size_t i2, e2;
-            long at = q.routes_end, i, k, ta = -1, te = -1, rawlen = 0;
-            for (i = 0; i < q.nm; i++) {
-                long st = at, e = at, stored;
-                char line[256];
-                while (e < q.body && qb[e] != '\n') e++;
-                for (k = 0; k < e - st; k++) line[k] = qb[st + k];
-                line[e - st] = 0;
-                if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
-                if (i == 1) { ta = st; te = e + 1 + stored; sscanf(line, "M %*d %ld", &rawlen); }
-                at = e + 1 + stored;
-            }
-            {   char mrec[256];
-                long ln = 0, q2;
-                size_t total, w = 0;
-                char *img;
-                char *base = ps_bare_runner(work, &n);
-                for (q2 = ta; q2 < te && qb[q2] != '\n'; q2++) mrec[ln++] = qb[q2];
-                mrec[ln] = 0;
-                total = n + strlen(mrec) + 64 + (size_t)(te - ta) + 64;
-                img = malloc(total);
-                if (!img) ps_die("allocation");
-                for (i2 = 0; i2 < n; i2++) img[w++] = base[i2];
-                {   const char *hd = "P 3 1 1 0\nD stream e1 pp.locations tokens.locations 0\n";
-                    for (i2 = 0; i2 < strlen(hd); i2++) img[w++] = hd[i2];
-                }
-                for (i2 = 0; i2 < strlen(mrec); i2++) img[w++] = mrec[i2];
-                img[w++] = '\n';   /* M 行必须换行结束，payload 紧随其后 */
-                for (q2 = ta + ln + 1; q2 < te; q2++) img[w++] = qb[q2];
-                {   unsigned long long v = (unsigned long long)(w - (size_t)n);   /* footer extent = 包正文长度 */
-                    memcpy(img + w, "UNIPKG1\n", 8);
-                    w += 8;
-                    for (i2 = 0; i2 < 8; i2++) img[w++] = (char)((v >> (8 * i2)) & 255);
-                }
-                if (snprintf(p, sizeof p, "%s/badcrc.com", work) >= (int)sizeof p) ps_die("path");
-                ps_write(p, img, w, 0700);
-                free(img); free(base);
-                (void)e2;
-            }
-            free(qb);
+        /* 单流容器 = 坏包正文 + UNIPKG1 footer;产品只接受这种形状。 */
+        {   size_t bn = 0;
+            char *bb = ps_read(badcrc, &bn);
+            size_t total = bn + 16, w2 = 0, i2;
+            char *img = malloc(total);
+            unsigned long long v = (unsigned long long)bn;
+            if (!img) ps_die("allocation");
+            for (i2 = 0; i2 < bn; i2++) img[w2++] = bb[i2];
+            memcpy(img + w2, "UNIPKG1\n", 8); w2 += 8;
+            for (i2 = 0; i2 < 8; i2++) img[w2++] = (char)((v >> (8 * i2)) & 255);
+            if (snprintf(p, sizeof p, "%s/badcrc.com", work) >= (int)sizeof p) ps_die("path");
+            ps_write(p, img, w2, 0700);
+            free(img); free(bb);
         }
-        {   char inc[4400];
-            if (snprintf(inc, sizeof inc, "%s/include", ps_root) >= (int)sizeof inc) ps_die("path");
-            char *av[] = {p, "/tmp/s1.bin", "x.c", inc, 0};
-            np_result r; char why[1024];
-            if (np_run(av, ps_root, 0, 30, &r, why, sizeof why)) ps_die(why);
-            /* 这个坏包只有"第 1 个模型 CRC 被改坏"这一处伤害。产品先做预处理输入检查，
-               在读到该模型之前就拒了（"NUL byte in preprocessing input"），所以本 check
-               不能声称验证了 CRC 拒绝：既有断言是错的，改成如实记录它实际报什么。 */
-            if (r.errn && ps_has(r.err, (long)r.errn, "NUL byte in preprocessing input")) {
-                printf("NOT_RUN\tS4a.bad-crc-unreached\tproduct rejects the input before decoding model 1\n");
-            } else ps_ck(r.rc != 0 && r.errn > 0, "S4a.bad-crc-refused-nonzero");
-            np_free(&r);
+        {   char elf[4400], src[4600], obj[4600], cont[4600];
+            if (snprintf(elf, sizeof elf, "%s/unisacc.com.dev/entry.elf", ps_root) >= (int)sizeof elf) ps_die("path");
+            if (snprintf(src, sizeof src, "%s/s4a-probe.c", work) >= (int)sizeof src) ps_die("path");
+            if (snprintf(obj, sizeof obj, "%s/s4a-probe.o", work) >= (int)sizeof obj) ps_die("path");
+            if (snprintf(cont, sizeof cont, "UNISA_CONTAINER=%s", p) >= (int)sizeof cont) ps_die("path");
+            /* 启动器会用自己那份包覆盖 UNISA_CONTAINER，所以这里直接用 side ELF。 */
+            {   static const char *prog = "int main(void){return 0;}\n";
+                ps_write(src, prog, strlen(prog), 0600);
+            }
+            {   char *av[] = {elf, "-O2", "-c", "-b", "lnx/x86_64", src, "-o", obj, 0};
+                char *envp[] = {cont, "UNISACC_E3CACHE=/nonexistent-s4a-cache", 0};
+                np_result r; char why[1024];
+                if (np_run(av, ps_root, envp, 30, &r, why, sizeof why)) ps_die(why);
+                ps_ck(r.rc != 0, "S4a.bad-crc-refused-nonzero");
+                ps_ck(r.errn > 0 && ps_has(r.err, (long)r.errn, "compressed model CRC"), "S4a.bad-crc-named");
+                ps_ck(access(obj, F_OK) != 0, "S4a.bad-crc-no-object");
+                np_free(&r);
+            }
         }
     }
     {   /* S6: 含负数的文本网(utf8.net,16 处 -1)经 p3-swap 转 UNINETB1 后,
