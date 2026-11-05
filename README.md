@@ -197,6 +197,10 @@ sh ./unisacc.com tools/release-build.cx -- slice ROOT PKG OUT --target TARGET
 sh ./unisacc.com tools/release-ape.cx -- pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64
 ```
 
+The lnx slices are `<slice>/entry.elf`: the APE carries one package at its end
+and every slice reads it through `UNISA_CONTAINER`, so a slice that still ends
+in `UNIPKG1` (a `candidate`) is refused rather than silently stripped.
+
 The classic route is archived: `unisacc.c`, `src/*.c` and the C sources of the
 old driver are in `archive/reference-c/`; `tests/build_ref.sh`,
 `tests/export_ref.sh` and `tests/release.sh` are in
