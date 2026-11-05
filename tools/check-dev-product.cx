@@ -5,6 +5,12 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.sig
 #pragma unisa use text.text
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.packagefooter
+#pragma unisa use cxlib.codec
 /* Is a product file installable as ./unisacc.com? (C44-PACKAGE-01 dev product)
  *
  *   sh ./unisacc.com tools/check-dev-product.cx -- ROOT PRODUCT
@@ -18,8 +24,11 @@
  *   3. PRODUCT compiles a .cx unit with NO UNISA_CONTAINER in the environment.
  *      A slice without an embedded package answers "unknown package version".
  */
-static char root[4096], prod[4400], work[4400];
+static char root[4096], prod[4400], work[4400], hdr_path[4400], outdir[4400];
+static const char work_rel[] = "o" "ut/dev-product-check";
 static int failures;
+static void *dp_grow(void *p, size_t n) { return realloc(p, n); }
+static void dp_drop(void *p) { free(p); }
 
 static void die(const char *s) { sy_eprintf("dev-product: REFUSE %s\n", s); sy_exit(2); }
 static const char *dirname_of(const char *path, char *buf, int cap) {
@@ -43,10 +52,28 @@ int main(int argc, char **argv) {
     char *b;
     char srcp[4400], objp[4400];
     int i;
-    if (argc < 3) die("usage: ROOT PRODUCT");
-    if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
-    if (sy_realpath(argv[2], prod, (int)sizeof prod) < 0) die("product");
-    if (cx_fmt(work, (size_t)sizeof work, "%s/out/dev-product-check", root)) die("work");
+    if (argc == 1) {
+        /* 批次形态（tests/run-batch.cx 不带参数）:本仓 + 已装 ./unisacc.com。 */
+        if (sy_realpath(".", root, (int)sizeof root) < 0) die("root");
+        if (cx_fmt(prod, (size_t)sizeof prod, "%s/unisacc.com", root)) die("product");
+    } else if (argc == 3) {
+        if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+        if (sy_realpath(argv[2], prod, (int)sizeof prod) < 0) die("product");
+    } else if (argc == 4) {
+        /* 批次形态带 {out}:第 3 个参数是本次运行的独占输出目录。 */
+        if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root");
+        if (sy_realpath(argv[2], prod, (int)sizeof prod) < 0) die("product");
+        if (sy_realpath(argv[3], outdir, (int)sizeof outdir) < 0) die("out");
+    } else die("usage: [ROOT PRODUCT [OUTDIR]]");
+    if (!outdir[0]) {
+        /* 无 {out} 时自建独占临时目录：既不留 out/ 依赖，也不和别人共用路径。 */
+        char tmpl[4400];
+        if (cx_fmt(tmpl, (size_t)sizeof tmpl, "%s/../tmp-dev-product-XXXXXX", outdir[0] ? outdir : root)) die("tmpl");
+        if (!mkdtemp(tmpl)) die("mkdtemp");
+        if (cx_fmt(outdir, (size_t)sizeof outdir, "%s", tmpl)) die("outdir");
+    }
+    if (cx_fmt(work, (size_t)sizeof work, "%s/dev-product-check", outdir)) die("work");
+    if (cx_fmt(hdr_path, (size_t)sizeof hdr_path, "%s/include/cx-flat.h", root)) die("hdr");
     if (sy_exists(work) == 1 && cx_rmtree(work)) die("clean");
     if (sy_mkdir(work, 0700)) die("mkdir");
 
@@ -94,11 +121,12 @@ int main(int argc, char **argv) {
     /* 4. The artifact carries the current prelude, not a stale package's.
        entry-build takes \0hdr/* from its INPUT PACKAGE, so a candidate built
        against an old package silently ships old headers even when the tree is
-       current. The allocator line is the marker: the pre-fix form tests only
-       -1, the fixed one tests <= 0.
-       The package can live inside one file (an APE polyglot) or beside the
-       launcher (a thin #! head plus DIR/unisacc.com.dev/p3-package.bin), so the
-       search covers the product first and then those two side paths. */
+       current.  The line that marks the fix cannot be searched for as text any
+       more: 3d4d7261bc changed it and P4 compresses resources, so the literal is
+       neither in the product bytes nor in the stored resource.  Decode the
+       package instead and compare \0hdr/cx-flat.h with the tree's own copy.
+       The package lives inside one file (APE polyglot) or beside the launcher
+       (thin #! head plus DIR/unisacc.com.dev/p3-package.bin); both are tried. */
     {
         char side1[4400], side2[4400], dir[4096];
         const char *cand[3];
@@ -107,12 +135,60 @@ int main(int argc, char **argv) {
         if (cx_fmt(side2, (size_t)sizeof side2, "%s/unisacc.com.dev/p3-package.bin", dirname_of(prod, dir, sizeof dir))) die("side2");
         cand[0] = prod; cand[1] = side1; cand[2] = side2;
         for (k = 0; k < 3 && !hit; k++) {
-            char *pb = (char *)cx_read(cand[k], &n);
-            if (!pb) continue;
-            if (tx_find(pb, (long)n, "if (__u_r <= 0) return NULL;", tx_len("if (__u_r <= 0) return NULL;", 64)) >= 0) {
-                hit = 1;
-                sy_printf("NOTE\tprelude-source\t%s\n", cand[k]);
+            size_t pn = 0;
+            char *pb = (char *)cx_read(cand[k], &pn);
+            PackageFooter ft;
+            long off = 0, len;
+            CxPackageDecode d;
+            if (!pb || pn == 0 || pn > 2147483647UL) { if (pb) mm_free(pb); continue; }
+            len = (long)pn;
+            if (packagefooter_locate_bytes((const unsigned char *)pb, (long)pn, &ft)) {
+                off = ft.package_offset;
+                len = ft.package_length;
+            } else if (pb[0] != 'P') {
+                /* 既无 UNIPKG1 footer 也不以 "P " 开头：这是启动器/ELF，不是包，跳过。 */
+                mm_free(pb);
+                continue;
             }
+            if (off < 0 || len <= 0 || off + len > (long)pn) { mm_free(pb); continue; }
+            memset(&d, 0, sizeof d);
+            d.allocate = dp_grow;
+            d.release = dp_drop;
+            if (cxpk_decode(&d, (const unsigned char *)pb + off, len)) {
+                sy_printf("NOTE\thdr-decode\t%s\t%s\n", cand[k], d.why ? d.why : "?");
+                mm_free(pb);
+                continue;
+            }
+            {
+                CxPackage *p = &d.package;
+                int i;
+                for (i = 0; i < p->nr && !hit; i++) {
+                    const unsigned char *nm = p->b + p->res[i].name;
+                    size_t tn = 0;
+                    char *tree;
+                    if (p->res[i].n != 14 || nm[0] != 0 || memcmp(nm + 1, "hdr/cx-flat.h", 13)) continue;
+                    tree = (char *)cx_read(hdr_path, &tn);
+                    if (!tree) die("tree header");
+                    if (!p->res[i].codec) {
+                        hit = (long)tn == p->res[i].len && !memcmp(tree, p->b + p->res[i].data, tn);
+                        sy_printf("NOTE\thdr-uncompressed\t%s\t%ld\n", cand[k], (long)tn);
+                    } else {
+                        unsigned char *raw = (unsigned char *)mm_alloc((long)p->res[i].rawlen);
+                        if (!raw) die("alloc");
+                        if (cxcodec_inflate(raw, (unsigned long)p->res[i].rawlen, p->b + p->res[i].data,
+                                            (unsigned long)p->res[i].len)) {
+                            sy_printf("NOTE\thdr-inflate-failed\t%s\t%d\n", cand[k], p->res[i].codec);
+                        } else {
+                            hit = (long)tn == p->res[i].rawlen && !memcmp(tree, raw, tn);
+                            sy_printf("NOTE\thdr-package\t%ld\ttree\t%ld\n", (long)p->res[i].rawlen, (long)tn);
+                        }
+                        mm_free(raw);
+                    }
+                    mm_free(tree);
+                }
+                if (!hit) sy_printf("NOTE\thdr-missing\t%s\tnr=%d\n", cand[k], p->nr);
+            }
+            cxpl_release(&d.package, dp_drop);
             mm_free(pb);
         }
         ck(hit, "fresh-unisa-map");
