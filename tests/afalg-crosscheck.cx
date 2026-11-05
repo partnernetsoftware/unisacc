@@ -1,0 +1,72 @@
+/* afalg-crosscheck.cx -- every file of a source-package context hashes the same
+ * through the kernel AF_ALG path and through the pure CX SHA256.
+ *
+ *   sh ./unisacc.com tests/afalg-crosscheck.cx -- ROOT CTX_DIR
+ *
+ * CTX_DIR is a prepared source-package context (package.tsv, compiler.pkg,
+ * kernels/, models/, declaration/, routes/).  Every regular file below it is
+ * hashed twice: ks_sha256_hex (AF_ALG on Linux/x86_64, the digest provider the
+ * package itself declares) and cx_sha256_hex (software).  The two must agree for
+ * every file, byte for byte, and the file must not change while it is read.
+ * A file that disappears or changes mid-read is a refusal, never a skip.
+ * Prints PASS/FAIL per file and AFALG_CROSS<TAB>files=N<TAB>failed=M.
+ * This is a local Linux/x86_64 gate; on any other host it is NOT_RUN (rc 3). */
+#pragma unisa use cxlib.kernelsha
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+static int ac_files, ac_failed, ac_depth;
+static char ac_root[4096];
+static void ac_ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) ac_failed++;
+}
+static int ac_walk(const char *dir, int depth) {
+    DIR *d; struct dirent *e; int rc = 0;
+    if (depth > 6) return 0;
+    d = opendir(dir);
+    if (!d) { printf("FAIL\tunreadable\t%s\n", dir); ac_failed++; return 0; }
+    while ((e = readdir(d)) != 0) {
+        char p[4400], name[160];
+        struct stat st;
+        long n;
+        if (e->d_name[0] == '.' && (e->d_name[1] == 0 || (e->d_name[1] == '.' && e->d_name[2] == 0))) continue;
+        if (snprintf(p, sizeof p, "%s/%s", dir, e->d_name) >= (int)sizeof p) { ac_failed++; continue; }
+        if (lstat(p, &st)) { printf("FAIL\tstat\t%s\n", p); ac_failed++; continue; }
+        if (S_ISDIR(st.st_mode)) { rc |= ac_walk(p, depth + 1); continue; }
+        if (!S_ISREG(st.st_mode)) continue;   /* symlinks are not followed: their target is hashed where it lives */
+        {
+            char *b = cx_read(p, (size_t *)&n);
+            char af[65], sw[65];
+            if (!b || n < 0) { printf("FAIL\tread\t%s\n", p); ac_failed++; continue; }
+            if (n > 2147483647L) { free(b); printf("FAIL\tsize\t%s\n", p); ac_failed++; continue; }
+            if (ks_sha256_hex(b, (size_t)n, af) || cx_sha256_hex(b, (size_t)n, sw)) {
+                free(b); printf("FAIL\thash\t%s\n", p); ac_failed++; continue;
+            }
+            ac_files++;
+            if (snprintf(name, sizeof name, "%s", p + strlen(ac_root) + 1) < 0) name[0] = 0;
+            ac_ck(!strcmp(af, sw), name);
+            free(b);
+        }
+    }
+    closedir(d);
+    return rc;
+}
+int main(int argc, char **argv) {
+#if !defined(__linux__) || !defined(__x86_64__)
+    fputs("NOT_RUN afalg-crosscheck requires Linux/x86_64 (kernel AF_ALG)\n", stderr);
+    return 3;
+#endif
+    if (argc > 2 || (argc == 2 && !realpath(argv[1], ac_root))) {
+        fputs("usage: afalg-crosscheck.cx [ROOT]\n", stderr);
+        return 2;
+    }
+    if (argc == 1 && !realpath(".", ac_root)) return 2;
+    {   char dir[4400];
+        if (snprintf(dir, sizeof dir, "%s/include", ac_root) >= (int)sizeof dir) return 2;
+        if (ac_walk(dir, 0)) return 2;
+    }
+    if (!ac_files) { fputs("afalg-crosscheck: no regular file under ROOT/include\n", stderr); return 2; }
+    printf("AFALG_CROSS\tfiles=%d\tfailed=%d\n", ac_files, ac_failed);
+    return ac_failed ? 1 : 0;
+}
