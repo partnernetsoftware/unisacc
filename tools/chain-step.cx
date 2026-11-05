@@ -35,6 +35,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
@@ -90,27 +91,132 @@ static void cs_expect_file(const char *p, const char *what) {
 }
 
 static void cs_sha(const char *p, char out[65]) {
-    if (sy_sha256_file(p, out)) cs_die("sha256", p);
+    long n = cs_file_size(p), at = 0;
+    int fd;
+    char *b;
+    if (n < 0) cs_die("sha256 read", p);
+    b = n > 0 ? malloc((size_t)n) : 0;
+    if (n > 0) {
+        fd = sy_open(p, O_RDONLY, 0);
+        if (fd < 0 || sy_read_full(fd, b, n) || sy_close(fd)) { free(b); cs_die("sha256 read", p); }
+    }
+    if (sy_sha256_hex(b, n, out)) { free(b); cs_die("sha256", p); }
+    free(b);
+    (void)at;
 }
 
 /* ---------- 各相位 ---------- */
 
 static int cs_snap(const char *rev, const char *out) {
-    /* release-build --rev 的第一次调用就会 git archive 出快照；用 p3 的空跑触发它不划算，
-       所以这里直接调 release-build 的 p3 到一个临时包再删。代价小（~12s）。 */
-    char tmp[4400], pkg[4400];
-    char *a[16];
-    int n = 0, rc;
-    if (cx_fmt(tmp, sizeof tmp, "%s/.snap-probe", out)) cs_die("path", out);
-    (void)sy_mkdir(tmp, 0700);
-    if (cx_fmt(pkg, sizeof pkg, "%s/pkg.bin", tmp)) cs_die("path", tmp);
-    a[n++] = "--rev"; a[n++] = (char *)rev;
-    a[n++] = "p3"; a[n++] = "."; a[n++] = "out/install44/pkg9/compiler.pkg"; a[n++] = pkg;
-    a[n++] = "--nets"; a[n++] = (char *)"out/ctxC/jobs";
-    a[n++] = "--routes"; a[n++] = (char *)"out/install44/pkg9/declaration/routes.tsv";
-    a[n] = 0;
-    (void)a;
-    sy_printf("CHAIN\tsnap\trev=%s\thint=release-build --rev 会生成 out/release-snap-<rev10>\n", rev);
+    /* release-build --rev 的快照就是 git archive 加仓根三件套与 .release-rev 标记
+       （tools/release-build.cx:639 rb_freeze 的同一配方）；这里按同一配方做，省掉一次
+       p3 构建。已存在同 rev 标记的快照直接复用，不重打。 */
+    char spec[128], full[80], brief[11], dir[4400], mark[4400], cmd[9000];
+    char *sh[4];
+    long n = 0;
+    int i;
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", rev)) cs_die("rev", rev);
+    if (cx_fmt(cmd, sizeof cmd, "git rev-parse --verify %s", spec)) cs_die("rev", rev);
+    {
+        char got[128];
+        int ofd = -1, pid, ex = 0, code = 0, sig = 0;
+        char *v[5];
+        v[0] = "/bin/sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+        pid = sy_spawn_pipe(v, ".", SY_SPAWN_NO_PATH, &ofd, 0);
+        if (pid < 0) cs_die("spawn", "git");
+        n = 0;
+        if (ofd >= 0) {
+            long r = sy_read(ofd, got, sizeof got - 1);
+            if (r > 0) n = r;
+            sy_close(ofd);
+        }
+        if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0 || (ex ? code : 128 + sig)) {
+            sy_eprintf("chain-step: rev-parse ex=%d code=%d sig=%d got=%.80s\n", ex, code, sig, got);
+            cs_die("rev", rev);
+        }
+        got[n] = 0;
+        while (n > 0 && (got[n - 1] == '\n' || got[n - 1] == '\r')) got[--n] = 0;
+        if (n != 40) cs_die("rev not 40 hex", rev);
+        for (i = 0; i < 40; i++) full[i] = got[i];
+        full[40] = 0;
+    }
+    for (i = 0; i < 10; i++) brief[i] = full[i];
+    brief[10] = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/release-snap-%s", out, brief)) cs_die("path", out);
+    if (cx_fmt(mark, sizeof mark, "%s/.release-rev", dir)) cs_die("path", dir);
+    if (sy_exists(mark)) {
+        sy_printf("CHAIN\tsnap\treused=%s\trev=%.10s\n", dir, full);
+        return 0;
+    }
+    if (sy_exists(dir)) cs_die("snapshot exists without a matching rev marker", dir);
+    if (sy_mkdir(dir, 0755)) cs_die("snapshot mkdir", dir);
+    if (cx_fmt(cmd, sizeof cmd, "git archive %s | tar -x -C %s", full, dir)) cs_die("path", dir);
+    sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+    if (cs_run(sh, ".")) cs_die("git archive", dir);
+    /* 冻结 ROOT 的启动器、根纪元记录与 dev 分体是一件东西：prepare-context 会核
+       root-epoch-product-digest，少一件就拒。git archive 不带这三件（构建产物）。 */
+    if (cx_fmt(cmd, sizeof cmd,
+               "cp unisacc.com %s/unisacc.com && cp unisacc.com.build.json %s/unisacc.com.build.json"
+               " && cp -a unisacc.com.dev %s/unisacc.com.dev", dir, dir, dir)) cs_die("path", dir);
+    sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+    if (cs_run(sh, ".")) cs_die("copy launcher", dir);
+    {
+        int fd = sy_open(mark, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0 || sy_write_all(fd, full, 40) || sy_close(fd)) cs_die("snapshot marker", mark);
+    }
+    sy_printf("CHAIN\tsnap\tfile=%s\trev=%.10s\n", dir, full);
+    return 0;
+}
+
+/* gen2 = gen1 当构造器出的一片；gen3 = gen2 当构造器出的同目标片；cmp 两份必须全等。
+   这是"两代不动点"的可执行口径：外部构造器只算 bootstrapping，不算一代。 */
+static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
+                         const char *target) {
+    char g2[4400], g3[4400], c2[4400], c3[4400], t2[4400], t3[4400];
+    char *a[10];
+    int n = 0;
+    if (cs_file_size(gen1) < 0) cs_die("gen1 candidate missing", gen1);
+    if (cx_fmt(g2, sizeof g2, "%s/g2", out)) cs_die("path", out);
+    if (cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
+    if (sy_setenv("UNISACC_CTOR", gen1, 1)) cs_die("env", "UNISACC_CTOR");
+    a[n++] = (char *)s; a[n++] = (char *)pkg; a[n++] = g2;
+    a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
+    if (cs_slice(rev, s, n, a)) return 2;
+    if (cx_fmt(c2, sizeof c2, "%s/%s", g2, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g2);
+    if (cs_file_size(c2) < 0) cs_die("gen2 candidate missing", c2);
+    if (sy_setenv("UNISACC_CTOR", c2, 1)) cs_die("env", "UNISACC_CTOR");
+    n = 0;
+    a[n++] = (char *)s; a[n++] = (char *)pkg; a[n++] = g3;
+    a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
+    if (cs_slice(rev, s, n, a)) return 2;
+    if (cx_fmt(c3, sizeof c3, "%s/%s", g3, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g3);
+    if (cs_file_size(c3) < 0) cs_die("gen3 candidate missing", c3);
+    /* 逐字节比较：两份都用 sy_open/sy_read 读全，长度不同直接判红。 */
+    {
+        long n2 = cs_file_size(c2), n3 = cs_file_size(c3), k;
+        int same = 1, fd;
+        if (n2 != n3) same = 0;
+        else if (n2 > 0) {
+            char *b2 = malloc((size_t)n2), *b3 = malloc((size_t)n3);
+            if (!b2 || !b3) cs_die("alloc", "candidate buffers");
+            fd = sy_open(c2, O_RDONLY, 0);
+            if (fd < 0 || sy_read_full(fd, b2, n2) || sy_close(fd)) cs_die("read candidate", c2);
+            fd = sy_open(c3, O_RDONLY, 0);
+            if (fd < 0 || sy_read_full(fd, b3, n3) || sy_close(fd)) cs_die("read candidate", c3);
+            for (k = 0; same && k < n2; k++) if (b2[k] != b3[k]) same = 0;
+            free(b2);
+            free(b3);
+        }
+        if (!same) { sy_printf("CHAIN\tfixedpoint\tMISMATCH\tgen2=%s\tgen3=%s\n", c2, c3); return 1; }
+    }
+    if (cx_fmt(t2, sizeof t2, "%s/candidate", g2)) cs_die("path", g2);
+    if (cx_fmt(t3, sizeof t3, "%s/candidate", g3)) cs_die("path", g3);
+    {
+        char h2[65], h3[65];
+        cs_sha(t2, h2);
+        cs_sha(t3, h3);
+        sy_printf("CHAIN\tfixedpoint\tgen2=%.16s\tgen3=%.16s\tbytes=%ld\tsame=1\n", h2, h3, cs_file_size(t2));
+    }
     return 0;
 }
 
@@ -274,8 +380,19 @@ int main(int argc, char **argv) {
         return cs_check(argv[2]);
     }
     if (tx_eqz(argv[1], "snap")) {
-        if (argc < 3) cs_die("snap needs REV", 0);
-        return cs_snap(argv[2], "out");
+        if (argc < 3) cs_die("snap needs REV [OUT]", 0);
+        return cs_snap(argv[2], argc > 3 ? argv[3] : "out");
+    }
+    if (tx_eqz(argv[1], "fixedpoint")) {
+        /* fixedpoint REV S PKG GEN1 OUT --target T */
+        if (argc < 7) cs_die("fixedpoint needs REV S PKG GEN1 OUT --target T", 0);
+        {
+            const char *target = 0;
+            int i;
+            for (i = 6; i + 1 < argc; i++) if (tx_eqz(argv[i], "--target")) target = argv[i + 1];
+            if (!target) cs_die("fixedpoint needs --target T", 0);
+            return cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target);
+        }
     }
     sy_eprintf("chain-step: unknown step %s\n", argv[1]);
     return 2;
