@@ -2,6 +2,8 @@
 
 候选:rc3 APE sha256 `54bb97a2672f5010c8815fb0f6ecfb3ee7bb7ca91af18723007430375cc3bbb8`,5,608,646B,源码 R4=`b1a219cf7d`;lnx/x86_64 候选三代逐字节相同(`45bdf636df1e`,`tests/chain-fixed-point.cx` failed=0)。
 
+本机全批会话(lnx/x86_64,同一候选 `54bb97a2`,会话 s3):408 批,274 PASS / 63 FAIL / 68 MISSING / 3 UNKNOWN;`tests/check-known-fail.cx` known=134 unknown=0 stale=0(每个非 PASS 都有带条目号的 F 行)。会话外在同一候选的 split2 安装上重跑 15 批:12 个读已装 split2 部件的批次(会话克隆只装了单文件 APE)与 3 个超时批次全部 PASS;cross-targets 用时 53 秒,超出会话 40 秒上限,0.0.45 按 OS 拆批(CROSS-TARGETS-SPLIT)。
+
 ## 支持矩阵(GitHub 原生 runner,CI-RUN-6,运行 42092234905)
 
 | 目标 | 状态 |

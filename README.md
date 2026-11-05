@@ -4,7 +4,9 @@ A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
 file, `unisacc.com`. Toolchain status (0.0.44-rc3 candidate, APE `54bb97a2`, source
-`b1a219cf7d`), checked on GitHub native runners (CI-RUN-6, run 42092234905):
+`b1a219cf7d`; local full-batch session on `lnx/x86_64`: 408 batches, 274 pass, every
+non-pass has a recorded known-fail row with an item id), checked on GitHub native
+runners (CI-RUN-6, run 42092234905):
 `lnx/x86_64`, `lnx/arm64`, `osx/x86_64` and `osx/arm64` pass identity, version, hello,
 the default `-run`, stream-pipe and smoke (the stdio errno case needs Linux's
 `/dev/full` and is not run on macOS). **`win/x86_64` does not work natively**:
