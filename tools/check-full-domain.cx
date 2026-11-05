@@ -17,16 +17,19 @@
 
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-full-domain.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-full-domain.%s\n", name); } }
-static void put(const char *name, const char *text) { char p[256]; if (cx_fmt(p, sizeof p, "out/check-full-domain/tests/%s-domain-matrix.tsv", name) || cx_write(p, text, (size_t)tx_len(text, 8192))) { sy_eprintf("check-full-domain: cannot write %s\n", p); sy_exit(2); } }
+static char fx[2048];   /* 本次运行的夹具根：/tmp 的 mkdtemp，不写仓内 out/ */
+static void put(const char *name, const char *text) { char p[2560]; if (cx_fmt(p, sizeof p, "%s/tests/%s-domain-matrix.tsv", fx, name) || cx_write(p, text, (size_t)tx_len(text, 8192))) { sy_eprintf("check-full-domain: cannot write %s\n", p); sy_exit(2); } }
 static int run(const char *domain, char *out, int cap) {
-    char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", "out/check-full-domain", (char *)domain, 0}; int cut;
+    char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", fx, (char *)domain, 0}; int cut;
     return sy_run(av, out, cap, &cut);
 }
 static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 4096), s, tx_len(s, 256)) >= 0; }
 
 int main(void) {
-    char out[4096]; int rc;
-    { char *av[] = {"sh", "-c", "rm -rf out/check-full-domain && mkdir -p out/check-full-domain/tests", 0}; int cut; if (sy_run(av, out, sizeof out, &cut)) return 2; }
+    char out[4096], cmd[2200]; int rc;
+    if (cx_fmt(fx, sizeof fx, "/tmp/check-full-domain-XXXXXX") || !mkdtemp(fx)) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s/tests", fx)) return 2;
+    { char *av[] = {"sh", "-c", cmd, 0}; int cut; if (sy_run(av, out, sizeof out, &cut)) return 2; }
     put("fx-all", "# fixture\nlnx/x86_64\ta\tyes\tCOVERED_LOCAL\te\tr\nosx/arm64\tb\tyes\tOBSERVED\te\tr\nlnx/x86_64\tc\tyes\tDECLARED_DEPENDENCY\te\tr\n");
     rc = run("fx-all", out, sizeof out); ck(rc == 0 && has(out, "required=3\tsatisfied=3\topen=0\tPASS") && !has(out, "OPEN\t"), "all-satisfied");
     put("fx-open", "lnx/x86_64\ta\tyes\tMISSING\te\tneeds a thing\nosx/arm64\tb\tyes\tNEEDS_FOREIGN_HOST\te\tr\nlnx/x86_64\tc\tyes\tNEEDS_PRODUCT_CHANGE\te\tr\nlnx/x86_64\td\tyes\tBLOCKED:owner-ruling\te\tr\nlnx/x86_64\te\tyes\tCOVERED_LOCAL\te\tr\n");
