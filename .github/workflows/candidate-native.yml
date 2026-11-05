@@ -336,18 +336,29 @@ jobs:
           # 11. fixed-base hypothesis: the same images with DllCharacteristics 0x8160 -> 0x8100 (no DYNAMIC_BASE,
           #     no HIGH_ENTROPY_VA). If argv and --version come out right, the missing relocations are the cause.
           $apf = Join-Path $PWD 'tests/cases/ci-argvprobe-win-x86_64-fixedbase.exe'
-          $uf = Join-Path $PWD 'tests/cases/unisacc-win-x86_64-fixedbase.exe'
           if (Test-Path $apf) { Run-Raw $apf @('A', 'B') 'fixedbase argvprobe.exe A B (pipe)' } else { Say "fixedbase argvprobe: NOT_RUN (not in this commit)" }
-          if (Test-Path $uf) {
-            $ufx = Join-Path $diag 'unisacc-fixedbase.exe'; Copy-Item $uf $ufx
-            Run-Raw $ufx @('--version') 'fixedbase unisacc --version'
+          # The candidate APE is itself a valid PE: patch a copy in place, never committed.
+          $uf = Join-Path $diag 'unisacc-fixedbase.exe'
+          $fb = [IO.File]::ReadAllBytes($com); $pe = [BitConverter]::ToUInt32($fb, 60); $at = $pe + 24 + 70
+          $was = [BitConverter]::ToUInt16($fb, $at)
+          if ([BitConverter]::ToUInt32($fb, $pe) -ne 0x4550 -or $was -ne 0x8160) {
+            Say ("fixedbase unisacc: NOT_RUN (PE sig or DllCharacteristics at 0x{0:x} is 0x{1:x4}, expected 0x8160)" -f $at, $was); $uf = $null
+          } else {
+            $fb[$at] = 0x00; $fb[$at + 1] = 0x81; [IO.File]::WriteAllBytes($uf, $fb)
+            $back = [IO.File]::ReadAllBytes($uf)
+            if ($back.Length -ne $fb.Length -or [BitConverter]::ToUInt16($back, $at) -ne 0x8100) { Say 'fixedbase unisacc: NOT_RUN (patch did not read back)'; $uf = $null }
+            else { Say ("fixedbase unisacc: DllCharacteristics at 0x{0:x} 0x8160 -> 0x8100, size {1}" -f $at, $back.Length) }
+          }
+          if ($uf) {
+            Run-Raw $uf @('--version') 'fixedbase unisacc --version'
             $hc = Join-Path $diag 'hello-fb.c'; [IO.File]::WriteAllText($hc, "#include <stdio.h>`nint main(void){puts(`"candidate-hello`");return 0;}`n")
             $ho = Join-Path $diag 'hello-fb.exe'
-            Run-Raw $ufx @('-o', $ho, $hc) 'fixedbase unisacc -o hello'
+            Run-Raw $uf @('-o', $ho, $hc) 'fixedbase unisacc -o hello'
             if (Test-Path $ho) { Run-Raw $ho @() 'fixedbase hello.exe' } else { Say 'fixedbase hello.exe: not produced' }
-            Run-Raw $ufx @('tests/run.cx', '--', '--smoke') 'fixedbase unisacc smoke'
-          } else { Say "fixedbase unisacc: NOT_RUN (not in this commit)" }
+            Run-Raw $uf @('tests/run.cx', '--', '--smoke') 'fixedbase unisacc smoke'
+          }
           foreach ($img in @($ap, $exe, $apf, $uf)) {
+            if (!$img) { continue }
             if (!(Test-Path $img)) { continue }
             try {
               $b = [IO.File]::ReadAllBytes($img); $pe = [BitConverter]::ToUInt32($b, 60)
