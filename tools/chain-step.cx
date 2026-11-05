@@ -179,14 +179,14 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     if (cx_fmt(g2, sizeof g2, "%s/g2", out)) cs_die("path", out);
     if (cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
     if (sy_setenv("UNISACC_CTOR", gen1, 1)) cs_die("env", "UNISACC_CTOR");
-    a[n++] = (char *)s; a[n++] = (char *)pkg; a[n++] = g2;
+    a[n++] = (char *)pkg; a[n++] = g2;
     a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
     if (cs_slice(rev, s, n, a)) return 2;
     if (cx_fmt(c2, sizeof c2, "%s/%s", g2, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g2);
     if (cs_file_size(c2) < 0) cs_die("gen2 candidate missing", c2);
     if (sy_setenv("UNISACC_CTOR", c2, 1)) cs_die("env", "UNISACC_CTOR");
     n = 0;
-    a[n++] = (char *)s; a[n++] = (char *)pkg; a[n++] = g3;
+    a[n++] = (char *)pkg; a[n++] = g3;
     a[n++] = (char *)"--target"; a[n++] = (char *)target; a[n] = 0;
     if (cs_slice(rev, s, n, a)) return 2;
     if (cx_fmt(c3, sizeof c3, "%s/%s", g3, tx_eqz(target, "lnx/x86_64") ? "candidate" : "slice-lnx-x86_64")) cs_die("path", g3);
@@ -279,33 +279,53 @@ static int cs_simple_wave(const char *s, const char *ctx, const char *b, const c
     return cs_tool(s, "tools/source-job-wave.cx", a);
 }
 
+/* release-build.cx 的两个动作都要先经过它自己的 --rev 前缀；argv[0] 是启动器
+   （sh <S>/unisacc.com <S>/tools/release-build.cx），不是 "--rev"。ROOT 用主树 "."：
+   rb_freeze 会把 ROOT 换成 out/release-snap-<rev10> 再取源，传已冻结的 S 会让它去找
+   snap 里的 snap。启动器与工具仍取 S 里的那份，避免用主树被改过的脚本。 */
+static int cs_release(const char *rev, const char *s, int argc, char **argv, const char *what) {
+    char com[4400], tool[4400];
+    char *a[32];
+    int n = 0, i;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", s)) cs_die("path", s);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/release-build.cx", s)) cs_die("path", s);
+    a[n++] = (char *)"sh";
+    a[n++] = com;
+    a[n++] = tool;
+    a[n++] = (char *)"--rev"; a[n++] = (char *)rev;
+    for (i = 0; i < argc && n + 1 < 32; i++) a[n++] = argv[i];
+    a[n] = 0;
+    if (cs_run(a, ".")) cs_die(what, "see release-build output above");
+    return 0;
+}
+
 static int cs_p3(const char *rev, const char *s, int argc, char **argv) {
     char *a[24];
     int n = 0, i;
     int have_nets = 0, have_routes = 0;
+    (void)s;
     for (i = 0; i < argc; i++) {
         if (tx_eqz(argv[i], "--nets")) have_nets = 1;
         if (tx_eqz(argv[i], "--routes")) have_routes = 1;
     }
     if (!have_nets || !have_routes)
         cs_die("p3 needs --nets CTX/jobs and --routes ROUTES", "a package without them is byte-identical to the stale 9f1ec852");
-    a[n++] = (char *)"--rev"; a[n++] = (char *)rev;
-    a[n++] = (char *)"p3"; a[n++] = (char *)s;
+    /* ROOT 交给 release-build 自己冻结：它把 ROOT 换成 snap 后从 snap 取工具与源。
+       传 S（已经是 snap）会让它去找 snap 里的 snap。 */
+    a[n++] = (char *)"p3"; a[n++] = (char *)".";
     for (i = 0; i < argc && n + 1 < 24; i++) a[n++] = argv[i];
     a[n] = 0;
-    if (cs_run(a, s)) cs_die("p3", argv[2]);
-    return 0;
+    return cs_release(rev, s, n, a, "p3");
 }
 
 static int cs_slice(const char *rev, const char *s, int argc, char **argv) {
     char *a[24];
     int n = 0, i;
-    a[n++] = (char *)"--rev"; a[n++] = (char *)rev;
-    a[n++] = (char *)"slice"; a[n++] = (char *)s;
+    (void)s;
+    a[n++] = (char *)"slice"; a[n++] = (char *)".";
     for (i = 0; i < argc && n + 1 < 24; i++) a[n++] = argv[i];
     a[n] = 0;
-    if (cs_run(a, s)) cs_die("slice", "see release-build output above");
-    return 0;
+    return cs_release(rev, s, n, a, "slice");
 }
 
 static int cs_pack(int argc, char **argv) {
