@@ -1,0 +1,204 @@
+/* tests/check-bad-package.cx -- 坏包/坏 kernel 的明确拒绝（rc1 门槛 6 + 矩阵 id.package-kernel-refusal）。
+ *
+ *   sh ./unisacc.com tests/check-bad-package.cx [-- --out DIR]
+ *
+ * 只读已装产品的三件套（unisacc.com / unisacc.com.dev/entry.elf /
+ * unisacc.com.dev/p3-package.bin），拷进 mkdtemp，对拷贝做变异；从不写仓内 out/。
+ *
+ * 每种变异都必须：rc != 0、stderr 有具名原因、不出产物。一个正例：原样拷贝能编通并运行。
+ *   1 missing      p3-package.bin 缺失            -> "missing …/p3-package.bin"
+ *   2 trunc-1      去掉尾部 1 字节                -> "bad or missing package footer"
+ *   3 trunc-half   去掉一半                       -> "bad or missing package footer"
+ *   4 footer        footer 魔数改坏               -> "bad or missing package footer"
+ *   5 kernel-bytes 包里 \0kernel/x86_64 的记录改名(找不到该 kernel) -> "assembly kernel not specified"
+ *   6 kernel-magic UNIKERN1 头魔数改坏            -> "bad kernel header"
+ *   7 kernel-bounds kernel 头声明的长度大于实际   -> "bad kernel bounds"
+ * 末行 BAD_PACKAGE<TAB>assertions=N<TAB>failed=K；任何 FAIL 退出码 1。
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define BP_MAX 32
+static int failed, assertions;
+static char root[4096], prod[4400], dev[4400], pkg[4400], work[4400];
+
+static void ck(int ok, const char *name) {
+    assertions++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static void die(const char *s) { fprintf(stderr, "check-bad-package: %s errno=%d\n", s, errno); exit(2); }
+static long rd(const char *p, char **b) {
+    size_t n = 0;
+    *b = cx_read(p, &n);
+    if (!*b) die(p);
+    return (long)n;
+}
+/* 包内 kernel/x86_64 资源名在包里的绝对偏移（找不到返回 -1） */
+static long find_key(const char *b, long n) {
+    static const char key[] = "\0kernel/x86_64";
+    long i;
+    for (i = 0; i + 14 < n; i++) if (!memcmp(b + i, key, 14)) return i;
+    return -1;
+}
+/* 包内 UNIKERN1 头在包里的绝对偏移（从 FROM 起找；找不到返回 -1） */
+static long find_kern(const char *b, long n, long from) {
+    long i;
+    for (i = from; i + 8 < n; i++) if (!memcmp(b + i, "UNIKERN1", 8)) return i;
+    return -1;
+}
+/* 把 len 字节按小端读成 long（只用于 8 字节字段） */
+static long le64(const char *p) {
+    long v = 0;
+    int j;
+    for (j = 7; j >= 0; j--) v = v * 256 + (unsigned char)p[j];
+    return v;
+}
+static void put64(char *p, long v) {
+    int j;
+    for (j = 0; j < 8; j++) { p[j] = (char)(v & 255); v = v >> 8; }
+}
+
+/* 一次编译：在 WORK 里用拷来的产品编 t.c；返回 rc，stderr 落到 why。 */
+static int build(const char *dir, char *why, long cap) {
+    np_result r;
+    char src[4400], obj[4400], err[4400];
+    char *v[12];
+    int i = 0;
+    if (cx_fmt(src, sizeof src, "%s/t.c", dir) || cx_fmt(obj, sizeof obj, "%s/t.o", dir) ||
+        cx_fmt(err, sizeof err, "%s/e.txt", dir)) die("path");
+    if (sy_exists(obj) == 1) sy_unlink(obj);
+    v[i++] = "sh"; v[i++] = prod; v[i++] = "-c"; v[i++] = "-b"; v[i++] = "lnx/x86_64";
+    v[i++] = src; v[i++] = "-o"; v[i++] = obj; v[i] = 0;
+    if (np_run(v, dir, 0, 55, &r, why, (size_t)cap)) die(why);
+    why[0] = 0;
+    if (r.err && r.errn) {
+        long k = 0;
+        while (k < (long)r.errn && k < cap - 1) { why[k] = r.err[k]; k++; }
+        why[k] = 0;
+    }
+    np_free(&r);
+    return r.rc;
+}
+static int has(const char *s, const char *needle) {
+    long n = tx_len(s, 8192), m = tx_len(needle, 256);
+    return tx_find(s, n, needle, m) >= 0;
+}
+
+/* 把整包换成 B（n 字节），然后编译并断言：rc!=0、stderr 含 WANT、无产物。 */
+static void case_bad(const char *name, const char *b, long n, const char *want) {
+    char why[8192], obj[4400], p[4400];
+    int rc;
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com.dev/p3-package.bin", work)) die("path");
+    if (n <= 0) { if (sy_exists(p) == 1) sy_unlink(p); }
+    else if (cx_write(p, b, (size_t)n)) die("write package");
+    rc = build(work, why, (long)sizeof why);
+    if (cx_fmt(obj, sizeof obj, "%s/t.o", work)) die("path");
+    {
+        char label[256];
+        if (cx_fmt(label, sizeof label, "%s.rc-nonzero", name)) die("label");
+        ck(rc != 0, label);
+        if (cx_fmt(label, sizeof label, "%s.named(%s)", name, want)) die("label");
+        ck(has(why, want), label);
+        if (cx_fmt(label, sizeof label, "%s.no-artifact", name)) die("label");
+        ck(sy_exists(obj) != 1, label);
+    }
+}
+
+int main(int argc, char **argv) {
+    char tmpl[4400], *orig = 0, *m = 0;
+    long on = 0, i;
+    char src[4400], why[8192];
+
+    if (argc == 3 && tx_eqz(argv[1], "--")) {
+        if (cx_fmt(tmpl, sizeof tmpl, "%s/check-bad-package-XXXXXX", argv[2])) die("path");
+    } else if (argc == 1) {
+        if (cx_fmt(tmpl, sizeof tmpl, "/tmp/check-bad-package-XXXXXX")) die("path");
+    } else { fprintf(stderr, "usage: check-bad-package.cx [-- --out DIR]\n"); return 2; }
+    if (!mkdtemp(tmpl)) die("mkdtemp");
+    if (cx_fmt(work, sizeof work, "%s", tmpl)) die("path");
+    if (!realpath(".", root)) die("root");
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) die("path");
+    if (cx_fmt(dev, sizeof dev, "%s/unisacc.com.dev", root)) die("path");
+    if (cx_fmt(pkg, sizeof pkg, "%s/unisacc.com.dev/p3-package.bin", root)) die("path");
+    if (sy_exists(prod) != 1 || sy_exists(pkg) != 1) die("installed product");
+
+    /* 三件套拷进临时目录：产品本体 + dev 目录（entry.elf 与 p3-package.bin）。
+       之后所有编译都用副本（WORK/unisacc.com），变异只作用在副本的包上。 */
+    {   char cmd[9200], dst[4400];
+        if (cx_fmt(dst, sizeof dst, "%s/unisacc.com.dev", work)) die("path");
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && cp '%s' '%s/' && cp '%s/entry.elf' '%s/' && cp '%s' '%s/'",
+                   dst, prod, work, dev, dst, pkg, dst)) die("cmd");
+        if (system(cmd) != 0) die("copy product");
+    }
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", work)) die("path");
+    if (sy_exists(prod) != 1) die("copied product");
+    if (cx_fmt(src, sizeof src, "%s/t.c", work)) die("path");
+    if (cx_write(src, "int main(void){return 0;}\n", 26)) die("write source");
+
+    /* 0. 正例：原样拷贝能编通，产物存在。 */
+    {   int rc = build(work, why, (long)sizeof why);
+        char obj[4400];
+        if (cx_fmt(obj, sizeof obj, "%s/t.o", work)) die("path");
+        ck(rc == 0, "0.copy-builds");
+        ck(sy_exists(obj) == 1, "0.copy-writes-object");
+    }
+
+    on = rd(pkg, &orig);
+
+    /* 1. 包缺失 */
+    case_bad("1.missing", 0, 0, "missing");
+
+    /* 2. 去掉尾部 1 字节 */
+    case_bad("2.trunc-1", orig, on - 1, "bad or missing package footer");
+
+    /* 3. 去掉一半 */
+    case_bad("3.trunc-half", orig, on / 2, "bad or missing package footer");
+
+    /* 4. footer 魔数改坏（最后 16 字节的前 8 字节） */
+    m = malloc((size_t)on);
+    if (!m) die("alloc");
+    memcpy(m, orig, (size_t)on);
+    memcpy(m + on - 16, "BADPKG99", 8);
+    case_bad("4.footer", m, on, "bad or missing package footer");
+
+    /* 5. 包内 kernel/x86_64 的记录改名：找不到该 kernel */
+    memcpy(m, orig, (size_t)on);
+    {   long k = find_key(m, on);
+        if (k < 0) die("package has no kernel/x86_64");
+        memcpy(m + k + 8, "arm64", 5);
+        case_bad("5.kernel-key-renamed", m, on, "assembly kernel not specified");
+    }
+
+    /* 6. UNIKERN1 头魔数改坏 */
+    memcpy(m, orig, (size_t)on);
+    {   long k = find_key(m, on), h;
+        if (k < 0) die("package has no kernel/x86_64");
+        h = find_kern(m, on, k);
+        if (h < 0) die("package has no UNIKERN1");
+        m[h + 7] = 'X';
+        case_bad("6.kernel-magic", m, on, "bad kernel header");
+    }
+
+    /* 7. kernel 头声明的长度大于实际（截断的等价形态） */
+    memcpy(m, orig, (size_t)on);
+    {   long k = find_key(m, on), h, len;
+        if (k < 0) die("package has no kernel/x86_64");
+        h = find_kern(m, on, k);
+        if (h < 0) die("package has no UNIKERN1");
+        len = le64(m + h + 32);
+        put64(m + h + 32, len + 4096);
+        case_bad("7.kernel-bounds", m, on, "bad kernel bounds");
+    }
+
+    free(m);
+    free(orig);
+    /* 清临时目录（不碰仓内 out/） */
+    {   char cmd[4600];
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", work)) die("cmd");
+        (void)system(cmd);
+    }
+    printf("BAD_PACKAGE\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
