@@ -29,6 +29,93 @@ static int collect(const char *b, const char *end, char out[][160], int cap) {
 }
 static int has(char l[][160], int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(l[i], s)) return 1; return 0; }
 static char ra[128][160], eb[128][160];
+
+/* ---- NN-NF: op index / arity / print name have ONE source, exec/facts/core-ops.tsv ----
+ * Eight copies of the arity table and three literal 56s (plus OP_COUNT) must agree with it,
+ * and both naming orders (executor order and DSL/delta order) must cover the same set.
+ * Without this, adding an opcode means editing nine places and drifting silently (e2stream
+ * already lacked INC). */
+static char op_name[96][32], op_arity[96][8], op_index[96][8];
+static int op_rows;
+static int ops_load(void) {
+    char *t = slurp("exec/facts/core-ops.tsv", 0);
+    if (!t) return 0;
+    for (char *line = t; line && *line; ) {
+        char *nl = strchr(line, '\n'), *f[3]; int k = 0; char *p = line;
+        if (nl) *nl = 0;
+        if (*line != '#' && *line) {
+            f[k++] = p; while (k < 3 && (p = strchr(p, '\t'))) { *p++ = 0; f[k++] = p; }
+            if (k == 3 && op_rows < 96) {
+                cx_fmt(op_name[op_rows], 32, "%s", f[0]);
+                cx_fmt(op_index[op_rows], 8, "%s", f[1]);
+                cx_fmt(op_arity[op_rows], 8, "%s", f[2]);
+                op_rows++;
+            }
+        }
+        line = nl ? nl + 1 : 0;
+    }
+    free(t);
+    return op_rows;
+}
+
+/* the arity list as a comma string, built from the table */
+static void ops_arity_list(char *out, size_t cap) {
+    size_t at = 0;
+    out[0] = 0;
+    for (int i = 0; i < op_rows && at + 4 < cap; i++) {
+        int z = cx_fmt(out + at, cap - at, "%s%s", i ? "," : "", op_arity[i]);
+        if (z <= 0) break;
+        at += (size_t)z;
+    }
+}
+
+/* every listed file must contain the table's comma-joined arity list */
+static void ops_check_arities(char *list) {
+    static const char *sites[] = {
+        "cx/core/execute.cx", "exec/c/core.h", "cx/runtime/model_decode.cx",
+        "cx/runtime/network_structure.cx", "cx/core/coregate.cx", "seed/pack.c",
+        "tools/cxlib/e2stream.cx", "tests/stream-e1-lex144.cx"
+    };
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
+        char *b = slurp(sites[i], 0);
+        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
+        if (!strstr(b, list)) bad("ops-arity-disagrees", sites[i], list);
+        free(b);
+    }
+}
+
+/* the three places that write the op count literally must equal the table's row count */
+static void ops_check_counts(void) {
+    static const char *sites[][2] = {
+        {"cx/runtime/model_decode.cx", "op >= 56"},
+        {"cx/runtime/network_structure.cx", "op >= 56"},
+        {"cx/core/coregate.cx", "op >= 56"},
+        {"exec/c/asm/actions.h", "#define OP_COUNT 56"},
+        {"cx/core/execute.cx", "int ARITY[NOP_]"}
+    };
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
+        char *b = slurp(sites[i][0], 0);
+        if (!b) { bad("ops-cannot-read", sites[i][0], "-"); continue; }
+        if (!strstr(b, sites[i][1])) bad("ops-count-disagrees", sites[i][0], sites[i][1]);
+        free(b);
+    }
+}
+
+/* the DSL/delta naming order must name the same op set as the table */
+static void ops_check_dsl_names(void) {
+    static const char *sites[] = {"tools/cxlib/delta.cx", "tools/cxlib/e2stream.cx"};
+    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
+        char *b = slurp(sites[i], 0);
+        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
+        for (int r = 0; r < op_rows; r++) {
+            char quoted[48];
+            cx_fmt(quoted, sizeof quoted, "\"%s\"", op_name[r]);
+            if (!strstr(b, quoted)) bad("ops-name-missing", sites[i], op_name[r]);
+        }
+        free(b);
+    }
+}
+
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "exec/facts/limits.tsv";
     char *t = slurp(path, 0), *line; char name[64] = "", value[32] = ""; int rows = 0;
@@ -66,6 +153,15 @@ int main(int argc, char **argv) {
         for (int i = 0; i < e; i++) if (!has(ra, a, eb[i])) bad("object-only-entry", eb[i], "-");
     }
     if (!rows) bad("no-rows", path, "-");
+    if (ops_load()) {
+        char list[512];
+        ops_arity_list(list, sizeof list);
+        ops_check_arities(list);
+        ops_check_counts();
+        ops_check_dsl_names();
+    } else {
+        bad("ops-table-unreadable", "exec/facts/core-ops.tsv", "-");
+    }
     if (failed) { printf("LIMITS\tfailed=%d\n", failed); return 1; }
-    printf("LIMITS\trows=%d\tstatus=PASS\n", rows); return 0;
+    printf("LIMITS\trows=%d\tops=%d\tstatus=PASS\n", rows, op_rows); return 0;
 }
