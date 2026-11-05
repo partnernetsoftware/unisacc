@@ -18,11 +18,20 @@ int main(void) {
     char out[4096]; int cut;
     char *a1[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", ".", "tests/waivers-0.0.43.tsv", "--check", 0};
     ck(sy_run(a1, out, sizeof out, &cut) == 0 && tx_find(out, tx_len(out, sizeof out), "disagree=0", 10) >= 0, "record-and-matrices-agree");
-    {   /* negative control: a root whose hosts matrix has one waived row turned back to required */
-        char *s1[] = {"sh", "-c", "rm -rf out/check-matrix-waive && mkdir -p out/check-matrix-waive/tests && cp tests/*-domain-matrix.tsv tests/waivers-0.0.43.tsv out/check-matrix-waive/tests/ && "
-                      "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"win/arm64\" && $2==\"version-0.0.43\" {$3=\"yes\"} {print}' tests/hosts-domain-matrix.tsv > out/check-matrix-waive/tests/hosts-domain-matrix.tsv", 0};
-        char *s2[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", "out/check-matrix-waive", "out/check-matrix-waive/tests/waivers-0.0.43.tsv", "--check", 0};
-        int r1 = sy_run(s1, out, sizeof out, &cut), r2 = sy_run(s2, out, sizeof out, &cut);
+    {   /* negative control: a root whose hosts matrix has one waived row turned back to required
+           (scratch under /tmp via mkdtemp: no out/ dependency) */
+        char scratch[2048], cmd[6144];
+        if (snprintf(scratch, sizeof scratch, "/tmp/check-matrix-waive-XXXXXX") >= (int)sizeof scratch || !mkdtemp(scratch)) return 2;
+        if (snprintf(cmd, sizeof cmd, "mkdir -p %s/tests && cp tests/*-domain-matrix.tsv tests/waivers-0.0.43.tsv %s/tests/ && "
+                      "awk -F'\\t' 'BEGIN{OFS=\"\\t\"} $1==\"win/arm64\" && $2==\"version-0.0.43\" {$3=\"yes\"} {print}' tests/hosts-domain-matrix.tsv > %s/tests/hosts-domain-matrix.tsv",
+                      scratch, scratch, scratch) >= (int)sizeof cmd) return 2;
+        char *s1[] = {"sh", "-c", cmd, 0};
+        char wv[2048];
+        if (snprintf(wv, sizeof wv, "%s/tests/waivers-0.0.43.tsv", scratch) >= (int)sizeof wv) return 2;
+        char *s2[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", scratch, wv, "--check", 0};
+        int r1, r2;
+        r1 = sy_run(s1, out, sizeof out, &cut);
+        r2 = sy_run(s2, out, sizeof out, &cut);
         ck(r1 == 0 && r2 == 1 && tx_find(out, tx_len(out, sizeof out), "version-0.0.43", 14) >= 0, "a-waived-row-made-required-is-caught");
     }
     sy_printf("CHECK_MATRIX_WAIVE\tfailed=%d\n", failed);
