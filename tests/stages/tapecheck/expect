@@ -1,0 +1,41 @@
+_start:
+  call __init
+  .argc r0
+  .lea r1, __argvv
+  imm r2, 0
+__argv_top:
+  slt64 r3, r2, r0
+  jumpz r3, __argv_done
+  .argv r4, r2
+  imm r5, 8
+  mul64 r5, r2, r5
+  add64 r5, r1, r5
+  store64 [r5+0], r4
+  imm r5, 1
+  add64 r2, r2, r5
+  jump __argv_top
+__argv_done:
+  call main
+  jump __main_ret
+.bss __argvv 32768
+main:
+  .frame 8
+  store64 [r7+0], r6
+  mov r6, r7
+  .frame      0
+  imm r0, 7
+  .frame 8
+  .st [r7+0], r0, 4
+  .ld r0, [r7+0], 4
+  .frame -8
+  jump __unisacc_R1
+  imm r0, 0
+__unisacc_R1:
+  mov r7, r6
+  load64 r6, [r7+0]
+  .frame -8
+  ret
+__init:
+  ret
+__main_ret:
+  .exit r0

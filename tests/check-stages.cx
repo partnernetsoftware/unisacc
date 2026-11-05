@@ -1,0 +1,156 @@
+/* check-stages.cx -- per-stage fixtures under tests/stages/<stage>/ against `unisacc stream STAGE`.
+ *
+ *   sh ./unisacc.com tests/check-stages.cx                  # product ./unisacc.com, root .
+ *   sh ./unisacc.com tests/check-stages.cx -- PRODUCT ROOT  # another candidate
+ *
+ * Each stage directory holds
+ *   args      one line: the stream arguments (route, --res, --source LABEL[, --raw])
+ *   in        the stage input
+ *   expect    the exact stage output
+ *   bad       an input the stage must reject     (optional; missing = no reject case)
+ *   bad.err   the exact stderr of that reject
+ *   bad.args  arguments for the reject when they differ from args
+ * The stage runs with its own directory as cwd (source labels such as a.c resolve there);
+ * outputs go to one mkdtemp scratch under $TMPDIR, removed at the end; out/ is not used.
+ *
+ * Assertions, one line each:
+ *   <stage> positive   rc 0 and stdout == expect
+ *   <stage> reject     rc 1 and stderr == bad.err; a stage without bad prints GAP and counts as
+ *                      uncovered -- an uncovered stage never passes
+ *   chain <a>-><b>     b/in == a/expect (the image pipe e2 e1 e3 sidecar prune lower elf)
+ *   anchor elf         elf/expect == PRODUCT -o of e2/a.c (the pipe ends where the product does)
+ * The last line is CHECK_STAGES failed=N uncovered=M with per-stage milliseconds above it;
+ * rc 1 when either is non-zero.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+
+#define CS_N 10
+
+static const char *cs_stage[CS_N] = {"e2", "e1", "e3", "sidecar", "e4", "prune", "lower", "elf", "tapecheck", "units"};
+static const char *cs_chain[] = {"e2", "e1", "e3", "sidecar", "prune", "lower", "elf"};
+static int cs_failed, cs_uncovered;
+static char cs_prod[4400], cs_root[4400], cs_dir[4400];
+static char *cs_env[] = {"UNISA_JOBS=1", 0};
+
+static void cs_die(const char *s) { fprintf(stderr, "check-stages: %s errno=%d\n", s, errno); exit(2); }
+static void cs_ck(int ok, const char *stage, const char *what) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", stage, what);
+    if (!ok) cs_failed++;
+}
+static char *cs_file(const char *stage, const char *name, size_t *n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/tests/stages/%s/%s", cs_root, stage, name)) cs_die("path");
+    return cx_read(p, n);
+}
+static int cs_has(const char *stage, const char *name) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/tests/stages/%s/%s", cs_root, stage, name)) cs_die("path");
+    return access(p, F_OK) == 0;
+}
+/* args file: one line, trailing newline dropped. */
+static void cs_args(const char *stage, const char *name, char *o, size_t cap) {
+    size_t n = 0, k;
+    char *b = cs_file(stage, name, &n);
+    if (!b) cs_die(name);
+    while (n && (b[n - 1] == '\n' || b[n - 1] == '\r')) n--;
+    if (n >= cap) cs_die("args too long");
+    for (k = 0; k < n; k++) o[k] = b[k];
+    o[n] = 0;
+    free(b);
+}
+static int cs_same(const char *a, size_t na, const char *b, size_t nb) { return a && b && na == nb && (na == 0 || !memcmp(a, b, na)); }
+/* PROD stream STAGE ARGS < IN > OUT 2> ERR, cwd = the stage directory, 20 s bound. */
+static int cs_run(const char *stage, const char *args, const char *in, const char *out, const char *err) {
+    char cmd[9000], cwd[4400];
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t;
+    if (cx_fmt(cwd, sizeof cwd, "%s/tests/stages/%s", cs_root, stage)) cs_die("cwd");
+    if (cx_fmt(cmd, sizeof cmd, "exec %s stream %s %s < %s > %s/%s.out 2> %s/%s.err", cs_prod, stage, args, in, cs_dir, out, cs_dir, err)) cs_die("cmd");
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    t = np_run(av, cwd, cs_env, 20, &r, why, sizeof why);
+    np_free(&r);
+    if (t) { fprintf(stderr, "check-stages: transport %s\n", why); return -1; }
+    return r.rc;
+}
+static char *cs_scratch(const char *name, size_t *n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", cs_dir, name)) cs_die("path");
+    return cx_read(p, n);
+}
+static long cs_ms(void) { return sy_now_ms(); }
+
+static void cs_one(const char *stage) {
+    char args[2000], in[4400], tag[64];
+    size_t ne = 0, no = 0, nb = 0, ng = 0;
+    char *exp, *got, *berr, *gerr;
+    long t0 = cs_ms();
+    int rc;
+    if (!cs_has(stage, "args") || !cs_has(stage, "in") || !cs_has(stage, "expect")) {
+        printf("GAP\t%s\tno positive fixture\n", stage);
+        cs_uncovered++;
+        return;
+    }
+    cs_args(stage, "args", args, sizeof args);
+    if (cx_fmt(in, sizeof in, "%s/tests/stages/%s/in", cs_root, stage) || cx_fmt(tag, sizeof tag, "%s.pos", stage)) cs_die("path");
+    rc = cs_run(stage, args, in, tag, tag);
+    exp = cs_file(stage, "expect", &ne);
+    { char nm[80]; cx_fmt(nm, sizeof nm, "%s.out", tag); got = cs_scratch(nm, &no); }
+    cs_ck(rc == 0 && cs_same(exp, ne, got, no), stage, "positive");
+    free(exp); free(got);
+    if (!cs_has(stage, "bad")) {
+        printf("GAP\t%s\tno reject fixture\n", stage);
+        cs_uncovered++;
+    } else {
+        if (cs_has(stage, "bad.args")) cs_args(stage, "bad.args", args, sizeof args);
+        if (cx_fmt(in, sizeof in, "%s/tests/stages/%s/bad", cs_root, stage) || cx_fmt(tag, sizeof tag, "%s.bad", stage)) cs_die("path");
+        rc = cs_run(stage, args, in, tag, tag);
+        berr = cs_file(stage, "bad.err", &nb);
+        { char nm[80]; cx_fmt(nm, sizeof nm, "%s.err", tag); gerr = cs_scratch(nm, &ng); }
+        cs_ck(rc == 1 && nb > 0 && cs_same(berr, nb, gerr, ng), stage, "reject");
+        free(berr); free(gerr);
+    }
+    printf("TIME\t%s\tms=%ld\n", stage, cs_ms() - t0);
+}
+
+int main(int argc, char **argv) {
+    const char *tmp = getenv("TMPDIR");
+    int i, shift;
+    shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0;
+    if (!realpath(argc > 1 + shift ? argv[1 + shift] : "./unisacc.com", cs_prod)) cs_die("product path");
+    if (!realpath(argc > 2 + shift ? argv[2 + shift] : ".", cs_root)) cs_die("root path");
+    if (cx_fmt(cs_dir, sizeof cs_dir, "%s/check-stages-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(cs_dir)) cs_die("scratch");
+    for (i = 0; i < CS_N; i++) cs_one(cs_stage[i]);
+    for (i = 0; i + 1 < (int)(sizeof cs_chain / sizeof cs_chain[0]); i++) {
+        size_t na = 0, nb = 0;
+        char *a = cs_file(cs_chain[i], "expect", &na), *b = cs_file(cs_chain[i + 1], "in", &nb);
+        char what[80];
+        cx_fmt(what, sizeof what, "%s->%s", cs_chain[i], cs_chain[i + 1]);
+        cs_ck(cs_same(a, na, b, nb), "chain", what);
+        free(a); free(b);
+    }
+    {   char cmd[9000], cwd[4400];
+        char *av[4];
+        np_result r = {0};
+        char why[1024] = {0};
+        size_t na = 0, nb = 0;
+        char *a, *b;
+        if (cx_fmt(cwd, sizeof cwd, "%s/tests/stages/e2", cs_root) ||
+            cx_fmt(cmd, sizeof cmd, "exec %s -o %s/anchor a.c", cs_prod, cs_dir)) cs_die("cmd");
+        av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+        if (np_run(av, cwd, cs_env, 20, &r, why, sizeof why)) cs_die("anchor transport");
+        np_free(&r);
+        a = cs_scratch("anchor", &na);
+        b = cs_file("elf", "expect", &nb);
+        cs_ck(r.rc == 0 && cs_same(a, na, b, nb), "anchor", "elf-equals-product-o");
+        free(a); free(b);
+    }
+    {   char cmd[4600];
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", cs_dir)) cs_die("cmd");
+        if (system(cmd) != 0 || access(cs_dir, F_OK) == 0) cs_ck(0, "scratch", "removed");
+    }
+    printf("CHECK_STAGES\tfailed=%d\tuncovered=%d\n", cs_failed, cs_uncovered);
+    return cs_failed || cs_uncovered ? 1 : 0;
+}
