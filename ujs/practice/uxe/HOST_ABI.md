@@ -28,7 +28,7 @@
 ## 0. Ship 胶水（ship-js 现状）
 
 Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` + **`sim.wasm`**（`directSim`），**无** 出货 `engine.wasm`、**无** `{game}.wasm` 必经、**无** `eng_boot` / `eng_sim_step` 双 memory 搬砖。  
-编译：`compile.mjs` 默认 **`compiler_core.wasm`**（M3；非 IntNet）。门禁：`./tests/ujs2wasm_step.sh` · `./tests/uxe_ship_js.sh` · `./tests/ujs2wasm_compiler.sh` — 见 [`prd.md`](../prd.md) M1–M3 / P0。
+编译：`compile.mjs` 默认 **`compiler_core.wasm`**（M3；非 IntNet）。门禁：`./tests/ujs2wasm_step.sh` · `./tests/uxe_ship_js.sh` · `./tests/ujs2wasm_compiler.sh` — 见 [`prd.md`](../../prd.md) M1–M3 / P0。
 
 | 块 | 落点 |
 |---|---|
@@ -207,7 +207,7 @@ cd ujs && npm run ship:pages    # 默认 compiler_core；无 python emit / 无 A
 
 ## 7. 扩展路线（Host 加厚）
 
-对标 Three 常用子集 → 见 [`prd.md`](../prd.md) 目标 #5。摘要：
+对标 Three 常用子集 → 见 [`../../prd.md`](../../prd.md) 目标 #5。摘要：
 
 | 档 | 能力 | 落点 |
 |---|---|---|
@@ -239,7 +239,7 @@ cd ujs && npm run ship:pages    # 默认 compiler_core；无 python emit / 无 A
 | 限流 / 超时 / 取消在 Host | 核保持同步帧友好 |
 | 与玩法解耦：LLM 是 **Host 能力**，不是 UJS 语言特性 | 无 API 的部署仍可跑纯本地游戏 |
 
-规格与目标见 [`../prd.md`](../prd.md)。
+规格与目标见 [`../../prd.md`](../../prd.md)。
 
 ---
 
@@ -266,4 +266,4 @@ cd ujs && npm run ship:pages    # 默认 compiler_core；无 python emit / 无 A
 cd ujs && npm run test:uxe:all
 ```
 
-改 ABI 而未改本文件 / 门禁 = 文档债务。两脊与子集边界见 [`../prd.md`](../prd.md) · Paper B [`../../research/ujs-paper.md`](../../research/ujs-paper.md)。
+改 ABI 而未改本文件 / 门禁 = 文档债务。两脊与子集边界见 [`../../prd.md`](../../prd.md) · Paper B [`../../../research/ujs-paper.md`](../../../research/ujs-paper.md)。

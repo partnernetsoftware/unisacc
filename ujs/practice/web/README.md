@@ -8,4 +8,4 @@
 | `game/` | Three / 裸 WebGL **对照**（非产品 API） |
 | `progs/` · `demos.json` | 可选演示产物 |
 
-**产品核**在 [`../core/`](../core/)（出货编译默认 **`compiler_core`**）。**UXE Host / ship**在 [`../uxe/`](../uxe/)（Pages → `sim.wasm`）。两脊见 [`../prd.md`](../prd.md) · Paper B [`../../research/ujs-paper.md`](../../research/ujs-paper.md)。
+**产品核**在 [`../core/`](../core/)（出货编译默认 **`compiler_core`**）。**UXE Host / ship**在 [`../uxe/`](../uxe/)（Pages → `sim.wasm`）。两脊见 [`../../prd.md`](../../prd.md) · Paper B [`../../../research/ujs-paper.md`](../../../research/ujs-paper.md)。

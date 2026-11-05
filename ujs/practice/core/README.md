@@ -21,4 +21,4 @@ await bootRuntime(new URL("./ujs_full.wasm", import.meta.url));
 
 出货：`node ../compile.mjs foo.ujs -o foo.wasm` → 默认 **`compiler_core.wasm`**（不是 IntNet；手写子集自举）。  
 构造 / path-A：`python3 -m ujs web-build` → 本目录。  
-嵌入网页的 Host 在 [`../uxe/`](../uxe/)。规格：[`../prd.md`](../prd.md)。
+嵌入网页的 Host 在 [`../uxe/`](../uxe/)。规格：[`../../prd.md`](../../prd.md)。

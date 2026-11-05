@@ -3,7 +3,7 @@
 > **已归档。** 平台叙事已并入 [`../prd.md`](../prd.md) 记忆宫殿；Host 真源仍是 [`../uxe/HOST_ABI.md`](../uxe/HOST_ABI.md)。
 
 > 短文：平台怎么从 Host + 多款 ship 长出来。  
-> **契约真源**仍是 [`HOST_ABI.md`](HOST_ABI.md)；规格与下一刀见 [`prd.md`](../prd.md) §7–§8。
+> **契约真源**仍是 [`HOST_ABI.md`](../practice/uxe/HOST_ABI.md)；规格与下一刀见 [`prd.md`](../prd.md) §7–§8。
 
 ## 一句话
 
@@ -57,7 +57,7 @@ WebRTC Live 仅为联网实验，**非**产品缺口清单项；见 [`docs/uxe/l
 
 | 文档 | 用途 |
 |---|---|
-| [`HOST_ABI.md`](HOST_ABI.md) | Host API 真源 |
+| [`HOST_ABI.md`](../practice/uxe/HOST_ABI.md) | Host API 真源 |
 | [`../prd.md`](../prd.md) | 产品规格 · 当前目标 §7–§8 · 代理观测 §6 |
 | [`README.md`](README.md) | UXE 目录 |
 | [`archive/`](archive/) | 下架车 |

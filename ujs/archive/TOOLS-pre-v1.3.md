@@ -44,13 +44,13 @@ cd ujs && npm run ship:pages && npm run test:uxe:all
 | [`DOCS.md`](DOCS.md) | **地图**（先读） |
 | [`README.md`](README.md) | 开箱与分发 |
 | [`prd.md`](prd.md) | 产品活规格 + 当前目标（v1.2） |
-| [`archive/prd-v1.0.md`](archive/prd-v1.0.md) | 原条款全表 |
-| [`archive/FUTURE-pre-v1.2.md`](archive/FUTURE-pre-v1.2.md) | 合并前路线稿 |
+| [`archive/prd-v1.0.md`](prd-v1.0.md) | 原条款全表 |
+| [`archive/FUTURE-pre-v1.2.md`](FUTURE-pre-v1.2.md) | 合并前路线稿 |
 | [`FUTURE.md`](FUTURE.md) | 重定向 stub → `prd.md` §7–§8 |
 
 | [`web/README.md`](web/README.md) | git vs Release |
 | [`uxe/README.md`](uxe/README.md) | UXE |
-| [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host ABI |
+| [`uxe/HOST_ABI.md`](../practice/uxe/HOST_ABI.md) | Host ABI |
 | [`uxe/archive/`](uxe/archive/) | 下架实践车 |
 | [`native/README.md`](native/README.md) | C VM / 游戏核 |
 | [`../research/README.md`](../research/README.md) | 论文索引 |

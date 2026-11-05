@@ -4,7 +4,7 @@
 
 入口按读者分流。**文档必须与代码同步**：改 ABI、目录或门禁时，同会话改相关 README。
 
-**命令真源**：[`package.json`](package.json) scripts · [`scripts/uxe-gate.sh`](scripts/uxe-gate.sh) · [`scripts/ship-pages.sh`](scripts/ship-pages.sh)。
+**命令真源**：[`package.json`](package.json) scripts · [`scripts/uxe-gate.sh`](../scripts/uxe-gate.sh) · [`scripts/ship-pages.sh`](../scripts/ship-pages.sh)。
 
 ---
 
@@ -35,7 +35,7 @@
 | 读什么 | 何时 |
 |---|---|
 | [`uxe/README.md`](uxe/README.md) | demo vs ship |
-| [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host API 真源 |
+| [`uxe/HOST_ABI.md`](../practice/uxe/HOST_ABI.md) | Host API 真源 |
 | [`uxe/PLATFORM.md`](uxe/PLATFORM.md) | 平台叙事 |
 | [`../docs/uxe/live/README.md`](../docs/uxe/live/README.md) | WebRTC 实验经验（非主线） |
 
