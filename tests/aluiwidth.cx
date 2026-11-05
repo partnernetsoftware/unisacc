@@ -1,0 +1,116 @@
+#pragma unisa use text.text
+/* aluiwidth.cx -- ALUI width ratchet (AUDIT-DUP, 2026-11-05). ALUI is 32-bit arithmetic
+   (cx/core/alu.cx core_alu32); a "mul" by a constant >= 65536 or by a ["constant",...] name,
+   or a "shl" by >= 16, is where a 64-bit offset can be truncated (al64-fix.patch moved two
+   such sites to A64I). Per exec/<dir>/<name>-result.tsv the count of such actions is compared
+   with tests/aluiwidth.tsv; counts only go down. Report-only in spirit: no site is rejected
+   for being wide, only for being new.
+     sh ./unisacc.com -run tests/aluiwidth.cx -- --check | --write */
+#define BASELINE "tests/aluiwidth.tsv"
+#define MAXR 512
+
+typedef struct { char path[256]; int count; int used; } Row;
+static Row rows[MAXR];
+static int nrows;
+
+static long num(const char *s, long n, long *i) {
+    long v = 0; int any = 0;
+    while (*i < n && s[*i] >= '0' && s[*i] <= '9') { v = v * 10 + (s[*i] - '0'); (*i)++; any = 1; }
+    return any ? v : -1;
+}
+
+/* Count ["ALUI","mul"|"shl",A,B,K] with a wide K in one result table. */
+static int count_wide(const char *s, long n) {
+    static const char pat[] = "[\"ALUI\",\"";
+    long i; int c = 0;
+    for (i = 0; i + 10 < n; i++) {
+        long j, k, commas = 0; int mul, shl;
+        if (s[i] != '[' || !tx_prefix(s + i, n - i, pat, 9)) continue;
+        j = i + 9;
+        mul = tx_prefix(s + j, n - j, "mul\"", 4); shl = tx_prefix(s + j, n - j, "shl\"", 4);
+        if (!mul && !shl) continue;
+        j += 4;
+        for (k = j; k < n && commas < 3; k++) {          /* skip ,"dst",A, to the fourth operand */
+            if (s[k] == '[') { int d = 1; k++; while (k < n && d) { if (s[k] == '[') d++; else if (s[k] == ']') d--; k++; } k--; }
+            else if (s[k] == ',') commas++;
+            else if (s[k] == ']' || s[k] == '\n') break;
+        }
+        if (commas < 3 || k >= n) continue;
+        if (tx_prefix(s + k, n - k, "[\"constant\"", 11)) { if (mul) c++; continue; }
+        {   long at = k, v = num(s, n, &at);
+            if (v >= 0 && ((mul && v >= 65536) || (shl && v >= 16))) c++; }
+    }
+    return c;
+}
+
+static int self_check(void) {
+    static const char t[] = "a\tb\t*\tc\t[[\"ALUI\",\"mul\",\"x\",\"y\",[\"constant\",\"STRIDE\"]],[\"ALUI\",\"shl\",\"x\",\"y\",16],"
+                            "[\"ALUI\",\"mul\",\"x\",\"y\",8],[\"ALUI\",\"add\",\"x\",\"y\",70000],[\"ALUI\",\"mul\",\"x\",\"y\",67108864],[\"A64I\",\"mul\",\"x\",\"y\",[\"constant\",\"S\"]]]\n";
+    return count_wide(t, (long)sizeof t - 1) == 3;
+}
+
+static int load_baseline(void) {
+    size_t n, i = 0; char *b = cx_read(BASELINE, &n);
+    if (!b) { fprintf(stderr, "aluiwidth: cannot read %s (run --write once)\n", BASELINE); return -1; }
+    while (i < n) {
+        size_t e = i; while (e < n && b[e] != '\n') e++;
+        if (e > i && b[i] != '#') {
+            size_t t = i; long at;
+            while (t < e && b[t] != '\t') t++;
+            if (t == e || t - i >= 256 || nrows == MAXR) { fprintf(stderr, "aluiwidth: bad row\n"); free(b); return -1; }
+            { size_t k; for (k = i; k < t; k++) rows[nrows].path[k - i] = b[k]; rows[nrows].path[t - i] = 0; }
+            at = (long)t + 1; rows[nrows].count = (int)num(b, (long)e, &at);
+            if (rows[nrows].count < 0) { fprintf(stderr, "aluiwidth: bad count\n"); free(b); return -1; }
+            nrows++;
+        }
+        i = e + 1;
+    }
+    free(b); return 0;
+}
+
+int main(int argc, char **argv) {
+    char *list = 0, *rec, *end; size_t ln = 0; int check, files = 0, total = 0, base_total = 0, over = 0, under = 0, k, rc;
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
+        fprintf(stderr, "usage: aluiwidth.cx --check | --write   (from the repo root)\n"); return 2;
+    }
+    if (!self_check()) { fprintf(stderr, "aluiwidth: self-check failed\n"); return 2; }
+    check = tx_eqz(argv[1], "--check");
+    if (check && load_baseline() < 0) return 2;
+    rc = cx_run("git ls-files -z -- 'exec/*-result.tsv'", &list, &ln);
+    if (rc != 0 || !list) { fprintf(stderr, "aluiwidth: git ls-files failed (rc %d)\n", rc); return 2; }
+    {   char *out = 0; size_t olen = 0, ocap = 0;
+        static const char head[] = "# tests/aluiwidth.tsv -- written by tests/aluiwidth.cx --write.\n"
+                                   "# ALUI mul by a constant >= 65536 or a [\"constant\",...] name, or shl >= 16 (32-bit; may truncate a 64-bit offset).\n"
+                                   "# Counts only go down. A missing row is held at 0.\n# path\tcount\n";
+        if (!check) { out = malloc(ocap = sizeof head + 400 * 300); if (!out) return 2; for (olen = 0; head[olen]; olen++) out[olen] = head[olen]; }
+        for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
+            size_t n; char *src; int c;
+            if (!*rec) continue;
+            src = cx_read(rec, &n);
+            c = src ? count_wide(src, (long)n) : 0;
+            free(src); files++; total += c;
+            if (check) {
+                Row *r = 0; int q;
+                for (q = 0; q < nrows; q++) if (tx_eqz(rows[q].path, rec)) r = &rows[q];
+                if (r) r->used = 1;
+                if (c > (r ? r->count : 0)) { printf("aluiwidth: %s has %d wide ALUI, baseline %d\n", rec, c, r ? r->count : 0); over++; }
+                else if (r && c < r->count) under++;
+            } else if (c > 0) {
+                char line[300]; int w = 0;
+                if (cx_fmt(line, sizeof line, "%s\t%d\n", rec, c) || olen + sizeof line >= ocap) return 2;
+                while (line[w]) out[olen++] = line[w++];
+            }
+        }
+        free(list);
+        if (!check) {
+            if (cx_write(BASELINE, out, olen)) { fprintf(stderr, "aluiwidth: cannot write %s\n", BASELINE); return 2; }
+            free(out);
+            printf("aluiwidth: wrote %s: %d tables, %d wide ALUI\n", BASELINE, files, total);
+            return 0;
+        }
+    }
+    for (k = 0; k < nrows; k++) base_total += rows[k].count;
+    printf("aluiwidth: %s: %d tables, %d wide ALUI (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
+           over ? "FAIL" : "ok", files, total, base_total, over, under);
+    return over ? 1 : 0;
+}
