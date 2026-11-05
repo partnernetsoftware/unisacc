@@ -64,19 +64,62 @@ static int pk_image(const char *s) {
     }
     return 0;
 }
+/* Route index over the stage list: one chain per distinct route, found
+ * through an open hash on the route text. The s^2 walk it replaces cost
+ * about 60ms per open on the 1,823-stage product package. Every refusal
+ * below is the same refusal as before, in the same order. */
+typedef struct { int *slot; int cap; int *next; int *first; int *last; } PkIndex;
+static unsigned pk_hash(const char *s) {
+    unsigned h = 2166136261u;
+    int i;
+    for (i = 0; s[i]; i++) { h = h ^ (unsigned char)s[i]; h = h * 16777619u; }
+    return h;
+}
+static void pk_index_drop(CxPackageDecode *d, PkIndex *x) {
+    d->release(x->slot); d->release(x->next); d->release(x->first); d->release(x->last);
+    x->slot = 0; x->next = 0; x->first = 0; x->last = 0;
+}
+static int pk_index_open(CxPackageDecode *d, PkIndex *x, int ps) {
+    int i;
+    x->cap = 16;
+    while (x->cap < ps * 2) x->cap = x->cap * 2;
+    x->slot = getmem(d, sizeof(int) * (size_t)x->cap);
+    x->next = getmem(d, sizeof(int) * (size_t)ps);
+    x->first = getmem(d, sizeof(int) * (size_t)ps);
+    x->last = getmem(d, sizeof(int) * (size_t)ps);
+    if (!x->slot || !x->next || !x->first || !x->last) { pk_index_drop(d, x); return 1; }
+    for (i = 0; i < x->cap; i++) x->slot[i] = -1;
+    for (i = 0; i < ps; i++) { x->next[i] = -1; x->first[i] = -1; x->last[i] = -1; }
+    return 0;
+}
+/* Find the slot of stage i's route among stages 0..i-1. The slot holds the
+ * first stage index of that route, or -1 when the route is new. */
+static int pk_index_find(const PkIndex *x, const CxPackage *p, int i) {
+    int bx_stage_route(const char *, const char *const *, int);
+    unsigned k = pk_hash(p->stages[i].route) & (unsigned)(x->cap - 1);
+    for (;;) {
+        const char *routes[1];
+        int f = x->slot[k];
+        if (f < 0) return (int)k;
+        routes[0] = p->stages[f].route;
+        if (bx_stage_route(p->stages[i].route, routes, 1) == 1) return (int)k;
+        k = (k + 1) & (unsigned)(x->cap - 1);
+    }
+}
 /* An image route must still name lower and end on elf. A one-byte stage
-   rename or an elf row that left the route is not a route. */
-static int image_open(CxPackage *p) {
-    int i, k, seen, lower;
+ * rename or an elf row that left the route is not a route. An image route
+ * of 64 bytes or more never matched itself under the old bounded compare and
+ * was refused; it still is. */
+static int image_open(const CxPackage *p, const PkIndex *x) {
+    int i, k, lower, n;
     const char *last;
     for (i = 0; i < p->s; i++) {
-        if (!pk_image(p->stages[i].route)) continue;
-        seen = 0;
-        for (k = 0; k < i; k++) if (pk_eq(p->stages[k].route, p->stages[i].route)) seen = 1;
-        if (seen) continue;
+        if (x->first[i] != i || !pk_image(p->stages[i].route)) continue;
+        for (n = 0; n < 64 && p->stages[i].route[n]; n++) {}
+        if (n >= 64) return 1;
         lower = 0;
         last = 0;
-        for (k = i; k < p->s; k++) if (pk_eq(p->stages[k].route, p->stages[i].route)) {
+        for (k = i; k >= 0; k = x->next[k]) {
             last = p->stages[k].name;
             if (pk_eq(last, "lower")) lower = 1;
         }
@@ -87,7 +130,6 @@ static int image_open(CxPackage *p) {
 static int decode(CxPackageDecode *d) {
     CxPackage *p=&d->package;int ver,pm,ps,nr=0;
     int bx_stage_model_ok(int, int);
-    int bx_stage_route(const char *, const char *const *, int);
     int bx_stage_present(const char *, const char *, const char *const *, const char *const *, int);
     int bx_stage_join(const char *, const char *);
     p->b=(unsigned char *)d->bytes;p->n=(int)d->length;
@@ -105,24 +147,26 @@ static int decode(CxPackageDecode *d) {
     p->crc=getmem(d,sizeof(uint32_t)*(size_t)pm);if(!p->crc)return 1;p->m=pm;
     p->stages=getmem(d,sizeof(CxPackageStage)*(size_t)ps);if(!p->stages)return 1;
     mm_fill(p->stages, sizeof(CxPackageStage)*(size_t)ps, 0, sizeof(CxPackageStage)*(size_t)ps);p->s=ps;
+    PkIndex x;if(pk_index_open(d,&x,ps))return 1;
     for(int i=0;i<ps;i++){
-        if(tag(d,'D'))return 1;CxPackageStage *s=&p->stages[i];
-        s->route=word(d);if(!s->route)return 1;s->name=word(d);if(!s->name)return 1;
-        s->in=word(d);if(!s->in)return 1;s->out=word(d);if(!s->out)return 1;
-        if(integer(d,&s->model))return 1;
-        if(bx_stage_model_ok(s->model,pm)!=0)return bad(d,"bad package model index");
-        int previous=-1;
-        for(int j=0;j<i;j++){
-            const char *routes[1];const char *names[1];
-            routes[0]=p->stages[j].route;names[0]=p->stages[j].name;
-            if(bx_stage_route(s->route,routes,1)==1){
-                if(bx_stage_present(s->route,s->name,routes,names,1)==1)return bad(d,"duplicate package stage");
-                previous=j;
+        if(tag(d,'D')){pk_index_drop(d,&x);return 1;}CxPackageStage *s=&p->stages[i];
+        s->route=word(d);if(!s->route){pk_index_drop(d,&x);return 1;}s->name=word(d);if(!s->name){pk_index_drop(d,&x);return 1;}
+        s->in=word(d);if(!s->in){pk_index_drop(d,&x);return 1;}s->out=word(d);if(!s->out){pk_index_drop(d,&x);return 1;}
+        if(integer(d,&s->model)){pk_index_drop(d,&x);return 1;}
+        if(bx_stage_model_ok(s->model,pm)!=0){pk_index_drop(d,&x);return bad(d,"bad package model index");}
+        int previous=-1;int slot=pk_index_find(&x,p,i);int f=x.slot[slot];
+        if(f>=0){
+            for(int j=f;j>=0;j=x.next[j]){
+                const char *routes[1];const char *names[1];
+                routes[0]=p->stages[j].route;names[0]=p->stages[j].name;
+                if(bx_stage_present(s->route,s->name,routes,names,1)==1){pk_index_drop(d,&x);return bad(d,"duplicate package stage");}
             }
-        }
-        if(previous>=0&&bx_stage_join(p->stages[previous].out,s->in)!=0)return bad(d,"package format mismatch");
+            previous=x.last[f];x.next[previous]=i;x.last[f]=i;x.first[i]=f;
+        } else {x.slot[slot]=i;x.first[i]=i;x.last[i]=i;}
+        if(previous>=0&&bx_stage_join(p->stages[previous].out,s->in)!=0){pk_index_drop(d,&x);return bad(d,"package format mismatch");}
     }
-    if (image_open(p)) return bad(d, "unknown package route or stage boundary");
+    if (image_open(p,&x)) {pk_index_drop(d,&x);return bad(d, "unknown package route or stage boundary");}
+    pk_index_drop(d,&x);
     for(int i=0;i<pm;i++){
         int n;if(tag(d,'M')||integer(d,&n))return 1;p->raw[i]=n;p->crc[i]=0;
         if(ver>=3){int codec;long long sum;if(integer(d,&p->raw[i])||integer(d,&codec)||number(d,&sum))return 1;
