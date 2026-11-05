@@ -9,7 +9,7 @@
 变化规律(实测确认):**尾部长度随 target 变,但用户代码段与尾部起点都在
 `ret form=<arch>` 之后**;尾部内容三种形态:
 - `lnx/*`:1551 B,`setreg <reg>, imm <sysno> role=sysno` + `gate form=syscall`
-- `osx/*`:1551 B 但 sysno 是 `33554436`(0x2000004)、`carry=true`、`sysno='0x2000004`
+- `osx/*`:1603 B(sysno 写成 `33554436` = 0x2000004 比 `1` 多 7 字节,`carry=true` 比 `false` 少 1 字节,净 +52),`sysno='0x2000004`
 - `win/*`:1569 B,`winsave 456` / `winrest 456, rax` 包住 `setreg rcx/rdx/r8` + `gate form=winapi`、`sysno='none`、`retconv=wcount`
 
 ---
