@@ -283,6 +283,76 @@ static void rb_say(const char *kind, const char *sha, long bytes, long long ns) 
         rb_die("report");
     sy_printf("%s", line);
 }
+/* P3-OPGUARD: a net that uses an action the packaged kernel base predates (index >= RB_BASE_OPS,
+   SBLOAD first) only enters the package when every \0kernel/<isa> resource equals what
+   tools/kernel-route.cx assembles from this snapshot's exec/c/asm.  Arities come from the
+   snapshot's exec/facts/core-ops.tsv (op index arity), the one source; nothing is copied here. */
+#define RB_BASE_OPS 56
+static int rb_ar[128], rb_nar;
+static void rb_arity_load(const char *root) {
+    char p[RB_FULL], *t; size_t n, i = 0; long f[3]; int nf;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/core-ops.tsv", root)) rb_die("core-ops.tsv");
+    if (!(t = cx_read(p, &n))) { if (sy_exists(p)) rb_die("core-ops.tsv"); return; }   /* older snapshot: executor has only the base ops */
+    while (i < n) {
+        if (t[i] == '#') { while (i < n && t[i] != '\n') i++; i++; continue; }
+        while (i < n && t[i] != '\t' && t[i] != '\n') i++;            /* name */
+        for (nf = 0; nf < 2 && i < n && t[i] == '\t'; nf++) { f[nf] = 0; i++; while (i < n && t[i] >= '0' && t[i] <= '9') f[nf] = f[nf] * 10 + (t[i++] - '0'); }
+        if (nf == 2) { if (f[0] != rb_nar || rb_nar >= 128) rb_die("core-ops.tsv order"); rb_ar[rb_nar++] = (int)f[1]; }
+        while (i < n && t[i] != '\n') i++; i++;
+    }
+    mm_free(t);
+    if (rb_nar <= RB_BASE_OPS) rb_die("core-ops.tsv short");
+}
+static int rb_ops_known(void) { return rb_nar > 0; }
+static long rb_num(const char *t, size_t n, size_t *i) {
+    long v = 0; int neg = 0;
+    while (*i < n && t[*i] == ' ') (*i)++;
+    if (*i < n && t[*i] == '-') { neg = 1; (*i)++; }
+    while (*i < n && t[*i] >= '0' && t[*i] <= '9') v = v * 10 + (t[(*i)++] - '0');
+    return neg ? -v : v;
+}
+/* 1 when some Q action's opcode is >= RB_BASE_OPS. */
+static int rb_net_new_op(const char *t, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        if (i + 2 < n && t[i] == 'Q' && t[i + 1] == ' ' && t[i + 2] != 'C') {
+            long c, a, op, k; i += 2; c = rb_num(t, n, &i); if (c < 0) c = -c;
+            for (a = 0; a < c; a++) {
+                op = rb_num(t, n, &i);
+                if (op < 0 || op >= rb_nar) rb_die("net opcode outside core-ops.tsv");
+                if (op >= RB_BASE_OPS) return 1;
+                for (k = 0; k < rb_ar[op]; k++) (void)rb_num(t, n, &i);
+            }
+        }
+        while (i < n && t[i] != '\n') i++; i++;
+    }
+    return 0;
+}
+static int rb_need_base;
+static const char *rb_root;
+/* Every \0kernel/<isa> resource of PKG must equal tools/kernel-route.cx's output from ROOT. */
+static void rb_base_check(const char *root, const unsigned char *body, const CxPackage *pkg) {
+    static const char *isa[2] = {"x86_64", "arm64"};
+    char out[RB_FULL], bnd[RB_FULL], kf[RB_FULL]; int j, i; long nk;
+    if (cx_fmt(out, sizeof out, "%s/out", root) || (sy_mkdir(out, 0755) && !sy_exists(out))) rb_die("opguard out");
+    if (cx_fmt(out, sizeof out, "%s/out/p3-opguard-%d", root, sy_pid()) || cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("opguard path");
+    { char *d[14] = {"sh", bnd, "55", "sh", "unisacc.com", "tools/kernel-route.cx", "--", (char *)root, out, "--isa", "x86_64", "--isa", "arm64", 0};
+      if (rb_pipe(d, root, 0, 0)) rb_die("opguard kernel-route"); }
+    for (j = 0; j < 2; j++) {
+        size_t kn; char *kb; int hit = 0;
+        if (cx_fmt(kf, sizeof kf, "%s/%s.kernel", out, isa[j]) || !(kb = cx_read(kf, &kn))) rb_die("opguard kernel read");
+        nk = 8 + (long)strlen(isa[j]);
+        for (i = 0; i < pkg->nr; i++) {
+            const unsigned char *nm = body + pkg->res[i].name;
+            if (pkg->res[i].n != nk || nm[0] || !mm_same(nm + 1, "kernel/", 7) || !mm_same(nm + 8, isa[j], nk - 8)) continue;
+            hit = 1;
+            if (pkg->res[i].codec || pkg->res[i].len != (long)kn || !mm_same(body + pkg->res[i].data, kb, (long)kn))
+                rb_die("a net uses an action newer than the packaged kernel base; rebuild kernel/ (kernel-build) first");
+        }
+        mm_free(kb);
+        if (!hit) rb_die("opguard: package has no kernel base");
+    }
+}
 
 /* --nets 来源校验: <nets> 是 <ctx>/jobs; ctx 的 context.tsv 记 source SID,
    现测(bound 6 <ctx>/identity-helper <快照>)必须相同, 否则网来自已漂移的作业链。 */
@@ -388,6 +458,7 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
         if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("nets path");
         text = cx_read(path, &tn);
         if (!text) rb_die(path);
+        if (rb_ops_known() && rb_net_new_op(text, tn)) rb_need_base = 1;
         bin = nw_binary_net(text, tn, &bn, why, sizeof why);
         mm_free(text);
         if (!bin) rb_die(why[0] ? why : "net encode");
@@ -410,6 +481,7 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
             at = hs + 1 + (long)stored;
         }
     }
+    if (rb_need_base) rb_base_check(rb_root, body, pkg);
 }
 
 static int rb_p3(int argc, char **argv) {
@@ -513,6 +585,8 @@ static int rb_p3(int argc, char **argv) {
         if (m_at >= res_at || body[m_at] != 'M') rb_die("--nets M section");
         rb_put(&out, body + line_end, m_at - line_end);
         rb_nets_guard(nets, argv[2]);
+        rb_root = argv[2];
+        rb_arity_load(argv[2]);
         rb_emit_models(&out, body, pkg, line_end, m_at, nets, routes);
     } else rb_put(&out, body + line_end, res_at - line_end);
     for (i = 0; i < pkg->nr; i++) {
