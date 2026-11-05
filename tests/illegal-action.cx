@@ -1,0 +1,100 @@
+/* illegal-action.cx -- a package member that decompresses cleanly and carries a
+ * matching CRC32 but names an action outside OP_COUNT is refused by name.
+ *
+ *   sh ./unisacc.com tests/illegal-action.cx -- ROOT PKG  (PKG: the P3/P4 package this run built)
+ *
+ * The bad net is built here with the same encoder the packer uses (netwire) and
+ * swapped into the package by tools/lab-loader/p3-swap.cx, which re-deflates with
+ * extx.deflate and writes the CRC32 in the M row -- so the only defect left in the
+ * container is the action number itself (58, one past OP_COUNT 57).
+ * The product must exit nonzero, name the refusal on stderr, and write no object.
+ * Prints PASS/FAIL lines and ILLEGAL_ACTION<TAB>assertions=N<TAB>failed=M. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.netwire
+#pragma unisa use text.text
+static int ia_assertions, ia_failed;
+static char ia_root[4096], ia_work[4096], ia_bound[4400], ia_product[4400];
+static void ia_ck(int ok, const char *name) { ia_assertions++; if (!ok) ia_failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); }
+static void ia_die(const char *s) { fprintf(stderr, "illegal-action: %s errno=%d\n", s, errno); exit(2); }
+/* A single-query net whose one action is opcode 58: valid domain, illegal opcode. */
+static const char *ia_net = "N 2 1 0 0 0 1\nQ 1 58\nH 0 0 0 0 0 0 0 0\n";
+static int ia_save(const char *p, const void *b, size_t n) {
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600), rc = 0;
+    if (fd < 0) return -1;
+    if (write(fd, b, n) != (long)n) rc = -1;
+    if (close(fd)) rc = -1;
+    return rc;
+}
+int main(int argc, char **argv) {
+    char net[4400], body[4400], pkg[4400], obj[4400], src[4400], why[1024];
+    char *bin, *sw;
+    size_t bn = 0, sn = 0;
+    np_result r = {0};
+    int tr;
+    const char *inpkg;
+    if (argc > 3 || (argc >= 2 && !realpath(argv[1], ia_root))) ia_die("usage [ROOT] [PKG]");
+    if (argc < 2 && !realpath(".", ia_root)) ia_die("root");
+    {   static char defpkg[4400];
+        if (argc == 3) { for (int i = 0; i < 4399 && argv[2][i]; i++) defpkg[i] = argv[2][i]; }
+        else if (cx_fmt(defpkg, sizeof defpkg, "%s/unisacc.com.dev/p3-package.bin", ia_root)) ia_die("path");
+        inpkg = defpkg;
+    }
+    if (cx_fmt(ia_work, sizeof ia_work, "%s/out/illegal-action", ia_root)) ia_die("path");
+    if (mkdir(ia_work, 0700) && errno != EEXIST) ia_die("work dir");
+    if (cx_fmt(ia_bound, sizeof ia_bound, "%s/tools/bound", ia_root) || cx_fmt(ia_product, sizeof ia_product, "%s/unisacc.com", ia_root)) ia_die("path");
+    if (cx_fmt(net, sizeof net, "%s/illegal.net", ia_work) || cx_fmt(body, sizeof body, "%s/body.bin", ia_work) ||
+        cx_fmt(pkg, sizeof pkg, "%s/illegal.com", ia_work) || cx_fmt(obj, sizeof obj, "%s/probe.o", ia_work) ||
+        cx_fmt(src, sizeof src, "%s/probe.c", ia_work)) ia_die("path");
+    ia_ck(ia_save(src, "int main(void){return 0;}\n", 25) == 0, "probe-source-saved");
+    /* p3-swap and the product both refuse to overwrite; start from absent paths */
+    {   const char *del[3]; int k;
+        del[0] = body; del[1] = pkg; del[2] = obj;
+        for (k = 0; k < 3; k++) { if (unlink(del[k]) && errno != ENOENT) ia_die("stale-output"); }
+    }
+    /* 1. the bad net, encoded with the packer's own encoder */
+    bin = nw_binary_net(ia_net, tx_len(ia_net, 128), &bn, why, sizeof why);
+    if (!bin) ia_die("encode");
+    ia_ck(ia_save(net, bin, bn) == 0, "net-saved");
+    free(bin);
+    /* 2. swap it into the package (re-deflate + CRC32 in the M row) */
+    {   char *v[] = {ia_bound, "55", "sh", ia_product, "tools/lab-loader/p3-swap.cx", "--", (char *)inpkg, "e2", body, net, 0};
+        tr = np_run(v, ia_root, 0, 55, &r, why, sizeof why);
+        ia_ck(!tr && !r.rc, "swap-into-package");
+        np_free(&r);
+    }
+    /* 3. the container: package body followed by the UNIPKG1 footer */
+    sw = cx_read(body, &sn);
+    if (!sw || sn < 16) ia_die("swap output");
+    {   unsigned char foot[16] = {'U','N','I','P','K','G','1','\n',0,0,0,0,0,0,0,0};
+        unsigned long long v = (unsigned long long)sn;
+        int i;
+        char *all = malloc(sn + 16);
+        if (!all) ia_die("allocation");
+        for (i = 0; i < 8; i++) foot[8 + i] = (unsigned char)((v >> (8 * i)) & 255);
+        {   size_t q; for (q = 0; q < sn; q++) all[q] = sw[q];
+            for (q = 0; q < 16; q++) all[sn + q] = (char)foot[q]; }
+        ia_ck(ia_save(pkg, all, sn + 16) == 0, "container-saved");
+        free(all);
+    }
+    free(sw);
+    /* 4. the product must refuse: nonzero exit, named reason, no object.
+       The launcher overwrites UNISA_CONTAINER with its own dev package, so the
+       side ELF is the only executable that honours the container passed here. */
+    {   char cont[4500], elfp[4400];
+        char *env[2];
+        char *v[10];
+        struct stat st;
+        if (cx_fmt(elfp, sizeof elfp, "%s/unisacc.com.dev/entry.elf", ia_root)) ia_die("path");
+        if (cx_fmt(cont, sizeof cont, "UNISA_CONTAINER=%s", pkg)) ia_die("path");
+        env[0] = cont; env[1] = 0;
+        v[0] = elfp; v[1] = "-O2"; v[2] = "-c"; v[3] = "-b"; v[4] = "lnx/x86_64";
+        v[5] = src; v[6] = "-o"; v[7] = obj; v[8] = 0;
+        tr = np_run(v, ia_root, env, 55, &r, why, sizeof why);
+        ia_ck(!tr && r.rc != 0, "bad-opcode-refused-rc");
+        ia_ck(r.errn > 0 && strstr(r.err ? r.err : "", "bad opcode") != 0, "bad-opcode-named");
+        ia_ck(lstat(obj, &st) != 0 && errno == ENOENT, "no-object-written");
+        np_free(&r);
+    }
+    printf("ILLEGAL_ACTION\tassertions=%d\tfailed=%d\n", ia_assertions, ia_failed);
+    return ia_failed ? 1 : 0;
+}
