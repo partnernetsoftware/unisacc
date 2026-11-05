@@ -1,0 +1,91 @@
+/* tests/cases/pe-dynbase.cx -- minimal default-run-free repro for PE-DYNBASE-HYGIENE.
+ *
+ *   sh ./unisacc.com tests/cases/pe-dynbase.cx [-- ROOT]
+ *
+ * Cross-compiles a one-line program for win/x86_64 and reads the PE header the product wrote:
+ *   DllCharacteristics at e_lfanew+94, and the .reloc section's VirtualSize/RawSize.
+ * The defect: the writer sets 0x8160 (DYNAMIC_BASE 0x40 | HIGH_ENTROPY_VA 0x20) while .reloc
+ * carries only the 12-byte empty block, i.e. a 64-bit image that claims it can be relocated but
+ * has no relocation entries.
+ *
+ * Prints one line:
+ *   PE_DYNBASE<TAB>repro<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N    the defect is present
+ *   PE_DYNBASE<TAB>fixed<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N    DYNAMIC_BASE is clear
+ * Exit 0 when the defect is present (a live repro), 1 when it is gone (flip the expectation then),
+ * 2 on usage/IO.  Nothing is written outside one mkdtemp scratch. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+
+static char g_root[4096];
+static void die(const char *s) { fprintf(stderr, "pe-dynbase: REFUSE %s errno=%d\n", s, errno); exit(2); }
+/* little-endian read of N bytes at OFF */
+static unsigned long long le(const unsigned char *b, long n, long off, int nbytes) {
+    unsigned long long v = 0;
+    int i;
+    if (off < 0 || off + nbytes > n) die("read outside the image");
+    for (i = nbytes - 1; i >= 0; i--) v = (v << 8) | b[off + i];
+    return v;
+}
+int main(int argc, char **argv) {
+    char work[4400], src[4600], exe[4600], cmd[9000];
+    unsigned char *img;
+    size_t n = 0;
+    long lfanew, nsec, sec0, i;
+    unsigned long long dll = 0, reloc_vs = 0, reloc_raw = 0;
+    int found_reloc = 0, rc;
+    if (argc > 2) die("usage: [ROOT]");
+    if (argc == 2) { if (!realpath(argv[1], g_root)) die("root"); }
+    else if (sy_cwd(g_root, sizeof g_root) < 0) die("cwd");
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/pe-dynbase-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) die("scratch"); }
+    if (cx_fmt(src, sizeof src, "%s/m.c", work) || cx_write(src, "int main(void){return 0;}\n", 26)) die("source");
+    if (cx_fmt(exe, sizeof exe, "%s/m.exe", work)) die("exe path");
+    if (cx_fmt(cmd, sizeof cmd, "exec ./unisacc.com -b win/x86_64 -o %s %s", exe, src)) die("cmd");
+    {   char *av[] = {"sh", "-c", cmd, 0};
+        np_result r; char why[1024] = {0};
+        if (np_run(av, g_root, 0, 55, &r, why, sizeof why)) die(why);
+        rc = r.rc;
+        if (rc != 0) { if (r.errn) fwrite(r.err, 1, r.errn, stderr); np_free(&r); die("cross-compile for win/x86_64"); }
+        np_free(&r); }
+    {   char *b = cx_read(exe, &n);
+        if (!b) die("read the produced image");
+        img = (unsigned char *)b; }
+    if (n < 0x40 || img[0] != 'M' || img[1] != 'Z') die("not an MZ image");
+    lfanew = (long)le(img, (long)n, 60, 4);
+    if (lfanew < 0 || lfanew + 24 > (long)n) die("e_lfanew outside the image");
+    if (le(img, (long)n, lfanew, 4) != 0x00004550ULL) die("not a PE signature");
+    nsec = (long)le(img, (long)n, lfanew + 6, 2);
+    if (nsec < 1 || nsec > 96) die("section count");
+    dll = le(img, (long)n, lfanew + 94, 2);
+    sec0 = lfanew + 24 + 240;                       /* first section header, PE32+ optional header is 240 bytes */
+    for (i = 0; i < nsec; i++) {
+        long s = sec0 + i * 40;
+        char nm[9];
+        int k;
+        if (s + 40 > (long)n) die("section header outside the image");
+        for (k = 0; k < 8; k++) nm[k] = (char)img[s + k];
+        nm[8] = 0;
+        if (!strcmp(nm, ".reloc")) {
+            reloc_vs = le(img, (long)n, s + 8, 4);
+            reloc_raw = le(img, (long)n, s + 16, 4);
+            found_reloc = 1;
+            break;
+        }
+    }
+    free(img);
+    {   char rm[4600];
+        if (cx_fmt(rm, sizeof rm, "%s", work)) die("path");
+        (void)sy_unlink(exe); (void)sy_unlink(src); (void)sy_rmdir(work); }
+    if (!found_reloc) { fprintf(stderr, "pe-dynbase: REFUSE no .reloc section\n"); return 2; }
+    /* DYNAMIC_BASE 0x40; an image with no relocation entries (vsize <= the 12-byte empty block)
+       must not set it. */
+    if ((dll & 0x40ULL) && reloc_vs <= 12)
+        printf("PE_DYNBASE\trepro\tdll=0x%04llx\treloc_vsize=%llu\treloc_raw=%llu\n", dll, reloc_vs, reloc_raw);
+    else
+        printf("PE_DYNBASE\tfixed\tdll=0x%04llx\treloc_vsize=%llu\treloc_raw=%llu\n", dll, reloc_vs, reloc_raw);
+    return ((dll & 0x40ULL) && reloc_vs <= 12) ? 0 : 1;
+}

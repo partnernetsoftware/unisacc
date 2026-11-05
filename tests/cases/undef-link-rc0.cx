@@ -1,0 +1,80 @@
+/* tests/cases/undef-link-rc0.cx -- minimal default-run-free repro for UNDEF-LINK-RC0.
+ *
+ *   sh ./unisacc.com tests/cases/undef-link-rc0.cx [-- ROOT]
+ *
+ * The defect: when the undefined function is referenced from a unit that is NOT the first one,
+ * the multi-unit compile reports nothing and still exits 0 with an image.  The failure only shows
+ * up at run time ("no host function NAME", rc 127).  A single-unit compile of the same code is
+ * correctly refused (rc 1, "undefined reference to NAME"), so the two paths disagree.
+ *
+ * Two programs are compiled for lnx/x86_64 (this host):
+ *   one.cx   the undefined call in the only unit          -> must be refused
+ *   t1/t2    the undefined call in the second unit        -> the defect: rc 0, empty stderr, an image
+ *
+ * Prints one line:
+ *   UNDEF_LINK_RC0<TAB>repro<TAB>single_rc=N<TAB>multi_rc=N<TAB>multi_stderr=N<TAB>multi_image=N
+ *   UNDEF_LINK_RC0<TAB>fixed<TAB>...                      the multi-unit path now refuses too
+ * Exit 0 when the defect is present (a live repro), 1 when it is gone (flip the expectation then),
+ * 2 on usage/IO.  Nothing is written outside one mkdtemp scratch. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+
+static char g_root[4096];
+static void die(const char *s) { fprintf(stderr, "undef-link-rc0: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void put(const char *dir, const char *leaf, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) die("path");
+    if (cx_write(p, text, strlen(text))) die(leaf);
+}
+/* Compile ARGS in ROOT with the product; return its rc, and the stderr byte count in *errn. */
+static int compile(const char *args, long *errn) {
+    char cmd[9000];
+    char *av[] = {"sh", "-c", cmd, 0};
+    np_result r;
+    char why[1024] = {0};
+    int rc;
+    if (cx_fmt(cmd, sizeof cmd, "exec ./unisacc.com %s", args)) die("cmd");
+    if (np_run(av, g_root, 0, 55, &r, why, sizeof why)) die(why);
+    rc = r.rc;
+    *errn = (long)r.errn;
+    np_free(&r);
+    return rc;
+}
+int main(int argc, char **argv) {
+    char work[4400], one[4600], t1[4600], t2[4600], a1[9000], a2[9000], img1[4600], img2[4600];
+    long single_errn = 0, multi_errn = 0;
+    int single_rc, multi_rc, multi_image;
+    if (argc > 2) die("usage: [ROOT]");
+    if (argc == 2) { if (!realpath(argv[1], g_root)) die("root"); }
+    else if (sy_cwd(g_root, sizeof g_root) < 0) die("cwd");
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/undef-link-rc0-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) die("scratch"); }
+    put(work, "one.cx", "int nosuch(void);\nint main(void){return nosuch();}\n");
+    put(work, "t1.cx", "int f(void);\nint main(void){return f();}\n");
+    put(work, "t2.cx", "int nosuch(void);\nint f(void){return nosuch();}\n");
+    if (cx_fmt(one, sizeof one, "%s/one.cx", work) || cx_fmt(t1, sizeof t1, "%s/t1.cx", work) ||
+        cx_fmt(t2, sizeof t2, "%s/t2.cx", work)) die("paths");
+    if (cx_fmt(img1, sizeof img1, "%s/one.elf", work) || cx_fmt(img2, sizeof img2, "%s/multi.elf", work)) die("images");
+    if (cx_fmt(a1, sizeof a1, "-b lnx/x86_64 -o %s %s", img1, one)) die("args");
+    if (cx_fmt(a2, sizeof a2, "-b lnx/x86_64 -o %s %s %s", img2, t1, t2)) die("args");
+    single_rc = compile(a1, &single_errn);
+    multi_rc = compile(a2, &multi_errn);
+    multi_image = sy_exists(img2) == 1;
+    {   char rm[4600];
+        if (cx_fmt(rm, sizeof rm, "%s", work)) die("path");
+        (void)sy_unlink(one); (void)sy_unlink(t1); (void)sy_unlink(t2);
+        (void)sy_unlink(img1); (void)sy_unlink(img2); (void)sy_rmdir(work); }
+    /* The defect is: the single-unit path refuses (rc != 0, no image) while the multi-unit path
+       exits 0 with an image and says nothing. */
+    if (single_rc != 0 && multi_rc == 0 && multi_errn == 0 && multi_image)
+        printf("UNDEF_LINK_RC0\trepro\tsingle_rc=%d\tmulti_rc=%d\tmulti_stderr=%ld\tmulti_image=%d\n",
+               single_rc, multi_rc, multi_errn, multi_image);
+    else
+        printf("UNDEF_LINK_RC0\tfixed\tsingle_rc=%d\tmulti_rc=%d\tmulti_stderr=%ld\tmulti_image=%d\n",
+               single_rc, multi_rc, multi_errn, multi_image);
+    return (single_rc != 0 && multi_rc == 0 && multi_errn == 0 && multi_image) ? 0 : 1;
+}
