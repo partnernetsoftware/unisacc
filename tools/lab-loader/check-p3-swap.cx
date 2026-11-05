@@ -149,7 +149,9 @@ static int ps_record(const char *b, const PsPkg *p, long idx, char **rec, size_t
 }
 
 /* 裸 runner：已装 entry.elf 去掉尾部的 UNIPKG1 包段。S4 拼坏包用它当基座，
-   这样既不读 out/ 的历史产物，也不依赖某个固定路径。 */
+   这样既不读 out/ 的历史产物，也不依赖某个固定路径。
+   已装 entry.elf 是 split2 分体（包在 unisacc.com.dev/p3-package.bin），本身没有
+   UNIPKG1 页脚；没有页脚时整份 entry.elf 就是裸 runner。 */
 static char *ps_bare_runner(const char *workdir, size_t *pn) {
     char elf[4400], out[4600];
     size_t n = 0;
@@ -159,10 +161,12 @@ static char *ps_bare_runner(const char *workdir, size_t *pn) {
     int fd;
     if (snprintf(elf, sizeof elf, "%s/unisacc.com.dev/entry.elf", ps_root) >= (int)sizeof elf) ps_die("path");
     b = ps_read(elf, &n);
-    if (n < 24 || memcmp(b + n - 16, "UNIPKG1\n", 8)) { free(b); ps_die("entry.elf has no package footer"); }
-    for (i = 7; i >= 0; i--) ext = (ext << 8) | (unsigned char)b[n - 8 + i];
-    if (ext == 0 || ext > (unsigned long long)n - 16) { free(b); ps_die("entry.elf package extent"); }
-    n = (size_t)((unsigned long long)n - 16 - ext);
+    if (n < 24) { free(b); ps_die("entry.elf too short"); }
+    if (!memcmp(b + n - 16, "UNIPKG1\n", 8)) {
+        for (i = 7; i >= 0; i--) ext = (ext << 8) | (unsigned char)b[n - 8 + i];
+        if (ext == 0 || ext > (unsigned long long)n - 16) { free(b); ps_die("entry.elf package extent"); }
+        n = (size_t)((unsigned long long)n - 16 - ext);
+    }
     if (snprintf(out, sizeof out, "%s/bare-runner.bin", workdir) >= (int)sizeof out) ps_die("path");
     fd = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
     if (fd < 0 || write(fd, b, n) != (ssize_t)n || close(fd)) { free(b); ps_die("write bare runner"); }
