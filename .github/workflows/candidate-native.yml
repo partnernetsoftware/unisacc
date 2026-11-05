@@ -333,7 +333,21 @@ jobs:
           $ap = Join-Path $PWD 'tests/cases/ci-argvprobe-win-x86_64.exe'
           if (Test-Path $ap) { Run-Raw $ap @('A', 'B') 'argvprobe.exe A B (pipe)' } else { Say "argvprobe.exe: NOT_RUN (not in this commit)" }
           # 10. was the image relocated? Compare the PE header ImageBase with the base Windows actually mapped.
-          foreach ($img in @($ap, $exe)) {
+          # 11. fixed-base hypothesis: the same images with DllCharacteristics 0x8160 -> 0x8100 (no DYNAMIC_BASE,
+          #     no HIGH_ENTROPY_VA). If argv and --version come out right, the missing relocations are the cause.
+          $apf = Join-Path $PWD 'tests/cases/ci-argvprobe-win-x86_64-fixedbase.exe'
+          $uf = Join-Path $PWD 'tests/cases/unisacc-win-x86_64-fixedbase.exe'
+          if (Test-Path $apf) { Run-Raw $apf @('A', 'B') 'fixedbase argvprobe.exe A B (pipe)' } else { Say "fixedbase argvprobe: NOT_RUN (not in this commit)" }
+          if (Test-Path $uf) {
+            $ufx = Join-Path $diag 'unisacc-fixedbase.exe'; Copy-Item $uf $ufx
+            Run-Raw $ufx @('--version') 'fixedbase unisacc --version'
+            $hc = Join-Path $diag 'hello-fb.c'; [IO.File]::WriteAllText($hc, "#include <stdio.h>`nint main(void){puts(`"candidate-hello`");return 0;}`n")
+            $ho = Join-Path $diag 'hello-fb.exe'
+            Run-Raw $ufx @('-o', $ho, $hc) 'fixedbase unisacc -o hello'
+            if (Test-Path $ho) { Run-Raw $ho @() 'fixedbase hello.exe' } else { Say 'fixedbase hello.exe: not produced' }
+            Run-Raw $ufx @('tests/run.cx', '--', '--smoke') 'fixedbase unisacc smoke'
+          } else { Say "fixedbase unisacc: NOT_RUN (not in this commit)" }
+          foreach ($img in @($ap, $exe, $apf, $uf)) {
             if (!(Test-Path $img)) { continue }
             try {
               $b = [IO.File]::ReadAllBytes($img); $pe = [BitConverter]::ToUInt32($b, 60)
