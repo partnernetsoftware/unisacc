@@ -25,15 +25,18 @@
 
 ## 已知限制
 
-本版是 0.0.44-rc1,只发 lnx/x86_64 候选,不打 0.0.44 正式标:主人 11-04 定的完成线要求两代不动点加六目标同候选证据,目前达不到。没有 push,CI 没跑,六目标原生证据 0/6。
+本版是 0.0.44-rc1,只发 lnx/x86_64 候选,不打 0.0.44 正式标:主人 11-04 定的完成线要求两代不动点加六目标同候选证据,目前达不到。打 tag 时 CI 没跑;之后在 GitHub 原生 runner 上跑了一次同候选资格(CI-RUN-1,APE a76e5fc1),只有 lnx/x86_64 通过。
 
-| 目标 | 状态 |
+**默认的 `-run`(直接运行)在 lnx/arm64、osx、win 主机上不可用(CI 实测),多架构 APE 目前只有 lnx/x86_64 能用默认模式。** 原因是 `-run` 的宿主目标写死为 lnx/x86_64(`src/drive.cx:504`、`cx/driver/route.cx:392`),在别的主机上也编出 lnx/x86_64 镜像;修复进 rc2(NATIVE-RUN-HOST-TARGET)。
+
+| 目标 | 状态(CI-RUN-1) |
 |---|---|
-| lnx/x86_64 | 本候选在本机原生实跑(证据见 plans/rc1-gates-2026-11-06.md) |
-| lnx/arm64 | 只在 qemu 模拟下实跑通过,未原生验证 |
-| osx/x86_64、osx/arm64 | NOT_RUN(未验证);这两片走 whole-o 路线,与 lnx 的 objects 路线不同 |
-| win/x86_64 | NOT_RUN(未验证);走 whole-o 路线 |
-| win/arm64 | 没有这个片;原生入口留 0.0.45 |
+| lnx/x86_64 | 原生 6/6 PASS(identity、version、hello、stdio-crossunit、stream-pipe、smoke) |
+| lnx/arm64 | 原生 FAIL:`-run` 报 `image could not be started from an anonymous memory file (errno 8)`,整格无证据 |
+| osx/x86_64 | 原生 FAIL:同一步 `Bad system call: 12`(exit 140) |
+| osx/arm64 | 结果未出 |
+| win/x86_64 | 原生 FAIL:身份核对通过,但 `--version` 退出 1 且输出乱串,编译与 smoke 访问违例(0xC0000005);NATIVE-WIN-PE |
+| win/arm64 | 没有这个片,只核身份;原生入口留 0.0.45 |
 
 - 跨单元共享 FILE 已在 0.0.44 修复：运行库状态(流表、atexit 表、`errno`、`setenv` 的 environ 堆)改为**全程序一份**(`RT_UNIT`/`RT_EXTERN` 三态；默认无宏仍是 `static`，单源产物字节不变)。多单元一次编译的产物字节因此变化：`entry.elf` 3438193B → 3448676B(**+10483B**，本版只共享状态、不去重)。
 - `-c` 分开编再链接的路径本版**只告警不修**：链接输入里有两个及以上自带私有流表的对象时，stderr 输出 `unisacc: warning: 2 objects each carry a private stdio table (cross-unit FILE state is not shared; compile the program in one invocation or link the RT_UNIT entity)`；rc 不变(报错会让今天能链接的程序失败)。真正合并需要 common/weak 符号(RT-COMMON，0.0.45)。

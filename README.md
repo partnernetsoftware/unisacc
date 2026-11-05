@@ -3,12 +3,13 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.44-rc1, rc1 candidate rev `7266862b08`,
-no CI run, 0/6 targets with native evidence): `lnx/x86_64` runs natively on the build host; `lnx/arm64` is run
-under emulation only and not natively verified; `osx/*` and `win/x86_64` have not
-run on a native host and are built by the `whole-o` route; there is no `win/arm64`
-slice. `-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+, and the default
-`-run` executes in memory;
+file, `unisacc.com`. Toolchain status (0.0.44-rc1, rc1 candidate rev `7266862b08`):
+on GitHub native runners (CI-RUN-1) only `lnx/x86_64` passes. The default `-run`
+does not work on `lnx/arm64`, `osx` or `win` hosts, because the run target is
+fixed to `lnx/x86_64` (fixed in rc2, NATIVE-RUN-HOST-TARGET), and the `win/x86_64`
+slice fails natively (NATIVE-WIN-PE); `osx/*` and `win/x86_64` are built by the
+`whole-o` route and there is no `win/arm64` slice. `-o` writes ELF, Mach-O with an
+ad-hoc signature, or PE32+, and on `lnx/x86_64` the default `-run` executes in memory;
 relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
 `ET_REL` object; GNU `ld` links that whole-program object into a runnable static
 program on its own, and `cc` cannot (`_start` collides with the crt, and the
