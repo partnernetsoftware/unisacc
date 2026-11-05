@@ -1,0 +1,117 @@
+/* tools/check-decode-sbout.cx -- the SBOUT decoder agrees with the tables it reads.
+ *
+ *   sh ./unisacc.com tools/check-decode-sbout.cx [-- ROOT]
+ *
+ * tools/decode-sbout.cx exists to turn a run of ["SBOUT",N] actions back into the text an
+ * ["@bytes","<text>"] tag would carry.  A decoder that silently mis-parses would hand a wrong string
+ * to whoever rewrites the table, so its output is pinned here in four ways:
+ *   1) the run count and the per-file distribution match the NN-NF-B survey
+ *      (plans/nn-nf-b-prep-2026-11-05.md: 15 runs -- cli 4, ftrim-libc 3, directive-body 2,
+ *      object-predefine 2, shared-predefine 2, sourcefacts 1, directive-body-result 1);
+ *   2) every decoded text starts with the NUL the cells carry (a lost NUL is the classic
+ *      off-by-one here);
+ *   3) two named cells decode to exactly the strings the plan quotes
+ *      (SF.start -> "\0library/sourcefacts", CLI.U -> "\0cli/undefines");
+ *   4) --min filters by run length: with --min 20 only SF.start (20 bytes) survives.
+ * Exit 0 when all four hold, 1 otherwise, 2 on usage/IO. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define MAXL 256
+static char g_root[4096];
+static int asserts, failed;
+static void die(const char *s) { fprintf(stderr, "check-decode-sbout: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ck(int ok, const char *what, const char *detail) {
+    asserts++;
+    if (!ok) failed++;
+    printf("%s\t%s%s%s\n", ok ? "PASS" : "FAIL", what, detail && *detail ? "\t" : "", detail ? detail : "");
+}
+/* run the decoder and return its stdout */
+static char *decode(const char *extra, int *rc) {
+    char cmd[9000];
+    char *v[] = {"sh", "-c", cmd, 0};
+    np_result r = {0};
+    char why[512] = {0};
+    char *out;
+    if (cx_fmt(cmd, sizeof cmd, "exec ./unisacc.com tools/decode-sbout.cx%s", extra)) die("cmd");
+    if (np_run(v, g_root, 0, 120, &r, why, sizeof why)) die(why);
+    *rc = r.rc;
+    out = calloc(1, r.outn + 1);
+    if (!out) die("alloc");
+    if (r.outn) mm_copy(out, r.outn + 1, r.out, r.outn);
+    np_free(&r);
+    return out;
+}
+static int count_of(const char *s, const char *needle) {
+    int n = 0; size_t nl = strlen(needle);
+    if (!nl) return 0;
+    while ((s = strstr(s, needle)) != 0) { n++; s += nl; }
+    return n;
+}
+/* the text= field of the DECODE line whose state column is STATE */
+static int text_of(const char *s, const char *state, char *dst, size_t cap) {
+    while (s && *s) {
+        const char *e = strchr(s, '\n');
+        size_t len = e ? (size_t)(e - s) : strlen(s);
+        char line[4096];
+        if (len >= sizeof line) die("line too long");
+        mm_copy(line, sizeof line, s, len); line[len] = 0;
+        if (!strncmp(line, "DECODE\t", 7)) {
+            char *f1 = strchr(line, '\t');          /* after DECODE */
+            char *f2 = f1 ? strchr(f1 + 1, '\t') : 0;   /* after the file */
+            char *f3 = f2 ? strchr(f2 + 1, '\t') : 0;   /* after the state */
+            size_t k = 0;
+            if (f2 && f3 && (size_t)(f3 - f2 - 1) == strlen(state) && !strncmp(f2 + 1, state, strlen(state))) {
+                char *t = strstr(line, "\ttext=");
+                if (!t) return 0;
+                t += 6;
+                while (*t && k + 1 < cap) dst[k++] = *t++;
+                dst[k] = 0;
+                return 1;
+            }
+        }
+        s = e ? e + 1 : 0;
+    }
+    return 0;
+}
+int main(int argc, char **argv) {
+    char *o;
+    int rc;
+    if (argc > 3) die("usage: [-- ROOT]");
+    if (argc == 3) { if (!realpath(argv[2], g_root)) die("root"); }
+    else if (argc == 2) { if (!realpath(argv[1], g_root)) die("root"); }
+    else if (sy_cwd(g_root, sizeof g_root) < 0) die("cwd");
+
+    o = decode("", &rc);
+    ck(rc == 0, "decoder-exit-0", "");
+    {   char d[128];
+        if (cx_fmt(d, sizeof d, "runs=%d", count_of(o, "DECODE\t"))) die("fmt");
+        ck(count_of(o, "DECODE\t") == 15, "fifteen-runs", d); }
+    ck(count_of(o, "DECODE_SUMMARY\truns=15\t") == 1, "summary-agrees", "");
+    /* per-file distribution from the plan */
+    ck(count_of(o, "\texec/pp/cli-byte.tsv\t") == 4, "cli-byte-has-4", "");
+    ck(count_of(o, "\texec/pp/ftrim-libc-byte.tsv\t") == 3, "ftrim-libc-has-3", "");
+    ck(count_of(o, "\texec/pp/directive-body-byte.tsv\t") == 2, "directive-body-has-2", "");
+    ck(count_of(o, "\texec/pp/object-predefine-byte.tsv\t") == 2, "object-predefine-has-2", "");
+    ck(count_of(o, "\texec/pp/shared-predefine-byte.tsv\t") == 2, "shared-predefine-has-2", "");
+    ck(count_of(o, "\texec/pp/sourcefacts-byte.tsv\t") == 1, "sourcefacts-has-1", "");
+    ck(count_of(o, "\texec/pp/directive-body-result.tsv\t") == 1, "directive-body-result-has-1", "");
+    /* every decode keeps its leading NUL except the one cell that genuinely has no NUL */
+    ck(count_of(o, "\ttext=\\0") == 14 && count_of(o, "\ttext=include/") == 1, "nul-prefix-preserved", "");
+    {   char t[MAXL];
+        ck(text_of(o, "SF.start", t, sizeof t) && !strcmp(t, "\\0library/sourcefacts"), "sf-start-text", t);
+        ck(text_of(o, "CLI.U", t, sizeof t) && !strcmp(t, "\\0cli/undefines"), "cli-u-text", t); }
+    free(o);
+
+    /* --min filters by run length */
+    o = decode(" --min 20", &rc);
+    ck(rc == 0 && count_of(o, "DECODE\t") == 1 && count_of(o, "\tSF.start\t") == 1, "min-20-keeps-only-sf-start", "");
+    free(o);
+    printf("DECODE_SBOUT\tassertions=%d\tfailed=%d\n", asserts, failed);
+    return failed ? 1 : 0;
+}
