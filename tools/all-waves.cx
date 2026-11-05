@@ -134,6 +134,54 @@ static void plan_inputs(Job *j){char *v[]={"sh",candidate,"-cx-plan",j->entry,0}
 static void hash_inputs(Job *j,char (*dst)[65]){for(int i=0;i<j->ninput;i++)if(as_sha_file(j->input[i],1,dst[i],0,why,sizeof why))die("input-hash",why);}
 /* the first TAB-separated column of buf[at..e); 0 when the line has no such column */
 static int col0(const char *buf,size_t at,size_t e,char *dst,size_t cap){size_t k=0;if(at>=e||buf[at]=='\t')return 0;while(at<e&&buf[at]!='\t'&&k+1<cap)dst[k++]=buf[at++];dst[k]=0;return k>0;}
+/* ---- wave domains -----------------------------------------------------------------------------
+   tests/wave-domains.tsv says which batches may not share a wave.  One predicate for all four
+   kinds: serial (no neighbour), wt (writes a shared path), hs (writes the harness trees), and
+   mi:<name> (writes that material).  Absent = no constraint.  Placement keeps two batches apart
+   when their masks intersect; the window only limits how many run at once. */
+#define DOM_SERIAL 1ULL
+#define DOM_WT 2ULL
+#define DOM_HS 4ULL
+#define DOM_USER 8ULL          /* first bit available to mi:<name> */
+#define DOM_MAXM 61
+static char g_dommat[DOM_MAXM][64];
+static int g_ndommat;
+static unsigned long long g_dommask[131];   /* indexed like argv order; set per wave */
+/* the mask of ID from the table, or 0 when unlisted */
+static unsigned long long domain_of(const char *tab, size_t tn, const char *id) {
+    size_t at = 0;
+    while (at < tn) {
+        size_t e = at; char sid[128], dom[512];
+        while (e < tn && tab[e] != '\n') e++;
+        if (e > at && tab[at] != '#' && col0(tab, at, e, sid, sizeof sid) && !strcmp(sid, id)) {
+            size_t d = at, k = 0; unsigned long long mask = 0;
+            while (d < e && tab[d] != '\t') d++;      /* past the id */
+            if (d < e) d++;
+            while (d < e && tab[d] != '\t' && k + 1 < sizeof dom) dom[k++] = tab[d++];
+            dom[k] = 0;
+            {   size_t p = 0;
+                while (dom[p]) {
+                    char t[128]; size_t q = 0;
+                    while (dom[p] && dom[p] != ',') { if (q + 1 < sizeof t) t[q++] = dom[p]; p++; }
+                    t[q] = 0;
+                    if (dom[p] == ',') p++;
+                    if (!t[0]) continue;
+                    if (!strcmp(t, "serial")) mask |= DOM_SERIAL;
+                    else if (!strcmp(t, "wt")) mask |= DOM_WT;
+                    else if (!strcmp(t, "hs")) mask |= DOM_HS;
+                    else if (!strncmp(t, "mi:", 3) && t[3]) {
+                        int m;
+                        for (m = 0; m < g_ndommat; m++) if (!strcmp(g_dommat[m], t + 3)) break;
+                        if (m == g_ndommat && g_ndommat < DOM_MAXM) { if (cx_fmt(g_dommat[g_ndommat], 64, "%s", t + 3)) die("domain material", "-"); m = g_ndommat++; }
+                        if (m < DOM_MAXM) mask |= DOM_USER << m;
+                    }
+                } }
+            return mask;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
 static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
  v[n++]=bound;v[n++]="--status";v[n++]=j->status;v[n++]=secs;v[n++]="sh";v[n++]=candidate;v[n++]=runner;v[n++]="--";v[n++]=root;v[n++]=(char *)wavedir;v[n++]=j->b->id;
  if(!tx_eqz(j->b->materials, "-")){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",j->b->id);const as_material *x=as_find_material(m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);{int z=snprintf(storage[s],sizeof storage[s],"%s=%s",name,x->path);if(z<0||(size_t)z>=sizeof storage[s]){fprintf(stderr,"bound-format\n");exit(2);}};v[n++]=storage[s++];}}
@@ -144,7 +192,7 @@ static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];
 static int cmd_wave(int argc,char **argv){
  if(argc<6)die("usage","wave ROOT SESSION [--child-seconds N] --light ID... | --heavy ID");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
  int at=4,cap_seconds=55;if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
- int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(heavy?count!=1:(count<1||count>WAVE_JOBS_MAX))die("wave-shape",heavy?"heavy-takes-one-id":"light-takes-one-to-WAVE_JOBS_MAX-ids");
+ int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(count<1||count>WAVE_JOBS_MAX)die("wave-shape","light-or-heavy-takes-one-to-WAVE_JOBS_MAX-ids");
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);
  for(int i=0;i<m.nwave;i++)if(m.wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
@@ -162,37 +210,37 @@ static int cmd_wave(int argc,char **argv){
  np_buf sb={0,0,0};np_puts(&sb,"START\tmode=");np_puts(&sb,heavy?"heavy":"light");np_puts(&sb,"\tdir=");np_puts(&sb,dir);np_puts(&sb,"\tids=");np_puts(&sb,ids.p);np_puts(&sb,"\n");if(as_append(fd,session,"start",seq,sb.p,sb.n,why,sizeof why))die("manifest-append",why);free(sb.p);
  if(mkdir(wavedir,0700))die("wave-dir-must-be-new",wavedir);
  char before[65];{ if (cx_fmt(before, sizeof before, "%s",live.candidate)) { fprintf(stderr, "all-waves: text too long for before\n"); exit(2); } }long long w0=as_now();
- /* Sliding window: at most wave_jobs() children alive at once (heavy waves stay at one).  A light
-    wave with four ids behaves exactly as before on a machine with >= 4 cores, because the window is
-    then never the limit.  A batch listed in tests/serial.tsv runs alone: a timing-ratio assertion
-    inside it fails when its neighbours compete for the machine. */
- int active_max=heavy?1:wave_jobs();
+ /* Placement honours the domain masks from tests/wave-domains.tsv: a job starts only when its mask
+    does not intersect any running job's mask, so serial/wt/hs/mi never overlap.  The window
+    (wave_jobs(), capped at WAVE_JOBS_MAX) bounds how many run at once; heavies take part too, since
+    a heavy batch is only "large", not "conflicting". */
+ int active_max=wave_jobs();
  if(active_max>count)active_max=count;
- {   char sp[4400];
-     if (!cx_fmt(sp, sizeof sp, "%s/tests/serial.tsv", root)) {
-         size_t sn = 0; char *st = cx_read(sp, &sn);
-         if (st) {
-             size_t at2 = 0;
-             while (at2 < sn) {
-                 size_t e2 = at2; char sid[128]; size_t k2;
-                 while (e2 < sn && st[e2] != '\n') e2++;
-                 if (e2 > at2 && st[at2] != '#' && col0(st, at2, e2, sid, sizeof sid)) {
-                     for (k2 = 0; k2 < (size_t)count; k2++)
-                         if (!strcmp(job[k2].b->id, sid)) {
-                             active_max = 1;
-                             printf("SERIAL\t%s\twindow=1\ttests/serial.tsv\n", sid);
-                         }
-                 }
-                 at2 = e2 + 1;
-             }
-             free(st);
+ {   char wp[4400]; size_t wn = 0; char *wt = 0;
+     if (!cx_fmt(wp, sizeof wp, "%s/tests/wave-domains.tsv", root)) wt = cx_read(wp, &wn);
+     for (int i2 = 0; i2 < count; i2++) {
+         g_dommask[i2] = wt ? domain_of(wt, wn, job[i2].b->id) : 0;
+         if (g_dommask[i2] & DOM_SERIAL) {
+             active_max = 1;
+             printf("DOMAIN\t%s\tserial\twindow=1\ttests/wave-domains.tsv\n", job[i2].b->id);
          }
-     } }
+     }
+     free(wt); }
  for(int i=0;i<count;i++){Job *j=&job[i];jobpath(j->out,wavedir,j->b->id,"stdout");jobpath(j->err,wavedir,j->b->id,"stderr");jobpath(j->status,wavedir,j->b->id,"status");jobpath(j->receipt,wavedir,j->b->id,"receipt");}
- int next_launch=0,active=0;
- while(next_launch<active_max)spawn(&job[next_launch++],wavedir,&m),active++;
- int left=count;while(left){int st;pid_t pid;do{pid=waitpid(-1,&st,0);}while(pid<0&&errno==EINTR);if(pid<0)die("waitpid",0);int found=-1;for(int i=0;i<count;i++)if(job[i].pid==pid&&!job[i].t1)found=i;if(found<0)continue;job[found].t1=as_now();job[found].bound_rc=WIFEXITED(st)?WEXITSTATUS(st):128+(WIFSIGNALED(st)?WTERMSIG(st):0);left--;active--;
-  while(active<active_max&&next_launch<count){spawn(&job[next_launch++],wavedir,&m);active++;}}
+ /* Launch in argv order while the window has room AND the next job's mask is disjoint from every
+    running job's mask.  A job that cannot start yet waits for a neighbour to finish, so a
+    conflicting pair never overlaps even when the window itself would allow it. */
+ {int done[131];memset(done,0,sizeof done);int next_launch=0,active=0,left=count;
+  while(left){int launched=0;
+   while(active<active_max&&next_launch<count){int j2=next_launch;unsigned long long busy=0;int k2,free_slot=1;
+    for(k2=0;k2<count;k2++)if(!done[k2]&&job[k2].pid>0&&!job[k2].t1&&k2!=j2)busy|=g_dommask[k2];
+    if(g_dommask[j2]&busy){/* conflicting with a running job: try the next one instead */next_launch++;continue;}
+    spawn(&job[j2],wavedir,&m);done[j2]=1;next_launch++;active++;launched=1;(void)free_slot;}
+   /* if nothing could start and nothing is running, we are stuck: start the head anyway */
+   if(!launched&&active==0&&next_launch<count){spawn(&job[next_launch],wavedir,&m);done[next_launch]=1;next_launch++;active++;}
+   int st2;pid_t pid2;do{pid2=waitpid(-1,&st2,0);}while(pid2<0&&errno==EINTR);if(pid2<0)die("waitpid",0);
+   {int f2=-1;for(int i2=0;i2<count;i2++)if(job[i2].pid==pid2&&!job[i2].t1)f2=i2;if(f2<0)continue;
+    job[f2].t1=as_now();job[f2].bound_rc=WIFEXITED(st2)?WEXITSTATUS(st2):128+(WIFSIGNALED(st2)?WTERMSIG(st2):0);left--;active--;}}}
  long long w1=as_now();
  /* after-measurements: candidate, registry, harness, SID, materials, inputs */
  as_ident after;int measured=!as_identity(root,1,&after,why,sizeof why);const char *changed=!measured?"after-measurement-failed":as_ident_diff(&after,&m.ident)?as_ident_diff(&after,&m.ident):strcmp(after.sid,m.ident.sid)?"sid":0;int identity_stable=!changed;
