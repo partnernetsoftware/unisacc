@@ -213,7 +213,7 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
     int __u_i; int __u_status;
     {   int __u_i2;
         if (__uffi_mode == UFFI_MODE_UNKNOWN) { __uffi_err = "UNISA_FFI_BRIDGE: unknown value"; return 0 - 4; }
-        if (__uffi_mode == UFFI_MODE_FORCE || __uffi_mode == UFFI_MODE_UNSET) {
+        if (__uffi_mode == UFFI_MODE_FORCE) {   /* UNSET falls through to libffi until the bridge is linked; refusing here broke float/variadic calls that worked (b7b87e9e95) */
             for (__u_i2 = 0; __u_i2 < __u_n; __u_i2++)
                 if (__u_types[__u_i2] == __uffi_types[UFFI_DOUBLE] || __u_types[__u_i2] == __uffi_types[UFFI_FLOAT]) {
                     __uffi_err = "bridge: floating-point arguments/results not supported";

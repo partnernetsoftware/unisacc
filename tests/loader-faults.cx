@@ -2,7 +2,7 @@
  *
  *   sh ./unisacc.com tests/loader-faults.cx            (from the repo root; works in out/loader-faults-batch/)
  *
- * Each case copies the installed unisacc.com and damages ONE thing in its P3 package:
+ * Each case copies the installed unisacc.com and damages ONE thing in its package (P3 or P4):
  *   trailing-package-data  one extra byte after the last row, with the UNIPKG1 footer length rewritten to include it
  *   m-stored-length-out-of-range  the first model row's stored length digits become 9999...
  *   m-raw-length-out-of-range     the same row's raw length becomes 9999999
@@ -50,6 +50,22 @@ static void variant(const char *name, int trailing, long patch_at, const char *p
 }
 static long row(const char *tag) { long at = tx_find((const char *)img + po, pl, tag, 3); if (at < 0) die("package row not found"); return at + 3; }   /* first byte of the first length field */
 
+/* first byte of the first F row's length field; F follows the last model's bytes with no newline (so no "\nF " search): walk header, D rows, M rows+bytes */
+static long frow(void) {
+    const char *b = (const char *)img + po; long at = 0, nm, nd, i, e;
+    e = tx_chr(b, pl, '\n'); if (e < 0 || b[0] != 'P') die("package header");
+    nm = tx_strtol(b + 4, 0, 10);
+    { const char *s = b + 4; while (*s != ' ') s++; nd = tx_strtol(s + 1, 0, 10); }
+    at = e + 1;
+    for (i = 0; i < nd; i++) { e = tx_chr(b + at, pl - at, '\n'); if (e < 0) die("D row"); at += e + 1; }
+    for (i = 0; i < nm; i++) {
+        long stored; e = tx_chr(b + at, pl - at, '\n'); if (e < 0 || b[at] != 'M') die("M row");
+        stored = tx_strtol(b + at + 2, 0, 10); at += e + 1 + stored;
+    }
+    if (at + 2 >= pl || b[at] != 'F' || b[at + 1] != ' ') die("package F row not found");
+    return at + 2;
+}
+
 /* first byte of the raw-length field (the second number) of the first M row */
 static long rawfield(void) { long at = row("\nM "); while (img[po + at] != ' ') at++; return at + 1; }
 
@@ -85,7 +101,7 @@ int main(void) {
     variant(names[0], 1, 0, "", 0);
     variant(names[1], 0, row("\nM "), "9999", 4);
     variant(names[2], 0, rawfield(), "9999999", 7);
-    variant(names[3], 0, row("\nF "), "z", 1);
+    variant(names[3], 0, frow(), "z", 1);
 
     for (c = 0; c < 4; c++) {
         char *r0[] = {"-run", "ok.c", 0};
