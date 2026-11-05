@@ -17,13 +17,32 @@
 6. 回滚点 1：`git apply -R` 逐条反向或 `git reset --hard <起点SHA>`（慢车道起点后无他人提交时）。
 
 ## 构造链（按序；每段独立 OUT 目录）
-7. `source-package.cx prepare-context ROOT Root41-bootstrap.com /usr/bin/x86_64-linux-gnu-gcc-11 CTX`（bootstrap=unisacc.com 薄头 624B；CC 已装）。
-8. `source-job-wave.cx ROOT CTX BUILD host` → `... list`（预期 `LIST authoritative_jobs=131 tools=5 gen=42 tbl=42 net=42`）→ `... wave tool|gen|tbl|net FIRST COUNT start-job|finish-job`（每相位 start+finish，count≤4 逐批覆盖 5/42/42/42）→ `... final`（必须 `VERIFIED`）。
-9. `kernel-build.cx ROOT OUT bootstrap|prepare|prepare-assembler|preprocess-{x86_64,arm64}|assemble-{x86_64,arm64}|link-{x86_64,arm64}`（九步，kernels.md 顺序）。
-10. `source-package-pack.cx prepare/model×34/route×6/declare/pack/seal/--verify`（README.md 构造链段落）。
-11. `release-build.cx p3 ROOT SRC_PKG OUT_PKG` → `release-build.cx slice ROOT PKG OUT` → `entry-build.cx ROOT P3 OUT`。
-12. （暂缓）`product-build.cx` slice×5 + wrap（两代 GEN）：`selfhost-mixed.cx endpoint prior/fresh/after-prior/after-fresh` ×4 + `compare`（固定点，SELFHOST_MIXED failed=0）。**product-build.cx / hostseed-step* / selfhost-mixed.cx 仍链已归档 C 参考，不能运行（README §run 承认），本步先跳过，等 33 对象入口链接回归后恢复。**
-13. 回滚点 2：构造链任何一步失败，`OUT` 目录保留供检查，回到回滚点 1 重跑；不静默 promote 旧文件。
+
+> **7–12 已被 `tools/chain-step.cx` 取代**（一条命令一个相位、每相位核产物身份）。下面保留为口径说明；
+> 实跑用 `sh ./unisacc.com tools/chain-step.cx -- <step> …`，见 `prd.md` 能力速查。
+> 已过时、不再执行的旧步：`kernel-build.cx`（9）、`source-package-pack.cx`（10）、
+> `product-build.cx` / `hostseed-step*` / `selfhost-mixed.cx`（12，仍链归档 C 参考，不能运行）。
+
+7. 快照与 controller：`release-build.cx --rev REV p3` 首次调用即 `git archive` 出 `S=out/release-snap-<rev10>`；
+   `B` 从已装 `unisacc.com`（+`.build.json`、`unisacc.com.dev/`）拷入，`S/tools/bound 55 sh B/Root41-bootstrap.com
+   -O2 S/tools/source-package.cx -o B/source-package-O2.elf` 现编 controller（**不得 cp 旧 build**）。
+8. `source-package.cx prepare-context S B/Root41-bootstrap.com /usr/bin/x86_64-linux-gnu-gcc-11 CTX`
+   （bootstrap=unisacc.com 薄头 624B；CC 已装）→ `source-job-wave.cx S CTX B host` → `list`
+   （预期 `LIST authoritative_jobs=131 tools=5 gen=42 tbl=42 net=42`）→ 逐相位
+   `wave tool|gen|tbl|net FIRST COUNT(≤4) start-job|finish-job` → `final`（必须 `VERIFIED`，`CTX/jobs` 131 record）。
+9. **p3 必须带 `--nets`**（缺则报错）：`release-build.cx --rev REV p3 S out/install44/pkg9/compiler.pkg OUT_PKG
+   --nets $PWD/CTX/jobs --routes $PWD/out/install44/pkg9/declaration/routes.tsv`。
+   验收：sha ≠ `9f1ec852`（旧包）、约 1.78MB、dev-lnx 包裸跑 65/72 rc0、129 rc1 `limit 128`。
+10. 五片：`release-build.cx --rev REV slice S OUT_PKG OUT_<t> --target <t>`，
+    t = `lnx/x86_64`（先）→ `lnx/arm64` → `osx/x86_64` → `win/x86_64` → `osx/arm64`
+    （osx/arm64 用 `OUT/slice-lnx-x86_64` 作构造器）。**构造器一律 `UNISACC_CTOR=<本轮 lnx/x86_64 的 candidate>`**，
+    不得用旧 `out/install44/candidate`（早于 140e8a9af8，`DV_MAXU=64`，43 源 76 单元 → `forwarding stub`）。
+    whole-o 单作业 ≤120s（`rb_wait_child`）。
+11. 打包与冒烟：`release-ape.cx pack OUT_APE OUT_PKG WIN LNX LNX_ARM OSX OSX_ARM` →
+    `release-ape.cx smoke OUT_APE/unisacc-next.com`。注意 `ujs/product/ape-pack.cx:308` 目前只接受
+    `P 1/2/3` 包头，而 p3 默认写 `P 4`；ujs 属论文 B 车道，**未获该车道支持前 APE 打包不可用**，
+    安装走 `release-ape dev-lnx`。
+12. 回滚点 2：构造链任何一步失败，`OUT` 目录保留供检查，回到回滚点 1 重跑；不静默 promote 旧文件。
 
 ## kind2 / 安装 / 换标
 14. `candidate-install.cx`（或 `cxpack-candidate-install.cx`）finish → `verify-prepared`；安装到仓根 `unisacc.com` + `unisacc.com.dev/`（新 entry.elf + p3-package.bin）。
@@ -33,5 +52,12 @@
 ## 全批 + 换标收尾
 17. `sh ./unisacc.com tests/run.cx -- --all`（rc0；覆盖不完整必须非零）。
 17a. all-waves 会话(2026-11-06 rc1 教训):init 前必须先拿到材料负责人的最终 `MAP_READY`(带时间与 map 的 sha256),只用那一份 map init;init 后立刻 `diff 会话/materials.tsv 最终map`,不一致就丢弃会话重来。map 每行按批次参数形态写(目录 / 文件 / 64 位 hex),例如 `p3-pack-ctx` 是目录、`chain-gen1` 是 candidate 文件、`assembler` 是 `kernels/assembler` 子目录;写错形态会让批次读空或拒绝,而不是暴露真根因(RC1-MATERIAL-BIND)。
+17a-补充(2026-11-06 rc1→rc2 间实测):**材料只能在跑会话的那个克隆里现场生成**,不能在一棵树里造、
+另拿一棵树核。理由:`tools/asm-material.cx` 写进 `<材料>/assembler/material.tsv` 的第 4 行是生成时的
+`root <绝对路径>`,而 `--verify` 会逐字节比这个文件,所以跨树核必然报
+`asm-material: REFUSE prepared output/receipt differs from regenerated material`,
+diff 出来的唯一差异就是那一行 root(实测:主树 `/home/devali/repos/unisacc` vs 会话克隆 `/tmp/wB/repo`)。
+这不是材料坏了 —— 同一份材料在**会话克隆里**跑 `assembler-cache` 是 PASS,在主树上跑才 FAIL。
+同理:会话绑定过的材料目录一律 `chmod -R a-w`,期间任何补跑都要换新目录(如 `/tmp/wB/mat3/kernels`)再做。
 18. 棘轮复跑 `tools/ratchets.cx` 9/9 + srcshape 只降不升；记录新 entry+P3 SHA 与慢车道起点 diff。
 19. 需主人：签名/Draft/Latest/公开（发布第 7 步）才请示；技术决定 cc 拍板。
