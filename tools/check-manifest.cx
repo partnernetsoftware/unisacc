@@ -15,6 +15,7 @@
  * 用法：sh ./unisacc.com tools/check-manifest.cx
  */
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sysx.process
 #pragma unisa use text.text
 
@@ -27,19 +28,24 @@ static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!
 
 int main(int argc,char **argv){
     (void)argc; (void)argv;
-    char root[4096],tool[4400],m1[4400],m2[4400],h1[65],h2[65];
+    char root[4096],tool[4400],m1[4400],m2[4400],h1[65],h2[65],scratch[4400],tmp2[4400];
     if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
     if(cx_fmt(tool,sizeof tool,"%s/tools/manifest-gen.cx",root))return 2;
-    /* 两个产品根：主树仓根（含 unisacc.com + unisacc.com.dev/）+ out/rebuild-b4/embedded-root */
-    const char *prod_roots[2] = {root, 0};
-    char rb[4400];
-    if(cx_fmt(rb,sizeof rb,"%s/out/rebuild-b4/embedded-root",root))return 2;
-    prod_roots[1] = rb;
-    int nroots = (sy_exists(rb)==1)?2:1;
+    /* 一次运行一个独占 scratch 目录（mkdtemp，放在 TMPDIR 下——cx_rmtree 只接受白名单根：
+       $TMPDIR、/tmp、<repo>/out、<repo>/.trash，所以不能放仓根旁边）。 */
+    {
+        const char *td = sy_env("TMPDIR");
+        if (!td || !td[0]) td = "/tmp";
+        if (cx_fmt(scratch, sizeof scratch, "%s/manifest-check-XXXXXX", td)) return 2;
+    }
+    if(!mkdtemp(scratch)){fprintf(stderr,"scratch\n");return 2;}
+    /* 产品根：只有已装的仓根这一份（split2：unisacc.com + unisacc.com.dev/）。 */
+    const char *prod_roots[1] = {root};
+    int nroots = 1;
 
     for(int i=0;i<nroots;i++){
-        if(cx_fmt(m1,sizeof m1,"%s/out/manifest-%d-a.tsv",root,i))return 2;
-        if(cx_fmt(m2,sizeof m2,"%s/out/manifest-%d-b.tsv",root,i))return 2;
+        if(cx_fmt(m1,sizeof m1,"%s/manifest-%d-a.tsv",scratch,i))return 2;
+        if(cx_fmt(m2,sizeof m2,"%s/manifest-%d-b.tsv",scratch,i))return 2;
         { sy_stat_t st; if(sy_stat(m1,&st)==0) unlink(m1); if(sy_stat(m2,&st)==0) unlink(m2); }
         /* 生成两次 */
         { char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"30",(char*)"sh",(char*)"./unisacc.com",tool,(char*)"--",(char*)prod_roots[i],m1,0};
@@ -68,7 +74,7 @@ int main(int argc,char **argv){
        sha 与 pp_member_list 对齐来验证（不做真正的文件篡改，避免污染冻结域）。
        直接断言生成的 manifest 行含正确字段形状。 */
     {
-        if(cx_fmt(m1,sizeof m1,"%s/out/manifest-0-a.tsv",root))return 2;
+        if(cx_fmt(m1,sizeof m1,"%s/manifest-0-a.tsv",scratch))return 2;
         size_t n; char *b=cx_read(m1,&n);
         int ok = b && n>0 && b[n-1]=='\n' && !memchr(b,0,n) && !memchr(b,'\r',n);
         /* 每行 6 字段 */
@@ -93,8 +99,14 @@ int main(int argc,char **argv){
     {
         char rec[4400], em[4400];
         int produced = 0, same = 0, missing = 0, extra = 0;
-        if(cx_fmt(rec,sizeof rec,"%s/out/epoch-2026-11-02/root/ape-receipt.txt",root))return 2;
-        if(cx_fmt(em,sizeof em,"%s/out/manifest-epoch.tsv",root))return 2;
+        if(cx_fmt(rec,sizeof rec,"%s/ape-receipt.txt",root))return 2;
+        if(cx_fmt(em,sizeof em,"%s/manifest-epoch.tsv",scratch))return 2;
+        {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"30",(char*)"sh",(char*)"unisacc.com",
+                      (char*)"tools/manifest-gen.cx",(char*)"--",(char*)root,em,0};
+            np_result r={0}; char why[512];
+            if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"member-set-gen");}
+            else { ck(r.rc==0,"member-set-gen-rc"); np_free(&r); }
+        }
         if(sy_exists(rec)!=1 || sy_exists(em)!=1){
             printf("MEMBER_SET\tSKIP\tmissing-input\n");
         } else {
@@ -166,9 +178,9 @@ int main(int argc,char **argv){
        artifact 段,那一项记到 B5c。 */
     {
         char er[4400], rec[4400], em[4400];
-        if(cx_fmt(er,sizeof er,"%s/out/epoch-2026-11-02/root",root))return 2;
+        if(cx_fmt(er,sizeof er,"%s",root))return 2;
         if(cx_fmt(rec,sizeof rec,"%s/ape-receipt.txt",er))return 2;
-        if(cx_fmt(em,sizeof em,"%s/out/manifest-epoch.tsv",root))return 2;
+        if(cx_fmt(em,sizeof em,"%s/manifest-epoch.tsv",scratch))return 2;
         {   sy_stat_t st;
             if(sy_stat(em,&st)==0) unlink(em);
         }
@@ -232,36 +244,47 @@ int main(int argc,char **argv){
        再只改 p3-package.bin 一个字节,重生成,断言该成员行 sha 变了且报出名字;
        同时断言未被改动的 unisacc.com 行 sha 不变(证明报的是那一个成员,不是整表重写)。 */
     {
-        char base[4400], t2[4400];
-        if(cx_fmt(base,sizeof base,"%s/out/b5a-tamper-base.tsv",root))return 2;
-        if(cx_fmt(t2,sizeof t2,"%s/out/b5a-tamper-after.tsv",root))return 2;
+        char base[4400], t2[4400], troot[4400], tdev[4400];
+        if(cx_fmt(base,sizeof base,"%s/b5a-tamper-base.tsv",scratch))return 2;
+        if(cx_fmt(t2,sizeof t2,"%s/b5a-tamper-after.tsv",scratch))return 2;
+        if(cx_fmt(troot,sizeof troot,"%s/tamper-root",scratch))return 2;
+        if(cx_fmt(tdev,sizeof tdev,"%s/unisacc.com.dev",troot))return 2;
         {   sy_stat_t st;
             if(sy_stat(base,&st)==0) unlink(base);
             if(sy_stat(t2,&st)==0) unlink(t2);
+            if(sy_stat(troot,&st)==0) cx_rmtree(troot);
         }
-        /* 先把副本恢复成未篡改状态(重复运行必须可重入):从冻结域重新拷三个成员 */
-        {   char *v[]={(char*)"sh",(char*)"-c",
-                      (char*)"cp -f out/epoch-2026-11-02/root/unisacc.com /tmp/tamper-root/ && "
-                      "cp -f out/epoch-2026-11-02/root/unisacc.com.dev/entry.elf out/epoch-2026-11-02/root/unisacc.com.dev/p3-package.bin /tmp/tamper-root/unisacc.com.dev/ && "
-                      "cp -f out/epoch-2026-11-02/root/ape-receipt.txt /tmp/tamper-root/",0};
-            np_result r={0}; char why[512];
-            if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"tamper-reset");}
-            else { ck(r.rc==0,"tamper-reset-rc"); np_free(&r); }
+        /* 副本建在自己的 scratch 里（不再用固定 /tmp 路径），成员取自已装仓根。 */
+        if(sy_mkdir(troot,0755) || (sy_mkdir(tdev,0755) && sy_exists(tdev)!=1)) { ck(0,"tamper-reset"); }
+        else {
+            char cmd[6000], one[4400], two[4400], three[4400];
+            if(cx_fmt(one,sizeof one,"%s/unisacc.com",root))return 2;
+            if(cx_fmt(two,sizeof two,"%s/unisacc.com.dev/entry.elf",root))return 2;
+            if(cx_fmt(three,sizeof three,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
+            if(cx_fmt(cmd,sizeof cmd,
+                      "cp -f %s %s/ && cp -f %s %s/ && cp -f %s %s/ && cp -f %s/ape-receipt.txt %s/",
+                      one,troot,two,tdev,three,tdev,root,troot)) return 2;
+            {   char *v[]={(char*)"sh",(char*)"-c",cmd,0};
+                np_result r={0}; char why[512];
+                if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"tamper-reset");}
+                else { ck(r.rc==0,"tamper-reset-rc"); np_free(&r); }
+            }
         }
         {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"40",(char*)"sh",(char*)"unisacc.com",
-                      (char*)"tools/manifest-gen.cx",(char*)"--",(char*)"/tmp/tamper-root",base,0};
+                      (char*)"tools/manifest-gen.cx",(char*)"--",troot,base,0};
             np_result r={0}; char why[512];
             if(np_run(v,root,0,40,&r,why,sizeof why)){ck(0,"tamper-base-gen");}
             else { ck(r.rc==0,"tamper-base-gen-rc"); np_free(&r); }
         }
         /* 改 p3-package.bin 的一个字节 */
-        {   int fd=open("/tmp/tamper-root/unisacc.com.dev/p3-package.bin",O_RDWR);
-            int okw=0;
+        {   char pk[4400]; int fd, okw=0;
+            if(cx_fmt(pk,sizeof pk,"%s/p3-package.bin",tdev))return 2;
+            fd=open(pk,O_RDWR);
             if(fd>=0){ char x='X'; if(lseek(fd,64,SEEK_SET)>=0 && write(fd,&x,1)==1) okw=1; close(fd); }
             ck(okw,"tamper-member-written");
         }
         {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"40",(char*)"sh",(char*)"unisacc.com",
-                      (char*)"tools/manifest-gen.cx",(char*)"--",(char*)"/tmp/tamper-root",t2,0};
+                      (char*)"tools/manifest-gen.cx",(char*)"--",troot,t2,0};
             np_result r={0}; char why[512];
             if(np_run(v,root,0,40,&r,why,sizeof why)){ck(0,"tamper-after-gen");}
             else { ck(r.rc==0,"tamper-after-gen-rc"); np_free(&r); }
@@ -306,6 +329,7 @@ int main(int argc,char **argv){
             free(bb); free(ab);
         }
     }
+    (void)cx_rmtree(scratch);   /* 本次运行的独占目录，跑完即删 */
 
     printf("MANIFEST_CHECK\tfailed=%d\tscope=deterministic-gen-and-shape-and-receipt\tbyte-equal-to-B0-explode=NOT-APPLICABLE(different-field-set)\n", failed);
     return failed?1:0;
