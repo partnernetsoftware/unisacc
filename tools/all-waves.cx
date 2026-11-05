@@ -43,6 +43,23 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
+/* Concurrency ceiling and fallback live in exec/facts/limits.tsv, so the number exists once.
+   Core count comes from `nproc` through the same capture helper every other probe uses; when it is
+   unavailable the fallback applies, which is the pre-split behaviour. */
+#define WAVE_JOBS_MAX 16
+#define WAVE_JOBS_FALLBACK 4
+static int wave_jobs(void) {
+    char *v[] = {"nproc", 0};
+    np_result r = {0};
+    char why[256] = {0};
+    int n = WAVE_JOBS_FALLBACK;
+    if (!np_run(v, 0, 0, 5, &r, why, sizeof why) && r.rc == 0 && r.outn > 0) {
+        long got = strtol(r.out, 0, 10);
+        if (got >= 1 && got <= 4096) n = (int)got;
+    }
+    np_free(&r);
+    return n > WAVE_JOBS_MAX ? WAVE_JOBS_MAX : n;
+}
 static char root[4096],session[4096],candidate[4400],bound[4400],runner[4400],why[1700];
 static double deadline;
 static void die(const char *name,const char *detail){printf("REFUSE\t%s\t%s\n",name,detail?detail:"-");fprintf(stderr,"all-waves: REFUSE %s %s\n",name,detail?detail:"-");exit(2);}
@@ -115,8 +132,9 @@ static void add_input(Job *j,const char *p){for(int i=0;i<j->ninput;i++)if(tx_eq
 static void plan_inputs(Job *j){char *v[]={"sh",candidate,"-cx-plan",j->entry,0};np_result r;char reason[1200];if(np_run(v,root,0,10,&r,reason,sizeof reason))die("cx-plan-transport",reason);if(r.rc||!r.outn||r.out[r.outn-1]!='\n'){np_free(&r);die("cx-plan",j->entry);}
  size_t at=0;while(at<r.outn){size_t end=at;while(r.out[end]!='\n')end++;r.out[end]=0;char *line=r.out+at;at=end+1;char *t1=strchr(line,'\t');if(!t1||line==t1)die("cx-plan-line",line);char *t2=strchr(t1+1,'\t');if(t2)*t2=0;char full[4400];if(t1[1]=='/'){if(strlen(t1+1)>=sizeof full)die("cx-plan-path",t1+1);{ if (cx_fmt(full, sizeof full, "%s",t1+1)) { fprintf(stderr, "all-waves: text too long for full\n"); exit(2); } }}else join(full,sizeof full,root,t1+1);add_input(j,full);}np_free(&r);}
 static void hash_inputs(Job *j,char (*dst)[65]){for(int i=0;i<j->ninput;i++)if(as_sha_file(j->input[i],1,dst[i],0,why,sizeof why))die("input-hash",why);}
-static void spawn(Job *j,const char *wavedir,const as_manifest *m){
- char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
+/* the first TAB-separated column of buf[at..e); 0 when the line has no such column */
+static int col0(const char *buf,size_t at,size_t e,char *dst,size_t cap){size_t k=0;if(at>=e||buf[at]=='\t')return 0;while(at<e&&buf[at]!='\t'&&k+1<cap)dst[k++]=buf[at++];dst[k]=0;return k>0;}
+static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
  v[n++]=bound;v[n++]="--status";v[n++]=j->status;v[n++]=secs;v[n++]="sh";v[n++]=candidate;v[n++]=runner;v[n++]="--";v[n++]=root;v[n++]=(char *)wavedir;v[n++]=j->b->id;
  if(!tx_eqz(j->b->materials, "-")){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",j->b->id);const as_material *x=as_find_material(m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);{int z=snprintf(storage[s],sizeof storage[s],"%s=%s",name,x->path);if(z<0||(size_t)z>=sizeof storage[s]){fprintf(stderr,"bound-format\n");exit(2);}};v[n++]=storage[s++];}}
  v[n]=0;j->t0=as_now();pid_t pid=fork();if(pid<0)die("fork",j->b->id);
@@ -126,11 +144,11 @@ static void spawn(Job *j,const char *wavedir,const as_manifest *m){
 static int cmd_wave(int argc,char **argv){
  if(argc<6)die("usage","wave ROOT SESSION [--child-seconds N] --light ID... | --heavy ID");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
  int at=4,cap_seconds=55;if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
- int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(heavy?count!=1:(count<1||count>4))die("wave-shape",heavy?"heavy-takes-one-id":"light-takes-one-to-four-ids");
+ int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(heavy?count!=1:(count<1||count>WAVE_JOBS_MAX))die("wave-shape",heavy?"heavy-takes-one-id":"light-takes-one-to-WAVE_JOBS_MAX-ids");
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);
  for(int i=0;i<m.nwave;i++)if(m.wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
- Job job[4];memset(job,0,sizeof job);np_buf ids={0,0,0};
+ Job *job=calloc((size_t)count,sizeof *job);if(!job)die("allocation",0);np_buf ids={0,0,0};
  for(int i=0;i<count;i++){const char *id=argv[at+i];const as_batch *b=as_find_batch(&reg,id);if(!b)die("unknown-batch",id);if(!tx_eqz(b->impl, "IMPLEMENTED"))die("batch-not-implemented",id);if(!tx_eqz(b->platform, "lnx/x86_64"))die("batch-needs-another-native-host",id);
   for(int k=0;k<i;k++)if(tx_eqz(job[k].b->id, id))die("duplicate-batch",id);if(decided(&m,id))die("batch-already-decided-in-session",id);if(light&&!tx_eqz(b->materials, "-"))die("light-wave-requires-materials-free-batch",id);
   job[i].b=b;if(as_entry(root,b,&m,job[i].entry,why,sizeof why))die("batch-entry",why);char src[4400];join(src,sizeof src,root,b->source);add_input(&job[i],src);add_input(&job[i],job[i].entry);plan_inputs(&job[i]);
@@ -144,8 +162,37 @@ static int cmd_wave(int argc,char **argv){
  np_buf sb={0,0,0};np_puts(&sb,"START\tmode=");np_puts(&sb,heavy?"heavy":"light");np_puts(&sb,"\tdir=");np_puts(&sb,dir);np_puts(&sb,"\tids=");np_puts(&sb,ids.p);np_puts(&sb,"\n");if(as_append(fd,session,"start",seq,sb.p,sb.n,why,sizeof why))die("manifest-append",why);free(sb.p);
  if(mkdir(wavedir,0700))die("wave-dir-must-be-new",wavedir);
  char before[65];{ if (cx_fmt(before, sizeof before, "%s",live.candidate)) { fprintf(stderr, "all-waves: text too long for before\n"); exit(2); } }long long w0=as_now();
- for(int i=0;i<count;i++){Job *j=&job[i];jobpath(j->out,wavedir,j->b->id,"stdout");jobpath(j->err,wavedir,j->b->id,"stderr");jobpath(j->status,wavedir,j->b->id,"status");jobpath(j->receipt,wavedir,j->b->id,"receipt");spawn(j,wavedir,&m);}
- int left=count;while(left){int st;pid_t pid;do{pid=waitpid(-1,&st,0);}while(pid<0&&errno==EINTR);if(pid<0)die("waitpid",0);int found=-1;for(int i=0;i<count;i++)if(job[i].pid==pid&&!job[i].t1)found=i;if(found<0)continue;job[found].t1=as_now();job[found].bound_rc=WIFEXITED(st)?WEXITSTATUS(st):128+(WIFSIGNALED(st)?WTERMSIG(st):0);left--;}
+ /* Sliding window: at most wave_jobs() children alive at once (heavy waves stay at one).  A light
+    wave with four ids behaves exactly as before on a machine with >= 4 cores, because the window is
+    then never the limit.  A batch listed in tests/serial.tsv runs alone: a timing-ratio assertion
+    inside it fails when its neighbours compete for the machine. */
+ int active_max=heavy?1:wave_jobs();
+ if(active_max>count)active_max=count;
+ {   char sp[4400];
+     if (!cx_fmt(sp, sizeof sp, "%s/tests/serial.tsv", root)) {
+         size_t sn = 0; char *st = cx_read(sp, &sn);
+         if (st) {
+             size_t at2 = 0;
+             while (at2 < sn) {
+                 size_t e2 = at2; char sid[128]; size_t k2;
+                 while (e2 < sn && st[e2] != '\n') e2++;
+                 if (e2 > at2 && st[at2] != '#' && col0(st, at2, e2, sid, sizeof sid)) {
+                     for (k2 = 0; k2 < (size_t)count; k2++)
+                         if (!strcmp(job[k2].b->id, sid)) {
+                             active_max = 1;
+                             printf("SERIAL\t%s\twindow=1\ttests/serial.tsv\n", sid);
+                         }
+                 }
+                 at2 = e2 + 1;
+             }
+             free(st);
+         }
+     } }
+ for(int i=0;i<count;i++){Job *j=&job[i];jobpath(j->out,wavedir,j->b->id,"stdout");jobpath(j->err,wavedir,j->b->id,"stderr");jobpath(j->status,wavedir,j->b->id,"status");jobpath(j->receipt,wavedir,j->b->id,"receipt");}
+ int next_launch=0,active=0;
+ while(next_launch<active_max)spawn(&job[next_launch++],wavedir,&m),active++;
+ int left=count;while(left){int st;pid_t pid;do{pid=waitpid(-1,&st,0);}while(pid<0&&errno==EINTR);if(pid<0)die("waitpid",0);int found=-1;for(int i=0;i<count;i++)if(job[i].pid==pid&&!job[i].t1)found=i;if(found<0)continue;job[found].t1=as_now();job[found].bound_rc=WIFEXITED(st)?WEXITSTATUS(st):128+(WIFSIGNALED(st)?WTERMSIG(st):0);left--;active--;
+  while(active<active_max&&next_launch<count){spawn(&job[next_launch++],wavedir,&m);active++;}}
  long long w1=as_now();
  /* after-measurements: candidate, registry, harness, SID, materials, inputs */
  as_ident after;int measured=!as_identity(root,1,&after,why,sizeof why);const char *changed=!measured?"after-measurement-failed":as_ident_diff(&after,&m.ident)?as_ident_diff(&after,&m.ident):strcmp(after.sid,m.ident.sid)?"sid":0;int identity_stable=!changed;

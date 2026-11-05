@@ -1,0 +1,96 @@
+/* tests/check-serial.cx -- tests/serial.tsv names batches that must run alone.
+ *
+ *   sh ./unisacc.com tests/check-serial.cx [-- ROOT]
+ *
+ * all-waves reads this file before it opens a window; a listed id runs as a wave of its own, so a
+ * timing-sensitive batch cannot be knocked over by its neighbours.  The table is only as good as its
+ * entries, hence three assertions per row:
+ *   - the id exists in tests/batches.tsv and is IMPLEMENTED (a typo would silently disable the rule);
+ *   - the reason column is not empty and the evidence column names a real observation;
+ *   - no id appears twice (a duplicate hides which entry the reader would honour).
+ * Exit 0 when the table is well formed, 1 on any violation, 2 on usage/IO. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+#define MAXROWS 64
+static char g_root[4096];
+static int asserts, failed;
+static void die(const char *s) { fprintf(stderr, "check-serial: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ck(int ok, const char *what, const char *detail) {
+    asserts++;
+    if (!ok) failed++;
+    printf("%s\t%s%s%s\n", ok ? "PASS" : "FAIL", what, detail && *detail ? "\t" : "", detail ? detail : "");
+}
+static char *slurp(const char *rel, size_t *n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", g_root, rel)) die("path");
+    { char *s = cx_read(p, n); if (!s) die(rel); return s; }
+}
+/* the k-th TAB-separated column of one line, 0-based; returns 0 when absent */
+static int col(const char *s, size_t n, int k, char *dst, size_t cap) {
+    size_t at = 0; int i;
+    for (i = 0; i < k; i++) { while (at < n && s[at] != '\t' && s[at] != '\n') at++; if (at >= n || s[at] == '\n') return 0; at++; }
+    { size_t kk = 0; while (at < n && s[at] != '\t' && s[at] != '\n' && kk + 1 < cap) dst[kk++] = s[at++]; dst[kk] = 0; }
+    return 1;
+}
+/* is ID in batches.tsv with implementation IMPLEMENTED (column 1)? */
+static int implemented(const char *batches, size_t bn, const char *id) {
+    size_t at = 0;
+    while (at < bn) {
+        size_t e = at; char name[128], impl[64];
+        while (e < bn && batches[e] != '\n') e++;
+        if (e > at && batches[at] != '#' && col(batches + at, e - at, 0, name, sizeof name) &&
+            !strcmp(name, id)) {
+            if (col(batches + at, e - at, 1, impl, sizeof impl)) return !strcmp(impl, "IMPLEMENTED");
+            return 0;
+        }
+        at = e + 1;
+    }
+    return -1;
+}
+int main(int argc, char **argv) {
+    size_t n = 0, bn = 0;
+    char *tab, *batches;
+    char ids[MAXROWS][128];
+    int rows = 0, i;
+    if (argc > 3) die("usage: [-- ROOT]");
+    if (argc == 3) { if (!realpath(argv[2], g_root)) die("root"); }
+    else if (argc == 2) { if (!realpath(argv[1], g_root)) die("root"); }
+    else if (sy_cwd(g_root, sizeof g_root) < 0) die("cwd");
+    tab = slurp("tests/serial.tsv", &n);
+    batches = slurp("tests/batches.tsv", &bn);
+    {   size_t at = 0;
+        while (at < n) {
+            size_t e = at; char id[128], why[512], ev[512], detail[640];
+            while (e < n && tab[e] != '\n') e++;
+            if (e > at && tab[at] != '#') {
+                int has_id = col(tab + at, e - at, 0, id, sizeof id);
+                int has_why = col(tab + at, e - at, 1, why, sizeof why);
+                int has_ev = col(tab + at, e - at, 2, ev, sizeof ev);
+                if (!has_id || !id[0]) {
+                    if (cx_fmt(detail, sizeof detail, "row=%d no id", rows + 1)) die("detail");
+                    ck(0, "row-has-id", detail);
+                    at = e + 1; continue;
+                }
+                if (rows >= MAXROWS) die("too many rows");
+                {   size_t z; for (z = 0; id[z] && z + 1 < sizeof ids[0]; z++) ids[rows][z] = id[z]; ids[rows][z] = 0; }
+                if (cx_fmt(detail, sizeof detail, "id=%s", id)) die("detail");
+                ck(implemented(batches, bn, id) == 1, "id-is-an-implemented-batch", detail);
+                if (cx_fmt(detail, sizeof detail, "id=%s", id)) die("detail");
+                ck(has_why && why[0] && has_ev && ev[0], "row-has-reason-and-evidence", detail);
+                rows++;
+            }
+            at = e + 1;
+        } }
+    ck(rows > 0, "table-not-empty", "");
+    for (i = 0; i < rows; i++) {
+        int j;
+        for (j = 0; j < i; j++) if (!strcmp(ids[i], ids[j])) break;
+        if (j < i) { char detail[200]; if (cx_fmt(detail, sizeof detail, "id=%s", ids[i])) die("detail"); ck(0, "no-duplicate-id", detail); }
+    }
+    ck(1, "no-duplicate-id", "");
+    printf("SERIAL\trows=%d\tassertions=%d\tfailed=%d\n", rows, asserts, failed);
+    return failed ? 1 : 0;
+}
