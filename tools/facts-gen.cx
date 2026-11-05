@@ -213,10 +213,10 @@ static void opt_gen(Ob *o) {
     static Rows peep, opinfo;
     static List dummy[1];
     static const char *none[1][2] = {{"", 0}};
-    List *PA = &F[0], *PB = &F[1], *PR = &F[2], *PY = &F[3];
+    List *PA = &F[0], *PB = &F[1], *PR = &F[2];
     char *words[256];
-    int nwords, i, npeep = 0, nopinfo = 0, nsimple = 0;
-    long PEEPB = fg_const("opt-gen-constants", "PEEPB"), ACLSB = fg_const("opt-gen-constants", "ACLSB"),
+    int nwords, i, nopinfo = 0, nsimple = 0;
+    long ACLSB = fg_const("opt-gen-constants", "ACLSB"),
          BCLSB = fg_const("opt-gen-constants", "BCLSB"), SIMPLE = fg_const("opt-gen-constants", "SIMPLE");
     fg_gold("peep", &peep, F, want, 4);
     fg_gold("opinfo", &opinfo, dummy, none, 0);
@@ -234,21 +234,7 @@ static void opt_gen(Ob *o) {
         ob_z(o, ", \"register\": "); ob_str(o, reg); ob_z(o, "}");
     }
     ob_z(o, "]\n");
-    /* =peepinit */
-    ob_z(o, "=peepinit\tjson\t[");
-    for (i = 0; i < peep.n; i++) {
-        char **f = peep.c[i];
-        int a, b, r, y;
-        if (peep.nc[i] != 4) continue;
-        a = list_index(PA, f[0]); b = list_index(PB, f[1]); r = list_index(PR, f[2]); y = list_index(PY, f[3]);
-        if (a < 0 || b < 0 || r < 0 || y < 0) continue;
-        ob_z(o, npeep ? ", {\"i\": " : "{\"i\": "); ob_int(o, npeep);
-        ob_z(o, ", \"index\": "); ob_int(o, ((long)a * PB->n + b) * PR->n + r);
-        ob_z(o, ", \"value\": "); ob_int(o, y + 1);
-        ob_z(o, ", \"bank\": "); ob_int(o, PEEPB); ob_z(o, "}");
-        npeep++;
-    }
-    ob_z(o, "]\n");
+    /* the peep answer itself is no START data: weights/gold/peep.tsv -> tools/decide-gen.cx -> exec/opt/peepdecide-result.tsv */
     /* =opinfoinit */
     ob_z(o, "=opinfoinit\tjson\t[");
     for (i = 0; i < opinfo.n; i++) {
@@ -288,7 +274,6 @@ static void opt_gen(Ob *o) {
             ob_z(o, plan == 1 ? "{\"name\": \"start1\", \"refs\": [" : ", {\"name\": \"start2\", \"refs\": [");
             for (k = 0; k < nwords; k++) { cx_fmt(ref, sizeof ref, "word_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
             if (plan == 2) {
-                for (k = 0; k < npeep; k++) { cx_fmt(ref, sizeof ref, "peep_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
                 for (k = 0; k < nopinfo; k++) { cx_fmt(ref, sizeof ref, "opinfo_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
             }
             for (k = 0; k < nsimple; k++) { cx_fmt(ref, sizeof ref, "simple_%d", k); if (!first) ob_z(o, ", "); ob_str(o, ref); first = 0; }
@@ -312,38 +297,6 @@ static void opt_gen(Ob *o) {
         ob_z(o, ", \"PB_size\": "); ob_int(o, PB->n);
         ob_z(o, ", \"PR_size\": "); ob_int(o, PR->n);
         ob_z(o, "}\n");
-    }
-    /* =Y: answer-targets name -> template, "*" the default, "{name}" replaced */
-    {
-        Lines T = fg_lines("exec/opt/answer-targets.tsv");
-        char *tn[256], *tv[256];
-        int nt = 0, k, star = -1;
-        for (k = 0; k < T.n; k++) {
-            char *cells[4], *line = fg_dupz(T.l[k]);
-            if (!*line || line[0] == '#') continue;
-            if (fg_split(line, cells, 4) != 2 || nt == 256) fg_die("bad answer-targets row", T.l[k]);
-            tn[nt] = cells[0]; tv[nt] = cells[1];
-            if (tx_eq(cells[0], "*", 4)) star = nt;
-            nt++;
-        }
-        if (star < 0) fg_die("answer-targets lacks *", 0);
-        ob_z(o, "=Y\tjson\t[");
-        for (i = 0; i < PY->n; i++) {
-            const char *t = tv[star];
-            char out[1024];
-            long at = 0, j, tl, hole;
-            for (k = 0; k < nt; k++) if (tx_eq(tn[k], PY->v[i], FG_CAP)) { t = tv[k]; break; }
-            tl = tx_len(t, FG_CAP);
-            hole = tx_find(t, tl, "{name}", 6);
-            for (j = 0; j < tl && at < 1000; ) {
-                if (j == hole) { long m = tx_len(PY->v[i], 512); if (tx_copy(out + at, 1024 - at, PY->v[i], m)) fg_die("target too long", 0); at += m; j += 6; }
-                else out[at++] = t[j++];
-            }
-            out[at] = 0;
-            ob_z(o, i ? ", {\"i\": " : "{\"i\": "); ob_int(o, i);
-            ob_z(o, ", \"target\": "); ob_str(o, out); ob_z(o, "}");
-        }
-        ob_z(o, "]\n");
     }
 }
 
@@ -4009,7 +3962,7 @@ static void enc_arm(Ob *o) {
 typedef struct { const char *stem; const char *inputs[40]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
-                 "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "tools/facts-gen.cx", 0}, opt_gen},
+                 "exec/facts/opt-gen-startwords.tsv", "tools/facts-gen.cx", 0}, opt_gen},
     {"parse-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "tools/facts-gen.cx", 0}, parse_tokens},
     {"top-modelbindings-template", {"exec/facts/top-modelbindings-const.tsv", "tools/facts-gen.cx", 0}, modelbindings_template},
     {"k2-tokenlocations-map", {"exec/facts/tokenlocations.tsv", "tools/facts-gen.cx", 0}, tokenlocations_map},

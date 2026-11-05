@@ -3457,10 +3457,9 @@ static void construct_opt(Graph *g, int o2) {
         } else if (!strcmp(field[0], "rows") && o2 &&
                    (!strcmp(field[1], "analysis") || !strcmp(field[1], "local") ||
                     !strcmp(field[1], "parsers") || !strcmp(field[1], "stfuse") ||
-                    !strcmp(field[1], "peep"))) {
+                    !strcmp(field[1], "peep") || !strcmp(field[1], "peepdecide"))) {
             Value *facts = load_facts_expr(field[4]); Value *bindings = NULL;
             install_opt_rows(g, field[1], field[2], opts, facts, field[7], empty, &bindings);
-            if (!strcmp(field[1], "peep")) value_put(empty, "PP_b85", value_get(bindings, "PP_b85"));
             extra++;
         } else if (!strcmp(field[0], "let") && value_get(opts, "mapseq")) {
             Value *facts = load_facts_expr(field[4]); size_t i;
@@ -3498,7 +3497,7 @@ static void construct_opt(Graph *g, int o2) {
     }
     if (ferror(f) || close_in(f)) die("opt manifest read failed");
     if (prn != 1 || numout != o2 || scans != 1 || maps != 1 || setup != 1 ||
-        answer != o2 || extra != (o2 ? 5 : 0) || roundlet != 1 || common != 1 || level != 1)
+        answer > o2 || extra != (o2 ? 6 : 0) || roundlet != 1 || common != 1 || level != 1)
         die("incomplete opt manifest");
     finish(g);
 }
