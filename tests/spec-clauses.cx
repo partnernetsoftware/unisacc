@@ -1,0 +1,68 @@
+/* spec-clauses.cx -- the assembly contract exists in spec.md as append-only
+ * [AS] clauses, one per promised topic.
+ *
+ *   sh ./unisacc.com tests/spec-clauses.cx
+ *
+ * The matrix cell asks for clauses covering: input, preprocessing, dialect,
+ * per-ISA encoding, object format, relocation, UNIKERN1, refusals.  This reads
+ * spec.md (never a copy of its text) and requires §4.8 to exist, every AS-1..AS-11
+ * id to appear exactly once as a table row, and the eight topics to be reachable
+ * from those clauses.  A missing section, a duplicated id or a dropped topic is a
+ * FAIL, not a skip.  Prints SPEC_CLAUSES<TAB>clauses=N<TAB>failed=M. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+static int sc_failed, sc_clauses;
+static void sc_ck(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) sc_failed++; }
+static int sc_has(const char *s, long n, const char *needle) { long i, k = tx_len(needle, 128); for (i = 0; i + k <= n; i++) if (!memcmp(s + i, needle, (size_t)k)) return 1; return 0; }
+/* count rows that start with "| **AS-<id>**" */
+static int sc_rows(const char *s, long n) {
+    long at = 0; int c = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (e - at > 9 && s[at] == '|' && s[at + 1] == ' ' && s[at + 2] == '*' && s[at + 3] == '*'
+            && s[at + 4] == 'A' && s[at + 5] == 'S' && s[at + 6] == '-') c++;
+        at = e + 1;
+    }
+    return c;
+}
+int main(int argc, char **argv) {
+    static const char *topics[] = {"输入", "预处理", "方言", "编码", "目标文件", "重定位", "UNIKERN1", "拒绝"};
+    char p[4400], root[4096];
+    char *s;
+    size_t n = 0;
+    long i;
+    int t, ok;
+    if (argc > 2 || (argc == 2 && !realpath(argv[1], root))) {
+        fputs("usage: spec-clauses.cx [ROOT]\n", stderr);
+        return 2;
+    }
+    if (argc == 1 && !realpath(".", root)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/spec.md", root)) return 2;
+    if (!(s = cx_read(p, &n))) { fputs("spec-clauses: cannot read spec.md\n", stderr); return 2; }
+    sc_ck(sc_has(s, (long)n, "### 4.8"), "section-4.8-present");
+    sc_clauses = sc_rows(s, (long)n);
+    sc_ck(sc_clauses == 11, "eleven-as-clauses");
+    for (i = 1; i <= 11; i++) {
+        char id[16];
+        if (cx_fmt(id, sizeof id, "**AS-%ld**", i)) return 2;
+        sc_ck(sc_has(s, (long)n, id), id);
+    }
+    /* every promised topic must be reachable from the clause block */
+    {   long at = 0, start = -1, end = (long)n;
+        while (at < n) { long e = at; while (e < (long)n && s[e] != '\n') e++;
+            if (start < 0 && e - at >= 7 && !memcmp(s + at, "### 4.8", 7)) start = at;
+            else if (start >= 0 && e - at >= 3 && !memcmp(s + at, "---", 3)) { end = at; break; }
+            at = e + 1; }
+        sc_ck(start >= 0, "clause-block-found");
+        for (t = 0; t < 8; t++) {
+            char name[64];
+            if (cx_fmt(name, sizeof name, "topic.%s", topics[t])) return 2;
+            ok = start >= 0 && sc_has(s + start, end - start, topics[t]);
+            sc_ck(ok, name);
+        }
+    }
+    free(s);
+    printf("SPEC_CLAUSES\tclauses=%d\tfailed=%d\n", sc_clauses, sc_failed);
+    return sc_failed ? 1 : 0;
+}
