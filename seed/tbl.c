@@ -114,9 +114,49 @@ static void emit(const char *p, long n) {
 static void emits(const char *s) { emit(s, (long)strlen(s)); }
 static void emitl(long v) { char b[32]; emit(b, sprintf(b, "%ld", v)); }
 
+/* FAST-1: a REJECT names where it happened.  A sequence whose REJECT carries a
+ * reason is cloned once per source state, with the reason becoming
+ * "reason\0state".  Consumers that stop at the zero byte print what they always
+ * printed; a diagnostic reader takes the part after it. */
+static char **qline; static long *qlen, *rej_str, *rej_at, *rej_end; static long nseq, qcap;
+static Set clones;
+static void qgrow(long want) {
+    if (want <= qcap) return;
+    qcap = want * 2;
+    qline = (char **)realloc(qline, (size_t)qcap * sizeof(char *));
+    qlen = (long *)realloc(qlen, (size_t)qcap * sizeof(long));
+    if (!qline || !qlen) die("out of memory");
+}
+static long reject_site(long seq, long ni, long nbase) {
+    char key[64], num[32], *line, *text; long kn, before, c, v, nl, tl;
+    if (seq < 0 || seq >= nbase || rej_str[seq] < 0) return seq;
+    v = rej_str[seq];
+    if (!strs.len[v] || (strs.len[v] == 11 && !memcmp(strs.s[v], "unreachable", 11))) return seq;  /* an empty reason prints no reject line */
+    kn = sprintf(key, "%ld:%ld", seq, ni);
+    before = clones.n; c = sadd(&clones, key, kn);
+    if (clones.n == before) return nbase + c;
+    tl = strs.len[v] + 1 + names.len[ni];
+    text = (char *)malloc((size_t)tl);
+    if (!text) die("out of memory");
+    memcpy(text, strs.s[v], (size_t)strs.len[v]);
+    text[strs.len[v]] = 0;
+    memcpy(text + strs.len[v] + 1, names.s[ni], (size_t)names.len[ni]);
+    v = sadd(&strs, text, tl);
+    free(text);
+    kn = sprintf(num, "%ld", v);
+    nl = rej_at[seq] + kn + (qlen[seq] - rej_end[seq]);
+    line = (char *)malloc((size_t)nl);
+    if (!line) die("out of memory");
+    memcpy(line, qline[seq], (size_t)rej_at[seq]);
+    memcpy(line + rej_at[seq], num, (size_t)kn);
+    memcpy(line + rej_at[seq] + kn, qline[seq] + rej_end[seq], (size_t)(qlen[seq] - rej_end[seq]));
+    qgrow(nseq + 1);
+    qline[nseq] = line; qlen[nseq] = nl; nseq++;
+    return nbase + c;
+}
+
 int main(int argc, char **argv) {
-    long root, st, sq, k, nseq = 0;
-    char **qline; long *qlen;
+    long root, st, sq, k, nbase;
     FILE *f;
     if (argc != 3) { fprintf(stderr, "usage: seed-tbl delta.json out.tbl\n"); return 2; }
     jparse_file(&D, argv[1]);
@@ -134,8 +174,13 @@ int main(int argc, char **argv) {
     }
     /* action sequences, numbering registers, strings and extra symbols on first use */
     for (k = jkid(&D, sq); k >= 0; k = jnext(&D, k)) nseq++;
-    qline = (char **)calloc((size_t)(nseq + 1), sizeof(char *)); qlen = (long *)calloc((size_t)(nseq + 1), sizeof(long));
-    if (!qline || !qlen) die("out of memory");
+    nbase = nseq;
+    qgrow(nseq + 1);
+    rej_str = (long *)malloc((size_t)(nseq + 1) * sizeof(long));
+    rej_at = (long *)calloc((size_t)(nseq + 1), sizeof(long));
+    rej_end = (long *)calloc((size_t)(nseq + 1), sizeof(long));
+    if (!rej_str || !rej_at || !rej_end) die("out of memory");
+    for (k = 0; k <= nseq; k++) rej_str[k] = -1;
     {
         long i = 0, s;
         for (s = jkid(&D, sq); s >= 0; s = jnext(&D, s), i++) {
@@ -170,7 +215,10 @@ int main(int argc, char **argv) {
                         else if (D.n[arg].type == JSTR) { memcpy(kb, D.buf + D.n[arg].str, (size_t)D.n[arg].slen); kb[D.n[arg].slen] = 0; v = atol(kb); }
                         else { die("bad immediate"); v = 0; }
                     }
-                    emits(" "); emitl(v);
+                    emits(" ");
+                    if (kinds[j] == 's' && !strcmp(OPN[code], "REJECT")) { rej_str[i] = v; rej_at[i] = olen - save; }
+                    emitl(v);
+                    if (kinds[j] == 's' && !strcmp(OPN[code], "REJECT")) rej_end[i] = olen - save;
                 }
                 if (arg >= 0) die("too many action arguments");
             }
@@ -209,7 +257,7 @@ int main(int argc, char **argv) {
                     key = atol(kb);
                     if (key < 0 || key > 256) continue;
                     full[key].next = state_ix(D.buf + D.n[nx].str, D.n[nx].slen);
-                    full[key].seq = (long)D.n[sqi].ival;
+                    full[key].seq = reject_site((long)D.n[sqi].ival, ni, nbase);
                 }
                 /* the most frequent (next, seq); among equals the smallest, as max(sorted(cnt), key=cnt.get) */
                 {   Ent srt[257]; long run = 0, bestn = 0;
@@ -234,7 +282,7 @@ int main(int argc, char **argv) {
                     else { long l = D.n[e].klen; kb[0] = 's'; memcpy(kb + 1, D.buf + D.n[e].key, (size_t)l);
                            key = state_ix(D.buf + D.n[e].key, l); if (key < 0) key = names.n + sadd(&syms, kb, l + 1); }
                     if (e != jkid(&D, row)) emits(" ");
-                    emitl(key); emits(" "); emitl(state_ix(D.buf + D.n[nx].str, D.n[nx].slen)); emits(" "); emitl((long)D.n[sqi].ival);
+                    emitl(key); emits(" "); emitl(state_ix(D.buf + D.n[nx].str, D.n[nx].slen)); emits(" "); emitl(reject_site((long)D.n[sqi].ival, ni, nbase));
                 }
             }
             emits("\n");
