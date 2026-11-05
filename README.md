@@ -3,8 +3,8 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.44-rc1; results on the rc1 candidate are pending candidate
-verification): `lnx/x86_64` runs natively on the build host; `lnx/arm64` is run
+file, `unisacc.com`. Toolchain status (0.0.44-rc1, rc1 candidate rev `7266862b08`,
+no CI run, 0/6 targets with native evidence): `lnx/x86_64` runs natively on the build host; `lnx/arm64` is run
 under emulation only and not natively verified; `osx/*` and `win/x86_64` have not
 run on a native host and are built by the `whole-o` route; there is no `win/arm64`
 slice. `-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+, and the default
@@ -82,8 +82,10 @@ the old C reference: `tools/entry-build.cx` compiles `src/unisacc.cx` per
 target, `tools/release-build.cx` adds the P3 package and one slice, and
 `tools/release-ape.cx` packs the five slices into one APE and smokes it. The
 `lnx` slices take the `objects` route and the `osx`/`win` slices take the `whole-o`
-route. The 0.0.44-rc1 product identity, size and two-generation result are pending
-candidate verification. The current working tree is a dev-lnx stub. The previous
+route. The 0.0.44-rc1 candidate (rev `7266862b08`) is the APE `a76e5fc1`
+(5,494,758 bytes; the `lnx/x86_64` smoke passes); its `lnx/x86_64` candidate
+binary `c3996bd4` came out byte-identical in generations one, two and three.
+The current working tree is a dev-lnx stub. The previous
 release, 0.0.43, is the five-slice APE `83343ec1` (rev `edc2c7700b`, 5,145,706
 bytes, 2026-11-01).
 Two steps of the object route are still open: the model driver's `-c -b`
@@ -193,7 +195,7 @@ one `tools/release-build.cx` run per slice (P3 package plus the slice; `whole-o`
 for osx/win, `objects` for lnx), then `tools/release-ape.cx -- pack` for the
 five-slice APE and `-- smoke` before anyone installs it. The steps are listed in
 [archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md),
-and the 0.0.44-rc1 `unisacc.com` is to be built this way (pending candidate verification):
+and the 0.0.44-rc1 candidate `unisacc.com` was built this way:
 
 ```bash
 sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
