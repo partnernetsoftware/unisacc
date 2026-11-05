@@ -40,6 +40,32 @@ static int call(const char *action,const char *id,const char *label){
  * or "REUSE MISS <id>" on stdout, and never touches BUILD or OUT. A caller that
  * sees only HIT lines knows the whole phase is already up to date and no job
  * command needs to run. */
+/* One-process batch reuse: every job of PHASE is decided inside a single
+ * controller process (reuse-batch IDLIST), so the context is verified once and
+ * a path shared by many jobs is hashed once. Reuse stays opt-in. */
+static void reuse_phase(const char *phase){
+ char p[4400],prefix[20];np_buf list={0};int fd;size_t at=0;
+ if(!reuse_enabled())die("reuse-disabled-set-UNISACC_WAVE_REUSE=1");
+ enumerate();checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));
+ for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix))){np_puts(&list,ids[i]);np_puts(&list,"\n");}
+ if(!list.n)die("phase extent");
+ checked(cx_fmt(p,sizeof p,"%s/reuse-batch.ids",outer));
+ fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+ if(fd<0)die("reuse-id-list");
+ while(at<list.n){ssize_t z=write(fd,list.p+at,list.n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("reuse-id-write");at+=(size_t)z;}
+ if(fsync(fd)||close(fd))die("reuse-id-close");
+ free(list.p);
+ { char *v[]={bound,"55",controller,"reuse-batch",root,ctx,p,0};
+   np_result r={0};char why[1500]={0};char *env[]={"CPATH=/usr/include/node",library_env,0};
+   long long begin=now();
+   int transport=np_run(v,root,env,58,&r,why,sizeof why);
+   long long elapsed=now()-begin;
+   if(r.outn)fwrite(r.out,1,r.outn,stdout);
+   if(transport||r.rc){if(r.errn)fwrite(r.err,r.errn,stderr);}
+   printf("REUSE_BATCH\t%s\ttransport=%d\trc=%d\twall_ns=%lld\n",phase,transport,r.rc,elapsed);
+   np_free(&r);
+   if(transport||r.rc)die("reuse-batch-failed"); }
+}
 static void reuse(const char *phase,int first,int count){
  if(!reuse_enabled())die("reuse-disabled-set-UNISACC_WAVE_REUSE=1");if(count<1||count>4)die("concurrency1..4");enumerate();char prefix[20];checked(cx_fmt(prefix,sizeof prefix,"%s-",phase));int selected[131],n=0;for(int i=0;i<nids;i++)if(!strncmp(ids[i],prefix,strlen(prefix)))selected[n++]=i;if(first+count>n)die("phase extent");
  int hits=0;for(int j=0;j<count;j++){const char *id=ids[selected[first+j]];char *v[]={bound,"55",controller,"reuse-job",root,ctx,(char *)id,0};
@@ -80,5 +106,6 @@ int main(int argc,char **argv){
  else if(argc==5&&tx_eqz(argv[4], "list")){if(mkdir(outer,0700))die("fresh outer directory");record_controller();if(call("--list",0,"list"))die("authoritative list failed");enumerate();printf("LIST authoritative_jobs=%d tools=5 gen=42 tbl=42 net=42\n",nids);}
  else if(argc==9&&tx_eqz(argv[4], "wave"))wave(argv[5],number(argv[6]),number(argv[7]),argv[8]);
  else if(argc==8&&tx_eqz(argv[4], "reuse")){reuse(argv[5],number(argv[6]),number(argv[7]));}
+ else if(argc==6&&tx_eqz(argv[4], "reuse-batch")){reuse_phase(argv[5]);}
  else if(argc==5&&tx_eqz(argv[4], "final"))final();else die("arguments");return 0;
 }

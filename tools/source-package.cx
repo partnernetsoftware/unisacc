@@ -181,8 +181,40 @@ static void list_jobs(void){puts("JOB\tSTATE\tDEPENDENCIES\tCHILD_BOUND\tOUTPUT"
  * would only burn wall clock. Nothing is trusted from the old record alone:
  * every dependency and the output are re-hashed here, and verify_job re-derives
  * the whole record and compares it. Exit 0 = reusable, 1 = must run. */
-static int reuse_job(const char *id){
- check_context();SpJob j=find_job(id);char dir[4400],out[4400],receipt[4400],p[4400];
+/* Batch reuse: read a newline-separated job-id list, then decide all of them in
+ * one process. BATCH_MISSES counts the MISSes for the caller's exit code. */
+/* Batch reuse: one process, one context verification, then every job decided
+ * by the same reuse_verdict the single-job entry uses. Reads are still hashed
+ * in full; sp_observe memoises a path within this process. */
+static int batch_misses;
+static void reuse_batch(const char *r,const char *c,const char *listpath){
+ size_t n,at=0;char *s;int fd,count=0,hit=0,miss=0;
+ char ids[1024][128];
+ setup(r,c);
+ fd=open(listpath,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+ if(fd<0)die("id-list-open");
+ { struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>1048576)die("id-list-shape");n=(size_t)st.st_size; }
+ s=malloc(n+1);
+ if(!s)die("allocation");
+ while(at<n){ssize_t z=read(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("id-list-read");at+=(size_t)z;}
+ close(fd);s[n]=0;
+ check_context();
+ at=0;
+ while(at<n&&count<1024){
+  const char *a=s+at,*e;size_t z;
+  while(at<n&&s[at]!='\n')at++;
+  e=s+at;z=(size_t)(e-a);
+  if(z){if(z>=sizeof ids[0])die("id-bound");memcpy(ids[count],a,z);ids[count][z]=0;count++;}
+  if(at<n)at++;
+ }
+ free(s);
+ for(int i=0;i<count;i++){
+  if(reuse_verdict(ids[i]))miss++;else hit++;
+ }
+ printf("REUSE_BATCH\tjobs=%d\thit=%d\tmiss=%d\n",count,hit,miss);
+ batch_misses=miss;
+}
+static int reuse_verdict(const char *id){SpJob j=find_job(id);char dir[4400],out[4400],receipt[4400],p[4400];
  job_paths(id,j,dir,out,receipt);
  struct stat st;errno=0;
  if(lstat(dir,&st)||!S_ISDIR(st.st_mode)){printf("REUSE\tmiss\t%s\tno-job-directory\n",id);return 1;}
@@ -205,6 +237,7 @@ static int reuse_job(const char *id){
  printf("REUSE\thit\t%s\tverified\n",id);
  return 0;
 }
+static int reuse_job(const char *id){check_context();return reuse_verdict(id);}
 static void start_job(const char *id){
  SpJob j=find_job(id);check_context();dependencies_only(j);
  np_buf before=dependency_observation(j);char dir[4400],out[4400],receipt[4400],evidence[4400];
@@ -232,6 +265,8 @@ int main(int argc,char **argv){
 #endif
  if(sizeof(long)!=8||sizeof(void *)!=8)die("LP64-process-required");
  if(argc==5&&tx_eqz(argv[1], "reuse-job")){setup(argv[2],argv[3]);return reuse_job(argv[4]);}
+ if(argc==5&&tx_eqz(argv[1], "reuse-batch")){reuse_batch(argv[2],argv[3],argv[4]);return batch_misses?1:0;}
+
  if(argc==6&&tx_eqz(argv[1], "prepare-context")){setup(argv[2],argv[5]);prepare_context(argv[3],argv[4]);return 0;}
  if(argc==4&&(tx_eqz(argv[1], "--list")||tx_eqz(argv[1], "--verify-context"))){setup(argv[2],argv[3]);check_context();char before[65];strcpy(before,context_sha);if(tx_eqz(argv[1], "--list"))list_jobs();check_context();if(!tx_eqz(before, context_sha))die("context-changed-during-readonly-verification");if(tx_eqz(argv[1], "--verify-context"))puts("VERIFIED\tsource-package-context-v2\tcontext-only-no-package-no-test-result");return 0;}
  if(argc==5&&tx_eqz(argv[1], "job")){setup(argv[2],argv[3]);run_job(argv[4]);return 0;}

@@ -107,8 +107,8 @@ static char sp_job_out[4400],sp_job_exe[4400],sp_job_src[4400],sp_job_inc[4400],
 static char root[4096],ctx[4096],bootstrap[4096],cc[4096],self[4096],product[4400],bound[4400],ident[4400],helper[4400],netpack[4400],bound_c[4400],jobs[4400];
 static char sid[65],context_sha[65],cc_sha[65],cc_version_sha[65],helper_sha[65],bootstrap_sha[65],product_sha[65],self_sha[65],netpack_sha[65],bound_sha[65],bound_c_sha[65],ident_sha[65];
 static char basis[4400],consumer[4096],consumer_sha[65],pc[4096],kgen[4096];
-static const char *basis_pin="8eb90951e86ee0e27cd7a292ba13f410b0cdc7f7ddb87eaa2f175540f906f87a";
-static const char *origin_basis_pin="8eb90951e86ee0e27cd7a292ba13f410b0cdc7f7ddb87eaa2f175540f906f87a";
+static const char *basis_pin="e0391c9018f4c9542ac2482bad5b69d11028bdedf0cbcf16bf54f9dd82a260a2";
+static const char *origin_basis_pin="e0391c9018f4c9542ac2482bad5b69d11028bdedf0cbcf16bf54f9dd82a260a2";
 static const char *sp_basis_pin(void){return sp_origin_mode?sp_origin_material.origin_foundation:basis_pin;}
 static void live_root_epoch_bind(void);
 static const char *environment_policy="raw-environ-remove-SEED_GEN_GENERIC-SEED_GEN_TRACE-UNISACC_SEED_TRACE-UNISACC_RF_CAPTURE-UNISA_ATTRIBUTES-v1";
@@ -244,7 +244,7 @@ static const char *recorded_field(const np_buf *b,const char *key,char *out,size
  (void)k;
  return out;
 }
-static void check_context(void){memset(job_seen,0,sizeof job_seen);free(kernel_observation.p);kernel_observation=(np_buf){0};kernel_observed=0;canonical(ctx);char p[4400];path(p,ctx,"context.tsv");size_t n;char *s=load(p,&n);if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))die("context-wire");extract_path(s,"cc",cc,sizeof cc);extract_path(s,"bootstrap",bootstrap,sizeof bootstrap);free(s);observe_inputs();{ if (cx_fmt(sid, sizeof sid, "%s",supplied_source)) { fprintf(stderr, "sourcepackage: text too long for sid\n"); exit(2); } }np_buf expected=context_record();if(!equal_same(p,&expected)){char rec[72];recorded_field(&expected,"source",rec,sizeof rec);fprintf(stderr,"sourcepackage: REFUSE source-sid-changed recorded=%s live=%s\n",rec[0]?rec:"ABSENT",sid);exit(2);}hash_bytes(expected.p,expected.n,context_sha);free(expected.p);sp_require_same_generation();if(!sp_origin_mode)live_root_epoch_bind();}
+static void check_context(void){memset(job_seen,0,sizeof job_seen);free(kernel_observation.p);kernel_observation=(np_buf){0};kernel_observed=0;canonical(ctx);char p[4400];path(p,ctx,"context.tsv");size_t n;char *s=load(p,&n);if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))die("context-wire");extract_path(s,"cc",cc,sizeof cc);extract_path(s,"bootstrap",bootstrap,sizeof bootstrap);free(s);observe_inputs();{ if (cx_fmt(sid, sizeof sid, "%s",supplied_source)) { fprintf(stderr, "sourcepackage: text too long for sid\n"); exit(2); } }np_buf expected=context_record();if(!equal_same(p,&expected)){char rec[72],*dp=strstr(p,"\nsource\t");rec[0]=0;if(dp){const char *e;size_t z;dp+=8;z=strlen(dp);if(z>=sizeof rec)z=sizeof rec-1;memcpy(rec,dp,z);rec[z]=0;e=strchr(rec,'\n');if(e)*e=0;}fprintf(stderr,"sourcepackage: REFUSE source-sid-changed recorded=%s live=%s\n",rec[0]?rec:"ABSENT",sid);exit(2);}hash_bytes(expected.p,expected.n,context_sha);free(expected.p);sp_require_same_generation();if(!sp_origin_mode)live_root_epoch_bind();}
 typedef struct {int tool,recipe,phase;} SpJob;
 static SpJob find_job(const char *id){SpJob j={-1,-1,-1};for(int i=0;i<5;i++){char name[80];{ if (cx_fmt(name,sizeof name,"tool-%s",tools[i])) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name)){j.tool=i;return j;}}const char *phases[]={"gen-","tbl-","net-"};for(int p=0;p<3;p++)for(int m=0;m<(int)(sizeof recipes/sizeof *recipes);m++){char name[160];{ if (cx_fmt(name,sizeof name,"%s%s",phases[p],recipes[m].id)) { fprintf(stderr, "sourcepackage: text too long for name\n"); exit(2); } }if(!strcmp(id,name)){j.recipe=m;j.phase=p;return j;}}die("unknown-or-PLANNED-job");return j;}
 static void job_paths(const char *id,SpJob j,char dir[4400],char output[4400],char receipt[4400]){path(dir,jobs,id);path(output,dir,j.tool>=0?"result.exe":j.phase==0?"result.json":j.phase==1?"result.tbl":"result.net");path(receipt,dir,"record.tsv");}
@@ -472,6 +472,35 @@ const char *sp_verify_dep_name(void){return sp_verify_dep?sp_verify_dep:"";}
  * refusing: 0 verified, 1 this job changed, 2 an ancestor changed (named in
  * sp_verify_dep), 3 depth overrun. */
 int sp_job_verified(const char *id){sp_verify_dep=0;return verify_job(id,0);}
+/* Batch entry for a caller that has ALREADY verified its context once (the
+ * producer's own check_context) and now wants every job decided in this same
+ * process: one path is hashed once, and no per-job process is started. Every read is still hashed in full; sp_observe memoises a
+ * path within this process, so a file shared by many jobs is hashed once and
+ * every lookup still compares the same bytes. Prints one line per job:
+ * "HIT <id>" or "MISS <id> <reason>"; exit code is the MISS count capped at 1.
+ * ROOT may be 0 when a previous call in this process already bound it. */
+int sp_reuse_batch(const char *root_arg,const char *ctx_arg,const char *const *ids,int n){
+ int i,miss=0;
+ if(!ids||n<1)return -1;
+ if(root_arg&&ctx_arg){
+  size_t z;
+  if(!realpath(root_arg,root))return -1;
+  z=strlen(root_arg);if(z>=sizeof root)return -1;
+  z=strlen(ctx_arg);if(z>=sizeof ctx)return -1;
+  memcpy(ctx,ctx_arg,z);ctx[z]=0;
+  path(jobs,ctx,"jobs");
+ } else if(!root[0]||!ctx[0]||!jobs[0]) return -1;
+ for(i=0;i<n;i++){
+  int v=sp_job_verified(ids[i]);
+  if(!v){printf("HIT\t%s\n",ids[i]);continue;}
+  miss++;
+  if(v==2&&sp_verify_dep_name()[0])printf("MISS\t%s\tdep=%s\n",ids[i],sp_verify_dep_name());
+  else if(v==1)printf("MISS\t%s\treads-or-record-changed\n",ids[i]);
+  else printf("MISS\t%s\tunverified-%d\n",ids[i],v);
+ }
+ return miss?1:0;
+}
+
 /* Consumer output remains separate from SOURCE_CTX. Phase receipts are honest
  * source-package-phase-v1 observations, never P7 refresh receipts. */
 static const char *target_ids[]={"lnx-arm64","lnx-x86_64","osx-arm64","osx-x86_64","win-arm64","win-x86_64"};
@@ -616,6 +645,39 @@ static int sp_copy_field(char *dst,size_t cap,const char *src){
  z=strlen(src);if(z>=cap)return -1;
  if(mm_copy(dst,(long)cap,src,(long)z))return -1;
  dst[z]=0;
+ return 0;
+}
+/* Read a file under a directory (ROOT/CTX + NAME) into a fresh buffer. */
+char *sp_load_file_root(const char *dir,const char *name,size_t *n){
+ char p[4400];char *s;
+ if(!dir||!name||!n)return 0;
+ if(cx_fmt(p,sizeof p,"%s/%s",dir,name))return 0;
+ if(sp_load_file(p,&s,n))return 0;
+ return s;
+}
+/* Supply the source SID the context pins; a batch caller has no per-job CLI to
+ * pass it, so it reads it from the same context record check_context verifies. */
+int sp_bind_source(const char *sid_arg){
+ if(!sid_arg||!sp_hex64(sid_arg))return -1;
+ return sp_copy_field(supplied_source,sizeof supplied_source,sid_arg);
+}
+/* Bind every path the record/verify implementation reads. The producer's own
+ * CLI fills these globals through its own setup(); a batch caller that only has
+ * the paths (no per-job CLI run) uses this instead, so there is still exactly
+ * one place that decides them. */
+int sp_bind_inputs(const char *r,const char *c,const char *cc_path,const char *bound_path,
+                   const char *self_path,const char *product_path,const char *ident_path,
+                   const char *netpack_path,const char *helper_path,const char *bound_c_path){
+ { char rr[4400],cr[4400];
+   if(!r||!c||!realpath(r,rr)||!realpath(c,cr))return -1;
+   if(sp_copy_field(root,sizeof root,rr)||sp_copy_field(ctx,sizeof ctx,cr))return -1; }
+ if(sp_copy_field(cc,sizeof cc,cc_path)||sp_copy_field(bound,sizeof bound,bound_path))return -1;
+ if(sp_copy_field(self,sizeof self,self_path)||sp_copy_field(product,sizeof product,product_path))return -1;
+ if(sp_copy_field(ident,sizeof ident,ident_path)||sp_copy_field(netpack,sizeof netpack,netpack_path))return -1;
+ if(sp_copy_field(helper,sizeof helper,helper_path))return -1;
+ if(sp_copy_field(bound_c,sizeof bound_c,bound_c_path))return -1;
+ path(jobs,ctx,"jobs");
+ { struct stat st;errno=0; if(lstat(jobs,&st)||!S_ISDIR(st.st_mode))return -1; }
  return 0;
 }
 /* Bind ROOT and the job directory for the record/verify implementation. */
