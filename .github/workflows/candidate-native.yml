@@ -329,6 +329,22 @@ jobs:
           # 8. side by side in the same pwsh: the small PE and unisacc --version, stdout/stderr lengths.
           if (Test-Path $hi) { Run-Raw $hi @() 'side-by-side hi.exe' }
           Run-Raw $exe @('--version') 'side-by-side unisacc --version'
+          # 9. the argv self-proof probe (tests/cases/ci-argvprobe-win-x86_64.cx, cross-compiled on Linux).
+          $ap = Join-Path $PWD 'tests/cases/ci-argvprobe-win-x86_64.exe'
+          if (Test-Path $ap) { Run-Raw $ap @('A', 'B') 'argvprobe.exe A B (pipe)' } else { Say "argvprobe.exe: NOT_RUN (not in this commit)" }
+          # 10. was the image relocated? Compare the PE header ImageBase with the base Windows actually mapped.
+          foreach ($img in @($ap, $exe)) {
+            if (!(Test-Path $img)) { continue }
+            try {
+              $b = [IO.File]::ReadAllBytes($img); $pe = [BitConverter]::ToUInt32($b, 60)
+              $hdr = [BitConverter]::ToUInt64($b, $pe + 48); $dll = [BitConverter]::ToUInt16($b, $pe + 94)
+              $rd = [BitConverter]::ToUInt32($b, $pe + 24 + 112 + 40); $rs = [BitConverter]::ToUInt32($b, $pe + 24 + 112 + 44)
+              $p = Start-Process -FilePath $img -ArgumentList 'A' -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $diag 'base.out') -RedirectStandardError (Join-Path $diag 'base.err')
+              $mapped = '-'; for ($i = 0; $i -lt 40 -and $mapped -eq '-'; $i++) { try { $m = $p.MainModule; if ($m) { $mapped = ('0x{0:x16}' -f $m.BaseAddress.ToInt64()) } } catch { Start-Sleep -Milliseconds 25 } }
+              if (!$p.HasExited) { $p.Kill() }
+              Say ("image {0}: header ImageBase=0x{1:x16} mapped={2} DllCharacteristics=0x{3:x4} reloc_dir rva=0x{4:x} size={5}" -f (Split-Path $img -Leaf), $hdr, $mapped, $dll, $rd, $rs)
+            } catch { Say "image $(Split-Path $img -Leaf): base probe failed: $_" }
+          }
           # 4. the previous release's APE through the same probes: not fetched; nothing is published for it.
           Say "previous-release APE: NOT_RUN (no private source on the runner; publishing it is out of scope)"
           # 5. WER crash records for unisacc (EventID 1000, Application log).
