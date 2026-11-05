@@ -31,3 +31,28 @@ lower 1480B;三类坏输入全部 `reject: not covered: malformed tape text`。
 不用另写重生流程:`tools/chain-step.cx` 的 gen/tbl/net 三个相位本来就从 rev 里的表重生
 这 11 张网。本文件的上表用作**对照基线** —— chain 跑完后把它的 net-* 作业 `result.net`
 的 sha 与上表"改后"一列逐张比,两边一致才说明新网确实进了包。
+
+## v2 基线（HEAD `fc252c5a44` 实生成）
+
+v1（上表"改后"列）只校验末字节；v2（`933300c047`）改成逐字节校验首行 `_start:\n` + 末字节换行，
+所以网 sha 又变了一次。go 的 chain 跑完后应比**这一列**（不是上表那一列）。
+
+方法：仓外克隆 `/tmp/bdy-vfy`（HEAD `fc252c5a44`），`cc -std=c99 -O2 -w -I seed seed/gen.c` 现编
+seed-gen，逐张生成。
+
+| 网 | v2 sha256（chain 应与此一致） |
+|---|---|
+| shared-e4 | 65eda7e85c4478b4783b12db30aab1c18d85cb99c49ad378b2dcb7c7c28a658d |
+| shared-o1 | 58995bf781609d19ee95ceb31a2a6cf06e8fa4c8ceb5dab66b0b2780fd0d6baa |
+| shared-prune | de607e6bc7d5ac1abe24abfda9675af3e987ebdbd2e209153cbeb7fbe41fde76 |
+| lnx-x86_64-lower | f990b04413d6ad5ac3d0c8cc565824050c765582895f804cbeaaa68a86878fac |
+| lnx-arm64-lower | 8de05f68c20aebb3718587dde60f39feea7a5ebe5c3df1c8e658549e504aca76 |
+| osx-x86_64-lower | af628c33b85c9f17165135311a3ba666f3702556d0423e3a023625877dc8b5d2 |
+| osx-arm64-lower | ff195903a643715f8993b2cdba68d1812a01d7366fd0cd16b3ccc8413ec2f459 |
+| win-x86_64-lower | 8f17ecacdaa4c316aef8f32b31e580518f11d57f7b12349564bcd55c2d22210c |
+| win-arm64-lower | cf02656893c33753a5b8973e6810d7944619295ba0eec134803112f61ce4270b |
+| object-lower-x86_64 | e37188f90af31b80da686c0eedca9d63f5d0aec41450cbbd7ac99881b73722a5 |
+| object-lower-arm64 | 65b593b410cd208f5855435f944b591133615c5c3e3cbc4aa7624a2b6657ec1c |
+
+v2 与 v1 的差异全部来自入口状态链（首行 8 个字节状态 + 尾部校验），行为等价仍由
+`plans/` 里记录的网级实测背书：合法输入输出与 v1 逐字节相同，三类坏输入全拒。
