@@ -72,8 +72,8 @@ static void put(Buf *b, const char *s, long n) {
 static void puts_(Buf *b, const char *s) { put(b, s, tx_len(s, CAP)); }
 
 /* ---------- files: one node per realpath ---------- */
-enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE };
-static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use"};
+enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE, V_GUARD };
+static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard"};
 typedef struct {
     char *key;      /* realpath, or the absolute spelling when it does not resolve */
     char *given;    /* the repo-relative spelling it was first reached by: uses resolve beside it */
@@ -256,6 +256,19 @@ static void mark_root(const char *rel) {
     for (k = 0; k < node[ni].ntok; k++) named(node[ni].tok[k], V_LIT);
 }
 
+/* Batches that read their inputs through a computed path (a runtime unit list): no use/literal/arg
+   edge reaches them, so a change anywhere below these subtrees reruns them.  Explicit, not scanned;
+   weakest match -- any source/use/literal/arg edge wins over a guard. */
+static const char *GUARD[][4] = {{"cross-targets", "src", "cx/sys", "include"}, {0, 0, 0, 0}};
+static void mark_guards(const char *id) {
+    int g, k;
+    for (g = 0; GUARD[g][0]; g++) if (tx_eqz(GUARD[g][0], id))
+        for (k = 1; k < 4 && GUARD[g][k]; k++) {
+            if (ndirs >= 4096) die("too many guarded directories");
+            dirs[ndirs] = path_node(GUARD[g][k], 1); dirvia[ndirs++] = V_GUARD;
+        }
+}
+
 /* ---------- registry ---------- */
 typedef struct { char *id, *source, *entry, *args, *materials; } Batch;
 static Batch batch[MAXBATCH];
@@ -279,6 +292,7 @@ static void mark_batch(Batch *B) {
     ndirs = 0; epoch++;
     mark_root(B->source);
     if (tx_chr(B->entry, tx_len(B->entry, 4096), '{') < 0 && !tx_eqz(B->entry, B->source)) mark_root(B->entry);
+    mark_guards(B->id);
     if (!tx_eqz(B->args, "-")) {   /* ';'-separated tokens; {placeholders} skipped */
         const char *at = B->args;
         while (*at) {
