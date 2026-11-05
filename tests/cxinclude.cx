@@ -116,13 +116,72 @@ static int load_boundary(void) {
     return 0;
 }
 
-static int is_boundary(const char *path) {
-    int k; size_t n;
-    for (k = 0; k < npref; k++) {
-        n = strlen(pref[k]);
-        if (!strncmp(path, pref[k], n)) return 1;
+/* `#pragma unisa dock` (bare, or `dock include|libc`) in the unit's first lines: the
+   unit declares that it is a docking unit.  Per plans/cx-dock-pragma.md only modules
+   (a `#pragma unisa module` unit, or one another unit `use`s) are subject to the rule;
+   a pure script is neither, so it is never asked for a dock and never exempted by
+   claiming one. */
+static int has_dock(const char *b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t e = i, j;
+        while (e < n && b[e] != '\n') e++;
+        j = i;
+        while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+        if (j < e && b[j] == '#') {
+            j++;
+            while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (e - j >= 6 && !memcmp(b + j, "pragma", 6)) {
+                j += 6;
+                while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                if (e - j >= 5 && !memcmp(b + j, "unisa", 5)) {
+                    j += 5;
+                    while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                    if (e - j >= 4 && !memcmp(b + j, "dock", 4) &&
+                        (j + 4 == e || b[j + 4] == ' ' || b[j + 4] == '\t')) return 1;
+                }
+            }
+        }
+        i = e + 1;
     }
-    for (k = 0; k < nexact; k++) {   /* exact entries: whole-path equality, no prefix reach */
+    return 0;
+}
+
+/* a unit that is a module: declares `#pragma unisa module`, or another unit `use`s it */
+static int is_module(const char *path, const char *b, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        size_t e = i, j;
+        while (e < n && b[e] != '\n') e++;
+        j = i;
+        while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+        if (j < e && b[j] == '#' && e - j >= 6 && !memcmp(b + j + 1, "pragma", 6)) {
+            j += 7;
+            while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (e - j >= 5 && !memcmp(b + j, "unisa", 5)) {
+                j += 5;
+                while (j < e && (b[j] == ' ' || b[j] == '\t')) j++;
+                if (e - j >= 6 && !memcmp(b + j, "module", 6)) return 1;
+            }
+        }
+        i = e + 1;
+    }
+    (void)path;
+    return 0;
+}
+
+/* docking units by path prefix or exact path -- and, when the unit is a module, only
+   if it also declares a dock.  A non-module script is not asked (plans/cx-dock-pragma.md). */
+static int is_boundary(const char *path, const char *b, size_t n) {
+    int k; size_t m;
+    for (k = 0; k < npref; k++) {
+        m = strlen(pref[k]);
+        if (!strncmp(path, pref[k], m)) return has_dock(b, n) || !is_module(path, b, n);
+    }
+    for (k = 0; k < nexact; k++) {   /* exact entries: whole-path equality, no prefix reach.
+                                        An exact entry names one unit the boundary file itself
+                                        licenses (a header-surface probe), so it stands in for a
+                                        dock until that lane adds one (omp-cc 2026-11-04). */
         const char *a = path, *x = exact[k];
         while (*a && *a == *x) { a++; x++; }
         if (!*a && !*x) return 1;
@@ -138,11 +197,12 @@ static int boundary_headers(int *files, int *incs) {
     *files = 0; *incs = 0;
     for (p = list, end = list + ln; p < end; p += strlen(p) + 1) {
         size_t n, L; char *src; int c;
-        if (!*p || !is_boundary(p)) continue;
+        if (!*p) continue;
         L = strlen(p);
         if (L < 3 || p[L - 2] != '.' || p[L - 1] != 'h') continue;
         src = cx_read(p, &n);
-        c = src ? count_includes(src, n) : 0;
+        if (!src || !is_boundary(p, src, n)) { free(src); continue; }
+        c = count_includes(src, n);
         free(src);
         (*files)++; (*incs) += c;
     }
@@ -193,12 +253,13 @@ int main(int argc, char **argv) {
         append(&out, &olen, &ocap, "# path\tincludes\n");
     }
     for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
-        size_t n; char *src; int c; Row *r;
+        size_t n; char *src; int c; Row *r; int docked;
         if (!(p = ls_path(rec)) || !*p) continue;
         src = cx_read(p, &n);
         c = src ? count_includes(src, n) : 0;
+        docked = src && is_boundary(p, src, n);
         free(src);
-        if (is_boundary(p)) {
+        if (docked) {
             bfiles++; binc += c;
             if ((r = find_row(p))) r->used = 1;
             continue;
