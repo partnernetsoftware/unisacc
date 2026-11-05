@@ -45,6 +45,7 @@
  * No spec clause is added and no AMB layer number is assigned.
  * Host parsing: sy_* and cx_* only, no libc names. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
@@ -489,7 +490,7 @@ static void cl_shard_file(const char *srcpath, const char *sha) {
     i = tx_rchr(dir, tx_len(dir, CL_PATH), '/');
     if (i > 0) dir[i] = 0; else cx_fmt(dir, sizeof dir, "%s", cl_root);
     if (sy_realpath(dir, cand, sizeof cand) < 0) { cl_failf("DIR-IO", srcpath, 0, "-", "", ""); return; }
-    cl_join(dir, sizeof dir, cl_root, cl_idx);
+    if (cx_fmt(dir, sizeof dir, "%s", cl_idx)) { cl_failf("SHARD", srcpath, 0, "-", "", ""); return; }
     if (cx_fmt(cand, sizeof cand, "%s/%s.tsv", dir, sha)) { cl_failf("SHARD", srcpath, 0, "-", "", ""); return; }
     n = cl_read(cand, cl_shard, CL_CAP);
     if (n <= 0) { cl_failf("SHARD", srcpath, 0, "-", "", ""); return; }
@@ -566,7 +567,7 @@ static int cl_audit(void) {
     cl_und_lex = cl_und_recon = cl_und_meta = cl_und_io = cl_und_total = 0;
     cl_domain = 0; cl_bytes = 0; cl_dig = 0; cl_man_dig = 0; cl_window_moved = 0;
     for (w = 0; w < cl_nwl; w++) cl_wl[w].used = 0;
-    cl_join(idx, sizeof idx, cl_root, cl_idx);
+    if (cx_fmt(idx, sizeof idx, "%s", cl_idx)) { cl_fail++; return 1; }
     cl_join(mp, sizeof mp, idx, "manifest.tsv");
     n = cl_read(mp, cl_man, CL_CAP);
     if (n <= 0) { sy_eprintf("FAIL\tMANIFEST\t%s\n", mp); cl_fail++; return 1; }
@@ -789,7 +790,7 @@ static int fx_dump(const char *rel) {
         cx_fmt(dd, sizeof dd, "%s/%s", cl_root, dir);
         cx_fmt(dir, sizeof dir, "%s", dd);
     }
-    cx_fmt(idx, sizeof idx, "%s/out/cx-layers-index", cl_reporoot);
+    if (cx_fmt(idx, sizeof idx, "%s", cl_idx)) return 1;
     v[n++] = "sh"; v[n++] = cl_prod; v[n++] = "tools/symindex.cx"; v[n++] = "--";
     v[n++] = "--index"; v[n++] = idx; v[n++] = "dump"; v[n++] = abs; v[n] = 0;
     tr = np_run(v, cl_reporoot, 0, 50, &r, why, sizeof why);
@@ -844,7 +845,7 @@ static int fx_load_wl(void) {
 static void cl_fixtures(void) {
     char base0[CL_PATH];
     int i, c, rc;
-    cx_fmt(base0, sizeof base0, "%s/out/cx-layers-fixtures-%ld", cl_reporoot, (long)sy_pid());
+    if (cx_fmt(base0, sizeof base0, "%s/fixtures-%ld", cl_reporoot, (long)sy_pid())) { sy_eprintf("fx base\n"); sy_exit(2); }
     if (sy_mkdir(base0, 0755) && !sy_exists(base0)) { sy_eprintf("fx base\n"); sy_exit(2); }
     cx_fmt(fx_base0, sizeof fx_base0, "%s", base0);
     cx_fmt(fx_base, sizeof fx_base, "%s", base0);
@@ -1017,7 +1018,6 @@ static void cl_fixtures(void) {
       rc2 = cl_unesc("", 0, out, sizeof out); fx_note(rc2 == 0 && out[0] == 0, "manifest-unescape-empty");
     }
     sy_printf("CX_LAYERS_FIXTURES\tchecks=%d\tfailed=%d\n", fx_checks, fx_fail);
-    cx_fmt(cl_root, sizeof cl_root, "%s", cl_reporoot);
 }
 
 int main(int argc, char **argv) {
@@ -1027,7 +1027,14 @@ int main(int argc, char **argv) {
     char real[CL_PATH];
     if (argc > 2) { sy_eprintf("usage: tools/check-cx-layers.cx [PRODUCT|--fixtures]\n"); return 2; }
     if (sy_realpath(".", cl_root, sizeof cl_root) < 0) return 2;
-    cx_fmt(cl_reporoot, sizeof cl_reporoot, "%s", cl_root);
+    /* 报告/索引/夹具三样 scratch 都放进一次运行的独占目录（$TMPDIR 下 mkdtemp），
+       不再写仓内 out/：全新克隆没有 out/ 也能跑。 */
+    {
+        const char *td = sy_env("TMPDIR");
+        if (!td || !td[0]) td = "/tmp";
+        if (cx_fmt(cl_reporoot, sizeof cl_reporoot, "%s/cx-layers-XXXXXX", td)) return 2;
+        if (!mkdtemp(cl_reporoot)) { sy_eprintf("scratch\n"); return 2; }
+    }
     if (argc == 2 && cl_eq(argv[1], "--fixtures")) {
         cl_join(cl_prod, sizeof cl_prod, cl_root, "unisacc.com");
         cl_fixtures();
@@ -1035,8 +1042,7 @@ int main(int argc, char **argv) {
     }
     if (argc == 2) { if (sy_realpath(argv[1], cl_prod, sizeof cl_prod) < 0) return 2; }
     else cl_join(cl_prod, sizeof cl_prod, cl_root, "unisacc.com");
-    cx_fmt(cl_idx, sizeof cl_idx, "out/cx-layers-index");
-    if (sy_mkdir("out", 0755) && !sy_exists("out")) return 2;
+    if (cx_fmt(cl_idx, sizeof cl_idx, "%s/symindex", cl_reporoot)) return 2;
     if (sy_mkdir(cl_idx, 0755) && !sy_exists(cl_idx)) return 2;
     n = 0;
     upd[n++] = "sh"; upd[n++] = cl_prod; upd[n++] = "tools/symindex.cx"; upd[n++] = "--";
