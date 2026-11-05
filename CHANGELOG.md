@@ -14,6 +14,7 @@
 - 单元上限事实表 exec/facts/limits.tsv + check-limits：6 处上限与两份对象表跨表一致校验。
 - APE 只带尾部一份模型包:ape-pack 拒绝片尾带 UNIPKG1 的片(`slice carries a package; pass <slice>/entry.elf`),lnx 片传 entry.elf;实测 APE 8,512,083→5,477,539B(APE-ONEPKG,2f5512d04b)。
 - 产品子命令 `unisacc stream STAGE`:单阶段过滤器,e2|e1|e3|sidecar|prune|lower|elf 与 `-o` 逐字节相同;改一行表到 e3 结论双向实测 21.9 s/21.8 s。
+- rc1 候选:rev `7266862b08`,APE `a76e5fc1`(5,494,758B,lnx/x86_64 冒烟通过);lnx/x86_64 候选 `c3996bd4` 在一、二、三代逐字节相同。已装:entry `0a82f989`(1,789,094B)、包 `7080b53a`(1,659,574B)。
 
 ## 提速（SPEED-02）
 - 作业身份 = 声明输入闭包（ptrace 观测读取 `read<TAB>sha<TAB>path`，含 ENOENT 探测），四类变异各自 MISS。
