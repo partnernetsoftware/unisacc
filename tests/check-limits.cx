@@ -62,14 +62,19 @@ static int ops_load(void) {
 static void ops_arity_list(char *out, size_t cap) {
     size_t at = 0;
     out[0] = 0;
-    for (int i = 0; i < op_rows && at + 4 < cap; i++) {
-        int z = cx_fmt(out + at, cap - at, "%s%s", i ? "," : "", op_arity[i]);
-        if (z <= 0) break;
-        at += (size_t)z;
+    for (int i = 0; i < op_rows; i++) {
+        size_t len = strlen(op_arity[i]);
+        if (at + len + (i ? 1 : 0) + 1 > cap) break;
+        if (i) out[at++] = ',';
+        for (size_t j = 0; j < len; j++) out[at++] = op_arity[i][j];
+        out[at] = 0;
     }
 }
 
-/* every listed file must contain the table's comma-joined arity list */
+/* Every listed file must carry the table's arity list.  The copies differ in
+ * layout only -- one line, wrapped over two lines, or with spaces after the
+ * commas -- so the comparison runs on a whitespace-stripped copy; a raw
+ * substring test would pass on some copies and fail on others for no reason. */
 static void ops_check_arities(char *list) {
     static const char *sites[] = {
         "cx/core/execute.cx", "exec/c/core.h", "cx/runtime/model_decode.cx",
@@ -77,26 +82,54 @@ static void ops_check_arities(char *list) {
         "tools/cxlib/e2stream.cx", "tests/stream-e1-lex144.cx"
     };
     for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
-        char *b = slurp(sites[i], 0);
+        size_t n = 0, at = 0;
+        char *b = slurp(sites[i], &n), *flat;
         if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
-        if (!strstr(b, list)) bad("ops-arity-disagrees", sites[i], list);
+        flat = malloc(n + 1);
+        if (!flat) { bad("ops-cannot-read", sites[i], "-"); free(b); continue; }
+        for (size_t j = 0; j < n; j++) {
+            unsigned char c = (unsigned char)b[j];
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') flat[at++] = (char)c;
+        }
+        flat[at] = 0;
+        if (!strstr(flat, list)) bad("ops-arity-disagrees", sites[i], list);
+        free(flat);
         free(b);
     }
 }
 
-/* the three places that write the op count literally must equal the table's row count */
+/* the places that write the op count literally must equal the table's row count */
 static void ops_check_counts(void) {
-    static const char *sites[][2] = {
-        {"cx/runtime/model_decode.cx", "op >= 56"},
-        {"cx/runtime/network_structure.cx", "op >= 56"},
-        {"cx/core/coregate.cx", "op >= 56"},
-        {"exec/c/asm/actions.h", "#define OP_COUNT 56"},
-        {"cx/core/execute.cx", "int ARITY[NOP_]"}
+    static const char *sites[] = {
+        "cx/runtime/model_decode.cx", "cx/runtime/network_structure.cx", "cx/core/coregate.cx"
     };
+    static const char *defs[] = {"exec/c/asm/actions.h", "cx/core/execute.cx"};
+    char want[64];
     for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
-        char *b = slurp(sites[i][0], 0);
-        if (!b) { bad("ops-cannot-read", sites[i][0], "-"); continue; }
-        if (!strstr(b, sites[i][1])) bad("ops-count-disagrees", sites[i][0], sites[i][1]);
+        char *b = slurp(sites[i], 0);
+        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
+        cx_fmt(want, sizeof want, "op >= %d", op_rows);
+        if (!strstr(b, want)) bad("ops-count-disagrees", sites[i], want);
+        free(b);
+    }
+    cx_fmt(want, sizeof want, "#define OP_COUNT %d", op_rows);
+    char *b = slurp(defs[0], 0);
+    if (!b) bad("ops-cannot-read", defs[0], "-");
+    else { if (!strstr(b, want)) bad("ops-count-disagrees", defs[0], want); free(b); }
+    b = slurp(defs[1], 0);
+    if (!b) bad("ops-cannot-read", defs[1], "-");
+    else { if (!strstr(b, "int ARITY[NOP_]")) bad("ops-count-disagrees", defs[1], "int ARITY[NOP_]"); free(b); }
+    /* the two assembly dispatch tables are one entry per opcode; a short table reads past its end */
+    static const char *tabs[][2] = {
+        {"exec/c/asm/action_x86_64.S", "-Lxatable"},
+        {"exec/c/asm/action_arm64.S", "-Latable"}
+    };
+    for (unsigned i = 0; i < sizeof tabs / sizeof *tabs; i++) {
+        b = slurp(tabs[i][0], 0);
+        if (!b) { bad("ops-cannot-read", tabs[i][0], "-"); continue; }
+        int n = 0;
+        for (char *p = b; (p = strstr(p, tabs[i][1])) != 0; p += strlen(tabs[i][1])) n++;
+        if (n != op_rows) { cx_fmt(want, sizeof want, "%d", n); bad("ops-dispatch-count", tabs[i][0], want); }
         free(b);
     }
 }

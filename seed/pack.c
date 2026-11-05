@@ -18,7 +18,7 @@
 #include <sys/stat.h>
 #include <zlib.h>
 
-static const int ARITY[] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+static const int ARITY[] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1,2};
 #define NOPS ((int)(sizeof ARITY / sizeof ARITY[0]))
 
 static void die(const char *m, const char *a) { fprintf(stderr, "pack: %s%s%s\n", m, a ? " " : "", a ? a : ""); exit(1); }

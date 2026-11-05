@@ -3,7 +3,7 @@
    may be active at a time; all working state is discarded on return. */
 #ifndef UNISA_EXEC_CORE_H
 #define UNISA_EXEC_CORE_H
-#define CORE_ACTION_ARITIES 0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1
+#define CORE_ACTION_ARITIES 0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1,2
 #ifndef __ASSEMBLER__
 #include <stdint.h>
 #include <stddef.h>
@@ -11,7 +11,8 @@ typedef int64_t I;
 enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, CORE_OUT, OUTW, COPY, COPYT,
        SPAN, SPANT, SPAN2, OLAST, ODROP, OLEN, OCUT, ORES, OFILL, OCLR, OSEL, SETOT, XATTR, PUSH, POP,
        INTERN, BLOBSAVE, INPUSH, INPUSHX, INPUSHXE, INPOP, SBCLR, SBOUT, SBSPAN, SBBLOB, SBINTERN,
-       SBSAVE, SBFIND, BLEN, CORE_BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, INC, NOP_ };
+       SBSAVE, SBFIND, BLEN, CORE_BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, INC,
+       SBLOAD, NOP_ };
 static const int ARITY[NOP_] = {CORE_ACTION_ARITIES};
 
 typedef struct { unsigned char *b; I *at; int n, cap; } Buf;

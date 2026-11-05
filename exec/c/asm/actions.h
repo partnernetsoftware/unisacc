@@ -55,4 +55,5 @@
 #define OP_C64 53
 #define OP_C64U 54
 #define OP_INC 55
-#define OP_COUNT 56
+#define OP_SBLOAD 56
+#define OP_COUNT 57

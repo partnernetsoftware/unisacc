@@ -110,6 +110,27 @@ LaINC:
     ldr x0,[x21,x8,lsl #3]
     add w0,w0,#1
     b Lawrite
+LaSBLOAD:
+/* R[a1] = blob(strings[a2]); the string bytes are borrowed from the model. */
+    ldr x8,[x20,#16]
+    ldr x9,[x19,#M_MODEL]
+    ldr x10,[x9,#CM_STR]
+    ldr x1,[x10,x8,lsl #3]
+#ifdef __APPLE__
+    adrp x9,Laempty@PAGE
+    add x9,x9,Laempty@PAGEOFF
+#else
+    adrp x9,Laempty
+    add x9,x9,:lo12:Laempty
+#endif
+    cmp x1,#0
+    csel x1,x1,x9,ne
+    ldr x9,[x19,#M_MODEL]
+    ldr x11,[x9,#CM_STRL]
+    ldr w2,[x11,x8,lsl #2]
+    add x0,x19,#M_BLOBS
+    bl CSYM(core_blob_add)
+    b Lawrite
 LaLDX:
     ldr x8,[x20,#16]
     ldr x1,[x21,x8,lsl #3]
@@ -608,6 +629,7 @@ Latable:
     .long LaCMP-Latable
     .long LaCMP-Latable
     .long LaINC-Latable
+    .long LaSBLOAD-Latable
 #ifdef __APPLE__
 .section __TEXT,__cstring,cstring_literals
 #else

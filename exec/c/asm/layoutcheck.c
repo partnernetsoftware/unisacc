@@ -95,6 +95,7 @@ typedef char action_A64I[(A64I==OP_A64I)?1:-1];
 typedef char action_C64[(C64==OP_C64)?1:-1];
 typedef char action_C64U[(C64U==OP_C64U)?1:-1];
 typedef char action_INC[(INC==OP_INC)?1:-1];
+typedef char action_SBLOAD[(SBLOAD==OP_SBLOAD)?1:-1];
 typedef char action_count[(NOP_==OP_COUNT)?1:-1];
 SCHECK(CoreMachine,model,M_MODEL);
 SCHECK(CoreMachine,result,M_RESULT);

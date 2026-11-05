@@ -113,6 +113,21 @@ LxaINC:
     movl (%r14,%rax,8),%eax
     incl %eax
     jmp Lxawrite
+LxaSBLOAD:
+    /* R[a1] = blob(strings[a2]); the string bytes are borrowed from the model. */
+    movq 16(%r13),%rcx
+    movq M_MODEL(%r12),%rax
+    movq CM_STR(%rax),%rdx
+    movq (%rdx,%rcx,8),%rsi
+    leaq Lxaempty(%rip),%rax
+    testq %rsi,%rsi
+    cmove %rax,%rsi
+    movq M_MODEL(%r12),%rax
+    movq CM_STRL(%rax),%rax
+    movl (%rax,%rcx,4),%edx
+    leaq M_BLOBS(%r12),%rdi
+    call CSYM(core_blob_add)
+    jmp Lxawrite
 LxaLDX:
     movq 16(%r13),%rax
     movq (%r14,%rax,8),%rsi
@@ -587,6 +602,7 @@ Lxatable:
     .long LxaCMP-Lxatable
     .long LxaCMP-Lxatable
     .long LxaINC-Lxatable
+    .long LxaSBLOAD-Lxatable
 #ifdef __APPLE__
 .section __TEXT,__cstring,cstring_literals
 #else

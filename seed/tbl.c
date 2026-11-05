@@ -18,10 +18,10 @@ static const char *OPN[] = {"ADV","MARK","JUMP","LDI","COPYW","ALU","ALUI","CMP"
     "OUT","OUTW","COPY","COPYT","SPAN","SPANT","SPAN2","OLAST","ODROP","OLEN","OCUT","ORES","OFILL","OCLR",
     "OSEL","SETOT","XATTR","PUSH","POP","INTERN","BLOBSAVE","INPUSH","INPUSHX","INPUSHXE","INPOP","SBCLR",
     "SBOUT","SBSPAN","SBBLOB","SBINTERN","SBSAVE","SBFIND","BLEN","BYTE","XLEN","DIVMOD10","SWAP","ACCEPT",
-    "REJECT","A64","A64I","C64","C64U","INC"};
+    "REJECT","A64","A64I","C64","C64U","INC","SBLOAD"};
 static const char *OPK[] = {"","r","r","ri","rr","arrr","arri","rr","ri","r","rri","rir","i","r","","","r","r",
     "rr","","","r","rr","ri","rri","","i","r","r","g","","rrr","rrr","r","r","rr","","","i","rr","r","r","r","r",
-    "rr","r","r","r","","","s","arrr","arri","rr","rr","r"};
+    "rr","r","r","r","","","s","arrr","arri","rr","rr","r","rr"};
 #define NOPS ((int)(sizeof(OPN) / sizeof(OPN[0])))
 static const char *ALUOPS[] = {"add","sub","mul","div","rem","and","or","xor","shl","sar","sdiv","srem","udiv","urem","not","shr"};
 
