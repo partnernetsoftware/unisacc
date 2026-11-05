@@ -1,0 +1,120 @@
+/* chain-fixed-point.cx -- the two-generation fixed point of one chain run, judged from its products.
+ *
+ *   sh ./unisacc.com tests/chain-fixed-point.cx -- GEN1 FPDIR      judge a real run
+ *   sh ./unisacc.com tests/chain-fixed-point.cx -- --self-test     the negative controls
+ *
+ * GEN1 is the first-generation candidate (the lnx/x86_64 slice candidate of the chain), FPDIR the OUT of
+ * `tools/chain-step.cx fixedpoint`: FPDIR/g2 and FPDIR/g3, each with candidate and receipt.txt.
+ * Passes only when all of these hold:
+ *   F1  g2/candidate and g3/candidate exist and have the same sha256 (the fixed point)
+ *   F2  g2/receipt.txt constructor_sha == sha256(GEN1): g2 was built by generation 1
+ *   F3  g3/receipt.txt constructor_sha == sha256(g2/candidate): g3 was built by generation 2
+ *   F4  both receipts name the same p3_sha and root (one package, one snapshot)
+ * F2 and F3 make a copied file fail: equal bytes alone do not show that each generation built the next.
+ * What it does not show: two independent constructions. Both generations come from one chain run on one
+ * host with one snapshot; an independent second construction (another host, another checkout) is not
+ * covered here, and the candidate matrix cell id.reproducible-construction says so in its note.
+ * Last line: CHAIN_FIXED_POINT<TAB>failed=N.  rc 1 on any FAIL, 2 on unusable arguments. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static int fp_failed;
+static void fp_ck(int ok, const char *label, const char *detail) {
+    sy_printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", label, detail);
+    if (!ok) fp_failed++;
+}
+static int fp_sha(const char *path, char out[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) { out[0] = 0; return -1; }
+    cx_sha256_hex(b, n, out);
+    mm_free(b);
+    return 0;
+}
+/* receipt rows are KEY<TAB>VALUE */
+static int fp_row(const char *path, const char *key, char *o, int cap) {
+    size_t n = 0; long at = 0, kl = tx_len(key, 64);
+    char *b = cx_read(path, &n);
+    o[0] = 0;
+    if (!b) return -1;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        if (e - at > kl && !mm_cmp(b + at, key, kl) && b[at + kl] == '\t') {
+            long vl = e - at - kl - 1;
+            if (vl >= cap) vl = cap - 1;
+            mm_copy(o, cap, b + at + kl + 1, vl); o[vl] = 0;
+            mm_free(b); return 0;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return -1;
+}
+static int fp_judge(const char *gen1, const char *fp) {
+    char p2[4400], p3[4400], r2[4400], r3[4400], h1[65], h2[65], h3[65], c2[128], c3[128], k2[128], k3[128], o2[4400], o3[4400];
+    int before = fp_failed;
+    if (cx_fmt(p2, sizeof p2, "%s/g2/candidate", fp) || cx_fmt(p3, sizeof p3, "%s/g3/candidate", fp) ||
+        cx_fmt(r2, sizeof r2, "%s/g2/receipt.txt", fp) || cx_fmt(r3, sizeof r3, "%s/g3/receipt.txt", fp)) return 2;
+    fp_sha(gen1, h1); fp_sha(p2, h2); fp_sha(p3, h3);
+    fp_ck(h2[0] && h3[0] && tx_eqz(h2, h3), "F1.gen2-equals-gen3", h2[0] ? h2 : "gen2 missing");
+    fp_row(r2, "constructor_sha", c2, sizeof c2);
+    fp_row(r3, "constructor_sha", c3, sizeof c3);
+    fp_ck(h1[0] && c2[0] && tx_eqz(c2, h1), "F2.gen2-built-by-gen1", c2[0] ? c2 : "no constructor_sha");
+    fp_ck(h2[0] && c3[0] && tx_eqz(c3, h2), "F3.gen3-built-by-gen2", c3[0] ? c3 : "no constructor_sha");
+    fp_row(r2, "p3_sha", k2, sizeof k2); fp_row(r3, "p3_sha", k3, sizeof k3);
+    fp_row(r2, "root", o2, sizeof o2); fp_row(r3, "root", o3, sizeof o3);
+    fp_ck(k2[0] && tx_eqz(k2, k3) && o2[0] && tx_eqz(o2, o3), "F4.same-package-and-snapshot", k2[0] ? k2 : "no p3_sha");
+    return fp_failed > before ? 1 : 0;
+}
+/* Negative controls: a scratch fixed point built from a real small file, then broken three ways. */
+static char fp_dir[4400];
+static void fp_put(const char *rel, const char *b, size_t n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fp_dir, rel) || cx_write(p, b, n)) { sy_eprintf("chain-fixed-point: cannot write %s\n", rel); exit(2); }
+}
+static void fp_mk(const char *g1, const char *g2, const char *g3, const char *c2, const char *c3, const char *pkg3) {
+    char r[1024];
+    char p[4400];
+    cx_fmt(p, sizeof p, "%s/g2", fp_dir); sy_mkdir(p, 0755);
+    cx_fmt(p, sizeof p, "%s/g3", fp_dir); sy_mkdir(p, 0755);
+    fp_put("g1", g1, tx_len(g1, 4096));
+    fp_put("g2/candidate", g2, tx_len(g2, 4096));
+    fp_put("g3/candidate", g3, tx_len(g3, 4096));
+    cx_fmt(r, sizeof r, "root\t/snap\np3_sha\taaaa\nconstructor_sha\t%s\n", c2); fp_put("g2/receipt.txt", r, tx_len(r, sizeof r));
+    cx_fmt(r, sizeof r, "root\t/snap\np3_sha\t%s\nconstructor_sha\t%s\n", pkg3, c3); fp_put("g3/receipt.txt", r, tx_len(r, sizeof r));
+}
+static int fp_self(void) {
+    const char *tmp = getenv("TMPDIR");
+    char g1[4400], h1[65], h2[65];
+    int bad = 0, saved;
+    if (cx_fmt(fp_dir, sizeof fp_dir, "%s/chain-fixed-point-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(fp_dir)) return 2;
+    if (cx_fmt(g1, sizeof g1, "%s/g1", fp_dir)) return 2;
+    cx_sha256_hex("generation-one", 14, h1);
+    cx_sha256_hex("fixed", 5, h2);
+    saved = fp_failed;
+    fp_mk("generation-one", "fixed", "fixed", h1, h2, "aaaa");
+    if (fp_judge(g1, fp_dir) != 0) { sy_printf("FAIL\tself.good-run-passes\n"); bad++; } else sy_printf("PASS\tself.good-run-passes\n");
+    fp_mk("generation-one", "fixed", "fixeD", h1, h2, "aaaa");
+    if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.gen3-differs-refused\n"); bad++; } else sy_printf("PASS\tself.gen3-differs-refused\n");
+    fp_mk("generation-one", "fixed", "fixed", h1, h1, "aaaa");
+    if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.chain-broken-refused\n"); bad++; } else sy_printf("PASS\tself.chain-broken-refused\n");
+    fp_mk("generation-one", "fixed", "fixed", h1, h2, "bbbb");
+    if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.package-differs-refused\n"); bad++; } else sy_printf("PASS\tself.package-differs-refused\n");
+    fp_failed = saved;
+    {   char cmd[4600]; cx_fmt(cmd, sizeof cmd, "rm -rf %s", fp_dir); if (system(cmd) != 0) bad++; }
+    sy_printf("CHAIN_FIXED_POINT\tfailed=%d\n", bad);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (argc - a == 1 && tx_eqz(argv[a], "--self-test")) return fp_self();
+    if (argc - a != 2) { sy_eprintf("usage: chain-fixed-point.cx GEN1 FPDIR | --self-test\n"); return 2; }
+    fp_judge(argv[a], argv[a + 1]);
+    sy_printf("CHAIN_FIXED_POINT\tfailed=%d\n", fp_failed);
+    return fp_failed ? 1 : 0;
+}
