@@ -1,0 +1,408 @@
+/* check-stream-cells.cx -- the interfaces domain-matrix cells that the
+ * `unisacc stream STAGE` pipeline can settle on this host, one labelled
+ * group per matrix cell.  Nothing is read from or written to out/: every
+ * fixture lives in one mkdtemp scratch under $TMPDIR and is removed at the
+ * end.  Every assertion is a byte compare, an exact rc or an exact byte
+ * string; there is no tolerance and no cached result.
+ *
+ *   sh ./unisacc.com tests/check-stream-cells.cx             # product ./unisacc.com
+ *   sh ./unisacc.com tests/check-stream-cells.cx -- PRODUCT  # another candidate
+ *
+ * Cells:
+ *   if.attr.sidecar-ownership    only E1 writes the USLATTRT carrier and only E3
+ *                                reads it; E2/E4/prune/lower create none, and E3
+ *                                refuses a bare tape that carries no carrier.
+ *   if.edge.consumer-frames      every stage output satisfies its consumer's frame:
+ *                                UNIPP1 for E1, USLATTRT+UNITOK1 for E3, text tape
+ *                                for E4/prune, @target text for elf, ELF64 for the
+ *                                image, UNITOK2 for units.
+ *   if.edge.corpus               eight language shapes beyond the two fixtures:
+ *                                the whole pipe equals the product image at O0 and
+ *                                O1 and the native exit code agrees.
+ *   if.route.units               per-unit E2/E1 frames, order recorded by frame,
+ *                                UNITOK2, and the E3 payload equals product -S.
+ *   if.route.optimization-levels O0 omits E4, O1 uses the O1 net, and all three
+ *                                levels equal the product image at that level while
+ *                                the three products differ from one another.
+ *   if.target.foreign-chains     the chain for each of the five foreign targets
+ *                                equals the product -b TARGET image, and the image
+ *                                carries that target's container magic.
+ * if.route.memory is not claimed here: it stays BLOCKED on the R7 waiver.
+ *
+ * Prints PASS/FAIL per assertion and a last line CHECK_STREAM_CELLS failed=N;
+ * rc 1 on any FAIL.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+
+static char sc_prod[4400], sc_dir[4400];
+static int sc_failed, sc_asserts;
+
+static void sc_ck(int ok, const char *cell, const char *label) {
+    sc_asserts++;
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", cell, label);
+    if (!ok) sc_failed++;
+}
+static void sc_die(const char *s) { fprintf(stderr, "check-stream-cells: %s errno=%d\n", s, errno); exit(2); }
+static void sc_path(char *o, size_t cap, const char *rel) {
+    if (cx_fmt(o, cap, "%s/%s", sc_dir, rel)) sc_die("path");
+}
+static void sc_put(const char *rel, const char *s) {
+    char p[4400];
+    sc_path(p, sizeof p, rel);
+    if (cx_write(p, s, strlen(s))) sc_die(rel);
+}
+/* One shell line in the scratch, 30 s bound; returns the rc (-1 on transport). */
+static int sc_sh(const char *cmd) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t, rc;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    t = np_run(av, sc_dir, 0, 30, &r, why, sizeof why);
+    if (t) { fprintf(stderr, "check-stream-cells: transport %s: %s\n", why, cmd); np_free(&r); return -1; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+static int sc_same(const char *a, const char *b) {
+    char pa[4400], pb[4400];
+    size_t na = 0, nb = 0;
+    char *ba, *bb;
+    int same;
+    sc_path(pa, sizeof pa, a);
+    sc_path(pb, sizeof pb, b);
+    ba = cx_read(pa, &na);
+    bb = cx_read(pb, &nb);
+    same = ba && bb && na > 0 && na == nb && !memcmp(ba, bb, na);
+    free(ba); free(bb);
+    return same;
+}
+static long sc_size(const char *rel) {
+    char p[4400];
+    size_t n = 0;
+    char *b;
+    sc_path(p, sizeof p, rel);
+    b = cx_read(p, &n);
+    free(b);
+    return (long)n;
+}
+/* The first 16 bytes of a file as the exact byte string the carrier must be:
+   "USLATTRT" then a little-endian record count of 4 (one carrier record). */
+static int sc_carrier(const char *rel) {
+    static const unsigned char want[16] = {85,83,76,65,84,84,82,84,4,0,0,0,0,0,0,0};
+    char p[4400];
+    size_t n = 0;
+    char *b;
+    int ok;
+    sc_path(p, sizeof p, rel);
+    b = cx_read(p, &n);
+    ok = b && n >= 16 && !memcmp(b, want, 16);
+    free(b);
+    return ok;
+}
+static int sc_prefix(const char *rel, const char *want) {
+    char p[4400];
+    size_t n = 0, wl = strlen(want);
+    char *b;
+    int ok;
+    sc_path(p, sizeof p, rel);
+    b = cx_read(p, &n);
+    ok = b && n >= wl && !memcmp(b, want, wl);
+    free(b);
+    return ok;
+}
+static int sc_has(const char *rel, const char *want) {
+    char p[4400];
+    size_t n = 0, wl = strlen(want), i;
+    char *b;
+    int ok = 0;
+    sc_path(p, sizeof p, rel);
+    b = cx_read(p, &n);
+    if (b && wl && n >= wl) for (i = 0; i + wl <= n; i++) if (!memcmp(b + i, want, wl)) { ok = 1; break; }
+    free(b);
+    return ok;
+}
+static int sc_absent(const char *rel) {
+    char p[4400];
+    sc_path(p, sizeof p, rel);
+    return sy_exists(p) == 0;
+}
+/* Run one stage as a filter: PROD stream STAGE ARGS < IN > OUT. */
+static int sc_stage(const char *stage, const char *args, const char *in, const char *out) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "exec %s stream %s %s < %s > %s", sc_prod, stage, args, in, out)) sc_die("cmd");
+    return sc_sh(cmd);
+}
+static int sc_ref(const char *flags, const char *out, const char *srcs) {
+    char cmd[12000];
+    if (cx_fmt(cmd, sizeof cmd, "exec %s %s %s %s", sc_prod, flags, out, srcs)) sc_die("cmd");
+    return sc_sh(cmd);
+}
+/* The image pipe for one source at one level into OUT.  The O0 route has no E4
+   stage, so the sidecar output feeds prune directly; O1 and O2 run E4. */
+static int sc_pipe(const char *src, const char *level, const char *out, const char *tag) {
+    char a[900], f[8][900];
+    int k, rc;
+    for (k = 0; k < 8; k++) if (cx_fmt(f[k], sizeof f[k], "%s.%d", tag, k)) sc_die("tag");
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/image/%s --source %s", level, src)) sc_die("args");
+    if ((rc = sc_stage("e2", a, src, f[0])) != 0) return rc;
+    if ((rc = sc_stage("e1", a, f[0], f[1])) != 0) return rc;
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/image/%s --res run-forward --source %s", level, src)) sc_die("args");
+    if ((rc = sc_stage("e3", a, f[1], f[2])) != 0) return rc;
+    if ((rc = sc_stage("sidecar", "", f[2], f[3])) != 0) return rc;
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/image/%s --source %s", level, src)) sc_die("args");
+    if (strcmp(level, "O0") == 0) {
+        /* The O0 image route has no E4 stage. */
+        if ((rc = sc_stage("prune", a, f[3], f[4])) != 0) return rc;
+    } else {
+        if ((rc = sc_stage("e4", a, f[3], f[6])) != 0) return rc;
+        if ((rc = sc_stage("prune", a, f[6], f[4])) != 0) return rc;
+    }
+    if ((rc = sc_stage("lower", a, f[4], f[5])) != 0) return rc;
+    if (cx_fmt(a, sizeof a, "--route lnx/x86_64/image/%s --source %s --raw", level, src)) sc_die("args");
+    return sc_stage("elf", a, f[5], out);
+}
+/* Per-source E2|E1 on the unit route, then frame over every source. */
+static int sc_frame(const char **srcs, int n, const char *frame) {
+    char a[900], in1[900], in2[900];
+    char *cmd;
+    int j, rc;
+    cmd = malloc(400 + (size_t)n * 1400);
+    if (!cmd) sc_die("alloc");
+    if (cx_fmt(cmd, 400 + (size_t)n * 1400, "exec %s stream frame", sc_prod)) sc_die("cmd");
+    for (j = 0; j < n; j++) {
+        if (cx_fmt(a, sizeof a, "--route lnx/x86_64/unit --unit %d --source %s", j, srcs[j]) ||
+            cx_fmt(in1, sizeof in1, "%s.u2", srcs[j]) || cx_fmt(in2, sizeof in2, "%s.u1", srcs[j])) sc_die("args");
+        if ((rc = sc_stage("e2", a, srcs[j], in1)) != 0) { free(cmd); return rc; }
+        if ((rc = sc_stage("e1", a, in1, in2)) != 0) { free(cmd); return rc; }
+        {
+            char *p = cmd + strlen(cmd);
+            const char *w1 = " --in ", *w2 = srcs[j], *w3 = "=", *w4 = in2;
+            while (*w1) *p++ = *w1++;
+            while (*w2) *p++ = *w2++;
+            while (*w3) *p++ = *w3++;
+            while (*w4) *p++ = *w4++;
+            *p = 0;
+        }
+    }
+    {
+        char *p = cmd + strlen(cmd);
+        const char *w = " > ";
+        while (*w) *p++ = *w++;
+        while (*frame) *p++ = *frame++;
+        *p = 0;
+    }
+    rc = sc_sh(cmd);
+    free(cmd);
+    return rc;
+}
+/* Static data: the eight corpus shapes, the five foreign targets. */
+static const char *SC_CORPUS[8] = {
+    "int main(void){return 0;}\n",
+    "int main(void){return 42;}\n",
+    "int main(void){int i,s=0;for(i=0;i<10;i++)s+=i;return s;}\n",
+    "int f(int x){return x>3?x*2:0;}\nint main(void){return f(5);}\n",
+    "int main(void){int a=7;while(a>0)a--;return a+3;}\n",
+    "int g(int x){return x+1;}\nint h(int x){return g(x)*2;}\nint main(void){return h(4);}\n",
+    "int main(void){char s[]=\"abc\";int n=0;while(s[n])n++;return n;}\n",
+    "int main(void){int x=1;switch(x){case 1:return 11;default:return 0;}}\n"
+};
+static const char *SC_FOREIGN[5] = {"lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+
+int main(int argc, char **argv) {
+    const char *tmp = getenv("TMPDIR");
+    char names[8][16], list[8 * 16];
+    const char *srcs[8];
+    const char *two[2] = {"a.c", "b.c"};
+    const char *levels[3] = {"O0", "O1", "O2"};
+    char a[900], b[900], c[900], d[900];
+    int i, j, rc, rc2, shift;
+
+    shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0;
+    if (!realpath(argc > 1 + shift ? argv[1 + shift] : "./unisacc.com", sc_prod)) sc_die("product path");
+    if (cx_fmt(sc_dir, sizeof sc_dir, "%s/stream-cells-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(sc_dir)) sc_die("scratch");
+
+    sc_put("a.c", "int g(int);\nint main(void){return g(2)-4;}\n");
+    sc_put("b.c", "int g(int x){return x+x;}\n");
+    list[0] = 0;
+    for (i = 0; i < 8; i++) {
+        if (cx_fmt(names[i], 16, "c%d.c", i + 1)) sc_die("name");
+        srcs[i] = names[i];
+        sc_put(names[i], SC_CORPUS[i]);
+    }
+
+    /* ---- if.attr.sidecar-ownership ------------------------------------- */
+    {
+        const char *cell = "if.attr.sidecar-ownership";
+        /* A self-contained source: a source with an undefined symbol needs the
+           forwarding-stub pass, which is not a pipe stage, so it cannot settle
+           a carrier-ownership question about the pipe itself. */
+        const char *run = "--route lnx/x86_64/image/O1 --source c1.c";
+        rc = sc_stage("e2", run, "c1.c", "own.e2");
+        sc_ck(rc == 0 && !sc_carrier("own.e2"), cell, "e2-creates-no-carrier");
+        rc = sc_stage("e1", run, "own.e2", "own.e1");
+        sc_ck(rc == 0 && sc_carrier("own.e1"), cell, "e1-writes-carrier");
+        rc = sc_stage("e3", "--route lnx/x86_64/image/O1 --res run-forward --source c1.c", "own.e1", "own.e3");
+        sc_ck(rc == 0 && sc_carrier("own.e3"), cell, "e3-keeps-carrier");
+        rc = sc_stage("sidecar", "", "own.e3", "own.sc");
+        sc_ck(rc == 0 && sc_carrier("own.sc"), cell, "sidecar-keeps-carrier");
+        /* A bare tape (carrier stripped) must be refused by E3: only E3 reads it. */
+        rc = sc_sh("tail -c +17 own.sc > own.bare");
+        rc2 = sc_stage("e3", "--route lnx/x86_64/image/O1 --source c1.c", "own.bare", "own.bad");
+        sc_ck(rc == 0 && rc2 != 0 && sc_size("own.bad") == 0, cell, "e3-refuses-bare-tape");
+        /* E4/prune/lower on the bare tape work and create no carrier. */
+        rc = sc_stage("e4", run, "own.bare", "own.e4b");
+        sc_ck(rc == 0 && !sc_carrier("own.e4b"), cell, "e4-creates-no-carrier");
+        rc = sc_stage("prune", run, "own.e4b", "own.prb");
+        sc_ck(rc == 0 && !sc_carrier("own.prb"), cell, "prune-creates-no-carrier");
+        rc = sc_stage("lower", run, "own.prb", "own.lob");
+        sc_ck(rc == 0 && !sc_carrier("own.lob"), cell, "lower-creates-no-carrier");
+    }
+
+    /* ---- if.edge.consumer-frames --------------------------------------- */
+    {
+        const char *cell = "if.edge.consumer-frames";
+        const char *run = "--route lnx/x86_64/image/O1 --source c1.c";
+        rc = sc_stage("e2", run, "c1.c", "fr.e2");
+        sc_ck(rc == 0 && sc_prefix("fr.e2", "UNIPP1"), cell, "e2-frame-for-e1-is-UNIPP1");
+        rc = sc_stage("e1", run, "fr.e2", "fr.e1");
+        sc_ck(rc == 0 && sc_prefix("fr.e1", "USLATTRT"), cell, "e1-frame-for-e3-is-USLATTRT");
+        sc_ck(sc_has("fr.e1", "UNITOK1"), cell, "e1-frame-carries-UNITOK1");
+        rc = sc_stage("e3", "--route lnx/x86_64/image/O1 --res run-forward --source c1.c", "fr.e1", "fr.e3");
+        sc_ck(rc == 0 && sc_carrier("fr.e3"), cell, "e3-frame-keeps-carrier");
+        rc = sc_stage("sidecar", "", "fr.e3", "fr.sc");
+        sc_ck(rc == 0 && sc_carrier("fr.sc"), cell, "sidecar-frame-keeps-carrier");
+        /* The payload after the 16-byte carrier is the text tape the next consumer reads. */
+        rc = sc_sh("tail -c +17 fr.sc > fr.tape");
+        sc_ck(rc == 0 && sc_prefix("fr.tape", "_start:"), cell, "tape-frame-starts-with-_start");
+        sc_ck(sc_sh("test \"$(tail -c 1 fr.tape | od -An -tu1 | tr -d ' ')\" = 10") == 0, cell, "tape-frame-ends-with-newline");
+        rc = sc_stage("e4", run, "fr.sc", "fr.e4");
+        rc2 = sc_stage("prune", run, "fr.e4", "fr.pr");
+        sc_ck(rc == 0 && rc2 == 0 && sc_carrier("fr.e4") && sc_carrier("fr.pr"), cell, "e4-and-prune-keep-carrier");
+        rc = sc_sh("tail -c +17 fr.e4 > fr.e4t; tail -c +17 fr.pr > fr.prt");
+        sc_ck(rc == 0 && sc_prefix("fr.e4t", "_start:") && sc_prefix("fr.prt", "_start:"), cell, "e4-and-prune-keep-tape-text");
+        rc = sc_stage("lower", run, "fr.pr", "fr.lo");
+        sc_ck(rc == 0 && sc_carrier("fr.lo"), cell, "lower-keeps-carrier");
+        rc = sc_sh("tail -c +17 fr.lo > fr.lot");
+        sc_ck(rc == 0 && sc_prefix("fr.lot", "@target "), cell, "lower-payload-is-target-text");
+        rc = sc_stage("elf", "--route lnx/x86_64/image/O1 --source c1.c --raw", "fr.lo", "fr.elf");
+        sc_ck(rc == 0 && sc_prefix("fr.elf", "\177ELF"), cell, "elf-payload-is-ELF-image");
+        rc = sc_ref("-O1 -o", "fr.prod", "c1.c");
+        sc_ck(rc == 0 && sc_same("fr.elf", "fr.prod"), cell, "image-equals-product-at-O1");
+        rc = sc_frame(two, 2, "fr.frame");
+        sc_ck(rc == 0 && sc_prefix("fr.frame", "USLATTRT"), cell, "frame-frame-is-USLATTRT");
+        rc = sc_stage("units", "--route lnx/x86_64/multi/run/O0 --res run-forward --source a.c", "fr.frame", "fr.un");
+        sc_ck(rc == 0 && sc_has("fr.un", "UNITOK2"), cell, "units-frame-carries-UNITOK2");
+    }
+
+    /* ---- if.edge.corpus ------------------------------------------------ */
+    {
+        const char *cell = "if.edge.corpus";
+        for (j = 0; j < 2; j++) {
+            for (i = 0; i < 8; i++) {
+                char out[64], prod[64], label[128];
+                if (cx_fmt(out, sizeof out, "cp%s%d.elf", levels[j], i + 1) ||
+                    cx_fmt(prod, sizeof prod, "cp%s%d.prod", levels[j], i + 1)) sc_die("name");
+                rc = sc_pipe(srcs[i], levels[j], out, out);
+                if (cx_fmt(a, sizeof a, "-%s -o", levels[j])) sc_die("args");
+                rc2 = sc_ref(a, prod, srcs[i]);
+                if (cx_fmt(label, sizeof label, "%s-shape%d-image-equals-product", levels[j], i + 1)) sc_die("label");
+                sc_ck(rc == 0 && rc2 == 0 && sc_same(out, prod), cell, label);
+                /* Native execution: the pipe image and the product image agree on the exit code. */
+                if (cx_fmt(b, sizeof b, "chmod +x %s %s && ./%s >/dev/null 2>&1; p=$?; ./%s >/dev/null 2>&1; c=$?; test \"$p\" = \"$c\"", out, prod, out, prod)) sc_die("cmd");
+                if (cx_fmt(label, sizeof label, "%s-shape%d-native-exit-equal", levels[j], i + 1)) sc_die("label");
+                sc_ck(rc == 0 && rc2 == 0 && sc_sh(b) == 0, cell, label);
+            }
+        }
+    }
+
+    /* ---- if.route.units ------------------------------------------------ */
+    {
+        const char *cell = "if.route.units";
+        const char *unit = "--route lnx/x86_64/unit";
+        rc = sc_frame(two, 2, "un.frame");
+        sc_ck(rc == 0 && sc_has("un.frame", "UNITOK1"), cell, "per-unit-frames-present");
+        /* Unit order is recorded: swapping the --in order changes the frame. */
+        if (cx_fmt(a, sizeof a, "exec %s stream frame --in b.c=b.c.u1 --in a.c=a.c.u1 > un.rev", sc_prod)) sc_die("cmd");
+        rc = sc_sh(a);
+        sc_ck(rc == 0 && !sc_same("un.frame", "un.rev"), cell, "unit-order-recorded");
+        rc = sc_stage("units", "--route lnx/x86_64/multi/run/O0 --res run-forward --source a.c", "un.frame", "un.out");
+        sc_ck(rc == 0 && sc_has("un.out", "UNITOK2"), cell, "units-emits-UNITOK2");
+        rc = sc_stage("e3", "--route lnx/x86_64/multi/run/O0 --res run-forward --source a.c", "un.out", "un.e3");
+        sc_ck(rc == 0 && sc_size("un.e3") > 0, cell, "units-e3-nonempty");
+        rc = sc_ref("-S -b lnx/x86_64 -o", "un.prod", "a.c b.c");
+        /* The E3 payload after the carrier and the forwarding envelope is the -S tape. */
+        if (cx_fmt(a, sizeof a, "off=$(grep -abo '_start:' un.e3 | head -1 | cut -d: -f1); test -n \"$off\" && tail -c +$((off+1)) un.e3 > un.tape")) sc_die("cmd");
+        rc2 = sc_sh(a);
+        sc_ck(rc == 0 && rc2 == 0 && sc_same("un.tape", "un.prod"), cell, "units-e3-payload-equals-product-S");
+    }
+
+    /* ---- if.route.optimization-levels ---------------------------------- */
+    {
+        const char *cell = "if.route.optimization-levels";
+        for (j = 0; j < 3; j++) {
+            char out[64], prod[64], label[128];
+            if (cx_fmt(out, sizeof out, "lv%s.elf", levels[j]) || cx_fmt(prod, sizeof prod, "lv%s.prod", levels[j])) sc_die("name");
+            rc = sc_pipe("c3.c", levels[j], out, out);
+            if (cx_fmt(a, sizeof a, "-%s -o", levels[j])) sc_die("args");
+            rc2 = sc_ref(a, prod, "c3.c");
+            if (cx_fmt(label, sizeof label, "%s-chain-equals-product", levels[j])) sc_die("label");
+            sc_ck(rc == 0 && rc2 == 0 && sc_same(out, prod), cell, label);
+        }
+        sc_ck(!sc_same("lvO0.prod", "lvO1.prod"), cell, "O0-product-differs-from-O1");
+        sc_ck(!sc_same("lvO1.prod", "lvO2.prod"), cell, "O1-product-differs-from-O2");
+        /* The O0 route has no E4 stage: feeding it there must be refused. */
+        rc = sc_stage("e4", "--route lnx/x86_64/image/O0 --source c3.c", "lvO0.elf.3", "lv.o0e4");
+        sc_ck(rc != 0 && sc_size("lv.o0e4") == 0, cell, "O0-route-omits-E4");
+        /* And the O1 chain really runs E4: its output differs from the input. */
+        rc = sc_stage("e4", "--route lnx/x86_64/image/O1 --source c3.c", "lvO1.elf.3", "lv.o1e4");
+        sc_ck(rc == 0 && !sc_same("lvO1.elf.3", "lv.o1e4"), cell, "O1-route-runs-E4");
+    }
+
+    /* ---- if.target.foreign-chains -------------------------------------- */
+    {
+        const char *cell = "if.target.foreign-chains";
+        for (i = 0; i < 5; i++) {
+            char out[80], prod[80], label[160];
+            if (cx_fmt(out, sizeof out, "fx%d.elf", i) || cx_fmt(prod, sizeof prod, "fx%d.prod", i)) sc_die("name");
+            /* The foreign image route is O0: no E4 on those networks. */
+            if (cx_fmt(a, sizeof a, "--route %s/image/O0 --source c1.c", SC_FOREIGN[i])) sc_die("args");
+            rc = sc_stage("e2", a, "c1.c", "fx.e2");
+            if (rc == 0) rc = sc_stage("e1", a, "fx.e2", "fx.e1");
+            if (rc == 0) {
+                if (cx_fmt(b, sizeof b, "--route %s/image/O0 --res run-forward --source c1.c", SC_FOREIGN[i])) sc_die("args");
+                rc = sc_stage("e3", b, "fx.e1", "fx.e3");
+            }
+            if (rc == 0) rc = sc_stage("sidecar", "", "fx.e3", "fx.sc");
+            if (rc == 0) rc = sc_stage("prune", a, "fx.sc", "fx.pr");
+            if (rc == 0) rc = sc_stage("lower", a, "fx.pr", "fx.lo");
+            if (rc == 0) {
+                if (cx_fmt(c, sizeof c, "--route %s/image/O0 --source c1.c --raw", SC_FOREIGN[i])) sc_die("args");
+                rc = sc_stage("elf", c, "fx.lo", out);
+            }
+            if (cx_fmt(d, sizeof d, "-b %s -o", SC_FOREIGN[i])) sc_die("args");
+            rc2 = sc_ref(d, prod, "c1.c");
+            if (cx_fmt(label, sizeof label, "%s-chain-equals-product", SC_FOREIGN[i])) sc_die("label");
+            sc_ck(rc == 0 && rc2 == 0 && sc_same(out, prod), cell, label);
+        }
+        /* Each image carries its own container magic. */
+        sc_ck(sc_prefix("fx0.prod", "\177ELF"), cell, "lnx-arm64-elf-magic");
+        sc_ck(sc_sh("test \"$(head -c 4 fx1.prod | od -An -tx1 | tr -d ' ')\" = cffaedfe") == 0, cell, "osx-x86_64-macho-magic");
+        sc_ck(sc_sh("test \"$(head -c 4 fx2.prod | od -An -tx1 | tr -d ' ')\" = cffaedfe") == 0, cell, "osx-arm64-macho-magic");
+        sc_ck(sc_sh("test \"$(od -An -tx1 -j 68 -N 2 fx3.prod | tr -d ' ')\" = 6486") == 0, cell, "win-x86_64-pe-machine");
+        sc_ck(sc_sh("test \"$(od -An -tx1 -j 68 -N 2 fx4.prod | tr -d ' ')\" = 64aa") == 0, cell, "win-arm64-pe-machine");
+    }
+
+    /* ---- cleanup: only our own scratch -------------------------------- */
+    {
+        int left;
+        if (cx_fmt(a, sizeof a, "rm -rf %s", sc_dir)) sc_die("cmd");
+        left = sc_sh(a) != 0;
+        left += sy_exists(sc_dir) == 0 ? 0 : 1;
+        sc_ck(left == 0, "cleanup", "scratch-removed");
+    }
+    printf("CHECK_STREAM_CELLS\tassertions=%d\tfailed=%d\n", sc_asserts, sc_failed);
+    printf("NOT_CLAIMED\tif.route.memory-stays-BLOCKED-on-R7-waiver;foreign-native-execution;multi-unit-static-isolation-beyond-unit-order\n");
+    return sc_failed ? 1 : 0;
+}
