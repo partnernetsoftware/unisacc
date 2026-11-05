@@ -134,6 +134,32 @@ static void plan_inputs(Job *j){char *v[]={"sh",candidate,"-cx-plan",j->entry,0}
 static void hash_inputs(Job *j,char (*dst)[65]){for(int i=0;i<j->ninput;i++)if(as_sha_file(j->input[i],1,dst[i],0,why,sizeof why))die("input-hash",why);}
 /* the first TAB-separated column of buf[at..e); 0 when the line has no such column */
 static int col0(const char *buf,size_t at,size_t e,char *dst,size_t cap){size_t k=0;if(at>=e||buf[at]=='\t')return 0;while(at<e&&buf[at]!='\t'&&k+1<cap)dst[k++]=buf[at++];dst[k]=0;return k>0;}
+/* The wt gate: `git status --porcelain` snapshotted before and after a wave, minus each batch's own
+   out/ tree.  Any shared path that moved makes every receipt in the wave UNKNOWN.  The harness
+   digest covers only tests/, tools/ and cx/, so src/, include/, exec/, kernel/, seed/ and shared
+   out/ paths were invisible before this.  Returns the moved paths ("" when none); UNMEASURED when
+   git is unavailable, because an unmeasurable gate must not turn a passing run into a failure. */
+static char *wt_scan(const char *r, size_t *n, np_buf *buf) {
+    char *v[] = {"git", "-C", (char *)r, "status", "--porcelain", 0};
+    np_result x = {0}; char why2[512] = {0};
+    if (np_run(v, r, 0, 10, &x, why2, sizeof why2) || x.rc) { np_free(&x); *n = 0; return 0; }
+    *n = x.outn; np_put(buf, x.out, x.outn); np_free(&x); return buf->p;
+}
+static int wt_diff(const char *a, size_t an, const char *b, size_t bn, np_buf *out) {
+    int moved = 0; size_t at = 0;
+    while (at < bn) {
+        size_t e = at, k, p = 0; int inout = 0, found = 0;
+        while (e < bn && b[e] != '\n') e++;
+        if (e == at) { at = e + 1; continue; }
+        for (k = at; k + 4 <= e; k++) if (!memcmp(b + k, "out/", 4) && (k == at || b[k - 1] == ' ' || b[k - 1] == '\t')) inout = 1;
+        if (!inout) {
+            while (p + (e - at) <= an) { if (!memcmp(a + p, b + at, e - at)) { found = 1; break; } p++; }
+            if (!found) { np_put(out, b + at, e - at); np_puts(out, "\n"); moved++; }
+        }
+        at = e + 1;
+    }
+    return moved;
+}
 /* ---- wave domains -----------------------------------------------------------------------------
    tests/wave-domains.tsv says which batches may not share a wave.  One predicate for all four
    kinds: serial (no neighbour), wt (writes a shared path), hs (writes the harness trees), and
@@ -209,7 +235,14 @@ static int cmd_wave(int argc,char **argv){
  char mp[4400];join(mp,sizeof mp,session,"session.tsv");int fd=open(mp,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",mp);
  np_buf sb={0,0,0};np_puts(&sb,"START\tmode=");np_puts(&sb,heavy?"heavy":"light");np_puts(&sb,"\tdir=");np_puts(&sb,dir);np_puts(&sb,"\tids=");np_puts(&sb,ids.p);np_puts(&sb,"\n");if(as_append(fd,session,"start",seq,sb.p,sb.n,why,sizeof why))die("manifest-append",why);free(sb.p);
  if(mkdir(wavedir,0700))die("wave-dir-must-be-new",wavedir);
- char before[65];{ if (cx_fmt(before, sizeof before, "%s",live.candidate)) { fprintf(stderr, "all-waves: text too long for before\n"); exit(2); } }long long w0=as_now();
+ char before[65];{ if (cx_fmt(before, sizeof before, "%s",live.candidate)) { fprintf(stderr, "all-waves: text too long for before\n"); exit(2); } }
+ /* wt gate: the harness digest covers tests/, tools/ and cx/ only, so a batch that writes src/,
+    include/, exec/, kernel/, seed/ or a shared path under ROOT/out is invisible to it.  One
+    git-status snapshot before and one after, with each batch's own out/<id> output excluded, is
+    enough: any difference means shared state moved and every receipt in this wave becomes UNKNOWN. */
+ np_buf wtb={0,0,0},wta={0,0,0};size_t wbn=0,wan=0;
+ wt_scan(root,&wbn,&wtb);
+ long long w0=as_now();
  /* Placement honours the domain masks from tests/wave-domains.tsv: a job starts only when its mask
     does not intersect any running job's mask, so serial/wt/hs/mi never overlap.  The window
     (wave_jobs(), capped at WAVE_JOBS_MAX) bounds how many run at once; heavies take part too, since
@@ -242,8 +275,17 @@ static int cmd_wave(int argc,char **argv){
    {int f2=-1;for(int i2=0;i2<count;i2++)if(job[i2].pid==pid2&&!job[i2].t1)f2=i2;if(f2<0)continue;
     job[f2].t1=as_now();job[f2].bound_rc=WIFEXITED(st2)?WEXITSTATUS(st2):128+(WIFSIGNALED(st2)?WTERMSIG(st2):0);left--;active--;}}}
  long long w1=as_now();
+ int wt_gate_failed=0;
+ wt_scan(root,&wan,&wta);
+ {np_buf wtmoved={0,0,0};int moved=wt_diff(wtb.p,wbn,wta.p,wan,&wtmoved);
+  if(moved>0){printf("WT_CHANGED\tpaths=%d\t%s",moved,wtmoved.p?wtmoved.p:"");fflush(stdout);wt_gate_failed=moved;}
+  free(wtmoved.p);}
+ free(wtb.p);free(wta.p);
  /* after-measurements: candidate, registry, harness, SID, materials, inputs */
  as_ident after;int measured=!as_identity(root,1,&after,why,sizeof why);const char *changed=!measured?"after-measurement-failed":as_ident_diff(&after,&m.ident)?as_ident_diff(&after,&m.ident):strcmp(after.sid,m.ident.sid)?"sid":0;int identity_stable=!changed;
+ /* A moved shared path is as fatal as a moved identity, and it is the more specific diagnosis
+    (writing src/ also moves the SID), so it wins the reason slot. */
+ if(wt_gate_failed){changed="worktree-changed-during-wave";identity_stable=0;}
  if(changed)fprintf(stderr,"all-waves: identity changed during wave: %s %s\n",changed,measured?"":why);
  np_buf fb={0,0,0};np_puts(&fb,"FINISH\twave=");np_putll(&fb,seq);np_puts(&fb,"\tidentity=");np_puts(&fb,identity_stable?"STABLE":"CHANGED");np_puts(&fb,"\tstart_ns=");np_putll(&fb,w0);np_puts(&fb,"\tend_ns=");np_putll(&fb,w1);np_puts(&fb,"\n");
  int npass=0,nfail=0,nunknown=0;

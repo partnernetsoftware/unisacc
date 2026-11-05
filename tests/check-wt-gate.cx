@@ -1,0 +1,129 @@
+/* tests/check-wt-gate.cx -- the wt gate in tools/all-waves.cx is live.
+ *
+ *   sh ./unisacc.com tests/check-wt-gate.cx [--] ROOT SESSION_PARENT
+ *
+ * SESSION_PARENT must be a directory under ROOT/out that the caller owns (the batch registration
+ * passes {out}, which run-batch binds to its own output directory).  Taking it as an argument keeps
+ * this source free of an "out/" literal, so the outdep ratchet stays at its baseline: the check
+ * never reads an undeclared out/ residual, it only creates a fresh session below the caller's dir.
+ *
+ * The harness digest covers tests/, tools/ and cx/ only, so a batch that writes src/, include/,
+ * exec/, kernel/, seed/ or a shared path under ROOT/out was invisible to every gate.  all-waves now
+ * takes `git status --porcelain` before and after a wave; a moved shared path makes the whole wave
+ * UNKNOWN.  This check proves that path is live, in three steps:
+ *   1) a clean wave (two ordinary batches) comes back with identity=STABLE and no WT_CHANGED line;
+ *   2) a wave containing tests/cases/wtprobe-batch.cx (which writes ROOT/src/_wt_probe.cx) prints
+ *      WT_CHANGED with that exact path, and every receipt in the wave is UNKNOWN;
+ *   3) the probe's file is removed afterwards, leaving the tree as it was.
+ * Step 2 is the negative control: without the gate the probe's wave would have been PASS.
+ * Exit 0 when all three hold, 1 otherwise, 2 on usage/IO. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static char g_root[4096];
+static int asserts, failed;
+static void die(const char *s) { fprintf(stderr, "check-wt-gate: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ck(int ok, const char *what, const char *detail) {
+    asserts++;
+    if (!ok) failed++;
+    printf("%s\t%s%s%s\n", ok ? "PASS" : "FAIL", what, detail && *detail ? "\t" : "", detail ? detail : "");
+}
+/* run one command in ROOT and return its stdout as a NUL-terminated buffer (caller frees). */
+static char *run(const char *args, int *rc) {
+    char cmd[9000];
+    char *v[] = {"sh", "-c", cmd, 0};
+    np_result r = {0};
+    char why[512] = {0};
+    char *out;
+    if (cx_fmt(cmd, sizeof cmd, "%s", args)) die("cmd");
+    if (np_run(v, g_root, 0, 120, &r, why, sizeof why)) die(why);
+    *rc = r.rc;
+    out = calloc(1, r.outn + 1);
+    if (!out) die("alloc");
+    if (r.outn) mm_copy(out, r.outn + 1, r.out, r.outn);
+    np_free(&r);
+    return out;
+}
+static int has(const char *s, const char *want) { return s && strstr(s, want) != 0; }
+int main(int argc, char **argv) {
+    char w[4400], sess_parent[4400], *o, *probe;
+    int rc, a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (argc < a + 2 || argc > a + 2) die("usage: ROOT SESSION_PARENT");
+    if (!realpath(argv[a], g_root)) die("root");
+    if (!realpath(argv[a + 1], sess_parent)) {
+        /* run-batch hands {out}, a directory it owns; create it when this is the first batch there. */
+        if (mkdir(argv[a + 1], 0700) && errno != EEXIST) die("session parent");
+        if (!realpath(argv[a + 1], sess_parent)) die("session parent");
+    }
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(w, sizeof w, "%s/wtgate-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(w)) die("scratch"); }
+
+    /* 1) a wave without the probe: STABLE, no WT_CHANGED */
+    {   char a[9000];
+        if (cx_fmt(a, sizeof a, "./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/s1 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/s1 --light cx-cell cx-target", g_root, sess_parent, g_root, sess_parent)) die("cmd");
+        o = run(a, &rc);
+        ck(rc == 0, "clean-wave-exit-0", "");
+        ck(has(o, "identity=STABLE") && !has(o, "WT_CHANGED"), "clean-wave-no-wt-change", "");
+        free(o); }
+
+    /* 2) the negative control: the probe writes ROOT/src/_wt_probe.cx */
+    {   char a[9000], keep[4600], tab[4600];
+        const char *row = "wtprobe\tIMPLEMENTED\tcontract\ttests/cases/wtprobe-batch.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/wtprobe-batch.cx\t-\tcontract.core-opkinds\trc0:WTPROBE\tproduct\n";
+        size_t bn = 0;
+        char *body;
+        int inserted = 0;
+        if (cx_fmt(keep, sizeof keep, "%s/batches.keep", w) || cx_fmt(tab, sizeof tab, "%s/tests/batches.tsv", g_root)) die("paths");
+        body = cx_read(tab, &bn);
+        if (!body) die("batches read");
+        {   /* copy the table, inserting the fixture row after the cx-target line */
+            size_t at = 0, cap = bn + strlen(row) + 1;
+            char *outb = calloc(1, cap);
+            if (!outb) die("alloc");
+            while (at < bn) {
+                size_t e = at;
+                while (e < bn && body[e] != '\n') e++;
+                if (e + 1 <= bn) mm_copy(outb + strlen(outb), cap - strlen(outb), body + at, e - at + 1);
+                if (!inserted && e - at > 9 && !memcmp(body + at, "cx-target\t", 10)) {
+                    mm_copy(outb + strlen(outb), cap - strlen(outb), row, strlen(row));
+                    inserted = 1;
+                }
+                at = e + 1;
+            }
+            if (!inserted) { free(outb); free(body); die("no cx-target row"); }
+            if (cx_write(keep, body, bn) || cx_write(tab, outb, strlen(outb))) die("batches write");
+            free(outb); }
+        free(body);
+        if (cx_fmt(a, sizeof a, "./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/s2 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/s2 --light wtprobe cx-cell", g_root, sess_parent, g_root, sess_parent)) die("cmd");
+        probe = run(a, &rc);
+        ck(has(probe, "WT_CHANGED\tpaths=1\t?? src/_wt_probe.cx"), "probe-wave-reports-the-written-path", "");
+        ck(has(probe, "reason=identity-changed-during-wave") && has(probe, "unknown=2"), "probe-wave-all-receipts-unknown", "");
+        ck(has(probe, "changed=worktree-changed-during-wave"), "probe-wave-names-the-gate", "");
+        free(probe);
+        /* restore the table verbatim and remove what the probe wrote */
+        {   size_t kn = 0; char *kb = cx_read(keep, &kn);
+            if (!kb) die("keep read");
+            if (cx_write(tab, kb, kn)) die("batches restore");
+            free(kb); }
+        if (cx_fmt(a, sizeof a, "rm -f src/_wt_probe.cx")) die("cmd");
+        o = run(a, &rc);
+        free(o);
+        ck(rc == 0, "table-restored", ""); }
+
+    /* 3) the tree is clean again */
+    {   char a[9000];
+        if (cx_fmt(a, sizeof a, "git -C . status --porcelain -- src/_wt_probe.cx")) die("cmd");
+        o = run(a, &rc);
+        ck(rc == 0 && (!o || !o[0]), "probe-file-removed", "");
+        free(o); }
+    {   char a[4400];
+        if (cx_fmt(a, sizeof a, "rm -rf %s", w)) die("cmd");
+        o = run(a, &rc);
+        free(o); }
+    printf("WT_GATE\tassertions=%d\tfailed=%d\n", asserts, failed);
+    return failed ? 1 : 0;
+}
