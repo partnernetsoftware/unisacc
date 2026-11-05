@@ -78,8 +78,44 @@ jobs:
           path: candidate/unisacc.com
           if-no-files-found: error
           retention-days: 7
-  candidate:
+  cell-tools:
+    # The cell must not itself depend on the default -run, which is the thing under test on osx/win
+    # (CI-RUN-1: -run is broken there). The candidate cross-compiles the cell tool for those slices on lnx/x86_64.
     needs: fetch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-ape
+          path: candidate
+      - name: Cross-compile the cell tool with the candidate
+        shell: bash
+        run: |
+          set -eu
+          got=$(sha256sum candidate/unisacc.com | cut -d' ' -f1)
+          if [ "$got" != "$APE_SHA" ]; then echo "::error::host hash $got, expected $APE_SHA"; exit 1; fi
+          cp candidate/unisacc.com ./unisacc.com; chmod +x ./unisacc.com
+          mkdir -p cell-tools
+          # win keeps its pwsh adapter: the cell tool needs POSIX fork/fcntl and does not compile for win/x86_64.
+          for t in osx/x86_64 osx/arm64; do
+            o=cell-tools/candidate-qualify-${t%/*}-${t#*/}
+            timeout 120 sh ./unisacc.com -b "$t" -o "$o" tests/candidate-qualify.cx
+            ls -l "$o"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cell-tools
+          path: cell-tools/
+          if-no-files-found: error
+          retention-days: 7
+  candidate:
+    needs: [fetch, cell-tools]
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +145,11 @@ jobs:
         with:
           name: candidate-ape
           path: candidate
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: matrix.os == 'osx'
+        with:
+          name: cell-tools
+          path: cell-tools
       - name: Run the cell (POSIX)
         if: matrix.os != 'win'
         shell: bash
@@ -119,7 +160,27 @@ jobs:
           cp candidate/unisacc.com ./unisacc.com
           chmod +x ./unisacc.com
           mkdir -p evidence
-          sh ./unisacc.com tests/candidate-qualify.cx -- cell "$TARGET" "$APE_SHA" "$COMMIT" "$EVIDENCE"
+          if [ "${{ matrix.os }}" = lnx ]; then
+            sh ./unisacc.com tests/candidate-qualify.cx -- cell "$TARGET" "$APE_SHA" "$COMMIT" "$EVIDENCE"
+          else
+            tool=cell-tools/candidate-qualify-${{ matrix.os }}-${{ matrix.arch }}
+            chmod +x "$tool"
+            "$tool" cell "$TARGET" "$APE_SHA" "$COMMIT" "$EVIDENCE"
+          fi
+      - name: lnx/arm64 diagnostics (read-only, not part of the verdict)
+        if: always() && matrix.os == 'lnx' && matrix.arch == 'arm64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "uname -m: $(uname -m)"
+            printf 'int main(void){return 0;}\n' > diag-h.c
+            sh ./unisacc.com diag-h.c -o diag-h; echo "compile rc=$?"; file diag-h
+            ./diag-h; echo "run rc=$?"
+            UNISACC_RR_TIME=1 sh ./unisacc.com diag-h.c 2>&1 | head -20; echo "-run rc=${PIPESTATUS[0]}"
+          } 2>&1 | tee diag-arm64.txt
+          cat diag-arm64.txt >> "$GITHUB_STEP_SUMMARY"
       - name: Run the cell (Windows adapter)
         if: matrix.os == 'win'
         shell: pwsh
@@ -170,7 +231,7 @@ jobs:
           elseif ($status.Code -ne 0 -or $status.Out) { $why = 'tracked files changed in the checkout' }
           elseif ("win/$hostArch" -cne $env:TARGET) { $why = "host is win/$hostArch, not $env:TARGET" }
           elseif ($pe -gt $bytes.Length - 6 -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { $why = 'candidate has no PE x86_64 image' }
-          $later = @('version', 'hello', 'stdio-crossunit', 'stream-pipe', 'smoke')
+          $later = @('version', 'hello', 'run', 'stdio-crossunit', 'stream-pipe', 'smoke')
           if ($why) {
             Add-Row 'identity' 'FAIL' 1 $why
             foreach ($check in $later) { Add-Row $check 'NOT_RUN' -1 'identity failed' }
@@ -190,6 +251,9 @@ jobs:
             $hello = Invoke-Bounded (Join-Path $PWD 'out/hello.exe') @()
             Add-Row 'hello' $(if ($hello.Code -eq 0 -and $hello.Out -cmatch '^candidate-hello\r?\n$') { 'PASS' } else { 'FAIL' }) $hello.Code "$($hello.Out) $($hello.Err)"
           }
+          [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
+          $run = Invoke-Bounded $com @('out/run.cx')
+          Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
           foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
           $smoke = Invoke-Bounded $com @('tests/run.cx', '--', '--smoke')
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
@@ -245,6 +309,23 @@ jobs:
           Run-Raw $exe @('--help') 'direct.exe --help'
           Run-Raw 'cmd.exe' @('/c', $exe, '--version') 'cmd --version'
           Run-Raw 'pwsh' @('-NoProfile', '-Command', "& '$exe' --version") 'pwsh --version'
+          # 1. console inherited (no redirection) vs pipe vs file: the .NET runs above are pipes.
+          $f = Join-Path $diag 'ver-file.txt'
+          cmd.exe /c "`"$exe`" --version > `"$f`" 2>&1"; Say "cmd >file --version exit=$LASTEXITCODE"
+          if (Test-Path $f) { Say "cmd >file stdout_hex= $(Hex ([IO.File]::ReadAllBytes($f)) 200)" }
+          $p = Start-Process -FilePath $exe -ArgumentList '--version' -NoNewWindow -Wait -PassThru; Say "console-inherited --version exit=$($p.ExitCode) (0x$('{0:x8}' -f $p.ExitCode))"
+          # 2. argv0 quoting: cmd passes the bare path, .NET quotes it.
+          Push-Location $diag; cmd.exe /c "unisacc.exe --version > ver-bare.txt 2>&1"; Say "cmd bare-argv0 --version exit=$LASTEXITCODE"; if (Test-Path ver-bare.txt) { Say "bare stdout_hex= $(Hex ([IO.File]::ReadAllBytes((Join-Path $diag 'ver-bare.txt'))) 200)" }; Pop-Location
+          # 3. a PE the candidate cross-compiled on Linux (not from this runner), under a pipe.
+          $hi = Join-Path $PWD 'tests/cases/ci-hi-win-x86_64.exe'
+          if (Test-Path $hi) { Run-Raw $hi @() 'linux-cross-compiled hi.exe (pipe)' } else { Say "linux-cross-compiled hi.exe: NOT_RUN (tests/cases/ci-hi-win-x86_64.exe not in this commit)" }
+          # 4. the 0.0.43 APE through the same probes: not fetched; nothing is published for it.
+          Say "0.0.43 APE: NOT_RUN (no private source on the runner; publishing it is out of scope)"
+          # 5. WER crash records for unisacc (EventID 1000, Application log).
+          try {
+            $ev = Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1000} -MaxEvents 20 -ErrorAction Stop | Where-Object { $_.Message -match 'unisacc|hello' } | Select-Object -First 5
+            if ($ev) { foreach ($e in $ev) { Say "WER: $(($e.Message -replace '[\r\n]+', ' | ').Substring(0, [Math]::Min(600, $e.Message.Length)))" } } else { Say 'WER: no EventID 1000 record names unisacc or hello' }
+          } catch { Say "WER: unavailable ($_)" }
           Get-Content $log | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && matrix.os == 'win'

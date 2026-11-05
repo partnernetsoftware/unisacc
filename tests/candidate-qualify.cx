@@ -1,20 +1,23 @@
 /* tests/candidate-qualify.cx -- same-candidate native qualification: per-target cell and six-target table.
  *
  *   sh ./unisacc.com tests/candidate-qualify.cx -- cell TARGET APE_SHA COMMIT OUT.tsv
+ *   ./candidate-qualify cell TARGET APE_SHA COMMIT OUT.tsv      (the same tool built with -b TARGET -o, so the
+ *                                                                cell does not itself depend on the default -run)
  *   sh ./unisacc.com tests/candidate-qualify.cx -- aggregate APE_SHA COMMIT DIR OUT.md
  *
  * cell runs from a checkout root whose ./unisacc.com is the candidate (POSIX hosts; Windows has its own adapter
  * in candidate-native.yml writing the same rows).  It first proves identity: HEAD == COMMIT, no tracked file
  * changed, sha256(./unisacc.com) == APE_SHA, uname == TARGET.  On any mismatch every later check is NOT_RUN and
  * the exit is 1.  Then, each under its own 55 s process-group bound: --version equals the PRODUCT_VERSION row of
- * exec/facts/limits.tsv, hello compiles and runs, tests/stdio-crossunit.cx, tests/check-stream-pipe.cx,
- * tests/run.cx --smoke.  The candidate is hashed again at the end.  rc 0 only when all six rows are PASS.
+ * exec/facts/limits.tsv, hello compiles and runs, run (the default mode: `sh ./unisacc.com FILE.cx` prints the
+ * literal it was given), tests/stdio-crossunit.cx, tests/check-stream-pipe.cx, tests/run.cx --smoke.  The candidate
+ * is hashed again at the end.  rc 0 only when all seven rows are PASS.
  *
  * Row: target check status rc ms ape_sha commit detail (TAB separated; status PASS, FAIL or NOT_RUN).
  *
  * aggregate reads DIR/<os>-<arch>.tsv for all six targets and writes the evidence table.  A missing file, a
  * missing/duplicate/unknown check, an unknown status or an identity differing from the arguments is INVALID.
- * Exit: 1 on any FAIL or INVALID; 3 when nothing failed but something is NOT_RUN; 0 only when all 36 cells PASS.
+ * Exit: 1 on any FAIL or INVALID; 3 when nothing failed but something is NOT_RUN; 0 only when all 42 cells PASS.
  * Prints CANDIDATE_QUALIFY<TAB>verdict=..; the verdict is computed, never a constant. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
@@ -23,10 +26,10 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 
-#define CQ_CHECKS 6
+#define CQ_CHECKS 7
 #define CQ_ADD(...) do { if (cx_fmt(md + at, cap - at, __VA_ARGS__)) return 2; at += strlen(md + at); } while (0)
 #define CQ_TARGETS 6
-static const char *cq_check[CQ_CHECKS] = {"identity", "version", "hello", "stdio-crossunit", "stream-pipe", "smoke"};
+static const char *cq_check[CQ_CHECKS] = {"identity", "version", "hello", "run", "stdio-crossunit", "stream-pipe", "smoke"};
 static const char *cq_target[CQ_TARGETS] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
 
 static int cq_hex(const char *s, size_t n) {
@@ -169,6 +172,13 @@ static int cq_cell(const char *target, const char *out) {
             cq_row("hello", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? "compiled, ran, exact stdout" : "ran with wrong rc or stdout");
         } else cq_row("hello", "FAIL", rc, sy_now_ms() - t, rc < 0 ? w : (r.err ? r.err : "compile failed"));
         if (rc >= 0) np_free(&r); }
+    {   static const char src[] = "int main(void){puts(\"candidate-run\");return 0;}\n";
+        np_result r; char w[512]; long t = sy_now_ms(); int rc, good;
+        if (cx_write("out/candidate-qualify/run.cx", src, sizeof src - 1)) { fprintf(stderr, "candidate-qualify: cannot write run.cx\n"); return 2; }
+        {   char *v[] = {"sh", "./unisacc.com", "out/candidate-qualify/run.cx", 0}; rc = cq_exec(v, &r, w, sizeof w); }
+        good = rc == 0 && r.outn == 14 && !memcmp(r.out, "candidate-run\n", 14);
+        cq_row("run", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? "default -run printed the literal" : (rc < 0 ? w : (r.errn ? r.err : "wrong rc or stdout")));
+        if (rc >= 0) np_free(&r); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/stdio-crossunit.cx", 0}; cq_batch("stdio-crossunit", v, "STDIO_CROSSUNIT\t"); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/check-stream-pipe.cx", 0}; cq_batch("stream-pipe", v, "CHECK_STREAM_PIPE\tfailed=0"); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--smoke", 0}; cq_batch("smoke", v, "SMOKE\tassertions=16\tfailed=0"); }
@@ -232,7 +242,7 @@ static int cq_aggregate(const char *dir, const char *out) {
     {   const char *verdict = failed || invalid ? "FAIL" : not_run ? "INCOMPLETE" : "QUALIFIED";
         CQ_ADD("# candidate-native evidence\n\n- ape_sha256: `%s`\n- commit: `%s`\n- verdict: **%s** pass=%d fail=%d not_run=%d invalid=%d\n\n| target |", cq_sha, cq_commit, verdict, pass, failed, not_run, invalid);
         for (c = 0; c < CQ_CHECKS; c++) CQ_ADD(" %s |", cq_check[c]);
-        CQ_ADD("\n|---|---|---|---|---|---|---|\n");
+        CQ_ADD("\n|---|---|---|---|---|---|---|---|\n");
         for (t = 0; t < CQ_TARGETS; t++) {
             CQ_ADD("| %s |", cq_target[t]);
             for (c = 0; c < CQ_CHECKS; c++) CQ_ADD(" %s |", cell[t][c][0] ? cell[t][c] : "MISSING");
