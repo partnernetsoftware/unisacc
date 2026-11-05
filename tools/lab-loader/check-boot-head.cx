@@ -20,6 +20,7 @@
  * 只实跑 lnx/x86_64；其余五格只出字节,标 CI-ONLY。
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
 
 static int bh_failed, bh_asserts;
 static char bh_root[4096];
@@ -74,20 +75,20 @@ static void bh_copy(const char *from, const char *to, int mode) {
     free(b);
 }
 
-/* 生成一份 boot 目录：boot.com + 原生段 + manifest(单行 base 指向 base 文件)。 */
+/* 生成一份 boot 目录：boot.com + 原生段 + manifest(单行 base 指向 base 文件)。
+   头与原生段都取自本次运行自己生成的 bh_l3 目录（不再是 out/lab-loader/L3）。 */
+static char bh_l3[4096];
 static int bh_make(const char *dir, const char *base_path, const char *base_name,
                    const char *sha_override) {
     char p[4400], q[4400], line[1024], sha[65];
     size_t n;
     if (mkdir(dir, 0700) && errno != EEXIST) return -1;
-    if (snprintf(p, sizeof p, "%s/boot.com", dir) >= (int)sizeof p) return -1;
-    if (snprintf(q, sizeof q, "%s/boot.com", bh_root) >= (int)sizeof q) return -1;
     {   /* 头由生成器写;这里只复制本轮的同一份,保证 H1 之外的用例同字节。 */
-        if (snprintf(p, sizeof p, "%s/out/lab-loader/L3/boot.com", bh_root) >= (int)sizeof p) return -1;
+        if (snprintf(p, sizeof p, "%s/boot.com", bh_l3) >= (int)sizeof p) return -1;
         if (snprintf(q, sizeof q, "%s/boot.com", dir) >= (int)sizeof q) return -1;
         bh_copy(p, q, 0700);
     }
-    if (snprintf(p, sizeof p, "%s/out/lab-loader/L3/boot-native-lnx-x86_64.com", bh_root) >= (int)sizeof p) return -1;
+    if (snprintf(p, sizeof p, "%s/boot-native-lnx-x86_64.com", bh_l3) >= (int)sizeof p) return -1;
     if (snprintf(q, sizeof q, "%s/boot-native-lnx-x86_64.com", dir) >= (int)sizeof q) return -1;
     bh_copy(p, q, 0700);
     if (snprintf(q, sizeof q, "%s/%s", dir, base_name) >= (int)sizeof q) return -1;
@@ -123,6 +124,39 @@ int main(int argc, char **argv) {
         if (!realpath(argv[2], out)) bh_die("output directory must exist");
     } else bh_die("usage [ROOT OUTDIR]");
 
+    /* 材料全部现场生成在自己的 {out} 里（不再读 out/lab-loader 的历史产物）：
+       - bh_l3：boot-head 生成器的产出（boot.com、boot-native-lnx-x86_64.com）
+       - mini：最小程序（打印 boot-mini-ok 并退出 0），H3d/H4/H5 用的 base */
+    if (snprintf(bh_l3, sizeof bh_l3, "%s/l3", out) >= (int)sizeof bh_l3) bh_die("path");
+    {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/boot-head.cx", bh_l3, 0};
+        if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+        if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("boot-head generation failed"); }
+        np_free(&res);
+    }
+    {   char src[4400], obj[4400], *av[8];
+        const char *text = "int main(void){printf(\"boot-mini-ok\\n\");return 0;}\n";
+        FILE *f;
+        if (snprintf(src, sizeof src, "%s/mini.cx", out) >= (int)sizeof src) bh_die("path");
+        if (snprintf(obj, sizeof obj, "%s/mini.bin", out) >= (int)sizeof obj) bh_die("path");
+        f = fopen(src, "wb");
+        if (!f || fwrite(text, 1, strlen(text), f) != strlen(text) || fclose(f)) bh_die("mini source");
+        av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-b"; av[3] = "lnx/x86_64";
+        av[4] = src; av[5] = "-o"; av[6] = obj; av[7] = 0;
+        if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+        if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("mini build failed"); }
+        np_free(&res);
+    }
+    /* 原生段是单独一步编译（boot-head.cx 只写多格式头）：编译到 bh_l3 里，交给 bh_make 拷。 */
+    {   char src[4400], obj[4400], *av[10];
+        if (snprintf(src, sizeof src, "%s/tools/lab-loader/boot-native.cx", bh_root) >= (int)sizeof src) bh_die("path");
+        if (snprintf(obj, sizeof obj, "%s/boot-native-lnx-x86_64.com", bh_l3) >= (int)sizeof obj) bh_die("path");
+        av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-b"; av[3] = "lnx/x86_64";
+        av[4] = src; av[5] = "-o"; av[6] = obj; av[7] = 0;
+        if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+        if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("boot-native build failed"); }
+        np_free(&res);
+    }
+
     /* H1：生成两次字节相同。 */
     {   char d1[4400], d2[4400], f1[4500], f2[4500];
         if (snprintf(d1, sizeof d1, "%s/gen1", out) >= (int)sizeof d1) bh_die("path");
@@ -155,17 +189,42 @@ int main(int argc, char **argv) {
         free(b);
     }
 
-    /* H3：换 manifest 启动两类目标,头字节不变。 */
+    /* H3：换 manifest 启动两类目标,头字节不变。
+       带包的 base 现场生成：先把已装 p3-package.bin 剥掉 UNIPKG1 footer（slice 只吃裸包），
+       再用本轮编出的裸 runner(mini.bin) 经 tools/lab-loader/slice.cx 打出单流容器。 */
     {   char d[4400], base[4400], run[4400], direct[4400];
-        /* a) 带包的单流产物 */
-        if (snprintf(base, sizeof base, "%s/out/lab-loader/L1/slice/e2/program.com", bh_root) >= (int)sizeof base) bh_die("path");
+        char pkg_all[4400], pkg_bare[4400], slout[4400];
+        if (snprintf(pkg_all, sizeof pkg_all, "%s/unisacc.com.dev/p3-package.bin", bh_root) >= (int)sizeof pkg_all) bh_die("path");
+        if (snprintf(pkg_bare, sizeof pkg_bare, "%s/pkg-bare.bin", out) >= (int)sizeof pkg_bare) bh_die("path");
+        if (snprintf(slout, sizeof slout, "%s/slice", out) >= (int)sizeof slout) bh_die("path");
+        if (sy_exists(slout)) cx_rmtree(slout);   /* stream-pack 要求 NEW_OUTDIR 不存在 */
+        {   /* footer: 最后 16 字节 "UNIPKG1\n" + 8 字节 extent（release-ape 写的同一种） */
+            size_t pn = 0;
+            char *pb = bh_read(pkg_all, &pn);
+            long extent = 0;
+            int j;
+            if (pn < 24 || memcmp(pb + pn - 16, "UNIPKG1\n", 8)) { free(pb); bh_die("package footer"); }
+            for (j = 7; j >= 0; j--) extent = (extent << 8) | (unsigned char)pb[pn - 8 + j];
+            if (extent <= 0 || (size_t)extent > pn - 16) { free(pb); bh_die("package footer extent"); }
+            bh_write(pkg_bare, pb, (size_t)extent, 0644);
+            free(pb);
+        }
+        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/slice.cx", "--", "out-mini", pkg_bare, slout, "lnx/x86_64", 0};
+            char mo[4400];
+            if (snprintf(mo, sizeof mo, "%s/mini.bin", out) >= (int)sizeof mo) bh_die("path");
+            av[4] = mo;
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            if (res.rc) { fputs(res.err ? res.err : "", stderr); np_free(&res); bh_die("slice generation failed"); }
+            np_free(&res);
+        }
+        if (snprintf(base, sizeof base, "%s/slice/e2/program.com", slout) >= (int)sizeof base) bh_die("path");
         if (snprintf(d, sizeof d, "%s/case-packaged", out) >= (int)sizeof d) bh_die("path");
         if (bh_make(d, base, "uni.com", 0)) bh_die("case-packaged setup");
         if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
-        {   char *av[] = {run, "out/lab-loader/L1gate/a.c", "a.c", "include", 0};
+        {   char *av[] = {run, 0};
             if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
             bh_ck(res.rc == 0 && res.outn > 0, "H3a.boot-reaches-packaged-base");
-            {   char *dv[] = {base, "out/lab-loader/L1gate/a.c", "a.c", "include", 0};
+            {   char *dv[] = {base, 0};
                 np_result d2; if (np_run(dv, bh_root, 0, 30, &d2, why, sizeof why)) bh_die(why);
                 bh_ck(d2.rc == res.rc && d2.outn == res.outn && !memcmp(d2.out, res.out, res.outn),
                       "H3b.output-identical-to-direct");
@@ -175,7 +234,7 @@ int main(int argc, char **argv) {
         }
         bh_ck(bh_same(run, p) || 1, "H3c.same-head-across-manifests");
         /* b) 最小程序 */
-        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(base, sizeof base, "%s/mini.bin", out) >= (int)sizeof base) bh_die("path");
         if (snprintf(d, sizeof d, "%s/case-mini", out) >= (int)sizeof d) bh_die("path");
         if (bh_make(d, base, "mini.bin", 0)) bh_die("case-mini setup");
         if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
@@ -190,7 +249,7 @@ int main(int argc, char **argv) {
 
     /* H4：sha 改一个字符 → 具名拒绝、不 exec。 */
     {   char d[4400], base[4400], run[4400], bad[65];
-        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(base, sizeof base, "%s/mini.bin", out) >= (int)sizeof base) bh_die("path");
         if (snprintf(d, sizeof d, "%s/case-badsha", out) >= (int)sizeof d) bh_die("path");
         if (cx_fmt(bad, sizeof bad, "%064d", 0)) bh_die("bad sha");
         if (bh_make(d, base, "mini.bin", bad)) bh_die("case-badsha setup");
@@ -207,7 +266,7 @@ int main(int argc, char **argv) {
 
     /* H5：三种拒绝口径。 */
     {   char d[4400], base[4400], run[4400], man[4400];
-        if (snprintf(base, sizeof base, "%s/out/lab-loader/L3/mini/mini.bin", bh_root) >= (int)sizeof base) bh_die("path");
+        if (snprintf(base, sizeof base, "%s/mini.bin", out) >= (int)sizeof base) bh_die("path");
         /* 缺 manifest */
         if (snprintf(d, sizeof d, "%s/case-nomanifest", out) >= (int)sizeof d) bh_die("path");
         if (bh_make(d, base, "mini.bin", 0)) bh_die("case-nomanifest setup");
