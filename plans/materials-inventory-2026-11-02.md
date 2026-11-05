@@ -191,3 +191,28 @@
 4. **stream SHA pin**：7 个哈希来自 `out/tb/mat-streams`；若测试源期望不同 pin，以测试源为准。
 5. **133/134 的口径**：134 是按目录存在性计；`identity-helper` 目录为空，实际可复用 133。包含 `ri-cli`/`ri-flow` 等预建目录；若其中某个目录缺 `runtime-native` 或 status 不是 PREPARED，应降级到 P1 再生成。
 6. **不要**为了让 `pending` 变绿而绑定未核实的路径；all-waves 的 fingerprint 会拒绝，且会把错误材料带进证据链。
+
+## P53 identity-material 走 A（2026-11-06，7a33641992）
+
+生成器 `tools/identity-material.cx` 不再"从 ident.c 里切一段再替换"，
+改成**整份 `seed/ident.c` 剥掉 9 个 `#include` + `seed/sha256.h` 剥掉 2 个**：
+
+| 项 | 旧（B 之前的写法） | 新（A） |
+|---|---|---|
+| 取源方式 | `unique(ident, "/* sha256 of a file … */")` 截到某行，再整段 replace `file_entry` | 全文，只删 include 行 |
+| 锚点 | 落在函数体内部（`900f79790f` 加一行就失效） | 只在 include 行 |
+| main | 写死 `if(argc!=1&&argc!=2)` | 沿用 `seed/ident.c` 自己的 main |
+| 能力集 | 只有 `identity [ROOT]` | write/check/legacy-projection/list-current/list-legacy 全有 |
+| pin | `base_sha` + 一处正文替换必须同时对上 | 只有 `base_sha`（跟 `seed/ident.c` 哈希） |
+
+实测（R4=b1a219cf7d 仓外克隆）：
+- `prepare` → `PREPARED`，`--verify` → `VERIFIED`；
+- 生成的 `identity-helper` 跑 `tests/identity.cx` → `IDENTITY checks=21 failed=0`（旧写法 21/3）；
+- 与产品 `out/rc2-b1a219cf7d/ctx/identity-helper` 在同一 fixture 上身份值逐字节相同（`97317e50…`）；
+- 两次 prepare 的 `material.tsv`（除 `root` 行）与 `identity.cx` 逐字节相同；
+- 改动材料一字节后 `--verify` 报 `REFUSE material-bytes-or-receipt-mismatch`。
+
+收据里三处不实声明已改：`scope` 去掉 `identity-prefix-only…256MiB`；
+`transform-contract` 从 `1-file_entry-replace;identity-only-main` 改为
+`verbatim-seed-ident-c-with-9-include-strips…;no-body-anchor;no-written-main;every-ident-mode-retained`；
+`runtime-domain` / `sha-provider` 改为"生成器不加任何 bound/provider"。
