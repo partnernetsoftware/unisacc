@@ -95,6 +95,47 @@ utf8.com 四类输入与 oracle 一致；执行器占 99.66%，模板开销 <1ms
    整程序路线受 `undefined function`（forward-signature）阻塞。可行路径是先链接后 `-S z`,
    或让物化器直接吃「对象 tape 列表」。二者都不在 lab-loader 现有范围,照实记为缺口。
 
+## L7 阶段管道（`tools/phase-pipe.cx` + `tools/stream-runtime.c`）
+
+```
+sh ./unisacc.com tools/phase-pipe.cx -- ROOT SLICEDIR SOURCE_LIST OUT
+sh ./unisacc.com tools/lab-loader/check-phase-pipe.cx      # 批次 phase-pipe-single
+```
+`SLICEDIR` 是 `slice.cx` 的产物目录（要有 `slice/{e2,e1,units,e3}/program.com`）。
+`SOURCE_LIST` 每行一个源路径，**首行是 main**，顺序与驱动的 `dv_units` 相同。
+每个源各起一次 e2、e1；全部源打完包（`fr_add`）后，一次 units、一次 e3。
+末行 `PIPE_MS<TAB>e2=..<TAB>e1=..<TAB>frame=0<TAB>units=..<TAB>e3=..<TAB>total=..<TAB>sources=N`；
+任何一段非零即打印该段 stderr 并退出 1。
+
+单段也能单独跑（`program.com` 就是切片，读 stdin 写 stdout）：
+
+```
+./tools/bound 20 SLICE/e2/program.com - LABEL < SRC   > pp       # 源 -> 预处理正文
+./tools/bound 20 SLICE/e1/program.com - LABEL < pp    > tape     # 正文 -> USLATTR1+UNITOK1
+./tools/bound 20 SLICE/units/program.com - main.c < frames       # 帧组 -> UNITOK2
+./tools/bound 20 SLICE/e3/program.com - LABEL < tape             # tape -> -S 文本
+```
+第二参数是 `SOURCE_LABEL`（写进 `cli/source`，参与 e2 的行号/诊断）；`-` 表示 stdin。
+**没有第二参数时默认 `stdin.c`，`.c` 与 `.cx` 在驱动里走不同前导**，标签必须与产品一致。
+
+资源清单（`cli/*` 与 `hdr/*` 由调用方供给，不在包里）：
+
+```
+UNISA_STREAM_RESOURCES=LIST ./tools/bound 20 SLICE/e3/program.com - LABEL < tape
+```
+`LIST` 每行 `hex-key<TAB>path`，键是含前导 NUL 的资源名（`cli/source` → `00636c69…`），
+行数以 64 为上限；与产品 `UNISACC_RF_CAPTURE` 写出的 `resources.tsv` 同格式，可直接复用。
+清单项覆盖内置默认项（`cli/f1`、`cli/attributes`、`cli/source`、`cli/target`）。
+缺 `hdr/cx.h` / `hdr/cx-flat.h` 时含 `#include` 的源在 e2 具名失败；缺 `cli/includes` 时
+`.cx` 源不会自动展开 `cx.h`（产品给 `.cx` 的隐式前导就是 `cli/includes="cx.h\0"`）。
+
+阶段边界与产品一致：e1 的 stdout 前面带 `USLATTR1` 属性帧，**units 只吃剥掉该帧后的 UNITOK1 段**
+（`phase-pipe.cx` 用 `cx/runtime/attribute_frame.cx` 的 `cxaf_strip` 剥，不自己拼帧）；
+units 的输出是 `UNITOK2`，e3 直吃它。
+
+gate（批次 `phase-pipe-single`）：单源含 `#include <stdio.h>` 的 `.c` 走完整五段，
+与已装产品 `-S` 同阶段输出**全文逐字节相同**（18,767B，sha `302f6ac1…`），预算 ≤55s。
+
 ## P3 单模型替换（`p3-swap.cx`）
 
 ```

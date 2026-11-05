@@ -1,0 +1,109 @@
+/* check-phase-pipe.cx -- L7 阶段管道的独立检查（实验线,不改正式产品）。
+ *
+ *   sh ./unisacc.com tools/lab-loader/check-phase-pipe.cx            # 批次 phase-pipe-single
+ *   sh ./unisacc.com tools/lab-loader/check-phase-pipe.cx -- ROOT SLICEDIR
+ *
+ * 无参（批次形态）：用 out/sliceQ2 的既有切片，在 out/check-phase-pipe-<pid> 下自建产物。
+ * 两参：用调用方给的切片目录复查。
+ *
+ * 判定口径（不做静默容差）：
+ *   A 切片完整：slice/{e2,e1,units,e3}/program.com 都存在且非空。
+ *   B 单源含 include 的 .c 走 e2|e1|frame|units|e3，与已装产品 -S 的输出全文逐字节相同。
+ *   C 管道的 e3 输出非空，且 PIPE_MS 行存在、sources=1。
+ * 产品基准 = ROOT/out/apeFinal/unisacc.com（UNISA_JOBS=1 保证单流路由，与管道同阶段）。
+ *
+ * 末行 CHECK_PHASE_PIPE failed=N；任何 FAIL 退出码 1。总预算 55s。
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+
+static int cp_failed;
+static char cp_root[4400], cp_slice[4400], cp_out[4400];
+static const char *cp_prod = "out/apeFinal/unisacc.com";
+
+static void cp_die(const char *s) { fprintf(stderr, "check-phase-pipe: %s errno=%d\n", s, errno); exit(2); }
+static void cp_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) cp_failed++;
+}
+static char *cp_read(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) cp_die(p);
+    return s;
+}
+static int cp_run(char *const av[], int budget, const char *what) {
+    np_result r; char why[1024];
+    if (np_run(av, cp_root, 0, budget, &r, why, sizeof why)) cp_die(why);
+    if (r.rc) {
+        if (r.err && r.errn) fwrite(r.err, 1, r.errn, stderr);
+        fprintf(stderr, "check-phase-pipe: %s rc=%d\n", what, r.rc);
+    }
+    np_free(&r);
+    return r.rc;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], list[4400], out[4400], prodout[4400], line[4400];
+    size_t an, bn;
+    char *a, *b;
+    int rc;
+
+    if (argc == 1) {
+        if (!getcwd(cp_root, sizeof cp_root)) cp_die("getcwd");
+        if (snprintf(cp_slice, sizeof cp_slice, "%s/out/sliceQ2", cp_root) >= (int)sizeof cp_slice) cp_die("path");
+        if (snprintf(cp_out, sizeof cp_out, "%s/out/check-phase-pipe-%d", cp_root, (int)getpid()) >= (int)sizeof cp_out) cp_die("path");
+        if (mkdir(cp_out, 0700) && errno != 17) cp_die("mkdir");
+    } else if (argc == 4 && !strcmp(argv[1], "--")) {
+        if (!realpath(argv[2], cp_root)) cp_die("root");
+        if (!realpath(argv[3], cp_slice)) cp_die("slice");
+        if (snprintf(cp_out, sizeof cp_out, "%s/out/check-phase-pipe-%d", cp_root, (int)getpid()) >= (int)sizeof cp_out) cp_die("path");
+        if (mkdir(cp_out, 0700) && errno != 17) cp_die("mkdir");
+    } else cp_die("usage [-- ROOT SLICEDIR]");
+
+    /* A：四段切片都在。 */
+    { const char *s[4] = {"e2", "e1", "units", "e3"}; int i, ok = 1;
+      for (i = 0; i < 4; i++) {
+          struct stat st;
+          if (snprintf(line, sizeof line, "%s/slice/%s/program.com", cp_slice, s[i]) >= (int)sizeof line) cp_die("path");
+          if (stat(line, &st) || st.st_size < 1024) ok = 0;
+      }
+      cp_ck(ok, "A slice-four-stages-present"); }
+
+    /* 夹具：含 include 的 .c，与产品同一条源、同一标签。 */
+    if (snprintf(src, sizeof src, "%s/pipe-inc.c", cp_out) >= (int)sizeof src) cp_die("path");
+    { const char *body = "#include <stdio.h>\nint main(void){return 0;}\n";
+      if (cx_write(src, body, strlen(body))) cp_die(src); }
+    if (snprintf(list, sizeof list, "%s/sources.list", cp_out) >= (int)sizeof list) cp_die("path");
+    if (cx_write(list, src, strlen(src))) cp_die(list);
+
+    /* B：管道 vs 已装产品，全文逐字节。 */
+    if (snprintf(out, sizeof out, "%s/pipe.out", cp_out) >= (int)sizeof out) cp_die("path");
+    if (snprintf(prodout, sizeof prodout, "%s/prod.out", cp_out) >= (int)sizeof prodout) cp_die("path");
+    { char *av[] = {"sh", "./unisacc.com", "tools/phase-pipe.cx", "--",
+                    cp_root, cp_slice, list, out, 0};
+      rc = cp_run(av, 50, "phase-pipe"); }
+    cp_ck(rc == 0, "B1 pipeline-rc0");
+    { char *av[] = {"sh", "-c", 0, 0};
+      char cmd[9200];
+      if (snprintf(cmd, sizeof cmd, "UNISA_JOBS=1 exec '%s/%s' -S '%s' > '%s'", cp_root, cp_prod, src, prodout) >= (int)sizeof cmd) cp_die("cmd");
+      av[2] = cmd;
+      rc = cp_run(av, 40, "product"); }
+    cp_ck(rc == 0, "B2 product-rc0");
+    a = cp_read(out, &an);
+    b = cp_read(prodout, &bn);
+    cp_ck(an > 0 && an == bn && !memcmp(a, b, an), "B3 pipeline-equals-product-byte-for-byte");
+    { char label[128]; snprintf(label, sizeof label, "B4 bytes=%zu", an); cp_ck(an == 18767, label); }
+    free(a); free(b);
+
+    /* C：PIPE_MS 行存在且 sources=1（管道自己报的段计时）。 */
+    { char *s = cp_read(out, &an); (void)s; free(s); }
+    { char *av[] = {"sh", "./unisacc.com", "tools/phase-pipe.cx", "--",
+                    cp_root, cp_slice, list, out, 0};
+      np_result r; char why[1024];
+      if (np_run(av, cp_root, 0, 50, &r, why, sizeof why)) cp_die(why);
+      cp_ck(r.rc == 0 && r.out && r.outn > 0 && strstr(r.out, "PIPE_MS") && strstr(r.out, "sources=1"),
+            "C1 pipe-reports-PIPE_MS-sources-1");
+      np_free(&r); }
+    printf("CHECK_PHASE_PIPE\tfailed=%d\n", cp_failed);
+    return cp_failed ? 1 : 0;
+}

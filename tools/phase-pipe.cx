@@ -1,0 +1,132 @@
+/* tools/phase-pipe.cx -- run the real stage executables produced by
+ * tools/lab-loader/slice.cx as a pipeline, e2|e1|frame|units|e3.
+ *
+ *   sh ./unisacc.com tools/phase-pipe.cx -- ROOT SLICEDIR SOURCE_LIST OUT
+ *
+ * SOURCE_LIST is one source path per line (first line is main), the same order
+ * the driver's dv_units uses. Every source gets its own e2 and e1 process
+ * (the first version; --batch comes later only if 65 sources exceed 60s).
+ * The frame is built with cx/compiler/frames.cx, the same fr_add that
+ * src/driveunits.cx calls, so there is no second framing implementation.
+ *
+ * Prints PIPE_MS<TAB>phase=ms...<TAB>total=ms and exits 0 only when every
+ * stage returned 0. A stage that refuses prints its stderr and returns 1. */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use compiler.frames
+#pragma unisa use cxlib.netpack
+#pragma unisa use runtime.attribute_frame
+#pragma unisa use text.text
+
+static char root[4400], slicedir[4400], bound[4400], outpath[4400], tmpdir[4400];
+static long ms[5];
+static int failed;
+
+static void die(const char *s) { fprintf(stderr, "phase-pipe: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void jn(char *o, size_t cap, const char *a, const char *b) {
+    if (cx_fmt(o, cap, b && b[0] ? "%s/%s" : "%s", a, b)) die("path");
+}
+static char *slurp(const char *p, long *n) {
+    size_t z;
+    char *s = cx_read(p, &z);
+    if (!s) die(p);
+    *n = (long)z;
+    return s;
+}
+/* The units network takes frames whose tape is the UNITOK1 section only; e1's
+   stdout carries a USLATTR1 attribute frame in front of it. Strip that frame
+   with cx/runtime/attribute_frame.cx, the same strip the driver's e1 handoff
+   does, then frame the tape. A non-zero rc here is a named refusal. */
+static void *sa_al(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static int strip_attrs(char *b, long *n) {
+    unsigned char *block = 0; long bn = 0, bcap = 0;
+    int rc = cxaf_strip(&block, &bn, &bcap, (unsigned char *)b, n, 0, sa_al);
+    free(block);
+    return rc == 0 || rc == 1 ? 0 : 1;
+}
+static void put(const char *p, const char *s, long n) {
+    if (cx_write(p, s, (size_t)n)) die(p);
+}
+static long now(void) { long v = sy_now_ms(); if (v < 0) die("clock"); return v; }
+
+/* One process per (source, stage). program.com reads stdin and writes stdout;
+   the shell is only the thin fd redirect, not a third stage implementation. */
+static void stage(int idx, const char *name, const char *in, const char *out, const char *prog) {
+    char cmd[9200], err[4400], why[1024];
+    char *av[6];
+    np_result r;
+    long t0 = now();
+    if (cx_fmt(err, sizeof err, "%s.err", out)) die("err path");
+    if (cx_fmt(cmd, sizeof cmd, "exec '%s' < '%s' > '%s' 2> '%s'", prog, in, out, err)) die("cmd");
+    av[0] = bound; av[1] = "55"; av[2] = "sh"; av[3] = "-c"; av[4] = cmd; av[5] = 0;
+    if (np_run(av, root, 0, 58, &r, why, sizeof why)) die(why);
+    ms[idx] += now() - t0;
+    if (r.rc) {
+        fwrite(r.err, 1, r.errn, stderr);
+        { long en = 0; char *e = slurp(err, &en); if (e) { fwrite(e, 1, (size_t)en, stderr); free(e); } }
+        fprintf(stderr, "phase-pipe: %s refused rc=%d in=%s\n", name, r.rc, in);
+        failed++;
+    }
+    np_free(&r);
+}
+static void stage_path(char *p, size_t cap, const char *name) {
+    char d[4400], q[4400];
+    jn(d, sizeof d, slicedir, "slice");
+    jn(q, sizeof q, d, name);
+    jn(p, cap, q, "program.com");
+}
+
+int main(int argc, char **argv) {
+    char e2p[4400], e1p[4400], unitp[4400], e3p[4400];
+    char pp[4400], tape[4400], fin[4400], uout[4400];
+    char *paths[512];
+    long n = 0, nsrc = 0, at = 0;
+    unsigned char *frame = 0;
+    long fn = 0, fc = 0;
+    char *s;
+    long t0 = now();
+    if (argc == 6 && !strcmp(argv[1], "--")) { argc--; argv++; }
+    if (argc != 5) die("usage ROOT SLICEDIR SOURCE_LIST OUT");
+    if (!realpath(argv[1], root)) die("root realpath");
+    if (!realpath(argv[2], slicedir)) die("slice realpath");
+    { void *k = memcpy(outpath, argv[4], strlen(argv[4]) + 1); (void)k; }
+    jn(bound, sizeof bound, root, "tools/bound");
+    if (cx_fmt(tmpdir, sizeof tmpdir, "%s.phase-pipe", outpath)) die("tmpdir path");
+    if (mkdir(tmpdir, 0700) && errno != 17) die("tmpdir");
+    s = slurp(argv[3], &n);
+    for (; at < n && nsrc < 511; ) {
+        char *a = s + at, *e = a; long z;
+        while (e < s + n && *e != '\n') e++;
+        z = (long)(e - a);
+        if (z) { if (z >= 4400) die("source path"); paths[nsrc] = malloc(z + 1);
+                 memcpy(paths[nsrc], a, (size_t)z); paths[nsrc][z] = 0; nsrc++; }
+        at = (long)(e - s) + 1;
+    }
+    free(s);
+    if (nsrc < 1) die("empty source list");
+    stage_path(e2p, sizeof e2p, "e2");
+    stage_path(e1p, sizeof e1p, "e1");
+    stage_path(unitp, sizeof unitp, "units");
+    stage_path(e3p, sizeof e3p, "e3");
+    for (long i = 0; i < nsrc; i++) {
+        if (cx_fmt(pp, sizeof pp, "%s/e2-%ld.pp", tmpdir, i)) die("pp path");
+        if (cx_fmt(tape, sizeof tape, "%s/e1-%ld.tape", tmpdir, i)) die("tape path");
+        stage(0, "e2", paths[i], pp, e2p);
+        stage(1, "e1", pp, tape, e1p);
+        { long tn = 0; char *t = slurp(tape, &tn);
+          if (strip_attrs(t, &tn)) die("e1-attribute-frame");
+          if (fr_add(&frame, &fn, &fc, paths[i], (long)strlen(paths[i]), (const unsigned char *)t, tn)) die("fr_add");
+          free(t); }
+    }
+    if (cx_fmt(fin, sizeof fin, "%s/units.in", tmpdir)) die("fin path");
+    if (cx_fmt(uout, sizeof uout, "%s/units.out", tmpdir)) die("uout path");
+    put(fin, (const char *)frame, fn);
+    free(frame);
+    stage(3, "units", fin, uout, unitp);
+    stage(4, "e3", uout, outpath, e3p);
+    { long total = now() - t0;
+      printf("PIPE_MS\te2=%ld\te1=%ld\tframe=0\tunits=%ld\te3=%ld\ttotal=%ld\tsources=%ld\n",
+             ms[0], ms[1], ms[3], ms[4], total, nsrc); }
+    return failed ? 1 : 0;
+}
