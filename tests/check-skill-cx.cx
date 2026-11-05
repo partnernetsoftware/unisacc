@@ -1,0 +1,144 @@
+/* check-skill-cx.cx -- the skill document must still be true: every ```cx-run block of
+ * skills/unisacc-cx/SKILL.md is run (sh -c, cwd = repo root) and its stdout must equal, byte for
+ * byte, the ```expect block that follows it.  An example that drifts, a module that was renamed, or
+ * a product whose output changed turns the document red instead of letting it rot.
+ *
+ *   sh ./unisacc.com tests/check-skill-cx.cx                      # skills/unisacc-cx/SKILL.md, root .
+ *   sh ./unisacc.com tests/check-skill-cx.cx -- SKILL.md          # another document
+ *   sh ./unisacc.com tests/check-skill-cx.cx -- --self-test       # red fixture fails, green passes
+ *
+ * Block grammar (fenced, each fence on its own line):
+ *   ```cx-run            one or more shell lines; the block's exit code must be 0
+ *   <command lines>      (put `; echo rc=$?` inside when a non-zero code is the point)
+ *   ```
+ *   ```expect            the exact stdout, including the final newline; an empty block means no output
+ *   <lines>
+ *   ```
+ * Blank lines may sit between the two fences.  A cx-run block without an expect block, an unclosed
+ * fence, or a document with zero cx-run blocks is a failure (a document with no checked examples is
+ * not a verified document).  Each block runs under a 55 s wall clock (124 = timeout); stderr passes
+ * through.  Prints one line per block
+ *   PASS|FAIL<TAB>skill-cx.N<TAB>line L<TAB>first command line
+ * with the expected and actual bytes after a FAIL, and ends with
+ *   CHECK_SKILL_CX<TAB>blocks=N<TAB>failed=M<TAB>elapsed_ms=T      rc 0 only when M = 0 and N > 0.
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+#define SK_SECS 55
+
+static int sk_blocks, sk_failed;
+
+static int sk_line(const char *b, long n, long *at, long *off, long *len) {
+    long e = *at;
+    if (*at >= n) return 0;
+    while (e < n && b[e] != '\n') e++;
+    *off = *at; *len = e - *at; *at = e + 1;
+    return 1;
+}
+static int sk_is(const char *b, long off, long len, const char *lit) {
+    long k = tx_len(lit, 64);
+    return len == k && mm_same(b + off, lit, k);
+}
+/* the body of a fence opened at *at: bytes [*boff, *boff+*blen) up to the closing ```; 0 when unclosed */
+static int sk_body(const char *b, long n, long *at, long *boff, long *blen) {
+    long off, len, start = *at;
+    *boff = start; *blen = 0;
+    while (sk_line(b, n, at, &off, &len)) {
+        if (sk_is(b, off, len, "```")) { *blen = off - start; return 1; }
+    }
+    return 0;
+}
+static void sk_dump(const char *tag, const char *p, long n) {
+    sy_printf("--- %s (%ld bytes)\n", tag, n);
+    if (n > 0) sy_write_all(1, p, n);
+    if (n > 0 && p[n - 1] != '\n') sy_printf("\\ no newline at end\n");
+}
+static void sk_run(const char *cmd, long cmdn, const char *want, long wantn, long line) {
+    char *c = mm_alloc(cmdn + 1), *out = 0; size_t outn = 0; int rc; long fl = 0;
+    char *argv[4];
+    sk_blocks++;
+    mm_copy(c, cmdn + 1, cmd, cmdn); c[cmdn] = 0;
+    while (fl < cmdn && cmd[fl] != '\n') fl++;
+    argv[0] = "sh"; argv[1] = "-c"; argv[2] = c; argv[3] = 0;
+    rc = cx_runv_timeout(argv, SK_SECS, &out, &outn);
+    if (rc == 0 && (long)outn == wantn && (wantn == 0 || mm_same(out, want, wantn))) {
+        sy_printf("PASS\tskill-cx.%d\tline %ld\t%.*s\n", sk_blocks, line, (int)fl, cmd);
+    } else {
+        sk_failed++;
+        sy_printf("FAIL\tskill-cx.%d\tline %ld\t%.*s\trc=%d\n", sk_blocks, line, (int)fl, cmd, rc);
+        sk_dump("expect", want, wantn);
+        sk_dump("actual", out ? out : "", (long)outn);
+    }
+    mm_free(out); mm_free(c);
+}
+static int sk_check(const char *path) {
+    size_t sz = 0; char *b = cx_read(path, &sz); long n = (long)sz, at = 0, off, len, line = 0, cline;
+    long coff, clen, eoff, elen;
+    if (!b) { sy_eprintf("check-skill-cx: cannot read %s\n", path); return 2; }
+    while (sk_line(b, n, &at, &off, &len)) {
+        line++;
+        if (!sk_is(b, off, len, "```cx-run")) continue;
+        cline = line;
+        if (!sk_body(b, n, &at, &coff, &clen)) { sy_printf("FAIL\tskill-cx\tline %ld\tunclosed cx-run fence\n", cline); sk_failed++; break; }
+        line += tx_count(b + coff, clen, "\n", 1) + 1;
+        /* skip blank lines, then demand ```expect */
+        for (;;) {
+            long save = at;
+            if (!sk_line(b, n, &at, &off, &len)) { off = -1; break; }
+            line++;
+            if (len == 0) continue;
+            if (!sk_is(b, off, len, "```expect")) { at = save; line--; off = -1; }
+            break;
+        }
+        if (off < 0) { sy_printf("FAIL\tskill-cx\tline %ld\tcx-run block without a following ```expect block\n", cline); sk_blocks++; sk_failed++; continue; }
+        if (!sk_body(b, n, &at, &eoff, &elen)) { sy_printf("FAIL\tskill-cx\tline %ld\tunclosed expect fence\n", cline); sk_failed++; break; }
+        line += tx_count(b + eoff, elen, "\n", 1) + 1;
+        sk_run(b + coff, clen, b + eoff, elen, cline);
+    }
+    mm_free(b);
+    return 0;
+}
+/* a scratch directory: mkdir is atomic, -EEXIST means try the next name; no pid, no wildcard rm */
+static int sk_scratch(char *dir, int cap) {
+    int i, rc = -1; long seed = sy_now_ms(); const char *base = sy_env_or("TMPDIR", "/tmp");
+    for (i = 0; i < 100 && rc < 0; i++) {
+        tx_snprintf(dir, cap, "%s/check-skill-cx-%lx-%d", base, seed, i);
+        rc = sy_mkdir(dir, 0700);
+        if (rc < 0 && rc != -17) return rc;
+    }
+    return rc;
+}
+static int sk_self_test(void) {
+    char dir[4096], red[4096], green[4096]; int r1, r2;
+    const char *g = "# t\n\n```cx-run\nprintf 'a\\n'; printf 'b\\n'\n```\n\n```expect\na\nb\n```\n";
+    const char *r = "# t\n```cx-run\nprintf 'a\\n'\n```\n```expect\nb\n```\n```cx-run\ntrue\n```\nno expect here\n";
+    if (sk_scratch(dir, sizeof dir) < 0) { sy_eprintf("check-skill-cx: no scratch dir\n"); return 2; }
+    cx_path_join(red, sizeof red, dir, "red.md"); cx_path_join(green, sizeof green, dir, "green.md");
+    if (cx_write(red, r, tx_len(r, 4096)) || cx_write(green, g, tx_len(g, 4096))) return 2;
+    sk_blocks = sk_failed = 0; sk_check(red);  r1 = (sk_failed == 2 && sk_blocks == 2);
+    sk_blocks = sk_failed = 0; sk_check(green); r2 = (sk_failed == 0 && sk_blocks == 1);
+    sy_unlink(red); sy_unlink(green); sy_rmdir(dir);
+    sy_printf("%s\tskill-cx.self-test.red\tfails as expected\n", r1 ? "PASS" : "FAIL");
+    sy_printf("%s\tskill-cx.self-test.green\tpasses\n", r2 ? "PASS" : "FAIL");
+    sy_printf("CHECK_SKILL_CX\tblocks=%d\tfailed=%d\tself_test=%d\n", 3, (r1 && r2) ? 0 : 1, 1);
+    return (r1 && r2) ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    const char *path = "skills/unisacc-cx/SKILL.md"; long t0 = sy_now_ms(); int rc;
+    if (argc == 2 && tx_eqz(argv[1], "--self-test")) return sk_self_test();
+    if (argc == 2) path = argv[1];
+    else if (argc > 2) { sy_eprintf("usage: check-skill-cx.cx [SKILL.md | --self-test]\n"); return 2; }
+    rc = sk_check(path);
+    if (rc) return rc;
+    if (sk_blocks == 0) { sy_printf("FAIL\tskill-cx\tno cx-run block in %s\n", path); sk_failed++; }
+    sy_printf("CHECK_SKILL_CX\tblocks=%d\tfailed=%d\telapsed_ms=%ld\n", sk_blocks, sk_failed, sy_now_ms() - t0);
+    return sk_failed ? 1 : 0;
+}
