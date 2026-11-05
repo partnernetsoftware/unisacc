@@ -1,0 +1,84 @@
+/* tools/rt-linkage.cx -- give the carried runtime functions of one header the RT-DEDUP three-way linkage.
+ *
+ *   sh ./unisacc.com tools/rt-linkage.cx -- FILE [--apply] [--skip NAME,NAME...]
+ *
+ * A carried function sits alone in its trim guard (`#if !__UNISA_FTRIM_LIBC || __UN_<name>`), opens with a
+ * one-line `static T name(ARGS) {` and closes with a column-0 `}` before the guard's `#endif`.  Each such
+ * function becomes
+ *     #if defined(RT_EXTERN)
+ *     extern T name(ARGS);              -- the unit only refers to it
+ *     #else
+ *     _U_RTFN T name(ARGS) {            -- static by default (bytes unchanged), a definition under RT_UNIT
+ *     ...
+ *     }
+ *     #endif
+ * _U_RTFN comes from <sys/_exit.h> next to _U_SHARED.  A guard whose body is not exactly one such function
+ * (several functions, a data object, a forward declaration, a variadic `...`) is left alone and listed, so
+ * nothing is rewritten on a guess; --skip names functions to keep static (e.g. __main_ret, a constructor).
+ * Prints RT_LINKAGE<TAB>file=..<TAB>rewritten=N<TAB>left=M and one LEFT<TAB>line<TAB>why per guard left.
+ * Exit 0, 2 on usage/IO.  Without --apply the file is not written. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXL 20000
+static char *ln[MAXL]; static long lnn[MAXL]; static int nl;
+
+static int is_guard(int i) { return tx_prefix(ln[i], lnn[i], "#if !__UNISA_FTRIM_LIBC || __UN_", 32); }
+static int is_endif(int i) { return lnn[i] >= 6 && tx_prefix(ln[i], lnn[i], "#endif", 6); }
+static int skipped(const char *skip, const char *name, long n) {
+    long a = 0, z, k = skip ? tx_len(skip, 4096) : 0;
+    while (a < k) { for (z = a; z < k && skip[z] != ','; z++) {} if (z - a == n && tx_prefix(skip + a, z - a, name, n)) return 1; a = z + 1; }
+    return 0;
+}
+int main(int argc, char **argv) {
+    size_t bn; char *b, *out; long i, cap, olen = 0; int apply = 0, rw = 0, left = 0, a;
+    const char *skip = 0;
+    if (argc < 2) { sy_eprintf("usage: rt-linkage.cx FILE [--apply] [--skip NAME,...]\n"); return 2; }
+    for (a = 2; a < argc; a++) {
+        if (tx_eqz(argv[a], "--apply")) apply = 1;
+        else if (tx_eqz(argv[a], "--skip") && a + 1 < argc) skip = argv[++a];
+        else { sy_eprintf("usage: rt-linkage.cx FILE [--apply] [--skip NAME,...]\n"); return 2; }
+    }
+    b = cx_read(argv[1], &bn); if (!b) { sy_eprintf("rt-linkage: cannot read %s\n", argv[1]); return 2; }
+    for (i = 0, nl = 0; i < (long)bn && nl < MAXL; ) {
+        long e = i; while (e < (long)bn && b[e] != '\n') e++;
+        ln[nl] = b + i; lnn[nl] = e - i; nl++; i = e + 1;
+    }
+    cap = (long)bn * 2 + 4096; out = mm_alloc(cap); if (!out) return 2;
+#define EMIT(p, n) do { if (mm_copy(out + olen, cap - olen, (p), (n))) return 2; olen += (n); } while (0)
+#define EMITZ(s) EMIT((s), tx_len((s), 256))
+    for (i = 0; i < nl; i++) {
+        long s = i + 1, e, close = -1, k, paren, nm, ne; int ok = 1; const char *why = 0;
+        if (!is_guard(i)) { EMIT(ln[i], lnn[i]); EMITZ("\n"); continue; }
+        for (e = s; e < nl && !is_endif(e) && !is_guard(e); e++) {}
+        if (e >= nl || !is_endif(e)) ok = 0, why = "no-endif";
+        if (ok && !(lnn[s] > 8 && tx_prefix(ln[s], lnn[s], "static ", 7) && ln[s][lnn[s] - 1] == '{' && ln[s][lnn[s] - 2] == ' ')) ok = 0, why = "not-one-line-static-def";
+        if (ok) { for (k = s + 1; k < e; k++) if (lnn[k] == 1 && ln[k][0] == '}') { if (close >= 0) { ok = 0; why = "two-bodies"; } close = k; } }
+        if (ok && close != e - 1) ok = 0, why = close < 0 ? "no-close" : "text-after-body";
+        if (ok && tx_find(ln[s], lnn[s], "...", 3) >= 0) ok = 0, why = "variadic";
+        paren = ok ? tx_find(ln[s], lnn[s], "(", 1) : -1;
+        if (ok && paren < 0) ok = 0, why = "no-paren";
+        if (ok) {   /* the name is the identifier right before '(' */
+            ne = paren; nm = ne; while (nm > 0 && (tx_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", 63, ln[s] + nm - 1, 1) >= 0)) nm--;
+            if (skipped(skip, ln[s] + nm, ne - nm)) ok = 0, why = "skipped";
+        }
+        if (!ok) {
+            sy_printf("LEFT\t%ld\t%s\n", i + 1, why); left++;
+            for (k = i; k <= (e < nl ? e : nl - 1); k++) { EMIT(ln[k], lnn[k]); EMITZ("\n"); }
+            i = e < nl ? e : nl - 1; continue;
+        }
+        EMIT(ln[i], lnn[i]); EMITZ("\n#if defined(RT_EXTERN)\nextern ");
+        EMIT(ln[s] + 7, lnn[s] - 7 - 2); EMITZ(";\n#else\n_U_RTFN ");
+        EMIT(ln[s] + 7, lnn[s] - 7); EMITZ("\n");
+        for (k = s + 1; k <= close; k++) { EMIT(ln[k], lnn[k]); EMITZ("\n"); }
+        EMITZ("#endif\n"); EMIT(ln[e], lnn[e]); EMITZ("\n");
+        rw++; i = e;
+    }
+    if (olen > 0 && (bn == 0 || b[bn - 1] != '\n')) olen--;
+    sy_printf("RT_LINKAGE\tfile=%s\trewritten=%d\tleft=%d\n", argv[1], rw, left);
+    if (apply && cx_write(argv[1], out, (size_t)olen) != 0) { sy_eprintf("rt-linkage: cannot write %s\n", argv[1]); return 2; }
+    return 0;
+}

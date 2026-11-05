@@ -1,0 +1,64 @@
+/* tools/check-rt-linkage.cx -- tools/rt-linkage.cx rewrites exactly the carried functions it may, nothing else.
+ *
+ *   sh ./unisacc.com tools/check-rt-linkage.cx [-- ROOT]
+ *
+ * In a mkdtemp scratch, a header with: one plain one-line function (rewritten), a variadic one, a guard
+ * holding two functions, a guard holding a data object, and a --skip'd function (all four left).
+ * Asserts (exit 0 all hold, 1 any fails, 2 usage/IO):
+ *   1) a dry run reports rewritten=1 left=4 and leaves the file byte-identical;
+ *   2) --apply writes exactly the expected text (the four left guards untouched);
+ *   3) a second --apply finds nothing more to rewrite (rewritten=0): the rewrite is not applied twice. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char g_root[4096], work[4096], hdr[4200];
+#define G(n) "#if !__UNISA_FTRIM_LIBC || __UN_" n "\n"
+static const char *SRC =
+    G("one") "static int one(int __u_a) {\n    return __u_a;\n}\n#endif\n"
+    G("va") "static int va(const char *__u_f, ...) {\n    return 0;\n}\n#endif\n"
+    G("two") "static int two(void) {\n    return 2;\n}\nstatic int three(void) {\n    return 3;\n}\n#endif\n"
+    G("tab") "static int tab[4];\n#endif\n"
+    G("keep") "static int keep(void) {\n    return 0;\n}\n#endif\n";
+static const char *WANT =
+    G("one") "#if defined(RT_EXTERN)\nextern int one(int __u_a);\n#else\n_U_RTFN int one(int __u_a) {\n    return __u_a;\n}\n#endif\n#endif\n"
+    G("va") "static int va(const char *__u_f, ...) {\n    return 0;\n}\n#endif\n"
+    G("two") "static int two(void) {\n    return 2;\n}\nstatic int three(void) {\n    return 3;\n}\n#endif\n"
+    G("tab") "static int tab[4];\n#endif\n"
+    G("keep") "static int keep(void) {\n    return 0;\n}\n#endif\n";
+
+static void check(int ok, const char *what) { sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+static int has(const char *s, const char *p) { return tx_contains(s, tx_len(s, 4096), p, tx_len(p, 4096)); }
+static int same(const char *want) {
+    size_t n; char *b = cx_read(hdr, &n);
+    return b && (long)n == tx_len(want, 8192) && mm_same(b, want, (long)n);
+}
+static int run(int apply, char *out, size_t cap) {
+    char *av[9] = {"sh", "./unisacc.com", "tools/rt-linkage.cx", "--", hdr, "--skip", "keep", apply ? "--apply" : 0, 0};
+    np_result r; char why[256];
+    if (np_run(av, g_root, 0, 55, &r, why, sizeof why)) { sy_eprintf("check-rt-linkage: %s\n", why); return -2; }
+    { size_t k = r.outn < cap - 1 ? r.outn : cap - 1; if (k) mm_copy(out, (long)cap, r.out, (long)k); out[k] = 0; }
+    return r.rc;
+}
+int main(int argc, char **argv) {
+    char out[1024]; int rc;
+    if (argc > 2) { sy_eprintf("usage: check-rt-linkage.cx [ROOT]\n"); return 2; }
+    if (argc == 2) { if (!realpath(argv[1], g_root)) return 2; } else if (sy_cwd(g_root, sizeof g_root) < 0) return 2;
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/check-rt-linkage-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) return 2; }
+    cx_fmt(hdr, sizeof hdr, "%s/h.h", work);
+    if (cx_write(hdr, SRC, (size_t)tx_len(SRC, 8192))) return 2;
+    rc = run(0, out, sizeof out);
+    check(rc == 0 && has(out, "rewritten=1\tleft=4") && same(SRC), "dry-run-counts-and-keeps-file");
+    rc = run(1, out, sizeof out);
+    check(rc == 0 && has(out, "rewritten=1\tleft=4") && same(WANT), "apply-rewrites-only-the-plain-function");
+    rc = run(1, out, sizeof out);
+    check(rc == 0 && has(out, "rewritten=0") && same(WANT), "second-apply-rewrites-nothing");
+    (void)sy_unlink(hdr); (void)sy_rmdir(work);
+    sy_printf("CHECK_RT_LINKAGE\tassertions=3\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
