@@ -9,10 +9,11 @@
 typedef struct { unsigned char *p; long n, cap; } Buf;
 static void put(Buf *b, const void *s, long n) {
     if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 64; b->p = realloc(b->p, b->cap); if (!b->p) { perror("ape"); exit(1); } }
-    memcpy(b->p + b->n, s, n); b->n += n;
+    { void *cx_kept = memcpy(b->p + b->n, s, n); (void)cx_kept; } b->n += n;
 }
 static void putc1(Buf *b, int c) { unsigned char u = (unsigned char)c; put(b, &u, 1); }
 static void put32(Buf *b, unsigned long v) { int i; for (i = 0; i < 4; i++) putc1(b, (int)(v >> 8 * i) & 255); }
+#define cx_fmt_chk(b, c, ...) do { int cx_n = snprintf(b, c, __VA_ARGS__); if (cx_n < 0 || cx_n >= (c)) { fputs("ape-pack: format bound\n", stderr); exit(1); } } while (0)
 static Buf slurp(const char *f) {
     Buf b = {0, 0, 0}; unsigned char tmp[65536]; size_t k; FILE *fp = fopen(f, "rb");
     if (!fp) { perror(f); exit(1); }
@@ -81,7 +82,7 @@ static void sha256hex(const unsigned char *p, long n, char *out16) {
         h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
         for (i = 0; i < 8; i++) h[i] &= 0xFFFFFFFFUL;
     }
-    sprintf(out16, "%08lx%08lx", h[0], h[1]);
+    cx_fmt_chk(out16, 17, "%08lx%08lx", h[0], h[1]);
 }
 
 static const char *NAME[4] = {"Linux|x86_64", "Linux|aarch64", "Darwin|x86_64", "Darwin|arm64"};
@@ -94,9 +95,9 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
     put(s, "u=$(uname -s)$(uname -m)\ncase \"$u\" in\n", 38);
     for (i = 0; i < 4; i++) {
         const char *bar = strchr(NAME[i], '|'); char o[16], a[16];
-        memcpy(o, NAME[i], (size_t)(bar - NAME[i])); o[bar - NAME[i]] = 0; strcpy(a, bar + 1);
-        if (!strcmp(a, "aarch64")) sprintf(line, "  %saarch64|%sarm64) o=%ld n=%ld k=%s;;\n", o, o, off[i], len[i], key[i]);
-        else sprintf(line, "  %s%s) o=%ld n=%ld k=%s;;\n", o, a, off[i], len[i], key[i]);
+        { void *cx_kept = memcpy(o, NAME[i], (size_t)(bar - NAME[i])); (void)cx_kept; } o[bar - NAME[i]] = 0; cx_fmt_chk(a, 16, "%s", bar + 1);
+        if (!strcmp(a, "aarch64")) cx_fmt_chk(line, 256, "  %saarch64|%sarm64) o=%ld n=%ld k=%s;;\n", o, o, off[i], len[i], key[i]);
+        else cx_fmt_chk(line, 256, "  %s%s) o=%ld n=%ld k=%s;;\n", o, a, off[i], len[i], key[i]);
         put(s, line, (long)strlen(line));
     }
     {
@@ -160,7 +161,7 @@ static Buf pe_with_stub(Buf pe, Buf stub) {
     {   unsigned long want = 488 + (unsigned long)stub.n;
         unsigned long hf = (want + 511) / 512 * 512; if (hf < 1024) hf = 1024; delta = hf - 1024; }
     memset(dos, 0, 64); dos[0] = 'M'; dos[1] = 'Z';
-    memcpy(dos + 2, stub.p, 62); wr32(dos + 0x3C, (unsigned long)stub.n + 2);
+    { void *cx_kept = memcpy(dos + 2, stub.p, 62); (void)cx_kept; } wr32(dos + 0x3C, (unsigned long)stub.n + 2);
     put(&o, dos, 64); put(&o, stub.p + 62, stub.n - 62);
     {   long ph = o.n; put(&o, pe.p + 64, (long)hdr);
         wr32(o.p + ph + 24 + 60, 1024 + delta);
@@ -259,7 +260,7 @@ static Buf add_version_info(Buf src, const char *name, const char *ver) {
     wr32(out.p + opt + 8, rd32(src.p + opt + 8) + rawsize);
     wr32(out.p + opt + 56, newimage); wr32(out.p + opt + 64, 0);
     wr32(out.p + opt + 112 + 16, rva); wr32(out.p + opt + 112 + 20, (unsigned long)res.n);
-    {   unsigned char *h = out.p + newh; memset(h, 0, 40); memcpy(h, ".rsrc", 5);
+    {   unsigned char *h = out.p + newh; memset(h, 0, 40); { void *cx_kept = memcpy(h, ".rsrc", 5); (void)cx_kept; }
         wr32(h + 8, (unsigned long)res.n); wr32(h + 12, rva); wr32(h + 16, rawsize); wr32(h + 20, raw); wr32(h + 36, 0x40000040UL); }
     return out;
 }
@@ -308,7 +309,7 @@ int main(int argc, char **argv) {
         if (pkg.n < 4 || (memcmp(pkg.p, "P 1 ", 4) && memcmp(pkg.p, "P 2 ", 4) && memcmp(pkg.p, "P 3 ", 4) && memcmp(pkg.p, "P 4 ", 4))) { fprintf(stderr, "ape: embedded payload must be a model package\n"); return 1; }
     }
     win = slurp(argv[2]);
-    for (i = 0; i < 4; i++) { Buf raw = slurp(argv[3 + i]); img[i] = deflate_on ? gz_deflate(raw) : gz(raw); free(raw.p); len[i] = img[i].n; off[i] = 1L << 30; strcpy(key[i], "0000000000000000"); }
+    for (i = 0; i < 4; i++) { Buf raw = slurp(argv[3 + i]); img[i] = deflate_on ? gz_deflate(raw) : gz(raw); free(raw.p); len[i] = img[i].n; off[i] = 1L << 30; cx_fmt_chk(key[i], 17, "%s", "0000000000000000"); }
     script(&sc, off, len, key);
     want = sc.n + 40;
     { long n0 = 2 + 64; want += (8 - (n0 + want) % 8) % 8; }   /* PE signature 8-aligned */
