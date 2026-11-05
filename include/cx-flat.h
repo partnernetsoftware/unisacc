@@ -7495,6 +7495,7 @@ static pid_t wait(int *__u_st) { return waitpid(-1, __u_st, 0); }
 
 
 
+
 #ifdef _WIN32
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -7542,7 +7543,9 @@ static pid_t wait(int *__u_st) { return waitpid(-1, __u_st, 0); }
 #define FD_CLOEXEC 1
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_open
-static int open(const char *__u_p, int __u_flags, int __u_mode) {
+static int open(const char *__u_p, int __u_flags, ...) {
+    int __u_mode = 0; va_list __u_ap;
+    if (__u_flags & O_CREAT) { va_start(__u_ap, __u_flags); __u_mode = va_arg(__u_ap, int); va_end(__u_ap); }
     __u_word __u_r;
 #ifdef _WIN32
     __u_word __u_acc; __u_word __u_disp;              /* the __open gate is CreateFileA(path, access, disposition) */
@@ -7587,7 +7590,9 @@ struct flock { short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l
 #endif
 #ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_fcntl
-static int fcntl(int __u_fd, int __u_cmd, __u_word __u_arg) {
+static int fcntl(int __u_fd, int __u_cmd, ...) {
+    __u_word __u_arg = 0; va_list __u_ap;
+    va_start(__u_ap, __u_cmd); if (__u_cmd != F_GETFD && __u_cmd != F_GETFL) __u_arg = va_arg(__u_ap, __u_word); va_end(__u_ap);
     __u_word __u_r; __u_r = __fcntl(__u_fd, __u_cmd, __u_arg);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return (int)__u_r;
 }
@@ -8305,6 +8310,7 @@ static int cx_path_join(char *__u_dst, size_t __u_cap, const char *__u_dir, cons
 
 
 
+
 #ifdef _WIN32
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -8352,7 +8358,9 @@ static int cx_path_join(char *__u_dst, size_t __u_cap, const char *__u_dir, cons
 #define FD_CLOEXEC 1
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_open
-static int open(const char *__u_p, int __u_flags, int __u_mode) {
+static int open(const char *__u_p, int __u_flags, ...) {
+    int __u_mode = 0; va_list __u_ap;
+    if (__u_flags & O_CREAT) { va_start(__u_ap, __u_flags); __u_mode = va_arg(__u_ap, int); va_end(__u_ap); }
     __u_word __u_r;
 #ifdef _WIN32
     __u_word __u_acc; __u_word __u_disp;              /* the __open gate is CreateFileA(path, access, disposition) */
@@ -8397,7 +8405,9 @@ struct flock { short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l
 #endif
 #ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_fcntl
-static int fcntl(int __u_fd, int __u_cmd, __u_word __u_arg) {
+static int fcntl(int __u_fd, int __u_cmd, ...) {
+    __u_word __u_arg = 0; va_list __u_ap;
+    va_start(__u_ap, __u_cmd); if (__u_cmd != F_GETFD && __u_cmd != F_GETFL) __u_arg = va_arg(__u_ap, __u_word); va_end(__u_ap);
     __u_word __u_r; __u_r = __fcntl(__u_fd, __u_cmd, __u_arg);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return (int)__u_r;
 }
