@@ -12,14 +12,18 @@
 - release-build 快照补齐根产品三件套（build.json + unisacc.com.dev/）。
 - whole-o（osx/win）改为工具内墙钟看门狗 rb_wait_child（120 s，可注入 UNISACC_RB_WHOLE_MS），超时报 `timeout after Nms`、删残余产物、杀进程组；tools/bound 超时明确报 `bound: timeout after N seconds`。
 - 单元上限事实表 exec/facts/limits.tsv + check-limits：6 处上限与两份对象表跨表一致校验。
+- APE 只带尾部一份模型包:ape-pack 拒绝片尾带 UNIPKG1 的片(`slice carries a package; pass <slice>/entry.elf`),lnx 片传 entry.elf;实测 APE 8,512,083→5,477,539B(APE-ONEPKG,2f5512d04b)。
+- 产品子命令 `unisacc stream STAGE`:单阶段过滤器,e2|e1|e3|sidecar|prune|lower|elf 与 `-o` 逐字节相同;改一行表到 e3 结论双向实测 21.9 s/21.8 s。
 
 ## 提速（SPEED-02）
 - 作业身份 = 声明输入闭包（ptrace 观测读取 `read<TAB>sha<TAB>path`，含 ENOENT 探测），四类变异各自 MISS。
 - reuse-batch 单进程判定：131 作业全命中 226 s → 12.7 s；复用默认仍关（UNISACC_WAVE_REUSE=1 启用）。
 
 ## 测试
-- tests/module/（cxmod/driveplan/driveunits 直连单测）、tests/unit-boundary（1/2/63/64/65/127/128/129）、reject-locate、check-limits、check-net-dump、trace-tools-only。
+- tests/module/（cxmod/driveplan/driveunits 直连单测）、tests/unit-boundary（1/2/63/64/65/127/128/129）、reject-locate、check-limits、check-net-dump、trace-tools-only、stream-pipe(七段管道对产品逐字节)、stages(tests/stages/<段>/ 分段字节用例,正例/拒绝/链/锚点,无拒绝用例的段记 GAP)、kernel-base、facts-current。
 
 ## 已知未完成（发布时删除本段）
-- 五片 APE：ape-pack 复制到 tools/ape-pack.cx 并加 P4 支持（APE-OWN，进行中）；本版安装走 dev-lnx。
-- LOADER-GRAD（分段管道转正）进行中；DOCK2*、ARITY、AUDIT-DUP、CHAIN-ARCHIVE、SRC-SPLIT 为 P2。
+- 跨单元共享 FILE:多源一次编译时,单元 A 写入的缓冲在单元 B fclose 时丢失(RT-SHARED 修复中,将并入本版);修复后多单元产物字节会变。`-c` 分开编再链接的路径本版只给警告,不修(RT-COMMON,0.0.45)。
+- e4/prune/lower 对不合法输入不拒绝(STAGE-REJECT 修复中);截断恰好落在行尾时 tape 入口检查无法识别(格式无结束标记)。
+- 运行库每对象各带一份(约 264KB,ELF 的 15%),去重留 0.0.45(RT-DEDUP)。
+- DOCK2*、ARITY、SRC-SPLIT 为 P2。
