@@ -1,0 +1,130 @@
+/* check-roll-up-open.cx -- a known-FAIL roll-up batch must not hide local open cells.
+ *
+ *   sh ./unisacc.com tests/check-roll-up-open.cx -- ROOT WAIVERS.tsv
+ *   sh ./unisacc.com tests/check-roll-up-open.cx -- --self-test
+ *
+ * Every F row whose batch is full-<domain> must state, in its reason, the open cells of
+ * tests/<domain>-domain-matrix.tsv as "open: foreign=N blocked=N local-missing=N product-change=N".
+ * A cell is open when column 3 is yes and column 4 is not COVERED_LOCAL, OBSERVED or DECLARED_DEPENDENCY
+ * (the same test as tests/full-domain.cx). It is counted as
+ *   foreign         NEEDS_FOREIGN_HOST
+ *   blocked         BLOCKED or BLOCKED:<reason>
+ *   product-change  NEEDS_PRODUCT_CHANGE
+ *   local-missing   MISSING on host lnx/x86_64 (this host could close it)
+ *   other           anything else, including MISSING on another host
+ * Per domain it prints ROLLUP with the measured counts and fails when
+ *   - the stated counts differ from the measured ones (a new open cell, or a closed one, must be written down), or
+ *   - local-missing is not 0 (a local gap must not ride on a foreign-host roll-up), or
+ *   - other is not 0 (it has no stated class).
+ * A full-<domain> F row without the "open:" clause, or for a domain with no matrix, fails.
+ * Last line: ROLLUP_OPEN<TAB>domains=D<TAB>failed=N.  rc 1 when N > 0, 2 on unusable arguments. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+typedef struct { int foreign, blocked, local, product, other; } ro_count;
+static int ro_failed;
+
+static int ro_field(const char *s, long n, int k, char *o, int cap) {
+    long off, len;
+    if (tx_field(s, n, '\t', k, &off, &len) || len >= cap) return 0;
+    mm_copy(o, cap, s + off, len); o[len] = 0;
+    return 1;
+}
+static int ro_starts(const char *s, const char *p) { return tx_prefix(s, tx_len(s, 256), p, tx_len(p, 64)); }
+/* Count the open cells of one matrix text. */
+static void ro_measure(const char *b, long n, ro_count *c) {
+    long at = 0;
+    mm_fill(c, sizeof *c, 0, sizeof *c);
+    while (at < n) {
+        long e = at; char host[64], req[16], st[160];
+        while (e < n && b[e] != '\n') e++;
+        if (e > at && b[at] != '#' && ro_field(b + at, e - at, 0, host, sizeof host) &&
+            ro_field(b + at, e - at, 2, req, sizeof req) && ro_field(b + at, e - at, 3, st, sizeof st) && tx_eqz(req, "yes") &&
+            !tx_eqz(st, "COVERED_LOCAL") && !tx_eqz(st, "OBSERVED") && !tx_eqz(st, "DECLARED_DEPENDENCY")) {
+            if (tx_eqz(st, "NEEDS_FOREIGN_HOST")) c->foreign++;
+            else if (tx_eqz(st, "BLOCKED") || ro_starts(st, "BLOCKED:")) c->blocked++;
+            else if (tx_eqz(st, "NEEDS_PRODUCT_CHANGE")) c->product++;
+            else if (tx_eqz(st, "MISSING") && tx_eqz(host, "lnx/x86_64")) c->local++;
+            else c->other++;
+        }
+        at = e + 1;
+    }
+}
+/* "open: foreign=N blocked=N local-missing=N product-change=N" anywhere in the reason. */
+static int ro_stated(const char *r, ro_count *c) {
+    long k = tx_find(r, tx_len(r, 4096), "open: foreign=", 14);
+    const char *p;
+    if (k < 0) return -1;
+    p = r + k;
+    mm_fill(c, sizeof *c, 0, sizeof *c);
+    if (sscanf(p, "open: foreign=%d blocked=%d local-missing=%d product-change=%d", &c->foreign, &c->blocked, &c->local, &c->product) != 4) return -1;
+    return 0;
+}
+static int ro_same(const ro_count *a, const ro_count *b) {
+    return a->foreign == b->foreign && a->blocked == b->blocked && a->local == b->local && a->product == b->product;
+}
+static int ro_judge_one(const char *domain, const char *matrix, long mn, const char *reason, int quiet) {
+    ro_count m, s;
+    int ok = 1;
+    ro_measure(matrix, mn, &m);
+    if (!quiet) sy_printf("ROLLUP\t%s\tforeign=%d\tblocked=%d\tlocal-missing=%d\tproduct-change=%d\tother=%d\n", domain, m.foreign, m.blocked, m.local, m.product, m.other);
+    if (ro_stated(reason, &s) != 0) { if (!quiet) sy_printf("FAIL\t%s\tF row has no 'open: foreign=N blocked=N local-missing=N product-change=N' clause\n", domain); return 0; }
+    if (!ro_same(&m, &s)) {
+        if (!quiet) sy_printf("FAIL\t%s\tstated foreign=%d blocked=%d local-missing=%d product-change=%d differs from the matrix\n", domain, s.foreign, s.blocked, s.local, s.product);
+        ok = 0;
+    }
+    if (m.local) { if (!quiet) sy_printf("FAIL\t%s\t%d lnx/x86_64 MISSING cell(s): a local gap must be closed, waived or given a state\n", domain, m.local); ok = 0; }
+    if (m.other) { if (!quiet) sy_printf("FAIL\t%s\t%d open cell(s) of no stated class\n", domain, m.other); ok = 0; }
+    return ok;
+}
+static int ro_run(const char *root, const char *waivers) {
+    size_t n = 0; long at = 0; int domains = 0;
+    char *b = cx_read(waivers, &n);
+    if (!b) { sy_eprintf("check-roll-up-open: cannot read %s\n", waivers); return 2; }
+    while (at < (long)n) {
+        long e = at; char id[128], reason[4096];
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e - at > 2 && b[at] == 'F' && b[at + 1] == '\t' && ro_field(b + at, e - at, 1, id, sizeof id) &&
+            ro_starts(id, "full-") && ro_field(b + at, e - at, 3, reason, sizeof reason)) {
+            char path[4400]; size_t mn = 0; char *mt;
+            domains++;
+            if (cx_fmt(path, sizeof path, "%s/tests/%s-domain-matrix.tsv", root, id + 5)) { mm_free(b); return 2; }
+            mt = cx_read(path, &mn);
+            if (!mt) { sy_printf("FAIL\t%s\tno matrix %s\n", id + 5, path); ro_failed++; }
+            else { if (!ro_judge_one(id + 5, mt, (long)mn, reason, 0)) ro_failed++; mm_free(mt); }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    sy_printf("ROLLUP_OPEN\tdomains=%d\tfailed=%d\n", domains, ro_failed);
+    return ro_failed ? 1 : 0;
+}
+static int ro_self(void) {
+    const char *m =
+        "# matrix\n"
+        "lnx/x86_64\ta\tyes\tCOVERED_LOCAL\n"
+        "lnx/x86_64\tb\tyes\tBLOCKED:owner-ruling\n"
+        "lnx/arm64\tc\tyes\tNEEDS_FOREIGN_HOST\n"
+        "win/arm64\td\tno\tNEEDS_PRODUCT_CHANGE\n";
+    const char *ml = "lnx/x86_64\ta\tyes\tMISSING\nlnx/arm64\tc\tyes\tNEEDS_FOREIGN_HOST\n";
+    int bad = 0, r;
+    r = ro_judge_one("t", m, tx_len(m, 4096), "x; open: foreign=1 blocked=1 local-missing=0 product-change=0", 1);
+    if (!r) { sy_printf("FAIL\tself.exact-counts-pass\n"); bad++; } else sy_printf("PASS\tself.exact-counts-pass\n");
+    r = ro_judge_one("t", m, tx_len(m, 4096), "x; open: foreign=1 blocked=0 local-missing=0 product-change=0", 1);
+    if (r) { sy_printf("FAIL\tself.new-open-cell-refused\n"); bad++; } else sy_printf("PASS\tself.new-open-cell-refused\n");
+    r = ro_judge_one("t", ml, tx_len(ml, 4096), "x; open: foreign=1 blocked=0 local-missing=1 product-change=0", 1);
+    if (r) { sy_printf("FAIL\tself.local-missing-refused\n"); bad++; } else sy_printf("PASS\tself.local-missing-refused\n");
+    r = ro_judge_one("t", m, tx_len(m, 4096), "no clause here", 1);
+    if (r) { sy_printf("FAIL\tself.missing-clause-refused\n"); bad++; } else sy_printf("PASS\tself.missing-clause-refused\n");
+    sy_printf("ROLLUP_OPEN\tself-test\tfailed=%d\n", bad);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (argc - a == 1 && tx_eqz(argv[a], "--self-test")) return ro_self();
+    if (argc - a != 2) { sy_eprintf("usage: check-roll-up-open.cx ROOT WAIVERS.tsv | --self-test\n"); return 2; }
+    return ro_run(argv[a], argv[a + 1]);
+}
