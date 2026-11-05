@@ -1,0 +1,53 @@
+/* tests/reject-locate.cx -- FAST-1: failures name their cause.
+ *
+ *   sh ./unisacc.com tests/reject-locate.cx
+ *
+ * 1. seed/tbl.c clones a REJECT with a reason per source state as "reason\0state";
+ *    "unreachable" and an empty reason stay shared, so default output cannot change.
+ * 2. A bound deadline reports timeout, and an unreadable source reports the open
+ *    failure; neither may look like a network rejection ("not covered"). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+static int failed;
+static void ck(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static char *slurp(const char *p) {
+    FILE *f = fopen(p, "rb"); char *b = calloc(1, 65536);
+    if (f && b) { size_t n = fread(b, 1, 65535, f); b[n] = 0; }
+    if (f) fclose(f);
+    return b;
+}
+int main(void) {
+    char dir[256], delta[300], table[300]; np_result r = {0}; char why[512];
+    snprintf(dir, sizeof dir, "out/reject-locate-%d", (int)getpid());
+    mkdir("out", 0755); if (mkdir(dir, 0755)) { fputs("reject-locate: mkdir\n", stderr); return 2; }
+    snprintf(delta, sizeof delta, "%s/d.json", dir); snprintf(table, sizeof table, "%s/d.tbl", dir);
+    FILE *f = fopen(delta, "wb"); if (!f) return 2;
+    fputs("{\"start\":\"A\",\"states\":{\"A\":[\"b\",{\"65\":[\"B\",1],\"66\":[\"C\",2]}],"
+          "\"B\":[\"b\",{\"65\":[\"B\",1],\"67\":[\"C\",3]}],\"C\":[\"b\",{}]},"
+          "\"seqs\":[[],[[\"REJECT\",\"why\"]],[[\"REJECT\",\"unreachable\"]],[[\"REJECT\",\"\"]]]}\n", f);
+    fclose(f);
+    char *tbl[] = {"sh", "./unisacc.com", "seed/tbl.c", "--", delta, table, 0};
+    int rc = np_run(tbl, ".", 0, 40, &r, why, sizeof why);
+    ck(!rc && !r.rc, "tbl-runs"); np_free(&r);
+    char *t = slurp(table);
+    ck(t && strstr(t, "S 7768790041\n"), "same-reason-state-A");        /* why\0A */
+    ck(t && strstr(t, "S 7768790042\n"), "same-reason-state-B");        /* why\0B */
+    ck(t && strstr(t, "S 756e726561636861626c65\n"), "unreachable-shared");
+    ck(t && !strstr(t, "S 756e726561636861626c6500"), "unreachable-not-cloned");
+    ck(t && !strstr(t, "S 0041") && !strstr(t, "S 0042"), "empty-reason-not-cloned");
+    free(t);
+    char *late[] = {"tools/bound", "1", "sleep", "5", 0};
+    memset(&r, 0, sizeof r); rc = np_run(late, ".", 0, 20, &r, why, sizeof why);
+    ck(!rc && r.rc == 142, "timeout-rc142");
+    ck(r.err && strstr(r.err, "timeout") && strstr(r.err, "sleep"), "timeout-named");
+    ck(!r.err || !strstr(r.err, "not covered"), "timeout-not-a-rejection"); np_free(&r);
+    char *missing[] = {"sh", "./unisacc.com", "-o", table, "out/reject-locate-no-such.c", 0};
+    memset(&r, 0, sizeof r); rc = np_run(missing, ".", 0, 20, &r, why, sizeof why);
+    ck(!rc && r.rc != 0, "read-failed-nonzero");
+    ck(r.err && strstr(r.err, "cannot open") && strstr(r.err, "ENOENT"), "read-failed-named");
+    ck(!r.err || !strstr(r.err, "not covered"), "read-failed-not-a-rejection"); np_free(&r);
+    if (failed) { printf("REJECT_LOCATE\tfailed=%d\n", failed); return 1; }
+    puts("REJECT_LOCATE\tstatus=PASS"); return 0;
+}

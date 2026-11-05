@@ -487,6 +487,7 @@ int main(int argc, char **argv) {
     if (past_hard() && !interrupted) return report_stop(child, CAUSE_DEADLINE);
     if (save_status(status_path, status)) { perror("bound: status file"); return 2; }
     trace_mark("exit normal");
+    if (interrupted == 142) fprintf(stderr, "bound: timeout after %u seconds: %s\n", seconds, argv[first + 1]);
     if (interrupted) return interrupted;
     return WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 2;
 usage:
