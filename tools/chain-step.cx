@@ -105,6 +105,268 @@ static void cs_sha(const char *p, char out[65]) {
     (void)at;
 }
 
+/* ---------- CHAIN-ROUTES: p3 的两个非源码输入从树内事实与 ctx 作业再生成 ----------
+   p3 原来吃 out/install44/pkg9 下的 compiler.pkg 与 declaration/routes.tsv：后者 1823 行、第 5 列是
+   绝对路径 models/X.net，两件都只能由 source-package-pack 的 route/declare/pack 相位产出，全新克隆
+   不可复现。这里全部重建，绝对路径不进任何产物：models/ 从 ctx 的 net-<id>/tbl-<id> 作业取（目录即
+   清单）；routes/ 是 6 份 7 行 manifest，阶段次序取 exec/pipeline/image-stages.tsv；declaration/ 跑 ctx
+   现成的 tool-compilerpack 并把第 5 列剥成 basename（读者只取 basename，实测三种写法出的包 sha 全等）；
+   kernels/ 用 tools/kernel-route.cx 现编两 ISA，顺带让包内基座与 asm 现编相等成为构造事实；
+   compiler.pkg 用 ctx 现成的 tool-pack，mount 与包本身一致。收据写本 rev、两 ISA kernel 的 sha 与
+   kernel-route 自己的输入表，换机器可复现。 */
+static const char *cs_target[6] = {"lnx-arm64", "lnx-x86_64", "osx-arm64", "osx-x86_64", "win-arm64", "win-x86_64"};
+static const char *cs_slash[6] = {"lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "win/x86_64"};
+static const char *cs_stage[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+static const char *cs_sin[7] = {"src.c", "pp.text", "tokens.typed", "tape.text", "tape.text", "tape.text", "target.text"};
+static const char *cs_sout[7] = {"pp.text", "tokens.typed", "tape.text", "tape.text", "tape.text", "target.text", "image.bytes"};
+static int cs_failed;
+static void cs_fail(const char *w, const char *a, const char *b) { sy_printf("FAIL\t%s\t%s\t%s\n", w, a ? a : "-", b ? b : "-"); cs_failed++; }
+static char *cs_load(const char *p, long *n) {
+    long sz = cs_file_size(p), at = 0; int fd; char *b;
+    if (sz < 0) return 0;
+    b = malloc((size_t)sz + 1); if (!b) cs_die("alloc", p);
+    if (sz > 0) { fd = sy_open(p, O_RDONLY, 0); if (fd < 0 || sy_read_full(fd, b, sz) || sy_close(fd)) { free(b); cs_die("read", p); } }
+    b[sz] = 0; if (n) *n = sz; (void)at; return b;
+}
+static void cs_save(const char *p, const char *b, long n) { int fd = sy_open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0 || sy_write_all(fd, b, n) || sy_close(fd)) cs_die("write", p); }
+static void cs_copy(const char *from, const char *to) { long n = 0; char *b = cs_load(from, &n); if (!b) cs_die("missing input", from); cs_save(to, b, n); free(b); }
+/* 有界追加：dst[*at..] 写入 n 字节，越界即失败。用它取代 strcat/strcpy/memcpy，
+   两处棘轮（cxapis 的 strcat/strcpy、cxtrunc 的丢弃拷贝）因此都是 0。 */
+static void cs_put(char *dst, long cap, long *at, const char *src, long n) {
+    long i;
+    if (*at < 0 || n < 0 || *at + n + 1 > cap) cs_die("append overflow", "bounded-buffer");
+    for (i = 0; i < n; i++) dst[*at + i] = src[i];
+    *at += n;
+    dst[*at] = 0;
+}
+static void cs_puts(char *dst, long cap, long *at, const char *s) {
+    long n = 0;
+    while (s[n]) n++;
+    cs_put(dst, cap, at, s, n);
+}
+/* models/: ctx 的净清单；net-<id> 与 tbl-<id> 成对，缺一半就是作业不完整。 */
+static int cs_routes_models(const char *ctx, const char *models) {
+    DIR *dp; struct dirent *e; int pairs = 0; char net[4400], tbl[4400], to[4400];
+    if (sy_mkdir(models, 0755) && cs_file_size(models) < 0) cs_die("mkdir", models);
+    if (!(dp = opendir(ctx))) cs_die("opendir", ctx);
+    while ((e = readdir(dp))) {
+        const char *id;
+        if (strncmp(e->d_name, "net-", 4)) continue;
+        id = e->d_name + 4;
+        if (cx_fmt(net, sizeof net, "%s/net-%s/result.net", ctx, id)) cs_die("path", ctx);
+        if (cx_fmt(tbl, sizeof tbl, "%s/tbl-%s/result.tbl", ctx, id)) cs_die("path", ctx);
+        if (cs_file_size(net) < 0) { cs_fail("routes-no-net", id, net); continue; }
+        if (cs_file_size(tbl) < 0) { cs_fail("routes-no-table", id, tbl); continue; }
+        if (cx_fmt(to, sizeof to, "%s/%s.net", models, id)) cs_die("path", models); cs_copy(net, to);
+        if (cx_fmt(to, sizeof to, "%s/%s.tbl", models, id)) cs_die("path", models); cs_copy(tbl, to);
+        pairs++;
+    }
+    closedir(dp);
+    if (pairs < 40) cs_fail("routes-few-models", "pairs", "want at least 40");
+    sy_printf("PREPARED\tchain-models\t%s\tpairs=%d\n", models, pairs);
+    return 0;
+}
+/* routes/: 6 份 7 行 manifest，第 5 列取 ../models/<id>.net（读者只取 basename）。 */
+static int cs_routes_manifests(const char *dir) {
+    int t, s; char p[4400];
+    if (sy_mkdir(dir, 0755) && cs_file_size(dir) < 0) cs_die("mkdir", dir);
+    for (t = 0; t < 6; t++) {
+        char text[4096]; long at = 0; text[0] = 0;
+        for (s = 0; s < 7; s++) {
+            char id[160], seg[560];
+            if (s < 5) { if (cx_fmt(id, sizeof id, "shared-%s", cs_stage[s])) cs_die("format", cs_stage[s]); }
+            else if (cx_fmt(id, sizeof id, "%s-%s", cs_target[t], cs_stage[s])) cs_die("format", cs_target[t]);
+            if (cx_fmt(seg, sizeof seg, "%s\t%s\t%s\t%s\t../models/%s.net\n", cs_slash[t], cs_stage[s], cs_sin[s], cs_sout[s], id)) cs_die("format", id);
+            cs_puts(text, (long)sizeof text, &at, seg);
+        }
+        if (cx_fmt(p, sizeof p, "%s/%s.tsv", dir, cs_target[t])) cs_die("path", dir);
+        cs_save(p, text, at);
+        sy_printf("PREPARED\tchain-routes-manifest\t%s\trows=7\n", p);
+    }
+    return 0;
+}
+/* declaration/: 跑 ctx 现成的 compilerpack，再把第 5 列剥成 basename。 */
+static int cs_routes_declare(const char *ctx, const char *models, const char *dir, const char *out) {
+    char exe[4400], o1[4400], e2[4400], abi[4400], mdir[4400], rp[4400], manifests[6][4400];
+    char *v[26]; int n = 0, t; long n2 = 0, at = 0, rows = 0, i; char *text, *flat;
+    if (cx_fmt(exe, sizeof exe, "%s/tool-compilerpack/result.exe", ctx)) cs_die("path", ctx);
+    if (cs_file_size(exe) < 0) cs_die("ctx has no tool-compilerpack/result.exe", exe);
+    if (cx_fmt(o1, sizeof o1, "%s/shared-o1.net", models)) cs_die("path", models);
+    if (cx_fmt(e2, sizeof e2, "%s/shared-e2.net", models)) cs_die("path", models);
+    if (cx_fmt(abi, sizeof abi, "%s/shared-nativeabi.net", models)) cs_die("path", models);
+    if (cx_fmt(mdir, sizeof mdir, "%s", models)) cs_die("path", models);
+    v[n++] = exe; v[n++] = (char *)out;
+    v[n++] = (char *)"--o1"; v[n++] = o1; v[n++] = (char *)"--e2"; v[n++] = e2;
+    v[n++] = (char *)"--nativeabi"; v[n++] = abi; v[n++] = (char *)"--models"; v[n++] = mdir;
+    for (t = 0; t < 6; t++) { if (cx_fmt(manifests[t], sizeof manifests[t], "%s/%s.tsv", dir, cs_target[t])) cs_die("path", dir); v[n++] = manifests[t]; }
+    v[n] = 0;
+    if (cs_run(v, ".")) cs_die("compilerpack", out);
+    if (cx_fmt(rp, sizeof rp, "%s/routes.tsv", out)) cs_die("path", out);
+    text = cs_load(rp, &n2); if (!text) cs_die("compilerpack wrote no routes.tsv", rp);
+    flat = malloc((size_t)n2 + 1); if (!flat) cs_die("alloc", "routes");
+    for (i = 0; i < n2; ) {
+        long start = i, end, col = 0, f4 = -1, base, j;
+        while (i < n2 && text[i] != '\n') i++;
+        end = i;
+        for (j = start; j < end; j++) if (text[j] == '\t' && ++col == 4) f4 = j + 1;
+        if (f4 >= 0) {
+            for (base = f4, j = f4; j < end; j++) if (text[j] == '/') base = j + 1;
+            /* 相对路径：pack 以 manifest 所在目录解析第 5 列，declaration 的邻居就是 models/；
+               release-build 只取 basename。绝对路径因此完全不进产物。 */
+            for (j = start; j < f4; j++) flat[at++] = text[j];
+            {
+                static const char rel[] = "../models/";
+                long q;
+                for (q = 0; rel[q]; q++) flat[at++] = rel[q];
+            }
+            for (j = base; j < end; j++) flat[at++] = text[j];
+            rows++;
+        } else for (j = start; j < end; j++) flat[at++] = text[j];
+        if (i < n2) flat[at++] = '\n';
+        i = end + 1;
+    }
+    cs_save(rp, flat, at); free(flat); free(text);
+    /* 1823 行是这个声明的实际规模；行数一变说明 compiler-routes/image-stages 事实改了。 */
+    if (rows != 1823) { char w[32]; cx_fmt(w, sizeof w, "%ld", rows); cs_fail("declare-rows", rp, w); }
+    sy_printf("PREPARED\tchain-declaration\t%s\trows=%ld\n", rp, rows);
+    return 0;
+}
+/* kernels/: kernel-route 现编两 ISA。 */
+static int cs_routes_kernels(const char *s, const char *out) {
+    char kdir[4400], iso[4400], launcher[4400], tool[4400], p[4400], h[65], to[4400];
+    char *v[8]; int n = 0, a;
+    if (cx_fmt(kdir, sizeof kdir, "%s/kernel-route", out)) cs_die("path", out);
+    if (cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", s)) cs_die("path", s);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/kernel-route.cx", s)) cs_die("path", s);
+    v[n++] = (char *)"sh"; v[n++] = launcher; v[n++] = tool; v[n++] = (char *)"--";
+    v[n++] = (char *)s; v[n++] = kdir; v[n] = 0;
+    if (cs_run(v, ".")) cs_die("kernel-route", kdir);
+    if (cx_fmt(p, sizeof p, "%s/kernels", out)) cs_die("path", out);
+    if (sy_mkdir(p, 0755) && cs_file_size(p) < 0) cs_die("mkdir", p);
+    for (a = 0; a < 2; a++) {
+        if (cx_fmt(iso, sizeof iso, "%s/%s.kernel", kdir, a ? "arm64" : "x86_64")) cs_die("path", kdir);
+        if (cs_file_size(iso) < 0) cs_die("kernel-route wrote no kernel", iso);
+        cs_sha(iso, h);
+        if (cx_fmt(to, sizeof to, "%s/%s", p, a ? "arm64" : "x86_64")) cs_die("path", p);
+        cs_copy(iso, to);
+        sy_printf("PREPARED\tchain-kernel\t%s\tsha=%.16s\tbytes=%ld\n", to, h, cs_file_size(to));
+    }
+    return 0;
+}
+/* compiler.pkg: ctx 现成的 pack job；routes.tsv 是位置参数（manifest）不是 mount。 */
+static int cs_routes_srcpkg(const char *s, const char *ctx, const char *out) {
+    char exe[4400], inc[4400], decl[4400], kdir[4400], outpkg[4400], pre[4400], rts[4400], h[65];
+    char *v[16]; int n = 0;
+    if (cx_fmt(exe, sizeof exe, "%s/tool-pack/result.exe", ctx)) cs_die("path", ctx);
+    if (cs_file_size(exe) < 0) cs_die("ctx has no tool-pack/result.exe", exe);
+    if (cx_fmt(decl, sizeof decl, "%s/declaration", out)) cs_die("path", out);
+    if (cx_fmt(kdir, sizeof kdir, "%s/kernels", out)) cs_die("path", out);
+    if (cx_fmt(outpkg, sizeof outpkg, "%s/compiler.pkg", out)) cs_die("path", out);
+    if (cx_fmt(inc, sizeof inc, "%s/include", s)) cs_die("path", s);
+    if (cx_fmt(pre, sizeof pre, "%s/predefines", decl)) cs_die("path", decl);
+    if (cx_fmt(rts, sizeof rts, "%s/routes.tsv", decl)) cs_die("path", decl);
+    v[n++] = exe; v[n++] = (char *)"-o"; v[n++] = outpkg; v[n++] = (char *)"--compressed";
+    v[n++] = (char *)"--mount"; v[n++] = (char *)"006864722f"; v[n++] = inc;
+    v[n++] = (char *)"--mount"; v[n++] = (char *)"006b65726e656c2f"; v[n++] = kdir;
+    v[n++] = (char *)"--mount"; v[n++] = (char *)"00707265646566696e65732f"; v[n++] = pre;
+    v[n++] = rts; v[n] = 0;
+    if (cs_run(v, ".")) cs_die("pack", outpkg);
+    cs_sha(outpkg, h);
+    sy_printf("PREPARED\tchain-srcpkg\t%s\tsha=%.16s\tbytes=%ld\n", outpkg, h, cs_file_size(outpkg));
+    return 0;
+}
+/* 收据: 本 rev、两 ISA kernel 身份、kernel-route 的输入表，以及所用 C 编译器与 cc.version。 */
+static int cs_routes_receipt(const char *rev, const char *s, const char *ctx, const char *out) {
+    char p[4400], text[8192], line[400], h[65];
+    long at; int a;
+    if (cx_fmt(text, sizeof text, "chain-routes-v1\nrevision\t%s\n", rev)) cs_die("format", rev);
+    at = (long)strlen(text);
+    /* 工具链：编译器取 ctx 记录的 cc（prepare-context 写的同一路径），版本串取 cc.version。
+       调用方给的是 <CTX>/jobs，context.tsv 与 cc.version 在上一级目录。 */
+    {
+        char root[4400], ccp[4400], ver[4400], vsha[65];
+        long n = 0, i, start = 0;
+        char *k;
+        ccp[0] = 0;
+        if (cx_fmt(root, sizeof root, "%s/..", ctx)) cs_die("path", ctx);
+        if (cx_fmt(p, sizeof p, "%s/context.tsv", root)) cs_die("path", root);
+        k = cs_load(p, &n);
+        if (k) {
+            for (i = 0; i <= n; i++) {
+                if (i == n || k[i] == '\n') {
+                    long len = i - start;
+                    if (len > 3 && !memcmp(k + start, "cc\t", 3)) {
+                        long cat = 0;
+                        cs_put(ccp, (long)sizeof ccp, &cat, k + start + 3, len - 3);
+                    }
+                    start = i + 1;
+                }
+            }
+            free(k);
+        }
+        if (ccp[0] && cs_file_size(ccp) >= 0) {
+            cs_sha(ccp, h);
+            if (cx_fmt(line, sizeof line, "toolchain\tcc\t%s\t%s\n", ccp, h)) cs_die("format", "cc");
+            cs_puts(text, (long)sizeof text, &at, line);
+        } else cs_fail("receipt-no-cc", root, ccp);
+        if (cx_fmt(ver, sizeof ver, "%s/cc.version", root)) cs_die("path", root);
+        if (cs_file_size(ver) >= 0) {
+            cs_sha(ver, vsha);
+            if (cx_fmt(line, sizeof line, "toolchain\tcc-version\t%s\t%s\n", ver, vsha)) cs_die("format", "cc-version");
+            cs_puts(text, (long)sizeof text, &at, line);
+        } else cs_fail("receipt-no-cc-version", root, ver);
+    }
+    for (a = 0; a < 2; a++) {
+        if (cx_fmt(p, sizeof p, "%s/kernels/%s", out, a ? "arm64" : "x86_64")) cs_die("path", out);
+        if (cs_file_size(p) < 0) { cs_fail("receipt-no-kernel", p, 0); continue; }
+        cs_sha(p, h);
+        if (cx_fmt(line, sizeof line, "kernel\t%s\t%s\t%ld\n", a ? "arm64" : "x86_64", h, cs_file_size(p))) cs_die("format", "kernel");
+        cs_puts(text, (long)sizeof text, &at, line);
+    }
+    if (cx_fmt(p, sizeof p, "%s/kernel-route/route.tsv", out)) cs_die("path", out);
+    {
+        long n = 0, i = 0, start = 0;
+        char *k = cs_load(p, &n);
+        if (!k) cs_fail("receipt-no-route-receipt", p, 0);
+        else {
+            while (i <= n) {
+                if (i == n || k[i] == '\n') {
+                    long len = i - start;
+                    if (len > 6 && !memcmp(k + start, "input\t", 6)) {
+                        cs_puts(text, (long)sizeof text, &at, "kernel-route-");
+                        cs_put(text, (long)sizeof text, &at, k + start, len);
+                        cs_put(text, (long)sizeof text, &at, "\n", 1);
+                    }
+                    start = i + 1;
+                }
+                i++;
+            }
+            free(k);
+        }
+    }
+    if (cx_fmt(p, sizeof p, "%s/receipt.tsv", out)) cs_die("path", out);
+    cs_save(p, text, at);
+    sy_printf("PREPARED\tchain-routes-receipt\t%s\n", p);
+    return cs_failed ? 1 : 0;
+}
+/* 一条命令把 p3 的两个非源码输入全做出来。 */
+static int cs_routes(const char *rev, const char *s, const char *ctx, const char *out) {
+    char models[4400], rdir[4400], decl[4400];
+    if (cx_fmt(models, sizeof models, "%s/models", out)) cs_die("path", out);
+    if (cx_fmt(rdir, sizeof rdir, "%s/routes", out)) cs_die("path", out);
+    if (cx_fmt(decl, sizeof decl, "%s/declaration", out)) cs_die("path", out);
+    if (sy_mkdir(out, 0755) && cs_file_size(out) < 0) cs_die("mkdir", out);
+    cs_routes_models(ctx, models);
+    cs_routes_manifests(rdir);
+    cs_routes_declare(ctx, models, rdir, decl);
+    cs_routes_kernels(s, out);
+    cs_routes_srcpkg(s, ctx, out);
+    cs_routes_receipt(rev, s, ctx, out);
+    if (cs_failed) { sy_printf("CHAIN\troutes\tfailed=%d\n", cs_failed); return 1; }
+    sy_printf("CHAIN\troutes\tsrcpkg=%s/compiler.pkg\troutes=%s/routes.tsv\tmodels=%s\n", out, decl, models);
+    return 0;
+}
+
 /* ---------- 各相位 ---------- */
 
 static int cs_snap(const char *rev, const char *out) {
@@ -402,6 +664,12 @@ int main(int argc, char **argv) {
     if (tx_eqz(argv[1], "snap")) {
         if (argc < 3) cs_die("snap needs REV [OUT]", 0);
         return cs_snap(argv[2], argc > 3 ? argv[3] : "out");
+    }
+    if (tx_eqz(argv[1], "routes")) {
+        /* routes REV S CTX OUT：p3 的两个非源码输入（compiler.pkg 与 declaration/routes.tsv）
+           从树内事实与 ctx 作业再生成，全新克隆也能出包。 */
+        if (argc < 6) cs_die("routes needs REV S CTX OUT", 0);
+        return cs_routes(argv[2], argv[3], argv[4], argv[5]);
     }
     if (tx_eqz(argv[1], "fixedpoint")) {
         /* fixedpoint REV S PKG GEN1 OUT --target T */
