@@ -163,6 +163,24 @@ static void scan_line_constants(const char *path, int line, const char *text) {
     }
 }
 
+/* A job/model count literal is only a count where the line says so: the line must
+   carry a count context (job/jobs/count/n_/nids/models) before the number.  Without
+   this guard every table that uses 34 as a byte value (ucn-identity-tables.cx's
+   ASCII double quote 0x22) was reported as a hard-coded job count, and the only way
+   to silence it would have been a pins.tsv row claiming "34 is the job count" --
+   a false fact.  Negative case kept by the fixture: a line that really writes the
+   job count ("jobs == 131") still has a count context and still fails when undeclared. */
+static int count_context(const char *text, const char *at) {
+    static const char *words[] = {"job", "jobs", "count", "counts", "nids", "models", "n_"};
+    int i;
+    for (i = 0; i < 7; i++) {
+        const char *w = words[i];
+        long wl = (long)strlen(w), p;
+        for (p = 0; p + wl <= (long)(at - text); p++)
+            if (!strncmp(text + p, w, (size_t)wl)) return 1;
+    }
+    return 0;
+}
 static void scan_line_counts(const char *path, int line, const char *text) {
     const char *q;
     for (q = text; (q = strchr(q, '"')) != 0; q++) {
@@ -170,7 +188,7 @@ static void scan_line_counts(const char *path, int line, const char *text) {
         if (q[1] == '1' && q[2] == '0' && q[3] == '7' && q[4] == '"') { val[0] = '1'; val[1] = '0'; val[2] = '7'; val[3] = 0; }
         else if (q[1] == '3' && q[2] == '4' && q[3] == '"') { val[0] = '3'; val[1] = '4'; val[2] = 0; }
         else continue;
-        {
+        if (count_context(text, q)) {
             char key[LINEBUF];
             if (snprintf(key, sizeof key, "%s:%d", path, line) < 0 || find_decl(key, val) < 0)
                 fail_line("COUNT_LITERAL", key, 0, "derived:source-job-wave", val);
