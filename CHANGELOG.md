@@ -43,5 +43,5 @@
   - A 类 12 项,**可能静默产出错误代码,这类程序的产物不可信**:duplicate-case、case-outside-switch、struct-redefinition、conflicting-typedef、conflicting-function-types、enumerator-redeclared、local-redefinition、duplicate-parameter、void-value-used、void-call-as-value、float-subscript、return-pointer-as-int。修复列为 0.0.45 P1。
   - B 类 10 项,只是缺少诊断:assign-to-const、write-through-const-pointer、discards-const、multiple-storage-classes、void-parameter-named、incompatible-pointer-init、int-to-pointer-init、int-plus-assign-string、distinct-pointer-compare、zero-array-size。
 - 坏包会被明确拒绝(新批次 bad-package,23/0):包缺失、截掉 1 字节或截掉一半、footer 魔数错、包里 kernel 记录被改名、kernel 头魔数错、kernel 头声明的长度超过实际,都是 rc 非 0、stderr 给出原因、不出产物。但**声明长度正确、kernel 代码内容被破坏**时(例如代码尾部 128 字节被抹成 0),产品会段错误(rc 139),不会给出具名拒绝:kernel 内容没有校验和,补校验留 0.0.45(KERNEL-CONTENT-CHECK)。
-- `-c` 分开编出的对象再链接时会出现 RT-SHARED 告警(见上),依赖"链接时 stderr 为空"的脚本要相应调整。
+- 该告警对 `.cx` 对象**误报**:每个 `.cx` 对象的 `.unit` 记录都带运行库预置的 `.bss g_<probe>` 行,判据(`src/drivelink.cx` 的 `dv_note_shared`)只数这一行,所以两个及以上 `.cx` 对象链接时恒打印 1 次,源码是否用 stdio 都一样;纯 C 对象不受影响。可忽略,rc 与产物不变。复现:`main.cx` 只写 `extern int object_value; int main(void){return object_value;}`,另一单元定义 `object_value`,各自 `-O2 -c -funit -b lnx/x86_64` 后一起链接,stderr 出现该告警。依赖"链接时 stderr 为空"的脚本要相应调整;objects-* 九批因此如实红。判据修复进下一候选(WARN-PROBE-USED)。
 - DOCK2*、ARITY、SRC-SPLIT 为 P2。
