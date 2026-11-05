@@ -216,3 +216,47 @@
 `transform-contract` 从 `1-file_entry-replace;identity-only-main` 改为
 `verbatim-seed-ident-c-with-9-include-strips…;no-body-anchor;no-written-main;every-ident-mode-retained`；
 `runtime-domain` / `sha-provider` 改为"生成器不加任何 bound/provider"。
+
+## package-controls 的两件材料（2026-11-06，7b2fa330a9）
+
+### baseline：来源唯一且可复算
+
+```
+out/c43-native-kernel-03/bootstrap-before-install.com   2 671 169 B   sha256 = 7f709378…
+out/c43-native-kernel-03/bootstrap-before-install.com.build.json
+        commit = d1fa90e516, sources_sha256 = d754b8af…, bytes = 2671169
+```
+
+复算方法（gate 里就是这么做的，5 秒）：
+
+```sh
+T=$(mktemp -d)
+git archive d1fa90e516 | tar -x -C "$T"
+sh ./unisacc.com "$T/seed/ident.c" -o "$T/sid"
+"$T/sid" "$T"        # → d754b8af…（与 record 的 sources_sha256 逐字相同）
+```
+
+结论：`tools/package-refresh.cx:14` 的 `baseline_sha=7f709378…` **不需要重定**——
+它钉的就是这一份 APE，而这份 APE 的构造 commit 与整树来源都能从 git 复算出来。
+负控：换任意别的 commit（如 `283a29618f`）算出的 SID 不同（`7601287d…`）。
+
+### kernels：7 件，一条命令 7.5 秒
+
+| 文件 | 来源 |
+|---|---|
+| `identity-helper`、`identity-helper.sha256`、`context.sha256` | `tools/kernel-build.cx … bootstrap`（14 s 内含编译） |
+| `arm64.kernel`、`x86_64.kernel` | `routes/kernel-route/`（构造链现编） |
+| `arm64-kernel.sha256`、`x86_64-kernel.sha256` | 上两者的 sha256 |
+
+**两个 `*-kernel.sha256` 必须恰好 64 字节**（纯哈希、不带换行）。
+`package-refresh` 的判据是 `hn != 64` 即 `REFUSE kernel digest receipt`，
+而 `sha256sum` 的默认输出是 79/80 字节（`<hash>  <name>`），直接拿会卡在这里。
+
+### 剩下那一半不在材料上
+
+`package-controls` 现在仍红，但 `package-refresh` 本身能跑通（补上 `exec/c/core.c`
+在两侧各一份、旧侧形态 `cc_kind=0` 后，它输出 `compiler.pkg` / `model-inputs.tsv` /
+`package.tsv`，rc=0，并记录 `core-source-compat 6845345a… → ee9ee579…`）。
+真正卡住的是**当前树里没有 `exec/c/core.c`**（`e16028ffa1` 归档到
+`archive/reference-c/`），而回填它属 `PACKAGE-REFRESH-REDESIGN`：按 cc 的裁定
+不把 pin 改读归档路径，也不从旧提交取回原文。
