@@ -16,7 +16,18 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
   `/tmp/ua_tdump` (exec/parse/mkdump.sh, `UA_TYPESPELL=1`).  Without --typed
   the delta is byte-identical to the tokens.plain one.
 - **tape.text** -- the reference's `-S -o -` tape: `label:` lines, `.dir`
-  lines, indented instructions.
+  lines, indented instructions.  Structure measured across every route that
+  reaches it (lnx/osx/win, x86_64/arm64, image/tape/object, O0/O1/O2, 40
+  combinations in all): the first line is always `_start:`; the tape carries
+  exactly one `__main_ret:` label followed by `  .exit r0`, and `.str` and
+  other data sections may follow it; the file ends with a newline.  A unit
+  without `main` never reaches this format -- e3 refuses it first
+  (`not covered: no main`).
+  The e4/prune/lower entry states check only the first line (`_start:\n`) and
+  the last byte (`\n`); everything else is left to the stages downstream.
+  `tape.text` has no end marker, so a tape cut exactly at a line end is a
+  complete prefix and passes the entry check -- see the "known unfinished"
+  section of CHANGELOG.md and TAPE-END (0.0.45).
 
 The E1/E3 connection also carries constructor and destructor marks. With
 `\0cli/f1`, E1 frames its typed tokens as `USLATTR1`, two LE32 words (mark
