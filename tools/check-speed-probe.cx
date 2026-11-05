@@ -1,7 +1,8 @@
 /* check-speed-probe: samples for tools/speed-probe.cx
  * Two synthetic jobs emit RR_TIME lines; the probe must parse ns -> ms and
- * rank by total. Samples live in a temp dir under out/, never in the tree. */
+ * rank by total. Samples live in a mkdtemp directory under $TMPDIR, never in the tree. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 
@@ -29,16 +30,27 @@ static int has(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(
 /* position of NEEDLE in OUT (or -1); -2 when a later needle is missing */
 static long at(const char *s) { return tx_find(out, tx_len(out, CAP), s, tx_len(s, 256)); }
 
-int main(void) {
-    sy_mkdir("out", 0755); sy_mkdir("out/speed-probe-samples", 0755);
+static char base[CAP];   /* 本次运行的独占样本目录：mkdtemp($TMPDIR)，不写仓内 out/ */
+
+int main(int argc, char **argv) {
+    const char *td = sy_env("TMPDIR");
+    char bigp[4600], smallp[4600], jobsp[4600], outdir[4600], jobs[9600];
+    (void)argc; (void)argv;
+    if (!td || !td[0]) td = "/tmp";
+    if (snprintf(base, sizeof base, "%s/speed-probe-XXXXXX", td) >= (int)sizeof base) return 2;
+    if (!mkdtemp(base)) { fputs("check-speed-probe: mkdtemp\n", stderr); return 2; }
+    if (snprintf(bigp, sizeof bigp, "%s/big.cx", base) >= (int)sizeof bigp ||
+        snprintf(smallp, sizeof smallp, "%s/small.cx", base) >= (int)sizeof smallp ||
+        snprintf(jobsp, sizeof jobsp, "%s/jobs.tsv", base) >= (int)sizeof jobsp ||
+        snprintf(outdir, sizeof outdir, "%s/out", base) >= (int)sizeof outdir) return 2;
     /* big: lower 1500 elf 2400; small: lower 100 elf 100 */
     const char *big = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=tapecheck\\trc=0\\tns=750000000\\nRR_TIME\\tinference\\tstage=lower\\trc=0\\tns=1500000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=2400000000\\n\");return 0;}\n";
     const char *small = "#include <stdio.h>\nint main(void){fprintf(stderr,\"RR_TIME\\tinference\\tstage=lower\\trc=0\\tns=100000000\\nRR_TIME\\tinference\\tstage=elf\\trc=0\\tns=100000000\\n\");return 0;}\n";
-    if (cx_write("out/speed-probe-samples/big.cx", big, tx_len(big, 4096))) { ck(0, "write-big"); return 1; }
-    if (cx_write("out/speed-probe-samples/small.cx", small, tx_len(small, 4096))) { ck(0, "write-small"); return 1; }
-    const char *jobs = "small\tout/speed-probe-samples/small.cx\nbig\tout/speed-probe-samples/big.cx\n";
-    if (cx_write("out/speed-probe-samples/jobs.tsv", jobs, tx_len(jobs, 4096))) { ck(0, "write-jobs"); return 1; }
-    char *av[3]; av[0] = "out/speed-probe-samples/jobs.tsv"; av[1] = "out/speed-probe-samples/out"; av[2] = 0;
+    if (cx_write(bigp, big, tx_len(big, 4096))) { ck(0, "write-big"); return 1; }
+    if (cx_write(smallp, small, tx_len(small, 4096))) { ck(0, "write-small"); return 1; }
+    if (snprintf(jobs, sizeof jobs, "small\t%s\nbig\t%s\n", smallp, bigp) >= (int)sizeof jobs) return 2;
+    if (cx_write(jobsp, jobs, tx_len(jobs, CAP * 2))) { ck(0, "write-jobs"); return 1; }
+    char *av[3]; av[0] = jobsp; av[1] = outdir; av[2] = 0;
     int rc = run(av);
     ck(rc == 0, "exit-zero");
     ck(at("small\t200\t100\t100\t0\t0") >= 0, "small-parsed");
