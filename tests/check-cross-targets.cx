@@ -39,7 +39,21 @@ int main(int argc, char **argv) {
     char root[4096], p[4400], work[4400], mainc[4600], img[4600], why[512];
     char *targets, *units; size_t tn = 0, un = 0; long at, e;
     int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
-    if (!realpath(argc > a ? argv[a] : ".", root)) { fprintf(stderr, "check-cross-targets: root\n"); return 2; }
+    /* --target T (repeatable) narrows the run to those targets, so the six-target sweep can be
+       split across batches that each stay inside the runner's per-batch bound.  No --target means
+       every row of pp-targets.tsv, which is the whole-sweep behaviour.  The optional ROOT may come
+       first (after an optional "--"); when the first argument is itself --target, ROOT is ".". */
+    static char only[8][40];
+    int nonly = 0, i, have_root = 0;
+    if (!(argc > a && !strncmp(argv[a], "--target", 8))) have_root = argc > a;
+    if (!realpath(have_root ? argv[a] : ".", root)) { fprintf(stderr, "check-cross-targets: root\n"); return 2; }
+    for (i = a + (have_root ? 1 : 0); i < argc; i += 2) {
+        if (i + 1 >= argc) { fprintf(stderr, "check-cross-targets: --target needs a value\n"); return 2; }
+        if (!tx_eqz(argv[i], "--target")) { fprintf(stderr, "check-cross-targets: unexpected argument %s\n", argv[i]); return 2; }
+        if (nonly >= 8 || strlen(argv[i + 1]) >= sizeof only[0]) { fprintf(stderr, "check-cross-targets: --target\n"); return 2; }
+        if (cx_fmt(only[nonly], sizeof only[0], "%s", argv[i + 1])) return 2;
+        nonly++;
+    }
     if (cx_fmt(p, sizeof p, "%s/exec/facts/pp-targets.tsv", root) || !(targets = cx_read(p, &tn))) { fprintf(stderr, "check-cross-targets: cannot read %s\n", p); return 2; }
     if (cx_fmt(p, sizeof p, "%s/tests/cases/cross-target-units.tsv", root) || !(units = cx_read(p, &un))) { fprintf(stderr, "check-cross-targets: cannot read %s\n", p); return 2; }
     {   const char *td = getenv("TMPDIR");
@@ -53,6 +67,11 @@ int main(int argc, char **argv) {
         if (e == at || targets[at] == '#') continue;
         if (field(targets + at, e - at, 0, os, sizeof os) || field(targets + at, e - at, 1, arch, sizeof arch)) continue;
         if (cx_fmt(target, sizeof target, "%s/%s", os, arch)) return 2;
+        if (nonly) {
+            int hit = 0;
+            for (i = 0; i < nonly; i++) if (tx_eqz(only[i], target)) hit = 1;
+            if (!hit) continue;
+        }
         for (u = 0; u < (long)un; u = f + 1) {
             char unit[512], up[4600];
             for (f = u; f < (long)un && units[f] != '\n'; f++) {}
