@@ -1,0 +1,37 @@
+/* streams-e1-frame: 产品 e1 的 USLATTRT 载体 -> 旧合同 USLATTR1 帧 (streams-material 的 e1 壳用)。
+ *   unisacc stream e1 < in | sh ./unisacc.com tools/streams-e1-frame.cx -- to1
+ * USLATTRT: 魔数 8B, LE32 tn, 表 tn 字节(LE32 count + count*9 记录 unit,ordinal,kind), 负载。
+ * USLATTR1: 魔数 8B, LE32 count, LE32 负载长, count*5 记录(ordinal,kind), 负载。
+ * UNISA_ATTRIBUTES 非空则把整张表(旧侧车格式)写到该文件。非载体输入按 count=0 原样加帧。 */
+static unsigned char *buf; static size_t len;
+static unsigned le(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
+static void put32(unsigned char *p, unsigned v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+static void cp(void *d, const void *s, size_t n) { unsigned char *a = d; const unsigned char *b = s; while (n--) *a++ = *b++; }
+static int bad(const char *m) { fprintf(stderr, "streams-e1-frame: %s\n", m); return 2; }
+int main(int argc, char **argv) {
+    size_t cap = 1 << 16, k, i, tn = 0, pay = 0; unsigned count = 0; const unsigned char *tab = 0; ssize_t r;
+    unsigned char *out; const char *side = getenv("UNISA_ATTRIBUTES");
+    if (argc > 1 && !strcmp(argv[1], "--")) { argc--; argv++; }
+    if (argc != 2 || strcmp(argv[1], "to1")) return bad("usage: -- to1");
+    buf = malloc(cap);
+    while ((r = read(0, buf + len, cap - len)) != 0) {
+        if (r < 0) { if (errno == EINTR) continue; return bad("read"); }
+        len += (size_t)r;
+        if (len == cap) { cap *= 2; buf = realloc(buf, cap); if (!buf) return bad("alloc"); }
+    }
+    if (len >= 12 && !memcmp(buf, "USLATTRT", 8)) {
+        tn = le(buf + 8); if (tn < 4 || tn > len - 12) return bad("table extent");
+        tab = buf + 12; count = le(tab); pay = 12 + tn;
+        if (tn != 4 + (size_t)count * 9) return bad("table records");
+    }
+    out = malloc(16 + (size_t)count * 5 + (len - pay) + 1);
+    cp(out, "USLATTR1", 8); put32(out + 8, count); put32(out + 12, (unsigned)(len - pay));
+    for (i = 0; i < count; i++) cp(out + 16 + i * 5, tab + 4 + i * 9 + 4, 5);
+    k = 16 + (size_t)count * 5; cp(out + k, buf + pay, len - pay); k += len - pay;
+    if (side && *side) {
+        int fd = open(side, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0 || (tn && write(fd, tab, tn) != (ssize_t)tn) || (!tn && write(fd, "\0\0\0\0", 4) != 4) || close(fd)) return bad("sidecar");
+    }
+    for (i = 0; i < k;) { r = write(1, out + i, k - i); if (r < 0 && errno == EINTR) continue; if (r <= 0) return bad("write"); i += (size_t)r; }
+    return 0;
+}

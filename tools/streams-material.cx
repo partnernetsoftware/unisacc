@@ -1,0 +1,57 @@
+/* streams-material: 七段旧合同薄壳 unisacc-stream1..7.com (e2,e1,e3,e4,prune,lower,elf),
+ * 转调已装产品 `unisacc stream STAGE`。与 streampack 的 8 容器无关。
+ *   sh ./unisacc.com tools/streams-material.cx -- ROOT NEW_OUTDIR [LEVEL=2 [TARGET=lnx/x86_64]]
+ * 壳只含阶段名(<=40B,sha 与 ROOT 无关);s 为分派器,烘入 ROOT/LEVEL/TARGET。
+ * e1 的 USLATTRT→USLATTR1 转换交 tools/streams-e1-frame.cx。收据 streams.json 用 streampack 的字段名,
+ * scope=product-stream-shim 且 NOT_CLAIMED 列明,不是独立 runner。 */
+#pragma unisa use cxlib.productpkg
+#define SN(b, cap, ...) do { if (cx_fmt(b, cap, __VA_ARGS__)) die("fmt"); } while (0)
+static const char *ST[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+static const char *IO[7][2] = {{"c.text", "pp.frame"}, {"pp.frame", "token.frame"}, {"token.frame", "tape.text"}, {"tape.text", "tape.text"}, {"tape.text", "tape.text"}, {"tape.text", "target.text"}, {"target.text", "image"}};
+static int die(const char *m) { fprintf(stderr, "streams-material: REFUSE %s\n", m); exit(2); return 1; }
+static void put(const char *dir, const char *leaf, const char *s, int mode) {
+    char p[4400]; int fd;
+    if (snprintf(p, sizeof p, "%s/%s", dir, leaf) >= (int)sizeof p) die("path");
+    fd = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (fd < 0 || write(fd, s, strlen(s)) != (ssize_t)strlen(s) || fsync(fd) || close(fd)) die(p);
+}
+int main(int argc, char **argv) {
+    char root[4096], buf[8192], h[65], pd[65]; int i, lv = 2, n; const char *tg = "lnx/x86_64";
+    if (argc > 1 && !strcmp(argv[1], "--")) { argc--; argv++; }
+    if (argc < 3 || argc > 5) return die("usage ROOT NEW_OUTDIR [LEVEL 0|1|2 [TARGET]]");
+    if (argc > 3) lv = atoi(argv[3]);
+    if (argc > 4) tg = argv[4];
+    if (lv < 0 || lv > 2 || !realpath(argv[1], root) || argv[2][0] != '/' || pp_product_digest(root, pd)) return die("args or product identity");
+    if (mkdir(argv[2], 0700)) return die("NEW_OUTDIR must be absent");
+    /* 分派器:'-' 即 stdin;e2 取 INC 为 include-dir;e1 过帧转换;e4/prune 空输入为恒等(旧合同)。 */
+    SN(buf, sizeof buf,
+        "#!/bin/sh\nR='%s'; S=\"$1\"; I=\"$2\"; L=\"${3:--}\"; [ \"$I\" = - ] && I=/dev/stdin\n"
+        "E=$(head -c 0 -- \"$I\" 2>&1) || { echo \"stream $S: cannot open input $I: ${E##*: }\" >&2; exit 2; }\n"
+        "[ -d \"$I\" ] && { echo \"stream $S: cannot read input $I: Is a directory\" >&2; exit 2; }\n"
+        "case \"$S\" in e4|prune) [ -f \"$I\" ] && [ ! -s \"$I\" ] && exit 0;; esac\n"
+        "F=--raw; RES=; T=$(mktemp) || exit 1; trap 'rm -f \"$T\" \"$T.1\"' EXIT\n"
+        "case \"$S\" in e2) F=; [ -n \"$4\" ] && { printf %%s \"$4\" >\"$T\"; RES=\"--res include-dir=$T\"; } ;; esac\n"
+        "U=\"sh $R/unisacc.com\"; A=\"--level %d --target %s --source $L\"; case \"$S\" in\n"
+        " e1) $U stream e1 $A <\"$I\" >\"$T.1\" && $U \"$R/tools/streams-e1-frame.cx\" -- to1 <\"$T.1\" ;;\n"
+        " e3) $U stream e3 $A --raw --unit 0 <\"$I\" ;;\n"
+        " *) $U stream \"$S\" $A $F $RES <\"$I\" ;;\nesac\n", root, lv, tg);
+    put(argv[2], "s", buf, 0755);
+    n = snprintf(buf, sizeof buf, "{ \"schema\":1,\"scope\":\"product-stream-shim\",\"release_eligible\":false,\"level\":%d,\n"
+        " \"selected_route\":\"%s/image/O%d\",\"root\":\"%s\",\"product_sha256\":\"%s\",\"source_package_sha256\":\"%s\",\n"
+        " \"NOT_CLAIMED\":[\"independent-runner\",\"p3-stream-container\",\"original_M_record (sha256 all-zero = absent)\",\"tapecheck\",\"units-stream\",\"lower-tail: product lower appends the runtime tape\"],\n"
+        " \"streams\":[\n", lv, tg, lv, root, pd, pd);
+    for (i = 0; i < 7; i++) {
+        char leaf[48], body[128];
+        SN(leaf, sizeof leaf, "unisacc-stream%d.com", i + 1);
+        SN(body, sizeof body, "#!/bin/sh\nexec \"${0%%/*}/s\" %s \"$@\"\n", ST[i]);
+        if (strlen(body) > 40) return die("shim over 40 bytes");
+        put(argv[2], leaf, body, 0755); cx_sha256_hex(body, strlen(body), h);
+        n += snprintf(buf + n, sizeof buf - n, "  %s{\"stream_unit\":\"%s\",\"file\":\"%s\",\"original_model_index\":-1,\"input\":\"%s\",\"output\":\"%s\","
+            "\"original_M_record_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"com_sha256\":\"%s\",\"com_bytes\":%d}\n",
+            i ? "," : "", ST[i], leaf, IO[i][0], IO[i][1], h, (int)strlen(body));
+    }
+    n += snprintf(buf + n, sizeof buf - n, " ]\n}\n");
+    put(argv[2], "streams.json", buf, 0600);
+    fputs(buf, stdout);
+    return 0;
+}

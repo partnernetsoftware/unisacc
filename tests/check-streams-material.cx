@@ -1,0 +1,61 @@
+/* check-streams-material: tools/streams-material.cx 的壳材料。无参,cwd=ROOT,工作目录 out/streams-material-PID。
+ * 断言: 7 壳各 <=40B; 收据 scope=product-stream-shim 且含 NOT_CLAIMED; 缺失/目录输入 rc=2 且点名;
+ * streams-e1-frame 的合成帧(count=1 的 USLATTRT -> USLATTR1 + 侧车);
+ * 七段壳串联产物与产品整路线 -O2 镜像逐字节相同(执行 rc=7)。仅 Linux x86_64 本机,不声明跨目标。 */
+#pragma unisa use cxlib.netpack
+#define SN(b, cap, ...) do { if (cx_fmt(b, cap, __VA_ARGS__)) die("fmt"); } while (0)
+static int failed;
+static void ck(int ok, const char *n) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static void die(const char *s) { fprintf(stderr, "check-streams-material: %s\n", s); exit(2); }
+static char root[4096], work[4096];
+static np_result sh(char *const *v, const char *env, const char *in) {
+    np_result r; char why[512]; const char *e[] = {env, 0};
+    (void)in; if (np_run((char **)v, root, (char *const *)e, 50, &r, why, sizeof why)) die(why);
+    return r;
+}
+static void save(const char *p, const void *b, size_t n) {
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (fd < 0 || write(fd, b, n) != (ssize_t)n || close(fd)) die(p);
+}
+static int has(const np_result *r, const char *s) { return r->errn && strstr(r->err, s) != 0; }
+int main(void) {
+    char mat[4400], p[4400], u[4400], tool[4400], bnd[4400], c[4400], q[4400], ref[4400], cur[4400], nxt[4400]; int i; size_t n;
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    np_subreaper();
+    SN(work, sizeof work, "%s/%s/streams-material-%d", root, "out", (int)getpid()); SN(mat, sizeof mat, "%s/m", work);
+    if (mkdir(work, 0700)) die("work");
+    SN(u, sizeof u, "%s/unisacc.com", root); SN(tool, sizeof tool, "%s/tools/streams-material.cx", root);
+    SN(bnd, sizeof bnd, "%s/tools/bound", root);
+    { char *v[] = {"sh", u, tool, "--", root, mat, 0}; np_result r = sh(v, "X=1", 0); ck(r.rc == 0, "generator.rc0"); np_free(&r); }
+    for (i = 1; i <= 7; i++) {
+        struct stat st; SN(p, sizeof p, "%s/unisacc-stream%d.com", mat, i);
+        ck(!stat(p, &st) && st.st_size > 0 && st.st_size <= 40 && (st.st_mode & 0100), "shim.le40-bytes-executable");
+    }
+    SN(p, sizeof p, "%s/streams.json", mat);
+    { char *j = cx_read(p, &n); ck(j && strstr(j, "\"scope\":\"product-stream-shim\"") && strstr(j, "NOT_CLAIMED") && strstr(j, "independent-runner"), "receipt.scope-and-not-claimed"); free(j); }
+    SN(q, sizeof q, "%s/absent.tape", work); SN(p, sizeof p, "%s/unisacc-stream4.com", mat);
+    { char *v[] = {bnd, "20", p, q, q, "include", 0}; np_result r = sh(v, "X=1", 0); ck(r.rc == 2 && !r.outn && has(&r, "cannot open input"), "shim.missing-input-rc2-named"); np_free(&r); }
+    { char *v[] = {bnd, "20", p, work, work, "include", 0}; np_result r = sh(v, "X=1", 0); ck(r.rc == 2 && !r.outn && has(&r, "cannot read input"), "shim.directory-input-rc2-named"); np_free(&r); }
+    /* 合成帧: USLATTRT tn=13 (count=1, 记录 unit=3 ordinal=5 kind=1) + 负载 "PAY" -> USLATTR1 count=1 plen=3 + 记录 05000000 01 + "PAY" */
+    { static const unsigned char in[] = {'U','S','L','A','T','T','R','T',13,0,0,0, 1,0,0,0, 3,0,0,0, 5,0,0,0, 1, 'P','A','Y'};
+      static const unsigned char want[] = {'U','S','L','A','T','T','R','1',1,0,0,0,3,0,0,0, 5,0,0,0,1, 'P','A','Y'};
+      char fr[4400], side[4400]; char *v[] = {"sh", u, "tools/streams-e1-frame.cx", "--", "to1", 0}; char env[4500]; np_result r;
+      SN(fr, sizeof fr, "%s/synth.in", work); SN(side, sizeof side, "%s/synth.side", work); save(fr, in, sizeof in); SN(env, sizeof env, "UNISA_ATTRIBUTES=%s", side);
+      { char cmd[9000]; char *w[] = {"sh", "-c", cmd, 0}; SN(cmd, sizeof cmd, "sh '%s' tools/streams-e1-frame.cx -- to1 <'%s'", u, fr); (void)v; r = sh(w, env, 0); }
+      ck(r.rc == 0 && r.outn == sizeof want && !memcmp(r.out, want, sizeof want), "e1-frame.synthetic-uslattrt-to-uslattr1"); np_free(&r);
+      { char *sd = cx_read(side, &n); ck(sd && n == 13 && !memcmp(sd, in + 8 + 4, 13) , "e1-frame.sidecar-is-table"); free(sd); } }
+    /* 七段串联 == 产品整路线 -O2 镜像 */
+    SN(c, sizeof c, "%s/t.c", work); save(c, "int main(void){return 7;}\n", 26); SN(cur, sizeof cur, "%s", c);
+    for (i = 1; i <= 7; i++) {
+        char sp[4400]; SN(sp, sizeof sp, "%s/unisacc-stream%d.com", mat, i); SN(nxt, sizeof nxt, "%s/e%d.out", work, i);
+        { char *v[] = {bnd, "30", sp, cur, c, "include", 0}; np_result r = sh(v, "UNISA_ATTRIBUTES=", 0); if (r.rc) { ck(0, "chain.stage-rc0"); break; } save(nxt, r.out, r.outn); np_free(&r); }
+        SN(cur, sizeof cur, "%s", nxt);
+    }
+    SN(ref, sizeof ref, "%s/ref.elf", work);
+    { char *v[] = {"sh", u, "-O2", "-b", "lnx/x86_64", c, "-o", ref, 0}; np_result r = sh(v, "X=1", 0); ck(r.rc == 0, "reference.product-O2-route"); np_free(&r); }
+    { size_t a, b; char *x = cx_read(cur, &a), *y = cx_read(ref, &b); ck(x && y && a == b && !memcmp(x, y, a), "chain.seven-streams-equal-product-O2-image"); free(x); free(y); }
+    { char *v[] = {cur, 0}; chmod(cur, 0700); np_result r = sh(v, "X=1", 0); ck(r.rc == 7, "chain.image-exit-7"); np_free(&r); }
+    printf("STREAMS_MATERIAL\tfailed=%d\tscope=product-stream-shim-local-linux-x86_64\n", failed);
+    printf("NOT_CLAIMED\tindependent-runner p3-container cross-target lower-tail\n");
+    return failed ? 1 : 0;
+}
