@@ -429,3 +429,84 @@ int uu_user_undef(const char *src, const unsigned char *b, unsigned long long n,
     mm_free(text);
     return 0;
 }
+/* UNDEF-LINK-RC0: the single-file check above only sees the first unit, so an extern whose
+   prototype lives in a later unit was never refused (multi-unit compile exited 0 with an image
+   that failed at run time).  This variant asks every unit: a name is defined when ANY unit has a
+   definition (uu_role 2); it is refused only when some unit declares a prototype (1) and no unit
+   defines it.  The name list and its offsets come from the same forwarding side-car. */
+int uu_user_undef_multi(const char *const *srcv, int nsrc, const unsigned char *b,
+                        unsigned long long n, unsigned long long at, unsigned long long cnt,
+                        char *why, int cap) {
+    int sy_open_read(const char *);
+    long sy_reg_size(int);
+    int sy_read_full(int, void *, long);
+    int sy_close(int);
+    void *mm_alloc(long);
+    void mm_free(void *);
+    char **text;
+    long *sz;
+    int nt, j;
+    unsigned long long r;
+    if (!srcv || nsrc < 1 || !b) return 0;
+    /* nsrc is the driver's source count, already bounded by DV_MAXU upstream; every unit's text
+       is opened, so a prototype in any unit is seen. */
+    nt = nsrc;
+    text = (char **)mm_alloc((long)nt * (long)sizeof *text);
+    sz = (long *)mm_alloc((long)nt * (long)sizeof *sz);
+    if (!text || !sz) { if (text) mm_free(text); if (sz) mm_free(sz); return 0; }
+    j = 0;
+    while (j < nt) { text[j] = 0; sz[j] = 0; j++; }
+    j = 0;
+    while (j < nt) {
+        const char *s = srcv[j];
+        int fd;
+        long k;
+        j++;
+        if (!s || !s[0] || (s[0] == '-' && s[1] == 0)) continue;
+        fd = sy_open_read(s);
+        if (fd < 0) continue;
+        k = sy_reg_size(fd);
+        if (k < 0 || k > 1048576L) { sy_close(fd); continue; }
+        text[j - 1] = (char *)mm_alloc(k + 1);
+        if (!text[j - 1]) { sy_close(fd); continue; }
+        if (k > 0 && sy_read_full(fd, text[j - 1], k)) { mm_free(text[j - 1]); text[j - 1] = 0; sy_close(fd); continue; }
+        sy_close(fd);
+        text[j - 1][k] = 0;
+        sz[j - 1] = k;
+    }
+    r = 0;
+    while (r < cnt) {
+        unsigned long long nl, sl;
+        const char *nm;
+        int defined = 0, proto = 0;
+        if (us_fw_u64(b, n, &at, &nl) || nl > 1024 || nl > n - at) break;
+        nm = (const char *)(b + at);
+        at += nl;
+        if (us_fw_u64(b, n, &at, &sl) || sl > n - at) break;
+        at += sl;
+        if (nl > 0 && nl <= 1024) {
+            j = 0;
+            while (j < nt) {
+                if (text[j] && sz[j] > 0) {
+                    int role = uu_role(text[j], sz[j], nm, (int)nl);
+                    if (role == 2) { defined = 1; break; }
+                    if (role == 1) proto = 1;
+                }
+                j++;
+            }
+            if (!defined && proto) {
+                uu_say(nm, (int)nl);
+                if (why && cap > 0) why[0] = 0;
+                j = 0;
+                while (j < nt) { if (text[j]) mm_free(text[j]); j++; }
+                mm_free(text); mm_free(sz);
+                return 1;
+            }
+        }
+        r++;
+    }
+    j = 0;
+    while (j < nt) { if (text[j]) mm_free(text[j]); j++; }
+    mm_free(text); mm_free(sz);
+    return 0;
+}

@@ -332,6 +332,27 @@ static int dv_image_route(const char *route, char *dst, int cap) {
     return 0;
 }
 
+/* UNDEF-LINK-RC0: the unresolved-extern check at the end of dv_run_lower used to see only the
+   first source file (uu_user_undef opens one path), so an extern whose prototype lives in a
+   later unit was never refused.  The wrapper below records the source vector for the current
+   call; the check then asks every unit.  A plain dv_run_lower call leaves the vector null and
+   keeps the single-file behaviour. */
+static const char *const *dv_undef_srcv;
+static int dv_undef_nsrc;
+
+int dv_run_lower_n(const char *route, const char *tgt, const char *src, int cx,
+                   int level, int nsrc, const char *const *srcv, unsigned char *in, long inn,
+                   unsigned char **out, long *outn, char *why, int cap, int *execf, int refuse_user) {
+    const char *const *keepv = dv_undef_srcv;
+    int keepn = dv_undef_nsrc, r;
+    dv_undef_srcv = srcv;
+    dv_undef_nsrc = nsrc;
+    r = dv_run_lower(route, tgt, src, cx, level, nsrc, in, inn, out, outn, why, cap, execf, refuse_user);
+    dv_undef_srcv = keepv;
+    dv_undef_nsrc = keepn;
+    return r;
+}
+
 int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
                  int level, int nsrc, unsigned char *in, long inn,
                  unsigned char **out, long *outn, char *why, int cap, int *execf, int refuse_user) {
@@ -430,7 +451,9 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     /* -run pushed argc and argv. -o pushed neither. An empty stack is not
        a failure; a present pair is dropped so the image has no process slots. */
     if (st_extra_pop() == 0) (void)st_extra_pop();
-    if ((refuse_user && uu_user_undef(src, e3, n, at, cnt, why, cap)) || dv_fwd_stub(e3, n, at, cnt, ccwc, tgt, why, cap)) {
+    if ((refuse_user && (dv_undef_srcv
+                         ? uu_user_undef_multi(dv_undef_srcv, dv_undef_nsrc, e3, n, at, cnt, why, cap)
+                         : uu_user_undef(src, e3, n, at, cnt, why, cap))) || dv_fwd_stub(e3, n, at, cnt, ccwc, tgt, why, cap)) {
         free(tape);
         free(e3);
         return 1;
