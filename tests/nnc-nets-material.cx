@@ -1,0 +1,105 @@
+/* tests/nnc-nets-material.cx -- build the nnc-nets material for check-nn-nf-c.cx.
+ *
+ *   sh ./unisacc.com tests/nnc-nets-material.cx -- prepare ROOT SRC_JOBS SRC_MODELS NEW_MATDIR
+ *   sh ./unisacc.com tests/nnc-nets-material.cx -- --verify ROOT MATDIR
+ *
+ * SRC_JOBS holds net-<name>/result.net (one chain ctx job per net); SRC_MODELS holds
+ * <name>.net (the models the package carries).  The material is a copy of both trees
+ * plus material.tsv, which records, per net, the two sha256 values and byte counts so a
+ * later run can prove nothing drifted between the two copies.  No test verdict is cached:
+ * the receipt says PREPARED, and check-nn-nf-c.cx still has to compare the bytes.
+ * A missing source, a non-file entry or an existing destination are refusals (rc 2). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int ms_failed, ms_rows;
+static void ms_die(const char *s) { fprintf(stderr, "nnc-nets-material: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ms_ck(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) ms_failed++; }
+/* copy p -> q, returning the sha256 and the byte count of the bytes copied */
+static int ms_copy(const char *p, const char *q, char hex[65], long *bytes) {
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    int fd;
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    *bytes = (long)n;
+    fd = open(q, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) { free(b); return -1; }
+    if (sy_write_all(fd, b, n) || sy_close(fd)) { free(b); return -1; }
+    free(b);
+    return 0;
+}
+int main(int argc, char **argv) {
+    char root[4096], jobs[4400], models[4400], mat[4400];
+    char path[4600], dst[4600], receipt[4400];
+    int prep;
+    if (argc < 4) { fputs("usage: prepare ROOT SRC_JOBS SRC_MODELS NEW_MATDIR | --verify ROOT MATDIR\n", stderr); return 2; }
+    prep = !strcmp(argv[1], "prepare");
+    if (!prep && strcmp(argv[1], "--verify")) { fputs("usage: prepare|--verify\n", stderr); return 2; }
+    if (prep ? argc < 6 : argc < 4) { fputs("usage: prepare ROOT SRC_JOBS SRC_MODELS NEW_MATDIR | --verify ROOT MATDIR\n", stderr); return 2; }
+    if (!realpath(argv[2], root)) ms_die("root");
+    if (prep) {
+        DIR *d;
+        struct dirent *e;
+        FILE *f;
+        if (!realpath(argv[3], jobs) || !realpath(argv[4], models)) ms_die("source dir");
+        if (realpath(argv[5], mat)) ms_die("destination must not exist");
+        if (mkdir(argv[5], 0700)) ms_die("mkdir");
+        if (cx_fmt(path, sizeof path, "%s/jobs", argv[5]) || mkdir(path, 0700)) ms_die("mkdir jobs");
+        if (cx_fmt(path, sizeof path, "%s/models", argv[5]) || mkdir(path, 0700)) ms_die("mkdir models");
+        if (cx_fmt(receipt, sizeof receipt, "%s/material.tsv", argv[5])) ms_die("path");
+        f = fopen(receipt, "w");
+        if (!f) ms_die("receipt");
+        fputs("# nnc-nets material v1: status PREPARED (identity only, no test verdict)\n", f);
+        fputs("# net\tctx_sha256\tctx_bytes\tmodel_sha256\tmodel_bytes\n", f);
+        d = opendir(jobs);
+        if (!d) ms_die("jobs dir");
+        while ((e = readdir(d)) != 0) {
+            char name[256], h1[65], h2[65];
+            char p1[4600], p2[4600], d1[4600], d2[4600];
+            long b1 = 0, b2 = 0;
+            if (strncmp(e->d_name, "net-", 4)) continue;
+            if (cx_fmt(name, sizeof name, "%s", e->d_name + 4)) ms_die("name");
+            if (cx_fmt(p1, sizeof p1, "%s/%s/result.net", jobs, e->d_name) ||
+                cx_fmt(p2, sizeof p2, "%s/%s.net", models, name)) ms_die("path");
+            if (cx_fmt(d1, sizeof d1, "%s/jobs/%s", argv[5], e->d_name) || mkdir(d1, 0700)) ms_die("mkdir net");
+            if (cx_fmt(d2, sizeof d2, "%s/jobs/%s/result.net", argv[5], e->d_name)) ms_die("path");
+            if (ms_copy(p1, d2, h1, &b1)) { closedir(d); ms_die("copy ctx net"); }
+            if (cx_fmt(d2, sizeof d2, "%s/models/%s.net", argv[5], name)) ms_die("path");
+            if (ms_copy(p2, d2, h2, &b2)) { closedir(d); ms_die("copy model"); }
+            fprintf(f, "%s\t%s\t%ld\t%s\t%ld\n", name, h1, b1, h2, b2);
+            ms_rows++;
+        }
+        closedir(d);
+        fputs("status\tPREPARED-no-test-result\n", f);
+        fclose(f);
+        printf("PREPARED\tnnc-nets-material\trows=%d\tno-test-result\n", ms_rows);
+        return ms_rows ? 0 : 2;
+    }
+    {   /* --verify: the two copies must still agree with the receipt */
+        char line[1024];
+        FILE *f;
+        if (!realpath(argv[3], mat)) ms_die("material dir");
+        if (cx_fmt(receipt, sizeof receipt, "%s/material.tsv", mat)) ms_die("path");
+        f = fopen(receipt, "r");
+        if (!f) ms_die("receipt");
+        while (fgets(line, (int)sizeof line, f)) {
+            char net[256], h1[65], h2[65];
+            long b1 = 0, b2 = 0;
+            char p1[4600], p2[4600], a1[65], a2[65];
+            long c1 = 0, c2 = 0;
+            if (line[0] == '#' || !strncmp(line, "status\t", 7)) continue;
+            if (sscanf(line, "%255s\t%64s\t%ld\t%64s\t%ld", net, h1, &b1, h2, &b2) != 5) continue;
+            if (cx_fmt(p1, sizeof p1, "%s/jobs/net-%s/result.net", mat, net) ||
+                cx_fmt(p2, sizeof p2, "%s/models/%s.net", mat, net)) ms_die("path");
+            {   size_t n = 0; char *b = cx_read(p1, &n); if (!b) { ms_ck(0, net); continue; } cx_sha256_hex(b, n, a1); c1 = (long)n; free(b); }
+            {   size_t n = 0; char *b = cx_read(p2, &n); if (!b) { ms_ck(0, net); continue; } cx_sha256_hex(b, n, a2); c2 = (long)n; free(b); }
+            ms_ck(!strcmp(h1, a1) && !strcmp(h2, a2) && b1 == c1 && b2 == c2, net);
+            ms_rows++;
+        }
+        fclose(f);
+        printf("NNC_MATERIAL\tverify=1\trows=%d\tfailed=%d\n", ms_rows, ms_failed);
+        return ms_failed ? 1 : 0;
+    }
+}

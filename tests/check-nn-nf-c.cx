@@ -1,0 +1,153 @@
+/* tests/check-nn-nf-c.cx -- NN-NF-C 的永久批次:同 rev 网字节等价 + 字节差报告。
+ *
+ *   sh ./unisacc.com tests/check-nn-nf-c.cx -- ROOT [MATDIR]
+ *   MATDIR 是一个材料目录,内含 jobs/(构造链的 ctx 作业) 与 models/(包内 models) 两棵子树;
+ *   省略时取 ROOT/nn-nf-c-material。批次登记为 materials=nnc-nets,args={root};{nnc-nets}。
+ *
+ * 三组断言:
+ *   cmp     -- net-<name>/result.net 与 models/<name>.net 逐字节比较,必须全部 EQUAL(diff=0、missing=0)。
+ *   report  -- 报告工具必须给出 runs_ge16/actions/bytes 三个非负测量值,且彼此相容。
+ *   refusal -- 把一张网改一个字节后比较必须变 DIFF 且退出码非 0,证明"等价"不是恒真。
+ * 末行 NN_NF_C<TAB>assertions=N<TAB>failed=M;退出 0 仅当 failed=0。 */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int nc_assertions, nc_failed;
+static char nc_root[4096], nc_out[4400], nc_rep[4400];
+static void nc_ck(int ok, const char *name) { nc_assertions++; if (!ok) nc_failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); }
+static void nc_die(const char *s) { fprintf(stderr, "check-nn-nf-c: %s errno=%d\n", s, errno); exit(2); }
+/* run the report tool and hand back its stdout */
+static char *nc_run(const char *jobs, const char *models, int *rc) {
+    char *av[8];
+    np_result r = {0};
+    char why[1024];
+    int tr;
+    av[0] = "sh";
+    av[1] = "./unisacc.com";
+    av[2] = "tests/nn-nf-c-report.cx";
+    av[3] = "--";
+    av[4] = nc_root;
+    av[5] = (char *)jobs;
+    av[6] = (char *)models;
+    av[7] = 0;
+    tr = np_run(av, nc_root, 0, 50, &r, why, sizeof why);
+    if (tr) { fprintf(stderr, "check-nn-nf-c: %s\n", why); exit(2); }
+    *rc = r.rc;
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    return r.outn ? r.out : 0;
+}
+static long nc_field(const char *s, const char *key) {
+    const char *p = strstr(s, key);
+    if (!p) return -1;
+    p += strlen(key);
+    {   long v = 0; int any = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; any = 1; }
+        return any ? v : -1;
+    }
+}
+int main(int argc, char **argv) {
+    char *av[8];
+    np_result r = {0};
+    char why[1024];
+    int tr, rc = 0;
+    long nets, equal, diff, missing, runs, acts, bytes;
+    char jobs[4400], models[4400], matbuf[4400], work[4400];
+    if (argc > 4 || (argc >= 2 && !realpath(argv[1], nc_root))) {
+        fputs("usage: check-nn-nf-c.cx ROOT [MATDIR [WORKDIR]]\n", stderr);
+        return 2;
+    }
+    if (argc < 2 && !realpath(".", nc_root)) return 2;
+    if (argc >= 3) {
+        if (!realpath(argv[2], matbuf)) return 2;
+    } else if (cx_fmt(matbuf, sizeof matbuf, "%s/nn-nf-c-material", nc_root)) return 2;
+    if (argc >= 4) { if (!realpath(argv[3], work)) return 2; }
+    else if (cx_fmt(work, sizeof work, "%s/out", nc_root)) return 2;
+    if (cx_fmt(jobs, sizeof jobs, "%s/jobs", matbuf) || cx_fmt(models, sizeof models, "%s/models", matbuf)) return 2;
+    /* 1. 同 rev 网字节等价 */
+    {
+        char *out = nc_run(jobs, models, &rc);
+        if (!out) nc_die("report produced no output");
+        nets = nc_field(out, "nets=");
+        equal = nc_field(out, "equal=");
+        diff = nc_field(out, "diff=");
+        missing = nc_field(out, "missing=");
+        runs = nc_field(out, "runs_ge16=");
+        acts = nc_field(out, "actions=");
+        bytes = nc_field(out, "bytes=");
+        nc_ck(nets > 0, "report.nets-positive");
+        nc_ck(equal == nets, "cmp.all-nets-equal");
+        nc_ck(diff == 0, "cmp.no-diff");
+        nc_ck(missing == 0, "cmp.no-missing");
+        nc_ck(rc == 0, "report.exit-zero");
+        /* 2. 报告自洽:三个测量值都非负,且 runs/actions/bytes 彼此相容 */
+        nc_ck(runs >= 0 && acts >= 0 && bytes >= 0, "report.fields-present");
+        nc_ck(acts >= runs * 16, "report.actions-cover-runs");
+        nc_ck(bytes >= acts, "report.bytes-at-least-actions");
+        {   char line[256];
+            if (cx_fmt(line, sizeof line, "NN_NF_C_REPORT nets=%ld equal=%ld runs_ge16=%ld actions=%ld bytes=%ld",
+                       nets, equal, runs, acts, bytes))
+                nc_die("report line");
+            printf("MEASURED\t%s\n", line);
+        }
+        free(out);
+    }
+    /* 3. 改一个字节必须变 DIFF:证明等价判定有牙齿 */
+    {
+        char bad[4400], one[4600];
+        size_t n = 0;
+        char *b;
+        if (cx_fmt(one, sizeof one, "%s/net-shared-e2/result.net", jobs) ||
+            cx_fmt(bad, sizeof bad, "%s/nnc-one-byte-off", work))
+            nc_die("path");
+        b = cx_read(one, &n);
+        if (!b || n < 64) nc_die("fixture");
+        b[n / 2] = (char)(b[n / 2] ^ 1);
+        {   int fd = open(bad, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+            if (fd < 0 || sy_write_all(fd, b, n) || sy_close(fd)) nc_die("write fixture");
+        }
+        free(b);
+        /* swap the model for the corrupted one and expect DIFF */
+        {   char dir[4400], mv[4600];
+            if (cx_fmt(dir, sizeof dir, "%s/nnc-models-copy", work)) nc_die("path");
+            if (mkdir(dir, 0700) && errno != EEXIST) nc_die("mkdir");
+            /* copy every model so only the corrupted one can be DIFF */
+            {   DIR *d = opendir(models);
+                struct dirent *e;
+                if (!d) nc_die("models dir");
+                while ((e = readdir(d)) != 0) {
+                    char src[4600], dst[4600];
+                    size_t sn = 0;
+                    char *sb;
+                    int fd;
+                    if (e->d_name[0] == '.') continue;
+                    if (cx_fmt(src, sizeof src, "%s/%s", models, e->d_name) || cx_fmt(dst, sizeof dst, "%s/%s", dir, e->d_name)) nc_die("path");
+                    sb = cx_read(src, &sn);
+                    if (!sb) nc_die("copy read");
+                    fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                    if (fd < 0 || sy_write_all(fd, sb, sn) || sy_close(fd)) nc_die("copy write");
+                    free(sb);
+                }
+                closedir(d);
+            }
+            if (cx_fmt(mv, sizeof mv, "%s/shared-e2.net", dir)) nc_die("path");
+            if (sy_rename(bad, mv)) nc_die("move fixture");
+        }
+        {   char dir[4400];
+            if (cx_fmt(dir, sizeof dir, "%s/nnc-models-copy", work)) nc_die("path");
+            {
+                char *o2 = nc_run(jobs, dir, &rc);
+                nc_ck(rc != 0, "refusal.exit-nonzero");
+                if (o2) {
+                    long d2 = nc_field(o2, "diff=");
+                    nc_ck(d2 >= 1, "refusal.one-diff-detected");
+                    free(o2);
+                } else nc_ck(0, "refusal.one-diff-detected");
+            }
+        }
+        unlink(bad);
+    }
+    printf("NN_NF_C\tassertions=%d\tfailed=%d\n", nc_assertions, nc_failed);
+    return nc_failed ? 1 : 0;
+}

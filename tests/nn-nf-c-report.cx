@@ -1,0 +1,157 @@
+/* tools/nn-nf-c-report.cx -- the byte-difference report NN-NF-C is judged on.
+ *
+ *   sh ./unisacc.com tools/nn-nf-c-report.cx -- ROOT CTX_JOBS MODELS_DIR [OUT.tsv]
+ *
+ * Two statements, both measured, never estimated:
+ *   cmp    every CTX_JOBS/net-<name>/result.net against MODELS_DIR/<name>.net:
+ *          EQUAL, DIFF (with both sizes) or MISSING.  Same-rev chain == package
+ *          models is what "网字节 cmp 等价" means before any rewrite.
+ *   runs   for every net that compares EQUAL, walk its Q lines and sum the runs of
+ *          >=16 consecutive OUT(12)/SBOUT(38) actions: how many runs, how many
+ *          actions, and how many net bytes those runs occupy today (zigzag varint
+ *          per action, the same width the encoder writes).  That is the upper bound
+ *          of what one S line plus SBLOAD can remove; the S line itself is charged
+ *          separately in the report as 2 hex chars per byte.
+ *
+ * Prints one ROW per net, then NN_NF_C_REPORT nets=N equal=N diff=N missing=N
+ * runs_ge16=N actions=N bytes=N.  Exit 1 when any net is DIFF or MISSING, so a
+ * report that silently lost a net cannot look green. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+#define NC_LINE 1048576
+static const int nc_arity[57] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,
+                                 0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1,2};
+static int nc_failed, nc_nets, nc_equal, nc_diff, nc_missing;
+static long nc_runs_total, nc_actions, nc_bytes;
+
+static long nc_vlen(long long v) {
+    unsigned long long x;
+    long n = 1;
+    x = v < 0 ? (unsigned long long)((-v) << 1) - 1 : (unsigned long long)(v << 1);
+    while (x >= 0x80u) { x >>= 7; n++; }
+    return n;
+}
+/* walk the Q lines of one text net; report runs of >=16 OUT/SBOUT */
+static void nc_walk(const char *s, size_t n, long *runs, long *acts, long *bytes) {
+    size_t at = 0;
+    long nq = 0, nstr = 0, line = 0, cur = 0;
+    long long curv = 0;
+    *runs = 0; *acts = 0; *bytes = 0;
+    while (at < n) {
+        size_t e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (line == 0) {
+            /* N ns nq nrg nstr start top -- skip the tag, then read the six numbers */
+            long f = 0; size_t p = at;
+            while (p < e && s[p] != ' ') p++;          /* tag */
+            while (p < e && f < 6) {
+                while (p < e && s[p] == ' ') p++;
+                if (p >= e) break;
+                {   long long v = 0; int any = 0;
+                    if (s[p] == '-') p++;
+                    while (p < e && s[p] >= '0' && s[p] <= '9') { v = v * 10 + (s[p] - '0'); p++; any = 1; }
+                    if (!any) { while (p < e && s[p] != ' ') p++; continue; }   /* not a number: skip the token */
+                    if (f == 1) nq = (long)v; else if (f == 3) nstr = (long)v;
+                    f++;
+                }
+            }
+        } else if (line > nstr && line <= nstr + nq && e > at && s[at] == 'Q') {
+            size_t p = at + 1;
+            long count = 0, done = 0;
+            while (p < e && s[p] == ' ') p++;
+            while (p < e && s[p] >= '0' && s[p] <= '9') { count = count * 10 + (s[p] - '0'); p++; }
+            while (done < count && p < e) {
+                long long op = 0; int opi; long k;
+                int neg = 0;
+                while (p < e && s[p] == ' ') p++;
+                if (p < e && s[p] == '-') { neg = 1; p++; }
+                while (p < e && s[p] >= '0' && s[p] <= '9') { op = op * 10 + (s[p] - '0'); p++; }
+                if (neg) op = -op;
+                opi = (int)(op < 0 ? op + 57 : op);
+                if (opi < 0 || opi >= 57) return;   /* malformed: stop, the report says nothing about this net */
+                if (opi == 12 || opi == 38) {
+                    long cost = nc_vlen(op);
+                    for (k = 0; k < nc_arity[opi]; k++) {
+                        long long a = 0; int aneg = 0;
+                        while (p < e && s[p] == ' ') p++;
+                        if (p < e && s[p] == '-') { aneg = 1; p++; }
+                        while (p < e && s[p] >= '0' && s[p] <= '9') { a = a * 10 + (s[p] - '0'); p++; }
+                        if (aneg) a = -a;
+                        cost += nc_vlen(a);
+                    }
+                    cur++; curv += cost;
+                } else {
+                    if (cur >= 16) { (*runs)++; (*acts) += cur; (*bytes) += curv; }
+                    cur = 0; curv = 0;
+                    for (k = 0; k < nc_arity[opi]; k++) {
+                        while (p < e && s[p] == ' ') p++;
+                        if (p < e && s[p] == '-') p++;
+                        while (p < e && s[p] >= '0' && s[p] <= '9') p++;
+                    }
+                }
+                done++;
+            }
+            if (cur >= 16) { (*runs)++; (*acts) += cur; (*bytes) += curv; }
+            cur = 0; curv = 0;
+        }
+        line++;
+        at = e + 1;
+    }
+}
+static char *nc_read(const char *p, size_t *n) {
+    struct stat st;
+    if (lstat(p, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > 268435456) return 0;
+    return cx_read(p, n);
+}
+int main(int argc, char **argv) {
+    char root[4096], jobs[4400], models[4400], tsvo[4400];
+    char path[4600], name[256];
+    DIR *d;
+    struct dirent *e;
+    FILE *out = 0;
+    int listed = 0;
+    if (argc < 4 || argc > 5 || !realpath(argv[1], root) || !realpath(argv[2], jobs) || !realpath(argv[3], models)) {
+        fputs("usage: nn-nf-c-report.cx ROOT CTX_JOBS MODELS_DIR [OUT.tsv]\n", stderr);
+        return 2;
+    }
+    if (argc == 5) {
+        if (cx_fmt(tsvo, sizeof tsvo, "%s", argv[4])) return 2;
+        out = fopen(tsvo, "w");
+        if (!out) { fprintf(stderr, "nn-nf-c-report: cannot write %s\n", tsvo); return 2; }
+        fputs("net\tcmp\tctx_bytes\tmodel_bytes\truns_ge16\tactions\tbytes\n", out);
+    }
+    d = opendir(jobs);
+    if (!d) { fprintf(stderr, "nn-nf-c-report: cannot open %s\n", jobs); return 2; }
+    while ((e = readdir(d)) != 0) {
+        long runs, acts, bytes;
+        size_t an = 0, bn = 0;
+        char *a, *b;
+        const char *cmp;
+        if (strncmp(e->d_name, "net-", 4)) continue;
+        if (cx_fmt(name, sizeof name, "%s", e->d_name + 4)) { closedir(d); return 2; }
+        if (cx_fmt(path, sizeof path, "%s/%s/result.net", jobs, e->d_name)) { closedir(d); return 2; }
+        a = nc_read(path, &an);
+        if (!a) { closedir(d); return 2; }
+        if (cx_fmt(path, sizeof path, "%s/%s.net", models, name)) { free(a); closedir(d); return 2; }
+        b = nc_read(path, &bn);
+        nc_nets++; listed++;
+        if (!b) { nc_missing++; cmp = "MISSING"; runs = acts = bytes = 0; nc_failed = 1; }
+        else if (an == bn && !memcmp(a, b, an)) {
+            nc_equal++; cmp = "EQUAL";
+            nc_walk(a, an, &runs, &acts, &bytes);
+        } else { nc_diff++; cmp = "DIFF"; runs = acts = bytes = 0; nc_failed = 1; }
+        printf("ROW\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%ld\n", name, cmp, (long)an, (long)(b ? bn : 0), runs, acts, bytes);
+        if (out) fprintf(out, "%s\t%s\t%ld\t%ld\t%ld\t%ld\t%ld\n", name, cmp, (long)an, (long)(b ? bn : 0), runs, acts, bytes);
+        nc_runs_total += runs; nc_actions += acts; nc_bytes += bytes;
+        free(a);
+        if (b) free(b);
+    }
+    closedir(d);
+    if (out) fclose(out);
+    printf("NN_NF_C_REPORT\tnets=%d\tequal=%d\tdiff=%d\tmissing=%d\truns_ge16=%ld\tactions=%ld\tbytes=%ld\n",
+           nc_nets, nc_equal, nc_diff, nc_missing, nc_runs_total, nc_actions, nc_bytes);
+    if (!listed) return 2;
+    return nc_failed ? 1 : 0;
+}
