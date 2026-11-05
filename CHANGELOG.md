@@ -35,7 +35,7 @@
 | lnx/arm64 | 原生 FAIL:`-run` 报 `image could not be started from an anonymous memory file (errno 8)`,整格无证据 |
 | osx/x86_64 | 原生 FAIL:同一步 `Bad system call: 12`(exit 140) |
 | osx/arm64 | 结果未出 |
-| win/x86_64 | 原生 FAIL:身份核对通过,但 `--version` 退出 1 且输出乱串,编译与 smoke 访问违例(0xC0000005);NATIVE-WIN-PE |
+| win/x86_64 | 原生 FAIL:身份核对通过,但 `--version` 退出 1 且输出乱串,编译与 smoke 访问违例(0xC0000005);NATIVE-WIN-PE。CI-RUN-3/4/5:Linux 交叉编的 argv 探针在 Windows 上 `argc` 读出 `.data` 里的一个常量指针、`argv` 为空;把 PE 头改成固定基址后映像按 ImageBase 加载,行为不变,所以不是"随机基址未重定位"。根因未定位,0.0.45 先补调试手段(WIN-DEBUG-LOOP) |
 | win/arm64 | 没有这个片,只核身份;原生入口留 0.0.45 |
 
 - 跨单元共享 FILE 已在 0.0.44 修复：运行库状态(流表、atexit 表、`errno`、`setenv` 的 environ 堆)改为**全程序一份**(`RT_UNIT`/`RT_EXTERN` 三态；默认无宏仍是 `static`，单源产物字节不变)。多单元一次编译的产物字节因此变化：`entry.elf` 3438193B → 3448676B(**+10483B**，本版只共享状态、不去重)。
