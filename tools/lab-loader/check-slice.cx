@@ -132,18 +132,50 @@ static void cs_manifest(const char *dir, const char *base_file, const char *shar
 int main(int argc, char **argv) {
     char root[4096], out[4096], p[4400], q[4400], base_file[4400], share_dir[4400];
     char flat[96], target[96] = "lnx/x86_64", tag[160];
-    const char *base_com = "out/c43-3a5b-stream-runtime.com";
-    const char *source = "out/release-ape/p3-package.bin";
+    char base_com[4400], source[4400];
+    size_t n = 0;
     int i;
 
     /* 无参运行（批次形态）：在 out/check-slice-<pid> 下自建产物，跑完保留。
-       两参运行：ROOT NEW_OUTDIR，用既有产物复查。 */
+       两参运行：ROOT NEW_OUTDIR，用既有产物复查。
+       base 与源包都现场取：base = 已装 entry.elf 剥掉包段的裸 runner，
+       源包 = 已装 unisacc.com.dev/p3-package.bin（stream-pack 自己剥 footer）。 */
     if (argc == 1) {
         if (!getcwd(root, sizeof root)) cs_die("getcwd");
-        if (snprintf(out, sizeof out, "%s/out/check-slice-%d", root, (int)getpid()) >= (int)sizeof out) cs_die("path");
+        if (snprintf(out, sizeof out, "/tmp/check-slice-XXXXXX") >= (int)sizeof out) cs_die("path");
+        if (!mkdtemp(out)) cs_die("output directory");
+        if (snprintf(base_com, sizeof base_com, "%s/bare-runner.bin", out) >= (int)sizeof base_com) cs_die("path");
+        if (snprintf(source, sizeof source, "%s/unisacc.com.dev/p3-package.bin", root) >= (int)sizeof source) cs_die("path");
+        {   char *e = cs_read(source, &n);
+            unsigned long long ext = 0;
+            int j, fd;
+            if (n < 24 || memcmp(e + n - 16, "UNIPKG1\n", 8)) cs_die("package footer");
+            for (j = 7; j >= 0; j--) ext = (ext << 8) | (unsigned char)e[n - 8 + j];
+            if (ext == 0 || ext > (unsigned long long)n - 16) cs_die("package extent");
+            /* slice.cx / stream-pack.cx 只吃裸包正文（不带 UNIPKG1 footer）：先剥出来落盘。 */
+            {   char bare[4400];
+                if (snprintf(bare, sizeof bare, "%s/pkg-bare.bin", out) >= (int)sizeof bare) cs_die("path");
+                fd = open(bare, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                if (fd < 0 || write(fd, e, (size_t)ext) != (ssize_t)ext || close(fd)) cs_die("write bare package");
+                if (snprintf(source, sizeof source, "%s", bare) >= (int)sizeof source) cs_die("path");
+            }
+            if (snprintf(p, sizeof p, "%s/unisacc.com.dev/entry.elf", root) >= (int)sizeof p) cs_die("path");
+            {   char *elf = cs_read(p, &n);
+                unsigned long long ee = 0;
+                if (n < 24 || memcmp(elf + n - 16, "UNIPKG1\n", 8)) cs_die("runner footer");
+                for (j = 7; j >= 0; j--) ee = (ee << 8) | (unsigned char)elf[n - 8 + j];
+                if (ee == 0 || ee > (unsigned long long)n - 16) cs_die("runner extent");
+                fd = open(base_com, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+                if (fd < 0 || write(fd, elf, (size_t)((unsigned long long)n - 16 - ee)) != (ssize_t)((unsigned long long)n - 16 - ee) || close(fd)) cs_die("write runner");
+                free(elf);
+            }
+            free(e);
+        }
         {   np_result r; char why[1024];
+            char build[4400];
+            if (snprintf(build, sizeof build, "%s/build", out) >= (int)sizeof build) cs_die("path");
             char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/slice.cx",
-                          (char *)base_com, (char *)source, out, target, "O2", 0};
+                          base_com, source, build, target, "O2", 0};
             if (np_run(av, root, 0, 55, &r, why, sizeof why)) cs_die(why);
             if (r.rc) { fputs(r.err ? r.err : "", stderr); np_free(&r); cs_die("slice build failed"); }
             np_free(&r);
@@ -151,8 +183,15 @@ int main(int argc, char **argv) {
     } else if (argc == 3) {
         if (!realpath(argv[1], root)) cs_die("root");
         if (!realpath(argv[2], out)) cs_die("output directory must exist (build it first)");
+        if (snprintf(source, sizeof source, "%s/unisacc.com.dev/p3-package.bin", root) >= (int)sizeof source) cs_die("path");
     } else cs_die("usage [ROOT NEW_OUTDIR]");
-    if (snprintf(base_file, sizeof base_file, "%s/%s", root, base_com) >= (int)sizeof base_file) cs_die("path");
+    /* 生成物都在 <out>/build 下（slice.cx 要求 NEW_OUTDIR 不存在；两参复查时它就是 slice 输出目录）。 */
+    if (argc == 1) {
+        char build[4400];
+        if (snprintf(build, sizeof build, "%s/build", out) >= (int)sizeof build) cs_die("path");
+        if (snprintf(out, sizeof out, "%s", build) >= (int)sizeof out) cs_die("path");
+    }
+    if (snprintf(base_file, sizeof base_file, "%s/base/%s.bin", out, target[0] == 'l' ? "lnx-x86_64" : "other") >= (int)sizeof base_file) cs_die("path");
     if (snprintf(share_dir, sizeof share_dir, "%s/share", out) >= (int)sizeof share_dir) cs_die("path");
     {   int k = 0;
         for (i = 0; target[i] && k < 95; i++) flat[k++] = target[i] == '/' ? '-' : target[i];
