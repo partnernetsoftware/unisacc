@@ -271,6 +271,77 @@ jobs:
           }
 
 
+  # WIN-PKG-LADDER: the crash happens only when a REAL package is opened (A with /nonexistent.bin is a
+  # clean rc=1; B and C with the real pkg.bin are 0xC0000005).  Four container inputs on the same host
+  # separate the file channel from the decoder:
+  #   missing  -> /nonexistent.bin          expect rc=1 with a package error
+  #   empty    -> zero-byte file            expect rc=1
+  #   short    -> first 1024 bytes of pkg   expect rc=1
+  #   full     -> the real pkg.bin          expect rc=1 or a crash; a crash ONLY here means the decoder
+  win-pkg-ladder:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the candidate and its package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path diag | Out-Null
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'unisacc.com' --dir diag --clobber
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'pkg.bin' --dir diag --clobber
+          if (!(Test-Path 'diag/pkg.bin')) { Write-Output 'FATAL: no pkg.bin asset'; exit 1 }
+          $b = [IO.File]::ReadAllBytes('diag/pkg.bin')
+          Write-Output ("PKG bytes={0} head={1}" -f $b.Length, (($b[0..15] | ForEach-Object { $_.ToString('x2') }) -join ''))
+          [IO.File]::WriteAllBytes('diag/pkg-empty.bin', (New-Object byte[] 0))
+          $short = New-Object byte[] ([Math]::Min(1024, $b.Length))
+          [Array]::Copy($b, $short, $short.Length)
+          [IO.File]::WriteAllBytes('diag/pkg-short.bin', $short)
+          Write-Output ("LADDER empty=0 short={0} full={1}" -f $short.Length, $b.Length)
+      - name: 'Control: can this runner start a native exe at all'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $info = [Diagnostics.ProcessStartInfo]::new()
+          $info.FileName = (Join-Path $env:SystemRoot 'System32/cmd.exe')
+          $info.Arguments = '/c exit 0'; $info.UseShellExecute = $false
+          $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+          $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+          try { [void]$p.Start(); [void]$p.WaitForExit(30000); Write-Host ("CONTROL cmd.exe exit={0}" -f $p.ExitCode) }
+          catch { Write-Host "CONTROL START FAILED: $_" } finally { $p.Dispose() }
+      - name: Run the four container inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          function Say([string]$s) { Write-Host $s }
+          function Run([string]$file, [string[]]$a, [string]$label, [hashtable]$env) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            if ($env) { foreach ($k in $env.Keys) { $info.Environment[$k] = [string]$env[$k] } }
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start()
+              $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(180000)) { $p.Kill($true); Say "$label TIMEOUT"; return }
+              Say ("{0} exit={1} stderr={2}" -f $label, $p.ExitCode, (($e.Result -replace '[\r\n]+',' ').Substring(0,[Math]::Min(200,$e.Result.Length))))
+            } catch { Say "$label START FAILED: $_" } finally { $p.Dispose() }
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD 'diag/hello.c'), "int main(void){return 40;}`n")
+          $hello = Join-Path $PWD 'diag/hello.c'
+          foreach ($case in @(
+            @{ n='missing'; p=(Join-Path $PWD 'diag/nonexistent.bin') },
+            @{ n='empty';   p=(Join-Path $PWD 'diag/pkg-empty.bin') },
+            @{ n='short';   p=(Join-Path $PWD 'diag/pkg-short.bin') },
+            @{ n='full';    p=(Join-Path $PWD 'diag/pkg.bin') })) {
+            Run $com @('-b','win/x86_64','-o',(Join-Path $PWD ("diag/{0}.exe" -f $case.n)),$hello) ("ladder-{0}" -f $case.n) @{ UNISA_CONTAINER = $case.p }
+          }
+          Say 'rc=1 everywhere -> the decoder survives all four; a crash only at full -> decoding real content'
+
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
   # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
