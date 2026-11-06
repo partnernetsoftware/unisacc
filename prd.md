@@ -97,6 +97,7 @@
 | 产品改动链预检 | `sh ./unisacc.com tools/chain-precheck.cx -- ROOT CHAIN_OUT NEW_OUT init --files LIST`（或 `--range A..B`），随后 `reuse`、逐项 `job`、`identity/routes/p3`、`probe include/drive/use/entry`、`slice all`、`finish` | 根/旧链/新输出均收绝对或相对路径，表清单收根内绝对路径并精确去重；旧控制器 ENOENT 时才回退旧链真实 `sl-lnx/candidate`，不吞权限/目录错误。未影响输入逐字节核对后显式复用；新作业逐状态、新包探针、lnx片全实跑才 `CHAIN_PRECHECK PASS`，不等于发布资格；检查器 `tools/check-chain-precheck.cx` |
 | Windows argv容量与布局 | `sh ./unisacc.com tools/win-argv-gen.cx -- --check . enc-x86win-winargs enc-armwin-winargs lower-data`；`PRODUCT=新包产品 sh ./unisacc.com tools/check-win-argv.cx` | `WIN_ARGVA_BYTES=131080`唯一事实推导16384项加NULL；双ISA边界/向量模式/显式NULL、PE虚拟尾与漂移负控；批次`win-argv`，Linux交叉检查不等于Windows原生通过 |
 | 表闭包静态预检 | `sh ./unisacc.com tools/table-lint.cx -- --root . --errors-only --limit 10`；`sh ./unisacc.com tools/check-table-lint.cx` | 查模式冲突、未定义引用、缺兜底及精确SB入口清理合同；支持根内call、有限facts/with/let/模板及确定flags。动态宏、fresh、条件和图编辑前置条件未证明者单列`UNRESOLVED`，`status=PARTIAL`且rc0仅表示无确定错误，不代替gen/新包/slice预检；批次`table-lint`保留三段历史失败回放与修后负控 |
+| 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序→标签→用户数升序→名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
 | libc99posix 契约表 | `sh ./unisacc.com tools/libc99posix-gen.cx -- --check`（`--write` 生成 `cx/compiler/libc99bind.cx`）；校验 `tools/check-libc99posix.cx` | 20 函数：原八项加 P0 十二项；win 导出按 run42196947660 双架构 UCRT 实物核名及 ABI/errno 约定，pipe/write/getcwd/ftruncate 因 ABI 不同保留 cx-own；cx-own 核头文件自带 static 体，两 win 目标 `-c -funit` 实编，不把存在导出等同于兼容绑定 |
@@ -304,7 +305,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-07,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 公开出发线（历史，不是本候选资格）:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定（主人2026-11-07）：**0.0.45公开预发布及已披露缺陷保持现状，不再追加稳定版，不起c45-4；后续修复全部归0.0.46，达到正式版门槛后一次公开。** 版本串仍为0.0.45，候选前统一调整limits.tsv八处。argv首批改动已合入`134a1b3643`，Win原生4000参数仍待c46候选CI；工具修复为`e52a973e9e`。`table-lint`合同检查29项通过、批次已登记；当前树0确定错误/11226未证明，结果仍为`PARTIAL`，不替代构造资格。下一件`SLICE-INVENTORY`仅盘点、不迁移产品，先完成静态检查提交；BOM保持0.0.46待排。仅决策、里程碑或真实故障向cc汇报。
+当前裁定（主人2026-11-07）：**0.0.45公开预发布及已披露缺陷保持现状，不再追加稳定版，不起c45-4；后续修复全部归0.0.46，达到正式版门槛后一次公开。** 版本串仍为0.0.45，候选前由cc统一调整limits.tsv八处。argv已合`134a1b3643`，Win原生4000参数待c46候选CI；工具修复`e52a973e9e`、table-lint交付`299e13cb4c`，未证明性质仍PARTIAL。库存批次已实跑，旧5ac7784dcb切片81单元/44根/37模块、闭包完整；cxmod为TABLE候选，driveroute整单元含IO/退出，纯路由是route.o。cc选tapegate（450432B对象/649行/反向用户3）为首试点：当前仅写`CORE-MIN-TAPEGATE`设计，fable评审通过且c46-1发出后才可实现；cxmod/source_frame本版不动。sysx等待与Darwin真单调在私有克隆完成本机回归，Mac原生仍待同c46候选，不另起链；BOM待排。仅决策、里程碑或真实故障向cc汇报。
 
 ```text
 0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
@@ -341,6 +342,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、`work/ledger.tsv` |
 | 事实表 | 事实→对应生成器→产物，生成器须带`--check`；通用派生用facts-gen，Win argv专属表用win-argv-gen | `exec/facts/`、上方能力速查 |
 | 静态预检 | 模式/引用/兜底/SB合同先查；动态及未证明性质单列PARTIAL，不能用无确定错误替代真实gen/新包/slice | `tools/table-lint.cx`、`tools/check-table-lint.cx`、`tools/chain-precheck.cx` |
+| 结构盘点与试点 | 旧5ac7784dcb对象81项已盘点；机械标签不是语义证明，整.o不是最终可减切片字节。tapegate首试点当前仅设计，迁移须c46-1后及fable批准；route热身，cxmod/source_frame本版不动 | `tools/slice-inventory.cx`、`CORE-MIN-TAPEGATE`、`plans/v0.0.46-unisacc.md` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
 ### 9.3 上一发布 0.0.43(历史)
