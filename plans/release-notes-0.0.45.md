@@ -1,6 +1,6 @@
 # unisacc 0.0.45 —— 发布说明
 
-> **预发布（prerelease），不是 Latest。** 六个平台的 identity、version、hello、run、smoke 都有同候选原生证据；其中 stdio-crossunit 与 stream-pipe 在 macOS 和 Windows 上有部分未跑，全批会话也没有对本候选重跑。详见下文，不夸大。
+> **预发布（prerelease），不是 Latest。** 六个平台的 identity、version、hello、run、smoke 都有同候选原生证据；stdio-crossunit 在 Windows 上只跑了 portable 子集，Windows 的 stream-pipe 有一个已确认的产品缺陷（见下）；全批会话也没有对本候选重跑。详见下文，不夸大。
 
 ## 是什么
 
@@ -13,20 +13,20 @@ unisacc 是一个 C99 编译器，自己写出可执行文件（ELF、Mach-O、P
 
 ## 支持哪些平台
 
-在 GitHub 原生 runner 上实测（workflow `candidate-native`，运行 42191390455，分支 `ci/c45-2f`）。汇总：`pass=36 fail=0 not_run=6`。
+在 GitHub 原生 runner 上实测。发布时的候选验证:`candidate-native` 运行 42191390455(`pass=36 fail=0 not_run=6`)。发布后用**同一个已发布 APE**(sha256 同上)补测了此前未跑的检查,测试取自较新的提交 `4830249e3c`,运行 42196947660(分支 `ci/win-batches`):`pass=40 fail=2 not_run=0`。下表为合并后的最新结果。
 
 | 目标 | identity | version | hello | run | smoke | stdio-crossunit | stream-pipe |
 |---|---|---|---|---|---|---|---|
 | Linux x86-64 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
 | Linux arm64 | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
-| macOS x86-64 | PASS | PASS | PASS | PASS | PASS | NOT_RUN | PASS |
-| macOS arm64 | PASS | PASS | PASS | PASS | PASS | NOT_RUN | PASS |
-| Windows x86-64 | PASS | PASS | PASS | PASS | PASS | NOT_RUN | NOT_RUN |
-| Windows arm64 | PASS | PASS | PASS | PASS | PASS | NOT_RUN | NOT_RUN |
+| macOS x86-64 | PASS | PASS | PASS | PASS | PASS | PASS¹ | PASS |
+| macOS arm64 | PASS | PASS | PASS | PASS | PASS | PASS¹ | PASS |
+| Windows x86-64 | PASS | PASS | PASS | PASS | PASS | PASS² | **FAIL**³ |
+| Windows arm64 | PASS | PASS | PASS | PASS | PASS | PASS² | **FAIL**³ |
 
-未跑的检查及原因：
-- macOS 的 stdio-crossunit：runner 没有 `/dev/full`，该用例需要它构造写失败。
-- Windows 的 stdio-crossunit 与 stream-pipe：这两个批次需要 POSIX `fork` 和进程组，Windows 上还没有对应的树看门狗与路径适配。
+¹ runner 没有 `/dev/full`,改用「关闭读端的管道」构造写失败(EPIPE);用例语义是写失败被如实报告。
+² **只是 portable 子集**(7/9 子检查):POSIX 部分(`fork`、`waitpid`、`kill`、`F_SETFD`、`environ`)在 Windows 上没有对应原语,未跑。
+³ 6 项 portable 子检查中 5 项通过,失败的是 `C hello-stdio-image-pipe-cmp`:带 stdio 的 `hello.c` 用 `-o` 直接编译与走 stream 管道产出的镜像不一致(win/x86_64 长度 38912 对 38400,win/arm64 长度相等但第 336 字节起不同)。Linux 上相等。这是一个已确认的产品缺陷(条目 `STREAM-WIN-STDIO-O-PIPE`),本版未修。另有 3 项 POSIX 子检查未跑。
 
 **Windows arm64 的执行体是随发的独立切片文件，不是 `unisacc.com` 自身。** 该格原生运行的是资产 `slice-win-arm64`（sha256 `380e28700a1a2595b7fda3cff563452efeb40b361c22c4829fc3f4a2eda85b25`，3,299,840 字节），配合资产 `pkg.bin`（sha256 `15d8af5844459de26e0ad7feec1564deb1cd1e501d58ab6a964097e7087208ec`，1,662,149 字节），通过环境变量 `UNISA_CONTAINER` 指向它。APE 内部还没有 win/arm64 的分发，所以 Windows arm64 用户目前要用这个独立切片文件。
 

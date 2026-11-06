@@ -10,10 +10,10 @@
 |---|---|
 | lnx/x86_64 | identity、version、hello、run、smoke、stdio-crossunit、stream-pipe 全 PASS |
 | lnx/arm64 | 同上,全 PASS |
-| osx/x86_64 | 除 stdio-crossunit 外 PASS;stdio-crossunit NOT_RUN(runner 无 `/dev/full`) |
-| osx/arm64 | 同上 |
-| win/x86_64 | identity、version、hello、run、smoke PASS;stdio-crossunit、stream-pipe NOT_RUN(需 POSIX `fork`) |
-| win/arm64 | 同 win/x86_64 的 5 项 PASS,执行体是独立资产 `slice-win-arm64`(sha256 `380e28700a1a2595b7fda3cff563452efeb40b361c22c4829fc3f4a2eda85b25`)配合 `pkg.bin`,不是 `unisacc.com` 自身;APE 内尚无该片分发 |
+| osx/x86_64 | 全 PASS(stdio-crossunit 在无 `/dev/full` 的 runner 上改用关闭读端的管道构造写失败) |
+| osx/arm64 | 同上,全 PASS |
+| win/x86_64 | identity、version、hello、run、smoke PASS;stdio-crossunit 只跑 portable 子集(7/9)PASS;stream-pipe **FAIL**(portable 6 项中 5 项通过,`hello-stdio` 的 `-o` 与 stream 管道产物不一致,条目 STREAM-WIN-STDIO-O-PIPE) |
+| win/arm64 | 同 win/x86_64:5 项 PASS、stdio-crossunit portable 子集 PASS、stream-pipe FAIL(同一子检查);执行体是独立资产 `slice-win-arm64`(sha256 `380e28700a1a2595b7fda3cff563452efeb40b361c22c4829fc3f4a2eda85b25`)配合 `pkg.bin`,不是 `unisacc.com` 自身;APE 内尚无该片分发 |
 
 ## 修复(rc3 → 0.0.45)
 
@@ -31,7 +31,7 @@
 ## 已知限制
 
 - 全批会话未对本候选重跑(见上)。
-- win 的 stdio-crossunit、stream-pipe,osx 的 stdio-crossunit 未跑(原因见矩阵)。
+- win 的 POSIX 进程类子检查(`fork`、`waitpid`、`kill`、`F_SETFD`、`environ`)未跑;win 的 stream-pipe 有已确认缺陷(见矩阵)。
 - APE 内尚无 win/arm64 分发。
 - `#include <C:/x.h>`(尖括号)不按盘符绝对路径处理。
 - 其余沿用下方 rc3「已知限制」中仍成立项:部分非法 C 被静默接受、`-c` 分开编译运行库状态不共享、手工拼 `stream` 管道的截断风险、预处理器接受两种非法输入、`-c -b osx/*|win/*` 文档与实际不符、运行库每对象一份。
