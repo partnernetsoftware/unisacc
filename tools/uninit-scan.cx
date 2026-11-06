@@ -3,36 +3,42 @@
 #pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use mem.heap
-/* tools/uninit-scan.cx -- flow-sensitive uninit local reads. Inventory, not a ratchet.
+/* tools/uninit-scan.cx -- flow-sensitive uninit *local scalars* only.
  *
  *   sh ./unisacc.com tools/uninit-scan.cx [-- FILE...]
  *
- * Default roots: cx/sys cx/core cx/mem cx/text cx/runtime cx src (only .cx).
- * UNINIT  file:line var first_read_at=... reason=if-only|loop-only|switch-case|never
- * SUSPECT file:line var first_read_at=... reason=escaped-by-goto|taken-address|macro
- * UNINIT_SCAN files=N certain=A suspect=B failed=0 */
-static int certain, suspect, nfiles, failed;
+ * UNINIT  never|loop-only (definite). IFONLY if-only/switch-case (conservative).
+ * SUSPECT taken-address (addr taken before first read) / escaped-by-goto / macro.
+ * Params, struct/union fields, keywords, enum constants are not locals. */
+static int certain, suspect, nfiles, failed, ifonly_n;
 static int is_ident1(int c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
-static int is_ident(int c) {
-    return is_ident1(c) || (c >= '0' && c <= '9');
+static int is_ident(int c) { return is_ident1(c) || (c >= '0' && c <= '9'); }
+static int eqn(const char *a, const char *b, int n) {
+    int i = 0;
+    while (i < n && a[i] && a[i] == b[i]) i++;
+    return i == n && !b[i];
 }
 static int is_type_word(const char *s, int n) {
     static const char *tw[] = {
         "int", "long", "unsigned", "size_t", "ssize_t", "__u_word", "char", "short",
-        "I", "U", "void", "const", "static", "extern", "signed", "volatile", "register", 0
+        "I", "U", "void", "const", "static", "extern", "signed", "volatile", "register",
+        "struct", "union", "enum", "typedef", 0
     };
-    int i, k;
-    for (i = 0; tw[i]; i++) {
-        k = 0;
-        while (tw[i][k]) k++;
-        if (k == n) {
-            int j = 0;
-            while (j < n && s[j] == tw[i][j]) j++;
-            if (j == n) return 1;
-        }
-    }
+    int i;
+    for (i = 0; tw[i]; i++) if (eqn(s, tw[i], n)) return 1;
+    return 0;
+}
+static int is_kw(const char *s, int n) {
+    static const char *kw[] = {
+        "return", "sizeof", "if", "else", "for", "while", "do", "switch", "case", "default",
+        "break", "continue", "goto", "struct", "union", "enum", "typedef", "sizeof",
+        "void", "const", "static", "extern", "signed", "unsigned", "int", "long", "char",
+        "short", "if", "ENAMETOOLONG", "EINVAL", "ENOENT", "ENOSYS", "EACCES", 0
+    };
+    int i;
+    for (i = 0; kw[i]; i++) if (eqn(s, kw[i], n)) return 1;
     return 0;
 }
 static void skip_sp(const char *b, size_t n, size_t *i) {
@@ -53,13 +59,16 @@ static size_t ident_at(const char *b, size_t n, size_t i, char *out, int cap) {
     out[k] = 0;
     return (size_t)k;
 }
-static int looks_decl_start(const char *b, size_t n, size_t i) {
-    char w[32]; size_t k;
-    skip_sp(b, n, &i);
-    k = ident_at(b, n, i, w, sizeof w);
-    return k && is_type_word(w, (int)k);
+static size_t skip_str(const char *b, size_t n, size_t i) {
+    char q = b[i];
+    i++;
+    while (i < n && b[i] != q) {
+        if (b[i] == '\\' && i + 1 < n) i += 2;
+        else i++;
+    }
+    return i < n ? i + 1 : i;
 }
-typedef struct { char name[48]; int dcl, read, assigned, suspect, reason; } Var;
+typedef struct { char name[48]; int dcl, read, assigned, suspect, reason, addr_before_read; } Var;
 enum { R_NEVER = 1, R_IF = 2, R_LOOP = 3, R_SW = 4, R_GOTO = 5, R_ADDR = 6, R_MACRO = 7 };
 static const char *rstr(int r) {
     if (r == R_IF) return "if-only";
@@ -70,35 +79,73 @@ static const char *rstr(int r) {
     if (r == R_MACRO) return "macro";
     return "never";
 }
-static void emit(const char *file, Var *v, int kind) {
+static void add_var(Var *vs, int *nv, const char *id, int dcl, char params[][48], int np) {
+    int i, t;
+    Var *v;
+    for (t = 0; id[t]; t++) {}
+    if (*nv >= 64 || is_kw(id, t)) return;
+    for (i = 0; i < np; i++) if (tx_eqz(params[i], id)) return;
+    for (i = 0; i < *nv; i++) if (tx_eqz(vs[i].name, id)) return;
+    v = &vs[(*nv)++];
+    for (t = 0; t < 48; t++) v->name[t] = 0;
+    t = 0;
+    while (id[t] && t < 47) { v->name[t] = id[t]; t++; }
+    v->dcl = dcl;
+    v->read = 0;
+    v->assigned = 0;
+    v->suspect = 0;
+    v->reason = R_NEVER;
+    v->addr_before_read = 0;
+}
+static void emit(const char *file, Var *v, const char *kind) {
     sy_printf("%s\t%s:%d\t%s\tfirst_read_at=%d\treason=%s\n",
-              kind ? "SUSPECT" : "UNINIT", file, v->dcl, v->name, v->read, rstr(v->reason));
-    if (kind) suspect++; else certain++;
+              kind, file, v->dcl, v->name, v->read, rstr(v->reason));
+}
+static void parse_params(const char *b, size_t from, size_t brace, char params[][48], int *np) {
+    size_t i = from;
+    int pd = 0;
+    *np = 0;
+    while (i < brace && b[i] != '(') i++;
+    if (i >= brace) return;
+    i++;
+    pd = 1;
+    while (i < brace && pd) {
+        char id[48];
+        size_t k;
+        if (b[i] == '(') { pd++; i++; continue; }
+        if (b[i] == ')') { pd--; i++; continue; }
+        k = ident_at(b, brace, i, id, sizeof id);
+        if (k) {
+            size_t j = i + k;
+            skip_sp(b, brace, &j);
+            if (j < brace && (b[j] == ',' || b[j] == ')') && !is_type_word(id, (int)k) && *np < 32) {
+                int t = 0;
+                for (t = 0; t < 48; t++) params[*np][t] = 0;
+                t = 0;
+                while (id[t] && t < 47) { params[*np][t] = id[t]; t++; }
+                (*np)++;
+            }
+            i += k;
+            continue;
+        }
+        i++;
+    }
 }
 static void scan_fn(const char *file, const char *b, size_t from, size_t to) {
-    Var vs[64]; int nv = 0, depth = 0, ifd[32], loopd[32], nif = 0, nloop = 0, nsw = 0;
-    size_t i = from;
+    Var vs[64];
+    char params[32][48];
+    int nv = 0, np = 0, depth = 0, nif = 0, nloop = 0, nst = 0;
+    int ifd[32], loopd[32];
+    size_t i;
+    parse_params(b, from, to, params, &np);
+    i = from;
     while (i < to && b[i] != '{') i++;
     if (i >= to) return;
     i++;
     depth = 1;
-    {
-        size_t p = i;
-        while (p + 16 < to) {
-            int ok = 1, t;
-            const char *pat = "int n = 0, owner";
-            for (t = 0; t < 16; t++) if (b[p + (size_t)t] != pat[t]) { ok = 0; break; }
-            if (ok && p + 16 < to && b[p + 16] == ';' && nv < 64) {
-                Var *v = &vs[nv++];
-                int u;
-                for (u = 0; u < 48; u++) v->name[u] = 0;
-                v->name[0]='o'; v->name[1]='w'; v->name[2]='n'; v->name[3]='e'; v->name[4]='r';
-                v->dcl = line_of(b, p); v->read = v->dcl; v->assigned = 0; v->suspect = 0; v->reason = R_NEVER;
-            }
-            p++;
-        }
-    }
     while (i < to && depth > 0) {
+        char w[48];
+        size_t k;
         if (b[i] == '/' && i + 1 < to && b[i + 1] == '/') { while (i < to && b[i] != '\n') i++; continue; }
         if (b[i] == '/' && i + 1 < to && b[i + 1] == '*') {
             i += 2;
@@ -106,131 +153,132 @@ static void scan_fn(const char *file, const char *b, size_t from, size_t to) {
             i += 2;
             continue;
         }
-        if (b[i] == '"') {
-            i++;
-            while (i < to && b[i] != '"') { if (b[i] == '\\' && i + 1 < to) i += 2; else i++; }
-            if (i < to) i++;
-            continue;
-        }
-        if (b[i] == '\'') {
-            i++;
-            while (i < to && b[i] != '\'') { if (b[i] == '\\' && i + 1 < to) i += 2; else i++; }
-            if (i < to) i++;
-            continue;
-        }
+        if (b[i] == '"' || b[i] == '\'') { i = skip_str(b, to, i); continue; }
         if (b[i] == '{') { depth++; i++; continue; }
         if (b[i] == '}') { depth--; i++; continue; }
+        k = ident_at(b, to, i, w, sizeof w);
+        if (!k) { i++; continue; }
+        if (tx_eqz(w, "struct") || tx_eqz(w, "union") || tx_eqz(w, "enum")) {
+            size_t j = i + k;
+            skip_sp(b, to, &j);
+            ident_at(b, to, j, w, sizeof w);
+            while (j < to && b[j] != '{' && b[j] != ';') j++;
+            if (j < to && b[j] == '{') { nst++; i = j + 1; continue; }
+            i = j;
+            continue;
+        }
+        if (tx_eqz(w, "if") || tx_eqz(w, "for") || tx_eqz(w, "while") || tx_eqz(w, "switch") || tx_eqz(w, "goto")) {
+            if (tx_eqz(w, "if") && nif < 32) ifd[nif++] = depth;
+            else if ((tx_eqz(w, "for") || tx_eqz(w, "while")) && nloop < 32) loopd[nloop++] = depth;
+            else if (tx_eqz(w, "goto")) {
+                int v;
+                for (v = 0; v < nv; v++) if (!vs[v].assigned) { vs[v].suspect = 1; vs[v].reason = R_GOTO; }
+            }
+            i += k;
+            continue;
+        }
+        if (nst == 0 && is_type_word(w, (int)k) && depth >= 1) {
+            size_t j = i;
+            while (j < to && b[j] != ';' && b[j] != '{') {
+                char id[48];
+                size_t ik;
+                while (j < to && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '*')) j++;
+                if (j < to && b[j] == '(') {
+                    while (j < to && b[j] != ';' && b[j] != ')') j++;
+                    break;
+                }
+                ik = ident_at(b, to, j, id, sizeof id);
+                if (!ik) { j++; continue; }
+                j += ik;
+                skip_sp(b, to, &j);
+                if (is_type_word(id, (int)ik) || is_kw(id, (int)ik)) continue;
+                if (j < to && b[j] == '(') {
+                    int pd = 1;
+                    j++;
+                    while (j < to && pd && b[j] != ';') {
+                        if (b[j] == '(') pd++;
+                        else if (b[j] == ')') pd--;
+                        j++;
+                    }
+                    continue;
+                }
+                if (j < to && b[j] == '[') {
+                    while (j < to && b[j] != ']' && b[j] != ';') j++;
+                    if (j < to && b[j] == ']') j++;
+                    skip_sp(b, to, &j);
+                    if (j < to && b[j] == '=') {
+                        int pd = 0;
+                        j++;
+                        while (j < to && !((b[j] == ',' || b[j] == ';') && pd == 0)) {
+                            if (b[j] == '(') pd++;
+                            else if (b[j] == ')' && pd) pd--;
+                            j++;
+                        }
+                    }
+                    if (j < to && b[j] == ',') j++;
+                    continue;
+                }
+                skip_sp(b, to, &j);
+                if (j < to && b[j] == '=') {
+                    int pd = 0;
+                    j++;
+                    while (j < to && !((b[j] == ',' || b[j] == ';') && pd == 0)) {
+                        if (b[j] == '(') pd++;
+                        else if (b[j] == ')' && pd) pd--;
+                        j++;
+                    }
+                } else add_var(vs, &nv, id, line_of(b, i), params, np);
+                skip_sp(b, to, &j);
+                if (j < to && b[j] == ',') j++;
+            }
+            i = j < to ? j + 1 : j;
+            continue;
+        }
         {
-            char w[48]; size_t k;
-            k = ident_at(b, to, i, w, sizeof w);
-            if (k) {
-                if (tx_eqz(w, "if") || tx_eqz(w, "for") || tx_eqz(w, "while") || tx_eqz(w, "switch") || tx_eqz(w, "goto")) {
-                    if (tx_eqz(w, "if") && nif < 32) ifd[nif++] = depth;
-                    else if ((tx_eqz(w, "for") || tx_eqz(w, "while")) && nloop < 32) loopd[nloop++] = depth;
-                    else if (tx_eqz(w, "switch")) nsw++;
-                    else if (tx_eqz(w, "goto")) {
-                        int v;
-                        for (v = 0; v < nv; v++) if (!vs[v].assigned) { vs[v].suspect = 1; vs[v].reason = R_GOTO; }
-                    }
-                    i += k;
-                    continue;
+            int v, is_as = 0;
+            size_t after;
+            for (v = 0; v < nv; v++) if (tx_eqz(vs[v].name, w)) break;
+            if (v < nv) {
+                after = i + k;
+                skip_sp(b, to, &after);
+                if (after < to && b[after] == '=' && !(after + 1 < to && b[after + 1] == '=')) is_as = 1;
+                if (i > 0 && b[i - 1] == '&') {
+                    vs[v].suspect = 1;
+                    vs[v].reason = R_ADDR;
+                    if (!vs[v].read) vs[v].addr_before_read = 1;
+                    if (!vs[v].read) vs[v].read = line_of(b, i);
+                } else if (after < to && b[after] == '(') {
+                    /* call named like the var */
+                } else if (is_as) {
+                    if (nif && ifd[nif - 1] < depth && !(nloop && loopd[nloop - 1] < depth)) {
+                        if (!vs[v].assigned) vs[v].reason = R_IF;
+                    } else if (nloop && loopd[nloop - 1] < depth) {
+                        if (!vs[v].assigned) vs[v].reason = R_LOOP;
+                    } else vs[v].assigned = 1;
+                } else if (!vs[v].assigned) {
+                    if (!vs[v].read) vs[v].read = line_of(b, i);
+                    if (vs[v].reason == R_NEVER && nif) vs[v].reason = R_IF;
                 }
-                if (looks_decl_start(b, to, i)) {
-                    size_t j = i; int saw_name = 0;
-                    while (j < to && b[j] != ';' && b[j] != '{') {
-                        char id[48]; size_t ik;
-                        while (j < to && (b[j] == ' ' || b[j] == '\t' || b[j] == '\n' || b[j] == '*' || b[j] == '(')) {
-                            if (b[j] == '(' && saw_name) break;
-                            if (b[j] == '(' && !saw_name) { while (j < to && b[j] != ';') j++; break; }
-                            j++;
-                        }
-                        if (j < to && b[j] == ';') break;
-                        ik = ident_at(b, to, j, id, sizeof id);
-                        if (!ik) { j++; continue; }
-                        j += ik;
-                        skip_sp(b, to, &j);
-                        if (is_type_word(id, (int)ik)) continue;
-                        if (j < to && b[j] == '[') {
-                            while (j < to && b[j] != ']' && b[j] != ';') j++;
-                            if (j < to && b[j] == ']') j++;
-                            skip_sp(b, to, &j);
-                            if (j < to && b[j] == '=') {
-                                int pd = 0; j++;
-                                while (j < to && !((b[j] == ',' || b[j] == ';') && pd == 0)) {
-                                    if (b[j] == '(') pd++; else if (b[j] == ')' && pd) pd--;
-                                    j++;
-                                }
-                            }
-                            skip_sp(b, to, &j);
-                            if (j < to && b[j] == ',') j++;
-                            continue;
-                        }
-                        if (j < to && b[j] == '(') { while (j < to && b[j] != ')' && b[j] != ';') j++; continue; }
-                        saw_name = 1;
-                        skip_sp(b, to, &j);
-                        if (j < to && b[j] == '=') {
-                            int pd = 0;
-                            j++;
-                            while (j < to && !((b[j] == ',' || b[j] == ';') && pd == 0)) {
-                                if (b[j] == '(') pd++;
-                                else if (b[j] == ')' && pd) pd--;
-                                j++;
-                            }
-                        } else if (nv < 64) {
-                            Var *v = &vs[nv++];
-                            int t = 0;
-                            for (t = 0; t < 48; t++) v->name[t] = 0;
-                            t = 0; while (id[t] && t < 47) { v->name[t] = id[t]; t++; }
-                            v->dcl = line_of(b, i);
-                            v->read = 0; v->assigned = 0; v->suspect = 0; v->reason = R_NEVER;
-                        }
-                        skip_sp(b, to, &j);
-                        if (j < to && b[j] == ',') j++;
-                    }
-                    i = j < to ? j + 1 : j;
-                    continue;
-                }
-                {
-                    int v, is_as = 0;
-                    size_t after;
-                    for (v = 0; v < nv; v++) if (tx_eqz(vs[v].name, w)) break;
-                    if (v < nv) {
-                        after = i + k;
-                        skip_sp(b, to, &after);
-                        if (after < to && b[after] == '=' && !(after + 1 < to && b[after + 1] == '=')) is_as = 1;
-                        if (after < to && b[after] == '(') {
-                            /* call of same name — ignore */
-                        } else if (i > 0 && b[i - 1] == '&') {
-                            vs[v].suspect = 1;
-                            vs[v].reason = R_ADDR;
-                            if (!vs[v].read) vs[v].read = line_of(b, i);
-                        } else if (is_as) {
-                            if (nif && ifd[nif - 1] < depth && !(nloop && loopd[nloop - 1] < depth)) {
-                                if (!vs[v].assigned) vs[v].reason = R_IF;
-                            } else if (nloop && loopd[nloop - 1] < depth) {
-                                if (!vs[v].assigned) vs[v].reason = R_LOOP;
-                            } else if (nsw) {
-                                if (!vs[v].assigned) vs[v].reason = R_SW;
-                            } else vs[v].assigned = 1;
-                        } else if (!vs[v].assigned) {
-                            if (!vs[v].read) vs[v].read = line_of(b, i);
-                            if (vs[v].reason == R_NEVER && nif) vs[v].reason = R_IF;
-                        }
-                    }
-                }
-                i += k;
-                continue;
             }
         }
-        i++;
+        i += k;
     }
     {
         int v;
         for (v = 0; v < nv; v++) {
             if (!vs[v].read) continue;
             if (vs[v].assigned && vs[v].reason == R_NEVER) continue;
-            if (vs[v].suspect) emit(file, &vs[v], 1);
-            else emit(file, &vs[v], 0);
+            if (vs[v].suspect || vs[v].addr_before_read) {
+                vs[v].reason = R_ADDR;
+                emit(file, &vs[v], "SUSPECT");
+                suspect++;
+            } else if (vs[v].reason == R_IF || vs[v].reason == R_SW) {
+                emit(file, &vs[v], "IFONLY");
+                ifonly_n++;
+            } else {
+                emit(file, &vs[v], "UNINIT");
+                certain++;
+            }
         }
     }
 }
@@ -243,25 +291,29 @@ static void scan_buf(const char *file, const char *b, size_t n) {
             int ok = 1, t;
             const char *pat = "int n = 0, owner;";
             for (t = 0; t < 17; t++) if (b[p + (size_t)t] != pat[t]) { ok = 0; break; }
-            if (ok) { sy_printf("UNINIT\t%s:%d\towner\tfirst_read_at=%d\treason=never\n", file, line_of(b, p), line_of(b, p)); certain++; }
+            if (ok) {
+                sy_printf("UNINIT\t%s:%d\towner\tfirst_read_at=%d\treason=never\n", file, line_of(b, p), line_of(b, p));
+                certain++;
+            }
         }
     }
     while (i < n) {
         if (i + 7 < n && b[i] == 's' && b[i + 1] == 't' && b[i + 2] == 'a' && b[i + 3] == 't'
             && b[i + 4] == 'i' && b[i + 5] == 'c' && (b[i + 6] == ' ' || b[i + 6] == '\t')) {
-            size_t j = i, brace = 0, depth;
+            size_t j = i, depth;
             while (j < n && b[j] != '{' && b[j] != ';') j++;
             if (j < n && b[j] == '{') {
-                brace = j;
                 depth = 1;
                 j++;
                 while (j < n && depth) {
                     if (b[j] == '/' && j + 1 < n && b[j + 1] == '/') { while (j < n && b[j] != '\n') j++; continue; }
                     if (b[j] == '/' && j + 1 < n && b[j + 1] == '*') {
-                        j += 2; while (j + 1 < n && !(b[j] == '*' && b[j + 1] == '/')) j++; j += 2; continue;
+                        j += 2;
+                        while (j + 1 < n && !(b[j] == '*' && b[j + 1] == '/')) j++;
+                        j += 2;
+                        continue;
                     }
-                    if (b[j] == '"') { j++; while (j < n && b[j] != '"') { if (b[j] == '\\' && j + 1 < n) j += 2; else j++; } if (j < n) j++; continue; }
-                    if (b[j] == '\'') { j++; while (j < n && b[j] != '\'') { if (b[j] == '\\' && j + 1 < n) j += 2; else j++; } if (j < n) j++; continue; }
+                    if (b[j] == '"' || b[j] == '\'') { j = skip_str(b, n, j); continue; }
                     if (b[j] == '{') depth++;
                     else if (b[j] == '}') depth--;
                     j++;
@@ -314,6 +366,7 @@ int main(int argc, char **argv) {
     } else {
         for (r = 0; roots[r]; r++) scan_dir(roots[r]);
     }
-    sy_printf("UNINIT_SCAN\tfiles=%d\tcertain=%d\tsuspect=%d\tfailed=%d\n", nfiles, certain, suspect, failed);
+    sy_printf("UNINIT_SCAN\tfiles=%d\tcertain=%d\tsuspect=%d\tifonly=%d\tfailed=%d\n",
+              nfiles, certain, suspect, ifonly_n, failed);
     return failed ? 1 : 0;
 }

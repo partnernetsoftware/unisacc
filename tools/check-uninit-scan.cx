@@ -15,6 +15,25 @@ static int has(const char *h, size_t n, const char *s) {
     }
     return 0;
 }
+static int has_kind_var(const char *h, size_t n, const char *kind, const char *var) {
+    size_t i = 0, kl = 0, vl = 0;
+    while (kind[kl]) kl++;
+    while (var[vl]) vl++;
+    while (i < n) {
+        size_t e = i, tab, t2;
+        while (e < n && h[e] != '\n') e++;
+        if (e - i > kl && !memcmp(h + i, kind, kl) && h[i + kl] == '\t') {
+            tab = i + kl + 1;
+            while (tab < e && h[tab] != '\t') tab++;
+            if (tab < e) {
+                t2 = tab + 1;
+                if (t2 + vl <= e && !memcmp(h + t2, var, vl) && (t2 + vl == e || h[t2 + vl] == '\t')) return 1;
+            }
+        }
+        i = e < n ? e + 1 : e;
+    }
+    return 0;
+}
 static int run_scan(const char *file, char **out, size_t *n) {
     char *av[6];
     av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/uninit-scan.cx"; av[3] = "--"; av[4] = (char *)file; av[5] = 0;
@@ -30,8 +49,12 @@ int main(void) {
         "static int loopf(void){int x; for(;;) x=1; return x;}\n"
         "static int zinit(void){int x=0; return x;}\n"
         "static int arr(void){int a[4]; return a[0];}\n"
-        "static int st(void){struct S{int a;} s; return s.a;}\n"
-        "static int mac(void){int x; FOO(x); return 0;}\n";
+        "static int st(void){struct S{int a;} s; s.a=1; return s.a;}\n"
+        "static int mac(void){int x; FOO(x); return 0;}\n"
+        "static int param_no(int s){return s;}\n"
+        "static int field_no(void){struct T{int a;}; struct T t; t.a=1; return t.a;}\n"
+        "static void take(int *p){(void)p;}\n"
+        "static int addr_sus(void){int z; take(&z); return z;}\n";
     td = getenv("TMPDIR");
     if (!td || !td[0]) td = "/tmp";
     if (cx_fmt(dir, sizeof dir, "%s/uninit-scan-XXXXXX", td)) return 2;
@@ -40,13 +63,10 @@ int main(void) {
     if (cx_write(p, fx, sizeof fx - 1) < 0) return 2;
     if (run_scan(p, &out, &n) != 0 || !out) return fail("fx-run");
     if (!has(out, n, "UNINIT") || !has(out, n, "owner")) return fail("owner-form");
-    if (has(out, n, "\tboth") || has(out, n, "both\t")) { /* both branches assign: no UNINIT x */ }
-    if (has(out, n, "UNINIT") && has(out, n, "\tx\t") && has(out, n, "if-only")) {}
-    else if (!has(out, n, "one")) {
-        /* one() must report x */
-        if (!has(out, n, "if-only") && !has(out, n, "never")) return fail("if-only");
-    }
-    if (has(out, n, "zinit") && has(out, n, "UNINIT") && has(out, n, "x=0")) return fail("zero-init");
+    if (has(out, n, "param_no") || (has(out, n, "UNINIT") && has(out, n, "\ts\t") && has(out, n, "param_no"))) return fail("param");
+    if (has(out, n, "UNINIT") && has(out, n, "\ta\t") && has(out, n, "field_no")) return fail("field");
+    if (!has(out, n, "SUSPECT") || !has(out, n, "taken-address") || !has(out, n, "z")) return fail("addr-suspect");
+    if (has_kind_var(out, n, "UNINIT", "z")) return fail("addr-not-uninit");
     {
         char *av[4], *g = 0; size_t gn = 0; char oldp[300];
         av[0] = "git"; av[1] = "show"; av[2] = "e91eb31bcf^:cx/sys/kernel.cx"; av[3] = 0;
