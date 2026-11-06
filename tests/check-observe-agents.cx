@@ -1,0 +1,127 @@
+/* tests/check-observe-agents.cx -- fixtures for tools/observe-agents.cx.
+ *   sh ./unisacc.com tools/check-observe-agents.cx -- [ROOT]
+ * ROOT defaults to the cwd. Every case runs the tool with --fixture (so no tmux is
+ * needed) and reads its TSV; the fixture text is written into a private mkdtemp
+ * under the system temp dir, so the check carries its own inputs and writes no
+ * repository path. Cases:
+ *   busy/idle     ▶ mind line = busy, ○ 空闲 = idle, neither = unknown
+ *   busy_for      the bottom-bar duration is reported, never the busy signal
+ *   stale/partial a plan/task line naming a DONE item is STALE; DONE-PARTIAL and
+ *                 DONE-IN-CLONE-NOT-MERGED are PARTIAL; BLOCKED is neither
+ *   cap           more than 30 output lines are truncated with one TRUNCATED line
+ *   no-items      a root without work/items.tsv still runs and reports stale=0
+ *   exact         plan/topic/task keep the text after the marker, box border cut */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+static char root[4096], work[4400];
+static int checks, failed;
+static void die(const char *a) { fprintf(stderr, "check-observe-agents: %s\n", a); exit(2); }
+static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\tobserve-agents.%s\n", ok ? "PASS" : "FAIL", name); }
+static void add(const char *p, const char *s) {
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0 || write(fd, s, strlen(s)) != (ssize_t)strlen(s) || close(fd)) die(p);
+}
+/* run the tool with the fixture and capture its TSV into OUT; rc.
+   PRODDIR holds the product and the tool; TARGET is what the tool observes
+   (--root), so a target without work/items.tsv is reachable with the real
+   product: the shipped unisacc.com is a shell booter that needs its side dir. */
+static int tool(const char *proddir, const char *target, const char *fix, char *out, size_t cap) {
+    char com[4400], t[4400], why[512]; np_result r;
+    char *v[] = {(char *)"sh", com, t, (char *)"--", (char *)"--root", (char *)target,
+                 (char *)"--fixture", (char *)fix, (char *)"--no-git", 0};
+    int rc;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", proddir)) die("path");
+    if (cx_fmt(t, sizeof t, "%s/tools/observe-agents.cx", proddir)) die("path");
+    if (np_run(v, proddir, 0, 60, &r, why, sizeof why)) die(why);
+    { size_t n = r.outn < cap - 1 ? r.outn : cap - 1;
+      if (n) memcpy(out, r.out, n); out[n] = 0; }
+    rc = r.rc; np_free(&r); return rc;
+}
+/* does OUT contain LINE as one whole TSV row? */
+static int has_row(const char *out, const char *line) {
+    size_t n = strlen(line), at = 0;
+    while (out[at]) {
+        const char *e = strchr(out + at, '\n'); size_t ln = e ? (size_t)(e - (out + at)) : strlen(out + at);
+        if (ln == n && !memcmp(out + at, line, n)) return 1;
+        at = e ? (size_t)(e - out) + 1 : at + ln;
+    }
+    return 0;
+}
+static void fixture(const char *name, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", work, name)) die("path");
+    add(p, text);
+}
+static void cleanup(void) { char *v[] = {"rm", "-rf", work, 0}; np_result r = {0}; char why[256]; np_run(v, 0, 0, 20, &r, why, sizeof why); np_free(&r); }
+int main(int argc, char **argv) {
+    char out[1 << 16], fix[4400];
+    if (argc > 2) die("usage [ROOT]");
+    if (argc == 2) { if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root"); }
+    else if (sy_realpath(".", root, (int)sizeof root) < 0) die("cwd");
+    /* 夹具目录放 /tmp 的 mkdtemp：check 不写仓内 out/，也不计入 outdep 棘轮 */
+    { char tmpl[4400];
+      if (cx_fmt(tmpl, sizeof tmpl, "/tmp/check-observe-agents-XXXXXX")) die("path");
+      if (!mkdtemp(tmpl)) die("work dir");
+      if (cx_fmt(work, sizeof work, "%s", tmpl)) die("path"); }
+    fixture("states.txt",
+        "=== PANE running ===\n"
+        "\xE2\x94\x82 \xE2\x96\xB6 cd /tmp && make \xC2\xB7 0s\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:UNITOK2-CAP review\n"
+        "\xE2\x94\x82   \xE4\xBB\xBB\xE5\x8A\xA1 next nothing\n"
+        " \xE2\xA0\xB4 12m > model\n"
+        "=== PANE resting ===\n"
+        "\xE2\x94\x82 \xE2\x97\x8B \xE7\xA9\xBA\xE9\x97\xB2 \xC2\xB7 last bash 0s\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:none\n"
+        " \xCF\x80 > model\n"
+        "=== PANE noline ===\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:none\n");
+    if (cx_fmt(fix, sizeof fix, "%s/states.txt", work)) die("path");
+    { int rc = tool(root, root, fix, out, sizeof out);
+      ck(rc == 0, "states.rc0");
+      ck(has_row(out, "PANE\trunning\tstate=busy\tbusy_for=12m\tsource=fixture"), "states.triangle-is-busy");
+      ck(has_row(out, "PANE\tresting\tstate=idle\tbusy_for=-\tsource=fixture"), "states.circle-is-idle");
+      ck(has_row(out, "PANE\tnoline\tstate=unknown\tbusy_for=-\tsource=fixture"), "states.no-mind-line-is-unknown");
+      ck(has_row(out, "PLAN\trunning\tUNITOK2-CAP review"), "states.plan-text"); }
+    fixture("stale.txt",
+        "=== PANE s1 ===\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:UNITOK2-CAP done\n"
+        "\xE2\x94\x82   \xE4\xBB\xBB\xE5\x8A\xA1 next REFACTOR-PRAGMA tail\n"
+        "\xE2\x94\x82 \xE2\x96\xB6 x \xC2\xB7 1s\n"
+        "=== PANE s2 ===\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:B3 still DONE-PARTIAL\n"
+        "\xE2\x94\x82   \xE4\xBB\xBB\xE5\x8A\xA1 next LIBCUNIT in-clone\n"
+        "\xE2\x94\x82 \xE2\x96\xB6 x \xC2\xB7 1s\n"
+        "=== PANE s3 ===\n"
+        "\xE2\x94\x82   \xE8\xAE\xA1\xE5\x88\x92:RI-CELL-TESTS still BLOCKED\n"
+        "\xE2\x94\x82 \xE2\x96\xB6 x \xC2\xB7 1s\n");
+    if (cx_fmt(fix, sizeof fix, "%s/stale.txt", work)) die("path");
+    { int rc = tool(root, root, fix, out, sizeof out);
+      ck(rc == 0, "stale.rc0");
+      ck(has_row(out, "STALE\ts1\tUNITOK2-CAP"), "stale.done-is-stale");
+      ck(has_row(out, "STALE\ts1\tREFACTOR-PRAGMA"), "stale.task-line-is-scanned");
+      ck(has_row(out, "PARTIAL\ts2\tB3"), "stale.done-partial-is-partial");
+      ck(has_row(out, "PARTIAL\ts2\tLIBCUNIT"), "stale.in-clone-is-partial");
+      ck(!has_row(out, "STALE\ts3\tRI-CELL-TESTS") && !has_row(out, "PARTIAL\ts3\tRI-CELL-TESTS"),
+         "stale.blocked-is-neither");
+      ck(strstr(out, "OBSERVE_AGENTS\tpanes=3\tstale=2\tfailed=0") != 0, "stale.summary-counts-two"); }
+    fixture("many.txt", "");
+    { char p[4400]; int i;
+      if (cx_fmt(p, sizeof p, "%s/many.txt", work)) die("path");
+      for (i = 0; i < 12; i++) { char b[200]; snprintf(b, sizeof b, "=== PANE p%d ===\n\xE2\x94\x82 \xE2\x96\xB6 x \xC2\xB7 1s\n", i); add(p, b); }
+      if (cx_fmt(fix, sizeof fix, "%s/many.txt", work)) die("path");
+      { int rc = tool(root, root, fix, out, sizeof out); int rows = 0; const char *q = out;
+        while (*q) { const char *e = strchr(q, '\n'); rows++; q = e ? e + 1 : q + strlen(q); }
+        ck(rc == 0, "cap.rc0");
+        ck(strstr(out, "TRUNCATED\toutput capped at 30 lines") != 0, "cap.truncation-line");
+        ck(rows <= 31, "cap.at-most-31-lines"); } }
+    { char bare[4400];
+      if (cx_fmt(bare, sizeof bare, "%s/bare", work) || sy_mkdir(bare, 0700)) die("bare dir");
+      if (cx_fmt(fix, sizeof fix, "%s/states.txt", work)) die("path");
+      { int rc = tool(root, bare, fix, out, sizeof out);
+        ck(rc == 0 && strstr(out, "stale=0") != 0, "no-items.still-runs"); } }
+    cleanup();
+    printf("CHECK_OBSERVE_AGENTS\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
