@@ -1,0 +1,112 @@
+/* tests/cases/sa-pool.cx -- minimal repro for SA-POOL-SK: a `_Static_assert` message takes a string-pool
+ * slot but the `sk` counter is not advanced, so every later string literal in the same translation unit
+ * gets the wrong `S<n>` label (silently: rc 0, wrong text printed).
+ *
+ *   sh ./unisacc.com tests/cases/sa-pool.cx [-- ROOT]
+ *
+ * Compiles five one-file programs with the product for one target and runs them:
+ *   1. assert-before   _Static_assert(1,"M0"); puts("U1")                  expect U1
+ *   2. assert-after    puts("U1"); _Static_assert(1,"M0")                  expect U1
+ *   3. assert-middle   puts("U1"); _Static_assert(1,"M0"); puts("U2")      expect U1 then U2
+ *   4. assert-escape   _Static_assert(1,"a\"b\\c"); puts("U1")             expect U1
+ *   5. no-assert       puts("U1")                                          expect U1 (control)
+ *
+ * The defect: cases 1, 3 and 4 print the assertion message where a user string belongs (case 3 also
+ * loses U2), while 2 and 5 are correct -- the pool holds one extra entry from the message but `sk`
+ * counted one fewer, so the labels after the message are shifted by one.
+ *
+ * Prints one line per case: SA_POOL<TAB>case<TAB>expected=..<TAB>actual=..<TAB>verdict, with control
+ * bytes in the actual text escaped (\n, \\, and non-printable as \xNN).
+ * Exit 0 when every case matches (the defect is gone), 1 when any departs (a live repro), 2 on
+ * usage/IO.  Nothing is written outside one mkdtemp scratch. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static char g_root[4096];
+static char g_work[4400];
+static int g_checks, g_failed;
+
+static void die(const char *s) { fprintf(stderr, "sa-pool: REFUSE %s errno=%d\n", s, errno); exit(2); }
+
+/* escape control bytes so one case stays one output line */
+static void escaped(char *dst, size_t cap, const char *src) {
+    size_t w = 0;
+    for (size_t i = 0; src[i] && w + 5 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\n') { dst[w++] = '\\'; dst[w++] = 'n'; }
+        else if (c == '\\') { dst[w++] = '\\'; dst[w++] = '\\'; }
+        else if (c == '\t') { dst[w++] = '\\'; dst[w++] = 't'; }
+        else if (c < 0x20 || c > 0x7e) { cx_fmt(dst + w, cap - w, "\\x%02x", c); w += 4; }
+        else dst[w++] = (char)c;
+    }
+    dst[w] = 0;
+}
+static void ck(int ok, const char *name, const char *want, const char *got) {
+    char shown[512];
+    g_checks++;
+    if (!ok) g_failed++;
+    escaped(shown, sizeof shown, got);
+    printf("SA_POOL\t%s\texpected=%s\tactual=%s\t%s\n", name, want, shown, ok ? "OK" : "WRONG");
+}
+
+/* Write SRC under the scratch, compile it with the product for lnx/x86_64, run it, return the stdout. */
+static const char *build_and_run(const char *name, const char *src) {
+    static char out[512];
+    char c[4400], exe[4400], prod[4400], why[1024];
+    FILE *f;
+    np_result r;
+    size_t sl = strlen(src), got;
+    if (cx_fmt(c, sizeof c, "%s/%s.c", g_work, name)) die("path bound");
+    if (cx_fmt(exe, sizeof exe, "%s/%s.bin", g_work, name)) die("path bound");
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", g_root)) die("path bound");
+    f = fopen(c, "wb");
+    if (!f) die("cannot write case source");
+    if (fwrite(src, 1, sl, f) != sl) { fclose(f); die("case source write"); }
+    if (fclose(f)) die("case source close");
+    {   char *v[8];
+        v[0] = "sh"; v[1] = prod; v[2] = "-b"; v[3] = "lnx/x86_64"; v[4] = "-o"; v[5] = exe; v[6] = c; v[7] = 0;
+        if (np_run(v, g_root, 0, 120, &r, why, sizeof why)) die(why);
+        if (r.rc != 0) { cx_fmt(out, sizeof out, "COMPILE-RC-%d", r.rc); np_free(&r); return out; }
+        np_free(&r);
+    }
+    {   char *v[2];
+        v[0] = exe; v[1] = 0;
+        if (np_run(v, g_work, 0, 120, &r, why, sizeof why)) die(why);
+        got = r.outn < sizeof out - 1 ? (size_t)r.outn : sizeof out - 1;
+        if (got) mm_copy(out, (long)sizeof out, r.out, (long)got);
+        out[got] = 0;
+        np_free(&r);
+    }
+    return out;
+}
+
+int main(int argc, char **argv) {
+    char tmpl[4400];
+    int a = 1;
+    if (!realpath(".", g_root)) die("cwd");
+    if (argc > 1) { a = !strcmp(argv[1], "--") ? 2 : 1; if (a < argc && !realpath(argv[a], g_root)) die("root"); }
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(tmpl, sizeof tmpl, "%s/sa-pool-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(tmpl)) die("scratch"); }
+    { size_t n = strlen(tmpl); if (n >= sizeof g_work) die("work bound"); mm_copy(g_work, (long)sizeof g_work, tmpl, (long)(n + 1)); }
+    printf("SA_POOL\tworkdir\t%s\n", g_work);
+
+    { const char *s = "_Static_assert(1,\"M0\");\nint puts(const char *);\nint main(void){puts(\"U1\");return 0;}\n";
+      ck(!strcmp(build_and_run("assert-before", s), "U1\n"), "assert-before", "U1", build_and_run("assert-before", s)); }
+    { const char *s = "int puts(const char *);\nint main(void){puts(\"U1\");return 0;}\n_Static_assert(1,\"M0\");\n";
+      ck(!strcmp(build_and_run("assert-after", s), "U1\n"), "assert-after", "U1", build_and_run("assert-after", s)); }
+    { const char *s = "int puts(const char *);\nint main(void){puts(\"U1\");_Static_assert(1,\"M0\");puts(\"U2\");return 0;}\n";
+      ck(!strcmp(build_and_run("assert-middle", s), "U1\nU2\n"), "assert-middle", "U1\\nU2", build_and_run("assert-middle", s)); }
+    { const char *s = "_Static_assert(1,\"a\\\"b\\\\c\");\nint puts(const char *);\nint main(void){puts(\"U1\");return 0;}\n";
+      ck(!strcmp(build_and_run("assert-escape", s), "U1\n"), "assert-escape", "U1", build_and_run("assert-escape", s)); }
+    { const char *s = "int puts(const char *);\nint main(void){puts(\"U1\");return 0;}\n";
+      ck(!strcmp(build_and_run("no-assert", s), "U1\n"), "no-assert", "U1", build_and_run("no-assert", s)); }
+
+    printf("SA_POOL_SUMMARY\tchecks=%d\tfailed=%d\tverdict=%s\n", g_checks, g_failed,
+           g_failed ? "DEFECT-PRESENT" : "FIXED");
+    return g_failed ? 1 : 0;
+}
