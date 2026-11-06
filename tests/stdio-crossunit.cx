@@ -89,26 +89,32 @@ int main(int argc, char **argv) {
             if (got) free(got);
         }
     }
-    {   /* 4: fflush 失败且 errno 对调用者可见。Linux /dev/full;否则关读端 pipe(EPIPE)。 */
+    {   /* 4: fflush 失败且 errno 可见。先试 /dev/full;编/跑非 0 再关读端 pipe(EPIPE)。 */
         struct stat st;
+        int compiled = 0, probed = 0;
+        static const char *pipe_src =
+            "#include <stdio.h>\n#include <errno.h>\n#include <unistd.h>\n#include <signal.h>\n"
+            "int main(void){int p[2];FILE *f;signal(SIGPIPE,SIG_IGN);"
+            "if(pipe(p))return 1;close(p[0]);f=fdopen(p[1],\"w\");if(!f)return 1;"
+            "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
+            "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n";
         if (stat("/dev/full", &st) == 0) {
             put("full.c", "#include <stdio.h>\n#include <errno.h>\n"
                           "int main(void){FILE *f=fopen(\"/dev/full\",\"w\");if(!f)return 1;"
                           "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
                           "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
-        } else {
-            put("full.c", "#include <stdio.h>\n#include <errno.h>\n#include <unistd.h>\n#include <signal.h>\n"
-                          "int main(void){int p[2];FILE *f;signal(SIGPIPE,SIG_IGN);"
-                          "if(pipe(p))return 1;close(p[0]);f=fdopen(p[1],\"w\");if(!f)return 1;"
-                          "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
-                          "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
+            { char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0}; compiled = run(v) == 0; }
+            if (compiled) { char *v[] = {"./fullprobe", 0}; probed = run(v) == 0; }
         }
-        {   char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0};
-            ck(run(v) == 0, "devfull-compiles");
+        if (!compiled || !probed) {
+            char fp[4400];
+            if (!cx_fmt(fp, sizeof fp, "%s/fullprobe", dir)) sy_unlink(fp);
+            put("full.c", pipe_src);
+            { char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0}; compiled = run(v) == 0; }
+            if (compiled) { char *v[] = {"./fullprobe", 0}; probed = run(v) == 0; }
         }
-        {   char *v[] = {"./fullprobe", 0};
-            ck(run(v) == 0, "devfull-errno-visible-to-caller");
-        }
+        ck(compiled, "devfull-compiles");
+        ck(probed, "devfull-errno-visible-to-caller");
     }
     {   char rm[4400];
         if (cx_fmt(rm, sizeof rm, "%s", dir)) return 2;
