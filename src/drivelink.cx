@@ -61,12 +61,31 @@ static int dv_line_has_call(const char *t, long at, long j, const char *sym, lon
     k += 5;
     return j - k == sn && dv_pre(t + k, sym, sn);
 }
+/* 私有流表 = 本对象定义了 `.bss g_<probe>` 却没有 `.global g_<probe>`:RT_UNIT 单元导出它(全程序一份),
+   RT_EXTERN 单元只有 `.extern g_<probe>`,两者都不是私有。 */
+static int dv_line_is(const char *t, long at, long j, const char *dir, long dn, const char *p, long pn) {
+    long k = at;
+    while (k < j && (t[k] == ' ' || t[k] == 9)) k++;
+    if (j - k < dn + 2 + pn || !dv_pre(t + k, dir, dn) || !dv_pre(t + k + dn, "g_", 2) || !dv_pre(t + k + dn + 2, p, pn)) return 0;
+    k += dn + 2 + pn;
+    return k == j || t[k] == ' ' || t[k] == 9;
+}
+static int dv_private(const char *t, long tl, const char *p) {
+    long at, j, pn; int bss = 0;
+    for (pn = 0; p[pn]; pn++) {}
+    for (at = 0; at < tl; at = j + 1) {
+        for (j = at; j < tl && t[j] != 10; j++) {}
+        if (dv_line_is(t, at, j, ".global ", 8, p, pn)) return 0;
+        if (dv_line_is(t, at, j, ".bss ", 5, p, pn)) bss = 1;
+    }
+    return bss;
+}
 static int dv_used(const char *t, long tl) {
     int i, n, prov, m, sn; const char *g, *p, *u, *e, *sym;
     for (i = 0, n = rts_count(); i < n; i++) {
         long at = 0, j;
         if (rts_at(i, &g, &p, &prov, &u, &e)) continue;
-        if (rts_used_count(i) <= 0) continue;
+        if (rts_used_count(i) <= 0 || !dv_private(t, tl, p)) continue;
         for (m = 0; m < rts_used_count(i); m++) {
             sym = rts_used_name(i, m);
             if (!sym) continue;
