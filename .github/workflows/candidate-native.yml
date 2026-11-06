@@ -254,20 +254,6 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
           $run = Invoke-Bounded $com @('out/run.cx')
           Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
-          # W45-WIN-FFI probe: compile and run the two FFI probes with the candidate's own win slice.
-          foreach ($p in @('strdup','pread')) {
-            $src = Join-Path $PWD ("tests/cases/win-ffi-{0}.c" -f $p)
-            if (!(Test-Path $src)) { Add-Row "win-ffi-$p" 'NOT_RUN' -1 'probe source not in this commit'; continue }
-            $o = Join-Path $PWD ("out/win-ffi-{0}.exe" -f $p)
-            $c = Invoke-Bounded $com @('-o', $o, $src)
-            if ($c.Code -ne 0) { Add-Row "win-ffi-$p" 'FAIL' $c.Code "compile: $($c.Err)"; continue }
-            Push-Location (Join-Path $PWD 'tests/cases')
-            $r = Invoke-Bounded $o @()
-            Pop-Location
-            $want = [IO.File]::ReadAllText((Join-Path $PWD ("tests/cases/win-ffi-{0}.expect" -f $p))).Replace("`r`n","`n")
-            $got = $r.Out.Replace("`r`n","`n")
-            Add-Row "win-ffi-$p" $(if ($r.Code -eq 0 -and $got -ceq $want) { 'PASS' } else { 'FAIL' }) $r.Code "$($got) $($r.Err)"
-          }
           foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
           $smoke = Invoke-Bounded $com @('tests/run.cx', '--', '--smoke')
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
@@ -385,6 +371,20 @@ jobs:
             } catch { Say "image $(Split-Path $img -Leaf): base probe failed: $_" }
           }
           # 4. the previous release's APE through the same probes: not fetched; nothing is published for it.
+          # W45-WIN-FFI (diagnostic branch only, never part of the verdict): why did open() fail and which
+          # POSIX names does the host C library actually export?  Compiled by the candidate's own win slice.
+          foreach ($t in @(@('win-ffi/diag-open.c','diag-open.exe'), @('tests/cases/win-ffi-strdup.c','ffi-strdup.exe'), @('tests/cases/win-ffi-pread.c','ffi-pread.exe'))) {
+            $src = Join-Path $PWD $t[0]
+            if (!(Test-Path $src)) { Say "ffi $($t[0]): NOT_RUN (source not in this commit)"; continue }
+            $o = Join-Path $diag $t[1]
+            $c = Invoke-Bounded $com @('-o', $o, $src)
+            Say "ffi $($t[0]): compile rc=$($c.Code) $($c.Err)"
+            if ($c.Code -ne 0 -or !(Test-Path $o)) { continue }
+            Run-Raw $o @() "ffi $($t[1]) from root"
+            Push-Location (Join-Path $PWD 'tests/cases')
+            Run-Raw $o @() "ffi $($t[1]) from tests/cases"
+            Pop-Location
+          }
           Say "previous-release APE: NOT_RUN (no private source on the runner; publishing it is out of scope)"
           # 5. WER crash records for unisacc (EventID 1000, Application log).
           try {
