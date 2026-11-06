@@ -88,6 +88,18 @@ function Hex32([byte[]]$b) {
   for ($i = 0; $i -lt $n; $i++) { $s += ('{0:x2}' -f $b[$i]) }
   return $s
 }
+function Clip400([string]$s) {
+  if ([string]::IsNullOrEmpty($s)) { return '-' }
+  $t = $s.Replace("`r", '\r').Replace("`n", '\n')
+  if ($t.Length -gt 400) { return $t.Substring(0, 400) }
+  return $t
+}
+function CmdStats([string]$file, [string[]]$arguments) {
+  $n = 1 + $arguments.Count
+  $len = $file.Length
+  foreach ($a in $arguments) { $len += 1 + $a.Length }
+  return @{ argc = $n; cmdlen = $len }
+}
 function Dump-Pair([string]$name, [int]$rcA, [int]$rcB, [string]$fa, [string]$fb) {
   $pa = Join-Path $sp $fa; $pb = Join-Path $sp $fb
   $ha = $(if (Test-Path -LiteralPath $pa) { [IO.File]::ReadAllBytes($pa) } else { [byte[]]@() })
@@ -142,26 +154,47 @@ for ($i = 0; $i -lt 65; $i++) {
   else { Set-Content -LiteralPath (Join-Path $sp $nm) -Value "int f$i(int x){return x;}`n" -Encoding ascii }
 }
 $eok = $true
-$ref = Invoke-Cwd $Exe $sp (@('-S','-o','s65.ref') + $names) 55000 $null $null
+$eStep = '-'
+$ePipe = @{ Code = 0; Err = '' }
+$refArgs = @('-S','-o','s65.ref') + $names
+$ref = Invoke-Cwd $Exe $sp $refArgs 55000 $null $null
+if ($ref.Code -ne 0) { $eStep = 'direct-S' }
 for ($i = 0; $i -lt 65 -and $eok; $i++) {
   $src = $names[$i]
   $ua = @('--route', "$Tgt/unit", '--unit', "$i", '--source', $src)
-  if ((Stage $sp 'e2' $ua $src "$src.u2").Code -ne 0) { $eok = $false }
-  elseif ((Stage $sp 'e1' $ua "$src.u2" "$src.u1").Code -ne 0) { $eok = $false }
+  $st = Stage $sp 'e2' $ua $src "$src.u2"
+  if ($st.Code -ne 0) { $eok = $false; $eStep = "e2:$src"; $ePipe = $st }
+  else {
+    $st = Stage $sp 'e1' $ua "$src.u2" "$src.u1"
+    if ($st.Code -ne 0) { $eok = $false; $eStep = "e1:$src"; $ePipe = $st }
+  }
 }
 if ($eok) {
   $inargs = @('stream','frame')
   for ($i = 0; $i -lt 65; $i++) { $inargs += @('--in', ($names[$i] + '=' + $names[$i] + '.u1')) }
   $fr = Invoke-Cwd $Exe $sp $inargs 55000 $null (Join-Path $sp 's65.frame')
-  if ($fr.Code -ne 0) { $eok = $false }
+  if ($fr.Code -ne 0) { $eok = $false; $eStep = 'frame'; $ePipe = $fr }
   else {
     $ta = @('--route', "$Tgt/multi/tape/O0", '--source', 'm0.c')
-    if ((Stage $sp 'units' $ta 's65.frame' 't.0').Code -ne 0) { $eok = $false }
-    elseif ((Stage $sp 'e3' $ta 't.0' 't.1').Code -ne 0) { $eok = $false }
-    elseif ((Stage $sp 'tapecheck' ($ta + @('--raw')) 't.1' 's65.pipe').Code -ne 0) { $eok = $false }
+    $st = Stage $sp 'units' $ta 's65.frame' 't.0'
+    if ($st.Code -ne 0) { $eok = $false; $eStep = 'units'; $ePipe = $st }
+    else {
+      $st = Stage $sp 'e3' $ta 't.0' 't.1'
+      if ($st.Code -ne 0) { $eok = $false; $eStep = 'e3'; $ePipe = $st }
+      else {
+        $st = Stage $sp 'tapecheck' ($ta + @('--raw')) 't.1' 's65.pipe'
+        if ($st.Code -ne 0) { $eok = $false; $eStep = 'tapecheck'; $ePipe = $st }
+      }
+    }
   }
 }
-if ($ref.Code -eq 0 -and $eok -and (Same 's65.ref' 's65.pipe')) { $npass++ } else { Dump-Pair 'E 65-source-tape-pipe-cmp' $ref.Code $(if ($eok) { 0 } else { 1 }) 's65.ref' 's65.pipe' }
+$eok2 = ($ref.Code -eq 0 -and $eok -and (Same 's65.ref' 's65.pipe'))
+if ($eok2) { $npass++ } else {
+  Dump-Pair 'E 65-source-tape-pipe-cmp' $ref.Code $(if ($eok) { 0 } else { 1 }) 's65.ref' 's65.pipe'
+  $rs = CmdStats $Exe $refArgs
+  $fs = CmdStats $Exe $(if ($null -ne $inargs) { $inargs } else { @('stream','frame') })
+  Write-Output ("SP_E`tstep=$eStep`tref_rc=$($ref.Code)`tref_argc=$($rs.argc)`tref_cmdlen=$($rs.cmdlen)`tref_err=$(Clip400 $ref.Err)`tpipe_rc=$($ePipe.Code)`tframe_argc=$($fs.argc)`tframe_cmdlen=$($fs.cmdlen)`tpipe_err=$(Clip400 $ePipe.Err)`tcwd=$sp")
+}
 # H wrong target
 $wrong = $(if ($Tgt -ceq 'win/x86_64') { 'lnx/x86_64' } else { 'win/x86_64' })
 $pip = Image-Pipe 'plain.c' 'plain.wrong.pipe' 'w' $wrong
