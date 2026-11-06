@@ -27,7 +27,7 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
   the last byte (`\n`); everything else is left to the stages downstream.
   `tape.text` has no end marker, so a tape cut exactly at a line end is a
   complete prefix and passes the entry check -- see the "known unfinished"
-  section of CHANGELOG.md and TAPE-END (0.0.45).
+  section of plans/release-notes-0.0.45.md and TAPE-END (0.0.45).
 
 The E1/E3 connection also carries constructor and destructor marks. With
 `\0cli/f1`, E1 frames its typed tokens as `USLATTR1`, two LE32 words (mark

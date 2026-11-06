@@ -299,14 +299,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点(2026-11-06,事实取自 CHANGELOG.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
-今日主线:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [CHANGELOG.md](CHANGELOG.md) 与 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
+当前节点(2026-11-06,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
+今日主线:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
 当前裁定：先完成 **0.0.45 稳定版**，上一行数字仅是公开预发布历史统计，不绑定当前候选。原本体三件已合入（`2a742f41fe`、`7cfab9bc0f`、`5ac7784dcb`）；c45-3 原生 E 失败已定位 Win 启动 argv 静默截为 63，c45-4 仅并 argv 修复。私有预检03包 `2a43173d` 三步全过，两Win文件不膨胀而虚拟各增131072B，原生4000参数仍待新候选CI。`table-lint`按cc暂停；BOM只登记下一版P2，不并本轮。旧预发布资产不变，未宣称稳定资格。
 
 ```text
 0.0.45 公开预发布 v0.0.45 → 0.0.45 稳定版完成线（全批资格、六格原生、逐片固定点、独立评审；原0.0.46本体队列已前移）
-├─ 已知限制以 CHANGELOG 为准;外平台格需六个原生 runner 同候选证据(见 §1 缺口)
-└─ rc1 阶段的门槛与身份已过期,见 CHANGELOG 与归档
+├─ 已知限制以 plans/release-notes-0.0.45.md 为准;外平台格需六个原生 runner 同候选证据(见 §1 缺口)
+└─ rc1 阶段的门槛与身份已过期,见发布说明与归档
 
 三层布局与 CORE-MIN(方向:主人 11-05 定 CORE-MIN [P1-0.0.45];实测依据 plans/layout-measure-2026-11-05.md)
 ├─ 现状三层:loader(APE 头,识别 OS/ISA、取包) / ISA 切片(每 ISA 一个 entry ELF,全是机器码,lnx/x86_64 entry 1,789,094B)/ 模型(尾部一份 UNIPKG1 包,平台无关,1,659,574B;APE-ONEPKG 已落:APE 8,512,083→5,477,539B 实测,发布 APE 为 5,494,758B)
@@ -317,7 +317,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 └─ 提速 [SPEED]:SPEED-02 已落作业身份=声明输入闭包(ptrace 观测),reuse-batch 131 作业 226 s→12.7 s,复用默认仍关(UNISACC_WAVE_REUSE=1);empty.c 12.2ms / host.c e3 120ms 的旧基线本轮未复测(UNMEASURED)
 
 0.0.44 其余方向(主人 11-01 定:清理干扰、修 bug、提速)
-├─ [~] DOCK 系列 [DOCK1]/[DOCK2*]/[DOCK3]、基座外置/APE 头 [B3]/[B4]、build.json 新格式 [B5c]:状态以 items 为准(DOCK2* 在 CHANGELOG 记为 P2)
+├─ [~] DOCK 系列 [DOCK1]/[DOCK2*]/[DOCK3]、基座外置/APE 头 [B3]/[B4]、build.json 新格式 [B5c]:状态以 items 为准(DOCK2* 在 items 记为 P2)
 ├─ [ ] 寄存器分配 [REGALLOC]:档1 实测 2.9% 不值得,BLOCKED 待主人要性能再开
 ├─ [ ] 身份机制统一(一个内容寻址身份替代 SID/PC/GEN/context/pins/receipts 多套)——设计级,未立项
 └─ [ ] 其余见 plans/v0.0.44.md、plans/v0.0.45.md 与 work/items.tsv(DRAFT 项需督导转 READY 才开工)
@@ -330,7 +330,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | 身份见 §3 | `tools/com-tree.cx` |
-| 当前发布与候选 | 0.0.45(公开 prerelease `v0.0.45`,APE `ae0b12d8…`,6,128,709 B,源 `fa0a747c7f`,非 Latest);更早:0.0.44-rc3(`54bb97a2…`,prerelease) | [CHANGELOG.md](CHANGELOG.md)、[plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)、§9.1 |
+| 当前发布与候选 | 0.0.45(公开 prerelease `v0.0.45`,APE `ae0b12d8…`,6,128,709 B,源 `fa0a747c7f`,非 Latest);更早:0.0.44-rc3(`54bb97a2…`,prerelease) | [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)、§9.1 |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
