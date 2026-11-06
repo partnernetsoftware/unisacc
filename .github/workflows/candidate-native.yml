@@ -77,6 +77,7 @@ jobs:
           mkdir slice
           if [ -n "$RELEASE_TAG" ]; then
             gh release download "$RELEASE_TAG" -p 'slice-win-arm64' --repo "$GITHUB_REPOSITORY" --dir slice || echo "::warning::release has no slice-win-arm64 asset"
+            gh release download "$RELEASE_TAG" -p 'pkg.bin' --repo "$GITHUB_REPOSITORY" --dir slice || echo "::warning::release has no pkg.bin asset"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -87,7 +88,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: slice-win-arm64
-          path: slice/slice-win-arm64
+          path: |
+            slice/slice-win-arm64
+            slice/pkg.bin
           if-no-files-found: ignore
           retention-days: 7
   ffi-lnx:
@@ -311,9 +314,29 @@ jobs:
                 Copy-Item -LiteralPath $slicePath $sexe
                 $sv = Invoke-Bounded $sexe @('--version')
                 Add-Row 'version' $(if ($sv.Code -eq 0 -and !$sv.Err -and $sv.Out -cmatch $env:VERSION_RE) { 'PASS' } else { 'FAIL' }) $sv.Code "slice-win-arm64 sha=$sha $($sv.Out) $($sv.Err)"
+                if ($sv.Code -eq 0) {
+                  # Same package the x86_64 cells find inside the APE: the slice file has none appended, so point it at pkg.bin.
+                  $pkgPath = Join-Path $PWD 'slice/pkg.bin'
+                  if (!(Test-Path -LiteralPath $pkgPath)) { foreach ($check in @('hello', 'run', 'smoke')) { Add-Row $check 'FAIL' 1 'pkg.bin asset missing (release_tag needs a pkg.bin asset)' } }
+                  else {
+                    $env:UNISA_CONTAINER = $pkgPath
+                    [IO.File]::WriteAllText((Join-Path $PWD 'out/hello.c'), "#include <stdio.h>`nint main(void){puts(`"candidate-hello`");return 0;}`n")
+                    $build = Invoke-Bounded $sexe @('-o', 'out/hello.exe', 'out/hello.c')
+                    if ($build.Code -ne 0) { Add-Row 'hello' 'FAIL' $build.Code "compile: $($build.Err)" }
+                    else {
+                      $hello = Invoke-Bounded (Join-Path $PWD 'out/hello.exe') @()
+                      Add-Row 'hello' $(if ($hello.Code -eq 0 -and $hello.Out -cmatch '^candidate-hello\r?\n$') { 'PASS' } else { 'FAIL' }) $hello.Code "$($hello.Out) $($hello.Err)"
+                    }
+                    [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
+                    $run = Invoke-Bounded $sexe @('out/run.cx')
+                    Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
+                    $smoke = Invoke-Bounded $sexe @('tests/run.cx', '--', '--smoke')
+                    Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
+                  }
+                } else { foreach ($check in @('hello', 'run', 'smoke')) { Add-Row $check 'NOT_RUN' -1 'win/arm64 slice --version failed' } }
               }
             }
-            foreach ($check in @('hello', 'run', 'stdio-crossunit', 'stream-pipe', 'smoke')) { Add-Row $check 'NOT_RUN' -1 'only the win/arm64 slice file --version is run natively on this cell' }
+            foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
             if ($script:failed) { exit 1 }
             exit 0
           }
@@ -339,7 +362,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:APE_SHA) { Add-Row 'identity' 'FAIL' 1 'candidate changed during the checks' }
           if ($script:failed) { exit 1 }
       - name: Windows FFI probes vs lnx reference (byte compare)
-        if: matrix.os == 'win' && matrix.arch == 'x86_64'
+        if: always() && matrix.os == 'win' && matrix.arch == 'x86_64'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
