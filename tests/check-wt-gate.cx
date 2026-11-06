@@ -25,9 +25,16 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
 
-static char g_root[4096];
-static int asserts, failed;
+static char g_root[4096], g_tab[4400], g_keep[4400];
+static int asserts, failed, g_need_restore;
 static void die(const char *s) { fprintf(stderr, "check-wt-gate: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void restore_batches(void) {
+    size_t kn = 0; char *kb;
+    if (!g_need_restore) return;
+    kb = cx_read(g_keep, &kn);
+    if (kb) { (void)cx_write(g_tab, kb, kn); free(kb); }
+    g_need_restore = 0;
+}
 static void ck(int ok, const char *what, const char *detail) {
     asserts++;
     if (!ok) failed++;
@@ -71,19 +78,19 @@ int main(int argc, char **argv) {
         ck(has(o, "identity=STABLE") && !has(o, "WT_CHANGED"), "clean-wave-no-wt-change", "");
         free(o); }
 
-    /* 2) the negative control: the probe writes ROOT/src/_wt_probe.cx */
-    {   char a[9000], keep[4600], tab[4600];
+    /* 2) negative control: mutate a keep-copy, always restore ROOT batches.tsv */
+    {   char a[9000];
         const char *row = "wtprobe\tIMPLEMENTED\tcontract\ttests/cases/wtprobe-batch.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/wtprobe-batch.cx\t-\tcontract.core-opkinds\trc0:WTPROBE\tproduct\n";
         size_t bn = 0;
         char *body;
         int inserted = 0;
-        if (cx_fmt(keep, sizeof keep, "%s/batches.keep", w) || cx_fmt(tab, sizeof tab, "%s/tests/batches.tsv", g_root)) die("paths");
-        body = cx_read(tab, &bn);
+        if (cx_fmt(g_keep, sizeof g_keep, "%s/batches.keep", w) || cx_fmt(g_tab, sizeof g_tab, "%s/tests/batches.tsv", g_root)) die("paths");
+        body = cx_read(g_tab, &bn);
         if (!body) die("batches read");
-        {   /* copy the table, inserting the fixture row after the cx-target line */
-            size_t at = 0, cap = bn + strlen(row) + 1;
+        if (cx_write(g_keep, body, bn)) { free(body); die("keep write"); }
+        {   size_t at = 0, cap = bn + strlen(row) + 1;
             char *outb = calloc(1, cap);
-            if (!outb) die("alloc");
+            if (!outb) { free(body); die("alloc"); }
             while (at < bn) {
                 size_t e = at;
                 while (e < bn && body[e] != '\n') e++;
@@ -95,24 +102,25 @@ int main(int argc, char **argv) {
                 at = e + 1;
             }
             if (!inserted) { free(outb); free(body); die("no cx-target row"); }
-            if (cx_write(keep, body, bn) || cx_write(tab, outb, strlen(outb))) die("batches write");
+            atexit(restore_batches);
+            g_need_restore = 1;
+            if (cx_write(g_tab, outb, strlen(outb))) { free(outb); free(body); die("batches write"); }
             free(outb); }
         free(body);
         if (cx_fmt(a, sizeof a, "./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/s2 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/s2 --light wtprobe cx-cell", g_root, sess_parent, g_root, sess_parent)) die("cmd");
         probe = run(a, &rc);
+        restore_batches();
         ck(has(probe, "WT_CHANGED\tpaths=1\t?? src/_wt_probe.cx"), "probe-wave-reports-the-written-path", "");
         ck(has(probe, "reason=identity-changed-during-wave") && has(probe, "unknown=2"), "probe-wave-all-receipts-unknown", "");
         ck(has(probe, "changed=worktree-changed-during-wave"), "probe-wave-names-the-gate", "");
         free(probe);
-        /* restore the table verbatim and remove what the probe wrote */
-        {   size_t kn = 0; char *kb = cx_read(keep, &kn);
-            if (!kb) die("keep read");
-            if (cx_write(tab, kb, kn)) die("batches restore");
-            free(kb); }
         if (cx_fmt(a, sizeof a, "rm -f src/_wt_probe.cx")) die("cmd");
         o = run(a, &rc);
         free(o);
-        ck(rc == 0, "table-restored", ""); }
+        ck(rc == 0, "table-restored", "");
+        {   size_t kn = 0, tn = 0; char *kb = cx_read(g_keep, &kn); char *tb = cx_read(g_tab, &tn);
+            ck(kb && tb && kn == tn && !memcmp(kb, tb, kn), "batches-sha-unchanged", "");
+            free(kb); free(tb); } }
 
     /* 3) the tree is clean again */
     {   char a[9000];
