@@ -400,7 +400,7 @@ jobs:
               Add-Type -MemberDefinition '[DllImport("ucrtbase.dll", EntryPoint="_open", CallingConvention=CallingConvention.Cdecl)] public static extern int c_open(string p, int flags);[DllImport("ucrtbase.dll", EntryPoint="_errno", CallingConvention=CallingConvention.Cdecl)] public static extern IntPtr c_errno();' -Name U -Namespace Nat
               foreach ($v in @(@('absolute', $abs), @('backslash', $back), @('relative', 'win-ffi-pread.c'))) {
                 Push-Location $cases
-                $h = [Nat.K32]::CreateFileA($v[1], 0x80000000, 1, [IntPtr]::Zero, 3, 0x80, [IntPtr]::Zero)
+                $h = [Nat.K32]::CreateFileA($v[1], [uint32]2147483648, 1, [IntPtr]::Zero, 3, 0x80, [IntPtr]::Zero)
                 $gle = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                 $fd = [Nat.U]::c_open($v[1], 0)
                 $en = [Runtime.InteropServices.Marshal]::ReadInt32([Nat.U]::c_errno())
@@ -533,6 +533,46 @@ jobs:
             $ev = Get-WinEvent -FilterHashtable @{LogName = 'Application'; Id = 1000} -MaxEvents 20 -ErrorAction Stop | Where-Object { $_.Message -match 'unisacc|hello' } | Select-Object -First 5
             if ($ev) { foreach ($e in $ev) { Say "WER: $(($e.Message -replace '[\r\n]+', ' | ').Substring(0, [Math]::Min(600, $e.Message.Length)))" } } else { Say 'WER: no EventID 1000 record names unisacc or hello' }
           } catch { Say "WER: unavailable ($_)" }
+          # ---- drive-letter include probes (DRV lines), diagnostic only ----
+          Say ("TEMPENV env:TEMP='{0}' GetTempPath='{1}'" -f $env:TEMP, [IO.Path]::GetTempPath())
+          if ($env:TARGET -ceq 'win/arm64') {
+            $drvExe = Join-Path $PWD 'out/slice-win-arm64.exe'
+            $slicePath = Join-Path $PWD 'slice/slice-win-arm64'
+            if (!(Test-Path -LiteralPath $drvExe) -and (Test-Path -LiteralPath $slicePath)) { New-Item -ItemType Directory -Force -Path out | Out-Null; Copy-Item -LiteralPath $slicePath $drvExe }
+            $env:UNISA_CONTAINER = Join-Path $PWD 'slice/pkg.bin'
+          } else { $drvExe = $com }
+          function Drv-Run([string]$name, [string[]]$a, [string]$dir) {
+            if (!(Test-Path -LiteralPath $drvExe)) { Say "DRV $name rc=NOT_RUN stderr=no executable for this cell"; return $null }
+            $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = $drvExe; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true; $info.WorkingDirectory = $dir
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start(); $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(55000)) { $p.Kill($true); Say "DRV $name rc=124 stderr=timeout"; return $null }
+              Say ("DRV {0} rc={1} stderr={2}" -f $name, $p.ExitCode, (($e.Result -replace '[\r\n]+', ' ').Trim()))
+              return $o.Result
+            } catch { Say "DRV $name rc=START_FAILED stderr=$_"; return $null } finally { $p.Dispose() }
+          }
+          $tmp = $env:TEMP
+          $fwd = $tmp.Replace('\', '/')
+          $bsl = $tmp.Replace('\', '\\')
+          [IO.File]::WriteAllText((Join-Path $tmp 'dh.h'), "#define DH 7`n")
+          [IO.File]::WriteAllText((Join-Path $tmp 'dc.c'), "#include `"$fwd/dh.h`"`nint main(void){return DH;}`n")
+          [IO.File]::WriteAllText((Join-Path $tmp 'dc2.c'), "#include `"$bsl\\dh.h`"`nint main(void){return DH;}`n")
+          [IO.File]::WriteAllText((Join-Path $tmp 'dc3.c'), "#include `"dh.h`"`nint main(void){return DH;}`n")
+          foreach ($n in @('dc', 'dc2', 'dc3')) {
+            $o = Drv-Run "$n-E" @('-E', "$n.c") $tmp
+            if ($o) { Say ("DRV {0}-E stdout_head={1}" -f $n, (($o -replace '[\r\n]+', ' ')).Substring(0, [Math]::Min(120, $o.Length))) }
+          }
+          # smoke again (read-only) to capture the include path it complains about, then look at the file system.
+          $sm = Drv-Run 'smoke-rerun' @('tests/run.cx', '--', '--smoke') $PWD.Path
+          Say 'CXIF_LIST begin'
+          Get-ChildItem $env:TEMP -Filter 'ua-cxif-*.h' -ErrorAction SilentlyContinue | ForEach-Object { Say ("CXIF_FILE {0} {1}" -f $_.Name, $_.Length) }
+          Say 'CXIF_LIST end'
+          $m = [regex]::Matches(($sm + ' ' + (Get-Content $log -Raw)), 'no such file for #include "([^"]+)"')
+          foreach ($mm in $m) { $pp = $mm.Groups[1].Value; Say ("CXIF_EXISTS {0} {1}" -f $pp, (Test-Path -LiteralPath $pp)) }
+          if ($m.Count -eq 0) { Say 'CXIF_EXISTS (no include path found in smoke output) False' }
           Get-Content $log | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && matrix.os == 'win'
