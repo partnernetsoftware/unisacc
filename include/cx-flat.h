@@ -3166,14 +3166,29 @@ static char *_unisa_envv[4096];
 __attribute__((constructor)) static void _unisa_environ_init(void) {
     int __u_k; int __u_n;
     if (_unisa_env) return;                 /* another unit's constructor already filled it */
+#if defined(_WIN32) && !defined(_UNISA_NO_HOSTCALL)
+    /* Windows leaves no block after argv: the environment is kernel32's
+       GetEnvironmentStringsA, "NAME=value\0...\0\0".  The block is never freed: environ points
+       into it for the life of the process, as the kernel's block does on POSIX.  Entries that
+       start with '=' (cmd.exe's per-drive "=C:=C:\..." entries) are not variables and are skipped. */
+    {   static __u_word __u_ges; char *__u_p;
+        __u_k = 0; __u_n = 0;
+        if (!__u_ges) __u_ges = _ux_sym("GetEnvironmentStringsA");
+        __u_p = __u_ges ? (char *)_ux_call(__u_ges, 0, 0, 0, 0) : 0;
+        while (__u_p && *__u_p && __u_n < 4095) {
+            if (*__u_p != 61) { _unisa_envv[__u_n] = __u_p; __u_n = __u_n + 1; }
+            while (*__u_p) __u_p = __u_p + 1;
+            __u_p = __u_p + 1;
+        }
+    }
+#else
     __u_k = __argc() + 1; __u_n = 0;
     while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+#endif
     _unisa_envv[__u_n] = 0;
     _unisa_env = _unisa_envv;
 }
 #endif
-/* Windows reads the real environment through the host channel in 0.0.22,
-   when the product lowers it (the compiler itself must not need it yet). */
 /* the index in environ of the entry "NAME=...", or -1 (NAME holds no '=') */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_envfind
 #if defined(RT_EXTERN)
@@ -4758,14 +4773,29 @@ static char *_unisa_envv[4096];
 __attribute__((constructor)) static void _unisa_environ_init(void) {
     int __u_k; int __u_n;
     if (_unisa_env) return;                 /* another unit's constructor already filled it */
+#if defined(_WIN32) && !defined(_UNISA_NO_HOSTCALL)
+    /* Windows leaves no block after argv: the environment is kernel32's
+       GetEnvironmentStringsA, "NAME=value\0...\0\0".  The block is never freed: environ points
+       into it for the life of the process, as the kernel's block does on POSIX.  Entries that
+       start with '=' (cmd.exe's per-drive "=C:=C:\..." entries) are not variables and are skipped. */
+    {   static __u_word __u_ges; char *__u_p;
+        __u_k = 0; __u_n = 0;
+        if (!__u_ges) __u_ges = _ux_sym("GetEnvironmentStringsA");
+        __u_p = __u_ges ? (char *)_ux_call(__u_ges, 0, 0, 0, 0) : 0;
+        while (__u_p && *__u_p && __u_n < 4095) {
+            if (*__u_p != 61) { _unisa_envv[__u_n] = __u_p; __u_n = __u_n + 1; }
+            while (*__u_p) __u_p = __u_p + 1;
+            __u_p = __u_p + 1;
+        }
+    }
+#else
     __u_k = __argc() + 1; __u_n = 0;
     while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+#endif
     _unisa_envv[__u_n] = 0;
     _unisa_env = _unisa_envv;
 }
 #endif
-/* Windows reads the real environment through the host channel in 0.0.22,
-   when the product lowers it (the compiler itself must not need it yet). */
 /* the index in environ of the entry "NAME=...", or -1 (NAME holds no '=') */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_envfind
 #if defined(RT_EXTERN)
