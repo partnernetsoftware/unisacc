@@ -13,6 +13,8 @@
  *      ROOT/unisacc.com in one step; any failure removes the temporary file and leaves unisacc.com as it was.
  * The record of the source sha is ROOT/unisacc.com.ape.sha256 (one line "sha256<TAB>bytes<TAB>name"), written the
  * same way.  unisacc.com stays ignored by git (it is a product); this tool and the record format are what is kept.
+ * An identical installed APE reports ALREADY: --write repairs stale build-record bytes/kind/digest only;
+ * a clean build record is not rewritten. Without --write even a stale build record is unchanged.
  * Prints INSTALL_APE<TAB>status<TAB>sha256<TAB>bytes; exit 0 ok, 1 refused, 2 usage/IO.
  * An L3 tool: no #include, no direct libc call. */
 #pragma unisa use runtime.packagefooter
@@ -78,16 +80,23 @@ static int ia_version_ok(const char *ape, char *line, int cap) {
 
 static int ia_join(char *out, int cap, const char *a, const char *b) { return cx_fmt(out, (size_t)cap, "%s/%s", a, b); }
 
-/* ROOT/unisacc.com.build.json: product_kind ape1 and product_digest = the APE's whole-file sha256, every other
-   field and its order kept.  A root without a record is left without one (nothing to sync). Written through a
-   temporary file and renamed. */
-static void ia_sync_record(const char *root, const char *sha) {
+/* ROOT/unisacc.com.build.json: product_kind ape1, product_digest = the APE's whole-file sha256,
+   and bytes = its verified size; every other field and its order kept. A root without a record
+   is left without one (nothing to sync). Written through a temporary file and renamed. */
+static void ia_sync_record(const char *root, const char *sha, long bytes) {
     char path[4400], tmp[4400], *b, *o;
     size_t n = 0;
     long at = 0, w = 0;
+    int fd;
+    sy_stat_t st;
     if (ia_join(path, (int)sizeof path, root, "unisacc.com.build.json") || cx_fmt(tmp, sizeof tmp, "%s.%d", path, sy_pid())) ia_die("path");
+    fd = sy_open_read(path);
+    if (fd == -ENOENT) return;
+    if (fd < 0) ia_die("cannot open the build record");
+    if (sy_fstat(fd, &st) || st.kind != 'f') { (void)sy_close(fd); ia_die("cannot read the build record"); }
+    if (sy_close(fd)) ia_die("cannot close the build record");
     b = cx_read(path, &n);
-    if (!b) return;
+    if (!b) ia_die("cannot read the build record");
     o = mm_alloc((long)n + 256);
     if (!o) { mm_free(b); ia_die("memory"); }
     while (at < (long)n) {
@@ -102,12 +111,17 @@ static void ia_sync_record(const char *root, const char *sha) {
             int comma = tx_find(b + at, l, ",", 1) >= 0;
             if (cx_fmt(o + w, 256, "  \"product_digest\": \"%s\"%s\n", sha, comma ? "," : "")) ia_die("record format");
             w += tx_len(o + w, 256);
+        } else if (l > 8 && tx_find(b + at, l, "\"bytes\":", 8) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"bytes\": %ld%s\n", bytes, comma ? "," : "")) ia_die("record format");
+            w += tx_len(o + w, 256);
         } else {
             mm_copy(o + w, (long)n + 256 - w, b + at, l);
             w += l;
         }
         at += l;
     }
+    if (w == (long)n && tx_same(b, (long)n, o, w)) { mm_free(b); mm_free(o); return; }
     if (cx_write(tmp, o, (size_t)w)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot write the build record"); }
     if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot rename the build record"); }
     mm_free(b);
@@ -154,6 +168,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         ia_join(rec, (int)sizeof rec, root, "unisacc.com.ape.sha256")) ia_die("path");
     if (cx_fmt(tmp, sizeof tmp, "%s/.unisacc.com.install.%d", root, pid) || cx_fmt(rtmp, sizeof rtmp, "%s/.unisacc.com.ape.sha256.%d", root, pid)) ia_die("path");
     if (ia_sha(com, cur, &cb) == 0 && tx_eqz(cur, got)) {
+        if (write) ia_sync_record(root, got, bytes);
         sy_printf("INSTALL_APE\tALREADY\t%s\t%ld\t%s\n", got, bytes, ver);
         return 0;
     }
@@ -183,7 +198,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
     if (cx_write(rtmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot write the record"); }
     if (sy_rename(tmp, com)) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
     if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
-    ia_sync_record(root, got);
+    ia_sync_record(root, got, bytes);
     ia_write_receipt(root, ape, got, bytes);
     ia_emit_identity(root);
     sy_printf("INSTALL_APE\tINSTALLED\t%s\t%ld\t%s\n", got, bytes, ver);

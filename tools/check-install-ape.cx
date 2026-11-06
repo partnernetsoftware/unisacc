@@ -11,10 +11,12 @@
  *   dryrun-writes-nothing --write absent: unisacc.com and the directory listing stay as they were
  *   install               --write: unisacc.com == APE (sha), old launcher kept as unisacc-dev, record written
  *   keep-existing-dev     a second install over an existing unisacc-dev leaves unisacc-dev untouched
- *   already               installing the same APE again reports ALREADY and changes nothing
+ *   already-*             identical APE reports ALREADY; --write repairs stale metadata, dry run leaves it,
+ *                         and a clean record and installed APE keep their inode and timestamps
  *   receipt-*, identity-*  --write rewrites ape-receipt.txt to one APE line and re-emits plans/root-identity.md as ape1; no doc = skipped
+ *   build-record-*        installed bytes come from the APE; canonical consumers accept valid metadata and reject stale bytes or wrong metadata
  * Prints PASS/FAIL/NOT_RUN per case and CHECK_INSTALL_APE<TAB>failed=N<TAB>not_run=M; exit 0 only when failed=0. */
-#pragma unisa use runtime.packagefooter
+#pragma unisa use cxlib.productpkg
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
@@ -45,6 +47,31 @@ static int write_file(const char *p, const char *s, int mode) {
     return sy_chmod(p, mode);
 }
 
+/* Exercise the production canonical-record consumer itself, not a second JSON validator. */
+static int record_consumer(const char *scratch, const char *expected) {
+    char path[4400], com[4400], digest[65];
+    size_t n = 0;
+    sy_stat_t st;
+    char *b;
+    const char *why;
+    int dr, ok;
+    if (cx_fmt(path, sizeof path, "%s/unisacc.com.build.json", scratch) ||
+        cx_fmt(com, sizeof com, "%s/unisacc.com", scratch) || sy_stat(com, &st) || st.kind != 'f') return 0;
+    b = cx_read(path, &n);
+    if (!b) return 0;
+    dr = pp_product_digest(scratch, digest);
+    why = pp_execution_record_error(b, n, (size_t)st.size, pp_identity_kind(scratch), dr ? 0 : digest);
+    ok = expected ? why && tx_eqz(why, expected) : !why;
+    mm_free(b);
+    return ok;
+}
+
+static int record_fixture(const char *path, long bytes, const char *kind, const char *digest) {
+    char text[1200];
+    if (cx_fmt(text, sizeof text, "{\n  \"bytes\": %ld,\n  \"commit\": \"0000000000000000000000000000000000000000\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n  \"product_kind\": \"%s\",\n  \"product_digest\": \"%s\"\n}\n", bytes, kind, digest)) return -1;
+    return write_file(path, text, 0600);
+}
+
 int main(int argc, char **argv) {
     char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
     char want[65], h0[65], h1[65], out[2048], launcher[4400];
@@ -55,10 +82,8 @@ int main(int argc, char **argv) {
     if (cx_fmt(g_tool, sizeof g_tool, "%s/tools/install-ape.cx", g_root)) return 2;
     if (argc > a + 1) { if (sy_realpath(argv[a + 1], ape, (int)sizeof ape) < 0) { sy_eprintf("check-install-ape: ape\n"); return 2; } have_ape = 1; }
     else {
-        PackageFooter f; size_t n = 0; char *b;
         if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", g_root)) return 2;
-        b = cx_read(ape, &n);
-        if (b) { have_ape = n > 16 && n <= 2147483647UL && packagefooter_locate_bytes((unsigned char *)b, (long)n, &f) ? 1 : 0; mm_free(b); }
+        have_ape = tx_eqz(pp_layout_name(pp_layout_of_file(ape)), "ape");
     }
     if (cx_fmt(work, sizeof work, "%s/check-install-ape-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) { sy_eprintf("check-install-ape: mkdtemp\n"); return 2; }
     if (cx_fmt(root, sizeof root, "%s/root", work) || sy_mkdir(root, 0755)) return 2;
@@ -78,8 +103,8 @@ int main(int argc, char **argv) {
         say("NOT_RUN", "positive-cases", "no footered APE available (ROOT/unisacc.com is the launcher script and no APE argument)");
         notrun++;
     } else {
-        char real[65]; long rb = 0;
-        sha_of(ape, real); (void)rb;
+        char real[65]; long ape_bytes = 0;
+        { size_t n = 0; char *b = cx_read(ape, &n); if (!b) return 2; ape_bytes = (long)n; cx_sha256_hex(b, n, real); mm_free(b); }
         /* neg: wrong sha */
         ck(tool(root, ape, "0000000000000000000000000000000000000000000000000000000000000000", 1, out, (int)sizeof out) == 1 && has(out, "sha-mismatch"), "neg-sha-mismatch", out);
         sha_of(com, h1);
@@ -122,12 +147,38 @@ int main(int argc, char **argv) {
                 cx_fmt(rb, sizeof rb, "%s/rollback.out", work)) return 2;
             if (write_file(com, "#!/bin/sh\necho third-launcher\n", 0755) || sy_unlink(dev)) return 2;
             if (sy_mkdir(sdir, 0755)) return 2;
-            if (write_file(bj, "{\n  \"bytes\": 1,\n  \"product_kind\": \"split2\",\n  \"product_digest\": \"aa\"\n}\n", 0600)) return 2;
+            if (record_fixture(bj, 1, "split2", "aa")) return 2;
             sha_of(com, h0); sha_of(bj, first);
             ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "split-root-install", out);
             t = cx_read(bj, &tn);
-            ck(t && has(t, "\"product_kind\": \"ape1\"") && has(t, real), "build-record-synced-to-ape1", t ? t : "no record");
+            if (cx_fmt(text, sizeof text, "\"bytes\": %ld,", ape_bytes)) return 2;
+            ck(t && has(t, "\"product_kind\": \"ape1\"") && has(t, real) && has(t, text), "build-record-synced-to-ape1", t ? t : "no record");
             if (t) mm_free(t);
+            ck(record_consumer(root, 0), "build-record-consumer-after-install", "installed record rejected");
+            if (record_fixture(bj, 1, "ape1", real)) return 2;
+            ck(record_consumer(root, "root-epoch-record-canonical"), "build-record-consumer-rejects-stale-bytes", "stale bytes not refused as canonical");
+            if (record_fixture(bj, ape_bytes, "split2", real)) return 2;
+            ck(record_consumer(root, "root-epoch-record-canonical"), "build-record-consumer-rejects-wrong-kind", "wrong kind not refused as canonical");
+            { char wrong[65]; for (int j = 0; j < 65; j++) wrong[j] = real[j]; wrong[0] = real[0] == '0' ? '1' : '0'; if (record_fixture(bj, ape_bytes, "ape1", wrong)) return 2; }
+            ck(record_consumer(root, "root-epoch-record-canonical"), "build-record-consumer-rejects-wrong-digest", "wrong digest not refused as canonical");
+            if (record_fixture(bj, ape_bytes, "ape1", real)) return 2;
+            /* Matching product bytes do not exempt stale metadata; dry runs still never repair it. */
+            {   sy_stat_t before, after, product_before, product_after;
+                char stale[65];
+                if (record_fixture(bj, 1, "ape1", real) || sha_of(bj, stale) || sy_stat(com, &product_before)) return 2;
+                ck(tool(root, ape, real, 0, out, (int)sizeof out) == 0 && has(out, "ALREADY"), "already-stale-dryrun", out);
+                if (sha_of(bj, back)) return 2;
+                ck(tx_eqz(stale, back) && record_consumer(root, "root-epoch-record-canonical"), "already-dryrun-keeps-stale-record", "dry run rewrote stale metadata");
+                ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "ALREADY"), "already-repairs-stale-record", out);
+                ck(record_consumer(root, 0), "already-repaired-record-consumed", "stale metadata was not repaired");
+                if (sy_stat(bj, &before) || sha_of(bj, stale)) return 2;
+                ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "ALREADY"), "already-clean", out);
+                if (sy_stat(bj, &after) || sy_stat(com, &product_after) || sha_of(bj, back)) return 2;
+                ck(tx_eqz(stale, back) && before.ino == after.ino && before.mtime == after.mtime && before.ctime == after.ctime,
+                   "already-clean-keeps-record-identity", "clean record was rewritten");
+                ck(product_before.ino == product_after.ino && product_before.mtime == product_after.mtime && product_before.ctime == product_after.ctime,
+                   "already-keeps-product-identity", "existing APE was rewritten");
+            }
             ck(sy_exists(sprev) == 1 && sy_exists(sdir) != 1, "split-dir-moved-aside", "unisacc.com.dev state");
             ck(sy_exists(bjp) == 1, "old-record-kept", "no .split-prev record");
             (void)text;
@@ -166,6 +217,9 @@ int main(int argc, char **argv) {
                 (void)sy_unlink(idoc);
                 if (write_file(com, "#!/bin/sh\necho fifth-launcher\n", 0755)) return 2;
                 ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "IDENTITY_SKIP"), "identity-skip-without-doc", out);
+                /* A present but unreadable-as-a-file record is not an absent record (also reliable as root). */
+                if (sy_unlink(bj) || sy_mkdir(bj, 0700) || write_file(com, "#!/bin/sh\necho sixth-launcher\n", 0755)) return 2;
+                ck(tool(root, ape, real, 1, out, (int)sizeof out) == 2, "build-record-read-error-not-skipped", out);
             }
             (void)rb;
         }
