@@ -1214,6 +1214,42 @@ static void enc_elf(Ob *o) {
     fc_used_bytes(o);
 }
 
+/* prune-nametable: the opcode name table of exec/prune/prune-result.tsv's INIT sequence.  Every
+   op block there is a function of one tape-shape row: the mnemonic bytes, the id (row + 1), the
+   arity (operand count), and one shape-character byte at offset 8*(row+1)+c.  One row per op and
+   one per character, in table order, so a mapseq emits the actions exactly as the table had them.
+   The offsets and ids are derived positions, not domain constants: they stay loop variables here. */
+static void prune_nametable(Ob *o) {
+    static char *op[512], *sh[512];
+    int n = 0, i, j;
+    Lines S = fg_lines("exec/facts/tape-shape.tsv");
+    for (i = 0; i < S.n; i++) {
+        char *cells[4], *line = fg_dupz(S.l[i]);
+        if (!*line || line[0] == '#') continue;
+        if (fg_split(line, cells, 4) != 2 || n == 512) fg_die("bad tape-shape row", S.l[i]);
+        op[n] = cells[0]; sh[n++] = cells[1];
+    }
+    ob_z(o, "=none\tjson\t[]\n=ops\tjson\t[");
+    for (i = 0; i < n; i++) {
+        int arity = 0, c = 0;
+        char *p = sh[i];
+        while (*p) { if (*p == ',') arity++; p++; }
+        if (*sh[i]) arity++;
+        ob_z(o, i ? ", {\"op\": " : "{\"op\": "); ob_str(o, op[i]);
+        ob_z(o, ", \"id\": "); ob_int(o, i + 1);
+        ob_z(o, ", \"arity\": "); ob_int(o, arity);
+        ob_z(o, ", \"chars\": [");
+        for (j = 0; sh[i][j]; j++) {
+            if (sh[i][j] == ',') continue;
+            ob_z(o, c ? ", {\"addr\": " : "{\"addr\": "); ob_int(o, 8L * (i + 1) + c);
+            ob_z(o, ", \"value\": "); ob_int(o, (long)(unsigned char)sh[i][j]); ob_z(o, "}");
+            c++;
+        }
+        ob_z(o, "]}");
+    }
+    ob_z(o, "]\n");
+}
+
 /* lower-armfuse: TAPE SHAPE ops eligible for ARM immediate fusion (shape / exclude / read policy). */
 static void lower_armfuse(Ob *o) {
     static char *pk[128], *pv[128], *op[512], *sh[512];
@@ -4003,6 +4039,7 @@ static const Table fg_tables[] = {
     {"node-record", {"exec/facts/node-record-layout.tsv", "tools/facts-gen.cx", 0}, node_record},
     {"enc-elf", {"exec/facts/image-elf.tsv", "exec/facts/image-pe.tsv", "tools/facts-gen.cx", 0}, enc_elf},
     {"lower-armfuse", {"exec/facts/tape-shape.tsv", "exec/lower/armfuse-shapes.tsv", "tools/facts-gen.cx", 0}, lower_armfuse},
+    {"prune-nametable", {"exec/facts/tape-shape.tsv", "tools/facts-gen.cx", 0}, prune_nametable},
     {"k2-gen2-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse2-extra.tsv",
                         "exec/parse/token-prefixes.tsv", "exec/facts/parse-constants.tsv", "tools/facts-gen.cx", 0}, k2_gen2_tokens},
     {"k2-units-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/parse-constants.tsv", "exec/parse/token-prefixes.tsv",

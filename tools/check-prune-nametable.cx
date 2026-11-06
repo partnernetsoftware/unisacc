@@ -1,0 +1,190 @@
+/* tools/check-prune-nametable.cx -- exec/prune's opcode name table stays in step with the tape shapes.
+ *
+ *   sh ./unisacc.com tools/check-prune-nametable.cx [-- ROOT]
+ *
+ * exec/prune/prune-result.tsv used to spell 72 opcode blocks inline: the mnemonic as a run of SBOUT,
+ * an id, an arity and one byte per shape character.  Those blocks are now derived by tools/facts-gen.cx
+ * into exec/facts/prune-nametable.tsv (one row per tape-shape row) and expanded by the manifest's
+ * mapseq, so the table carries no domain literal at all.  The derivation is only worth anything if a
+ * later tape-shape edit cannot leave the nametable stale, so this check re-derives every field from
+ * exec/facts/tape-shape.tsv independently and compares:
+ *   1) op count and order equal, every mnemonic equal;
+ *   2) id == row + 1, arity == operand count of the shape;
+ *   3) every shape character (commas dropped) at addr 8*(row+1)+j with value ord(c);
+ *   4) no shape-less row claims a character, and no row is missing from the nametable;
+ *   5) the INIT cell of prune-result.tsv starts with the opinit reference and keeps exactly the 12
+ *      register/symbol blocks whose names are not tape shapes (they are not derived by design).
+ * Exit 0 when all hold, 1 on any mismatch, 2 on usage/IO. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+#define MAXOP 256
+#define MAXCH 64
+static char root[4096];
+static int asserts, failed;
+static void die(const char *s) { fprintf(stderr, "check-prune-nametable: REFUSE %s errno=%d\n", s, errno); exit(2); }
+static void ck(int ok, const char *what, const char *detail) {
+    asserts++;
+    if (!ok) failed++;
+    printf("%s\t%s%s%s\n", ok ? "PASS" : "FAIL", what, detail && *detail ? "\t" : "", detail ? detail : "");
+}
+static char *slurp(const char *rel, long *n) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) die("path");
+    { char *s = cx_read(p, (size_t *)n); if (!s) die(rel); return s; }
+}
+/* next line of s[at..n), not starting with '#', as a zero-terminated string; returns the new offset */
+static long line(char *s, long n, long at, char *dst, long cap) {
+    long k = 0;
+    while (at < n && s[at] == '#') { while (at < n && s[at] != '\n') at++; at++; }
+    if (at >= n) return -1;
+    while (at < n && s[at] != '\n' && k + 1 < cap) dst[k++] = s[at++];
+    dst[k] = 0;
+    if (at < n) at++;
+    return at;
+}
+/* split one line into at most cap tab-separated cells, zero-terminated in place */
+static int cells(char *s, char **out, int cap) {
+    int n = 0; char *p = s;
+    for (;;) {
+        if (n == cap) return -1;
+        out[n++] = p;
+        while (*p && *p != '\t') p++;
+        if (!*p) return n;
+        *p++ = 0;
+    }
+}
+
+typedef struct { char op[64]; int arity; int nch; int addr[MAXCH]; int value[MAXCH]; } Op;
+
+static int tsv_ops(Op *o) {                     /* the reference: exec/facts/tape-shape.tsv */
+    long n, at = 0; char *b = slurp("exec/facts/tape-shape.tsv", &n), buf[512];
+    int count = 0;
+    while (count < MAXOP && (at = line(b, n, at, buf, sizeof buf)) >= 0) {
+        char *c[4]; int nc = cells(buf, c, 4), j, k = 0;
+        if (nc != 2) die("tape-shape row column count");
+        if (strlen(c[0]) >= sizeof o[count].op) die("op name bound");
+        { int q = 0; while (c[0][q] && q + 1 < (int)sizeof o[count].op) { o[count].op[q] = c[0][q]; q++; } o[count].op[q] = 0; }
+        for (j = 0; c[1][j]; j++) if (c[1][j] != ',') {
+            if (k == MAXCH) die("shape too wide");
+            o[count].addr[k] = 8 * (count + 1) + k;
+            o[count].value[k] = (unsigned char)c[1][j];
+            k++;
+        }
+        o[count].nch = k;
+        o[count].arity = 0;
+        if (*c[1]) { o[count].arity = 1; for (j = 0; c[1][j]; j++) if (c[1][j] == ',') o[count].arity++; }
+        count++;
+    }
+    free(b); return count;
+}
+/* the nametable body is one JSON array of {"op":..,"id":..,"arity":..,"chars":[{"addr":..,"value":..}]} */
+static long skip_ws(const char *s, long i) { while (s[i] == ' ' || s[i] == '\n' || s[i] == '\t') i++; return i; }
+static long jint(const char *s, long i, int *out) {
+    int v = 0, neg = 0;
+    i = skip_ws(s, i);
+    if (s[i] == '-') { neg = 1; i++; }
+    if (s[i] < '0' || s[i] > '9') die("json integer");
+    while (s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+    *out = neg ? -v : v;
+    return i;
+}
+static int json_ops(Op *o) {                    /* the derivation: exec/facts/prune-nametable.tsv */
+    static char buf[1 << 20];
+    long n, at = 0, i = 0; char *b = slurp("exec/facts/prune-nametable.tsv", &n);
+    int count = 0;
+    b[n] = 0;
+    while ((at = line(b, n, at, buf, sizeof buf)) >= 0) {
+        if (strncmp(buf, "=ops\tjson\t", 10)) continue;
+        i = 10;
+        i = skip_ws(buf, i);
+        if (buf[i] != '[') die("ops is not an array");
+        i++;
+        for (;;) {
+            Op *cur = &o[count];
+            i = skip_ws(buf, i);
+            if (buf[i] == ']') { i++; break; }
+            if (count == MAXOP) die("ops bound");
+            if (buf[i] == ',') { i++; i = skip_ws(buf, i); }
+            if (strncmp(buf + i, "{\"op\": \"", 8)) die("op field");
+            i += 8;
+            { int k = 0; while (buf[i] && buf[i] != '"' && k + 1 < (int)sizeof cur->op) cur->op[k++] = buf[i++]; cur->op[k] = 0; }
+            if (buf[i] != '"') die("op string end");
+            i++;
+            { long off; const char *keys[2] = {"\"id\": ", "\"arity\": "}; int vals[2], q;
+              for (q = 0; q < 2; q++) { off = (long)(strstr(buf + i, keys[q]) - buf); if (off <= i) die("id/arity field");
+                  i = jint(buf, off + (long)strlen(keys[q]), &vals[q]); }
+              if (vals[0] != count + 1) die("id is not row+1");
+              cur->arity = vals[1]; }
+            { const char *cs = strstr(buf + i, "\"chars\": ["); int k = 0;
+              if (!cs) die("chars field");
+              i = (long)(cs - buf) + 10;
+              for (;;) {
+                  i = skip_ws(buf, i);
+                  if (buf[i] == ']') { i++; break; }
+                  if (buf[i] == ',') { i++; i = skip_ws(buf, i); }
+                  if (strncmp(buf + i, "{\"addr\": ", 9)) die("char addr");
+                  if (k == MAXCH) die("chars bound");
+                  i = jint(buf, i + 9, &cur->addr[k]);
+                  { const char *v = strstr(buf + i, "\"value\": "); if (!v) die("char value"); i = jint(buf, (long)(v - buf) + 9, &cur->value[k]); }
+                  k++; i = skip_ws(buf, i);
+                  if (buf[i] != '}') die("char object end");
+                  i++;
+              }
+              cur->nch = k; }
+            i = skip_ws(buf, i);
+            if (buf[i] != '}') die("op object end");
+            i++;
+            count++;
+        }
+        break;
+    }
+    free(b); return count;
+}
+
+int main(int argc, char **argv) {
+    static Op ref[MAXOP], got[MAXOP];
+    int nref, ngot, i, j, bad = 0, a = 1;
+    char msg[256];
+    if (!realpath(".", root)) die("cwd");
+    if (argc > 1) { a = !strcmp(argv[1], "--") ? 2 : 1; if (a < argc && !realpath(argv[a], root)) die("root"); }
+    nref = tsv_ops(ref);
+    ngot = json_ops(got);
+    ck(nref == ngot, "op-count", (cx_fmt(msg, sizeof msg, "tape-shape=%d nametable=%d", nref, ngot), msg));
+    if (nref != ngot) bad = 1;
+    for (i = 0; i < nref && i < ngot; i++) {
+        int same = !strcmp(ref[i].op, got[i].op) && ref[i].arity == got[i].arity && ref[i].nch == got[i].nch;
+        for (j = 0; same && j < ref[i].nch; j++)
+            if (ref[i].addr[j] != got[i].addr[j] || ref[i].value[j] != got[i].value[j]) same = 0;
+        if (!same) { ck(0, "op-row", ref[i].op); bad = 1; }
+    }
+    ck(!bad, "every-row-derived", "op/id/arity/char addr+value");
+    /* the result table must consume the derivation and keep only the 12 non-shape blocks */
+    {
+        static char buf[1 << 17];
+        long n, at = 0; char *b = slurp("exec/prune/prune-result.tsv", &n);
+        int found = 0, ops_out = 0;
+        while ((at = line(b, n, at, buf, sizeof buf)) >= 0) {
+            char *c[8];
+            if (strncmp(buf, "main\tINIT\t*\tDOMAIN\t", 19)) continue;
+            if (cells(buf, c, 8) != 5) die("INIT row column count");
+            found = 1;
+            ck(!strncmp(c[4], "[[\"@\",\"opinit\"],", 16), "init-uses-opinit", "");
+            /* the 12 register/symbol blocks are the only ones left: r0..r7 store at 29000000 and the four
+               symbols intern a label, so the shape fields and the per-character offsets must all be gone.
+               42 SBOUT == r0..r7 (2 each) + _start 6 + main 4 + __init 6 + __main_ret 10. */
+            ck(strstr(c[4], "28000000") == 0 && strstr(c[4], "30000000") == 0 &&
+               strstr(c[4], "31000000") == 0, "no-derivation-left", "");
+            { int sb = 0; const char *p = c[4];
+              while ((p = strstr(p, "\"SBOUT\"")) != 0) { sb++; p += 6; }
+              ck(sb == 42, "only-symbol-bytes-left", (cx_fmt(msg, sizeof msg, "sbout=%d", sb), msg)); }
+            break;
+        }
+        ck(found, "init-row-present", "");
+        free(b);
+    }
+    printf("PRUNE_NAMETABLE\tasserts=%d\tfailed=%d\tstatus=%s\n", asserts, failed, failed ? "FAIL" : "PASS");
+    return failed ? 1 : 0;
+}
