@@ -12,9 +12,8 @@
  *   ab-fclose   A 打开并写 "A"，B 写 "B" 再 fclose → 文件必须是 "AB"
  *   ab-exit     A 打开并写 "A"，B 写 "B"，不 fclose，靠 main 返回时的 exit 冲刷 → "AB"
  *   abc-fflush  A 写 "A"，B 写 "B" 后 fflush，A 继续写 "C" → "ABC"
- * 第四个用例是失败合同（cdx 报的 errno 回归）：
- *   devfull     fopen("/dev/full","w") 写 1 字节后 errno==0，fflush 必须失败且 errno!=0
- *               需要 /dev/full(Linux 设备);主机没有时这两条记 NOT_RUN,不算 PASS。
+ *   devfull     写 1 字节后 errno==0，fflush 必须失败且 errno!=0。Linux 用 /dev/full;
+ *               无该设备时用关读端的 pipe(EPIPE,忽略 SIGPIPE),语义同「写失败如实进 errno」。
  * 所有材料建在 mkdtemp 的独占目录里：不写仓内 out/，全新克隆可跑。
  * 输出 STDIO_CROSSUNIT<TAB>assertions=N<TAB>failed=K<TAB>not_run=M;退出 1 当 failed>0,
  * 3 当没有失败但有 NOT_RUN,0 仅当全部 PASS。 */
@@ -90,24 +89,25 @@ int main(int argc, char **argv) {
             if (got) free(got);
         }
     }
-    {   /* 4: the failure contract -- errno must be the caller's errno too.  It needs /dev/full, a Linux device
-           (macOS has none): without it the two rows are NOT_RUN, counted apart, never PASS. */
+    {   /* 4: fflush 失败且 errno 对调用者可见。Linux /dev/full;否则关读端 pipe(EPIPE)。 */
         struct stat st;
-        if (stat("/dev/full", &st) != 0) {
-            not_run += 2;
-            printf("NOT_RUN\tdevfull-compiles\tno /dev/full on this host\n");
-            printf("NOT_RUN\tdevfull-errno-visible-to-caller\tno /dev/full on this host\n");
-        } else {
+        if (stat("/dev/full", &st) == 0) {
             put("full.c", "#include <stdio.h>\n#include <errno.h>\n"
                           "int main(void){FILE *f=fopen(\"/dev/full\",\"w\");if(!f)return 1;"
                           "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
                           "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
-            {   char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0};
-                ck(run(v) == 0, "devfull-compiles");
-            }
-            {   char *v[] = {"./fullprobe", 0};
-                ck(run(v) == 0, "devfull-errno-visible-to-caller");
-            }
+        } else {
+            put("full.c", "#include <stdio.h>\n#include <errno.h>\n#include <unistd.h>\n#include <signal.h>\n"
+                          "int main(void){int p[2];FILE *f;signal(SIGPIPE,SIG_IGN);"
+                          "if(pipe(p))return 1;close(p[0]);f=fdopen(p[1],\"w\");if(!f)return 1;"
+                          "if(fwrite(\"x\",1,1,f)!=1)return 2;if(errno!=0)return 3;"
+                          "if(fflush(f)==0)return 4;if(errno==0)return 5;return 0;}\n");
+        }
+        {   char *v[] = {"sh", product, "-o", "fullprobe", "full.c", 0};
+            ck(run(v) == 0, "devfull-compiles");
+        }
+        {   char *v[] = {"./fullprobe", 0};
+            ck(run(v) == 0, "devfull-errno-visible-to-caller");
         }
     }
     {   char rm[4400];
