@@ -1,0 +1,102 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* tools/libc99posix-audit.cx -- include/ static POSIX names missing from exec/facts/libc99posix.tsv.
+ *
+ *   sh ./unisacc.com tools/libc99posix-audit.cx
+ *
+ * Scans include/*.h (not cx-flat.h) for `static <type> <name>(`. Names already in the
+ * fact table are omitted. UCRT underscore candidates are marked UCRT? (not PE-probed here).
+ * Prints GAP<TAB>header<TAB>name<TAB>tag then LIBC99POSIX_AUDIT<TAB>gaps=N. rc 0 always
+ * (inventory, not a ratchet). */
+static const char *ucrt[] = {
+    "write", "isatty", "unlink", "getpid", "dup", "rmdir", "access", "chdir", "getcwd",
+    "pipe", "fsync", "ftruncate", 0
+};
+static int is_ucrt(const char *n) {
+    int i;
+    for (i = 0; ucrt[i]; i++) if (tx_eqz(n, ucrt[i])) return 1;
+    return 0;
+}
+static int in_table(const char *n, char **tab, int nt) {
+    int i;
+    for (i = 0; i < nt; i++) if (tx_eqz(n, tab[i])) return 1;
+    return 0;
+}
+static int ident_end(const char *s) {
+    int i = 0;
+    if (!((s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
+    i = 1;
+    while ((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_') i++;
+    return i;
+}
+int main(void) {
+    char *tsv; size_t tn = 0;
+    char *names[128]; int nt = 0;
+    char dir[32]; int fd, nn, off = 0; char ents[1 << 16];
+    int gaps = 0;
+    tsv = cx_read("exec/facts/libc99posix.tsv", &tn);
+    if (!tsv) { sy_eprintf("libc99posix-audit: no fact table\n"); return 2; }
+    {   size_t i = 0;
+        while (i < tn) {
+            size_t e = i;
+            while (e < tn && tsv[e] != '\n') e++;
+            if (tsv[i] != '#' && tsv[i] != 0) {
+                size_t k = i;
+                while (k < e && tsv[k] != '\t') k++;
+                if (k > i && nt < 128) {
+                    tsv[k] = 0;
+                    names[nt++] = tsv + i;
+                }
+            }
+            i = e < tn ? e + 1 : e;
+        }
+    }
+    fd = sy_open("include", 0, 0);
+    if (fd < 0) { sy_eprintf("libc99posix-audit: include\n"); return 2; }
+    nn = (int)sy_dir_names(fd, ents, sizeof ents);
+    sy_close(fd);
+    if (nn < 0) return 2;
+    while (off < (int)sizeof ents && ents[off]) {
+        long len = (long)tx_len(ents + off, 256);
+        char path[300], *b; size_t n = 0, at;
+        if (len > 2 && ents[off + len - 2] == '.' && ents[off + len - 1] == 'h'
+            && !tx_eqz(ents + off, "cx-flat.h") && !tx_eqz(ents + off, "cx-nested.h")) {
+            if (cx_fmt(path, sizeof path, "include/%s", ents + off)) return 2;
+            b = cx_read(path, &n);
+            if (b) {
+                at = 0;
+                while (at + 8 < n) {
+                    if (at + 7 < n && b[at] == 's' && b[at + 1] == 't' && b[at + 2] == 'a'
+                        && b[at + 3] == 't' && b[at + 4] == 'i' && b[at + 5] == 'c' && b[at + 6] == ' ') {
+                        size_t p = at + 7;
+                        int id;
+                        while (p < n && b[p] != '(' && b[p] != ';' && b[p] != '\n') p++;
+                        if (p < n && b[p] == '(') {
+                            size_t q = p;
+                            while (q > at + 7 && b[q - 1] != ' ' && b[q - 1] != '\t' && b[q - 1] != '*') q--;
+                            id = ident_end(b + q);
+                            if (id > 0) {
+                                char save = b[q + id];
+                                b[q + id] = 0;
+                                if (!in_table(b + q, names, nt) && b[q] != '_') {
+                                    sy_printf("GAP\t%s\t%s\t%s\n", ents + off, b + q, is_ucrt(b + q) ? "UCRT?" : "-");
+                                    gaps++;
+                                }
+                                b[q + id] = save;
+                            }
+                        }
+                    }
+                    at++;
+                }
+                mm_free(b);
+            }
+        }
+        off += (int)len + 1;
+        if (!ents[off]) break;
+    }
+    sy_printf("LIBC99POSIX_AUDIT\tgaps=%d\n", gaps);
+    return 0;
+}
