@@ -4846,9 +4846,25 @@ static int strcoll(const char *__u_a, const char *__u_b) {
 }
 #endif
 
-/* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the host C library on every target
-   (Windows: the loader search in <unisacc_ffi.h> uffi_dlsym) */
+/* 0.0.28 H4 (SQLite's shell): POSIX strdup. Linux/macOS forward to the host C
+   library. Windows UCRT exports _strdup, not strdup, so the Windows path is a
+   carried body over malloc+memcpy (same pattern as win pread/pwrite). */
+#ifdef _WIN32
+
+#if !__UNISA_FTRIM_LIBC || __UN_strdup
+static char *strdup(const char *__u_s) {
+    __u_word __u_n; char *__u_d;
+    if (!__u_s) return 0;
+    __u_n = 0; while (__u_s[__u_n]) __u_n = __u_n + 1;
+    __u_d = (char *)malloc(__u_n + 1);
+    if (!__u_d) return 0;
+    { __u_word __u_i = 0; while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; } __u_d[__u_n] = 0; }
+    return __u_d;
+}
+#endif
+#else
 char *strdup(const char *__u_s);
+#endif
 /* C99 7.21.4.5 strxfrm: prototype-only, forwarded to the host's C library on Linux and macOS
  * (the bundled locale is C, whose transformation is the identity). */
 #ifndef _WIN32
@@ -5666,18 +5682,35 @@ typedef int sig_atomic_t;
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))(0-1))
-#define SIGINT  2
-#define SIGILL  4
-#define SIGABRT 6
-#define SIGFPE  8
-#define SIGSEGV 11
-#define SIGHUP  1
+/* BEGIN generated signal targets */
+/* Generated from exec/facts/signal-targets.tsv; do not edit.
+ * Windows numbers are unisa compatibility values, not native UCRT signals. */
+#define SIGHUP 1
+#define SIGINT 2
 #define SIGQUIT 3
+#define SIGILL 4
+#define SIGABRT 6
+#define SIGFPE 8
 #define SIGKILL 9
-#define SIGTERM 15
-#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#if defined(__APPLE__)
+#define SIGUSR1 30
+#elif defined(_WIN32)
+#define SIGUSR1 10
+#else
+#define SIGUSR1 10
+#endif
+#define SIGSEGV 11
+#if defined(__APPLE__)
+#define SIGUSR2 31
+#elif defined(_WIN32)
 #define SIGUSR2 12
-#define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
+#else
+#define SIGUSR2 12
+#endif
+#define SIGPIPE 13
+#define SIGTERM 15
+#define SIGWINCH 28
+/* END generated signal targets */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 
@@ -7054,18 +7087,35 @@ typedef int sig_atomic_t;
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))(0-1))
-#define SIGINT  2
-#define SIGILL  4
-#define SIGABRT 6
-#define SIGFPE  8
-#define SIGSEGV 11
-#define SIGHUP  1
+/* BEGIN generated signal targets */
+/* Generated from exec/facts/signal-targets.tsv; do not edit.
+ * Windows numbers are unisa compatibility values, not native UCRT signals. */
+#define SIGHUP 1
+#define SIGINT 2
 #define SIGQUIT 3
+#define SIGILL 4
+#define SIGABRT 6
+#define SIGFPE 8
 #define SIGKILL 9
-#define SIGTERM 15
-#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#if defined(__APPLE__)
+#define SIGUSR1 30
+#elif defined(_WIN32)
+#define SIGUSR1 10
+#else
+#define SIGUSR1 10
+#endif
+#define SIGSEGV 11
+#if defined(__APPLE__)
+#define SIGUSR2 31
+#elif defined(_WIN32)
 #define SIGUSR2 12
-#define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
+#else
+#define SIGUSR2 12
+#endif
+#define SIGPIPE 13
+#define SIGTERM 15
+#define SIGWINCH 28
+/* END generated signal targets */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 

@@ -1,6 +1,7 @@
 # 0.0.45 稳定版开发（未发布）
 
 - **stream 路由目标联动**：仅给 `--route OS/ARCH/...` 时从目标事实接口选择预定义与 E3 数据模型；同时给出冲突的 `--target` 时一行具名拒绝。旧预发布在交叉 stream 路由下错误沿用宿主宏，修复会改变此前错误的平台条件分支与 `long` 字宽输出；direct `-o/-run` 不受该缺陷影响。新增 `stream-target` 六 cell 回归及平台宏/字宽敏感的 foreign-chains 语料。本机预检不是 macOS/Windows 原生资格，最终候选原生证据仍待发布窗口。
+- **目标信号与 P0 契约**：信号宏由目标事实表生成，补 `SIGPIPE` 并修正 Darwin `SIGUSR1/SIGUSR2` 为 30/31；Windows 编号仅供现有进程内模拟，不改变真实信号投递能力。libc99posix 从八项扩为二十项，Windows 名字依据真实双架构 UCRT 导出及 ABI 核验；`write/getcwd/pipe/ftruncate` 保留自带实现，不能把存在下划线导出视为 ABI 等价。
 - 已发布 `v0.0.45` 预发布及其资产保持不变；本节不宣称稳定版已发布。
 
 # 0.0.45(预发布)

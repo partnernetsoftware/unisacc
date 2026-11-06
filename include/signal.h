@@ -13,18 +13,35 @@ typedef int sig_atomic_t;
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))(0-1))
-#define SIGINT  2
-#define SIGILL  4
-#define SIGABRT 6
-#define SIGFPE  8
-#define SIGSEGV 11
-#define SIGHUP  1
+/* BEGIN generated signal targets */
+/* Generated from exec/facts/signal-targets.tsv; do not edit.
+ * Windows numbers are unisa compatibility values, not native UCRT signals. */
+#define SIGHUP 1
+#define SIGINT 2
 #define SIGQUIT 3
+#define SIGILL 4
+#define SIGABRT 6
+#define SIGFPE 8
 #define SIGKILL 9
-#define SIGTERM 15
-#define SIGUSR1 10                  /* POSIX: raise() delivers it to the handler like SIGINT */
+#if defined(__APPLE__)
+#define SIGUSR1 30
+#elif defined(_WIN32)
+#define SIGUSR1 10
+#else
+#define SIGUSR1 10
+#endif
+#define SIGSEGV 11
+#if defined(__APPLE__)
+#define SIGUSR2 31
+#elif defined(_WIN32)
 #define SIGUSR2 12
-#define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
+#else
+#define SIGUSR2 12
+#endif
+#define SIGPIPE 13
+#define SIGTERM 15
+#define SIGWINCH 28
+/* END generated signal targets */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 
