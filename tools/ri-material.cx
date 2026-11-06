@@ -13,6 +13,12 @@ static char native_sha[65];static size_t native_bytes;static int has_native;
 static const char *native_flags="-O2 -fno-trim-libc -b lnx/x86_64 -o -";
 static void die(const char *s){fprintf(stderr,"ri-material: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
+static void cpath(char *p,const char *rel){
+ path(p,root,rel);
+ { struct stat st; if(!lstat(p,&st)) return; }
+ { char alt[4400]; int n=snprintf(alt,sizeof alt,"%s/archive/reference-c/%s",root,rel); if(n<0||n>=(int)sizeof alt) die("path");
+   { struct stat st; if(!lstat(alt,&st)) { int i=0; while(i<=n){p[i]=alt[i];i++;} return; } } }
+}
 static char *load(const char *p,size_t *n){
  struct stat before,st;errno=0;if(lstat(p,&before))die(p);
  if(!S_ISREG(before.st_mode)||before.st_size<0||before.st_size>16777216)die("bounded regular input required");
@@ -47,11 +53,13 @@ static void generate(const char *fixture){
  source(sid);size_t n;char *s=load(product,&n);cx_sha256_hex(s,n,boot);free(s);
  np_puts(&record,"ri-material-v1\nstatus\tPREPARED\nscope\tsource-preserving-C-runtime-with-CX-witness\nsource\t");np_puts(&record,sid);np_puts(&record,"\nbootstrap\t");np_puts(&record,boot);np_puts(&record,"\n");
  for(i=0;i<9;i++){
-  char p[4400];path(p,root,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,hashes[i]);np_puts(&record,inputs[i]);np_puts(&record,"\t");np_puts(&record,hashes[i]);np_puts(&record,"\n");
+  char p[4400];cpath(p,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,hashes[i]);np_puts(&record,inputs[i]);np_puts(&record,"\t");np_puts(&record,hashes[i]);np_puts(&record,"\n");
   if(i==8){
    if(memchr(s,0,n))die("fixture NUL");const char *mark="/* RUNTIME_BODY */";char *at=strstr(s,mark);if(!at||strstr(at+1,mark))die("one runtime delimiter");
    np_puts(&body,"/* Generated C substrate; original executor and headers remain C. */\n#include <stdio.h>\n#include <stdlib.h>\n#include <stdint.h>\n#include <string.h>\n#include <errno.h>\n#include <sys/stat.h>\n#include <unistd.h>\n#include <fcntl.h>\n#include <dirent.h>\n");
-   size_t prefix=(size_t)(at-s);np_put(&body,s,prefix);np_puts(&body,"\n#define main ri_original_main\n#include \"");np_puts(&body,root);np_puts(&body,"/exec/c/run.c\"\n#undef main\n");np_put(&body,at+strlen(mark),n-prefix-strlen(mark));
+   size_t prefix=(size_t)(at-s);np_puts(&body,"\n#define main ri_original_main\n#include \"");
+   { char rcpath[4400]; cpath(rcpath,"exec/c/run.c"); np_puts(&body,rcpath); }
+   np_puts(&body,"\"\n#undef main\n");np_put(&body,at+strlen(mark),n-prefix-strlen(mark));
   }free(s);
  }
  cx_sha256_hex(body.p,body.n,body_sha);np_puts(&record,"runtime.c\t");np_puts(&record,body_sha);np_puts(&record,"\n");cx_sha256_hex(record.p,record.n,record_sha);
@@ -59,7 +67,7 @@ static void generate(const char *fixture){
 static void stable(const char *phase){
  char now[65],p[4400],h[65];source(now);if(!tx_eqz(sid, now)){fprintf(stderr,"ri-material: phase=%s\n",phase);die("source drift");}
  size_t n;char *s=load(product,&n);cx_sha256_hex(s,n,h);free(s);if(!tx_eqz(boot, h)){fprintf(stderr,"ri-material: phase=%s\n",phase);die("bootstrap drift");}
- for(int i=0;i<9;i++){path(p,root,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,h);free(s);if(!tx_eqz(h, hashes[i])){fprintf(stderr,"ri-material: phase=%s input=%s\n",phase,inputs[i]);die("input drift");}}
+ for(int i=0;i<9;i++){cpath(p,inputs[i]);s=load(p,&n);cx_sha256_hex(s,n,h);free(s);if(!tx_eqz(h, hashes[i])){fprintf(stderr,"ri-material: phase=%s input=%s\n",phase,inputs[i]);die("input drift");}}
 }
 static void check_generated(void){output("runtime.c",body.p,body.n,1,0600);output("material.tsv",record.p,record.n,1,0600);}
 static unsigned long long little(const unsigned char *p,int n){unsigned long long v=0;for(int i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}

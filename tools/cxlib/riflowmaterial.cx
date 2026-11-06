@@ -6,6 +6,7 @@ static const char *closure_paths[9]={"exec/c/run.c","exec/c/core.c","exec/c/core
 static const char *flags="-O2 -b lnx/x86_64 -o -";
 static void die(const char *s){fprintf(stderr,"ri-flow-material: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static void cpath(char *p,const char *rel){path(p,root,rel);{struct stat st;if(!lstat(p,&st))return;}{char alt[4400];int n=snprintf(alt,sizeof alt,"%s/archive/reference-c/%s",root,rel);if(n<0||n>=(int)sizeof alt)die("path bound");{struct stat st;if(!lstat(alt,&st)){int i=0;while(i<=n){p[i]=alt[i];i++;}return;}}}}
 static char *load(const char *p,size_t *n){
  struct stat a,b;errno=0;if(lstat(p,&a))die(errno==ENOENT?"input absent":"input stat failed");if(!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>16777216)die("bounded regular input");
  int fd=open(p,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);if(fd<0)die("input open");if(fstat(fd,&b)||!S_ISREG(b.st_mode)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size){close(fd);die("input descriptor identity");}
@@ -14,7 +15,7 @@ static char *load(const char *p,size_t *n){
 }
 static void digest(const char *p,char *h){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
 static int exists(const char *p){struct stat st;errno=0;if(lstat(p,&st)){if(errno==ENOENT)return 0;die("output existence stat");}if(!S_ISREG(st.st_mode))die("existing output is not regular");return 1;}
-static void stable(void){for(int i=0;i<6;i++){char h[65];digest(watched[i],h);if(strcmp(h,hashes[i])){fprintf(stderr,"changed input: %s\n",watched[i]);die("profile input changed");}}for(int i=0;i<9;i++){char p[4400],h[65];path(p,root,closure_paths[i]);digest(p,h);if(strcmp(h,closure_hash[i])){fprintf(stderr,"changed closure input: %s\n",p);die("nine-input C closure changed");}}}
+static void stable(void){for(int i=0;i<6;i++){char h[65];digest(watched[i],h);if(strcmp(h,hashes[i])){fprintf(stderr,"changed input: %s\n",watched[i]);die("profile input changed");}}for(int i=0;i<9;i++){char p[4400],h[65];cpath(p,closure_paths[i]);digest(p,h);if(strcmp(h,closure_hash[i])){fprintf(stderr,"changed closure input: %s\n",p);die("nine-input C closure changed");}}}
 static void generic_verify(void){
  if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear ambient resource state");char *v[]={bound,"18","sh",product,generic,"--","--verify",root,mat,"tests/cases/ri-flow.cx",0};np_result r;char why[1400];if(np_run(v,root,0,20,&r,why,sizeof why))die(why);const char *tail="VERIFIED\tri-material\tno-test-result\n";size_t n=strlen(tail);int ok=!r.rc&&!r.errn&&r.outn>=n&&!memcmp(r.out+r.outn-n,tail,n);if(!ok){fprintf(stderr,"generic source verify rc=%d\n",r.rc);if(r.errn)fwrite(r.err,1,r.errn,stderr);}np_free(&r);if(!ok)die("generic source material verification");
 }
@@ -45,7 +46,8 @@ static void check_pair(const char *status,const char *file,const char *h,size_t 
 const char *rfm_flags(void){return flags;}
 int rfm_compile(const char *root_arg,const char *mat_arg,char artifact[65],size_t *bytes){
  if(!artifact||!bytes)die("result arguments");initialize(root_arg,mat_arg);if(exists(image)||exists(pending_path)||exists(receipt_path))die("compile requires absent profile outputs");generic_verify();stable();
- char *v[]={bound,"20","sh",product,"-O2","-b","lnx/x86_64",source,"-o","-",0};np_result r;char why[1400];if(np_run(v,root,0,23,&r,why,sizeof why))die(why);if(r.rc||r.errn||r.outn>16777216||!elf((const unsigned char *)r.out,r.outn)){fprintf(stderr,"actual default-trim compiler rc=%d bytes=%lu\n",r.rc,(unsigned long)r.outn);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("actual compile failed or invalid ELF");}
+ char inc1[4400],inc2[4400];path(inc1,root,"exec/c");path(inc2,root,"archive/reference-c/exec/c");
+ char *v[]={bound,"20","sh",product,"-O2","-b","lnx/x86_64","-I",inc1,"-I",inc2,source,"-o","-",0};np_result r;char why[1400];if(np_run(v,root,0,23,&r,why,sizeof why))die(why);if(r.rc||r.errn||r.outn>16777216||!elf((const unsigned char *)r.out,r.outn)){fprintf(stderr,"actual default-trim compiler rc=%d bytes=%lu\n",r.rc,(unsigned long)r.outn);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("actual compile failed or invalid ELF");}
  /* Generic pre-verification proved these exact nine hashes. The direct post
   * check avoids a second source-identity program in this bounded compile step. */
  stable();cx_sha256_hex(r.out,r.outn,artifact);*bytes=r.outn;write_new(image,r.out,r.outn,0700);np_free(&r);char actual[65];size_t z;inspect(actual,&z);if(z!=*bytes||strcmp(actual,artifact))die("installed image differs from compiler bytes");np_buf pending=record("COMPILED",artifact,*bytes);write_new(pending_path,pending.p,pending.n,0600);free(pending.p);stable();check_pair("COMPILED",pending_path,artifact,*bytes);return 0;
