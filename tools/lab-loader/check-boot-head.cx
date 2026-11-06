@@ -22,6 +22,7 @@
 #pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use cxlib.productpkg
 
 static int bh_failed, bh_asserts;
 static char bh_root[4096];
@@ -191,18 +192,34 @@ int main(int argc, char **argv) {
     }
 
     /* H3：换 manifest 启动两类目标,头字节不变。
-       带包的 base 直接用已装的 unisacc.com.dev/entry.elf(自带 UNIPKG1 尾部包),
-       不再经 slice.cx 打单流容器。两次调用都带 --version, 好让 rc/输出可比。 */
+       带包的 base：PP_SPLIT 用 unisacc.com.dev/entry.elf；PP_APE 用仓根 unisacc.com(UNIPKG1)。 */
     {   char d[4400], base[4400], run[4400], direct[4400];
         char pkg_elf[4400];
-        if (snprintf(pkg_elf, sizeof pkg_elf, "%s/unisacc.com.dev/entry.elf", bh_root) >= (int)sizeof pkg_elf) bh_die("path");
-        if (sy_exists(pkg_elf) != 1) bh_die("installed entry.elf for the packaged base");
+        int lay = pp_layout(bh_root);
+        int ape = !strcmp(pp_layout_name(lay), "ape");
+        if (ape) {
+            if (snprintf(pkg_elf, sizeof pkg_elf, "%s/unisacc.com", bh_root) >= (int)sizeof pkg_elf) bh_die("path");
+        } else {
+            if (snprintf(pkg_elf, sizeof pkg_elf, "%s/unisacc.com.dev/entry.elf", bh_root) >= (int)sizeof pkg_elf) bh_die("path");
+        }
+        if (sy_exists(pkg_elf) != 1) bh_die(ape ? "installed APE for the packaged base" : "installed entry.elf for the packaged base");
         if (snprintf(base, sizeof base, "%s/uni-base.com", out) >= (int)sizeof base) bh_die("path");
         bh_copy(pkg_elf, base, 0700);
         if (snprintf(d, sizeof d, "%s/case-packaged", out) >= (int)sizeof d) bh_die("path");
         if (bh_make(d, base, "uni.com", 0)) bh_die("case-packaged setup");
         if (snprintf(run, sizeof run, "%s/boot.com", d) >= (int)sizeof run) bh_die("path");
-        {   char *av[] = {run, "--version", 0};
+        if (ape) {
+            char *av[] = {"sh", pkg_elf, "--version", 0};
+            np_result d2;
+            if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
+            bh_ck(res.rc == 0 && res.outn > 0, "H3a.boot-reaches-packaged-base");
+            if (np_run(av, bh_root, 0, 30, &d2, why, sizeof why)) bh_die(why);
+            bh_ck(d2.rc == res.rc && d2.outn == res.outn && !memcmp(d2.out, res.out, res.outn),
+                  "H3b.output-identical-to-direct");
+            np_free(&d2);
+            np_free(&res);
+        } else {
+            char *av[] = {run, "--version", 0};
             if (np_run(av, bh_root, 0, 30, &res, why, sizeof why)) bh_die(why);
             bh_ck(res.rc == 0 && res.outn > 0, "H3a.boot-reaches-packaged-base");
             {   char *dv[] = {base, "--version", 0};
