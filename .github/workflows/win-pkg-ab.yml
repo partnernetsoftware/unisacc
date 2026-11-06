@@ -447,16 +447,37 @@ jobs:
             [BitConverter]::ToUInt16($b,$opt+48), [BitConverter]::ToUInt16($b,$opt+50))
           Run $patched @('--version') 'slice-arm64(subsys 6.02) --version'
           Run $patched @('--help') 'slice-arm64(subsys 6.02) --help'
-          # DllCharacteristics: ours is 0x8100 (TS_AWARE|NX), a shipping ARM64 exe is 0xc160
-          # (TS_AWARE|GUARD_CF|NX|DYNAMIC_BASE|HIGH_ENTROPY_VA).  Test the missing DYNAMIC_BASE bit.
-          $patched2 = Join-Path $PWD 'diag/slice-win-arm64-dllchar.exe'
-          Copy-Item $exe $patched2 -Force
-          $b2 = [IO.File]::ReadAllBytes($patched2)
-          $pe2 = [BitConverter]::ToUInt32($b2, 60); $o2 = $pe2 + 24
-          $dc = [BitConverter]::ToUInt16($b2, $o2 + 70)
-          Write-Output ("DLLCHAR before=0x{0:x4}" -f $dc)
-          [BitConverter]::GetBytes([UInt16]($dc -bor 0x00E0)).CopyTo($b2, $o2 + 70)
-          [IO.File]::WriteAllBytes($patched2, $b2)
-          Write-Output ("DLLCHAR after =0x{0:x4}" -f [BitConverter]::ToUInt16($b2, $o2 + 70))
-          Run $patched2 @('--version') 'slice-arm64(dllchar 0xc160) --version'
+          # DllCharacteristics: ours is 0x8100 (TS_AWARE|NX); a shipping ARM64 exe is 0xc160
+          # (TS_AWARE|DYNAMIC_BASE|HIGH_ENTROPY_VA|NX|GUARD_CF).  A first attempt that OR'd 0xE0 also
+          # set FORCE_INTEGRITY (0x80) and the loader answered "cannot verify the digital signature"
+          # instead -- proof the header IS parsed, and that 0x80 must stay clear.  Now one bit at a time.
+          foreach ($bit in @(
+            @{ n='dynamic-base'; v=0x0040 },
+            @{ n='high-entropy'; v=0x0020 },
+            @{ n='both';         v=0x0060 })) {
+            $f = Join-Path $PWD ("diag/slice-arm64-{0}.exe" -f $bit.n)
+            Copy-Item $exe $f -Force
+            $bb = [IO.File]::ReadAllBytes($f)
+            $pp = [BitConverter]::ToUInt32($bb, 60); $oo = $pp + 24
+            $old = [BitConverter]::ToUInt16($bb, $oo + 70)
+            [BitConverter]::GetBytes([UInt16]($old -bor $bit.v)).CopyTo($bb, $oo + 70)
+            [IO.File]::WriteAllBytes($f, $bb)
+            Write-Output ("DLLCHAR {0}: 0x{1:x4} -> 0x{2:x4}" -f $bit.n, $old, [BitConverter]::ToUInt16($bb, $oo + 70))
+            Run $f @('--version') ("slice-arm64(dllchar {0}) --version" -f $bit.n)
+          }
+          # Section table of the control and of ours, so a missing/unusual section shows up as data.
+          function Sections([string]$path, [string]$label) {
+            $b = [IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToUInt32($b, 60); $n = [BitConverter]::ToUInt16($b, $pe + 6)
+            $sz = [BitConverter]::ToUInt16($b, $pe + 20); $sec = $pe + 24 + $sz
+            for ($i = 0; $i -lt $n; $i++) {
+              $o = $sec + 40 * $i
+              $nm = [Text.Encoding]::ASCII.GetString($b, $o, 8).TrimEnd([char]0)
+              $vs = [BitConverter]::ToUInt32($b, $o + 8); $va = [BitConverter]::ToUInt32($b, $o + 12)
+              $rs = [BitConverter]::ToUInt32($b, $o + 16); $ch = [BitConverter]::ToUInt32($b, $o + 36)
+              Write-Output ("SEC {0} {1,-8} va=0x{2:x} vs=0x{3:x} rawsz=0x{4:x} ch=0x{5:x8}" -f $label, $nm, $va, $vs, $rs, $ch)
+            }
+          }
+          Sections $ctrlc 'control(where)'
+          Sections $exe 'ours'
 
