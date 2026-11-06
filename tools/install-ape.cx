@@ -22,6 +22,7 @@
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 
 static void ia_refuse(const char *why, const char *what) {
     sy_printf("INSTALL_APE\tREFUSED\t%s\t%s\n", why, what ? what : "-");
@@ -77,11 +78,47 @@ static int ia_version_ok(const char *ape, char *line, int cap) {
 
 static int ia_join(char *out, int cap, const char *a, const char *b) { return cx_fmt(out, (size_t)cap, "%s/%s", a, b); }
 
+/* ROOT/unisacc.com.build.json: product_kind ape1 and product_digest = the APE's whole-file sha256, every other
+   field and its order kept.  A root without a record is left without one (nothing to sync). Written through a
+   temporary file and renamed. */
+static void ia_sync_record(const char *root, const char *sha) {
+    char path[4400], tmp[4400], *b, *o;
+    size_t n = 0;
+    long at = 0, w = 0;
+    if (ia_join(path, (int)sizeof path, root, "unisacc.com.build.json") || cx_fmt(tmp, sizeof tmp, "%s.%d", path, sy_pid())) ia_die("path");
+    b = cx_read(path, &n);
+    if (!b) return;
+    o = mm_alloc((long)n + 256);
+    if (!o) { mm_free(b); ia_die("memory"); }
+    while (at < (long)n) {
+        long e = at, l;
+        while (e < (long)n && b[e] != '\n') e++;
+        l = e - at + (e < (long)n ? 1 : 0);
+        if (l > 18 && tx_find(b + at, l, "\"product_kind\":", 15) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"product_kind\": \"ape1\"%s\n", comma ? "," : "")) ia_die("record format");
+            w += tx_len(o + w, 256);
+        } else if (l > 18 && tx_find(b + at, l, "\"product_digest\":", 17) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"product_digest\": \"%s\"%s\n", sha, comma ? "," : "")) ia_die("record format");
+            w += tx_len(o + w, 256);
+        } else {
+            mm_copy(o + w, (long)n + 256 - w, b + at, l);
+            w += l;
+        }
+        at += l;
+    }
+    if (cx_write(tmp, o, (size_t)w)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot write the build record"); }
+    if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot rename the build record"); }
+    mm_free(b);
+    mm_free(o);
+}
+
 /* install APE over ROOT/unisacc.com.  want = expected sha; write = do it.  Returns the exit code. */
 static int ia_install(const char *root, const char *ape, const char *want, int write) {
     char got[65], cur[65], com[4400], dev[4400], tmp[4400], rec[4400], rtmp[4400], line[4400], ver[160];
     long bytes = 0, cb = 0;
-    int pid = sy_pid(), had_dev;
+    int pid = sy_pid(), had_dev, had_split;
     if (!ia_hex64(want)) ia_refuse("expected-sha-not-64-hex", want);
     if (ia_sha(ape, got, &bytes)) ia_refuse("cannot-read-ape", ape);
     if (!tx_eqz(got, want)) ia_refuse("sha-mismatch", got);
@@ -105,27 +142,65 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
             if (sy_copy(com, dev, 0755)) ia_die("cannot keep the launcher as unisacc-dev");
         }
     }
+    {   char sd[4400], sp[4400];
+        if (ia_join(sd, (int)sizeof sd, root, "unisacc.com.dev") || ia_join(sp, (int)sizeof sp, root, "unisacc.com.dev.split-prev")) ia_die("path");
+        had_split = sy_exists(sd) == 1;
+        if (had_split && !sy_exists(sp)) { if (sy_rename(sd, sp)) ia_die("cannot move unisacc.com.dev aside"); }
+    }
+    {   char bj[4400], bp[4400];
+        if (ia_join(bj, (int)sizeof bj, root, "unisacc.com.build.json") || ia_join(bp, (int)sizeof bp, root, "unisacc.com.build.json.split-prev")) ia_die("path");
+        if (sy_exists(bj) == 1 && sy_exists(bp) != 1 && sy_copy(bj, bp, 0600)) ia_die("cannot keep the build record as .split-prev");
+    }
     if (sy_copy(ape, tmp, 0755)) { (void)sy_unlink(tmp); ia_die("cannot copy the ape beside unisacc.com"); }
     if (ia_sha(tmp, cur, &cb) || !tx_eqz(cur, got) || cb != bytes) { (void)sy_unlink(tmp); ia_refuse("copy-differs-from-source", tmp); }
     if (cx_fmt(line, sizeof line, "%s\t%ld\t%s\n", got, bytes, "unisacc.com")) { (void)sy_unlink(tmp); ia_die("record"); }
     if (cx_write(rtmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot write the record"); }
     if (sy_rename(tmp, com)) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
     if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
+    ia_sync_record(root, got);
     sy_printf("INSTALL_APE\tINSTALLED\t%s\t%ld\t%s\n", got, bytes, ver);
+    return 0;
+}
+
+/* undo: ROOT/unisacc-dev goes back to unisacc.com, ROOT/unisacc.com.dev.split-prev back to unisacc.com.dev, and
+   ROOT/unisacc.com.build.json.split-prev (saved by the install) back to unisacc.com.build.json.  Refuses when
+   there is no unisacc-dev to go back to. */
+static int ia_rollback(const char *root, int write) {
+    char com[4400], dev[4400], sd[4400], sp[4400], gone[4400];
+    if (ia_join(com, (int)sizeof com, root, "unisacc.com") || ia_join(dev, (int)sizeof dev, root, "unisacc-dev") ||
+        ia_join(sd, (int)sizeof sd, root, "unisacc.com.dev") || ia_join(sp, (int)sizeof sp, root, "unisacc.com.dev.split-prev") ||
+        cx_fmt(gone, sizeof gone, "%s/.unisacc.com.ape-removed.%d", root, sy_pid())) ia_die("path");
+    if (sy_exists(dev) != 1) ia_refuse("no-unisacc-dev-to-roll-back-to", dev);
+    if (!write) { sy_printf("INSTALL_APE\tROLLBACK_DRYRUN\t%s\n", dev); return 0; }
+    if (sy_rename(com, gone)) ia_die("cannot move the ape aside");
+    if (sy_rename(dev, com)) { (void)sy_rename(gone, com); ia_die("cannot restore unisacc-dev"); }
+    if (sy_exists(sp) == 1 && sy_exists(sd) != 1 && sy_rename(sp, sd)) ia_die("cannot restore unisacc.com.dev");
+    {   char bj[4400], bp[4400];
+        if (ia_join(bj, (int)sizeof bj, root, "unisacc.com.build.json") || ia_join(bp, (int)sizeof bp, root, "unisacc.com.build.json.split-prev")) ia_die("path");
+        if (sy_exists(bp) == 1 && sy_rename(bp, bj)) ia_die("cannot restore the build record");
+    }
+    (void)sy_unlink(gone);
+    sy_printf("INSTALL_APE\tROLLED_BACK\t%s\n", com);
     return 0;
 }
 
 int main(int argc, char **argv) {
     char root[4096];
-    int write = 0, i;
+    int write = 0, rollback = 0, i;
     const char *pos[3];
     int np = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         if (tx_eqz(argv[i], "--write")) { write = 1; continue; }
-        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write]");
+        if (tx_eqz(argv[i], "--rollback")) { rollback = 1; continue; }
+        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write] | ROOT --rollback [--write]");
     }
-    if (np != 3) ia_die("usage: ROOT APE SHA256 [--write]");
+    if (rollback) {
+        if (np != 1) ia_die("usage: ROOT --rollback [--write]");
+        if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
+        return ia_rollback(root, write);
+    }
+    if (np != 3) ia_die("usage: ROOT APE SHA256 [--write] | ROOT --rollback [--write]");
     if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
     return ia_install(root, pos[1], pos[2], write);
 }

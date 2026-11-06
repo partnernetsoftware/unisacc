@@ -112,6 +112,35 @@ int main(int argc, char **argv) {
         sha_of(dev, h1);
         ck(tx_eqz(h0, h1), "keep-existing-dev", "unisacc-dev was overwritten");
         (void)junk;
+        /* build.json sync and rollback: a root with a split2 record and a unisacc.com.dev directory */
+        {   char bj[4400], bjp[4400], sdir[4400], sprev[4400], rb[4400], first[65], back[65], text[2048];
+            size_t tn = 0; char *t;
+            char *v[8]; int k = 0, cut = 0, rrc;
+            if (cx_fmt(bj, sizeof bj, "%s/unisacc.com.build.json", root) || cx_fmt(bjp, sizeof bjp, "%s/unisacc.com.build.json.split-prev", root) ||
+                cx_fmt(sdir, sizeof sdir, "%s/unisacc.com.dev", root) || cx_fmt(sprev, sizeof sprev, "%s/unisacc.com.dev.split-prev", root) ||
+                cx_fmt(rb, sizeof rb, "%s/rollback.out", work)) return 2;
+            if (write_file(com, "#!/bin/sh\necho third-launcher\n", 0755) || sy_unlink(dev)) return 2;
+            if (sy_mkdir(sdir, 0755)) return 2;
+            if (write_file(bj, "{\n  \"bytes\": 1,\n  \"product_kind\": \"split2\",\n  \"product_digest\": \"aa\"\n}\n", 0600)) return 2;
+            sha_of(com, h0); sha_of(bj, first);
+            ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "split-root-install", out);
+            t = cx_read(bj, &tn);
+            ck(t && has(t, "\"product_kind\": \"ape1\"") && has(t, real), "build-record-synced-to-ape1", t ? t : "no record");
+            if (t) mm_free(t);
+            ck(sy_exists(sprev) == 1 && sy_exists(sdir) != 1, "split-dir-moved-aside", "unisacc.com.dev state");
+            ck(sy_exists(bjp) == 1, "old-record-kept", "no .split-prev record");
+            (void)text;
+            v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; v[k++] = root; v[k++] = "--rollback"; v[k++] = "--write"; v[k] = 0;
+            rrc = sy_run(v, out, (int)sizeof out, &cut);
+            ck(rrc == 0 && has(out, "ROLLED_BACK"), "rollback", out);
+            sha_of(com, back);
+            ck(tx_eqz(back, h0), "rollback-restores-launcher-bytes", back);
+            sha_of(bj, back);
+            ck(tx_eqz(back, first), "rollback-restores-record-bytes", back);
+            ck(sy_exists(sdir) == 1 && sy_exists(sprev) != 1, "rollback-restores-split-dir", "unisacc.com.dev state");
+            ck(tool(root, ape, real, 0, out, (int)sizeof out) == 0, "dryrun-after-rollback", out);
+            (void)rb;
+        }
     }
     (void)cx_rmtree(work);
     sy_printf("CHECK_INSTALL_APE\tfailed=%d\tnot_run=%d\n", failed, notrun);
