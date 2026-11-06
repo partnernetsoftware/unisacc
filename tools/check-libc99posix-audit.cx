@@ -1,16 +1,75 @@
 #pragma unisa use sys.io
+#pragma unisa use sys.fs
 #pragma unisa use text.text
-/* tools/check-libc99posix-audit.cx -- inventory tool prints GAP rows and a total. */
+/* tools/check-libc99posix-audit.cx -- table members must not be GAP; fcntl stays GAP. */
 static int fail(const char *w) { sy_eprintf("check-libc99posix-audit\tFAIL\t%s\n", w); return 1; }
+static int field3_is(const char *line, const char *end, const char *name) {
+    const char *p = line, *a, *b;
+    int tabs = 0;
+    while (p < end) {
+        if (*p == '\t') {
+            tabs++;
+            if (tabs == 2) a = p + 1;
+            if (tabs == 3) {
+                b = p;
+                if ((int)(b - a) == tx_len(name, 64) && !tx_cmp(a, (long)(b - a), name, tx_len(name, 64))) return 1;
+                return 0;
+            }
+        }
+        p++;
+    }
+    return 0;
+}
 int main(void) {
     char *out; size_t n = 0; char *av[6]; int rc;
+    char *tsv; size_t tn = 0;
     av[0] = "./tools/bound"; av[1] = "20"; av[2] = "sh"; av[3] = "./unisacc.com";
     av[4] = "tools/libc99posix-audit.cx"; av[5] = 0;
     rc = cx_runv_timeout(av, 25, &out, &n);
     if (rc != 0 || !out) return fail("run");
     if (!tx_contains(out, (int)n, "LIBC99POSIX_AUDIT\tgaps=", 23)) return fail("marker");
-    if (!tx_contains(out, (int)n, "GAP\tunistd.h\twrite\tUCRT?", 24)) return fail("write-ucrt");
-    if (!tx_contains(out, (int)n, "GAP\tstdio.h\tfopen\t-", 19)) return fail("fopen");
+    if (!tx_contains(out, (int)n, "GAP\tfcntl.h\tfcntl\t", 18)
+        && !tx_contains(out, (int)n, "GAP\tunistd.h\tfcntl\t", 19))
+        return fail("fcntl-gap-control");
+    tsv = cx_read("exec/facts/libc99posix.tsv", &tn);
+    if (!tsv) return fail("table");
+    {
+        size_t i = 0;
+        while (i < tn) {
+            size_t e = i, k;
+            char save;
+            const char *nm;
+            while (e < tn && tsv[e] != '\n') e++;
+            if (tsv[i] != '#' && tsv[i] != 0) {
+                k = i;
+                while (k < e && tsv[k] != '\t') k++;
+                if (k > i) {
+                    save = tsv[k];
+                    tsv[k] = 0;
+                    nm = tsv + i;
+                    {
+                        size_t at = 0;
+                        int saw_bound = 0;
+                        while (at < n) {
+                            size_t le = at;
+                            while (le < n && out[le] != '\n') le++;
+                            if (le - at >= 4 && out[at] == 'G' && out[at + 1] == 'A' && out[at + 2] == 'P' && out[at + 3] == '\t') {
+                                if (field3_is(out + at, out + le, nm)) return fail("registered-gap");
+                            }
+                            if (le - at >= 6 && out[at] == 'B' && out[at + 1] == 'O' && out[at + 2] == 'U'
+                                && out[at + 3] == 'N' && out[at + 4] == 'D' && out[at + 5] == '\t') {
+                                if (field3_is(out + at, out + le, nm)) saw_bound = 1;
+                            }
+                            at = le < n ? le + 1 : le;
+                        }
+                        if (!saw_bound) return fail("registered-bind");
+                    }
+                    tsv[k] = save;
+                }
+            }
+            i = e < tn ? e + 1 : e;
+        }
+    }
     sy_printf("CHECK_LIBC99POSIX_AUDIT\tfailed=0\n");
     return 0;
 }

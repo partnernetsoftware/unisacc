@@ -20,10 +20,10 @@ static int is_ucrt(const char *n) {
     for (i = 0; ucrt[i]; i++) if (tx_eqz(n, ucrt[i])) return 1;
     return 0;
 }
-static int in_table(const char *n, char **tab, int nt) {
+static int table_ix(const char *n, char **tab, int nt) {
     int i;
-    for (i = 0; i < nt; i++) if (tx_eqz(n, tab[i])) return 1;
-    return 0;
+    for (i = 0; i < nt; i++) if (tx_eqz(n, tab[i])) return i;
+    return -1;
 }
 static int ident_end(const char *s) {
     int i = 0;
@@ -34,7 +34,7 @@ static int ident_end(const char *s) {
 }
 int main(void) {
     char *tsv; size_t tn = 0;
-    char *names[128]; int nt = 0;
+    char *names[128]; char *binds[128]; int nt = 0;
     char dir[32]; int fd, nn, off = 0; char ents[1 << 16];
     int gaps = 0;
     tsv = cx_read("exec/facts/libc99posix.tsv", &tn);
@@ -44,11 +44,21 @@ int main(void) {
             size_t e = i;
             while (e < tn && tsv[e] != '\n') e++;
             if (tsv[i] != '#' && tsv[i] != 0) {
-                size_t k = i;
+                size_t k = i, k2, k3, k4;
                 while (k < e && tsv[k] != '\t') k++;
                 if (k > i && nt < 128) {
                     tsv[k] = 0;
-                    names[nt++] = tsv + i;
+                    names[nt] = tsv + i;
+                    k2 = k + 1;
+                    while (k2 < e && tsv[k2] != '\t') k2++;
+                    k3 = k2 < e ? k2 + 1 : k2;
+                    while (k3 < e && tsv[k3] != '\t') k3++;
+                    k4 = k3 < e ? k3 + 1 : k3;
+                    k2 = k4;
+                    while (k2 < e && tsv[k2] != '\t') k2++;
+                    if (k2 > k4) { tsv[k2] = 0; binds[nt] = tsv + k4; }
+                    else binds[nt] = "-";
+                    nt++;
                 }
             }
             i = e < tn ? e + 1 : e;
@@ -81,9 +91,14 @@ int main(void) {
                             if (id > 0) {
                                 char save = b[q + id];
                                 b[q + id] = 0;
-                                if (!in_table(b + q, names, nt) && b[q] != '_') {
-                                    sy_printf("GAP\t%s\t%s\t%s\n", ents + off, b + q, is_ucrt(b + q) ? "UCRT?" : "-");
-                                    gaps++;
+                                if (b[q] != '_') {
+                                    int ix = table_ix(b + q, names, nt);
+                                    if (ix >= 0)
+                                        sy_printf("BOUND\t%s\t%s\t%s\n", ents + off, b + q, binds[ix]);
+                                    else {
+                                        sy_printf("GAP\t%s\t%s\t%s\n", ents + off, b + q, is_ucrt(b + q) ? "UCRT?" : "-");
+                                        gaps++;
+                                    }
                                 }
                                 b[q + id] = save;
                             }
