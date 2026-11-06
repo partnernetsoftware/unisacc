@@ -24,26 +24,26 @@ typedef struct {
 typedef struct { Buf out, err; const char *reason; int reason_n; } CoreResult;
 
 static unsigned char *kn_code;
-static long kn_entry;
+static I kn_entry;
 
 static void kn_die(const char *s) { {extern void core_host_panic(const char *);core_host_panic(s);} abort(); }
 /* The kernel's only way out: allocation, byte primitives, the resource fetch and the panic hook. */
-static long kn_service(long op, long a, long b, long c, long d) {
-    if (op == 0) return (long)calloc((size_t)a, (size_t)b);
-    if (op == 1) return (long)realloc((void *)a, (size_t)b);
+static I kn_service(I op, I a, I b, I c, I d) {
+    if (op == 0) return (I)calloc((size_t)a, (size_t)b);
+    if (op == 1) return (I)realloc((void *)a, (size_t)b);
     if (op == 2) { free((void *)a); return 0; }
-    if (op == 3) { void *r = memcpy((void *)a, (void *)b, (size_t)c); return (long)r; }
+    if (op == 3) { void *r = memcpy((void *)a, (void *)b, (size_t)c); return (I)r; }
     if (op == 4) return memcmp((void *)a, (void *)b, (size_t)c);
-    if (op == 5) return (long)memset((void *)a, (int)b, (size_t)c);
-    if (op == 6) return (long)strlen((char *)a);
+    if (op == 5) return (I)memset((void *)a, (int)b, (size_t)c);
+    if (op == 6) return (I)strlen((char *)a);
     if (op == 7) { extern int core_host_fetch(const unsigned char *,int,unsigned char **,int *);
                    return core_host_fetch((unsigned char *)a, (int)b, (unsigned char **)c, (int *)d); }
     if (op == 8) kn_die((char *)a);
     kn_die("bad kernel service");
     return 0;
 }
-static long kn_field(const unsigned char *p) {
-    long n = 0;
+static I kn_field(const unsigned char *p) {
+    I n = 0;
     int j;
     for (j = 7; j >= 0; j--) {
         if (n > (2147483647L - p[j]) / 256) kn_die("bad kernel extent");
@@ -54,15 +54,15 @@ static long kn_field(const unsigned char *p) {
 static void kn_load(void) {
 #ifdef __aarch64__
     static const char key[] = "\0kernel/arm64";
-    const long want = 1;
+    const I want = 1;
 #else
     static const char key[] = "\0kernel/x86_64";
-    const long want = 2;
+    const I want = 2;
 #endif
     extern int core_host_fetch(const unsigned char *,int,unsigned char **,int *);
     unsigned char *bytes = 0, *code;
     int n = 0, owner = 0;
-    long isa, entry, slot, length, mapped, i;
+    I isa, entry, slot, length, mapped, i;
     /* External base first: when UNISA_KERNEL names a file, load and (optionally)
        sha-verify it; otherwise fall back to the embedded pack blob. */
     {
@@ -102,31 +102,31 @@ static void kn_load(void) {
 #else
     code = (unsigned char *)__mmap(0, mapped, 3, 0x1002, -1, 0);
 #endif
-    if ((long)code < 0 || !code || ((long)code & 4095)) kn_die("cannot map kernel memory");
+    if ((I)code < 0 || !code || ((I)code & 4095)) kn_die("cannot map kernel memory");
     for (i = 0; i < length; i++) code[i] = bytes[40 + i];
     if (owner == 2) free(bytes);
-    *(long *)(code + slot) = (long)kn_service;
+    *(I *)(code + slot) = (I)kn_service;
 #ifdef _WIN32
-    if (__mprotect((long)code, mapped, 0x20)) kn_die("cannot protect kernel memory");
+    if (__mprotect((I)code, mapped, 0x20)) kn_die("cannot protect kernel memory");
 #else
-    if (__mprotect((long)code, mapped, 5)) kn_die("cannot protect kernel memory");
+    if (__mprotect((I)code, mapped, 5)) kn_die("cannot protect kernel memory");
 #endif
     kn_code = code;
     kn_entry = entry;
 }
-static long kn_call(long *args) {
-    long (*entry)(long *);
+static I kn_call(I *args) {
+    I (*entry)(I *);
     if (!kn_code) kn_load();
 #if defined(_WIN32) && defined(__aarch64__)
     args[0] = args[0] + 2;   /* the Windows tape stack is separate from the real WinAPI stack */
 #endif
-    entry = (long (*)(long *))(kn_code + kn_entry);
+    entry = (I (*)(I *))(kn_code + kn_entry);
     return entry(args);
 }
 int core_run(const CoreModel *m, unsigned char *input, int inputn, const char *src, I maxsteps, CoreResult *result) {
-    long args[7];
-    args[0] = 0; args[1] = (long)m; args[2] = (long)input; args[3] = inputn;
-    args[4] = (long)src; args[5] = (long)maxsteps; args[6] = (long)result;
+    I args[7];
+    args[0] = 0; args[1] = (I)m; args[2] = (I)input; args[3] = inputn;
+    args[4] = (I)src; args[5] = (I)maxsteps; args[6] = (I)result;
     return (int)kn_call(args);
 }
 /* The kernel's transition entry (args[0] = 1) is not exported here: cx/core/transition.cx keeps
