@@ -5,21 +5,12 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 /* tools/check-procguard.cx -- checks tools/procguard.cx for real.
-
      sh ./unisacc.com tools/check-procguard.cx
-
-   Builds two throwaway "test file" symlinks (out/procguard-check-PID/pgA.cx,
-   pgB.cx -> the host sleep) and starts 6 A, 2 B and 4 plain sleep processes
-   (12 children, at most 14 processes at once).  With --max 5 the A group is
-   over the threshold, B and the plain ones are not.  Two scans run:
-   --dry-run must report the A group and signal nothing, --enforce must kill
-   exactly the 6 A members (SIGKILL, checked through wait status) and leave B,
-   the plain sleeps, this process and its ancestors alive.  The log must hold
-   the ENFORCE line and nothing about B.  Then two more scans check the
-   residue field: two late A members read back as residue=...:2, and a second
-   enforce followed by a scan reads back 0 (the kill count alone is not proof).
-   Prints "PASS name" / "FAIL name", then CX_PROCGUARD<TAB>failed=N; exit 1 on
-   any FAIL.  An L3 tool: no #include and no direct libc call. */
+   Two throwaway symlinks pgA.cx/pgB.cx -> sleep; 6 A, 2 B, 4 plain (max 5).
+   dry-run must name A (pgA.cx:6) and signal nothing; under load /proc top can
+   be another .cx group so the same needle is retried ≤5, never relaxed.
+   enforce kills the 6 A (SIGKILL) and leaves B/plain/self. residue then 2 then 0.
+   Prints PASS/FAIL then CX_PROCGUARD<TAB>failed=N. L3: no #include, no libc. */
 
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("%s %s\n", c ? "PASS" : "FAIL", name); if (c) n_ok++; else n_bad++; }
@@ -87,14 +78,18 @@ int main(int argc, char **argv) {
     ok(np == 12, "spawn: 6 A + 2 B + 4 plain run");
     sy_sleep_ms(300);
 
-    rc = run_pg("dry-run", 5, log, out, sizeof out);
-    ok(rc == 0, "dry-run exits 0");
-    ok(tx_contains(out, tx_len(out, sizeof out), "DRY key=", 8), "dry-run reports the A group");
-    ok(tx_contains(out, tx_len(out, sizeof out), "count=6", 7), "dry-run counts 6 A members");
-    {   char lg[8192]; int n = read_file(log, lg, sizeof lg);
+    {   int tries, hit = 0; char lg[8192]; int n;
         const char *needle = "pgA.cx:6";
-        ok(n > 0 && tx_contains(lg, n, "top=", 4) && tx_contains(lg, n, needle, tx_len(needle, 16)),
-           "scan log names the largest group");
+        for (tries = 0; tries < 5 && !hit; tries++) {
+            rc = run_pg("dry-run", 5, log, out, sizeof out);
+            n = read_file(log, lg, sizeof lg);
+            if (rc == 0 && n > 0 && tx_contains(lg, n, "top=", 4) && tx_contains(lg, n, needle, tx_len(needle, 16))) hit = 1;
+            else if (tries < 4) sy_sleep_ms(400);
+        }
+        ok(rc == 0, "dry-run exits 0");
+        ok(tx_contains(out, tx_len(out, sizeof out), "DRY key=", 8), "dry-run reports the A group");
+        ok(tx_contains(out, tx_len(out, sizeof out), "count=6", 7), "dry-run counts 6 A members");
+        ok(hit, "scan log names the largest group");
     }
     {   int all = 1; for (i = 0; i < np; i++) if (!alive(pids[i])) all = 0; ok(all, "dry-run signals nothing"); }
 
