@@ -1,0 +1,190 @@
+/* Executable owner of the two Windows argv bodies and lower-data layout,
+ * independent of archived references and unrelated provenance hashes.
+ * sh ./unisacc.com tools/win-argv-gen.cx -- --write|--check ROOT
+ * WIN_ARGVA_BYTES is the only capacity fact. CreateProcess's 32767-character
+ * command line (including NUL) permits at most 16383 one-character arguments;
+ * the >=16384 guard is therefore unreachable for an OS-provided command line.
+ * Keep that guard for memory safety, and always explicitly terminate argv. */
+/* Source contract: inputs are only enc-literals and this executable. Outputs
+ * are the two winargs tables and lower-data; none is read as an input, so the
+ * dependency graph is acyclic. lower-data's non-Windows rows retain their
+ * frozen values. Windows extra is a zero virtual tail, not a stored blob:
+ * lower/data HEAD adds it after align8(outn); pedelta uses stored for raw size
+ * and full+extra_bss for virtual size. Keep argv inside extra and the startup
+ * stack in bss; do not move the user-data base or shrink extra to 264. */
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+typedef struct { char p[16384]; long n; } Ob;
+typedef struct { const char *stem, *schema; const char *inputs[3]; void (*produce)(Ob *); } Table;
+static char fg_root[4096];
+static void fg_die(const char *a, const char *b) { fprintf(stderr, "win-argv-gen: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+static void ob_put(Ob *o, const char *s, long n) {
+    long i;
+    if (n < 0 || n > 16383 - o->n) fg_die("output capacity", 0);
+    for (i = 0; i < n; i++) o->p[o->n + i] = s[i];
+    o->n += n; o->p[o->n] = 0;
+}
+static void ob_z(Ob *o, const char *s) { long n = tx_len(s, 16384); if (n < 0) fg_die("string too long", 0); ob_put(o, s, n); }
+static void ob_int(Ob *o, long v) { char b[32]; if (cx_fmt(b, sizeof b, "%ld", v)) fg_die("integer formatting", 0); ob_z(o, b); }
+static char *wa_read(const char *rel, size_t *n) {
+    char path[4400]; char *b;
+    if (cx_fmt(path, sizeof path, "%s/%s", fg_root, rel)) fg_die("path too long", rel);
+    b = cx_read(path, n); if (!b || *n > 1048576) fg_die("cannot read bounded input", rel); return b;
+}
+static void fg_input(Ob *o, const char *rel) {
+    size_t n; char hex[65], *b = wa_read(rel, &n);
+    cx_sha256_hex(b, n, hex); free(b);
+    ob_z(o, "# input "); ob_z(o, rel); ob_z(o, " sha256:"); ob_put(o, hex, 16); ob_z(o, "\n");
+}
+static long el_int(const char *kind, const char *name) {
+    static size_t n;
+    static char *b;
+    char key[128];
+    long at = 0, value = 0, kn; int found = 0;
+    if (!b) b = wa_read("exec/facts/enc-literals.tsv", &n);
+    if (cx_fmt(key, sizeof key, "%s\t%s\t", kind, name)) fg_die("scalar key too long", name);
+    kn = tx_len(key, sizeof key);
+    while (at < (long)n) {
+        long end = at, p; while (end < (long)n && b[end] != '\n') end++;
+        if (end - at >= kn && tx_prefix(b + at, end - at, key, kn)) {
+            p = at + kn; if (p == end || ++found != 1) fg_die("invalid capacity fact", name);
+            for (; p < end; p++) { if (b[p] < '0' || b[p] > '9' || value > 100000000) fg_die("invalid capacity integer", name); value = value * 10 + b[p] - '0'; }
+        }
+        at = end + 1;
+    }
+    if (!found) fg_die("capacity fact absent", name); return value;
+}
+static unsigned long wa_code[512];
+static int wa_n, wa_label[11], wa_at[32], wa_to[32], wa_op[32], wa_nf;
+static void wa_reset(void) { int i; wa_n = wa_nf = 0; for (i = 0; i < 11; i++) wa_label[i] = -1; }
+static void wa_put(unsigned long v) { if (wa_n == 512) fg_die("winargs body too large", 0); wa_code[wa_n++] = v; }
+static void wa_mark(int l) { wa_label[l] = wa_n; }
+static void wa_hex(const char *s) {
+    int i, hi = -1;
+    for (i = 0; s[i]; i++) {
+        int d = s[i] >= '0' && s[i] <= '9' ? s[i] - '0' : s[i] >= 'a' && s[i] <= 'f' ? s[i] - 'a' + 10 : -1;
+        if (d < 0) { if (s[i] != ' ') fg_die("bad winargs hex", 0); continue; }
+        if (hi < 0) hi = d; else { wa_put(hi * 16 + d); hi = -1; }
+    }
+    if (hi >= 0) fg_die("odd winargs hex", 0);
+}
+static void wa_le(unsigned long v) { int i; for (i = 0; i < 4; i++) { wa_put(v & 255); v >>= 8; } }
+static void wa_branch(int label, unsigned long op) {
+    if (wa_nf == 32) fg_die("too many winargs branches", 0);
+    wa_at[wa_nf] = wa_n; wa_to[wa_nf] = label; wa_op[wa_nf++] = op;
+    if (!op) wa_le(0); else wa_put(op);
+}
+static void wa_j(int op, int label) { if (op == 0xe9) wa_put(op); else { wa_put(0x0f); wa_put(op); } wa_branch(label, 0); }
+static void wa_output(Ob *o, int arm) {
+    int i, j;
+    for (i = 0; i < wa_nf; i++) {
+        int at = wa_at[i], op = wa_op[i];
+        long d = wa_label[wa_to[i]] - at;
+        unsigned long u;
+        if (wa_label[wa_to[i]] < 0) fg_die("missing winargs label", 0);
+        if (!arm) { u = (unsigned long)(d - 4); for (j = 0; j < 4; j++) { wa_code[at + j] = u & 255; u >>= 8; } }
+        else if ((op & 0xfc000000UL) == 0x14000000UL) wa_code[at] |= (unsigned long)d & 0x3ffffff;
+        else { if (d < -262144 || d > 262143) fg_die("winargs branch range", 0); wa_code[at] |= ((unsigned long)d & 0x7ffff) << 5; }
+    }
+    for (i = 0; i < wa_n; i++) { ob_int(o, wa_code[i]); ob_z(o, "\n"); }
+}
+static long wa_limit(void) {
+    long bytes = el_int("lower", "WIN_ARGVA_BYTES"), limit = bytes / 8 - 1;
+    if (bytes % 8 || limit < 16384 || limit > 16773120 || limit % 4096) fg_die("invalid Windows argv capacity", 0);
+    return limit;
+}
+/* Labels name whitespace, argument, character, skip-space, unquoted, copy,
+ * string-end, argv-end, and separator. Branch offsets are never literals. */
+static void enc_x86win_winargs(Ob *o) {
+    long limit = wa_limit(); wa_reset();
+    wa_mark(0); wa_hex("0f b6 06 3c 20"); wa_j(0x84, 3);
+    wa_hex("3c 09"); wa_j(0x85, 1); wa_mark(3); wa_hex("48 ff c6"); wa_j(0xe9, 0);
+    wa_mark(1); wa_hex("84 c0"); wa_j(0x84, 7);
+    wa_hex("48 81 f9"); wa_le(limit); wa_j(0x8d, 7);
+    wa_hex("49 89 3c c8 48 ff c1 45 31 c9");
+    wa_mark(2); wa_hex("0f b6 06 84 c0"); wa_j(0x84, 6);
+    wa_hex("3c 22"); wa_j(0x85, 4); wa_hex("41 83 f1 01 48 ff c6"); wa_j(0xe9, 2);
+    wa_mark(4); wa_hex("45 85 c9"); wa_j(0x85, 5);
+    wa_hex("3c 20"); wa_j(0x84, 10); wa_hex("3c 09"); wa_j(0x84, 10);
+    wa_mark(5); wa_hex("88 07 48 ff c7 48 ff c6"); wa_j(0xe9, 2);
+    wa_mark(10); wa_hex("c6 07 00 48 ff c7 48 ff c6"); wa_j(0xe9, 0);
+    wa_mark(6); wa_hex("c6 07 00"); wa_mark(7); wa_hex("49 c7 04 c8 00 00 00 00"); wa_output(o, 0);
+}
+static void enc_armwin_winargs(Ob *o) {
+    long limit = wa_limit(); wa_reset();
+    wa_mark(0); wa_put(0x39400004); wa_put(0x7100809f); wa_branch(3, 0x54000000);
+    wa_put(0x7100249f); wa_branch(1, 0x54000001); wa_mark(3); wa_put(0x91000400); wa_branch(0, 0x14000000);
+    wa_mark(1); wa_branch(7, 0x34000004);
+    wa_put(0xf140005fUL | ((unsigned long)(limit / 4096) << 10)); wa_branch(7, 0x5400000a);
+    wa_put(0xf8227861); wa_put(0x91000442); wa_put(0xd2800005);
+    wa_mark(2); wa_put(0x39400004); wa_branch(6, 0x34000004);
+    wa_put(0x7100889f); wa_branch(4, 0x54000001); wa_put(0x520000a5); wa_put(0x91000400); wa_branch(2, 0x14000000);
+    wa_mark(4); wa_branch(5, 0x35000005); wa_put(0x7100809f); wa_branch(10, 0x54000000);
+    wa_put(0x7100249f); wa_branch(10, 0x54000000);
+    wa_mark(5); wa_put(0x39000024); wa_put(0x91000421); wa_put(0x91000400); wa_branch(2, 0x14000000);
+    wa_mark(10); wa_put(0x3900003f); wa_put(0x91000421); wa_put(0x91000400); wa_branch(0, 0x14000000);
+    wa_mark(6); wa_put(0x3900003f); wa_mark(7); wa_put(0xf822787f); wa_output(o, 1);
+}
+static void lower_data(Ob *o) {
+    long posix = el_int("lower", "SCRATCH") + el_int("lower", "PRINTMAX");
+    long bytes = el_int("lower", "WIN_ARGVA_BYTES"), stack = el_int("lower", "WIN_STACK");
+    long extra = posix + el_int("lower", "WIN_HSTD_BYTES") + el_int("lower", "WIN_WRITTEN_BYTES") + el_int("lower", "WIN_SAVE_BYTES") + bytes;
+    wa_limit();
+    if (posix != 168 || extra + stack > 2147483640L) fg_die("invalid startup data extent", 0);
+    ob_z(o, "=RAW\tint\t1099511627776\n=START\tint\t2199023255552\n=NAME\tint\t3298534883328\n"
+        "=FLAG\tint\t4398046511104\n=NEW\tint\t5497558138880\n=REMAP\tint\t6597069766656\n"
+        "=DEFINED\tint\t7696581394432\n=RSTART\tint\t8796093022208\n"
+        "=escape0\tint\t10\n=escape1\tint\t9\n=escape2\tint\t13\n=escape3\tint\t0\n"
+        "=escape4\tint\t92\n=escape5\tint\t34\n=escape6\tint\t39\n"
+        "=classes\tjson\t{\"escape0\":[110],\"escape1\":[116],\"escape2\":[114],\"escape3\":[48],\"escape4\":[92],\"escape5\":[34],\"escape6\":[39]}\n"
+        "=posix_extra\tint\t168\n=posix_bss\tint\t0\n=posix_limit\tint\t2147483472\n=win_extra\tint\t");
+    ob_int(o, extra); ob_z(o, "\n=win_bss\tint\t"); ob_int(o, stack);
+    ob_z(o, "\n=win_limit\tint\t"); ob_int(o, 2147483640L - extra - stack); ob_z(o, "\n");
+}
+
+static const Table wa_tables[] = {
+    {"enc-x86win-winargs", "v", {"exec/facts/enc-literals.tsv", "tools/win-argv-gen.cx", 0}, enc_x86win_winargs},
+    {"enc-armwin-winargs", "value", {"exec/facts/enc-literals.tsv", "tools/win-argv-gen.cx", 0}, enc_armwin_winargs},
+    {"lower-data", 0, {"exec/facts/enc-literals.tsv", "tools/win-argv-gen.cx", 0}, lower_data}
+};
+static int wa_one(const Table *t, int mode) {
+    static Ob head, body, all;
+    char path[4400];
+    size_t n;
+    char *cur;
+    int i, same;
+    head.n = body.n = all.n = 0;
+    /* The seed fact loader takes the first comment as vector column names.
+     * Typed scalar tables have no vector schema. Provenance follows it. */
+    if (t->schema) { ob_z(&head, "# "); ob_z(&head, t->schema); ob_z(&head, "\n"); }
+    ob_z(&head, "# exec/facts/"); ob_z(&head, t->stem);
+    ob_z(&head, ".tsv: written by tools/win-argv-gen.cx, do not edit\n");
+    for (i = 0; t->inputs[i]; i++) fg_input(&head, t->inputs[i]);
+    t->produce(&body);
+    ob_put(&all, head.p, head.n); ob_put(&all, body.p, body.n);
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/%s.tsv", fg_root, t->stem)) fg_die("path too long", t->stem);
+    if (mode == 1) {
+        if (cx_write(path, all.p, (size_t)all.n)) fg_die("cannot write", path);
+        printf("WROTE\t%s\n", t->stem); return 0;
+    }
+    cur = cx_read(path, &n);
+    if (!cur) fg_die("cannot read", path);
+    same = tx_same(cur, (long)n, all.p, all.n);
+    free(cur);
+    printf("%s\t%s\n", same ? "SAME" : "DIFF", t->stem);
+    return !same;
+}
+int main(int argc, char **argv) {
+    int mode, i, k, bad = 0;
+    if (argc < 3) fg_die("usage", "--check|--write ROOT [TABLE...]");
+    if (tx_eq(argv[1], "--check", 16)) mode = 0;
+    else if (tx_eq(argv[1], "--write", 16)) mode = 1;
+    else fg_die("usage", "--check|--write ROOT [TABLE...]");
+    if (!realpath(argv[2], fg_root)) fg_die("bad ROOT", argv[2]);
+    for (i = 0; i < 3; i++) {
+        int pick = argc == 3;
+        for (k = 3; k < argc; k++) if (tx_eq(argv[k], wa_tables[i].stem, 128)) pick = 1;
+        if (pick) bad |= wa_one(&wa_tables[i], mode);
+    }
+    return bad;
+}

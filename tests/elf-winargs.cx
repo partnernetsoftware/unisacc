@@ -1,6 +1,7 @@
-/* Product win/x86_64 image must contain the declared WINARGS_BODY template
-   once. The bytes are the fact table, not a copy of a previous image.
-   sh ./unisacc.com tests/elf-winargs.cx -- PRODUCT_COM */
+/* Product win/x86_64 image must contain the WINARGS body from the fact table
+ * once. Expectation is regenerated from enc-x86win-winargs.tsv, not a stale
+ * 93-byte literal. Capacity fact WIN_ARGVA_BYTES must match the encoded bound.
+ * sh ./unisacc.com tests/elf-winargs.cx -- PRODUCT_COM */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -8,16 +9,11 @@
 #pragma unisa use sys.sig
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use mem.heap
 
 static int assertions, failures;
-static const unsigned char body[] = {
-    0x0f, 0xb6, 0x06, 0x3c, 0x20, 0x74, 0x04, 0x3c, 0x09, 0x75, 0x05, 0x48, 0xff, 0xc6, 0xeb, 0xf0,
-    0x84, 0xc0, 0x74, 0x49, 0x48, 0x83, 0xf9, 0x3f, 0x7d, 0x43, 0x49, 0x89, 0x3c, 0xc8, 0x48, 0xff,
-    0xc1, 0x45, 0x31, 0xc9, 0x0f, 0xb6, 0x06, 0x84, 0xc0, 0x74, 0x2f, 0x3c, 0x22, 0x75, 0x09, 0x41,
-    0x83, 0xf1, 0x01, 0x48, 0xff, 0xc6, 0xeb, 0xec, 0x45, 0x85, 0xc9, 0x75, 0x08, 0x3c, 0x20, 0x74,
-    0x0e, 0x3c, 0x09, 0x74, 0x0a, 0x88, 0x07, 0x48, 0xff, 0xc7, 0x48, 0xff, 0xc6, 0xeb, 0xd5, 0xc6,
-    0x07, 0x00, 0x48, 0xff, 0xc7, 0x48, 0xff, 0xc6, 0xeb, 0xa6, 0xc6, 0x07, 0x00
-};
+static unsigned char body[512];
+static int body_n;
 
 static void die(const char *s) { sy_eprintf("elf-winargs: REFUSE %s\n", s); sy_exit(2); }
 static void ck(int ok, const char *name) {
@@ -25,17 +21,97 @@ static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\telf-winargs.%s\n", name);
     else { failures++; sy_printf("FAIL\telf-winargs.%s\n", name); }
 }
+static unsigned long u16(const unsigned char *p) { return p[0] | ((unsigned long)p[1] << 8); }
+static unsigned long u32(const unsigned char *p) { return u16(p) | (u16(p + 2) << 16); }
 
-static int count(const unsigned char *b, long n) {
-    long i, k, hit;
-    hit = 0;
-    if (n < (long)sizeof body) return 0;
-    for (i = 0; i + (long)sizeof body <= n; i++) {
+static int load_body(const char *root) {
+    char path[4400]; size_t n; char *t; size_t i;
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/enc-x86win-winargs.tsv", root)) return 0;
+    t = cx_read(path, &n);
+    if (!t) return 0;
+    body_n = 0;
+    i = 0;
+    while (i < n) {
+        size_t e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e > i && t[i] != '#') {
+            unsigned long v = 0;
+            size_t k = i;
+            while (k < e && t[k] >= '0' && t[k] <= '9') {
+                v = v * 10 + (unsigned long)(t[k] - '0');
+                if (v > 255) { mm_free(t); return 0; }
+                k++;
+            }
+            if (k == i || body_n >= (int)sizeof body) { mm_free(t); return 0; }
+            body[body_n++] = (unsigned char)v;
+        }
+        i = e < n ? e + 1 : e;
+    }
+    mm_free(t);
+    return body_n > 20;
+}
+
+static long load_bytes_fact(const char *root) {
+    char path[4400]; size_t n; char *t; size_t i;
+    const char *key = "lower\tWIN_ARGVA_BYTES\t";
+    int kn, found = 0;
+    long bytes = 0;
+    if (cx_fmt(path, sizeof path, "%s/exec/facts/enc-literals.tsv", root)) return -1;
+    t = cx_read(path, &n);
+    if (!t) return -1;
+    kn = tx_len(key, 64);
+    i = 0;
+    while (i < n) {
+        size_t e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e > i && (int)(e - i) >= kn && !tx_cmp(t + i, (long)(e - i) > kn ? kn : (long)(e - i), key, kn) && (int)(e - i) >= kn) {
+            /* tx_cmp 0 means equal for min length — require prefix */
+        }
+        if (e > i && (int)(e - i) > kn) {
+            int eq = 1, k;
+            for (k = 0; k < kn; k++) if (t[i + k] != key[k]) { eq = 0; break; }
+            if (eq) {
+                size_t p = i + (size_t)kn;
+                long v = 0;
+                found++;
+                while (p < e && t[p] >= '0' && t[p] <= '9') {
+                    v = v * 10 + (t[p] - '0');
+                    p++;
+                }
+                bytes = v;
+            }
+        }
+        i = e < n ? e + 1 : e;
+    }
+    mm_free(t);
+    if (found != 1) return -1;
+    return bytes;
+}
+
+static int count_hits(const unsigned char *b, long n) {
+    long i, k, hit = 0;
+    if (n < body_n || body_n <= 0) return 0;
+    for (i = 0; i + body_n <= n; i++) {
         k = 0;
-        while (k < (long)sizeof body && b[i + k] == body[k]) k++;
-        if (k == (long)sizeof body) hit++;
+        while (k < body_n && b[i + k] == body[k]) k++;
+        if (k == body_n) hit++;
     }
     return (int)hit;
+}
+
+static int bound_in_body(long limit) {
+    int i;
+    unsigned char le[4];
+    le[0] = (unsigned char)(limit & 255);
+    le[1] = (unsigned char)((limit >> 8) & 255);
+    le[2] = (unsigned char)((limit >> 16) & 255);
+    le[3] = (unsigned char)((limit >> 24) & 255);
+    for (i = 0; i + 7 <= body_n; i++) {
+        if (body[i] == 0x48 && body[i + 1] == 0x81 && body[i + 2] == 0xf9
+            && body[i + 3] == le[0] && body[i + 4] == le[1] && body[i + 5] == le[2] && body[i + 6] == le[3])
+            return 1;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -43,9 +119,9 @@ int main(int argc, char **argv) {
     char *v[16];
     char why[512];
     np_result r;
-    unsigned char img[8192];
+    unsigned char img[16384];
     int fd, hits;
-    long sz;
+    long sz, bytes, limit, soi;
     const char *com;
     char selfcom[4400];
     root[0] = 0;
@@ -56,6 +132,12 @@ int main(int argc, char **argv) {
         com = selfcom;
     }
     if (root[0] == 0 && sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (!load_body(root)) die("winargs fact table");
+    bytes = load_bytes_fact(root);
+    ck(bytes > 0 && (bytes % 8) == 0, "capacity-row");
+    limit = bytes / 8 - 1;
+    ck(limit >= 16384, "capacity-ge-16384");
+    ck(bound_in_body(limit), "encoded-bound-equals-fact");
     if (cx_fmt(work, sizeof work, "%s/elfwin-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(work)) die("work");
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("bound");
     if (cx_fmt(src, sizeof src, "%s/m.c", work) || cx_fmt(out, sizeof out, "%s/m.exe", work)) die("leaf");
@@ -71,14 +153,23 @@ int main(int argc, char **argv) {
     fd = sy_open_read(out);
     if (fd < 0) die("open image");
     sz = sy_reg_size(fd);
-    ck(sz == 5120, "image-5120");
+    ck(sz > 64 && sz <= 5120 + 512, "image-budget");
     if (sz < 64 || sz > (long)sizeof img) { sy_close(fd); die("size"); }
     if (sy_read_full(fd, img, sz) || sy_close(fd)) die("read");
     ck(img[0] == 'M' && img[1] == 'Z', "mz");
-    hits = count(img, sz);
+    {
+        unsigned long pe = u32(img + 60);
+        soi = 0;
+        if (pe + 88 <= (unsigned long)sz && img[pe] == 'P' && img[pe + 1] == 'E')
+            soi = (long)u32(img + pe + 80);
+        ck(soi > 0, "sizeofimage-reported");
+        sy_printf("OBS\telf-winargs.sizeofimage=%ld\tfile=%ld\n", soi, sz);
+    }
+    hits = count_hits(img, sz);
     ck(hits == 1, "winargs-once");
     cx_rmtree(work);
-    sy_printf("ELF_WINARGS\tassertions=%d\tfailed=%d\thits=%d\tbytes=%d\n", assertions, failures, hits, (int)sizeof body);
+    sy_printf("ELF_WINARGS\tassertions=%d\tfailed=%d\thits=%d\tbody=%d\tlimit=%ld\n",
+              assertions, failures, hits, body_n, limit);
     sy_exit(failures ? 1 : 0);
     return 1;
 }

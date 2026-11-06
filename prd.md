@@ -95,6 +95,7 @@
 | 已知 FAIL 必须登记 | `sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv`（`-- --self-test`） | rc1 门槛 1：聚合输出里非 PASS 的批次都得是 `tests/waivers-0.0.44.tsv` 的 `F` 行；F 行只说"已知有主有计划"，不把 FAIL 变 PASS |
 | 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
 | 产品改动链预检 | `sh ./unisacc.com tools/chain-precheck.cx -- ROOT CHAIN_OUT NEW_OUT init --files LIST`（或 `--range A..B`），随后 `reuse`、逐项 `job`、`identity/routes/p3`、`probe include/drive/use/entry`、`slice all`、`finish` | 根/旧链/新输出均收绝对或相对路径，表清单收根内绝对路径并精确去重；旧控制器 ENOENT 时才回退旧链真实 `sl-lnx/candidate`，不吞权限/目录错误。未影响输入逐字节核对后显式复用；新作业逐状态、新包探针、lnx片全实跑才 `CHAIN_PRECHECK PASS`，不等于发布资格；检查器 `tools/check-chain-precheck.cx` |
+| Windows argv容量与布局 | `sh ./unisacc.com tools/win-argv-gen.cx -- --check . enc-x86win-winargs enc-armwin-winargs lower-data`；`PRODUCT=新包产品 sh ./unisacc.com tools/check-win-argv.cx` | `WIN_ARGVA_BYTES=131080`唯一事实推导16384项加NULL；双ISA边界/向量模式/显式NULL、PE虚拟尾与漂移负控；批次`win-argv`，Linux交叉检查不等于Windows原生通过 |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
 | libc99posix 契约表 | `sh ./unisacc.com tools/libc99posix-gen.cx -- --check`（`--write` 生成 `cx/compiler/libc99bind.cx`）；校验 `tools/check-libc99posix.cx` | 20 函数：原八项加 P0 十二项；win 导出按 run42196947660 双架构 UCRT 实物核名及 ABI/errno 约定，pipe/write/getcwd/ftruncate 因 ABI 不同保留 cx-own；cx-own 核头文件自带 static 体，两 win 目标 `-c -funit` 实编，不把存在导出等同于兼容绑定 |
@@ -302,10 +303,10 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-06,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 今日主线:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定：先完成 **0.0.45 稳定版**，上一行数字仅是公开预发布历史统计，不绑定当前候选。原本体三件已合入（`2a742f41fe`、`7cfab9bc0f`、`5ac7784dcb`）；c45-3 原生 E 失败已定位 Win 启动 argv 静默截为 63，c45-4 仅并 argv 修复。私有预检03包 `2a43173d` 三步全过，两Win文件不膨胀而虚拟各增131072B，原生4000参数仍待新候选CI。`table-lint`按cc暂停；BOM只登记下一版P2，不并本轮。旧预发布资产不变，未宣称稳定资格。
+当前裁定（主人2026-11-07）：**0.0.45公开预发布及已披露缺陷保持现状，不再追加稳定版，不起c45-4；后续修复全部归0.0.46，达到正式版门槛后一次公开。** 版本串仍为0.0.45，0.0.46候选前统一调整limits.tsv八处。argv容量63→16384作为首批产品改动；私有预检03包`2a43173d`三步通过，Win文件不变、虚拟各增131072B，原生4000参数待c46候选CI。工具修复已合入`e52a973e9e`；BOM与table-lint按0.0.46计划继续，未实现/未实跑不记PASS。仅决策、里程碑或真实故障向cc汇报。
 
 ```text
-0.0.45 公开预发布 v0.0.45 → 0.0.45 稳定版完成线（全批资格、六格原生、逐片固定点、独立评审；原0.0.46本体队列已前移）
+0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
 ├─ 已知限制以 plans/release-notes-0.0.45.md 为准;外平台格需六个原生 runner 同候选证据(见 §1 缺口)
 └─ rc1 阶段的门槛与身份已过期,见发布说明与归档
 
@@ -348,7 +349,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 - **0.0.43**：已发布（历史，主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
 - **0.0.44**（rc3 已作公开 prerelease 发布，正式标条件见 §9.1 / rc3-verify）：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
-- **0.0.45**：四个一级目标（TSV 无 hardcode、loader 优化、切片流+网、持续加速）加六 ISA 切片需求（见 §1）；公开预发布 `v0.0.45` 保持不变，平台完整性与资格债按主人最新裁定纳入本版稳定完成线（原草案 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md) 的本体队列已前移）。**0.0.46** 的 agent harness（cx-csih）仍归 csih 车道，见 [plans/v0.0.46.md](plans/v0.0.46.md)。
+- **0.0.45**：公开预发布`v0.0.45`已收口，资产及说明保持现状，不再追加稳定版。**0.0.46**：后续产品修复、平台完整性与资格债全部归入本版，达到正式版门槛后一次公开，见[本体计划](plans/v0.0.46-unisacc.md)；agent harness（cx-csih）仍归csih车道，见[其计划](plans/v0.0.46.md)。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
 <a id="optimization-leads"></a>

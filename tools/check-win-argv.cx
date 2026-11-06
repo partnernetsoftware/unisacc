@@ -1,0 +1,91 @@
+/* Cross-compile and inspect PE instructions, never execute foreign images.
+ * sh ./unisacc.com tools/check-win-argv.cx -- [ROOT]
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static void die(const char *s){fprintf(stderr,"win-argv: %s\n",s);exit(2);}
+static np_result run(char **v,const char *root){np_result r={0};char why[512];if(np_run(v,root,0,55,&r,why,sizeof why))die(why);return r;}
+static void command(char **v,const char *root,int reject){np_result r=run(v,root);int ok=reject?(r.rc==1||r.rc==2):r.rc==0;if(!ok){fprintf(stderr,"win-argv: rc=%d",r.rc);for(int i=0;v[i];i++)fprintf(stderr," [%s]",v[i]);fputc('\n',stderr);if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die(reject?"drift-not-rejected":"command");}np_free(&r);}
+static void put(const char *p,const void *b,size_t n){FILE *f=fopen(p,"wb");if(!f)die("write-open");int bad=fwrite(b,1,n,f)!=n;if(fclose(f))bad=1;if(bad)die("write");}
+/* Fixed input list and a bounded buffer: no recursive repository copy. */
+static void copy(const char *a,const char *b){FILE *in=fopen(a,"rb"),*out=fopen(b,"wb");unsigned char buf[8192];if(!in||!out)die("copy-open");size_t total=0,n;while((n=fread(buf,1,sizeof buf,in))){total+=n;if(total>1048576||fwrite(buf,1,n,out)!=n)die("copy-bound");}int bad=ferror(in);if(fclose(in))bad=1;if(fclose(out))bad=1;if(bad)die("copy");}
+static unsigned long u16(const unsigned char *p){return p[0]|((unsigned long)p[1]<<8);}
+static unsigned long u32(const unsigned char *p){return u16(p)|(u16(p+2)<<16);}
+static long sx(unsigned long x,int bits){unsigned long sign=1UL<<(bits-1);return x&sign?(long)x-(long)(sign*2):(long)x;}
+static void bounds(size_t n,unsigned long at,unsigned long len){if(at>n||len>n-at)die("PE-bounds");}
+static void inspect(const char *path,int arm,unsigned long limit){
+ size_t n;unsigned char *p=(unsigned char *)cx_read(path,&n);if(!p||n<64||memcmp(p,"MZ",2))die("PE-DOS");
+ unsigned long h=u32(p+60);bounds(n,h,24);if(memcmp(p+h,"PE\0\0",4)||u16(p+h+4)!=(arm?0xaa64:0x8664))die("PE-target");
+ unsigned long ns=u16(p+h+6),o=h+24,os=u16(p+h+20);bounds(n,o,os);if(os<20||u16(p+o)!=0x20b)die("PE64");unsigned long entry=u32(p+o+16),s=o+os;bounds(n,s,40*ns);int hits=0;
+ for(unsigned long j=0;j<ns;j++){
+  unsigned char *sh=p+s+40*j;unsigned long va=u32(sh+12),at=u32(sh+20),len=u32(sh+16);if(!(u32(sh+36)&0x20000000UL))continue;bounds(n,at,len);
+  if(entry<va||entry-va>=len)continue;/* Only executable startup section, not arbitrary data. */
+  for(unsigned long i=at;i+(arm?16:20)<=at+len;i+=arm?4:1){
+   if(arm){
+    unsigned long cmp=u32(p+i);if((cmp&0xff8003ffUL)!=0xf100005f)continue;/* cmp x2,#imm12[,lsl #12] */
+    unsigned long immediate=(cmp>>10)&4095;if(cmp&0x400000)immediate<<=12;if(immediate!=limit)die("ARM-capacity-fact-mismatch");
+    unsigned long b=u32(p+i+4);if((b&0xff00001fUL)!=0x5400000a)die("ARM-guard-condition");
+    long target=(long)i+4+4*sx((b>>5)&0x7ffff,19);if(target<(long)at||target+4>(long)(at+len)||u32(p+target)!=0xf822787f)die("ARM-guard-NULL-target");
+    if(target<(long)at+4||u32(p+target-4)!=0x3900003f)die("ARM-normal-NULL-fallthrough");
+    if(u32(p+i+8)!=0xf8227861||u32(p+i+12)!=0x91000442)die("ARM-argv-store-increment");
+   }else{
+    if(memcmp(p+i,"\x48\x81\xf9",3))continue;
+    if(u32(p+i+3)!=limit)die("x86-capacity-fact-mismatch");
+    if(p[i+7]!=0x0f||p[i+8]!=0x8d)die("x86-guard-condition");
+    long target=(long)i+13+sx(u32(p+i+9),32);if(target<(long)at||target+8>(long)(at+len)||memcmp(p+target,"\x49\xc7\x04\xc8\0\0\0\0",8))die("x86-guard-NULL-target");
+    if(target<(long)at+3||memcmp(p+target-3,"\xc6\x07\x00",3))die("x86-normal-NULL-fallthrough");
+    if(memcmp(p+i+13,"\x49\x89\x3c\xc8\x48\xff\xc1",7))die("x86-argv-store-increment");
+   }
+   hits++;
+  }
+ }
+ free(p);if(hits!=1)die("startup-guard-not-unique");
+}
+static void drift(const char *path,const char *needle){size_t n;char *b=cx_read(path,&n);if(!b||n>1048576)die("drift-read");size_t k=tx_len(needle,256);long at=tx_find(b,n,needle,k);if(at<0)die("drift-marker");/* Preserve the grammar and change an actual capacity/table value. */b[at+k-1]=b[at+k-1]=='0'?'1':'0';put(path,b,n);free(b);}
+static unsigned long scalar(const char *path,const char *key){
+ size_t n;char *p=cx_read(path,&n);if(!p||n>1048576)die("scalar-read");size_t k=tx_len(key,128);unsigned long value=0;int found=0;
+ for(size_t start=0;start<n;){size_t end=start;while(end<n&&p[end]!='\n')end++;if(end-start>=k&&!memcmp(p+start,key,k)){if(found++||end==start+k)die("scalar-row");for(size_t i=start+k;i<end;i++){if(p[i]<'0'||p[i]>'9'||value>214748364UL)die("scalar-integer");value=value*10+(p[i]-'0');}}start=end+1;}
+ free(p);if(found!=1)die("scalar-missing");return value;
+}
+static unsigned long slots(const char *path){unsigned long bytes=scalar(path,"lower\tWIN_ARGVA_BYTES\t");if(bytes%8||bytes/8<16385)die("capacity-slots");return bytes/8;}
+static void layout(const char *facts,const char *data){
+ const char *names[]={"SCRATCH","PRINTMAX","WIN_HSTD_BYTES","WIN_WRITTEN_BYTES","WIN_SAVE_BYTES","WIN_ARGVA_BYTES"};unsigned long extra=0;char key[128];
+ for(int i=0;i<6;i++){if(cx_fmt(key,sizeof key,"lower\t%s\t",names[i]))die("scalar-key");extra+=scalar(facts,key);}
+ unsigned long bss=scalar(facts,"lower\tWIN_STACK\t");if(extra>2147483640UL||bss>2147483640UL-extra)die("layout-limit");
+ if(scalar(data,"=win_extra\tint\t")!=extra||scalar(data,"=win_bss\tint\t")!=bss||scalar(data,"=win_limit\tint\t")!=2147483640UL-extra-bss)die("lower-data-fact-mismatch");
+}
+/* A vector fact's first comment establishes its named columns. Resolve the
+ * requested field there (not in provenance), then consume its numeric rows.
+ * These bodies have one column; scalar lower-data deliberately bypasses this. */
+static int vector_field(const char *path,const char *field,unsigned long max){
+ size_t n;char *p=cx_read(path,&n);if(!p||n>1048576)die("vector-read");
+ size_t end=0,start=0,k=tx_len(field,128);int rows=0,valid=1;
+ while(end<n&&p[end]!='\n')end++;
+ if(!end||p[0]!='#')valid=0;else{start=1;while(start<end&&(p[start]==' '||p[start]=='\t'))start++;size_t stop=start;while(stop<end&&p[stop]!=' '&&p[stop]!='\t')stop++;if(stop-start!=k||memcmp(p+start,field,k))valid=0;while(stop<end&&(p[stop]==' '||p[stop]=='\t'))stop++;if(stop!=end)valid=0;}
+ for(start=end+1;valid&&start<n;start=end+1){end=start;while(end<n&&p[end]!='\n')end++;if(end==start||p[start]=='#')continue;unsigned long value=0;for(size_t i=start;i<end;i++){if(p[i]<'0'||p[i]>'9'||value>(max-(unsigned long)(p[i]-'0'))/10){valid=0;break;}value=value*10+(p[i]-'0');}if(++rows>512)valid=0;}
+ free(p);return valid&&rows>0;
+}
+int main(int argc,char **argv){
+ char root[4096],com[4400],gen[4400],a[4600],b[4600],src[4600],image[4600];char tmp[]="/tmp/cx-win-argv-XXXXXX";
+ if(argc>2||!realpath(argc==2?argv[1]:".",root)||!mkdtemp(tmp))die("usage: [ROOT]");
+ if(cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(gen,sizeof gen,"%s/tools/win-argv-gen.cx",root))die("path");
+ if(getenv("PRODUCT")&&cx_fmt(com,sizeof com,"%s",getenv("PRODUCT")))die("product-path");
+ if(cx_fmt(a,sizeof a,"%s/exec/facts/enc-literals.tsv",root))die("path");unsigned long count=slots(a),limit=count-1;
+ char *check[]={"sh",com,gen,"--","--check",root,"enc-x86win-winargs","enc-armwin-winargs","lower-data",0};command(check,root,0);
+ if(cx_fmt(b,sizeof b,"%s/exec/facts/lower-data.tsv",root))die("path");layout(a,b);
+ const char *dirs[]={"exec","exec/facts","tools"};for(int i=0;i<3;i++){if(cx_fmt(b,sizeof b,"%s/%s",tmp,dirs[i])||mkdir(b,0700))die("shadow-directory");}
+ const char *files[]={"exec/facts/enc-literals.tsv","tools/win-argv-gen.cx","exec/facts/enc-x86win-winargs.tsv","exec/facts/enc-armwin-winargs.tsv","exec/facts/lower-data.tsv"};
+ for(int i=0;i<5;i++){if(cx_fmt(a,sizeof a,"%s/%s",root,files[i])||cx_fmt(b,sizeof b,"%s/%s",tmp,files[i]))die("copy-path");copy(a,b);}
+ for(int arm=0;arm<2;arm++){if(cx_fmt(a,sizeof a,"%s/%s",root,files[2+arm]))die("vector-path");if(!vector_field(a,arm?"value":"v",arm?4294967295UL:255))die("consumer-vector-field");}
+ check[5]=tmp;command(check,root,0);/* Prove the shadow is complete before its negative controls. */
+ if(cx_fmt(b,sizeof b,"%s/%s",tmp,files[0]))die("path");char needle[128];if(cx_fmt(needle,sizeof needle,"WIN_ARGVA_BYTES\t%lu",count*8))die("capacity-marker");drift(b,needle);command(check,root,1);
+ if(cx_fmt(a,sizeof a,"%s/%s",root,files[0]))die("path");copy(a,b);command(check,root,0);
+ for(int i=2;i<5;i++){if(cx_fmt(a,sizeof a,"%s/%s",root,files[i])||cx_fmt(b,sizeof b,"%s/%s",tmp,files[i]))die("path");size_t n;char *text=cx_read(b,&n);if(!text)die("table-read");long start=0;while(start<(long)n){long end=start;while(end<(long)n&&text[end]!='\n')end++;if(end>start&&text[start]!='#'){text[start]=text[start]=='1'?'2':'1';break;}start=end+1;}if(start==(long)n)die("table-empty");put(b,text,n);free(text);command(check,root,1);copy(a,b);command(check,root,0);}
+ /* A schema-only mutation is grammatically a vector, but no longer binds the
+  * mapseq consumer's required field. Later provenance cannot repair it. */
+ for(int arm=0;arm<2;arm++){if(cx_fmt(a,sizeof a,"%s/%s",root,files[2+arm])||cx_fmt(b,sizeof b,"%s/%s",tmp,files[2+arm]))die("vector-path");drift(b,arm?"# value":"# v");if(vector_field(b,arm?"value":"v",arm?4294967295UL:255))die("schema-drift-not-rejected");copy(a,b);}
+ if(cx_fmt(src,sizeof src,"%s/probe.c",tmp))die("path");const char *probe="int main(int argc,char **argv){return argv[argc]!=0 || argc<1;}\n";put(src,probe,tx_len(probe,256));
+ for(int arm=0;arm<2;arm++){if(cx_fmt(image,sizeof image,"%s/probe-%d.exe",tmp,arm))die("path");char *v[]={"sh",com,"-b",arm?"win/arm64":"win/x86_64",src,"-o",image,0};command(v,root,0);inspect(image,arm,limit);printf("PASS\twin-argv.%s\tslots=%lu\tcapacity=%lu\tNULL-guard\tNOT_RUN_FOREIGN\n",arm?"arm64":"x86_64",count,limit);}
+ if(cx_rmtree(tmp))die("cleanup");printf("CHECK_WIN_ARGV\tfailed=0\tfacts-and-negative-controls=PASS\tPE-structure=PASS\tnative=NOT_RUN_FOREIGN\n");return 0;
+}
