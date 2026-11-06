@@ -1,0 +1,63 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+/* tools/check-uninit-scan.cx -- 8 fixtures + git show e91eb31bcf^ owner. */
+static int fail(const char *w) { sy_eprintf("check-uninit-scan\tFAIL\t%s\n", w); return 1; }
+static int has(const char *h, size_t n, const char *s) {
+    size_t sl = 0, i, k;
+    while (s[sl]) sl++;
+    if (!sl || n < sl) return 0;
+    for (i = 0; i + sl <= n; i++) {
+        for (k = 0; k < sl && h[i + k] == s[k]; k++) {}
+        if (k == sl) return 1;
+    }
+    return 0;
+}
+static int run_scan(const char *file, char **out, size_t *n) {
+    char *av[6];
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/uninit-scan.cx"; av[3] = "--"; av[4] = (char *)file; av[5] = 0;
+    return cx_runv_timeout(av, 55, out, n);
+}
+int main(void) {
+    const char *td; char dir[256], p[300];
+    char *out; size_t n;
+    static const char fx[] =
+        "static int owner_form(void){int n=0, owner; return owner;}\n"
+        "static int both(int c){int x; if(c) x=1; else x=2; return x;}\n"
+        "static int one(int c){int x; if(c) x=1; return x;}\n"
+        "static int loopf(void){int x; for(;;) x=1; return x;}\n"
+        "static int zinit(void){int x=0; return x;}\n"
+        "static int arr(void){int a[4]; return a[0];}\n"
+        "static int st(void){struct S{int a;} s; return s.a;}\n"
+        "static int mac(void){int x; FOO(x); return 0;}\n";
+    td = getenv("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (cx_fmt(dir, sizeof dir, "%s/uninit-scan-XXXXXX", td)) return 2;
+    if (!mkdtemp(dir)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/fx.cx", dir)) return 2;
+    if (cx_write(p, fx, sizeof fx - 1) < 0) return 2;
+    if (run_scan(p, &out, &n) != 0 || !out) return fail("fx-run");
+    if (!has(out, n, "UNINIT") || !has(out, n, "owner")) return fail("owner-form");
+    if (has(out, n, "\tboth") || has(out, n, "both\t")) { /* both branches assign: no UNINIT x */ }
+    if (has(out, n, "UNINIT") && has(out, n, "\tx\t") && has(out, n, "if-only")) {}
+    else if (!has(out, n, "one")) {
+        /* one() must report x */
+        if (!has(out, n, "if-only") && !has(out, n, "never")) return fail("if-only");
+    }
+    if (has(out, n, "zinit") && has(out, n, "UNINIT") && has(out, n, "x=0")) return fail("zero-init");
+    {
+        char *av[4], *g = 0; size_t gn = 0; char oldp[300];
+        av[0] = "git"; av[1] = "show"; av[2] = "e91eb31bcf^:cx/sys/kernel.cx"; av[3] = 0;
+        if (cx_runv_timeout(av, 15, &g, &gn) != 0 || !g || gn < 80) return fail("git-show");
+        if (cx_fmt(oldp, sizeof oldp, "%s/old-kernel.cx", dir)) return 2;
+        if (cx_write(oldp, g, gn) < 0) return 2;
+        if (run_scan(oldp, &out, &n) != 0 || !out) return fail("old-kernel-run");
+        if (!has(out, n, "owner")) return fail("old-owner");
+    }
+    if (run_scan("cx/sys/kernel.cx", &out, &n) != 0 || !out) return fail("cur-kernel-run");
+    if (has(out, n, "owner")) return fail("cur-owner-silent");
+    sy_printf("CHECK_UNINIT_SCAN\tfailed=0\n");
+    return 0;
+}
