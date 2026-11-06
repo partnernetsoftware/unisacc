@@ -238,4 +238,17 @@ $pip = Image-Pipe 'bad.c' 'bad.pipe' 'b' $Tgt
 if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ } else { Write-Output ("SP_FAIL`tF reject-stderr-and-rc`trcA=$($ref.Code)`trcB=$pip`texe=$Exe`ttgt=$Tgt") }
 $streamOk = $npass -eq 6
 Write-Output ("STREAM`t" + $(if ($streamOk) { 'PASS' } else { 'FAIL' }) + "`t" + $(if ($streamOk) { 0 } else { 1 }) + "`t$streamNote npass=$npass/6")
+[IO.File]::WriteAllBytes((Join-Path $sp 'argcprobe.c'), [Text.Encoding]::ASCII.GetBytes("#include <stdio.h>`nint main(int argc,char **argv){printf(`"ARGC %d LAST %s\n`",argc,(argc>0&&argv[argc-1])?argv[argc-1]:`"-`");return 0;}`n"))
+$ac = Invoke-Cwd $Exe $sp @('-o','argcprobe.exe','argcprobe.c') 55000 $null $null
+Write-Output ("SP_ARGC_BUILD`trc=$($ac.Code)`terr=$(Clip400 $ac.Err)")
+if ($ac.Code -eq 0) {
+  $probe = Join-Path $sp 'argcprobe.exe'
+  foreach ($n in @(40, 63, 64, 65, 100, 200)) {
+    $aa = @(); for ($i = 1; $i -le $n; $i++) { $aa += ("a$i") }
+    $outp = Join-Path $sp ("argc-$n.out")
+    $r = Invoke-Cwd $probe $sp $aa 15000 $null $outp
+    $txt = $(if (Test-Path -LiteralPath $outp) { [IO.File]::ReadAllText($outp) } else { '' })
+    Write-Output ("SP_ARGC`tn=$n`texpect=$($n+1)`trc=$($r.Code)`tout=$(Clip400 $txt)`terr=$(Clip400 $r.Err)")
+  }
+}
 exit 0
