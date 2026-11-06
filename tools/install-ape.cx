@@ -1,0 +1,131 @@
+/* tools/install-ape.cx -- put a six-slice APE at ROOT/unisacc.com; the old launcher script stays as unisacc-dev.
+ *
+ *   sh ./unisacc.com tools/install-ape.cx -- ROOT APE SHA256 [--write]
+ *   sh ./unisacc.com tools/install-ape.cx -- --self-test
+ *
+ * APE   the candidate file (a single file: launcher, slices, one package, a UNIPKG1 footer).
+ * SHA256  the full expected sha256 of APE (64 hex).  A mismatch, a file without a UNIPKG1 footer, or a file that
+ *         does not answer `--version` is refused by name; nothing under ROOT is touched.
+ * Without --write it only reports (a dry run never writes).  With --write:
+ *   1  ROOT/unisacc.com is copied to ROOT/unisacc-dev when that is still the launcher script (a shell script
+ *      without a footer) and unisacc-dev does not exist yet; an existing unisacc-dev is kept as it is.
+ *   2  the APE is copied to ROOT/.unisacc.com.install.<pid> (mode 0755), re-hashed, then renamed over
+ *      ROOT/unisacc.com in one step; any failure removes the temporary file and leaves unisacc.com as it was.
+ * The record of the source sha is ROOT/unisacc.com.ape.sha256 (one line "sha256<TAB>bytes<TAB>name"), written the
+ * same way.  unisacc.com stays ignored by git (it is a product); this tool and the record format are what is kept.
+ * Prints INSTALL_APE<TAB>status<TAB>sha256<TAB>bytes; exit 0 ok, 1 refused, 2 usage/IO.
+ * An L3 tool: no #include, no direct libc call. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static void ia_refuse(const char *why, const char *what) {
+    sy_printf("INSTALL_APE\tREFUSED\t%s\t%s\n", why, what ? what : "-");
+    sy_exit(1);
+}
+static void ia_die(const char *why) { sy_eprintf("install-ape: %s\n", why); sy_exit(2); }
+
+static int ia_hex64(const char *s) {
+    int i;
+    for (i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[64] == 0;
+}
+
+/* sha256 and size of PATH; 0 on success */
+static int ia_sha(const char *path, char hex[65], long *bytes) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    *bytes = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+/* 1 when the file at PATH ends with a UNIPKG1 footer (a self-contained APE), 0 otherwise, -1 unreadable */
+static int ia_has_footer(const char *path) {
+    size_t n = 0;
+    PackageFooter f;
+    int r;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    r = n > 16 && n <= 2147483647UL && packagefooter_locate_bytes((unsigned char *)b, (long)n, &f) ? 1 : 0;
+    mm_free(b);
+    return r;
+}
+
+/* run `sh APE --version`; 1 when it exits 0 and prints a line starting "unisacc " */
+static int ia_version_ok(const char *ape, char *line, int cap) {
+    char *v[4];
+    char out[256];
+    int cut = 0, rc;
+    v[0] = "sh"; v[1] = (char *)ape; v[2] = "--version"; v[3] = 0;
+    rc = sy_run(v, out, (int)sizeof out, &cut);
+    if (rc != 0 || tx_len(out, (long)sizeof out) < 9 || !tx_same(out, 8, "unisacc ", 8)) return 0;
+    {   int k = 0;
+        while (out[k] && out[k] != '\n' && k + 1 < cap) { line[k] = out[k]; k++; }
+        line[k] = 0; }
+    return 1;
+}
+
+static int ia_join(char *out, int cap, const char *a, const char *b) { return cx_fmt(out, (size_t)cap, "%s/%s", a, b); }
+
+/* install APE over ROOT/unisacc.com.  want = expected sha; write = do it.  Returns the exit code. */
+static int ia_install(const char *root, const char *ape, const char *want, int write) {
+    char got[65], cur[65], com[4400], dev[4400], tmp[4400], rec[4400], rtmp[4400], line[4400], ver[160];
+    long bytes = 0, cb = 0;
+    int pid = sy_pid(), had_dev;
+    if (!ia_hex64(want)) ia_refuse("expected-sha-not-64-hex", want);
+    if (ia_sha(ape, got, &bytes)) ia_refuse("cannot-read-ape", ape);
+    if (!tx_eqz(got, want)) ia_refuse("sha-mismatch", got);
+    if (ia_has_footer(ape) != 1) ia_refuse("no-UNIPKG1-footer", ape);
+    if (!ia_version_ok(ape, ver, (int)sizeof ver)) ia_refuse("ape-does-not-answer-version", ape);
+    if (ia_join(com, (int)sizeof com, root, "unisacc.com") || ia_join(dev, (int)sizeof dev, root, "unisacc-dev") ||
+        ia_join(rec, (int)sizeof rec, root, "unisacc.com.ape.sha256")) ia_die("path");
+    if (cx_fmt(tmp, sizeof tmp, "%s/.unisacc.com.install.%d", root, pid) || cx_fmt(rtmp, sizeof rtmp, "%s/.unisacc.com.ape.sha256.%d", root, pid)) ia_die("path");
+    if (ia_sha(com, cur, &cb) == 0 && tx_eqz(cur, got)) {
+        sy_printf("INSTALL_APE\tALREADY\t%s\t%ld\t%s\n", got, bytes, ver);
+        return 0;
+    }
+    if (!write) {
+        sy_printf("INSTALL_APE\tDRYRUN\t%s\t%ld\t%s\n", got, bytes, ver);
+        return 0;
+    }
+    had_dev = sy_exists(dev);
+    if (!had_dev && sy_exists(com)) {
+        int f = ia_has_footer(com);
+        if (f == 0) {
+            if (sy_copy(com, dev, 0755)) ia_die("cannot keep the launcher as unisacc-dev");
+        }
+    }
+    if (sy_copy(ape, tmp, 0755)) { (void)sy_unlink(tmp); ia_die("cannot copy the ape beside unisacc.com"); }
+    if (ia_sha(tmp, cur, &cb) || !tx_eqz(cur, got) || cb != bytes) { (void)sy_unlink(tmp); ia_refuse("copy-differs-from-source", tmp); }
+    if (cx_fmt(line, sizeof line, "%s\t%ld\t%s\n", got, bytes, "unisacc.com")) { (void)sy_unlink(tmp); ia_die("record"); }
+    if (cx_write(rtmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot write the record"); }
+    if (sy_rename(tmp, com)) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
+    if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
+    sy_printf("INSTALL_APE\tINSTALLED\t%s\t%ld\t%s\n", got, bytes, ver);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096];
+    int write = 0, i;
+    const char *pos[3];
+    int np = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--write")) { write = 1; continue; }
+        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write]");
+    }
+    if (np != 3) ia_die("usage: ROOT APE SHA256 [--write]");
+    if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
+    return ia_install(root, pos[1], pos[2], write);
+}

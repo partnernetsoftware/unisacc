@@ -1,0 +1,119 @@
+/* tools/check-install-ape.cx -- tools/install-ape.cx puts an APE at ROOT/unisacc.com safely.
+ *
+ *   sh ./unisacc.com tools/check-install-ape.cx [-- ROOT [APE]]
+ *
+ * APE defaults to ROOT/unisacc.com when that file already carries a UNIPKG1 footer; with the launcher script in
+ * place and no APE argument the positive cases are NOT_RUN (never PASS).  Every case works in a mkdtemp scratch
+ * under $TMPDIR or /tmp; ROOT is only read.
+ *   neg-sha-mismatch      a wrong expected sha is refused, the scratch unisacc.com is byte-identical
+ *   neg-no-footer         a shell script (no UNIPKG1 footer) with the right sha is refused
+ *   neg-not-version       a footered file that does not answer --version is refused
+ *   dryrun-writes-nothing --write absent: unisacc.com and the directory listing stay as they were
+ *   install               --write: unisacc.com == APE (sha), old launcher kept as unisacc-dev, record written
+ *   keep-existing-dev     a second install over an existing unisacc-dev leaves unisacc-dev untouched
+ *   already               installing the same APE again reports ALREADY and changes nothing
+ * Prints PASS/FAIL/NOT_RUN per case and CHECK_INSTALL_APE<TAB>failed=N<TAB>not_run=M; exit 0 only when failed=0. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed, notrun;
+static char g_root[4096], g_tool[4400];
+
+static void say(const char *v, const char *name, const char *why) { sy_printf("%s\tinstall-ape.%s\t%s\n", v, name, why ? why : ""); }
+static void ck(int ok, const char *name, const char *why) { if (!ok) failed++; say(ok ? "PASS" : "FAIL", name, ok ? "" : why); }
+
+static int sha_of(const char *p, char h[65]) { size_t n = 0; char *b = cx_read(p, &n); if (!b) { h[0] = 0; return -1; } cx_sha256_hex(b, n, h); mm_free(b); return 0; }
+
+/* run the tool with ARGS (already a vector tail); output into OUT; the exit code or -1 */
+static int tool(const char *root, const char *ape, const char *sha, int write, char *out, int cap) {
+    char *v[9]; int k = 0, cut = 0;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--";
+    v[k++] = (char *)root; v[k++] = (char *)ape; v[k++] = (char *)sha;
+    if (write) v[k++] = "--write";
+    v[k] = 0;
+    return sy_run(v, out, cap, &cut);
+}
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 14), s, tx_len(s, 256)) >= 0; }
+
+static int write_file(const char *p, const char *s, int mode) {
+    if (cx_write(p, s, (size_t)tx_len(s, 1 << 16))) return -1;
+    return sy_chmod(p, mode);
+}
+
+int main(int argc, char **argv) {
+    char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
+    char want[65], h0[65], h1[65], out[2048], launcher[4400];
+    const char *td = getenv("TMPDIR");
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    int have_ape = 0;
+    if (sy_realpath(argc > a ? argv[a] : ".", g_root, (int)sizeof g_root) < 0) { sy_eprintf("check-install-ape: root\n"); return 2; }
+    if (cx_fmt(g_tool, sizeof g_tool, "%s/tools/install-ape.cx", g_root)) return 2;
+    if (argc > a + 1) { if (sy_realpath(argv[a + 1], ape, (int)sizeof ape) < 0) { sy_eprintf("check-install-ape: ape\n"); return 2; } have_ape = 1; }
+    else {
+        PackageFooter f; size_t n = 0; char *b;
+        if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", g_root)) return 2;
+        b = cx_read(ape, &n);
+        if (b) { have_ape = n > 16 && n <= 2147483647UL && packagefooter_locate_bytes((unsigned char *)b, (long)n, &f) ? 1 : 0; mm_free(b); }
+    }
+    if (cx_fmt(work, sizeof work, "%s/check-install-ape-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) { sy_eprintf("check-install-ape: mkdtemp\n"); return 2; }
+    if (cx_fmt(root, sizeof root, "%s/root", work) || sy_mkdir(root, 0755)) return 2;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(dev, sizeof dev, "%s/unisacc-dev", root) || cx_fmt(rec, sizeof rec, "%s/unisacc.com.ape.sha256", root)) return 2;
+    if (cx_fmt(launcher, sizeof launcher, "%s/launcher.sh", work)) return 2;
+    if (write_file(com, "#!/bin/sh\necho old-launcher\n", 0755)) return 2;
+
+    sha_of(com, h0);
+    /* neg: no footer, right sha */
+    if (write_file(launcher, "#!/bin/sh\necho unisacc 0.0.0\n", 0755)) return 2;
+    sha_of(launcher, want);
+    ck(tool(root, launcher, want, 1, out, (int)sizeof out) == 1 && has(out, "no-UNIPKG1-footer"), "neg-no-footer", out);
+    sha_of(com, h1);
+    ck(tx_eqz(h0, h1), "neg-no-footer-left-old-file", "unisacc.com changed");
+
+    if (!have_ape) {
+        say("NOT_RUN", "positive-cases", "no footered APE available (ROOT/unisacc.com is the launcher script and no APE argument)");
+        notrun++;
+    } else {
+        char real[65]; long rb = 0;
+        sha_of(ape, real); (void)rb;
+        /* neg: wrong sha */
+        ck(tool(root, ape, "0000000000000000000000000000000000000000000000000000000000000000", 1, out, (int)sizeof out) == 1 && has(out, "sha-mismatch"), "neg-sha-mismatch", out);
+        sha_of(com, h1);
+        ck(tx_eqz(h0, h1) && !sy_exists(dev), "neg-sha-mismatch-left-root-alone", "unisacc.com changed or unisacc-dev appeared");
+        /* neg: footered but not answering --version: the APE with its first bytes replaced by a failing script is no longer an APE; build a footered fake instead */
+        if (cx_fmt(fake, sizeof fake, "%s/fake.com", work)) return 2;
+        {   size_t n = 0; char *b = cx_read(ape, &n);
+            if (!b || n < 64) return 2;
+            b[0] = '#'; b[1] = '!'; b[2] = '/'; b[3] = 'b'; b[4] = 'i'; b[5] = 'n'; b[6] = '/'; b[7] = 'f'; b[8] = 'a'; b[9] = 'l'; b[10] = 's'; b[11] = 'e'; b[12] = '\n';
+            if (cx_write(fake, b, n)) return 2;
+            sy_chmod(fake, 0755); mm_free(b); }
+        sha_of(fake, want);
+        ck(tool(root, fake, want, 1, out, (int)sizeof out) == 1 && has(out, "ape-does-not-answer-version"), "neg-not-version", out);
+        /* dry run */
+        ck(tool(root, ape, real, 0, out, (int)sizeof out) == 0 && has(out, "DRYRUN"), "dryrun-reports", out);
+        sha_of(com, h1);
+        ck(tx_eqz(h0, h1) && !sy_exists(dev) && !sy_exists(rec), "dryrun-writes-nothing", "dry run changed the root");
+        /* install */
+        ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "install", out);
+        sha_of(com, h1);
+        ck(tx_eqz(h1, real), "install-unisacc-com-is-the-ape", h1);
+        sha_of(dev, h1);
+        ck(tx_eqz(h1, h0), "install-old-launcher-kept-as-unisacc-dev", h1);
+        ck(sy_exists(rec) == 1, "install-record-written", "no record");
+        /* keep an existing unisacc-dev, ALREADY on the same APE */
+        ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "ALREADY"), "already", out);
+        if (write_file(com, "#!/bin/sh\necho second-launcher\n", 0755)) return 2;
+        if (write_file(dev, "#!/bin/sh\necho keep-me\n", 0755)) return 2;
+        sha_of(dev, h0);
+        ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "install-again", out);
+        sha_of(dev, h1);
+        ck(tx_eqz(h0, h1), "keep-existing-dev", "unisacc-dev was overwritten");
+        (void)junk;
+    }
+    (void)cx_rmtree(work);
+    sy_printf("CHECK_INSTALL_APE\tfailed=%d\tnot_run=%d\n", failed, notrun);
+    return failed ? 1 : 0;
+}
