@@ -162,6 +162,62 @@ jobs:
           Say 'B ok -> package discovery works on win; B "bad kernel header" -> the container read is the fault'
           Say 'keep the kernel resource dump above: its head bytes show whether the read was corrupted'
 
+  # Env channel probes (c45-2b added GetEnvironmentStringsA to the win slice): (a) do we get a TEMP
+  # path back at all, (b) does UNISA_CONTAINER now steer the container the program reads.  Both compile
+  # and run from the candidate's own win slice, so a crash here is inside the win runtime, not the host.
+  win-env:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the candidate and its package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path diag | Out-Null
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'unisacc.com' --dir diag --clobber
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'pkg.bin' --dir diag --clobber
+          Get-ChildItem diag | ForEach-Object { Write-Output ("ASSET {0} {1}" -f $_.Name, $_.Length) }
+      - name: Probe getenv and UNISA_CONTAINER
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          function Say([string]$s) { Write-Host $s }
+          function Run([string]$file, [string[]]$a, [string]$label, [hashtable]$env) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            if ($env) { foreach ($k in $env.Keys) { $info.Environment[$k] = [string]$env[$k] } }
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start()
+              $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(180000)) { $p.Kill($true); Say "$label TIMEOUT"; return }
+              Say ("{0} exit={1}" -f $label, $p.ExitCode)
+              Say ("{0} stdout={1}" -f $label, (($o.Result -replace '[\r\n]+',' ')))
+              Say ("{0} stderr={1}" -f $label, (($e.Result -replace '[\r\n]+',' ').Substring(0,[Math]::Min(240,$e.Result.Length))))
+            } catch { Say "$label START FAILED: $_" } finally { $p.Dispose() }
+          }
+          # (a) TEMP through the new environment channel
+          [IO.File]::WriteAllText((Join-Path $PWD 'diag/envprobe.c'),
+            "#include <stdlib.h>`n#include <stdio.h>`nint main(void){const char *t = getenv(`"TEMP`"); printf(`"%s\n`", t ? t : `"(none)`"); return 0;}`n")
+          $ep = Join-Path $PWD 'diag/envprobe.exe'
+          Run $com @('-o',$ep,(Join-Path $PWD 'diag/envprobe.c')) 'envprobe compile' $null
+          if (Test-Path $ep) { Run $ep @() 'envprobe run' $null } else { Say 'envprobe NOT PRODUCED' }
+          # (b) hello with UNISA_CONTAINER pointed at a real package (now that the env channel works)
+          [IO.File]::WriteAllText((Join-Path $PWD 'diag/hello.c'), "int main(void){return 40;}`n")
+          $pkg = Join-Path $PWD 'diag/pkg.bin'
+          $out = Join-Path $PWD 'diag/hello-container.exe'
+          if (Test-Path $pkg) {
+            Run $com @('-b','win/x86_64','-o',$out,(Join-Path $PWD 'diag/hello.c')) 'B hello+UNISA_CONTAINER' @{ UNISA_CONTAINER = $pkg }
+            if (Test-Path $out) { Run $out @() 'B run' $null } else { Say 'B image NOT PRODUCED' }
+          } else { Say 'B NOT_RUN (no pkg.bin asset)' }
+
+
   # W45-WIN-FFI (diagnostic branch only): compile and run the two FFI probes with the candidate's own
   # win slice, then compare stdout with the .expect file.  The four files travel with this branch
   # because the CI test commit predates them.
