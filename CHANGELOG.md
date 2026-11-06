@@ -1,3 +1,41 @@
+# 0.0.45(预发布)
+
+候选:APE sha256 `ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0`,6,128,709B,源码 `fa0a747c7f22ba20c0a875183108106afff21f4a`,`unisacc --version` 为 `unisacc 0.0.45`。未对本候选运行自举固定点(`tests/chain-fixed-point.cx`)。完整发布说明见 `plans/release-notes-0.0.45.md`。
+
+全批会话没有对本候选重跑;最近一次(c45-1,lnx/x86_64)418 批已实现,292 PASS / 58 FAIL / 1 UNKNOWN / 67 MISSING,另 68 批材料未登记;失败项均登记于 `tests/waivers-0.0.44.tsv`。本版因此标预发布。
+
+## 支持矩阵(GitHub 原生 runner,candidate-native,运行 42191390455,pass=36 fail=0 not_run=6)
+
+| 目标 | 状态 |
+|---|---|
+| lnx/x86_64 | identity、version、hello、run、smoke、stdio-crossunit、stream-pipe 全 PASS |
+| lnx/arm64 | 同上,全 PASS |
+| osx/x86_64 | 除 stdio-crossunit 外 PASS;stdio-crossunit NOT_RUN(runner 无 `/dev/full`) |
+| osx/arm64 | 同上 |
+| win/x86_64 | identity、version、hello、run、smoke PASS;stdio-crossunit、stream-pipe NOT_RUN(需 POSIX `fork`) |
+| win/arm64 | 同 win/x86_64 的 5 项 PASS,执行体是独立资产 `slice-win-arm64`(sha256 `380e28700a1a2595b7fda3cff563452efeb40b361c22c4829fc3f4a2eda85b25`)配合 `pkg.bin`,不是 `unisacc.com` 自身;APE 内尚无该片分发 |
+
+## 修复(rc3 → 0.0.45)
+
+- **kernel `long`→`I`**(LLP64):win 数据模型 `long=4`;lnx/osx 四片对象 sha 对拍不变。
+- **`sy_tmpdir`**:win 临时路径 `'\'`→`'/'`。
+- **WIN-RUN CreateProcess**:win 默认 `-run` 写临时 exe 再 CreateProcessA。
+- **strdup**:win 头自带实现;`open`/`read`/`close`/`lseek`/`fdopen` 的 UCRT 下划线绑定名由事实表 `exec/facts/libc99posix.tsv` 驱动,fwdstub 按目标查绑定。
+- **INC2 盘符绝对路径**:`#include "C:/…"` 在 win 目标按绝对路径解析(`INC2.drv` 补 `SBCLR`);尖括号形式不处理。
+- **PE `DYNAMIC_BASE` 与启动崩点**:win 启动崩溃(0xC0000005)的根因修复。
+- **`_Static_assert` 之后字符串字面量取错**(rc3 已知限制):`tests/cases/sa-pool.cx` 在本候选上五条全 OK。
+- **win/arm64**:第一次有同候选原生证据;candidate-native 新增该格,FFI strdup/pread 在 win 与 lnx 逐字节相同。
+- **版本串** `unisacc 0.0.45`。
+- **`tools/install-ape.cx`**:原子安装 APE 到仓根,旧脚本留作 `unisacc-dev`,可 `--rollback`。
+
+## 已知限制
+
+- 全批会话未对本候选重跑(见上)。
+- win 的 stdio-crossunit、stream-pipe,osx 的 stdio-crossunit 未跑(原因见矩阵)。
+- APE 内尚无 win/arm64 分发。
+- `#include <C:/x.h>`(尖括号)不按盘符绝对路径处理。
+- 其余沿用下方 rc3「已知限制」中仍成立项:部分非法 C 被静默接受、`-c` 分开编译运行库状态不共享、手工拼 `stream` 管道的截断风险、预处理器接受两种非法输入、`-c -b osx/*|win/*` 文档与实际不符、运行库每对象一份。
+
 # 0.0.44-rc3(候选)
 
 候选:rc3 APE sha256 `54bb97a2672f5010c8815fb0f6ecfb3ee7bb7ca91af18723007430375cc3bbb8`,5,608,646B,源码 R4=`b1a219cf7d`;lnx/x86_64 候选三代逐字节相同(`45bdf636df1e`,`tests/chain-fixed-point.cx` failed=0)。
