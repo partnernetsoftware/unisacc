@@ -16,16 +16,4 @@ _Static_assert(sizeof(__u_word) == 8 && sizeof(__u_word) == sizeof(void *), "__u
 #define __u_word long
 #define __u_uword unsigned long
 #endif
-/* RT-DEDUP: linkage of a carried runtime function.  Default `static`, so a unit's bytes are what they were;
-   with RT_UNIT the one providing unit defines it for the whole program, with RT_EXTERN the other units only
-   declare it (tools/rt-linkage.cx writes those declarations).  Same switch as _U_SHARED in <sys/_exit.h>.
-   The name is the marker the trim scanners already accept in place of `static` (seed/unisa_libneed.c body_head,
-   tools/facts-gen.cx fg_linkage), so the carried-body tables do not change. */
-#if defined(RT_UNIT)
-#define __UNISA_LIBC_LINKAGE
-#elif defined(RT_EXTERN)
-#define __UNISA_LIBC_LINKAGE extern
-#else
-#define __UNISA_LIBC_LINKAGE static
-#endif
 #endif

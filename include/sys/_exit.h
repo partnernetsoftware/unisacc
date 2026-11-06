@@ -43,14 +43,10 @@ _U_SHARED char _u_st_buf[_U_NST * _U_BUFSZ];
 _U_SHARED int _u_st_bpos[_U_NST];
 _U_SHARED int _u_st_blen[_U_NST];
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_copy
-#if defined(RT_EXTERN)
-extern void _u_st_copy(char *__u_d, const char *__u_s, __u_word __u_n);
-#else
-__UNISA_LIBC_LINKAGE void _u_st_copy(char *__u_d, const char *__u_s, __u_word __u_n) {
+static void _u_st_copy(char *__u_d, const char *__u_s, __u_word __u_n) {
     __u_word __u_j; __u_j = 0;
     while (__u_j < __u_n) { __u_d[__u_j] = __u_s[__u_j]; __u_j = __u_j + 1; }
 }
-#endif
 #endif
 _U_SHARED int _u_st_wlen[_U_NST];             /* D3': bytes waiting in the buffer to be written */
 _U_SHARED int _u_st_ro[_U_NST];               /* opened "r" without "+": a write fails with EBADF [C99 7.19.5.3] */
@@ -64,10 +60,7 @@ _U_SHARED int _u_st_n;
    __write gate calls an error: negative on POSIX and the VM, 0 on Windows
    (WriteFile's count); an answer larger than asked is not trusted. */
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_raw
-#if defined(RT_EXTERN)
-extern __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n);
-#else
-__UNISA_LIBC_LINKAGE __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
+static __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word __u_n) {
     __u_word __u_done; __u_word __u_r;
     __u_done = 0;
     while (__u_done < __u_n) {
@@ -88,12 +81,8 @@ __UNISA_LIBC_LINKAGE __u_word _u_st_raw(int __u_fd, const char *__u_p, __u_word 
     return __u_n;
 }
 #endif
-#endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_wflush
-#if defined(RT_EXTERN)
-extern int _u_st_wflush(int __u_i);
-#else
-__UNISA_LIBC_LINKAGE int _u_st_wflush(int __u_i) {
+static int _u_st_wflush(int __u_i) {
     __u_word __u_k;
     if (__u_i < 0 || _u_st_wlen[__u_i] == 0) return 0;
     __u_k = _u_st_wlen[__u_i]; _u_st_wlen[__u_i] = 0;
@@ -101,22 +90,14 @@ __UNISA_LIBC_LINKAGE int _u_st_wflush(int __u_i) {
     return 0;
 }
 #endif
-#endif
 #if !__UNISA_FTRIM_LIBC || __UN__u_st_flushall
-#if defined(RT_EXTERN)
-extern void _u_st_flushall(void);
-#else
-__UNISA_LIBC_LINKAGE void _u_st_flushall(void) {
+static void _u_st_flushall(void) {
     int __u_i; __u_i = 0;
     while (__u_i < _u_st_n) { _u_st_wflush(__u_i); __u_i = __u_i + 1; }
 }
 #endif
-#endif
 #if !__UNISA_FTRIM_LIBC || __UN_exit
-#if defined(RT_EXTERN)
-extern void exit(int __u_code);
-#else
-__UNISA_LIBC_LINKAGE void exit(int __u_code) {
+static void exit(int __u_code) {
     /* the atexit handlers, last registered first (C99 7.20.4.3p3) */
     while (_unisa_natexit > 0) {
         _unisa_natexit = _unisa_natexit - 1;
@@ -125,6 +106,5 @@ __UNISA_LIBC_LINKAGE void exit(int __u_code) {
     _u_st_flushall();   /* streams last (C99 7.20.4.3p4) */
     __exit(__u_code);
 }
-#endif
 #endif
 #endif
