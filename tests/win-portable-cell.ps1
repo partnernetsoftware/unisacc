@@ -243,10 +243,11 @@ $ac = Invoke-Cwd $Exe $sp @('-o','argcprobe.exe','argcprobe.c') 55000 $null $nul
 Write-Host ("SP_ARGC_BUILD`trc=$($ac.Code)`terr=$(Clip400 $ac.Err)")
 if ($ac.Code -eq 0) {
   $probe = Join-Path $sp 'argcprobe.exe'
-  foreach ($n in @(40, 63, 64, 65, 100, 200)) {
+  foreach ($n in @(40, 63, 64, 65, 100, 200, 1000, 4000)) {
     $aa = @(); for ($i = 1; $i -le $n; $i++) { $aa += ("a$i") }
     $outp = Join-Path $sp ("argc-$n.out")
-    $r = Invoke-Cwd $probe $sp $aa 15000 $null $outp
+    $ms = $(if ($n -ge 1000) { 55000 } else { 15000 })
+    $r = Invoke-Cwd $probe $sp $aa $ms $null $outp
     $txt = $(if (Test-Path -LiteralPath $outp) { [IO.File]::ReadAllText($outp) } else { '' })
     Write-Host ("SP_ARGC`tn=$n`texpect=$($n+1)`trc=$($r.Code)`tout=$(Clip400 $txt)`terr=$(Clip400 $r.Err)")
   }
