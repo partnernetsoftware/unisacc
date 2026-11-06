@@ -415,6 +415,33 @@ jobs:
           TryCase @('--version') 'version-only'
           TryCase @('-b','lnx/x86_64','-o',(Join-Path $PWD 'diag/lnx.o'),(Join-Path $PWD 'diag/empty.c')) 'lnx-target-control'
 
+      - name: 'LLP64 probe: sizeof(long) on this target, compiled and run natively'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          $src = Join-Path $PWD 'diag/sizes.c'
+          $out = Join-Path $PWD 'diag/sizes.exe'
+          Copy-Item (Join-Path $PWD 'diag-src/sizes.c') $src -Force
+          function RunCase([string]$file, [string[]]$a, [string]$label) {
+            $i = [Diagnostics.ProcessStartInfo]::new()
+            $i.FileName = $file; $i.UseShellExecute = $false
+            $i.RedirectStandardOutput = $true; $i.RedirectStandardError = $true
+            $i.Environment['UNISA_CONTAINER'] = (Join-Path $PWD 'diag/pkg.bin')
+            foreach ($x in $a) { $i.ArgumentList.Add($x) }
+            $pr = [Diagnostics.Process]::new(); $pr.StartInfo = $i
+            try {
+              [void]$pr.Start()
+              $o = $pr.StandardOutput.ReadToEndAsync(); $e = $pr.StandardError.ReadToEndAsync()
+              if (!$pr.WaitForExit(180000)) { $pr.Kill($true); Write-Host ("{0} TIMEOUT" -f $label); return }
+              Write-Host ("{0} exit={1}" -f $label, $pr.ExitCode)
+              foreach ($l in ($o.Result -split "[\r\n]+")) { if ($l) { Write-Host ("{0} OUT| {1}" -f $label, $l) } }
+              foreach ($l in ($e.Result -split "[\r\n]+")) { if ($l) { Write-Host ("{0} ERR| {1}" -f $label, $l) } }
+            } catch { Write-Host ("{0} START FAILED: {1}" -f $label, $_) } finally { $pr.Dispose() }
+          }
+          RunCase $com @('-b','win/x86_64','-o',$out,$src) 'sizes-compile'
+          if (Test-Path $out) { RunCase $out @() 'sizes-run' } else { Write-Host 'sizes image NOT PRODUCED' }
+
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
   # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
