@@ -14,7 +14,7 @@
  * SLICE-CHANGE ledger rows stay. DONE/CLOSED items stay if git grep finds them
  * outside work/items.tsv. */
 static void die(const char *s) { sy_eprintf("archive-records: REFUSE %s\n", s); exit(2); }
-static int g_write, g_root_n;
+static int g_write, g_root_n, g_ledger_short;
 static char g_root[4096], g_cut[16] = "2026-11-03";
 static char g_sha_before[65], g_sha_after[65];
 
@@ -71,14 +71,19 @@ static void do_ledger(int *move, int *keep, int *total) {
     fd_k = g_write ? sy_open_new(tkeep, 0644) : -1;
     fd_m = -1;
     if (g_write && fd_k < 0) die("tmp keep");
+    { int lineno = 0;
     while (at < n) {
         size_t e = at, ln;
         int tabs = 0, i;
         while (e < n && b[e] != '\n') e++;
         ln = e - at;
+        lineno++;
         if (ln) {
             for (i = 0; i < (int)ln; i++) if (b[at + i] == '\t') tabs++;
-            /* short rows stay live; extra tabs live in the last field */
+            if (lineno > 1 && tabs != 5) {
+                g_ledger_short++;
+                sy_printf("LEDGER_SHORT\tline=%d\tfields=%d\n", lineno, tabs + 1);
+            }
         }
         if (at == 0) {
             if (g_write) put_line(fd_k, b + at, ln);
@@ -113,6 +118,7 @@ static void do_ledger(int *move, int *keep, int *total) {
         at = e < n ? e + 1 : e;
         first = 0;
         (void)first;
+    }
     }
     mm_free(b);
     if (g_write) {
@@ -223,7 +229,7 @@ int main(int argc, char **argv) {
     do_items(&im, &ik, &it);
     if (lm + lk != lt) die("ledger count");
     if (im + ik != it) die("items count");
-    sy_printf("ARCHIVE_RECORDS\tmode=%s\tcutoff=%s\tledger_move=%d\tledger_keep=%d\tledger_total=%d\titems_move=%d\titems_keep=%d\titems_total=%d\n",
-              g_write ? "write" : "dry", g_cut, lm, lk, lt, im, ik, it);
+    sy_printf("ARCHIVE_RECORDS\tmode=%s\tcutoff=%s\tledger_move=%d\tledger_keep=%d\tledger_total=%d\titems_move=%d\titems_keep=%d\titems_total=%d\tledger_short=%d\n",
+              g_write ? "write" : "dry", g_cut, lm, lk, lt, im, ik, it, g_ledger_short);
     return 0;
 }
