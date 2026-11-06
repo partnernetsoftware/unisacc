@@ -264,9 +264,25 @@ static int strcoll(const char *__u_a, const char *__u_b) {
 }
 #endif
 
-/* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the host C library on every target
-   (Windows: the loader search in <unisacc_ffi.h> uffi_dlsym) */
+/* 0.0.28 H4 (SQLite's shell): POSIX strdup. Linux/macOS forward to the host C
+   library. Windows UCRT exports _strdup, not strdup, so the Windows path is a
+   carried body over malloc+memcpy (same pattern as win pread/pwrite). */
+#ifdef _WIN32
+#include <stdlib.h>
+#if !__UNISA_FTRIM_LIBC || __UN_strdup
+static char *strdup(const char *__u_s) {
+    __u_word __u_n; char *__u_d;
+    if (!__u_s) return 0;
+    __u_n = 0; while (__u_s[__u_n]) __u_n = __u_n + 1;
+    __u_d = (char *)malloc(__u_n + 1);
+    if (!__u_d) return 0;
+    { __u_word __u_i = 0; while (__u_i < __u_n) { __u_d[__u_i] = __u_s[__u_i]; __u_i = __u_i + 1; } __u_d[__u_n] = 0; }
+    return __u_d;
+}
+#endif
+#else
 char *strdup(const char *__u_s);
+#endif
 /* C99 7.21.4.5 strxfrm: prototype-only, forwarded to the host's C library on Linux and macOS
  * (the bundled locale is C, whose transformation is the identity). */
 #ifndef _WIN32
