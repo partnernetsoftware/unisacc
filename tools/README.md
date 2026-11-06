@@ -7,7 +7,13 @@ Current source, candidate and installed identities are in prd.md §2 (work tree)
 ```sh
 sh ./unisacc.com tools/sourceflat.cx -- out/unisacc-flat.c
 sh ./unisacc.com tools/sourceflat.cx -- --verify out/unisacc-flat.c
+sh ./unisacc.com tools/sourceflat.cx -- --root archive/reference-c out/reference-flat.c
 ```
+
+`--root DIR` reads the canonical source tree from DIR (the retired reference C
+lives in `archive/reference-c`); the tool's own identity and the shipped
+`include/` still come from this checkout, so `source.json` names which tree
+every byte came from.
 
 The export and provenance verification use the product directly. `export_ref.sh`
 is only a compatibility loader for existing construction callers.

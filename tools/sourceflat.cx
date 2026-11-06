@@ -8,7 +8,7 @@
 typedef struct { char *p; size_t n, cap; } Buf;
 typedef struct { char *path; char sha[65]; } Dep;
 static Dep *deps; static int nd, capd;
-static char root[4096], temporary[4096], jt[4096];
+static char g_home[4096], g_rootbuf[4096], temporary[4096], jt[4096]; static char *root = g_home;   /* checkout; --root; our sibling temps */
 static Buf flat, identity, json;
 static void cleanup(void) {
     /* Only our exclusive sibling files, never arbitrary caller paths. */
@@ -65,7 +65,7 @@ static void emit(const char *p,int depth){
     }
     free(b);
 }
-static void addfile(const char *relative){char p[4096],*b;size_t n;path_(p,root,relative);b=read_(p,&n);remember(relative,b,n);free(b);}
+static void addfile(const char *relative,const char *full){char *b;size_t n;b=read_(full?full:relative,&n);remember(relative,b,n);free(b);}
 /* Bind the implicit CX runtime headers too; cx_walk sorts names before descent. */
 static int cmp_(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
 static void headers(const char *dir,int depth){
@@ -81,7 +81,7 @@ static void headers(const char *dir,int depth){
     if(n)qsort(v,n,sizeof *v,cmp_);
     for(i=0;i<n;i++){if(stat(v[i],&st))die("cannot stat runtime input",v[i]);
         if(S_ISDIR(st.st_mode))headers(v[i],depth+1);
-        else if(S_ISREG(st.st_mode))addfile(v[i]+strlen(root)+1);
+        else if(S_ISREG(st.st_mode))addfile(v[i]+strlen(root)+1,v[i]);
         else die("runtime input is not regular",v[i]);free(v[i]);}
     free(v);
 }
@@ -95,7 +95,8 @@ static void receipt(void){
     for(i=0;i<nd;i++){if(i)text_(&json,",");text_(&json,"{\"path\":");quote(&json,deps[i].path);text_(&json,",\"sha256\":\"");text_(&json,deps[i].sha);text_(&json,"\"}");}
     text_(&json,"]}\n");
 }
-static void stable(void){int i;char p[4096],h[65],*b;size_t n;for(i=0;i<nd;i++){path_(p,root,deps[i].path);b=read_(p,&n);cx_sha256_hex(b,n,h);free(b);if(!tx_eqz(h, deps[i].sha))die("input changed during export",p);}}
+/* input rows resolve against --root; the tool's own path lives in g_home */ static void input_path(char p[4096],const char *rel){if(tx_eqz(rel, "tools/sourceflat.cx"))path_(p,g_home,rel);else path_(p,root,rel);}
+static void stable(void){int i;char p[4096],h[65],*b;size_t n;for(i=0;i<nd;i++){input_path(p,deps[i].path);b=read_(p,&n);cx_sha256_hex(b,n,h);free(b);if(!tx_eqz(h, deps[i].sha))die("input changed during export",p);}}
 /* Resolve the parent even for a new file, and existing symlinks for refusal. */
 static void destination(const char *arg,char out[4096]){
     char work[4096],parent[4096],resolved[4096],*s;struct stat st;int i;
@@ -104,18 +105,17 @@ static void destination(const char *arg,char out[4096]){
     if(!*s||tx_eqz(s, ".")||tx_eqz(s, ".."))die("invalid output path",arg);
     path_(out,parent,s);
     if(stat(out,&st)==0){if(!S_ISREG(st.st_mode))die("output is not regular",out);if(!realpath(out,resolved))die("cannot resolve output",out);}else{if(errno!=ENOENT)die("cannot stat output",out);strcpy(resolved,out);}
-    for(i=0;i<nd;i++){char p[4096],r[4096];path_(p,root,deps[i].path);if(!realpath(p,r))die("cannot resolve input",p);if(tx_eqz(r, resolved))die("refusing input overwrite",out);if(stat(out,&st)==0){struct stat in;if(stat(p,&in))die("cannot stat input",p);if(in.st_dev==st.st_dev&&in.st_ino==st.st_ino)die("refusing input hardlink overwrite",out);}else if(errno!=ENOENT)die("cannot stat output",out);}
+    for(i=0;i<nd;i++){char p[4096],r[4096];input_path(p,deps[i].path);if(!realpath(p,r))die("cannot resolve input",p);if(tx_eqz(r, resolved))die("refusing input overwrite",out);if(stat(out,&st)==0){struct stat in;if(stat(p,&in))die("cannot stat input",p);if(in.st_dev==st.st_dev&&in.st_ino==st.st_ino)die("refusing input hardlink overwrite",out);}else if(errno!=ENOENT)die("cannot stat output",out);}
 }
 static void stage(char tmp[4096],const char *out,const Buf *b){int fd;FILE *f;if(snprintf(tmp,4096,"%s.tmp.XXXXXX",out)>=4096)die("path too long",out);fd=mkstemp(tmp);if(fd<0){tmp[0]=0;die("cannot create sibling temporary",out);}f=fdopen(fd,"wb");if(!f){close(fd);die("fdopen failed",tmp);}if(fwrite(b->p,1,b->n,f)!=b->n){fclose(f);die("write failed",tmp);}if(fflush(f)||fsync(fd)){fclose(f);die("flush failed",tmp);}if(fclose(f))die("close failed",tmp);}
 int main(int argc,char **argv){
-    char self[4096],inc[4096],out[4096],side[4096],sidearg[4096],*s,*b;size_t n;int verify=0;
-    if(argc==3&&tx_eqz(argv[1], "--verify")){verify=1;argv++;argc--;}
-    if(argc!=2){fprintf(stderr,"usage: sourceflat.cx [--verify] OUTPUT\n");return 2;}
-    if(!realpath(__FILE__,self))die("cannot resolve tool",__FILE__);
-    s=strrchr(self,'/');if(!s)die("invalid tool path",self);*s=0;s=strrchr(self,'/');if(!s)die("invalid tool root",self);*s=0;strcpy(root,self);
-    /* Mark canonical source before checking output; no file is written yet. */
-    emit("unisacc.c",0);if(!flat.n)die("empty source",0);
-    addfile("tools/sourceflat.cx");path_(inc,root,"include");headers(inc,0);
+    char self[4096],inc[4096],out[4096],side[4096],sidearg[4096],*s,*b;size_t n;int verify=0;const char *rootarg=0;
+    while(argc>1&&!tx_eqz(argv[1], "--verify")){if(tx_eqz(argv[1], "--root")){if(argc<3)die("--root needs a directory",0);rootarg=argv[2];argv+=2;argc-=2;}else break;} if(argc==3&&tx_eqz(argv[1], "--verify")){verify=1;argv++;argc--;}
+    if(argc!=2){fprintf(stderr,"usage: sourceflat.cx [--root DIR] [--verify] OUTPUT\n");return 2;} if(!realpath(__FILE__,self))die("cannot resolve tool",__FILE__);
+    s=strrchr(self,'/');if(!s)die("invalid tool path",self);*s=0;s=strrchr(self,'/');if(!s)die("invalid tool root",self);*s=0;strcpy(g_home,self);
+    /* the canonical source tree may live elsewhere (archive/reference-c); tool and identity stay here */ if(rootarg){if(!realpath(rootarg,g_rootbuf))die("cannot resolve --root",rootarg);root=g_rootbuf;}
+    emit("unisacc.c",0);if(!flat.n)die("empty source",0);   /* the canonical source goes in first; nothing is written yet */
+    {char own[4096];path_(own,g_home,"tools/sourceflat.cx");addfile("tools/sourceflat.cx",own);}path_(inc,root,"include");headers(inc,0);
     destination(argv[1],out);if(snprintf(sidearg,sizeof sidearg,"%s.source.json",out)>=sizeof sidearg)die("path too long",out);destination(sidearg,side);
     receipt();stable();
     if(verify){b=read_(out,&n);if(n!=flat.n||memcmp(b,flat.p,n))die("stale or damaged flat source",out);free(b);b=read_(side,&n);if(n!=json.n||memcmp(b,json.p,n))die("stale or damaged source identity",side);free(b);stable();return 0;}

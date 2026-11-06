@@ -5,7 +5,10 @@
 ```
 sh ./unisacc.com tools/sourceflat.cx -- out/unisacc-flat.c
 sh ./unisacc.com tools/sourceflat.cx -- --verify out/unisacc-flat.c
+sh ./unisacc.com tools/sourceflat.cx -- --root archive/reference-c out/reference-flat.c
 ```
+
+`--root DIR` 从另一个目录读规范源树（归档的参考 C 在 `archive/reference-c`）；工具自身和随产品携带的 `include/` 仍取自本检出，所以 `source.json` 记下每个字节来自哪棵树。`--root` 不给时行为不变。
 
 输出包含完整独立 C 源与相邻的 `.source.json`。源文件展开规则保留旧 `export_ref.sh` 合同：递归替换整行的 `#include "relative-path"`（允许前后空格或制表符），同一文本路径只输出一次，其他行逐字节保留并补齐末尾换行。角括号 include、带注释的 include 和条件指令原样保留；这是一份有序源装配，不是通用 C 条件预处理器。
 
