@@ -18,8 +18,10 @@
 #pragma unisa use sys.env
 #pragma unisa use sysx.process
 #pragma unisa use text.text
+#pragma unisa use cxlib.productpkg
 
 static int failed;
+static int ape_root(const char *r){return !strcmp(pp_layout_name(pp_layout(r)),"ape");}
 static void ck(int ok,const char *name){
     printf("%s\t%s\n",ok?"PASS":"FAIL",name);
     if(!ok) failed++;
@@ -109,6 +111,24 @@ int main(int argc,char **argv){
         }
         if(sy_exists(rec)!=1 || sy_exists(em)!=1){
             printf("MEMBER_SET\tSKIP\tmissing-input\n");
+        } else if(ape_root(root)){
+            /* APE: the product is one file, so the receipt legitimately lists more names
+               than the manifest has.  The one member that must agree is unisacc.com. */
+            size_t rn=0,mn=0;
+            char *rb=cx_read(rec,&rn), *mb=cx_read(em,&mn);
+            int have=0;
+            if(rb && mb){
+                char *cur=mb;
+                while(cur<mb+mn){
+                    char *nl=memchr(cur,'\n',(size_t)(mb+mn-cur));
+                    long len=nl?(long)(nl-cur):(long)(mb+mn-cur);
+                    if(len>13 && !memcmp(cur,"unisacc.com\t",12)) have=1;
+                    cur += len+1;
+                }
+            }
+            printf("MEMBER_SET\tape=unisacc.com\thave=%d\n",have);
+            ck(have,"member-set-equals-ape-receipt");
+            free(rb); free(mb);
         } else {
             size_t rn=0,mn=0;
             char *rb=cx_read(rec,&rn), *mb=cx_read(em,&mn);
@@ -256,6 +276,18 @@ int main(int argc,char **argv){
         }
         /* 副本建在自己的 scratch 里（不再用固定 /tmp 路径），成员取自已装仓根。 */
         if(sy_mkdir(troot,0755) || (sy_mkdir(tdev,0755) && sy_exists(tdev)!=1)) { ck(0,"tamper-reset"); }
+        else if(ape_root(root)) {
+            /* APE: the product is a single file.  Copy it whole; the tamper target is the same
+               file (there is no separate package member to hit). */
+            char cmd[6000], one[4400];
+            if(cx_fmt(one,sizeof one,"%s/unisacc.com",root))return 2;
+            if(cx_fmt(cmd,sizeof cmd,"cp -f %s %s/ && cp -f %s/ape-receipt.txt %s/",one,troot,root,troot)) return 2;
+            {   char *v[]={(char*)"sh",(char*)"-c",cmd,0};
+                np_result r={0}; char why[512];
+                if(np_run(v,root,0,60,&r,why,sizeof why)){ck(0,"tamper-reset");}
+                else { ck(r.rc==0,"tamper-reset-rc"); np_free(&r); }
+            }
+        }
         else {
             char cmd[6000], one[4400], two[4400], three[4400];
             if(cx_fmt(one,sizeof one,"%s/unisacc.com",root))return 2;
@@ -276,11 +308,12 @@ int main(int argc,char **argv){
             if(np_run(v,root,0,40,&r,why,sizeof why)){ck(0,"tamper-base-gen");}
             else { ck(r.rc==0,"tamper-base-gen-rc"); np_free(&r); }
         }
-        /* 改 p3-package.bin 的一个字节 */
+        /* 改成员的一个字节：split 改包，APE 改整文件本身 */
         {   char pk[4400]; int fd, okw=0;
-            if(cx_fmt(pk,sizeof pk,"%s/p3-package.bin",tdev))return 2;
+            int ape = ape_root(root);
+            if(cx_fmt(pk,sizeof pk,ape?"%s/unisacc.com":"%s/p3-package.bin",ape?troot:tdev))return 2;
             fd=open(pk,O_RDWR);
-            if(fd>=0){ char x='X'; if(lseek(fd,64,SEEK_SET)>=0 && write(fd,&x,1)==1) okw=1; close(fd); }
+            if(fd>=0){ char x='X'; if(lseek(fd,256,SEEK_SET)>=0 && write(fd,&x,1)==1) okw=1; close(fd); }
             ck(okw,"tamper-member-written");
         }
         {   char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"40",(char*)"sh",(char*)"unisacc.com",
@@ -292,7 +325,8 @@ int main(int argc,char **argv){
         /* 比对两表:p3-package.bin 的 sha 必须变,unisacc.com 的必须不变 */
         {   size_t bn=0, an=0;
             char *bb=cx_read(base,&bn), *ab=cx_read(t2,&an);
-            int pkg_changed=0, base_stable=0, named=0;
+            int pkg_changed=0, base_stable=0, named=0, lb=0, la=0;
+            const char *want_pkg = ape_root(root) ? "unisacc.com" : "p3-package.bin";
             if(bb && ab){
                 char pkgb[65]={0}, pkga[65]={0}, comb[65]={0}, coma[65]={0};
                 char *cur=bb;
@@ -302,8 +336,9 @@ int main(int argc,char **argv){
                     char *f[6]; int nf=0; char *q=cur;
                     while(nf<6 && q<cur+len){ f[nf++]=q; char *tab=memchr(q,'\t',(size_t)(cur+len-q)); if(!tab) break; *tab=0; q=tab+1; }
                     if(nf==6){
-                        if(!strcmp(f[0],"p3-package.bin")){ size_t k; for(k=0;k<64&&f[3][k];k++) pkgb[k]=f[3][k]; }
-                        if(!strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) comb[k]=f[3][k]; }
+                        if(!strcmp(f[0],want_pkg)){ size_t k; for(k=0;k<64&&f[3][k];k++) pkgb[k]=f[3][k]; }
+                        lb++;
+                        if(!ape_root(root) && !strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) comb[k]=f[3][k]; }
                     }
                     cur += len+1;
                 }
@@ -314,15 +349,16 @@ int main(int argc,char **argv){
                     char *f[6]; int nf=0; char *q=cur;
                     while(nf<6 && q<cur+len){ f[nf++]=q; char *tab=memchr(q,'\t',(size_t)(cur+len-q)); if(!tab) break; *tab=0; q=tab+1; }
                     if(nf==6){
-                        if(!strcmp(f[0],"p3-package.bin")){ size_t k; for(k=0;k<64&&f[3][k];k++) pkga[k]=f[3][k]; named=1; }
-                        if(!strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) coma[k]=f[3][k]; }
+                        if(!strcmp(f[0],want_pkg)){ size_t k; for(k=0;k<64&&f[3][k];k++) pkga[k]=f[3][k]; named=1; }
+                        la++;
+                        if(!ape_root(root) && !strcmp(f[0],"unisacc.com")){ size_t k; for(k=0;k<64&&f[3][k];k++) coma[k]=f[3][k]; }
                     }
                     cur += len+1;
                 }
                 pkg_changed = pkgb[0] && pkga[0] && strcmp(pkgb,pkga)!=0;
-                base_stable = comb[0] && coma[0] && !strcmp(comb,coma);
-                if(pkg_changed) printf("TAMPER\tmember=p3-package.bin\tbefore=%s\tafter=%s\n",pkgb,pkga);
-                else printf("TAMPER\tNOT-CHANGED\tmember=p3-package.bin\n");
+                base_stable = ape_root(root) ? (lb==1 && la==1) : (comb[0] && coma[0] && !strcmp(comb,coma));  /* APE: no second member; the manifest must still hold exactly the one line */
+                if(pkg_changed) printf("TAMPER\tmember=%s\tbefore=%s\tafter=%s\n",want_pkg,pkgb,pkga);
+                else printf("TAMPER\tNOT-CHANGED\tmember=%s\n",want_pkg);
             }
             ck(pkg_changed && named,"tamper-member-reports-name");
             ck(base_stable,"tamper-untouched-member-stable");

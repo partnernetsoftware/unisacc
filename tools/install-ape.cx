@@ -114,6 +114,32 @@ static void ia_sync_record(const char *root, const char *sha) {
     mm_free(o);
 }
 
+/* ROOT/ape-receipt.txt becomes the APE-shaped one line "unisacc.com<TAB>APE<TAB>sha=HEX<TAB>bytes=N" (the split
+   receipt named three members; an APE has one).  Written through a temporary file and renamed. */
+static void ia_write_receipt(const char *root, const char *ape, const char *sha, long bytes) {
+    char path[4400], tmp[4400], line[9000];
+    if (ia_join(path, (int)sizeof path, root, "ape-receipt.txt") || cx_fmt(tmp, sizeof tmp, "%s.%d", path, sy_pid())) ia_die("path");
+    if (cx_fmt(line, sizeof line, "unisacc.com\t%s\tsha=%s\tbytes=%ld\n", ape, sha, bytes)) ia_die("receipt format");
+    if (cx_write(tmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); ia_die("cannot write the receipt"); }
+    if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); ia_die("cannot rename the receipt"); }
+}
+
+/* Re-emit plans/root-identity.md from the installed APE (split2 -> ape1).  A root without the tool or the document
+   has nothing to emit and is skipped; a failing emit is an error. */
+static void ia_emit_identity(const char *root) {
+    char com[4400], tool[4400], doc[4400], out[512], cmd[9000];
+    char *v[8];
+    int k = 0, cut = 0, rc;
+    if (ia_join(com, (int)sizeof com, root, "unisacc.com") || ia_join(tool, (int)sizeof tool, root, "tools/check-root-identity.cx") ||
+        ia_join(doc, (int)sizeof doc, root, "plans/root-identity.md")) ia_die("path");
+    if (sy_exists(tool) != 1 || sy_exists(doc) != 1) { sy_printf("INSTALL_APE\tIDENTITY_SKIP\tno-tool-or-doc\n"); return; }
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/check-root-identity.cx -- '%s' --emit", root, root)) ia_die("path");
+    v[k++] = "sh"; v[k++] = "-c"; v[k++] = cmd; v[k] = 0;
+    rc = sy_run(v, out, (int)sizeof out, &cut);
+    if (rc != 0) ia_die("installed, but check-root-identity --emit failed");
+    sy_printf("INSTALL_APE\tIDENTITY_EMITTED\t%s\n", doc);
+}
+
 /* install APE over ROOT/unisacc.com.  want = expected sha; write = do it.  Returns the exit code. */
 static int ia_install(const char *root, const char *ape, const char *want, int write) {
     char got[65], cur[65], com[4400], dev[4400], tmp[4400], rec[4400], rtmp[4400], line[4400], ver[160];
@@ -158,6 +184,8 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
     if (sy_rename(tmp, com)) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
     if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
     ia_sync_record(root, got);
+    ia_write_receipt(root, ape, got, bytes);
+    ia_emit_identity(root);
     sy_printf("INSTALL_APE\tINSTALLED\t%s\t%ld\t%s\n", got, bytes, ver);
     return 0;
 }

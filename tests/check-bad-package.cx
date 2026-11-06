@@ -4,6 +4,7 @@
  *
  * 只读已装产品的三件套（unisacc.com / unisacc.com.dev/entry.elf /
  * unisacc.com.dev/p3-package.bin），拷进 mkdtemp，对拷贝做变异；从不写仓内 out/。
+ * 单文件 APE（pp_layout 为 ape）没有 dev 目录：产品本体就是包所在文件，变异直接改 APE 副本。
  *
  * 每种变异都必须：rc != 0、stderr 有具名原因、不出产物。一个正例：原样拷贝能编通并运行。
  *   1 missing      p3-package.bin 缺失            -> "missing …/p3-package.bin"
@@ -16,6 +17,8 @@
  * 末行 BAD_PACKAGE<TAB>assertions=N<TAB>failed=K；任何 FAIL 退出码 1。
  */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.packagefooter
 #pragma unisa use mem.bytes
 #pragma unisa use sys.fs
 #pragma unisa use text.text
@@ -87,11 +90,14 @@ static int has(const char *s, const char *needle) {
     return tx_find(s, n, needle, m) >= 0;
 }
 
-/* 把整包换成 B（n 字节），然后编译并断言：rc!=0、stderr 含 WANT、无产物。 */
+/* 把整包换成 B（n 字节），然后编译并断言：rc!=0、stderr 含 WANT、无产物。
+   split：包是 dev 目录的 p3-package.bin；ape：包与 footer 都在产品文件里，写产品副本。 */
+static int g_ape;
 static void case_bad(const char *name, const char *b, long n, const char *want) {
     char why[8192], obj[4400], p[4400];
     int rc;
     if (cx_fmt(p, sizeof p, "%s/unisacc.com.dev/p3-package.bin", work)) die("path");
+    if (g_ape) { if (cx_fmt(p, sizeof p, "%s/unisacc.com", work)) die("path"); }
     if (n <= 0) { if (sy_exists(p) == 1) sy_unlink(p); }
     else if (cx_write(p, b, (size_t)n)) die("write package");
     rc = build(work, why, (long)sizeof why);
@@ -109,7 +115,7 @@ static void case_bad(const char *name, const char *b, long n, const char *want) 
 
 int main(int argc, char **argv) {
     char tmpl[4400], *orig = 0, *m = 0;
-    long on = 0, i;
+    long on = 0, i, fo;
     char src[4400], why[8192];
 
     if (argc == 3 && tx_eqz(argv[1], "--")) {
@@ -123,7 +129,8 @@ int main(int argc, char **argv) {
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) die("path");
     if (cx_fmt(dev, sizeof dev, "%s/unisacc.com.dev", root)) die("path");
     if (cx_fmt(pkg, sizeof pkg, "%s/unisacc.com.dev/p3-package.bin", root)) die("path");
-    if (sy_exists(prod) != 1 || sy_exists(pkg) != 1) die("installed product");
+    g_ape = tx_eqz(pp_layout_name(pp_layout(root)), "ape");
+    if (sy_exists(prod) != 1 || (!g_ape && sy_exists(pkg) != 1)) die("installed product");
 
     /* 三件套拷进临时目录：产品本体 + dev 目录（entry.elf 与 p3-package.bin）。
        之后所有编译都用副本（WORK/unisacc.com），变异只作用在副本的包上。 */
@@ -131,6 +138,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(dst, sizeof dst, "%s/unisacc.com.dev", work)) die("path");
         if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && cp '%s' '%s/' && cp '%s/entry.elf' '%s/' && cp '%s' '%s/'",
                    dst, prod, work, dev, dst, pkg, dst)) die("cmd");
+        if (g_ape && cx_fmt(cmd, sizeof cmd, "cp '%s' '%s/'", prod, work)) die("cmd");
         if (system(cmd) != 0) die("copy product");
     }
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", work)) die("path");
@@ -146,10 +154,12 @@ int main(int argc, char **argv) {
         ck(sy_exists(obj) == 1, "0.copy-writes-object");
     }
 
-    on = rd(pkg, &orig);
+    on = rd(g_ape ? prod : pkg, &orig);
+    fo = on - 16;
+    if (g_ape) { PackageFooter f; if (!packagefooter_locate_bytes((unsigned char *)orig, on, &f)) die("ape has no footer"); fo = f.footer_offset; }
 
     /* 1. 包缺失 */
-    case_bad("1.missing", 0, 0, "missing");
+    case_bad("1.missing", 0, 0, g_ape ? "cannot open" : "missing");
 
     /* 2. 去掉尾部 1 字节 */
     case_bad("2.trunc-1", orig, on - 1, "bad or missing package footer");
@@ -161,7 +171,7 @@ int main(int argc, char **argv) {
     m = malloc((size_t)on);
     if (!m) die("alloc");
     if (mm_copy(m, on, orig, on)) die("copy package");
-    if (mm_copy(m + on - 16, 8, "BADPKG99", 8)) die("footer");
+    if (mm_copy(m + fo, 8, "BADPKG99", 8)) die("footer");
     case_bad("4.footer", m, on, "bad or missing package footer");
 
     /* 5. 包内 kernel/x86_64 的记录改名：找不到该 kernel */

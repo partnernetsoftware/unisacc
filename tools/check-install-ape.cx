@@ -12,6 +12,7 @@
  *   install               --write: unisacc.com == APE (sha), old launcher kept as unisacc-dev, record written
  *   keep-existing-dev     a second install over an existing unisacc-dev leaves unisacc-dev untouched
  *   already               installing the same APE again reports ALREADY and changes nothing
+ *   receipt-*, identity-*  --write rewrites ape-receipt.txt to one APE line and re-emits plans/root-identity.md as ape1; no doc = skipped
  * Prints PASS/FAIL/NOT_RUN per case and CHECK_INSTALL_APE<TAB>failed=N<TAB>not_run=M; exit 0 only when failed=0. */
 #pragma unisa use runtime.packagefooter
 #pragma unisa use sys.fs
@@ -139,6 +140,33 @@ int main(int argc, char **argv) {
             ck(tx_eqz(back, first), "rollback-restores-record-bytes", back);
             ck(sy_exists(sdir) == 1 && sy_exists(sprev) != 1, "rollback-restores-split-dir", "unisacc.com.dev state");
             ck(tool(root, ape, real, 0, out, (int)sizeof out) == 0, "dryrun-after-rollback", out);
+            /* receipt + identity: a scratch tools/ copy and a doc with a split2 block; the old 3-line receipt is replaced */
+            {   char rcp[4400], idoc[4400], pdir[4400], cmd[9000], *rt, *dt; size_t rtn = 0, dtn = 0; char *cv[5]; int cc = 0;
+                if (cx_fmt(rcp, sizeof rcp, "%s/ape-receipt.txt", root) || cx_fmt(pdir, sizeof pdir, "%s/plans", root) ||
+                    cx_fmt(idoc, sizeof idoc, "%s/plans/root-identity.md", root) ||
+                    cx_fmt(cmd, sizeof cmd, "cp -r %s/tools %s/tools && cp -r %s/cx %s/cx && cp -r %s/ext %s/ext && cp %s/cxroot.tsv %s/", g_root, root, g_root, root, g_root, root, g_root, root)) return 2;
+                if (sy_mkdir(pdir, 0755)) return 2;
+                if (write_file(idoc, "x\n<!-- identity-begin -->\nproduct_kind\tsplit2\nold\n<!-- identity-end -->\n", 0644)) return 2;
+                if (write_file(rcp, "NOT_RELEASE\tdev-lnx-only\nunisacc.com\ta\tsha=00\tbytes=1\nentry.elf\tb\tsha=11\tbytes=2\n", 0644)) return 2;
+                cv[0] = "sh"; cv[1] = "-c"; cv[2] = cmd; cv[3] = 0;
+                if (sy_run(cv, out, (int)sizeof out, &cc) != 0) return 2;
+                if (write_file(com, "#!/bin/sh\necho fourth-launcher\n", 0755)) return 2;
+                ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "IDENTITY_EMITTED"), "receipt-identity-install", out);
+                rt = cx_read(rcp, &rtn);
+                {   char want_line[9000];
+                    if (cx_fmt(want_line, sizeof want_line, "sha=%s\tbytes=", real)) return 2;
+                    ck(rt && rt[0] == 'u' && has(rt, "unisacc.com\t") && has(rt, want_line) && !has(rt, "entry.elf") && !has(rt, "NOT_RELEASE"), "receipt-is-one-ape-line", rt ? rt : "no receipt");
+                    ck(rt && rtn > 0 && rt[rtn - 1] == '\n' && tx_find(rt, (long)rtn - 1, "\n", 1) < 0, "receipt-has-exactly-one-line", rt ? rt : "no receipt");
+                }
+                if (rt) mm_free(rt);
+                dt = cx_read(idoc, &dtn);
+                ck(dt && has(dt, "product_kind\tape1") && !has(dt, "split2") && !has(dt, "\nold\n"), "identity-block-ape1", dt ? dt : "no doc");
+                if (dt) mm_free(dt);
+                /* negative: a root without the document is skipped, not failed */
+                (void)sy_unlink(idoc);
+                if (write_file(com, "#!/bin/sh\necho fifth-launcher\n", 0755)) return 2;
+                ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "IDENTITY_SKIP"), "identity-skip-without-doc", out);
+            }
             (void)rb;
         }
     }
