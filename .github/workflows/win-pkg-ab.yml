@@ -357,6 +357,36 @@ jobs:
           }
           Say 'all rc=1 -> decoder survives; crash from 3 on -> header parse; only 5 -> decoding content; only above a size -> growth/offset'
 
+      - name: 'Stage trace: UNISACC_PROFILE=1 + UNISACC_RR_TIME=1 on the full package'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          $hello = Join-Path $PWD 'diag/hello.c'
+          $pkg = Join-Path $PWD 'diag/pkg.bin'
+          # No product change: the shipped binary already prints one PROFILE line per stage when
+          # UNISACC_PROFILE=1.  The last stage in the output is the one that crashed.
+          foreach ($case in @(
+            @{ n='trace-full'; env=@{ UNISA_CONTAINER = $pkg; UNISACC_PROFILE = '1'; UNISACC_RR_TIME = '1' } },
+            @{ n='trace-empty'; env=@{ UNISA_CONTAINER = (Join-Path $PWD 'diag/pkg-2-empty.bin'); UNISACC_PROFILE = '1'; UNISACC_RR_TIME = '1' } })) {
+            $out = Join-Path $PWD ("diag/{0}.exe" -f $case.n)
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $com; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            foreach ($k in $case.env.Keys) { $info.Environment[$k] = [string]$case.env[$k] }
+            foreach ($x in @('-b','win/x86_64','-o',$out,$hello)) { $info.ArgumentList.Add($x) }
+            $pr = [Diagnostics.Process]::new(); $pr.StartInfo = $info
+            try {
+              [void]$pr.Start()
+              $o = $pr.StandardOutput.ReadToEndAsync(); $e = $pr.StandardError.ReadToEndAsync()
+              if (!$pr.WaitForExit(180000)) { $pr.Kill($true); Write-Host ("{0} TIMEOUT" -f $case.n) } else {
+                Write-Host ("{0} exit={1}" -f $case.n, $pr.ExitCode)
+                foreach ($line in ($e.Result -split "[\r\n]+")) { if ($line) { Write-Host ("{0} ERR| {1}" -f $case.n, $line) } }
+                foreach ($line in ($o.Result -split "[\r\n]+")) { if ($line) { Write-Host ("{0} OUT| {1}" -f $case.n, $line) } }
+              }
+            } catch { Write-Host ("{0} START FAILED: {1}" -f $case.n, $_) } finally { $pr.Dispose() }
+          }
+
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
   # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
