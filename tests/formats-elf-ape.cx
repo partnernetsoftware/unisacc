@@ -35,6 +35,15 @@ static void copy_fit(char *d,size_t cap,const char *s){size_t n=strlen(s),i;if(n
 static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);size_t at=0;if(f<0)die(p);while(at<n){ssize_t k=write(f,(const char *)s+at,n-at);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");at+=(size_t)k;}if(close(f))die("close");}
 static unsigned char *load(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return (unsigned char *)s;}
 static void sha_file(const char *p,char h[65]){size_t n;unsigned char *s=load(p,&n);cx_sha256_hex((char *)s,n,h);free(s);}
+static const char APE0043_SHA[]="83343ec111521d731da6df41072ab0784b754833b98fc440ea68e7ea590ea775";
+/* 0=NOT_RUN missing, 1=ok, -1=sha mismatch. Path is $HOME/.unisacc-baselines/<fullsha>.com; gate pins sha not a path. */
+static int ape0043_com(char *out,size_t cap){
+ const char *home=getenv("HOME");char h[65];struct stat st;
+ if(!home||!home[0]){puts("NOT_RUN\tape-0043\tno-HOME");return 0;}
+ if(snprintf(out,cap,"%s/.unisacc-baselines/%s.com",home,APE0043_SHA)<0||(size_t)snprintf(out,cap,"%s/.unisacc-baselines/%s.com",home,APE0043_SHA)>=cap){puts("NOT_RUN\tape-0043\tpath-bound");return 0;}
+ errno=0;if(lstat(out,&st)){puts("NOT_RUN\tape-0043\tmissing");return 0;}
+ sha_file(out,h);if(!tx_eqz(h, APE0043_SHA)){puts("FAIL\tape-0043\tsha-mismatch");return -1;}
+ return 1;}
 static long long mtime_of(const char *p){struct stat st;errno=0;if(lstat(p,&st))die(errno==ENOENT?"mtime: absent":"mtime: stat");return (long long)st.st_mtime;}
 static unsigned long long get(const unsigned char *p,int n){unsigned long long v=0;int i;for(i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
 static void put_le(unsigned char *p,int n,unsigned long long v){int i;for(i=0;i<n;i++)p[i]=(unsigned char)(v>>(8*i));}
@@ -210,13 +219,12 @@ static void ape_controls(const unsigned char *p,size_t n,const ape_t *base){
 int main(int argc,char **argv){
  char before[65],after[65],da[4400],db[4400],sa[4400],stamp[4400],img_a[6][4400],img_b[6][4400];
  int i,ok_a[6],ok_b[6];
- if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||argv[3][0]!='/'||strstr(argv[3],".."))die("usage ROOT PRODUCT_COM NEW_ABS_OUT");
- /* PRODUCT_COM is whatever APE the caller points at: batch material ape-0043 is the frozen
-    0.0.43 artifact, because the dev-lnx candidate is a thin launcher with no single-file APE.
-    The container format is what this check tests, not which build shipped it. */
+ if(argc!=3||!realpath(argv[1],root)||argv[2][0]!='/'||strstr(argv[2],".."))die("usage ROOT NEW_ABS_OUT");
+ /* Frozen 0.0.43 APE identified by sha256 83343ec1…ea775; file is $HOME/.unisacc-baselines/<sha>.com after the gate hashes it. */
  if(unsetenv("UNISACC_RR_TIME")||unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES")||setenv("UNISACC_RUN_CACHE","0",1))die("clean-environment");
- copy_fit(com,sizeof com,argv[2]);copy_fit(work,sizeof work,argv[3]);
+ copy_fit(work,sizeof work,argv[2]);
  if(mkdir(work,0700))die("new private output required");
+ {int ar=ape0043_com(com,sizeof com);if(ar==0)return 3;if(ar<0)return 1;}
  path(bound,sizeof bound,root,"tools/bound");
  sha_file(com,before);printf("INPUT\tproduct\t%s\tsha256=%s\n",com,before);
  path(da,sizeof da,work,"alpha_dir_7Q");path(db,sizeof db,work,"bravo_longer_dir_9Z");if(mkdir(da,0700)||mkdir(db,0700))die("round dirs");
