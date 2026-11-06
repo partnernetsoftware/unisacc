@@ -108,10 +108,10 @@ function Dump-Pair([string]$name, [int]$rcA, [int]$rcB, [string]$fa, [string]$fb
   $lim = [Math]::Min($ha.Length, $hb.Length)
   for ($i = 0; $i -lt $lim; $i++) { if ($ha[$i] -ne $hb[$i]) { $off = $i; break } }
   if ($off -lt 0 -and $ha.Length -ne $hb.Length) { $off = $lim }
-  Write-Output ("SP_FAIL`t$name`trcA=$rcA`trcB=$rcB`tlenA=$($ha.Length)`tlenB=$($hb.Length)`tmismatch_off=$off`thexA=$(Hex32 $ha)`thexB=$(Hex32 $hb)`texe=$Exe`ttgt=$Tgt")
+  Write-Host ("SP_FAIL`t$name`trcA=$rcA`trcB=$rcB`tlenA=$($ha.Length)`tlenB=$($hb.Length)`tmismatch_off=$off`thexA=$(Hex32 $ha)`thexB=$(Hex32 $hb)`texe=$Exe`ttgt=$Tgt")
 }
 $npass = 0
-Write-Output ("SP_ENTRY`texe=$Exe`ttgt=$Tgt")
+Write-Host ("SP_ENTRY`texe=$Exe`ttgt=$Tgt")
 $ref = Invoke-Cwd $Exe $sp @('-o','plain.ref','plain.c') 55000 $null $null
 $pip = Image-Pipe 'plain.c' 'plain.pipe' 'p' $Tgt
 $bok = ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'plain.ref' 'plain.pipe'))
@@ -156,7 +156,7 @@ function Dump-EFix([string]$label) {
   $n59 = $(if (Test-Path -LiteralPath $p59) { ([IO.File]::ReadAllBytes($p59)).Length } else { -1 })
   $sha = '-'
   if (Test-Path -LiteralPath $p59) { $sha = (Get-FileHash -LiteralPath $p59 -Algorithm SHA256).Hash.ToLowerInvariant() }
-  Write-Output ("SP_E_FIX`t$label`tm0_n=$($b0.Length)`tm0_hex16=$(Hex32 $b0)`tu59_n=$n59`tu59_sha=$sha")
+  Write-Host ("SP_E_FIX`t$label`tm0_n=$($b0.Length)`tm0_hex16=$(Hex32 $b0)`tu59_n=$n59`tu59_sha=$sha")
 }
 function Write-EFiles([string]$mode) {
   $names = @()
@@ -216,7 +216,7 @@ function Run-E65([string]$label, [string[]]$names) {
   $ok = ($ref.Code -eq 0 -and $eok -and (Same 's65.ref' 's65.pipe'))
   $rs = CmdStats $Exe $refArgs
   $fs = CmdStats $Exe $inargs
-  Write-Output ("SP_E`tlabel=$label`tok=$ok`tstep=$eStep`tref_rc=$($ref.Code)`tref_argc=$($rs.argc)`tref_cmdlen=$($rs.cmdlen)`tref_err=$(Clip400 $ref.Err)`tpipe_rc=$($ePipe.Code)`tframe_argc=$($fs.argc)`tframe_cmdlen=$($fs.cmdlen)`tpipe_err=$(Clip400 $ePipe.Err)")
+  Write-Host ("SP_E`tlabel=$label`tok=$ok`tstep=$eStep`tref_rc=$($ref.Code)`tref_argc=$($rs.argc)`tref_cmdlen=$($rs.cmdlen)`tref_err=$(Clip400 $ref.Err)`tpipe_rc=$($ePipe.Code)`tframe_argc=$($fs.argc)`tframe_cmdlen=$($fs.cmdlen)`tpipe_err=$(Clip400 $ePipe.Err)")
   if (-not $ok) { Dump-Pair "E 65-source-tape-pipe-cmp $label" $ref.Code $(if ($eok) { 0 } else { 1 }) 's65.ref' 's65.pipe' }
   return $ok
 }
@@ -226,8 +226,8 @@ $eAsis = Run-E65 'asis' $names
 $names = Write-EFiles 'lf'
 Dump-EFix 'lf'
 $eLf = Run-E65 'lf' $names
-if ($eAsis) { $npass++ }
-Write-Output ("SP_E_VAR`tasis=$eAsis`tlf=$eLf")
+if ($true -eq $eAsis) { $npass++ }
+Write-Host ("SP_E_VAR`tasis=$eAsis`tlf=$eLf")
 # H wrong target
 $wrong = $(if ($Tgt -ceq 'win/x86_64') { 'lnx/x86_64' } else { 'win/x86_64' })
 $pip = Image-Pipe 'plain.c' 'plain.wrong.pipe' 'w' $wrong
@@ -235,12 +235,12 @@ if ($pip -ne 0 -or -not (Same 'plain.ref' 'plain.wrong.pipe')) { $npass++ } else
 # F reject
 $ref = Invoke-Cwd $Exe $sp @('-o','bad.ref','bad.c') 20000 $null $null
 $pip = Image-Pipe 'bad.c' 'bad.pipe' 'b' $Tgt
-if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ } else { Write-Output ("SP_FAIL`tF reject-stderr-and-rc`trcA=$($ref.Code)`trcB=$pip`texe=$Exe`ttgt=$Tgt") }
+if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ } else { Write-Host ("SP_FAIL`tF reject-stderr-and-rc`trcA=$($ref.Code)`trcB=$pip`texe=$Exe`ttgt=$Tgt") }
 $streamOk = $npass -eq 6
 Write-Output ("STREAM`t" + $(if ($streamOk) { 'PASS' } else { 'FAIL' }) + "`t" + $(if ($streamOk) { 0 } else { 1 }) + "`t$streamNote npass=$npass/6")
 [IO.File]::WriteAllBytes((Join-Path $sp 'argcprobe.c'), [Text.Encoding]::ASCII.GetBytes("#include <stdio.h>`nint main(int argc,char **argv){printf(`"ARGC %d LAST %s\n`",argc,(argc>0&&argv[argc-1])?argv[argc-1]:`"-`");return 0;}`n"))
 $ac = Invoke-Cwd $Exe $sp @('-o','argcprobe.exe','argcprobe.c') 55000 $null $null
-Write-Output ("SP_ARGC_BUILD`trc=$($ac.Code)`terr=$(Clip400 $ac.Err)")
+Write-Host ("SP_ARGC_BUILD`trc=$($ac.Code)`terr=$(Clip400 $ac.Err)")
 if ($ac.Code -eq 0) {
   $probe = Join-Path $sp 'argcprobe.exe'
   foreach ($n in @(40, 63, 64, 65, 100, 200)) {
@@ -248,7 +248,7 @@ if ($ac.Code -eq 0) {
     $outp = Join-Path $sp ("argc-$n.out")
     $r = Invoke-Cwd $probe $sp $aa 15000 $null $outp
     $txt = $(if (Test-Path -LiteralPath $outp) { [IO.File]::ReadAllText($outp) } else { '' })
-    Write-Output ("SP_ARGC`tn=$n`texpect=$($n+1)`trc=$($r.Code)`tout=$(Clip400 $txt)`terr=$(Clip400 $r.Err)")
+    Write-Host ("SP_ARGC`tn=$n`texpect=$($n+1)`trc=$($r.Code)`tout=$(Clip400 $txt)`terr=$(Clip400 $r.Err)")
   }
 }
 exit 0
