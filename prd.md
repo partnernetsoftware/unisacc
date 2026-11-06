@@ -29,12 +29,12 @@
 
 ## 1. unisacc.com 是什么
 
-**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——自身原生运行在 5 个切片上（win/arm64 靠模拟），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练，由一个通用执行器推理——以网换逻辑。
+**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练，由一个通用执行器推理——以网换逻辑。
 
 **一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
 - **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
-- **自身运行在五原生切片 + win/arm64 系统模拟**（注意）：文件里只有 5 个原生执行切片（win/x86_64、lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64），**没有 win/arm64 原生切片**——Windows on ARM 上靠 win/x86_64 PE 的系统模拟运行。win/arm64 原生入口是已知缺口 C44-WIN-ARM64-01（0.0.44 待做，见 §9.4）。
+- **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据。**现状缺口**：当前 0.0.44-rc3 的 APE 只有五片；win/x86_64 的片在 Windows 上崩溃（argv 缺陷，WIN-DEBUG-LOOP / NATIVE-WIN-PE 在做）；win/arm64 已能 `-b win/arm64` 交叉编出 PE（machine 0xAA64），release-build 已能出 slice-win-arm64（提交 `0b22d546e3`），发布打包第 6 槽在做，目标是 0.0.45 候选 c45-2 出六片。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
 - **自举**：宿主构建 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。
 
@@ -108,6 +108,7 @@
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
 | 携带头与 glibc 的转换语义是否一致 | `sh ./unisacc.com tools/check-libc-probes.cx -- ROOT` | 七个自校验 C 程序，期望值是 glibc 字面量（运行时不靠宿主 gcc）：`putc` / `SIGUSR1,SIGUSR2` / `NAN` 符号 / scanf `%[...]`（含 16000 字符字段与宽度边界）/ printf `%n`（含截断不越界）/ scanf `%n`（含 `"%n%s"` 不跳空白）/ `strtod` 的 inf、infinity、nan。每条以 `.c` 与 `.cx` 两种输入各跑一次；`putc` 一行要产品重建（名字表在 `p3-package.bin`）才转绿 |
 | 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `work/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
+
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
 
@@ -185,7 +186,7 @@ L3 资源                    头文件、事实表等
 
 ## 5. 源码结构（src/ 六层 + cx/ 树）
 
-`src/unisacc.cx` 是入口，`use drive`。六层（`src/` 共 15 文件、5352 行）：
+`src/unisacc.cx` 是入口，`use drive`。六层（文件数与行数以 `tests/srcshape.tsv` 为准）：
 
 | 层 | 文件 | 职责 |
 |---|---|---|
@@ -200,7 +201,7 @@ L3 资源                    头文件、事实表等
 
 **cx/ 树**（`.cx` 模块体系，`#pragma unisa module/use`）：
 
-- `cx/sys/`（L0，23 文件）：对接 libc/POSIX 的唯一层（env/fs/proc/time/net/poll/tty/posix/sha/mem/dl/sig…）。
+- `cx/sys/`（L0）：对接 libc/POSIX 的唯一层（env/fs/proc/time/net/poll/tty/posix/sha/mem/dl/sig…）。
 - `cx/mem/`（L0）：所有者缓冲、arena、slice（Rust 式 Vec/String/所有权）。
 - `cx/text/`（L0）：带长度字节串比较/格式化/拼接（`tx_*`）。
 - `ext/crypto/`（包层 EXT）：纯 cx 密码学（sha256/b64/hkdf/aes-gcm/chacha20poly1305/x25519/bn/der/p256/rsa/x509/tls13）。
@@ -213,7 +214,7 @@ L3 资源                    头文件、事实表等
 
 ## 6. 事实表与权重（exec/ 与 weights/ 与 seed/）
 
-- `exec/facts/`（226 文件）：编译各阶段的**事实表**（pp-targets、lex-consts、lower-abi、image-elf/macho/pe…），经 `tools/facts-gen.cx` 生成，只经「事实表 → 生成器 → 表」修改。
+- `exec/facts/`：编译各阶段的**事实表**（pp-targets、lex-consts、lower-abi、image-elf/macho/pe…），经 `tools/facts-gen.cx` 生成，只经「事实表 → 生成器 → 表」修改。
 - `exec/`（enc/lex/lower/opt/parse/pp/prune/tapecheck…）：各阶段网络的事实与构造（含 `exec/c/` 旧 C 参考，只供对照）。
 - `weights/gold/`：十八网金表；`weights/*.f32/i8.unisa`：构造出的权重。
 - `seed/`：C 种子构造器（`gold_<阶段>_label.c` 规则形式、`ident.c` 身份、`ape.c` 打包）。
@@ -226,14 +227,14 @@ L3 资源                    头文件、事实表等
 sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ```
 
-- `--smoke`：16 条本地冒烟（product 层 smoke 批次）。
+- `--smoke`：本地冒烟（product 层 smoke 批次，条数以 `--list` 为准）。
 - `--list`：列全部批次 + 覆盖行 + 计划计数。
 - `--all ABS_SESSION`：全量资格判定（`tools/all-waves.cx` 会话 + `tests/all-aggregate.cx` 聚合）。
 
 ### 7.2 注册表（两份 TSV）
 
-- `tests/batches.tsv`（350 行）：每个测试批次一行——id、implementation、layer、source、mode、platform、budget、materials、entry、args、coverage、expect。`IMPLEMENTED` 才进 QUALIFIED，`PLANNED` 不进。
-- `tests/coverage.tsv`（331 行）：每个覆盖行一行——id、layer、implementation、expected_or_gap、source。一行被至少一个 IMPLEMENTED 批次 PASS 即 satisfied。
+- `tests/batches.tsv`（行数以 `tests/run.cx -- --list` 为准）：每个测试批次一行——id、implementation、layer、source、mode、platform、budget、materials、entry、args、coverage、expect。`IMPLEMENTED` 才进 QUALIFIED，`PLANNED` 不进。
+- `tests/coverage.tsv`（行数以 `--list` 为准）：每个覆盖行一行——id、layer、implementation、expected_or_gap、source。一行被至少一个 IMPLEMENTED 批次 PASS 即 satisfied。
 
 ### 7.3 分层（coverage.tsv 的 layer 列）
 
@@ -244,7 +245,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | negative | 30 | 具名拒绝、坏输入、语义级坏包 |
 | product | 22 | 产品端到端（编译/运行/镜像字节） |
 | library | 11 | 库/ABI（libunisacc、头布局） |
-| platform | 6 | 跨平台（六目标写程序；原生宿主只有 5 切片 + win/arm64 模拟，见 §1） |
+| platform | 6 | 跨平台（六目标写程序；六 ISA 切片需求与现状缺口见 §1） |
 | properties | 9 | 优化/property 性质 |
 
 ### 7.4 19 张域矩阵（tests/*-domain-matrix.tsv）
@@ -265,14 +266,14 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 路径 | 内容 |
 |---|---|
-| `src/` | 产品六层入口（15 文件，5352 行，srcshape 棘轮只降不升） |
+| `src/` | 产品六层入口（规模以 `tests/srcshape.tsv` 为准，srcshape 棘轮只降不升） |
 | `cx/` | `.cx` 模块树（sys/mem/text = L0；core/driver/runtime/compiler = L1）；包层在 `ext/<package>/`（crypto 在此） |
 | `exec/` | 各阶段事实与构造（facts/enc/lex/lower/opt/parse/pp/prune/tapecheck；c/ 旧 C 参考） |
 | `weights/` | 十八网金表 + 构造权重 |
 | `seed/` | C 种子构造器（gold label 规则、ident.c 身份、ape 打包） |
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
-| `tools/` | 开发工具（378 个 .cx，`ls tools/*.cx | wc -l` 2026-11-06：生成器/棘轮/refactor/symindex/all-waves…） |
+| `tools/` | 开发工具（个数以 `ls tools/*.cx` 为准：生成器/棘轮/refactor/symindex/all-waves…） |
 | `plans/` | 活跃计划（v0.0.4x 路线 + 架构/分层/缺陷；已完成的归档到 archive/plans） |
 | `docs/` | 规格/术语（spec.md 在根、docs/glossary.md、docs/cx/） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
@@ -289,19 +290,13 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点(2026-11-06,事实取自 CHANGELOG.md 0.0.44-rc1 段、plans/rc1-gates-2026-11-06.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
-今日主线:**0.0.44-rc1**(只发 lnx/x86_64 候选,不打 0.0.44 正式标:两代不动点加六目标同候选证据未达到;不 push、不上传、不签名;CI 没跑,六目标原生证据 0/6)。已装候选(dev-lnx,rev `7266862b08`):`--version` = `unisacc 0.0.44`,entry `0a82f989`(1,789,094B)、包 `7080b53a`(1,659,574B)——2026-11-06 在共享检出用 `sha256sum unisacc.com.dev/*` 复核一致;APE `a76e5fc1`(5,494,758B,lnx/x86_64 冒烟 `RELEASE_APE SMOKE ok=5 failed=0`,取自 rc1-gates 门槛 6,本轮未重跑);lnx/x86_64 候选 `c3996bd4` gen1=gen2=gen3(chain-fixed-point 批次,门槛 4)。门槛现状:2、4 达成,3、6、8 部分/已有证据,1、5、7 待候选(UNMEASURED),9、10 未完——逐条以 plans/rc1-gates-2026-11-06.md 为准。
+当前节点(2026-11-06,事实取自 CHANGELOG.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
+今日主线:**0.0.45 开发中**。0.0.44 的 rc3(APE sha256 以 `54bb97a2` 开头,5,608,646 字节,源 `b1a219cf7d`)已于 2026-11-06 作为公开 prerelease `v0.0.44-rc3-candidate` 发布,非 Latest,不是正式版;正式标还缺什么见 rc3-verify 与 CHANGELOG。0.0.45 当前候选 c45-1(克隆提交 `f871fd80a3`,五片,fixedpoint 五项 same);目标 c45-2 出六片(六 ISA 切片需求与缺口见 §1)。0.0.45 四个一级目标:TSV 无 hardcode、loader 优化、切片流+网、持续加速。
 
 ```text
-0.0.44-rc1 收口(进行中,督导 omp-cc-opus;门槛表 plans/rc1-gates-2026-11-06.md,任务 [RC1-GATES])
-├─ 已装并复核:entry 0a82f989 / pkg 7080b53a / APE a76e5fc1;ROOT_IDENTITY assertions=9 failed=0
-├─ 门槛 1 `--all` FAIL 集合 ⊆ tests/waivers-0.0.44.tsv(用 tests/check-known-fail.cx 判)——UNMEASURED(待仓外干净树+候选)
-├─ 门槛 5/7 `--version`/check-limits/kernel-base/facts-current、146 材料批次 all-waves 全量——UNMEASURED(待会话;
-│  材料必须在最终 rev 上现场重建并在 init 后 diff materials.tsv,见 tools/all-waves.cx 会话要点)
-├─ 已知限制(CHANGELOG 已写):lnx/arm64 仅 qemu 模拟实跑;osx/win NOT_RUN(whole-o 路线);win/arm64 无片;
-│  STAGE-REJECT 已撤回(stages 批次如实红);运行库每对象各带一份;-c 只告警;c-negative 22 项(A 类 12 静默错码,P1→0.0.45);pp-negative 2 项
-├─ QUALIFIED 缺口(未变):外平台格需 CI 6 原生 runner;CI 工作流已改为 ape_sha256+commit 钉身份,仅手动触发,未跑
-└─ 未签名、未公开(先 QUALIFIED 再发布)
+0.0.44-rc3 prerelease → 正式标(状态以 CHANGELOG / rc3-verify 为准,不在此手抄)
+├─ 已知限制以 CHANGELOG 为准;外平台格需六个原生 runner 同候选证据(见 §1 缺口)
+└─ rc1 阶段的门槛与身份已过期,见 CHANGELOG 与归档
 
 三层布局与 CORE-MIN(方向:主人 11-05 定 CORE-MIN [P1-0.0.45];实测依据 plans/layout-measure-2026-11-05.md)
 ├─ 现状三层:loader(APE 头,识别 OS/ISA、取包) / ISA 切片(每 ISA 一个 entry ELF,全是机器码,lnx/x86_64 entry 1,789,094B)/ 模型(尾部一份 UNIPKG1 包,平台无关,1,659,574B;APE-ONEPKG 已落:APE 8,512,083→5,477,539B 实测,发布 APE 为 5,494,758B)
@@ -324,27 +319,25 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
-| 上一发布 0.0.43 | `83343ec1`，5,145,706 B，rev `edc2c7700b`（当前工作树 dev-lnx 薄壳见 §9.1） | `tools/com-tree.cx` |
-| 当前候选 0.0.44-rc1 | entry `0a82f989`（1,789,094B）、包 `7080b53a`（1,659,574B）、APE `a76e5fc1`（5,494,758B）、rev `7266862b08`；仅 lnx/x86_64，不打正式标 | [CHANGELOG.md](CHANGELOG.md)、[plans/rc1-gates-2026-11-06.md](plans/rc1-gates-2026-11-06.md) |
+| 上一发布 0.0.43 | 身份见 §3 | `tools/com-tree.cx` |
+| 当前发布与候选 | 0.0.44-rc3(APE `54bb97a2…`,5,608,646 B,源 `b1a219cf7d`,公开 prerelease,非 Latest);0.0.45 候选 c45-1(`f871fd80a3`,五片) | [CHANGELOG.md](CHANGELOG.md)、§9.1 |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
-| 棘轮 | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape，只降不升 | `tools/ratchets.cx` |
-| 事实表 | 只经 `tools/facts-gen.cx --check/--write`（名表生成器 `tools/nametab-gen.cx` 已于 2026-11-02 停止生成并删除，零消费者，字节等价验证 648a47ca，见 [plans/w4-dedupe-2026-11-02.md](plans/w4-dedupe-2026-11-02.md)） | `exec/facts/` |
+| 棘轮 | 13 项(以 `tools/ratchets.cx` 末行为准,不在此列名),只降不升 | `tools/ratchets.cx` |
+| 事实表 | 只经 `tools/facts-gen.cx --check/--write` | `exec/facts/` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
-### 9.3 上一发布 0.0.43 的状态（历史；当前状态见 §9.1）
+### 9.3 上一发布 0.0.43(历史)
 
-- 上一发布 0.0.43 = `83343ec1`（5,145,706 B，rev `edc2c7700b`）。五片：win/x86_64 `18d2757f`、lnx/x86_64 `759c520a`、lnx/arm64 `6703dd4d`、osx/x86_64 `581300df`、osx/arm64 `7e3d267b`；两代自举逐字节相同。当前工作树是 dev-lnx 薄壳（见 §9.1 当前节点）。
-- 门禁（0.0.43 当时）：七棘轮 `ok=7`、`--smoke` 16/0、`release-ape smoke` 5/5。0.0.44-rc1 的门禁见 §9.1 与 plans/rc1-gates-2026-11-06.md。
-- **QUALIFIED 缺口**（详见 [plans/release-0.0.43.md](plans/release-0.0.43.md)）：73 个外平台格（需 CI 6 原生 runner）+ ~24 BLOCKED（5 个 owner-ruling 需主人裁定范围）。本机 linux/x86_64 物理无法实跑其他 OS，故 QUALIFIED 未达成、未签名、未公开。
+历史状态见 [plans/release-0.0.43.md](plans/release-0.0.43.md);身份见 §3。
 
 ### 9.4 路线
 
 - **0.0.43**：已发布（历史，主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
-- **0.0.44**（当前为 0.0.44-rc1 收口，见 §9.1）：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
-- **0.0.45 / 0.0.46**：模块外部共享（含通用 APE loader 模板 C45-LOADER-01、ujs 复用、编译期所有权路线 C、范式命名）/ agent harness（cx-csih）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
+- **0.0.44**（rc3 已作公开 prerelease 发布，正式标条件见 §9.1 / rc3-verify）：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
+- **0.0.45**：四个一级目标（TSV 无 hardcode、loader 优化、切片流+网、持续加速）加六 ISA 切片需求（见 §1）；候选 c45-1 五片，c45-2 目标六片。**0.0.46**：agent harness（cx-csih，归 csih 车道）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
 <a id="optimization-leads"></a>
