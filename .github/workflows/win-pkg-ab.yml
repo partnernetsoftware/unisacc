@@ -161,6 +161,59 @@ jobs:
           Say 'B ok -> package discovery works on win; B "bad kernel header" -> the container read is the fault'
           Say 'keep the kernel resource dump above: its head bytes show whether the read was corrupted'
 
+  # W45-WIN-FFI (diagnostic branch only): compile and run the two FFI probes with the candidate's own
+  # win slice, then compare stdout with the .expect file.  The four files travel with this branch
+  # because the CI test commit predates them.
+  win-ffi:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path diag | Out-Null
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'unisacc.com' --dir diag --clobber
+          if (!(Test-Path 'diag/unisacc.com')) { Write-Output 'FATAL: no candidate'; exit 1 }
+      - name: Run the FFI probes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          function Say([string]$s) { Write-Host $s }
+          function Run([string]$file, [string[]]$a, [string]$label) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start()
+              $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(120000)) { $p.Kill($true); Say "$label TIMEOUT"; return $null }
+              Say ("{0} exit={1} stdout={2} stderr={3}" -f $label, $p.ExitCode,
+                (($o.Result -replace '[\r\n]+', ' ')), (($e.Result -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(200, $e.Result.Length))))
+              return @{ rc = $p.ExitCode; out = $o.Result }
+            } catch { Say "$label START FAILED: $_"; return $null } finally { $p.Dispose() }
+          }
+          foreach ($p in @('strdup','pread')) {
+            $src = Join-Path $PWD ("win-ffi/win-ffi-{0}.c" -f $p)
+            $out = Join-Path $PWD ("diag/win-ffi-{0}.exe" -f $p)
+            if (!(Test-Path $src)) { Say "win-ffi-$p NOT_RUN (source missing)"; continue }
+            $c = Run $com @('-o', $out, $src) "win-ffi-$p compile"
+            if (!(Test-Path $out)) { Say "win-ffi-$p NOT_RUN (no image)"; continue }
+            Push-Location (Join-Path $PWD 'win-ffi')
+            $r = Run $out @() "win-ffi-$p run"
+            Pop-Location
+            $want = [IO.File]::ReadAllText((Join-Path $PWD ("win-ffi/win-ffi-{0}.expect" -f $p))).Replace("`r`n","`n")
+            $got = if ($r) { $r.out.Replace("`r`n","`n") } else { '' }
+            Say ("win-ffi-{0} match={1} want={2} got={3}" -f $p, ($got -ceq $want), ($want -replace '[\r\n]+',' '), ($got -replace '[\r\n]+',' '))
+          }
+
+
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
   # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
