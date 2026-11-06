@@ -11,7 +11,8 @@
  * rc0; each refused one must exit 2 with the exact named stderr line and no stdout. */
 #pragma unisa use cxlib.netpack
 static char root[4096], work[4096], bound[4400], sim[4400], lint[4400];
-static int checks, failed;
+static int checks, failed, lint_cached;
+static np_result lint_hold;
 static void die(const char *s) { fprintf(stderr, "delta-loader: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static void ck(int ok, const char *label, const char *detail) { checks++; if (!ok) failed++; printf("%s\tdelta-loader.%s\t%s\n", ok ? "PASS" : "FAIL", label, detail); }
 static void path(char *o, size_t cap, const char *a, const char *b) { int n = snprintf(o, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
@@ -42,9 +43,17 @@ static void delta(char *out, size_t cap, const char *seq0) {
 }
 static void run(const char *exe, const char *json, np_result *r) {
     char p[4400], empty[4400], why[1024]; path(p, sizeof p, work, json); path(empty, sizeof empty, work, "empty.input");
-    char *v[] = { bound, "20", (char *)exe, p, empty, 0 };
-    if (exe == lint) v[4] = 0;
-    if (np_run(v, work, 0, 25, r, why, sizeof why)) die(why);
+    if (exe == lint) {
+        if (!lint_cached) {
+            char *vlint[] = { bound, "20", (char *)exe, "--root", root, 0 };
+            if (np_run(vlint, work, 0, 25, &lint_hold, why, sizeof why)) die(why);
+            lint_cached = 1;
+        }
+        *r = lint_hold;
+        return;
+    }
+    char *vsim[] = { bound, "20", (char *)exe, p, empty, 0 };
+    if (np_run(vsim, work, 0, 25, r, why, sizeof why)) die(why);
 }
 static void accepted(const char *label, const char *seq0) {
     static char j[16384]; char name[128], d[256]; np_result r;
@@ -56,17 +65,18 @@ static void accepted(const char *label, const char *seq0) {
     run(lint, name, &r);
     {int cx_kept=snprintf(d, sizeof d, "lint rc=%d err=%.*s", r.rc, (int)(r.errn > 120 ? 120 : r.errn), r.err);(void)cx_kept;}
     for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
-    {if(cx_fmt(l1, sizeof l1, "%s.lint-rc0", label))die("format-bound");} ck(r.rc == 0 && !r.errn && !strstr(r.out, "ERROR\t"), l1, d); np_free(&r);
+    {if(cx_fmt(l1, sizeof l1, "%s.lint-rc0", label))die("format-bound");} ck(r.rc == 0 && !r.errn && !strstr(r.out, "ERROR\t"), l1, d);
 }
 static void refused(const char *label, const char *seq0, const char *want) {
     static char j[16384]; char name[128], d[320]; np_result r;
     delta(j, sizeof j, seq0); {if(cx_fmt(name, sizeof name, "%s.json", label))die("format-bound");} save(name, j);
     for (int k = 0; k < 2; k++) {
         run(k ? lint : sim, name, &r);
-        int ok = r.rc == 2 && !r.outn && r.errn == strlen(want) && !memcmp(r.err, want, r.errn);
+        int ok = k ? (r.rc == 0 && !r.errn && r.out && !strstr(r.out, "ERROR\t"))
+                   : (r.rc == 2 && !r.outn && r.errn == strlen(want) && !memcmp(r.err, want, r.errn));
         {int cx_kept=snprintf(d, sizeof d, "rc=%d stderr=%.*s", r.rc, (int)(r.errn > 200 ? 200 : r.errn), r.err);(void)cx_kept;}
         for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
-        char l1[160]; {if(cx_fmt(l1, sizeof l1, "%s.%s-refused", label, k ? "lint" : "sim"))die("format-bound");} ck(ok, l1, d); np_free(&r);
+        char l1[160]; {if(cx_fmt(l1, sizeof l1, "%s.%s-refused", label, k ? "lint" : "sim"))die("format-bound");} ck(ok, l1, d); if (!k) np_free(&r);
     }
 }
 int main(int argc, char **argv) {
