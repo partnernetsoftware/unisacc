@@ -297,10 +297,10 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
 当前节点(2026-11-06,事实取自 CHANGELOG.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
-今日主线:**0.0.45 开发中**。0.0.44 的 rc3(APE sha256 以 `54bb97a2` 开头,5,608,646 字节,源 `b1a219cf7d`)已于 2026-11-06 作为公开 prerelease `v0.0.44-rc3-candidate` 发布,非 Latest,不是正式版;正式标还缺什么见 rc3-verify 与 CHANGELOG。0.0.45 当前候选 c45-1(克隆提交 `f871fd80a3`,五片,fixedpoint 五项 same);目标 c45-2 出六片(六 ISA 切片需求与缺口见 §1)。0.0.45 四个一级目标:TSV 无 hardcode、loader 优化、切片流+网、持续加速。
+今日主线:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [CHANGELOG.md](CHANGELOG.md) 与 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
 
 ```text
-0.0.44-rc3 prerelease → 正式标(状态以 CHANGELOG / rc3-verify 为准,不在此手抄)
+0.0.45 公开预发布 v0.0.45 → 0.0.46 质量债(全批资格、win 缺口、契约层;见 plans/v0.0.46-unisacc.md)
 ├─ 已知限制以 CHANGELOG 为准;外平台格需六个原生 runner 同候选证据(见 §1 缺口)
 └─ rc1 阶段的门槛与身份已过期,见 CHANGELOG 与归档
 
@@ -326,7 +326,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | 身份见 §3 | `tools/com-tree.cx` |
-| 当前发布与候选 | 0.0.44-rc3(APE `54bb97a2…`,5,608,646 B,源 `b1a219cf7d`,公开 prerelease,非 Latest);0.0.45 候选 c45-1(`f871fd80a3`,五片) | [CHANGELOG.md](CHANGELOG.md)、§9.1 |
+| 当前发布与候选 | 0.0.45(公开 prerelease `v0.0.45`,APE `ae0b12d8…`,6,128,709 B,源 `fa0a747c7f`,非 Latest);更早:0.0.44-rc3(`54bb97a2…`,prerelease) | [CHANGELOG.md](CHANGELOG.md)、[plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)、§9.1 |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
@@ -343,7 +343,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 - **0.0.43**：已发布（历史，主计划 [plans/v0.0.43.md](plans/v0.0.43.md)）。
 - **0.0.44**（rc3 已作公开 prerelease 发布，正式标条件见 §9.1 / rc3-verify）：方向三条——**清理干扰信息、持续修 bug、改进速度**（主人 2026-11-01 定）。编译加速是第一优先级（C44-SPEED-01），另有体积（C44-SIZE-01）、win/arm64（C44-WIN-ARM64-01）、libunisacc（C44-LIBUNISACC-01）、`.cx` 模块化/内存安全（C44-CX-MODULE-01 / C44-CX-MEMORY-01）、去 .py/.sh（C44-NATIVE-01）、测试结构（C44-TEST-01）。正文见 [plans/v0.0.44.md](plans/v0.0.44.md)。
-- **0.0.45**：四个一级目标（TSV 无 hardcode、loader 优化、切片流+网、持续加速）加六 ISA 切片需求（见 §1）；候选 c45-1 五片，c45-2 目标六片。**0.0.46**：agent harness（cx-csih，归 csih 车道）。见 [plans/v0.0.45.md](plans/v0.0.45.md)、[plans/v0.0.46.md](plans/v0.0.46.md)。
+- **0.0.45**：四个一级目标（TSV 无 hardcode、loader 优化、切片流+网、持续加速）加六 ISA 切片需求（见 §1）；已发布公开预发布 `v0.0.45`(六片)。**0.0.46**：unisacc 本体的平台完整性与资格（[plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)）；agent harness（cx-csih，归 csih 车道，见 [plans/v0.0.46.md](plans/v0.0.46.md)）。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
 <a id="optimization-leads"></a>
