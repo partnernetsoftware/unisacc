@@ -421,7 +421,9 @@ jobs:
               $label, $mach, $mag, $chs, $dllc, $sub, $sal, $fal, $shdr, $nsec, $rel, $imp, $b.Length)
           }
           $ctrl = Join-Path $env:SystemRoot 'System32/notepad.exe'
-          if (Test-Path $ctrl) { PeFields $ctrl 'control(notepad.exe)' } else { Write-Host 'HDR control: notepad.exe absent' }
+          if (Test-Path $ctrl) { PeFields $ctrl 'control(notepad.exe GUI)' } else { Write-Host 'HDR control: notepad.exe absent' }
+          $ctrlc = Join-Path $env:SystemRoot 'System32/where.exe'
+          if (Test-Path $ctrlc) { PeFields $ctrlc 'control(where.exe CUI)' } else { Write-Host 'HDR control: where.exe absent' }
           PeFields $exe 'ours(slice-win-arm64)'
           Run $exe @('--version') 'slice-arm64 --version'
           Run $exe @('--help') 'slice-arm64 --help'
@@ -445,4 +447,16 @@ jobs:
             [BitConverter]::ToUInt16($b,$opt+48), [BitConverter]::ToUInt16($b,$opt+50))
           Run $patched @('--version') 'slice-arm64(subsys 6.02) --version'
           Run $patched @('--help') 'slice-arm64(subsys 6.02) --help'
+          # DllCharacteristics: ours is 0x8100 (TS_AWARE|NX), a shipping ARM64 exe is 0xc160
+          # (TS_AWARE|GUARD_CF|NX|DYNAMIC_BASE|HIGH_ENTROPY_VA).  Test the missing DYNAMIC_BASE bit.
+          $patched2 = Join-Path $PWD 'diag/slice-win-arm64-dllchar.exe'
+          Copy-Item $exe $patched2 -Force
+          $b2 = [IO.File]::ReadAllBytes($patched2)
+          $pe2 = [BitConverter]::ToUInt32($b2, 60); $o2 = $pe2 + 24
+          $dc = [BitConverter]::ToUInt16($b2, $o2 + 70)
+          Write-Output ("DLLCHAR before=0x{0:x4}" -f $dc)
+          [BitConverter]::GetBytes([UInt16]($dc -bor 0x00E0)).CopyTo($b2, $o2 + 70)
+          [IO.File]::WriteAllBytes($patched2, $b2)
+          Write-Output ("DLLCHAR after =0x{0:x4}" -f [BitConverter]::ToUInt16($b2, $o2 + 70))
+          Run $patched2 @('--version') 'slice-arm64(dllchar 0xc160) --version'
 
