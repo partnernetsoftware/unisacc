@@ -3,9 +3,15 @@ name: win-pkg-ab
 # (file-mode / offset) fault?  One windows-2025 job, the published c45-2a candidate, three variants on
 # the same host, each compiling AND running a hello:
 #
-#   A  UNISA_CONTAINER=<downloaded pkg.bin>            hello -b win/x86_64 -o a.exe
-#   B  nothing set, UNISACC_RR_TIME=1                  hello -b win/x86_64 -o b.exe
-#   C  UNISA_KERNEL=<kernel/x86_64> + _SHA             hello -b win/x86_64 -o c.exe
+#   A  UNISA_CONTAINER=/nonexistent.bin   (probe: does a setenv'd variable reach getenv at all?)
+#   B  nothing set, UNISACC_RR_TIME=1     (the real measurement: the candidate finds its own package)
+#   C  UNISA_CONTAINER=<real pkg.bin>     (only meaningful if A shows getenv works)
+#
+# Why A is a probe: the win slice's getenv reads the POSIX block after argv
+# (include/stdlib.h:934-941) and never calls GetEnvironmentStringsA, so an environment variable may
+# simply not be visible on windows.  If A's error changes from 'bad kernel header' to a package error
+# the variable DID reach the program; if the error stays the same, the environment is unreadable and
+# variants A/C prove nothing about the package path.
 #
 # Reading the table (opus, 2026-11-06):
 #   A ok,  B fails  -> the package content is fine; the APE cannot find/unpack its own trailer
@@ -85,10 +91,9 @@ jobs:
           if ($found) {
             $k = 'diag/kernel-x86_64.bin'
             $ksha = (Get-FileHash -LiteralPath $k -Algorithm SHA256).Hash.ToLowerInvariant()
-            [IO.File]::WriteAllText('diag/kernel-x86_64.sha', $ksha)
             Write-Output ("KERNEL bytes={0} sha256={1} head={2}" -f (Get-Item $k).Length, $ksha,
               (((Get-Content -LiteralPath $k -AsByteStream -TotalCount 16) | ForEach-Object { $_.ToString('x2') }) -join ''))
-          } else { Write-Output 'KERNEL x86_64 slice NOT FOUND' }
+          } else { Write-Output 'KERNEL x86_64 slice NOT FOUND (the .data dump above still tells read corruption)' }
 
       - name: Run the three variants
         shell: pwsh
@@ -118,29 +123,23 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'diag/hello.c'), "int main(void){return 40;}`n")
           $hello = Join-Path $PWD 'diag/hello.c'
           $pkg = Join-Path $PWD 'diag/pkg.bin'
-          $kern = Join-Path $PWD 'diag/kernel-x86_64.bin'
-          $ksha = if (Test-Path 'diag/kernel-x86_64.sha') { (Get-Content 'diag/kernel-x86_64.sha' -Raw).Trim() } else { $null }
 
           Say '== variant table'
           Say ("{0} | {1} | {2} | {3}" -f 'variant', 'env', 'compile', 'run')
 
           $rows = @()
-          foreach ($v in @('A','B','C')) {
-            $out = Join-Path $PWD ("diag/{0}.exe" -f $v.ToLower())
-            $envh = $null
-            $envdesc = 'none'
-            if ($v -eq 'A') {
-              if (!(Test-Path $pkg)) { $rows += "$v | UNISA_CONTAINER | NOT_RUN(no pkg) | -"; continue }
-              $envh = @{ UNISA_CONTAINER = $pkg }; $envdesc = 'UNISA_CONTAINER=pkg.bin'
-            } elseif ($v -eq 'B') {
-              $envh = @{ UNISACC_RR_TIME = '1' }; $envdesc = 'UNISACC_RR_TIME=1'
-            } else {
-              if (!(Test-Path $kern)) { $rows += "$v | UNISA_KERNEL | NOT_RUN(no kernel) | -"; continue }
-              $envh = @{ UNISA_KERNEL = $kern }; $envdesc = 'UNISA_KERNEL=kernel-x86_64.bin'
-              if ($ksha) { $envh['UNISA_KERNEL_SHA'] = $ksha; $envdesc += '+SHA' }
-            }
-            Say ("-- variant {0}: {1}" -f $v, $envdesc)
-            $crc = Run $com @('-b','win/x86_64','-o',$out,$hello) ("{0} compile" -f $v) $envh
+          $nonexistent = Join-Path $PWD 'diag/nonexistent.bin'
+          $variants = @(
+            @{ v = 'A'; out = 'diag/a.exe'; envh = @{ UNISA_CONTAINER = $nonexistent }; desc = 'UNISA_CONTAINER=/nonexistent.bin (probe)' },
+            @{ v = 'B'; out = 'diag/b.exe'; envh = @{ UNISACC_RR_TIME = '1' }; desc = 'nothing set + UNISACC_RR_TIME=1' },
+            @{ v = 'C'; out = 'diag/c.exe'; envh = $(if (Test-Path $pkg) { @{ UNISA_CONTAINER = $pkg } } else { $null }); desc = 'UNISA_CONTAINER=<real pkg.bin>' }
+          )
+          foreach ($x in $variants) {
+            $v = $x.v
+            if ($v -eq 'C' -and !(Test-Path $pkg)) { $rows += ("{0} | {1} | NOT_RUN(no pkg) | -" -f $v, $x.desc); continue }
+            $out = Join-Path $PWD $x.out
+            Say ("-- variant {0}: {1}" -f $v, $x.desc)
+            $crc = Run $com @('-b','win/x86_64','-o',$out,$hello) ("{0} compile" -f $v) $x.envh
             $runrc = '-'
             if (Test-Path $out) {
               $img = [IO.File]::ReadAllBytes($out)
@@ -148,8 +147,10 @@ jobs:
               $r = Run $out @() ("{0} run" -f $v) $null
               if ($null -ne $r) { $runrc = $r }
             } else { Say ("{0} image NOT PRODUCED" -f $v) }
-            $rows += ("{0} | {1} | rc={2} | rc={3}" -f $v, $envdesc, $crc, $runrc)
+            $rows += ("{0} | {1} | rc={2} | rc={3}" -f $v, $x.desc, $crc, $runrc)
           }
           Say '== summary'
           foreach ($r in $rows) { Say $r }
-          Say 'A ok/B fail -> discovery; A fail/C ok -> package read; A fail/C fail -> file mode; all ok -> not reproduced'
+          Say 'A error changes (package, not kernel) -> getenv works; A unchanged -> getenv unreadable on win, C proves nothing'
+          Say 'B ok -> package discovery works on win; B "bad kernel header" -> the container read is the fault'
+          Say 'keep the kernel resource dump above: its head bytes show whether the read was corrupted'
