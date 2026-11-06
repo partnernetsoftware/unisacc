@@ -7,11 +7,9 @@
 判定口径在块外。它登记的批次是 `cx-root-identity`，每次全量都会重算并逐行比对）：
 
 <!-- identity-begin -->
-product_kind	split2
-product_digest	aa1250448dd8bd5bddf10b85f1e53bd05fe79eae6d5c2c3c716bdc4e03aeabf4
-entry.elf	0a82f989670409c280c35513ef25dc20e655de7d6c98a09407ae7d0375a7ade7	1789094
-p3-package.bin	7080b53a66a17ba7c698fcd297fc9f4949d41b9b810906dd31ec24036fb342ed	1659574
-unisacc.com	dc0033f47cd28d99afa261c28f4972278946b2a0b11b9704e95c5753979e002b	1292
+product_kind	ape1
+product_digest	ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0
+unisacc.com	ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0	6128709
 <!-- identity-end -->
 
 三身份 sha256 不在这里另抄一份：上面的生成块就是唯一副本（抄第二份必然漂移）。
