@@ -1,0 +1,155 @@
+/* tests/stream-budget.cx -- resources domain: the stream route's step budget and its recovery.
+ *
+ *   sh ./unisacc.com tests/stream-budget.cx -- ROOT PRODUCT NEW_ABS_OUT
+ *
+ * ROOT is the tree, PRODUCT is the container under test (sh ./unisacc.com normally; a candidate
+ * path while a product patch is pending review), NEW_ABS_OUT is an absent directory under /tmp.
+ *
+ * Two matrix cells, one input file and one product for both, so the recovery half really is the
+ * same container and the same input after the exhaustion half:
+ *   res.steps.stream-exhaust   UNISA_MAXSTEPS=1 on the e2 stage: exit 3, stderr exactly
+ *                              "step budget exhausted (budget 1 steps)\n", empty stdout.
+ *                              rc3 is the contract for out-of-steps (exec/c/run.c:14), a budget
+ *                              stop is not NOT_IMPLEMENTED (rc2).
+ *   res.steps.stream-recovery  the same container and input with the default budget: rc 0 and the
+ *                              pinned output bytes; a second default run repeats them byte for byte.
+ * The product file is hashed before and after, so neither half can pass by another product.
+ * Prints PASS/FAIL per case and STREAM_BUDGET<TAB>assertions=N<TAB>failed=M; exit 0 only when
+ * nothing failed. Linux/x86_64 only: the pinned bytes and the route are this target's. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static char root[4096], prod[4400], work[4400], source[4400], bound[4400];
+static char product_before[65], product_after[65];
+static int assertions, failures;
+
+/* Pinned e2 output for "int x;\n" at --level 2 on lnx/x86_64: the 27-byte UNIPP1 header with
+   body length 7, then the source text. Recovery is exact bytes, never a prefix or a length. */
+static const char *e2_pin = "a0942cb0ac3928ed8732047d565219c2849814fea22914559c321aa639299571";
+
+static void die(const char *s) { fprintf(stderr, "stream-budget: %s\n", s); exit(2); }
+static void ck(int ok, const char *name) {
+    assertions++;
+    if (ok) printf("PASS\t%s\n", name);
+    else { failures++; printf("FAIL\t%s\n", name); }
+}
+static void copy_fit(char *dst, size_t cap, const char *src) {
+    size_t i = 0;
+    if (cap == 0) die("copy-bound");
+    while (src[i] && i + 1 < cap) { dst[i] = src[i]; i++; }
+    if (src[i]) die("copy-bound");
+    dst[i] = 0;
+}
+static void path(char *out, size_t cap, const char *dir, const char *name) {
+    if (cx_fmt(out, cap, "%s/%s", dir, name)) die("path");
+}
+static void put(const char *leaf, const char *s) {
+    char p[4600];
+    path(p, sizeof p, work, leaf);
+    if (cx_write(p, s, (size_t)tx_len(s, 4096))) die(leaf);
+}
+static void digest(const char *p, char *hex) {
+    size_t n = 0;
+    char *s = cx_read(p, &n);
+    if (!s || n == 0) die(p);
+    cx_sha256_hex(s, n, hex);
+    mm_free(s);
+}
+
+/* One e2 stage run: PRODUCT stream e2 ... < in.c, cwd = the scratch, under tools/bound.
+   BUDGET is 0 for the default budget, otherwise the UNISA_MAXSTEPS value to export. */
+static np_result stage(int secs, const char *budget) {
+    char cmd[9000];
+    char *v[8];
+    char *env[2];
+    np_result r;
+    char why[1024];
+    int n = 0;
+    if (cx_fmt(cmd, sizeof cmd, "exec %s stream e2 --level 2 --target lnx/x86_64 --source in.c < in.c", prod)) die("cmd");
+    v[n++] = bound;
+    v[n++] = "12";
+    v[n++] = "sh";
+    v[n++] = "-c";
+    v[n++] = cmd;
+    v[n] = 0;
+    if (budget) { env[0] = (char *)budget; env[1] = 0; }
+    else env[0] = 0;
+    if (np_run(v, work, env, secs, &r, why, sizeof why)) die(why);
+    return r;
+}
+static int has(const np_result *r, const char *s) { return tx_find(r->err, (long)r->errn, s, tx_len(s, 256)) >= 0; }
+
+int main(int argc, char **argv) {
+    np_result ex, rec, again;
+    char *img, *img2;
+    size_t imn = 0, i2n = 0;
+    char hex[65];
+    int shifted = argc > 1 && tx_eqz(argv[1], "--");
+    int base = shifted ? 2 : 1;
+#if !defined(__linux__) || !defined(__x86_64__)
+    fputs("NOT_RUN stream-budget needs Linux/x86_64 (pinned bytes and route are that target's)\n", stderr);
+    return 77;
+#else
+    { struct stat st;
+      if (argc - base == 0) {
+          /* Registered batch: run-batch passes no arguments.  ROOT is this checkout (the batch's cwd
+             is ROOT), PRODUCT is ROOT/unisacc.com, and the scratch is a mkdtemp under TMPDIR, so a
+             batch run never needs out/ and never writes into the tree.  The explicit form below
+             exists so a candidate can be pointed at while a product patch waits for review. */
+          const char *tmp = getenv("TMPDIR");
+          if (sy_cwd(root, (int)sizeof root) != 0) die("cwd");
+          if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) die("product path");
+          if (cx_fmt(work, sizeof work, "%s/stream-budget-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(work)) die("scratch");
+      } else if (argc - base == 3) {
+          if (!realpath(argv[base], root)) die("root");
+          if (!realpath(argv[base + 1], prod)) die("product");
+          if (argv[base + 2][0] != '/' || strlen(argv[base + 2]) >= sizeof work) die("absolute-new-outdir");
+          if (lstat(argv[base + 2], &st) == 0 || errno != ENOENT) die("new-outdir-must-be-absent");
+          copy_fit(work, sizeof work, argv[base + 2]);
+          if (mkdir(work, 0700)) die("mkdir-new-outdir");
+      } else die("usage ROOT PRODUCT NEW_ABS_OUT, or no arguments from the batch runner"); }
+    path(bound, sizeof bound, root, "tools/bound");
+    path(source, sizeof source, work, "in.c");
+    put("in.c", "int x;\n");
+    digest(prod, product_before);
+
+    ex = stage(20, "UNISA_MAXSTEPS=1");
+    ck(ex.rc == 3, "res.steps.stream-exhaust.rc3-out-of-steps");
+    ck(ex.outn == 0, "res.steps.stream-exhaust.stdout-empty");
+    ck(ex.errn == (size_t)tx_len("step budget exhausted (budget 1 steps)\n", 256) &&
+       !memcmp(ex.err, "step budget exhausted (budget 1 steps)\n",
+               (size_t)tx_len("step budget exhausted (budget 1 steps)\n", 256)),
+       "res.steps.stream-exhaust.stderr-exact");
+    if (ex.rc != 3 || ex.errn == 0 || !has(&ex, "step budget exhausted"))
+        fprintf(stderr, "stream-budget: exhaust rc=%d outn=%zu stderr:\n%.*s\n", ex.rc, ex.outn, (int)ex.errn, ex.err ? ex.err : "");
+
+    rec = stage(20, 0);
+    ck(rec.rc == 0, "res.steps.stream-recovery.default-budget-rc0");
+    img = rec.rc == 0 ? (char *)rec.out : 0;
+    imn = rec.outn;
+    if (img) cx_sha256_hex(img, imn, hex);
+    ck(img && imn > 0 && tx_eqz(hex, e2_pin), "res.steps.stream-recovery.pinned-output-bytes");
+    if (!img || !tx_eqz(hex, e2_pin)) fprintf(stderr, "stream-budget: recovery rc=%d outn=%zu sha=%s\n", rec.rc, imn, img ? hex : "-");
+
+    again = stage(20, 0);
+    img2 = again.rc == 0 ? (char *)again.out : 0;
+    i2n = again.outn;
+    ck(again.rc == 0 && img2 && imn > 0 && i2n == imn && !memcmp(img, img2, imn),
+       "res.steps.stream-recovery.replay-byte-identical");
+
+    digest(prod, product_after);
+    ck(tx_eqz(product_before, product_after), "res.steps.product-unchanged-by-both-halves");
+    ck(sy_exists(source) == 1, "res.steps.input-unchanged");
+
+    np_free(&ex);
+    np_free(&rec);
+    np_free(&again);
+    cx_rmtree(work);
+    printf("STREAM_BUDGET\tassertions=%d\tfailed=%d\tscope=stream-e2-step-budget-and-recovery-lnx-x86_64\n", assertions, failures);
+    return failures ? 1 : 0;
+#endif
+}
