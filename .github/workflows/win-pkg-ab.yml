@@ -387,6 +387,34 @@ jobs:
             } catch { Write-Host ("{0} START FAILED: {1}" -f $case.n, $_) } finally { $pr.Dispose() }
           }
 
+      - name: 'Narrow the crash: optimization level and input size'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $com = Join-Path $PWD 'diag/unisacc.com'
+          $pkg = Join-Path $PWD 'diag/pkg.bin'
+          [IO.File]::WriteAllText((Join-Path $PWD 'diag/empty.c'), "int main(void){return 0;}`n")
+          function Try([string[]]$a, [string]$label) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $com; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            $info.Environment['UNISA_CONTAINER'] = $pkg
+            $info.Environment['UNISACC_RR_TIME'] = '1'
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $pr = [Diagnostics.Process]::new(); $pr.StartInfo = $info
+            try {
+              [void]$pr.Start()
+              $o = $pr.StandardOutput.ReadToEndAsync(); $e = $pr.StandardError.ReadToEndAsync()
+              if (!$pr.WaitForExit(180000)) { $pr.Kill($true); Write-Host ("{0} TIMEOUT" -f $label); return }
+              Write-Host ("{0} exit={1}" -f $label, $pr.ExitCode)
+              foreach ($line in ($e.Result -split "[\r\n]+")) { if ($line) { Write-Host ("{0} ERR| {1}" -f $label, $line) } }
+            } catch { Write-Host ("{0} START FAILED: {1}" -f $label, $_) } finally { $pr.Dispose() }
+          }
+          Try @('-b','win/x86_64','-O0','-o',(Join-Path $PWD 'diag/o0.exe'),(Join-Path $PWD 'diag/empty.c')) 'empty-O0'
+          Try @('-b','win/x86_64','-O1','-o',(Join-Path $PWD 'diag/o1.exe'),(Join-Path $PWD 'diag/empty.c')) 'empty-O1'
+          Try @('--version') 'version-only'
+          Try @('-b','lnx/x86_64','-o',(Join-Path $PWD 'diag/lnx.o'),(Join-Path $PWD 'diag/empty.c')) 'lnx-target-control'
+
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
   # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
