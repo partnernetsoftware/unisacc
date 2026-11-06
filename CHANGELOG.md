@@ -2,7 +2,7 @@
 
 候选:APE sha256 `ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0`,6,128,709B,源码 `fa0a747c7f22ba20c0a875183108106afff21f4a`,`unisacc --version` 为 `unisacc 0.0.45`。未对本候选运行自举固定点(`tests/chain-fixed-point.cx`)。完整发布说明见 `plans/release-notes-0.0.45.md`。
 
-全批会话没有对本候选重跑;最近一次(c45-1,lnx/x86_64)418 批已实现,292 PASS / 58 FAIL / 1 UNKNOWN / 67 MISSING,另 68 批材料未登记;失败项均登记于 `tests/waivers-0.0.44.tsv`。本版因此标预发布。
+对本候选在 lnx/x86_64 跑了一次全批会话:NOT_QUALIFIED,427 批已实现,215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据;`check-known-fail` 对 waivers:known=127 unknown=85 stale=3,失败批次未逐项归因。本版因此标预发布。
 
 ## 支持矩阵(GitHub 原生 runner,candidate-native,运行 42191390455,pass=36 fail=0 not_run=6)
 
@@ -30,7 +30,7 @@
 
 ## 已知限制
 
-- 全批会话未对本候选重跑(见上)。
+- 全批会话 NOT_QUALIFIED(见上),失败与未登记批次未逐项归因。
 - win 的 POSIX 进程类子检查(`fork`、`waitpid`、`kill`、`F_SETFD`、`environ`)未跑;win 的 stream-pipe 有已确认缺陷(见矩阵)。
 - APE 内尚无 win/arm64 分发。
 - `#include <C:/x.h>`(尖括号)不按盘符绝对路径处理。
