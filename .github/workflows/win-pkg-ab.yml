@@ -160,3 +160,51 @@ jobs:
           Say 'A error changes (package, not kernel) -> getenv works; A unchanged -> getenv unreadable on win, C proves nothing'
           Say 'B ok -> package discovery works on win; B "bad kernel header" -> the container read is the fault'
           Say 'keep the kernel resource dump above: its head bytes show whether the read was corrupted'
+
+  # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
+  # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
+  # alone is a milestone: it proves the slice boots, maps its kernel and prints through its own stdio.
+  win-arm64-slice:
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the win/arm64 slice
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path diag | Out-Null
+          gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'slice-win-arm64' --dir diag --clobber
+          if (!(Test-Path 'diag/slice-win-arm64')) { Write-Output 'FATAL: slice asset missing'; exit 1 }
+          $b = [IO.File]::ReadAllBytes('diag/slice-win-arm64')
+          Write-Output ("SLICE bytes={0} sha256={1}" -f $b.Length, (Get-FileHash 'diag/slice-win-arm64' -Algorithm SHA256).Hash.ToLowerInvariant())
+          $pe = [BitConverter]::ToUInt32($b, 60)
+          Write-Output ("SLICE machine=0x{0:x4} (0xAA64 = Aarch64) subsystem={1}" -f [BitConverter]::ToUInt16($b, $pe + 4), [BitConverter]::ToUInt16($b, $pe + 24 + 68))
+          Write-Output ("HOST arch={0} PROCESSOR_ARCHITECTURE={1}" -f $env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432)
+      - name: Run the slice natively
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $exe = Join-Path $PWD 'diag/slice-win-arm64.exe'
+          Copy-Item 'diag/slice-win-arm64' $exe -Force
+          function Run([string]$file, [string[]]$a, [string]$label) {
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+            foreach ($x in $a) { $info.ArgumentList.Add($x) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            try {
+              [void]$p.Start()
+              $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+              if (!$p.WaitForExit(120000)) { $p.Kill($true); Write-Host "$label TIMEOUT"; return }
+              $so = $o.Result; $se = $e.Result
+              Write-Host ("{0} exit={1} stdout_len={2}" -f $label, $p.ExitCode, $so.Length)
+              Write-Host ("{0} stdout={1}" -f $label, (($so -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(200, $so.Length))))
+              Write-Host ("{0} stderr={1}" -f $label, (($se -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(300, $se.Length))))
+            } catch { Write-Host "$label START FAILED: $_" } finally { $p.Dispose() }
+          }
+          Run $exe @('--version') 'slice-arm64 --version'
+          Run $exe @('--help') 'slice-arm64 --help'
+
