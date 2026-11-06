@@ -19,14 +19,52 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use runtime.codec
 #pragma unisa use cxlib.productpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.text
 
 static int ps_failed, ps_asserts;
 static char ps_root[4096];
 static void ps_die(const char *s);
 static void ps_pkg(char *o, int cap) { if (pp_package_path(ps_root, o, cap)) ps_die("package"); }
 static void ps_elf(char *o, int cap) {
-    if (!strcmp(pp_layout_name(pp_layout(ps_root)), "ape")) ps_pkg(o, cap);
-    else if (snprintf(o, cap, "%s/unisacc.com.dev/entry.elf", ps_root) >= cap) ps_die("path");
+    if (strcmp(pp_layout_name(pp_layout(ps_root)), "ape")) {
+        if (snprintf(o, cap, "%s/unisacc.com.dev/entry.elf", ps_root) >= cap) ps_die("path");
+        return;
+    }
+    {
+        char ape[4400], dir[4400], ents[65536], why[256];
+        const char *home = getenv("HOME");
+        int fd, off = 0;
+        long best = 0;
+        char bestn[256];
+        np_result r;
+        bestn[0] = 0;
+        if (snprintf(ape, sizeof ape, "%s/unisacc.com", ps_root) >= (int)sizeof ape) ps_die("path");
+        { char *av[] = {"sh", ape, "--version", 0}; if (np_run(av, ps_root, 0, 20, &r, why, sizeof why)) ps_die(why); np_free(&r); }
+        if (!home || !home[0]) ps_die("HOME");
+        if (snprintf(dir, sizeof dir, "%s/.cache/unisacc", home) >= (int)sizeof dir) ps_die("path");
+        fd = sy_open(dir, 0, 0);
+        if (fd < 0) ps_die("ape-cache-dir");
+        if (sy_dir_names(fd, ents, sizeof ents) < 0) { sy_close(fd); ps_die("ape-cache-list"); }
+        sy_close(fd);
+        while (off < (int)sizeof ents && ents[off]) {
+            long len = (long)tx_len(ents + off, 256);
+            char p[4400];
+            sy_stat_t st;
+            if (len > 8 && !memcmp(ents + off, "unisacc-", 8)) {
+                if (snprintf(p, sizeof p, "%s/%s", dir, ents + off) >= (int)sizeof p) ps_die("path");
+                if (!sy_stat(p, &st) && st.kind == 'f' && st.size > best && st.size > 1000000) {
+                    best = st.size;
+                    { int t = 0; while (t < 255 && ents[off + t]) { bestn[t] = ents[off + t]; t++; } bestn[t] = 0; }
+                }
+            }
+            off += (int)len + 1;
+            if (!ents[off]) break;
+        }
+        if (!bestn[0] || snprintf(o, cap, "%s/%s", dir, bestn) >= cap) ps_die("ape-cache-elf");
+    }
 }
 
 static void ps_die(const char *s) { fprintf(stderr, "check-p3-swap: %s\n", s); exit(2); }
@@ -335,7 +373,7 @@ int main(int argc, char **argv) {
             }
             {   char *av_ape[] = {"sh", elf, "-O2", "-c", "-b", "lnx/x86_64", src, "-o", obj, 0};
                 char *av_elf[] = {elf, "-O2", "-c", "-b", "lnx/x86_64", src, "-o", obj, 0};
-                char **av = (!strcmp(pp_layout_name(pp_layout(ps_root)), "ape")) ? av_ape : av_elf;
+                char **av = av_elf;
                 char *envp[] = {cont, "UNISACC_E3CACHE=/nonexistent-s4a-cache", 0};
                 np_result r; char why[1024];
                 if (np_run(av, ps_root, envp, 30, &r, why, sizeof why)) ps_die(why);
