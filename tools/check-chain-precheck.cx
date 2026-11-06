@@ -1,0 +1,36 @@
+/* 消费者可见边界：实际启动预检，不检查源码文本。
+ * sh ./unisacc.com tools/check-chain-precheck.cx
+ * 创建私有微型git仓及作业记录；不依赖 /tmp/c2* 现场。
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+static char base[4400],repo[4400],chain[4400],fresh[4400],com[4400],tool[4400];static int bad,checks;
+static void die(const char *s){fprintf(stderr,"check-chain-precheck: %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path bound");}
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("fixture write");}
+static void md(const char *p){if(mkdir(p,0700))die("fixture mkdir");}
+static void ok(int c,const char *s){checks++;printf("%s\t%s\n",c?"PASS":"FAIL",s);if(!c)bad++;}
+static void command(char **v){np_result r;char why[1400];if(np_run(v,repo,0,10,&r,why,sizeof why)||r.rc||r.residue)die("fixture git");np_free(&r);}
+static int consume(const char *phase,const char *a,const char *b,const char *needle,int rc){char *v[]={"sh",com,tool,"--",repo,chain,fresh,(char *)phase,(char *)a,(char *)b,0};if(!a)v[8]=0;else if(!b)v[9]=0;np_result r;char why[1400];int t=np_run(v,repo,0,55,&r,why,sizeof why);int yes=!t&&r.rc==rc&&!r.residue&&((r.out&&strstr(r.out,needle))||(r.err&&strstr(r.err,needle)));if(!yes){if(r.out)fwrite(r.out,1,r.outn,stderr);if(r.err)fwrite(r.err,1,r.errn,stderr);}np_free(&r);return yes;}
+static void macro_behavior(void){char dir[4400],header[4400],src[4400],body[10000];path(dir,base,"macro-consumer");md(dir);path(header,dir,"value.h");path(src,dir,"check.c");if(cx_fmt(body,sizeof body,"#include \"value.h\"\n#if PRECHECK_VALUE != 7\n#error relative_value\n#endif\n#include \"%s\"\n#if PRECHECK_VALUE != 7\n#error absolute_value\n#endif\nint main(void){return PRECHECK_VALUE;}\n",header))die("macro body");put(src,body);for(int i=0;i<2;i++){put(header,i?"#define PRECHECK_VALUE 8\n":"#define PRECHECK_VALUE   ( 7 )\n");char *v[]={"sh",com,"-b","lnx/x86_64","-E",src,0};np_result r;char why[1400];int t=np_run(v,dir,0,30,&r,why,sizeof why);ok(!t&&!r.residue&&(i?r.rc!=0:r.rc==0),i?"真实预处理器对错误宏值触发#error":"真实预处理器接受等值宏且与输出空白无关");np_free(&r);}}
+int main(void){
+ char root[4096],p[4400],q[4400],list[4400],text[10000];if(!realpath(".",root))die("cwd");path(com,root,"unisacc.com");path(tool,root,"tools/chain-precheck.cx");if(cx_fmt(base,sizeof base,"%s/chain-precheck-check-XXXXXX",sy_env_or("TMPDIR","/tmp"))||!mkdtemp(base))die("temporary directory");path(repo,base,"root");md(repo);path(chain,base,"chain");md(chain);path(p,chain,"ctx");md(p);path(q,p,"jobs");md(q);path(p,q,"gen-case");md(p);path(q,p,"command.status");put(q,"rc\t0\n");path(q,p,"command.reads.tsv");if(cx_fmt(text,sizeof text,"%s\n%s/input.tsv\n",repo,repo))die("reads bound");put(q,text);path(q,p,"command.argv.tsv");put(q,"arg-0\tsh\narg-1\t-c\narg-2\tprintf 'seed-gen: state mode conflict\\n' >&2; exit 9\n");path(q,repo,"input.tsv");put(q,"input\n");char *v1[]={"git","init","-q",0};command(v1);char *v2[]={"git","add","input.tsv",0};command(v2);char *v3[]={"git","-c","user.name=precheck","-c","user.email=precheck@invalid","commit","-qm","fixture",0};command(v3);
+ path(list,base,"files");put(list,"missing.tsv\n");path(fresh,base,"unmapped");ok(consume("init","--files",list,"unmapped",2),"未映射输入明确拒绝");
+ put(list,"input.tsv\n");path(fresh,base,"run");ok(consume("init","--files",list,"PREPARED",0),"真实reads映射初始化");
+ path(q,repo,"out");struct stat outstat;ok(!lstat(q,&outstat)&&S_ISDIR(outstat.st_mode),"init自动创建ROOT/out快照父目录");
+ ok(consume("job","tbl-other",0,"job not selected",2),"未选择gen的tbl作业拒绝");ok(consume("job","net-other",0,"job not selected",2),"未选择gen的net作业拒绝");
+ path(q,fresh,"selected.tsv");put(q,"prefix-gen-case\n");ok(consume("job","gen-case",0,"job not selected",2),"selected不接受行内后缀命中");put(q,"gen-case\n");
+ ok(consume("job","gen-case",0,"FAIL",1),"实际子进程非零不能冒充通过");path(q,fresh,"jobs/gen-case/command.status");size_t n;char *s=cx_read(q,&n);ok(s&&n>=5&&!memcmp(s,"rc\t9\n",5),"新作业保留失败command.status");free(s);ok(consume("finish",0,0,"selected gen incomplete",2),"失败作业阻断汇总PASS");
+ const char *badstatus[]={"rc\t1\n","rc\t0\nrc\t1\n","rc\t0\ntransport\t0\nresidue\t0\nrc\t1\n","rc\t0\ntransport\t0\nresidue\t1\n"};
+ for(int i=0;i<4;i++){path(q,p,"command.status");put(q,badstatus[i]);if(cx_fmt(text,sizeof text,"bad-status-%d",i))die("status path");path(fresh,base,text);ok(consume("init","--files",list,"chain gen status failed",2),"旧链失败、重复字段或残留状态拒绝");}path(q,p,"command.status");put(q,"rc\t0\n");
+ const char *paths[]={"/input.tsv\n","C:/input.tsv\n","../input.tsv\n","input.tsv.extra\n"};for(int i=0;i<4;i++){put(list,paths[i]);if(cx_fmt(text,sizeof text,"bad-path-%d",i))die("path fixture");path(fresh,base,text);ok(consume("init","--files",list,i==3?"unmapped":"file-list-relative-path",2),"绝对路径、父路径及后缀输入拒绝");}
+ path(fresh,base,"run");char baseline[4400],probejob[4400];path(baseline,base,"baseline");md(baseline);path(q,fresh,"source-root");put(q,baseline);path(probejob,chain,"ctx/jobs/gen-probe");md(probejob);path(q,probejob,"command.reads.tsv");if(cx_fmt(text,sizeof text,"%s\n%s/optional-missing\n",baseline,baseline))die("negative read fixture");put(q,text);
+ ok(consume("reuse",0,0,"PREPARED",0),"双端ENOENT存在探测允许复用");path(q,repo,"optional-missing");put(q,"now exists\n");ok(consume("reuse",0,0,"reuse-input-stat-or-existence-changed",2),"原来不存在的输入出现必须拒绝");if(unlink(q))die("fixture unlink");path(q,baseline,"optional-missing");put(q,"old file\n");ok(consume("reuse",0,0,"baseline=",2),"单端缺失拒绝且诊断包含路径");
+ if(unlink(q))die("fixture unlink");md(q);char child[4400];path(child,q,"child");put(child,"x\n");path(q,repo,"optional-missing");put(q,"not a directory\n");path(q,probejob,"command.reads.tsv");if(cx_fmt(text,sizeof text,"%s\n%s/optional-missing/child\n",baseline,baseline))die("ENOTDIR fixture");put(q,text);ok(consume("reuse",0,0,"reuse-input-stat-or-existence-changed",2),"ENOTDIR不得当成双端ENOENT");
+ if(geteuid()!=0){path(q,baseline,"optional-missing");if(chmod(q,0000))die("permission fixture");ok(consume("reuse",0,0,"baseline-errno=13",2),"EACCES保留精确错误且不得吞为不存在");if(chmod(q,0700))die("permission restore");}
+ path(q,repo,"out");if(rmdir(q))die("snapshot parent fixture");put(q,"not a directory\n");put(list,"input.tsv\n");path(fresh,base,"invalid-snapshot-parent");ok(consume("init","--files",list,"ROOT/out must be a directory",2),"ROOT/out普通文件明确拒绝");if(unlink(q)||symlink(".",q))die("snapshot symlink fixture");path(fresh,base,"symlink-snapshot-parent");ok(consume("init","--files",list,"ROOT/out must be a directory",2),"ROOT/out符号链接不冒充新快照父目录");
+ macro_behavior();
+ printf("CHAIN_PRECHECK_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;
+}
