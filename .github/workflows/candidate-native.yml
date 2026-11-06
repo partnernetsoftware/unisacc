@@ -435,6 +435,47 @@ jobs:
           $logName = 'win-' + $env:TARGET.Replace('/', '-') + '.txt'
           $log = Join-Path $diag $logName
           function Say([string]$s) { Write-Output $s; [IO.File]::AppendAllText($log, "$s`n") }
+          function Pe-Exports([string]$dll) {
+            $b = [IO.File]::ReadAllBytes($dll)
+            $pe = [BitConverter]::ToInt32($b, 60)
+            if ([BitConverter]::ToUInt32($b, $pe) -ne 0x4550) { return @() }
+            $magic = [BitConverter]::ToUInt16($b, $pe + 24)
+            $dd = $pe + 24 + $(if ($magic -eq 0x20b) { 112 } else { 96 })
+            $rva = [BitConverter]::ToInt32($b, $dd)
+            if ($rva -le 0) { return @() }
+            $sec = $pe + 24 + [BitConverter]::ToUInt16($b, $pe + 20)
+            $nsec = [BitConverter]::ToUInt16($b, $pe + 6)
+            $rva2off = {
+              param($r)
+              for ($i = 0; $i -lt $nsec; $i++) {
+                $o = $sec + $i * 40
+                $vs = [BitConverter]::ToInt32($b, $o + 8); $va = [BitConverter]::ToInt32($b, $o + 12); $raw = [BitConverter]::ToInt32($b, $o + 20)
+                if ($r -ge $va -and $r -lt $va + [Math]::Max($vs, 1)) { return $raw + ($r - $va) }
+              }
+              return -1
+            }
+            $exp = & $rva2off $rva
+            if ($exp -lt 0) { return @() }
+            $nn = [BitConverter]::ToInt32($b, $exp + 24)
+            $nr = [BitConverter]::ToInt32($b, $exp + 32)
+            $no = & $rva2off $nr
+            $names = @()
+            for ($i = 0; $i -lt $nn -and $i -lt 8000; $i++) {
+              $nrva = [BitConverter]::ToInt32($b, $no + $i * 4)
+              $off = & $rva2off $nrva
+              if ($off -lt 0) { continue }
+              $end = $off; while ($end -lt $b.Length -and $b[$end] -ne 0) { $end++ }
+              $names += [Text.Encoding]::ASCII.GetString($b, $off, $end - $off)
+            }
+            return $names
+          }
+          $ucrt = Join-Path $env:WINDIR 'System32\ucrtbase.dll'
+          $expFile = Join-Path $diag 'ucrtbase-exports.txt'
+          if (Test-Path -LiteralPath $ucrt) {
+            $ex = Pe-Exports $ucrt
+            $ex | Sort-Object | Set-Content -LiteralPath $expFile -Encoding ascii
+            Say ("UCRT_EXPORTS file={0} count={1} _open={2} open={3} _write={4} write={5}" -f $expFile, $ex.Count, [int]($ex -contains '_open'), [int]($ex -contains 'open'), [int]($ex -contains '_write'), [int]($ex -contains 'write'))
+          } else { Say 'UCRT_EXPORTS NOT_RUN no ucrtbase.dll' }
           function Hex([byte[]]$b, [int]$max) { if (!$b) { return '-' }; $n = [Math]::Min($b.Length, $max); ($b[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ' }
           function Run-Raw([string]$file, [string[]]$arguments, [string]$label) {
             $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = $file; $info.UseShellExecute = $false
