@@ -58,7 +58,7 @@ static void die(const char *s) { sy_eprintf("coreapi: %s\n", s); sy_exit(2); }
 static char *dup_n(const char *s, long n) { char *d = mm_alloc((size_t)n + 1); if (!d) die("out of memory"); tx_copy(d, (size_t)n + 1, s, n); d[n] = 0; return d; }
 static char *dup0(const char *s) { return dup_n(s, tx_len(s, 1 << 20)); }
 static char *join2(const char *a, const char *b, char *dst, size_t cap) { if (cx_fmt(dst, cap, "%s/%s", a, b)) die("path too long"); return dst; }
-static char *abs_path(const char *rel, char *dst, size_t cap) { if (cx_fmt(dst, cap, "%s/%s", base, rel)) die("path too long"); return dst; }
+static char *abs_path(const char *rel, char *dst, size_t cap) { if (rel[0]=='/' ? cx_fmt(dst, cap, "%s", rel) : cx_fmt(dst, cap, "%s/%s", base, rel)) die("path too long"); return dst; }
 
 /* Shard fields escape TAB, newline and backslash as \t, \n and \\ ; a multi-line declaration is one
  * signature, so decode before the whitespace collapse. */
@@ -387,13 +387,28 @@ static void fixtures(void) {
     sy_exit(fx_fail ? 1 : 0);
 }
 
+/* 符号索引 scratch 的路径与清理：scratch 每次约十几 MB，必须随本次运行消失。
+ * 索引一次会有上千个分片，所以用显式上限 20000 的 unisa_safedel，而不是默认 1000 上限的 cx_rmtree。 */
+static char idx_dir[P];
+static void idx_cleanup(void) {
+    char why[600];
+    if (!idx_dir[0]) return;
+    if (unisa_safedel(idx_dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000, why, (int)sizeof why))
+        sy_eprintf("coreapi: scratch not removed: %s: %s\n", idx_dir, why);
+    idx_dir[0] = 0;
+}
+
 int main(int argc, char **argv) {
     char idxbuf[P];
     const char *idx = idxbuf;
     int mode; char pb[P];
     if (sy_realpath(".", base, (int)sizeof base) < 0 || !base[0]) die("cannot resolve the repo root");
-    /* 符号索引是本次运行的 scratch：放 /tmp 的 mkdtemp，不写仓内 out/（symindex update 会自建它）。 */
+    /* 符号索引是本次运行的 scratch：放 /tmp 的 coreapi-index-<pid>，不写仓内 out/（symindex update 会自建它）。 */
     if (cx_fmt(idxbuf, sizeof idxbuf, "/tmp/coreapi-index-%ld", (long)sy_pid())) die("index path");
+    tx_copy(idx_dir, sizeof idx_dir, idxbuf, tx_len(idxbuf, P));
+    /* 这块 scratch 每次运行约十几 MB，必须随本次运行消失：登记退出清理（含 sy_exit 的失败路径与
+       --fixtures 的提前 return）；cx_rmtree 的白名单允许 /tmp。 */
+    if (sy_atexit(idx_cleanup)) die("atexit");
     prod = abs_path("unisacc.com", pb, sizeof pb);
     if (argc == 2 && tx_eqz(argv[1], "--fixtures")) { fixtures(); return 0; }
     if (argc != 2) { sy_eprintf("usage: coreapi.cx --check | --write | --init | --fixtures\n"); return 2; }
