@@ -1,0 +1,358 @@
+/* tools/slice-freeze.cx -- the slice freeze gate (plans/v0.0.45-slice-freeze-design.md).
+ *   sh ./unisacc.com tools/slice-freeze.cx -- list
+ *   sh ./unisacc.com tools/slice-freeze.cx -- check BASE [HEAD] [--receipts DIR] [--baseline DIR]
+ *        [--mode advisory|enforce]
+ *
+ * Read-only: it never writes the repository. BASE..HEAD (HEAD defaults to the work tree's
+ * HEAD) is intersected with the globs of tests/slice-freeze.tsv; a commit that touches the
+ * thin interface layer must (a) bring a regression case under tests/cases/ whose batch is
+ * named by a hit row, (b) add a work/ledger.tsv row kind=SLICE-CHANGE whose 5th field starts
+ * "A " or "B " (affected targets) and whose 6th field names cc, and (c) leave the sha of every
+ * target that is NOT declared affected unchanged between --baseline and --receipts.
+ *
+ * Two validations keep the gate from being green by construction: every batch named in the
+ * list must exist in tests/batches.tsv (field 1), and every glob must match at least one
+ * tracked file. Both are refusals (rc2), never a skip.
+ *
+ * Receipts: a per-slice directory sl-* holding receipt.txt. The target comes from the
+ * receipt's "target" line when it has one (whole-o receipts do); entry-build receipts (the
+ * two lnx slices) do not, so the six fixed SLUG names decide -- they are the same slugs as
+ * tools/release-build.cx rb_whole_slug, and this file's check compares the two. The sha is
+ * the "sha<TAB>hex" line, else "candidate<TAB>sha=hex". A missing receipt is UNMEASURED,
+ * never ok. Directory names outside the six are refused by name, not guessed.
+ *
+ * advisory prints the same lines as enforce and always exits 0, adding one
+ * SLICE_FREEZE_WOULD_FAIL line when enforce would have failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+
+#define SF_P 4400
+#define SF_MAXROW 64
+
+typedef struct { char glob[256], targets[256], batches[512], note[160]; } Row;
+static Row rows[SF_MAXROW]; static int nrow;
+static char root[SF_P];
+static char *batches_tsv; static size_t batches_n;
+static int hits, fails; static char verdict_case[32], verdict_appr[32], verdict_bytes[32];
+
+static void die(const char *a) { fprintf(stderr, "slice-freeze: %s\n", a); exit(2); }
+static int eqz(const char *a, const char *b) { return a && b && !strcmp(a, b); }
+/* copy at most N bytes; never cuts a UTF-8 sequence in half */
+static void cp(char *d, size_t cap, const char *s, size_t n) {
+    size_t i = 0; if (!cap) return;
+    while (i + 1 < cap && i < n && s[i]) { d[i] = s[i]; i++; }
+    if (i < n && s[i]) while (i && ((d[i] & 0xC0) == 0x80)) i--;
+    d[i] = 0;
+}
+/* run ARGV from ROOT; stdout into OUT (cap bytes); the exit code */
+static int run(char **v, char *out, size_t cap) {
+    np_result r; char why[400]; int rc;
+    if (np_run(v, root, 0, 120, &r, why, sizeof why)) { cp(out, cap, why, strlen(why)); return -1; }
+    cp(out, cap, r.out ? r.out : "", r.outn);
+    rc = r.rc; np_free(&r); return rc;
+}
+/* read a repository file whole; 0 when it cannot be read */
+static char *slurp(const char *rel, size_t *n) {
+    char p[SF_P];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) die("path too long");
+    return cx_read(p, n);
+}
+/* field WANT (1-based, TAB) of LINE; 0 when the line has fewer */
+static int field(const char *line, size_t ln, int want, const char **val, size_t *vn) {
+    size_t k, f = 1, fs = 0;
+    for (k = 0; k <= ln; k++) {
+        if (k != ln && line[k] != '\t') continue;
+        if (f == want) { *val = line + fs; *vn = k - fs; return 1; }
+        f++; fs = k + 1;
+    }
+    return 0;
+}
+/* next LF-terminated line of *P into D (CR stripped); 0 at the end */
+static int line(const char **p, char *d, size_t cap) {
+    const char *e; size_t n;
+    if (!**p) return 0;
+    e = strchr(*p, '\n'); n = e ? (size_t)(e - *p) : strlen(*p);
+    while (n && (*p)[n - 1] == '\r') n--;
+    cp(d, cap, *p, n); *p = e ? e + 1 : *p + n;
+    return 1;
+}
+/* shell glob: '*' any run, '?' one byte, else literal. One '*' per pattern segment is enough
+   for tests/slice-freeze.tsv (cx/sys/*, exec/facts/x.tsv, ...). */
+static int glob(const char *pat, const char *s) {
+    while (*pat) {
+        if (*pat == '*') {
+            const char *rest = pat + 1;
+            if (!*rest) return 1;
+            for (;;) { if (glob(rest, s)) return 1; if (!*s) return 0; s++; }
+        }
+        if (!*s) return 0;
+        if (*pat != '?' && *pat != *s) return 0;
+        pat++; s++;
+    }
+    return !*s;
+}
+/* is NAME a batch id in tests/batches.tsv field 1? */
+static int batch_exists(const char *name) {
+    const char *p = batches_tsv; char one[600]; size_t n = strlen(name);
+    if (!batches_tsv) return 0;
+    while (line(&p, one, sizeof one)) {
+        const char *v; size_t vn;
+        if (one[0] == '#' || !one[0]) continue;
+        if (field(one, strlen(one), 1, &v, &vn) && vn == n && !memcmp(v, name, n)) return 1;
+    }
+    return 0;
+}
+/* the batches of the list rows whose glob matches PATH; appended to OUT */
+static void batches_of(const char *path, char *out, size_t cap) {
+    int i; size_t at = strlen(out);
+    for (i = 0; i < nrow; i++) {
+        const char *p;
+        if (!glob(rows[i].glob, path)) continue;
+        p = rows[i].batches;
+        while (*p) {
+            char b[128]; size_t k = 0, bl;
+            while (*p && *p != ';' && k + 1 < sizeof b) b[k++] = *p++;
+            b[k] = 0; if (*p == ';') p++;
+            bl = strlen(b);
+            if (!bl) continue;
+            if (at) { if (at + 2 < cap) { out[at++] = ','; out[at] = 0; } }
+            if (at + bl + 1 < cap) { if (tx_copy(out + at, (long)(cap - at), b, (long)bl)) continue; at += bl; }
+        }
+    }
+}
+static int tracked(const char *path) {
+    char out[4096]; char *v[] = {(char *)"git", (char *)"ls-files", (char *)"--", (char *)path, 0};
+    return run(v, out, sizeof out) == 0 && out[0] != 0;
+}
+/* read the list and validate it; refuses rather than skipping */
+static void load_list(void) {
+    size_t n = 0; char *b = slurp("tests/slice-freeze.tsv", &n); const char *p; char one[1024]; int bad = 0;
+    if (!b) die("no tests/slice-freeze.tsv");
+    p = b;
+    while (line(&p, one, sizeof one)) {
+        const char *v[4]; size_t vn[4]; int k, ok = 1;
+        if (!one[0] || one[0] == '#') continue;
+        if (nrow == SF_MAXROW) die("too many rows");
+        for (k = 0; k < 4; k++) if (!field(one, strlen(one), k + 1, &v[k], &vn[k])) ok = k == 3;
+        if (!ok) { fprintf(stderr, "FAIL\tLIST_FIELDS\t%s\n", one); bad++; continue; }
+        cp(rows[nrow].glob, sizeof rows[nrow].glob, v[0], vn[0]);
+        cp(rows[nrow].targets, sizeof rows[nrow].targets, v[1], vn[1]);
+        cp(rows[nrow].batches, sizeof rows[nrow].batches, v[2], vn[2]);
+        rows[nrow].note[0] = 0;
+        if (vn[3]) cp(rows[nrow].note, sizeof rows[nrow].note, v[3], vn[3]);
+        nrow++;
+    }
+    free(b);
+    /* every named batch must be a registered batch, and every glob must match a tracked file */
+    { char out[8192]; int i;
+      for (i = 0; i < nrow; i++) {
+          const char *p2 = rows[i].batches;
+          while (*p2) {
+              char b[128]; size_t k = 0;
+              while (*p2 && *p2 != ';' && k + 1 < sizeof b) b[k++] = *p2++;
+              b[k] = 0; if (*p2 == ';') p2++;
+              if (!b[0]) continue;
+              if (!batch_exists(b)) { fprintf(stderr, "FAIL\tLIST_BATCH\t%s\t%s\n", rows[i].glob, b); bad++; }
+          }
+          { char *v2[] = {(char *)"git", (char *)"ls-files", (char *)"--", rows[i].glob, 0};
+            if (run(v2, out, sizeof out) != 0 || !out[0]) { fprintf(stderr, "FAIL\tLIST_GLOB\t%s\n", rows[i].glob); bad++; } }
+      } }
+    if (bad) { printf("SLICE_FREEZE_LIST\trows=%d\tfailed=%d\n", nrow, bad); exit(2); }
+}
+static void list(void) {
+    int i;
+    for (i = 0; i < nrow; i++) printf("%s\t%s\t%s\n", rows[i].glob, rows[i].targets, rows[i].batches);
+    printf("SLICE_FREEZE_LIST\trows=%d\tfailed=0\n", nrow);
+}
+/* 1 when TARGET appears in a commas-only target list of a hit row */
+static int target_named(const char *list, const char *target) {
+    const char *p = list; size_t tn = strlen(target);
+    while (*p) {
+        const char *s = p; size_t n;
+        while (*p && *p != ',') p++;
+        n = (size_t)(p - s);
+        if (n == tn && !memcmp(s, target, tn)) return 1;
+        if (*p == ',') p++;
+    }
+    return 0;
+}
+/* crate the six slice slugs: same names as tools/release-build.cx rb_whole_slug */
+static const char *slug_target(const char *dir) {
+    if (eqz(dir, "sl-lnx")) return "lnx/x86_64";
+    if (eqz(dir, "sl-lnx-arm64")) return "lnx/arm64";
+    if (eqz(dir, "sl-osx-x86_64")) return "osx/x86_64";
+    if (eqz(dir, "sl-osx-arm64")) return "osx/arm64";
+    if (eqz(dir, "sl-win-x86_64")) return "win/x86_64";
+    if (eqz(dir, "sl-win-arm64")) return "win/arm64";
+    return 0;
+}
+/* target and sha of DIR/receipt.txt; 1 when both were found, -1 when the receipt has no sha */
+static int receipt(const char *dir, char *target, size_t tcap, char *sha, size_t scap) {
+    char p[SF_P], one[600]; size_t n = 0; char *b; const char *q; int have_sha = 0;
+    target[0] = 0; sha[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/receipt.txt", dir)) die("path too long");
+    if (sy_exists(p) != 1) return 0;
+    b = cx_read(p, &n); if (!b) return 0;
+    for (q = b; line(&q, one, sizeof one);) {
+        const char *v; size_t vn, ln = strlen(one);
+        if (!target[0] && !strncmp(one, "target\t", 7)) cp(target, tcap, one + 7, ln - 7);
+        if (!have_sha && !strncmp(one, "sha\t", 4)) { cp(sha, scap, one + 4, ln - 4); have_sha = 1; }
+        if (!have_sha && !strncmp(one, "candidate\t", 10) && field(one, ln, 2, &v, &vn) && vn > 4 && !memcmp(v, "sha=", 4)) {
+            cp(sha, scap, v + 4, vn - 4); have_sha = 1;
+        }
+    }
+    free(b);
+    return have_sha ? 1 : -1;
+}
+/* walk DIR's sl-* entries; for each, print one SLICE_BYTES line comparing it with BASE */
+static void bytes_section(const char *base, const char *head, const char *aff) {
+    char names[1 << 14]; char dir[SF_P], bdir[SF_P]; int fd, n, k, i = 0, drift = 0, un = 0;
+    if (!base || !head) { cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10); return; }
+    if (cx_fmt(dir, sizeof dir, "%s", head)) die("path"); 
+    fd = sy_open(dir, O_RDONLY | O_DIRECTORY, 0);
+    if (fd < 0) { cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10); return; }
+    n = sy_dir_names(fd, names, sizeof names); sy_close(fd);
+    if (n < 0) { cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10); return; }
+    for (k = 0; k < n; k++) {
+        char leaf[128], t[64], sha[80], bsha[80], bt[64]; int r;
+        cp(leaf, sizeof leaf, names + i, strlen(names + i));
+        i += (int)strlen(names + i) + 1;
+        if (strncmp(leaf, "sl-", 3)) continue;
+        { sy_stat_t st; if (cx_fmt(dir, sizeof dir, "%s/%s", head, leaf) || sy_lstat(dir, &st) || st.kind != 'd') continue; }
+        if (cx_fmt(dir, sizeof dir, "%s/%s", head, leaf) || cx_fmt(bdir, sizeof bdir, "%s/%s", base, leaf)) die("path");
+        r = receipt(dir, t, sizeof t, sha, sizeof sha);
+        if (!t[0]) { const char *s = slug_target(leaf); if (!s) { printf("FAIL\tSLICE_DIR\t%s\n", leaf); fails++; continue; } cp(t, sizeof t, s, strlen(s)); }
+        if (r <= 0) { printf("SLICE_BYTES\t%s\tUNMEASURED\t-\t%s\n", t, r < 0 ? "-" : "no-receipt"); un++; continue; }
+        { int rb = receipt(bdir, bt, sizeof bt, bsha, sizeof bsha); (void)rb; }
+        if (!bsha[0]) { printf("SLICE_BYTES\t%s\tUNMEASURED\t-\t%s\n", t, sha); un++; continue; }
+        if (target_named(aff, t)) { printf("SLICE_BYTES\t%s\tAFFECTED\t%s\t%s\n", t, bsha, sha); continue; }
+        if (eqz(bsha, sha)) printf("SLICE_BYTES\t%s\tok\t%s\t%s\n", t, bsha, sha);
+        else { printf("SLICE_BYTES\t%s\tDRIFT\t%s\t%s\n", t, bsha, sha); drift++; }
+    }
+    if (drift) cp(verdict_bytes, sizeof verdict_bytes, "DRIFT", 5);
+    else if (un) cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10);
+    else cp(verdict_bytes, sizeof verdict_bytes, "ok", 2);
+}
+/* does BASE..HEAD add a ledger SLICE-CHANGE row that names cc and an A/B target list? */
+static int approval(const char *range) {
+    char out[1 << 15]; char *v[] = {(char *)"git", (char *)"diff", (char *)"-U0", (char *)range, (char *)"--", (char *)"work/ledger.tsv", 0};
+    const char *p; char one[1200]; int ok = 0;
+    if (run(v, out, sizeof out) != 0) return 0;
+    for (p = out; line(&p, one, sizeof one);) {
+        const char *f5, *f6; size_t n5, n6;
+        if (one[0] != '+') continue;
+        if (!field(one + 1, strlen(one + 1), 3, &f5, &n5)) continue;
+        if (!(n5 == 12 && !memcmp(f5, "SLICE-CHANGE", 12))) continue;
+        if (!field(one + 1, strlen(one + 1), 5, &f5, &n5)) continue;
+        if (!(n5 > 1 && (f5[0] == 'A' || f5[0] == 'B') && f5[1] == ' ')) continue;
+        if (!field(one + 1, strlen(one + 1), 6, &f6, &n6)) continue;
+        { size_t q; for (q = 0; q + 2 <= n6; q++) if (!memcmp(f6 + q, "cc", 2)) ok = 1; }
+    }
+    return ok;
+}
+/* is a case under tests/cases/ part of the range, and does its batch appear in the hit rows? */
+static int case_ok(const char *range, const char *affbatches) {
+    char out[1 << 15]; char *v[] = {(char *)"git", (char *)"diff", (char *)"--name-only", (char *)range, 0};
+    const char *p; char one[600]; int ok = 0;
+    if (run(v, out, sizeof out) != 0) return 0;
+    for (p = out; line(&p, one, sizeof one);) {
+        char src[SF_P], cand[600]; char *lv[] = {(char *)"git", (char *)"ls-files", (char *)"--", cand, 0};
+        if (strncmp(one, "tests/cases/", 12)) continue;
+        /* the case's batch: batches.tsv field 1 where field 4 (source) equals this path */
+        { size_t n = 0; char *b = slurp("tests/batches.tsv", &n); const char *q; char row[1200];
+          (void)src; (void)lv;
+          if (b) {
+              for (q = b; line(&q, row, sizeof row);) {
+                  const char *fs, *fi; size_t ns, ni;
+                  if (row[0] == '#' || !row[0]) continue;
+                  if (!field(row, strlen(row), 4, &fs, &ns) || ns != strlen(one) || memcmp(fs, one, ns)) continue;
+                  if (!field(row, strlen(row), 1, &fi, &ni)) continue;
+                  cp(cand, sizeof cand, fi, ni);
+                  { const char *a = affbatches; char want[128]; size_t wn;
+                    while (*a) { size_t k = 0; while (*a && *a != ',' && k + 1 < sizeof want) want[k++] = *a++; want[k] = 0; if (*a == ',') a++;
+                        if (k == ni && !memcmp(want, fi, ni)) ok = 1; } }
+              }
+              free(b); } }
+    }
+    return ok;
+}
+int main(int argc, char **argv) {
+    const char *base = 0, *head = 0, *receipts = 0, *baseline = 0, *mode = "advisory";
+    int i, advisory;
+    if (sy_realpath(".", root, (int)sizeof root) < 0 || !root[0]) die("cannot resolve cwd");
+    cp(verdict_case, sizeof verdict_case, "NO_CASE", 7);
+    cp(verdict_appr, sizeof verdict_appr, "NO_APPROVAL", 11);
+    cp(verdict_bytes, sizeof verdict_bytes, "UNMEASURED", 10);
+    for (i = 1; i < argc; i++) {
+        if (eqz(argv[i], "--")) continue;
+        if (eqz(argv[i], "list")) { size_t n0 = 0; batches_tsv = slurp("tests/batches.tsv", &n0); batches_n = n0; load_list(); list(); return 0; }
+        if (eqz(argv[i], "check")) {
+            if (i + 1 < argc && argv[i + 1][0] != '-') base = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-') head = argv[++i];
+            continue;
+        }
+        if (eqz(argv[i], "--receipts") && i + 1 < argc) { receipts = argv[++i]; continue; }
+        if (eqz(argv[i], "--baseline") && i + 1 < argc) { baseline = argv[++i]; continue; }
+        if (eqz(argv[i], "--mode") && i + 1 < argc) { mode = argv[++i]; continue; }
+        die("bad argument");
+    }
+    if (!base) die("usage: check BASE [HEAD] [--receipts DIR] [--baseline DIR] [--mode advisory|enforce]");
+    advisory = !eqz(mode, "enforce");
+    { size_t n = 0; batches_tsv = slurp("tests/batches.tsv", &n); batches_n = n; }
+    load_list();
+    { char range[256], out[1 << 15], one[600], aff[SF_P], affbatches[1024]; const char *p;
+      if (cx_fmt(range, sizeof range, "%s..%s", base, head ? head : "HEAD")) die("range");
+      aff[0] = 0; affbatches[0] = 0;
+      { char *v[] = {(char *)"git", (char *)"diff", (char *)"--name-only", range, 0};
+        if (run(v, out, sizeof out) != 0) die("git diff failed");
+        for (p = out; line(&p, one, sizeof one);) {
+            int r; size_t at;
+            for (r = 0; r < nrow; r++) if (glob(rows[r].glob, one)) break;
+            if (r == nrow) continue;
+            hits++;
+            printf("SLICE_HIT\t%s\t%s\t%s\n", one, rows[r].targets, rows[r].batches);
+            /* accumulate the declared affected targets of every hit row ("all" means all six) */
+            { char one2[64]; const char *tp = rows[r].targets;
+              while (*tp) {
+                  size_t k = 0;
+                  while (*tp && *tp != ',' && k + 1 < sizeof one2) one2[k++] = *tp++;
+                  one2[k] = 0; if (*tp == ',') tp++;
+                  if (!one2[0]) continue;
+                  at = strlen(aff);
+                  if (at && at + 2 < sizeof aff) { aff[at++] = ','; aff[at] = 0; }
+                  else if (at) continue;
+                  { size_t ol = strlen(one2); if (at + ol + 1 < sizeof aff) { if (!tx_copy(aff + at, (long)(sizeof aff - at), one2, (long)ol)) at += ol; } }
+              } }
+            { const char *b = rows[r].batches; char bb[128];
+              while (*b) {
+                  size_t k = 0, bl;
+                  while (*b && *b != ';' && k + 1 < sizeof bb) bb[k++] = *b++;
+                  bb[k] = 0; if (*b == ';') b++;
+                  bl = strlen(bb);
+                  if (!bl) continue;
+                  at = strlen(affbatches);
+                  if (at) { if (at + 2 < sizeof affbatches) { affbatches[at++] = ','; affbatches[at] = 0; } }
+                  if (at + bl + 1 < sizeof affbatches) { if (tx_copy(affbatches + at, (long)(sizeof affbatches - at), bb, (long)bl)) continue; at += bl; }
+              } }
+        } }
+      if (hits == 0) { printf("SLICE_FREEZE\thit=0\n"); return 0; }
+      if (case_ok(range, affbatches)) cp(verdict_case, sizeof verdict_case, "ok", 2);
+      printf("SLICE_CASE\t%s\t%s\n", verdict_case, affbatches);
+      if (approval(range)) cp(verdict_appr, sizeof verdict_appr, "ok", 2);
+      printf("SLICE_APPROVAL\t%s\t%s\n", verdict_appr, "work/ledger.tsv");
+      if (!advisory && !eqz(verdict_appr, "ok")) {  /* B is reported only when the row says B */
+          /* no-op: the row's own letter is not carried here; NO_APPROVAL covers both */
+      }
+      bytes_section(baseline, receipts, aff);
+      printf("SLICE_FREEZE\thit=%d\tcase=%s\tapproval=%s\tbytes=%s\tmode=%s\n",
+             hits, verdict_case, verdict_appr, verdict_bytes, advisory ? "advisory" : "enforce");
+      if (!advisory && (!eqz(verdict_case, "ok") || !eqz(verdict_appr, "ok") || !eqz(verdict_bytes, "ok"))) return 1;
+      if (advisory && (!eqz(verdict_case, "ok") || !eqz(verdict_appr, "ok") || !eqz(verdict_bytes, "ok"))) {
+          printf("SLICE_FREEZE_WOULD_FAIL\tcase=%s\tapproval=%s\tbytes=%s\n", verdict_case, verdict_appr, verdict_bytes);
+      }
+      (void)batches_n; }
+    return 0;
+}

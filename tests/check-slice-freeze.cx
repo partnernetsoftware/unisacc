@@ -1,0 +1,195 @@
+/* tests/check-slice-freeze.cx -- fixtures for tools/slice-freeze.cx.
+ *   sh ./unisacc.com tests/check-slice-freeze.cx -- [ROOT]
+ * ROOT defaults to the cwd and only supplies the product; every fixture is built in a
+ * mkdtemp git repository under the system temp dir, so nothing in ROOT changes (the last
+ * check re-reads git status of ROOT to prove it). Cases:
+ *   hit=0                     a commit outside the frozen surface exits 0 with hit=0
+ *   NO_CASE                   a hit without a case for a hit-row batch
+ *   NO_APPROVAL               a case but no ledger SLICE-CHANGE row naming cc
+ *   enforce rc1 / advisory 0  the same red case in both modes
+ *   SLICE_DRIFT               an undeclared target's receipt sha changed
+ *   AFFECTED                  a declared target's sha may change
+ *   UNMEASURED                a missing receipt is never ok
+ *   ok                        case + approval + unchanged shas exits 0 in enforce
+ *   list refusals             an unknown batch id and a glob matching nothing are refused
+ *   slugs                     the six SLUG names equal tools/release-build.cx rb_whole_slug */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define CK_P 4400
+static char root[CK_P], work[CK_P];
+static int checks, failed;
+
+static void die(const char *a) { fprintf(stderr, "check-slice-freeze: %s\n", a); exit(2); }
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tslice-freeze.%s\n", ok ? "PASS" : "FAIL", n); }
+static void cp(char *d, size_t cap, const char *s, size_t n) {
+    size_t i = 0; if (!cap) return;
+    while (i + 1 < cap && i < n && s[i]) { d[i] = s[i]; i++; }
+    if (i < n && s[i]) while (i && ((d[i] & 0xC0) == 0x80)) i--;
+    d[i] = 0;
+}
+/* write TEXT to DIR/NAME (created) */
+static void put(const char *dir, const char *name, const char *text) {
+    char p[CK_P]; int fd; const char *s = text; size_t n = strlen(text), at = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) die("path");
+    fd = open(p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) die("open");
+    while (at < n) { ssize_t z = write(fd, s + at, n - at); if (z <= 0) die("write"); at += (size_t)z; }
+    if (close(fd)) die("close");
+}
+/* run ARGV in DIRW; stdout+stderr into OUT; the exit code */
+static int run(const char *cwd, char **v, char *out, size_t cap) {
+    np_result r; char why[400]; int rc;
+    if (np_run(v, cwd, 0, 120, &r, why, sizeof why)) { cp(out, cap, why, strlen(why)); return -1; }
+    { size_t n = r.outn < cap - 1 ? r.outn : cap - 1, i;
+      for (i = 0; i < n; i++) out[i] = r.out[i];
+      out[n] = 0;
+      if (r.errn && n + r.errn + 1 < cap) { for (i = 0; i < r.errn; i++) out[n + i] = r.err[i]; out[n + r.errn] = 0; } }
+    rc = r.rc; np_free(&r); return rc;
+}
+/* git in DIRW with ARGS; returns rc */
+static int git(const char *cwd, const char *a1, const char *a2, const char *a3) {
+    char out[4096]; char *v[] = {(char *)"git", (char *)a1, (char *)a2, (char *)a3, 0};
+    return run(cwd, v, out, sizeof out);
+}
+static int commit_all(const char *cwd, const char *msg) {
+    char out[4096]; char *v[] = {(char *)"git", (char *)"add", (char *)"-A", 0};
+    char *c[] = {(char *)"git", (char *)"-c", (char *)"user.email=f@x", (char *)"-c", (char *)"user.name=f",
+                 (char *)"commit", (char *)"-qm", (char *)msg, 0};
+    if (run(cwd, v, out, sizeof out) != 0) return 1;
+    return run(cwd, c, out, sizeof out) == 0 ? 0 : 1;
+}
+/* the tool, run from FIX with the given extra args */
+static int tool(const char *fix, char **extra, char *out, size_t cap) {
+    char sf[CK_P], com[CK_P]; char *v[24]; int n = 0, i;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path");
+    if (cx_fmt(sf, sizeof sf, "%s/tools/slice-freeze.cx", root)) die("path");
+    v[n++] = (char *)"sh"; v[n++] = com; v[n++] = sf; v[n++] = (char *)"--";
+    for (i = 0; extra[i] && n < 23; i++) v[n++] = extra[i];
+    v[n] = 0;
+    return run(fix, v, out, cap);
+}
+/* a receipt directory RECEIPTS/sl-NAME with a receipt holding TARGET and SHA */
+static void receipt(const char *receipts, const char *leaf, const char *target, const char *sha) {
+    char d[CK_P], line[600];
+    if (cx_fmt(d, sizeof d, "%s/%s", receipts, leaf) || sy_mkdir(d, 0755)) die("receipt dir");
+    if (cx_fmt(line, sizeof line, "target\t%s\nsha\t%s\n", target, sha)) die("line");
+    put(d, "receipt.txt", line);
+}
+/* BASE fixture: a git repo with the list, a batches table and a frozen file */
+static void base_repo(const char *fix) {
+    put(fix, "frozen.txt", "a\n");
+    put(fix, "keep.txt", "k\n");
+    put(fix, "win.txt", "w\n");
+    { char d[CK_P]; if (cx_fmt(d, sizeof d, "%s/tests", fix) || sy_mkdir(d, 0755)) die("tests dir"); }
+    { char d[CK_P]; if (cx_fmt(d, sizeof d, "%s/tests/cases", fix) || sy_mkdir(d, 0755)) die("cases dir");
+      if (cx_fmt(d, sizeof d, "%s/work", fix) || sy_mkdir(d, 0755)) die("work dir"); }
+    put(fix, "tests/slice-freeze.tsv",
+        "# path_glob\ttargets\tbatches\tnote\n"
+        "frozen.txt\tlnx/x86_64\tdemo-batch\tfixture surface\n"
+        "win.txt\twin/x86_64,win/arm64\tdemo-batch\twin surface\n");
+    put(fix, "tests/batches.tsv",
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n"
+        "demo-batch\tIMPLEMENTED\tcontract\ttests/cases/demo.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/demo.cx\t-\tcontract.demo\trc0:DEMO\tproduct\n");
+    put(fix, "tests/cases/demo.cx", "int main(void){return 0;}\n");
+    put(fix, "work/ledger.tsv", "时间\tid\t事件\tcommit\t证据\t角色/模型\n");
+    if (git(fix, "init", "-q", ".") ) die("git init");
+    if (commit_all(fix, "base")) die("git base commit");
+}
+int main(int argc, char **argv) {
+    char out[1 << 15], fix[CK_P], before[4096], after[4096], rdir[CK_P], bdir[CK_P];
+    if (argc > 2) die("usage [ROOT]");
+    if (argc == 2) { if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root"); }
+    else if (sy_realpath(".", root, (int)sizeof root) < 0) die("cwd");
+    { char tmpl[CK_P];
+      if (cx_fmt(tmpl, sizeof tmpl, "/tmp/check-slice-freeze-XXXXXX")) die("path");
+      if (!mkdtemp(tmpl)) die("work dir");
+      if (cx_fmt(work, sizeof work, "%s", tmpl)) die("path"); }
+    { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, before, sizeof before); }
+    /* 1: hit=0 */
+    { char d[CK_P];
+      if (cx_fmt(d, sizeof d, "%s/hit0", work) || sy_mkdir(d, 0755)) die("dir");
+      base_repo(d);
+      put(d, "keep.txt", "k2\n");
+      if (commit_all(d, "outside")) die("commit");
+      { char *a[] = {(char *)"check", (char *)"HEAD~1", (char *)"HEAD", 0};
+        ck(tool(d, a, out, sizeof out) == 0 && strstr(out, "hit=0"), "hit0.rc0"); } }
+    /* 2: NO_CASE + NO_APPROVAL, advisory 0 then enforce 1 */
+    { char d[CK_P];
+      if (cx_fmt(d, sizeof d, "%s/redcase", work) || sy_mkdir(d, 0755)) die("dir");
+      base_repo(d);
+      put(d, "frozen.txt", "b\n");
+      if (commit_all(d, "touch frozen")) die("commit");
+      { char *a[] = {(char *)"check", (char *)"HEAD~1", (char *)"HEAD", 0};
+        int rc = tool(d, a, out, sizeof out);
+        ck(rc == 0 && strstr(out, "SLICE_HIT\tfrozen.txt") != 0, "hit.one-line");
+        ck(strstr(out, "case=NO_CASE") && strstr(out, "approval=NO_APPROVAL"), "red.both-missing");
+        ck(strstr(out, "SLICE_FREEZE_WOULD_FAIL") != 0, "advisory.would-fail-line");
+        { char *e[] = {(char *)"check", (char *)"HEAD~1", (char *)"HEAD", (char *)"--mode", (char *)"enforce", 0};
+          ck(tool(d, e, out, sizeof out) == 1, "enforce.rc1"); } }
+      /* 3: add a case for the hit batch + a cc approval -> ok (bytes unmeasured, no receipts) */
+      put(d, "tests/cases/demo.cx", "int main(void){return 1;}\n");
+      put(d, "work/ledger.tsv", "时间\tid\t事件\tcommit\t证据\t角色/模型\n"
+          "2026-11-06T00:00\t-\tSLICE-CHANGE\tabc\tA all frozen.txt\tcc omp-go\n");
+      if (commit_all(d, "case+approval")) die("commit");
+      { char *e[] = {(char *)"check", (char *)"HEAD~2", (char *)"HEAD", (char *)"--mode", (char *)"enforce", 0};
+        int rc = tool(d, e, out, sizeof out);
+        ck(strstr(out, "case=ok") != 0, "case.ok");
+        ck(strstr(out, "approval=ok") != 0, "approval.ok");
+        ck(rc == 1 && strstr(out, "bytes=UNMEASURED"), "bytes.unmeasured-not-pass"); } }
+    /* 4: receipts -- DRIFT on an undeclared target, AFFECTED on a declared one */
+    { char d[CK_P];
+      if (cx_fmt(d, sizeof d, "%s/receipts", work) || sy_mkdir(d, 0755)) die("dir");
+      base_repo(d);
+      if (cx_fmt(rdir, sizeof rdir, "%s/r-head", d) || sy_mkdir(rdir, 0755)) die("dir");
+      if (cx_fmt(bdir, sizeof bdir, "%s/r-base", d) || sy_mkdir(bdir, 0755)) die("dir");
+      receipt(rdir, "sl-lnx", "lnx/x86_64", "1111"); receipt(bdir, "sl-lnx", "lnx/x86_64", "1111");
+      receipt(rdir, "sl-win-x86_64", "win/x86_64", "2222"); receipt(bdir, "sl-win-x86_64", "win/x86_64", "9999");
+      put(d, "frozen.txt", "c\n");
+      if (commit_all(d, "touch again")) die("commit");
+      { char *a[] = {(char *)"check", (char *)"HEAD~1", (char *)"HEAD", (char *)"--receipts", rdir,
+                     (char *)"--baseline", bdir, (char *)"--mode", (char *)"enforce", 0};
+        int rc = tool(d, a, out, sizeof out);
+        ck(strstr(out, "SLICE_BYTES\tlnx/x86_64\tAFFECTED") != 0, "bytes.declared-affected");
+        ck(strstr(out, "SLICE_BYTES\twin/x86_64\tDRIFT") != 0, "bytes.drift-detected");
+        ck(rc == 1, "bytes.drift-not-ok"); }
+      /* 5: a missing receipt is UNMEASURED, never ok */
+      { char d2[CK_P], r2[CK_P];
+        if (cx_fmt(d2, sizeof d2, "%s/missing", work) || sy_mkdir(d2, 0755)) die("dir");
+        if (cx_fmt(r2, sizeof r2, "%s/r-none", d2) || sy_mkdir(r2, 0755)) die("dir");
+        receipt(r2, "sl-lnx", "lnx/x86_64", "1111");
+        { char m[CK_P]; if (cx_fmt(m, sizeof m, "%s/sl-win-x86_64", r2) || sy_mkdir(m, 0755)) die("dir"); }
+        { char *a[] = {(char *)"check", (char *)"HEAD~1", (char *)"HEAD", (char *)"--receipts", r2,
+                       (char *)"--baseline", bdir, 0};
+          int rc = tool(d, a, out, sizeof out);
+          ck(rc == 0 && strstr(out, "bytes=UNMEASURED"), "receipt.missing-unmeasured"); } } }
+    /* 6: list refusals -- unknown batch, glob matching nothing */
+    { char d[CK_P];
+      if (cx_fmt(d, sizeof d, "%s/badlist", work) || sy_mkdir(d, 0755)) die("dir");
+      base_repo(d);
+      put(d, "tests/slice-freeze.tsv",
+          "# path_glob\ttargets\tbatches\tnote\nfrozen.txt\tall\tno-such-batch\tfixture\n");
+      if (commit_all(d, "bad batch")) die("commit");
+      { char *l[] = {(char *)"list", 0}; ck(tool(d, l, out, sizeof out) == 2, "list.unknown-batch-refused"); }
+      put(d, "tests/slice-freeze.tsv",
+          "# path_glob\ttargets\tbatches\tnote\nno/such/file.tsv\tall\tdemo-batch\tfixture\n");
+      if (commit_all(d, "bad glob")) die("commit");
+      { char *l[] = {(char *)"list", 0}; ck(tool(d, l, out, sizeof out) == 2, "list.glob-matching-nothing-refused"); } }
+    /* 7: the six SLUG names agree with tools/release-build.cx rb_whole_slug */
+    { size_t n = 0; char p[CK_P], *b; const char *need[6] = {"slice-lnx-x86_64", "slice-lnx-arm64", "slice-osx-x86_64",
+                                                             "slice-osx-arm64", "slice-win-x86_64", "slice-win-arm64"};
+      int k, ok = 1;
+      if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) die("path");
+      b = cx_read(p, &n); if (!b) die("release-build.cx");
+      for (k = 0; k < 6; k++) if (!strstr(b, need[k])) ok = 0;
+      free(b);
+      ck(ok, "slugs.match-release-build"); }
+    { char *v[] = {"rm", "-rf", work, 0}; np_result r = {0}; char why[200];
+      np_run(v, 0, 0, 30, &r, why, sizeof why); np_free(&r); }
+    { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, after, sizeof after); }
+    ck(strcmp(before, after) == 0, "repo.untouched");
+    printf("CHECK_SLICE_FREEZE\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
