@@ -12,8 +12,11 @@
  *   UNMEASURED                a missing receipt is never ok
  *   ok                        case + approval + unchanged shas exits 0 in enforce
  *   list refusals             an unknown batch id and a glob matching nothing are refused
- *   slugs                     the six SLUG names equal tools/release-build.cx rb_whole_slug */
+ *   six target receipts       sha-only sl-* receipts infer all six targets through the real CLI
+ *   release snapshot          real release-build p3 entry freezes APE/split products before usage */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.productpkg
+#pragma unisa use mem.bytes
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use text.text
@@ -42,7 +45,7 @@ static void put(const char *dir, const char *name, const char *text) {
 /* run ARGV in DIRW; stdout+stderr into OUT; the exit code */
 static int run(const char *cwd, char **v, char *out, size_t cap) {
     np_result r; char why[400]; int rc;
-    if (np_run(v, cwd, 0, 120, &r, why, sizeof why)) { cp(out, cap, why, strlen(why)); return -1; }
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) { cp(out, cap, why, strlen(why)); return -1; }
     { size_t n = r.outn < cap - 1 ? r.outn : cap - 1, i;
       for (i = 0; i < n; i++) out[i] = r.out[i];
       out[n] = 0;
@@ -63,10 +66,9 @@ static int commit_all(const char *cwd, const char *msg) {
 }
 /* the tool, run from FIX with the given extra args */
 static int tool(const char *fix, char **extra, char *out, size_t cap) {
-    char sf[CK_P], com[CK_P]; char *v[24]; int n = 0, i;
-    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path");
-    if (cx_fmt(sf, sizeof sf, "%s/tools/slice-freeze.cx", root)) die("path");
-    v[n++] = (char *)"sh"; v[n++] = com; v[n++] = sf; v[n++] = (char *)"--";
+    char sf[CK_P]; char *v[24]; int n = 0, i;
+    if (cx_fmt(sf, sizeof sf, "%s/slice-freeze.elf", work)) die("path");
+    v[n++] = sf;
     for (i = 0; extra[i] && n < 23; i++) v[n++] = extra[i];
     v[n] = 0;
     return run(fix, v, out, cap);
@@ -98,6 +100,163 @@ static void base_repo(const char *fix) {
     if (git(fix, "init", "-q", ".") ) die("git init");
     if (commit_all(fix, "base")) die("git base commit");
 }
+/* Exercise release-build's real dispatcher. Deliberately omit package arguments:
+   the p3 usage refusal happens only AFTER rb_freeze completes, without building. */
+static int release_freeze(const char *fix, char *out, size_t cap) {
+    char exe[CK_P];
+    char *v[] = {exe, "p3", (char *)fix, 0};
+    if (cx_fmt(exe, sizeof exe, "%s/release-build.elf", work)) die("path");
+    return run(root, v, out, cap);
+}
+static int same_file(const char *a, const char *b) {
+    size_t an = 0, bn = 0;
+    char *ab = cx_read(a, &an), *bb = cx_read(b, &bn);
+    int same = ab && bb && an == bn && memcmp(ab, bb, an) == 0;
+    free(ab); free(bb); return same;
+}
+static void release_snapshots(void) {
+    char d[CK_P], dev[CK_P], snap[CK_P], a[CK_P], b[CK_P], out[32768], rev[80];
+    int mode, rc;
+    /* Compile the real tool once; all fixtures exercise this same dispatcher. */
+    {
+        char com[CK_P], src[CK_P], exe[CK_P], status[80];
+        char *v[] = {"sh", com, "-o", exe, src, 0};
+        if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+            cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root) ||
+            cx_fmt(exe, sizeof exe, "%s/release-build.elf", work)) die("release compile path");
+        rc = run(root, v, out, sizeof out);
+        put(work, "release-compile-output.txt", out);
+        if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("release compile status");
+        put(work, "release-compile-status.txt", status);
+        if (rc != 0 || sy_exists(exe) != 1) {
+            ck(0, "release.compile-tool");
+            fprintf(stderr, "release compile fixture=%s rc=%d\n%s\n", work, rc, out);
+            return;
+        }
+    }
+    for (mode = 0; mode < 5; mode++) {
+        int failed_before = failed;
+        if (cx_fmt(d, sizeof d, "%s/release-%d", work, mode) || sy_mkdir(d, 0755)) die("release dir");
+        put(d, "tracked.txt", "snapshot source\n");
+        if (git(d, "init", "-q", ".") || commit_all(d, "snapshot")) die("release git");
+        if (cx_fmt(a, sizeof a, "%s/out", d) || sy_mkdir(a, 0755)) die("release out");
+        { char *v[] = {"git", "rev-parse", "HEAD", 0};
+          if (run(d, v, rev, sizeof rev)) die("release rev"); rev[10] = 0; }
+        if (cx_fmt(snap, sizeof snap, "%s/release-snap-%s", a, rev)) die("release snap");
+        put(d, "unisacc.com.build.json", "{\n  \"epoch\": 47, \"retained\": \"exact bytes\"\n}\n");
+        if (!mode) {
+            size_t n = 0; char *pkg = pp_read_package(root, &n);
+            /* A runnable shell prefix plus the installed footer-backed package.
+               Prefixing preserves the footer's end-relative package span. */
+            const char *prefix = "#!/bin/sh\nexit 0\n";
+            size_t pn = strlen(prefix); char *ape;
+            if (!pkg) die("ape package");
+            ape = malloc(pn + n); if (!ape) die("ape allocation");
+            if (mm_copy(ape, (long)(pn + n), prefix, (long)pn) ||
+                mm_copy(ape + pn, (long)n, pkg, (long)n)) die("ape copy");
+            if (cx_fmt(a, sizeof a, "%s/unisacc.com", d) || cx_write(a, ape, pn + n)) die("ape fixture");
+            free(ape); free(pkg);
+            if (strcmp(pp_layout_name(pp_layout(d)), "ape")) die("ape fixture layout");
+        } else {
+            size_t n = 0; char *bytes;
+            put(d, "unisacc.com", "#!/bin/sh\nexec \"$(dirname \"$0\")/unisacc.com.dev/entry.elf\" \"$@\"\n");
+            if (cx_fmt(dev, sizeof dev, "%s/unisacc.com.dev", d) || sy_mkdir(dev, 0755)) die("split dir");
+            if (mode != 3) {
+                if (cx_fmt(a, sizeof a, "%s/unisacc.com.dev/entry.elf", root)) die("entry source");
+                bytes = cx_read(a, &n);
+                if (!bytes) bytes = cx_read("/bin/true", &n);
+                if (!bytes || cx_fmt(a, sizeof a, "%s/entry.elf", dev) || cx_write(a, bytes, n) || sy_chmod(a, 0755)) die("entry fixture");
+                free(bytes);
+            }
+            bytes = pp_read_package(root, &n);
+            if (!bytes || cx_fmt(a, sizeof a, "%s/p3-package.bin", dev) || cx_write(a, bytes, n)) die("split package");
+            free(bytes);
+            if (mode >= 2) {
+                put(d, "ape-receipt.txt", "NOT_RELEASE\nentry\tunisacc.com.dev/entry.elf\npackage\tunisacc.com.dev/p3-package.bin\nextra\tunisacc.com.dev/resource.bin\n");
+                if (mode != 4) put(dev, "resource.bin", "receipt resource bytes\n");
+            }
+        }
+        rc = release_freeze(d, out, sizeof out);
+        put(d, "release-output.txt", out);
+        { char status[80];
+          if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("release status");
+          put(d, "release-status.txt", status); }
+        if (mode >= 3) {
+            if (cx_fmt(a, sizeof a, "%s/.release-rev", snap) ||
+                cx_fmt(b, sizeof b, "%s/unisacc.com.build.json", snap)) die("refusal path");
+            ck(rc > 0 && sy_exists(a) == 1 && sy_exists(b) == 0,
+               mode == 3 ? "release.missing-entry-refused" : "release.missing-receipt-member-refused");
+            if (failed != failed_before) fprintf(stderr, "release fixture=%s rc=%d\n%s\n", d, rc, out);
+            continue;
+        }
+        { const char *members[] = {"unisacc.com", "unisacc.com.build.json", "unisacc.com.dev/entry.elf", "unisacc.com.dev/p3-package.bin", "unisacc.com.dev/resource.bin"};
+          int i, count = mode == 0 ? 2 : mode == 1 ? 4 : 5, same = 1;
+          for (i = 0; i < count; i++) {
+              if (cx_fmt(a, sizeof a, "%s/%s", d, members[i]) || cx_fmt(b, sizeof b, "%s/%s", snap, members[i])) die("member path");
+              if (!same_file(a, b)) same = 0;
+          }
+          ck(rc == 1 && same, mode == 0 ? "release.ape-bytes-and-build-record" : mode == 1 ? "release.split-bytes-and-build-record" : "release.receipt-bytes-and-build-record"); }
+        if (!mode) {
+            if (cx_fmt(a, sizeof a, "%s/unisacc.com.dev", snap)) die("ape dev path");
+            ck(sy_exists(a) == 0, "release.ape-no-fake-dev");
+        }
+        if (failed != failed_before) fprintf(stderr, "release fixture=%s rc=%d\n%s\n", d, rc, out);
+    }
+}
+static int field_is(const char *line, long n, int field, const char *want) {
+    long at, len;
+    return !tx_field(line, n, '\t', field, &at, &len) &&
+           len == (long)strlen(want) && !memcmp(line + at, want, (size_t)len);
+}
+static void six_target_receipts(void) {
+    const char *leaves[] = {"sl-lnx", "sl-lnx-arm64", "sl-osx-x86_64", "sl-osx-arm64", "sl-win-x86_64", "sl-win-arm64"};
+    const char *targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    char d[CK_P], head[CK_P], base[CK_P], p[CK_P], out[32768], status[80];
+    int seen[6] = {0}, i, j, rc, valid = 1, rows = 0;
+    long at = 0, n;
+    if (cx_fmt(d, sizeof d, "%s/six-targets", work) || sy_mkdir(d, 0755)) die("six targets dir");
+    base_repo(d);
+    put(d, "frozen.txt", "changed\n");
+    put(d, "tests/cases/demo.cx", "int main(void){return 1;}\n");
+    put(d, "work/ledger.tsv", "时间\tid\t事件\tcommit\t证据\t角色/模型\n"
+        "2026-11-06T00:00\t-\tSLICE-CHANGE\tabc\tA all frozen.txt\tcc omp-go\n");
+    if (commit_all(d, "hit with case and approval")) die("six targets commit");
+    if (cx_fmt(head, sizeof head, "%s/head", d) || sy_mkdir(head, 0755) ||
+        cx_fmt(base, sizeof base, "%s/base", d) || sy_mkdir(base, 0755)) die("six targets receipts");
+    for (i = 0; i < 6; i++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", head, leaves[i]) || sy_mkdir(p, 0755)) die("head receipt");
+        put(p, "receipt.txt", i == 0 ? "sha\t2222\n" : "sha\t1111\n");
+        if (cx_fmt(p, sizeof p, "%s/%s", base, leaves[i]) || sy_mkdir(p, 0755)) die("base receipt");
+        put(p, "receipt.txt", "sha\t1111\n");
+    }
+    { char *v[] = {"check", "HEAD~1", "HEAD", "--receipts", head, "--baseline", base, "--mode", "enforce", 0};
+      rc = tool(d, v, out, sizeof out); }
+    put(d, "slice-output.txt", out);
+    if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("six targets status");
+    put(d, "slice-status.txt", status);
+    n = (long)strlen(out);
+    while (at < n) {
+        long end = at;
+        while (end < n && out[end] != '\n') end++;
+        if (field_is(out + at, end - at, 0, "SLICE_BYTES")) {
+            int found = 0;
+            rows++;
+            for (j = 0; j < 6; j++) {
+                if (!field_is(out + at, end - at, 1, targets[j])) continue;
+                found = 1; seen[j]++;
+                if (!field_is(out + at, end - at, 2, j == 0 ? "AFFECTED" : "ok") ||
+                    !field_is(out + at, end - at, 3, "1111") ||
+                    !field_is(out + at, end - at, 4, j == 0 ? "2222" : "1111")) valid = 0;
+            }
+            if (!found) valid = 0;
+        }
+        at = end + 1;
+    }
+    for (i = 0; i < 6; i++) if (seen[i] != 1) valid = 0;
+    valid = valid && rc == 0 && rows == 6;
+    ck(valid, "slugs.six-target-receipt-contract");
+    if (!valid) fprintf(stderr, "six targets fixture=%s rc=%d\n%s\n", d, rc, out);
+}
 int main(int argc, char **argv) {
     char out[1 << 15], fix[CK_P], before[4096], after[4096], rdir[CK_P], bdir[CK_P];
     if (argc > 2) die("usage [ROOT]");
@@ -108,6 +267,22 @@ int main(int argc, char **argv) {
       if (!mkdtemp(tmpl)) die("work dir");
       if (cx_fmt(work, sizeof work, "%s", tmpl)) die("path"); }
     { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, before, sizeof before); }
+    /* All slice-freeze cases use one real compiled CLI, not repeated JITs. */
+    {
+        char com[CK_P], src[CK_P], exe[CK_P], status[80]; int rc;
+        char *v[] = {"sh", com, "-o", exe, src, 0};
+        if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+            cx_fmt(src, sizeof src, "%s/tools/slice-freeze.cx", root) ||
+            cx_fmt(exe, sizeof exe, "%s/slice-freeze.elf", work)) die("slice compile path");
+        rc = run(root, v, out, sizeof out);
+        put(work, "slice-compile-output.txt", out);
+        if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("slice compile status");
+        put(work, "slice-compile-status.txt", status);
+        if (rc != 0 || sy_exists(exe) != 1) {
+            fprintf(stderr, "slice compile retained fixtures=%s rc=%d\n%s\n", work, rc, out);
+            return 1;
+        }
+    }
     /* 1: hit=0 */
     { char d[CK_P];
       if (cx_fmt(d, sizeof d, "%s/hit0", work) || sy_mkdir(d, 0755)) die("dir");
@@ -177,19 +352,15 @@ int main(int argc, char **argv) {
           "# path_glob\ttargets\tbatches\tnote\nno/such/file.tsv\tall\tdemo-batch\tfixture\n");
       if (commit_all(d, "bad glob")) die("commit");
       { char *l[] = {(char *)"list", 0}; ck(tool(d, l, out, sizeof out) == 2, "list.glob-matching-nothing-refused"); } }
-    /* 7: the six SLUG names agree with tools/release-build.cx rb_whole_slug */
-    { size_t n = 0; char p[CK_P], *b; const char *need[6] = {"slice-lnx-x86_64", "slice-lnx-arm64", "slice-osx-x86_64",
-                                                             "slice-osx-arm64", "slice-win-x86_64", "slice-win-arm64"};
-      int k, ok = 1;
-      if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) die("path");
-      b = cx_read(p, &n); if (!b) die("release-build.cx");
-      for (k = 0; k < 6; k++) if (!strstr(b, need[k])) ok = 0;
-      free(b);
-      ck(ok, "slugs.match-release-build"); }
-    { char *v[] = {"rm", "-rf", work, 0}; np_result r = {0}; char why[200];
-      np_run(v, 0, 0, 30, &r, why, sizeof why); np_free(&r); }
+    release_snapshots();
+    six_target_receipts();
     { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, after, sizeof after); }
     ck(strcmp(before, after) == 0, "repo.untouched");
+    if (failed) fprintf(stderr, "check-slice-freeze: retained fixtures=%s\n", work);
+    else {
+        char *v[] = {"rm", "-rf", work, 0}; np_result r = {0}; char why[200];
+        np_run(v, 0, 0, 30, &r, why, sizeof why); np_free(&r);
+    }
     printf("CHECK_SLICE_FREEZE\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;
 }
