@@ -2,6 +2,36 @@
 
 Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.
 
+Darwin 时钟常量以 `exec/facts/clock-targets.tsv` 为唯一事实，
+`tools/clock-targets-gen.cx` 维护 `include/time.h` 的标记块。
+先生成并检查常量，再展平及导出携带头；`tools/check-clock-targets.cx`
+只验证六目标常量与生成漂移；宿主行为和错误 ABI 由 Mac 原生探针验证。Darwin 使用 libSystem
+`clock_gettime`，不再以 `gettimeofday` 代替单调时钟；Linux 保留系统调用，
+Windows 保留签名适配 shim。`exec/facts/libc99posix.tsv` 的逐格绑定同时约束
+编译器与 Mac 候选 smoke。两个 Mac 架构都须真实运行 50ms nanosleep，
+并得到 [50, 500]ms 内非负单调增量；源码检查及 Linux 执行不算 Mac 收据。
+没有现有原生流水线收据，不宣称执行或候选资格通过。
+
+```sh
+sh ./unisacc.com tools/clock-targets-gen.cx
+sh ./unisacc.com tools/clock-targets-gen.cx -- --check
+sh ./unisacc.com tools/libc99posix-gen.cx -- --write
+sh ./unisacc.com tools/libc99posix-gen.cx -- --check
+sh ./unisacc.com tools/cx-flatten.cx -- --write .
+sh ./unisacc.com tools/cx-flatten.cx -- --check .
+sh ./unisacc.com tools/facts-gen.cx -- --write . pp-autoinc-gen
+sh ./unisacc.com tools/facts-gen.cx -- --check . pp-autoinc-gen
+```
+
+`kernel/unisa_headers.inc` 仅通过现有
+`tools/carried-header-export.cx prepare ROOT NEW_MAT LIBNEED_NATIVE`、
+`--verify ROOT MAT`、`install ROOT MAT` 接口重建；物料收据不等于产品资格，
+禁止手改生成的展平头或携带头。
+
+`clock-targets-gen` 是独立生成入口，不在旧 NN 作业的 `command.reads.tsv` 自动映射内。
+完整变更清单仍须保留原始 clock 事实、time 头和 libc 契约，分别记录上述生成检查、clock 批次与携带头物料收据；不得删去未映射源文件冒称完整覆盖。
+NN 作业预检只声明实际读取的派生表覆盖（本项为 `exec/facts/pp-autoinc-gen.tsv`）；携带头及其它 C/CX 实现通过新包探针、当前源单片构造及同候选原生验证另行验收。
+
 `sourceflat.cx` is the native complete-source exporter:
 
 ```sh

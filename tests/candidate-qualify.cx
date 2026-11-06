@@ -10,8 +10,9 @@
  * changed, sha256(./unisacc.com) == APE_SHA, uname == TARGET.  On any mismatch every later check is NOT_RUN and
  * the exit is 1.  Then, each under its own 55 s process-group bound: --version equals the PRODUCT_VERSION row of
  * exec/facts/limits.tsv, hello compiles and runs, run (the default mode: `sh ./unisacc.com FILE.cx` prints the
- * literal it was given), tests/stdio-crossunit.cx, tests/check-stream-pipe.cx, tests/run.cx --smoke.  The candidate
- * is hashed again at the end.  rc 0 only when all seven rows are PASS.
+ * literal it was given), tests/stdio-crossunit.cx, tests/check-stream-pipe.cx, tests/run.cx --smoke. On Mac,
+ * smoke also verifies the same-source clock binding contract and compiles/runs darwin-monotonic.c (50..500 ms).
+ * The candidate is hashed again at the end. rc 0 only when all seven rows are PASS.
  *
  * Row: target check status rc ms ape_sha commit detail (TAB separated; status PASS, FAIL or NOT_RUN).
  *
@@ -93,9 +94,68 @@ static int cq_marker(const np_result *r, const char *needle) {
     return found;
 }
 
+/* Mac-only additions stay inside smoke: the other four cells keep their existing domain. */
+static int cq_mac_clock_contract(void) {
+    size_t n = 0; char *b = cq_slurp("exec/facts/libc99posix.tsv", &n), *line; int found = 0, good = 0;
+    if (!b) return 0;
+    line = b;
+    while (*line) {
+        char *end = strchr(line, '\n'), *f[10], *p; int k = 0;
+        if (end) *end = 0;
+        p = line;
+        while (k < 10) {
+            f[k++] = p;
+            p = strchr(p, '\t');
+            if (!p) break;
+            *p++ = 0;
+        }
+        if (tx_eqz(f[0], "clock_gettime")) {
+            found++;
+            good = k == 10 && !p && tx_eqz(f[3], "per-cell")
+                && tx_eqz(f[6], "host-export:clock_gettime")
+                && tx_eqz(f[7], "host-export:clock_gettime");
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    free(b);
+    return found == 1 && good;
+}
+
+static int cq_mac_clock(char *detail, size_t cap) {
+    np_result r; char why[512]; int rc, good;
+    if (!cq_mac_clock_contract()) {
+        if (cx_fmt(detail, cap, "CLOCK_MONOTONIC contract FAIL: both Mac cells must bind host-export clock_gettime")) detail[0] = 0;
+        return 1;
+    }
+    { char *v[] = {"sh", "./unisacc.com", "-b", (char *)cq_t, "-I", "./include", "-o", "out/candidate-qualify/darwin-monotonic", "tests/cases/darwin-monotonic.c", 0};
+      rc = cq_exec(v, &r, why, sizeof why); }
+    if (rc == 0) {
+        char *v[] = {"./out/candidate-qualify/darwin-monotonic", 0};
+        np_free(&r);
+        rc = cq_exec(v, &r, why, sizeof why);
+        good = rc == 0 && cq_marker(&r, "CLOCK_MONOTONIC\tPASS\tdelta_ns=");
+        if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+        { char *z = cq_zout(&r);
+          if (cx_fmt(detail, cap, "CLOCK_MONOTONIC %s; Mac facts host-export/clock_gettime; %.180s", good ? "PASS" : "FAIL", z ? z : why)) detail[0] = 0;
+          free(z); }
+    } else {
+        good = 0;
+        if (cx_fmt(detail, cap, "CLOCK_MONOTONIC compile FAIL: %.200s", rc < 0 ? why : (r.err ? r.err : "no diagnostic"))) detail[0] = 0;
+    }
+    if (rc >= 0 || r.out || r.err) np_free(&r);
+    return good ? 0 : 1;
+}
+
 static void cq_batch(const char *check, char **argv, const char *marker) {
     np_result r; char why[512], detail[500]; long t0 = sy_now_ms(); int rc = cq_exec(argv, &r, why, sizeof why), good;
     good = rc == 0 && cq_marker(&r, marker);
+    char clock_detail[350]; int mac_clock = tx_eqz(check, "smoke") && !strncmp(cq_t, "osx/", 4);
+    if (mac_clock && cq_mac_clock(clock_detail, sizeof clock_detail)) {
+        cq_row(check, "FAIL", 1, sy_now_ms() - t0, clock_detail);
+        if (rc >= 0 || r.out || r.err) np_free(&r);
+        return;
+    }
     if (rc == 3 && cq_marker(&r, marker) && !cq_marker(&r, "\nFAIL\t")) {   /* the batch ran and some row could not run here */
         char *z = cq_zout(&r), *f = z ? strstr(z, "NOT_RUN\t") : 0;
         if (f) { char *e = strchr(f, '\n'); if (e) *e = 0; }
@@ -105,7 +165,7 @@ static void cq_batch(const char *check, char **argv, const char *marker) {
         np_free(&r);
         return;
     }
-    if (good) { if (cx_fmt(detail, sizeof detail, "%s", marker)) detail[0] = 0; }
+    if (good) { if (cx_fmt(detail, sizeof detail, "%s%s%s", marker, mac_clock ? "; " : "", mac_clock ? clock_detail : "")) detail[0] = 0; }
     else if (rc < 0) { if (cx_fmt(detail, sizeof detail, "not observed: %s", why)) detail[0] = 0; }
     else {  /* first FAIL line, else the stderr head: what a reader needs from the table */
         char *z = cq_zout(&r), *f = 0;

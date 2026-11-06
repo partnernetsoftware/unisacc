@@ -1,0 +1,96 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* sh ./unisacc.com tools/clock-targets-gen.cx -- [--check] [HEADER]
+ * Facts own the numeric namespace only. Runtime clock semantics stay unchanged.
+ * Optional HEADER permits an isolated drift-rejection probe. */
+#define FACTS "exec/facts/clock-targets.tsv"
+#define HEADER "include/time.h"
+#define BEGIN "/* BEGIN generated clock targets */\n"
+#define END "/* END generated clock targets */\n"
+static char block[8192];
+static size_t used;
+static int fail(const char *s) { sy_eprintf("clock-targets-gen\tFAIL\t%s\n", s); return 1; }
+static int add(const char *s) {
+    size_t n = tx_len(s, sizeof block);
+    if (n >= sizeof block - used) return 1;
+    for (size_t i = 0; i < n; i++) block[used++] = s[i];
+    block[used] = 0;
+    return 0;
+}
+static long find(const char *b, size_t n, const char *s) {
+    size_t m = tx_len(s, 128);
+    for (size_t i = 0; i + m <= n; i++) {
+        size_t k = 0;
+        while (k < m && b[i+k] == s[k]) k++;
+        if (k == m) return (long)i;
+    }
+    return -1;
+}
+static int build(void) {
+    size_t n = 0, i = 0;
+    char *b = cx_read(FACTS, &n);
+    int rows = 0;
+    if (!b || !n || b[n-1] != '\n') return fail("facts-read");
+    if (add(BEGIN) || add("/* Generated from exec/facts/clock-targets.tsv; do not edit.\n * Windows numbers are unisa compatibility values, not native clock IDs. */\n")) return fail("capacity");
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        b[e] = 0;
+        if (b[i] != '#') {
+            char *f[4]; int k = 1;
+            f[0] = b+i;
+            for (size_t p = i; p < e; p++) if (b[p] == '\t') {
+                if (k == 4) return fail("fields");
+                b[p] = 0; f[k++] = b+p+1;
+            }
+            if (k != 4 || rows >= 2 || !tx_eqz(f[0], rows == 0 ? "CLOCK_REALTIME" : "CLOCK_MONOTONIC")) return fail("row");
+            for (int c = 1; c < 4; c++) {
+                int v = 0; size_t z = tx_len(f[c], 3);
+                if (!z || z > 2) return fail("number");
+                for (size_t p = 0; p < z; p++) {
+                    if (f[c][p] < '0' || f[c][p] > '9') return fail("number");
+                    v = v * 10 + f[c][p] - '0';
+                }
+                if (v < 0 || v > 31) return fail("range");
+            }
+            if (tx_eqz(f[1], f[2]) && tx_eqz(f[1], f[3])) {
+                if (add("#define ") || add(f[0]) || add(" ") || add(f[1]) || add("\n")) return fail("capacity");
+            } else {
+                if (add("#if defined(__APPLE__)\n#define ") || add(f[0]) || add(" ") || add(f[2]) || add("\n#elif defined(_WIN32)\n#define ") || add(f[0]) || add(" ") || add(f[3]) || add("\n#else\n#define ") || add(f[0]) || add(" ") || add(f[1]) || add("\n#endif\n")) return fail("capacity");
+            }
+            rows++;
+        }
+        i = e+1;
+    }
+    if (rows != 2 || add(END)) return fail("facts-empty-or-capacity");
+    return 0;
+}
+int main(int argc, char **argv) {
+    int check = 0, a = 1;
+    const char *path = HEADER;
+    if (a < argc && tx_eqz(argv[a], "--check")) { check = 1; a++; }
+    if (a < argc) path = argv[a++];
+    if (a != argc) return fail("usage: [--check] [HEADER]");
+    if (build()) return 1;
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return fail("header-read");
+    long start = find(b, n, BEGIN), end = find(b, n, END);
+    if (start < 0 || end < start) return fail("header-markers");
+    size_t after = (size_t)end + tx_len(END, 128);
+    int same = after - (size_t)start == used;
+    if (same) for (size_t j = 0; j < used; j++) if (b[start+j] != block[j]) { same = 0; break; }
+    if (check) {
+        if (!same) return fail("header-drift");
+        sy_eprintf("clock-targets-gen\tCHECK\n"); return 0;
+    }
+    if (!same) {
+        int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) return fail("header-open");
+        int bad = sy_write_all(fd, b, (size_t)start) || sy_write_all(fd, block, used) || sy_write_all(fd, b+after, n-after);
+        sy_close(fd);
+        if (bad) return fail("header-write");
+    }
+    return 0;
+}

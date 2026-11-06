@@ -17,16 +17,22 @@ typedef __u_word time_t;
 typedef __u_word clock_t;
 #include <sys/_timespec.h>
 #include <sys/_ret.h>
-/* clock_gettime / nanosleep (0.0.20 R20-6, dsh).  Linux: the system calls.
-   macOS has no clock_gettime call: both clocks read gettimeofday, so
-   CLOCK_MONOTONIC there is the wall clock at microsecond grain (stated). */
+/* clock_gettime / nanosleep: Linux uses system calls; Darwin uses the
+   libSystem clock_gettime export (macOS 10.12+), including its monotonic clock.
+   Windows retains the bundled compatibility implementation. */
 typedef int clockid_t;
+/* BEGIN generated clock targets */
+/* Generated from exec/facts/clock-targets.tsv; do not edit.
+ * Windows numbers are unisa compatibility values, not native clock IDs. */
 #define CLOCK_REALTIME 0
-#ifdef __APPLE__
+#if defined(__APPLE__)
 #define CLOCK_MONOTONIC 6
+#elif defined(_WIN32)
+#define CLOCK_MONOTONIC 1
 #else
 #define CLOCK_MONOTONIC 1
 #endif
+/* END generated clock targets */
 #if !__UNISA_FTRIM_LIBC || __UN_clock_gettime
 static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
     __u_word __u_r;
@@ -47,13 +53,40 @@ static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
     __u_ts->tv_sec = __u_r / __u_freq; __u_ts->tv_nsec = (long)((__u_r % __u_freq) * 1000000000L / __u_freq);
     return 0;
 #elif defined(__APPLE__)
-    __u_word __u_tv[2];
-    if (__u_c != CLOCK_REALTIME && __u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
-    __u_tv[0] = 0; __u_tv[1] = 0;
-    __u_r = __gettimeofday((char *)__u_tv, 0, 0);
-    if (__u_r < 0) return (int)_unisa_ret(__u_r);
-    __u_ts->tv_sec = __u_tv[0]; __u_ts->tv_nsec = __u_tv[1] * 1000;
-    return 0;
+    /* Host ABI: int clock_gettime(clockid_t, struct timespec *).
+       Integer/pointer slots use the existing native hostcall bridge; narrow
+       its result to int before returning (host -1 is not a syscall errno).
+       Resolve in libSystem explicitly, never in this bundled static shim. */
+    static __u_word __u_libsystem; static __u_word __u_clock_gettime;
+    static __u_word __u_error;
+    int __u_status; int *__u_host_errno;
+    __u_word __u_args[10] = {0};
+    if (!__u_libsystem) {
+        __u_args[0] = (__u_word)"/usr/lib/libSystem.B.dylib"; __u_args[1] = 2;
+        __u_libsystem = __hostcall(__hostaddr0(), __u_args);
+        if (!__u_libsystem) return (int)_unisa_ret(0 - ENOSYS);
+    }
+    if (!__u_clock_gettime) {
+        __u_args[0] = __u_libsystem; __u_args[1] = (__u_word)"clock_gettime";
+        __u_clock_gettime = __hostcall(__hostaddr1(), __u_args);
+        if (!__u_clock_gettime) return (int)_unisa_ret(0 - ENOSYS);
+    }
+    /* Host ABI: int *__error(void). Resolve before clock_gettime so a
+       missing errno accessor fails explicitly without invoking the clock. */
+    if (!__u_error) {
+        __u_args[0] = __u_libsystem; __u_args[1] = (__u_word)"__error";
+        __u_error = __hostcall(__hostaddr1(), __u_args);
+        if (!__u_error) return (int)_unisa_ret(0 - ENOSYS);
+    }
+    __u_args[0] = (__u_word)__u_c; __u_args[1] = (__u_word)__u_ts;
+    __u_status = (int)__hostcall(__u_clock_gettime, __u_args);
+    if (__u_status == -1) {
+        __u_args[0] = 0; __u_args[1] = 0;
+        __u_host_errno = (int *)__hostcall(__u_error, __u_args);
+        if (!__u_host_errno) return (int)_unisa_ret(0 - ENOSYS);
+        errno = *__u_host_errno;
+    }
+    return __u_status;
 #elif defined(__x86_64__)
     __u_r = __syscall6(228, __u_c, (__u_word)__u_ts, 0, 0, 0);
     return (int)_unisa_ret(__u_r);

@@ -1,6 +1,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use text.text
+#pragma unisa use compiler.libc99bind
 /* Fact drift is refused; both Windows targets compile the public P0 header
    surface, including the four cx-own bodies (not CRT aliases), with -c -funit. */
 static int bad;
@@ -9,6 +10,32 @@ static int fail(const char *w) {
     sy_eprintf("check-libc99posix\tFAIL\t%s\n", w);
     bad = 1;
     return 1;
+}
+
+/* Preserve the original contracts without pinning the total table size. */
+static int bindings(void) {
+    const char *targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    const char *host[] = {"open", "read", "close", "lseek", "fdopen", "getpid", "fsync", "chdir", "unlink", "access", "dup", "rmdir", "isatty"};
+    const char *win[] = {"_open", "_read", "_close", "_lseek", "_fdopen", "_getpid", "_commit", "_chdir", "_unlink", "_access", "_dup", "_rmdir", "_isatty"};
+    const char *own[] = {"strdup", "pread", "pwrite", "write", "pipe", "getcwd", "ftruncate"};
+    int c, i;
+    for (c = 0; c < (int)(sizeof targets / sizeof targets[0]); c++) {
+        const char *sym;
+        for (i = 0; i < (int)(sizeof host / sizeof host[0]); i++) {
+            sym = l99_fwdsym(host[i], tx_len(host[i], 32), targets[c]);
+            if (!sym || !tx_eqz(sym, c >= 4 ? win[i] : host[i])) return fail("legacy-host-binding");
+        }
+        for (i = 0; i < (int)(sizeof own / sizeof own[0]); i++)
+            if (l99_fwdsym(own[i], tx_len(own[i], 32), targets[c])) return fail("legacy-own-binding");
+        sym = l99_fwdsym("clock_gettime", 13, targets[c]);
+        if (c == 2 || c == 3) {
+            if (!sym || !tx_eqz(sym, "clock_gettime")) return fail("darwin-clock-binding");
+        } else if (sym) return fail("clock-shim-not-host-export");
+    }
+    if (l99_fwdsym("clock_gettime", 13, "osx/arm64-extra")
+        || l99_fwdsym("open", 4, "unknown") || l99_fwdsym("fcntl", 5, "lnx/x86_64"))
+        return fail("binding-domain");
+    return 0;
 }
 
 static int public_surface(void) {
@@ -62,6 +89,7 @@ int main(void) {
     argv[7] = 0;
     rc = cx_runv_timeout(argv, 55, &out, &n);
     if (rc != 0) return fail("gen-check");
+    if (bindings()) return 1;
     if (public_surface()) return 1;
     if (!bad) sy_printf("LIBC99POSIX\tok=1\tfailed=0\n");
     return bad;

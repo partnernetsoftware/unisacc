@@ -5,8 +5,8 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
-/* Checks the tree reaper of cx/sys/process.cx: sy_child_subreaper and
-   sy_kill_tree.
+/* Checks sysx.process: tree cleanup and np_run's monotonic bounded wait,
+   including children that close both capture pipes before they exit.
 
      sh ./unisacc.com tools/check-reaper.cx
 
@@ -176,10 +176,92 @@ static void cleanup(void) {
     nall = 0;
 }
 
+/* Same-ELF fixtures: no compiler, shell program or recursive check startup.
+   Every sleeper exits after eight seconds even if timeout cleanup regresses. */
+static int capture_sleeper(void *ud) {
+    if (write_pid(ud) != 0) return 1;
+    sy_sleep_ms(8000);
+    return 0;
+}
+
+static int capture_child(const char *mode) {
+    int fds[2], d;
+    if (!strcmp(mode, "normal")) {
+        sy_write_all(1, "capture-out\n", 12);
+        sy_write_all(2, "capture-err\n", 12);
+        return 0;
+    }
+    if (!strcmp(mode, "nonzero")) return 7;
+    if (strcmp(mode, "closed")) return 2;
+    if (write_pid("capture-root") != 0) return 3;
+    if (sy_getpgid(0) != sy_pid()) return 4;
+    if (write_pid("capture-group") != 0) return 5;
+    d = sy_fork_session(capture_sleeper, "capture-detached", fds);
+    if (d <= 0) return 6;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (await_pid("capture-detached") != d) return 8;
+    sy_close(1); sy_close(2);
+    sy_sleep_ms(8000);
+    return 0;
+}
+
+static void check_capture(void) {
+    char why[1024], p[512];
+    char *av[] = { "/proc/self/exe", "--np-child", fxdir, "normal", 0 };
+    np_result r;
+    long start, elapsed;
+    int rc, root, group, d;
+    why[0] = 0;
+    rc = np_run(av, 0, 0, 2, &r, why, sizeof why);
+    ok(rc == 0 && r.rc == 0 && r.outn == 12 && r.errn == 12 &&
+       !strcmp(r.out, "capture-out\n") && !strcmp(r.err, "capture-err\n") &&
+       r.residue == 0, "np_run: captures stdout and stderr normally");
+    np_free(&r);
+    ok(!r.out && !r.err && !r.outn && !r.errn && !r.residue,
+       "np_run: caller owns output and np_free clears it");
+    av[3] = "nonzero";
+    rc = np_run(av, 0, 0, 2, &r, why, sizeof why);
+    ok(rc == 0 && r.rc == 7 && !r.outn && !r.errn,
+       "np_run: nonzero child exit is a captured result, not a launch error");
+    np_free(&r);
+    av[3] = "closed";
+    start = sy_now_ms();
+    rc = np_run(av, 0, 0, 1, &r, why, sizeof why);
+    elapsed = sy_now_ms() - start;
+    pid_path(p, sizeof p, "capture-root"); root = read_pid(p); remember(root);
+    pid_path(p, sizeof p, "capture-group"); group = read_pid(p);
+    pid_path(p, sizeof p, "capture-detached"); d = read_pid(p); remember(d);
+    printf("NOTE\treaper\tnp_run pid=%d pgid=%d detached=%d elapsed_ms=%ld budget_ms=3500\n",
+           root, group, d, elapsed);
+    ok(start >= 0 && elapsed >= 1000 && elapsed < 3500,
+       "np_run: closed stdout/stderr still returns within the explicit timeout budget");
+    ok(rc == -1 && strstr(why, "subprocess.TimeoutExpired:") == why &&
+       r.residue == 0 &&
+       !r.out && !r.err && !r.outn && !r.errn,
+       "np_run: timeout preserves error text, residue and empty-output ownership");
+    ok(root > 0 && group == root && d > 0 && !alive(root) && !alive(d) &&
+       sy_killpg(group, 0) == -ESRCH && sy_killpg(d, 0) == -ESRCH,
+       "np_run: real root PID, PGID and detached descendant leave no residue");
+    np_free(&r);
+    pid_path(p, sizeof p, "no-such-executable"); av[0] = p;
+    rc = np_run(av, 0, 0, 2, &r, why, sizeof why);
+    ok(rc == -1 && strstr(why, "FileNotFoundError:") == why && !r.out && !r.err,
+       "np_run: exec failure remains a launch error");
+    np_free(&r);
+    av[0] = "/proc/self/exe";
+    pid_path(p, sizeof p, "no-such-directory"); rc = np_run(av, p, 0, 2, &r, why, sizeof why);
+    ok(rc == -1 && strstr(why, "FileNotFoundError:") == why && !r.out && !r.err,
+       "np_run: cwd failure remains a launch error");
+    np_free(&r);
+}
+
 int main(int argc, char **argv) {
     char rep[256];
     int root, g1, g2, keep_pid, eroot, d, res, dead, fds[2];
-    (void)argc; (void)argv;
+    if (argc == 4 && !strcmp(argv[1], "--np-child")) {
+        tx_snprintf(fxdir, sizeof fxdir, "%s", argv[2]);
+        return capture_child(argv[3]);
+    }
     tx_snprintf(fxdir, sizeof fxdir, "out/check-reaper-%d", sy_pid());
     {
         int mk = sy_mkdir(fxdir, 0755);
@@ -236,6 +318,7 @@ int main(int argc, char **argv) {
     ok(!alive(eroot), "escape: the root is gone");
     ok(!alive(d), "escape: the detached sleeper is gone");
     ok(res == 0 && rep[0] == 0, "escape: kill_tree reports no residue");
+    check_capture();
     cleanup();
     printf("CX_REAPER\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
