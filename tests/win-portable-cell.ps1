@@ -75,18 +75,39 @@ function Image-Pipe([string]$src, [string]$out, [string]$tag, [string]$routeTgt)
   return (Stage $sp 'elf' ($img + @('--raw')) "$tag.5" $out).Code
 }
 function Same([string]$a, [string]$b) {
-  $ba = [IO.File]::ReadAllBytes((Join-Path $sp $a)); $bb = [IO.File]::ReadAllBytes((Join-Path $sp $b))
+  $pa = Join-Path $sp $a; $pb = Join-Path $sp $b
+  if (-not (Test-Path -LiteralPath $pa) -or -not (Test-Path -LiteralPath $pb)) { return $false }
+  $ba = [IO.File]::ReadAllBytes($pa); $bb = [IO.File]::ReadAllBytes($pb)
   if ($ba.Length -eq 0 -or $ba.Length -ne $bb.Length) { return $false }
   for ($i = 0; $i -lt $ba.Length; $i++) { if ($ba[$i] -ne $bb[$i]) { return $false } }
   return $true
 }
+function Hex32([byte[]]$b) {
+  if ($null -eq $b -or $b.Length -eq 0) { return '-' }
+  $n = [Math]::Min(32, $b.Length); $s = ''
+  for ($i = 0; $i -lt $n; $i++) { $s += ('{0:x2}' -f $b[$i]) }
+  return $s
+}
+function Dump-Pair([string]$name, [int]$rcA, [int]$rcB, [string]$fa, [string]$fb) {
+  $pa = Join-Path $sp $fa; $pb = Join-Path $sp $fb
+  $ha = $(if (Test-Path -LiteralPath $pa) { [IO.File]::ReadAllBytes($pa) } else { [byte[]]@() })
+  $hb = $(if (Test-Path -LiteralPath $pb) { [IO.File]::ReadAllBytes($pb) } else { [byte[]]@() })
+  $off = -1
+  $lim = [Math]::Min($ha.Length, $hb.Length)
+  for ($i = 0; $i -lt $lim; $i++) { if ($ha[$i] -ne $hb[$i]) { $off = $i; break } }
+  if ($off -lt 0 -and $ha.Length -ne $hb.Length) { $off = $lim }
+  Write-Output ("SP_FAIL`t$name`trcA=$rcA`trcB=$rcB`tlenA=$($ha.Length)`tlenB=$($hb.Length)`tmismatch_off=$off`thexA=$(Hex32 $ha)`thexB=$(Hex32 $hb)`texe=$Exe`ttgt=$Tgt")
+}
 $npass = 0
+Write-Output ("SP_ENTRY`texe=$Exe`ttgt=$Tgt")
 $ref = Invoke-Cwd $Exe $sp @('-o','plain.ref','plain.c') 55000 $null $null
 $pip = Image-Pipe 'plain.c' 'plain.pipe' 'p' $Tgt
-if ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'plain.ref' 'plain.pipe')) { $npass++ }
+$bok = ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'plain.ref' 'plain.pipe'))
+if ($bok) { $npass++ } else { Dump-Pair 'B plain-image-pipe-cmp' $ref.Code $pip 'plain.ref' 'plain.pipe' }
 $ref = Invoke-Cwd $Exe $sp @('-o','hello.ref','hello.c') 55000 $null $null
 $pip = Image-Pipe 'hello.c' 'hello.pipe' 'h' $Tgt
-if ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'hello.ref' 'hello.pipe')) { $npass++ }
+$cok = ($ref.Code -eq 0 -and $pip -eq 0 -and (Same 'hello.ref' 'hello.pipe'))
+if ($cok) { $npass++ } else { Dump-Pair 'C hello-stdio-image-pipe-cmp' $ref.Code $pip 'hello.ref' 'hello.pipe' }
 # D two-source
 $ref = Invoke-Cwd $Exe $sp @('-o','ab.ref','a.c','b.c') 55000 $null $null
 $uok = $true
@@ -110,7 +131,7 @@ if ($uok) {
     elseif ((Stage $sp 'elf' ($mi + @('--raw')) 'm.4' 'ab.pipe').Code -ne 0) { $uok = $false }
   }
 }
-if ($ref.Code -eq 0 -and $uok -and (Same 'ab.ref' 'ab.pipe')) { $npass++ }
+if ($ref.Code -eq 0 -and $uok -and (Same 'ab.ref' 'ab.pipe')) { $npass++ } else { Dump-Pair 'D two-source-image-pipe-cmp' $ref.Code $(if ($uok) { 0 } else { 1 }) 'ab.ref' 'ab.pipe' }
 # E 65 sources tape
 $list = @(); $names = @()
 for ($i = 0; $i -lt 65; $i++) {
@@ -140,15 +161,15 @@ if ($eok) {
     elseif ((Stage $sp 'tapecheck' ($ta + @('--raw')) 't.1' 's65.pipe').Code -ne 0) { $eok = $false }
   }
 }
-if ($ref.Code -eq 0 -and $eok -and (Same 's65.ref' 's65.pipe')) { $npass++ }
+if ($ref.Code -eq 0 -and $eok -and (Same 's65.ref' 's65.pipe')) { $npass++ } else { Dump-Pair 'E 65-source-tape-pipe-cmp' $ref.Code $(if ($eok) { 0 } else { 1 }) 's65.ref' 's65.pipe' }
 # H wrong target
 $wrong = $(if ($Tgt -ceq 'win/x86_64') { 'lnx/x86_64' } else { 'win/x86_64' })
 $pip = Image-Pipe 'plain.c' 'plain.wrong.pipe' 'w' $wrong
-if ($pip -ne 0 -or -not (Same 'plain.ref' 'plain.wrong.pipe')) { $npass++ }
+if ($pip -ne 0 -or -not (Same 'plain.ref' 'plain.wrong.pipe')) { $npass++ } else { Dump-Pair 'H wrong-target-pipe-not-equal' 0 $pip 'plain.ref' 'plain.wrong.pipe' }
 # F reject
 $ref = Invoke-Cwd $Exe $sp @('-o','bad.ref','bad.c') 20000 $null $null
 $pip = Image-Pipe 'bad.c' 'bad.pipe' 'b' $Tgt
-if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ }
+if ($ref.Code -eq 1 -and $pip -eq 1) { $npass++ } else { Write-Output ("SP_FAIL`tF reject-stderr-and-rc`trcA=$($ref.Code)`trcB=$pip`texe=$Exe`ttgt=$Tgt") }
 $streamOk = $npass -eq 6
 Write-Output ("STREAM`t" + $(if ($streamOk) { 'PASS' } else { 'FAIL' }) + "`t" + $(if ($streamOk) { 0 } else { 1 }) + "`t$streamNote npass=$npass/6")
 exit 0
