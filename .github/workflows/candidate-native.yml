@@ -72,10 +72,56 @@ jobs:
           [ -f candidate/unisacc.com ] || { echo "::error::no unisacc.com fetched"; exit 1; }
           got=$(sha256sum candidate/unisacc.com | cut -d' ' -f1)
           if [ "$got" != "$APE_SHA" ]; then echo "::error::ape sha256 $got, expected $APE_SHA"; exit 1; fi
+          # The sixth slice (win/arm64) is a separate release asset of the same draft release; the outer PE of the
+          # APE is x86_64, so the windows-11-arm cell runs this file itself. Missing asset => that cell FAILs (not skipped).
+          mkdir slice
+          if [ -n "$RELEASE_TAG" ]; then
+            gh release download "$RELEASE_TAG" -p 'slice-win-arm64' --repo "$GITHUB_REPOSITORY" --dir slice || echo "::warning::release has no slice-win-arm64 asset"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: candidate-ape
           path: candidate/unisacc.com
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: slice-win-arm64
+          path: slice/slice-win-arm64
+          if-no-files-found: ignore
+          retention-days: 7
+  ffi-lnx:
+    # Reference output for the win FFI probes: the same sources, same candidate, compiled for and run on lnx/x86_64.
+    needs: fetch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-ape
+          path: candidate
+      - name: Build and run the FFI probes on lnx
+        shell: bash
+        run: |
+          set -eu
+          got=$(sha256sum candidate/unisacc.com | cut -d' ' -f1)
+          if [ "$got" != "$APE_SHA" ]; then echo "::error::host hash $got, expected $APE_SHA"; exit 1; fi
+          cp candidate/unisacc.com ./unisacc.com; chmod +x ./unisacc.com
+          mkdir -p ffi-ref
+          for p in strdup pread; do
+            timeout 120 sh ./unisacc.com -b lnx/x86_64 -o ffi-ref/win-ffi-$p tests/cases/win-ffi-$p.c
+            (cd tests/cases && timeout 30 "$OLDPWD/ffi-ref/win-ffi-$p" > "$OLDPWD/ffi-ref/$p.out")
+            echo "== $p"; od -c ffi-ref/$p.out | head
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffi-ref
+          path: ffi-ref/*.out
           if-no-files-found: error
           retention-days: 7
   cell-tools:
@@ -115,7 +161,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   candidate:
-    needs: [fetch, cell-tools]
+    needs: [fetch, cell-tools, ffi-lnx]
     strategy:
       fail-fast: false
       matrix:
@@ -125,8 +171,9 @@ jobs:
           - {runner: macos-15-intel, os: osx, arch: x86_64, native_slice: 'yes'}
           - {runner: macos-15, os: osx, arch: arm64, native_slice: 'yes'}
           - {runner: windows-2025, os: win, arch: x86_64, native_slice: 'yes'}
-          # The APE has five slices (tools/release-ape.cx) and none is win/arm64: this host would only emulate x86_64.
-          - {runner: windows-11-arm, os: win, arch: arm64, native_slice: 'no'}
+          # The APE's outer PE is x86_64 (tools/release-ape.cx packs win/arm64 as the sixth slice), so this host
+          # would only emulate it. native_slice 'file' runs the win/arm64 slice file itself, natively.
+          - {runner: windows-11-arm, os: win, arch: arm64, native_slice: 'file'}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 12
     env:
@@ -150,6 +197,17 @@ jobs:
         with:
           name: cell-tools
           path: cell-tools
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: matrix.native_slice == 'file'
+        continue-on-error: true
+        with:
+          name: slice-win-arm64
+          path: slice
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: matrix.os == 'win' && matrix.arch == 'x86_64'
+        with:
+          name: ffi-ref
+          path: ffi-ref
       - name: Run the cell (POSIX)
         if: matrix.os != 'win'
         shell: bash
@@ -238,6 +296,27 @@ jobs:
             exit 1
           }
           Add-Row 'identity' 'PASS' 0 'HEAD, tracked bytes, ape sha and host all agree'
+          if ($env:NATIVE_SLICE -ceq 'file') {
+            # Sixth slice, run natively as a file: --version must print the exact version text. Other checks stay NOT_RUN.
+            $slicePath = Join-Path $PWD 'slice/slice-win-arm64'
+            if (!(Test-Path -LiteralPath $slicePath)) { Add-Row 'version' 'FAIL' 1 'win/arm64 slice asset missing (release_tag needs a slice-win-arm64 asset)' }
+            else {
+              $sb = [IO.File]::ReadAllBytes($slicePath)
+              $spe = [BitConverter]::ToUInt32($sb, 60)
+              $machine = if ($spe -le $sb.Length - 6 -and [BitConverter]::ToUInt32($sb, $spe) -eq 0x4550) { [BitConverter]::ToUInt16($sb, $spe + 4) } else { 0 }
+              $sha = (Get-FileHash -LiteralPath $slicePath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($machine -ne 0xAA64) { Add-Row 'version' 'FAIL' 1 ("slice machine=0x{0:x4}, expected 0xaa64 sha={1}" -f $machine, $sha) }
+              else {
+                $sexe = Join-Path $PWD 'out/slice-win-arm64.exe'
+                Copy-Item -LiteralPath $slicePath $sexe
+                $sv = Invoke-Bounded $sexe @('--version')
+                Add-Row 'version' $(if ($sv.Code -eq 0 -and !$sv.Err -and $sv.Out -cmatch $env:VERSION_RE) { 'PASS' } else { 'FAIL' }) $sv.Code "slice-win-arm64 sha=$sha $($sv.Out) $($sv.Err)"
+              }
+            }
+            foreach ($check in @('hello', 'run', 'stdio-crossunit', 'stream-pipe', 'smoke')) { Add-Row $check 'NOT_RUN' -1 'only the win/arm64 slice file --version is run natively on this cell' }
+            if ($script:failed) { exit 1 }
+            exit 0
+          }
           if ($env:NATIVE_SLICE -cne 'yes') {
             foreach ($check in $later) { Add-Row $check 'NOT_RUN' -1 'APE has no win/arm64 slice; x86_64 emulation is not this native target' }
             exit 0
@@ -259,6 +338,60 @@ jobs:
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
           if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:APE_SHA) { Add-Row 'identity' 'FAIL' 1 'candidate changed during the checks' }
           if ($script:failed) { exit 1 }
+      - name: Windows FFI probes vs lnx reference (byte compare)
+        if: matrix.os == 'win' && matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $com = Join-Path $PWD 'candidate/unisacc.com'
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          function Run-Cap([string]$file, [string[]]$arguments, [string]$dir) {
+            $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = $file; $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true; $info.WorkingDirectory = $dir
+            foreach ($a in $arguments) { $info.ArgumentList.Add($a) }
+            $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
+            [void]$p.Start()
+            $ms = [IO.MemoryStream]::new(); $t = $p.StandardOutput.BaseStream.CopyToAsync($ms); $e = $p.StandardError.ReadToEndAsync()
+            if (!$p.WaitForExit(55000)) { $p.Kill($true); return @{ Code = 124; Out = [byte[]]@(); Err = 'timeout after 55s' } }
+            [void]$t.Wait(2000)
+            return @{ Code = $p.ExitCode; Out = $ms.ToArray(); Err = $e.Result }
+          }
+          function Show([byte[]]$b) { if ($b.Length -eq 0) { '(empty)' } else { ($b | ForEach-Object { $_.ToString('x2') }) -join ' ' } }
+          $bad = $false
+          $cases = Join-Path $PWD 'tests/cases'
+          foreach ($p in @('strdup', 'pread')) {
+            $exe = Join-Path $PWD "out/win-ffi-$p.exe"
+            & $com -b win/x86_64 -o $exe (Join-Path $cases "win-ffi-$p.c")
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $exe)) { Write-Output "FFI $p compile rc=$LASTEXITCODE"; $bad = $true; continue }
+            $ref = [IO.File]::ReadAllBytes((Join-Path $PWD "ffi-ref/$p.out"))
+            if ($p -eq 'pread') {
+              # Bisect open(): absolute path, backslash path, relative path (cwd = tests/cases). Each prints rc/errno/GetLastError.
+              $abs = Join-Path $cases 'win-ffi-pread.c'
+              $back = $abs.Replace('/', '\')
+              foreach ($v in @(@('absolute', $abs, $cases), @('backslash', $back, $cases), @('relative', 'win-ffi-pread.c', $cases))) {
+                $r = Run-Cap $exe @($v[1]) $v[2]
+                Write-Output ("FFI pread open[{0}] arg='{1}' exit={2} stdout_hex={3} stderr='{4}'" -f $v[0], $v[1], $r.Code, (Show $r.Out), ($r.Err -replace '[\r\n]+', ' '))
+              }
+              # Native errno/GetLastError of open() itself, from the same host, for the three spellings.
+              Add-Type -Namespace Nat -Name K32 -UsingNamespace System.Runtime.InteropServices -MemberDefinition '[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr CreateFileA(string n, uint acc, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);'
+              Add-Type -MemberDefinition '[DllImport("ucrtbase.dll", EntryPoint="_open", CallingConvention=CallingConvention.Cdecl)] public static extern int c_open(string p, int flags);[DllImport("ucrtbase.dll", EntryPoint="_errno", CallingConvention=CallingConvention.Cdecl)] public static extern IntPtr c_errno();' -Name U -Namespace Nat -UsingNamespace System.Runtime.InteropServices
+              foreach ($v in @(@('absolute', $abs), @('backslash', $back), @('relative', 'win-ffi-pread.c'))) {
+                Push-Location $cases
+                $h = [Nat.K32]::CreateFileA($v[1], 0x80000000, 1, [IntPtr]::Zero, 3, 0x80, [IntPtr]::Zero)
+                $gle = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                $fd = [Nat.U]::c_open($v[1], 0)
+                $en = [Runtime.InteropServices.Marshal]::ReadInt32([Nat.U]::c_errno())
+                Pop-Location
+                Write-Output ("FFI pread host-open[{0}] CreateFileA handle={1} GetLastError={2}; ucrt _open fd={3} errno={4}" -f $v[0], $h, $gle, $fd, $en)
+              }
+            }
+            # Verdict: the reference spelling is the relative one (the lnx run used cwd = tests/cases with the default argument).
+            $r = Run-Cap $exe @() $cases
+            $same = ($r.Code -eq 0) -and ([Convert]::ToBase64String($r.Out) -ceq [Convert]::ToBase64String($ref))
+            Write-Output ("FFI {0}: exit={1} win_hex={2} lnx_hex={3} err='{4}' => {5}" -f $p, $r.Code, (Show $r.Out), (Show $ref), ($r.Err -replace '[\r\n]+', ' '), $(if ($same) { 'IDENTICAL' } else { 'DIFFERENT' }))
+            if (!$same) { $bad = $true }
+          }
+          if ($bad) { exit 1 }
       - name: Windows diagnostics (read-only, not part of the verdict)
         if: always() && matrix.os == 'win'
         continue-on-error: true
