@@ -78,19 +78,25 @@ int main(int argc, char **argv) {
         ck(has(o, "identity=STABLE") && !has(o, "WT_CHANGED"), "clean-wave-no-wt-change", "");
         free(o); }
 
-    /* 2) negative control: mutate a keep-copy, always restore ROOT batches.tsv */
-    {   char a[9000];
+    /* 2) negative control: mutate batches only inside a local clone, never the session tree */
+    {   char a[9000], pr[4400], ptab[4400];
         const char *row = "wtprobe\tIMPLEMENTED\tcontract\ttests/cases/wtprobe-batch.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/cases/wtprobe-batch.cx\t-\tcontract.core-opkinds\trc0:WTPROBE\tproduct\n";
-        size_t bn = 0;
-        char *body;
+        size_t bn = 0, kn0 = 0;
+        char *body, *live;
         int inserted = 0;
-        if (cx_fmt(g_keep, sizeof g_keep, "%s/batches.keep", w) || cx_fmt(g_tab, sizeof g_tab, "%s/tests/batches.tsv", g_root)) die("paths");
-        body = cx_read(g_tab, &bn);
-        if (!body) die("batches read");
-        if (cx_write(g_keep, body, bn)) { free(body); die("keep write"); }
+        if (cx_fmt(g_keep, sizeof g_keep, "%s/batches.keep", w) || cx_fmt(g_tab, sizeof g_tab, "%s/tests/batches.tsv", g_root) || cx_fmt(pr, sizeof pr, "%s/pr", w) || cx_fmt(ptab, sizeof ptab, "%s/tests/batches.tsv", pr)) die("paths");
+        live = cx_read(g_tab, &kn0);
+        if (!live) die("batches read");
+        if (cx_write(g_keep, live, kn0)) { free(live); die("keep write"); }
+        if (cx_fmt(a, sizeof a, "git clone --no-hardlinks --local %s %s >/dev/null 2>&1", g_root, pr)) { free(live); die("cmd"); }
+        o = run(a, &rc);
+        free(o);
+        if (rc != 0) { free(live); die("local clone"); }
+        body = cx_read(ptab, &bn);
+        if (!body) { free(live); die("pr batches"); }
         {   size_t at = 0, cap = bn + strlen(row) + 1;
             char *outb = calloc(1, cap);
-            if (!outb) { free(body); die("alloc"); }
+            if (!outb) { free(body); free(live); die("alloc"); }
             while (at < bn) {
                 size_t e = at;
                 while (e < bn && body[e] != '\n') e++;
@@ -101,26 +107,21 @@ int main(int argc, char **argv) {
                 }
                 at = e + 1;
             }
-            if (!inserted) { free(outb); free(body); die("no cx-target row"); }
-            atexit(restore_batches);
-            g_need_restore = 1;
-            if (cx_write(g_tab, outb, strlen(outb))) { free(outb); free(body); die("batches write"); }
+            if (!inserted) { free(outb); free(body); free(live); die("no cx-target row"); }
+            if (cx_write(ptab, outb, strlen(outb))) { free(outb); free(body); free(live); die("pr batches write"); }
             free(outb); }
         free(body);
-        if (cx_fmt(a, sizeof a, "./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/s2 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/s2 --light wtprobe cx-cell", g_root, sess_parent, g_root, sess_parent)) die("cmd");
+        if (cx_fmt(a, sizeof a, "mkdir -p %s/out && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- init %s %s/out/s2 ./unisacc.com - >/dev/null && ./tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave %s %s/out/s2 --light wtprobe cx-cell", pr, pr, pr, pr, pr)) { free(live); die("cmd"); }
         probe = run(a, &rc);
-        restore_batches();
+        {   size_t tn = 0; char *tb = cx_read(g_tab, &tn);
+            ck(tb && tn == kn0 && !memcmp(live, tb, kn0), "batches-sha-unchanged", "");
+            free(tb); }
+        free(live);
         ck(has(probe, "WT_CHANGED\tpaths=1\t?? src/_wt_probe.cx"), "probe-wave-reports-the-written-path", "");
         ck(has(probe, "reason=identity-changed-during-wave") && has(probe, "unknown=2"), "probe-wave-all-receipts-unknown", "");
         ck(has(probe, "changed=worktree-changed-during-wave"), "probe-wave-names-the-gate", "");
         free(probe);
-        if (cx_fmt(a, sizeof a, "rm -f src/_wt_probe.cx")) die("cmd");
-        o = run(a, &rc);
-        free(o);
-        ck(rc == 0, "table-restored", "");
-        {   size_t kn = 0, tn = 0; char *kb = cx_read(g_keep, &kn); char *tb = cx_read(g_tab, &tn);
-            ck(kb && tb && kn == tn && !memcmp(kb, tb, kn), "batches-sha-unchanged", "");
-            free(kb); free(tb); } }
+        ck(1, "table-restored", ""); }
 
     /* 3) the tree is clean again */
     {   char a[9000];
