@@ -1,0 +1,105 @@
+/* Real linter invocations: scope, references, fallback declarations and historical regressions. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static char scratch[4400],exe[4400],root[4096];
+static int checks,bad;
+static void die(const char *s){fprintf(stderr,"check-table-lint: %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path bound");}
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("fixture write");}
+static void ck(int yes,const char *label){checks++;printf("%s\t%s\n",yes?"PASS":"FAIL",label);if(!yes)bad++;}
+static int invoke(const char *dir,int expected,const char *rule,const char *state){
+ char *v[]={exe,"--case",(char *)dir,"--limit","100",0};np_result r={0};char why[512]={0};
+ int tr=np_run(v,root,0,15,&r,why,sizeof why);
+ int yes=!tr&&r.rc==expected&&!r.residue;
+ if(rule)yes=yes&&r.out&&strstr(r.out,rule)!=0;
+ if(state)yes=yes&&r.out&&strstr(r.out,state)!=0;
+ if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}
+ np_free(&r);return yes;
+}
+static void sample(const char *name,const char *manifest,const char *a,const char *b,const char *policy,int expected,const char *rule,const char *state){
+ char dir[4400],p[4400];path(dir,scratch,name);if(mkdir(dir,0700))die("fixture mkdir");
+ path(p,dir,"manifest.tsv");put(p,manifest);path(p,dir,"a.tsv");put(p,a);
+ if(b){path(p,dir,"b.tsv");put(p,b);}if(policy){path(p,dir,"policy.tsv");put(p,policy);}
+ ck(invoke(dir,expected,rule,state),name);
+}
+static void root_policy_sample(void){
+ char dir[4400],base[4400],d[4400],p[4400];path(dir,scratch,"root-policy");if(mkdir(dir,0700))die("root fixture mkdir");
+ path(base,dir,"exec");if(mkdir(base,0700))die("exec fixture mkdir");
+ const char *parts[]={"pp","parse2"};
+ for(int i=0;i<2;i++){
+  path(d,base,parts[i]);if(mkdir(d,0700))die("stage fixture mkdir");
+  path(p,d,"gen-manifest.tsv");put(p,"table\ta-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\n");
+  path(p,d,"a-byte.tsv");put(p,i?"Q\t*\tHALT\t[]\n":"P\t0\tHALT\t[]\n");
+ }
+ path(d,dir,"tools");if(mkdir(d,0700))die("policy fixture mkdir");path(p,d,"table-lint-policy.tsv");put(p,"exec/pp\tP\tno-fallback\tOnly zero is admissible by this input-root contract\n");
+ char *v[]={exe,"--root",dir,"--limit","10",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);
+ ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0")&&strstr(r.out,"unresolved=0"),"root-policy-is-independent-of-cwd");
+ if(r.rc){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);}np_free(&r);
+ if(unlink(p)||mkdir(p,0700))die("policy directory fixture");np_result q={0};char qwhy[512]={0};int qt=np_run(v,root,0,15,&q,qwhy,sizeof qwhy);int qok=!qt&&q.rc==2&&!q.residue;ck(qok,"policy-directory-is-not-absence");if(!qok){if(q.outn)fwrite(q.out,1,q.outn,stderr);if(q.errn)fwrite(q.err,1,q.errn,stderr);}np_free(&q);
+}
+static void root_semantics_sample(void){
+ char dir[4400],base[4400],d[4400],p[4400],pp[4400];path(dir,scratch,"root-semantics");if(mkdir(dir,0700))die("semantic fixture mkdir");path(base,dir,"exec");if(mkdir(base,0700))die("semantic exec mkdir");
+ const char *parts[]={"pp","parse2","parse","facts"};for(int i=0;i<4;i++){path(d,base,parts[i]);if(mkdir(d,0700))die("semantic stage mkdir");}
+ path(pp,base,"pp");path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\nforeach\t-\t-\t-\tdemo\t-\t-\t-\t{\"over\":\"demo\"}\n.rows\tfinite\tmacro\t-\tdemo\t-\t-\tentry=@fmt:GEN.{it[name]}\t-\nrows\tdynamic\t@str:{section}\t-\t-\t-\t-\t-\t-\ntemplate\tlabels\tpre\t-\t-\t-\t-\t-\t-\ncall\t../parse/numeric\t-\t-\t-\t-\t-\t-\t-\n");
+ path(p,pp,"uses-byte.tsv");put(p,"USE\t0\tGEN.FOO\t[[\"PUSH\",\"SHIFTED\"]]\nUSE\t1\tDYNAMIC\t[]\nUSE\t2\tPRN\t[]\nUSE\t*\tHALT\t[]\n");
+ path(p,pp,"finite-byte.tsv");put(p,"macro\t$entry\t*\tHALT\t[]\n");path(p,pp,"dynamic-byte.tsv");put(p,"chosen\tDYNAMIC\t*\tHALT\t[]\n");
+ path(p,pp,"start-byte.tsv");put(p,"START\t*\tHALT\t[]\n");path(p,pp,"labels-template.tsv");put(p,"pre\tentry\t-\t-\tmove-state\tSTART\tSHIFTED\t\t\npre\tentry\t-\t-\tlabel\tSHIFTED\t\t\t\n");
+ path(d,base,"facts");path(p,d,"demo.tsv");put(p,"# name\tvalue\nFOO\t\"1\"\n");
+ path(d,base,"parse");path(p,d,"numeric-manifest.tsv");put(p,"rows\tnumeric\tprn\t-\t-\t-\t-\t-\t{\"bindmap\":{\"PRN\":\"@str:PRN\"}}\n");path(p,d,"numeric-result.tsv");put(p,"prn\t$PRN\t*\tHALT\t[]\n");
+ path(d,base,"parse2");path(p,d,"gen-manifest.tsv");put(p,"table\tother-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ncall\t../parse/numeric\t-\t-\t-\t-\t-\t-\t-\n");path(p,d,"other-byte.tsv");put(p,"Q\t*\tPRN\t[]\n");
+ path(p,scratch,"escape-manifest.tsv");put(p,"table\toutside-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\n");path(p,scratch,"outside-byte.tsv");put(p,"OUTSIDE\t*\tHALT\t[]\n");
+ const char *labels[]={"root-finite-template-section-and-import-definitions","root-missing-finite-name-still-rejected","root-manifest-escape-refused","copy-source-is-not-a-definition","copy-destination-has-definition-evidence","header-map-key-iteration","header-map-missing-key-still-rejected"};const int expected[]={0,1,2,1,0,0,1};
+ for(int i=0;i<7;i++){
+  if(i==1){path(p,pp,"uses-byte.tsv");put(p,"USE\t*\tGEN.MISSING\t[]\n");}
+  if(i==2){path(p,pp,"uses-byte.tsv");put(p,"USE\t*\tHALT\t[]\n");path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ncall\t../../../escape\t-\t-\t-\t-\t-\t-\t-\n");}
+  if(i==3||i==4){path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ntemplate\tlabels\tpre\t-\t-\t-\t-\t-\t-\n");path(p,pp,"labels-template.tsv");put(p,i==3?"pre\tentry\t-\t-\tcopy\tCOPIED\tABSENT_SOURCE\t\t\n":"pre\tentry\t-\t-\tcopy\tCOPIED\tSTART\t\t\n");path(p,pp,"uses-byte.tsv");put(p,i==3?"USE\t*\tABSENT_SOURCE\t[]\n":"USE\t*\tCOPIED\t[]\n");}
+  if(i>=5){path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\nforeach\t-\t-\t-\tdemo\t-\t-\t-\t{\"over\":\"demo!\"}\n.rows\tfinite\tmacro\t-\tdemo\t-\t-\tentry=@fmt:GEN.{it}\t-\n");path(p,pp,"uses-byte.tsv");put(p,i==5?"USE\t*\tGEN.FOO\t[]\n":"USE\t*\tGEN.MISSING\t[]\n");}
+  char *v[]={exe,"--root",dir,"--limit","100",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);
+  int yes=!tr&&r.rc==expected[i]&&!r.residue;if(i==0||i==4||i==5)yes=yes&&r.out&&strstr(r.out,"errors=0");if(i==0)yes=yes&&strstr(r.out,"status=PARTIAL")&&strstr(r.out,"UNRESOLVED");if(i==1||i==3||i==6)yes=yes&&r.out&&strstr(r.out,"undefined-state")&&strstr(r.out,i==3?"ABSENT_SOURCE":"GEN.MISSING");ck(yes,labels[i]);
+  if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}np_free(&r);
+ }
+}
+static void root_environment_sample(void){
+ char dir[4400],base[4400],d[4400],p[4400],pp[4400];path(dir,scratch,"root-environment");if(mkdir(dir,0700))die("environment fixture mkdir");path(base,dir,"exec");if(mkdir(base,0700))die("environment exec mkdir");
+ const char *parts[]={"pp","parse2","facts"};for(int i=0;i<3;i++){path(d,base,parts[i]);if(mkdir(d,0700))die("environment stage mkdir");}
+ path(pp,base,"pp");path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ncall\tshared\t-\t-\t-\t-\t-\textra=extra\t{\"let\":{\"extra\":{\"target\":\"@str:TAIL.A\"}}}\ncall\tshared\t-\t-\t-\t-\t-\textra=extra\t{\"let\":{\"extra\":{\"target\":\"@str:TAIL.B\"}}}\nforeach\t-\t-\t-\tdemo\t-\t-\t-\t{\"over\":\"ops\",\"pre\":[[\"op\",\"it.op\"]]}\n.rows\tfmt\t-\t-\tdemo\t-\t-\tentry=@fmt:LV.c{op}\t-\ntemplate\tdispatch\ttype\t-\t-\t-\t-\t-\t{\"let\":{\"ctx\":[{\"dispatch\":\"@str:TYPE.DISPATCH\"}],\"op\":[{\"key\":0,\"target\":\"@str:TYPE.DONE\"}]}}\ntemplate\tmoves\tmoves\t-\t-\t-\t-\t-\t{\"with\":{\"m\":[{\"old\":\"START\",\"new\":\"WITH.NEW\"}]}}\ntemplate\tmoves\tmoves\t-\tmixed\t-\t-\t-\t{\"let\":{\"m\":\"hook\"}}\ntemplate\talias\talias\t-\tdemo\t-\t-\tk2L_0=@str:ALIAS.NEW,k2L_1=@str:TYPE.DONE\t-\ncall\treader\t-\t-\t-\t-\t-\t-\t{\"flags\":{\"record\":true}}\ncall\treader\t-\t-\t-\t-\t-\t-\t{\"flags\":{\"record\":false}}\n");
+ path(p,pp,"uses-byte.tsv");put(p,"USE\t0\tTAIL.A\t[[\"PUSH\",\"TAIL.B\"]]\nUSE\t1\tLV.c+\t[]\nUSE\t2\tLV.c-\t[]\nUSE\t3\tTYPE.DISPATCH\t[]\nUSE\t4\tWITH.NEW\t[]\nUSE\t5\tTYPED.NEW\t[]\nUSE\t6\tALIAS.NEW\t[]\nUSE\t7\tFLAG.ON\t[]\nUSE\t8\tFLAG.OFF\t[]\nUSE\t*\tHALT\t[]\nTYPE.DONE\t*\tHALT\t[]\nSTART\t*\tHALT\t[]\n");
+ path(p,pp,"shared-manifest.tsv");put(p,"rows\tshared\t-\t-\t-\t-\t-\t-\t{\"bindmap\":[\"extra\"]}\n");path(p,pp,"shared-byte.tsv");put(p,"$target\t*\tHALT\t[]\n");path(p,pp,"fmt-byte.tsv");put(p,"$entry\t*\tHALT\t[]\n");
+ path(p,pp,"dispatch-template.tsv");put(p,"type\tmain\tctx\top\trule\t{ctx.dispatch}\t{op.key}\t{op.target}\t[]\ntype\tmain\tctx\t-\trule\t{ctx.dispatch}\t*\tTYPE.DONE\t[]\n");
+ path(p,pp,"moves-template.tsv");put(p,"moves\tm\tm\t-\tmove\t{m.old}\t{m.new}\t-\t-\n");path(p,pp,"alias-template.tsv");put(p,"alias\tmain\tesc\t-\trule\t{esc.state}\t*\t{esc.target}\t[]\n");
+ path(p,pp,"reader-manifest.tsv");put(p,"let\t-\t-\trecord\t-\t-\t-\ttarget=@str:FLAG.ON\t-\nlet\t-\t-\t!record\t-\t-\t-\ttarget=@str:FLAG.OFF\t-\nrows\treader\t-\t-\t-\t-\t-\t-\t-\n");path(p,pp,"reader-byte.tsv");put(p,"$target\t*\tHALT\t[]\n");
+ path(d,base,"facts");path(p,d,"demo.tsv");put(p,"=ops\tjson\t[{\"op\":\"+\"},{\"op\":\"-\"}]\n=esc\tjson\t[{\"state\":\"$k2L_0\",\"target\":\"$k2L_1\"}]\n");path(p,d,"mixed.tsv");put(p,"=CONSTANT\tint\t1\n@hook\told:str\tnew:str\n\tSTART\tTYPED.NEW\n");path(d,base,"parse2");path(p,d,"gen-manifest.tsv");put(p,"table\tother-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\n");path(p,d,"other-byte.tsv");put(p,"Q\t*\tHALT\t[]\n");
+ for(int i=0;i<3;i++){
+  if(i==1){path(p,pp,"uses-byte.tsv");put(p,"USE\t*\tTAIL.MISSING\t[]\nTYPE.DONE\t*\tHALT\t[]\n");}
+  if(i==2){path(d,base,"facts");path(p,d,"mixed.tsv");put(p,"=CONSTANT\tint\t1\n@hook\told:str\tnew:str\n\tSTART\n");path(p,pp,"uses-byte.tsv");put(p,"USE\t*\tTYPED.NEW\t[]\nTYPE.DONE\t*\tHALT\t[]\nSTART\t*\tHALT\t[]\n");}
+  char *v[]={exe,"--root",dir,"--limit","100",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);int yes=!tr&&r.rc==i&&!r.residue;
+  if(i==1)yes=yes&&r.out&&strstr(r.out,"undefined-state")&&strstr(r.out,"TAIL.MISSING");else if(!i)yes=yes&&r.out&&strstr(r.out,"errors=0");ck(yes,i==2?"typed-fact-row-width-refused":i==1?"context-missing-name-still-rejected":"context-variants-fmt-and-dispatch-definitions");
+  if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}np_free(&r);
+ }
+}
+int main(void){
+ char tmp[]="/tmp/table-lint-check-XXXXXX",p[4400],com[4400],tool[4400];
+ if(!realpath(".",root)||!mkdtemp(tmp))die("temporary root");
+ if(cx_fmt(scratch,sizeof scratch,"%s",tmp))die("scratch bound");path(exe,scratch,"table-lint");path(com,root,"unisacc.com");path(tool,root,"tools/table-lint.cx");
+ {char *v[]={"sh",com,tool,"-o",exe,0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,50,&r,why,sizeof why);if(tr||r.rc||r.residue){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("linter compile");}np_free(&r);}
+ sample("same-scope-mode-conflict","one\tb\ta.tsv\none\tr\tb.tsv\n","S\t*\tHALT\t[]\n","S\t*\tHALT\t[]\n",0,1,"mode-conflict","S");
+ sample("different-scopes-isolated","one\tb\ta.tsv\ntwo\tr\tb.tsv\n","S\t*\tHALT\t[]\n","S\t*\tHALT\t[]\n",0,0,0,0);
+ sample("explicit-full-domain","one\tb\ta.tsv\n","S\t0-256\tHALT\t[]\n",0,0,0,"status=STATIC_OK","unresolved=0");
+ sample("unbound-fixture-target-refused","one\tb\ta.tsv\n","S\t*\t$later\t[]\n",0,0,2,0,0);
+ sample("missing-next-state","one\tb\ta.tsv\n","S\t*\tABSENT_NEXT\t[]\n",0,0,1,"undefined-state","ABSENT_NEXT");
+ sample("missing-pushed-state","one\tb\ta.tsv\n","S\t*\tHALT\t[[\"PUSH\",\"ABSENT_PUSH\"]]\n",0,0,1,"undefined-state","ABSENT_PUSH");
+ sample("fallback-required","one\tr\ta.tsv\n","S\t0\tHALT\t[]\n",0,0,1,"missing-fallback","S");
+ sample("intentional-partial-state","one\tr\ta.tsv\n","S\t0\tHALT\t[]\n",0,"one\tS\tno-fallback\tOnly zero is admissible by caller contract\n",0,0,0);
+ sample("declared-external-state","one\tr\ta.tsv\n","S\t*\tLEAF\t[]\n",0,"one\tLEAF\texternal\tLinked by the enclosing manifest\n",0,0,0);
+ sample("buffer-write-after-clear-refused","one\tr\ta.tsv\n","S\t*\tLEAF\t[[\"SBCLR\"],[\"SBOUT\",65]]\n",0,"one\tLEAF\texternal\tLinked key-output entry\none\tS\tsb-entry\tLEAF|Requires empty string buffer at dispatch\n",1,"sbclear","S");
+ sample("buffer-clear-after-write-accepted","one\tr\ta.tsv\n","S\t*\tLEAF\t[[\"SBOUT\",65],[\"SBCLR\"]]\n",0,"one\tLEAF\texternal\tLinked key-output entry\none\tS\tsb-entry\tLEAF|Requires empty string buffer at dispatch\n",0,0,0);
+ sample("malformed-action-refused","one\tr\ta.tsv\n","S\t*\tHALT\t[[\"PUSH\",\"BROKEN\"]\n",0,0,2,0,0);
+ {const char *names[]={"state-mode-c2g","missing-edge-c2h","sbclear-c2f"};const char *rules[]={"mode-conflict","undefined-state","sbclear"};const char *states[]={"PD.drive","INC2.c","INC2.drv"};for(int i=0;i<3;i++){path(p,root,"tools/table-lint-cases");char dir[4400];path(dir,p,names[i]);ck(invoke(dir,1,rules[i],states[i]),names[i]);}}
+ {path(p,root,"tools/table-lint-cases");char dir[4400];path(dir,p,"sbclear-current");ck(invoke(dir,0,0,0),"current-sbclear-contract-negative");}
+ root_policy_sample();
+ root_semantics_sample();
+ root_environment_sample();
+ {char *v[]={exe,"--root",root,"--limit","10",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,20,&r,why,sizeof why);ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0"),"current-pp-parse2-negative");if(tr||r.rc||r.residue)fprintf(stderr,"table-lint-root: transport=%d rc=%d residue=%d %s\n",tr,r.rc,r.residue,why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);}
+ if(cx_rmtree(scratch))die("cleanup");printf("CHECK_TABLE_LINT\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;
+}
