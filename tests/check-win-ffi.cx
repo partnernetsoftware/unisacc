@@ -1,0 +1,84 @@
+/* tests/check-win-ffi.cx -- W45-WIN-FFI: the host-call probes build for every target and run on this host.
+ *
+ *   sh ./unisacc.com tests/check-win-ffi.cx [-- ROOT]
+ *
+ * Probes tests/cases/win-ffi-strdup.c (strdup forwarded to the host C library) and
+ * tests/cases/win-ffi-pread.c (pread: forwarded on lnx/osx, carried in <unistd.h> on win).
+ * For each probe:
+ *   - lnx/x86_64: compile with -o, run it (cwd tests/cases), and compare stdout byte for byte with
+ *     win-ffi-<name>.expect, rc 0;
+ *   - lnx/arm64, osx/x86_64, osx/arm64, win/x86_64, win/arm64: compile with -b TARGET -o; rc 0, an output file,
+ *     no "error:" on stderr.  These images are NOT run here: the line says NOT_RUN, never PASS.  The native
+ *     run is the candidate-native CI probe (windows-2025, windows-11-arm), built by the candidate's own slice.
+ * Work files go to a mkdtemp directory under $TMPDIR or /tmp, removed at the end; nothing is written under ROOT.
+ * Each compile/run is bounded at 55 s.  Last line WIN_FFI<TAB>built=N<TAB>ran=R<TAB>not_run=M<TAB>failed=K. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int built, ran, notrun, failed;
+
+static void say(const char *verdict, const char *target, const char *probe, const char *why) {
+    printf("%s\t%s\t%s\t%s\n", verdict, target, probe, why);
+}
+
+int main(int argc, char **argv) {
+    static const char *targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    static const char *probes[] = {"strdup", "pread"};
+    char root[4096], work[4400], cases[4400], src[4600], img[4600], expect[4600], why[512];
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    int t, p;
+    if (argc > a + 1) { fprintf(stderr, "usage: check-win-ffi.cx [-- ROOT]\n"); return 2; }
+    if (!realpath(argc > a ? argv[a] : ".", root)) { fprintf(stderr, "check-win-ffi: root\n"); return 2; }
+    if (cx_fmt(cases, sizeof cases, "%s/tests/cases", root)) return 2;
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/check-win-ffi-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) {
+            fprintf(stderr, "check-win-ffi: mkdtemp\n"); return 2; } }
+    for (p = 0; p < 2; p++) {
+        if (cx_fmt(src, sizeof src, "%s/win-ffi-%s.c", cases, probes[p]) ||
+            cx_fmt(expect, sizeof expect, "%s/win-ffi-%s.expect", cases, probes[p])) return 2;
+        for (t = 0; t < 6; t++) {
+            char tag[16]; int k = 0; const char *s = targets[t];
+            np_result r; int bad; struct stat st; int made, errline;
+            while (s[k] && k < 15) { tag[k] = s[k] == '/' ? '-' : s[k]; k++; }
+            tag[k] = 0;
+            if (cx_fmt(img, sizeof img, "%s/%s-%s", work, probes[p], tag)) return 2;
+            (void)unlink(img);
+            {   char *v[] = {"sh", "./unisacc.com", "-b", (char *)targets[t], "-o", img, src, 0};
+                memset(&r, 0, sizeof r);
+                bad = np_run(v, root, 0, 55, &r, why, sizeof why);
+            }
+            if (bad) { failed++; say("FAIL", targets[t], probes[p], why); continue; }
+            made = stat(img, &st) == 0 && st.st_size > 0;
+            errline = r.errn && r.err && strstr(r.err, "error:") != 0;
+            np_free(&r);
+            if (r.rc || !made || errline) { failed++; say("FAIL", targets[t], probes[p], "compile"); continue; }
+            built++;
+            if (t != 0) { notrun++; say("NOT_RUN", targets[t], probes[p], "built; native run is the CI probe"); continue; }
+            {   char *v[] = {img, 0};
+                size_t en = 0; char *want = cx_read(expect, &en);
+                int ok;
+                if (!want) { failed++; say("FAIL", targets[t], probes[p], "no expect file"); continue; }
+                memset(&r, 0, sizeof r);
+                bad = np_run(v, cases, 0, 55, &r, why, sizeof why);
+                ok = !bad && r.rc == 0 && r.outn == en && (en == 0 || mm_cmp(r.out, want, (long)en) == 0);
+                free(want);
+                if (!bad) np_free(&r);
+                if (ok) { ran++; say("PASS", targets[t], probes[p], "stdout == expect, rc 0"); }
+                else { failed++; say("FAIL", targets[t], probes[p], bad ? why : "run output or rc"); }
+            }
+        }
+    }
+    (void)unlink(img);
+    for (p = 0; p < 2; p++) for (t = 0; t < 6; t++) {
+        char tag[16]; int k = 0; const char *s = targets[t];
+        while (s[k] && k < 15) { tag[k] = s[k] == '/' ? '-' : s[k]; k++; }
+        tag[k] = 0;
+        if (!cx_fmt(img, sizeof img, "%s/%s-%s", work, probes[p], tag)) (void)unlink(img);
+    }
+    (void)rmdir(work);
+    printf("WIN_FFI\tbuilt=%d\tran=%d\tnot_run=%d\tfailed=%d\n", built, ran, notrun, failed);
+    return failed ? 1 : 0;
+}

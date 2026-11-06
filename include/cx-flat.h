@@ -5328,10 +5328,9 @@ __UNISA_LIBC_LINKAGE int strcoll(const char *__u_a, const char *__u_b) {
 #endif
 #endif
 
-/* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the system C library on Linux and macOS */
-#ifndef _WIN32
+/* 0.0.28 H4 (SQLite's shell): POSIX strdup, forwarded to the host C library on every target
+   (Windows: the loader search in <unisacc_ffi.h> uffi_dlsym) */
 char *strdup(const char *__u_s);
-#endif
 /* C99 7.21.4.5 strxfrm: prototype-only, forwarded to the host's C library on Linux and macOS
  * (the bundled locale is C, whose transformation is the identity). */
 #ifndef _WIN32
@@ -6073,10 +6072,45 @@ static char *getcwd(char *__u_buf, size_t __u_size) {
 #endif
 }
 #endif
-/* 0.0.28 H4 (SQLite's unix VFS): forwarded to the system C library on Linux and macOS */
-#ifndef _WIN32
+/* 0.0.28 H4 (SQLite's unix VFS): forwarded to the system C library on Linux and macOS.
+   Windows has no pread/pwrite export to forward to, so they are carried here over the
+   same read/write/lseek gates: save the position, seek, transfer, put the position back
+   (POSIX leaves the offset unchanged; unlike POSIX this is not atomic against another
+   thread on the same descriptor).  A static definition, so the prototype is non-Windows only. */
+#ifdef _WIN32
+#if !__UNISA_FTRIM_LIBC || __UN_pread
+static ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off) {
+    __u_word __u_cur; __u_word __u_r;
+    if (__u_off < 0) { errno = EINVAL; return -1; }
+    __u_cur = __lseek(__u_fd, 0, SEEK_CUR);
+    if (__u_cur < 0) { errno = (int)(0 - __u_cur); return -1; }
+    __u_r = __lseek(__u_fd, (__u_word)__u_off, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    __u_r = __read(__u_fd, (char *)__u_buf, (__u_word)__u_n);
+    __lseek(__u_fd, __u_cur, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    return __u_r;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_pwrite
+static ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off) {
+    __u_word __u_cur; __u_word __u_r;
+    if (__u_off < 0) { errno = EINVAL; return -1; }
+    __u_cur = __lseek(__u_fd, 0, SEEK_CUR);
+    if (__u_cur < 0) { errno = (int)(0 - __u_cur); return -1; }
+    __u_r = __lseek(__u_fd, (__u_word)__u_off, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    __u_r = __write(__u_fd, (char *)__u_buf, (__u_word)__u_n);
+    __lseek(__u_fd, __u_cur, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    return __u_r;
+}
+#endif
+#else
 ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off);
 ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off);
+#endif
+#ifndef _WIN32
 int fchown(int __u_fd, uid_t __u_uid, gid_t __u_gid);
 /* 0.0.34 X1 (cx.h cx_run_timeout kills the whole group): forwarded */
 int setpgid(pid_t __u_pid, pid_t __u_pgid);
@@ -7426,10 +7460,45 @@ static char *getcwd(char *__u_buf, size_t __u_size) {
 #endif
 }
 #endif
-/* 0.0.28 H4 (SQLite's unix VFS): forwarded to the system C library on Linux and macOS */
-#ifndef _WIN32
+/* 0.0.28 H4 (SQLite's unix VFS): forwarded to the system C library on Linux and macOS.
+   Windows has no pread/pwrite export to forward to, so they are carried here over the
+   same read/write/lseek gates: save the position, seek, transfer, put the position back
+   (POSIX leaves the offset unchanged; unlike POSIX this is not atomic against another
+   thread on the same descriptor).  A static definition, so the prototype is non-Windows only. */
+#ifdef _WIN32
+#if !__UNISA_FTRIM_LIBC || __UN_pread
+static ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off) {
+    __u_word __u_cur; __u_word __u_r;
+    if (__u_off < 0) { errno = EINVAL; return -1; }
+    __u_cur = __lseek(__u_fd, 0, SEEK_CUR);
+    if (__u_cur < 0) { errno = (int)(0 - __u_cur); return -1; }
+    __u_r = __lseek(__u_fd, (__u_word)__u_off, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    __u_r = __read(__u_fd, (char *)__u_buf, (__u_word)__u_n);
+    __lseek(__u_fd, __u_cur, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    return __u_r;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_pwrite
+static ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off) {
+    __u_word __u_cur; __u_word __u_r;
+    if (__u_off < 0) { errno = EINVAL; return -1; }
+    __u_cur = __lseek(__u_fd, 0, SEEK_CUR);
+    if (__u_cur < 0) { errno = (int)(0 - __u_cur); return -1; }
+    __u_r = __lseek(__u_fd, (__u_word)__u_off, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    __u_r = __write(__u_fd, (char *)__u_buf, (__u_word)__u_n);
+    __lseek(__u_fd, __u_cur, SEEK_SET);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    return __u_r;
+}
+#endif
+#else
 ssize_t pread(int __u_fd, void *__u_buf, size_t __u_n, off_t __u_off);
 ssize_t pwrite(int __u_fd, const void *__u_buf, size_t __u_n, off_t __u_off);
+#endif
+#ifndef _WIN32
 int fchown(int __u_fd, uid_t __u_uid, gid_t __u_gid);
 /* 0.0.34 X1 (cx.h cx_run_timeout kills the whole group): forwarded */
 int setpgid(pid_t __u_pid, pid_t __u_pgid);
