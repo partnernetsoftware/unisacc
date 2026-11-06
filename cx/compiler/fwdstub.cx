@@ -1,4 +1,5 @@
 #pragma unisa module fwdstub
+#pragma unisa use compiler.libc99bind
 /* Host-forwarding stub text. No libc and no posix. The buffer is private.
    src/fwdstub.c remains the reference oracle for the C front end. */
 /* ---- -run forwarding stubs (0.0.19 R19-10), shared by both drivers ----
@@ -12,20 +13,9 @@ static int fwdrun;
 static char fwdsrc[131072];
 static int nfwdsrc;
 /* The widest host call the target actually delivers.  0 means fwd_emit's own
-   ceiling of six.  A win target sets four, and the reason is measured, not
-   guessed: the Microsoft x64 convention has four integer register slots, and
-   the generated hostcall sequence (the BK_HOST_WIN_X86 template in
-   back_encode.c) does not build the shadow space or the stack argument area,
-   so a fifth argument is dropped in silence.  The callee then returns a
-   plausible value and the caller's out-parameter stays empty -- the most
-   expensive kind of wrong, because the program keeps working and the data
-   never arrives (examples/win/outparam.c measures it: a 4-argument
-   GetDiskFreeSpaceExA fills all three of its out-parameters, a 5-argument
-   SearchPathA returns the right length and writes nothing).  So a target
-   that cannot deliver the arguments refuses the forward BY NAME instead of
-   emitting a call that quietly loses them.  Set by the driver from the -b
-   target; the product driver leaves it 0 and does not forward to a win target
-   at all yet (archive/plans/v0.0.23.md item A1). */
+   ceiling of six.  A four-slot hostcall target sets four: extra arguments are
+   dropped in silence, so the forward is refused by name instead.  Set by the
+   driver from the -b target. */
 static int fwd_maxargs;
 /* 0.0.31 H3: set by the reference front end when the program takes a function's address; every
    pointer argument then goes through __unisa_ccw_of (front_parse.c cca_emit), so a function the
@@ -71,6 +61,13 @@ int fwd_prologue(void) {
     fwd_s("    return f;\n}\n");
     return 0;
 }
+static int fwd_symlit(char *nm, int nl) {
+    const char *b;
+    b = l99_fwdsym(nm, nl, fwd_maxargs);
+    if (b) fwd_s((char *)b);
+    else fwd_n(nm, nl);
+    return 0;
+}
 int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, int rkind, int rw, int runs) {
     int k; char *rt; int rk;
     rt = fwd_ctype(rkind, rw, runs); rk = fwd_ukind(rkind, rw, runs);
@@ -86,7 +83,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
             if (np == 0) fwd_s("void");
             fwd_s(") {\n    static void *fn; int64_t v[10];\n");
-            fwd_s("    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
+            fwd_s("    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_symlit(nm, nl); fwd_s("\");\n");
             fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
             k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("(int64_t)(intptr_t)__unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(")"); } else { fwd_s(kind[k] == 1 ? "(int64_t)(intptr_t)a" : "(int64_t)a"); fwd_d(k); } } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
@@ -101,7 +98,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     if (np == 0) fwd_s("void");
     fwd_s(") {\n    static void *fn; int kinds[33]; void *vals[33];");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
-    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_symlit(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc -run: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(32 + nl); fwd_s("); exit(127); }\n");
     k = 0; while (k < np) { if (fwd_ccw && kind[k] == 1) { fwd_s("    a"); fwd_d(k); fwd_s(" = __unisa_ccw_of((void *)a"); fwd_d(k); fwd_s(");\n"); } k = k + 1; }
     k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(kind[k], w[k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
@@ -129,7 +126,7 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int isvoid, int rk
     k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k]); k = k + 1; }
     fwd_s(", ...) {\n    static void *fn; int64_t x[4]; va_list ap;");
     if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
-    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("\n    if (fn == 0) fn = __unisa_fwdsym(\""); fwd_symlit(nm, nl); fwd_s("\");\n");
     fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
     fwd_s("    va_start(ap, a"); fwd_d(np - 1); fwd_s("); x[0] = va_arg(ap, int64_t); x[1] = va_arg(ap, int64_t); x[2] = va_arg(ap, int64_t); x[3] = va_arg(ap, int64_t); va_end(ap);\n");
     fwd_s("#if defined(__APPLE__) && defined(__aarch64__)\n    { int kinds[9]; void *vals[9];\n");
