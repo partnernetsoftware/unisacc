@@ -85,11 +85,17 @@ static void sha256hex(const unsigned char *p, long n, char *out16) {
     cx_fmt_chk(out16, 17, "%08lx%08lx", h[0], h[1]);
 }
 
+/* The shell dispatcher covers the four POSIX slices in payload order
+   (Linux|x86_64, Linux|aarch64, Darwin|x86_64, Darwin|arm64). Windows never
+   reaches it: the APE is a PE, so the OS runs the image directly and the DOS
+   stub is ignored. So the optional fifth payload slice (win/arm64) is carried
+   but has no case line -- a dispatcher gap, not a packaging one. */
 static const char *NAME[4] = {"Linux|x86_64", "Linux|aarch64", "Darwin|x86_64", "Darwin|arm64"};
 static int embedded;   /* --payload: the script exports UNISA_CONTAINER */
 static long ape_need;  /* --need KB: only then the launcher checks ulimit -v */
 static const char *ape_tool = "ujs"; /* --tool NAME; default keeps the ujs.com shell text */
-static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
+/* off/len/key carry up to five payload slices; the fifth is win/arm64. */
+static void script(Buf *s, long off[5], long len[5], char key[5][17]) {
     char line[256]; int i;
     s->n = 0;
     put(s, "u=$(uname -s)$(uname -m)\ncase \"$u\" in\n", 38);
@@ -274,8 +280,8 @@ static void mkstub(Buf *st, Buf *sc, long want) {
     }
 }
 int main(int argc, char **argv) {
-    Buf win, img[4], sc = {0, 0, 0}, st = {0, 0, 0}, head, out = {0, 0, 0};
-    long off[4], len[4], want, base, at; char key[4][17]; int i; FILE *fp;
+    Buf win, img[5], sc = {0, 0, 0}, st = {0, 0, 0}, head, out = {0, 0, 0};
+    long off[5], len[5], want, base, at; char key[5][17]; int i, nposix; FILE *fp;
     const char *payload = 0, *pname = 0, *pver = 0; Buf pkg = {0, 0, 0};
     while (argc > 1 && argv[1][0] == '-') {
         if (!strcmp(argv[1], "--payload") && argc > 2) { payload = argv[2]; argv += 2; argc -= 2; }
@@ -303,13 +309,14 @@ int main(int argc, char **argv) {
         }
         else break;
     }
-    if (argc != 7) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] [--need KB] [--deflate] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64\n"); return 2; }
+    if (argc != 7 && argc != 8) { fprintf(stderr, "usage: ape-pack.cx [--payload PKG] [--product NAME VERSION] [--tool NAME] [--need KB] [--deflate] OUT WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 [WIN_ARM64]\n"); return 2; }
+    nposix = argc == 8 ? 5 : 4;
     if (payload) {
         pkg = slurp(payload); embedded = 1;
         if (pkg.n < 4 || (memcmp(pkg.p, "P 1 ", 4) && memcmp(pkg.p, "P 2 ", 4) && memcmp(pkg.p, "P 3 ", 4) && memcmp(pkg.p, "P 4 ", 4))) { fprintf(stderr, "ape: embedded payload must be a model package\n"); return 1; }
     }
     win = slurp(argv[2]);
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < nposix; i++) {
         Buf raw = slurp(argv[3 + i]);
         /* The APE carries one package at its end; a slice must be the bare base
            (lnx: entry.elf). A candidate that still ends in UNIPKG1 + LE64 is the
@@ -327,14 +334,14 @@ int main(int argc, char **argv) {
     head = pe_with_stub(win, st);
     if (pname) { Buf v = add_version_info(head, pname, pver); free(head.p); head = v; }
     base = (head.n + 15) / 16 * 16; at = base;
-    for (i = 0; i < 4; i++) { off[i] = at + 1; sha256hex(img[i].p, img[i].n, key[i]); at += (img[i].n + 15) / 16 * 16; }
+    for (i = 0; i < nposix; i++) { off[i] = at + 1; sha256hex(img[i].p, img[i].n, key[i]); at += (img[i].n + 15) / 16 * 16; }
     script(&sc, off, len, key); mkstub(&st, &sc, want);
     free(head.p); head = pe_with_stub(win, st);
     if (pname) { Buf v = add_version_info(head, pname, pver); free(head.p); head = v; }
     if ((head.n + 15) / 16 * 16 != base) { fprintf(stderr, "ape: header length moved\n"); return 1; }
     if (rd32(head.p + 0x3C) % 8) { fprintf(stderr, "ape: PE offset not 8-aligned\n"); return 1; }
     put(&out, head.p, head.n); while (out.n < base) putc1(&out, 0);
-    for (i = 0; i < 4; i++) { put(&out, img[i].p, img[i].n); while (out.n % 16) putc1(&out, 0); }
+    for (i = 0; i < nposix; i++) { put(&out, img[i].p, img[i].n); while (out.n % 16) putc1(&out, 0); }
     if (payload) {
         unsigned char le[8]; int j; put(&out, pkg.p, pkg.n);
         for (j = 0; j < 8; j++) le[j] = (unsigned char)((unsigned long long)pkg.n >> 8 * j);

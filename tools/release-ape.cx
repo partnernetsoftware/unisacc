@@ -44,9 +44,10 @@ static int receipt_line(char *r, long cap, long *at, const char *key, const char
     return 0;
 }
 
-static int pack(char **argv) {
-    const char *out = argv[0], *p3 = argv[1], *keys[6] = {"p3", "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64"};
+static int pack(char **argv, int nslice) {
+    const char *out = argv[0], *p3 = argv[1], *keys[8] = {"p3", "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/arm64"};
     char payload[4400], com[4400], rp[4400], log[8192], receipt[8192]; size_t pn; long at = 0; int i, rc; PackageFooter foot;
+    if (nslice != 5 && nslice != 6) ra_die("slice count", "pack takes 5 or 6 slices");
     if (sy_mkdir(out, 0755) && sy_exists(out) != 1) ra_die("cannot make", out);
     if (cx_fmt(payload, sizeof payload, "%s/p3-package.body", out) || cx_fmt(com, sizeof com, "%s/unisacc-next.com", out) || cx_fmt(rp, sizeof rp, "%s/ape-receipt.txt", out)) ra_die("path too long", out);
     {   char *b = cx_read(p3, &pn);
@@ -63,13 +64,14 @@ static int pack(char **argv) {
            44 MiB. The two layers do not overlap: the launcher cannot know which
            subcommand it is about to run. The old 300000 was for the 237936 KB
            mapping era. Re-measure if any floor moves. */
-        char *av[] = {"sh", "./unisacc.com", "-run", "tools/ape-pack.cx", "--", "--payload", payload, "--tool", "unisacc", "--need", "53248", "--deflate",
-                      "--product", "unisacc", "0.0.44", com, argv[2], argv[3], argv[4], argv[5], argv[6], 0};
+        char *av[24] = {"sh", "./unisacc.com", "-run", "tools/ape-pack.cx", "--", "--payload", payload, "--tool", "unisacc", "--need", "53248", "--deflate",
+                      "--product", "unisacc", "0.0.44", com, argv[2], argv[3], argv[4], argv[5], argv[6], 0, 0};
+        if (nslice == 6) { av[21] = argv[7]; av[22] = 0; }   /* WIN_ARM64 is the optional sixth slice */
         rc = run(av, log, sizeof log);
         if (rc != 0 || sy_exists(com) != 1) { sy_eprintf("%s", log); ra_die("ape-pack failed", com); }
         sy_chmod(com, 0755);
     }
-    for (i = 0; i < 6; i++) if (receipt_line(receipt, sizeof receipt, &at, keys[i], argv[1 + i])) ra_die("cannot hash", argv[1 + i]);
+    for (i = 0; i < nslice + 1; i++) if (receipt_line(receipt, sizeof receipt, &at, keys[i], argv[1 + i])) ra_die("cannot hash", argv[1 + i]);
     if (receipt_line(receipt, sizeof receipt, &at, "p3-package.body", payload) || receipt_line(receipt, sizeof receipt, &at, "unisacc-next.com", com)) ra_die("cannot hash", com);
     {   /* the packed file's last package must be the payload: footer = "UNIPKG1\n" + length, payload just before it */
         size_t cn, qn; char *c = cx_read(com, &cn), *q = cx_read(payload, &qn); long len = 0; int k;
@@ -196,9 +198,10 @@ static int devlnx(const char *out, const char *p3, const char *lnxelf) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 9 && tx_eqz(argv[1], "pack")) return pack(argv + 2);
+    /* pack OUT P3 + five slices = 9 argv; the optional sixth slice WIN_ARM64 = 10. */
+    if ((argc == 9 || argc == 10) && tx_eqz(argv[1], "pack")) return pack(argv + 2, argc - 4);
     if (argc == 5 && tx_eqz(argv[1], "dev-lnx")) return devlnx(argv[2], argv[3], argv[4]);
     if (argc == 3 && tx_eqz(argv[1], "smoke")) return smoke(argv[2]);
-    sy_eprintf("usage: release-ape.cx pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 | dev-lnx OUT P3 LNX_ELF | smoke FILE\n");
+    sy_eprintf("usage: release-ape.cx pack OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 [WIN_ARM64] | dev-lnx OUT P3 LNX_ELF | smoke FILE\n");
     return 2;
 }
