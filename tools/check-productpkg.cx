@@ -58,14 +58,33 @@ static void die(const char *what) {
     exit(2);
 }
 
+/* A split2 scratch root that does not copy the live install. Live ROOT may be APE. */
+static int make_split_root(const char *dst) {
+    char p[4400], dev[4400], src[4400];
+    size_t n = 0;
+    char *b;
+    if (sy_mkdir(dst, 0700)) return -1;
+    if (cx_fmt(src, sizeof src, "%s/unisacc-dev", root)) return -1;
+    b = cx_read(src, &n);
+    if (!b || n < 8) { if (b) free(b); return -1; }
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com", dst)) { free(b); return -1; }
+    if (cx_write(p, b, n)) { free(b); return -1; }
+    free(b);
+    if (cx_fmt(dev, sizeof dev, "%s/unisacc.com.dev", dst)) return -1;
+    if (sy_mkdir(dev, 0700)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/entry.elf", dev) || cx_write(p, "entry\n", 6)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/p3-package.bin", dev) || cx_write(p, "P 1\n", 4)) return -1;
+    return 0;
+}
+
 /* argv: child identity-fail  -- build a product copy with a member missing, then ask the guard
    wrapper for its identity. It must refuse (exit 2), not return an empty string: two empty
    strings compare equal and the unchanged-guard would pass without measuring anything. */
 static int main_identity_fail(void) {
     char g[4400], ge[4400];
     if (cx_fmt(g, sizeof g, "%s/guard-fail", work)) die("fail dir");
-    if (pp_copy_product(root, g)) die("fail copy");
-    if (!tx_eqz(pp_identity_kind(g), "split2")) return 0;
+    if (make_split_root(g)) die("fail split");
+    if (!tx_eqz(pp_identity_kind(g), "split2")) die("fail not split2");
     if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("fail entry");
     if (sy_unlink(ge)) die("fail unlink");
     {   char h[65];
@@ -129,9 +148,8 @@ int main(int argc, char **argv) {
         if (cx_fmt(g, sizeof g, "%s/guard", work)) die("guard dir");
         copied = pp_copy_product(root, g) == 0;
         ok(copied, "guard-copy-ok");
-        { char _d[4400], _e[4400]; if (!cx_fmt(_d, sizeof _d, "%s/unisacc.com.dev/p3-package.bin", g) && !cx_fmt(_e, sizeof _e, "%s/unisacc.com.dev/entry.elf", g)) fprintf(stderr, "DEBUG guard pkg=%d entry=%d\n", sy_exists(_d), sy_exists(_e)); }
         if (cx_fmt(gp, sizeof gp, "%s/unisacc.com.dev/p3-package.bin", g)) die("guard package");
-        { char _n[16][64], _h[16][65]; long _b[16]; int _k = pp_member_list(g, _n, _h, _b, 16); int _r = pp_product_digest(g, h1); if (_r) fprintf(stderr, "DEBUG guard identity rc=%d members=%d layout=%s\n", _r, _k, pp_layout_name(pp_layout(g))); ok(_r == 0 && h1[0], "identity-computable"); }
+        ok(pp_product_digest(g, h1) == 0 && h1[0], "identity-computable");
         ok(pp_product_digest(g, h2) == 0 && tx_eqz(h1, h2), "identity-stable");
         if (tx_eqz(pp_identity_kind(g), "split2")) {
             b = cx_read(gp, &n);
@@ -169,7 +187,7 @@ int main(int argc, char **argv) {
         char h[65];
         int copied;
         if (cx_fmt(g, sizeof g, "%s/guard-missing", work)) die("missing dir");
-        copied = pp_copy_product(root, g) == 0;
+        copied = make_split_root(g) == 0;
         if (copied && tx_eqz(pp_identity_kind(g), "split2")) {
             if (cx_fmt(ge, sizeof ge, "%s/unisacc.com.dev/entry.elf", g)) die("missing entry");
             if (sy_unlink(ge)) die("unlink entry");
@@ -184,7 +202,7 @@ int main(int argc, char **argv) {
         long at = 0;
         int i, n = 0, built = 1;
         if (cx_fmt(m, sizeof m, "%s/many", work)) die("many dir");
-        if (pp_copy_product(root, m)) built = 0;
+        if (make_split_root(m)) built = 0;
         if (built) {
             for (i = 0; i < 18 && built; i++) {
                 if (cx_fmt(f, sizeof f, "%s/unisacc.com.dev/m%02d", m, i)) die("many member");
@@ -212,7 +230,7 @@ int main(int argc, char **argv) {
         char *only = "NOT_RELEASE\tdev-lnx-only\n";
         int built;
         if (cx_fmt(r, sizeof r, "%s/empty-receipt", work)) die("empty dir");
-        built = pp_copy_product(root, r) == 0;
+        built = make_split_root(r) == 0;
         if (built) {
             if (cx_fmt(rec, sizeof rec, "%s/ape-receipt.txt", r)) die("empty receipt");
             if (cx_write(rec, only, tx_len(only, 64))) built = 0;
@@ -227,7 +245,7 @@ int main(int argc, char **argv) {
         char sl[4400], entry2[4400], target[4400];
         int built, linked = 0;
         if (cx_fmt(sl, sizeof sl, "%s/symlink-member", work)) die("symlink dir");
-        built = pp_copy_product(root, sl) == 0;
+        built = make_split_root(sl) == 0;
         if (built && tx_eqz(pp_identity_kind(sl), "split2")) {
             if (cx_fmt(entry2, sizeof entry2, "%s/unisacc.com.dev/entry.elf", sl)) die("symlink entry");
             if (cx_fmt(target, sizeof target, "%s/entry-target", sl)) die("symlink target");
@@ -249,7 +267,7 @@ int main(int argc, char **argv) {
             !cx_fmt(rec, sizeof rec, "%s/ape-receipt.txt", wr) &&
             !cx_fmt(m1, sizeof m1, "%s/unisacc.com.dev/entry.elf", wr) &&
             !cx_fmt(m2, sizeof m2, "%s/unisacc.com.dev/p3-package.bin", wr) &&
-            pp_copy_product(root, wr) == 0 &&
+            make_split_root(wr) == 0 &&
             !cx_fmt(body, sizeof body, "NOT_RELEASE\tdev-lnx-only\nentry.elf\t%s\tsha=x\tbytes=1\np3-package\t%s\tsha=x\tbytes=1\n", m1, m2) &&
             cx_write(rec, body, tx_len(body, sizeof body)) == 0)
             okc = pp_copy_product(wr, wr2) == 0;
@@ -262,8 +280,10 @@ int main(int argc, char **argv) {
     }
 
     {   char ape[4400];
-        if (cx_fmt(ape, sizeof ape, "%s/out/m4-backup/unisacc.com.83343ec1", root)) die("ape path");
-        if (sy_exists(ape) != 1) skip("ape-layout", "no archived single-file APE");
+        if (tx_eqz(pp_layout_name(pp_layout(root)), "ape"))
+            ok(tx_eqz(pp_layout_name(pp_layout_of_file(com)), "ape"), "ape-layout");
+        else if (cx_fmt(ape, sizeof ape, "%s/out/m4-backup/unisacc.com.83343ec1", root)) die("ape path");
+        else if (sy_exists(ape) != 1) skip("ape-layout", "no archived single-file APE");
         else ok(tx_eqz(pp_layout_name(pp_layout_of_file(ape)), "ape"), "ape-layout");
     }
 
