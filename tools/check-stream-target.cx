@@ -1,0 +1,331 @@
+/* PRODUCT selects an installed/candidate shell product; ROOT is its resource cwd.
+   With no arguments, or `all`, run all six cells in one fresh process/scratch;
+   `cell INDEX` runs one sub-batch if all cannot finish in 55 seconds. Each runs
+   direct/stream/explicit E2, then width-e2/e1/e3, default-host and conflict checks.
+   The common deadline is 54 seconds, leaving cleanup slack before outer 55/60s.
+   BASELINE_PRODUCT optionally selects the old product for real old/new default
+   sampling; absent means explicit NOT_RUN for that cross-version assertion.
+   Both batch modes always execute products, never reuse historical receipts.
+   Low-level direct|stream|explicit|default INDEX RESULT, width-e2/e1/e3 INDEX
+   RESULT and conflict RESULT are diagnostic samples only. compare RESULT and
+   summary RESULT BASELINE only inspect evidence and never report a batch PASS.
+   The generated macro probe covers exec/pp/predefines.tsv, including arch. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pytempfile
+#pragma unisa use sys.time
+#pragma unisa use sys.hostid
+
+static long ct_deadline;
+static const char *ct_product_override;
+
+
+static const char *ct_targets[] = {"win/x86_64", "win/arm64", "lnx/x86_64", "osx/arm64", "lnx/arm64", "osx/x86_64"};
+static const char *ct_macros[] = {"__linux__", "__unix__", "__ELF__", "__APPLE__", "__MACH__", "_WIN32", "_WIN64", "__x86_64__", "__aarch64__", "__LP64__", "__UNISA__"};
+static const unsigned ct_expected[] = {1248, 1376, 1671, 1818, 1799, 1690};
+
+static void ct_die(const char *why) { fprintf(stderr, "check-stream-target: %s\n", why); exit(2); }
+static int ct_seconds(void) {
+    long now, left;
+    if (!ct_deadline) return 55;
+    now = sy_now_ms();
+    left = ct_deadline - now;
+    if (now < 0 || left < 1000) ct_die("batch deadline exceeded");
+    return (int)(left / 1000);
+}
+
+static unsigned ct_mask(const np_buf *b) {
+    unsigned mask = 0;
+    int i;
+    for (i = 0; i < 11; i++) {
+        char marker[40];
+        size_t n;
+        if (cx_fmt(marker, sizeof marker, "CST_MACRO_%02d_END", i)) ct_die("marker overflow");
+        n = np_count(b->p, b->n, marker, strlen(marker));
+        if (n > 1) ct_die("duplicate macro marker");
+        if (n) mask |= 1U << i;
+    }
+    return mask;
+}
+
+
+static np_buf ct_load(const char *dir, const char *name) {
+    char path[8192];
+    np_buf b = {0};
+    if (cx_fmt(path, sizeof path, "%s/%s", dir, name)) ct_die("path overflow");
+    if (np_readfile(path, &b)) ct_die("missing batch evidence");
+    return b;
+}
+
+static int ct_compare(const char *dir, int first_cell, int end_cell) {
+    unsigned masks[6];
+    int i, j, mode;
+    for (i = first_cell; i < end_cell; i++) {
+        unsigned first = 0;
+        for (mode = 0; mode < 2; mode++) {
+            char path[8192], marker[40];
+            np_buf b = {0};
+            unsigned mask = 0;
+            if (cx_fmt(path, sizeof path, "%s/%s-%d.txt", dir, mode ? "stream" : "direct", i)) ct_die("path overflow");
+            if (np_readfile(path, &b)) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+            for (j = 0; j < 11; j++) {
+                size_t count;
+                if (cx_fmt(marker, sizeof marker, "CST_MACRO_%02d_END", j)) ct_die("marker overflow");
+                count = np_count(b.p, b.n, marker, strlen(marker));
+                if (count > 1) { free(b.p); return 1; }
+                if (count) mask |= 1U << j;
+            }
+            free(b.p);
+            if (!mode) first = mask;
+            else if (first != mask) { fprintf(stderr, "macro set mismatch: %s\n", ct_targets[i]); return 1; }
+        }
+        /* Both paths must actually preprocess the probe and expose an architecture. */
+        if (!(first & (1U << 10)) || ((first & (1U << 7)) != 0) == ((first & (1U << 8)) != 0)) return 1;
+        if (first != ct_expected[i]) { fprintf(stderr, "unexpected target macros: %s\n", ct_targets[i]); return 1; }
+        masks[i] = first;
+        for (j = first_cell; j < i; j++) if (masks[j] == first) { fprintf(stderr, "target sets collapsed\n"); return 1; }
+        printf("CHECK %s macro-set=%u\n", ct_targets[i], first);
+        {
+            np_buf a = {0}, b = {0};
+            char path[8192];
+            int bad;
+            if (cx_fmt(path, sizeof path, "%s/stream-%d.txt", dir, i)) ct_die("path overflow");
+            bad = np_readfile(path, &a);
+            if (cx_fmt(path, sizeof path, "%s/explicit-%d.txt", dir, i)) ct_die("path overflow");
+            bad |= np_readfile(path, &b);
+            if (bad || a.n != b.n || memcmp(a.p, b.p, a.n)) {
+                free(a.p); free(b.p); fprintf(stderr, "explicit target bytes differ\n"); return 1;
+            }
+            free(a.p); free(b.p);
+        }
+    }
+    return 0;
+}
+
+/* Only this mode reports a complete batch PASS. It starts no subprocess. */
+static int ct_summary(const char *dir, const char *baseline, int first_cell, int end_cell) {
+    int i;
+    np_buf a = {0}, b = {0}, err = {0}, out = {0}, code = {0};
+    if (ct_compare(dir, first_cell, end_cell)) return 1;
+    for (i = first_cell; i < end_cell; i++) {
+        char name[64];
+        const char *want = i < 2 ? "  imm r0, 4\n" : "  imm r0, 8\n";
+        const char *other = i < 2 ? "  imm r0, 8\n" : "  imm r0, 4\n";
+        int bad;
+        if (cx_fmt(name, sizeof name, "width-%d-2.bin", i)) ct_die("name overflow");
+        a = ct_load(dir, name);
+        bad = np_count(a.p, a.n, want, strlen(want)) != 1 || np_count(a.p, a.n, other, strlen(other));
+        free(a.p);
+        if (bad) return 1;
+    }
+    if (baseline) {
+        a = ct_load(dir, "default-0.txt"); b = ct_load(baseline, "default-0.txt");
+        i = !a.n || a.n != b.n || memcmp(a.p, b.p, a.n);
+        free(a.p); free(b.p);
+        if (i) return 1;
+    } else puts("NOT_RUN default-cross-version: BASELINE_PRODUCT not supplied");
+    for (i = 0; i < 6; i++) if (!strcmp(ct_targets[i], tn_self())) break;
+    if (i == 6) return 1;
+    {
+        char name[64];
+        unsigned expected = ct_expected[i];
+        if (cx_fmt(name, sizeof name, "direct-%d.txt", i)) ct_die("name overflow");
+        a = ct_load(dir, "default-0.txt"); b = ct_load(dir, name);
+        i = !a.n || !b.n || ct_mask(&a) != expected || ct_mask(&b) != expected;
+        free(a.p); free(b.p);
+        if (i) return 1;
+    }
+    err = ct_load(dir, "conflict-err.bin"); out = ct_load(dir, "conflict-out.bin"); code = ct_load(dir, "conflict-rc.txt");
+    i = !atoi(code.p) || out.n || !err.n || err.p[err.n - 1] != '\n' || np_count(err.p, err.n, "\n", 1) != 1 || np_count(err.p, err.n, "usage", 5) || !np_count(err.p, err.n, "conflicts with route target", 27);
+    free(err.p); free(out.p); free(code.p);
+    if (i) return 1;
+    if (ct_deadline && sy_now_ms() >= ct_deadline) return 1;
+    printf("%s\tcells=%d\tfailed=0\tmacros explicit-bytes E3-width conflict default-host baseline=%s\n", ct_deadline ? "CHECK_STREAM_TARGET" : "CHECK_STREAM_TARGET_EVIDENCE_ONLY", end_cell - first_cell, baseline ? "CHECKED" : "NOT_RUN");
+    return 0;
+}
+
+/* Preserve stage carriers between commands; E3's existing textual tape contract
+   exposes sizeof constants as `imm r0, N` (tests/stream-e3.cx). */
+static int ct_width(int argc, char **argv, const char *product, const char *root) {
+    char absolute[8192], input[8192], output[8192], route[96], why[256] = {0};
+    char *child[24];
+    const char *stage;
+    np_result r = {0};
+    int index, step, k = 0, rc, fail;
+    if (argc != 4 || strlen(argv[2]) != 1 || argv[2][0] < '0' || argv[2][0] > '5') return 2;
+    if (!strcmp(argv[1], "width-e2")) step = 0;
+    else if (!strcmp(argv[1], "width-e1")) step = 1;
+    else if (!strcmp(argv[1], "width-e3")) step = 2;
+    else return 2;
+    index = argv[2][0] - '0';
+    stage = step == 0 ? "e2" : step == 1 ? "e1" : "e3";
+    ptf_abspath(product, absolute, sizeof absolute);
+    if (cx_fmt(output, sizeof output, "%s/width-%d-%d.bin", argv[3], index, step)) ct_die("path overflow");
+    if (!step) {
+        const char *source = "int main(void) { return sizeof(long); }\n";
+        if (cx_fmt(input, sizeof input, "%s/width-%d.c", argv[3], index)) ct_die("path overflow");
+        if (np_writefile(input, source, strlen(source))) return 1;
+    } else if (cx_fmt(input, sizeof input, "%s/width-%d-%d.bin", argv[3], index, step - 1)) ct_die("path overflow");
+    {
+        char path[8192];
+        ptf_abspath(input, path, sizeof path);
+        if (cx_fmt(input, sizeof input, "%s", path)) ct_die("path overflow");
+    }
+    if (cx_fmt(route, sizeof route, "%s/run/O0", ct_targets[index])) ct_die("route overflow");
+    child[k++] = "sh"; child[k++] = "-c";
+    child[k++] = "input=$1; shift; exec sh \"$@\" < \"$input\"";
+    child[k++] = "check-stream-target"; child[k++] = input; child[k++] = absolute;
+    child[k++] = "stream"; child[k++] = (char *)stage;
+    child[k++] = "--route"; child[k++] = route;
+    child[k++] = "--source"; child[k++] = "width.c";
+    child[k++] = "--res"; child[k++] = "run-forward";
+    if (step == 2) child[k++] = "--raw";
+    child[k] = 0;
+    rc = np_run(child, root, 0, ct_seconds(), &r, why, sizeof why);
+    fail = rc || r.rc || r.errn || !r.outn;
+    if (!fail && step == 2) {
+        const char *want = index < 2 ? "  imm r0, 4\n" : "  imm r0, 8\n";
+        const char *other = index < 2 ? "  imm r0, 8\n" : "  imm r0, 4\n";
+        if (np_count(r.out, r.outn, want, strlen(want)) != 1 || np_count(r.out, r.outn, other, strlen(other))) fail = 1;
+    }
+    if (!fail && np_writefile(output, r.out, r.outn)) fail = 1;
+    if (fail) {
+        fprintf(stderr, "width %s %s: transport=%d rc=%d %s\n", stage, ct_targets[index], rc, r.rc, why);
+        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    } else printf("SAMPLE %s %s\n", argv[1], ct_targets[index]);
+    np_free(&r);
+    return fail;
+}
+
+int main(int argc, char **argv);
+
+/* Always run a fresh real batch, never accept an earlier receipt directory.
+   cell INDEX is the bounded executable fallback when all exceeds 55 seconds. */
+static int ct_all(int first_cell, int end_cell) {
+    static const char *modes[] = {"direct", "stream", "explicit", "width-e2", "width-e1", "width-e3"};
+    const char *baseline = getenv("BASELINE_PRODUCT");
+    char scratch[8192], old[8192], number[2];
+    char *call[5] = {"check-stream-target", 0, number, scratch, 0};
+    long start = sy_now_ms();
+    int i, mode, rc = 1;
+    if (start < 0) ct_die("clock unavailable");
+    ct_deadline = start + 54000;
+    if (ptf_mkdtemp(0, "check-stream-target-batch-", scratch, sizeof scratch)) return 1;
+    for (i = first_cell; i < end_cell; i++) {
+        number[0] = (char)('0' + i); number[1] = 0;
+        for (mode = 0; mode < 6; mode++) {
+            call[1] = (char *)modes[mode];
+            if (main(4, call)) goto finish;
+        }
+    }
+    for (i = 0; i < 6; i++) if (!strcmp(ct_targets[i], tn_self())) break;
+    if (i == 6) goto finish;
+    if (i < first_cell || i >= end_cell) {
+        number[0] = (char)('0' + i); number[1] = 0; call[1] = "direct";
+        if (main(4, call)) goto finish;
+    }
+    number[0] = '0'; number[1] = 0; call[1] = "default";
+    if (main(4, call)) goto finish;
+    if (baseline && *baseline) {
+        if (cx_fmt(old, sizeof old, "%s/baseline", scratch)) ct_die("path overflow");
+        if (mkdir(old, 0700)) goto finish;
+        ct_product_override = baseline; call[3] = old;
+        i = main(4, call);
+        ct_product_override = 0; call[3] = scratch;
+        if (i) goto finish;
+    }
+    call[1] = "conflict"; call[2] = scratch; call[3] = 0;
+    if (main(3, call)) goto finish;
+    rc = ct_summary(scratch, baseline && *baseline ? old : 0, first_cell, end_cell);
+finish:
+    ct_product_override = 0;
+    ptf_rmtree(scratch);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *product = ct_product_override ? ct_product_override : getenv("PRODUCT"), *root = getenv("ROOT");
+    char tmp[8192], source[8192], absolute[8192], route[96], why[256] = {0};
+    char *child[24];
+    np_buf probe = {0};
+    np_result r = {0};
+    int i, k = 0, index = 0, conflict, stream, explicit_target, default_target, rc, fail;
+    if (argc == 1 || (argc == 2 && !strcmp(argv[1], "all"))) return ct_all(0, 6);
+    if (argc == 3 && !strcmp(argv[1], "cell") && strlen(argv[2]) == 1 && argv[2][0] >= '0' && argv[2][0] <= '5') return ct_all(argv[2][0] - '0', argv[2][0] - '0' + 1);
+    if (argc == 3 && !strcmp(argv[1], "compare")) return ct_compare(argv[2], 0, 6);
+    if (argc == 4 && !strcmp(argv[1], "summary")) return ct_summary(argv[2], argv[3], 0, 6);
+    if (argc > 1 && !strncmp(argv[1], "width-", 6)) return ct_width(argc, argv, product && *product ? product : "./unisacc.com", root && *root ? root : ".");
+    conflict = (argc == 2 || argc == 3) && !strcmp(argv[1], "conflict");
+    explicit_target = argc == 4 && !strcmp(argv[1], "explicit");
+    default_target = argc == 4 && !strcmp(argv[1], "default");
+    stream = argc == 4 && (!strcmp(argv[1], "stream") || explicit_target || default_target);
+    if (!conflict && !(argc == 4 && (stream || !strcmp(argv[1], "direct")) && strlen(argv[2]) == 1 && argv[2][0] >= '0' && argv[2][0] <= '5')) {
+        fputs("usage: check-stream-target direct|stream|explicit|default INDEX RESULTS | compare RESULTS | conflict\n", stderr);
+        return 2;
+    }
+    if (!product || !*product) product = "./unisacc.com";
+    if (!root || !*root) root = ".";
+    ptf_abspath(product, absolute, sizeof absolute);
+    if (!conflict) index = argv[2][0] - '0';
+    if (ptf_mkdtemp(0, "check-stream-target-", tmp, sizeof tmp)) return 1;
+    if (cx_fmt(source, sizeof source, "%s/macros.c", tmp)) ct_die("path overflow");
+    for (i = 0; i < 11; i++) {
+        char text[160];
+        if (cx_fmt(text, sizeof text, "#ifdef %s\nCST_MACRO_%02d_END\n#endif\n", ct_macros[i], i)) ct_die("probe overflow");
+        np_puts(&probe, text);
+    }
+    if (np_writefile(source, probe.p, probe.n)) { free(probe.p); ptf_rmtree(tmp); return 1; }
+    free(probe.p);
+    /* Shell positional arguments keep PRODUCT, ROOT and temporary paths unquoted-data safe. */
+    child[k++] = "sh";
+    child[k++] = "-c";
+    child[k++] = "input=$1; shift; exec sh \"$@\" < \"$input\"";
+    child[k++] = "check-stream-target";
+    child[k++] = source;
+    child[k++] = absolute;
+    if (stream || conflict) {
+        child[k++] = "stream"; child[k++] = "e2";
+        if (!default_target) {
+            child[k++] = "--route";
+            if (cx_fmt(route, sizeof route, "%s/run/O0", ct_targets[index])) ct_die("route overflow");
+            child[k++] = route;
+        }
+        child[k++] = "--source"; child[k++] = "macros.c";
+        child[k++] = "--raw";
+        child[k++] = "--res"; child[k++] = "run-forward";
+        if (conflict) { child[k++] = "--target"; child[k++] = "lnx/x86_64"; }
+        if (explicit_target) { child[k++] = "--target"; child[k++] = (char *)ct_targets[index]; }
+    } else {
+        child[k++] = source; child[k++] = "-b";
+        child[k++] = (char *)ct_targets[index]; child[k++] = "-E";
+    }
+    child[k] = 0;
+    rc = np_run(child, root, 0, ct_seconds(), &r, why, sizeof why);
+    ptf_rmtree(tmp);
+    fail = rc != 0;
+    if (conflict) {
+        if (np_count(r.err, r.errn, "usage", 5)) fail = 1;
+        if (!rc && (!r.rc || r.outn || !r.errn || r.err[r.errn - 1] != '\n' || np_count(r.err, r.errn, "\n", 1) != 1 || !np_count(r.err, r.errn, "conflicts with route target", 27))) fail = 1;
+        if (!fail && argc == 3) {
+            char path[8192], code[32];
+            if (cx_fmt(path, sizeof path, "%s/conflict-err.bin", argv[2])) ct_die("path overflow");
+            if (np_writefile(path, r.err, r.errn)) fail = 1;
+            if (cx_fmt(path, sizeof path, "%s/conflict-out.bin", argv[2])) ct_die("path overflow");
+            if (np_writefile(path, r.out, r.outn)) fail = 1;
+            if (cx_fmt(path, sizeof path, "%s/conflict-rc.txt", argv[2]) || cx_fmt(code, sizeof code, "%d\n", r.rc)) ct_die("format overflow");
+            if (np_writefile(path, code, strlen(code))) fail = 1;
+        }
+    } else {
+        char path[8192];
+        if (r.rc || r.errn || !r.outn) fail = 1;
+        if (!fail) {
+            if (cx_fmt(path, sizeof path, "%s/%s-%d.txt", argv[3], argv[1], index)) ct_die("path overflow");
+            if (np_writefile(path, r.out, r.outn)) fail = 1;
+        }
+    }
+    if (fail) {
+        fprintf(stderr, "check-stream-target: transport=%d rc=%d %s\n", rc, r.rc, why);
+        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    } else printf("SAMPLE %s %s\n", argv[1], conflict ? "" : ct_targets[index]);
+    np_free(&r);
+    return fail;
+}

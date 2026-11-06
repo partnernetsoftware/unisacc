@@ -1,3 +1,8 @@
+# 0.0.45 稳定版开发（未发布）
+
+- **stream 路由目标联动**：仅给 `--route OS/ARCH/...` 时从目标事实接口选择预定义与 E3 数据模型；同时给出冲突的 `--target` 时一行具名拒绝。旧预发布在交叉 stream 路由下错误沿用宿主宏，修复会改变此前错误的平台条件分支与 `long` 字宽输出；direct `-o/-run` 不受该缺陷影响。新增 `stream-target` 六 cell 回归及平台宏/字宽敏感的 foreign-chains 语料。本机预检不是 macOS/Windows 原生资格，最终候选原生证据仍待发布窗口。
+- 已发布 `v0.0.45` 预发布及其资产保持不变；本节不宣称稳定版已发布。
+
 # 0.0.45(预发布)
 
 候选:APE sha256 `ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0`,6,128,709B,源码 `fa0a747c7f22ba20c0a875183108106afff21f4a`,`unisacc --version` 为 `unisacc 0.0.45`。未对本候选运行自举固定点(`tests/chain-fixed-point.cx`)。完整发布说明见 `plans/release-notes-0.0.45.md`。
