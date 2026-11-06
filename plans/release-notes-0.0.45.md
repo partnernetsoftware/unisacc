@@ -45,6 +45,7 @@ unisacc 是一个 C99 编译器，自己写出可执行文件（ELF、Mach-O、P
 - **全批会话未达资格（NOT_QUALIFIED）。** 在 lnx/x86_64 上对本 APE 跑了一次全批会话（仓外克隆，候选 sha256 `ae0b12d8…`）：427 批已实现，收据 265 批；215 PASS，41 FAIL，9 UNKNOWN，162 批无收据。`check-known-fail` 对 waivers：127 项已登记，85 项未登记，3 项过期。失败与未知的批次清单未逐项归因，不能据此给出通过率。ref 材料只做到身份已钉（PREPARED），未验功能。因此本版只作预发布。
 - 部分非法 C 会被静默接受，产物不可信：22 种 C99 约束违例不报错，其中 12 种可能产出错误代码。约束检查请另用 `gcc` 或 `clang -std=c99 -pedantic-errors`。（沿用 rc3，本轮未复跑。）
 - `-c` 分开编译再链接：运行库状态不跨对象共享；两个及以上带 stdio 的对象一起链接只告警。要共享 `FILE` 请一次编译所有源。（沿用 rc3。）
+- **`unisacc stream` 的前端在 Windows 路由下注入 Linux 的预定义宏（已确认缺陷，本版未修）**：对同一个源文件，`stream e2 --route win/x86_64/run/O0` 看到 `__linux__` 且 `__u_word` 是 `long`（4 字节），而默认的 `-o` 与 `-run`（direct 路径）看到 `_WIN64` 且是 `long long`；win 与 lnx 的 stream e2 输出逐字节相同。因此**用 stream 管道为 Windows 产出的程序，字宽与平台分支是错的**。默认路径不受影响。这也是 Windows 上 stream-pipe 检查 FAIL 的原因。
 - 手工拼 `unisacc stream` 管道：tape 无结束标记，上游截断时下游可能接受不完整输入；请用 `set -o pipefail`。正常 `-o` 与默认运行不受影响。（沿用 rc3。）
 - 预处理器接受两种非法输入（宏名不是标识符、`#include` 头名未闭合）。（沿用 rc3。）
 - `-c -b osx/*|win/*` 文档写拒绝，实际会编出对象。（沿用 rc3。）
