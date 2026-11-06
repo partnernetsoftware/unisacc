@@ -336,7 +336,12 @@ jobs:
                 } else { foreach ($check in @('hello', 'run', 'smoke')) { Add-Row $check 'NOT_RUN' -1 'win/arm64 slice --version failed' } }
               }
             }
-            foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
+            if (Test-Path -LiteralPath $sexe) {
+              $scu = Invoke-Bounded $sexe @('tests/stdio-crossunit.cx')
+              Add-Row 'stdio-crossunit' $(if ($scu.Code -eq 0 -and $scu.Out -cmatch "STDIO_CROSSUNIT`tassertions=\d+`tfailed=0`tnot_run=0") { 'PASS' } else { 'FAIL' }) $scu.Code "$($scu.Err)"
+              $spp = Invoke-Bounded $sexe @('tests/check-stream-pipe.cx')
+              Add-Row 'stream-pipe' $(if ($spp.Code -eq 0 -and $spp.Out -cmatch "CHECK_STREAM_PIPE`tfailed=0") { 'PASS' } else { 'FAIL' }) $spp.Code "$($spp.Err)"
+            } else { foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'FAIL' 1 'no slice exe' } }
             if ($script:failed) { exit 1 }
             exit 0
           }
@@ -356,7 +361,10 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
           $run = Invoke-Bounded $com @('out/run.cx')
           Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
-          foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
+          $scu = Invoke-Bounded $com @('tests/stdio-crossunit.cx')
+          Add-Row 'stdio-crossunit' $(if ($scu.Code -eq 0 -and $scu.Out -cmatch "STDIO_CROSSUNIT`tassertions=\d+`tfailed=0`tnot_run=0") { 'PASS' } else { 'FAIL' }) $scu.Code "$($scu.Err)"
+          $spp = Invoke-Bounded $com @('tests/check-stream-pipe.cx')
+          Add-Row 'stream-pipe' $(if ($spp.Code -eq 0 -and $spp.Out -cmatch "CHECK_STREAM_PIPE`tfailed=0") { 'PASS' } else { 'FAIL' }) $spp.Code "$($spp.Err)"
           $smoke = Invoke-Bounded $com @('tests/run.cx', '--', '--smoke')
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
           if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:APE_SHA) { Add-Row 'identity' 'FAIL' 1 'candidate changed during the checks' }
