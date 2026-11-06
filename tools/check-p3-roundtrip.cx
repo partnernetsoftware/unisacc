@@ -11,7 +11,8 @@
  */
 #pragma unisa use sysx.process
 #pragma unisa use text.text
-
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.fs
 static int failed;
 static void ck(int ok,const char *name){
     printf("%s\t%s\n",ok?"PASS":"FAIL",name);
@@ -58,16 +59,32 @@ int main(int argc,char **argv){
     if(cx_fmt(explode,sizeof explode,"%s/tools/p3-explode.cx",root)
        ||cx_fmt(implode,sizeof implode,"%s/tools/p3-implode.cx",root))return 2;
     char def1[4400],def2[4400];
-    /* 默认只跑已装的那一个包（P3/P4 都吃）：out/epoch-2026-11-02 那份是历史残留，全新克隆没有。 */
-    if(cx_fmt(def1,sizeof def1,"%s/unisacc.com.dev/p3-package.bin",root))return 2;
-    if(cx_fmt(def2,sizeof def2,"%s",def1))return 2;
+    /* 默认已装包：PP_SPLIT 为 .dev/p3-package.bin，PP_APE 为仓根 unisacc.com。 */
+    if (pp_package_path(root, def1, (int)sizeof def1)) return 2;
+    if (cx_fmt(def2, sizeof def2, "%s", def1)) return 2;
     int np = (argc>2)?(argc-2):1;
 
     for(int i=0;i<np;i++){
         const char *src = (argc>2)?argv[2+i]:(i==0?def1:def2);
         size_t n; char *b=cx_read(src,&n);
+        char inner[4400];
         if(!b){ck(0,"input-absent");continue;}
-        cx_sha256_hex(b,n,before); free(b);
+        if (n >= 16 && !memcmp(b + n - 16, "UNIPKG1\n", 8)) {
+            unsigned long long ext = 0; int k; int fd;
+            for (k = 7; k >= 0; k--) ext = (ext << 8) | (unsigned char)b[n - 8 + (size_t)k];
+            if (ext > 0 && ext + 16 < n) {
+                size_t off = (size_t)n - 16 - (size_t)ext;
+                if (cx_fmt(inner, sizeof inner, "/tmp/p3-rt-inner-%d.pkg", (int)getpid())) return 2;
+                (void)sy_unlink(inner);
+                fd = open(inner, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0600);
+                if (fd < 0) { free(b); ck(0,"inner-write"); continue; }
+                if (write(fd, b + off, (size_t)ext) != (ssize_t)ext) { close(fd); free(b); ck(0,"inner-write"); continue; }
+                close(fd);
+                src = inner;
+            }
+        }
+        { size_t n2; char *b2=cx_read(src,&n2); if(!b2){free(b);ck(0,"input-absent");continue;} cx_sha256_hex(b2,n2,before); free(b2); }
+        free(b);
         if(cx_fmt(dir,sizeof dir,"/tmp/p3-rt-XXXXXX"))return 2;
         if(!mkdtemp(dir))return 2;
         if(cx_fmt(rebuilt,sizeof rebuilt,"%s/rebuilt.pkg",dir))return 2;
