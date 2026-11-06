@@ -254,6 +254,20 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
           $run = Invoke-Bounded $com @('out/run.cx')
           Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
+          # W45-WIN-FFI probe: compile and run the two FFI probes with the candidate's own win slice.
+          foreach ($p in @('strdup','pread')) {
+            $src = Join-Path $PWD ("tests/cases/win-ffi-{0}.c" -f $p)
+            if (!(Test-Path $src)) { Add-Row "win-ffi-$p" 'NOT_RUN' -1 'probe source not in this commit'; continue }
+            $o = Join-Path $PWD ("out/win-ffi-{0}.exe" -f $p)
+            $c = Invoke-Bounded $com @('-o', $o, $src)
+            if ($c.Code -ne 0) { Add-Row "win-ffi-$p" 'FAIL' $c.Code "compile: $($c.Err)"; continue }
+            Push-Location (Join-Path $PWD 'tests/cases')
+            $r = Invoke-Bounded $o @()
+            Pop-Location
+            $want = [IO.File]::ReadAllText((Join-Path $PWD ("tests/cases/win-ffi-{0}.expect" -f $p))).Replace("`r`n","`n")
+            $got = $r.Out.Replace("`r`n","`n")
+            Add-Row "win-ffi-$p" $(if ($r.Code -eq 0 -and $got -ceq $want) { 'PASS' } else { 'FAIL' }) $r.Code "$($got) $($r.Err)"
+          }
           foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'batch needs POSIX fork/process groups; no Windows tree watchdog or path adapter yet' }
           $smoke = Invoke-Bounded $com @('tests/run.cx', '--', '--smoke')
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
