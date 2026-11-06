@@ -317,7 +317,7 @@ jobs:
                 if ($sv.Code -eq 0) {
                   # Same package the x86_64 cells find inside the APE: the slice file has none appended, so point it at pkg.bin.
                   $pkgPath = Join-Path $PWD 'slice/pkg.bin'
-                  if (!(Test-Path -LiteralPath $pkgPath)) { foreach ($check in @('hello', 'run', 'smoke')) { Add-Row $check 'FAIL' 1 'pkg.bin asset missing (release_tag needs a pkg.bin asset)' } }
+                  if (!(Test-Path -LiteralPath $pkgPath)) { foreach ($check in @('hello', 'run', 'smoke', 'stdio-crossunit', 'stream-pipe')) { Add-Row $check 'FAIL' 1 'pkg.bin asset missing (release_tag needs a pkg.bin asset)' } }
                   else {
                     $env:UNISA_CONTAINER = $pkgPath
                     [IO.File]::WriteAllText((Join-Path $PWD 'out/hello.c'), "#include <stdio.h>`nint main(void){puts(`"candidate-hello`");return 0;}`n")
@@ -332,14 +332,17 @@ jobs:
                     Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
                     $smoke = Invoke-Bounded $sexe @('tests/run.cx', '--', '--smoke')
                     Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
+                    $plines = & (Join-Path $PWD 'tests/win-portable-cell.ps1') -Exe $sexe -Tgt 'win/arm64' -Root $PWD
+                    foreach ($ln in $plines) {
+                      $bits = [string]$ln -split "`t", 4
+                      if ($bits.Count -ge 4 -and $bits[0] -ceq 'STDIO') { Add-Row 'stdio-crossunit' $bits[1] ([int]$bits[2]) $bits[3] }
+                      if ($bits.Count -ge 4 -and $bits[0] -ceq 'STREAM') { Add-Row 'stream-pipe' $bits[1] ([int]$bits[2]) $bits[3] }
+                    }
                   }
-                } else { foreach ($check in @('hello', 'run', 'smoke')) { Add-Row $check 'NOT_RUN' -1 'win/arm64 slice --version failed' } }
+                } else { foreach ($check in @('hello', 'run', 'smoke', 'stdio-crossunit', 'stream-pipe')) { Add-Row $check 'NOT_RUN' -1 'win/arm64 slice --version failed' } }
               }
             }
-            if (Test-Path -LiteralPath $sexe) {
-              Add-Row 'stdio-crossunit' 'NOT_RUN' -1 'win/arm64: same portable fixture as x86_64 cell; adapter block uses x86_64 $com path — run portable on x86_64 cell; POSIX missing fork,waitpid,kill,F_SETFD,environ'
-              Add-Row 'stream-pipe' 'NOT_RUN' -1 'POSIX missing fork,waitpid,kill,F_SETFD,environ,F_SETFL'
-            } else { foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'FAIL' 1 'no slice exe' } }
+            if (-not (Test-Path -LiteralPath $sexe)) { foreach ($check in @('stdio-crossunit', 'stream-pipe')) { Add-Row $check 'FAIL' 1 'no slice exe' } }
             if ($script:failed) { exit 1 }
             exit 0
           }
@@ -359,37 +362,12 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'out/run.cx'), "int main(void){puts(`"candidate-run`");return 0;}`n")
           $run = Invoke-Bounded $com @('out/run.cx')
           Add-Row 'run' $(if ($run.Code -eq 0 -and $run.Out -cmatch '^candidate-run\r?\n$') { 'PASS' } else { 'FAIL' }) $run.Code "$($run.Out) $($run.Err)"
-          # portable stdio-crossunit: compile cases/ without netpack/proc. POSIX harness (fork/F_SETFD/environ) NOT_RUN.
-          $scuDir = Join-Path $PWD 'out/scu'
-          New-Item -ItemType Directory -Force -Path $scuDir | Out-Null
-          Copy-Item (Join-Path $PWD 'tests/cases/stdio-crossunit/a.c') $scuDir
-          Copy-Item (Join-Path $PWD 'tests/cases/stdio-crossunit/b.c') $scuDir
-          Copy-Item (Join-Path $PWD 'tests/cases/stdio-crossunit/main.c') $scuDir
-          $info = [Diagnostics.ProcessStartInfo]::new(); $info.FileName = $com; $info.UseShellExecute = $false
-          $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true; $info.WorkingDirectory = $scuDir
-          foreach ($a in @('-o','probe.exe','a.c','b.c','main.c')) { $info.ArgumentList.Add($a) }
-          $p = [Diagnostics.Process]::new(); $p.StartInfo = $info; [void]$p.Start(); $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
-          if (!$p.WaitForExit(55000)) { $p.Kill($true); Add-Row 'stdio-crossunit' 'FAIL' 124 'portable compile timeout' }
-          else {
-            $crc = $p.ExitCode; $cerr = $se.Result
-            if ($crc -ne 0) { Add-Row 'stdio-crossunit' 'FAIL' $crc "portable compile $cerr" }
-            else {
-              $ok = $true
-              foreach ($mode in @('0','1','2')) {
-                $want = $(if ($mode -ceq '2') { 'ABC' } else { 'AB' })
-                $rp = Join-Path $scuDir 'result'; if (Test-Path $rp) { Remove-Item $rp }
-                $info2 = [Diagnostics.ProcessStartInfo]::new(); $info2.FileName = (Join-Path $scuDir 'probe.exe'); $info2.UseShellExecute = $false
-                $info2.RedirectStandardOutput = $true; $info2.RedirectStandardError = $true; $info2.WorkingDirectory = $scuDir
-                $info2.ArgumentList.Add($mode)
-                $p2 = [Diagnostics.Process]::new(); $p2.StartInfo = $info2; [void]$p2.Start(); if (!$p2.WaitForExit(15000)) { $p2.Kill($true); $ok = $false; break }
-                if ($p2.ExitCode -ne 0) { $ok = $false; break }
-                $got = [IO.File]::ReadAllText((Join-Path $scuDir 'result'))
-                if ($got -cne $want) { $ok = $false; break }
-              }
-              Add-Row 'stdio-crossunit' $(if ($ok) { 'PASS' } else { 'FAIL' }) $(if ($ok) { 0 } else { 1 }) $(if ($ok) { 'portable a.c+b.c+main.c AB/ABC; POSIX harness NOT_RUN missing fork,waitpid,kill,F_SETFD,environ' } else { 'portable probe mismatch' })
-            }
+          $plines = & (Join-Path $PWD 'tests/win-portable-cell.ps1') -Exe $com -Tgt 'win/x86_64' -Root $PWD
+          foreach ($ln in $plines) {
+            $bits = [string]$ln -split "`t", 4
+            if ($bits.Count -ge 4 -and $bits[0] -ceq 'STDIO') { Add-Row 'stdio-crossunit' $bits[1] ([int]$bits[2]) $bits[3] }
+            if ($bits.Count -ge 4 -and $bits[0] -ceq 'STREAM') { Add-Row 'stream-pipe' $bits[1] ([int]$bits[2]) $bits[3] }
           }
-          Add-Row 'stream-pipe' 'NOT_RUN' -1 'portable file-pipe not wired in adapter; POSIX missing fork,waitpid,kill,F_SETFD,environ,F_SETFL'
           $smoke = Invoke-Bounded $com @('tests/run.cx', '--', '--smoke')
           Add-Row 'smoke' $(if ($smoke.Code -eq 0 -and $smoke.Out -cmatch "SMOKE`tassertions=16`tfailed=0") { 'PASS' } else { 'FAIL' }) $smoke.Code "$($smoke.Err)"
           if ((Get-FileHash -LiteralPath $com -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:APE_SHA) { Add-Row 'identity' 'FAIL' 1 'candidate changed during the checks' }
