@@ -1,0 +1,85 @@
+/* tests/check-sy-tmpdir.cx -- L0 sy_tmpdir(): the temporary-file directory per host.
+ *
+ *   sh ./unisacc.com tests/check-sy-tmpdir.cx [-- ROOT]
+ *
+ * tests/cases/sy-tmpdir-probe.cx (prints sy_tmpdir()) is compiled into a mkdtemp work directory and run three
+ * ways on this host:
+ *   set:   TMPDIR=<work dir>  -> prints exactly that directory;
+ *   unset: no TMPDIR          -> prints /tmp;
+ *   empty: TMPDIR=""          -> prints /tmp (an empty value is unset).
+ * The Windows branch (TEMP, then TMP, then TMPDIR, last resort ".") cannot run here: the probe is built for
+ * win/x86_64 and win/arm64 and those lines say NOT_RUN, never PASS.
+ * Nothing is written under ROOT.  Last line SY_TMPDIR<TAB>pass=N<TAB>not_run=M<TAB>failed=K. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int pass, notrun, failed;
+
+static void say(const char *verdict, const char *name, const char *why) {
+    printf("%s\tsy-tmpdir.%s\t%s\n", verdict, name, why);
+    if (verdict[0] == 'P') pass++; else if (verdict[0] == 'N') notrun++; else failed++;
+}
+
+/* run IMG with ENVADD and require stdout == WANT "\n" */
+static void run_case(const char *name, const char *img, char *const envadd[], const char *want) {
+    char *v[] = {(char *)img, 0};
+    char why[256]; np_result r; int bad; long wl = tx_len(want, 4096);
+    memset(&r, 0, sizeof r);
+    bad = np_run(v, 0, envadd, 30, &r, why, sizeof why);
+    if (bad) { say("FAIL", name, why); return; }
+    if (r.rc == 0 && (long)r.outn == wl + 1 && mm_cmp(r.out, want, wl) == 0 && r.out[wl] == '\n') say("PASS", name, want);
+    else say("FAIL", name, "stdout differs from the expected directory");
+    np_free(&r);
+}
+
+int main(int argc, char **argv) {
+    char probe_rel[] = "tests/cases/sy-tmpdir-probe.cx";
+    char root[4096], work[4400], src[4600], img[4600], why[512], envset[4500];
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    if (argc > a + 1) { fprintf(stderr, "usage: check-sy-tmpdir.cx [-- ROOT]\n"); return 2; }
+    if (!realpath(argc > a ? argv[a] : ".", root)) { fprintf(stderr, "check-sy-tmpdir: root\n"); return 2; }
+    {   const char *td = getenv("TMPDIR");
+        if (cx_fmt(work, sizeof work, "%s/check-sy-tmpdir-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) {
+            fprintf(stderr, "check-sy-tmpdir: mkdtemp\n"); return 2; } }
+    if (cx_fmt(src, sizeof src, "%s/%s", root, probe_rel)) return 2;
+    if (cx_fmt(img, sizeof img, "%s/probe", work)) return 2;
+    {   char *v[] = {"sh", "./unisacc.com", "-o", img, src, 0};
+        np_result r; int bad;
+        memset(&r, 0, sizeof r);
+        bad = np_run(v, root, 0, 55, &r, why, sizeof why);
+        if (bad || r.rc) { say("FAIL", "build-lnx", bad ? why : "compile"); if (!bad) np_free(&r); goto out; }
+        np_free(&r);
+    }
+    if (cx_fmt(envset, sizeof envset, "TMPDIR=%s", work)) return 2;
+    {   char *e1[] = {envset, 0}; run_case("tmpdir-set", img, e1, work); }
+    {   char *e2[] = {"TMPDIR=", 0}; run_case("tmpdir-empty", img, e2, "/tmp"); }
+    {   char *v[] = {"env", "-u", "TMPDIR", img, 0};
+        np_result r; int bad;
+        memset(&r, 0, sizeof r);
+        bad = np_run(v, 0, 0, 30, &r, why, sizeof why);
+        if (bad) say("FAIL", "tmpdir-unset", why);
+        else { if (r.rc == 0 && r.outn == 5 && mm_cmp(r.out, "/tmp\n", 5) == 0) say("PASS", "tmpdir-unset", "/tmp"); else say("FAIL", "tmpdir-unset", "stdout is not /tmp"); np_free(&r); }
+    }
+    {   static const char *wt[] = {"win/x86_64", "win/arm64"};
+        int t;
+        for (t = 0; t < 2; t++) {
+            char wimg[4700]; struct stat st;
+            char *v[] = {"sh", "./unisacc.com", "-b", (char *)wt[t], "-o", wimg, src, 0};
+            np_result r; int bad;
+            if (cx_fmt(wimg, sizeof wimg, "%s/probe-%d.exe", work, t)) return 2;
+            memset(&r, 0, sizeof r);
+            bad = np_run(v, root, 0, 55, &r, why, sizeof why);
+            if (!bad && r.rc == 0 && stat(wimg, &st) == 0 && st.st_size > 0) say("NOT_RUN", wt[t], "built; TEMP/TMP/TMPDIR/'.' branch runs only on Windows");
+            else say("FAIL", wt[t], bad ? why : "compile");
+            if (!bad) np_free(&r);
+            (void)unlink(wimg);
+        }
+    }
+out:
+    (void)unlink(img); (void)rmdir(work);
+    printf("SY_TMPDIR\tpass=%d\tnot_run=%d\tfailed=%d\n", pass, notrun, failed);
+    return failed ? 1 : 0;
+}
