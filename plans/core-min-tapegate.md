@@ -1,8 +1,10 @@
 # 0.0.46 core-min：tapegate 第一试点设计
 
+**评审结论：不整体迁；见 fable 评审（cc于2026-11-07转达并采信）。** 本文以下保留为评审前设计记录，不是现行实施授权。tapegate主体是LEB解码、随机访问池和文本渲染机制；将其全搬进网会变成网里写程序。450432B整对象不能代表可回收镜像字节，排序改以最终镜像贡献重做；试点待新表后重选。执行器输入属性8倍放大与OOM panic另立P2，现有libc直接调用债另立P3。
+
 ## 状态、身份与禁区
 
-本文是设计，不是迁移收据。新旧等价实验、构造链与体积测量均为 **NOT_RUN**；父进程仅实跑既有基线：`sh ./unisacc.com tools/check-tapebin.cx`→`PASS byte-identical bytes=383`、`TAPEBIN_ROUND failed=0`，`sh ./unisacc.com tools/check-tapebin-wiring.cx -- .`→`TAPEBIN_WIRING failed=0`，不代表迁移资格。仅写此页，不改产品、测试、版本，不起链。必须等 **c46-1 候选发出且 fable 独立评审批准本设计**后才实施。route仅作热身，其结果不能替代本试点资格；cxmod/source_frame是第二批，本版不动。
+本文是已完成评审的历史设计，不是迁移收据。**tapegate整体迁移已取消，本页不得用于实施。** 新旧等价实验、构造链与体积测量均NOT_RUN；父仅实跑既有基线：`sh ./unisacc.com tools/check-tapebin.cx`→`PASS byte-identical bytes=383`、`TAPEBIN_ROUND failed=0`，`sh ./unisacc.com tools/check-tapebin-wiring.cx -- .`→`TAPEBIN_WIRING failed=0`，不代表迁移资格。后续主线先重做最终镜像真实贡献表，再由cc选择RT-DEDUP或CORE-MIN-ASMTEXT等候选写新设计；不因旧页包含方案而启动迁移。
 
 已知旧盘点身份为 `5ac7784dcb`：tapegate.o 为 450432B、649 行、TABLE-DRIVEN、环境与闭包 IO 为 0，反向 use 闭包对象用户为 drive.o、drivetapebin.o、m0.o。这些是旧盘点，不是当前候选实测。本次读取 `cx/compiler/tapegate.cx:1-649`，源文件 SHA-256 为 `3c65588e40b86e5b14c98cb5fe1699dc441e7692a7400752993b3b2a649624ff`；649 行相同不证明内容与旧提交相同。当前源仍为函数实现，没有迁移。对象用户不等于源文件中三个独立调用入口。
 

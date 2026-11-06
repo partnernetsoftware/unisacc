@@ -305,7 +305,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-07,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 公开出发线（历史，不是本候选资格）:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定（主人2026-11-07）：**0.0.45公开预发布及已披露缺陷保持现状，不再追加稳定版，不起c45-4；后续修复全部归0.0.46，达到正式版门槛后一次公开。** 版本串仍为0.0.45，候选前由cc统一调整limits.tsv八处。argv已合`134a1b3643`，Win原生4000参数待c46候选CI；工具修复`e52a973e9e`、table-lint交付`299e13cb4c`，未证明性质仍PARTIAL。库存批次已实跑，旧5ac7784dcb切片81单元/44根/37模块、闭包完整；cxmod为TABLE候选，driveroute整单元含IO/退出，纯路由是route.o。cc选tapegate（450432B对象/649行/反向用户3）为首试点：当前仅写`CORE-MIN-TAPEGATE`设计，fable评审通过且c46-1发出后才可实现；cxmod/source_frame本版不动。sysx等待与Darwin真单调在私有克隆完成本机回归，Mac原生仍待同c46候选，不另起链；BOM待排。仅决策、里程碑或真实故障向cc汇报。
+当前裁定（主人2026-11-07）：**0.0.45公开预发布保持原样，不追加稳定版、不起c45-4；后续归0.0.46正式版完成线。** 版本串仍为0.0.45，候选前由cc统一改limits.tsv八处。argv已合`134a1b3643`，Win原生4000参数待c46候选；工具修复`e52a973e9e`、table-lint`299e13cb4c`、库存与历史设计`6952763dd4`。旧5ac切片81单元/44根/37模块的对象盘点有效，但**整.o排序不再用于收益决策**。fable评审已否决tapegate整体迁移，设计页保留评审记录；下一步`SLICE-CONTRIBUTION`按entry.elf真实节/符号/可证明单元贡献重排，明确文件字节、rodata、IR与BSS内存，实测libc副本及asmtext占比后由cc重选RT-DEDUP或CORE-MIN-ASMTEXT候选。sysx/Darwin私有生成及本机回归已完成，Mac原生等同c46候选，不另起链；netpack批器仍未修，单列`BOUNDED-WAIT-SWEEP`。tapegate libc既有债P3与执行器8倍属性/OOM缺口P2独立排队，不借迁移绕过资源合同。
 
 ```text
 0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
@@ -342,7 +342,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、`work/ledger.tsv` |
 | 事实表 | 事实→对应生成器→产物，生成器须带`--check`；通用派生用facts-gen，Win argv专属表用win-argv-gen | `exec/facts/`、上方能力速查 |
 | 静态预检 | 模式/引用/兜底/SB合同先查；动态及未证明性质单列PARTIAL，不能用无确定错误替代真实gen/新包/slice | `tools/table-lint.cx`、`tools/check-table-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与试点 | 旧5ac7784dcb对象81项已盘点；机械标签不是语义证明，整.o不是最终可减切片字节。tapegate首试点当前仅设计，迁移须c46-1后及fable批准；route热身，cxmod/source_frame本版不动 | `tools/slice-inventory.cx`、`CORE-MIN-TAPEGATE`、`plans/v0.0.46-unisacc.md` |
+| 结构盘点与试点 | 81对象清单已交付，但对象体积不能冒称最终收益；fable否决tapegate整体迁移。当前先量最终entry.elf的节/符号/单元真实贡献，libc副本与asmtext候选待表后选择；BSS只记内存、不充文件减量 | `SLICE-CONTRIBUTION`、`plans/core-min-tapegate.md`评审结论、`plans/v0.0.46-unisacc.md` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
 ### 9.3 上一发布 0.0.43(历史)
