@@ -1,18 +1,17 @@
-/* tests/cases/pe-dynbase.cx -- minimal default-run-free repro for PE-DYNBASE-HYGIENE.
+/* tests/cases/pe-dynbase.cx -- PE DllCharacteristics contract for the win images.
  *
  *   sh ./unisacc.com tests/cases/pe-dynbase.cx [-- ROOT]
  *
  * Cross-compiles a one-line program for win/x86_64 and reads the PE header the product wrote:
  *   DllCharacteristics at e_lfanew+94, and the .reloc section's VirtualSize/RawSize.
- * The defect: the writer sets 0x8160 (DYNAMIC_BASE 0x40 | HIGH_ENTROPY_VA 0x20) while .reloc
- * carries only the 12-byte empty block, i.e. a 64-bit image that claims it can be relocated but
- * has no relocation entries.
+ * Contract (exec/facts/image-pe.tsv DLL_CHARACTERISTICS = 0x8140): DYNAMIC_BASE 0x40 set (win/arm64
+ * does not start an image without it), HIGH_ENTROPY_VA 0x20 clear, FORCE_INTEGRITY 0x80 clear.
  *
  * Prints one line:
- *   PE_DYNBASE<TAB>repro<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N    the defect is present
- *   PE_DYNBASE<TAB>fixed<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N    DYNAMIC_BASE is clear
- * Exit 0 when the defect is present (a live repro), 1 when it is gone (flip the expectation then),
- * 2 on usage/IO.  Nothing is written outside one mkdtemp scratch. */
+ *   PE_DYNBASE<TAB>required<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N    contract holds
+ *   PE_DYNBASE<TAB>wrong<TAB>dll=0x..<TAB>reloc_vsize=N<TAB>reloc_raw=N       contract broken
+ * Exit 0 when the contract holds, 1 when broken, 2 on usage/IO.  Nothing is written outside one
+ * mkdtemp scratch. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.io
@@ -81,12 +80,10 @@ int main(int argc, char **argv) {
         if (cx_fmt(rm, sizeof rm, "%s", work)) die("path");
         (void)sy_unlink(exe); (void)sy_unlink(src); (void)sy_rmdir(work); }
     if (!found_reloc) { fprintf(stderr, "pe-dynbase: REFUSE no .reloc section\n"); return 2; }
-    /* DYNAMIC_BASE 0x40; an image with no relocation entries (vsize <= the 12-byte empty block)
-       must not set it.  The expectation is now the FIXED side: a writer that claims the
-       defect (0x8160 with an empty .reloc) exits 0, so dropping the fix turns this red. */
-    if ((dll & 0x40ULL) && reloc_vs <= 12)
-        printf("PE_DYNBASE\trepro\tdll=0x%04llx\treloc_vsize=%llu\treloc_raw=%llu\n", dll, reloc_vs, reloc_raw);
-    else
-        printf("PE_DYNBASE\tfixed\tdll=0x%04llx\treloc_vsize=%llu\treloc_raw=%llu\n", dll, reloc_vs, reloc_raw);
-    return ((dll & 0x40ULL) && reloc_vs <= 12) ? 1 : 0;
+    /* Native evidence (win/arm64, 2026-11-06 bdy): DYNAMIC_BASE 0x40 is REQUIRED for the loader to
+       start the image; HIGH_ENTROPY_VA 0x20 is not needed; FORCE_INTEGRITY 0x80 must never be set
+       (the loader then demands a signature).  The expectation: 0x40 set, 0x20 and 0x80 clear. */
+    int ok = (dll & 0x40ULL) && !(dll & 0x20ULL) && !(dll & 0x80ULL);
+    printf("PE_DYNBASE\t%s\tdll=0x%04llx\treloc_vsize=%llu\treloc_raw=%llu\n", ok ? "required" : "wrong", dll, reloc_vs, reloc_raw);
+    return ok ? 0 : 1;
 }
