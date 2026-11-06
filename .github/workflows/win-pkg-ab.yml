@@ -294,12 +294,22 @@ jobs:
           gh release download $env:CANDIDATE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'pkg.bin' --dir diag --clobber
           if (!(Test-Path 'diag/pkg.bin')) { Write-Output 'FATAL: no pkg.bin asset'; exit 1 }
           $b = [IO.File]::ReadAllBytes('diag/pkg.bin')
-          Write-Output ("PKG bytes={0} head={1}" -f $b.Length, (($b[0..15] | ForEach-Object { $_.ToString('x2') }) -join ''))
+          Write-Output ("PKG bytes={0} head={1} tail={2}" -f $b.Length,
+            (($b[0..15] | ForEach-Object { $_.ToString('x2') }) -join ''),
+            (($b[($b.Length-16)..($b.Length-1)] | ForEach-Object { $_.ToString('x2') }) -join ''))
           [IO.File]::WriteAllBytes('diag/pkg-empty.bin', (New-Object byte[] 0))
-          $short = New-Object byte[] ([Math]::Min(1024, $b.Length))
-          [Array]::Copy($b, $short, $short.Length)
-          [IO.File]::WriteAllBytes('diag/pkg-short.bin', $short)
-          Write-Output ("LADDER empty=0 short={0} full={1}" -f $short.Length, $b.Length)
+          $s3 = New-Object byte[] ([Math]::Min(4096, $b.Length)); [Array]::Copy($b, $s3, $s3.Length)
+          [IO.File]::WriteAllBytes('diag/pkg-4096.bin', $s3)
+          $n4 = $b.Length - 16; $s4 = New-Object byte[] $n4; [Array]::Copy($b, $s4, $n4)
+          [IO.File]::WriteAllBytes('diag/pkg-nofooter.bin', $s4)
+          foreach ($kb in @(64, 256, 1024)) {
+            $n = [Math]::Min($kb * 1024, $b.Length)
+            $sz = New-Object byte[] $n; [Array]::Copy($b, $sz, $n)
+            [IO.File]::WriteAllBytes(("diag/pkg-{0}k.bin" -f $kb), $sz)
+          }
+          New-Item -ItemType Directory -Force -Path 'C:\p' | Out-Null
+          Copy-Item 'diag/pkg.bin' 'C:\p\pkg.bin' -Force
+          Write-Output ("LADDER sizes: empty=0 first4096={0} nofooter={1} full={2}" -f $s3.Length, $n4, $b.Length)
       - name: 'Control: can this runner start a native exe at all'
         shell: pwsh
         run: |
@@ -311,7 +321,7 @@ jobs:
           $p = [Diagnostics.Process]::new(); $p.StartInfo = $info
           try { [void]$p.Start(); [void]$p.WaitForExit(30000); Write-Host ("CONTROL cmd.exe exit={0}" -f $p.ExitCode) }
           catch { Write-Host "CONTROL START FAILED: $_" } finally { $p.Dispose() }
-      - name: Run the four container inputs
+      - name: Run the nine container inputs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -334,13 +344,18 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD 'diag/hello.c'), "int main(void){return 40;}`n")
           $hello = Join-Path $PWD 'diag/hello.c'
           foreach ($case in @(
-            @{ n='missing'; p=(Join-Path $PWD 'diag/nonexistent.bin') },
-            @{ n='empty';   p=(Join-Path $PWD 'diag/pkg-empty.bin') },
-            @{ n='short';   p=(Join-Path $PWD 'diag/pkg-short.bin') },
-            @{ n='full';    p=(Join-Path $PWD 'diag/pkg.bin') })) {
+            @{ n='1-missing';   p=(Join-Path $PWD 'diag/nonexistent.bin') },
+            @{ n='2-empty';     p=(Join-Path $PWD 'diag/pkg-empty.bin') },
+            @{ n='3-4096';      p=(Join-Path $PWD 'diag/pkg-4096.bin') },
+            @{ n='4-nofooter';  p=(Join-Path $PWD 'diag/pkg-nofooter.bin') },
+            @{ n='5-full';      p=(Join-Path $PWD 'diag/pkg.bin') },
+            @{ n='6-shortpath'; p='C:\p\pkg.bin' },
+            @{ n='7-64k';       p=(Join-Path $PWD 'diag/pkg-64k.bin') },
+            @{ n='8-256k';      p=(Join-Path $PWD 'diag/pkg-256k.bin') },
+            @{ n='9-1m';        p=(Join-Path $PWD 'diag/pkg-1024k.bin') })) {
             Run $com @('-b','win/x86_64','-o',(Join-Path $PWD ("diag/{0}.exe" -f $case.n)),$hello) ("ladder-{0}" -f $case.n) @{ UNISA_CONTAINER = $case.p }
           }
-          Say 'rc=1 everywhere -> the decoder survives all four; a crash only at full -> decoding real content'
+          Say 'all rc=1 -> decoder survives; crash from 3 on -> header parse; only 5 -> decoding content; only above a size -> growth/offset'
 
   # G5b: the sixth slice (win/arm64) tested natively for the first time.  The APE's outer PE is x86_64,
   # so this is the only way to run the arm64 slice on an ARM runner without emulation.  A --version
@@ -386,6 +401,29 @@ jobs:
               Write-Host ("{0} stderr={1}" -f $label, (($se -replace '[\r\n]+', ' ').Substring(0, [Math]::Min(300, $se.Length))))
             } catch { Write-Host "$label START FAILED: $_" } finally { $p.Dispose() }
           }
+          # Before blaming the slice, prove this runner starts a native ARM64 exe at all, and compare the
+          # two PE headers field by field against one that is known to start.
+          function PeFields([string]$path, [string]$label) {
+            $b = [IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToUInt32($b, 60); $o = $pe + 24
+            $nsec = [BitConverter]::ToUInt16($b, $pe + 6)
+            $chs  = [BitConverter]::ToUInt16($b, $pe + 22)
+            $dllc = [BitConverter]::ToUInt16($b, $o + 70)
+            $sub  = [BitConverter]::ToUInt16($b, $o + 68)
+            $sal  = [BitConverter]::ToUInt32($b, $o + 32)
+            $fal  = [BitConverter]::ToUInt32($b, $o + 36)
+            $shdr = [BitConverter]::ToUInt32($b, $o + 60)
+            $mach = [BitConverter]::ToUInt16($b, $pe + 4)
+            $mag  = [BitConverter]::ToUInt16($b, $o)
+            $rel  = [BitConverter]::ToUInt32($b, $o + 112 + 8 * 5)
+            $imp  = [BitConverter]::ToUInt32($b, $o + 112 + 8 * 1)
+            Write-Host ("HDR {0}: machine=0x{1:x4} magic=0x{2:x} chars=0x{3:x4} dllchars=0x{4:x4} subsystem={5} sectalign=0x{6:x} filealign=0x{7:x} sizehdr=0x{8:x} nsec={9} reloc_rva=0x{10:x} import_rva=0x{11:x} bytes={12}" -f `
+              $label, $mach, $mag, $chs, $dllc, $sub, $sal, $fal, $shdr, $nsec, $rel, $imp, $b.Length)
+          }
+          $ctrl = Join-Path $env:SystemRoot 'System32/notepad.exe'
+          if (Test-Path $ctrl) { PeFields $ctrl 'control(notepad.exe)' } else { Write-Host 'HDR control: notepad.exe absent' }
+          PeFields $exe 'ours(slice-win-arm64)'
+          Run $ctrl @('/?') 'control notepad /?'   # may open a window; a START FAILED here is the answer
           Run $exe @('--version') 'slice-arm64 --version'
           Run $exe @('--help') 'slice-arm64 --help'
           # A second copy with the subsystem version the ARM64 loader is documented to require (6.02):
