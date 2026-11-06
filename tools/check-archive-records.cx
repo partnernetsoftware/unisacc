@@ -1,0 +1,50 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+/* tools/check-archive-records.cx -- dry-run archive-records and check counts. */
+static int fail(const char *w) { sy_eprintf("check-archive-records\tFAIL\t%s\n", w); return 1; }
+int main(void) {
+    char *out; size_t n = 0;
+    char *av[8];
+    int rc, lm = -1, lk = -1, lt = -1, im = -1, ik = -1, it = -1;
+    av[0] = "./tools/bound"; av[1] = "40"; av[2] = "sh"; av[3] = "./unisacc.com";
+    av[4] = "tools/archive-records.cx"; av[5] = "--"; av[6] = "--cutoff"; av[7] = "2026-11-03";
+    /* 8 args + 0 */
+    { char *v[9]; int i; for (i = 0; i < 8; i++) v[i] = av[i]; v[8] = 0;
+      rc = cx_runv_timeout(v, 45, &out, &n); }
+    if (rc != 0 || !out) return fail("run");
+    if (!tx_contains(out, (int)n, "ARCHIVE_RECORDS\tmode=dry", 24)) return fail("marker");
+    {
+        const char *p = out;
+        while (*p && !(p[0] == 'A' && tx_contains(p, 20, "ARCHIVE_RECORDS", 15))) p++;
+        /* parse move/keep/total with sscanf-like scan */
+        { const char *q = out; int k;
+          for (k = 0; k < (int)n - 12; k++) {
+            if (out[k] == 'l' && tx_contains(out + k, 20, "ledger_move=", 12)) {
+              q = out + k + 12; lm = 0; while (*q >= '0' && *q <= '9') { lm = lm * 10 + (*q - '0'); q++; }
+            }
+            if (out[k] == 'l' && tx_contains(out + k, 20, "ledger_keep=", 12)) {
+              q = out + k + 12; lk = 0; while (*q >= '0' && *q <= '9') { lk = lk * 10 + (*q - '0'); q++; }
+            }
+            if (out[k] == 'l' && tx_contains(out + k, 20, "ledger_total=", 13)) {
+              q = out + k + 13; lt = 0; while (*q >= '0' && *q <= '9') { lt = lt * 10 + (*q - '0'); q++; }
+            }
+            if (out[k] == 'i' && tx_contains(out + k, 20, "items_move=", 11)) {
+              q = out + k + 11; im = 0; while (*q >= '0' && *q <= '9') { im = im * 10 + (*q - '0'); q++; }
+            }
+            if (out[k] == 'i' && tx_contains(out + k, 20, "items_keep=", 11)) {
+              q = out + k + 11; ik = 0; while (*q >= '0' && *q <= '9') { ik = ik * 10 + (*q - '0'); q++; }
+            }
+            if (out[k] == 'i' && tx_contains(out + k, 20, "items_total=", 12)) {
+              q = out + k + 12; it = 0; while (*q >= '0' && *q <= '9') { it = it * 10 + (*q - '0'); q++; }
+            }
+          }
+        }
+    }
+    if (lm < 0 || lk < 1 || lt < 1 || lm + lk != lt) return fail("ledger-count");
+    if (im < 0 || ik < 1 || it < 1 || im + ik != it) return fail("items-count");
+    sy_printf("CHECK_ARCHIVE_RECORDS\tfailed=0\tledger_move=%d\titems_move=%d\n", lm, im);
+    return 0;
+}

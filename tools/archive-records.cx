@@ -1,0 +1,229 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+/* tools/archive-records.cx -- move old ledger/items rows into archive/work/.
+ *
+ *   sh ./unisacc.com tools/archive-records.cx -- [--cutoff YYYY-MM-DD] [--write] [ROOT]
+ *
+ * Dry-run is the default. --write uses tmp+rename; if the live file sha
+ * changes between read and replace, it refuses. First landing: --cutoff 2026-11-03.
+ * SLICE-CHANGE ledger rows stay. DONE/CLOSED items stay if git grep finds them
+ * outside work/items.tsv. */
+static void die(const char *s) { sy_eprintf("archive-records: REFUSE %s\n", s); exit(2); }
+static int g_write, g_root_n;
+static char g_root[4096], g_cut[16] = "2026-11-03";
+static char g_sha_before[65], g_sha_after[65];
+
+static void sha_file(const char *p, char out[65]) {
+    char *v[] = { "sha256sum", (char *)p, 0 };
+    np_result r = {0}; char why[256];
+    if (np_run(v, g_root, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 64) die("sha256sum");
+    mm_copy(out, 65, r.out, 64); out[64] = 0;
+    np_free(&r);
+}
+static int live_item_ref(const char *id) {
+    char cmd[800];
+    char *v[] = { "sh", "-c", cmd, 0 };
+    np_result r = {0}; char why[256];
+    if (cx_fmt(cmd, sizeof cmd,
+               "git grep -l -F -- '%s' -- prd.md plans tests tools .github work/items.tsv 2>/dev/null | grep -v '^work/items.tsv$' | head -1",
+               id)) die("cmd");
+    if (np_run(v, g_root, 0, 25, &r, why, sizeof why)) { np_free(&r); return 1; }
+    { int hit = r.outn > 0; np_free(&r); return hit; }
+}
+static int atomic_replace(const char *path, const char *tmp, const char *want_sha) {
+    char now[65];
+    sha_file(path, now);
+    if (!tx_eqz(now, want_sha)) return 1;
+    if (sy_rename(tmp, path)) die("rename");
+    return 0;
+}
+static void put_line(int fd, const char *s, size_t n) {
+    if (sy_write_all(fd, s, n) || sy_write_all(fd, "\n", 1)) die("write");
+}
+static int ymd_le(const char *row, const char *cut) {
+    char d[11]; int i;
+    for (i = 0; i < 10; i++) {
+        if (!row[i]) return 0;
+        d[i] = row[i];
+    }
+    d[10] = 0;
+    if (d[4] != '-' || d[7] != '-') return 0;
+    return tx_cmp(d, 10, cut, 10) <= 0;
+}
+
+static void do_ledger(int *move, int *keep, int *total) {
+    char path[4400], arch[4400], tkeep[4400], tmv[4400];
+    size_t n = 0, at = 0; char *b;
+    int fd_k, fd_m, first = 1;
+    if (cx_fmt(path, sizeof path, "%s/work/ledger.tsv", g_root)) die("path");
+    if (cx_fmt(arch, sizeof arch, "%s/archive/work/ledger-202611.tsv", g_root)) die("path");
+    if (cx_fmt(tkeep, sizeof tkeep, "%s/work/ledger.tsv.tmp", g_root)) die("path");
+    if (cx_fmt(tmv, sizeof tmv, "%s/archive/work/ledger-202611.tsv.tmp", g_root)) die("path");
+    b = cx_read(path, &n);
+    if (!b) die("ledger read");
+    sha_file(path, g_sha_before);
+    *move = *keep = *total = 0;
+    fd_k = g_write ? sy_open_new(tkeep, 0644) : -1;
+    fd_m = -1;
+    if (g_write && fd_k < 0) die("tmp keep");
+    while (at < n) {
+        size_t e = at, ln;
+        int tabs = 0, i;
+        while (e < n && b[e] != '\n') e++;
+        ln = e - at;
+        if (ln) {
+            for (i = 0; i < (int)ln; i++) if (b[at + i] == '\t') tabs++;
+            /* short rows stay live; extra tabs live in the last field */
+        }
+        if (at == 0) {
+            if (g_write) put_line(fd_k, b + at, ln);
+            (*keep)++;
+        } else if (ln && tabs >= 5 && ymd_le(b + at, g_cut) && !tx_contains(b + at, (int)ln, "SLICE-CHANGE", 12)) {
+            (*move)++;
+            if (g_write) {
+                if (fd_m < 0) {
+                    sy_stat_t st; char dir[4400];
+                    if (cx_fmt(dir, sizeof dir, "%s/archive/work", g_root)) die("path");
+                    (void)sy_mkdir(dir, 0755);
+                    if (sy_stat(arch, &st) == 0) {
+                        char *old; size_t on = 0;
+                        old = cx_read(arch, &on);
+                        fd_m = sy_open_new(tmv, 0644);
+                        if (fd_m < 0) die("tmp arch");
+                        if (on) sy_write_all(fd_m, old, on);
+                        if (old) mm_free(old);
+                    } else {
+                        fd_m = sy_open_new(tmv, 0644);
+                        if (fd_m < 0) die("tmp arch");
+                        put_line(fd_m, "时间\tid\t事件\tcommit\t证据\t角色/模型", 40);
+                    }
+                }
+                put_line(fd_m, b + at, ln);
+            }
+        } else {
+            (*keep)++;
+            if (g_write) put_line(fd_k, b + at, ln);
+        }
+        (*total)++;
+        at = e < n ? e + 1 : e;
+        first = 0;
+        (void)first;
+    }
+    mm_free(b);
+    if (g_write) {
+        if (sy_close(fd_k)) die("close keep");
+        if (fd_m >= 0 && sy_close(fd_m)) die("close arch");
+        sha_file(path, g_sha_after);
+        if (!tx_eqz(g_sha_before, g_sha_after)) {
+            sy_unlink(tkeep);
+            if (fd_m >= 0) sy_unlink(tmv);
+            die("ledger changed underfoot");
+        }
+        if (atomic_replace(path, tkeep, g_sha_before)) die("ledger race");
+        if (fd_m >= 0) {
+            if (sy_rename(tmv, arch)) die("arch rename");
+        }
+    }
+}
+
+static void do_items(int *move, int *keep, int *total) {
+    char path[4400], arch[4400], tkeep[4400], tmv[4400];
+    size_t n = 0, at = 0; char *b;
+    int fd_k, fd_m = -1;
+    if (cx_fmt(path, sizeof path, "%s/work/items.tsv", g_root)) die("path");
+    if (cx_fmt(arch, sizeof arch, "%s/archive/work/items-done-202611.tsv", g_root)) die("path");
+    if (cx_fmt(tkeep, sizeof tkeep, "%s/work/items.tsv.tmp", g_root)) die("path");
+    if (cx_fmt(tmv, sizeof tmv, "%s/archive/work/items-done-202611.tsv.tmp", g_root)) die("path");
+    b = cx_read(path, &n);
+    if (!b) die("items read");
+    sha_file(path, g_sha_before);
+    *move = *keep = *total = 0;
+    fd_k = g_write ? sy_open_new(tkeep, 0644) : -1;
+    if (g_write && fd_k < 0) die("items tmp");
+    while (at < n) {
+        size_t e = at, ln, t0, t1;
+        int tabs = 0, i, done = 0;
+        char id[80];
+        while (e < n && b[e] != '\n') e++;
+        ln = e - at;
+        for (i = 0; i < (int)ln; i++) if (b[at + i] == '\t') tabs++;
+        if (at == 0) {
+            if (tabs < 10) die("items cols");
+            if (g_write) put_line(fd_k, b + at, ln);
+            (*keep)++;
+        } else {
+            t0 = at;
+            while (t0 < e && b[t0] != '\t') t0++;
+            { size_t il = t0 - at; if (il >= sizeof id) die("id"); mm_copy(id, sizeof id, b + at, il); id[il] = 0; }
+            /* field 9 = state (0-based field 8) */
+            { int f = 0; size_t p = at; char st[24];
+              while (p < e && f < 8) { if (b[p] == '\t') f++; p++; }
+              t1 = p; while (t1 < e && b[t1] != '\t') t1++;
+              { size_t sl = t1 - p; if (sl > 20) sl = 20; mm_copy(st, 24, b + p, sl); st[sl] = 0;
+                done = tx_eqz(st, "DONE") || tx_eqz(st, "CLOSED"); }
+            }
+            if (tabs < 10) die("items cols");
+            if (done && id[0] && !live_item_ref(id)) {
+                (*move)++;
+                if (g_write) {
+                    if (fd_m < 0) {
+                        sy_stat_t st; char dir[4400];
+                        if (cx_fmt(dir, sizeof dir, "%s/archive/work", g_root)) die("path");
+                        (void)sy_mkdir(dir, 0755);
+                        fd_m = sy_open_new(tmv, 0644);
+                        if (fd_m < 0) die("items arch tmp");
+                        if (sy_stat(arch, &st) == 0) {
+                            char *old; size_t on = 0; old = cx_read(arch, &on);
+                            if (on) sy_write_all(fd_m, old, on);
+                            if (old) mm_free(old);
+                        } else put_line(fd_m, "id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck", 72);
+                    }
+                    put_line(fd_m, b + at, ln);
+                }
+            } else {
+                (*keep)++;
+                if (g_write) put_line(fd_k, b + at, ln);
+            }
+        }
+        (*total)++;
+        at = e < n ? e + 1 : e;
+    }
+    mm_free(b);
+    if (g_write) {
+        if (sy_close(fd_k)) die("close");
+        if (fd_m >= 0 && sy_close(fd_m)) die("close");
+        sha_file(path, g_sha_after);
+        if (!tx_eqz(g_sha_before, g_sha_after)) { sy_unlink(tkeep); die("items changed underfoot"); }
+        if (atomic_replace(path, tkeep, g_sha_before)) die("items race");
+        if (fd_m >= 0 && sy_rename(tmv, arch)) die("items arch rename");
+    }
+}
+
+int main(int argc, char **argv) {
+    int i, lm = 0, lk = 0, lt = 0, im = 0, ik = 0, it = 0;
+    g_root[0] = '.'; g_root[1] = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--write")) g_write = 1;
+        else if (tx_eqz(argv[i], "--cutoff") && i + 1 < argc) {
+            i++;
+            if (tx_len(argv[i], 16) != 10) die("cutoff");
+            mm_copy(g_cut, 16, argv[i], 11);
+        } else if (argv[i][0] != '-') {
+            if (!realpath(argv[i], g_root)) die("root");
+        }
+    }
+    if (g_root[0] == '.' && !realpath(".", g_root)) die("cwd");
+    g_root_n = (int)tx_len(g_root, 4096);
+    do_ledger(&lm, &lk, &lt);
+    do_items(&im, &ik, &it);
+    if (lm + lk != lt) die("ledger count");
+    if (im + ik != it) die("items count");
+    sy_printf("ARCHIVE_RECORDS\tmode=%s\tcutoff=%s\tledger_move=%d\tledger_keep=%d\tledger_total=%d\titems_move=%d\titems_keep=%d\titems_total=%d\n",
+              g_write ? "write" : "dry", g_cut, lm, lk, lt, im, ik, it);
+    return 0;
+}
