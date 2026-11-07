@@ -77,3 +77,6 @@ s8b 十行 PASS 后无 `CHECK_CANDIDATE_QUALIFY`：`tests/check-candidate-qualif
 ## 会话基础设施
 
 s8 作废因 cdx ROOT 未跟踪 `illegal-action-work/`（测试写仓根）。s8b：`tests/illegal-action.cx` mkdtemp（c05aa85998 / 34f7e2db），harness 8a134c18。
+
+candidate-qualify s8b rc=2：`git rev-parse HEAD`（check-candidate-qualify.cx:80）在 git archive 快照失败。INFRA。主树有.git 时 APE 复跑 failed=0。
+

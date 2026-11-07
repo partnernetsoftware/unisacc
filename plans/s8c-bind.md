@@ -6,12 +6,18 @@
 
 **自动点**：init 成功后立刻对 MAP 每个名字 `material`，再 wave。
 
-**一条命令**（独立空跑已过）：
+**一条命令**（`tools/s8c-bind.sh`，git log 无占用）：
 
 ```
-sh out/s8c-bind.sh ROOT SESSION ROOT/unisacc.com ROOT/out/s8c.map
+sh tools/s8c-bind.sh ROOT SESSION ROOT/unisacc.com MAP
 ```
 
-`s8c-bind.sh`：`init` 后 `awk` MAP 第一列，逐名 `tools/bound 55 … -- material ROOT SESSION NAME`。
+独立 scratch `/tmp/grk-s8c-dry/out/s8c14` 全图 14 名：
 
-空跑 `/tmp/grk-s8c-dry`：`INIT materials_mapped=1`；`MATERIAL hostcc … PREPARED-identity-only`；`BIND_DONE`。全 14 名同命令换 MAP（s8b 的 `out/s8b.map`）。PREPARED≠PASS。不挡 0.0.46 发布。
+| | heavy registered=yes | heavy =no |
+|---|---|---|
+| init 后、material 前 | 0 | 162 |
+| 14 名 material 后 | 84 | 78 |
+
+余 78 为 map 未列名（ref/ri-cli/sha 绑定等），本命令不造伪材料。PREPARED≠PASS。s8b 终态后同命令起 s8c。
+
