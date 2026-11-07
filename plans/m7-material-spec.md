@@ -18,3 +18,10 @@ kernel-route 单 ISA 会得到 inputs=22/11/11/1，被 :88 拒绝。objects 必�
 
 转绿（同源 884adfef 重构造后实跑 PASS）：objects 5 + kernel-route 7 + ri-flow 9 + ri-chain 7 + pp-gold 2 = **30**。streams 28 实跑未完，不改此数。**p3: 需 ctx tool-pack（chain-step p3 REV S SRC_PKG OUT --nets CTX/jobs --routes R），待磁盘/候选链复用，本轮不做。**
 
+## streams / PEEP / OPINFO（2026-11-07 定性）
+
+- **unrealizable=179**：`tools/peep-cases-gen.cx:178-180`。`realise()` 返回 0 且 `y==keep` → `UNREALIZABLE keep-by-definition`，**不跑 e4**。200 键里 179 条 keep 不构成测试。
+- **手工一例** `0000.store64.store64.none`（y=keep 却被 realise 成可跑？results 记 FAIL rc=2）：want 四行 `_start:/store64/store64/ret`；got **空文件**。diff= want 全文被删。不是 peep 改写错，是 **STREAM4_COM 对 tape rc=2 无 stdout**。
+- **三档**：①材料/运行器——21 FAIL 均 `rc=2` 空 `.out`（与 classic sources / product-identity 同类，不是网语义）；②用例表——179 unrealizable 使 keep 网几乎无正例；③网真缺陷——**本例未证明**。不立 P1 网缺陷。OPINFO fail=54 同批运行器，未逐字节。
+
+
