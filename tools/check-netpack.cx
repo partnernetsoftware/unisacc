@@ -3,7 +3,9 @@
  *   sh ./unisacc.com tools/check-netpack.cx
  * A. a timed-out job's setsid descendant is dead and residue is 0 (kill(-pid) alone misses it);
  * B. the TimeoutExpired text keeps its prefix and duration, and gains a survivor suffix only when residue > 0;
- * C. the normal paths are untouched: rc, stdout/stderr capture, cwd OSError, residue 0. */
+ * C. the normal paths are untouched: rc, stdout/stderr capture, cwd OSError, residue 0.
+ * D. EOF is not process exit: an ignored SIGTERM cannot bypass the timeout;
+ *    timeout returns only after the direct child is reaped, without stealing siblings. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -53,6 +55,27 @@ int main(void) {
     {   char *v[] = { "true", 0 };
         int t = np_run(v, "/no/such/dir/netpack-contract", 0, 5, &r, why, sizeof why);
         ok(t == -1 && !strncmp(why, "FileNotFoundError:", 18), "C: a bad cwd is the OSError path, not a timeout");
+        np_free(&r);
+    }
+    {   char pidf[4400], script[2048]; int child, st, sibling;
+        if (cx_fmt(pidf, sizeof pidf, "%s/eof.pid", tmp)) return 2;
+        if (cx_fmt(script, sizeof script, "echo $$ > %s; trap '' TERM; exec 1>&- 2>&-; exec sleep 40", pidf)) return 2;
+        sibling = fork();
+        if (sibling == 0) _exit(23);
+        { char *v[] = { "sh", "-c", script, 0 };
+          int t = np_run(v, root, 0, 1, &r, why, sizeof why);
+          ok(t == -1 && strstr(why, "timed out after 1 seconds") != 0, "D: EOF with ignored SIGTERM still reaches timeout");
+          child = read_pid(pidf);
+          ok(child > 10 && !alive(child), "D: direct child is gone before timeout returns");
+          ok(r.residue == 0, "D: killed direct child has no residue");
+          ok(waitpid(sibling, &st, WNOHANG) == sibling && WIFEXITED(st) && WEXITSTATUS(st) == 23, "D: timeout does not reap an unrelated child");
+          np_free(&r);
+        }
+        sy_unlink(pidf);
+    }
+    {   char *v[] = { "sh", "-c", "exec 1>&- 2>&-; exit 9", 0 };
+        int t = np_run(v, root, 0, 5, &r, why, sizeof why);
+        ok(t == 0 && r.rc == 9 && r.outn == 0 && r.errn == 0, "D: normal EOF preserves empty output and exit status");
         np_free(&r);
     }
     {   char p[4400]; if (!cx_fmt(p, sizeof p, "%s/esc.pid", tmp)) sy_unlink(p); }

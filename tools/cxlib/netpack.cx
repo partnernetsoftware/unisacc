@@ -771,6 +771,18 @@ static int np_fault(void) {
     if (!strcmp(v, "residue")) return 1;
     return -1;
 }
+/* Reap only this child, never the caller's other jobs. SIGKILL is asynchronous;
+   allow at most two seconds and 2000 polls for its exit to become waitable. */
+static int np_reap_killed(pid_t pid, int *st) {
+    int i;
+    for (i = 0; i < 2000; i++) {
+        int w = waitpid(pid, st, WNOHANG);
+        if (w == pid || (w < 0 && errno == ECHILD)) return 0;
+        if (w < 0 && errno != EINTR) return -1;
+        usleep(1000);
+    }
+    return -1;
+}
 int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
     pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
@@ -814,7 +826,8 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
     k = read(pf[0], err, sizeof err);
     close(pf[0]);
     if (k == (ssize_t)sizeof err) {
-        waitpid(pid, &st, 0); close(po[0]); close(pe[0]);
+        if (np_reap_killed(pid, &st) < 0) res->residue = 1;
+        close(po[0]); close(pe[0]);
         np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
         return -1;
     }
@@ -824,7 +837,11 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         int got = 0;
         if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
         if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
-        if (!open_o && !open_e && !reaped) { waitpid(pid, &st, 0); reaped = 1; break; }
+        if (!reaped) {
+            int w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) reaped = 1;
+        }
+        if (!open_o && !open_e && reaped) break;
         (void)got;
         if (idle >= (long)secs * 1000) {   /* 1 ms ticks, counted with or without output */
             size_t i; char rep[256];
@@ -832,7 +849,11 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
             if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
             res->residue = sv;
             if (fault == 1) { res->residue = 1; fputs("FAULT_INJECTED\tresidue\n", stderr); }
-            { int w; do { w = waitpid(pid, &st, WNOHANG); } while (w < 0 && errno == EINTR); }
+            if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
+                res->residue = 1;
+                memcpy(rep, "direct child not reaped", sizeof "direct child not reaped");
+                sv = 1;
+            }
             if (open_o) close(po[0]);
             if (open_e) close(pe[0]);
             free(o.p); free(e.p);

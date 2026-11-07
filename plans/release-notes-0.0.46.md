@@ -27,6 +27,7 @@ C99 编译器，自己写出可执行文件（ELF、Mach-O、PE），能编译�
 - 沿用 0.0.45：22 种 C99 约束违例不报错（12 种可能产出错误代码）；`-c` 分开编译运行库不跨对象共享；手工拼 stream 管道 tape 无结束标记；预处理器接受两种非法输入；运行库在每对象各带一份；`#include <C:/x.h>` 尖括号不按盘符绝对路径处理；APE 内尚无 win/arm64 分发（用随发独立切片 `slice-win-arm64` 配 `pkg.bin`，`UNISA_CONTAINER` 指向）。
 - Windows 上 POSIX 部分（fork/waitpid/kill/F_SETFD/environ）无对应原语，未跑。
 - RI 参考运行器仍不支持 P4 模型包，`ri-flow-data` 为 `NOT_AVAILABLE`；材料 `PREPARED` 不等于功能验证通过。P4 兼容修复排入 0.0.47。
+- `sysx.process` 超时路径的单次非阻塞回收是代码审查疑点；四次真实探针未复现僵尸残留，尚非已确认缺陷。0.0.47 继续验证，本版不改该产品输入。
 
 ## 怎么验证
 1. `sha256sum unisacc.com` 应为候选 sha（见上）。
