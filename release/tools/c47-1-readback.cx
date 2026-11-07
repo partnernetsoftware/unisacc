@@ -1,0 +1,46 @@
+/* Read-only release rehearsal. ROOT TAG NEW_OUT OLD_APE VERSION COMMIT PINS DRAFT.
+ * PINS maps four roles to remote asset names and expected SHA256; no uploads or release edits.
+ * NEW_OUT must be absolute and absent. Every child is bounded; stdout/stderr/rc are retained. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+static char root[4096],out[4096];
+static const char *role[]={"ape","package","win-arm64","record"};
+static const char *local[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json"};
+static char name[4][256],pin[4][65];
+static void die(const char *s){sy_eprintf("C47_READBACK REFUSED %s\n",s);sy_exit(1);}
+static int hex(const char *s,int n){int i;if(tx_len(s,n+1)!=n)return 0;for(i=0;i<n;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static void join(char *p,size_t cap,const char *dir,const char *file){if(cx_fmt(p,cap,"%s/%s",dir,file))die("path");}
+static void save(const char *label,const char *suffix,const char *b,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s.%s",out,label,suffix))die("receipt path");int fd=sy_open_new(p,0600);if(fd<0)die("receipt create");int rc=sy_write_all(fd,b,(long)n),closed=sy_close(fd);if(rc||closed)die("receipt write");}
+static np_result command(const char *label,char **v,const char *cwd,int bound){np_result r={0};char why[1024],status[64];if(np_run(v,cwd,0,bound,&r,why,sizeof why))die(why);save(label,"stdout",r.out,r.outn);save(label,"stderr",r.err,r.errn);int n=tx_snprintf(status,sizeof status,"rc=%d residue=%d\n",r.rc,r.residue);if(n<0||n>=(int)sizeof status)die("status length");save(label,"status",status,(size_t)n);if(r.outn&&sy_write_all(1,r.out,(long)r.outn))die("stdout");if(r.errn&&sy_write_all(2,r.err,(long)r.errn))die("stderr");if(r.rc||r.residue)die(label);sy_printf("READBACK_STEP %s PASS\n",label);return r;}
+static void run(const char *label,char **v,const char *cwd,int bound){np_result r=command(label,v,cwd,bound);np_free(&r);}
+static void pins(const char *path){
+    char b[2048];int fd=sy_open_read(path),i,count=0;if(fd<0)die("pins open");long n=sy_reg_size(fd);if(n<0||n>(long)sizeof b){sy_close(fd);die("pins size");}int rc=sy_read_full(fd,b,n),closed=sy_close(fd);if(rc||closed)die("pins read");
+    if(!tx_prefix(b,n,"role\tasset\tsha256\n",18))die("pins header");long at=18;
+    while(at<n){long len=tx_chr(b+at,n-at,'\n');if(len<0)len=n-at;long ro,rn,no,nn,ho,hn;if(tx_fields(b+at,len,'\t')!=3||tx_field(b+at,len,'\t',0,&ro,&rn)||tx_field(b+at,len,'\t',1,&no,&nn)||tx_field(b+at,len,'\t',2,&ho,&hn))die("pins row");for(i=0;i<4;i++)if(tx_same(b+at+ro,rn,role[i],tx_len(role[i],32)))break;if(i==4||name[i][0]||nn<1||tx_copy(name[i],sizeof name[i],b+at+no,nn)||tx_copy(pin[i],sizeof pin[i],b+at+ho,hn)||!hex(pin[i],64)||tx_eqz(name[i],".")||tx_eqz(name[i],".."))die("pins role");for(long j=0;j<nn;j++){int c=name[i][j];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='.'||c=='-'||c=='_'))die("asset filename");}count++;at+=len+1;}
+    if(count!=4)die("pins incomplete");
+}
+int main(int argc,char **argv){
+    char download[4400],canonical[4400],layout[4400],p[4600],q[4600],exe[4400],tool[4400],query[1024],version[128],zip[128];int i;
+    if(argc!=9)die("usage: ROOT TAG NEW_OUT OLD_APE VERSION COMMIT PINS true|false");
+    if(sy_realpath(argv[1],root,sizeof root)<0||argv[3][0]!='/'||!hex(argv[6],40)||(!tx_eqz(argv[8],"true")&&!tx_eqz(argv[8],"false")))die("arguments");
+    if(cx_fmt(out,sizeof out,"%s",argv[3]))die("output path");pins(argv[7]);int made=sy_mkdir(out,0700);if(made){sy_eprintf("NEW_OUT: %s\n",sy_strerror(made));die("NEW_OUT creation");}
+    join(download,sizeof download,out,"download");join(canonical,sizeof canonical,out,"canonical");join(layout,sizeof layout,out,"layout");if(sy_mkdir(canonical,0700))die("canonical mkdir");
+    if(cx_fmt(query,sizeof query,"if .isDraft == %s and .isPrerelease == false and .targetCommitish == \"%s\" then . else error(\"release metadata mismatch\") end",argv[8],argv[6]))die("metadata query");
+    char *metadata[]={"gh","release","view",argv[2],"--repo","partnernetsoftware/unisacc","--json","tagName,isDraft,isPrerelease,targetCommitish","--jq",query,0};run("metadata",metadata,root,15);
+    if(tx_eqz(argv[8],"false")){char endpoint[512];if(cx_fmt(endpoint,sizeof endpoint,"repos/partnernetsoftware/unisacc/git/ref/tags/%s",argv[2]))die("tag path");char *v[]={"gh","api",endpoint,"--jq",".object.sha",0};np_result r=command("tag",v,root,15);if(r.outn!=41||!tx_same(r.out,40,argv[6],40)||r.out[40]!='\n')die("tag commit");np_free(&r);}
+    char *fetch[]={"gh","release","download",argv[2],"--repo","partnernetsoftware/unisacc","--dir",download,"--pattern",name[0],"--pattern",name[1],"--pattern",name[2],"--pattern",name[3],0};run("download",fetch,root,25);
+    char *hashes[]={"sha256sum","--",name[0],name[1],name[2],name[3],0};np_result hr=command("asset-sha",hashes,download,10);long pos=0;for(i=0;i<4;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",pin[i],name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die(role[i]);pos+=len;join(p,sizeof p,download,name[i]);join(q,sizeof q,canonical,local[i]);if(sy_copy(p,q,0644))die("canonical copy");sy_printf("READBACK_SHA %s %s\n",name[i],pin[i]);}if(pos!=(long)hr.outn)die("asset SHA rows");np_free(&hr);
+    join(exe,sizeof exe,root,"unisacc.com");join(p,sizeof p,canonical,"unisacc.com");
+    char *ver[]={"sh",p,"--version",0};np_result r=command("version",ver,root,10);int n=tx_snprintf(version,sizeof version,"unisacc %s\n",argv[5]);if(n<0||(size_t)n>=sizeof version||!tx_same(r.out,(long)r.outn,version,n))die("version mismatch");np_free(&r);
+    join(tool,sizeof tool,root,"tools/chain-step.cx");char *smoke[]={"sh",exe,tool,"--","smoke",p,0};run("smoke",smoke,root,45);
+    join(tool,sizeof tool,root,"tools/check-run-comm.cx");char *comm[]={"sh",exe,tool,"--",root,p,argv[4],0};run("comm",comm,root,45);
+    join(tool,sizeof tool,root,"tools/release-layout.cx");char *generate[]={"sh",exe,tool,"--","--version",argv[5],canonical,layout,0};run("layout-generate",generate,root,45);
+    char *check[]={"sh",exe,tool,"--","--version",argv[5],"--check",layout,0};run("layout-check",check,root,45);
+    char *sums[]={"sha256sum","--check","SHA256SUMS",0};run("checksums",sums,layout,10);
+    if(cx_fmt(zip,sizeof zip,"unisacc-%s-win-arm64.zip",argv[5]))die("zip name");char *members[]={"unzip","-Z1",zip,0};r=command("zip-members",members,layout,10);const char *expected="slice-win-arm64\npkg.bin\nrun.cmd\nREADME-win-arm64.txt\n";if(!tx_same(r.out,(long)r.outn,expected,tx_len(expected,128)))die("zip members");np_free(&r);
+    sy_printf("C47_1_READBACK PASS expected_draft=%s tag=%s version=%s commit=%s output=%s\n",argv[8],argv[2],argv[5],argv[6],out);return 0;
+}

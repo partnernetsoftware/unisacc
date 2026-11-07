@@ -241,3 +241,27 @@ CI正式dispatch（bg_309 rc0/2.14秒）：workflow `candidate-native.yml`，ref
 
 最终本机负例/空白与COMM原件及完整阶段账封存于`~/.unisacc-baselines/c47-1/R2-local-verification-7b98ec2c06-Ex8782/local-checks.tar.gz`，gzip检查通过，SHA=`169960c75b957399416fee2773c9817534d34b46163c70f33fe49b9282b20c9c`；同时保留活目录全部14个失败文件。封存后主根445026304B，空闲6622429184B，未触发3G暂停。资产保持原件不变。
 
+## 候选资产只读读回演练
+
+新入口`release/tools/c47-1-readback.cx`复用旧读回顺序，不修改`release/tools/c46-3-readback.sh`。参数为`ROOT TAG NEW_OUT OLD_APE VERSION COMMIT PINS true|false`：最后一项指定预期draft状态；版本、源commit、tag和资产名均不硬编码在程序中。`release/tools/c47-1-readback.tsv`按ape/package/win-arm64/record角色固定本轮四资产名与SHA；输入可用其他角色映射表，下载后仅在新目录规范化本地文件名。正式release模式还核tag指向；本轮只执行draft模式，不冒称正式发布演练已实跑。
+
+```sh
+tools/bound 55 sh ./unisacc.com release/tools/c47-1-readback.cx -- \
+  /home/devali/repos/unisacc v0.0.47-c47-1-candidate NEW_ABSOLUTE_OUT \
+  /home/devali/.unisacc-baselines/c46-2/unisacc-c46-2.com \
+  0.0.47 7b98ec2c0618df88115ae1c80cea47144e8614d3 \
+  /home/devali/repos/unisacc/release/tools/c47-1-readback.tsv true
+```
+
+`NEW_ABSOLUTE_OUT`必须不存在。每个外部子命令最多45秒，外层55秒；下载、版本、smoke、COMM、布局生成/校验、外部校验和及ZIP成员各保存stdout/stderr/rc/residue。没有release create/edit/upload、签名、tag写入或资产写入命令。
+
+本轮bg_315实际rc0/42.22秒，干净目录`/tmp/cdx-c471-readback-oegCoL/run`：draft=true/prerelease=false/target7b98匹配；四SHA与固定原件一致；`unisacc 0.0.47`；smoke5/0（含C退出7）；COMM旧63/新rcprobe.c并保留memfd/argv0/参数/fd9/stdout/rc37。`layout/`为新生成文件，未上传，不是从远端下载ZIP后声称验收。
+
+布局工具新增可选`--version VERSION`：`tools/release-layout.cx -- --version 0.0.47 SOURCE NEW_OUT`与`-- --version 0.0.47 --check OUT`，旧两参数调用仍保持0.0.46合同。实际生成与独立check均`RELEASE_LAYOUT status=PASS`；外部`sha256sum --check SHA256SUMS`六项OK，ZIP四成员恰为`slice-win-arm64/pkg.bin/run.cmd/README-win-arm64.txt`，`build.json`与配对侧车同SHA。新ZIP `unisacc-0.0.47-win-arm64.zip` SHA=`9c7102d3b06c52162b3e6f229a7d14a9a024d05654e40a9f900664c1854acfae`。bg_316原布局八断言全过，包含包一字节损坏与重钉摘要后ZIP附加字节拒绝；同作业历史语料分类表与冻结7b98的完整性gate rc0，不重跑已知GCC拒绝。
+
+bg_317工作区十三闸`ok=13 fail=0 elapsed_ms=7640`，工具行数80298≤80302，未修改任何基线。读回只是Linux本机与格式验证，不授予Windows原生执行或同候选CI资格，不改变已有14个C负例FAIL。
+
+初版bg_315虽实跑通过，但bg_318生产hook拒绝其新文件cxraw25/cxapis2/cxlibc35，未产生提交；初版未跟踪时的bg_317不作为最终门禁。未增补或抬高基线，改用既有L0接口：PIN以sy_read_full/tx_field解析、sha256sum一次核四文件、sy_copy只写新目录、sy_open_new保留收据、sy_*/tx_*输出比较。bg_319误引sys.proc导致sy_exit未定义，编译rc1且未运行；实际声明位于sys.sig，修正引用后重新实跑。
+
+**最终L0实现**bg_321 rc0/21.54秒，输出目录`/tmp/cdx-c471-readback-oegCoL/l0-final`，完整SHA/version/smoke/COMM/layout生成与check/六项SHA256SUMS/ZIP四成员均PASS；新COMM原件`/tmp/cx-run-comm-xqqvzd`。bg_320将新文件纳入真实暂存输入后十三闸13/0、8234ms，新增raw/cxapis/libc均0。旧c46-3-readback.sh对冻结7b98的diff rc0；产品源码/产品表/冻结资产从未改写。
+
