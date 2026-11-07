@@ -1,141 +1,94 @@
-/* decode-sbout.cx -- read-only: turn a table cell's SBOUT byte run back into the text it spells.
- *
- *   sh ./unisacc.com tools/decode-sbout.cx            # every cell with >= MIN SBOUT in exec/pp/*.tsv
- *   sh ./unisacc.com tools/decode-sbout.cx -- FILE    # just that table
- *   sh ./unisacc.com tools/decode-sbout.cx -- --min N
- *
- * Why: seed/gen.c can expand ["@bytes","<text>"] into one SBOUT per byte, so a run of SBOUT actions
- * inside a table cell can be replaced by that single tag -- but only if the exact text of the run is
- * known.  Reading it back by hand is where mistakes hide (NUL bytes, high bytes, escapes), so this
- * tool decodes every run and prints the bytes next to the string, for review.
- *
- * It reads only, writes nothing, and changes nothing.  Each line:
- *   DECODE<TAB>file<TAB>row<TAB>state<TAB>from..to<TAB>bytes=N<TAB>text=<escaped>
- * where the escaped text uses \0 \n \r \t \\ \" and \xNN for anything outside printable ASCII, so a
- * reviewer sees exactly the string an ["@bytes","..."] tag would need to carry.
- * Exit 0 when every file parsed, 2 on usage/IO. */
+/* Read-only: decode legacy SBOUT runs and concrete @bytes cells after GEN-CELL-BYTES.
+ * sh ./unisacc.com tools/decode-sbout.cx -- [FILE] [--min N]
+ * JSON byte semantics match seed/json.h: preserve NUL by length; Unicode >255 becomes '?'.
+ * Manifest templates are not concrete cells. Exit 2 on malformed byte actions or IO. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.netpack
-
-#define MIN_RUN 8            /* a run shorter than this is not worth a tag */
-#define MAX_ROWS 4096
 static char g_root[4096];
 static int found, files;
 static void die(const char *s) { fprintf(stderr, "decode-sbout: REFUSE %s errno=%d\n", s, errno); exit(2); }
-static char *slurp(const char *rel, size_t *n) {
-    char p[4400];
-    if (cx_fmt(p, sizeof p, "%s/%s", g_root, rel)) die("path");
-    { char *s = cx_read(p, n); if (!s) die(rel); return s; }
+static size_t ws(const char *b, size_t n, size_t k) { while (k < n && (b[k]==' ' || b[k]=='\t' || b[k]=='\r')) k++; return k; }
+static int hex4(const char *b, size_t n, size_t *k) {
+    int v=0, i; for(i=0;i<4;i++) { int c, d; if(*k>=n) die("short unicode escape"); c=(unsigned char)b[(*k)++];
+        d=c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1;
+        if(d<0) die("unicode escape"); v=v*16+d; } return v;
 }
-/* ["SBOUT",NN] at B+I?  yields the byte in *val and the end offset in *end */
-static int sbout(const char *b, size_t n, size_t i, long *val, size_t *end) {
-    size_t k = i; long v = 0; int digits = 0;
-    if (i + 10 > n || memcmp(b + i, "[\"SBOUT\",", 9)) return 0;
-    k = i + 9;
-    while (k < n && b[k] >= '0' && b[k] <= '9') { v = v * 10 + (b[k] - '0'); k++; digits++; }
-    if (!digits || k >= n || b[k] != ']') return 0;
-    *val = v; *end = k + 1;
-    return 1;
-}
-/* escape one byte into DST as a C-style escape */
 static void esc_byte(unsigned char c, char *dst, size_t cap, size_t *at) {
-    char t[8];
-    const char *s = t;
-    if (c == 0) s = "\\0";
-    else if (c == '\n') s = "\\n";
-    else if (c == '\r') s = "\\r";
-    else if (c == '\t') s = "\\t";
-    else if (c == '\\') s = "\\\\";
-    else if (c == '"') s = "\\\"";
-    else if (c >= 32 && c < 127) { t[0] = (char)c; t[1] = 0; }
-    else { static const char hex[] = "0123456789abcdef"; t[0] = '\\'; t[1] = 'x'; t[2] = hex[(c >> 4) & 15]; t[3] = hex[c & 15]; t[4] = 0; }
-    while (*s && *at + 1 < cap) dst[(*at)++] = *s++;
-    dst[*at] = 0;
+    char t[8]; const char *s=t;
+    if(c==0) s="\\0"; else if(c=='\n') s="\\n"; else if(c=='\r') s="\\r"; else if(c=='\t') s="\\t";
+    else if(c=='\\') s="\\\\"; else if(c=='\"') s="\\\"";
+    else if(c>=32&&c<127) {t[0]=(char)c;t[1]=0;}
+    else {static const char h[]="0123456789abcdef";t[0]='\\';t[1]='x';t[2]=h[c>>4];t[3]=h[c&15];t[4]=0;}
+    if(strlen(s)>=cap-*at) die("decoded text too long");
+    while(*s) dst[(*at)++]=*s++; dst[*at]=0;
 }
-static void scan_file(const char *rel, int minrun) {
-    size_t n = 0; char *b = slurp(rel, &n); size_t at = 0;
-    files++;
-    while (at < n) {
-        size_t e = at, col = 0, start = at; int row = 0;
-        while (e < n && b[e] != '\n') e++;
-        if (e == at) { at = e + 1; continue; }
-        if (b[at] == '#') { at = e + 1; continue; }
-        /* column 0 is the row name, column 1 the observation */
-        {   size_t k = at; char name[128]; size_t kn = 0;
-            while (k < e && b[k] != '\t' && kn + 1 < sizeof name) name[kn++] = b[k++];
-            name[kn] = 0;
-            if (k < e && b[k] == '\t') { col = 1; start = k + 1; }
-            (void)row;
-            {   size_t j = start;
-                while (j < e) {
-                    long val; size_t end;
-                    if (sbout(b, e, j, &val, &end)) {
-                        size_t first = j, count = 0;
-                        char text[4096]; size_t tn = 0;
-                        text[0] = 0;
-                        while (j < e && sbout(b, e, j, &val, &end)) {
-                            esc_byte((unsigned char)val, text, sizeof text, &tn);
-                            count++; j = end;
-                            while (j < e && b[j] == ',') j++;
-                        }
-                        if ((int)count >= minrun) {
-                            printf("DECODE\t%s\t%s\tcol=%zu\tat=%zu..%zu\tbytes=%zu\ttext=%s\n",
-                                   rel, name, col, first, j, count, text);
-                            found++;
-                        }
-                    } else j++;
-                } }
+/* Decode or skip one JSON string. The cursor ends after its closing quote. */
+static size_t string_bytes(const char *b,size_t n,size_t *k,char *text,size_t cap) {
+    size_t count=0, at=0; if(*k>=n||b[(*k)++]!='"') die("string expected");
+    while(*k<n) {int c=(unsigned char)b[(*k)++]; if(c=='"') return count;
+        if(c<32) die("control byte in string");
+        if(c=='\\') {if(*k>=n) die("short escape"); c=(unsigned char)b[(*k)++];
+            if(c=='u') {c=hex4(b,n,k); if(c>=0xd800&&c<0xdc00&&*k+6<=n&&b[*k]=='\\'&&b[*k+1]=='u') {*k+=2;(void)hex4(b,n,k);} if(c>255)c='?';}
+            else if(c=='n')c='\n'; else if(c=='r')c='\r'; else if(c=='t')c='\t'; else if(c=='b')c=8; else if(c=='f')c=12;
+            else if(c!='"'&&c!='\\'&&c!='/') die("invalid escape");
         }
-        at = e + 1;
-    }
-    free(b);
+        if(text) esc_byte((unsigned char)c,text,cap,&at); count++;
+    } die("unterminated string"); return 0;
 }
-int main(int argc, char **argv) {
-    char only[4400];
-    int minrun = MIN_RUN, i;
-    const char *one = 0;
-    if (sy_cwd(g_root, sizeof g_root) < 0) die("cwd");
-    for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--min") && i + 1 < argc) { minrun = atoi(argv[++i]); if (minrun < 1) die("--min"); }
-        else if (!strcmp(argv[i], "--")) continue;
-        else if (!one) one = argv[i];
-        else die("usage: [FILE] [--min N]");
+static int sbout(const char *b,size_t n,size_t k,long *value,size_t *end) {
+    long v=0; int digits=0;
+    if(k+9>n||memcmp(b+k,"[\"SBOUT\",",9)) return 0; k=ws(b,n,k+9);
+    while(k<n&&b[k]>='0'&&b[k]<='9') {v=v*10+b[k++]-'0'; if(v>255)die("SBOUT byte");digits++;}
+    k=ws(b,n,k); if(!digits||k>=n||b[k]!=']')die("SBOUT byte"); *value=v;*end=k+1;return 1;
+}
+static void scan_file(const char *rel,int minrun) {
+    char path[4400],header[256]; size_t n=0,at=0,h=0; char *b;
+    if(cx_fmt(path,sizeof path,rel[0]=='/'?"%s":"%s/%s",rel[0]=='/'?rel:g_root,rel))die("path");
+    b=cx_read(path,&n); if(!b)die(rel);
+    while(h<n&&b[h]!='\n'&&h+1<sizeof header){header[h]=b[h];h++;}header[h]=0;
+    if(!strstr(header,"\tnext\tactions")){free(b);return;} files++;
+    while(at<n) {
+        size_t e=at,k,kn=0; char name[128];
+        while(e<n&&b[e]!='\n')e++; if(e==at||b[at]=='#'){at=e+1;continue;}
+        k=at;while(k<e&&b[k]!='\t'&&kn+1<sizeof name)name[kn++]=b[k++];name[kn]=0;
+        if(k==e||b[k]!='\t')die("state column"); k=e;while(k>at&&b[k-1]!='\t')k--;
+        if(k==at)die("actions column");
+        while(k<e) {
+            long val;size_t end,first=k,count=0,tn=0;char text[4096];text[0]=0;
+            if(k+10<=e&&!memcmp(b+k,"[\"@bytes\",",10)) {
+                k=ws(b,e,k+10);count=string_bytes(b,e,&k,text,sizeof text);k=ws(b,e,k);
+                if(!count||k>=e||b[k]!=']')die("@bytes requires one nonempty string");k++;
+            } else if(sbout(b,e,k,&val,&end)) {
+                do {esc_byte((unsigned char)val,text,sizeof text,&tn);count++;k=ws(b,e,end);
+                    if(k<e&&b[k]==',')k=ws(b,e,k+1);
+                } while(sbout(b,e,k,&val,&end));
+            } else if(b[k]=='"') {(void)string_bytes(b,e,&k,0,0);continue;}
+            else {k++;continue;}
+            if((int)count>=minrun){printf("DECODE\t%s\t%s\tcol=actions\tat=%zu..%zu\tbytes=%zu\ttext=%s\n",rel,name,first,k,count,text);found++;}
+        } at=e+1;
+    } free(b);
+}
+int main(int argc,char **argv) {
+    int minrun=8,i;const char *one=0;
+    if(sy_cwd(g_root,sizeof g_root)<0)die("cwd");
+    for(i=1;i<argc;i++) {
+        if(!strcmp(argv[i],"--min")&&i+1<argc){minrun=atoi(argv[++i]);if(minrun<1)die("--min");}
+        else if(!strcmp(argv[i],"--"))continue;else if(!one)one=argv[i];else die("usage: [FILE] [--min N]");
     }
-    if (one) {
-        scan_file(one, minrun);
-    } else {
-        char dir[4400];
-        if (cx_fmt(dir, sizeof dir, "%s/exec/pp", g_root)) die("path");
-        {   /* the directory listing, one entry per line */
-            char cmd[4400];
-            if (cx_fmt(cmd, sizeof cmd, "ls %s", dir)) die("cmd");
-            {   char *v[] = {"sh", "-c", cmd, 0};
-                np_result r = {0};
-                char why[512] = {0};
-                if (np_run(v, g_root, 0, 10, &r, why, sizeof why)) die(why);
-                if (r.rc) { np_free(&r); die("cannot list exec/pp"); }
-                {   size_t at = 0;
-                    while (at < r.outn) {
-                        size_t e = at;
-                        while (e < r.outn && r.out[e] != '\n') e++;
-                        if (e > at) {
-                            char leaf[256], rel[4400]; size_t kn = 0;
-                            while (at + kn < e && kn + 1 < sizeof leaf) { leaf[kn] = r.out[at + kn]; kn++; }
-                            leaf[kn] = 0;
-                            if (kn > 4 && !strcmp(leaf + kn - 4, ".tsv")) {
-                                if (cx_fmt(rel, sizeof rel, "exec/pp/%s", leaf)) die("path");
-                                scan_file(rel, minrun);
-                            }
-                        }
-                        at = e + 1;
-                    } }
-                np_free(&r); }
-        }
+    if(one)scan_file(one,minrun);
+    else {
+        char *v[]={"sh","-c","ls exec/pp",0};np_result r={0};char why[512]={0};
+        if(np_run(v,g_root,0,10,&r,why,sizeof why))die(why);if(r.rc){np_free(&r);die("cannot list exec/pp");}
+        {size_t at=0;while(at<r.outn){size_t e=at,kn=0;char leaf[256],rel[4400];
+            while(e<r.outn&&r.out[e]!='\n')e++;
+            if(e-at>=sizeof leaf)die("file name too long");
+            while(at+kn<e){leaf[kn]=r.out[at+kn];kn++;}leaf[kn]=0;
+            if(kn>4&&!strcmp(leaf+kn-4,".tsv")){if(cx_fmt(rel,sizeof rel,"exec/pp/%s",leaf))die("path");scan_file(rel,minrun);}at=e+1;
+        }}np_free(&r);
     }
-    printf("DECODE_SUMMARY\truns=%d\tfiles=%d\tmin=%d\n", found, files, minrun);
-    return 0;
+    printf("DECODE_SUMMARY\truns=%d\tfiles=%d\tmin=%d\n",found,files,minrun);return 0;
 }

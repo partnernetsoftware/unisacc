@@ -2,9 +2,9 @@
  *
  *   sh ./unisacc.com tools/check-decode-sbout.cx [-- ROOT]
  *
- * tools/decode-sbout.cx exists to turn a run of ["SBOUT",N] actions back into the text an
- * ["@bytes","<text>"] tag would carry.  A decoder that silently mis-parses would hand a wrong string
- * to whoever rewrites the table, so its output is pinned here in four ways:
+ * The GEN-CELL-BYTES migration replaced the fifteen concrete SBOUT runs with @bytes.
+ * Decode both forms using the constructor's JSON byte semantics, keeping the original
+ * survey count, distribution and exact-string checks; also compare both forms in a fixture:
  *   1) the run count and the per-file distribution match the NN-NF-B survey
  *      (plans/nn-nf-b-prep-2026-11-05.md: 15 runs -- cli 4, ftrim-libc 3, directive-body 2,
  *      object-predefine 2, shared-predefine 2, sourcefacts 1, directive-body-result 1);
@@ -39,7 +39,7 @@ static char *decode(const char *extra, int *rc) {
     char why[512] = {0};
     char *out;
     if (cx_fmt(cmd, sizeof cmd, "exec ./unisacc.com tools/decode-sbout.cx%s", extra)) die("cmd");
-    if (np_run(v, g_root, 0, 120, &r, why, sizeof why)) die(why);
+    if (np_run(v, g_root, 0, 50, &r, why, sizeof why)) die(why);
     *rc = r.rc;
     out = calloc(1, r.outn + 1);
     if (!out) die("alloc");
@@ -112,6 +112,29 @@ int main(int argc, char **argv) {
     o = decode(" --min 20", &rc);
     ck(rc == 0 && count_of(o, "DECODE\t") == 1 && count_of(o, "\tSF.start\t") == 1, "min-20-keeps-only-sf-start", "");
     free(o);
+    /* Both representations must preserve decoded length, embedded NUL and escapes. */
+    {
+        char path[] = "/tmp/check-decode-sbout-XXXXXX";
+        char extra[512], a[MAXL], b[MAXL];
+        int fd = mkstemp(path); FILE *f;
+        if (fd < 0) die("fixture create");
+        f = fdopen(fd, "wb");
+        if (!f) { close(fd); unlink(path); die("fixture open"); }
+        if (fputs("# state\tobservation\tnext\tactions\n"
+                  "LEGACY\t*\tEND\t[[\"SBOUT\",0],[\"SBOUT\",65],[\"SBOUT\",10],[\"SBOUT\",255],[\"SBOUT\",34],[\"SBOUT\",92],[\"SBOUT\",47],[\"SBOUT\",90]]\n"
+                  "TAG\t*\tEND\t[[\"@bytes\",\"\\u0000A\\n\\u00ff\\\"\\\\/Z\"]]\n", f) < 0 || fclose(f)) {
+            unlink(path); die("fixture write");
+        }
+        if (cx_fmt(extra, sizeof extra, " -- %s", path)) { unlink(path); die("fixture argument"); }
+        o = decode(extra, &rc);
+        unlink(path);
+        ck(rc == 0 && count_of(o, "DECODE\t") == 2 && count_of(o, "\tbytes=8\t") == 2,
+           "legacy-and-tag-decoded-byte-length", "");
+        a[0] = b[0] = 0;
+        ck(text_of(o, "LEGACY", a, sizeof a) && text_of(o, "TAG", b, sizeof b) &&
+           !strcmp(a, b) && !strcmp(a, "\\0A\\n\\xff\\\"\\\\/Z"), "legacy-tag-exact-byte-equivalence", a);
+        free(o);
+    }
     printf("DECODE_SBOUT\tassertions=%d\tfailed=%d\n", asserts, failed);
     return failed ? 1 : 0;
 }
