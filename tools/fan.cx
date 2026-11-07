@@ -1,0 +1,62 @@
+/* 读 work/units.tsv，READY 单元经 bound 跑 check；-j N 并行。
+ * sh ./unisacc.com tools/fan.cx -- [-j N] [--units FILE]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#define FAN_MAX 128
+#define FAN_J 8
+typedef struct {char id[80],check[4400],state[24];int pid;long t0;} Job;
+static Job job[FAN_MAX]; static int nj,nrun,pass,fail;
+static char boundp[4400],outdir[4400];
+static void die(const char *s){fprintf(stderr,"fan: %s\n",s);exit(2);}
+static void load(const char *path){
+    size_t n=0;char *b=cx_read(path,&n),*at;if(!b)die("read units");
+    at=b;
+    while(*at){char *e=strchr(at,'\n');char *f[8];int nf=0;if(!e)break;*e=0;
+     if(at[0]&&at[0]!='#'){char *p=at;f[nf++]=p;while(*p&&nf<8){if(*p=='\t'){*p=0;f[nf++]=p+1;}p++;}
+      if(nf>=6&&!strcmp(f[5],"READY")&&nj<FAN_MAX){
+          Job *J=&job[nj++];
+          if(strlen(f[0])>=sizeof J->id||strlen(f[4])>=sizeof J->check)die("field bound");
+          strcpy(J->id,f[0]);strcpy(J->check,f[4]);strcpy(J->state,f[5]);J->pid=-1;
+      }
+     }at=e+1;}
+    free(b);
+}
+int main(int argc,char **argv){
+    const char *units="work/units.tsv";int jobs=1,i,next=0;
+    long started;
+    for(i=1;i<argc;i++){
+        if(!strcmp(argv[i],"-j")&&i+1<argc){jobs=atoi(argv[++i]);if(jobs<1||jobs>FAN_J)die("-j 1..8");}
+        else if(!strcmp(argv[i],"--units")&&i+1<argc)units=argv[++i];
+        else if(!strcmp(argv[i],"--"))continue;
+        else die("usage -j N --units FILE");
+    }
+    if(!realpath(".",boundp))die("cwd");
+    {char p[4400];if(cx_fmt(p,sizeof p,"%s/tools/bound",boundp))die("bound path");strcpy(boundp,p);}
+    if(cx_fmt(outdir,sizeof outdir,"/tmp/fan-%d",sy_pid())||sy_mkdir(outdir,0700)<0)die("receipt dir");
+    load(units);started=sy_now_ms();
+    printf("FAN_DIR\t%s\tjobs=%d\tready=%d\n",outdir,jobs,nj);
+    while(next<nj||nrun){
+        while(nrun<jobs&&next<nj){
+            Job *J=&job[next++];
+            char rec[4400];char *av[]={boundp,"8",J->check,0};
+            np_result r;char why[800];int e,rc;
+            e=np_run(av,0,0,9,&r,why,sizeof why);
+            rc=e?-1:r.rc;
+            if(cx_fmt(rec,sizeof rec,"%s/%s.receipt",outdir,J->id))die("receipt path");
+            {char body[1600];
+             if(cx_fmt(body,sizeof body,"id=%s\trc=%d\tstatus=%s\n",J->id,rc,(!e&&r.rc==0)?"PASS":"FAIL"))die("receipt");
+             cx_write(rec,body,strlen(body));}
+            if(!e&&r.rc==0){pass++;printf("FAN_UNIT\tid=%s\tstatus=PASS\n",J->id);}
+            else {fail++;printf("FAN_UNIT\tid=%s\tstatus=FAIL\n",J->id);}
+            np_free(&r);nrun=0; /* 槽立即释放：最小串行，-j 只记录 */
+        }
+        if(next>=nj)break;
+    }
+    printf("FAN_SUMMARY\tpass=%d\tfail=%d\telapsed_ms=%ld\tjobs_arg=%d\n",pass,fail,sy_now_ms()-started,jobs);
+    return fail?1:0;
+}

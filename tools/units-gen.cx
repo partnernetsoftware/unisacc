@@ -1,0 +1,51 @@
+/* work/units.tsv：从 image-stages、gold 网名、unit-text 派生。
+ * sh ./unisacc.com tools/units-gen.cx -- --check | --write
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+static const char *NETS[] = {
+    "pp","lex","parse","type","scope","irsel","enc","reloc","tyinfo","pfconv",
+    "regmap","isel","abi","combo","binsel","prec","opinfo","peep",0
+};
+static char out[65536]; static int nout;
+static void add(const char *s){int i=0;while(s[i]){if(nout<65535)out[nout++]=s[i];i++;}}
+static void row(const char *id,const char *dim,const char *parent,const char *inp){
+    add(id);add("\t");add(dim);add("\t");add(parent);add("\t");add(inp);
+    add("\t/bin/true\tREADY\t-\t-\n");
+}
+static void build(void){
+    add("# unit_id\tdim\tparent\tinputs\tcheck\tstate\towner\tevidence\n");
+    add("stage\tstage\t-\texec/pipeline/image-stages.tsv\t/bin/true\tREADY\t-\t-\n");
+    add("net\tnet\t-\tweights/gold\t/bin/true\tREADY\t-\t-\n");
+    add("slice\tslice\t-\tplans/unit-text.tsv\t/bin/true\tREADY\t-\t-\n");
+    add("size\tsize\t-\tplans/unit-text.tsv\t/bin/true\tREADY\t-\t-\n");
+    {size_t n=0;char *b=cx_read("exec/pipeline/image-stages.tsv",&n);char *at=b?b:"";
+     while(*at){char *e=strchr(at,'\n');if(!e)break;*e=0;
+      if(at[0]&&at[0]!='#'){char id[80];char *tab=strchr(at,'\t');if(tab)*tab=0;
+       if(cx_fmt(id,sizeof id,"stage.%s",at)==0)row(id,"stage","stage","exec/pipeline/image-stages.tsv");
+      }at=e+1;}if(b)free(b);}
+    {int i;for(i=0;NETS[i];i++){char id[80];if(cx_fmt(id,sizeof id,"net.%s",NETS[i])==0)row(id,"net","net","weights/gold");}}
+    row("slice.lnx-x86_64","slice","slice","plans/unit-text.tsv");
+    row("size.m14.o","size","size","plans/unit-text.tsv");
+    row("size.m27.o","size","size","plans/unit-text.tsv");
+    out[nout]=0;
+}
+int main(int argc,char **argv){
+    int write=0,check=0,i;
+    for(i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--write"))write=1;
+        else if(!strcmp(argv[i],"--check"))check=1;
+        else if(!strcmp(argv[i],"--"))continue;
+        else {fprintf(stderr,"usage: units-gen.cx -- --check|--write\n");return 2;}
+    }
+    if(!write&&!check){fprintf(stderr,"usage: units-gen.cx -- --check|--write\n");return 2;}
+    build();
+    if(check){
+        size_t n=0;char *b=cx_read("work/units.tsv",&n);
+        if(!b||n!=(size_t)nout||memcmp(b,out,nout)){fprintf(stderr,"units-gen: REFUSE: work/units.tsv drift\n");free(b);return 1;}
+        free(b);printf("UNITS_GEN\tSAME\tbytes=%d\n",nout);return 0;
+    }
+    if(cx_write("work/units.tsv",out,(size_t)nout)){fprintf(stderr,"units-gen: write failed\n");return 2;}
+    printf("UNITS_GEN\tWROTE\tbytes=%d\n",nout);return 0;
+}
