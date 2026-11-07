@@ -1,18 +1,19 @@
-# s8b 中段（非终态）
+# s8b 驱动结束快照（2026-11-07T18:41:55 END n=61）
 
-会话 `/tmp/grk-s8b-c463/out/s8b` candidate `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf` harness `8a134c18…` 2026-11-07T17:50 END n=58 后同会话续（跳 wt-gate/cx-resolver）。s8 PASS 不沿用。
+会话 `/tmp/grk-s8b-c463/out/s8b` candidate `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf` harness `8a134c18…` identity=STABLE。s8 PASS 不沿用。未完全抽干。
 
 ## 计数
 
 | 类 | 数 | 注 |
 |---|---|---|
-| PASS | 204 | 末次收据 |
-| FAIL | 17 | 下表 |
-| UNKNOWN | 6 | wave-39 bound 超时 INFRA 待复跑 |
-| NOT-AVAIL | 162 | 按下表材料分组 |
+| PASS | 230 | 末次收据 |
+| FAIL | 27 | 无编译器真缺陷；见下与「新增10」 |
+| UNKNOWN | 4 | wave-199 watchdog-deadline：cx-core-interface ratchets-tool cx-layers flow-tool |
+| NOT-AVAIL | 162 | 未 `all-waves material` + 未入图 78 |
 | KNOWN-GAP | 20 | full-* |
-| 未决 light | 41 | 续跑中 |
-| resolver / wt-gate | 各1 | 抽干后单独串行，bound 数分钟 |
+| 未决 light | 4 | 即上列 UNKNOWN 循环，再跑仍 55s 假红 |
+| resolver / wt-gate | 各1 | all-waves 外层必须 bound 55，加长被拒 |
+
 
 ## NOT-AVAIL 按材料
 
