@@ -32,6 +32,29 @@ sh ./unisacc.com tools/facts-gen.cx -- --check . pp-autoinc-gen
 完整变更清单仍须保留原始 clock 事实、time 头和 libc 契约，分别记录上述生成检查、clock 批次与携带头物料收据；不得删去未映射源文件冒称完整覆盖。
 NN 作业预检只声明实际读取的派生表覆盖（本项为 `exec/facts/pp-autoinc-gen.tsv`）；携带头及其它 C/CX 实现通过新包探针、当前源单片构造及同候选原生验证另行验收。
 
+### Context legality facts
+
+`exec/facts/type-context.tsv` owns the four context rules, independent of the old
+binary `weights/gold/type.tsv` answers. `facts-gen` reuses that table's `t1` order
+(the TAX `ax` domain) and `gen2-literals.tsv`'s `tyint` integer class. It writes
+`weights/type/context.tsv`: 4 contexts × 15 source types, with labels `legal`,
+`illegal`, and `needs-null`. Arrays and functions are pointer-class after decay.
+`ret-pointer` integers need a fresh null-pointer proof; this table alone does not
+grant one. Return contexts are facts only, not return-path consumers.
+
+```sh
+sh ./unisacc.com tools/facts-gen.cx -- --write . type-context
+sh ./unisacc.com tools/facts-gen.cx -- --check . type-context
+sh ./unisacc.com tools/decide-gen.cx -- --write --each ctx=index,ret-arith,ret-bool,ret-pointer weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
+sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=index,ret-arith,ret-bool,ret-pointer weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
+```
+
+`context-manifest.tsv` installs the independent `CTX.ask.<ctx>` rows once. The
+caller uses TAX then `RLD ax` to enter the chosen state, and owns preservation of
+`vt`/`vb` and the `CTX.legal`, `CTX.illegal`, `CTX.needs-null`, and
+`CTX.out-of-domain` destinations. No RESD state or old type/kernel answer changes.
+
+
 `sourceflat.cx` is the native complete-source exporter:
 
 ```sh

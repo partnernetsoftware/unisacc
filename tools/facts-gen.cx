@@ -4015,8 +4015,42 @@ static void enc_arm(Ob *o) {
     for (i = 0; i < 4; i++) { ob_z(o, "\t"); ob_int(o, i); ob_z(o, "\t"); ob_int(o, i - 1); ob_z(o, "\n"); }
 }
 
+/* Context legality is independent of binary type results; TAX's t1 order is the key. */
+static void type_context(Ob *o) {
+    static Rows rows;
+    static List axes[1];
+    static const char *want[1][2] = {{"t1", 0}};
+    Jv *groups[3], *rules = fj_eq("exec/facts/type-context.tsv", "rules");
+    int i, j, g, k;
+    groups[0] = fj_eq("exec/facts/gen2-literals.tsv", "tyint");
+    groups[1] = fj_eq("exec/facts/type-context.tsv", "float");
+    groups[2] = fj_eq("exec/facts/type-context.tsv", "pointer");
+    fg_gold("type", &rows, axes, want, 1);
+    if (axes[0].n != 15 || rules->n != 4) fg_die("context domain", 0);
+    ob_z(o, "#field\tctx");
+    for (i = 0; i < rules->n; i++) {
+        if (rules->v[i]->n != 5) fg_die("context rule width", 0);
+        ob_z(o, "\t"); ob_z(o, jv_str(rules->v[i]->v[0], "context"));
+    }
+    ob_z(o, "\n#field\tsrc");
+    for (j = 0; j < axes[0].n; j++) { ob_z(o, "\t"); ob_z(o, axes[0].v[j]); }
+    ob_z(o, "\n#head\ty\tlegal\tillegal\tneeds-null\nctx\tsrc\t=> y\n");
+    for (i = 0; i < rules->n; i++) for (j = 0; j < axes[0].n; j++) {
+        int cls = 4;
+        for (g = 0; g < 3; g++) for (k = 0; k < groups[g]->n; k++)
+            if (tx_eq(axes[0].v[j], jv_str(groups[g]->v[k], "context class"), 64)) {
+                if (cls != 4) fg_die("overlapping context classes", axes[0].v[j]);
+                cls = g + 1;
+            }
+        ob_z(o, jv_str(rules->v[i]->v[0], "context")); ob_z(o, "\t");
+        ob_z(o, axes[0].v[j]); ob_z(o, "\t");
+        ob_z(o, jv_str(rules->v[i]->v[cls], "context label")); ob_z(o, "\n");
+    }
+}
+
 typedef struct { const char *stem; const char *inputs[40]; void (*produce)(Ob *); } Table;   /* inputs 0-terminated */
 static const Table fg_tables[] = {
+    {"type-context", {"exec/facts/type-context.tsv", "exec/facts/gen2-literals.tsv", "weights/gold/type.tsv", "tools/facts-gen.cx", 0}, type_context},
     {"opt-gen", {"weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv",
                  "exec/facts/opt-gen-startwords.tsv", "tools/facts-gen.cx", 0}, opt_gen},
     {"parse-tokens", {"exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "tools/facts-gen.cx", 0}, parse_tokens},
@@ -4095,7 +4129,8 @@ static void fg_input(Ob *head, const char *rel) {
 }
 static void fg_render(const Table *t, Ob *head, Ob *body) {
     int i;
-    ob_z(head, "# exec/facts/"); ob_z(head, t->stem); ob_z(head, ".tsv: written by tools/facts-gen.cx, do not edit\n");
+    if (tx_eq(t->stem, "type-context", 32)) ob_z(head, "# weights/type/context.tsv: written by tools/facts-gen.cx, do not edit\n");
+    else { ob_z(head, "# exec/facts/"); ob_z(head, t->stem); ob_z(head, ".tsv: written by tools/facts-gen.cx, do not edit\n"); }
     for (i = 0; t->inputs[i]; i++) fg_input(head, t->inputs[i]);
     if (tx_eq(t->stem, "pp-autoinc-gen", 32)) { ih_list(); for (i = 0; i < ih_n; i++) fg_input(head, ih_path[i]); }   /* every .h under include/ */
     t->produce(body);
@@ -4103,7 +4138,7 @@ static void fg_render(const Table *t, Ob *head, Ob *body) {
 
 static long fg_body_start(const char *s, long n) {       /* offset of the first line not starting with '#' */
     long at = 0;                         /* header = the writer line and the "# input " lines */
-    while (at < n && (tx_prefix(s + at, n - at, "# exec/facts/", 13) || tx_prefix(s + at, n - at, "# input ", 8))) {
+    while (at < n && (tx_prefix(s + at, n - at, "# exec/facts/", 13) || tx_prefix(s + at, n - at, "# weights/type/", 15) || tx_prefix(s + at, n - at, "# input ", 8))) {
         long off = tx_chr(s + at, n - at, '\n');
         if (off < 0) return n;
         at += off + 1;
@@ -4117,7 +4152,8 @@ static int fg_one(const Table *t, int mode) {   /* mode 0 check, 1 write, 2 comp
     size_t n;
     char *cur;
     fg_render(t, &head, &body);
-    cx_fmt(path, sizeof path, "%s/exec/facts/%s.tsv", fg_root, t->stem);
+    if (tx_eq(t->stem, "type-context", 32)) cx_fmt(path, sizeof path, "%s/weights/type/context.tsv", fg_root);
+    else cx_fmt(path, sizeof path, "%s/exec/facts/%s.tsv", fg_root, t->stem);
     if (mode == 1) {
         Ob all = {0, 0, 0};
         ob_put(&all, head.p, head.n); ob_put(&all, body.p, body.n);
