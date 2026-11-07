@@ -1,0 +1,97 @@
+/* tools/a12-cycle.cx -- the parse2 / facts table-edit validation loop as one command (cwd = repo root).
+ *   sh ./unisacc.com tools/a12-cycle.cx -- [--dry-run] [--only STEP] [--build B] [--flags F] [--src C [--reject]] [--neg43 EXE]
+ * Thin driver over existing tools in cdx's order: gen tbl net bin (G=B/tools built by main, B default
+ * out/c47-main-a8, flags default --errors) -> e2 e1 sim (probe on --src; --reject: sim must exit 1 with a named error) -> decide decide-rtc check-decide ->
+ * ratchets -> neg43 (frozen 43-row executable, --neg43 required; not tools/c-negative.cx). A missing tool or
+ * input fails by name (MISSING; build G first, this tool never builds it). Each step runs under np_run 58 s with
+ * UNISACC_WAVE_REUSE=1 in its children only (release chain default off); receipts in B/a12-cycle-PID/.
+ * Prints STEP<TAB>name<TAB>rc<TAB>seconds<TAB>receipt, stops at the first failure, ends A12_CYCLE total_s= steps= failed=. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.fd
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+/* name, need (space-separated paths that must exist), argv template; "<F" stdin, ">F" stdout */
+static const char *st[][3] = {
+    { "gen", "{G}/gen", "{G}/gen parse2 {B}/errorparse.json {flags}" },
+    { "tbl", "{G}/tbl", "{G}/tbl {B}/errorparse.json {B}/errorparse.tbl" },
+    { "net", "{G}/net", "{G}/net {B}/errorparse.tbl {B}/errorparse.net" },
+    { "bin", "{G}/net-binary.cx", "sh ./unisacc.com {G}/net-binary.cx -- {B}/errorparse.net {B}/errorparse.bin" },
+    { "e2", "{src}", "sh ./unisacc.com stream e2 --source {src} <{src} >{B}/original.e2" },
+    { "e1", "{src}", "sh ./unisacc.com stream e1 --raw <{B}/original.e2 >{B}/original.e1.raw" },
+    { "sim", "tools/sim.cx {src}", "sh ./unisacc.com tools/sim.cx -- {B}/errorparse.json {B}/original.e1.raw {src} {root} --resource cli/target={root}/{B}/target.txt --cov {B}/original.cov.tsv" },
+    { "decide", "tools/decide-gen.cx", "sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=index weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv" },
+    { "decide-rtc", "tools/decide-gen.cx", "sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=ret-arith,ret-bool weights/type/context.tsv RTC RTC.ask exec/parse2/returncontext-result.tsv" },
+    { "check-decide", "tests/check-decide.cx", "sh ./unisacc.com tests/check-decide.cx" },
+    { "ratchets", "tools/ratchets.cx", "sh ./unisacc.com tools/ratchets.cx" },
+    { "neg43", "{neg43} tools/bound", "tools/bound 55 {neg43} {root} {rcpt}/neg43 /usr/bin/gcc" },
+};
+#define NST ((int)(sizeof st / sizeof st[0]))
+static char root[4096], rcpt[4400]; static int reject; static const char *B = "out/c47-main-a8", *flags = "--errors", *src = "{src}", *neg = "{neg43}";
+static void die(const char *s) { fprintf(stderr, "a12-cycle: %s\n", s); exit(2); }
+static size_t expand(const char *t, char *b, size_t cap) {
+    size_t n = 0; static const char *key[] = { "{G}", "{B}", "{flags}", "{src}", "{neg43}", "{root}", "{rcpt}" };
+    for (; *t; t++) {
+        int i = 0; const char *v[] = { 0, B, flags, src, neg, root, rcpt }; char g[4400];
+        if (cx_fmt(g, sizeof g, "%s/tools", B)) die("path"); v[0] = g;
+        for (; i < 7 && strncmp(t, key[i], strlen(key[i])); i++) {}
+        const char *s = i < 7 ? v[i] : t; size_t l = i < 7 ? strlen(s) : 1;
+        if (mm_copy(b + n, (long)(cap - n - 1), s, (long)l)) die("template too long");
+        n += l; if (i < 7) t += strlen(key[i]) - 1;
+    }
+    b[n] = 0; return n;
+}
+static int split(char *b, char **av, int max, char **in, char **out) {
+    int a = 0; *in = *out = 0;
+    for (char *p = b; *p && a < max - 1;) {
+        while (*p == ' ') *p++ = 0;
+        if (!*p) break;
+        if (*p == '<') *in = p + 1; else if (*p == '>') *out = p + 1; else av[a++] = p;
+        while (*p && *p != ' ') p++;
+    }
+    av[a] = 0; return a;
+}
+static void put(const char *p, const char *s, size_t n) { sy_unlink(p); int fd = sy_open_new(p, 0600); if (fd < 0 || (n && sy_write_all(fd, s, (long)n))) die(p); sy_close(fd); }
+
+int main(int argc, char **argv) {
+    int dry = 0, from = 0, k, ran = 0, failed = 0; const char *only = 0;
+    for (k = 1; k < argc; k++) {
+        const char *a = argv[k], *v = argv[k + 1];
+        if (!strcmp(a, "--dry-run")) { dry = 1; continue; }
+        if (!strcmp(a, "--reject")) { reject = 1; continue; }
+        if (!v) break;
+        if (!strcmp(a, "--only")) only = v; else if (!strcmp(a, "--build")) B = v; else if (!strcmp(a, "--flags")) flags = v;
+        else if (!strcmp(a, "--src")) src = v; else if (!strcmp(a, "--neg43")) neg = v; else die("usage: see header");
+        k++;
+    }
+    if (k < argc) die("usage: see header");
+    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(rcpt, sizeof rcpt, "%s/%s/a12-cycle-%d", root, B, (int)getpid())) die("root");
+    if (only) { for (; from < NST && strcmp(st[from][0], only); from++) {} if (from == NST) die("unknown --only STEP"); }
+    printf("ENV\tUNISACC_WAVE_REUSE=1\tscope=a12-cycle children only; release chain default off\n");
+    long t0 = sy_now_ms(); char *envadd[] = { "UNISACC_WAVE_REUSE=1", 0 };
+    for (k = from; k < NST && !failed; k++, ran++) {
+        char need[8192], buf[8192], *av[64], *in, *out, rp[4600]; expand(st[k][1], need, sizeof need);
+        { char *nv[16], *x, *y; split(need, nv, 16, &x, &y);
+          for (int i = 0; nv[i] && !failed; i++) { int rg = sy_is_reg(nv[i]); if (rg != 1) { printf("STEP\t%s\t%s\t0\t%s%s\n", st[k][0], rg == -ENOENT || nv[i][0] == '{' ? "MISSING" : rg ? "STAT_ERROR" : "NOT_REGULAR", nv[i], strstr(nv[i], "/tools/") ? " (build G with main first)" : ""); failed++; } } }
+        if (failed) break;
+        expand(st[k][2], buf, sizeof buf);
+        if (dry) { printf("PLAN\t%s\t%s\n", st[k][0], buf); continue; }
+        if (!ran && sy_mkdir(rcpt, 0700)) die("fresh receipt dir");
+        if (!strcmp(st[k][0], "sim")) { char tp[4600]; if (cx_fmt(tp, sizeof tp, "%s/target.txt", B)) die("path"); put(tp, "lnx/x86_64", 10); }
+        int n = split(buf, av, 64, &in, &out), saved = -1, fd; (void)n;
+        if (in) { if ((fd = sy_open_read(in)) < 0) die(in); saved = sy_dup(0); sy_dup2(fd, 0); sy_close(fd); }
+        np_result r = { 0 }; char why[1024] = { 0 }; long b = sy_now_ms();
+        int tr = np_run(av, root, envadd, 58, &r, why, sizeof why), rc = tr ? 3 : r.rc;
+        if (reject && !tr && !strcmp(st[k][0], "sim")) rc = r.rc == 1 && r.err && strstr(r.err, "error:") ? 0 : r.rc ? r.rc : 4;
+        if (saved >= 0) { sy_dup2(saved, 0); sy_close(saved); }
+        if (out && !tr) put(out, r.out, r.outn);
+        if (cx_fmt(rp, sizeof rp, "%s/%s.stdout", rcpt, st[k][0])) die("path"); put(rp, out ? "" : r.out, out ? 0 : r.outn);
+        { char ep[4600]; if (cx_fmt(ep, sizeof ep, "%s/%s.stderr", rcpt, st[k][0])) die("path"); put(ep, r.err, r.errn); }
+        if (tr) fprintf(stderr, "a12-cycle: %s transport: %s\n", st[k][0], why);
+        printf("STEP\t%s\t%d\t%.3f\t%s\n", st[k][0], rc, (sy_now_ms() - b) / 1000.0, rp);
+        np_free(&r); if (rc) failed++;
+    }
+    printf("A12_CYCLE total_s=%.3f steps=%d failed=%d%s\n", (sy_now_ms() - t0) / 1000.0, ran + (failed ? 1 : 0), failed, dry ? " dry_run=1" : "");
+    return failed ? 1 : 0;
+}
