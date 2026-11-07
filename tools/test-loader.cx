@@ -4,6 +4,7 @@
  * before product inputs and preserves user arguments following product `--`.
  * --slice ABS --models ABS [--identity]
  * [--net STAGE=ABS --swap-tool ABS] -- PRODUCT_ARGS...
+ * --e2-adapter selects FILE SOURCE INCLUDE positional adaptation, not a container.
  * --swap-tool is an executable compiled from existing lab-loader/p3-swap.cx.
  * Replacement scratch is removed after bounded execution; receipts remain on stderr.
  * Identity hashes are compressed M records/payloads, NOT decoded weights. */
@@ -12,8 +13,8 @@
 #pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
-static char scratch[4096],rawpath[4096],pkgpath[4096];
-static void cleanup(void){if(rawpath[0])unlink(rawpath);if(pkgpath[0])unlink(pkgpath);if(scratch[0])rmdir(scratch);}
+static char scratch[4096],rawpath[4096],pkgpath[4096],incpath[4096];
+static void cleanup(void){if(incpath[0])unlink(incpath);if(rawpath[0])unlink(rawpath);if(pkgpath[0])unlink(pkgpath);if(scratch[0])rmdir(scratch);}
 static void refuse(const char *s){cleanup();fprintf(stderr,"test-loader: REFUSE %s\n",s);exit(2);}
 static char *readfile(const char *p,size_t *n){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||st.st_size>268435456)refuse("bounded regular file required");char *b=cx_read(p,n);if(!b||*n!=(size_t)st.st_size)refuse("file read changed");return b;}
 static void identity(const char *kind,const char *p){size_t n=0;char h[65];char *b=readfile(p,&n);cx_sha256_hex(b,n,h);free(b);fprintf(stderr,"TEST_LOADER_IDENTITY\tscope=development-evidence\tkind=%s\tpath=%s\tbytes=%lu\tsha256=%s\n",kind,p,(unsigned long)n,h);}
@@ -30,24 +31,32 @@ static void models_identity(const char *p){size_t n;char *b=readfile(p,&n);Recei
 static void replace(const char *pkg,const char *net,const char *stage,const char *tool,char *out){char dir[]="/tmp/test-loader-net-XXXXXX",why[1024];if(!mkdtemp(dir))refuse("replacement scratch create");if(cx_fmt(scratch,sizeof scratch,"%s",dir)||cx_fmt(rawpath,sizeof rawpath,"%s/replaced.body",dir)||cx_fmt(pkgpath,sizeof pkgpath,"%s/replaced.pkg",dir)||cx_fmt(out,4096,"%s",pkgpath))refuse("replacement path");char *av[]={(char *)tool,(char *)pkg,(char *)stage,rawpath,(char *)net,"--model",0};np_result r={0};if(np_run(av,dir,0,20,&r,why,sizeof why))refuse(why);if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(r.rc)refuse("p3-swap failed");np_free(&r);
  size_t n;char *b=readfile(rawpath,&n);int fd=open(out,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)refuse("replacement output create");np_buf image={0};np_put(&image,b,n);free(b);char footer[16];memcpy(footer,"UNIPKG1\n",8);unsigned long long z=n;for(int i=0;i<8;i++){footer[8+i]=(char)(z&255);z>>=8;}np_put(&image,footer,16);size_t at=0;while(at<image.n){ssize_t k=write(fd,image.p+at,image.n-at);if(k<0&&errno==EINTR)continue;if(k<=0)refuse("replacement output write");at+=(size_t)k;}if(close(fd))refuse("replacement output close");free(image.p);
 }
+/* Product stream adapter, not an independent UNIPKG1 stream container. */
+static int e2adapter(const char *slice,const char *models,char **args){
+ int fd=!strcmp(args[0],"-")?dup(0):open(args[0],O_RDONLY);if(fd<0){fprintf(stderr,"stream e2: cannot open input %s: %s\n",args[0],strerror(errno));cleanup();return 2;}struct stat st;if(fstat(fd,&st)||S_ISDIR(st.st_mode)){fprintf(stderr,"stream e2: cannot read input %s: Is a directory\n",args[0]);close(fd);cleanup();return 2;}
+ char temp[]="/tmp/test-loader-include-XXXXXX";int t=mkstemp(temp);if(t<0)refuse("include resource create");if(cx_fmt(incpath,sizeof incpath,"%s",temp))refuse("include resource path");size_t n=strlen(args[2]),at=0;while(at<n){ssize_t z=write(t,args[2]+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)refuse("include resource write");at+=(size_t)z;}if(close(t)||dup2(fd,0)<0)refuse("adapter descriptor");close(fd);
+ char res[4400],why[1024];if(cx_fmt(res,sizeof res,"include-dir=%s",incpath))refuse("include resource binding");char *av[]={(char *)slice,"stream","e2","--models",(char *)models,"--level","2","--target","lnx/x86_64","--source",args[1],"--res",res,0};np_result r={0};if(np_run(av,0,0,35,&r,why,sizeof why))refuse(why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);cleanup();return rc<0?128-rc:rc;
+}
 int main(int argc,char **argv){
- const char *slice=0,*models=0,*netarg=0,*swap=0;char sp[4096],mp[4096],net[4096],tool[4096],replaced[4096],stage[512];int receipt=0,at=1;
+ const char *slice=0,*models=0,*netarg=0,*swap=0;char sp[4096],mp[4096],net[4096],tool[4096],replaced[4096],stage[512];int receipt=0,adapter=0,at=1;
  while(at<argc&&strcmp(argv[at],"--")){
   if(!strcmp(argv[at],"--slice")){if(slice||at+1>=argc)refuse("slice binding required exactly once");slice=argv[++at];}
   else if(!strcmp(argv[at],"--models")){if(models||at+1>=argc)refuse("models binding required exactly once");models=argv[++at];}
   else if(!strcmp(argv[at],"--net")){if(netarg||at+1>=argc)refuse("net binding required exactly once");netarg=argv[++at];}
   else if(!strcmp(argv[at],"--swap-tool")){if(swap||at+1>=argc)refuse("swap-tool binding required exactly once");swap=argv[++at];}
   else if(!strcmp(argv[at],"--identity")){receipt=1;}
+  else if(!strcmp(argv[at],"--e2-adapter")){if(adapter)refuse("duplicate e2 adapter mode");adapter=1;}
   else refuse("unknown launcher argument");at++;
  }
  if(!slice)refuse("missing --slice binding");if(!models)refuse("missing --models binding");
  bound(slice,sp,"slice binding must name an existing absolute regular file");bound(models,mp,"models binding must name an existing absolute regular file");
  if(at==argc||at+1==argc)refuse("missing -- product arguments");at++;
- for(int i=at;i<argc&&strcmp(argv[i],"--");i++)if(!strcmp(argv[i],"--models")||!strncmp(argv[i],"--models=",9))refuse("product arguments must not override models binding");
+ if(!adapter)for(int i=at;i<argc&&strcmp(argv[i],"--");i++)if(!strcmp(argv[i],"--models")||!strncmp(argv[i],"--models=",9))refuse("product arguments must not override models binding");
  if(receipt){identity("launcher","/proc/self/exe");identity("slice",sp);identity("models-file",mp);models_identity(mp);}
  if(netarg){const char *eq=strchr(netarg,'=');if(!eq||eq==netarg||(size_t)(eq-netarg)>=sizeof stage||mm_copy(stage,sizeof stage,netarg,(long)(eq-netarg)))refuse("net binding requires STAGE=ABS_FILE");stage[eq-netarg]=0;for(size_t i=0;stage[i];i++)if(!((stage[i]>='a'&&stage[i]<='z')||(stage[i]>='0'&&stage[i]<='9')||stage[i]=='-'))refuse("net stage name");bound(eq+1,net,"net binding must name an existing absolute regular file");bound(swap,tool,"net requires absolute --swap-tool binding");identity("external-net",net);replace(mp,net,stage,tool,replaced);if(cx_fmt(mp,sizeof mp,"%s",replaced))refuse("replacement binding path");identity("replaced-models-file",mp);if(receipt)models_identity(mp);}
  else if(swap)refuse("swap-tool requires --net binding");
  if(setenv("UNISA_CONTAINER",mp,1))refuse("container environment binding failed");
+ if(adapter){if(argc-at!=3)refuse("e2 adapter requires FILE SOURCE INCLUDE");return e2adapter(sp,mp,argv+at);}
  char **av=calloc((size_t)argc+4,sizeof(char *));if(!av)refuse("allocation");int n=0;av[n++]=sp;
  int insert=at;if(!strcmp(argv[at],"stream")){if(at+1>=argc)refuse("stream stage required");av[n++]=argv[at];av[n++]=argv[at+1];insert=at+2;}
  av[n++]="--models";av[n++]=mp;for(int i=insert;i<argc;i++)av[n++]=argv[i];av[n]=0;
