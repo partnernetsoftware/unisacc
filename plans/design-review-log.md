@@ -42,3 +42,11 @@
 4. 全批结构障碍:162 批 NOT_RUN 因 materials≠- 而无 PREPARED 证据;最小改造=`tools/materials-prepare.cx --tier daily` 产出 out/materials.tsv(身份→路径→PREPARED),把「材料缺失」从会话期移到准备期并可缓存命中。(与 M7 合并)
 5. 一条命令:register.cx 扩成四步事务(batches 行+toolsloc 按文件登记+prd 速查追加+ratchets --only),任一失败整体回滚;precommit 调它(并入 check-precommit-toolsloc)。
 (cc 处置:4 并入 M7(grk);5 并入 grk 已在做的 precommit toolsloc 钩子;1+3 作 M8「工具治理」排 cdx2 在 M4 之后:先加 tier 列与 per-file 上限度量,总量降为报表;2 先出聚类统计报告再谈合并,不删覆盖。)
+
+## ⑨ 切片薄层(FFI/dl/syscall/ABI)封装质量(fable 只读评审,2026-11-07)
+1. 接口面:内存4、fd2+posix15、时间9、进程17、dl5、FFI10。最不一致=进程/posix 类:Windows 整类 -ENOSYS,Darwin 与两 Linux 走手写 syscall 号表(cx/sys/posix.cx:14-32 四套常量;proc.cx:273-291 setpgid 五分支;posix.cx:117 dents 记录布局不同)。
+2. ABI 混合:表驱动=host bridge guard 链(enc-hostbridge*.tsv,SysV/AAPCS64/Win64/WinARM64 分体生成);散落=include/unisacc_ffi.h:14-22,54-55(aarch64 nfixedargs、x86_64 分支)、cx/sys/ffi.cx:25-31(RTLD_GLOBAL Darwin 8/glibc 0x100 写死)、posix.cx ioctl 号写死。libc99posix.tsv 仅名字映射,不含调用约定。
+3. 标注部分如实:Windows -ENOSYS 在头注与 cx/sys/README.md:24;FFI 的 Windows 限制只在 unisacc_ffi.h:133 与 coverage.tsv:351,未入计划;osx 的 sy_dl_addr 走 dlfcn 直取无文档。
+4. 最小第一步:把 posix.cx:14-32、proc.cx:273-291、ffi.cx:25-31 的六目标常量合并为 exec/facts/sys-syscalls.tsv(name×六列),由 tools/target-gen.cx(已生成 hostid.cx)生成 cx/sys/sysnums.cx;验收=target-gen --check 退出0、生成物字节等价、ratchets 的 cxplatform 对 cx/sys 只降不升。
+5. NN 化后易成瓶颈:sy_ffi_call(ffi.cx:59,依赖私有 libffi dlsym 与 cif 布局;调用约定若进表而 cif 手写,六目标会分叉;Windows 全无);sy_dl_addr(dl.cx:246,静态产品手解 ELF 取 dlopen 地址,host.cx 依赖,osx/win 路径不同)。
+(cc 处置:4 作 M10a 的前置 L0——「sys 常量表化」,owner cdx2(L1 去重之后);3 把 Windows ENOSYS/FFI 限制补入 plans 薄层节与发布说明模板;5 两个接口列为 M10b 资源合同门的联审对象。)
