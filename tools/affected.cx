@@ -30,8 +30,9 @@
    2 usage, registry or I/O error.
    --users FILE: every tracked .cx (archive/ and symlinks skipped) whose use closure holds FILE, as
    USER<TAB>path, then USERS_SUMMARY<TAB>file=..<TAB>users=N<TAB>scanned=K.
-   Not modelled: generated inputs, files read through a computed path, and anything run-batch adds itself
-   (unisacc.com is matched only where a root names ./unisacc.com).  Notes go to stderr as NOTE lines. */
+   Model inputs: tools/affected-model-inputs.tsv projects observed generator reads onto recipe IDs.
+   Exact recipe/job/artifact literals in the source/use closure and args select those inputs;
+   this is not a proof of computed runtime model selection or current generated-byte equivalence. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -72,12 +73,13 @@ static void put(Buf *b, const char *s, long n) {
 static void puts_(Buf *b, const char *s) { put(b, s, tx_len(s, CAP)); }
 
 /* ---------- files: one node per realpath ---------- */
-enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE, V_GUARD };
-static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard"};
+enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE, V_GUARD, V_MODEL };
+static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard", "model-input"};
 typedef struct {
     char *key;      /* realpath, or the absolute spelling when it does not resolve */
     char *given;    /* the repo-relative spelling it was first reached by: uses resolve beside it */
     int parsed, cx, isdir, mark, via;
+    unsigned long models;
     int *use; int nuse;
     char **tok; int ntok, tokcap;   /* path-like string-literal tokens (raw) */
 } Node;
@@ -116,6 +118,48 @@ static const char *display(int ni) {
     if (tx_prefix(k, tx_len(k, 8192), root, root_n) && k[root_n] == '/') return k + root_n + 1;
     return k;
 }
+/* Observed sourcepackage reads: MODEL<TAB>repo-relative input, not command.reads.tsv's root header. */
+static char *model_id[64];
+static char *model_names[64][7];
+static long model_lengths[64][7];
+static int model_count, input_node[MAXNODE], input_model[MAXNODE], input_count;
+static void load_models(void) {
+    size_t n; char *s = cx_read("tools/affected-model-inputs.tsv", &n); long at = 0;
+    if (!s) die("cannot read model input projection");
+    while (at < (long)n) {
+        long end = at, tab; int m;
+        while (end < (long)n && s[end] != '\n') end++;
+        if (end == (long)n) die("model input projection requires LF rows");
+        if (s[at] != '#' && end > at) {
+            tab = tx_chr(s + at, end - at, '\t');
+            if (tab < 1 || tab + 1 == end - at) die("model input projection row");
+            s[at + tab] = 0; s[end] = 0;
+            for (m = 0; m < model_count && !tx_eqz(model_id[m], s + at); m++) {}
+            if (m == model_count) {
+                if (model_count == 64) die("too many models");
+                model_id[model_count++] = zkeep(s + at);
+            }
+            if (input_count == MAXNODE) die("too many model inputs");
+            input_model[input_count] = m; input_node[input_count++] = path_node(s + at + tab + 1, 1);
+        }
+        at = end + 1;
+    }
+    free(s);
+    { int m, k; char name[256];
+      const char *prefix[] = {"", "gen-", "tbl-", "net-", "", "", ""};
+      const char *suffix[] = {"", "", "", "", ".json", ".tbl", ".net"};
+      for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++) {
+          if (cx_fmt(name, sizeof name, "%s%s%s", prefix[k], model_id[m], suffix[k])) die("model name bound");
+          model_lengths[m][k] = tx_len(name, sizeof name); model_names[m][k] = keep(name, model_lengths[m][k]);
+      }
+    }
+}
+static unsigned long model_token(const char *s, long n) {
+    int m, k; unsigned long bits = 0;
+    for (m = 0; m < model_count; m++) for (k = 0; k < 7; k++)
+        if (model_lengths[m][k] == n && tx_prefix(s, n, model_names[m][k], n)) bits |= 1UL << m;
+    return bits;
+}
 
 static int is_pathc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/' || c == '+'; }
 static void add_tok(Node *N, const char *s, long n) {
@@ -138,6 +182,7 @@ static void add_tok(Node *N, const char *s, long n) {
     N->tok[N->ntok++] = keep(s, n);
 }
 static void add_literal(Node *N, const char *s, long n) {
+    N->models |= model_token(s, n);
     long i = 0, a;
     while (i < n) {
         while (i < n && !is_pathc((unsigned char)s[i])) i++;
@@ -294,6 +339,7 @@ static void load_registry(void) {
     if (tp_visit(root, r, rn, c, cn, &ob, &sum, why, sizeof why)) { fprintf(stderr, "affected: REFUSE metadata %s\n", why); exit(2); }
 }
 static void mark_batch(Batch *B) {
+    unsigned long models = 0; int ni;
     ndirs = 0; epoch++;
     mark_root(B->source);
     if (tx_chr(B->entry, tx_len(B->entry, 4096), '{') < 0 && !tx_eqz(B->entry, B->source)) mark_root(B->entry);
@@ -303,10 +349,13 @@ static void mark_batch(Batch *B) {
         while (*at) {
             long n = 0; char tok[2048];
             while (at[n] && at[n] != ';') n++;
+            models |= model_token(at, n);
             if (n > 0 && at[0] != '{' && n < (long)sizeof tok && tx_chr(at, n, '/') >= 0 && !tx_copy(tok, sizeof tok, at, n)) named(tok, V_ARG);
             at += n; if (*at) at++;
         }
     }
+    for (ni = 0; ni < nnode; ni++) if (node[ni].mark == epoch) models |= node[ni].models;
+    for (ni = 0; ni < input_count; ni++) if (models & (1UL << input_model[ni])) mark(input_node[ni], V_MODEL);
 }
 /* the strongest match of the changed files against the current marks: its via, *WHY the file */
 static int match(const int *changed, int nch, int *why) {
@@ -487,6 +536,7 @@ int main(int argc, char **argv) {
     if (sy_realpath(".", root, sizeof root) < 0) die("cannot resolve the root");
     root_n = tx_len(root, sizeof root);
     if (argc == 3 && tx_eqz(argv[1], "--users")) return users(argv[2]);
+    load_models();
     while (a < argc) {
         if (tx_eqz(argv[a], "--since") && a + 1 < argc) { since = argv[a + 1]; a += 2; src++; }
         else if (tx_eqz(argv[a], "--files") || tx_eqz(argv[a], "--ids")) {

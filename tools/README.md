@@ -879,7 +879,7 @@ value, not a source record or filename). Expectation: `rc0:ADOPTED_SNAPSHOT`.
 Actual invocation in this checkout:
 
 ```sh
-tools/bound 55 sh ./unisacc.com -I /home/devali/repos/unisacc/include tests/adopted-package.cx -- /home/devali/repos/unisacc /home/devali/repos/unisacc/out/c43-adopted-package-01 0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0
+tools/bound 55 sh ./unisacc.com -I include tests/adopted-package.cx -- . out/c43-adopted-package-01 0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0
 ```
 
 The probe out/c43-adoptedsnapshot-probe-run-01.log and permanent
@@ -986,3 +986,45 @@ retained in `out/c43-kernelsha-regression-01.log`. This establishes a bootstrap
 kernel-crypto mechanism, not new-product/P3 qualification or a measured
 implementation of `-run` compilation reuse. Producer integration and PC02
 still require their own actual execution; the19 broad gaps remain open.
+
+## 0.0.48 开发车道提速 T1/T4
+
+`tools/dev-run` 的普通 `.cx` 入口保持不变；GCC 生成器必须显式启用，没有自动回退。以下构造入口每次真实编译 `seed/gen.c`，输出路径相对调用目录解释：
+
+```sh
+sh tools/dev-run --seed-gen out/seed-gen-product
+sh tools/dev-run --seed-gen=product out/seed-gen-product
+sh tools/dev-run --seed-gen=gcc-O2 out/seed-gen-gcc
+```
+
+未指定 GCC 开关的生成器构造使用当前产品版编译器 `-O0`；显式 GCC 车道使用 `gcc -std=c99 -O2`。发布构造的既有工具选择、原 40 秒限时和产品源码不变。`check-dev-product.cx` 保留安装检查，新增两版 `hostsymbols` 真实生成及严格字节相等冒烟；冒烟不是全 42 配方的等价声明。
+
+全量对照是 Linux/GCC/GNU `date`、`timeout` 环境下的离线命令，不登记批次，工作目录必须尚不存在：
+
+```sh
+mkdir -p out && sh tools/dev-run --check-seed-gen out/t1-seed-delta
+```
+
+该命令只编译一次对照工具、分别真实构造产品版及 GCC-O2 版生成器，再运行当前规范配方的 42 个模型 × 两版生成，最后逐对检查成功标记、非空输出及长度和 `memcmp` 全同。配方参数来自 `cxlib.sourcepackage`；缺任何配方或执行失败都拒绝。仅此新增离线对照的单配方观察窗为 120 秒，编译/构造与原注册检查仍为 55 秒；发布和 s9 的限时不变。失败不重试、不删除现场，也不把部分完成称为全量通过。
+
+离线目录的 `recipes.tsv` 保存配方清单，`timings.tsv` 记录每步 `step/model/lane/elapsed_ns/rc`；lane 0 为产品版，lane 1 为 GCC-O2。产品版超过 40 秒的配方须单列慢生成证据。这是单次墙钟差记录，不是稳定性能倍率或跨平台资格。
+
+本次离线实测 84 次生成均 rc0，42 对 JSON 全部严格字节相等；总流程 425.01 秒。以下两项为「产品版生成器慢」证据，超过原 40 秒而未放宽任何发布或批次门：
+
+| 配方 | 产品版秒数 | GCC-O2 秒数 |
+|---|---:|---:|
+| errorparse | 47.629704 | 8.317670 |
+| warnparse | 48.056603 | 8.357375 |
+
+首次产品版 `errorparse` 的 40 秒超时及首次误用通用限时器的拒绝现场均保留，不能替换为成功记录；全量通过仅指后续获批的独立 120 秒离线对照。
+
+`affected.cx` 新增真实读取投影 → 模型 → 批次边，输出 `via=model-input`。对 `exec/parse2/control-result.tsv`，修改前的入口和回归源视图实测 `batches=0`；修改后为 `batches=5`：四个模型消费者及新增回归自身。对应读取模型为 `shared-e3`、`warnparse`、`errorparse`，不含独立的 `warnunits`。
+
+```sh
+sh ./unisacc.com tools/affected.cx -- --files exec/parse2/control-result.tsv --list-only
+python3 tools/affected-model-inputs.py CONTEXT_OR_TAR --check
+```
+
+`tools/affected-model-inputs.tsv` 含当前 42 模型的 3970 条去重排序输入边，可由普通 source-package context 或其归档中的实际读取记录再生；去掉 `--check` 才写投影。优先读取 `job-reads.before.tsv`，缺失才用 `command.reads.tsv`，两者均按每行一个路径处理；根前缀来自 `context.tsv`，搬迁材料可显式给 `--root-prefix`。缺模型、空记录、越界和投影漂移均拒绝。
+
+模型消费者只通过精确模型/job/artifact 字面量及现有 use/literal 工具闭包关联；不是整个 `exec/` 的粗 guard。包含通用配方模块的批次会保守扩散，计算所得的动态模型选择仍未完整建模；本映射不证明生成字节等价，也不改变发布资格。

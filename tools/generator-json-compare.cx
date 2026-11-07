@@ -1,11 +1,116 @@
-/* Fresh content comparison, not a reconstruction of historical exit status. */
+/* Fresh content comparison, not a reconstruction of historical exit status.
+ * --dev-lane ROOT WORK prepare-0|prepare-1|list|recipe ID LANE|finish.
+ * Each prepare builds once; each recipe runs one lane into a fresh directory.
+ * finish requires all 42 pairs and successful-run markers, then compares bytes.
+ * This is current execution evidence, not a cache or source snapshot claim.
+ * ORIGIN_JOBS NEW_JSON_DIRECTORY is unchanged. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.kernelsha
+#pragma unisa use cxlib.sourcepackage
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+static char root[4096], work[4400];
+static int failures;
+static void ck(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failures++;
+}
 static void die(const char *s){fprintf(stderr,"generator-json-compare: REFUSE %s errno=%d\n",s,errno);exit(2);}
 static void path(char *out,const char *base,const char *leaf){int n=snprintf(out,4400,"%s/%s",base,leaf);if(n<0||n>=4400)die("path-bound");}
 static char *read_regular(const char *p,size_t *n){struct stat a,b;if(lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<0||a.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)a.st_size||lstat(p,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||a.st_mtime!=b.st_mtime)die("read-changed");return s;}
 static int order(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
+/* Exercise the actual dev-run lane, not the unused e2s_model helper. The recipe
+ * names are read from the authoritative table; argv comes from its public API.
+ * Both constructors really run, in ROOT, into disjoint fresh output trees. */
+static int dp_command(char **v, int seconds) {
+    np_result r; char why[512];
+    if (np_run(v, root, 0, seconds, &r, why, sizeof why)) die(why);
+    int rc = r.rc;
+    if (rc && r.errn) sy_eprintf("%.*s", (int)r.errn, r.err);
+    np_free(&r);
+    return rc;
+}
+static void dp_generators(const char *step, const char *selected, const char *lane) {
+    char entry[4400], bins[2][4400], dirs[2][4400], bound_path[4400], table[4400];
+    path(entry, root, "tools/dev-run");
+    path(bound_path, root, "tools/bound");
+    path(table, root, "tools/cxlib/sourcepackage.cx");
+    for (int k = 0; k < 2; k++) {
+        if (cx_fmt(bins[k], sizeof bins[k], "%s/gen-%d", work, k) ||
+            cx_fmt(dirs[k], sizeof dirs[k], "%s/json-%d", work, k)) die("gen work");
+    }
+    if (!strcmp(step, "prepare-0") || !strcmp(step, "prepare-1")) {
+        int k = step[8] - '0';
+        if (sy_exists(bins[k]) == 1 || sy_mkdir(dirs[k], 0700)) die("fresh prepare required");
+        char *v[] = {"sh", entry, k ? "--seed-gen=gcc-O2" : "--seed-gen", bins[k], 0};
+        ck(dp_command(v, 55) == 0, k ? "gen-gcc-O2-build" : "gen-default-product-build");
+        return;
+    }
+    int execute = !strcmp(step, "recipe"), finish = !strcmp(step, "finish");
+    if (!execute && !finish && strcmp(step, "list")) die("unknown dev-lane step");
+    if (execute && (!selected || !lane || (strcmp(lane, "0") && strcmp(lane, "1")))) die("recipe ID LANE");
+    size_t size = 0;
+    char *text = (char *)cx_read(table, &size);
+    if (!text) die("recipe table");
+    char *at = strstr(text, "static const SpModel recipes[]={");
+    char *end = at ? strstr(at, "\n};") : 0;
+    if (!end) die("recipe table shape");
+    int count = 0, matched = 0;
+    while ((at = strstr(at, " {\"")) && at < end) {
+        at += 3; char *close = strchr(at, '"');
+        char id[160], outputs[2][4400];
+        if (!close || close >= end || close - at > 150) die("recipe id");
+        if (cx_fmt(id, sizeof id, "gen-%.*s", (int)(close - at), at)) die("recipe id bound");
+        if (!execute && !finish) printf("%s\n", id);
+        int wanted = execute && !strcmp(id, selected);
+        if (wanted) matched++;
+        for (int k = 0; (wanted || finish) && k < 2; k++) {
+            char dir[4400], status[4400];
+            path(dir, dirs[k], id);
+            path(outputs[k], dir, "result.json");
+            path(status, dir, "execution.status");
+            if (wanted && k == lane[0] - '0') {
+                char *v[21]; int n = 0;
+                if (sy_mkdir(dir, 0700)) die("fresh recipe required");
+                if (sp_job_command(root, dirs[k], "gcc", bound_path, id, v, &n) || n < 5) die("recipe argv");
+                /* Offline GNU timeout enforces wall time; formal jobs retain bound/40. */
+                if (n >= 20) die("offline argv bound");
+                v[2] = bins[k];
+                for (int i = n; i >= 2; i--) v[i + 1] = v[i];
+                v[0] = "timeout";
+                v[1] = "--signal=KILL";
+                v[2] = "120";
+                if (dp_command(v, 120)) die("recipe execution failed");
+                if (cx_write(status, "rc\t0\n", 5)) die("recipe status");
+            }
+            if (finish) {
+                size_t n = 0; char *s = read_regular(status, &n);
+                if (n != 5 || memcmp(s, "rc\t0\n", 5)) die("recipe not completed");
+                free(s);
+            }
+        }
+        if (finish) {
+            size_t an = 0, bn = 0;
+            char *a = read_regular(outputs[0], &an), *b = read_regular(outputs[1], &bn);
+            ck(an && an == bn && !memcmp(a, b, an), id);
+            free(a); free(b);
+        }
+        count++; at = close + 1;
+    }
+    if (execute && matched != 1) die("unknown recipe");
+    if (count != 42) die("recipe inventory changed");
+    if (finish) ck(count == 42, "gen-all-42-recipes-executed");
+    mm_free(text);
+}
 int main(int argc,char **argv){
+ if(argc>=5&&!strcmp(argv[1],"--dev-lane")) {
+  if((argc!=5&&argc!=7)||!realpath(argv[2],root)||!realpath(argv[3],work))die("dev-lane ROOT WORK STEP [ID LANE]");
+  if((!strcmp(argv[4],"recipe"))!=(argc==7))die("recipe requires ID LANE only");
+  dp_generators(argv[4],argc==7?argv[5]:0,argc==7?argv[6]:0);
+  if(strcmp(argv[4],"list"))printf("GENERATOR_DEV_LANE\tfailed=%d\n",failures);
+  return failures?1:0;
+ }
  char origin[4096],current[4096];if(argc!=3||!realpath(argv[1],origin)||!realpath(argv[2],current))die("usage ORIGIN_JOBS NEW_JSON_DIRECTORY");
  DIR *d=opendir(origin);if(!d)die("origin-directory");char *names[256];int count=0;
  for(;;){errno=0;struct dirent *e=readdir(d);if(!e){if(errno)die("directory-read");break;}if(strncmp(e->d_name,"gen-",4))continue;

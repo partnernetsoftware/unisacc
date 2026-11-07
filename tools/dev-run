@@ -2,4 +2,55 @@
 # Thin development entry; the native launcher checks its actual source identity.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# DEV_ONLY constructor lane: --seed-gen[=product|gcc-O2] OUTPUT.
+# No cache or fallback: every request builds anew; ordinary .cx runs stay unchanged.
+case "${1-}" in
+  --check-seed-gen)
+    # Offline evidence only: fresh outputs, no retries or cached qualification.
+    test "$#" = 2 || { echo 'dev-run: --check-seed-gen requires fresh WORKDIR' >&2; exit 2; }
+    case "$2" in /*) work=$2 ;; *) work=$PWD/$2 ;; esac
+    if test -e "$work" || test -L "$work"; then
+      echo 'dev-run: WORKDIR must not exist' >&2
+      exit 2
+    fi
+    mkdir -m 700 -- "$work"
+    cd "$root"
+    printf 'step\tmodel\tlane\telapsed_ns\trc\n' > "$work/timings.tsv"
+    timed() {
+      step=$1 model=$2 lane=$3
+      shift 3
+      start=$(date +%s%N)
+      if "$@"; then rc=0; else rc=$?; fi
+      end=$(date +%s%N)
+      printf '%s\t%s\t%s\t%s\t%s\n' "$step" "$model" "$lane" "$((end - start))" "$rc" >> "$work/timings.tsv"
+      if test "$rc" != 0; then
+        echo "dev-run: $step failed; evidence retained in $work" >&2
+        exit "$rc"
+      fi
+    }
+    helper=$work/generator-json-compare.elf
+    timed compile - - "$root/tools/bound" 55 sh "$root/unisacc.com" -O0 tools/generator-json-compare.cx -o "$helper"
+    timed prepare - 0 "$helper" --dev-lane "$root" "$work" prepare-0
+    timed prepare - 1 "$helper" --dev-lane "$root" "$work" prepare-1
+    timed list - - "$helper" --dev-lane "$root" "$work" list > "$work/recipes.tsv"
+    while IFS= read -r recipe; do
+      timed recipe "$recipe" 0 "$helper" --dev-lane "$root" "$work" recipe "$recipe" 0
+      timed recipe "$recipe" 1 "$helper" --dev-lane "$root" "$work" recipe "$recipe" 1
+    done < "$work/recipes.tsv"
+    timed finish - - "$helper" --dev-lane "$root" "$work" finish
+    exit 0
+    ;;
+  --seed-gen|--seed-gen=product|--seed-gen=gcc-O2)
+    mode=$1
+    shift
+    test "$#" = 1 || { echo 'dev-run: --seed-gen requires OUTPUT' >&2; exit 2; }
+    case "$1" in /*) output=$1 ;; *) output=$PWD/$1 ;; esac
+    cd "$root"
+    if test "$mode" = --seed-gen=gcc-O2; then
+      exec "$root/tools/bound" 55 gcc -std=c99 -O2 -w -I seed seed/gen.c -o "$output"
+    fi
+    exec "$root/tools/bound" 55 sh "$root/unisacc.com" -O0 seed/gen.c -o "$output"
+    ;;
+  --seed-gen=*) echo 'dev-run: unknown seed-gen mode' >&2; exit 2 ;;
+esac
 exec "$root/tools/bound" 55 "$root/out/c43-cxcache-product-01/dev-run.elf" "$root" "$@"

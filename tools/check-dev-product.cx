@@ -193,6 +193,37 @@ int main(int argc, char **argv) {
         }
         ck(hit, "fresh-unisa-map");
     }
+    /* Bounded smoke only; all 42 pairs require generator-json-compare's
+       explicit prepare/recipe/finish steps, not this registered 55s batch. */
+    {
+        char entry[4400], bins[2][4400], json[2][4400]; int built = 1;
+        if (cx_fmt(entry, sizeof entry, "%s/tools/dev-run", root)) die("gen entry");
+        char *bad[] = {"sh", entry, "--seed-gen=invalid", 0};
+        if (np_run(bad, root, 0, 5, &r, why, sizeof why)) die(why);
+        ck(r.rc == 2, "gen-unknown-mode-refused"); np_free(&r);
+        bad[2] = "--seed-gen=gcc-O2";
+        if (np_run(bad, root, 0, 5, &r, why, sizeof why)) die(why);
+        ck(r.rc == 2, "gen-missing-output-refused"); np_free(&r);
+        for (int k = 0; k < 2; k++) {
+            if (cx_fmt(bins[k], sizeof bins[k], "%s/smoke-gen-%d", work, k) ||
+                cx_fmt(json[k], sizeof json[k], "%s/smoke-%d.json", work, k)) die("gen smoke paths");
+            char *build[] = {"sh", entry, k ? "--seed-gen=gcc-O2" : "--seed-gen", bins[k], 0};
+            if (np_run(build, root, 0, 40, &r, why, sizeof why)) die(why);
+            ck(r.rc == 0, k ? "gen-gcc-O2-build" : "gen-default-product-build");
+            int ok = r.rc == 0; np_free(&r);
+            if (!ok) { built = 0; continue; }
+            char *generate[] = {bins[k], "lower/hostsymbols", json[k], 0};
+            if (np_run(generate, root, 0, 10, &r, why, sizeof why)) die(why);
+            ck(r.rc == 0, k ? "gen-gcc-O2-smoke-run" : "gen-product-smoke-run");
+            if (r.rc) built = 0;
+            np_free(&r);
+        }
+        size_t an = 0, bn = 0;
+        char *a = (char *)cx_read(json[0], &an), *b = (char *)cx_read(json[1], &bn);
+        ck(built && a && b && an && an == bn && !memcmp(a, b, an), "gen-hostsymbols-smoke-byte-equal");
+        if (a) mm_free(a);
+        if (b) mm_free(b);
+    }
 
     sy_printf("DEV_PRODUCT\tfailed=%d\n", failures);
     return failures ? 1 : 0;
