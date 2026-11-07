@@ -1,63 +1,87 @@
-/* tools/check-precommit-toolsloc.cx -- staging tools/*.cx while toolsloc is over baseline must refuse. */
+/* tools/check-precommit-toolsloc.cx -- real indexed hook checks, in independent bounded batches.
+ * Run --loc, --source and --symlink separately; every batch uses its own real git repository.
+ * The real hook still runs the complete real ratchets from the caller's repository.
+ */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 static int npass,nfail;
+static char hook[300];
 static void ck(int ok,const char *n){printf("%s\t%s\n",ok?"PASS":"FAIL",n);if(ok)npass++;else nfail++;}
-int main(void){
-    char *src=0; size_t n=0; FILE *f; char td[200], idx[300], bak[300];
-    src=cx_read("tools/precommit.cx",&n);
-    ck(src&&strstr(src,"先写基线+理由"),"hook-text");
-    free(src);
-    if(cx_fmt(td,sizeof td,"%s/pc-ts-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td)) return 2;
-    if(cx_fmt(idx,sizeof idx,"%s/index",td)||cx_fmt(bak,sizeof bak,"%s/toolsloc.bak",td)) return 2;
-    {char *v[]={"cp","tests/toolsloc.tsv",bak,0}; np_result r; char why[400];
-     if(np_run(v,".",0,10,&r,why,sizeof why)||r.rc) return 2; np_free(&r);}
-    f=fopen("tests/toolsloc.tsv","wb"); if(!f) return 2; fputs("TOTAL\t1\n",f); fclose(f);
-    {char *e0="GIT_INDEX_FILE"; setenv("GIT_INDEX_FILE",idx,1);
-     char *v[]={"git","read-tree","HEAD",0}; np_result r; char why[400];
-     np_run(v,".",0,15,&r,why,sizeof why); np_free(&r);
-     char *t[]={"git","add","--","tests/toolsloc.tsv","tools/precommit.cx",0};
-     np_run(t,".",0,15,&r,why,sizeof why); np_free(&r);
-     char *p[]={"sh","./unisacc.com","tools/precommit.cx",0};
-     if(np_run(p,".",0,40,&r,why,sizeof why)) { unsetenv(e0); }
-     else {
-         ck(r.rc==1,"over-baseline-rc1");
-         ck(r.errn&&strstr(r.err,"先写基线+理由"),"over-baseline-text");
-         np_free(&r);
-     }
-     unsetenv("GIT_INDEX_FILE");
+static int fixture_run(char **v,const char *cwd){
+    np_result r; char why[400]; int ok;
+    if(np_run(v,cwd,0,40,&r,why,sizeof why)){fprintf(stderr,"fixture command %s in %s: %s\n",v[0],cwd,why);return 0;}
+    ok=r.rc==0;
+    if(!ok){fprintf(stderr,"fixture command in %s (rc=%d):",cwd,r.rc);for(int i=0;v[i];i++)fprintf(stderr," %s",v[i]);fprintf(stderr,"\n");if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+    np_free(&r); return ok;
+}
+static int fixture_write(const char *td,const char *name,const char *text){
+    char path[500]; FILE *f;
+    if(cx_fmt(path,sizeof path,"%s/%s",td,name)) return 0;
+    f=fopen(path,"wb"); if(!f) return 0;
+    {int ok=fputs(text,f)>=0; return fclose(f)==0&&ok;}
+}
+static void fixture_hook(const char *td,int rc,const char *text,const char *label,const char *extra){
+    char gd[500],why[400]; np_result r; char *p[]={hook,0};
+    if(cx_fmt(gd,sizeof gd,"%s/.git",td)){ck(0,label);return;}
+    setenv("GIT_DIR",gd,1); setenv("GIT_WORK_TREE",td,1);
+    if(np_run(p,".",0,40,&r,why,sizeof why)){ck(0,label);if(extra)ck(0,extra);}
+    else {
+        ck((rc<0||r.rc==rc)&&(!text||(r.errn&&strstr(r.err,text))),label);
+        if(extra)ck(r.errn&&strstr(r.err,"先写基线+理由"),extra);
+        np_free(&r);
     }
-    {char *v[]={"cp",bak,"tests/toolsloc.tsv",0}; np_result r; char why[400];
-     np_run(v,".",0,10,&r,why,sizeof why); np_free(&r);}
-    {FILE *u=fopen("tools/_untracked_huge.cx","wb"); int k; if(u){for(k=0;k<400;k++) fputs("int x;\n",u); fclose(u);}
-     char *e0="GIT_INDEX_FILE"; setenv(e0,idx,1);
-     {char *v[]={"git","read-tree","HEAD",0}; np_result r; char why[400]; np_run(v,".",0,15,&r,why,sizeof why); np_free(&r);
-      char *a[]={"git","add","--","tools/precommit.cx",0}; np_run(a,".",0,15,&r,why,sizeof why); np_free(&r);
-      char *p[]={"sh","./unisacc.com","tools/precommit.cx",0};
-      if(!np_run(p,".",0,40,&r,why,sizeof why)){
-          ck(!(r.errn&&strstr(r.err,"_untracked_huge")),"untracked-huge-not-counted");
-          np_free(&r);
-      }
-     }
-     unsetenv(e0); unlink("tools/_untracked_huge.cx");}
-    {FILE *b=fopen("tools/_bash_fake.cx","wb"); if(b){fputs("#!/usr/bin/env bash\necho x\n",b); fclose(b);}
-     FILE *c=fopen("tools/_cx_shebang.cx","wb"); if(c){fputs("#!/usr/bin/env unisacc.com -run\nint main(void){return 0;}\n",c); fclose(c);}
-     setenv("GIT_INDEX_FILE",idx,1);
-     {char *v[]={"git","read-tree","HEAD",0}; np_result r; char why[400]; np_run(v,".",0,15,&r,why,sizeof why); np_free(&r);
-      char *a[]={"git","add","--","tools/_bash_fake.cx",0}; np_run(a,".",0,15,&r,why,sizeof why); np_free(&r);
-      char *p[]={"sh","./unisacc.com","tools/precommit.cx",0};
-      if(!np_run(p,".",0,40,&r,why,sizeof why)){
-          ck(r.rc==1&&r.errn&&strstr(r.err,".cx 只放 cx 源码"),"bash-fake-cx-refused");
-          np_free(&r);
-      }
-      char *v2[]={"git","read-tree","HEAD",0}; np_run(v2,".",0,15,&r,why,sizeof why); np_free(&r);
-      char *a2[]={"git","add","--","tools/_cx_shebang.cx",0}; np_run(a2,".",0,15,&r,why,sizeof why); np_free(&r);
-      if(!np_run(p,".",0,40,&r,why,sizeof why)){
-          ck(!(r.errn&&strstr(r.err,"_cx_shebang.cx")),"unisacc-shebang-allowed");
-          np_free(&r);
-      }
-     }
-     unsetenv("GIT_INDEX_FILE"); unlink("tools/_bash_fake.cx"); unlink("tools/_cx_shebang.cx");}
-    printf("PRECOMMIT_TOOLSLOC\tpass=%d\tfail=%d\n",npass,nfail);
+    unsetenv("GIT_DIR"); unsetenv("GIT_WORK_TREE");
+}
+static int stage(const char *td,const char *name){char *v[]={"git","add","--",(char *)name,0};return fixture_run(v,td);}
+static void fixture(const char *mode){
+    char td[200],path[500]; int ok;
+    if(cx_fmt(td,sizeof td,"%s/pc-link-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td)){ck(0,"symlink-fixture-create");return;}
+    {char *v[]={"git","init","-q",0};ok=fixture_run(v,td);}
+    {char *v[]={"mkdir","tools","tests",0};ok=fixture_run(v,td)&&ok;}
+    ok=fixture_write(td,"tools/source.cx","int x;")&&ok;
+    ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\n")&&ok;
+    if(cx_fmt(path,sizeof path,"%s/tools/alias.cx",td)||symlink("source.cx",path)) ok=0;
+    ok=stage(td,"tools")&&stage(td,"tests/toolsloc.tsv")&&ok;
+    ck(ok,"symlink-fixture-real-index");
+    if(ok&&strcmp(mode,"--loc")==0){
+        ok=fixture_write(td,"tools/source.cx","int x;\nint y;\n")&&stage(td,"tools/source.cx");
+        ck(ok,"over-baseline-real-index");
+        if(ok)fixture_hook(td,1,0,"over-baseline-rc1","over-baseline-text");
+    }
+    if(ok&&strcmp(mode,"--source")==0){
+        ok=fixture_write(td,"tools/_untracked_huge.cx","int untracked;\n");
+        if(ok){FILE *f;cx_fmt(path,sizeof path,"%s/tools/_untracked_huge.cx",td);f=fopen(path,"ab");if(f){for(int k=0;k<400;k++)fputs("int x;\n",f);ok=fclose(f)==0;}else ok=0;}
+        ck(ok,"untracked-huge-fixture-write");
+        if(ok)fixture_hook(td,0,0,"untracked-huge-not-counted",0);
+        ok=fixture_write(td,"tools/_bash_fake.cx","#!/usr/bin/env bash\necho x\n")&&stage(td,"tools/_bash_fake.cx");
+        ck(ok,"bash-fake-real-index");
+        if(ok)fixture_hook(td,1,".cx 只放 cx 源码","bash-fake-cx-refused",0);
+        /* This file is newly staged, not committed: git rm needs -f to remove its indexed content. */
+        {char *v[]={"git","rm","-f","-q","--","tools/_bash_fake.cx",0};ok=fixture_run(v,td);}
+        ok=fixture_write(td,"tools/_cx_shebang.cx","#!/usr/bin/env unisacc.com -run\nint main(void){return 0;}\n")&&stage(td,"tools/_cx_shebang.cx")&&ok;
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t3\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        ck(ok,"unisacc-shebang-real-index");
+        if(ok)fixture_hook(td,0,0,"unisacc-shebang-allowed",0);else ck(0,"unisacc-shebang-allowed");
+    }
+    if(ok&&strcmp(mode,"--symlink")==0){
+        fixture_hook(td,0,0,"symlink-alias-not-double-counted-no-final-lf",0);
+        ok=fixture_write(td,"tools/source.cx","int x;\nint y;\n");
+        ck(ok,"symlink-fixture-worktree-write");
+        if(ok)fixture_hook(td,0,0,"unstaged-regular-growth-not-counted",0);
+        ok=fixture_write(td,"tools/new.cx","int z;\n")&&stage(td,"tools/new.cx");
+        ck(ok,"symlink-fixture-new-regular-index");
+        if(ok)fixture_hook(td,1,"toolsloc commit-tree 2 > baseline 1","new-regular-line-still-refused",0);
+    }
+    {char *v[]={"rm","-rf","--",td,0};ck(fixture_run(v,"."),"symlink-fixture-cleanup");}
+}
+int main(int argc,char **argv){
+    char td[200];
+    if(argc!=2||(strcmp(argv[1],"--loc")&&strcmp(argv[1],"--source")&&strcmp(argv[1],"--symlink"))){fprintf(stderr,"usage: check-precommit-toolsloc --loc | --source | --symlink (run all three batches)\n");return 2;}
+    if(cx_fmt(td,sizeof td,"%s/pc-ts-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td))return 2;
+    if(cx_fmt(hook,sizeof hook,"%s/precommit",td))return 2;
+    {char *v[]={"sh","./unisacc.com","tools/precommit.cx","-o",hook,0};int ok=fixture_run(v,".");ck(ok,"build-real-precommit-once");if(!ok)return 2;}
+    fixture(argv[1]);
+    unlink(hook);rmdir(td);
+    printf("PRECOMMIT_TOOLSLOC\tbatch=%s\tpass=%d\tfail=%d\n",argv[1],npass,nfail);
     return nfail?1:0;
 }

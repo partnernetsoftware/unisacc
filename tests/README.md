@@ -46,6 +46,91 @@ coverage.tsv separates implemented assertions from missing obligations; batches.
 
 The metadata-only commands are `tools/bound 20 sh ./unisacc.com tests/plan.cx -- --validate ROOT` and `tools/bound 20 sh ./unisacc.com tests/plan.cx -- --selftest ROOT`. The parser's 30 local assertions include malformed mappings, missing files, duplicate rows and borrowed-view callback lifetime controls. Metadata validity always reports executed_batches=0; it is not functional or host qualification.
 
+### 全 tools 消费者编译闸
+
+`tests/tools-compile.cx` 对 `git ls-files -s -z -- tools` 中所有递归 `.cx`
+源执行当前仓根 `unisacc.com -c -funit -b lnx/x86_64`，不按 fixture、历史实验或
+专属宿主头需求过滤。符号链接逐 tracked 别名跟随编译，并在结果中标记
+`mode=symlink-follow`；损坏链接同样失败。普通源必须同时满足 run=0、rc=0、
+residue=0 和非空对象才 PASS；超时、异常、缺结果和外层 fork/wait 错误必须失败，
+并收割已启动的同批子进程。唯一事实表 `tests/tools-compile-expected.tsv` 每行四列：
+exact source、类别、诊断片段（`|` 分隔）、中文原因。所有源仍实际编译，不删源、不 skip。
+类别 `known-debt` 与 `fixture-negative` 只有精确路径且 run=0、rc=1、object=0、residue=0、
+全部诊断命中 stderr 才 XFAIL；其意外成功为 XPASS 并失败，须移除过期项，漂移也失败。
+`scanner-input` 没有必须编译失败的合同：诊断列只描述基线，不锁定拒绝，正常rc0/非空对象
+记 INPUT-COMPILED，正常rc1/无对象记 INPUT-REJECTED，均不记普通工具PASS；run异常、
+残留进程、其他rc或对象状态不一致仍必红。所有结果写类别原因；重复路径、缺原因、路径
+不在完整inventory或格式错误直接拒绝。其他未知工具失败必红，不能更新清单掩盖回归。
+
+永久批次 `tools-compile-000` 至 `tools-compile-070` 必须全部运行；每片取 Git
+索引顺序连续八个源，至多八路并发，每子进程 40 秒上限（使用既有 `sysx.process`
+的 `np_run` 清理进程树），各自隔离 `TMPDIR`、对象、完整 stdout/stderr。
+每片注册预算 55 秒。私有索引实测 564 个源（含 18 个符号链接），恰好需要
+71 个非空片，最后一片四个源。超过已登记容量 568 个源会硬失败，必须一起扩充
+源码分片上限和登记行；源减少到 560 个或更少也硬失败，须同步缩减登记，不能空 PASS。
+将来新增源越过容量必须同步登记，不能截断语料。全量不是一条 55 秒命令，应逐片运行，例如：
+
+```sh
+ROOT=$PWD
+mkdir -p "$ROOT/out"
+OUT=$(mktemp -d "$ROOT/out/tools-compile.XXXXXX")
+i=0
+while [ "$i" -lt 71 ]; do
+  id=$(printf 'tools-compile-%03d' "$i")
+  if tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/run-batch.cx" -- "$ROOT" "$OUT" "$id" >"$OUT/$id.log" 2>&1; then
+    printf '%s\t0\n' "$id" >>"$OUT/status.tsv"
+  else
+    printf '%s\t%s\n' "$id" "$?" >>"$OUT/status.tsv"
+  fi
+  i=$((i + 1))
+done
+```
+
+不经批次 runner 的准确八路单片命令为
+`tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/tools-compile.cx" -- "$ROOT" "$OUT/shard-000" 0`；
+其余片替换输出新目录和末尾 0..70。`run-batch` 的实际输出目录以其日志为准，
+每片 `results.tsv` 含 PASS/XFAIL/FAIL/XPASS/INPUT-COMPILED/INPUT-REJECTED 行、类别、原因与 stderr 路径，
+`*.stdout`/`*.stderr` 保留完整诊断；FAIL 与 XPASS 均属回归闸失败。
+`TOOLS_COMPILE SUMMARY` 分别报告 `compiled`（实际启动编译数）、`compile_pass`、
+`known_failures`（严格XFAIL）、`known_debt`、`fixture_negative`、`scanner_inputs`、
+`scanner_compile_failures`、`unexpected_failures` 和 `raw_compile_failures`（所有原始非零编译rc数）；
+`failed` 仅表示 unexpected，绝不意味着所有源可编。runner 保留显式
+`rc0:TOOLS_COMPILE` 期望：只有进程 rc0 且 marker 匹配才通过，XFAIL 本身不是 rc1 豁免。
+此外必须单列 `status.tsv` 的非零项（包括无结果的构建/runner/55秒外界失败），
+不可把缺结果当通过。汇总必须核对 71 个片号各出现一次、inventory 相同、各片
+compiled 之和等于 inventory；缺片或语料变化均不是全量证据。即使某片失败也继续余片。
+
+这不是发布全绿：九个原始失败仍在全量分母里，四个 `known-debt` 尚未修复，三个
+`fixture-negative` 有 check-install-fixes:51-52、57-58 的真实编译拒绝断言；两个
+`scanner-input` 只有扫描用途（facts文件头声明never compiled，proto/user仅文本扫描），
+不能编造其必须失败的合同。下面记录父会话已执行的对照（不是本次清单实现的测试）：
+干净基线 `7e3f76f924`，同产品 SHA `884adfef…99fcf`；初测实际 71 片、564 源、无缺片，
+553 compile-pass、11 raw compile failures。两项导入回归修复并重跑原片后，父会话报告
+应归并为555普通编译通过、7严格已知失败、2扫描输入拒绝，raw compile failures仍9，不能写作564全可编。
+
+| 工具 | 干净HEAD结果 | HEAD+L0初测 | 定性/修复后 |
+| --- | --- | --- | --- |
+| tools/cxlib/e2stream.cx | rc0 | rc1 | L0导入回归；补显式 use sys.posix，原33片PASS |
+| tools/e2stream-child.cx | rc0 | rc1 | 同一导入回归；共享源补导入后，原37片PASS |
+| tools/hostseed-step-nativefirst.cx | rc1 unknown opcode / 29745 | rc1 同诊断 | known-debt，未修 |
+| tools/hostseed-step.cx | rc1 unknown opcode / 23643 | rc1 同诊断 | known-debt，未修 |
+| tools/install-fixes/iproto/main.cx | rc1 tx_snprintf、tx_strtod未use | rc1 同诊断 | fixture-negative，真实拒绝断言 |
+| tools/install-fixes/iproto/user.cx | rc1 tx_snprintf、tx_strtod未use | rc1 同诊断 | fixture-negative，真实拒绝断言 |
+| tools/install-fixes/uses48/main49.cx | rc1 more than 48 uses | rc1 同诊断 | fixture-negative，真实48-use边界断言 |
+| tools/practice-grow-perf.cx | rc1 mm_alloc重复导出 | rc1 同诊断 | known-debt，未修 |
+| tools/practice-vec.cx | rc1 mm_alloc重复导出 | rc1 同诊断 | known-debt，未修 |
+| tools/symindex/fixture/facts.cx | rc1 FX_REGISTER顶层构造 | rc1 同诊断 | scanner-input，拒绝不是合同 |
+| tools/symindex/fixture/proto/user.cx | rc1 lib_num/lib_vec/lib_fmt/lib_count未use | rc1 同诊断 | scanner-input，拒绝不是合同 |
+
+九项 L0 原始 stderr 位于 `/tmp/omp-cdx2-tools-compile-shard-040/{0322,0323}.stderr`、
+`041/0334.stderr`、`042/{0336,0339}.stderr`、`058/{0468,0470}.stderr`、
+`067/{0536,0541}.stderr`（后四组同目录前缀）；HEAD 对照来自父会话命令输出，
+未另存完整 stderr 文件。cdx2 已实跑最终 71 个非空分片并逐源对账：564 个唯一源、555 个普通编译 PASS、4 个既有债与 3 个编译负例 XFAIL、2 个扫描输入拒绝；原始非零编译仍为 9，未知失败与缺片均为 0。这是已知失败回归闸通过，不是 564 个源全部可编译，更不是发布资格全绿。
+
+实际 `tests/run-batch.cx` 执行 `tools-compile-040` 得到 `BATCH_RUN status=PASS`，同时保留两个 hostseed 原始 rc=1。另在同产品的隔离干净 HEAD 对照根中变异清单：诊断不匹配时返回 rc=1、unexpected_failures=1；把正常 `group-gen.cx` 误列既有失败时记录 XPASS，并将未登记的真实失败一并计入 unexpected_failures=2、返回 rc=1。未改夹具或放宽编译器断言。
+
+
+
 The batch covers basic functions, recursion, struct arrays and pointer mutation, callback execution, loops, short-circuit behavior, overlap memmove, snprintf bytes and length, strtol value and tail, allocation, a published SHA-256 known answer, and imported module private state. It provides basic product behavior evidence on the current local host only.
 
 Batch execution, validation, compiler startup and internal construction/loading/inference/output are explicitly UNMEASURED. The former sys/time.h dependency is removed; no unverified OS ABI declaration replaces it. A verified module time API and phase probes remain missing. An external wall-clock measurement may report the whole invocation but cannot substitute for missing phase probes.

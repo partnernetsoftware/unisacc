@@ -387,7 +387,7 @@ FFI 对外窗口：经 <unisacc_ffi.h> 调宿主库（libcurl、libc），上层
 | `sy_protect_rw` | `int (void *p, long n)` | 改为可读写 |
 | `sy_protect_rx` | `int (void *p, long n)` | 改为可读可执行 |
 
-### `cx/sys/posix.cx`（19 个导出）
+### `cx/sys/posix.cx`（20 个导出）
 
 POSIX 原语：相对目录 fd 系列、终端属性与前后台进程组、文件锁、会话、socketpair。
 
@@ -398,6 +398,7 @@ POSIX 原语：相对目录 fd 系列、终端属性与前后台进程组、文�
 | `sy_at_fdcwd` | `int (void)` | AT_FDCWD 的平台常量 |
 | `sy_setsid` | `long (void)` | 新建会话 |
 | `sy_getpgid` | `long (int pid)` | 取进程组 id |
+| `sy_setpgid` | `int (int pid, int pgid)` | 设置进程所在进程组 |
 | `sy_killpg` | `int (int pgrp, int sig)` | 向进程组发信号 |
 | `sy_socketpair` | `int (int sv[2])` | 建一对已连接 socket |
 | `sy_tcgetpgrp` | `long (int fd)` | 终端前台进程组 |
@@ -415,7 +416,7 @@ POSIX 原语：相对目录 fd 系列、终端属性与前后台进程组、文�
 | `sy_unlockf` | `int (int fd)` | 解除 lockf 锁 |
 | `sy_rlimit_as` | `long (void)` | 地址空间软上限（无上限返回 0） |
 
-### `cx/sys/proc.cx`（12 个导出）
+### `cx/sys/proc.cx`（11 个导出）
 
 进程：spawn/管道/等待/信号/进程组；nohang 等待与退出码/信号二分解。
 
@@ -434,7 +435,6 @@ POSIX 原语：相对目录 fd 系列、终端属性与前后台进程组、文�
 | `sy_wait` | `int (int pid, int nohang)` | 等子进程退出 |
 | `sy_kill` | `int (int pid)` | 终止进程 |
 | `sy_pid` | `int (void)` | 当前进程 id |
-| `sy_setpgid` | `int (int pid, int pgid)` | 设置进程所在进程组 |
 
 ### `cx/sys/sha.cx`（1 个导出）
 
