@@ -65,6 +65,23 @@ s8c：init 后对 map 每一名执行 `tools/bound 55 sh ./unisacc.com tools/all
 
 命令与空跑见 [s8c-bind.md](s8c-bind.md)。
 
+### 未入图 78（heavy registered=no，绑定 14 名后）
+
+| n | 材料声明 | 可入图? | 谁入 |
+|---|---|---|---|
+| 12 | ref | 否：P4 冻结参考 | 材料主人/cc |
+| 10 | streams,ref | 否：缺 ref | 同上 |
+| 8 | ri-cli | 可：增量 ROOT 另会话已有 | 不进 s8c 本图除非复制身份 |
+| 6 | streams,stream-lower-sha:sha256 | 否：要冻结 sha 字面 | 测试主人钉 sha |
+| 6 | ri-flow-runtime,ri-flow-data | 否：缺 ri-flow-data | 材料主人 |
+| 4+4 | stream-e2/e1-sha:sha256 | 否：sha 字面 | 测试主人 |
+| 2 | streams-cc / nets | 视有无冻结树 | 材料主人 |
+| 1×若干 | origin/libneed/p3-gen/identity-helper/baseline/adopted/assembler/chain/e2reader/hosts-profile/ri-capture/p3model | 否或缺独立来源 | 各材料条目主人 |
+| 1 | ri-cli,ri-chain | 半：ri-chain 已图，ri-cli 否 | |
+
+不造伪。s8c 只绑已图 14 名。
+
+
 ## candidate-qualify rc=2
 
 s8b 十行 PASS 后无 `CHECK_CANDIDATE_QUALIFY`：`tests/check-candidate-qualify.cx:78-80` `git rev-parse HEAD` 在 git archive 根失败 → `return 2`。INFRA 非工具缺陷。主树 APE 884adfef 复跑 `CHECK_CANDIDATE_QUALIFY failed=0`（有 .git）。

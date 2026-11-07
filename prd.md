@@ -95,6 +95,8 @@
 | 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `work/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
 | 已知 FAIL 必须登记 | `sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv`（`-- --self-test`） | rc1 门槛 1：聚合输出里非 PASS 的批次都得是 `tests/waivers-0.0.44.tsv` 的 `F` 行；F 行只说"已知有主有计划"，不把 FAIL 变 PASS |
 | 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
+| 会话图内材料一键绑定 | `sh ./unisacc.com tools/s8c-bind.cx -- ROOT SESSION CANDIDATE MAP`（薄壳 `tools/s8c-bind.sh`；批次 `s8c-bind`） | init 后对 MAP 每名独立 `all-waves material`（各 bound 55）。PREPARED≠PASS。scratch 14 名后 heavy yes 0→84 |
+
 | 产品改动链预检 | `sh ./unisacc.com tools/chain-precheck.cx -- ROOT CHAIN_OUT NEW_OUT init --files LIST`（或`--range A..B`），随后`reuse`、逐项`job`、`identity/routes/p3`、四`probe`、`slice all`、`finish` | 复制执行员链须先只读`cp -a --reflink=auto`到私有CHAIN_OUT，不改ctx/reads。正式入口从原argv识别记录ctx/jobs，派生读写映射NEW_OUT/jobs、工具取副本；执行前精确限制写路径，原链/副本前后文件名大小mtime快照变化即拒。主树语义负控51/0；旧实现51项失败6。range目前要求每文件直接NN reads，混合文档/代码/上游事实会拒，见CHAIN-PRECHECK-RANGE-UNMAPPED；不能缩范围后冒称自动全覆盖 |
 | Windows argv容量与布局 | `sh ./unisacc.com tools/win-argv-gen.cx -- --check . enc-x86win-winargs enc-armwin-winargs lower-data`；`PRODUCT=新包产品 sh ./unisacc.com tools/check-win-argv.cx` | `WIN_ARGVA_BYTES=131080`唯一事实推导16384项加NULL；双ISA边界/向量模式/显式NULL、PE虚拟尾与漂移负控；批次`win-argv`，Linux交叉检查不等于Windows原生通过 |
 | 表闭包静态预检 | `sh ./unisacc.com tools/tsv-lint.cx -- --root . --errors-only --limit 10`；`sh ./unisacc.com tools/check-tsv-lint.cx` | 查模式冲突、未定义引用、缺兜底及精确SB入口清理合同；支持根内call、有限facts/with/let/模板及确定flags。动态宏、fresh、条件和图编辑前置条件未证明者单列`UNRESOLVED`，`status=PARTIAL`且rc0仅表示无确定错误，不代替gen/新包/slice预检；批次`tsv-lint`保留三段历史失败回放与修后负控 |
@@ -318,9 +320,9 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-07,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 公开出发线（历史，不是本候选资格）:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定（2026-11-07）：**c46-3 发布线由 omp-cdx 负责到底**，冻结提交 `44182b4059d51191cb021241c666b521bf34b2ad`；正规131作业/final/routes/P4及六片真实构造完成，APE `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`（6,163,990字节），新包 `29e13aeb8c62a09c0323a9d86dcd51ab8b35684696264b3fc66571d79654ef6c`。原生CI `42353236985` 同候选 **QUALIFIED 42/0/0/0**；Windows stdio/stream仅portable子集。五片五类固定点全same，第六片独立checker `failed=0 missing=0`，Windows原生自举NOT_CLAIMED。正式APE comm正负控、smoke5/0和材料绑定批 `run-comm` 均实跑通过；三资产下载回读SHA一致，配对记录与CI已备份 `~/.unisacc-baselines/c46-3/`。工具改动私有13/13且未放宽阈值。grk的s8仍冻结执行，最终计数/说明收口未完成；不迁移c46-2或旧s7资格。
+当前裁定（2026-11-07）：**c46-3 发布线由 omp-cdx 收口，公开动作由cc执行**，冻结提交 `44182b4059d51191cb021241c666b521bf34b2ad`；正规131作业/final/routes/P4及六片真实构造完成，APE `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`（6,163,990字节），新包 `29e13aeb8c62a09c0323a9d86dcd51ab8b35684696264b3fc66571d79654ef6c`。原生CI `42353236985` 同候选 **QUALIFIED 42/0/0/0**；Windows stdio/stream仅portable子集。五片五类固定点全same，第六片独立checker `failed=0 missing=0`，Windows原生自举NOT_CLAIMED。正式APE comm正负控、smoke5/0和材料绑定批 `run-comm` 均实跑通过；四资产下载回读SHA一致，配对记录与CI已备份 `~/.unisacc-baselines/c46-3/`。工具私有13/13；主树已按cc授权+36提交基线79021，但提交后又实测79041，额外20行正定位归属，不能冒称主树已绿。grk的s8仍冻结执行、resolver反复超时已交其改调度，最终计数/说明收口未完成；不迁移c46-2或旧s7资格。
 **已交付（分治基础）**：test-loader A/B/C、40M 部署模型逐模型批（共享七 mode、特殊 M36-39、六目标）、ISA 本机启动检查、`work/units.tsv`＋`tools/fan.cx` 真并行（七流 READY，开发证据）。18 事实网另轨 gold→kernel→nets，BLOCKED 如实标注。切片瘦身：可迁性分类显示大状态逻辑占约 74%，试点 rtsharedname 设计页已出，不进 0.0.46 产品。
-**发布门槛剩余**：精确提交并在grk阶段边界移交harness新输入身份、s8全批原始结论、发布说明证据核实与“待证”清零；公开仍须主人批准，当前只有已授权私有 draft `v0.0.46-c46-3-candidate`，未创建正式版标签或更改Latest。
+**发布门槛剩余**：主树toolsloc来源修正后13/13、s8最终原始结论及发布说明最后一处“待证”。主人已批准公开，但实际发布明确由cc执行；cdx只备命令与读回脚本，建议tag直接指向CI提交44182。私有draft完整读回脚本已实跑通过，正式模式拒绝私有draft；未执行正式发布或更改Latest。
 **结构反思（主人 2026-11-07 提出，详见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md) 末节）**：①测试专用 loader com（独立切片文件＋按需加载流/网文件，测试分片收敛）；②切片逻辑大部分迁 NN，切片只留 ISA 对接（host syscall/ABI/ffi/dl）。主人 11-07 裁定：①②均在0.0.46立即开工（TEST-LOADER-COM、SLICE-SHRINK-PRE）。
 ```text
 0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
@@ -349,7 +351,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | 身份见 §3 | `tools/com-tree.cx` |
-| 当前发布与候选 | 公开安装产品仍 `v0.0.45` 预发布（APE `ae0b12d8…`）；c46-3 冻结 `44182b4059`，omp-cdx 负责构造→私有 APE→comm→CI→备份→说明；c46-2 资格只属历史，不迁移；公开须主人批准 | [公开发布说明](plans/release-notes-0.0.45.md)、[0.0.46本体门槛](plans/v0.0.46-unisacc.md)、§9.1 |
+| 当前发布与候选 | 公开产品仍 `v0.0.45`；c46-3冻结44182、APE884adfef、CI42353236985为42/0，备份完成。主人已批准公开，cc负责执行；cdx完成说明/脚本与主树门禁准备，不擅自发布；c46-2资格不迁移 | [发布说明](plans/release-notes-0.0.46.md)、[本体门槛与命令清单](plans/v0.0.46-unisacc.md)、§9.1 |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |
