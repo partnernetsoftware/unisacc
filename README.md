@@ -1,22 +1,45 @@
 # unisacc
 
+## Quick start
+
+```sh
+curl -LO https://github.com/partnernetsoftware/unisacc/releases/download/v0.0.46/unisacc.com
+chmod +x unisacc.com
+sh ./unisacc.com --version                         # unisacc 0.0.46
+printf 'int main(void){return 7;}\n' > hello.c
+sh ./unisacc.com hello.c; echo $?                  # 7 (default -run)
+```
+
+Windows x86-64: see the [release notes](plans/release-notes-0.0.46.md) for verified native invocation details.
+Windows arm64 uses the Release's `slice-win-arm64` and `pkg.bin` with
+`UNISA_CONTAINER` set to the absolute path of `pkg.bin`.
+Verify downloads against `SHA256SUMS` from the Release. Uninstall by deleting
+the downloaded files; roll back by restoring the previous Release's files.
+
+## What is not claimed
+
+- Native self-hosting on Windows or macOS is not claimed.
+- Windows stdio-crossunit and stream-pipe cover portable subsets; POSIX
+  sub-checks were not run and are not counted as passed.
+- Full-batch qualification is separate from native CI; see the
+  [release notes](plans/release-notes-0.0.46.md) for the s8b final state.
+
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.44-rc3 candidate, APE `54bb97a2`, source
-`b1a219cf7d`; local full-batch session on `lnx/x86_64`: 408 batches, 274 pass, every
-non-pass has a recorded known-fail row with an item id), checked on GitHub native
-runners (CI-RUN-6, run 42092234905):
-`lnx/x86_64`, `lnx/arm64`, `osx/x86_64` and `osx/arm64` pass identity, version, hello,
-the default `-run`, stream-pipe and smoke (the stdio errno case needs Linux's
-`/dev/full` and is not run on macOS). **`win/x86_64` does not work natively**:
-`--version` prints garbage and compiling crashes (NATIVE-WIN-PE, cause not found
-yet), and there is no `win/arm64` slice. `osx/*` and `win/x86_64` are built by the
-`whole-o` route. `-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+ (a PE
-written on Linux for a small program does run on Windows; the unisacc slice itself
-does not), and the default `-run` executes in memory on Linux and from a private
-temporary file on macOS;
-relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
+file, `unisacc.com`. Toolchain status (0.0.46): the c46-3 APE is
+6,163,990 bytes, SHA256
+`884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`.
+Native CI run [42353236985](https://github.com/partnernetsoftware/unisacc/actions/runs/42353236985)
+reports QUALIFIED 42/0 across six targets (identity, version, hello, default
+run, stdio-crossunit, stream-pipe and smoke). Windows stdio-crossunit and
+stream-pipe cover only the portable subset, not the POSIX sub-checks.
+Windows arm64 uses the shipped `slice-win-arm64` with `pkg.bin` and an explicit
+`UNISA_CONTAINER`. See the [release notes](plans/release-notes-0.0.46.md) for
+artifact identities, platform limits and the final full-batch session state.
+`-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+; the default `-run`
+executes in memory on Linux and from a private temporary file on macOS.
+Relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
 `ET_REL` object; GNU `ld` links that whole-program object into a runnable static
 program on its own, and `cc` cannot (`_start` collides with the crt, and the
 calling convention is not SysV or AAPCS64). `-c -b osx/*|win/*` is refused by
@@ -49,6 +72,9 @@ weights come deterministically from a TSV table DSL for finite state
 transitions, not from training. The classic reference is a separate route; its
 18 fact networks are constructed and checked, while its runtime queries DENSE
 answer tables enumerated from them.
+Weights are constructed deterministically from fact tables by generators, with
+no training or generalisation claim: the user supplies C99 and receives ELF,
+Mach-O or PE output with deterministic behaviour.
 
 TSV tables are the construction and verification method used by this product,
 not a defining requirement of a neural-network-based compiler. Other network
@@ -85,19 +111,13 @@ three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.
 retain the exact historical candidates, hashes and build lineage. They do not
 qualify the current candidate.
 
-The 0.0.44-rc1 `unisacc.com` is built from the CX chain in this tree, not from
-the old C reference: `tools/entry-build.cx` compiles `src/unisacc.cx` per
-target, `tools/release-build.cx` adds the P3 package and one slice, and
-`tools/release-ape.cx` packs the five slices into one APE and smokes it. The
-`lnx` slices take the `objects` route and the `osx`/`win` slices take the `whole-o`
-route. The 0.0.44-rc1 candidate (rev `7266862b08`) is the APE `a76e5fc1`
-(5,494,758 bytes; the `lnx/x86_64` smoke passes); its `lnx/x86_64` candidate
-binary `c3996bd4` came out byte-identical in generations one, two and three; generation
-two was built by generation one and generation three by generation two (the `constructor`
-field of each receipt; `tests/chain-fixed-point.cx` reports 0 failures).
-The current working tree is a dev-lnx stub. The previous
-release, 0.0.43, is the five-slice APE `83343ec1` (rev `edc2c7700b`, 5,145,706
-bytes, 2026-11-01).
+The 0.0.46 `unisacc.com` is built from the CX chain, not the old C reference.
+The c46-3 construction and fixed-point evidence are recorded in the
+[release notes](plans/release-notes-0.0.46.md): objects, kernels, five generic
+slices, product and package were compared independently; Windows arm64 has
+its own G2/G3 checker and receipts. Native Windows self-hosting is not claimed.
+Build inputs, constructor identities and released artifacts must not be
+interchanged with historical candidates.
 Two steps of the object route are still open: the model driver's `-c -b`
 reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text
 ([candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)).
@@ -206,7 +226,7 @@ one `tools/release-build.cx` run per slice (P3 package plus the slice; `whole-o`
 for osx/win, `objects` for lnx), then `tools/release-ape.cx -- pack` for the
 five-slice APE and `-- smoke` before anyone installs it. The steps are listed in
 [archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md),
-and the 0.0.44-rc1 candidate `unisacc.com` was built this way:
+and the historical five-slice candidate was built this way:
 
 ```bash
 sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
@@ -555,6 +575,7 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 
 | Limitation | What happens | Reproduce |
 |---|---|---|
+| 22 classes of C99 diagnostic gaps (A: 12, B: 10) | Eight class-A cases were measured as accepted with wrong output: `duplicate-case`, `case-outside-switch`, `struct-redefinition`, `conflicting-typedef`, `conflicting-function-types`, `enumerator-redeclared`, `float-subscript`, `return-pointer-as-int`. Full list and evidence in the [release notes](plans/release-notes-0.0.46.md). Check constraints separately with `gcc -std=c99 -pedantic-errors` | see release notes |
 | `__LINE__` before a line continuation (C99 6.10.8) | A token that sits BEFORE a backslash-newline on the same line reads one line too high (`int m = __LINE__; int \\` then ` n = __LINE__;` gives `3 3` where gcc gives `2 3`); diagnostics at such a token are off by one the same way.  Tokens after the join, and every later line, are right | the two-line example |
 | No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected; the 0.0.20 reference names it (`not covered: complex types`, with an `UNCOVERED` record), released compilers say `expected ';'` or `unknown identifier`; `<complex.h>` is not provided | `double _Complex z = 1.0;` |
 | No trigraph replacement (C99 5.2.1.1) | `"a??=b"` stays `a??=b`; C99 requires `??=` to become `#` in translation phase 1 (gcc/clang also skip it unless `-trigraphs`) | `printf("%s", "??=")` |
@@ -566,7 +587,7 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 | Identifiers: 63 significant characters | C99 6.4.2.1 requires that many, and both front ends keep them.  **The C reference refuses a 64-character name** with `error: identifier too long (max 63 characters)` at its position, rather than truncating it -- truncation merged two distinct names that shared a prefix, and miniz's `tinfl_`/`tdefl_` families are exactly that shape.  The **product accepts arbitrary lengths** (E3 interns names by source position), so a program the reference rejects still compiles on the product; the asymmetry is deliberate, not a bug in either | a 64-character identifier: the reference exits 1 with that message at the name, the product compiles it |
 | Struct member count: 256 per struct | A limit separate from the table capacities below: one struct may hold at most 256 members.  Both front ends refuse a 257th, worded differently -- the reference prints `too many members` with no position, the product prints `error: not covered: structure member capacity` at the member | a struct with 257 members, then `s.m0 = 1` |
 | Shared table capacities are not deduplicated | The typedef, struct-tag and member tables are shared across translation units and **not deduplicated**: every unit re-registers the headers it includes, so N units of the same headers consume N times the entries.  Counted rather than guessed -- one unit of the miniz headers contributes ~91 typedefs, and three units crossed the old limit of 256.  The limits are now typedefs 1024, struct tags 512, members 4096 | compile the same header from three translation units and watch the typedef count climb |
-| Source files per invocation: 128 | One `unisacc.com` run accepts at most 128 source files (multi-unit frame cap `UNIT_MAX` in `exec/facts/limits.tsv`, checked by `tests/check-limits.cx` against every copy); a 129th is refused up front with `unisacc: model driver: too many sources (limit 128)` and no output.  Before 0.0.44 the cap was 64 | `main.c` plus 128 one-function files |
+| Source files per invocation: 128 | One `unisacc.com` run accepts at most 128 source files (multi-unit frame cap `UNIT_MAX` in `exec/facts/limits.tsv`, checked by `tests/check-limits.cx` against every copy); a 129th is refused up front with `unisacc: model driver: too many sources (limit 128)` and no output. The earlier cap was 64 | `main.c` plus 128 one-function files |
 | Headers and functions that are declared but absent | `regex.h`, `strings.h`, `utime.h`, `pwd.h`; `system`, `strdup`, `sigaction`. (`unistd.h`, `fcntl.h`, `sys/stat.h`, `getline` and `time()` exist since 0.0.18-0.0.19; `clock_gettime`, `nanosleep`, `sleep`/`usleep` and `execl`/`execlp`/`execle` and `sys/un.h` are in 0.0.20.)  A program that needs one gets a missing-header error, or an implicit declaration and then `undefined function`.  The 0.0.13 additions are `size_t`-style types, `strerror`, the stdio set (`feof`/`ferror`/`ungetc`/`clearerr`/`setvbuf`/`tmpfile`/`vprintf`) and `errno` codes.  The rest is the FX-5 layering decision: L2 (declare and import the host's) is 0.0.14 | `#include <pwd.h>` or a call to `strdup` |
 | The private calling convention is not the host's | Code this compiler generates calls code it generated: arguments are pushed on the tape stack, `r9` is the frame pointer and the result is in `rax` (prd W-16).  It is explicitly unstable and external code must not depend on it; interop goes through the libunisacc carrier or the plan's bridge routes.  This is why `#21` above has nowhere to put the callee's address | any two units, or `nativeboot` |
 | Unit objects from before 0.0.20 | The 0.0.20 linker refuses a `-funit` object without the `.unit 2` record (`link: object predates .unit 2`): older objects cannot say which global had an initialiser, so two initialised definitions of one name would be silently merged. It also refuses two initialisers for one object across units and an object only ever declared `extern` (`link: undefined reference to NAME`) | recompile the objects with the new compiler |
