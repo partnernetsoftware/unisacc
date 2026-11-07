@@ -35,6 +35,8 @@ int main(void) {
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "include", "exec/facts", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
+    char *mv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "tests/coverage.tsv", "tests/batches.tsv", 0};
+    char *lv[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
     char *names = slurp(gv, &sn), *rows;
     if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
     for (at = 0; at < sn; ) { long l = tx_len(names + at, sn - at); if (l <= 0) break; staged++; at += l + 1; }
@@ -60,6 +62,25 @@ int main(void) {
               }
           }
           a2 += nl + 1;
+      }
+    }
+    { long msn; char *mnames = slurp(mv, &msn);
+      if (!mnames) { sy_eprintf("precommit: git diff --cached (metadata) failed\n"); return 1; }
+      if (msn > 0) {
+          char *lout; long ln;
+          lout = slurp(lv, &ln);
+          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
+          if (tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
+              long at2 = 0;
+              sy_eprintf("precommit: tests/run.cx --list metadata_valid!=1\n");
+              while (at2 < ln) {
+                  long e = tx_chr(lout + at2, ln - at2, '\n'), l = e < 0 ? ln - at2 : e;
+                  if (tx_find(lout + at2, l, "REFUSE", 6) >= 0 || tx_find(lout + at2, l, "row=", 4) >= 0)
+                      sy_eprintf("precommit: %.*s\n", (int)l, lout + at2);
+                  at2 += l + 1;
+              }
+              blocked++;
+          }
       }
     }
     /* facts gate: a commit touching include/ or exec/facts/ must leave the generated pp-autoinc-gen table
