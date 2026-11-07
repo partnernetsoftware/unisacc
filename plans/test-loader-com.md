@@ -36,7 +36,7 @@ C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、�
 
 ## 同输入迭代耗时（单样本，非稳定性能结论）
 
-同 APE/slice/pkg 身份见上；分片入口为冻结 `/tmp/loaderimpl/test-loader-C1`。E2 双方使用同一适配器二进制与同一材料 pin，只由显式环境选择整 APE 或分片；不删 MATERIAL 行。每对 stdout、stderr、退出码逐字节一致，父以六次 `cmp` 实核全同。首次不同适配器 SHA 导致三行 MATERIAL 不同的原失败保留于 `speed-c1-e2.*`，修正比较合同后才产生以下正式数据。
+同 APE/slice/pkg 身份见上；分片入口为冻结 `/tmp/loaderimpl/test-loader-C1`。E2 双方使用硬链接的同一适配器二进制与同一材料 pin，由显式入口路径（argv[0] 的 direct-speed/c1-speed）选择整 APE 或分片；不删 MATERIAL 行。每对 stdout、stderr、退出码逐字节一致，父以六次 `cmp` 实核全同。首次不同适配器 SHA 导致三行 MATERIAL 不同的原失败保留于 `speed-c1-e2.*`，修正比较合同后才产生以下正式数据。逐字命令及输入身份在同目录 `speed-evidence.txt`。
 
 | 批 | 整 APE 墙时（ms） | 分片墙时（ms） | 样本数/侧 | stdout/stderr/rc | 原合同结果 |
 |---|---:|---:|---:|---|---|
@@ -44,3 +44,9 @@ C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、�
 | stream 完整批 | 9187.984647 | 6089.602999 | 1 | 全同；rc0/0 | 9 PASS，failed=0 |
 
 实测总墙时包含子进程启动、构造/执行、输出与校验；启动独占、执行独占、装载/推理各分相及冷/热均 `UNMEASURED`，不从单样本宣称稳定收益。未重建整链、未运行 CI 或全批。原始证据在 `/tmp/loader-ape-proof-dbISgu/speed-c1-{e2-final,stream}.{0,1}.1.{stdout,stderr,rc}`；临时 `.cx` 计时器 `speed-pair.cx` 与 `e2-speed-batch.cx` 同目录保留供审计，不作为已登记工具。
+
+## 后续独立批的双轨边界（cc 裁定）
+
+- test-loader 的逐网对象是出货 P3 部署模型，即 D 路由指向的 M，按阶段和模型索引命名；先做 e2/e3/lower 三模板。阶段名替换按首 D 选 M，不能将名字拒绝冒充某个未选中模型的实际消费拒绝。lower 首条是 arm64 模型，最小模板只生成 arm64 `target.text`，不声称原生执行或 x86_64 lower 模型覆盖。
+- 18 事实网是 gold→kernel/nets 的独立轨；D.stage 没有这些事实网名。combo/isel/parse/pfconv/scope 等对照臂不能伪报 P3 替换消费。独立单元不删不缩：grk 已以 `aeae980e74` 保留 `net.* BLOCKED evidence=gold-kernel-nets`，只有实际接入的 stage.e2 为 READY；后段待冻结载体及 SHA 后按流接口接入。
+- ISA 启动检查使用显式目标与精确版本期望；只声明真实本机 slice 的启动结果，其他五格 `NOT_CLAIMED`。旧冻结 0.0.45 可用于开发检查，但不得用当前源码版本号冒认为 0.0.46 或发布资格。

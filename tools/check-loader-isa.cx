@@ -1,0 +1,34 @@
+/* 仅开发证据：显式本机绑定启动；不认证六片身份或发布候选。
+ * 无参数；TEST_LOADER_ROOT/LOADER/SLICE/MODELS 必须为绝对路径，
+ * TEST_LOADER_TARGET 与 TEST_LOADER_VERSION 为显式目标和精确期望版本。
+ * 旧冻结输入可显式期望 0.0.45，绝不冒认当前 0.0.46。 */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.hostid
+static void refuse(const char *name){fprintf(stderr,"check-loader-isa: REFUSE binding %s\n",name);exit(2);}
+static char *binding(const char *name,int path){char *v=getenv(name);if(!v||!*v||(path&&v[0]!='/'))refuse(name);return v;}
+int main(int argc,char **argv){
+ (void)argv;if(argc!=1)refuse("environment-only");
+ char *root=binding("TEST_LOADER_ROOT",1),*loader=binding("TEST_LOADER_LOADER",1);
+ char *slice=binding("TEST_LOADER_SLICE",1),*models=binding("TEST_LOADER_MODELS",1);
+ char *target=binding("TEST_LOADER_TARGET",0),*version=binding("TEST_LOADER_VERSION",0);
+ const char *targets[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+ int found=0;for(int i=0;i<6;i++)if(!strcmp(target,targets[i]))found=1;if(!found)refuse("TEST_LOADER_TARGET");
+ for(const char *p=version;*p;p++)if(*p=='\n'||*p=='\r')refuse("TEST_LOADER_VERSION");
+ char expected[512];if(cx_fmt(expected,sizeof expected,"unisacc %s\n",version))refuse("TEST_LOADER_VERSION");
+ const char *host=tn_self();int claimed=0,failed=0;
+ for(int i=0;i<6;i++){
+  if(strcmp(host,targets[i])||strcmp(target,targets[i])){
+   printf("SLICE_START\ttarget=%s\tstatus=NOT_CLAIMED\treason=%s\tscope=development-evidence\n",targets[i],strcmp(host,targets[i])?"not-native":"not-bound");continue;
+  }
+  char *call[]={loader,"--slice",slice,"--models",models,"--","--version",0};
+  np_result r={0};char why[1024];int run=np_run(call,root,0,12,&r,why,sizeof why);
+  int ok=!run&&!r.rc&&!r.errn&&r.outn==strlen(expected)&&!memcmp(r.out,expected,r.outn);
+  claimed++;if(!ok)failed++;
+  printf("SLICE_START\ttarget=%s\tstatus=%s\texpected_version=%s\trc=%d\tstdout_bytes=%lu\tstderr_bytes=%lu\tscope=development-evidence\n",targets[i],ok?"PASS":"FAIL",version,r.rc,(unsigned long)r.outn,(unsigned long)r.errn);
+  if(run)fprintf(stderr,"check-loader-isa: execution failed: %s\n",why);
+  if(!ok){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);}
+  np_free(&r);
+ }
+ printf("LOADER_ISA_START\tclaimed=%d\tfailed=%d\tscope=development-evidence\n",claimed,failed);
+ return failed?1:0;
+}
