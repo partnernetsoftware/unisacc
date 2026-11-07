@@ -1,36 +1,54 @@
-/* 读 work/units.tsv；READY 经 tools/bound 跑 check；-j N 真并行。
- * sh ./unisacc.com tools/fan.cx -- [-j N] [--units FILE]
+/* fan: READY 跑 check；UNBOUND 无 --env 则打印 UNBOUND 不跑。
+ * --env ABS 必须绝对路径，缺文件具名 rc2，不回落。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
 #pragma unisa use sys.poll
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #define FAN_MAX 128
 #define FAN_J 8
 typedef struct {char id[80],check[4400];int pid,ofd,efd,live;} Job;
-static Job job[FAN_MAX]; static int nj,pass,fail;
+static Job job[FAN_MAX]; static int nj,pass,fail,unbound;
 static char boundp[4400],root[4400],outdir[4400];
 static void die(const char *s){fprintf(stderr,"fan: %s\n",s);exit(2);}
-static void load(const char *path){
+static void load_env(const char *path){
+    size_t n=0;char *b;char *at;
+    if(!path||path[0]!='/')die("--env must be absolute");
+    b=cx_read(path,&n);if(!b)die("--env missing");
+    at=b;
+    while(*at){char *e=strchr(at,'\n');char *eq;if(!e)break;*e=0;
+     if(at[0]&&at[0]!='#'){eq=strchr(at,'=');if(!eq)die("--env KEY=ABS");*eq=0;
+      if(eq[1]!='/')die("--env value must be absolute");
+      if(sy_setenv(at,eq+1,1))die("setenv");}
+     at=e+1;}
+    free(b);
+}
+static void load(const char *path,int run_unbound){
     size_t n=0;char *b=cx_read(path,&n),*at;if(!b)die("read units");
     at=b;
     while(*at){char *e=strchr(at,'\n');char *f[8];int nf=0;if(!e)break;*e=0;
      if(at[0]&&at[0]!='#'){char *p=at;f[nf++]=p;while(*p&&nf<8){if(*p=='\t'){*p=0;f[nf++]=p+1;}p++;}
-      if(nf>=6&&!strcmp(f[5],"READY")&&nj<FAN_MAX){
-          Job *J=&job[nj++];
-          if(strlen(f[0])>=sizeof J->id||strlen(f[4])>=sizeof J->check)die("field bound");
-          if(mm_copy(J->id,sizeof J->id,f[0],strlen(f[0])+1)||mm_copy(J->check,sizeof J->check,f[4],strlen(f[4])+1))die("copy");
-          J->pid=-1;J->ofd=J->efd=-1;J->live=0;
+      if(nf>=6&&nj<FAN_MAX){
+          int ready=!strcmp(f[5],"READY"), ub=!strcmp(f[5],"UNBOUND");
+          if(ready||(ub&&run_unbound)){
+              Job *J=&job[nj++];
+              if(strlen(f[0])>=sizeof J->id||strlen(f[4])>=sizeof J->check)die("field bound");
+              if(mm_copy(J->id,sizeof J->id,f[0],strlen(f[0])+1)||mm_copy(J->check,sizeof J->check,f[4],strlen(f[4])+1))die("copy");
+              J->pid=-1;J->ofd=J->efd=-1;J->live=0;
+          }else if(ub){
+              unbound++;printf("FAN_UNIT\tid=%s\tstatus=UNBOUND\n",f[0]);
+          }
       }
      }at=e+1;}
     free(b);
 }
-static void receipt(Job *J,int rc){
+static void receipt(Job *J,int rc,const char *st){
     char rec[4400],body[400];
     if(cx_fmt(rec,sizeof rec,"%s/%s.receipt",outdir,J->id))die("receipt path");
-    if(cx_fmt(body,sizeof body,"id=%s\trc=%d\tstatus=%s\n",J->id,rc,rc==0?"PASS":"FAIL"))die("receipt");
+    if(cx_fmt(body,sizeof body,"id=%s\trc=%d\tstatus=%s\n",J->id,rc,st))die("receipt");
     cx_write(rec,body,strlen(body));
 }
 static void finish(Job *J){
@@ -39,32 +57,38 @@ static void finish(Job *J){
     if(J->efd>=0){sy_close(J->efd);J->efd=-1;}
     if(sy_wait_status(J->pid,0,&ex,&code,&sig)<0){ex=1;code=255;}
     rc=ex?code:(128+sig);
-    receipt(J,rc);
+    receipt(J,rc,rc==0?"PASS":"FAIL");
     if(rc==0){pass++;printf("FAN_UNIT\tid=%s\tstatus=PASS\n",J->id);}
     else {fail++;printf("FAN_UNIT\tid=%s\tstatus=FAIL\n",J->id);}
     J->live=0;J->pid=-1;
 }
 int main(int argc,char **argv){
-    const char *units="work/units.tsv";int jobs=1,i,next=0,nrun=0,k;
+    const char *units="work/units.tsv",*envf=0;int jobs=1,i,next=0,nrun=0,k;
     long started,hard;
     for(i=1;i<argc;i++){
         if(!strcmp(argv[i],"-j")&&i+1<argc){jobs=atoi(argv[++i]);if(jobs<1||jobs>FAN_J)die("-j 1..8");}
         else if(!strcmp(argv[i],"--units")&&i+1<argc)units=argv[++i];
+        else if(!strcmp(argv[i],"--env")&&i+1<argc)envf=argv[++i];
         else if(!strcmp(argv[i],"--"))continue;
-        else die("usage -j N --units FILE");
+        else die("usage -j N --units FILE --env ABS");
     }
+    if(envf)load_env(envf);
     if(!realpath(".",root))die("cwd");
     if(cx_fmt(boundp,sizeof boundp,"%s/tools/bound",root))die("bound path");
     if(cx_fmt(outdir,sizeof outdir,"/tmp/fan-%d",sy_pid())||sy_mkdir(outdir,0700)<0)die("receipt dir");
-    load(units);started=sy_now_ms();hard=started+55000;
-    printf("FAN_DIR\t%s\tjobs=%d\tready=%d\n",outdir,jobs,nj);
+    load(units,envf!=0);
+    if(envf){int z;char tmp[4400];for(z=0;z<nj;z++){
+        if(cx_fmt(tmp,sizeof tmp,"set -a; . '%s'; %s",envf,job[z].check))die("wrap");
+        if(strlen(tmp)>=sizeof job[z].check||mm_copy(job[z].check,sizeof job[z].check,tmp,strlen(tmp)+1))die("wrap copy");}}
+    started=sy_now_ms();hard=started+55000;
+    printf("FAN_DIR\t%s\tjobs=%d\trun=%d\tunbound=%d\n",outdir,jobs,nj,unbound);
     while(next<nj||nrun){
         long now=sy_now_ms();
         while(nrun<jobs&&next<nj&&now<hard){
             Job *J=&job[next++];
             char *av[]={boundp,"8","sh","-c",J->check,0};
             J->pid=sy_spawn_pipe(av,root,SY_SPAWN_STDERR_SPLIT,&J->ofd,&J->efd);
-            if(J->pid<0){receipt(J,255);fail++;printf("FAN_UNIT\tid=%s\tstatus=FAIL\n",J->id);continue;}
+            if(J->pid<0){receipt(J,255,"FAIL");fail++;printf("FAN_UNIT\tid=%s\tstatus=FAIL\n",J->id);continue;}
             J->live=1;nrun++;
         }
         if(now>=hard){
@@ -88,7 +112,9 @@ int main(int argc,char **argv){
          }
         }
         for(k=0;k<nj;k++)if(job[k].live&&job[k].ofd<0&&job[k].efd<0){finish(&job[k]);nrun--;}
+        if(!nrun&&next>=nj)break;
+        if(!nrun&&next<nj&&now>=hard)break;
     }
-    printf("FAN_SUMMARY\tpass=%d\tfail=%d\telapsed_ms=%ld\tjobs_arg=%d\n",pass,fail,sy_now_ms()-started,jobs);
+    printf("FAN_SUMMARY\tpass=%d\tfail=%d\tunbound=%d\telapsed_ms=%ld\tjobs_arg=%d\n",pass,fail,unbound,sy_now_ms()-started,jobs);
     return fail?1:0;
 }
