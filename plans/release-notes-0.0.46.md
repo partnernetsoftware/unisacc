@@ -22,7 +22,7 @@ C99 编译器，自己写出可执行文件（ELF、Mach-O、PE），能编译�
 
 ## 已知限制（诚实披露）
 - 全批会话：[待证：s5 进行中，结果出来后填 PASS/FAIL/KNOWN-GAP/SESSION-INFRA 计数；SESSION-INFRA 不算合格]。
-- 逐切片固定点：[待证：win/arm64 缺口由 cdx 在做]。
+- 逐切片固定点：win/arm64 的 G2、G3 两代 PE 与 c46-2 随发切片 `slice-win-arm64` 字节相同（sha256 `1eee599bbcec474b31893ce8f4b85f46947145660cbd3dae74f07333866d4a56`；cdx 报，我已核该 sha 前缀与 c46-2 切片备份一致）；这是 Linux 宿主上的跨构造固定点，Windows 原生自举未声称（NOT_CLAIMED）；[待证：cdx 补丁合入并独立复跑后确认]。
 - `unisacc stream` 在没有显式绑定时默认读 `./unisacc.com`（相对 `UNISA_CONTAINER` 继承），在其他工作目录可能找不到包或加载到旧包；用 `--models` 显式绑定。
 - 沿用 0.0.45：22 种 C99 约束违例不报错（12 种可能产出错误代码）；`-c` 分开编译运行库不跨对象共享；手工拼 stream 管道 tape 无结束标记；预处理器接受两种非法输入；运行库在每对象各带一份；`#include <C:/x.h>` 尖括号不按盘符绝对路径处理；APE 内尚无 win/arm64 分发（用随发独立切片 `slice-win-arm64` 配 `pkg.bin`，`UNISA_CONTAINER` 指向）。
 - Windows 上 POSIX 部分（fork/waitpid/kill/F_SETFD/environ）无对应原语，未跑。
