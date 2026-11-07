@@ -1,0 +1,25 @@
+/* Release layout checks: fixed ZIP members, launcher, identity and corruption refusal, no product input. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+static int assertions,failed;
+static char root[4096],tmp[4096];
+static void ck(int ok,const char *s){assertions++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static int run(char **v,const char *cwd,char **out){np_result r={0};char why[512]={0};int rc;if(np_run(v,cwd,0,45,&r,why,sizeof why)){fprintf(stderr,"%s\n",why);return 125;}rc=r.rc;if(out){*out=calloc(1,r.outn+1);if(!*out)exit(2);mm_copy(*out,r.outn+1,r.out,r.outn);}np_free(&r);return rc;}
+static void writefile(const char *p,const char *s){FILE *f=fopen(p,"wb");if(!f||fwrite(s,1,strlen(s),f)!=strlen(s)||fclose(f))exit(2);}
+static int tool(const char *a,const char *b){char exe[4400],script[4400];char *v[]={"sh",exe,script,"--",(char *)a,(char *)b,0};if(cx_fmt(exe,sizeof exe,"%s/unisacc.com",root)||cx_fmt(script,sizeof script,"%s/tools/release-layout.cx",root))exit(2);return run(v,root,0);}
+int main(void){char src[4400],out[4400],p[4400],q[4400],*text=0;char dir[]="/tmp/check-release-layout-XXXXXX";char *v[12];
+    if(sy_cwd(root,sizeof root)<0||!mkdtemp(dir))return 2;if(cx_fmt(tmp,sizeof tmp,"%s",dir)||cx_fmt(src,sizeof src,"%s/src",tmp)||cx_fmt(out,sizeof out,"%s/out",tmp)||mkdir(src,0700))return 2;
+    if(cx_fmt(p,sizeof p,"%s/unisacc.com",src))return 2;writefile(p,"compiler fixture");if(cx_fmt(p,sizeof p,"%s/pkg.bin",src))return 2;writefile(p,"package fixture");if(cx_fmt(p,sizeof p,"%s/slice-win-arm64",src))return 2;writefile(p,"slice fixture");
+    v[0]="sha256sum";v[1]="unisacc.com";v[2]=0;if(run(v,src,&text)||strlen(text)<64)return 2;text[64]=0;if(cx_fmt(q,sizeof q,"{\"product_digest\": \"%s\",\"schema\":1}\n",text)||cx_fmt(p,sizeof p,"%s/unisacc.com.build.json",src))return 2;writefile(p,q);free(text);
+    ck(tool(src,out)==0,"generate-layout");ck(tool("--check",out)==0,"check-layout");ck(tool(src,out)!=0,"refuse-existing-output");
+    v[0]="sha256sum";v[1]="-c";v[2]="SHA256SUMS";v[3]=0;ck(run(v,out,0)==0,"external-checksums");
+    v[0]="unzip";v[1]="-Z1";v[2]="unisacc-0.0.46-win-arm64.zip";v[3]=0;ck(run(v,out,&text)==0&&!strcmp(text,"slice-win-arm64\npkg.bin\nrun.cmd\nREADME-win-arm64.txt\n"),"fixed-zip-members");free(text);
+    v[0]="unzip";v[1]="-p";v[2]="unisacc-0.0.46-win-arm64.zip";v[3]="run.cmd";v[4]=0;ck(run(v,out,&text)==0&&strstr(text,"UNISA_CONTAINER=%~dp0pkg.bin")&&strstr(text,"slice-win-arm64.exe\" %*")&&strstr(text,"exit /b %errorlevel%"),"launcher-container-and-arguments");free(text);
+    if(cx_fmt(p,sizeof p,"%s/pkg.bin",out))return 2;writefile(p,"Package fixture");ck(tool("--check",out)!=0,"one-byte-package-corruption-refused");writefile(p,"package fixture");
+    if(cx_fmt(p,sizeof p,"%s/unisacc-0.0.46-win-arm64.zip",out))return 2;{FILE *f=fopen(p,"ab");if(!f||fputc('X',f)==EOF||fclose(f))return 2;}
+    v[0]="sh";v[1]="-c";v[2]="sha256sum unisacc.com pkg.bin slice-win-arm64 unisacc.com.build.json build.json unisacc-0.0.46-win-arm64.zip > SHA256SUMS";v[3]=0;if(run(v,out,0))return 2;ck(tool("--check",out)!=0,"zip-corruption-refused-even-with-new-manifest");
+    v[0]="rm";v[1]="-rf";v[2]=tmp;v[3]=0;if(run(v,root,0))return 2;printf("RELEASE_LAYOUT_CHECK\tassertions=%d\tfailed=%d\n",assertions,failed);return failed?1:0;
+}
