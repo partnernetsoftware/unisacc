@@ -96,7 +96,8 @@
 | 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
 | 产品改动链预检 | `sh ./unisacc.com tools/chain-precheck.cx -- ROOT CHAIN_OUT NEW_OUT init --files LIST`（或 `--range A..B`），随后 `reuse`、逐项 `job`、`identity/routes/p3`、`probe include/drive/use/entry`、`slice all`、`finish` | 根/旧链/新输出均收绝对或相对路径，表清单收根内绝对路径并精确去重；旧控制器 ENOENT 时才回退旧链真实 `sl-lnx/candidate`，不吞权限/目录错误。未影响输入逐字节核对后显式复用；新作业逐状态、新包探针、lnx片全实跑才 `CHAIN_PRECHECK PASS`，不等于发布资格；检查器 `tools/check-chain-precheck.cx` |
 | Windows argv容量与布局 | `sh ./unisacc.com tools/win-argv-gen.cx -- --check . enc-x86win-winargs enc-armwin-winargs lower-data`；`PRODUCT=新包产品 sh ./unisacc.com tools/check-win-argv.cx` | `WIN_ARGVA_BYTES=131080`唯一事实推导16384项加NULL；双ISA边界/向量模式/显式NULL、PE虚拟尾与漂移负控；批次`win-argv`，Linux交叉检查不等于Windows原生通过 |
-| 表闭包静态预检 | `sh ./unisacc.com tools/table-lint.cx -- --root . --errors-only --limit 10`；`sh ./unisacc.com tools/check-table-lint.cx` | 查模式冲突、未定义引用、缺兜底及精确SB入口清理合同；支持根内call、有限facts/with/let/模板及确定flags。动态宏、fresh、条件和图编辑前置条件未证明者单列`UNRESOLVED`，`status=PARTIAL`且rc0仅表示无确定错误，不代替gen/新包/slice预检；批次`table-lint`保留三段历史失败回放与修后负控 |
+| 表闭包静态预检 | `sh ./unisacc.com tools/tsv-lint.cx -- --root . --errors-only --limit 10`；`sh ./unisacc.com tools/check-tsv-lint.cx` | 查模式冲突、未定义引用、缺兜底及精确SB入口清理合同；支持根内call、有限facts/with/let/模板及确定flags。动态宏、fresh、条件和图编辑前置条件未证明者单列`UNRESOLVED`，`status=PARTIAL`且rc0仅表示无确定错误，不代替gen/新包/slice预检；批次`tsv-lint`保留三段历史失败回放与修后负控 |
+| 构造前DELTA.json审计（旧工具已恢复） | `sh ./unisacc.com tools/table-lint.cx -- DELTA.json [--strict]` | 保留5596cb4310以来的total/reach/stale-r/t-keys/unwritten/maybe-unwritten等合同；`tests/delta-loader.cx`负责接受/拒绝消费回归。与新`tools/tsv-lint.cx`是不同功能，不能互相替代或共用入口 |
 | 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序→标签→用户数升序→名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
@@ -342,7 +343,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md) |
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、`work/ledger.tsv` |
 | 事实表 | 事实→对应生成器→产物，生成器须带`--check`；通用派生用facts-gen，Win argv专属表用win-argv-gen | `exec/facts/`、上方能力速查 |
-| 静态预检 | 模式/引用/兜底/SB合同先查；动态及未证明性质单列PARTIAL，不能用无确定错误替代真实gen/新包/slice | `tools/table-lint.cx`、`tools/check-table-lint.cx`、`tools/chain-precheck.cx` |
+| 静态预检 | 模式/引用/兜底/SB合同先查；动态及未证明性质单列PARTIAL，不能用无确定错误替代真实gen/新包/slice | `tools/tsv-lint.cx`、`tools/check-tsv-lint.cx`、`tools/chain-precheck.cx` |
 | 结构盘点与试点 | 81对象清单已交付，但对象体积不能冒称最终收益；fable否决tapegate整体迁移。当前先量最终entry.elf的节/符号/单元真实贡献，libc副本与asmtext候选待表后选择；BSS只记内存、不充文件减量 | `SLICE-CONTRIBUTION`、`plans/core-min-tapegate.md`评审结论、`plans/v0.0.46-unisacc.md` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
