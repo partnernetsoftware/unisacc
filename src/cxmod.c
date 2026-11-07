@@ -170,7 +170,9 @@ int cxm_load(char *path, int u) {
     if (n < 0) return 0 - 1;
     cxm_nsrc = n; s = cxm_src; s[n] = 0;
     i = 0;
-    if (n > 1 && s[0] == '#' && s[1] == '!') { while (i < n && s[i] != '\n') { s[i] = ' '; i = i + 1; } }
+    /* Match E2 P0S: only a complete UTF-8 BOM at physical source start. */
+    if (n >= 3 && (s[0] & 255) == 239 && (s[1] & 255) == 187 && (s[2] & 255) == 191) { s[0] = ' '; s[1] = ' '; s[2] = ' '; i = 3; }
+    if (i + 1 < n && s[i] == '#' && s[i + 1] == '!') { while (i < n && s[i] != '\n') { s[i] = ' '; i = i + 1; } }
     while (i < n) {
         if (s[i] == '\\' && i + 1 < n && s[i + 1] == '\n') { s[i] = 1; i = i + 2; continue; }
         if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {

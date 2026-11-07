@@ -1,0 +1,205 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+/* Usage: sh PRODUCT tests/check-source-bom.cx -- PRODUCT ROOT NEW_OUT [BASELINE_PRODUCT|- [HOST_CX_DRIVER]]
+ * NEW_OUT must not exist. All fixtures, stdout, stderr, rc and images survive failure.
+ * Each child uses ROOT/tools/bound (at most 12s); the entire matrix has a 52s
+ * deadline. Exhaustion is FAIL, never a skipped PASS. No normalization of E2,
+ * tape or image bytes is permitted, including cxmod's three replacement spaces.
+ * Without HOST_CX_DRIVER, cc (or gcc) must be installed: the check builds the
+ * real src/cxmod.c host driver inside NEW_OUT. Missing cc is FAIL, not PASS.
+ * Use '-' for BASELINE_PRODUCT to supply only HOST_CX_DRIVER. The mirror
+ * comparison checks exact unit closures, not private interface hash filenames.
+ * With no arguments, ROOT is cwd, PRODUCT is $PRODUCT or ROOT/unisacc.com,
+ * and NEW_OUT is an exclusive /tmp/check-source-bom-XXXXXX directory.
+ */
+static char root[4096], product[4096], dest[4096], bound[4096];
+static int checks, fails, serial;
+static long long started;
+static void die(const char *s) { fprintf(stderr, "check-source-bom: %s errno=%d\n", s, errno); exit(2); }
+static void path(char *p, const char *a, const char *b) { if (cx_path_join(p, 4096, a, b)) die("path overflow"); }
+static long long now(void) { sy_ts_t t; if (sy_mono(&t)) die("clock"); return (long long)t.sec * 1000000000LL + t.nsec; }
+static void note(int ok, const char *name) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); checks++; if (!ok) fails++; }
+static void put(const char *name, const char *s) { char p[4096]; path(p, dest, name); if (np_writefile(p, s, strlen(s))) die("fixture write"); }
+static int equal(const char *a, const char *b) {
+    size_t an = 0, bn = 0; char *ap = cx_read(a, &an), *bp = cx_read(b, &bn);
+    int ok = ap && bp && an == bn && !memcmp(ap, bp, an); free(ap); free(bp); return ok;
+}
+static int lexical_reject(const char *err) {
+    size_t n = 0; char *s = cx_read(err, &n);
+    int ok = s && np_count(s, n, "reject: unexpected character", 28) > 0;
+    free(s); return ok;
+}
+struct result { int rc; char out[4096], err[4096], image[4096]; };
+/* mode: 0 run, 1 stream e2, 2 tape, 3 image, 4 product plan, 5 native host plan, 6 host build. */
+static void invoke(const char *bin, const char *src, int mode, const char *inc, struct result *r) {
+    char source[4096], header[4096], sec[16], rel[80], why[1024], receipt[4096];
+    char *av[24]; int n = 0, pr, seconds; np_result rr;
+    if (cx_fmt(rel, sizeof rel, "%03d", serial++)) die("serial");
+    if (cx_fmt(receipt, sizeof receipt, "%s/%s.rc", dest, rel)) die("receipt path");
+    if (cx_fmt(r->out, sizeof r->out, "%s/%s.stdout", dest, rel) ||
+        cx_fmt(r->err, sizeof r->err, "%s/%s.stderr", dest, rel) ||
+        cx_fmt(r->image, sizeof r->image, "%s/%s.image", dest, rel)) die("artifact path");
+    seconds = (int)((52000000000LL - (now() - started)) / 1000000000LL);
+    if (seconds > 12) seconds = 12;
+    r->rc = -1;
+    if (seconds < 1) { if (np_writefile(r->err, "matrix deadline exhausted\n", 26)) die("deadline log"); fails++; return; }
+    if (cx_fmt(sec, sizeof sec, "%d", seconds)) die("seconds");
+    path(source, dest, src);
+    av[n++] = bound; av[n++] = sec; av[n++] = "sh"; av[n++] = "-c";
+    av[n++] = mode >= 5 ? "input=$1; shift; exec \"$@\" < \"$input\"" : "input=$1; shift; exec sh \"$@\" < \"$input\"";
+    av[n++] = "check-source-bom"; av[n++] = source; av[n++] = (char *)bin;
+    if (mode == 0) av[n++] = "-run";
+    if (mode == 1) {
+        av[n++] = "stream"; av[n++] = "e2"; av[n++] = "--level"; av[n++] = "2";
+        av[n++] = "--target"; av[n++] = "lnx/x86_64";
+        av[n++] = "--source"; av[n++] = "bom-input.c";
+    }
+    if (mode == 2) av[n++] = "-S";
+    if (mode == 2 || mode == 3) { av[n++] = "-o"; av[n++] = r->image; }
+    if (mode == 4 || mode == 5) av[n++] = "-cx-plan";
+    if (inc) { path(header, dest, inc); av[n++] = "-include"; av[n++] = header; }
+    if (mode != 1) av[n++] = source;
+    if (mode == 6) { av[n++] = root; av[n++] = dest; av[n++] = bound; }
+    av[n] = 0;
+    memset(&rr, 0, sizeof rr); why[0] = 0;
+    pr = np_run(av, dest, 0, seconds + 1, &rr, why, sizeof why);
+    if (np_writefile(r->out, rr.out ? rr.out : "", rr.outn) ||
+        np_writefile(r->err, pr ? why : (rr.err ? rr.err : ""), pr ? strlen(why) : rr.errn)) die("child log");
+    if (!pr) r->rc = rr.rc;
+    { char text[128]; if (cx_fmt(text, sizeof text, "rc=%d transport=%d mode=%d source=%s\n", r->rc, pr, mode, src)) die("receipt"); if (np_writefile(receipt, text, strlen(text))) die("receipt write"); }
+    np_free(&rr);
+}
+static void run(const char *name, const char *text, const char *inc) { struct result r; put(name, text); invoke(product, name, 0, inc, &r); note(r.rc == 0, name); }
+static void pair(const char *name, const char *plain, const char *bom, const char *base) {
+    int mode; struct result a, b;
+    for (mode = 1; mode <= 3; mode++) {
+        char label[160]; invoke(product, bom, mode, 0, &a); invoke(base, plain, mode, 0, &b);
+        if (cx_fmt(label, sizeof label, "%s/%s/byte-equal", name, mode == 1 ? "e2" : mode == 2 ? "tape" : "image")) die("label");
+        note(a.rc == 0 && b.rc == 0 && equal(mode != 1 ? a.image : a.out, mode != 1 ? b.image : b.out), label);
+    }
+}
+/* Inspect only the plan's unit identity and forced-include fields; interface
+ * filenames are implementation-private and are deliberately not compared. */
+static int closure(const struct result *r) {
+    char mainpath[4096], leafpath[4096], first[8192], last[8192];
+    size_t n = 0, a, b, k; char *s; int ok = 0;
+    if (r->rc != 0) return 0;
+    path(mainpath, dest, "mirror-main.cx"); path(leafpath, dest, "mirrorleaf.cx");
+    if (cx_fmt(first, sizeof first, "0\t%s\tcx.h\t", mainpath) ||
+        cx_fmt(last, sizeof last, "1\t%s\tcx.h\n", leafpath)) die("plan prefix");
+    s = cx_read(r->out, &n); a = strlen(first); b = strlen(last);
+    if (s && n > a + b && !memcmp(s, first, a)) {
+        k = a; while (k < n && s[k] != '\n' && s[k] != '\t') k++;
+        ok = k > a && k < n && s[k] == '\n' && n - k - 1 == b && !memcmp(s + k + 1, last, b);
+    }
+    free(s); return ok;
+}
+static int named_scan_reject(const struct result *r, const char *name) {
+    size_t n = 0; char *s = cx_read(r->err, &n);
+    const char *why = "unisa pragma after first declaration";
+    int ok = r->rc == 1 && s && np_count(s, n, why, strlen(why)) == 1 && np_count(s, n, name, strlen(name)) > 0;
+    free(s); return ok;
+}
+static void mirrors(const char *host) {
+    struct result p, h; int i; char built[4096];
+    const char *negative[2] = { "mirror-repeat.cx", "mirror-after.cx" };
+    if (!host[0]) {
+        /* Real C mirror, using the same compilation units and flags as
+         * tests/cx-host-run.cx. Host cc/gcc is a required dependency. */
+        put("build-host.sh",
+            "set -eu\nroot=$1; out=$2; bound=$3\n"
+            "cc=$(command -v cc || command -v gcc) || { echo 'check-source-bom: host C compiler cc/gcc required' >&2; exit 2; }\n"
+            "\"$bound\" 12 \"$cc\" -std=c99 -Werror=implicit-function-declaration -include stdlib.h -DCXM_HOST_REALPATH -c \"$root/src/cxmod.c\" -o \"$out/host-cxmod.o\"\n"
+            "\"$bound\" 12 \"$cc\" -std=c99 -Werror=implicit-function-declaration -include \"$root/include/cx.h\" -x c -c \"$root/tools/cxcc.cx\" -o \"$out/host-cxcc.o\"\n"
+            "\"$bound\" 12 \"$cc\" -std=c99 -Werror=implicit-function-declaration -include \"$root/include/cx.h\" -x c -c \"$root/tools/cxproc.cx\" -o \"$out/host-cxproc.o\"\n"
+            "\"$bound\" 12 \"$cc\" -std=c99 -Werror=implicit-function-declaration -include \"$root/include/cx.h\" -x c -c \"$root/tools/gcc_cx.cx\" -o \"$out/host-main.o\"\n"
+            "\"$bound\" 12 \"$cc\" -std=c99 -o \"$out/bom-host-driver\" \"$out/host-cxmod.o\" \"$out/host-cxcc.o\" \"$out/host-cxproc.o\" \"$out/host-main.o\"\n");
+        invoke("sh", "build-host.sh", 6, 0, &h);
+        note(h.rc == 0, "cxmod-mirror/build-host-cc-required");
+        if (h.rc != 0) return;
+        path(built, dest, "bom-host-driver"); host = built;
+    }
+    put("mirrorleaf.cx", "\357\273\277#pragma unisa module mirrorleaf\nint mirror_value(void){return 0;}\n");
+    put("mirror-main.cx", "\357\273\277#pragma unisa use mirrorleaf\nint main(void){return mirror_value();}\n");
+    invoke(product, "mirror-main.cx", 4, 0, &p); invoke(host, "mirror-main.cx", 5, 0, &h);
+    note(closure(&p) && closure(&h), "cxmod-mirror/BOM-use-module/exact-closure");
+    put(negative[0], "\357\273\277\357\273\277\n#pragma unisa use mirrorleaf\nint main(void){return 0;}\n");
+    put(negative[1], "int before;\n#pragma unisa use mirrorleaf\nint main(void){return 0;}\n");
+    for (i = 0; i < 2; i++) {
+        invoke(product, negative[i], 4, 0, &p); invoke(host, negative[i], 5, 0, &h);
+        note(p.rc == h.rc && named_scan_reject(&p, negative[i]) && named_scan_reject(&h, negative[i]), negative[i]);
+    }
+}
+int main(int argc, char **argv) {
+    char baseline[4096], host[4096]; int i;
+    static const char *const bad[] = { "\357\273\277", "\377\376", "\376\377", "\357", "\357\273", "\357\273\277\357\273\277" };
+    static const char *const names[] = { "middle", "fffe", "feff", "ef", "efbb", "repeated" };
+    if (argc >= 5 && argc <= 7 && !strcmp(argv[1], "--")) { argv++; argc--; }
+    baseline[0] = 0; host[0] = 0;
+    if (argc == 1) {
+        char fallback[4096]; const char *selected = getenv("PRODUCT");
+        if (!getcwd(root, sizeof root)) die("cwd ROOT");
+        path(fallback, root, "unisacc.com");
+        if (!realpath(selected && selected[0] ? selected : fallback, product)) die("PRODUCT");
+        if (cx_fmt(dest, sizeof dest, "/tmp/check-source-bom-XXXXXX") || !mkdtemp(dest)) die("exclusive NEW_OUT");
+    } else {
+        if (argc < 4 || argc > 6) die("usage: PRODUCT ROOT NEW_OUT [BASELINE_PRODUCT|- [HOST_CX_DRIVER]]");
+        if (!realpath(argv[1], product) || !realpath(argv[2], root)) die("PRODUCT/ROOT");
+        if (argc >= 5 && strcmp(argv[4], "-") && !realpath(argv[4], baseline)) die("BASELINE_PRODUCT");
+        if (argc == 6 && !realpath(argv[5], host)) die("HOST_CX_DRIVER");
+        if (sy_mkdir(argv[3], 0700) || !realpath(argv[3], dest)) die("NEW_OUT must be new");
+    }
+    printf("SOURCE_BOM_MATERIAL\t%s\n", dest);
+    path(bound, root, "tools/bound"); unsetenv("UNISA_CONTAINER"); started = now();
+    put("forced.h", "#define FORCED 0\n");
+    run("main.c", "\357\273\277int main(void){return 0;}\n", 0);
+    run("main.cx", "\357\273\277int main(void){return 0;}\n", 0);
+    run("forced.c", "\357\273\277int main(void){return FORCED;}\n", "forced.h");
+    run("forced.cx", "\357\273\277int main(void){return FORCED;}\n", "forced.h");
+    run("forced-clean.cx", "int main(void){return FORCED;}\n", "forced.h");
+    put("direct.h", "\357\273\277#define DIRECT 0\n");
+    run("direct.c", "#include \"direct.h\"\nint main(void){return DIRECT;}\n", 0);
+    put("inner.h", "\357\273\277#define INNER 0\n"); put("outer.h", "\357\273\277#include \"inner.h\"\n");
+    run("nested.c", "#include \"outer.h\"\nint main(void){return INNER;}\n", 0);
+    run("crlf.c", "\357\273\277\r\nint main(void){return 0;}\r\n", 0);
+    run("literal.c", "int main(void){unsigned char *p=(unsigned char*)\"\357\273\277\";return !(p[0]==239&&p[1]==187&&p[2]==191&&p[3]==0);}\n", 0);
+    run("comment.c", "/*\357\273\277*/int main(void){return 0;} //\357\273\277\n", 0);
+    put("bommod.cx", "\357\273\277#pragma unisa module bommod\nint bomvalue(void){return 0;}\n");
+    run("closure.cx", "\357\273\277#pragma unisa use bommod\nint main(void){return bomvalue();}\n", 0);
+    put("forcedmod.cx", "\357\273\277#pragma unisa module forcedmod\nint forcedvalue(void){return FORCED;}\n");
+    run("forced-closure.cx", "\357\273\277#pragma unisa use forcedmod\nint main(void){return forcedvalue();}\n", "forced.h");
+    /* Empty units agree at E2 and retain the compiler's missing-main refusal. */
+    { struct result a, b; put("empty.c", ""); put("only-bom.c", "\357\273\277"); invoke(product, "empty.c", 1, 0, &a); invoke(product, "only-bom.c", 1, 0, &b); note(a.rc == 0 && b.rc == a.rc && equal(a.out, b.out), "empty/only-bom-contract"); }
+    { struct result a, b; invoke(product, "empty.c", 2, 0, &a); invoke(product, "only-bom.c", 2, 0, &b); note(a.rc == 1 && b.rc == a.rc && !lexical_reject(b.err), "empty/only-bom-no-main-not-E1"); }
+    for (i = 0; i < 8; i++) {
+        char a[80], b[80], text[1024], label[120]; struct result x, y;
+        const char *bytes = i < 6 ? bad[i] : "\357\273\277";
+        const char *prefix = i == 6 ? "\r\n" : i == 7 ? "#include \"direct.h\"\n" : " ";
+        if (cx_fmt(a, sizeof a, "reject-%d.c", i) || cx_fmt(b, sizeof b, "control-%d.c", i)) die("reject name");
+        if (cx_fmt(text, sizeof text, "%s%s", i > 0 && i < 6 ? "" : prefix, bytes)) die("reject text"); put(a, text);
+        /* The same illegal bytes at a non-initial position pin E1's rc. */
+        if (cx_fmt(text, sizeof text, "\n%s", bytes)) die("control text"); put(b, text);
+        invoke(product, a, 2, 0, &x); invoke(product, b, 2, 0, &y);
+        if (cx_fmt(label, sizeof label, "E1/%s/rc-equal", i < 6 ? names[i] : i == 6 ? "after-crlf" : "parent-return")) die("label");
+        note(x.rc == 1 && y.rc == 1 && x.rc == y.rc && lexical_reject(x.err) && lexical_reject(y.err), label);
+    }
+    put("equiv.c", "int main(void){return 0;}\n"); put("equiv-bom.c", "\357\273\277int main(void){return 0;}\n");
+    put("equiv.cx", "int main(void){return 0;}\n"); put("equiv-bom.cx", "\357\273\277int main(void){return 0;}\n");
+    pair("C-BOM", "equiv.c", "equiv-bom.c", product); pair("cx-BOM", "equiv.cx", "equiv-bom.cx", product);
+    put("equiv-crlf.c", "int main(void){return 0;}\r\n"); put("equiv-bom-crlf.c", "\357\273\277int main(void){return 0;}\r\n");
+    pair("C-BOM-CRLF", "equiv-crlf.c", "equiv-bom-crlf.c", product);
+    if (baseline[0]) {
+        static const char *const examples[] = { "hello", "fact", "fib" };
+        for (i = 0; i < 3; i++) {
+            char rel[100], original[4096], local[100]; size_t len; char *bytes;
+            if (cx_fmt(rel, sizeof rel, "examples/%s.c", examples[i]) || cx_fmt(local, sizeof local, "baseline-%s.c", examples[i])) die("baseline path");
+            path(original, root, rel); bytes = cx_read(original, &len); if (!bytes) die("baseline corpus");
+            path(original, dest, local); if (np_writefile(original, bytes, len)) die("baseline fixture"); free(bytes);
+            pair(examples[i], local, local, baseline);
+        }
+        pair("CRLF", "equiv-crlf.c", "equiv-crlf.c", baseline);
+    }
+    mirrors(host);
+    printf("SOURCE_BOM\tchecks=%d\tfailed=%d\n", checks, fails); return fails ? 1 : 0;
+}
