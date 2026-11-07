@@ -14,6 +14,7 @@ C99 编译器，自己写出可执行文件（ELF、Mach-O、PE），能编译�
 - UTF-8 BOM 开头的源文件被拒绝：已修（物理源 BOM 支持，保留对非法位置 BOM 的拒绝）；另修了无 BOM 时显式 `-include` 的宏在 `-run` 丢失的既有缺陷。
 - Darwin 单调时钟、sysx 有界等待、strdup 等 Windows 运行期问题：已修。
 - k2 构造名与依赖事实身份同步（构造链内部）。
+- 行为变化：Darwin 上 `SIGUSR1` 常量由 10 改为 30（与系统一致）；旧编译产物里硬编码的 `raise(10)` 在 macOS 上语义不同。
 
 ## 新增（开发/测试基础设施，非用户功能）
 - 测试 loader（`tools/test-loader.cx`）：显式绑定 slice/pkg 启动，支持单网替换与按 ISA 本机启动检查；缺绑定具名拒绝，不回落读 `./unisacc.com`。仅开发证据。
