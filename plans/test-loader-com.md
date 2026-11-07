@@ -69,3 +69,10 @@ C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、�
 覆盖并集为0–39共40个唯一M；9、12、13的交叠只算一次，不用重复用例充覆盖数。三新增批已由register实际登记/运行通过，父合成干净私有根13棘轮全过，工具真实/基线78551；分别净增41、36、56行。特殊接口帧只证冻结包的stream消费，不冒认归档libunisacc公共API资格；18事实网仍独立gold/kernel/nets轨，不因40M绿而关闭。
 
 原始证据：共享七mode `/tmp/check-loader-common-{nefazb,dfzglb,zinhpg,xiampp,clvpjm,frzdis,ksozlb}`；特殊 `/tmp/check-loader-special-mjhciz`；跨目标 `/tmp/ev-targetrun-lnx-x64`、`/tmp/final-verify-lnx-arm64`、`/tmp/osx-x64-evidence`、`/tmp/receipt-osx-arm64-final.txt`、`/tmp/evidence-win-x64`、`/tmp/receipt-win-arm64-final.txt`。每格具体载体、三态stdout/stderr/status及M记录在其输出标出的 `/tmp/check-loader-targets-*` 目录，未删原注册超时/错误funit载体等失败。
+
+## c46-2 部件开发验证（2026-11-07）
+
+- 输入为候选 APE `c1309d112ba1d389a296ef701f864d56cc06fe281eea98f621a51d8d2b429caf`，不沿用上节 0.0.45 的 PASS。直接提取 Linux x86_64 gzip 切片并核 CRC；提取包与候选备份 `pkg.bin` 逐字节相同，切片真实启动输出 `unisacc 0.0.46`。
+- 部件目录 `/tmp/cdx-c46-loader-FII4Hd/`：slice SHA `9ff8987634cce362e5a59036e77e1dc6adc5d4c963c66d480d015d37874b79af`，pkg SHA `29e13aeb8c62a09c0323a9d86dcd51ab8b35684696264b3fc66571d79654ef6c`。loader SHA `15738d02b0ee7a1aafc78037e73d6fd32ff4dff068158822361f4ca1ab9c3cc9`，swap SHA `1030283a455d3d49e0a17e7c071be119ee81f8025ef9d2464bc5828ce22a0a5d`。
+- 五项 `TEST_LOADER_*` 绝对路径绑定后，经候选默认-run 执行当前检查源码；每次调用独立 `tools/bound 55`。八模板 `LOADER_NET_REPLACEMENT assertions=46 failed=0`，证据 `/tmp/check-loader-nets-xzikdz`；特殊接口 `LOADER_SPECIAL assertions=21 failed=0`，证据 `/tmp/cdx-c46-special-evidence/` 与 `/tmp/check-loader-special-vodabs`。
+- common 七 mode（pp/tapecheck/o2/units/tokens-pp/tokens-lex/warn）本轮各 `assertions=10 failed=0`、rc0，日志 `/tmp/cdx-c46-common-evidence.bDi0qf/`。targets 六目标 × image/object 十二格本轮各 `models=2 assertions=14 failed=0 native-execution=NONE`、rc0，完整命令与末行见 `/tmp/cdx-c46-targets-evidence/summary.json`。连同八模板与特殊接口，本轮并集覆盖 M0–M39，断言总计 305、失败 0；交叠模型不重复计数。只证部署模型开发合同，不代替 18 事实网或六目标原生发布资格。
