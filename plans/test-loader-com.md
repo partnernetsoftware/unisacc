@@ -10,6 +10,8 @@
 
 接口：`test-loader --slice ABS --models ABS [--identity] [--net STAGE=ABS_FILE --swap-tool ABS] -- PRODUCT_ARGS...`。A 的 `--identity` 为 stderr 收据开关，不是路径。B 先支持一条显式 `--net`，重复拒绝，不引入目录猜测布局；`--swap-tool` 显式绑定现有 p3-swap 可执行件，禁止隐式寻找仓根产品。所有路径必须绝对且可读，子进程工作目录变化不改变输入；缺任一必需绑定立即非零退出，不能从环境猜候选，不能回落 `./unisacc.com`。`--models` 首版仅接受 pkg 容器文件，拒绝目录；单网由既有 p3-swap 替换成私有容器后仍走原产品 loader，不宣称产品已经原生支持目录装载。
 
+索引扩展：`--net INDEX=ABS_FILE` 的全数字 KEY 是显式 M 索引，复用 p3-swap 既有数值入口；非数字 KEY 保留阶段首 D 选择语义。空索引、负数、溢出及包内模型数越界均实际具名拒绝；精确 `stage+route` 的共享选择器返回该 D 对应 M，不再将 x86 lower-M13误作arm64首D-M9。父实跑原检查24/0（原19项保留）与八模板46/0，工具净+9行；当前main干净私有13棘轮全过，实际/基线78418。八模板唯一M为0、1、4、6、8、9、12、13，其中prune-M8变异实际被消费并拒绝，不用假NOT_CLAIMED成功兜底。证据 `/tmp/loader-index-parent-boundary`、`/tmp/check-loader-nets-gqnatt`。
+
 每次执行记录 loader、slice、pkg、实际使用的流/网文件 sha256、字节数、目标、参数及退出码。尚未可拆出的流/网必须明确记录由哪个 pkg 提供以及该 pkg 身份，不把源码表 sha 冒充运行网文件 sha。运行前后复核输入不变；缺文件、不可读、哈希不符均拒绝。APE 身份是 `F(loader, 有序切片, pkg, 打包参数)` 的确定性产物；开发收据不能凭部件相同推导整个 APE 相同。只有实际提取并核对该 APE 的内部件 sha 后，才能记与其部件一致。
 
 B 块必须支持外部单个网文件替换包内同名网（至少一个网），逐网记录原始/替换 sha，不能仅换启动入口。复用 `tools/lab-loader/p3-swap.cx:60-78,163-208`：`PKG MODEL OUT NEW_NET --model`；实际实现接受整 M 记录、UNINETB1 二进制、经 `nw_binary_net` 转换的 N 文本网（文件头注释过时，不作为拒绝合同）。输出裸包正文，补 footer 后送原 slice，产品仍经 `pm_open`。同 M 记录替换要求包及行为逐字节相同；正文重压不要求压缩字节相同，但执行结果须相同。变异网必须有可观测结果差异或具名拒绝，证明实际消费替换文件，不能只验证收据。按 A（严格绑定与负控）、B（逐网身份与替换）、C（批适配与登记）小块推进，反馈环不超过 15 分钟；未分片验证不触整链/CI/全批。
