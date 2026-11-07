@@ -1,62 +1,58 @@
-/* release-layout: package caller-supplied CI-verified c46-3 assets; does not grant CI qualification.
- * tools/release-layout.cx -- SOURCE NEW_OUT | --check OUT; requires sha256sum, never modifies SOURCE.
- * Stored ZIP is reconstructed byte-for-byte on check: fixed names, bytes, CRC and metadata, no extra entries.
- * build.json retains the paired product record; SHA256SUMS covers all six published files, not itself. */
+/* Candidate layout packaging validates bytes, not Windows execution or CI qualification.
+ * --candidate TABLE SOURCE NEW_OUT | --candidate TABLE --check OUT
+ * Stored ZIP has fixed members and metadata; manifest covers roles 0..5, never itself. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
-#pragma unisa use sys.env
+#pragma unisa use sys.sig
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
 #pragma unisa use text.deflate
-static char zip_asset[128];
-static const char *asset[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json","build.json",zip_asset};
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+static RcCandidate candidate;
 static const char *member[]={"slice-win-arm64","pkg.bin","run.cmd","README-win-arm64.txt"};
 static const char *launcher="@echo off\r\nsetlocal\r\nset \"UNISA_CONTAINER=%~dp0pkg.bin\"\r\ncopy /y /b \"%~dp0slice-win-arm64\" \"%~dp0slice-win-arm64.exe\" >nul || exit /b 1\r\n\"%~dp0slice-win-arm64.exe\" %*\r\nexit /b %errorlevel%\r\n";
 static const char *readme="Windows ARM64: keep all four files together. From cmd, run run.cmd --version or run.cmd hello.c.\r\nThe launcher copies the CI-verified slice to .exe and sets UNISA_CONTAINER to this directory's pkg.bin.\r\nThe packaging check verifies layout and checksums, not Windows execution or CI qualification.\r\n";
 static char scratch[4096];
-static void cleanup(void){int i;char p[4400];if(!*scratch)return;for(i=0;i<4;i++){if(!cx_fmt(p,sizeof p,"%s/%s",scratch,member[i]))unlink(p);}if(!cx_fmt(p,sizeof p,"%s/expected.zip",scratch))unlink(p);if(!cx_fmt(p,sizeof p,"%s/expected.sha",scratch))unlink(p);rmdir(scratch);*scratch=0;}
-static void fail(const char *s){cleanup();fprintf(stderr,"RELEASE_LAYOUT REFUSE %s\n",s);exit(2);}
-static void path(char *p,const char *root,const char *name){if(cx_fmt(p,4400,"%s/%s",root,name))fail("path bound");}
-static FILE *openfile(const char *p,const char *mode){FILE *f=fopen(p,mode);if(!f)fail(p);return f;}
-static void closefile(FILE *f){if(fclose(f))fail("close");}
-static void copyfile(const char *src,const char *dst){char b[32768];size_t n;FILE *a=openfile(src,"rb"),*o=openfile(dst,"wb");while((n=fread(b,1,sizeof b,a)))if(fwrite(b,1,n,o)!=n)fail("write");if(ferror(a))fail("read");closefile(a);closefile(o);}
-static int equal(const char *a,const char *b){char x[4096],y[4096];size_t n,m;int same=1;FILE *f=openfile(a,"rb"),*g=openfile(b,"rb");do{n=fread(x,1,sizeof x,f);m=fread(y,1,sizeof y,g);if(n!=m||memcmp(x,y,n))same=0;}while(same&&n);if(ferror(f)||ferror(g))fail("read");closefile(f);closefile(g);return same;}
-static void put(FILE *f,unsigned long v,int n){while(n--){if(fputc(v&255,f)==EOF)fail("zip write");v>>=8;}}
-static void bytes(FILE *f,const char *s,size_t n){if(fwrite(s,1,n,f)!=n)fail("zip write");}
-static unsigned long crc(const char *p,unsigned long *len){unsigned long c=0;unsigned char b[32768];size_t n;FILE *f=openfile(p,"rb");*len=0;while((n=fread(b,1,sizeof b,f))){*len+=n;if(*len>0x7fffffffUL)fail("zip size");c=dz_crc32(c,b,(long)n);}if(ferror(f))fail("crc read");closefile(f);return c;}
-static void zip(const char *root,const char *out){unsigned long sum[4],len[4],off[4],start,end;int i;char p[4400],b[32768];size_t n;FILE *z=openfile(out,"wb");
-    for(i=0;i<4;i++){FILE *f;const char *s=member[i];path(p,root,s);sum[i]=crc(p,&len[i]);off[i]=(unsigned long)ftell(z);put(z,0x04034b50,4);put(z,20,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,33,2);put(z,sum[i],4);put(z,len[i],4);put(z,len[i],4);put(z,strlen(s),2);put(z,0,2);bytes(z,s,strlen(s));f=openfile(p,"rb");while((n=fread(b,1,sizeof b,f)))bytes(z,b,n);if(ferror(f))fail("zip source");closefile(f);}
-    start=(unsigned long)ftell(z);for(i=0;i<4;i++){const char *s=member[i];put(z,0x02014b50,4);put(z,20,2);put(z,20,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,33,2);put(z,sum[i],4);put(z,len[i],4);put(z,len[i],4);put(z,strlen(s),2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,0,4);put(z,off[i],4);bytes(z,s,strlen(s));}
-    end=(unsigned long)ftell(z);put(z,0x06054b50,4);put(z,0,2);put(z,0,2);put(z,4,2);put(z,4,2);put(z,end-start,4);put(z,start,4);put(z,0,2);closefile(z);
+static long length(const char *s){long n=tx_len(s,1<<20);if(n<0)sy_exit(2);return n;}
+static void path(char *p,const char *root,const char *name){int n=tx_snprintf(p,4400,"%s/%s",root,name);if(n<0||n>=4400)sy_exit(2);}
+static void cleanup(void){int i;char p[4400];if(!scratch[0])return;for(i=0;i<4;i++){path(p,scratch,member[i]);sy_unlink(p);}path(p,scratch,"expected.zip");sy_unlink(p);path(p,scratch,"expected.sha");sy_unlink(p);sy_rmdir(scratch);scratch[0]=0;}
+static void fail(const char *s){cleanup();sy_write_all(2,"RELEASE_LAYOUT REFUSE ",22);sy_write_all(2,s,length(s));sy_write_all(2,"\n",1);sy_exit(2);}
+static void verify(const char *root,int count){char why[512]={0};if(rcand_verify(&candidate,root,count,why,sizeof why))fail(why);}
+static int openfile(const char *p,int writing){int f=writing?sy_open(p,O_WRONLY|O_CREAT|O_TRUNC,0600):sy_open_read(p);if(f<0)fail(p);return f;}
+static void closefile(int f){if(sy_close(f))fail("close");}
+static void copyfile(const char *src,const char *dst){if(sy_copy(src,dst,0600))fail("copy");}
+static int equal(const char *a,const char *b){char x[4096],y[4096];long n,m;int same=1,f=openfile(a,0),g=openfile(b,0);do{n=sy_read(f,x,sizeof x);if(n<0)fail("read");m=0;while(m<n){long k=sy_read(g,y+m,n-m);if(k<0)fail("read");if(!k)break;m+=k;}if(n!=m||!tx_same(x,n,y,m))same=0;if(!n){m=sy_read(g,y,1);if(m<0)fail("read");if(m)same=0;}}while(same&&n);closefile(f);closefile(g);return same;}
+static void bytes(int f,const char *s,long n){if(sy_write_all(f,s,n))fail("write");}
+static void put(int f,unsigned long v,int n){char b[4];int i;for(i=0;i<n;i++){b[i]=v&255;v>>=8;}bytes(f,b,n);}
+static unsigned long crc(const char *p,unsigned long *len){unsigned long c=0;unsigned char b[32768];long n;int f=openfile(p,0);*len=0;while((n=sy_read(f,b,sizeof b))>0){*len+=n;if(*len>0x7fffffffUL)fail("zip size");c=dz_crc32(c,b,n);}if(n<0)fail("crc read");closefile(f);return c;}
+static unsigned long position(int f){long n=sy_lseek(f,0,SEEK_CUR);if(n<0)fail("zip position");return (unsigned long)n;}
+static void zip(const char *root,const char *out){unsigned long sum[4],len[4],off[4],start,end;int i;char p[4400],b[32768];long n;int z=openfile(out,1);
+    for(i=0;i<4;i++){int f;const char *s=member[i];path(p,root,s);sum[i]=crc(p,&len[i]);off[i]=position(z);put(z,0x04034b50,4);put(z,20,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,33,2);put(z,sum[i],4);put(z,len[i],4);put(z,len[i],4);put(z,length(s),2);put(z,0,2);bytes(z,s,length(s));f=openfile(p,0);while((n=sy_read(f,b,sizeof b))>0)bytes(z,b,n);if(n<0)fail("zip source");closefile(f);}
+    start=position(z);for(i=0;i<4;i++){const char *s=member[i];put(z,0x02014b50,4);put(z,20,2);put(z,20,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,33,2);put(z,sum[i],4);put(z,len[i],4);put(z,len[i],4);put(z,length(s),2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,0,2);put(z,0,4);put(z,off[i],4);bytes(z,s,length(s));}
+    end=position(z);put(z,0x06054b50,4);put(z,0,2);put(z,0,2);put(z,4,2);put(z,4,2);put(z,end-start,4);put(z,start,4);put(z,0,2);closefile(z);
 }
-static void hash(const char *root,const char *name,char *digest){char *v[]={"sha256sum","--",(char *)name,0};np_result r={0};char why[512]={0};int i;if(np_run(v,root,0,10,&r,why,sizeof why)||r.rc||r.outn<65)fail("sha256sum");for(i=0;i<64;i++){char c=r.out[i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))fail("digest");digest[i]=c;}digest[64]=0;np_free(&r);}
-static void manifest(const char *root,const char *dest){int i;char h[65];FILE *f=openfile(dest,"wb");for(i=0;i<6;i++){hash(root,asset[i],h);if(fprintf(f,"%s  %s\n",h,asset[i])<0)fail("manifest write");}closefile(f);}
-static void literal(const char *root,const char *name,const char *text){char p[4400];FILE *f;path(p,root,name);f=openfile(p,"wb");bytes(f,text,strlen(text));closefile(f);}
-static void paired(const char *root){char p[4400],q[4400],h[65],key[128];size_t n;char *record;hash(root,asset[0],h);path(p,root,asset[3]);record=cx_read(p,&n);if(!record)fail("build record");if(cx_fmt(key,sizeof key,"\"product_digest\": \"%s\"",h)||!strstr(record,key))fail("unpaired product digest");free(record);path(q,root,"build.json");if(!equal(p,q))fail("build.json differs from paired record");}
-static void check(const char *root){
-    char temp[]="/tmp/release-layout-check-XXXXXX",p[4400],q[4400];
-    if(!mkdtemp(temp))fail("check temporary directory");
-    if(cx_fmt(scratch,sizeof scratch,"%s",temp))fail("scratch path");
-    paired(root);literal(temp,member[2],launcher);literal(temp,member[3],readme);
-    path(p,root,member[0]);path(q,temp,member[0]);copyfile(p,q);
-    path(p,root,member[1]);path(q,temp,member[1]);copyfile(p,q);
-    path(q,temp,"expected.zip");zip(temp,q);path(p,root,asset[5]);
-    if(!equal(p,q))fail("zip fixed contents");
-    path(q,temp,"expected.sha");manifest(root,q);path(p,root,"SHA256SUMS");
-    if(!equal(p,q))fail("checksum manifest");
-    cleanup();printf("RELEASE_LAYOUT\tstatus=PASS\n");
+static void hash(const char *root,const char *name,char *digest){char *v[]={"sha256sum","--",(char *)name,0};np_result r={0};char why[512]={0};int i,bad=0;if(np_run(v,root,0,10,&r,why,sizeof why)||r.rc||r.outn<65){np_free(&r);fail("sha256sum");}for(i=0;i<64;i++){char c=r.out[i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))bad=1;digest[i]=c;}digest[64]=0;np_free(&r);if(bad)fail("digest");}
+static void manifest(const char *root,const char *dest){int i,f=openfile(dest,1);char h[65];for(i=0;i<6;i++){hash(root,candidate.name[i],h);bytes(f,h,64);bytes(f,"  ",2);bytes(f,candidate.name[i],length(candidate.name[i]));bytes(f,"\n",1);}closefile(f);}
+static void literal(const char *root,const char *name,const char *text){char p[4400];int f;path(p,root,name);f=openfile(p,1);bytes(f,text,length(text));closefile(f);}
+static void paired(const char *root){char p[4400],q[4400],h[65],key[128],b[4096];long n,used=0,k;int f,found=0;hash(root,candidate.name[0],h);k=tx_snprintf(key,sizeof key,"\"product_digest\": \"%s\"",h);if(k<0||k>=sizeof key)fail("digest key");path(p,root,candidate.name[3]);f=openfile(p,0);while((n=sy_read(f,b+used,sizeof b-used))>0){long total=used+n;if(tx_contains(b,total,key,k))found=1;used=total<k-1?total:k-1;{long i;for(i=0;i<used;i++)b[i]=b[total-used+i];}}if(n<0)fail("build record read");closefile(f);if(!found)fail("unpaired product digest");path(q,root,candidate.name[4]);if(!equal(p,q))fail("build alias differs from paired record");}
+static void check(const char *root){char p[4400],q[4400];int attempt;
+    verify(root,7);paired(root);
+    for(attempt=0;attempt<100;attempt++){int n=tx_snprintf(scratch,sizeof scratch,"/tmp/release-layout-%d-%d",sy_pid(),attempt);if(n<0||n>=sizeof scratch)fail("scratch path");if(!sy_mkdir(scratch,0700))break;scratch[0]=0;}if(attempt==100)fail("check temporary directory");
+    literal(scratch,member[2],launcher);literal(scratch,member[3],readme);
+    path(p,root,candidate.name[2]);path(q,scratch,member[0]);copyfile(p,q);path(p,root,candidate.name[1]);path(q,scratch,member[1]);copyfile(p,q);
+    path(q,scratch,"expected.zip");zip(scratch,q);path(p,root,candidate.name[5]);if(!equal(p,q))fail("zip fixed contents");
+    path(q,scratch,"expected.sha");manifest(root,q);path(p,root,candidate.name[6]);if(!equal(p,q))fail("checksum manifest");cleanup();bytes(1,"RELEASE_LAYOUT\tstatus=PASS\n",27);
 }
-int main(int argc,char **argv){
-    char src[4096],out[4096],p[4400],q[4400];int i,a=1;const char *version="0.0.46";if(argc>=3&&!strcmp(argv[1],"--version")){version=argv[2];a=3;}
-    if(argc-a!=2||!version[0])fail("usage: [--version VERSION] SOURCE NEW_OUT | [--version VERSION] --check OUT");
-    for(i=0;version[i];i++)if((version[i]<'0'||version[i]>'9')&&version[i]!='.')fail("version filename");if(cx_fmt(zip_asset,sizeof zip_asset,"unisacc-%s-win-arm64.zip",version))fail("version length");
-    if(!strcmp(argv[a],"--check")){if(!realpath(argv[a+1],out))fail("output path");check(out);return 0;}
-    if(!realpath(argv[a],src))fail("source path");
-    if(mkdir(argv[a+1],0700))fail("NEW_OUT must not exist");
-    if(!realpath(argv[a+1],out))fail("output path");
-    for(i=0;i<4;i++){path(p,src,asset[i]);path(q,out,asset[i]);copyfile(p,q);}
-    path(p,out,asset[3]);path(q,out,"build.json");copyfile(p,q);
-    literal(out,member[2],launcher);literal(out,member[3],readme);
-    path(p,out,asset[5]);zip(out,p);
-    path(p,out,member[2]);unlink(p);path(p,out,member[3]);unlink(p);
-    path(p,out,"SHA256SUMS");manifest(out,p);check(out);return 0;
+int main(int argc,char **argv){char src[4096],out[4096],p[4400],q[4400],why[512]={0};int i;
+    if(argc!=5||!tx_eqz(argv[1],"--candidate"))fail("usage: --candidate TABLE SOURCE NEW_OUT | --candidate TABLE --check OUT");
+    if(rcand_load(argv[2],&candidate,why,sizeof why))fail(why);
+    if(tx_eqz(argv[3],"--check")){if(sy_realpath(argv[4],out,sizeof out)<0)fail("output path");check(out);return 0;}
+    if(sy_realpath(argv[3],src,sizeof src)<0)fail("source path");verify(src,4);
+    if(sy_mkdir(argv[4],0700))fail("NEW_OUT must not exist");if(sy_realpath(argv[4],out,sizeof out)<0)fail("output path");
+    for(i=0;i<4;i++){path(p,src,candidate.name[i]);path(q,out,candidate.name[i]);copyfile(p,q);}path(p,out,candidate.name[3]);path(q,out,candidate.name[4]);copyfile(p,q);
+    /* ZIP construction uses a private workspace so external asset basenames never affect member names. */
+    for(i=0;i<100;i++){int n=tx_snprintf(scratch,sizeof scratch,"/tmp/release-layout-%d-%d",sy_pid(),i);if(n<0||n>=sizeof scratch)fail("scratch path");if(!sy_mkdir(scratch,0700))break;scratch[0]=0;}if(i==100)fail("zip temporary directory");
+    path(p,out,candidate.name[2]);path(q,scratch,member[0]);copyfile(p,q);path(p,out,candidate.name[1]);path(q,scratch,member[1]);copyfile(p,q);literal(scratch,member[2],launcher);literal(scratch,member[3],readme);path(p,out,candidate.name[5]);zip(scratch,p);cleanup();
+    path(p,out,candidate.name[6]);manifest(out,p);check(out);return 0;
 }

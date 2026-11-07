@@ -1,0 +1,32 @@
+/* Isolated safety contracts: invalid inputs must yield no release plan. No network fixtures. */
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+static char root[4096],temp[4096],exe[4400],dispatch[4400];
+static int passed,failed;
+static void die(const char *s){sy_eprintf("CHECK_RELEASE_DISPATCH setup: %s\n",s);sy_exit(2);}
+static void path(char *p,const char *a,const char *b){int n=tx_snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path");}
+static void write_new(const char *p,const char *b,long n,const char *tail,long m){int fd=sy_open_new(p,0600);if(fd<0)die("fixture create");int rc=sy_write_all(fd,b,n);if(!rc&&m)rc=sy_write_all(fd,tail,m);int end=sy_close(fd);if(rc||end)die("fixture write");}
+static np_result run(char **v,int seconds){np_result r={0};char why[1024];if(np_run(v,root,0,seconds,&r,why,sizeof why)||r.residue)die("bounded child");return r;}
+static void reject(const char *name,const char *mode,const char *table,const char *assets,int want){char *v[]={"sh",exe,dispatch,"--",(char*)mode,(char*)table,(char*)assets,0};np_result r=run(v,15);int ok=r.rc==want&&r.outn==0;if(ok)passed++;else failed++;sy_printf("%s\t%s rc=%d plan_bytes=%lu\n",ok?"PASS":"FAIL",name,r.rc,(unsigned long)r.outn);np_free(&r);}
+int main(void){
+    RcCandidate c;char why[1024],table[4400],source[4400],assets[4400],p[4400],bad[4400],layout[4400],record[256],buf[8192];
+    if(sy_cwd(root,sizeof root))die("cwd");path(exe,root,"unisacc.com");path(dispatch,root,"tools/release-dispatch.cx");path(table,root,"release/testdata/layout-candidate.tsv");if(rcand_load(table,&c,why,sizeof why))die(why);
+    char *mk[]={"mktemp","-d","/tmp/check-release-dispatch-XXXXXX",0};np_result r=run(mk,10);if(r.rc||r.outn<2||r.outn>=sizeof temp||r.out[r.outn-1]!='\n'||tx_copy(temp,sizeof temp,r.out,(long)r.outn-1))die("temporary directory");np_free(&r);
+    path(source,temp,"source");path(assets,temp,"assets");if(sy_mkdir(source,0700))die("source mkdir");const char *body[]={"compiler fixture","package fixture","slice fixture"};for(int i=0;i<3;i++){path(p,source,c.name[i]);write_new(p,body[i],tx_len(body[i],64),0,0);}int n=tx_snprintf(record,sizeof record,"{\"product_digest\": \"%s\",\"schema\":1}\n",c.sha[0]);if(n<0||n>=(int)sizeof record)die("record");path(p,source,c.name[3]);write_new(p,record,n,0,0);
+    path(layout,root,"tools/release-layout.cx");char *prepare[]={"sh",exe,layout,"--","--candidate",table,source,assets,0};r=run(prepare,25);if(r.rc)die("golden layout preparation");np_free(&r);
+    path(p,assets,c.name[1]);int fd=sy_open(p,O_WRONLY|O_TRUNC,0600);if(fd<0||sy_write_all(fd,"Package fixture",15)||sy_close(fd))die("corrupt fixture");reject("corrupt-upload-asset-no-plan","--dry-run",table,assets,1);
+    fd=sy_open(p,O_WRONLY|O_TRUNC,0600);if(fd<0||sy_write_all(fd,"package fixture",15)||sy_close(fd))die("restore fixture");
+    fd=sy_open_read(table);if(fd<0)die("table open");long z=sy_reg_size(fd);if(z<1||z>(long)sizeof buf||sy_read_full(fd,buf,z)||sy_close(fd))die("table read");long first=tx_chr(buf,z,'\n');if(first<0)die("fixture header");path(bad,temp,"two-candidates.tsv");write_new(bad,buf,z,buf+first+1,z-first-1);reject("multiple-candidates-no-plan","--dry-run",bad,assets,1);
+    long pos=first+1;for(int i=0;i<7;i++){long k=tx_chr(buf+pos,z-pos,'\t');if(k<0)die("fixture field");pos+=k+1;}char saved=buf[pos];buf[pos]='/';path(bad,temp,"unsafe-name.tsv");write_new(bad,buf,z,0,0);buf[pos]=saved;reject("unsafe-asset-basename-no-plan","--dry-run",bad,assets,1);
+    pos=first+1;long sep=tx_chr(buf+pos,z-pos,'\t');if(sep<0)die("tag field");pos+=sep+1;saved=buf[pos];buf[pos]='"';path(bad,temp,"unsafe-tag.tsv");write_new(bad,buf,z,0,0);buf[pos]=saved;reject("workflow-unsafe-tag-no-plan","--dry-run",bad,assets,1);
+    reject("live-mode-not-supported","--publish",table,assets,2);
+    path(p,assets,c.name[5]);if(sy_unlink(p))die("remove zip fixture");reject("missing-derived-zip-no-plan","--dry-run",table,assets,1);
+    if(!failed){char cleaner[4400];path(cleaner,root,"tools/safedel.cx");char *clean[]={"sh",exe,cleaner,"--","--purge",temp,0};r=run(clean,15);if(r.rc)die("fixture cleanup");np_free(&r);}else sy_eprintf("failure fixtures retained: %s\n",temp);
+    sy_printf("CHECK_RELEASE_DISPATCH passed=%d failed=%d\n",passed,failed);return failed?1:0;
+}

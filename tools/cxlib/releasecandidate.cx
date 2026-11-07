@@ -1,0 +1,104 @@
+#pragma unisa module releasecandidate
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+/* One exact TSV header and one candidate row. No network or implicit pins.
+ * Failed loads leave the destination unchanged; all diagnostics are bounded.
+ * verify accepts only the source four or the complete seven asset roles. */
+typedef struct RcCandidate {
+ char repo[128],tag[128],commit[41],version[32],workflow[64],workflow_ref[128],ci_run_id[32];
+ char name[7][256],sha[7][65];
+} RcCandidate;
+
+static int rcand_error(char *why,int cap,const char *field,const char *detail){
+ int n=0,i=0;
+ if(why&&cap>0){
+  while(field[i]&&n<cap-1)why[n++]=field[i++];
+  if(n<cap-1)why[n++]=':';
+  if(n<cap-1)why[n++]=' ';
+  i=0;while(detail[i]&&n<cap-1)why[n++]=detail[i++];why[n]=0;
+ }
+ return -1;
+}
+static int rcand_hex(const char *s,int n){int i;for(i=0;i<n;i++){int c=s[i];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))return 0;}return 1;}
+static int rcand_alnum(char c){return(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9');}
+static const char *rcand_column(int i){
+ static const char *cols[21]={"repo","tag","commit","version","workflow","workflow_ref","ci_run_id","ape","ape_sha256","package","package_sha256","win_arm64","win_arm64_sha256","record","record_sha256","build_alias","build_alias_sha256","zip","zip_sha256","checksums","checksums_sha256"};
+ return cols[i];
+}
+static int rcand_validate(const RcCandidate *c,char *why,int cap){
+ const char *s[7];int sizes[7]={128,128,41,32,64,128,32};int i,j,k,n;
+ s[0]=c->repo;s[1]=c->tag;s[2]=c->commit;s[3]=c->version;s[4]=c->workflow;s[5]=c->workflow_ref;s[6]=c->ci_run_id;
+ for(i=0;i<7;i++){
+  n=(int)tx_len(s[i],sizes[i]);if(n<=0)return rcand_error(why,cap,rcand_column(i),"empty or capacity exceeded");
+  for(j=0;j<n;j++)if(s[i][j]<33||s[i][j]>126)return rcand_error(why,cap,rcand_column(i),"unsafe field byte");
+ }
+ if(tx_len(c->commit,41)!=40||!rcand_hex(c->commit,40))return rcand_error(why,cap,"commit","expected 40 lowercase hex digits");
+ for(i=0;c->tag[i];i++)if(!rcand_alnum(c->tag[i])&&c->tag[i]!='.'&&c->tag[i]!='_'&&c->tag[i]!='-')return rcand_error(why,cap,"tag","expected a plain workflow release tag");
+ for(i=0;c->ci_run_id[i];i++)if(c->ci_run_id[i]<'0'||c->ci_run_id[i]>'9')return rcand_error(why,cap,"ci_run_id","expected decimal digits");
+ for(i=0;i<7;i++){
+  n=(int)tx_len(c->name[i],256);
+  if(n<=0||!rcand_alnum(c->name[i][0]))return rcand_error(why,cap,rcand_column(7+2*i),"expected safe basename");
+  for(j=0;j<n;j++)if(!rcand_alnum(c->name[i][j])&&c->name[i][j]!='.'&&c->name[i][j]!='_'&&c->name[i][j]!='-')return rcand_error(why,cap,rcand_column(7+2*i),"unsafe basename byte");
+  for(k=0;k<i;k++)if(tx_eqz(c->name[i],c->name[k]))return rcand_error(why,cap,rcand_column(7+2*i),"duplicate basename");
+  if(tx_len(c->sha[i],65)!=64||!rcand_hex(c->sha[i],64))return rcand_error(why,cap,rcand_column(8+2*i),"expected 64 lowercase hex digits");
+ }
+ return 0;
+}
+int rcand_load(const char *path,RcCandidate *c,char *why,int cap){
+ char text[8192],*dest[21];int sizes[21],fd,i,j,row,col,start,end,n=0,rc;long got;RcCandidate next;
+ if(why&&cap>0)why[0]=0;
+ if(!path||!path[0]||!c)return rcand_error(why,cap,"candidate","invalid arguments");
+ fd=sy_open_read(path);if(fd<0)return rcand_error(why,cap,"candidate","cannot open table");
+ if(sy_reg_size(fd)<0){sy_close(fd);return rcand_error(why,cap,"candidate","table is not a regular file");}
+ while(n<(int)sizeof text){got=sy_read(fd,text+n,(int)sizeof text-n);if(got<0){sy_close(fd);return rcand_error(why,cap,"candidate","table read failed");}if(!got)break;n+=(int)got;}
+ rc=sy_close(fd);if(rc!=0)return rcand_error(why,cap,"candidate","table close failed");
+ if(n==(int)sizeof text)return rcand_error(why,cap,"candidate","table capacity exceeded");
+ dest[0]=next.repo;sizes[0]=128;dest[1]=next.tag;sizes[1]=128;dest[2]=next.commit;sizes[2]=41;dest[3]=next.version;sizes[3]=32;dest[4]=next.workflow;sizes[4]=64;dest[5]=next.workflow_ref;sizes[5]=128;dest[6]=next.ci_run_id;sizes[6]=32;
+ for(i=0;i<7;i++){dest[7+2*i]=next.name[i];sizes[7+2*i]=256;dest[8+2*i]=next.sha[i];sizes[8+2*i]=65;}
+ row=0;col=0;start=0;
+ for(i=0;i<=n;i++){
+  if(i<n&&text[i]!='\t'&&text[i]!='\n'){
+   if(text[i]==0||text[i]=='\r')return rcand_error(why,cap,"candidate","NUL or CR byte in table");
+   continue;
+  }
+  if(i==n&&start==n&&col==0)break;
+  if(row>1)return rcand_error(why,cap,"candidate","expected exactly one candidate row");
+  if(col>=21)return rcand_error(why,cap,"candidate","expected 21 columns");
+  end=i;
+  if(row==0){const char *h=rcand_column(col);for(j=0;start+j<end&&h[j]&&text[start+j]==h[j];j++);if(start+j!=end||h[j])return rcand_error(why,cap,rcand_column(col),"header mismatch");}
+  else{if(end-start<=0||end-start>=sizes[col])return rcand_error(why,cap,rcand_column(col),"empty or capacity exceeded");for(j=start;j<end;j++)dest[col][j-start]=text[j];dest[col][end-start]=0;}
+  col++;start=i+1;
+  if(i==n||text[i]=='\n'){if(col!=21)return rcand_error(why,cap,"candidate","expected 21 columns");row++;col=0;}
+ }
+ if(row!=2)return rcand_error(why,cap,"candidate","expected header and exactly one candidate row");
+ if(rcand_validate(&next,why,cap)!=0)return -1;
+ *c=next;return 0;
+}
+int rcand_verify(const RcCandidate *c,const char *dir,int count,char *why,int cap){
+ int i,j,n,ok,rc;size_t at=0;char detail[512];np_result r={0};char *argv[10];
+ if(why&&cap>0)why[0]=0;
+ if(!c||!dir||!dir[0]||(count!=4&&count!=7))return rcand_error(why,cap,"verify","expected candidate, directory and count 4 or 7");
+ if(rcand_validate(c,why,cap)!=0)return -1;
+ argv[0]="sha256sum";argv[1]="--";
+ for(i=0;i<count;i++)argv[2+i]=(char *)c->name[i];
+ argv[2+count]=0;detail[0]=0;
+ rc=np_run(argv,dir,0,15,&r,detail,sizeof detail);
+ if(rc!=0){np_free(&r);return rcand_error(why,cap,"verify",detail[0]?detail:"sha256sum launch failed");}
+ if(r.rc!=0||r.residue!=0||!r.out){np_free(&r);return rcand_error(why,cap,"verify","sha256sum failed or child residue");}
+ for(i=0;i<count;i++){
+  n=(int)tx_len(c->name[i],256);ok=r.outn>=at+(size_t)(67+n);
+  if(ok){
+   for(j=0;j<64;j++)if(r.out[at+j]!=c->sha[i][j])ok=0;
+   if(r.out[at+64]!=' '||r.out[at+65]!=' ')ok=0;
+   for(j=0;j<n;j++)if(r.out[at+66+j]!=c->name[i][j])ok=0;
+   if(r.out[at+66+n]!='\n')ok=0;
+  }
+  if(!ok){np_free(&r);return rcand_error(why,cap,rcand_column(7+2*i),"sha256sum output or digest mismatch");}
+  at+=(size_t)(67+n);
+ }
+ ok=at==r.outn;np_free(&r);
+ if(!ok)return rcand_error(why,cap,"verify","unexpected trailing sha256sum output");
+ return 0;
+}
