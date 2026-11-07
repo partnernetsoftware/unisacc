@@ -99,6 +99,7 @@
 | 表闭包静态预检 | `sh ./unisacc.com tools/tsv-lint.cx -- --root . --errors-only --limit 10`；`sh ./unisacc.com tools/check-tsv-lint.cx` | 查模式冲突、未定义引用、缺兜底及精确SB入口清理合同；支持根内call、有限facts/with/let/模板及确定flags。动态宏、fresh、条件和图编辑前置条件未证明者单列`UNRESOLVED`，`status=PARTIAL`且rc0仅表示无确定错误，不代替gen/新包/slice预检；批次`tsv-lint`保留三段历史失败回放与修后负控 |
 | 构造前DELTA.json审计（旧工具已恢复） | `sh ./unisacc.com tools/table-lint.cx -- DELTA.json [--strict]` | 保留5596cb4310以来的total/reach/stale-r/t-keys/unwritten/maybe-unwritten等合同；`tests/delta-loader.cx`负责接受/拒绝消费回归。与新`tools/tsv-lint.cx`是不同功能，不能互相替代或共用入口 |
 | 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序→标签→用户数升序→名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
+| 切片镜像归属度量（不改产品） | `sh ./unisacc.com tools/image-contrib.cx -- --objects a.o... [--image FILE] [--src KEY=PATH]`；`sh ./unisacc.com tools/check-image-contrib.cx` | 合并tape的`tl_unit` emit按单元计数；最终镜像列恒UNATTRIBUTED（prune/lower/elf丢来源）。分类TRANSFORM/FINITE/UNBOUNDED/SYS-IO来自源码扫描不是对象体积。批次`image-contrib`。试点设计`plans/slice-shrink.md`，fable评审前不动产品 |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | arity 表与规则对拍 | `sh ./unisacc.com tools/arity-gen.cx -- --check PWD`（`--write` 重生成，`call P N M` 查单键） | `weights/arity/arity.tsv` 243 键＝proto×npar×nargs，与 `seed/gold_arity_label.c` 的 `table` 输出逐字节相等；不计入 18 网，产品 parse 尚未读它 |
 | libc99posix 契约表 | `sh ./unisacc.com tools/libc99posix-gen.cx -- --check`（`--write` 生成 `cx/compiler/libc99bind.cx`）；校验 `tools/check-libc99posix.cx` | 保留原八项及 P0 十二项语义，新增 clock_gettime；bind=per-cell 时六格为 KIND:SYMBOL，Darwin 两格 host-export:clock_gettime，Linux/Windows 为 cx-own:-（原系统调用头/签名适配 shim，不直绑 QPC）。前转按完整目标名选格，不以参数数目混同 Linux/Mac；回归检查旧绑定及 clock 六格行为，不钉死总行数。win P0 导出仍按 run42196947660 双架构 UCRT 实物及 ABI/errno 约定，cx-own 核 static 体，两 win 目标 `-c -funit` 实编 |
@@ -345,7 +346,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、`work/ledger.tsv` |
 | 事实表 | 事实→对应生成器→产物，生成器须带`--check`；通用派生用facts-gen，Win argv专属表用win-argv-gen | `exec/facts/`、上方能力速查 |
 | 静态预检 | 模式/引用/兜底/SB合同先查；动态及未证明性质单列PARTIAL，不能用无确定错误替代真实gen/新包/slice | `tools/tsv-lint.cx`、`tools/check-tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与试点 | 对象清单已交付，不冒称最终收益；fable否决tapegate整体迁移。旧entry真实归属UNATTRIBUTED，link-map边车推迟0.0.47 P3，保留方案不实施，不挡0.0.46；BSS只计内存 | `SLICE-CONTRIBUTION`、`plans/link-map-sidecar.md`、tapegate历史评审记录 |
+| 结构盘点与试点 | 对象清单已交付，不冒称最终收益；fable否决tapegate整体迁移。镜像单元贡献仍UNATTRIBUTED；0.0.46前置度量是`image-contrib`（tape emit可复跑，镜像不摊）。link-map边车方案保留不实施。试点`plans/slice-shrink.md`（netname）待fable | `SLICE-SHRINK-PRE`、`tools/image-contrib.cx`、`plans/link-map-sidecar.md` |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | `archive/` |
 
 ### 9.3 上一发布 0.0.43(历史)

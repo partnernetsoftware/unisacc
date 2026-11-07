@@ -1,0 +1,83 @@
+/* 只读：对象内.unisa.tape载荷长。最终镜像字节一律UNATTRIBUTED。不改产品、不调tl_begin。
+ * sh ./unisacc.com tools/image-contrib.cx -- --objects a.o b.o [--image FILE] [--src KEY=PATH ...]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use compiler.tapelink
+
+#define IC_MAX 256
+static int ic_die(char *m){fprintf(stderr,"image-contrib: REFUSE: %s",m&&*m?m:"die\n");exit(2);return 1;}
+static int ic_emit(int c){(void)c;return 0;}
+static void fail(const char *s){fprintf(stderr,"image-contrib: REFUSE: %s\n",s);exit(2);}
+static char *load(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)fail("read");return s;}
+static const char *class_of(const char *src){
+    size_t n;char *s;int io=0,disp=0,loop=0,glob=0,unk=0;
+    if(!src||!*src)return "UNBOUNDED";
+    s=load(src,&n);
+    {size_t i=0;int in=0;
+     for(;i<n;i++){
+      if(s[i]=='"'){in=!in;continue;}
+      if(in)continue;
+      if(i+5<n&&!memcmp(s+i,"while",5))loop++;
+      if(i+3<n&&!memcmp(s+i,"for",3))loop++;
+      if(i+2<n&&!memcmp(s+i,"if",2))disp++;
+      if(i+6<n&&!memcmp(s+i,"static",6))glob++;
+      if(i+5<n&&!memcmp(s+i,"puts(",5))io++;
+      if(i+7<n&&!memcmp(s+i,"getenv(",7))io++;
+      if(i+3<n&&!memcmp(s+i,"sy_",3))io++;
+      if(i+4<n&&!memcmp(s+i,"abs(",4))unk++;
+     }
+    }
+    free(s);
+    if(io)return "SYS-IO";
+    if(unk||glob||loop>4)return "UNBOUNDED";
+    if(disp>=4)return "FINITE";
+    return "TRANSFORM";
+}
+int main(int argc,char **argv){
+    const char *objs[IC_MAX],*keys[IC_MAX],*srcs[IC_MAX];
+    int nobj=0,nsrc=0,i;
+    const char *image=0;
+    long tape_sum=0,image_bytes=0;
+    char image_sha[65];image_sha[0]=0;
+    for(i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--objects")){
+            i++;
+            while(i<argc&&argv[i][0]!='-'){if(nobj==IC_MAX)fail("object bound");objs[nobj++]=argv[i++];}
+            i--;continue;
+        }
+        if(!strcmp(argv[i],"--image")&&i+1<argc){image=argv[++i];continue;}
+        if(!strcmp(argv[i],"--src")&&i+1<argc){
+            char *eq=strchr(argv[++i],'=');if(!eq)fail("src KEY=PATH");
+            *eq=0;if(nsrc==IC_MAX)fail("src bound");keys[nsrc]=argv[i];srcs[nsrc]=eq+1;nsrc++;continue;
+        }
+        fail("usage --objects a.o... [--image FILE] [--src KEY=PATH]");
+    }
+    if(!nobj)fail("--objects required");
+    if(tl_bind(ic_emit,ic_die))fail("tl_bind");
+    printf("KIND\tKEY\tTAPE_PAYLOAD\tOBJECT_BYTES\tIMAGE_BYTES\tCLASS\n");
+    for(i=0;i<nobj;i++){
+        size_t nb;char *b=load(objs[i],&nb);long tlen=0;char *t;
+        const char *base=strrchr(objs[i],'/');base=base?base+1:objs[i];
+        const char *cls="UNBOUNDED";int k;
+        t=tl_tape(b,(long)nb,&tlen);if(!t)fail("tl_tape");
+        tape_sum+=tlen;
+        for(k=0;k<nsrc;k++)if(!strcmp(keys[k],base)){cls=class_of(srcs[k]);break;}
+        if(k==nsrc)cls="UNBOUNDED";
+        printf("UNIT\t%s\t%ld\t%ld\tUNATTRIBUTED\t%s\n",base,tlen,(long)nb,cls);
+        free(b);
+    }
+    if(image){
+        size_t n;char *s=load(image,&n);
+        image_bytes=(long)n;
+        if(sy_sha256_hex(s,(long)n,image_sha))cx_sha256_hex(s,n,image_sha);
+        free(s);
+    }
+    printf("TOTAL\ttape_payload=%ld\tobject_sum_not_image=1\timage_bytes=%ld\timage_attr=UNATTRIBUTED\timage_sha=%s\n",
+           tape_sum,image_bytes,image_sha[0]?image_sha:"-");
+    printf("NOTE\ttape payload is not merged emit and not final image; prune/lower/elf drop provenance\n");
+    printf("IMAGE_CONTRIB\tunits=%d\ttape_payload=%ld\timage_attr=UNATTRIBUTED\n",nobj,tape_sum);
+    return 0;
+}

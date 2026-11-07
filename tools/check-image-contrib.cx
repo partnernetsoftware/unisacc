@@ -1,0 +1,54 @@
+/* 夹具：两单元真实 -c -funit，核对tape emit守恒与镜像UNATTRIBUTED。
+ * sh ./unisacc.com tools/check-image-contrib.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+static char home[4400],base[4400],com[4400],bound[4400];
+static int checks,bad;
+static void die(const char *s){fprintf(stderr,"check-image-contrib: %s\n",s);exit(2);}
+static void path(char *d,const char *a,const char *b){if(cx_fmt(d,4400,"%s/%s",a,b))die("path");}
+static void ck(int yes,const char *s){checks++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);if(!yes)bad++;}
+static void cleanup_dir(const char *p){DIR *d=opendir(p);if(!d)return;struct dirent *e;char q[4400];while((e=readdir(d)))if(strcmp(e->d_name,".")&&strcmp(e->d_name,"..")){path(q,p,e->d_name);struct stat st;if(!lstat(q,&st)&&S_ISDIR(st.st_mode))cleanup_dir(q);else unlink(q);}closedir(d);rmdir(p);}
+static void cleanup(void){if(*base)cleanup_dir(base);}
+static char *run(char **args,int expected){
+    char *v[32];int n=0;v[n++]=bound;v[n++]="55";
+    for(int i=0;args[i];i++){if(n==30)die("argv");v[n++]=args[i];}v[n]=0;
+    np_result r={0};char why[1400]={0};int tr=np_run(v,base,0,55,&r,why,sizeof why);
+    int yes=!tr&&!r.residue&&r.rc==expected;
+    if(!yes){fprintf(stderr,"transport=%d rc=%d %s\n",tr,r.rc,why);if(r.out)fwrite(r.out,1,r.outn,stderr);if(r.err)fwrite(r.err,1,r.errn,stderr);}
+    char *out=0;if(yes){out=malloc(r.outn+1);if(!out)die("alloc");if(r.outn)memcpy(out,r.out,r.outn);out[r.outn]=0;}
+    np_free(&r);return out;
+}
+int main(void){
+    char a[4400],b[4400],oa[4400],ob[4400],img[4400],tool[4400];
+    if(!realpath(".",home))die("cwd");
+    path(com,home,"unisacc.com");path(bound,home,"tools/bound");path(tool,home,"tools/image-contrib.cx");
+    if(cx_fmt(base,sizeof base,"/tmp/check-image-contrib-XXXXXX"))die("tmp");
+    if(!mkdtemp(base))die("mkdtemp");atexit(cleanup);
+    path(a,base,"pure.cx");path(b,base,"io.cx");path(oa,base,"pure.o");path(ob,base,"io.o");path(img,base,"fake.img");
+    {const char *ps="#pragma unisa module pure\nint copy_bytes(const unsigned char *s,unsigned char *d,int n){int i=0;while(i<n){d[i]=s[i];i++;}return n;}\n";
+     const char *is="#pragma unisa module io\nint emit_bytes(const unsigned char *s,unsigned char *d,int n){puts(\"x\");d[0]=s[0];return n;}\n";
+     if(cx_write(a,ps,strlen(ps)))die("pure");
+     if(cx_write(b,is,strlen(is)))die("io");}
+    {char *v[]={"sh",com,a,"-c","-funit","-b","lnx/x86_64","-o",oa,0};char *s=run(v,0);if(!s)die("compile pure");free(s);}
+    {char *v[]={"sh",com,b,"-c","-funit","-b","lnx/x86_64","-o",ob,0};char *s=run(v,0);if(!s)die("compile io");free(s);}
+    if(cx_write(img,"ABCD",4))die("img");
+    {char srca[4400],srcb[4400];
+     if(cx_fmt(srca,sizeof srca,"pure.o=%s",a)||cx_fmt(srcb,sizeof srcb,"io.o=%s",b))die("src");
+     char *v[]={"sh",com,tool,"--","--objects",oa,ob,"--image",img,"--src",srca,"--src",srcb,0};
+     char *out=run(v,0);ck(out!=0,"工具rc0");
+     ck(out&&strstr(out,"image_attr=UNATTRIBUTED"),"镜像UNATTRIBUTED");
+     ck(out&&strstr(out,"IMAGE_CONTRIB"),"结束标记");
+     ck(out&&strstr(out,"UNIT\tpure.o")&&strstr(out,"TRANSFORM"),"纯变换分类");
+     ck(out&&strstr(out,"UNIT\tio.o")&&strstr(out,"SYS-IO"),"系统IO分类");
+     ck(out&&strstr(out,"image_bytes=4"),"image只记文件长不摊单元");
+     if(out){long e1=0,e2=0;char *p=strstr(out,"UNIT\tpure.o\t");if(p){p=strchr(p+5,'\t');if(p)e1=atol(p+1);}p=strstr(out,"UNIT\tio.o\t");if(p){p=strchr(p+5,'\t');if(p)e2=atol(p+1);}
+      ck(e1>0&&e2>0,"两单元tape emit>0");}
+     free(out);
+    }
+    {char *v[]={"sh",com,tool,"--",0};char *s=run(v,2);ck(s!=0,"缺objects拒绝");free(s);}
+    printf("IMAGE_CONTRIB_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);
+    return bad?1:0;
+}
