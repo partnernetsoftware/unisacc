@@ -57,3 +57,11 @@
 cdx2 事实核实(命令级,cc 未复跑):完整 pkg(1663382B,sha 29e13aeb)在已发布 APE 中只出现 1 次,非「三份」;m27.o(1328264B,3492 符号)是汇编器代码、m22.o(570968B,1982 符号)是源框架代码,非「两份模型」。→「切片与 NN 组互相嵌入」论据不成立。
 cc 自己的数据与建议冲突处:L1 base「30–60KB/ISA」与 M10a 的薄层 395,710B 不符(7KB 仅 NN 内核)。
 待验证前提(cdx2 在测):tape.gz 总量 ≤ 六份原生之和的 1/3?首次运行现编耗时?——判据未达则 L2 不成立,M10 保持现状(迁表 6 单元+其余按 M10a 清单)。
+
+## ⑩ 候选→公开发布流水线(fable 只读评审,2026-11-07)
+1. 手工点:发布手册四段手抄 shell;候选 sha/commit 在文档、release/tools/c46-3-readback.sh、tools/release-layout.cx 三处硬编码;CI 四个 workflow_dispatch 输入人工粘贴;发布后收尾四条独立命令+手写记录;备份靠人 cp。
+2. 最耗时:正规链 131 作业(可按「源 SID+include sha」缓存 p3 包与 lnx 切片)、全批会话(波次串行发起,可一次按冲突域派 16 路,init 直读 CI 产物 sha)、CI 矩阵(cell-tools/ffi-lnx 可按 APE sha 缓存命中跳过)。
+3. 返工三类与预防:会话身份漂移→init 私有快照+每波核 session;记录滞后→identity-derive 进棘轮并由 install-ape 自动调用;参数不一致→单一 release/candidate.tsv(tag/commit/APE sha/资产 sha/CI run id)生成所有脚本输入。
+4. 一条命令缺口:候选事实表;release-layout 去硬编码;tools/release-dispatch.cx(draft 上传七资产→workflow_dispatch→回写 run id);readback 泛化为 readback.cx;备份目录工具化。四件薄封装,不触产品。
+5. 发布说明模板化:release-notes-TEMPLATE.md + tools/release-notes.cx 从候选事实表/全批聚合/items 的已知限制行生成,人工只写变更摘要;--check 比对已发布说明,发布后补证据=重生成+标注段。
+(cc 复核:readback.sh 与 release-layout.cx 的硬编码已用 grep 计数确认。处置:立项 M11「发布一条命令化」,owner cdx(A12 之后),先做候选事实表+readback.cx+release-dispatch.cx。)
