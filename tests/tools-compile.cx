@@ -1,9 +1,9 @@
 /* ROOT NEW_OUT SHARD: permanent installed-product consumer check.
- * SHARD is 0..70; all 71 shards cover git ls-files -s -z -- tools,
+ * SHARD is 0..ceil(inventory/8)-1; shards cover git ls-files -s -z -- tools,
  * recursively, including every tracked .cx symlink (compiled through its
  * tracked alias, never silently deduplicated). Non-.cx entries are not sources.
  * Each shard contains at most eight consecutive sources in Git index order.
- * More than 568 sources is a hard inventory failure, not partial coverage.
+ * tests/tools-compile-sources.tsv explicitly approves source paths and kinds.
  * Eight children run concurrently; np_run bounds each compile at 40 seconds
  * and cleans its process tree. Every source is compiled, including the exact
  * known failures in tests/tools-compile-expected.tsv; unexpected failures and
@@ -20,9 +20,9 @@
 
 static void die(const char *s) { fprintf(stderr,"tools-compile: %s\n",s); exit(2); }
 static char root[4096], work[4096], product[4400];
-static char *sources[568];
-static int links[568], count;
-static char *category[568], *diagnostics[568], *reason[568];
+static char **sources;
+static int *links, count;
+static char **category, **diagnostics, **reason;
 static void path(char *p,size_t cap,const char *base,const char *leaf);
 static void expectations(void) {
     char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-expected.tsv");
@@ -96,29 +96,97 @@ static int compile(int i) {
     fprintf(f,"%s\t%s\tmode=%s\trun=%d\trc=%d\tobject=%d\tresidue=%d\traw_compile_failure=%d\tcategory=%s\treason=%s\tstderr=%s\n",status,sources[i],links[i]?"symlink-follow":"regular",run,r.rc,object,r.residue,r.rc!=0,known?category[i]:"-",known?reason[i]:"-",err);
     if(fclose(f))die("result close");np_free(&r);return xfail||input_ok?3:(!known&&ok?0:1);
 }
+static void registry(int update,const char *destination) {
+    char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-sources.tsv");
+    if(update) {
+        FILE *f=fopen(destination,"wx");if(!f)die("new registry destination required");
+        for(int i=0;i<count;i++)fprintf(f,"%s\t%s\n",sources[i],links[i]?"symlink":"regular");
+        if(ferror(f)||fclose(f))die("registry write");return;
+    }
+    FILE *f=fopen(p,"rb");if(!f)die("REFUSE registry open");
+    int *seen=calloc((size_t)count,sizeof *seen);if(!seen)die("allocation");
+    int refused=0;char previous[8192]={0};
+    while(fgets(line,sizeof line,f)) {
+        size_t len=strlen(line);
+        if(!len||line[len-1]!='\n')die("REFUSE registry line bound or missing newline");
+        line[--len]=0;char *kind=strchr(line,'\t');
+        if(!kind)die("REFUSE registry fields");*kind++=0;
+        if(!*line||strchr(kind,'\t')||(strcmp(kind,"regular")&&strcmp(kind,"symlink")))die("REFUSE registry fields or kind");
+        if(*previous&&strcmp(previous,line)>=0)die("REFUSE registry order or duplicate");
+        if(tx_copy(previous,sizeof previous,line,strlen(line)))die("REFUSE registry path bound");
+        int lo=0,hi=count;
+        while(lo<hi){int mid=lo+(hi-lo)/2;if(strcmp(sources[mid],line)<0)lo=mid+1;else hi=mid;}
+        int i=lo;if(i<count&&strcmp(sources[i],line))i=count;
+        if(i==count||strcmp(kind,links[i]?"symlink":"regular")) {
+            fprintf(stderr,"REFUSE removed\t%s\t%s\n",line,kind);refused=1;
+        } else seen[i]=1;
+    }
+    if(ferror(f)||fclose(f))die("REFUSE registry read");
+    for(int i=0;i<count;i++)if(!seen[i]) {
+        fprintf(stderr,"REFUSE added\t%s\t%s\n",sources[i],links[i]?"symlink":"regular");refused=1;
+    }
+    free(seen);if(refused)die("REFUSE inventory differs from reviewed registry");
+}
+static void batches(int shards) {
+    char p[4400],line[16384],expected[512];path(p,sizeof p,root,"tests/batches.tsv");
+    FILE *f=fopen(p,"rb");if(!f)die("REFUSE batches open");
+    int *seen=calloc((size_t)shards,sizeof *seen);if(!seen)die("allocation");
+    while(fgets(line,sizeof line,f)) {
+        size_t len=strlen(line);if(!len||line[len-1]!='\n')die("REFUSE batch line bound or missing newline");
+        if(strncmp(line,"tools-compile-",14))continue;
+        char *end;errno=0;long i=strtol(line+14,&end,10);
+        if(errno||end==line+14||*end!='\t'||i<0||i>=shards)die("REFUSE batch shard range");
+        int n=tx_snprintf(expected,sizeof expected,"tools-compile-%03ld\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%ld\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\n",i,i);
+        if(n<0||(size_t)n>=sizeof expected||strcmp(line,expected)||seen[i])die("REFUSE batch contract or duplicate");
+        seen[i]=1;
+    }
+    if(ferror(f)||fclose(f))die("REFUSE batches read");
+    for(int i=0;i<shards;i++)if(!seen[i])die("REFUSE missing registered shard");
+    free(seen);
+}
 int main(int argc,char **argv) {
-    if(argc!=4)die("usage: ROOT NEW_OUT SHARD(0..70)");
-    if(!realpath(argv[1],root))die("root");
-    char *end;long shard=strtol(argv[3],&end,10);if(!*argv[3]||*end||shard<0||shard>=71)die("shard");
-    if(argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("absolute output required");
-    if(tx_copy(work,sizeof work,argv[2],strlen(argv[2])))die("output path bound");
-    if(mkdir(work,0700))die("new output required");path(product,sizeof product,root,"unisacc.com");
+    if(argc==4&&!strcmp(argv[1],"--boundaries")) {
+        char script[4400];path(script,sizeof script,argv[2],"tests/tools-compile-boundaries.py");
+        char *av[]={"python3",script,argv[2],argv[3],0};execvp(av[0],av);die("boundary runner exec");
+    }
+    int update=argc==4&&!strcmp(argv[1],"--register");
+    int listing=argc==3&&!strcmp(argv[1],"--shards");
+    if(argc!=4&&!listing)die("usage: ROOT NEW_OUT SHARD | --shards ROOT | --register ROOT NEW_REGISTRY");
+    if(!realpath(argv[update||listing?2:1],root))die("root");
+    char *end;long shard=0;
+    if(!update&&!listing){errno=0;shard=strtol(argv[3],&end,10);if(errno||!*argv[3]||*end||shard<0)die("shard");}
+    if(!update&&!listing) {
+        if(argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("absolute output required");
+        if(tx_copy(work,sizeof work,argv[2],strlen(argv[2])))die("output path bound");
+    }
+    path(product,sizeof product,root,"unisacc.com");
     char *gv[]={"git","ls-files","-s","-z","--","tools",0},why[1024];np_result list;
     if(np_run(gv,root,0,3,&list,why,sizeof why)||list.rc||list.errn)die("git inventory failed");
+    size_t capacity=0;for(size_t j=0;j<list.outn;j++)if(!list.out[j])capacity++;
+    if(!capacity||capacity>2147483640u||capacity>((size_t)-1)/sizeof(char *))die("inventory allocation bound");
+    sources=calloc(capacity,sizeof *sources);links=calloc(capacity,sizeof *links);
+    category=calloc(capacity,sizeof *category);diagnostics=calloc(capacity,sizeof *diagnostics);reason=calloc(capacity,sizeof *reason);
+    if(!sources||!links||!category||!diagnostics||!reason)die("allocation");
     size_t at=0;while(at<list.outn){char *s=list.out+at;size_t n=0;while(n<list.outn-at&&s[n])n++;
         if(n==list.outn-at)die("unterminated inventory");char *tab=memchr(s,'\t',n);if(!tab)die("inventory fields");
         char *p=tab+1;size_t pn=n-(size_t)(p-s);
         if(pn>=3&&!strcmp(p+pn-3,".cx")){
-            if(count==568)die("inventory exceeds 71 shards; extend registry and shard limit together");
             if(strncmp(s,"100644 ",7)&&strncmp(s,"100755 ",7)&&strncmp(s,"120000 ",7))die("unsupported source index mode");
-            if(tab[-1]!='0')die("unmerged source index");
+            if(tab-s<3||tab[-1]!='0'||tab[-2]!=' ')die("unmerged source index");
             if(strchr(p,'\n')||strchr(p,'\t'))die("source name cannot be represented in TSV");
             sources[count]=strdup(p);if(!sources[count])die("allocation");links[count]=!strncmp(s,"120000 ",7);count++;
         }at+=n+1;
     }np_free(&list);
-    if(count<=560)die("inventory leaves registered shards empty; update registry and shard limit together");
+    if(!count)die("empty source inventory");
+    if(update){registry(1,argv[3]);return 0;}
+    registry(0,0);
+    int shards=count/8+(count%8!=0);
+    batches(shards);
+    if(listing){printf("%d\n",shards);return 0;}
+    if(shard>=shards)die("shard outside inventory");
     expectations();
-    int first=(int)shard*8,last=first+8;if(last>count)last=count;
+    if(mkdir(work,0700))die("new output required");
+    int first=(int)shard*8,last=count-first>8?first+8:count;
     int pid[8],n=0,failed=0,compile_pass=0,known_failures=0,raw_failures=0,scanner_inputs=0,scanner_failures=0,debt=0,negative=0;fflush(stdout);fflush(stderr);
     for(int i=first;i<last;i++){
         int p=fork();
@@ -167,6 +235,6 @@ int main(int argc,char **argv) {
         if(ferror(r))die("aggregate read");fclose(r);
     }
     if(fclose(f))die("aggregate close");
-    printf("TOOLS_COMPILE\tSUMMARY\tshard=%ld\tshards=71\tjobs=8\tinventory=%d\tcompiled=%d\tcompile_pass=%d\tknown_failures=%d\tknown_debt=%d\tfixture_negative=%d\tscanner_inputs=%d\tscanner_compile_failures=%d\tunexpected_failures=%d\traw_compile_failures=%d\tfailed=%d\tsymlinks=follow-each-alias\n",shard,count,n,compile_pass,known_failures,debt,negative,scanner_inputs,scanner_failures,failed,raw_failures,failed);
+    printf("TOOLS_COMPILE\tSUMMARY\tshard=%ld\tshards=%d\tjobs=8\tinventory=%d\tcompiled=%d\tcompile_pass=%d\tknown_failures=%d\tknown_debt=%d\tfixture_negative=%d\tscanner_inputs=%d\tscanner_compile_failures=%d\tunexpected_failures=%d\traw_compile_failures=%d\tfailed=%d\tsymlinks=follow-each-alias\n",shard,shards,count,n,compile_pass,known_failures,debt,negative,scanner_inputs,scanner_failures,failed,raw_failures,failed);
     return failed?1:0;
 }

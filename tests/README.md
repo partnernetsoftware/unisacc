@@ -118,7 +118,7 @@ The metadata-only commands are `tools/bound 20 sh ./unisacc.com tests/plan.cx --
 专属宿主头需求过滤。符号链接逐 tracked 别名跟随编译，并在结果中标记
 `mode=symlink-follow`；损坏链接同样失败。普通源必须同时满足 run=0、rc=0、
 residue=0 和非空对象才 PASS；超时、异常、缺结果和外层 fork/wait 错误必须失败，
-并收割已启动的同批子进程。唯一事实表 `tests/tools-compile-expected.tsv` 每行四列：
+并收割已启动的同批子进程。唯一失败预期表 `tests/tools-compile-expected.tsv` 每行四列：
 exact source、类别、诊断片段（`|` 分隔）、中文原因。所有源仍实际编译，不删源、不 skip。
 类别 `known-debt` 与 `fixture-negative` 只有精确路径且 run=0、rc=1、object=0、residue=0、
 全部诊断命中 stderr 才 XFAIL；其意外成功为 XPASS 并失败，须移除过期项，漂移也失败。
@@ -127,35 +127,102 @@ exact source、类别、诊断片段（`|` 分隔）、中文原因。所有源�
 残留进程、其他rc或对象状态不一致仍必红。所有结果写类别原因；重复路径、缺原因、路径
 不在完整inventory或格式错误直接拒绝。其他未知工具失败必红，不能更新清单掩盖回归。
 
-永久批次 `tools-compile-000` 至 `tools-compile-070` 必须全部运行；每片取 Git
-索引顺序连续八个源，至多八路并发，每子进程 40 秒上限（使用既有 `sysx.process`
-的 `np_run` 清理进程树），各自隔离 `TMPDIR`、对象、完整 stdout/stderr。
-每片注册预算 55 秒。私有索引实测 564 个源（含 18 个符号链接），恰好需要
-71 个非空片，最后一片四个源。超过已登记容量 568 个源会硬失败，必须一起扩充
-源码分片上限和登记行；源减少到 560 个或更少也硬失败，须同步缩减登记，不能空 PASS。
-将来新增源越过容量必须同步登记，不能截断语料。全量不是一条 55 秒命令，应逐片运行，例如：
+永久批次当前为 `tools-compile-000` 至 `tools-compile-071`，完整登记570源/72个非空片，
+最后一片2源；片数始终按实时索引源数向上除以8，不设568源或71片的旧上限。
+每片取 Git 索引顺序连续最多八个源，八路并发，每子进程40秒（使用既有
+`sysx.process` 的 `np_run` 清理进程树），各自隔离 `TMPDIR`、对象与完整输出。
+每片注册预算仍为55秒。`tests/tools-compile-sources.tsv` 是唯一完整人工审阅库存，
+两列为仓相对路径与 `regular`/`symlink`，严格按Git索引顺序；普通100644/100755
+共用regular类别，120000按别名保留，非stage0及文件名TAB/LF拒绝。
+每片编译前比较实际库存和审阅表，新、删、kind变化均打印完整 `REFUSE added` /
+`REFUSE removed` 差集并失败；未知库存不得靠失败预期表批准。坏登记同样拒绝。
+同时强制校验 `tests/batches.tsv` 恰好登记所有IMPLEMENTED编译片，参数、55秒预算、
+覆盖ID均须一致，缺片、重复和额外空片不能通过；只读 `--shards ROOT` 也先执行这些闸。
+全量不是一条55秒命令；调度者必须使用动态片数，不得继续硬循环71，例如：
 
 ```sh
 ROOT=$PWD
 mkdir -p "$ROOT/out"
 OUT=$(mktemp -d "$ROOT/out/tools-compile.XXXXXX")
+SHARDS=$(tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/tools-compile.cx" -- --shards "$ROOT") || exit $?
+failed=0
 i=0
-while [ "$i" -lt 71 ]; do
+while [ "$i" -lt "$SHARDS" ]; do
   id=$(printf 'tools-compile-%03d' "$i")
   if tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/run-batch.cx" -- "$ROOT" "$OUT" "$id" >"$OUT/$id.log" 2>&1; then
     printf '%s\t0\n' "$id" >>"$OUT/status.tsv"
   else
     printf '%s\t%s\n' "$id" "$?" >>"$OUT/status.tsv"
+    failed=1
   fi
   i=$((i + 1))
 done
+test "$failed" -eq 0
 ```
 
 不经批次 runner 的准确八路单片命令为
 `tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/tools-compile.cx" -- "$ROOT" "$OUT/shard-000" 0`；
-其余片替换输出新目录和末尾 0..70。`run-batch` 的实际输出目录以其日志为准，
+其余片替换输出新目录和动态范围内的片号。`run-batch` 的实际输出目录以其日志为准，
 每片 `results.tsv` 含 PASS/XFAIL/FAIL/XPASS/INPUT-COMPILED/INPUT-REJECTED 行、类别、原因与 stderr 路径，
 `*.stdout`/`*.stderr` 保留完整诊断；FAIL 与 XPASS 均属回归闸失败。
+
+人工审阅更新必须显式触发；以下命令仅在全新目录生成三个候选文件，不改仓内登记：
+候选中的source清单和batch行按索引动态生成；coverage只描述不固定数量的动态契约，
+按原始字节复制，不解析中文说明，也不从文案取得库存或片数。实际数量以完整source清单
+及batches结构数据为准；仅修改coverage措辞不会改变候选生成行为。
+
+```sh
+python3 tests/update-tools-compile.py "$ROOT" "$OUT/review-candidate"
+diff -u tests/tools-compile-sources.tsv "$OUT/review-candidate/tools-compile-sources.tsv"
+diff -u tests/batches.tsv "$OUT/review-candidate/batches.tsv"
+diff -u tests/coverage.tsv "$OUT/review-candidate/coverage.tsv"
+# 人工审核新增/删除路径与kind、批次及覆盖说明后，三份文件一起安装。
+cp "$OUT/review-candidate/"*.tsv "$ROOT/tests/"
+```
+
+底层显式导出CLI为 `sh "$ROOT/unisacc.com" "$ROOT/tests/tools-compile.cx" -- --register "$ROOT" NEW_REGISTRY`，
+目标文件必须不存在；它只导出候选，不批准或更改现有审阅表。常规编译和只读查询绝不自写登记。
+`python3 tests/tools-compile-boundaries.py "$ROOT" "$ROOT/unisacc.com"` 使用临时真实Git索引与真实编译器，
+检查完整稳定分片、逐alias、显式新增后实际编译、增删/kind差集、坏清单、分片缺口/重复/越界、
+超过旧容量、100755、非stage0/不支持mode、TAB/LF、XPASS/诊断和类别漂移及未知错误。
+边界脚本不改产品工作树，不以源码字符串检查或伪编译器代替实际行为。
+边界脚本同时登记为 `tools-inventory-boundaries`，沿用55秒预算与真实SOURCE消费者；
+准确命令为 `tools/bound 55 sh "$ROOT/unisacc.com" "$ROOT/tests/run-batch.cx" -- "$ROOT" "$OUT" tools-inventory-boundaries`。
+该入口使用 `tests/tools-compile.cx --boundaries ROOT PRODUCT`，只在临时Git仓运行变异；
+先以真实产品编译一次消费者，再运行行为用例，不反复编译测试框架。
+脚本在加载本地登记模块前自行禁止bytecode写入，不依赖调用者传 `-B`，不得借忽略
+`__pycache__` 弱化harness身份。以下行为入口实际执行注册批次，并比较前后全部
+`tests/tools/cx` 文件、符号链接及mode；不排除任何pyc。`OUT` 须为此前创建的全新批次父目录：
+
+```sh
+python3 - "$ROOT" "$OUT" <<'PY'
+import hashlib, os, pathlib, subprocess, sys
+root, out = map(lambda p: pathlib.Path(p).resolve(), sys.argv[1:])
+def snapshot():
+    result = {}
+    for name in ("tests", "tools", "cx"):
+        for p in sorted((root / name).rglob("*")):
+            mode = p.lstat().st_mode
+            if p.is_symlink():
+                value = (mode, os.readlink(p))
+            elif p.is_file():
+                value = (mode, hashlib.sha256(p.read_bytes()).hexdigest())
+            else:
+                continue
+            result[str(p.relative_to(root))] = value
+    return result
+before = snapshot()
+run = subprocess.run([str(root / "tools/bound"), "55", "sh", str(root / "unisacc.com"),
+                      str(root / "tests/run-batch.cx"), "--", str(root), str(out),
+                      "tools-inventory-boundaries"], cwd=root)
+after = snapshot()
+changed = [p for p in sorted(before.keys() | after.keys()) if before.get(p) != after.get(p)]
+assert not changed, changed
+assert run.returncode == 0, run.returncode
+print("TOOLS_INVENTORY_HARNESS_UNCHANGED")
+PY
+```
+
 `TOOLS_COMPILE SUMMARY` 分别报告 `compiled`（实际启动编译数）、`compile_pass`、
 `known_failures`（严格XFAIL）、`known_debt`、`fixture_negative`、`scanner_inputs`、
 `scanner_compile_failures`、`unexpected_failures` 和 `raw_compile_failures`（所有原始非零编译rc数）；
