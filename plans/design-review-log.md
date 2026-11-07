@@ -50,3 +50,4 @@
 4. 最小第一步:把 posix.cx:14-32、proc.cx:273-291、ffi.cx:25-31 的六目标常量合并为 exec/facts/sys-syscalls.tsv(name×六列),由 tools/target-gen.cx(已生成 hostid.cx)生成 cx/sys/sysnums.cx;验收=target-gen --check 退出0、生成物字节等价、ratchets 的 cxplatform 对 cx/sys 只降不升。
 5. NN 化后易成瓶颈:sy_ffi_call(ffi.cx:59,依赖私有 libffi dlsym 与 cif 布局;调用约定若进表而 cif 手写,六目标会分叉;Windows 全无);sy_dl_addr(dl.cx:246,静态产品手解 ELF 取 dlopen 地址,host.cx 依赖,osx/win 路径不同)。
 (cc 处置:4 作 M10a 的前置 L0——「sys 常量表化」,owner cdx2(L1 去重之后);3 把 Windows ENOSYS/FFI 限制补入 plans 薄层节与发布说明模板;5 两个接口列为 M10b 资源合同门的联审对象。)
+(更正,cc 2026-11-07:评审⑦第1/4条「cx/driver/sys 与 cx/sys 重复」不成立,git ls-files -s 显示 cx/driver/sys、cx/driver/mem 为 120000 软链;该试点收益作废,L1 仅保留 trace/net/reaper 移出 L0。教训:评审里「重复」类断言须先用 git ls-files -s / diff -r 复核再排期。)
