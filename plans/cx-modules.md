@@ -33,11 +33,11 @@
 
 | 阶段 | 内容 | 闸 | 动产品字节? |
 |---|---|---|---|
-| CX0 | 删除冗余 `#include <cx.h>` 及 prelude 已提供的系统头；新增 `tests/cxinclude.cx` + `tests/cxinclude.tsv`（模块 include 只降不升；新 `.cx` 必须 0）。`--write` 遇到新行或更高计数就拒绝落盘。`include/` 与 `tools/cxcc-hostinc/` 是对接 libc/POSIX 的单元，可以用 `#include`，不进模块棘轮。短记见 [cx-include-lint.md](cx-include-lint.md) | `cxinclude` 硬拒新债 | 否 |
+| CX0 | 删除冗余 `#include <cx.h>` 及 prelude 已提供的系统头；新增 `tests/cxinclude.cx` + `tests/cxinclude.tsv`（模块 include 只降不升；新 `.cx` 必须 0）。`--write` 遇到新行或更高计数就拒绝落盘。`include/` 与 `tools/cxcc-hostinc/` 是对接 libc/POSIX 的单元，可以用 `#include`，不进模块棘轮。短记见 [cx-include-lint.md](../archive/plans/2026-10-28/cx-include-lint.md) | `cxinclude` 硬拒新债 | 否 |
 | CX1 | prelude 补齐 `.cx` 实际所需 POSIX API（stdint/fcntl/errno/limits/ctype/sys/types 等），版次化（`cx edition`）；随后删除对应系统头 | 棘轮下降 + 产品重建 + 28/28 不退 | 是（`include/cx.h`） |
 | CX2 | 模块引用：`#pragma unisa use <mod>`（spec §2）由 unisacc 解析——加入该模块单元、按其非 static 定义生成接口（CXIF）注入原型；取代本地头与 `.cx` 文本包含 | 本地头 include 归零；去掉 use 后必须具名红 | 是（前端） |
-| CX2b | 包清单 `cxpack.tsv`：模块名钉到路径（点即目录）；公开名字是该文件非 static 定义的有序子集。`tests/cxpack.cx` 拒绝未知 `use`、跨模块调用未公开的名字、static 列入公开集、名字与路径不一致。短记见 [cx-pack.md](cx-pack.md) | 正例 `-run` 退出 5；四负例具名红 | 否 |
-| CX2c | CXIF v0 文本文法：banner、守卫、类型、原型、`#endif`。`tests/cxif.cx` 对现场 `-cx-interface` 做检查。短记见 [cxif-v0.md](cxif-v0.md) | 两份现场接口通过；四份坏文本具名红 | 否 |
+| CX2b | 包清单 `cxpack.tsv`：模块名钉到路径（点即目录）；公开名字是该文件非 static 定义的有序子集。`tests/cxpack.cx` 拒绝未知 `use`、跨模块调用未公开的名字、static 列入公开集、名字与路径不一致。短记见 [cx-pack.md](../archive/plans/2026-10-28/cx-pack.md) | 正例 `-run` 退出 5；四负例具名红 | 否 |
+| CX2c | CXIF v0 文本文法：banner、守卫、类型、原型、`#endif`。`tests/cxif.cx` 对现场 `-cx-interface` 做检查。短记见 [cxif-v0.md](../archive/plans/2026-10-28/cxif-v0.md) | 两份现场接口通过；四份坏文本具名红 | 否 |
 | CX3 | 严格模式：`.cx` 中 `#include` 为具名拒绝；未定义外部对象具名拒绝（修 W0 缺口） | 负例闸 | 是 |
 | CX4 | 内存安全：检查器闸——禁无界 API（strcpy/strcat/sprintf/gets…）、prelude 提供带长度的切片/缓冲 API；所有权/借用规则按 spec §5 逐条以棘轮引入 | 违规计数棘轮 | 视规则 |
 
