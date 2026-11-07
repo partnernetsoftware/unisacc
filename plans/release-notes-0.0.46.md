@@ -1,6 +1,6 @@
 # unisacc 0.0.46 —— 发布说明
 
-本版为正式版（非预发布）。产品证据是同候选六目标原生 CI（QUALIFIED 42/0）；**全批会话未达资格**，数量与原因见“已知限制”首条。Tag 对应 main 提交 `623b62fd0d`，其产品输入（`src cx exec include seed ext kernel`）与 CI 验证的 `44182b4059` 逐字相同（`git diff 44182b4059 623b62fd0d` 对这些目录为空）。
+本版为正式版（非预发布）。产品证据是同候选六目标原生 CI（QUALIFIED 42/0）；**全批会话未达资格**，数量与原因见“已知限制”首条。Tag 所指的 main 提交，其产品输入（`src cx exec include seed ext kernel`）与 CI 验证的 `44182b4059` 逐字相同（`git diff 44182b4059 v0.0.46 -- src cx exec include seed ext kernel` 为空）。
 
 ## 是什么
 面向 C99 的编译器，自己写出 ELF、Mach-O、PE，可编译自身；产品是单文件 `unisacc.com`（APE 加载头、ISA 切片和一份模型包）。不作完整 C99/POSIX 符合性声明，具体缺口见下。
