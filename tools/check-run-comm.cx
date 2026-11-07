@@ -1,0 +1,54 @@
+/* Linux default-run comm regression; no cached qualification.
+ * sh PRODUCT tools/check-run-comm.cx -- ROOT NEW_PRODUCT OLD_PRODUCT
+ * sh PRODUCT tools/check-run-comm.cx -- ROOT --old-control OLD_PRODUCT
+ * With no args, require RUN_COMM_ROOT/RUN_COMM_NEW_PRODUCT/RUN_COMM_OLD_PRODUCT.
+ * TMPDIR is inherited by products; each invocation owns a private /tmp directory.
+ * Logs and C input are retained there; no -o product execution substitutes for -run.
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.kernelsha
+static char root[4096],work[]="/tmp/cx-run-comm-XXXXXX";
+static void die(const char *s){fprintf(stderr,"CHECK_RUN_COMM FAIL %s\n",s);exit(2);}
+static void put(const char *p,const char *s,size_t n){FILE *f=fopen(p,"wb");if(!f)die("log-open");int bad=fwrite(s,1,n,f)!=n;if(fclose(f))bad=1;if(bad)die("log-write");}
+static void path(char *p,size_t n,const char *leaf){if(cx_fmt(p,n,"%s/%s",work,leaf))die("path");}
+static void oldpin(const char *p){size_t n;char *s=cx_read(p,&n),h[65];if(!s||ks_sha256_hex(s,n,h))die("old-product-read");free(s);if(strcmp(h,"c1309d112ba1d389a296ef701f864d56cc06fe281eea98f621a51d8d2b429caf"))die("old-product-sha256");}
+static int probe(const char *product,const char *label,const char *expected){
+ char src[4400],fd[4400],log[4400],err[4400];path(src,sizeof src,"rcprobe.c");path(fd,sizeof fd,"fd-input");
+ /* The probe only observes comm. Old/new expectations live independently below. */
+ const char *body=
+ "#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n"
+ "int main(int argc,char **argv){char comm[64],exe[4096],fd[8]={0};FILE *f=fopen(\"/proc/self/comm\",\"r\");if(!f||!fgets(comm,sizeof comm,f))return 91;if(fclose(f))return 92;size_t n=strlen(comm);if(n&&comm[n-1]=='\\n')comm[n-1]=0;long z=readlink(\"/proc/self/exe\",exe,sizeof exe-1);if(z<0)return 93;exe[z]=0;printf(\"COMM=%s\\nEXE=%s\\n\",comm,exe);if(argc!=5||strcmp(argv[1],\"a b\")||strcmp(argv[2],\"\")||strcmp(argv[3],\"--literal\")||strcmp(argv[4],\"9\"))return 94;if(read(argv[4][0]-'0',fd,7)!=7||memcmp(fd,\"fd-nine\",7))return 95;puts(\"SEMANTICS=stdout,args,fd9\");printf(\"ARGV0=%s\\n\",argv[0]);return 37;}\n";
+ put(src,body,strlen(body));put(fd,"fd-nine",7);
+ /* The driver's inherited-fd contract retains 3..62 only when a pure numeric
+  * argument names that fd; pass 9 explicitly rather than evading the contract. */
+ char *v[]={"sh","-c","exec sh \"$1\" \"$2\" -- 'a b' '' --literal 9 9<\"$3\"","run-comm",(char *)product,src,fd,0};
+ np_result r={0};char why[512];if(np_run(v,root,0,50,&r,why,sizeof why))die(why);
+ char leaf[128];if(cx_fmt(leaf,sizeof leaf,"%s.stdout",label))die("stdout-label");path(log,sizeof log,leaf);put(log,r.out,r.outn);if(cx_fmt(leaf,sizeof leaf,"%s.stderr",label))die("stderr-label");path(err,sizeof err,leaf);put(err,r.err,r.errn);
+ printf("OBSERVE %s rc=%d stdout=%s stderr=%s\n",label,r.rc,log,err);if(r.outn)fwrite(r.out,1,r.outn,stdout);
+ char want[96];if(cx_fmt(want,sizeof want,"COMM=%s\n",expected))die("comm-expectation");
+ char entry[4500];if(cx_fmt(entry,sizeof entry,"ARGV0=%s\n",src))die("argv0-expectation");
+ int ok=r.rc==37&&!r.errn&&r.outn>0&&!strncmp(r.out,want,strlen(want))&&strstr(r.out,"\nEXE=/memfd:")&&strstr(r.out," (deleted)\nSEMANTICS=stdout,args,fd9\n")&&strstr(r.out,entry);
+ np_free(&r);printf("%s %s expected-comm=%s\n",ok?"CHECKED":"FAIL",label,expected);return ok;
+}
+int main(int argc,char **argv){
+ int envmode=argc==1;char *bound[5]={argv[0],0,0,0,0};
+ if(envmode){
+  const char *keys[]={"RUN_COMM_ROOT","RUN_COMM_NEW_PRODUCT","RUN_COMM_OLD_PRODUCT"};
+  for(int i=0;i<3;i++){bound[i+1]=getenv(keys[i]);if(!bound[i+1]||!bound[i+1][0]){fprintf(stderr,"NOT_RUN missing binding: %s\n",keys[i]);return 2;}}
+  argc=4;argv=bound;
+ }
+ char old[4096],fresh[4096];int control=!envmode&&argc==4&&!strcmp(argv[2],"--old-control");
+ if(argc!=4||!realpath(argv[1],root))die("usage ROOT NEW_PRODUCT OLD_PRODUCT | ROOT --old-control OLD_PRODUCT");
+ if(!realpath(argv[3],old)||access(old,R_OK))die("OLD_PRODUCT unavailable");oldpin(old);
+ int available=!control&&realpath(argv[2],fresh)&&!access(fresh,R_OK);
+ if(!mkdtemp(work))die("private-directory");printf("EVIDENCE %s\n",work);
+ int ok=probe(old,"OLD_NEGATIVE_CONTROL","63");
+ if(control){puts("OLD_CONTROL_ONLY new-qualification=NOT_RUN");return ok?0:1;}
+ if(!available){fprintf(stderr,"NOT_RUN NEW_PRODUCT unavailable: %s\n",argv[2]);return 2;}
+ if(!strcmp(fresh,old))die("NEW_PRODUCT equals OLD_PRODUCT");
+ /* Old observation records argv0 ending in rcprobe.c: preserve the suffix. */
+ ok=probe(fresh,"NEW_DEFAULT_RUN","rcprobe.c")&&ok;
+ if(ok)puts("CHECK_RUN_COMM\tPASS old-negative-control=63 new-comm=rcprobe.c memfd,args,fd9,stdout,rc=CHECKED");
+ return ok?0:1;
+}

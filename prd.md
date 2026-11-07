@@ -34,7 +34,7 @@
 **一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
 - **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
-- **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据。**现状缺口**：当前 0.0.44-rc3 的 APE 只有五片；win/x86_64 的片在 Windows 上崩溃（argv 缺陷，WIN-DEBUG-LOOP / NATIVE-WIN-PE 在做）；win/arm64 已能 `-b win/arm64` 交叉编出 PE（machine 0xAA64），release-build 已能出 slice-win-arm64（提交 `0b22d546e3`），发布打包第 6 槽在做，目标是 0.0.45 候选 c45-2 出六片。
+- **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据。c46-3 冻结 `44182b4059` 已实际构造六片，原生 CI `42353236985` 为 42/0；Windows 两格的 stdio/stream 仅 portable 子集，完整 POSIX 未声称，见 §9.1。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
 - **自举**：宿主构建 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。
 
@@ -131,8 +131,9 @@
 | 共享部署模型逐mode消费 | `sh ./unisacc.com tools/check-loader-common.cx`；批次 `loader-common-models` | 五绑定加显式 `TEST_LOADER_COMMON_MODE=pp/tapecheck/o2/units/tokens-pp/tokens-lex/warn`；每mode10项真实自M等价、变异产品拒绝及SHA不变，缺模式非零；覆盖M3/5/7/32/33/34/35，18事实网另轨 |
 | 特殊部署接口模型消费 | `sh ./unisacc.com tools/check-loader-special.cx`；批次 `loader-special` | 五绑定；M36 nativeabi、M37 symbols、M38 contract、M39 ownership完整合法协议帧、自M全输出相等、变异产品具名拒绝及部件SHA不变，共21项；非归档libunisacc发布资格 |
 | 六目标部署模型逐格消费 | `sh ./unisacc.com tools/check-loader-targets.cx`；批次 `loader-target-models` | 五绑定加显式 `TEST_LOADER_TARGET_MODE=image-或object-目标`；12格各14项，覆盖24个lower/elf模型，自M全输出相等、变异必须产品拒绝（仅launcher拒绝不算）；跨目标镜像不执行，非原生资格 |
-| win/arm64分片固定点证据检查 | `sh ./unisacc.com tools/check-win-arm64-fixedpoint.cx -- MANIFEST [--test-loader LOADER PROBE]` | 显式候选/包/两代构造器与收据SHA，核AA64及真实G2/G3独立产物字节；缺代际rc3，坏PE/身份rc1，Linux loader烟测不冒认Windows原生；负控批`win-arm64-fixedpoint-controls` |
+| win/arm64分片固定点证据检查 | `sh ./unisacc.com tools/check-win-arm64-fixedpoint.cx -- MANIFEST [--test-loader LOADER PROBE]` | 必需 `root` 为 win 实际源根、`native_root` 为 Linux 构造器实际源根；双方收据均核同一 rev，另核候选/包/两代构造器与收据SHA、AA64、独立产物字节；缺代际rc3，坏PE/身份rc1；负控批 `win-arm64-fixedpoint-controls`，不冒认Windows原生自举 |
 | RI原生材料生产与缺头负控 | `sh ./unisacc.com tools/ri-material.cx -- --build ROOT NEW_OUT tests/cases/ri-cli.cx`（或`ri-consumers.cx`）；`--verify-native`只核验 | 完整fixture前缀、`-I ROOT/exec/c`及既有close-fail链接叶SHA入native收据；缺-I真编译负控批`ri-material-native-missing-include`必须rc2具名，NULL0 hook保留；仅PREPARED，绝对ROOT不能搬，P4 flow-data兼容仍另项 |
+| Linux默认运行命名回归 | `sh ./unisacc.com tools/check-run-comm.cx -- ROOT NEW_PRODUCT OLD_PRODUCT`；正式批 `run-comm` 绑定 `run-comm-new,run-comm-old` | 实跑旧c46-2固定SHA负控 `comm=63` 与新程序 `comm=rcprobe.c`，同时核memfd、argv0、空参数/带空格参数、fd9、stdout及rc37；无参需三项显式RUN_COMM绑定，缺失NOT_RUN/rc2，不猜候选 |
 
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
@@ -317,9 +318,9 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-07,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 公开出发线（历史，不是本候选资格）:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定（2026-11-07）：**c46-2 候选已通过 CI**：run 42332407482，提交 `b64a34aaa86400ad75f52a1602025e52b7dfdd17`，APE sha256 `c1309d112ba1d389a296ef701f864d56cc06fe281eea98f621a51d8d2b429caf`，QUALIFIED 42/0（Windows 两格 stdio-crossunit/stream-pipe 为 portable 子集）；私有 draft `v0.0.46-c46-2-candidate`，资产已按 sha 备份 `~/.unisacc-baselines/c46-2/`。fable 独立评审产品输入差异：无阻断（见本体计划）。**进行中**：全批会话 s5（grk，克隆 `/tmp/grk-s5-c46-2`，轻批 PASS 36/FAIL 0，161 个需材料批正在绑定）；win/arm64 两代 PE 固定点已出（cdx 报，G2=G3=随发切片，sha `1eee599b…`，checker 待复跑自合，Windows 原生 NOT_CLAIMED）。
+当前裁定（2026-11-07）：**c46-3 发布线由 omp-cdx 负责到底**，冻结提交 `44182b4059d51191cb021241c666b521bf34b2ad`；正规131作业/final/routes/P4及六片真实构造完成，APE `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`（6,163,990字节），新包 `29e13aeb8c62a09c0323a9d86dcd51ab8b35684696264b3fc66571d79654ef6c`。原生CI `42353236985` 同候选 **QUALIFIED 42/0/0/0**；Windows stdio/stream仅portable子集。五片五类固定点全same，第六片独立checker `failed=0 missing=0`，Windows原生自举NOT_CLAIMED。正式APE comm正负控、smoke5/0和材料绑定批 `run-comm` 均实跑通过；三资产下载回读SHA一致，配对记录与CI已备份 `~/.unisacc-baselines/c46-3/`。工具改动私有13/13且未放宽阈值。grk的s8仍冻结执行，最终计数/说明收口未完成；不迁移c46-2或旧s7资格。
 **已交付（分治基础）**：test-loader A/B/C、40M 部署模型逐模型批（共享七 mode、特殊 M36-39、六目标）、ISA 本机启动检查、`work/units.tsv`＋`tools/fan.cx` 真并行（七流 READY，开发证据）。18 事实网另轨 gold→kernel→nets，BLOCKED 如实标注。切片瘦身：可迁性分类显示大状态逻辑占约 74%，试点 rtsharedname 设计页已出，不进 0.0.46 产品。
-**发布门槛剩余**：s5 结论（SESSION-INFRA 不算合格）、发布说明去“待证”、主人批准公开；发布手册见本体计划。
+**发布门槛剩余**：精确提交并在grk阶段边界移交harness新输入身份、s8全批原始结论、发布说明证据核实与“待证”清零；公开仍须主人批准，当前只有已授权私有 draft `v0.0.46-c46-3-candidate`，未创建正式版标签或更改Latest。
 **结构反思（主人 2026-11-07 提出，详见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md) 末节）**：①测试专用 loader com（独立切片文件＋按需加载流/网文件，测试分片收敛）；②切片逻辑大部分迁 NN，切片只留 ISA 对接（host syscall/ABI/ffi/dl）。主人 11-07 裁定：①②均在0.0.46立即开工（TEST-LOADER-COM、SLICE-SHRINK-PRE）。
 ```text
 0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
@@ -348,7 +349,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | 当前任务与认领人在 `work/items.tsv`(owner 列=tmux 窗口名;只有 READY 项被 omp-workflow 自动续跑);事实与进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 上一发布 0.0.43 | 身份见 §3 | `tools/com-tree.cx` |
-| 当前发布与候选 | 公开安装产品仍`v0.0.45`预发布（APE`ae0b12d8…`）；源/候选已0.0.46，cc接管c46-2；不追加0.0.45稳定版。BOM+独立RUN+k2按新组合实际证据合入，旧候选资格不迁移 | [公开发布说明](plans/release-notes-0.0.45.md)、[0.0.46本体门槛](plans/v0.0.46-unisacc.md)、§9.1 |
+| 当前发布与候选 | 公开安装产品仍 `v0.0.45` 预发布（APE `ae0b12d8…`）；c46-3 冻结 `44182b4059`，omp-cdx 负责构造→私有 APE→comm→CI→备份→说明；c46-2 资格只属历史，不迁移；公开须主人批准 | [公开发布说明](plans/release-notes-0.0.45.md)、[0.0.46本体门槛](plans/v0.0.46-unisacc.md)、§9.1 |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md) |
 | 流/网 | 7 流（e2/e1/e3/e4/prune/lower/elf）+ 18 网（真源 `exec/pipeline/image-stages.tsv`、`weights/gold/*.tsv`） | §4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | `tests/batches.tsv`、`tests/coverage.tsv` |

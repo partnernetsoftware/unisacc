@@ -1,10 +1,11 @@
 /* Explicit evidence, not a Windows-native bootstrap claim.
  * Usage: check-win-arm64-fixedpoint.cx MANIFEST [--test-loader LOADER PROBE]
- * TSV key/value rows (repeated keys must agree): root, rev; ape/pkg/linux/win and *_sha.
+ * TSV key/value rows (repeated keys must agree): root, native_root, rev; ape/pkg/linux/win and *_sha.
  * Optional g2/g3 name separate TSV receipts: root, rev, pkg_sha, ape_sha,
  * target=win/arm64, route=whole-o, image, sha, constructor, constructor_sha,
  * argv (actual invocation), status/status_sha (whole-o receipt with rc=0).
  * generation=g2/g3, native_sha, native_receipt/native_receipt_sha bind each Linux constructor's real entry-build receipt and preceding constructor path/SHA.
+ * root binds Windows generation receipts; native_root binds Linux entry-build receipts, whose rev must equal rev.
  * Missing generations => NOT_CLAIMED and rc 3; malformed evidence => rc 1.
  * Loader mode also binds loader/loader_sha and loader_slice/loader_slice_sha; PROBE must print WIN_ARM64_NATIVE_SMOKE and exit 7. Uses existing loader, never executes Windows PE.
  */
@@ -36,10 +37,10 @@ static void bound(const char *f,const char *key,char *p,char *h){char k[128],wan
 static void same(const char *f,const char *key,const char *want){char v[4400];req(f,key,v,sizeof v);ck(tx_eqz(v,want),key);}
 static int equal(const char *a,const char *b){size_t na=0,nb=0;char *x=cx_read(a,&na),*y=cx_read(b,&nb);sy_stat_t sa,sb;int ok=x&&y&&na==nb&&!mm_cmp(x,y,na)&&!sy_stat(a,&sa)&&!sy_stat(b,&sb)&&(sa.dev!=sb.dev||sa.ino!=sb.ino);mm_free(x);mm_free(y);return ok;}
 int main(int argc,char **argv){
- int a=argc>1&&tx_eqz(argv[1],"--")?2:1;char ape[4400],pkg[4400],lnx[4400],win[4400],ha[65],hp[65],hl[65],hw[65],root[4400],rev[128],prev[65]={0};
+ int a=argc>1&&tx_eqz(argv[1],"--")?2:1;char ape[4400],pkg[4400],lnx[4400],win[4400],ha[65],hp[65],hl[65],hw[65],root[4400],native_root[4400],rev[128],prev[65]={0};
  char *f;if(argc-a!=1&&argc-a!=4){sy_eprintf("usage: MANIFEST [--test-loader LOADER PROBE]\n");return 2;}f=argv[a];
  if(argc-a==4&&!tx_eqz(argv[a+1],"--test-loader"))return 2;
- req(f,"root",root,sizeof root);req(f,"rev",rev,sizeof rev);
+ req(f,"root",root,sizeof root);req(f,"native_root",native_root,sizeof native_root);req(f,"rev",rev,sizeof rev);
  bound(f,"ape",ape,ha);bound(f,"pkg",pkg,hp);bound(f,"linux",lnx,hl);bound(f,"win",win,hw);
  ck(image(lnx,0),"linux.ELF-x86_64");ck(image(win,1),"win.PEMachineAA64");
  char previous_native[65];mm_copy(previous_native,sizeof previous_native,hl,65);
@@ -52,7 +53,7 @@ int main(int argc,char **argv){
   same(r,"root",root);same(r,"rev",rev);same(r,"pkg_sha",hp);same(r,"ape_sha",ha);same(r,"target","win/arm64");same(r,"route","whole-o");
   req(r,"image",p,sizeof p);req(r,"sha",want,sizeof want);ck(!sha(p,h)&&tx_eqz(h,want)&&image(p,1),"generation.PE-and-sha");
   req(r,"constructor",ctor,sizeof ctor);req(r,"constructor_sha",want,sizeof want);ck(!sha(ctor,hc)&&tx_eqz(hc,want)&&image(ctor,0),"generation.native-constructor");
-  char nr[4400],nh[65],ng[16];bound(r,"native_receipt",nr,nh);same(nr,"root",root);same(nr,"p3_sha",hp);same(nr,"constructor_sha",previous_native);same(nr,"constructor",previous_ctor);same(nr,"via","exec");
+  char nr[4400],nh[65],ng[16];bound(r,"native_receipt",nr,nh);same(nr,"root",native_root);same(nr,"rev",rev);same(nr,"p3_sha",hp);same(nr,"constructor_sha",previous_native);same(nr,"constructor",previous_ctor);same(nr,"via","exec");
   cx_fmt(ng,sizeof ng,"g%d",g);same(r,"generation",ng);same(r,"native_sha",hc);mm_copy(previous_native,sizeof previous_native,hc,65);tx_copy(previous_ctor,sizeof previous_ctor,ctor,tx_len(ctor,sizeof ctor));
   char cand[4400],prefix[80];req(nr,"candidate",cand,sizeof cand);cx_fmt(prefix,sizeof prefix,"sha=%s\t",hc);ck(!strncmp(cand,prefix,69),"native.receipt-output-sha");
   req(r,"argv",av,sizeof av);ck(strstr(av,ctor)&&strstr(av,"win/arm64")&&strstr(av,pkg),"generation.argv-identities");
