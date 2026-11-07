@@ -65,3 +65,8 @@ cc 自己的数据与建议冲突处:L1 base「30–60KB/ISA」与 M10a 的薄�
 4. 一条命令缺口:候选事实表;release-layout 去硬编码;tools/release-dispatch.cx(draft 上传七资产→workflow_dispatch→回写 run id);readback 泛化为 readback.cx;备份目录工具化。四件薄封装,不触产品。
 5. 发布说明模板化:release-notes-TEMPLATE.md + tools/release-notes.cx 从候选事实表/全批聚合/items 的已知限制行生成,人工只写变更摘要;--check 比对已发布说明,发布后补证据=重生成+标注段。
 (cc 复核:readback.sh 与 release-layout.cx 的硬编码已用 grep 计数确认。处置:立项 M11「发布一条命令化」,owner cdx(A12 之后),先做候选事实表+readback.cx+release-dispatch.cx。)
+
+## L2 程序层可行性测量结果与决策(cdx2 测量,cc 判断,2026-11-07)
+测量(cdx2,未全量实跑):57 个 UNBOUNDED+MIXED 单元的 E3 tape gzip 合计估 0.50–0.52MB;三代表(cxmod/route/m0)E3 raw/gz = 645389/31662、365231/19109、365215/21298;冷进程 E3→对象 1.05–1.78s;首编全量估计 25–47s(不含最终链接/冷盘);osx/win 六目标 -c 仅得 tape 容器无 .text,六份原生尚不齐。
+cc 判断:① tape 约占 57 单元四片 gzip 原生份额(≈1.1MB)的 45%,未达「≤1/3」判据(含 win 两片则接近但样本不齐);② 首次运行现编 25–47s 与默认 -run 的使用体验冲突,须靠缓存+预编,预编则回到「六份原生」;③ 循环依赖:驱动里负责「跑 e2→elf 流水线」的单元(stages/driveunits/runexec/drivelink 等 MIXED/SYS-IO)正是编译 L2 所必须的,不能放进 L2,可迁部分小于 57 项;④ 最终收益上限约 20–25% APE 体积,代价是首跑延迟与自举复杂度。
+决策:L2 不进 0.0.47;记为 0.0.48 研究项(前提 M10b 资源合同门完成、六目标 tape→native 全链可测)。M10 保持现状:M10a 清单→M10b 资源合同门→M10c rtsharedname 试点→M10d 批量迁 FINITE/TRANSFORM(~72KB)。运行库(L4)去重作为独立项另议。
