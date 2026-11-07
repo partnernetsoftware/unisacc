@@ -315,8 +315,9 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前节点(2026-11-07,事实取自 plans/release-notes-0.0.45.md、work/ledger.tsv)。节点后的 `[ID]` 是 `work/items.tsv` 的条目号,状态以 items 为准。
 公开出发线（历史，不是本候选资格）:**0.0.45 已于 2026-11-06 作为公开预发布 `v0.0.45` 发布**(APE sha256 `ae0b12d8c822efa4…`,6,128,709 字节,源 `fa0a747c7f`,非 Latest;六格原生运行 42191390455 `pass=36 fail=0 not_run=6`,发布后用同一 APE 补测 42196947660 `pass=40 fail=2`;全批会话 NOT_QUALIFIED:215 PASS / 41 FAIL / 9 UNKNOWN / 162 无收据),事实以 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) 为准。0.0.44-rc3 仍是更早的公开 prerelease,0.0.44 没有正式标。**0.0.46 本体计划见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)。**
-当前裁定（2026-11-07，主人令测试loader与切片瘦身立即在0.0.46开工）：cdx、grk 已复工，**c46-2/CI/全批s5 暂缓**，待 loader 最小版可用。产品输入已合：RUN-FORCED-INCLUDE-LOST `fd3b900686`、BOM `8380cde266`、k2 `3feadb3b74`，工具安全 `6ccc1aa9f0`/`e12bc69e42`。批次数字（SOURCE_BOM46/0、E2正198/0拒201/0、facts33/0等）为cdx所报，未复跑；E2 14红已归因探针未绑--models。
-已完成：**TEST-LOADER-COM 最小版**（DONE-LOCAL，开发证据，非发布资格；A/B/C 已合入，19/0，棘轮13/13，速度表见 plans/test-loader-com.md）。下一块：逐网批、按ISA切片检查、units.tsv 接 test-loader。**SLICE-SHRINK-PRE**（grk）：归属工具 ead7a2f4cf，试点改 rtsharedname；索引树 88f4868256；fan 待做真并行。
+当前裁定（2026-11-07）：**c46-2 候选已通过 CI**：run 42332407482，提交 `b64a34aaa86400ad75f52a1602025e52b7dfdd17`，APE sha256 `c1309d112ba1d389a296ef701f864d56cc06fe281eea98f621a51d8d2b429caf`，QUALIFIED 42/0（Windows 两格 stdio-crossunit/stream-pipe 为 portable 子集）；私有 draft `v0.0.46-c46-2-candidate`，资产已按 sha 备份 `~/.unisacc-baselines/c46-2/`。fable 独立评审产品输入差异：无阻断（见本体计划）。**进行中**：全批会话 s5（grk，克隆 `/tmp/grk-s5-c46-2`，轻批 PASS 36/FAIL 0，161 个需材料批正在绑定）；win/arm64 两代 PE 固定点已出（cdx 报，G2=G3=随发切片，sha `1eee599b…`，checker 待复跑自合，Windows 原生 NOT_CLAIMED）。
+**已交付（分治基础）**：test-loader A/B/C、40M 部署模型逐模型批（共享七 mode、特殊 M36-39、六目标）、ISA 本机启动检查、`work/units.tsv`＋`tools/fan.cx` 真并行（七流 READY，开发证据）。18 事实网另轨 gold→kernel→nets，BLOCKED 如实标注。切片瘦身：可迁性分类显示大状态逻辑占约 74%，试点 rtsharedname 设计页已出，不进 0.0.46 产品。
+**发布门槛剩余**：s5 结论（SESSION-INFRA 不算合格）、发布说明去“待证”、主人批准公开；发布手册见本体计划。
 **结构反思（主人 2026-11-07 提出，详见 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md) 末节）**：①测试专用 loader com（独立切片文件＋按需加载流/网文件，测试分片收敛）；②切片逻辑大部分迁 NN，切片只留 ISA 对接（host syscall/ABI/ffi/dl）。主人 11-07 裁定：①②均在0.0.46立即开工（TEST-LOADER-COM、SLICE-SHRINK-PRE）。
 ```text
 0.0.45 公开预发布 v0.0.45（收口保持原样）→ 0.0.46 正式版完成线（全批资格、六格原生、逐片固定点、独立评审）
