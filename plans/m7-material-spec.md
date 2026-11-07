@@ -16,7 +16,7 @@ kernel-route 单 ISA 会得到 inputs=22/11/11/1，被 :88 拒绝。objects 必�
 
 ## 进度 2026-11-07
 
-转绿（同源 884adfef 重构造后实跑 PASS）：objects 5 + kernel-route 7 + ri-flow 9 + ri-chain 7 + pp-gold 2 = **30**。streams 28 实跑未完，不改此数。**p3: 需 ctx tool-pack（chain-step p3 REV S SRC_PKG OUT --nets CTX/jobs --routes R），待磁盘/候选链复用，本轮不做。**
+转绿 **45**（与 30 无重叠）：objects5+kr7+ri-flow9+ri-chain7+pp-gold2 + s8f streams **15** = peep-0..7, opinfo-0/1, properties-bound/tu, e4-semantics, prune-io, prune-semantics。p3 挂起。prune-cases=材料 classic sources errno=2；model-identity=材料 not canonical P3；det/meta=PROPERTY not_run=1（既有 STREAM-DET-NOTRUN / STREAM-WIN-TAPE-RT）。
 
 ## streams / PEEP / OPINFO（2026-11-07 定性）
 
