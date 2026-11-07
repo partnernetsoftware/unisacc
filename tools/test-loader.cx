@@ -1,29 +1,56 @@
-/* Development evidence only. This launcher delegates every model read to the
- * supplied product slice; it is not another package loader.
- * Usage: --slice ABS --models ABS [--identity] -- PRODUCT_ARGS...
- * Paths must be absolute so inherited cwd/container cannot choose a package. */
+/* Development evidence only, never release evidence. All execution is delegated
+ * to the supplied product slice (hs_container/hs_read/pm_open unchanged).
+ * Historical block A proved stream delegation only. Block B inserts --models
+ * before product inputs and preserves user arguments following product `--`.
+ * --slice ABS --models ABS [--identity]
+ * [--net STAGE=ABS --swap-tool ABS] -- PRODUCT_ARGS...
+ * --swap-tool is an executable compiled from existing lab-loader/p3-swap.cx.
+ * Replacement scratch is removed after bounded execution; receipts remain on stderr.
+ * Identity hashes are compressed M records/payloads, NOT decoded weights. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sys.env
-static void refuse(const char *s){fprintf(stderr,"test-loader: REFUSE %s\n",s);exit(2);}
-static void identity(const char *kind,const char *p){size_t n=0;char h[65];char *b=cx_read(p,&n);if(!b)refuse(kind);cx_sha256_hex(b,n,h);free(b);fprintf(stderr,"TEST_LOADER_IDENTITY\tscope=development-evidence\tkind=%s\tpath=%s\tbytes=%lu\tsha256=%s\n",kind,p,(unsigned long)n,h);}
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+static char scratch[4096],rawpath[4096],pkgpath[4096];
+static void cleanup(void){if(rawpath[0])unlink(rawpath);if(pkgpath[0])unlink(pkgpath);if(scratch[0])rmdir(scratch);}
+static void refuse(const char *s){cleanup();fprintf(stderr,"test-loader: REFUSE %s\n",s);exit(2);}
+static char *readfile(const char *p,size_t *n){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<=0||st.st_size>268435456)refuse("bounded regular file required");char *b=cx_read(p,n);if(!b||*n!=(size_t)st.st_size)refuse("file read changed");return b;}
+static void identity(const char *kind,const char *p){size_t n=0;char h[65];char *b=readfile(p,&n);cx_sha256_hex(b,n,h);free(b);fprintf(stderr,"TEST_LOADER_IDENTITY\tscope=development-evidence\tkind=%s\tpath=%s\tbytes=%lu\tsha256=%s\n",kind,p,(unsigned long)n,h);}
 static void bound(const char *p,char *out,const char *why){struct stat st;if(!p||p[0]!='/')refuse(why);if(!realpath(p,out)||stat(out,&st)||!S_ISREG(st.st_mode)||st.st_size<=0)refuse(why);}
+/* This is receipt-only extent enumeration, following p3-swap's D/M layout.
+ * No inflation, model construction, model selection or execution happens here. */
+typedef struct {char *data;size_t n,pos;char row[2048];} Receipt;
+static char *row(Receipt *r){size_t start=r->pos;while(r->pos<r->n&&r->data[r->pos]!='\n')r->pos++;size_t n=r->pos-start;if(r->pos==r->n||!n||n>=sizeof r->row||mm_copy(r->row,sizeof r->row,r->data+start,(long)n))refuse("identity header extent");r->row[n]=0;r->pos++;return r->row;}
+static void body(char *b,size_t n,Receipt *r){r->data=b;r->n=n;r->pos=0;if(n>=16&&!memcmp(b+n-16,"UNIPKG1\n",8)){unsigned long long len=0;for(int i=7;i>=0;i--)len=(len<<8)|(unsigned char)b[n-8+i];if(!len||len>n-16)refuse("identity footer extent");r->data=b+n-16-(size_t)len;r->n=(size_t)len;}}
+static void models_identity(const char *p){size_t n;char *b=readfile(p,&n);Receipt r;body(b,n,&r);long ver,nm,ns,nr;if(sscanf(row(&r),"P %ld %ld %ld %ld",&ver,&nm,&ns,&nr)!=4||(ver!=3&&ver!=4)||nm<=0||nm>65536||ns<=0||ns>65536||nr<0)refuse("identity requires bounded P3/P4");
+ for(long i=0;i<ns;i++){char route[512],stage[512],in[512],out[512];long index;if(sscanf(row(&r),"D %511s %511s %511s %511s %ld",route,stage,in,out,&index)!=5||index<0||index>=nm)refuse("identity D row");fprintf(stderr,"TEST_LOADER_BINDING\tscope=development-evidence\troute=%s\tstage=%s\tmodel=%ld\n",route,stage,index);}
+ for(long i=0;i<nm;i++){size_t at=r.pos;long len,raw,codec;unsigned long crc;if(sscanf(row(&r),"M %ld %ld %ld %lu",&len,&raw,&codec,&crc)!=4||len<=0||raw<=0||codec!=1||(size_t)len>r.n-r.pos)refuse("identity M extent");char mh[65],ph[65];cx_sha256_hex(r.data+at,r.pos-at+(size_t)len,mh);cx_sha256_hex(r.data+r.pos,(size_t)len,ph);fprintf(stderr,"TEST_LOADER_MODEL\tscope=development-evidence\tindex=%ld\tM_record_sha256=%s\tcompressed_payload_sha256=%s\tcompressed_bytes=%ld\tdecoded_hash=NOT_MEASURED\n",i,mh,ph,len);r.pos+=(size_t)len;}free(b);
+}
+static void replace(const char *pkg,const char *net,const char *stage,const char *tool,char *out){char dir[]="/tmp/test-loader-net-XXXXXX",why[1024];if(!mkdtemp(dir))refuse("replacement scratch create");if(cx_fmt(scratch,sizeof scratch,"%s",dir)||cx_fmt(rawpath,sizeof rawpath,"%s/replaced.body",dir)||cx_fmt(pkgpath,sizeof pkgpath,"%s/replaced.pkg",dir)||cx_fmt(out,4096,"%s",pkgpath))refuse("replacement path");char *av[]={(char *)tool,(char *)pkg,(char *)stage,rawpath,(char *)net,"--model",0};np_result r={0};if(np_run(av,dir,0,20,&r,why,sizeof why))refuse(why);if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(r.rc)refuse("p3-swap failed");np_free(&r);
+ size_t n;char *b=readfile(rawpath,&n);int fd=open(out,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)refuse("replacement output create");np_buf image={0};np_put(&image,b,n);free(b);char footer[16];memcpy(footer,"UNIPKG1\n",8);unsigned long long z=n;for(int i=0;i<8;i++){footer[8+i]=(char)(z&255);z>>=8;}np_put(&image,footer,16);size_t at=0;while(at<image.n){ssize_t k=write(fd,image.p+at,image.n-at);if(k<0&&errno==EINTR)continue;if(k<=0)refuse("replacement output write");at+=(size_t)k;}if(close(fd))refuse("replacement output close");free(image.p);
+}
 int main(int argc,char **argv){
- const char *slice=0,*models=0;char sp[4096],mp[4096];int receipt=0,at=1;
+ const char *slice=0,*models=0,*netarg=0,*swap=0;char sp[4096],mp[4096],net[4096],tool[4096],replaced[4096],stage[512];int receipt=0,at=1;
  while(at<argc&&strcmp(argv[at],"--")){
   if(!strcmp(argv[at],"--slice")){if(slice||at+1>=argc)refuse("slice binding required exactly once");slice=argv[++at];}
   else if(!strcmp(argv[at],"--models")){if(models||at+1>=argc)refuse("models binding required exactly once");models=argv[++at];}
+  else if(!strcmp(argv[at],"--net")){if(netarg||at+1>=argc)refuse("net binding required exactly once");netarg=argv[++at];}
+  else if(!strcmp(argv[at],"--swap-tool")){if(swap||at+1>=argc)refuse("swap-tool binding required exactly once");swap=argv[++at];}
   else if(!strcmp(argv[at],"--identity")){receipt=1;}
   else refuse("unknown launcher argument");at++;
  }
  if(!slice)refuse("missing --slice binding");if(!models)refuse("missing --models binding");
  bound(slice,sp,"slice binding must name an existing absolute regular file");bound(models,mp,"models binding must name an existing absolute regular file");
  if(at==argc||at+1==argc)refuse("missing -- product arguments");at++;
- for(int i=at;i<argc;i++)if(!strcmp(argv[i],"--models")||!strncmp(argv[i],"--models=",9))refuse("product arguments must not override models binding");
- if(receipt){identity("slice",sp);identity("models-file",mp);}
+ for(int i=at;i<argc&&strcmp(argv[i],"--");i++)if(!strcmp(argv[i],"--models")||!strncmp(argv[i],"--models=",9))refuse("product arguments must not override models binding");
+ if(receipt){identity("launcher","/proc/self/exe");identity("slice",sp);identity("models-file",mp);models_identity(mp);}
+ if(netarg){const char *eq=strchr(netarg,'=');if(!eq||eq==netarg||(size_t)(eq-netarg)>=sizeof stage||mm_copy(stage,sizeof stage,netarg,(long)(eq-netarg)))refuse("net binding requires STAGE=ABS_FILE");stage[eq-netarg]=0;for(size_t i=0;stage[i];i++)if(!((stage[i]>='a'&&stage[i]<='z')||(stage[i]>='0'&&stage[i]<='9')||stage[i]=='-'))refuse("net stage name");bound(eq+1,net,"net binding must name an existing absolute regular file");bound(swap,tool,"net requires absolute --swap-tool binding");identity("external-net",net);replace(mp,net,stage,tool,replaced);if(cx_fmt(mp,sizeof mp,"%s",replaced))refuse("replacement binding path");identity("replaced-models-file",mp);if(receipt)models_identity(mp);}
+ else if(swap)refuse("swap-tool requires --net binding");
  if(setenv("UNISA_CONTAINER",mp,1))refuse("container environment binding failed");
  char **av=calloc((size_t)argc+4,sizeof(char *));if(!av)refuse("allocation");int n=0;av[n++]=sp;
- /* stream has a distinct argument parser; both accept --models after inputs. */
- for(int i=at;i<argc;i++)av[n++]=argv[i];av[n++]="--models";av[n++]=mp;av[n]=0;
- execv(sp,av);refuse("slice exec failed");return 2;
+ int insert=at;if(!strcmp(argv[at],"stream")){if(at+1>=argc)refuse("stream stage required");av[n++]=argv[at];av[n++]=argv[at+1];insert=at+2;}
+ av[n++]="--models";av[n++]=mp;for(int i=insert;i<argc;i++)av[n++]=argv[i];av[n]=0;
+ if(!netarg){execv(sp,av);refuse("slice exec failed");}
+ np_result result={0};char why[1024];if(np_run(av,0,0,35,&result,why,sizeof why))refuse(why);if(result.outn)fwrite(result.out,1,result.outn,stdout);if(result.errn)fwrite(result.err,1,result.errn,stderr);int rc=result.rc;np_free(&result);free(av);cleanup();return rc<0?128-rc:rc;
 }

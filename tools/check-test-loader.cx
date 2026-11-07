@@ -1,15 +1,44 @@
-/* Block A only: explicit binding and byte-identical stream delegation.
- * Usage ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT
- * All artifacts are retained. No build, release chain, or batch invocation. */
+/* Development-only A/B checks: explicit binding, byte-identical stream
+ * delegation, user argv boundary, per-M hashes and external M consumption.
+ * ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT [SWAP_TOOL]; artifacts retained. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
 static int checks,failed;static char work[4096];
 static void die(const char *s){fprintf(stderr,"check-test-loader: %s\n",s);exit(2);}
 static void ck(int yes,const char *s){checks++;if(!yes)failed++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);}
 static void save(const char *name,const char *s,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s",work,name)||cx_write(p,s,n))die("save output");}
 static void run(char **v,const char *cwd,const char *tag,np_result *r){char why[1024],name[100];const char *env[]={"UNISA_CONTAINER=./unisacc.com",0};if(np_run(v,cwd,(char *const *)env,12,r,why,sizeof why))die(why);if(cx_fmt(name,sizeof name,"%s.stdout",tag))die("stdout path");save(name,r->out,r->outn);if(cx_fmt(name,sizeof name,"%s.stderr",tag))die("stderr path");save(name,r->err,r->errn);char rc[40];if(cx_fmt(rc,sizeof rc,"%d\n",r->rc)||cx_fmt(name,sizeof name,"%s.status",tag))die("status format");save(name,rc,strlen(rc));}
+typedef struct {char *p;size_t n,at;char text[2048];} Scan;
+static char *next(Scan *s){size_t start=s->at;while(s->at<s->n&&s->p[s->at]!='\n')s->at++;size_t z=s->at-start;if(s->at==s->n||!z||z>=sizeof s->text||mm_copy(s->text,sizeof s->text,s->p+start,(long)z))die("receipt row");s->text[z]=0;s->at++;return s->text;}
+static void digest(const char *path,char hash[65]){size_t n;char *b=cx_read(path,&n);if(!b)die("digest input");cx_sha256_hex(b,n,hash);free(b);}
+static void netcheck(const char *loader,const char *slice,const char *models,const char *tool,const char *input){
+ size_t n;char *b=cx_read(models,&n);if(!b||n<16||memcmp(b+n-16,"UNIPKG1\n",8))die("B requires container footer");unsigned long long len=0;for(int i=7;i>=0;i--)len=(len<<8)|(unsigned char)b[n-8+i];if(!len||len>n-16)die("B footer extent");Scan s={b+n-16-(size_t)len,(size_t)len,0,{0}};
+ long ver,nm,ns,nr,wanted=-1;if(sscanf(next(&s),"P %ld %ld %ld %ld",&ver,&nm,&ns,&nr)!=4||nm<=0||nm>65536||ns<=0||ns>65536)die("B header");
+ for(long i=0;i<ns;i++){char route[512],stage[512],in[512],out[512];long index;if(sscanf(next(&s),"D %511s %511s %511s %511s %ld",route,stage,in,out,&index)!=5)die("B directory");if(wanted<0&&!strcmp(stage,"e2"))wanted=index;}
+ char netpath[4400],badpath[4400],binding[4600],badbinding[4600],mh[65],pkgsha[65];if(cx_fmt(netpath,sizeof netpath,"%s/e2.M",work)||cx_fmt(badpath,sizeof badpath,"%s/e2-bad.M",work)||cx_fmt(binding,sizeof binding,"e2=%s",netpath)||cx_fmt(badbinding,sizeof badbinding,"e2=%s",badpath))die("B paths");
+ char *record=0;size_t rn=0;np_buf expected={0};
+ for(long i=0;i<nm;i++){size_t start=s.at;long clen,raw,codec;unsigned long crc;if(sscanf(next(&s),"M %ld %ld %ld %lu",&clen,&raw,&codec,&crc)!=4||clen<=0||(size_t)clen>s.n-s.at)die("B M extent");size_t bytes=s.at-start+(size_t)clen;char hash[65];cx_sha256_hex(s.p+start,bytes,hash);np_puts(&expected,hash);np_puts(&expected,"\n");if(i==wanted){record=s.p+start;rn=bytes;}s.at+=(size_t)clen;}
+ if(!record||!rn||cx_write(netpath,record,rn))die("B selected external record");cx_sha256_hex(record,rn,mh);record[rn-1]^=1;if(cx_write(badpath,record,rn))die("B changed record");record[rn-1]^=1;cx_sha256_hex(s.p,s.n+16,pkgsha);
+ char net_before[65],swap_before[65];digest(netpath,net_before);digest(tool,swap_before);
+ char *base[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--identity","--","stream","e2","--route","lnx/x86_64/run/O0","--source",(char *)input,0};
+ char *same[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--identity","--net",binding,"--swap-tool",(char *)tool,"--","stream","e2","--route","lnx/x86_64/run/O0","--source",(char *)input,0};
+ char *bad[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--identity","--net",badbinding,"--swap-tool",(char *)tool,"--","stream","e2","--route","lnx/x86_64/run/O0","--source",(char *)input,0};
+ np_result a={0},c={0},d={0};char **calls[]={base,same,bad};np_result *results[]={&a,&c,&d};const char *tags[]={"B-original","B-self-replace","B-mutated"};int saved=dup(0);if(saved<0)die("B stdin save");for(int i=0;i<3;i++){int fd=open(input,O_RDONLY);if(fd<0||dup2(fd,0)<0)die("B stdin");close(fd);run(calls[i],work,tags[i],results[i]);}if(dup2(saved,0)<0)die("B stdin restore");close(saved);
+ ck(!a.rc&&!c.rc&&a.outn>0&&a.outn==c.outn&&!memcmp(a.out,c.out,a.outn),"B-external-self-replacement-byte-equality");
+ ck(!c.rc&&strstr(c.err,mh)&&strstr(c.err,"kind=external-net")&&strstr(c.err,"kind=replaced-models-file")&&strstr(c.err,pkgsha),"B-external-file-and-derived-package-sha");
+ int all=1;for(size_t at=0;at<expected.n;at+=65){char hash[65];void *kept=memcpy(hash,expected.p+at,64);(void)kept;hash[64]=0;if(!strstr(a.err,hash))all=0;}ck(!a.rc&&all&&np_count(a.err,a.errn,"TEST_LOADER_MODEL\t",18)==(size_t)nm,"B-all-actual-model-record-sha");
+ ck(d.rc!=0&&!d.outn&&strstr(d.err,"unisacc:")&&(strstr(d.err,"model")||strstr(d.err,"package")),"B-mutated-external-model-consumed-and-refused");
+ char *unbound[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",binding,"--","stream","e2",0};np_result negative={0};run(unbound,work,"B-missing-swap",&negative);ck(negative.rc==2&&!negative.outn&&strstr(negative.err,"requires absolute --swap-tool binding"),"B-missing-swap-binding-refused");np_free(&negative);
+ char *duplicate[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",binding,"--net",binding,"--swap-tool",(char *)tool,"--","stream","e2",0};run(duplicate,work,"B-duplicate-net",&negative);ck(negative.rc==2&&!negative.outn&&strstr(negative.err,"net binding required exactly once"),"B-duplicate-net-binding-refused");np_free(&negative);
+ char *override[]={ (char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","--models",(char *)models,(char *)input,0};run(override,work,"B-models-override",&negative);ck(negative.rc==2&&!negative.outn&&strstr(negative.err,"must not override models binding"),"B-product-models-override-refused");np_free(&negative);
+ char net_after[65],swap_after[65];digest(netpath,net_after);digest(tool,swap_after);ck(!strcmp(net_before,net_after)&&!strcmp(swap_before,swap_after),"B-net-and-swap-inputs-unchanged");
+ np_free(&a);np_free(&c);np_free(&d);free(expected.p);free(b);
+}
 int main(int argc,char **argv){
- if(argc!=6)die("usage ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT");char root[4096],loader[4096],slice[4096],models[4096],input[4400];if(!realpath(argv[1],root)||!realpath(argv[2],loader)||!realpath(argv[3],slice)||!realpath(argv[4],models)||argv[5][0]!='/'||mkdir(argv[5],0700)||!realpath(argv[5],work))die("absolute inputs/fresh output");
+ if(argc!=6&&argc!=7)die("usage ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT [SWAP_TOOL]");char root[4096],loader[4096],slice[4096],models[4096],input[4400];if(!realpath(argv[1],root)||!realpath(argv[2],loader)||!realpath(argv[3],slice)||!realpath(argv[4],models)||argv[5][0]!='/'||mkdir(argv[5],0700)||!realpath(argv[5],work))die("absolute inputs/fresh output");
+ char slice_before[65],models_before[65];digest(slice,slice_before);digest(models,models_before);
  if(cx_fmt(input,sizeof input,"%s/input.c",work))die("input path");const char *src="int main(void){return 7;}\n";if(cx_write(input,src,strlen(src)))die("input");
  char *missing[]={loader,"--slice",slice,"--","stream","e2",input,0};np_result m={0};run(missing,work,"missing-models",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"missing --models binding"),"missing-models-foreign-cwd");np_free(&m);
  char *noslice[]={loader,"--models",models,"--","stream","e2",input,0};run(noslice,work,"missing-slice",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"missing --slice binding"),"missing-slice-foreign-cwd");np_free(&m);
@@ -26,5 +55,9 @@ int main(int argc,char **argv){
   if(cx_fmt(tag,sizeof tag,"%s-success-byte-equality",stages[i]))die("equality tag");ck(!a.rc&&!b.rc&&a.outn>0&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn)&&a.errn==b.errn&&(!a.errn||!memcmp(a.err,b.err,a.errn)),tag);
   if(cx_fmt(tag,sizeof tag,"%s.carrier",stages[i]))die("carrier tag");save(tag,b.out,b.outn);if(cx_fmt(previous,sizeof previous,"%s/%s",work,tag))die("carrier path");np_free(&a);np_free(&b);
  }
- printf("TEST_LOADER_A\tassertions=%d\tfailed=%d\tscope=development-evidence\n",checks,failed);return failed?1:0;
+ char probe[4400];if(cx_fmt(probe,sizeof probe,"%s/argv.c",work))die("argv probe path");const char *code="int main(int argc,char **argv){printf(\"%d:%s:%s\\n\",argc,argv[1],argv[2]);return 0;}\n";if(cx_write(probe,code,strlen(code)))die("argv probe");
+ char *userargs[]={loader,"--slice",slice,"--models",models,"--",probe,"--","--models","literal",0};run(userargs,work,"argv-boundary",&m);ck(!m.rc&&!m.errn&&m.outn==19&&!memcmp(m.out,"3:--models:literal\n",19),"user-models-argument-not-loader-option");np_free(&m);
+ if(argc==7){char tool[4096];if(argv[6][0]!='/'||!realpath(argv[6],tool))die("absolute swap tool");netcheck(loader,slice,models,tool,input);}
+ char slice_after[65],models_after[65];digest(slice,slice_after);digest(models,models_after);ck(!strcmp(slice_before,slice_after)&&!strcmp(models_before,models_after),"slice-and-package-inputs-unchanged");
+ printf("TEST_LOADER_AB\tassertions=%d\tfailed=%d\tscope=development-evidence\n",checks,failed);return failed?1:0;
 }
