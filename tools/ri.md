@@ -78,12 +78,14 @@ entire chain and trace accept. These synthetic networks are not production
 E1/E3 qualification. The separate `--trace-output` driver batch covers the host
 symbol sidefile, SC1 metadata compatibility and unsupported run/object routes.
 
+材料负控每次只跑一项，各用新输出目录与55秒外包：`control-valid`、`native-byte-flip`、
+`missing-native-receipt`、`symlink-native`、`fifo-receipt`、`corrupt-runtime.c`、
 `corrupt-flags-receipt`、`native-missing-include`。纯核验只变异私有副本；缺include用例运行
-bound. Besides `control-valid`, select `native-byte-flip`,
-`missing-native-receipt`, `symlink-native`, `fifo-receipt`, `corrupt-runtime.c`,
-or `corrupt-flags-receipt`, always with a new output directory. They copy the
-four material leaves, mutate only the private copy, require the specific
-refusal, and physically reread the original leaves afterward.
+实际移除 `-I ROOT/exec/c` 的临时producer，必须rc2且具名 `core.h` 与native compiler failure。
+所有用例重读原叶SHA。原生构造必须保留完整fixture前缀（包括NULL0 memcpy hook），
+以第二编译单元复用既有close-fail C叶，并在native收据和前后稳定性检查绑定其SHA；flags记录实际绝对路径。
+父当前main私有实跑原生PREPARED、缺include真编译10/0、恢复前缀后NULL0五项5/0及13棘轮全过。
+新材料只能在固定增量ROOT生成，不能搬迁含绝对ROOT的runtime.c；s7旧材料与来源记录不回填、不伪造。
 
 The isolated NULL,0 probe retains an active memcpy hook and checks allocation,
 slot count, growth, nonempty copies and cleanup. Its original red observation

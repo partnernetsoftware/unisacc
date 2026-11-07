@@ -210,18 +210,15 @@ recorded separately; generation11 is installed as `P53e2cd1f/S447f794a`. Its cur
 observations bind actual runtime, chain and bootstrap identities; full product
 and foreign-host qualification remain separate.
 
+原生材料负控复用同一 `ri-cli` 材料，每次用全新目录、55秒外包，只跑一个 CASE_ID：
+`control-valid`、`native-byte-flip`、`missing-native-receipt`、`symlink-native`、`fifo-receipt`、
 `corrupt-runtime.c`、`corrupt-flags-receipt`、`native-missing-include`。八个独立批映射到
-new output directory and55-second invocation: `control-valid`,
-`native-byte-flip`, `missing-native-receipt`, `symlink-native`, `fifo-receipt`,
-`corrupt-runtime.c`, or `corrupt-flags-receipt`. Seven separate registry batches
-map to `construction.ri-native-material-controls`; one successful case cannot
-qualify the other six. The runner first verifies the original material, copies
-actual bytes and native permissions into a private directory, mutates that copy,
-and requires the specific rejection reason with rc2 and empty stdout. Valid
-control requires exact verification output. All four original hashes are read
-again afterwards. Each tool invocation is bounded to18 seconds; the seven cases
-are not combined under an expanded timeout. All seven were actually executed
-on P53:70 checks with zero failures, `out/c43-ri-native-control-*-11.log`.
+`construction.ri-native-material-controls`，一个用例的成功不能授权其他用例。
+先实际核验原材料，再保存原四叶SHA；七个纯核验用例只修改私有副本，要求精确输出或具名rc2。
+缺include用例只在临时producer中移除真实argv的 `-I ROOT/exec/c`，实际编译必须rc2，
+同时具名 `core.h` 和 native compiler failure；临时producer执行后移除，注入源码与stdout/stderr/status保留审计。
+核验子命令bound18，变体构造bound40，均不放宽外层55秒。历史P53七用例70/0仍只属于
+`out/c43-ri-native-control-*-11.log`，不作为新增真编译负控的证据。
 The initial valid01 failed during setup because an empty inherited capture
 variable was rejected by the bootstrap; it did not reach a material mutation
 and supplies no semantic control evidence. The runner now clears that variable
