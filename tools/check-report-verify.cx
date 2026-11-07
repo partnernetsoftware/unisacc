@@ -1,0 +1,63 @@
+/* Checks tools/report-verify.cx: sh ./unisacc.com tools/check-report-verify.cx   (from the repo root)
+   Builds claim files in a temp dir and runs the tool on them: a positive file (commit, tsvcount, receipts, sha256
+   all OK, rc 0) and one negative control per outcome: MISMATCH (wrong counts, wrong sha, bad sha text, unknown kind,
+   wrong receipts) and MISSING (absent commit, absent evidence files).  The ratchets kind is not run here (slow;
+   it is tools/ratchets.cx itself).  Prints PASS/FAIL lines and CHECK_REPORT_VERIFY<TAB>failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\treport-verify.%s\n", ok ? "PASS" : "FAIL", name); }
+static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 16), s, tx_len(s, 512)) >= 0; }
+
+static int rv(const char *claims, char *out, long cap) {
+    char *argv[] = {"sh", "./unisacc.com", "tools/report-verify.cx", "--", (char *)claims, 0};
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while (n < cap - 1 && (r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+static int claims(const char *td, const char *name, const char *text, char *path, long cap) {
+    int fd;
+    if (cx_fmt(path, cap, "%s/%s", td, name)) return -1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    sy_write_all(fd, text, tx_len(text, 1 << 14)); sy_close(fd);
+    return 0;
+}
+
+#define RES "tools/report-verify/res.tsv"
+#define SES "tools/report-verify/session.tsv"
+#define SHA "f533a5eff940606f5ba808ee09271f723dd015414f1a8101908b024a576743e9"
+
+int main(void) {
+    static char o[1 << 16]; char td[160], p[220]; int rc;
+    if (cx_fmt(td, sizeof td, "%s/check-report-verify-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(td)) return 2;
+    if (claims(td, "good", "# comment\ncommit\t6f8a0f8493\ntsvcount\t" RES "\t3\t2\ntsvcount\t" RES "\t3\t2\t1\nreceipts\t" SES "\t2\nsha256\t" RES "\t" SHA "\n", p, sizeof p)) return 2;
+    rc = rv(p, o, sizeof o);
+    ck(rc == 0 && has(o, "VERIFY\tcommit\tOK\t") && has(o, "VERIFY\ttsvcount\tOK\tpass=3 fail=2") && has(o, "VERIFY\treceipts\tOK\tpass=2")
+       && has(o, "VERIFY\tsha256\tOK\t") && has(o, "REPORT_VERIFY\ttotal=5\tbad=0\n"), "positive-all-ok");
+    claims(td, "m1", "tsvcount\t" RES "\t4\t2\n", p, sizeof p); rc = rv(p, o, sizeof o);
+    ck(rc == 1 && has(o, "VERIFY\ttsvcount\tMISMATCH\tpass=3 fail=2 expected 4/2") && has(o, "total=1\tbad=1\n"), "tsvcount-mismatch");
+    claims(td, "m2", "receipts\t" SES "\t3\n", p, sizeof p); rc = rv(p, o, sizeof o);
+    ck(rc == 1 && has(o, "VERIFY\treceipts\tMISMATCH\tpass=2 expected 3"), "receipts-mismatch");
+    claims(td, "m3", "sha256\t" RES "\t0000000000000000000000000000000000000000000000000000000000000000\n", p, sizeof p); rc = rv(p, o, sizeof o);
+    ck(rc == 1 && has(o, "VERIFY\tsha256\tMISMATCH\tactual " SHA), "sha256-mismatch");
+    claims(td, "m4", "commit\tzz;rm\nbogus\tx\n", p, sizeof p); rc = rv(p, o, sizeof o);
+    ck(rc == 1 && has(o, "VERIFY\tcommit\tMISMATCH\tbad sha") && has(o, "VERIFY\tunknown\tMISMATCH") && has(o, "total=2\tbad=2\n"), "bad-sha-and-unknown-kind");
+    claims(td, "x1", "commit\tdeadbeefdeadbeef0123\ntsvcount\t/nonexistent/r.tsv\t1\t1\nreceipts\t/nonexistent/s.tsv\t1\nsha256\t/nonexistent/f\t" SHA "\n", p, sizeof p); rc = rv(p, o, sizeof o);
+    ck(rc == 1 && has(o, "VERIFY\tcommit\tMISSING\t") && has(o, "VERIFY\ttsvcount\tMISSING\t") && has(o, "VERIFY\treceipts\tMISSING\t")
+       && has(o, "VERIFY\tsha256\tMISSING\t") && has(o, "total=4\tbad=4\n"), "missing-evidence");
+    rc = rv("/nonexistent/claims.tsv", o, sizeof o);
+    ck(rc == 2, "unreadable-claims-usage-rc2");
+    printf("CHECK_REPORT_VERIFY\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

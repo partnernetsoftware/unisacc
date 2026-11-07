@@ -1,0 +1,142 @@
+/* tools/report-verify.cx -- check a teammate's report against facts.
+ *
+ *   sh ./unisacc.com tools/report-verify.cx -- CLAIMS.tsv        (run from the repo root)
+ *
+ * CLAIMS.tsv rows (TAB separated; blank lines and lines starting with # are skipped):
+ *   commit<TAB>SHA                                  SHA names a commit (git cat-file -e SHA^{commit})
+ *   tsvcount<TAB>PATH<TAB>PASS<TAB>FAIL[<TAB>FIELD] rows of PATH whose FIELD (1-based, default 1) is PASS / FAIL
+ *   receipts<TAB>SESSION_TSV<TAB>PASS               lines starting with RECEIPT that carry verdict=PASS
+ *   sha256<TAB>PATH<TAB>HEX                         sha256 of PATH (via sha256sum) equals HEX
+ *   ratchets                                        tools/ratchets.cx prints RATCHETS ok=13
+ * Prints VERIFY<TAB>kind<TAB>OK|MISMATCH|MISSING<TAB>detail per claim, then REPORT_VERIFY<TAB>total=N<TAB>bad=M;
+ * exit 1 when M > 0, 2 on usage.  MISSING = the evidence file / object is absent; a bad row is MISMATCH. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int total, bad;
+static void out(const char *kind, const char *v, const char *fmt, const char *a, long x, long y) {
+    char d[600];
+    if (tx_find(fmt, tx_len(fmt, 200), "%s", 2) >= 0 ? cx_fmt(d, sizeof d, fmt, a ? a : "") : cx_fmt(d, sizeof d, fmt, x, y)) d[0] = 0;
+    total++; if (v[1] != 'K') bad++;   /* OK has 'K' second */
+    printf("VERIFY\t%s\t%s\t%s\n", kind, v, d);
+}
+
+/* run argv, capture stdout in o; returns exit code, -1 when it did not run */
+static int run(char **argv, char *o, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return -1;
+    while (n < cap - 1 && (r = sy_read(ofd, o + n, cap - 1 - n)) > 0) n += r;
+    o[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+static long num(const char *s, long n) {
+    long v = 0, i;
+    if (n <= 0) return -1;
+    for (i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; v = v * 10 + (s[i] - '0'); }
+    return v;
+}
+
+/* split line into up to 6 TAB fields (pointers+lengths) */
+static int fields(const char *l, long n, const char **f, long *fl) {
+    int k = 0; long at = 0;
+    while (k < 6) {
+        long e = tx_chr(l + at, n - at, '\t');
+        f[k] = l + at; fl[k] = e < 0 ? n - at : e; k++;
+        if (e < 0) break;
+        at += e + 1;
+    }
+    return k;
+}
+
+static void cp(char *d, long cap, const char *s, long n) { if (n > cap - 1) n = cap - 1; tx_copy(d, cap, s, n); }
+
+static void do_commit(const char *s, long n) {
+    char sha[200], spec[220], o[512]; long i; char *v[] = {"git", "cat-file", "-e", spec, 0};
+    for (i = 0; i < n; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) break;
+    if (n < 4 || n > 64 || i != n) { cp(sha, sizeof sha, s, n); out("commit", "MISMATCH", "bad sha %s", sha, 0, 0); return; }
+    cp(sha, sizeof sha, s, n);
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", sha)) return;
+    if (run(v, o, sizeof o) == 0) out("commit", "OK", "%s exists", sha, 0, 0);
+    else out("commit", "MISSING", "%s not a commit", sha, 0, 0);
+}
+
+static void count(const char *kind, const char *path, long exp_p, long exp_f, int fld, int receipts) {
+    size_t sz; char *b = cx_read(path, &sz); long at = 0, p = 0, f = 0;
+    if (!b) { out(kind, "MISSING", "cannot read %s", path, 0, 0); return; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n'), ln = e < 0 ? (long)sz - at : e;
+        if (receipts) {
+            if (ln >= 7 && tx_same(b + at, 7, "RECEIPT", 7)) {
+                if (tx_find(b + at, ln, "verdict=PASS", 12) >= 0) p++;
+                else if (tx_find(b + at, ln, "verdict=FAIL", 12) >= 0) f++;
+            }
+        } else {
+            const char *fv[6]; long fl[6]; int k = fields(b + at, ln, fv, fl);
+            if (k >= fld) {
+                if (fl[fld - 1] == 4 && tx_same(fv[fld - 1], 4, "PASS", 4)) p++;
+                else if (fl[fld - 1] == 4 && tx_same(fv[fld - 1], 4, "FAIL", 4)) f++;
+            }
+        }
+        at += ln + 1;
+    }
+    if (receipts) {
+        if (p == exp_p) out(kind, "OK", "pass=%ld", 0, p, 0);
+        else out(kind, "MISMATCH", "pass=%ld expected %ld", 0, p, exp_p);
+    } else if (p == exp_p && f == exp_f) out(kind, "OK", "pass=%ld fail=%ld", 0, p, f);
+    else { char d[200]; if (cx_fmt(d, sizeof d, "pass=%ld fail=%ld expected %ld/%ld", p, f, exp_p, exp_f)) d[0] = 0; out(kind, "MISMATCH", "%s", d, 0, 0); }
+}
+
+static void do_sha(const char *path, const char *hex, long hn) {
+    char o[1024], want[80]; char *v[] = {"sha256sum", (char *)path, 0}; size_t sz; char *b = cx_read(path, &sz);
+    if (!b) { out("sha256", "MISSING", "cannot read %s", path, 0, 0); return; }
+    cp(want, sizeof want, hex, hn);
+    if (run(v, o, sizeof o) != 0 || tx_len(o, 1024) < 64) { out("sha256", "MISMATCH", "sha256sum failed on %s", path, 0, 0); return; }
+    if (hn == 64 && tx_same(o, 64, hex, 64)) out("sha256", "OK", "%s", path, 0, 0);
+    else { o[64] = 0; out("sha256", "MISMATCH", "actual %s", o, 0, 0); }
+}
+
+static void do_ratchets(void) {
+    static char o[1 << 17]; char *v[] = {"timeout", "55", "sh", "./unisacc.com", "tools/ratchets.cx", 0};
+    int rc = run(v, o, sizeof o);
+    if (rc < 0) { out("ratchets", "MISSING", "ratchets did not run", 0, 0, 0); return; }
+    if (tx_find(o, tx_len(o, sizeof o), "RATCHETS\tok=13\tfail=0", 21) >= 0 && rc == 0) out("ratchets", "OK", "ok=13", 0, 0, 0);
+    else out("ratchets", "MISMATCH", "rc=%ld, not ok=13 fail=0", 0, rc, 0);
+}
+
+int main(int argc, char **argv) {
+    size_t sz; char *b; long at = 0;
+    if (argc < 2) { fprintf(stderr, "usage: report-verify CLAIMS.tsv\n"); return 2; }
+    b = cx_read(argv[1], &sz);
+    if (!b) { fprintf(stderr, "report-verify: cannot read %s\n", argv[1]); return 2; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n'), ln = e < 0 ? (long)sz - at : e;
+        const char *f[6]; long fl[6]; int k;
+        if (ln > 0 && b[at] != '#') {
+            char path[2048]; k = fields(b + at, ln, f, fl);
+            if (fl[0] == 6 && tx_same(f[0], 6, "commit", 6) && k >= 2) do_commit(f[1], fl[1]);
+            else if (fl[0] == 8 && tx_same(f[0], 8, "tsvcount", 8) && k >= 4) {
+                long fld = k >= 5 ? num(f[4], fl[4]) : 1;
+                cp(path, sizeof path, f[1], fl[1]);
+                if (num(f[2], fl[2]) < 0 || num(f[3], fl[3]) < 0 || fld < 1 || fld > 6) out("tsvcount", "MISMATCH", "bad claim row", 0, 0, 0);
+                else count("tsvcount", path, num(f[2], fl[2]), num(f[3], fl[3]), (int)fld, 0);
+            } else if (fl[0] == 8 && tx_same(f[0], 8, "receipts", 8) && k >= 3) {
+                cp(path, sizeof path, f[1], fl[1]);
+                if (num(f[2], fl[2]) < 0) out("receipts", "MISMATCH", "bad claim row", 0, 0, 0);
+                else count("receipts", path, num(f[2], fl[2]), 0, 1, 1);
+            } else if (fl[0] == 6 && tx_same(f[0], 6, "sha256", 6) && k >= 3) {
+                cp(path, sizeof path, f[1], fl[1]); do_sha(path, f[2], fl[2]);
+            } else if (fl[0] == 8 && tx_same(f[0], 8, "ratchets", 8)) do_ratchets();
+            else out("unknown", "MISMATCH", "unrecognised or short row", 0, 0, 0);
+        }
+        at += ln + 1;
+    }
+    printf("REPORT_VERIFY\ttotal=%d\tbad=%d\n", total, bad);
+    return bad ? 1 : 0;
+}
