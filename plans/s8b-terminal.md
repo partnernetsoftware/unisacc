@@ -63,6 +63,17 @@
 
 s8c：init 后对 map 每一名执行 `tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- material ROOT SESSION NAME`，再 heavy 波。不挡本版发布。
 
+命令与空跑见 [s8c-bind.md](s8c-bind.md)。
+
+## candidate-qualify rc=2
+
+s8b 十行 PASS 后无 `CHECK_CANDIDATE_QUALIFY`：`tests/check-candidate-qualify.cx:78-80` `git rev-parse HEAD` 在 git archive 根失败 → `return 2`。INFRA 非工具缺陷。主树 APE 884adfef 复跑 `CHECK_CANDIDATE_QUALIFY failed=0`（有 .git）。
+
+## stages failed=9 vs 已知限制
+
+九条即 e4/prune/lower × reject-bad / .trunc / .rand。与 `plans/rc3-verify-2026-11-06.md:123`「9 条 FAIL 正好是… STAGE-REJECT 撤回」同型，无新增类型。known_gap=3 为披露缺口计数。
+
+
 ## 会话基础设施
 
 s8 作废因 cdx ROOT 未跟踪 `illegal-action-work/`（测试写仓根）。s8b：`tests/illegal-action.cx` mkdtemp（c05aa85998 / 34f7e2db），harness 8a134c18。
