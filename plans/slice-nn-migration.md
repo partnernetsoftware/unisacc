@@ -33,7 +33,7 @@
 | m17.o | `cx/sys/mem.cx` | 5278 | SYS-IO | - |
 | hostnative.o | `src/hostnative.cx` | 3558 | SYS-IO | - |
 
-薄层终态合同:sy_*/mm_*/tx_* 原语签名表 + 六目标实现状态,见 `cx/sys/README.md`;冻结后新增原语只走 L0。`cx/driver/sys`、`cx/driver/mem` 为 `cx/sys`、`cx/mem` 的副本,L1 去重(trace/net 移出 L0)是本清单的前置清理。
+薄层终态合同:sy_*/mm_*/tx_* 原语签名表 + 六目标实现状态,见 `cx/sys/README.md`;冻结后新增原语只走 L0。`cx/driver/sys`、`cx/driver/mem` 为指向 `cx/sys`、`cx/mem` 的目录软链,没有物理副本;L1 边界收敛(trace/net/reaper 移出 L0)是本清单的前置清理。
 
 ## 2. 迁移清单(非薄层)
 

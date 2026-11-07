@@ -1,20 +1,30 @@
-/* tools/check-trace-tools-only.cx -- sys.trace is a construction-side
- * observation layer (L0 ptrace). Only tools may use it: a product unit that
+/* tests/trace-tools-only.cx -- sysx.trace is a construction-side
+ * observation layer (optional ptrace). Only tools may use it: a product unit that
  * reaches it would drag platform tracing into the shipped product, so this
  * scan walks the product trees directly (not any index, so a brand-new file is
- * covered the moment it exists) and refuses `use sys.trace` by name.
+ * covered the moment it exists) and refuses `use sysx.trace` by name.
  *
- *   sh ./unisacc.com tools/check-trace-tools-only.cx -- [DIR...]
+ *   sh ./unisacc.com tests/trace-tools-only.cx -- [DIR...]
  *
  * Prints TRACE_TOOLS_ONLY<TAB>violations=N; exit 0 only when nothing failed. */
 #pragma unisa use text.text
+static int forbidden(const char *line) { return strstr(line, "use sysx.trace") != 0; }
+static int negative_control(void) {
+    /* Split literals keep this fixture out of direct-use indexes. */
+    if (!forbidden("#pragma unisa use " "sysx.trace\n") ||
+        !forbidden("#pragma unisa use " "sysx.trace, text.text\n") ||
+        forbidden("#pragma unisa use sysx.net\n")) {
+        fprintf(stderr, "trace-tools-only: renamed-module negative control failed\n");
+        return 1;
+    }
+    return 0;
+}
 static int check(const char *path) {
     FILE *f = fopen(path, "r"); char line[4096]; int no = 0, bad = 0;
     if (!f) { fprintf(stderr, "trace-tools-only: cannot read %s\n", path); return 1; }
     while (fgets(line, sizeof line, f)) {
         no++;
-        if (strstr(line, "use sys.trace")) { fprintf(stderr, "TRACE-TOOLS-ONLY\t%s:%d\tuse sys.trace\n", path, no); bad++; }
-        if (strstr(line, "use sys.trace,")) { fprintf(stderr, "TRACE-TOOLS-ONLY\t%s:%d\tuse sys.trace\n", path, no); bad++; }
+        if (forbidden(line)) { fprintf(stderr, "TRACE-TOOLS-ONLY\t%s:%d\tuse sysx.trace\n", path, no); bad++; }
     }
     fclose(f);
     return bad;
@@ -36,7 +46,7 @@ static int walk(const char *dir, int depth) {
     return bad;
 }
 int main(int argc, char **argv) {
-    int i, bad = 0;
+    int i, bad = negative_control();
     if (argc > 1) { for (i = 1; i < argc; i++) bad += check(argv[i]); }
     else { bad += walk("src", 0); bad += walk("cx/compiler", 0); bad += walk("cx/driver", 0); bad += walk("cx/runtime", 0); }
     printf("TRACE_TOOLS_ONLY\tviolations=%d\n", bad);

@@ -11,7 +11,6 @@
 | `sys.fs` | `fs.cx` | 文件/目录（sy_open/sy_read/sy_read_full/sy_read_once/sy_write_all/sy_copy/sy_access/sy_fstat/sy_stat/sy_lstat/sy_realpath/sy_mkdir/sy_mkfifo/sy_rename/sy_unlink/sy_rmdir/sy_symlink/sy_readlink/sy_truncate/sy_fsync/sy_fdatasync/sy_exists 等） |
 | `sys.proc` | `proc.cx` | 进程（sy_run/sy_spawn/sy_spawn_pipe/sy_pipe/sy_wait/sy_kill/sy_fork_session） |
 | `sys.time` | `time.cx` | 时钟（sy_now_ms/sy_wall_s/sy_sleep_ms/sy_set_mtime） |
-| `sys.net` | `net.cx` | TCP（sy_tcp_connect/listen/accept/send_all/recv） |
 | `sys.posix` | `posix.cx` | 补充 POSIX（sy_flock/sy_lockf/sy_socketpair 等） |
 | `sys.mem` | `mem.cx` | 映射内存（sy_map_none/sy_protect_rw/sy_protect_rx/sy_unmap） |
 | `sys.dl` | `dl.cx` | 映射地址（sy_dl_addr/sy_rtld_now），无宿主符号 |
@@ -22,6 +21,8 @@
 | `sys.poll` | `poll.cx` | 轮询（sy_poll） |
 | `sys.tty` | `tty.cx` | 终端（sy_tty_raw/sy_tty_size 等） |
 | `sys.fd` | `fd.cx` | 描述符复制（sy_dup/sy_dup2；Windows 上 sy_dup2 为 -ENOSYS） |
+
+`net`、`reaper`、`trace` 的实现在可选扩展层，分别由 `sysx.net`、`sysx.reaper`、`sysx.trace` 提供；旧 `sys.trace`、`sys.reaper` 路径不再存在，`sys.net` 保留原符号链接供 csih 兼容，实现在 `ext/sysx/net.cx`。公开 `sy_*`/`rp_*` API 与错误行为不变。`sysx.trace` 仅用于构造工具，产品目录由 `tests/trace-tools-only.cx` 禁入；net/reaper 的真实 API 检查分别为 `tools/check-cx-sys-net.cx`、`tools/check-reaper.cx`、`tools/check-netpack.cx`、`tools/check-e2stream.cx`。
 
 ## 非 `sys.*` 的 L0 文件
 

@@ -60,8 +60,8 @@
 - 两张表的不一致已收口（2026-10-31）：过去 `tests/cxraw-layers.tsv` 按文件逐个准许 `cx/core/kernel.cx`、`cx/runtime/process*.cx` 直接调 libc，与 include 白名单不同名。现在这些文件已迁进 `cx/sys/`，两张表都用同一个目录前缀表达 L0，剩下的精确例外只有引导期的 `src/host.cx`、`src/hostnative.cx` 和 csih 的头部表面探针。
 - 白名单外仍在 include 的（2026-10-30）：
   - `src/host.cx` 原来 3 个（`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`）。mmap、mprotect、munmap 已进 `cx/sys/mem.cx`，dlopen、dlsym、dlclose、dlerror 的地址已进 `cx/sys/dl.cx`。open 用的 `O_*` 本来就在前导里，没有再为 `<fcntl.h>` 写 include。`src/host.cx` 现在 0 个 `#include`。`tests/cxinclude.cx --check` 不再报这个文件；整次仍失败，报的是 `apps/csih`（24 个超基线、2 个低于基线），那是 csih 车道。
-  - `apps/csih`：主人定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sys.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
-    - `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`、`<netdb.h>` 改为 `use sys.net`；
+  - `apps/csih`：主人定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sysx.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
+    - `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`、`<netdb.h>` 改为 `use sysx.net`；
     - `<poll.h>` 改为 `use sys.poll`，类型用 `sy_pollfd_t`，事件位用 `SY_POLL*`；
     - `<termios.h>`、`<sys/ioctl.h>` 改为 `use sys.posix` 加 `use sys.tty`；
     - `<time.h>` 改为 `use sys.time`；
