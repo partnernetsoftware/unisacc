@@ -96,3 +96,5 @@ c46-3 对 A 类 12 项的实测（`plans/v0.0.47-corpus-feasibility.md` 的 A12 
 - 22 个断言真实运行后失败（`stream-e4-peep-0..7`、`stream-e4-opinfo`、`stream-lower-target-*`、`stream-e4-io`、`*-semantics`、`properties-cases-*`）：同一配置下用 0.0.45 与 c46-2 的 APE 对照，**三个版本均失败**，因此是原有问题而非本版回归；已列入 0.0.47。
 - `c-negative` 22 项红即上文披露的 22 类 C99 诊断缺口；`pp-negative` 2 项红即“宏名不是标识符、`#include` 头名未闭合被接受”这一已披露限制。
 结论不变：本版全批未达资格；产品证据是同候选六目标原生 CI（42/0）。
+
+外部语料正面证据（发布后补充）：固定上游 `c-testsuite`（rev `5c7275656d751de0e68b2d340a95b5681858ed07`）220 个单文件用例对本版 APE `884adfef…`：216 个被接受且输出与期望相符，0 个错值，4 个被拒绝（3 个表达式、1 个字符相关，均为合法 C99 被误拒，已列入 0.0.47）。该结果由 omp-cdx2 记录于 `tests/corpus-ctestsuite/`，发布者仅独立复跑了末 20 例（16 接受、4 拒绝），其余 200 例未独立复核。
