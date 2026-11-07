@@ -24,6 +24,23 @@ C 块不能把独立 E2 批偷换为直接 `-E`：`tests/e2-input-binding.cx:15-
 
 分片结果一律标开发证据，不算发布资格；正式资格仍须同候选整 APE 六目标原生证据。每个执行与子进程有不超过 60 秒的独立上限，失败保留实际退出状态；日常车道显式 `UNISACC_WAVE_REUSE=1`，发布链关闭。
 
-## 当前待补证据
+## 当前实现与证据
 
-共享调用路径已按源码核实；具体候选部件所在位置、实际模型文件身份清单及 smoke 命令随首块验证补全。此页不是实现完成或 PASS 收据。
+同一真实 APE 的部件已提取并核身份（材料 `/tmp/loader-ape-proof-dbISgu`）：APE `ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0`，6,128,709 字节；lnx/x86_64 slice `67ea0b25ec6896aa74c629c3936c4d5f3bb1c8b3cb199ea18a29380228e30d58`，1,851,254 字节；pkg 正文 `15d8af5844459de26e0ad7feec1564deb1cd1e501d58ab6a964097e7087208ec`，1,662,149 字节。直接 `-E`、stream E2 与分片输出逐字节一致；父实际现有完整 stream 批 9 PASS、`CHECK_STREAM_PIPE failed=0`。本 APE 是公开旧产品，不作为新候选资格。
+
+A 已合入 `3475daee75`，最初证据限 stream 绑定/异 cwd 负控与 E2/E1 对照 6/0。B 已由 cc 用主树源码自建 loader 与 p3-swap 后实跑 16/0、棘轮 13/13，toolsloc 基线 78016。原默认 `-run` 的 APP_ARGS 污染已修：父最小探针从收到额外 `--models/pkg`、rc9，变为仅 `ARG[1]=sentinel`、rc0；用户 APP_ARGS 自带 `--models` 的回归通过，故解除该历史使用限定。B 逐 M 身份、自网替换等价、外网变异实际消费拒绝与输入前后不变均有开发证据，非发布资格。C 批次登记使用 `tools/register.cx`，不手写 batches/coverage；完成后同输入实测整 APE 与分片的 E2/stream 批耗时，未测相位标 UNMEASURED。
+
+C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、棘轮 13/13，toolsloc 基线 78040；父私有冻结 C1 另实跑 19/0。`register.cx` 实际输出 `REGISTER id=test-loader-com status=REGISTERED`；批次的无参入口必须显式提供绝对 `TEST_LOADER_ROOT/LOADER/SLICE/MODELS/SWAP`，缺绑定非零。逐字命令和原始状态见 `/tmp/loaderimpl/C-evidence.txt`，父证据 `/tmp/check-test-loader-mlznku/evidence`。E2 原消费者 single 36/0、refusal 201/0；positive 198 项有 10 项旧产品 BOM 失败，整 APE 与分片字节相同且正文仍含 BOM，原失败保留，不改断言、不归因加载器。适配器不是七个独立 UNIPKG1 容器，不声称 `e2-input-binding` 整批通过。
+
+身份收据逐网给出压缩 M 记录与压缩载荷 SHA256，明确 `decoded_hash=NOT_MEASURED`；p3-swap 按阶段名取首条 D 对应 M，同一 M 的所有路由共同受影响，不声称替换所有同名阶段的不同 M。输入前后 SHA 检查仅对冻结开发输入提供证据，不认证恶意并发 TOCTOU。无替换分支 exec 保留调用方 deadline；公共 np_run 双管 EOF 后 waitpid 边界已交 cc/grk，本工具调用仍须外包 55 秒，不声称修复该公共接口。
+
+## 同输入迭代耗时（单样本，非稳定性能结论）
+
+同 APE/slice/pkg 身份见上；分片入口为冻结 `/tmp/loaderimpl/test-loader-C1`。E2 双方使用同一适配器二进制与同一材料 pin，只由显式环境选择整 APE 或分片；不删 MATERIAL 行。每对 stdout、stderr、退出码逐字节一致，父以六次 `cmp` 实核全同。首次不同适配器 SHA 导致三行 MATERIAL 不同的原失败保留于 `speed-c1-e2.*`，修正比较合同后才产生以下正式数据。
+
+| 批 | 整 APE 墙时（ms） | 分片墙时（ms） | 样本数/侧 | stdout/stderr/rc | 原合同结果 |
+|---|---:|---:|---:|---|---|
+| E2（single + positive + refusal） | 16113.354121 | 14923.072950 | 1 | 全同；rc1/1 | 36/0；198/10（旧 BOM）；201/0 |
+| stream 完整批 | 9187.984647 | 6089.602999 | 1 | 全同；rc0/0 | 9 PASS，failed=0 |
+
+实测总墙时包含子进程启动、构造/执行、输出与校验；启动独占、执行独占、装载/推理各分相及冷/热均 `UNMEASURED`，不从单样本宣称稳定收益。未重建整链、未运行 CI 或全批。原始证据在 `/tmp/loader-ape-proof-dbISgu/speed-c1-{e2-final,stream}.{0,1}.1.{stdout,stderr,rc}`；临时 `.cx` 计时器 `speed-pair.cx` 与 `e2-speed-batch.cx` 同目录保留供审计，不作为已登记工具。
