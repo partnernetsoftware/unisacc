@@ -1,6 +1,6 @@
-# unisacc 0.0.46 —— c46-3 私有候选说明
+# unisacc 0.0.46 —— 发布说明
 
-当前只建立私有 draft 和原生资格证据；未公开发布，未创建正式版标签或更改 Latest。公开仍须主人批准。原生 CI 的 QUALIFIED 不等于全批正式发布合格。
+主人已批准公开；实际发布由 cc 执行，本文准备阶段尚未创建正式版标签或更改公开状态。原生 CI 的 QUALIFIED 不等于全批正式发布合格，s8结论单独披露。
 
 ## 是什么
 面向 C99 的编译器，自己写出 ELF、Mach-O、PE，可编译自身；产品是单文件 `unisacc.com`（APE 加载头、ISA 切片和一份模型包）。不作完整 C99/POSIX 符合性声明，具体缺口见下。
@@ -21,7 +21,8 @@
 - **Windows 限定**：两格 stdio-crossunit 和 stream-pipe 只跑 portable 子集。原始说明分别记 7/9 与 6/9；fork/waitpid/kill/F_SETFD/environ/F_SETFL 等 POSIX 子检查未运行，不计作通过。完整原件见备份 `ci-42353236985/table.md`。
 - 固定点分开证明：通用五片比较实际得到 objects 81、kernels 2、slices 5、product、package 全部 same；另用专属 checker 核 win/arm64 真实 G2/G3 独立输出、PE Machine AA64、实际构造器链与原始收据，`failed=0 missing=0`。Linux 三代构造器均 `3c660571e790370664b9b3c5e3817e610bb0803f665b9cd8542730a7166c9b63`；Windows 原生自举固定点仍为 `NOT_CLAIMED`。
 - 本机 APE 用户入口 smoke 为 5/0。工具改动私有十三棘轮为 13/0，提交 `8484436b0e`；没有提高无关基线。
-- 全批会话：[待证：grk 的 c46-3 ROOT 上 s8 正冻结执行；须填原始终态与 PASS/FAIL/KNOWN-GAP/SESSION-INFRA/未知计数，不能用原生 CI 或旧 s7 的 PASS 代替。]
+- 全批会话：[待证：grk 的新冻结快照 s8b 最终原始结论及 PASS/FAIL/KNOWN-GAP/SESSION-INFRA/未知计数；旧s8已因自身测试写工作目录而作废，原始失败保留，不迁移旧s8/s7或原生CI的PASS。]
+- 全批会话基础设施说明：第一次会话 s8 因批次 `illegal-action` 在会话根目录写工作目录而被判身份变化作废，已丢弃；改用冻结快照重跑 s8b，快照在 `44182b4059` 基础上仅同步 `tests/illegal-action.cx`（`c05aa85998`，无 IA_WORK 时改用 mkdtemp 临时目录），harness sha 因此从 `1e9337a0` 变为 `8a134c18`，产品输入未变。
 
 ## 相对 0.0.45 修复的缺陷
 
@@ -49,6 +50,8 @@
 |---|---|---|
 | A，12类 | `duplicate-case`、`case-outside-switch`、`struct-redefinition`、`conflicting-typedef`、`conflicting-function-types`、`enumerator-redeclared`、`local-redefinition`、`duplicate-parameter`、`void-value-used`、`void-call-as-value`、`float-subscript`、`return-pointer-as-int` | 可能静默产生错误代码，这类输入的产物不可信 |
 | B，10类 | `assign-to-const`、`write-through-const-pointer`、`discards-const`、`multiple-storage-classes`、`void-parameter-named`、`incompatible-pointer-init`、`int-to-pointer-init`、`int-plus-assign-string`、`distinct-pointer-compare`、`zero-array-size` | 缺少应有诊断；不据未观察到错码宣称语义安全 |
+
+c46-3 对 A 类 12 项的实测（`plans/v0.0.47-corpus-feasibility.md` 的 A12 表，来源为 grk 实测记录）：8 项被接受并产出错误结果（`duplicate-case`、`case-outside-switch`、`struct-redefinition`、`conflicting-typedef`、`conflicting-function-types`、`enumerator-redeclared`、`float-subscript`、`return-pointer-as-int`），4 项已被拒绝但 stderr 为空（`local-redefinition`、`duplicate-parameter`、`void-value-used`、`void-call-as-value`）。以上 8 项的修复排在 0.0.47 最前；在此之前，约束检查请另用 `gcc -std=c99 -pedantic-errors`。
 
 ### 语言、接口与容量
 
