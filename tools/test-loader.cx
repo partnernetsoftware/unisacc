@@ -1,0 +1,29 @@
+/* Development evidence only. This launcher delegates every model read to the
+ * supplied product slice; it is not another package loader.
+ * Usage: --slice ABS --models ABS [--identity] -- PRODUCT_ARGS...
+ * Paths must be absolute so inherited cwd/container cannot choose a package. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+static void refuse(const char *s){fprintf(stderr,"test-loader: REFUSE %s\n",s);exit(2);}
+static void identity(const char *kind,const char *p){size_t n=0;char h[65];char *b=cx_read(p,&n);if(!b)refuse(kind);cx_sha256_hex(b,n,h);free(b);fprintf(stderr,"TEST_LOADER_IDENTITY\tscope=development-evidence\tkind=%s\tpath=%s\tbytes=%lu\tsha256=%s\n",kind,p,(unsigned long)n,h);}
+static void bound(const char *p,char *out,const char *why){struct stat st;if(!p||p[0]!='/')refuse(why);if(!realpath(p,out)||stat(out,&st)||!S_ISREG(st.st_mode)||st.st_size<=0)refuse(why);}
+int main(int argc,char **argv){
+ const char *slice=0,*models=0;char sp[4096],mp[4096];int receipt=0,at=1;
+ while(at<argc&&strcmp(argv[at],"--")){
+  if(!strcmp(argv[at],"--slice")){if(slice||at+1>=argc)refuse("slice binding required exactly once");slice=argv[++at];}
+  else if(!strcmp(argv[at],"--models")){if(models||at+1>=argc)refuse("models binding required exactly once");models=argv[++at];}
+  else if(!strcmp(argv[at],"--identity")){receipt=1;}
+  else refuse("unknown launcher argument");at++;
+ }
+ if(!slice)refuse("missing --slice binding");if(!models)refuse("missing --models binding");
+ bound(slice,sp,"slice binding must name an existing absolute regular file");bound(models,mp,"models binding must name an existing absolute regular file");
+ if(at==argc||at+1==argc)refuse("missing -- product arguments");at++;
+ for(int i=at;i<argc;i++)if(!strcmp(argv[i],"--models")||!strncmp(argv[i],"--models=",9))refuse("product arguments must not override models binding");
+ if(receipt){identity("slice",sp);identity("models-file",mp);}
+ if(setenv("UNISA_CONTAINER",mp,1))refuse("container environment binding failed");
+ char **av=calloc((size_t)argc+4,sizeof(char *));if(!av)refuse("allocation");int n=0;av[n++]=sp;
+ /* stream has a distinct argument parser; both accept --models after inputs. */
+ for(int i=at;i<argc;i++)av[n++]=argv[i];av[n++]="--models";av[n++]=mp;av[n]=0;
+ execv(sp,av);refuse("slice exec failed");return 2;
+}

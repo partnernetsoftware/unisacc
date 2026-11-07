@@ -1,0 +1,30 @@
+/* Block A only: explicit binding and byte-identical stream delegation.
+ * Usage ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT
+ * All artifacts are retained. No build, release chain, or batch invocation. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+static int checks,failed;static char work[4096];
+static void die(const char *s){fprintf(stderr,"check-test-loader: %s\n",s);exit(2);}
+static void ck(int yes,const char *s){checks++;if(!yes)failed++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);}
+static void save(const char *name,const char *s,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s",work,name)||cx_write(p,s,n))die("save output");}
+static void run(char **v,const char *cwd,const char *tag,np_result *r){char why[1024],name[100];const char *env[]={"UNISA_CONTAINER=./unisacc.com",0};if(np_run(v,cwd,(char *const *)env,12,r,why,sizeof why))die(why);if(cx_fmt(name,sizeof name,"%s.stdout",tag))die("stdout path");save(name,r->out,r->outn);if(cx_fmt(name,sizeof name,"%s.stderr",tag))die("stderr path");save(name,r->err,r->errn);char rc[40];if(cx_fmt(rc,sizeof rc,"%d\n",r->rc)||cx_fmt(name,sizeof name,"%s.status",tag))die("status format");save(name,rc,strlen(rc));}
+int main(int argc,char **argv){
+ if(argc!=6)die("usage ROOT LOADER_ELF SLICE MODELS NEW_ABS_OUT");char root[4096],loader[4096],slice[4096],models[4096],input[4400];if(!realpath(argv[1],root)||!realpath(argv[2],loader)||!realpath(argv[3],slice)||!realpath(argv[4],models)||argv[5][0]!='/'||mkdir(argv[5],0700)||!realpath(argv[5],work))die("absolute inputs/fresh output");
+ if(cx_fmt(input,sizeof input,"%s/input.c",work))die("input path");const char *src="int main(void){return 7;}\n";if(cx_write(input,src,strlen(src)))die("input");
+ char *missing[]={loader,"--slice",slice,"--","stream","e2",input,0};np_result m={0};run(missing,work,"missing-models",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"missing --models binding"),"missing-models-foreign-cwd");np_free(&m);
+ char *noslice[]={loader,"--models",models,"--","stream","e2",input,0};run(noslice,work,"missing-slice",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"missing --slice binding"),"missing-slice-foreign-cwd");np_free(&m);
+ char *bad[]={loader,"--slice",slice,"--models","/nonexistent/test-loader-models","--","stream","e2",input,0};run(bad,root,"bad-models",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"models binding must name"),"missing-file-no-nearby-product-fallback");np_free(&m);
+ char *relative[]={loader,"--slice",slice,"--models","./unisacc.com","--","stream","e2",input,0};run(relative,root,"relative-models",&m);ck(m.rc==2&&!m.outn&&strstr(m.err,"models binding must name"),"relative-models-rejected");np_free(&m);
+ const char *stages[]={"e2","e1"};char previous[4400];if(cx_fmt(previous,sizeof previous,"%s",input))die("previous path");
+ for(int i=0;i<2;i++){
+  char *direct[]={slice,"stream",(char *)stages[i],"--route","lnx/x86_64/run/O0","--source",input,"--models",models,0};
+  char *wrapped[]={loader,"--slice",slice,"--models",models,"--","stream",(char *)stages[i],"--route","lnx/x86_64/run/O0","--source",input,0};
+  np_result a={0},b={0};char tag[80];int saved=dup(0),fd=open(previous,O_RDONLY);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin");close(fd);
+  if(cx_fmt(tag,sizeof tag,"%s-direct",stages[i]))die("direct tag");run(direct,root,tag,&a);
+  fd=open(previous,O_RDONLY);if(fd<0||dup2(fd,0)<0)die("stdin rewind");close(fd);
+  if(cx_fmt(tag,sizeof tag,"%s-bound-foreign-cwd",stages[i]))die("bound tag");run(wrapped,work,tag,&b);if(dup2(saved,0)<0)die("stdin restore");close(saved);
+  if(cx_fmt(tag,sizeof tag,"%s-success-byte-equality",stages[i]))die("equality tag");ck(!a.rc&&!b.rc&&a.outn>0&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn)&&a.errn==b.errn&&(!a.errn||!memcmp(a.err,b.err,a.errn)),tag);
+  if(cx_fmt(tag,sizeof tag,"%s.carrier",stages[i]))die("carrier tag");save(tag,b.out,b.outn);if(cx_fmt(previous,sizeof previous,"%s/%s",work,tag))die("carrier path");np_free(&a);np_free(&b);
+ }
+ printf("TEST_LOADER_A\tassertions=%d\tfailed=%d\tscope=development-evidence\n",checks,failed);return failed?1:0;
+}
