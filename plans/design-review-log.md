@@ -51,3 +51,9 @@
 5. NN 化后易成瓶颈:sy_ffi_call(ffi.cx:59,依赖私有 libffi dlsym 与 cif 布局;调用约定若进表而 cif 手写,六目标会分叉;Windows 全无);sy_dl_addr(dl.cx:246,静态产品手解 ELF 取 dlopen 地址,host.cx 依赖,osx/win 路径不同)。
 (cc 处置:4 作 M10a 的前置 L0——「sys 常量表化」,owner cdx2(L1 去重之后);3 把 Windows ENOSYS/FFI 限制补入 plans 薄层节与发布说明模板;5 两个接口列为 M10b 资源合同门的联审对象。)
 (更正,cc 2026-11-07:评审⑦第1/4条「cx/driver/sys 与 cx/sys 重复」不成立,git ls-files -s 显示 cx/driver/sys、cx/driver/mem 为 120000 软链;该试点收益作废,L1 仅保留 trace/net/reaper 移出 L0。教训:评审里「重复」类断言须先用 git ls-files -s / diff -r 复核再排期。)
+
+## 外部架构建议(另一 fable,主人转交,2026-11-07)与事实核实
+建议:三层→五层(L0 loader / L1 base 机制 / L2 平台无关程序层=驱动逻辑存一份 tape 由 L1 现编 / L3 nets / L4 runtime);M10 改为「切片逻辑迁 tape 自举」,仅 6 个 FINITE 单元进网。
+cdx2 事实核实(命令级,cc 未复跑):完整 pkg(1663382B,sha 29e13aeb)在已发布 APE 中只出现 1 次,非「三份」;m27.o(1328264B,3492 符号)是汇编器代码、m22.o(570968B,1982 符号)是源框架代码,非「两份模型」。→「切片与 NN 组互相嵌入」论据不成立。
+cc 自己的数据与建议冲突处:L1 base「30–60KB/ISA」与 M10a 的薄层 395,710B 不符(7KB 仅 NN 内核)。
+待验证前提(cdx2 在测):tape.gz 总量 ≤ 六份原生之和的 1/3?首次运行现编耗时?——判据未达则 L2 不成立,M10 保持现状(迁表 6 单元+其余按 M10a 清单)。
