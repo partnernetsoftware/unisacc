@@ -13,3 +13,8 @@
 | ref / streams,ref | — | 冻结参考 | **不可自造** | 标来源 |
 
 kernel-route 单 ISA 会得到 inputs=22/11/11/1，被 :88 拒绝。objects 必须在同一快照 ROOT 上 prepare，否则 `material receipt mismatch`。
+
+## 进度 2026-11-07
+
+转绿（同源 884adfef 重构造后实跑 PASS）：objects 5 + kernel-route 7 + ri-flow 9 + ri-chain 7 + pp-gold 2 = **30**。encoding 拆批并行 failed=0 另计。p3-library 4 仍 regular-input errno=2。
+
