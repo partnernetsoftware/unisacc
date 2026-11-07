@@ -89,3 +89,10 @@ c46-3 对 A 类 12 项的实测（`plans/v0.0.47-corpus-feasibility.md` 的 A12 
 3. 默认运行：`printf 'int main(void){return 7;}\n' > t.c && sh ./unisacc.com t.c`，退出码应为 7。
 4. 命名与负控：`sh ./unisacc.com tools/check-run-comm.cx -- ROOT NEW_PRODUCT OLD_PRODUCT`，旧产品固定为 c46-2，不能用同一新产品自作负控。
 5. 原生证据取本轮 run `42353236985`；全批结果另看本轮 s8，不读旧会话结论充数。
+
+## 发布后补充（2026-11-07，s8c；不改变上文的任何结论）
+为补上 s8b 里 162 个“未运行”批次，发布后在新冻结快照 s8c（同一候选 APE `884adfef…`）上绑定材料并跑了其中 84 个 heavy 批次：**11 PASS、73 FAIL**，详见 `plans/s8c-terminal.md`。归类（grk 记录，未逐项独立复现）：
+- 约 40 个是 REFUSE 类：材料未规范化（如 `ROUTE_DIR not canonical`）、输入缺失（`input absent`）、材料回执不匹配，批次的断言没有运行，需要用本候选重新构造材料后再跑，**不能因此记为通过**。
+- 22 个断言真实运行后失败（`stream-e4-peep-0..7`、`stream-e4-opinfo`、`stream-lower-target-*`、`stream-e4-io`、`*-semantics`、`properties-cases-*`）：同一配置下用 0.0.45 与 c46-2 的 APE 对照，**三个版本均失败**，因此是原有问题而非本版回归；已列入 0.0.47。
+- `c-negative` 22 项红即上文披露的 22 类 C99 诊断缺口；`pp-negative` 2 项红即“宏名不是标识符、`#include` 头名未闭合被接受”这一已披露限制。
+结论不变：本版全批未达资格；产品证据是同候选六目标原生 CI（42/0）。
