@@ -21,7 +21,7 @@
 - **Windows 限定**：两格 stdio-crossunit 和 stream-pipe 只跑 portable 子集。原始说明分别记 7/9 与 6/9；fork/waitpid/kill/F_SETFD/environ/F_SETFL 等 POSIX 子检查未运行，不计作通过。完整原件见备份 `ci-42353236985/table.md`。
 - 固定点分开证明：通用五片比较实际得到 objects 81、kernels 2、slices 5、product、package 全部 same；另用专属 checker 核 win/arm64 真实 G2/G3 独立输出、PE Machine AA64、实际构造器链与原始收据，`failed=0 missing=0`。Linux 三代构造器均 `3c660571e790370664b9b3c5e3817e610bb0803f665b9cd8542730a7166c9b63`；Windows 原生自举固定点仍为 `NOT_CLAIMED`。
 - 本机 APE 用户入口 smoke 为 5/0。工具改动私有十三棘轮为 13/0，提交 `8484436b0e`；没有提高无关基线。
-- 全批会话：[待证：grk 的新冻结快照 s8b 最终原始结论及 PASS/FAIL/KNOWN-GAP/SESSION-INFRA/未知计数；旧s8已因自身测试写工作目录而作废，原始失败保留，不迁移旧s8/s7或原生CI的PASS。]
+- **全批会话未达资格（NOT_QUALIFIED）。** 在冻结快照 s8b（`44182b4059` + 候选 APE `884adfef…`，会话身份稳定；旧 s8 因批次 `illegal-action` 写工作目录而作废，s7/s8 的 PASS 与原生 CI 的 PASS 均不沿用）上，445 个批次的终态：230 PASS；27 FAIL；4 UNKNOWN；162 NOT-AVAILABLE（缺材料或材料未绑定，未运行）；20 KNOWN-GAP（`full-*` 需要外部宿主）；`cx-resolver` 与 `wt-gate` 未跑（外层 55 秒限制所致）。27 个 FAIL 逐项归类见 `plans/s8b-terminal.md`：均为记录/摘要滞后于新 APE、快照里缺少 `.git` 或环境变量、检查与表迁移不同步等测试与基础设施原因，未发现编译器产品缺陷；这是 grk 的归类，未对每一项做独立复现，其中 `pins`、`cx-kernel-context`、`cx-decode-sbout`（`011d36b077`）等已在主树修复并以 c46-3 补充复跑，补充复跑不属于同一会话。4 个 UNKNOWN 是 55 秒看门狗在并发下超时（`cx-core-interface`、`cx-layers`、`flow-tool`、`ratchets-tool`），不能记为通过。这些数字来自 grk 的会话记录，发布前由我抽查了其中 `decode-sbout` 一项。因此本版 **不能宣称全批通过**；产品证据是同候选六目标原生 CI（42/0）。
 - 全批会话基础设施说明：第一次会话 s8 因批次 `illegal-action` 在会话根目录写工作目录而被判身份变化作废，已丢弃；改用冻结快照重跑 s8b，快照在 `44182b4059` 基础上仅同步 `tests/illegal-action.cx`（`c05aa85998`，无 IA_WORK 时改用 mkdtemp 临时目录），harness sha 因此从 `1e9337a0` 变为 `8a134c18`，产品输入未变。
 
 ## 相对 0.0.45 修复的缺陷
