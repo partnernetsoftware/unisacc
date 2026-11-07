@@ -132,6 +132,7 @@
 | 特殊部署接口模型消费 | `sh ./unisacc.com tools/check-loader-special.cx`；批次 `loader-special` | 五绑定；M36 nativeabi、M37 symbols、M38 contract、M39 ownership完整合法协议帧、自M全输出相等、变异产品具名拒绝及部件SHA不变，共21项；非归档libunisacc发布资格 |
 | 六目标部署模型逐格消费 | `sh ./unisacc.com tools/check-loader-targets.cx`；批次 `loader-target-models` | 五绑定加显式 `TEST_LOADER_TARGET_MODE=image-或object-目标`；12格各14项，覆盖24个lower/elf模型，自M全输出相等、变异必须产品拒绝（仅launcher拒绝不算）；跨目标镜像不执行，非原生资格 |
 | win/arm64分片固定点证据检查 | `sh ./unisacc.com tools/check-win-arm64-fixedpoint.cx -- MANIFEST [--test-loader LOADER PROBE]` | 显式候选/包/两代构造器与收据SHA，核AA64及真实G2/G3独立产物字节；缺代际rc3，坏PE/身份rc1，Linux loader烟测不冒认Windows原生；负控批`win-arm64-fixedpoint-controls` |
+| RI原生材料生产与缺头负控 | `sh ./unisacc.com tools/ri-material.cx -- --build ROOT NEW_OUT tests/cases/ri-cli.cx`（或`ri-consumers.cx`）；`--verify-native`只核验 | 完整fixture前缀、`-I ROOT/exec/c`及既有close-fail链接叶SHA入native收据；缺-I真编译负控批`ri-material-native-missing-include`必须rc2具名，NULL0 hook保留；仅PREPARED，绝对ROOT不能搬，P4 flow-data兼容仍另项 |
 
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。

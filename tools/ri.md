@@ -78,7 +78,7 @@ entire chain and trace accept. These synthetic networks are not production
 E1/E3 qualification. The separate `--trace-output` driver batch covers the host
 symbol sidefile, SC1 metadata compatibility and unsupported run/object routes.
 
-Material controls run one case per invocation, each with its own 55-second
+`corrupt-flags-receipt`、`native-missing-include`。纯核验只变异私有副本；缺include用例运行
 bound. Besides `control-valid`, select `native-byte-flip`,
 `missing-native-receipt`, `symlink-native`, `fifo-receipt`, `corrupt-runtime.c`,
 or `corrupt-flags-receipt`, always with a new output directory. They copy the

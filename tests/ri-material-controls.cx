@@ -1,7 +1,7 @@
 /* ROOT EXISTING_MATERIAL FIXTURE_REL NEW_ABS_OUT CASE_ID.
  * Run exactly one case per caller-owned tools/bound 55 invocation.
- * Baseline and changed clone each use --verify-native with bound18; no build,
- * fixture execution, source mutation or original-material mutation is done.
+ * Baseline and changed clone use --verify-native with bound18. The named
+ * missing-include case really builds a private old-producer variant; no original is mutated.
  * Linux/x86_64 only; FIFO uses the existing raw mknodat syscall convention. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
@@ -18,14 +18,23 @@ static np_result verify(const char *material,const char *fixture,const char *lab
 /* errno is incidental state, not the named rejection contract: accept exactly
  * one reason line, followed only by a signed decimal errno and its newline. */
 static int reason_is(const np_result *r,const char *reason){char prefix[300];int n=snprintf(prefix,sizeof prefix,"ri-material: REFUSE %s errno=",reason);if(n<0||(size_t)n>=sizeof prefix||r->errn<(size_t)n+2||memcmp(r->err,prefix,(size_t)n))return 0;size_t at=(size_t)n;if(r->err[at]=='-')at++;size_t start=at;while(at<r->errn&&r->err[at]>='0'&&r->err[at]<='9')at++;return at>start&&at+1==r->errn&&r->err[at]=='\n';}
-static int accepted(const np_result *r){char expected[512];int n=snprintf(expected,sizeof expected,"VERIFIED\tri-native\tartifact=%s\tbytes=%lu\tflags=-O2 -fno-trim-libc -b lnx/x86_64 -o -\tno-test-result\nVERIFIED\tri-material\tno-test-result\n",hashes[3],(unsigned long)sizes[3]);return n>0&&(size_t)n<sizeof expected&&!r->rc&&!r->errn&&r->outn==(size_t)n&&!memcmp(r->out,expected,(size_t)n);}
+static int accepted(const np_result *r){char expected[9500];int n=snprintf(expected,sizeof expected,"VERIFIED\tri-native\tartifact=%s\tbytes=%lu\tflags=-O2 -fno-trim-libc -b lnx/x86_64 -I %s/exec/c %s/tools/ri-shim/cxsf_close_fail.c -o -\tno-test-result\nVERIFIED\tri-material\tno-test-result\n",hashes[3],(unsigned long)sizes[3],root,root);return n>0&&(size_t)n<sizeof expected&&!r->rc&&!r->errn&&r->outn==(size_t)n&&!memcmp(r->out,expected,(size_t)n);}
 static int within(const char *p,const char *dir){size_t n=strlen(dir);return !strncmp(p,dir,n)&&(!p[n]||p[n]=='/');}
+/* Fault injection removes only the argv include pair from a private producer.
+ * Source matching constructs the fault; acceptance depends on actual compilation. */
+static void missing_include(const char *fixture){
+ size_t n;char *s=readfile(tool,&n);const char *needle="\"-I\",inc,";char *at=strstr(s,needle);if(!at||strstr(at+1,needle))die("unique include injection site");size_t skip=strlen(needle);memmove(at,at+skip,n-(size_t)(at-s)-skip);n-=skip;
+ char variant[4400],dest[4400],why[1024],status[40],name[100];int name_n=snprintf(name,sizeof name,"tools/.ri-material-missing-include-%ld.cx",(long)getpid());if(name_n<0||(size_t)name_n>=sizeof name)die("private producer name");join(variant,root,name);join(dest,work,"missing-include-build");writefile(variant,s,n,0600,1);evidence("native-missing-include","producer.cx",s,n);free(s);
+ char *v[]={bound,"40","sh",product,variant,"--","--build",root,dest,(char *)fixture,0};np_result r;int failed=np_run(v,root,0,42,&r,why,sizeof why);if(unlink(variant))die("private producer removal");if(failed)die(why);
+ evidence("native-missing-include","stdout",r.out,r.outn);evidence("native-missing-include","stderr",r.err,r.errn);int z=snprintf(status,sizeof status,"rc\t%d\n",r.rc);evidence("native-missing-include","status",status,(size_t)z);
+ ck(r.rc==2&&!r.outn&&strstr(r.err,"core.h")&&strstr(r.err,"ri-material: REFUSE native compiler failed or invalid ELF output errno="),"native-missing-include.actual-compiler-rc2-core.h");np_free(&r);
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN ri-material-controls requires Linux/x86_64\n",stderr);return 3;
 #endif
- const char *names[]={"control-valid","native-byte-flip","missing-native-receipt","symlink-native","fifo-receipt","corrupt-runtime.c","corrupt-flags-receipt"};int which=-1;
- if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],original)||!argv[3][0]||argv[3][0]=='/'||strstr(argv[3],"..")||strpbrk(argv[3],"\\\r\n\t")||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT EXISTING_MATERIAL FIXTURE_REL NEW_ABS_OUT CASE_ID");for(int i=0;i<7;i++)if(tx_eqz(argv[5], names[i]))which=i;if(which<0)die("unknown CASE_ID");
+ const char *names[]={"control-valid","native-byte-flip","missing-native-receipt","symlink-native","fifo-receipt","corrupt-runtime.c","corrupt-flags-receipt","native-missing-include"};int which=-1;
+ if(argc!=6||!realpath(argv[1],root)||!realpath(argv[2],original)||!argv[3][0]||argv[3][0]=='/'||strstr(argv[3],"..")||strpbrk(argv[3],"\\\r\n\t")||argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("usage ROOT EXISTING_MATERIAL FIXTURE_REL NEW_ABS_OUT CASE_ID");for(int i=0;i<8;i++)if(tx_eqz(argv[5], names[i]))which=i;if(which<0)die("unknown CASE_ID");
  /* Canonicalize the existing parent, keeping the output leaf genuinely new.
   * A clone may not be created inside the original material directory. */
  char parent[4096],canonical[4096];strcpy(parent,argv[4]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||tx_eqz(slash+1, ".")||tx_eqz(slash+1, ".."))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,canonical))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",canonical,tx_eqz(canonical, "/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,original))die("output aliases original material");if(mkdir(work,0700))die("new private output required");join(clone,work,"material");if(mkdir(clone,0700))die("new clone directory");join(bound,root,"tools/bound");join(product,root,"unisacc.com");join(tool,root,"tools/ri-material.cx");
@@ -37,8 +46,8 @@ int main(int argc,char **argv){
  if(which==3){char target[4400];join(p,clone,"runtime-native");join(target,original,"runtime-native");if(unlink(p)||symlink(target,p))die("private native symlink");reason="material leaf is not regular";}
  if(which==4){join(p,clone,"native.tsv");if(unlink(p))die("private receipt removal");/* Linux x86_64 syscall_64.tbl: mknodat=259. */if(_unisa_ret(__syscall6(259,-100,(long)p,S_IFIFO|0600,0,0)))die("private FIFO creation");reason="material leaf is not regular";}
  if(which==5){if(!sizes[0])die("runtime source empty");bytes[0][0]^=1;join(p,clone,"runtime.c");writefile(p,bytes[0],sizes[0],0600,0);reason="material changed";}
- if(which==6){const char *needle="\nflags\t-O2 -fno-trim-libc -b lnx/x86_64 -o -\n";char *at=strstr(bytes[2],needle);if(!at||strstr(at+1,needle))die("unique native flags");at[strlen("\nflags\t-O")]='3';join(p,clone,"native.tsv");writefile(p,bytes[2],sizes[2],0600,0);reason="material changed";}
- np_result result=verify(clone,argv[3],names[which]);ck(which==0?accepted(&result):result.rc==2&&!result.outn&&reason_is(&result,reason),names[which]);np_free(&result);
+ if(which==6){char needle[9100];int z=snprintf(needle,sizeof needle,"\nflags\t-O2 -fno-trim-libc -b lnx/x86_64 -I %s/exec/c %s/tools/ri-shim/cxsf_close_fail.c -o -\n",root,root);if(z<0||(size_t)z>=sizeof needle)die("flags bound");char *at=strstr(bytes[2],needle);if(!at||strstr(at+1,needle))die("unique native flags");at[strlen("\nflags\t-O")]='3';join(p,clone,"native.tsv");writefile(p,bytes[2],sizes[2],0600,0);reason="material changed";}
+ if(which==7)missing_include(argv[3]);else {np_result result=verify(clone,argv[3],names[which]);ck(which==0?accepted(&result):result.rc==2&&!result.outn&&reason_is(&result,reason),names[which]);np_free(&result);}
  for(int i=0;i<4;i++){char q[4400],h[65],label[100];size_t n;join(q,original,leaves[i]);char *s=readfile(q,&n);cx_sha256_hex(s,n,h);snprintf(label,sizeof label,"original-unchanged.%s",leaves[i]);ck(n==sizes[i]&&tx_eqz(h, hashes[i]),label);free(s);free(bytes[i]);}
  puts("NOT_CLAIMED\tfixture-behavior-product-rebuild-foreign-hosts-or-general-filesystem-race-safety");puts("TIMING\tstartup_construction_loading_output_validation_cold_hot=UNMEASURED");printf("RI_MATERIAL_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\texecuted-cases=1\n",names[which],assertions,failures);return failures?1:0;
 }

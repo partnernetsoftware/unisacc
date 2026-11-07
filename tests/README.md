@@ -210,7 +210,7 @@ recorded separately; generation11 is installed as `P53e2cd1f/S447f794a`. Its cur
 observations bind actual runtime, chain and bootstrap identities; full product
 and foreign-host qualification remain separate.
 
-Native-material controls use the same `ri-cli` material but run one CASE_ID per
+`corrupt-runtime.c`、`corrupt-flags-receipt`、`native-missing-include`。八个独立批映射到
 new output directory and55-second invocation: `control-valid`,
 `native-byte-flip`, `missing-native-receipt`, `symlink-native`, `fifo-receipt`,
 `corrupt-runtime.c`, or `corrupt-flags-receipt`. Seven separate registry batches
