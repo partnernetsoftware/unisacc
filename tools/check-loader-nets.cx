@@ -1,0 +1,44 @@
+/* Development-only deployed P3 stage/model templates, not the 18 fact-net track.
+ * Absolute TEST_LOADER_{ROOT,LOADER,SLICE,MODELS,SWAP} required; evidence stays in /tmp.
+ * Pipeline follows tests/check-stream-pipe.cx sp_image_pipe; arm64 output is not executed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.loadernets
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+static int checks,failed;static char work[4096];
+static void die(const char *s){fprintf(stderr,"check-loader-nets: %s\n",s);exit(2);}
+static void ck(int yes,const char *s){checks++;if(!yes)failed++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);}
+static char *material(const char *name){char *v=getenv(name);if(!v||v[0]!='/'){fprintf(stderr,"check-loader-nets: missing absolute material binding %s\n",name);exit(2);}return v;}
+static void evidence(const char *kind,const char *path){char h[65];ln_digest(path,h);printf("LOADER_NET_SHA\tkind=%s\tpath=%s\tsha256=%s\n",kind,path,h);}
+static void save(const char *tag,const char *suffix,const char *b,size_t n){char path[4400];if(cx_fmt(path,sizeof path,"%s/%s.%s",work,tag,suffix)||cx_write(path,b,n))die("save evidence");}
+static void invoke(char **av,const char *input,const char *tag,np_result *r){char why[1024],status[40];int saved=dup(0),fd=open(input,O_RDONLY);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin");close(fd);if(np_run(av,work,0,35,r,why,sizeof why))die(why);if(dup2(saved,0)<0)die("stdin restore");close(saved);save(tag,"stdout",r->out,r->outn);save(tag,"stderr",r->err,r->errn);if(cx_fmt(status,sizeof status,"%d\n",r->rc))die("status");save(tag,"status",status,strlen(status));}
+/* Same seven filters and route transition as sp_image_pipe, retaining every carrier. */
+static void carriers(const char *loader,const char *slice,const char *models,const char *source,const char *target,const char *tag){
+ const char *stages[]={"e2","e1","e3","sidecar","prune","lower","elf"};char input[4400],route[100];if(cx_fmt(input,sizeof input,"%s",source))die("carrier source");
+ for(int i=0;i<7;i++){if(cx_fmt(route,sizeof route,"%s/%s/O0",target,i<4?"run":"image"))die("carrier route");char *av[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stages[i],"--route",route,"--res","run-forward","--source",(char *)source,0,0};if(i==3)av[8]=0;if(i==6)av[14]="--raw";np_result r={0};char name[100],path[4400];if(cx_fmt(name,sizeof name,"%s.%d",tag,i))die("carrier name");invoke(av,input,name,&r);if(r.rc||!r.outn)die("carrier filter refused");if(cx_fmt(path,sizeof path,"%s/%s",work,name)||cx_write(path,r.out,r.outn)||cx_fmt(input,sizeof input,"%s",path))die("carrier output");np_free(&r);if(i<6)evidence(stages[i+1],path);}
+}
+static void template(const char *loader,const char *slice,const char *models,const char *swap,const char *stage,const char *route,const char *input,const char *source){
+ long wanted;size_t rn;char *record;ln_select(models,stage,route,&wanted,&rn,&record);
+ printf("LOADER_DEPLOYED_MODEL\tstage=%s\tmodel=%ld\troute=%s\tscope=three-templates-not-fact-nets\n",stage,wanted,route);
+ char path[4400],badpath[4400],binding[4600],badbinding[4600],tag[120];if(cx_fmt(path,sizeof path,"%s/%s-M%ld",work,stage,wanted)||cx_fmt(badpath,sizeof badpath,"%s/%s-M%ld.bad",work,stage,wanted)||cx_fmt(binding,sizeof binding,"%s=%s",stage,path)||cx_fmt(badbinding,sizeof badbinding,"%s=%s",stage,badpath))die("net paths");
+ if(cx_write(path,record,rn))die("net record");record[rn-1]^=1;if(cx_write(badpath,record,rn))die("net mutation");free(record);
+ char h[65],badsha[65],after[65];ln_digest(path,h);ln_digest(badpath,badsha);evidence("self-before",path);evidence("mutated-before",badpath);evidence("stage-input",input);
+ char *base[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0};
+ char *same[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",binding,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0};
+ char *receipt[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--identity","--net",binding,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0};
+ np_result a={0},c={0},d={0},id={0};char **calls[]={base,same,receipt};np_result *rs[]={&a,&c,&id};const char *names[]={"original","self","identity"};for(int i=0;i<3;i++){if(cx_fmt(tag,sizeof tag,"%s-M%ld-%s",stage,wanted,names[i]))die("net tag");invoke(calls[i],input,tag,rs[i]);}
+ if(cx_fmt(tag,sizeof tag,"%s-M%ld-full-stdout-stderr-rc-equality",stage,wanted))die("label");ck(!a.rc&&a.outn>0&&a.rc==c.rc&&a.outn==c.outn&&!memcmp(a.out,c.out,a.outn)&&a.errn==c.errn&&(!a.errn||!memcmp(a.err,c.err,a.errn)),tag);
+ if(cx_fmt(tag,sizeof tag,"%s-M%ld-self-sha-selected-receipt",stage,wanted))die("label");ck(!id.rc&&strstr(id.err,h)&&strstr(id.err,"kind=external-net")&&strstr(id.err,"kind=replaced-models-file"),tag);
+ receipt[7]=badbinding;if(cx_fmt(tag,sizeof tag,"%s-M%ld-mutated",stage,wanted))die("tag");invoke(receipt,input,tag,&d);
+ if(cx_fmt(tag,sizeof tag,"%s-M%ld-last-byte-selected-named-refusal-no-output",stage,wanted))die("label");ck(d.rc!=0&&!d.outn&&strstr(d.err,badsha)&&strstr(d.err,"kind=external-net")&&(strstr(d.err,"unisacc:")||strstr(d.err,"test-loader: REFUSE"))&&(strstr(d.err,"model")||strstr(d.err,"package")),tag);
+ ln_digest(path,after);ck(!strcmp(h,after),"self-M-unchanged");ln_digest(badpath,after);ck(!strcmp(badsha,after),"mutated-M-unchanged");evidence("self-after",path);evidence("mutated-after",badpath);np_free(&a);np_free(&c);np_free(&d);np_free(&id);
+}
+int main(int argc,char **argv){
+ if(argc!=1)die("use absolute TEST_LOADER material environment only");const char *root=material("TEST_LOADER_ROOT"),*loader=material("TEST_LOADER_LOADER"),*slice=material("TEST_LOADER_SLICE"),*models=material("TEST_LOADER_MODELS"),*swap=material("TEST_LOADER_SWAP");
+ char fresh[]="/tmp/check-loader-nets-XXXXXX",source[4400];const char *src="int main(void){return 0;}\n";if(!mkdtemp(fresh)||cx_fmt(work,sizeof work,"%s",fresh)||cx_fmt(source,sizeof source,"%s/input.c",work)||cx_write(source,src,strlen(src)))die("evidence directory/source");
+ char before[4][65];const char *bound[]={loader,slice,models,swap};for(int i=0;i<4;i++){ln_digest(bound[i],before[i]);evidence("material-before",bound[i]);}
+ carriers(loader,slice,models,source,"lnx/x86_64","carrier");carriers(loader,slice,models,source,"lnx/arm64","arm64");
+ const char *selected[]={"e2","e3","lower"};const char *routes[]={"lnx/x86_64/run/O0","lnx/x86_64/run/O0","lnx/arm64/image/O0"};for(int i=0;i<3;i++){char input[4400];if(cx_fmt(input,sizeof input,i==0?"%s/input.c":i==1?"%s/carrier.1":"%s/arm64.4",work))die("stage input");template(loader,slice,models,swap,selected[i],routes[i],input,source);}
+ for(int i=0;i<4;i++){char after[65];ln_digest(bound[i],after);ck(!strcmp(before[i],after),"material-unchanged");evidence("material-after",bound[i]);}
+ printf("LOADER_NET_REPLACEMENT\tassertions=%d\tfailed=%d\ttemplates=3\tfact-nets=18\tall18=NOT_CLAIMED\tlower=arm64-not-native-not-x86-M13\troot=%s\tout=%s\n",checks,failed,root,work);return failed?1:0;
+}

@@ -48,5 +48,7 @@ C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、�
 ## 后续独立批的双轨边界（cc 裁定）
 
 - test-loader 的逐网对象是出货 P3 部署模型，即 D 路由指向的 M，按阶段和模型索引命名；先做 e2/e3/lower 三模板。阶段名替换按首 D 选 M，不能将名字拒绝冒充某个未选中模型的实际消费拒绝。lower 首条是 arm64 模型，最小模板只生成 arm64 `target.text`，不声称原生执行或 x86_64 lower 模型覆盖。
-- 18 事实网是 gold→kernel/nets 的独立轨；D.stage 没有这些事实网名。combo/isel/parse/pfconv/scope 等对照臂不能伪报 P3 替换消费。独立单元不删不缩：grk 已以 `aeae980e74` 保留 `net.* BLOCKED evidence=gold-kernel-nets`，只有实际接入的 stage.e2 为 READY；后段待冻结载体及 SHA 后按流接口接入。
+- 18 事实网是 gold→kernel/nets 的独立轨；D.stage 没有这些事实网名。combo/isel/parse/pfconv/scope 等对照臂不能伪报 P3 替换消费。独立单元不删不缩：grk 已以 `aeae980e74` 保留 `net.* BLOCKED evidence=gold-kernel-nets`。本窗口交付冻结载体及 SHA 后，grk 以 `89b44591ec` 接入后段，`9ab008f1a0` 补 e4；七流 stage 全部经真实检查 READY（开发证据）。
 - ISA 启动检查使用显式目标与精确版本期望；只声明真实本机 slice 的启动结果，其他五格 `NOT_CLAIMED`。旧冻结 0.0.45 可用于开发检查，但不得用当前源码版本号冒认为 0.0.46 或发布资格。
+
+三模板已由父在当前 main 的干净私有克隆实跑 `LOADER_NET_REPLACEMENT assertions=19 failed=0`，覆盖 e2-M0、e3-M4、arm64 lower-M9；原 checker 另实跑 19/0，13 棘轮全过、工具行数实际/基线同为 78341。新增 `cxlib.loadernets` 模块移动复用 M 记录解析，未添加 `#include` 或放宽任何断言；净新增工具 60 行。为使原始与自 M 替换的产品 stdout/stderr/rc 完整逐字节比较，成功替换元数据仅 `--identity` 启用；产品错误诊断从未过滤，收据 SHA 另独立实跑核验。证据 `/tmp/check-loader-nets-leptbs`、`/tmp/check-test-loader-quevly/evidence`；精确命令 `/tmp/loader-nets-replay.txt`。
