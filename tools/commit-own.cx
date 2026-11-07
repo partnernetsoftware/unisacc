@@ -10,7 +10,8 @@
  * path's entry in the shared index is moved to the new blob when it still held the old HEAD blob (nobody had
  * staged that path) or a blob the path had in one of its last 50 commits (a stale, already-committed version --
  * leaving it would let a later plain `git commit` put the old file back); an entry that already is the new blob
- * is left silently; any other staged version is someone's work, left alone, and a NOTE line says so.
+ * 收尾: 绝不 git read-tree HEAD 覆盖默认索引。只对刚提交路径补 cacheinfo。
+ * 然后 git diff --cached --name-only: 空则 CACHED_QUIET; 含非本批路径则 NOTE 保留(负控:不吞别人暂存)。
  * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
  * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage. */
 #pragma unisa use sys.fs
@@ -149,6 +150,21 @@ int main(int argc, char **argv) {
                     if (!good) { sy_printf("NOTE\t%s\tthe shared index could not be updated after 12 tries (index.lock?); run: git update-index --add --cacheinfo %s\n", path[k], info); lost++; }
                 }
             } else printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+        }
+        {   char *v[] = {"git", "diff", "--cached", "--name-only", 0};
+            if (run(v, out, sizeof out) == 0) {
+                if (!out[0]) sy_printf("CACHED_QUIET\n");
+                else {
+                    long at = 0, nout = tx_len(out, sizeof out); int alien = 0;
+                    while (at < nout) {
+                        long e = tx_chr(out + at, nout - at, '\n'), ln = e < 0 ? nout - at : e; int mine = 0;
+                        for (k = 0; k < np; k++) if (ln == tx_len(path[k], 4000) && tx_same(out + at, ln, path[k], ln)) mine = 1;
+                        if (!mine && ln > 0) { alien++; sy_printf("NOTE\tcached-foreign\t%.*s\n", (int)ln, out + at); }
+                        at += ln + (e >= 0);
+                    }
+                    if (!alien) sy_printf("CACHED_QUIET\n");
+                }
+            }
         }
         printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
         if (lost) return 1;   /* committed, but the shared index still shows these paths as staged deletions */
