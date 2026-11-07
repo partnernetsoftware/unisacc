@@ -1,6 +1,6 @@
 /* tools/opt-corpus-gen.cx -- optimization matrix corpus/closure/CLI cells (tests/optimization-domain-matrix.tsv) with
  * literal and classic-reference-differential oracles.
- *   sh ./unisacc.com tools/opt-corpus-gen.cx -- ROOT ABS_OUT GROUP [REF]
+ *   sh ./unisacc.com tools/opt-corpus-gen.cx -- ROOT ABS_OUT GROUP [REF] [TCC]
  * GROUP (each stays under the 60 s rule; a compile costs about 0.13 s):
  *   corpus-N : one program each (a compile costs about 0.35 s; 72 product + 72 reference compiles per program):
  *              0 corpus.int64-edges, 1 corpus.float-double, 2 corpus.calls-abi, 3 corpus.switch-dense,
@@ -10,6 +10,7 @@
  *              (no-flag image == -O0 image bytes and executes to the literal)
  *   ccdiff   : corpus.cc-differential, 4th argument = host C compiler (declared oracle): host -O0/-O2 and product
  *              -O0/-O2 lnx images execute to the literal and to each other, all ten programs
+ *              optional TCC (sixth argv entry) adds a separate no-optimization-flag C99 oracle and three-way rows.
  *   cli      : refusal.other-spellings (-Og, -Ofast, -O-1, -O4, -O5: named refusal, rc 1, no image); REF's behaviour
  *              on the same spellings is recorded as INFO (measured 2026-10-28: the classic reference accepts them silently)
  * Per corpus program and each of the six flags (-O0 -O1 -O -O2 -O3 -Os): the lnx/x86_64 image executes to the
@@ -22,7 +23,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 
-static char root[4096], outdir[4096], work[4200], bound[4400], product[4400], ref[4096];
+static char root[4096], outdir[4096], work[4200], bound[4400], product[4400], ref[4096], tcc[4096];
 static FILE *res; static int npass, nfail, nvac, nnotrun;
 static void die(const char *s) { fprintf(stderr, "opt-corpus: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
@@ -100,7 +101,7 @@ static void corpus_program(const Prog *p) {
     for (int f = 0; f < 6; f++) for (int t = 0; t < 6; t++) {
         char img[4400]; { if (cx_fmt(img, sizeof img, "%s/%s.%s.%s", work, p->name, fslug[f], tslug[t])) { fprintf(stderr, "opt-corpus-gen: text too long for img\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.%s", fslug[f], tslug[t])) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
         if (compile_with("product", a, b, flags[f], targets[t], img, &r) || r.rc) { row("NOT_RUN", p->cell, lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
-        if (t == 0) { char *v[] = { img, 0 }; char d[200]; if (run(v, 3, &r)) row("NOT_RUN", p->cell, lab, "image did not run"); else { { if (cx_fmt(d, sizeof d, "exit %d, stdout literal", p->exit_want)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } char l2[220]; { if (cx_fmt(l2, sizeof l2, "%s.executes", lab)) { fprintf(stderr, "opt-corpus-gen: text too long for l2\n"); exit(2); } } check(exact(&r, p->stdout_want, p->exit_want), p->cell, l2, exact(&r, p->stdout_want, p->exit_want) ? d : "stdout or exit differs from literal"); np_free(&r); } }
+        if (t == 0) { char *v[] = { img, 0 }; char d[200]; if (run(v, 3, &r)) row("NOT_RUN", p->cell, lab, "image did not run"); else { { if (cx_fmt(d, sizeof d, "exit %d, stdout literal", p->exit_want)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } char l2[220]; { if (cx_fmt(l2, sizeof l2, "%s.executes", lab)) { fprintf(stderr, "opt-corpus-gen: text too long for l2\n"); exit(2); } } check(exact(&r, p->stdout_want, p->exit_want), p->cell, l2, exact(&r, p->stdout_want, p->exit_want) ? d : "stdout or exit differs from literal"); } np_free(&r); }
         if (ref[0]) { char rimg[4400]; { if (cx_fmt(rimg, sizeof rimg, "%s.ref", img)) { fprintf(stderr, "opt-corpus-gen: text too long for rimg\n"); exit(2); } } char l2[220]; { if (cx_fmt(l2, sizeof l2, "%s.image-equals-reference", lab)) { fprintf(stderr, "opt-corpus-gen: text too long for l2\n"); exit(2); } }
             if (compile_with(ref, a, b, flags[f], targets[t], rimg, &r) || r.rc) row("NOT_RUN", p->cell, l2, "reference compile failed"); else check(same_file(img, rimg), p->cell, l2, "byte equality"); np_free(&r); }
     }
@@ -118,17 +119,17 @@ static void group_closure(void) {
           if (compile_with("product", a, b, 0, targets[0], nf, &r) || r.rc) { row("NOT_RUN", "default.native-image", p->name, "no-flag compile failed"); np_free(&r); continue; } np_free(&r);
           if (compile_with("product", a, b, "-O0", targets[0], o0, &r) || r.rc) { row("NOT_RUN", "default.native-image", p->name, "-O0 compile failed"); np_free(&r); continue; } np_free(&r);
           { if (cx_fmt(lab, sizeof lab, "%s.noflag-equals-O0-bytes", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } check(same_file(nf, o0), "default.native-image", lab, "byte equality");
-          char *v[] = { nf, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.noflag-executes", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } if (run(v, 3, &r)) row("NOT_RUN", "default.native-image", lab, "image did not run"); else { check(exact(&r, p->stdout_want, p->exit_want), "default.native-image", lab, "literal stdout and exit"); np_free(&r); } } }
+          char *v[] = { nf, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.noflag-executes", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } if (run(v, 3, &r)) row("NOT_RUN", "default.native-image", lab, "image did not run"); else { check(exact(&r, p->stdout_want, p->exit_want), "default.native-image", lab, "literal stdout and exit"); } np_free(&r); } }
 }
 
 static void group_cli(void) {
     const Prog *p = &progs[0]; char a[4400], b[4400]; np_result r; sources(p, a, sizeof a, b, sizeof b);
     const char *sp[] = { "-Og", "-Ofast", "-O-1", "-O4", "-O5", "-O1x" };
     for (size_t i = 0; i < sizeof sp / sizeof *sp; i++) { char img[4400], lab[200]; { if (cx_fmt(img, sizeof img, "%s/cli-%zu.img", work, i)) { fprintf(stderr, "opt-corpus-gen: text too long for img\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.named-refusal", sp[i])) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
-        if (compile_with("product", a, b, sp[i], targets[0], img, &r)) { row("NOT_RUN", "refusal.other-spellings", lab, "product did not run"); continue; }
+        if (compile_with("product", a, b, sp[i], targets[0], img, &r)) { row("NOT_RUN", "refusal.other-spellings", lab, "product did not run"); np_free(&r); continue; }
         struct stat st; int noimg = stat(img, &st) && errno == ENOENT; int ok = r.rc == 1 && !r.outn && r.errn && strstr(r.err, "option not migrated") && noimg;
         char d[200]; { if (cx_fmt(d, sizeof d, "rc=%d stderr names 'option not migrated', no image", r.rc)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } check(ok, "refusal.other-spellings", lab, ok ? d : "refusal shape differs"); np_free(&r);
-        if (ref[0]) { char rimg[4400]; { if (cx_fmt(rimg, sizeof rimg, "%s/cli-%zu.ref", work, i)) { fprintf(stderr, "opt-corpus-gen: text too long for rimg\n"); exit(2); } } if (!compile_with(ref, a, b, sp[i], targets[0], rimg, &r)) { struct stat s2; fprintf(res, "INFO\trefusal.other-spellings\t%s.reference\trc=%d image=%s stderr=%zu bytes\n", sp[i], r.rc, stat(rimg, &s2) ? "no" : "yes", r.errn); np_free(&r); } } }
+        if (ref[0]) { char rimg[4400]; { if (cx_fmt(rimg, sizeof rimg, "%s/cli-%zu.ref", work, i)) { fprintf(stderr, "opt-corpus-gen: text too long for rimg\n"); exit(2); } } if (!compile_with(ref, a, b, sp[i], targets[0], rimg, &r)) { struct stat s2; fprintf(res, "INFO\trefusal.other-spellings\t%s.reference\trc=%d image=%s stderr=%zu bytes\n", sp[i], r.rc, stat(rimg, &s2) ? "no" : "yes", r.errn); } np_free(&r); } }
 }
 
 /* corpus.cc-differential (spec.md:711 A-17): the declared oracle is the host C compiler (fable ruling 2026-10-28: a .cx
@@ -182,23 +183,33 @@ static const Prog progs4[] = {
 #define NPROG4 ((int)(sizeof progs4 / sizeof *progs4))
 static void group_ccdiff(const Prog *tbl, int count) {
     if (!ref[0]) die("ccdiff needs HOST_CC");
-    { np_result r; char *vv[] = { ref, "--version", 0 }; char ver[200] = "-"; if (!run(vv, 5, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; np_free(&r); } fprintf(res, "ORACLE\thost_cc=%s\toracle_id=%s\n", ref, ver); }
+    { np_result r; char *vv[] = { ref, "--version", 0 }; char ver[200] = "-"; if (!run(vv, 5, &r)) { size_t k = 0; while (k < r.outn && r.out[k] != '\n' && k < 199) { ver[k] = r.out[k]; k++; } ver[k] = 0; } np_free(&r); fprintf(res, "ORACLE\thost_cc=%s\toracle_id=%s\n", ref, ver); }
+    if (tcc[0]) { np_result r; char hash[65], ver[200], *v[] = { tcc, "-v", 0 }; if (!shafile(tcc, hash)) die("tcc digest"); int tr = run(v, 5, &r); const char *s = r.outn ? r.out : r.err; size_t n = r.outn ? r.outn : r.errn, k = 0; while (k < n && k < sizeof ver - 1 && s[k] != '\n' && s[k] != '\r') { ver[k] = s[k] == '\t' ? ' ' : s[k]; k++; } ver[k] = 0; fprintf(res, "ORACLE\ttcc=%s\tsha256=%s\tflags=-std=c99,no-optimization-flag\toracle_id=%s\n", tcc, hash, ver); check(!tr && !r.rc && k, tbl[0].cell, "tcc.identity", "tcc -v identity; no fallback flags"); np_free(&r); }
     for (int i = 0; i < count; i++) { const Prog *p = &tbl[i]; char a[4400], b[4400]; sources(p, a, sizeof a, b, sizeof b); const char *lv[2] = { "-O0", "-O2" };
+        np_result tc = {0}; int tok = 0;
+        if (tcc[0]) { char ti[4400], label[200]; if (cx_fmt(ti, sizeof ti, "%s/%s.tcc", work, p->name) || cx_fmt(label, sizeof label, "%s.tcc.no-opt.compile", p->name)) die("tcc path/label"); char *v[] = { tcc, "-std=c99", a, b[0] ? b : "-o", b[0] ? "-o" : ti, b[0] ? ti : 0, 0 }; np_result r; int tr = run(v, 20, &r); int built = !tr && !r.rc;
+            char log[4500], status[200]; if (cx_fmt(log, sizeof log, "%s.compile.stdout", ti)) { np_free(&r); die("tcc log path"); } saved(log, r.out ? r.out : "", r.outn);
+            if (cx_fmt(log, sizeof log, "%s.compile.stderr", ti)) { np_free(&r); die("tcc log path"); } saved(log, r.err ? r.err : "", r.errn);
+            if (cx_fmt(log, sizeof log, "%s.compile.status", ti) || cx_fmt(status, sizeof status, "transport=%d rc=%d stdout_bytes=%zu stderr_bytes=%zu", tr, r.rc, r.outn, r.errn)) { np_free(&r); die("tcc status"); } saved(log, status, strlen(status)); check(built, p->cell, label, status); np_free(&r);
+            if (built) { char *x[] = { ti, 0 }; tok = !run(x, 3, &tc); if (cx_fmt(label, sizeof label, "%s.tcc.no-opt.literal", p->name)) { np_free(&tc); die("tcc label"); } check(tok && exact(&tc, p->stdout_want, p->exit_want), p->cell, label, "TCC stdout/stderr/exit versus literal, no optimization flag"); } }
         for (int f = 0; f < 2; f++) { char hi[4400], pi[4400], lab[200], d[300]; { if (cx_fmt(hi, sizeof hi, "%s/%s.%s.cc", work, p->name, lv[f] + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for hi\n"); exit(2); } } { if (cx_fmt(pi, sizeof pi, "%s/%s.%s.product", work, p->name, lv[f] + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for pi\n"); exit(2); } } np_result r;
             char *hv[] = { ref, "-std=c99", "-w", (char *)lv[f], (char *)a, b[0] ? (char *)b : "-o", b[0] ? "-o" : hi, b[0] ? hi : 0, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.%s.host-cc", p->name, lv[f] + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
             if (run(hv, 20, &r) || r.rc) { { if (cx_fmt(d, sizeof d, "host cc rc=%d", r.rc)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } check(0, p->cell, lab, d); np_free(&r); continue; } np_free(&r);
             if (compile_with("product", a, b, lv[f], targets[0], pi, &r) || r.rc) { { if (cx_fmt(lab, sizeof lab, "%s.%s.product", p->name, lv[f] + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } check(0, p->cell, lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
-            np_result h, q; char *x[] = { hi, 0 }, *y[] = { pi, 0 }; if (run(x, 3, &h)) { check(0, p->cell, lab, "host image did not run"); continue; } if (run(y, 3, &q)) { check(0, p->cell, lab, "product image did not run"); np_free(&h); continue; }
+            np_result h, q; char *x[] = { hi, 0 }, *y[] = { pi, 0 }; if (run(x, 3, &h)) { check(0, p->cell, lab, "host image did not run"); np_free(&h); continue; } if (run(y, 3, &q)) { check(0, p->cell, lab, "product image did not run"); np_free(&h); np_free(&q); continue; }
             int hl = exact(&h, p->stdout_want, p->exit_want), pl = exact(&q, p->stdout_want, p->exit_want), eq = h.rc == q.rc && h.outn == q.outn && !memcmp(h.out, q.out, h.outn);
             { if (cx_fmt(d, sizeof d, "host rc=%d product rc=%d want=%d; host literal=%d product literal=%d equal=%d", h.rc, q.rc, p->exit_want, hl, pl, eq)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.%s.host-equals-product-equals-literal", p->name, lv[f] + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
-            check(hl && pl && eq, p->cell, lab, d); np_free(&h); np_free(&q); } }
+            check(hl && pl && eq, p->cell, lab, d);
+            if (tcc[0]) { if (cx_fmt(lab, sizeof lab, "%s.%s.host-product-tcc-literal", p->name, lv[f] + 1)) die("tcc label"); int tl = tok && exact(&tc, p->stdout_want, p->exit_want), teq = tok && tc.rc == h.rc && tc.outn == h.outn && !memcmp(tc.out, h.out, h.outn); if (cx_fmt(d, sizeof d, "host rc=%d product rc=%d tcc(no-opt) rc=%d want=%d; literals host=%d product=%d tcc=%d; host-product=%d host-tcc=%d tcc-ran=%d", h.rc, q.rc, tc.rc, p->exit_want, hl, pl, tl, eq, teq, tok)) { np_free(&h); np_free(&q); np_free(&tc); die("tcc detail"); } check(hl && pl && eq && tl && teq, p->cell, lab, d); }
+            np_free(&h); np_free(&q); } np_free(&tc); }
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc == 5 && !realpath(argv[4], ref))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3|ccdiff-4 HOST_CC\n", stderr); return 2; }
+    if ((argc != 4 && argc != 5 && argc != 6) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc >= 5 && !realpath(argv[4], ref)) || (argc == 6 && !realpath(argv[5], tcc))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3|ccdiff-4 HOST_CC [TCC]\n", stderr); return 2; }
     const char *group = argv[3]; int gp = -1, gl = tx_eqz(group, "closure"), gi = tx_eqz(group, "cli"), gc = tx_eqz(group, "ccdiff"), gc2 = tx_eqz(group, "ccdiff-2"), gc3 = tx_eqz(group, "ccdiff-3"), gc4 = tx_eqz(group, "ccdiff-4");
     if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
     if (gp < 0 && !gl && !gi && !gc && !gc2 && !gc3 && !gc4) die("group");
+    if (tcc[0] && !gc && !gc2 && !gc3 && !gc4) die("TCC only supported for ccdiff groups");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "opt-corpus-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, group)) { fprintf(stderr, "opt-corpus-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
