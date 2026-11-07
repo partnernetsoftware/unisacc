@@ -1,4 +1,4 @@
-# 试点：rtsharedname（替代 asmtext）
+# 摘要：完整设计见 [rtsharedname-nn-pilot.md](rtsharedname-nn-pilot.md)
 
 不改产品。asmtext 暂缓。
 
