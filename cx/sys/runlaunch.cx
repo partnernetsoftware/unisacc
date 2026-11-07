@@ -3,6 +3,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.time
+#pragma unisa use sys.posix
 /* L0 sys/runlaunch: the tmpfile -run launch (pp-targets.tsv run_launch=tmpfile:
    osx/* and win/*). A private 0700 directory under TMPDIR holds the image; the
    child runs and is waited for; file and directory go either way. The child's
@@ -126,28 +127,43 @@ int rl_tmpfile_exec(const unsigned char *image, long n, char **argv) {
     return rc < 0 ? 1 : rc;
 }
 
+/* Directory-open flags for rl_run_link; Windows' prelude has no O_NOFOLLOW or
+   O_DIRECTORY (and sy_openat is -ENOSYS there anyway). */
+static int rl_dirflags_os(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    return O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+#endif
+}
+
 /* The kernel names an exec'd process (comm) after the exec path's basename, so
-   the memfd launch's execveat(63, "", AT_EMPTY_PATH) shows up as "63". Write
-   DST = TMPDIR/unisacc-run-UID/BASE (BASE = ARGV0's basename), a fixed symlink
-   to /proc/self/fd/63; exec through it and comm is BASE. 0, or nonzero when
-   any step fails (the caller keeps the AT_EMPTY_PATH exec). */
+   the memfd launch's execveat(63, "", AT_EMPTY_PATH) shows up as "63". Open
+   TMPDIR/unisacc-run-UID as a directory fd D (no symlink followed, owner must
+   be this euid, mode 0700), make D/BASE (BASE = ARGV0's basename) a fixed
+   symlink to /proc/self/fd/63, and write DST = /proc/self/fd/D/BASE: an exec
+   of DST is pinned to the checked directory and comm is BASE. Returns D
+   (close-on-exec, never 63; the caller closes it if the exec fails), or -1
+   when any step fails (the caller keeps the AT_EMPTY_PATH exec). */
 int rl_run_link(const char *argv0, char *dst, int cap) {
     char dir[4096], got[32];
     const char *b, *s;
     sy_stat_t st;
     long r;
-    int mk;
+    int mk, d;
     b = argv0 ? argv0 : "";
     for (s = b; *s; s++) if (*s == '/') b = s + 1;
     if (!b[0] || !strcmp(b, ".") || !strcmp(b, "..")) b = "unisacc-run";
-    if (cx_fmt(dir, sizeof dir, "%s/unisacc-run-%d", sy_tmpdir(), sy_uid())) return 1;
+    if (cx_fmt(dir, sizeof dir, "%s/unisacc-run-%d", sy_tmpdir(), sy_uid())) return -1;
     mk = sy_mkdir(dir, 0700);
-    if (mk && (mk != -EEXIST || sy_lstat(dir, &st) || st.kind != 'd' || (st.mode & 0777) != 0700)) return 1;
-    if (cx_fmt(dst, cap, "%s/%s", dir, b)) return 1;
-    mk = sy_symlink("/proc/self/fd/63", dst);
-    if (mk && mk != -EEXIST) return 1;
-    r = sy_readlink(dst, got, sizeof got - 1);
-    if (r != 16) return 1;
-    got[r] = 0;
-    return strcmp(got, "/proc/self/fd/63") != 0;
+    if (mk && mk != -EEXIST) return -1;
+    d = sy_openat(sy_at_fdcwd(), dir, rl_dirflags_os(), 0);
+    if (d < 0) return -1;
+    mk = d == 63 || sy_fstat(d, &st) || st.kind != 'd' || st.uid != sy_euid() || (st.mode & 0777) != 0700
+        || cx_fmt(dst, cap, "/proc/self/fd/%d/%s", d, b);
+    if (!mk) { mk = sy_symlink("/proc/self/fd/63", dst); mk = mk && mk != -EEXIST; }
+    r = mk ? 0 : sy_readlink(dst, got, sizeof got - 1);
+    got[r == 16 ? 16 : 0] = 0;
+    if (mk || strcmp(got, "/proc/self/fd/63")) { sy_close(d); return -1; }
+    return d;
 }
