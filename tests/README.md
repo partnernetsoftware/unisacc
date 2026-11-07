@@ -1,3 +1,22 @@
+## 枚举常量的翻译单元隔离
+
+`repro-enum-unit-a.c` 与 `repro-enum-unit-b.c` 在各自翻译单元合法定义同名、不同值枚举；同时编译应成功。再追加 `repro-enum-unit-duplicate.c` 形成三个翻译单元时，第三单元内的第二次定义必须报 `enumerator redeclared`。将第二单元改为 `repro-enum-unit-stale.c` 时必须拒绝未声明标识符，不能读取前一单元的枚举值。`repro-enum-unit-interface.cx` 则必须拒绝同一单元内接口导入与正文的同名枚举，即使值相等。
+
+所有命令绑定同一显式候选，从仓库根运行，每条单独使用 55 秒外部限时；输出选择尚不存在的仓库相对路径。以候选入口 `sh ./unisacc.com` 为例：
+
+```sh
+sh ./unisacc.com -O0 -b lnx/x86_64 tests/repro-enum-unit-a.c tests/repro-enum-unit-b.c -o out/enum-two-tu
+sh ./unisacc.com -O0 -b lnx/x86_64 tests/repro-enum-unit-a.c tests/repro-enum-unit-b.c tests/repro-enum-unit-duplicate.c -o out/enum-three-tu
+sh ./unisacc.com -O0 -b lnx/x86_64 tests/repro-enum-unit-a.c tests/repro-enum-unit-stale.c -o out/enum-stale
+sh ./unisacc.com -c -O0 -b lnx/x86_64 tests/repro-enum-unit-interface.cx -o out/enum-interface.o
+sh ./unisacc.com tests/repro-enum-unit-ten-import.cx
+sh ./unisacc.com tools/target-gen.cx -- --check
+```
+
+依次期望退出码为 `0、1、1、1、0、0`；最后一项仍检查原 `sysnums.cx` 与全部目标投影生成字节，不能通过改静态常量类型或搬迁枚举绕过跨单元隔离。上述边界不加入既有 43/59 例分母。
+
+补充枚举维度与动态维度合同：`sh ./unisacc.com tests/repro-enum-unit-bound.c` 和 `sh ./unisacc.com tests/repro-enum-unit-vla.c` 均应退出0。前者要求块作用域枚举维度仍是可初始化的整数常量表达式；后者要求真正动态维度继续走既有VLA分配/读写路径，不能为了修复枚举维度而取消动态判断。
+
 ## M12 缓存行为（工作区源码与显式候选）
 
 从工作区根目录运行；所有新输出和缓存目录均须使用绝对路径，且运行前必须不存在。
