@@ -21,10 +21,31 @@ sh $P/unisacc.com tools/s8c-bind.cx -- $P $P/out/s9 $P/unisacc.com $P/out/s9.map
 | ri-chain | `ri-chain-material.cx -- $P MAT` | ri-chain 7 |
 | pp-gold | `pp-gold-material.cx -- prepare $P MAT` | pp-gold 2 |
 | streams | `streams-material.cx -- $P MAT`（**不烘 ROOT**） | s8f 15 PASS |
+| nets | `net-material.cx -- $P MAT` 然后 `MAT/nets.cx -- $P` | 2026-11-08 NETS PASS models=18 |
+| hostcc | MAP `hostcc	/usr/bin/x86_64-linux-gnu-gcc-11`（s8c-bind 已 mapped=1，无仓内构造） | c-negative 实跑 C_NEGATIVE pass=21 fail=38 rc=1，**转绿 0**（既有 c.negative 红行，非缺绑定） |
+| hostar | MAP `hostar	/usr/bin/x86_64-linux-gnu-ar` | formats-archive-ar |
+| hostld | MAP `hostld	/usr/bin/x86_64-linux-gnu-ld.bfd` | formats-object-ld |
+| assembler | `asm-material.cx -- $P MAT` | 未实跑 |
+| identity-helper | `identity-material.cx -- $P MAT BOOTSTRAP` | 未实跑 |
+| libneed-native | `libneed-material.cx -- $P MAT BOOTSTRAP` | 未实跑 |
+| ri-cli | `ri-material.cx -- $P MAT tests/cases/ri-cli.cx` | 未实跑 |
+| prune-cases | NOT_CONSTRUCTIBLE tapeprune.c | — |
+| model-identity | NOT_CONSTRUCTIBLE canonical P3 | — |
+| e2-input-binding | NOT_CONSTRUCTIBLE fixture-footer | — |
+
+64 自造分组：`plans/s9-self64-groups.tsv`。47 冻结参考：`plans/s9-ref47.tsv`。
 
 p3 挂起（需 ctx tool-pack）。ref / `*-sha:sha256` 不造伪。
 
-init 后必须 `s8c-bind` 对 MAP 每名 `all-waves material`，否则 `materials_registered=no`。
+init 后必须 `s8c-bind` 对 MAP 每名 `all-waves material`，否则 `materials_registered=no`。SESSION 必须在 `$P/out/` 下。
+
+## 2026-11-08 0.0.46 APE 实跑（s8c 快照+s8f streams，<1G）
+
+- prune-cases：`REFUSE classic sources errno=2`（`/tmp/grk-s8c/src/tapeprune.c` 缺）。转绿 0。
+- model-identity：`REFUSE not canonical P3`。转绿 0。
+- e2-input-binding：`FAIL candidate-selected-e2-model`… `fixture-footer errno=11`。转绿 0。
+- s9 init 空 MAP：`/tmp/grk-s8c/out/s9-dry` BIND_DONE mapped=0，不依赖已删目录。
+- make ref 私有克隆 137M：`sourceflat: cannot read unisacc.c` elapsed=3.333。自指钉设计 `plans/s9-self-pin.md`。tapeprune/adopted-package 仍 KNOWN-GAP。
 
 ## 对照模板
 

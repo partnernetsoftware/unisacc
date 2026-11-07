@@ -16,7 +16,17 @@ kernel-route 单 ISA 会得到 inputs=22/11/11/1，被 :88 拒绝。objects 必�
 
 ## 进度 2026-11-07
 
-转绿 **45**（与 30 无重叠）：objects5+kr7+ri-flow9+ri-chain7+pp-gold2 + s8f streams **15** = peep-0..7, opinfo-0/1, properties-bound/tu, e4-semantics, prune-io, prune-semantics。p3 挂起。prune-cases=材料 classic sources errno=2；model-identity=材料 not canonical P3；det/meta=PROPERTY not_run=1（既有 STREAM-DET-NOTRUN / STREAM-WIN-TAPE-RT）。
+转绿 **45**。p3 挂起。
+
+## NOT_CONSTRUCTIBLE（2026-11-08，不再磨）
+
+| 批 | 原因 | 缺什么 |
+|---|---|---|
+| stream-prune-cases | classic sources errno=2 | 冻结参考源 `src/tapeprune.c`（git archive 快照可缺） |
+| stream-model-identity | not canonical P3 | 完整 P3 ctx（footer 不是包） |
+| e2-input-binding | fixture-footer errno=11；candidate-selected-e2-model FAIL | 完整 P3/选中 e2 模型+合法 fixture footer |
+
+均属依赖冻结参考/完整 ctx，当前仓不可自造。施工图 `plans/m7-notavail-final.tsv`。
 
 ## streams / PEEP / OPINFO（2026-11-07 定性）
 
