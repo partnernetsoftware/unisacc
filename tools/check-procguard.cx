@@ -10,6 +10,10 @@
    dry-run must name A (pgA.cx:6) and signal nothing; under load /proc top can
    be another .cx group so the same needle is retried ≤5, never relaxed.
    enforce kills the 6 A (SIGKILL) and leaves B/plain/self. residue then 2 then 0.
+   Pure observation fixtures cover strict age/CPU and signal eligibility edges.
+   Real deleted-cwd probes use default dry then explicit enforce; young sleep,
+   busy and existing directory suffix lookalikes survive. --probe runs only
+   those real probes. Every enforce is restricted to this check's children.
    Prints PASS/FAIL then CX_PROCGUARD<TAB>failed=N. L3: no #include, no libc. */
 
 static int n_ok, n_bad;
@@ -52,9 +56,87 @@ static int run_pg(const char *verb, int max, const char *log, char *out, int cap
     char *av[4];
     int cut = 0;
     av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
-    if (cx_fmt(cmd, sizeof cmd, "PG_LOG='%s' sh %s tools/procguard.cx --once --%s --max %d",
-               log, sy_env_or("UNISACC", "./unisacc.com"), verb, max)) return -EINVAL;
+    if (cx_fmt(cmd, sizeof cmd, "PG_LOG='%s' sh %s tools/procguard.cx --once --%s --max %d --only-parent %d",
+               log, sy_env_or("UNISACC", "./unisacc.com"), verb, max, sy_pid())) return -EINVAL;
     return sy_run(av, out, cap, &cut);
+}
+
+/* Exercise observable decisions; every signalled pid is our direct child. */
+static void runaway_probe(const char *dir, const char *log) {
+    char cmd[4096], out[8192], cwd[1200], link[1200], busy[1200], sleeper[1200], named[1200], namedlink[1200], spaced[1200], spacedlink[1200];
+    int p[5], i, rc, cut = 0, clean = 1;
+    const char *sb = sleep_bin();
+    char *av[] = {"sh", "-c", cmd, 0};
+    cx_fmt(cwd, sizeof cwd, "%s/deleted", dir);
+    cx_fmt(link, sizeof link, "%s/deleted.cx", dir);
+    cx_fmt(busy, sizeof busy, "%s/busy.cx", dir);
+    cx_fmt(sleeper, sizeof sleeper, "%s/sleeper.cx", dir); sy_symlink(sb, sleeper);
+    sy_mkdir(cwd, 0700); sy_symlink(sb, link); sy_symlink("/bin/sh", busy);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", cwd, link);
+    p[0] = sy_spawn(av);
+    { char *a[] = {sleeper, "55", 0}; p[1] = sy_spawn(a); }
+    cx_fmt(cmd, sizeof cmd, "exec '%s' -c 'while :; do :; done'", busy);
+    p[2] = sy_spawn(av);
+    cx_fmt(named, sizeof named, "%s/foo(deleted)", dir); sy_mkdir(named, 0700);
+    cx_fmt(namedlink, sizeof namedlink, "%s/named.cx", dir); sy_symlink(sb, namedlink);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", named, namedlink); p[3] = sy_spawn(av);
+    cx_fmt(spaced, sizeof spaced, "%s/foo (deleted)", dir); sy_mkdir(spaced, 0700);
+    cx_fmt(spacedlink, sizeof spacedlink, "%s/spaced.cx", dir); sy_symlink(sb, spacedlink);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", spaced, spacedlink); p[4] = sy_spawn(av);
+    sy_sleep_ms(300); sy_rmdir(cwd);
+    cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx --once --max 100000 --only-parent %d --log '%s'", sy_env_or("UNISACC", "./unisacc.com"), sy_pid(), log);
+    rc = sy_run(av, out, sizeof out, &cut);
+    printf("PROBE_DEFAULT %s", out);
+    ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "deleted-cwd=1", 13), "deleted cwd is an actual default-dry candidate");
+    ok(alive(p[0]) && alive(p[1]) && alive(p[2]), "default dry preserves deleted target and sleep/busy controls");
+    ok(!tx_contains(out, tx_len(out, sizeof out), "busy.cx", 7), "young real busy process is not a runaway");
+    ok(!tx_contains(out, tx_len(out, sizeof out), "sleeper.cx", 10), "young real cx sleep process is not a runaway");
+    ok(alive(p[3]) && !tx_contains(out, tx_len(out, sizeof out), "named.cx", 8), "existing foo(deleted) directory is not a deleted cwd candidate");
+    ok(alive(p[4]) && !tx_contains(out, tx_len(out, sizeof out), "spaced.cx", 9), "existing foo (deleted) directory is not a deleted cwd candidate");
+    rc = run_pg("enforce", 100000, log, out, sizeof out);
+    printf("PROBE_ENFORCE %s", out);
+    { int ex = 0, code = 0, sig = 0, w = 0, tries;
+      for (tries = 0; tries < 20 && w == 0; tries++) { w = sy_wait_status(p[0], 1, &ex, &code, &sig); if (!w) sy_sleep_ms(50); }
+      ok(rc == 0 && w == p[0] && ex == 0 && sig == 9, "explicit enforce kills the deleted cwd target by SIGKILL"); }
+    ok(alive(p[1]) && alive(p[2]), "explicit enforce preserves real sleep and busy negative controls");
+    ok(alive(p[3]), "enforce preserves existing foo(deleted) directory negative control");
+    ok(alive(p[4]), "enforce preserves existing foo (deleted) directory negative control");
+    for (i = 0; i < 5; i++) if (p[i] > 0) { sy_signal(p[i], 9); sy_wait_status(p[i], 0, 0, 0, 0); if (alive(p[i])) clean = 0; }
+    ok(clean, "real probe children are reaped without residue");
+}
+
+static void fixtures(const char *args, const char *prefix, const char *expected, const char **names, int count) {
+    char cmd[4096], out[4096]; int cut = 0, rc, i, pos = 0, n;
+    char *av[] = {"sh", "-c", cmd, 0};
+    cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx %s", sy_env_or("UNISACC", "./unisacc.com"), args);
+    rc = sy_run(av, out, sizeof out, &cut); n = tx_len(out, sizeof out);
+    for (i = 0; i < count; i++) {
+        int end = pos; char want[64];
+        while (end < n && out[end] != '\n') end++;
+        if (tx_eqz(prefix, "stopped")) cx_fmt(want, sizeof want, "kill=%c cont=%c", expected[i * 2], expected[i * 2 + 1]);
+        else cx_fmt(want, sizeof want, "%s%c", prefix, expected[i]);
+        ok(rc == 0 && !cut && tx_contains(out + pos, end - pos, want, tx_len(want, sizeof want)), names[i]);
+        pos = end < n ? end + 1 : end;
+    }
+    ok(pos == n, "observation fixture emits exactly the requested rows");
+}
+
+static void boundaries(void) {
+    const char *reasons[] = {
+        "CPU age exactly ten minutes is excluded", "CPU below ninety percent is excluded",
+        "CPU exactly ninety percent above ten minutes qualifies", "CPU above ninety percent qualifies",
+        "orphan exactly thirty minutes is excluded", "orphan above thirty minutes qualifies",
+        "non-init parent excludes orphan reason", "tmux tree excludes orphan reason",
+        "deleted cwd qualifies independently of age", "overlapping reasons retain all OR branches" };
+    const char *identities[] = { "unchanged eligible identity is safe", "changed PID identity cannot be signalled",
+        "different uid cannot be signalled", "protected process cannot be signalled", "non cx process cannot be signalled" };
+    const char *stops[] = { "CPU reason drift after owned STOP does not strand target",
+        "changed identity after STOP rejects KILL and CONT", "unowned STOP cannot be killed or resumed",
+        "originally stopped protected process is not resumed", "failed KILL restores only our own STOP despite protection change",
+        "changed uid after STOP rejects KILL and CONT", "failed KILL does not resume an already running target" };
+    fixtures("--classify 60000 60000 100 0 2 0 60010 54008 100 0 2 0 60010 54009 100 0 2 0 60010 54010 100 0 2 0 180000 0 100 0 1 0 180001 0 100 0 1 0 180001 0 100 0 2 0 180001 0 100 0 1 1 1 0 100 1 2 0 180010 180010 100 1 1 0", "reason=", "0011040027", reasons, 10);
+    fixtures("--identity 100 100 1 0 1 100 101 1 0 1 100 100 0 0 1 100 100 1 1 1 100 100 1 0 0", "safe=", "10000", identities, 5);
+    fixtures("--stopped 10 10 1 0 1 1 0 1 0 10 11 1 0 1 1 1 1 0 10 10 1 0 1 0 1 1 0 10 10 1 1 1 2 1 1 0 10 10 1 1 1 1 1 1 0 10 10 0 0 1 1 1 1 0 10 10 1 1 1 1 1 0 0", "stopped", "10000000010000", stops, 7);
 }
 
 int main(int argc, char **argv) {
@@ -62,12 +144,14 @@ int main(int argc, char **argv) {
     int pids[24], np = 0, i, rc;
     char out[8192];
     const char *sb = sleep_bin();
-    int mypid = sy_pid();
-    (void)argc; (void)argv;
+    (void)argv;
     if (!sb) { printf("FAIL sleep binary\nCX_PROCGUARD\tfailed=1\n"); return 1; }
-    if (cx_fmt(dir, sizeof dir, "%s/procguard-check-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(dir)) return 2;
+    if (cx_fmt(dir, sizeof dir, "/tmp/cdx-procguard-check-XXXXXX") || !mkdtemp(dir)) return 2;
     if (cx_fmt(pa, sizeof pa, "%s/pgA.cx", dir) || cx_fmt(pb, sizeof pb, "%s/pgB.cx", dir) || cx_fmt(log, sizeof log, "%s/log", dir))
         return 2;
+    if (argc > 1 && tx_eqz(argv[1], "--probe")) { runaway_probe(dir, log); cx_rmtree(dir); printf("CX_PROCGUARD\tfailed=%d\n", n_bad); return n_bad ? 1 : 0; }
+    boundaries();
+    runaway_probe(dir, log);
     sy_unlink(pa); sy_unlink(pb);
     if (sy_symlink(sb, pa) < 0 || sy_symlink(sb, pb) < 0) { printf("FAIL cannot link the fixtures\nCX_PROCGUARD\tfailed=1\n"); return 1; }
 
@@ -150,6 +234,7 @@ int main(int argc, char **argv) {
     }
 
     for (i = 6; i < np; i++) { sy_signal(pids[i], 9); sy_wait_status(pids[i], 0, 0, 0, 0); }
+    { int clean = 1; for (i = 0; i < np; i++) if (alive(pids[i])) clean = 0; ok(clean, "all fork-contract children are gone after cleanup"); }
     cx_rmtree(dir);
     printf("CX_PROCGUARD\tfailed=%d\n", n_bad);
     return n_bad ? 1 : 0;

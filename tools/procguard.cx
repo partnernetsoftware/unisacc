@@ -7,7 +7,7 @@
 /* tools/procguard.cx -- fork-bomb guard for the unisacc test surface.
 
    sh ./unisacc.com tools/procguard.cx [--once] [--dry-run|--enforce]
-        [--max N] [--tick-ms N] [--log PATH]
+        [--max N] [--tick-ms N] [--log PATH] [--only-parent PID]
 
    Every tick it lists /proc itself (sy_dir_names; no external ps), keeps only
    processes of this real uid whose command line names a .cx file, groups them
@@ -17,6 +17,16 @@
    their in-scope descendants (by ppid) are signalled.  Each scan line after
    an ENFORCE carries residue=KEY:N -- how many of that group the fresh scan
    still sees -- so "collected" is read off the log, not off the kill count.
+   Independently, an unprotected same-uid .cx pid is a candidate for CPU >=90%
+   averaged over its lifetime strictly >600 seconds, a cwd link ending in
+   (deleted), or ppid=1 with age strictly >1800 seconds outside a tmux subtree.
+   CPU/age use one validated getconf CLK_TCK observation at startup; unavailable
+   clocks disable those two reasons, never the independent deleted-cwd reason.
+   Each signal rechecks starttime identity, uid, command and live protections.
+   --only-parent PID narrows both observation and signals to direct children.
+   --classify AGE_TICKS CPU_TICKS HZ DELETED PPID TMUX and
+   --identity SNAP_START NOW_START UID_MATCH PROTECTED HAS_CX are pure fixture
+   observations: both exit before scanning or signalling any process.
 
    Two nets, different duties: the NOFLOW backstop stops a check from breeding
    at all (self-restart writing list: plans/v0.0.44.md "自重启类检查写法清单",
@@ -28,8 +38,8 @@
    chrome, chromium, grok-bot, sshd, python, codex (or systemd/dbus), and any
    child of a tmux server (a pane's shell).
 
-   Defaults: MAX 100 (env PG_MAX), tick 10000 ms (env PG_TICK_MS), enforce on
-   (--dry-run reports the same decision and signals nothing), log appended to
+   Defaults: MAX 100 (env PG_MAX), tick 10000 ms (env PG_TICK_MS), dry-run
+   (only explicit --enforce enables signals), log appended to
    $HOME/.cache/procguard/log (env PG_LOG).  --once scans once and exits; it
    skips the single-instance lock so a test or a drill can run beside the
    resident service.  The resident loop holds an exclusive flock on
@@ -47,13 +57,17 @@
 #define O_APPEND_ 02000
 #define SIGSTOP_ 19
 #define SIGKILL_ 9
+#define SIGCONT_ 18
 #define LOCK_EX_NB (2 | 4)
 
 typedef struct {
     int pid, ppid, uid, keyidx;
     char state;
+    long start, cpu, age;
+    int reason, tmux;
     char prot;      /* never signal this pid */
     char marked;    /* frozen as a descendant of a runaway key */
+    char owned_stopped; /* 1: our STOP; 2: target was already stopped */
 } Rec;
 
 static Rec recs[MAXREC];
@@ -61,11 +75,10 @@ static int nrec;
 static char keys[MAXKEYS][KEYLEN];
 static int kcount[MAXKEYS];
 static int nkeys, nover, killed_total;
-static int tmux_pid[64], ntmux;
 
 static int max_procs = 100;
 static long tick_ms = 10000;
-static int enforce = 1, once = 0;
+static int enforce = 0, once = 0;
 static char logpath[PATHLEN];
 static int logfd = -1;
 static int my_uid;
@@ -73,6 +86,20 @@ static int self_pid;
 static int top_key = -1, top_n = 0;   /* largest group of the last scan */
 static int anc[64];
 static int nanc;
+static long clock_ticks, uptime_ticks;
+static int only_parent;
+
+static int identity_safe(long before, long after, int uidmatch, int protected, int has_cx) {
+    return before >= 0 && before == after && uidmatch == 1 && !protected && has_cx == 1;
+}
+
+/* After a successful STOP, reason drift is irrelevant; identity still is not.
+   Bit 1 permits KILL; bit 2 permits undoing only a newly owned failed STOP. */
+static int stopped_policy(int owned, int same, int protected, int has_cx, int failed, int stopped) {
+    int action = owned > 0 && owned <= 2 && same && !protected && has_cx ? 1 : 0;
+    if (owned == 1 && same && failed && stopped) action |= 2;
+    return action;
+}
 
 static int parse_num(const char *s, long n, long *out) {
     long v = 0, i;
@@ -98,23 +125,79 @@ static int read_file(const char *path, char *buf, int cap) {
     return n;
 }
 
-/* /proc/PID/stat into PPID and STATE; 0 or -errno */
-static int proc_stat(int pid, int *ppid, char *state) {
+/* Parse fixed /proc stat fields; failures never manufacture an observation. */
+static int stat_values(int pid, int *ppid, char *state, long *start, long *cpu) {
     char path[64], buf[PATHLEN];
-    long n, i;
-    long close = -1;
+    long n, i, close = -1, user = -1, sys = -1, born = -1;
+    int field;
     if (cx_fmt(path, sizeof path, "/proc/%d/stat", pid)) return -EINVAL;
     n = read_file(path, buf, sizeof buf);
-    if (n <= 0) return n < 0 ? (int)n : -ENOENT;
+    if (n <= 0 || n == sizeof buf - 1) return -EIO;
     for (i = n - 1; i > 0; i--) if (buf[i] == ')') { close = i; break; }
-    if (close < 0 || close + 3 >= n) return -EIO;
+    if (close < 0 || close + 4 >= n) return -EIO;
     if (state) *state = buf[close + 2];
-    {   long a = close + 4, e = a, v = 0, k;
-        while (e < n && buf[e] != ' ') e++;
-        for (k = a; k < e; k++) v = v * 10 + (buf[k] - '0');
-        if (ppid) *ppid = (int)v;
+    i = close + 4;
+    for (field = 4; field <= 22; field++) {
+        long v = 0, digits = 0;
+        int neg = 0;
+        if (buf[i] == '-') { neg = 1; i++; }
+        while (i < n && buf[i] >= '0' && buf[i] <= '9') {
+            if (v > (9223372036854775807L - (buf[i] - '0')) / 10) return -EIO;
+            v = v * 10 + buf[i++] - '0'; digits++;
+        }
+        if (!digits || i >= n || buf[i] != ' ') return -EIO;
+        if (field == 4 && ppid) *ppid = neg ? -1 : (int)v;
+        if (field == 14) user = neg ? -1 : v;
+        if (field == 15) sys = neg ? -1 : v;
+        if (field == 22) born = neg ? -1 : v;
+        while (i < n && buf[i] == ' ') i++;
     }
+    if (user < 0 || sys < 0 || born < 0 || user > 9223372036854775807L - sys) return -EIO;
+    if (start) *start = born;
+    if (cpu) *cpu = user + sys;
     return 0;
+}
+
+static int proc_stat(int pid, int *ppid, char *state) {
+    return stat_values(pid, ppid, state, 0, 0);
+}
+
+/* Pure classifier: seconds represented as ticks, preserving strict boundaries. */
+static int classify(long age, long cpu, long hz, int deleted, int ppid, int tmux) {
+    int reason = deleted ? 2 : 0;
+    if (hz > 0 && hz <= 1000000 && age >= 0 && cpu >= 0) {
+        if (age > 600 * hz && cpu >= age - age / 10) reason |= 1;
+        if (age > 1800 * hz && ppid == 1 && !tmux) reason |= 4;
+    }
+    return reason;
+}
+
+static void load_clock(void) {
+    char buf[64]; long n, v = 0;
+    char *av[] = {"/usr/bin/getconf", "CLK_TCK", 0}; int cut = 0;
+    clock_ticks = 0;
+    if (sy_run(av, buf, sizeof buf, &cut) != 0 || cut) return;
+    n = tx_len(buf, sizeof buf);
+    if (n > 0 && buf[n - 1] == '\n') n--;
+    if (parse_num(buf, n, &v) == 0 && v > 0 && v <= 1000000) clock_ticks = v;
+}
+
+static void load_uptime(void) {
+    char buf[128]; long i = 0, seconds = 0, fraction = 0, scale = 1;
+    uptime_ticks = -1;
+    if (!clock_ticks || read_file("/proc/uptime", buf, sizeof buf) <= 0) return;
+    while (buf[i] >= '0' && buf[i] <= '9') {
+        if (seconds > 9223372036854L) return;
+        seconds = seconds * 10 + buf[i++] - '0';
+    }
+    if (!i || buf[i++] != '.') return;
+    while (buf[i] >= '0' && buf[i] <= '9') {
+        if (scale < 1000000) { fraction = fraction * 10 + buf[i] - '0'; scale *= 10; }
+        i++;
+    }
+    if (buf[i] != ' ') return;
+    if (seconds > (9223372036854775807L - clock_ticks) / clock_ticks) return;
+    uptime_ticks = seconds * clock_ticks + fraction * clock_ticks / scale;
 }
 
 static int is_prot_name(const char *base) {
@@ -176,10 +259,103 @@ static void load_ancestors(void) {
     anc[nanc++] = 1;
 }
 
+/* Walk every ancestor, not merely .cx records: tmux servers seldom name .cx.
+   Unknown ancestry is protected; a truncated walk cannot prove non-tmux. */
+static int live_protection(int pid, int *in_tmux) {
+    int at = pid, depth, prot = 0;
+    *in_tmux = 0;
+    for (depth = 0; depth < 128 && at > 1; depth++) {
+        char path[64], exe[PATHLEN], cmd[PATHLEN];
+        int pp = 0, k; long el, cl;
+        if (proc_stat(at, &pp, 0) < 0 || pp < 1 || pp == at) return 1;
+        if (cx_fmt(path, sizeof path, "/proc/%d/exe", at)) return 1;
+        el = sy_readlink(path, exe, sizeof exe - 1);
+        if (el <= 0 || el >= sizeof exe - 1) return 1;
+        exe[el] = 0;
+        if (cx_fmt(path, sizeof path, "/proc/%d/cmdline", at)) return 1;
+        cl = read_file(path, cmd, sizeof cmd);
+        if (cl <= 0 || cl >= sizeof cmd - 1) return 1;
+        if (tx_prefixz(base_of(exe), "tmux", 4) || tx_prefixz(base_of(cmd), "tmux", 4)) {
+            *in_tmux = 1;
+            if (depth <= 1) prot = 1;
+        }
+        if (!depth) {
+            if (is_prot_name(base_of(exe)) || is_prot_name(base_of(cmd))) prot = 1;
+            for (k = 0; k < nanc; k++) if (anc[k] == pid) prot = 1;
+        }
+        at = pp;
+    }
+    if (at != 1) return 1;
+    return prot;
+}
+
+static int deleted_cwd(int pid) {
+    char path[64], cwd[PATHLEN]; long n;
+    sy_stat_t target, named, again; int rc;
+    if (cx_fmt(path, sizeof path, "/proc/%d/cwd", pid)) return 0;
+    n = sy_readlink(path, cwd, sizeof cwd - 1);
+    if (n <= 0 || n >= sizeof cwd - 1) return 0;
+    cwd[n] = 0;
+    if (n < 10 || !tx_eqz(cwd + n - 10, " (deleted)")) return 0;
+    if (sy_stat(path, &target) < 0 || target.kind != 'd') return 0;
+    rc = sy_stat(cwd, &named);
+    if (rc == 0) {
+        if (named.dev == target.dev && named.ino == target.ino) return 0;
+        return 0; /* a different live directory is still ambiguous */
+    }
+    if (rc != -ENOENT) return 0;
+    if (sy_stat(path, &again) < 0 || again.dev != target.dev || again.ino != target.ino) return 0;
+    return 1;
+}
+
+static int checked_signal(Rec *r, int sig) {
+    char path[64], cmd[PATHLEN], key[KEYLEN]; sy_stat_t st;
+    long start, cpu; int pp, tmux; char state;
+    if (r->prot || stat_values(r->pid, &pp, &state, &start, &cpu) < 0 || start != r->start || state == 'Z' || state == 'X') return -1;
+    if (cx_fmt(path, sizeof path, "/proc/%d", r->pid) || sy_stat(path, &st) < 0 || (int)st.uid != my_uid) return -1;
+    if (!identity_safe(r->start, start, (int)st.uid == my_uid, live_protection(r->pid, &tmux), 1)) return -1;
+    if (cx_fmt(path, sizeof path, "/proc/%d/cmdline", r->pid)) return -1;
+    { int n = read_file(path, cmd, sizeof cmd);
+      if (n <= 0 || n >= sizeof cmd - 1 || !key_from_cmd(cmd, n, key, sizeof key) || !tx_eqz(key, keys[r->keyidx])) return -1; }
+    if (stat_values(r->pid, &pp, &state, &start, &cpu) < 0 || start != r->start) return -1;
+    if (only_parent && pp != only_parent) return -1;
+    if (sig == SIGKILL_ && !(stopped_policy(r->owned_stopped, identity_safe(r->start, start, (int)st.uid == my_uid, 0, 1), 0, 1, 0, 1) & 1)) return -1;
+    if (sig == SIGSTOP_ && !r->marked && kcount[r->keyidx] <= max_procs) {
+        load_uptime();
+        if (!classify(uptime_ticks >= start ? uptime_ticks - start : -1, cpu, clock_ticks, deleted_cwd(r->pid), pp, tmux)) return -1;
+    }
+    { int rc = sy_signal(r->pid, sig);
+      if (rc >= 0 && sig == SIGSTOP_) r->owned_stopped = state == 'T' || state == 't' ? 2 : 1;
+      return rc; }
+}
+
+static int safe_signal(Rec *r, int sig) {
+    int rc;
+    if (sig == SIGKILL_ && !r->owned_stopped) return -1;
+    rc = checked_signal(r, sig);
+    if (sig == SIGKILL_) {
+        if (rc < 0 && r->owned_stopped == 1) {
+            char path[64]; sy_stat_t st; long start; char state;
+            /* Undo only our own STOP. Protection/argv can change after STOP;
+               resuming the same uid+starttime is cleanup, not a kill decision. */
+            if (!cx_fmt(path, sizeof path, "/proc/%d", r->pid) &&
+                sy_stat(path, &st) >= 0 && (int)st.uid == my_uid &&
+                stat_values(r->pid, 0, &state, &start, 0) == 0 &&
+                (stopped_policy(r->owned_stopped, identity_safe(r->start, start, (int)st.uid == my_uid, 0, 1), 0, 1, 1, state == 'T' || state == 't') & 2)) {
+                int resumed = sy_signal(r->pid, SIGCONT_);
+                printf("procguard: skipped-kill pid=%d resume=%d\n", r->pid, resumed);
+            } else printf("procguard: skipped-kill pid=%d resume=unknown-identity\n", r->pid);
+        }
+        r->owned_stopped = 0;
+    }
+    return rc;
+}
+
 static void scan(void) {
     char names[NAMEBUF];
-    int dfd, n, i, j;
-    nrec = 0; nkeys = 0; nover = 0; ntmux = 0;
+    int dfd, n, i;
+    nrec = 0; nkeys = 0; nover = 0;
+    load_uptime();
     dfd = sy_open("/proc", O_RDONLY_, 0);
     if (dfd < 0) { printf("procguard: cannot open /proc: %d\n", dfd); return; }
     n = (int)sy_dir_names(dfd, names, sizeof names);
@@ -193,10 +369,11 @@ static void scan(void) {
             if (nl < 1 || nl > 9 || parse_num(name, nl, &v) < 0 || v <= 1) continue;
             {   int pid = (int)v, ppid = 0, keyidx, k;
                 char state = '?', key[KEYLEN], path[64], cmd[PATHLEN], exe[PATHLEN];
-                long cl;
-                int prot = 0;
+                long cl, start = 0, cpu = 0;
+                int prot = 0, tmux = 0;
                 sy_stat_t st;
-                if (proc_stat(pid, &ppid, &state) < 0) continue;
+                if (stat_values(pid, &ppid, &state, &start, &cpu) < 0) continue;
+                if (only_parent && ppid != only_parent) continue;
                 if (state == 'Z' || state == 'X') continue;
                 if (cx_fmt(path, sizeof path, "/proc/%d", pid)) continue;
                 if (sy_stat(path, &st) < 0 || (int)st.uid != my_uid) continue;
@@ -216,7 +393,7 @@ static void scan(void) {
                 for (k = 0; k < nanc; k++) if (anc[k] == pid) prot = 1;
                 if (is_prot_name(base_of(exe))) prot = 1;
                 if (is_prot_name(base_of(cmd))) prot = 1;
-                if (base_of(exe)[0] && tx_prefixz(base_of(exe), "tmux", 4) && ntmux < 64) tmux_pid[ntmux++] = pid;
+                prot |= live_protection(pid, &tmux);
                 recs[nrec].pid = pid;
                 recs[nrec].ppid = ppid;
                 recs[nrec].uid = (int)st.uid;
@@ -224,14 +401,16 @@ static void scan(void) {
                 recs[nrec].keyidx = keyidx;
                 recs[nrec].prot = (char)prot;
                 recs[nrec].marked = 0;
+                recs[nrec].owned_stopped = 0;
+                recs[nrec].start = start;
+                recs[nrec].cpu = cpu;
+                recs[nrec].age = uptime_ticks >= start ? uptime_ticks - start : -1;
+                recs[nrec].tmux = tmux;
+                recs[nrec].reason = classify(recs[nrec].age, cpu, clock_ticks, deleted_cwd(pid), ppid, tmux);
                 nrec++;
                 kcount[keyidx]++;
             }
         }
-    }
-    /* a pane's shell is a direct child of a tmux server: never signal it */
-    for (i = 0; i < nrec; i++) {
-        for (j = 0; j < ntmux; j++) if (recs[i].ppid == tmux_pid[j]) { recs[i].prot = 1; break; }
     }
     top_key = -1; top_n = 0;
     for (i = 0; i < nkeys; i++) {
@@ -358,8 +537,10 @@ static void act(void) {
             if (!added) break;
         }
         /* freeze every member first, then kill: no member can fork in between */
-        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) sy_signal(recs[i].pid, SIGSTOP_);
-        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) { if (sy_signal(recs[i].pid, SIGKILL_) >= 0) hits++; }
+        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) {
+            if (safe_signal(&recs[i], SIGSTOP_) < 0) recs[i].marked = 0;
+        }
+        for (i = 0; i < nrec; i++) if (recs[i].marked && !recs[i].prot) { if (safe_signal(&recs[i], SIGKILL_) >= 0) hits++; }
         for (i = 0; i < nrec; i++) recs[i].marked = 0;
         killed_total += hits;
         printf("procguard: ENFORCE key=%s count=%d killed=%d root=%d\n", keys[k], kcount[k], hits, first);
@@ -367,10 +548,23 @@ static void act(void) {
         pend_add(keys[k]);
         pend_save();
     }
+    for (i = 0; i < nrec; i++) {
+        Rec *r = &recs[i]; char line[1024]; int hits = 0;
+        if (!r->reason || r->prot || kcount[r->keyidx] > max_procs) continue;
+        if (enforce && safe_signal(r, SIGSTOP_) >= 0 && safe_signal(r, SIGKILL_) >= 0) { hits = 1; killed_total++; }
+        if (!cx_fmt(line, sizeof line, "ts=%ld %s key=%s pid=%d reason=%d cpu=%d deleted-cwd=%d orphan=%d age_ticks=%ld cpu_ticks=%ld hz=%ld killed=%d\n",
+                    sy_now_ms(), enforce ? "ENFORCE" : "DRY", keys[r->keyidx], r->pid, r->reason,
+                    !!(r->reason & 1), !!(r->reason & 2), !!(r->reason & 4), r->age, r->cpu, clock_ticks, hits)) {
+            printf("%s", line); logline(line);
+        }
+        if (hits) { pend_add(keys[r->keyidx]); pend_save(); }
+    }
 }
 
 static void usage(void) {
-    printf("sh ./unisacc.com tools/procguard.cx [--once] [--dry-run|--enforce] [--max N] [--tick-ms N] [--log PATH]\n"
+    printf("sh ./unisacc.com tools/procguard.cx [--once] [--dry-run|--enforce] [--max N] [--tick-ms N] [--log PATH] [--only-parent PID]\n"
+           "pure fixtures: --classify AGE_TICKS CPU_TICKS HZ DELETED PPID TMUX [...]; --identity SNAP_START NOW_START UID_MATCH PROTECTED HAS_CX [...]\n"
+           "stop fixture: --stopped SNAP_START NOW_START UID_MATCH PROTECTED HAS_CX OWNED FAILED STOPPED CURRENT_REASON [...]\n"
            "env: PG_MAX (100), PG_TICK_MS (10000), PG_LOG ($HOME/.cache/procguard/log)\n");
 }
 
@@ -380,6 +574,30 @@ int main(int argc, char **argv) {
     char dir[PATHLEN], lockpath[PATHLEN], line[512];
     int i, lockfd = -1;
     long v;
+    /* Observation fixtures are pure and exit before any /proc scan or signal. */
+    if (argc > 1 && tx_eqz(argv[1], "--stopped")) {
+        int at; long f[9];
+        if (argc < 11 || (argc - 2) % 9) return 2;
+        for (at = 2; at < argc; at += 9) {
+            int policy;
+            for (i = 0; i < 9; i++) if (parse_num(argv[at + i], tx_len(argv[at + i], 16), &f[i]) < 0) return 2;
+            policy = stopped_policy((int)f[5], identity_safe(f[0], f[1], (int)f[2], 0, 1), (int)f[3], (int)f[4], (int)f[6], (int)f[7]);
+            printf("kill=%d cont=%d\n", !!(policy & 1), !!(policy & 2));
+        }
+        return 0;
+    }
+    if (argc > 1 && (tx_eqz(argv[1], "--classify") || tx_eqz(argv[1], "--identity"))) {
+        long f[6]; int count = tx_eqz(argv[1], "--classify") ? 6 : 5, r, at;
+        if (argc < count + 2 || (argc - 2) % count) return 2;
+        for (at = 2; at < argc; at += count) {
+            for (i = 0; i < count; i++) if (parse_num(argv[at + i], tx_len(argv[at + i], 16), &f[i]) < 0) return 2;
+            if (count == 6) {
+                r = classify(f[0], f[1], f[2], (int)f[3], (int)f[4], (int)f[5]);
+                printf("reason=%d cpu=%d deleted-cwd=%d orphan=%d\n", r, !!(r & 1), !!(r & 2), !!(r & 4));
+            } else printf("safe=%d\n", identity_safe(f[0], f[1], (int)f[2], (int)f[3], (int)f[4]));
+        }
+        return 0;
+    }
     self_pid = sy_pid();
     {   sy_stat_t st; if (sy_stat("/proc/self", &st) < 0) { printf("procguard: cannot stat /proc/self\n"); return 2; } my_uid = (int)st.uid; }
     e = sy_env_or("PG_MAX", ""); if (e[0] && parse_num(e, tx_len(e, 16), &v) == 0) max_procs = (int)v;
@@ -391,6 +609,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--once")) once = 1;
         else if (tx_eqz(argv[i], "--dry-run")) enforce = 0;
         else if (tx_eqz(argv[i], "--enforce")) enforce = 1;
+        else if (tx_eqz(argv[i], "--only-parent") && i + 1 < argc) { if (parse_num(argv[i + 1], tx_len(argv[i + 1], 16), &v) < 0 || v <= 1) return 2; only_parent = (int)v; i++; }
         else if (tx_eqz(argv[i], "--max") && i + 1 < argc) { if (parse_num(argv[i + 1], tx_len(argv[i + 1], 16), &v) < 0) { usage(); return 2; } max_procs = (int)v; i++; }
         else if (tx_eqz(argv[i], "--tick-ms") && i + 1 < argc) { if (parse_num(argv[i + 1], tx_len(argv[i + 1], 16), &v) < 0) { usage(); return 2; } tick_ms = v; i++; }
         else if (tx_eqz(argv[i], "--log") && i + 1 < argc) { if (cx_fmt(logpath, sizeof logpath, "%s", argv[i + 1])) return 2; i++; }
@@ -405,6 +624,7 @@ int main(int argc, char **argv) {
     if (cx_fmt(dir, sizeof dir, "%s/.cache/procguard", home)) return 2;
     {   int r = sy_mkdir(dir, 0755); if (r < 0 && r != -EEXIST) { printf("procguard: cannot make %s: %d\n", dir, r); return 3; } }
     load_ancestors();
+    load_clock();
     if (!once) {
         if (cx_fmt(lockpath, sizeof lockpath, "%s/.cache/procguard/lock", home)) return 2;
         lockfd = sy_open(lockpath, 02 | O_CREAT_, 0644);
@@ -426,7 +646,7 @@ int main(int argc, char **argv) {
         }
         if (res[0]) printf("procguard: scan residue%s\n", res);
         if (npend) { npend = 0; sy_unlink(pendpath); }   /* consumed by this scan line */
-        if (nover) act();
+        act();
         if (once) { printf("procguard: once procs=%d keys=%d over=%d killed=%d mode=%s\n", nrec, nkeys, nover, killed_total, enforce ? "enforce" : "dry"); break; }
         sy_sleep_ms(tick_ms);
     }
