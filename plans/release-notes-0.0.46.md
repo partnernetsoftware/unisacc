@@ -21,6 +21,7 @@ C99 编译器，自己写出可执行文件（ELF、Mach-O、PE），能编译�
 - 索引树 `work/units.tsv` 与并行分流 `tools/fan.cx`。
 
 ## 已知限制（诚实披露）
+- **默认 `-run` 起来的进程在 `ps`/`top` 里都叫 `63`（已确认缺陷，本版未修）**：运行镜像经匿名内存文件放到 fd 63 再 `execveat`，内核据此把进程名置为 `63`，`pkill NAME` 与按名监控不可用。规避：用 `ps -o args` 或 `/proc/PID/cmdline` 辨认。不影响 `-o` 落盘产物。
 - 全批会话：[待证：s5 进行中，结果出来后填 PASS/FAIL/KNOWN-GAP/SESSION-INFRA 计数；SESSION-INFRA 不算合格]。
 - 逐切片固定点：win/arm64 的 G2、G3 两代 PE 与 c46-2 随发切片 `slice-win-arm64` 字节相同（sha256 `1eee599bbcec474b31893ce8f4b85f46947145660cbd3dae74f07333866d4a56`；cdx 报，我已核该 sha 前缀与 c46-2 切片备份一致）；这是 Linux 宿主上的跨构造固定点，Windows 原生自举未声称（NOT_CLAIMED）；检查器已合入（`3f4d197bef`，主树棘轮 13/13）。
 - `unisacc stream` 在没有显式绑定时默认读 `./unisacc.com`（相对 `UNISA_CONTAINER` 继承），在其他工作目录可能找不到包或加载到旧包；用 `--models` 显式绑定。
