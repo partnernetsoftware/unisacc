@@ -34,3 +34,11 @@
 3. 最便宜三改:① A12 十二例+两例登记负例矩阵(~20 行表,不触产品输入);② `reject: not covered: X` 统一带被拒 token 与阶段名(src/ 40–60 行,触产品输入);③ e3 加「指针/整数赋值类别不符」与「同 switch 重复 case 常量」两条约束表行(表 10 行+生成器 30 行,覆盖 A12 最大两类)。
 4. TAPE-END 最小方案:tape.text 末尾固定 `.end` 终结行,e3 产出/e4·prune·lower 透传/elf 入口校验,否则 `reject: tape truncated (no .end)`;6 目标产物不变,但所有 e3/e4/prune/lower 网与 tape 材料指纹全变,须重生网并重跑 stages/stream 批次;-S 输出多一行需进 CHANGELOG。
 (cc 处置:TAPE-END 有实测崩溃产物(10670 处中 3 处),属 0.0.47 最高优先的「可信」项之一,排在 A12 八错码之后/并行(不同文件域);②③ 并入 A12 修复;① 已由 grk 登记。0.0.46 发布说明的「手工拼 stream 管道」限制保留并补上这组实测。)
+
+## ⑧ 工具/棘轮/批次体量(fable 只读评审,2026-11-07)
+1. toolsloc 只有一个 TOTAL 行,度量是全树总行数,新增工具必然「违约→手动上调」,近 15 次提交几乎全是上调,棘轮退化成签到簿。更合适:按文件行上限(≤600;>400 行的 16 个、facts-gen 4239 行单列豁免)+ 新增文件必须带 check-*.cx 与批次登记 + 重复度(相同 use 集合与函数签名 hash 的工具对计数);总量只作报表。
+2. 可合并类别:cx-* 54、stream-* 15、crypto-*/core-* 各 13;check-* 209/442=47%,多为「一个 main 调同一份读表逻辑」,可并为「一个 check 驱动+事实表」,保留原名薄入口,不删覆盖。
+3. 批次分层:判据=(source 是否属被改域)×(materials 是否 -)×预算;每次提交≈281 批(无材料、≤55s、affected 命中),每日≈175 批有材料绑定可本机构造者+negative/properties,发布=platform/product/六目标证据。batches.tsv 加一列 tier。
+4. 全批结构障碍:162 批 NOT_RUN 因 materials≠- 而无 PREPARED 证据;最小改造=`tools/materials-prepare.cx --tier daily` 产出 out/materials.tsv(身份→路径→PREPARED),把「材料缺失」从会话期移到准备期并可缓存命中。(与 M7 合并)
+5. 一条命令:register.cx 扩成四步事务(batches 行+toolsloc 按文件登记+prd 速查追加+ratchets --only),任一失败整体回滚;precommit 调它(并入 check-precommit-toolsloc)。
+(cc 处置:4 并入 M7(grk);5 并入 grk 已在做的 precommit toolsloc 钩子;1+3 作 M8「工具治理」排 cdx2 在 M4 之后:先加 tier 列与 per-file 上限度量,总量降为报表;2 先出聚类统计报告再谈合并,不删覆盖。)
