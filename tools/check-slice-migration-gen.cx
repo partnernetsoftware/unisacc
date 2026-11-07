@@ -1,0 +1,37 @@
+/* Checks tools/slice-migration-gen.cx: sh ./unisacc.com tools/check-slice-migration-gen.cx   (repo root)
+   --check exits 0 with CHECK units=81 and the document holds all five sections and the pilot m14 first;
+   no argument exits 2 (usage).  Prints PASS/FAIL lines and CHECK_SLICE_MIGRATION_GEN<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tslice-migration-gen.%s\n", ok ? "PASS" : "FAIL", name); }
+static int run(const char *arg, char *err, long cap) {
+    char *argv[] = {"sh", "./unisacc.com", "tools/slice-migration-gen.cx", "--", (char *)arg, 0};
+    int ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    if (!arg) argv[3] = 0;
+    pid = sy_spawn_pipe(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    if (pid < 0) return -1;
+    while ((r = sy_read(efd, err + n, cap - 1 - n)) > 0) n += r;
+    err[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd); sy_close(efd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *b, long n, const char *s) { return tx_find(b, n, s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    static char e[1 << 14]; size_t dn = 0; char *d;
+    int rc = run("--check", e, sizeof e);
+    ck(rc == 0 && has(e, tx_len(e, sizeof e), "slice-migration-gen\tCHECK\tunits=81\n"), "check-passes-81-units");
+    ck(run(0, e, sizeof e) == 2 && has(e, tx_len(e, sizeof e), "usage"), "usage-exit-2");
+    d = cx_read("plans/slice-nn-migration.md", &dn);
+    ck(d && has(d, (long)dn, "\n## 1. 薄层边界清单") && has(d, (long)dn, "\n## 2. 迁移清单") && has(d, (long)dn, "\n## 3. 前 10 个")
+        && has(d, (long)dn, "\n## 4. 需要新建的生成器") && has(d, (long)dn, "\n## 5. 与 M10b"), "five-sections");
+    ck(d && has(d, (long)dn, "| 1 | m14.o `cx/compiler/rtsharedname.cx` |"), "pilot-m14-first");
+    ck(d && has(d, (long)dn, "合计:81 单元"), "total-81");
+    printf("CHECK_SLICE_MIGRATION_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

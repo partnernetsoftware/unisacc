@@ -1,0 +1,228 @@
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+/* M10a: plans/unit-text.tsv + plans/slice-units.tsv -> plans/slice-nn-migration.md
+   sh ./unisacc.com tools/slice-migration-gen.cx -- --write   regenerate the document
+   sh ./unisacc.com tools/slice-migration-gen.cx -- --check   keys of both tables agree 1:1,
+        every source file exists, and the document on disk equals the regenerated text.
+   Rules (data -> columns): thin layer = kind host | source under cx/sys, cx/mem, cx/text |
+   cx/driver/{input,output}.cx | override 留切片.  Else UNBOUNDED->迁VM字节码, FINITE/TRANSFORM->迁表,
+   MIXED/SYS-IO->先拆分后迁; override wins.  Batch: 迁表 1 (<=10KB, no sys use) else 2;
+   先拆分后迁 2 (<10KB, no sys use, heap 0) else 3; VM 4.  Risk: 无界结构|递归|IO. */
+#define UNIT_TSV "plans/unit-text.tsv"
+#define FACT_TSV "plans/slice-units.tsv"
+#define OUT_MD "plans/slice-nn-migration.md"
+#define MAXU 128
+#define STR 48
+#define USES 256
+#define DOC (1 << 18)
+
+typedef struct {
+    char key[STR], kind[STR], path[STR], mig[STR], sym[STR];
+    long text, obj;
+    char src[STR], mod[STR], uses[USES], over[STR], note[STR];
+    int lines, heap, rec;
+    int thin, dest, batch, risks;      /* dest 0 留切片 1 迁表 2 迁VM字节码 3 先拆分后迁 */
+    long score;
+} U;
+static U u[MAXU];
+static int nu, nfact;
+static char doc[DOC];
+static int dn;
+static const char *DEST[4] = {"留切片", "迁表", "迁VM字节码", "先拆分后迁"};
+
+static int fail(const char *w, const char *k) { sy_eprintf("slice-migration-gen\tFAIL\t%s\t%s\n", w, k ? k : "-"); return 1; }
+static void put(const char *s) { while (*s && dn + 1 < DOC) doc[dn++] = *s++; doc[dn] = 0; }
+static void putn(long v) { char b[24]; int i = 23, neg = v < 0; b[i] = 0; if (neg) v = -v; do { b[--i] = (char)('0' + v % 10); v /= 10; } while (v); if (neg) b[--i] = '-'; put(b + i); }
+static int cpy(char *d, int cap, const char *s, int n) { int i; if (n < 0 || n >= cap) return -1; for (i = 0; i < n; i++) d[i] = s[i]; d[n] = 0; return 0; }
+static long num(const char *s, int n) { long v = 0; int i; for (i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; v = v * 10 + (s[i] - '0'); } return n ? v : -1; }
+static int split(char *line, int n, const char **f, int *len, int want) {
+    int i, k = 0, st = 0;
+    for (i = 0; i <= n; i++) if (i == n || line[i] == '\t') { if (k >= want) return -1; f[k] = line + st; len[k] = i - st; k++; st = i + 1; }
+    return k == want ? 0 : -1;
+}
+static int find(const char *key) { int i; for (i = 0; i < nu; i++) if (tx_eqz(u[i].key, key)) return i; return -1; }
+static int starts(const char *s, const char *p) { int i = 0; while (p[i]) { if (s[i] != p[i]) return 0; i++; } return 1; }
+static int has_sys_use(const U *x) { return tx_find(x->uses, tx_len(x->uses, USES), "sys.", 4) >= 0; }
+
+/* each line of a tsv; comment lines skipped; want fields */
+static int load(const char *path, int want, int (*row)(const char **, int *)) {
+    size_t n = 0, i = 0;
+    char *b = cx_read(path, &n);
+    const char *f[12]; int len[12];
+    if (!b) return fail("read", path);
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e > i && b[i] != '#') {
+            if (split(b + i, (int)(e - i), f, len, want)) return fail("fields", path);
+            if (row(f, len)) return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+static int unit_row(const char **f, int *len) {
+    U *x;
+    if (nu >= MAXU) return fail("capacity", UNIT_TSV);
+    x = &u[nu];
+    if (cpy(x->key, STR, f[0], len[0]) || cpy(x->kind, STR, f[3], len[3]) || cpy(x->path, STR, f[4], len[4])
+        || cpy(x->mig, STR, f[5], len[5]) || cpy(x->sym, STR, f[6], len[6])) return fail("unit-col", f[0]);
+    x->text = num(f[1], len[1]); x->obj = num(f[2], len[2]);
+    if (x->text < 0 || x->obj < 0) return fail("unit-num", x->key);
+    if (find(x->key) >= 0) return fail("unit-dup", x->key);
+    nu++;
+    return 0;
+}
+static int fact_row(const char **f, int *len) {
+    char key[STR]; int i; U *x;
+    if (cpy(key, STR, f[0], len[0])) return fail("fact-key", "-");
+    i = find(key);
+    if (i < 0) return fail("fact-not-in-unit-text", key);
+    x = &u[i];
+    if (x->src[0]) return fail("fact-dup", key);
+    if (cpy(x->src, STR, f[1], len[1]) || cpy(x->mod, STR, f[2], len[2]) || cpy(x->uses, USES, f[3], len[3])
+        || cpy(x->over, STR, f[7], len[7]) || cpy(x->note, STR, f[8], len[8])) return fail("fact-col", key);
+    x->lines = (int)num(f[4], len[4]); x->heap = (int)num(f[5], len[5]); x->rec = (int)num(f[6], len[6]);
+    if (x->lines < 0 || x->heap < 0 || x->rec < 0) return fail("fact-num", key);
+    if (!tx_eqz(x->over, "-")) { for (i = 0; i < 4 && !tx_eqz(x->over, DEST[i]); i++) {} if (i == 4) return fail("fact-override", key); }
+    if (sy_access(x->src, 0) != 0) return fail("source-missing", x->src);
+    nfact++;
+    return 0;
+}
+
+static void classify(U *x) {
+    int i;
+    x->thin = tx_eqz(x->kind, "host") || starts(x->src, "cx/sys/") || starts(x->src, "cx/mem/") || starts(x->src, "cx/text/")
+        || tx_eqz(x->src, "cx/driver/input.cx") || tx_eqz(x->src, "cx/driver/output.cx");
+    if (tx_eqz(x->mig, "UNBOUNDED")) x->dest = 2;
+    else if (tx_eqz(x->mig, "FINITE") || tx_eqz(x->mig, "TRANSFORM")) x->dest = 1;
+    else x->dest = 3;
+    if (x->thin) x->dest = 0;
+    for (i = 0; i < 4; i++) if (tx_eqz(x->over, DEST[i])) x->dest = i;
+    x->thin = x->dest == 0;
+    x->risks = 0;
+    if (tx_eqz(x->mig, "UNBOUNDED") || x->heap > 0) x->risks |= 1;
+    if (x->rec > 0) x->risks |= 2;
+    if (has_sys_use(x) || tx_eqz(x->mig, "SYS-IO") || tx_eqz(x->kind, "host")) x->risks |= 4;
+    x->batch = 0;
+    if (x->dest == 1) x->batch = (x->text <= 10000 && !has_sys_use(x)) ? 1 : 2;
+    else if (x->dest == 3) x->batch = (x->text < 10000 && !has_sys_use(x) && x->heap == 0) ? 2 : 3;
+    else if (x->dest == 2) x->batch = 4;
+    x->score = x->dest == 1 || x->dest == 3 ? x->text / (1 + 2 * ((x->risks & 1) + ((x->risks >> 1) & 1) + ((x->risks >> 2) & 1))) : 0;
+    if (tx_eqz(x->key, "m14.o")) x->score = 1L << 40; /* M10c 试点钉在首位 */
+}
+static void put_risk(const U *x) {
+    int any = 0;
+    if (x->risks & 1) { put("无界结构"); any = 1; }
+    if (x->risks & 2) { put(any ? "/递归" : "递归"); any = 1; }
+    if (x->risks & 4) { put(any ? "/IO" : "IO"); any = 1; }
+    if (!any) put("低");
+}
+/* module name of a use entry = last dotted segment */
+static int mod_of_use(const char *uses, int at, char *out) {
+    int i = at, st = at, n = 0;
+    while (uses[i] && uses[i] != ',') { if (uses[i] == '.') st = i + 1; i++; }
+    for (; st < i && n + 1 < STR; st++) out[n++] = uses[st];
+    out[n] = 0;
+    return uses[i] ? i + 1 : -1;
+}
+static void put_deps(const U *x) {
+    int at = 0, k = 0, i, j, cnt = 0; char m[STR]; const U *callers[3] = {0, 0, 0};
+    put("调用:");
+    if (tx_eqz(x->uses, "-")) { put("-"); at = -1; }
+    while (at >= 0 && k < 3) { at = mod_of_use(x->uses, at, m); if (k) put(","); put(m); k++; }
+    put(" 被调:");
+    for (i = 0; i < nu; i++) {
+        const U *c = &u[i]; int hit = 0;
+        if (c == x || tx_eqz(c->uses, "-") || tx_eqz(x->mod, "-")) continue;
+        at = 0;
+        while (at >= 0 && !hit) { at = mod_of_use(c->uses, at, m); if (tx_eqz(m, x->mod)) hit = 1; }
+        if (!hit) continue;
+        cnt++;
+        for (j = 0; j < 3; j++) if (!callers[j] || callers[j]->text < c->text) { int t; for (t = 2; t > j; t--) callers[t] = callers[t - 1]; callers[j] = c; break; }
+    }
+    if (!cnt) put("-");
+    for (j = 0; j < 3 && callers[j]; j++) { if (j) put(","); put(callers[j]->key); }
+    if (cnt > 3) { put("(+"); putn(cnt - 3); put(")"); }
+}
+static void put_accept(const U *x) {
+    if (tx_eqz(x->mig, "FINITE")) put("金标全枚举:键域由事实表定义,网输出与 C 实现逐字段 cmp 全同");
+    else if (tx_eqz(x->mig, "TRANSFORM")) put("差分:tests 语料全部输入 + 边界(空/最长/非法),C 实现 vs 网逐字节 cmp");
+    else put("先拆分:IO 壳留切片、纯逻辑子程序差分(语料+边界),壳/逻辑接口以表固定");
+}
+
+static void gen(void) {
+    int i, j, cnt[4] = {0, 0, 0, 0}, bcnt[5] = {0, 0, 0, 0, 0}; long tsum[4] = {0, 0, 0, 0}, total = 0;
+    int order[MAXU];
+    dn = 0; doc[0] = 0;
+    for (i = 0; i < nu; i++) { classify(&u[i]); cnt[u[i].dest]++; tsum[u[i].dest] += u[i].text; total += u[i].text; bcnt[u[i].batch]++; }
+    put("# 切片逻辑 NN 化迁移清单(M10a)\n\n");
+    put("生成物:`sh ./unisacc.com tools/slice-migration-gen.cx -- --write`;校验 `--check`。输入 `plans/unit-text.tsv`(.text 估量,切片 lnx/x86_64)+ `plans/slice-units.tsv`(源文件、use 依赖、堆/递归事实、显式覆盖)。手改本文件会被 `--check` 拒绝;改事实表再生成。\n\n");
+    put("方向(主人 2026-11-07):六个 ISA 切片全部保留;切片内逻辑迁为 NN(事实表→生成器→网/执行器字节码);切片只留 FFI/dl/host syscall/ABI 薄层。体积下降是结果不是手段。\n\n");
+    put("规则(由 `slice-migration-gen.cx` 固化):薄层 = kind host | 源在 cx/sys、cx/mem、cx/text | cx/driver/{input,output} | 显式覆盖「留切片」。其余:UNBOUNDED→迁VM字节码;FINITE/TRANSFORM→迁表;MIXED/SYS-IO→先拆分后迁。批次:迁表 1(≤10KB 且无 sys use)否则 2;先拆分后迁 2(<10KB、无 sys use、无堆)否则 3;VM 4。风险:无界结构(UNBOUNDED 或堆分配)/递归(自调用)/IO(sys use、SYS-IO 或 host)。\n\n");
+    put("合计:"); putn(nu); put(" 单元,.text "); putn(total); put(" 字节。");
+    for (i = 0; i < 4; i++) { put(i ? ";" : "");  put(DEST[i]); put(" "); putn(cnt[i]); put(" 单元/"); putn(tsum[i]); put(" 字节"); }
+    put("。批次 1/2/3/4 = "); putn(bcnt[1]); put("/"); putn(bcnt[2]); put("/"); putn(bcnt[3]); put("/"); putn(bcnt[4]); put("。\n\n");
+
+    put("## 1. 薄层边界清单(留切片)\n\n| 单元 | 源文件 | 现 .text | 分类 | 说明 |\n|---|---|---:|---|---|\n");
+    for (i = 0; i < nu; i++) if (u[i].thin) {
+        put("| "); put(u[i].key); put(" | `"); put(u[i].src); put("` | "); putn(u[i].text); put(" | "); put(u[i].mig); put(" | "); put(u[i].note); put(" |\n");
+    }
+    put("\n薄层终态合同:sy_*/mm_*/tx_* 原语签名表 + 六目标实现状态,见 `cx/sys/README.md`;冻结后新增原语只走 L0。`cx/driver/sys`、`cx/driver/mem` 为 `cx/sys`、`cx/mem` 的副本,L1 去重(trace/net 移出 L0)是本清单的前置清理。\n\n");
+
+    put("## 2. 迁移清单(非薄层)\n\n| 单元 | 现 .text | 分类 | 建议去向 | 依赖(前三) | 风险 | 批次 | 备注 |\n|---|---:|---|---|---|---|---:|---|\n");
+    for (i = 0; i < nu; i++) if (!u[i].thin) {
+        put("| "); put(u[i].key); put(" `"); put(u[i].src); put("` | "); putn(u[i].text); put(" | "); put(u[i].mig); put(" | "); put(DEST[u[i].dest]);
+        put(" | "); put_deps(&u[i]); put(" | "); put_risk(&u[i]); put(" | "); putn(u[i].batch); put(" | "); put(u[i].note); put(" |\n");
+    }
+
+    put("\n## 3. 前 10 个最适合先迁的单元(收益/风险)\n\n评分 = .text ÷ (1 + 2×风险项数),仅计「迁表」「先拆分后迁」且批次 ≤2;m14 为 M10c 试点钉首位。\n\n| # | 单元 | .text | 去向 | 风险 | 最小验收 |\n|---|---|---:|---|---|---|\n");
+    for (i = 0; i < nu; i++) order[i] = i;
+    for (i = 0; i < nu; i++) for (j = i + 1; j < nu; j++) if (u[order[j]].score > u[order[i]].score) { int t = order[i]; order[i] = order[j]; order[j] = t; }
+    for (i = 0, j = 0; i < nu && j < 10; i++) {
+        const U *x = &u[order[i]];
+        if (!x->score || x->batch > 2) continue;
+        j++;
+        put("| "); putn(j); put(" | "); put(x->key); put(" `"); put(x->src); put("` | "); putn(x->text); put(" | "); put(DEST[x->dest]); put(" | "); put_risk(x); put(" | "); put_accept(x); put(" |\n");
+    }
+
+    put("\n## 4. 需要新建的生成器/执行器能力(缺口)\n\n");
+    put("- 表→网生成器通用化:现有 `*-gen.cx` 每张表一个生成器;需要一个「键域枚举 + 输出列」的通用一热阈值网生成器(带 `--check`),FINITE 单元(route/tapeshape/rtsharedname/cellname/model_number/driveargs)共用。\n");
+    put("- 差分 oracle 驱动:对 TRANSFORM/MIXED 单元,批量把语料喂给 C 实现与网/VM 程序并逐字节 cmp,输出逐例收据(现无,评审②要求独立 oracle)。\n");
+    put("- CX→执行器字节码编译路线(VM):UNBOUNDED 单元(asmtext/cxmod/source_frame/tapegate/tapelink/runcache 等)需要把 CX 子集编成执行器程序;缺:稀疏内存上的结构体/数组寻址、调用约定、字符串原语映射到 tx_*。M10e 只出备忘与一个有界子程序实测。\n");
+    put("- 执行器资源合同(见 §5):具名可恢复 OOM、输入长度/属性乘加溢出拒绝、动作/字节预算与取消点。\n");
+    put("- 壳/逻辑拆分接口表:MIXED 单元拆成 IO 壳(留切片)与纯子程序,接口(参数/返回/所有权)以事实表固定并由生成器出两侧桩。\n");
+    put("- 度量:每单元迁移收据需 6 片 .text 减量、pkg 增量、APE 总字节、E2·stream 墙时冷/热各 ≥3 样本;缺项标 UNMEASURED(现 tools 无逐单元收据生成器)。\n");
+
+    put("\n## 5. 与 M10b(执行器资源合同门)的依赖\n\n");
+    put("- 批次 1(迁表,FINITE/小 TRANSFORM)不依赖 M10b:网为有界一热查表,不触发执行器动态分配增长;但验收仍要跑在现执行器上,OOM 退出为 panic 时失败不可区分,收据须记「执行器合同未门禁」。\n");
+    put("- 批次 2/3(先拆分后迁)部分依赖:子程序若引入输入相关增长(输出/属性),须等 M10b 的输出/属性预算与扩容失败合同。\n");
+    put("- 批次 4(迁VM字节码)硬依赖 M10b:`plans/v0.0.47-vm-resource-contract.md` 决策门 1-3 未过前不把大状态编译逻辑搬进 VM(OOM 具名可恢复、活跃分配归零、逐分配点失败注入全 PASS、输入长度边界拒绝、步数/取消合同)。\n");
+    put("- 留切片的 executor/execute/transition 本身是 M10b 的修改对象,不进迁移清单。\n");
+    put("\n## 6. 登记建议(共享表由集成者改)\n\n`tests/batches.tsv` 建议行:\n\n```\nslice-migration-gen\tIMPLEMENTED\tinterfaces\ttools/check-slice-migration-gen.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-slice-migration-gen.cx\t-\tinterfaces.slice-migration-gen\trc0:CHECK_SLICE_MIGRATION_GEN\tproduct\n```\n\n`tests/coverage.tsv` 建议行:`interfaces.slice-migration-gen\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tM10a migration list generator --check against unit-text/slice-units\tplans/unit-text.tsv;plans/slice-units.tsv;tools/slice-migration-gen.cx;plans/slice-nn-migration.md`。`tests/toolsloc.tsv` TOTAL 需 +264(gen 227 + check 37),由 cc 授权。\n");
+}
+
+int main(int argc, char **argv) {
+    int write = argc == 2 && tx_eqz(argv[1], "--write"), check = argc == 2 && tx_eqz(argv[1], "--check");
+    int i;
+    if (!write && !check) { sy_eprintf("slice-migration-gen\tusage\t--check|--write\n"); return 2; }
+    if (load(UNIT_TSV, 7, unit_row)) return 1;
+    if (load(FACT_TSV, 9, fact_row)) return 1;
+    if (!nu) return fail("row-count", UNIT_TSV);
+    for (i = 0; i < nu; i++) if (!u[i].src[0]) return fail("unit-without-fact", u[i].key);
+    if (nfact != nu) return fail("fact-count", FACT_TSV);
+    gen();
+    if (write) {
+        if (cx_write(OUT_MD, doc, (size_t)dn)) return fail("write", OUT_MD);
+        sy_eprintf("slice-migration-gen\tWRITE\tunits=%d\n", nu);
+        return 0;
+    } else {
+        size_t on = 0; char *cur = cx_read(OUT_MD, &on);
+        if (!cur) return fail("doc-missing", OUT_MD);
+        if ((int)on != dn || tx_find(cur, (long)on, doc, dn) != 0) return fail("doc-stale", OUT_MD);
+        sy_eprintf("slice-migration-gen\tCHECK\tunits=%d\n", nu);
+        return 0;
+    }
+}
