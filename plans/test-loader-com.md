@@ -54,3 +54,18 @@ C 已由 cc 主树源码自建后实跑 `TEST_LOADER assertions=19 failed=0`、�
 - ISA 启动检查使用显式目标与精确版本期望；只声明真实本机 slice 的启动结果，其他五格 `NOT_CLAIMED`。旧冻结 0.0.45 可用于开发检查，但不得用当前源码版本号冒认为 0.0.46 或发布资格。
 
 三模板已由父在当前 main 的干净私有克隆实跑 `LOADER_NET_REPLACEMENT assertions=19 failed=0`，覆盖 e2-M0、e3-M4、arm64 lower-M9；原 checker 另实跑 19/0，13 棘轮全过、工具行数实际/基线同为 78341。新增 `cxlib.loadernets` 模块移动复用 M 记录解析，未添加 `#include` 或放宽任何断言；净新增工具 60 行。为使原始与自 M 替换的产品 stdout/stderr/rc 完整逐字节比较，成功替换元数据仅 `--identity` 启用；产品错误诊断从未过滤，收据 SHA 另独立实跑核验。证据 `/tmp/check-loader-nets-leptbs`、`/tmp/check-test-loader-quevly/evidence`；精确命令 `/tmp/loader-nets-replay.txt`。
+
+## 冻结 P4 部署模型覆盖（不是新候选资格）
+
+此轮包身份仍为上文旧 APE 提取 pkg SHA `15d8af58…`，实际头为 P4/40M/1823D/77资源；不是旧 c44 的32模型包，更不是 c46-2。以下全部使用真实载体、数值索引替换、完整 stdout/stderr/rc 等价及变异后 **产品** 具名拒绝；收据只证绑定，不能替代消费。
+
+| 独立批 | 实际模型索引 | 实跑结果 |
+|---|---|---|
+| loader-net-replacement | 0、1、4、6、8、9、12、13 | 八模板46/0，原检查24/0 |
+| loader-common-models | 3、5、7、32、33、34、35 | 七mode新版各10/0；裸非空断言已删，合法基线并入真正等价断言 |
+| loader-special | 36、37、38、39 | 合法完整USLNCAR1/UNISYM1/USLCON1/USLSEL1帧21/0 |
+| loader-target-models | 2及9–31 | 六目标image/object共12格，收紧新版各14/0；每格两模型，只产镜像不执行跨目标输出 |
+
+覆盖并集为0–39共40个唯一M；9、12、13的交叠只算一次，不用重复用例充覆盖数。三新增批已由register实际登记/运行通过，父合成干净私有根13棘轮全过，工具真实/基线78551；分别净增41、36、56行。特殊接口帧只证冻结包的stream消费，不冒认归档libunisacc公共API资格；18事实网仍独立gold/kernel/nets轨，不因40M绿而关闭。
+
+原始证据：共享七mode `/tmp/check-loader-common-{nefazb,dfzglb,zinhpg,xiampp,clvpjm,frzdis,ksozlb}`；特殊 `/tmp/check-loader-special-mjhciz`；跨目标 `/tmp/ev-targetrun-lnx-x64`、`/tmp/final-verify-lnx-arm64`、`/tmp/osx-x64-evidence`、`/tmp/receipt-osx-arm64-final.txt`、`/tmp/evidence-win-x64`、`/tmp/receipt-win-arm64-final.txt`。每格具体载体、三态stdout/stderr/status及M记录在其输出标出的 `/tmp/check-loader-targets-*` 目录，未删原注册超时/错误funit载体等失败。

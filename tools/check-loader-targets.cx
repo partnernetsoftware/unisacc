@@ -1,0 +1,56 @@
+/* Deployed D/M target cells, not the separate 18 fact nets. Never execute target output.
+ * Five absolute TEST_LOADER bindings plus explicit TEST_LOADER_TARGET_MODE required.
+ * Each invocation proves only its named image/object cell (lower/elf), retaining all evidence. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.loadernets
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+static int checks,failed,unit;static char work[4096];
+static void die(const char *s){fprintf(stderr,"check-loader-targets: %s\n",s);exit(2);}
+static void ck(int yes,const char *s){checks++;if(!yes)failed++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);}
+static char *binding(const char *name){char *v=getenv(name);if(!v||v[0]!='/'){fprintf(stderr,"check-loader-targets: missing absolute binding %s\n",name);exit(2);}return v;}
+static void evidence(const char *kind,const char *path){char h[65];ln_digest(path,h);printf("LOADER_TARGET_SHA\tkind=%s\tpath=%s\tsha256=%s\n",kind,path,h);}
+static void save(const char *tag,const char *suffix,const char *b,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s.%s",work,tag,suffix)||cx_write(p,b,n))die("save evidence");}
+static void invoke(char **av,const char *input,const char *tag,np_result *r){char why[1024],status[40],*args[40];char **call=av;if(unit){int n=0,sidecar=0;while(av[n]){if(n>=34)die("argument bound");if(!strcmp(av[n],"sidecar"))sidecar=1;args[n]=av[n];n++;}if(!sidecar){args[n++]="--res";args[n++]="funit";args[n++]="--res";args[n++]="object";}args[n]=0;call=args;}int saved=dup(0),fd=open(input,O_RDONLY);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin binding");close(fd);if(np_run(call,work,0,35,r,why,sizeof why))die(why);if(dup2(saved,0)<0)die("stdin restore");close(saved);save(tag,"stdout",r->out,r->outn);save(tag,"stderr",r->err,r->errn);if(cx_fmt(status,sizeof status,"%d\n",r->rc))die("status");save(tag,"status",status,strlen(status));}
+/* Explicit product routes; no architecture inference and no native-output claim. */
+typedef struct {const char *mode,*target,*kind;} Cell;
+static const Cell cells[]={
+ {"image-lnx-x86_64","lnx/x86_64","image"},{"image-lnx-arm64","lnx/arm64","image"},{"image-osx-x86_64","osx/x86_64","image"},{"image-osx-arm64","osx/arm64","image"},{"image-win-x86_64","win/x86_64","image"},{"image-win-arm64","win/arm64","image"},
+ {"object-lnx-x86_64","lnx/x86_64","object"},{"object-lnx-arm64","lnx/arm64","object"},{"object-osx-x86_64","osx/x86_64","object"},{"object-osx-arm64","osx/arm64","object"},{"object-win-x86_64","win/x86_64","object"},{"object-win-arm64","win/arm64","object"}};
+static void consume(const char *loader,const char *slice,const char *models,const char *swap,const char *stage,const char *route,const char *input,const char *source){
+ long index;size_t rn;char *record;ln_select(models,stage,route,&index,&rn,&record);
+ char path[4400],bad[4400],net[4600],badnet[4600],tag[160],selected[80];
+ if(cx_fmt(path,sizeof path,"%s/%s-M%ld",work,stage,index)||cx_fmt(bad,sizeof bad,"%s.bad",path)||cx_fmt(net,sizeof net,"%ld=%s",index,path)||cx_fmt(badnet,sizeof badnet,"%ld=%s",index,bad)||cx_fmt(selected,sizeof selected,"\tmodel=%ld\tpayload=",index))die("selected M paths");
+ if(cx_write(path,record,rn))die("self M write");record[rn-1]^=1;if(cx_write(bad,record,rn))die("mutated M write");free(record);
+ char hash[65],badsha[65],after[65];ln_digest(path,hash);ln_digest(bad,badsha);evidence("self-before",path);evidence("mutation-before",bad);evidence("stage-input",input);
+ printf("LOADER_TARGET_MODEL\tstage=%s\troute=%s\tindex=%ld\n",stage,route,index);
+ char *base[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ char *same[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",net,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ char *identity[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--identity","--net",net,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ if(!strcmp(stage,"elf")){base[14]="--raw";same[18]="--raw";identity[19]="--raw";}
+ np_result a={0},b={0},id={0},d={0};char **calls[]={base,same,identity};np_result *results[]={&a,&b,&id};const char *names[]={"original","self","identity"};
+ for(int i=0;i<3;i++){if(cx_fmt(tag,sizeof tag,"%s-M%ld-%s",stage,index,names[i]))die("evidence tag");invoke(calls[i],input,tag,results[i]);}
+ ck(!a.rc&&a.outn&&a.rc==b.rc&&a.outn==b.outn&&!memcmp(a.out,b.out,a.outn)&&a.errn==b.errn&&(!a.errn||!memcmp(a.err,b.err,a.errn)),"full-original-self-stdout-stderr-rc-equality");
+ ck(!id.rc&&strstr(id.err,hash)&&strstr(id.err,"kind=external-net")&&strstr(id.err,"kind=replaced-models-file")&&strstr(id.err,selected),"independent-identity-selected-external-sha");
+ identity[7]=badnet;if(cx_fmt(tag,sizeof tag,"%s-M%ld-mutated",stage,index))die("mutation tag");invoke(identity,input,tag,&d);
+ ck(d.rc!=0&&!d.outn&&strstr(d.err,badsha)&&strstr(d.err,"kind=external-net")&&strstr(d.err,selected)&&strstr(d.err,"unisacc:")&&(strstr(d.err,"model")||strstr(d.err,"package")),"last-byte-mutation-selected-named-refusal-no-output");
+ ln_digest(path,after);ck(!strcmp(hash,after),"self-M-unchanged");ln_digest(bad,after);ck(!strcmp(badsha,after),"mutated-M-unchanged");evidence("self-after",path);evidence("mutation-after",bad);
+ np_free(&a);np_free(&b);np_free(&id);np_free(&d);
+}
+int main(int argc,char **argv){
+ if(argc!=1)die("use explicit environment bindings only");const char *root=binding("TEST_LOADER_ROOT"),*loader=binding("TEST_LOADER_LOADER"),*slice=binding("TEST_LOADER_SLICE"),*models=binding("TEST_LOADER_MODELS"),*swap=binding("TEST_LOADER_SWAP");
+ const char *mode=getenv("TEST_LOADER_TARGET_MODE");if(!mode||!*mode)die("missing TEST_LOADER_TARGET_MODE");const Cell *cell=0;for(size_t i=0;i<sizeof cells/sizeof cells[0];i++)if(!strcmp(mode,cells[i].mode))cell=&cells[i];if(!cell)die("unknown TEST_LOADER_TARGET_MODE");
+ unit=!strcmp(cell->kind,"object");
+ char temp[]="/tmp/check-loader-targets-XXXXXX",source[4400],input[4400],route[160];const char *src="int main(void){return 0;}\n";
+ if(!mkdtemp(temp)||cx_fmt(work,sizeof work,"%s",temp)||cx_fmt(source,sizeof source,"%s/input.c",work)||cx_write(source,src,strlen(src))||cx_fmt(input,sizeof input,"%s",source))die("evidence source");
+ const char *bound[]={loader,slice,models,swap};char before[4][65];for(int i=0;i<4;i++){ln_digest(bound[i],before[i]);evidence("material-before",bound[i]);}
+ const char *stages[]={"e2","e1","e3","sidecar","prune","lower","elf"};
+ for(int i=0;i<7;i++){
+  if(cx_fmt(route,sizeof route,"%s/%s/O0",cell->target,i<4?"run":cell->kind))die("explicit carrier route");
+  if(i>=5)consume(loader,slice,models,swap,stages[i],route,input,source);
+  char *av[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stages[i],"--route",route,"--res","run-forward","--source",source,0,0};if(i==3)av[8]=0;if(i==6)av[14]="--raw";
+  np_result r={0};char tag[80],path[4400];if(cx_fmt(tag,sizeof tag,"carrier-%d",i))die("carrier tag");invoke(av,input,tag,&r);if(r.rc||!r.outn)die("carrier filter refused");if(cx_fmt(path,sizeof path,"%s/%s",work,tag)||cx_write(path,r.out,r.outn)||cx_fmt(input,sizeof input,"%s",path))die("carrier output");np_free(&r);evidence(stages[i],path);
+ }
+ for(int i=0;i<4;i++){char after[65];ln_digest(bound[i],after);ck(!strcmp(before[i],after),"bound-component-unchanged");evidence("material-after",bound[i]);}
+ printf("LOADER_TARGET_MODELS\tcell=%s\tmodels=2\tassertions=%d\tfailed=%d\tother-cells=NOT_CLAIMED\tfact-nets=NOT_CLAIMED\tnative-execution=NONE\troot=%s\tout=%s\n",mode,checks,failed,root,work);return failed?1:0;
+}
