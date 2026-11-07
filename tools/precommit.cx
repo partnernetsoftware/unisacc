@@ -56,6 +56,24 @@ int main(void) {
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     rows = slurp(rv, &rn);
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
+    { int tools_cx = 0; long a2;
+      for (a2 = 0; a2 < sn; ) {
+          long nl = tx_len(names + a2, sn - a2); if (nl <= 0) break;
+          if (tx_prefix(names + a2, nl, "tools/", 6) && nl >= 3 && tx_same(names + a2 + nl - 3, 3, ".cx", 3)) tools_cx = 1;
+          a2 += nl + 1;
+      }
+      if (tools_cx) {
+          long p = 0;
+          for (; p + 18 < rn; p++) {
+              if (tx_prefix(rows + p, rn - p, "RATCHET\ttoolsloc\tfail", 22) ||
+                  tx_prefix(rows + p, rn - p, "toolsloc: FAIL", 14)) {
+                  sy_eprintf("precommit: toolsloc above baseline; 先写基线+理由 (tests/toolsloc.tsv TOTAL)\n");
+                  blocked++;
+                  break;
+              }
+          }
+      }
+    }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
         const char *r = rows + at;
@@ -67,7 +85,6 @@ int main(void) {
                 long nl = tx_len(names + a2, sn - a2);
                 if (nl <= 0) break;
                 if (tx_same(names + a2, nl, r + p, q - p)) {
-                    /* tool/test scripts are not product code; their printf/fprintf is not a ratchet debt */
                     if (!tx_prefix(names + a2, nl, "tools/", 6) && !tx_prefix(names + a2, nl, "tests/", 6)) {
                         sy_eprintf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1); blocked++;
                     }

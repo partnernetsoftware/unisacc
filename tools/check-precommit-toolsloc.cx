@@ -1,0 +1,34 @@
+/* tools/check-precommit-toolsloc.cx -- staging tools/*.cx while toolsloc is over baseline must refuse. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+static int npass,nfail;
+static void ck(int ok,const char *n){printf("%s\t%s\n",ok?"PASS":"FAIL",n);if(ok)npass++;else nfail++;}
+int main(void){
+    char *src=0; size_t n=0; FILE *f; char td[200], idx[300], bak[300];
+    src=cx_read("tools/precommit.cx",&n);
+    ck(src&&strstr(src,"先写基线+理由"),"hook-text");
+    free(src);
+    if(cx_fmt(td,sizeof td,"%s/pc-ts-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td)) return 2;
+    if(cx_fmt(idx,sizeof idx,"%s/index",td)||cx_fmt(bak,sizeof bak,"%s/toolsloc.bak",td)) return 2;
+    {char *v[]={"cp","tests/toolsloc.tsv",bak,0}; np_result r; char why[400];
+     if(np_run(v,".",0,10,&r,why,sizeof why)||r.rc) return 2; np_free(&r);}
+    f=fopen("tests/toolsloc.tsv","wb"); if(!f) return 2; fputs("TOTAL\t1\n",f); fclose(f);
+    {char *e0="GIT_INDEX_FILE"; setenv("GIT_INDEX_FILE",idx,1);
+     char *v[]={"git","read-tree","HEAD",0}; np_result r; char why[400];
+     np_run(v,".",0,15,&r,why,sizeof why); np_free(&r);
+     char *a[]={"git","add","--","tools/precommit.cx",0};
+     np_run(a,".",0,15,&r,why,sizeof why); np_free(&r);
+     char *p[]={"sh","./unisacc.com","tools/precommit.cx",0};
+     if(np_run(p,".",0,40,&r,why,sizeof why)) { unsetenv(e0); }
+     else {
+         ck(r.rc==1,"over-baseline-rc1");
+         ck(r.errn&&strstr(r.err,"先写基线+理由"),"over-baseline-text");
+         np_free(&r);
+     }
+     unsetenv("GIT_INDEX_FILE");
+    }
+    {char *v[]={"cp",bak,"tests/toolsloc.tsv",0}; np_result r; char why[400];
+     np_run(v,".",0,10,&r,why,sizeof why); np_free(&r);}
+    printf("PRECOMMIT_TOOLSLOC\tpass=%d\tfail=%d\n",npass,nfail);
+    return nfail?1:0;
+}
