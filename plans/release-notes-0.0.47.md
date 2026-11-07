@@ -81,15 +81,15 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 
 ## 验证入口与待证表
 
-本节供 CI 与全批负责人填真实结果；**当前各项均待证，不预写通过数、发布或候选资格**。结果须同时保存原始收据、身份与未运行项，失败及缺材料不得改记通过。
+本节供 CI 与全批负责人填真实结果；**当前仅同候选原生 CI 已有下列实证，其余各项仍待证，不据此预写发布或完整候选资格**。结果须同时保存原始收据、身份与未运行项，失败及缺材料不得改记通过。
 
 | 待证项 | 必填真实材料与结果 | 当前状态 |
 |---|---|---|
 | 新产品身份 | 冻结提交、源 SID、APE/pkg/切片/资产 SHA256 与字节数、配对记录、实际版本输出 | 待证 |
 | 正规构造与固定点 | 同候选构造链、各目标收据与实际比较结果；区分字节固定点和原生自举 | 待证 |
-| 同候选原生 CI | 运行标识、提交与候选 SHA；42 格逐格结果及真实汇总；平台子集与未运行项 | 待证 |
+| 同候选原生 CI | [运行 42408207540](https://github.com/partnernetsoftware/unisacc/actions/runs/42408207540)，源 `7b98ec2c0618df88115ae1c80cea47144e8614d3`；候选 APE SHA256 `fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`（6215778 字节），`pkg.bin` SHA256 `6b99c50491d9268f4e3c5fe828885f3425fe15284ff8d65d03da10f2e21be971`，`slice-win-arm64` SHA256 `889f36cd9cc58e9451d43e6544ffeae4b88ef3cd70e3d88273248af7b912da28`；本地配对 `unisacc.com.build.json` SHA256 `0512a1de8ddde26442e9f55ef8dfb40c817f2e1f6c2a93263ab15d4b934dde4f` 位于 `~/.unisacc-baselines/c47-1/R2-APE-final-7b98ec2c06-Ex8782/`。下载原件 `~/.unisacc-baselines/c47-1/ci-42408207540/candidate-native-evidence/` 的六份目标 TSV 与 `table.md` 绑定同源同 APE：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64 各 identity/version/hello/run/stdio-crossunit/stream-pipe/smoke 七项 PASS，版本均为 `unisacc 0.0.47`。Windows 两格 stdio-crossunit 与 stream-pipe 仅 portable 子集（原始说明分别为 7/9、6/9）；fork/waitpid/kill/F_SETFD/environ/F_SETFL 等 POSIX 子检查未运行，stdio 的 devfull 两条亦未跑，不计作通过，沿用 0.0.46 的披露边界。 | CI 已完成且 success；原始聚合 `QUALIFIED pass=42 fail=0 not_run=0 invalid=0`（仅指此 CI 表格，非全部子检查或发布资格） |
 | 新产品正控 | 同候选命名与诊断正控的原始输出；固定 43 例重新测量另列，不套用开发曲线 | 待证 |
 | 全批 `s9` | 会话、快照、候选及材料绑定身份；真实终态总数、失败、未知、缺材料与未运行原因 | 待证 |
 | 发布判定 | 仅据上述同候选实际收据填写结论；源冻结、源码门与注册验证不得代替 | 待证 |
 
-复核顺序：先绑定新资产与配对记录，再核实际 `--version`，随后独立记录同候选 CI 与全批；不得从旧 `0.0.46` 模板复制资格数字。当前仅有源码及开发证据，是否具备发布资格仍待上述实证。
+复核顺序：先绑定新资产与配对记录，再核实际 `--version`，随后独立记录同候选 CI 与全批；不得从旧 `0.0.46` 模板复制资格数字。当前已有源码、开发及上述同候选原生 CI 证据；其余待证项（含新产品身份完整材料、正规构造与固定点、新产品正控、全批 `s9` 和发布判定）保持待证，是否具备发布资格仍待上述实证。
