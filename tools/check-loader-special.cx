@@ -1,0 +1,36 @@
+/* Development-only special model deployment; separate from the 18 fact nets.
+ * Required absolute TEST_LOADER_{ROOT,LOADER,SLICE,MODELS,SWAP}; no fallback.
+ * Wire contracts: exec/{librarycontract,librarypartition,nativeabi}/README.md;
+ * symbols wire follows exec/lower/hostsymbols.md (empty tape, zero slots). */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.loadernets
+#pragma unisa use sys.fs
+static char work[4096];static int failed,checks;
+static void die(const char *s){fprintf(stderr,"check-loader-special: REFUSE %s\n",s);exit(2);}
+static const char *material(const char *s){char *v=getenv(s);if(!v||v[0]!='/')die(s);char h[65];ln_digest(v,h);printf("SPECIAL_MATERIAL\t%s\t%s\t%s\n",s,v,h);return v;}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static void save(const char *tag,const char *ext,const char *b,size_t n){char p[4400];if(cx_fmt(p,sizeof p,"%s/%s.%s",work,tag,ext)||cx_write(p,b,n))die("save evidence");}
+static void invoke(char **av,const char *input,const char *tag,np_result *r){char why[1024],rc[40];int saved=dup(0),fd=open(input,O_RDONLY);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin binding");close(fd);if(np_run(av,work,0,35,r,why,sizeof why))die(why);if(dup2(saved,0)<0)die("stdin restore");close(saved);save(tag,"stdout",r->out,r->outn);save(tag,"stderr",r->err,r->errn);if(cx_fmt(rc,sizeof rc,"%d\n",r->rc))die("status");save(tag,"rc",rc,strlen(rc));}
+static void special(const char *loader,const char *slice,const char *models,const char *swap,const char *stage,const char *route,const char *frame,size_t framen,const char *wanted,size_t wantedn){
+ long index;size_t n;char *record;ln_select(models,stage,route,&index,&n,&record);
+ char input[4400],net[4400],bad[4400],binding[4600],badbinding[4600],tag[120];
+ if(cx_fmt(input,sizeof input,"%s/%s.input",work,stage)||cx_write(input,frame,framen)||cx_fmt(net,sizeof net,"%s/M%ld",work,index)||cx_fmt(bad,sizeof bad,"%s/M%ld.bad",work,index)||cx_fmt(binding,sizeof binding,"%ld=%s",index,net)||cx_fmt(badbinding,sizeof badbinding,"%ld=%s",index,bad))die("model paths");
+ if(cx_write(net,record,n))die("self record");record[n-1]^=1;if(cx_write(bad,record,n))die("mutation record");free(record);char hash[65],badsha[65];ln_digest(net,hash);ln_digest(bad,badsha);printf("SPECIAL_SELECTED\tstage=%s\troute=%s\tmodel=%ld\tself=%s\tmutation=%s\n",stage,route,index,hash,badsha);
+ char *base[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stage,"--route",(char *)route,"--target","lnx/x86_64",0};
+ char *same[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",binding,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--target","lnx/x86_64",0};
+ char *identity[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",binding,"--swap-tool",(char *)swap,"--identity","--","stream",(char *)stage,"--route",(char *)route,"--target","lnx/x86_64",0};
+ np_result a={0},b={0},c={0},d={0};char **calls[]={base,same,identity};np_result *results[]={&a,&b,&c};const char *names[]={"original","self","identity"};for(int i=0;i<3;i++){if(cx_fmt(tag,sizeof tag,"M%ld-%s",index,names[i]))die("tag");invoke(calls[i],input,tag,results[i]);}
+ ck(!a.rc&&!a.errn&&a.outn==wantedn&&!memcmp(a.out,wanted,wantedn),"documented-complete-output");ck(a.rc==b.rc&&a.outn==b.outn&&a.errn==b.errn&&(!a.outn||!memcmp(a.out,b.out,a.outn))&&(!a.errn||!memcmp(a.err,b.err,a.errn)),"full-stdout-stderr-rc-equivalence");
+ ck(!c.rc&&strstr(c.err,hash)&&strstr(c.err,"kind=external-net")&&strstr(c.err,"kind=replaced-models-file"),"self-selected-receipt");identity[6]=badbinding;if(cx_fmt(tag,sizeof tag,"M%ld-mutated",index))die("mutation tag");invoke(identity,input,tag,&d);
+ ck(d.rc!=0&&!d.outn&&strstr(d.err,badsha)&&strstr(d.err,"kind=external-net")&&strstr(d.err,"unisacc:")&&(strstr(d.err,"model")||strstr(d.err,"package")),"selected-mutation-product-named-refusal");np_free(&a);np_free(&b);np_free(&c);np_free(&d);
+}
+int main(int argc,char **argv){
+ if(argc!=1)die("environment bindings only");const char *root=getenv("TEST_LOADER_ROOT");if(!root||root[0]!='/')die("TEST_LOADER_ROOT");const char *loader=material("TEST_LOADER_LOADER"),*slice=material("TEST_LOADER_SLICE"),*models=material("TEST_LOADER_MODELS"),*swap=material("TEST_LOADER_SWAP");char fresh[]="/tmp/check-loader-special-XXXXXX";if(!mkdtemp(fresh)||cx_fmt(work,sizeof work,"%s",fresh))die("private evidence directory");
+ const char *materials[]={loader,slice,models,swap,"/proc/self/exe"};char before[5][65];for(int i=0;i<5;i++){ln_digest(materials[i],before[i]);printf("SPECIAL_BEFORE\t%s\t%s\n",materials[i],before[i]);}
+ char frame[16]={0},out[16]={0};memcpy(frame,"USLDEC1\n",8);frame[8]=1;frame[9]=1;memcpy(out,frame,16);memcpy(out,"USLCON1\n",8);special(loader,slice,models,swap,"contract","library-contract",frame,16,out,16);
+ memcpy(frame,"USLPAR1\n",8);memset(out,0,16);memcpy(out,"USLSEL1\n",8);special(loader,slice,models,swap,"ownership","library-selection",frame,16,out,12);
+ memset(frame,0,16);memcpy(frame,"USLSYM1\n",8);frame[8]=1;memset(out,0,16);memcpy(out,"UNISYM1\n",8);out[8]=1;special(loader,slice,models,swap,"symbols","host-symbols",frame,10,out,12);
+ char sig[111]={0},carrier[265]={0};memcpy(sig,"USLSIG2\n",8);sig[8]=1;sig[16]=1;sig[24]='f';sig[26]=1;sig[110]=1;memcpy(carrier,"USLNCAR1\n",9);carrier[9]=10;memcpy(carrier+17,"lnx/x86_64",10);carrier[27]=111;memcpy(carrier+35,sig,111);carrier[146]=111;memcpy(carrier+154,sig,111);special(loader,slice,models,swap,"nativeabi","lnx/x86_64/nativeabi",sig,111,carrier,sizeof carrier);
+ for(int i=0;i<5;i++){char after[65];ln_digest(materials[i],after);ck(!strcmp(before[i],after),"material-unchanged");printf("SPECIAL_AFTER\t%s\t%s\n",materials[i],after);}
+ printf("LOADER_SPECIAL\tassertions=%d\tfailed=%d\tmodels=36,37,38,39\tfact-nets=18-separate-not-claimed\tout=%s\n",checks,failed,work);return failed?1:0;
+}
