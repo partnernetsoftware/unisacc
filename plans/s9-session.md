@@ -4,9 +4,9 @@
 
 ## 口径（同 s8b illegal-action：结论披露 overlay）
 
-- **候选**：冻结 `7b98ec2c06` 构造出的 APE（产品输入=该提交，不复用 f748/s8 PASS）。
-- **harness**：冻结提交的 `tests/` + 覆盖到最新 HEAD 的 **仅 `tests/`**（不碰产品输入）。当前 HEAD `a41770c6a4` 相对冻结 **tests/ 无差**；`harness_sha`=`7b98ec2c06:tests` = `a50ddb122a727626f518669c4a4972e0232cfbe6`。覆盖文件清单：∅。
-- cdx2 将改 `tests/tools-compile.cx` 动态库存（硬上限 568→跟 tools 数）。该文件一进 HEAD，s9 用新 `harness_sha`=HEAD:`tests`，清单=`tests/tools-compile.cx`。
+- **product_source**：`7b98ec2c06`（构造 APE；不复用 f748/s8 PASS）。
+- **harness_commit**：`>=4cdbb3ac7d`，只覆盖 `tests/`。现测 `4cdbb3ac7d:tests` = `0d515c9ad48dfbbd62b8e0fc11de243b36037115`（主树 git rev-parse，非私有 FP）。
+- **覆盖文件清单**（`7b98ec2c06..4cdbb3ac7d -- tests/`）：`tests/README.md`、`tests/batches.tsv`、`tests/coverage.tsv`、`tests/tools-compile-boundaries.py`、`tests/tools-compile-sources.tsv`、`tests/tools-compile.cx`、`tests/update-tools-compile.py`。s9 组装根上再 `git rev-parse HEAD:tests` 写入 session 披露。
 
 
 ## 一条命令
