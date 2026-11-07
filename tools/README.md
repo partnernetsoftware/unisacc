@@ -40,19 +40,30 @@ binary `weights/gold/type.tsv` answers. `facts-gen` reuses that table's `t1` ord
 `weights/type/context.tsv`: 4 contexts × 15 source types, with labels `legal`,
 `illegal`, and `needs-null`. Arrays and functions are pointer-class after decay.
 `ret-pointer` integers need a fresh null-pointer proof; this table alone does not
-grant one. Return contexts are facts only, not return-path consumers.
+grant one. Only `ret-arith` and `ret-bool` are consumed by the return path;
+pointer-target compatibility and null-pointer proof remain on the existing path.
 
 ```sh
 sh ./unisacc.com tools/facts-gen.cx -- --write . type-context
 sh ./unisacc.com tools/facts-gen.cx -- --check . type-context
-sh ./unisacc.com tools/decide-gen.cx -- --write --each ctx=index,ret-arith,ret-bool,ret-pointer weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
-sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=index,ret-arith,ret-bool,ret-pointer weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
+sh ./unisacc.com tools/decide-gen.cx -- --write --each ctx=index weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
+sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=index weights/type/context.tsv CTX CTX.ask exec/parse2/context-result.tsv
+sh ./unisacc.com tools/decide-gen.cx -- --write --each ctx=ret-arith,ret-bool weights/type/context.tsv RTC RTC.ask exec/parse2/returncontext-result.tsv
+sh ./unisacc.com tools/decide-gen.cx -- --check --each ctx=ret-arith,ret-bool weights/type/context.tsv RTC RTC.ask exec/parse2/returncontext-result.tsv
 ```
 
 `context-manifest.tsv` installs the independent `CTX.ask.<ctx>` rows once. The
 caller uses TAX then `RLD ax` to enter the chosen state, and owns preservation of
 `vt`/`vb` and the `CTX.legal`, `CTX.illegal`, `CTX.needs-null`, and
 `CTX.out-of-domain` destinations. No RESD state or old type/kernel answer changes.
+`returncontext-manifest.tsv` separately installs `RTC.ask.ret-arith` and
+`RTC.ask.ret-bool`. Before target conversion, the return consumer classifies the
+actual target with TAX (including encoded function pointers), then classifies
+the original source. Non-Boolean arithmetic targets reject pointer, array and
+function addresses and void/aggregate sources with a return-type diagnostic;
+Boolean targets allow pointer-class sources. Legal arithmetic conversions and
+explicit casts retain the existing ASSIGNCV/NARROW path. This is a finite
+category constraint, not complete C99 scalar-assignment compatibility.
 
 
 `sourceflat.cx` is the native complete-source exporter:
