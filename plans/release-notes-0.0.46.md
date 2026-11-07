@@ -1,37 +1,80 @@
-# unisacc 0.0.46 —— 发布说明（草稿，未发布；标 [待证] 的项在证据到齐前不得写成已通过）
+# unisacc 0.0.46 —— c46-3 私有候选说明
+
+当前只建立私有 draft 和原生资格证据；未公开发布，未创建正式版标签或更改 Latest。公开仍须主人批准。原生 CI 的 QUALIFIED 不等于全批正式发布合格。
 
 ## 是什么
-C99 编译器，自己写出可执行文件（ELF、Mach-O、PE），能编译自身；整个工具链是一个文件 `unisacc.com`（APE：加载头、ISA 切片、一个模型包）。
+面向 C99 的编译器，自己写出 ELF、Mach-O、PE，可编译自身；产品是单文件 `unisacc.com`（APE 加载头、ISA 切片和一份模型包）。不作完整 C99/POSIX 符合性声明，具体缺口见下。
 
-## 候选身份
-- 候选 c46-2：APE sha256 `c1309d112ba1d389a296ef701f864d56cc06fe281eea98f621a51d8d2b429caf`，源提交 `b64a34aaa86400ad75f52a1602025e52b7dfdd17`，`unisacc --version` 为 `unisacc 0.0.46`。
-- 同候选原生证据：`candidate-native` 运行 42332407482，`QUALIFIED pass=42 fail=0 not_run=0 invalid=0`（六格 × identity/version/hello/run/stdio-crossunit/stream-pipe/smoke）。Windows 两格的 stdio-crossunit 与 stream-pipe 只跑 portable 子集（POSIX 部分在 Windows 无对应原语）。
-- 正式版标签所在提交须与候选产品输入相同（`git diff` 对 src cx exec include seed ext kernel 为空）；[待证：最终发布时再核]。
+## c46-3 身份与证据
 
-## 相对 0.0.45 修复的已知缺陷
-- Windows argv 超过 63 项被截断：已修，容量由 63 提到 16384；SP_ARGC 在 n=40/63/64/65/100/200/1000/4000 八点均得 `ARGC=n+1`（CI 原生）。
-- stream 只给 `--route` 不给 `--target` 时前端宏用宿主目标：已修（route 联动 target）；Windows stream-pipe 检查在六格通过（portable 子集）。
-- UTF-8 BOM 开头的源文件被拒绝：已修（物理源 BOM 支持，保留对非法位置 BOM 的拒绝）；另修了无 BOM 时显式 `-include` 的宏在 `-run` 丢失的既有缺陷。
-- Darwin 单调时钟、sysx 有界等待、strdup 等 Windows 运行期问题：已修。
-- k2 构造名与依赖事实身份同步（构造链内部）。
-- 行为变化：Darwin 上 `SIGUSR1` 常量由 10 改为 30（与系统一致）；旧编译产物里硬编码的 `raise(10)` 在 macOS 上语义不同。
+| 对象 | SHA256 / 身份 | 字节 |
+|---|---|---:|
+| 冻结产品源 | `44182b4059d51191cb021241c666b521bf34b2ad` | — |
+| APE `unisacc.com` | `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf` | 6163990 |
+| `pkg.bin` | `29e13aeb8c62a09c0323a9d86dcd51ab8b35684696264b3fc66571d79654ef6c` | 1663382 |
+| `slice-win-arm64` | `bd16566df04a3d3caf248146c03419a62328db3f72f4af7459ddccad8f381b10` | 3325440 |
+| 配对 `unisacc.com.build.json` | `56fa8f14317f6150d0e6f182e0a51bf09ffe4168f36166216561477bdf2086e5` | 314 |
 
-## 新增（开发/测试基础设施，非用户功能）
-- 测试 loader（`tools/test-loader.cx`）：显式绑定 slice/pkg 启动，支持单网替换与按 ISA 本机启动检查；缺绑定具名拒绝，不回落读 `./unisacc.com`。仅开发证据。
-- 索引树 `work/units.tsv` 与并行分流 `tools/fan.cx`。
+- 私有 draft：`v0.0.46-c46-3-candidate`。资产已实际下载回读 SHA，备份在 `~/.unisacc-baselines/c46-3/`。构建记录由现成身份/安装工具生成，绑定本源提交、源 SID `95e34c70d087d78fc2527465428042914ec07b48443a2db0fc97303c93d16451` 和新 APE，而非复制旧产品记录。
+- 正规链重新执行 131 个作业、final、routes、P4及六片构造，未开启 `UNISACC_WAVE_REUSE`。新包与旧包字节相同是在新构造后确认，不迁移旧候选资格。
+- 同候选原生 CI：[42353236985](https://github.com/partnernetsoftware/unisacc/actions/runs/42353236985)，分支 `ci/c46-3`、提交为上表冻结源；原始聚合 `QUALIFIED pass=42 fail=0 not_run=0 invalid=0`，六目标各含 identity/version/hello/run/stdio-crossunit/stream-pipe/smoke。
+- **Windows 限定**：两格 stdio-crossunit 和 stream-pipe 只跑 portable 子集。原始说明分别记 7/9 与 6/9；fork/waitpid/kill/F_SETFD/environ/F_SETFL 等 POSIX 子检查未运行，不计作通过。完整原件见备份 `ci-42353236985/table.md`。
+- 固定点分开证明：通用五片比较实际得到 objects 81、kernels 2、slices 5、product、package 全部 same；另用专属 checker 核 win/arm64 真实 G2/G3 独立输出、PE Machine AA64、实际构造器链与原始收据，`failed=0 missing=0`。Linux 三代构造器均 `3c660571e790370664b9b3c5e3817e610bb0803f665b9cd8542730a7166c9b63`；Windows 原生自举固定点仍为 `NOT_CLAIMED`。
+- 本机 APE 用户入口 smoke 为 5/0。工具改动私有十三棘轮为 13/0，提交 `8484436b0e`；没有提高无关基线。
+- 全批会话：[待证：grk 的 c46-3 ROOT 上 s8 正冻结执行；须填原始终态与 PASS/FAIL/KNOWN-GAP/SESSION-INFRA/未知计数，不能用原生 CI 或旧 s7 的 PASS 代替。]
 
-## 已知限制（诚实披露）
-- **默认 `-run` 起来的进程在 `ps`/`top` 里都叫 `63`（已确认缺陷，本版未修）**：运行镜像经匿名内存文件放到 fd 63 再 `execveat`，内核据此把进程名置为 `63`，`pkill NAME` 与按名监控不可用。规避：用 `ps -o args` 或 `/proc/PID/cmdline` 辨认。不影响 `-o` 落盘产物。
-- 全批会话：[待证：s5 进行中，结果出来后填 PASS/FAIL/KNOWN-GAP/SESSION-INFRA 计数；SESSION-INFRA 不算合格]。
-- 逐切片固定点：win/arm64 的 G2、G3 两代 PE 与 c46-2 随发切片 `slice-win-arm64` 字节相同（sha256 `1eee599bbcec474b31893ce8f4b85f46947145660cbd3dae74f07333866d4a56`；cdx 报，我已核该 sha 前缀与 c46-2 切片备份一致）；这是 Linux 宿主上的跨构造固定点，Windows 原生自举未声称（NOT_CLAIMED）；检查器已合入（`3f4d197bef`，主树棘轮 13/13）。
-- `unisacc stream` 在没有显式绑定时默认读 `./unisacc.com`（相对 `UNISA_CONTAINER` 继承），在其他工作目录可能找不到包或加载到旧包；用 `--models` 显式绑定。
-- 沿用 0.0.45：22 种 C99 约束违例不报错（12 种可能产出错误代码）；`-c` 分开编译运行库不跨对象共享；手工拼 stream 管道 tape 无结束标记；预处理器接受两种非法输入；运行库在每对象各带一份；`#include <C:/x.h>` 尖括号不按盘符绝对路径处理；APE 内尚无 win/arm64 分发（用随发独立切片 `slice-win-arm64` 配 `pkg.bin`，`UNISA_CONTAINER` 指向）。
-- Windows 上 POSIX 部分（fork/waitpid/kill/F_SETFD/environ）无对应原语，未跑。
-- RI 参考运行器仍不支持 P4 模型包，`ri-flow-data` 为 `NOT_AVAILABLE`；材料 `PREPARED` 不等于功能验证通过。P4 兼容修复排入 0.0.47。
-- `sysx.process` 超时路径的单次非阻塞回收是代码审查疑点；四次真实探针未复现僵尸残留，尚非已确认缺陷。0.0.47 继续验证，本版不改该产品输入。
+## 相对 0.0.45 修复的缺陷
 
-## 怎么验证
-1. `sha256sum unisacc.com` 应为候选 sha（见上）。
-2. `sh ./unisacc.com --version` 输出 `unisacc 0.0.46`。
-3. 冒烟：`printf 'int main(void){return 7;}\n' > t.c && sh ./unisacc.com t.c; echo $?` 应为 7。
-4. 各平台原生证据：`candidate-native` 运行 42332407482 的 `evidence-<os>-<arch>` 产物。
+- **Linux 默认 `-run` 进程在 ps/top 中名为 `63`：已修复。** 生成 ELF 仍从 memfd 执行，通过已校验且 dirfd 固定的具名入口保留程序名，不靠落盘 `-o` 冒充默认运行。正式新 APE 实测 `comm=rcprobe.c`，固定 SHA 的旧 c46-2 负控仍为 `63`；同时核验 `/proc/self/exe=/memfd:unisacc-run (deleted)`、原 argv0、空参数/带空格参数、fd9、stdout 和退出码 37。新批 `run-comm` 显式声明两份产品材料；这不是“修复了63项”的计数。
+- Windows argv 超过 63 项截断：已修，容量为 16384。既有原生参数边界覆盖 n=40/63/64/65/100/200/1000/4000；这里的 63 是旧参数上限，不是进程名。
+- `stream` 只给 `--route` 不给 `--target` 时错用宿主宏：已修，route 联动 target；Windows 验证范围仍受 portable 子集限制。
+- UTF-8 BOM 开头的物理源被拒：已修，非法位置 BOM 仍拒绝；无 BOM 时显式 `-include` 宏在 `-run` 丢失的独立既有缺陷也已修。
+- Darwin 单调时钟、既有 sysx 有界等待及 Windows strdup 等运行期问题已修；k2 构造名与依赖事实身份同步。
+- Darwin `SIGUSR1` 常量改为 30，与系统一致；旧产物硬编码 `raise(10)` 的语义不因此改变。
+
+## 开发与测试基础设施
+
+- 测试 loader：显式绑定 slice/pkg，缺绑定具名拒绝，不回落仓根产品；独立分片启动和单网替换属于开发证据，不自动获得发布资格。
+- `work/units.tsv` 与 `tools/fan.cx` 提供索引及分流。
+- 工具小修：APE 构造器的 sh 分支恢复 PATH 查找，直接 ELF 分支仍禁查找；已实际完整构造验证。分根固定点清单新增必需 `native_root`，双方原始收据必须绑定同一 rev，不能篡改旧收据令目录相等。
+- 内核上下文检查不再把当前源码整树摘要写死为 `REC_V3`：保留kernel变异和忽略边界，新增六个实际工具输入逐项变异必须改变context。正式新输入批9/0；受控遗漏netpack身份的生产者变异必被捕获（9项中1项失败），恢复后9/0及私有13/13。原s8快照断言失败保留，不重钉摘要、不追填旧PASS。
+
+## 已知限制与未声称的性质
+
+### C99 诊断缺口：此前披露的22类未作为本版修复关闭
+
+来源：`plans/rc1-gates-2026-11-06.md`、`plans/defects-c43.md`、`tests/waivers-0.0.44.tsv`。保留失败断言与覆盖；已知缺陷不因 waiver 改记 PASS。
+
+| 类别 | 完整类别名 | 风险 |
+|---|---|---|
+| A，12类 | `duplicate-case`、`case-outside-switch`、`struct-redefinition`、`conflicting-typedef`、`conflicting-function-types`、`enumerator-redeclared`、`local-redefinition`、`duplicate-parameter`、`void-value-used`、`void-call-as-value`、`float-subscript`、`return-pointer-as-int` | 可能静默产生错误代码，这类输入的产物不可信 |
+| B，10类 | `assign-to-const`、`write-through-const-pointer`、`discards-const`、`multiple-storage-classes`、`void-parameter-named`、`incompatible-pointer-init`、`int-to-pointer-init`、`int-plus-assign-string`、`distinct-pointer-compare`、`zero-array-size` | 缺少应有诊断；不据未观察到错码宣称语义安全 |
+
+### 语言、接口与容量
+
+- `_Complex`/完整复数库、trigraph 替换未作为已实现完整能力；`long double` 按 double 表示，无扩展精度。
+- 续行前 `__LINE__` 的偏移、拼接头的文件/行位置、头文件内 `#line` 及其部分宏/转义形式仍有既有覆盖限制；不能把主文件的支持推广到所有包含位置。详见 `README.md` 的限制表。
+- 生成代码使用私有且不稳定的调用约定；外部互操作走正式 FFI/carrier，不承诺直接兼容宿主 SysV/AAPCS64 ABI。旧 `.unit` 格式对象需要重编。
+- 结构成员、typedef/tag/member共享表、源文件数等均有有限容量；多单元重复包含会重复占用共享表，不能当作自动去重。SQLite 大型 amalgamation 已有 `structure member capacity` 拒绝证据，不声称支持完整 SQLite。
+- GCC K&R 旧式参数声明仍有 `not covered: parameter`；Lua 的未定长 extern 数组后接其它定义会被 `DM.tent.test4` 误拒。二者均属合法 C99 的已知前端缺口，留到 0.0.47，未混入本候选修复。
+- C/POSIX 库并非完整；README 含历史条目，不能把其中旧的 strdup/时钟/缺头描述直接当本候选新测结果。当前树已有 regex/pwd/utime 头，不能再泛称它们全部缺失；平台能力以实际对应收据为准。
+
+### 管道、平台、资源与验证边界
+
+- `-c` 分开编译不跨对象共享运行库，多个 stdio 对象只告警；运行库仍可能每对象重复携带。`-c -b osx/*|win/*` 的拒绝文档与实际产出对象之间仍有既有合同债，不能当完全统一的对象支持承诺。
+- 手工拼接 stream 管道的 tape 缺可靠结束标记；预处理器仍有接受非法宏名/未闭合头名的缺口；`#include <C:/x.h>` 不按盘符绝对路径处理。
+- `unisacc stream` 未显式绑定时可能读相对 `./unisacc.com`，换工作目录可能找不到或读到旧包；使用 `--models` 显式绑定。
+- APE 的 Windows ARM64 原生分发仍有限制；该原生格使用随发 `slice-win-arm64` 与 `pkg.bin`、显式 `UNISA_CONTAINER`。六片被打包不等于外层 PE 同时具有两种机器类型，也不等于 Windows 原生自举已验证。
+- RI 参考运行器仍不兼容 P4；`ri-flow-data` 为 `NOT_AVAILABLE`。材料 `PREPARED` 不等于功能通过，相关修复归 0.0.47。
+- `sysx.process` 超时路径单次 WNOHANG 是未复现审查疑点：四次实际探针未见僵尸残留，不当已确认缺陷，也未合入私有防御补丁。
+- 执行器输入属性的内存放大、OOM/失败/清理与输出预算、步数/取消合同仍有未关闭项；运行期句柄检查不等于 Rust 式编译期所有权，未证明的安全性质不宣称实现。
+- 本次命名修复验证的是编译器生成 ELF 的默认运行；不宣称脚本的匿名内存执行兼容。只读跨构造字节固定点与同候选原生 CI 分别记账，不等于完整 RI/语言/资源合同全部通过。
+- `src/host.cx` 保留安全具名入口失败后的匿名 `execveat(AT_EMPTY_PATH)` 降级；该路径仍可能显示 `63`。本次已验证正常安全目录下的命名，不保证所有 TMPDIR/权限/容器环境；长名称也受内核 comm 长度限制。此保底路径不等于执行不安全的替换文件。
+
+## 验证入口
+
+1. 对上表资产执行 `sha256sum`；配对记录的 commit/source SID/product digest 必须对应 c46-3。
+2. `sh ./unisacc.com --version` 应输出 `unisacc 0.0.46`。
+3. 默认运行：`printf 'int main(void){return 7;}\n' > t.c && sh ./unisacc.com t.c`，退出码应为 7。
+4. 命名与负控：`sh ./unisacc.com tools/check-run-comm.cx -- ROOT NEW_PRODUCT OLD_PRODUCT`，旧产品固定为 c46-2，不能用同一新产品自作负控。
+5. 原生证据取本轮 run `42353236985`；全批结果另看本轮 s8，不读旧会话结论充数。

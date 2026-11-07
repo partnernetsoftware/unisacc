@@ -1,10 +1,10 @@
 /* tools/check-kernel-context.cx -- the native-kernel context binds exactly what it should.
  *   sh ./unisacc.com tools/check-kernel-context.cx
- * Four cases, all on copies; the tree is never modified:
+ * Behavioral cases, all on copies; the tree is never modified:
  *   .S-byte-changes-context   one kernel .S sha differs -> context differs
  *   tests-file-ignored        no tests/ path is an input at all
  *   thin-head-ignored         unisacc.com (the launcher) is not an input
- *   matches-recorded-v3       the tree's context equals the recorded v3 value
+ *   context-tool-byte-change  each declared tool SHA must affect the context
  * Prints PASS/FAIL and KERNEL_CONTEXT<TAB>assertions=N<TAB>failed=M. */
 #pragma unisa use cxlib.kernelinputs
 #pragma unisa use sys.env
@@ -12,12 +12,11 @@
 #pragma unisa use sys.sha
 #pragma unisa use sys.io
 #pragma unisa use text.text
-#define REC_V3 "5dd871a53c4e818d4b80062f7d4d13baadaf414349b36f51255873fe85a0ea56" /* d774a41ae0: netpack fcntl→sy_fd_cloexec (ki_context_file); ad293b4168 long→I 针仍 99a8f6ce */
 static int assertions, failed;
 static void ok(int c, const char *n) { assertions++; if (!c) failed++; printf("%s\t%s\n", c ? "PASS" : "FAIL", n); }
 static int same(const char *a, const char *b) { long i = 0; if (!a || !b) return 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
 int main(void) {
-    char root[4400], p[4600], ks[24][65], ts[6][65], body[4096], body2[4096];
+    char root[4400], p[4600], ks[24][65], ts[6][65], ksum[65], body[4096], body2[4096];
     const char *tptr[6];
     int i;
     size_t n = 0;
@@ -25,7 +24,7 @@ int main(void) {
     if (sy_cwd(root, sizeof root) < 0) return 2;
     for (i = 0; i < 24; i++) { const char *f = ki_kernel_source(i); char *b; ks[i][0] = 0; if (!f) return 2; if (cx_fmt(p, sizeof p, "%s/%s", root, f)) return 2; b = cx_read(p, &n); if (!b) { printf("MISSING %s\n", p); return 2; } cx_sha256_hex(b, n, ks[i]); free(b); }
     for (i = 0; i < 6; i++) { const char *f = ki_context_file(i); char *b; ts[i][0] = 0; if (!f) return 2; if (cx_fmt(p, sizeof p, "%s/%s", root, f)) return 2; b = cx_read(p, &n); if (!b) { printf("MISSING %s\n", p); return 2; } cx_sha256_hex(b, n, ts[i]); free(b); }
-    { char ksum[65]; const char *kptr[24]; for (i = 0; i < 6; i++) tptr[i] = ts[i]; for (i = 0; i < 24; i++) kptr[i] = ks[i]; ki_kernel_source_sha(kptr, ksum); bn = ki_context_body(body, sizeof body, ksum, tptr); if (bn < 0) return 2; }
+    { const char *kptr[24]; for (i = 0; i < 6; i++) tptr[i] = ts[i]; for (i = 0; i < 24; i++) kptr[i] = ks[i]; ki_kernel_source_sha(kptr, ksum); bn = ki_context_body(body, sizeof body, ksum, tptr); if (bn < 0) return 2; }
     {   char k2[24][65]; for (i = 0; i < 24; i++) { long j; for (j = 0; j < 65; j++) k2[i][j] = ks[i][j]; }
         k2[0][0] = (k2[0][0] == '0') ? '1' : '0';
         { char ksum2[65]; const char *k2p[24]; for (i = 0; i < 24; i++) k2p[i] = k2[i]; ki_kernel_source_sha(k2p, ksum2); if (ki_context_body(body2, sizeof body2, ksum2, tptr) < 0) return 2; }
@@ -38,10 +37,12 @@ int main(void) {
         for (i = 0; i < 24; i++) if (tx_contains(ki_kernel_source(i), tx_len(ki_kernel_source(i),200), "unisacc.com", 11)) hit = 1;
         for (i = 0; i < 6; i++) if (tx_contains(ki_context_file(i), tx_len(ki_context_file(i),200), "unisacc.com", 11)) hit = 1;
         ok(!hit, "thin-head-ignored"); }
-    {   char bh[65];
-        cx_sha256_hex(body, (size_t)bn, bh);
-        ok(same(bh, REC_V3), "matches-recorded-v3");
-        if (!same(bh, REC_V3)) printf("GOT\t%s\n", bh);
+    for (i = 0; i < 6; i++) {
+        char saved = ts[i][0];
+        ts[i][0] = saved == '0' ? '1' : '0';
+        if (ki_context_body(body2, sizeof body2, ksum, tptr) < 0) return 2;
+        ok(!same(body, body2), ki_context_file(i));
+        ts[i][0] = saved;
     }
     printf("KERNEL_CONTEXT\tassertions=%d\tfailed=%d\n", assertions, failed);
     return failed ? 1 : 0;
