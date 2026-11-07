@@ -8,8 +8,8 @@
 
 <!-- identity-begin -->
 product_kind	ape1
-product_digest	ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0
-unisacc.com	ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0	6128709
+product_digest	884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf
+unisacc.com	884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf	6163990
 <!-- identity-end -->
 
 三身份 sha256 不在这里另抄一份：上面的生成块就是唯一副本（抄第二份必然漂移）。
@@ -17,6 +17,8 @@ unisacc.com	ae0b12d8c822efa44d6724782f32a275b4d3fb2cdb3387178cbd76541972c6f0	612
 不是任何一个单文件的 sha；`candidate_kind` 说明用的是哪种定义。
 
 变更记录：
+  2026-11-07 c46-3 APE 884adfef… 6163990B（冻结 44182b4059）；s8 会话内该项仍 FAIL，本更新是主树记录对齐，非同会话追填。
+
   2026-11-02 薄头 1bfdcd20… → d93c1b24…：dev-lnx 薄头加 ulimit -v 预检（need=53248，
             类B 编译地址下限），entry.elf（de54dd80 含 -run -- 参数透传修复）与
             p3-package.bin（47a2275d）不变。行为等价依据 = check-dev-product 复验 + smoke。
