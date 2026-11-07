@@ -98,3 +98,6 @@ c46-3 对 A 类 12 项的实测（`plans/v0.0.47-corpus-feasibility.md` 的 A12 
 结论不变：本版全批未达资格；产品证据是同候选六目标原生 CI（42/0）。
 
 外部语料正面证据（发布后补充）：固定上游 `c-testsuite`（rev `5c7275656d751de0e68b2d340a95b5681858ed07`）220 个单文件用例对本版 APE `884adfef…`：216 个被接受且输出与期望相符，0 个错值，4 个被拒绝（`00213`/`00214` 使用 GNU 语句表达式 `({…})`，`00219` 使用 C11 `_Generic`，三者在 `gcc -std=c99 -pedantic-errors` 下同样被拒，不属于 C99 误拒；`00216` 含 form-feed 空白，严格 gcc 接受而本版报 `unexpected character`，是唯一的 C99 误拒，已列入 0.0.47）。该结果由 omp-cdx2 记录于 `tests/corpus-ctestsuite/`，发布者仅独立复跑了末 20 例（16 接受、4 拒绝），其余 200 例未独立复核。
+
+材料构造后的 heavy 批次（发布后补充，会话 s8e）：在同一候选 APE `884adfef…` 上，用候选一键构造材料（`objects`、`kernel-route`、`ri-flow`、`ri-chain`、`pp-gold`）并绑定后，在新冻结会话中跑这 31 个原先“未运行”或因材料未规范化而 REFUSE 的 heavy 批次：**31 PASS、0 FAIL**（会话 `candidate_sha=884adfef…`，registry sha `dc1ef2ff…`；发布者独立读取了会话文件的 31 条 `RECEIPT`，均为 `verdict=PASS`）。这说明上文 s8c 中约 40 个 REFUSE 类失败属于材料问题而非产品缺陷；但全批仍未达资格，其余未运行批次（`streams` 28、冻结参考 22、`ri-cli` 8、`p3` 4 等）见 `plans/m7-material-spec.md`。
+
