@@ -10,9 +10,8 @@ printf 'int main(void){return 7;}\n' > hello.c
 sh ./unisacc.com hello.c; echo $?                  # 7 (default -run)
 ```
 
-Windows x86-64: see the [release notes](plans/release-notes-0.0.46.md) for verified native invocation details.
-Windows arm64 uses the Release's `slice-win-arm64` and `pkg.bin` with
-`UNISA_CONTAINER` set to the absolute path of `pkg.bin`.
+Windows x86-64: CI uses PowerShell to launch `unisacc.com` without renaming it; see [Windows使用](plans/release-notes-0.0.46.md#windows使用) for the verified invocation and helper.
+Windows arm64: CI copies `slice-win-arm64` to an `.exe` and sets `UNISA_CONTAINER` to `pkg.bin` before compilation; see [Windows使用](plans/release-notes-0.0.46.md#windows使用).
 Verify downloads against `SHA256SUMS` from the Release. Uninstall by deleting
 the downloaded files; roll back by restoring the previous Release's files.
 

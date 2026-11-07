@@ -76,6 +76,14 @@ c46-3 对 A 类 12 项的实测（`plans/v0.0.47-corpus-feasibility.md` 的 A12 
 
 ## 验证入口
 
+### Windows使用
+以下是 run `42353236985` 的 PowerShell（`pwsh`）原生调用方式；先使用 [CI 中的 `Invoke-Bounded` 函数](../.github/workflows/candidate-native.yml#L247-L270)（55 秒期限、直接 ProcessStartInfo 启动，并非 cmd 命令）；不是省略该函数后可直接粘贴的独立脚本。
+- x86-64：`$com = Join-Path $PWD 'unisacc.com'`；`Copy-Item candidate/unisacc.com $com`；`Invoke-Bounded $com @('--version')`。CI 保留 `.com` 文件名，不改名 `.exe`，未设置此格的 `UNISA_CONTAINER`（[准备](../.github/workflows/candidate-native.yml#L282-L283)、[版本与编译](../.github/workflows/candidate-native.yml#L358-L368)）。
+- arm64：`$slicePath = Join-Path $PWD 'slice/slice-win-arm64'`；`$sexe = Join-Path $PWD 'out/slice-win-arm64.exe'`；`Copy-Item -LiteralPath $slicePath $sexe`；`Invoke-Bounded $sexe @('--version')`（[原始命令](../.github/workflows/candidate-native.yml#L304-L318)）；须有 `out` 目录。
+- arm64 编译前：`$pkgPath = Join-Path $PWD 'slice/pkg.bin'`；`$env:UNISA_CONTAINER = $pkgPath`；`Invoke-Bounded $sexe @('-o', 'out/hello.exe', 'out/hello.c')`；x86-64 对应为 `Invoke-Bounded $com @('-o', 'out/hello.exe', 'out/hello.c')`。两格运行生成物均为 `Invoke-Bounded (Join-Path $PWD 'out/hello.exe') @()`（[arm64](../.github/workflows/candidate-native.yml#L320-L330)、[x86-64](../.github/workflows/candidate-native.yml#L360-L365)）。
+- `candidate/`、`slice/`、`out/hello.c` 是 CI 已准备的材料路径；Release 资产需对应放置再复现。原生 CI 证明上述调用及 portable 子集，不证明 cmd 直接调用、arm64 直接运行未改名文件或 Windows 原生自举；这些方式未验证。
+
+
 1. 对上表资产执行 `sha256sum`；配对记录的 commit/source SID/product digest 必须对应 c46-3。
 2. `sh ./unisacc.com --version` 应输出 `unisacc 0.0.46`。
 3. 默认运行：`printf 'int main(void){return 7;}\n' > t.c && sh ./unisacc.com t.c`，退出码应为 7。
