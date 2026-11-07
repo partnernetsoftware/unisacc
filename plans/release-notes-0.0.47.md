@@ -28,7 +28,7 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 
 | 点 | 本点修复标识符 | 通过/失败 |
 |---|---|---:|
-| 0.0.46 基点 | 原发布产品 | 21/22 |
+| 0.0.46 基点 | 原发布产品 `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`；私有实验（非发布资产）原收据副本：私有克隆根 `omp-cdx2-m12-cache` 下 `out/release-notes-047/fixed43-c463/results.tsv`，SHA256 `cb7ef879cbeeacad274c3bef0433a53848e70a51276772bfb9168f6f68b0b2c0`，原文 `SUMMARY pass=21 fail=22`（字段以制表符分隔） | 21/22 |
 | A1 | `duplicate-case` | 22/21 |
 | A2 | `case-outside-switch` | 23/20 |
 | A3 | `struct-redefinition` | 24/19 |
@@ -67,6 +67,7 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 
 - **A5 `conflicting-function-types` 推迟**：网指纹与 pointee qualifier 缺口仍需独立处理；逆向 NPC 未实现。七修复点与固定 29/14 都不能表述为 A12 全绿，更不能表述为完整 C99 诊断。
 - **TAPE-END 推迟**：手工拼接 stream 管道的 tape 仍缺可靠结束标记，仍有截断风险，不把本轮改动称为管道完整性修复。
+- **对象编译合同债未修**：`-c -b osx/*|win/*` 文档写拒绝，实际仍编出对象；[0.0.46 已披露](release-notes-0.0.46.md#管道平台资源与验证边界)，本版未修，grk objects 四批红仍属该合同债。0.0.48 待在“真正拒绝”与“修正文档”之间二选一，尚未裁定，也未宣称已修。
 - **E1-LINT-RDOMAIN 是既有债**：旧新均为 20 条 `ERROR` 与 6 条 `WARN`；未放宽断言，不能写成 lint 通过，见[记录](v0.0.47-unisacc.md#m3-a-c99-form-feed-空白修复私有验收2026-11-07)。
 - GNU 语句表达式 `({…})` 与 C11 `_Generic` 不属于严格 C99 义务；相关拒绝不能混作 C99 误拒，也不能因 M3-a 修复而宣称它们已支持。
 - K&R 旧式参数声明、Lua 未定长 extern 数组与 SQLite 大型 amalgamation 的其它既有缺口未关闭；两项 M3 不等于全部外部语料可用。
