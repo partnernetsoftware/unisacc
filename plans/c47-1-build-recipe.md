@@ -5,7 +5,7 @@
 cc负责发布；本窗口执行构造。范围为A1–A4/A6–A8、L0/M12及M3两项；A5与TAPE-END延期。M12合入前只准备配方；cc通知冻结提交后直接启动，不再等待第二次许可。M11冻结前不实施。
 
 版本分开核验：bootstrap为已发布0.0.46，APE SHA256=`884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`；目标产出为0.0.47。cc已报告统一版本表同步、check-limits与13/13通过；不得拿仍装着的0.0.46去宣称新版本检查通过。
-当前状态：旧冻结`f7484108febaf3ac7d0eb5d909887d6a46c313cf`已被cc裁定重做，131/P4仅作参考。G1拒绝的根因已纠正为A6的END_跨TU纪元缺失，先前L0重复定义归因撤回。cdx2实施A6b；本窗口最终三文件语义评审通过，另发现并确认修复VLA的旧`==1`消费者（详见末节）。完整71/13及合入由实现者/cc验收；仍等cc新冻结SHA，届时新SID、全链重跑，不迁移旧资格。
+当前状态：cc已重新冻结`7b98ec2c0618df88115ae1c80cea47144e8614d3`，R2已启动，源SID=`c84ea430ab7b037d983cd0208ec6340ccf878cf3ead00b463629a80dcae53c04`，新主根`/tmp/cdx-c471-r2-Ex8782`。controller实编44.56秒、context46.08秒，仅记PREPARED；全131/P4、后续六片与不动点全部重新执行，不复用旧f748资格。cc报告新冻结主树13/13、metadata_valid=1与关键工具实编已通过，本窗口不重复确认；产品目标0.0.47、bootstrap884/0.0.46不变。
 
 容量裁定：只先建立主根及lnx目标根，逐目标封存slice/pkg/receipt到`~/.unisacc-baselines/c47-1/`并核对摘要后删除该目标临时根，不一次建立五根。`/tmp`空闲<3G即暂停并报告cc；本次旧主根亦须按该闸删除。封存目录与/tmp同属/dev/vda2，挪目录本身不增空闲，需核验保留材料后删除已授权冗余根。
 
@@ -181,7 +181,7 @@ sh "$S/unisacc.com" "$S/tools/c-negative.cx" -- "$W" "$NEG" /usr/bin/gcc
 |G1N002|rc1，19.60秒，ua-cxif-59051f84b6e7f63c.h:4:35 enumerator redeclared|cc纠正为A6跨TU纪元缺失；cdx2实施A6b，等待新冻结|
 |最小sys.io探针|bg_242 rc0、1.00秒、stdout=ok|该最小例未复现，不能宣称全部CX都失败|
 
-封存目录`~/.unisacc-baselines/c47-1/cdx-f7484108fe-tzdPw5/`：`source-context.tar.gz`摘要77bb6f3e4277430c3276e6bbc19ebcc19c32af8208175d451a6834e3dfada8cb，内含全131原始输出、正式记录及controller身份；gzip校验与指定成员读取已通过。另保留旧context、P4、routes收据、原始拒绝日志、生成头、最小探针、阶段账和作废状态。含A6b独立评审材料后的封存实测88,997,888B（<300MB）；主根`/tmp/cdx-c471-primary-tzdPw5`为1,142,980,608B（<2GiB），同期空闲5,982,035,968B。主根保留对照，不自动重启旧输入。
+封存目录`~/.unisacc-baselines/c47-1/cdx-f7484108fe-tzdPw5/`：`source-context.tar.gz`摘要77bb6f3e4277430c3276e6bbc19ebcc19c32af8208175d451a6834e3dfada8cb，内含全131原始输出、正式记录及controller身份；gzip校验与指定成员读取已通过。另保留旧context、P4、routes收据、原始拒绝日志、生成头、最小探针、阶段账和作废状态。含A6b评审材料的封存实测88,997,888B（<300MB）。原主根`/tmp/cdx-c471-primary-tzdPw5`已按cc裁定在新冻结启动后删除，不再作为可执行入口；删除后观测空闲5,698,330,624B，新R2根304,578,560B。
 
 ## A6b评审与受影响读者
 
