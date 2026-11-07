@@ -368,7 +368,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | `work/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 当前发布 | 0.0.46 已发布（见 §9.1）；c46-3 资格不迁移到后续候选 | [发布说明](plans/release-notes-0.0.46.md)、[s8b 终态](plans/s8b-terminal.md) |
-| 下一版 | 0.0.47「可信」；c47-1新冻结7b98ec2c06已启动新SID全链，旧f748的131/P4仅参考 | [里程碑](plans/v0.0.47-unisacc.md)、[构造配方与当前证据](plans/c47-1-build-recipe.md) |
+| 下一版 | 0.0.47「可信」；c47-1冻结7b98/c84全131、六片、两代FP及独立WinARM已实跑，最终APE fde2db18；私有draft四资产回读全同，CI42408207540已触发待终态；负例45/14 FAIL不改绿，s9另轨 | [里程碑](plans/v0.0.47-unisacc.md)、[构造配方与当前证据](plans/c47-1-build-recipe.md) |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |

@@ -7,7 +7,7 @@ cc负责发布；本窗口执行构造。范围为A1–A4/A6–A8、L0/M12及M3�
 版本分开核验：bootstrap为已发布0.0.46，APE SHA256=`884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`；目标产出为0.0.47。cc已报告统一版本表同步、check-limits与13/13通过；不得拿仍装着的0.0.46去宣称新版本检查通过。
 当前状态：cc已重新冻结`7b98ec2c0618df88115ae1c80cea47144e8614d3`，R2已启动，源SID=`c84ea430ab7b037d983cd0208ec6340ccf878cf3ead00b463629a80dcae53c04`，新主根`/tmp/cdx-c471-r2-Ex8782`。controller实编44.56秒、context46.08秒，仅记PREPARED；全131/P4、后续六片与不动点全部重新执行，不复用旧f748资格。cc报告新冻结主树13/13、metadata_valid=1与关键工具实编已通过，本窗口不重复确认；产品目标0.0.47、bootstrap884/0.0.46不变。
 
-容量裁定：只先建立主根及lnx目标根，逐目标封存slice/pkg/receipt到`~/.unisacc-baselines/c47-1/`并核对摘要后删除该目标临时根，不一次建立五根。`/tmp`空闲<3G即暂停并报告cc；本次旧主根亦须按该闸删除。封存目录与/tmp同属/dev/vda2，挪目录本身不增空闲，需核验保留材料后删除已授权冗余根。
+容量裁定：逐相位将slice/pkg/receipt封存到`~/.unisacc-baselines/c47-1/R2-<相位>/`并核摘要，逐目标删除临时根，不一次建五根。gen→tbl→net→routes/P4存在真实依赖，须最后消费者完成且原始ctx封存后再删这一组中间件。`/tmp`空闲<4G时，cc已授权清理`/tmp/unisacc-e3cache-1001`中90分钟未动的可再生条目；<3G暂停报告cc，不启动后续作业。封存目录与/tmp同属/dev/vda2，移动本身不增空闲，须删已授权冗余文件才回收空间，不碰其它窗口源码或输入。
 
 以下命令每行独立调用，变量由执行器绑定；不是新增shell调度脚本。`REV`必须是cc通知的完整新冻结SHA，不用滚动HEAD；`SHORT`为其前十位。所有路径用绝对路径，克隆根创建前cwd=MAIN，其余默认cwd=P，第6节按说明用S。每次调用记录job ID、argv、cwd、输入SHA、真实PID/进程组、deadline、退出码、日志与产物SHA。阶段失败即停该依赖链，保留失败，不自动重启。
 
@@ -125,7 +125,7 @@ cmp "$WA/out/gen2/slice-win-arm64" "$WA/out/gen3/slice-win-arm64"
 
 ## 6. pack、smoke、comm与C负例
 
-令`F=P/out/fixedpoint/g3`、`APE_DIR=P/out/c47-ape`、`APE=APE_DIR/unisacc.com`。
+令`F=P/out/fixedpoint/g3`、`APE_DIR=P/out/c47-ape-final`、`APE=APE_DIR/unisacc-next.com`。本节cwd必须为S：pack内部用相对`./unisacc.com`与`tools/ape-pack.cx`。本轮曾在P下先打包，已保留该收据并用冻结S、新目录重新正式打包；两次字节相同，但正式来源只采用后者。
 
 ```sh
 sh "$S/unisacc.com" "$S/tools/release-ape.cx" -- pack "$APE_DIR" "$PKG" "$F/win-x86_64/slice-win-x86_64" "$F/lnx-x86_64/entry.elf" "$F/lnx-arm64/entry.elf" "$F/osx-x86_64/slice-osx-x86_64" "$F/osx-arm64/slice-osx-arm64" "$WA/out/gen3/slice-win-arm64"
@@ -152,16 +152,16 @@ sh "$S/unisacc.com" "$S/tools/c-negative.cx" -- "$W" "$NEG" /usr/bin/gcc
 
 |阶段|c46-3证据/耗时|c47-1状态|
 |---|---|---|
-|list|5.77秒；131组start/finish状态保存|UNMEASURED|
-|全131波次|外层wave窗口与总耗时未恢复；不能引用其他轮271.8/279秒|UNMEASURED|
-|P4|8.456秒|UNMEASURED|
-|native|65.4秒，内层独立bound|UNMEASURED|
-|lnx/arm64|20.764秒|UNMEASURED|
-|osx/arm64|23.584秒|UNMEASURED|
-|osx/x86_64|18.036秒|UNMEASURED|
-|win/arm64|17.889秒|UNMEASURED|
-|win/x86_64|16.437秒|UNMEASURED|
-|pack / smoke|约2.42 / 2.03秒|UNMEASURED|
+|list|5.77秒；131组start/finish状态保存|R2 bg_257 rc0，13.20秒，131项|
+|全131波次|外层wave窗口与总耗时未恢复；不能引用其他轮271.8/279秒|R2 bg_258—270：5/42/42/42全部实际start/finish/command0；总墙钟未汇总，PREPARED不是资格|
+|P4|8.456秒|R2 bg_272 rc0，外层68.96秒/内层48.426秒|
+|native|65.4秒，内层独立bound|R2 bg_274 rc0，57.02秒/内层41.997秒|
+|lnx/arm64|20.764秒|R2 bg_278 rc0，53.12秒|
+|osx/arm64|23.584秒|R2 bg_280 rc0，90.72秒|
+|osx/x86_64|18.036秒|R2 bg_282 rc0，90.45秒|
+|win/arm64|17.889秒|R2 bg_288 rc0，74.62秒|
+|win/x86_64|16.437秒|R2 bg_285 rc0，72.91秒|
+|pack / smoke|约2.42 / 2.03秒|R2 正式bg_295/297：15.49/5.87秒，smoke5/0|
 
 历史主根1,834,496,000B；五目标根分别347,844,608/302,796,800/304,726,016/303,497,216/305,586,176B。合计约3.4GB是估计，不是测得峰值。本次启动可用6,135,128,064B；归档主根303,652,864B后剩5,664,624,640B。构造前及每阶段用`df -B1 /tmp`和`du -s -B1 ROOT`记录真实容量；每根硬界限2GiB，空闲<3G暂停报告。封存只保留后续必需产物及原始日志，目标依次构造、核验封存后删除；主根在context/fixedpoint仍使用时不得删除。
 
@@ -205,3 +205,39 @@ sh "$S/unisacc.com" "$S/tools/c-negative.cx" -- "$W" "$NEG" /usr/bin/gcc
 最终私包SHA=`3aa59130cc66564341511f821c47cddf367e060584c3fb02dbff199cfae68410`；前包605e完整身份、脚本及原始日志封存于上述目录的`a6b-review/`。首次残值脚本误设`UNISACC_RR_TIME=0`并断言正常stderr为空，导致6项脚本FAIL但十个实际rc已符合；原结果保留，去误开关并删除该偶然日志断言后新批次0 FAIL，未改rc/transport/residue合同。
 
 结论限于语义评审：未发现剩余语义P1；高水位线性扫描与无条件零写的极限资源成本未独测，不能据此宣称完整资源边界或发布资格通过。71/13、新冻结构造及s9仍按各自输入身份执行。
+
+## R2正式构造与最终APE实证
+
+冻结源`7b98ec2c0618df88115ae1c80cea47144e8614d3`，SID=`c84ea430ab7b037d983cd0208ec6340ccf878cf3ead00b463629a80dcae53c04`；bootstrap仍为0.0.46/884adfef，正式产物为0.0.47。主根`/tmp/cdx-c471-r2-Ex8782`；逐作业记录为`out/c47-build/phases.tsv`。正式pack必须在冻结S下运行，输出实际名`unisacc-next.com`；基线交付改名为`unisacc.com`，字节不改。
+
+|最终资产|字节|SHA256|
+|---|---:|---|
+|APE|6215778|`fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`|
+|完整pkg.bin|1665282|`6b99c50491d9268f4e3c5fe828885f3425fe15284ff8d65d03da10f2e21be971`|
+|内嵌包body（不含16B footer）|1665266|`0d5696535d0062d038bc71a97b266904b69f174a9b799555c2981d5b182c5ad4`|
+|独立G3 win-arm64|3367424|`889f36cd9cc58e9451d43e6544ffeae4b88ef3cd70e3d88273248af7b912da28`|
+|unisacc.com.build.json|314|`0512a1de8ddde26442e9f55ef8dfb40c817f2e1f6c2a93263ab15d4b934dde4f`|
+
+最终资产原件在`~/.unisacc-baselines/c47-1/R2-APE-final-7b98ec2c06-Ex8782/`。新记录不是0.0.46侧车：对冻结树重新运行既有identity-helper、核对`.release-rev`，实际测APE全文件SHA和长度，再按既有`pp_execution_record_error`的canonical合同生成并校验（bg_307）。`product_kind=ape1`，commit/SID分别绑定上述7b98/c84。初次记录器误要求修订标记末尾LF，bg_306拒绝且未写记录；按真实40B标记修正后成功，未改变产品或测试断言。
+
+两代不动点bg_283 rc0/793.70秒：82对象、2内核、5片、产品、包逐字节相同；G2/G3 native均`37356ba5927e47bd4f38367df01af6ad4191826a50b8dd1bc7ce85e45e0c8f6e`/3546048B。独立WinARM bg_290/291为71.56/70.67秒，G2/G3都为表中889f36摘要且cmp0。`UNISACC_RUN_CACHE=0`禁用磁盘输出及展开模型缓存，不禁用M12进程内不可变资源缓存，不能说所有缓存关闭。FP归档`R2-fixedpoint-7b98ec2c06-Ex8782/g2-g3.tar.gz`摘要`4d8a22e116d82d8f3754a0b1ebd492bfc8211503017ba83fb632f1091a837505`。
+
+|最终APE本机检查|作业/实测|实际结论|
+|---|---|---|
+|release-ape smoke|bg_297，5.87秒|5 PASS/0 FAIL|
+|COMM旧负控/新产品|bg_298，8.32秒|旧63/新rcprobe.c；memfd、argv0、参数、fd9、stdout、rc37全核对|
+|安装修复合同（不执行安装）|bg_299，29.32秒|6项PASS，failed=0|
+|C99 VT/FF|bg_300，11.55秒|12 PASS/0 FAIL|
+|59个C负例|bg_301，12.52秒，rc1|45 PASS/14 FAIL；完整失败原件保留，不记全绿|
+|A6b最终APE正控|bg_302，rc0|局部enum固定初始化数组、A7下标/A8算术及零Bool、预先INTERN main的三TU全部默认run0|
+
+14个`.product-refuses`失败：`assign-to-const`、`incompatible-pointer-init`、`duplicate-parameter`、`int-to-pointer-init`、`conflicting-function-types`、`zero-array-size`、`void-value-used`、`write-through-const-pointer`、`int-plus-assign-string`、`distinct-pointer-compare`、`local-redefinition`、`discards-const`、`void-parameter-named`、`multiple-storage-classes`。计数与先前开发轮同，不把未经逐例对比的集合等同当作新证明；不删断言、不缩覆盖、不改退出码。
+
+source/context、P4、各G1片、两代FP、WinARM独立G2/G3均已分相位封存并校验gzip/成员/SHA；只在routes/P4最后消费者结束后删除jobs/models。各目标临时根封存后删除；主根保留冻结源和后续收据。磁盘阈值沿用本配方，不靠跨目录移动伪装释放。
+
+cc本轮明确授权建立私有draft `v0.0.47-c47-1-candidate`并触发`candidate-native.yml`，不是公开正式发布。bg_307创建draft并上传表中四个文件资产（内嵌body仅作身份说明，不另上传）；bg_308下载四资产与基线逐个cmp0，SHA全部一致。GitHub draft暂用untagged展示URL，实际tagName仍为上述候选名，targetCommitish为7b98。CI通过`release_tag`鉴权取draft，不把匿名URL当已公开资产；CI期间不修改APE或四资产。s9由grk负责，本机smoke与构造不替代s9或原生矩阵资格；14个C负例FAIL不改写。
+
+CI正式dispatch（bg_309 rc0/2.14秒）：workflow `candidate-native.yml`，ref=`ci/c47-1`，`commit=7b98ec2c0618df88115ae1c80cea47144e8614d3`，`ape_sha256=fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`，`release_tag=v0.0.47-c47-1-candidate`；`ape_url=https://github.com/partnernetsoftware/unisacc/releases/download/v0.0.47-c47-1-candidate/unisacc.com`仅作未使用后备（非空release_tag优先）。bg_310获得run **[42408207540](https://github.com/partnernetsoftware/unisacc/actions/runs/42408207540)**，headSha为冻结7b98，首次观察`in_progress`、conclusion为空。终态由cc读取；此处不等待、不重复触发、不冒认CI PASS。draft发布对象ID=`RE_kwDOUhBsCM4aGFng`，四资产ID依次APE721758240/pkg721758239/WinARM721758237/记录721758238。
+
+最终本机负例/空白与COMM原件及完整阶段账封存于`~/.unisacc-baselines/c47-1/R2-local-verification-7b98ec2c06-Ex8782/local-checks.tar.gz`，gzip检查通过，SHA=`169960c75b957399416fee2773c9817534d34b46163c70f33fe49b9282b20c9c`；同时保留活目录全部14个失败文件。封存后主根445026304B，空闲6622429184B，未触发3G暂停。资产保持原件不变。
+
