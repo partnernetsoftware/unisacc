@@ -38,6 +38,30 @@ int main(void) {
     char *names = slurp(gv, &sn), *rows;
     if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
     for (at = 0; at < sn; ) { long l = tx_len(names + at, sn - at); if (l <= 0) break; staged++; at += l + 1; }
+    { long a2;
+      for (a2 = 0; a2 < sn; ) {
+          long nl = tx_len(names + a2, sn - a2); if (nl <= 0) break;
+          if (nl >= 3 && tx_same(names + a2 + nl - 3, 3, ".cx", 3)) {
+              char spec[4410]; long j, bn, e; char *blob; char *sv[4];
+              if (nl < 4398) {
+                  spec[0] = ':'; for (j = 0; j < nl; j++) spec[j + 1] = names[a2 + j]; spec[nl + 1] = 0;
+                  sv[0] = "git"; sv[1] = "show"; sv[2] = spec; sv[3] = 0;
+                  blob = slurp(sv, &bn);
+                  if (blob && bn >= 2 && blob[0] == '#' && blob[1] == '!') {
+                      e = 0; while (e < bn && blob[e] != '\n') e++;
+                      if (tx_find(blob, e, "bash", 4) >= 0 || tx_find(blob, e, "/sh", 3) >= 0 ||
+                          tx_find(blob, e, "zsh", 3) >= 0 || tx_find(blob, e, "python", 6) >= 0 ||
+                          tx_find(blob, e, "perl", 4) >= 0 || tx_find(blob, e, "node", 4) >= 0 ||
+                          tx_find(blob, e, "bun", 3) >= 0) {
+                          sy_eprintf("precommit: %.*s: .cx 只放 cx 源码,shell 薄入口用 .sh 且 ≤20 行\n", (int)nl, names + a2);
+                          blocked++;
+                      }
+                  }
+              }
+          }
+          a2 += nl + 1;
+      }
+    }
     /* facts gate: a commit touching include/ or exec/facts/ must leave the generated pp-autoinc-gen table
        in sync. The FTRIM/libc anchors are baked into that table from every .h's raw #if lines, so an out-of-
        sync table silently breaks dead-code elimination (see items.tsv FTRIM-ANCHOR). Run facts-gen --check
