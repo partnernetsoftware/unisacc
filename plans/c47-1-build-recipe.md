@@ -17,17 +17,20 @@ cc负责发布；本窗口执行构造。范围为A1–A4/A6–A8、L0/M12及M3�
 git clone --shared --single-branch "$MAIN" "$P"
 git -C "$P" rev-parse --verify "$REV^{commit}"
 cp "$MAIN/unisacc.com" "$P/unisacc.com"
-cp "$MAIN/unisacc.com.build.json" "$P/unisacc.com.build.json"
+cp /home/devali/.unisacc-baselines/c46-3/unisacc.com.build.json "$P/unisacc.com.build.json"
 sha256sum "$P/unisacc.com" "$P/unisacc.com.build.json"
 sh "$P/unisacc.com" --version
 mkdir -p "$B" "$S"
 cp "$P/unisacc.com" "$B/Root41-bootstrap.com"
+cp /home/devali/.unisacc-baselines/c46-3/unisacc.com.build.json "$B/Root41-bootstrap.com.build.json"
+sha256sum "$B/Root41-bootstrap.com" "$B/Root41-bootstrap.com.build.json"
 git archive "$REV" | tar -x -C "$S"
 cp "$P/unisacc.com" "$S/unisacc.com"
 cp "$P/unisacc.com.build.json" "$S/unisacc.com.build.json"
 ```
 
 bootstrap版本须精确为`unisacc 0.0.46`且APE摘要如上。实跑发现当前为独立APE，无`unisacc.com.dev`；旧chain-step snap无条件复制dev目录，不能用于此输入。改用上面的真实git archive与两件产品材料复制，归档成功后由文件写入工具将完整40字节REV写入`S/.release-rev`，不造空dev目录。`Root41-bootstrap.com`只是工具文件名。release-build本身通过pp_copy_product支持独立APE；同一snapshot的刷新写操作保持串行。
+context前必须给bootstrap APE准备配对build.json：来自`~/.unisacc-baselines/c46-3/unisacc.com.build.json`，摘要为`56fa8f14317f6150d0e6f182e0a51bf09ffe4168f36166216561477bdf2086e5`，product_digest须等于bootstrap的884adfef完整摘要。注意当前共享main的记录摘要aca03458虽也写相同product_digest，却标commit=3b32f21c、sources_sha=ce291cc3，不是正式发布存档的44182b40/95e34c70；本次只在私有根用正式存档替换，未改共享记录。首个缺sidecar上下文及第二个aca身份上下文均保留，切换配对记录后新建context、保留旧outer目录，不能混用旧身份或以目录存在当本次list成功。
 
 每到一个目标再执行`git clone --shared --single-branch "$MAIN" "$TARGET_ROOT"`及`git -C "$TARGET_ROOT" rev-parse --verify "$REV^{commit}"`，复制下面两件启动材料；`TARGET_ROOT`依次为LA、OA、OX、WA、WX。所有根保留main；源输入由`git archive REV`冻结，不靠切分支。构造入口统一读取S内冻结工具，各目标只写自己的snapshot与输出。
 
@@ -54,45 +57,20 @@ host只准备host-libz和host-inputs.tsv，不调用controller，不要求不存
 c46-3旧ctx/jobs已删除，`chain-precheck init`的`REFUSE jobs directory`不是可恢复输入。必须新建context，完成全131项。每个wave先start-job再finish-job；`chain-step wave`已按此顺序调用两次，下面每行是一整个窗口。FIRST是phase内索引，不是slice编号；不用未证明的“wave×五片”说法。
 
 ```sh
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tool 0 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tool 4 1
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 0 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 4 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 8 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 12 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 16 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 20 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 24 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 28 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 32 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 36 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 40 2
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 0 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 4 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 8 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 12 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 16 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 20 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 24 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 28 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 32 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 36 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 40 2
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 0 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 4 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 8 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 12 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 16 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 20 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 24 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 28 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 32 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 36 4
-env UNISACC_WAVE_REUSE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 40 2
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tool 0 5
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 0 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 16 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" gen 32 10
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 0 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 16 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" tbl 32 10
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 0 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 16 16
+env UNISACC_WAVE_REUSE=0 UNISACC_RUN_CACHE=0 sh "$S/unisacc.com" "$S/tools/chain-step.cx" -- wave "$S" "$C" "$B" net 32 10
 sh "$S/unisacc.com" "$S/tools/source-job-wave.cx" -- "$S" "$C" "$B" final
 ```
 
-COUNT=4是保守窗口选择，当前尚未恢复c46-3外层wave窗口的原始argv，不宣称它就是历史实跑切分。历史归档保留131组start/finish内层argv与退出状态。source-job-wave传输shell上限58秒，controller子项bound55；不要再用外层55秒误杀合法窗口。每阶段记录实际完成清单与失败项，不能只看最后一行。
+本次nproc=16、可用内存20,302,360,576B，冻结工具硬上限WAVE_JOBS_MAX=16，因此按16/16/10切分42项、五工具同窗；这是本轮选择，不冒称c46-3历史切分。工具旧文件头COUNT1..4是历史注释，实际硬上限见宏与wave范围检查。历史归档保留131组start/finish内层argv与退出状态。每子项bound55、传输58秒不变，chain-step包含start与finish两个动作，调用器外层180秒只用于正规有界构造窗口，不放宽任何子项。每阶段核对实际完成清单与失败项。
 
 ## 3. routes、声明资源与P4包
 
