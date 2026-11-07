@@ -444,6 +444,31 @@ int main(int argc, char **argv) {
             if (append_row(&out, &olen, &ocap, p, c) < 0) { fprintf(stderr, "cxtrunc: out of memory\n"); return 2; }
         }
     }
+    { char *ulist = 0; size_t uln = 0;
+      rc = cx_run("git ls-files -o --exclude-standard -z -- '*.cx'", &ulist, &uln);
+      if (rc == 0 && ulist) {
+          for (rec = ulist, end = ulist + uln; rec < end; rec += strlen(rec) + 1) {
+              size_t n; char *src; int c; Row *r;
+              if (!*rec || tx_prefix(rec, (long)strlen(rec), "archive/", 8)) continue;
+              src = cx_read(rec, &n);
+              c = src ? count_trunc(src, n) : 0;
+              free(src);
+              files++; total += c;
+              if (check) {
+                  r = find_row(rec);
+                  if (r) r->used = 1;
+                  if (c > (r ? r->count : 0)) {
+                      if (r) printf("cxtrunc: %s has %d calls, baseline %d\n", rec, c, r->count);
+                      else printf("cxtrunc: %s has %d calls and no baseline row (a new .cx must have 0)\n", rec, c);
+                      over++;
+                  } else if (r && c < r->count) under++;
+              } else if (c > 0) {
+                  if (append_row(&out, &olen, &ocap, rec, c) < 0) { fprintf(stderr, "cxtrunc: out of memory\n"); return 2; }
+              }
+          }
+          free(ulist);
+      }
+    }
     free(list); free(cdup);
     if (!check) {
         if (cx_write(BASELINE, out, olen) != 0) { fprintf(stderr, "cxtrunc: cannot write %s\n", BASELINE); return 2; }
