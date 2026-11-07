@@ -22,6 +22,13 @@ Python 在这条路径上是离线构造工具；旧 C/Python 预处理器用于
 不在生成器里复制这18行决策。未提供的动作分节必须失败。
 运算符编号和动作中的寄存器名是机器接口，不能只改编号而不改消费它的声明。
 
+空白分类与 E1 共用 `weights/gold/lexcls.tsv`。`tools/facts-gen.cx --write . pp-gen`
+派生 `classes`：`hspace` 为 HT/VT/FF/CR/space，`space` 另含 LF；宏内部
+paint 标记的并集类仅供已有参数帧使用，不把其它源控制字节归为空白。
+指令、宏调用、字符串化与自动包含行通过清单的 `classes` 绑定读这些事实；
+LF 计数行保持独立，字符串/字符字面量和注释状态不做字节过滤。
+`tests/c99-whitespace.cx` 保留原值、字符串化折叠和非空白控制字节拒绝边界。
+
 `exec/finite_rules.py` 只展开互斥观察范围、默认值、动作序列、分节与显式绑定，
 并登记返回标签；不解释 C 指令、宏或表达式。
 

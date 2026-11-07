@@ -1,0 +1,33 @@
+/* C99 5.1.1.2, 6.4 and 6.10: whitespace is not a newline or a literal byte filter.
+ * ROOT PRODUCT ABS_NEW_OUT [START COUNT]; PRODUCT is an explicitly bound candidate. */
+#pragma unisa use cxlib.netpack
+long time(long *);
+static void save(const char *p,const char *s,size_t n){FILE *f=fopen(p,"wbx");if(!f||fwrite(s,1,n,f)!=n||fclose(f))exit(2);}
+int main(int argc,char **argv){
+ if(argc!=4&&argc!=6)return 2; int start=argc==6?atoi(argv[4]):0,count=argc==6?atoi(argv[5]):100;
+ if(start==0&&mkdir(argv[3],0700))return 2;
+ struct {const char *name,*source;int rc;const char *err;} cases[]={
+ {"declaration","int\fmain(void){int\fx=3;return x-3;}\n",0,0},
+ {"return","int main(void){return\f0;}\n",0,0},
+ {"expression","int main(void){return 3\f+\f4-7;}\n",0,0},
+ {"directive","\f#\fdefine\fVALUE\f7\nint main(void){return VALUE-7;}\n",0,0},
+ {"macro-arguments","#define ADD(a,b) ((a)+(b))\nint main(void){return ADD(\f3\f,\f4\f)-7;}\n",0,0},
+ {"stringize","#define S(x) #x\nint main(void){char *s=S(\fa\f\v\r\t b\f);return !(s[0]=='a'&&s[1]==' '&&s[2]=='b'&&s[3]==0);}\n",0,0},
+ {"all-six","int\tmain(void)\r{\vint\fx = 0;\nreturn x;}\n",0,0},
+ {"literal-values","int main(void){char *s=\"a\fb\v\";return !(s[0]=='a'&&s[1]==12&&s[2]=='b'&&s[3]==11&&'\f'==12&&'\v'==11&&'\\f'==12&&'\\v'==11);}\n",0,0},
+ {"comments","/*\f\v*/ int main(void){int x=1; //\f\v\nreturn x-1;}\n",0,0},
+ {"not-newline","#define F(x) ((x)+1)\nint main(void){return F\f(2)-3;}\n",0,0},
+ {"macro-literal","#define ID(x) x\nint main(void){char *s=ID(\"a\fb\");return !(s[1]==12&&s[2]=='b');}\n",0,0},
+ {"non-whitespace-control","int main(void){return\0160;}\n",1,"unexpected character"}
+ };
+ int fail=0,done=0; char p[4096],q[4096],why[1024];
+ snprintf(q,sizeof q,"%s/results-%d.tsv",argv[3],start); FILE *report=fopen(q,"wbx");if(!report)return 2;
+ for(int i=start;i<(int)(sizeof cases/sizeof cases[0])&&i<start+count;i++){
+ snprintf(p,sizeof p,"%s/%s.c",argv[3],cases[i].name);save(p,cases[i].source,strlen(cases[i].source));
+ char *av[]={"sh",argv[2],p,0}; np_result r={0}; long begun=time(0);printf("START\t%s\tparent_pid=%d\tdeadline=%ld\n",cases[i].name,(int)getpid(),begun+20);
+ int tr=np_run(av,argv[1],0,20,&r,why,sizeof why);int ok=!tr&&r.rc==cases[i].rc&&(!cases[i].err||strstr(r.err,cases[i].err));
+ snprintf(q,sizeof q,"%s/%s.stdout",argv[3],cases[i].name);save(q,r.out,r.outn);snprintf(q,sizeof q,"%s/%s.stderr",argv[3],cases[i].name);save(q,r.err,r.errn);
+ fprintf(report,"%s\t%s\trc=%d\ttransport=%d\tresidue=%d\tstarted=%ld\tended=%ld\n",ok?"PASS":"FAIL",cases[i].name,r.rc,tr,r.residue,begun,time(0));printf("%s\t%s\trc=%d\n",ok?"PASS":"FAIL",cases[i].name,r.rc);if(!ok)fail++;done++;np_free(&r);
+ }
+ fprintf(report,"SUMMARY\tpass=%d\tfail=%d\n",done-fail,fail);fclose(report);printf("C99_WHITESPACE\tpass=%d\tfail=%d\n",done-fail,fail);return fail?1:0;
+}

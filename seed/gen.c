@@ -2690,6 +2690,26 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
     }
     if (ferror(f) || close_in(f) || rows != 2) die("opt answer template read failed");
 }
+/* Resolve manifest classes before applying any row-local classmap additions. */
+static Value *pp_row_classes(Value *opts, Value *facts) {
+    if (!opts) return NULL;
+    Value *name = value_get(opts, "classes"), *map = value_get(opts, "classmap");
+    Value *base = name ? value_path(facts, value_text(name)) : NULL;
+    Value *classes = base;
+    if (map) {
+        classes = value_new(JOBJ);
+        if (base) for (size_t i = 0; i < base->n; i++)
+            value_put(classes, base->items[i].key, base->items[i].value);
+        for (size_t i = 0; i < map->n; i++)
+            value_put(classes, map->items[i].key,
+                      value_path(facts, value_text(map->items[i].value)));
+    }
+    return classes;
+}
+static Value *pp_field_classes(const char *options, Value *facts) {
+    return !strcmp(options, "-") ? NULL :
+        pp_row_classes(value_json(options, "pp row options"), facts);
+}
 static void inspect_pp_emit(const char *outpath, size_t index) {
     FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *emits = value_get(facts, "emits");
@@ -2720,8 +2740,8 @@ static void inspect_pp_emit(const char *outpath, size_t index) {
             Value *bindings = value_new(JOBJ), *opts = value_json(field[8], "pp emit options");
             Value *sequences = mapseq_construct(opts, facts);
             direct_bindings(bindings, field[7], facts);
-            install_plain(&g, "exec/pp/autoinc-emit-byte.tsv", 'b', bindings, sequences);
-            install_plain(&g, "exec/pp/autoinc-emit-result.tsv", 'r', bindings, sequences);
+            install_plain_classes(&g, "exec/pp/autoinc-emit-byte.tsv", 'b', bindings, sequences, pp_row_classes(opts, facts));
+            install_plain_classes(&g, "exec/pp/autoinc-emit-result.tsv", 'r', bindings, sequences, pp_row_classes(opts, facts));
             found++;
         }
         free(s);
@@ -2739,10 +2759,11 @@ static void inspect_pp_object_predefine(const char *outpath) {
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], "object-predefine")) {
-            if (strcmp(field[2], "-") || strcmp(field[4], "-") || strcmp(field[7], "-") ||
-                strcmp(field[8], "-")) die("unsupported pp object-predefine row");
-            install_plain(&g, "exec/pp/object-predefine-byte.tsv", 'b', empty, NULL);
-            install_plain(&g, "exec/pp/object-predefine-result.tsv", 'r', empty, NULL);
+            Value *classes = pp_field_classes(field[8], load_facts_expr(field[4]));
+            if (strcmp(field[2], "-") || strcmp(field[7], "-"))
+                die("unsupported pp object-predefine row");
+            install_plain_classes(&g, "exec/pp/object-predefine-byte.tsv", 'b', empty, NULL, classes);
+            install_plain_classes(&g, "exec/pp/object-predefine-result.tsv", 'r', empty, NULL, classes);
             found++;
         }
         free(s);
@@ -2752,14 +2773,14 @@ static void inspect_pp_object_predefine(const char *outpath) {
     output(out, &g); if (close_in(out)) die("output close failed");
 }
 static void pp_install_stem(Graph *g, const char *stem, const char *section,
-                            Value *bindings, Value *sequences) {
+                            Value *bindings, Value *sequences, Value *classes) {
     char path[1024];
     for (int i = 0; i < 2; i++) {
         if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
             die("pp stem path too long");
         if (section && strcmp(section, "-"))
-            install_section(g, path, section, i ? 'r' : 'b', bindings, sequences);
-        else install_plain(g, path, i ? 'r' : 'b', bindings, sequences);
+            install_section_classes(g, path, section, i ? 'r' : 'b', bindings, sequences, classes);
+        else install_plain_classes(g, path, i ? 'r' : 'b', bindings, sequences, classes);
     }
 }
 static void pp_install_standard(Graph *g);
@@ -2788,10 +2809,10 @@ static void pp_install_prefix(Graph *g, int no_autoinc) {
                    (!strcmp(field[1], "cli") || !strcmp(field[1], "text") ||
                     !strcmp(field[1], "macro") || !strcmp(field[1], "pragma"))) {
             Value *bindings = value_new(JOBJ), *facts = load_facts_expr(field[4]);
-            if (strcmp(field[2], "-") || strcmp(field[8], "-")) die("unsupported pp prefix row");
+            if (strcmp(field[2], "-")) die("unsupported pp prefix row");
             direct_bindings(bindings, field[7], facts);
             pp_install_stem(g, field[1], NULL, bindings,
-                            !strcmp(field[1], "cli") ? sequences : NULL);
+                            !strcmp(field[1], "cli") ? sequences : NULL, pp_field_classes(field[8], facts));
             rows++;
         } else die("unsupported pp prefix manifest row");
         free(s);
@@ -2852,15 +2873,9 @@ static void pp_autoinc_block(Graph *g, PPRow *rows, size_t lo, size_t hi, int de
                 for (size_t k = 0; k < b->n; k++) value_put(env, b->items[k].key, b->items[k].value);
             } else if (!strcmp(f[0] + depth, "rows")) {
                 Value *bindings = value_new(JOBJ), *sequences = mapseq_construct(opts, facts);
-                Value *classmap = value_get(opts, "classmap"), *classes = NULL;
+                Value *classes = pp_row_classes(opts, facts);
                 char path[1024];
                 direct_bindings(bindings, f[7], facts);
-                if (classmap) {
-                    classes = value_new(JOBJ);
-                    for (size_t k = 0; k < classmap->n; k++)
-                        value_put(classes, classmap->items[k].key,
-                                  value_path(facts, value_text(classmap->items[k].value)));
-                }
                 for (int k = 0; k < 2; k++) {
                     if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", f[1], k ? "result" : "byte") >= (int)sizeof(path))
                         die("pp autoinc path too long");
@@ -2922,24 +2937,24 @@ static void pp_install_body_before_dsw(Graph *g) {
         if (!strcmp(field[0], "template") && !strcmp(field[1], "dsw")) { free(s); break; }
         if (!strcmp(field[0], "rows") && !strcmp(field[1], "directive-scan")) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
-            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL); scans++;
+            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL, pp_field_classes(field[8], facts)); scans++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "object-predefine")) {
-            pp_install_stem(g, field[1], NULL, value_new(JOBJ), NULL); obj++;
+            pp_install_stem(g, field[1], NULL, value_new(JOBJ), NULL, pp_field_classes(field[8], load_facts_expr(field[4]))); obj++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
                    !strcmp(field[2], "predefine")) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ), *seqs = value_new(JOBJ);
             if (!seqenv || !value_get(seqenv, "objname")) die("pp object name sequence missing");
             direct_bindings(bind, field[7], facts); value_put(seqs, "name", value_get(seqenv, "objname"));
-            pp_install_stem(g, field[1], field[2], bind, seqs); assembly++;
+            pp_install_stem(g, field[1], field[2], bind, seqs, pp_field_classes(field[8], facts)); assembly++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "linedir")) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
-            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL); linedir++;
+            direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL, pp_field_classes(field[8], facts)); linedir++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "shared-predefine")) {
             /* --shared-predefines: predefines come from resources; it replaces the per-target foreach */
             if (strcmp(field[3], "shared-predefines")) die("unsupported shared-predefine condition");
             if (pp_shared_predefines) {
                 Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
-                direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL);
+                direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL, pp_field_classes(field[8], facts));
             }
         } else if (!strcmp(field[0], "foreach") && pp_shared_predefines) {
             if (strcmp(field[3], "!shared-predefines")) die("unsupported pp predefine foreach condition");
@@ -2961,7 +2976,7 @@ static void pp_install_body_before_dsw(Graph *g) {
                 value_put(bind, "F_BODY", value_get(ctx, "F_BODY"));
                 seqs = mapseq_construct(opts, ctx);
                 value_put(seqs, "name", value_get(seqs, "pname"));
-                pp_install_stem(g, "assembly", "predefine", bind, seqs);
+                pp_install_stem(g, "assembly", "predefine", bind, seqs, NULL);
             }
             free(s); break;
         } else die("unsupported pp body row before dsw");
@@ -3017,13 +3032,13 @@ static void pp_install_body_after_dsw(Graph *g) {
                 value_put(ctx, "it", it); value_put(ctx, "name", value_get(it, "name"));
                 value_put(ctx, "section", value_get(it, "section"));
                 direct_bindings(bind, bf[7], ctx);
-                pp_install_stem(g, bf[1], value_text(value_get(it, "section")), bind, NULL);
+                pp_install_stem(g, bf[1], value_text(value_get(it, "section")), bind, NULL, pp_field_classes(bf[8], ctx));
                 free(local);
             }
             actions++; free(body);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
                    !strcmp(field[2], "accept")) {
-            pp_install_stem(g, "assembly", "accept", value_new(JOBJ), NULL); accept++;
+            pp_install_stem(g, "assembly", "accept", value_new(JOBJ), NULL, pp_field_classes(field[8], load_facts_expr(field[4]))); accept++;
         } else if (!strcmp(field[0], "template") && !strcmp(field[1], "escape")) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp escape options");
             Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
@@ -3048,7 +3063,7 @@ static void pp_install_body_after_dsw(Graph *g) {
                     value_put(bind, extra->items[i].key, extra->items[i].value);
             }
             direct_bindings(bind, field[7], facts);
-            pp_install_stem(g, field[1], NULL, bind, NULL); rows++;
+            pp_install_stem(g, field[1], NULL, bind, NULL, pp_row_classes(opts, facts)); rows++;
         } else if (!strcmp(field[0], "call") && !strcmp(field[1], "locations")) {
             /* No --locations flag in the default product route. */
         } else if (!strcmp(field[0], ".rows")) {
@@ -3152,7 +3167,7 @@ static void pp_sourcefacts_edit(Graph *g, const char *section) {
 static void pp_install_sourcefacts(Graph *g) {
     Value *empty = value_new(JOBJ);
     pp_sourcefacts_edit(g, "pre");
-    pp_install_stem(g, "sourcefacts", NULL, empty, NULL);
+    pp_install_stem(g, "sourcefacts", NULL, empty, NULL, NULL);
     pp_sourcefacts_edit(g, "post");
 }
 static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
@@ -3186,8 +3201,8 @@ static void inspect_pp_header(const char *outpath, size_t index) {
             !strcmp(field[2], "header")) {
             Value *bindings = value_new(JOBJ);
             direct_bindings(bindings, field[7], facts);
-            install_section(&g, "exec/pp/assembly-byte.tsv", "header", 'b', bindings, NULL);
-            install_section(&g, "exec/pp/assembly-result.tsv", "header", 'r', bindings, NULL);
+            install_section_classes(&g, "exec/pp/assembly-byte.tsv", "header", 'b', bindings, NULL, pp_field_classes(field[8], facts));
+            install_section_classes(&g, "exec/pp/assembly-result.tsv", "header", 'r', bindings, NULL, pp_field_classes(field[8], facts));
             found++;
         } else if (!strcmp(field[0], "..rows") && !strcmp(field[1], "autoinc-name")) {
             Value *names = value_get(value_get(facts, "it"), "names"), *opts = value_json(field[8], "pp name options");
@@ -3200,7 +3215,7 @@ static void inspect_pp_header(const char *outpath, size_t index) {
                 for (int k = 0; k < 2; k++) {
                     if (snprintf(path, sizeof(path), "exec/pp/autoinc-name-%s.tsv", k ? "result" : "byte") >= (int)sizeof(path))
                         die("pp name path too long");
-                    install_plain(&g, path, k ? 'r' : 'b', bindings, sequences);
+                    install_plain_classes(&g, path, k ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
                 }
             }
             found++;
@@ -3240,8 +3255,8 @@ static void inspect_pp_body(const char *outpath, size_t index) {
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", field[1], i ? "result" : "byte") >= (int)sizeof(path))
                     die("pp body path too long");
-                if (assembly) install_section(&g, path, "predefine", i ? 'r' : 'b', bindings, sequences);
-                else install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+                if (assembly) install_section_classes(&g, path, "predefine", i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
+                else install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
             }
             found++;
         }
@@ -3275,7 +3290,7 @@ static void inspect_pp_key(const char *outpath, size_t index) {
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/ftrim-libc-key-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
                     die("pp key path too long");
-                install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+                install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
             }
             found++;
         }
@@ -3296,15 +3311,9 @@ static void inspect_pp_autoinc(const char *stem, const char *outpath) {
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
             Value *opts = value_json(field[8], "pp autoinc options"), *sequences = mapseq_construct(opts, facts);
-            Value *classes = NULL, *classmap = value_get(opts, "classmap");
+            Value *classes = pp_row_classes(opts, facts);
             char path[1024];
             direct_bindings(bindings, field[7], facts);
-            if (classmap) {
-                classes = value_new(JOBJ);
-                for (size_t j = 0; j < classmap->n; j++)
-                    value_put(classes, classmap->items[j].key,
-                              value_path(facts, value_text(classmap->items[j].value)));
-            }
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
                     die("pp autoinc path too long");
@@ -3334,7 +3343,7 @@ static void inspect_pp_locations(const char *outpath) {
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/location-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
                     die("pp location path too long");
-                install_plain(&g, path, i ? 'r' : 'b', bindings, NULL);
+                install_plain_classes(&g, path, i ? 'r' : 'b', bindings, NULL, pp_field_classes(field[8], facts));
             }
             found++;
         }
@@ -3385,12 +3394,12 @@ static void inspect_pp_assembly(const char *section, const char *outpath) {
                    !strcmp(field[2], section)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
             Value *sequences = value_new(JOBJ);
-            if (strcmp(field[8], "-") || !strcmp(field[3], "locations")) die("unsupported pp assembly row");
+            if (!strcmp(field[3], "locations")) die("unsupported pp assembly row");
             direct_bindings(bindings, field[7], facts);
             if (mapseq && value_get(mapseq, "objname"))
                 value_put(sequences, "name", value_get(mapseq, "objname"));
-            install_section(&g, "exec/pp/assembly-byte.tsv", section, 'b', bindings, sequences);
-            install_section(&g, "exec/pp/assembly-result.tsv", section, 'r', bindings, sequences);
+            install_section_classes(&g, "exec/pp/assembly-byte.tsv", section, 'b', bindings, sequences, pp_field_classes(field[8], facts));
+            install_section_classes(&g, "exec/pp/assembly-result.tsv", section, 'r', bindings, sequences, pp_field_classes(field[8], facts));
             found++;
         }
         free(s);
@@ -3410,10 +3419,10 @@ static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoin
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem) &&
             when_true(field[3], no_autoinc, no_autoinc ? (char *[]){"--no-autoinc"} : NULL)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
-            if (strcmp(field[2], "-") || strcmp(field[6], "-") || strcmp(field[8], "-"))
-                die("pp row has unsupported section, sequence, or options");
+            if (strcmp(field[2], "-") || strcmp(field[6], "-"))
+                die("pp row has unsupported section or sequence");
             direct_bindings(bindings, field[7], facts);
-            pp_install_stem(&g, stem, NULL, bindings, NULL);
+            pp_install_stem(&g, stem, NULL, bindings, NULL, pp_field_classes(field[8], facts));
             found++;
         }
         free(s);
@@ -3441,7 +3450,7 @@ static void inspect_pp_cli(const char *outpath, int no_autoinc) {
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/cli-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
                     die("pp CLI path too long");
-                install_plain(&g, path, i ? 'r' : 'b', bindings, sequences);
+                install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_field_classes(field[8], facts));
             }
             found++;
         }

@@ -24,6 +24,13 @@ deleted on 2026-10-23 (it built on the archived seed's construction).
 | `count-*.tsv` | counter rendering and halt |
 | `location-*.tsv` | positioned-input envelope validation and emission |
 
+C99 whitespace classification is centralized in `weights/gold/lexcls.tsv`:
+HT (9), VT (11), FF (12), CR (13) and space (32) use `ws`; only LF (10)
+uses `nl`. All six are attribute-lookahead whitespace. This classification
+does not rewrite bytes inside string/character literals or comments and does
+not admit other control bytes. `tests/c99-whitespace.cx` exercises the source
+pipeline, literal values, macro whitespace and a named non-whitespace refusal.
+
 The shared reader is `exec/finite_rules.py`, also used by the preprocessor.
 Transition columns are state, observation set, next state, action tuples.
 Ranges are inclusive; `*` means the remaining domain, not priority over
