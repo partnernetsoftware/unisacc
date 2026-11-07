@@ -1,0 +1,41 @@
+/* Independent shared/format deployment modes; numeric M comes only from stage+route D.
+ * Required absolute TEST_LOADER_{ROOT,LOADER,SLICE,MODELS,SWAP}; one mode per <=55s batch.
+ * Fixtures are the legal consumers documented by tests/stages and check-stream-pipe. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.loadernets
+#pragma unisa use sys.fs
+static char work[4096],cwd[4400];static int checks,failed;
+static void die(const char *s){fprintf(stderr,"check-loader-common: REFUSE %s\n",s);exit(2);}
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static const char *binding(const char *s){char *v=getenv(s);if(!v||v[0]!='/')die(s);return v;}
+static void save(const char *tag,const char *ext,const char *b,size_t n){char p[4600];if(cx_fmt(p,sizeof p,"%s/%s.%s",work,tag,ext)||cx_write(p,b,n))die("evidence write");}
+static void invoke(char **av,const char *input,const char *tag,np_result *r){char why[1024],rc[40];int saved=dup(0),fd=open(input,O_RDONLY);if(saved<0||fd<0||dup2(fd,0)<0)die("stdin binding");close(fd);if(np_run(av,cwd,0,10,r,why,sizeof why))die(why);if(dup2(saved,0)<0)die("stdin restore");close(saved);save(tag,"stdout",r->out,r->outn);save(tag,"stderr",r->err,r->errn);if(cx_fmt(rc,sizeof rc,"%d\n",r->rc))die("status");save(tag,"rc",rc,strlen(rc));}
+static int equal(np_result *a,np_result *b){return a->rc==b->rc&&a->outn==b->outn&&a->errn==b->errn&&(!a->outn||!memcmp(a->out,b->out,a->outn))&&(!a->errn||!memcmp(a->err,b->err,a->errn));}
+int main(int argc,char **argv){
+ if(argc>2)die("one mode argument or TEST_LOADER_COMMON_MODE required");
+ const char *root=binding("TEST_LOADER_ROOT"),*loader=binding("TEST_LOADER_LOADER"),*slice=binding("TEST_LOADER_SLICE"),*models=binding("TEST_LOADER_MODELS"),*swap=binding("TEST_LOADER_SWAP");
+ const char *mode=argc==2?argv[1]:getenv("TEST_LOADER_COMMON_MODE"),*stage=0,*route=0,*fixture=0,*source="a.c";int raw=0;if(!mode||!*mode)die("TEST_LOADER_COMMON_MODE");
+ if(!strcmp(mode,"pp")){stage="e2";route="lnx/x86_64/pp";fixture="e2";}
+ else if(!strcmp(mode,"tapecheck")){stage="tapecheck";route="lnx/x86_64/tape/O0";fixture="tapecheck";raw=1;}
+ else if(!strcmp(mode,"o2")){stage="e4";route="lnx/x86_64/run/O2";fixture="e4";source="b.c";}
+ else if(!strcmp(mode,"units")){stage="units";route="lnx/x86_64/multi/run/O0";fixture="units";source="u0.c";}
+ else if(!strcmp(mode,"tokens-pp")){stage="tokenpp";route="tokens";fixture="e2";}
+ else if(!strcmp(mode,"tokens-lex")){stage="tokenlex";route="tokens";fixture="e2";}
+ else if(!strcmp(mode,"warn")){stage="e3";route="lnx/x86_64/warn/image/O0";fixture="e3";}
+ else die("unsupported mode");
+ char fresh[]="/tmp/check-loader-common-XXXXXX",input[4600];if(!mkdtemp(fresh)||cx_fmt(work,sizeof work,"%s",fresh)||cx_fmt(cwd,sizeof cwd,"%s/tests/stages/%s",root,fixture)||cx_fmt(input,sizeof input,"%s/in",cwd))die("fixture paths");
+ if(!strcmp(mode,"tokens-lex")){char carrier[4600];if(cx_fmt(carrier,sizeof carrier,"%s/tokenpp",work))die("token carrier path");char *av[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream","tokenpp","--route","tokens","--source","a.c",0};np_result r={0};invoke(av,input,"tokenpp-carrier",&r);if(r.rc||!r.outn||cx_write(carrier,r.out,r.outn)||cx_fmt(input,sizeof input,"%s",carrier))die("legal tokenpp carrier");np_free(&r);}
+ const char *bound[]={loader,slice,models,swap,input};char before[5][65];for(int i=0;i<5;i++){ln_digest(bound[i],before[i]);printf("COMMON_BEFORE\t%s\t%s\n",bound[i],before[i]);}
+ long index;size_t n;char *record;ln_select(models,stage,route,&index,&n,&record);
+ char net[4400],bad[4400],selfarg[4600],badarg[4600];if(cx_fmt(net,sizeof net,"%s/M%ld",work,index)||cx_fmt(bad,sizeof bad,"%s/M%ld.bad",work,index)||cx_fmt(selfarg,sizeof selfarg,"%ld=%s",index,net)||cx_fmt(badarg,sizeof badarg,"%ld=%s",index,bad))die("model paths");
+ if(cx_write(net,record,n))die("self M");record[n-1]^=1;if(cx_write(bad,record,n))die("mutated M");free(record);char sha[65],badsha[65];ln_digest(net,sha);ln_digest(bad,badsha);printf("COMMON_SELECTED\tmode=%s\tstage=%s\troute=%s\tM=%ld\tself=%s\tmutation=%s\n",mode,stage,route,index,sha,badsha);
+ char *base[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ char *self[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",selfarg,"--swap-tool",(char *)swap,"--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ char *id[]={(char *)loader,"--slice",(char *)slice,"--models",(char *)models,"--net",selfarg,"--swap-tool",(char *)swap,"--identity","--","stream",(char *)stage,"--route",(char *)route,"--res","run-forward","--source",(char *)source,0,0};
+ if(raw){base[14]="--raw";self[18]="--raw";id[19]="--raw";}
+ np_result a={0},b={0},c={0},d={0};invoke(base,input,"original",&a);invoke(self,input,"self",&b);invoke(id,input,"identity",&c);
+ ck(!a.rc&&equal(&a,&b),"complete-stdout-stderr-rc-equivalence");ck(!c.rc&&strstr(c.err,sha)&&strstr(c.err,"kind=external-net")&&strstr(c.err,"kind=replaced-models-file"),"identity-self-M-sha-selected");
+ id[6]=badarg;invoke(id,input,"mutation",&d);ck(d.rc!=0&&!d.outn&&strstr(d.err,badsha)&&strstr(d.err,"kind=external-net")&&strstr(d.err,"unisacc:")&&(strstr(d.err,"model")||strstr(d.err,"package")),"last-byte-M-product-named-refusal-no-stdout");
+ const char *unchanged[]={net,bad};const char *hashes[]={sha,badsha};for(int i=0;i<2;i++){char h[65];ln_digest(unchanged[i],h);ck(!strcmp(h,hashes[i]),"external-M-unchanged");}for(int i=0;i<5;i++){char h[65];ln_digest(bound[i],h);ck(!strcmp(h,before[i]),"bound-material-unchanged");printf("COMMON_AFTER\t%s\t%s\n",bound[i],h);}
+ np_free(&a);np_free(&b);np_free(&c);np_free(&d);printf("LOADER_COMMON\tmode=%s\tassertions=%d\tfailed=%d\tout=%s\n",mode,checks,failed,work);return failed?1:0;
+}

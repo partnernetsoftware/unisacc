@@ -128,6 +128,7 @@
 | 仓根换成真 APE（旧脚本留为 unisacc-dev,可回退） | `sh ./unisacc.com tools/install-ape.cx -- ROOT APE SHA256 [--write]`；回退 `-- ROOT --rollback [--write]`；检查 `tools/check-install-ape.cx` | 校验整文件 sha、UNIPKG1 尾、`--version`；同目录临时文件复核后原子 rename；旧启动脚本存 `unisacc-dev`、`.dev/` 让位为 `.dev.split-prev`、记录备份 `.split-prev`。build.json 同步 `ape1`/digest/**实际 bytes**；`ALREADY --write` 修陈旧记录，干净记录不重写，不带 `--write` 不改。两源包生产入口共享 `productpkg.pp_execution_record_error` 规范校验；更新生产者自钉后旧代材料必须重新准备；批次 `install-ape` |
 | 分片本机启动与外域不声明 | `sh ./unisacc.com tools/check-loader-isa.cx`；批次 `loader-isa-start` | 必需显式 `TEST_LOADER_ROOT/LOADER/SLICE/MODELS/TARGET/VERSION`，路径绝对；只核真实本机精确版本，其他五格 `NOT_CLAIMED`，缺绑定具名拒绝，开发证据不是六目标发布资格 |
 | 部署模型单网替换回归 | `sh ./unisacc.com tools/check-loader-nets.cx`；批次 `loader-net-replacement` | 显式 `TEST_LOADER_ROOT/LOADER/SLICE/MODELS/SWAP`；八个真实D/M模板完整输出等价及变异实际拒绝；`test-loader --net STAGE或数值INDEX=ABS --swap-tool ABS`，精确route选M；18事实网另轨，跨目标只生成产物不冒认原生 |
+| 共享部署模型逐mode消费 | `sh ./unisacc.com tools/check-loader-common.cx`；批次 `loader-common-models` | 五绑定加显式 `TEST_LOADER_COMMON_MODE=pp/tapecheck/o2/units/tokens-pp/tokens-lex/warn`；每mode10项真实自M等价、变异产品拒绝及SHA不变，缺模式非零；覆盖M3/5/7/32/33/34/35，18事实网另轨 |
 
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
