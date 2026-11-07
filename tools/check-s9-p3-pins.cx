@@ -1,0 +1,34 @@
+/* tools/check-s9-p3-pins.cx -- 正例 c46-3 pkg p3=14a69316…；负例篡改一字节必红。 */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+static int failed;
+static void ck(int ok, const char *n){ if(!ok) failed++; sy_printf("%s\ts9-p3-pins.%s\n", ok?"PASS":"FAIL", n); }
+int main(void){
+    const char *pkg="/home/devali/.unisacc-baselines/c46-3/pkg.bin";
+    const char *want="14a69316e4ec658063c83237f3b05a3eef22f1d68a0dad4c225d55805b227bad";
+    char map[80], badpkg[80], badmap[80];
+    if(cx_fmt(map,sizeof map,"/tmp/grk-s9pin-good.map")||cx_fmt(badpkg,sizeof badpkg,"/tmp/grk-s9pin-bad.bin")||cx_fmt(badmap,sizeof badmap,"/tmp/grk-s9pin-bad.map")) return 2;
+    sy_unlink(map); sy_unlink(badpkg); sy_unlink(badmap);
+    { char *v[]={"tools/bound","20","sh","./unisacc.com","tools/s9-p3-pins.cx","--",(char*)pkg,map,0};
+      np_result r; char why[800];
+      if(np_run(v,".",0,25,&r,why,sizeof why)) { ck(0,"pos-run"); np_free(&r); }
+      else { ck(!r.rc && r.outn && tx_find(r.out,(long)r.outn,want,64)>=0,"pos-p3"); np_free(&r); }
+    }
+    { size_t n=0; char *b=cx_read(pkg,&n); int fd;
+      ck(b&&n>16,"bad-copy-src");
+      if(b&&n>16){ b[n-1]^=1; fd=sy_open_new(badpkg,0600);
+        ck(fd>=0 && !sy_write_all(fd,b,(long)n) && !sy_close(fd),"bad-write");
+      }
+    }
+    { char *v[]={"tools/bound","20","sh","./unisacc.com","tools/s9-p3-pins.cx","--",badpkg,badmap,0};
+      np_result r; char why[800];
+      if(np_run(v,".",0,25,&r,why,sizeof why)) { ck(1,"neg-transport-ok"); np_free(&r); }
+      else { ck(r.rc!=0 || !r.outn || tx_find(r.out,(long)r.outn,want,64)<0,"neg-tamper"); np_free(&r); }
+    }
+    sy_unlink(map); sy_unlink(badpkg); sy_unlink(badmap);
+    sy_printf("CHECK_S9_P3_PINS\tfailed=%d\n", failed);
+    if(!failed) sy_printf("S9_P3_PINS\n");
+    return failed?1:0;
+}

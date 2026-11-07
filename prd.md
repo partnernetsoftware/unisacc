@@ -124,6 +124,7 @@
 | 两代不动点（读 chain-step 产物） | `sh ./unisacc.com tests/chain-fixed-point.cx`（批次 `chain-fixed-point`，材料 `chain-gen1`、`chain-fixedpoint`） | F1 gen2 sha==gen3 sha；F2/F3 receipt 的 constructor_sha 依次指向上一代，防复制同一文件冒充；不重跑构造。材料必须绑到候选文件而非其父目录（RC1-MATERIAL-BIND） |
 | 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
 | 会话图内材料一键绑定 | `sh ./unisacc.com tools/s8c-bind.cx -- ROOT SESSION CANDIDATE MAP`（薄壳 `tools/s8c-bind.sh`；批次 `s8c-bind`） | init 后对 MAP 每名独立 `all-waves material`（各 bound 55）。PREPARED≠PASS。scratch 14 名后 heavy yes 0→84 |
+| 候选 P3 自指钉 | `sh ./unisacc.com tools/s9-p3-pins.cx -- PKG MAP`（批次 `s9-p3-pins`） | 同一 pkg/APE 现算 file/p3 sha 写 MAP；c46-3 空跑 p3=14a69316…；篡改一字节必红。禁止旧候选拷钉 |
 | 身份派生校对 | `sh ./unisacc.com tools/identity-derive.cx -- ROOT --check|--write`（批次 `identity-derive`） | 编排 `check-root-identity` emit/check；--check 不一致打印 DIFF。尚未接 ape-receipt/build.json/pins |
 | 发布目录布局与校验 | `sh ./unisacc.com tools/release-layout.cx -- SOURCE NEW_OUT`；`-- --check OUT`（批次 `release-layout`） | SOURCE 为已由 CI 验证的 `unisacc.com/pkg.bin/slice-win-arm64/unisacc.com.build.json`；输出六文件及真实 SHA256SUMS，固定四成员 Windows arm64 ZIP 含设置 UNISA_CONTAINER 的 run.cmd 与说明，build.json 保留配对记录。拒绝覆盖；check 重算校验并逐字节重建 ZIP，篡改与额外 ZIP 内容均拒绝。不授予 CI 资格；生成的 cmd 包装本轮未在 Windows 原生执行，需独立原生验收。 |
 | 固定220例外部语料与期望配对 | `sh ./unisacc.com tools/ctestsuite.cx -- ROOT MATERIAL NEW_OUT START COUNT`，每片≤20；批次`ctestsuite` | 上游rev/归档SHA/每例源码与期望SHA在`tests/corpus-ctestsuite/`；源码不重分发。真实c46-3首轮216符合、4拒绝、0错值、0未知；仅1个拒绝最小例为严格C99，另3个为GNU/C11扩展。输出接受/拒绝/错值/未知和原件，不删拒绝例换绿。 |
@@ -367,7 +368,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | `work/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
 | 当前发布 | 0.0.46 已发布（见 §9.1）；c46-3 资格不迁移到后续候选 | [发布说明](plans/release-notes-0.0.46.md)、[s8b 终态](plans/s8b-terminal.md) |
-| 下一版 | 0.0.47「可信」 | [plans/v0.0.47-unisacc.md](plans/v0.0.47-unisacc.md) |
+| 下一版 | 0.0.47「可信」；c47-1旧冻结G1拒绝，等待A6b跨TU纪元修复及新冻结，不迁移旧131/P4资格 | [里程碑](plans/v0.0.47-unisacc.md)、[构造配方与当前证据](plans/c47-1-build-recipe.md) |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
