@@ -2,6 +2,13 @@
 
 不依赖已删路径（无 `/tmp/grk-s5-c46-2`）。streams 用 `STREAMS_ROOT` 或 cwd/`unisacc.com`（`tools/streams-material.cx`）。
 
+## 口径（同 s8b illegal-action：结论披露 overlay）
+
+- **候选**：冻结 `7b98ec2c06` 构造出的 APE（产品输入=该提交，不复用 f748/s8 PASS）。
+- **harness**：冻结提交的 `tests/` + 覆盖到最新 HEAD 的 **仅 `tests/`**（不碰产品输入）。当前 HEAD `a41770c6a4` 相对冻结 **tests/ 无差**；`harness_sha`=`7b98ec2c06:tests` = `a50ddb122a727626f518669c4a4972e0232cfbe6`。覆盖文件清单：∅。
+- cdx2 将改 `tests/tools-compile.cx` 动态库存（硬上限 568→跟 tools 数）。该文件一进 HEAD，s9 用新 `harness_sha`=HEAD:`tests`，清单=`tests/tools-compile.cx`。
+
+
 ## 一条命令
 
 ```
