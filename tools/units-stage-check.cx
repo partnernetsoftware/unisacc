@@ -1,30 +1,56 @@
-/* 单元 check：显式 TEST_LOADER_{ROOT,LOADER,SLICE,MODELS} 调 test-loader 跑 stream STAGE。
- * 缺绑定具名拒绝，不回落 ./unisacc.com。开发证据，非发布资格。
- * sh ./unisacc.com tools/units-stage-check.cx -- e2
+/* 显式 TEST_LOADER_* 调 test-loader stream STAGE。缺绑定具名拒绝。
+ * e2: C 源 stdin。其余: TEST_LOADER_CARRIER_DIR/carrier.N 喂 stdin。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 static void die(const char *s){fprintf(stderr,"units-stage-check: %s\n",s);exit(2);}
 static const char *need(const char *k){
     const char *v=getenv(k);if(!v||!*v||v[0]!='/')die(k);return v;
 }
+static int carriermap(const char *stage,const char **name,const char **sha){
+    if(!strcmp(stage,"e1")){*name="carrier.0";*sha="2a9aea76e932deaa4710a0618133b4e742523743e9022334707c653e7ca7c4ec";return 0;}
+    if(!strcmp(stage,"e3")){*name="carrier.1";*sha="a2f7026a8426b852a4cd6fb602a464f04245e3b60e94440fcb93a41af980e3f0";return 0;}
+    if(!strcmp(stage,"sidecar")){*name="carrier.2";*sha="1e132fd1d0d193270827f8ebed3ba7e685f5a0d1b602ed5307a4c7834c78bc29";return 0;}
+    if(!strcmp(stage,"prune")){*name="carrier.3";*sha="a11c4cf2954101e44074e458fd314e7c50899be915ccae6b212847663f64a480";return 0;}
+    if(!strcmp(stage,"lower")){*name="carrier.4";*sha="a11c4cf2954101e44074e458fd314e7c50899be915ccae6b212847663f64a480";return 0;}
+    if(!strcmp(stage,"elf")){*name="carrier.5";*sha="fc93bbfcf80793b5d5cad008fd97c822996f7899547cd185a0e382c4b061fe0b";return 0;}
+    return 1;
+}
 int main(int argc,char **argv){
     int a=argc>=2&&!strcmp(argv[1],"--")?2:1;
-    const char *stage;char loader[4400],slice[4400],models[4400],in[4400],td[]="/tmp/units-stage-XXXXXX";
+    const char *stage,*cname=0,*want=0;char loader[4400],slice[4400],models[4400],in[4400],td[]="/tmp/units-stage-XXXXXX",src[4400];
     np_result r;char why[1200];
     if(argc-a!=1)die("usage STAGE");
     stage=argv[a];
     {const char *ld=need("TEST_LOADER_LOADER");const char *sl=need("TEST_LOADER_SLICE");const char *mo=need("TEST_LOADER_MODELS");
      (void)need("TEST_LOADER_ROOT");
      if(!realpath(ld,loader)||!realpath(sl,slice)||!realpath(mo,models))die("realpath");}
-    if(!mkdtemp(td)||cx_fmt(in,sizeof in,"%s/in.c",td))die("tmp");
-    {const char *s="int main(void){return 0;}\n";if(cx_write(in,s,strlen(s)))die("input");}
-    if(strcmp(stage,"e2"))die("only e2 until frozen carriers");
-    {char wrap[4400],body[8000];
+    if(!mkdtemp(td))die("tmp");
+    if(!strcmp(stage,"e2")){
+        if(cx_fmt(in,sizeof in,"%s/in.c",td))die("in");
+        {const char *s="int main(void){return 0;}\n";if(cx_write(in,s,strlen(s)))die("input");}
+        if(mm_copy(src,sizeof src,in,strlen(in)+1))die("src");
+    }else{
+        const char *dir=need("TEST_LOADER_CARRIER_DIR");char p[4400],h[65];size_t n;char *b;
+        if(carriermap(stage,&cname,&want))die("unknown stage");
+        if(cx_fmt(p,sizeof p,"%s/%s",dir,cname))die("carrier path");
+        b=cx_read(p,&n);if(!b)die("carrier read");
+        if(sy_sha256_hex(b,(long)n,h))cx_sha256_hex(b,n,h);
+        free(b);
+        if(strcmp(h,want))die("carrier sha");
+        if(mm_copy(src,sizeof src,p,strlen(p)+1))die("src");
+    }
+    {char wrap[4400],body[9000];
      if(cx_fmt(wrap,sizeof wrap,"%s/run.sh",td))die("wrap");
-     if(cx_fmt(body,sizeof body,"#!/bin/sh\nexec '%s' --slice '%s' --models '%s' -- stream e2 --level 2 < '%s'\n",loader,slice,models,in))die("script");
+     if(!strcmp(stage,"e2")){
+         if(cx_fmt(body,sizeof body,"#!/bin/sh\nexec '%s' --slice '%s' --models '%s' -- stream e2 --level 2 < '%s'\n",loader,slice,models,src))die("script");
+     }else{
+         if(cx_fmt(body,sizeof body,"#!/bin/sh\nexec '%s' --slice '%s' --models '%s' -- stream %s < '%s'\n",loader,slice,models,stage,src))die("script");
+     }
      if(cx_write(wrap,body,strlen(body))||chmod(wrap,0700))die("wrap write");
      {char *v[]={wrap,0};int e=np_run(v,0,0,20,&r,why,sizeof why);
       printf("UNITS_STAGE\tstage=%s\trc=%d\tscope=development-evidence\n",stage,e?2:r.rc);
