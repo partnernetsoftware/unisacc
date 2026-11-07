@@ -1,6 +1,5 @@
 #pragma unisa module posix
 #pragma unisa dock
-#pragma unisa use sys.sysnums
 /* L0 sys/posix: the POSIX calls the carried runtime does not provide on
    0.0.43 (plans/cx-layers.md; apps/csih/docs/python-debt.md BLOCKED list),
    made from the system calls themselves. No #include: __syscall6 is the
@@ -13,24 +12,26 @@
 
 /* syp_dents: getdents64 on Linux, getdirentries64 on macOS (different record layouts, see sy_dir_names). */
 #if defined(__APPLE__)
-#define SYP_NUM(name) (sn_osx_x86_64_##name##_hi * 65536L + sn_osx_x86_64_##name##_lo)
+static const long syp_ok = 1, syp_setsid = 147, syp_getpgid = 151, syp_socketpair = 135, syp_ioctl = 54,
+                  syp_openat = 463, syp_linkat = 471, syp_flock = 131,
+                  syp_mkdirat = 475, syp_unlinkat = 472, syp_dents = 344, syp_mac = 1, syp_at_removedir = 0x80,
+                  syp_tiocgpgrp = 0x40047477L, syp_tiocspgrp = 0x80047476L, syp_at_fdcwd = -2;
 #elif defined(__linux__) && defined(__aarch64__)
-#define SYP_NUM(name) (sn_lnx_arm64_##name##_hi * 65536L + sn_lnx_arm64_##name##_lo)
+static const long syp_ok = 1, syp_setsid = 157, syp_getpgid = 155, syp_socketpair = 199, syp_ioctl = 29,
+                  syp_openat = 56, syp_linkat = 37, syp_flock = 32,
+                  syp_mkdirat = 34, syp_unlinkat = 35, syp_dents = 61, syp_mac = 0, syp_at_removedir = 0x200,
+                  syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
 #elif defined(__linux__) && defined(__x86_64__)
-#define SYP_NUM(name) (sn_lnx_x86_64_##name##_hi * 65536L + sn_lnx_x86_64_##name##_lo)
+static const long syp_ok = 1, syp_setsid = 112, syp_getpgid = 121, syp_socketpair = 53, syp_ioctl = 16,
+                  syp_openat = 257, syp_linkat = 265, syp_flock = 73,
+                  syp_mkdirat = 258, syp_unlinkat = 263, syp_dents = 217, syp_mac = 0, syp_at_removedir = 0x200,
+                  syp_tiocgpgrp = 0x540FL, syp_tiocspgrp = 0x5410L, syp_at_fdcwd = -100;
 #else
-#define SYP_NUM(name) (sn_fallback_##name##_hi * 65536L + sn_fallback_##name##_lo)
+static const long syp_ok = 0, syp_setsid = 0, syp_getpgid = 0, syp_socketpair = 0, syp_ioctl = 0,
+                  syp_openat = 0, syp_linkat = 0, syp_flock = 0,
+                  syp_mkdirat = 0, syp_unlinkat = 0, syp_dents = 0, syp_mac = 0, syp_at_removedir = 0,
+                  syp_tiocgpgrp = 0, syp_tiocspgrp = 0, syp_at_fdcwd = -1;
 #endif
-static const long syp_ok = SYP_NUM(syp_ok), syp_setsid = SYP_NUM(syp_setsid),
-    syp_getpgid = SYP_NUM(syp_getpgid), syp_socketpair = SYP_NUM(syp_socketpair),
-    syp_ioctl = SYP_NUM(syp_ioctl), syp_openat = SYP_NUM(syp_openat),
-    syp_linkat = SYP_NUM(syp_linkat), syp_flock = SYP_NUM(syp_flock),
-    syp_mkdirat = SYP_NUM(syp_mkdirat), syp_unlinkat = SYP_NUM(syp_unlinkat),
-    syp_dents = SYP_NUM(syp_dents), syp_mac = SYP_NUM(syp_mac),
-    syp_at_removedir = SYP_NUM(syp_at_removedir), syp_tiocgpgrp = SYP_NUM(syp_tiocgpgrp),
-    syp_tiocspgrp = SYP_NUM(syp_tiocspgrp), syp_at_fdcwd = SYP_NUM(syp_at_fdcwd);
-static const long syp_setpgid = SYP_NUM(sy_setpgid);
-#undef SYP_NUM
 
 /* __syscall6 returns -errno on failure on every target (the carried headers
    rely on the same: include/unistd.h wraps it in _unisa_ret). */
@@ -42,17 +43,6 @@ static long syp(long n, long a, long b, long c, long d, long e) {
     if (!syp_ok) return -ENOSYS;
     return __syscall6(_UNISA_SC(n), a, b, c, d, e);
 #endif
-}
-
-/* The raw setpgid system call (the prelude's setpgid is forwarded to the host C library, whose
-   errno is not this unit's). Windows has no process groups here. */
-/* Put process PID (0: this one) into process group PGID (0: the group whose id is PID, a new
-   group led by it). 0, or -errno: -EINVAL for a negative argument, -ESRCH when PID is neither
-   this process nor a child, -EACCES for a child that has already exec'd, -EPERM for a session
-   leader or a group in another session; -ENOSYS on Windows. */
-int sy_setpgid(int pid, int pgid) {
-    if (pid < 0 || pgid < 0) return -EINVAL;
-    return (int)syp(syp_setpgid, pid, pgid, 0, 0, 0);
 }
 
 /* The directory fd that means "relative to the current directory" for
