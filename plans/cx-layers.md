@@ -92,6 +92,8 @@
 - `cx/mem`：所有者缓冲区（创建、增长、借用视图、释放；长度与容量在句柄内，越界与重复释放具名拒绝）、定长复制/移动/填充/比较一律带两端长度；arena（一次释放一组分配，适合编译阶段的临时表）。
 - `cx/text`：带长度的字节串比较、前缀/后缀/查找、有界格式化与拼接（收编 `cx_fmt`、`cx_path_join`）。
 - `cx/sys`：整文件读写与原子替换（收编 `cx_read`、`cx_write`）、打开/关闭/读写/定位、stat 类、删除与改名、目录遍历、进程（spawn/wait/pipe，收编 `cx_run*`）、环境变量、单调时钟、映射内存与改权限。按平台分实现，错误码显式返回。
+- L0' 平台调用号与常量的事实入口是 `exec/facts/sys-syscalls.tsv`：六目标列沿用 `pp-targets.tsv` 顺序，另有原不支持目标的 fallback 列；`tools/target-gen.cx --write/--check` 同步覆盖 `cx/sys/sysnums.cx`。生成模块只导出无条件高/低 16 位 enum，消费端按 `hi * 65536L + lo` 组成编译期 long 常量，不作运行时查表。`sy_setpgid` 复用 `posix` 的平台常量与原始调用适配，`proc` 沿既有 `sys.posix` 依赖使用同名公开 API，负参数与 Windows `-ENOSYS` 合同不变；不新增兼容别名。
+- 本轮使用 `tests/cxplatform.cx` 的同一词法计数器比较 HEAD 与工作区，`cx/sys` 正规模块的平台条件/原始调用从 108 降至 101（`proc.cx` 7→0）。正式 `cxplatform` 闸跳过 L0，其上层总数仍为 23，不能把该数冒报为 L0 指标。四份既有生成投影 SHA256 均保持不变，六目标 `src/host.cx` 闭包构造及 Linux 实际系统 API 125/0 通过；跨目标构造不等于非本机实际运行资格。
 
 ## 已有与新建的 L0
 

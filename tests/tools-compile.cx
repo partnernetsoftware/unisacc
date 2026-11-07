@@ -1,0 +1,172 @@
+/* ROOT NEW_OUT SHARD: permanent installed-product consumer check.
+ * SHARD is 0..70; all 71 shards cover git ls-files -s -z -- tools,
+ * recursively, including every tracked .cx symlink (compiled through its
+ * tracked alias, never silently deduplicated). Non-.cx entries are not sources.
+ * Each shard contains at most eight consecutive sources in Git index order.
+ * More than 568 sources is a hard inventory failure, not partial coverage.
+ * Eight children run concurrently; np_run bounds each compile at 40 seconds
+ * and cleans its process tree. Every source is compiled, including the exact
+ * known failures in tests/tools-compile-expected.tsv; unexpected failures and
+ * stale expectations are fatal. Full stdout/stderr and per-source results
+ * remain in NEW_OUT. Aggregate every results.tsv and shard summary.
+ * Run every shard even after failure. An empty registered shard is an error.
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static void die(const char *s) { fprintf(stderr,"tools-compile: %s\n",s); exit(2); }
+static char root[4096], work[4096], product[4400];
+static char *sources[568];
+static int links[568], count;
+static char *category[568], *diagnostics[568], *reason[568];
+static void path(char *p,size_t cap,const char *base,const char *leaf);
+static void expectations(void) {
+    char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-expected.tsv");
+    FILE *f=fopen(p,"rb");if(!f)die("expected table open");
+    while(fgets(line,sizeof line,f)) {
+        size_t len=strlen(line);if(!len||line[len-1]!='\n')die("expected table line bound or missing newline");
+        line[--len]=0;if(len&&line[len-1]=='\r')die("expected table CR");
+        char *a=strchr(line,'\t');if(!a)die("expected table fields");*a++=0;
+        char *b=strchr(a,'\t');if(!b)die("expected table fields");*b++=0;
+        char *c=strchr(b,'\t');if(!c)die("expected table fields");*c++=0;
+        if(strchr(c,'\t')||!*c||!*b||(strcmp(a,"known-debt")&&strcmp(a,"fixture-negative")&&strcmp(a,"scanner-input")))die("expected table category, diagnostics or reason");
+        if(*b=='|'||b[strlen(b)-1]=='|'||strstr(b,"||"))die("empty diagnostic fragment");
+        int i;for(i=0;i<count;i++)if(!strcmp(line,sources[i]))break;
+        if(i==count)die("expected source absent from complete inventory");
+        if(category[i])die("duplicate expected source");
+        category[i]=strdup(a);diagnostics[i]=strdup(b);reason[i]=strdup(c);
+        if(!category[i]||!diagnostics[i]||!reason[i])die("allocation");
+    }
+    if(ferror(f)||fclose(f))die("expected table read");
+}
+static int matches(int i,const char *text) {
+    char *p=diagnostics[i];
+    while(*p) {
+        char *end=strchr(p,'|');if(end)*end=0;
+        int found=text&&strstr(text,p)!=0;
+        if(end)*end='|';if(!found)return 0;if(!end)break;p=end+1;
+    }
+    return 1;
+}
+static void path(char *p,size_t cap,const char *base,const char *leaf) {
+    int n=tx_snprintf(p,cap,"%s/%s",base,leaf); if(n<0||(size_t)n>=cap)die("path bound");
+}
+static void save(const char *p,const char *s,size_t n) {
+    FILE *f=fopen(p,"wb"); if(!f)die("open evidence");
+    if(n&&fwrite(s,1,n,f)!=n)die("write evidence"); if(fclose(f))die("close evidence");
+}
+static int compile(int i) {
+    char obj[4400],out[4400],err[4400],result[4400],leaf[64],why[2048]={0};
+    char temp[4400],envtmp[4500];
+    int len=tx_snprintf(leaf,sizeof leaf,"%04d.tmp",i);
+    if(len<0||(size_t)len>=sizeof leaf)die("temporary leaf bound");
+    path(temp,sizeof temp,work,leaf);
+    if(mkdir(temp,0700))die("compiler temporary directory");
+    len=tx_snprintf(envtmp,sizeof envtmp,"TMPDIR=%s",temp);
+    if(len<0||(size_t)len>=sizeof envtmp)die("temporary environment");
+    char *adds[]={envtmp,"UNISA_JOBS=1",0};
+    len=tx_snprintf(leaf,sizeof leaf,"%04d.o",i);
+    if(len<0||(size_t)len>=sizeof leaf)die("object leaf bound");
+    path(obj,sizeof obj,work,leaf);
+    len=tx_snprintf(leaf,sizeof leaf,"%04d.stdout",i);
+    if(len<0||(size_t)len>=sizeof leaf)die("stdout leaf bound");
+    path(out,sizeof out,work,leaf);
+    len=tx_snprintf(leaf,sizeof leaf,"%04d.stderr",i);
+    if(len<0||(size_t)len>=sizeof leaf)die("stderr leaf bound");
+    path(err,sizeof err,work,leaf);
+    len=tx_snprintf(leaf,sizeof leaf,"%04d.result",i);
+    if(len<0||(size_t)len>=sizeof leaf)die("result leaf bound");
+    path(result,sizeof result,work,leaf);
+    char *av[]={"sh",product,"-c","-funit","-b","lnx/x86_64",sources[i],"-o",obj,0};
+    np_result r;int run=np_run(av,root,adds,40,&r,why,sizeof why);
+    save(out,r.out?r.out:"",r.outn);save(err,r.err?r.err:"",r.errn);
+    if(run) { FILE *f=fopen(err,"ab");if(!f)die("timeout evidence");fprintf(f,"%s\n",why);fclose(f); }
+    struct stat st;int object=!stat(obj,&st)&&S_ISREG(st.st_mode)&&st.st_size>0;
+    int ok=!run&&!r.rc&&!r.residue&&object;
+    int known=category[i]!=0;
+    int scanner=known&&!strcmp(category[i],"scanner-input");
+    int input_ok=scanner&&!run&&!r.residue&&(ok||(r.rc==1&&!object));
+    int xfail=known&&!scanner&&!run&&r.rc==1&&!object&&!r.residue&&matches(i,r.err);
+    const char *status=scanner?(input_ok?(ok?"INPUT-COMPILED":"INPUT-REJECTED"):"FAIL"):(known?(ok?"XPASS":(xfail?"XFAIL":"FAIL")):(ok?"PASS":"FAIL"));
+    FILE *f=fopen(result,"wb");if(!f)die("result evidence");
+    fprintf(f,"%s\t%s\tmode=%s\trun=%d\trc=%d\tobject=%d\tresidue=%d\traw_compile_failure=%d\tcategory=%s\treason=%s\tstderr=%s\n",status,sources[i],links[i]?"symlink-follow":"regular",run,r.rc,object,r.residue,r.rc!=0,known?category[i]:"-",known?reason[i]:"-",err);
+    if(fclose(f))die("result close");np_free(&r);return xfail||input_ok?3:(!known&&ok?0:1);
+}
+int main(int argc,char **argv) {
+    if(argc!=4)die("usage: ROOT NEW_OUT SHARD(0..70)");
+    if(!realpath(argv[1],root))die("root");
+    char *end;long shard=strtol(argv[3],&end,10);if(!*argv[3]||*end||shard<0||shard>=71)die("shard");
+    if(argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("absolute output required");
+    if(tx_copy(work,sizeof work,argv[2],strlen(argv[2])))die("output path bound");
+    if(mkdir(work,0700))die("new output required");path(product,sizeof product,root,"unisacc.com");
+    char *gv[]={"git","ls-files","-s","-z","--","tools",0},why[1024];np_result list;
+    if(np_run(gv,root,0,3,&list,why,sizeof why)||list.rc||list.errn)die("git inventory failed");
+    size_t at=0;while(at<list.outn){char *s=list.out+at;size_t n=0;while(n<list.outn-at&&s[n])n++;
+        if(n==list.outn-at)die("unterminated inventory");char *tab=memchr(s,'\t',n);if(!tab)die("inventory fields");
+        char *p=tab+1;size_t pn=n-(size_t)(p-s);
+        if(pn>=3&&!strcmp(p+pn-3,".cx")){
+            if(count==568)die("inventory exceeds 71 shards; extend registry and shard limit together");
+            if(strncmp(s,"100644 ",7)&&strncmp(s,"100755 ",7)&&strncmp(s,"120000 ",7))die("unsupported source index mode");
+            if(tab[-1]!='0')die("unmerged source index");
+            if(strchr(p,'\n')||strchr(p,'\t'))die("source name cannot be represented in TSV");
+            sources[count]=strdup(p);if(!sources[count])die("allocation");links[count]=!strncmp(s,"120000 ",7);count++;
+        }at+=n+1;
+    }np_free(&list);
+    if(count<=560)die("inventory leaves registered shards empty; update registry and shard limit together");
+    expectations();
+    int first=(int)shard*8,last=first+8;if(last>count)last=count;
+    int pid[8],n=0,failed=0,compile_pass=0,known_failures=0,raw_failures=0,scanner_inputs=0,scanner_failures=0,debt=0,negative=0;fflush(stdout);fflush(stderr);
+    for(int i=first;i<last;i++){
+        int p=fork();
+        if(p<0){fprintf(stderr,"tools-compile: fork: %s\n",strerror(errno));failed++;break;}
+        if(!p)_exit(compile(i));
+        pid[n++]=p;
+    }
+    for(int j=0;j<n;j++){
+        int st,got;
+        for(;;){
+            got=waitpid(pid[j],&st,0);
+            if(got>=0)break;
+            int e=errno;
+            if(e==EINTR)continue;
+            fprintf(stderr,"tools-compile: wait: %s\n",strerror(e));failed++;
+            if(e==ECHILD)break;
+        }
+        if(got<0||!WIFEXITED(st)||(WEXITSTATUS(st)&&WEXITSTATUS(st)!=3))failed++;
+    }
+    char table[4400];path(table,sizeof table,work,"results.tsv");FILE *f=fopen(table,"wb");if(!f)die("results table");
+    for(int i=first;i<last;i++){
+        char p[4400],leaf[64],buf[8192];
+        int len=tx_snprintf(leaf,sizeof leaf,"%04d.result",i);
+        if(len<0||(size_t)len>=sizeof leaf)die("aggregate leaf bound");
+        path(p,sizeof p,work,leaf);
+        FILE *r=fopen(p,"rb");
+        if(!r){
+            fprintf(f,"FAIL\t%s\tmissing-result\n",sources[i]);
+            printf("FAIL\t%s\tmissing-result\n",sources[i]);failed++;continue;
+        }
+        size_t k;
+        if(fgets(buf,sizeof buf,r)) {
+            if(!strncmp(buf,"PASS\t",5))compile_pass++;
+            if(!strncmp(buf,"XFAIL\t",6))known_failures++;
+            if(!strncmp(buf,"XFAIL\t",6)&&strstr(buf,"\tcategory=known-debt\t"))debt++;
+            if(!strncmp(buf,"XFAIL\t",6)&&strstr(buf,"\tcategory=fixture-negative\t"))negative++;
+            if(!strncmp(buf,"INPUT-",6))scanner_inputs++;
+            if(!strncmp(buf,"INPUT-REJECTED\t",15))scanner_failures++;
+            if(strstr(buf,"\traw_compile_failure=1\t"))raw_failures++;
+            if(fseek(r,0,SEEK_SET))die("aggregate rewind");
+        }
+        while((k=fread(buf,1,sizeof buf,r))){
+            if(fwrite(buf,1,k,f)!=k)die("aggregate write");
+            fwrite(buf,1,k,stdout);
+        }
+        if(ferror(r))die("aggregate read");fclose(r);
+    }
+    if(fclose(f))die("aggregate close");
+    printf("TOOLS_COMPILE\tSUMMARY\tshard=%ld\tshards=71\tjobs=8\tinventory=%d\tcompiled=%d\tcompile_pass=%d\tknown_failures=%d\tknown_debt=%d\tfixture_negative=%d\tscanner_inputs=%d\tscanner_compile_failures=%d\tunexpected_failures=%d\traw_compile_failures=%d\tfailed=%d\tsymlinks=follow-each-alias\n",shard,count,n,compile_pass,known_failures,debt,negative,scanner_inputs,scanner_failures,failed,raw_failures,failed);
+    return failed?1:0;
+}
