@@ -34,20 +34,34 @@
 | 6 | p3-pack-ctx | 图有 | p3-library-* |
 | 其余 <5 | pp-gold, nets, kernels, origin, baseline, adopted-package, identity-helper, e2model, p3-gen-* | 否：P53/baseline/adopted/foreign | 见 pending |
 
-## FAIL 17
+## FAIL 17（stdout 末行归类；无编译器真缺陷，不报 c46-4）
 
-| 批 | 归类 | 补充证据 |
+| 批 | 归类 | stdout/stderr 末 |
 |---|---|---|
-| pins | 记录滞后（七 carrier 针） | 主树 1d57fa479d 后 CHECK_PINS failed=0（非同会话） |
-| cx-root-identity | 记录滞后（文档/APE） | 主树文档已 884adfef；主树已装产品仍 ae0b12 故单跑 failed=1 |
-| cx-kernel-context | 工具合同，归 cdx | 不钉 GOT |
-| illegal-action | INFRA 缺 .dev side ELF | cdx：缺 fixture 不算产品已测坏 opcode |
-| cx-manifest | 记录滞后 receipt ae0b12 vs APE 884adfef | 同 root-identity |
-| cx-toolsloc | 快照 44182 工具行 vs 后继主树 | 非产品 |
-| commit-own / affected-tool / stale-tool / snapshot-run-tool / doc-links-tool | 待 INFRA/工具，stdout 未逐条钉 | s8b 冻 |
-| cxraw-dock / cx-npfault / cx-reaper | 待 | |
-| candidate-qualify / host-cell / stages | 待材料/资格格 | |
-| UNKNOWN×6 | SESSION-INFRA 55s | skill-cx unit-boundary flow-tool ratchets-tool cx-core-interface cx-layers |
+| pins | 记录滞后 | UNDECLARED_PIN ×7；主树补充 CHECK_PINS failed=0 |
+| cx-root-identity | 记录滞后 | doc ae0b12 vs APE 884adfef |
+| cx-kernel-context | 工具合同/cdx | matches-recorded-v3 GOT22308622… |
+| illegal-action | INFRA 缺 .dev | 缺 side ELF |
+| cx-manifest | 记录滞后 | RECEIPT_CONSISTENCY sha=ae0b12；FAIL manifest-sha-equals-ape-receipt |
+| cx-toolsloc | 快照工具行 | 非产品 |
+| commit-own | INFRA 无 git | `check-commit-own: REFUSE cannot prepare the clone` rc2 |
+| affected-tool | 工具/快照 | `FAIL affected.users-reverse` CHECK_AFFECTED failed=1 |
+| stale-tool | 工具/快照 | `FAIL stale.orphans-listed-referenced-not` failed=2 |
+| snapshot-run-tool | INFRA | stdout 仅 BATCH_RUN rc=2 无探针行 |
+| doc-links-tool | 记录滞后 | `FAIL doc-links.fix-moved-two-on-one-line` failed=2（44182 链） |
+| cxraw-dock | INFRA 无 git | `dock-map: git ls-files failed` rc2 |
+| cx-npfault | 工具/INFRA | `FAIL D: a batch that never times out is still PASS` checks=13 failed=1 |
+| cx-reaper | 工具（sysx 回收） | CX_REAPER ok=6 failed=14；非编译器 |
+| candidate-qualify | INFRA | 十行 PASS 后 rc=2 无 CHECK 汇总行 |
+| host-cell | 记录滞后 | `host-cell: REFUSE no-argument and no-recorded-product-digest errno=2` |
+| stages | KNOWN-GAP STAGE-REJECT | FAIL e4/prune/lower reject-bad{,.trunc,.rand} failed=9 known_gap=3 |
+| UNKNOWN×6 | SESSION-INFRA 55s | wave-39 |
+
+## 材料接线（图有路径但 registered=no）
+
+`all-waves pending` 的 `materials_registered=yes` **不是** init 的 map 文件，而是 session 里 `MATERIAL` 块：`as_find_material`（`all-waves.cx:122`）。init 只把 map 拷到 `session/materials.tsv`。s7 曾对 14 名逐个 `all-waves material ROOT SESSION NAME`（测指纹、append MATERIAL）。s8b **未跑 material**，故 ri-flow-runtime/objects/kernel-route/ri-chain/hostcc/p3-pack-ctx 等虽在 map 仍 no。
+
+s8c：init 后对 map 每一名执行 `tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- material ROOT SESSION NAME`，再 heavy 波。不挡本版发布。
 
 ## 会话基础设施
 
