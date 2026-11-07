@@ -1,0 +1,22 @@
+/* Real candidate checks; caller supplies frozen manifest and APE. No fabricated fixed point. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+static int bad;
+static void run(const char *ape,const char *manifest,int expected,const char *needle){char *v[]={"sh",(char *)ape,"tools/check-win-arm64-fixedpoint.cx","--",(char *)manifest,0};np_result r;char why[512];int ok=!np_run(v,".",0,25,&r,why,sizeof why)&&r.rc==expected&&r.out&&strstr(r.out,needle);printf("%s\t%s\n",ok?"PASS":"FAIL",needle);if(!ok)bad++;np_free(&r);}
+int main(int n,char **v){
+ char *envv[4];if(n==1||(n==2&&tx_eqz(v[1],"--"))){envv[0]=v[0];envv[1]=getenv("TEST_WINARM_FP_MISSING_MANIFEST");envv[2]=getenv("TEST_WINARM_FP_APE");envv[3]=0;if(!envv[1]||envv[1][0]!='/'||!envv[2]||envv[2][0]!='/'){fprintf(stderr,"win-arm64-fixedpoint-controls: REFUSE explicit missing-generation manifest and APE bindings\n");return 2;}v=envv;n=3;}
+ int a=n>1&&tx_eqz(v[1],"--")?2:1;if(n-a!=2)return 2;size_t len;char *b=cx_read(v[a],&len);if(!b)return 2;
+ char dir[4400],p[4400],q[4400],text[10000];if(cx_fmt(dir,sizeof dir,"/tmp/winarm-fixed-controls-XXXXXX")||!mkdtemp(dir))return 2;
+ run(v[a+1],v[a],3,"NOT_CLAIMED");
+ /* Replace PE binding with actual Linux ELF and matching SHA: format must still fail. */
+ char *start=strstr(b,"win\t"),*end=start?strstr(start,"\nwin_sha\t"):0;if(!start||!end)return 2;
+ char *linux=strstr(b,"linux\t"),*ls=linux?strstr(linux,"\nlinux_sha\t"):0;if(!linux||!ls)return 2;
+ char native[4400],hash[65];long l=ls-linux-6;if(l<=0||l>=sizeof native)return 2;mm_copy(native,sizeof native,linux+6,l);native[l]=0;mm_copy(hash,sizeof hash,ls+11,64);hash[64]=0;
+ *start=0;cx_fmt(text,sizeof text,"%swin\t%s\nwin_sha\t%s\n",b,native,hash);cx_fmt(p,sizeof p,"%s/bad-pe.tsv",dir);if(cx_write(p,text,strlen(text)))return 2;run(v[a+1],p,1,"FAIL\twin.PEMachineAA64");
+ cx_fmt(text,sizeof text,"%swin\t%s\nwin_sha\t%s\n",b,native,"0000000000000000000000000000000000000000000000000000000000000000");cx_fmt(q,sizeof q,"%s/bad-identity.tsv",dir);if(cx_write(q,text,strlen(text)))return 2;run(v[a+1],q,1,"FAIL\twin");
+ mm_free(b);printf("WIN_ARM64_FIXEDPOINT_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
+}

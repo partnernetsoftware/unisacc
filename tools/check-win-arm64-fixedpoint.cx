@@ -1,0 +1,65 @@
+/* Explicit evidence, not a Windows-native bootstrap claim.
+ * Usage: check-win-arm64-fixedpoint.cx MANIFEST [--test-loader LOADER PROBE]
+ * TSV key/value rows (repeated keys must agree): root, rev; ape/pkg/linux/win and *_sha.
+ * Optional g2/g3 name separate TSV receipts: root, rev, pkg_sha, ape_sha,
+ * target=win/arm64, route=whole-o, image, sha, constructor, constructor_sha,
+ * argv (actual invocation), status/status_sha (whole-o receipt with rc=0).
+ * generation=g2/g3, native_sha, native_receipt/native_receipt_sha bind each Linux constructor's real entry-build receipt and preceding constructor path/SHA.
+ * Missing generations => NOT_CLAIMED and rc 3; malformed evidence => rc 1.
+ * Loader mode also binds loader/loader_sha and loader_slice/loader_slice_sha; PROBE must print WIN_ARM64_NATIVE_SMOKE and exit 7. Uses existing loader, never executes Windows PE.
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+static int bad, missing;
+static void ck(int ok,const char *name){sy_printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)bad++;}
+static int row(const char *file,const char *key,char *out,long cap){
+ size_t n=0;long at=0,k=tx_len(key,128);int found=0;char *b=cx_read(file,&n);out[0]=0;
+ if(!b){sy_eprintf("IO\t%s\terrno=%d\n",file,errno);return -1;}
+ while(at<(long)n){long e=at;while(e<(long)n&&b[e]!='\n')e++;
+  if(e-at>k&&!mm_cmp(b+at,key,k)&&b[at+k]=='\t'){long len=e-at-k-1;if(len>=cap||(found&&(tx_len(out,cap)!=len||mm_cmp(out,b+at+k+1,len)))){mm_free(b);return -1;}mm_copy(out,cap,b+at+k+1,len);out[len]=0;found=1;}at=e+1;
+ }mm_free(b);return found?0:1;
+}
+static void req(const char *f,const char *k,char *v,long n){if(row(f,k,v,n)||!v[0]){sy_eprintf("FAIL\trow\t%s\t%s\n",f,k);bad++;}}
+static int sha(const char *p,char h[65]){size_t n=0;char *b=cx_read(p,&n);h[0]=0;if(!b){sy_eprintf("IO\t%s\terrno=%d\n",p,errno);return -1;}cx_sha256_hex(b,n,h);mm_free(b);return 0;}
+static int image(const char *p,int pe){
+ size_t n=0;unsigned char *b=(unsigned char *)cx_read(p,&n);int ok=0;
+ if(b&&pe&&n>=64&&b[0]=='M'&&b[1]=='Z'){unsigned long o=(unsigned long)b[60]+((unsigned long)b[61]<<8)+((unsigned long)b[62]<<16)+((unsigned long)b[63]<<24);if(o<=n&&n-o>=26)ok=!mm_cmp(b+o,"PE\0\0",4)&&b[o+4]==0x64&&b[o+5]==0xaa&&b[o+24]==0x0b&&b[o+25]==2;}
+ if(b&&!pe&&n>=20)ok=!mm_cmp(b,"\177ELF",4)&&b[4]==2&&b[5]==1&&b[18]==62&&b[19]==0;
+ mm_free(b);return ok;
+}
+static void bound(const char *f,const char *key,char *p,char *h){char k[128],want[128];req(f,key,p,4400);cx_fmt(k,sizeof k,"%s_sha",key);req(f,k,want,sizeof want);ck(!sha(p,h)&&tx_len(want,128)==64&&tx_eqz(h,want),key);}
+static void same(const char *f,const char *key,const char *want){char v[4400];req(f,key,v,sizeof v);ck(tx_eqz(v,want),key);}
+static int equal(const char *a,const char *b){size_t na=0,nb=0;char *x=cx_read(a,&na),*y=cx_read(b,&nb);sy_stat_t sa,sb;int ok=x&&y&&na==nb&&!mm_cmp(x,y,na)&&!sy_stat(a,&sa)&&!sy_stat(b,&sb)&&(sa.dev!=sb.dev||sa.ino!=sb.ino);mm_free(x);mm_free(y);return ok;}
+int main(int argc,char **argv){
+ int a=argc>1&&tx_eqz(argv[1],"--")?2:1;char ape[4400],pkg[4400],lnx[4400],win[4400],ha[65],hp[65],hl[65],hw[65],root[4400],rev[128],prev[65]={0};
+ char *f;if(argc-a!=1&&argc-a!=4){sy_eprintf("usage: MANIFEST [--test-loader LOADER PROBE]\n");return 2;}f=argv[a];
+ if(argc-a==4&&!tx_eqz(argv[a+1],"--test-loader"))return 2;
+ req(f,"root",root,sizeof root);req(f,"rev",rev,sizeof rev);
+ bound(f,"ape",ape,ha);bound(f,"pkg",pkg,hp);bound(f,"linux",lnx,hl);bound(f,"win",win,hw);
+ ck(image(lnx,0),"linux.ELF-x86_64");ck(image(win,1),"win.PEMachineAA64");
+ char previous_native[65];mm_copy(previous_native,sizeof previous_native,hl,65);
+ char previous_image[4400]={0},previous_ctor[4400];tx_copy(previous_ctor,sizeof previous_ctor,lnx,tx_len(lnx,sizeof lnx));
+ for(int g=2;g<=3;g++){
+  char key[8],r[4400],p[4400],h[65],ctor[4400],hc[65],want[128],status[4400],hs[65],av[4400];sy_stat_t st;
+  cx_fmt(key,sizeof key,"g%d",g);int rc=row(f,key,r,sizeof r);
+  if(rc==1||(!rc&&sy_stat(r,&st)==-ENOENT)){sy_printf("NOT_CLAIMED\t%s.win-arm64.receipt-missing\n",key);missing++;continue;}
+  if(rc||sy_stat(r,&st)<0){ck(0,"generation.receipt-IO");continue;}
+  same(r,"root",root);same(r,"rev",rev);same(r,"pkg_sha",hp);same(r,"ape_sha",ha);same(r,"target","win/arm64");same(r,"route","whole-o");
+  req(r,"image",p,sizeof p);req(r,"sha",want,sizeof want);ck(!sha(p,h)&&tx_eqz(h,want)&&image(p,1),"generation.PE-and-sha");
+  req(r,"constructor",ctor,sizeof ctor);req(r,"constructor_sha",want,sizeof want);ck(!sha(ctor,hc)&&tx_eqz(hc,want)&&image(ctor,0),"generation.native-constructor");
+  char nr[4400],nh[65],ng[16];bound(r,"native_receipt",nr,nh);same(nr,"root",root);same(nr,"p3_sha",hp);same(nr,"constructor_sha",previous_native);same(nr,"constructor",previous_ctor);same(nr,"via","exec");
+  cx_fmt(ng,sizeof ng,"g%d",g);same(r,"generation",ng);same(r,"native_sha",hc);mm_copy(previous_native,sizeof previous_native,hc,65);tx_copy(previous_ctor,sizeof previous_ctor,ctor,tx_len(ctor,sizeof ctor));
+  char cand[4400],prefix[80];req(nr,"candidate",cand,sizeof cand);cx_fmt(prefix,sizeof prefix,"sha=%s\t",hc);ck(!strncmp(cand,prefix,69),"native.receipt-output-sha");
+  req(r,"argv",av,sizeof av);ck(strstr(av,ctor)&&strstr(av,"win/arm64")&&strstr(av,pkg),"generation.argv-identities");
+  bound(r,"status",status,hs);same(status,"rc","0");same(status,"target","win/arm64");same(status,"rev",rev);same(status,"sha",h);
+  if(g==2){mm_copy(prev,sizeof prev,h,65);tx_copy(previous_image,sizeof previous_image,p,tx_len(p,sizeof previous_image));}else ck(prev[0]&&tx_eqz(prev,h)&&equal(previous_image,p),"G2-G3.win-arm64.byte-fixedpoint");
+ }
+ if(argc-a==4&&!bad){char loader[4400],slice[4400],hs[65],ht[65];bound(f,"loader",loader,ht);bound(f,"loader_slice",slice,hs);ck(tx_eqz(loader,argv[a+2])&&image(loader,0)&&image(slice,0),"linux.loader-identities");if(!bad){char *v[]={loader,"--slice",slice,"--models",pkg,"--",argv[a+3],0};np_result r={0};char why[512];ck(!np_run(v,0,0,55,&r,why,sizeof why)&&r.rc==7&&r.out&&tx_eqz(r.out,"WIN_ARM64_NATIVE_SMOKE\n"),"linux.test-loader.exec-only");np_free(&r);}}
+ sy_printf("WIN_ARM64_FIXEDPOINT\t%s\tfailed=%d\tmissing=%d\tnative-windows=NOT_CLAIMED\n",bad?"FAIL":missing?"NOT_CLAIMED":"PASS",bad,missing);
+ return bad?1:missing?3:0;
+}
