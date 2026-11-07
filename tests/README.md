@@ -1,3 +1,49 @@
+## M12 缓存行为（工作区源码与显式候选）
+
+从工作区根目录运行；所有新输出和缓存目录均须使用绝对路径，且运行前必须不存在。
+以下两个已注册的 SOURCE 批次导入当前 `runtime.modelcache`，
+不是已安装驱动的实现：
+
+```sh
+UNISACC_RUN_CACHE=0 tools/bound 55 sh ./unisacc.com tests/modelcache-budget.cx -- "$PWD/out/NEW_LRU" lru
+UNISACC_RUN_CACHE=0 tools/bound 55 sh ./unisacc.com tests/modelcache-budget.cx -- "$PWD/out/NEW_PARALLEL" concurrent
+```
+
+它们使用私有缓存/TMPDIR 目录和 450 字节预算。LRU 检查真实的 199 字节条目、
+热条目的 mtime 刷新、最旧条目淘汰、mtime 同秒时按字典序确定淘汰对象，
+以及拒绝同长度的损坏 payload 后真实修复。并发用例派生八个进程，
+核对真实读取字节、最终缓存命中及无临时文件。
+LRU 用例还在发布 C 期间持有最旧 B 条目的真实只读描述符：
+B 的名字必须消失，但已打开的描述符仍须返回全部原始 199 字节及正确 payload；
+A/C 仍须有效命中，并关闭该描述符。
+这是目标被占用时的 POSIX unlink 回归，不是注入 unlink 失败。
+直接 unlink 失败仍为 UNMEASURED；不修改挂载、UID 或宿主权限。
+
+既有 `runcache.cx NEW_OUT [COMPILER WORDS...]` 模式保持不变，
+不要求已安装产品包含 M12。新增预算模式必须显式指定
+**已经构造好的新候选 ELF**（单个可执行文件参数，
+不是 `sh CANDIDATE`，也不是根目录旧产品）：
+
+```sh
+UNISACC_RUN_CACHE=0 tools/bound 55 sh ./unisacc.com tests/runcache.cx -- --budget serial "$PWD/out/NEW_SERIAL" "$PWD/out/NEW_CANDIDATE"
+UNISACC_RUN_CACHE=0 tools/bound 55 sh ./unisacc.com tests/runcache.cx -- --budget faults "$PWD/out/NEW_FAULTS" "$PWD/out/NEW_CANDIDATE"
+UNISACC_RUN_CACHE=0 tools/bound 55 sh ./unisacc.com tests/runcache.cx -- --budget concurrent "$PWD/out/NEW_CONCURRENT" "$PWD/out/NEW_CANDIDATE"
+```
+
+`NEW_SERIAL`、`NEW_FAULTS`、`NEW_CONCURRENT` 目录运行前必须不存在；
+`NEW_CANDIDATE` 则是此前单独构造并确认身份的现有候选可执行文件。
+这些是有意保留的手工候选命令，不是把 `{root}/unisacc` 冒充新材料的注册。
+每个用例的子进程时限均为 55 秒。serial 比较五个不同源码的默认运行结果
+与关闭缓存时的输出，证明保持 inode 的真实命中，观察淘汰，
+并检查完成文件总字节不超过预算加最大条目。
+faults 在候选运行时持有真实 flock（子进程关闭继承的锁描述符），
+随后将锁变为不可用，并用普通文件占据缓存目录路径以使其不可写；
+每次执行都必须保持 rc/输出，不得挂起或失败。
+concurrent 启动八个真实候选进程并比较全部输出，
+随后要求保持 inode 的有效命中且无临时文件。
+需要 POSIX shell、兼容 GNU find/stat 的环境，以及 Linux 上的 awk、cmp 和 flock。
+本次注册不宣称任何测试结果或候选资格。
+
 # Tests
 
 Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.

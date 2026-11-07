@@ -117,10 +117,74 @@ static const char *prog3 =
     "/* pad */\n"
     "int main(int c, char **v) { printf(\"%d %s\\n\", VAL + 2, c > 1 ? v[1] : \"-\"); return 0; }\n";
 
+/* Explicit candidate-only modes; never silently exercise the installed product.
+   Each case is separate so the registered/default 24-assertion suite is unchanged. */
+static int budget_main(int argc, char **argv) {
+    char script[2200], *v[8], *out = 0;
+    size_t n = 0;
+    int rc;
+    const char *body =
+        "set -eu\n"
+        "candidate=$1; w=$2; mode=$3\n"
+        "export UNISACC_E3CACHE=$w/cache TMPDIR=$w/tmp UNISACC_E3CACHE_MAX_BYTES=1160000\n"
+        "unset UNISACC_RUN_CACHE\n"
+        "mkdir -m 700 \"$TMPDIR\" \"$UNISACC_E3CACHE\"\n"
+        "emit() { printf 'int main(void) { printf(\"budget-%s\\\\n\"); return 0; }\\n' \"$1\" > \"$w/main.c\"; }\n"
+        "run() { \"$candidate\" \"$w/main.c\"; }\n"
+        "inventory() { find \"$UNISACC_E3CACHE\" -type f ! -name '.*' -printf '%f %i\\n' | sort; }\n"
+        "bound() { find \"$UNISACC_E3CACHE\" -type f ! -name '.*' -printf '%s\\n' | awk '{s+=$1;if($1>m)m=$1} END {exit !(s>0 && s<=1160000+m)}'; }\n"
+        "emit 1\n"
+        "UNISACC_RUN_CACHE=0 run > \"$w/expected\"\n"
+        "if [ \"$mode\" = serial ]; then\n"
+        " # Hit identity requires the complete working set, not a cache already trimming it.\n"
+        " export UNISACC_E3CACHE_MAX_BYTES=1073741824\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"; inventory > \"$w/first\"; test -s \"$w/first\"\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"; inventory > \"$w/hit\"; cmp \"$w/first\" \"$w/hit\"\n"
+        " # Now force real eviction while retaining output and completed-byte bounds.\n"
+        " export UNISACC_E3CACHE_MAX_BYTES=1160000\n"
+        " for i in 2 3 4 5; do emit $i; UNISACC_RUN_CACHE=0 run > \"$w/expected\"; run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"; bound; done\n"
+        " inventory > \"$w/last\"\n"
+        " awk 'NR==FNR {old[$1]=1;next} {delete old[$1]} END {for(k in old) exit 0;exit 1}' \"$w/first\" \"$w/last\"\n"
+        "elif [ \"$mode\" = faults ]; then\n"
+        " exec 9>\"$UNISACC_E3CACHE/.budget.lock\"; flock -x 9\n"
+        " run 9>&- > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"\n"
+        " flock -u 9; exec 9>&-\n"
+        " rm \"$UNISACC_E3CACHE/.budget.lock\"; mkdir \"$UNISACC_E3CACHE/.budget.lock\"\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"\n"
+        " rmdir \"$UNISACC_E3CACHE/.budget.lock\"\n"
+        " export UNISACC_E3CACHE=$w/not-directory; printf blocked > \"$UNISACC_E3CACHE\"\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"\n"
+        "else\n"
+        " pids=''; for i in 1 2 3 4 5 6 7 8; do run > \"$w/parallel-$i\" & pids=\"$pids $!\"; done\n"
+        " for p in $pids; do wait $p; done\n"
+        " for i in 1 2 3 4 5 6 7 8; do cmp \"$w/expected\" \"$w/parallel-$i\"; done\n"
+        " bound\n"
+        " # Concurrent low-budget writes may evict a model or host needed by the next run.\n"
+        " export UNISACC_E3CACHE_MAX_BYTES=1073741824\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"\n"
+        " inventory > \"$w/first\"; test -s \"$w/first\"\n"
+        " run > \"$w/actual\"; cmp \"$w/expected\" \"$w/actual\"; inventory > \"$w/hit\"; cmp \"$w/first\" \"$w/hit\"\n"
+        "fi\n"
+        "test -z \"$(find \"$UNISACC_E3CACHE\" -type f -name '*.tmp.*' -print 2>/dev/null)\"\n"
+        "printf 'PASS\\truncache.budget-%s\\n' \"$mode\"\n";
+    if (argc != 5 || (!same(argv[2], "serial") && !same(argv[2], "faults") && !same(argv[2], "concurrent")))
+        die("usage: --budget serial|faults|concurrent NEW_OUT CANDIDATE_ELF");
+    if (cx_fmt(work, sizeof work, "%s", argv[3])) die("path-bound");
+    if (sy_mkdir(work, 0700)) die("NEW_OUT must not exist");
+    path(script, "budget.sh");
+    put(script, body);
+    v[0] = "sh"; v[1] = script; v[2] = argv[4]; v[3] = work; v[4] = argv[2]; v[5] = 0;
+    rc = cx_runv_timeout(v, 55, &out, &n);
+    if (out) printf("%s", out);
+    ck(rc == 0, "budget-case-rc-output-and-cache");
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     long cold, hit, ms;
     char before[CAP];
     int i, made;
+    if (argc > 1 && same(argv[1], "--budget")) return budget_main(argc, argv);
     if (argc < 2 || argc > 2 + 15) die("usage: NEW_OUT [COMPILER WORDS...]");
     if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path-bound");
     if (argc == 2) { compiler[0] = "sh"; compiler[1] = "./unisacc.com"; ncompiler = 2; }

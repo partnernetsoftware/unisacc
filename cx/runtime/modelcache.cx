@@ -4,6 +4,9 @@
 #pragma unisa use sys.io
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
 /* cx/runtime/modelcache.cx -- the inflated-model cache (C44-SPEED-01, lever 4).
 
    Inflating stage models is a fixed cost of every compiler call: measured 78.5 ms for a 26-byte
@@ -63,8 +66,120 @@ static int mc_cat_u(char *out, int cap, int *at, unsigned long long v) {
     return 0;
 }
 
+
+/* Decimal bytes, including zero (retain no completed entries). Empty, malformed
+   and overflowing values use the default; RUN_CACHE=0 still disables the cache. */
+static unsigned long long mc_limit(void) {
+    const char *e;
+    unsigned long long n = 0;
+    int i = 0;
+    e = sy_env("UNISACC_E3CACHE_MAX_BYTES");
+    if (!e || !e[0]) return 1073741824ull;
+    while (e[i]) {
+        unsigned d;
+        if (e[i] < '0' || e[i] > '9') return 1073741824ull;
+        d = (unsigned)(e[i++] - '0');
+        if (n > (18446744073709551615ull - d) / 10) return 1073741824ull;
+        n = n * 10 + d;
+    }
+    return n;
+}
+
+static int mc_hexchar(int c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+/* Only the complete names emitted by the model and run caches, never temps. */
+static int mc_entry_name(const char *s) {
+    int i;
+    if (s[0] == 'm' && s[1] == 'c' && s[2] == '-') {
+        i = 3;
+        while (i < 35) { if (!mc_hexchar(s[i])) return 0; i++; }
+        if (s[i++] != '-' || s[i] < '1' || s[i] > '9') return 0;
+        while (s[i] >= '0' && s[i] <= '9') i++;
+        return s[i] == 0;
+    }
+    i = 0;
+    while (i < 64) { if (!mc_hexchar(s[i])) return 0; i++; }
+    return s[i] == 0 || tx_eqz(s + i, ".host");
+}
+
+typedef struct {
+    const char *name; /* borrowed from the directory buffer until trim finishes */
+    sy_stat_t st;
+} mc_candidate;
+
+/* Seconds-resolution mtime is the existing L0 contract. Equal times are ordered
+   by the complete filename, independent of directory enumeration order. */
+static int mc_older(const mc_candidate *a, const mc_candidate *b) {
+    int i = 0;
+    if (a->st.mtime != b->st.mtime) return a->st.mtime < b->st.mtime;
+    while (a->name[i] && a->name[i] == b->name[i]) i++;
+    return (unsigned char)a->name[i] < (unsigned char)b->name[i];
+}
+
+static void mc_heap_up(mc_candidate *v, long i) {
+    mc_candidate one;
+    long p;
+    one = v[i];
+    while (i > 0) {
+        p = (i - 1) / 2;
+        if (!mc_older(&one, &v[p])) break;
+        v[i] = v[p];
+        i = p;
+    }
+    v[i] = one;
+}
+
+static void mc_heap_pop(mc_candidate *v, long n) {
+    mc_candidate one;
+    long i = 0, c;
+    if (n <= 1) return;
+    one = v[n - 1];
+    n--;
+    while (i < n / 2) {
+        c = i * 2 + 1;
+        if (c + 1 < n && mc_older(&v[c + 1], &v[c])) c++;
+        if (!mc_older(&v[c], &one)) break;
+        v[i] = v[c];
+        i = c;
+    }
+    v[i] = one;
+}
+
+static int mc_same(const sy_stat_t *a, const sy_stat_t *b) {
+    return b->kind == 'f' && a->dev == b->dev && a->ino == b->ino &&
+        a->size == b->size && a->mtime == b->mtime && a->ctime == b->ctime;
+}
+
+/* A reserved filename alone is not enough to claim an unrelated user file.
+   Atomic publication makes these small format/length checks sufficient for
+   eviction; full payload validation remains exclusively in the lookup path. */
+static int mc_complete(const char *path, const char *name, const sy_stat_t *st) {
+    char head[8];
+    sy_stat_t opened;
+    unsigned long long n = 0;
+    int fd, ok, i;
+    if (st->kind != 'f' || st->size < 8 || !mc_entry_name(name)) return 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    ok = sy_fstat(fd, &opened) == 0 && mc_same(st, &opened) &&
+        sy_read_full(fd, head, 8) == 0;
+    sy_close(fd);
+    if (!ok) return 0;
+    if (name[0] != 'm') return st->size >= 88 &&
+        (tx_same(head, 8, "USE33\n\0\0", 8) || tx_same(head, 8, "USE34\n\0\0", 8));
+    if (!tx_same(head, 6, MC_MAGIC, 6)) return 0;
+    i = 36;
+    while (name[i]) {
+        unsigned d = (unsigned)(name[i++] - '0');
+        if (n > (9223372036854775736ull - d) / 10) return 0;
+        n = n * 10 + d;
+    }
+    return (unsigned long long)st->size == n + MC_HEAD;
+}
 /* $UNISACC_E3CACHE or $TMPDIR/unisacc-e3cache-<uid>, created 0700; 1 on failure. */
-static int mc_dir(char *out, int cap) {
+int mc_cache_dir(char *out, int cap) {
     const char *e, *td;
     sy_stat_t st;
     int at = 0, mk;
@@ -83,6 +198,110 @@ static int mc_dir(char *out, int cap) {
     if (mk != -EEXIST) return 1;
     if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
     return 1;
+}
+
+static int mc_join(char *out, int cap, const char *dir, const char *name) {
+    int at = 0;
+    if (mc_cat(out, cap, &at, dir) || mc_cat(out, cap, &at, "/") ||
+        mc_cat(out, cap, &at, name)) return 1;
+    out[at] = 0;
+    return 0;
+}
+
+/* Persistent inode, never unlinked: a crashed process releases its kernel lock.
+   All cooperating publications and touches use this same lock. */
+static int mc_lock_op(const char *dir, int op) {
+    char path[4400];
+    sy_stat_t st, opened;
+    int fd, rc;
+    if (mc_join(path, sizeof path, dir, ".budget.lock")) return -1;
+    fd = sy_open_new(path, 0600);
+    if (fd == -EEXIST) fd = sy_open_read(path);
+    if (fd < 0) return -1;
+    if (sy_lstat(path, &st) || st.kind != 'f' || sy_fstat(fd, &opened) ||
+        !mc_same(&st, &opened)) { sy_close(fd); return -1; }
+    do { rc = sy_flock(fd, op); } while (rc == -EINTR);
+    if (rc) { sy_close(fd); return -1; }
+    return fd;
+}
+
+int mc_cache_lock(const char *dir) { return mc_lock_op(dir, 6); }
+
+/* One directory listing (grown and retried on ENOSPC), O(N) stat/header work,
+   O(N) memory per successful write, O(N log N) heap work only above the limit.
+   Allocation, listing and unlink failures only leave a larger cache. */
+static void mc_trim(const char *dir) {
+    char *names = 0, *grown;
+    char path[4400];
+    mc_candidate *v = 0;
+    sy_stat_t st;
+    unsigned long long total = 0, limit = mc_limit();
+    long at = 0, used = 0, i;
+    int fd, count, cap = 8192;
+    fd = sy_open_read(dir);
+    if (fd < 0) return;
+    for (;;) {
+        grown = mm_grow(names, cap);
+        if (!grown) { sy_close(fd); mm_free(names); return; }
+        names = grown;
+        count = sy_dir_names(fd, names, cap);
+        if (count != -ENOSPC) break;
+        if (cap > 1073741823) { sy_close(fd); mm_free(names); return; }
+        cap = cap * 2;
+    }
+    sy_close(fd);
+    if (count <= 0) { mm_free(names); return; }
+    if ((long)count > 9223372036854775807L / (long)sizeof(mc_candidate)) {
+        mm_free(names); return;
+    }
+    v = mm_alloc((long)count * (long)sizeof(mc_candidate));
+    if (!v) { mm_free(names); return; }
+    for (i = 0; i < count; i++) {
+        const char *name = names + at;
+        long len = tx_len(name, cap - at);
+        at += len + 1;
+        if (len >= 96 || !mc_entry_name(name) || mc_join(path, sizeof path, dir, name)) continue;
+        if (sy_lstat(path, &st) || !mc_complete(path, name, &st)) continue;
+        if (total > 18446744073709551615ull - (unsigned long long)st.size) goto done;
+        total += (unsigned long long)st.size;
+        v[used].name = name;
+        v[used].st = st;
+        used++;
+    }
+    if (total <= limit) goto done;
+    for (i = 1; i < used; i++) mc_heap_up(v, i);
+    while (total > limit && used > 0) {
+        if (!mc_join(path, sizeof path, dir, v[0].name) &&
+            sy_lstat(path, &st) == 0 && mc_same(&v[0].st, &st) && sy_unlink(path) == 0)
+            total -= (unsigned long long)st.size;
+        mc_heap_pop(v, used);
+        used--;
+    }
+done:
+    mm_free(v);
+    mm_free(names);
+}
+
+/* Consume LOCKFD, publishing exactly the caller's already complete temp file.
+   Trimming cannot change publication success or the enclosing program result. */
+int mc_cache_publish(const char *dir, const char *tmp, const char *path, int lockfd) {
+    int rc;
+    if (lockfd < 0) return 1;
+    rc = sy_rename(tmp, path);
+    if (rc == 0) mc_trim(dir);
+    sy_close(lockfd);
+    return rc != 0;
+}
+
+void mc_cache_touch(const char *dir, const char *path) {
+    sy_stat_t st;
+    long now;
+    int fd = mc_lock_op(dir, 6);
+    if (fd < 0) return;
+    now = sy_wall_s();
+    if (now >= 0 && sy_lstat(path, &st) == 0 && st.kind == 'f' && now > st.mtime)
+        sy_set_mtime(path, now);
+    sy_close(fd);
 }
 
 /* DIR/mc-KEY32-OLEN[SUFFIX]; 1 on overflow. */
@@ -124,9 +343,9 @@ int mc_get(const unsigned char *comp, unsigned long clen, unsigned char *out, un
     sy_stat_t st;
     if (mc_off() || !comp || !out || clen == 0 || olen == 0) return 0;
     if (sy_sha256_hex(comp, (long)clen, hex) != 0) return 0;
-    if (mc_dir(dir, (int)sizeof dir)) return 0;
+    if (mc_cache_dir(dir, (int)sizeof dir)) return 0;
     if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return 0;
-    if (mc_read(path, out, olen)) { mc_say("hit", olen); return 1; }
+    if (mc_read(path, out, olen)) { mc_cache_touch(dir, path); mc_say("hit", olen); return 1; }
     /* present but unusable is worth telling apart from absent: it means a damaged cache */
     if (sy_lstat(path, &st) == 0) mc_say("corrupt", olen);
     else mc_say("miss", olen);
@@ -136,15 +355,15 @@ int mc_get(const unsigned char *comp, unsigned long clen, unsigned char *out, un
 /* Best effort: any failure is a miss next time, never an error. */
 void mc_put(const unsigned char *comp, unsigned long clen, const unsigned char *out, unsigned long olen) {
     char hex[65], back[65], dir[4096], path[4400], tmp[4400], head[MC_HEAD];
-    int fd, at;
+    int fd, at, lockfd;
     if (mc_off() || !comp || !out || clen == 0 || olen == 0) return;
     if (sy_sha256_hex(comp, (long)clen, hex) != 0) return;
     if (sy_sha256_hex(out, (long)olen, back) != 0) return;
-    if (mc_dir(dir, (int)sizeof dir)) return;
+    if (mc_cache_dir(dir, (int)sizeof dir)) return;
     if (mc_path(path, (int)sizeof path, dir, hex, olen, 0)) return;
     if (mc_path(tmp, (int)sizeof tmp, dir, hex, olen, ".tmp.")) return;
-    /* no pid: two processes writing the same key produce the same bytes, so a shared temp name is
-       harmless -- whoever renames last wins with identical content */
+    /* Publication and temp creation share the budget lock, including writers of
+       the same model key. No process can truncate another writer's temp. */
     {   static unsigned long long seq;
         at = (int)tx_len(tmp, sizeof tmp);
         seq = seq + 1;
@@ -154,12 +373,15 @@ void mc_put(const unsigned char *comp, unsigned long clen, const unsigned char *
     mm_copy(head, 6, MC_MAGIC, 6);
     mm_copy(head + 6, 64, back, 64);
     head[70] = '\n';
+    lockfd = mc_cache_lock(dir);
+    if (lockfd < 0) return;
     sy_unlink(tmp);
     fd = sy_open_new(tmp, 0600);
-    if (fd < 0) return;
+    if (fd < 0) { sy_close(lockfd); return; }
     if (sy_write_all(fd, head, MC_HEAD) != 0 || sy_write_all(fd, out, (long)olen) != 0) {
-        sy_close(fd); sy_unlink(tmp); return;
+        sy_close(fd); sy_unlink(tmp); sy_close(lockfd); return;
     }
-    if (sy_fsync(fd) != 0 || sy_close(fd) != 0) { sy_unlink(tmp); return; }
-    if (sy_rename(tmp, path) != 0) sy_unlink(tmp);
+    if (sy_fsync(fd) != 0) { sy_close(fd); sy_unlink(tmp); sy_close(lockfd); return; }
+    if (sy_close(fd) != 0) { sy_unlink(tmp); sy_close(lockfd); return; }
+    if (mc_cache_publish(dir, tmp, path, lockfd)) sy_unlink(tmp);
 }

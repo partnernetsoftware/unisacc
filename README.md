@@ -141,6 +141,7 @@ file is the user entry point, not the status page.
 slice for the machine (Linux and macOS, x86-64 and arm64). Windows reads it as a
 PE, but that slice does not work yet (see the status above). The C headers it
 needs travel inside it.
+0.0.47 开发版中，完成缓存条目的默认字节上限为 `1073741824`（1GiB），可通过 `UNISACC_E3CACHE_MAX_BYTES` 设置字节上限；达到上限按 mtime 淘汰，缓存异常不影响程序运行。
 
 ```bash
 ./unisacc.com hello.c [args]                # compile and RUN in memory (the default; not cc's a.out)

@@ -3,6 +3,8 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use runtime.rcident
+#pragma unisa use runtime.modelcache
+#pragma unisa use mem.bytes
 /* Cross-process reuse of a -run frontend tape (USE33) and of the forward ELF
    (USE34, file <key>.host). The key binds the candidate file (entry plus the
    attached P3), the route, and the sources. Arguments after "--" are not part
@@ -300,32 +302,6 @@ static int rc_off(void) {
     return e && tx_eq(e, "0", 8) ? 1 : 0;
 }
 
-static int rc_dir(char *out, int cap) {
-    const char *sy_env(const char *);
-    int sy_uid(void);
-    int sy_mkdir(const char *, int);
-    int sy_lstat(const char *, sy_stat_t *);
-    const char *e;
-    const char *td;
-    sy_stat_t st;
-    int at;
-    int mk;
-    at = 0;
-    e = sy_env("UNISACC_E3CACHE");
-    if (e && e[0]) {
-        if (rc_cat(out, cap, &at, e)) return 1;
-    } else {
-        td = sy_tmpdir();
-        if (rc_cat(out, cap, &at, td)) return 1;
-        if (rc_cat(out, cap, &at, "/unisacc-e3cache-")) return 1;
-        if (rc_cat_u(out, cap, &at, (unsigned long long)sy_uid())) return 1;
-    }
-    mk = sy_mkdir(out, 0700);
-    if (mk == 0) return 0;
-    if (mk != -EEXIST) return 1;
-    if (sy_lstat(out, &st) == 0 && st.kind == 'd' && (st.mode & 0777) == 0700) return 0;
-    return 1;
-}
 
 static int rc_route(char *dst, int cap, int elf) {
     int at;
@@ -395,13 +371,16 @@ static int rc_still_absent(const char *path) {
     return rc == -ENOENT;
 }
 
-static int rc_atomic(const char *final_path, const unsigned char *data, long n) {
-    int sy_rename(const char *, const char *);
+static int rc_atomic(const char *dir, const char *final_path, const unsigned char *data, long n) {
+    int mc_cache_lock(const char *);
+    int mc_cache_publish(const char *, const char *, const char *, int);
+    int sy_close(int);
     int sy_unlink(const char *);
     int hs_pid(void);
     long long hs_ns(void);
     char tmp[700];
     int at;
+    int lockfd;
     long long ns;
     int pid;
     at = 0;
@@ -415,8 +394,14 @@ static int rc_atomic(const char *final_path, const unsigned char *data, long n) 
     if (ns < 0) ns = 0;
     if (rc_cat_u(tmp, 700, &at, (unsigned long long)ns)) return 1;
     if (rc_cat(tmp, 700, &at, ".tmp")) return 1;
-    if (cx_write(tmp, data, (size_t)n)) return 1;
-    if (sy_rename(tmp, final_path)) {
+    lockfd = mc_cache_lock(dir);
+    if (lockfd < 0) return 1;
+    if (cx_write(tmp, data, (size_t)n)) {
+        sy_unlink(tmp);
+        sy_close(lockfd);
+        return 1;
+    }
+    if (mc_cache_publish(dir, tmp, final_path, lockfd)) {
         sy_unlink(tmp);
         return 1;
     }
@@ -424,6 +409,7 @@ static int rc_atomic(const char *final_path, const unsigned char *data, long n) 
 }
 
 static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
+    int mc_cache_dir(char *, int);
     int sy_stat(const char *, sy_stat_t *);
     long tx_len(const char *, long);
     char dir[400];
@@ -440,7 +426,7 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
     if (!rc_on || rc_broken || !tape || tn < 0 || tn > (1L << 26)) return 1;
     hn = (unsigned)rc_nh;
     abn = (unsigned)rc_nm;
-    if (rc_dir(dir, 400)) return 1;
+    if (mc_cache_dir(dir, 400)) return 1;
     if (rc_route(route, 160, elf)) return 1;
     if (rc_key(key, route)) return 1;
     if (rc_join(path, 560, dir, key, elf)) return 1;
@@ -491,7 +477,7 @@ static int rc_store_kind(int elf, const unsigned char *tape, long tn) {
         i = i + 1;
     }
     if (tn && rc_app(&payload, &at, &cap, tape, tn)) goto bad;
-    if (rc_atomic(path, payload, at)) goto bad;
+    if (rc_atomic(dir, path, payload, at)) goto bad;
     rc_release(payload);
     return 0;
 bad:
@@ -527,7 +513,7 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     if (!rc_on || !out || !outn) return 0;
     t0 = hs_ns();
     magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
-    if (rc_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route) || rc_join(path, 560, dir, key, elf)) {
+    if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route) || rc_join(path, 560, dir, key, elf)) {
         t1 = hs_ns();
         rc_report(0, t1 - t0);
         return 0;
@@ -603,14 +589,11 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     if (!tx_same(hex, 64, got, 64)) goto miss;
     tape = rc_alloc(tn ? (long)tn : 1);
     if (!tape) goto miss;
-    i = 0;
-    while (i < tn) {
-        tape[i] = file[at + i];
-        i = i + 1;
-    }
+    mm_copy(tape, (long)tn, file + at, (long)tn);
     rc_release(file);
     *out = tape;
     *outn = (long)tn;
+    mc_cache_touch(dir, path);
     t1 = hs_ns();
     rc_report(elf ? 2 : 1, t1 - t0);
     return 1;

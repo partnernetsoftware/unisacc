@@ -1,0 +1,123 @@
+/* Real workspace runtime.modelcache regression. Usage: NEW_OUT lru|concurrent.
+   No installed-driver budget assumptions: the SOURCE import is the code under test. */
+#pragma unisa use runtime.modelcache
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static unsigned char body[128], got[128];
+static char dir[4096];
+static int checks, failed;
+static void ck(int ok, const char *name) {
+    checks++; if (!ok) failed++;
+    sy_printf("%s\tmodelcache-budget.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int path_for(char *p, unsigned char key) {
+    char hex[65];
+    if (sy_sha256_hex(&key, 1, hex)) return 1;
+    hex[32] = 0;
+    return tx_snprintf(p, 4400, "%s/mc-%s-128", dir, hex) >= 4400;
+}
+static int hit(unsigned char key) {
+    return mc_get(&key, 1, got, 128) && tx_same((char *)got, 128, (char *)body, 128);
+}
+static void store(unsigned char key) { mc_put(&key, 1, body, 128); }
+static int worker(void *unused) {
+    int i;
+    unsigned char key = 77;
+    for (i = 0; i < 12; i++) {
+        store(key);
+        /* A nonblocking writer may lose the lock; a lookup must never return bad bytes. */
+        if (mc_get(&key, 1, got, 128) && !tx_same((char *)got, 128, (char *)body, 128)) return 1;
+    }
+    return 0;
+}
+static int inspect(const char *p, void *ctx) {
+    sy_stat_t st;
+    const char *s = p;
+    long *totals = ctx;
+    int i;
+    for (i = 0; p[i]; i++) if (p[i] == '/') s = p + i + 1;
+    if (tx_eqz(s, ".budget.lock")) return 0;
+    if (sy_lstat(p, &st) || st.kind != 'f') return -1;
+    if (!tx_same(s, 3, "mc-", 3) || st.size != 199 || tx_len(s, 4400) != 39) return -1;
+    totals[0] += st.size; totals[1]++;
+    return 0;
+}
+int main(int argc, char **argv) {
+    unsigned char a = 11, b = 22, c = 33;
+    char pa[4400], pb[4400], pc[4400], tmp[4400];
+    sy_stat_t st;
+    long totals[2] = {0, 0};
+    int i;
+    if (argc != 3 || (!tx_eqz(argv[2], "lru") && !tx_eqz(argv[2], "concurrent"))) return 2;
+    if (sy_mkdir(argv[1], 0700)) return 2;
+    if (tx_snprintf(dir, sizeof dir, "%s/cache", argv[1]) >= sizeof dir ||
+        tx_snprintf(tmp, sizeof tmp, "%s/tmp", argv[1]) >= sizeof tmp) return 2;
+    if (sy_mkdir(tmp, 0700) || sy_setenv("TMPDIR", tmp, 1) ||
+        sy_setenv("UNISACC_E3CACHE", dir, 1) || sy_setenv("UNISACC_E3CACHE_MAX_BYTES", "450", 1)) return 2;
+    sy_unsetenv("UNISACC_RUN_CACHE");
+    for (i = 0; i < 128; i++) body[i] = (unsigned char)(i % 113);
+    if (path_for(pa, a) || path_for(pb, b) || path_for(pc, c)) return 2;
+    if (tx_eqz(argv[2], "concurrent")) {
+        int pids[8], fds[2], rc;
+        store(77);
+        ck(hit(77), "parallel-precondition-real-store");
+        for (i = 0; i < 8; i++) {
+            pids[i] = sy_fork_session(worker, 0, fds);
+            if (pids[i] < 0) return 2;
+            sy_close(fds[0]); sy_close(fds[1]);
+        }
+        for (i = 0; i < 8; i++) { rc = sy_wait(pids[i], 0); ck(rc == 0, "parallel-worker-valid-bytes"); }
+        ck(hit(77), "parallel-final-valid-hit");
+        ck(cx_walk(dir, inspect, totals) == 0 && totals[0] == 199 && totals[1] == 1, "parallel-one-complete-no-temporaries");
+    } else {
+        int victim_fd;
+        char held[199], *original;
+        size_t original_n = 0;
+        store(a); store(b);
+        ck(hit(a) && hit(b), "two-real-stores");
+        ck(sy_set_mtime(pa, 1000) == 0 && sy_set_mtime(pb, 2000) == 0, "age-fixture");
+        ck(hit(a), "hot-lookup-valid-bytes");
+        ck(sy_stat(pa, &st) == 0 && st.mtime > 2000, "hot-lookup-touches-mtime");
+        /* A real open reader owns the oldest victim while trim unlinks its name. */
+        victim_fd = sy_open_read(pb);
+        original = cx_read(pb, &original_n);
+        ck(victim_fd >= 0 && original != 0 && original_n == 199, "occupied-victim-open");
+        if (victim_fd < 0 || !original || original_n != 199) return 2;
+        store(c);
+        ck(sy_exists(pb) == 0 && !hit(b), "oldest-b-evicted");
+        ck(hit(a) && hit(c), "hot-a-and-new-c-retained");
+        ck(sy_read_full(victim_fd, held, sizeof held) == 0 &&
+            tx_same(held, sizeof held, original, original_n) &&
+            tx_same(held + 71, 128, (char *)body, 128), "unlinked-occupied-victim-readable-intact");
+        ck(sy_close(victim_fd) == 0, "occupied-victim-reader-closed");
+        free(original);
+        ck(cx_walk(dir, inspect, totals) == 0 && totals[0] == 398 && totals[1] == 2, "budget-complete-bytes");
+        /* Equal-second policy is lexical full filename, not enumeration order. */
+        ck(sy_set_mtime(pa, 1000) == 0 && sy_set_mtime(pc, 1000) == 0, "same-second-fixture");
+        store(b);
+        if (tx_cmp(pa, tx_len(pa, 4400), pc, tx_len(pc, 4400)) < 0) ck(!sy_exists(pa) && hit(c) && hit(b), "same-second-lexical-victim");
+        else ck(!sy_exists(pc) && hit(a) && hit(b), "same-second-lexical-victim");
+        /* Retain correct size but corrupt payload: header/size-only validation must fail. */
+        {
+            char damaged[199];
+            char *bytes = 0;
+            size_t n = 0;
+            bytes = cx_read(pb, &n);
+            ck(bytes != 0 && n == 199, "corrupt-fixture-read");
+            if (!bytes || n != 199) return 2;
+            for (i = 0; i < 199; i++) damaged[i] = bytes[i];
+            damaged[198] ^= 1;
+            ck(cx_write(pb, damaged, 199) == 0 && !hit(b), "same-size-corrupt-rejected");
+            store(b); ck(hit(b), "corrupt-entry-repaired-by-real-store");
+        }
+    }
+    sy_printf("MODELCACHE_BUDGET\tmode=%s\tassertions=%d\tfailed=%d\n", argv[2], checks, failed);
+    return failed ? 1 : 0;
+}
