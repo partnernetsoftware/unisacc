@@ -1048,9 +1048,7 @@ sh ./unisacc.com tools/forecast-tier-runtime.cx -- "$ROOT"
 
 估时两表列完整清单、平台、材料与完成/预算来源；lnx/x86_64 daily累计16443.712749917秒，release/default16968.614173520秒。非PASS用原预算，材料构造与外平台等待未估；登记顺序估时不替代实际选择波，重叠scope/pool不可相加。
 
-逐文件限额等于当前每个普通`.cx`实测，无预留；608个文件逐项核对608/608，tip的ratchets105、check-net-deps141、check-interface-digest74均按实际设线。新增CLI必须真实check及source/entry批次登记，新库在coverage显式关联已登记行为检查，新文件最多600行。I2旧TOTAL退役只报告，不恢复其否决；完整逐文件表仍拒绝现存文件加行。TOTAL保留输出及证据，严格增长超过`X=1%`时打印`TOTAL_GROWTH threshold_percent=1 previous/current/growth approval=REQUIRED`，整数比较，不把报告变成TOTAL否决。实际无check的601行新CLI及现存文件逐文件增长两负例均5/0，通过的含义是原hook真实拒绝。
-
-主线历史TOTAL83733不是当前HEAD实测：未暂存索引实测84079；候选85229，实际/物理净增1150，低于cc批准1157，无历史推导差额豁免。首次迁移保留增长报告`previous=83733 current=85229 growth=1496 approval=REQUIRED`；逐文件差异及批准边界随包交对账。
+工具行数只作统计报告：TOTAL、逐文件、新文件、增长比例均无上限或批准门槛。`tests/toolsloc.cx --check` 保留报告兼容入口，拒绝写入或初始化基线；`tests/toolsloc.tsv` 保留全部历史行并标RETIRED。新工具仍须真实配套check与批次登记，非法.cx脚本及未登记别名仍拒绝；M8选择、估时、材料门与新增检查登记保持。
 
 完整库存626源/79片，含18 symlink，与608普通文件指标分开。全部三补丁的有界拷贝、CLI选择查询均已合入；上层检查不再include工具源码。支持性行为原日志附各自基点，不冒充4102提交档全绿。WT原八断言保留在daily问题`M8-WT-NEG-CONSTRUCT`，不扩大缓存框架；T2.c十INFRA和T2.a材料另循真实证据交付，不回填历史s9资格。
 
