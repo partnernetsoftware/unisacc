@@ -58,7 +58,7 @@ static int first_macro(const char *pre, size_t pn, const char *kind, const char 
 }
 /* 在生成文件里找第 n 个 "#if defined(X) && defined(Y)"(n 从 0 起),返回其后的
    SELF_TARGET / SELF_LAUNCH 值 */
-static int branch(const char *g, size_t gn, int n, char *mo, size_t moc, char *ma, size_t mac, char *tgt, size_t tc, char *lnch, size_t lc) {
+static int branch(const char *g, size_t gn, int n, char *mo, size_t moc, char *ma, size_t mac, char *tgt, size_t tc, char *lnch, size_t lc, char *policy, size_t pc) {
     size_t at = 0; int seen = 0;
     while (at < gn) {
         size_t e = at;
@@ -80,7 +80,7 @@ static int branch(const char *g, size_t gn, int n, char *mo, size_t moc, char *m
                 ma[k] = 0;
                 /* 该分支后两行是 #define SELF_TARGET / SELF_LAUNCH */
                 { size_t q = e + 1; int got = 0;
-                  while (q < gn && got < 2) {
+                  while (q < gn && got < 3) {
                       size_t qe = q; char v[64];
                       while (qe < gn && g[qe] != '\n') qe++;
                       if (qe - q > 15 && !memcmp(g + q, "#define SELF_", 13)) {
@@ -90,11 +90,12 @@ static int branch(const char *g, size_t gn, int n, char *mo, size_t moc, char *m
                           while (s < qe && g[s] != '"' && kk + 1 < sizeof v) v[kk++] = g[s++];
                           v[kk] = 0;
                           if (!memcmp(g + q, "#define SELF_TARGET", 19)) { size_t j; for (j = 0; j + 1 < tc && v[j]; j++) tgt[j] = v[j]; tgt[j] = 0; got++; }
+                          else if (!memcmp(g + q, "#define SELF_TAPE_DEFAULT", 25)) { size_t j; for (j = 0; j + 1 < pc && v[j]; j++) policy[j] = v[j]; policy[j] = 0; got++; }
                           else if (!memcmp(g + q, "#define SELF_LAUNCH", 19)) { size_t j; for (j = 0; j + 1 < lc && v[j]; j++) lnch[j] = v[j]; lnch[j] = 0; got++; }
                       }
                       q = qe + 1;
                   }
-                  return got == 2; }
+                  return got == 3; }
             }
             seen++;
         }
@@ -105,7 +106,7 @@ static int branch(const char *g, size_t gn, int n, char *mo, size_t moc, char *m
 int main(int argc, char **argv) {
     size_t tn = 0, pn = 0, gn = 0;
     char *tab, *pre, *gen;
-    char rows[MAXT][3][32];
+    char rows[MAXT][4][32];
     int n = 0, i;
     if (argc > 2) { fputs("usage: [ROOT]\n", stderr); return 2; }
     if (argc == 2) { if (!realpath(argv[1], root)) die("root"); }
@@ -121,7 +122,8 @@ int main(int argc, char **argv) {
               if (n >= MAXT) die("table rows");
               if (!col(tab + at, e - at, 0, rows[n][0], sizeof rows[n][0]) ||
                   !col(tab + at, e - at, 1, rows[n][1], sizeof rows[n][1]) ||
-                  !col(tab + at, e - at, 2, rows[n][2], sizeof rows[n][2])) die("table cols");
+                  !col(tab + at, e - at, 2, rows[n][2], sizeof rows[n][2]) ||
+                  !col(tab + at, e - at, 3, rows[n][3], sizeof rows[n][3])) die("table cols");
               n++;
           }
           at = e + 1;
@@ -133,13 +135,13 @@ int main(int argc, char **argv) {
       ck(tn_at(n, &dummy_os, &dummy_arch) == 2, "tn_at-out-of-range-returns-2", ""); }
     for (i = 0; i < n; i++) {
         const char *os = 0, *arch = 0;
-        char mo[32], ma[32], tgt[64], lnch[32], want_os[32], want_arch[32], detail[200];
+        char mo[32], ma[32], tgt[64], lnch[32], policy[32], want_os[32], want_arch[32], detail[200];
         int ok_at = tn_at(i, &os, &arch) == 0 && os && arch && !strcmp(os, rows[i][0]) && !strcmp(arch, rows[i][1]);
         if (cx_fmt(detail, sizeof detail, "row=%d %s/%s", i, rows[i][0], rows[i][1])) die("detail");
         ck(ok_at, "tn_at-matches-table-row", detail);
         if (!first_macro(pre, pn, "os", rows[i][0], want_os, sizeof want_os) ||
             !first_macro(pre, pn, "arch", rows[i][1], want_arch, sizeof want_arch)) die("predefines macros");
-        if (!branch(gen, gn, i, mo, sizeof mo, ma, sizeof ma, tgt, sizeof tgt, lnch, sizeof lnch)) {
+        if (!branch(gen, gn, i, mo, sizeof mo, ma, sizeof ma, tgt, sizeof tgt, lnch, sizeof lnch, policy, sizeof policy)) {
             if (cx_fmt(detail, sizeof detail, "branch=%d missing", i)) die("detail");
             ck(0, "generated-branch-present", detail);
             continue;
@@ -152,6 +154,9 @@ int main(int argc, char **argv) {
           ck(!strcmp(tgt, want), "branch-self-target-matches-table", detail); }
         if (cx_fmt(detail, sizeof detail, "branch=%d launch=%s table=%s", i, lnch, rows[i][2])) die("detail");
         ck(!strcmp(lnch, rows[i][2]), "branch-self-launch-matches-table", detail);
+        ck(!strcmp(policy, rows[i][3]), "branch-tape-default-matches-table", detail);
+        { char expected[80]; if(cx_fmt(expected,sizeof expected,"%s/%s",rows[i][0],rows[i][1]))die("policy target");
+          ck(!strcmp(policy,!strcmp(rows[i][0],"osx")?expected:"lnx/x86_64"),"only-osx-tape-default-is-native",detail); }
     }
     printf("PP_TARGETS_LINES\tassertions=%d\tfailed=%d\n", asserts, failed);
     return failed ? 1 : 0;

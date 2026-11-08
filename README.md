@@ -48,7 +48,7 @@ calling convention is not SysV or AAPCS64).
 当前 main 的开发修复支持 `--target T` / `--target=T`，只选目标，不覆盖 `-E/-S/-c` 模式；
 裸 `-c` 默认宿主目标并写 `.o`，可用 `-o` 指定路径。非 Linux 的 `-c` 使用已有 unit 合同：
 Mach-O/COFF 容器只携带 unit tape，供 unisacc 自己链接，不是系统链接器对象。
-`-c --tapebin` 与 `-S` 保留显式 tape 输出。公开 0.0.47 原资产未含此开发修复，身份见
+`-c --tapebin` 与 `-S` 保留显式 tape 输出。当前 main 的裸 `-S` 在两种 macOS slice 上按本片平台预定义 C 宏；其余宿主保留 lnx/x86_64 默认。显式目标、已有 tape/tapebin 的来源路由及裸 `-S -o bare.s` 的 tape 输出合同保留。公开 0.0.47 原资产未含此开发修复，身份见
 [本地记录](plans/root-identity.md)与[发布记录](plans/release-notes-0.0.47.md)。
 `-c -b T -funit` 显式选择 unit 对象；`unisacc a.o
 b.a [-o prog]` links unit objects and archives, and `unisacc ar rcs|t|x` writes
