@@ -20,7 +20,7 @@
 | `tests/` | 批次表 `batches.tsv`、覆盖表 `coverage.tsv`、`run.cx` 与批次检查;入口 `sh ./unisacc.com tests/run.cx -- --list` |
 | `weights/` | 静态输入:金标 `gold/*.tsv`、`built.uns2`(构造网的输入) |
 | `release/` | 发布材料:`candidate.tsv`(候选身份唯一来源)、读回/布局工具说明;用法见 `release/README.md` |
-| `work/` | 任务与账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`(分治索引) |
+| `work/` | 任务与账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`(分治索引) ——**管理账,不是产品事实表**:只给流程工具读写,不进「TSV→NN→unisacc」链,与 `exec/`、`weights/` 里的事实表无关 |
 | `.github/` | CI 工作流(六目标原生验证 `candidate-native.yml`) |
 
 ## 三、文档与计划
