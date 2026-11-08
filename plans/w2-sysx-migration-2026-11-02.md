@@ -1,6 +1,6 @@
 # W2 准备:cx/sys → ext/sysx 的调用点清点与分批方案(只读,2026-11-02)
 
-> 依据 `plans/cx-tiers-2026-11-02.md` 与 `plans/layering-refactor-2026-11-02.md`。
+> 依据 `plans/cx-tiers-2026-11-02.md` 与 `archive/plans/2026-11-08b/layering-refactor-2026-11-02.md`。
 > 范围:`net` `tty` `poll` `guard` `fd` `process` `process_group` `process_group_osx` `reaper` `childdepth`。
 > **`ffi`、`dl`、`dlcall` 属 core,不迁**(cc 2026-11-02 更正:`ffi` 是 cx 对接外部世界的核心能力);
 > `sig` 另议。实际清单是 **10 个模块**;cc 文中所说 11 个,差项待确认。

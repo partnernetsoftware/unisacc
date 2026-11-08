@@ -341,7 +341,7 @@ L0 库补齐 Rust 的 O(1) 尾部操作与 str 后缀/裁剪（不受 closure-on
 
 ## 收敛阻塞更正：cli.cx 是 closure-once，不是软链归一（grk 2026-10-30）
 
-grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而是 **closure-once**（plans/closure-once-2026-10-30.md）：`-c -funit` 把 use 闭包的函数体编进每只对象，符号是全局的。drive.o 已经 use text.text（tx_eqz 在 drive.o），cli.o 再 use text.text 会再带一份 tx_eqz，33 只对象链接重复符号。sy_realpath 只折叠软链，不去掉两只对象里的同一份函数。所以 cli.cx 用模块内 static cxc_eqz/cxc_prefixz 是**当前正确设计**，不是「未收敛」。等 closure-once（每模块只进一只对象）解决后，再统一收敛 use text.text。cx/driver/text 软链已删（它会让已装产品把同一模块算两次）。
+grk 澄清：cli.cx 收敛 use text.text 的真正阻塞不是软链归一，而是 **closure-once**（archive/plans/2026-11-08b/closure-once-2026-10-30.md）：`-c -funit` 把 use 闭包的函数体编进每只对象，符号是全局的。drive.o 已经 use text.text（tx_eqz 在 drive.o），cli.o 再 use text.text 会再带一份 tx_eqz，33 只对象链接重复符号。sy_realpath 只折叠软链，不去掉两只对象里的同一份函数。所以 cli.cx 用模块内 static cxc_eqz/cxc_prefixz 是**当前正确设计**，不是「未收敛」。等 closure-once（每模块只进一只对象）解决后，再统一收敛 use text.text。cx/driver/text 软链已删（它会让已装产品把同一模块算两次）。
 
 ## 产品重编后的收敛清单（modid 候选已实测可用，但 grk 这次不装）
 
@@ -379,7 +379,7 @@ feedback 反复问「cli.cx 收敛、practice-vec 转正为什么未落地」。
 2. 解除需要「每模块只进一只对象」：把 text/mem/sys 库模块单独编成共享对象（libtext.o 等），其他对象的 use 闭包不内联函数体、只生成符号引用，链接时由 libtext.o 提供。这需要：
    a. 编译器后端支持 -funit 的「use 闭包符号去重 / 不内联只引用」（cxmod/后端能力）。
    b. entry-build.cx 支持「共享模块单对象 + 其他对象引用」的分对象清单。
-3. 这是编译器核心能力 + 构建架构的联合改造，grk 已在推进（drive.cx 已 use text.text 是第一步，plans/closure-once-2026-10-30.md 记录了）。
+3. 这是编译器核心能力 + 构建架构的联合改造，grk 已在推进（drive.cx 已 use text.text 是第一步，archive/plans/2026-11-08b/closure-once-2026-10-30.md 记录了）。
 
 在这个改造完成前，cli.cx 用模块内 static cxc_eqz 是正确做法（不是未收敛的债），practice-vec 用 modid 候选验证软链归一（软链归一已修，只差 closure-once 的符号去重）。
 
