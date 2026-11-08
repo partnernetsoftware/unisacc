@@ -1537,3 +1537,8 @@ Original time limits are unchanged.
 默认回归在独立 `tests/check-tapebin-consumer.cx`，不在生产工具里提供自检 CLI。参数为 `ROOT ABS_NEW_OUT OLD_CHECKER_BIN NEW_CHECKER_BIN ABS_COMPILER ABS_MODELS`；检查旧新默认 67 个产物、stdout/stderr 和退出状态逐字节相同，并检查八类绑定拒绝。每日批次 `tapebin-consumer` 显式声明 `before-checker,after-checker,new-product,new-models`，通过 `tests/run-batch.cx ROOT CANONICAL_OUT_PARENT tapebin-consumer before-checker=ABS ...` 绑定，材料路径必须是 realpath 后的真实规范路径，不能以 `ROOT/out` 软链别名冒充。只计该批实际执行结果，不缓存 PASS。
 
 正式完整 roundtrip 的五个 `origin-target` 失败按 cc 裁定为 `TAPEBIN-ORIGIN-5` KNOWN-GAP，原断言不删不改；其余 67 项实际通过。每日 consumer 的 9/0 只表示默认等价与绑定拒绝，不覆盖或豁免这五项。s9 必须附源码身份及该缺口，0.0.49 独立调查。
+
+### s9 提交档选择与注册表一致性
+
+`select-commit-tier` 的成本仍来自冻结timings，但准入档位以生成当次 `tests/batches.tsv` 为准，历史commit不能覆盖当前daily/release。检查同时覆盖反向历史daily/当前commit，并核持久选择表中有wave的批次仍注册commit；注册表事后变动也会显式失败，不能等all-waves静默过滤。生成器只写调用指定输出；重生成并检查后才能安装计划。当前修复计划81个已测选择、7波、预测213128144423ns，不是整档实际资格。
+

@@ -21,9 +21,11 @@ int main(int argc,char **argv){
     np_buf timing={0},registry={0};
     np_puts(&timing,"# startup_ns=47464787754\n# wave_reserve_ns=10000000000\nid\tstatus\tcompletion_ns\toriginal_tier\tdomains\tmaterials\n");
     /* Reverse tie input order: output must still order a before b. */
-    np_puts(&timing,"b\tPASS\t1\tcommit\twt\t-\na\tPASS\t1\tcommit\twt\t-\ns\tPASS\t2\tcommit\tserial\t-\nu\tUNKNOWN\t-\tcommit\t-\t-\nf\tFAIL\t-\tcommit\t-\t-\nz\tPASS\t200000000000\tcommit\t-\t-\n");
+    np_puts(&timing,"b\tPASS\t1\tcommit\twt\t-\na\tPASS\t1\tdaily\twt\t-\ns\tPASS\t2\tcommit\tserial\t-\nu\tUNKNOWN\t-\tcommit\t-\t-\nf\tFAIL\t-\tcommit\t-\t-\nz\tPASS\t200000000000\tcommit\t-\t-\n");
     np_puts(&registry,"id\ttier\nb\tcommit\na\tcommit\ns\tcommit\nu\tcommit\nf\tcommit\nz\tcommit\n");
-    for(int i=0;i<283;i++){
+    np_puts(&timing,"daily-now\tPASS\t0\tcommit\t-\t-\nrelease-now\tPASS\t0\tcommit\t-\t-\n");
+    np_puts(&registry,"daily-now\tdaily\nrelease-now\trelease\n");
+    for(int i=0;i<281;i++){
         char id[40];
         if(cx_fmt(id,sizeof id,"padding-%03d",i))ct_die("fixture ID");
         np_puts(&timing,id);
@@ -67,6 +69,28 @@ int main(int argc,char **argv){
         int r=cs_batch(&output,excluded[k]);
         failures+=!ct_eq(ct_get(&output,r,"tier"),"daily");
         failures+=!ct_eq(ct_get(&output,r,"reason"),reasons[k]);
+    }
+    const char *preserved[]={"daily-now","release-now"};
+    const char *tiers[]={"daily","release"};
+    for(int k=0;k<2;k++){
+        int r=cs_batch(&output,preserved[k]);
+        failures+=!ct_eq(ct_get(&output,r,"tier"),tiers[k]);
+        failures+=!ct_eq(ct_get(&output,r,"wave"),"-");
+        failures+=!ct_eq(ct_get(&output,r,"reason"),"preserve-registry-tier");
+    }
+    /* Registry edits after generation must not silently filter scheduled work. */
+    ct_table live={0},plan={0};
+    ct_load(argv[1],"tests/batches.tsv",&live);
+    ct_load(argv[1],"tests/commit-tier-selection.tsv",&plan);
+    for(int r=0;r<plan.n;r++){
+        if(!ct_eq(ct_get(&plan,r,"kind"),"batch")||ct_eq(ct_get(&plan,r,"wave"),"-"))continue;
+        const char *id=ct_get(&plan,r,"id");
+        int registered=ct_find(&live,id);
+        if(registered<0||!ct_eq(ct_get(&live,registered,"tier"),"commit")||
+           !ct_eq(ct_get(&plan,r,"tier"),"commit")){
+            fprintf(stderr,"scheduled batch is not registered commit: %s\n",id);
+            failures++;
+        }
     }
     /* Leave failed evidence intact; remove only this check's own fixture files. */
     if(!failures){
