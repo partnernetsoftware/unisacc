@@ -35,3 +35,19 @@ Gatekeeper保持enabled，carrier和提取MachO评估均实际exit3/rejected；�
 N默认4，当前计入并touch为最近；额外保留存活lease，PID复用宁保留。legacy旧压缩SHA16名字不能当rawSHA，V2标记另绑定原名/type/fullSHA；实际迁移同N处理。未来旧launcher生成的新无标记条目仍保守保留，需再次fresh审计adopt；不宣称所有旧launcher已永久受限。lsof是同一次调用的快照，不是停止世界或恶意同UID/ABA证明。异常信号及解包失败时的临时目录回收未覆盖；已验证正常退出的锁忙/manager失败回退。
 
 小日志、收据、脚本与身份清单见evidence/；大载体、helper、下载和缓存不复制进research。HASHES排除自身，使用CX逐文件重算并复核。迁移包装器和盘点/验证算法均为CX；本轮未改共享管理器、打包器或主文档源码，未提交。
+
+## 冻结执行源码归档
+
+本次仅将已执行的三份CX分析快照原字节移至archive，未改算法、未重新执行迁移，也未移出现行缓存工具或16项检查合同。原路径无工具/测试/注册调用者，静态失败日志仍保留原历史路径。执行身份不因归档迁移：
+
+- [cache-inventory.cx](../../archive/research/c48-macos-distribution/evidence/cache-inventory.cx)：017d4fbcc3c588a3a4c345dace905e370b6248816a9d9e30102236e7d8c73fc3
+- [cache-migration.cx](../../archive/research/c48-macos-distribution/evidence/cache-migration.cx)：d7ebe32953b5ff8d0dfe0550bff12f88a819c82f21ecc7148ce7e22df96ae778
+- [cache-post-verify.cx](../../archive/research/c48-macos-distribution/evidence/cache-post-verify.cx)：c766ce83f02f722c816eaa538c457c892f51fdd4e913c2b16b90b0c1dd5495c2
+
+这是冻结执行快照归档，不是新增工具、缩减活跃覆盖或放宽安全基线。HASHES以本报告目录为根，仅这三个标准相对路径外指本仓archive；其余仍在本目录。所有旧结果继续绑定上述历史源SHA，未冒充当前工具新实跑。
+
+## 最终安全补丁与新私有载体
+
+为消除本刀新增的真实安全门债，管理器/检查器动态格式改为检查cx_fmt；动态复制改为检查mm_copy，dcap取protected真实65537容量、active_names单槽256、Item.name256及Item.key17。原容量、16断言、时限和安全基线均未放宽。新管理器源码SHA `c3d1eaf2340bddf2f1a205968234bc6acba29af46b89d2b8960a353313a1c424`，检查器源码SHA `9906a6b8082241811f81570953ed1a52bc33fefdf32679efd895bdd82861d904`。旧9990884b…源码和136→4真实迁移仍保持其历史身份，未改旧证据SHA或重演删除。
+
+正式cache-retain会话48059实际PASS/rc0/transport0，16/0；源码冻结后同六个真实slice与P3重新默认pack，会话65827实际0。新私有载体6,274,578字节，SHA `a9c138ec1fc44daea10648ed6c685857d3abe02126084900068901741790de3f`；当前根产品和公开资产均未改。ARM与Rosetta私有XDG实际版本均0、hello均7，且各自产生正确raw-key标记/租约。完整正式日志、默认检查日志、新pack收据/日志、四次运行状态及stdout/stderr、marker/lease摘要与sourceSHA见safety-final/。最终全局13门由父另行收口，本节不将尚未收到的结果记PASS。
