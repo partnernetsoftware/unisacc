@@ -85,6 +85,7 @@
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
 | 网级依赖图与第14号波及面门 | `sh ./unisacc.com tools/net-deps.cx -- [--summary\|--touch FILE...\|--oracle]`；`tests/net-deps.cx --check` | 路径别名统一规范化；原工具25/0、棘轮行为7/0；42配方静态上界实测pp3/lower12/generator42/facts30，无预留。批次net-deps及net-deps-ratchet；不是运行读集完备或语义覆盖证明 |
 | 0.0.48底子执行（cc续派） | BASE-1..6与C0.2登记于items；父集成BASE-1/BASE-6，独立子任务C0.2摘要、BASE-2耗时、BASE-5函数矩阵；BASE-4复用I2原型 | 先落实依赖/摘要及单网实测，再做真实pp扰动增量验证；仅冻结输入运行，不改产品输入。逐项提交同步并在计划§14填实际数字，全部完成后接X2；超过5分钟先分解，已有60秒子步骤看门狗不放宽 |
+| 单网闭包内容摘要（C0.2） | `sh ./unisacc.com tools/net-digest.cx -- --root DIR [--closure TSV] --net NAME\|--all [--export-closure NEW]`；正式net-digest批15/0 | 三真实pp配方端到端；长度分帧绑定recipe参数、排序canonical路径/kind/内容与工具身份；闭包内变/外不变。缺输入、符号链接、权限、坏图、重复、逃逸、未知网均拒绝且不出摘要。旧tree_digest未找到定义，本次复用现SHA库实落地；显式闭包只适用于已冻结图，不证明运行读集完备或构造/全键验证通过 |
 | 符号索引 | `sh ./unisacc.com tools/symindex.cx -- def NAME` | 冷建 ~2.4s，查询 ~250ms |
 | `use` 的包根解析 | 仓根 `cxroot.tsv`（`R<TAB>PREFIX<TAB>DIR`）；工具侧 `use cxlib.cxroot` 调 `cxr_path`；`sh ./unisacc.com tools/check-cxroot.cx` | 旁边找不到时查最近祖先的 `cxroot.tsv`，最长前缀映射（cx/spec.md CX-U-7）；编译器侧已改 `plan.cx`/`cxmod.cx`，**已装产品要重建安装后才生效**，软链届时逐目录淘汰 |
 | 源码所有权检查（CX-W-4 路线 B） | `sh ./unisacc.com tools/cx-own.cx -- FILE...` 或 `-- --tracked`；夹具 `tools/check-cx-own.cx` | 函数内局部 owner 的 DOUBLE-FREE / USE-AFTER-FREE / LEAK；保守（转给未知函数视作可能转出）。2026-11-03 全仓：9043 函数，LEAK 220（抽 10 全真，多为工具错误路径），DOUBLE-FREE 1（误报，互斥整数条件），产品目录只有 60 个局部 owner——产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到 |
