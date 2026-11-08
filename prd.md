@@ -465,3 +465,13 @@ model-program-census注册验收实跑终态：`out/model-program-census-registe
 〔C47输入词身份下一增量〕私有诊断为INTERN/SBINTERN记录源帧/缓冲代次、精确半开子串范围、内容SHA及返回的intern身份；相同词在不同位置保留不同来源事件，不凭共享id合并模块归属。先以两行相同词和scratch复用的独立delta核位置与身份，再接真实图中的OPC属性读及E.ret规则；输入词所在完整行只能由同SHA不可变输入的行界核对，仍不把行位置直接当模块名。并行只读调查prune/lower实体来源合同及稀疏日志规模，暂不改产品。
 
 〔C47 INTERN实际验证〕直接check29/0/rc0（会话59482），独立重复ret两行分别绑定[0,3)/[4,7)且scratch同id保持独立源事件；原25项保留。首轮29/1因新夹具留下ret输入使旧拒绝用例读到114而非65，修复为恢复其原始A输入，原失败日志intern-edges-check.log保留，不改拒绝期望。真实同输入/模型仅新增诊断，minimal-intern.elf与前版cmp0；44859事件/11405402B，INTERN在LW.i返回id59且精确子串[2224,2227)，内容SHA 85e4aea1…；并不靠cursor猜该词。注册批次尚待父本轮执行。
+
+〔C47稀疏观察决定〕全写事件小例已约10MB，不能直接扩到8MB/439366行真实merged tape。新增仅私有sim的显式状态观察模式：配置列出实际状态与只读寄存器/指定地址槽，状态入口快照带frame SHA/实例/cursor、输出代次/长度及配置SHA；模式明确STATE_OBSERVATION_ONLY，未选择动作不称完整因果日志。现有完整write-events默认合同及1M事件/64MiB硬界保留。先用独立delta验证状态取值、坏配置拒绝与默认产物cmp，再为prune整行、lower实体/episode制定同模型内容SHA绑定的profile；不能按名字相似泛用证书。此模式是量测原语，来源解释另由固定规则合同检验。
+
+〔C47 source/object身份缺口〕slice-inventory的VERIFIED只核字节/顺序计划，不独立证明源码等于对象。已实际用原冻结构造器fde2db18…、同snapshot cwd/source、原-O2 -c -b lnx/x86_64 -funit重编routestep.o，0.20s/rc0，输出SHA a5be9626…与候选对象cmp0。下一步用分批有界重放核82对象的原始优化参数及源码SHA；逐对象相等后才能把planned_source升级为该构造输入的实证来源，仍不替代模块到最终镜像的传播证明。不重建权重、不重跑全套测试。
+
+〔C47 lower整行实体量测决定〕先以LINE入口前后输出长度及原输入完整行范围复原CL复制出的code缓冲，必须核复原字节SHA等于C.init所观测真实帧，不能靠词或标签相似。C.next/C.label将nc绑定该code帧完整行，再把GENERIC至C.advance的输出episode、PF/PL两行消耗分别绑定实体集合，其他规则/合成/数据仍UNKNOWN。实现独立消费检查，拒绝错input/delta/配置SHA、错帧、反序或重复实体以及不守恒复制；它只证明所登记规则的行来源，不把nc或intern身份当对象模块。当前真实小例watch已rc0/6264条，输入与原lower输出的cmp由消费校验接续。
+
+〔C47稀疏观察实际交付〕`--watch-states CONFIG --write-events NEW.tsv`严格配置为STATE TAB REG,REG（当前只支持直接寄存器，不支持间接地址槽），最多64状态/每状态16不同寄存器/64KiB；未知状态/寄存器、重复/空字段及坏形均拒绝。仅选中状态入口记录frame实例/SHA/cursor/end、output/scratch代次和长度、指定寄存器值；关闭完整动作日志及属性版本map，header明确STATE_OBSERVATION_ONLY与config_sha，ACCEPT/预算/独占原子发布合同保留。新check13/0、原check29/0真实终态；sim-state-watch实际注册PASS/13/0/transport0，会话13804退出0。真实lower小例6,264条/1,632,524B，输出与原minimal.target cmp0；该规模不是全切片60秒资格。
+
+冻结seed-gen prune→tbl→net另实际绑定包model8：raw23014B SHA33f2a9daec27e4f90d42781d7d01f1c76a975c1b9a04b18656b7e850591a98d7，完整memcmp=1/CRC通过；JSON sha048d415d42047197afddc2d1e1a3e8f80947efd753487e317680a58626134f48，可接真实整行prune量测，不信旧stamp。证据out/c47-driver-fix/model-binding/prune-binding.tsv，真实会话97920退出0。INTERN正式sim-write-events批亦29/0/transport0，会话96410退出0，前述“待执行”已由本收据闭合。
