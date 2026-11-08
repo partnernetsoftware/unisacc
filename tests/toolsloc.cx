@@ -1,118 +1,16 @@
-/* toolsloc.cx -- tools line ratchet (W6): tracked regular tools/*.cx total lines only go down.
- *
- *   sh ./unisacc.com tests/toolsloc.cx -- --check | --write | --init | --selftest | --staged --check
- *
- * Baseline is tests/toolsloc.tsv: one TOTAL<TAB>lines row.
- * --check: rc 1 when the current total exceeds the baseline.
- * --write: only ratchets down; refuses when current > baseline, writes only when current < baseline.
- * --init: writes the first baseline only when the file is absent.
- * --selftest: proves the red fixture (baseline=total-1) fails, then the green fixture (baseline=total)
- *             passes without touching any file.
- */
-#pragma unisa use sys.fs
-#pragma unisa use sys.io
+/* Historical entry point: line counts are a report, never a limit.
+ * The retired baseline is intentionally never read or written. */
+#pragma unisa use sys.proc
 #pragma unisa use text.text
-#pragma unisa use text.num
 #pragma unisa use mem.heap
-
-#define BASELINE "tests/toolsloc.tsv"
-
-static long num(const char *s, long n) {
-    char t[32];
-    tx_copy(t, sizeof t, s, n < 31 ? n : 31);
-    return tx_strtol(t, 0, 10);
-}
-
-static long load_base(long *base) {
-    size_t n;
-    char *b = cx_read(BASELINE, &n);
-    long at = 0;
-    *base = -1;
-    if (!b) return -1;
-    while (at < (long)n) {
-        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
-        if (l > 6 && tx_prefix(b + at, l, "TOTAL\t", 6)) *base = num(b + at + 6, l - 6);
-        at += l + 1;
-    }
-    mm_free(b);
-    return *base < 0 ? -1 : 0;
-}
-
-static long count_tools(long *files, int staged) {
-    char *list = 0;
-    size_t ln = 0;
-    long at = 0, total = 0;
-    int rc = cx_run("git ls-files -s -z -- 'tools'", &list, &ln);
-    if (rc != 0 || !list) { sy_eprintf("toolsloc: git ls-files failed\n"); return -1; }
-    *files = 0;
-    while (at < (long)ln) {
-        char *rec = list + at;
-        long rl = tx_len(rec, (long)ln - at), tab = tx_chr(rec, rl, '\t');
-        char *p;
-        long pl, lines = 0;
-        size_t sn;
-        char *src = 0;
-        at += rl + 1;
-        if (tab < 0 || tx_prefix(rec, rl, "120000", 6)) continue;
-        p = rec + tab + 1;
-        pl = rl - tab - 1;
-        if (!tx_suffix(p, pl, ".cx", 3)) continue;
-        if (staged) {
-            char cmd[4600];
-            if (cx_fmt(cmd, sizeof cmd, "git show :%.*s", (int)pl, p)) { mm_free(list); return -1; }
-            if (cx_run(cmd, &src, &sn) != 0 || !src) { sy_eprintf("toolsloc: cannot git show :%.*s\n", (int)pl, p); mm_free(list); return -1; }
-        } else {
-            src = cx_read(p, &sn);
-            if (!src) { sy_eprintf("toolsloc: cannot read %.*s\n", (int)pl, p); mm_free(list); return -1; }
-        }
-        for (size_t i = 0; i < sn; i++) if (src[i] == '\n') lines++;
-        mm_free(src);
-        (*files)++;
-        total += lines;
-    }
-    mm_free(list);
-    return total;
-}
-
-static int emit(long total, long base, long files, int red) {
-    if (red) sy_printf("toolsloc: tools/ total lines %ld, baseline %ld\n", total, base);
-    sy_printf("toolsloc: %s: %ld tools .cx files, %ld lines (baseline %ld); %d above baseline\n",
-              red ? "FAIL" : "ok", files, total, base, red ? 1 : 0);
-    if (!red) sy_printf("TOOLSLOC\n");
-    return red ? 1 : 0;
-}
-
 int main(int argc, char **argv) {
-    long total, base = -1, files;
-    int mode = -1, staged = 0, i, red;
-    for (i = 1; i < argc; i++) {
-        if (tx_eqz(argv[i], "--staged")) staged = 1;
-        else if (tx_eqz(argv[i], "--check")) mode = 0;
-        else if (tx_eqz(argv[i], "--write")) mode = 1;
-        else if (tx_eqz(argv[i], "--init")) mode = 2;
-        else if (tx_eqz(argv[i], "--selftest")) mode = 3;
-        else { sy_eprintf("usage: toolsloc.cx --check | --write | --init | --selftest | --staged --check\n"); return 2; }
+    char *out = 0; size_t n = 0; int rc;
+    if (argc > 2 || (argc == 2 && !tx_eqz(argv[1], "--check"))) {
+        fprintf(stderr, "toolsloc: retired; use tools/tool-inventory.cx -- --recent N (no baseline writes)\n");
+        return 2;
     }
-    if (mode < 0) mode = 0;
-    total = count_tools(&files, staged);
-    if (total < 0) return 2;
-    if (mode == 3) {
-        red = total > total - 1;
-        sy_printf("toolsloc: selftest red fixture: %s (baseline %ld)\n", red ? "FAIL as expected" : "unexpected pass", total - 1);
-        sy_printf("toolsloc: selftest green fixture: %s (baseline %ld)\n", total <= total ? "ok" : "unexpected fail", total);
-        return red ? 0 : 1;
-    }
-    if (mode == 2) {
-        if (load_base(&base) == 0) { sy_eprintf("toolsloc: --init refused, %s exists\n", BASELINE); return 2; }
-        { char line[64]; if (cx_fmt(line, sizeof line, "TOTAL\t%ld\n", total) || cx_write(BASELINE, line, tx_len(line, sizeof line))) return 2; }
-        sy_printf("toolsloc: ok: wrote %s with TOTAL %ld\n", BASELINE, total);
-        return 0;
-    }
-    if (load_base(&base) != 0) { sy_eprintf("toolsloc: cannot read %s (run --init once)\n", BASELINE); return 2; }
-    if (mode == 0) return emit(total, base, files, total > base);
-    if (total > base) { sy_eprintf("toolsloc: --write refused, %s unchanged: %ld > %ld\n", BASELINE, total, base); return 1; }
-    if (total == base) { sy_printf("toolsloc: ok: %ld lines, baseline unchanged\n", total); return 0; }
-    { char line[64]; if (cx_fmt(line, sizeof line, "TOTAL\t%ld\n", total) || cx_write(BASELINE, line, tx_len(line, sizeof line))) return 2; }
-    sy_printf("toolsloc: ok: ratcheted %s down %ld -> %ld\n", BASELINE, base, total);
-    return 0;
+    rc = cx_run("sh ./unisacc.com tools/tool-inventory.cx -- --recent 0", &out, &n);
+    if (out) { fwrite(out, 1, n, stdout); mm_free(out); }
+    if (rc == 0) printf("TOOLSLOC\n");
+    return rc;
 }

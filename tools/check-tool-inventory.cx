@@ -1,0 +1,28 @@
+/* Isolated Git fixture: report candidates without thresholds or repository mutation. */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+static int checks,bad;static char fixture[4096],com[8192],tool[8192];
+static void die(const char *s){fprintf(stderr,"tool-inventory-check: %s\n",s);exit(2);}
+static void ck(int yes,const char *s){checks++;bad+=!yes;printf("%s\t%s\n",yes?"PASS":"FAIL",s);}
+static np_result call(char **a,const char *cwd){np_result r={0};char why[300]={0};if(np_run(a,cwd,0,8,&r,why,sizeof why)||r.residue)die(why);return r;}
+static void git(char **a){np_result r=call(a,fixture);if(r.rc){fprintf(stderr,"git rc%d %s\n",r.rc,r.err?r.err:"");die("fixture git");}np_free(&r);}
+static void save(const char *p,const char *s){char path[8192];snprintf(path,sizeof path,"%s/%s",fixture,p);if(cx_write(path,s,strlen(s)))die("fixture write");}
+static np_result inventory(const char *count,const char *root){char *a[]={"sh",com,tool,"--","--root",(char *)root,"--recent",(char *)count,0};return call(a,0);}
+int main(void){char root[4096];if(!realpath(".",root))die("root");snprintf(com,sizeof com,"%s/unisacc.com",root);snprintf(tool,sizeof tool,"%s/tools/tool-inventory.cx",root);strcpy(fixture,"/tmp/tool-inventory-check-XXXXXX");if(!mkdtemp(fixture))die("mkdtemp");char p[8192];const char *dirs[]={"tools","tools/sub","tests","docs"};for(int i=0;i<4;i++){snprintf(p,sizeof p,"%s/%s",fixture,dirs[i]);if(mkdir(p,0700))die("mkdir");}
+ char *init[]={"git","init","-q",0};git(init);save("tools/alpha.cx","int alpha;\nlast");save("tools/check-alpha.cx","/* tools/alpha.cx */\n");save("tools/dupe.cx","same\nsame\n");save("tools/sub/copy.cx","same\nsame\n");save("tests/batches.tsv","alpha\tIMPLEMENTED\tinterfaces\ttools/alpha.cx\tSOURCE\n");save("docs/use.md","Use tools/alpha.cx.\n");snprintf(p,sizeof p,"%s/tools/link.cx",fixture);if(symlink("alpha.cx",p))die("symlink");char *add[]={"git","add",".",0};git(add);char *commit[]={"git","-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-qm","base",0};git(commit);
+ save("tools/check-copy.cx","/* root paired check */\n");
+ save("tests/batches.tsv","alpha\tIMPLEMENTED\tinterfaces\ttools/alpha.cx\tSOURCE\ncopy\tIMPLEMENTED\tinterfaces\ttools/check-copy.cx\tSOURCE\n");
+ save("tools/recent.cx","one\ntwo\nthree\n");git(add);char *next[]={"git","-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-qm","second",0};git(next);save("tools/untracked.cx","ignored\nignored\n");
+ np_result r=inventory("1",fixture);
+ ck(!r.rc&&r.out&&strstr(r.out,"TOOL_INVENTORY_COMPLETE\tfiles=6\tlines=10\t"),"tracked regular LF total includes unterminated line correctly");
+ ck(r.out&&!strstr(r.out,"FILE\ttools/link.cx")&&!strstr(r.out,"FILE\ttools/untracked.cx"),"symlinks and untracked files excluded");
+ ck(r.out&&strstr(r.out,"DIRECTORY\ttools/sub\tfiles=1\tlines=2\n"),"directory totals");
+ ck(r.out&&strstr(r.out,"CANDIDATE\texact-content-duplicate\ttools/dupe.cx\ttools/sub/copy.cx\n"),"exact duplicate SHA candidate");
+ ck(r.out&&strstr(r.out,"CANDIDATE\tmissing-paired-check\ttools/recent.cx\n")&&strstr(r.out,"CANDIDATE\tno-implemented-batch-entry\ttools/recent.cx\n")&&strstr(r.out,"CANDIDATE\tno-lexical-caller\ttools/recent.cx\n")&&!strstr(r.out,"CANDIDATE\tmissing-paired-check\ttools/alpha.cx\n")&&!strstr(r.out,"CANDIDATE\tno-implemented-batch-entry\ttools/alpha.cx\n"),"missing check registration caller are report-only candidates");
+ ck(r.out&&strstr(r.out,"\tadded=4\tdeleted=0\tnet=4\tfiles=2\n"),"recent commit tools increment ignores other paths");
+ ck(r.out&&strstr(r.out,"caller_files=2\tregistered=1\tpaired_check=1"),"check and batch are distinct lexical callers; self excluded");
+ ck(r.out&&!strstr(r.out,"CANDIDATE\tmissing-paired-check\ttools/sub/copy.cx\n")&&!strstr(r.out,"CANDIDATE\tno-implemented-batch-entry\ttools/sub/copy.cx\n"),"root paired checker and checker batch cover nested tool");
+ if(r.rc)fprintf(stderr,"report rc=%d %s\n",r.rc,r.err?r.err:"");
+ np_free(&r);
+ r=inventory("0",fixture);ck(!r.rc&&r.out&&!strstr(r.out,"RECENT\t")&&strstr(r.out,"recent_requested=0\tcandidates=REPORT_ONLY"),"zero recent avoids history and candidates never fail");np_free(&r);r=inventory("-1",fixture);ck(r.rc==2&&!r.outn,"invalid recent rejected");np_free(&r);char invalid[8192];snprintf(invalid,sizeof invalid,"%s/not-a-repository",fixture);r=inventory("1",invalid);ck(r.rc==2&&!r.outn,"invalid root is IO error not empty inventory");np_free(&r);
+ char *cleanup[]={"/bin/rm","-rf",fixture,0};r=call(cleanup,0);if(r.rc)die("fixture cleanup");np_free(&r);printf("TOOL_INVENTORY_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}

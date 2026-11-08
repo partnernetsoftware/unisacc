@@ -26,18 +26,31 @@
 **禁用写法**：裸 `stage` 一律写 `stream-stage`（流）或 `net`（网）；「网」专指 §0.1 定义的构造 NN；包里的执行单元写 `model`（模型 ≠ 网，一个模型可含网+生成程序+常量）；旧 `unisa/control/net.py` 那类训练用神经网络写「训练模型」。
 
 ### 0.1 范式与核心概念（定义；全文以此为准）
-**RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
 **范式一句话**：用 NN 替代逻辑——编译器中的表状决策先写成**事实表**，再由生成器**确定性构造**成 NN，由一个通用执行器运行。「以网换逻辑」「NN 替代逻辑」「TSV→NN」是同一命题的三种说法，不存在冲突。
-## 1. unisacc.com 是什么
 
 | 概念 | 定义 | 不是什么 |
-**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练。通用执行器执行构造出的选择器与动作程序；这是决策表示的改变，尚无语义决策覆盖率证明，不能由模型体积推出“以网换逻辑”。
+|---|---|---|
+| **事实表**（tsv） | 有限定义域上的决策映射，人可审、可 diff；范式的**源** | 不是生成物，不手改生成结果 |
+| **生成器** | 表 → 网/程序 的确定性构造程序（`tools/*-gen.cx`、`seed/gen.c`），带 `--check` | 不是训练 |
+| **网**（NN） | 由事实表构造的小整数阈值神经网络；在表的**全定义域逐键验证 = 表** | 不是训练所得，不声称泛化；验证只证「网 = 表」，不证「表 = C99」 |
+| **生成程序** | 生成器产出的转移/动作序列，由执行器运行（承担网之外的动作落地） | 不是手写代码 |
+| **模型**（kind N） | 包里的执行单元 = 选择器（网）+ 生成程序 + 常量；P4 包 40 个 | 不等于「网」的个数 |
+| **执行器** | 通用机制（定宽运算、栈、字节/帧、资源），语义全来自模型 | 不含语言/ABI 特判 |
+| **机制代码** | 尚未进表的经典代码：循环/递归/带副作用序列等 | 不是范式失败，是范式**尚未覆盖**的剩余空间 |
 
 **两套计数不混用**：经典参考 **18 张金表网**（`weights/gold`，其中 5 张为对照臂）；默认产品阶段包 **42 张构造阈值网**（分布在 40 个模型里）。
-**一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
 **替代发生在哪一步**：逻辑 → 事实表 这一步把决策从代码里拿出来；表 → 网 是等价的执行形式转换。覆盖度的度量看「决策进表的比例」，现状见 §9.6（源码中机制代码约 49%，是后续推进空间）。
+
+**RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
+
+## 1. unisacc.com 是什么
+
+**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练。通用执行器执行构造出的选择器与动作程序；这是决策表示的改变，尚无语义决策覆盖率证明，不能由模型体积推出“以网换逻辑”。
+
+**一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
+
 - **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
 - **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据；当前候选的原生 CI 结果与 Windows 两格仅 portable 子集的限制见 §9.1。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
@@ -63,13 +76,6 @@
 
 | 动作 | 现成用法 | 说明 |
 |---|---|---|
-| **事实表**（tsv） | 有限定义域上的决策映射，人可审、可 diff；范式的**源** | 不是生成物，不手改生成结果 |
-| **生成器** | 表 → 网/程序 的确定性构造程序（`tools/*-gen.cx`、`seed/gen.c`），带 `--check` | 不是训练 |
-| **网**（NN） | 由事实表构造的小整数阈值神经网络；在表的**全定义域逐键验证 = 表** | 不是训练所得，不声称泛化；验证只证「网 = 表」，不证「表 = C99」 |
-| **生成程序** | 生成器产出的转移/动作序列，由执行器运行（承担网之外的动作落地） | 不是手写代码 |
-| **模型**（kind N） | 包里的执行单元 = 选择器（网）+ 生成程序 + 常量；P4 包 40 个 | 不等于「网」的个数 |
-| **执行器** | 通用机制（定宽运算、栈、字节/帧、资源），语义全来自模型 | 不含语言/ABI 特判 |
-| **机制代码** | 尚未进表的经典代码：循环/递归/带副作用序列等 | 不是范式失败，是范式**尚未覆盖**的剩余空间 |
 | 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认即 `-run`；`.c` 同样适用 |
 | 显式动态执行 | `./unisacc.com -run FILE.cx -- ARGS` | 保留的显式写法 |
 | 从 tape 写目标镜像 | `./unisacc.com INPUT.tape -b OS/ARCH -o OUTPUT` | `.tapebin` 也有现成入口 |
@@ -109,9 +115,9 @@
 | 上层禁 libc/POSIX | `sh ./unisacc.com tests/cxlibc.cx -- --check` | 名单不手写，按前导分类 |
 | 看某域还差什么 | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN` | 逐格读矩阵，印 OPEN 行 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.44.tsv --check` | R 行理由 + W 行豁免 |
-| 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/toolsloc/verwriter/aluiwidth/outdep/check-literal（2026-11-06 主树 `RATCHETS ok=13 fail=0`，见 plans/rc1-gates-2026-11-06.md 门槛 2） |
-| tools 行数只降不升 | `sh ./unisacc.com tests/toolsloc.cx -- --check`（`--write` 只下调） | tracked regular `tools/*.cx` 总行数，基线 `tests/toolsloc.tsv`；新增 tool 必须先改基线并经 cc 批准 |
-| 真实提交 tools LOC 与源码分类闸 | `sh ./unisacc.com tools/check-precommit-toolsloc.cx -- --loc`、`-- --source`、`-- --symlink`（三批全部执行；批次 `precommit-toolsloc`、`precommit-toolsloc-source`、`precommit-toolsloc-symlink`，各 45 秒） | 各批独立真实临时 git 仓，实际编译并运行生产 hook 与完整 ratchets；保留超额 rc/理由、未跟踪排除、shebang 分类、符号链接不重复计行、无尾 LF 计行、未暂存增长排除和新增常规行拒绝；无参拒绝，不提供隐式串行全批入口；耗时须实测，不表示已通过 |
+| 仓级棘轮（12 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal；2026-11-08撤出toolsloc，旧13项通过记录仅属历史 |
+| tools 统计与候选清理 | `sh ./unisacc.com tools/tool-inventory.cx -- --recent 10` | 总行数、按目录/文件及近N次提交增量；无调用者/无批次/疑似重复只报告；不设总量或逐文件上限。tests/toolsloc.tsv退役保留；precommit只对新增tool缺check或批次登记拦截 |
+| 真实提交工具配套与源码分类闸 | `sh ./unisacc.com tools/check-precommit-toolsloc.cx -- --loc`、`-- --source`、`-- --symlink`（保留三批历史ID） | 独立真实临时git仓运行生产hook；历史行数超额允许，shebang伪源码拒绝，新增tool缺check或缺IMPLEMENTED批次拒绝；旧工具无调用者/无批次/重复仅列候选 |
 | 分片测试：显式绑定 slice/pkg 启动 | `tools/test-loader.cx`（`--slice ABS --models ABS --identity ABS`、`--net STAGE=ABS --swap-tool ABS` 单网替换、`--e2-adapter`）；检查 `tools/check-test-loader.cx`（批 test-loader-com，需 5 个 `TEST_LOADER_*` 绝对路径环境绑定） | 开发证据，不是发布资格；缺绑定非零，不回落读 `./unisacc.com`；规格见 plans/test-loader-com.md |
 | 波次哪些批不能同跑 | `sh ./unisacc.com tests/check-wave-domains.cx`（批次 `wave-domains`） | `tests/wave-domains.tsv` 每行 `id<TAB>domains<TAB>reason<TAB>evidence`；domains 取 `serial`（独占一波）/`wt`（写共享路径）/`hs`（写 harness 三树）/`mi:<材料名>`，空=无约束；all-waves 按掩码两两不相交放置 |
 | 单阶段过滤器（分段编译管道） | `./unisacc.com stream STAGE [--route R] [--res NAME[=FILE]] [--models PKG] [--raw] < in > out`；`stream frame --in L=F...`；`stream sidecar` | 同一 st_span/包/`\0cli/*` 跑一个阶段；属性表随流（USLATTRT）；`e2\|e1\|e3\|sidecar\|prune\|lower\|elf` 与 `-o` 逐字节同；校验 `tests/check-stream-pipe.cx`；改表→`tools/lab-loader/p3-swap.cx --model`→`--models` 实测 ≈8s |
@@ -394,7 +400,6 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
-|---|---|---|
 | 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
 | 当前发布 | 0.0.47 已发布（见 §9.1）；0.0.46 同日早些时候发布；旧候选资格不迁移 | [0.0.47 发布说明](plans/release-notes-0.0.47.md) |
 | 下一版 | 0.0.48 | [计划](plans/v0.0.48-unisacc.md)、`agentwork/items.tsv` |
@@ -402,10 +407,10 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md)、§8 |
-| 棘轮 | 13 项，以 `tools/ratchets.cx` 末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、§2.2 |
+| 棘轮 | 12项，以`tools/ratchets.cx`末行为准；toolsloc已退役，工具行数只统计，不设任何上限 | `tools/ratchets.cx`、§2.2 |
 | 事实表 | 事实→生成器（须带 `--check`）→产物 | `exec/facts/`、§2.4 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；仅工具预算 +243 待批，不称全仓绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
+| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布（历史）
@@ -446,7 +451,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 D1数据结论：模型大半raw字节是生成动作程序，选择器只是其中一部分；这些表示计数没有证明“以网消除逻辑”。机制代码、跨目标合同与独立于参考C的语义oracle仍须分别验证；本次逐字节对拍和来源一致性不是独立语义oracle。whole观察的快核目前依赖out私有HOSTCC/ASM诊断原型及实际execution身份，不声称已迁入共享sim或形成可移植产品能力。
 
-全部新增工具及最终参数模式均已正式登记实跑，包含8个encoder双段profile；静态和动态错配拒绝保留。最终工具行数实测585文件83,279行，对已合入的cc基线83,036仍超243行；未改基线，扩额待答复。局部功能和登记通过不称全仓棘轮/--all/六宿主CI通过；首次超时、静态profile拒绝与未知状态均保留。
+全部新增工具及最终参数模式均已正式登记实跑，包含8个encoder双段profile；静态和动态错配拒绝保留。C47最终测量585文件83,279行；2026-11-08主人最终裁定工具行数门退役，C47据已有功能证据DONE。先前13项实测9绿、cxapis/cxtrunc/outdep红及coreapi ERROR仍保留，统计制度改变不使其余门变绿。局部功能和登记通过不称全仓棘轮/--all/六宿主CI通过；首次超时、静态profile拒绝与未知状态均保留。
 
 ## 10. 归档索引
 

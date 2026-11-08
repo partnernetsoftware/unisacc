@@ -29,7 +29,7 @@
   - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
   - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
-  - 十二个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform、srcshape、coreapi、toolsloc、verwriter 记录版本标签唯一写者、aluiwidth ALUI 位宽只降不升、outdep 批次不得读未声明的 out/ 残留）。
+  - 十二个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform、srcshape、coreapi、verwriter 记录版本标签唯一写者、aluiwidth ALUI 位宽只降不升、outdep 批次不得读未声明的 out/ 残留、check-literal）。toolsloc已退役，不设总量或逐文件行数上限。
 - **cx 架构方向（主人定）**：不许写回传统 C 结构。
   - 上层不写 `#include`：用 `#pragma unisa use`。
   - 上层不直接调 libc/POSIX：printf、malloc、strcmp、open 等改用 L0 的 `sy_*`、`mm_*`、`tx_*`。**产品代码**（`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`）严格按这条走，为的是跨六目标；**工具/测试脚本**（`tools/`、`tests/`）允许 printf/fprintf 输出给人看，本机跑、不跨目标，不被这条卡住加功能。
@@ -73,6 +73,7 @@
 - 并行不改变验收合同：不缓存PASS、不删断言、不缩覆盖、不放宽时限；准备材料只记PREPARED，未实跑或证据不完整不得记PASS。
 - 共享 main 上不得用 `git stash`/`pop`、`git clean`、`git reset` 或 `git checkout` 清理、暂移、还原他人路径；需要干净输入时在仓外用 `git archive` 或独立克隆，不改变共享检出。
 - 提交粒度：有合理、可审查的代码/表/工具进展就分批提交：`git commit -m ... -- 明确路径`；不积压大量代码改动作一次大提交。**纯文档（`plans/`、看板、说明、研究记录）不单独提交**：随下一个实质提交（代码、表、工具、补丁）一并带上，或在一轮慢车道/里程碑收尾时一次提交；仅当别的车道或窗口正在依赖该文档时才单独提交。纯文档提交后不重跑棘轮。提交说明写做了什么，不写“更新计划/看板”。
+- 工具行数（主人2026-11-08改派）：只统计总量、目录/文件分布与近N次提交增量，不设任何行数上限。新增tool必须带check-*.cx并登记批次；无调用者/无批次与疑似重复工具只列候选清理表，不据此自动删除或阻塞。历史tests/toolsloc.tsv退役保留，不再扩额。
 - 新动态编辑优先自己的`.com + .cx`，精确匹配并断言；不用临时Python或sed改源码。
 - 文件存在性只把ENOENT当不存在；ENOTDIR/EACCES必须报告。
 - 调试日志、临时程序、缓存和生成产物放忽略的`out/`或仓外；不往research追加操作流水账。

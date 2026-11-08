@@ -24,9 +24,62 @@ static char *slurp(char **argv, long *n) {
         *n += r;
         if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) return 0; b = g; cap *= 2; }
     }
-    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
+    { int ex = 0, code = 0, sig = 0;
+      sy_close(ofd);
+      if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code != 0) { mm_free(b); *n = 0; return 0; }
+    }
     b[*n] = 0;
     return b;
+}
+
+static int registered(const char *b, long n, const char *check) {
+    long at = 0, cl = tx_len(check, 4600);
+    while (b && at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e, pos = 0, field = 0;
+        int implemented = 0, found = 0;
+        if (l > 0 && b[at] != '#') while (pos <= l) {
+            long t = tx_chr(b + at + pos, l - pos, '\t'), len = t < 0 ? l - pos : t;
+            if (field == 1) implemented = tx_same(b + at + pos, len, "IMPLEMENTED", 11);
+            if (field == 3 || field == 8) found |= tx_same(b + at + pos, len, check, cl);
+            field++; if (t < 0) break; pos += len + 1;
+        }
+        if (implemented && found && field == 13) return 1;
+        at += l + 1;
+    }
+    return 0;
+}
+
+/* Gate actual support for newly indexed tools, never their size. Check tools
+ * are leaves; modules can use a root tools/check-NAME.cx or adjacent check. */
+static int new_tools(void) {
+    char *av[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--", "tools", 0};
+    char *bv[] = {"git", "show", ":tests/batches.tsv", 0};
+    long n, bn, at = 0; int blocked = 0;
+    char *names = slurp(av, &n), *batches = slurp(bv, &bn);
+    if (!names) return 1;
+    while (at < n) {
+        const char *p = names + at; long l = tx_len(p, n - at), slash = 0, j, cn;
+        char check[4600], spec[4600]; char *blob; char *v[] = {"git", "show", spec, 0};
+        at += l + 1;
+        if (!tx_suffix(p, l, ".cx", 3)) continue;
+        for (j = 0; j < l; j++) if (p[j] == '/') slash = j + 1;
+        if (tx_prefix(p + slash, l - slash, "check-", 6)) continue;
+        { char *lv[] = {"git", "ls-files", "-s", "--", (char *)p, 0}; long ln; char *ls = slurp(lv, &ln);
+          if (ls && tx_prefix(ls, ln, "120000", 6)) { mm_free(ls); continue; } mm_free(ls); }
+        if (cx_fmt(check, sizeof check, "tools/check-%s", p + slash) || cx_fmt(spec, sizeof spec, ":%s", check)) return 1;
+        blob = slurp(v, &cn);
+        if (!blob || cn == 0) {
+            mm_free(blob);
+            if (cx_fmt(check, sizeof check, "%.*scheck-%s", (int)slash, p, p + slash) || cx_fmt(spec, sizeof spec, ":%s", check)) return 1;
+            blob = slurp(v, &cn);
+        }
+        if (!blob || cn == 0) { sy_eprintf("precommit: new tool %s missing check-*.cx\n", p); blocked++; }
+        else if (!registered(batches, bn, check)) {
+            sy_eprintf("precommit: new tool %s check missing batch registration: %s\n", p, check); blocked++;
+        }
+        mm_free(blob);
+    }
+    mm_free(names); mm_free(batches); return blocked;
 }
 
 int main(void) {
@@ -99,25 +152,19 @@ int main(void) {
       }
     }
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
+    blocked += new_tools();
+    { int product_cx = 0;
+      for (at = 0; at < sn; ) {
+          long l = tx_len(names + at, sn - at);
+          if (!tx_prefix(names + at, l, "tools/", 6) && !tx_prefix(names + at, l, "tests/", 6)) product_cx = 1;
+          at += l + 1;
+      }
+      /* These paths were already excluded from the row blocker below. Their
+       * support, metadata and source-classification gates above still run. */
+      if (!product_cx) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked); return blocked ? 1 : 0; }
+    }
     rows = slurp(rv, &rn);
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
-    { int tools_cx = 0; long a2;
-      for (a2 = 0; a2 < sn; ) {
-          long nl = tx_len(names + a2, sn - a2); if (nl <= 0) break;
-          if (tx_prefix(names + a2, nl, "tools/", 6) && nl >= 3 && tx_same(names + a2 + nl - 3, 3, ".cx", 3)) tools_cx = 1;
-          a2 += nl + 1;
-      }
-      if (tools_cx) {
-          char *tlrows; long tln;
-          char *tlv[] = {"sh", "./unisacc.com", "tests/toolsloc.cx", "--", "--staged", "--check", 0};
-          tlrows = slurp(tlv, &tln);
-          if (!tlrows) { sy_eprintf("precommit: tests/toolsloc.cx --staged --check did not run\n"); return 1; }
-          if (tx_find(tlrows, tln, "toolsloc: FAIL", 14) >= 0) {
-              sy_eprintf("precommit: toolsloc above baseline; 先写基线+理由 (tests/toolsloc.tsv TOTAL)\n");
-              blocked++;
-          }
-      }
-    }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
         const char *r = rows + at;

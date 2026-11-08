@@ -33,4 +33,4 @@ whole观察使用私有ARM64整数快核/HOSTCC/ASM hook，完整输出均与生
 
 旧sim单账1M事件/64MiB限制保留。完整whole观察另用显式双段协议（最多2M/128MiB），保留原所有观测和frame-edges；新consumer核全段SHA、global SEQ、FRAME字典和COMPLETE。Mach静态profile限定host_dyn=0，完整动态镜像用独立的`osx/*-forward` profile要求1；原拒绝未放宽。首次超时/静态拒绝材料保留，只有完整成功证书进入最终mapper。
 
-最终参数模式已全部正式登记并实跑通过，包括8个encoder双段profile。工具预算当前585文件83,279行，超已合入基线83,036共243行，未擅改基线。局部检查不替代全仓棘轮、`--all`或同候选六宿主CI；本次未发布、签名、切换资产或操作K6。
+最终参数模式已全部正式登记并实跑通过，包括8个encoder双段profile。C47测量585文件83,279行。2026-11-08主人最终裁定toolsloc退役，仅统计；C47功能取证DONE，不称全局棘轮或CI通过。局部检查不替代全仓棘轮、`--all`或同候选六宿主CI；本次未发布、签名、切换资产或操作K6。
