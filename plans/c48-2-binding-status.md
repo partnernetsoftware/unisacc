@@ -21,6 +21,14 @@
 
 原日志及独立报告在`out/c48-c48-2-infra-audit/host-cell-*`；正式批仅验证接口合同，不授予c48-2全批资格。
 
+## 登记失败回滚与工具pin（实际跑过）
+
+`register`在`--list`因既有坏元数据拒绝时仍持append/list锁，却重新取得rollback锁；修复仅在失败分支先释放本调用锁，再按原锁预算及精确两行删除规则回滚。成功路径和外部竞争的DIRTY合同保留。新独立`--metadata-rollback`在私有表植入坏行，旧源配对38439实际checker exit1、child exit3/DIRTY/两行残留；最终3986实际exit0、8/0，child exit1/ROLLED_BACK且两行删除，原坏表和coverage字节完整保留。正式登记41926实际exit0、PASS/rc0/transport0。没有改原35项断言或预算。
+
+原`--args-check`的行尾预期漏了已存在的第14列tier；按现行schema保留完整encoded args断言，补`product TAB commit LF`，最终91026实际exit0/5项。正式register-args在1627的受影响队列中独立PASS/rc0/transport0；该队列另一个pins当时FAIL，整体exit1没有记绿。默认35项89213在本机原55秒预算内未完成、exit142，仍未记全套通过，也未擅判语义红或新增serial。旧反例、超时、原args失败均保存在`out/register-metadata-rollback/`。
+
+T1合入后`tools/source-package-pack.cx`实际SHA为`e67953bd9c1481b21ed462e1eba7ec68df579d8ab5a494baadbdd79d44eb8a21`，`sourcepackage.cx:117`字面相同；表仍旧a0f391…，另digest_module/selfcheck已移至98/100而声明仍96/98。只同步这些实际调用位置和已核工具字节，保留两组原重复行、所有known-broken和产品pin；新loader负控的全零SHA按literal登记。最终check-pins90845实际exit0、failed0/stale30/hostdep6，六个本机缺失Linux zlib宿主依赖继续报告，不能称这些依赖已满足或来源包构造已通过。原六红完整保留，未改工具判据。表单独修正不授予新候选资格。
+
 ## RI 20秒编译窄核（实际跑过）
 
 同一本机f069，工具`tools/ri-material.cx -- --build ROOT NEW_OUT tests/cases/ri-cli.cx`一次新私有构造49392/exit0、stderr空；原内部bound20未改，输出严格ELF64/x64、前后身份复核及EXCL安装封印均实际通过。`runtime-native`为270272B，SHA`4394b7d8ab25fba8b3dcad81121f340acdeae58b907fdde9fdd62171a3eeddd1`，材料位于`out/c48-ri-native-phase/native-attempt/`。这是Linux交叉ELF的PREPARED，不是消费者PASS；没有在Mac执行ELF或冒充Linux原生资格。各相位精确耗时UNMEASURED。
@@ -29,4 +37,4 @@
 
 ## 下一必要证据
 
-本机`ssh lnx`实际无法解析，私有当前ROOT/SESSION/MAP未定位。冻结表的candidate_sid声明只记原串，未证明其哈希类型或与实物的对应；本机实算源ident与APE摘要分账。取得当前Linux执行入口后，以新完整会话逐项验证23个材料条目和10个INFRA；注册表拆成多mode的批次须全覆盖，未知保持未知，不把上述开发证据迁成新候选资格。
+cc已裁定Linux格归远程，标PENDING-REMOTE；本机无lnx入口是预期，不做不等。所需ROOT/SESSION/MAP清单已写items C48-2-LINUX与plans/s9-session.md。本机继续osx原生和材料接口。远程T1合入前，冻结表candidate_sid仅有声明；合入后实算会话65994真实exit0，当前源ident为e586721c7767275e1b5af84fe5a3cd199600e2550fc665c26cec642c6f4c9325，已与原声明全串相等。APE仍f069开发载荷；这不证明已取得该源对应的新候选产品，两者分账。取得当前Linux执行入口后，以新完整会话逐项验证23个材料条目和10个INFRA；注册表拆成多mode的批次须全覆盖，未知保持未知，不把上述开发证据迁成新候选资格。

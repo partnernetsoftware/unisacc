@@ -139,8 +139,35 @@ static void reg_argv(char **av, const char **store, const char *id, const char *
     av[6] = (char *)id; av[7] = fx; av[8] = (char *)marker; av[9] = (char *)text; av[10] = fx; av[11] = "interfaces"; av[12] = 0;
 }
 
+/* A separate bounded mode keeps the existing concurrency cases unchanged. DRIVER_SOURCE may
+ * explicitly select a frozen old source for a paired failing regression, never a cached result. */
+static int metadata_rollback(const char *driver) {
+    const char *bad="invalid-existing-metadata\tBROKEN\n";
+    FILE *f=fopen(bpath,"ab");if(!f||fwrite(bad,1,strlen(bad),f)!=strlen(bad)||fclose(f))die("invalid metadata fixture",bpath);
+    size_t bn,cn;char *beforeb=cx_read(bpath,&bn),*beforec=cx_read(cpath,&cn);
+    if(!beforeb||!beforec)die("fixture snapshot",tables);
+    char out[1<<15];char *a[]={"env","REGISTER_LOCK_MS=300","REGISTER_ROLLBACK_LOCK_MS=100",envtables,
+        "./tools/bound","15","sh","./unisacc.com",(char *)driver,"--","cr-invalid-metadata",fx,
+        "REGISTER_FIXTURE_OK","invalid existing metadata rollback",fx,"interfaces",0};
+    int rc=run(a,out,sizeof out);printf("METADATA_CHILD\trc=%d\tretained=%s\n%s",rc,tables,out);
+    ok(rc==1,"metadata refusal exits 1 within the child bound");
+    ok(strstr(out,"metadata_valid!=1")&&strstr(out,"REFUSE"),"existing invalid metadata really refuses list");
+    ok(strstr(out,"status=ROLLED_BACK")&&strstr(out,"rows_removed=2"),"metadata refusal reports exact two-row rollback");
+    ok(!strstr(out,"status=DIRTY")&&!strstr(out,"lock timeout"),"own append lock does not obstruct rollback");
+    ok(!count_lines(bpath,"cr-invalid-metadata\t")&&!count_lines(cpath,"interfaces.cr-invalid-metadata\t"),"both attempted rows are absent");
+    size_t an,acn;char *afterb=cx_read(bpath,&an),*afterc=cx_read(cpath,&acn);
+    ok(afterb&&an==bn&&!memcmp(afterb,beforeb,bn),"original invalid batch table preserved byte for byte");
+    ok(afterc&&acn==cn&&!memcmp(afterc,beforec,cn),"original coverage table preserved byte for byte");
+    ok(count_lines(bpath,"invalid-existing-metadata\t")==1,"preexisting invalid row is preserved");
+    free(beforeb);free(beforec);free(afterb);free(afterc);
+    printf("CX_REGISTER_METADATA\tchecks=%d\tfailed=%d\tretained=%s\n",checks,failed,tables);
+    return failed?1:0;
+}
+
 int main(int argc,char **argv) {
-    int args_only=argc==2&&!strcmp(argv[1],"--args-check");if(argc!=1&&!args_only)return 2;
+    int args_only=argc==2&&!strcmp(argv[1],"--args-check");
+    int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
+    if(argc!=1&&!args_only&&!metadata_only)return 2;
     static char abuf[1 << 15], bbuf[1 << 15];
     char *av0[16], *av1[16], *v[2] = { av0, av1 };
     const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
@@ -177,9 +204,11 @@ int main(int argc,char **argv) {
     if (cx_fmt(fx, sizeof fx, "%s", "tools/register-fixture.cx")) die("fixture path", 0);
     if (!sy_exists(fx)) die("missing fixture", fx);
 
+    if(metadata_only)return metadata_rollback(argc==3?argv[2]:DRIVER);
+
     if(args_only){
         char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0};
-        int rc=run(args,abuf,sizeof abuf);ok(rc==0&&strstr(abuf,"status=REGISTERED"),"explicit two args reach real fixture and marker");size_t n;char *bytes=cx_read(bpath,&n);ok(bytes&&strstr(bytes,"\talpha;beta\tinterfaces.cr-args\trc0:REGISTER_FIXTURE_ARGS_OK\tproduct\n"),"final registry keeps exact encoded args");free(bytes);
+        int rc=run(args,abuf,sizeof abuf);ok(rc==0&&strstr(abuf,"status=REGISTERED"),"explicit two args reach real fixture and marker");size_t n;char *bytes=cx_read(bpath,&n);ok(bytes&&strstr(bytes,"\talpha;beta\tinterfaces.cr-args\trc0:REGISTER_FIXTURE_ARGS_OK\tproduct\tcommit\n"),"final registry keeps exact encoded args");free(bytes);
         char hb[65],hc[65],afterb[65],afterc[65];bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,hb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,hc);free(bytes);
         args[6]="cr-args-empty";args[14]="";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"empty args refuse before mutation");args[6]="cr-args-tab";args[14]="alpha\tbeta";rc=run(args,abuf,sizeof abuf);ok(rc==2&&strstr(abuf,"empty args"),"control field refuses before mutation");bytes=cx_read(bpath,&n);cx_sha256_hex(bytes,n,afterb);free(bytes);bytes=cx_read(cpath,&n);cx_sha256_hex(bytes,n,afterc);free(bytes);ok(!strcmp(hb,afterb)&&!strcmp(hc,afterc),"refused args preserve private registries");printf("REGISTER_ARGS_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;
     }

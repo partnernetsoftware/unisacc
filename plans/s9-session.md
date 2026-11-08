@@ -1,4 +1,21 @@
-# s9 全批会话（c47-1 APE 一出即起）
+# s9 全批会话（历史c47-1与当前c48-2分账）
+
+## c48-2远程Linux格
+
+cc裁定：状态 **PENDING-REMOTE**，归远程lnx车道。本机无lnx入口是预期，不在本机执行Linux全批，不等待它；本机继续osx原生格与可跨平台的材料/接口施工。
+
+当前候选源SID：`e586721c7767275e1b5af84fe5a3cd199600e2550fc665c26cec642c6f4c9325`。T1合入后本机实算65994/exit0与此全串相等；本机根产品仍f069开发载荷，不作为该SID候选的Linux资格证据。
+
+远程格必须披露以下材料（尚未在本机取得，不影响本机施工）：
+
+- `ROOT`：绝对规范的冻结执行根，实际`unisacc.com`完整SHA与构造/source身份，实算源SID必须为上述e586串；源SID不冒充产物SHA。
+- `SESSION`：该ROOT/out下全新会话绝对路径，当前完整注册表、coverage及harness身份；每个作业真实开始/退出、stdout/stderr/status与可重推的receipt。旧会话/旧PASS不迁移。
+- `MAP`：绝对材料映射文件及实际内容/身份，包含所有声明的path与sha256材料；loader显式入口须同时绑定loader6目录与loader6-sha，host-cell须候选实际摘要期待值。未制备/未登记/错身份保持未知或NOT-AVAIL。
+- 逐项对照`plans/m7-notavail-s9.tsv`原23个逻辑条目及原10 INFRA，拆成多mode的现行批次逐格执行；计数不能通过换分母或只跑单mode降低。NOT-AVAIL目标≤8；INFRA实际转绿或证明真实冲突并登记串行域，不以serial掩盖语义红。
+
+本机材料PREPARED、接口负控、osx原生PASS各自绑定实际f069/材料身份，不折算为该远程格PASS；以下c47-1内容只保留历史口径。见items的C48-2-LINUX。
+
+## 历史c47-1会话
 
 不依赖已删路径（无 `/tmp/grk-s5-c46-2`）。streams 用 `STREAMS_ROOT` 或 cwd/`unisacc.com`（`tools/streams-material.cx`）。
 
