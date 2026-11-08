@@ -1,0 +1,32 @@
+/* Tool-only bridge until L0 sy_self_path supports this host. No argv0 fallback.
+ * Returns the canonical regular executable path length, or negative errno.
+ * Host symbols are capability-discovered; this is not a product platform fix. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.ffi
+#pragma unisa use mem.bytes
+
+int ts_self_path(char *dst,int cap){
+    if(!dst||cap<2)return -EINVAL;
+    dst[0]=0;
+    char raw[4096]={0},canonical[4096];
+    int n=sy_self_path(raw,sizeof raw);
+    if(n<0){
+        void *fn=sy_ffi_dlsym(sy_ffi_default(),"_NSGetExecutablePath");
+        if(!fn)return n;
+        unsigned int available=sizeof raw;
+        char *buffer=raw;void *sizep=&available;
+        int kinds[2]={SY_FFI_POINTER,SY_FFI_POINTER},result=-1;
+        void *values[2]={&buffer,&sizep};
+        if(sy_ffi_call(fn,SY_FFI_INT,kinds,values,2,2,&result))return -EIO;
+        if(result||available>sizeof raw)return -ENAMETOOLONG;
+    }else if(n<=0||(size_t)n>=sizeof raw)return -ENAMETOOLONG;
+    if(!memchr(raw,0,sizeof raw)||!raw[0])return -EIO;
+    if(!realpath(raw,canonical))return errno?-errno:-EIO;
+    struct stat st;
+    if(stat(canonical,&st))return errno?-errno:-EIO;
+    if(!S_ISREG(st.st_mode)||st.st_size<=0)return -EINVAL;
+    size_t bytes=strlen(canonical);
+    if(bytes>=(size_t)cap)return -ENAMETOOLONG;
+    if(mm_copy(dst,cap,canonical,(long)bytes+1))return -ENAMETOOLONG;
+    return (int)bytes;
+}

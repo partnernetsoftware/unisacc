@@ -21,6 +21,18 @@
 
 原日志及独立报告在`out/c48-c48-2-infra-audit/host-cell-*`；正式批仅验证接口合同，不授予c48-2全批资格。
 
+## osx材料消费与实际映像路径（实际跑过）
+
+loader新增规范v2收据：候选必须是ROOT/unisacc.com，实际APE目标slot解压经CRC与完整字节比较等于所用slice，候选与MODELS的完整package+footer span相同；八个成员的规范路径、完整SHA和字节数重建后与原收据全字节相等。外传manifest SHA必需，未知尾、错成员、重复slot、越界、坏CRC均拒绝。该收据是八成员consistency与实际slice/package关系证明，未声称完整sourceclosure、源码与二进制可复现编译或敌手并发文件系统安全；输入在seal/verify期间需冻结。
+
+新接口为`units-prepare --seal-loader-bound ROOT DIR CANDIDATE SLICE MODELS TARGET VERSION`及`--verify-loader ROOT DIR CANDIDATE MANIFEST_SHA`；仅ISA消费者先接`--material DIR ROOT CANDIDATE MANIFEST_SHA`，注册同时声明loader6路径与loader6-sha:sha256。其余五类loader检查仍保留原ENV开发合同，不冒称全六类已迁移。独立17/0及正式95423真实exit0/PASS/rc0/transport0；新私有材料证明将所有TEST_LOADER_*设错也不能替换显式ISA所用材料。
+
+osx原兼容红的实际原因是test-loader和special硬读/proc/self/exe，现L0 sy_self_path在Darwin也走此路径。工具模块toolselfpath先保持L0成功路径，否则复用现sys.ffi发现宿主实际映像API，验证容量、返回、NUL及canonical regular文件；不用argv0。Linux分支未在本机冒称实际通过，产品L0与源SID未修改，L0缺口另记pkg-gaps。
+
+独立检查2777实际exit0/15项，正式osx平台行22231实际exit0/15项；包括伪argv0、symlink、NULL与0/-1/1/短容量及真实映像SHA。修复后正式兼容批：common87131，pp10/0；special71227为21/0；net-replacement82720为46/0；ISA46723在错ENV下claimed1/failed0，均实际PASS/rc0/transport0。test-loader-com12879仍FAIL/24中1红，仅C-adapter-UNIPP2-byte-equality-foreign-cwd：旧f069/旧外包载荷与新UNIPP2预期不合，原断言保持，未将它改成PASS。原五个identity相关失败已修，不能据局部绿声称完整当前T1流资格。
+
+新开发材料DIR为`out/c48-c48-2-material-audit/selfpath/development-v3`，收据SHA`d52f3de458266780bf3eb64f14711ce092784d14298620895b44fe911c2de06a`；loader实际SHA`7cb96624447efa7155c9e34a69534a4b39d766d4ba048cb75adb6dcd61fb3d88`，627682B。seal56512、verify11740均exit0，只记PREPARED/VERIFIED。原四红与新逐批全文日志分留在out/c48-loader-explicit-formal和out/osx-loader-final-formal，不覆盖失败现场。
+
 ## 登记失败回滚与工具pin（实际跑过）
 
 `register`在`--list`因既有坏元数据拒绝时仍持append/list锁，却重新取得rollback锁；修复仅在失败分支先释放本调用锁，再按原锁预算及精确两行删除规则回滚。成功路径和外部竞争的DIRTY合同保留。新独立`--metadata-rollback`在私有表植入坏行，旧源配对38439实际checker exit1、child exit3/DIRTY/两行残留；最终3986实际exit0、8/0，child exit1/ROLLED_BACK且两行删除，原坏表和coverage字节完整保留。正式登记41926实际exit0、PASS/rc0/transport0。没有改原35项断言或预算。

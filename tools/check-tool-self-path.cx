@@ -1,0 +1,58 @@
+/* Actual host executable discovery. No product source or SID changes. */
+#pragma unisa use cxlib.toolselfpath
+#pragma unisa use sys.fs
+#pragma unisa use sys.ffi
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+
+static int checks,failed;
+static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
+static int child(const char *exe,const char *mode,const char *expected){
+    char output[4096];int cut=0;
+    char *av[]={"./tools/bound","5",(char *)exe,(char *)mode,(char *)expected,0};
+    int rc=sy_run(av,output,sizeof output,&cut);
+    if(rc||cut)fprintf(stderr,"self-path child rc=%d cut=%d\n%s",rc,cut,output);
+    return rc==0&&!cut;
+}
+int main(int argc,char **argv){
+    if(argc==3&&!strcmp(argv[1],"--false-argv0")){
+        char *av[]={"/false/not-the-executable","--probe",argv[2],0};
+        execv(argv[2],av);return 2;
+    }
+    if(argc==3&&!strcmp(argv[1],"--probe")){
+        char got[4096];int n=ts_self_path(got,sizeof got);
+        return n>0&&!strcmp(got,argv[2])?0:2;
+    }
+    if(argc!=1)return 2;
+    char self[4096],raw[4096],tiny[2]={7,7};
+    int n=ts_self_path(self,sizeof self);
+    ck(n>0&&(size_t)n==strlen(self)&&self[0]=='/',"actual-canonical-path");
+    struct stat st;ck(n>0&&!stat(self,&st)&&S_ISREG(st.st_mode)&&st.st_size>0,"actual-regular-image");
+    char again[4096];ck(ts_self_path(again,sizeof again)==n&&!strcmp(self,again),"stable-same-process");
+    ck(ts_self_path(0,4096)==-EINVAL,"null-buffer-rejected");
+    ck(ts_self_path(tiny,0)==-EINVAL,"zero-capacity-rejected");
+    ck(ts_self_path(tiny,-1)==-EINVAL,"negative-capacity-rejected");
+    ck(ts_self_path(tiny,1)==-EINVAL,"one-byte-capacity-rejected");
+    ck(ts_self_path(tiny,sizeof tiny)==-ENAMETOOLONG&&tiny[0]==0,"small-capacity-no-partial-path");
+    int primary=sy_self_path(raw,sizeof raw);void *ns=sy_ffi_dlsym(sy_ffi_default(),"_NSGetExecutablePath");
+    ck(primary>=0||ns!=0,"host-capability-available");
+    if(primary>=0){char canonical[4096];ck(realpath(raw,canonical)&&!strcmp(self,canonical),"L0-success-kept");}
+    else {
+        char one[1]={0};unsigned int cap=1;char *p=one;void *q=&cap;
+        int kinds[2]={SY_FFI_POINTER,SY_FFI_POINTER},result=99;void *values[2]={&p,&q};
+        ck(ns&&sy_ffi_call(ns,SY_FFI_INT,kinds,values,2,2,&result)==0&&result==-1&&cap>1,"host-small-buffer-contract");
+    }
+    char tmp[4096],dir[4096],exe[4400],link[4400];
+    if(cx_fmt(tmp,sizeof tmp,"%s/self-path.XXXXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(tmp)||!realpath(tmp,dir)||cx_fmt(exe,sizeof exe,"%s/probe",dir)||cx_fmt(link,sizeof link,"%s/link",dir))return 2;
+    char output[4096];int cut=0;char *build[]={"./tools/bound","30","sh","./unisacc.com","tools/check-tool-self-path.cx","-o",exe,0};
+    int built=sy_run(build,output,sizeof output,&cut)==0&&!cut;
+    ck(built,"compile-current-host-check");
+    ck(built&&child(exe,"--probe",exe),"native-actual-image");
+    ck(built&&child(exe,"--false-argv0",exe),"forged-argv0-does-not-change-image");
+    ck(built&&!symlink(exe,link)&&child(link,"--probe",exe),"symlink-canonical-image");
+    size_t bytes=0;char hash[65],*b=n>0?cx_read(self,&bytes):0;
+    ck(b&&bytes>0&&cx_sha256_hex(b,bytes,hash)==0,"actual-image-hash");
+    if(b){printf("SELF_PATH_IMAGE\tpath=%s\tbytes=%lu\tsha256=%s\tL0_rc=%d\n",self,(unsigned long)bytes,hash,primary);free(b);}
+    unlink(link);unlink(exe);rmdir(dir);
+    printf("TOOL_SELF_PATH\tassertions=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}
