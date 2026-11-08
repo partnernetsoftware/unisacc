@@ -17,7 +17,7 @@
 | 目录 | 是什么 |
 |---|---|
 | `tools/` | 开发与构造工具(`.cx`):生成器 `*-gen`、检查 `check-*`、发布 `release-*`、`commit-own`、`ratchets`;**找工具先看 `prd.md` 能力速查** |
-| `tests/` | 批次表 `batches.tsv`、覆盖表 `coverage.tsv`、`run.cx` 与批次检查;入口 `sh ./unisacc.com tests/run.cx -- --list` |
+| `tests/` | 批次表 `batches.tsv`、覆盖表 `coverage.tsv`、`run.cx` 与批次检查;入口 `sh ./unisacc.com tests/run.cx -- --list` —— `tests/*.tsv` 是管理表（批次、覆盖、棘轮基线、域矩阵），不是产品事实表，不构造成网 |
 | `weights/` ★ | 静态输入:金标 `gold/*.tsv`、`built.uns2`(构造网的输入) |
 | `release/` | 发布材料:`candidate.tsv`(候选身份唯一来源)、读回/布局工具说明;用法见 `release/README.md` |
 | `agentwork/` | 任务与账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`(分治索引) ——**管理账,不是产品事实表**:只给流程工具读写,不进「TSV→NN→unisacc」链,与 `exec/`、`weights/` 里的事实表无关 |
