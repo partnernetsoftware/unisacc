@@ -1,6 +1,6 @@
 # 仓库目录地图(从哪里看起)
 
-30 个顶层目录按用途分四组。**规则:带 ★ 的七个目录是「产品输入」(以 `seed/ident.c` 的 list-current 为准:`exec src kernel include weights seed cx` 七目录 + `iterate/kernel/typekw.tsv` + `tools/` 下 10 个支撑文件,共 1586 个文件;`ext/` 不在源 SID 内),它们的内容决定每个候选的源 SID(身份),冻结后不得改动;其余目录可改,但改动必须过棘轮与元数据闸。**
+30 个顶层目录按用途分四组。**规则:带 ★ 的七个目录是「产品输入」(以 `seed/ident.c` 的 list-current 为准:`exec src kernel include weights seed cx` 七目录 + `iterate/kernel/typekw.tsv` + `tools/` 下 10 个支撑文件,共 1586 个文件;`ext/` 目录本身不在源 SID 内，但 `ext/memx`、`ext/textx` 经 `cx/mem`、`cx/text` 里的符号链接参与 SID),它们的内容决定每个候选的源 SID(身份),冻结后不得改动;其余目录可改,但改动必须过棘轮与元数据闸。**
 
 ## 一、产品输入 ★(冻结面,改动会使身份全变)
 | 目录 | 是什么 |
