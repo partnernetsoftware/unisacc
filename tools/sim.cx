@@ -102,6 +102,14 @@ static long ifind(IMap *m, long long k, int insert) {
 }
 static long long iget(IMap *m, long long k) { long i = m->cap ? ifind(m, k, 0) : -1; return i < 0 ? 0 : m->vals[i]; }
 static void iset(IMap *m, long long k, long long v) { long i = ifind(m, k, 1); if (!m->used[i]) { m->used[i] = 1; m->keys[i] = k; m->n++; } m->vals[i] = v; }
+/* Diagnostic write versions identify the last actual store, including zero writes. */
+static IMap we_versions;
+static long we_store_serial;
+static void we_memory(const char *state,int key,int ai,const char *op,long long address,long long value,long version,long previous,long cursor){
+ char line[2048],st[1024];if(++we_count>we_limit)die("write-events event budget exceeded");we_hex(state,st,sizeof st);
+ int n=snprintf(line,sizeof line,"MEMORY\t%ld\tstate_hex=%s\tkey=%d\taction_index=%d\taction=%s\taddress=%lld\tvalue=%lld\tversion=%ld\tprevious_version=%ld\tframe_instance=%ld\tcursor=%ld\tmodule=UNKNOWN\n",we_count,st,key,ai,op,address,value,version,previous,we_active_frame,cursor);
+ if(n<0||n>=sizeof line)die("write-events memory line bound");we_add(line);
+}
 
 /* ---- files (read-only dictionary; keys are the delta's path strings) ---- */
 static const char *bundled;
@@ -221,8 +229,8 @@ int main(int argc, char **argv) {
             case DL_A64: case DL_A64I: { int dz; long long v = alu64(a->alu, W[a->r2], a->op == DL_A64 ? W[a->r3] : a->v, &dz); W[a->r1] = v; r = dz; } break;
             case DL_C64: case DL_C64U: { long long u = W[a->r1], v = W[a->r2]; if (a->op == DL_C64U) { unsigned long long uu = (unsigned long long)u, vv = (unsigned long long)v; r = uu < vv ? 0 : uu == vv ? 1 : 2; } else r = u < v ? 0 : u == v ? 1 : 2; } break;
             case DL_RLD: { long long v = W[a->r1]; r = (v >= 0 && v <= 256) ? v : 256; } break;
-            case DL_LDX: W[a->r1] = iget(&WM, W[a->r2] + a->v); break;
-            case DL_STX: iset(&WM, W[a->r1] + a->v, W[a->r2]); break;
+            case DL_LDX: { long long address=W[a->r2]+a->v;W[a->r1]=iget(&WM,address);if(we_path)we_memory(st->name,key,ai,"LDX",address,W[a->r1],(long)iget(&we_versions,address),0,fr->cur); } break;
+            case DL_STX: { long long address=W[a->r1]+a->v,value=W[a->r2];iset(&WM,address,value);if(we_path){long prior=(long)iget(&we_versions,address),version=++we_store_serial;iset(&we_versions,address,version);we_memory(st->name,key,ai,"STX",address,value,version,prior,fr->cur);} } break;
             case DL_OUTW: { int c = (int)(W[a->r1] & 255); if (osel == 0) { bputc(&o, c); wput(&oattr, OT); } else bputc(&e, c); } break;
             case DL_SPAN: case DL_SPANT: case DL_SPAN2: { long s0 = (long)W[a->r1]; if (s0 < 0) s0 = 0; long s1 = a->op == DL_SPAN2 ? (long)W[a->r2] : fr->cur; if (s1 > fr->end) s1 = fr->end;
                 if (s0 < s1) { if (osel == 1) bput(&e, fr->b + s0, s1 - s0); else { bput(&o, fr->b + s0, s1 - s0); for (long i = s0; i < s1; i++) wput(&oattr, (a->op == DL_SPANT || !fr->attr) ? OT : fr->attr[i]); } } } break;
