@@ -1,0 +1,47 @@
+/* Strict holdframe material extraction. PREPARED is not a provenance PASS.
+ * PHASE NEW_OUTDIR. The token payload is opaque after UNITOK1 identity. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#define WS_MAX 128
+#define WS_BYTES 536870912
+static void bad(const char *s){fprintf(stderr,"whole-stage-material: REFUSE %s\n",s);exit(2);}
+static unsigned long u32(const unsigned char *p){return (unsigned long)p[0]|((unsigned long)p[1]<<8)|((unsigned long)p[2]<<16)|((unsigned long)p[3]<<24);}
+static void hash(const void *p,long n,char h[65]){if(sy_sha256_hex(p,n,h))cx_sha256_hex(p,n,h);}
+static void fresh(const char *dir,const char *name,const void *p,long n){
+ char path[8192];if(cx_fmt(path,sizeof path,"%s/%s",dir,name))bad("output path bound");
+ int fd=sy_open_new(path,0600);if(fd<0)bad("exclusive file create");int wr=sy_write_all(fd,p,n),cl=sy_close(fd);if(wr||cl)bad("output write");
+}
+static void append(char *ledger,long *used,const char *s,long n){if(n<0||n>1048576-*used)bad("ledger bound");memcpy(ledger+*used,s,n);*used+=n;}
+int main(int argc,char **argv){
+ if(argc!=3)bad("usage PHASE NEW_OUTDIR");struct stat st;if(stat(argv[1],&st))bad(errno==ENOENT?"phase missing":"phase stat");
+ if(!S_ISREG(st.st_mode)||st.st_size<8||st.st_size>WS_BYTES)bad("phase extent");size_t n;unsigned char *b=(unsigned char *)cx_read(argv[1],&n);if(!b||n!=(size_t)st.st_size)bad("phase read");
+ unsigned long fn=u32(b),an=u32(b+4);if(!fn||an<4||fn>n-8||an!=n-8-fn)bad("phase framing/tail");
+ unsigned char *fr=b+8,*at=fr+fn;unsigned long ac=u32(at);if(ac>1000000||an!=4+ac*9)bad("attribute extent/tail");
+ char names[WS_MAX][4096],ph[WS_MAX][65];long flo[WS_MAX],fhi[WS_MAX],plo[WS_MAX],pn[WS_MAX];int count=0;long pos=0;
+ while(pos<(long)fn){
+  if(count==WS_MAX||fn-pos<8)bad("frame count/header");unsigned long z=u32(fr+pos),nl=u32(fr+pos+4);
+  if(z<4||z>fn-pos-4||!nl||nl>=4096||nl>z-4)bad("frame/path extent");long po=pos+8+nl,len=z-4-nl;
+  if(len<=8||memcmp(fr+po,"UNITOK1\0",8))bad("empty or non-UNITOK1 payload");
+  for(unsigned long j=0;j<nl;j++)if(fr[pos+8+j]<32||fr[pos+8+j]==127)bad("path control/NUL");
+  memcpy(names[count],fr+pos+8,nl);names[count][nl]=0;for(int j=0;j<count;j++)if(!strcmp(names[j],names[count]))bad("duplicate path");
+  flo[count]=pos;fhi[count]=pos+4+z;plo[count]=po;pn[count]=len;hash(fr+po,len,ph[count]);count++;pos+=4+z;
+ }
+ if(!count||pos!=(long)fn)bad("empty frames/tail");
+ /* Sort a private fixed-record copy for duplicate detection; preserve source order. */
+ unsigned char *sorted=malloc(ac?ac*9:1);if(!sorted)bad("attribute allocation");if(ac)memcpy(sorted,at+4,ac*9);
+ for(unsigned long i=0;i<ac;i++)if(u32(at+4+i*9)>=(unsigned long)count)bad("attribute unit");
+ /* Nine radix passes avoid quadratic behavior for the million-record format bound. */
+ unsigned char *tmp=malloc(ac?ac*9:1);if(!tmp)bad("attribute sort allocation");
+ for(int key=8;key>=0;key--){unsigned long bins[256]={0},off[256],sum=0;for(unsigned long i=0;i<ac;i++)bins[sorted[i*9+key]]++;for(int i=0;i<256;i++){off[i]=sum;sum+=bins[i];}for(unsigned long i=0;i<ac;i++){unsigned long j=off[sorted[i*9+key]]++;memcpy(tmp+j*9,sorted+i*9,9);}unsigned char *swap=sorted;sorted=tmp;tmp=swap;}
+ for(unsigned long i=1;i<ac;i++)if(!memcmp(sorted+(i-1)*9,sorted+i*9,9))bad("duplicate attribute record");free(sorted);free(tmp);
+ long cn=12+an+fn;unsigned char *carrier=malloc(cn);if(!carrier)bad("carrier allocation");memcpy(carrier,"USLATTRT",8);memcpy(carrier+8,b+4,4);memcpy(carrier+12,at,an);memcpy(carrier+12+an,fr,fn);
+ char phaseh[65],frameh[65],attrh[65],carrierh[65];hash(b,n,phaseh);hash(fr,fn,frameh);hash(at,an,attrh);hash(carrier,cn,carrierh);
+ char *ledger=malloc(1048576),line[8192];long used=0;if(!ledger)bad("ledger allocation");
+ int z=snprintf(line,sizeof line,"WHOLE_STAGE_MATERIAL\tversion=1\tstatus=PREPARED\tclaim=material-only\tphase_sha=%s\tphase_bytes=%ld\tframes_sha=%s\tframes_bytes=%lu\tattrs_sha=%s\tattrs_bytes=%lu\tattributes=%lu\tcarrier_sha=%s\tcarrier_bytes=%ld\n",phaseh,(long)n,frameh,fn,attrh,an,ac,carrierh,cn);if(z<0||z>=sizeof line)bad("ledger header");append(ledger,&used,line,z);
+ for(int i=0;i<count;i++){z=snprintf(line,sizeof line,"FRAME\t%d\tpath=%s\tframe_lo=%ld\tframe_hi=%ld\tpayload_lo=%ld\tpayload_bytes=%ld\tpayload_sha=%s\n",i,names[i],flo[i],fhi[i],plo[i],pn[i],ph[i]);if(z<0||z>=sizeof line)bad("ledger row");append(ledger,&used,line,z);}
+ z=snprintf(line,sizeof line,"COMPLETE\tstatus=PREPARED\tframes=%d\tattributes=%lu\tcarrier_sha=%s\n",count,ac,carrierh);if(z<0||z>=sizeof line)bad("ledger completion");append(ledger,&used,line,z);
+ if(strlen(argv[2])>8000)bad("output directory path");if(sy_mkdir(argv[2],0700))bad("exclusive new directory");
+ fresh(argv[2],"frames.bin",fr,fn);fresh(argv[2],"attrs.bin",at,an);fresh(argv[2],"units-input.carrier",carrier,cn);fresh(argv[2],"material.tsv",ledger,used);
+ char lh[65];hash(ledger,used,lh);printf("WHOLE_STAGE_MATERIAL\tstatus=PREPARED\tframes=%d\tattributes=%lu\tphase_sha=%s\tcarrier_sha=%s\tledger_sha=%s\n",count,ac,phaseh,carrierh,lh);return 0;
+}

@@ -1,0 +1,31 @@
+/* Independent framed-byte fixtures; no parser/production algorithm copied. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+static char root[4400],base[4400],com[4400],tool[4400],phase[4400],out[4400];static int checks,failed,serial;
+static void die(void){fprintf(stderr,"whole-stage fixture IO\n");exit(2);}
+static void ck(int yes,const char *label){checks++;failed+=!yes;printf("%s\t%s\n",yes?"PASS":"FAIL",label);}
+static void put(unsigned char *s,int off,unsigned long n){for(int i=0;i<4;i++)s[off+i]=(unsigned char)(n>>(8*i));}
+static int same(const char *name,const void *want,size_t n){char p[8192];size_t z;if(cx_fmt(p,sizeof p,"%s/%s",out,name))die();char *s=cx_read(p,&z);int yes=s&&z==n&&!memcmp(s,want,n);free(s);return yes;}
+static void example(int mode){
+ /* Two frames of 18 bytes: length14, name1, UNITOK1 magic+one token byte. */
+ unsigned char b[80]={0};long n=66;put(b,0,36);put(b,4,22);
+ put(b,8,14);put(b,12,1);b[16]='a';memcpy(b+17,"UNITOK1\0X",9);
+ put(b,26,14);put(b,30,1);b[34]='b';memcpy(b+35,"UNITOK1\0Y",9);
+ put(b,44,2);put(b,48,0);put(b,52,3);b[56]=1;put(b,57,1);put(b,61,4);b[65]=2;
+ if(mode==1)n=7;if(mode==2)b[n++]=99;if(mode==3)put(b,8,99);if(mode==4)b[16]=0;if(mode==5)b[34]='a';if(mode==6)b[17]='Q';if(mode==7)put(b,44,3);if(mode==8)put(b,57,2);if(mode==9)memcpy(b+57,b+48,9);if(mode==10){put(b,0,0);put(b,4,4);put(b,8,0);n=12;}if(mode==11)put(b,12,0);
+ if(cx_write(phase,b,n))die();
+}
+static void run_case(int mode,int expect,const char *label){
+ example(mode);if(cx_fmt(out,sizeof out,"%s/result-%d",base,++serial))die();if(mode==12&&sy_mkdir(out,0700))die();char *v[]={"sh",com,tool,"--",phase,out,0};np_result r={0};char why[300]={0};int tr=np_run(v,root,0,8,&r,why,sizeof why);int yes=!tr&&!r.residue&&r.rc==expect;
+ if(!expect){unsigned char fr[36]={0},at[22]={0},carrier[70]={0};put(fr,0,14);put(fr,4,1);fr[8]='a';memcpy(fr+9,"UNITOK1\0X",9);put(fr,18,14);put(fr,22,1);fr[26]='b';memcpy(fr+27,"UNITOK1\0Y",9);put(at,0,2);put(at,4,0);put(at,8,3);at[12]=1;put(at,13,1);put(at,17,4);at[21]=2;memcpy(carrier,"USLATTRT",8);put(carrier,8,22);memcpy(carrier+12,at,22);memcpy(carrier+34,fr,36);yes=yes&&r.out&&strstr(r.out,"status=PREPARED\tframes=2\tattributes=2")&&same("frames.bin",fr,36)&&same("attrs.bin",at,22)&&same("units-input.carrier",carrier,70);}
+ else {struct stat st;yes=yes&&!r.outn;if(mode!=12){errno=0;yes=yes&&lstat(out,&st)&&errno==ENOENT;}}
+ ck(yes,label);if(!yes)fprintf(stderr,"mode%d tr%d rc%d %s %s\n",mode,tr,r.rc,why,r.err?r.err:"");np_free(&r);
+}
+static void max_frames(void){
+ unsigned char b[2600]={0};long pos=8;for(int i=0;i<129;i++){put(b,pos,15);put(b,pos+4,2);b[pos+8]=(unsigned char)(33+i/90);b[pos+9]=(unsigned char)(33+i%90);memcpy(b+pos+10,"UNITOK1\0Z",9);pos+=19;}put(b,0,pos-8);put(b,4,4);put(b,pos,0);pos+=4;if(cx_write(phase,b,pos))die();if(cx_fmt(out,sizeof out,"%s/result-%d",base,++serial))die();char *v[]={"sh",com,tool,"--",phase,out,0};np_result r={0};char why[300]={0};int tr=np_run(v,root,0,8,&r,why,sizeof why);struct stat st;errno=0;int absent=lstat(out,&st)&&errno==ENOENT;ck(!tr&&!r.residue&&r.rc==2&&!r.outn&&absent,"129 frames refuse before publication");np_free(&r);
+}
+static void real_case(const char *input,const char *reference){
+ if(cx_fmt(out,sizeof out,"%s/real",base))die();char *v[]={"sh",com,tool,"--",(char *)input,out,0};np_result r={0};char why[300]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);size_t n;char *s=cx_read(reference,&n);if(!s)die();int yes=!tr&&!r.residue&&!r.rc&&r.out&&strstr(r.out,"status=PREPARED\tframes=82\tattributes=82")&&same("units-input.carrier",s,n);ck(yes,"captured Win phase equals independent Python carrier byte for byte");if(!yes)fprintf(stderr,"real tr%d rc%d %s %s\n",tr,r.rc,why,r.err?r.err:"");free(s);np_free(&r);
+}
+int main(int argc,char **argv){if(argc!=1&&(argc!=4||strcmp(argv[1],"--real")))die();if(!realpath(".",root)||cx_fmt(base,sizeof base,"%s/out/whole-stage-check-XXXXXX",root)||!mkdtemp(base))die();if(cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/whole-stage-material.cx",root)||cx_fmt(phase,sizeof phase,"%s/input.phase",base))die();run_case(0,0,"independent two-frame bytes and preserved order");const char *labels[]={"short phase","unknown tail","frame overrun","NUL path","duplicate path","wrong payload identity","attribute length","attribute unit range","duplicate attribute","empty frame set","empty path","existing output preserved"};for(int i=1;i<=12;i++)run_case(i,2,labels[i-1]);max_frames();if(argc==4)real_case(argv[2],argv[3]);printf("WHOLE_STAGE_MATERIAL_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
