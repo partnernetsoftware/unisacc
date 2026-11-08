@@ -106,3 +106,9 @@ s9 身份：`product_source=7b98ec2c06`，`harness_commit>=4cdbb3ac7d`；[会话
 | 正式发布 | 正式 tag、Release URL、发布资产及最终资格裁定 | 待发布；本页仍为草稿，不预写成功 |
 | 正式资产读回 | 正式 Release 下载原件、配对记录、SHA256/字节数与比较结果 | 发布后补；现有 draft 读回与演练不替代正式读回 |
 | 正式安装 | 从正式发布读回资产进行安装、实际版本与使用正控收据 | 发布后补；安装合同检查不等于已经安装 |
+
+## 发布后记录(cc,2026-11-08)
+- **发布:** GitHub Release `v0.0.47`(非 draft、非 prerelease,tag 指向 `e8309f048819973b0fc85fff8051eb6d53ad3470`,七个资产);产品输入相对冻结 `7b98ec2c06` 为零差异。
+- **读回:** 用 `release/tools/c47-1-readback.cx`(表中 tag/commit 更新为正式身份后)对正式 release 读回 `PASS`:元数据、四资产 sha、`--version`=`unisacc 0.0.47`、冒烟 5/0、进程名(以 c46-2 的 `c1309d11…` 为有缺陷的对照,旧报 `63`、新报程序名)、`SHA256SUMS` 六项、zip 四成员。读回时第一次误用 0.0.46 APE 作旧对照被拒(0.0.46 已修进程名,不能当负控),属传参错误,不是发布问题。
+- **安装:** 已装入仓根并 `identity-derive --check` 通过;装入后 `cx-root-identity`、`cx-manifest`、`host-cell` 由红转绿(记录滞后类得到验证);`pins` 仍 FAIL(待查,0.0.48)。
+- **后续:** 0.0.48 计划见 `plans/v0.0.48-unisacc.md`(含 fable 评审修订);发布后暂停等主人通知(用量原因)。
