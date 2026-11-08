@@ -409,3 +409,11 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 〔2026-11-08 cc评审后续，C47-DRIVER-TARGET-OBJECT / C47-LOGIC-DISTRIBUTION〕先登记两项任务。修复已装0.0.47的--target拒绝与裸-c只出tape回退，保留默认-run最小复现，补六目标格式合同并重建核身份；独立普查表/生成程序/网/经典机制代码及六片解压模块字节，明确统计分母、重叠与未归因，为D1设计提供数据。当前均DOING，未借旧CI或发布资格。
 
 〔C47-DRIVER-TARGET-OBJECT 定位/决定〕已装0.0.47默认-run最小main成功；--target lnx/x86_64 -o报option not migrated，裸-c输出_start tape（out/c47-driver-fix/*.before.log）。--target只选目标不覆盖-E/-S/-c；裸-c缺目标时取tn_self，非Linux沿现有-funit容器合同（Mach-O/COFF只载unit tape，由unisacc链接，不宣称系统链接器可用），保留-S与--tapebin显式文本路径。旧cxt_object低层拒绝合同保留，driver在展开前规范化。
+
+〔C47-LOGIC-DISTRIBUTION，2026-11-08，实际实跑，尚未完成最终镜像模块归因〕新增 `tools/logic-distribution.cx`：`--sources ROOT` 按 tracked regular 文件、固定根 src/cx/exec/seed/weights/tools 做互斥的 TABLE(.tsv) / GENERATOR(*-gen.cx、seed/gen.c、seed/gold_*) / NETWORK_REPRESENTATION(.net/.tbl/.rows) / CLASSIC_MECHANISM(其余源码)分组，列每文件字节/物理行及分类分账；if/case/switch/? 跳过注释与字面量后只作词法代理，不等于语义决策或运行频率。当前2290文件、13,760,638B：表5,771,926B(41.9451%)，生成器1,450,565B(10.5414%)，经典机制6,538,147B(47.5134%)；tracked网表示0B仅因构造产物未跟踪，绝不表示产品不含网。事实表与其生成网有信息重叠，不能把以上字节份额当“以网换逻辑”的决策覆盖率。独立语义oracle仍未补齐。
+
+同工具 `--ape FILE --package FILE --slice TARGET FILE` 核实际解压CRC/SHA、包内模型/资源/元数据，六片当前实测：lnx/x86_64=1,880,766B、lnx/arm64=1,884,814B、osx/x86_64=2,410,978B、osx/arm64=3,071,458B、win/x86_64外层PE=2,663,424B（含APE stub/version，不冒充原始裸片）、独立win/arm64=3,367,424B、sha889f36cd…（父提供公开候选资产）。包1,665,266B=模型存储1,315,916B+资源241,070B+目录/元数据108,280B；模型行以PACK_ROUTE绑定流与索引，资源列真实名字。证据 `out/logic-distribution-current.tsv`、`out/logic-distribution-slices.tsv`，输入为当时已装fde2db18…产品与公开win/arm64，父后续重建必须重新绑定身份。
+
+**仍缺最终模块字节归属，目标保持未完成**：当前镜像无来源映射，经典路径tl_unit→prune→lower→elf丢单元身份且可跨单元融合；不能按对象.text比例或旧 `plans/unit-text.tsv` 分摊现候选镜像。工具每片明确 MODULE UNATTRIBUTED、归因0B并核守恒；这只验证未知账完整，不构成模块分账完成。下一步按 `plans/link-map-sidecar.md` 在构造链保留单元来源集合、融合记SHARED、最终布局输出同镜像SHA绑定的不重叠区间，再由普查消费；不能仅补节区或符号大小冒充模块。检查 `tools/check-logic-distribution.cx` 已装产品默认-run实跑6/0，覆盖词法正负例、分类、未知模块守恒、坏格式及无参拒绝；批次登记工具因既有inventory-root-layout拒绝需要父处理，不记完整批次PASS。
+
+能力速查补充：逻辑/体积普查 `sh ./unisacc.com tools/logic-distribution.cx -- --sources . --ape unisacc.com --package unisacc.com [--slice TARGET FILE]`；检查 `sh ./unisacc.com tools/check-logic-distribution.cx`；缺最终机器码模块来源时明确UNATTRIBUTED，不按比例摊账。
