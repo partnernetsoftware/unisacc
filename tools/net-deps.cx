@@ -4,12 +4,14 @@
      (默认)             TSV 表头 + 行 `net stage manifest input_file kind`, 随后 `#` 汇总
      --summary          只出汇总(每网闭包大小、共享度分布、共享度前10表)
      --touch FILE...    FILE 改动后失效的网: AFFECTED<TAB>net, 末行 AFFECTED_SUMMARY; FILE 以 / 结尾 = 目录前缀
-     --oracle           与 tools/affected-model-inputs.tsv(运行期观测读集)逐网比对静态闭包
+     --oracle           与 tools/affected-model-inputs.tsv(独立运行期观测读集)逐网比对静态闭包
+     --table-deps       输出静态保守 MODEL<TAB>exec/*.tsv 映射(可安装为 exec/pipeline/table-deps.tsv)
+     --check-table-deps 与当前根下 table-deps.tsv 逐字节核对; 漂移/缺引用 rc1, IO/用法 rc2
    rc: 0 成功且全部引用存在; 1 有引用缺失(REF_MISSING 打到 stderr); 2 用法/IO 错误。
 
    「一个网」是什么(本工具的判定, 不确定处见末):
-     * 42 = tools/cxlib/sourcepackage.cx 的 recipes[] 配方数(同时 tools/affected-model-inputs.tsv 恰有 42 个
-       MODEL, plans/v0.0.48-unisacc.md T1 的「42 配方」)。每个配方 = 一个网/一次 gen 产物
+     * 42 = tools/cxlib/sourcepackage.cx 的 recipes[] 配方数(独立观测 oracle 为 tools/affected-model-inputs.tsv,
+       plans/v0.0.48-unisacc.md T1 的「42 配方」)。每个配方 = 一个网/一次 gen 产物
        (shared-e2/e1/e3/e4/o1/prune/nativeabi, 6 目标 lower+elf, warn/error/token 变体, object-*, tapecheck...)。
        注意: weights/ 与 kernel/ 下的 18 张 gold 网(pp lex parse ...)是另一套, 来自 weights/gold/*.tsv,
        不是 exec manifest 的网; prd.md 里的「七流 42 张网」与此「42 配方」数字相同, 是否同一集合本工具不下结论。
@@ -347,6 +349,45 @@ static int oracle(void) {
     mm_free(s);
     return 0;
 }
+
+/* One canonical wire for export and drift checking; never confuse this upper bound with observed reads. */
+static int path_order(const void *a, const void *b) { return strcmp(fpath[*(const int *)a], fpath[*(const int *)b]); }
+static int net_order(const void *a, const void *b) { return strcmp(netname[*(const int *)a], netname[*(const int *)b]); }
+static int table_deps(int check) {
+    const char *header = "# Static conservative manifest closure; MODEL\\trepository-relative exec TSV.\n"
+        "# Regenerate: sh ./unisacc.com tools/net-deps.cx -- --table-deps\n"
+        "# Check: sh ./unisacc.com tools/net-deps.cx -- --check-table-deps\n"
+        "# when flags are not evaluated; includes facts and manifests; excludes shared generators.\n";
+    int files[MAXF], nets[MAXN], nf = 0, k, j; long size = tx_len(header, 4096), at;
+    char *wire;
+    if (refmiss) return 1;
+    for (j = 0; j < nfile; j++) {
+        long n = tx_len(fpath[j], 4096);
+        if (fkind[j] != 2 && n >= 10 && tx_prefix(fpath[j], n, "exec/", 5) && tx_eqz(fpath[j] + n - 4, ".tsv")) files[nf++] = j;
+    }
+    for (k = 0; k < nnet; k++) nets[k] = k;
+    qsort(files, nf, sizeof files[0], path_order); qsort(nets, nnet, sizeof nets[0], net_order);
+    for (k = 0; k < nnet; k++) for (j = 0; j < nf; j++) if (seen[nets[k]][files[j]])
+        size += tx_len(netname[nets[k]], 4096) + tx_len(fpath[files[j]], 4096) + 2;
+    wire = mm_alloc(size + 1); if (!wire) die("table dependency allocation");
+    at = tx_len(header, 4096); if (mm_copy(wire, size + 1, header, at)) die("table dependency header");
+    for (k = 0; k < nnet; k++) for (j = 0; j < nf; j++) if (seen[nets[k]][files[j]]) {
+        const char *name = netname[nets[k]], *path = fpath[files[j]];
+        long nn = tx_len(name, 4096), pn = tx_len(path, 4096);
+        if (mm_copy(wire + at, size + 1 - at, name, nn)) die("table dependency model"); at += nn; wire[at++] = '\t';
+        if (mm_copy(wire + at, size + 1 - at, path, pn)) die("table dependency path"); at += pn; wire[at++] = '\n';
+    }
+    wire[at] = 0;
+    if (check) {
+        size_t n; char *current = read_rel("exec/pipeline/table-deps.tsv", &n); int same;
+        if (!current) die("cannot read exec/pipeline/table-deps.tsv");
+        same = n == (size_t)size && mm_same(current, wire, size);
+        mm_free(current); mm_free(wire);
+        if (!same) { sy_eprintf("net-deps: table dependency mapping differs\n"); return 1; }
+        sy_printf("TABLE_DEPS_CHECK\tunchanged\n"); return 0;
+    }
+    sy_printf("%s", wire); mm_free(wire); return 0;
+}
 int main(int argc, char **argv) {
     int a = 1, mode = 0, rc;
     root[0] = '.'; root[1] = 0;
@@ -354,8 +395,12 @@ int main(int argc, char **argv) {
     if (a < argc && tx_eqz(argv[a], "--summary")) { mode = 1; a++; }
     else if (a < argc && tx_eqz(argv[a], "--touch")) { mode = 2; a++; if (a >= argc) die("usage: --touch FILE..."); }
     else if (a < argc && tx_eqz(argv[a], "--oracle")) { mode = 3; a++; }
-    else if (a < argc) die("usage: [--root DIR] [--summary|--touch FILE...|--oracle]");
+    else if (a < argc && tx_eqz(argv[a], "--table-deps")) { mode = 4; a++; }
+    else if (a < argc && tx_eqz(argv[a], "--check-table-deps")) { mode = 5; a++; }
+    else if (a < argc) die("usage: [--root DIR] [--summary|--touch FILE...|--oracle|--table-deps|--check-table-deps]");
+    if (mode != 2 && a != argc) die("unexpected argument");
     build();
+    if (mode == 4 || mode == 5) return table_deps(mode == 5);
     if (mode == 0) { out_tsv(); out_summary(); }
     else if (mode == 1) out_summary();
     else if (mode == 2) touch(argc, argv, a);

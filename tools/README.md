@@ -1018,14 +1018,21 @@ mkdir -p out && sh tools/dev-run --check-seed-gen out/t1-seed-delta
 
 首次产品版 `errorparse` 的 40 秒超时及首次误用通用限时器的拒绝现场均保留，不能替换为成功记录；全量通过仅指后续获批的独立 120 秒离线对照。
 
-`affected.cx` 新增真实读取投影 → 模型 → 批次边，输出 `via=model-input`。对 `exec/parse2/control-result.tsv`，修改前的入口和回归源视图实测 `batches=0`；修改后为 `batches=5`：四个模型消费者及新增回归自身。对应读取模型为 `shared-e3`、`warnparse`、`errorparse`，不含独立的 `warnunits`。
+`affected.cx` 的表类别现输出 `via=table`，从原生静态保守表闭包关联精确模型/job/artifact消费者，不再拿旧观测快照冒充新表的完整依赖。新主树 `exec/tapeframe/frame-result.tsv` 曾在旧投影下漏选为零；当前真实CLI能选择 `source-job-union` 等消费者，且不把28个网硬等同28个批次。
 
 ```sh
 sh ./unisacc.com tools/affected.cx -- --files exec/parse2/control-result.tsv --list-only
+sh ./unisacc.com tools/net-deps.cx -- --table-deps
+sh ./unisacc.com tools/net-deps.cx -- --check-table-deps
 python3 tools/affected-model-inputs.py CONTEXT_OR_TAR --check
 ```
 
-`tools/affected-model-inputs.tsv` 含当前 42 模型的 3970 条去重排序输入边，可由普通 source-package context 或其归档中的实际读取记录再生；去掉 `--check` 才写投影。优先读取 `job-reads.before.tsv`，缺失才用 `command.reads.tsv`，两者均按每行一个路径处理；根前缀来自 `context.tsv`，搬迁材料可显式给 `--root-prefix`。缺模型、空记录、越界和投影漂移均拒绝。
+两份映射语义独立，旧观测投影及遗留Python投影器原字节保留，只作独立oracle，不与静态映射互相冒名。原生导出先核缺引用；只在rc0时安装新文件，失败不能覆盖现有映射。静态图按MODEL/路径排序去重，`--check-table-deps` 对漂移、漏边、多边、重复边及改边返回1，IO/用法返回2。
+
+| 映射 | 当前边数 | 来源与用途 |
+|---|---:|---|
+| `exec/pipeline/table-deps.tsv` | 5210 | 原生net-deps的42配方静态保守闭包；含manifest/facts，排除共享生成器，仅exec下TSV；供affected及漂移检查 |
+| `tools/affected-model-inputs.tsv` | 3970 | 历史source-package实际读取记录；仍由原投影器复算并供独立oracle，不能宣称当前完整运行读集 |
 
 模型消费者只通过精确模型/job/artifact 字面量及现有 use/literal 工具闭包关联；不是整个 `exec/` 的粗 guard。包含通用配方模块的批次会保守扩散，计算所得的动态模型选择仍未完整建模；本映射不证明生成字节等价，也不改变发布资格。
 
@@ -1053,4 +1060,26 @@ sh ./unisacc.com tools/forecast-tier-runtime.cx -- "$ROOT"
 完整库存626源/79片，含18 symlink，与608普通文件指标分开。全部三补丁的有界拷贝、CLI选择查询均已合入；上层检查不再include工具源码。支持性行为原日志附各自基点，不冒充4102提交档全绿。WT原八断言保留在daily问题`M8-WT-NEG-CONSTRUCT`，不扩大缓存框架；T2.c十INFRA和T2.a材料另循真实证据交付，不回填历史s9资格。
 
 既有遗留`tests/update-tools-compile.py`本轮只改十四列兼容：`batch(i,tier=None)`无tier仍输出原十三列、有tier才追加；仅当表头末列为tier才读取既有编译片档位；要求档位唯一且合法，混合档位真实拒绝；再生编译片沿用该既有档位，不隐式改档。原索引regular/symlink发现、每8源向上取整、独立候选输出及coverage字节复制流程均未改，具体diff随包列明。
+
+## 0.0.48 T5.3：有限事实证明与未解析单调门
+
+`tsv-lint` 默认对真实根启用未解析棘轮，`--max-unresolved N` 只能收紧；最终上限按父实测固化为11050，不能回调旧11281。fixture默认不继承整仓额度，显式传上限时同样受门约束。
+
+| 输入及工具视图 | 未解析数 | 结果 |
+|---|---:|---|
+| 6a前一工具树原始实测 | 11281 | 原始PARTIAL，不冒称f66同树前后对照 |
+| f66有限稀疏域证明 | 11272 | 原始PARTIAL，未知条件仍保留 |
+| 最新产品输入、已兼容事实前导注释、尚无闭合section证明 | 11281 | 原11272门实际拒绝，失败保留，未抬上限 |
+| 最新产品输入、完整两类证明 | 11050 | errors=0，仍为PARTIAL，不称全图已证明 |
+
+有限域仅接受实际环境中的整数键集合，严格核EOF/越界/类型、多调用并集与未知局部遮蔽。闭合section排除仅证明manifest安装视图内某普通4/5列行不可能选中；动态call/stem/section（含@表达式）、缺失调用与通配选择保守保留。排除行不制造状态、引用或可能定义，已选行引用仅排除定义时仍报错。此证明不涵盖seed/gen.c额外手工装配、实际NN可达性或语言语义。
+
+事实读取接受生成说明/来源注释/空行后真实schema，数据行宽仍严格拒绝，错误保留文件与行号。真实根盘点仍为560文件、28193行、5216状态。父行为检查54/0覆盖稀疏域、模式/引用、闭合选择、动态遮蔽及单调门；状态仍PARTIAL不是隐藏未解析项。
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/tsv-lint.cx -- --root . --audit --limit 0
+tools/bound 55 sh ./unisacc.com tools/check-tsv-lint.cx
+```
+
+收口仅交T5.1/T5.3；strict原型、生产图strict零告警、native20秒拆分与T2余项按 `agentwork/items.tsv` 排0.0.49，不注册生产常红批、不修改产品实现或退役LOC表。
 

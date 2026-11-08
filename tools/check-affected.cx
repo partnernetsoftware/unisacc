@@ -131,19 +131,33 @@ int main(void) {
             && has(o, "AFFECTED\tcross-targets-win\twhy=src/host.cx\tvia=guard\n");
         ck(g, "cross-targets-guard-src");
     }
-    {   /* Real observed reads, not an exec/ subtree guard; units is a separate generator recipe. */
+    {   /* Static manifest closure selects consumers; the separate observed oracle keeps its own identity. */
         char *a[] = {"--files", "exec/parse2/control-result.tsv", "--list-only", 0};
         char *b[] = {"--files", "exec/parse2/no-such-affected-table.tsv", "--list-only", 0};
         size_t n; char *reads = cx_read("tools/affected-model-inputs.tsv", &n);
         ck(reads && has(reads, "shared-e3\texec/parse2/control-result.tsv\n")
+           && !has(reads, "\tseed/gen.c\n")
            && has(reads, "warnparse\texec/parse2/control-result.tsv\n")
            && has(reads, "errorparse\texec/parse2/control-result.tsv\n")
            && !has(reads, "warnunits\texec/parse2/control-result.tsv\n"), "observed-control-models-not-units");
         free(reads);
+        reads = cx_read("exec/pipeline/table-deps.tsv", &n);
+        ck(reads && has(reads, "# Static conservative manifest closure;")
+           && has(reads, "shared-e3\texec/parse2/control-result.tsv\n")
+           && has(reads, "\texec/tapeframe/frame-result.tsv\n")
+           && !has(reads, "\tseed/gen.c\n"), "static-table-closure-not-generator");
+        free(reads);
         rc = tool(a, o, OUTCAP); rc2 = tool(b, p, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\tsource-job-union\twhy=exec/parse2/control-result.tsv\tvia=model-input\n")
+        ck(rc == 0 && has(o, "AFFECTED\tsource-job-union\twhy=exec/parse2/control-result.tsv\tvia=table\n")
            && !has(o, "AFFECTED\ttape-gap-tool\t"), "table-to-model-to-batch");
         ck(rc2 == 0 && others(p) == 0, "unrelated-table-no-model-edge");
+        { char *c[] = {"--files", "./exec/parse2/control-result.tsv", "--list-only", 0};
+          rc = tool(c, p, OUTCAP);
+          ck(rc == 0 && has(p, "AFFECTED\tsource-job-union\twhy=exec/parse2/control-result.tsv\tvia=table\n"), "table-canonical-spelling"); }
+        { char *c[] = {"--files", "exec/tapeframe/frame-result.tsv", "--list-only", 0};
+          rc = tool(c, p, OUTCAP);
+          ck(rc == 0 && has(p, "AFFECTED\tsource-job-union\twhy=exec/tapeframe/frame-result.tsv\tvia=table\n")
+             && !has(p, "AFFECTED\ttape-gap-tool\t"), "new-static-frame-reaches-real-consumer"); }
     }
     printf("CHECK_AFFECTED\tfailed=%d\n", failed);
     return failed ? 1 : 0;

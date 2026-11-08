@@ -94,6 +94,14 @@ int main(void) {
       ck(same_set(names, c, e), "hand-set-tapecheck-1-net"); }
     ck(nets_of(o1, n1, "seed/gen.c", names) == 42, "shared-generator-hits-all-42");
     ck(nets_of(o1, n1, "exec/no-such-table.tsv", names) == 0, "unreferenced-file-affects-0-nets");
+    { char *mapping = 0, *out = 0; size_t mn = 0, on = 0;
+      rc = run(0, "--table-deps", 0, &mapping, &mn);
+      ck(rc == 0 && mapping && tx_contains(mapping, mn, "# Static conservative manifest closure;", 39)
+         && tx_contains(mapping, mn, "\texec/tapeframe/frame-result.tsv\n", 33)
+         && !tx_contains(mapping, mn, "\tseed/gen.c\n", 12), "export-static-tables-not-generators");
+      rc = run(0, "--check-table-deps", 0, &out, &on);
+      ck(rc == 0 && out && tx_contains(out, on, "TABLE_DEPS_CHECK\tunchanged", 26), "real-static-mapping-unchanged");
+      if (mapping) mm_free(mapping); if (out) mm_free(out); }
     /* 准备副本 */
     if (cx_fmt(TMP, sizeof TMP, "%s/net-deps-check-XXXXXX", sy_tmpdir()) || !mkdtemp(TMP)) { ck(0, "tmp-dir"); return 1; }
     { char *rm[] = {(char *)"rm", (char *)"-rf", (char *)TMP, 0}; sh(rm); }
@@ -102,6 +110,35 @@ int main(void) {
       for (i = 0; src[i]; i++) { char *cp[] = {(char *)"cp", (char *)"-r", 0, (char *)TMP, 0}; cp[2] = (char *)src[i]; ck(sh(cp) == 0, "tmp-copy-tree"); } }
     { char *cp[] = {(char *)"cp", (char *)"tools/cxlib/sourcepackage.cx", 0, 0}; char d[4400]; cx_fmt(d, sizeof d, "%s/tools/cxlib/", TMP); cp[2] = d; ck(sh(cp) == 0, "tmp-copy-recipes"); }
     { char *cp[] = {(char *)"cp", (char *)"tools/affected-model-inputs.tsv", 0, 0}; char d[4400]; cx_fmt(d, sizeof d, "%s/tools/", TMP); cp[2] = d; ck(sh(cp) == 0, "tmp-copy-observed"); }
+    { char *mapping = 0, *out = 0; size_t mn = 0, on = 0; long first = 0, end;
+      rc = run(TMP, "--table-deps", 0, &mapping, &mn);
+      ck(rc == 0 && mapping, "tmp-export-static-mapping");
+      cx_fmt(p, sizeof p, "%s/exec/pipeline/table-deps.tsv", TMP);
+      if (mapping) {
+        while (first < (long)mn && mapping[first] == '#') { while (first < (long)mn && mapping[first] != '\n') first++; first++; }
+        end = first; while (end < (long)mn && mapping[end] != '\n') end++; if (end < (long)mn) end++;
+        ck(end > first && end <= (long)mn, "mapping-has-data-row");
+        if (end > first && end <= (long)mn) {
+          char *bad = mm_alloc(mn + 1); int wrote;
+          if (!bad) return 1;
+          wrote = cx_write(p, mapping, mn) == 0;
+          rc = run(TMP, "--check-table-deps", 0, &out, &on); ck(wrote && rc == 0, "tmp-static-mapping-unchanged"); if (out) mm_free(out);
+          mm_copy(bad, mn + 1, mapping, first); mm_copy(bad + first, mn + 1 - first, mapping + end, mn - end);
+          wrote = cx_write(p, bad, mn - (end - first)) == 0;
+          rc = run(TMP, "--check-table-deps", 0, &out, &on); ck(wrote && rc == 1, "mapping-missing-edge-refused"); if (out) mm_free(out);
+          wrote = cx_write(p, mapping, mn) == 0 && append(p, "tapecheck\texec/unreferenced-static-probe.tsv\n") == 0;
+          rc = run(TMP, "--check-table-deps", 0, &out, &on); ck(wrote && rc == 1, "mapping-extra-edge-refused"); if (out) mm_free(out);
+          mm_copy(bad, mn + 1, mapping + first, end - first); bad[end - first] = 0;
+          wrote = cx_write(p, mapping, mn) == 0 && append(p, bad) == 0;
+          rc = run(TMP, "--check-table-deps", 0, &out, &on); ck(wrote && rc == 1, "mapping-duplicate-edge-refused"); if (out) mm_free(out);
+          mm_copy(bad, mn + 1, mapping, mn); bad[first] = bad[first] == 'x' ? 'y' : 'x';
+          wrote = cx_write(p, bad, mn) == 0;
+          rc = run(TMP, "--check-table-deps", 0, &out, &on); ck(wrote && rc == 1, "mapping-changed-edge-refused"); if (out) mm_free(out);
+          ck(cx_write(p, mapping, mn) == 0, "restore-static-mapping"); mm_free(bad);
+        }
+        mm_free(mapping);
+      }
+    }
     /* (a) 扰动 1: 翻转一个字节 */
     cx_fmt(p, sizeof p, "%s/exec/pp/location-byte.tsv", TMP);
     { size_t n; char *s = (char *)cx_read(p, &n); int changed = 0;
@@ -132,6 +169,10 @@ int main(void) {
     ck(append(p, "table\tno-such-table.tsv\t-\t-\t-\t-\t-\t-\t-\n") == 0, "add-dangling-row");
     rc = run(TMP, 0, 0, &o4, &n4);
     ck(rc == 1, "dangling-table-ref-rc1");
+    rc = run(TMP, "--table-deps", 0, &o4, &n4);
+    ck(rc == 1 && (!o4 || !tx_contains(o4, n4, "# Static conservative manifest closure;", 39)), "missing-reference-refuses-export");
+    rc = run(TMP, "--check-table-deps", 0, &o4, &n4);
+    ck(rc == 1, "missing-reference-refuses-mapping-check");
     /* oracle: 观测读集不得有静态漏报 */
     rc = run(0, "--oracle", 0, &o5, &n5);
     ck(rc == 0 && o5 && tx_contains(o5, (long)n5, "ORACLE_SUMMARY\tobs_not_static_total=0", 37), "oracle-no-static-miss");
