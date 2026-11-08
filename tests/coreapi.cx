@@ -53,6 +53,9 @@ static char base[P];   /* absolute repo root: the product and every child path i
 static const char *prod = "./unisacc.com";
 static int red_missing, red_new, red_sig, red_alias;
 static int show_reds = 1;
+/* This invocation builds one helper; only its executable is reused, never query results.
+ * Fixture module roots and query arguments are unchanged; they use this same fresh helper. */
+static char sym_native[P], sym_tool_dir[P];
 
 static void die(const char *s) { sy_eprintf("coreapi: %s\n", s); sy_exit(2); }
 static char *dup_n(const char *s, long n) { char *d = mm_alloc((size_t)n + 1); if (!d) die("out of memory"); tx_copy(d, (size_t)n + 1, s, n); d[n] = 0; return d; }
@@ -118,9 +121,25 @@ static char *child(char **av, const char *what) {
     return out;
 }
 
+static int sym_command(char **av, char *tool, size_t cap) {
+    if (sym_native[0]) { av[0] = sym_native; return 1; }
+    av[0] = "sh"; av[1] = (char *)prod; av[2] = abs_path("tools/symindex.cx", tool, cap); av[3] = "--";
+    return 4;
+}
+
+static void prepare_symindex(void) {
+    char tool[P];
+    if (cx_fmt(sym_tool_dir, sizeof sym_tool_dir, "/tmp/coreapi-tool-XXXXXX") || !mkdtemp(sym_tool_dir)) die("helper directory");
+    join2(sym_tool_dir, "symindex", sym_native, sizeof sym_native);
+    abs_path("tools/symindex.cx", tool, sizeof tool);
+    char *av[] = {"sh", (char *)prod, "-o", sym_native, tool, 0};
+    char *out = child(av, "compile current symindex");
+    mm_free(out);
+}
+
 static void dump_module(int mi, const char *idx) {
     char *av[12]; int n = 0; char tool[P], mrel[P], adx[P], *txt, *line;
-    av[n++] = "sh"; av[n++] = (char *)prod; av[n++] = abs_path("tools/symindex.cx", tool, sizeof tool); av[n++] = "--";
+    n = sym_command(av, tool, sizeof tool);
     av[n++] = "--index"; av[n++] = abs_path(idx, adx, sizeof adx); av[n++] = "dump";
     av[n++] = join2(root, mods[mi], mrel, sizeof mrel); av[n] = 0;   /* repo-relative: the index key is the tracked path */
     txt = child(av, mods[mi]);
@@ -178,7 +197,7 @@ static void load_base(void) {
 static int alias_callers(const char *sym, const char *defpath, const char *idx, const char *inlist) {
     char *av[14]; int n = 0, callers = 0; char *txt, *line;
     char adx[P], ali[P];
-    av[n++] = "sh"; av[n++] = (char *)prod; av[n++] = abs_path("tools/symindex.cx", ali, sizeof ali); av[n++] = "--";
+    n = sym_command(av, ali, sizeof ali);
     av[n++] = "--index"; av[n++] = abs_path(idx, adx, sizeof adx);
     if (inlist) { av[n++] = "--in"; av[n++] = (char *)inlist; }   /* a top-level option: only before the command */
     av[n++] = "calls"; av[n++] = (char *)sym;
@@ -392,6 +411,11 @@ static void fixtures(void) {
 static char idx_dir[P];
 static void idx_cleanup(void) {
     char why[600];
+    if (sym_tool_dir[0]) {
+        if (unisa_safedel(sym_tool_dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000, why, (int)sizeof why))
+            sy_eprintf("coreapi: helper scratch not removed: %s: %s\n", sym_tool_dir, why);
+        sym_tool_dir[0] = 0; sym_native[0] = 0;
+    }
     if (!idx_dir[0]) return;
     if (unisa_safedel(idx_dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 20000, why, (int)sizeof why))
         sy_eprintf("coreapi: scratch not removed: %s: %s\n", idx_dir, why);
@@ -410,12 +434,13 @@ int main(int argc, char **argv) {
        --fixtures 的提前 return）；cx_rmtree 的白名单允许 /tmp。 */
     if (sy_atexit(idx_cleanup)) die("atexit");
     prod = abs_path("unisacc.com", pb, sizeof pb);
-    if (argc == 2 && tx_eqz(argv[1], "--fixtures")) { fixtures(); return 0; }
+    if (argc == 2 && tx_eqz(argv[1], "--fixtures")) { prepare_symindex(); fixtures(); return 0; }
     if (argc != 2) { sy_eprintf("usage: coreapi.cx --check | --write | --init | --fixtures\n"); return 2; }
     mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
     if (mode < 0) { sy_eprintf("usage: coreapi.cx --check | --write | --init | --fixtures\n"); return 2; }
     if (mode == 2) { char bp[P]; size_t n; char *b = cx_read(join2(root, BASE, bp, sizeof bp), &n); if (b) { mm_free(b); sy_eprintf("coreapi: --init refused, " BASE " exists\n"); return 2; } }
     if (mode != 2) { char bp[P]; size_t n; char *b = cx_read(join2(root, BASE, bp, sizeof bp), &n); if (!b) { sy_eprintf("coreapi: cannot read " BASE " (run --init once)\n"); return 2; } mm_free(b); }
+    prepare_symindex();
     load_mods(); load_base(); scan(idx);
     compare(idx, 0);
     summary(0);
