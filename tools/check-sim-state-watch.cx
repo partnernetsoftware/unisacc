@@ -2,16 +2,41 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
-static char dir[4400],delta[4400],input[4400],side[4400],cfg[4400],com[4400],sim[4400];static int checks,bad;
+static char dir[4400],delta[4400],input[4400],side[4400],cfg[4400],com[4400],sim[4400];static int checks,bad,compact;
 static void die(const char *s){fprintf(stderr,"watch-check %s\n",s);exit(2);}
 static void ck(int v,const char *s){checks++;printf("%s\t%s\n",v?"PASS":"FAIL",s);if(!v)bad++;}
 static void path(char *p,const char *s){if(cx_fmt(p,4400,"%s/%s",dir,s))die("path");}
-static char *run(int watch,int trace,int expected,const char *limit){char *v[18];int k=0;v[k++]="sh";v[k++]=com;v[k++]=sim;v[k++]="--";v[k++]=delta;v[k++]=input;if(trace){v[k++]="--write-events";v[k++]=side;}if(watch){v[k++]="--watch-states";v[k++]=cfg;}if(limit){v[k++]="--event-limit";v[k++]=(char *)limit;}v[k]=0;np_result r={0};char why[256]={0};int e=np_run(v,0,0,10,&r,why,sizeof why);char *s=0;if(!e&&!r.residue&&r.rc==expected){s=malloc(r.outn+1);memcpy(s,r.out,r.outn);s[r.outn]=0;}else fprintf(stderr,"run rc=%d transport=%d residue=%d %s\n%s\n",r.rc,e,r.residue,why,r.err?r.err:"");np_free(&r);return s;}
+static char *run(int watch,int trace,int expected,const char *limit){char *v[18];int k=0;v[k++]="sh";v[k++]=com;v[k++]=sim;v[k++]="--";v[k++]=delta;v[k++]=input;if(trace){v[k++]="--write-events";v[k++]=side;}if(watch){v[k++]="--watch-states";v[k++]=cfg;}if(compact)v[k++]="--watch-compact";if(limit){v[k++]="--event-limit";v[k++]=(char *)limit;}v[k]=0;np_result r={0};char why[256]={0};int e=np_run(v,0,0,10,&r,why,sizeof why);char *s=0;if(!e&&!r.residue&&r.rc==expected){s=malloc(r.outn+1);memcpy(s,r.out,r.outn);s[r.outn]=0;}else fprintf(stderr,"run rc=%d transport=%d residue=%d %s\n%s\n",r.rc,e,r.residue,why,r.err?r.err:"");np_free(&r);return s;}
 static int exists(void){struct stat s;if(!lstat(side,&s))return 1;if(errno==ENOENT)return 0;die("stat");return 1;}
 static void refuse(const char *text,const char *label){if(cx_write(cfg,text,strlen(text)))die("config");char *s=run(1,1,2,0);ck(s&&!exists(),label);free(s);}
+static void compactprobe(const char *good){
+ if(cx_write(cfg,good,strlen(good)))die("compact config");compact=1;
+ char *out=run(1,1,0,"4");
+ ck(out&&!strcmp(out,"AB"),"compact/default/long exact AB output at four-record budget");free(out);
+ size_t n;char *log=cx_read(side,&n),sha[65],expected[160];cx_sha256_hex("A",1,sha);
+ snprintf(expected,sizeof expected,"FRAME\t1\t1\t%s\t1\n",sha);
+ int frames=0,rows=0,valid=1;long values[3]={0,7,9};
+ if(log)for(char *p=log;*p;){
+  if(!strncmp(p,"FRAME\t",6))frames++;
+  if(!strncmp(p,"WATCHC\t",7)){
+   long seq,slot,frame,cursor,ogen,on,sgen,sn,value;
+   int got=sscanf(p,"WATCHC\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld",&seq,&slot,&frame,&cursor,&ogen,&on,&sgen,&sn,&value);
+   if(got!=9||rows>=3)valid=0;
+   else if(seq!=rows+2||slot!=rows||frame!=1||cursor!=0||ogen!=0||on!=rows||sgen!=(rows?1:0)||sn!=(rows?1:0)||value!=values[rows])valid=0;
+   rows++;
+  }
+  char *next=strchr(p,'\n');if(!next)break;p=next+1;
+ }
+ ck(log&&strstr(log,"watch_format=compact-v1")&&strstr(log,"claim=STATE_OBSERVATION_ONLY"),"compact-v1 explicit header");
+ ck(log&&frames==1&&strstr(log,expected),"FRAME first-seen identity SHA and end emitted once");
+ ck(log&&valid&&rows==3&&strstr(log,"COMPLETE\tevents=4\n"),"three positional compact observations preserve 0/7/9 and buffer state");
+ free(log);unlink(side);
+ out=run(1,1,2,"3");ck(out&&!exists(),"compact four records exceed budget three without publication");free(out);
+ out=run(0,1,2,0);ck(out&&!exists(),"compact without watch config refuses");free(out);compact=0;
+}
 int main(int argc,char **argv){char root[4400],temp[]="/tmp/watch-check-XXXXXX";size_t n;if(!realpath(".",root)||!mkdtemp(temp))die("cwd/tmp");strcpy(dir,temp);path(delta,"delta.json");path(input,"input");path(side,"events");path(cfg,"config");cx_fmt(com,sizeof com,"%s/unisacc.com",root);if(argc>1)strcpy(sim,argv[1]);else cx_fmt(sim,sizeof sim,"%s/tools/sim.cx",root);
 const char *d="{\"start\":\"S\",\"states\":{\"S\":[\"b\",{\"65\":[\"T\",0]}],\"T\":[\"b\",{\"65\":[\"U\",1]}],\"U\":[\"b\",{\"65\":[\"U\",2]}]},\"seqs\":[[[\"LDI\",\"x\",7],[\"OUT\",65],[\"SBCLR\"],[\"SBOUT\",81],[\"STX\",\"x\",100,\"x\"]],[[\"LDI\",\"x\",9],[\"OUT\",66]],[[\"ACCEPT\"]]]}";
 const char *good="S\tx\nT\tx\nU\tx\n";if(cx_write(delta,d,strlen(d))||cx_write(input,"A",1)||cx_write(cfg,good,strlen(good)))die("fixture");char *off=run(0,0,0,0),*on=run(1,1,0,"3");ck(off&&on&&!strcmp(off,"AB")&&!strcmp(off,on),"default/watch exact AB output");free(off);free(on);char *log=cx_read(side,&n),h[65],needle[100];cx_sha256_hex(good,strlen(good),h);snprintf(needle,sizeof needle,"config_sha=%s",h);ck(log&&strstr(log,needle)&&strstr(log,"claim=STATE_OBSERVATION_ONLY"),"config content identity and limited claim");ck(log&&!strstr(log,"\nEVENT\t")&&!strstr(log,"\nEDGE\t")&&!strstr(log,"\nMEMORY\t"),"watch suppresses full causal events");ck(log&&strstr(log,"state_hex=53\t")&&strstr(log,"value:x=0\n")&&strstr(log,"state_hex=54\t")&&strstr(log,"output_len=1\tscratch_generation=1\tscratch_len=1\tvalue:x=7\n")&&strstr(log,"output_len=2\tscratch_generation=1\tscratch_len=1\tvalue:x=9\n")&&strstr(log,"COMPLETE\tevents=3"),"state entry observes actual evolving values and buffer lengths");free(log);unlink(side);
 on=run(1,1,2,"2");ck(on&&!exists(),"watch budget overflow no sidecar");free(on);on=run(1,0,2,0);ck(on&&!exists(),"watch requires write-events");free(on);
 refuse("Missing\tx\n","unknown state refuses");refuse("S\ty\n","unknown register refuses");refuse("S\tx,x\n","duplicate field refuses");refuse("S\tx\nS\tx\n","duplicate state refuses");refuse("S\tx,\n","empty field refuses");refuse("S\tx\textra\n","extra TSV column refuses");refuse("S\tx\r\n","CR config refuses");
-unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
+compactprobe(good);unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
