@@ -1,0 +1,148 @@
+/* Independent MachO consistency fixtures, not six actual whole-o runs.
+ * Every child has an explicit deadline. Default reads no out/ residues. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+static char dir[4096], exe[4400];
+static int checks, failed;
+static void die(void) {
+  fprintf(stderr, "check-osx-chain: fixture failure\n");
+  exit(2);
+}
+static void ck(int ok, const char *s) {
+  checks++;
+  if (!ok)
+    failed++;
+  printf("%s\t%s\n", ok ? "PASS" : "FAIL", s);
+}
+static void path(char *p, const char *name) {
+  if (cx_fmt(p, 4400, "%s/%s", dir, name))
+    die();
+}
+static int call(const char *arch, const char *a, const char *b) {
+  char output[8192];
+  int cut = 0;
+  char *av[] = {"./tools/bound", "5",       exe,       "--check-fixedpoint",
+                (char *)arch,    (char *)a, (char *)b, 0};
+  int rc = sy_run(av, output, sizeof output, &cut);
+  return cut ? 125 : rc;
+}
+static void put(const char *p, const unsigned char *b, size_t n) {
+  if (cx_write(p, b, n))
+    die();
+}
+static int evidence(const char *receipt) {
+  char output[8192];
+  int cut = 0;
+  char *av[] = {"./tools/bound", "5", exe, "--check-evidence",
+                (char *)receipt, 0};
+  int rc = sy_run(av, output, sizeof output, &cut);
+  return cut ? 125 : rc;
+}
+int main(void) {
+  char tmp[4096];
+  if (cx_fmt(tmp, sizeof tmp, "%s/osx-chain-check.XXXXXXXX",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") ||
+      !mkdtemp(tmp) || !realpath(tmp, dir))
+    die();
+  path(exe, "controller");
+  char output[8192];
+  int cut = 0;
+  char *build[] = {"./tools/bound",      "40", "sh", "./unisacc.com",
+                   "tools/osx-chain.cx", "-o", exe,  0};
+  int rc = sy_run(build, output, sizeof output, &cut);
+  ck(rc == 0 && !cut, "compile-current-controller");
+  if (rc || cut) {
+    fprintf(stderr, "%s", output);
+    return 1;
+  }
+  char arm[4400], arm2[4400], x64[4400], bad[4400], missing[4400];
+  path(arm, "arm");
+  path(arm2, "arm2");
+  path(x64, "x64");
+  path(bad, "bad");
+  path(missing, "missing");
+  unsigned char fixture[64] = {0};
+  const unsigned char head[] = {0xcf, 0xfa, 0xed, 0xfe, 12, 0, 0, 1};
+  if (mm_copy(fixture, sizeof fixture, head, sizeof head))
+    die();
+  fixture[12] = 2;
+  put(arm, fixture, sizeof fixture);
+  put(arm2, fixture, sizeof fixture);
+  ck(call("arm64", arm, arm2) == 0, "independent-arm64-full-byte-equality");
+  fixture[4] = 7;
+  put(x64, fixture, sizeof fixture);
+  ck(call("x86_64", x64, x64) == 0, "independent-x86_64-full-byte-equality");
+  ck(call("arm64", arm, x64) == 2, "CPU-mismatch-rejected");
+  ck(call("alien", x64, x64) == 2, "unknown-architecture-rejected");
+  fixture[4] = 12;
+  fixture[63] = 1;
+  put(bad, fixture, sizeof fixture);
+  ck(call("arm64", arm, bad) == 2, "different-last-byte-rejected");
+  put(bad, fixture, 12);
+  ck(call("arm64", arm, bad) == 2, "truncated-header-rejected");
+  fixture[12] = 1;
+  put(bad, fixture, sizeof fixture);
+  ck(call("arm64", arm, bad) == 2, "MachO-object-not-executable-rejected");
+  fixture[12] = 2;
+  fixture[0] = 0;
+  put(bad, fixture, sizeof fixture);
+  ck(call("arm64", arm, bad) == 2, "wrong-magic-rejected");
+  ck(call("arm64", arm, missing) == 2, "missing-input-rejected");
+  char *usage[] = {"./tools/bound", "5", exe, 0};
+  ck(sy_run(usage, output, sizeof output, &cut) == 2,
+     "no-implicit-fixed-package-mode");
+  char *report[] = {"./tools/bound", "5", exe, "--report", dir, 0};
+  ck(sy_run(report, output, sizeof output, &cut) == 2,
+     "missing-plan-refused-not-PASS");
+  char payload[4400], manifest[4400], receipt[4400], hash[65], mh[65],
+      text[10000];
+  path(payload, "command.stdout");
+  path(manifest, "observed-files.tsv");
+  path(receipt, "stage.tsv");
+  put(payload, (const unsigned char *)"actual fixture output\n", 22);
+  cx_sha256_hex("actual fixture output\n", 22, hash);
+  if (cx_fmt(text, sizeof text, "%s\t%s\n", payload, hash))
+    die();
+  put(manifest, (unsigned char *)text, strlen(text));
+  cx_sha256_hex(text, strlen(text), mh);
+  if (cx_fmt(text, sizeof text, "attempt\t%s\nevidence\t%s\nevidence_sha\t%s\n",
+             dir, manifest, mh))
+    die();
+  put(receipt, (unsigned char *)text, strlen(text));
+  ck(evidence(receipt) == 0, "independent-stage-raw-evidence-rehash");
+  put(payload, (const unsigned char *)"changed fixture output\n", 23);
+  ck(evidence(receipt) == 2, "stage-output-tampering-refused");
+  put(payload, (const unsigned char *)"actual fixture output\n", 22);
+  put(manifest, (const unsigned char *)"bad\n", 4);
+  ck(evidence(receipt) == 2, "manifest-tampering-refused");
+  if (cx_fmt(text, sizeof text, "%s\t%s\n", payload, hash))
+    die();
+  put(manifest, (unsigned char *)text, strlen(text));
+  if (cx_fmt(text, sizeof text,
+             "attempt\t%s\nevidence\t%s\nevidence_sha\t%s\nevidence_sha\t%s\n",
+             dir, manifest, mh, mh))
+    die();
+  put(receipt, (unsigned char *)text, strlen(text));
+  ck(evidence(receipt) == 2, "duplicate-metadata-key-refused");
+  if (cx_fmt(text, sizeof text,
+             "attempt\t/not-this-attempt\nevidence\t%s\nevidence_sha\t%s\n",
+             manifest, mh))
+    die();
+  put(receipt, (unsigned char *)text, strlen(text));
+  ck(evidence(receipt) == 2, "cross-attempt-evidence-refused");
+  unlink(payload);
+  unlink(manifest);
+  unlink(receipt);
+  printf("OSX_CHAIN_CHECK\tassertions=%d\tfailed=%d\tscope=independent-"
+         "consistency-fixtures-not-whole-o\n",
+         checks, failed);
+  unlink(arm);
+  unlink(arm2);
+  unlink(x64);
+  unlink(bad);
+  unlink(exe);
+  rmdir(dir);
+  return failed ? 1 : 0;
+}

@@ -1,0 +1,681 @@
+/* Bounded, resumable Mac bare-slice fixed-external-package chain.
+ * ROOT REV PKG NEW_RUN --fixed-package prepares, never installs.
+ * --step RUN PHASE | --all RUN | --report RUN.
+ * Same-source NN/P3 and full N22 are explicitly NOT_CLAIMED. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+static char run[4096], root[4096], rev[41], pkg[4096], pkgsha[65],
+    productsha[65], toolsha[65], selfsha[65], exesha[65], hostarch[32];
+static long deadline;
+static int coordinator, multi_command;
+static np_buf observations;
+static const char *phases[] = {"slice-arm64",
+                               "slice-x86_64",
+                               "selfhost-arm64-g2",
+                               "selfhost-arm64-g3",
+                               "selfhost-x86_64-g2",
+                               "selfhost-x86_64-g3",
+                               "probes",
+                               "security-read"};
+static const char *arches[] = {"arm64", "x86_64", "arm64",
+                               "arm64", "x86_64", "x86_64"};
+static const int previous[] = {-1, -1, 0, 2, 1, 4};
+static void die(const char *s) {
+  fprintf(stderr, "osx-chain: REFUSE %s errno=%d\n", s, errno);
+  exit(2);
+}
+static void copy(char *d, size_t cap, const char *s) {
+  size_t n = strlen(s);
+  if (n >= cap || mm_copy(d, cap, s, n + 1))
+    die("text bound");
+}
+static void path(char *d, size_t cap, const char *a, const char *b) {
+  if (cx_fmt(d, cap, "%s/%s", a, b))
+    die("path bound");
+}
+static void canonical(const char *p, char *d) {
+  if (!realpath(p, d) || strpbrk(d, "\t\r\n"))
+    die("canonical path");
+}
+static char *readfile(const char *p, size_t *n) {
+  struct stat s;
+  if (lstat(p, &s) || !S_ISREG(s.st_mode) || s.st_size < 0 ||
+      s.st_size > 134217728)
+    die("regular input bound");
+  char *b = cx_read(p, n);
+  if (!b || *n != (size_t)s.st_size)
+    die("read changed");
+  return b;
+}
+static void hash(const char *p, char h[65]) {
+  size_t n;
+  char *b = readfile(p, &n);
+  cx_sha256_hex(b, n, h);
+  free(b);
+}
+static void unchanged(const char *p, const char *want) {
+  char h[65];
+  hash(p, h);
+  if (strcmp(h, want))
+    die("frozen input changed");
+}
+static void save(const char *p, const void *b, size_t n) {
+  int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0)
+    die("exclusive output");
+  size_t at = 0;
+  while (at < n) {
+    ssize_t k = write(fd, (const char *)b + at, n - at);
+    if (k < 0 && errno == EINTR)
+      continue;
+    if (k <= 0)
+      die("write");
+    at += k;
+  }
+  if (close(fd))
+    die("close");
+}
+static void field(np_buf *b, const char *k, const char *v) {
+  np_puts(b, k);
+  np_puts(b, "\t");
+  np_puts(b, v);
+  np_puts(b, "\n");
+}
+static void get(const char *b, const char *key, char *out, size_t cap) {
+  int count = 0;
+  size_t kn = strlen(key);
+  for (const char *p = b; *p;) {
+    const char *e = strchr(p, '\n');
+    if (!e)
+      die("manifest newline");
+    if ((size_t)(e - p) > kn && p[kn] == '\t' && !memcmp(p, key, kn)) {
+      size_t z = e - p - kn - 1;
+      if (z >= cap || mm_copy(out, cap, p + kn + 1, z))
+        die("manifest value");
+      out[z] = 0;
+      count++;
+    }
+    p = e + 1;
+  }
+  if (count != 1)
+    die("manifest unique key");
+}
+static void setdeadline(int seconds) {
+  deadline = sy_now_ms() + (long)seconds * 1000;
+}
+static int seconds(int cap) {
+  long left = (deadline - sy_now_ms()) / 1000;
+  if ((coordinator || multi_command) && left < cap + 3) {
+    fprintf(
+        stderr,
+        "PENDING\tinsufficient coordinator budget for unchanged child limit\n");
+    exit(3);
+  }
+  if (left < 1)
+    die("phase deadline exhausted");
+  return cap;
+}
+static void observed(const char *p) {
+  char h[65];
+  hash(p, h);
+  field(&observations, p, h);
+}
+static int command(char **av, const char *dir, const char *tag, int cap) {
+  char p[4400], why[1024], s[80];
+  np_buf args = {0};
+  for (int i = 0; av[i]; i++) {
+    if (cx_fmt(s, sizeof s, "arg%d", i))
+      die("arg key");
+    field(&args, s, av[i]);
+  }
+  path(p, sizeof p, dir, tag);
+  char ap[4500];
+  if (cx_fmt(ap, sizeof ap, "%s.argv.tsv", p))
+    die("arg path");
+  save(ap, args.p, args.n);
+  free(args.p);
+  observed(ap);
+  np_result r = {0};
+  long start = sy_now_ms();
+  if (np_run(av, root, 0, seconds(cap), &r, why, sizeof why))
+    die(why);
+  if (cx_fmt(ap, sizeof ap, "%s.stdout", p))
+    die("stdout path");
+  save(ap, r.out, r.outn);
+  observed(ap);
+  if (cx_fmt(ap, sizeof ap, "%s.stderr", p))
+    die("stderr path");
+  save(ap, r.err, r.errn);
+  observed(ap);
+  if (cx_fmt(s, sizeof s, "rc\t%d\nresidue\t%d\nelapsed_ms\t%ld\n", r.rc,
+             r.residue, sy_now_ms() - start) ||
+      cx_fmt(ap, sizeof ap, "%s.status.tsv", p))
+    die("status");
+  save(ap, s, strlen(s));
+  observed(ap);
+  int rc = r.residue ? 125 : r.rc;
+  np_free(&r);
+  return rc;
+}
+static void image(const char *p, const char *arch, char sha[65]) {
+  if (strcmp(arch, "arm64") && strcmp(arch, "x86_64"))
+    die("unsupported Mac architecture");
+  size_t n;
+  unsigned char *b = (unsigned char *)readfile(p, &n);
+  unsigned cpu = !strcmp(arch, "arm64") ? 12 : 7;
+  if (n < 32 || memcmp(b, "\xcf\xfa\xed\xfe", 4) || b[4] != cpu || b[5] ||
+      b[6] || b[7] != 1 || b[12] != 2 || b[13] || b[14] || b[15])
+    die("MachO executable CPU");
+  cx_sha256_hex(b, n, sha);
+  free(b);
+}
+static void compare(const char *a, const char *b, const char *arch) {
+  char h[65];
+  image(a, arch, h);
+  image(b, arch, h);
+  size_t an, bn;
+  char *ab = readfile(a, &an), *bb = readfile(b, &bn);
+  int same = an == bn && !memcmp(ab, bb, an);
+  free(ab);
+  free(bb);
+  if (!same)
+    die("fixed point bytes differ");
+}
+static void verify_evidence(const char *record) {
+  char manifest[4400], expected[65], attempt_dir[4096];
+  get(record, "evidence", manifest, sizeof manifest);
+  get(record, "evidence_sha", expected, sizeof expected);
+  get(record, "attempt", attempt_dir, sizeof attempt_dir);
+  unchanged(manifest, expected);
+  size_t n;
+  char *b = readfile(manifest, &n);
+  if (!n || memchr(b, 0, n) || memchr(b, '\r', n))
+    die("evidence wire");
+  for (char *p = b; *p;) {
+    char *e = strchr(p, '\n'), *tab = strchr(p, '\t');
+    if (!e || !tab || tab >= e || e - tab != 65)
+      die("evidence row");
+    *tab = 0;
+    *e = 0;
+    size_t dn = strlen(attempt_dir);
+    if (strncmp(p, attempt_dir, dn) || p[dn] != '/')
+      die("evidence outside attempt");
+    unchanged(p, tab + 1);
+    p = e + 1;
+  }
+  free(b);
+}
+static void phase_output(int i, char *p) {
+  char key[100], record[4400];
+  if (cx_fmt(key, sizeof key, "%s.ok.tsv", phases[i]))
+    die("phase key");
+  path(record, sizeof record, run, key);
+  size_t n;
+  char *b = readfile(record, &n), want[65], id[65];
+  verify_evidence(b);
+  get(b, "output", p, 4096);
+  get(b, "sha", want, sizeof want);
+  get(b, "plan_sha", id, sizeof id);
+  char plan[4400], actual[65];
+  path(plan, sizeof plan, run, "plan.tsv");
+  hash(plan, actual);
+  if (strcmp(actual, id))
+    die("phase plan mismatch");
+  image(p, arches[i], actual);
+  if (strcmp(actual, want))
+    die("phase image changed");
+  free(b);
+}
+static void frozen(void) {
+  char p[4400];
+  unchanged(pkg, pkgsha);
+  path(p, sizeof p, root, "unisacc.com");
+  unchanged(p, productsha);
+  path(p, sizeof p, root, "tools/release-build.cx");
+  unchanged(p, toolsha);
+  path(p, sizeof p, root, "tools/osx-chain.cx");
+  unchanged(p, selfsha);
+  path(p, sizeof p, run, "release-build");
+  unchanged(p, exesha);
+}
+static void load(const char *arg) {
+  canonical(arg, run);
+  char p[4400], mode[100];
+  path(p, sizeof p, run, "plan.tsv");
+  size_t n;
+  char *b = readfile(p, &n);
+  if (memchr(b, 0, n) || memchr(b, '\r', n))
+    die("plan wire");
+  get(b, "mode", mode, sizeof mode);
+  if (strcmp(mode, "fixed-external-package-not-same-source-NN"))
+    die("explicit fixed package required");
+  get(b, "root", root, sizeof root);
+  get(b, "rev", rev, sizeof rev);
+  get(b, "pkg", pkg, sizeof pkg);
+  get(b, "pkg_sha", pkgsha, sizeof pkgsha);
+  get(b, "product_sha", productsha, sizeof productsha);
+  get(b, "release_source_sha", toolsha, sizeof toolsha);
+  get(b, "controller_source_sha", selfsha, sizeof selfsha);
+  get(b, "release_exe_sha", exesha, sizeof exesha);
+  get(b, "host_arch", hostarch, sizeof hostarch);
+  if (strcmp(hostarch, "arm64") && strcmp(hostarch, "x86_64"))
+    die("unsupported frozen Darwin host architecture");
+  free(b);
+  frozen();
+}
+static void prepare(char **argv) {
+  canonical(argv[1], root);
+  canonical(argv[3], pkg);
+  for (size_t k = 0; root[k]; k++)
+    if (!((root[k] >= 'a' && root[k] <= 'z') ||
+          (root[k] >= 'A' && root[k] <= 'Z') ||
+          (root[k] >= '0' && root[k] <= '9') || strchr("/_-.", root[k])))
+      die("release-build requires shell-safe root path");
+  size_t n;
+  char *b = readfile(pkg, &n);
+  PackageFooter footer;
+  if (!packagefooter_locate_bytes((unsigned char *)b, n, &footer))
+    die("fixed package footer");
+  free(b);
+  char spec[256], why[1024];
+  if (cx_fmt(spec, sizeof spec, "%s^{commit}", argv[2]))
+    die("revision");
+  char *git[] = {"git", "rev-parse", "--verify", spec, 0};
+  np_result r = {0};
+  if (np_run(git, root, 0, seconds(5), &r, why, sizeof why) || r.rc ||
+      r.outn != 41 || r.out[40] != '\n')
+    die("revision resolution");
+  for (int i = 0; i < 40; i++)
+    if (!((r.out[i] >= '0' && r.out[i] <= '9') ||
+          (r.out[i] >= 'a' && r.out[i] <= 'f')))
+      die("revision hex");
+  if (mm_copy(rev, sizeof rev, r.out, 40))
+    die("revision copy");
+  rev[40] = 0;
+  np_free(&r);
+  if (mkdir(argv[4], 0700))
+    die("new run directory");
+  canonical(argv[4], run);
+  char p[4400], product[4400], source[4400], exe[4400];
+  path(product, sizeof product, root, "unisacc.com");
+  path(source, sizeof source, root, "tools/release-build.cx");
+  path(exe, sizeof exe, run, "release-build");
+  hash(pkg, pkgsha);
+  hash(product, productsha);
+  hash(source, toolsha);
+  path(p, sizeof p, root, "tools/osx-chain.cx");
+  hash(p, selfsha);
+  char *host[] = {"/usr/bin/uname", "-s", 0};
+  if (command(host, run, "prepare-host", 5))
+    die("host query");
+  path(p, sizeof p, run, "prepare-host.stdout");
+  b = readfile(p, &n);
+  if (n != 7 || memcmp(b, "Darwin\n", 7))
+    die("Darwin execution host required");
+  free(b);
+  char *hostcpu[] = {"/usr/bin/uname", "-m", 0};
+  if (command(hostcpu, run, "prepare-host-cpu", 5))
+    die("host CPU query");
+  path(p, sizeof p, run, "prepare-host-cpu.stdout");
+  b = readfile(p, &n);
+  if (n < 2 || n >= sizeof hostarch || b[n - 1] != '\n')
+    die("host CPU result");
+  b[n - 1] = 0;
+  copy(hostarch, sizeof hostarch, b);
+  free(b);
+  if (strcmp(hostarch, "arm64") && strcmp(hostarch, "x86_64"))
+    die("unsupported Darwin host CPU");
+  char *build[] = {"sh", product, source, "-o", exe, 0};
+  if (command(build, run, "prepare-release-build", 40))
+    die("release controller compile");
+  hash(exe, exesha);
+  np_buf plan = {0};
+  field(&plan, "version", "1");
+  field(&plan, "mode", "fixed-external-package-not-same-source-NN");
+  field(&plan, "root", root);
+  field(&plan, "rev", rev);
+  field(&plan, "pkg", pkg);
+  field(&plan, "pkg_sha", pkgsha);
+  field(&plan, "product_sha", productsha);
+  field(&plan, "release_source_sha", toolsha);
+  field(&plan, "controller_source_sha", selfsha);
+  field(&plan, "release_exe_sha", exesha);
+  field(&plan, "host_arch", hostarch);
+  field(&plan, "same_source_P3", "NOT_CLAIMED");
+  field(&plan, "full_N22", "NOT_CLAIMED");
+  path(p, sizeof p, run, "plan.tsv");
+  save(p, plan.p, plan.n);
+  free(plan.p);
+  free(observations.p);
+  memset(&observations, 0, sizeof observations);
+  puts("PREPARED\tosx-chain\tfixed-external-package\tno-test-result");
+}
+static int exists(const char *p) {
+  struct stat st;
+  if (lstat(p, &st) == 0)
+    return 1;
+  if (errno == ENOENT)
+    return 0;
+  die("stat error");
+  return 0;
+}
+static void attempt(int i, char *dir) {
+  char name[200];
+  for (unsigned long k = 1;; k++) {
+    if (sy_now_ms() >= deadline) {
+      fprintf(stderr, "PENDING\tattempt allocation deadline\n");
+      exit(3);
+    }
+    if (cx_fmt(name, sizeof name, "%s-attempt-%lu", phases[i], k))
+      die("attempt bound");
+    path(dir, 4096, run, name);
+    if (!mkdir(dir, 0700))
+      return;
+    if (errno != EEXIST)
+      die("phase create");
+    struct stat occupied;
+    if (lstat(dir, &occupied) || !S_ISDIR(occupied.st_mode))
+      die("attempt name occupied by non-directory");
+  }
+}
+static void build_slice(int i, const char *dir, char *output) {
+  char ctor[4096], controller[4400], temp[4400], out[4400], target[64],
+      envctor[4500], envpkg[4500], envtmp[4500];
+  path(controller, sizeof controller, run, "release-build");
+  path(temp, sizeof temp, dir, "tmp");
+  path(out, sizeof out, dir, "image");
+  if (mkdir(temp, 0700))
+    die("private tmp");
+  if (cx_fmt(target, sizeof target, "osx/%s", arches[i]) ||
+      cx_fmt(envpkg, sizeof envpkg, "UNISA_CONTAINER=%s", pkg) ||
+      cx_fmt(envtmp, sizeof envtmp, "TMPDIR=%s", temp))
+    die("build environment");
+  char *av[24];
+  int ac = 0;
+  av[ac++] = "env";
+  av[ac++] = "-i";
+  av[ac++] = "PATH=/usr/bin:/bin";
+  av[ac++] = "UNISA_JOBS=1";
+  av[ac++] = envpkg;
+  av[ac++] = envtmp;
+  if (previous[i] >= 0) {
+    phase_output(previous[i], ctor);
+    if (cx_fmt(envctor, sizeof envctor, "UNISACC_CTOR=%s", ctor))
+      die("ctor environment");
+    av[ac++] = envctor;
+  }
+  av[ac++] = controller;
+  av[ac++] = "--rev";
+  av[ac++] = rev;
+  av[ac++] = "slice";
+  av[ac++] = root;
+  av[ac++] = pkg;
+  av[ac++] = out;
+  av[ac++] = "--target";
+  av[ac++] = target;
+  av[ac] = 0;
+  if (command(av, dir, "build", 60))
+    die("slice construction failed; attempt retained");
+  char name[100];
+  if (cx_fmt(name, sizeof name, "slice-osx-%s", arches[i]))
+    die("image name");
+  path(output, 4096, out, name);
+  char sha[65];
+  image(output, arches[i], sha);
+  char rec[4400], want[128];
+  path(rec, sizeof rec, out, "receipt.txt");
+  observed(rec);
+  size_t n;
+  char *b = readfile(rec, &n);
+  get(b, "sha", want, sizeof want);
+  if (strcmp(want, sha))
+    die("receipt image hash");
+  get(b, "rev", want, sizeof want);
+  if (strcmp(want, rev))
+    die("receipt revision");
+  get(b, "target", want, sizeof want);
+  if (strcmp(want, target))
+    die("receipt target");
+  get(b, "rc", want, sizeof want);
+  if (strcmp(want, "0"))
+    die("receipt rc");
+  get(b, "ns", want, sizeof want);
+  char *end;
+  errno = 0;
+  unsigned long long ns = strtoull(want, &end, 10);
+  if (errno || !*want || *end || ns >= 60000000000ULL)
+    die("receipt deadline");
+  free(b);
+  if (i == 3 || i == 5) {
+    char prev[4096];
+    phase_output(previous[i], prev);
+    compare(prev, output, arches[i]);
+  }
+}
+static void probes(const char *dir) {
+  const char *source = "int main(void){return 7;}\n";
+  const char *macros =
+      "#if defined(__APPLE__) && defined(__aarch64__)\nint probe(void){return "
+      "17;}\n#elif defined(__APPLE__) && defined(__x86_64__)\nint "
+      "probe(void){return 19;}\n#else\nint probe(void){return 43;}\n#endif\n";
+  char src[4400], m[4400];
+  path(src, sizeof src, dir, "hello.c");
+  save(src, source, strlen(source));
+  path(m, sizeof m, dir, "platform.c");
+  save(m, macros, strlen(macros));
+  for (int a = 0; a < 2; a++) {
+    char ctor[4096], output[4400], bare[4400], explicit[4400], tag[100],
+        target[64], models[4500], name[100];
+    int stage = a ? 5 : 3;
+    phase_output(stage, ctor);
+    if (cx_fmt(models, sizeof models, "UNISA_CONTAINER=%s", pkg) ||
+        cx_fmt(target, sizeof target, "osx/%s", arches[stage]))
+      die("probe environment");
+    char *version[] = {"env", models, ctor, "--version", 0};
+    if (cx_fmt(tag, sizeof tag, "%s-version", arches[stage]) ||
+        command(version, dir, tag, 10))
+      die("version probe");
+    if (cx_fmt(name, sizeof name, "%s-hello", arches[stage]))
+      die("probe name");
+    path(output, sizeof output, dir, name);
+    char *compile[] = {"env", models, ctor, src, "-o", output, 0};
+    if (cx_fmt(tag, sizeof tag, "%s-hello-build", arches[stage]) ||
+        command(compile, dir, tag, 20))
+      die("hello compile");
+    char h[65];
+    image(output, arches[stage], h);
+    char *execute[] = {output, 0};
+    if (cx_fmt(tag, sizeof tag, "%s-hello-run", arches[stage]) ||
+        command(execute, dir, tag, 10) != 7)
+      die("hello expected seven");
+    if (cx_fmt(name, sizeof name, "%s-bare.s", arches[stage]))
+      die("probe name");
+    path(bare, sizeof bare, dir, name);
+    if (cx_fmt(name, sizeof name, "%s-explicit.tape", arches[stage]))
+      die("probe name");
+    path(explicit, sizeof explicit, dir, name);
+    char *s1[] = {"env", models, ctor, "-S", m, "-o", bare, 0};
+    char *s2[] = {"env",  models, ctor, "-S",     "-b",
+                  target, m,      "-o", explicit, 0};
+    if (cx_fmt(tag, sizeof tag, "%s-bare-S", arches[stage]) ||
+        command(s1, dir, tag, 20) ||
+        cx_fmt(tag, sizeof tag, "%s-explicit-S", arches[stage]) ||
+        command(s2, dir, tag, 20))
+      die("S macro probes");
+    size_t an, bn;
+    char *ab = readfile(bare, &an), *bb = readfile(explicit, &bn);
+    int same = an == bn && !memcmp(ab, bb, an);
+    free(ab);
+    free(bb);
+    if (!same)
+      die("default S differs from explicit host target");
+  }
+}
+static void security(const char *dir) {
+  for (int a = 0; a < 2; a++) {
+    char p[4096], tag[100];
+    phase_output(a ? 5 : 3, p);
+    char *v[] = {"/usr/bin/codesign", "--verify", "--strict",
+                 "--verbose=2",       p,          0};
+    char *s[] = {"/usr/sbin/spctl", "--assess", "--type", "execute",
+                 "--verbose=4",     p,          0};
+    char *n[] = {"/usr/bin/xcrun", "stapler", "validate", p, 0};
+    if (cx_fmt(tag, sizeof tag, "%s-codesign-read", a ? "x86_64" : "arm64"))
+      die("tag");
+    command(v, dir, tag, 10);
+    if (cx_fmt(tag, sizeof tag, "%s-spctl-read", a ? "x86_64" : "arm64"))
+      die("tag");
+    command(s, dir, tag, 10);
+    if (cx_fmt(tag, sizeof tag, "%s-notary-read", a ? "x86_64" : "arm64"))
+      die("tag");
+    command(n, dir, tag, 10);
+  }
+  puts("SECURITY\tread-only-observations\ttrust-and-notarization=NOT_CLAIMED");
+}
+static void step(int i) {
+  multi_command = i >= 6;
+  frozen();
+  char name[200], record[4400];
+  if (cx_fmt(name, sizeof name, "%s.ok.tsv", phases[i]))
+    die("phase name");
+  path(record, sizeof record, run, name);
+  if (exists(record)) {
+    if (i < 6) {
+      char p[4096];
+      phase_output(i, p);
+    } else
+      die("non-build observation already completed; use report");
+    printf("REVALIDATED\t%s\tartifact-not-rerun\n", phases[i]);
+    return;
+  }
+  char dir[4096], output[4096] = {0};
+  attempt(i, dir);
+  if (i < 6)
+    build_slice(i, dir, output);
+  else if (i == 6)
+    probes(dir);
+  else
+    security(dir);
+  frozen();
+  np_buf receipt = {0};
+  field(&receipt, "phase", phases[i]);
+  field(&receipt, "attempt", dir);
+  if (i < 6) {
+    field(&receipt, "output_arch", arches[i]);
+    field(&receipt, "constructor_execution",
+          previous[i] < 0               ? "root-bootstrap-cross-build"
+          : strcmp(hostarch, arches[i]) ? "translated-MachO-execution"
+                                        : "native-MachO-execution");
+  }
+  char p[4400], h[65];
+  path(p, sizeof p, dir, "observed-files.tsv");
+  save(p, observations.p, observations.n);
+  hash(p, h);
+  field(&receipt, "evidence", p);
+  field(&receipt, "evidence_sha", h);
+  free(observations.p);
+  memset(&observations, 0, sizeof observations);
+  path(p, sizeof p, run, "plan.tsv");
+  hash(p, h);
+  field(&receipt, "plan_sha", h);
+  if (i < 6) {
+    image(output, arches[i], h);
+    field(&receipt, "output", output);
+    field(&receipt, "sha", h);
+  }
+  field(&receipt, "status", "COMPLETE_FIXED_PACKAGE_SCOPE");
+  save(record, receipt.p, receipt.n);
+  free(receipt.p);
+  printf("COMPLETE\t%s\tfixed-package-only\n", phases[i]);
+}
+static void report(void) {
+  char p[4096], a[4096], b[4096];
+  for (int i = 0; i < 6; i++)
+    phase_output(i, p);
+  phase_output(2, a);
+  phase_output(3, b);
+  compare(a, b, "arm64");
+  phase_output(4, a);
+  phase_output(5, b);
+  compare(a, b, "x86_64");
+  for (int i = 6; i < 8; i++) {
+    char name[200], record[4400], want[65], actual[65];
+    if (cx_fmt(name, sizeof name, "%s.ok.tsv", phases[i]))
+      die("phase name");
+    path(record, sizeof record, run, name);
+    if (!exists(record))
+      die("incomplete phase set");
+    size_t n;
+    char *text = readfile(record, &n);
+    verify_evidence(text);
+    get(text, "plan_sha", want, sizeof want);
+    path(record, sizeof record, run, "plan.tsv");
+    hash(record, actual);
+    if (strcmp(actual, want))
+      die("observation plan changed");
+    free(text);
+  }
+  puts("OSX_CHAIN\tCOMPLETE\tMachO-fixed-package-two-ISA-fixedpoint\tsame-"
+       "source-P3=NOT_CLAIMED\tfull-N22=NOT_CLAIMED\tsigning-notarization=NOT_"
+       "PERFORMED");
+}
+int main(int argc, char **argv) {
+  setdeadline(60);
+  if (argc == 5 && !strcmp(argv[1], "--check-fixedpoint")) {
+    char h[65];
+    image(argv[3], argv[2], h);
+    compare(argv[3], argv[4], argv[2]);
+    puts("FIXEDPOINT\tbyte-identical\tfixture-or-artifact-consistency-only");
+    return 0;
+  }
+  if (argc == 3 && !strcmp(argv[1], "--check-evidence")) {
+    size_t n;
+    char *b = readfile(argv[2], &n);
+    if (memchr(b, 0, n) || memchr(b, '\r', n))
+      die("receipt wire");
+    verify_evidence(b);
+    free(b);
+    puts("EVIDENCE\tcontent-consistency-only");
+    return 0;
+  }
+  if (argc == 6 && !strcmp(argv[5], "--fixed-package")) {
+    prepare(argv);
+    return 0;
+  }
+  if (argc == 3 &&
+      (!strcmp(argv[1], "--all") || !strcmp(argv[1], "--report"))) {
+    load(argv[2]);
+    if (!strcmp(argv[1], "--all")) {
+      setdeadline(290);
+      coordinator = 1;
+      for (int i = 0; i < 8; i++) {
+        char name[200], p[4400];
+        if (cx_fmt(name, sizeof name, "%s.ok.tsv", phases[i]))
+          die("phase name");
+        path(p, sizeof p, run, name);
+        if (i >= 6 && exists(p))
+          continue;
+        step(i);
+      }
+    }
+    report();
+    return 0;
+  }
+  if (argc == 4 && !strcmp(argv[1], "--step")) {
+    load(argv[2]);
+    for (int i = 0; i < 8; i++)
+      if (!strcmp(argv[3], phases[i])) {
+        step(i);
+        return 0;
+      }
+    die("unknown phase");
+  }
+  fprintf(stderr, "usage: ROOT REV PKG NEW_RUN --fixed-package | --step RUN "
+                  "PHASE | --all RUN (290s coordinator) | --report RUN\n");
+  return 2;
+}
