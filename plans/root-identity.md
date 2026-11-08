@@ -1,20 +1,23 @@
-# 根产品身份（M4 dev-lnx 安装后，2026-11-02）
+# 本地根产品身份（2026-11-08 开发修复）
 
-本地根产品 = lnx-only 开发 APE（薄 shell 头 + 旁目录），非发布物（NOT_RELEASE）。
-发布仍待 osx/win 片 + UNITOK2。
+本地根产品是修复 `--target` 与裸 `-c` 的 0.0.47 开发 APE，非公开发布字节（NOT_RELEASE）。
+六切片由冻结源 `3b41cc224ff07b470eec1b885459f1ea011a372b` 本机构造，沿用已装模型包；win/arm64 单列资产。
+当前只证明本机格式/执行与回归，不迁移公开版 CI 资格。公开原件及侧车已备份于 `out/c47-driver-fix/before-install/`。
 
 机器可校验的产品身份（本块由 `tools/check-root-identity.cx -- --emit` 写，只含事实；
 判定口径在块外。它登记的批次是 `cx-root-identity`，每次全量都会重算并逐行比对）：
 
 <!-- identity-begin -->
 product_kind	ape1
-product_digest	fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe
-unisacc.com	fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe	6215778
+product_digest	f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82
+unisacc.com	f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82	5818178
 <!-- identity-end -->
 
-三身份 sha256 不在这里另抄一份：上面的生成块就是唯一副本（抄第二份必然漂移）。
-块里的 `product_digest` 是**成员集合**的身份（split 布局下按 basename 排序逐员哈希再合并），
-不是任何一个单文件的 sha；`candidate_kind` 说明用的是哪种定义。
+上块的 `product_kind=ape1` 表示 `product_digest` 是整个 APE 的 SHA256；split 布局才是成员集合身份。
+构造与安装收据在 `out/c47-driver-fix/`，配对 `unisacc.com.build.json` 必须具有有效 JSON、实际字节数和同一摘要。
+源记录提交与冻结源之间须核产品输入零差异，不用相同版本字符串替代字节身份。
+
+以下 dev-lnx、173 收据及旧侧车描述是历史记录，不代表当前根产品或当前验证资格。
 
 变更记录：
   2026-11-07 c46-3 APE 884adfef… 6163990B（冻结 44182b4059）；s8 会话内该项仍 FAIL，本更新是主树记录对齐，非同会话追填。

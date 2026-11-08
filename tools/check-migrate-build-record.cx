@@ -1,0 +1,22 @@
+/* Canonical JSON fixtures for all four combinations of optional identity fields. */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+static int bad;
+static void ck(int yes,const char *s){printf("%s\t%s\n",yes?"PASS":"FAIL",s);bad+=!yes;}
+int main(void){
+ char root[4096],dir[]="/tmp/check-migrate-record-XXXXXX",com[4400],tool[4400],copy[4400],rec[4400],hash[65],text[1024],want[1024],why[512];size_t n;
+ if(!getcwd(root,sizeof root)||!mkdtemp(dir)||cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/migrate-build-record.cx",root)||cx_fmt(copy,sizeof copy,"%s/unisacc.com",dir)||cx_fmt(rec,sizeof rec,"%s/unisacc.com.build.json",dir))return 2;
+ char *b=cx_read(com,&n);if(!b||cx_write(copy,b,n))return 2;cx_sha256_hex(b,n,hash);free(b);
+ for(int mask=0;mask<4;mask++){
+  if(cx_fmt(text,sizeof text,"{\n  \"schema\": 1%s%s%s\n}\n",mask?",":"",mask&1?"\n  \"product_kind\": \"wrong\"":"",mask&2?(mask&1?",\n  \"product_digest\": \"wrong\"":"\n  \"product_digest\": \"wrong\""):""))return 2;
+  if(cx_write(rec,text,strlen(text)))return 2;
+  char *v[]={"sh",com,tool,"--",dir,"--write",0};np_result r={0};if(np_run(v,root,0,8,&r,why,sizeof why))return 2;
+  int ok=!r.rc&&!r.residue;np_free(&r);
+  if(mask==2){if(cx_fmt(want,sizeof want,"{\n  \"schema\": 1,\n  \"product_digest\": \"%s\",\n  \"product_kind\": \"ape1\"\n}\n",hash))return 2;}
+  else if(cx_fmt(want,sizeof want,"{\n  \"schema\": 1,\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",hash))return 2;
+  b=cx_read(rec,&n);snprintf(text,sizeof text,"fields-%d-canonical-json",mask);ck(ok&&b&&n==strlen(want)&&!memcmp(b,want,n),text);free(b);
+  if(np_run(v,root,0,8,&r,why,sizeof why))return 2;ok=!r.rc&&!r.residue;np_free(&r);b=cx_read(rec,&n);snprintf(text,sizeof text,"fields-%d-idempotent",mask);ck(ok&&b&&n==strlen(want)&&!memcmp(b,want,n),text);free(b);
+ }
+ unlink(rec);unlink(copy);rmdir(dir);printf("MIGRATE_RECORD_CHECK\tchecks=8\tfailed=%d\n",bad);return bad?1:0;
+}
