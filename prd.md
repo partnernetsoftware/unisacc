@@ -69,6 +69,7 @@
 | `use` 的包根解析 | 仓根 `cxroot.tsv`（`R<TAB>PREFIX<TAB>DIR`）；工具侧 `use cxlib.cxroot` 调 `cxr_path`；`sh ./unisacc.com tools/check-cxroot.cx` | 旁边找不到时查最近祖先的 `cxroot.tsv`，最长前缀映射（cx/spec.md CX-U-7）；编译器侧已改 `plan.cx`/`cxmod.cx`，**已装产品要重建安装后才生效**，软链届时逐目录淘汰 |
 | 源码所有权检查（CX-W-4 路线 B） | `sh ./unisacc.com tools/cx-own.cx -- FILE...` 或 `-- --tracked`；夹具 `tools/check-cx-own.cx` | 函数内局部 owner 的 DOUBLE-FREE / USE-AFTER-FREE / LEAK；保守（转给未知函数视作可能转出）。2026-11-03 全仓：9043 函数，LEAK 220（抽 10 全真，多为工具错误路径），DOUBLE-FREE 1（误报，互斥整数条件），产品目录只有 60 个局部 owner——产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到 |
 | 批量机械改写 | `refactor.cx -- find/apply/sweep` | 每文件改前改后验证，不过即还原 |
+| C47 whole函数来源 | `tools/whole-function-origin.cx -- MATERIAL UNITS FRAMES CONFIG WATCH OUTPUT NEWDIR [--sidecar]`；`tools/module-byte-map.cx -- --whole-context …` | 校验normalized帧地图及同位置快照；后改写、区间外与跨上下文保持UNKNOWN，stub单列SYNTHETIC；非排他所有权 |
 | 归档过期 ledger/items 行 | `sh ./unisacc.com tools/archive-records.cx -- [--cutoff YYYY-MM-DD] [--write]`；检查 `tools/check-archive-records.cx` | 默认干跑；`--write` 把早于 cutoff 的 ledger 行与无存活引用的 DONE/CLOSED items 追加到 `archive/work/`；SLICE-CHANGE 不动；写前写后核 sha |
 | 改了文件重跑哪些批 | `sh ./unisacc.com tools/affected.cx -- --files F` | 按 use 闭包算受影响批次 |
 | 改一个文件看爆炸半径（一条命令） | `sh ./unisacc.com tools/flow.cx -- check FILE... [--run]` | 串起符号图受影响文件 + 受影响测试批次；`flow -- graph FILE` 出局部图 |
@@ -569,3 +570,4 @@ Win/x86_64正常whole-o原44roots路线实际重放成功，bare2663424B SHA7624
 〔C47快核来源观察实际突破〕私有counter完整e3在生产4e11步预算下ACCEPT，382608138步/4.63秒，输出13472952B与生产sidecar cmp0。完整稀疏snapshot+frame observer随后真实9.97秒/exit0，11121事件、2780 mark/span对、1实际frame；output仍cmp0，导出frame与完整39268516B units.payload也cmp0，故本输入UC SWAP后内容相等由实际字节证实而非假设。minimal事件/manifest/frame与当前sim逐字节核等，动作wrapper保留SWAP/SBCLR/INPUSH/POP代次。数据仍out私有原型，Win4资源身份单列尚未header绑定；不是来源消费已绿。实际consumer接入rc2揭示新consumer把USLFW1 magic误写为NUL结尾，生产实际LF；由其owner修精确合同并补sidecar正负控，原拒绝保留。
 〔C47 Mach最终镜像反证〕两片83帧splice、units/e3/prune/lower/elf均真实exit0，但stage-replayed.image对原slice均char217不同，未闭合最终identity。保留新材料作为失败对照，不把83帧守恒外推到原像；正在核生产fallback资源/阶段差异，不盲重跑whole。
 〔C47函数消费与Mach窄修复〕真实whole-function消费已exit0：82单元、2780上下文全部survived=1，裸tape与原e3-first.tape cmp0，尾[13015177,13472921)保留UNKNOWN；sidecar LF magic正负控4/0、旧夹具7/0。Mach差异已收窄到stub独立stream漏生产RT_EXTERN：14项私有状态按实际D.align合计33320B，恰等两片BSS增量；补RT_EXTERN后stub e2/e1均exit0且声明变extern。下一仅用新stub接83帧后续链核原镜像，未闭合前仍记FAIL。另将私有快核参数化并测lower/encoder真实观察量，决定有界事件账设计；原1M/64MiB模式上限不改。
+〔C47 Mach新资源链实证〕补RT_EXTERN后两Mach的splice/units/e3/prune/lower/elf链各步均exit0，最终image对各自原候选slice实际cmp0：x64 2410978B/42ce67ed…，ARM 3071458B/e5f80fac…。新产物分目录保留原失败对照，未重跑82源front。此证明阶段材料链身份，不替代未完成的函数与机器码模块来源证书。

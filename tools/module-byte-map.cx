@@ -19,19 +19,45 @@ static long mb_n(char **v,int n,const char *k){return mb_num(mb_kv(v,n,k));}
 static void mb_hash(char **v,int n,const char *k,const char *expected){if(strcmp(mb_kv(v,n,k),expected))mb_die("SHA chain");}
 static void mb_span(long lo,long hi,long max){if(lo<0||hi<lo||hi>max)mb_die("range");}
 static char *mb_text(char *b,size_t n){if(memchr(b,0,n)||memchr(b,'\r',n))mb_die("text NUL/CR");return b;}
-typedef struct {long lo,hi,bytes,records;char *name;} MbUnit;
+typedef struct {long lo,hi,bytes,records;char *name;int synthetic;} MbUnit;
 typedef struct {long lo,hi;int owner;} MbEntity;
 typedef struct {long lo,hi;int owner;} MbEpisode;
 static MbUnit units[2048];static int nu;
 static MbEntity *entities;static long ne;
 static MbEpisode *episodes;static long np;
 static long sb[5],sr[5];
+typedef struct {long lo,hi;int owner;} MbContext;
+static MbContext *contexts;static long nc;static int whole;
+static void mb_hexfield(char **v,int n,const char *key){char *p=mb_kv(v,n,key);if(strlen(p)!=64)mb_die("whole SHA shape");for(int i=0;i<64;i++)if(!((p[i]>='0'&&p[i]<='9')||(p[i]>='a'&&p[i]<='f')))mb_die("whole SHA hex");}
+static void mb_whole(char *origin,char *tape,long length,const char *tapehash){
+ char *at=origin,*s=mb_line(&at),*v[32];int n=s?mb_fields(s,v):0;
+ if(n!=13||strcmp(v[0],"WHOLE_FUNCTION_ORIGIN")||strcmp(mb_kv(v,n,"version"),"1")||strcmp(mb_kv(v,n,"claim"),"emitter-context-not-exclusive-ownership"))mb_die("whole header");
+ const char *keys[]={"material_sha","frames_sha","attrs_sha","original_units_sha","frame_manifest_sha","config_sha","watch_sha","output_sha","tape_sha","delta_sha"};for(int i=0;i<10;i++)mb_hexfield(v,n,keys[i]);
+ mb_hash(v,n,"tape_sha",tapehash);mb_hash(v,n,"delta_sha","a985b1706b96659bd3951a44495e774d4eb3c969163845c7a63d9c225e6b1811");
+ const char *profile="CT.afterfn\tunit_epoch,hl_pos,fns,fne\toutput-mark\nFN.nx\tunit_epoch,infunc\toutput-span\n";char expected[65];if(sy_sha256_hex(profile,strlen(profile),expected))cx_sha256_hex(profile,strlen(profile),expected);mb_hash(v,n,"config_sha",expected);
+ contexts=calloc(100000,sizeof *contexts);if(!contexts)mb_die("whole context allocation");long cursor=0;int complete=0,body=0;
+ while((s=mb_line(&at))){mb_tick();n=mb_fields(s,v);if(complete)mb_die("whole identity after tail");
+  if(!strcmp(v[0],"UNIT")){
+   if(body||n!=4||nu==128||mb_num(v[1])!=nu)mb_die("whole UNIT sequence/schema");char *name=mb_kv(v,n,"planned_source"),*kind=mb_kv(v,n,"kind");if(!*name||name[0]!='/'||strpbrk(name,"\t\r\n")||(strcmp(kind,"SOURCE")&&strcmp(kind,"SYNTHETIC")))mb_die("whole UNIT identity");for(int i=0;i<nu;i++)if(!strcmp(name,units[i].name))mb_die("whole duplicate source");units[nu].name=strdup(name);if(!units[nu].name)mb_die("unit allocation");units[nu].synthetic=!strcmp(kind,"SYNTHETIC");nu++;
+  }else if(!strcmp(v[0],"CONTEXT")){
+   body=1;if(n!=7||!nu||nc==100000||mb_num(v[1])!=nc)mb_die("whole CONTEXT sequence/schema");long unit=mb_n(v,n,"unit"),lo=mb_n(v,n,"lo"),hi=mb_n(v,n,"hi"),saved=mb_n(v,n,"survived");mb_span(lo,hi,length);if(unit<0||unit>=nu||saved<0||saved>1||lo!=cursor)mb_die("whole CONTEXT order/range");mb_hexfield(v,n,"sha");char actual[65];if(sy_sha256_hex(tape+lo,hi-lo,actual))cx_sha256_hex(tape+lo,hi-lo,actual);if((!strcmp(actual,mb_kv(v,n,"sha")))!=saved)mb_die("whole context survival SHA");contexts[nc++]=(MbContext){lo,hi,saved?(units[unit].synthetic?-3:(int)unit):-1};cursor=hi;
+  }else if(!strcmp(v[0],"UNKNOWN")){
+   body=1;if(n!=3||!nu)mb_die("whole UNKNOWN schema");long lo=mb_n(v,n,"lo"),hi=mb_n(v,n,"hi");mb_span(lo,hi,length);if(lo!=cursor||hi==lo)mb_die("whole UNKNOWN order/range");cursor=hi;
+  }else if(!strcmp(v[0],"COMPLETE")){
+   if(n!=5||!nu||mb_n(v,n,"units")!=nu||mb_n(v,n,"contexts")!=nc||mb_n(v,n,"tape_bytes")!=length||cursor!=length)mb_die("whole tail count/extent");mb_hash(v,n,"tape_sha",tapehash);complete=1;
+  }else mb_die("whole origin row");
+ }
+ if(!complete)mb_die("whole identity missing tail");
+}
+
 /* -1 UNKNOWN, -2 SHARED, -3 SYNTHETIC; modules are nonnegative unit indices. */
-static int mb_owner(long lo,long hi,long total){if(lo<0||hi<lo||hi>total)return -1;for(int i=0;i<nu;i++)if(lo>=units[i].lo&&hi<=units[i].hi&&hi>lo)return i;return -1;}
+static int mb_owner(long lo,long hi,long total){if(lo<0||hi<lo||hi>total)return -1;if(whole){if(hi==lo)return -1;long l=0,r=nc;while(l<r){long m=(l+r)/2;if(contexts[m].lo<=lo)l=m+1;else r=m;}if(!l)return -1;MbContext *c=&contexts[l-1];return lo>=c->lo&&hi<=c->hi?c->owner:-1;}for(int i=0;i<nu;i++)if(lo>=units[i].lo&&hi<=units[i].hi&&hi>lo)return i;return -1;}
 static int mb_join(int a,int b){if(a==-1||b==-1)return -1;if(a==b)return a;return -2;}
-int main(int argc,char **argv){began=sy_now_ms();if(argc!=7)mb_die("usage ORIGIN MERGED ROWS EPISODES RECORDS IMAGE");char h[6][65];size_t size[6];char *b[6];for(int i=0;i<6;i++)b[i]=mb_load(argv[i+1],&size[i],h[i]);for(int i=0;i<5;i++)if(i!=1)mb_text(b[i],size[i]);
- char *at=b[0],*s=mb_line(&at),*v[32];int n=s?mb_fields(s,v):0;if(!n||strcmp(v[0],"TAPE_ORIGIN"))mb_die("origin header");mb_hash(v,n,"tape_sha",h[1]);if(mb_n(v,n,"bytes")!=(long)size[1])mb_die("merged bytes");long origin_end=0,synlo=-1,synhi=-1;int complete=0;
- while((s=mb_line(&at))){n=mb_fields(s,v);if(complete)mb_die("origin after tail");if(!strcmp(v[0],"ORDER_INPUT"))continue;if(!strcmp(v[0],"UNIT")){if(nu==2048||n<3||mb_num(v[1])!=nu)mb_die("unit sequence");MbUnit *u=&units[nu];u->lo=mb_n(v,n,"lo");u->hi=mb_n(v,n,"hi");mb_span(u->lo,u->hi,(long)size[1]);if(u->lo!=origin_end||synlo>=0)mb_die("origin overlap/gap");u->name=strdup(mb_kv(v,n,"planned_source"));if(!u->name||!*u->name||strpbrk(u->name,"\t\r\n"))mb_die("planned source");origin_end=u->hi;nu++;}else if(!strcmp(v[0],"SYNTHETIC")){if(synlo>=0)mb_die("duplicate synthetic");synlo=mb_n(v,n,"lo");synhi=mb_n(v,n,"hi");mb_span(synlo,synhi,(long)size[1]);if(synlo!=origin_end)mb_die("synthetic gap");origin_end=synhi;}else if(!strcmp(v[0],"COMPLETE")){if(mb_n(v,n,"units")!=nu||mb_n(v,n,"sum")!=(long)size[1]||origin_end!=(long)size[1])mb_die("origin tail");mb_hash(v,n,"tape_sha",h[1]);complete=1;}else mb_die("origin row");}if(!complete)mb_die("origin tail missing");
+int main(int argc,char **argv){began=sy_now_ms();whole=argc==8&&!strcmp(argv[1],"--whole-context");if(argc!=7&&!whole)mb_die("usage [--whole-context] ORIGIN MERGED ROWS EPISODES RECORDS IMAGE");if(whole)argv++;char h[6][65];size_t size[6];char *b[6];for(int i=0;i<6;i++)b[i]=mb_load(argv[i+1],&size[i],h[i]);for(int i=0;i<5;i++)if(i!=1)mb_text(b[i],size[i]);
+ char *at,*s,*v[32];int n;long synlo=-1,synhi=-1;int complete=0;
+ if(whole)mb_whole(b[0],b[1],size[1],h[1]);else{
+ at=b[0];s=mb_line(&at);n=s?mb_fields(s,v):0;if(!n||strcmp(v[0],"TAPE_ORIGIN"))mb_die("origin header");mb_hash(v,n,"tape_sha",h[1]);if(mb_n(v,n,"bytes")!=(long)size[1])mb_die("merged bytes");long origin_end=0;
+ while((s=mb_line(&at))){n=mb_fields(s,v);if(complete)mb_die("origin after tail");if(!strcmp(v[0],"ORDER_INPUT"))continue;if(!strcmp(v[0],"UNIT")){if(nu==2048||n<3||mb_num(v[1])!=nu)mb_die("unit sequence");MbUnit *u=&units[nu];u->lo=mb_n(v,n,"lo");u->hi=mb_n(v,n,"hi");mb_span(u->lo,u->hi,(long)size[1]);if(u->lo!=origin_end||synlo>=0)mb_die("origin overlap/gap");u->name=strdup(mb_kv(v,n,"planned_source"));if(!u->name||!*u->name||strpbrk(u->name,"\t\r\n"))mb_die("planned source");origin_end=u->hi;nu++;}else if(!strcmp(v[0],"SYNTHETIC")){if(synlo>=0)mb_die("duplicate synthetic");synlo=mb_n(v,n,"lo");synhi=mb_n(v,n,"hi");mb_span(synlo,synhi,(long)size[1]);if(synlo!=origin_end)mb_die("synthetic gap");origin_end=synhi;}else if(!strcmp(v[0],"COMPLETE")){if(mb_n(v,n,"units")!=nu||mb_n(v,n,"sum")!=(long)size[1]||origin_end!=(long)size[1])mb_die("origin tail");mb_hash(v,n,"tape_sha",h[1]);complete=1;}else mb_die("origin row");}if(!complete)mb_die("origin tail missing");}
  entities=calloc(MB_MAX,sizeof *entities);episodes=calloc(MB_MAX,sizeof *episodes);if(!entities||!episodes)mb_die("allocation");at=b[2];s=mb_line(&at);n=s?mb_fields(s,v):0;if(!n||strcmp(v[0],"LOWER_ROW_ID"))mb_die("rows header");mb_hash(v,n,"source_sha",h[1]);char outputsha[65];snprintf(outputsha,sizeof outputsha,"%s",mb_kv(v,n,"output_sha"));long codebytes=mb_n(v,n,"code_bytes"),codeend=0;complete=0;
  while((s=mb_line(&at))){n=mb_fields(s,v);if(complete)mb_die("rows after tail");if(!strcmp(v[0],"ENTITY")){if(ne==MB_MAX||n<2||mb_num(v[1])!=ne)mb_die("ENTITY sequence");long cl=mb_n(v,n,"code_lo"),ch=mb_n(v,n,"code_hi"),lo=mb_n(v,n,"source_lo"),hi=mb_n(v,n,"source_hi");mb_span(cl,ch,codebytes);mb_span(lo,hi,(long)size[1]);if(cl!=codeend)mb_die("ENTITY code overlap/gap");codeend=ch;MbEntity *e=&entities[ne++];e->lo=lo;e->hi=hi;e->owner=lo>=synlo&&hi<=synhi&&hi>lo?-3:mb_owner(lo,hi,(long)size[1]);}else if(!strcmp(v[0],"LOWER_ROW_ORIGIN")){if(mb_n(v,n,"entities")!=ne||mb_n(v,n,"rows")!=ne||mb_n(v,n,"code_bytes")!=codebytes||codeend!=codebytes)mb_die("rows tail");complete=1;}else mb_die("rows row");}if(!complete)mb_die("rows tail missing");
  at=b[3];s=mb_line(&at);n=s?mb_fields(s,v):0;if(!n||strcmp(v[0],"LOWER_EPISODE_ID"))mb_die("episodes header");mb_hash(v,n,"rows_sha",h[2]);mb_hash(v,n,"output_sha",outputsha);long targetend=0,ecount=0,unknowncount=0,unknownbytes=0;complete=0;
