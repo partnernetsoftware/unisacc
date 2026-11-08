@@ -28,7 +28,7 @@ static void bput(Bytes *b, const unsigned char *s, long n) { bgrow(b, n); { void
 static void bputc(Bytes *b, int c) { bgrow(b, 1); b->s[b->n++] = (unsigned char)c; }
 /* Opt-in write association only. No module ownership or causal completeness claim. */
 static const char *we_path;
-static const char *ws_path;static char ws_sha[65];static int *ws_index,ws_n,ws_regs[64][16],ws_counts[64];
+static const char *ws_path;static char ws_sha[65];static int *ws_index,ws_n,ws_regs[64][16],ws_counts[64],ws_edges[64];
 static int ws_compact;
 typedef struct {const unsigned char *bytes;long end;char sha[65];} WSFrame;
 static WSFrame *ws_frame(long id,const unsigned char *bytes,long end,int *fresh);
@@ -46,7 +46,7 @@ static void ws_load(dl_delta *d){
  if(!ws_path)return;if(!we_path)die("--watch-states requires --write-events");
  FILE *f=fopen(ws_path,"rb");if(!f)die("watch config open");char *b=xmalloc(65538);long n=fread(b,1,65537,f);int bad=ferror(f);fclose(f);if(bad||n<1||n>65536||memchr(b,0,n))die("watch config size or NUL");we_hash((unsigned char *)b,n,ws_sha);b[n]=0;
  ws_index=xmalloc(d->ns*sizeof(int));memset(ws_index,0,d->ns*sizeof(int));
- char *p=b;while(*p){char *end=strchr(p,'\n');if(end)*end=0;char *tab=strchr(p,'\t');if(!tab||tab==p||!tab[1]||strchr(tab+1,'\t')||strchr(p,'\r'))die("watch config TSV shape");*tab=0;int state=-1;for(int i=0;i<d->ns;i++)if(!strcmp(p,d->s[i].name)){state=i;break;}if(state<0)die("watch unknown state");if(ws_n==64||ws_index[state])die("watch duplicate state or state limit");int slot=ws_n++;ws_index[state]=slot+1;p=tab+1;
+ char *p=b;while(*p){char *end=strchr(p,'\n');if(end)*end=0;char *tab=strchr(p,'\t');if(!tab||tab==p||!tab[1]||strchr(p,'\r'))die("watch config TSV shape");char *policy=strchr(tab+1,'\t');if(policy){*policy++=0;if(strcmp(policy,"frame-edges")||!tab[1])die("watch config policy");}*tab=0;int state=-1;for(int i=0;i<d->ns;i++)if(!strcmp(p,d->s[i].name)){state=i;break;}if(state<0)die("watch unknown state");if(ws_n==64||ws_index[state])die("watch duplicate state or state limit");int slot=ws_n++;ws_index[state]=slot+1;ws_edges[slot]=policy!=0;p=tab+1;
   for(;;){char *comma=strchr(p,',');if(comma)*comma=0;if(!*p||ws_counts[slot]==16)die("watch field shape or limit");int reg=0;for(int i=1;i<=d->nreg;i++)if(!strcmp(p,dl_regname(d,i))){reg=i;break;}if(!reg)die("watch unknown register");for(int i=0;i<ws_counts[slot];i++)if(ws_regs[slot][i]==reg)die("watch duplicate register");ws_regs[slot][ws_counts[slot]++]=reg;if(!comma)break;p=comma+1;}
   if(!end)break;p=end+1;
  }free(b);
@@ -54,6 +54,7 @@ static void ws_load(dl_delta *d){
 static void ws_record(dl_delta *d,int state,const long long *w,long frame,const unsigned char *bytes,long cursor,long end,long outlen,long scratchlen){
  if(!ws_path||!ws_index[state])return;
  int slot=ws_index[state]-1,n;char line[4096],st[1024],sha[65];
+ if(ws_edges[slot]&&cursor!=0&&cursor!=end)return;
  if(ws_compact){
   int fresh=0;WSFrame *f=ws_frame(frame,bytes,end,&fresh);
   if(fresh){

@@ -194,6 +194,8 @@ static int episodes(int argc, char **argv) {
     if(!strstr(cfg,"GENERIC\tci,kind,op,ldp_dry\n")||!strstr(cfg,"C.advance\tci,nc,ldp_dry\n")||
        !strstr(cfg,"LDP.original.PF.emit\tci,nc,ldp_dry\n")||!strstr(cfg,"LDP.original.PL.emit\tci,nc,ldp_dry\n"))
         fail("episode profile config");
+    int arm_af=strstr(cfg,"LDP.original.AF.emit\tci,nc,ldp_dry\n")!=0,arm_ai=strstr(cfg,"LDP.original.AI.emit\tci,nc,ldp_dry\n")!=0;
+    if(arm_af!=arm_ai)fail("incomplete ARM episode profile");
     p=watch;end=strchr(p,'\n');if(!end)fail("episode watch header");*end=0;nf=fields(p,f);
     if(strcmp(f[0],"WRITE_EVENTS")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"input_sha"),source_sha)||
        strcmp(value(f,nf,"config_sha"),gh)||strcmp(value(f,nf,"output_sha"),th)||number(value(f,nf,"output_bytes"))!=(long)tn)
@@ -228,7 +230,7 @@ static int episodes(int argc, char **argv) {
         if(dry>1)fail("episode dry flag");
         if(dry){if(pending)fail("dry pass inside live episode");dry_count++;p=end+1;continue;}
         if(ne&&(len<last_hi||gen!=last_generation))fail("output reset after completed episode");
-        int rule=!strcmp(st,"LDP.original.PF.emit")?2:!strcmp(st,"LDP.original.PL.emit")?3:0;
+        int rule=!strcmp(st,"LDP.original.PF.emit")?2:!strcmp(st,"LDP.original.PL.emit")?3:arm_af&&!strcmp(st,"LDP.original.AF.emit")?4:arm_ai&&!strcmp(st,"LDP.original.AI.emit")?5:0;
         if(!strcmp(st,"GENERIC")){
             if(number(value(f,nf,"value:kind"))==2)rule=1;
             else{if(pending)fail("nested unknown GENERIC");unknown++;p=end+1;continue;}
@@ -239,7 +241,7 @@ static int episodes(int argc, char **argv) {
         }else if(!strcmp(st,"C.advance")){
             if(number(value(f,nf,"value:nc"))!=nr)fail("episode nc coverage");
             if(!pending){unknown++;p=end+1;continue;}
-            long count=pending_rule==1?1:2,expected=pending_ci+count-1;
+            long count=pending_rule==1?1:pending_rule==4?4:2,expected=pending_ci+count-1;
             if(ci!=expected||pending_ci+count>nr||gen!=pending_gen||fi!=pending_frame||len<pending_len||len>(long)tn||
                !boundary(target,tn,len))fail("episode close ci/generation/range");
             if(len==pending_len)unknown++;
@@ -264,8 +266,13 @@ static int episodes(int argc, char **argv) {
             append_text(line);unknown_bytes+=x->lo-covered_end;
         }
         covered_end=x->hi;
-        Row *a=&rows[x->first],*b=&rows[x->first+x->count-1];
-        snprintf(line,sizeof line,"EPISODE\t%ld\trule=%s\ttarget_lo=%ld\ttarget_hi=%ld\tnc_lo=%ld\tnc_hi=%ld\tsource0_lo=%ld\tsource0_hi=%ld\tsource1_lo=%ld\tsource1_hi=%ld\tobject_module=UNKNOWN\n",i,x->rule==1?"GENERIC":x->rule==2?"PF":"PL",x->lo,x->hi,x->first,x->first+x->count,a->slo,a->shi,x->count==2?b->slo:-1,x->count==2?b->shi:-1);
+        Row *a=&rows[x->first],*b=&rows[x->first+(x->count>1?1:0)];
+        snprintf(line,sizeof line,"EPISODE\t%ld\trule=%s\ttarget_lo=%ld\ttarget_hi=%ld\tnc_lo=%ld\tnc_hi=%ld\tsource0_lo=%ld\tsource0_hi=%ld\tsource1_lo=%ld\tsource1_hi=%ld\tobject_module=UNKNOWN\n",i,x->rule==1?"GENERIC":x->rule==2?"PF":x->rule==3?"PL":x->rule==4?"AF":"AI",x->lo,x->hi,x->first,x->first+x->count,a->slo,a->shi,x->count>=2?b->slo:-1,x->count>=2?b->shi:-1);
+        if(x->count==4){
+            long used=strlen(line);line[--used]=0;
+            Row *c=&rows[x->first+2],*d=&rows[x->first+3];
+            snprintf(line+used,sizeof line-used,"\tsource2_lo=%ld\tsource2_hi=%ld\tsource3_lo=%ld\tsource3_hi=%ld\n",c->slo,c->shi,d->slo,d->shi);
+        }
         append_text(line);
     }
     if(covered_end<(long)tn){snprintf(line,sizeof line,"UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n",covered_end,(long)tn);append_text(line);unknown_bytes+=(long)tn-covered_end;}

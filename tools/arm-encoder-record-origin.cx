@@ -1,0 +1,38 @@
+/* Static Linux ARM two-pass record certificate. Transcript consistency, not authenticity.
+ * TARGET CONFIG WATCH IMAGE; compact-v1 only, root frame, immutable model/profile SHA.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#define AR_DELTA "8d56c3089e1b46d459d35f577bc8bf2f683f30b198bf0305099f48dffe6e1e3d"
+#define AR_CONFIG "8ef302ee88b76de993624c107118f1ab5f37cadfcfffe3e6e98d2c04679ce964"
+typedef struct {long lo,hi,ws,we,begin,end;} ArRow;
+static ArRow *rows;static long nr,cap;
+static char buffer[65536];static int used;
+static void fail(const char *s){fprintf(stderr,"ARM_ENCODER_RECORD REFUSE %s\n",s);exit(2);}
+static void emit(const char *s,int n){if(n<0||n>=1024)fail("output line");if(used+n>sizeof buffer){if(sy_write_all(1,buffer,used))fail("output write");used=0;}memcpy(buffer+used,s,n);used+=n;}
+static char *load(const char *p,size_t *n,long limit,int text){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>limit)fail("input extent");char *b=cx_read(p,n);if(!b||*n!=(size_t)st.st_size||(text&&(memchr(b,0,*n)||memchr(b,'\r',*n))))fail("input read/text");return b;}
+static void hash(const char *s,size_t n,char h[65]){if(sy_sha256_hex(s,(long)n,h))cx_sha256_hex(s,n,h);}
+static long number(const char *s){long n=0;if(!s||!*s)fail("number");for(;*s;s++){if(*s<'0'||*s>'9'||n>1000000000)fail("number");n=n*10+*s-'0';}return n;}
+static int split(char *s,char **v){int n=1;v[0]=s;for(;*s;s++)if(*s=='\t'){if(n==32)fail("columns");*s=0;v[n++]=s+1;}return n;}
+static char *field(char **v,int n,const char *k){size_t z=strlen(k);char *r=0;for(int i=1;i<n;i++)if(!strncmp(v[i],k,z)&&v[i][z]=='='){if(r)fail("duplicate field");r=v[i]+z+1;}if(!r)fail("missing field");return r;}
+static void scan(const char *s,long n){for(long lo=0;lo<n;){long hi=lo;while(hi<n&&s[hi]!='\n')hi++;if(hi==n)fail("target final LF");hi++;long ws=lo;while(ws<hi&&(s[ws]==' '||s[ws]=='\t'))ws++;long we=ws;while(we<hi&&s[we]!=' '&&s[we]!='\t'&&s[we]!='\n')we++;if(we>ws&&s[ws]!='@'&&s[we-1]!=':'){if(nr==1000000)fail("row bound");if(nr==cap){cap=cap?cap*2:1024;rows=realloc(rows,cap*sizeof *rows);if(!rows)fail("allocation");}rows[nr++]=(ArRow){lo,hi,ws,we,0,0};}lo=hi;}}
+static unsigned long long le(const unsigned char *p,long n,long off,int z){if(off<0||off>n||z>n-off)fail("ELF bound");unsigned long long v=0;for(int i=0;i<z;i++)v|=(unsigned long long)p[off+i]<<(8*i);return v;}
+static void elf(const unsigned char *p,long n,long text,long pad){if(n<176||memcmp(p,"\177ELF\2\1\1",7)||le(p,n,16,2)!=2||le(p,n,18,2)!=183||le(p,n,20,4)!=1||le(p,n,32,8)!=64||le(p,n,40,8)||le(p,n,52,2)!=64||le(p,n,54,2)!=56||le(p,n,56,2)!=2)fail("static ARM ELF");int rx=0,data=0;for(int i=0;i<2;i++){long a=64+i*56;if(le(p,n,a,4)!=1)fail("ELF segment");if(le(p,n,a+4,4)&1){if(rx++||le(p,n,a+4,4)!=5||le(p,n,a+8,8)||le(p,n,a+32,8)!=(unsigned long long)(176+text))fail("ELF text extent");unsigned long long va=le(p,n,a+16,8),entry=le(p,n,24,8);if(entry<va+176||entry>=va+176+text)fail("ELF entry");}else if(data++||le(p,n,a+4,4)!=6||le(p,n,a+8,8)!=(unsigned long long)pad||pad>n||le(p,n,a+32,8)>(unsigned long long)(n-pad))fail("ELF data extent");}if(rx!=1||data!=1||text>n-176)fail("ELF closure");}
+int main(int argc,char **argv){if(argc!=5)fail("usage TARGET CONFIG WATCH IMAGE");size_t tn,cn,wn,in;char *target=load(argv[1],&tn,134217728,1),*cfg=load(argv[2],&cn,65536,1),*watch=load(argv[3],&wn,67108864,1),*image=load(argv[4],&in,134217728,0);char th[65],ch[65],wh[65],ih[65];hash(target,tn,th);hash(cfg,cn,ch);hash(watch,wn,wh);hash(image,in,ih);if(strcmp(ch,AR_CONFIG))fail("config SHA");scan(target,(long)tn);if(!nr)fail("empty instruction rows");
+ long seq=0,counts[2]={0,0},lnum=0,pending=-1,startout=0,lastout=0,text=-1,pad=-1;int phase=0,head=0,root=0,done=0,started=0,arity[8]={2,4,2,2,3,3,3,1};
+ for(char *p=watch;*p;){char *end=strchr(p,'\n');if(!end)fail("watch final LF");*end=0;char *v[32];int n=split(p,v);
+ if(!head){if(strcmp(v[0],"WRITE_EVENTS")||strcmp(field(v,n,"version"),"1")||strcmp(field(v,n,"delta_sha"),AR_DELTA)||strcmp(field(v,n,"config_sha"),ch)||strcmp(field(v,n,"input_sha"),th)||strcmp(field(v,n,"output_sha"),ih)||number(field(v,n,"output_bytes"))!=(long)in||strcmp(field(v,n,"claim"),"STATE_OBSERVATION_ONLY")||strcmp(field(v,n,"watch_format"),"compact-v1"))fail("watch identity");head=1;p=end+1;continue;}
+ if(!strcmp(v[0],"COMPLETE")){if(n!=2||strncmp(v[1],"events=",7)||number(v[1]+7)!=seq||end[1]||phase!=6||pending>=0)fail("watch complete");done=1;break;}
+ if(n<2||number(v[1])!=++seq||seq>1000000)fail("watch sequence");if(!strcmp(v[0],"FRAME")){if(root||n!=5||number(v[2])!=1||strcmp(v[3],th)||number(v[4])!=(long)tn)fail("root frame");root=1;p=end+1;continue;}
+ if(strcmp(v[0],"WATCHC")||!root||n<10)fail("compact record");long slot=number(v[2]),frame=number(v[3]),cursor=number(v[4]),gen=number(v[5]),out=number(v[6]);if(slot>7||n!=9+arity[slot]||frame!=1||cursor>(long)tn||gen||out>(long)in)fail("watch extent/frame");number(v[7]);number(v[8]);long a[4];for(int j=0;j<arity[slot];j++)a[j]=number(v[9+j]);
+ if(slot==0){if(started++||phase||a[0]||a[1]||cursor||out)fail("START root identity");}
+ else if(slot==1){long pass=a[0];if(!started||pass>1||((phase==0&&pass)||(phase==2&&pass!=1))||(phase!=0&&phase!=2)||a[1]!=lnum)fail("OP pass/count");if(pending>=0){if(pending!=pass||counts[pass]>=nr||out<startout)fail("OP transaction order");ArRow *prior=&rows[counts[pass]++];if(pass){prior->begin=startout;prior->end=out;}pending=-1;lastout=out;}if(counts[pass]>=nr)fail("duplicate OP row");ArRow *r=&rows[counts[pass]];if(cursor!=r->we||a[2]!=r->ws||a[3]!=r->we)fail("OP row identity");if(counts[pass]==0&&out)fail("rewind OCUT or prefix output");pending=pass;startout=out;lnum++;}
+ else if(slot==2){if(phase||a[0]||a[1]!=lnum||pending!=0||counts[0]+1!=nr||out<startout)fail("REWIND pass0 closure");counts[0]++;pending=-1;phase=1;}
+ else if(slot==3){if(phase!=1||a[0]||a[1]!=lnum)fail("rewind reset order");phase=2;lastout=0;}
+ else if(slot==4){if(phase!=2||a[0]!=1||a[2]!=1||pending!=1||counts[1]+1!=nr||a[1]!=out||out<startout)fail("pass1 text closure");ArRow *prior=&rows[counts[1]++];prior->begin=startout;prior->end=out;pending=-1;text=out;phase=3;}
+ else if(slot==5){if(phase!=3||a[0]!=text||a[1]!=1||a[2]||out!=text)fail("static image entry");phase=4;}
+ else if(slot==6){if(phase!=4||!a[0]||a[1]!=text||a[2]||out!=176)fail("copy text H/T");phase=5;}
+ else {if((phase!=5&&phase!=6)||a[0]!=text||(phase==5?out!=176+text:out!=pad+1))fail("copy text closure");pad=out;phase=6;}
+ p=end+1;}
+ if(!head||!done||!root||text<0||pad<0)fail("missing completion");elf((unsigned char *)image,(long)in,text,pad);char line[1024];int n=snprintf(line,sizeof line,"ENCODER_RECORD_ID\tcertificate=c47-arm-model2-static-v1\tdelta_sha=%s\tconfig_sha=%s\ttarget_sha=%s\twatch_sha=%s\timage_sha=%s\tclaim=target-row-lineage-only\tobject_module=UNKNOWN\n",AR_DELTA,ch,th,wh,ih);emit(line,n);for(long i=0;i<nr;i++){n=snprintf(line,sizeof line,"RECORD\t%ld\ttarget_lo=%ld\ttarget_hi=%ld\ttext_lo=%ld\ttext_hi=%ld\tfile_lo=%ld\tfile_hi=%ld\tobject_module=UNKNOWN\n",i,rows[i].lo,rows[i].hi,rows[i].begin,rows[i].end,176+rows[i].begin,176+rows[i].end);emit(line,n);}n=snprintf(line,sizeof line,"OTHER\tHEADER\tfile_lo=0\tfile_hi=176\tobject_module=UNKNOWN\nOTHER\tDATA_OR_ALIGN\tfile_lo=%ld\tfile_hi=%ld\tobject_module=UNKNOWN\nENCODER_RECORD_ORIGIN\trecords=%ld\ttext_bytes=%ld\timage_bytes=%ld\n",176+text,(long)in,nr,text,(long)in);emit(line,n);if(used&&sy_write_all(1,buffer,used))fail("output write");return 0;}

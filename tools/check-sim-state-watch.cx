@@ -34,7 +34,38 @@ static void compactprobe(const char *good){
  out=run(1,1,2,"3");ck(out&&!exists(),"compact four records exceed budget three without publication");free(out);
  out=run(0,1,2,0);ck(out&&!exists(),"compact without watch config refuses");free(out);compact=0;
 }
-int main(int argc,char **argv){char root[4400],temp[]="/tmp/watch-check-XXXXXX";size_t n;if(!realpath(".",root)||!mkdtemp(temp))die("cwd/tmp");strcpy(dir,temp);path(delta,"delta.json");path(input,"input");path(side,"events");path(cfg,"config");cx_fmt(com,sizeof com,"%s/unisacc.com",root);if(argc>1)strcpy(sim,argv[1]);else cx_fmt(sim,sizeof sim,"%s/tools/sim.cx",root);
+static void edgeprobe(void){
+ const char *d="{\"start\":\"S\",\"states\":{\"S\":[\"b\",{\"97\":[\"L\",0]}],\"L\":[\"b\",{\"97\":[\"L\",1],\"98\":[\"L\",1],\"99\":[\"L\",1],\"256\":[\"L\",2]}]},\"seqs\":[[[\"LDI\",\"x\",0],[\"LDI\",\"end\",3],[\"BLOBSAVE\",\"blob\",\"x\",\"end\"],[\"INPUSH\",\"blob\"]],[[\"COPY\"],[\"ADV\"]],[[\"ACCEPT\"]]]}";
+ if(cx_write(delta,d,strlen(d))||cx_write(input,"abc",3))die("edge fixture");
+ char *off=run(0,0,0,0);ck(off&&!strcmp(off,"abc"),"frame-edge fixture default output abc");
+ for(int mode=0;mode<2;mode++){
+  compact=mode;
+  for(int filtered=0;filtered<2;filtered++){
+   const char *config=filtered?"L\tx\tframe-edges\n":"L\tx\n";
+   if(cx_write(cfg,config,strlen(config)))die("edge config");
+   char *out=run(1,1,0,0);ck(off&&out&&!strcmp(out,off),mode?(filtered?"compact edges output cmp":"compact all output cmp"):(filtered?"long edges output cmp":"long all output cmp"));free(out);
+   size_t n;char *log=cx_read(side,&n),sha[65],needle[180];cx_sha256_hex("abc",3,sha);
+   int rows=0,frames=0,valid=1;
+   if(log)for(char *p=log;*p;){
+    if(!strncmp(p,"FRAME\t",6)){long seq,id,end;char h[65];frames++;if(sscanf(p,"FRAME\t%ld\t%ld\t%64s\t%ld",&seq,&id,h,&end)!=4||seq!=1||id!=2||end!=3||strcmp(h,sha))valid=0;}
+    if(!strncmp(p,mode?"WATCHC\t":"WATCH\t",mode?7:6)){
+     long cursor=filtered?(rows?3:0):rows;
+     if(mode){long seq,slot,id,cur,gen,len,sg,sn,x;if(sscanf(p,"WATCHC\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld",&seq,&slot,&id,&cur,&gen,&len,&sg,&sn,&x)!=9||seq!=rows+2||slot!=0||id!=2||cur!=cursor||gen||len!=cursor||sg||sn||x)valid=0;}
+     else{snprintf(needle,sizeof needle,"frame_instance=2\tframe_sha=%s\tcursor=%ld\tframe_end=3\toutput_generation=0\toutput_len=%ld\t",sha,cursor,cursor);char *end=strchr(p,'\n'),*hit=strstr(p,needle);if(!hit||(end&&hit>end))valid=0;}
+     rows++;
+    }
+    char *next=strchr(p,'\n');if(!next)break;p=next+1;
+   }
+   int expected=filtered?2:4;snprintf(needle,sizeof needle,"COMPLETE\tevents=%d\n",expected+mode);
+   ck(log&&valid&&rows==expected&&frames==mode&&strstr(log,needle),mode?(filtered?"compact edges cursor0/3 frame SHA/end/length":"compact all cursor0/1/2/3 frame identity"):(filtered?"long edges cursor0/3 frame SHA/end/length":"long all cursor0/1/2/3 frame identity"));
+   free(log);unlink(side);
+  }
+ }
+ compact=0;free(off);
+ refuse("L\tx\tunknown\n","unknown third-column policy refuses");
+ refuse("L\tx\tframe-edges\textra\n","four columns refuse");
+}
+int main(int argc,char **argv){char root[4400],temp[]="/tmp/watch-check-XXXXXX";size_t n;if(!realpath(".",root)||!mkdtemp(temp))die("cwd/tmp");strcpy(dir,temp);path(delta,"delta.json");path(input,"input");path(side,"events");path(cfg,"config");cx_fmt(com,sizeof com,"%s/unisacc.com",root);int edges=argc>1&&!strcmp(argv[1],"--frame-edges");if(argc>1&&!edges)strcpy(sim,argv[1]);else cx_fmt(sim,sizeof sim,"%s/tools/sim.cx",root);if(edges){edgeprobe();unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_EDGES_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
 const char *d="{\"start\":\"S\",\"states\":{\"S\":[\"b\",{\"65\":[\"T\",0]}],\"T\":[\"b\",{\"65\":[\"U\",1]}],\"U\":[\"b\",{\"65\":[\"U\",2]}]},\"seqs\":[[[\"LDI\",\"x\",7],[\"OUT\",65],[\"SBCLR\"],[\"SBOUT\",81],[\"STX\",\"x\",100,\"x\"]],[[\"LDI\",\"x\",9],[\"OUT\",66]],[[\"ACCEPT\"]]]}";
 const char *good="S\tx\nT\tx\nU\tx\n";if(cx_write(delta,d,strlen(d))||cx_write(input,"A",1)||cx_write(cfg,good,strlen(good)))die("fixture");char *off=run(0,0,0,0),*on=run(1,1,0,"3");ck(off&&on&&!strcmp(off,"AB")&&!strcmp(off,on),"default/watch exact AB output");free(off);free(on);char *log=cx_read(side,&n),h[65],needle[100];cx_sha256_hex(good,strlen(good),h);snprintf(needle,sizeof needle,"config_sha=%s",h);ck(log&&strstr(log,needle)&&strstr(log,"claim=STATE_OBSERVATION_ONLY"),"config content identity and limited claim");ck(log&&!strstr(log,"\nEVENT\t")&&!strstr(log,"\nEDGE\t")&&!strstr(log,"\nMEMORY\t"),"watch suppresses full causal events");ck(log&&strstr(log,"state_hex=53\t")&&strstr(log,"value:x=0\n")&&strstr(log,"state_hex=54\t")&&strstr(log,"output_len=1\tscratch_generation=1\tscratch_len=1\tvalue:x=7\n")&&strstr(log,"output_len=2\tscratch_generation=1\tscratch_len=1\tvalue:x=9\n")&&strstr(log,"COMPLETE\tevents=3"),"state entry observes actual evolving values and buffer lengths");free(log);unlink(side);
 on=run(1,1,2,"2");ck(on&&!exists(),"watch budget overflow no sidecar");free(on);on=run(1,0,2,0);ck(on&&!exists(),"watch requires write-events");free(on);

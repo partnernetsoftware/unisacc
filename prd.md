@@ -503,3 +503,31 @@ model-program-census注册验收实跑终态：`out/model-program-census-registe
 已完成其余五目标10模型的gen/tbl/net→正式wire/decoder→包raw核对，各child10s、整个阶段55s内终态0；10个bytes_equal=1，模型索引与真实路由一致。为避免只留out临时材料，本轮把首片完整模块摘要及10模型身份表存research/c47-logic-distribution-20261108/，包含全部输入链SHA；这只是来源/体积证据，不是六片或语义验收。
 
 module-byte-map正式注册实际PASS/8/0/transport0，证据out/c47-driver-fix/module-byte-map-final.registered.log；首次注册父写错marker MODULE_BYTE_CHECK，虽check8/0但门禁正确判FAIL并撤回两行，日志保留，未据此记通过。实际marker为MODULE_BYTE_MAP_CHECK，最终新调用重新执行而非复用缓存。首片贡献前五为asmtext223070B、cxmod119477B、source_frame92079B、host90856B、tapegate77950B；完整82模块与链身份见research/c47-logic-distribution-20261108/lnx-x86_64-module-bytes.tsv，其它五目标内容绑定表见同目录five-target-model-bindings.tsv。
+
+〔C47 ARM编码事务实现登记〕新增arm-encoder-record-origin/check（名称全git历史查空），先只做已绑定lnx/arm64 model2静态ELF。依真实pass1完整行及OP.end输出事务建区间，pass0/REWIND OCUT严格隔离，lnum不假定重置；布局176B/EM_AARCH64核实际ELF。先独立fixture和真实最小target，再接全片；不是把x86 WR.nx改机器号。其它ARM格式与whole-o来源仍另需合同。
+
+〔C47 ARM来源前置实证与whole-o捕获决定〕Linux ARM实际inventory=82/82、44roots+38closure、VERIFIED/COMPLETE；合并tape8122531B SHA4f565b8b…，prune根FALLBACK完整帧传递输出同SHA，未借x86材料替代。首次重编调用给相对out，child冻结cwd下正确拒cannot open output，终态2保留；使用绝对新目录重跑前32对象已实memcmp相等，不改工具放宽。另实比snapshot与原release-snap-3b41cc224f的src/cx/exec/include/seed共1890文件零差异。下一仅重放win/x86_64原whole-o诊断构造，保留真实绝对source路径，捕获原holdframe/资源，并与原bare片memcmp；各步<=50s，不修改产品或发布资产。RF_CAPTURE不自带stage全文，后续仍需实际阶段重放，不能以捕获目录存在认完成。
+
+〔C47 x86其余格式编码证书登记〕已有encoder-record-origin/check保留Linux固定profile，下一增显式osx/x86_64与win/x86_64 profile，只接受各自已绑定delta与确切配置。共用LW/WRITE/WR.nx事务，分别核Mach-O1020B文本复制及二次整文件复制、PE1024B文本复制及同名copy的重定位用途；不得只替换header机器号。先独立格式fixture与产品真实最小链，完整whole-o来源仍另证。
+
+〔C47两个Linux源码重编链实证〕arm64完整82对象六批0/16/32/48/64各16、80起2均真实exit0和BYTE_IDENTICAL；源seal/receipt/构造器批前后复核，原合并内容身份4f565b8b…不变。lower-front观察与433924实体消费也真实exit0，full-front.target现已生成，最终ARM编码镜像仍未闭合，不能提前记第二片贡献。slice-inventory/check泛化两个Linux目标，拒冲突/重复/非Linux，replay核inventory与receipt目标并实际传-b；seal-v1由receiptSHA绑定目标继续兼容。独立最小ARM和x64重编链各13/0；inventory原无参超55s，不删断言，拆--part1/2/3/4分别18/5/4/5，32全部实际通过，注册同样拆分，旧超时保留。
+
+whole-o首轮捕获在编译前因默认UNISA_JOBS=8被资源严格合同拒绝（rc2，非超时）；原stderr保留。下一明确UNISA_JOBS=1并用已有PHASE A/B断点把单位准备与最终输出分开，各自50s；不提高时限、不把A成功当镜像成功。ARM编码窄profile以START及两pass OP.end取事务，省掉每字节/行重复LINE观察而保留全部指令记录；标签/元数据/空行无代码追加的源规则需消费检查核，1M事件硬限不变。
+
+〔C47复制边观察的窄扩展决定〕Mach-O/PE纯COPY循环若逐字节观察，整片必超既有1M记录；新增watch配置可选第三列frame-edges，仅对明确登记状态在当前frame cursor=0或end时记录，默认两列观察不变。配置SHA绑定筛选策略，header仍STATE_OBSERVATION_ONLY，消费证书必须验证首/尾frame SHA/end及cursor/output变化，再以已内容绑定且固定COPY/ADV无分支改写的规则核完整复制；不以省掉动作审查换低记录数。profile未登记的状态不受此筛选。保留1M/64MiB硬限，扩展独立正负控后才用于整片。
+
+正式inventory mapping批53515/95213并发中，target部分4/0通过，但mapping注册外55s终止，未记PASS（直接part4的5/0不冒充注册通过）。进一步按拒绝阶段拆原part4为unsafe/dupkey两项、claimed/missing两项、root外一项，各自保持原真实fixture和断言；旧part1/2/3不变，合计仍32，不加时限。
+
+〔C47第二片区间与覆盖扩展决定〕ARM完整producer761808条观察、consumer379288条RECORD均真实exit0，最终1889006B ELF与原ARM候选entry.elf cmp0。当前已核GENERIC/PF/PL的模块账亦守恒，但代码UNKNOWN132612B（AF/AI等尚未纳入），不能用x86较高覆盖率替代。下一保留旧profile/schema，另增已审AF消费4、AI消费2的显式profile与每实体source字段；mapper按规则确切count逐一核nc及所有source0..3，跨模块只记SHARED一次，AI lookahead不计消费。独立正负控后再新观察ARM完整发射，禁止把原UNKNOWN直接按相邻模块填账。
+
+〔C47 PE真实路径不能缩为static〕已装产品Win最小输入的host_dyn实际为1，现static消费者正确拒绝，不能换不含运行库的静态玩具当当前Win全片证据。新增明确forward profile将分别核PE forward头/导入布局与观察分支，文本仍需证明PE.text→PE.copy完整且逐q闭合；额外合成代码若存在单列，绝不贴给最近q。Mach-O最小1155 records/text4909/image33250已实际consumer通过，完整whole-o来源仍独立未闭合。
+
+object-source-replay两目标的直接13/0仍有效，但注册并发三批时两份replay均在55s外限终止，不能把直接检查替代该两份注册PASS。下一保留默认13项，新增--part1/2/3，每份都实际准备源/对象/inventory/seal/重编，再分别覆盖目标错配、对象/构造器/新目录、源码/路径/范围三组；唯一断言集合不减，只重复必要准备以限制单批。不放宽55s。
+
+frame-edges最初登记helper没有入口args参数，实际运行了默认19项，不能记新增policy通过；已把该batch args明确更正--frame-edges，正式新调用须核11项。新增独立edge11/0、原watch19/0、完整事件29/0均实际exit0；原edge夹具用非法'*'byte键的9项失败保留，换为真实97/98/99字节键后通过，不改生产拒绝逻辑。AF/AI新check7/0、mapper3/0与旧21/9/8亦均实际通过，注册以独立新批覆盖。
+
+外格式最终独立检查Linux11/0、MachO5/0、PE static5/0、PE forward9/0均实际exit0；真实PE forward1479记录/text7892/image11776、imports[9216,10752)，consumer两次真实终态0。新profile配置SHA与首尾COPY帧内容绑定，两OTHER保持完整非text尾守恒桶，ID附已核imports区间。sim-edge和mapper-ARM独立check的marker与默认模式不同，首注册虽rc0仍按不匹配marker正确判FAIL；metadata改用SIM_STATE_WATCH_EDGES_CHECK与MODULE_BYTE_MAP_ARM_CHECK后重新执行，不以错门禁回执记通过。
+
+〔C47两片模块最终本地账〕ARM新AF/AI完整观察774105记录、target与原front cmp0；消费372588 episode实际退出0，最后mapper亦退出0：1889006B=82模块上下文代码1793808B+未覆盖代码52860B+合成1324B+HEADER176B+DATA_OR_ALIGN40838B，SHARED0。新账research/c47-logic-distribution-20261108/lnx-arm64-module-bytes.tsv保留完整SHA链；旧未含AF/AI的132612B UNKNOWN账保留在out，不拿其覆盖新证据。Linux两片分别守恒且与本轮候选镜像cmp0；仍不是其它四片完成，亦不证明共享全局数据的排他所有权。
+
+Win/x86_64正常whole-o原44roots路线实际重放成功，bare2663424B SHA76248e1fdcb152e260b9bb530179bb44295530ad448ee1c050475bdf720b2fec，与原片完整cmp0；原holdframe37029416B/82源帧/742B属性，SHA6aa39be72d1c0f8cf0c5183edc387e9df06b0a9d6cd5dd8b9c209c5e9a2e12b4。分段PHASE B确实在__ccw_0处lower拒绝，未冒充原片证据；存在固定临时forward源码名且多agent共享TMPDIR，后续捕获应先隔离TMPDIR再核，不先断言根因。旧RF_CAPTURE e3 companion的SHA字段空白不能作有效输入身份，后续用独立内容hash和最终image cmp补证，绝不把空身份填成PASS。

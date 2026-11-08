@@ -53,7 +53,81 @@ static void elf(const unsigned char *s,long n,long text,long pad){
 static const char *states[6]={"4c572e69","5752495445","57522e6e78","4c49422e696d616765626567696e","45482e72383231","45492e706164"};
 static int arity[6]={3,5,1,3,2,1};
 static const char *regs[6][5]={{"npc","ws","we"},{"npc","endo","memory_mode","host_dyn","target_os"},{"q"},{"endo","npc","lib_present"},{"text_blob","endo"},{"endo"}};
+/* C47 models20/28. Compact copy-edge witnesses; no full-slice scale claim. */
+typedef struct {long id,end;char sha[65];} ERFrame;
+static void foreign_format(const unsigned char *im,long n,long text,long prefix,int mac,int forward){
+ if(mac){
+  if(le(im,n,0,4)!=4277009103ULL||le(im,n,4,4)!=16777223||le(im,n,8,4)!=3||le(im,n,12,4)!=2||le(im,n,16,4)!=12||le(im,n,20,4)!=832)refuse("MachO header");
+  long p=32;int found=0,entry=0,sig=0;
+  for(int i=0;i<12;i++){long cmd=le(im,n,p,4),z=le(im,n,p+4,4);if(z<8||z>n-p)refuse("MachO command extent");
+   if(cmd==25){long ns=le(im,n,p+64,4);if(ns>(z-72)/80)refuse("MachO sections");for(long j=0;j<ns;j++){long a=p+72+j*80;if(!memcmp(im+a,"__text\0",7)){if(found++||le(im,n,a+40,8)!=(unsigned long long)text||le(im,n,a+48,4)!=1020||le(im,n,p+40,8)>1020||le(im,n,p+48,8)<(unsigned long long)(1020+text))refuse("MachO text section");}}}
+   if(cmd==2147483688ULL){long e=le(im,n,p+8,8);if(entry++||e<1020||e>=1020+text)refuse("MachO entry");}
+   if(cmd==29){if(sig++||le(im,n,p+8,4)!=(unsigned long long)prefix||le(im,n,p+12,4)!=(unsigned long long)(n-prefix))refuse("MachO signature prefix");}
+   p+=z;
+  }if(found!=1||entry!=1||sig!=1||p!=864)refuse("MachO command closure");
+ }else{
+  if(n<1024||memcmp(im,"MZ",2))refuse("PE DOS");long p=le(im,n,60,4);if(le(im,n,p,4)!=17744||le(im,n,p+4,2)!=34404||le(im,n,p+6,2)!=(forward?4:3))refuse("PE COFF");long os=le(im,n,p+20,2),o=p+24;
+  if(os!=240||le(im,n,o,2)!=523||le(im,n,o+32,4)!=4096||le(im,n,o+36,4)!=512||le(im,n,o+60,4)!=1024)refuse("PE optional header");long e=le(im,n,o+16,4);if(e<4096||e>=4096+text)refuse("PE entry");
+  int found=0,rel=0;for(int i=0;i<(forward?4:3);i++){long a=o+os+i*40;if(a>n-40)refuse("PE section extent");if(!memcmp(im+a,".text\0",6)){if(found++||le(im,n,a+8,4)!=(unsigned long long)text||le(im,n,a+12,4)!=4096||le(im,n,a+16,4)!=(unsigned long long)((text+511)&-512)||le(im,n,a+20,4)!=1024)refuse("PE text section");}if(!memcmp(im+a,".reloc\0",7)){if(rel++||le(im,n,a+20,4)!=(unsigned long long)prefix)refuse("PE relocation copy offset");}}if(found!=1||rel!=1)refuse("PE sections");
+ }
+}
+/* Model28 PE forward metadata. None of these ranges are attributed to q. */
+static void pe_forward_format(const unsigned char *im,long n,long text,long prefix,long *m){
+ long rd=m[0],rf=m[1],df=m[2],dt=m[3],cookie=m[4],rl=m[6];
+ if(rd!=4096+((text+4095)&-4096)||rf!=1024+((text+511)&-512)||df!=rf+1536||dt!=rd+4096||m[5]!=prefix||m[7]!=128||cookie<5368709120LL+dt+128||rl<8||prefix+((rl+511)&-512)!=n||df>prefix)refuse("PE forward layout");
+ long p=le(im,n,60,4),o=p+24,a=o+240;int data=0,rdata=0,rel=0;
+ if(le(im,n,p+22,2)!=34||le(im,n,o+24,8)!=5368709120ULL||le(im,n,o+68,2)!=3||le(im,n,o+70,2)!=33088||le(im,n,o+4,4)!=(unsigned long long)((text+511)&-512))refuse("PE forward image header");
+ for(int i=0;i<4;i++,a+=40){
+  if(!memcmp(im+a,".rdata\0",7)){if(rdata++||le(im,n,a+8,4)!=1256||le(im,n,a+12,4)!=rd||le(im,n,a+16,4)!=1536||le(im,n,a+20,4)!=rf||le(im,n,a+36,4)!=1073741888)refuse("PE forward rdata");}
+  if(!memcmp(im+a,".data\0",6)){if(data++||le(im,n,a+12,4)!=dt||le(im,n,a+20,4)!=df||le(im,n,a+16,4)>(unsigned long long)(prefix-df)||le(im,n,a+36,4)!=3221225536ULL)refuse("PE forward data");}
+  if(!memcmp(im+a,".reloc\0",7)){if(rel++||le(im,n,a+8,4)!=rl||le(im,n,a+16,4)!=(unsigned long long)((rl+511)&-512)||le(im,n,o+152,4)!=le(im,n,a+12,4)||le(im,n,o+156,4)!=rl||le(im,n,a+36,4)!=1107296320||le(im,n,o+56,4)!=((le(im,n,a+12,4)+rl+4095)&~4095ULL))refuse("PE forward reloc");}
+ }
+ if(data!=1||rdata!=1||rel!=1||le(im,n,o+108,4)!=16||le(im,n,o+120,4)!=rd||le(im,n,o+124,4)!=40||le(im,n,o+192,4)!=rd+936||le(im,n,o+196,4)!=320||le(im,n,o+208,4)!=rd+256||le(im,n,o+212,4)!=216)refuse("PE forward directories");
+ if(rf>n-1536||le(im,n,rf,4)!=rd+40||le(im,n,rf+4,4)||le(im,n,rf+8,4)||le(im,n,rf+12,4)!=rd+916||le(im,n,rf+16,4)!=rd+256||memcmp(im+rf+916,"KERNEL32.dll\0",13)||le(im,n,rf+936,4)!=320||le(im,n,rf+1024,8)!=(unsigned long long)cookie)refuse("PE forward import/config");
+ for(int i=20;i<40;i++)if(im[rf+i])refuse("PE forward null descriptor");
+ const int names[26]={472,488,500,512,526,540,554,572,588,606,620,644,662,676,690,708,730,752,772,788,808,830,852,868,886,900};
+ for(int i=0;i<27;i++){unsigned long long v=i==26?0:rd+names[i];if(le(im,n,rf+40+i*8,8)!=v||le(im,n,rf+256+i*8,8)!=v)refuse("PE forward thunk");}
+}
+
+static int foreign_encoder(const char *profile,char **args){
+ int mac=!strcmp(profile,"osx/x86_64"),forward=!strcmp(profile,"win/x86_64-forward");if(!mac&&!forward&&strcmp(profile,"win/x86_64"))refuse("unsupported profile");
+ const char *delta=mac?"14e7172dc3ea4df12013cc9095fae820b85ffa8fa8f8431a0e4fb1749bfd87c0":"ed5f89c5bcaf876ffd3301f7f096ea1ece484b1811ff3b7695aaf6d61e376b09";
+ const char *configuration=mac?"LW.i\tnpc,ws,we\nWRITE\tnpc,endo,memory_mode,host_dyn,target_os\nWR.nx\tq\nLIB.imagebegin\tendo,npc,lib_present\nMH.text\ttext_blob,endo\nMH.copy\tendo\tframe-edges\nMH.r945\tmh_sigoff\nMH.r946\tmh_sigoff\n":"LW.i\tnpc,ws,we\nWRITE\tnpc,endo,memory_mode,host_dyn,target_os\nWR.nx\tq\nLIB.imagebegin\tendo,npc,lib_present\nPE.r1023\ttext_blob,endo\nPE.copy\tendo\tframe-edges\nPE.r1143\tpe_rlsize\nPE.r1144\tpe_rlsize\n";
+ if(forward)configuration="LW.i\tnpc,ws,we\nWRITE\tnpc,endo,memory_mode,host_dyn,target_os\nWR.nx\tq\nLIB.imagebegin\tendo,npc,lib_present\nPE.r1023\ttext_blob,endo\nPE.copy\tendo\tframe-edges\nPE.r1143\tpe_rlsize\nPE.r1144\tpe_rlsize\nPE.header.forward\tpe_rd,pe_rf,pe_df,pe_dt,pe_cookie,pe_relf,pe_rlsize,pe_cookie_shift\nPE.imports.forward\tpe_rd,pe_rf,pe_df,pe_cookie\n";
+ size_t tn,cn,wn,in;char *target=load(args[0],&tn,134217728,1),*cfg=load(args[1],&cn,65536,1),*watch=load(args[2],&wn,67108864,1),*im=load(args[3],&in,134217728,0);
+ char th[65],ch[65],wh[65],ih[65],expected[65];hash(target,tn,th);hash(cfg,cn,ch);hash(watch,wn,wh);hash(im,in,ih);hash(configuration,strlen(configuration),expected);if(strcmp(ch,expected)||cn!=strlen(configuration)||memcmp(cfg,configuration,cn))refuse("foreign fixed configuration");target_rows(target,tn);
+ ERFrame frames[8];int nf=0,phase=0,head=0,complete=0;long seq=0,lw=0,q=0,text=-1,last=0,H=mac?1020:1024,prefix=-1,copy_start=0,copy_end=0,copy_cur=-1,copy_id=-1,first_copy=-1;
+ int ar[10]={3,5,1,3,2,1,1,1,8,4};long meta[8]={0};int fh=0,fi=0;
+ for(char *p=watch;*p;){char *e=strchr(p,'\n');if(!e)refuse("foreign truncated transcript");*e=0;char *f[32];int n=split(p,f);
+  if(!head){if(n!=9||strcmp(f[0],"WRITE_EVENTS")||strcmp(header(f,n,"version"),"1")||strcmp(header(f,n,"delta_sha"),delta)||strcmp(header(f,n,"config_sha"),ch)||strcmp(header(f,n,"input_sha"),th)||strcmp(header(f,n,"output_sha"),ih)||number(header(f,n,"output_bytes"))!=(long)in||strcmp(header(f,n,"claim"),"STATE_OBSERVATION_ONLY")||strcmp(header(f,n,"watch_format"),"compact-v1"))refuse("foreign binding/profile");head=1;p=e+1;continue;}
+  if(!strcmp(f[0],"COMPLETE")){if(n!=2||strncmp(f[1],"events=",7)||number(f[1]+7)!=seq||e[1]||phase!=8||lw!=count||q!=count||(forward&&(!fh||!fi)))refuse("foreign completeness");complete=1;break;}
+  if(n<2||number(f[1])!=++seq||seq>1000000)refuse("foreign sequence");
+  if(!strcmp(f[0],"FRAME")){if(n!=5||nf==8||strlen(f[3])!=64)refuse("foreign FRAME");long id=number(f[2]);if(!id)refuse("frame id");for(int i=0;i<nf;i++)if(frames[i].id==id)refuse("duplicate frame");frames[nf].id=id;frames[nf].end=number(f[4]);strcpy(frames[nf].sha,f[3]);if(id==1&&(strcmp(f[3],th)||frames[nf].end!=(long)tn))refuse("foreign root frame");nf++;p=e+1;continue;}
+  if(strcmp(f[0],"WATCHC")||n<9)refuse("foreign compact only");long slot=number(f[2]),id=number(f[3]);if(slot>(forward?9:7)||n!=9+ar[slot])refuse("foreign slots");ERFrame *fr=0;for(int i=0;i<nf;i++)if(frames[i].id==id)fr=&frames[i];if(!fr)refuse("missing frame");long cur=number(f[4]),gen=number(f[5]),on=number(f[6]),v[8];number(f[7]);number(f[8]);for(int i=0;i<ar[slot];i++)v[i]=number(f[9+i]);if(gen||cur>fr->end||on>(long)in)refuse("foreign observation extent");
+  if(slot!=5&&(id!=1||strcmp(fr->sha,th)||fr->end!=(long)tn))refuse("foreign root observation");
+  if(slot==0){if(phase||lw>=count||v[0]!=lw||v[1]!=records[lw].ws||v[2]!=records[lw].we||cur!=v[2])refuse("foreign row");lw++;}
+  else if(slot==1){if(phase||lw!=count||v[0]!=count||v[1]>(long)in-H||v[2]||v[3]!=forward||v[4]!=(mac?2:3)||on)refuse("foreign static WRITE");text=v[1];phase=1;}
+  else if(slot==2){if(phase!=1||q>=count||v[0]!=q||on<last||on>text)refuse("foreign q");records[q].begin=last;records[q].end=on;last=on;q++;}
+  else if(slot==3){if(phase!=1||q!=count||last!=text||v[0]!=text||v[1]!=count||v[2]||on!=text)refuse("foreign text closure");phase=2;}
+  else if(slot==4){if((forward&&!fh)||phase!=2||!v[0]||v[1]!=text||on!=H)refuse("foreign text copy entry");phase=3;copy_start=H;copy_end=text;copy_cur=-1;copy_id=-1;}
+  else if(slot==5){
+   if((phase!=3&&phase!=6)||id==1||v[0]!=text||(copy_cur<0?cur!=0:cur!=copy_end)||fr->end!=copy_end||on!=copy_start+cur)refuse("foreign copy transaction");
+   if(copy_cur<0){if(copy_start>(long)in||copy_end>(long)in-copy_start||id==first_copy)refuse("cross-copy frame");hash(im+copy_start,copy_end,expected);if(strcmp(fr->sha,expected))refuse("copy SHA/final prefix");copy_id=id;if(phase==3)first_copy=id;}else if(id!=copy_id)refuse("copy frame switch");
+   copy_cur=cur;if(cur==copy_end)phase=phase==3?4:7;
+  }
+  else if(slot==6){if((forward&&!fi)||phase!=4||on<H+text)refuse("second copy entry");prefix=on;copy_start=mac?0:on;copy_end=mac?on:v[0];if(mac&&v[0]!=on)refuse("MachO prefix length");copy_cur=-1;copy_id=-1;phase=6;}
+  else if(slot==7){if(phase!=7||on!=copy_start+copy_end||v[0]!=(mac?prefix:copy_end))refuse("second copy closure");phase=8;}
+  else if(slot==8){if(!forward||phase!=2||fh++||on)refuse("PE forward header branch");for(int i=0;i<8;i++)meta[i]=v[i];}
+  else {if(!forward||phase!=4||fi++||on!=meta[1]||v[0]!=meta[0]||v[1]!=meta[1]||v[2]!=meta[2]||v[3]!=meta[4])refuse("PE forward import branch");}
+  p=e+1;
+ }
+ if(!complete||!head||!count)refuse("foreign missing closure");foreign_format((unsigned char *)im,in,text,prefix,mac,forward);if(forward)pe_forward_format((unsigned char *)im,in,text,prefix,meta);
+ char line[1024];int n=snprintf(line,sizeof line,"ENCODER_RECORD_ID\tcertificate=c47-model%d-%s-copy-v1\tdelta_sha=%s\tconfig_sha=%s\ttarget_sha=%s\twatch_sha=%s\timage_sha=%s\tclaim=target-row-lineage-only\tobject_module=UNKNOWN\n",mac?20:28,forward?"forward":"static",delta,ch,th,wh,ih);if(forward){if(n<1||n>=sizeof line)refuse("identity line");n--;n+=snprintf(line+n,sizeof line-n,"\tpe_forward_import_lo=%ld\tpe_forward_import_hi=%ld\n",meta[1],meta[2]);}append_record_line(line,n,sizeof line);for(long i=0;i<count;i++)emit_record(i,H);
+ n=snprintf(line,sizeof line,"OTHER\tHEADER\tfile_lo=0\tfile_hi=%ld\tobject_module=UNKNOWN\nOTHER\tDATA_OR_ALIGN\tfile_lo=%ld\tfile_hi=%ld\tobject_module=UNKNOWN\nENCODER_RECORD_ORIGIN\trecords=%ld\ttext_bytes=%ld\timage_bytes=%ld\n",H,H+text,(long)in,count,text,(long)in);append_record_line(line,n,sizeof line);flush_records();return 0;
+}
+
 int main(int argc,char **argv){
+ if(argc==7&&!strcmp(argv[1],"--profile"))return foreign_encoder(argv[2],argv+3);
  if(argc!=5)refuse("usage TARGET CONFIG WATCH IMAGE");size_t tn,cn,wn,in;
  char *target=load(argv[1],&tn,134217728,1),*cfg=load(argv[2],&cn,65536,1),*watch=load(argv[3],&wn,67108864,1),*image=load(argv[4],&in,134217728,0);
  char th[65],ch[65],wh[65],ih[65];hash(target,tn,th);hash(cfg,cn,ch);hash(watch,wn,wh);hash(image,in,ih);if(strcmp(ch,ER_CONFIG))refuse("certificate config SHA");target_rows(target,tn);
