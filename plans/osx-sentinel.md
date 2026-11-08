@@ -45,6 +45,6 @@ lane每次执行一个原有阶段或完整批次窗口，结果保存stdout/std
 
 私有克隆/git archive不切换共享main；共享写入只有最终ledger/items追加，不自动提交、push、安装产品或修改发布资产。开发交付的提交与推送由集成者按路径完成。
 
-队列实现第一阶段验证：源ed33f38f…、native1fac17ce…；原default14和scheduler30保留，新init12、完整单job PASS/FAIL各12及恢复重核各1全部实际退出0。最初把恢复末重核合成13项导致两次55秒超时142，原日志保留；按12+1拆成独立步骤，断言未删且预算未提高。主树正式`osx-lane-queue`为12/0/PASS；这些都不是24批全绿。实际冻结ae1e06的动态24批独立推进，终态另记。
+队列实现第一阶段验证：源ed33f38f…、native1fac17ce…；原default14和scheduler30保留，新init12、完整单job PASS/FAIL各12及恢复重核各1全部实际退出0。最初把恢复末重核合成13项导致两次55秒超时142，原日志保留；按12+1拆成独立步骤，断言未删且预算未提高。主树正式`osx-lane-queue`为12/0/PASS；这些都不是24批全绿。实际冻结ae1e06的动态24批已全部LOCAL_PASS：step31真实exit0/COMPLETE，readonly verify会话40724真实exit0，executed=selected=24，receipt SHA9cdbd592650265cd1db0121f6bc4ef915292fa88e3f696029a87c97bcff5a4fe。ROOT为out/osx-sentinel-head-ae1e06，根/包f069、DUT848、源SID9023均为历史冻结身份，未迁到当前main30或新42候选。末端原始证据step-31.log、verify-terminal.log及out/run/queue-result.tsv。周期STATE out/osx-sentinel-state已初始化，首次真实tick8099退出3，仅DETECTED当前4c0ae95e7，不冒充新HEAD全批完成。
 
 控制器最终交付：主树六正式批全部实际PASS/rc0/transport0，总51/0，prepare16、execution10、bisect10、UNKNOWN5、伪wait5、无base红5；最终十三闸13/13。日志`out/osx-sentinel-dev/formal/`，source SHA2b3b4adc…、check SHA b6a5ce7c…、native SHA e43dce3e…。既有`cxlib.toolselfpath`通过宿主能力读取真实进程映像；独立SOURCE入口探针也实际exec同版e43缓存，并非把bootstrap当controller。周期命令仍显式native以保留完整时间窗口。所有证据限工具协议/本机开发范围，不迁成当前主树全批绿或同源NN资格。
