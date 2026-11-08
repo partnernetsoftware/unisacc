@@ -493,3 +493,13 @@ model-program-census注册验收实跑终态：`out/model-program-census-registe
 编码消费者全片首轮2351被50s外限终止（exit142），虽校验阶段已完成，输出只到q333668且无总结，full-encoder-origin.tsv不是PASS。与前序lower相同，setvbuf不足以降低运行时逐printf开销；下一窄修只改显式64KiB拼接/fwrite，所有RECORD保留，原超时材料保留，新文件full-encoder-origin-buffered.tsv再核。producer完整759328观察已23.98s/rc0，输出image与原候选相等；不能把producer成功替代consumer成功。
 
 〔C47区间链消费闭合实证〕编码器显式缓冲窄修后，独立check11/0（21431退出0），完整consumer54329在原50s限内退出0；out/c47-driver-fix/full-encoder-origin-buffered.tsv SHA b74c57265d5652bf41edb549d0a25509747e756fc34fc8d8a18e23f9b606dd64，378536条RECORD、text1840773B，header[0,176)、code[176,1840949)、DATA_OR_ALIGN[1840949,1880862)，image SHA2343d813…与本轮候选一致。绑定target cf021fbf…/watch a1bcb30…，不能由同一SHA替代事务闭合校验。lower-row-origin注册批21/0、lower-row-episodes注册9/0、encoder-record-origin注册11/0均本机实际PASS/rc0/transport0，日志out/c47-driver-fix/{lower-row-origin-episodes-final.registered,lower-row-episodes-final.registered,encoder-record-origin.registered}.log；全部同候选f069d4c9…，不等于全仓门禁。下游module-byte-map尚在独立实现/核验，当前不报模块覆盖率，更不报六片完成。
+
+〔C47其余目标来源前置〕lnx/arm64同为82对象entry-build路线，但现有slice-inventory/object-source-replay硬限lnx/x86_64，不能借该目标PASS贴到arm64。下一步在现有工具明确接收并绑定两个Linux目标，默认行为不变；receipt目标参与seal身份且重放命令使用该目标，source-plan仍经实际对象重编核。osx/win原whole-o路线需从真实单位发射阶段补源实体，不将另编独立对象的不同优化/链接结果冒充原片。六片分账目标不缩为两片。
+
+〔C47五目标模型内容前置〕只读合同已定位真实路由：lnxARM lower/enc=9/2、osxARM17/16、osxx8621/20、winARM25/24、winx8629/28；ARM编码为两遍扫描且lnum未重置，不能沿用WR.nx证书。现先从冻结snapshot以既有native seed-gen/tbl/net重造这10模型，逐个与已装包raw完整memcmp/CRC核一致后才用其JSON制定观察；仍明确宿主工具依赖，不称产品重建或独立oracle。各相位内层有界，新路径在model-binding各目标子目录，所有原产物保留。whole-o sourceframe到tape传播尚待单独补证。
+
+〔C47首片模块字节表实际接通〕module-byte-map/check已以SHA链连接真实origin→433975 ENTITY→371917 lower EPISODE/UNKNOWN→378536编码RECORD→候选image；独立一致性fixture8/0含2模块、融合SHARED单计、合成、UNKNOWN/zero、label/metadata空隙及错hash/重叠/ENTITY/count/缺尾拒绝。真实v3退出0，lnx/x86_64的1880862B分为82模块上下文代码1803567B、未覆盖代码36795B、合成初始化411B、HEADER176B、DATA_OR_ALIGN39913B，加总精确相等；SHARED0B只是本片命中情况，不证明融合永不同源。原v1把RECORD target跨度误要求连续的拒绝保留，最终仅要求target单调且file/text严格连续，因label/@sym行本来无编码RECORD。planned_source发射上下文贡献在82对象实际重编证据支持下可追冻结输入，仍不宣称共享数据独占。真实证据out/c47-driver-fix/module-byte-map-real-v3.log，当前仅首片，六片要求未完成。
+
+已完成其余五目标10模型的gen/tbl/net→正式wire/decoder→包raw核对，各child10s、整个阶段55s内终态0；10个bytes_equal=1，模型索引与真实路由一致。为避免只留out临时材料，本轮把首片完整模块摘要及10模型身份表存research/c47-logic-distribution-20261108/，包含全部输入链SHA；这只是来源/体积证据，不是六片或语义验收。
+
+module-byte-map正式注册实际PASS/8/0/transport0，证据out/c47-driver-fix/module-byte-map-final.registered.log；首次注册父写错marker MODULE_BYTE_CHECK，虽check8/0但门禁正确判FAIL并撤回两行，日志保留，未据此记通过。实际marker为MODULE_BYTE_MAP_CHECK，最终新调用重新执行而非复用缓存。首片贡献前五为asmtext223070B、cxmod119477B、source_frame92079B、host90856B、tapegate77950B；完整82模块与链身份见research/c47-logic-distribution-20261108/lnx-x86_64-module-bytes.tsv，其它五目标内容绑定表见同目录five-target-model-bindings.tsv。

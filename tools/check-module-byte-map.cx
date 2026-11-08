@@ -1,0 +1,30 @@
+/* Consistency fixtures, not executions of sim nor historical source provenance. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+static char root[4400],work[4400],com[4400],tool[4400],p[6][4400];
+static int count,bad;
+static void die(const char *s){fprintf(stderr,"check-module-byte-map: %s\n",s);exit(2);}
+static void put(int i,const char *s){if(cx_write(p[i],s,strlen(s)))die("write");}
+static void sha(int i,char h[65]){size_t n;char *b=cx_read(p[i],&n);if(!b)die("read");if(sy_sha256_hex(b,(long)n,h))cx_sha256_hex(b,n,h);free(b);}
+static void fixture(void){put(1,"012345678901234567890123456789012345678901234567890123456789");put(5,"0123456789abcdef");char merged[65],image[65],rows[65],zero[65];memset(zero,'0',64);zero[64]=0;sha(1,merged);sha(5,image);char b[8192];
+ snprintf(b,sizeof b,"TAPE_ORIGIN\tversion=1\ttape_sha=%s\tbytes=60\nORDER_INPUT\tclaim=fixture-consistency-only\nUNIT\t0\ta.o\tlo=0\thi=20\tplanned_source=a.cx\nUNIT\t1\tb.o\tlo=20\thi=40\tplanned_source=b.cx\nSYNTHETIC\tinit\tlo=40\thi=60\nCOMPLETE\tunits=2\tcontext_bytes=40\tsynthetic_bytes=20\tsum=60\ttape_sha=%s\n",merged,merged);put(0,b);
+ snprintf(b,sizeof b,"LOWER_ROW_ID\tsource_sha=%s\toutput_sha=%s\tcode_bytes=3\nENTITY\t0\tcode_lo=0\tcode_hi=1\tsource_lo=1\tsource_hi=2\nENTITY\t1\tcode_lo=1\tcode_hi=2\tsource_lo=21\tsource_hi=22\nENTITY\t2\tcode_lo=2\tcode_hi=3\tsource_lo=41\tsource_hi=42\nLOWER_ROW_ORIGIN\trows=3\tcode_bytes=3\tentities=3\n",merged,zero);put(2,b);sha(2,rows);
+ snprintf(b,sizeof b,"LOWER_EPISODE_ID\trows_sha=%s\toutput_sha=%s\nEPISODE\t0\trule=GENERIC\ttarget_lo=0\ttarget_hi=1\tnc_lo=0\tnc_hi=1\tsource0_lo=1\tsource0_hi=2\tsource1_lo=-1\tsource1_hi=-1\nEPISODE\t1\trule=GENERIC\ttarget_lo=1\ttarget_hi=2\tnc_lo=1\tnc_hi=2\tsource0_lo=21\tsource0_hi=22\tsource1_lo=-1\tsource1_hi=-1\nEPISODE\t2\trule=PF\ttarget_lo=2\ttarget_hi=3\tnc_lo=0\tnc_hi=2\tsource0_lo=1\tsource0_hi=2\tsource1_lo=21\tsource1_hi=22\nEPISODE\t3\trule=GENERIC\ttarget_lo=3\ttarget_hi=4\tnc_lo=2\tnc_hi=3\tsource0_lo=41\tsource0_hi=42\tsource1_lo=-1\tsource1_hi=-1\nUNKNOWN\ttarget_lo=4\ttarget_hi=6\treason=fixture\nLOWER_EPISODES\tepisodes=4\tuncovered_target_bytes=2\n",rows,zero);put(3,b);
+ FILE *f=fopen(p[4],"wb");if(!f)die("records");fprintf(f,"ENCODER_RECORD_ID\ttarget_sha=%s\timage_sha=%s\n",zero,image);int x=0;for(int i=0;i<6;i++){int len=i==4?0:1;fprintf(f,"RECORD\t%d\ttarget_lo=%d\ttarget_hi=%d\ttext_lo=%d\ttext_hi=%d\tfile_lo=%d\tfile_hi=%d\n",i,i,i+1,x,x+len,x+4,x+len+4);x+=len;}fprintf(f,"OTHER\tHEADER\tfile_lo=0\tfile_hi=4\nOTHER\tDATA_OR_ALIGN\tfile_lo=9\tfile_hi=16\nENCODER_RECORD_ORIGIN\trecords=6\ttext_bytes=5\timage_bytes=16\n");if(fclose(f))die("close");}
+static void change(int i,const char *old,const char *value){size_t n;char *s=cx_read(p[i],&n),*at=s?strstr(s,old):0;if(!at||strstr(at+strlen(old),old))die("exact fixture replacement");size_t a=at-s,o=strlen(old),v=strlen(value);char *b=malloc(n-o+v+1);if(!b)die("alloc");memcpy(b,s,a);memcpy(b+a,value,v);memcpy(b+a+v,at+o,n-a-o);if(cx_write(p[i],b,n-o+v))die("replace");free(b);free(s);}
+static void check(int expected,const char *label){char *v[]={"sh",com,tool,"--",p[0],p[1],p[2],p[3],p[4],p[5],0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,8,&r,why,sizeof why);int ok=!tr&&!r.residue&&r.rc==expected;if(!expected)ok=ok&&strstr(r.out,"MODULE\ta.cx\tbytes=1\trecords=1")&&strstr(r.out,"MODULE\tb.cx\tbytes=1\trecords=1")&&strstr(r.out,"SHARED\tbytes=1\trecords=1")&&strstr(r.out,"SYNTHETIC\tbytes=1\trecords=1")&&strstr(r.out,"UNKNOWN\tbytes=1\trecords=2")&&strstr(r.out,"accounted_bytes=16");else ok=ok&&!r.outn;count++;bad+=!ok;printf("%s\t%s\n",ok?"PASS":"FAIL",label);if(!ok){fprintf(stderr,"transport=%d rc=%d %s\n",tr,r.rc,why);if(r.err)fwrite(r.err,1,r.errn,stderr);if(r.out)fwrite(r.out,1,r.outn,stderr);}np_free(&r);}
+int main(void){if(!realpath(".",root))die("root");snprintf(work,sizeof work,"%s/out/module-byte-map-check-XXXXXX",root);if(!mkdtemp(work))die("temp");snprintf(com,sizeof com,"%s/unisacc.com",root);snprintf(tool,sizeof tool,"%s/tools/module-byte-map.cx",root);for(int i=0;i<6;i++)snprintf(p[i],sizeof p[i],"%s/input%d",work,i);
+ fixture();check(0,"two-modules-shared-synthetic-unknown-zero-conserved");
+ fixture();
+ for(int i=3;i>=0;i--){char a[100],z[100];snprintf(a,sizeof a,"target_lo=%d\ttarget_hi=%d",i,i+1);snprintf(z,sizeof z,"target_lo=%d\ttarget_hi=%d",2*i,2*i+2);change(3,a,z);}
+ change(3,"UNKNOWN\ttarget_lo=4\ttarget_hi=6","UNKNOWN\ttarget_lo=8\ttarget_hi=14");change(3,"uncovered_target_bytes=2","uncovered_target_bytes=6");
+ for(int i=5;i>=0;i--){char a[100],z[100];snprintf(a,sizeof a,"target_lo=%d\ttarget_hi=%d",i,i+1);snprintf(z,sizeof z,"target_lo=%d\ttarget_hi=%d",2*i,2*i+1);change(4,a,z);}
+ check(0,"metadata-label-gaps-and-nonrecord-tail-conserved");
+ fixture();change(3,"nc_lo=0\tnc_hi=1\tsource0_lo=1","nc_lo=0\tnc_hi=3\tsource0_lo=1");check(2,"rule-count-over-two-refused");
+ fixture();put(1,"changed");check(2,"wrong-merged-hash-refused");
+ fixture();change(4,"RECORD\t1\ttarget_lo=1","RECORD\t1\ttarget_lo=0");check(2,"overlapping-record-refused");
+ fixture();change(3,"EPISODE\t0\trule=GENERIC\ttarget_lo=0\ttarget_hi=1\tnc_lo=0\tnc_hi=1\tsource0_lo=1","EPISODE\t0\trule=GENERIC\ttarget_lo=0\ttarget_hi=1\tnc_lo=0\tnc_hi=1\tsource0_lo=2");check(2,"wrong-ENTITY-refused");
+ fixture();change(4,"ENCODER_RECORD_ORIGIN\trecords=6\ttext_bytes=5\timage_bytes=16\n","");check(2,"missing-record-tail-refused");
+ fixture();change(3,"EPISODE\t3\trule=GENERIC\ttarget_lo=3","EPISODE\t3\trule=GENERIC\ttarget_lo=2");check(2,"overlapping-episode-refused");
+ printf("MODULE_BYTE_MAP_CHECK\tchecks=%d\tfailed=%d\tfixture=consistency-only\twork=%s\n",count,bad,work);return bad?1:0;}
