@@ -461,3 +461,7 @@ model-program-census注册验收实跑终态：`out/model-program-census-registe
 〔C47真实编码小例对照〕冻结sim的ELF、当前带事件sim的ELF、已装产品以同minimal.cx `--target lnx/x86_64 -o`写出的ELF三者实际cmp0，均8192B/SHA ad5feb95…；同源默认-run退出7是在Darwin宿主，未运行该Linux ELF，不冒称Linux原生证据。完整命令、终态与lower绑定见out/c47-driver-fix/lower-binding-report.txt（sha47757b8653b12ec5a72b654e7d1b57ac3319235d847b7b9c386321a0e1367c62）。三个相等证明日志未改变该例输出，模块归属仍需单独证明。
 
 〔C47首个编码事件到最终字节的实证链〕只读核查固定事件2230的E.ret seq190=LDI195/OUTW→2231 OCUT/blob63→2233 BLB[68]版本437→24443 LDX同版本→24444 INPUSH/frame58→24445 COPY写重排text[336,337)→32745 LIB.imagebegin OCUT/text_blob995→32929 INPUSH/frame994→33266 EI.copy写file[512,513)，实读最终byte195，沿途无覆盖/截断失效。真实图被librarysymbols包装，OCUT状态是LIB.imagebegin，不能只据原始ELF.begin模板猜测。报告out/c47-driver-fix/ret-lineage-report.txt（sha b42a8bd09db3c85e0fa40668f4c7f3baf5336e603cb3bcd677e8f5ba329e700c）。这是特定编码事件到一个文件字节的链；输入ret完整行到事件尚缺INTERN/row_id显式边，原单元经prune/lower到target行也未证，模块仍UNKNOWN。下一步须补这两层并采用稀疏记录量真实切片，不能逐个手认字节冒充模块普查。
+
+〔C47输入词身份下一增量〕私有诊断为INTERN/SBINTERN记录源帧/缓冲代次、精确半开子串范围、内容SHA及返回的intern身份；相同词在不同位置保留不同来源事件，不凭共享id合并模块归属。先以两行相同词和scratch复用的独立delta核位置与身份，再接真实图中的OPC属性读及E.ret规则；输入词所在完整行只能由同SHA不可变输入的行界核对，仍不把行位置直接当模块名。并行只读调查prune/lower实体来源合同及稀疏日志规模，暂不改产品。
+
+〔C47 INTERN实际验证〕直接check29/0/rc0（会话59482），独立重复ret两行分别绑定[0,3)/[4,7)且scratch同id保持独立源事件；原25项保留。首轮29/1因新夹具留下ret输入使旧拒绝用例读到114而非65，修复为恢复其原始A输入，原失败日志intern-edges-check.log保留，不改拒绝期望。真实同输入/模型仅新增诊断，minimal-intern.elf与前版cmp0；44859事件/11405402B，INTERN在LW.i返回id59且精确子串[2224,2227)，内容SHA 85e4aea1…；并不靠cursor猜该词。注册批次尚待父本轮执行。
