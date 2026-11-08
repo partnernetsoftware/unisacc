@@ -50,3 +50,17 @@ T1合入后`tools/source-package-pack.cx`实际SHA为`e67953bd9c1481b21ed462e1eb
 ## 下一必要证据
 
 cc已裁定Linux格归远程，标PENDING-REMOTE；本机无lnx入口是预期，不做不等。所需ROOT/SESSION/MAP清单已写items C48-2-LINUX与plans/s9-session.md。本机继续osx原生和材料接口。远程T1合入前，冻结表candidate_sid仅有声明；合入后实算会话65994真实exit0，当前源ident为e586721c7767275e1b5af84fe5a3cd199600e2550fc665c26cec642c6f4c9325，已与原声明全串相等。APE仍f069开发载荷；这不证明已取得该源对应的新候选产品，两者分账。取得当前Linux执行入口后，以新完整会话逐项验证23个材料条目和10个INFRA；注册表拆成多mode的批次须全覆盖，未知保持未知，不把上述开发证据迁成新候选资格。
+
+## OBJ-C-PRUNES-EXTERNAL源修复集成通道
+
+修复提交`02a7a0d2d8aeef29a0d3ed781ed89a0523710689`：driver对象路径前端至tapecheck/e4后直接lower，兼容旧目录仍含prune的包；对象tape的O0从lower恢复。compilerpack新对象目录及warning/multi克隆均不含prune，image/run保留。原placement六断言保留。
+
+正规冻结源SID=`9023ad22ba3b605fc4eeb0c04ea0a243278646b08cddf941ca7a2c85525e5044`，本机ARM slice=`848e0404e032e75f6dee5fd70cdac911e8b2f28a211eb5d39f97a5ded2ff283c`，3137506B、31.400049秒；`out/obj-c-prunes-external/integrated-arm64/receipt.txt`为真实构造回执。编译/检查bootstrap和固定模型仍为f069（40模型），不是修复前e586/3d0e的42模型候选或新版本发布件。
+
+`out/obj-c-prunes-external/formal-batches/`九个新批均真实PASS/rc0/transport0：六目标source、真实unit抽取tape及-funit三入口各O0/O1/O2，每格12/0；本机bare5/0；独立格式oracle28/0；同次实编compilerpack再生成288目录路线及四负控7/0。另helper239/0、原placement6/0、默认S11/0及十三棘轮13/13。raw Linux source对象既有LOCAL/NOTYPE如实报告，只证明定义保留，不冒系统链接资格。
+
+用户provider/consumer最小程序已实际分别裸-c，helper/entry/main及.global均在；随后新驱动和旧G3读取同样对象都报`reject: tape truncated`。旧固定包unit载荷缺`.end`，而当前源码`exec/parse2/tapeframes-result.tsv`的最终接受/封装路线已输出`.end\n`；lower/encoder透明封装，不补或删末尾。42包本机实物NOT_AVAILABLE，不能将源事实当运行证据，不能给旧对象手补end或放宽tl_unitver。原始反证与只读审查在`out/obj-c-prunes-external/link-frame-review.md`。
+
+下一冻结窗口须交新版本候选APE与完整SHA、对应修复后源SID/构造回执、完整42模型包及SHA；Mac只复验本机原生格与材料接口。Linux同候选全批归远程，需ROOT绝对路径、ROOT/out/全新SESSION、typed MAP及材料原始回执，至少提供`prune-dut`/`prune-models`与全批要求的全部材料；不得复用修复前e586/3d0e的PASS。远程可直接调用`tools/prune-route-placement.cx --objects ROOT NEW_OUT DUT MODELS TARGET both`逐目标验证，并以-funit provider/consumer真链接exit7完成Linux格。保持PENDING-REMOTE，本机不等Linux入口。
+
+链接复验输入固定为`provider.c`: `extern int entry(void); int helper(int x){return x+1;} int main(void){return entry();}`，`consumer.c`: `extern int helper(int); int entry(void){return helper(6);}`。Mac各自裸`-c -o provider.o provider.c`和`-c -o consumer.o consumer.c`后，用同DUT链接两对象，原生执行须exit7；Linux使用显式`-b lnx/ARCH -funit`构造可由产品链接的unit对象，两个子编译、链接及执行各≤8秒，不能把raw ELF系统链接支持混入此断言。

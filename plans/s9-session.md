@@ -74,3 +74,5 @@ init 后必须 `s8c-bind` 对 MAP 每名 `all-waves material`，否则 `material
 ## 对照模板
 
 `plans/s9-vs-s8b.tsv`：`batch<TAB>c46-3<TAB>c47-1`。s9 出结果再填第三列。
+
+P0 OBJ-C-PRUNES-EXTERNAL源修复已经02a7a0d2d推送，旧e586/3d0e不是修复后的冻结身份。新源SID9023ad22…、本机ARM848e0404…和固定f06940模型仅作本机开发分账；六目标符号保留已验，新42包unit闭合/链接尚未验。下一候选须按[源修复集成清单](c48-2-binding-status.md#obj-c-prunes-external源修复集成通道)提供APE/模型完整SHA、ROOT/全新SESSION/typed MAP/原始回执；Linux同候选全批仍PENDING-REMOTE，本机不做、不等。

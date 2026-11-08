@@ -1,0 +1,456 @@
+/* Real compilerpack execution on nonempty metadata-only model fixtures.
+ * GENERATOR SOURCE_ROOT NEW_OUT; --validate ROUTES provides the same oracle.
+ * This does not validate NN evaluation or rebuild a model/package. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+static const char *targets[] = {"lnx/arm64",  "lnx/x86_64", "osx/arm64",
+                                "osx/x86_64", "win/arm64",  "win/x86_64"};
+static const char *ids[] = {"lnx-arm64",  "lnx-x86_64", "osx-arm64",
+                            "osx-x86_64", "win-arm64",  "win-x86_64"};
+static const char *modelids[] = {"arm64",      "x86_64",    "osx-arm64",
+                                 "osx-x86_64", "win-arm64", "win-x86_64"};
+static const char *prefix[] = {"", "warn/", "multi/", "warn/multi/"};
+static const char *kinds[] = {"object", "image", "run", "tape"};
+typedef struct {
+  char route[160];
+  char *stage[16], *model[16], *format[16];
+  int n;
+} Route;
+static int checks, failed;
+static void die(const char *s) {
+  fprintf(stderr, "check-object-route-directory: REFUSE %s errno=%d\n", s,
+          errno);
+  exit(2);
+}
+static void ck(int ok, const char *s) {
+  checks++;
+  if (!ok)
+    failed++;
+  printf("%s\t%s\n", ok ? "PASS" : "FAIL", s);
+}
+static void path(char *p, size_t cap, const char *a, const char *b) {
+  if (cx_fmt(p, cap, "%s/%s", a, b))
+    die("path");
+}
+static char *load(const char *p, size_t *n) {
+  char *b = cx_read(p, n);
+  if (!b)
+    die("read");
+  return b;
+}
+static void put(const char *p, const void *b, size_t n) {
+  int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0)
+    die("new file");
+  size_t at = 0;
+  while (at < n) {
+    ssize_t k = write(fd, (const char *)b + at, n - at);
+    if (k < 0 && errno == EINTR)
+      continue;
+    if (k <= 0)
+      die("write");
+    at += k;
+  }
+  if (close(fd))
+    die("close");
+}
+static void copy(const char *a, const char *b) {
+  size_t n;
+  char *s = load(a, &n);
+  put(b, s, n);
+  free(s);
+}
+static int validate(const char *file, int verbose) {
+  Route *r = calloc(288, sizeof *r);
+  if (!r)
+    die("allocation");
+  int index = 0;
+  for (int t = 0; t < 6; t++)
+    for (int w = 0; w < 4; w++)
+      for (int k = 0; k < 4; k++)
+        for (int o = 0; o < 3; o++)
+          if (cx_fmt(r[index++].route, sizeof r[0].route, "%s/%s%s/O%d",
+                     targets[t], prefix[w], kinds[k], o))
+            die("route name");
+  size_t n;
+  char *b = load(file, &n);
+  int bad = 0;
+  if (!n || memchr(b, 0, n) || memchr(b, '\r', n) || b[n - 1] != '\n') {
+    free(r);
+    free(b);
+    return 0;
+  }
+  for (char *p = b; *p;) {
+    char *e = strchr(p, '\n');
+    if (!e) {
+      bad = 1;
+      break;
+    }
+    *e = 0;
+    char *f[5] = {p};
+    int nf = 1;
+    for (char *q = p; *q; q++)
+      if (*q == '\t') {
+        *q = 0;
+        if (nf == 5) {
+          bad = 1;
+          break;
+        }
+        f[nf++] = q + 1;
+      }
+    if (bad || nf != 5) {
+      bad = 1;
+      break;
+    }
+    int x;
+    for (x = 0; x < 288; x++)
+      if (!strcmp(f[0], r[x].route))
+        break;
+    if (x < 288) {
+      int z = r[x].n++;
+      if (z >= 16) {
+        bad = 1;
+        break;
+      }
+      r[x].stage[z] = f[1];
+      r[x].model[z] = f[4];
+      r[x].format[z] = f[3];
+    }
+    p = e + 1;
+  }
+  index = 0;
+  int counts[4] = {0};
+  for (int t = 0; t < 6; t++)
+    for (int w = 0; w < 4; w++)
+      for (int k = 0; k < 4; k++)
+        for (int o = 0; o < 3; o++) {
+          Route *a = &r[index++];
+          const char *want[10];
+          int wn = 0;
+          if (w < 2) {
+            want[wn++] = "e2";
+            want[wn++] = "e1";
+          } else
+            want[wn++] = "units";
+          want[wn++] = "e3";
+          want[wn++] = "tapecheck";
+          if (o)
+            want[wn++] = "e4";
+          if (k == 1 || k == 2)
+            want[wn++] = "prune";
+          if (k != 3)
+            want[wn++] = "lower";
+          if (k == 0 || k == 1)
+            want[wn++] = "elf";
+          int ok = a->n == wn;
+          for (int j = 0; j < a->n && j < wn; j++)
+            if (strcmp(a->stage[j], want[j]))
+              ok = 0;
+          if (k == 0 && ok) {
+            char name[120];
+            if (cx_fmt(name, sizeof name, "/object-lower-%s.net", modelids[t]))
+              die("model name");
+            int lower = wn - 2, elf = wn - 1;
+            size_t z = strlen(a->model[lower]), nz = strlen(name);
+            if (z < nz || strcmp(a->model[lower] + z - nz, name))
+              ok = 0;
+            if (cx_fmt(name, sizeof name, "/object-enc-%s.net", modelids[t]))
+              die("model name");
+            z = strlen(a->model[elf]);
+            nz = strlen(name);
+            if (z < nz || strcmp(a->model[elf] + z - nz, name) ||
+                strcmp(a->format[elf], "object-v1"))
+              ok = 0;
+          }
+          if (!ok) {
+            bad = 1;
+            if (verbose)
+              fprintf(stderr, "INVALID_ROUTE\t%s\tactual=%d\texpected=%d\n",
+                      a->route, a->n, wn);
+          } else
+            counts[k]++;
+        }
+  if (verbose)
+    printf("ROUTE_ORACLE\tobject=%d/72\timage=%d/72\trun=%d/72\ttape=%d/"
+           "72\tNN_semantics=NOT_CLAIMED\n",
+           counts[0], counts[1], counts[2], counts[3]);
+  free(r);
+  free(b);
+  return !bad;
+}
+static void model(const char *dir, const char *name) {
+  char p[4400], stem[200];
+  const char *v = "nonempty metadata fixture; not a real NN\n";
+  if (cx_fmt(stem, sizeof stem, "%s.net", name))
+    die("stem");
+  path(p, sizeof p, dir, stem);
+  put(p, v, strlen(v));
+}
+static void mutate(const char *in, const char *out, const char *needle,
+                   int append) {
+  size_t n;
+  char *b = load(in, &n);
+  np_buf z = {0};
+  int hit = 0;
+  for (char *p = b; p < b + n;) {
+    char *e = memchr(p, '\n', (size_t)(b + n - p));
+    if (!e)
+      die("mutate newline");
+    size_t len = e - p + 1;
+    if (!hit && !strncmp(p, needle, strlen(needle))) {
+      hit = 1;
+      if (append)
+        np_put(&z, p, len);
+    } else
+      np_put(&z, p, len);
+    p = e + 1;
+  }
+  if (!hit)
+    die("mutation target absent");
+  if (append)
+    np_puts(&z,
+            "osx/arm64/object/O0\tprune\ttape.text\ttape.text\tfixture.net\n");
+  put(out, z.p, z.n);
+  free(z.p);
+  free(b);
+}
+static int fixture(int argc, char **argv) {
+  if (argc == 3 && !strcmp(argv[1], "--validate"))
+    return validate(argv[2], 1) ? 0 : 1;
+  if (argc != 4) {
+    fprintf(stderr, "usage: GENERATOR SOURCE_ROOT NEW_OUT | --validate ROUTES "
+                    "| --build ROOT NEW_OUT\n");
+    return 2;
+  }
+  char generator[4096], root[4096], work[4096];
+  if (!realpath(argv[1], generator) || !realpath(argv[2], root) ||
+      mkdir(argv[3], 0700) || !realpath(argv[3], work))
+    die("canonical new fixture");
+  char fixture[4400], models[4400], output[4400], audit[4400], p[4400], q[4400],
+      manifest[6][4400];
+  path(fixture, sizeof fixture, work, "root");
+  if (mkdir(fixture, 0700))
+    die("fixture root");
+  path(p, sizeof p, fixture, "exec");
+  if (mkdir(p, 0700))
+    die("exec");
+  path(p, sizeof p, fixture, "exec/c");
+  if (mkdir(p, 0700))
+    die("exec/c");
+  path(p, sizeof p, fixture, "exec/facts");
+  if (mkdir(p, 0700))
+    die("exec/facts");
+  const char *real[] = {"exec/c/compiler-routes.tsv", "exec/facts/pp-gen.tsv"};
+  for (int i = 0; i < 2; i++) {
+    path(p, sizeof p, root, real[i]);
+    path(q, sizeof q, fixture, real[i]);
+    copy(p, q);
+  }
+  path(models, sizeof models, fixture, "models");
+  if (mkdir(models, 0700))
+    die("models");
+  const char *common[] = {"source",
+                          "o1",
+                          "e2",
+                          "nativeabi",
+                          "tokenpp",
+                          "tokenlex",
+                          "warnlex",
+                          "warnparse",
+                          "warnunits",
+                          "errorparse",
+                          "warnpp-shared",
+                          "tapecheck",
+                          "hostsymbols",
+                          "librarycontract",
+                          "librarypartition"};
+  for (int i = 0; i < 15; i++)
+    model(models, common[i]);
+  for (int t = 0; t < 6; t++) {
+    char stem[120];
+    if (cx_fmt(stem, sizeof stem, "object-lower-%s", modelids[t]))
+      die("stem");
+    model(models, stem);
+    if (cx_fmt(stem, sizeof stem, "object-enc-%s", modelids[t]))
+      die("stem");
+    model(models, stem);
+  }
+  const char *stage[] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+  const char *ins[] = {"src.c",     "pp.text",   "tokens.typed", "tape.text",
+                       "tape.text", "tape.text", "target.text"};
+  const char *outs[] = {"pp.text",   "tokens.typed", "tape.text",  "tape.text",
+                        "tape.text", "target.text",  "image.bytes"};
+  char source[4400];
+  path(source, sizeof source, models, "source.net");
+  for (int t = 0; t < 6; t++) {
+    char name[100];
+    if (cx_fmt(name, sizeof name, "%s.tsv", ids[t]))
+      die("route file");
+    path(manifest[t], sizeof manifest[t], fixture, name);
+    np_buf rows = {0};
+    for (int j = 0; j < 7; j++) {
+      char line[4800];
+      if (cx_fmt(line, sizeof line, "%s\t%s\t%s\t%s\t%s\n", targets[t],
+                 stage[j], ins[j], outs[j], source))
+        die("route row");
+      np_puts(&rows, line);
+    }
+    put(manifest[t], rows.p, rows.n);
+    free(rows.p);
+  }
+  path(output, sizeof output, fixture, "declaration");
+  path(audit, sizeof audit, fixture, "audit");
+  char o1[4400], e2[4400], abi[4400];
+  path(o1, sizeof o1, models, "o1.net");
+  path(e2, sizeof e2, models, "e2.net");
+  path(abi, sizeof abi, models, "nativeabi.net");
+  char *av[] = {generator,
+                output,
+                "--o1",
+                o1,
+                "--e2",
+                e2,
+                "--nativeabi",
+                abi,
+                "--models",
+                models,
+                manifest[0],
+                manifest[1],
+                manifest[2],
+                manifest[3],
+                manifest[4],
+                manifest[5],
+                0};
+  np_buf args = {0};
+  for (int i = 0; av[i]; i++) {
+    np_puts(&args, av[i]);
+    np_puts(&args, "\n");
+  }
+  path(p, sizeof p, work, "command.argv.lines");
+  put(p, args.p, args.n);
+  free(args.p);
+  np_result r = {0};
+  char why[1024];
+  int transport = np_run(av, fixture, 0, 20, &r, why, sizeof why);
+  path(p, sizeof p, work, "generator.stdout");
+  put(p, r.out, r.outn);
+  path(p, sizeof p, work, "generator.stderr");
+  put(p, r.err, r.errn);
+  ck(!transport && !r.rc && !r.residue,
+     "actual-product-built-generator-execution");
+  if (transport || r.rc || r.residue) {
+    fprintf(stderr, "%s\n%s", transport ? why : "generator failed",
+            r.err ? r.err : "");
+    np_free(&r);
+    return 1;
+  }
+  np_free(&r);
+  char routes[4400];
+  path(routes, sizeof routes, output, "routes.tsv");
+  ck(validate(routes, 1), "six-target-object-image-run-tape-full-stage-order");
+  path(p, sizeof p, work, "bad-object-prune.tsv");
+  mutate(routes, p, "osx/arm64/object/O0\te2\t", 1);
+  ck(!validate(p, 0), "injected-object-prune-negative-control");
+  path(p, sizeof p, work, "bad-image-prune.tsv");
+  mutate(routes, p, "osx/arm64/image/O0\tprune\t", 0);
+  ck(!validate(p, 0), "missing-image-prune-negative-control");
+  path(p, sizeof p, work, "bad-tapecheck.tsv");
+  mutate(routes, p, "osx/arm64/object/O0\ttapecheck\t", 0);
+  ck(!validate(p, 0), "missing-tapecheck-negative-control");
+  path(p, sizeof p, work, "bad-lower.tsv");
+  mutate(routes, p, "osx/arm64/object/O0\tlower\t", 0);
+  ck(!validate(p, 0), "missing-object-lower-negative-control");
+  char identity[1000], gh[65], rh[65];
+  size_t n;
+  char *b = load(generator, &n);
+  cx_sha256_hex(b, n, gh);
+  free(b);
+  b = load(routes, &n);
+  cx_sha256_hex(b, n, rh);
+  free(b);
+  if (cx_fmt(identity, sizeof identity,
+             "generator_sha\t%s\nroutes_sha\t%s\nfixture_models\tNONEMPTY_NOT_"
+             "NN_EVALUATED\npackage_construction\tNOT_PERFORMED\n",
+             gh, rh))
+    die("identity");
+  path(p, sizeof p, work, "identity.tsv");
+  put(p, identity, strlen(identity));
+  printf("OBJECT_ROUTE_DIRECTORY\tassertions=%d\tfailed=%d\tgenerated=1\n",
+         checks, failed);
+  return failed ? 1 : 0;
+}
+static void digest(const char *p, char hash[65]) {
+  size_t n;
+  char *b = load(p, &n);
+  cx_sha256_hex(b, n, hash);
+  free(b);
+}
+int main(int argc, char **argv) {
+  if (argc != 4 || strcmp(argv[1], "--build"))
+    return fixture(argc, argv);
+  char root[4096], work[4096];
+  if (!realpath(argv[2], root) || mkdir(argv[3], 0700) ||
+      !realpath(argv[3], work))
+    die("canonical new build directory");
+  char product[4400], source[4400], generator[4400], run[4400], p[4400];
+  path(product, sizeof product, root, "unisacc.com");
+  path(source, sizeof source, root, "seed/compilerpack.c");
+  path(generator, sizeof generator, work, "compilerpack");
+  path(run, sizeof run, work, "fixture-run");
+  char source_before[65], product_before[65], source_after[65],
+      product_after[65];
+  digest(source, source_before);
+  digest(product, product_before);
+  char *av[] = {"/bin/sh", product, source, "-o", generator, 0};
+  np_buf args = {0};
+  for (int i = 0; av[i]; i++) {
+    np_puts(&args, av[i]);
+    np_puts(&args, "\n");
+  }
+  path(p, sizeof p, work, "build.argv.lines");
+  put(p, args.p, args.n);
+  free(args.p);
+  np_result r = {0};
+  char why[1024];
+  int transport = np_run(av, root, 0, 20, &r, why, sizeof why);
+  path(p, sizeof p, work, "build.stdout");
+  put(p, r.out, r.outn);
+  path(p, sizeof p, work, "build.stderr");
+  put(p, r.err, r.errn);
+  digest(source, source_after);
+  digest(product, product_after);
+  int ok = !transport && !r.rc && !r.residue &&
+           !strcmp(source_before, source_after) &&
+           !strcmp(product_before, product_after);
+  ck(ok, "compile-current-root-generator-with-frozen-inputs");
+  char status[512];
+  if (cx_fmt(status, sizeof status,
+             "transport=%d\trc=%d\tresidue=%d\tcap_seconds=20\n", transport,
+             r.rc, r.residue))
+    die("build status");
+  path(p, sizeof p, work, "build.status.tsv");
+  put(p, status, strlen(status));
+  if (!ok) {
+    fprintf(stderr, "%s\n%s",
+            transport ? why : "build or input identity failed",
+            r.err ? r.err : "");
+    np_free(&r);
+    return 1;
+  }
+  np_free(&r);
+  char generator_sha[65], identity[1024];
+  digest(generator, generator_sha);
+  if (cx_fmt(identity, sizeof identity,
+             "source_sha\t%s\nproduct_sha\t%s\ngenerator_sha\t%s\n"
+             "source_after_sha\t%s\nproduct_after_sha\t%s\n"
+             "claim\tSAME_INVOCATION_BUILD_ROUTE_FIXTURE_ONLY\n",
+             source_before, product_before, generator_sha, source_after,
+             product_after))
+    die("build identity");
+  path(p, sizeof p, work, "build.identity.tsv");
+  put(p, identity, strlen(identity));
+  char *fv[] = {argv[0], generator, root, run, 0};
+  return fixture(4, fv);
+}
