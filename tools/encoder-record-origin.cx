@@ -5,6 +5,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use cxlib.watchbundle
+#pragma unisa use mem.bytes
 static int bundle_mode;static char bundle_identity[65];
 #define ER_DELTA "bcf30b2297085486f8aff96a10242b7e91c2d1b2e7260d96abc2d560f67fba98"
 #define ER_CONFIG "397fedac0eec749d48b5c9515450a40231abe188ed261adbd375e216900e3829"
@@ -20,7 +21,7 @@ static void flush_records(void){
 static void append_record_line(const char *line,int n,long cap){
  if(n<0||n>=cap||n>sizeof record_buffer)refuse("output line bound");
  if(record_used+n>sizeof record_buffer)flush_records();
- memcpy(record_buffer+record_used,line,n);record_used+=n;
+ mm_copy(record_buffer+record_used, n, line, n);record_used+=n;
 }
 static void emit_record(long i,long h){
  char line[320];
@@ -30,7 +31,7 @@ static void emit_record(long i,long h){
 static char *load(const char *p,size_t *n,long cap,int textual){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>cap)refuse("file extent");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size||(textual&&memchr(s,0,*n)))refuse("read or NUL");return s;}
 static void hash(const char *s,long n,char *out){if(sy_sha256_hex(s,n,out))cx_sha256_hex(s,n,out);}
 static char *watch_load(const char *path,size_t *n){if(bundle_mode)return wb_watch(path,n,bundle_identity);return load(path,n,67108864,1);}
-static void watch_hash(const char *b,size_t n,char h[65]){if(bundle_mode)memcpy(h,bundle_identity,65);else hash(b,n,h);}
+static void watch_hash(const char *b,size_t n,char h[65]){if(bundle_mode)mm_copy(h, 65, bundle_identity, 65);else hash(b,n,h);}
 static int certificate_transport(char *line,int n,long cap){if(!bundle_mode)return n;if(n<1||n>=cap||line[n-1]!='\n')refuse("bundle certificate bound");int added=snprintf(line+n-1,cap-n+1,"\twatch_transport=watch-bundle-v1\n");if(added<0||added>=cap-n+1)refuse("bundle transport bound");return n-1+added;}
 static long number(const char *s){char *e;errno=0;long n=strtol(s,&e,10);if(!*s||*e||errno||n<0)refuse("number");return n;}
 static int split(char *s,char **f){int n=0;for(;;){if(n==32)refuse("field count");f[n++]=s;char *e=strchr(s,'\t');if(!e)break;*e=0;s=e+1;}return n;}
@@ -107,7 +108,7 @@ static int foreign_encoder(const char *profile,char **args){
   if(!head){if(n!=9||strcmp(f[0],"WRITE_EVENTS")||strcmp(header(f,n,"version"),"1")||strcmp(header(f,n,"delta_sha"),delta)||strcmp(header(f,n,"config_sha"),ch)||strcmp(header(f,n,"input_sha"),th)||strcmp(header(f,n,"output_sha"),ih)||number(header(f,n,"output_bytes"))!=(long)in||strcmp(header(f,n,"claim"),"STATE_OBSERVATION_ONLY")||strcmp(header(f,n,"watch_format"),"compact-v1"))refuse("foreign binding/profile");head=1;p=e+1;continue;}
   if(!strcmp(f[0],"COMPLETE")){if(n!=2||strncmp(f[1],"events=",7)||number(f[1]+7)!=seq||e[1]||phase!=8||lw!=count||q!=count||(forward&&(!fh||!fi)))refuse("foreign completeness");complete=1;break;}
   if(n<2||number(f[1])!=++seq||seq>(bundle_mode?2000000:1000000))refuse("foreign sequence");
-  if(!strcmp(f[0],"FRAME")){if(n!=5||nf==8||strlen(f[3])!=64)refuse("foreign FRAME");long id=number(f[2]);if(!id)refuse("frame id");for(int i=0;i<nf;i++)if(frames[i].id==id)refuse("duplicate frame");frames[nf].id=id;frames[nf].end=number(f[4]);strcpy(frames[nf].sha,f[3]);if(id==1&&(strcmp(f[3],th)||frames[nf].end!=(long)tn))refuse("foreign root frame");nf++;p=e+1;continue;}
+  if(!strcmp(f[0],"FRAME")){if(n!=5||nf==8||strlen(f[3])!=64)refuse("foreign FRAME");long id=number(f[2]);if(!id)refuse("frame id");for(int i=0;i<nf;i++)if(frames[i].id==id)refuse("duplicate frame");frames[nf].id=id;frames[nf].end=number(f[4]);(cx_fmt(frames[nf].sha, sizeof frames[nf].sha, "%s", f[3]) ? exit(2) : (void)0);if(id==1&&(strcmp(f[3],th)||frames[nf].end!=(long)tn))refuse("foreign root frame");nf++;p=e+1;continue;}
   if(strcmp(f[0],"WATCHC")||n<9)refuse("foreign compact only");long slot=number(f[2]),id=number(f[3]);if(slot>(forward?9:7)||n!=9+ar[slot])refuse("foreign slots");ERFrame *fr=0;for(int i=0;i<nf;i++)if(frames[i].id==id)fr=&frames[i];if(!fr)refuse("missing frame");long cur=number(f[4]),gen=number(f[5]),on=number(f[6]),v[8];number(f[7]);number(f[8]);for(int i=0;i<ar[slot];i++)v[i]=number(f[9+i]);if(gen||cur>fr->end||on>(long)in)refuse("foreign observation extent");
   if(slot!=5&&(id!=1||strcmp(fr->sha,th)||fr->end!=(long)tn))refuse("foreign root observation");
   if(slot==0){if(phase||lw>=count||v[0]!=lw||v[1]!=records[lw].ws||v[2]!=records[lw].we||cur!=v[2])refuse("foreign row");lw++;}
@@ -152,7 +153,7 @@ int main(int argc,char **argv){if(argc>1&&!strcmp(argv[1],"--watch-bundle")){bun
   }else{
    if(strcmp(f[0],"WATCH"))refuse("long record");const char *st=value(f,nf,"state_hex");for(int j=0;j<6;j++)if(!strcmp(st,states[j]))slot=j;
    if(slot<0||nf!=11+arity[slot]||number(value(f,nf,"frame_instance"))!=1||strcmp(value(f,nf,"frame_sha"),th)||number(value(f,nf,"frame_end"))!=(long)tn)refuse("long root identity");cursor=number(value(f,nf,"cursor"));ogen=number(value(f,nf,"output_generation"));on=number(value(f,nf,"output_len"));number(value(f,nf,"scratch_generation"));number(value(f,nf,"scratch_len"));
-   for(int j=0;j<arity[slot];j++){char key[80];snprintf(key,sizeof key,"value:%s",regs[slot][j]);v[j]=number(value(f,nf,key));}
+   for(int j=0;j<arity[slot];j++){char key[80];(cx_fmt(key, sizeof key, "value:%s", regs[slot][j]) ? exit(2) : (void)0);v[j]=number(value(f,nf,key));}
   }
   if(cursor>(long)tn||ogen||on>(long)in)refuse("observation extent/generation");
   if(slot==0){if(phase||lw>=count||v[0]!=lw||v[1]!=records[lw].ws||v[2]!=records[lw].we||cursor!=v[2])refuse("LW row/npc");lw++;}

@@ -2,11 +2,12 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
+#pragma unisa use mem.bytes
 static char dir[4400],delta[4400],input[4400],side[4400],cfg[4400],com[4400],sim[4400];static int checks,bad,compact;
 static void die(const char *s){fprintf(stderr,"watch-check %s\n",s);exit(2);}
 static void ck(int v,const char *s){checks++;printf("%s\t%s\n",v?"PASS":"FAIL",s);if(!v)bad++;}
 static void path(char *p,const char *s){if(cx_fmt(p,4400,"%s/%s",dir,s))die("path");}
-static char *run(int watch,int trace,int expected,const char *limit){char *v[18];int k=0;v[k++]="sh";v[k++]=com;v[k++]=sim;v[k++]="--";v[k++]=delta;v[k++]=input;if(trace){v[k++]="--write-events";v[k++]=side;}if(watch){v[k++]="--watch-states";v[k++]=cfg;}if(compact)v[k++]="--watch-compact";if(limit){v[k++]="--event-limit";v[k++]=(char *)limit;}v[k]=0;np_result r={0};char why[256]={0};int e=np_run(v,0,0,10,&r,why,sizeof why);char *s=0;if(!e&&!r.residue&&r.rc==expected){s=malloc(r.outn+1);memcpy(s,r.out,r.outn);s[r.outn]=0;}else fprintf(stderr,"run rc=%d transport=%d residue=%d %s\n%s\n",r.rc,e,r.residue,why,r.err?r.err:"");np_free(&r);return s;}
+static char *run(int watch,int trace,int expected,const char *limit){char *v[18];int k=0;v[k++]="sh";v[k++]=com;v[k++]=sim;v[k++]="--";v[k++]=delta;v[k++]=input;if(trace){v[k++]="--write-events";v[k++]=side;}if(watch){v[k++]="--watch-states";v[k++]=cfg;}if(compact)v[k++]="--watch-compact";if(limit){v[k++]="--event-limit";v[k++]=(char *)limit;}v[k]=0;np_result r={0};char why[256]={0};int e=np_run(v,0,0,10,&r,why,sizeof why);char *s=0;if(!e&&!r.residue&&r.rc==expected){s=malloc(r.outn+1);mm_copy(s, r.outn, r.out, r.outn);s[r.outn]=0;}else fprintf(stderr,"run rc=%d transport=%d residue=%d %s\n%s\n",r.rc,e,r.residue,why,r.err?r.err:"");np_free(&r);return s;}
 static int exists(void){struct stat s;if(!lstat(side,&s))return 1;if(errno==ENOENT)return 0;die("stat");return 1;}
 static void refuse(const char *text,const char *label){if(cx_write(cfg,text,strlen(text)))die("config");char *s=run(1,1,2,0);ck(s&&!exists(),label);free(s);}
 static void compactprobe(const char *good){
@@ -14,7 +15,7 @@ static void compactprobe(const char *good){
  char *out=run(1,1,0,"4");
  ck(out&&!strcmp(out,"AB"),"compact/default/long exact AB output at four-record budget");free(out);
  size_t n;char *log=cx_read(side,&n),sha[65],expected[160];cx_sha256_hex("A",1,sha);
- snprintf(expected,sizeof expected,"FRAME\t1\t1\t%s\t1\n",sha);
+ (cx_fmt(expected, sizeof expected, "FRAME\t1\t1\t%s\t1\n", sha) ? exit(2) : (void)0);
  int frames=0,rows=0,valid=1;long values[3]={0,7,9};
  if(log)for(char *p=log;*p;){
   if(!strncmp(p,"FRAME\t",6))frames++;
@@ -51,12 +52,12 @@ static void edgeprobe(void){
     if(!strncmp(p,mode?"WATCHC\t":"WATCH\t",mode?7:6)){
      long cursor=filtered?(rows?3:0):rows;
      if(mode){long seq,slot,id,cur,gen,len,sg,sn,x;if(sscanf(p,"WATCHC\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld",&seq,&slot,&id,&cur,&gen,&len,&sg,&sn,&x)!=9||seq!=rows+2||slot!=0||id!=2||cur!=cursor||gen||len!=cursor||sg||sn||x)valid=0;}
-     else{snprintf(needle,sizeof needle,"frame_instance=2\tframe_sha=%s\tcursor=%ld\tframe_end=3\toutput_generation=0\toutput_len=%ld\t",sha,cursor,cursor);char *end=strchr(p,'\n'),*hit=strstr(p,needle);if(!hit||(end&&hit>end))valid=0;}
+     else{(cx_fmt(needle, sizeof needle, "frame_instance=2\tframe_sha=%s\tcursor=%ld\tframe_end=3\toutput_generation=0\toutput_len=%ld\t", sha, cursor, cursor) ? exit(2) : (void)0);char *end=strchr(p,'\n'),*hit=strstr(p,needle);if(!hit||(end&&hit>end))valid=0;}
      rows++;
     }
     char *next=strchr(p,'\n');if(!next)break;p=next+1;
    }
-   int expected=filtered?2:4;snprintf(needle,sizeof needle,"COMPLETE\tevents=%d\n",expected+mode);
+   int expected=filtered?2:4;(cx_fmt(needle, sizeof needle, "COMPLETE\tevents=%d\n", expected+mode) ? exit(2) : (void)0);
    ck(log&&valid&&rows==expected&&frames==mode&&strstr(log,needle),mode?(filtered?"compact edges cursor0/3 frame SHA/end/length":"compact all cursor0/1/2/3 frame identity"):(filtered?"long edges cursor0/3 frame SHA/end/length":"long all cursor0/1/2/3 frame identity"));
    free(log);unlink(side);
   }
@@ -65,9 +66,9 @@ static void edgeprobe(void){
  refuse("L\tx\tunknown\n","unknown third-column policy refuses");
  refuse("L\tx\tframe-edges\textra\n","four columns refuse");
 }
-int main(int argc,char **argv){char root[4400],temp[]="/tmp/watch-check-XXXXXX";size_t n;if(!realpath(".",root)||!mkdtemp(temp))die("cwd/tmp");strcpy(dir,temp);path(delta,"delta.json");path(input,"input");path(side,"events");path(cfg,"config");cx_fmt(com,sizeof com,"%s/unisacc.com",root);int edges=argc>1&&!strcmp(argv[1],"--frame-edges");if(argc>1&&!edges)strcpy(sim,argv[1]);else cx_fmt(sim,sizeof sim,"%s/tools/sim.cx",root);if(edges){edgeprobe();unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_EDGES_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
+int main(int argc,char **argv){char root[4400],temp[]="/tmp/watch-check-XXXXXX";size_t n;if(!realpath(".",root)||!mkdtemp(temp))die("cwd/tmp");(cx_fmt(dir, sizeof dir, "%s", temp) ? exit(2) : (void)0);path(delta,"delta.json");path(input,"input");path(side,"events");path(cfg,"config");cx_fmt(com,sizeof com,"%s/unisacc.com",root);int edges=argc>1&&!strcmp(argv[1],"--frame-edges");if(argc>1&&!edges)(cx_fmt(sim, sizeof sim, "%s", argv[1]) ? exit(2) : (void)0);else cx_fmt(sim,sizeof sim,"%s/tools/sim.cx",root);if(edges){edgeprobe();unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_EDGES_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
 const char *d="{\"start\":\"S\",\"states\":{\"S\":[\"b\",{\"65\":[\"T\",0]}],\"T\":[\"b\",{\"65\":[\"U\",1]}],\"U\":[\"b\",{\"65\":[\"U\",2]}]},\"seqs\":[[[\"LDI\",\"x\",7],[\"OUT\",65],[\"SBCLR\"],[\"SBOUT\",81],[\"STX\",\"x\",100,\"x\"]],[[\"LDI\",\"x\",9],[\"OUT\",66]],[[\"ACCEPT\"]]]}";
-const char *good="S\tx\nT\tx\nU\tx\n";if(cx_write(delta,d,strlen(d))||cx_write(input,"A",1)||cx_write(cfg,good,strlen(good)))die("fixture");char *off=run(0,0,0,0),*on=run(1,1,0,"3");ck(off&&on&&!strcmp(off,"AB")&&!strcmp(off,on),"default/watch exact AB output");free(off);free(on);char *log=cx_read(side,&n),h[65],needle[100];cx_sha256_hex(good,strlen(good),h);snprintf(needle,sizeof needle,"config_sha=%s",h);ck(log&&strstr(log,needle)&&strstr(log,"claim=STATE_OBSERVATION_ONLY"),"config content identity and limited claim");ck(log&&!strstr(log,"\nEVENT\t")&&!strstr(log,"\nEDGE\t")&&!strstr(log,"\nMEMORY\t"),"watch suppresses full causal events");ck(log&&strstr(log,"state_hex=53\t")&&strstr(log,"value:x=0\n")&&strstr(log,"state_hex=54\t")&&strstr(log,"output_len=1\tscratch_generation=1\tscratch_len=1\tvalue:x=7\n")&&strstr(log,"output_len=2\tscratch_generation=1\tscratch_len=1\tvalue:x=9\n")&&strstr(log,"COMPLETE\tevents=3"),"state entry observes actual evolving values and buffer lengths");free(log);unlink(side);
+const char *good="S\tx\nT\tx\nU\tx\n";if(cx_write(delta,d,strlen(d))||cx_write(input,"A",1)||cx_write(cfg,good,strlen(good)))die("fixture");char *off=run(0,0,0,0),*on=run(1,1,0,"3");ck(off&&on&&!strcmp(off,"AB")&&!strcmp(off,on),"default/watch exact AB output");free(off);free(on);char *log=cx_read(side,&n),h[65],needle[100];cx_sha256_hex(good,strlen(good),h);(cx_fmt(needle, sizeof needle, "config_sha=%s", h) ? exit(2) : (void)0);ck(log&&strstr(log,needle)&&strstr(log,"claim=STATE_OBSERVATION_ONLY"),"config content identity and limited claim");ck(log&&!strstr(log,"\nEVENT\t")&&!strstr(log,"\nEDGE\t")&&!strstr(log,"\nMEMORY\t"),"watch suppresses full causal events");ck(log&&strstr(log,"state_hex=53\t")&&strstr(log,"value:x=0\n")&&strstr(log,"state_hex=54\t")&&strstr(log,"output_len=1\tscratch_generation=1\tscratch_len=1\tvalue:x=7\n")&&strstr(log,"output_len=2\tscratch_generation=1\tscratch_len=1\tvalue:x=9\n")&&strstr(log,"COMPLETE\tevents=3"),"state entry observes actual evolving values and buffer lengths");free(log);unlink(side);
 on=run(1,1,2,"2");ck(on&&!exists(),"watch budget overflow no sidecar");free(on);on=run(1,0,2,0);ck(on&&!exists(),"watch requires write-events");free(on);
 refuse("Missing\tx\n","unknown state refuses");refuse("S\ty\n","unknown register refuses");refuse("S\tx,x\n","duplicate field refuses");refuse("S\tx\nS\tx\n","duplicate state refuses");refuse("S\tx,\n","empty field refuses");refuse("S\tx\textra\n","extra TSV column refuses");refuse("S\tx\r\n","CR config refuses");
 compactprobe(good);unlink(delta);unlink(input);unlink(cfg);rmdir(dir);printf("SIM_STATE_WATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}

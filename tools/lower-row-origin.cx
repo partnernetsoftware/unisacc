@@ -4,6 +4,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use cxlib.watchbundle
+#pragma unisa use mem.bytes
 static int bundle_mode;static char bundle_sha[65];
 #define LR_CAP 134217728
 #define LR_ROWS 1000000
@@ -31,7 +32,7 @@ static char normalized[32][320];
 static void bounded_copy(char *dst, long cap, const char *src) {
     long n = strlen(src);
     if (n < 1 || n >= cap) fail("compact config name bound");
-    memcpy(dst, src, n + 1);
+    mm_copy(dst, n + 1, src, n + 1);
 }
 static void configure_slots(char *cfg) {
     char *p = cfg;
@@ -76,7 +77,7 @@ static void define_frame(char **f, int n) {
     for (int i = 0; i < 64; i++)
         if (!((f[3][i] >= '0' && f[3][i] <= '9') || (f[3][i] >= 'a' && f[3][i] <= 'f')))
             fail("compact frame SHA encoding");
-    memcpy(watch_frames[id].sha, f[3], 65);
+    mm_copy(watch_frames[id].sha, 65, f[3], 65);
     watch_frames[id].end = number(f[4]);
 }
 static void normalized_field(int at, const char *key, const char *text) {
@@ -108,7 +109,7 @@ static int normalize_compact(char **f, int n) {
     normalized_field(1, "frame_instance", raw[3]);
     normalized_field(2, "frame_sha", fr->sha);
     normalized_field(3, "cursor", raw[4]);
-    snprintf(num, sizeof num, "%ld", fr->end);
+    (cx_fmt(num, sizeof num, "%ld", fr->end) ? exit(2) : (void)0);
     normalized_field(4, "frame_end", num);
     const char *keys[] = {"output_generation", "output_len", "scratch_generation", "scratch_len"};
     for (int i = 0; i < 4; i++) normalized_field(5+i, keys[i], raw[5+i]);
@@ -117,7 +118,7 @@ static int normalize_compact(char **f, int n) {
         strtoll(raw[9+i], &end, 10);
         if (!*raw[9+i] || *end || errno) fail("compact register integer");
         char key[140];
-        snprintf(key, sizeof key, "value:%s", slot->regs[i]);
+        (cx_fmt(key, sizeof key, "value:%s", slot->regs[i]) ? exit(2) : (void)0);
         normalized_field(9+i, key, raw[9+i]);
     }
     f[0] = "WATCH";
@@ -138,17 +139,17 @@ static void emit_row(long i) {
     int n = snprintf(line, sizeof line, "ENTITY\t%ld\tcode_lo=%ld\tcode_hi=%ld\tsource_lo=%ld\tsource_hi=%ld\tlabel=%d\tobject_module=UNKNOWN\n", i, rows[i].clo, rows[i].chi, rows[i].slo, rows[i].shi, rows[i].label);
     if (n < 0 || n >= sizeof line) fail("row output bound");
     if (output_used + n > sizeof output_buffer) flush_rows();
-    memcpy(output_buffer + output_used, line, n);
+    mm_copy(output_buffer + output_used, n, line, n);
     output_used += n;
 }
 
-static void copyrow(const char *src,long sn,long cur,long len,long gen){if(cur<previous_cursor||cur>sn||len<previous_len||gen!=previous_gen)fail("data pass order/append generation");long a=previous_cursor,z=cur-a,added=len-previous_len;if(z){if(src[cur-1]!='\n'||memchr(src+a,'\n',z-1))fail("LINE is not exactly one source row");if(added){if(added!=z||previous_len!=cn||nr==LR_ROWS)fail("copy length or continuity");rows[nr].slo=a;rows[nr].shi=cur;rows[nr].clo=cn;rows[nr].chi=cn+z;memcpy(code+cn,src+a,z);cn+=z;nr++;}}else if(added||cur!=sn)fail("duplicate/reversed LINE");previous_cursor=cur;previous_len=len;previous_gen=gen;}
+static void copyrow(const char *src,long sn,long cur,long len,long gen){if(cur<previous_cursor||cur>sn||len<previous_len||gen!=previous_gen)fail("data pass order/append generation");long a=previous_cursor,z=cur-a,added=len-previous_len;if(z){if(src[cur-1]!='\n'||memchr(src+a,'\n',z-1))fail("LINE is not exactly one source row");if(added){if(added!=z||previous_len!=cn||nr==LR_ROWS)fail("copy length or continuity");rows[nr].slo=a;rows[nr].shi=cur;rows[nr].clo=cn;rows[nr].chi=cn+z;mm_copy(code+cn, z, src+a, z);cn+=z;nr++;}}else if(added||cur!=sn)fail("duplicate/reversed LINE");previous_cursor=cur;previous_len=len;previous_gen=gen;}
 typedef struct { long lo,hi,first,count; int rule; } Episode;
 static void append_text(const char *text) {
     long n = strlen(text);
     if (n > sizeof output_buffer) fail("episode line budget");
     if (output_used + n > sizeof output_buffer) flush_rows();
-    memcpy(output_buffer + output_used, text, n);
+    mm_copy(output_buffer + output_used, n, text, n);
     output_used += n;
 }
 static int boundary(const char *target, long n, long at) {
@@ -260,27 +261,27 @@ static int episodes(int argc, char **argv) {
     }
     if(!complete)fail("missing episode COMPLETE");
     char line[1024];
-    snprintf(line,sizeof line,"LOWER_EPISODE_ID\trows_sha=%s\tdelta_sha=%s\tconfig_sha=%s\toutput_sha=%s\tclaim=source-row-lineage-only\tobject_module=UNKNOWN%s%s\n",rh,dh,gh,th,bundle_mode?"\twatch_transport=watch-bundle-v1\twatch_sha=":"",bundle_mode?bundle_sha:"");
+    (cx_fmt(line, sizeof line, "LOWER_EPISODE_ID\trows_sha=%s\tdelta_sha=%s\tconfig_sha=%s\toutput_sha=%s\tclaim=source-row-lineage-only\tobject_module=UNKNOWN%s%s\n", rh, dh, gh, th, bundle_mode?"\twatch_transport=watch-bundle-v1\twatch_sha=":"", bundle_mode?bundle_sha:"") ? exit(2) : (void)0);
     append_text(line);
     long covered_end=0,unknown_bytes=0;
     for(long i=0;i<ne;i++){
         Episode *x=&ep[i];
         if(x->lo>covered_end){
-            snprintf(line,sizeof line,"UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n",covered_end,x->lo);
+            (cx_fmt(line, sizeof line, "UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n", covered_end, x->lo) ? exit(2) : (void)0);
             append_text(line);unknown_bytes+=x->lo-covered_end;
         }
         covered_end=x->hi;
         Row *a=&rows[x->first],*b=&rows[x->first+(x->count>1?1:0)];
-        snprintf(line,sizeof line,"EPISODE\t%ld\trule=%s\ttarget_lo=%ld\ttarget_hi=%ld\tnc_lo=%ld\tnc_hi=%ld\tsource0_lo=%ld\tsource0_hi=%ld\tsource1_lo=%ld\tsource1_hi=%ld\tobject_module=UNKNOWN\n",i,x->rule==1?"GENERIC":x->rule==2?"PF":x->rule==3?"PL":x->rule==4?"AF":"AI",x->lo,x->hi,x->first,x->first+x->count,a->slo,a->shi,x->count>=2?b->slo:-1,x->count>=2?b->shi:-1);
+        (cx_fmt(line,sizeof line,"EPISODE\t%ld\trule=%s\ttarget_lo=%ld\ttarget_hi=%ld\tnc_lo=%ld\tnc_hi=%ld\tsource0_lo=%ld\tsource0_hi=%ld\tsource1_lo=%ld\tsource1_hi=%ld\tobject_module=UNKNOWN\n",i,x->rule==1?"GENERIC":x->rule==2?"PF":x->rule==3?"PL":x->rule==4?"AF":"AI",x->lo,x->hi,x->first,x->first+x->count,a->slo,a->shi,x->count>=2?b->slo:-1,x->count>=2?b->shi:-1)?exit(2):(void)0);
         if(x->count==4){
             long used=strlen(line);line[--used]=0;
             Row *c=&rows[x->first+2],*d=&rows[x->first+3];
-            snprintf(line+used,sizeof line-used,"\tsource2_lo=%ld\tsource2_hi=%ld\tsource3_lo=%ld\tsource3_hi=%ld\n",c->slo,c->shi,d->slo,d->shi);
+            (cx_fmt(line+used, sizeof line-used, "\tsource2_lo=%ld\tsource2_hi=%ld\tsource3_lo=%ld\tsource3_hi=%ld\n", c->slo, c->shi, d->slo, d->shi) ? exit(2) : (void)0);
         }
         append_text(line);
     }
-    if(covered_end<(long)tn){snprintf(line,sizeof line,"UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n",covered_end,(long)tn);append_text(line);unknown_bytes+=(long)tn-covered_end;}
-    snprintf(line,sizeof line,"LOWER_EPISODES\tepisodes=%ld\tunknown_observations=%ld\tdry_excluded=%ld\tuncovered_target_bytes=%ld\tobject_module=UNKNOWN\n",ne,unknown,dry_count,unknown_bytes);
+    if(covered_end<(long)tn){(cx_fmt(line, sizeof line, "UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n", covered_end, (long)tn) ? exit(2) : (void)0);append_text(line);unknown_bytes+=(long)tn-covered_end;}
+    (cx_fmt(line, sizeof line, "LOWER_EPISODES\tepisodes=%ld\tunknown_observations=%ld\tdry_excluded=%ld\tuncovered_target_bytes=%ld\tobject_module=UNKNOWN\n", ne, unknown, dry_count, unknown_bytes) ? exit(2) : (void)0);
     append_text(line);flush_rows();return 0;
 }
 int main(int argc,char **argv){if(argc>1&&!strcmp(argv[1],"--watch-bundle")){bundle_mode=1;for(int i=1;i+1<argc;i++)argv[i]=argv[i+1];argc--;}if(argc>1&&!strcmp(argv[1],"--episodes"))return episodes(argc,argv);if(argc!=6)fail("usage SOURCE DELTA CONFIG WATCH OUTPUT");size_t sn,dn,gn,wn,on;char *src=load(argv[1],&sn),*delta=load(argv[2],&dn),*cfg=load(argv[3],&gn),*watch=load_watch(argv[4],&wn),*output=load(argv[5],&on);char sh[65],dh[65],gh[65],oh[65],ch[65];hash(src,sn,sh);hash(delta,dn,dh);hash(cfg,gn,gh);hash(output,on,oh);if(!strstr(cfg,"LINE\tline\n")||!strstr(cfg,"LAY\tcode\n")||!strstr(cfg,"C.init\tcode,nc\n")||!strstr(cfg,"C.next\tnc,na\n")||!strstr(cfg,"C.label\tnc,tok\n"))fail("profile config missing required states");rows=calloc(LR_ROWS,sizeof *rows);code=malloc(sn+1);if(!rows||!code)fail("allocation");char *p=watch,*e=strchr(p,'\n');if(!e)fail("header");*e=0;char *f[64];int nf=fields(p,f);if(strcmp(f[0],"WRITE_EVENTS")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"input_sha"),sh)||strcmp(value(f,nf,"config_sha"),gh)||strcmp(value(f,nf,"output_sha"),oh)||number(value(f,nf,"output_bytes"))!=(long)on)fail("watch content SHA/extent mismatch");int compact=0;for(int i=0;i<nf;i++)if(!strncmp(f[i],"watch_format=",13)){if(strcmp(f[i],"watch_format=compact-v1"))fail("unknown watch_format");compact=1;}if(compact)configure_slots(cfg);p=e+1;long seq=0,next=0,frame=-1;int lay=0,init=0,complete=0;while(*p){e=strchr(p,'\n');if(!e)fail("truncated record");*e=0;nf=fields(p,f);if(!strcmp(f[0],"COMPLETE")){if(complete||number(value(f,nf,"events"))!=seq||e[1])fail("COMPLETE count/trailing records");complete=1;break;}if(compact){if(!strcmp(f[0],"FRAME")){if(nf<2||number(f[1])!=++seq)fail("compact FRAME order/id");sequence_bound(seq);define_frame(f,nf);p=e+1;continue;}if(strcmp(f[0],"WATCHC"))fail("compact transport record");nf=normalize_compact(f,nf);}if(nf<2||strcmp(f[0],"WATCH")||number(f[1])!=++seq)fail("watch order/duplicate/id");sequence_bound(seq);char st[128];state(value(f,nf,"state_hex"),st);long cur=number(value(f,nf,"cursor")),end=number(value(f,nf,"frame_end")),len=number(value(f,nf,"output_len")),gen=number(value(f,nf,"output_generation")),fi=number(value(f,nf,"frame_instance"));const char *fh=value(f,nf,"frame_sha");if(!strcmp(st,"LINE")||!strcmp(st,"LAY")){if(lay||init||strcmp(fh,sh)||end!=(long)sn||cur>end)fail("source frame identity/order");if(!have_line){if(strcmp(st,"LINE")||cur||len)fail("first LINE must start at zero");previous_cursor=cur;previous_len=len;previous_gen=gen;have_line=1;}else copyrow(src,sn,cur,len,gen);if(!strcmp(st,"LAY")){if(cur!=(long)sn||len!=cn)fail("data pass does not close");hash(code,cn,ch);lay=1;}}

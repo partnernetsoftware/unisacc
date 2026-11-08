@@ -5,6 +5,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use cxlib.watchbundle
+#pragma unisa use mem.bytes
 static int bundle_mode;static char bundle_identity[65];
 #define AR_DELTA "8d56c3089e1b46d459d35f577bc8bf2f683f30b198bf0305099f48dffe6e1e3d"
 #define AR_CONFIG "8ef302ee88b76de993624c107118f1ab5f37cadfcfffe3e6e98d2c04679ce964"
@@ -12,11 +13,11 @@ typedef struct {long lo,hi,ws,we,begin,end;} ArRow;
 static ArRow *rows;static long nr,cap;
 static char buffer[65536];static int used;
 static void fail(const char *s){fprintf(stderr,"ARM_ENCODER_RECORD REFUSE %s\n",s);exit(2);}
-static void emit(const char *s,int n){if(n<0||n>=1024)fail("output line");if(used+n>sizeof buffer){if(sy_write_all(1,buffer,used))fail("output write");used=0;}memcpy(buffer+used,s,n);used+=n;}
+static void emit(const char *s,int n){if(n<0||n>=1024)fail("output line");if(used+n>sizeof buffer){if(sy_write_all(1,buffer,used))fail("output write");used=0;}mm_copy(buffer+used, n, s, n);used+=n;}
 static char *load(const char *p,size_t *n,long limit,int text){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>limit)fail("input extent");char *b=cx_read(p,n);if(!b||*n!=(size_t)st.st_size||(text&&(memchr(b,0,*n)||memchr(b,'\r',*n))))fail("input read/text");return b;}
 static void hash(const char *s,size_t n,char h[65]){if(sy_sha256_hex(s,(long)n,h))cx_sha256_hex(s,n,h);}
 static char *watch_load(const char *path,size_t *n){if(bundle_mode)return wb_watch(path,n,bundle_identity);return load(path,n,67108864,1);}
-static void watch_hash(const char *b,size_t n,char h[65]){if(bundle_mode)memcpy(h,bundle_identity,65);else hash(b,n,h);}
+static void watch_hash(const char *b,size_t n,char h[65]){if(bundle_mode)mm_copy(h, 65, bundle_identity, 65);else hash(b,n,h);}
 static int certificate_transport(char *line,int n,long cap){if(!bundle_mode)return n;if(n<1||n>=cap||line[n-1]!='\n')fail("bundle certificate bound");int added=snprintf(line+n-1,cap-n+1,"\twatch_transport=watch-bundle-v1\n");if(added<0||added>=cap-n+1)fail("bundle transport bound");return n-1+added;}
 static long number(const char *s){long n=0;if(!s||!*s)fail("number");for(;*s;s++){if(*s<'0'||*s>'9'||n>1000000000)fail("number");n=n*10+*s-'0';}return n;}
 static int split(char *s,char **v){int n=1;v[0]=s;for(;*s;s++)if(*s=='\t'){if(n==32)fail("columns");*s=0;v[n++]=s+1;}return n;}
@@ -67,7 +68,7 @@ size_t tn,cn,wn,in;char *target=load(argv[1],&tn,134217728,1),*cfg=load(argv[2],
  for(char *p=watch;*p;){char *end=strchr(p,'\n');if(!end)fail("watch final LF");*end=0;char *v[32];int n=split(p,v);
  if(!head){if(strcmp(v[0],"WRITE_EVENTS")||strcmp(field(v,n,"version"),"1")||strcmp(field(v,n,"delta_sha"),delta)||strcmp(field(v,n,"config_sha"),ch)||strcmp(field(v,n,"input_sha"),th)||strcmp(field(v,n,"output_sha"),ih)||number(field(v,n,"output_bytes"))!=(long)in||strcmp(field(v,n,"claim"),"STATE_OBSERVATION_ONLY")||strcmp(field(v,n,"watch_format"),"compact-v1"))fail("watch identity");head=1;p=end+1;continue;}
  if(!strcmp(v[0],"COMPLETE")){if(n!=2||strncmp(v[1],"events=",7)||number(v[1]+7)!=seq||end[1]||phase!=9||pending>=0)fail("watch complete");done=1;break;}
- if(n<2||number(v[1])!=++seq||seq>(bundle_mode?2000000:1000000))fail("watch sequence");if(!strcmp(v[0],"FRAME")){if(n!=5||nf==8||strlen(v[3])!=64)fail("foreign frame");long id=number(v[2]);if(!id)fail("frame zero");for(int j=0;j<nf;j++)if(frames[j].id==id)fail("duplicate frame");frames[nf].id=id;frames[nf].end=number(v[4]);strcpy(frames[nf++].sha,v[3]);if(id==1){if(root||strcmp(v[3],th)||number(v[4])!=(long)tn)fail("root frame");root=1;}p=end+1;continue;}
+ if(n<2||number(v[1])!=++seq||seq>(bundle_mode?2000000:1000000))fail("watch sequence");if(!strcmp(v[0],"FRAME")){if(n!=5||nf==8||strlen(v[3])!=64)fail("foreign frame");long id=number(v[2]);if(!id)fail("frame zero");for(int j=0;j<nf;j++)if(frames[j].id==id)fail("duplicate frame");frames[nf].id=id;frames[nf].end=number(v[4]);(cx_fmt(frames[nf++].sha, sizeof frames[nf++].sha, "%s", v[3]) ? exit(2) : (void)0);if(id==1){if(root||strcmp(v[3],th)||number(v[4])!=(long)tn)fail("root frame");root=1;}p=end+1;continue;}
  if(strcmp(v[0],"WATCHC")||!root||n<10)fail("compact record");long slot=number(v[2]),frame=number(v[3]),cursor=number(v[4]),gen=number(v[5]),out=number(v[6]);if(slot>(forward?11:9)||n!=9+arity[slot]||gen||out>(long)in)fail("watch extent/frame");ArFrame *fr=0;for(int j=0;j<nf;j++)if(frames[j].id==frame)fr=&frames[j];if(!fr||cursor>fr->end||(slot!=7&&frame!=1))fail("foreign frame extent");number(v[7]);number(v[8]);long a[8];for(int j=0;j<arity[slot];j++)a[j]=number(v[9+j]);
  if(slot==0){if(started++||phase||a[0]||a[1]||cursor||out)fail("START root identity");}
  else if(slot==1){long pass=a[0];if(!started||pass>1||((phase==0&&pass)||(phase==2&&pass!=1))||(phase!=0&&phase!=2)||a[1]!=lnum)fail("OP pass/count");if(pending>=0){if(pending!=pass||counts[pass]>=nr||out<startout)fail("OP transaction order");ArRow *prior=&rows[counts[pass]++];if(pass){prior->begin=startout;prior->end=out;}pending=-1;lastout=out;}if(counts[pass]>=nr)fail("duplicate OP row");ArRow *r=&rows[counts[pass]];if(cursor!=r->we||a[2]!=r->ws||a[3]!=r->we)fail("OP row identity");if(counts[pass]==0&&out)fail("rewind OCUT or prefix output");pending=pass;startout=out;lnum++;}
