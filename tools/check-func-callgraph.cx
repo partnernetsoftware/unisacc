@@ -1,0 +1,56 @@
+/* tools/check-func-callgraph.cx -- tools/func-callgraph.cx 的检查。
+ *
+ *   sh ./unisacc.com tools/check-func-callgraph.cx -- [UNISACC_COM]     (仓库根目录运行;默认 ./unisacc.com)
+ *
+ * 1) seed/gen.c 函数数 = 281(G1 基线);2) 小夹具边界逐行精确(含注释/字符串内花括号、续行宏、
+ * 数组初始化、多行签名、单行函数默认不收);3) --oneline 多收单行函数;4) 缺文件非零退出;
+ * 5) seed/gen.c 的矩阵含 A-全局公共 与 X-仅inspect调试 两类。
+ * 输出 PASS/FAIL 与 CHECK_FUNC_CALLGRAPH<TAB>failed=N。 */
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int failed;
+static char buf[1 << 17];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-func-callgraph.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-func-callgraph.%s\n", name); }
+}
+
+int main(int argc, char **argv) {
+    const char *com = argc > 1 ? argv[1] : "./unisacc.com";
+    int cut = 0, rc; long n, lines;
+    {
+        char *a[] = {"sh", (char *)com, "tools/func-callgraph.cx", "--", "seed/gen.c", "--funcs", 0};
+        rc = sy_run(a, buf, sizeof buf, &cut); n = tx_len(buf, sizeof buf);
+        ck(rc == 0 && !cut, "gen-runs");
+        ck(tx_count(buf, n, "\n", 1) == 281, "gen-281-funcs");
+    }
+    {
+        char *a[] = {"sh", (char *)com, "tools/func-callgraph.cx", "--", "tests/fixtures/func-callgraph-small.c", "--funcs", 0};
+        const char *want;
+        rc = sy_run(a, buf, sizeof buf, &cut); n = tx_len(buf, sizeof buf);
+        /* main 为单行函数,默认不收;期望只有 alpha/beta/gamma_f */
+        want = "alpha\t10\t15\t6\nbeta\t16\t20\t5\ngamma_f\t22\t24\t3\n";
+        ck(rc == 0 && tx_same(buf, n, want, tx_len(want, 999)), "fixture-bounds");
+        if (!(rc == 0 && tx_same(buf, n, want, tx_len(want, 999)))) sy_printf("GOT\n%s", buf);
+    }
+    {
+        char *a[] = {"sh", (char *)com, "tools/func-callgraph.cx", "--", "tests/fixtures/func-callgraph-small.c", "--funcs", "--oneline", 0};
+        rc = sy_run(a, buf, sizeof buf, &cut); n = tx_len(buf, sizeof buf);
+        ck(rc == 0 && tx_count(buf, n, "\n", 1) == 5 && tx_contains(buf, n, "one\t9\t9\t1\n", 9), "fixture-oneline");
+    }
+    {
+        char *a[] = {"sh", (char *)com, "tools/func-callgraph.cx", "--", "out/no-such-file.c", 0};
+        rc = sy_run(a, buf, sizeof buf, &cut);
+        ck(rc != 0, "missing-file-rejected");
+    }
+    {
+        char *a[] = {"sh", (char *)com, "tools/func-callgraph.cx", "--", "seed/gen.c", 0};
+        rc = sy_run(a, buf, sizeof buf, &cut); n = tx_len(buf, sizeof buf);
+        lines = tx_count(buf, n, "\tA-全局公共\t", 0 + tx_len("\tA-全局公共\t", 99));
+        ck(rc == 0 && lines > 0 && tx_contains(buf, n, "\tX-仅inspect调试\t", tx_len("\tX-仅inspect调试\t", 99)), "matrix-classes");
+    }
+    sy_printf("CHECK_FUNC_CALLGRAPH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

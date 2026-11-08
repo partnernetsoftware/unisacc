@@ -1,0 +1,67 @@
+/* tools/check-interface-digest.cx -- tools/interface-digest.cx 的检查(仓根运行)。
+   临时副本 out/interface-digest-check/ (formats.md、docs/tapebin-v1*、registry、image-stages、keep-elf)里:
+     a 基线: 7 阶段表可出, rc 0, 同输入两次输出逐字节相同
+     b 改 tape.text 的规范块一字节 -> tape.text 摘要变, 其余 5 种格式摘要不变
+     c 改 formats.md 的无关节(Warning CLI routes)一字节 -> 6 种格式摘要全不变
+     d 改无关文件(docs/glossary.md 副本)-> 全不变
+     e 未知格式名 -> rc 2, 不出摘要
+     f --consumers tape.text 含 cx/compiler/stream/lowering.cx(listed)且含 inferred 行; 未知格式拒绝 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int fails, checks;
+static void ck(int ok, const char *w) { checks++; if (!ok) fails++; sy_printf("%s\tinterface-digest.%s\n", ok ? "PASS" : "FAIL", w); }
+static const char *FM[] = {"src.c", "pp.text", "tokens.typed", "tape.text", "target.text", "image.bytes"};
+static const char *D = "out/interface-digest-check";
+
+static int run(const char *root, const char *a, const char *b, char **o, size_t *n) {
+    /* 负例会让被测工具向 stderr 写诊断;经 sh 丢弃 stderr,保证标记行是批次输出的最后内容 */
+    char cmd[2400]; char *v[4] = { "sh", "-c", cmd, 0 };
+    if (cx_fmt(cmd, sizeof cmd, "exec sh ./unisacc.com tools/interface-digest.cx -- %s%s%s '%s'%s%s%s 2>/dev/null",
+               root ? "--root '" : "", root ? root : "", root ? "'" : "", a, b ? " '" : "", b ? b : "", b ? "'" : "")) return 99;
+    *o = 0; *n = 0; return cx_runv_timeout(v, 40, o, n);
+}
+static void dig(const char *root, const char *f, char out[65]) {
+    char *o; size_t n; out[0] = 0;
+    if (run(root, "--digest", f, &o, &n) == 0 && n >= 64) { mm_copy(out, 65, o, 64); out[64] = 0; }
+}
+static int sh(const char *cmd) { char *v[5] = {"sh", "-c", (char *)cmd, 0}; char *o; size_t n; return cx_runv_timeout(v, 40, &o, &n); }
+/* 在文件 path 中第一次出现 pat 之后插入一个字节 '!' */
+static int poke(const char *path, const char *pat) {
+    size_t n; char *s = (char *)cx_read(path, &n); long k = tx_len(pat, 256), at; char *t;
+    if (!s) return 0;
+    at = tx_find(s, n, pat, k); if (at < 0) return 0;
+    t = (char *)mm_alloc(n + 2); if (!t) return 0;
+    mm_copy(t, n + 2, s, at + k); t[at + k] = '!'; mm_copy(t + at + k + 1, n + 1 - at - k, s + at + k, n - at - k);
+    return cx_write(path, t, n + 1) == 0;
+}
+
+int main(void) {
+    char base[6][65], cur[65], cmd[1024], *o; size_t n; int i, rc;
+    char dir[256]; cx_fmt(dir, sizeof dir, "%s", D);
+    cx_fmt(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/exec/pipeline %s/docs %s/tools && cp exec/pipeline/formats.md exec/pipeline/image-stages.tsv exec/pipeline/keep-elf.txt %s/exec/pipeline/ && cp docs/tapebin-v1* docs/glossary.md %s/docs/ && cp tools/interface-registry.tsv %s/tools/", D, D, D, D, D, D, D);
+    if (sh(cmd)) { ck(0, "setup"); return 1; }
+    ck(run(dir, "--table", 0, &o, &n) == 0 && n > 100, "a.table-rc0");
+    { char *o2; size_t n2; run(dir, "--table", 0, &o2, &n2); ck(o && o2 && n == n2 && mm_cmp(o, o2, n) == 0, "a.deterministic"); }
+    for (i = 0; i < 6; i++) { dig(dir, FM[i], base[i]); if (!base[i][0]) ck(0, FM[i]); }
+    ck(poke("out/interface-digest-check/exec/pipeline/formats.md", "- **tape.text** -- the reference's"), "b.poke");
+    for (i = 0; i < 6; i++) { dig(dir, FM[i], cur); ck(base[i][0] && (tx_eqz(FM[i], "tape.text") ? !tx_eqz(cur, base[i]) : tx_eqz(cur, base[i])), tx_eqz(FM[i], "tape.text") ? "b.tape-digest-changes" : "b.other-unchanged"); }
+    for (i = 0; i < 6; i++) dig(dir, FM[i], base[i]);   /* 以 b 之后为新基线 */
+    ck(poke("out/interface-digest-check/exec/pipeline/formats.md", "## Warning CLI routes"), "c.poke");
+    for (i = 0; i < 6; i++) { dig(dir, FM[i], cur); ck(base[i][0] && tx_eqz(cur, base[i]), "c.unrelated-section-unchanged"); }
+    ck(poke("out/interface-digest-check/docs/glossary.md", "a"), "d.poke");
+    for (i = 0; i < 6; i++) { dig(dir, FM[i], cur); ck(base[i][0] && tx_eqz(cur, base[i]), "d.unrelated-file-unchanged"); }
+    rc = run(0, "--digest", "no.such.fmt", &o, &n);
+    ck(rc == 2 && n == 0, "e.unknown-format-rejected");
+    rc = run(0, "--consumers", "no.such.fmt", &o, &n);
+    ck(rc == 2, "f.unknown-consumers-rejected");
+    rc = run(0, "--consumers", "tape.text", &o, &n);
+    ck(rc == 0 && o && tx_find(o, n, "cx/compiler/stream/lowering.cx\tscan+listed", 40) >= 0, "f.listed-consumer-found");
+    ck(o && tx_find(o, n, "\tinferred", 9) >= 0, "f.inferred-marked");
+    sy_printf("CHECK_INTERFACE_DIGEST\tchecks=%d fails=%d\n", checks, fails);
+    return fails ? 1 : 0;
+}

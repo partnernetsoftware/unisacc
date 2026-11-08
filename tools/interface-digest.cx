@@ -1,0 +1,133 @@
+/* tools/interface-digest.cx -- 7 阶段接口摘要与「格式 -> 消费者」机查。
+   用法(仓根): sh ./unisacc.com tools/interface-digest.cx -- [--root DIR] [--table | --consumers FMT | --digest FMT]
+     --table(默认)   每阶段一行: stage in_fmt in_digest12 out_fmt out_digest12
+     --consumers FMT 列 `CONSUMER fmt file source`; source = scan(全文含格式名) | listed | inferred | scan+listed
+     --digest FMT    输出 64 位 hex 摘要
+   摘要 = sha256( 对 registry 中该格式每条 S 规范: "SPEC\n" + 抽出文本 + "\n" )。rc: 0 成功; 2 未知格式/规范缺失/IO。
+   不做: 不解析语法(只对文本做内容摘要), 扫描只认格式名字面, 不认字段名。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use crypto.sha256
+
+#define BUF (1 << 20)
+static char acc[BUF];
+static long accn;
+
+static void die(const char *a, const char *b) { sy_eprintf("interface-digest: %s %s\n", a, b ? b : ""); exit(2); }
+static void put(const char *p, long n) { if (accn + n > BUF) die("buffer full", 0); mm_copy(acc + accn, BUF - accn, p, n); accn += n; }
+static long linend(const char *s, long n, long at) { while (at < n && s[at] != '\n') at++; return at; }
+static int starts(const char *s, long n, long at, const char *p) { long k = tx_len(p, 4096); return at + k <= n && tx_find(s + at, k, p, k) == 0; }
+
+/* 抽取 SPEC 对应文本追加到 acc */
+static void extract(const char *spec) {
+    char path[512], key[256]; long pl = 0, i, n = tx_len(spec, 1024), at = 0, e, from = -1; int mode = 0; size_t fn; char *f;
+    while (pl < n && spec[pl] != '@' && spec[pl] != '#') pl++;
+    if (pl >= 511) die("path too long", spec);
+    mm_copy(path, sizeof path, spec, pl); path[pl] = 0;
+    if (pl < n) { mode = spec[pl] == '@' ? 1 : 2; cx_fmt(key, sizeof key, "%s", spec + pl + 1); }
+    f = (char *)cx_read(path, &fn);
+    if (!f) die("spec file missing:", path);
+    put(spec, n); put("\n", 1);
+    if (mode == 0) { put(f, (long)fn); put("\n", 1); return; }
+    while (at < (long)fn) {
+        e = linend(f, (long)fn, at);
+        if (from < 0) {
+            char pre[300];
+            if (mode == 1) cx_fmt(pre, sizeof pre, "- **%s** ", key); else cx_fmt(pre, sizeof pre, "## %s", key);
+            if (starts(f, (long)fn, at, pre)) from = at;
+            else if (mode == 1) { cx_fmt(pre, sizeof pre, "- **%s**", key); if (starts(f, (long)fn, at, pre)) from = at; }
+        } else if (mode == 1 ? (e == at || f[at] != ' ') : (starts(f, (long)fn, at, "## ") || starts(f, (long)fn, at, "# "))) {
+            put(f + from, at - from); put("\n", 1); return;
+        }
+        at = e + 1;
+    }
+    if (from < 0) die("section not found:", spec);
+    put(f + from, (long)fn - from); put("\n", 1);
+    (void)i;
+}
+
+static char *reg; static size_t regn;
+static void loadreg(void) { reg = (char *)cx_read("tools/interface-registry.tsv", &regn); if (!reg) die("registry missing", 0); }
+
+/* 逐行遍历 registry: 取第 k 列 */
+static int col(const char *s, long n, int k, char *out, long cap) {
+    long at = 0; int c = 0;
+    while (at <= n) {
+        long a = at; while (at < n && s[at] != '\t') at++;
+        if (c == k) { if (at - a >= cap) die("column too long", 0); mm_copy(out, cap, s + a, at - a); out[at - a] = 0; return 1; }
+        c++; at++;
+    }
+    return 0;
+}
+static int known(const char *fmt) {
+    long at = 0; char t[8], f[128];
+    while (at < (long)regn) { long e = linend(reg, regn, at); if (e > at && reg[at] != '#') { col(reg + at, e - at, 0, t, 8); if (tx_eqz(t, "S") && col(reg + at, e - at, 1, f, 128) && tx_eqz(f, fmt)) return 1; } at = e + 1; }
+    return 0;
+}
+static void digest(const char *fmt, char hex[65]) {
+    long at = 0; char t[8], f[128], sp[512];
+    if (!known(fmt)) die("unknown format:", fmt);
+    accn = 0;
+    while (at < (long)regn) {
+        long e = linend(reg, regn, at);
+        if (e > at && reg[at] != '#') {
+            col(reg + at, e - at, 0, t, 8);
+            if (tx_eqz(t, "S") && col(reg + at, e - at, 1, f, 128) && tx_eqz(f, fmt)) { col(reg + at, e - at, 2, sp, 512); extract(sp); }
+        }
+        at = e + 1;
+    }
+    cs_sha256_hex(acc, accn, hex);
+}
+
+static int has(const char *list, const char *x) { long at = 0, n = tx_len(list, 1 << 20); while (at < n) { long e = at; while (e < n && list[e] != '\n') e++; if (e - at == tx_len(x, 4096) && tx_find(list + at, e - at, x, e - at) == 0) return 1; at = e + 1; } return 0; }
+
+static void consumers(const char *fmt) {
+    static char scan[1 << 20]; char *v[24]; int i = 0; char *o = 0; size_t on = 0; long at = 0; char t[8], f[128], file[256], kind[32];
+    if (!known(fmt)) die("unknown format:", fmt);
+    v[i++] = "grep"; v[i++] = "-rIlF"; v[i++] = "--exclude-dir=.git"; v[i++] = "--exclude-dir=out"; v[i++] = "--exclude-dir=archive"; v[i++] = "--exclude-dir=plans";
+    v[i++] = "--exclude=interface-*"; v[i++] = "--exclude=check-interface-*"; v[i++] = "-e"; v[i++] = (char *)fmt;
+    v[i++] = "tests"; v[i++] = "tools"; v[i++] = "cx"; v[i++] = "exec"; v[i++] = "docs"; v[i++] = "seed"; v[i++] = "prd.md"; v[i] = 0;
+    cx_runv_timeout(v, 40, &o, &on);   /* grep rc 1 = 无匹配, 不当错误 */
+    if (on >= sizeof scan) die("scan too big", 0);
+    if (o) { mm_copy(scan, sizeof scan, o, on); } scan[on] = 0;
+    while (at < (long)on) { long e = linend(scan, on, at); if (e > at) { scan[e] = 0; if (!starts(scan, on, at, "tools/interface-")) sy_printf("CONSUMER\t%s\t%s\t%s\n", fmt, scan + at, "scan"); scan[e] = '\n'; } at = e + 1; }
+    at = 0;
+    while (at < (long)regn) {
+        long e = linend(reg, regn, at);
+        if (e > at && reg[at] != '#') {
+            col(reg + at, e - at, 0, t, 8);
+            if (tx_eqz(t, "C") && col(reg + at, e - at, 1, f, 128) && tx_eqz(f, fmt)) {
+                col(reg + at, e - at, 2, file, 256); col(reg + at, e - at, 3, kind, 32);
+                if (has(scan, file)) sy_printf("CONSUMER\t%s\t%s\t%s\n", fmt, file, "scan+listed");
+                else sy_printf("CONSUMER\t%s\t%s\t%s\n", fmt, file, kind);
+            }
+        }
+        at = e + 1;
+    }
+}
+
+static void table(void) {
+    size_t n; char *s = (char *)cx_read("exec/pipeline/image-stages.tsv", &n); long at = 0; char st[32], a[64], b[64], ha[65], hb[65];
+    if (!s) die("image-stages.tsv missing", 0);
+    sy_printf("stage\tin_fmt\tin_digest\tout_fmt\tout_digest\n");
+    while (at < (long)n) {
+        long e = linend(s, n, at);
+        if (e > at && s[at] != '#') { col(s + at, e - at, 0, st, 32); col(s + at, e - at, 1, a, 64); col(s + at, e - at, 2, b, 64); digest(a, ha); digest(b, hb); ha[12] = 0; hb[12] = 0; sy_printf("%s\t%s\t%s\t%s\t%s\n", st, a, ha, b, hb); }
+        at = e + 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    int a = 1;
+    if (a + 1 < argc && tx_eqz(argv[a], "--root")) { if (sy_chdir(argv[a + 1])) die("chdir", argv[a + 1]); a += 2; }
+    loadreg();
+    if (a >= argc || tx_eqz(argv[a], "--table")) table();
+    else if (a + 1 < argc && tx_eqz(argv[a], "--consumers")) consumers(argv[a + 1]);
+    else if (a + 1 < argc && tx_eqz(argv[a], "--digest")) { char h[65]; digest(argv[a + 1], h); sy_printf("%s\n", h); }
+    else die("usage: [--root DIR] [--table|--consumers FMT|--digest FMT]", 0);
+    return 0;
+}
