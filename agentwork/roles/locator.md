@@ -4,4 +4,4 @@ READ: 工作项 `context` 所列文件与命令输出;必要时用 grep 找全�
 DECIDE: 落点在哪个文件/函数/表;改动属于哪一层(事实表→生成器→网,而不是在驱动里写特判);同类位置还有几处。判据:落点必须能被一条命令验证。
 SPEED: 先 grep 缩圈,再读最小行段;找到第一个可验证落点就出结论,不通读。
 DON'T: 不改任何文件;不给实现方案(只给落点与风险);不下"应该没问题"之类无证据结论。
-OUTPUT: WORKFLOW.md §6 JSON;`steps` 每步须有 `path:line` 引用与逐字 `quote`;`next` 必须含验证命令。
+OUTPUT: agentwork/WORKFLOW.md §6 JSON;`steps` 每步须有 `path:line` 引用与逐字 `quote`;`next` 必须含验证命令。

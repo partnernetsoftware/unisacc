@@ -80,7 +80,7 @@
 | 超时作业的整棵树清理 | `#pragma unisa use sys.process` → `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
 | 子进程超时契约（run/capture + residue） | `sh ./unisacc.com tools/check-netpack.cx` | 双管EOF后仍按原deadline非阻塞等待，超时冻结整树后击杀并有界定向回收直接子，不抢调用者的其他子进程；`np_result.residue` 0才算干净。孤儿可见性仍需调用方先`np_subreaper()`。`UNISACC_NP_FAULT=residue`为tools与run-batch的显式注入缝，默认关，其它值具名拒绝；sysx产品单次回收疑点另列0.0.47，不混同此测试库修复。 |
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
-| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `work/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
+| 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `agentwork/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
 
 #### 2.2 测试（棘轮、门禁、批次）
 
@@ -102,7 +102,7 @@
 | 单阶段过滤器（分段编译管道） | `./unisacc.com stream STAGE [--route R] [--res NAME[=FILE]] [--models PKG] [--raw] < in > out`；`stream frame --in L=F...`；`stream sidecar` | 同一 st_span/包/`\0cli/*` 跑一个阶段；属性表随流（USLATTRT）；`e2\|e1\|e3\|sidecar\|prune\|lower\|elf` 与 `-o` 逐字节同；校验 `tests/check-stream-pipe.cx`；改表→`tools/lab-loader/p3-swap.cx --model`→`--models` 实测 ≈8s |
 | stream 路由目标一致性 | `sh ./unisacc.com tools/check-stream-target.cx`（批次 `stream-target`）；开发可指定 `PRODUCT/ROOT/BASELINE_PRODUCT` | route-only 从事实表 cell 前缀导出目标，显式 target 冲突一行拒绝；六 cell 宏与 direct 相等且互异、E3 long 字宽、显式一致及默认宿主逐次实跑；旧公开预发布的 route-only 曾错误沿用宿主宏，新候选重建后生效，未供旧产品伪报通过 |
 | 分段单阶段用例（逐段字节 golden） | `sh ./unisacc.com tests/check-stages.cx [-- PRODUCT ROOT]`（批次 `stages`） | `tests/stages/<段>/` 每段 `args/in/expect`，可选 `bad/bad.err/bad.args`，喂 `unisacc stream STAGE`；无拒绝用例的段记 GAP。tape 入口校验撤回，本批如实红（见 CHANGELOG 已知限制） |
-| 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `work/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
+| 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `agentwork/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
 | 已知 FAIL 必须登记 | `sh ./unisacc.com tests/check-known-fail.cx -- AGGREGATE.out WAIVERS.tsv`（`-- --self-test`） | rc1 门槛 1：聚合输出里非 PASS 的批次都得是 `tests/waivers-0.0.44.tsv` 的 `F` 行；F 行只说"已知有主有计划"，不把 FAIL 变 PASS |
 | 懒分配表有没有漏守卫 | `sh ./unisacc.com tools/check-asmtext-tables.cx -- ROOT` | 碰表的 asmtext 入口必须调 `at_tables()`；删掉守卫即红 |
 | 标准流写失败可见吗 | `sh ./unisacc.com tools/check-stdio.cx -- ROOT` | `/dev/full` 下 `puts`/`fflush`/`ferror` 必须全报，退出码 15 |
@@ -242,7 +242,7 @@ L3 资源                    头文件、事实表等
 - **产品身份 = manifest 的 sha256(Merkle 根)**。取代 `pp_product_digest` / `ape-receipt` / `build.json` artifact 段等多处各算一份的口径(见 `plans/identity-inventory-2026-11-02.md`、`plans/identity-unify-2026-11-02.md`)。kernel context 仍独立于它(判断 kernel 可否复用,不随全树变),两代 GEN 互证仍保留。
 - 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节→输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
 - 单文件发布(pack 内嵌)保留;外部目录形态用于开发。启动开销是主要风险(现热 `-run` ≈10ms),每步测量。
-- 进度与分步:见 `work/items.tsv`(B0 P3 explode/implode → B1 resolver → B2 阶段测试台 → B3 基座外置 → B4 booter APE 头 → B5 身份收敛到 manifest)。
+- 进度与分步:见 `agentwork/items.tsv`(B0 P3 explode/implode → B1 resolver → B2 阶段测试台 → B3 基座外置 → B4 booter APE 头 → B5 身份收敛到 manifest)。
 - 现状(2026-11-06):L1/L2/L3 的外置与 booter 分离([B3][B4][B5c])未完成,发布形态仍是单文件 APE(尾部一份包);已落地的是 resolver/explode 工具与 `unisacc stream STAGE` 阶段过滤器。三层口径(loader / ISA 切片 / 模型)与 CORE-MIN 见 §9.1。
 
 ## 5. 源码结构（src/ 六层 + cx/ 树）
@@ -346,7 +346,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话） |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `work/`、`release/`、`roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 任务看板与账（work/，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整四组地图见 [docs/REPO-MAP.md](docs/REPO-MAP.md) |
+| `agentwork/`、`release/`、`agentwork/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 任务看板与账（agentwork/，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整四组地图见 [docs/REPO-MAP.md](docs/REPO-MAP.md) |
 
 <a id="current-plans"></a>
 ## 9. 当前状态与路线
@@ -356,7 +356,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前版本：**0.0.47 已于 2026-11-08 正式发布**（tag `v0.0.47`，提交 `e8309f0488`；GitHub Release 非 draft 非 prerelease；APE sha256 `fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`，6,215,778 字节；冻结产品源 `7b98ec2c06`；同候选六目标原生 CI 运行 `42408207540` 为 42/0）。全批 s9：445 批 = 380 PASS + 0 真 FAIL + 32 KNOWN-GAP + 10 INFRA + 23 NOT-AVAIL，**NOT_QUALIFIED**。上一版 0.0.46 同日早些时候发布。事实见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
 
-下一版：**0.0.48**，计划见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)；任务状态以 `work/items.tsv`、进度以 `work/ledger.tsv` 为准，本节不复述条目状态。
+下一版：**0.0.48**，计划见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)；任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv` 为准，本节不复述条目状态。
 
 三个最大阻塞：
 - 全批资格：32 KNOWN-GAP / 10 INFRA / 23 NOT-AVAIL 未收敛，全批仍 NOT_QUALIFIED。
@@ -367,9 +367,9 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
-| 任务队列 | `work/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
+| 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
 | 当前发布 | 0.0.47 已发布（见 §9.1）；0.0.46 同日早些时候发布；旧候选资格不迁移 | [0.0.47 发布说明](plans/release-notes-0.0.47.md) |
-| 下一版 | 0.0.48 | [计划](plans/v0.0.48-unisacc.md)、`work/items.tsv` |
+| 下一版 | 0.0.48 | [计划](plans/v0.0.48-unisacc.md)、`agentwork/items.tsv` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
@@ -393,7 +393,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="optimization-leads"></a>
 ### 9.5 优化线索
 
-2026-11-03 实测的优化线索表（libc 闭包、整树 SID、生成代码性能、资源段、执行内核/loader 体积等）已登记到各版计划与 `work/items.tsv`，此处不复写；入口见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)，旧表全文见 §10 的完整旧版。
+2026-11-03 实测的优化线索表（libc 闭包、整树 SID、生成代码性能、资源段、执行内核/loader 体积等）已登记到各版计划与 `agentwork/items.tsv`，此处不复写；入口见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)，旧表全文见 §10 的完整旧版。
 
 ## 10. 归档索引
 

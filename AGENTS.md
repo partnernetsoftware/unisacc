@@ -12,7 +12,7 @@
 - 每轮先读 `prd.md` 的思维树、记忆宫殿、能力速查。事实、阻塞和下一动作原位更新，旧进度不能继续冒充当前状态。
 - 旧测试及工作规则在 `archive/testing-c43-legacy/`；旧1333项队列已停调度，不再作为主入口或完成率。原始失败和未知状态保留。
 - 新测试入口：`sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`。smoke是局部验证；`--all`在覆盖不完整时必须非零。
-- 工作流与管道见 `WORKFLOW.md`(事实由命令产生、判断由模型产生;gate 是可执行命令;只有一个集成者写 main)。当前任务看 `work/items.tsv`,进度看 `work/ledger.tsv`,角色提示词在 `roles/`。**不再为交接单写带日期的 plans/*.md。**
+- 工作流与管道见 `agentwork/WORKFLOW.md`(事实由命令产生、判断由模型产生;gate 是可执行命令;只有一个集成者写 main)。当前任务看 `agentwork/items.tsv`,进度看 `agentwork/ledger.tsv`,角色提示词在 `agentwork/roles/`。**不再为交接单写带日期的 plans/*.md。**
 
 ## 直接使用自身体系
 

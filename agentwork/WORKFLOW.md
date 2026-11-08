@@ -1,7 +1,7 @@
-# WORKFLOW.md —— unisacc 的开发工作流与管道
+# agentwork/WORKFLOW.md —— unisacc 的开发工作流与管道
 
 本文件是稳定规范:谁都按它干活,换窗口、换模型、换人都不用重新交接。易变的内容各有归处:
-规则 → `AGENTS.md`;产品与架构 → `prd.md`;**当前要做什么 → `work/items.tsv`;做到哪了 → `work/ledger.tsv`**;角色提示词 → `roles/*.md`。
+规则 → `AGENTS.md`;产品与架构 → `prd.md`;**当前要做什么 → `agentwork/items.tsv`;做到哪了 → `agentwork/ledger.tsv`**;角色提示词 → `agentwork/roles/*.md`。
 不再为"交接"单写带日期的 `plans/*.md`;`plans/` 只放调查、设计探针与一次性研究。
 
 ## 1 三条原则
@@ -10,17 +10,17 @@
 3. **改动先在私有副本;只有一个集成者写 main。** 实现节点产出 patch,不直接写共享检出。
 
 ## 2 进入一个任务(任何 agent 的开工顺序)
-1. 读 `AGENTS.md`(规则)→ 本文件 → 你的角色文件 `roles/<role>.md` → `work/items.tsv` 里你的那一行。
+1. 读 `AGENTS.md`(规则)→ 本文件 → 你的角色文件 `agentwork/roles/<role>.md` → `agentwork/items.tsv` 里你的那一行。
 2. 只读该行 `context` 列出的文件;要读别的,先在回信 `needs` 里说明。
 3. 在私有副本(`git archive HEAD` 到 `out/work/<id>/`)里做;跑 gate;把输出原样附在回信里。
 
-## 3 工作项 `work/items.tsv`
+## 3 工作项 `agentwork/items.tsv`
 制表符分隔,一项一行:
 `id | goal(一句) | role | domain(可写路径,分号分隔) | gate(验收命令) | context(必读路径,分号分隔) | budget(分钟) | deps | state`
 - `domain` 外一律不改;两个工作项 domain 相交则后者排队。
-- `state` ∈ `READY / DOING / VERIFYING / DONE / BLOCKED / REOPENED`;状态以 `work/ledger.tsv` 最新行为准,items 里的 state 只是快照。
+- `state` ∈ `READY / DOING / VERIFYING / DONE / BLOCKED / REOPENED`;状态以 `agentwork/ledger.tsv` 最新行为准,items 里的 state 只是快照。
 
-## 4 账本 `work/ledger.tsv`(只追加)
+## 4 账本 `agentwork/ledger.tsv`(只追加)
 `时间 | id | 事件 | commit | 证据(命令+输出一行或其哈希) | 角色/模型`
 看板、todo、信封里的口头状态一概不作依据;"落后项"=roadmap 里已到期而账本无 DONE 的项。
 
@@ -67,7 +67,7 @@ INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → 
 - 构造链每步有硬 bound;构造运行期间不并行跑批次(并行负载会造成假超时)。
 
 ## 8 并发与冲突
-读并行、写按 domain 串行;冲突域只有三类:工作树、候选/材料身份、harness。runner 持 `work/locks.tsv`(domain→占用项)。
+读并行、写按 domain 串行;冲突域只有三类:工作树、候选/材料身份、harness。runner 持 `agentwork/locks.tsv`(domain→占用项)。
 
 ## 9 度量与淘汰
 每次 JUDGE/IMPL 记录 token、时间、是否 INVALID、`verified` 条数;按"角色×模型"统计产出(DONE 数/消耗),低产组合降级或淘汰。
@@ -77,7 +77,7 @@ INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → 
 
 ## 11 归档准则(减少干扰信息)
 - **只归档不删除**:`git mv` 到 `archive/<原目录名>/<日期或版本>/`,保留历史;不改写内容。
-- 可归档判据(须同时给命令证据):① 无入站引用——除 `archive/` 外,被 `tools/ tests/ src/ cx/ prd.md AGENTS.md WORKFLOW.md work/ roles/` 引用次数为 0,或引用已同步改到新路径;② 内容已被取代(有新文档/新工具覆盖)或对应工作项已 DONE/作废;③ 不是生成物、不是测试输入、不是 `tests/batches.tsv`/`coverage.tsv` 登记的 fixture。
+- 可归档判据(须同时给命令证据):① 无入站引用——除 `archive/` 外,被 `tools/ tests/ src/ cx/ prd.md AGENTS.md agentwork/WORKFLOW.md agentwork/ agentwork/roles/` 引用次数为 0,或引用已同步改到新路径;② 内容已被取代(有新文档/新工具覆盖)或对应工作项已 DONE/作废;③ 不是生成物、不是测试输入、不是 `tests/batches.tsv`/`coverage.tsv` 登记的 fixture。
 - 禁区:`apps/csih/`、`ujs/`、`kernel/`(生成物)、`include/`、`seed/`、`weights/`、`exec/`、`tests/`、`tools/`(这些只能经各自工作项处理)。
 - 归档后:入口文档(`prd.md` 记忆宫殿、`plans/README`)里的链接同步;`tools/ratchets.cx` 9/9;`tests/run.cx -- --smoke` 不退化。
 - `plans/` 只留当前仍在驱动工作的调查;其余按日期归档。`out/`、`tmp/` 不入库,不属此处。

@@ -4,4 +4,4 @@ READ: 各方案及其证据(命令输出、`path:line`);工作项 gate。
 DECIDE: 选哪一个。判据按序:① 有执行证据优先于无;② 改动面小优先;③ 不引入新的重复口径/新抄一份常量;④ 可回滚。
 SPEED: 只比较证据,不重新调研;证据不足就写 `needs` 指明缺哪条命令的输出,不猜。
 DON'T: 不折中拼凑方案;不引入第三个方案(除非两者都违反硬规矩,此时说明违反哪条)。
-OUTPUT: WORKFLOW.md §6 JSON;`rejected` 必须列出被否决项及一句理由。
+OUTPUT: agentwork/WORKFLOW.md §6 JSON;`rejected` 必须列出被否决项及一句理由。

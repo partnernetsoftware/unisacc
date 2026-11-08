@@ -1,6 +1,6 @@
 ---
 name: unisacc-cx
-description: 写脚本、自动化、批处理、文本与文件处理、TSV 表、子进程、测试夹具、构建胶水、小型本机服务工具时，优先用 `sh ./unisacc.com FILE.cx -- ARGS`（unisacc 自带的 .cx 方言，直接运行、不落盘），而不是 python / node / bun。覆盖：三分钟上手、python/node 惯用法到 cx 模块的迁移对照表（每条实跑）、架构规则（不直调 libc、有界 API、≤60 秒）、模块化与内存安全现状、常用工具箱、常见坑、逐步迁移路线。不适用：需要大型三方生态（numpy/pandas、浏览器、ORM、HTTP 框架）、JSON/正则/哈希表这些 cx 还没有的模块——先查 `cx/`、`ext/`、`tools/cxlib/` 有没有，没有就回落到原语言并把缺口登记到 `work/items.tsv`，不要假装有。
+description: 写脚本、自动化、批处理、文本与文件处理、TSV 表、子进程、测试夹具、构建胶水、小型本机服务工具时，优先用 `sh ./unisacc.com FILE.cx -- ARGS`（unisacc 自带的 .cx 方言，直接运行、不落盘），而不是 python / node / bun。覆盖：三分钟上手、python/node 惯用法到 cx 模块的迁移对照表（每条实跑）、架构规则（不直调 libc、有界 API、≤60 秒）、模块化与内存安全现状、常用工具箱、常见坑、逐步迁移路线。不适用：需要大型三方生态（numpy/pandas、浏览器、ORM、HTTP 框架）、JSON/正则/哈希表这些 cx 还没有的模块——先查 `cx/`、`ext/`、`tools/cxlib/` 有没有，没有就回落到原语言并把缺口登记到 `agentwork/items.tsv`，不要假装有。
 ---
 
 # unisacc + .cx：把脚本从 python/node/bun 换过来
@@ -14,7 +14,7 @@ description: 写脚本、自动化、批处理、文本与文件处理、TSV 表
 | 场景 | 选 |
 |---|---|
 | 一次性文本/TSV 处理、文件改写、测试夹具生成、构建胶水、子进程编排、哈希/校验、小 CLI | **cx**（本文） |
-| 要 numpy/pandas/浏览器/ORM/HTTP 框架、或要 JSON/正则/哈希表且今天就要 | 先查 `cx/ ext/ tools/cxlib/`；没有 → 回落原语言，并在 `work/items.tsv` 立 DRAFT 缺口条目 |
+| 要 numpy/pandas/浏览器/ORM/HTTP 框架、或要 JSON/正则/哈希表且今天就要 | 先查 `cx/ ext/ tools/cxlib/`；没有 → 回落原语言，并在 `agentwork/items.tsv` 立 DRAFT 缺口条目 |
 | 另一个车道的文件（`apps/csih/`、`ujs/`） | 不动，发信封给主人 |
 
 为什么是 cx：不用装运行时（一个文件 `unisacc.com` 就是编译器和解释器）；输出可写成六目标可执行文件；模块边界、带界 API 和运行期所有权检查由产品和棘轮一起守着；工具沉淀到 `tools/` 后别的代理能复用。
@@ -244,8 +244,8 @@ other_still=1
 
 **先换**（收益高、风险低）：① 一次性文本/TSV 处理与报表（`tx_fields` + `sb_*`）；② 测试夹具生成与 golden 比对（`cx_read` + `mm_same`，本文的 check 就是）；③ 构建胶水与子进程编排（`sy_run`/`cx_runv_timeout`，天然带 60 秒 deadline）。
 
-**验收 = 行为等价对照**：同一输入分别喂旧脚本与新 `.cx`，stdout、stderr、退出码、产物逐字节比较（`cmp`/`sha256sum`），对照至少覆盖正例、空输入、坏输入三类；对照通过后旧脚本移到 `archive/` 并在 `work/ledger.tsv` 记一行，不删历史。
+**验收 = 行为等价对照**：同一输入分别喂旧脚本与新 `.cx`，stdout、stderr、退出码、产物逐字节比较（`cmp`/`sha256sum`），对照至少覆盖正例、空输入、坏输入三类；对照通过后旧脚本移到 `archive/` 并在 `agentwork/ledger.tsv` 记一行，不删历史。
 
-**不该换**：要 JSON/正则/HTTP 框架/数值栈且 cx 没有对应模块；别的车道的文件；一次性用完即弃且不进仓的命令。遇到这些：先查模块，没有就在 `work/items.tsv` 立缺口条目，再回落。
+**不该换**：要 JSON/正则/HTTP 框架/数值栈且 cx 没有对应模块；别的车道的文件；一次性用完即弃且不进仓的命令。遇到这些：先查模块，没有就在 `agentwork/items.tsv` 立缺口条目，再回落。
 
 **登记**：新 check 用 `tools/register.cx` 登记（`tests/batches.tsv` 一行 + `tests/coverage.tsv` 一行），提交用 `commit-own.cx --keyed`。本文自身的检查：`sh ./unisacc.com tests/check-skill-cx.cx`（批次 `skill-cx`，标记 `CHECK_SKILL_CX`）。

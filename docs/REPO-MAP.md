@@ -20,7 +20,7 @@
 | `tests/` | 批次表 `batches.tsv`、覆盖表 `coverage.tsv`、`run.cx` 与批次检查;入口 `sh ./unisacc.com tests/run.cx -- --list` |
 | `weights/` | 静态输入:金标 `gold/*.tsv`、`built.uns2`(构造网的输入) |
 | `release/` | 发布材料:`candidate.tsv`(候选身份唯一来源)、读回/布局工具说明;用法见 `release/README.md` |
-| `work/` | 任务与账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`(分治索引) ——**管理账,不是产品事实表**:只给流程工具读写,不进「TSV→NN→unisacc」链,与 `exec/`、`weights/` 里的事实表无关 |
+| `agentwork/` | 任务与账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`(分治索引) ——**管理账,不是产品事实表**:只给流程工具读写,不进「TSV→NN→unisacc」链,与 `exec/`、`weights/` 里的事实表无关 |
 | `.github/` | CI 工作流(六目标原生验证 `candidate-native.yml`) |
 
 ## 三、文档与计划
@@ -30,7 +30,7 @@
 | `plans/` | 版本计划与设计记录:现行 `v0.0.48-unisacc.md`、`standing-goal.md`、`design-review-log.md`、`release-notes-*.md`;过期的进 `archive/plans/` |
 | `docs/` | 契约与说明(`glossary.md`、`toolchain.md`、本页) |
 | `README.md` | 用户视角:下载、Quick start、已知限制 |
-| `AGENTS.md`、`CLAUDE.md`、`WORKFLOW.md`、`roles/` | 协作规则与角色提示词 |
+| `AGENTS.md`、`CLAUDE.md`、`agentwork/WORKFLOW.md`、`agentwork/roles/` | 协作规则与角色提示词 |
 | `spec.md`、`ARCHITECTURE.md` | 条款全文与早期架构叙述(`ARCHITECTURE.md` 含历史段落,以 `prd.md` 为准) |
 
 ## 四、车道、实验与归档
