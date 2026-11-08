@@ -405,3 +405,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 - [archive/testing-c43-legacy/](archive/testing-c43-legacy/) —— 旧 1333 项测试套件（已停调度）。
 - [archive/reference-c/](archive/reference-c/)、[archive/reference-py/](archive/reference-py/) —— 旧 C/Python 参考实现。
 - [archive/plans/](archive/plans/) —— 历史计划与设计探针。
+
+〔2026-11-08 cc评审后续，C47-DRIVER-TARGET-OBJECT / C47-LOGIC-DISTRIBUTION〕先登记两项任务。修复已装0.0.47的--target拒绝与裸-c只出tape回退，保留默认-run最小复现，补六目标格式合同并重建核身份；独立普查表/生成程序/网/经典机制代码及六片解压模块字节，明确统计分母、重叠与未归因，为D1设计提供数据。当前均DOING，未借旧CI或发布资格。
+
+〔C47-DRIVER-TARGET-OBJECT 定位/决定〕已装0.0.47默认-run最小main成功；--target lnx/x86_64 -o报option not migrated，裸-c输出_start tape（out/c47-driver-fix/*.before.log）。--target只选目标不覆盖-E/-S/-c；裸-c缺目标时取tn_self，非Linux沿现有-funit容器合同（Mach-O/COFF只载unit tape，由unisacc链接，不宣称系统链接器可用），保留-S与--tapebin显式文本路径。旧cxt_object低层拒绝合同保留，driver在展开前规范化。

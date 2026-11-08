@@ -1,0 +1,88 @@
+/* Product CLI regression. Each invocation covers one OS pair or CLI contracts.
+ * sh ./unisacc.com tests/driver-target-object.cx -- ROOT lnx|osx|win|cli
+ * Independent header oracle: ELF64 little-endian type/machine, Mach-O64
+ * cputype/filetype, PE32+ signature/machine. No foreign execution claim.
+ * Each child has an 8-second process-tree deadline; four Linux compiles max.
+ * Bare -c must create a host .o; no system-linker compatibility is implied.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sysx.process
+#pragma unisa use sys.hostid
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static char root[4096], work[4400], com[4400], src[4600], image[4600];
+static int count, failed;
+static void die(const char *s) { fprintf(stderr,"driver-target-object: %s\n",s); exit(2); }
+static void ck(int ok,const char *label) { count++; failed+=!ok; printf("%s\t%s\n",ok?"PASS":"FAIL",label); }
+static unsigned long get(const unsigned char *p,int n) { unsigned long v=0; for(int i=n-1;i>=0;i--)v=(v<<8)|p[i]; return v; }
+static int header(const unsigned char *p,size_t n,const char *target,int object) {
+    int arm=strstr(target,"arm64")!=0;
+    if(!strncmp(target,"lnx/",4)) return n>=64&&!memcmp(p,"\177ELF",4)&&p[4]==2&&p[5]==1&&get(p+16,2)==(object?1:2)&&get(p+18,2)==(arm?183:62);
+    if(!strncmp(target,"osx/",4)) return n>=32&&get(p,4)==0xfeedfacfUL&&get(p+4,4)==(arm?0x100000cUL:0x1000007UL)&&get(p+12,4)==(object?1:2);
+    if(!strncmp(target,"win/",4)) {
+        if(object) return n>=20&&get(p,2)==(arm?0xaa64:0x8664);
+        if(n<64||p[0]!='M'||p[1]!='Z')return 0;
+        unsigned long at=get(p+60,4);
+        return at<=n&&n-at>=26&&!memcmp(p+at,"PE\0\0",4)&&get(p+at+4,2)==(arm?0xaa64:0x8664)&&get(p+at+24,2)==0x20b;
+    }
+    return 0;
+}
+static int format(const char *file,const char *target,int object) {
+    size_t n=0; char *b=cx_read(file,&n); if(!b)return 0;
+    int ok=header((unsigned char *)b,n,target,object); free(b); return ok;
+}
+static np_result run(char **v) {
+    np_result r={0}; char why[512];
+    if(np_run(v,work,0,8,&r,why,sizeof why))die(why);
+    if(r.residue)die("child residue");
+    return r;
+}
+static int nofile(const char *file) { struct stat st; if(!stat(file,&st))return 0; if(errno!=ENOENT)die("stat failure"); return 1; }
+static void compile_target(const char *target,int object) {
+    char label[120]; unlink(image);
+    char *v[]={"sh",com,src,"--target",(char *)target,object?"-c":"-o",image,0};
+    /* -c requires -o as a distinct argument. */
+    char *o[]={"sh",com,src,"--target",(char *)target,"-c","-o",image,0};
+    np_result r=run(object?o:v);
+    snprintf(label,sizeof label,"%s.%s",target,object?"object-format":"image-format");
+    ck(!r.rc&&!r.outn&&format(image,target,object),label);
+    if(r.rc&&r.errn)fwrite(r.err,1,r.errn,stderr);
+    np_free(&r); unlink(image);
+}
+static void reject(char **v,const char *label) {
+    unlink(image); np_result r=run(v);
+    ck(r.rc!=0&&r.rc!=124&&r.rc!=137&&r.rc!=142&&r.errn&&!r.outn&&nofile(image),label); np_free(&r);
+}
+int main(int argc,char **argv) {
+    if(argc!=3||!realpath(argv[1],root))die("usage: ROOT lnx|osx|win|cli");
+    const char *mode=argv[2];
+    if(strcmp(mode,"lnx")&&strcmp(mode,"osx")&&strcmp(mode,"win")&&strcmp(mode,"cli"))die("unknown mode");
+    if(cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(work,sizeof work,"%s/driver-target-object-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(work)||cx_fmt(src,sizeof src,"%s/probe.cx",work)||cx_fmt(image,sizeof image,"%s/image",work))die("paths");
+    char fixture[4600]; size_t n=0;
+    if(cx_fmt(fixture,sizeof fixture,"%s/tests/cases/driver-target-object-min.cx",root))die("fixture path");
+    char *b=cx_read(fixture,&n); if(!b||cx_write(src,b,n))die("fixture copy"); free(b);
+    /* Negative controls exercise each independent oracle without the compiler. */
+    unsigned char bad[64]={0};
+    ck(!header(bad,sizeof bad,"lnx/x86_64",0)&&!header(bad,sizeof bad,"osx/arm64",0)&&!header(bad,sizeof bad,"win/arm64",0),"invalid-format-controls");
+    if(strcmp(mode,"cli")) {
+        char target[40]; snprintf(target,sizeof target,"%s/x86_64",mode); compile_target(target,0);
+        snprintf(target,sizeof target,"%s/arm64",mode); compile_target(target,0);
+        if(!strcmp(mode,"lnx")) { compile_target("lnx/x86_64",1); compile_target("lnx/arm64",1); }
+    } else {
+        char *v[]={"sh",com,src,0}; np_result r=run(v);
+        ck(r.rc==23&&!r.outn&&!r.errn,"default-run-exit23"); np_free(&r);
+        char obj[4600]; if(cx_fmt(obj,sizeof obj,"%s/probe.o",work))die("object path"); unlink(obj);
+        char *c[]={"sh",com,src,"-c",0}; r=run(c);
+        ck(!r.rc&&!r.outn&&format(obj,tn_self(),1),"bare-c-host-object"); np_free(&r); unlink(obj);
+        char *s[]={"sh",com,src,"-S",0}; r=run(s);
+        ck(!r.rc&&r.outn&&strstr(r.out,"main")&&strstr(r.out,"23")&&nofile(obj),"bare-S-tape-stdout"); np_free(&r);
+        char *u[]={"sh",com,src,"--target","unknown/x86_64","-o",image,0}; reject(u,"unknown-target-refused");
+        char *m[]={"sh",com,src,"--target",0}; reject(m,"missing-target-refused");
+        char *o[]={"sh",com,src,"-o",0}; reject(o,"missing-output-refused");
+    }
+    unlink(src);unlink(image);rmdir(work);
+    printf("DRIVER_TARGET_OBJECT\tmode=%s\tassertions=%d\tfailed=%d\n",mode,count,failed);
+    return failed?1:0;
+}

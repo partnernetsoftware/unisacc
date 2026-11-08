@@ -251,7 +251,8 @@ static int cxc_skips(const char *a) {
 }
 
 static int cxc_mode_word(const char *a) {
-    return cxc_eqz(a, "-run") || cxc_eqz(a, "-dump-tokens") || cxc_eqz(a, "--tapebin")
+    return cxc_eqz(a, "--target") || cxc_prefixz(a, "--target=", 9)
+        || cxc_eqz(a, "-run") || cxc_eqz(a, "-dump-tokens") || cxc_eqz(a, "--tapebin")
         || cxc_eqz(a, "--version") || cxc_eqz(a, "-version");
 }
 
@@ -375,7 +376,7 @@ int cxc_default_run(CxcState *st, char **argv, int argc, char *why, long whycap)
         if (a[1] == 'o' || a[1] == 'b' || a[1] == 't' || a[1] == 'S' || a[1] == 'c'
             || a[1] == 'E' || a[1] == 'M') modeflag = 1;
         if (cxc_mode_word(a)) modeflag = 1;
-        if (cxc_skips(a)) i++;
+        if (cxc_skips(a) || cxc_eqz(a, "--target")) i++;
     }
     if (!modeflag) {
         st->runit = 1;
@@ -482,6 +483,21 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
         *index = *index + 2;
         return cxc_ok(why, whycap);
     }
+    /* The long spelling selects a target without changing an explicit
+       preprocessing, tape or object mode, regardless of option order. */
+    if (cxc_eqz(a, "--target") || cxc_prefixz(a, "--target=", 9)) {
+        if (a[8] == '=') {
+            arg = (char *)(a + 9);
+            if (!arg[0]) return cxc_fail(5, "missing target", why, whycap);
+        } else {
+            got = cxc_need(argv, argc, *index, &arg);
+            if (got == 0) return cxc_fail(5, "missing target", why, whycap);
+            if (got < 0) return cxc_fail(5, "bad argument", why, whycap);
+        }
+        st->target = arg;
+        *index = *index + (a[8] == '=' ? 1 : 2);
+        return cxc_ok(why, whycap);
+    }
     if (cxc_eqz(a, "-b") || cxc_eqz(a, "-t")) {
         int mode, image;
         got = cxc_need(argv, argc, *index, &arg);
@@ -532,4 +548,12 @@ int cxc_step(CxcState *st, char **argv, int argc, int *index, char *why, long wh
     if (a[0] == '-' && (a[1] == 'D' || a[1] == 'U'))
         return cxc_macro(st, argv, argc, index, a, why, whycap);
     return 1;
+}
+
+/* Complete the object defaults after parsing and before module expansion.
+   Non-Linux objects use the existing tape-only unit container contract. */
+void cxc_object_defaults(CxcState *st, const char *native) {
+    if (!st || !native || !st->sawc || st->sawS || st->emitbin || st->mode != 2) return;
+    if (!st->target) st->target = native;
+    if (!cxc_prefixz(st->target, "lnx/", 4)) st->funit = 1;
 }
