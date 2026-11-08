@@ -1,0 +1,138 @@
+/* tools/check-net-deps.cx -- tools/net-deps.cx 的检查(从仓根运行, 约 30 秒)。
+     (a) 扰动: 临时副本(out/net-deps-check/)里改 exec/pp/location-byte.tsv 一个字节, 重算; 受影响网集合须等于按 manifest
+         手算的 {shared-e2, tokenpp, warnpp-shared}(exec/pp/gen-manifest.tsv `call body` -> `call locations` -> rows location,
+         只有 dir=pp 的三个配方); 且字节翻转不改变整张依赖图(整份 TSV 逐字节相同)。
+         结构扰动: 往 exec/librarycontract/gen-manifest.tsv 追加 `table probe-x.tsv` 并建文件, probe-x.tsv 只波及 librarycontract。
+     (b) 真实树: rc 0 且无 REF_MISSING(每个 manifest 的 rows/table/template/call 引用的文件都存在), 恰 42 个网。
+     (c) 负例: 副本里让 tapecheck 清单引用不存在的表 -> rc 必为 1; 共享生成器 seed/gen.c 波及全部 42 网; 不被引用的文件波及 0 网;
+         --oracle 不得出现观测读集里静态闭包没有的文件。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int fails, checks;
+static void ck(int ok, const char *what) { checks++; if (!ok) fails++; sy_printf("%s\tnet-deps.%s\n", ok ? "PASS" : "FAIL", what); }
+
+static const char *TMP = "out/net-deps-check";
+
+static int run(const char *root, const char *mode, const char *arg, char **out, size_t *n) {
+    char *v[12]; int i = 0;
+    v[i++] = (char *)"sh"; v[i++] = (char *)"./unisacc.com"; v[i++] = (char *)"tools/net-deps.cx"; v[i++] = (char *)"--";
+    if (root) { v[i++] = (char *)"--root"; v[i++] = (char *)root; }
+    if (mode) v[i++] = (char *)mode;
+    if (arg) v[i++] = (char *)arg;
+    v[i] = 0;
+    *out = 0; *n = 0;
+    return cx_runv_timeout(v, 50, out, n);
+}
+static int sh(char **v) { char *o; size_t n; return cx_runv_timeout(v, 40, &o, &n); }
+
+/* 依赖 TSV 中 input_file 列 == FILE 的行的网名(去重), 返回个数 */
+static int nets_of(const char *out, size_t n, const char *file, char names[64][96]) {
+    long at = 0; int cnt = 0;
+    while (at < (long)n) {
+        long end = at, f[5], k = 0, p = at;
+        while (end < (long)n && out[end] != '\n') end++;
+        if (out[at] != '#' && end > at) {
+            f[0] = at;
+            for (; p < end && k < 4; p++) if (out[p] == '\t') f[++k] = p + 1;
+            if (k == 4) {
+                long l3 = 0; long a3 = f[3], e3 = f[4] - 1;
+                l3 = e3 - a3;
+                if (l3 == tx_len(file, 4096) && tx_same(out + a3, l3, file, l3)) {
+                    long nl = f[1] - 1 - f[0]; int i, dup = 0;
+                    if (nl > 0 && nl < 95) {
+                        for (i = 0; i < cnt; i++) if (tx_len(names[i], 96) == nl && tx_same(names[i], nl, out + f[0], nl)) dup = 1;
+                        if (!dup && cnt < 64) { if (tx_copy(names[cnt], 96, out + f[0], nl)) return -1; names[cnt][nl] = 0; cnt++; }
+                    }
+                }
+            }
+        }
+        at = end + 1;
+    }
+    return cnt;
+}
+static int in_list(const char *name, const char **list) { int i; for (i = 0; list[i]; i++) if (tx_eqz(list[i], name)) return 1; return 0; }
+static int same_set(char names[64][96], int cnt, const char **expect) {
+    int i, m = 0;
+    for (i = 0; expect[i]; i++) m++;
+    if (m != cnt) return 0;
+    for (i = 0; i < cnt; i++) if (!in_list(names[i], expect)) return 0;
+    return 1;
+}
+static int append(const char *path, const char *text) {
+    size_t n; char *s = (char *)cx_read(path, &n), *t; size_t m = tx_len(text, 4096); int rc;
+    if (!s) return 1;
+    t = (char *)mm_alloc(n + m + 1);
+    if (!t) return 1;
+    mm_copy(t, n + m + 1, s, n); mm_copy(t + n, m + 1, text, m + 1);
+    rc = cx_write(path, t, n + m);
+    mm_free(s); mm_free(t);
+    return rc;
+}
+int main(void) {
+    char *o1, *o2, *o3, *o4, *o5; size_t n1, n2, n3, n4, n5; int rc;
+    static char names[64][96];
+    char p[4400], q[4400];
+    /* (b) 真实树 */
+    rc = run(0, 0, 0, &o1, &n1);
+    ck(rc == 0 && o1 != 0, "real-tree-rc0-all-refs-exist");
+    if (!o1) return 1;
+    ck(tx_contains(o1, (long)n1, "# 汇总: 网=42 ", 11) , "exactly-42-nets");
+    ck(tx_contains(o1, (long)n1, "缺失引用=0", 14), "no-missing-refs-in-summary");
+    { static const char *e[] = {"shared-e2", "tokenpp", "warnpp-shared", 0};
+      int c = nets_of(o1, n1, "exec/pp/location-byte.tsv", names);
+      ck(same_set(names, c, e), "hand-set-pp-location-3-nets"); }
+    { static const char *e[] = {"tapecheck", 0};
+      int c = nets_of(o1, n1, "exec/tapecheck/tapecheck-byte.tsv", names);
+      ck(same_set(names, c, e), "hand-set-tapecheck-1-net"); }
+    ck(nets_of(o1, n1, "seed/gen.c", names) == 42, "shared-generator-hits-all-42");
+    ck(nets_of(o1, n1, "exec/no-such-table.tsv", names) == 0, "unreferenced-file-affects-0-nets");
+    /* 准备副本 */
+    { char *rm[] = {(char *)"rm", (char *)"-rf", (char *)TMP, 0}; sh(rm); }
+    { char *mk[] = {(char *)"mkdir", (char *)"-p", 0, 0}; char d[4400]; cx_fmt(d, sizeof d, "%s/tools/cxlib", TMP); mk[2] = d; ck(sh(mk) == 0, "tmp-mkdir"); }
+    { const char *src[] = {"exec", "seed", "include", 0}; int i;
+      for (i = 0; src[i]; i++) { char *cp[] = {(char *)"cp", (char *)"-r", 0, (char *)TMP, 0}; cp[2] = (char *)src[i]; ck(sh(cp) == 0, "tmp-copy-tree"); } }
+    { char *cp[] = {(char *)"cp", (char *)"tools/cxlib/sourcepackage.cx", 0, 0}; char d[4400]; cx_fmt(d, sizeof d, "%s/tools/cxlib/", TMP); cp[2] = d; ck(sh(cp) == 0, "tmp-copy-recipes"); }
+    { char *cp[] = {(char *)"cp", (char *)"tools/affected-model-inputs.tsv", 0, 0}; char d[4400]; cx_fmt(d, sizeof d, "%s/tools/", TMP); cp[2] = d; ck(sh(cp) == 0, "tmp-copy-observed"); }
+    /* (a) 扰动 1: 翻转一个字节 */
+    cx_fmt(p, sizeof p, "%s/exec/pp/location-byte.tsv", TMP);
+    { size_t n; char *s = (char *)cx_read(p, &n); int changed = 0;
+      if (s && n > 8) { s[n - 2] = (char)(s[n - 2] ^ 1); changed = cx_write(p, s, n) == 0; }
+      ck(changed, "flip-one-byte-written");
+      if (s) { size_t m; char *t = (char *)cx_read(p, &m); char *u = (char *)cx_read("exec/pp/location-byte.tsv", &m); ck(t && u && !mm_same(t, u, n < m ? n : m), "flip-differs-from-original"); if (t) mm_free(t); if (u) mm_free(u); mm_free(s); } }
+    rc = run(TMP, 0, 0, &o2, &n2);
+    ck(rc == 0 && o2 != 0, "perturbed-rc0");
+    if (o2) {
+        static const char *e[] = {"shared-e2", "tokenpp", "warnpp-shared", 0};
+        int c = nets_of(o2, n2, "exec/pp/location-byte.tsv", names);
+        ck(same_set(names, c, e), "perturbed-affected-set-equals-hand-set");
+        ck(n1 == n2 && tx_same(o1, (long)n1, o2, (long)n2), "byte-flip-leaves-graph-identical");
+    }
+    /* (a) 扰动 2: 结构变化 */
+    cx_fmt(p, sizeof p, "%s/exec/librarycontract/gen-manifest.tsv", TMP);
+    cx_fmt(q, sizeof q, "%s/exec/librarycontract/probe-x.tsv", TMP);
+    ck(append(p, "table\tprobe-x.tsv\t-\t-\t-\t-\t-\t-\t-\n") == 0 && cx_write(q, "k\tv\n", 4) == 0, "add-probe-row-and-file");
+    rc = run(TMP, 0, 0, &o3, &n3);
+    ck(rc == 0 && o3 != 0, "probe-rc0");
+    if (o3) {
+        static const char *e[] = {"librarycontract", 0};
+        int c = nets_of(o3, n3, "exec/librarycontract/probe-x.tsv", names);
+        ck(same_set(names, c, e), "probe-affects-only-librarycontract");
+    }
+    /* (c) 负例: 引用不存在的表 */
+    cx_fmt(p, sizeof p, "%s/exec/tapecheck/gen-manifest.tsv", TMP);
+    ck(append(p, "table\tno-such-table.tsv\t-\t-\t-\t-\t-\t-\t-\n") == 0, "add-dangling-row");
+    rc = run(TMP, 0, 0, &o4, &n4);
+    ck(rc == 1, "dangling-table-ref-rc1");
+    /* oracle: 观测读集不得有静态漏报 */
+    rc = run(0, "--oracle", 0, &o5, &n5);
+    ck(rc == 0 && o5 && tx_contains(o5, (long)n5, "ORACLE_SUMMARY\tobs_not_static_total=0", 37), "oracle-no-static-miss");
+    { char *rm[] = {(char *)"rm", (char *)"-rf", (char *)TMP, 0}; sh(rm); }
+    sy_printf("CHECK_NET_DEPS\tchecks=%d\tfailed=%d\n", checks, fails);
+    return fails ? 1 : 0;
+}

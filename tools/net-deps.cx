@@ -1,0 +1,364 @@
+/* tools/net-deps.cx -- 网级依赖图: 每个网(sourcepackage 配方)读哪些 exec 表(静态, 来自 manifest)。
+
+   用法(仓根):  sh ./unisacc.com tools/net-deps.cx -- [--root DIR] [MODE]
+     (默认)             TSV 表头 + 行 `net stage manifest input_file kind`, 随后 `#` 汇总
+     --summary          只出汇总(每网闭包大小、共享度分布、共享度前10表)
+     --touch FILE...    FILE 改动后失效的网: AFFECTED<TAB>net, 末行 AFFECTED_SUMMARY; FILE 以 / 结尾 = 目录前缀
+     --oracle           与 tools/affected-model-inputs.tsv(运行期观测读集)逐网比对静态闭包
+   rc: 0 成功且全部引用存在; 1 有引用缺失(REF_MISSING 打到 stderr); 2 用法/IO 错误。
+
+   「一个网」是什么(本工具的判定, 不确定处见末):
+     * 42 = tools/cxlib/sourcepackage.cx 的 recipes[] 配方数(同时 tools/affected-model-inputs.tsv 恰有 42 个
+       MODEL, plans/v0.0.48-unisacc.md T1 的「42 配方」)。每个配方 = 一个网/一次 gen 产物
+       (shared-e2/e1/e3/e4/o1/prune/nativeabi, 6 目标 lower+elf, warn/error/token 变体, object-*, tapecheck...)。
+       注意: weights/ 与 kernel/ 下的 18 张 gold 网(pp lex parse ...)是另一套, 来自 weights/gold/*.tsv,
+       不是 exec manifest 的网; prd.md 里的「七流 42 张网」与此「42 配方」数字相同, 是否同一集合本工具不下结论。
+     * 配方 DIR -> 入口清单: exec/DIR/gen-manifest.tsv(DIR 是目录)否则 exec/DIR-manifest.tsv。
+     * 闭包: 入口清单的每一行, 去掉行首的 . (缩进深度); 按 op 取文件(相对该清单所在目录, ../ 归一):
+         rows STEM      -> STEM-byte.tsv, STEM-result.tsv
+         table FILE     -> FILE            template STEM -> STEM-template.tsv
+         holder FILE    -> FILE (仅当以 .tsv 结尾)
+         call NAME      -> NAME-manifest.tsv(先本目录, 再 exec/), 递归
+         第5列 facts    -> 每个 a+b+c 名(去尾 !) 若存在 exec/facts/NAME.tsv 则为 facts; 不存在者是虚拟集名, 忽略
+       被引用的清单文件本身也算输入(kind=table)。
+     * shared-generator: seed/gen.c tbl.c net.c compilerpack.c pack.c 与其头文件, 对 42 个网全部计入
+       (粗粒度: 不区分配方实际调用哪个生成器程序; 所有网共享)。
+   不确定处(明说):
+     * 清单 when 列(osx/win/arm64 等标志)未求值: 闭包是上界(多报不漏报), 同目录配方间会偏大。
+     * 未解析 op(part0/part2.* 等, 非清单语义行)忽略; 虚拟 facts 名忽略; 以 --oracle 对照观测读集。
+     * 生成器 gen.c 对 opts JSON 内的隐式文件引用(若有)静态不可见, 靠 --oracle 暴露。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXF 8192
+#define MAXN 64
+#define POOL (1 << 21)
+#define HASHN 16384
+
+static char root[4096];
+static char pool[POOL];
+static long pool_n;
+static const char *fpath[MAXF];
+static int fkind[MAXF]; /* 0 table 1 facts 2 shared-generator */
+static int nfile;
+static int hslot[HASHN];
+static const char *kname[] = {"table", "facts", "shared-generator"};
+
+static char *netname[MAXN], *netdir[MAXN];
+static int nnet;
+static unsigned char seen[MAXN][MAXF];
+static short via[MAXN][MAXF]; /* 首次引用该文件的清单(文件号), -1 = 无 */
+static int order[MAXN][MAXF], norder[MAXN];
+static int refmiss, virt_facts;
+
+static void die(const char *s) { sy_eprintf("net-deps: %s\n", s); exit(2); }
+static char *keep(const char *s, long n) {
+    char *p;
+    if (pool_n + n + 1 > POOL) die("pool full");
+    p = pool + pool_n;
+    if (mm_copy(p, POOL - pool_n, s, n)) die("copy");
+    p[n] = 0; pool_n += n + 1;
+    return p;
+}
+static unsigned long hash(const char *s) { unsigned long h = 1469598103934665603UL; while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211UL; } return h; }
+static int intern(const char *p, int kind, int create) {
+    unsigned long h = hash(p) & (HASHN - 1);
+    while (hslot[h]) {
+        if (tx_eqz(fpath[hslot[h] - 1], p)) return hslot[h] - 1;
+        h = (h + 1) & (HASHN - 1);
+    }
+    if (!create) return -1;
+    if (nfile == MAXF) die("too many files");
+    fpath[nfile] = keep(p, tx_len(p, 4096)); fkind[nfile] = kind; hslot[h] = ++nfile;
+    return nfile - 1;
+}
+/* DIR/REL 归一化(处理 . 与 ..), 结果仓内相对路径 */
+static void norm(char *out, long cap, const char *dir, const char *rel) {
+    char tmp[8192]; const char *comp[256]; long clen[256]; int nc = 0, i; long o = 0, at = 0, n;
+    if (cx_fmt(tmp, sizeof tmp, "%s/%s", dir, rel)) die("path too long");
+    n = tx_len(tmp, sizeof tmp);
+    while (at <= n) {
+        long a = at;
+        while (at < n && tmp[at] != '/') at++;
+        if (at - a == 0 || (at - a == 1 && tmp[a] == '.')) { }
+        else if (at - a == 2 && tmp[a] == '.' && tmp[a + 1] == '.') { if (nc) nc--; }
+        else { if (nc == 256) die("too deep"); comp[nc] = tmp + a; clen[nc] = at - a; nc++; }
+        at++;
+    }
+    for (i = 0; i < nc; i++) {
+        if (o + clen[i] + 2 > cap) die("path too long");
+        if (i) out[o++] = '/';
+        if (mm_copy(out + o, cap - o, comp[i], clen[i])) die("copy");
+        o += clen[i];
+    }
+    out[o] = 0;
+}
+static int exists_rel(const char *rel) {
+    char abs[8192];
+    if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long");
+    return sy_exists(abs) == 1;
+}
+static char *read_rel(const char *rel, size_t *n) {
+    char abs[8192];
+    if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long");
+    return (char *)cx_read(abs, n);
+}
+static void add(int net, const char *path, int kind, int manifest) {
+    int f;
+    if (!exists_rel(path)) {
+        refmiss++;
+        sy_eprintf("REF_MISSING\t%s\t%s\t%s\n", netname[net], manifest >= 0 ? fpath[manifest] : "-", path);
+        return;
+    }
+    f = intern(path, kind, 1);
+    if (kind == 1) fkind[f] = 1;
+    if (seen[net][f]) return;
+    seen[net][f] = 1; via[net][f] = (short)manifest; order[net][norder[net]++] = f;
+}
+static int ends(const char *s, const char *suf) { long n = tx_len(s, 4096), m = tx_len(suf, 64); return n >= m && tx_eqz(s + n - m, suf); }
+static void add_ref(int net, const char *dir, const char *rel, const char *suf, int manifest) {
+    char a[4096], p[4400];
+    if (cx_fmt(a, sizeof a, "%s%s", rel, suf)) die("path too long");
+    norm(p, sizeof p, dir, a);
+    add(net, p, 0, manifest);
+}
+/* 可选文件: 存在才算(rows/template 的 STEM-fresh.tsv) */
+static void add_opt(int net, const char *dir, const char *rel, const char *suf, int manifest) {
+    static const char *sib[] = {"-fresh.tsv", "-text.tsv", "-tokens.tsv", "-buffers.tsv", "-messages.tsv", "-seq.tsv",
+        "-stack.tsv", "-manifest-fresh.tsv", "-names.tsv", 0};
+    char a[4096], p[4400]; int i;
+    (void)suf;
+    /* STEM 的同名可选兄弟表(gen2 阶段 C 代码按名读取, 清单里不出现; 由 --oracle 暴露) */
+    for (i = 0; sib[i]; i++) {
+        if (cx_fmt(a, sizeof a, "%s%s", rel, sib[i])) die("path too long");
+        norm(p, sizeof p, dir, a);
+        if (exists_rel(p)) add(net, p, 0, manifest);
+    }
+}
+static void walk(int net, const char *mpath, int from) {
+    char dir[4096], p[4400]; size_t n; char *s; long at = 0, sl; int me;
+    me = intern(mpath, 0, 1);
+    if (seen[net][me]) return;
+    s = read_rel(mpath, &n);
+    if (!s) { refmiss++; sy_eprintf("REF_MISSING\t%s\t%s\t%s\n", netname[net], from >= 0 ? fpath[from] : "-", mpath); return; }
+    seen[net][me] = 1; via[net][me] = (short)from; order[net][norder[net]++] = me;
+    sl = tx_rchr(mpath, tx_len(mpath, 4096), '/');
+    if (sl < 0) { dir[0] = '.'; dir[1] = 0; } else { if (tx_copy(dir, sizeof dir, mpath, sl)) die("dir"); dir[sl] = 0; }
+    while (at < (long)n) {
+        char *f[10]; int nf = 0, i; long end = at;
+        while (end < (long)n && s[end] != '\n') end++;
+        if (end - at > 3 && s[at] == '#' && s[at + 1] == '!' && s[at + 2] == ' ' &&
+            (tx_prefix(s + at + 3, end - at - 3, "domains ", 8) || tx_prefix(s + at + 3, end - at - 3, "extra ", 6))) {
+            /* `#! domains NAME` / `#! extra A B`: 每个词若存在 exec/facts/WORD.tsv 即 facts 输入 */
+            long w = at + 3;
+            while (w < end && s[w] != ' ') w++;
+            while (w < end) {
+                long a2, b2; char word[256];
+                while (w < end && s[w] == ' ') w++;
+                a2 = w; while (w < end && s[w] != ' ' && s[w] != '\r') w++;
+                b2 = w;
+                if (b2 > a2 && b2 - a2 < 200) {
+                    if (tx_copy(word, sizeof word, s + a2, b2 - a2)) die("word");
+                    word[b2 - a2] = 0;
+                    cx_fmt(p, sizeof p, "exec/facts/%s.tsv", word);
+                    if (exists_rel(p)) add(net, p, 1, me);
+                }
+                if (w < end && s[w] == '\r') break;
+            }
+        }
+        if (end > at && s[at] != '#' && s[at] != '\r') {
+            char *q = s + at; const char *op;
+            s[end] = 0;
+            f[nf++] = q;
+            for (; *q && nf < 10; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+            for (i = nf; i < 10; i++) f[i] = (char *)"";
+            op = f[0]; while (*op == '.') op++;
+            if (nf >= 2 && f[1][0] && !tx_eqz(f[1], "-")) {
+                if (tx_eqz(op, "rows")) { add_ref(net, dir, f[1], "-byte.tsv", me); add_ref(net, dir, f[1], "-result.tsv", me); add_opt(net, dir, f[1], "-fresh.tsv", me); }
+                else if (tx_eqz(op, "table")) add_ref(net, dir, f[1], "", me);
+                else if (tx_eqz(op, "template")) { add_ref(net, dir, f[1], "-template.tsv", me); add_opt(net, dir, f[1], "-fresh.tsv", me); }
+                else if (tx_eqz(op, "holder") && ends(f[1], ".tsv")) add_ref(net, dir, f[1], "", me);
+                else if (tx_eqz(op, "call")) {
+                    char a[4096];
+                    if (cx_fmt(a, sizeof a, "%s-manifest.tsv", f[1])) die("path too long");
+                    norm(p, sizeof p, dir, a);
+                    if (!exists_rel(p)) norm(p, sizeof p, "exec", a);
+                    walk(net, p, me);
+                }
+            }
+            if (nf >= 5 && f[4][0] && !tx_eqz(f[4], "-")) {
+                char *b = f[4];
+                while (*b) {
+                    char *e = b, name[512];
+                    while (*e && *e != '+') e++;
+                    { long len = e - b; if (len > 0 && b[len - 1] == '!') len--;
+                      if (len > 0 && len < 400) {
+                          if (tx_copy(name, sizeof name, b, len)) die("name");
+                          name[len] = 0;
+                          cx_fmt(p, sizeof p, "exec/facts/%s.tsv", name);
+                          if (exists_rel(p)) add(net, p, 1, me); else virt_facts++;
+                      } }
+                    b = *e ? e + 1 : e;
+                }
+            }
+            s[end] = '\n';
+            { /* 还原被改写的制表符不必要: 本行已处理完 */ }
+        }
+        at = end + 1;
+    }
+    mm_free(s);
+}
+static const char *shared_gen[] = {"seed/gen.c", "seed/json.h", "seed/facts.h", "seed/tbl.c", "seed/net.c", "exec/c/core.h",
+    "seed/compilerpack.c", "seed/sha256.h", "include/unisa_safedel.h", "seed/pack.c", 0};
+
+static void load_recipes(void) {
+    size_t n; char *s = read_rel("tools/cxlib/sourcepackage.cx", &n); long at, i;
+    if (!s) die("cannot read tools/cxlib/sourcepackage.cx");
+    at = tx_find(s, (long)n, "recipes[]={", 11);
+    if (at < 0) die("no recipes[]");
+    i = at + 11;
+    while (i + 1 < (long)n && !(s[i] == '}' && s[i + 1] == ';')) {
+        if (s[i] == '{' && s[i + 1] == '"') {
+            long a = i + 2, b = a;
+            while (b < (long)n && s[b] != '"') b++;
+            if (!(b - a >= 2 && s[a] == '-' && s[a + 1] == '-')) { /* 名字 */
+                long c, d;
+                if (nnet == MAXN) die("too many recipes");
+                netname[nnet] = keep(s + a, b - a);
+                c = b + 1;
+                while (c < (long)n && s[c] != '"') c++;
+                d = c + 1;
+                while (d < (long)n && s[d] != '"') d++;
+                netdir[nnet] = keep(s + c + 1, d - c - 1);
+                nnet++;
+                i = d;
+            } else i = b;
+        }
+        i++;
+    }
+    mm_free(s);
+}
+static void build(void) {
+    int k, j; char m[4400];
+    load_recipes();
+    for (k = 0; k < nnet; k++) {
+        cx_fmt(m, sizeof m, "exec/%s/gen-manifest.tsv", netdir[k]);
+        if (!exists_rel(m)) cx_fmt(m, sizeof m, "exec/%s-manifest.tsv", netdir[k]);
+        for (j = 0; j < nfile; j++) via[k][j] = -1;
+        walk(k, m, -1);
+        /* gen.c 硬编码: parse2 阶段另读 exec/parse/tokens2-manifest.tsv(seed/gen.c:5077), 清单里无 call */
+        if (tx_eqz(netdir[k], "parse2")) {
+            walk(k, "exec/parse/tokens2-manifest.tsv", -1);
+            /* seed/gen.c 的 load_fact("parse-tokens") 等硬编码事实(gen.c:4312/5051/6072); diagnostics 经 oracle 暴露 */
+            add(k, "exec/facts/parse-tokens.tsv", 1, -1);
+            add(k, "exec/facts/diagnostics.tsv", 1, -1);
+        }
+        for (j = 0; shared_gen[j]; j++) { int f; if (!exists_rel(shared_gen[j])) { refmiss++; sy_eprintf("REF_MISSING\t%s\t-\t%s\n", netname[k], shared_gen[j]); continue; }
+            f = intern(shared_gen[j], 2, 1); fkind[f] = 2;
+            if (!seen[k][f]) { seen[k][f] = 1; via[k][f] = -1; order[k][norder[k]++] = f; } }
+    }
+}
+static int degree(int f) { int k, d = 0; for (k = 0; k < nnet; k++) d += seen[k][f]; return d; }
+
+static void out_tsv(void) {
+    int k, i;
+    sy_printf("net\tstage\tmanifest\tinput_file\tkind\n");
+    for (k = 0; k < nnet; k++) for (i = 0; i < norder[k]; i++) {
+        int f = order[k][i];
+        sy_printf("%s\t%s\t%s\t%s\t%s\n", netname[k], netdir[k], via[k][f] >= 0 ? fpath[via[k][f]] : "-", fpath[f], kname[fkind[f]]);
+    }
+}
+static void out_summary(void) {
+    int k, i, top[10], ntop = 0, hist[MAXN + 2], shared_tables = 0, tables = 0;
+    for (i = 0; i < MAXN + 2; i++) hist[i] = 0;
+    sy_printf("# 汇总: 网=%d 文件=%d 虚拟facts名引用=%d 缺失引用=%d\n", nnet, nfile, virt_facts, refmiss);
+    sy_printf("# net\tstage\tclosure_files\ttables\tfacts\n");
+    for (k = 0; k < nnet; k++) {
+        int c[3] = {0, 0, 0};
+        for (i = 0; i < norder[k]; i++) c[fkind[order[k][i]]]++;
+        sy_printf("# %s\t%s\t%d\t%d\t%d\n", netname[k], netdir[k], norder[k], c[0], c[1]);
+    }
+    for (i = 0; i < nfile; i++) if (fkind[i] != 2) {
+        int d = degree(i), p;
+        tables++; if (d > 1) shared_tables++;
+        hist[d]++;
+        for (p = 0; p < ntop && degree(top[p]) >= d; p++) {}
+        if (p < 10) { int q; if (ntop < 10) ntop++; for (q = ntop - 1; q > p; q--) top[q] = top[q - 1]; top[p] = i; }
+    }
+    sy_printf("# 非生成器输入文件=%d, 被>=2网共享=%d\n", tables, shared_tables);
+    sy_printf("# 共享度直方图(度:文件数)");
+    for (i = 1; i <= nnet; i++) if (hist[i]) sy_printf(" %d:%d", i, hist[i]);
+    sy_printf("\n# 共享度前10(文件\\t网数\\tkind)\n");
+    for (i = 0; i < ntop; i++) sy_printf("# %s\t%d\t%s\n", fpath[top[i]], degree(top[i]), kname[fkind[top[i]]]);
+}
+static int touch(int argc, char **argv, int a) {
+    int k, n = 0, i;
+    for (k = 0; k < nnet; k++) {
+        int hit = 0;
+        for (i = a; i < argc && !hit; i++) {
+            long al = tx_len(argv[i], 4096); int j;
+            for (j = 0; j < norder[k]; j++) {
+                const char *p = fpath[order[k][j]];
+                if (tx_eqz(p, argv[i]) || (al > 1 && argv[i][al - 1] == '/' && tx_prefix(p, tx_len(p, 4096), argv[i], al))) { hit = 1; break; }
+            }
+        }
+        if (hit) { sy_printf("AFFECTED\t%s\t%s\n", netname[k], netdir[k]); n++; }
+    }
+    sy_printf("AFFECTED_SUMMARY\tnets=%d\ttotal=%d\n", n, nnet);
+    return 0;
+}
+static int oracle(void) {
+    size_t n; char *s = read_rel("tools/affected-model-inputs.tsv", &n); long at = 0;
+    static unsigned char obs[MAXN][MAXF]; int k, j, tot_miss = 0;
+    if (!s) die("cannot read tools/affected-model-inputs.tsv");
+    while (at < (long)n) {
+        long end = at, tab;
+        while (end < (long)n && s[end] != '\n') end++;
+        if (s[at] != '#' && end > at) {
+            tab = tx_chr(s + at, end - at, '\t');
+            if (tab > 0) {
+                char m[256], p[4400]; int f;
+                if (tx_copy(m, sizeof m, s + at, tab)) die("model"); m[tab] = 0;
+                if (tx_copy(p, sizeof p, s + at + tab + 1, end - at - tab - 1)) die("path"); p[end - at - tab - 1] = 0;
+                if (!exists_rel(p)) { at = end + 1; continue; } /* 观测里的 ".name" 拼写(探测不存在文件)不计 */
+                f = intern(p, 0, 1);
+                for (k = 0; k < nnet; k++) if (tx_eqz(netname[k], m)) obs[k][f] = 1;
+            }
+        }
+        at = end + 1;
+    }
+    sy_printf("ORACLE\tnet\tstatic_nongen\tobserved\tobs_not_static\tstatic_not_obs\n");
+    for (k = 0; k < nnet; k++) {
+        int st = 0, ob = 0, om = 0, so = 0;
+        for (j = 0; j < nfile; j++) {
+            int s1 = seen[k][j] && fkind[j] != 2;
+            st += s1; ob += obs[k][j];
+            if (obs[k][j] && !seen[k][j]) { om++; if (om <= 99) sy_printf("ORACLE_MISS\t%s\t%s\n", netname[k], fpath[j]); }
+            if (s1 && !obs[k][j]) so++;
+        }
+        tot_miss += om;
+        sy_printf("ORACLE\t%s\t%d\t%d\t%d\t%d\n", netname[k], st, ob, om, so);
+    }
+    sy_printf("ORACLE_SUMMARY\tobs_not_static_total=%d\n", tot_miss);
+    mm_free(s);
+    return 0;
+}
+int main(int argc, char **argv) {
+    int a = 1, mode = 0, rc;
+    root[0] = '.'; root[1] = 0;
+    if (a + 1 < argc && tx_eqz(argv[a], "--root")) { if (cx_fmt(root, sizeof root, "%s", argv[a + 1])) die("root"); a += 2; }
+    if (a < argc && tx_eqz(argv[a], "--summary")) { mode = 1; a++; }
+    else if (a < argc && tx_eqz(argv[a], "--touch")) { mode = 2; a++; if (a >= argc) die("usage: --touch FILE..."); }
+    else if (a < argc && tx_eqz(argv[a], "--oracle")) { mode = 3; a++; }
+    else if (a < argc) die("usage: [--root DIR] [--summary|--touch FILE...|--oracle]");
+    build();
+    if (mode == 0) { out_tsv(); out_summary(); }
+    else if (mode == 1) out_summary();
+    else if (mode == 2) touch(argc, argv, a);
+    else oracle();
+    rc = refmiss ? 1 : 0;
+    return rc;
+}
