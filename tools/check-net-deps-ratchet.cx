@@ -1,0 +1,17 @@
+/* Gate 14 behavior: actual closure plus bounded independent counterexamples. */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+static int checks,failed;static char work[4400],gp[4600],bp[4600];
+static void ck(int x,const char *s){checks++;failed+=!x;printf("%s\t%s\n",x?"PASS":"FAIL",s);}
+static void die(const char *s){fprintf(stderr,"check-net-deps-ratchet: %s\n",s);exit(2);}
+static void fixture(int pp,int total,int duplicate){FILE *f=fopen(gp,"wb");if(!f)die("graph open");fprintf(f,"net\tstage\tmanifest\tinput_file\tkind\n");for(int i=0;i<total;i++){fprintf(f,"n%02d\tx\t-\tseed/gen.c\tshared-generator\n",i);if(i<pp)fprintf(f,"n%02d\tx\t-\texec/pp/x.tsv\ttable\n",i);if(i<1)fprintf(f,"n%02d\tx\t-\texec/lower/x.tsv\ttable\n",i);if(i<2)fprintf(f,"n%02d\tx\t-\texec/facts/x.tsv\tfacts\n",i);}if(duplicate)fprintf(f,"n00\tx\t-\texec/pp/x.tsv\ttable\n");if(fclose(f))die("graph close");}
+static np_result run(int actual){char *v[]={"sh","./unisacc.com","tests/net-deps.cx","--","--check","--graph",gp,"--baseline",bp,0};if(actual)v[5]=0;np_result r={0};char why[300]={0};if(np_run(v,".",0,20,&r,why,sizeof why)||r.residue)die(why);return r;}
+int main(void){const char *tmp=getenv("TMPDIR");if(cx_fmt(work,sizeof work,"%s/fanout-check-XXXXXX",tmp?tmp:"/tmp")||!mkdtemp(work)||cx_fmt(gp,sizeof gp,"%s/graph.tsv",work)||cx_fmt(bp,sizeof bp,"%s/base.tsv",work))die("workdir");const char *base="class\tmax_affected\tuniverse\npp\t3\t42\nlower\t1\t42\ngenerator\t42\t42\nfacts\t2\t42\n";if(cx_write(bp,base,strlen(base)))die("baseline");
+ np_result r=run(1);ck(!r.rc&&r.out&&strstr(r.out,"net-deps: ok:")&&strstr(r.out,"class=pp\taffected=3\tuniverse=42")&&strstr(r.out,"class=generator\taffected=42\tuniverse=42"),"real-tree-baseline-pp3-generator42");np_free(&r);
+ fixture(3,42,0);r=run(0);ck(!r.rc&&r.out&&strstr(r.out,"above=0"),"fixture-at-baseline");np_free(&r);
+ fixture(4,42,0);r=run(0);ck(r.rc==1&&r.out&&strstr(r.out,"net-deps: FAIL:")&&r.err&&strstr(r.err,"pp has 4"),"pp-fanout-growth-refused");np_free(&r);
+ fixture(2,42,0);r=run(0);ck(!r.rc&&r.out&&strstr(r.out,"class=pp\taffected=2"),"fanout-reduction-accepted");np_free(&r);
+ fixture(3,43,0);r=run(0);ck(r.rc==1&&r.out&&strstr(r.out,"universe=43"),"universe-drift-refused");np_free(&r);
+ fixture(3,42,1);r=run(0);ck(r.rc==2&&r.err&&strstr(r.err,"duplicate net/input row")&&!r.outn,"duplicate-input-refused");np_free(&r);
+ fixture(3,42,0);if(cx_write(bp,"pp\t3\t42\n",8))die("bad baseline write");r=run(0);ck(r.rc==2&&r.err&&strstr(r.err,"baseline incomplete")&&!r.outn,"incomplete-baseline-refused");np_free(&r);
+ unlink(gp);unlink(bp);rmdir(work);printf("CHECK_NET_DEPS_RATCHET\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}

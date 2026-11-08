@@ -29,7 +29,7 @@
   - 标识符改名：`refactor.cx rename`。
   - 按行段替换：`tools/edit-span.cx`。
   - 改动影响了哪些测试批次、并行重跑它们：`tools/affected.cx`。
-  - 十二个棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform、srcshape、coreapi、verwriter 记录版本标签唯一写者、aluiwidth ALUI 位宽只降不升、outdep 批次不得读未声明的 out/ 残留、check-literal）。toolsloc已退役，不设总量或逐文件行数上限。
+  - 十三个现行棘轮一次跑完：`tools/ratchets.cx`（cxraw、cxinclude、cxapis、cxtrunc、cxlibc、cxplatform、srcshape、coreapi、verwriter、aluiwidth、outdep、check-literal、net-deps）。net-deps沿计划称第14号门（pp/lower/generator/facts波及面），toolsloc已退役，故实际13项；工具不设任何行数上限。
 - **cx 架构方向（主人定）**：不许写回传统 C 结构。
   - 上层不写 `#include`：用 `#pragma unisa use`。
   - 上层不直接调 libc/POSIX：printf、malloc、strcmp、open 等改用 L0 的 `sy_*`、`mm_*`、`tx_*`。**产品代码**（`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`）严格按这条走，为的是跨六目标；**工具/测试脚本**（`tools/`、`tests/`）允许 printf/fprintf 输出给人看，本机跑、不跨目标，不被这条卡住加功能。

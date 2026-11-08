@@ -1,0 +1,25 @@
+/* Gate 14: recipe dependency fanout. No product mutation or construction. */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#define NF 8192
+static char *paths[NF], *nets[64];
+static unsigned long masks[NF];
+static int slots[16384], categories[NF], nf, nn;
+static const char *classes[]={"pp","lower","generator","facts"};
+static long limits[4], universes[4];
+static int maxima[4]; static const char *witness[4];
+static void die(const char *s){fprintf(stderr,"net-deps: %s\n",s);exit(2);}
+static unsigned long hash(const char *s){unsigned long h=1469598103934665603UL;while(*s){h^=(unsigned char)*s++;h*=1099511628211UL;}return h;}
+static int category(const char *p,const char *kind){if(!strcmp(kind,"shared-generator"))return 2;if(!strcmp(kind,"facts"))return 3;if(!strncmp(p,"exec/pp/",8))return 0;if(!strncmp(p,"exec/lower/",11))return 1;return -1;}
+static int fields(char *s,char **f,int cap){int n=0;while(n<cap){f[n++]=s;char *q=strchr(s,'\t');if(!q)return n;*q=0;s=q+1;}return -1;}
+static int netid(const char *s){for(int i=0;i<nn;i++)if(!strcmp(nets[i],s))return i;if(nn==64)die("net count bound");nets[nn]=strdup(s);if(!nets[nn])die("allocation");return nn++;}
+static void graph(char *b,size_t n){if(memchr(b,0,n)||!n||b[n-1]!='\n')die("graph wire");int header=0;for(char *p=b;*p;){char *e=strchr(p,'\n');if(!e)die("graph line");*e=0;if(*p&&*p!='#'){if(!header){if(strcmp(p,"net\tstage\tmanifest\tinput_file\tkind"))die("graph header");header=1;}else{char *f[6];if(fields(p,f,6)!=5||!*f[0]||!*f[1]||!*f[3])die("graph row");if(strstr(f[3],"..")||f[3][0]=='/')die("graph path");if(strcmp(f[4],"table")&&strcmp(f[4],"facts")&&strcmp(f[4],"shared-generator"))die("graph kind");int k=netid(f[0]);unsigned long h=hash(f[3])&16383;while(slots[h]&&strcmp(paths[slots[h]-1],f[3]))h=(h+1)&16383;int j;if(!slots[h]){if(nf==NF)die("file count bound");j=nf++;paths[j]=strdup(f[3]);if(!paths[j])die("allocation");slots[h]=j+1;categories[j]=category(f[3],f[4]);}else {j=slots[h]-1;if(categories[j]!=category(f[3],f[4]))die("input kind disagreement");}unsigned long bit=1UL<<k;if(masks[j]&bit)die("duplicate net/input row");masks[j]|=bit;}}
+ p=e+1;}if(!header||!nn||!nf)die("empty graph");
+ /* Count each canonical input once per net. Inconsistent kinds are refused. */
+}
+static void measure(void){for(int i=0;i<nf;i++){int k=categories[i];if(k<0)continue;int c=0;for(unsigned long b=masks[i];b;b>>=1)c+=b&1;if(c>maxima[k]){maxima[k]=c;witness[k]=paths[i];}}}
+static void baseline(const char *path){size_t n;char *b=cx_read(path,&n);if(!b||!n||b[n-1]!='\n'||memchr(b,0,n))die("baseline IO/wire");int seen=0;for(char *p=b;*p;){char *e=strchr(p,'\n');*e=0;if(*p&&*p!='#'&&strcmp(p,"class\tmax_affected\tuniverse")){char *f[4],*end;if(fields(p,f,4)!=3)die("baseline columns");int k;for(k=0;k<4&&strcmp(f[0],classes[k]);k++);if(k==4||(seen&(1<<k)))die("baseline class/duplicate");limits[k]=strtol(f[1],&end,10);if(!*f[1]||*end||limits[k]<0)die("baseline limit");universes[k]=strtol(f[2],&end,10);if(!*f[2]||*end||universes[k]<1||limits[k]>universes[k])die("baseline universe");seen|=1<<k;}p=e+1;}if(seen!=15)die("baseline incomplete");free(b);}
+int main(int ac,char **av){const char *root=".",*gp=0,*bp="tests/net-deps.tsv";int report=0;for(int i=1;i<ac;i++){if(!strcmp(av[i],"--check"))continue;else if(!strcmp(av[i],"--report"))report=1;else if(!strcmp(av[i],"--root")&&i+1<ac)root=av[++i];else if(!strcmp(av[i],"--graph")&&i+1<ac)gp=av[++i];else if(!strcmp(av[i],"--baseline")&&i+1<ac)bp=av[++i];else die("usage --check|--report [--root DIR] [--graph TSV] [--baseline TSV]");}
+ char *b;size_t n;if(gp){b=cx_read(gp,&n);if(!b)die("graph IO");}else{char *v[]={"sh","./unisacc.com","tools/net-deps.cx","--","--root",(char *)root,0};np_result r={0};char why[300]={0};if(np_run(v,".",0,40,&r,why,sizeof why)||r.rc||r.residue){fprintf(stderr,"net-deps: graph producer %s\n",why);return 2;}b=r.out;n=r.outn;free(r.err);}
+ graph(b,n);measure();int failed=0;if(!report)baseline(bp);for(int k=0;k<4;k++){printf("FANOUT\tgate=14\tclass=%s\taffected=%d\tuniverse=%d\twitness=%s\n",classes[k],maxima[k],nn,witness[k]?witness[k]:"NONE");if(!maxima[k])die("missing category");if(!report&&(maxima[k]>limits[k]||nn!=universes[k])){fprintf(stderr,"net-deps: %s has %d affected nets of %d, baseline %ld of %ld\n",classes[k],maxima[k],nn,limits[k],universes[k]);failed++;}}
+ printf("net-deps: %s: gate=14 classes=4 universe=%d above=%d scope=static-closure-upper-bound\n",failed?"FAIL":"ok",nn,failed);return failed?1:0;}

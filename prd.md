@@ -83,7 +83,8 @@
 | 查 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 模块循环硬拒绝，报 `module cycle` |
 | 用系统 GCC/Clang 编 `.cx` | `sh ./gcc_cx.com FILE.cx -o OUT` / `sh ./clang_cx.com` | 六格 APE 宿主驱动，不调 unisacc.com |
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
-| 网级依赖图(42 配方网 × exec 表闭包) | `sh ./unisacc.com tools/net-deps.cx -- [--summary\|--touch FILE...\|--oracle]`；检查 `tools/check-net-deps.cx` | 静态读 manifest，输出 net/stage/manifest/input_file/kind；`--touch` 给出改一个表后失效的网集合；`--oracle` 对照观测读集（C0.1，未登记批次） |
+| 网级依赖图与第14号波及面门 | `sh ./unisacc.com tools/net-deps.cx -- [--summary\|--touch FILE...\|--oracle]`；`tests/net-deps.cx --check` | 路径别名统一规范化；原工具25/0、棘轮行为7/0；42配方静态上界实测pp3/lower12/generator42/facts30，无预留。批次net-deps及net-deps-ratchet；不是运行读集完备或语义覆盖证明 |
+| 0.0.48底子执行（cc续派） | BASE-1..6与C0.2登记于items；父集成BASE-1/BASE-6，独立子任务C0.2摘要、BASE-2耗时、BASE-5函数矩阵；BASE-4复用I2原型 | 先落实依赖/摘要及单网实测，再做真实pp扰动增量验证；仅冻结输入运行，不改产品输入。逐项提交同步并在计划§14填实际数字，全部完成后接X2；超过5分钟先分解，已有60秒子步骤看门狗不放宽 |
 | 符号索引 | `sh ./unisacc.com tools/symindex.cx -- def NAME` | 冷建 ~2.4s，查询 ~250ms |
 | `use` 的包根解析 | 仓根 `cxroot.tsv`（`R<TAB>PREFIX<TAB>DIR`）；工具侧 `use cxlib.cxroot` 调 `cxr_path`；`sh ./unisacc.com tools/check-cxroot.cx` | 旁边找不到时查最近祖先的 `cxroot.tsv`，最长前缀映射（cx/spec.md CX-U-7）；编译器侧已改 `plan.cx`/`cxmod.cx`，**已装产品要重建安装后才生效**，软链届时逐目录淘汰 |
 | 源码所有权检查（CX-W-4 路线 B） | `sh ./unisacc.com tools/cx-own.cx -- FILE...` 或 `-- --tracked`；夹具 `tools/check-cx-own.cx` | 函数内局部 owner 的 DOUBLE-FREE / USE-AFTER-FREE / LEAK；保守（转给未知函数视作可能转出）。2026-11-03 全仓：9043 函数，LEAK 220（抽 10 全真，多为工具错误路径），DOUBLE-FREE 1（误报，互斥整数条件），产品目录只有 60 个局部 owner——产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到 |
@@ -115,7 +116,7 @@
 | 上层禁 libc/POSIX | `sh ./unisacc.com tests/cxlibc.cx -- --check` | 名单不手写，按前导分类 |
 | 看某域还差什么 | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN` | 逐格读矩阵，印 OPEN 行 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.44.tsv --check` | R 行理由 + W 行豁免 |
-| 仓级棘轮（12 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal；2026-11-08撤出toolsloc，旧13项通过记录仅属历史 |
+| 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal/net-deps；toolsloc退役，新增net-deps沿计划保留第14号门称呼；旧通过记录不迁移 |
 | tools 统计与候选清理 | `sh ./unisacc.com tools/tool-inventory.cx -- --recent 10` | 总行数、按目录/文件及近N次提交增量；无调用者/无批次/疑似重复只报告；不设总量或逐文件上限。tests/toolsloc.tsv退役保留；precommit只对新增tool缺check或批次登记拦截 |
 | osx X1旧项复核（2026-11-08） | `tests/driver-target-object.cx ROOT cli`：9/0；平台宏最小源见`tests/cases/driver-default-platform.cx` | Darwin arm64 26.5.1、产品SHA f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82。默认-run原生、裸-c产宿主Mach-O对象并由产品链接执行，NATIVE-RUN-HOST-TARGET核销；不承诺系统链接器兼容。裸-S仍用lnx/x86_64预定义：平台源bare/显式lnx tape SHA同为d7bb734dae19…，显式osx为e02cac44f622…；DEFAULT-TARGET-S-C保留READY，只剩-S语义裁定/修复，不重复-c修复，也不迁移六宿主CI资格 |
 | 真实提交工具配套与源码分类闸 | `sh ./unisacc.com tools/check-precommit-toolsloc.cx -- --loc`、`-- --source`、`-- --symlink`（保留三批历史ID） | 独立真实临时git仓运行生产hook；历史行数超额允许，shebang伪源码拒绝，新增tool缺check或缺IMPLEMENTED批次拒绝；旧工具无调用者/无批次/重复仅列候选 |
@@ -408,7 +409,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md)、§8 |
-| 棘轮 | 12项，以`tools/ratchets.cx`末行为准；toolsloc已退役，工具行数只统计，不设任何上限 | `tools/ratchets.cx`、§2.2 |
+| 棘轮 | 13项，以`tools/ratchets.cx`末行为准；新增第14号net-deps，toolsloc已退役；工具行数只统计 | `tools/ratchets.cx`、§2.2 |
 | 事实表 | 事实→生成器（须带 `--check`）→产物 | `exec/facts/`、§2.4 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
 | 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
