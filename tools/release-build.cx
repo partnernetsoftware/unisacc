@@ -17,8 +17,8 @@
    resource \0hdr/cx-flat.h must then match that include/cx-flat.h byte for
    byte. Models are not rebuilt and package-refresh is not called.
 
-   slice has two routes. whole-o (osx, win): one child under tools/bound 60,
-   except osx/arm64, which uses the already built OUT/slice-lnx-x86_64 as the
+   slice has two routes. whole-o (osx, win): one child under an internal 60s
+   watchdog. The unused rb_phase helper can use OUT/slice-lnx-x86_64 as the
    constructor: PHASE=A writes the frames and stops, PHASE=B writes the image.
    Each child is bounded; the image matches a whole-o of the same sources and
    has no P3. objects (lnx): one child under tools/bound RB_OBJ_WALL (the
@@ -53,11 +53,10 @@
    child (compile 55, link 45, plan 50); this is only the outer "the whole
    entry-build never finishes" guard, not a per-job limit. */
 #define RB_OBJ_DEADLINE_MS 240000
-/* whole-o wall clock: 43 sources take ~70s (33 took 56-59s under the old 55s
-   cap), and tools/bound only accepts 1..60 by design, so the tool owns this
-   ceiling itself (same pattern as RB_OBJ_DEADLINE_MS) and kills the child's
-   whole process group when it expires. */
-#define RB_WHOLE_DEADLINE_MS 120000
+/* Complete 44-root whole-o job: at most 60s, including child output capture.
+   The dispatcher owns this watchdog and kills/reaps the child's process group
+   before removing a partial image. Test overrides can only shorten the cap. */
+#define RB_WHOLE_DEADLINE_MS 60000
 
 /* The whole-o ceiling is overridable only so a test can shrink it and watch the
    timeout path actually fire; a production run never sets it. */
@@ -905,7 +904,7 @@ static int rb_wait_child(int pid, int fd, RbBuf *cap, long deadline_ms,
     }
 }
 
-/* One whole -o. The child is tools/bound 60. osx whole-o was 56-59s under the old 55s cap. The image is not spliced with P3. */
+/* One complete whole -o with the internal 60s watchdog. No P3 splicing. */
 static int rb_whole(int argc, char **argv, const char *target) {
     char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
     char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
@@ -936,8 +935,8 @@ static int rb_whole(int argc, char **argv, const char *target) {
     rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
     if (sy_mono(&t0)) rb_die("clock");
     n = 0;
-    /* No tools/bound here: its ceiling is 1..60 by design and 43 sources need
-       ~70s. RB_WHOLE_DEADLINE_MS below is this route's own watchdog. */
+    /* The internal watchdog bounds the whole child and drains its output;
+       timeout cleanup removes any partial image before reporting refusal. */
     /* osx/win whole-o must be able to compile with a generation candidate, not
      * only the installed root product: UNISACC_CTOR (the same variable the lnx
      * object route uses) names the compiler binary; unset keeps the historical
