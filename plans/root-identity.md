@@ -8,8 +8,8 @@
 
 <!-- identity-begin -->
 product_kind	ape1
-product_digest	884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf
-unisacc.com	884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf	6163990
+product_digest	fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe
+unisacc.com	fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe	6215778
 <!-- identity-end -->
 
 三身份 sha256 不在这里另抄一份：上面的生成块就是唯一副本（抄第二份必然漂移）。
