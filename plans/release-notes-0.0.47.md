@@ -1,6 +1,6 @@
-# unisacc 0.0.47 —— 发布说明（草稿，未发布）
+# unisacc 0.0.47 —— 发布说明
 
-**本页不是发布公告，也不授予候选资格。** 冻结产品源为 `7b98ec2c0618df88115ae1c80cea47144e8614d3`，[版本定义](../src/version.h)为 `UNISACC_VERSION "0.0.47"`；源码冻结不等于新 APE、CI 或全批资格。构造所用旧 bootstrap `884adfef…` 仍报告 `0.0.46`，不得冒报为新产品。
+本版为正式版（非预发布）。产品证据是同候选六目标原生 CI（QUALIFIED 42/0，运行 42408207540）；**全批会话 s9 仍未达资格（NOT_QUALIFIED）**：445 个批次中 380 PASS、0 个产品方向的真实失败、32 已知缺口、10 基础设施、23 未运行（材料不可构造），详见下文。Tag 所指的 main 提交，其产品输入（`src cx exec include seed ext kernel`）与 CI 验证并冻结的 `7b98ec2c0618df88115ae1c80cea47144e8614d3` 逐字相同（`git diff 7b98ec2c06 v0.0.47 -- src cx exec include seed ext kernel` 为空）。发布后读回、安装与补充证据见末节。
 
 ## 是什么
 
