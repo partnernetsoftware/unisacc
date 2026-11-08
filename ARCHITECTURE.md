@@ -1,5 +1,7 @@
 # 仓库地图
 
+> **更简明的目录入口见 [docs/REPO-MAP.md](docs/REPO-MAP.md)。本文含 0.0.43 时期的历史叙述,现行状态以 [prd.md](prd.md) 为准。**
+
 **0.0.43当前入口（2026-10-25重规划）：** 旧测试树与旧门禁已移入
 `archive/testing-c43-legacy/`。新套件由`tests/run.cx`直接默认-run；当前smoke
 只有16项局部断言，完整验收仍明确NOT_READY。产品构造支持独立在`tools/`，

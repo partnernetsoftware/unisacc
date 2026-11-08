@@ -1,5 +1,7 @@
 # unisacc
 
+> **看不清目录?** 先读 [docs/REPO-MAP.md](docs/REPO-MAP.md):30 个顶层目录按用途分四组,标出哪些是冻结的「产品输入」。
+
 ## Quick start
 
 ```sh
