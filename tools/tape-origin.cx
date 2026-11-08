@@ -1,0 +1,115 @@
+/* Replay the product tape linker with an emitter-context ledger.
+ * OUTDIR must be new. Objects are ordered; archives are deliberately refused.
+ * Context is a pre-prune fact, never a claim of exclusive module ownership. */
+#pragma unisa use compiler.tapelink
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#define TO_UNITS 128
+#define TO_BYTES 33554432
+static unsigned char *merged;
+static long used,capacity;
+static long starts[TO_UNITS],lengths[TO_UNITS],payloads[TO_UNITS];
+static char hashes[TO_UNITS][65],tapehashes[TO_UNITS][65];
+static char ordered[TO_UNITS][4400],module_names[TO_UNITS][1024];
+static char inventory_sha[65],builder_sha[65];
+static void fail(const char *s){fprintf(stderr,"tape-origin: REFUSE %s\n",s);exit(2);}
+static int link_fail(char *s){fail(s);return 1;}
+static int emit(int c){
+ if(used==TO_BYTES)fail("merged tape byte budget");
+ if(used==capacity){long next=capacity?capacity*2:4096;void *p=mm_grow(merged,next);if(!p)fail("allocation");merged=p;capacity=next;}
+ merged[used++]=(unsigned char)c;return 0;
+}
+static void hash(const void *p,long n,char *hex){if(sy_sha256_hex(p,n,hex))cx_sha256_hex(p,n,hex);}
+static char *readfile(const char *path,size_t *n){
+ struct stat st;
+ if(stat(path,&st))fail(errno==ENOENT?"missing object":"object stat error");
+ if(!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>TO_BYTES)fail("object kind or byte budget");
+ char *p=cx_read(path,n);if(!p||*n!=(size_t)st.st_size)fail("object read extent");return p;
+}
+static void fresh_write(const char *path,const void *data,long n){
+ int fd=sy_open_new(path,0600);if(fd<0)fail("exclusive output create");
+ int bad=sy_write_all(fd,data,n);int closed=sy_close(fd);
+ if(bad||closed)fail("output write");
+}
+/* The existing slice-inventory verifies the in-order root/closure plan.
+ * Reconstruct exactly that order from the frozen builder's numbered keys;
+ * reject unfamiliar or sparse layouts rather than sorting alphabetically. */
+static int entry_order(const char *inventory,const char *builder,const char *objects){
+ size_t in,bn;char *inv=readfile(inventory,&in),*b=readfile(builder,&bn);
+ hash(inv,in,inventory_sha);hash(b,bn,builder_sha);
+ if(!strstr(inv,"INVENTORY_ID\t")||!strstr(inv,"identity=VERIFIED\tclosure=COMPLETE"))fail("verified complete inventory required");
+ char *definition=strstr(b,"#define EB_OBJ ");if(!definition)fail("builder root count declaration");
+ long roots=strtol(definition+15,0,10);if(roots<1||roots>TO_UNITS)fail("builder root count");
+ char keys[TO_UNITS][128],sources[TO_UNITS][1024];int selected[TO_UNITS]={0};int n=0;
+ for(char *p=inv;*p;){char *e=strchr(p,'\n');if(e)*e=0;
+  if(!strncmp(p,"UNIT\t",5)){
+   if(n==TO_UNITS)fail("inventory units bound");long a,z;
+   if(tx_field(p,strlen(p),'\t',1,&a,&z)||z<1||z>=128||tx_copy(keys[n],sizeof keys[n],p+a,z))fail("inventory key");
+   if(tx_field(p,strlen(p),'\t',2,&a,&z)||z<1||z>=1024||tx_copy(sources[n],sizeof sources[n],p+a,z))fail("inventory source");
+   for(int j=0;j<n;j++)if(!strcmp(keys[j],keys[n]))fail("duplicate inventory key");n++;
+  }
+  if(!e)break;p=e+1;
+ }
+ if(n<roots)fail("inventory root count");
+ for(int i=0;i<n;i++){
+  char key[128],pat[64];
+  if(i<roots){
+   if(cx_fmt(pat,sizeof pat,"keys[%d] = \"",i))fail("root pattern");
+   char *p=strstr(b,pat);if(!p||strstr(p+strlen(pat),pat))fail("unique numbered builder root required");p+=strlen(pat);char *e=strchr(p,'\"');
+   if(!e||e-p<1||e-p>=128||tx_copy(key,sizeof key,p,e-p))fail("builder root key");
+  }else if(cx_fmt(key,sizeof key,"m%d.o",i-(int)roots))fail("closure key");
+  int j;for(j=0;j<n;j++)if(!strcmp(keys[j],key))break;
+  if(j==n||strchr(key,'/')||strpbrk(key,"\t\n\r"))fail("complete contiguous object order required");
+  if(selected[j])fail("repeated ordered object key");selected[j]=1;
+  if(cx_fmt(ordered[i],sizeof ordered[i],"%s/%s",objects,key)||tx_copy(module_names[i],sizeof module_names[i],sources[j],strlen(sources[j])))fail("ordered path");
+ }
+ free(inv);free(b);return n;
+}
+int main(int argc,char **argv){
+ const char *dir;const char *paths[TO_UNITS];int count;
+ if(argc==7&&!strcmp(argv[1],"--entry")){
+  dir=argv[6];count=entry_order(argv[2],argv[3],argv[4]);
+  if(strcmp(argv[5],"--out"))fail("--entry INVENTORY FROZEN_BUILDER OBJECT_DIR --out NEW_OUTDIR");
+  for(int i=0;i<count;i++)paths[i]=ordered[i];
+ }else{
+  if(argc<3||argc-2>TO_UNITS)fail("usage: NEW_OUTDIR ORDERED_OBJECT... | --entry INVENTORY FROZEN_BUILDER OBJECT_DIR --out NEW_OUTDIR");
+  dir=argv[1];count=argc-2;for(int i=0;i<count;i++)paths[i]=argv[i+2];
+ }
+ if(strpbrk(dir,"\t\n\r"))fail("unsafe output path");
+ for(int i=0;i<count;i++)if(strpbrk(paths[i],"\t\n\r"))fail("unsafe object path");
+ struct stat old;errno=0;
+ if(!lstat(dir,&old)||errno!=ENOENT)fail("output directory must be absent");
+ if(tl_bind(emit,link_fail)||tl_begin())fail("linker initialization");
+ for(int i=0;i<count;i++){
+  size_t n;char *b=readfile(paths[i],&n);long tn=0;
+  hash(b,(long)n,hashes[i]);char *t=tl_tape(b,(long)n,&tn);
+  if(!t||tn<0||tn>2147483647L)fail("unit tape required (archives unsupported)");
+  if(!i)tl_adopt_first();else if(tl_target_differs())fail("objects target mismatch");
+  hash(t,tn,tapehashes[i]);payloads[i]=tn;starts[i]=used;
+  if(tl_unitver(t,(int)tn)||tl_unit(t,(int)tn,i)||tl_note_links(t,tn))fail("unit linker rejection");
+  lengths[i]=used-starts[i];free(b);
+ }
+ if(tl_check_undef())fail("unresolved symbol");
+ if(tl_entry_missing())fail("missing entry");
+ long synthetic=used;
+ if(tl_os("__init:\n",8))fail("init emission");
+ for(int i=0;i<count;i++){tl_os("  call __init_u",15);tl_num(i);tl_os("\n",1);}
+ tl_os("  ret\n",6);
+ char tape_sha[65],tape_path[4400],ledger_path[4400];hash(merged,used,tape_sha);
+ if(cx_fmt(tape_path,sizeof tape_path,"%s/merged.tape",dir)||cx_fmt(ledger_path,sizeof ledger_path,"%s/origin.tsv",dir))fail("path bound");
+ /* Publish the complete ledger last; no file is created before linker validation. */
+ if(mkdir(dir,0700))fail("exclusive output directory create");
+ fresh_write(tape_path,merged,used);
+ FILE *f=fopen(ledger_path,"wx");if(!f)fail("exclusive ledger create");
+ fprintf(f,"TAPE_ORIGIN\tversion=1\tphase=pre-prune\tclaim=emitter-context-only\ttarget=%s\ttape_sha=%s\tbytes=%ld\n",tl_first_text(),tape_sha,used);
+ if(inventory_sha[0])fprintf(f,"ORDER_INPUT\tinventory_sha=%s\tbuilder_sha=%s\tmethod=numbered-roots-then-contiguous-closure;source-claim=inventory-plan-only\n",inventory_sha,builder_sha);
+ for(int i=0;i<count;i++)fprintf(f,"UNIT\t%d\t%s\tobject_sha=%s\tpayload_sha=%s\tpayload_bytes=%ld\tlo=%ld\thi=%ld\tshared_ownership=UNPROVEN\tplanned_source=%s\n",i,paths[i],hashes[i],tapehashes[i],payloads[i],starts[i],starts[i]+lengths[i],module_names[i][0]?module_names[i]:"UNKNOWN");
+ fprintf(f,"SYNTHETIC\tinit\tlo=%ld\thi=%ld\n",synthetic,used);
+ fprintf(f,"COMPLETE\tunits=%d\tcontext_bytes=%ld\tsynthetic_bytes=%ld\tsum=%ld\ttape_sha=%s\n",count,synthetic,used-synthetic,used,tape_sha);
+ if(fclose(f))fail("ledger close");
+ printf("TAPE_ORIGIN\tunits=%d\tbytes=%ld\ttape_sha=%s\tclaim=emitter-context-only\n",count,used,tape_sha);
+ free(merged);return 0;
+}

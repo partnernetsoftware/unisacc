@@ -1,0 +1,48 @@
+/* Real unit objects exercise the product linker and emitter-context conservation. */
+#pragma unisa use sys.fs
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+static char root[4096],base[4400],com[4400],tool[4400];
+static int count,bad;
+static void die(const char *s){fprintf(stderr,"check-tape-origin: %s\n",s);exit(2);}
+static void path(char *p,const char *name){if(cx_fmt(p,4400,"%s/%s",base,name))die("path");}
+static void ck(int yes,const char *name){count++;bad+=!yes;printf("%s\t%s\n",yes?"PASS":"FAIL",name);}
+static int absent(const char *p){struct stat s;if(!lstat(p,&s))return 0;if(errno!=ENOENT)die("stat");return 1;}
+static int run(char **v,int expected){np_result r={0};char why[512];int e=np_run(v,root,0,8,&r,why,sizeof why);int ok=!e&&!r.residue&&r.rc==expected;if(!ok){fprintf(stderr,"transport=%d rc=%d want=%d %s\n",e,r.rc,expected,why);if(r.err)fwrite(r.err,1,r.errn,stderr);}np_free(&r);return ok;}
+static void compile(const char *name,const char *source,const char *target,char *object){char p[4400];path(p,name);if(cx_write(p,source,strlen(source)))die("source fixture");if(cx_fmt(object,4400,"%s/%s.o",base,name))die("object path");char *v[]={"sh",com,p,"-c","-funit","-b",(char *)target,"-o",object,0};if(!run(v,0))die("compile fixture");}
+static int occurrences(const char *text,const char *word){int n=0;size_t k=strlen(word);const char *p=text;while((p=strstr(p,word))){n++;p+=k;}return n;}
+int main(void){
+ char temp[]="/tmp/check-tape-origin-XXXXXX",a[4400],b[4400],arm[4400],undef[4400],out[4400],tape[4400],ledger[4400],rejected[4400];
+ if(!realpath(".",root)||!mkdtemp(temp))die("root/temp");strcpy(base,temp);
+ if(cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/tape-origin.cx",root))die("tool path");
+ compile("a.cx","static int local(void){return 5;} int shared; int f(void){return local()+shared;}\n","lnx/x86_64",a);
+ compile("b.cx","static int local(void){return 18;} int shared; int f(void); int main(void){return f()+local();}\n","lnx/x86_64",b);
+ compile("arm.cx","int main(void){return 0;}\n","lnx/arm64",arm);
+ compile("undef.cx","int missing(void); int main(void){return missing();}\n","lnx/x86_64",undef);
+ path(out,"joined");char *v[]={"sh",com,tool,"--",out,a,b,0};ck(run(v,0),"two real unit objects accepted");
+ if(cx_fmt(tape,sizeof tape,"%s/merged.tape",out)||cx_fmt(ledger,sizeof ledger,"%s/origin.tsv",out))die("outputs");size_t tn=0,ln=0;char *t=cx_read(tape,&tn),*l=cx_read(ledger,&ln);
+ ck(t&&strstr(t,"__u0_")&&strstr(t,"__u1_"),"same local names retain separate unit prefixes");
+ ck(t&&occurrences(t,".bss g_shared ")==1,"shared tentative BSS emitted once");
+ ck(l&&strstr(l,"claim=emitter-context-only")&&occurrences(l,"shared_ownership=UNPROVEN")==2,"context never claims shared ownership");
+ long lo0=-1,hi0=-1,lo1=-1,hi1=-1,sylo=-1,syhi=-1;char *p=l?strstr(l,"UNIT\t0\t"):0;
+ if(p&&(p=strstr(p,"\tlo=")))sscanf(p,"\tlo=%ld\thi=%ld",&lo0,&hi0);p=l?strstr(l,"UNIT\t1\t"):0;if(p&&(p=strstr(p,"\tlo=")))sscanf(p,"\tlo=%ld\thi=%ld",&lo1,&hi1);p=l?strstr(l,"SYNTHETIC\tinit\t"):0;if(p)sscanf(p,"SYNTHETIC\tinit\tlo=%ld\thi=%ld",&sylo,&syhi);
+ ck(lo0==0&&hi0>0&&lo1==hi0&&hi1>lo1&&sylo==hi1&&syhi==(long)tn,"all tape bytes in contiguous nonoverlapping contexts");
+ char h[65],needle[100];if(t)cx_sha256_hex(t,tn,h);else h[0]=0;snprintf(needle,sizeof needle,"tape_sha=%s",h);ck(l&&strstr(l,needle)&&strstr(l,"COMPLETE\tunits=2"),"ledger binds exact completed tape SHA");
+ ck(run(v,2),"existing output directory refused");size_t again;char *saved=cx_read(ledger,&again);ck(saved&&l&&again==ln&&!memcmp(saved,l,ln),"existing ledger unchanged");free(saved);
+ path(rejected,"noentry");char *noentry[]={"sh",com,tool,"--",rejected,a,0};ck(run(noentry,2)&&absent(rejected),"missing entry refuses before output creation");
+ path(rejected,"duplicate");char *duplicate[]={"sh",com,tool,"--",rejected,b,b,0};ck(run(duplicate,2)&&absent(rejected),"duplicate definition refuses before output creation");
+ path(rejected,"mixed");char *mixed[]={"sh",com,tool,"--",rejected,a,arm,0};ck(run(mixed,2)&&absent(rejected),"mixed targets refuse before output creation");
+ path(rejected,"undefined");char *unknown[]={"sh",com,tool,"--",rejected,undef,0};ck(run(unknown,2)&&absent(rejected),"unresolved external refuses before output creation");
+ char inv[4400],builder[4400],entryout[4400],entrytape[4400];path(inv,"inventory.tsv");path(builder,"builder.cx");path(entryout,"entry-order");
+ const char *inventory="INVENTORY_ID\tfixture\nUNIT\tb.cx.o\tb.cx\nUNIT\ta.cx.o\ta.cx\nSLICE_INVENTORY\tunits=2\tidentity=VERIFIED\tclosure=COMPLETE\n";
+ const char *build="#define EB_OBJ 2\nkeys[0] = \"a.cx.o\";\nkeys[1] = \"b.cx.o\";\n";
+ if(cx_write(inv,inventory,strlen(inventory))||cx_write(builder,build,strlen(build)))die("entry fixture");
+ char *entry[]={"sh",com,tool,"--","--entry",inv,builder,base,"--out",entryout,0};
+ ck(run(entry,0),"verified inventory entry ordering accepts");
+ if(cx_fmt(entrytape,sizeof entrytape,"%s/merged.tape",entryout))die("entry tape path");saved=cx_read(entrytape,&again);
+ ck(saved&&t&&again==tn&&!memcmp(saved,t,tn),"reversed inventory reconstructs exact builder order");free(saved);
+ path(entryout,"bad-builder");const char *dupbuild="#define EB_OBJ 2\nkeys[0] = \"a.cx.o\";\nkeys[1] = \"a.cx.o\";\n";
+ if(cx_write(builder,dupbuild,strlen(dupbuild)))die("duplicate builder fixture");ck(run(entry,2)&&absent(entryout),"duplicate builder object key refuses");
+ path(entryout,"unverified");if(cx_write(builder,build,strlen(build))||cx_write(inv,"UNIT\ta.cx.o\ta.cx\n",17))die("unverified fixture");ck(run(entry,2)&&absent(entryout),"unverified inventory refuses");
+ free(t);free(l);printf("TAPE_ORIGIN_CHECK\tchecks=%d\tfailed=%d\n",count,bad);return bad?1:0;
+}
