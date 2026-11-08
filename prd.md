@@ -531,3 +531,23 @@ frame-edges最初登记helper没有入口args参数，实际运行了默认19项
 〔C47两片模块最终本地账〕ARM新AF/AI完整观察774105记录、target与原front cmp0；消费372588 episode实际退出0，最后mapper亦退出0：1889006B=82模块上下文代码1793808B+未覆盖代码52860B+合成1324B+HEADER176B+DATA_OR_ALIGN40838B，SHARED0。新账research/c47-logic-distribution-20261108/lnx-arm64-module-bytes.tsv保留完整SHA链；旧未含AF/AI的132612B UNKNOWN账保留在out，不拿其覆盖新证据。Linux两片分别守恒且与本轮候选镜像cmp0；仍不是其它四片完成，亦不证明共享全局数据的排他所有权。
 
 Win/x86_64正常whole-o原44roots路线实际重放成功，bare2663424B SHA76248e1fdcb152e260b9bb530179bb44295530ad448ee1c050475bdf720b2fec，与原片完整cmp0；原holdframe37029416B/82源帧/742B属性，SHA6aa39be72d1c0f8cf0c5183edc387e9df06b0a9d6cd5dd8b9c209c5e9a2e12b4。分段PHASE B确实在__ccw_0处lower拒绝，未冒充原片证据；存在固定临时forward源码名且多agent共享TMPDIR，后续捕获应先隔离TMPDIR再核，不先断言根因。旧RF_CAPTURE e3 companion的SHA字段空白不能作有效输入身份，后续用独立内容hash和最终image cmp补证，绝不把空身份填成PASS。
+
+下一正常Win重放将TMPDIR设为本任务独占目录，保持原构造器/容器/44输入和正常whole-o路线，不用PHASE B、不启RF_CAPTURE；同时留存hf原帧及真实forward stub。须再次最终image cmp原片，才能把隔离捕获材料加入来源链；不会用不同输入产物冒充原片。
+
+〔C47 whole-o关键分支已实测收窄〕正常重放的独占TMPDIR下image仍cmp原Win片0，且无forward stub文件；实际product stream units/e3/sidecar已全部退出0，USLFW1为hostslot0/ccw46。按dv_run_lower的cnt0真实分支可直接剥tape→prune/image，不需要第二e3；前述假设stub的计划被实证撤回。原PHASE A在cnt0也可能完成整片，不得只按环境名认“停在e3”。e3-first.tape13472921B/787224行，SHA cb9860332f975e901a6cbfb5da2f53db788e6bb421db502cbdb443561d61f583，82帧与742B属性保留。
+
+模型4实际绑定的是parse2 --errors图（隐含locations），JSON SHA a985b1706b96659bd3951a44495e774d4eb3c969163845c7a63d9c225e6b1811、raw434447B SHA09ca74c5…，正式raw cmp=1；--locations-only的409740B不匹配图保留拒绝，不用它作来源。模型35 --locations已raw cmp=1。现source-package配方的shared-e3 --locations与本包事实不符，只记录缺口，不顺手修改构造链。
+
+工具预算实测574文件82081行，对新合入cc基线81824多257；没有改基线，已异步提交具体本刀扩额问题。工具功能/来源验证继续，不把该棘轮红表述成全仓绿；另误选precommit自身夹具--loc整体55s超时保留，真正当前计量是tests/toolsloc.cx --check明确exit1。
+
+〔C47 ARM其它格式证书决定〕保留现Linux ARM两pass/OP.end合同和默认11断言，新增显式osx/arm64与win/arm64-forward profile，各自绑定model16/24及新配置SHA；格式布局及完整复制边沿用已审x86格式事实，但机器码事务仍按ARM两pass验证。先独立格式正负控与真实最小target，完整whole-o分账未闭合前不记其它片完成。
+
+〔C47 whole-o阶段链实证〕父真实product stream lower与elf均已终态exit0，win-stage-replayed.exe为2663424B，与正常whole-o原bare全字节cmp0；因此已捕获的82帧→units→model4首e3→cnt0 strip→prune→lower→elf链确为该原片材料。尚无逐函数来源证书，不能把镜像相等替代来源。下一对osx两架构及winARM各用同一原44绝对输入、冻结旧构造器/容器、独占TMPDIR正常whole-o捕获，各外限50秒，分别与自己的原片cmp；三路不共享输出或状态。
+
+〔C47四片whole-o原材料闭合〕osx/x86_64、osx/arm64、win/arm64三份正常whole-o捕获会话62586/66780/24640均真实exit0，各自image与原候选slice cmp0；字节/镜像SHA分别2410978/42ce67ed…、3071458/e5f80fac…、3369472/fcfcc413…；原holdframe SHA分别6b80eb1a…、43ecf905…、1e9598aa…。首次WinARM cmp路径误指whole下不存在文件，保留拒绝，随后对正确win-arm64/slice-win-arm64实际cmp0；不把不存在路径当通过。所有材料为相同44原绝对输入及冻结构造器，四目标源帧各自捕获不互代。
+
+〔C47 whole观察性能未闭合〕minimal真实e3输入198B上默认与-O2 sim均exit0，623B sidecar及940B完整12记录观察账逐字节相等；据此才单次完整-O2重试，仍在同50s退出142、无COMPLETE/sidecar0B，不记全片PASS。下一只做10秒私有诊断核新frame重复哈希是否热点，不凭猜测改性能或再完整重试；共享sim输入已移交写窗口。
+
+〔C47 holdframe材料提取工具决定〕四目标whole-o已捕获，但原一次性Python提取有明确债，不继续复制算法。新增可复用.cx工具严格解析holdframe LE32 frn/atn、82源帧记录与原属性，验证路径/长度/重复单元/完整尾后输出USLATTRT units载体、attrs及逐帧SHA身份；仅准备材料，不代表功能或来源已证。配独立check并登记，原Python材料保留且新工具输出须cmp0。
+
+〔C47 ARM外格式实际门禁〕新MachO ARM独立4/0、PE ARM forward5/0，原Linux11/0保留；真实最小producer/consumer均exit0（1349records/text6524/image33250及1765records/text9820/image13824）。两个新注册批最终均PASS/rc0/transport0/ARM_FOREIGN_CHECK，绑定现候选f069d4c9…。register无args，初次默认11只算注册准备，父改精确args/marker后正式新跑；另首次手动run-batch漏ROOT/OUT参数正确usage拒绝，已保留原日志，正确完整参数调用才记PASS。能力速查：arm-encoder-record-origin --profile osx/arm64|win/arm64-forward TARGET CONFIG WATCH IMAGE；配置SHA d64f933c…/edc2f841…。四目标whole-o材料身份已固化research/c47-logic-distribution-20261108/whole-o-material-identities.tsv，但函数来源/四片最终模块表仍未完成。
