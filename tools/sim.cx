@@ -28,7 +28,7 @@ static void bput(Bytes *b, const unsigned char *s, long n) { bgrow(b, n); { void
 static void bputc(Bytes *b, int c) { bgrow(b, 1); b->s[b->n++] = (unsigned char)c; }
 /* Opt-in write association only. No module ownership or causal completeness claim. */
 static const char *we_path;
-static long we_count,we_limit=100000,we_byte_limit=16777216,we_generation,we_frame_serial=1,we_active_frame;
+static long we_count,we_limit=100000,we_byte_limit=16777216,we_generation,we_scratch_generation,we_frame_serial=1,we_active_frame;
 static const unsigned char *we_cached_frame;static long we_cached_n=-1;static char we_cached_sha[65];
 static Bytes we_log;
 static long we_fill_at,we_fill_width;
@@ -38,6 +38,8 @@ static void we_frame_hash(const unsigned char *s,long n,char *out){if(s!=we_cach
 static long we_number(const char *s,long max){char *e;long v=strtol(s,&e,10);if(!*s||*e||v<1||v>max)die("write-events budget must be positive and within hard cap");return v;}
 static void we_add(const char *s){long n=strlen(s);if(n>we_byte_limit-we_log.n)die("write-events file budget exceeded");bput(&we_log,(const unsigned char *)s,n);}
 static void we_hex(const char *s,char *out,long cap){const char *hex="0123456789abcdef";long i=0;for(;*s;s++){if(i+2>=cap)die("write-events state/key length");out[i++]=hex[((unsigned char)*s)>>4];out[i++]=hex[((unsigned char)*s)&15];}out[i]=0;}
+/* Identity edges do not infer ownership. Blob IDs distinguish equal content. */
+static void we_edge(const char *state,int key,int ai,const char *op,const char *src,long generation,long lo,long hi,const char *dst,long id,const unsigned char *bytes,long n){char line[2048],st[1024],sha[65];long source_blob=!strcmp(src,"blob")?generation:-1;if(++we_count>we_limit)die("write-events event budget exceeded");we_hex(state,st,sizeof st);we_hash(bytes?bytes:(const unsigned char *)"",n,sha);int k=snprintf(line,sizeof line,"EDGE\t%ld\tstate_hex=%s\tkey=%d\taction_index=%d\taction=%s\tsource_buffer=%s\tsource_generation=%ld\tsource_blob_id=%ld\tsource_lo=%ld\tsource_hi=%ld\tsource_frame_instance=%ld\tdestination=%s\tdestination_id=%ld\tsha=%s\tbytes=%ld\tmodule=UNKNOWN\n",we_count,st,key,ai,op,src,source_blob>=0?0:generation,source_blob,lo,hi,we_active_frame,dst,id,sha,n);if(k<0||k>=sizeof line)die("write-events edge line bound");we_add(line);}
 static void we_event(const char *state,int key,const char *top,int ai,const char *op,const char *buf,long generation,long aftergen,long before,long after,const char *frame,long cursor,long end,long lo,long hi){long dstlo=after>=before?before:after,dsthi=after>=before?after:before;if(!strcmp(op,"OFILL")){dstlo=we_fill_at;dsthi=we_fill_at+we_fill_width;}if(!strcmp(op,"SWAP")){dstlo=0;dsthi=before;}char line[4096],st[1024],tk[1024];if(++we_count>we_limit)die("write-events event budget exceeded");we_hex(state,st,sizeof st);we_hex(top?top:"",tk,sizeof tk);int n=snprintf(line,sizeof line,"EVENT\t%ld\tstate_hex=%s\tkey=%d\ttop_hex=%s\taction_index=%d\taction=%s\tbuffer=%s\tgeneration=%ld\tafter_generation=%ld\tbefore=%ld\tafter=%ld\tframe_sha=%s\tframe_instance=%ld\tcursor=%ld\tframe_end=%ld\tsource_lo=%ld\tsource_hi=%ld\tdst_lo=%ld\tdst_hi=%ld\tmodule=UNKNOWN\n",we_count,st,key,tk,ai,op,buf,generation,aftergen,before,after,frame,we_active_frame,cursor,end,lo,hi,dstlo,dsthi);if(n<0||n>=sizeof line)die("write-events event line bound");we_add(line);}
 static void we_publish(const Bytes *o){char sha[65],line[512],tmp[4400];we_hash(o->s?o->s:(const unsigned char *)"",o->n,sha);if(snprintf(tmp,sizeof tmp,"%s.tmp.%d",we_path,getpid())>=sizeof tmp)die("write-events path bound");int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)die("write-events create temp");snprintf(line,sizeof line,"WRITE_EVENTS\tversion=1\tdelta_sha=%s\tinput_sha=%s\toutput_sha=%s\toutput_bytes=%ld\tclaim=association-only\n",we_delta_sha,we_input_sha,sha,o->n);Bytes all={0};bput(&all,(unsigned char *)line,strlen(line));bput(&all,we_log.s,we_log.n);snprintf(line,sizeof line,"COMPLETE\tevents=%ld\n",we_count);bput(&all,(unsigned char *)line,strlen(line));if(all.n>we_byte_limit){close(fd);unlink(tmp);die("write-events file budget exceeded including metadata");}long at=0;while(at<all.n){long n=write(fd,all.s+at,all.n-at);if(n<=0){close(fd);unlink(tmp);die("write-events write");}at+=n;}if(close(fd)||sy_linkat(sy_at_fdcwd(),tmp,sy_at_fdcwd(),we_path,0)){unlink(tmp);die("write-events publish (target must not exist)");}if(unlink(tmp))die("write-events temp cleanup");free(all.s);}
 typedef struct { long long *s; long n, cap; } Words;
@@ -202,7 +204,7 @@ int main(int argc, char **argv) {
         q = ed->next; dl_seq *sq = ed->seq;
         for (int ai = 0; ai < sq->n; ai++) {
             dl_act *a = &sq->a[ai];
-            long we_on=0,we_en=0,we_sn=0,we_cur=0,we_end=0,we_lo=-1,we_hi=-1,we_gen=we_generation;char we_frame[65]={0};const char *we_top="";
+            long we_on=0,we_en=0,we_sn=0,we_cur=0,we_end=0,we_lo=-1,we_hi=-1,we_gen=we_generation,we_sgen=we_scratch_generation;char we_frame[65]={0};const char *we_top="";
             if(we_path){we_fill_at=a->op==DL_OFILL?(long)W[a->r1]:-1;we_fill_width=(long)a->v;we_on=o.n;we_en=e.n;we_sn=sb.n;we_cur=fr->cur;we_end=fr->end;we_active_frame=fr->diagnostic_id;we_frame_hash(fr->b,fr->end,we_frame);we_top=we_observed_top;if(a->op==DL_COPY||a->op==DL_COPYT){we_lo=fr->cur;we_hi=fr->cur<fr->end?fr->cur+1:fr->cur;}if(a->op==DL_SPAN||a->op==DL_SPANT||a->op==DL_SPAN2||a->op==DL_SBSPAN){we_lo=(long)W[a->r1];if(we_lo<0)we_lo=0;we_hi=(a->op==DL_SPAN2||a->op==DL_SBSPAN)?(long)W[a->r2]:fr->cur;if(we_hi>fr->end)we_hi=fr->end;if(we_hi<we_lo)we_hi=we_lo;}}
             switch (a->op) {
             case DL_ADV: fr->cur++; break;
@@ -227,7 +229,7 @@ int main(int argc, char **argv) {
             case DL_OLAST: r = o.n ? o.s[o.n - 1] : 256; break;
             case DL_ODROP: if (o.n) { o.n--; oattr.n--; } break;
             case DL_OLEN: W[a->r1] = o.n; break;
-            case DL_OCUT: { long s0 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n; long len = o.n - s0; unsigned char *c = xmalloc((size_t)len + 1); { void *cx_kept = memcpy(c, o.s + s0, (size_t)len); (void)cx_kept; } ADDBLOB(c, len); W[a->r1] = nblobs - 1; o.n = s0; oattr.n = s0; } break;
+            case DL_OCUT: { long s0 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n; long len = o.n - s0; unsigned char *c = xmalloc((size_t)len + 1); { void *cx_kept = memcpy(c, o.s + s0, (size_t)len); (void)cx_kept; } ADDBLOB(c, len); W[a->r1] = nblobs - 1;if(we_path)we_edge(st->name,key,ai,"OCUT","output",we_generation,s0,o.n,"blob",nblobs-1,c,len); o.n = s0; oattr.n = s0; } break;
             case DL_ORES: W[a->r1] = o.n; for (long long i = 0; i < a->v; i++) { bputc(&o, ' '); wput(&oattr, OT); } break;
             case DL_OFILL: { char t[32]; int tn = snprintf(t, sizeof t, "%lld", W[a->r2]); long wdt = (long)a->v, at = (long)W[a->r1]; if (at < 0 || at + wdt > o.n) die("fill past the reservation");
                 if (tn <= wdt) { memset(o.s + at, ' ', (size_t)(wdt - tn)); { void *cx_kept = memcpy(o.s + at + wdt - tn, t, (size_t)tn); (void)cx_kept; } } else { result = 1; rejname = "field overflow"; goto done; } } break;
@@ -240,11 +242,11 @@ int main(int argc, char **argv) {
             case DL_INTERN: case DL_SBINTERN: { const unsigned char *k; long kn; if (a->op == DL_INTERN) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
                 long long id; if (!bhas(&intern, k, kn, &id)) { id = intern.n + 1; bset(&intern, k, kn, id); } W[a->r1] = id; } break;
             case DL_BLOBSAVE: case DL_SBSAVE: { const unsigned char *k; long kn; if (a->op == DL_BLOBSAVE) { long s0 = (long)W[a->r2], s1 = (long)W[a->r3]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; k = fr->b + s0; kn = s0 < s1 ? s1 - s0 : 0; } else { k = sb.s ? sb.s : (const unsigned char *)""; kn = sb.n; }
-                unsigned char *c = xmalloc((size_t)kn + 1); { void *cx_kept = memcpy(c, k, (size_t)kn); (void)cx_kept; } ADDBLOB(c, kn); W[a->r1] = nblobs - 1; } break;
-            case DL_INPUSH: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("INPUSH blob index"); if (nfr == MAXFRAMES) die("frame overflow"); if(we_path)frames[nfr].diagnostic_id=++we_frame_serial;frames[nfr].b = blobs[bi].s; frames[nfr].attr = 0; frames[nfr].cur = 0; frames[nfr].end = blobs[bi].n; fr = &frames[nfr++]; } break;
+                unsigned char *c = xmalloc((size_t)kn + 1); { void *cx_kept = memcpy(c, k, (size_t)kn); (void)cx_kept; } ADDBLOB(c, kn); W[a->r1] = nblobs - 1;if(we_path){long lo=a->op==DL_BLOBSAVE?(long)(k-fr->b):0;we_edge(st->name,key,ai,dl_opname(a->op),a->op==DL_BLOBSAVE?"frame":"scratch",a->op==DL_BLOBSAVE?fr->diagnostic_id:we_scratch_generation,lo,lo+kn,"blob",nblobs-1,c,kn);} } break;
+            case DL_INPUSH: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("INPUSH blob index"); if (nfr == MAXFRAMES) die("frame overflow"); if(we_path){frames[nfr].diagnostic_id=++we_frame_serial;we_edge(st->name,key,ai,"INPUSH","blob",(long)bi,0,blobs[bi].n,"frame",frames[nfr].diagnostic_id,blobs[bi].s,blobs[bi].n);}frames[nfr].b = blobs[bi].s; frames[nfr].attr = 0; frames[nfr].cur = 0; frames[nfr].end = blobs[bi].n; fr = &frames[nfr++]; } break;
             case DL_INPUSHX: case DL_INPUSHXE: { if (nfr == MAXFRAMES) die("frame overflow"); if(we_path)frames[nfr].diagnostic_id=++we_frame_serial;frames[nfr].b = x; frames[nfr].attr = xattr; frames[nfr].cur = (long)W[a->r1]; long end = xn; if (a->op == DL_INPUSHXE) { long long ee = W[a->r2]; if (ee < end) end = (long)ee; } frames[nfr].end = end; fr = &frames[nfr++]; } break;
             case DL_INPOP: if (nfr <= 1) die("INPOP of the base frame"); nfr--; fr = &frames[nfr - 1]; break;
-            case DL_SBCLR: sb.n = 0; break;
+            case DL_SBCLR: sb.n = 0;if(we_path)we_scratch_generation++; break;
             case DL_SBOUT: bputc(&sb, (int)a->v); break;
             case DL_SBSPAN: { long s0 = (long)W[a->r1], s1 = (long)W[a->r2]; if (s0 < 0) s0 = 0; if (s1 > fr->end) s1 = fr->end; if (s0 < s1) bput(&sb, fr->b + s0, s1 - s0); } break;
             case DL_SBBLOB: { long long bi = W[a->r1]; if (bi < 0 || bi >= nblobs) die("SBBLOB blob index"); bput(&sb, blobs[bi].s, blobs[bi].n); } break;
@@ -257,12 +259,12 @@ int main(int argc, char **argv) {
             case DL_DIVMOD10: { unsigned long long v = (unsigned long long)W[a->r1] & 0xFFFFFFFFULL; W[a->r1] = (long long)(v / 10); r = (long long)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
             case DL_INC: W[a->r1] = (long long)(((unsigned long long)W[a->r1] + 1) & 0xFFFFFFFFULL); break;   /* exec/c/core.c:300 */
             case DL_SWAP: { unsigned char *nx = xmalloc((size_t)o.n + 1); { void *cx_kept = memcpy(nx, o.s, (size_t)o.n); (void)cx_kept; } nx[o.n] = 0; long long *na = xmalloc((size_t)(o.n ? o.n : 1) * sizeof(long long)); { void *cx_kept = memcpy(na, oattr.s, (size_t)o.n * sizeof(long long)); (void)cx_kept; }
-                x = nx; xn = o.n; xattr = na; o.s = 0; o.n = 0; o.cap = 0; oattr.s = 0; oattr.n = 0; oattr.cap = 0; nfr = 1; if(we_path)frames[0].diagnostic_id=++we_frame_serial; frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; fr = &frames[0]; } break;
+                x = nx; xn = o.n; xattr = na; o.s = 0; o.n = 0; o.cap = 0; oattr.s = 0; oattr.n = 0; oattr.cap = 0; nfr = 1; if(we_path){frames[0].diagnostic_id=++we_frame_serial;we_edge(st->name,key,ai,"SWAP","output",we_generation,0,xn,"frame",frames[0].diagnostic_id,x,xn);} frames[0].b = x; frames[0].attr = xattr; frames[0].cur = 0; frames[0].end = xn; fr = &frames[0]; } break;
             case DL_ACCEPT: result = 0; goto done;
             case DL_REJECT: result = 1; rejname = a->s1; goto done;
             default: die("unhandled action");
             }
-            if(we_path){if(a->op==DL_SWAP)we_generation++;if(o.n!=we_on||a->op==DL_OFILL||a->op==DL_SWAP||a->op==DL_OCLR||a->op==DL_OCUT||a->op==DL_ODROP)we_event(st->name,key,we_top,ai,dl_opname(a->op),"output",we_gen,we_generation,we_on,o.n,we_frame,we_cur,we_end,we_lo,we_hi);if(e.n!=we_en)we_event(st->name,key,we_top,ai,dl_opname(a->op),"diagnostic",0,0,we_en,e.n,we_frame,we_cur,we_end,we_lo,we_hi);if(sb.n!=we_sn||a->op==DL_SBCLR)we_event(st->name,key,we_top,ai,dl_opname(a->op),"scratch",0,0,we_sn,sb.n,we_frame,we_cur,we_end,we_lo,we_hi);}
+            if(we_path){if(a->op==DL_SWAP)we_generation++;if(o.n!=we_on||a->op==DL_OFILL||a->op==DL_SWAP||a->op==DL_OCLR||a->op==DL_OCUT||a->op==DL_ODROP)we_event(st->name,key,we_top,ai,dl_opname(a->op),"output",we_gen,we_generation,we_on,o.n,we_frame,we_cur,we_end,we_lo,we_hi);if(e.n!=we_en)we_event(st->name,key,we_top,ai,dl_opname(a->op),"diagnostic",0,0,we_en,e.n,we_frame,we_cur,we_end,we_lo,we_hi);if(sb.n!=we_sn||a->op==DL_SBCLR)we_event(st->name,key,we_top,ai,dl_opname(a->op),"scratch",we_sgen,we_scratch_generation,we_sn,sb.n,we_frame,we_cur,we_end,we_lo,we_hi);}
         }
     }
 done:

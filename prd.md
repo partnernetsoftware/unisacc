@@ -29,7 +29,7 @@
 
 ## 1. unisacc.com 是什么
 
-**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练，由一个通用执行器推理——以网换逻辑。
+**一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（16 张出货，isel/combo 为对照），网络权重由真值表构造并穷举验证、不经训练。通用执行器执行构造出的选择器与动作程序；这是决策表示的改变，尚无语义决策覆盖率证明，不能由模型体积推出“以网换逻辑”。
 
 **一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
 
@@ -447,3 +447,7 @@ model-program-census注册验收实跑终态：`out/model-program-census-registe
 〔C47-LOGIC-DISTRIBUTION 合并来源账本实证〕`tools/tape-origin.cx --entry INVENTORY FROZEN_BUILDER OBJECT_DIR --out NEW_OUTDIR` 从已验证完整的slice-inventory与冻结entry-build编号重建真实链接顺序，不依赖收据完成顺序或文件名排序；复用compiler.tapelink，不复制链接算法。82对象（44根+38闭包）生成8,123,582B合并tape，SHA `d97a2288606b7012f13cf879420e41482ee4dcad814d2275d3beeb4f1ac7b1a3`；emitter上下文8,122,102B+合成初始化1,480B精确守恒。仅记planned_source，去重共享所有权仍UNPROVEN。输入收据复制到origin-material，P3路径仅重绑定到相同fde2db18…字节备份，原始收据未改；不是新构造证据。真实已装f069d4c9…重放该tape所得ELF SHA `2343d81333db0359fbba3336b157785b1485c0d0c798be97d62db466d42c9818` 与本轮lnx/x86_64/entry.elf cmp0，证明合并路径一致，不证明最终模块边界。
 
 新增entry-order四项后检查与正式批次均实际16/0，最终批次日志 `out/c47-driver-fix/tape-origin-final.registered.log` 为PASS/rc0/transport0，绑定f069d4c9…；覆盖反序inventory、重复builder key与未验证inventory拒绝，保留原12项真实对象/同名局部/共享BSS及拒绝断言。最终元数据版 `origin-lnxx64-v2/merged.tape` 与前版cmp0；账本在同目录origin.tsv。能力速查：`sh ./unisacc.com tools/tape-origin.cx -- NEW_OUTDIR ORDERED_OBJECT...` 或上述--entry接口；`sh ./unisacc.com tools/model-program-census.cx -- --package unisacc.com` 分开报告生成动作与选择器。六片最终机器码模块归因仍未完成；下一步补blob创建/使用、缓冲代次与属性读写版本，连接编码器重排至最终文件。
+
+〔C47普查同候选更新与D1结论〕已装f069d4c9…的六片/包普查实际rc0，`out/c47-driver-fix/current-candidate-slices.tsv`：lnx/x86_64=1,880,862B，lnx/arm64=1,889,006B，osx/x86_64=2,410,978B，osx/arm64=3,071,458B，win/x86_64外层PE=2,664,960B（含APE stub），独立win/arm64=3,369,472B。包内模型/资源/元数据仍1,315,916/241,070/108,280B；不得用旧fde2db18…两片Linux尺寸或旧win/arm64身份替代本轮。就解压模型分母而言，动作程序59.7184%、选择器36.3544%、常量3.9107%，只说明存储表示；生成器源码、已生成程序、表与网须分层记账，存在信息重叠。D1不能由这些份额声称逻辑消失或语义正确：经典机制仍需独立oracle与跨目标合同，第一项已补六目标格式回归，而完整同候选原生资格与最终模块贡献另需证据。
+
+〔C47编码来源blob边实证〕显式write-events新增EDGE：OCUT/BLOBSAVE/SBSAVE记录新blob身份、内容SHA和源缓冲/代次/范围，INPUSH连接blob_id到独立frame实例，SWAP连接旧output代次到新frame，SBCLR递增scratch代次；相同内容的不同blob不靠SHA合并身份。所有EDGE与EVENT共用预算，仍仅ACCEPT后独占原子发布。独立小delta默认与开启日志均输出BQ，解析字段核BLOBSAVE的B子串、SBSAVE的Q、OCUT的BQ及INPUSH/SWAP连接；原14项断言保留，预算因新增两条真实边改为精确12/超界11，不放宽资源硬上限。直接检查20/0（真实会话7701退出0）与正式sim-write-events批次20/0/transport0（真实会话17974退出0）均绑定已装f069d4c9…；日志out/c47-driver-fix/blob-edges-check-final.log、blob-edges-final.registered.log。STX/LDX地址及最后写版本、SBBLOB等边仍缺，不能据本次称因果完整或最终模块已归属。
