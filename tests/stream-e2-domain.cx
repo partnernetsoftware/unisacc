@@ -1,4 +1,4 @@
-/* E2 stream domain cells (src.c -> UNIPP1 pp.locations) on Linux/x86_64.
+/* E2 stream domain cells (src.c -> UNIPP2 pp.locations) on Linux/x86_64.
  * MODE ROOT STREAM_DIR NEW_OUTDIR, MODE = positive | refusal. Uses the pinned
  * stream1.com from prepared seven-stream material; constructs nothing and does
  * not touch the product route. Matrix: tests/stream-e2-domain-matrix.tsv.
@@ -34,24 +34,35 @@ static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);r
 static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
 static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
 
-/* ---- UNIPP1 decoder (exec/pipeline/formats.md "Preprocessor diagnostic envelope") ---- */
+/* ---- UNIPP2 decoder; retained arrays are assertion samples, not input caps. ---- */
 #define MAXREC 16
-typedef struct {int ok;unsigned len,forced,autoinc,nspl,ninc;unsigned spl[MAXREC];unsigned inc_line[MAXREC],inc_lines[MAXREC],inc_namelen[MAXREC];const unsigned char *inc_name[MAXREC];const unsigned char *body;size_t bn;} frame;
-static frame unipp1(const unsigned char *b,size_t n){
- frame f;memset(&f,0,sizeof f);
- if(n<27||memcmp(b,"UNIPP1\0",7))return f;
- f.len=little(b+7);f.forced=little(b+11);f.autoinc=little(b+15);f.nspl=little(b+19);f.ninc=little(b+23);size_t at=27;
- if(f.nspl>(n-at)/4)return f;
- for(unsigned i=0;i<f.nspl;i++){if(i<MAXREC)f.spl[i]=little(b+at);at+=4;}
- for(unsigned i=0;i<f.ninc;i++){
-  if(n-at<12)return f;
-  unsigned names=little(b+at+8);
-  if(i<MAXREC){f.inc_line[i]=little(b+at);f.inc_lines[i]=little(b+at+4);f.inc_namelen[i]=names;}
-  at+=12;if(names>62||names>n-at)return f;
-  if(i<MAXREC)f.inc_name[i]=b+at;at+=names;
+typedef struct {int ok;unsigned len,forced,autoinc,nspl,ninc,nline;unsigned spl[MAXREC];unsigned inc_line[MAXREC],inc_lines[MAXREC],inc_namelen[MAXREC];const unsigned char *inc_name[MAXREC];unsigned line_raw[MAXREC],line_user[MAXREC],line_number[MAXREC],line_namelen[MAXREC];const unsigned char *line_name[MAXREC];const unsigned char *body;size_t bn;} frame;
+static int unipp2_body(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn){
+ if(n<31||n>2147483647ULL||memcmp(b,"UNIPP2\0",7))return 0;
+ unsigned len=little(b+7),sc=little(b+19),ic=little(b+23),lc=little(b+27),prev=0;size_t at=31;
+ if(len>2147483647U||little(b+11)>2147483647U||little(b+15)>2147483647U||sc>2147483647U||ic>2147483647U||lc>2147483647U||sc>(n-at)/4)return 0;
+ for(unsigned i=0;i<sc;i++){unsigned pos=little(b+at);if(pos>2147483647U||(i&&pos<=prev))return 0;prev=pos;at+=4;}
+ prev=0;
+ for(unsigned i=0;i<ic;i++){
+  if(n-at<12)return 0;unsigned pos=little(b+at),lines=little(b+at+4),names=little(b+at+8);at+=12;
+  if(pos>2147483647U||lines>2147483647U||(unsigned long long)pos+lines>2147483647ULL||(i&&pos<prev)||names>n-at||memchr(b+at,0,names))return 0;
+  prev=pos;at+=names;
  }
- if(f.len!=n-at)return f;
- f.body=b+at;f.bn=f.len;f.ok=1;return f;}
+ prev=0;
+ for(unsigned i=0;i<lc;i++){
+  if(n-at<16)return 0;unsigned pos=little(b+at),user=little(b+at+4),number=little(b+at+8),names=little(b+at+12);at+=16;
+  if(pos>2147483647U||user>2147483647U||number>2147483647U||(i&&pos<=prev))return 0;
+  if(names!=4294967295U){if(names>n-at||memchr(b+at,0,names))return 0;at+=names;}prev=pos;
+ }
+ if(len!=n-at)return 0;*body=b+at;*bn=len;return 1;
+}
+static frame unipp2(const unsigned char *b,size_t n){
+ frame f;memset(&f,0,sizeof f);if(!unipp2_body(b,n,&f.body,&f.bn))return f;
+ f.len=little(b+7);f.forced=little(b+11);f.autoinc=little(b+15);f.nspl=little(b+19);f.ninc=little(b+23);f.nline=little(b+27);size_t at=31;
+ for(unsigned i=0;i<f.nspl;i++){if(i<MAXREC)f.spl[i]=little(b+at);at+=4;}
+ for(unsigned i=0;i<f.ninc;i++){unsigned names=little(b+at+8);if(i<MAXREC){f.inc_line[i]=little(b+at);f.inc_lines[i]=little(b+at+4);f.inc_namelen[i]=names;f.inc_name[i]=b+at+12;}at+=12+(size_t)names;}
+ for(unsigned i=0;i<f.nline;i++){unsigned names=little(b+at+12);if(i<MAXREC){f.line_raw[i]=little(b+at);f.line_user[i]=little(b+at+4);f.line_number[i]=little(b+at+8);f.line_namelen[i]=names;f.line_name[i]=b+at+16;}at+=16;if(names!=4294967295U)at+=names;}
+ f.ok=1;return f;}
 
 /* ---- token-text canon: C99 6.10.3 fixes token sequences, not the spaces an
  * expansion writes between tokens. Per line: drop leading/trailing blanks, drop
@@ -95,8 +106,8 @@ static np_result run_at(const char *input,const char *incdir,const char *cwd){
 static np_result run_src(const char *leaf,const char *src,size_t n,const char *incdir){
  char p[4400];path(p,sizeof p,work,leaf);saved(p,src,n);return run_at(p,incdir,root);}
 static frame accepted(const char *name,np_result *r){
- frame f=unipp1((const unsigned char *)r->out,r->outn);
- check(!r->rc&&!r->errn,name,"accept-rc0-empty-stderr");check(f.ok,name,"unipp1-frame");
+ frame f=unipp2((const unsigned char *)r->out,r->outn);
+ check(!r->rc&&!r->errn,name,"accept-rc0-empty-stderr");check(f.ok,name,"unipp2-frame");
  return f;}
 
 /* ---- positive cells ---- */
@@ -121,14 +132,33 @@ static void pos_markers(const char *name,const char *src,const char *const *good
 typedef struct {unsigned line,lines;const char *name;} increc;
 static void check_records(const char *name,const frame *f,const increc *want,unsigned n){
  int ok=f->ok&&f->ninc==n;
- for(unsigned i=0;ok&&i<n;i++){size_t m=strlen(want[i].name);if(m>62)m=62;ok=f->inc_line[i]==want[i].line&&f->inc_lines[i]==want[i].lines&&f->inc_namelen[i]==m&&!memcmp(f->inc_name[i],want[i].name,m);}
+ for(unsigned i=0;ok&&i<n;i++){size_t m=strlen(want[i].name);ok=f->inc_line[i]==want[i].line&&f->inc_lines[i]==want[i].lines&&f->inc_namelen[i]==m&&!memcmp(f->inc_name[i],want[i].name,m);}
  check(ok,name,"include-records-exact");}
 static void pos_include(const char *name,const char *src,const char *incdir,const char *want,const increc *rec,unsigned nrec){
  np_result r=run_src(name,src,strlen(src),incdir);frame f=accepted(name,&r);
  check(f.ok&&f.bn==strlen(want)&&!memcmp(f.body,want,f.bn),name,"body-exact");
  check_records(name,&f,rec,nrec);check(f.ok&&f.nspl==0&&f.forced==0&&f.autoinc==0,name,"other-fields-zero");np_free(&r);}
 
+static void put32(unsigned char *p,unsigned x){for(int i=0;i<4;i++){p[i]=(unsigned char)(x&255);x>>=8;}}
+/* Hand-built frames exercise the oracle independently of producer output. */
+static void frame_cells(void){
+ unsigned char b[160];memset(b,0,sizeof b);memcpy(b,"UNIPP2\0",7);put32(b+27,2);
+ put32(b+31,1);put32(b+35,1);put32(b+39,10);put32(b+43,4294967295U);
+ put32(b+47,2);put32(b+51,2);put32(b+55,20);put32(b+59,0);
+ frame f=unipp2(b,63);check(f.ok&&f.nline==2&&f.line_namelen[0]==4294967295U&&f.line_namelen[1]==0,"frame-line-names","default-distinct-from-empty");
+ put32(b+47,1);check(!unipp2(b,63).ok,"frame-line-order","duplicate-rejected");put32(b+47,0);check(!unipp2(b,63).ok,"frame-line-order","descending-rejected");put32(b+47,2);
+ put32(b+59,1);check(!unipp2(b,63).ok,"frame-line-extent","missing-name-rejected");check(!unipp2(b,64).ok,"frame-line-name","nul-rejected");b[63]='x';check(unipp2(b,64).ok,"frame-line-name","explicit-name-accepted");put32(b+59,4294967294U);check(!unipp2(b,64).ok,"frame-line-extent","wide-name-no-wrap");put32(b+59,0);
+ put32(b+51,2147483648U);check(!unipp2(b,63).ok,"frame-line-domain","signed31-user-rejected");put32(b+51,2);check(!unipp2(b,64).ok,"frame-tail","padding-rejected");check(!unipp2(b,62).ok,"frame-header","truncated-line-rejected");
+ memset(b+7,0,sizeof b-7);put32(b+23,1);put32(b+31,2147483647U);put32(b+35,1);check(!unipp2(b,43).ok,"frame-include-domain","sum-overflow-rejected");put32(b+31,1);put32(b+39,70);memset(b+43,'n',70);check(unipp2(b,113).ok,"frame-include-name","full-long-name-accepted");check(!unipp2(b,112).ok,"frame-include-extent","short-name-rejected");b[80]=0;check(!unipp2(b,113).ok,"frame-include-name","nul-rejected");
+ /* Include records retain encounter order: equal starts and identical records are valid. */
+ memset(b+7,0,sizeof b-7);put32(b+23,2);put32(b+31,2);put32(b+35,1);put32(b+43,2);put32(b+47,1);
+ check(unipp2(b,55).ok,"frame-include-order","identical-records-accepted");put32(b+47,3);check(unipp2(b,55).ok,"frame-include-order","equal-starts-accepted");put32(b+43,3);check(unipp2(b,55).ok,"frame-include-order","ascending-accepted");put32(b+43,1);check(!unipp2(b,55).ok,"frame-include-order","descending-rejected");
+ memset(b+7,0,sizeof b-7);put32(b+19,2);put32(b+31,1);put32(b+35,1);check(!unipp2(b,39).ok,"frame-splice-order","duplicate-rejected");put32(b+35,2);check(unipp2(b,39).ok,"frame-splice-order","ascending-accepted");put32(b+19,4294967295U);check(!unipp2(b,39).ok,"frame-count-domain","wide-product-no-wrap");
+}
 static void positive(void){
+ frame_cells();
+ {const char *src="#line 10\nint a;\n#line 20 \"\"\nint b;\n#line 30\nint c;\n";np_result r=run_src("line-default-empty.c",src,strlen(src),empty_inc);frame f=accepted("line-default-empty.c",&r);
+  check(f.ok&&f.nline==3&&f.line_raw[0]==1&&f.line_user[0]==1&&f.line_number[0]==10&&f.line_namelen[0]==4294967295U&&f.line_raw[1]==3&&f.line_number[1]==20&&f.line_namelen[1]==0&&f.line_raw[2]==5&&f.line_number[2]==30&&f.line_namelen[2]==0,"line-default-empty.c","default-empty-and-inherited-empty-records");np_free(&r);}
  {static const unsigned none[1]={0};
   pos_exact("line-comment.c","int a; // note\nint b;\n","int a;  \nint b;\n",0,none);
   pos_exact("shebang.c","#!/x/y\nint a;\n","      \nint a;\n",0,none);}
@@ -219,7 +249,8 @@ static void positive(void){
   pos_include("bom-only-include.c","#include \"bom_only.h\"\nint m;\n",empty_inc,"\n\nint m;\n",w,1);}
  {char longname[80];memset(longname,'n',68);memcpy(longname+68,".h",3);savedz(work,longname,"int long_h;\n");
   char src[160];int z=snprintf(src,sizeof src,"#include \"%s\"\nint m;\n",longname);if(z<0||(size_t)z>=sizeof src)die("long-src");
-  increc w[1]={{1,2,longname}};pos_include("include-name-62.c",src,empty_inc,"int long_h;\n\n\nint m;\n",w,1);}
+  increc w[1]={{1,2,longname}};pos_include("include-name-complete.c",src,empty_inc,"int long_h;\n\n\nint m;\n",w,1);
+ }
  /* cwd independence: same absolute input from two working directories. */
  savedz(work,"cwd_h.h","int from_h;\n");
  {const char *src="#include \"cwd_h.h\"\nint after;\n";char p[4400];path(p,sizeof p,work,"cwd-label.c");saved(p,src,strlen(src));

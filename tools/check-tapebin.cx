@@ -1,55 +1,49 @@
 #pragma unisa use mem.heap
 #pragma unisa use compiler.tapebin
 #pragma unisa use compiler.tapegate
-/* Round-trip check for the v1 UTAPEBIN encoder (C44-TAPEBIN-01, R11).
-   Decodes tests/fixtures/tapebin/return7.tapebin with the existing tapegate
-   reader, re-encodes the recovered text with compiler.tapebin, and requires the
-   two byte strings to match. That is the strongest statement available without
-   re-deriving the fixture: it holds the encoder to the frozen 0.0.43 product
-   byte for byte, and it also proves the encoder and the reader are inverses.
-   The fixture header fixes the parameters: minor 0, origin 1, 3 sections.
-   sh ./unisacc.com tools/check-tapebin.cx */
+/* Current format contract: minor 2 preserves explicit source-name/empty-name
+   frames (kind 8) and one terminal end (kind 9). Historical minor 0/1 are
+   refusal fixtures, not an encoder implementation snapshot. Compile native:
+   sh ./unisacc.com -O0 tools/check-tapebin.cx -o OUT/check-tapebin */
+static int failed;
+static void check(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
 int main(void) {
-    unsigned char *fx;
-    long fxn;
-    int minor, nsec, i, end, aligned, bad;
-    long long roff, rlen, rcnt;
-    int soff[4], slen[4], scnt[4];
-    char *text;
-    int textn;
-    unsigned char *enc;
-    long encn;
-    unsigned char *raw;
-    size_t rawn;
-    raw = (unsigned char *)cx_read("tests/fixtures/tapebin/return7.tapebin", &rawn);
-    if (!raw) { printf("FAIL\tfixture-read\n"); return 1; }
-    fx = raw; fxn = (long)rawn;
-    
-    minor = 0; nsec = 0;
-    if (tb2_magic(fx, (int)fxn) || tb2_fixed(fx, (int)fxn, &minor) || tb2_nsec(fx, (int)fxn, &nsec)) {
-        printf("FAIL\theader\n"); return 1;
+    const char text[] = ".unit 0 3:412e63\n.unit 0 0:\n.end\n";
+    const unsigned char records[] = {3, 8, 0, 3, 'A', '.', 'c', 8, 0, 0, 9};
+    unsigned char *bin = 0, *again = 0;
+    long n = 0, an = 0;
+    int minor = -1, sections = 0, off[4], len[4], count[4], good = 1;
+    size_t oldn = 0;
+    unsigned char *old = (unsigned char *)cx_read("tests/fixtures/tapebin/return7.tapebin", &oldn);
+    check(old && oldn >= 136 && old[10] == 0 && old[11] == 0, "historical-minor0-fixture");
+    if (old && oldn >= 136) {
+        check(tb2_carrier(old, (int)oldn) == 2 && tb2_fixed(old, (int)oldn, &minor) == 1, "minor0-refused");
+        old[10] = 1;
+        check(tb2_carrier(old, (int)oldn) == 2 && tb2_fixed(old, (int)oldn, &minor) == 1, "minor1-refused");
     }
-    
-    end = 64 + 24 * nsec; bad = 0; i = 0;
-    while (i < nsec && !bad) {
-        aligned = tb2_align(end);
-        if (aligned < 0 || tb2_row(fx, (int)fxn, i, aligned, &roff, &rlen, &rcnt)) { bad = 1; break; }
-        soff[i] = (int)roff; slen[i] = (int)rlen; scnt[i] = (int)rcnt;
-        end = (int)roff + (int)rlen;
-        i = i + 1;
+    free(old);
+    check(tb_encode(text, sizeof text - 1, 1, &bin, &n) > 0, "encode-minor2");
+    if (!bin) return 1;
+    check(!tb2_magic(bin, (int)n) && !tb2_fixed(bin, (int)n, &minor) && minor == 2
+          && !tb2_nsec(bin, (int)n, &sections) && sections == 3, "minor2-header");
+    int end = 64 + 24 * sections;
+    for (int i = 0; i < sections && i < 4; i++) {
+        long long at, bytes, rows;
+        if (tb2_row(bin, (int)n, i, tb2_align(end), &at, &bytes, &rows)) { good = 0; break; }
+        off[i] = (int)at; len[i] = (int)bytes; count[i] = (int)rows; end = (int)(at + bytes);
     }
-    if (bad) { printf("FAIL\tsection-table\n"); return 1; }
-    text = 0; textn = 0;
-    if (tb2_text(fx, (int)fxn, minor, soff, slen, scnt, &text, &textn)) { printf("FAIL\tdecode\n"); return 1; }
-    
-    enc = 0; encn = 0;
-    if (!tb_encode(text, (long)textn, 1, &enc, &encn)) { printf("FAIL\tencode\n"); return 1; }
-    
-    if (encn != fxn) { printf("FAIL\tsize\tenc=%ld\tfixture=%ld\n", encn, fxn); return 1; }
-    i = 0;
-    while (i < (int)fxn) { if (enc[i] != fx[i]) break; i = i + 1; }
-    if (i == (int)fxn) printf("PASS\tbyte-identical\tbytes=%ld\n", fxn);
-    else printf("FAIL\tbyte-diff\tat=%d\n", i);
-    printf("TAPEBIN_ROUND\tfailed=%d\n", i == (int)fxn ? 0 : 1);
-    return i == (int)fxn ? 0 : 1;
+    check(good && sections == 3 && end == n, "section-extents");
+    check(good && sections == 3 && count[2] == 3 && len[2] == sizeof records
+          && !memcmp(bin + off[2], records, sizeof records), "wire-kind8-name-empty-kind9-unique-terminal");
+    char *decoded = 0; int decodedn = 0;
+    int rc = good && sections == 3 ? tb2_text(bin, (int)n, minor, off, len, count, &decoded, &decodedn) : 1;
+    check(!rc && decoded && decodedn == sizeof text - 1 && !memcmp(decoded, text, sizeof text - 1), "canonical-source-empty-end");
+    check(!rc && decoded && tb_encode(decoded, decodedn, 1, &again, &an) > 0
+          && an == n && !memcmp(again, bin, (size_t)n), "canonical-fixed-point");
+    mm_free(decoded); mm_free(again); mm_free(bin);
+    printf("TAPEBIN_ROUND\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
 }

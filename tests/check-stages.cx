@@ -22,13 +22,15 @@
  *   chain <a>-><b>     the -O1 pipe e4 o1/prune o1/lower o1/elf
  *   anchor elf         elf/expect == PRODUCT -o of e2/a.c (the pipe ends where the product does)
  *   anchor o1-elf      o1/elf/expect == PRODUCT -O1 -o of e4/b.c
- * trunc-at-eol is a known boundary (a cut at a newline is a complete tape prefix; tape.text
- * has no end marker): it prints GAP with the reason and counts in known_gap, not as a pass.
+ * trunc-at-eol retains the historical newline-cut input and must now reject with
+ * reject: tape truncated, with no stdout; it is never a known-gap exemption.
  * The last line is CHECK_STAGES failed=N uncovered=M known_gap=K with per-stage milliseconds
  * above it; rc 1 when failed or uncovered is non-zero.
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
 
 #define CS_N 10
 
@@ -131,17 +133,37 @@ static void cs_one(const char *stage) {
             cs_ck(rc == 1 && nb > 0 && cs_same(berr, nb, gerr, ng), stage, what);
             free(berr); free(gerr);
         }
-        /* trunc-at-eol is a known boundary: a cut exactly at a newline is a
-           syntactically complete tape prefix, and tape.text carries no length
-           header or end marker, so the entry state cannot tell it apart. It is
-           printed as GAP with the reason but does not make the stage
-           uncovered: the stage has real reject fixtures above. */
+        /* Keep the actual historical cut, rather than regenerating a malformed
+           opcode: the missing terminator is the only reason to refuse it. */
         if (cs_has(stage, "trunc-at-eol")) {
-            printf("GAP\t%s\ttrunc-at-eol: tape.text has no end marker, a cut at a newline is a complete prefix\n", stage);
-            cs_known_gap++;
+            char gn[80]; size_t ns = 0;
+            if (cx_fmt(in, sizeof in, "%s/tests/stages/%s/trunc-at-eol", cs_root, stage) || cx_fmt(tag, sizeof tag, "%s.eol", stage)) cs_die("path");
+            rc = cs_run(stage, args, in, tag, tag);
+            cx_fmt(gn, sizeof gn, "%s.err", tag); gerr = cs_scratch(gn, &ng);
+            cx_fmt(gn, sizeof gn, "%s.out", tag); got = cs_scratch(gn, &ns);
+            cs_ck(rc == 1 && ns == 0 && gerr && tx_find(gerr, (long)ng, "reject: tape truncated", 22) >= 0, stage, "reject-trunc-at-eol");
+            free(gerr); free(got);
         }
     }
     printf("TIME\t%s\tms=%ld\n", stage, cs_ms() - t0);
+}
+
+/* The outer carrier declares the exact body extent. These mutations therefore
+   reach the shared payload validator, not an accidental outer short-read. */
+static void cs_sidecar_case(const char *name, const char *body, int valid) {
+    unsigned char frame[512]; size_t n = strlen(body), no = 0, ne = 0;
+    char input[4400], tag[80], file[100], args[2000]; char *out, *err; int rc;
+    if (n > sizeof frame - 31) cs_die("sidecar fixture extent");
+    memset(frame, 0, 31); memcpy(frame, "USLFW1\n", 7);
+    for (int j = 0; j < 8; j++) frame[7 + j] = (unsigned char)(((unsigned long long)n >> (8 * j)) & 255);
+    if (mm_copy(frame + 31, sizeof frame - 31, body, n)) cs_die("sidecar fixture extent");
+    if (cx_fmt(input, sizeof input, "%s/sidecar-body.in", cs_dir) || cx_write(input, (char *)frame, n + 31) || cx_fmt(tag, sizeof tag, "sidecar.%s", name)) cs_die("sidecar fixture");
+    cs_args("sidecar", "args", args, sizeof args); rc = cs_run("sidecar", args, input, tag, tag);
+    cx_fmt(file, sizeof file, "%s.out", tag); out = cs_scratch(file, &no);
+    cx_fmt(file, sizeof file, "%s.err", tag); err = cs_scratch(file, &ne);
+    if (valid) cs_ck(rc == 0 && ne == 0 && cs_same(body, n, out, no), "sidecar", name);
+    else cs_ck(rc == 1 && no == 0 && cs_same("reject: tape truncated\n", 23, err, ne), "sidecar", name);
+    free(out); free(err);
 }
 
 int main(int argc, char **argv) {
@@ -152,6 +174,13 @@ int main(int argc, char **argv) {
     if (!realpath(argc > 2 + shift ? argv[2 + shift] : ".", cs_root)) cs_die("root path");
     if (cx_fmt(cs_dir, sizeof cs_dir, "%s/check-stages-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(cs_dir)) cs_die("scratch");
     for (i = 0; i < CS_N; i++) cs_one(cs_stage[i]);
+    cs_sidecar_case("complete-body", "_start:\n.unit 0 1:61\n.end\n", 1);
+    cs_sidecar_case("empty-name-switch", "_start:\n.unit 0 1:61\n.unit 0 0:\n.unit 0 1:62\n.end\n", 1);
+    cs_sidecar_case("body-no-end", "_start:\n", 0);
+    cs_sidecar_case("body-short-end", "_start:\n.end", 0);
+    cs_sidecar_case("body-after-end", "_start:\n.end\nx\n.end\n", 0);
+    cs_sidecar_case("body-unit-short-hex", "_start:\n.unit 0 2:61\n.end\n", 0);
+    cs_sidecar_case("body-unit-leading-zero", "_start:\n.unit 00 0:\n.end\n", 0);
     {   const char **chains[2];
         int cn[2], c, k;
         chains[0] = cs_chain; cn[0] = (int)(sizeof cs_chain / sizeof cs_chain[0]);

@@ -12,6 +12,37 @@ removes its Python control implementation; it does not erase the rule or imply
 smaller weights. Shared action sequences and dynamic gold/catalog values must
 remain shared inputs, not copied answers.
 
+E4 元记录零宽约定：`opt/scans-*` 的 `META` 只识别严格输入校验已认可的
+`.unit ` 记录（含两字段版本头）及精确 `.end` 行，不把其它点前缀标签视为元记录。
+`NEXTSEM` 仅移动输入游标，不输出、不改变定位上下文；所有投机窗口共用它。
+O2 的 `LSS/LEE` 与活跃性数组仅索引语义行，因此原来的 `pi+1`、窗口上限和
+寄存器扫描仍按去元记录后的旧流解释。`METACOPY` 仅在确认提交后按输入顺序
+输出被合并区间的元记录；`SEMCOPY` 输出同区间的非元记录，避免重复。
+替换输出前保留该窗口内最后的逻辑文件上下文；窗口结束后的元记录仍留给后续行。
+每个内部 round 透传末尾 `.end`，不把它当作屏障、标签或符号引用，也不另造终止行。
+独立正负材料见 `tests/opt-frame-transparency/cases.tsv`；材料为手写，不从新实现取 oracle。
+既有 `tests/check-netregen-bytes.cx` 的
+`opt-frames ROOT RUN NET TABLE ABS_OUT CASE` 模式按 cases.tsv 的一行分片运行；
+CASE 为 `positive`、`negative-label`、`negative-end` 或 `negative-eof`。
+NET 与 TABLE 分别作为 MODEL 以 `RUN MODEL INPUT SRCPATH` 调用，绝不把表当作输入；
+两路均检查严格投影、原序元记录、末尾唯一 end，并比较实际输出字节。
+负例只接受 rc=1、空 stdout 及精确 `reject: tape truncated` 诊断，不接受 usage rc=2。
+同一检查器的 `prepare|case|summary ROOT OLD_PRODUCT NEW_PRODUCT ABS_OUT [CASE TARGET]`
+可统一追加 `--new-models ABS_PKG`；该包的规范绝对路径及 SHA256 进入 material 身份，
+后续 case/summary 必须传相同参数且包内容不变。仅 NEW_PRODUCT 显式收到 `--models PKG`，
+OLD_PRODUCT 继续用 embedded 旧包。产品前四字节为 ELF magic 时直接 exec，否则保留 APE 的
+`sh PRODUCT` 路径；实际 argv 原样存证。每产品仍限 25 秒，五案例乘六目标共 30 片，
+只比较跨产品输出图像，不能把该比较当成目标平台原生执行资格。
+参考旧 0.0.47 产品的独立片为
+`reference ROOT A B OUT CASE TARGET --reference-product ABS_LEGACY [--new-models SAME_B_PKG]`。
+它要求同版本检查器 prepare 的正式 material 及既有 A/B 片，复用同一固定源码绝对路径、
+目标和编译参数，只执行第三 legacy 通道一次（25 秒），不重编 A/B；没有历史 harness 例外。
+每片记录 legacy 产品 path/SHA、argv/stdout/stderr/status/image 和独立绑定/观察；真实拒绝
+保留为 REJECT，图像不存在时明确记 ABSENT，不填伪造 SHA。传输失败不作语义拒绝。
+`reference-summary ROOT A B OUT --reference-product ABS_LEGACY [--new-models SAME_B_PKG]`
+只读真实 30 片，输出每案例/六目标的 legacy/A/B SHA 及 legacy 对 A 的 SAME/DIFF/REJECT。
+同源 B 与 A 的逐字节相同始终是强断言；旧 0.0.47 仅作参考，不能迁移候选资格。
+
 | Stage | Declaration sources already used | Remaining handwritten construction |
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the classic reference lexer |

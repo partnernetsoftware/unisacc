@@ -1,6 +1,6 @@
 /* seed/facts.h -- 0.0.29 B4 (cc): the manifest interpreter's environment and cell evaluation, the C side
  * of exec/assemble.py Run.value/cells/one's fact scope.  Included by seed/gen.c after its Value type,
- * value_* helpers, load_fact() and die(); it adds no second value model or TSV reader.
+ * value_* helpers, load_fact(), input_location and die_at(); it adds no second value model or TSV reader.
  * Semantics follow assemble.py exactly; anything this subset does not cover dies by name. */
 #ifndef SEED_FACTS_H
 #define SEED_FACTS_H
@@ -45,7 +45,7 @@ static void seed_repr(Buffer *b, Value *v) {
 /* Python str() of a fact value, as interpolation and @str/@fmt use it */
 static char *seed_str(Value *v) {
     char n[64];
-    if (!v) die("missing value in interpolation");
+    if (!v) die_at(input_location, "missing value in interpolation");
     switch (v->kind) {
     case JSTR: return copy(v->s);
     case JINT: snprintf(n, sizeof(n), "%lld", v->number); return copy(n);
@@ -62,7 +62,7 @@ static int seed_word(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <
 static Value *seed_env_copy(Value *obj) {
     Value *out = value_new(JOBJ); size_t i;
     if (!obj) return out;
-    if (obj->kind != JOBJ) die("environment is not an object");
+    if (obj->kind != JOBJ) die_at(input_location, "environment is not an object");
     (void)i;
     if (!obj->n) return out;
     /* D2: keys are unique and never freed, so share them and clone the index in bulk
@@ -88,7 +88,7 @@ static void seed_env_drop(Value *v) {
 static void seed_update(Value *into, Value *from) {
     size_t i;
     if (!from) return;
-    if (from->kind != JOBJ) die("update from a non-object");
+    if (from->kind != JOBJ) die_at(input_location, "update from a non-object");
     for (i = 0; i < from->n; i++) value_put(into, from->items[i].key, from->items[i].value);
 }
 
@@ -135,31 +135,31 @@ static char *seed_fmt(const char *f, Value *facts) {
     buf_add(&b, "", 0);
     while (f[i]) {
         if ((f[i] == '{' && f[i + 1] == '{') || (f[i] == '}' && f[i + 1] == '}')) { buf_char(&b, f[i]); i += 2; continue; }
-        if (f[i] == '}') die("@fmt: stray brace");
+        if (f[i] == '}') die_at(input_location, "@fmt: stray brace");
         if (f[i] == '{') {
             size_t j = i + 1; char *name; Value *x; char *s;
-            if (!((f[j] >= 'a' && f[j] <= 'z') || (f[j] >= 'A' && f[j] <= 'Z') || f[j] == '_')) die("@fmt: stray brace");
+            if (!((f[j] >= 'a' && f[j] <= 'z') || (f[j] >= 'A' && f[j] <= 'Z') || f[j] == '_')) die_at(input_location, "@fmt: stray brace");
             while (seed_word(f[j])) j++;
             name = copy_n(f + i + 1, j - i - 1); x = value_get(facts, name);
-            if (!x) { fprintf(stderr, "@fmt key: %s\n", name); die("@fmt: unknown fact"); }
+            if (!x) { fprintf(stderr, "@fmt key: %s\n", name); die_at(input_location, "@fmt: unknown fact"); }
             free(name);
             while (f[j] == '[') {
                 size_t k = j + 1, e; char *key; int digits = 1;
                 while (f[k] && f[k] != ']' && f[k] != '[' && f[k] != '{' && f[k] != '}') k++;
-                if (f[k] != ']' || k == j + 1) die("@fmt: stray brace");
+                if (f[k] != ']' || k == j + 1) die_at(input_location, "@fmt: stray brace");
                 key = copy_n(f + j + 1, k - j - 1);
                 for (e = 0; key[e]; e++) if (key[e] < '0' || key[e] > '9') digits = 0;
                 if (digits) {
                     unsigned long ix = strtoul(key, 0, 10);
-                    if (!x || x->kind != JARR || ix >= x->n) die("@fmt: index out of range");
+                    if (!x || x->kind != JARR || ix >= x->n) die_at(input_location, "@fmt: index out of range");
                     x = x->items[ix].value;
                 } else {
                     x = value_get(x, key);
-                    if (!x) die("@fmt: unknown key");
+                    if (!x) die_at(input_location, "@fmt: unknown key");
                 }
                 free(key); j = k + 1;
             }
-            if (f[j] != '}') die("@fmt: stray brace");
+            if (f[j] != '}') die_at(input_location, "@fmt: stray brace");
             s = seed_str(x); buf_add(&b, s, strlen(s)); free(s);
             i = j + 1; continue;
         }
@@ -194,7 +194,7 @@ static Value *seed_eval(const char *cell, Value *facts, Value *env) {
                 while (seed_word(arg[j])) j++;
                 if (j > i + 1 && arg[j] == '}') {
                     char *name = copy_n(arg + i + 1, j - i - 1), *s; Value *x = value_get(facts, name);
-                    if (!x) { fprintf(stderr, "@str key: %s\n", name); die("@str: unknown fact"); }
+                    if (!x) { fprintf(stderr, "@str key: %s\n", name); die_at(input_location, "@str: unknown fact"); }
                     s = seed_str(x); buf_add(&b, s, strlen(s)); free(s); free(name); i = j + 1; continue;
                 }
             }
@@ -206,7 +206,7 @@ static Value *seed_eval(const char *cell, Value *facts, Value *env) {
     } else if (klen == 4 && !strncmp(v, "@ref", 4)) {
         char *s = seed_fmt(arg, facts); out = value_path(facts, s); free(s);
     } else if (v[0] == '@' || (klen == 5 && !strncmp(v, "fresh", 5))) {
-        fprintf(stderr, "cell: %s\n", v); die("graph value form is not a data cell");
+        fprintf(stderr, "cell: %s\n", v); die_at(input_location, "graph value form is not a data cell");
     } else if (v[0] == '$' && v[1] == '$') {
         char *colon = strchr(v + 2, ':'), *domain, *key; Value *d; int braced = 0; size_t i;
         domain = colon ? copy_n(v + 2, (size_t)(colon - v - 2)) : copy(v + 2);
@@ -214,13 +214,13 @@ static Value *seed_eval(const char *cell, Value *facts, Value *env) {
         for (i = 0; key[i]; i++) if (key[i] == '{' && (seed_word(key[i + 1]))) { size_t j = i + 1; while (seed_word(key[j]) || key[j] == '[' || key[j] == ']') j++; if (key[j] == '}') braced = 1; }
         if (braced) { char *k2 = seed_fmt(key, facts); free(key); key = k2; }
         d = value_get(env, domain);
-        if (!d) { fprintf(stderr, "env domain: %s\n", domain); die("$$: unknown environment domain"); }
+        if (!d) { fprintf(stderr, "env domain: %s\n", domain); die_at(input_location, "$$: unknown environment domain"); }
         out = value_get(d, key);
-        if (!out) { fprintf(stderr, "env key: %s:%s\n", domain, key); die("$$: unknown key"); }
+        if (!out) { fprintf(stderr, "env key: %s:%s\n", domain, key); die_at(input_location, "$$: unknown key"); }
         free(domain); free(key);
     } else if (v[0] == '$') {
         out = value_get(env, v + 1);
-        if (!out) { fprintf(stderr, "env name: %s\n", v + 1); die("$: unknown environment name"); }
+        if (!out) { fprintf(stderr, "env name: %s\n", v + 1); die_at(input_location, "$: unknown environment name"); }
     } else out = value_path(facts, v);
     free(v); return out;
 }
@@ -239,7 +239,7 @@ static Value *seed_eval_tree(Value *v, Value *facts, Value *env) {
 static void seed_let(Value *let, Value *facts, Value *env) {
     size_t i;
     if (!let) return;
-    if (let->kind != JOBJ) die("opts.let is not an object");
+    if (let->kind != JOBJ) die_at(input_location, "opts.let is not an object");
     for (i = 0; i < let->n; i++) value_put(facts, let->items[i].key, seed_eval_tree(let->items[i].value, facts, env));
 }
 
@@ -252,7 +252,7 @@ static Value *seed_bind_cells(const char *cells, Value *facts, Value *env) {
         char *comma = strchr(p, ','), *eq;
         if (comma) *comma = 0;
         eq = strchr(p, '=');
-        if (!eq) die("binding cell without '='");   /* partition('=') would bind k='' -> path '' */
+        if (!eq) die_at(input_location, "binding cell without '='");   /* partition('=') would bind k='' -> path '' */
         *eq = 0;
         value_put(out, p, seed_eval(eq + 1, facts, env));
         if (!comma) break;

@@ -1,5 +1,7 @@
 #pragma unisa module tapebin
 #pragma unisa use tapeshape
+#pragma unisa use tapegate
+#pragma unisa use runtime.tape_frame
 /* L1 compiler/tapebin: v1 text-tape -> UTAPEBIN encoder (docs/tapebin-v1.md).
    The C reference is src/tapebin_encode.inc + exec/c/tapebin_emit.h; this is
    the model-product encoder, all buffers lazily allocated (no static large
@@ -167,6 +169,19 @@ static int tb_literal(const char *in, int start, int end) {
     return n;
 }
 
+static int tb_source(const char *s, int p, int e, int pass) {
+    int id; int bytes; int at; int end;
+    if (tb2_source_frame((const unsigned char *)s, p, e, &id, &bytes, &at)) return tb_fail();
+    if (pass) {
+        tb_emit(8); tb_emit_u(id); tb_emit_u(bytes);
+        end = at + bytes * 2;
+        while (at < end) {
+            tb_emit(tb_bk_hex(s[at]) * 16 + tb_bk_hex(s[at + 1]));
+            at = at + 2;
+        }
+    }
+    return !tb_bad;
+}
 /* One pass over the text tape. pass==0 collects pools and counts records;
    pass==1 emits the RECORDS section bytes. */
 static int tb_text_pass(const char *in, int pass, int textlen) {
@@ -189,12 +204,16 @@ static int tb_text_pass(const char *in, int pass, int textlen) {
         p = line; while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
         if (p == end) { line = next; continue; }
         tb_rec_count = tb_rec_count + 1;
-        if (end - p >= 6 && tb_wsame(in + p, ".unit", 5) && (in[p + 5] == 32 || in[p + 5] == 9)) {
-            p = p + 6; while (p < end && (in[p] == 32 || in[p] == 9)) p = p + 1;
-            q = tb_token_end(in, p, end);
-            if (tb_rec_count != 1 || q - p != 1 || in[p] != 50 || tb_skip(in, q, end) != end) return tb_fail();
-            unit = 1;
-            if (pass) { if (!tb_emit(6) || !tb_emit_u(2)) return 0; }
+        if (end - p == 4 && tb_wsame(in + p, ".end", 4)) {
+            if (p != line || next != textlen || end + 1 != next) return tb_fail();
+            if (pass) tb_emit(9);
+        } else if (end - p >= 6 && tb_wsame(in + p, ".unit ", 6)) {
+            if (p != line || end + 1 != next) return tb_fail();
+            if (end - p == 7 && in[p + 6] == 50) {
+                if (tb_rec_count != 1) return tb_fail();
+                unit = 1;
+                if (pass) { tb_emit(6); tb_emit_u(2); }
+            } else if (!tb_source(in, p + 6, end, pass)) return 0;
         } else if (end - p >= 7 &&
                    ((end - p >= 8 && (tb_wsame(in + p, ".global", 7) || tb_wsame(in + p, ".extern", 7)) && (in[p + 7] == 32 || in[p + 7] == 9)) ||
                     (tb_wsame(in + p, ".gdef", 5) && (in[p + 5] == 32 || in[p + 5] == 9)))) {
@@ -291,8 +310,8 @@ static int tb_text_pass(const char *in, int pass, int textlen) {
         line = next;
     }
     if (gdef && !unit) return tb_fail();
-    if (pass && unit != tb_minor) return tb_fail();
-    if (!pass) tb_minor = unit;
+    if (textlen < 5 || !tb_wsame(in + textlen - 5, ".end\n", 5)) return tb_fail();
+    tb_minor = 2;
     return !tb_bad;
 }
 
@@ -307,6 +326,7 @@ int tb_encode(const char *text, long textlen, int origin,
     unsigned char digest[32];
     if (!text || textlen < 0 || textlen >= TB_MAXOUT || origin < 0 || origin > 6 || !out || !outn) return 0;
     *out = 0; *outn = 0;
+    if (tb2_tape_frame((const unsigned char *)text, (int)textlen)) return 0;
     tb_bad = 0; tb_nn = 0; tb_nc = 0; tb_constused = 0; tb_minor = 0; tb_outpos = 0;
     tb_file = mm_alloc(TB_MAXOUT);
     tb_constdata = mm_alloc(TB_CONSTCAP);

@@ -148,7 +148,7 @@ static void begin(prog *p,const ddef *d,int nd,int data_first){memset(p,0,sizeof
  if(data_first){int i;char l[400];for(i=0;i<nd;i++){if(d[i].bss)FMT(l,".bss %s %llu",d[i].name,d[i].len);else FMT(l,".str %s %s",d[i].name,d[i].spell);T(p,l);}}}
 static void finish(prog *p,np_buf *tape,np_buf *want){int i;char l[400];
  *tape=p->tape;if(!p->data_first)for(i=0;i<p->nd;i++){if(p->d[i].bss)FMT(l,".bss %s %llu",p->d[i].name,p->d[i].len);else FMT(l,".str %s %s",p->d[i].name,p->d[i].spell);lf(tape,l);}
- np_put(&p->head,p->code.p?p->code.p:"",p->code.n);*want=p->head;free(p->code.p);}
+ lf(tape,".end");W(p,".end");np_put(&p->head,p->code.p?p->code.p:"",p->code.n);*want=p->head;free(p->code.p);}
 static void mark(const char *name,size_t from,prog *p){if(nb>=MAXB)die("blocks");bname[nb]=name;bfrom[nb]=from;bto[nb]=p->code.n;nb++;}
 static void entry(prog *p){char l[200];T(p,"_start:");W(p,"_start:");FMT(l,"spinit %s",R("r7"));W(p,l);FMT(l,"argsave %llu, %llu, true",ARGC,ARGV);W(p,l);}
 static void ins_ret(prog *p){char l[100];T(p,"  ret");FMT(l,"ret form=%s",A("ret")->form);W(p,l);}
@@ -352,8 +352,8 @@ static void mode_abi(void){
  x_exit(&p,"r0");accept_prog("sys6",&p,0,0,0);
  /* getdirentries64: abi sysno none on lnx -> no system call for this on lnx (unisa/lower.py), declared {target} lowering */
  {int nnone=0;for(i=0;i<nabi;i++)if(is_sysop(abi[i].op)&&tx_eqz(abi[i].f[SYSNO], "none"))nnone++;check(nnone==1&&tx_eqz(A("getdirentries64")->f[SYSNO], "none"),"abi","getdirentries64-only-row-without-number");}
- refuse_text("getdirentries64-sys3","_start:\n  .sys getdirentries64, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
- refuse_text("getdirentries64-sys6","_start:\n  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n  ret\n","not covered: lnx/x86_64 lowering");
+ refuse_text("getdirentries64-sys3","_start:\n  .sys getdirentries64, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
+ refuse_text("getdirentries64-sys6","_start:\n  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
  /* 45 tape machine ops: no system-call sequence; enc form; regmap operands; reloc on branches */
  begin(&p,NODATA,0,0);entry(&p);
  {static const char *op3[]={"add64","sub64","xor64","mul64","slt64","sle64","and64","or64","shl64","shr64","ult64","ule64","lshr64",
@@ -408,22 +408,22 @@ static void mode_refusals(void){
   {"str-unquoted",".str s abc"},{"str-unterminated",".str s \"abc"},{"str-bad-hex",".str s \"\\xZZ\""},{"str-short-hex",".str s \"\\x4\""},{"str-escape-at-eol",".str s \"a\\"}};
  char t[400],name[100];size_t i;prog p;np_result a;
  /* data directives the reference reader refuses (unisa/tape.py parse/_unescape) -> exec/lower 'tape data directive' */
- for(i=0;i<sizeof dd/sizeof dd[0];i++){FMT(t,"_start:\n  ret\n%s\n",dd[i][1]);FMT(name,"data-directive.%s",dd[i][0]);refuse_text(name,t,"not covered: tape data directive");}
+ for(i=0;i<sizeof dd/sizeof dd[0];i++){FMT(t,"_start:\n  ret\n%s\n.end\n",dd[i][1]);FMT(name,"data-directive.%s",dd[i][0]);refuse_text(name,t,"not covered: tape data directive");}
  /* extent: @data_len = align8(extent) + 168 must stay <= 2^31-1 (formats.md; README 'rejects an extent which cannot
   * also accommodate alignment and scratch storage') -> the largest extent is 2147483472 */
  {static const ddef d[]={{"big",1,2147483472ULL,0,0}};begin(&p,d,1,0);entry(&p);ins_ret(&p);accept_prog("extent.largest-accepted",&p,&a,0,0);
   check(has_line(a.out,a.outn,"@data_len 2147483640")&&has_line(a.out,a.outn,"@data -"),"extent.largest-accepted","data-len-literal");np_free(&a);}
- refuse_text("extent.bss-one-past","_start:\n  ret\n.bss big 2147483473\n","not covered: tape data directive");
- refuse_text("extent.str-crosses","_start:\n  ret\n.bss big 2147483472\n.str s \"a\"\n","not covered: tape data directive");
- refuse_text("extent.two-gib-halves","_start:\n  ret\n.bss a 1073741824\n.bss b 1073741824\n","not covered: tape data directive");
- refuse_text("extent.beyond-u64","_start:\n  ret\n.bss big 18446744073709551616\n","not covered: tape data directive");
+ refuse_text("extent.bss-one-past","_start:\n  ret\n.bss big 2147483473\n.end\n","not covered: tape data directive");
+ refuse_text("extent.str-crosses","_start:\n  ret\n.bss big 2147483472\n.str s \"a\"\n.end\n","not covered: tape data directive");
+ refuse_text("extent.two-gib-halves","_start:\n  ret\n.bss a 1073741824\n.bss b 1073741824\n.end\n","not covered: tape data directive");
+ refuse_text("extent.beyond-u64","_start:\n  ret\n.bss big 18446744073709551616\n.end\n","not covered: tape data directive");
  /* argument shapes the lowering cannot pass (unisa/lower.py: stack argument; hostaddr index 0..3; unknown catalog op) */
- refuse_text("shape.sys-machine-op","_start:\n  .sys add64, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
- refuse_text("shape.hostaddr-index-4","_start:\n  .hostaddr r0, 4\n  ret\n","not covered: lnx/x86_64 lowering");
- refuse_text("shape.sys-unknown-op","_start:\n  .sys nosuch, r0, r1, r2\n  ret\n","not covered: lnx/x86_64 lowering");
+ refuse_text("shape.sys-machine-op","_start:\n  .sys add64, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
+ refuse_text("shape.hostaddr-index-4","_start:\n  .hostaddr r0, 4\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
+ refuse_text("shape.sys-unknown-op","_start:\n  .sys nosuch, r0, r1, r2\n  ret\n.end\n","not covered: lnx/x86_64 lowering");
  /* library ops outside library mode */
- refuse_text("library.libraryfn-outside-mode","_start:\n  .libraryfn r0, 1\n  ret\n","not covered: libraryfn requires library mode");
- refuse_text("library.librarycall-without-bindings","_start:\n  .librarycall r0, r1\n  ret\n","not covered: library import binding or signature");
+ refuse_text("library.libraryfn-outside-mode","_start:\n  .libraryfn r0, 1\n  ret\n.end\n","not covered: libraryfn requires library mode");
+ refuse_text("library.librarycall-without-bindings","_start:\n  .librarycall r0, r1\n  ret\n.end\n","not covered: library import binding or signature");
  puts("CLAIMS\tlower.ref.extent-2gb (data extent),lower.rec.after-refusal");
  puts("NOT_CLAIMED\tlower.ref.unsupported-shape object-metadata part (stream6 is the image route; .global/.unit are object-route metadata)");
  puts("NOT_CLAIMED\tlower.ref.library-mode malformed callsite/callback contracts (need library-mode material)");

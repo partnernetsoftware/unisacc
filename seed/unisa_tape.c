@@ -6,6 +6,10 @@
  *         E OP ARG...             Tape.emit(OP, ARG...)   ARG: i = int(x,0), r/s/L = the token
  *         S NAME HEX ALIGN        Tape.string(NAME, bytes.fromhex(HEX), align=ALIGN)
  *         B NAME N                Tape.string(NAME, N, align=8)   zero global by size
+ *         .unit N B:HEX           source filename frame, canonical decimal and lowercase hex
+ *                                 B=0 clears the current logical filename (empty HEX).
+ *         .end                    optional explicit final frame; otherwise generated
+ *       Complete parsed tapes require exact final .end LF with no following bytes.
  *       then prints to_text() (text) or to_canonical_text() (canon).
  *   unisa-tape parse FILE text|canon
  *       parse(FILE), then prints to_text() or to_canonical_text().
@@ -24,6 +28,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef UNISA_RUNTIME_TAPE_FRAME_CX
+#define UNISA_RUNTIME_TAPE_FRAME_CX
+#include "../cx/runtime/tape_frame.cx"
+#endif
 
 #define DATA_BASE 0x100
 #define MAXTOK 64
@@ -113,7 +121,7 @@ static int int_lit(const char *s, int base0, long long *out) {
 /* ---- Tape state ---- */
 typedef struct { int isint; long long v; char *s; } Arg;
 typedef struct { const char *op; int n; Arg a[7]; } Insn;
-enum { R_LABEL, R_INSN, R_STR, R_BSS, R_UNIT, R_GLOBAL, R_EXTERN, R_GDEF };
+enum { R_LABEL, R_INSN, R_STR, R_BSS, R_UNIT, R_GLOBAL, R_EXTERN, R_GDEF, R_SOURCE_UNIT, R_END };
 typedef struct { int kind; char *name; Str blob; long long num; Insn *in; } Rec;
 typedef struct { char *name; long long addr; } Sym;
 typedef struct { char *name; long long pc; } Lab;
@@ -242,6 +250,13 @@ static void canonical(Str *o) {
         Rec *r = &recs[i];
         switch (r->kind) {
         case R_UNIT: sputf(o, ".unit %lld\n", r->num); break;
+        case R_SOURCE_UNIT: {
+            size_t k;
+            sputf(o, ".unit %lld %zu:", r->num, r->blob.n);
+            for (k = 0; k < r->blob.n; k++) sputf(o, "%02x", r->blob.p[k]);
+            sputc(o, '\n'); break;
+        }
+        case R_END: sputs(o, ".end\n"); break;
         case R_GLOBAL: sputf(o, ".global %s\n", r->name); break;
         case R_EXTERN: sputf(o, ".extern %s\n", r->name); break;
         case R_GDEF: sputf(o, ".gdef %s\n", r->name); break;
@@ -255,7 +270,7 @@ static void canonical(Str *o) {
 
 static int has_link_or_unit(void) {
     size_t i;
-    for (i = 0; i < nrec; i++) if (recs[i].kind >= R_UNIT) return 1;
+    for (i = 0; i < nrec; i++) if (recs[i].kind >= R_UNIT && recs[i].kind != R_END) return 1;
     return 0;
 }
 
@@ -293,6 +308,7 @@ static void to_text(Str *o) {
         if (k < ncode) { sputs(o, "  "); fmt_insn(o, code[k]); sputc(o, '\n'); }
     }
     if (o->n == before) sputc(o, '\n');     /* python "\n".join([]) + "\n" */
+    sputs(o, ".end\n");
 }
 
 /* ---- parsing (tape.py _unescape, _strip_comment, _regroup, parse) ---- */
@@ -458,27 +474,56 @@ static char *read_all(const char *path) {
     b = malloc(cap);
     if (!b) die("out of memory", NULL);
     while ((c = fgetc(f)) != EOF) {
-        if (c == 0) die("NUL byte in input (not covered)", path);
+        if (c == 0) die("tape truncated", NULL);
         if (n + 2 > cap) { cap *= 2; b = realloc(b, cap); if (!b) die("out of memory", NULL); }
         b[n++] = (char)c;
     }
+    if (ferror(f)) die("tape truncated", NULL);
     fclose(f);
     b[n] = 0;
     return b;
 }
 
+/* Location frames are parsed before whitespace/comment normalization. */
+static void source_unit(const char *raw) {
+    int unit, bytes, at, k; size_t len = strlen(raw); Rec *r; Str name = {0};
+    if (len > INT_MAX || tb2_source_frame((const unsigned char *)raw, 6, (int)len, &unit, &bytes, &at)) die("tape truncated", NULL);
+    for (k = 0; k < bytes; k++) {
+        int a = hexval((unsigned char)raw[at + k * 2]);
+        int b = hexval((unsigned char)raw[at + k * 2 + 1]);
+        sputc(&name, (unsigned char)(a * 16 + b));
+    }
+    r = push_rec(R_SOURCE_UNIT); r->num = (long long)unit; r->blob = name;
+}
+/* Prefix-sharing dot labels remain ordinary labels, not metadata records. */
+static int directive_word(const char *s, const char *word) {
+    size_t n = strlen(word);
+    return !strncmp(s, word, n) && (!s[n] || isspace((unsigned char)s[n]));
+}
 static void parse_text(const char *text) {
     const char *p = text; int lineno = 0;
+    size_t textlen = strlen(text);
+    if (textlen > INT_MAX || tb2_tape_frame((const unsigned char *)text, (int)textlen)) die("tape truncated", NULL);
     while (*p) {
-        const char *e = strchr(p, '\n'); size_t L = e ? (size_t)(e - p) : strlen(p);
-        char *raw = dupn(p, L), *s;
-        lineno++;
-        p = e ? e + 1 : p + L;
+        const char *e = strchr(p, '\n'); size_t L; char *raw, *s;
+        if (!e) die("tape truncated", NULL);
+        L = (size_t)(e - p); raw = dupn(p, L); lineno++;
+        p = e + 1;
+        if (!strcmp(raw, ".end")) {
+            if (*p) die("tape truncated", NULL);
+            push_rec(R_END); return;
+        }
+        if (directive_word(raw, ".unit") && !(lineno == 1 && !strcmp(raw, ".unit 2"))) {
+            if (strncmp(raw, ".unit ", 6)) die("tape truncated", NULL);
+            source_unit(raw); continue;
+        }
         raw[strip_comment_len(raw)] = 0;
         s = trim(raw);
-        if (!*s) continue;
-        parse_line(s, lineno);
+        if (directive_word(s, ".unit") && !(lineno == 1 && !strcmp(raw, ".unit 2"))) die("tape truncated", NULL);
+        if (directive_word(s, ".end")) die("tape truncated", NULL);
+        if (*s) parse_line(s, lineno);
     }
+    die("tape truncated", NULL);
 }
 
 /* ---- build: the script form of the Tape API (see the header) ---- */
@@ -499,6 +544,11 @@ static void build_text(const char *text) {
         char *line = dupn(p, L), *tok[MAXTOK]; int n;
         lineno++;
         p = e ? e + 1 : p + L;
+        if (!strcmp(line, ".end")) {
+            if (!e || *p) die("tape truncated", NULL);
+            break;
+        }
+        if (!strncmp(line, ".unit ", 6)) { source_unit(line); continue; }
         n = split_ws(line, tok, MAXTOK);
         if (n == 0) continue;
         if (!strcmp(tok[0], "L") && n == 2) t_label(tok[1]);
@@ -527,6 +577,7 @@ static void build_text(const char *text) {
             fprintf(stderr, "unisa-tape: script line %d: unknown form\n", lineno); exit(1);
         }
     }
+    push_rec(R_END);
 }
 
 int main(int argc, char **argv) {

@@ -110,13 +110,20 @@ static void tbc_insn(Buf *b,int op,const uint64_t *v,const int *tag,
     bput(b,'\n',0);
 }
 static int tbc_decode(const unsigned char *data,size_t size,int expected,int force,Buf *text){
-    if(size<136||size>33554432||memcmp(data,"UTAPEBIN",8))return 1;
+    if(size<136)return 2;
+    if(size>33554432||memcmp(data,"UTAPEBIN",8))return 1;
     uint64_t minor=tbc_le(data+10,2);
-    if(tbc_le(data+8,2)!=1||minor>1||tbc_le(data+12,2)!=1||tbc_le(data+14,2)||
+    if(tbc_le(data+8,2)!=1||minor>2||tbc_le(data+12,2)!=1||tbc_le(data+14,2)||
        tbc_le(data+16,4)||tbc_le(data+24,4)!=64)return 1;
     uint64_t count=tbc_le(data+20,4),origin=tbc_le(data+60,4);
-    if(count<3||count>4||origin>6||64+24*count>size)return 1;
+    if(count<3||count>4||origin>6)return 1;
     if(!force&&expected&&origin&&origin!=(uint64_t)expected)return 1;
+    if(minor<2||64+24*count>size)return 2;
+    for(size_t i=0;i<count;i++){
+        const unsigned char *d=data+64+24*i;
+        uint64_t off=tbc_le(d+4,8),n=tbc_le(d+12,8);
+        if(off>size||n>size-off||(i+1==count&&off+n!=size))return 2;
+    }
     unsigned char digest[32];tbc_sha(data+64,size-64,digest);
     if(memcmp(digest,data+28,32))return 1;
     size_t at[4]={0},length[4]={0},items[4]={0},end=64+24*count;
@@ -146,16 +153,28 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
             r.pos+=(size_t)len;
         }if(r.pos!=r.end)goto done;
     }
+    if(length[2]<2||data[at[2]+length[2]-1]!=9)goto truncated;
     TbcReader r={data+at[2],0,length[2],0};uint64_t nr=tbc_u(&r);
-    if(r.bad||nr!=items[2]||nr>r.end)goto done;
+    if(r.bad||nr!=items[2]||nr>r.end)goto truncated;
     int unit=0;
     for(uint64_t row=0;row<nr;row++){
-        if(r.pos>=r.end)goto done;int kind=r.p[r.pos++];
+        if(r.pos>=r.end)goto truncated;int kind=r.p[r.pos++];
+        if(kind==8){
+            uint64_t id=tbc_u(&r),n=tbc_u(&r);
+            if(minor!=2||r.bad||id>=128||n>r.end-r.pos)goto truncated;
+            tbc_put(text,".unit ");tbc_unum(text,id);bput(text,' ',0);tbc_unum(text,n);bput(text,':',0);
+            for(uint64_t j=0;j<n;j++){
+                unsigned c=r.p[r.pos++];if(!c)goto truncated;
+                bput(text,"0123456789abcdef"[c>>4],0);bput(text,"0123456789abcdef"[c&15],0);
+            }
+            bput(text,'\n',0);continue;
+        }
+        if(kind==9){if(minor!=2||row+1!=nr)goto truncated;tbc_put(text,".end\n");continue;}
         if(kind==TB_RECORD_UNIT){
-            if(minor!=1||row||tbc_u(&r)!=2||r.bad)goto done;
+            if(row||tbc_u(&r)!=2||r.bad)goto truncated;
             unit=1;tbc_put(text,".unit 2\n");
         }else if(kind==TB_RECORD_GLOBAL||kind==TB_RECORD_EXTERN||kind==TB_RECORD_GDEF){
-            if(kind==TB_RECORD_GDEF&&(!unit||minor!=1))goto done;
+            if(kind==TB_RECORD_GDEF&&(!unit||minor<1))goto done;
             uint64_t id=tbc_u(&r);if(r.bad||id>=items[0])goto done;
             tbc_put(text,kind==TB_RECORD_GLOBAL?".global ":(kind==TB_RECORD_EXTERN?".extern ":".gdef "));
             tbc_name(text,names[id],namelen[id]);tbc_put(text,"\n");
@@ -195,8 +214,10 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
         }else goto done;
         if(text->n>33554432)goto done;
     }
-    if(r.bad||r.pos!=r.end||(minor==1&&!unit))goto done;
-    bad=0;
+    if(r.bad||r.pos!=r.end||text->n<5||memcmp(text->b+text->n-5,".end\n",5))goto truncated;
+    bad=0;goto done;
+truncated:
+    bad=2;
 done:
     free(names);free(namelen);free(consts);free(constlen);
     if(bad){free(text->b);free(text->at);memset(text,0,sizeof *text);}

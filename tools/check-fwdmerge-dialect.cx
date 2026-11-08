@@ -51,10 +51,10 @@ static void fd_tape(const char *text, FwmBuf *out) {
 }
 
 /* ELF/x86_64 shape: the stub carries main:/__init_u:/__main_ret:, the base carries
-   __init:/__main_ret:; both end with "  ret".  fwm_export seeds the symbol list. */
+   __init:/__main_ret:; tapes have one final .end. fwm_export seeds the symbols. */
 static const char *fd_elf_unit =
     ".unit 2\n"
-    ".global helper\n";
+    ".global helper\n.end\n";
 static const char *fd_elf_stub =
     ".global main\n"
     ".bss x 8\n"
@@ -66,20 +66,20 @@ static const char *fd_elf_stub =
     "  .exit r0\n"
     "  ret\n"
     "__main_ret:\n"
-    "  .exit r0\n";
+    "  .exit r0\n.end\n";
 static const char *fd_elf_base =
     ".str S0 \"x\"\n"
     "__init:\n"
     "  ret\n"
     "  call helper\n"
     "__main_ret:\n"
-    "  ret\n";
+    "  ret\n.end\n";
 
 /* Mach-O/arm64 shape: same structure, different labels -- `_main`, `__init_u` without the
    trailing colon form the ELF merge expects, and `  bl` instead of `  call`. */
 static const char *fd_macho_unit =
     ".unit 2\n"
-    ".global _helper\n";
+    ".global _helper\n.end\n";
 static const char *fd_macho_stub =
     ".global _main\n"
     "_main:\n"
@@ -89,13 +89,13 @@ static const char *fd_macho_stub =
     "  bl _exit\n"
     "  ret\n"
     "__main_ret:\n"
-    "  ret\n";
+    "  ret\n.end\n";
 static const char *fd_macho_base =
     "_init:\n"
     "  ret\n"
     "  bl _helper\n"
     "__main_ret:\n"
-    "  ret\n";
+    "  ret\n.end\n";
 
 static int fd_run(const char *unit, const char *stub, const char *base, FwmBuf *out) {
     FwmBuf u, s, bb;
@@ -108,6 +108,26 @@ static int fd_run(const char *unit, const char *stub, const char *base, FwmBuf *
     out->n = 0;
     out->cap = 0;
     return fwm_merge(&bb, &s, &u, 0, out);
+}
+
+static int fd_contains(const FwmBuf *b, const char *s) {
+    int n = (int)strlen(s);
+    for (int i = 0; i <= b->n - n; i++) if (!memcmp(b->b + i, s, (size_t)n)) return 1;
+    return 0;
+}
+static int fd_same_body(const FwmBuf *a, const FwmBuf *b) {
+    int i = 0, j = 0;
+    while (i < a->n || j < b->n) {
+        if (i + 6 <= a->n && (i == 0 || a->b[i - 1] == '\n') && !memcmp(a->b + i, ".unit ", 6)) {
+            while (i < a->n && a->b[i] != '\n') i++; if (i < a->n) i++; continue;
+        }
+        if (j + 6 <= b->n && (j == 0 || b->b[j - 1] == '\n') && !memcmp(b->b + j, ".unit ", 6)) {
+            while (j < b->n && b->b[j] != '\n') j++; if (j < b->n) j++; continue;
+        }
+        if (i == a->n || j == b->n || a->b[i] != b->b[j]) return 0;
+        i++; j++;
+    }
+    return 1;
 }
 
 int main(void) {
@@ -136,9 +156,45 @@ int main(void) {
 
     /* D4: a tape that does not start with `.unit 2` is refused whatever else it looks like */
     {   FwmBuf out;
-        int r = fd_run(".unit 3\n", fd_elf_stub, fd_elf_base, &out);
+        int r = fd_run(".unit 3\n.end\n", fd_elf_stub, fd_elf_base, &out);
         printf("BADUNIT_MERGE\tresult=%d\n", r);
         fd_ck(r == 0, "D4-non-unit2-refused");
+        free(out.b);
+    }
+    {
+        const char *located_stub =
+            ".global main\n.unit 0 1:62\n.bss x 8\nmain:\n  call __init_u\n  ret\n"
+            "__init_u:\n  call exit\n  .exit r0\n  ret\n__main_ret:\n  .exit r0\n.end\n";
+        const char *located_base =
+            ".str S0 \"x\"\n.unit 0 1:62\n__init:\n.unit 0 1:63\n  ret\n.unit 0 1:62\n  call helper\n.unit 0 1:63\n__main_ret:\n.unit 0 0:\n  ret\n.end\n";
+        FwmBuf plain, located;
+        int rp = fd_run(fd_elf_unit, fd_elf_stub, fd_elf_base, &plain);
+        int rl = fd_run(fd_elf_unit, located_stub, located_base, &located);
+        fd_ck(rp == 1 && rl == 1 && fd_same_body(&plain, &located), "D5-location-preserves-forward-body");
+        fd_ck(rl == 1 && fd_contains(&located, ".unit 0 1:62\n") && fd_contains(&located, ".unit 1 1:62\n"), "D6-distinct-TUs-same-filename");
+        fd_ck(rl == 1 && fd_contains(&located, ".unit 0 1:62\n__init:\n") && fd_contains(&located, ".unit 0 1:63\n  ret\n") && fd_contains(&located, ".unit 0 1:62\n  call helper\n") && fd_contains(&located, ".unit 0 1:63\n__main_ret:\n"), "D6b-same-TU-A-B-A-B");
+        fd_ck(rl == 1 && fd_contains(&located, ".unit 0 0:\n  ret\n"), "D6c-explicit-empty-clears-context");
+        int ends = 0;
+        for (int i = 0; i + 5 <= located.n; i++) if (!memcmp(located.b + i, ".end\n", 5)) ends++;
+        fd_ck(rl == 1 && ends == 1 && located.n >= 5 && !memcmp(located.b + located.n - 5, ".end\n", 5), "D7-one-final-end");
+        free(plain.b); free(located.b);
+    }
+    {
+        FwmBuf out;
+        int r = fd_run(".unit 2\n.global helper\n", fd_elf_stub, fd_elf_base, &out);
+        fd_ck(r == 0, "D8-missing-end-refused"); free(out.b);
+        r = fd_run(".unit 2\n.global helper\n.end\nX", fd_elf_stub, fd_elf_base, &out);
+        fd_ck(r == 0, "D9-after-end-refused"); free(out.b);
+        r = fd_run(".unit 2\n.unit 0 21474836470:61\n.global helper\n.end\n", fd_elf_stub, fd_elf_base, &out);
+        fd_ck(r == 0, "D10-overflow-name-length-refused"); free(out.b);
+        r = fd_run(".unit 2\n.unit 128 1:61\n.global helper\n.end\n", fd_elf_stub, fd_elf_base, &out);
+        fd_ck(r == 0, "D11-overlimit-TU-refused"); free(out.b);
+    }
+    {
+        const char *labels = ".global main\n.unit0:\n.unitx:\n.endfoo:\n.bss x 8\nmain:\n  call __init_u\n  ret\n__init_u:\n  call exit\n  .exit r0\n  ret\n__main_ret:\n  .exit r0\n.end\n";
+        FwmBuf out;
+        int r = fd_run(fd_elf_unit, labels, fd_elf_base, &out);
+        fd_ck(r == 1 && fd_contains(&out, ".unit0__u0:\n") && fd_contains(&out, ".unitx__u0:\n") && fd_contains(&out, ".endfoo__u0:\n"), "D12-meta-prefix-labels-preserved");
         free(out.b);
     }
 

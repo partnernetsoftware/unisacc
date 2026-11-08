@@ -100,25 +100,82 @@ static int *tl_gdef_at; static int *tl_gdef_len; static int tl_ngdef;    /* R20-
 /* R20-3: a unit tape's first record must be `.unit 2` (exactly once); an
    object without it predates the initialiser marks and could hide two
    initialised definitions, so it is refused rather than guessed at */
+/* Source frame ids are local to each object, then assigned distinct link ids. */
+static int tl_source_next;
+static int tl_source_map[128];
+/* tokenlocations.UNIT_MAX = 128; anonymous boundaries share the same budget.
+   Blank/comment rows are not semantics. Tape controls end comments, just as
+   in exec/facts/tape-space.tsv; metadata is handled before this predicate. */
+static int tl_semantic(char *t, int p, int e) {
+    int c;
+    while (p < e) {
+        c = t[p] & 255;
+        if (c == 9 || c == 11 || c == 12 || c == 13 || c == 28 || c == 29 || c == 30 || c == 32 || c == 133 || c == 160) { p++; continue; }
+        if (c != 59) return 1;
+        while (p < e) {
+            c = t[p] & 255; p++;
+            if (c == 11 || c == 12 || c == 13 || c == 28 || c == 29 || c == 30 || c == 133) break;
+        }
+    }
+    return 0;
+}
+static int tl_unlocated(char *t, int p, int e, int first, int *located) {
+    int id;
+    if (*located || !tl_semantic(t, p, e)) return 0;
+    if (tl_source_next >= 128) { tl_fail("reject: tape truncated\n"); return 1; }
+    id = tl_source_next; tl_source_next++;
+    if (first >= 0) tl_source_map[first] = id;
+    tl_os(".unit ", 6); tl_num(id); tl_os(" 0:\n", 4);
+    *located = 1;
+    return 0;
+}
+static int tl_frame(char *t, int p, int e, int *id, int *tail) {
+    int v; int b; int k; int h; int l;
+    if (p >= e || t[p] < 48 || t[p] > 57) return 0;
+    v = 0; k = p;
+    while (p < e && t[p] >= 48 && t[p] <= 57) { if (v > 127) return 0; v = v * 10 + t[p] - 48; p++; }
+    if (v >= 128 || (p - k > 1 && t[k] == 48) || p >= e || t[p] != 32) return 0;
+    *id = v; p++; *tail = p; k = p; b = 0;
+    while (p < e && t[p] >= 48 && t[p] <= 57) {
+        int max; int digit; max = (e - p) / 2; digit = t[p] - 48;
+        if (b > max / 10 || (b == max / 10 && digit > max % 10)) return 0;
+        b = b * 10 + digit; p++;
+    }
+    if (p == k || (p - k > 1 && t[k] == 48) || p >= e || t[p] != 58 || b != (e - p - 1) / 2 || (e - p - 1) % 2) return 0;
+    p++;
+    while (p < e) {
+        h = t[p]; l = t[p + 1];
+        if (!((h >= 48 && h <= 57) || (h >= 97 && h <= 102)) || !((l >= 48 && l <= 57) || (l >= 97 && l <= 102)) || (h == 48 && l == 48)) return 0;
+        p = p + 2;
+    }
+    return 1;
+}
 int tl_unitver(char *t, int n) {
-    int i; int e; int seen; int first; seen = 0; first = 1; i = 0;
+    int i; int e; int id; int tail;
+    if (n < 13 || !tl_same(t, 8, ".unit 2\n", 8)) { tl_fail("link: object predates .unit 2 (recompile it with this unisacc -c -funit)\n"); return 1; }
+    i = 8;
     while (i < n) {
-        e = i; while (e < n && t[e] != 10) e = e + 1;
-        if (e > i && t[i] != 59) {
-            int isu; isu = e - i >= 5 && tl_same(t + i, 5, ".unit", 5) && (e - i == 5 || t[i + 5] == 32);
-            if (isu) {
-                if (!first || seen || !(e - i == 7 && t[i + 6] == 50)) tl_fail("link: malformed .unit record (recompile the object with this unisacc)\n");
-                seen = 1;
-            }
-            first = 0;
+        e = i; while (e < n && t[e] != 10) e++;
+        if (e == n) break;
+        if (e - i >= 4 && tl_same(t + i, 4, ".end", 4) &&
+            (e - i == 4 || t[i + 4] == 32 || t[i + 4] == 9 || t[i + 4] == 13 || t[i + 4] == 59)) {
+            if (e - i == 4 && e + 1 == n) return 0;
+            break;
+        }
+        if (e - i >= 5 && tl_same(t + i, 5, ".unit", 5) &&
+            (e - i == 5 || t[i + 5] == 32 || t[i + 5] == 9 || t[i + 5] == 13 || t[i + 5] == 59)) {
+            if (e - i < 6 || t[i + 5] != 32 || !tl_frame(t, i + 6, e, &id, &tail)) break;
         }
         i = e + 1;
     }
-    if (!seen) tl_fail("link: object predates .unit 2 (recompile it with this unisacc -c -funit)\n");
-    return 0;
+    tl_fail("reject: tape truncated\n"); return 1;
 }
 int tl_unit(char *t, int n, int u) {
-    int i; int e; int j; int q; int pass;
+    int i; int e; int j; int q; int pass; int first; int located;
+    i = 0; while (i < 128) { tl_source_map[i] = -1; i++; }
+    /* Prefix semantics belong to the first real local TU, if one exists.
+       Reserve its mapping early, without inheriting its later filename. */
+    first = -1; located = 0;
     tl_t = t;
     i = 0; while (i < TL_HASH) { tl_hat[i] = 0; i = i + 1; }
     pass = 0;
@@ -129,6 +186,10 @@ int tl_unit(char *t, int n, int u) {
             if (e > i) {
                 if (t[i] == 46) {
                     j = i + 1; q = tl_word(t, j, e);
+                    if (pass == 0 && first < 0 && tl_same(t + j, q - j, "unit", 4) && q < e && t[q] == 32) {
+                        int id; int tail;
+                        if (tl_frame(t, q + 1, e, &id, &tail)) first = id;
+                    }
                     if (pass == 0 && tl_same(t + j, q - j, "global", 6)) { j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 2); }
                     if (pass == 1 && (tl_same(t + j, q - j, "bss", 3) || tl_same(t + j, q - j, "str", 3))) {
                         j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 1);
@@ -146,7 +207,19 @@ int tl_unit(char *t, int n, int u) {
             if (t[i] == 46) {
                 j = i + 1; q = tl_word(t, j, e);
                 if (tl_same(t + j, q - j, "global", 6) || tl_same(t + j, q - j, "extern", 6)) { i = e + 1; continue; }
-                if (tl_same(t + j, q - j, "unit", 4)) { i = e + 1; continue; }   /* checked in tl_takeunit */
+                if (tl_same(t + j, q - j, "end", 3) && q == e) { i = e + 1; continue; }
+                if (tl_same(t + j, q - j, "unit", 4) && q < e && t[q] == 32) {
+                    int id; int tail;
+                    if (e - i == 7 && tl_same(t + i, 7, ".unit 2", 7)) { i = e + 1; continue; }
+                    if (!tl_frame(t, q + 1, e, &id, &tail)) { tl_fail("reject: tape truncated\n"); return 1; }
+                    if (tl_source_map[id] < 0) {
+                        if (tl_source_next >= 128) { tl_fail("reject: tape truncated\n"); return 1; }
+                        tl_source_map[id] = tl_source_next; tl_source_next++;
+                    }
+                    tl_os(".unit ", 6); tl_num(tl_source_map[id]); tl_o(32); tl_os(t + tail, e - tail); tl_o(10);
+                    located = 1;
+                    i = e + 1; continue;
+                }
                 /* R20-3: `.gdef NAME` -- this unit gives NAME an initialiser; a
                    second unit doing the same is two definitions (C99 6.9p5) */
                 if (tl_same(t + j, q - j, "gdef", 4)) {
@@ -168,9 +241,12 @@ int tl_unit(char *t, int n, int u) {
                         tl_gadd(t + a, b - a);
                     }
                 }
+                if (tl_unlocated(t, i, e, first, &located)) return 1;
                 tl_os(t + i, q - i);           /* the directive word itself */
                 tl_operands(t, q, e, u);
-            } else { if (t[i] == 32 || t[i] == 9) {
+            } else {
+                if (tl_unlocated(t, i, e, first, &located)) return 1;
+                if (t[i] == 32 || t[i] == 9) {
                 j = i; while (j < e && (t[j] == 32 || t[j] == 9)) j = j + 1;
                 q = j; while (q < e && t[q] != 32 && t[q] != 9) q = q + 1;   /* the op, as it is */
                 /* `.sys NAME, ...`: NAME is a system call, never a unit's name
@@ -426,6 +502,7 @@ static int tl_tables(void) {
 
 int tl_begin(void) {
     if (tl_tables()) { tl_fail("link: out of memory\n"); return 1; }
+    tl_source_next = 0;
     tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0;
     return 0;
 }

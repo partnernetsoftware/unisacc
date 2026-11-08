@@ -8,6 +8,9 @@
  *         E OP ARG...             Tape.emit(OP, ARG...)   ARG: i = int(x,0), r/s/L = the token
  *         S NAME HEX ALIGN        Tape.string(NAME, bytes.fromhex(HEX), align=ALIGN)
  *         B NAME N                Tape.string(NAME, N, align=8)
+ *         .unit N B:HEX           source filename frame (N < 128, non-NUL bytes; B=0 clears name)
+ *         .end                    optional explicit final frame; otherwise generated
+ *       New encodings use minor 2, kind 8 source-unit and final kind 9 end.
  *       prints encode(tape, origin_target=ORIGIN, source_sha=SHA) as one lowercase hex line.
  *   unisa-tapebin decode HEXFILE
  *       prints "ORIGIN n", then "SHA hex" when section 4 is present, then to_canonical_text().
@@ -174,10 +177,11 @@ static int int_lit(const char *s, int base0, long long *out) {
 /* ---- records (Tape.records) ---- */
 typedef struct { int isint, isbig; long long v; unsigned long long u; char *s; } Arg;
 typedef struct { int op; int n; Arg a[7]; } Insn;
-enum { R_LABEL, R_INSN, R_STR, R_BSS, R_UNIT, R_GLOBAL, R_EXTERN, R_GDEF };
+enum { R_LABEL, R_INSN, R_STR, R_BSS, R_UNIT, R_GLOBAL, R_EXTERN, R_GDEF, R_SOURCE_UNIT, R_END };
 typedef struct { int kind; char *name; Str blob; unsigned long long num; Insn *in; } Rec;
 
 static Rec *recs; static size_t nrec, caprec;
+static int wire_minor = 2;
 static char **symnames; static size_t nsym, capsym;   /* Tape.syms keys, for the early return on a known name */
 
 static Rec *push_rec(int kind) {
@@ -272,6 +276,13 @@ static void canonical(Str *o) {
         Rec *r = &recs[i];
         switch (r->kind) {
         case R_UNIT: sputs(o, ".unit 2\n"); break;
+        case R_SOURCE_UNIT: {
+            size_t k;
+            sputf(o, ".unit %llu %zu:", r->num, r->blob.n);
+            for (k = 0; k < r->blob.n; k++) sputf(o, "%02x", r->blob.p[k]);
+            sputc(o, '\n'); break;
+        }
+        case R_END: sputs(o, ".end\n"); break;
         case R_GLOBAL: sputf(o, ".global %s\n", r->name); break;
         case R_EXTERN: sputf(o, ".extern %s\n", r->name); break;
         case R_GDEF: sputf(o, ".gdef %s\n", r->name); break;
@@ -303,7 +314,7 @@ static void put_s(Str *o, int64_t v) {
 typedef struct { const unsigned char *p; size_t n, pos; } Rd;
 static const unsigned char *rd_take(Rd *r, uint64_t count) {
     const unsigned char *q;
-    if (count > r->n - r->pos) die("truncated input", NULL);
+    if (count > r->n - r->pos) die("tape truncated", NULL);
     q = r->p + r->pos; r->pos += (size_t)count; return q;
 }
 static unsigned char rd_byte(Rd *r) { return *rd_take(r, 1); }
@@ -375,7 +386,7 @@ static void collect(Pool *names, Pool *consts) {
     size_t i, k;
     for (i = 0; i < nrec; i++) {
         Rec *r = &recs[i];
-        if (r->kind == R_UNIT) continue;
+        if (r->kind == R_UNIT || r->kind == R_SOURCE_UNIT || r->kind == R_END) continue;
         if (r->kind == R_INSN) {
             const char *sh = SH[r->in->op].shape;
             for (k = 0; sh[k]; k++)
@@ -401,6 +412,8 @@ static void encode_records(Str *o, Pool *names, Pool *consts) {
         Rec *r = &recs[i];
         switch (r->kind) {
         case R_UNIT: sputc(o, 6); put_u(o, 2); break;
+        case R_SOURCE_UNIT: sputc(o, 8); put_u(o, r->num); put_u(o, r->blob.n); sadd(o, r->blob.p, r->blob.n); break;
+        case R_END: sputc(o, 9); break;
         case R_GLOBAL: sputc(o, 4); put_u(o, pool_idx(names, r->name, strlen(r->name))); break;
         case R_EXTERN: sputc(o, 5); put_u(o, pool_idx(names, r->name, strlen(r->name))); break;
         case R_GDEF: sputc(o, 7); put_u(o, pool_idx(names, r->name, strlen(r->name))); break;
@@ -435,7 +448,10 @@ static void encode_tape(Str *o, int origin, const unsigned char *sha) {
     Str dir = {0}, payload = {0}, body = {0}; unsigned char head[64], digest[32];
     int unit_first, unit_any = 0, unit_count = 0;
     if (origin < 0 || origin > 6) die("invalid origin target (python: ValueError)", NULL);
+    if (wire_minor == 2 && (!nrec || recs[nrec - 1].kind != R_END)) die("tape truncated", NULL);
     for (i = 0; i < nrec; i++) {
+        if (recs[i].kind == R_END && i + 1 != nrec) die("tape truncated", NULL);
+        if (recs[i].kind == R_SOURCE_UNIT && (recs[i].num >= 128 || (recs[i].blob.n && memchr(recs[i].blob.p, 0, recs[i].blob.n)))) die("tape truncated", NULL);
         if (recs[i].kind == R_UNIT) { unit_count++; unit_any = 1; }
         if (recs[i].kind == R_GDEF) unit_any = 1;
     }
@@ -466,7 +482,7 @@ static void encode_tape(Str *o, int origin, const unsigned char *sha) {
     sha256(body.p, body.n, digest);
     memset(head, 0, sizeof head);
     memcpy(head, "UTAPEBIN", 8);
-    head[8] = 1; head[10] = unit_first ? 1 : 0; head[12] = 1;
+    head[8] = 1; head[10] = (unsigned char)wire_minor; head[12] = 1;
     head[20] = (unsigned char)nsec; head[24] = 64;
     memcpy(head + 28, digest, 32);
     head[60] = (unsigned char)origin;
@@ -483,7 +499,7 @@ static void decode_blob(const unsigned char *blob, size_t len) {
     unsigned char digest[32], calc[32];
     size_t pos, i, k; int seen[6] = {0}, ord[5] = {0}; const unsigned char *sd[6]; size_t sl[6], sc[6];
     Rd r;
-    if (len < 64 || len > (1u << 30)) die("invalid file length", NULL);
+    if (len < 64 || len > (1u << 30)) die("tape truncated", NULL);
     if (memcmp(blob, "UTAPEBIN", 8)) die("bad magic", NULL);
     major = blob[8] | (blob[9] << 8); minor = blob[10] | (blob[11] << 8);
     opset = blob[12] | (blob[13] << 8); flags = blob[14] | (blob[15] << 8);
@@ -492,8 +508,10 @@ static void decode_blob(const unsigned char *blob, size_t len) {
     hlen = blob[24] | (blob[25] << 8) | (blob[26] << 16) | ((unsigned)blob[27] << 24);
     memcpy(digest, blob + 28, 32);
     origin = blob[60] | (blob[61] << 8) | (blob[62] << 16) | ((unsigned)blob[63] << 24);
-    if (major != 1 || opset != 1 || flags != 0 || target != 0 || hlen != 64 || (minor != 0 && minor != 1) || origin > 6)
+    if (major != 1 || opset != 1 || flags != 0 || target != 0 || hlen != 64 || minor > 2 || origin > 6)
         die("unsupported header", NULL);
+    if (minor != 2) die("tape truncated", NULL);
+    wire_minor = (int)minor;
     if (n < 3 || n > 5 || 64 + (size_t)n * 24 > len) die("invalid section count", NULL);
     sha256(blob + 64, len - 64, calc);
     if (memcmp(calc, digest, 32)) die("hash mismatch", NULL);
@@ -542,12 +560,23 @@ static void decode_blob(const unsigned char *blob, size_t len) {
       for (row = 0; row < cn; row++) {
           unsigned kind = rd_byte(&r);
           if (kind == 6) {
-              if (minor != 1 || row != 0 || rd_uint(&r) != 2) die("invalid unit version", NULL);
+              if (minor == 0 || row != 0 || rd_uint(&r) != 2) die("invalid unit version", NULL);
               push_rec(R_UNIT); continue;
+          }
+          if (kind == 8) {
+              uint64_t unit, bytes; const unsigned char *name; Rec *rr;
+              if (minor != 2) die("tape truncated", NULL);
+              unit = rd_uint(&r); bytes = rd_uint(&r); name = rd_take(&r, bytes);
+              if (unit >= 128 || (bytes && memchr(name, 0, (size_t)bytes))) die("tape truncated", NULL);
+              rr = push_rec(R_SOURCE_UNIT); rr->num = unit; sadd(&rr->blob, name, (size_t)bytes); continue;
+          }
+          if (kind == 9) {
+              if (minor != 2 || row + 1 != cn || r.pos != r.n) die("tape truncated", NULL);
+              push_rec(R_END); continue;
           }
           if (kind == 4 || kind == 5 || kind == 7) {
               uint64_t idx; Rec *rr;
-              if (kind == 7 && minor != 1) die(".gdef requires minor 1", NULL);
+              if (kind == 7 && minor == 0) die(".gdef requires unit version", NULL);
               idx = rd_uint(&r); if (idx >= dnames.n) die("name index out of range", NULL);
               rr = push_rec(kind == 4 ? R_GLOBAL : kind == 5 ? R_EXTERN : R_GDEF);
               rr->name = dupn(dnames.v[idx], dnames.len[idx]);
@@ -603,7 +632,7 @@ static void decode_blob(const unsigned char *blob, size_t len) {
       }
       if (r.pos != r.n) die("section has trailing bytes", NULL);
     }
-    if (minor == 1 && (nrec == 0 || recs[0].kind != R_UNIT)) die("missing unit marker", NULL);
+    if (!nrec || recs[nrec - 1].kind != R_END) die("tape truncated", NULL);
     for (k = 0; k < nrec; k++) if (recs[k].kind == R_GDEF && (nrec == 0 || recs[0].kind != R_UNIT)) die(".gdef needs unit marker", NULL);
     dorigin = (int)origin; dhas_sha = seen[4];
     if (seen[4]) {
@@ -631,11 +660,35 @@ static int hex_bytes(const char *h, unsigned char *out, size_t cap, size_t *n) {
     return 1;
 }
 static void build_script(const char *path) {
-    FILE *f = fopen(path, "rb"); char line[1 << 16];
+    FILE *f = fopen(path, "rb"); Str input = {0}; int c;
     if (!f) die("cannot open", path);
-    while (fgets(line, sizeof line, f)) {
-        char *tok[MAXTOK]; int n = 0; char *p = line;
-        size_t L = strlen(line); if (L && line[L - 1] == '\n') line[--L] = 0;
+    for (;;) {
+        char *line, *tok[MAXTOK], *p; int n = 0;
+        input.n = 0;
+        while ((c = fgetc(f)) != EOF && c != '\n') {
+            if (!c) die("tape truncated", NULL);
+            sputc(&input, (unsigned char)c);
+        }
+        if (c == EOF && !input.n) break;
+        sputc(&input, 0); line = (char *)input.p; p = line;
+        if (!strcmp(line, ".end")) {
+            if (c != '\n' || fgetc(f) != EOF || ferror(f)) die("tape truncated", NULL);
+            break;
+        }
+        if (!strncmp(line, ".unit ", 6)) {
+            const char *q = line + 6; unsigned long long unit = 0, bytes = 0; size_t k; Rec *rr; Str name = {0};
+            if (*q < '0' || *q > '9' || (*q == '0' && q[1] >= '0' && q[1] <= '9')) die("tape truncated", NULL);
+            while (*q >= '0' && *q <= '9') { if (unit >= 128) die("tape truncated", NULL); unit = unit * 10 + (unsigned)(*q++ - '0'); }
+            if (unit >= 128 || *q++ != ' ' || *q < '0' || *q > '9' || (*q == '0' && q[1] >= '0' && q[1] <= '9')) die("tape truncated", NULL);
+            while (*q >= '0' && *q <= '9') { unsigned d = (unsigned)(*q++ - '0'); if (bytes > (ULLONG_MAX - d) / 10) die("tape truncated", NULL); bytes = bytes * 10 + d; }
+            if (*q++ != ':' || bytes > strlen(q) / 2 || strlen(q) != bytes * 2) die("tape truncated", NULL);
+            for (k = 0; k < (size_t)bytes; k++) {
+                int a = hexval((unsigned char)q[2*k]), b = hexval((unsigned char)q[2*k+1]);
+                if (a < 0 || b < 0 || (q[2*k] >= 'A' && q[2*k] <= 'F') || (q[2*k+1] >= 'A' && q[2*k+1] <= 'F') || !(a * 16 + b)) die("tape truncated", NULL);
+                sputc(&name, (unsigned char)(a * 16 + b));
+            }
+            rr = push_rec(R_SOURCE_UNIT); rr->num = unit; rr->blob = name; continue;
+        }
         while (*p) {
             while (*p == ' ' || *p == '\t' || *p == '\r') p++;
             if (!*p) break;
@@ -666,6 +719,8 @@ static void build_script(const char *path) {
             else { t_string(tok[1], NULL, (size_t)nb, 1); }
         } else die("unknown script form", tok[0]);
     }
+    if (ferror(f)) die("tape truncated", NULL);
+    push_rec(R_END);
     fclose(f);
 }
 

@@ -1,5 +1,6 @@
 #pragma unisa use mem.heap
 #pragma unisa use compiler.tapegate
+#pragma unisa use runtime.tape_frame
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -31,6 +32,59 @@ static void ck(int ok, const char *name) {
 }
 static char *readf(const char *p, size_t *n) { char *b = cx_read(p, n); return b; }
 
+static void frame_cases(void) {
+    const char *text[] = {
+        "_start:\n.end\n",
+        "_start:\n.unit 0 1:41\n.unit 0 0:\n.unit 0 1:42\n.end\n",
+        ".unit 2\n_start:\n.unit 127 3:c3a920\n.end\n",
+        "_start:\n.unit0:\n.unitx:\n.endfoo:\n.exit r0\n.end\n",
+        "_start:\nnot-an-opcode\n.end\n",
+        "_start:\n", "_start:\n.end", "_start:\n.end\nX",
+        "_start:\n.end\n.end\n",
+        "_start:\n .end\n.end\n",
+        "_start:\n.unit 128 0:\n.end\n",
+        "_start:\n.unit 00 0:\n.end\n",
+        "_start:\n.unit 0 00:\n.end\n",
+        "_start:\n.unit 0 1:00\n.end\n",
+        "_start:\n.unit 0 1:AF\n.end\n",
+        "_start:\n.unit 0 2:41\n.end\n",
+        "_start:\n.unit 0 21474836470:41\n.end\n",
+        "_start:\n.unit 2\n.end\n",
+        "; header\n.unit 2\n.end\n",
+        "_start:\n.unit\t0 0:\n.end\n",
+        "_start:\n.unit 0 0: \n.end\n",
+        "_start:\n.end extra\n.end\n"
+    };
+    int count = (int)(sizeof text / sizeof text[0]);
+    for (int i = 0; i < count; i++) {
+        char label[80];
+        if (cx_fmt(label, sizeof label, "shared-frame-case-%d", i)) die("frame-case name");
+        ck(tb2_tape_frame((const unsigned char *)text[i], (int)strlen(text[i])) == (i < 5 ? 0 : 2), label);
+    }
+    {
+        int leading[] = {9,11,12,13,28,29,30,32,133,160};
+        int controls[] = {11,12,13,28,29,30,133};
+        char sample[160]; char label[80];
+        for (int i = 0; i < 10; i++) {
+            int c = leading[i];
+            if (cx_fmt(sample, sizeof sample, "_start:\n%c.unit bad\n.end\n", c) || cx_fmt(label, sizeof label, "shared-frame-leading-unit-%d", c)) die("leading unit case");
+            ck(tb2_tape_frame((const unsigned char *)sample, (int)strlen(sample)) == 2, label);
+            if (cx_fmt(sample, sizeof sample, "_start:\n%c.end\n.end\n", c) || cx_fmt(label, sizeof label, "shared-frame-leading-end-%d", c)) die("leading end case");
+            ck(tb2_tape_frame((const unsigned char *)sample, (int)strlen(sample)) == 2, label);
+            if (cx_fmt(sample, sizeof sample, "_start:\n.unit%c0 0:\n.end\n", c) || cx_fmt(label, sizeof label, "shared-frame-unit-delimiter-%d", c)) die("unit delimiter case");
+            ck(tb2_tape_frame((const unsigned char *)sample, (int)strlen(sample)) == (c == 32 ? 0 : 2), label);
+        }
+        for (int i = 0; i < 7; i++) {
+            int c = controls[i];
+            if (cx_fmt(sample, sizeof sample, "_start:\n;comment%c\t.unit bad\n.end\n", c) || cx_fmt(label, sizeof label, "shared-frame-comment-control-%d", c)) die("comment control case");
+            ck(tb2_tape_frame((const unsigned char *)sample, (int)strlen(sample)) == 2, label);
+            if (cx_fmt(sample, sizeof sample, "_start:\nordinary%c\t.unitx:\n.exit r0\n.end\n", c) || cx_fmt(label, sizeof label, "shared-frame-control-label-%d", c)) die("control label case");
+            ck(tb2_tape_frame((const unsigned char *)sample, (int)strlen(sample)) == 0, label);
+        }
+    }
+    ck(tb2_tape_frame(0, 0) == 4 && tb2_tape_frame((const unsigned char *)"", -1) == 4, "shared-frame-badarg");
+}
+
 int main(int argc, char **argv) {
     np_result r;
     char why[512];
@@ -47,6 +101,7 @@ int main(int argc, char **argv) {
     int soff[4], slen[4], scnt[4];
     char *dec;
     int decn;
+    frame_cases();
     /* ROOT defaults to the current directory, so a registry batch row can pass
        the same "-" every other check-* tool accepts. An explicit ROOT still wins. */
     if (argc >= 2 && !(argv[1][0] == '-' && argv[1][1] == 0)) {
@@ -70,7 +125,10 @@ int main(int argc, char **argv) {
     if (sy_exists(root) != 1) die("root");
     if (cx_fmt(work, (size_t)sizeof work, "%s/tapebin-wiring-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(work)) die("work");
     if (cx_fmt(src, (size_t)sizeof src, "%s/t.cx", work)) die("src");
-    if (cx_write(src, "int main(void){ return 7; }\n", 28)) die("write");
+    {
+        const char *source = "#line 1 \"A.c\"\nint a(void){return 3;}\n#line 2 \"\"\nint b(void){return 4;}\n#line 3 \"B.c\"\nint main(void){return a()+b();}\n";
+        if (cx_write(src, source, strlen(source))) die("write");
+    }
     if (cx_fmt(tpath, (size_t)sizeof tpath, "%s/t.tape", work)) die("tpath");
     if (cx_fmt(bpath, (size_t)sizeof bpath, "%s/t.tapebin", work)) die("bpath");
 
@@ -83,7 +141,7 @@ int main(int argc, char **argv) {
     ck(r.rc == 0, "text-tape-rc0");
     np_free(&r);
     text = readf(tpath, &textn);
-    ck(text && textn > 0, "text-tape-nonempty");
+    ck(text && !tb2_tape_frame((const unsigned char *)text, (int)textn) && strstr(text, ".unit 0 3:412e63\n") && strstr(text, ".unit 0 0:\n") && strstr(text, ".unit 0 3:422e63\n"), "text-tape-valid-source-frames");
 
     /* 2. the same source through --tapebin. */
     i = 0;
@@ -96,8 +154,7 @@ int main(int argc, char **argv) {
     np_free(&r);
 
     bin = (unsigned char *)readf(bpath, &binn);
-    ck(bin && binn >= 136, "tapebin-present");
-    if (!bin || binn < 136) { sy_printf("TAPEBIN_WIRING\tfailed=%d\n", failures); return failures ? 1 : 0; }
+    if (!bin || binn < 136) { ck(0, "tapebin-header"); sy_printf("TAPEBIN_WIRING\tfailed=%d\n", failures); return 1; }
     ck(bin[0] == 'U' && bin[1] == 'T' && bin[2] == 'A' && bin[3] == 'P' &&
        bin[4] == 'E' && bin[5] == 'B' && bin[6] == 'I' && bin[7] == 'N', "magic");
 
@@ -118,7 +175,13 @@ int main(int argc, char **argv) {
     ck(!bad, "sections");
     dec = 0; decn = 0;
     if (!bad && tb2_text(bin, (int)binn, minor, soff, slen, scnt, &dec, &decn)) bad = 1;
-    ck(!bad && dec && decn > 0, "decode");
+    ck(!bad && dec && !tb2_tape_frame((const unsigned char *)dec, decn), "decode-valid-frames");
+    if (dec) {
+        char *a = strstr(dec, ".unit 0 3:412e63\n");
+        char *empty = a ? strstr(a, ".unit 0 0:\n") : 0;
+        char *b = empty ? strstr(empty, ".unit 0 3:422e63\n") : 0;
+        ck(a && empty && b, "logical-A-empty-B-roundtrip");
+    }
     if (dec) mm_free(dec);
 
     /* The decoded text is canonical, not the same bytes as the -S tape (the

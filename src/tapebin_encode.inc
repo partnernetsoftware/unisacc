@@ -1,3 +1,7 @@
+#ifndef UNISA_RUNTIME_TAPE_FRAME_CX
+#define UNISA_RUNTIME_TAPE_FRAME_CX
+#include "../cx/runtime/tape_frame.cx"
+#endif
 /* Shared v1 text encoder: classic reference and model-driver IO adapter. */
 /* Text encoder.  The source is the exact tape currently in out[0..nout),
    so emitting a package does not ask Python or re-enter the C front end. */
@@ -116,6 +120,18 @@ int tb_literal(int start, int end) {
     p = p + 1; while (p < end) { if (out[p] != 32 && out[p] != 9) return tb_fail(); p = p + 1; }
     return n;
 }
+static int tb_source(const char *s, int p, int e, int pass) {
+    int id; int b; int h; int l;
+    if (tb2_source_frame((const unsigned char *)s, p, e, &id, &b, &p)) return tb_fail();
+    if (pass) {
+        tb_emit(8); tb_emit_u(id); tb_emit_u(b);
+        while (p < e) {
+            h = s[p++]; l = s[p++];
+            tb_emit((h <= 57 ? h - 48 : h - 87) * 16 + (l <= 57 ? l - 48 : l - 87));
+        }
+    }
+    return !tb_bad;
+}
 int tb_text_pass(int pass, int textlen) {
     int line; int end; int next; int p; int q; int op; int i; int idx; int name; int regs[8]; int nr;
     int quoted; int escape; int unit; int gdef;
@@ -139,12 +155,16 @@ int tb_text_pass(int pass, int textlen) {
         p = line; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
         if (p == end) { line = next; continue; }
         tb_rec_count = tb_rec_count + 1;
-        if (end - p >= 6 && tb_wsame(out + p, ".unit", 5) && (out[p + 5] == 32 || out[p + 5] == 9)) {
-            p = p + 6; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
-            q = tb_token_end(p, end);
-            if (tb_rec_count != 1 || q - p != 1 || out[p] != 50 || tb_skip(q, end) != end) return tb_fail();
-            unit = 1;
-            if (pass) { tb_emit(TB_RECORD_UNIT); tb_emit_u(2); }
+        if (end - p == 4 && tb_wsame(out + p, ".end", 4)) {
+            if (p != line || next != textlen || end + 1 != next) return tb_fail();
+            if (pass) tb_emit(9);
+        } else if (end - p >= 6 && tb_wsame(out + p, ".unit ", 6)) {
+            if (p != line || end + 1 != next) return tb_fail();
+            if (end - p == 7 && out[p + 6] == 50) {
+                if (tb_rec_count != 1) return tb_fail();
+                unit = 1;
+                if (pass) { tb_emit(6); tb_emit_u(2); }
+            } else if (!tb_source(out, p + 6, end, pass)) return 0;
         } else if (end - p >= 7 &&
                    ((end - p >= 8 && (tb_wsame(out + p, ".global", 7) || tb_wsame(out + p, ".extern", 7)) && (out[p + 7] == 32 || out[p + 7] == 9)) ||
                     (tb_wsame(out + p, ".gdef", 5) && (out[p + 5] == 32 || out[p + 5] == 9)))) {
@@ -228,14 +248,16 @@ int tb_text_pass(int pass, int textlen) {
         line = next;
     }
     if (gdef && !unit) return tb_fail();
-    if (pass && unit != tb_minor) return tb_fail();
-    if (!pass) tb_minor = unit;
+    if (textlen < 5 || !tb_wsame(out + textlen - 5, ".end\n", 5)) return tb_fail();
+    tb_minor = 2;
     return !tb_bad;
 }
 int tb_encode(int textlen, int origin) {
     int i; int p; int at1; int at2; int at3; int end1; int end2; int nr; char digest[32];
     if (origin < 0 || origin > 6) return 0;
     tb_bad = 0; tb_nn = 0; tb_nc = 0; tb_constused = 0; tb_minor = 0;
+    i = 0; while (i < textlen) { if (!out[i]) return tb_fail(); i++; }
+    if (tb2_tape_frame((const unsigned char *)out, textlen)) return tb_fail();
     if (!tb_text_pass(0, textlen)) return 0;
     nr = tb_rec_count; tb_outpos = 64 + 3 * 24;
     at1 = tb_outpos; tb_emit_u(tb_nn);

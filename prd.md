@@ -119,6 +119,9 @@
 
 #### 2.2 测试（棘轮、门禁、批次）
 
+T1合同登记（登记不等于通过）：`generator-location`批次自建真实GCC hostgen，并保留 `ROOT ABS_GEN FRESH_OUT` 独立入口；`unipp2-reference`必须绑定 `newpp-run/newpp-net`；30个`netregen-CASE-OS-ARCH`批次必须绑定 `old-product/new-product/new-models`，各自prepare后执行A/B镜像比较。PREPARED不作测试结果；镜像字节同不代表外机执行资格。`opt-frame4-o1-*`与`opt-frame4-o2-*`共8片各显式绑定对应o1-run/o1-net/o1-table或o2-run/o2-net/o2-table，分别执行positive/negative-label/negative-end/negative-eof；两算法路径分别登记，覆盖语义投影、有序元数据、唯一end、真实dot标签与精确截断拒绝，不升级为产品全链覆盖。
+
+
 | 动作 | 现成用法 | 说明 |
 | 核对队友报告里的事实 | `sh ./unisacc.com tools/report-verify.cx -- CLAIMS.tsv`；校验 `tools/check-report-verify.cx` | commit/tsvcount/receipts/sha256/ratchets 五类断言逐条核实，输出 OK/MISMATCH/MISSING，有 MISMATCH 退出 1 |
 |---|---|---|
@@ -405,6 +408,8 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 当前版本：**0.0.47 已于 2026-11-08 正式发布**（tag `v0.0.47`，提交 `e8309f0488`；GitHub Release 非 draft 非 prerelease；APE sha256 `fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`，6,215,778 字节；冻结产品源 `7b98ec2c06`；同候选六目标原生 CI 运行 `42408207540` 为 42/0）。全批 s9：445 批 = 380 PASS + 0 真 FAIL + 32 KNOWN-GAP + 10 INFRA + 23 NOT-AVAIL，**NOT_QUALIFIED**。上一版 0.0.46 同日早些时候发布。事实见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
 
 下一版：**0.0.48**，计划见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)；任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv` 为准，本节不复述条目状态。
+
+私有 C48-L-NETS 冻结基线79c09c401，源码`/tmp/cdx-c48-l-main79`，产品SID`e586721c7767275e1b5af84fe5a3cd199600e2550fc665c26cec642c6f4c9325`不变。最终第三轮131job与42全键均rc0，35,080,489观察/135,914态且actions/strings同；KGEN九步rc0。正式raw a1797e8c…/2370305B、消费载体0c7f5355…/2370321B，正文相同仅加16B标准footer，seal/verify通过；harness修复后纯读verify再跑28.88s rc0。正式载体及最终harness实跑：六目标30组A/B同且30legacy SAME；629源79片620对象/7XFAIL/2scanner拒绝，unknown0/residue0，最后仅重跑变更片075；格式275/0、独立UNIPP2 61/0、TU13/0、stream-pipe12/0、codec9/0与实际镜像exit7。tapebin完整67PASS/5个TAPEBIN-ORIGIN-5 KNOWN-GAP保留断言，0.0.49调查；独立daily consumer默认67产物/标准流/rc字节同及8拒绝实跑9/0，注册批PASS。s9披露harness安全API、测试语法修复和adapter仅路径/SHA变更；check-stages旧未绑定整体13红，新增7项与11chain通过，E2完整独立stream材料缺失不宣称实跑，原frame_cells oracle-smoke21/0。8个literal精确限期豁免已按cc批准登记，产品7项棘轮由cc集成时处理；79c历史红不充当最新main基线。工具13源码净654已精确获批无预留，当前main实际统计由cc集成时核。只交补丁和证据，不安装、不自主集成main或开T1.4；当前Root仍fde2db18/sidecar263287。
 
 三个最大阻塞：
 - 全批资格：32 KNOWN-GAP / 10 INFRA / 23 NOT-AVAIL 未收敛，全批仍 NOT_QUALIFIED。

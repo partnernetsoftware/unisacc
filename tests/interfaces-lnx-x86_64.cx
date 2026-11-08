@@ -4,8 +4,8 @@
  *
  * Edges: two literal fixtures run stage by stage through files and, independently, through stdin
  * ("-"); every edge must be byte-equal across the two transports, satisfy the consumer's frame
- * (UNIPP1, USLATTR1+UNITOK1, tape.text, target.text, ELF64), and the fixture-0 edges must equal the
- * hand-built independent UNIPP1/UNITOK1 and reference-derived literal Tape oracles. The last edge must equal the
+ * (UNIPP2, USLATTR1+UNITOK1, tape.text, target.text, ELF64), and the fixture-0 edges must equal the
+ * hand-built independent UNIPP2/UNITOK1 and reference-derived literal Tape oracles. The last edge must equal the
  * full product's -O2 image and execute to 7.
  *
  * Refusals: each corrupt input names an exact rc and the complete stderr, empty stdout and no
@@ -46,7 +46,7 @@ static const char tape_oracle[]=
  "  imm r0, 7\n  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n"
  "  jump __unisacc_R1\n  imm r0, 0\n__unisacc_R1:\n"
  "  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n"
- "__init:\n  ret\n__main_ret:\n  .exit r0\n";
+ "__init:\n  ret\n__main_ret:\n  .exit r0\n.end\n";
 static const char *bodies[]={"int main(void){return 7;}\n","int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n"};
 static np_buf edge[2][8];          /* edge[f][0] source, edge[f][k+1] file-route stdout of stage k */
 static char edge_path[2][8][4200];
@@ -87,9 +87,9 @@ static np_result stage(int k,int fixture,const char *bytes,size_t n,const char *
 }
 
 /* Independent consumer-side frame parsers. */
-static int unipp1_frame(const char *b,size_t n,const char *body){
- size_t i,bn=strlen(body);if(n!=27+bn||memcmp(b,"UNIPP1\0",7)||le32(b+7)!=bn)return 0;
- for(i=11;i<27;i++)if(b[i])return 0;return !memcmp(b+27,body,bn);}
+static int unipp2_frame(const char *b,size_t n,const char *body){
+ size_t i,bn=strlen(body);if(n!=31+bn||memcmp(b,"UNIPP2\0",7)||le32(b+7)!=bn)return 0;
+ for(i=11;i<31;i++)if(b[i])return 0;return !memcmp(b+31,body,bn);}
 static int uslattr1_frame(const char *b,size_t n,unsigned want_count,const char **pay,size_t *pn){
  if(n<16||memcmp(b,"USLATTR1",8)||le32(b+8)!=want_count)return 0;
  if(16+(size_t)want_count*5+(size_t)le32(b+12)!=n)return 0;*pay=b+16+(size_t)want_count*5;*pn=le32(b+12);return 1;}
@@ -106,10 +106,18 @@ static int elf_image(const char *b,size_t n){return n>=64&&!memcmp(b,"\177ELF\2\
 static void hand_unitok1(np_buf *b){
  const char *src=bodies[0];const char *tok[]={"type=int","id=main","(","type=void",")","{","return","num=7",";","}","eof"};
  unsigned off[]={0,4,8,9,13,14,15,22,23,24,26};np_buf pp={0};int i;
- np_put(&pp,"UNIPP1\0",7);put32(&pp,(unsigned)strlen(src));for(i=0;i<4;i++)put32(&pp,0);np_puts(&pp,src);
+ np_put(&pp,"UNIPP2\0",7);put32(&pp,(unsigned)strlen(src));for(i=0;i<5;i++)put32(&pp,0);np_puts(&pp,src);
  np_put(b,"UNITOK1\0",8);put32(b,(unsigned)pp.n);np_put(b,pp.p,pp.n);
  for(i=0;i<11;i++){np_put(b,"@",1);put32(b,off[i]);np_put(b,"\n",1);np_puts(b,tok[i]);np_put(b,"\n",1);}
  np_puts(b,"11 tokens\n");free(pp.p);}
+/* One exact source switch precedes the original hand-derived instructions. */
+static void hand_tape(np_buf *b){
+ static const char hex[]="0123456789abcdef";char head[64];size_t n=strlen(source[0]);
+ int z=snprintf(head,sizeof head,".unit 0 %zu:",n);if(z<0||(size_t)z>=sizeof head)die("unit-length-format");
+ np_put(b,tape_oracle,8);np_put(b,head,(size_t)z);
+ for(size_t i=0;i<n;i++){unsigned c=(unsigned char)source[0][i];char pair[2]={hex[c>>4],hex[c&15]};np_put(b,pair,2);}
+ np_puts(b,"\n");np_put(b,tape_oracle+8,sizeof tape_oracle-1-8);
+}
 
 static void chain(int f){
  char lab[160],side[4200],leaf[80],tag[40];int k;np_result r;
@@ -136,7 +144,7 @@ static void chain(int f){
   free(prev.p);}
  /* consumer frame of every edge */
  {const char *pay=0;size_t pn=0;{int z=snprintf(tag,sizeof tag,"case%d",f);if(z<0||(size_t)z>=sizeof tag){fprintf(stderr,"bound-format\n");exit(2);}};
-  label3(lab,sizeof lab,tag,"e2-e1","unipp1-frame-carries-source");check(unipp1_frame(edge[f][1].p,edge[f][1].n,bodies[f]),lab);
+  label3(lab,sizeof lab,tag,"e2-e1","unipp2-frame-carries-source");check(unipp2_frame(edge[f][1].p,edge[f][1].n,bodies[f]),lab);
   label3(lab,sizeof lab,tag,"e1-e3","uslattr1-frame-extent");check(uslattr1_frame(edge[f][2].p,edge[f][2].n,(unsigned)f,&pay,&pn),lab);
   label3(lab,sizeof lab,tag,"e1-e3","unitok1-echo-equals-e2-e1-edge");check(pay&&unitok1_echo(pay,pn,edge[f][1].p,edge[f][1].n),lab);
   label3(lab,sizeof lab,tag,"e3-e4","tape-text");check(tape_text(edge[f][3].p,edge[f][3].n),lab);
@@ -155,15 +163,15 @@ static void chain(int f){
 }
 
 static void oracle_case0(void){
- np_buf pp={0},tok={0},fr={0};int i;
- np_put(&pp,"UNIPP1\0",7);put32(&pp,(unsigned)strlen(bodies[0]));for(i=0;i<4;i++)put32(&pp,0);np_puts(&pp,bodies[0]);
- check(same(edge[0][1].p,edge[0][1].n,pp.p,pp.n),"case0.e2-e1.equals-hand-unipp1-oracle");
+ np_buf pp={0},tok={0},fr={0},tape={0};int i;
+ np_put(&pp,"UNIPP2\0",7);put32(&pp,(unsigned)strlen(bodies[0]));for(i=0;i<5;i++)put32(&pp,0);np_puts(&pp,bodies[0]);
+ check(same(edge[0][1].p,edge[0][1].n,pp.p,pp.n),"case0.e2-e1.equals-hand-unipp2-oracle");
  hand_unitok1(&tok);np_put(&fr,"USLATTR1",8);put32(&fr,0);put32(&fr,(unsigned)tok.n);np_put(&fr,tok.p,tok.n);
- check(tok.n==195&&same(edge[0][2].p,edge[0][2].n,fr.p,fr.n),"case0.e1-e3.equals-hand-uslattr1-unitok1-oracle");
- check(sizeof tape_oracle-1==592&&same(edge[0][3].p,edge[0][3].n,tape_oracle,sizeof tape_oracle-1),"case0.e3-e4.equals-reference-derived-literal-tape");
+ check(tok.n==199&&same(edge[0][2].p,edge[0][2].n,fr.p,fr.n),"case0.e1-e3.equals-hand-uslattr1-unitok1-oracle");
+ hand_tape(&tape);check(sizeof tape_oracle-1==597&&same(edge[0][3].p,edge[0][3].n,tape.p,tape.n),"case0.e3-e4.equals-reference-derived-literal-tape");
  {char side[4200];np_result r=stage(2,0,tok.p,tok.n,"case0-bare-unitok1",0,side,sizeof side);
   check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[0][3].p,edge[0][3].n),"case0.e3.framed-and-bare-unitok1-same-tape");np_free(&r);}
- free(pp.p);free(tok.p);free(fr.p);}
+ free(pp.p);free(tok.p);free(fr.p);free(tape.p);}
 
 /* A corrupt input on stage k (clean input/output = fixture-0 edges k, k+1), then recovery. */
 static void refuse(int k,const char *tag,const char *bytes,size_t n,int want_rc,const char *want_err){
@@ -208,7 +216,7 @@ static void refusals(void){
  /* E2: source text, no frame */
  na("e2","bad-magic","src.c carries no magic");na("e2","length-field","src.c carries no length field");
  na("e2","truncation","src.c truncation is a different program (stream.e2 refusal slice)");na("e2","trailing-bytes","src.c has no frame end");
- /* E1: UNIPP1 = magic7, u32 text length, 4 x u32 counts, text */
+ /* E1: UNIPP2 = magic7, u32 text length, 5 x u32 counts, text */
  flip(&b,1,0,1);refuse(1,"bad-magic",b.p,b.n,1,PP_REJ);
  prefix(&b,1,20);refuse(1,"truncated-header",b.p,b.n,1,PP_REJ);
  prefix(&b,1,edge[0][1].n-1);refuse(1,"truncated-text",b.p,b.n,1,PP_REJ);
@@ -220,8 +228,8 @@ static void refusals(void){
  flip(&b,2,0,1);refuse(2,"attribute-bad-magic",b.p,b.n,1,TOK_REJ);
  flip(&b,2,16,1);refuse(2,"token-bad-magic",b.p,b.n,1,TOK_REJ);
  prefix(&b,2,12);refuse(2,"truncated-attribute-header",b.p,b.n,2,ATTR_REJ);
- /* Cut one byte before the embedded UNIPP1 echo ends (outer16 + inner header12 +
-    UNIPP1 extent), rather than old offset100 inside token records. */
+ /* Cut one byte before the embedded UNIPP2 echo ends (outer16 + inner header12 +
+    UNIPP2 extent), rather than old offset100 inside token records. */
  prefix(&b,2,16+12+edge[0][1].n-1);repair_attribute_payload_length(&b);refuse(2,"truncated-echo",b.p,b.n,1,TOK_REJ);
  prefix(&b,2,edge[0][2].n-strlen("11 tokens\n"));repair_attribute_payload_length(&b);refuse(2,"truncated-token-count-line",b.p,b.n,1,TOK_REJ);
  prefix(&b,2,edge[0][2].n-1);repair_attribute_payload_length(&b);refuse(2,"truncated-final-byte",b.p,b.n,1,TOK_REJ);
@@ -243,35 +251,37 @@ static void refusals(void){
   label3(lab,sizeof lab,names[k],"foreign-attribute-frame","refuse-exact-rc-and-diagnostic");check(r.rc==2&&exact_err(&r,FOREIGN_REJ)&&!r.outn&&absent(side),lab);np_free(&r);
   r=stage(k,0,edge[0][k].p,edge[0][k].n,"foreign-attribute-frame-recovery",0,side,sizeof side);
   label3(lab,sizeof lab,names[k],"foreign-attribute-frame","recovery-clean-edge-bytes");check(r.rc==0&&!r.errn&&same(r.out,r.outn,edge[0][k+1].p,edge[0][k+1].n),lab);np_free(&r);}
- /* tape.text: no magic, no length; truncation/trailing are preserved by design (prd 3.7/3.7a) and must be refused at elf. */
+ /* tape.text: framed consumers reject trailing bytes and real truncation before parsing opcodes. */
  for(k=3;k<6;k++){na(names[k],"bad-magic","tape.text carries no magic");na(names[k],"length-field","tape.text carries no length field");}
  {const char *cut="  imm r0, 7\n";size_t at=find(edge[0][3].p,edge[0][3].n,cut)+6;
   struct{const char *tag;size_t keep;const char *tail;size_t tn;const char *want;}tc[]={
    {"tape-trailing-garbage",edge[0][3].n,"zz",2,OP_REJ},{"tape-trailing-nul",edge[0][3].n,"\0\1\2",3,OP_REJ},
-   {"tape-truncated-mid-instruction",at,"",0,LABEL_REJ},{"tape-empty",0,"",0,TGT_REJ}}; /* lower of an empty tape has no code or _start */
+   {"tape-truncated-mid-instruction",at,"",0,LABEL_REJ},{"tape-empty",0,"",0,TGT_REJ}};
   int c;for(c=0;c<4;c++){np_buf t={0};char side[4200],lab[160];np_result r;int s,ok=1;np_put(&t,edge[0][3].p,tc[c].keep);np_put(&t,tc[c].tail,tc[c].tn);
-   for(s=3;s<6&&ok;s++){r=stage(s,0,t.p,t.n,tc[c].tag,0,side,sizeof side);ok=r.rc==0&&!r.errn;
-    label3(lab,sizeof lab,names[s],tc[c].tag,s<5?"preserved-exact":"lowered-rc0");check(ok&&(s==5||same(r.out,r.outn,t.p,t.n)),lab);t.n=0;np_put(&t,r.out,r.outn);np_free(&r);}
-   if(ok)refuse(6,tc[c].tag,t.p,t.n,1,tc[c].want);free(t.p);}}
+   for(s=3;s<6&&ok;s++){r=stage(s,0,t.p,t.n,tc[c].tag,0,side,sizeof side);ok=r.rc==1&&!r.outn&&exact_err(&r,"reject: not covered: tape truncated\n");
+    label3(lab,sizeof lab,names[s],tc[c].tag,"refuse-truncated-frame");check(ok,lab);np_free(&r);}
+   free(t.p);}}
  /* elf: target.text header (@target, @data, @sym, @src_os, @data_len, @bss, @relocs) then target ops */
  rewrite(&b,6,"@target lnx/x86_64\n","@targex lnx/x86_64\n");refuse(6,"bad-magic",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,"@target lnx/x86_64\n","");refuse(6,"target-missing",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,"@target lnx/x86_64\n","@target zzz/q\n");refuse(6,"unknown-target",b.p,b.n,1,TGT_REJ);
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n@data_len ")+5);refuse(6,"truncated-header-mid-line",b.p,b.n,1,TGT_REJ);
- prefix(&b,6,strlen("@target lnx/x86_64\n"));refuse(6,"truncated-header-target-line-only",b.p,b.n,1,TGT_REJ);
- refuse(6,"empty","",0,1,TGT_REJ);
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n@data_len ")+5);refuse(6,"truncated-header-mid-line",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ prefix(&b,6,strlen("@target lnx/x86_64\n"));refuse(6,"truncated-header-target-line-only",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ refuse(6,"empty","",0,1,"reject: not covered: tape truncated\n");
  line_of(line,sizeof line,6,"\n@data_len ");rewrite(&b,6,line,"");refuse(6,"length-missing",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,line,"@data_len 8\n");refuse(6,"length-understated",b.p,b.n,1,EXT_REJ);
  rewrite(&b,6,line,"@data_len 99999999999999999999\n");refuse(6,"length-overflow",b.p,b.n,1,EXT_REJ);
  {int z=snprintf(nw,sizeof nw,"@data_len x%s",line+strlen("@data_len "));if(z<0||(size_t)z>=sizeof nw){fprintf(stderr,"bound-format\n");exit(2);}};rewrite(&b,6,line,nw);refuse(6,"length-non-decimal",b.p,b.n,1,EXT_REJ);
  line_of(line,sizeof line,6,"\n@sym __argvv ");rewrite(&b,6,line,"@sym __argvv 99999\n");refuse(6,"symbol-length-overstated",b.p,b.n,1,EXT_REJ);
- /* Cut the retained final instruction inside register rdx. All labels and headers remain
-    complete; `rd` is not a register. Avoid cutting gate metadata: a partial optional key/value
-    may be ignored and would not test the operand refusal. */
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\nsetreg rdx, imm 0 role=arg2\n")+strlen("\nsetreg rd"));refuse(6,"truncated-final-op",b.p,b.n,1,OPERAND_REJ);
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n__main_ret:\n")+1);refuse(6,"truncated-before-branch-target",b.p,b.n,1,LABEL_REJ);
- append(&b,6,"zz\n",3);refuse(6,"trailing-garbage-line",b.p,b.n,1,OP_REJ);
- append(&b,6,"\0",1);refuse(6,"trailing-nul",b.p,b.n,1,OP_REJ);
+ /* Real cuts remain unclosed and exercise the frame guard. Complete operand,
+    opcode, and label mutations below retain their original semantic refusals. */
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\nsetreg rdx, imm 0 role=arg2\n")+strlen("\nsetreg rd"));refuse(6,"truncated-final-op",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n__main_ret:\n")+1);refuse(6,"truncated-before-branch-target",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ append(&b,6,"zz\n",3);refuse(6,"trailing-garbage-line",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ append(&b,6,"\0",1);refuse(6,"trailing-nul",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ rewrite(&b,6,".end\n","zz\n.end\n");refuse(6,"complete-unknown-op",b.p,b.n,1,OP_REJ);
+ rewrite(&b,6,"setreg rdx, imm 0 role=arg2\n","setreg rd, imm 0 role=arg2\n");refuse(6,"complete-invalid-register",b.p,b.n,1,OPERAND_REJ);
+ rewrite(&b,6,"\n__main_ret:\n","\nmissing_main_ret:\n");refuse(6,"complete-undefined-label",b.p,b.n,1,LABEL_REJ);
  free(b.p);
 }
 

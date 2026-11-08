@@ -1,0 +1,165 @@
+/* ROOT ABS_NEW_OUT OLD_CHECKER_BIN NEW_CHECKER_BIN ABS_COMPILER ABS_MODELS
+ * Default-path regression and eight binding refusals for tapebin-roundtrip.
+ * OLD_CHECKER_BIN is the retained pre-binding checker, not a substitute compiler.
+ * Both real default consumers use the same absolute fixture paths, then all
+ * 67 generated files, stdout, stderr and exit status must match byte-for-byte.
+ * Matching rc=1 preserves existing root-consumer debt, not release qualification.
+ * Explicit candidate acceptance remains the tool's unchanged 66 assertions.
+ * Run this complete contract under a 55-second outer deadline.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+
+static char root[4096], work[4096];
+static FILE *evidence;
+static long deadline;
+static void die(const char *s) {
+    fprintf(stderr, "check-tapebin-consumer: %s\n", s);
+    exit(2);
+}
+static void path(char *p, size_t cap, const char *base, const char *leaf) {
+    if (cx_fmt(p, cap, "%s/%s", base, leaf)) die("path bound");
+}
+static void save(const char *p, const char *s, size_t n) {
+    FILE *f = fopen(p, "wbx");
+    if (!f) die("evidence create");
+    if ((n && fwrite(s, 1, n, f) != n) || fclose(f)) die("evidence write");
+}
+static void identity(const char *label, const char *p) {
+    size_t n;
+    char h[65], *s = cx_read(p, &n);
+    if (!s) die("identity read");
+    cx_sha256_hex(s, n, h);
+    free(s);
+    fprintf(evidence, "%s\t%s\n%s-sha256\t%s\n", label, p, label, h);
+}
+static int run(char **v, const char *label, int seconds, np_result *r) {
+    long now = sy_now_ms();
+    long left = (deadline - now) / 1000;
+    if (now < 0 || left <= 0) die("contract deadline");
+    if (left < seconds) seconds = (int)left;
+    for (int a = 0; v[a]; a++) fprintf(evidence, "%s-argv\t%d\t%s\n", label, a, v[a]);
+    char why[1024], leaf[128], p[4400];
+    int transport = np_run(v, root, 0, seconds, r, why, sizeof why);
+    if (cx_fmt(leaf, sizeof leaf, "%s.stdout", label)) die("stdout name");
+    path(p, sizeof p, work, leaf);
+    save(p, r->out ? r->out : "", r->outn);
+    if (cx_fmt(leaf, sizeof leaf, "%s.stderr", label)) die("stderr name");
+    path(p, sizeof p, work, leaf);
+    save(p, r->err ? r->err : "", r->errn);
+    fprintf(evidence, "%s-status\trun=%d\trc=%d\tresidue=%d\n", label, transport, r->rc, r->residue);
+    return transport;
+}
+static void equal_file(const char *a, const char *b) {
+    size_t an, bn;
+    char *as = cx_read(a, &an), *bs = cx_read(b, &bn);
+    int equal = as && bs && an == bn && !memcmp(as, bs, an);
+    free(as);
+    free(bs);
+    if (!equal) die("default bytes differ");
+}
+static void defaults(char inputs[4][4096]) {
+    char lane[4400], old[4400], p[4400];
+    path(lane, sizeof lane, work, "lane");
+    path(old, sizeof old, work, "old");
+    int status[2];
+    for (int i = 0; i < 2; i++) {
+        char *v[] = { inputs[i], root, lane, 0 };
+        np_result r = {0};
+        int transport = run(v, i ? "new" : "old", 24, &r);
+        status[i] = r.rc;
+        int bad = transport || r.residue || (r.rc != 0 && r.rc != 1);
+        np_free(&r);
+        if (bad) die("default consumer transport or refusal");
+        if (!i && rename(lane, old)) die("preserve old outputs");
+    }
+    if (status[0] != status[1]) die("default status differs");
+    const char *streams[] = { "stdout", "stderr" };
+    for (int i = 0; i < 2; i++) {
+        char leaf[32], a[4400], b[4400];
+        if (cx_fmt(leaf, sizeof leaf, "old.%s", streams[i])) die("stream name");
+        path(a, sizeof a, work, leaf);
+        if (cx_fmt(leaf, sizeof leaf, "new.%s", streams[i])) die("stream name");
+        path(b, sizeof b, work, leaf);
+        equal_file(a, b);
+    }
+    /* diff compares the complete relative path sets and every file byte. */
+    char *diff[] = { "diff", "-r", old, lane, 0 };
+    np_result r = {0};
+    int transport = run(diff, "default-tree-diff", 3, &r);
+    int bad = transport || r.rc || r.residue || r.outn || r.errn;
+    np_free(&r);
+    if (bad) die("default generated tree differs");
+    char *find[] = { "find", lane, "-type", "f", "-print", 0 };
+    transport = run(find, "default-files", 3, &r);
+    int count = 0;
+    for (size_t i = 0; i < r.outn; i++) if (r.out[i] == '\n') count++;
+    bad = transport || r.rc || r.residue || r.errn || count != 67;
+    np_free(&r);
+    if (bad) die("default requires exactly 67 generated files");
+    path(p, sizeof p, lane, "results.tsv");
+    identity("equal-default-results", p);
+    fprintf(evidence, "default-equivalence\tfiles=67\trc=%d\n", status[0]);
+    printf("PASS\ttapebin.consumer.default-67-files-stdout-stderr-rc\n");
+}
+static void refusals(char inputs[4][4096]) {
+    const char *labels[] = {
+        "missing-models", "missing-compiler", "relative-compiler", "relative-models",
+        "absent-compiler", "absent-models", "directory-compiler", "directory-models"
+    };
+    char absent[4400];
+    path(absent, sizeof absent, work, "does-not-exist");
+    for (int i = 0; i < 8; i++) {
+        char leaf[128], output[4400];
+        if (cx_fmt(leaf, sizeof leaf, "reject-%s", labels[i])) die("refusal name");
+        path(output, sizeof output, work, leaf);
+        char *compiler = i == 2 ? "relative-compiler" : i == 4 ? absent : i == 6 ? root : inputs[2];
+        char *models = i == 3 ? "relative-models" : i == 5 ? absent : i == 7 ? root : inputs[3];
+        char *v[8];
+        int n = 0;
+        v[n++] = inputs[1];
+        v[n++] = root;
+        v[n++] = output;
+        if (i != 1) { v[n++] = "--compiler"; v[n++] = compiler; }
+        if (i != 0) { v[n++] = "--models"; v[n++] = models; }
+        v[n] = 0;
+        np_result r = {0};
+        int transport = run(v, leaf, 2, &r);
+        int bad = transport || r.rc != 2 || r.residue || r.outn || !r.errn;
+        np_free(&r);
+        struct stat st;
+        errno = 0;
+        if (!lstat(output, &st) || errno != ENOENT) bad = 1;
+        if (bad) die("binding refusal must exit 2 before creating output");
+        printf("PASS\ttapebin.consumer.reject-%s\n", labels[i]);
+    }
+}
+int main(int argc, char **argv) {
+    if (argc != 7) die("usage: ROOT ABS_NEW_OUT OLD_CHECKER_BIN NEW_CHECKER_BIN ABS_COMPILER ABS_MODELS");
+    if (!realpath(argv[1], root) || argv[2][0] != '/' || cx_fmt(work, sizeof work, "%s", argv[2])) die("root/output");
+    char inputs[4][4096];
+    for (int i = 0; i < 4; i++) {
+        if (argv[3+i][0] != '/' || !realpath(argv[3+i], inputs[i])) die("absolute existing input required");
+        struct stat st;
+        if (stat(inputs[i], &st) || !S_ISREG(st.st_mode)) die("regular input required");
+    }
+    if (!strcmp(inputs[0], inputs[1])) die("distinct old and new checkers required");
+    if (mkdir(work, 0700)) die("fresh output required");
+    long now = sy_now_ms();
+    if (now < 0) die("clock");
+    deadline = now + 52000;
+    char p[4400];
+    path(p, sizeof p, work, "identity.tsv");
+    evidence = fopen(p, "wbx");
+    if (!evidence) die("identity create");
+    fprintf(evidence, "scope\tinstalled-default-equivalence-and-candidate-binding-refusals-not-release-qualification\n");
+    const char *labels[] = { "before-checker", "after-checker", "new-product", "new-models" };
+    for (int i = 0; i < 4; i++) identity(labels[i], inputs[i]);
+    path(p, sizeof p, root, "unisacc.com");
+    identity("installed-product", p);
+    defaults(inputs);
+    refusals(inputs);
+    if (ferror(evidence) || fclose(evidence)) die("identity write");
+    printf("TAPEBIN_CONSUMER\tpass=9\tfail=0\n");
+    return 0;
+}

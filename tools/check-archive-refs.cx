@@ -1,6 +1,9 @@
 /* check-archive-refs: every path in archive/ARCHIVE.tsv must be gone from the
  * live tree and must not be referenced by a live file.
- * Manifest format: one original repo-relative path per line, '#' comments.
+ * Manifest: original repo-relative paths, '#' comments, directory records D,
+ * and L<TAB>archive-target<TAB>live-entry<TAB>contract for an explicit live reference.
+ * L verifies both regular files and the entry's literal reference to the target;
+ * it does not exempt any ordinary archived-path disappearance/reference check.
  * A row fails when the path is still tracked at its old location (git ls-files)
  * or when git grep finds it in tools/ tests/ src/ cx/ prd.md AGENTS.md
  * agentwork/WORKFLOW.md agentwork/ agentwork/roles/. Only reads; the answer comes from git itself so the
@@ -13,7 +16,7 @@
 
 #define CAP (1L << 16)
 static char out[CAP];
-static int failed, rows;
+static int failed, rows, live_rows;
 
 /* A match at C is the archived home when the text just before it is
    "archive/<one-level-dir>/" and that directory exists in the tree. The
@@ -51,6 +54,58 @@ static int git(char **av) {
     return code;
 }
 
+static int relative_path(const char *p) {
+    long i = 0, begin = 0;
+    if (!p[0] || p[0] == '/') return 0;
+    while (p[i]) {
+        unsigned c = (unsigned char)p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '-' || c == '_')) return 0;
+        if (c == '/') {
+            if (i == begin || (i - begin == 1 && p[begin] == '.') ||
+                (i - begin == 2 && p[begin] == '.' && p[begin + 1] == '.')) return 0;
+            begin = i + 1;
+        }
+        i++;
+    }
+    return i != begin && !(i - begin == 1 && p[begin] == '.') &&
+           !(i - begin == 2 && p[begin] == '.' && p[begin + 1] == '.');
+}
+static int live_reference(const char *m, long at, long end) {
+    char target[512], entry[512], contract[128];
+    char *fields[3] = {target, entry, contract};
+    long caps[3] = {sizeof target, sizeof entry, sizeof contract}, pos = at + 2;
+    sy_stat_t st;
+    for (int f = 0; f < 3; f++) {
+        long first = pos, n;
+        while (pos < end && m[pos] != '\t') pos++;
+        n = pos - first;
+        if (!n || n >= caps[f] || (f < 2 && pos == end) || (f == 2 && pos != end)) {
+            printf("FAIL\tarchive-refs.live-record-malformed\n"); return 1;
+        }
+        if (tx_copy(fields[f], caps[f], m + first, n)) {
+            printf("FAIL\tarchive-refs.live-record-malformed\n"); return 1;
+        }
+        pos++;
+    }
+    live_rows++;
+    if (!relative_path(target) || !relative_path(entry) ||
+        !tx_prefix(target, tx_len(target, 512), "archive/", 8) ||
+        tx_prefix(entry, tx_len(entry, 512), "archive/", 8)) {
+        printf("FAIL\tarchive-refs.live-record-path\t%s\t%s\n", target, entry); return 1;
+    }
+    if (sy_stat(target, &st) != 0 || st.kind != 'f' || sy_stat(entry, &st) != 0 || st.kind != 'f') {
+        printf("FAIL\tarchive-refs.live-record-file\t%s\t%s\n", target, entry); return 1;
+    }
+    long n = 0, length = tx_len(target, 512), i;
+    char *body = cx_read(entry, &n); int found = 0;
+    if (body) for (i = 0; i + length <= n; i++) if (!memcmp(body + i, target, (size_t)length)) { found = 1; break; }
+    free(body);
+    if (!found) { printf("FAIL\tarchive-refs.live-record-no-entry-reference\t%s\t%s\n", target, entry); return 1; }
+    printf("LIVE_REFERENCE\t%s\t%s\t%s\n", target, entry, contract);
+    return 0;
+}
+
 int main(void) {
     long mn = 0;
     char *m = cx_read("archive/ARCHIVE.tsv", &mn);
@@ -59,7 +114,9 @@ int main(void) {
     while (at < mn) {
         long e = at; while (e < mn && m[e] != '\n') e++;
         /* 'D<TAB>path...' rows are directory-level records: recorded, not re-grepped */
-        if (e > at && m[at] != '#' && !(e - at > 2 && m[at] == 'D' && m[at + 1] == '\t')) {
+        if (e - at > 2 && m[at] == 'L' && m[at + 1] == '\t') {
+            failed += live_reference(m, at, e);
+        } else if (e > at && m[at] != '#' && !(e - at > 2 && m[at] == 'D' && m[at + 1] == '\t')) {
             char p[512]; long pl = e - at < 511 ? e - at : 511, i;
             for (i = 0; i < pl; i++) p[i] = m[at + i];
             p[pl] = 0;
@@ -113,6 +170,6 @@ int main(void) {
         at = e + 1;
     }
     free(m);
-    printf("ARCHIVE_REFS\trows=%d\tfailed=%d\n", rows, failed);
+    printf("ARCHIVE_REFS\trows=%d\tlive_references=%d\tfailed=%d\n", rows, live_rows, failed);
     return failed ? 1 : 0;
 }

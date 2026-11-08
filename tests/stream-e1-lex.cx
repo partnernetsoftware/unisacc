@@ -1,10 +1,10 @@
 /* E1 lexing domain on the registered streams material (lnx/x86_64, unisacc-stream2.com pin 68f08deb).
  * ROOT STREAM_DIR NEW_OUTDIR MODE, MODE one of:
- *   --tokens    token-line format, typed spelling, offsets, non-zero UNIPP1 maps, marks, positive lexing,
+ *   --tokens    token-line format, typed spelling, offsets, non-zero UNIPP2 maps, marks, positive lexing,
  *               lex.tsv 144 keys, lexword 15 words, parse.tsv tok domain + typekw, label/transport determinism
  *   --bytes     lexcls.tsv 257 rows: byte class and __attribute__ look-ahead (attws) per byte, eof
  *   --refusals  E1 envelope/lexer/capacity/input refusals by declared name, each followed by exact recovery
- * Inputs are hand-built UNIPP1.  Expected bytes are hand oracles from exec/lex control tables
+ * Inputs are hand-built UNIPP2.  Expected bytes are hand oracles from exec/lex control tables
  * (entry/number/literal/ident/location/f1 tables) and weights/gold lex, lexcls, lexword, parse tok and
  * iterate/kernel/typekw.tsv, which are read at run time to bind each fragment to its gold key.  Product
  * output is never an oracle.  Timing phases are UNMEASURED. */
@@ -76,11 +76,12 @@ static void load_gold(void){
   at=e+1;}
  free(s);if(ntypekw<1)die("typekw empty");}
 
-/* ---- UNIPP1 input and expected token lines ---- */
-typedef struct {unsigned forced,autoc;int ns;unsigned spl[4];int ni;unsigned iline[2],ilines[2];const char *iname[2];} ppmap;
+/* ---- UNIPP2 input and expected token lines ---- */
+typedef struct {unsigned forced,autoc;int ns;unsigned spl[4];int ni;unsigned iline[4],ilines[4];const char *iname[4];int nl;unsigned lraw[3],luser[3],lnumber[3];const char *lname[3];} ppmap;
 static void pp_build(np_buf *b,const char *text,size_t tn,const ppmap *m){int i;
- np_put(b,"UNIPP1\0",7);put32(b,(unsigned)tn);put32(b,m?m->forced:0);put32(b,m?m->autoc:0);put32(b,m?(unsigned)m->ns:0);put32(b,m?(unsigned)m->ni:0);
- if(m){for(i=0;i<m->ns;i++)put32(b,m->spl[i]);for(i=0;i<m->ni;i++){put32(b,m->iline[i]);put32(b,m->ilines[i]);put32(b,(unsigned)strlen(m->iname[i]));np_puts(b,m->iname[i]);}}
+ np_put(b,"UNIPP2\0",7);put32(b,(unsigned)tn);put32(b,m?m->forced:0);put32(b,m?m->autoc:0);put32(b,m?(unsigned)m->ns:0);put32(b,m?(unsigned)m->ni:0);put32(b,m?(unsigned)m->nl:0);
+ if(m){for(i=0;i<m->ns;i++)put32(b,m->spl[i]);for(i=0;i<m->ni;i++){put32(b,m->iline[i]);put32(b,m->ilines[i]);put32(b,(unsigned)strlen(m->iname[i]));np_puts(b,m->iname[i]);}
+  for(i=0;i<m->nl;i++){put32(b,m->lraw[i]);put32(b,m->luser[i]);put32(b,m->lnumber[i]);put32(b,m->lname[i]?(unsigned)strlen(m->lname[i]):0xffffffffu);if(m->lname[i])np_puts(b,m->lname[i]);}}
  np_put(b,text,tn);}
 typedef struct {np_buf b;int n;} toks;
 static void tk(toks *t,unsigned off,const char *s,size_t sn){np_put(&t->b,"@",1);put32(&t->b,off);np_put(&t->b,"\n",1);np_put(&t->b,s,sn);np_put(&t->b,"\n",1);t->n++;}
@@ -319,14 +320,44 @@ static void ucn_range_case(void){
  np_puts(&text,"\n");tk_end(&wanted,(unsigned)text.n);accept_text("positive.ucn-annexd-range-boundaries-both-forms",text.p,text.n,0,&wanted);
  printf("INFO\tucn-annexd\tranges=%d\tboundary_forms=%d\n",rows,words);free(text.p);free(kind);tfree(&wanted);
 }
+/* Include records retain encounter order at equal IRLN. IRNL is the child's
+ * insertion-time NL+1, not a recursively expanded parent span. These hand
+ * frames deliberately do not depend on E2 or normalize names/records. */
+static void include_order_cases(void){
+ const char *text="int main(void){return 7;}\n\n\n\n\n";toks w={{0},0};ppmap m;int i;
+ want_spec(&w,0,"0:type=int\0014:id=main\0018:(\0019:type=void\00113:)\00114:{\00115:return\00122:num=7\00123:;\00124:}");tk_end(&w,(unsigned)strlen(text));
+ memset(&m,0,sizeof m);m.ni=3;
+ for(i=0;i<m.ni;i++){m.iline[i]=1;m.ilines[i]=2;}
+ m.iname[0]="z-parent.h";m.iname[1]="a-child.h";m.iname[2]="m-grandchild.h";
+ accept_text("input.include-same-start-three-level-encounter-order",text,strlen(text),&m,&w);
+ memset(&m,0,sizeof m);m.ni=4;
+ for(i=0;i<m.ni;i++){m.iline[i]=1;m.ilines[i]=2;}
+ m.iname[0]="z-parent.h";m.iname[1]="a-child.h";m.iname[2]="m-grandchild.h";m.iname[3]="b-leaf.h";
+ accept_text("input.include-same-start-four-level-encounter-order",text,strlen(text),&m,&w);
+ memset(&m,0,sizeof m);m.ni=2;m.iline[0]=m.iline[1]=1;
+ m.ilines[0]=2;m.ilines[1]=5;m.iname[0]="parent.h";m.iname[1]="longer-child.h";
+ accept_text("input.include-child-lines-longer-than-parent",text,strlen(text),&m,&w);
+ memset(&m,0,sizeof m);m.ni=2;
+ for(i=0;i<m.ni;i++){m.iline[i]=1;m.ilines[i]=2;m.iname[i]="same.h";}
+ accept_text("input.include-identical-wire-records",text,strlen(text),&m,&w);tfree(&w);
+}
 static void mode_tokens(void){
  toks w={{0},0};int i;
  /* format: exact token lines after the echo, typed spelling, text-relative offsets, eof at text length */
  plain_want(&w);accept_text("format.plain-token-lines",PLAIN,strlen(PLAIN),0,&w);
- /* non-zero maps: echo is the whole envelope, offsets stay text-relative; splice at text end and 62-byte name accepted */
+ include_order_cases();
  {ppmap m;memset(&m,0,sizeof m);m.forced=1;m.autoc=2;m.ns=2;m.spl[0]=3;m.spl[1]=(unsigned)strlen(PLAIN);m.ni=2;m.iline[0]=1;m.ilines[0]=2;m.iname[0]="inc/a.h";
   m.iline[1]=2;m.ilines[1]=1;m.iname[1]="n12345678901234567890123456789012345678901234567890123456789.h";
   if(strlen(m.iname[1])!=62)die("62-byte include name");accept_text("input.nonzero-maps-text-relative",PLAIN,strlen(PLAIN),&m,&w);}
+ /* Non-zero maps retain text-relative offsets; full names have no 62-byte cap.
+  * Line names distinguish an explicit empty name from the default-TU sentinel. */
+ {ppmap m;memset(&m,0,sizeof m);m.forced=1;m.autoc=2;m.ns=2;m.spl[0]=3;m.spl[1]=(unsigned)strlen(PLAIN);m.ni=2;m.iline[0]=1;m.ilines[0]=2;m.iname[0]="inc/a.h";
+  m.iline[1]=2;m.ilines[1]=1;m.iname[1]="n123456789012345678901234567890123456789012345678901234567890123456789.h";
+  if(strlen(m.iname[1])<=62)die("long include name");m.nl=3;
+  m.lraw[0]=1;m.luser[0]=1;m.lnumber[0]=10;m.lname[0]=m.iname[1];
+  m.lraw[1]=2;m.luser[1]=2;m.lnumber[1]=20;m.lname[1]="";
+  m.lraw[2]=3;m.luser[2]=3;m.lnumber[2]=30;m.lname[2]=0;
+  accept_text("input.nonzero-maps-long-names-empty-and-default-text-relative",PLAIN,strlen(PLAIN),&m,&w);}
  /* determinism: stdin transport and a different SOURCE_LABEL give the same bytes */
  {np_buf pp={0};np_result a,b,c;pp_build(&pp,PLAIN,strlen(PLAIN),0);
   a=run_pp("det.file-label-a",pp.p,pp.n,0,label_a,0);b=run_pp("det.stdin-label-a",pp.p,pp.n,0,label_a,1);c=run_pp("det.file-label-b",pp.p,pp.n,0,label_b,0);
@@ -398,19 +429,40 @@ static void mode_bytes(void){
 
 /* ---- --refusals mode ---- */
 static void env_case(const char *name,np_buf *pp,const char *needle){np_result r=run_pp(name,pp->p,pp->n,0,label_a,0);refuse_check(name,&r,needle);np_free(&r);free(pp->p);pp->p=0;pp->n=pp->cap=0;recover(name);}
-static void hdr(np_buf *b,unsigned tl,unsigned fo,unsigned au,unsigned ns,unsigned ni){np_put(b,"UNIPP1\0",7);put32(b,tl);put32(b,fo);put32(b,au);put32(b,ns);put32(b,ni);}
+static void hdr_lines(np_buf *b,unsigned tl,unsigned fo,unsigned au,unsigned ns,unsigned ni,unsigned nl){np_put(b,"UNIPP2\0",7);put32(b,tl);put32(b,fo);put32(b,au);put32(b,ns);put32(b,ni);put32(b,nl);}
+static void hdr(np_buf *b,unsigned tl,unsigned fo,unsigned au,unsigned ns,unsigned ni){hdr_lines(b,tl,fo,au,ns,ni,0);}
+static void line_record(np_buf *b,unsigned raw,unsigned user,unsigned number,unsigned namelen,const char *name,size_t n){put32(b,raw);put32(b,user);put32(b,number);put32(b,namelen);np_put(b,name,n);}
 static void text_refusal(const char *name,const char *text,size_t tn,const char *needle){refuse_text(name,text,tn,needle);recover(name);}
 static void mode_refusals(void){
  const char *T="int x;\n";unsigned tl=7;np_buf b={0};int i;
  /* envelope */
  hdr(&b,tl-3,0,0,0,0);np_puts(&b,T);env_case("ref.length-understated",&b,MALF);
  hdr(&b,tl,0,0,0,0);np_puts(&b,T);np_put(&b,"Z",1);env_case("ref.trailing-byte",&b,MALF);
+ np_put(&b,"UNIPP2\0",7);for(i=0;i<23;i++)np_put(&b,"\0",1);env_case("ref.header-missing-line-count-byte",&b,MALF);
  hdr(&b,tl,0,0,1,0);put32(&b,tl+1);np_puts(&b,T);env_case("ref.splice-offset-past-text",&b,MALF);
  hdr(&b,tl,0,0,1,0);put32(&b,0xffffu);np_puts(&b,T);env_case("ref.splice-offset-far-past-text",&b,MALF);
  hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,40);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.include-name-past-input",&b,MALF);
  hdr(&b,tl,0,0,0,1);put32(&b,1);env_case("ref.include-record-truncated",&b,MALF);
- hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,63);for(i=0;i<63;i++)np_put(&b,"n",1);np_puts(&b,T);env_case("ref.include-name-63-over-bound",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,63);for(i=0;i<62;i++)np_put(&b,"n",1);np_puts(&b,T);env_case("ref.include-name-exceeds-metadata-extent",&b,MALF);
  hdr(&b,tl,0,0,0,2);put32(&b,1);put32(&b,1);put32(&b,3);np_puts(&b,"a.h");np_puts(&b,T);env_case("ref.include-count-overstated",&b,MALF);
+ /* Every metadata name must fit before the final text extent, and contain no NUL.
+  * The default-TU sentinel belongs only to line records and consumes no bytes. */
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,0xffffffffu);np_puts(&b,T);env_case("ref.include-default-sentinel-forbidden",&b,MALF);
+ hdr(&b,tl,0,0,0,1);put32(&b,1);put32(&b,1);put32(&b,3);np_put(&b,"a\0h",3);np_puts(&b,T);env_case("ref.include-name-nul",&b,MALF);
+ hdr(&b,tl,0,0,2,0);put32(&b,2);put32(&b,1);np_puts(&b,T);env_case("ref.splice-descending",&b,MALF);
+ hdr(&b,tl,0,0,2,0);put32(&b,1);put32(&b,1);np_puts(&b,T);env_case("ref.splice-duplicate",&b,MALF);
+ hdr(&b,tl,0,0,0,2);put32(&b,2);put32(&b,1);put32(&b,1);np_puts(&b,"a");put32(&b,1);put32(&b,1);put32(&b,1);np_puts(&b,"b");np_puts(&b,T);env_case("ref.include-descending",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);put32(&b,1);np_puts(&b,T);env_case("ref.line-record-truncated",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,2);line_record(&b,1,1,1,0,"",0);np_puts(&b,T);env_case("ref.line-count-overstated",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,1,1,3,"a\0h",3);np_puts(&b,T);env_case("ref.line-name-nul",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,1,1,4,"abc",3);np_puts(&b,T);env_case("ref.line-name-exceeds-metadata-extent",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,1,1,0xffffffffu,"x",1);np_puts(&b,T);env_case("ref.line-sentinel-with-name-bytes",&b,MALF);
+ for(i=0;i<2;i++){hdr_lines(&b,tl,0,0,0,0,2);line_record(&b,2,1,1,0,"",0);line_record(&b,i?2:1,2,2,0xffffffffu,"",0);np_puts(&b,T);env_case(i?"ref.line-duplicate":"ref.line-descending",&b,MALF);}
+ hdr_lines(&b,tl,0,0,0,0,0x80000000u);np_puts(&b,T);env_case("ref.int32.line-count",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,0x80000000u,1,1,0,"",0);np_puts(&b,T);env_case("ref.int32.line-raw",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,0x80000000u,1,0,"",0);np_puts(&b,T);env_case("ref.int32.line-user",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,1,0x80000000u,0,"",0);np_puts(&b,T);env_case("ref.int32.line-number",&b,MALF);
+ hdr_lines(&b,tl,0,0,0,0,1);line_record(&b,1,1,1,0x80000000u,"",0);np_puts(&b,T);env_case("ref.line-name-huge-extent",&b,MALF);
  /* nonnegative signed 32-bit extents */
  hdr(&b,0x80000000u|tl,0,0,0,0);np_puts(&b,T);env_case("ref.int32.text-length",&b,MALF);
  hdr(&b,tl,0x80000000u,0,0,0);np_puts(&b,T);env_case("ref.int32.forced-count",&b,MALF);

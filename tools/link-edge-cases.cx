@@ -14,6 +14,7 @@
  *     `reject: not covered: address or target declaration`, which does not name the missing main -- a diagnostic
  *     quality note, see plans/defects-c43.md). */
 #pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
 
 static char root[4096], outdir[4096], product[4400], bound[4400]; static int npass, nfail; static FILE *res;
 static void die(const char *s) { fprintf(stderr, "link-edge-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
@@ -27,7 +28,61 @@ static void refused(const char *label, char *const argv[], const char *img, cons
     int named = r.errn && strstr(r.err, text) != 0; char d[320]; { if (cx_fmt(d, sizeof d, "rc=%d image-absent=%d named=%d stderr=%.*s", r.rc, absent(img), named, (int)(r.errn > 120 ? 120 : r.errn), r.err)) { fprintf(stderr, "link-edge-cases: text too long for d\n"); exit(2); } } for (char *q = d; *q; q++) if (*q == '\n') *q = ' ';
     check(r.rc && absent(img) && named, label, d); np_free(&r); }
 
+/* 真实产品链接路径；单网swap仅开发证据，不迁移发布资格。
+ * HARNESS --sourceless ROOT OUT PRODUCT A_PRODUCT
+ *   [--models PKG] [--a-models A_PKG] [--legacy-a]
+ * legacy A使用无来源帧、无.end的真实对应对象，语义行完全相同。
+ * scope仅有限链接行为及before-fix语义投影，不是0515be同源A/B机器字节资格；
+ * 正式A/B资格另由30个正规case验证，旧SID材料不迁资格。 */
+static const char *sl_models[2];
+static int sl_legacy;
+static void sl_num(char *p,int at,int width,unsigned long long n){for(int i=0;i<width;i++){p[at+i]=(char)n;n>>=8;}}
+static void sl_object(const char *leaf,const char *tape){
+    char head[100],p[4400];int hn=snprintf(head,sizeof head,"UNISATAPE1 lnx/x86_64 %zu\n",strlen(tape));
+    if(hn<0||hn>=(int)sizeof head)die("payload header");size_t n=288+(size_t)hn+strlen(tape);char *b=calloc(1,n);if(!b)die("object allocation");
+    memcpy(b,"\177ELF\2\1\1",7);sl_num(b,16,2,1);sl_num(b,18,2,62);sl_num(b,20,4,1);sl_num(b,40,8,64);sl_num(b,52,2,64);sl_num(b,58,2,64);sl_num(b,60,2,3);sl_num(b,62,2,1);
+    sl_num(b,128+4,4,3);sl_num(b,128+24,8,256);sl_num(b,128+32,8,24);
+    sl_num(b,192,4,1);sl_num(b,192+4,4,1);sl_num(b,192+24,8,288);sl_num(b,192+32,8,n-288);
+    memcpy(b+256,"\0.unisa.tape\0.shstrtab\0",22);if(mm_copy(b+288,n-288,head,(size_t)hn)||mm_copy(b+288+hn,n-288-(size_t)hn,tape,strlen(tape)))die("object payload");
+    path(p,sizeof p,outdir,leaf);saved(p,b,n);free(b);
+}
+static np_buf sl_project(const char *s,size_t n){np_buf b={0};for(size_t a=0;a<n;){size_t e=a;while(e<n&&s[e]!='\n')e++;if(e==n)die("linked tape LF");if(e-a<6||memcmp(s+a,".unit ",6))np_put(&b,s+a,e-a+1);a=e+1;}return b;}
+static np_result sl_run(const char *exe,char **objects,int count,const char *label,int lane){
+    char *v[150],output[128],p[4400],log[160],why[1024];int n=0;
+    if(cx_fmt(output,sizeof output,"%s-%d.tape",label,lane))die("output name");
+    char legacy[4][100];v[n++]=(char *)exe;if(sl_models[lane]){v[n++]="--models";v[n++]=(char *)sl_models[lane];}v[n++]="-S";v[n++]="-o";v[n++]=output;for(int i=0;i<count;i++){if(lane&&sl_legacy){if(cx_fmt(legacy[i],sizeof legacy[i],"legacy-%s",objects[i]))die("legacy object path");v[n++]=legacy[i];}else v[n++]=objects[i];}v[n]=0;
+    np_buf args={0};for(int i=0;i<n;i++){np_puts(&args,v[i]);np_puts(&args,"\n");}if(cx_fmt(log,sizeof log,"%s-%d.argv",label,lane))die("argv name");path(p,sizeof p,outdir,log);saved(p,args.p,args.n);free(args.p);
+    np_result r={0};int transport=np_run(v,outdir,0,20,&r,why,sizeof why);
+    if(cx_fmt(log,sizeof log,"%s-%d.stderr",label,lane))die("stderr name");path(p,sizeof p,outdir,log);saved(p,r.err?r.err:"",r.errn);
+    if(cx_fmt(log,sizeof log,"%s-%d.stdout",label,lane))die("stdout name");path(p,sizeof p,outdir,log);saved(p,r.out?r.out:"",r.outn);
+    char status[100];int z=snprintf(status,sizeof status,"transport\t%d\nrc\t%d\nresidue\t%d\n",transport,r.rc,r.residue);if(cx_fmt(log,sizeof log,"%s-%d.status",label,lane))die("status name");path(p,sizeof p,outdir,log);saved(p,status,(size_t)z);
+    if(transport||r.residue)die("link transport");return r;
+}
+static int sourceless(int argc,char **argv){
+    if(argc<6||!realpath(argv[2],root)||argv[3][0]!='/')die("--sourceless ROOT OUT PRODUCT A_PRODUCT [--models PKG] [--a-models A_PKG] [--legacy-a]");
+    for(int i=6;i<argc;i++){if(!strcmp(argv[i],"--legacy-a")){if(sl_legacy)die("duplicate legacy-a");sl_legacy=1;}else{int lane=!strcmp(argv[i],"--models")?0:!strcmp(argv[i],"--a-models")?1:-1;if(lane<0||i+1>=argc||sl_models[lane])die("model binding arguments");sl_models[lane]=argv[++i];}}
+    if(cx_fmt(outdir,sizeof outdir,"%s",argv[3])||mkdir(outdir,0700))die("fresh output");char p[4400];path(p,sizeof p,outdir,"results.tsv");res=fopen(p,"wbx");if(!res)die("results");
+    sl_object("named.o",".unit 2\n.unit 0 3:612e63\n_start:\n  imm r1, 1\n.end\n");
+    sl_object("named-b.o",".unit 2\n.unit 0 3:622e63\n  imm r2, 2\n.end\n");
+    sl_object("raw.o",".unit 2\n  imm r3, 3\n.end\n");sl_object("empty.o",".unit 2\n.end\n");
+    sl_object("bad.o",".unit 2\n  bogus r0, r0\n.end\n");
+    if(sl_legacy){sl_object("legacy-named.o",".unit 2\n_start:\n  imm r1, 1\n");sl_object("legacy-named-b.o",".unit 2\n  imm r2, 2\n");sl_object("legacy-raw.o",".unit 2\n  imm r3, 3\n");sl_object("legacy-empty.o",".unit 2\n");}
+    const char *labels[]={"named-raw","raw-named","named-raw-named","raw-named-raw","empty-middle"};
+    char *seq[5][4]={{"named.o","raw.o",0},{"raw.o","named.o",0},{"named.o","raw.o","named-b.o",0},{"raw.o","named.o","raw.o",0},{"named.o","empty.o","raw.o",0}};
+    const char *gold[]={".unit 0 3:612e63\n  imm r1, 1\n.unit 1 0:\n  imm r3, 3\n.end\n",".unit 0 0:\n  imm r3, 3\n.unit 1 3:612e63\n  imm r1, 1\n.end\n",".unit 0 3:612e63\n  imm r1, 1\n.unit 1 0:\n  imm r3, 3\n.unit 2 3:622e63\n  imm r2, 2\n.end\n",".unit 0 0:\n  imm r3, 3\n.unit 1 3:612e63\n  imm r1, 1\n.unit 2 0:\n  imm r3, 3\n.end\n",".unit 0 3:612e63\n  imm r1, 1\n.unit 1 0:\n  imm r3, 3\n.end\n"};
+    for(int c=0;c<5;c++){int count=c<2?2:3;np_buf project[2]={{0},{0}};for(int lane=0;lane<2;lane++){
+        np_result r=sl_run(argv[4+lane],seq[c],count,labels[c],lane);char leaf[128];if(cx_fmt(leaf,sizeof leaf,"%s-%d.tape",labels[c],lane))die("tape name");path(p,sizeof p,outdir,leaf);size_t n=0;char *t=r.rc?0:cx_read(p,&n);
+        if(!lane){np_buf observed={0};int ends=0;for(size_t a=0;t&&a<n;){size_t e=a;while(e<n&&t[e]!='\n')e++;if(e==n)die("linked tape LF");size_t z=e-a;if((z>=6&&!memcmp(t+a,".unit ",6))||(z>=6&&!memcmp(t+a,"  imm ",6))||(z==4&&!memcmp(t+a,".end",4)))np_put(&observed,t+a,z+1);if(z==4&&!memcmp(t+a,".end",4))ends++;a=e+1;}check(!r.rc&&!r.errn&&t&&ends==1&&n>=5&&!memcmp(t+n-5,".end\n",5)&&observed.n==strlen(gold[c])&&!memcmp(observed.p,gold[c],observed.n),labels[c],"source frames and fixture semantics in order, one final end");free(observed.p);}if(t)project[lane]=sl_project(t,n);free(t);np_free(&r);
+    }check(project[0].n&&project[0].n==project[1].n&&!memcmp(project[0].p,project[1].p,project[0].n),"before-fix-semantic-bytes",labels[c]);free(project[0].p);free(project[1].p);}
+    /* 127 named ids followed by a raw TU exactly fills 128; an empty TU
+       consumes none; the next real raw TU must be refused. */
+    np_buf many={0};np_puts(&many,".unit 2\n");for(int i=0;i<127;i++){char line[80];int z=snprintf(line,sizeof line,".unit %d 3:612e63\n  imm r1, 1\n",i);np_put(&many,line,(size_t)z);}np_puts(&many,"_start:\n.end\n");sl_object("near.o",many.p);free(many.p);
+    char *edge[]={"near.o","empty.o","raw.o","raw.o"};for(int overflow=0;overflow<2;overflow++){const char *label=overflow?"unit-max-overflow":"unit-max-exact";np_result r=sl_run(argv[4],edge,3+overflow,label,0);path(p,sizeof p,outdir,overflow?"unit-max-overflow-0.tape":"unit-max-exact-0.tape");if(overflow)check(r.rc>0&&r.rc<128&&r.errn&&strstr(r.err,"tape truncated")&&absent("unit-max-overflow-0.tape"),label,"next real TU rejected");else{size_t n;char *t=r.rc?0:cx_read(p,&n);check(!r.rc&&!r.errn&&t&&strstr(t,".unit 127 0:\n"),label,"empty TU does not consume source id");free(t);}np_free(&r);}
+    char *badseq[]={"named.o","bad.o"};np_result linked=sl_run(argv[4],badseq,2,"diagnostic",0);check(linked.rc>0&&linked.rc<128&&linked.errn&&strstr(linked.err,"unknown opcode")&&!strstr(linked.err,"a.c")&&absent("diagnostic-0.tape"),"named-raw-diagnostic-clears-name","actual link consumer rejects invalid opcode without inheriting previous filename");np_free(&linked);
+    fprintf(res,"SUMMARY\tpass=%d\tfail=%d\n",npass,nfail);fclose(res);printf("LINK_EDGE_CASES\tpass=%d\tfail=%d\n",npass,nfail);return nfail?1:0;
+}
 int main(int argc, char **argv) {
+    if(argc>1&&!strcmp(argv[1],"--sourceless"))return sourceless(argc,argv);
     if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "link-edge-cases: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com"); path(bound, sizeof bound, root, "tools/bound");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");

@@ -1,4 +1,4 @@
-/* Independent E2 stream oracle (src.c -> UNIPP1/pp). Not the seven-stream chain.
+/* Independent E2 stream oracle (src.c -> UNIPP2/pp). Not the seven-stream chain.
  * ROOT STREAM_DIR NEW_OUTDIR; Linux/x86_64 only. Uses stream1.com from prepared
  * seven-stream material; does not construct nets or touch the product route.
  * This batch checks E2 in isolation; later streams and foreign hosts are separate. */
@@ -18,21 +18,29 @@ static void saved(const char *p,const void *s,size_t n){int f=open(p,O_WRONLY|O_
 static char *loaded(const char *p,size_t *n){char *s=cx_read(p,n);if(!s)die(p);return s;}
 static void digest(const char *p,char *hex){size_t n;char *s=loaded(p,&n);cx_sha256_hex(s,n,hex);free(s);}
 static unsigned little(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
-/* Five u32 fields, splice offsets, include records, then exact text bytes. */
-static int unipp1(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn,unsigned *splices,unsigned *includes,const unsigned char **first_include){
- if(n<27||memcmp(b,"UNIPP1\0",7))return 0;
- unsigned len=little(b+7),sc=little(b+19),ic=little(b+23);size_t at=27;
- if(sc>(n-at)/4)return 0;
- at+=(size_t)sc*4;
- *first_include=ic?b+at:0;
+/* Six u32 fields, splices, includes, logical lines, then exact text. */
+static int unipp2_body(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn){
+ if(n<31||n>2147483647ULL||memcmp(b,"UNIPP2\0",7))return 0;
+ unsigned len=little(b+7),sc=little(b+19),ic=little(b+23),lc=little(b+27),prev=0;size_t at=31;
+ if(len>2147483647U||little(b+11)>2147483647U||little(b+15)>2147483647U||sc>2147483647U||ic>2147483647U||lc>2147483647U||sc>(n-at)/4)return 0;
+ for(unsigned i=0;i<sc;i++){unsigned pos=little(b+at);if(pos>2147483647U||(i&&pos<=prev))return 0;prev=pos;at+=4;}
+ prev=0;
  for(unsigned i=0;i<ic;i++){
-  if(n-at<12)return 0;
-  unsigned names=little(b+at+8);at+=12;
-  if(names>62||names>n-at)return 0;
-  at+=names;
+  if(n-at<12)return 0;unsigned pos=little(b+at),lines=little(b+at+4),names=little(b+at+8);at+=12;
+  if(pos>2147483647U||lines>2147483647U||(unsigned long long)pos+lines>2147483647ULL||(i&&pos<prev)||names>n-at||memchr(b+at,0,names))return 0;
+  prev=pos;at+=names;
  }
- if(len!=n-at)return 0;
- *body=b+at;*bn=len;*splices=sc;*includes=ic;return 1;
+ prev=0;
+ for(unsigned i=0;i<lc;i++){
+  if(n-at<16)return 0;unsigned pos=little(b+at),user=little(b+at+4),number=little(b+at+8),names=little(b+at+12);at+=16;
+  if(pos>2147483647U||user>2147483647U||number>2147483647U||(i&&pos<=prev))return 0;
+  if(names!=4294967295U){if(names>n-at||memchr(b+at,0,names))return 0;at+=names;}prev=pos;
+ }
+ if(len!=n-at)return 0;*body=b+at;*bn=len;return 1;
+}
+static int unipp2(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn,unsigned *splices,unsigned *includes,const unsigned char **first_include){
+ if(!unipp2_body(b,n,body,bn))return 0;
+ *splices=little(b+19);*includes=little(b+23);*first_include=*includes?b+31+(size_t)*splices*4:0;return 1;
 }
 static np_result invoke(const char *input_leaf,const char *evidence_leaf){
  char src[4200],outp[4400],errp[4400];int z;path(src,sizeof src,work,input_leaf);
@@ -46,9 +54,9 @@ static void positive(const char *name,const char *src,const char *want_body,unsi
  char sp[4200],t[140];path(sp,sizeof sp,work,name);saved(sp,src,strlen(src));
  np_result r=invoke(name,name);
  const unsigned char *body,*first=0;size_t bn;unsigned splices=0,includes=0;
- int frame=unipp1((unsigned char *)r.out,r.outn,&body,&bn,&splices,&includes,&first);
+ int frame=unipp2((unsigned char *)r.out,r.outn,&body,&bn,&splices,&includes,&first);
  {int zn=snprintf(t,sizeof t,"%s.accept-rc0-empty-stderr",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(!r.rc&&!r.errn,t);
- {int zn=snprintf(t,sizeof t,"%s.unipp1-frame",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(frame,t);
+ {int zn=snprintf(t,sizeof t,"%s.unipp2-frame",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(frame,t);
  {int zn=snprintf(t,sizeof t,"%s.body-exact",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(frame&&bn==strlen(want_body)&&!memcmp(body,want_body,bn),t);
  {int zn=snprintf(t,sizeof t,"%s.splice-count",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(frame&&splices==want_splices,t);
  {int zn=snprintf(t,sizeof t,"%s.include-count",name);if(zn<0||(size_t)zn>=sizeof t)die("label");}check(frame&&includes==want_includes,t);

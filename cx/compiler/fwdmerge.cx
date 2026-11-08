@@ -7,7 +7,7 @@
    driver's layout: two pointers, then two ints. long long is 8 bytes on LP64
    and LLP64. */
 typedef struct { unsigned char *b; long long *at; int n, cap; } FwmBuf;
-typedef struct { const unsigned char *p; int n; } FwmLine;
+typedef struct { const unsigned char *p; int n; const unsigned char *source; int source_n; int source_id; } FwmLine;
 typedef struct { const unsigned char *p; int n; } FwmName;
 static char *fwm_exports[512];
 static int fwm_nexports;
@@ -54,15 +54,64 @@ static int fwm_eq(FwmLine l, const char *s) {
 static int fwm_prefix(FwmLine l, const char *s) {
     int n; n = fwm_len(s); return l.n >= n && fwm_memeq(l.p, (const unsigned char *)s, n);
 }
-static int fwm_lines(const FwmBuf *b, FwmLine **out) {
-    int cap; int count; int at; FwmLine *v;
-    cap = 256; count = 0; at = 0; v = fwm_grow(0, (long long)cap * (long long)sizeof *v);
-    while (at < b->n) {
-        int end; end = at; while (end < b->n && b->b[end] != '\n') end = end + 1;
-        if (end == b->n) { fwm_drop(v); return -1; }
-        if (count == cap) { cap = cap * 2; v = fwm_grow(v, (long long)cap * (long long)sizeof *v); }
-        v[count].p = b->b + at; v[count].n = end - at; count = count + 1; at = end + 1;
+static int fwm_metaword(FwmLine l, const char *s) {
+    int n; n = fwm_len(s);
+    if (!fwm_prefix(l, s)) return 0;
+    return l.n == n || l.p[n] == ' ' || l.p[n] == '\t' || l.p[n] == '\r' || l.p[n] == ';';
+}
+/* Metadata is attached to the following semantic rows, not treated as a
+   function body or label. Reordered fragments restore their own context. */
+static int fwm_source(FwmLine l, int *id, int *tail) {
+    int p; int k; int v; int bytes;
+    p = 6; k = p; v = 0;
+    while (p < l.n && l.p[p] >= '0' && l.p[p] <= '9') {
+        if (v > 127) return 0;
+        v = v * 10 + l.p[p] - '0'; p++;
     }
+    if (p == k || v >= 128 || (p - k > 1 && l.p[k] == '0') || p >= l.n || l.p[p] != ' ') return 0;
+    *id = v; p++; *tail = p; k = p; bytes = 0;
+    while (p < l.n && l.p[p] >= '0' && l.p[p] <= '9') {
+        int max; int digit; max = (l.n - p) / 2; digit = l.p[p] - '0';
+        if (bytes > max / 10 || (bytes == max / 10 && digit > max % 10)) return 0;
+        bytes = bytes * 10 + digit; p++;
+    }
+    if (p == k || (p - k > 1 && l.p[k] == '0') || p >= l.n || l.p[p] != ':' || l.n - p - 1 != 2 * bytes) return 0;
+    p++;
+    while (p < l.n) {
+        int h; int low; h = l.p[p]; low = l.p[p + 1];
+        if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f')) ||
+            !((low >= '0' && low <= '9') || (low >= 'a' && low <= 'f')) || (h == '0' && low == '0')) return 0;
+        p = p + 2;
+    }
+    return 1;
+}
+static int fwm_lines(const FwmBuf *b, FwmLine **out) {
+    int cap; int count; int at; int ended; int source_id; int source_n;
+    const unsigned char *source;
+    FwmLine *v;
+    cap = 256; count = 0; at = 0; ended = 0; source = 0; source_n = 0; source_id = -1;
+    v = fwm_grow(0, (long long)cap * (long long)sizeof *v);
+    while (at < b->n) {
+        int end; FwmLine l;
+        end = at; while (end < b->n && b->b[end] != '\n') end++;
+        if (end == b->n) { fwm_drop(v); return -1; }
+        l.p = b->b + at; l.n = end - at;
+        if (fwm_metaword(l, ".end")) {
+            if (!fwm_eq(l, ".end") || end + 1 != b->n) { fwm_drop(v); return -1; }
+            ended = 1; break;
+        }
+        if (fwm_metaword(l, ".unit")) {
+            int id; int tail;
+            if (!(at == 0 && fwm_eq(l, ".unit 2"))) {
+                if (!fwm_prefix(l, ".unit ") || !fwm_source(l, &id, &tail)) { fwm_drop(v); return -1; }
+                source = l.p + tail; source_n = l.n - tail; source_id = id; at = end + 1; continue;
+            }
+        }
+        if (count == cap) { cap = cap * 2; v = fwm_grow(v, (long long)cap * (long long)sizeof *v); }
+        l.source = source; l.source_n = source_n; l.source_id = source_id;
+        v[count] = l; count++; at = end + 1;
+    }
+    if (!ended) { fwm_drop(v); return -1; }
     *out = v; return count;
 }
 static int fwm_nameeq(FwmName a, const unsigned char *p, int n) {
@@ -118,8 +167,35 @@ static void fwm_int(FwmBuf *o, int x) {
     if (x < 0) { d[n] = '-'; n = n + 1; }
     while (n > 0) { n = n - 1; fwm_put(o, (const unsigned char *)(d + n), 1); }
 }
+static int fwm_source_maps[256];
+static int fwm_source_next;
+static int fwm_source_active;
+static const unsigned char *fwm_source_active_name;
+static int fwm_source_active_len;
+static int fwm_locations(FwmLine *v, int n, int offset) {
+    int i;
+    for (i = 0; i < n; i++) if (v[i].source) {
+        int key; key = offset + v[i].source_id;
+        if (fwm_source_maps[key] < 0) {
+            if (fwm_source_next >= 128) return 1;
+            fwm_source_maps[key] = fwm_source_next; fwm_source_next++;
+        }
+    }
+    return 0;
+}
+static void fwm_location(FwmBuf *o, FwmLine l, int offset) {
+    int id;
+    if (!l.source) return;
+    id = fwm_source_maps[offset + l.source_id];
+    if (id == fwm_source_active && l.source_n == fwm_source_active_len &&
+        fwm_memeq(l.source, fwm_source_active_name, l.source_n)) return;
+    fwm_text(o, ".unit "); fwm_int(o, id); fwm_text(o, " ");
+    fwm_put(o, l.source, l.source_n); fwm_text(o, "\n");
+    fwm_source_active = id; fwm_source_active_name = l.source; fwm_source_active_len = l.source_n;
+}
 static int fwm_rewrite(FwmBuf *o, FwmLine l, FwmName *locals, int nlocals, int labshift, int strshift, int unit) {
     int start; int end; int i;
+    fwm_location(o, l, 128);
     start = 0; end = l.n;
     if (fwm_prefix(l, "  .sys ") || fwm_prefix(l, "  .sys6 ")) {
         while (start < l.n && l.p[start] != ',') start = start + 1;
@@ -153,7 +229,7 @@ static int fwm_rewrite(FwmBuf *o, FwmLine l, FwmName *locals, int nlocals, int l
     if (end < l.n) fwm_put(o, l.p + end, l.n - end);
     fwm_text(o, "\n"); return 0;
 }
-static void fwm_line(FwmBuf *o, FwmLine l) { fwm_put(o, l.p, l.n); fwm_text(o, "\n"); }
+static void fwm_line(FwmBuf *o, FwmLine l) { fwm_location(o, l, 0); fwm_put(o, l.p, l.n); fwm_text(o, "\n"); }
 int fwm_merge(const FwmBuf *base, const FwmBuf *stub, const FwmBuf *unit_tape, int unit, FwmBuf *out) {
     FwmLine *a; FwmLine *b; FwmLine *u; FwmName *locals; FwmName *globals;
     int na; int nb; int nu; int nglobals; int ok; int body; int main; int sinit; int sret; int ainit; int aret; int lastret;
@@ -162,6 +238,12 @@ int fwm_merge(const FwmBuf *base, const FwmBuf *stub, const FwmBuf *unit_tape, i
     nglobals = 0; ok = 0; body = -1; main = -1; sinit = -1; sret = -1; ainit = -1; aret = -1; lastret = -1;
     if (na < 0 || nb < 0 || nu < 0 || !fwm_nexports || fwm_overflow) goto done;
     if (nu < 1 || !fwm_eq(u[0], ".unit 2")) goto done;
+    {
+        int i;
+        for (i = 0; i < 256; i++) fwm_source_maps[i] = -1;
+        fwm_source_next = 0; fwm_source_active = -1; fwm_source_active_name = 0; fwm_source_active_len = 0;
+        if (fwm_locations(a, na, 0) || fwm_locations(b, nb, 128)) goto done;
+    }
     globals = fwm_grow(0, 4096 * (long long)sizeof *globals);
     {
         int i;
@@ -260,6 +342,7 @@ int fwm_merge(const FwmBuf *base, const FwmBuf *stub, const FwmBuf *unit_tape, i
                 if (fwm_rewrite(out, b[j], locals, nlocals, labmax, strmax + 1, unit)) goto done;
         }
     }
+    fwm_text(out, ".end\n");
     ok = 1;
 done:
     fwm_drop(a); fwm_drop(b); fwm_drop(u); fwm_drop(locals); fwm_drop(globals);

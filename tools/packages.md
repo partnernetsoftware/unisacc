@@ -1,3 +1,20 @@
+# Source-package consumer material and models carrier
+
+`source-package-pack.cx` keeps the native `tool-pack` output `compiler.pkg`
+as an unmodified raw package body with its actual command receipt. It is **not**
+a direct `--models` input. After validating all source jobs, private models,
+routes, headers, kernels and predefines, `seal` exclusively creates
+`compiler.models.pkg`: that same complete body followed by `UNIPKG1\n` and its
+unsigned little-endian 64-bit byte length. No code slice or package rewrite is
+involved. Formal consumers must use `B --models PACK/compiler.models.pkg`.
+
+`package.tsv` binds both paths, SHA-256 identities, lengths, the derivation and
+the footer-locator module's logical import, resolved physical path and SHA. Seal
+prechecks this provider before writing; both endpoints and `--verify` compare
+the carrier's exact body span, bytes and hash with the verified raw output. Existing or partial carrier output
+is refused; source/consumer changes require a fresh pack context. These remain
+`PREPARED-no-test-result` materials, not functional qualification or installation.
+
 # Native development package refresh
 
 `package-refresh.cx` supports one explicitly pinned migration baseline (P7f709),

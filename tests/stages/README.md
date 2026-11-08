@@ -9,16 +9,20 @@
 拒绝用例文件:`bad`(主用例)、`bad.trunc`、`bad.magic`、`bad.rand` 各配同名 `.err`;
 四者都必须 rc1 且 stderr 与该 `.err` 逐字节相同。
 
-## 已知边界:行尾截断
+## 行尾截断负控
 
-`trunc-at-eol` 用例故意把输入截在**换行处**。这类输入本身就是一段语法完整的 tape 前缀,
-只是少了后面几行;`tape.text` 没有长度头也没有结束标记,段的入口状态分不出来。
-检查器对它打印 `GAP` 并写明原因,**不算 PASS,也不让该段 uncovered**(该段已有真实拒绝用例)。
+`trunc-at-eol` 保留历史上截在**换行处**的真实 tape 前缀，不补 `.end`。
+检查器现在要求 rc1、stdout 为空、stderr 包含 `reject: tape truncated`，
+不再记为 GAP。这些固定材料不能跟随正例重生而补尾，否则会丢掉负控。
 
-这条边界与全量实测(10670 个行尾截断点里 10667 个被 elf 拒绝,其余 3 例产物不可运行)
-记在 [发布说明](../../plans/release-notes-0.0.45.md) 的"已知限制"段,加结束标记的工作项是
-TAPE-END(0.0.45)。截在**非换行处**的输入(`bad` / `bad.trunc`)与首行不是 `_start:` 的
-输入由入口状态拒收。
+历史全量实测曾在 10670 个行尾截断点里得到 3 个不能运行的产物；
+该记录不是新产品验收结果。正例需要完整终止帧，缺尾、短读及终止后
+多余内容均不能以默认值或隐式补尾修复后接受。
+
+`sidecar` 在既有 USLFW1 外层长度拒绝之后，调用共享 `compiler.tapegate`
+文本帧机制独立校验声明的 tape body；不依赖后接 prune 才拒绝缺尾或非法帧。
+`check-stages.cx` 用准确长度的独立 USLFW1 材料检查完整 body、空名切换、
+缺尾、短 end、早 end 后内容、短 HEX 和非法 unit 编号；外层错误优先级不变。
 
 ## 人工核对记录(2026-11-05,已装 0.0.44:entry 29b44d17 / pkg 8a974386)
 
@@ -35,8 +39,8 @@ TAPE-END(0.0.45)。截在**非换行处**的输入(`bad` / `bad.trunc`)与首行
 | tapecheck | tape route → 592B | 输出 `_start:` 文本 tape,与 `-S` 同一路由 | 垃圾输入 → `unknown opcode` |
 | units | u0.c+u1.c 两单元帧 424B → 500B | 两个单元按顺序合成一个 multi 输入 | 垃圾输入 → `malformed unit frame` |
 
-e4、prune、lower 三段原先遇到不合法的输入 rc0 并继续输出。现在三段的**网入口状态**会校验:
-tape 文本必须以换行结束(检查动作 XLEN + INPUSHXE + BYTE + CMPI vs 10),否则走
-`DEAD` + `REJECT not covered: malformed tape text`。改动落在
-`exec/opt/setup-result.tsv`、`exec/prune/prune-result.tsv`+`prune-byte.tsv`、
-`exec/lower/data-result.tsv`,不在驱动里写特判。
+e4、prune、lower 三段曾遇到不合法输入 rc0 并继续输出；上表保留当时实测，
+不是新候选的运行证据。当前源合同由 `exec/tapeframe/frame-{byte,result}.tsv`
+统一校验完整终止与定位帧，阶段原入口的格式检查仍然保留。
+缺尾先检查最后五字节快拒；存在尾部后再完整扫描，拒绝早先 `.end` 后的内容、
+非法 `.unit` 边界。同一 TU 的重复帧可切换逻辑文件名；不对截断输入补尾。

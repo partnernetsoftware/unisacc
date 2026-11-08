@@ -1,0 +1,77 @@
+#pragma unisa module tape_frame
+/* Source-frame payload after the exact '.unit ' prefix. No decoding buffer:
+   successful outputs identify the validated HEX span in the caller's text. */
+int tb2_source_frame(const unsigned char *text, int p, int end, int *unit, int *bytes, int *hex) {
+    int id; int count; int start; int at;
+    if (!text || !unit || !bytes || !hex || p < 0 || end < p) return 4;
+    id = 0; start = p;
+    while (p < end && text[p] >= '0' && text[p] <= '9') {
+        if (id > 127) return 2;
+        id = id * 10 + text[p] - '0'; p++;
+    }
+    if (p == start || id >= 128 || (p - start > 1 && text[start] == '0') || p >= end || text[p] != ' ') return 2;
+    p++; start = p; count = 0;
+    while (p < end && text[p] >= '0' && text[p] <= '9') {
+        int max; int digit; max = (end - p) / 2; digit = text[p] - '0';
+        if (count > max / 10 || (count == max / 10 && digit > max % 10)) return 2;
+        count = count * 10 + digit; p++;
+    }
+    if (p == start || (p - start > 1 && text[start] == '0') || p >= end || text[p] != ':' || end - p - 1 != count * 2) return 2;
+    p++; at = p;
+    while (p < end) {
+        int high; int low; high = text[p]; low = text[p + 1];
+        if (!((high >= '0' && high <= '9') || (high >= 'a' && high <= 'f')) ||
+            !((low >= '0' && low <= '9') || (low >= 'a' && low <= 'f')) || (high == '0' && low == '0')) return 2;
+        p = p + 2;
+    }
+    *unit = id; *bytes = count; *hex = at;
+    return 0;
+}
+/* exec/facts/tape-space.tsv: bit 0 = tape_leading, bit 1 =
+   tape_controls. LF is deliberately excluded: only LF starts a frame. */
+static int tf_frame_space(int c) {
+    if (c == 11 || c == 12 || c == 13 || c == 28 || c == 29 || c == 30 || c == 133) return 3;
+    if (c == 9 || c == 32 || c == 160) return 1;
+    return 0;
+}
+static int tf_frame_word(const unsigned char *text, int p, int end, const char *word) {
+    int k; k = 0;
+    while (word[k]) {
+        if (p >= end || text[p] != word[k]) return 0;
+        p++; k++;
+    }
+    return p == end || tf_frame_space(text[p]) || text[p] == ';';
+}
+/* Structure only: preserve opcode, RI, ABI and runtime decisions downstream.
+   The tail check rejects the common incomplete sidecar without a full scan. */
+int tb2_tape_frame(const unsigned char *text, int n) {
+    int line;
+    if (!text || n < 0) return 4;
+    if (n < 5 || text[n - 5] != '.' || text[n - 4] != 'e' || text[n - 3] != 'n' || text[n - 2] != 'd' || text[n - 1] != '\n') return 2;
+    line = 0;
+    while (line < n) {
+        int end; int p;
+        end = line; while (end < n && text[end] != '\n') end++;
+        if (end == n) return 2;
+        p = line;
+        while (p < end) {
+            while (p < end && (tf_frame_space(text[p]) & 1)) p++;
+            if (tf_frame_word(text, p, end, ".end")) {
+                return p == line && end - line == 4 && end + 1 == n ? 0 : 2;
+            }
+            if (tf_frame_word(text, p, end, ".unit")) {
+                int id; int bytes; int hex;
+                if (p != line || end - p < 6 || text[p + 5] != ' ') return 2;
+                if (line == 0 && end == 7 && text[6] == '2') break;
+                if (tb2_source_frame(text, p + 6, end, &id, &bytes, &hex)) return 2;
+                break;
+            }
+            /* These existing tape controls end an ordinary/comment row, but
+               never establish a canonical physical start for metadata. */
+            while (p < end && !(tf_frame_space(text[p]) & 2)) p++;
+            if (p < end) p++;
+        }
+        line = end + 1;
+    }
+    return 2;
+}

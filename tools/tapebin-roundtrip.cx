@@ -1,5 +1,8 @@
 /* tools/tapebin-roundtrip.cx -- formats cell tapebin.roundtrip (prd.md:82, docs/tapebin-v1.md acceptance 1-3).
  *   sh ./unisacc.com tools/tapebin-roundtrip.cx -- ROOT ABS_OUT
+ *   ROOT ABS_OUT [--compiler ABS_PRODUCT --models ABS_PKG]
+ * Explicit binding is candidate-consumer, not root APE qualification; ELF
+ * executes directly and other products use sh, as in tests/tools-compile.cx.
  * Routes (exec/c/compiler.c:623,754,926,1415): `-S -o X.tape SRC.c`; `-S --tapebin -o X.tapebin X.tape` (origin 0 for a
  * tape input) or `... SRC.c` (origin = this target); `-S -o Y.tape X.tapebin` prints the canonical text (whitespace is
  * not preserved, docs/tapebin-v1.md "接入与兼容"), so text equality is asserted on the canonical form, not on the
@@ -14,30 +17,80 @@
  *   execution: -run on .tape, on the tape-route .tapebin and on the C-route .tapebin all exit with the hand value;
  *   refusal: a tapebin with a corrupted magic is refused with rc != 0, empty stdout and the declared diagnostic. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
 
 static char root[4096], outdir[4096], product[4400];
+static char models[4096];
+static int explicit_consumer, native_consumer, invocation;
 static int npass, nfail; static FILE *res;
 static void die(const char *s) { fprintf(stderr, "tapebin-roundtrip: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static void path(char *p, size_t cap, const char *a, const char *b) { int n = snprintf(p, cap, "%s/%s", a, b); if (n < 0 || (size_t)n >= cap) die("path"); }
 static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600); if (f < 0) die("exclusive create"); while (n) { ssize_t k = write(f, s, n); if (k <= 0) die("write"); s += k; n -= (size_t)k; } if (close(f)) die("close"); }
 static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\ttapebin.roundtrip.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", fx, label); if (ok) npass++; else nfail++; }
 /* product invocation, 20 s bound; returns transport failure */
-static int prod(char *const extra[], np_result *r) { char *v[16]; int n = 0; v[n++] = "sh"; v[n++] = product; for (int i = 0; extra[i]; i++) { if (n >= 15) die("argv"); v[n++] = extra[i]; } v[n] = 0; char why[1024]; return np_run(v, root, 0, 20, r, why, sizeof why); }
+static int prod(char *const extra[], np_result *r) {
+    char *v[20]; int n = 0;
+    if (!native_consumer) v[n++] = "sh";
+    v[n++] = product;
+    if (explicit_consumer) { v[n++] = "--models"; v[n++] = models; }
+    for (int i = 0; extra[i]; i++) { if (n >= 19) die("argv"); v[n++] = extra[i]; }
+    v[n] = 0;
+    if (explicit_consumer) {
+        char leaf[64], p[4400];
+        if (cx_fmt(leaf, sizeof leaf, "%04d.argv", invocation++)) die("argv name");
+        path(p, sizeof p, outdir, leaf); FILE *f = fopen(p, "wbx"); if (!f) die("argv evidence");
+        for (int a = 0; a < n; a++) { fprintf(f, "%s\n", v[a]); printf("ARGV\t%d\t%s\n", a, v[a]); }
+        if (ferror(f) || fclose(f)) die("argv write");
+    }
+    char why[1024]; return np_run(v, root, 0, 20, r, why, sizeof why);
+}
 static int same(const char *a, const char *b, size_t *na_out) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int ok = x && y && na == nb && !memcmp(x, y, na); if (na_out) *na_out = x ? na : 0; free(x); free(y); return ok; }
 static int run_rc(const char *input, int *rc, size_t *outn) { char *v[] = { "-run", (char *)input, 0 }; np_result r; if (prod(v, &r)) return 1; *rc = r.rc; *outn = r.outn; np_free(&r); return 0; }
 static int compile(const char *out, const char *in, int bin) { char *v[] = { "-S", bin ? "--tapebin" : "-o", bin ? "-o" : (char *)out, bin ? (char *)out : (char *)in, bin ? (char *)in : 0, 0 }; np_result r; if (prod(v, &r)) return 1; int rc = r.rc; np_free(&r); return rc; }
+static int truncated(const char *in) {
+    char *v[] = { "-S", "-o", "/dev/null", (char *)in, 0 }; np_result r;
+    if (prod(v, &r)) return 0;
+    int ok = r.rc && !r.outn && r.errn && strstr(r.err, "reject: tape truncated");
+    np_free(&r); return ok;
+}
+
+/* Identity and native dispatch follow tests/tools-compile.cx; np_run is the
+   existing bounded process-tree launcher for both modes. */
+static void bound_file(FILE *f, const char *label, const char *p) {
+    size_t n; char *s = cx_read(p, &n), h[65]; if (!s) die("identity input read");
+    cx_sha256_hex(s, n, h); free(s);
+    fprintf(f, "%s\t%s\n%s-sha256\t%s\n", label, p, label, h);
+    printf("IDENTITY\t%s\t%s\nSHA256\t%s\t%s\n", label, p, label, h);
+}
 
 int main(int argc, char **argv) {
-    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n", stderr); return 2; }
-    { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "tapebin-roundtrip: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
+    explicit_consumer = argc == 7 && !strcmp(argv[3], "--compiler") && !strcmp(argv[5], "--models");
+    if ((argc != 3 && !explicit_consumer) || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT [--compiler ABS_PRODUCT --models ABS_PKG]\n", stderr); return 2; }
+    path(product, sizeof product, root, "unisacc.com");
+    if (explicit_consumer) {
+        if (argv[4][0] != '/' || argv[6][0] != '/' || !realpath(argv[4], product) || !realpath(argv[6], models)) die("absolute compiler and models files required");
+        if (strchr(product, '\n') || strchr(product, '\t') || strchr(models, '\n') || strchr(models, '\t')) die("identity path cannot be represented");
+        struct stat st; if (stat(product, &st) || !S_ISREG(st.st_mode) || stat(models, &st) || !S_ISREG(st.st_mode)) die("compiler and models regular files required");
+        unsigned char magic[4]; FILE *f = fopen(product, "rb"); if (!f) die("product open");
+        size_t n = fread(magic, 1, sizeof magic, f); int bad = ferror(f); if (fclose(f) || bad) die("product magic read");
+        native_consumer = n == 4 && !memcmp(magic, "\177ELF", 4);
+    }
+    { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "tapebin-roundtrip: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700)) die("new out dir must be absent");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
-    { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
-    struct { const char *name, *src; int want; } fx[4] = {
+    if (explicit_consumer) {
+        path(rp, sizeof rp, outdir, "identity.tsv"); FILE *f = fopen(rp, "wbx"); if (!f) die("identity evidence");
+        fprintf(f, "scope\tcandidate-consumer-not-installed-qualification\nroot\t%s\n", root);
+        printf("SCOPE\tcandidate-consumer-not-installed-qualification\n");
+        bound_file(f, "B", product); bound_file(f, "models", models);
+        if (ferror(f) || fclose(f)) die("identity write");
+    } else { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
+    struct { const char *name, *src; int want; } fx[5] = {
         { "arith", "int main(void){int a=3,b=4;return a*b-5;}\n", 7 },
         { "loop", "int main(void){int s=0;for(int i=1;i<=10;i++)s+=i;return s-50;}\n", 5 },
         { "call-str", "static int len(const char*s){int n=0;while(s[n])n++;return n;}\nint main(void){return len(\"tapebin\")+len(\"\");}\n", 7 },
-        { "global-bss", "static int g[16];int main(void){g[3]=9;return g[3]+g[4];}\n", 9 } };
-    for (int i = 0; i < 4; i++) { const char *fxn = fx[i].name; char c[4400], t[4400], b1[4400], b2[4400], y1[4400], y2[4400], bc[4400], yc[4400], yb[4400], bad[4400], leaf[128]; char d[400]; int rc; size_t on, n1, n2;
+        { "global-bss", "static int g[16];int main(void){g[3]=9;return g[3]+g[4];}\n", 9 },
+        { "logical-switch", "#line 10 \"A.c\"\nint f(void){return 1;}\n#line 20 \"space é B.c\"\nint g(void){return 2;}\n#line 30 \"A.c\"\nint h(void){return 4;}\n#line 40 \"space é B.c\"\nint main(void){return f()+g()+h();}\n", 7 } };
+    for (int i = 0; i < 5; i++) { const char *fxn = fx[i].name; char c[4400], t[4400], b1[4400], b2[4400], y1[4400], y2[4400], bc[4400], yc[4400], yb[4400], bad[4400], leaf[128]; char d[400]; int rc; size_t on, n1, n2;
         { if (cx_fmt(leaf, sizeof leaf, "%s.c", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(c, sizeof c, outdir, leaf); saved(c, fx[i].src, strlen(fx[i].src));
         { if (cx_fmt(leaf, sizeof leaf, "%s.tape", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(t, sizeof t, outdir, leaf); { if (cx_fmt(leaf, sizeof leaf, "%s.1.tapebin", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(b1, sizeof b1, outdir, leaf); { if (cx_fmt(leaf, sizeof leaf, "%s.2.tapebin", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(b2, sizeof b2, outdir, leaf);
         { if (cx_fmt(leaf, sizeof leaf, "%s.y1.tape", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(y1, sizeof y1, outdir, leaf); { if (cx_fmt(leaf, sizeof leaf, "%s.y2.tape", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(y2, sizeof y2, outdir, leaf); { if (cx_fmt(leaf, sizeof leaf, "%s.c.tapebin", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(bc, sizeof bc, outdir, leaf);
@@ -46,17 +99,91 @@ int main(int argc, char **argv) {
         if (run_rc(c, &rc, &on)) die("run c"); { if (cx_fmt(d, sizeof d, "rc=%d want=%d", rc, fx[i].want)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } check(rc == fx[i].want && !on, fxn, "oracle.c-run", d); if (rc != fx[i].want) continue;
         if (compile(t, c, 0) || compile(b1, t, 1) || compile(b2, t, 1) || compile(y1, b1, 0) || compile(y2, b1, 0) || compile(bc, c, 1) || compile(yc, bc, 0) || compile(yb, y1, 1)) { check(0, fxn, "routes.compile", "a route returned non-zero"); continue; }
         { size_t bn, cn; char *b = cx_read(b1, &bn), *z = cx_read(bc, &cn); /* u16 major@8 minor@10 opset@12 flags@14; u32 target@16 header_bytes@24 origin@60 (docs/tapebin-v1.md, exec/c/tapebin.h:114) */
-          int hdr = b && bn >= 64 && !memcmp(b, "UTAPEBIN", 8) && b[8] == 1 && !b[9] && !b[10] && !b[11] && b[12] == 1 && !b[13] && !b[14] && !b[15] && !b[16] && !b[17] && !b[18] && !b[19] && b[24] == 64 && !b[25] && !b[26] && !b[27];
+          int hdr = b && bn >= 64 && !memcmp(b, "UTAPEBIN", 8) && b[8] == 1 && !b[9] && b[10] == 2 && !b[11] && b[12] == 1 && !b[13] && !b[14] && !b[15] && !b[16] && !b[17] && !b[18] && !b[19] && b[24] == 64 && !b[25] && !b[26] && !b[27];
           { if (cx_fmt(d, sizeof d, "bytes=%zu major=%d minor=%d opset=%d flags=%d target=%d header_bytes=%d", bn, b && bn >= 64 ? b[8] : -1, b && bn >= 64 ? b[10] : -1, b && bn >= 64 ? b[12] : -1, b && bn >= 64 ? b[14] : -1, b && bn >= 64 ? b[16] : -1, b && bn >= 64 ? b[24] : -1)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } check(hdr, fxn, "header.magic-major-minor-opset-target", d);
           int org = b && z && bn >= 64 && cn >= 64 && !b[60] && !b[61] && !b[62] && !b[63] && z[60] == 1 && !z[61] && !z[62] && !z[63]; { if (cx_fmt(d, sizeof d, "tape-route origin=%d c-route origin=%d (0 = tape input, 1 = lnx/x86_64)", b && bn >= 64 ? b[60] : -1, z && cn >= 64 ? z[60] : -1)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } check(org, fxn, "origin-target", d); free(b); free(z); }
         check(same(b1, b2, &n1), fxn, "encode-stable", "same tape encoded twice");
         check(same(y1, y2, &n2), fxn, "decode-stable", "same tapebin decoded twice");
+        { size_t zn; char *z = cx_read(y1, &zn);
+          check(z && zn >= 5 && !memcmp(z + zn - 5, ".end\n", 5) && strstr(z, "\n.unit 0 "), fxn, "location-and-end", "source frame and final end survive canonical roundtrip"); free(z); }
         check(same(yb, b1, 0), fxn, "fixed-point.encode-decode-encode", "encode(decode(b)) == b");
         { char yy[4400]; { if (cx_fmt(leaf, sizeof leaf, "%s.yy.tape", fxn)) { fprintf(stderr, "tapebin-roundtrip: text too long for leaf\n"); exit(2); } } path(yy, sizeof yy, outdir, leaf); if (compile(yy, yb, 0)) check(0, fxn, "canonical-closed", "decode of re-encoded tapebin failed"); else check(same(yy, y1, 0), fxn, "canonical-closed", "decode(encode(canonical)) == canonical"); }
         { size_t nb, nc; char *x = cx_read(b1, &nb), *z = cx_read(bc, &nc); size_t first = 0; while (x && z && first < nb && first < nc && x[first] == z[first]) first++; { if (cx_fmt(d, sizeof d, "tape-route %zu bytes, c-route %zu bytes, first differing byte %zu (origin/SOURCE_SHA, recorded)", nb, nc, first)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } fprintf(res, "INFO\ttapebin.roundtrip.%s.c-route-bytes\t%s\n", fxn, d); free(x); free(z); }
         check(same(yc, y1, 0), fxn, "c-route-same-records", "C-route tapebin decodes to the tape-route canonical text");
         { int r1 = -1, r2 = -1, r3 = -1; size_t o1 = 1, o2 = 1, o3 = 1; int tr = run_rc(t, &r1, &o1) || run_rc(b1, &r2, &o2) || run_rc(bc, &r3, &o3); { if (cx_fmt(d, sizeof d, "tape rc=%d tapebin rc=%d c-tapebin rc=%d want=%d", r1, r2, r3, fx[i].want)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } check(!tr && r1 == fx[i].want && r2 == fx[i].want && r3 == fx[i].want && !o1 && !o2 && !o3, fxn, "execution.tape-tapebin-equal", d); }
         { size_t bn; char *b = cx_read(b1, &bn); if (!b) die("read b1"); b[0] = 'X'; saved(bad, b, bn); free(b); char *v[] = { "-S", "-o", "/dev/null", bad, 0 }; np_result r; if (prod(v, &r)) check(0, fxn, "refusal.bad-magic", "transport"); else { int ok = r.rc && !r.outn && r.errn && strstr(r.err, "invalid tapebin or origin target mismatch"); { if (cx_fmt(d, sizeof d, "rc=%d stdout=%zu", r.rc, r.outn)) { fprintf(stderr, "tapebin-roundtrip: text too long for d\n"); exit(2); } } check(ok, fxn, "refusal.bad-magic", ok ? "rc != 0, empty stdout, declared diagnostic" : d); np_free(&r); } }
+    }
+    { const char *badframe[] = {
+          "_start:\n  ret\n",
+          "_start:\n.end\nX",
+          "_start:\n.unit 128 1:61\n.end\n",
+          "_start:\n.unit 0 00:\n.end\n",
+          "_start:\n.unit 0 1:00\n.end\n",
+          "_start:\n.unit 0 1:AF\n.end\n",
+          "_start:\n.unit 0 01:61\n.end\n",
+          "_start:\n.unit 0 2:61\n.end\n",
+          "_start:\n.unit 0 21474836470:61\n.end\n" };
+      for (int j = 0; j < 9; j++) {
+          char leaf[64], in[4400], bin[4400];
+          if (cx_fmt(leaf, sizeof leaf, "bad-frame-%d.tape", j)) die("bad frame name"); path(in, sizeof in, outdir, leaf);
+          if (cx_fmt(leaf, sizeof leaf, "bad-frame-%d.tapebin", j)) die("bad frame binary name"); path(bin, sizeof bin, outdir, leaf);
+          saved(in, badframe[j], strlen(badframe[j]));
+          check(compile(bin, in, 1) != 0, "frames", "refusal", "malformed unit/end rejected");
+      }
+    }
+    {
+        char frame[4096], expected[2048], in[4400], bin[4400], decoded[4400];
+        /* 600 filename bytes, including space and UTF-8, exceed historical
+           line-sized filename buffers while remaining a legal wire frame. */
+        int ep = snprintf(expected, sizeof expected, ".unit 0 600:");
+        const char *hex = "0123456789abcdef";
+        for (int j = 0; j < 600; j++) {
+            int c = j == 1 ? 32 : (j == 2 ? 195 : (j == 3 ? 169 : 97));
+            expected[ep++] = hex[c >> 4]; expected[ep++] = hex[c & 15];
+        }
+        expected[ep++] = '\n'; expected[ep] = 0;
+        if (cx_fmt(frame, sizeof frame, "_start:\n.unit0:\n.unitx:\n.endfoo:\n%s  nop\n.unit 0 0:\n  nop\n.unit 0 1:62\n  nop\n%s  nop\n.unit 0 1:62\n  ret\n.end\n", expected, expected)) die("long switch frame");
+        path(in, sizeof in, outdir, "long-switch.tape"); path(bin, sizeof bin, outdir, "long-switch.tapebin"); path(decoded, sizeof decoded, outdir, "long-switch.decoded.tape");
+        saved(in, frame, strlen(frame));
+        int rc = compile(bin, in, 1) || compile(decoded, bin, 0);
+        size_t zn = 0; char *z = rc ? 0 : cx_read(decoded, &zn);
+        char *a = z ? strstr(z, expected) : 0;
+        char *b = a ? strstr(a + ep, ".unit 0 1:62\n") : 0;
+        char *c = b ? strstr(b + 13, expected) : 0;
+        char *d = c ? strstr(c + ep, ".unit 0 1:62\n") : 0;
+        char *empty = a ? strstr(a + ep, ".unit 0 0:\n") : 0;
+        check(!rc && z && strstr(z, ".unit0:\n") && strstr(z, ".unitx:\n") && strstr(z, ".endfoo:\n"), "frames", "metadata-prefix-labels", "only complete directive tokens are metadata");
+        check(!rc && a && empty && b && empty < b && c && d && zn >= 5 && !memcmp(z + zn - 5, ".end\n", 5), "frames", "same-TU-long-A-empty-B-A-B", "explicit empty context and space UTF-8 long filename switches survive"); free(z);
+        if (!rc) {
+            size_t bn = 0; char *bytes = cx_read(bin, &bn);
+            if (!bytes || bn < 64) die("long-switch binary");
+            for (int minor = 0; minor < 2; minor++) {
+                char leaf[64], old[4400]; if (cx_fmt(leaf, sizeof leaf, "old-minor-%d.tapebin", minor)) die("old minor name"); path(old, sizeof old, outdir, leaf);
+                bytes[10] = (char)minor; saved(old, bytes, bn);
+                check(truncated(old), "frames", "old-minor-refused", "minor0/1 report tape truncated rather than synthetic end");
+            }
+            bytes[10] = 2;
+            char shortfile[4400], tailfile[4400], framefile[4400];
+            path(shortfile, sizeof shortfile, outdir, "physical-short.tapebin"); saved(shortfile, bytes, bn - 1);
+            check(truncated(shortfile), "frames", "short-read-diagnostic", "short section reports tape truncated before digest");
+            path(tailfile, sizeof tailfile, outdir, "physical-tail.tapebin");
+            char *extra = malloc(bn + 1); if (!extra) die("physical-tail allocation"); if (mm_copy(extra, bn + 1, bytes, bn)) die("physical-tail copy"); extra[bn] = 'X'; saved(tailfile, extra, bn + 1); free(extra);
+            check(truncated(tailfile), "frames", "tail-byte-diagnostic", "byte after complete carrier reports tape truncated");
+            size_t at = 0;
+            for (size_t j = 64; j + 50 < bn && !at; j++) {
+                int same = 1; for (size_t k = 0; k < 50; k++) if (bytes[j + k] != 'a') same = 0;
+                if (same) at = j;
+            }
+            if (!at) die("long filename raw bytes");
+            bytes[at] = 0; unsigned char digest[32]; cx_sha256(bytes + 64, bn - 64, digest); memcpy(bytes + 28, digest, 32);
+            path(framefile, sizeof framefile, outdir, "nul-frame.tapebin"); saved(framefile, bytes, bn);
+            check(truncated(framefile), "frames", "illegal-frame-diagnostic", "authenticated NUL filename reports tape truncated");
+            bytes[at] = 'a'; bytes[bn - 1] = 0;
+            cx_sha256(bytes + 64, bn - 64, digest); memcpy(bytes + 28, digest, 32);
+            char noend[4400]; path(noend, sizeof noend, outdir, "missing-end.tapebin"); saved(noend, bytes, bn);
+            check(truncated(noend), "frames", "missing-end-diagnostic", "complete authenticated carrier without final end is truncated");
+            free(bytes);
+        }
     }
     fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res);
     printf("TAPEBIN_ROUNDTRIP\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;

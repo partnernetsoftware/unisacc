@@ -1,0 +1,153 @@
+/* Explicit live-reference check, not the retired reference-py suite.
+ * ROOT PP_RUN PP_NET NEW_ABS_OUT; Linux/x86_64. PP_RUN/PP_NET are the frozen
+ * active E2 runner/model supplied by the caller. Build the independent C PP
+ * from archive/reference-c with the declared read-only kernel/include inputs,
+ * then compare every UNIPP2 byte on identical source/header files.
+ * Host C and the classic kernel are explicit reference dependencies, not a
+ * claim that the product construction or reference debt has disappeared. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+static char root[4096],work[4096],runner[4096],model[4096],bound[4400],reference[4400];
+static char snapshot_maker[4400],predefine_names[4400];
+static const char *ri_stage="source:lnx/x86_64/image/O2";
+static int checks,failed,serial;
+static void die(const char *s){fprintf(stderr,"unipp2-reference: %s errno=%d\n",s,errno);exit(2);}
+static void ck(int yes,const char *label){checks++;if(!yes)failed++;printf("%s\t%s\n",yes?"PASS":"FAIL",label);}
+static void join(char *out,size_t cap,const char *a,const char *b){if(cx_fmt(out,cap,"%s/%s",a,b))die("path extent");}
+static void store(const char *leaf,const void *p,size_t n){char path[4400];join(path,sizeof path,work,leaf);if(cx_write(path,p,n))die("write fixture");}
+static void text(const char *leaf,const char *s){store(leaf,s,strlen(s));}
+static void identity(const char *label,const char *path,char digest[65]){size_t n;char *p=cx_read(path,&n);if(!p)die("identity input");cx_sha256_hex(p,n,digest);free(p);printf("SOURCE\t%s\t%s\t%s\n",label,digest,path);}
+static np_result call(char *const *v,const char *tag){np_result r={0};char why[1024],leaf[160];const char *env[]={"UNISA_ATTRIBUTES=","UNISA_MAXSTEPS=200000000",0};if(np_run(v,root,env,53,&r,why,sizeof why))die(why);if(cx_fmt(leaf,sizeof leaf,"%03d-%s.stdout",++serial,tag))die("evidence name");store(leaf,r.out,r.outn);if(cx_fmt(leaf,sizeof leaf,"%03d-%s.stderr",serial,tag))die("evidence name");store(leaf,r.err,r.errn);return r;}
+static void require_command(char *const *v,const char *tag){np_result r=call(v,tag);if(r.rc){fprintf(stderr,"unipp2-reference: %s rc=%d\n%.*s",tag,r.rc,(int)r.errn,r.err);np_free(&r);die("reference build command");}np_free(&r);}
+static void link_input(const char *stage,const char *name,const char *rel){char to[4400],from[4400];join(to,sizeof to,stage,name);join(from,sizeof from,root,rel);if(symlink(from,to))die("read-only reference input link");}
+static void build_reference(void){
+ char stage[4400],flat[4400],source[4400],archive[4400],exporter[4400],product[4400],shimpath[4400];
+ join(stage,sizeof stage,work,"reference-input");if(mkdir(stage,0700))die("reference input directory");
+ link_input(stage,"unisacc.c","archive/reference-c/unisacc.c");link_input(stage,"kernel","kernel");link_input(stage,"include","include");
+ char srcdir[4400];join(srcdir,sizeof srcdir,stage,"src");if(mkdir(srcdir,0700))die("reference source directory");
+ static const char *classic[]={"front_pp.c","main.c","opt.c","tapebin.c","tapelink.c","tapeprune.c","asmtext.c","back_encode.c","back_image.c","back_lower.c","cxmod.c","front_parse.c","fwdstub.c"};
+ static const char *shared[]={"internal_types.h","version.h","ucn_ranges.inc","host_dl.h","tapescan.h","tapebin_shape.inc","tapebin_encode.inc"};
+ for(size_t i=0;i<sizeof classic/sizeof classic[0];i++){char rel[256];if(cx_fmt(rel,sizeof rel,"archive/reference-c/src/%s",classic[i]))die("classic input name");link_input(srcdir,classic[i],rel);}
+ for(size_t i=0;i<sizeof shared/sizeof shared[0];i++){char rel[256];if(cx_fmt(rel,sizeof rel,"src/%s",shared[i]))die("shared input name");link_input(srcdir,shared[i],rel);}
+ /* tapebin_encode.inc includes ../cx/runtime/tape_frame.cx. Mirror only
+  * that exact read-only dependency; sourceflat records its bytes in receipt. */
+ char cxdir[4400],runtime[4400];join(cxdir,sizeof cxdir,stage,"cx");if(mkdir(cxdir,0700))die("reference cx directory");join(runtime,sizeof runtime,cxdir,"runtime");if(mkdir(runtime,0700))die("reference runtime directory");link_input(runtime,"tape_frame.cx","cx/runtime/tape_frame.cx");
+ join(flat,sizeof flat,work,"reference-flat.c");join(source,sizeof source,work,"reference-entry.c");join(reference,sizeof reference,work,"reference");join(exporter,sizeof exporter,root,"tools/sourceflat.cx");join(product,sizeof product,root,"unisacc.com");
+ {char *v[]={bound,"50","sh",product,exporter,"--","--root",stage,flat,0};require_command(v,"reference-export");}
+ join(archive,sizeof archive,root,"archive/reference-c/src/front_pp.c");char digest[65];identity("live-reference-pp",archive,digest);
+ char framepath[4400];join(framepath,sizeof framepath,root,"cx/runtime/tape_frame.cx");identity("reference-tape-frame-input",framepath,digest);
+ join(shimpath,sizeof shimpath,root,"tools/refshim.h");size_t sn,fn;char *shim=cx_read(shimpath,&sn),*body=cx_read(flat,&fn);if(!shim||!body)die("reference compile inputs");
+ np_buf b={0};np_put(&b,shim,sn);np_puts(&b,"\n");
+ /* These are real, unchanged character/UCN judgments used by classic PP. */
+ static const char *judgments[]={"archive/reference-c/cx/compiler/srcgate.cx","archive/reference-c/cx/compiler/frontpp.cx"};
+ for(size_t i=0;i<sizeof judgments/sizeof judgments[0];i++){char path[4400];size_t n;join(path,sizeof path,root,judgments[i]);char *p=cx_read(path,&n);if(!p)die("reference judgment input");identity("reference-judgment",path,digest);np_put(&b,p,n);np_puts(&b,"\n");free(p);}
+ np_put(&b,body,fn);
+ /* Call only the existing PP phases. Do not retain classic main/fe_units,
+  * whose runtime -E branch still gives the linker all backend call edges. */
+ np_puts(&b,"\n#undef main\n"
+  "int main(int argc,char **argv){int fd,r;long need;char extra;struct stat st;"
+  "if(argc!=2){fputs(\"usage: reference INPUT.c\\n\",stderr);return 2;}"
+  "fd=open(argv[1],O_RDONLY);if(fd<0||fstat(fd,&st)||!S_ISREG(st.st_mode)){fputs(\"reference source open/stat failed\\n\",stderr);return 2;}"
+  "if(st.st_size<0||st.st_size>(2147483647L-1048576L)/2){fputs(\"reference source allocator extent overflow\\n\",stderr);close(fd);return 2;}"
+  "need=(long)st.st_size;srcroom(need);nsrc=0;"
+  "while(nsrc<need){r=__read(fd,src+nsrc,(int)(need-nsrc));if(r<=0){fputs(\"reference source short read\\n\",stderr);close(fd);return 2;}nsrc+=r;}"
+  "r=__read(fd,&extra,1);close(fd);if(r!=0){fputs(\"reference source extent changed\\n\",stderr);return 2;}src[nsrc]=0;"
+  "model_dims();setup();srcpath=argv[1];tgt=\"lnx/x86_64\";ftrim_libc=1;pponly=1;"
+  "nspl=0;nireg=0;nisp=0;nfnpool=0;nautoinc=0;nld=0;prelines=0;"
+  "if(nsrc>1&&src[0]==35&&src[1]==33){int i=0;while(i<nsrc&&src[i]!=10)src[i++]=32;}"
+  "splice();decomment();autoinc();preprocess();expandsrc();if(nerr)return 1;"
+  "if(pp_origin_write(1)){fputs(\"reference UNIPP2 serialization failed\\n\",stderr);return 1;}return 0;}\n");
+ if(cx_write(source,b.p,b.n))die("reference entry");free(shim);free(body);free(b.p);
+ const char *cc=getenv("CC");if(!cc||!*cc)cc="cc";
+ printf("REFERENCE_BUILD\tcc=%s\tmode=direct-PP\tflags=-O0,-ffunction-sections,-fdata-sections,--gc-sections\n",cc);
+ {char *v[]={bound,"50",(char *)cc,"-w","-O0","-ffunction-sections","-fdata-sections",source,"-Wl,--gc-sections","-o",reference,0};require_command(v,"reference-compile");}
+ {char receipt[4400];join(receipt,sizeof receipt,work,"reference-flat.c.source.json");identity("reference-input-receipt",receipt,digest);}
+}
+static int field_is(const char *p,size_t n,const char *s){return n==strlen(s)&&!memcmp(p,s,n);}
+static void build_ri(void){
+ char table[4400],source[4400],header[4400],digest[65];size_t n;join(table,sizeof table,root,"exec/pp/predefines.tsv");char *p=cx_read(table,&n);if(!p)die("target predefinition facts");identity("target-predefinition-facts",table,digest);np_buf names={0};
+ for(size_t at=0;at<n;){size_t end=at,a,b;while(end<n&&p[end]!='\n')end++;if(end>at&&p[at]!='#'){
+  a=at;while(a<end&&p[a]!='\t')a++;b=a+1;while(b<end&&p[b]!='\t')b++;if(a==end||b==end)die("predefinition fact fields");
+  int selected=(field_is(p+at,a-at,"os")&&field_is(p+a+1,b-a-1,"lnx"))||(field_is(p+at,a-at,"arch")&&field_is(p+a+1,b-a-1,"x86_64"))||(field_is(p+at,a-at,"model")&&field_is(p+a+1,b-a-1,"lnx"))||(field_is(p+at,a-at,"common")&&field_is(p+a+1,b-a-1,"*"));
+  if(selected){size_t first=b+1;while(first<end){size_t e=first;while(e<end&&p[e]!='\t')e++;if(e==first)die("empty predefinition name");np_put(&names,p+first,e-first);np_put(&names,"",1);first=e+1;}}
+ }at=end<n?end+1:end;}
+ free(p);if(!names.n)die("missing target predefinition names");join(predefine_names,sizeof predefine_names,work,"predefine-names.bin");store("predefine-names.bin",names.p,names.n);free(names.p);
+ join(source,sizeof source,work,"ri-maker.c");join(snapshot_maker,sizeof snapshot_maker,work,"ri-maker");join(header,sizeof header,root,"exec/c/resourceledger.h");identity("RI-snapshot-writer",header,digest);
+ const char *code=
+ "static unsigned char *load(const char *p,int *n){FILE *f=fopen(p,\"rb\");long z;unsigned char *b;if(!f)return 0;if(fseek(f,0,SEEK_END)||(z=ftell(f))<0||z>2147483647L||fseek(f,0,SEEK_SET)){fclose(f);return 0;}b=malloc(z?z:1);if(!b){fclose(f);return 0;}if(fread(b,1,z,f)!=(size_t)z||fgetc(f)!=EOF||ferror(f)){free(b);fclose(f);return 0;}if(fclose(f)){free(b);return 0;}*n=(int)z;return b;}\n"
+ "int main(int argc,char **argv){int in,names,r;char err[512];unsigned char *input,*defs;static const unsigned char one=1;static const unsigned char f1[]=\"\\0cli/f1\",attrs[]=\"\\0cli/attributes\",src[]=\"\\0cli/source\",target[]=\"\\0cli/target\",predefs[]=\"\\0predefines/lnx/x86_64\";if(argc!=4)return 2;input=load(argv[2],&in);defs=load(argv[3],&names);if(!input||!defs)return 2;RLBlob rows[5]={{f1,sizeof f1-1,&one,1},{attrs,sizeof attrs-1,0,0},{src,sizeof src-1,(const unsigned char *)argv[2],(int)strlen(argv[2])+1},{target,sizeof target-1,(const unsigned char *)\"lnx/x86_64\",10},{predefs,sizeof predefs-1,defs,names}};r=rl_snapshot_write(argv[1],\"source:lnx/x86_64/image/O2\",input,in,rows,5,err,sizeof err);free(input);free(defs);if(r)fprintf(stderr,\"%s\\n\",err);return r;}\n";
+ if(cx_write(source,code,strlen(code)))die("RI snapshot maker source");const char *cc=getenv("CC");if(!cc||!*cc)cc="cc";char *v[]={bound,"50",(char *)cc,"-O0","-include",header,source,"-o",snapshot_maker,0};require_command(v,"RI-snapshot-maker-compile");
+}
+static unsigned word(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
+typedef struct {const char *name,*source;unsigned ninclude,nline;const char *includes[4],*names[3];unsigned numbers[3];int raw_user_distinct,include_relation;} Case;
+/* NULL expected line name is the default-TU sentinel; "" is explicit empty. */
+static int frame(const unsigned char *p,size_t n,const Case *c){
+ if(n<31||n>2147483647u||memcmp(p,"UNIPP2\0",7))return 0;
+ for(unsigned k=0;k<6;k++)if(word(p+7+4*k)>2147483647u)return 0;
+ unsigned len=word(p+7),ns=word(p+19),ni=word(p+23),nl=word(p+27);size_t at=31;unsigned prev=0;
+ if(ni!=c->ninclude||nl!=c->nline||ns>(n-at)/4)return 0;
+ for(unsigned k=0;k<ns;k++){unsigned v=word(p+at);at+=4;if(!v||v<=prev||v>2147483647u)return 0;prev=v;}
+ for(unsigned kind=0;kind<2;kind++){
+  unsigned count=kind?nl:ni,previous_lines=0;size_t fixed=kind?16:12;prev=0;if(count>(n-at)/fixed)return 0;
+  for(unsigned k=0;k<count;k++){
+   if(n-at<fixed)return 0;unsigned pos=word(p+at),value=word(p+at+4),number=kind?word(p+at+8):0,nm=word(p+at+fixed-4),oldpos=prev;
+   if(!pos||pos<prev||(kind&&pos==prev)||pos>2147483647u||value>2147483647u||(kind&&(!number||number>2147483647u)))return 0;prev=pos;at+=fixed;
+   /* Fixture properties, not a general parent/child predicate: IRNL is
+      insertion-time size, so a same-start child may exceed its parent. */
+   if(!kind){if(k==1&&c->include_relation==1&&(pos!=oldpos||value<=previous_lines))return 0;if(k==1&&c->include_relation==2&&(pos!=oldpos||value!=previous_lines))return 0;previous_lines=value;}
+   const char *want=kind?c->names[k]:c->includes[k];
+   if(kind&&number!=c->numbers[k])return 0;
+   if(kind&&c->raw_user_distinct&&pos<=value)return 0;
+   if(kind&&nm==4294967295u){if(want)return 0;continue;}
+   if(!want||nm>n-at||memchr(p+at,0,nm)||nm!=strlen(want)||memcmp(p+at,want,nm))return 0;at+=nm;
+  }
+ }
+ return len==n-at;
+}
+static const char long_header[]="header-完整名称-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789.h";
+static const char long_file[]="逻辑文件-abcdefghijklmnopqrstuvwxyz-ABCDEFGHIJKLMNOPQRSTUVWXYZ-0123456789.c";
+static void exercise(const Case *c){
+ char leaf[160],input[4400],label[200];if(cx_fmt(leaf,sizeof leaf,"%s.c",c->name))die("case filename");text(leaf,c->source);join(input,sizeof input,work,leaf);
+ char *rv[]={bound,"12",reference,input,0};np_result r=call(rv,c->name);
+ char snap[4400];if(cx_fmt(leaf,sizeof leaf,"%s.ri",c->name))die("RI directory name");join(snap,sizeof snap,work,leaf);char *sv[]={bound,"12",snapshot_maker,snap,input,predefine_names,0};require_command(sv,"RI-snapshot-write");
+ char *pv[]={bound,"12",runner,"--ri-snapshot",snap,"--upstream-stage",(char *)ri_stage,model,input,input,work,0};np_result p=call(pv,c->name);
+ if(cx_fmt(label,sizeof label,"%s.reference-accept",c->name))die("label");ck(!r.rc&&!r.errn,label);
+ if(cx_fmt(label,sizeof label,"%s.active-pp-accept",c->name))die("label");ck(!p.rc&&!p.errn,label);
+ if(cx_fmt(label,sizeof label,"%s.exact-unipp2-byte-equality",c->name))die("label");ck(!r.rc&&!p.rc&&r.outn==p.outn&&!memcmp(r.out,p.out,r.outn),label);
+ if(cx_fmt(label,sizeof label,"%s.independent-record-semantics",c->name))die("label");ck(!p.rc&&frame((const unsigned char *)p.out,p.outn,c),label);
+ np_free(&r);np_free(&p);
+}
+int main(int argc,char **argv){
+ if(argc!=5){fputs("usage: ROOT PP_RUN PP_NET NEW_ABS_OUT\n",stderr);return 2;}
+#if !defined(__linux__) || !defined(__x86_64__)
+ fputs("UNVERIFIED: unipp2-reference requires Linux/x86_64\n",stderr);return 77;
+#endif
+ if(!realpath(argv[1],root)||!realpath(argv[2],runner)||!realpath(argv[3],model))die("explicit input realpath");
+ if(argv[4][0]!='/'||strlen(argv[4])>=sizeof work)die("absolute new output directory");if(tx_copy(work,sizeof work,argv[4],strlen(argv[4])))die("absolute new output directory");if(mkdir(work,0700))die("new output directory");join(bound,sizeof bound,root,"tools/bound");
+ char before[65],after[65],runbefore[65],runafter[65];identity("active-pp-net",model,before);identity("active-pp-runner",runner,runbefore);build_reference();build_ri();
+ text("inner.h","int inner_value;\n");text("middle.h","#include \"inner.h\"\nint middle_value;\n");text("outer.h","#include \"middle.h\"\nint outer_value;\n");text(long_header,"int long_header_value;\n");
+ text("inner4.h","int inner4_value;\n");text("middle4.h","#include \"inner4.h\"\nint middle4_value;\n");text("outer4.h","#include \"middle4.h\"\nint outer4_value;\n");text("top4.h","#include \"outer4.h\"\nint top4_value;\n");
+ text("large-child.h","int child_a;\nint child_b;\nint child_c;\nint child_d;\n");text("short-outer.h","#include \"large-child.h\"\n");
+ char dir[4400];join(dir,sizeof dir,work,"dir");if(mkdir(dir,0700))die("outer duplicate-name directory");join(dir,sizeof dir,work,"dir/dir");if(mkdir(dir,0700))die("inner duplicate-name directory");text("dir/x.h","#include \"dir/x.h\"\n");text("dir/dir/x.h","int duplicate_name_value;\n");
+ Case cases[]={
+  {"plain","int x;\n",0,0,{0},{0},{0}},
+  {"line-inherit","#line 5 \"a.c\"\nint a;\n#line 9\nint b;\n",0,2,{0},{"a.c","a.c"},{5,9}},
+  {"line-empty","#line 9 \"\"\nint a;\n#line 11\nint b;\n",0,2,{0},{"",""},{9,11}},
+  {"line-default","#line 9\nint d;\n",0,1,{0},{0},{9}},
+  {"three-includes","#include \"outer.h\"\nint main_value;\n",3,0,{"outer.h","middle.h","inner.h"},{0},{0}},
+  {"four-includes","#include \"top4.h\"\nint main_value;\n",4,0,{"top4.h","outer4.h","middle4.h","inner4.h"},{0},{0}},
+  {"child-longer-than-outer","#include \"short-outer.h\"\nint main_value;\n",2,0,{"short-outer.h","large-child.h"},{0},{0},0,1},
+  {"identical-wire-distinct-paths","#include \"dir/x.h\"\nint main_value;\n",2,0,{"dir/x.h","dir/x.h"},{0},{0},0,2},
+  {"line-before-include","#line 50 \"before.c\"\n#include \"inner.h\"\nint tail=__LINE__;\nchar *name=__FILE__;\n",1,1,{"inner.h"},{"before.c"},{50},0},
+  {"include-before-line","#include \"inner.h\"\n#line 50 \"after.c\"\nint tail=__LINE__;\nchar *name=__FILE__;\n",1,1,{"inner.h"},{"after.c"},{50},1},
+  {"line-before-three-includes","#line 50 \"before.c\"\n#include \"outer.h\"\nint tail=__LINE__;\nchar *name=__FILE__;\n",3,1,{"outer.h","middle.h","inner.h"},{"before.c"},{50},0},
+  {"three-includes-before-line","#include \"outer.h\"\n#line 9 \"after.c\"\nint tail=__LINE__;\nchar *name=__FILE__;\n",3,1,{"outer.h","middle.h","inner.h"},{"after.c"},{9},1},
+  {"splice-line","int \\\nvalue;\n#line 42 \"spliced.c\"\nint end;\n",0,1,{0},{"spliced.c"},{42}}
+ };
+ for(size_t k=0;k<sizeof cases/sizeof cases[0];k++)exercise(&cases[k]);
+ char src[512];if(cx_fmt(src,sizeof src,"#include \"%s\"\nint tail;\n",long_header))die("long include fixture");Case inc={"long-utf8-include",src,1,0,{long_header},{0},{0}};exercise(&inc);
+ if(cx_fmt(src,sizeof src,"#line 800 \"%s\"\nint tail;\n#line 900\nint next;\n",long_file))die("long line fixture");Case line={"long-utf8-line",src,0,2,{0},{long_file,long_file},{800,900}};exercise(&line);
+ identity("active-pp-net-after",model,after);identity("active-pp-runner-after",runner,runafter);ck(!strcmp(before,after)&&!strcmp(runbefore,runafter),"explicit-active-inputs-stable");
+ printf("UNIPP2_REFERENCE\tchecks=%d\tfailed=%d\tscope=explicit-live-C-reference-vs-active-E2-bytes\n",checks,failed);
+ puts("NOT_CLAIMED\tproduct-full-chain-language-domain-foreign-host-or-reference-dependency-removal");return failed?1:0;
+}

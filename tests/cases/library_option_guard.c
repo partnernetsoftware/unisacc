@@ -22,7 +22,7 @@ int main(int argc,char **argv){
  }
  const char *valid[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
  for(int i=0;i<6;i++){
-  us_context *c=us_new(argv[1]);const char *t="_start:\n  imm r0, 7\n  ret\n";
+  us_context *c=us_new(argv[1]);const char *t="_start:\n  imm r0, 7\n  ret\n.end\n";
   if(!c||us_add_tape(c,t,strlen(t)))return 2;
   check(!us_compile(c,valid[i],1),"valid-target-tape-options-only",i);
   check(us_compile(c,"invalid/target",1)!=0&&!strcmp(us_error(c),"invalid compilation options"),"tape-unknown-target-refused",i);

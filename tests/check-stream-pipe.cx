@@ -16,6 +16,8 @@
  *   F  bad.c: product rc 1 and stderr == the e3 stage's stderr; the next stage on an
  *      empty pipe is rc 1 with the one-line "no input".
  *   G  the scratch is gone.
+ *   I  malformed USLATTRT counts are rejected before sidecar/body handling and frame merging;
+ *      a complete table still reaches the existing sidecar diagnostic.
  * Prints PASS/FAIL per assertion and a last line CHECK_STREAM_PIPE failed=N; rc 1 on any FAIL.
  */
 #pragma unisa use cxlib.netpack
@@ -148,6 +150,33 @@ static int sp_ref(const char *flags, const char *out, const char *srcs, char **e
     return sp_sh(cmd, err, errn);
 }
 
+static void sp_attr_table(void) {
+    unsigned char table[25] = {0};
+    char path[4400];
+    char *err = 0;
+    size_t errn = 0;
+    const char *bad = "unisacc: model driver: malformed USLATTR1 side-car\n";
+    const char *frame = "unisacc: stream: frame: attribute frame\n";
+    const char *missing = "unisacc: model driver: forwarding side-car missing\n";
+    int rc;
+    memcpy(table, "USLATTRT", 8);
+    table[8] = 13;
+    table[12] = 2; /* Claims two records, but contains only one. No payload. */
+    sp_path(path, sizeof path, "attr-table.bin");
+    if (cx_write(path, table, sizeof table)) sp_die("attr-table.bin");
+    rc = sp_stage("sidecar", "", "attr-table.bin", "/dev/null", &err, &errn);
+    sp_ck(rc == 1 && errn == strlen(bad) && !memcmp(err, bad, errn), "I table-before-sidecar");
+    free(err); err = 0;
+    rc = sp_stage("frame", "--in a=attr-table.bin", "/dev/null", "/dev/null", &err, &errn);
+    sp_ck(rc == 1 && errn == strlen(frame) && !memcmp(err, frame, errn), "I frame-table-count");
+    free(err); err = 0;
+    table[12] = 1;
+    if (cx_write(path, table, sizeof table)) sp_die("attr-table.bin");
+    rc = sp_stage("sidecar", "", "attr-table.bin", "/dev/null", &err, &errn);
+    sp_ck(rc == 1 && errn == strlen(missing) && !memcmp(err, missing, errn), "I valid-table-reaches-sidecar");
+    free(err);
+}
+
 int main(int argc, char **argv) {
     static const char *s65[SP_N65];
     static char names[SP_N65][16];
@@ -184,6 +213,7 @@ int main(int argc, char **argv) {
     }
     /* A: the product has the subcommand (usage is rc 2, not "cannot open stream"). */
     sp_ck(sp_stage("", "", "/dev/null", "/dev/null", 0, 0) == 2, "A stream-subcommand");
+    sp_attr_table();
     /* B, C: single source -o. */
     rc = sp_ref("-o", "plain.ref", "plain.c", 0, 0);
     rc2 = sp_image_pipe("plain.c", "plain.pipe", "p", 0, 0);

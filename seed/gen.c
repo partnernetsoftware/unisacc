@@ -8,20 +8,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+static void gen_json_failure(const char *src, long len, long pos, const char *path, const char *why);
+#define JFAIL(d, why) gen_json_failure((d)->src, (d)->len, (d)->pos, (d)->path, why)
 #include "json.h"
+#undef JFAIL
 
 /* Python facts have unbounded integers.  E3's decimal magnitude limits use
    the full uint64 range, while seed/json.h deliberately keeps JSON inputs in
    signed range.  This internal value kind covers those typed TSV cells. */
 enum { JUINT = JNULL + 1 };
 
+typedef struct { const char *path; size_t line; } InputLocation;
 typedef struct { char *key, *target; int seq; } Edge;
 typedef struct { char *name; char mode; Edge *edge; size_t n, cap; int *key_index; } State;
-typedef struct { State *state; size_t n, cap; size_t *state_index, index_cap; char **seq; size_t ns, cs, *seq_index, seq_index_cap; char **labels; size_t nl, cl; char **once; size_t no, co; } Graph;
-typedef struct { int key; char *target, *actions; } Rule;
-typedef struct { char *name; Rule *rule; size_t n, cap; char *def_target, *def_actions; } RuleState;
+typedef struct { State *state; size_t n, cap; size_t *state_index, index_cap; char **seq; size_t ns, cs, *seq_index, seq_index_cap; char **labels; size_t nl, cl; char **once; size_t no, co; int framed_entry; const char *external_start; } Graph;
+typedef struct { int key; char *target, *actions; InputLocation source; } Rule;
+typedef struct { char *name; Rule *rule; size_t n, cap; char *def_target, *def_actions; InputLocation source; } RuleState;
 typedef struct { RuleState *state; size_t n, cap; } RuleSet;
-typedef struct { char *s; size_t n, cap; } Buffer;
+typedef struct { char *s; size_t n, cap; InputLocation *source; size_t lines, source_cap; } Buffer;
 /* Values preserve the insertion order of object keys, as assemble.load_facts does. */
 typedef struct Value Value;
 typedef struct { char *key; Value *value; } Member;
@@ -32,29 +36,85 @@ struct Value {
     size_t *hix; size_t hcap, hn; Member *hitems;   /* object key index, rebuilt when items/n change */
 };
 
-static void die(const char *why) { fprintf(stderr, "seed-gen: %s\n", why); exit(1); }
+static InputLocation input_location;
+/* A TSV cell inherits its row; a whole JSON file starts at its own first line. */
+static InputLocation json_location;
+static void gen_json_failure(const char *src, long len, long pos, const char *path, const char *why) {
+    InputLocation at = json_location;
+    if (!at.path) at = (InputLocation){path, 1};
+    for (long i = 0; src && i < pos && i < len; i++) if (src[i] == '\n') at.line++;
+    fprintf(stderr, "json: %s:%lu: %s at byte %ld\n", at.path, (unsigned long)at.line, why, pos);
+}
+static void die_at(InputLocation at, const char *why) {
+    if (at.path) fprintf(stderr, "seed-gen: %s:%lu: %s\n", at.path, (unsigned long)at.line, why);
+    else fprintf(stderr, "seed-gen: %s\n", why);
+    exit(1);
+}
+/* Paths outlive streams: deferred manifest/template rows retain their provenance. */
+typedef struct InputPath InputPath;
+struct InputPath { InputPath *next; char text[1]; };
+static InputPath *input_paths;
+typedef struct { FILE *f; InputLocation at, parent; const InputLocation *source; size_t lines; } InputStream;
+static InputStream *input_streams;
+static size_t input_stream_count;
+static void input_register(FILE *f, InputLocation at, const InputLocation *source, size_t lines) {
+    size_t i;
+    for (i = 0; i < input_stream_count && input_streams[i].f; i++) {}
+    if (i == input_stream_count) {
+        InputStream *next;
+        if (i >= SIZE_MAX / sizeof(*next) - 1) die_at(input_location, "size overflow");
+        next = realloc(input_streams, (i + 1) * sizeof(*next));
+        if (!next) die_at(input_location, "out of memory");
+        input_streams = next; input_stream_count++;
+    }
+    input_streams[i] = (InputStream){f, at, input_location, source, lines};
+}
+static FILE *open_input(const char *path, const char *mode) {
+    FILE *f; InputPath *p;
+    if (mode[0] != 'r') return fopen(path, mode);
+    for (p = input_paths; p && strcmp(p->text, path); p = p->next) {}
+    if (!p) {
+        size_t n = strlen(path);
+        p = malloc(sizeof(*p) + n);
+        if (!p) die_at(input_location, "out of memory");
+        memcpy(p->text, path, n + 1); p->next = input_paths; input_paths = p;
+    }
+    f = fopen(path, mode);
+    if (!f) { input_location = (InputLocation){p->text, 1}; return NULL; }
+    input_register(f, (InputLocation){p->text, 0}, NULL, 0);
+    return f;
+}
 static void *grow(void *p, size_t n, size_t unit) {
-    if (n > SIZE_MAX / unit) die("size overflow");
-    p = realloc(p, n * unit); if (!p) die("out of memory"); return p;
+    if (n > SIZE_MAX / unit) die_at(input_location, "size overflow");
+    p = realloc(p, n * unit); if (!p) die_at(input_location, "out of memory"); return p;
 }
 static char *copy(const char *s) {
     size_t n = strlen(s) + 1; char *p = malloc(n);
-    if (!p) die("out of memory"); memcpy(p, s, n); return p;
+    if (!p) die_at(input_location, "out of memory"); memcpy(p, s, n); return p;
 }
 static char *copy_n(const char *s, size_t n) {
     char *p = grow(NULL, n + 1, 1);
     memcpy(p, s, n); p[n] = 0; return p;
 }
 static void buf_add(Buffer *b, const char *s, size_t n) {
-    if (n > SIZE_MAX - b->n - 1) die("buffer size overflow");
+    if (n > SIZE_MAX - b->n - 1) die_at(input_location, "buffer size overflow");
     if (b->n + n + 1 > b->cap) {
         size_t cap = b->cap ? b->cap : 128;
-        while (cap < b->n + n + 1) { if (cap > SIZE_MAX / 2) die("buffer too large"); cap *= 2; }
+        while (cap < b->n + n + 1) { if (cap > SIZE_MAX / 2) die_at(input_location, "buffer too large"); cap *= 2; }
         b->s = grow(b->s, cap, 1); b->cap = cap;
     }
     memcpy(b->s + b->n, s, n); b->n += n; b->s[b->n] = 0;
 }
-static void buf_char(Buffer *b, char c) { buf_add(b, &c, 1); }
+static void buf_char(Buffer *b, char c) {
+    buf_add(b, &c, 1);
+    if (c == '\n') {
+        if (b->lines == b->source_cap) {
+            b->source_cap = b->source_cap ? b->source_cap * 2 : 32;
+            b->source = grow(b->source, b->source_cap, sizeof(*b->source));
+        }
+        b->source[b->lines++] = input_location;
+    }
+}
 static void buf_quote(Buffer *b, const char *s) {
     const unsigned char *p = (const unsigned char *)s; char x[7];
     buf_char(b, '"');
@@ -81,7 +141,7 @@ static void buf_value(Buffer *b, const Value *v) {
             buf_value(b, v->items[i].value);
         }
         buf_char(b, v->kind == JOBJ ? '}' : ']'); break;
-    default: die("unknown value kind");
+    default: die_at(input_location, "unknown value kind");
     }
 }
 static Value *value_new(int kind) {
@@ -107,7 +167,7 @@ static long value_find(Value *v, const char *key) {
     if (v->hn != v->n || v->hitems != v->items || v->hcap < 2 * v->n) {
         size_t cap = 64;
         while (cap < 4 * v->n) cap *= 2;
-        free(v->hix); v->hix = calloc(cap, sizeof(size_t)); if (!v->hix) die("out of memory");
+        free(v->hix); v->hix = calloc(cap, sizeof(size_t)); if (!v->hix) die_at(input_location, "out of memory");
         v->hcap = cap;
         for (i = 0; i < v->n; i++) {
             h = value_khash(v->items[i].key) & (cap - 1);
@@ -128,10 +188,10 @@ static long value_find(Value *v, const char *key) {
 }
 static void value_put(Value *parent, const char *key, Value *child) {
     size_t i;
-    if (parent->kind != JOBJ && parent->kind != JARR) die("value is not a container");
+    if (parent->kind != JOBJ && parent->kind != JARR) die_at(input_location, "value is not a container");
     if (parent->kind == JOBJ) {
         long at;
-        if (!key) die("missing object key");
+        if (!key) die_at(input_location, "missing object key");
         at = value_find(parent, key);
         if (at >= 0) { parent->items[at].value = child; return; }
     }
@@ -177,16 +237,18 @@ static Value *value_from_json(JDoc *d, int ix) {
             char *key = n->type == JOBJ ? copy_n(d->buf + c->key, (size_t)c->klen) : NULL;
             value_put(v, key, value_from_json(d, child)); free(key);
         }
-    } else die("unsupported JSON value");
+    } else die_at(input_location, "unsupported JSON value");
     return v;
 }
 static Value *value_json(const char *s, const char *label) {
-    JDoc d; Value *v;
+    JDoc d; Value *v; InputLocation saved = json_location;
+    json_location = input_location;
     jparse_text(&d, s, (long)strlen(s), label);
+    json_location = saved;
     v = value_from_json(&d, 0); jfree(&d); return v;
 }
 static const char *value_text(Value *v) {
-    if (!v || v->kind != JSTR) die("expected string value");
+    if (!v || v->kind != JSTR) die_at(input_location, "expected string value");
     return v->s;
 }
 static const char *value_scalar_text(Value *v, char number[64]) {
@@ -194,11 +256,11 @@ static const char *value_scalar_text(Value *v, char number[64]) {
     if (v->kind == JSTR) return v->s;
     if (v->kind == JINT) { snprintf(number, 64, "%lld", v->number); return number; }
     if (v->kind == JUINT) { snprintf(number, 64, "%llu", v->unumber); return number; }
-    die("expected scalar value"); return NULL;
+    die_at(input_location, "expected scalar value"); return NULL;
 }
 static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) {
     size_t i;
-    if (!action || action->kind != JARR || !action->n) die("invalid action");
+    if (!action || action->kind != JARR || !action->n) die_at(input_location, "invalid action");
     /* A table cell may carry ["@bytes","<text>"] -- the same tag the mapseq path expands into one
        SBOUT per byte.  Without this the tag reached the net as a literal array (the "empty string"
        symptom of plans/nn-nf-b-prep-2026-11-05.md).  The text keeps embedded NULs ("\u0000cli/x")
@@ -208,13 +270,13 @@ static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) 
         Value *raw = action->items[1].value;
         const unsigned char *u;
         size_t len, k; char num[8];
-        if (!raw || raw->kind != JSTR) die("byte action needs a string");
+        if (!raw || raw->kind != JSTR) die_at(input_location, "byte action needs a string");
         u = (const unsigned char *)raw->s;
         /* the parsed length, never strlen: an empty tag is a mistake in the table (it would emit no
            bytes at all and silently shrink the image), and strlen on a NUL-prefixed text would read
            past the zero and pick up the wrong tail. */
         len = raw->n;
-        if (!len) die("empty byte action");
+        if (!len) die_at(input_location, "empty byte action");
         for (k = 0; k < len; k++) {
             buf_char(b, '['); buf_quote(b, "SBOUT"); buf_char(b, ',');
             snprintf(num, sizeof num, "%u", (unsigned)u[k]);
@@ -232,13 +294,13 @@ static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) 
             Value *arg = v->items[1].value;
             if (!strcmp(tag, "constant")) {
                 Value *bound = value_get(bindings, value_text(arg));
-                if (!bound) die("unknown constant binding");
+                if (!bound) die_at(input_location, "unknown constant binding");
                 buf_value(b, bound); continue;
             }
             if (!strcmp(tag, "observation")) {
                 long long shift = arg->number, number;
                 Value q = {0};
-                if (arg->kind != JINT || shift < 0 || shift > 63 || key < 0) die("invalid observation substitution");
+                if (arg->kind != JINT || shift < 0 || shift > 63 || key < 0) die_at(input_location, "invalid observation substitution");
                 number = ((unsigned long long)key) << shift;
                 q.kind = JINT; q.number = number; buf_value(b, &q); continue;
             }
@@ -249,16 +311,16 @@ static void expanded_action(Buffer *b, Value *action, Value *bindings, int key) 
 }
 static char *expand_actions(const char *raw, Value *bindings, Value *sequences, int key) {
     Value *v = value_json(raw, "rule actions"); Buffer b = {0}; size_t i, n = 0;
-    if (v->kind != JARR) die("action sequence is not a list");
+    if (v->kind != JARR) die_at(input_location, "action sequence is not a list");
     buf_char(&b, '[');
     for (i = 0; i < v->n; i++) {
         Value *a = v->items[i].value; size_t j;
-        if (!a || a->kind != JARR || !a->n) die("invalid rule action");
+        if (!a || a->kind != JARR || !a->n) die_at(input_location, "invalid rule action");
         if (!strcmp(value_text(a->items[0].value), "@")) {
             Value *seqv;
-            if (a->n != 2) die("invalid named sequence");
+            if (a->n != 2) die_at(input_location, "invalid named sequence");
             seqv = value_get(sequences, value_text(a->items[1].value));
-            if (!seqv || seqv->kind != JARR) die("unknown named sequence");
+            if (!seqv || seqv->kind != JARR) die_at(input_location, "unknown named sequence");
             for (j = 0; j < seqv->n; j++) {
                 if (n++) buf_char(&b, ',');
                 expanded_action(&b, seqv->items[j].value, bindings, key);
@@ -289,10 +351,10 @@ static Reader rd[8];
 static Reader *rd_get(FILE *f) {
     size_t cap = 1 << 16, got; int i, k = -1;
     for (i = 0; i < 8; i++) { if (rd[i].f == f) return &rd[i]; if (!rd[i].f && k < 0) k = i; }
-    if (k < 0) die("too many open input streams");
+    if (k < 0) die_at(input_location, "too many open input streams");
     rd[k].f = f; rd[k].n = rd[k].pos = 0; rd[k].buf = grow(NULL, cap, 1);
     for (;;) {
-        if (cap - rd[k].n < (1 << 16)) { if (cap > SIZE_MAX / 2) die("input too long"); cap *= 2; rd[k].buf = grow(rd[k].buf, cap, 1); }
+        if (cap - rd[k].n < (1 << 16)) { if (cap > SIZE_MAX / 2) die_at(input_location, "input too long"); cap *= 2; rd[k].buf = grow(rd[k].buf, cap, 1); }
         got = fread(rd[k].buf + rd[k].n, 1, cap - rd[k].n, f);
         if (!got) break;
         rd[k].n += got;
@@ -302,12 +364,23 @@ static Reader *rd_get(FILE *f) {
 static int close_in(FILE *f) {
     int i;
     for (i = 0; i < 8; i++) if (rd[i].f == f) { free(rd[i].buf); rd[i].buf = NULL; rd[i].f = NULL; }
+    for (size_t i = 0; i < input_stream_count; i++) if (input_streams[i].f == f) {
+        InputStream *in = &input_streams[i];
+        input_location = in->parent;
+        in->f = NULL; break;
+    }
     return fclose(f);
 }
 static char *line(FILE *f) {
     Reader *r = rd_get(f); size_t start, n; char *s;
     if (r->pos >= r->n) return NULL;
     start = r->pos;
+    for (size_t i = 0; i < input_stream_count; i++) if (input_streams[i].f == f) {
+        InputStream *in = &input_streams[i];
+        in->at.line++;
+        input_location = in->source && in->at.line <= in->lines ? in->source[in->at.line - 1] : in->at;
+        break;
+    }
     while (r->pos < r->n && r->buf[r->pos] != '\n') r->pos++;
     n = r->pos - start;
     if (r->pos < r->n) r->pos++;
@@ -318,15 +391,15 @@ static char *line(FILE *f) {
 static int key_number(const char *s) {
     char *end; long n;
     errno = 0; n = strtol(s, &end, 10);
-    if (errno || end == s || *end || n < 0 || n > 256) die("invalid observation key");
+    if (errno || end == s || *end || n < 0 || n > 256) die_at(input_location, "invalid observation key");
     return (int)n;
 }
-static void number_text(int n, char out[16]) { if (snprintf(out, 16, "%d", n) < 0) die("number formatting"); }
+static void number_text(int n, char out[16]) { if (snprintf(out, 16, "%d", n) < 0) die_at(input_location, "number formatting"); }
 static void quoted(FILE *f, const char *s) {
     const unsigned char *p = (const unsigned char *)s; fputc('"', f);
     for (; *p; p++) {
         if (*p == '"' || *p == '\\') { fputc('\\', f); fputc(*p, f); }
-        else if (*p < 32) { if (fprintf(f, "\\u%04x", (unsigned)*p) < 0) die("write failed"); }
+        else if (*p < 32) { if (fprintf(f, "\\u%04x", (unsigned)*p) < 0) die_at(input_location, "write failed"); }
         else fputc(*p, f);
     }
     fputc('"', f);
@@ -334,7 +407,7 @@ static void quoted(FILE *f, const char *s) {
 static void value_write(FILE *f, const Value *v) {
     /* one write of the whole text: the product's stdio sends every fputc to the kernel */
     char *t = value_json_text(v); size_t n = strlen(t);
-    if (fwrite(t, 1, n, f) != n) die("write failed");
+    if (fwrite(t, 1, n, f) != n) die_at(input_location, "write failed");
     free(t);
 }
 static int fields_tab(char *s, char **field, int max) {
@@ -345,7 +418,7 @@ static int fields_tab(char *s, char **field, int max) {
         if (!tab) return n;
         *tab = 0; p = tab + 1;
     }
-    if (strchr(p, '\t')) die("too many TSV fields");
+    if (strchr(p, '\t')) die_at(input_location, "too many TSV fields");
     return n;
 }
 static Value *fact_cell(const char *type, const char *text) {
@@ -356,10 +429,10 @@ static Value *fact_cell(const char *type, const char *text) {
         if (errno == ERANGE && text[0] != '-') {
             unsigned long long u;
             errno = 0; u = strtoull(text, &end, 10);
-            if (errno || end == text || *end || text[0] == '+') die("invalid fact integer");
+            if (errno || end == text || *end || text[0] == '+') die_at(input_location, "invalid fact integer");
             v = value_new(JUINT); v->unumber = u; return v;
         }
-        if (errno || end == text || *end) die("invalid fact integer");
+        if (errno || end == text || *end) die_at(input_location, "invalid fact integer");
         v = value_new(JINT); v->number = n; return v;
     }
     if (!strcmp(type, "str")) {
@@ -372,7 +445,7 @@ static Value *fact_cell(const char *type, const char *text) {
         out[j] = 0;
         { Value *v = value_string(out); free(out); return v; }
     }
-    die("unknown fact cell type"); return NULL;
+    die_at(input_location, "unknown fact cell type"); return NULL;
 }
 static Value *header_cell(const char *text) {
     unsigned char c = (unsigned char)text[0];
@@ -390,13 +463,19 @@ static Value *load_fact(const char *stem) {
     size_t ci;
     for (ci = 0; ci < cache_n; ci++)
         if (!strcmp(cache[ci].stem, stem)) return cache[ci].value;
-    if (snprintf(path, sizeof(path), "exec/facts/%s.tsv", stem) >= (int)sizeof(path)) die("fact path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open fact table");
+    if (snprintf(path, sizeof(path), "exec/facts/%s.tsv", stem) >= (int)sizeof(path)) die_at(input_location, "fact path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open fact table");
     while ((s = line(f))) {
         char *field[128]; int n, i;
         if (!*s) { free(s); continue; }
         if (typed < 0 && s[0] != '#') typed = s[0] == '=' || s[0] == '@' || s[0] == '\t' ? 1 : 0;
         if (s[0] == '#') {
+            /* facts-gen's fg_body_start treats these as identity metadata,
+               never as the following table's declared column header. */
+            if (!strncmp(s, "# exec/facts/", 13) || !strncmp(s, "# weights/type/", 15) ||
+                !strncmp(s, "# input ", 8)) {
+                free(s); continue;
+            }
             if (typed < 0 && nh == 0 && s[1] == ' ') {
                 char *h = copy(s + 2); nh = fields_tab(h, field, 128);
                 for (i = 0; i < nh; i++) header[i] = copy(field[i]); free(h);
@@ -406,30 +485,30 @@ static Value *load_fact(const char *stem) {
         n = fields_tab(s, field, 128);
         if (!typed) {
             Value *row = value_new(JOBJ);
-            if (n != nh || nh == 0) die("header fact column count");
+            if (n != nh || nh == 0) die_at(input_location, "header fact column count");
             if (!table) { table = value_new(JARR); value_put(root, stem, table); }
             for (i = 0; i < n; i++) value_put(row, header[i], header_cell(field[i]));
             value_put(table, NULL, row);
         } else if (field[0][0] == '=') {
-            if (n != 3) die("scalar fact column count");
+            if (n != 3) die_at(input_location, "scalar fact column count");
             value_put(root, field[0] + 1, fact_cell(field[1], field[2]));
         } else if (field[0][0] == '@') {
-            if (n < 2) die("fact table header count");
+            if (n < 2) die_at(input_location, "fact table header count");
             table_name = copy(field[0] + 1); table = value_new(JARR);
             value_put(root, table_name, table); nh = n - 1;
             for (i = 0; i < nh; i++) {
-                char *colon = strchr(field[i + 1], ':'); if (!colon) die("fact column type missing");
+                char *colon = strchr(field[i + 1], ':'); if (!colon) die_at(input_location, "fact column type missing");
                 *colon = 0; header[i] = copy(field[i + 1]); types[i] = copy(colon + 1);
             }
         } else {
             Value *row = value_new(JOBJ);
-            if (!table || field[0][0] || n != nh + 1) die("fact table row count");
+            if (!table || field[0][0] || n != nh + 1) die_at(input_location, "fact table row count");
             for (i = 0; i < nh; i++) value_put(row, header[i], fact_cell(types[i], field[i + 1]));
             value_put(table, NULL, row);
         }
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("fact read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "fact read failed");
     /* load.facts: a table whose single column is `value` is the list of values. */
     if (!typed && table && nh == 1 && !strcmp(header[0], "value"))
         for (ci = 0; ci < table->n; ci++) table->items[ci].value = value_get(table->items[ci].value, "value");
@@ -440,11 +519,11 @@ static Value *load_fact(const char *stem) {
         value_put(root, copy_n(stem, strlen(stem)), table);
         for (i = 0; i < table->n; i++) {
             Value *row = table->items[i].value, *name = value_get(row, "name"), *val = value_get(row, "value");
-            if (!name || name->kind != JSTR) die("invalid name/value fact");
+            if (!name || name->kind != JSTR) die_at(input_location, "invalid name/value fact");
             value_put(map, name->s, val);
             if (!value_get(root, name->s)) value_put(root, name->s, val);
         }
-        { char key[1024]; if (snprintf(key, sizeof(key), "%s!", stem) >= (int)sizeof(key)) die("fact key too long"); value_put(root, key, map); }
+        { char key[1024]; if (snprintf(key, sizeof(key), "%s!", stem) >= (int)sizeof(key)) die_at(input_location, "fact key too long"); value_put(root, key, map); }
     }
     if (cache_n == cache_cap) {
         cache_cap = cache_cap ? cache_cap * 2 : 16;
@@ -474,10 +553,10 @@ static Value *value_path(Value *root, const char *path) {
         if (dot) *dot = 0;
         if (v && v->kind == JARR) {
             char *end; unsigned long i = strtoul(p, &end, 10);
-            if (end == p || *end || i >= v->n) die("invalid fact list index");
+            if (end == p || *end || i >= v->n) die_at(input_location, "invalid fact list index");
             v = v->items[i].value;
         } else v = value_get(v, p);
-        if (!v) { fprintf(stderr, "unknown fact path: %s\n", path); die("unknown fact path"); }
+        if (!v) { fprintf(stderr, "unknown fact path: %s\n", path); die_at(input_location, "unknown fact path"); }
         if (!dot) break; p = dot + 1;
     }
     free(parts); return v;
@@ -487,14 +566,14 @@ static unsigned long fresh_count;
 static char *fresh_label(const char *owner, const char *kind) {
     char name[1024]; const char *dot = strchr(owner, '.');
     size_t prefix = dot ? (size_t)(dot - owner) : strlen(owner);
-    if (++fresh_count > 1000000) die("fresh label limit");
+    if (++fresh_count > 1000000) die_at(input_location, "fresh label limit");
     if (snprintf(name, sizeof(name), "%.*s.%s%lu", (int)prefix, owner, kind, fresh_count) >= (int)sizeof(name))
-        die("fresh label too long");
+        die_at(input_location, "fresh label too long");
     return copy(name);
 }
 static int has_flag(int argc, char **argv, const char *name) {
     int i; char flag[128];
-    if (snprintf(flag, sizeof(flag), "--%s", name) >= (int)sizeof(flag)) die("flag too long");
+    if (snprintf(flag, sizeof(flag), "--%s", name) >= (int)sizeof(flag)) die_at(input_location, "flag too long");
     for (i = 0; i < argc; i++) if (!strcmp(argv[i], flag)) return 1;
     return 0;
 }
@@ -530,12 +609,12 @@ static char *interpolate(const char *text, Value *env) {
             part = text + i; i++;
         } else if (text[i] == '{') {
             const char *end = strchr(text + i + 1, '}'); Value *v; char *key;
-            if (!end) die("unterminated interpolation");
+            if (!end) die_at(input_location, "unterminated interpolation");
             key = copy_n(text + i + 1, (size_t)(end - text - i - 1));
             v = value_field(env, key);
             if (!v || (v->kind != JSTR && v->kind != JINT && v->kind != JUINT)) {
                 fprintf(stderr, "seed-gen: missing interpolation fact %s\n", key);
-                die("unknown interpolation fact");
+                die_at(input_location, "unknown interpolation fact");
             }
             free(key);
             if (v->kind == JINT) { snprintf(number, sizeof(number), "%lld", v->number); part = number; }
@@ -544,7 +623,7 @@ static char *interpolate(const char *text, Value *env) {
             len = strlen(part); i = (size_t)(end - text);
         }
         if (n + len + 1 > cap) {
-            while (n + len + 1 > cap) { if (cap > SIZE_MAX / 2) die("interpolation too long"); cap *= 2; }
+            while (n + len + 1 > cap) { if (cap > SIZE_MAX / 2) die_at(input_location, "interpolation too long"); cap *= 2; }
             out = grow(out, cap, 1);
         }
         memcpy(out + n, part, len); n += len;
@@ -555,20 +634,20 @@ static Value *fresh_bindings(Value *opts, Value *facts) {
     Value *bindings = value_new(JOBJ), *specs = value_get(opts, "freshrows");
     size_t s;
     if (!specs) return bindings;
-    if (specs->kind != JARR) die("unsupported freshrows shape");
+    if (specs->kind != JARR) die_at(input_location, "unsupported freshrows shape");
     for (s = 0; s < specs->n; s++) {
         Value *spec = specs->items[s].value;
         Value *rows = value_path(facts, value_text(value_get(spec, "over")));
         Value *where = value_get(spec, "where"); size_t i;
-        if (rows->kind != JARR) die("freshrows source is not a list");
+        if (rows->kind != JARR) die_at(input_location, "freshrows source is not a list");
         for (i = 0; i < rows->n; i++) {
             Value *row = rows->items[i].value, *ctx = value_new(JOBJ);
             char *key, *owner, *kind, *label; size_t j; int match = 1;
-            if (row->kind != JOBJ) die("freshrows item is not an object");
+            if (row->kind != JOBJ) die_at(input_location, "freshrows item is not an object");
             for (j = 0; j < facts->n; j++) value_put(ctx, facts->items[j].key, facts->items[j].value);
             for (j = 0; j < row->n; j++) value_put(ctx, row->items[j].key, row->items[j].value);
             if (where) {
-                if (where->kind != JOBJ) die("freshrows where is not an object");
+                if (where->kind != JOBJ) die_at(input_location, "freshrows where is not an object");
                 for (j = 0; j < where->n; j++) {
                     Value *actual = value_get(row, where->items[j].key);
                     char *expect = interpolate(value_text(where->items[j].value), ctx);
@@ -596,16 +675,16 @@ static Value *fresh_bindings_file(Value *opts, const char *root) {
     char path[1024]; FILE *f; char *s; int header = 0;
     if (!spec || spec->kind != JSTR) return bindings;
     if (snprintf(path, sizeof(path), "%s/%s", root, spec->s) >= (int)sizeof(path))
-        die("freshrows path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open freshrows table");
+        die_at(input_location, "freshrows path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open freshrows table");
     while ((s = line(f))) {
         char *field[3], *label; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 3);
-        if (n != 3) die("freshrows column count");
+        if (n != 3) die_at(input_location, "freshrows column count");
         if (!header++) {
             if (strcmp(field[0], "owner") || strcmp(field[1], "kind") || strcmp(field[2], "key"))
-                die("freshrows header mismatch");
+                die_at(input_location, "freshrows header mismatch");
         } else {
             label = fresh_label(field[0], field[1]);
             value_put(bindings, field[2], value_string(label));
@@ -613,33 +692,33 @@ static Value *fresh_bindings_file(Value *opts, const char *root) {
         }
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("freshrows read failed");
-    if (!header) die("empty freshrows table");
+    if (ferror(f) || close_in(f)) die_at(input_location, "freshrows read failed");
+    if (!header) die_at(input_location, "empty freshrows table");
     return bindings;
 }
 static void numeric_file_bindings(Value *opts, Value *facts, Value *bindings) {
     Value *specs = value_get(opts, "freshrows");
     if (!specs || specs->kind != JARR || specs->n != 1)
-        die("numeric freshrows declaration missing");
+        die_at(input_location, "numeric freshrows declaration missing");
     Value *spec = specs->items[0].value, *where = value_get(spec, "where");
     const char *file = value_text(value_get(spec, "file"));
     char path[1024]; FILE *f; char *s; int header = 0;
     if (snprintf(path, sizeof(path), "exec/parse/%s", file) >= (int)sizeof(path))
-        die("numeric freshrows path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open numeric freshrows");
+        die_at(input_location, "numeric freshrows path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open numeric freshrows");
     while ((s = line(f))) {
         char *field[4]; int n;
         if (!*s) { free(s); continue; }
         if (s[0] == '#') {
             if (!header && strcmp(s, "# section\tbinding\tprefix\tkind"))
-                die("numeric freshrows header mismatch");
+                die_at(input_location, "numeric freshrows header mismatch");
             header = 1; free(s); continue;
         }
         n = fields_tab(s, field, 4);
-        if (n != 4 || !header) die("numeric freshrows column count");
+        if (n != 4 || !header) die_at(input_location, "numeric freshrows column count");
         if (where && where->kind == JOBJ) {
             Value *selected = value_get(where, "section");
-            if (!selected || selected->kind != JSTR) die("numeric freshrows section missing");
+            if (!selected || selected->kind != JSTR) die_at(input_location, "numeric freshrows section missing");
             if (strcmp(field[0], selected->s)) { free(s); continue; }
         }
         Value *ctx = value_new(JOBJ); char *key, *owner, *kind, *label;
@@ -656,11 +735,11 @@ static void numeric_file_bindings(Value *opts, Value *facts, Value *bindings) {
         value_put(bindings, key, value_string(label));
         free(key); free(owner); free(kind); free(label); free(s);
     }
-    if (ferror(f) || close_in(f) || !header) die("numeric freshrows read failed");
+    if (ferror(f) || close_in(f) || !header) die_at(input_location, "numeric freshrows read failed");
 }
 static void declared_bindmap(Value *opts, Value *facts, Value *bindings) {
     Value *map = value_get(opts, "bindmap");
-    if (!map || map->kind != JOBJ) die("expected declared bindmap");
+    if (!map || map->kind != JOBJ) die_at(input_location, "expected declared bindmap");
     for (size_t i = 0; i < map->n; i++) {
         Value *src = map->items[i].value, *value;
         const char *s = value_text(src);
@@ -678,18 +757,18 @@ static void direct_bindings_ex(Value *bindings, Value *sequences,
     while (*p) {
         char *comma = strchr(p, ','), *eq = strchr(p, '='); Value *v;
         if (comma) *comma = 0;
-        if (!eq || eq == p || !eq[1]) die("invalid binding cell");
+        if (!eq || eq == p || !eq[1]) die_at(input_location, "invalid binding cell");
         *eq = 0;
         if (!strncmp(eq + 1, "@str:", 5) || !strncmp(eq + 1, "@fmt:", 5)) {
             char *s = interpolate(eq + 6, facts);
             v = value_string(s); free(s);
         } else if (!strncmp(eq + 1, "@bytes:", 7)) {
             Value *source = eq[8] == '=' ? value_path(facts, eq + 9) : NULL;
-            if (source && source->kind != JSTR) die("byte source is not text");
+            if (source && source->kind != JSTR) die_at(input_location, "byte source is not text");
             const unsigned char *bytes = (const unsigned char *)(source ? source->s : eq + 8);
             size_t count = source ? source->n : strlen((const char *)bytes), i;
             Value *actions = value_new(JARR);
-            if (!sequences) die("byte binding requires sequences");
+            if (!sequences) die_at(input_location, "byte binding requires sequences");
             for (i = 0; i < count; i++) {
                 Value *act = value_new(JARR), *byte = value_new(JINT);
                 byte->number = bytes[i];
@@ -703,10 +782,10 @@ static void direct_bindings_ex(Value *bindings, Value *sequences,
         } else if (!strncmp(eq + 1, "fresh:", 6)) {
             char *scope = copy(eq + 7), *kind = strrchr(scope, ':'), *label;
             char *owner;
-            if (!kind || !kind[1]) die("invalid fresh binding");
+            if (!kind || !kind[1]) die_at(input_location, "invalid fresh binding");
             *kind++ = 0;
             if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2))
-                die("unsupported fresh binding scope");
+                die_at(input_location, "unsupported fresh binding scope");
             owner = interpolate(scope + 2, facts);
             label = fresh_label(owner, kind);
             v = value_string(label); free(label); free(owner); free(scope);
@@ -726,7 +805,7 @@ static Value *map_cell(Value *source, Value *ctx) {
     if (n > 1 && s[0] == '$') return value_path(ctx, s + 1);
     if (n >= 3 && s[0] == '{' && s[n - 1] == '}' && !strchr(s + 1, '{')) {
         char *key = copy_n(s + 1, n - 2); Value *v = value_field(ctx, key);
-        free(key); if (!v) die("unknown mapseq cell"); return v;
+        free(key); if (!v) die_at(input_location, "unknown mapseq cell"); return v;
     }
     { char *text = interpolate(s, ctx); Value *v = value_string(text); free(text); return v; }
 }
@@ -736,25 +815,25 @@ static int map_equal(Value *a, Value *b) {
     if (a->kind == JINT || a->kind == JBOOL) return a->number == b->number;
     if (a->kind == JUINT) return a->unumber == b->unumber;
     if (a->kind == JNULL) return 1;
-    die("unsupported mapseq predicate value"); return 0;
+    die_at(input_location, "unsupported mapseq predicate value"); return 0;
 }
 static void map_actions(Value *out, Value *actions, Value *ctx) {
     size_t i, c;
-    if (!actions || actions->kind != JARR) die("invalid mapseq acts");
+    if (!actions || actions->kind != JARR) die_at(input_location, "invalid mapseq acts");
     for (i = 0; i < actions->n; i++) {
         Value *input = actions->items[i].value, *action;
         if (input->kind == JSTR && input->s[0] == '$') {
             Value *source = value_path(ctx, input->s + 1);
-            if (source->kind != JARR) die("mapseq splice is not an action list");
+            if (source->kind != JARR) die_at(input_location, "mapseq splice is not an action list");
             for (size_t j = 0; j < source->n; j++) value_put(out, NULL, source->items[j].value);
             continue;
         }
         if (input->kind == JOBJ) {
             Value *over = value_get(input, "over"), *body = value_get(input, "acts");
             Value *as = value_get(input, "as"), *items;
-            if (!over || !body) die("nested mapseq action lacks over or acts");
+            if (!over || !body) die_at(input_location, "nested mapseq action lacks over or acts");
             items = value_path(ctx, value_text(over));
-            if (items->kind != JARR) die("nested mapseq over is not a list");
+            if (items->kind != JARR) die_at(input_location, "nested mapseq over is not a list");
             for (size_t j = 0; j < items->n; j++) {
                 Value *nested = seed_env_copy(ctx);
                 value_put(nested, as ? value_text(as) : "it", items->items[j].value);
@@ -763,16 +842,16 @@ static void map_actions(Value *out, Value *actions, Value *ctx) {
             }
             continue;
         }
-        if (input->kind != JARR || !input->n) die("invalid mapseq action");
+        if (input->kind != JARR || !input->n) die_at(input_location, "invalid mapseq action");
         if (!strcmp(value_text(input->items[0].value), "@out") ||
             !strcmp(value_text(input->items[0].value), "@bytes")) {
             int output = !strcmp(value_text(input->items[0].value), "@out");
             Value *value; const unsigned char *s;
-            if (input->n != 2) die("invalid mapseq byte expansion");
+            if (input->n != 2) die_at(input_location, "invalid mapseq byte expansion");
             {   Value *raw = input->items[1].value; size_t n;
                 /* a literal with an embedded "\u0000" ("\u0000cli/funit") keeps every byte */
                 if (raw->kind == JSTR && strlen(raw->s) < raw->n) {
-                    if (memchr(raw->s, '{', raw->n)) die("mapseq byte literal with NUL and fields");
+                    if (memchr(raw->s, '{', raw->n)) die_at(input_location, "mapseq byte literal with NUL and fields");
                     value = raw; n = raw->n;
                 } else { value = map_cell(raw, ctx); n = strlen(value_text(value)); }
                 s = (const unsigned char *)value_text(value);
@@ -794,19 +873,19 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
     Value *over = value_get(part, "over"), *where = value_get(part, "where");
     Value *rows = over ? value_path(facts, value_text(over)) : NULL;
     size_t i, n = rows ? rows->n : 1;
-    if (rows && rows->kind != JARR) die("mapseq over is not a list");
+    if (rows && rows->kind != JARR) die_at(input_location, "mapseq over is not a list");
     for (i = 0; i < n; i++) {
         Value *ctx; size_t j; int take = 1;
         Value *item = rows ? rows->items[i].value : NULL;
-        if (facts->kind != JOBJ) die("environment is not an object");
+        if (facts->kind != JOBJ) die_at(input_location, "environment is not an object");
         ctx = seed_env_copy(facts);   /* D2: bulk copy */
         if (item) {
             /* assemble mapseq: a non-dict row leaves ctx = facts */
-            if (item->kind != JOBJ && where) die("mapseq where over a non-object item");
+            if (item->kind != JOBJ && where) die_at(input_location, "mapseq where over a non-object item");
             if (item->kind == JOBJ) for (j = 0; j < item->n; j++) value_put(ctx, item->items[j].key, item->items[j].value);
         }
         if (where) {
-            if (where->kind != JOBJ) die("invalid mapseq where");
+            if (where->kind != JOBJ) die_at(input_location, "invalid mapseq where");
             for (j = 0; j < where->n; j++) {
                 Value *actual = value_get(ctx, where->items[j].key);
                 Value *expect = where->items[j].value;
@@ -831,7 +910,7 @@ static void map_old_part(Value *out, Value *part, Value *facts) {
 static Value *mapseq_construct(Value *opts, Value *facts) {
     Value *spec = value_get(opts, "mapseq"), *out = value_new(JOBJ); size_t k; int pass;
     if (!spec) return out;
-    if (spec->kind != JOBJ) die("mapseq is not an object");
+    if (spec->kind != JOBJ) die_at(input_location, "mapseq is not an object");
     /* assemble.Run.mapseq first evaluates fixed names, then formatted names.
        This insertion order is observable in the returned fact dictionary. */
     for (pass = 0; pass < 2; pass++) for (k = 0; k < spec->n; k++) {
@@ -845,12 +924,12 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
         }
         Value *rows = value_path(facts, value_text(value_get(decl, "over")));
         Value *parts = value_get(decl, "parts"); size_t i;
-        if (rows->kind != JARR || !parts || parts->kind != JARR) die("invalid mapseq rows or parts");
+        if (rows->kind != JARR || !parts || parts->kind != JARR) die_at(input_location, "invalid mapseq rows or parts");
         for (i = 0; i < rows->n; i++) {
             Value *row = rows->items[i].value, *ctx, *acts = value_new(JARR);
             char *name; size_t j, p;
-            if (row->kind != JOBJ) die("mapseq row is not an object");
-            if (facts->kind != JOBJ) die("environment is not an object");
+            if (row->kind != JOBJ) die_at(input_location, "mapseq row is not an object");
+            if (facts->kind != JOBJ) die_at(input_location, "environment is not an object");
             ctx = seed_env_copy(facts);   /* D2: bulk copy, same key order as the put loop */
             for (j = 0; j < row->n; j++) value_put(ctx, row->items[j].key, row->items[j].value);
             name = interpolate(namefmt, ctx);
@@ -860,16 +939,16 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
                 Value *source = value_get(part, "acts"); int take = 1;
                 if (splice) {
                     Value *refs = value_get(row, value_text(splice)); size_t r;
-                    if (!refs || refs->kind != JARR) die("mapseq splice is not a list");
+                    if (!refs || refs->kind != JARR) die_at(input_location, "mapseq splice is not a list");
                     for (r = 0; r < refs->n; r++) {
                         Value *named = value_get(out, value_text(refs->items[r].value)); size_t a;
-                        if (!named || named->kind != JARR) die("mapseq forward or unknown reference");
+                        if (!named || named->kind != JARR) die_at(input_location, "mapseq forward or unknown reference");
                         for (a = 0; a < named->n; a++) value_put(acts, NULL, named->items[a].value);
                     }
                     continue;
                 }
                 if (where) {
-                    if (where->kind != JOBJ) die("mapseq where is not an object");
+                    if (where->kind != JOBJ) die_at(input_location, "mapseq where is not an object");
                     for (j = 0; j < where->n; j++) {
                         Value *actual = value_get(row, where->items[j].key);
                         Value *expect = where->items[j].value;
@@ -882,7 +961,7 @@ static Value *mapseq_construct(Value *opts, Value *facts) {
                     }
                 }
                 if (!take) continue;
-                if (!source || source->kind != JARR) die("mapseq acts is not a list");
+                if (!source || source->kind != JARR) die_at(input_location, "mapseq acts is not a list");
                 map_actions(acts, source, ctx);
             }
             seed_env_drop(ctx);
@@ -896,19 +975,19 @@ static Value *textrows_construct(const char *root, Value *opts) {
     char path[1024], *s; FILE *f; int header = 0;
     if (!spec) return out;
     if (snprintf(path, sizeof(path), "%s/%s", root, value_text(spec)) >= (int)sizeof(path))
-        die("textrows path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open textrows");
+        die_at(input_location, "textrows path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open textrows");
     while ((s = line(f))) {
         char *field[2]; int n;
         if (!*s) { free(s); continue; }
         n = fields_tab(s, field, 2);
-        if (n != 2) die("textrows column count");
+        if (n != 2) die_at(input_location, "textrows column count");
         if (!header++) {
             if (strcmp(field[0], "name") || strcmp(field[1], "value"))
-                die("textrows header changed");
+                die_at(input_location, "textrows header changed");
         } else {
             Value *text = value_json(field[1], "textrows value"), *actions = value_new(JARR);
-            if (text->kind != JSTR) die("textrows value is not text");
+            if (text->kind != JSTR) die_at(input_location, "textrows value is not text");
             for (size_t i = 0; i < text->n; i++) {
                 Value *act = value_new(JARR), *byte = value_new(JINT);
                 byte->number = (unsigned char)text->s[i];
@@ -920,7 +999,7 @@ static Value *textrows_construct(const char *root, Value *opts) {
         }
         free(s);
     }
-    if (ferror(f) || close_in(f) || !header) die("textrows read failed");
+    if (ferror(f) || close_in(f) || !header) die_at(input_location, "textrows read failed");
     return out;
 }
 static void let_bind(Value *env, const char *bind) {
@@ -929,9 +1008,9 @@ static void let_bind(Value *env, const char *bind) {
     while (*p) {
         char *comma = strchr(p, ','), *eq = strchr(p, '='); Value *v; char *s;
         if (comma) *comma = 0;
-        if (!eq || eq == p || eq[1] == 0) die("invalid let binding");
+        if (!eq || eq == p || eq[1] == 0) die_at(input_location, "invalid let binding");
         *eq = 0;
-        if (strncmp(eq + 1, "@str:", 5)) die("unsupported let value");
+        if (strncmp(eq + 1, "@str:", 5)) die_at(input_location, "unsupported let value");
         s = interpolate(eq + 6, env); v = value_string(s); free(s);
         value_put(env, p, v);
         if (!comma) break; p = comma + 1;
@@ -942,28 +1021,28 @@ static void let_bind(Value *env, const char *bind) {
    operation in a real graph build: callers explicitly request only let rows. */
 static void inspect_lets(const char *stage, const char *outpath, int argc, char **argv) {
     char path[1024]; FILE *f, *out; char *s; Value *env = value_new(JOBJ);
-    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die("manifest path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die_at(input_location, "manifest path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "manifest column count");
         if (!strcmp(field[0], "let") && when_true(field[3], argc, argv)) {
             if (strcmp(field[4], "-") || strcmp(field[6], "-") || strcmp(field[8], "-"))
-                die("unsupported let facts/options");
+                die_at(input_location, "unsupported let facts/options");
             let_bind(env, field[7]);
         }
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("manifest read failed");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, env); if (close_in(out)) die("output close failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "manifest read failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    value_write(out, env); if (close_in(out)) die_at(input_location, "output close failed");
 }
 
 /* A template's `each` and `over` columns are finite products of fact lists.
    This reader is intentionally stage-neutral: it expands declaration rows,
    leaving graph installation and edits to the later constructor step. */
-typedef struct { char *block, *each, *over, *kind, *a, *b, *c, *d; int depth; } TRow;
+typedef struct { char *block, *each, *over, *kind, *a, *b, *c, *d; int depth; InputLocation source; } TRow;
 typedef struct { TRow *row; size_t n, cap; } TRows;
 typedef void (*TVisit)(Value *, void *);
 
@@ -980,10 +1059,10 @@ static void tuple_walk(char *spec, Value *facts, Value *scope, TVisit visit, voi
     colon = strchr(spec, ':');
     if (colon) {
         *colon = 0; name = spec; source = colon + 1;
-        dot = strchr(source, '.'); if (!dot) die("invalid dependent template fact");
+        dot = strchr(source, '.'); if (!dot) die_at(input_location, "invalid dependent template fact");
         *dot = 0; list = value_get(value_get(scope, source), dot + 1);
     } else { name = spec; list = value_get(facts, name); }
-    if (!list || list->kind != JARR) die("unknown template fact list");
+    if (!list || list->kind != JARR) die_at(input_location, "unknown template fact list");
     for (i = 0; i < list->n; i++) {
         Value *next = scope_add(scope, name, list->items[i].value);
         if (comma) tuple_walk(comma + 1, facts, next, visit, ctx);
@@ -999,13 +1078,13 @@ static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
         if (text[i] == '{') {
             const char *end = strchr(text + i + 1, '}'); char *path, *dot, number[64];
             Value *value; const char *piece;
-            if (!end) die("unterminated template variable");
+            if (!end) die_at(input_location, "unterminated template variable");
             path = copy_n(text + i + 1, (size_t)(end - text - i - 1));
             if (!strncmp(path, "fresh:", 6) || !strncmp(path, "fresh@row:", 10)) {
                 int row = !strncmp(path, "fresh@row:", 10);
                 char *name = path + (row ? 10 : 6), *kind = strchr(name, ':');
                 Value *map = row ? rowlabels : labels;
-                if (!fresh_owner || !kind || !kind[1]) die("invalid template fresh label");
+                if (!fresh_owner || !kind || !kind[1]) die_at(input_location, "invalid template fresh label");
                 *kind++ = 0;
                 value = value_get(map, name);
                 if (!value) {
@@ -1014,7 +1093,7 @@ static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
                         /* assemble.Run.fresh 'split': KIND is OWNER_KIND -> P.fresh(holder(OWNER), KIND),
                            with KIND the second '_' field exactly as Python's k.split('_')[1] */
                         char *u = strchr(kind, '_'), *v;
-                        if (!u) die("split fresh kind needs OWNER_KIND");
+                        if (!u) die_at(input_location, "split fresh kind needs OWNER_KIND");
                         *u++ = 0; v = strchr(u, '_'); if (v) *v = 0;
                         label = fresh_label(kind, u);
                     } else label = fresh_label(fresh_owner, kind);
@@ -1030,7 +1109,7 @@ static char *template_subst_ctx(const char *text, Value *scope, Value *labels,
                 buf_value(&out, value); free(path); i = (size_t)(end - text); continue;
             }
             piece = value_scalar_text(value, number);
-            if (!piece) die("unbound template variable");
+            if (!piece) die_at(input_location, "unbound template variable");
             buf_add(&out, piece, strlen(piece)); free(path); i = (size_t)(end - text);
         } else buf_char(&out, text[i]);
     }
@@ -1048,6 +1127,7 @@ static void template_group_visit(Value *scope, void *arg) {
     TGroup *g = arg; size_t i = g->first;
     while (i < g->last) {
         TRow *r = &g->rows->row[i];
+        input_location = r->source;
         if (r->depth == g->depth) {
             char *a, *b, *c, *d; Value *rowlabels = value_new(JOBJ);
             a = template_subst_ctx(r->a, scope, g->labels, rowlabels, g->prev, g->fresh_owner);
@@ -1071,11 +1151,11 @@ static void template_group_visit(Value *scope, void *arg) {
                 buf_add(g->edits, b, strlen(b)); buf_char(g->edits, '\t');
                 buf_add(g->edits, c, strlen(c)); buf_char(g->edits, '\t');
                 buf_add(g->edits, d, strlen(d)); buf_char(g->edits, '\n');
-            } else die("template graph edit not yet supported");
+            } else die_at(input_location, "template graph edit not yet supported");
             free(a); free(b); free(c); free(d); i++;
         } else {
             size_t end = i + 1;
-            if (r->depth != g->depth + 1) die("template loop depth jump");
+            if (r->depth != g->depth + 1) die_at(input_location, "template loop depth jump");
             while (end < g->last && g->rows->row[end].depth > g->depth) end++;
             template_groups(g->rows, g->facts, scope, g->out, i, end, g->depth + 1,
                             g->labels, g->prev, g->modes, g->fresh_owner, g->edits);
@@ -1089,7 +1169,8 @@ static void template_groups(TRows *rows, Value *facts, Value *scope, Buffer *out
     size_t i = first;
     while (i < last) {
         TRow *r = &rows->row[i]; size_t end = i + 1; TGroup group;
-        if (r->depth != depth || !strcmp(r->over, "=")) die("invalid template loop");
+        input_location = r->source;
+        if (r->depth != depth || !strcmp(r->over, "=")) die_at(input_location, "invalid template loop");
         while (end < last && (rows->row[end].depth > depth ||
                (rows->row[end].depth == depth && !strcmp(rows->row[end].over, "=")))) end++;
         group = (TGroup){rows, facts, out, i, end, depth, labels, prev, modes, fresh_owner, edits};
@@ -1113,11 +1194,12 @@ static Buffer expand_template_file_fresh_edit(const char *path, Value *facts,
                                               const char *section, const char *fresh_owner,
                                               Value *modes, Buffer *edits) {
     FILE *f; char *s; TRows rows = {0}; Buffer expanded = {0}; size_t i;
-    f = fopen(path, "rb"); if (!f) die("cannot open template");
+    InputLocation caller = input_location;
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open template");
     while ((s = line(f))) {
         char *field[9]; int n; TRow *r; char *over;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("template column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "template column count");
         if (section && *section && strcmp(section, "-") && strcmp(field[0], section)) {
             free(s); continue;
         }
@@ -1125,18 +1207,19 @@ static Buffer expand_template_file_fresh_edit(const char *path, Value *facts,
         r = &rows.row[rows.n++];
         over = field[3]; r->depth = 0; while (*over == '.') { r->depth++; over++; }
         *r = (TRow){copy(field[1]), copy(field[2]), copy(over), copy(field[4]),
-                    copy(field[5]), copy(field[6]), copy(field[7]), copy(field[8]), r->depth};
+                    copy(field[5]), copy(field[6]), copy(field[7]), copy(field[8]), r->depth, input_location};
         free(s);
     }
-    if (ferror(f) || close_in(f) || !rows.n) die("template read failed");
+    if (ferror(f) || close_in(f) || !rows.n) die_at(input_location, "template read failed");
     for (i = 0; i < rows.n;) {
         size_t end = i + 1;
         while (end < rows.n && !strcmp(rows.row[end].block, rows.row[i].block)) {
-            if (strcmp(rows.row[end].each, rows.row[i].each)) die("template block has two each lists");
+            if (strcmp(rows.row[end].each, rows.row[i].each)) die_at(input_location, "template block has two each lists");
             end++;
         }
         template_rows(&rows, facts, &expanded, i, end, fresh_owner, modes, edits); i = end;
     }
+    input_location = caller;
     return expanded;
 }
 static Buffer expand_template_file_fresh(const char *path, Value *facts,
@@ -1152,50 +1235,51 @@ static Buffer expand_template_file(const char *path, Value *facts, const char *s
 static Buffer expand_template_section(const char *stage, const char *section) {
     char path[1024]; Value *facts = load_fact(!strcmp(stage, "lex") ? "lex-gen" : stage);
     if (snprintf(path, sizeof(path), "exec/%s/gen-template.tsv", stage) >= (int)sizeof(path))
-        die("template path too long");
+        die_at(input_location, "template path too long");
     Buffer expanded = expand_template_file(path, facts, section);
     return expanded;
 }
 static void inspect_template(const char *stage, const char *section, const char *outpath) {
     Buffer expanded = expand_template_section(stage, section);
-    FILE *out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    if (expanded.n && fwrite(expanded.s, 1, expanded.n, out) != expanded.n) die("template write failed");
-    if (close_in(out)) die("template close failed");
+    FILE *out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    if (expanded.n && fwrite(expanded.s, 1, expanded.n, out) != expanded.n) die_at(input_location, "template write failed");
+    if (close_in(out)) die_at(input_location, "template close failed");
 }
 static void inspect_fresh(const char *stage, const char *stem, const char *outpath, const char *initial) {
     char path[1024], *end; FILE *f, *out; char *s; int found = 0;
     fresh_count = strtoul(initial, &end, 10);
-    if (end == initial || *end || fresh_count > 1000000) die("invalid initial fresh count");
-    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die("manifest path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+    if (end == initial || *end || fresh_count > 1000000) die_at(input_location, "invalid initial fresh count");
+    if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(path)) die_at(input_location, "manifest path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "manifest options");
             Value *bindings = fresh_bindings(opts, facts);
             direct_bindings(bindings, field[7], facts);
-            if (++found > 1) die("ambiguous fresh manifest row");
-            out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-            value_write(out, bindings); if (close_in(out)) die("output close failed");
+            if (++found > 1) die_at(input_location, "ambiguous fresh manifest row");
+            out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+            value_write(out, bindings); if (close_in(out)) die_at(input_location, "output close failed");
         }
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("manifest read failed");
-    if (!found) die("fresh manifest row not found");
+    if (ferror(f) || close_in(f)) die_at(input_location, "manifest read failed");
+    if (!found) die_at(input_location, "fresh manifest row not found");
 }
 static RuleState *rule_state(RuleSet *r, const char *name) {
     size_t i; RuleState *s;
     for (i = 0; i < r->n; i++) if (!strcmp(r->state[i].name, name)) return &r->state[i];
     if (r->n == r->cap) { r->cap = r->cap ? r->cap * 2 : 64; r->state = grow(r->state, r->cap, sizeof(*r->state)); }
-    s = &r->state[r->n++]; memset(s, 0, sizeof(*s)); s->name = copy(name); return s;
+    s = &r->state[r->n++]; memset(s, 0, sizeof(*s)); s->source = input_location; s->name = copy(name); return s;
 }
 static void rule_add(RuleState *s, int key, const char *target, const char *actions) {
     size_t i; Rule *r;
-    for (i = 0; i < s->n; i++) if (s->rule[i].key == key) die("overlapping observation rules");
+    for (i = 0; i < s->n; i++) if (s->rule[i].key == key) die_at(input_location, "overlapping observation rules");
     if (s->n == s->cap) { s->cap = s->cap ? s->cap * 2 : 8; s->rule = grow(s->rule, s->cap, sizeof(*s->rule)); }
     r = &s->rule[s->n++]; r->key = key; r->target = copy(target); r->actions = copy(actions);
+    r->source = input_location;
 }
 static void rule_keys(RuleState *s, const char *keys, const char *target, const char *actions) {
     char *work = copy(keys), *part = work;
@@ -1205,7 +1289,7 @@ static void rule_keys(RuleState *s, const char *keys, const char *target, const 
         dash = strchr(part, '-');
         if (dash) { *dash = 0; lo = key_number(part); hi = key_number(dash + 1); }
         else lo = hi = key_number(part);
-        if (lo > hi) die("descending observation range");
+        if (lo > hi) die_at(input_location, "descending observation range");
         for (k = lo; k <= hi; k++) rule_add(s, k, target, actions);
         if (!comma) break; part = comma + 1;
     }
@@ -1215,11 +1299,11 @@ static void rule_keys_classes(RuleState *s, const char *keys, const char *target
                               const char *actions, Value *classes) {
     if (keys[0] == '@') {
         Value *v = value_get(classes, keys + 1);
-        if (!v || v->kind != JARR || !v->n) die("unknown rule class");
+        if (!v || v->kind != JARR || !v->n) die_at(input_location, "unknown rule class");
         for (size_t i = 0; i < v->n; i++) {
             Value *item = v->items[i].value;
             if (item->kind != JINT || item->number < 0 || item->number > 256)
-                die("invalid rule class member");
+                die_at(input_location, "invalid rule class member");
             rule_add(s, (int)item->number, target, actions);
         }
     } else rule_keys(s, keys, target, actions);
@@ -1246,7 +1330,7 @@ static int seq(Graph *g, const char *actions) {
         if (!strcmp(g->seq[i], actions)) return (int)i;
         h = (h + 1) & (g->seq_index_cap - 1);
     }
-    if (g->ns >= INT_MAX) die("too many sequences");
+    if (g->ns >= INT_MAX) die_at(input_location, "too many sequences");
     if (g->ns == g->cs) { g->cs = g->cs ? g->cs * 2 : 64; g->seq = grow(g->seq, g->cs, sizeof(*g->seq)); }
     g->seq[g->ns] = copy(actions); g->seq_index[h] = g->ns + 1;
     if (strstr(actions, "\"PUSH\"")) action_labels(g, actions);
@@ -1260,7 +1344,7 @@ static size_t name_hash(const char *name) {
 static void state_index_grow(Graph *g) {
     size_t cap = g->index_cap ? g->index_cap * 2 : 128;
     while (cap <= (g->n + 1) * 2) {
-        if (cap > SIZE_MAX / 2) die("state index too large");
+        if (cap > SIZE_MAX / 2) die_at(input_location, "state index too large");
         cap *= 2;
     }
     size_t *slots = grow(NULL, cap, sizeof(*slots));
@@ -1279,7 +1363,7 @@ static State *graph_state(Graph *g, const char *name, char mode) {
     while (g->state_index[h]) {
         s = &g->state[g->state_index[h] - 1];
         if (!strcmp(s->name, name)) {
-            if (s->mode != mode) die("state mode conflict");
+            if (s->mode != mode) die_at(input_location, "state mode conflict");
             return s;
         }
         h = (h + 1) & (g->index_cap - 1);
@@ -1316,16 +1400,19 @@ static void label_add(Graph *g, const char *name) {
 }
 static void action_labels(Graph *g, const char *actions) {
     JDoc d; int a;
+    InputLocation saved_json = json_location;
+    json_location = input_location;
     jparse_text(&d, actions, (long)strlen(actions), "prune action");
-    if (d.n[0].type != JARR) die("action sequence is not an array");
+    json_location = saved_json;
+    if (d.n[0].type != JARR) die_at(input_location, "action sequence is not an array");
     for (a = jkid(&d, 0); a >= 0; a = jnext(&d, a)) {
         int op = -1, arg;
         if (d.n[a].type != JARR || (op = jkid(&d, a)) < 0 || d.n[op].type != JSTR)
-            die("invalid action entry");
+            die_at(input_location, "invalid action entry");
         if (!jstris(&d, op, "PUSH")) continue;
         arg = jnext(&d, op);
         if (arg < 0 || d.n[arg].type != JSTR || jnext(&d, arg) >= 0)
-            die("invalid PUSH action");
+            die_at(input_location, "invalid PUSH action");
         {
             size_t n = (size_t)d.n[arg].slen; char *name = grow(NULL, n + 1, 1);
             memcpy(name, d.buf + d.n[arg].str, n); name[n] = 0;
@@ -1359,14 +1446,15 @@ static void edge_set(Graph *g, const char *name, char mode, const char *key,
     s->edge[s->n++] = (Edge){copy(key), copy(target), id};
     if (s->key_index && n >= 0) s->key_index[n] = (int)s->n;
 }
-typedef struct { char *key, *target, *actions; } DRule;
-typedef struct { char *name; DRule *rules; size_t n, cap; char *def_target, *def_actions; } DRow;
+typedef struct { char *key, *target, *actions; InputLocation source; } DRule;
+typedef struct { char *name; DRule *rules; size_t n, cap; char *def_target, *def_actions; InputLocation source; } DRow;
 typedef struct { DRow *rows; size_t n, cap; } DTable;
 static DRow *drow(DTable *t, const char *name) {
     size_t i;
     for (i = 0; i < t->n; i++) if (!strcmp(t->rows[i].name, name)) return &t->rows[i];
     if (t->n == t->cap) { t->cap = t->cap ? t->cap * 2 : 32; t->rows = grow(t->rows, t->cap, sizeof(*t->rows)); }
     memset(&t->rows[t->n], 0, sizeof(*t->rows));
+    t->rows[t->n].source = input_location;
     t->rows[t->n].name = copy(name); return &t->rows[t->n++];
 }
 static DRule *drule(DRow *r, const char *key) {
@@ -1386,7 +1474,7 @@ static int domain_has(Value *domain, const char *key) {
 }
 static Value *numeric_domain(int lo, int hi) {
     Value *v = value_new(JARR); int i;
-    if (lo < 0 || hi < lo || hi > 1000000) die("invalid numeric domain");
+    if (lo < 0 || hi < lo || hi > 1000000) die_at(input_location, "invalid numeric domain");
     for (i = lo; i < hi; i++) { Value *n = value_new(JINT); n->number = i; value_put(v, NULL, n); }
     return v;
 }
@@ -1403,24 +1491,24 @@ static void keys_simple(Value *out, const char *text, Value *domain, Value *clas
             }
         } else if (*part == '@') {
             Value *members = value_get(classes, part + 1);
-            if (!members || members->kind != JARR || !members->n) die("unknown key class");
+            if (!members || members->kind != JARR || !members->n) die_at(input_location, "unknown key class");
             for (i = 0; i < members->n; i++) {
                 char number[64]; const char *s = value_scalar_text(members->items[i].value, number);
-                if (!domain_has(domain, s)) die("key class outside domain");
+                if (!domain_has(domain, s)) die_at(input_location, "key class outside domain");
                 value_put(out, NULL, value_string(s));
             }
         } else if (domain_has(domain, part)) value_put(out, NULL, value_string(part));
         else if ((dash = strchr(part, '-')) != NULL) {
             char *end; long lo, hi, k;
-            *dash = 0; lo = strtol(part, &end, 10); if (*end) die("invalid key range");
+            *dash = 0; lo = strtol(part, &end, 10); if (*end) die_at(input_location, "invalid key range");
             hi = strtol(dash + 1, &end, 10); if (*end || lo < 0 || hi < lo || hi > 1000000)
-                die("invalid key range");
+                die_at(input_location, "invalid key range");
             for (k = lo; k <= hi; k++) {
                 char number[64]; snprintf(number, sizeof(number), "%ld", k);
-                if (!domain_has(domain, number)) die("key range outside domain");
+                if (!domain_has(domain, number)) die_at(input_location, "key range outside domain");
                 value_put(out, NULL, value_string(number));
             }
-        } else die("unknown observation key");
+        } else die_at(input_location, "unknown observation key");
         if (!comma) break; part = comma + 1;
     }
     free(work);
@@ -1445,9 +1533,10 @@ static Value *keys_expand(const char *text, Value *domain, Value *classes) {
 static void drow_put(DRow *r, const char *key, const char *target, const char *actions,
                      int overlay, int fill_only) {
     DRule *slot = drule(r, key);
-    if (slot->target && !overlay && !fill_only) die("overlapping delta rules");
+    if (slot->target && !overlay && !fill_only) die_at(input_location, "overlapping delta rules");
     if (slot->target && fill_only) return;
     slot->target = copy(target); slot->actions = copy(actions);
+    slot->source = input_location;
 }
 static const char *delta_bound_name(const char *name, Value *bindings) {
     return name[0] == '$' && bindings ? value_text(value_get(bindings, name + 1)) : name;
@@ -1459,11 +1548,12 @@ static void install_delta_text_bound(Graph *g, FILE *f, char mode, Value *domain
     while ((s = line(f))) {
         char *field[4]; int n; DRow *r; Value *keys;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 4); if (n != 4) die("delta table column count");
+        n = fields_tab(s, field, 4); if (n != 4) die_at(input_location, "delta table column count");
         r = drow(&table, delta_bound_name(field[0], bindings));
         if (!strcmp(field[1], "*") && !overlay) {
-            if (r->def_target) die("repeated delta default");
+            if (r->def_target) die_at(input_location, "repeated delta default");
             r->def_target = copy(!strcmp(field[2], "$lexer") ? lexer : delta_bound_name(field[2], bindings));
+            r->source = input_location;
             r->def_actions = copy(field[3]); free(s); continue;
         }
         keys = keys_expand(field[1], domain, classes);
@@ -1474,30 +1564,35 @@ static void install_delta_text_bound(Graph *g, FILE *f, char mode, Value *domain
         }
         free(s);
     }
-    if (ferror(f)) die("delta table read failed");
+    if (ferror(f)) die_at(input_location, "delta table read failed");
     for (i = 0; i < table.n; i++) {
         DRow *r = &table.rows[i]; int omit = 0;
+        input_location = r->source;
         if (skip) for (j = 0; j < skip->n; j++) if (!strcmp(value_text(skip->items[j].value), r->name)) omit = 1;
         if (omit) continue;
         if (!overlay) for (j = 0; j < domain->n; j++) {
             char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
             DRule *slot = drule(r, key);
             if (!slot->target) {
-                if (!r->def_target) die("incomplete delta state");
+                if (!r->def_target) die_at(input_location, "incomplete delta state");
                 slot->target = r->def_target; slot->actions = r->def_actions;
+                slot->source = r->source;
             }
         }
         if (ordered) {
             for (j = 0; j < domain->n; j++) {
                 char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
                 DRule *rule = drule(r, key); char *acts;
-                if (!rule->target) die("ordered delta state incomplete");
+                input_location = rule->source.path ? rule->source : r->source;
+                if (!rule->target) die_at(input_location, "ordered delta state incomplete");
                 acts = expand_actions(rule->actions, bindings, sequences, (int)domain->items[j].value->number);
                 edge_set(g, r->name, mode, key, rule->target, acts); free(acts);
             }
         } else for (j = 0; j < r->n; j++) {
-            DRule *rule = &r->rules[j]; char *acts = expand_actions(rule->actions, bindings, sequences,
-                                       mode == 't' ? -1 : atoi(rule->key));
+            DRule *rule = &r->rules[j]; char *acts;
+            input_location = rule->source;
+            acts = expand_actions(rule->actions, bindings, sequences,
+                                  mode == 't' ? -1 : atoi(rule->key));
             edge_set(g, r->name, mode, rule->key, rule->target, acts); free(acts);
         }
     }
@@ -1509,35 +1604,36 @@ static void install_delta_text(Graph *g, FILE *f, char mode, Value *domain, Valu
 }
 static FILE *buffer_file(const Buffer *b) {
     FILE *f = tmpfile();
-    if (!f) die("cannot open temporary table");
-    if (b->n && fwrite(b->s, 1, b->n, f) != b->n) die("temporary table write failed");
+    if (!f) die_at(input_location, "cannot open temporary table");
+    if (b->n && fwrite(b->s, 1, b->n, f) != b->n) die_at(input_location, "temporary table write failed");
+    input_register(f, (InputLocation){input_location.path, 0}, b->source, b->lines);
     rewind(f); return f;
 }
 static void output(FILE *f, const Graph *g);
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names);
 static Value *lex_sequences_flags(int argc, char **argv) {
-    FILE *f = fopen("exec/lex/output-manifest.tsv", "rb"); char *s;
-    if (!f) die("cannot open lex output manifest");
+    FILE *f = open_input("exec/lex/output-manifest.tsv", "rb"); char *s;
+    if (!f) die_at(input_location, "cannot open lex output manifest");
     while ((s = line(f))) {
         char *field[9]; int n; Value *opts, *facts, *sequences;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("lex output manifest columns");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "lex output manifest columns");
         if (!when_true(field[3], argc, argv)) { free(s); continue; }
         opts = value_json(field[8], "lex output options");
         facts = load_facts_expr(field[4]); sequences = mapseq_construct(opts, facts);
         close_in(f); free(s); return sequences;
     }
-    die("missing lex output row"); return NULL;
+    die_at(input_location, "missing lex output row"); return NULL;
 }
 static Value *lex_sequences(void) { return lex_sequences_flags(0, NULL); }
 static void inspect_pp_start(const char *outpath) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *table, *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *table, *out;
     char *s; Value *sequences = NULL; Graph g = {0};
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp output options");
             sequences = mapseq_construct(opts, facts);
@@ -1545,12 +1641,12 @@ static void inspect_pp_start(const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || !sequences) die("pp start sequences missing");
-    table = fopen("exec/pp/start-byte.tsv", "rb"); if (!table) die("cannot open pp start table");
+    if (ferror(manifest) || close_in(manifest) || !sequences) die_at(input_location, "pp start sequences missing");
+    table = open_input("exec/pp/start-byte.tsv", "rb"); if (!table) die_at(input_location, "cannot open pp start table");
     install_delta_text(&g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
-    if (close_in(table)) die("pp start table close failed");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (close_in(table)) die_at(input_location, "pp start table close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_delta_template(const char *section, const char *outpath) {
     Graph g = {0}; Buffer rows = expand_template_section("lex", section);
@@ -1558,9 +1654,9 @@ static void inspect_delta_template(const char *section, const char *outpath) {
     Value *domain = numeric_domain(0, 257), *sequences = lex_sequences();
     FILE *f = buffer_file(&rows), *out;
     install_delta_text(&g, f, 'b', domain, classes, sequences, 1, 0, NULL, "DISPATCH");
-    if (close_in(f)) die("temporary table close failed");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (close_in(f)) die_at(input_location, "temporary table close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void install_lex_table(Graph *g, const char *stem, Value *opts,
                               Value *facts, Value *sequences, const char *lexer) {
@@ -1570,47 +1666,47 @@ static void install_lex_table(Graph *g, const char *stem, Value *opts,
     d = value_get(opts, "domain"); dk = value_get(opts, "domain_keys");
     if (d) {
         if (d->kind != JARR || d->n != 2 || d->items[0].value->kind != JINT ||
-            d->items[1].value->kind != JINT) die("invalid lex table domain");
+            d->items[1].value->kind != JINT) die_at(input_location, "invalid lex table domain");
         domain = numeric_domain((int)d->items[0].value->number, (int)d->items[1].value->number);
     } else if (dk) domain = value_path(facts, value_text(dk));
     else domain = numeric_domain(0, 257);
     d = value_get(opts, "classes"); if (d) classes = value_path(facts, value_text(d));
     skip = value_get(opts, "skip"); d = value_get(opts, "ordered");
     ordered = d && d->kind == JBOOL && d->number;
-    if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die("lex table path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open lex table");
+    if (snprintf(path, sizeof(path), "exec/lex/%s", stem) >= (int)sizeof(path)) die_at(input_location, "lex table path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open lex table");
     install_delta_text(g, f, mode[0], domain, classes, sequences, 0, ordered, skip, lexer);
-    if (close_in(f)) die("lex table close failed");
+    if (close_in(f)) die_at(input_location, "lex table close failed");
 }
 static void inspect_delta_table(const char *stem, const char *outpath) {
-    Graph g = {0}; FILE *manifest = fopen("exec/lex/gen-manifest.tsv", "rb"), *out;
+    Graph g = {0}; FILE *manifest = open_input("exec/lex/gen-manifest.tsv", "rb"), *out;
     char *s; int found = 0;
-    if (!manifest) die("cannot open lex manifest");
+    if (!manifest) die_at(input_location, "cannot open lex manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n; Value *opts, *facts;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("lex manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "lex manifest column count");
         if (strcmp(field[0], "table") || strcmp(field[1], stem) || !when_true(field[3], 0, NULL)) {
             free(s); continue;
         }
-        if (++found > 1) die("ambiguous lex table");
+        if (++found > 1) die_at(input_location, "ambiguous lex table");
         opts = value_json(field[8], "lex table options"); facts = load_facts_expr(field[4]);
         install_lex_table(&g, stem, opts, facts, lex_sequences(), "DISPATCH");
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("lex table not found");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "lex table not found");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void finish_lex(Graph *g, const char *start) {
     Value *facts = load_fact("lex-domains"), *rows = value_get(facts, "lex-domains");
     size_t i, j; int *reach; size_t *todo, nreach = 0, ntodo = 0;
-    if (!rows || rows->kind != JARR) die("missing lex domains");
+    if (!rows || rows->kind != JARR) die_at(input_location, "missing lex domains");
     for (i = 0; i < g->n; i++) for (j = 0; j < g->state[i].n; j++) {
         const char *target = g->state[i].edge[j].target; size_t k;
         if (!strcmp(target, "HALT")) continue;
         for (k = 0; k < g->n && strcmp(g->state[k].name, target); k++);
-        if (k == g->n) { fprintf(stderr, "lex target state missing: %s -> %s\n", g->state[i].name, target); die("lex target state missing"); }
+        if (k == g->n) { fprintf(stderr, "lex target state missing: %s -> %s\n", g->state[i].name, target); die_at(input_location, "lex target state missing"); }
     }
     for (i = 0; i < g->n; i++) {
         State *st = &g->state[i]; Value *domain = NULL;
@@ -1622,7 +1718,7 @@ static void finish_lex(Graph *g, const char *start) {
                 break;
             }
         }
-        if (!domain || domain->kind != JARR) die("lex mode lacks domain");
+        if (!domain || domain->kind != JARR) die_at(input_location, "lex mode lacks domain");
         for (j = 0; j < domain->n; j++) {
             char number[64]; const char *key = value_scalar_text(domain->items[j].value, number);
             if (!edge_has(st, key)) edge_set(g, st->name, st->mode, key, "HALT", "[[\"REJECT\",\"unreachable\"]]");
@@ -1631,7 +1727,7 @@ static void finish_lex(Graph *g, const char *start) {
     reach = grow(NULL, g->n, sizeof(*reach)); memset(reach, 0, g->n * sizeof(*reach));
     todo = grow(NULL, g->n, sizeof(*todo));
     for (i = 0; i < g->n && strcmp(g->state[i].name, start); i++);
-    if (i == g->n) die("lex start missing");
+    if (i == g->n) die_at(input_location, "lex start missing");
     todo[ntodo++] = i; reach[i] = 1;
     while (ntodo) {
         State *st = &g->state[todo[--ntodo]];
@@ -1639,7 +1735,7 @@ static void finish_lex(Graph *g, const char *start) {
             size_t k; const char *target = st->edge[j].target;
             if (!strcmp(target, "HALT")) continue;
             for (k = 0; k < g->n && strcmp(g->state[k].name, target); k++);
-            if (k == g->n) die("lex target state missing after fill");
+            if (k == g->n) die_at(input_location, "lex target state missing after fill");
             if (!reach[k]) { reach[k] = 1; todo[ntodo++] = k; }
         }
     }
@@ -1670,7 +1766,7 @@ static State *find_state(Graph *g, const char *name) {
     size_t i;
     for (i = 0; i < g->n; i++) if (!strcmp(g->state[i].name, name)) return &g->state[i];
     fprintf(stderr, "template edit state: %s\n", name);
-    die("template edit state missing"); return NULL;
+    die_at(input_location, "template edit state missing"); return NULL;
 }
 typedef struct { Value *pattern, *actions; char *skip, *require; } CompanionRule;
 static int manifest_glob_span(const char *pattern, size_t length, const char *text) {
@@ -1792,12 +1888,12 @@ static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
         signature = NULL;
         for (size_t ci = 0; ci < nc; ci++)
             if (cache[ci].mapped == mapped) { signature = cache[ci].signature; break; }
-        if (!signature) die("companion cache signature missing");
+        if (!signature) die_at(input_location, "companion cache signature missing");
         for (size_t ei = 0; ei < st->n; ei++) {
             Edge *edge = &st->edge[ei];
             int oldseq = edge->seq;
             if (oldseq < 0 || (size_t)oldseq >= original_ns)
-                die("companion sequence outside original graph");
+                die_at(input_location, "companion sequence outside original graph");
             if (mapped[oldseq]) { edge->seq = mapped[oldseq] - 1; continue; }
             misses++;
             {
@@ -1858,12 +1954,12 @@ static void manifest_companions(Graph *g, CompanionRule *rules, size_t nr) {
                     for (size_t xi = 0; xi < r->actions->n; xi++) {
                         Value *template = r->actions->items[xi].value;
                         Value *expanded = value_new(JARR);
-                        if (template->kind != JARR) die("companion action must be an array");
+                        if (template->kind != JARR) die_at(input_location, "companion action must be an array");
                         for (size_t vi = 0; vi < template->n; vi++) {
                             Value *v = template->items[vi].value;
                             if (v->kind == JSTR && v->s[0] == '$' && isdigit((unsigned char)v->s[1])) {
                                 size_t ix = (size_t)atoi(v->s + 1);
-                                if (action->kind != JARR || ix >= action->n) die("companion field missing");
+                                if (action->kind != JARR || ix >= action->n) die_at(input_location, "companion field missing");
                                 v = action->items[ix].value;
                             }
                             value_put(expanded, NULL, v);
@@ -1901,7 +1997,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
     f = buffer_file(edits);
     while ((s = line(f))) {
         char *field[5]; int n = fields_tab(s, field, 5); size_t i;
-        if (n != 5) die("template edit column count");
+        if (n != 5) die_at(input_location, "template edit column count");
         for (int k = 1; k <= 3; k++) {
             Value *bound = field[k][0] == '$' ? value_get(bindings, field[k] + 1) : NULL;
             if (bound && bound->kind == JSTR) field[k] = bound->s;
@@ -1927,7 +2023,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             int *mapped = grow(NULL, ncache, sizeof(*mapped));
             char **targets = grow(NULL, ncache, sizeof(*targets));
             memset(mapped, 0, ncache * sizeof(*mapped));
-            if (spec->kind != JARR || spec->n != 2) die("group-tail spec must be [op, prefix]");
+            if (spec->kind != JARR || spec->n != 2) die_at(input_location, "group-tail spec must be [op, prefix]");
             op = value_text(spec->items[0].value); prefix = value_text(spec->items[1].value); plen = strlen(prefix);
             if (!groups) groups = value_new(JOBJ);
             for (size_t si = 0; si < g->n; si++) {
@@ -1949,7 +2045,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                     const char *msg; char *text;
                     /* A sequence has one result within this row. Keep first-seen message numbering,
                        but parse/free each distinct sequence once instead of once per edge. */
-                    if ((size_t)oldseq >= ncache) die("group-tail sequence outside initial pool");
+                    if ((size_t)oldseq >= ncache) die_at(input_location, "group-tail sequence outside initial pool");
                     if (mapped[oldseq]) {
                         if (mapped[oldseq] > 0) {
                             edge->target = copy(targets[oldseq]); edge->seq = mapped[oldseq] - 1;
@@ -1992,7 +2088,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             Value *inserts = value_json(field[4], "insert-after insertions");
             size_t original_ns = g->ns; int *memo;
             if (patterns->kind != JARR || inserts->kind != JARR || patterns->n != inserts->n)
-                die("insert-after needs one insertion per pattern");
+                die_at(input_location, "insert-after needs one insertion per pattern");
             memo = grow(NULL, original_ns ? original_ns : 1, sizeof(*memo));
             memset(memo, 0, original_ns * sizeof(*memo));
             for (size_t si = 0; si < g->n; si++) {
@@ -2050,7 +2146,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             size_t original_ns = g->ns;
             int *rewritten = grow(NULL, original_ns ? original_ns : 1, sizeof(*rewritten));
             if (pattern->kind != JARR || replacement->kind != JARR)
-                die("rewrite-tail actions must be arrays");
+                die_at(input_location, "rewrite-tail actions must be arrays");
             memset(rewritten, 0, original_ns * sizeof(*rewritten));
             for (size_t si = 0; si < g->n; si++) {
                 State *st = &g->state[si];
@@ -2070,7 +2166,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                     Value *acts;
                     int match;
                     if (oldseq < 0 || (size_t)oldseq >= original_ns)
-                        die("rewrite-tail sequence outside original graph");
+                        die_at(input_location, "rewrite-tail sequence outside original graph");
                     if (rewritten[oldseq]) {
                         if (rewritten[oldseq] > 0) {
                             edge->seq = rewritten[oldseq] - 1;
@@ -2113,7 +2209,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             size_t original_ns = g->ns, original_n = g->n;
             int *rewritten = grow(NULL, original_ns ? original_ns : 1, sizeof(*rewritten));
             char **remainder = grow(NULL, original_ns ? original_ns : 1, sizeof(*remainder));
-            if (cut->kind != JARR || !cut->n) die("split-at pattern must be nonempty array");
+            if (cut->kind != JARR || !cut->n) die_at(input_location, "split-at pattern must be nonempty array");
             memset(rewritten, 0, original_ns * sizeof(*rewritten));
             memset(remainder, 0, original_ns * sizeof(*remainder));
             for (size_t si = 0; si < original_n; si++) {
@@ -2124,7 +2220,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                     Edge *edge = &g->state[si].edge[ei];
                     int oldseq = edge->seq;
                     if (oldseq < 0 || (size_t)oldseq >= original_ns)
-                        die("split-at sequence outside original graph");
+                        die_at(input_location, "split-at sequence outside original graph");
                     if (!rewritten[oldseq]) {
                         Value *acts = value_json(g->seq[oldseq], "split-at source actions");
                         size_t at;
@@ -2173,7 +2269,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
         for (i = 0; i < g->n && strcmp(g->state[i].name, field[1]); i++);
         if (i == g->n && strcmp(field[0], "copy") && strcmp(field[0], "fill-edge")) {
             fprintf(stderr, "template edit state missing: %s %s -> %s\n", field[0], field[1], field[2]);
-            die("template edit state missing");
+            die_at(input_location, "template edit state missing");
         }
         if (!strcmp(field[0], "drop-state")) {
             memmove(&g->state[i], &g->state[i + 1], (g->n - i - 1) * sizeof(*g->state));
@@ -2181,13 +2277,13 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
         } else if (!strcmp(field[0], "move-state") || !strcmp(field[0], "move")) {
             State moved = g->state[i];
             for (size_t j = 0; j < g->n; j++)
-                if (!strcmp(g->state[j].name, field[2])) die("move-state target exists");
+                if (!strcmp(g->state[j].name, field[2])) die_at(input_location, "move-state target exists");
             memmove(&g->state[i], &g->state[i + 1], (g->n - i - 1) * sizeof(*g->state));
             moved.name = copy(field[2]); g->state[g->n - 1] = moved;
         } else if (!strcmp(field[0], "drop-edge")) {
             State *st = &g->state[i]; size_t k;
             for (k = 0; k < st->n && strcmp(st->edge[k].key, field[2]); k++);
-            if (k == st->n) die("template drop-edge absent");
+            if (k == st->n) die_at(input_location, "template drop-edge absent");
             memmove(&st->edge[k], &st->edge[k + 1], (st->n - k - 1) * sizeof(*st->edge));
             st->n--;
             if (st->key_index) {
@@ -2201,11 +2297,11 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             State *st = &g->state[i];
             if (st->mode != field[2][0] || field[2][1] ||
                 (strcmp(field[3], "b") && strcmp(field[3], "r")))
-                die("template set-mode precondition failed");
+                die_at(input_location, "template set-mode precondition failed");
             st->mode = field[3][0];
         } else if (!strcmp(field[0], "prepend") || !strcmp(field[0], "append")) {
             State *st = &g->state[i]; Value *extra = value_json(field[4], "template sequence edit");
-            if (extra->kind != JARR) die("template sequence edit is not a list");
+            if (extra->kind != JARR) die_at(input_location, "template sequence edit is not a list");
             for (size_t j = 0; j < st->n; j++) {
                 Value *old = value_json(g->seq[st->edge[j].seq], "template old sequence");
                 Value *joined = value_new(JARR); char *actions;
@@ -2223,14 +2319,14 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
         } else if (!strcmp(field[0], "redirect")) {
             State *st = &g->state[i]; size_t j; Value *actions;
             for (j = 0; j < st->n && strcmp(st->edge[j].key, field[2]); j++);
-            if (j == st->n) die("template redirect edge missing");
+            if (j == st->n) die_at(input_location, "template redirect edge missing");
             actions = value_json(field[4], "template redirect sequence");
             st->edge[j].target = copy(field[3]);
             st->edge[j].seq = seq(g, value_json_text(actions));
         } else if (!strcmp(field[0], "fill-edge") || !strcmp(field[0], "insert-edge")) {
             State *st = i == g->n ? NULL : &g->state[i];
             if (st && edge_has(st, field[2])) {
-                if (!strcmp(field[0], "insert-edge")) die("template insert-edge duplicate");
+                if (!strcmp(field[0], "insert-edge")) die_at(input_location, "template insert-edge duplicate");
             } else {
                 char *actions = expand_actions(field[4], bindings, sequences, atoi(field[2]));
                 edge_set(g, field[1], st ? st->mode : mode, field[2], field[3], actions);
@@ -2242,9 +2338,9 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             Value *replacement = value_json(field[4], "copy-replace new actions");
             char *old_text = value_json_text(old);
             int found = 0;
-            if (replacement->kind != JARR) die("copy-replace replacement is not an array");
+            if (replacement->kind != JARR) die_at(input_location, "copy-replace replacement is not an array");
             for (size_t j = 0; j < g->n; j++)
-                if (!strcmp(g->state[j].name, field[2])) die("copy-replace target exists");
+                if (!strcmp(g->state[j].name, field[2])) die_at(input_location, "copy-replace target exists");
             if (g->n == g->cap) {
                 g->cap = g->cap ? g->cap * 2 : 64;
                 g->state = grow(g->state, g->cap, sizeof(*g->state));
@@ -2277,11 +2373,11 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                 }
             }
             free(old_text);
-            if (!found) die("copy-replace source action missing");
+            if (!found) die_at(input_location, "copy-replace source action missing");
         } else if (!strcmp(field[0], "clone-push")) {
             State source_state = g->state[i], *target_state;
             for (size_t j = 0; j < g->n; j++)
-                if (!strcmp(g->state[j].name, field[2])) die("clone-push target exists");
+                if (!strcmp(g->state[j].name, field[2])) die_at(input_location, "clone-push target exists");
             if (g->n == g->cap) {
                 g->cap = g->cap ? g->cap * 2 : 64;
                 g->state = grow(g->state, g->cap, sizeof(*g->state));
@@ -2299,16 +2395,16 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
                 Edge *edge = &target_state->edge[ei];
                 Value *acts = value_json(g->seq[edge->seq], "clone-push actions");
                 unsigned pushes = 0; char *text;
-                if (strcmp(edge->target, field[3])) die("clone-push target mismatch");
+                if (strcmp(edge->target, field[3])) die_at(input_location, "clone-push target mismatch");
                 for (size_t ai = 0; ai < acts->n; ai++) {
                     Value *act = acts->items[ai].value;
                     if (act->kind == JARR && act->n &&
                         !strcmp(value_text(act->items[0].value), "PUSH")) {
-                        if (act->n != 2) die("clone-push action arity");
+                        if (act->n != 2) die_at(input_location, "clone-push action arity");
                         act->items[1].value = value_string(field[4]); pushes++;
                     }
                 }
-                if (pushes != 1) die("clone-push requires one PUSH");
+                if (pushes != 1) die_at(input_location, "clone-push requires one PUSH");
                 text = value_json_text(acts); edge->seq = seq(g, text); free(text);
             }
             label_add(g, field[4]);
@@ -2317,9 +2413,9 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             const char *target = !strcmp(field[0], "copy") ? field[1] : field[2];
             State source_state, *copy_state;
             for (i = 0; i < g->n && strcmp(g->state[i].name, source); i++);
-            if (i == g->n) die("template copy source missing");
+            if (i == g->n) die_at(input_location, "template copy source missing");
             for (size_t j = 0; j < g->n; j++)
-                if (!strcmp(g->state[j].name, target)) die("template copy target exists");
+                if (!strcmp(g->state[j].name, target)) die_at(input_location, "template copy target exists");
             source_state = g->state[i];
             if (g->n == g->cap) {
                 g->cap = g->cap ? g->cap * 2 : 64;
@@ -2336,7 +2432,7 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
             }
         } else {
             fprintf(stderr, "template graph edit kind: %s\n", field[0]);
-            die("template graph edit kind is not yet covered");
+            die_at(input_location, "template graph edit kind is not yet covered");
         }
         free(g->state_index); g->state_index = NULL; g->index_cap = 0;
         state_index_grow(g); free(s);
@@ -2346,11 +2442,12 @@ static void manifest_template_edits(Graph *g, Buffer *edits, Value *bindings,
         manifest_companions(g, pending, np);
     }
     free(pending);
-    if (ferror(f) || close_in(f)) die("template edit read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "template edit read failed");
 }
 typedef struct { Graph *graph; TRow *row; } EditContext;
 static void edit_row_visit(Value *scope, void *arg) {
     EditContext *ctx = arg; Graph *g = ctx->graph; TRow *r = ctx->row;
+    input_location = r->source;
     char *a = template_subst(r->a, scope), *b = template_subst(r->b, scope);
     char *c = template_subst(r->c, scope), *d = template_subst(r->d, scope);
     size_t i, j;
@@ -2358,8 +2455,8 @@ static void edit_row_visit(Value *scope, void *arg) {
         Value *pattern = value_json(a, "rewrite-tail pattern");
         Value *replacement = value_json(d, "rewrite-tail replacement");
         if (pattern->kind != JARR || !pattern->n || replacement->kind != JARR)
-            die("invalid rewrite-tail arrays");
-        if (strcmp(b, "-")) die("rewrite-tail skip list is not supported yet");
+            die_at(input_location, "invalid rewrite-tail arrays");
+        if (strcmp(b, "-")) die_at(input_location, "rewrite-tail skip list is not supported yet");
         for (i = 0; i < g->n; i++) {
             State *st = &g->state[i];
             for (j = 0; j < st->n; j++) {
@@ -2380,9 +2477,9 @@ static void edit_row_visit(Value *scope, void *arg) {
     } else if (!strcmp(r->kind, "redirect")) {
         State *st = find_state(g, a); Edge *e = NULL;
         for (i = 0; i < st->n; i++) if (!strcmp(st->edge[i].key, b)) { e = &st->edge[i]; break; }
-        if (!e) die("template redirect edge missing");
+        if (!e) die_at(input_location, "template redirect edge missing");
         e->target = copy(c); e->seq = seq(g, value_json_text(value_json(d, "redirect actions")));
-    } else die("unsupported lex graph edit");
+    } else die_at(input_location, "unsupported lex graph edit");
     free(a); free(b); free(c); free(d);
 }
 typedef struct { Graph *graph; TRow *row; } EditBlock;
@@ -2391,31 +2488,31 @@ static void edit_block_visit(Value *scope, void *arg) {
     tuple_walk(block->row->over, load_fact("lex-gen"), scope, edit_row_visit, &ctx);
 }
 static void sourcefacts_lex_edits(Graph *g) {
-    FILE *f = fopen("exec/lex/sourcefacts-template.tsv", "rb"); char *s;
+    FILE *f = open_input("exec/lex/sourcefacts-template.tsv", "rb"); char *s;
     Value *facts = load_fact("lex-gen");
-    if (!f) die("cannot open lex sourcefacts template");
+    if (!f) die_at(input_location, "cannot open lex sourcefacts template");
     while ((s = line(f))) {
         char *field[9]; int n; TRow row; EditBlock block; Value *scope;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9); if (n != 9 || strcmp(field[0], "envelope"))
-            die("invalid lex sourcefacts template row");
+            die_at(input_location, "invalid lex sourcefacts template row");
         row = (TRow){field[1], field[2], field[3], field[4], field[5], field[6], field[7], field[8], 0};
         block = (EditBlock){g, &row}; scope = value_new(JOBJ);
         tuple_walk(row.each, facts, scope, edit_block_visit, &block);
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("lex sourcefacts template read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "lex sourcefacts template read failed");
 }
 static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
-    FILE *f = fopen("exec/lex/gen-manifest.tsv", "rb"); char *s; Value *sequences = lex_sequences_flags(argc, argv);
+    FILE *f = open_input("exec/lex/gen-manifest.tsv", "rb"); char *s; Value *sequences = lex_sequences_flags(argc, argv);
     int envelope = has_flag(argc, argv, "typed") || has_flag(argc, argv, "positions") ||
                    has_flag(argc, argv, "locations") || has_flag(argc, argv, "sourcefacts");
     const char *inner_start = "DISPATCH";
-    if (!f) die("cannot open lex manifest");
+    if (!f) die_at(input_location, "cannot open lex manifest");
     while ((s = line(f))) {
         char *field[9]; int n; Value *opts, *facts;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("lex manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "lex manifest column count");
         if (strcmp(field[3], "fact:envelope") ? !when_true(field[3], argc, argv) : !envelope) {
             free(s); continue;
         }
@@ -2428,7 +2525,7 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
             FILE *rows = buffer_file(&lines);
             facts = load_facts_expr(field[4]); classes = value_get(facts, "classes");
             install_delta_text(g, rows, 'b', domain, classes, sequences, 1, 0, NULL, "DISPATCH");
-            if (close_in(rows)) die("lex template close failed");
+            if (close_in(rows)) die_at(input_location, "lex template close failed");
         } else if (!strcmp(field[0], "template") && !strcmp(field[1], "sourcefacts")) {
             sourcefacts_lex_edits(g);
         } else if (!strcmp(field[0], "template")) {
@@ -2437,21 +2534,21 @@ static void construct_lex(Graph *g, int argc, char **argv, const char *start) {
             opts = value_json(field[8], "lex template options");
             facts = load_facts_expr(field[4]);
             if (snprintf(path, sizeof(path), "exec/lex/%s-template.tsv", field[1]) >= (int)sizeof(path))
-                die("lex template path too long");
+                die_at(input_location, "lex template path too long");
             lines = expand_template_file(path, facts, field[2]);
             rows = buffer_file(&lines);
             mode = value_text(value_get(opts, "mode"));
             domain = value_get(opts, "domain_keys");
             domain = domain ? value_path(facts, value_text(domain)) : numeric_domain(0, 257);
             install_delta_text(g, rows, mode[0], domain, NULL, sequences, 1, 0, NULL, inner_start);
-            if (close_in(rows)) die("lex template close failed");
+            if (close_in(rows)) die_at(input_location, "lex template close failed");
         } else if (!strcmp(field[0], "let")) {
             if (!strcmp(field[7], "START=@str:LOC.magic0")) inner_start = "LOC.magic0";
             else if (!strcmp(field[7], "START=@str:SF.start")) inner_start = "SF.start";
-        } else if (strcmp(field[0], "call")) die("unsupported lex manifest op");
+        } else if (strcmp(field[0], "call")) die_at(input_location, "unsupported lex manifest op");
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("lex manifest read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "lex manifest read failed");
     finish_lex(g, start);
 }
 static void output(FILE *f, const Graph *g);
@@ -2463,29 +2560,32 @@ static const char *bound_name(const char *s, Value *bindings) {
 }
 static void install_plain_classes(Graph *g, const char *path, char mode,
                                   Value *bindings, Value *sequences, Value *classes) {
-    FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
-    if (!f) die("cannot open rule file");
+    FILE *f = open_input(path, "rb"); char *s; RuleSet rules = {0};
+    if (!f) die_at(input_location, "cannot open rule file");
     while ((s = line(f))) {
         char *field[4]; int n; RuleState *st;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 4); if (n != 4) die("plain rule column count");
-        if (!*field[0] || !*field[2]) die("empty rule state or target");
+        n = fields_tab(s, field, 4); if (n != 4) die_at(input_location, "plain rule column count");
+        if (!*field[0] || !*field[2]) die_at(input_location, "empty rule state or target");
         st = rule_state(&rules, bound_name(field[0], bindings));
         if (!strcmp(field[1], "*")) {
-            if (st->def_target) die("repeated default rule");
+            if (st->def_target) die_at(input_location, "repeated default rule");
             st->def_target = copy(bound_name(field[2], bindings));
             st->def_actions = copy(field[3]);
+            st->source = input_location;
         } else rule_keys_classes(st, field[1], bound_name(field[2], bindings), field[3], classes);
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("rule read failed");
-    if (!rules.n) die("empty rule file");
+    if (ferror(f) || close_in(f)) die_at(input_location, "rule read failed");
+    if (!rules.n) die_at(input_location, "empty rule file");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
+        input_location = st->source;
         int variable = st->def_actions && actions_depend_on_key(st->def_actions, sequences);
         char *fixed = (!st->def_actions || variable) ? NULL :
                       expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
+            input_location = st->rule[j].source;
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
             edge_add(g, st->name, mode, key, st->rule[j].target, actions);
@@ -2496,7 +2596,8 @@ static void install_plain_classes(Graph *g, const char *path, char mode,
             for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
             if (!found) {
                 char *actions;
-                if (!st->def_target) die("incomplete rule state");
+                input_location = st->source;
+                if (!st->def_target) die_at(input_location, "incomplete rule state");
                 actions = variable ? expand_actions(st->def_actions, bindings, sequences, k) : fixed;
                 number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
                 if (variable) free(actions);
@@ -2512,31 +2613,34 @@ static void install_plain(Graph *g, const char *path, char mode,
 static void install_section_domain_classes(Graph *g, const char *path, const char *section,
                                            char mode, Value *bindings, Value *sequences,
                                            Value *classes, Value *domain) {
-    FILE *f = fopen(path, "rb"); char *s; RuleSet rules = {0};
-    if (!f) die("cannot open section rule file");
+    FILE *f = open_input(path, "rb"); char *s; RuleSet rules = {0};
+    if (!f) die_at(input_location, "cannot open section rule file");
     while ((s = line(f))) {
         char *field[5]; int n; RuleState *st;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 5); if (n != 5) die("section rule column count");
+        n = fields_tab(s, field, 5); if (n != 5) die_at(input_location, "section rule column count");
         if (strcmp(field[0], section)) { free(s); continue; }
         if (getenv("UNISACC_SEED_TRACE") && strstr(path, "shape-result.tsv"))
             fprintf(stderr, "shape rule %s %s %s %s\n", field[1], field[2], field[3], field[4]);
-        if (!*field[1] || !*field[3]) die("empty section state or target");
+        if (!*field[1] || !*field[3]) die_at(input_location, "empty section state or target");
         st = rule_state(&rules, bound_name(field[1], bindings));
         if (!strcmp(field[2], "*")) {
-            if (st->def_target) die("repeated section default");
+            if (st->def_target) die_at(input_location, "repeated section default");
             st->def_target = copy(bound_name(field[3], bindings));
             st->def_actions = copy(field[4]);
+            st->source = input_location;
         } else rule_keys_classes(st, field[2], bound_name(field[3], bindings), field[4], classes);
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("section rule read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "section rule read failed");
     for (size_t i = 0; i < rules.n; i++) {
         RuleState *st = &rules.state[i]; char key[16];
+        input_location = st->source;
         int variable = st->def_actions && actions_depend_on_key(st->def_actions, sequences);
         char *fixed = (!st->def_actions || variable) ? NULL :
                       expand_actions(st->def_actions, bindings, sequences, 0);
         for (size_t j = 0; j < st->n; j++) {
+            input_location = st->rule[j].source;
             char *actions = expand_actions(st->rule[j].actions, bindings, sequences, st->rule[j].key);
             number_text(st->rule[j].key, key);
             edge_add(g, st->name, mode, key, st->rule[j].target, actions); free(actions);
@@ -2545,11 +2649,12 @@ static void install_section_domain_classes(Graph *g, const char *path, const cha
             int k = domain ? (int)domain->items[di].value->number : (int)di;
             int found = 0;
             if (domain && (domain->kind != JARR || domain->items[di].value->kind != JINT || k < 0 || k > 256))
-                die("invalid section domain");
+                die_at(input_location, "invalid section domain");
             for (size_t j = 0; j < st->n; j++) if (st->rule[j].key == k) { found = 1; break; }
             if (!found) {
                 char *actions;
-                if (!st->def_target) die("incomplete section state");
+                input_location = st->source;
+                if (!st->def_target) die_at(input_location, "incomplete section state");
                 actions = variable ? expand_actions(st->def_actions, bindings, sequences, k) : fixed;
                 number_text(k, key); edge_add(g, st->name, mode, key, st->def_target, actions);
                 if (variable) free(actions);
@@ -2568,28 +2673,28 @@ static void install_section(Graph *g, const char *path, const char *section,
     install_section_classes(g, path, section, mode, bindings, sequences, NULL);
 }
 static void install_prn_call(Graph *g) {
-    FILE *f = fopen("exec/parse/prn-manifest.tsv", "rb"); char *s;
+    FILE *f = open_input("exec/parse/prn-manifest.tsv", "rb"); char *s;
     Value *instances = NULL; char *factexpr = NULL, *bind = NULL, *opts_text = NULL;
     int loops = 0, body = 0;
-    if (!f) die("cannot open called manifest");
+    if (!f) die_at(input_location, "cannot open called manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("called manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "called manifest column count");
         if (!strcmp(field[0], "foreach")) {
             Value *facts, *opts;
-            if (loops++ || strcmp(field[4], "numeric-instances")) die("unsupported foreach declaration");
+            if (loops++ || strcmp(field[4], "numeric-instances")) die_at(input_location, "unsupported foreach declaration");
             facts = load_fact(field[4]); opts = value_json(field[8], "foreach options");
-            if (strcmp(value_text(value_get(opts, "over")), field[4])) die("unsupported foreach source");
+            if (strcmp(value_text(value_get(opts, "over")), field[4])) die_at(input_location, "unsupported foreach source");
             instances = value_path(facts, field[4]);
         } else if (!strcmp(field[0], ".rows")) {
-            if (body++ || strcmp(field[1], "numeric") || strcmp(field[2], "prn")) die("unsupported foreach body");
+            if (body++ || strcmp(field[1], "numeric") || strcmp(field[2], "prn")) die_at(input_location, "unsupported foreach body");
             factexpr = copy(field[4]); bind = copy(field[7]); opts_text = copy(field[8]);
-        } else die("unsupported called DSL op");
+        } else die_at(input_location, "unsupported called DSL op");
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("called manifest read failed");
-    if (loops != 1 || body != 1 || !instances || instances->kind != JARR) die("incomplete called manifest");
+    if (ferror(f) || close_in(f)) die_at(input_location, "called manifest read failed");
+    if (loops != 1 || body != 1 || !instances || instances->kind != JARR) die_at(input_location, "incomplete called manifest");
     for (size_t i = 0; i < instances->n; i++) {
         Value *item = instances->items[i].value, *facts = load_facts_expr(factexpr);
         Value *opts = value_json(opts_text, "called row options");
@@ -2603,16 +2708,16 @@ static void install_prn_call(Graph *g) {
     }
 }
 static void install_numout_call(Graph *g) {
-    FILE *f = fopen("exec/parse/numout-manifest.tsv", "rb"); char *s;
+    FILE *f = open_input("exec/parse/numout-manifest.tsv", "rb"); char *s;
     int rows = 0;
-    if (!f) die("cannot open numout manifest");
+    if (!f) die_at(input_location, "cannot open numout manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9);
         if (n != 9 || strcmp(field[0], "rows") || strcmp(field[1], "numeric") ||
             strcmp(field[2], "numout") || strcmp(field[3], "-"))
-            die("unsupported numout manifest row");
+            die_at(input_location, "unsupported numout manifest row");
         {
             Value *facts = load_facts_expr(field[4]);
             Value *opts = value_json(field[8], "numout options");
@@ -2625,12 +2730,12 @@ static void install_numout_call(Graph *g) {
         rows++;
         free(s);
     }
-    if (ferror(f) || close_in(f) || rows != 1) die("numout manifest read failed");
+    if (ferror(f) || close_in(f) || rows != 1) die_at(input_location, "numout manifest read failed");
 }
 static Value *classes_for(Value *opts, Value *facts) {
     Value *spec = value_get(opts, "classmap"), *classes = value_new(JOBJ);
     if (!spec) return classes;
-    if (spec->kind != JOBJ) die("invalid classmap");
+    if (spec->kind != JOBJ) die_at(input_location, "invalid classmap");
     for (size_t i = 0; i < spec->n; i++) {
         Value *source = value_path(facts, value_text(spec->items[i].value));
         Value *array = value_new(JARR);
@@ -2647,35 +2752,35 @@ static void install_opt_rows(Graph *g, const char *stem, const char *section,
     Value *bindmap = value_get(opts, "bindmap"), *classes = classes_for(opts, facts);
     if (bindmap) {
         Value *map = value_path(facts, value_text(bindmap));
-        if (map->kind != JOBJ) die("bindmap is not an object");
+        if (map->kind != JOBJ) die_at(input_location, "bindmap is not an object");
         for (size_t i = 0; i < map->n; i++) value_put(bindings, map->items[i].key, map->items[i].value);
     }
     direct_bindings(bindings, bind, facts);
     if (exported) *exported = bindings;
     for (int i = 0; i < 2; i++) {
         if (snprintf(path, sizeof(path), "exec/opt/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
-            die("opt rule path too long");
+            die_at(input_location, "opt rule path too long");
         if (section && strcmp(section, "-"))
             install_section_classes(g, path, section, i ? 'r' : 'b', bindings, sequences, classes);
         else install_plain_classes(g, path, i ? 'r' : 'b', bindings, sequences, classes);
     }
 }
 static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
-    FILE *f = fopen("exec/opt/setup-template.tsv", "rb"); char *s; int rows = 0;
+    FILE *f = open_input("exec/opt/setup-template.tsv", "rb"); char *s; int rows = 0;
     Value *y = value_get(facts, "Y");
-    if (!f || !y || y->kind != JARR) die("invalid opt answer template");
+    if (!f || !y || y->kind != JARR) die_at(input_location, "invalid opt answer template");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9);
         if (n != 9 || strcmp(field[0], "answer") || strcmp(field[1], "answer") ||
-            strcmp(field[4], "rule") || strcmp(field[8], "[]")) die("unsupported opt answer template row");
+            strcmp(field[4], "rule") || strcmp(field[8], "[]")) die_at(input_location, "unsupported opt answer template row");
         if (!strcmp(field[3], "Y")) {
             for (size_t i = 0; i < y->n; i++) {
                 Value *item = y->items[i].value;
                 char key[32]; const char *name = bound_name(field[5], bindings);
                 Value *ix = value_get(item, "i");
-                if (!ix || ix->kind != JINT) die("invalid opt answer index");
+                if (!ix || ix->kind != JINT) die_at(input_location, "invalid opt answer index");
                 number_text((int)ix->number, key);
                 edge_add(g, name, 'r', key, value_text(value_get(item, "target")), "[]");
             }
@@ -2685,10 +2790,10 @@ static void install_opt_answer(Graph *g, Value *facts, Value *bindings) {
                 char key[16]; number_text(k, key);
                 edge_add(g, name, 'r', key, field[7], "[]");
             }
-        } else die("unsupported opt answer iterator");
+        } else die_at(input_location, "unsupported opt answer iterator");
         rows++; free(s);
     }
-    if (ferror(f) || close_in(f) || rows != 2) die("opt answer template read failed");
+    if (ferror(f) || close_in(f) || rows != 2) die_at(input_location, "opt answer template read failed");
 }
 /* Resolve manifest classes before applying any row-local classmap additions. */
 static Value *pp_row_classes(Value *opts, Value *facts) {
@@ -2711,31 +2816,31 @@ static Value *pp_field_classes(const char *options, Value *facts) {
         pp_row_classes(value_json(options, "pp row options"), facts);
 }
 static void inspect_pp_emit(const char *outpath, size_t index) {
-    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *emits = value_get(facts, "emits");
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest || !emits || emits->kind != JARR || index >= emits->n) die("invalid pp emit index");
+    if (!manifest || !emits || emits->kind != JARR || index >= emits->n) die_at(input_location, "invalid pp emit index");
     value_put(facts, "it", emits->items[index].value);
     {
         Value *it = value_get(facts, "it"), *special = value_get(it, "special"), *terminal = value_get(it, "terminal");
         char entry[64], test[64], need[64], next[64];
-        if (!special || !terminal || special->kind != JBOOL || terminal->kind != JBOOL) die("invalid pp emit facts");
+        if (!special || !terminal || special->kind != JBOOL || terminal->kind != JBOOL) die_at(input_location, "invalid pp emit facts");
         if (special->number) { strcpy(entry, "AEM"); strcpy(test, "AEMR"); strcpy(need, "RTP"); }
         else {
             if (snprintf(entry, sizeof(entry), "AEM%lld", value_get(it, "id")->number) >= (int)sizeof(entry) ||
                 snprintf(test, sizeof(test), "AEM%lldr", value_get(it, "id")->number) >= (int)sizeof(test) ||
-                snprintf(need, sizeof(need), "NEED%lld", value_get(it, "id")->number) >= (int)sizeof(need)) die("pp emit name too long");
+                snprintf(need, sizeof(need), "NEED%lld", value_get(it, "id")->number) >= (int)sizeof(need)) die_at(input_location, "pp emit name too long");
         }
         if (terminal->number) strcpy(next, "ACP0");
         else if (snprintf(next, sizeof(next), "AEM%lld", value_get(it, "end")->number) >= (int)sizeof(next))
-            die("pp emit successor too long");
+            die_at(input_location, "pp emit successor too long");
         value_put(facts, "emit_entry", value_string(entry)); value_put(facts, "emit_test", value_string(test));
         value_put(facts, "emit_need", value_string(need)); value_put(facts, "emit_next", value_string(next));
     }
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp autoinc manifest column count");
         if (!strcmp(field[0], ".rows") && !strcmp(field[1], "autoinc-emit")) {
             Value *bindings = value_new(JOBJ), *opts = value_json(field[8], "pp emit options");
             Value *sequences = mapseq_construct(opts, facts);
@@ -2746,38 +2851,38 @@ static void inspect_pp_emit(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp emit row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp emit row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_object_predefine(const char *outpath) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; Value *empty = value_new(JOBJ); char *s; int found = 0;
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], "object-predefine")) {
             Value *classes = pp_field_classes(field[8], load_facts_expr(field[4]));
             if (strcmp(field[2], "-") || strcmp(field[7], "-"))
-                die("unsupported pp object-predefine row");
+                die_at(input_location, "unsupported pp object-predefine row");
             install_plain_classes(&g, "exec/pp/object-predefine-byte.tsv", 'b', empty, NULL, classes);
             install_plain_classes(&g, "exec/pp/object-predefine-result.tsv", 'r', empty, NULL, classes);
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp object-predefine row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp object-predefine row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void pp_install_stem(Graph *g, const char *stem, const char *section,
                             Value *bindings, Value *sequences, Value *classes) {
     char path[1024];
     for (int i = 0; i < 2; i++) {
         if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
-            die("pp stem path too long");
+            die_at(input_location, "pp stem path too long");
         if (section && strcmp(section, "-"))
             install_section_classes(g, path, section, i ? 'r' : 'b', bindings, sequences, classes);
         else install_plain_classes(g, path, i ? 'r' : 'b', bindings, sequences, classes);
@@ -2785,14 +2890,14 @@ static void pp_install_stem(Graph *g, const char *stem, const char *section,
 }
 static void pp_install_standard(Graph *g);
 static void pp_install_prefix(Graph *g, int no_autoinc) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb");
     Value *sequences = NULL; char *s; int start = 0, rows = 0;
     char *flags[] = {"--no-autoinc"};
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "call") && !strcmp(field[1], "standard")) {
             pp_install_standard(g); free(s); continue;
         }
@@ -2801,33 +2906,32 @@ static void pp_install_prefix(Graph *g, int no_autoinc) {
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
             sequences = mapseq_construct(value_json(field[8], "pp prefix options"), load_facts_expr(field[4]));
         } else if (!strcmp(field[0], "table") && !strcmp(field[1], "start-byte.tsv")) {
-            FILE *table = fopen("exec/pp/start-byte.tsv", "rb");
-            if (!table || !sequences || start++) die("invalid pp prefix start");
+            FILE *table = open_input("exec/pp/start-byte.tsv", "rb");
+            if (!table || !sequences || start++) die_at(input_location, "invalid pp prefix start");
             install_delta_text(g, table, 'b', numeric_domain(0, 257), NULL, sequences, 0, 0, NULL, "START");
-            if (close_in(table)) die("pp start table close failed");
+            if (close_in(table)) die_at(input_location, "pp start table close failed");
         } else if (!strcmp(field[0], "rows") &&
                    (!strcmp(field[1], "cli") || !strcmp(field[1], "text") ||
                     !strcmp(field[1], "macro") || !strcmp(field[1], "pragma"))) {
             Value *bindings = value_new(JOBJ), *facts = load_facts_expr(field[4]);
-            if (strcmp(field[2], "-")) die("unsupported pp prefix row");
+            if (strcmp(field[2], "-")) die_at(input_location, "unsupported pp prefix row");
             direct_bindings(bindings, field[7], facts);
             pp_install_stem(g, field[1], NULL, bindings,
                             !strcmp(field[1], "cli") ? sequences : NULL, pp_field_classes(field[8], facts));
             rows++;
-        } else die("unsupported pp prefix manifest row");
+        } else die_at(input_location, "unsupported pp prefix manifest row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || start != 1 || rows != 4)
-        die("incomplete pp prefix");
+        die_at(input_location, "incomplete pp prefix");
 }
 static void inspect_pp_prefix(const char *outpath, int no_autoinc) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, no_autoinc);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
-typedef struct { int depth; char *raw; char *field[9]; } PPRow;
-static int pp_shared_predefines;   /* 0.0.32 B5: --shared-predefines (the product's e2) */
+typedef struct { int depth; char *raw; char *field[9]; InputLocation source; } PPRow;
 static Value *pp_env_copy(Value *env) {
     Value *copy = value_new(JOBJ);
     for (size_t i = 0; i < env->n; i++) value_put(copy, env->items[i].key, env->items[i].value);
@@ -2836,36 +2940,37 @@ static Value *pp_env_copy(Value *env) {
 static int pp_fact_when(const char *when, Value *facts) {
     int neg = *when == '!'; const char *key = when + neg;
     Value *v;
-    if (strncmp(key, "fact:", 5)) die("unsupported pp fact condition");
+    if (strncmp(key, "fact:", 5)) die_at(input_location, "unsupported pp fact condition");
     v = value_get(facts, key + 5);
     return !!(v && ((v->kind == JBOOL || v->kind == JINT) ? v->number : v->n)) != neg;
 }
 static void pp_autoinc_block(Graph *g, PPRow *rows, size_t lo, size_t hi, int depth, Value *env) {
     for (size_t i = lo; i < hi;) {
         PPRow *r = &rows[i]; char **f = r->field; size_t j = i + 1;
+        input_location = r->source;
         Value *facts = load_facts_expr(f[4]), *opts;
         while (j < hi && rows[j].depth > depth) j++;
-        if (r->depth != depth) die("invalid pp manifest nesting");
+        if (r->depth != depth) die_at(input_location, "invalid pp manifest nesting");
         for (size_t k = 0; k < env->n; k++) value_put(facts, env->items[k].key, env->items[k].value);
         opts = !strcmp(f[8], "-") ? value_new(JOBJ) : value_json(f[8], "pp autoinc options");
         if (!strcmp(f[0] + depth, "foreach")) {
             Value *over = value_get(opts, "over"), *items = value_path(facts, value_text(over));
             Value *as = value_get(opts, "as"), *pre = value_get(opts, "pre");
-            if (items->kind != JARR || j == i + 1) die("invalid pp foreach");
+            if (items->kind != JARR || j == i + 1) die_at(input_location, "invalid pp foreach");
             for (size_t n = 0; n < items->n; n++) {
                 Value *child = pp_env_copy(env), *ctx = pp_env_copy(facts);
                 value_put(child, as ? value_text(as) : "it", items->items[n].value);
                 value_put(ctx, as ? value_text(as) : "it", items->items[n].value);
                 if (pre) for (size_t p = 0; p < pre->n; p++) {
                     Value *pair = pre->items[p].value;
-                    if (pair->kind != JARR || pair->n != 2) die("invalid pp foreach pre");
+                    if (pair->kind != JARR || pair->n != 2) die_at(input_location, "invalid pp foreach pre");
                     value_put(child, value_text(pair->items[0].value),
                               value_path(ctx, value_text(pair->items[1].value)));
                 }
                 pp_autoinc_block(g, rows, i + 1, j, depth + 1, child);
             }
         } else if (strncmp(f[3], "fact:", 5) && strncmp(f[3], "!fact:", 6) && strcmp(f[3], "-")) {
-            die("unsupported pp autoinc condition");
+            die_at(input_location, "unsupported pp autoinc condition");
         } else if (!strcmp(f[3], "-") || pp_fact_when(f[3], facts)) {
             if (!strcmp(f[0] + depth, "let")) {
                 Value *b = value_new(JOBJ);
@@ -2878,55 +2983,56 @@ static void pp_autoinc_block(Graph *g, PPRow *rows, size_t lo, size_t hi, int de
                 direct_bindings(bindings, f[7], facts);
                 for (int k = 0; k < 2; k++) {
                     if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", f[1], k ? "result" : "byte") >= (int)sizeof(path))
-                        die("pp autoinc path too long");
+                        die_at(input_location, "pp autoinc path too long");
                     if (strcmp(f[2], "-"))
                         install_section_classes(g, path, f[2], k ? 'r' : 'b', bindings, sequences, classes);
                     else install_plain_classes(g, path, k ? 'r' : 'b', bindings, sequences, classes);
                 }
-            } else die("unsupported pp autoinc op");
+            } else die_at(input_location, "unsupported pp autoinc op");
         }
         i = j;
     }
 }
 static void pp_install_call_autoinc(Graph *g) {
-    FILE *f = fopen("exec/pp/autoinc-manifest.tsv", "rb");
+    FILE *f = open_input("exec/pp/autoinc-manifest.tsv", "rb");
     PPRow *rows = NULL; size_t n = 0, cap = 0; char *s;
     Value *env = value_new(JOBJ);
-    if (!f) die("cannot open pp autoinc manifest");
+    if (!f) die_at(input_location, "cannot open pp autoinc manifest");
     while ((s = line(f))) {
         PPRow *r; char *op; int cols, depth = 0;
         if (!*s || *s == '#') { free(s); continue; }
         if (n == cap) { cap = cap ? cap * 2 : 32; rows = grow(rows, cap, sizeof(*rows)); }
         r = &rows[n++]; r->raw = s; cols = fields_tab(s, r->field, 9);
-        if (cols != 9) die("pp autoinc manifest column count");
+        r->source = input_location;
+        if (cols != 9) die_at(input_location, "pp autoinc manifest column count");
         op = r->field[0]; while (op[depth] == '.') depth++;
         r->depth = depth;
     }
-    if (ferror(f) || close_in(f)) die("pp autoinc manifest read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "pp autoinc manifest read failed");
     pp_autoinc_block(g, rows, 0, n, 0, env);
 }
 static void inspect_pp_call_autoinc(const char *outpath) {
     Graph g = {0}; FILE *out;
     pp_install_call_autoinc(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_through_autoinc(const char *outpath, int no_autoinc) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, no_autoinc);
     if (!no_autoinc) pp_install_call_autoinc(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void pp_install_body_before_dsw(Graph *g) {
-    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s;
+    FILE *f = open_input("exec/pp/body-manifest.tsv", "rb"); char *s;
     Value *seqenv = NULL;
     int active = 0, scans = 0, obj = 0, assembly = 0, linedir = 0;
-    if (!f) die("cannot open pp body manifest");
+    if (!f) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp body column count");
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
             seqenv = mapseq_construct(value_json(field[8], "pp body sequences"), load_facts_expr(field[4]));
         }
@@ -2943,28 +3049,21 @@ static void pp_install_body_before_dsw(Graph *g) {
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "assembly") &&
                    !strcmp(field[2], "predefine")) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ), *seqs = value_new(JOBJ);
-            if (!seqenv || !value_get(seqenv, "objname")) die("pp object name sequence missing");
+            if (!seqenv || !value_get(seqenv, "objname")) die_at(input_location, "pp object name sequence missing");
             direct_bindings(bind, field[7], facts); value_put(seqs, "name", value_get(seqenv, "objname"));
             pp_install_stem(g, field[1], field[2], bind, seqs, pp_field_classes(field[8], facts)); assembly++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "linedir")) {
             Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
             direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL, pp_field_classes(field[8], facts)); linedir++;
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "shared-predefine")) {
-            /* --shared-predefines: predefines come from resources; it replaces the per-target foreach */
-            if (strcmp(field[3], "shared-predefines")) die("unsupported shared-predefine condition");
-            if (pp_shared_predefines) {
-                Value *facts = load_facts_expr(field[4]), *bind = value_new(JOBJ);
-                direct_bindings(bind, field[7], facts); pp_install_stem(g, field[1], NULL, bind, NULL, pp_field_classes(field[8], facts));
-            }
-        } else if (!strcmp(field[0], "foreach") && pp_shared_predefines) {
-            if (strcmp(field[3], "!shared-predefines")) die("unsupported pp predefine foreach condition");
-            free(s); break;
+            /* These inspect profiles use per-target predefinitions. */
+            if (strcmp(field[3], "shared-predefines")) die_at(input_location, "unsupported shared-predefine condition");
         } else if (!strcmp(field[0], "foreach")) {
             Value *facts = load_facts_expr(field[4]);
             Value *predef = value_get(value_get(facts, "predef"), "lnx/x86_64");
             Value *opts = value_json("{\"mapseq\":{\"pname\":[{\"acts\":[[\"SBCLR\"],[\"@bytes\",\"{it[name]}\"]]}]}}", "pp predefine sequences");
             if (!predef || predef->kind != JARR || strcmp(field[8], "{\"over\": \"predef.{target}\"}"))
-                die("unsupported pp target predefinitions");
+                die_at(input_location, "unsupported pp target predefinitions");
             for (size_t i = 0; i < predef->n; i++) {
                 Value *ctx = load_facts_expr("pp-gen+pp-layout"), *bind = value_new(JOBJ);
                 Value *seqs;
@@ -2979,41 +3078,41 @@ static void pp_install_body_before_dsw(Graph *g) {
                 pp_install_stem(g, "assembly", "predefine", bind, seqs, NULL);
             }
             free(s); break;
-        } else die("unsupported pp body row before dsw");
+        } else die_at(input_location, "unsupported pp body row before dsw");
         free(s);
     }
     if (ferror(f) || close_in(f) || scans != 1 || obj != 1 || assembly != 1 || linedir != 1)
-        die("incomplete pp body before dsw");
+        die_at(input_location, "incomplete pp body before dsw");
 }
 static void pp_install_dsw(Graph *g) {
-    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s; int found = 0;
-    if (!f) die("cannot open pp body manifest");
+    FILE *f = open_input("exec/pp/body-manifest.tsv", "rb"); char *s; int found = 0;
+    if (!f) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp body column count");
         if (!strcmp(field[0], "template") && !strcmp(field[1], "dsw")) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp dsw options");
             Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
             Buffer lines = expand_template_file("exec/pp/dsw-template.tsv", facts, field[2]);
             FILE *table = buffer_file(&lines);
-            if (strcmp(value_text(value_get(opts, "mode")), "r")) die("pp dsw mode changed");
+            if (strcmp(value_text(value_get(opts, "mode")), "r")) die_at(input_location, "pp dsw mode changed");
             install_delta_text(g, table, 'r', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (close_in(table)) die("pp dsw table close failed");
+            if (close_in(table)) die_at(input_location, "pp dsw table close failed");
             found++;
         }
         free(s);
     }
-    if (ferror(f) || close_in(f) || found != 1) die("pp dsw declaration missing");
+    if (ferror(f) || close_in(f) || found != 1) die_at(input_location, "pp dsw declaration missing");
 }
 static void pp_install_body_after_dsw(Graph *g) {
-    FILE *f = fopen("exec/pp/body-manifest.tsv", "rb"); char *s; int active = 0;
+    FILE *f = open_input("exec/pp/body-manifest.tsv", "rb"); char *s; int active = 0;
     int actions = 0, rows = 0, escape = 0, accept = 0;
-    if (!f) die("cannot open pp body manifest");
+    if (!f) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp body column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp body column count");
         if (!active && !strcmp(field[0], "template") && !strcmp(field[1], "dsw")) {
             active = 1; free(s); continue;
         }
@@ -3022,13 +3121,13 @@ static void pp_install_body_after_dsw(Graph *g) {
         if (!strcmp(field[0], "foreach") && !strcmp(field[4], "pp-gen+pp-layout")) {
             Value *facts = load_facts_expr(field[4]), *items = value_get(facts, "dactions");
             char *body = line(f);
-            if (!items || items->kind != JARR || !body) die("invalid pp directive action loop");
+            if (!items || items->kind != JARR || !body) die_at(input_location, "invalid pp directive action loop");
             for (size_t i = 0; i < items->n; i++) {
                 Value *ctx = load_facts_expr(field[4]), *bind = value_new(JOBJ);
                 Value *it = items->items[i].value;
                 char *bf[9]; char *local = copy(body);
                 if (fields_tab(local, bf, 9) != 9 || strcmp(bf[0], ".rows") ||
-                    strcmp(bf[1], "directive-action")) die("unsupported pp directive action body");
+                    strcmp(bf[1], "directive-action")) die_at(input_location, "unsupported pp directive action body");
                 value_put(ctx, "it", it); value_put(ctx, "name", value_get(it, "name"));
                 value_put(ctx, "section", value_get(it, "section"));
                 direct_bindings(bind, bf[7], ctx);
@@ -3044,9 +3143,9 @@ static void pp_install_body_after_dsw(Graph *g) {
             Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
             Buffer lines = expand_template_file("exec/pp/escape-template.tsv", facts, field[2]);
             FILE *table = buffer_file(&lines);
-            if (strcmp(value_text(value_get(opts, "mode")), "b")) die("pp escape mode changed");
+            if (strcmp(value_text(value_get(opts, "mode")), "b")) die_at(input_location, "pp escape mode changed");
             install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (close_in(table)) die("pp escape table close failed");
+            if (close_in(table)) die_at(input_location, "pp escape table close failed");
             escape++;
         } else if (!strcmp(field[0], "rows") &&
                    (!strcmp(field[1], "directive-body") || !strcmp(field[1], "include-location") ||
@@ -3058,7 +3157,7 @@ static void pp_install_body_after_dsw(Graph *g) {
             Value *bindmap = opts ? value_get(opts, "bindmap") : NULL;
             if (bindmap) {
                 Value *extra = value_path(facts, value_text(bindmap));
-                if (extra->kind != JOBJ) die("pp bindmap is not an object");
+                if (extra->kind != JOBJ) die_at(input_location, "pp bindmap is not an object");
                 for (size_t i = 0; i < extra->n; i++)
                     value_put(bind, extra->items[i].key, extra->items[i].value);
             }
@@ -3068,18 +3167,18 @@ static void pp_install_body_after_dsw(Graph *g) {
             /* No --locations flag in the default product route. */
         } else if (!strcmp(field[0], ".rows")) {
             /* Consumed with the preceding foreach declaration. */
-        } else die("unsupported pp body row after dsw");
+        } else die_at(input_location, "unsupported pp body row after dsw");
         free(s);
     }
     if (ferror(f) || close_in(f) || actions != 1 || rows != 7 || escape != 1 || accept != 1)
-        die("incomplete pp body after dsw");
+        die_at(input_location, "incomplete pp body after dsw");
 }
 static void pp_move_state(Graph *g, const char *from, const char *to) {
     size_t i;
     for (i = 0; i < g->n; i++) if (!strcmp(g->state[i].name, from)) break;
-    if (i == g->n) die("pp sourcefacts state to move missing");
+    if (i == g->n) die_at(input_location, "pp sourcefacts state to move missing");
     for (size_t j = 0; j < g->n; j++) if (!strcmp(g->state[j].name, to))
-        die("pp sourcefacts destination exists");
+        die_at(input_location, "pp sourcefacts destination exists");
     {
         State st = g->state[i];
         memmove(g->state + i, g->state + i + 1, (g->n - i - 1) * sizeof(*g->state));
@@ -3097,7 +3196,7 @@ static void pp_copy_state(Graph *g, const char *from, const char *to) {
         g->state = grow(g->state, g->cap, sizeof(*g->state));
     }
     st = graph_state(g, to, mode);
-    if (st->n) die("pp sourcefacts copy destination exists");
+    if (st->n) die_at(input_location, "pp sourcefacts copy destination exists");
     old = find_state(g, from); /* graph_state may have reallocated the state array */
     if (st->cap < n) { st->cap = n; st->edge = grow(st->edge, n, sizeof(*st->edge)); }
     for (size_t i = 0; i < n; i++) {
@@ -3111,92 +3210,32 @@ static void pp_copy_state(Graph *g, const char *from, const char *to) {
     }
     st->n = n;
 }
-static void pp_sourcefacts_edit(Graph *g, const char *section) {
-    FILE *f = fopen("exec/pp/sourcefacts-template.tsv", "rb"); char *s; int edits = 0;
-    if (!f) die("cannot open pp sourcefacts template");
-    while ((s = line(f))) {
-        char *field[9]; int n;
-        if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp sourcefacts template column count");
-        if (strcmp(field[0], section)) { free(s); continue; }
-        if (strcmp(field[1], "entry") || strcmp(field[2], "-") || strcmp(field[3], "-"))
-            die("unsupported pp sourcefacts edit loop");
-        if (!strcmp(field[4], "move-state")) pp_move_state(g, field[5], field[6]);
-        else if (!strcmp(field[4], "label")) label_add(g, field[5]);
-        else if (!strcmp(field[4], "rewrite-tail")) {
-            if (strcmp(field[5], "[[\"ACCEPT\"]]") || *field[6] ||
-                strcmp(field[7], "SF.finish") || strcmp(field[8], "[]"))
-                die("unsupported pp sourcefacts tail rewrite");
-            {
-                size_t old_n = g->ns;
-                int *rewritten = grow(NULL, old_n, sizeof(*rewritten));
-                for (size_t i = 0; i < old_n; i++) rewritten[i] = -1;
-                for (size_t i = 0; i < g->n; i++) {
-                    State *st = &g->state[i];
-                    for (size_t j = 0; j < st->n; j++) {
-                        Edge *e = &st->edge[j]; int id = e->seq;
-                        if ((size_t)id >= old_n) die("sourcefacts sequence index changed");
-                        if (rewritten[id] == -1) {
-                            rewritten[id] = -2;
-                            if (strstr(g->seq[id], "\"ACCEPT\"")) {
-                                Value *acts = value_json(g->seq[id], "pp sourcefacts edge actions");
-                                if (acts->n) {
-                                    Value *last = acts->items[acts->n - 1].value;
-                                    if (last->kind == JARR && last->n == 1 &&
-                                        !strcmp(value_text(last->items[0].value), "ACCEPT")) {
-                                        acts->n--;
-                                        rewritten[id] = seq(g, value_json_text(acts));
-                                    }
-                                }
-                            }
-                        }
-                        if (rewritten[id] >= 0) {
-                            e->target = copy(field[7]); e->seq = rewritten[id];
-                        }
-                    }
-                }
-                free(rewritten);
-            }
-        } else if (!strcmp(field[4], "copy")) pp_copy_state(g, field[6], field[5]);
-        else die("unsupported pp sourcefacts edit");
-        edits++; free(s);
-    }
-    if (ferror(f) || close_in(f) || edits != (!strcmp(section, "pre") ? 3 : 1))
-        die("pp sourcefacts edits missing");
-}
-static void pp_install_sourcefacts(Graph *g) {
-    Value *empty = value_new(JOBJ);
-    pp_sourcefacts_edit(g, "pre");
-    pp_install_stem(g, "sourcefacts", NULL, empty, NULL, NULL);
-    pp_sourcefacts_edit(g, "post");
-}
 static void inspect_pp_through_linedir(const char *outpath, int with_dsw) {
     Graph g = {0}; FILE *out;
     pp_install_prefix(&g, 0); pp_install_call_autoinc(&g); pp_install_body_before_dsw(&g);
     if (with_dsw) pp_install_dsw(&g);
     if (with_dsw > 1) pp_install_body_after_dsw(&g);
-    if (with_dsw > 2) { pp_install_sourcefacts(&g); finish(&g); }
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_header(const char *outpath, size_t index) {
-    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *headers = value_get(facts, "headers");
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest || !headers || headers->kind != JARR || index >= headers->n) die("invalid pp header index");
+    if (!manifest || !headers || headers->kind != JARR || index >= headers->n) die_at(input_location, "invalid pp header index");
     value_put(facts, "it", headers->items[index].value);
     {
         Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal"); char next[64];
-        if (terminal->kind != JBOOL) die("invalid pp header terminal");
+        if (terminal->kind != JBOOL) die_at(input_location, "invalid pp header terminal");
         if (terminal->number) strcpy(next, "AEM");
         else if (snprintf(next, sizeof(next), "AH%lld_0", value_get(it, "end")->number) >= (int)sizeof(next))
-            die("pp header successor too long");
+            die_at(input_location, "pp header successor too long");
         value_put(facts, "header_next", value_string(next));
     }
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp autoinc manifest column count");
         if (!strcmp(field[0], ".rows") && !strcmp(field[1], "assembly") &&
             !strcmp(field[2], "header")) {
             Value *bindings = value_new(JOBJ);
@@ -3214,7 +3253,7 @@ static void inspect_pp_header(const char *outpath, size_t index) {
                 sequences = mapseq_construct(opts, facts);
                 for (int k = 0; k < 2; k++) {
                     if (snprintf(path, sizeof(path), "exec/pp/autoinc-name-%s.tsv", k ? "result" : "byte") >= (int)sizeof(path))
-                        die("pp name path too long");
+                        die_at(input_location, "pp name path too long");
                     install_plain_classes(&g, path, k ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
                 }
             }
@@ -3222,28 +3261,28 @@ static void inspect_pp_header(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 2) die("pp header rows missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 2) die_at(input_location, "pp header rows missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_body(const char *outpath, size_t index) {
-    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *bodies = value_get(facts, "bodies");
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest || !bodies || bodies->kind != JARR || index >= bodies->n) die("invalid pp body index");
+    if (!manifest || !bodies || bodies->kind != JARR || index >= bodies->n) die_at(input_location, "invalid pp body index");
     value_put(facts, "it", bodies->items[index].value);
     {
         Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal"); char next[64];
-        if (terminal->kind != JBOOL) die("invalid pp body terminal");
+        if (terminal->kind != JBOOL) die_at(input_location, "invalid pp body terminal");
         if (terminal->number) strcpy(next, "LNDEF");
         else if (snprintf(next, sizeof(next), "LNB%lld", value_get(it, "end")->number) >= (int)sizeof(next))
-            die("pp body successor too long");
+            die_at(input_location, "pp body successor too long");
         value_put(facts, "body_next", value_string(next));
     }
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp autoinc manifest column count");
         if (!strcmp(field[0], ".rows") &&
             (!strcmp(field[1], "ftrim-libc-body") ||
              (!strcmp(field[1], "assembly") && !strcmp(field[2], "predefine")))) {
@@ -3254,7 +3293,7 @@ static void inspect_pp_body(const char *outpath, size_t index) {
             if (opts) sequences = mapseq_construct(opts, facts);
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", field[1], i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp body path too long");
+                    die_at(input_location, "pp body path too long");
                 if (assembly) install_section_classes(&g, path, "predefine", i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
                 else install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
             }
@@ -3262,52 +3301,52 @@ static void inspect_pp_body(const char *outpath, size_t index) {
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 2) die("pp body rows missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 2) die_at(input_location, "pp body rows missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_key(const char *outpath, size_t index) {
-    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Value *facts = load_facts_expr("pp-autoinc-gen+pp-layout"), *keys = value_get(facts, "keys");
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest || !keys || keys->kind != JARR || index >= keys->n) die("invalid pp key index");
+    if (!manifest || !keys || keys->kind != JARR || index >= keys->n) die_at(input_location, "invalid pp key index");
     value_put(facts, "it", keys->items[index].value);
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp autoinc manifest column count");
         if (!strcmp(field[0], ".rows") && !strcmp(field[1], "ftrim-libc-key")) {
             Value *it = value_get(facts, "it"), *terminal = value_get(it, "terminal");
             Value *bindings = value_new(JOBJ), *opts = value_json(field[8], "pp key options");
             Value *sequences; char path[1024], next[64];
-            if (terminal->kind != JBOOL) die("invalid pp key terminal");
+            if (terminal->kind != JBOOL) die_at(input_location, "invalid pp key terminal");
             if (terminal->number) strcpy(next, "LNB0");
             else if (snprintf(next, sizeof(next), "LNK%lld", value_get(it, "end")->number) >= (int)sizeof(next))
-                die("pp key successor too long");
+                die_at(input_location, "pp key successor too long");
             value_put(facts, "key_next", value_string(next));
             direct_bindings(bindings, field[7], facts);
             sequences = mapseq_construct(opts, facts);
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/ftrim-libc-key-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp key path too long");
+                    die_at(input_location, "pp key path too long");
                 install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_row_classes(opts, facts));
             }
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp key row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp key row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_autoinc(const char *stem, const char *outpath) {
-    FILE *manifest = fopen("exec/pp/autoinc-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/autoinc-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest) die("cannot open pp autoinc manifest");
+    if (!manifest) die_at(input_location, "cannot open pp autoinc manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp autoinc manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp autoinc manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
             Value *opts = value_json(field[8], "pp autoinc options"), *sequences = mapseq_construct(opts, facts);
@@ -3316,77 +3355,77 @@ static void inspect_pp_autoinc(const char *stem, const char *outpath) {
             direct_bindings(bindings, field[7], facts);
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/%s-%s.tsv", stem, i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp autoinc path too long");
+                    die_at(input_location, "pp autoinc path too long");
                 install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, classes);
             }
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp autoinc row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp autoinc row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_locations(const char *outpath) {
-    FILE *manifest = fopen("exec/pp/locations-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/locations-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest) die("cannot open pp locations manifest");
+    if (!manifest) die_at(input_location, "cannot open pp locations manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp locations manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp locations manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], "location")) {
             Value *facts = load_facts_expr("locations+pp-layout"), *bindings = value_new(JOBJ);
-            const char *names[] = {"SPLB", "IRLN", "IRNL", "IRNAME"};
+            const char *names[] = {"SPLB", "IRLN", "IRNL", "IRFULLNAME", "LDRAW", "LDUSER", "LDNUM", "LDNM"};
             char path[1024]; size_t j;
-            for (j = 0; j < 4; j++) value_put(bindings, names[j], value_get(facts, names[j]));
+            for (j = 0; j < sizeof names / sizeof names[0]; j++) value_put(bindings, names[j], value_get(facts, names[j]));
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/location-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp location path too long");
+                    die_at(input_location, "pp location path too long");
                 install_plain_classes(&g, path, i ? 'r' : 'b', bindings, NULL, pp_field_classes(field[8], facts));
             }
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp locations row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp locations row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_template(const char *stem, const char *outpath) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "template") && !strcmp(field[1], stem)) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp template options");
             Value *domain = value_path(facts, value_text(value_get(opts, "domain_keys")));
             const char *mode = value_text(value_get(opts, "mode"));
             char path[1024]; Buffer lines; FILE *rows;
             if (snprintf(path, sizeof(path), "exec/pp/%s-template.tsv", stem) >= (int)sizeof(path))
-                die("pp template path too long");
+                die_at(input_location, "pp template path too long");
             lines = expand_template_file(path, facts, field[2]); rows = buffer_file(&lines);
             install_delta_text(&g, rows, mode[0], domain, NULL, NULL, 0, 0, NULL, "START");
-            if (close_in(rows)) die("pp template close failed");
+            if (close_in(rows)) die_at(input_location, "pp template close failed");
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp template row missing or repeated");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp template row missing or repeated");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_assembly(const char *section, const char *outpath) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; Value *mapseq = NULL; int found = 0;
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
             mapseq = mapseq_construct(value_json(field[8], "pp output options"),
                                       load_facts_expr(field[4]));
@@ -3394,7 +3433,7 @@ static void inspect_pp_assembly(const char *section, const char *outpath) {
                    !strcmp(field[2], section)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
             Value *sequences = value_new(JOBJ);
-            if (!strcmp(field[3], "locations")) die("unsupported pp assembly row");
+            if (!strcmp(field[3], "locations")) die_at(input_location, "unsupported pp assembly row");
             direct_bindings(bindings, field[7], facts);
             if (mapseq && value_get(mapseq, "objname"))
                 value_put(sequences, "name", value_get(mapseq, "objname"));
@@ -3404,41 +3443,41 @@ static void inspect_pp_assembly(const char *section, const char *outpath) {
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp assembly row missing or repeated");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp assembly row missing or repeated");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_rows(const char *stem, const char *outpath, int no_autoinc) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; char *s; int found = 0;
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem) &&
             when_true(field[3], no_autoinc, no_autoinc ? (char *[]){"--no-autoinc"} : NULL)) {
             Value *facts = load_facts_expr(field[4]), *bindings = value_new(JOBJ);
             if (strcmp(field[2], "-") || strcmp(field[6], "-"))
-                die("pp row has unsupported section or sequence");
+                die_at(input_location, "pp row has unsupported section or sequence");
             direct_bindings(bindings, field[7], facts);
             pp_install_stem(&g, stem, NULL, bindings, NULL, pp_field_classes(field[8], facts));
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp row missing or repeated");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp row missing or repeated");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_pp_cli(const char *outpath, int no_autoinc) {
-    FILE *manifest = fopen("exec/pp/body-manifest.tsv", "rb"), *out;
+    FILE *manifest = open_input("exec/pp/body-manifest.tsv", "rb"), *out;
     Graph g = {0}; Value *sequences = NULL; char *s; int found = 0;
-    if (!manifest) die("cannot open pp body manifest");
+    if (!manifest) die_at(input_location, "cannot open pp body manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("pp manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "pp manifest column count");
         if (!strcmp(field[0], "let") && !strcmp(field[4], "pp-gen+pp-layout")) {
             Value *facts = load_facts_expr(field[4]), *opts = value_json(field[8], "pp output options");
             sequences = mapseq_construct(opts, facts);
@@ -3449,41 +3488,46 @@ static void inspect_pp_cli(const char *outpath, int no_autoinc) {
             direct_bindings(bindings, field[7], facts);
             for (int i = 0; i < 2; i++) {
                 if (snprintf(path, sizeof(path), "exec/pp/cli-%s.tsv", i ? "result" : "byte") >= (int)sizeof(path))
-                    die("pp CLI path too long");
+                    die_at(input_location, "pp CLI path too long");
                 install_plain_classes(&g, path, i ? 'r' : 'b', bindings, sequences, pp_field_classes(field[8], facts));
             }
             found++;
         }
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || found != 1) die("pp CLI row missing");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(manifest) || close_in(manifest) || found != 1) die_at(input_location, "pp CLI row missing");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
+static void manifest_graph_call_fields(Graph *g, const char *dir, char **fields,
+                                       int o2, Value *env);
+
 static void construct_opt(Graph *g, int o2) {
-    FILE *f = fopen("exec/opt/gen-manifest.tsv", "rb"); char *s;
+    FILE *f = open_input("exec/opt/gen-manifest.tsv", "rb"); char *s;
     Value *seqenv = value_new(JOBJ), *rounds = value_new(JOBJ), *empty = value_new(JOBJ);
     int prn = 0, numout = 0, scans = 0, maps = 0, setup = 0, answer = 0;
     int roundlet = 0, common = 0, level = 0, extra = 0;
     char *flags[] = {"--o2"};
     fresh_count = 0;
-    if (!f) die("cannot open opt manifest");
+    if (!f) die_at(input_location, "cannot open opt manifest");
     while ((s = line(f))) {
         char *field[9], path[1024]; int n;
         Value *opts;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("opt manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "opt manifest column count");
         if (!when_true(field[3], o2, flags)) { free(s); continue; }
         opts = !strcmp(field[8], "-") ? value_new(JOBJ) : value_json(field[8], "opt manifest options");
         if (!strcmp(field[0], "call") && !strcmp(field[1], "../parse/prn")) {
-            if (prn++) die("duplicate opt prn call");
+            if (prn++) die_at(input_location, "duplicate opt prn call");
             install_prn_call(g);
         } else if (!strcmp(field[0], "call") && !strcmp(field[1], "../parse/numout")) {
-            if (numout++) die("duplicate opt numout call");
+            if (numout++) die_at(input_location, "duplicate opt numout call");
             install_numout_call(g);
+        } else if (!strcmp(field[0], "call")) {
+            manifest_graph_call_fields(g, "exec/opt", field, o2, seqenv);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "scans")) {
             Value *facts = load_facts_expr(field[4]), *bindings;
-            if (scans++ || strcmp(field[2], "-")) die("unsupported opt scans row");
+            if (scans++ || strcmp(field[2], "-")) die_at(input_location, "unsupported opt scans row");
             bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
             install_plain(g, "exec/opt/scans-byte.tsv", 'b', bindings, empty);
             install_plain(g, "exec/opt/scans-result.tsv", 'r', bindings, empty);
@@ -3496,42 +3540,42 @@ static void construct_opt(Graph *g, int o2) {
             extra++;
         } else if (!strcmp(field[0], "let") && value_get(opts, "mapseq")) {
             Value *facts = load_facts_expr(field[4]); size_t i;
-            if (maps++) die("duplicate opt mapseq");
+            if (maps++) die_at(input_location, "duplicate opt mapseq");
             seqenv = mapseq_construct(opts, facts);
-            for (i = 0; i < seqenv->n; i++) if (!seqenv->items[i].value) die("empty mapped sequence");
+            for (i = 0; i < seqenv->n; i++) if (!seqenv->items[i].value) die_at(input_location, "empty mapped sequence");
         } else if (!strcmp(field[0], "template") && !strcmp(field[1], "setup") && o2) {
             Value *facts = load_facts_expr(field[4]); Value *bindings = value_new(JOBJ);
             if (answer++ || strcmp(field[2], "answer") || strcmp(field[7], "dispatch=$PP_b85"))
-                die("unsupported opt answer declaration");
+                die_at(input_location, "unsupported opt answer declaration");
             value_put(bindings, "dispatch", value_get(empty, "PP_b85"));
             install_opt_answer(g, facts, bindings);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "setup")) {
             Value *seq = value_new(JOBJ), *start = value_get(seqenv, o2 ? "start2" : "start1");
             if (setup++ || strcmp(field[2], "start") || !start ||
                 strcmp(field[6], o2 ? "data=$start2" : "data=$start1"))
-                die("unsupported opt setup row");
+                die_at(input_location, "unsupported opt setup row");
             value_put(seq, "data", start);
             install_section(g, "exec/opt/setup-byte.tsv", "start", 'b', empty, seq);
             install_section(g, "exec/opt/setup-result.tsv", "start", 'r', empty, seq);
         } else if (!strcmp(field[0], "let") && value_get(opts, "freshrows")) {
             Value *facts = load_facts_expr(field[4]);
-            if (roundlet++) die("duplicate opt rounds binding");
+            if (roundlet++) die_at(input_location, "duplicate opt rounds binding");
             rounds = fresh_bindings(opts, facts); direct_bindings(rounds, field[7], facts);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "rounds")) {
             const char *section = field[2];
             if (!strcmp(section, "common")) common++;
             else if (!strcmp(section, o2 ? "2" : "1")) level++;
-            else die("unsupported opt round section");
-            if (snprintf(path, sizeof(path), "exec/opt/rounds-byte.tsv") >= (int)sizeof(path)) die("rule path too long");
+            else die_at(input_location, "unsupported opt round section");
+            if (snprintf(path, sizeof(path), "exec/opt/rounds-byte.tsv") >= (int)sizeof(path)) die_at(input_location, "rule path too long");
             install_section(g, path, section, 'b', rounds, empty);
             install_section(g, "exec/opt/rounds-result.tsv", section, 'r', rounds, empty);
-        } else die("unsupported enabled opt DSL op");
+        } else die_at(input_location, "unsupported enabled opt DSL op");
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("opt manifest read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "opt manifest read failed");
     if (prn != 1 || numout != o2 || scans != 1 || maps != 1 || setup != 1 ||
         answer > o2 || extra != (o2 ? 6 : 0) || roundlet != 1 || common != 1 || level != 1)
-        die("incomplete opt manifest");
+        die_at(input_location, "incomplete opt manifest");
     finish(g);
 }
 static void inspect_bound_rows(const char *stage, const char *stem, const char *outpath,
@@ -3539,34 +3583,226 @@ static void inspect_bound_rows(const char *stage, const char *stem, const char *
     char manifest_path[1024], path[1024], *end; FILE *f, *out; char *s; int found = 0;
     Graph g = {0}; Value *empty = value_new(JOBJ);
     fresh_count = strtoul(initial, &end, 10);
-    if (end == initial || *end || fresh_count > 1000000) die("invalid initial fresh count");
+    if (end == initial || *end || fresh_count > 1000000) die_at(input_location, "invalid initial fresh count");
     if (snprintf(manifest_path, sizeof(manifest_path), "exec/%s/gen-manifest.tsv", stage) >= (int)sizeof(manifest_path))
-        die("manifest path too long");
-    f = fopen(manifest_path, "rb"); if (!f) die("cannot open manifest");
+        die_at(input_location, "manifest path too long");
+    f = open_input(manifest_path, "rb"); if (!f) die_at(input_location, "cannot open manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+        n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "manifest column count");
         if (!strcmp(field[0], "rows") && !strcmp(field[1], stem)) {
             Value *facts, *opts, *bindings;
-            if (++found > 1 || strcmp(field[2], "-") || strcmp(field[6], "-")) die("unsupported bound row shape");
+            if (++found > 1 || strcmp(field[2], "-") || strcmp(field[6], "-")) die_at(input_location, "unsupported bound row shape");
             facts = load_facts_expr(field[4]); opts = value_json(field[8], "manifest options");
             bindings = fresh_bindings(opts, facts); direct_bindings(bindings, field[7], facts);
-            if (snprintf(path, sizeof(path), "exec/%s/%s-byte.tsv", stage, stem) >= (int)sizeof(path)) die("rule path too long");
+            if (snprintf(path, sizeof(path), "exec/%s/%s-byte.tsv", stage, stem) >= (int)sizeof(path)) die_at(input_location, "rule path too long");
             install_plain(&g, path, 'b', bindings, empty);
-            if (snprintf(path, sizeof(path), "exec/%s/%s-result.tsv", stage, stem) >= (int)sizeof(path)) die("rule path too long");
+            if (snprintf(path, sizeof(path), "exec/%s/%s-result.tsv", stage, stem) >= (int)sizeof(path)) die_at(input_location, "rule path too long");
             install_plain(&g, path, 'r', bindings, empty);
         }
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("manifest read failed");
-    if (!found) die("bound row not found");
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "manifest read failed");
+    if (!found) die_at(input_location, "bound row not found");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
 }
+/* A frame-capable manifest also installs the diagnostic subroutine. Split
+   terminal REJECT actions, rather than changing their reason or executor ABI.
+   The saved continuation is registered by seq() before finish builds RET. */
+static void frame_rejects(Graph *g) {
+    size_t states = g->n, sequences = g->ns; int enabled = 0;
+    int *replacement;
+    for (size_t i = 0; i < states; i++)
+        if (!strcmp(g->state[i].name, "TF.diagnostic")) enabled = 1;
+    if (!enabled) return;
+    replacement = grow(NULL, sequences, sizeof(*replacement));
+    for (size_t i = 0; i < sequences; i++) replacement[i] = -1;
+    for (size_t i = 0; i < sequences; i++) {
+        Value *actions, *before, *after; size_t at; int channel = 0; char name[80], key[16];
+        char *prefix, *tail; Buffer push = {0};
+        if (!strstr(g->seq[i], "\"REJECT\"")) continue;
+        actions = value_json(g->seq[i], "frame rejection actions");
+        if (actions->kind != JARR) die_at(input_location, "frame actions are not an array");
+        for (at = 0; at < actions->n; at++) {
+            Value *action = actions->items[at].value;
+            if (action->kind == JARR && action->n &&
+                !strcmp(value_text(action->items[0].value), "REJECT")) break;
+            if (action->kind == JARR && action->n == 2 &&
+                !strcmp(value_text(action->items[0].value), "OSEL") && action->items[1].value->kind == JINT)
+                channel = (int)action->items[1].value->number;
+        }
+        if (at == actions->n) continue;
+        {
+            Value *reject = actions->items[at].value;
+            const char *reason = reject->n > 1 ? value_text(reject->items[1].value) : "";
+            if (!strcmp(reason, "unreachable") || !strcmp(reason, "tape truncated") || !*reason) continue;
+        }
+        before = value_new(JARR); after = value_new(JARR);
+        for (size_t j = 0; j < at; j++) value_put(before, NULL, actions->items[j].value);
+        for (size_t j = at; j < actions->n; j++) value_put(after, NULL, actions->items[j].value);
+        snprintf(name, sizeof name, "TF.reject.%lu", (unsigned long)i);
+        snprintf(key, sizeof key, "%d", channel);
+        buf_add(&push, "[[\"LDI\",\"tf_output\",", strlen("[[\"LDI\",\"tf_output\","));
+        buf_add(&push, key, strlen(key)); buf_add(&push, "],[\"PUSH\",", strlen("],[\"PUSH\","));
+        buf_quote(&push, name); buf_add(&push, "]]", 2);
+        {
+            Value *extra = value_json(push.s, "frame rejection continuation");
+            for (size_t j = 0; j < extra->n; j++) value_put(before, NULL, extra->items[j].value);
+        }
+        free(push.s); prefix = value_json_text(before); tail = value_json_text(after);
+        replacement[i] = seq(g, prefix);
+        for (int k = 0; k <= 256; k++) {
+            number_text(k, key); edge_add(g, name, 'r', key, "DEAD", tail);
+        }
+        free(prefix); free(tail);
+    }
+    for (size_t i = 0; i < states; i++) {
+        State *state = &g->state[i];
+        if (!strncmp(state->name, "TF.", 3)) continue;
+        for (size_t j = 0; j < state->n; j++) {
+            Edge *edge = &state->edge[j]; int old = edge->seq;
+            if (old >= 0 && (size_t)old < sequences && replacement[old] >= 0) {
+                /* Template state copies share targets; graph edits only replace them. */
+                edge->seq = replacement[old]; edge->target = copy("TF.diagnostic");
+            }
+        }
+    }
+    free(replacement);
+}
+
+static int frame_out_byte(const Value *a, int byte) {
+    return a->kind == JARR && a->n == 2 && a->items[0].value->kind == JSTR &&
+        !strcmp(a->items[0].value->s, "OUT") && a->items[1].value->kind == JINT && a->items[1].value->number == byte;
+}
+static int frame_output_action(const Value *a) {
+    const char *op;
+    if (a->kind != JARR || !a->n || a->items[0].value->kind != JSTR) return 0;
+    op = a->items[0].value->s;
+    return !strcmp(op,"OUT") || !strcmp(op,"OUTW") || !strcmp(op,"SPAN") || !strcmp(op,"SPAN2") ||
+        !strcmp(op,"SPANT") || !strcmp(op,"COPY") || !strcmp(op,"COPYT");
+}
+/* The last-source cache describes visible output, not a detached fragment.
+   Preserve all semantic actions and their result; LDI only invalidates metadata
+   after output cuts/switches and after replay of a saved byte span. */
+static void frame_coherence(Graph *g) {
+    size_t sequences = g->ns; int *mapped = grow(NULL, sequences, sizeof(*mapped));
+    Value *invalidate = value_json("[\"LDI\",\"tf_last_ready\",0]", "frame cache invalidation");
+    for (size_t i = 0; i < sequences; i++) {
+        const char *text = g->seq[i]; Value *actions, *copy; char *out;
+        int replay = strstr(text, "\"INPUSH\"") && strstr(text, "\"SPAN2\"");
+        mapped[i] = (int)i;
+        if (!replay && !strstr(text, "\"OCUT\"") && !strstr(text, "\"OCLR\"") && !strstr(text, "\"SWAP\"")) continue;
+        actions = value_json(text, "frame output ownership actions"); copy = value_new(JARR);
+        for (size_t j = 0; j < actions->n; j++) {
+            Value *action = actions->items[j].value; const char *op = value_text(action->items[0].value);
+            value_put(copy, NULL, action);
+            if (!strcmp(op, "OCUT") || !strcmp(op, "OCLR") || !strcmp(op, "SWAP") || (replay && !strcmp(op, "INPOP")))
+                value_put(copy, NULL, invalidate);
+        }
+        out = value_json_text(copy); mapped[i] = seq(g, out); free(out);
+    }
+    for (size_t i = 0; i < g->n; i++) {
+        State *state = &g->state[i];
+        if (!strncmp(state->name,"TF.",3) || !strncmp(state->name,"DP.",3) || !strncmp(state->name,"DIAG.",5)) continue;
+        for (size_t j = 0; j < state->n; j++)
+            if ((size_t)state->edge[j].seq < sequences) state->edge[j].seq = mapped[state->edge[j].seq];
+    }
+    free(mapped);
+}
+
+/* Split only known complete output lines, never token reads or partial operands.
+   A shared observation capture preserves the r/RI contract across source lookup. */
+static void frame_emissions(Graph *g) {
+    size_t states = g->n, serial = 0; int enabled = 0; Value *plans = value_new(JOBJ);
+    for (size_t i = 0; i < states; i++) if (!strcmp(g->state[i].name,"TF.current")) enabled = 1;
+    if (!enabled) return;
+    frame_coherence(g);
+    for (size_t si = 0; si < states; si++) {
+        size_t edges = g->state[si].n; const char *name = g->state[si].name;
+        Value *recent = NULL; int recent_seq = -1;
+        if (!strncmp(name,"TF.",3) || !strncmp(name,"DP.",3) || !strncmp(name,"DIAG.",5)) continue;
+        for (size_t ei = 0; ei < edges; ei++) {
+            int old = g->state[si].edge[ei].seq; const char *target = g->state[si].edge[ei].target;
+            if (!strstr(g->seq[old], "\"OUT\"")) continue;
+            Buffer cache = {0}; char number[32]; Value *plan;
+            if (recent && recent_seq == old && !strcmp(value_text(recent->items[2].value), target)) {
+                plan = recent;
+                goto frame_plan_ready;
+            }
+            snprintf(number,sizeof number,"%d:",old); buf_add(&cache,number,strlen(number)); buf_add(&cache,target,strlen(target));
+            plan = value_get(plans,cache.s);
+            if (!plan) {
+                Value *a = value_json(g->seq[old],"frame emission actions");
+                size_t *point = grow(NULL,a->n ? a->n : 1,sizeof(*point)), count = 0, last = SIZE_MAX;
+                const char *next = target; plan = value_new(JARR);
+                for (size_t i = 0; i + 1 < a->n; i++) {
+                    Value *x = a->items[i].value, *y = a->items[i+1].value;
+                    if ((last == SIZE_MAX || frame_out_byte(a->items[last].value,10)) &&
+                        ((frame_out_byte(x,32) && frame_out_byte(y,32)) ||
+                         (frame_out_byte(x,46) && (frame_out_byte(y,98) || frame_out_byte(y,115))))) point[count++] = i;
+                    if (frame_output_action(x)) last = i;
+                }
+                if (count) {
+                    for (size_t p = count; p-- > 0;) {
+                        Value *chunk = value_json("[[\"RLD\",\"te_result\"]]","frame observation restore");
+                        char label[80], key[16]; char *text;
+                        for (size_t i = point[p]; i < (p+1<count ? point[p+1] : a->n); i++) value_put(chunk,NULL,a->items[i].value);
+                        snprintf(label,sizeof label,"TE.emit.%lu",(unsigned long)serial++);
+                        if (p+1<count) { Value *push=value_new(JARR); value_put(push,NULL,value_string("PUSH")); value_put(push,NULL,value_string(next)); value_put(chunk,NULL,push); }
+                        text=value_json_text(chunk);
+                        for (int k=0;k<=256;k++) { number_text(k,key); edge_add(g,label,'r',key,p+1<count ? "TE.capture" : next,text); }
+                        free(text); next=graph_state(g,label,'r')->name;
+                    }
+                    {
+                        Value *prefix=value_new(JARR), *push=value_new(JARR), *id=value_new(JINT); char *text;
+                        for (size_t i=0;i<point[0];i++) value_put(prefix,NULL,a->items[i].value);
+                        value_put(push,NULL,value_string("PUSH")); value_put(push,NULL,value_string(next)); value_put(prefix,NULL,push);
+                        text=value_json_text(prefix); id->number=seq(g,text); free(text);
+                        value_put(plan,NULL,id); value_put(plan,NULL,value_string("TE.capture"));
+                    }
+                } else { Value *id=value_new(JINT); id->number=old; value_put(plan,NULL,id); value_put(plan,NULL,value_string(target)); }
+                free(point); value_put(plan,NULL,value_string(target)); value_put(plans,cache.s,plan);
+            }
+            free(cache.s);
+            recent = plan; recent_seq = old;
+frame_plan_ready:
+            g->state[si].edge[ei].seq=(int)plan->items[0].value->number;
+            if (strcmp(g->state[si].edge[ei].target,value_text(plan->items[1].value))) {
+                /* Targets can be shared by shallow template state copies. */
+                g->state[si].edge[ei].target=copy(value_text(plan->items[1].value));
+            }
+        }
+    }
+    for (int k=0;k<=256;k++) {
+        char key[16], acts[80]; number_text(k,key); snprintf(acts,sizeof acts,"[[\"LDI\",\"te_result\",%d]]",k);
+        edge_add(g,"TE.capture",'r',key,"TF.current",acts);
+    }
+}
+
 static void finish(Graph *g) {
     const char *unreachable = "[[\"REJECT\",\"unreachable\"]]";
     size_t initial; char key[16];
+    frame_rejects(g);
+    frame_emissions(g);
+    /* The installed manifest declares this capability. Keep every old START
+       edge intact: a parser may revisit START internally without rescanning
+       its entire input. Only the external JSON entry performs the guard. */
+    for (size_t i = 0; i < g->n; i++) {
+        int guard = !strcmp(g->state[i].name, "TF.check");
+        int prepare = !strcmp(g->state[i].name, "TF.prepare");
+        const char *entry = guard ? "TF.entry" : "TE.entry";
+        Buffer actions = {0};
+        if (!guard && !prepare) continue;
+        buf_add(&actions, "[[\"PUSH\",", strlen("[[\"PUSH\","));
+        buf_quote(&actions, g->external_start ? g->external_start : "START"); buf_add(&actions, "]]", 2);
+        for (int k = 0; k <= 256; k++) {
+            number_text(k, key); edge_add(g, entry, 'r', key, guard ? "TF.check" : "TF.prepare", actions.s);
+        }
+        free(actions.s); g->framed_entry = guard ? 1 : 2;
+        break;
+    }
     qsort(g->labels, g->nl, sizeof(*g->labels), label_compare);
     for (size_t i = 0; i < g->nl; i++)
         edge_add(g, "RET", 't', g->labels[i], g->labels[i], "[[\"POP\"]]");
@@ -3585,12 +3821,12 @@ static void finish(Graph *g) {
 /* Preserve the source order and nesting of a nine-column DSL manifest.
    end is the first row after this row's body, so the interpreter can skip a
    false foreach without scanning unrelated descendants. */
-typedef struct { char *cell[9]; size_t end; unsigned depth; } ManifestRow;
+typedef struct { char *cell[9]; size_t end; unsigned depth; InputLocation source; } ManifestRow;
 typedef struct { ManifestRow *row; size_t n, cap; } ManifestRows;
 static ManifestRows manifest_rows(const char *path) {
-    ManifestRows rows = {0}; FILE *f = fopen(path, "rb"); char *s;
+    ManifestRows rows = {0}; FILE *f = open_input(path, "rb"); char *s;
     size_t stack[128], sp = 0;
-    if (!f) die("cannot open manifest");
+    if (!f) die_at(input_location, "cannot open manifest");
     while ((s = line(f))) {
         ManifestRow *r; char *p; int col = 0, extra = 0;
         if (!*s || *s == '#') { free(s); continue; }
@@ -3599,9 +3835,10 @@ static ManifestRows manifest_rows(const char *path) {
             rows.row = grow(rows.row, rows.cap, sizeof(*rows.row));
         }
         r = &rows.row[rows.n]; memset(r, 0, sizeof(*r));
+        r->source = input_location;
         p = s; while (*p == '.') { r->depth++; p++; }
         if (r->depth >= 128 || (rows.n && r->depth > rows.row[rows.n - 1].depth + 1))
-            die("invalid manifest nesting");
+            die_at(input_location, "invalid manifest nesting");
         while (sp && rows.row[stack[sp - 1]].depth >= r->depth)
             rows.row[stack[--sp]].end = rows.n;
         while (col < 9) {
@@ -3611,12 +3848,12 @@ static ManifestRows manifest_rows(const char *path) {
             if (col == 9) { extra = 1; break; }
             p = tab + 1;
         }
-        if (extra) die("manifest column count");
+        if (extra) die_at(input_location, "manifest column count");
         while (col < 9) r->cell[col++] = copy("-");
         stack[sp++] = rows.n++;
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("manifest read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "manifest read failed");
     while (sp) rows.row[stack[--sp]].end = rows.n;
     return rows;
 }
@@ -3625,7 +3862,7 @@ static int manifest_truth(Value *v) {
     if (v->kind == JBOOL || v->kind == JINT) return v->number != 0;
     if (v->kind == JUINT) return v->unumber != 0;
     if (v->kind == JSTR || v->kind == JOBJ || v->kind == JARR) return v->n != 0;
-    die("invalid manifest truth value"); return 0;
+    die_at(input_location, "invalid manifest truth value"); return 0;
 }
 static int manifest_when(const char *when, Value *flags, Value *facts) {
     char *parts, *p;
@@ -3638,7 +3875,7 @@ static int manifest_when(const char *when, Value *flags, Value *facts) {
         if (!strncmp(key, "fact:", 5)) v = value_get(facts, key + 5);
         else {
             v = value_get(flags, key);
-            if (!v) die("unknown manifest flag");
+            if (!v) die_at(input_location, "unknown manifest flag");
         }
         truth = manifest_truth(v);
         if (truth == neg) { free(parts); return 0; }
@@ -3654,7 +3891,7 @@ static char *manifest_section(const char *section, Value *flags) {
         buf_add(&out, at, (size_t)(open - at));
         const char *end = strchr(open + 1, '}');
         const char *question, *name; size_t length; int neg = 0;
-        if (!end) die("manifest section bracket missing");
+        if (!end) die_at(input_location, "manifest section bracket missing");
         name = open + 1;
         if (*name == '!') { neg = 1; name++; }
         question = memchr(name, '?', (size_t)(end - name));
@@ -3675,12 +3912,12 @@ static char *manifest_section(const char *section, Value *flags) {
    (or formatted defaults), with key/value winning on a name collision. */
 static Value *manifest_foreach_map(Value *over, Value *join, Value *facts, Value *env) {
     Value *source = value_get(env, over->s + 1), *rows = value_new(JARR), *table = NULL;
-    if (!source || source->kind != JOBJ) die("foreach environment map is not an object");
+    if (!source || source->kind != JOBJ) die_at(input_location, "foreach environment map is not an object");
     if (join) {
         Value *path = value_get(join, "over");
-        if (join->kind != JOBJ || !path || path->kind != JSTR) die("invalid foreach join");
+        if (join->kind != JOBJ || !path || path->kind != JSTR) die_at(input_location, "invalid foreach join");
         table = value_path(facts, path->s);
-        if (table->kind != JARR) die("foreach join table is not an array");
+        if (table->kind != JARR) die_at(input_location, "foreach join table is not an array");
     }
     for (size_t i = 0; i < source->n; i++) {
         Value *row = value_new(JOBJ), *base = NULL;
@@ -3689,7 +3926,7 @@ static Value *manifest_foreach_map(Value *over, Value *join, Value *facts, Value
         if (join) {
             Value *on = value_get(join, "on"), *defaults = value_get(join, "default");
             if (!on || on->kind != JSTR || !defaults || defaults->kind != JOBJ)
-                die("invalid foreach join fields");
+                die_at(input_location, "invalid foreach join fields");
             for (size_t j = 0; j < table->n; j++) {
                 Value *candidate = table->items[j].value, *key = value_get(candidate, on->s);
                 if (key && key->kind == JSTR && !strcmp(key->s, source->items[i].key)) {
@@ -3738,7 +3975,7 @@ static void parse2base_define_p(const char *name) {
     if (!parse2base_procedures) return;
     if (value_get(parse2base_procedures, name)) {
         fprintf(stderr, "seed-gen: parse2base defined twice: (%s, P)\n", name);
-        die("parse2base duplicate procedure definition");
+        die_at(input_location, "parse2base duplicate procedure definition");
     }
     value_put(parse2base_procedures, name, value_string("P"));
 }
@@ -3748,20 +3985,20 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
     if (!strncmp(cell, "@acts:", 6)) return value_path(facts, cell + 6);
     if (!strncmp(cell, "@seqmap:", 8)) {   /* assemble._seqmap: LIST:TEMPLATE (0.0.32 B5, enc) */
         const char *colon = strrchr(cell + 8, ':'); char *lst, *path; Value *xs, *tmpl, *out = value_new(JARR);
-        if (!colon) die("@seqmap lacks template");
+        if (!colon) die_at(input_location, "@seqmap lacks template");
         lst = copy_n(cell + 8, (size_t)(colon - cell - 8));
         path = seed_fmt(lst, facts); xs = value_path(facts, path); tmpl = value_path(facts, colon + 1);
-        if (xs->kind != JARR || tmpl->kind != JARR) die("@seqmap: list and template must be arrays");
+        if (xs->kind != JARR || tmpl->kind != JARR) die_at(input_location, "@seqmap: list and template must be arrays");
         for (size_t i = 0; i < xs->n; i++)
             for (size_t j = 0; j < tmpl->n; j++) {
                 Value *a = tmpl->items[j].value;
                 if (a->kind == JSTR) {
                     Value *seq = value_get(env, a->s + 1);
-                    if (!seq || seq->kind != JARR) { fprintf(stderr, "@seqmap env: %s\n", a->s); die("@seqmap: unknown sequence"); }
+                    if (!seq || seq->kind != JARR) { fprintf(stderr, "@seqmap env: %s\n", a->s); die_at(input_location, "@seqmap: unknown sequence"); }
                     for (size_t k = 0; k < seq->n; k++) value_put(out, NULL, seq->items[k].value);
                 } else {
                     Value *t = value_new(JARR);
-                    if (a->kind != JARR) die("@seqmap: template item is neither name nor action");
+                    if (a->kind != JARR) die_at(input_location, "@seqmap: template item is neither name nor action");
                     for (size_t k = 0; k < a->n; k++) {
                         Value *c = a->items[k].value;
                         value_put(t, NULL, c->kind == JSTR && !strcmp(c->s, "{x}") ? xs->items[i].value : c);
@@ -3826,18 +4063,18 @@ static Value *manifest_cell(const char *cell, Value *facts, Value *env) {
     if (!strncmp(cell, "fresh:", 6)) {
         const char *last = strrchr(cell + 6, ':'); char *scope, *owner, *name;
         Value *v;
-        if (!last) die("fresh cell lacks key");
+        if (!last) die_at(input_location, "fresh cell lacks key");
         scope = copy_n(cell + 6, (size_t)(last - cell - 6));
         owner = strchr(scope, '{') ? seed_fmt(scope, facts) : seed_interp(scope, env);
         if (owner[0] == '=') {
             char key[256]; Value *held;
             if (snprintf(key, sizeof(key), "__holder_%s", owner + 1) >= (int)sizeof(key))
-                die("holder name too long");
-            held = value_get(env, key); if (!held) die("manifest fresh holder missing");
+                die_at(input_location, "holder name too long");
+            held = value_get(env, key); if (!held) die_at(input_location, "manifest fresh holder missing");
             name = fresh_label(value_text(held), last + 1);
         } else {
             if (strncmp(owner, "U:", 2) && strncmp(owner, "S:", 2) && strncmp(owner, "P:", 2))
-                die("manifest fresh scope is not yet covered");
+                die_at(input_location, "manifest fresh scope is not yet covered");
             if (!strncmp(owner, "P:", 2)) parse2base_define_p(owner + 2);
             name = fresh_label(owner + 2, last + 1);
         }
@@ -3858,7 +4095,7 @@ static Value *manifest_eval_tree(Value *v, Value *facts, Value *env) {
 static void manifest_let_graph(Value *opts, Value *facts, Value *env) {
     Value *let = value_get(opts, "let");
     if (!let) return;
-    if (let->kind != JOBJ) die("manifest let must be an object");
+    if (let->kind != JOBJ) die_at(input_location, "manifest let must be an object");
     for (size_t i = 0; i < let->n; i++)
         value_put(facts, let->items[i].key,
                   manifest_eval_tree(let->items[i].value, facts, env));
@@ -3872,6 +4109,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                                 ManifestVisit visit, void *arg) {
     for (size_t i = first; i < last; i = rows->row[i].end) {
         ManifestRow *r = &rows->row[i];
+        input_location = r->source;
         Value *facts = seed_facts_scope(env, r->cell[4], extra);
         Value *opts;
         if (!manifest_when(r->cell[3], flags, facts)) { seed_env_drop(facts); continue; }
@@ -3882,27 +4120,27 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             Value *over = value_get(opts, "over"), *as = value_get(opts, "as"), *items;
             Value *pre = value_get(opts, "pre"), *chain = value_get(opts, "chain"), *current = NULL;
             char *over_path;
-            if (!over || over->kind != JSTR) die("foreach without over");
-            if (r->end == i + 1) die("foreach without body");
+            if (!over || over->kind != JSTR) die_at(input_location, "foreach without over");
+            if (r->end == i + 1) die_at(input_location, "foreach without body");
             if (over->s[0] == '$') items = manifest_foreach_map(over, value_get(opts, "join"), facts, env);
             else {
                 over_path = strchr(over->s, '{') ? seed_fmt(over->s, facts) : copy(over->s);
                 items = value_path(facts, over_path);
                 free(over_path);
             }
-            if (items->kind != JARR) die("foreach over is not an array");
+            if (items->kind != JARR) die_at(input_location, "foreach over is not an array");
             if (value_get(opts, "where")) {
                 /* assemble._foreach: keep rows whose column is one of the
                    section-expanded, fact-formatted allowed strings. */
                 Value *where = value_get(opts, "where"), *kept = value_new(JARR);
-                if (where->kind != JOBJ) die("foreach where is not an object");
+                if (where->kind != JOBJ) die_at(input_location, "foreach where is not an object");
                 for (size_t j = 0; j < items->n; j++) {
                     int ok = 1;
                     for (size_t w = 0; ok && w < where->n; w++) {
                         Value *allowed = where->items[w].value;
                         Value *cell = value_get(items->items[j].value, where->items[w].key);
                         int hit = 0;
-                        if (allowed->kind != JARR || !cell) die("foreach where shape");
+                        if (allowed->kind != JARR || !cell) die_at(input_location, "foreach where shape");
                         for (size_t a = 0; !hit && a < allowed->n; a++) {
                             char *sec = manifest_section(value_text(allowed->items[a].value), flags);
                             char *want = seed_fmt(sec, facts);
@@ -3918,20 +4156,20 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             if (chain) {
                 Value *start = value_get(chain, "start");
                 if (chain->kind != JOBJ || !start || start->kind != JSTR)
-                    die("invalid foreach chain");
+                    die_at(input_location, "invalid foreach chain");
                 current = manifest_cell(start->s, facts, env);
             }
             for (size_t j = 0; j < items->n; j++) {
                 Value *next = seed_env_copy(extra);
                 value_put(next, as && as->kind == JSTR ? as->s : "it", items->items[j].value);
                 if (pre) {
-                    if (pre->kind != JARR) die("foreach pre is not an array");
+                    if (pre->kind != JARR) die_at(input_location, "foreach pre is not an array");
                     for (size_t k = 0; k < pre->n; k++) {
                         Value *pair = pre->items[k].value;
                         Value *scope, *v;
                         if (pair->kind != JARR || pair->n != 2 ||
                             pair->items[0].value->kind != JSTR || pair->items[1].value->kind != JSTR)
-                            die("invalid foreach pre binding");
+                            die_at(input_location, "invalid foreach pre binding");
                         scope = seed_env_copy(facts);
                         seed_update(scope, next);
                         v = manifest_cell(pair->items[1].value->s, scope, env);
@@ -3943,7 +4181,7 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
                     Value *scope = seed_env_copy(facts), *entry = value_get(chain, "entry");
                     Value *next_cell = value_get(chain, "next"), *following;
                     if (!entry || entry->kind != JSTR || !next_cell || next_cell->kind != JSTR)
-                        die("invalid foreach chain step");
+                        die_at(input_location, "invalid foreach chain step");
                     seed_update(scope, next);
                     following = manifest_cell(next_cell->s, scope, env);
                     seed_env_drop(scope);
@@ -3956,11 +4194,11 @@ static void manifest_walk_block(ManifestRows *rows, size_t first, size_t last,
             }
             if (chain) {
                 Value *result = value_get(chain, "result");
-                if (!result || result->kind != JSTR) die("invalid foreach chain result");
+                if (!result || result->kind != JSTR) die_at(input_location, "invalid foreach chain result");
                 value_put(env, result->s, current);
             }
         } else {
-            if (r->end != i + 1) die("body under non-foreach op");
+            if (r->end != i + 1) die_at(input_location, "body under non-foreach op");
             if (getenv("UNISACC_SEED_TRACE"))
                 fprintf(stderr, "manifest row %lu %s %s\n", (unsigned long)i,
                         r->cell[0], r->cell[1]);
@@ -3980,8 +4218,8 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
         int name_col = -1, part_col = -1, section_col = -1, width = 0;
         if (part) *part++ = 0;
         if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
-            die("manifest freshrows path too long");
-        f = fopen(path, "rb"); if (!f) die("cannot open manifest freshrows file");
+            die_at(input_location, "manifest freshrows path too long");
+        f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest freshrows file");
         while ((s = line(f))) {
             char *field[16]; int n;
             if (!*s || *s == '#') { free(s); continue; }
@@ -4003,36 +4241,36 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
                 int pc = part_col >= 0 ? part_col : section_col;
                 char *label;
                 if (n != width || oc < 0 || kc < 0 || kind_col < 0)
-                    die("manifest freshrows string columns invalid");
+                    die_at(input_location, "manifest freshrows string columns invalid");
                 if (part && pc >= 0 && strcmp(field[pc], part)) { free(s); continue; }
                 label = fresh_label(field[oc], field[kind_col]);
                 value_put(bindings, field[kc], value_string(label)); free(label);
             }
             free(s);
         }
-        if (ferror(f) || close_in(f)) die("manifest freshrows read failed");
+        if (ferror(f) || close_in(f)) die_at(input_location, "manifest freshrows read failed");
         free(name); return;
     }
-    if (specs->kind != JARR) die("manifest freshrows must be a list");
+    if (specs->kind != JARR) die_at(input_location, "manifest freshrows must be a list");
     for (size_t si = 0; si < specs->n; si++) {
         Value *spec = specs->items[si].value, *file = value_get(spec, "file");
         Value *over = value_get(spec, "over"), *source = NULL;
         Value *where = value_get(spec, "where");
         char path[1024]; FILE *f; char *s; char *header[16]; int nh = 0;
         if (!file && over) {
-            if (over->kind != JSTR) die("manifest freshrows over must be a path");
+            if (over->kind != JSTR) die_at(input_location, "manifest freshrows over must be a path");
             source = value_path(facts, over->s);
-            if (source->kind != JARR) die("manifest freshrows over must be a list");
+            if (source->kind != JARR) die_at(input_location, "manifest freshrows over must be a list");
             for (size_t ri = 0; ri < source->n; ri++) {
                 Value *row = source->items[ri].value, *ctx = seed_env_copy(facts);
                 char *key, *owner, *kind, *label;
                 int take = 1;
-                if (row->kind != JOBJ) die("manifest freshrows item must be an object");
+                if (row->kind != JOBJ) die_at(input_location, "manifest freshrows item must be an object");
                 Value *ordinal = value_new(JINT); ordinal->number = (long long)ri;
                 value_put(ctx, "i", ordinal);
                 seed_update(ctx, row);
                 if (where) {
-                    if (where->kind != JOBJ) die("freshrows where is not an object");
+                    if (where->kind != JOBJ) die_at(input_location, "freshrows where is not an object");
                     for (size_t wi = 0; wi < where->n; wi++) {
                         char *expect = seed_fmt(value_text(where->items[wi].value), ctx);
                         Value *actual = value_get(row, where->items[wi].key);
@@ -4058,8 +4296,8 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
         }
         if (!file || file->kind != JSTR ||
             snprintf(path, sizeof(path), "%s/%s", dir, file->s) >= (int)sizeof(path))
-            die("manifest freshrows file is not covered");
-        f = fopen(path, "rb"); if (!f) die("cannot open manifest freshrows file");
+            die_at(input_location, "manifest freshrows file is not covered");
+        f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest freshrows file");
         while ((s = line(f))) {
             char *field[16], *record = s; int n;
             if (!*s) { free(s); continue; }
@@ -4069,17 +4307,17 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
             }
             n = fields_tab(record, field, 16);
             if (!nh) {
-                if (n < 1 || n > 16) die("freshrows header width");
+                if (n < 1 || n > 16) die_at(input_location, "freshrows header width");
                 nh = n;
                 for (int i = 0; i < n; i++) header[i] = copy(field[i]);
             } else {
                 Value *row = value_new(JOBJ), *ctx = seed_env_copy(facts);
                 int take = 1; char *key, *owner, *kind, *label;
-                if (n != nh) die("freshrows row width");
+                if (n != nh) die_at(input_location, "freshrows row width");
                 for (int i = 0; i < n; i++) value_put(row, header[i], value_string(field[i]));
                 seed_update(ctx, row);
                 if (where) {
-                    if (where->kind != JOBJ) die("freshrows where is not an object");
+                    if (where->kind != JOBJ) die_at(input_location, "freshrows where is not an object");
                     for (size_t i = 0; i < where->n; i++) {
                         char *expect = seed_fmt(value_text(where->items[i].value), facts);
                         Value *actual = value_get(row, where->items[i].key);
@@ -4104,7 +4342,7 @@ static void manifest_freshrows_file(const char *dir, Value *specs, Value *facts,
             }
             free(s);
         }
-        if (ferror(f) || close_in(f) || !nh) die("manifest freshrows read failed");
+        if (ferror(f) || close_in(f) || !nh) die_at(input_location, "manifest freshrows read failed");
         for (int i = 0; i < nh; i++) free(header[i]);
     }
 }
@@ -4116,7 +4354,7 @@ static Value *manifest_bind_cells(const char *cells, Value *facts, Value *env) {
         char *comma = strchr(p, ','), *eq;
         if (comma) *comma = 0;
         eq = strchr(p, '=');
-        if (!eq) die("manifest binding lacks '='");
+        if (!eq) die_at(input_location, "manifest binding lacks '='");
         *eq = 0;
         value_put(out, p, manifest_cell(eq + 1, facts, env));
         if (!comma) break; p = comma + 1;
@@ -4141,38 +4379,38 @@ static void manifest_seqrows_file(const char *dir, Value *spec, const char *op,
     char path[1024]; FILE *f; char *s;
     if (!spec) return;
     if (snprintf(path, sizeof(path), "%s/%s", dir, value_text(spec)) >= (int)sizeof(path))
-        die("sequence rows path too long");
-    f = fopen(path, "rb"); if (!f) die("cannot open sequence rows");
-    s = line(f); if (!s) die("empty sequence rows"); free(s);
+        die_at(input_location, "sequence rows path too long");
+    f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open sequence rows");
+    s = line(f); if (!s) die_at(input_location, "empty sequence rows"); free(s);
     while ((s = line(f))) {
         char *field[2]; Value *decoded; char *name;
         if (!*s || *s == '#') { free(s); continue; }
-        if (fields_tab(s, field, 2) != 2) die("sequence rows column count");
+        if (fields_tab(s, field, 2) != 2) die_at(input_location, "sequence rows column count");
         decoded = value_json(field[1], "sequence row text");
-        if (decoded->kind != JSTR) die("sequence row is not a string");
+        if (decoded->kind != JSTR) die_at(input_location, "sequence row is not a string");
         name = grow(NULL, strlen(prefix) + strlen(field[0]) + 1, 1);
         strcpy(name, prefix); strcat(name, field[0]);
         value_put(sequences, name, manifest_byte_actions_n(decoded->s, decoded->n, op));   /* "\u0000" survives */
         if (names) value_put(names, NULL, value_string(field[0]));
         free(name); free(s);
     }
-    if (ferror(f) || close_in(f)) die("sequence rows read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "sequence rows read failed");
 }
 static void manifest_outseq(const char *dir, const char *stem, Value *sequences) {
     const char *suffix[] = {"-result.tsv", "-byte.tsv"};
     for (size_t fi = 0; fi < 2; fi++) {
         char path[1024]; FILE *f; char *s;
         if (snprintf(path, sizeof(path), "%s/%s%s", dir, stem, suffix[fi]) >= (int)sizeof(path))
-            die("manifest outseq path too long");
-        f = fopen(path, "rb");
-        if (!f) { if (errno == ENOENT) continue; die("cannot open outseq table"); }
+            die_at(input_location, "manifest outseq path too long");
+        f = open_input(path, "rb");
+        if (!f) { if (errno == ENOENT) continue; die_at(input_location, "cannot open outseq table"); }
         while ((s = line(f))) {
             char *field[5]; int n;
             if (!*s || *s == '#') { free(s); continue; }
             n = fields_tab(s, field, 5);
             if (n == 5) {
                 Value *acts = value_json(field[4], "manifest outseq table actions");
-                if (acts->kind != JARR) die("manifest outseq action shape");
+                if (acts->kind != JARR) die_at(input_location, "manifest outseq action shape");
                 for (size_t ai = 0; ai < acts->n; ai++) {
                     Value *a = acts->items[ai].value;
                     const char *name;
@@ -4185,7 +4423,7 @@ static void manifest_outseq(const char *dir, const char *stem, Value *sequences)
             }
             free(s);
         }
-        if (ferror(f) || close_in(f)) die("manifest outseq read failed");
+        if (ferror(f) || close_in(f)) die_at(input_location, "manifest outseq read failed");
     }
 }
 static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *facts,
@@ -4244,7 +4482,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                  strcmp(opts->items[i].key, "with")) {
                 fprintf(stderr, "manifest rows option: %s (%s/%s:%s)\n", opts->items[i].key,
                         ctx->dir, row->cell[1], row->cell[2]);
-                die("manifest rows option is not yet covered");
+                die_at(input_location, "manifest rows option is not yet covered");
             }
         if (accumulate) seed_update(bindings, value_get(ctx->accum, value_text(accumulate)));
         if (bindmap) {
@@ -4256,7 +4494,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 for (size_t i = 0; i < bindmap->n; i++)
                     value_put(bindings, bindmap->items[i].key,
                               manifest_cell(value_text(bindmap->items[i].value), facts, env));
-            } else die("manifest rows bindmap shape is not covered");
+            } else die_at(input_location, "manifest rows bindmap shape is not covered");
         }
         if (cellsfirst && manifest_truth(cellsfirst))
             seed_update(bindings, manifest_bind_cells(row->cell[7], facts, env));
@@ -4277,14 +4515,14 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         if (msgrows) {
             Value *names = value_new(JARR);
             if (msgrows->kind != JARR || msgrows->n != 3)
-                die("manifest msgrows shape is not covered");
+                die_at(input_location, "manifest msgrows shape is not covered");
             manifest_seqrows_file(ctx->dir, msgrows->items[0].value, "SBOUT",
                                   value_text(msgrows->items[2].value), sequences, names);
             value_put(facts, value_text(msgrows->items[1].value), names);
         }
         if (seqfact) seed_update(sequences, value_path(facts, value_text(seqfact)));
         if (seqlist) {
-            if (seqlist->kind != JARR) die("manifest seqlist shape is not covered");
+            if (seqlist->kind != JARR) die_at(input_location, "manifest seqlist shape is not covered");
             for (size_t i = 0; i < seqlist->n; i++)
                 seed_update(sequences, value_path(facts, value_text(seqlist->items[i].value)));
         }
@@ -4297,11 +4535,11 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         }
         if (seqenv) {
             Value *names = value_path(facts, value_text(seqenv));
-            if (names->kind != JARR) die("manifest seqenv names are not an array");
+            if (names->kind != JARR) die_at(input_location, "manifest seqenv names are not an array");
             for (size_t i = 0; i < names->n; i++) {
                 const char *name = value_text(names->items[i].value);
                 Value *actions = value_get(env, name);
-                if (!actions) die("manifest seqenv entry missing");
+                if (!actions) die_at(input_location, "manifest seqenv entry missing");
                 value_put(sequences, name, actions);
             }
         }
@@ -4314,19 +4552,19 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             if (tokens->kind == JSTR) {
                 FILE *tf; char *ts;
                 if (snprintf(path, sizeof(path), "%s/%s", ctx->dir, tokens->s) >= (int)sizeof(path))
-                    die("token class path too long");
-                tf = fopen(path, "rb"); if (!tf) die("cannot open token classes");
+                    die_at(input_location, "token class path too long");
+                tf = open_input(path, "rb"); if (!tf) die_at(input_location, "cannot open token classes");
                 token_map = value_new(JOBJ);
                 ts = line(tf); free(ts);
                 while ((ts = line(tf))) {
                     char *field[2];
                     if (!*ts || *ts == '#') { free(ts); continue; }
-                    if (fields_tab(ts, field, 2) != 2) die("token class column count");
+                    if (fields_tab(ts, field, 2) != 2) die_at(input_location, "token class column count");
                     value_put(token_map, field[0], value_string(field[1])); free(ts);
                 }
-                if (ferror(tf) || close_in(tf)) die("token class read failed");
+                if (ferror(tf) || close_in(tf)) die_at(input_location, "token class read failed");
             }
-            if (token_map->kind != JOBJ) die("token classes are not an object");
+            if (token_map->kind != JOBJ) die_at(input_location, "token classes are not an object");
             classes = classes ? seed_env_copy(classes) : value_new(JOBJ);
             for (size_t i = 0; i < token_map->n; i++) {
                 const char *name = value_text(token_map->items[i].value);
@@ -4335,12 +4573,12 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 else if (!strcmp(name, "string")) id = value_get(constants, "TK_STR");
                 else if (!strcmp(name, "identifier")) id = value_get(constants, "TK_ID");
                 else id = value_get(tk, name);
-                if (!id) die("unknown token class name");
+                if (!id) die_at(input_location, "unknown token class name");
                 value_put(one, NULL, id); value_put(classes, token_map->items[i].key, one);
             }
         }
         if (classmap) {
-            if (classmap->kind != JOBJ) die("classmap is not an object");
+            if (classmap->kind != JOBJ) die_at(input_location, "classmap is not an object");
             classes = classes ? seed_env_copy(classes) : value_new(JOBJ);
             for (size_t i = 0; i < classmap->n; i++) {
                 Value *v = manifest_cell(value_text(classmap->items[i].value), facts, env);
@@ -4360,11 +4598,11 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                     const char *key = value_text(exports->items[i].value);
                     value_put(env, key, value_get(bindings, key));
                 }
-            } else die("invalid manifest export mapping");
+            } else die_at(input_location, "invalid manifest export mapping");
         }
         for (int mode = 0; mode < 2; mode++) {
             if (snprintf(path, sizeof(path), "%s/%s-%s.tsv", ctx->dir, row->cell[1],
-                         mode ? "result" : "byte") >= (int)sizeof(path)) die("manifest rule path too long");
+                         mode ? "result" : "byte") >= (int)sizeof(path)) die_at(input_location, "manifest rule path too long");
             const char *section = row->cell[2];
             if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
             else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
@@ -4390,23 +4628,23 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             for (size_t i = 0; i < opts->n; i++)
                 if (strcmp(opts->items[i].key, "cols") && strcmp(opts->items[i].key, "where") &&
                     strcmp(opts->items[i].key, "owner") && strcmp(opts->items[i].key, "scope"))
-                    die("manifest holder table option is not yet covered");
-            if (cols->kind != JARR || cols->n != 3) die("manifest holder cols shape");
+                    die_at(input_location, "manifest holder table option is not yet covered");
+            if (cols->kind != JARR || cols->n != 3) die_at(input_location, "manifest holder cols shape");
             ki = (int)cols->items[0].value->number; kd = (int)cols->items[1].value->number;
             ko = (int)cols->items[2].value->number;
             if (snprintf(path, sizeof(path), "%s/%s", ctx->dir, row->cell[1]) >= (int)sizeof(path))
-                die("manifest holder path too long");
-            f = fopen(path, "rb"); if (!f) die("cannot open manifest holder table");
+                die_at(input_location, "manifest holder path too long");
+            f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest holder table");
             while ((s = line(f))) {
                 char *field[32], owner[1024]; int n, skip = 0;
                 if (!*s || *s == '#') { free(s); continue; }
                 n = fields_tab(s, field, 32);
-                if (ki >= n || kd >= n || ko >= n) die("manifest holder table columns");
+                if (ki >= n || kd >= n || ko >= n) die_at(input_location, "manifest holder table columns");
                 for (size_t w = 0; where && w < where->n; w++) {
                     Value *c = where->items[w].value; int col;
-                    if (c->kind != JARR || c->n != 2) die("manifest holder where shape");
+                    if (c->kind != JARR || c->n != 2) die_at(input_location, "manifest holder where shape");
                     col = (int)c->items[0].value->number;
-                    if (col >= n) die("manifest holder where column");
+                    if (col >= n) die_at(input_location, "manifest holder where column");
                     if (strcmp(field[col], value_text(c->items[1].value))) skip = 1;
                 }
                 if (!skip) {
@@ -4416,9 +4654,9 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                         const char *sub = NULL; size_t adv = 1;
                         if (!strncmp(fmt, "{owner}", 7)) { sub = field[ko]; adv = 7; }
                         else if (!strncmp(fmt, "{key}", 5)) { sub = field[ki]; adv = 5; }
-                        if (sub) { size_t l = strlen(sub); if (o + l >= sizeof(owner)) die("holder owner too long");
+                        if (sub) { size_t l = strlen(sub); if (o + l >= sizeof(owner)) die_at(input_location, "holder owner too long");
                                    memcpy(owner + o, sub, l); o += l; }
-                        else { if (o + 1 >= sizeof(owner)) die("holder owner too long"); owner[o++] = *fmt; }
+                        else { if (o + 1 >= sizeof(owner)) die_at(input_location, "holder owner too long"); owner[o++] = *fmt; }
                         fmt += adv;
                     }
                     owner[o] = 0;
@@ -4429,21 +4667,21 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 }
                 free(s);
             }
-            if (ferror(f) || close_in(f)) die("manifest holder table read failed");
+            if (ferror(f) || close_in(f)) die_at(input_location, "manifest holder table read failed");
             return;
         }
         if (opts->n && (opts->n != 1 || !value_get(opts, "cur")))
-            die("manifest holder options are not yet covered");
+            die_at(input_location, "manifest holder options are not yet covered");
         if (snprintf(key, sizeof(key), "__holder_%s", row->cell[1]) >= (int)sizeof(key))
-            die("holder name too long");
+            die_at(input_location, "holder name too long");
         if (strncmp(spec, "P:", 2) && strncmp(spec, "U:", 2) && strncmp(spec, "S:", 2))
-            die("manifest holder kind is not yet covered");
+            die_at(input_location, "manifest holder kind is not yet covered");
         if (!strncmp(spec, "P:", 2)) parse2base_define_p(spec + 2);
         value_put(env, key, value_string(value_get(opts, "cur") ?
                                          value_text(value_get(opts, "cur")) : spec + 2));
     } else if (!strcmp(row->cell[0], "label")) {
         char *names = copy(row->cell[1]), *p = names;
-        if (opts->n) die("manifest label option is not yet covered");
+        if (opts->n) die_at(input_location, "manifest label option is not yet covered");
         while (*p) {
             char *comma = strchr(p, ','); if (comma) *comma = 0;
             label_add(ctx->graph, p);
@@ -4478,14 +4716,14 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 strcmp(opts->items[i].key, "accumulate") && strcmp(opts->items[i].key, "keep") &&
                 strcmp(opts->items[i].key, "textrows") && strcmp(opts->items[i].key, "once") &&
                 strcmp(opts->items[i].key, "with"))
-                die("manifest let option is not yet covered");
+                die_at(input_location, "manifest let option is not yet covered");
         if (accumulate) seed_update(bindings, value_get(ctx->accum, value_text(accumulate)));
         if (bindmap) {
             if (bindmap->kind == JSTR) seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap), env)));
             else if (bindmap->kind == JARR) {
                 for (size_t i = 0; i < bindmap->n; i++)
                     seed_update(bindings, value_path(facts, manifest_interp(value_text(bindmap->items[i].value), env)));
-            } else die("manifest let bindmap shape is not covered");
+            } else die_at(input_location, "manifest let bindmap shape is not covered");
         }
         manifest_freshrows_file(ctx->dir, freshrows, facts, bindings);
         seed_update(bindings, manifest_bind_cells(row->cell[7], facts, env));
@@ -4509,12 +4747,12 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         Value *result = value_get(opts, "result"), *bindmap = value_get(opts, "bindmap");
         ManifestRows child_rows; ManifestGraph child = *ctx; char *slash;
         if (bindmap) {
-            if (bindmap->kind != JSTR) die("manifest call bindmap is not yet covered");
+            if (bindmap->kind != JSTR) die_at(input_location, "manifest call bindmap is not yet covered");
             seed_update(child_env, value_path(facts, manifest_interp(value_text(bindmap), env)));
         }
         seed_update(child_env, bindings);
         if (flagopts) {
-            if (flagopts->kind != JOBJ) die("manifest call flags are not an object");
+            if (flagopts->kind != JOBJ) die_at(input_location, "manifest call flags are not an object");
             for (size_t i = 0; i < flagopts->n; i++) {
                 Value *v = flagopts->items[i].value;
                 if (v->kind == JARR) {
@@ -4529,9 +4767,9 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             }
         }
         if (snprintf(path, sizeof(path), "%s/%s-manifest.tsv", ctx->dir, row->cell[1]) >= (int)sizeof(path))
-            die("child manifest path too long");
+            die_at(input_location, "child manifest path too long");
         child_rows = manifest_rows(path);
-        slash = strrchr(path, '/'); if (!slash) die("child manifest has no directory");
+        slash = strrchr(path, '/'); if (!slash) die_at(input_location, "child manifest has no directory");
         *slash = 0; child.dir = path; child.flags = child_flags;
         child.rows = child.labels = 0; child.done = 0; child.accum = value_new(JOBJ);
         manifest_walk_block(&child_rows, 0, child_rows.n, child_flags, child_env, NULL,
@@ -4557,11 +4795,11 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                 for (size_t i = 0; i < bindmap->n; i++)
                     value_put(bindings, bindmap->items[i].key,
                               manifest_cell(value_text(bindmap->items[i].value), facts, env));
-            } else die("manifest table bindmap shape is not covered");
+            } else die_at(input_location, "manifest table bindmap shape is not covered");
         }
         seed_update(bindings, manifest_bind_cells(row->cell[7], facts, env));
         if (seqlist) {
-            if (seqlist->kind != JARR) die("manifest table seqlist is not an array");
+            if (seqlist->kind != JARR) die_at(input_location, "manifest table seqlist is not an array");
             for (size_t i = 0; i < seqlist->n; i++)
                 seed_update(sequences, value_path(facts, value_text(seqlist->items[i].value)));
         }
@@ -4576,7 +4814,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                     value_put(domain, NULL, value_string(names[i]));
                 value_put(domain, NULL, value_string("BOT")); free(names);
             } else {
-                if (domainopt->kind != JARR || domainopt->n != 2) die("invalid manifest table domain");
+                if (domainopt->kind != JARR || domainopt->n != 2) die_at(input_location, "invalid manifest table domain");
                 domain = numeric_domain((int)domainopt->items[0].value->number,
                                         (int)domainopt->items[1].value->number);
             }
@@ -4589,13 +4827,13 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
         else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
         if (snprintf(path, sizeof(path), "%s/%s", ctx->dir, row->cell[1]) >= (int)sizeof(path))
-            die("manifest table path too long");
-        input = fopen(path, "rb"); if (!input) die("cannot open manifest table");
+            die_at(input_location, "manifest table path too long");
+        input = open_input(path, "rb"); if (!input) die_at(input_location, "cannot open manifest table");
         while ((s = line(input))) {
             char *field[5]; int n;
             if (!*s || *s == '#') { free(s); continue; }
             n = fields_tab(s, field, 5);
-            if (n != 4 && n != 5) die("manifest table column count");
+            if (n != 4 && n != 5) die_at(input_location, "manifest table column count");
             if (n == 4 || !strcmp(section, "-") || !*section || !strcmp(field[0], section)) {
                 for (int i = n == 4 ? 0 : 1; i < n; i++) {
                     buf_add(&selected, field[i], strlen(field[i]));
@@ -4604,12 +4842,12 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             }
             free(s);
         }
-        if (ferror(input) || close_in(input)) die("manifest table read failed");
+        if (ferror(input) || close_in(input)) die_at(input_location, "manifest table read failed");
         table = buffer_file(&selected);
         install_delta_text_bound(ctx->graph, table, modeopt ? value_text(modeopt)[0] : 'r',
                                  domain, classes, sequences, 0, ordered && manifest_truth(ordered),
                                  skip, "START", bindings);
-        if (close_in(table)) die("manifest table close failed");
+        if (close_in(table)) die_at(input_location, "manifest table close failed");
         free(selected.s); ctx->rows++;
     } else if (!strcmp(row->cell[0], "template")) {
         Value *modeopt = value_get(opts, "mode"), *domainopt = value_get(opts, "domain");
@@ -4634,7 +4872,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                  strcmp(opts->items[i].key, "accumulate") && strcmp(opts->items[i].key, "keep")) {
                 fprintf(stderr, "manifest template option: %s (%s/%s:%s)\n",
                         opts->items[i].key, ctx->dir, row->cell[1], row->cell[2]);
-                die("manifest template option is not yet covered");
+                die_at(input_location, "manifest template option is not yet covered");
             }
         if (value_get(opts, "accumulate")) {   /* assemble.bindings: accum[acc] + cells, stored back */
             const char *acc = value_text(value_get(opts, "accumulate")); Value *keep = value_get(opts, "keep");
@@ -4645,7 +4883,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             if (keep) value_put(env, value_text(keep), seed_env_copy(bindings));
         }
         if (domainopt) {
-            if (domainopt->kind != JARR || domainopt->n != 2) die("invalid template domain");
+            if (domainopt->kind != JARR || domainopt->n != 2) die_at(input_location, "invalid template domain");
             domain = numeric_domain((int)domainopt->items[0].value->number,
                                     (int)domainopt->items[1].value->number);
         }
@@ -4657,14 +4895,14 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             else if (scope[0] == '=') {
                 char key[256]; Value *held;
                 if (snprintf(key, sizeof(key), "__holder_%s", scope + 1) >= (int)sizeof(key))
-                    die("holder name too long");
-                held = value_get(env, key); if (!held) die("template fresh holder missing");
+                    die_at(input_location, "holder name too long");
+                held = value_get(env, key); if (!held) die_at(input_location, "template fresh holder missing");
                 owner = copy(value_text(held));
             }
             else {
                 if (strncmp(scope, "P:", 2) && strncmp(scope, "U:", 2) &&
                     strncmp(scope, "S:", 2))
-                    die("manifest template fresh scope is not yet covered");
+                    die_at(input_location, "manifest template fresh scope is not yet covered");
                 if (!strncmp(scope, "P:", 2)) parse2base_define_p(scope + 2);
                 owner = copy(scope + 2);
             }
@@ -4673,12 +4911,12 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         if (section[0] == '@') section = value_text(manifest_cell(section, facts, env));
         else if (strchr(section, '{')) section = manifest_section(section, ctx->flags);
         if (snprintf(path, sizeof(path), "%s/%s-template.tsv", ctx->dir, row->cell[1]) >= (int)sizeof(path))
-            die("template path too long");
+            die_at(input_location, "template path too long");
         manifest_seqrows_file(ctx->dir, textrows, "OUT", "", sequences, NULL);
         if (msgrows) {
             Value *names = value_new(JARR);
             if (msgrows->kind != JARR || msgrows->n != 3)
-                die("template msgrows shape is not covered");
+                die_at(input_location, "template msgrows shape is not covered");
             manifest_seqrows_file(ctx->dir, msgrows->items[0].value, "SBOUT",
                                   value_text(msgrows->items[2].value), sequences, names);
             value_put(facts, value_text(msgrows->items[1].value), names);
@@ -4693,11 +4931,11 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
         }
         if (seqenv) {
             Value *names = value_path(facts, value_text(seqenv));
-            if (names->kind != JARR) die("template seqenv names are not an array");
+            if (names->kind != JARR) die_at(input_location, "template seqenv names are not an array");
             for (size_t i = 0; i < names->n; i++) {
                 const char *name = value_text(names->items[i].value);
                 Value *actions = value_get(env, name);
-                if (!actions) die("template seqenv entry missing");
+                if (!actions) die_at(input_location, "template seqenv entry missing");
                 value_put(sequences, name, actions);
             }
         }
@@ -4716,7 +4954,7 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
                                     modeopt ? value_text(modeopt)[0] : 'r', groups);
             if (result) value_put(env, value_text(result), groups);
         }
-        if (close_in(table)) die("template table close failed");
+        if (close_in(table)) die_at(input_location, "template table close failed");
         free(expanded.s); free(edits.s); free(owner);
         ctx->rows++;
     } else if (!strcmp(row->cell[0], "assert-absent")) {
@@ -4726,14 +4964,28 @@ static void manifest_graph_visit_row(size_t index, ManifestRow *row, Value *fact
             if (!strcmp(ctx->graph->state[i].name, row->cell[1])) { actual = 1; break; }
         if (actual != (present && manifest_truth(present))) {
             fprintf(stderr, "manifest state assertion: %s\n", row->cell[1]);
-            die("manifest state assertion failed");
+            die_at(input_location, "manifest state assertion failed");
         }
     } else {
         fprintf(stderr, "manifest op: %s\n", row->cell[0]);
-        die("manifest graph operation is not yet covered");
+        die_at(input_location, "manifest graph operation is not yet covered");
     }
     (void)opts;
 }
+/* Legacy dispatchers retain their existing row handling and delegate directory
+   calls to the same walker/visitor as generic manifests. No child path, flags,
+   bindings, or call options are interpreted by the bridge. */
+static void manifest_graph_call_fields(Graph *g, const char *dir, char **fields,
+                                       int o2, Value *env) {
+    ManifestRow row = {0}; ManifestRows rows = {0}; ManifestGraph ctx = {0};
+    Value *flags = value_new(JOBJ), *enabled = value_new(JBOOL);
+    for (size_t i = 0; i < 9; i++) row.cell[i] = fields[i];
+    row.end = 1; row.source = input_location; rows.row = &row; rows.n = 1;
+    enabled->number = o2; value_put(flags, "o2", enabled);
+    ctx.graph = g; ctx.dir = dir; ctx.flags = flags; ctx.accum = value_new(JOBJ);
+    manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
+}
+
 static void pp_install_standard(Graph *g) {
     ManifestRows rows = manifest_rows("exec/pp/standard-manifest.tsv");
     ManifestGraph ctx = {0};
@@ -4745,11 +4997,11 @@ static void manifest(Graph *graph, const char *dir) {
     char path[1024]; ManifestRows rows; ManifestGraph ctx = {0};
     Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
     if (snprintf(path, sizeof(path), "%s/gen-manifest.tsv", dir) >= (int)sizeof(path))
-        die("manifest path too long");
+        die_at(input_location, "manifest path too long");
     rows = manifest_rows(path); ctx.graph = graph; ctx.dir = dir; ctx.flags = flags;
     ctx.accum = value_new(JOBJ);
     manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
-    if (!ctx.rows || !ctx.labels) die("manifest omitted rows or labels");
+    if (!ctx.rows || !ctx.labels) die_at(input_location, "manifest omitted rows or labels");
 }
 static void inspect_manifest_graph(const char *path, const char *flags_text,
                                    const char *env_text, const char *outpath,
@@ -4758,21 +5010,21 @@ static void inspect_manifest_graph(const char *path, const char *flags_text,
     Value *flags = value_json(flags_text, "manifest flags");
     Value *env = value_json(env_text, "manifest environment");
     Graph g = {0}; FILE *out; char *dir = copy(path), *slash = strrchr(dir, '/');
-    if (!slash || flags->kind != JOBJ || env->kind != JOBJ) die("invalid manifest inspect arguments");
+    if (!slash || flags->kind != JOBJ || env->kind != JOBJ) die_at(input_location, "invalid manifest inspect arguments");
     *slash = 0; ctx.graph = &g; ctx.dir = dir; ctx.flags = flags;
     ctx.accum = value_new(JOBJ);
     if (initpath) {
         ManifestRows initial = manifest_rows(initpath);
         char *initdir = copy(initpath), *cut = strrchr(initdir, '/');
-        if (!cut) die("initial manifest has no directory");
+        if (!cut) die_at(input_location, "initial manifest has no directory");
         *cut = 0; ctx.dir = initdir;
         manifest_walk_block(&initial, 0, initial.n, flags, env, NULL, manifest_graph_visit, &ctx);
         ctx.dir = dir; free(initdir);
     }
     manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
     free(dir);
 }
 static void manifest_walk_trace(size_t index, ManifestRow *row, Value *facts,
@@ -4791,11 +5043,11 @@ static void inspect_manifest_walk(const char *path, const char *row_text,
     Value *trace = value_new(JARR);
     char *end; unsigned long start = strtoul(row_text, &end, 10); FILE *out;
     if (*end || start >= rows.n || strcmp(rows.row[start].cell[0], "foreach"))
-        die("manifest walk start must be a foreach row index");
+        die_at(input_location, "manifest walk start must be a foreach row index");
     manifest_walk_block(&rows, start, rows.row[start].end, flags, env, NULL,
                         manifest_walk_trace, trace);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, dump_env ? env : trace); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    value_write(out, dump_env ? env : trace); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_manifest_rows(const char *path, const char *outpath) {
     ManifestRows rows = manifest_rows(path); Value *all = value_new(JARR);
@@ -4808,8 +5060,8 @@ static void inspect_manifest_rows(const char *path, const char *outpath) {
         for (int c = 0; c < 9; c++) value_put(cells, NULL, value_string(rows.row[i].cell[c]));
         value_put(row, NULL, cells); value_put(all, NULL, row);
     }
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, all); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    value_write(out, all); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_manifest_when(const char *path, const char *facts_expr,
                                   const char *flags_json, const char *outpath) {
@@ -4827,30 +5079,30 @@ static void inspect_manifest_when(const char *path, const char *facts_expr,
             value_put(all, NULL, index);
         }
     }
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, all); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    value_write(out, all); if (close_in(out)) die_at(input_location, "output close failed");
 }
 /* First nested nativeabi call: modelsignature -> modelinput.  This command
    exposes a small graph slice while the full nativeabi manifest interpreter
    is being assembled; it reads the same call row and result table as Python. */
 static void nativeabi_modelinput_call(Graph *g) {
-    FILE *f = fopen("exec/modelsignature-manifest.tsv", "rb");
+    FILE *f = open_input("exec/modelsignature-manifest.tsv", "rb");
     char *s; int found = 0;
-    if (!f) die("cannot open modelsignature manifest");
+    if (!f) die_at(input_location, "cannot open modelsignature manifest");
     while ((s = line(f))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9);
-        if (n != 9) die("modelsignature manifest column count");
+        if (n != 9) die_at(input_location, "modelsignature manifest column count");
         if (!strcmp(field[0], "call") && !strcmp(field[1], "modelinput")) {
             Value *facts = load_facts_expr(field[4]);
             Value *bindings = value_new(JOBJ), *sequences = value_new(JOBJ);
             value_put(facts, "fail", value_string("DEAD"));
             direct_bindings_ex(bindings, sequences, field[7], facts);
             {
-                FILE *sub = fopen("exec/modelinput-manifest.tsv", "rb");
+                FILE *sub = open_input("exec/modelinput-manifest.tsv", "rb");
                 char *row; int subfound = 0;
-                if (!sub) die("cannot open modelinput manifest");
+                if (!sub) die_at(input_location, "cannot open modelinput manifest");
                 for (size_t i = 0; i < bindings->n; i++)
                     value_put(facts, bindings->items[i].key, bindings->items[i].value);
                 while ((row = line(sub))) {
@@ -4858,27 +5110,27 @@ static void nativeabi_modelinput_call(Graph *g) {
                     if (!*row || *row == '#') { free(row); continue; }
                     cols = fields_tab(row, col, 9);
                     if (cols != 9 || strcmp(col[0], "rows") || strcmp(col[1], "modelinput") || strcmp(col[2], "u64"))
-                        die("unsupported modelinput row");
+                        die_at(input_location, "unsupported modelinput row");
                     direct_bindings_ex(bindings, sequences, col[7], facts);
                     subfound++;
                     free(row);
                 }
-                if (ferror(sub) || close_in(sub) || subfound != 1) die("modelinput row not found");
+                if (ferror(sub) || close_in(sub) || subfound != 1) die_at(input_location, "modelinput row not found");
             }
             install_section(g, "exec/modelinput-result.tsv", "u64", 'r', bindings, sequences);
             found++;
         }
         free(s);
     }
-    if (ferror(f) || close_in(f) || found != 1) die("modelinput call not found");
+    if (ferror(f) || close_in(f) || found != 1) die_at(input_location, "modelinput call not found");
 }
 static void inspect_nativeabi_modelinput(const char *outpath) {
     Graph g = {0}; FILE *out;
     nativeabi_modelinput_call(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
     output_graph(out, &g, "START", NULL);
-    if (close_in(out)) die("output close failed");
+    if (close_in(out)) die_at(input_location, "output close failed");
 }
 static Value *nativeabi_rows(Graph *g, const char *stem, const char *section,
                              const char *factexpr, const char *bind, const char *opttext,
@@ -4899,22 +5151,22 @@ static Value *nativeabi_rows(Graph *g, const char *stem, const char *section,
     }
     if (bindmap) {
         Value *map = value_path(facts, value_text(bindmap));
-        if (map->kind != JOBJ) die("nativeabi bindmap is not an object");
+        if (map->kind != JOBJ) die_at(input_location, "nativeabi bindmap is not an object");
         for (size_t i = 0; i < map->n; i++) value_put(bindings, map->items[i].key, map->items[i].value);
     }
     direct_bindings_ex(bindings, seqs, bind, facts);
     if (seqenv) {
         Value *names = value_path(facts, value_text(seqenv));
-        if (names->kind != JARR) die("nativeabi seqenv is not a list");
+        if (names->kind != JARR) die_at(input_location, "nativeabi seqenv is not a list");
         for (size_t i = 0; i < names->n; i++) {
             const char *name = value_text(names->items[i].value);
             Value *sequence = value_get(env, name);
-            if (!sequence) die("nativeabi sequence absent from env");
+            if (!sequence) die_at(input_location, "nativeabi sequence absent from env");
             value_put(seqs, name, sequence);
         }
     }
     if (classmap) {
-        if (classmap->kind != JOBJ) die("nativeabi classmap is not an object");
+        if (classmap->kind != JOBJ) die_at(input_location, "nativeabi classmap is not an object");
         classes = value_new(JOBJ);
         for (size_t i = 0; i < classmap->n; i++) {
             Value *v = value_path(facts, value_text(classmap->items[i].value));
@@ -4922,69 +5174,66 @@ static Value *nativeabi_rows(Graph *g, const char *stem, const char *section,
             value_put(classes, classmap->items[i].key, v);
         }
     }
-    if (snprintf(path, sizeof(path), "exec/%s-byte.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
+    if (snprintf(path, sizeof(path), "exec/%s-byte.tsv", stem) >= (int)sizeof(path)) die_at(input_location, "nativeabi rule path too long");
     install_section_classes(g, path, section, 'b', bindings, seqs, classes);
-    if (snprintf(path, sizeof(path), "exec/%s-result.tsv", stem) >= (int)sizeof(path)) die("nativeabi rule path too long");
+    if (snprintf(path, sizeof(path), "exec/%s-result.tsv", stem) >= (int)sizeof(path)) die_at(input_location, "nativeabi rule path too long");
     install_section_classes(g, path, section, 'r', bindings, seqs, classes);
     return bindings;
 }
 static void nativeabi_calls(Graph *g) {
     Value *env = value_new(JOBJ); FILE *f; char *s;
     value_put(env, "fail", value_string("DEAD"));
-    f = fopen("exec/modelsignature-manifest.tsv", "rb"); if (!f) die("cannot open modelsignature manifest");
+    f = open_input("exec/modelsignature-manifest.tsv", "rb"); if (!f) die_at(input_location, "cannot open modelsignature manifest");
     while ((s = line(f))) {
         char *col[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, col, 9); if (n != 9) die("modelsignature row count");
+        n = fields_tab(s, col, 9); if (n != 9) die_at(input_location, "modelsignature row count");
         if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env, NULL);
         else if (!strcmp(col[0], "call") && !strcmp(col[1], "modelinput")) nativeabi_modelinput_call(g);
-        else if (strcmp(col[0], "let")) die("unsupported modelsignature declaration");
+        else if (strcmp(col[0], "let")) die_at(input_location, "unsupported modelsignature declaration");
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("modelsignature read failed");
-    f = fopen("exec/modelgraphequality-manifest.tsv", "rb"); if (!f) die("cannot open modelgraphequality manifest");
+    if (ferror(f) || close_in(f)) die_at(input_location, "modelsignature read failed");
+    f = open_input("exec/modelgraphequality-manifest.tsv", "rb"); if (!f) die_at(input_location, "cannot open modelgraphequality manifest");
     while ((s = line(f))) {
         char *col[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, col, 9); if (n != 9) die("modelgraphequality row count");
+        n = fields_tab(s, col, 9); if (n != 9) die_at(input_location, "modelgraphequality row count");
         if (!strcmp(col[0], "rows")) nativeabi_rows(g, col[1], col[2], col[4], col[7], col[8], env, NULL);
-        else if (strcmp(col[0], "let") && strcmp(col[0], "call")) die("unsupported modelgraphequality declaration");
+        else if (strcmp(col[0], "let") && strcmp(col[0], "call")) die_at(input_location, "unsupported modelgraphequality declaration");
         free(s);
     }
-    if (ferror(f) || close_in(f)) die("modelgraphequality read failed");
+    if (ferror(f) || close_in(f)) die_at(input_location, "modelgraphequality read failed");
 }
 static void inspect_nativeabi_calls(const char *outpath) {
     Graph g = {0}; FILE *out;
     nativeabi_calls(&g); finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
     output_graph(out, &g, "START", NULL);
-    if (close_in(out)) die("output close failed");
+    if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void nativeabi_template_at(Graph *g, const char *path, const char *section,
                                   const char *fresh_owner) {
     Value *facts = load_fact("nativeabi"), *seqs = value_new(JOBJ);
     Buffer expanded = expand_template_file_fresh(path, facts,
                                                  section, fresh_owner, NULL);
-    FILE *f = tmpfile();
-    if (!f) die("cannot create template stream");
-    if (expanded.n && fwrite(expanded.s, 1, expanded.n, f) != expanded.n) die("template write failed");
-    if (fflush(f) || fseek(f, 0, SEEK_SET)) die("template rewind failed");
+    FILE *f = buffer_file(&expanded);
     install_delta_text(g, f, 'r', numeric_domain(0, 257), NULL, seqs, 0, 0, NULL, "START");
-    if (close_in(f)) die("template close failed");
+    if (close_in(f)) die_at(input_location, "template close failed");
     free(expanded.s);
 }
 static void inspect_nativeabi_head(const char *outpath, int phase) {
     Graph g = {0}; FILE *manifest, *out; char *linebuf;
     Value *env = value_new(JOBJ), *nc = NULL, *ol = NULL;
     int seen = 0, limit = phase + 4;
-    manifest = fopen("exec/nativeabi/gen-manifest.tsv", "rb");
-    if (!manifest) die("cannot open nativeabi manifest");
+    manifest = open_input("exec/nativeabi/gen-manifest.tsv", "rb");
+    if (!manifest) die_at(input_location, "cannot open nativeabi manifest");
     while ((linebuf = line(manifest))) {
         char *col[9], path[1024]; int n;
         if (!*linebuf || *linebuf == '#') { free(linebuf); continue; }
         if (seen == limit) { free(linebuf); break; }
         n = fields_tab(linebuf, col, 9);
-        if (n != 9) die("nativeabi manifest column count");
+        if (n != 9) die_at(input_location, "nativeabi manifest column count");
         seen++;
         if (!strcmp(col[0], "let")) {
             Value *opts = value_json(col[8], "nativeabi let options");
@@ -4993,35 +5242,37 @@ static void inspect_nativeabi_head(const char *outpath, int phase) {
                 value_put(env, seqs->items[i].key, seqs->items[i].value);
         } else if (!strcmp(col[0], "call")) {
             if (strcmp(col[1], "../modelgraphequality"))
-                die("unsupported nativeabi call");
+                die_at(input_location, "unsupported nativeabi call");
             nativeabi_calls(&g);
         } else if (!strcmp(col[0], "rows")) {
             Value *opts = value_json(col[8], "nativeabi row options");
             Value *acc = value_get(opts, "accumulate"), **prior;
-            if (!acc || acc->kind != JSTR) die("nativeabi row lacks accumulator");
+            if (!acc || acc->kind != JSTR) die_at(input_location, "nativeabi row lacks accumulator");
             if (!strcmp(acc->s, "nc")) prior = &nc;
             else if (!strcmp(acc->s, "ol")) prior = &ol;
-            else die("unknown nativeabi accumulator");
+            else die_at(input_location, "unknown nativeabi accumulator");
             if (snprintf(path, sizeof(path), "nativeabi/%s", col[1]) >= (int)sizeof(path))
-                die("nativeabi row path too long");
+                die_at(input_location, "nativeabi row path too long");
             *prior = nativeabi_rows(&g, path, col[2], col[4], col[7], col[8], env, *prior);
         } else if (!strcmp(col[0], "template")) {
-            if (strncmp(col[5], "P:", 2)) die("unsupported nativeabi fresh scope");
+            if (strncmp(col[5], "P:", 2)) die_at(input_location, "unsupported nativeabi fresh scope");
             if (snprintf(path, sizeof(path), "exec/nativeabi/%s-template.tsv", col[1]) >= (int)sizeof(path))
-                die("nativeabi template path too long");
+                die_at(input_location, "nativeabi template path too long");
             nativeabi_template_at(&g, path, col[2], col[5] + 2);
-        } else die("unsupported nativeabi manifest operation");
+        } else die_at(input_location, "unsupported nativeabi manifest operation");
         free(linebuf);
     }
     if (ferror(manifest) || close_in(manifest) || seen != limit)
-        die("nativeabi manifest incomplete");
+        die_at(input_location, "nativeabi manifest incomplete");
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
     output_graph(out, &g, phase >= 8 ? "NC.START" : "START", NULL);
-    if (close_in(out)) die("output close failed");
+    if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void output_graph(FILE *f, const Graph *g, const char *start, const Value *tok_names) {
     Buffer b = {0}; char number[32];
+    if (g->framed_entry && !strcmp(start, g->external_start ? g->external_start : "START"))
+        start = g->framed_entry == 1 ? "TF.entry" : "TE.entry";
     buf_add(&b, "{\"start\":", 9); buf_quote(&b, start); buf_add(&b, ",\"states\":{", 11);
     for (size_t i = 0; i < g->n; i++) {
         const State *s = &g->state[i];
@@ -5040,7 +5291,7 @@ static void output_graph(FILE *f, const Graph *g, const char *start, const Value
     buf_char(&b, ']');
     if (tok_names) { buf_add(&b, ",\"tok_names\":", 13); buf_value(&b, tok_names); }
     buf_char(&b, '}');
-    if (fwrite(b.s, 1, b.n, f) != b.n || ferror(f)) die("write failed");
+    if (fwrite(b.s, 1, b.n, f) != b.n || ferror(f)) die_at(input_location, "write failed");
     free(b.s);
 }
 static void output(FILE *f, const Graph *g) { output_graph(f, g, "START", NULL); }
@@ -5053,115 +5304,115 @@ static void inspect_parse2_tokens(const char *outpath) {
     Value *extra = value_get(load_fact("parse2-extra"), "words");
     long long maximum = 0; size_t i; FILE *out;
     if (!words || words->kind != JARR || !tk || tk->kind != JOBJ)
-        die("invalid parse token facts");
+        die_at(input_location, "invalid parse token facts");
     for (i = 0; i < tk->n; i++) {
         Value *v = tk->items[i].value;
-        if (!v || v->kind != JINT || v->number < 0) die("invalid parse token number");
+        if (!v || v->kind != JINT || v->number < 0) die_at(input_location, "invalid parse token number");
         if (v->number > maximum) maximum = v->number;
     }
-    if (!extra || extra->kind != JARR) die("invalid parse2 extra words");
+    if (!extra || extra->kind != JARR) die_at(input_location, "invalid parse2 extra words");
     for (i = 0; i < extra->n; i++) {
         const char *word = value_text(extra->items[i].value);
         Value *id = value_new(JINT);
-        if (value_get(tk, word)) die("duplicate parse2 token");
-        if (maximum == LLONG_MAX) die("parse token number overflow");
+        if (value_get(tk, word)) die_at(input_location, "duplicate parse2 token");
+        if (maximum == LLONG_MAX) die_at(input_location, "parse token number overflow");
         id->number = ++maximum;
         value_put(words, NULL, value_string(word));
         value_put(tk, word, id);
     }
     value_put(result, "WORDS", words); value_put(result, "TK", tk);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    value_write(out, result); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    value_write(out, result); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void build_parse2_token_graph(Graph *g) {
-    FILE *manifest = fopen("exec/parse/tokens2-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse/tokens2-manifest.tsv", "rb");
     Value *facts = load_fact("k2-gen2-tokens"), *modes = value_new(JOBJ);
     Value *sequences = value_new(JOBJ), *bindings; char *s; int template_seen = 0, rows_seen = 0;
-    if (!manifest) die("cannot open parse2 token manifest");
+    if (!manifest) die_at(input_location, "cannot open parse2 token manifest");
     while ((s = line(manifest))) {
         char *field[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, field, 9);
-        if (n != 9) die("parse2 token manifest column count");
+        if (n != 9) die_at(input_location, "parse2 token manifest column count");
         if (!strcmp(field[0], "template") && !strcmp(field[1], "tokenfacts")) {
             Buffer expanded; FILE *rules;
             if (template_seen++ || rows_seen || strcmp(field[2], "facts") ||
-                strcmp(field[4], "k2-gen2-tokens")) die("unexpected parse2 token template");
+                strcmp(field[4], "k2-gen2-tokens")) die_at(input_location, "unexpected parse2 token template");
             expanded = expand_template_file_fresh("exec/parse/tokenfacts-template.tsv",
                                                   facts, "facts", NULL, modes);
             rules = buffer_file(&expanded);
             install_delta_text(g, rules, 'b', numeric_domain(0, 257), NULL,
                                sequences, 0, 0, NULL, "START");
-            if (close_in(rules)) die("parse2 token template close failed");
+            if (close_in(rules)) die_at(input_location, "parse2 token template close failed");
             for (size_t i = 0; i < modes->n; i++) {
                 const char *name = modes->items[i].key; size_t j;
                 if (strcmp(value_text(modes->items[i].value), "r"))
-                    die("unsupported parse2 token mode");
+                    die_at(input_location, "unsupported parse2 token mode");
                 for (j = 0; j < g->n; j++) if (!strcmp(g->state[j].name, name)) {
                     g->state[j].mode = 'r'; break;
                 }
-                if (j == g->n) die("parse2 token mode state missing");
+                if (j == g->n) die_at(input_location, "parse2 token mode state missing");
             }
-            if (!modes->n) die("parse2 token mode overrides missing");
+            if (!modes->n) die_at(input_location, "parse2 token mode overrides missing");
             free(expanded.s);
         } else if (!strcmp(field[0], "rows") && !strcmp(field[1], "tokenread")) {
             Value *rowfacts;
             if (!template_seen || rows_seen++ || strcmp(field[4], "k2-gen2-tokens+parse-constants") ||
                 strcmp(field[6], "truncated=@rej:not covered: truncated token dump"))
-                die("unexpected parse2 token rows");
+                die_at(input_location, "unexpected parse2 token rows");
             rowfacts = load_facts_expr(field[4]); bindings = value_new(JOBJ);
             value_put(sequences, "truncated", value_json("[[\"REJECT\",\"not covered: truncated token dump\"]]", "token truncation"));
             direct_bindings(bindings, field[7], rowfacts);
             install_plain(g, "exec/parse/tokenread-byte.tsv", 'b', bindings, sequences);
             install_plain(g, "exec/parse/tokenread-result.tsv", 'r', bindings, sequences);
-        } else die("unsupported parse2 token manifest row");
+        } else die_at(input_location, "unsupported parse2 token manifest row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || template_seen != 1 || rows_seen != 1)
-        die("incomplete parse2 token manifest");
+        die_at(input_location, "incomplete parse2 token manifest");
 }
 static void inspect_parse2_token_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
     build_parse2_token_graph(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 /* The first nested parse2 body call installs gen2's startup marker.  Execute
    the stage-edits declaration on the token graph, in manifest order.  These
    are graph operations, not C syntax decisions. */
 static void parse2_startup_edits(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/gen2parts-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/gen2parts-manifest.tsv", "rb");
     FILE *templ; char *s; int declared = 0, copied = 0, dropped = 0, rule = 0;
-    if (!manifest) die("cannot open gen2parts manifest");
+    if (!manifest) die_at(input_location, "cannot open gen2parts manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("gen2parts manifest column count");
+        if (n != 9) die_at(input_location, "gen2parts manifest column count");
         if (!strcmp(f[0], "template") && !strcmp(f[1], "stage-edits") &&
             (!strcmp(f[2], "startup") || !strcmp(f[2], "startup-entry"))) declared++;
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || declared != 2)
-        die("parse2 startup edits not declared");
-    templ = fopen("exec/parse2/stage-edits-template.tsv", "rb");
-    if (!templ) die("cannot open parse2 stage edits");
+        die_at(input_location, "parse2 startup edits not declared");
+    templ = open_input("exec/parse2/stage-edits-template.tsv", "rb");
+    if (!templ) die_at(input_location, "cannot open parse2 stage edits");
     while ((s = line(templ))) {
         char *f[9]; int n; State *st;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("parse2 stage edit column count");
+        if (n != 9) die_at(input_location, "parse2 stage edit column count");
         if (!strcmp(f[0], "startup") && !strcmp(f[4], "copy-state")) {
             if (copied++ || strcmp(f[3], "-") || strcmp(f[7], "-") || strcmp(f[8], "-"))
-                die("invalid parse2 startup copy declaration");
+                die_at(input_location, "invalid parse2 startup copy declaration");
             pp_copy_state(g, f[5], f[6]);
         } else if (!strcmp(f[0], "startup") && !strcmp(f[4], "drop-edge")) {
             size_t i;
-            if (!copied || dropped++ || strcmp(f[3], "-")) die("invalid parse2 startup drop declaration");
+            if (!copied || dropped++ || strcmp(f[3], "-")) die_at(input_location, "invalid parse2 startup drop declaration");
             st = find_state(g, f[5]);
             for (i = 0; i < st->n && strcmp(st->edge[i].key, f[6]); i++) {}
-            if (i == st->n) die("parse2 startup edge to drop missing");
+            if (i == st->n) die_at(input_location, "parse2 startup edge to drop missing");
             memmove(st->edge + i, st->edge + i + 1, (st->n - i - 1) * sizeof(*st->edge));
             st->n--;
             if (st->key_index) {
@@ -5172,67 +5423,67 @@ static void parse2_startup_edits(Graph *g) {
                 }
             }
         } else if (!strcmp(f[0], "startup-entry") && !strcmp(f[4], "rule")) {
-            if (!dropped || rule++ || strcmp(f[3], "-")) die("invalid parse2 startup rule declaration");
+            if (!dropped || rule++ || strcmp(f[3], "-")) die_at(input_location, "invalid parse2 startup rule declaration");
             st = find_state(g, f[5]);
-            if (edge_has(st, f[6])) die("parse2 startup rule edge already exists");
+            if (edge_has(st, f[6])) die_at(input_location, "parse2 startup rule edge already exists");
             edge_add(g, f[5], st->mode, f[6], f[7], f[8]);
         }
         free(s);
     }
     if (ferror(templ) || close_in(templ) || copied != 1 || dropped != 1 || rule != 1)
-        die("incomplete parse2 startup edits");
+        die_at(input_location, "incomplete parse2 startup edits");
 }
 static void parse2_drop_state(Graph *g, const char *name) {
     size_t i;
     for (i = 0; i < g->n && strcmp(g->state[i].name, name); i++) {}
-    if (i == g->n) die("parse2 template state to drop missing");
+    if (i == g->n) die_at(input_location, "parse2 template state to drop missing");
     memmove(g->state + i, g->state + i + 1, (g->n - i - 1) * sizeof(*g->state));
     g->n--;
     free(g->state_index); g->state_index = NULL; g->index_cap = 0;
     state_index_grow(g);
 }
 static void parse2_string_span(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/strings-token-span-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/strings-token-span-manifest.tsv", "rb");
     FILE *templ; Value *facts = load_fact("k2-strings-token-span");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     Value *constants = load_fact("parse-constants");
     char *s; int declared = 0, dropped = 0;
-    if (!manifest) die("cannot open parse2 string span manifest");
+    if (!manifest) die_at(input_location, "cannot open parse2 string span manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("parse2 string span manifest column count");
+        if (n != 9) die_at(input_location, "parse2 string span manifest column count");
         if (declared == 0 && !strcmp(f[0], "let") && !strcmp(f[4], "k2-strings-token-span")) declared++;
         else if (declared == 1 && !strcmp(f[0], "template") &&
                  !strcmp(f[1], "strings") && !strcmp(f[2], "token_span_drop")) declared++;
         else if (declared == 2 && !strcmp(f[0], "rows") &&
                  !strcmp(f[1], "strings") && !strcmp(f[2], "token_span")) declared++;
-        else die("unexpected parse2 string span manifest row");
+        else die_at(input_location, "unexpected parse2 string span manifest row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || declared != 3)
-        die("incomplete parse2 string span manifest");
-    templ = fopen("exec/parse2/strings-template.tsv", "rb");
-    if (!templ) die("cannot open parse2 strings template");
+        die_at(input_location, "incomplete parse2 string span manifest");
+    templ = open_input("exec/parse2/strings-template.tsv", "rb");
+    if (!templ) die_at(input_location, "cannot open parse2 strings template");
     while ((s = line(templ))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("parse2 strings template column count");
+        if (n != 9) die_at(input_location, "parse2 strings template column count");
         if (!strcmp(f[0], "token_span_drop")) {
-            if (dropped++ || strcmp(f[4], "drop-state")) die("invalid string span drop");
+            if (dropped++ || strcmp(f[4], "drop-state")) die_at(input_location, "invalid string span drop");
             parse2_drop_state(g, f[5]);
         }
         free(s);
     }
     if (ferror(templ) || close_in(templ) || dropped != 1)
-        die("incomplete parse2 strings template");
+        die_at(input_location, "incomplete parse2 strings template");
     for (int i = 0; i < 3; i++) {
         char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR);
         Value *reason; snprintf(name, sizeof(name), "reject%d", i);
         reason = value_get(facts, name);
-        if (!reason || reason->kind != JSTR) die("missing string span rejection fact");
+        if (!reason || reason->kind != JSTR) die_at(input_location, "missing string span rejection fact");
         value_put(reject, NULL, value_string("REJECT"));
         value_put(reject, NULL, reason);
         value_put(acts, NULL, reject);
@@ -5243,32 +5494,32 @@ static void parse2_string_span(Graph *g) {
     install_section(g, "exec/parse2/strings-result.tsv", "token_span", 'r', bindings, sequences);
 }
 static void parse2_startup_control(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/control-manifest.tsv", "rb");
     Value *facts = load_fact("k2-control"), *opts = NULL;
     Value *bindings = value_new(JOBJ), *sequences, *classes;
     char *s; int declarations = 0;
-    if (!manifest) die("cannot open parse2 control manifest");
+    if (!manifest) die_at(input_location, "cannot open parse2 control manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("parse2 control manifest column count");
+        if (n != 9) die_at(input_location, "parse2 control manifest column count");
         if (!declarations && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
             !strcmp(f[3], "!fact:control_export") && !strcmp(f[4], "k2-control"))
             opts = value_json(f[8], "parse2 control options");
         declarations++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || declarations != 2 || !opts)
-        die("unsupported parse2 control manifest");
+        die_at(input_location, "unsupported parse2 control manifest");
     /* The startup-marker section has no fresh labels.  Its named action
        sequences still come from the same mapseq declaration as every other
        control section; only the rows below consume them. */
     sequences = mapseq_construct(opts, facts);
     classes = value_get(facts, "classes");
-    if (!classes || classes->kind != JOBJ) die("parse2 control classes missing");
+    if (!classes || classes->kind != JOBJ) die_at(input_location, "parse2 control classes missing");
     /* Bind the control constants (TDN, TDE, ...) as assemble._bindings does. */
     Value *consts = value_get(facts, "consts");
-    if (!consts || consts->kind != JOBJ) die("parse2 control constants missing");
+    if (!consts || consts->kind != JOBJ) die_at(input_location, "parse2 control constants missing");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
     install_section_classes(g, "exec/parse2/control-byte.tsv", "startup-marker", 'b',
@@ -5279,8 +5530,8 @@ static void parse2_startup_control(Graph *g) {
 /* The first gen2 segment delegates to the control manifest.  Read its
    declaration and fresh-label table in source order, as assemble.Run does. */
 static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, Value *seqextra) {
-    FILE *manifest = fopen("exec/parse2/control-manifest.tsv", "rb");
-    FILE *fresh = fopen("exec/parse2/control-fresh.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/control-manifest.tsv", "rb");
+    FILE *fresh = open_input("exec/parse2/control-fresh.tsv", "rb");
     Value *facts = load_fact("k2-control"), *opts = NULL;
     Value *bindings = value_new(JOBJ), *sequences, *classes;
     char *s; int rows = 0, header = 0;
@@ -5303,30 +5554,30 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         strcmp(section, "sizeof3") && strcmp(section, "address") &&
         strcmp(section, "if") && strcmp(section, "switch") &&
         strcmp(section, "loops"))
-        die("unsupported gen2 control section");
-    if (!manifest || !fresh) die("cannot open gen2 control declarations");
+        die_at(input_location, "unsupported gen2 control section");
+    if (!manifest || !fresh) die_at(input_location, "cannot open gen2 control declarations");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("control manifest column count");
+        if (n != 9) die_at(input_location, "control manifest column count");
         if (!rows && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
             !strcmp(f[3], "!fact:control_export") && !strcmp(f[4], "k2-control"))
             opts = value_json(f[8], "control options");
         rows++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 2 || !opts)
-        die("unsupported control manifest");
+        die_at(input_location, "unsupported control manifest");
     sequences = mapseq_construct(opts, facts);
     if (seqextra) {
-        if (seqextra->kind != JOBJ) die("control extra sequences must be an object");
+        if (seqextra->kind != JOBJ) die_at(input_location, "control extra sequences must be an object");
         for (size_t i = 0; i < seqextra->n; i++)
             value_put(sequences, seqextra->items[i].key, seqextra->items[i].value);
     }
     classes = value_get(facts, "classes");
-    if (!classes || classes->kind != JOBJ) die("control classes missing");
+    if (!classes || classes->kind != JOBJ) die_at(input_location, "control classes missing");
     Value *consts = value_get(facts, "consts");
-    if (!consts || consts->kind != JOBJ) die("control constants missing");
+    if (!consts || consts->kind != JOBJ) die_at(input_location, "control constants missing");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
     value_put(bindings, "statement", value_string("STMT"));
@@ -5334,11 +5585,11 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         char *f[4], *label; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 4);
-        if (n != 4) die("control fresh column count");
+        if (n != 4) die_at(input_location, "control fresh column count");
         if (!header++) {
             if (strcmp(f[0], "section") || strcmp(f[1], "prefix") ||
                 strcmp(f[2], "kind") || strcmp(f[3], "key"))
-                die("control fresh header mismatch");
+                die_at(input_location, "control fresh header mismatch");
         } else if (!strcmp(f[0], section)) {
             Value *owner = extra ? value_get(extra, f[1]) : NULL;
             label = fresh_label(owner ? value_text(owner) : f[1], f[2]);
@@ -5346,9 +5597,9 @@ static void parse2_gen2_control_ex(Graph *g, const char *section, Value *extra, 
         }
         free(s);
     }
-    if (ferror(fresh) || close_in(fresh) || !header) die("control fresh read failed");
+    if (ferror(fresh) || close_in(fresh) || !header) die_at(input_location, "control fresh read failed");
     if (extra) {
-        if (extra->kind != JOBJ) die("control extra facts must be an object");
+        if (extra->kind != JOBJ) die_at(input_location, "control extra facts must be an object");
         for (size_t i = 0; i < extra->n; i++)
             value_put(bindings, extra->items[i].key, extra->items[i].value);
     }
@@ -5361,9 +5612,9 @@ static void parse2_gen2_control(Graph *g, const char *section) {
     parse2_gen2_control_ex(g, section, NULL, NULL);
 }
 static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra) {
-    FILE *actions = fopen("exec/parse2/gen2-actions-manifest.tsv", "rb");
-    FILE *manifest = fopen("exec/parse2/return-manifest.tsv", "rb");
-    FILE *fresh = fopen("exec/parse2/return-fresh.tsv", "rb");
+    FILE *actions = open_input("exec/parse2/gen2-actions-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/return-manifest.tsv", "rb");
+    FILE *fresh = open_input("exec/parse2/return-fresh.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *recipes = NULL, *sequences = value_new(JOBJ);
     Value *bindings = value_new(JOBJ), *classes = value_get(facts, "retclasses");
     char *s; int action_row = 0, return_row = 0, header = 0;
@@ -5373,14 +5624,14 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
          strcmp(section, "qt0") && strcmp(section, "qt1") &&
          strcmp(section, "floating") && strcmp(section, "qt2") &&
          strcmp(section, "integer") && strcmp(section, "qt3")))
-        die("return constructor input missing");
+        die_at(input_location, "return constructor input missing");
     while ((s = line(actions))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 9); if (n != 9 || strcmp(f[0], "let")) die("gen2 action declaration changed");
+        n = fields_tab(s, f, 9); if (n != 9 || strcmp(f[0], "let")) die_at(input_location, "gen2 action declaration changed");
         if (action_row == 0) {
             Value *constants = value_get(facts, "scopeconst");
-            if (!constants || constants->kind != JOBJ) die("gen2 action constants missing");
+            if (!constants || constants->kind != JOBJ) die_at(input_location, "gen2 action constants missing");
             for (size_t i = 0; i < constants->n; i++)
                 value_put(facts, constants->items[i].key, constants->items[i].value);
             recipes = mapseq_construct(value_json(f[8], "gen2 action recipes"), facts);
@@ -5388,24 +5639,24 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
         else if (action_row == 1) {
             Value *opts = value_json(f[8], "gen2 named actions");
             Value *named = value_path(opts, "let.action_retseqs");
-            if (named->kind != JOBJ) die("gen2 return actions changed");
+            if (named->kind != JOBJ) die_at(input_location, "gen2 return actions changed");
             for (size_t i = 0; i < named->n; i++) {
                 const char *ref = value_text(named->items[i].value);
                 Value *seq;
-                if (strncmp(ref, "@ref:", 5)) die("gen2 return action reference changed");
+                if (strncmp(ref, "@ref:", 5)) die_at(input_location, "gen2 return action reference changed");
                 seq = value_get(recipes, ref + 5);
-                if (!seq) die("gen2 return action recipe missing");
+                if (!seq) die_at(input_location, "gen2 return action recipe missing");
                 value_put(sequences, named->items[i].key, seq);
             }
         }
         action_row++; free(s);
         if (action_row == 2) break;
     }
-    if (close_in(actions) || action_row != 2) die("gen2 return action declarations missing");
+    if (close_in(actions) || action_row != 2) die_at(input_location, "gen2 return action declarations missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 9); if (n != 9) die("return manifest column count");
+        n = fields_tab(s, f, 9); if (n != 9) die_at(input_location, "return manifest column count");
         if (return_row == 0 && (!strcmp(f[0], "rows") && !strcmp(f[1], "return") &&
                                 !strcmp(f[2], "@str:{ret_section}"))) {
             Value *opts = value_json(f[8], "return options");
@@ -5413,35 +5664,35 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
             if (!bindmap || bindmap->kind != JARR || bindmap->n != 2 ||
                 strcmp(value_text(bindmap->items[0].value), "retconst") ||
                 strcmp(value_text(bindmap->items[1].value), "extra"))
-                die("return binding declaration changed");
+                die_at(input_location, "return binding declaration changed");
             return_row++;
         }
         free(s); if (return_row) break;
     }
-    if (close_in(manifest) || return_row != 1) die("return row declaration missing");
+    if (close_in(manifest) || return_row != 1) die_at(input_location, "return row declaration missing");
     {
         Value *constant = value_get(facts, "retconst");
-        if (!constant || constant->kind != JOBJ) die("return constants missing");
+        if (!constant || constant->kind != JOBJ) die_at(input_location, "return constants missing");
         for (size_t i = 0; i < constant->n; i++)
             value_put(bindings, constant->items[i].key, constant->items[i].value);
     }
     while ((s = line(fresh))) {
         char *f[4]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 4); if (n != 4) die("return fresh column count");
+        n = fields_tab(s, f, 4); if (n != 4) die_at(input_location, "return fresh column count");
         if (!header++) {
             if (strcmp(f[0], "section") || strcmp(f[1], "owner") ||
                 strcmp(f[2], "kind") || strcmp(f[3], "key"))
-                die("return fresh header changed");
+                die_at(input_location, "return fresh header changed");
         } else if (!strcmp(f[0], section)) {
             char *label = fresh_label(f[1], f[2]);
             value_put(bindings, f[3], value_string(label)); free(label);
         }
         free(s);
     }
-    if (ferror(fresh) || close_in(fresh) || !header) die("return fresh rows missing");
+    if (ferror(fresh) || close_in(fresh) || !header) die_at(input_location, "return fresh rows missing");
     if (extra) {
-        if (extra->kind != JOBJ) die("return extra bindings must be an object");
+        if (extra->kind != JOBJ) die_at(input_location, "return extra bindings must be an object");
         for (size_t i = 0; i < extra->n; i++)
             value_put(bindings, extra->items[i].key, extra->items[i].value);
     }
@@ -5455,14 +5706,14 @@ static Value *parse2_gen2_return_ex(Graph *g, const char *section, Value *extra)
         Value *dispatch = value_get(bindings, "f48");
         if (!domain || domain->kind != JARR || !compound || compound->kind != JARR ||
             !dispatch || dispatch->kind != JSTR)
-            die("return expression dispatch facts changed");
+            die_at(input_location, "return expression dispatch facts changed");
         install_section_domain_classes(g, "exec/parse2/return-dispatch.tsv", "expr0", 'r',
                                        bindings, sequences, classes, domain);
         for (size_t i = 0; i < compound->n; i++) {
             Value *item = compound->items[i].value, *one = value_new(JARR);
             Value *key = value_get(item, "key"), *target = value_get(item, "target");
             if (!key || key->kind != JINT || !target || target->kind != JSTR)
-                die("return compound dispatch fact changed");
+                die_at(input_location, "return compound dispatch fact changed");
             value_put(bindings, "lp_dispatch", dispatch);
             value_put(bindings, "operation", target);
             value_put(one, NULL, key);
@@ -5478,16 +5729,16 @@ static void parse2_gen2_return(Graph *g, const char *section) {
 static Value *parse2_gen2_return_integers(Graph *g) {
     Value *ints = value_get(load_fact("k2-gen2"), "retint");
     Value *current = value_string("QT.scalar");
-    if (!ints || ints->kind != JARR || ints->n != 8) die("return integer facts changed");
+    if (!ints || ints->kind != JARR || ints->n != 8) die_at(input_location, "return integer facts changed");
     for (size_t i = 0; i < ints->n; i++) {
         Value *extra = value_new(JOBJ), *code = value_get(ints->items[i].value, "code");
         Value *bindings;
-        if (!code || code->kind != JINT) die("return integer code missing");
+        if (!code || code->kind != JINT) die_at(input_location, "return integer code missing");
         value_put(extra, "integer_current", current);
         value_put(extra, "integer_code", code);
         bindings = parse2_gen2_return_ex(g, "integer", extra);
         current = value_get(bindings, "f92");
-        if (!current || current->kind != JSTR) die("return integer continuation missing");
+        if (!current || current->kind != JSTR) die_at(input_location, "return integer continuation missing");
     }
     return current;
 }
@@ -5499,19 +5750,19 @@ static void parse2_gen2_return_float(Graph *g, Value *row) {
         !base || base->kind != JINT ||
         snprintf(entry, sizeof(entry), "QT.%s", label->s) >= (int)sizeof(entry) ||
         snprintf(cvt, sizeof(cvt), "TO.%s", convert->s) >= (int)sizeof(cvt))
-        die("return floating row invalid");
+        die_at(input_location, "return floating row invalid");
     value_put(extra, "float_entry", value_string(entry));
     value_put(extra, "float_convert", value_string(cvt));
     value_put(extra, "result_base", base);
     parse2_gen2_return_ex(g, "floating", extra);
 }
 static void parse2_gen2_conditional(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/conditional-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/conditional-manifest.tsv", "rb");
     Value *facts = load_fact("conditional"), *k2env = value_path(load_fact("k2-gen2"), "k2env");
     Value *env = value_new(JOBJ), *sequences = value_new(JOBJ);
     char *s; int rows = 0;
     if (!manifest || !facts || !k2env || k2env->kind != JOBJ)
-        die("conditional manifest or facts missing");
+        die_at(input_location, "conditional manifest or facts missing");
     value_put(env, "enum_values", value_get(k2env, "ENV"));
     value_put(env, "enum_defined", value_get(k2env, "END_"));
     while ((s = line(manifest))) {
@@ -5519,12 +5770,12 @@ static void parse2_gen2_conditional(Graph *g) {
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "conditional") ||
-            strcmp(f[4], "conditional")) die("conditional manifest row changed");
+            strcmp(f[4], "conditional")) die_at(input_location, "conditional manifest row changed");
         {
             Value *opts = value_json(f[8], "conditional row options");
             Value *class_name = value_get(opts, "classes"), *classes;
             Value *bindings = value_new(JOBJ);
-            if (!class_name || class_name->kind != JSTR) die("conditional classes missing");
+            if (!class_name || class_name->kind != JSTR) die_at(input_location, "conditional classes missing");
             classes = value_path(facts, class_name->s);
             direct_bindings(bindings, f[7], env);
             install_section_classes(g, "exec/parse2/conditional-byte.tsv", f[2], 'b',
@@ -5535,21 +5786,21 @@ static void parse2_gen2_conditional(Graph *g) {
         rows++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 11)
-        die("conditional manifest incomplete");
+        die_at(input_location, "conditional manifest incomplete");
 }
 static void parse2_gen2_type_words(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *words = value_get(facts, "typewords");
     if (!words || words->kind != JARR || words->n != 8)
-        die("gen2 type-word domain changed");
+        die_at(input_location, "gen2 type-word domain changed");
     for (size_t i = 0; i < words->n; i++) {
         Value *word = words->items[i].value, *extra = value_new(JOBJ);
         Value *name = value_get(word, "word"), *value = value_get(word, "value");
         Value *rank = value_get(word, "rank"), *follow = value_get(word, "follow");
         char state[128], *ret;
         if (!name || name->kind != JSTR || !value || !rank || !follow)
-            die("invalid gen2 type-word fact");
+            die_at(input_location, "invalid gen2 type-word fact");
         if (snprintf(state, sizeof(state), "TS.%s", name->s) >= (int)sizeof(state))
-            die("gen2 type-word name too long");
+            die_at(input_location, "gen2 type-word name too long");
         ret = fresh_label(state, "r");
         value_put(extra, "word_state", value_string(state));
         value_put(extra, "word_return", value_string(ret));
@@ -5569,7 +5820,7 @@ static void parse2_gen2_type_entry(Graph *g) {
 static Value *parse2_gen2_tail_first(Value *item, const char *register_name) {
     Value *first = value_get(item, "first"), *seq = value_new(JARR);
     if (!first || first->kind != JARR || first->n > 1)
-        die("gen2 tail initial fact changed");
+        die_at(input_location, "gen2 tail initial fact changed");
     if (first->n) {
         Value *action = value_new(JARR), *zero = value_new(JINT);
         value_put(action, NULL, value_string("LDI"));
@@ -5581,7 +5832,7 @@ static Value *parse2_gen2_tail_first(Value *item, const char *register_name) {
 }
 static Value *parse2_gen2_tail_mask(Value *item) {
     Value *text = value_get(item, "masktext"), *seq = value_new(JARR);
-    if (!text || text->kind != JSTR) die("gen2 tail mask fact changed");
+    if (!text || text->kind != JSTR) die_at(input_location, "gen2 tail mask fact changed");
     for (size_t i = 0; i < text->n; i++) {
         Value *action = value_new(JARR), *byte = value_new(JINT);
         value_put(action, NULL, value_string("OUT"));
@@ -5595,13 +5846,13 @@ static void parse2_gen2_tytail(Graph *g) {
     Value *resd = value_get(facts, "resdrows"), *final;
     if (!ckm || ckm->kind != JARR || ckm->n != 3 ||
         !resd || resd->kind != JARR || resd->n != 8)
-        die("gen2 tail row domains changed");
+        die_at(input_location, "gen2 tail row domains changed");
     for (size_t i = 0; i < ckm->n; i++) {
         Value *item = ckm->items[i].value, *extra = value_new(JOBJ), *seq = value_new(JOBJ);
         Value *current = value_get(item, "current"), *hit = value_get(item, "hit");
         Value *next = value_get(item, "next"), *axis = value_get(item, "axis");
         char *test;
-        if (!current || !hit || !next || !axis) die("gen2 ckm row changed");
+        if (!current || !hit || !next || !axis) die_at(input_location, "gen2 ckm row changed");
         test = fresh_label(value_text(current), "b");
         value_put(extra, "word_state", current);
         value_put(extra, "tail_current", current);
@@ -5613,12 +5864,12 @@ static void parse2_gen2_tytail(Graph *g) {
         parse2_gen2_control_ex(g, "ckm-row", extra, seq); free(test);
     }
     final = value_get(facts, "ckmfinal");
-    if (!final || final->kind != JOBJ) die("gen2 ckm final changed");
+    if (!final || final->kind != JOBJ) die_at(input_location, "gen2 ckm final changed");
     {
         Value *extra = value_new(JOBJ), *seq = value_new(JOBJ);
         Value *current = value_get(final, "current"), *axis = value_get(final, "axis");
         char *test;
-        if (!current || !axis) die("gen2 ckm final missing field");
+        if (!current || !axis) die_at(input_location, "gen2 ckm final missing field");
         test = fresh_label(value_text(current), "b");
         value_put(extra, "tail_current", current);
         value_put(extra, "tail_test", value_string(test));
@@ -5631,9 +5882,9 @@ static void parse2_gen2_tytail(Graph *g) {
         Value *current = value_get(item, "current"), *hit = value_get(item, "hit");
         Value *next = value_get(item, "next"), *axis = value_get(item, "axis");
         Value *code = value_get(item, "code"); char mask[128], *test;
-        if (!current || !hit || !next || !axis || !code) die("gen2 resd row changed");
+        if (!current || !hit || !next || !axis || !code) die_at(input_location, "gen2 resd row changed");
         if (snprintf(mask, sizeof(mask), "%s.mask", value_text(hit)) >= (int)sizeof(mask))
-            die("gen2 resd mask name too long");
+            die_at(input_location, "gen2 resd mask name too long");
         test = fresh_label(value_text(current), "b");
         value_put(extra, "word_state", current);
         value_put(extra, "tail_current", current);
@@ -5648,7 +5899,7 @@ static void parse2_gen2_tytail(Graph *g) {
     }
     final = value_get(facts, "resdfinal");
     if (!final || final->kind != JOBJ || !value_get(final, "current"))
-        die("gen2 resd final changed");
+        die_at(input_location, "gen2 resd final changed");
     {
         Value *extra = value_new(JOBJ), *seq = value_new(JOBJ);
         value_put(extra, "tail_current", value_get(final, "current"));
@@ -5657,17 +5908,17 @@ static void parse2_gen2_tytail(Graph *g) {
     }
 }
 static void parse2_gen2_ladder_reject(Graph *g, const char *which) {
-    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/gen2-manifest.tsv", "rb");
     char *s; int count = 0; char when[80];
     if (snprintf(when, sizeof(when), "fact:seg_ladder-%s-reject", which) >= (int)sizeof(when))
-        die("gen2 ladder reject name too long");
-    if (strcmp(which, "E") && strcmp(which, "C")) die("unsupported ladder reject section");
-    if (!manifest) die("cannot open gen2 manifest");
+        die_at(input_location, "gen2 ladder reject name too long");
+    if (strcmp(which, "E") && strcmp(which, "C")) die_at(input_location, "unsupported ladder reject section");
+    if (!manifest) die_at(input_location, "cannot open gen2 manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("gen2 ladder reject manifest columns");
+        if (n != 9) die_at(input_location, "gen2 ladder reject manifest columns");
         if (!strcmp(f[3], when)) {
             Value *bindings = value_new(JOBJ), *opts, *seq;
             if (strcmp(f[0], "rows") || strcmp(f[1], "ladder-reject") ||
@@ -5675,7 +5926,7 @@ static void parse2_gen2_ladder_reject(Graph *g, const char *which) {
                 strcmp(f[7], "reject_state=@str:DEAD.pa") &&
                 strcmp(f[7], "reject_state=@str:DEAD.ty") &&
                 strcmp(f[7], "reject_state=@str:DEAD.ui"))
-                die("unsupported gen2 ladder reject row");
+                die_at(input_location, "unsupported gen2 ladder reject row");
             opts = value_json(f[8], "gen2 ladder reject options");
             seq = mapseq_construct(opts, value_new(JOBJ));
             direct_bindings_ex(bindings, seq, f[7], value_new(JOBJ));
@@ -5686,14 +5937,14 @@ static void parse2_gen2_ladder_reject(Graph *g, const char *which) {
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || count != (strcmp(which, "E") ? 3 : 4))
-        die("gen2 ladder reject rows changed");
+        die_at(input_location, "gen2 ladder reject rows changed");
 }
 static Value *parse2_gen2_ladder_extra(const char *owner, const char *up,
                                         const char *next, const char *dispatch,
                                         const char *op) {
     Value *extra = value_new(JOBJ); char loop[128], state[128], tail[128];
     if (snprintf(loop, sizeof(loop), "%s.l", owner) >= (int)sizeof(loop))
-        die("ladder loop name too long");
+        die_at(input_location, "ladder loop name too long");
     value_put(extra, "ladder_owner", value_string(owner));
     value_put(extra, "ladder_loop", value_string(loop));
     value_put(extra, "ladder_up", up ? value_string(up) : value_new(JNULL));
@@ -5702,7 +5953,7 @@ static Value *parse2_gen2_ladder_extra(const char *owner, const char *up,
     if (op) {
         if (snprintf(state, sizeof(state), "%s.%s", owner, op) >= (int)sizeof(state) ||
             snprintf(tail, sizeof(tail), "OPX.%s", op) >= (int)sizeof(tail))
-            die("ladder operator name too long");
+            die_at(input_location, "ladder operator name too long");
         value_put(extra, "ladder_operator", value_string(state));
         value_put(extra, "ladder_tail", value_string(tail));
         value_put(extra, "word_state", value_string(state));
@@ -5722,14 +5973,14 @@ static void parse2_gen2_ladder_dispatch(Graph *g, const char *owner,
     table = buffer_file(&expanded);
     install_delta_text(g, table, 'r', numeric_domain(0, 257), NULL,
                        value_new(JOBJ), 0, 0, NULL, "START");
-    if (close_in(table)) die("ladder dispatch table close failed");
+    if (close_in(table)) die_at(input_location, "ladder dispatch table close failed");
     free(expanded.s);
 }
 static void parse2_gen2_ladder(Graph *g, char kind) {
     Value *facts = load_fact("k2-gen2"), *rows = value_get(facts, "ladder");
-    if (kind != 'E' && kind != 'C') die("unsupported gen2 ladder kind");
+    if (kind != 'E' && kind != 'C') die_at(input_location, "unsupported gen2 ladder kind");
     if (!rows || rows->kind != JARR || rows->n != 10)
-        die("gen2 ladder domain changed");
+        die_at(input_location, "gen2 ladder domain changed");
     for (size_t i = 0; i < rows->n; i++) {
         Value *item = rows->items[i].value, *lv = value_get(item, "lv");
         Value *nxt = value_get(item, "nxt"), *ops = value_get(item, "ops");
@@ -5738,14 +5989,14 @@ static void parse2_gen2_ladder(Graph *g, char kind) {
         const char *up_name, *next_name;
         if (!lv || lv->kind != JINT || !ops || ops->kind != JARR ||
             !mid || mid->kind != JARR || !last || last->kind != JARR ||
-            (mid->n + last->n != 1)) die("invalid gen2 ladder row");
+            (mid->n + last->n != 1)) die_at(input_location, "invalid gen2 ladder row");
         if (snprintf(owner, sizeof(owner), "%c%lld", kind, lv->number) >= (int)sizeof(owner))
-            die("ladder owner too long");
+            die_at(input_location, "ladder owner too long");
         if (mid->n) {
             if (!nxt || nxt->kind != JINT ||
                 snprintf(up, sizeof(up), "%c%lld", kind, nxt->number) >= (int)sizeof(up) ||
                 snprintf(next, sizeof(next), "E%lld", nxt->number) >= (int)sizeof(next))
-                die("ladder next missing");
+                die_at(input_location, "ladder next missing");
             up_name = up; next_name = next;
         } else {
             up_name = kind == 'E' ? "UNARY" : NULL;
@@ -5762,7 +6013,7 @@ static void parse2_gen2_ladder(Graph *g, char kind) {
             Value *mode = value_get(op, "mode"); char section[32];
             if (!name || name->kind != JSTR || !mode || mode->kind != JSTR ||
                 snprintf(section, sizeof(section), "ladder-%s", mode->s) >= (int)sizeof(section))
-                die("invalid ladder operator fact");
+                die_at(input_location, "invalid ladder operator fact");
             parse2_gen2_control_ex(g, section,
                 parse2_gen2_ladder_extra(owner, up_name, next_name, dispatch, name->s), NULL);
         }
@@ -5772,7 +6023,7 @@ static void parse2_gen2_ladder(Graph *g, char kind) {
 static Value *parse2_gen2_operator_extra(Value *spec, Value *ctx) {
     Value *result = value_new(JOBJ), *let = value_get(spec, "let");
     Value *extra = let ? value_get(let, "extra") : NULL;
-    if (!extra || extra->kind != JOBJ) die("operator extra declaration missing");
+    if (!extra || extra->kind != JOBJ) die_at(input_location, "operator extra declaration missing");
     for (size_t i = 0; i < extra->n; i++) {
         Value *source = extra->items[i].value, *v;
         const char *cell = value_text(source);
@@ -5786,54 +6037,54 @@ static Value *parse2_gen2_operator_extra(Value *spec, Value *ctx) {
     return result;
 }
 static void parse2_gen2_operator_prefix(Graph *g, int level) {
-    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/gen2-manifest.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *ops = value_get(facts, "oprows");
     Value *seqopts = NULL, *callopts = NULL, *selectopts = NULL;
     Value *floatopts = NULL, *floatcall = NULL, *rejectcall = NULL;
     Value *pointercall = NULL, *integercall = NULL; char *s; int row = 0;
     if (!manifest || !ops || ops->kind != JARR || ops->n != 16)
-        die("operator prefix inputs missing");
+        die_at(input_location, "operator prefix inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
-        n = fields_tab(s, f, 9); if (n != 9) die("gen2 manifest columns");
+        n = fields_tab(s, f, 9); if (n != 9) die_at(input_location, "gen2 manifest columns");
         if (row == 48) {
             if (strcmp(f[0], ".let") || strcmp(f[4], "k2-gen2"))
-                die("operator prefix sequence declaration changed");
+                die_at(input_location, "operator prefix sequence declaration changed");
             seqopts = value_json(f[8], "operator prefix sequences");
         } else if (row == 53) {
             if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-prefix,", 36))
-                die("operator prefix call changed");
+                die_at(input_location, "operator prefix call changed");
             callopts = value_json(f[8], "operator prefix call");
         } else if (row == 55) {
             if (strcmp(f[0], "..call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-float-select,", 42))
-                die("operator float-select call changed");
+                die_at(input_location, "operator float-select call changed");
             selectopts = value_json(f[8], "operator float-select call");
         } else if (row == 57) {
             if (strcmp(f[0], "..let") || strcmp(f[4], "-"))
-                die("operator float sequence declaration changed");
+                die_at(input_location, "operator float sequence declaration changed");
             floatopts = value_json(f[8], "operator float sequences");
         } else if (row == 58) {
             if (strcmp(f[0], "..call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-float-body,", 40))
-                die("operator float-body call changed");
+                die_at(input_location, "operator float-body call changed");
             floatcall = value_json(f[8], "operator float-body call");
         } else if (row == 60) {
             if (strcmp(f[0], "..call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-float-reject,", 42))
-                die("operator float-reject call changed");
+                die_at(input_location, "operator float-reject call changed");
             rejectcall = value_json(f[8], "operator float-reject call");
         } else if (row == 61) {
             if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-pointer-{ptr},", 44))
-                die("operator pointer call changed");
+                die_at(input_location, "operator pointer call changed");
             pointercall = value_json(f[8], "operator pointer call");
         } else if (row == 62) {
             if (strcmp(f[0], ".call") || strcmp(f[1], "control") ||
                 strncmp(f[7], "control_section=@str:operator-integer,", 37))
-                die("operator integer call changed");
+                die_at(input_location, "operator integer call changed");
             integercall = value_json(f[8], "operator integer call");
         }
         row++; free(s);
@@ -5844,13 +6095,13 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         (level > 1 && (!floatopts || !floatcall)) ||
         (level > 2 && !rejectcall) || (level > 3 && !pointercall) ||
         (level > 4 && !integercall))
-        die("operator prefix declarations missing");
+        die_at(input_location, "operator prefix declarations missing");
     for (size_t i = 0; i < ops->n; i++) {
         Value *item = ops->items[i].value, *ctx = value_new(JOBJ), *seq;
         Value *name = value_get(item, "op"), *ptrn = value_get(item, "ptrn");
         Value *cmpl = value_get(item, "cmpl"); char ref[128];
         if (!name || name->kind != JSTR || !ptrn || ptrn->kind != JARR ||
-            !cmpl || cmpl->kind != JARR) die("operator prefix fact changed");
+            !cmpl || cmpl->kind != JARR) die_at(input_location, "operator prefix fact changed");
         for (size_t j = 0; j < facts->n; j++)
             value_put(ctx, facts->items[j].key, facts->items[j].value);
         for (size_t j = 0; j < item->n; j++)
@@ -5858,11 +6109,11 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         value_put(ctx, "o", item);
         if (snprintf(ref, sizeof(ref), "OPX.%s.%c", name->s,
                      ptrn->n ? 'n' : 'r') >= (int)sizeof(ref))
-            die("operator integer entry too long");
+            die_at(input_location, "operator integer entry too long");
         value_put(ctx, "ient", value_string(ref));
         if (cmpl->n) {
             if (snprintf(ref, sizeof(ref), "OPX.%s.r", name->s) >= (int)sizeof(ref))
-                die("operator pointer target too long");
+                die_at(input_location, "operator pointer target too long");
             value_put(ctx, "pct", value_string(ref));
         } else value_put(ctx, "pct", value_string("DEAD.pa"));
         seq = mapseq_construct(seqopts, ctx);
@@ -5871,7 +6122,7 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         if (level) {
             Value *fl = value_get(item, "fl");
             if (!fl || fl->kind != JARR || fl->n > 1)
-                die("operator float-select fact changed");
+                die_at(input_location, "operator float-select fact changed");
             if (fl->n) parse2_gen2_control_ex(g, "operator-float-select",
                 parse2_gen2_operator_extra(selectopts, ctx), seq);
         }
@@ -5880,13 +6131,13 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
             Value *spec = value_get(floatopts, "mapseq"), *opcode = value_get(spec, "float_opcode");
             if (!floats || floats->kind != JARR || !invl || invl->kind != JARR ||
                 invl->n > 1 || !opcode || opcode->kind != JARR)
-                die("operator float-body declarations changed");
+                die_at(input_location, "operator float-body declarations changed");
             for (size_t k = 0; k < floats->n; k++) {
                 Value *f = floats->items[k].value, *fctx = value_new(JOBJ);
                 Value *small = value_new(JOBJ), *map = value_new(JOBJ);
                 Value *floatseq, *invert = value_new(JARR), *inversion = value_get(facts, "INVTEXT");
                 if (!f || f->kind != JOBJ || !inversion || inversion->kind != JSTR)
-                    die("operator float fact changed");
+                    die_at(input_location, "operator float fact changed");
                 for (size_t j = 0; j < ctx->n; j++)
                     value_put(fctx, ctx->items[j].key, ctx->items[j].value);
                 for (size_t j = 0; j < f->n; j++)
@@ -5910,7 +6161,7 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
         if (level > 2) {
             Value *nf = value_get(item, "nf");
             if (!nf || nf->kind != JARR || nf->n > 1)
-                die("operator float-reject fact changed");
+                die_at(input_location, "operator float-reject fact changed");
             if (nf->n) parse2_gen2_control_ex(g, "operator-float-reject",
                 parse2_gen2_operator_extra(rejectcall, ctx), seq);
         }
@@ -5918,7 +6169,7 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
             Value *ptr = value_get(item, "ptr"); char section[64];
             if (!ptr || ptr->kind != JSTR ||
                 snprintf(section, sizeof(section), "operator-pointer-%s", ptr->s) >= (int)sizeof(section))
-                die("operator pointer variant changed");
+                die_at(input_location, "operator pointer variant changed");
             parse2_gen2_control_ex(g, section,
                 parse2_gen2_operator_extra(pointercall, ctx), seq);
         }
@@ -5929,37 +6180,37 @@ static void parse2_gen2_operator_prefix(Graph *g, int level) {
 static void parse2_gen2_startup_guard(Graph *g) {
     Value *facts = load_fact("k2-gen2"), *span = value_get(facts, "POSSPAN");
     Value *extra = value_new(JOBJ);
-    if (!span || span->kind != JINT) die("gen2 startup guard span missing");
+    if (!span || span->kind != JINT) die_at(input_location, "gen2 startup guard span missing");
     value_put(extra, "POSSPAN", span);
     parse2_gen2_control_ex(g, "startup-guard", extra, NULL);
 }
 static void parse2_gen2_statics(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/statics-manifest.tsv", "rb");
-    FILE *outer = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/statics-manifest.tsv", "rb");
+    FILE *outer = open_input("exec/parse2/gen2-manifest.tsv", "rb");
     FILE *templ;
     Value *facts = load_fact("k2-statics"), *genfacts = load_fact("k2-gen2");
     Value *env = value_new(JOBJ), *sequences = NULL, *bindings;
     char *s; int row = 0, found = 0, edits = 0;
-    if (!manifest || !outer) die("cannot open statics declarations");
+    if (!manifest || !outer) die_at(input_location, "cannot open statics declarations");
     while ((s = line(outer))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("gen2 manifest column count");
+        if (n != 9) die_at(input_location, "gen2 manifest column count");
         if (!strcmp(f[0], "call") && !strcmp(f[1], "statics") &&
             !strcmp(f[3], "fact:seg_statics-init")) {
-            if (found++) die("duplicate statics call");
+            if (found++) die_at(input_location, "duplicate statics call");
             direct_bindings(env, f[7], genfacts);
         }
         free(s);
     }
-    if (ferror(outer) || close_in(outer) || found != 1) die("missing statics call");
+    if (ferror(outer) || close_in(outer) || found != 1) die_at(input_location, "missing statics call");
     for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("statics manifest column count");
+        if (n != 9) die_at(input_location, "statics manifest column count");
         if (row == 0 && !strcmp(f[0], "let") && !strcmp(f[1], "-")) {
             Value *opts = value_json(f[8], "statics sequences");
             sequences = mapseq_construct(opts, facts);
@@ -5967,19 +6218,19 @@ static void parse2_gen2_statics(Graph *g) {
                 value_put(facts, sequences->items[i].key, sequences->items[i].value);
             row++;
         } else if (row == 1 && !strcmp(f[0], "template") && !strcmp(f[1], "statics")) {
-            templ = fopen("exec/parse2/statics-template.tsv", "rb");
-            if (!templ) die("cannot open statics template");
+            templ = open_input("exec/parse2/statics-template.tsv", "rb");
+            if (!templ) die_at(input_location, "cannot open statics template");
             char *tline;
             while ((tline = line(templ))) {
                 char *t[9]; int tn;
                 if (!*tline || *tline == '#') { free(tline); continue; }
                 tn = fields_tab(tline, t, 9);
                 if (tn != 9 || strcmp(t[0], "replace") || strcmp(t[4], "drop-state") || edits++)
-                    die("unsupported statics template edit");
+                    die_at(input_location, "unsupported statics template edit");
                 parse2_drop_state(g, t[5]);
                 free(tline);
             }
-            if (ferror(templ) || close_in(templ) || edits != 1) die("incomplete statics template");
+            if (ferror(templ) || close_in(templ) || edits != 1) die_at(input_location, "incomplete statics template");
             row++;
         } else if (row == 2 && !strcmp(f[0], "rows") && !strcmp(f[1], "statics")) {
             Value *sq = value_new(JOBJ); bindings = value_new(JOBJ);
@@ -5990,48 +6241,48 @@ static void parse2_gen2_statics(Graph *g) {
             install_plain_classes(g, "exec/parse2/statics-result.tsv", 'r',
                                   bindings, sq, value_get(facts, "classes"));
             row++;
-        } else die("unexpected statics manifest row");
+        } else die_at(input_location, "unexpected statics manifest row");
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || row != 3) die("incomplete statics manifest");
+    if (ferror(manifest) || close_in(manifest) || row != 3) die_at(input_location, "incomplete statics manifest");
 }
 static void parse2_gen2_initializers_hook(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/initializers-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/initializers-manifest.tsv", "rb");
     FILE *templ;
     char *s;
     int row = 0, edit = 0;
-    if (!manifest) die("cannot open initializers manifest");
+    if (!manifest) die_at(input_location, "cannot open initializers manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("initializers manifest column count");
+        if (n != 9) die_at(input_location, "initializers manifest column count");
         if (row == 0 && !strcmp(f[0], "let") && !strcmp(f[1], "-")) row++;
         else if (row == 1 && !strcmp(f[0], "template") &&
                  !strcmp(f[1], "initializers") && !strcmp(f[2], "hook")) {
             row++; free(s); break;
-        } else die("unexpected initializers hook row");
+        } else die_at(input_location, "unexpected initializers hook row");
         free(s);
     }
-    if (close_in(manifest) || row != 2) die("incomplete initializers hook manifest");
-    templ = fopen("exec/parse2/initializers-template.tsv", "rb");
-    if (!templ) die("cannot open initializers template");
+    if (close_in(manifest) || row != 2) die_at(input_location, "incomplete initializers hook manifest");
+    templ = open_input("exec/parse2/initializers-template.tsv", "rb");
+    if (!templ) die_at(input_location, "cannot open initializers template");
     while ((s = line(templ))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("initializers template column count");
+        if (n != 9) die_at(input_location, "initializers template column count");
         if (!strcmp(f[0], "hook")) {
-            if (strcmp(f[4], "move-state") || edit++) die("unsupported initializers hook edit");
+            if (strcmp(f[4], "move-state") || edit++) die_at(input_location, "unsupported initializers hook edit");
             pp_move_state(g, f[5], f[6]);
         }
         free(s);
     }
-    if (ferror(templ) || close_in(templ) || edit != 1) die("incomplete initializers hook template");
+    if (ferror(templ) || close_in(templ) || edit != 1) die_at(input_location, "incomplete initializers hook template");
 }
 static Value *parse2_gen2_initializers_text(Value *text) {
     Value *seq = value_new(JARR);
-    if (!text || text->kind != JSTR) die("initializer text fact missing");
+    if (!text || text->kind != JSTR) die_at(input_location, "initializer text fact missing");
     for (size_t i = 0; i < text->n; i++) {
         Value *act = value_new(JARR), *byte = value_new(JINT);
         byte->number = (unsigned char)text->s[i];
@@ -6049,18 +6300,18 @@ static Value *parse2_gen2_initializers_reject(const char *reason) {
     return seq;
 }
 static void parse2_gen2_initializers_main(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/initializers-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/initializers-manifest.tsv", "rb");
     Value *facts = load_facts_expr("parse2-initializers+k2-stack");
     Value *outer = load_fact("k2-gen2"), *env = value_get(outer, "initenv");
     Value *mapseq = NULL, *classes = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
-    if (!manifest || !env || env->kind != JOBJ) die("cannot read initializer declarations");
+    if (!manifest || !env || env->kind != JOBJ) die_at(input_location, "cannot read initializer declarations");
     for (size_t i = 0; i < env->n; i++) value_put(facts, env->items[i].key, env->items[i].value);
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("initializer manifest column count");
+        if (n != 9) die_at(input_location, "initializer manifest column count");
         if (row == 0 && !strcmp(f[0], "let")) {
             Value *opts = value_json(f[8], "initializer sequences");
             mapseq = mapseq_construct(opts, facts);
@@ -6074,30 +6325,30 @@ static void parse2_gen2_initializers_main(Graph *g) {
             Value *seqs = mapseq_construct(opts, facts);
             char *cells = copy(f[6]), *p = cells;
             if (!tokenmap || tokenmap->kind != JOBJ || !tokens || tokens->kind != JOBJ)
-                die("initializer token classes absent");
+                die_at(input_location, "initializer token classes absent");
             for (size_t i = 0; i < tokenmap->n; i++) {
                 const char *name = value_text(tokenmap->items[i].value);
                 Value *code = !strcmp(name, "identifier") ? value_get(constants, "TK_ID") :
                               !strcmp(name, "string") ? value_get(constants, "TK_STR") :
                               value_get(tokens, name);
                 Value *one = value_new(JARR);
-                if (!code || code->kind != JINT) die("initializer token code absent");
+                if (!code || code->kind != JINT) die_at(input_location, "initializer token code absent");
                 value_put(one, NULL, code); value_put(classes, tokenmap->items[i].key, one);
             }
             while (*p) {
                 char *comma = strchr(p, ','), *eq = strchr(p, '='), *val;
                 if (comma) *comma = 0;
-                if (!eq || eq == p) die("initializer sequence cell malformed");
+                if (!eq || eq == p) die_at(input_location, "initializer sequence cell malformed");
                 *eq = 0; val = eq + 1;
                 if (val[0] == '$') {
                     Value *v = value_get(mapseq, val + 1);
-                    if (!v) die("initializer sequence absent");
+                    if (!v) die_at(input_location, "initializer sequence absent");
                     value_put(seqs, p, v);
                 } else if (!strncmp(val, "@textf:", 7))
                     value_put(seqs, p, parse2_gen2_initializers_text(value_path(facts, val + 7)));
                 else if (!strncmp(val, "@rej:", 5))
                     value_put(seqs, p, parse2_gen2_initializers_reject(val + 5));
-                else die("unsupported initializer sequence cell");
+                else die_at(input_location, "unsupported initializer sequence cell");
                 if (!comma) break; p = comma + 1;
             }
             free(cells);
@@ -6107,24 +6358,24 @@ static void parse2_gen2_initializers_main(Graph *g) {
             install_section_classes(g, "exec/parse2/initializers-result.tsv", "main", 'r',
                                     bindings, seqs, classes);
             row++;
-        } else die("unexpected initializer main row");
+        } else die_at(input_location, "unexpected initializer main row");
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || row != 3) die("incomplete initializer main manifest");
+    if (ferror(manifest) || close_in(manifest) || row != 3) die_at(input_location, "incomplete initializer main manifest");
 }
 static void parse2_string_walk_head(Graph *g, const char *pre, const char *body, const char *done);
 static void parse2_string_walk_escape(Graph *g, const char *pre, const char *body);
 static void parse2_string_walk_tail(Graph *g, const char *pre, const char *body, const char *done);
 static void parse2_gen2_manifest_strwalk(Graph *g, const char *when, int ordinal, int count) {
-    FILE *manifest = fopen("exec/parse2/gen2-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/gen2-manifest.tsv", "rb");
     Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
     char *s; int found = 0;
-    if (!manifest) die("cannot open gen2 string walk declarations");
+    if (!manifest) die_at(input_location, "cannot open gen2 string walk declarations");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("gen2 string walk column count");
+        if (n != 9) die_at(input_location, "gen2 string walk column count");
         if (!strcmp(f[0], "call") && !strcmp(f[1], "strwalk") &&
             !strcmp(f[3], when)) {
             if (found++ == ordinal) direct_bindings(bindings, f[7], facts);
@@ -6132,7 +6383,7 @@ static void parse2_gen2_manifest_strwalk(Graph *g, const char *when, int ordinal
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || found != count || ordinal < 0 || ordinal >= count)
-        die("gen2 string walker count changed");
+        die_at(input_location, "gen2 string walker count changed");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
     const char *done = value_text(value_get(bindings, "done"));
@@ -6144,30 +6395,30 @@ static void parse2_gen2_statics_strwalk(Graph *g) {
     parse2_gen2_manifest_strwalk(g, "fact:seg_statics-init", 0, 1);
 }
 static void parse2_gen2_shape_simple(Graph *g, const char *section) {
-    FILE *manifest = fopen("exec/parse2/shape-manifest.tsv", "rb");
-    FILE *fresh = fopen("exec/parse2/shape-fresh.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/shape-manifest.tsv", "rb");
+    FILE *fresh = open_input("exec/parse2/shape-fresh.tsv", "rb");
     Value *facts = load_fact("k2-gen2"), *consts = value_get(facts, "shapeconst");
     Value *classes = value_get(facts, "shapeclasses"), *bindings = value_new(JOBJ);
     Value *sequences = value_new(JOBJ);
     char *s; int rows = 0, labels = 0;
     if (!manifest || !fresh || !consts || consts->kind != JOBJ ||
-        !classes || classes->kind != JOBJ) die("cannot read shape declarations");
+        !classes || classes->kind != JOBJ) die_at(input_location, "cannot read shape declarations");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "shape") ||
-            strcmp(f[4], "k2-gen2") || rows++) die("unsupported shape manifest");
+            strcmp(f[4], "k2-gen2") || rows++) die_at(input_location, "unsupported shape manifest");
         free(s);
     }
-    if (ferror(manifest) || close_in(manifest) || rows != 1) die("incomplete shape manifest");
+    if (ferror(manifest) || close_in(manifest) || rows != 1) die_at(input_location, "incomplete shape manifest");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
     while ((s = line(fresh))) {
         char *f[4], *label; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 4);
-        if (n != 4) die("shape fresh column count");
+        if (n != 4) die_at(input_location, "shape fresh column count");
         if (!strcmp(f[0], section)) {
             label = fresh_label(f[1], f[2]);
             value_put(bindings, f[3], value_string(label));
@@ -6175,24 +6426,24 @@ static void parse2_gen2_shape_simple(Graph *g, const char *section) {
         }
         free(s);
     }
-    if (ferror(fresh) || close_in(fresh) || !labels) die("shape fresh labels absent");
+    if (ferror(fresh) || close_in(fresh) || !labels) die_at(input_location, "shape fresh labels absent");
     install_section_classes(g, "exec/parse2/shape-byte.tsv", section, 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse2/shape-result.tsv", section, 'r',
                             bindings, sequences, classes);
 }
 static void parse2_string_initializer_head(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
     if (!manifest || !reasons || reasons->kind != JOBJ)
-        die("cannot read string initializer facts");
+        die_at(input_location, "cannot read string initializer facts");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("string initializer manifest column count");
+        if (n != 9) die_at(input_location, "string initializer manifest column count");
         if (!row && (!strcmp(f[0], "let") && !strcmp(f[4], "k2-strings"))) {
             row++;
         } else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[1], "strings") &&
@@ -6201,7 +6452,7 @@ static void parse2_string_initializer_head(Graph *g) {
                 char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
                 snprintf(name, sizeof(name), "reject%d", i);
                 reason = value_get(reasons, name);
-                if (!reason || reason->kind != JSTR) die("missing string initializer rejection fact");
+                if (!reason || reason->kind != JSTR) die_at(input_location, "missing string initializer rejection fact");
                 value_put(reject, NULL, value_string("REJECT"));
                 value_put(reject, NULL, reason);
                 value_put(acts, NULL, reject);
@@ -6215,20 +6466,20 @@ static void parse2_string_initializer_head(Graph *g) {
             row++;
         } else if (row == 2 && !strcmp(f[0], "call") && !strcmp(f[1], "strwalk")) {
             free(s); break;
-        } else die("unexpected string initializer head row");
+        } else die_at(input_location, "unexpected string initializer head row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || row != 2)
-        die("incomplete string initializer head");
+        die_at(input_location, "incomplete string initializer head");
 }
 static void parse2_string_walk_head(Graph *g, const char *pre,
                                     const char *body, const char *done) {
-    FILE *manifest = fopen("exec/parse2/strwalk-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/strwalk-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
     if (!manifest || !reasons || reasons->kind != JOBJ)
-        die("cannot read string walker facts");
+        die_at(input_location, "cannot read string walker facts");
     value_put(facts, "pre", value_string(pre));
     value_put(facts, "body", value_string(body));
     value_put(facts, "done", value_string(done));
@@ -6236,7 +6487,7 @@ static void parse2_string_walk_head(Graph *g, const char *pre,
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("string walker manifest column count");
+        if (n != 9) die_at(input_location, "string walker manifest column count");
         if (!row && !strcmp(f[0], "let") && !strcmp(f[4], "k2-strings")) row++;
         else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[1], "strings") &&
                  !strcmp(f[2], "walk_head") && !strcmp(f[4], "k2-strings")) {
@@ -6244,7 +6495,7 @@ static void parse2_string_walk_head(Graph *g, const char *pre,
                 char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
                 snprintf(name, sizeof(name), "reject%d", i);
                 reason = value_get(reasons, name);
-                if (!reason || reason->kind != JSTR) die("missing string walker rejection fact");
+                if (!reason || reason->kind != JSTR) die_at(input_location, "missing string walker rejection fact");
                 value_put(reject, NULL, value_string("REJECT"));
                 value_put(reject, NULL, reason);
                 value_put(acts, NULL, reject);
@@ -6259,20 +6510,20 @@ static void parse2_string_walk_head(Graph *g, const char *pre,
         } else if (row == 2 && !strcmp(f[0], "template") &&
                    !strcmp(f[1], "strings") && !strcmp(f[2], "walk_escape")) {
             free(s); break;
-        } else die("unexpected string walker head row");
+        } else die_at(input_location, "unexpected string walker head row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || row != 2)
-        die("incomplete string walker head");
+        die_at(input_location, "incomplete string walker head");
 }
 static void parse2_string_walk_escape(Graph *g, const char *pre,
                                       const char *body) {
-    FILE *templ = fopen("exec/parse2/strings-template.tsv", "rb");
+    FILE *templ = open_input("exec/parse2/strings-template.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *escapes = value_get(facts, "escape");
     Value *bindings = value_new(JOBJ);
     char *s; int found = 0;
     if (!templ || !escapes || escapes->kind != JARR)
-        die("cannot read string escape template facts");
+        die_at(input_location, "cannot read string escape template facts");
     value_put(facts, "pre", value_string(pre));
     value_put(facts, "body", value_string(body));
     direct_bindings(bindings, "walk_es=@str:{pre}.es,body=$body", facts);
@@ -6280,10 +6531,10 @@ static void parse2_string_walk_escape(Graph *g, const char *pre,
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("string escape template column count");
+        if (n != 9) die_at(input_location, "string escape template column count");
         if (!strcmp(f[0], "walk_escape")) {
             if (found++ || strcmp(f[3], "escape") || strcmp(f[4], "rule"))
-                die("unsupported string escape declaration");
+                die_at(input_location, "unsupported string escape declaration");
             for (size_t i = 0; i < escapes->n; i++) {
                 Value *scope = value_new(JOBJ);
                 char *a, *b, *c, *d;
@@ -6298,16 +6549,16 @@ static void parse2_string_walk_escape(Graph *g, const char *pre,
         free(s);
     }
     if (ferror(templ) || close_in(templ) || found != 1)
-        die("incomplete string escape template");
+        die_at(input_location, "incomplete string escape template");
 }
 static void parse2_string_walk_tail(Graph *g, const char *pre,
                                     const char *body, const char *done) {
-    FILE *manifest = fopen("exec/parse2/strwalk-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/strwalk-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
     if (!manifest || !reasons || reasons->kind != JOBJ)
-        die("cannot read string walker tail facts");
+        die_at(input_location, "cannot read string walker tail facts");
     value_put(facts, "pre", value_string(pre));
     value_put(facts, "body", value_string(body));
     value_put(facts, "done", value_string(done));
@@ -6315,7 +6566,7 @@ static void parse2_string_walk_tail(Graph *g, const char *pre,
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("string walker tail manifest column count");
+        if (n != 9) die_at(input_location, "string walker tail manifest column count");
         if (row == 0 && !strcmp(f[0], "let")) row++;
         else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[2], "walk_head")) row++;
         else if (row == 2 && !strcmp(f[0], "template") && !strcmp(f[2], "walk_escape")) row++;
@@ -6325,7 +6576,7 @@ static void parse2_string_walk_tail(Graph *g, const char *pre,
                 char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
                 snprintf(name, sizeof(name), "reject%d", i);
                 reason = value_get(reasons, name);
-                if (!reason || reason->kind != JSTR) die("missing string walker tail rejection fact");
+                if (!reason || reason->kind != JSTR) die_at(input_location, "missing string walker tail rejection fact");
                 value_put(reject, NULL, value_string("REJECT"));
                 value_put(reject, NULL, reason);
                 value_put(acts, NULL, reject);
@@ -6337,24 +6588,24 @@ static void parse2_string_walk_tail(Graph *g, const char *pre,
             install_section(g, "exec/parse2/strings-result.tsv", "walk_tail", 'r',
                             bindings, sequences);
             row++;
-        } else die("unexpected string walker tail row");
+        } else die_at(input_location, "unexpected string walker tail row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || row != 4)
-        die("incomplete string walker tail");
+        die_at(input_location, "incomplete string walker tail");
 }
 static void parse2_string_initializer_tail(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/strings-initializer-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/strings-initializer-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
     if (!manifest || !reasons || reasons->kind != JOBJ)
-        die("cannot read string initializer tail facts");
+        die_at(input_location, "cannot read string initializer tail facts");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("string initializer tail manifest column count");
+        if (n != 9) die_at(input_location, "string initializer tail manifest column count");
         if (row == 0 && !strcmp(f[0], "let")) row++;
         else if (row == 1 && !strcmp(f[0], "rows") && !strcmp(f[2], "initializer_head")) row++;
         else if (row == 2 && !strcmp(f[0], "call") && !strcmp(f[1], "strwalk")) row++;
@@ -6364,7 +6615,7 @@ static void parse2_string_initializer_tail(Graph *g) {
                 char name[16]; Value *acts = value_new(JARR), *reject = value_new(JARR), *reason;
                 snprintf(name, sizeof(name), "reject%d", i);
                 reason = value_get(reasons, name);
-                if (!reason || reason->kind != JSTR) die("missing string initializer tail rejection fact");
+                if (!reason || reason->kind != JSTR) die_at(input_location, "missing string initializer tail rejection fact");
                 value_put(reject, NULL, value_string("REJECT"));
                 value_put(reject, NULL, reason);
                 value_put(acts, NULL, reject);
@@ -6376,25 +6627,25 @@ static void parse2_string_initializer_tail(Graph *g) {
             install_section(g, "exec/parse2/strings-result.tsv", "initializer_tail", 'r',
                             bindings, sequences);
             row++;
-        } else die("unexpected string initializer tail row");
+        } else die_at(input_location, "unexpected string initializer tail row");
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || row != 4)
-        die("incomplete string initializer tail");
+        die_at(input_location, "incomplete string initializer tail");
 }
 static void parse2_numeric(Graph *g) {
-    FILE *manifest = fopen("exec/parse/numeric-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse/numeric-manifest.tsv", "rb");
     char *s; int rows = 0;
-    if (!manifest) die("cannot open numeric manifest");
+    if (!manifest) die_at(input_location, "cannot open numeric manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n; Value *facts, *opts, *bindings, *lets;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "numeric") ||
             strcmp(f[4], "parse-constants") || rows >= 3)
-            die("unsupported numeric manifest row");
+            die_at(input_location, "unsupported numeric manifest row");
         if (strcmp(f[2], rows < 2 ? "prn" : "numout"))
-            die("numeric section order changed");
+            die_at(input_location, "numeric section order changed");
         facts = load_fact("parse-constants");
         opts = value_json(f[8], "numeric manifest options");
         lets = value_get(opts, "let");
@@ -6410,17 +6661,17 @@ static void parse2_numeric(Graph *g) {
         rows++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 3)
-        die("incomplete numeric manifest");
+        die_at(input_location, "incomplete numeric manifest");
 }
 static void parse2_float_boundary(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/floatconst-manifest.tsv", "rb");
     FILE *templ; char *s; int rows = 0, edits = 0;
-    if (!manifest) die("cannot open floatconst manifest");
+    if (!manifest) die_at(input_location, "cannot open floatconst manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("floatconst manifest column count");
+        if (n != 9) die_at(input_location, "floatconst manifest column count");
         if (rows == 0 && !strcmp(f[0], "let") &&
             !strcmp(f[1], "-") && !strcmp(f[8], "{\"mapseq\":{\"reject0\":[{\"acts\":[[\"REJECT\",\"not covered: decimal floating constant\"]]}],\"reject1\":[{\"acts\":[[\"REJECT\",\"not covered: decimal floating suffix\"]]}]}}")) rows++;
         else if (rows == 1 && !strcmp(f[0], "template") &&
@@ -6430,35 +6681,35 @@ static void parse2_float_boundary(Graph *g) {
         free(s);
         if (rows == 2) break;
     }
-    if (close_in(manifest) || rows != 2) die("floatconst boundary manifest changed");
-    templ = fopen("exec/parse2/floatconst-template.tsv", "rb");
-    if (!templ) die("cannot open floatconst template");
+    if (close_in(manifest) || rows != 2) die_at(input_location, "floatconst boundary manifest changed");
+    templ = open_input("exec/parse2/floatconst-template.tsv", "rb");
+    if (!templ) die_at(input_location, "cannot open floatconst template");
     while ((s = line(templ))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("floatconst template column count");
+        if (n != 9) die_at(input_location, "floatconst template column count");
         if (strcmp(f[0], "boundary")) { free(s); continue; }
         if (edits == 0 && !strcmp(f[4], "move-state"))
             pp_move_state(g, f[5], f[6]);
         else if ((edits == 1 || edits == 2) && !strcmp(f[4], "drop-state"))
             parse2_drop_state(g, f[5]);
-        else die("unsupported floatconst boundary edit");
+        else die_at(input_location, "unsupported floatconst boundary edit");
         edits++; free(s);
     }
     if (ferror(templ) || close_in(templ) || edits != 3)
-        die("incomplete floatconst boundary edits");
+        die_at(input_location, "incomplete floatconst boundary edits");
 }
 static void parse2_float_entry(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/floatconst-manifest.tsv", "rb");
     Value *facts = load_fact("k2-floatconst"), *bindings = value_new(JOBJ);
     Value *sequences = value_new(JOBJ); char *s; int rows = 0;
-    if (!manifest) die("cannot open floatconst manifest");
+    if (!manifest) die_at(input_location, "cannot open floatconst manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("floatconst manifest column count");
+        if (n != 9) die_at(input_location, "floatconst manifest column count");
         if (rows == 0 && !strcmp(f[0], "let")) rows++;
         else if (rows == 1 && !strcmp(f[0], "template") &&
                  !strcmp(f[2], "boundary")) rows++;
@@ -6471,7 +6722,7 @@ static void parse2_float_entry(Graph *g) {
         free(s);
         if (rows == 3) break;
     }
-    if (close_in(manifest) || rows != 3) die("floatconst entry manifest changed");
+    if (close_in(manifest) || rows != 3) die_at(input_location, "floatconst entry manifest changed");
     for (int i = 0; i < 2; i++) {
         Value *actions = value_new(JARR), *act = value_new(JARR); char key[16];
         snprintf(key, sizeof(key), "reject%d", i);
@@ -6485,14 +6736,14 @@ static void parse2_float_entry(Graph *g) {
     install_section(g, "exec/parse2/floatconst-result.tsv", "entry", 'r', bindings, sequences);
 }
 static void parse2_float_digits(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/floatconst-manifest.tsv", "rb");
     char *s; int row = 0, digit = 0;
-    if (!manifest) die("cannot open floatconst manifest");
+    if (!manifest) die_at(input_location, "cannot open floatconst manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("floatconst manifest column count");
+        if (n != 9) die_at(input_location, "floatconst manifest column count");
         if (row++ < 3) { free(s); continue; }
         if (strcmp(f[0], "template") || strcmp(f[1], "floatconst") ||
             strcmp(f[2], "digit")) { free(s); break; }
@@ -6505,7 +6756,7 @@ static void parse2_float_digits(Graph *g) {
             direct_bindings(bindings, f[7], facts);
             while ((rule = line(table))) {
                 char *c[4]; int cols = fields_tab(rule, c, 4);
-                if (cols != 4) die("floatconst digit template column count");
+                if (cols != 4) die_at(input_location, "floatconst digit template column count");
                 buf_add(&bound, bound_name(c[0], bindings), strlen(bound_name(c[0], bindings)));
                 buf_char(&bound, '\t'); buf_add(&bound, c[1], strlen(c[1]));
                 buf_char(&bound, '\t');
@@ -6513,20 +6764,20 @@ static void parse2_float_digits(Graph *g) {
                 buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
                 buf_char(&bound, '\n'); free(rule);
             }
-            if (ferror(table) || close_in(table)) die("floatconst digit template read failed");
+            if (ferror(table) || close_in(table)) die_at(input_location, "floatconst digit template read failed");
             table = buffer_file(&bound);
             install_delta_text(g, table, 'b', domain, NULL, NULL, 0, 0, NULL, "START");
-            if (close_in(table)) die("floatconst digit table close failed");
+            if (close_in(table)) die_at(input_location, "floatconst digit table close failed");
         }
         digit++; free(s);
         if (digit == 3) break;
     }
-    if (close_in(manifest) || digit != 3) die("incomplete floatconst digit manifest");
+    if (close_in(manifest) || digit != 3) die_at(input_location, "incomplete floatconst digit manifest");
 }
 static void parse2_float_rows(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/floatconst-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/floatconst-manifest.tsv", "rb");
     Value *sequences = value_new(JOBJ); char *s; int row = 0, installed = 0;
-    if (!manifest) die("cannot open floatconst manifest");
+    if (!manifest) die_at(input_location, "cannot open floatconst manifest");
     for (int i = 0; i < 2; i++) {
         Value *actions = value_new(JARR), *act = value_new(JARR); char key[16];
         snprintf(key, sizeof(key), "reject%d", i);
@@ -6540,11 +6791,11 @@ static void parse2_float_rows(Graph *g) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("floatconst manifest column count");
+        if (n != 9) die_at(input_location, "floatconst manifest column count");
         if (row++ < 6) { free(s); continue; }
         if (strcmp(f[0], "rows") || strcmp(f[1], "floatconst") ||
             strcmp(f[4], "k2-floatconst") || strcmp(f[5], "-"))
-            die("unsupported floatconst row");
+            die_at(input_location, "unsupported floatconst row");
         {
             Value *facts = load_fact("k2-floatconst"), *bindings = value_new(JOBJ);
             value_put(facts, "reject0", value_get(sequences, "reject0"));
@@ -6556,36 +6807,36 @@ static void parse2_float_rows(Graph *g) {
         installed++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || installed != 10)
-        die("incomplete floatconst rows");
+        die_at(input_location, "incomplete floatconst rows");
 }
 static void parse2_autoscan(Graph *g) {
-    FILE *manifest = fopen("exec/parse/autoscan-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse/autoscan-manifest.tsv", "rb");
     FILE *names; char *s; int rows = 0, labels = 0;
     Value *facts = load_fact("parse-constants"), *bindings = value_new(JOBJ);
     Value *sequences = value_new(JOBJ), *classes = value_new(JOBJ);
     Value *tokens = value_get(load_fact("parse-tokens"), "TK");
-    if (!manifest) die("cannot open autoscan manifest");
+    if (!manifest) die_at(input_location, "cannot open autoscan manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9 || strcmp(f[0], "rows") || strcmp(f[1], "autoscan") ||
             strcmp(f[2], "auto") || strcmp(f[4], "parse-constants") || rows++)
-            die("unsupported autoscan manifest");
+            die_at(input_location, "unsupported autoscan manifest");
         {
             Value *opts = value_json(f[8], "autoscan options");
             Value *map = value_get(opts, "bindmap"), *tokenmap = value_get(opts, "tokens");
             Value *act = value_new(JARR), *seq = value_new(JARR);
             const char *reject = "reject_header=@rej:";
-            if (strncmp(f[6], reject, strlen(reject))) die("autoscan rejection changed");
+            if (strncmp(f[6], reject, strlen(reject))) die_at(input_location, "autoscan rejection changed");
             value_put(act, NULL, value_string("REJECT"));
             value_put(act, NULL, value_string(f[6] + strlen(reject)));
             value_put(seq, NULL, act); value_put(sequences, "reject_header", seq);
             if (!map || map->kind != JOBJ || !tokenmap || tokenmap->kind != JOBJ)
-                die("autoscan map declaration missing");
+                die_at(input_location, "autoscan map declaration missing");
             for (size_t i = 0; i < map->n; i++) {
                 const char *ref = value_text(map->items[i].value);
-                if (strncmp(ref, "parse-constants!.", 17)) die("autoscan map fact changed");
+                if (strncmp(ref, "parse-constants!.", 17)) die_at(input_location, "autoscan map fact changed");
                 value_put(bindings, map->items[i].key, value_get(facts, ref + 17));
             }
             for (size_t i = 0; i < tokenmap->n; i++) {
@@ -6593,32 +6844,32 @@ static void parse2_autoscan(Graph *g) {
                 Value *code = !strcmp(name, "identifier") ? value_get(facts, "TK_ID") :
                               value_get(tokens, name);
                 Value *list = value_new(JARR);
-                if (!code || code->kind != JINT) die("autoscan token code missing");
+                if (!code || code->kind != JINT) die_at(input_location, "autoscan token code missing");
                 value_put(list, NULL, code); value_put(classes, tokenmap->items[i].key, list);
             }
         }
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 1)
-        die("incomplete autoscan manifest");
-    names = fopen("exec/parse/autoscan-names.tsv", "rb");
-    if (!names) die("cannot open autoscan names");
+        die_at(input_location, "incomplete autoscan manifest");
+    names = open_input("exec/parse/autoscan-names.tsv", "rb");
+    if (!names) die_at(input_location, "cannot open autoscan names");
     while ((s = line(names))) {
         char *f[3]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 3);
         if (n != 3 || (!labels && strcmp(f[0], "AUTO_r1")))
-            die("autoscan names changed");
+            die_at(input_location, "autoscan names changed");
         {
             char owner[256]; char *label;
             if (snprintf(owner, sizeof(owner), "%s.autoscan_%s", f[1], f[0]) >= (int)sizeof(owner))
-                die("autoscan owner too long");
+                die_at(input_location, "autoscan owner too long");
             label = fresh_label(owner, f[2]);
             value_put(bindings, f[0], value_string(label)); free(label);
         }
         labels++; free(s);
     }
-    if (ferror(names) || close_in(names) || labels != 19) die("autoscan names incomplete");
+    if (ferror(names) || close_in(names) || labels != 19) die_at(input_location, "autoscan names incomplete");
     install_section_classes(g, "exec/parse/autoscan-byte.tsv", "auto", 'b',
                             bindings, sequences, classes);
     install_section_classes(g, "exec/parse/autoscan-result.tsv", "auto", 'r',
@@ -6627,48 +6878,48 @@ static void parse2_autoscan(Graph *g) {
 static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value *prior) {
     char section[64];
     if (snprintf(section, sizeof(section), "%s.all", part) >= (int)sizeof(section))
-        die("unarycontrol section too long");
-    FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
+        die_at(input_location, "unarycontrol section too long");
+    FILE *manifest = open_input("exec/parse2/unarycontrol-manifest.tsv", "rb");
     FILE *names; char *s, *bind_cell = NULL; int rows = 0, labels = 0;
     Value *facts = load_fact("k2-unary"), *bindings = value_new(JOBJ);
     Value *genfacts = load_fact("k2-gen2"), *sequences = NULL;
     Value *ufacts = value_path(genfacts, "unaryenv.ufacts");
     Value *classes = value_get(facts, "classes"), *seqnames = value_get(facts, "seq_names");
-    if (!manifest) die("cannot open unarycontrol manifest");
+    if (!manifest) die_at(input_location, "cannot open unarycontrol manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("unarycontrol manifest column count");
+        if (n != 9) die_at(input_location, "unarycontrol manifest column count");
         if (rows == 0) {
-            if (strcmp(f[0], "let")) die("unarycontrol sequence declaration changed");
+            if (strcmp(f[0], "let")) die_at(input_location, "unarycontrol sequence declaration changed");
             sequences = mapseq_construct(value_json(f[8], "unarycontrol sequences"), facts);
         }
         if (rows == row_index) {
             if (strcmp(f[0], "rows") || strcmp(f[1], "unarycontrol") ||
                 strcmp(f[2], section) || strcmp(f[4], "k2-unary"))
-                die("unarycontrol row declaration changed");
+                die_at(input_location, "unarycontrol row declaration changed");
             bind_cell = copy(f[7]);
         }
         rows++; free(s);
         if (rows > row_index) break;
     }
     if (close_in(manifest) || rows != row_index + 1 || !sequences || !classes || !seqnames)
-        die("unarycontrol row declaration missing");
-    names = fopen("exec/parse2/unarycontrol-fresh.tsv", "rb");
-    if (!names) die("cannot open unarycontrol fresh rows");
+        die_at(input_location, "unarycontrol row declaration missing");
+    names = open_input("exec/parse2/unarycontrol-fresh.tsv", "rb");
+    if (!names) die_at(input_location, "cannot open unarycontrol fresh rows");
     while ((s = line(names))) {
         char *f[5]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 5);
-        if (n != 5) die("unarycontrol fresh row columns");
+        if (n != 5) die_at(input_location, "unarycontrol fresh row columns");
         if (!strcmp(f[0], "section")) {
             if (strcmp(f[1], "mode") || strcmp(f[2], "owner") ||
                 strcmp(f[3], "kind") || strcmp(f[4], "key"))
-                die("unarycontrol fresh header changed");
+                die_at(input_location, "unarycontrol fresh header changed");
         } else if (!strcmp(f[0], part)) {
             char *label;
-            if (strcmp(f[1], "all")) die("unarycontrol fresh mode changed");
+            if (strcmp(f[1], "all")) die_at(input_location, "unarycontrol fresh mode changed");
             label = fresh_label(f[2], f[3]);
             value_put(bindings, f[4], value_string(label));
             free(label); labels++;
@@ -6676,12 +6927,12 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value
         free(s);
     }
     if (ferror(names) || close_in(names) || !labels)
-        die("unarycontrol head fresh rows missing");
+        die_at(input_location, "unarycontrol head fresh rows missing");
     for (size_t i = 0; i < ufacts->n; i++)
         value_put(bindings, ufacts->items[i].key, ufacts->items[i].value);
     if (prior) for (size_t i = 0; i < prior->n; i++)
         value_put(bindings, prior->items[i].key, prior->items[i].value);
-    if (!bind_cell) die("unarycontrol row binding missing");
+    if (!bind_cell) die_at(input_location, "unarycontrol row binding missing");
     direct_bindings(bindings, bind_cell, facts);
     free(bind_cell);
     {
@@ -6689,7 +6940,7 @@ static Value *parse2_unary_rows(Graph *g, const char *part, int row_index, Value
         for (size_t i = 0; i < seqnames->n; i++) {
             const char *name = value_text(seqnames->items[i].value);
             Value *seq = value_get(sequences, name);
-            if (!seq) die("unarycontrol named sequence missing");
+            if (!seq) die_at(input_location, "unarycontrol named sequence missing");
             value_put(selected, name, seq);
         }
         install_section_classes(g, "exec/parse2/unarycontrol-byte.tsv", section, 'b',
@@ -6711,19 +6962,19 @@ static char *parse2_unary_part8(Graph *g) {
     return copy(value_text(value_get(bindings, "f_part8_1216_U_r_1")));
 }
 static char *parse2_printfallback_head(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfallback-manifest.tsv", "rb");
     Value *sequences = NULL, *facts = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0;
-    if (!manifest) die("cannot open printfallback manifest");
+    if (!manifest) die_at(input_location, "cannot open printfallback manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printfallback manifest column count");
+        if (n != 9) die_at(input_location, "printfallback manifest column count");
         if (row == 0) {
             Value *opts;
             if (strcmp(f[0], "let") || strcmp(f[7], "-") || strcmp(f[8], "-") == 0)
-                die("printfallback sequence declaration changed");
+                die_at(input_location, "printfallback sequence declaration changed");
             opts = value_json(f[8], "printfallback sequences");
             sequences = mapseq_construct(opts, facts);
             for (size_t i = 0; i < sequences->n; i++)
@@ -6731,50 +6982,50 @@ static char *parse2_printfallback_head(Graph *g) {
         } else if (row == 1) {
             if (strcmp(f[0], "rows") || strcmp(f[1], "printfallback") ||
                 strcmp(f[2], "head") || strcmp(f[4], "k2-printfallback"))
-                die("printfallback head declaration changed");
+                die_at(input_location, "printfallback head declaration changed");
             direct_bindings(bindings, f[7], facts);
         }
         row++; free(s);
         if (row == 2) break;
     }
-    if (close_in(manifest) || row != 2 || !sequences) die("printfallback head missing");
+    if (close_in(manifest) || row != 2 || !sequences) die_at(input_location, "printfallback head missing");
     install_section(g, "exec/parse2/printfallback-byte.tsv", "head", 'b', bindings, sequences);
     install_section(g, "exec/parse2/printfallback-result.tsv", "head", 'r', bindings, sequences);
     return copy(value_text(value_get(bindings, "PF_b1")));
 }
 static void parse2_printfallback_more(Graph *g, const char *entry, int first, int last) {
-    FILE *manifest = fopen("exec/parse2/printfallback-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfallback-manifest.tsv", "rb");
     Value *sequences = NULL, *ctx = value_new(JOBJ);
     char *s; int row = 0, installed = 0;
     if (!manifest || first < 2 || last > 17 || first >= last)
-        die("invalid printfallback manifest range");
+        die_at(input_location, "invalid printfallback manifest range");
     value_put(ctx, "PF_b1", value_string(entry));
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printfallback manifest column count");
+        if (n != 9) die_at(input_location, "printfallback manifest column count");
         if (row == 0) {
-            if (strcmp(f[0], "let")) die("printfallback sequence declaration changed");
+            if (strcmp(f[0], "let")) die_at(input_location, "printfallback sequence declaration changed");
             sequences = mapseq_construct(value_json(f[8], "printfallback sequences"), ctx);
         } else if (row >= first && row < last && !strcmp(f[0], "template")) {
-            FILE *templ = fopen("exec/parse2/printfallback-template.tsv", "rb");
+            FILE *templ = open_input("exec/parse2/printfallback-template.tsv", "rb");
             Value *facts = load_facts_expr(f[4]), *kinds = value_get(facts, "kind");
             Value *bind = value_new(JOBJ); char *t; int found = 0;
             if (strcmp(f[1], "printfallback") || strcmp(f[2], "dispatch") ||
                 !templ || !kinds || kinds->kind != JARR)
-                die("printfallback dispatch declaration changed");
+                die_at(input_location, "printfallback dispatch declaration changed");
             direct_bindings(bind, f[7], ctx);
             while ((t = line(templ))) {
                 char *v[9]; int m;
                 if (!*t || *t == '#') { free(t); continue; }
                 m = fields_tab(t, v, 9);
-                if (m != 9) die("printfallback template column count");
+                if (m != 9) die_at(input_location, "printfallback template column count");
                 if (!strcmp(v[0], "dispatch")) {
                     if (found++ || strcmp(v[1], "kind") || strcmp(v[2], "kind") ||
                         strcmp(v[4], "fill-edge") || strcmp(v[5], "$PF_b1") ||
                         strcmp(v[7], "PF.convert.{kind.name}") || strcmp(v[8], "[]"))
-                        die("printfallback dispatch template changed");
+                        die_at(input_location, "printfallback dispatch template changed");
                     for (size_t i = 0; i < kinds->n; i++) {
                         Value *kind = kinds->items[i].value;
                         char key[16], target[128];
@@ -6782,24 +7033,24 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
                         if (snprintf(target, sizeof(target), "PF.convert.%s",
                                      value_text(value_get(kind, "name"))) >= (int)sizeof(target) ||
                             strcmp(target, value_text(value_get(bind, "convert"))))
-                            die("printfallback dispatch target changed");
+                            die_at(input_location, "printfallback dispatch target changed");
                         edge_set(g, entry, 'r', key, target, "[]");
                     }
                 }
                 free(t);
             }
             if (ferror(templ) || close_in(templ) || found != 1)
-                die("printfallback dispatch template missing");
+                die_at(input_location, "printfallback dispatch template missing");
             installed++;
         } else if (row >= first && row < last && !strcmp(f[0], "rows")) {
             Value *seqbindings = value_new(JOBJ), *bindings = value_new(JOBJ);
             if (strcmp(f[1], "printfallback") ||
                 (strcmp(f[2], "body") && strcmp(f[2], "tail")) ||
                 strcmp(f[4], "k2-printfallback") || !sequences)
-                die("printfallback row declaration changed");
+                die_at(input_location, "printfallback row declaration changed");
             direct_bindings(seqbindings, f[6], sequences);
             direct_bindings(bindings, f[7], ctx);
-            if (!value_get(seqbindings, "body")) die("printfallback body sequence missing");
+            if (!value_get(seqbindings, "body")) die_at(input_location, "printfallback body sequence missing");
             install_section(g, "exec/parse2/printfallback-byte.tsv", f[2], 'b', bindings, seqbindings);
             install_section(g, "exec/parse2/printfallback-result.tsv", f[2], 'r', bindings, seqbindings);
             installed++;
@@ -6808,14 +7059,14 @@ static void parse2_printfallback_more(Graph *g, const char *entry, int first, in
         if (row == last) break;
     }
     if (close_in(manifest) || row != last || installed != last - first)
-        die("printfallback manifest range incomplete");
+        die_at(input_location, "printfallback manifest range incomplete");
 }
 static void parse2_printfcontrol_part0(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printfcontrol-0-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfcontrol-0-manifest.tsv", "rb");
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *classes = value_get(facts, "classes"), *sequences; char *s;
     int rows = 0;
-    if (!manifest || !classes) die("printfcontrol part0 inputs missing");
+    if (!manifest || !classes) die_at(input_location, "printfcontrol part0 inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -6823,7 +7074,7 @@ static void parse2_printfcontrol_part0(Graph *g) {
         if (n != 9 || rows++ || strcmp(f[0], "rows") ||
             strcmp(f[1], "printfcontrol") || strcmp(f[2], "part0.all") ||
             strcmp(f[4], "printfcontrol"))
-            die("printfcontrol part0 declaration changed");
+            die_at(input_location, "printfcontrol part0 declaration changed");
         sequences = mapseq_construct(value_json(f[8], "printfcontrol part0 options"), facts);
         direct_bindings(bindings, f[7], facts);
         install_section_classes(g, "exec/parse2/printfcontrol-byte.tsv", "part0.all", 'b',
@@ -6833,28 +7084,28 @@ static void parse2_printfcontrol_part0(Graph *g) {
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 1)
-        die("printfcontrol part0 row missing");
+        die_at(input_location, "printfcontrol part0 row missing");
 }
 static void parse2_printf_strwalk(Graph *g, int call_row) {
-    FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printf-manifest.tsv", "rb");
     Value *bindings = value_new(JOBJ), *facts = value_new(JOBJ);
     char *s; int row = 0;
-    if (!manifest) die("cannot open printf manifest");
+    if (!manifest) die_at(input_location, "cannot open printf manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printf manifest column count");
+        if (n != 9) die_at(input_location, "printf manifest column count");
         if (row == call_row) {
             if (strcmp(f[0], "call") || strcmp(f[1], "strwalk"))
-                die("printf string walker declaration changed");
+                die_at(input_location, "printf string walker declaration changed");
             direct_bindings(bindings, f[7], facts);
         }
         row++; free(s);
         if (row == call_row + 1) break;
     }
     if (close_in(manifest) || row != call_row + 1 || !value_get(bindings, "pre"))
-        die("printf string walker missing");
+        die_at(input_location, "printf string walker missing");
     const char *pre = value_text(value_get(bindings, "pre"));
     const char *body = value_text(value_get(bindings, "body"));
     const char *done = value_text(value_get(bindings, "done"));
@@ -6863,36 +7114,36 @@ static void parse2_printf_strwalk(Graph *g, int call_row) {
     parse2_string_walk_tail(g, pre, body, done);
 }
 static void parse2_printfcontrol_append(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
-    FILE *table = fopen("exec/parse2/printfcontrol-spelling.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
+    FILE *table = open_input("exec/parse2/printfcontrol-spelling.tsv", "rb");
     char *s; int found = 0, installed = 0, first = -1, end = -1;
-    if (!manifest || !table) die("printfcontrol append inputs missing");
+    if (!manifest || !table) die_at(input_location, "printfcontrol append inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
         if (n != 9 || found++ || strcmp(f[0], "table") ||
             strcmp(f[1], "printfcontrol-spelling.tsv") || strcmp(f[2], "append"))
-            die("printfcontrol append declaration changed");
+            die_at(input_location, "printfcontrol append declaration changed");
         Value *opts = value_json(f[8], "printfcontrol append options");
         Value *domain = value_get(opts, "domain");
         if (!domain || domain->kind != JARR || domain->n != 2 ||
             domain->items[0].value->kind != JINT || domain->items[1].value->kind != JINT)
-            die("printfcontrol append domain missing");
+            die_at(input_location, "printfcontrol append domain missing");
         first = (int)domain->items[0].value->number;
         end = (int)domain->items[1].value->number;
-        if (first < 0 || end > 257 || first >= end) die("printfcontrol append domain invalid");
+        if (first < 0 || end > 257 || first >= end) die_at(input_location, "printfcontrol append domain invalid");
         free(s); break;
     }
     if (ferror(manifest) || close_in(manifest) || found != 1)
-        die("printfcontrol append manifest missing");
+        die_at(input_location, "printfcontrol append manifest missing");
     while ((s = line(table))) {
         char *f[5]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 5);
-        if (n != 5) die("printfcontrol spelling columns");
+        if (n != 5) die_at(input_location, "printfcontrol spelling columns");
         if (!strcmp(f[0], "append")) {
-            if (installed++ || strcmp(f[2], "*")) die("printfcontrol append row changed");
+            if (installed++ || strcmp(f[2], "*")) die_at(input_location, "printfcontrol append row changed");
             for (int k = first; k < end; k++) {
                 char key[16]; char *actions = expand_actions(f[4], NULL, NULL, k);
                 number_text(k, key);
@@ -6903,24 +7154,24 @@ static void parse2_printfcontrol_append(Graph *g) {
         free(s);
     }
     if (ferror(table) || close_in(table) || installed != 1)
-        die("printfcontrol append row missing");
+        die_at(input_location, "printfcontrol append row missing");
 }
 static Value *parse2_printfcontrol_part1_all(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *classes = value_get(facts, "classes"); char *s; int row = 0;
-    if (!manifest || !classes) die("printfcontrol part1 inputs missing");
+    if (!manifest || !classes) die_at(input_location, "printfcontrol part1 inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printfcontrol part1 manifest columns");
+        if (n != 9) die_at(input_location, "printfcontrol part1 manifest columns");
         if (row == 1) {
             Value *opts, *sequences, *mapped;
             if (strcmp(f[0], "rows") || strcmp(f[1], "printfcontrol") ||
                 strcmp(f[2], "part1.all") || strcmp(f[3], "!warnings") ||
                 strcmp(f[4], "printfcontrol"))
-                die("printfcontrol part1 declaration changed");
+                die_at(input_location, "printfcontrol part1 declaration changed");
             opts = value_json(f[8], "printfcontrol part1 options");
             sequences = textrows_construct("exec/parse2", opts);
             mapped = mapseq_construct(opts, facts);
@@ -6935,15 +7186,15 @@ static Value *parse2_printfcontrol_part1_all(Graph *g) {
         row++; free(s);
         if (row == 2) break;
     }
-    if (close_in(manifest) || row != 2) die("printfcontrol part1 row missing");
+    if (close_in(manifest) || row != 2) die_at(input_location, "printfcontrol part1 row missing");
     return bindings;
 }
 static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
-    FILE *manifest = fopen("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printfcontrol-1-manifest.tsv", "rb");
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *ctx = value_new(JOBJ), *classes = value_get(facts, "classes");
     char *s; int row = 0;
-    if (!manifest || !classes || !prior) die("printfcontrol plain inputs missing");
+    if (!manifest || !classes || !prior) die_at(input_location, "printfcontrol plain inputs missing");
     for (size_t i = 0; i < facts->n; i++)
         value_put(ctx, facts->items[i].key, facts->items[i].value);
     for (size_t i = 0; i < prior->n; i++)
@@ -6952,13 +7203,13 @@ static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printfcontrol plain manifest columns");
+        if (n != 9) die_at(input_location, "printfcontrol plain manifest columns");
         if (row == 2) {
             Value *opts, *sequences, *mapped;
             if (strcmp(f[0], "rows") || strcmp(f[1], "printfcontrol") ||
                 strcmp(f[2], "part1.plain") || strcmp(f[3], "!warnings") ||
                 strcmp(f[4], "printfcontrol"))
-                die("printfcontrol plain declaration changed");
+                die_at(input_location, "printfcontrol plain declaration changed");
             opts = value_json(f[8], "printfcontrol plain options");
             sequences = textrows_construct("exec/parse2", opts);
             mapped = mapseq_construct(opts, facts);
@@ -6973,18 +7224,18 @@ static void parse2_printfcontrol_part1_plain(Graph *g, Value *prior) {
         row++; free(s);
         if (row == 3) break;
     }
-    if (close_in(manifest) || row != 3) die("printfcontrol plain row missing");
+    if (close_in(manifest) || row != 3) die_at(input_location, "printfcontrol plain row missing");
 }
 static void parse2_printfcontrol_part(Graph *g, int part) {
     char path[128], section[32]; FILE *manifest;
     Value *facts = load_fact("printfcontrol"), *bindings = value_new(JOBJ);
     Value *classes = value_get(facts, "classes");
     char *s; int rows = 0, skipped = 0;
-    if (part < 2 || part > 4) die("unsupported printfcontrol part");
+    if (part < 2 || part > 4) die_at(input_location, "unsupported printfcontrol part");
     snprintf(path, sizeof(path), "exec/parse2/printfcontrol-%d-manifest.tsv", part);
     snprintf(section, sizeof(section), "part%d.all", part);
-    manifest = fopen(path, "rb");
-    if (!manifest || !classes) die("printfcontrol part inputs missing");
+    manifest = open_input(path, "rb");
+    if (!manifest || !classes) die_at(input_location, "printfcontrol part inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -6993,7 +7244,7 @@ static void parse2_printfcontrol_part(Graph *g, int part) {
         if (n != 9 || rows++ || strcmp(f[0], "rows") ||
             strcmp(f[1], "printfcontrol") || strcmp(f[2], section) ||
             strcmp(f[4], "printfcontrol"))
-            die("printfcontrol part declaration changed");
+            die_at(input_location, "printfcontrol part declaration changed");
         Value *opts = value_json(f[8], "printfcontrol part options");
         Value *sequences = textrows_construct("exec/parse2", opts);
         Value *mapped = mapseq_construct(opts, facts);
@@ -7007,28 +7258,28 @@ static void parse2_printfcontrol_part(Graph *g, int part) {
         free(s);
     }
     if (ferror(manifest) || close_in(manifest) || rows != 1)
-        die("printfcontrol part row missing");
+        die_at(input_location, "printfcontrol part row missing");
 }
 static void parse2_printf_wide_hooks(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/printf-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/printf-manifest.tsv", "rb");
     Value *facts = load_fact("k2-strings"), *reasons = value_get(facts, "rej");
     Value *sequences = value_new(JOBJ), *bindings = value_new(JOBJ);
     char *s; int row = 0, found = 0;
-    if (!manifest || !reasons) die("printf wide hooks inputs missing");
+    if (!manifest || !reasons) die_at(input_location, "printf wide hooks inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printf wide hooks columns");
+        if (n != 9) die_at(input_location, "printf wide hooks columns");
         if (row == 8) {
             if (strcmp(f[0], "rows") || strcmp(f[1], "strings") ||
                 strcmp(f[2], "wide_hooks") || strcmp(f[4], "k2-strings"))
-                die("printf wide hooks declaration changed");
+                die_at(input_location, "printf wide hooks declaration changed");
             for (int i = 0; i < 5; i++) {
                 char key[16]; Value *reject = value_new(JARR), *action = value_new(JARR);
                 snprintf(key, sizeof(key), "reject%d", i);
                 Value *reason = value_get(reasons, key);
-                if (!reason || reason->kind != JSTR) die("printf rejection reason missing");
+                if (!reason || reason->kind != JSTR) die_at(input_location, "printf rejection reason missing");
                 value_put(action, NULL, value_string("REJECT"));
                 value_put(action, NULL, reason);
                 value_put(reject, NULL, action);
@@ -7044,15 +7295,15 @@ static void parse2_printf_wide_hooks(Graph *g) {
         row++; free(s);
         if (row == 9) break;
     }
-    if (close_in(manifest) || row != 9 || found != 1) die("printf wide hooks row missing");
+    if (close_in(manifest) || row != 9 || found != 1) die_at(input_location, "printf wide hooks row missing");
 }
 static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
     char path[128]; FILE *manifest;
     char *s; int found = 0;
-    if (part != 3 && part != 4) die("unsupported printfcontrol escape part");
+    if (part != 3 && part != 4) die_at(input_location, "unsupported printfcontrol escape part");
     snprintf(path, sizeof(path), "exec/parse2/printfcontrol-%d-manifest.tsv", part);
-    manifest = fopen(path, "rb");
-    if (!manifest) die("printfcontrol escape manifest missing");
+    manifest = open_input(path, "rb");
+    if (!manifest) die_at(input_location, "printfcontrol escape manifest missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -7061,7 +7312,7 @@ static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
             strcmp(f[2], "escape") ||
             strcmp(f[4], found ? "printfcontrol+printfcontrol-f2" :
                                   "printfcontrol+printfcontrol-f1"))
-            die("printfcontrol escape declaration changed");
+            die_at(input_location, "printfcontrol escape declaration changed");
         Value *facts = load_facts_expr(f[4]), *bindings = value_new(JOBJ);
         Value *opts = value_json(f[8], "printfcontrol escape options");
         Value *sequences = textrows_construct("exec/parse2", opts);
@@ -7073,7 +7324,7 @@ static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
         direct_bindings(bindings, f[7], facts);
         while ((rule = line(table))) {
             char *c[4]; int cols = fields_tab(rule, c, 4);
-            if (cols != 4) die("printfcontrol escape template columns");
+            if (cols != 4) die_at(input_location, "printfcontrol escape template columns");
             buf_add(&bound, bound_name(c[0], bindings), strlen(bound_name(c[0], bindings)));
             buf_char(&bound, '\t'); buf_add(&bound, c[1], strlen(c[1]));
             buf_char(&bound, '\t');
@@ -7081,37 +7332,37 @@ static void parse2_printfcontrol_escape(Graph *g, int last, int part) {
             buf_char(&bound, '\t'); buf_add(&bound, c[3], strlen(c[3]));
             buf_char(&bound, '\n'); free(rule);
         }
-        if (ferror(table) || close_in(table)) die("printfcontrol escape template read failed");
+        if (ferror(table) || close_in(table)) die_at(input_location, "printfcontrol escape template read failed");
         table = buffer_file(&bound);
         install_delta_text(g, table, found ? 'b' : 'r', numeric_domain(0, 256), NULL,
                            sequences, 0, 0, NULL, "START");
-        if (close_in(table)) die("printfcontrol escape table close failed");
+        if (close_in(table)) die_at(input_location, "printfcontrol escape table close failed");
         found++; free(s);
         if (found == last) break;
     }
-    if (close_in(manifest) || found != last) die("printfcontrol escape row missing");
+    if (close_in(manifest) || found != last) die_at(input_location, "printfcontrol escape row missing");
 }
 static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
-    FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
-    FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
+    FILE *outer = open_input("exec/parse2/printf-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/fmtwalk-manifest.tsv", "rb");
     Value *ctx = value_new(JOBJ), *bindings = value_new(JOBJ);
     Value *facts = load_fact("k2-fmtwalk"), *classes = value_get(facts, "classes");
     char *s; int row = 0, found = 0;
-    if (!outer || !manifest || !classes) die("fmtwalk inputs missing");
+    if (!outer || !manifest || !classes) die_at(input_location, "fmtwalk inputs missing");
     while ((s = line(outer))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printf manifest columns");
+        if (n != 9) die_at(input_location, "printf manifest columns");
         if (row == call_row) {
             if (strcmp(f[0], "call") || strcmp(f[1], "fmtwalk"))
-                die("printf fmtwalk call changed");
+                die_at(input_location, "printf fmtwalk call changed");
             direct_bindings(ctx, f[7], value_new(JOBJ));
         }
         row++; free(s);
         if (row == call_row + 1) break;
     }
-    if (close_in(outer) || row != call_row + 1) die("printf fmtwalk call missing");
+    if (close_in(outer) || row != call_row + 1) die_at(input_location, "printf fmtwalk call missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
@@ -7120,14 +7371,14 @@ static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
             strcmp(f[1], "helpers") ||
             strcmp(f[2], found ? "length" : "format") ||
             strcmp(f[4], "k2-fmtwalk"))
-            die("fmtwalk row declaration changed");
+            die_at(input_location, "fmtwalk row declaration changed");
         for (size_t i = 0; i < facts->n; i++)
             value_put(ctx, facts->items[i].key, facts->items[i].value);
         direct_bindings(bindings, f[7], ctx);
         Value *domain = found ? value_get(facts, "lenkeys") : NULL;
         Value *sequences = value_new(JOBJ), *reject = value_new(JARR), *action = value_new(JARR);
         if (strcmp(f[6], "reject=@rej:not covered: printf conversion"))
-            die("fmtwalk rejection declaration changed");
+            die_at(input_location, "fmtwalk rejection declaration changed");
         value_put(action, NULL, value_string("REJECT"));
         value_put(action, NULL, value_string("not covered: printf conversion"));
         value_put(reject, NULL, action);
@@ -7139,58 +7390,58 @@ static void parse2_fmtwalk_rows(Graph *g, int last, int call_row) {
         found++; free(s);
         if (found == last) break;
     }
-    if (close_in(manifest) || found != last) die("fmtwalk rows missing");
+    if (close_in(manifest) || found != last) die_at(input_location, "fmtwalk rows missing");
 }
 static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
-    FILE *manifest = fopen("exec/parse2/fmtwalk-manifest.tsv", "rb");
-    FILE *outer = fopen("exec/parse2/printf-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/fmtwalk-manifest.tsv", "rb");
+    FILE *outer = open_input("exec/parse2/printf-manifest.tsv", "rb");
     Value *facts = load_fact("k2-fmtwalk"), *classes = value_get(facts, "classes");
     Value *conv = value_get(facts, "conv"), *callctx = value_new(JOBJ);
     char *s, *bindcell = NULL; int row = 0;
     if (!manifest || !outer || !classes || !conv || conv->kind != JARR)
-        die("fmtwalk conversion inputs missing");
+        die_at(input_location, "fmtwalk conversion inputs missing");
     while ((s = line(outer))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("printf fmtwalk conversion columns");
+        if (n != 9) die_at(input_location, "printf fmtwalk conversion columns");
         if (row == call_row) {
             if (strcmp(f[0], "call") || strcmp(f[1], "fmtwalk"))
-                die("printf fmtwalk conversion call changed");
+                die_at(input_location, "printf fmtwalk conversion call changed");
             direct_bindings(callctx, f[7], value_new(JOBJ));
         }
         row++; free(s);
         if (row == call_row + 1) break;
     }
     if (close_in(outer) || row != call_row + 1 || !value_get(callctx, "pre"))
-        die("printf fmtwalk conversion call missing");
+        die_at(input_location, "printf fmtwalk conversion call missing");
     row = 0;
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("fmtwalk conversion columns");
+        if (n != 9) die_at(input_location, "fmtwalk conversion columns");
         if (row == 2 && (strcmp(f[0], "foreach") || strcmp(f[4], "k2-fmtwalk") ||
                          strcmp(f[8], "{\"over\":\"conv\",\"as\":\"c\"}")))
-            die("fmtwalk conversion loop changed");
+            die_at(input_location, "fmtwalk conversion loop changed");
         if (row == 3) {
             if (strcmp(f[0], ".rows") || strcmp(f[1], "helpers") ||
                 strcmp(f[2], "conversion") || strcmp(f[4], "k2-fmtwalk") ||
                 strcmp(f[6], "reject=@rej:not covered: printf conversion"))
-                die("fmtwalk conversion declaration changed");
+                die_at(input_location, "fmtwalk conversion declaration changed");
             bindcell = copy(f[7]);
         }
         row++; free(s);
     }
     if (ferror(manifest) || close_in(manifest) || row != 4 || !bindcell)
-        die("fmtwalk conversion rows missing");
+        die_at(input_location, "fmtwalk conversion rows missing");
     for (size_t i = 0; i < conv->n; i++) {
         Value *ctx = value_new(JOBJ), *bindings = value_new(JOBJ);
         Value *domain = value_new(JARR), *sequences = value_new(JOBJ);
         Value *reject = value_new(JARR), *action = value_new(JARR);
         Value *item = conv->items[i].value, *byte = value_get(item, "byte");
         if (!byte || byte->kind != JINT || !value_get(item, "kind"))
-            die("fmtwalk conversion fact changed");
+            die_at(input_location, "fmtwalk conversion fact changed");
         for (size_t j = 0; j < facts->n; j++)
             value_put(ctx, facts->items[j].key, facts->items[j].value);
         for (size_t j = 0; j < callctx->n; j++)
@@ -7211,7 +7462,7 @@ static void parse2_fmtwalk_conversion(Graph *g, int call_row) {
 }
 static Value *parse2_manifest_out_sequence(const char *cell) {
     Value *seq = value_new(JARR); const char *p = cell;
-    if (strncmp(p, "@out:", 5)) die("addr output sequence cell changed");
+    if (strncmp(p, "@out:", 5)) die_at(input_location, "addr output sequence cell changed");
     p += 5;
     while (*p) {
         int c = (unsigned char)*p++;
@@ -7220,12 +7471,12 @@ static Value *parse2_manifest_out_sequence(const char *cell) {
             else if (*p == 't') { c = '\t'; p++; }
             else if (*p == 'x') {
                 char hx[3] = {p[1], p[2], 0}; char *end;
-                if (!p[1] || !p[2]) die("short addr hex escape");
+                if (!p[1] || !p[2]) die_at(input_location, "short addr hex escape");
                 c = (int)strtol(hx, &end, 16);
-                if (*end) die("bad addr hex escape");
+                if (*end) die_at(input_location, "bad addr hex escape");
                 p += 3;
             } else if (*p) c = (unsigned char)*p++;
-            else die("short addr escape");
+            else die_at(input_location, "short addr escape");
         }
         Value *act = value_new(JARR), *byte = value_new(JINT);
         byte->number = c;
@@ -7240,7 +7491,7 @@ static void parse2_addr_out_bindings(Value *seqs, const char *cells, Value *env)
     while (*p) {
         char *comma = strchr(p, ','), *eq = strchr(p, '=');
         if (comma) *comma = 0;
-        if (!eq || eq == p) die("addr sequence binding changed");
+        if (!eq || eq == p) die_at(input_location, "addr sequence binding changed");
         *eq = 0;
         value_put(seqs, p, eq[1] == '$' ? value_path(env, eq + 2) :
                   parse2_manifest_out_sequence(eq + 1));
@@ -7250,20 +7501,20 @@ static void parse2_addr_out_bindings(Value *seqs, const char *cells, Value *env)
     free(all);
 }
 static Value *parse2_addr_template(Graph *g, const char *entry) {
-    FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/addr-manifest.tsv", "rb");
     Value *env = value_new(JOBJ), *seqs = value_new(JOBJ), *bind = value_new(JOBJ);
     Value *constants = load_fact("librarydata");
     char *s; int row = 0; char *global, *done;
-    if (!manifest || !entry || !constants) die("addr template inputs missing");
+    if (!manifest || !entry || !constants) die_at(input_location, "addr template inputs missing");
     value_put(env, "entry", value_string(entry));
     value_put(env, "pending", value_new(JARR));
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("addr manifest columns");
+        if (n != 9) die_at(input_location, "addr manifest columns");
         if (row == 0) {
-            if (strcmp(f[0], "let")) die("addr fresh declaration changed");
+            if (strcmp(f[0], "let")) die_at(input_location, "addr fresh declaration changed");
             const char *keys[] = {"global", "local", "done", "static", "frame", "auto", "entry_test"};
             const char *kinds[] = {"ga", "la", "ad", "sa", "fa", "auto", "b"};
             for (size_t i = 0; i < 7; i++) {
@@ -7273,14 +7524,14 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
         } else if (row == 1) {
             if (strcmp(f[0], "template") || strcmp(f[1], "librarydata") ||
                 strcmp(f[2], "address") || strcmp(f[4], "librarydata"))
-                die("addr template declaration changed");
+                die_at(input_location, "addr template declaration changed");
             global = copy(value_text(value_get(env, "global")));
             done = copy(value_text(value_get(env, "done")));
             Value *facts = value_new(JOBJ), *ents = value_new(JARR);
             Value *classics = value_new(JARR), *dones = value_new(JARR);
             char classic[1024];
             if (snprintf(classic, sizeof(classic), "%s.classic", global) >= (int)sizeof(classic))
-                die("addr classic label too long");
+                die_at(input_location, "addr classic label too long");
             value_put(ents, NULL, value_string(global));
             value_put(classics, NULL, value_string(classic));
             value_put(dones, NULL, value_string(done));
@@ -7297,7 +7548,7 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
             Buffer bound = {0}; FILE *table = buffer_file(&expanded); char *rule;
             while ((rule = line(table))) {
                 char *c[4]; int cols = fields_tab(rule, c, 4);
-                if (cols != 4) die("addr template rule columns");
+                if (cols != 4) die_at(input_location, "addr template rule columns");
                 char *acts = expand_actions(c[3], bind, seqs, 0);
                 buf_add(&bound, c[0], strlen(c[0])); buf_char(&bound, '\t');
                 buf_add(&bound, c[1], strlen(c[1])); buf_char(&bound, '\t');
@@ -7305,32 +7556,32 @@ static Value *parse2_addr_template(Graph *g, const char *entry) {
                 buf_add(&bound, acts, strlen(acts)); buf_char(&bound, '\n');
                 free(acts); free(rule);
             }
-            if (ferror(table) || close_in(table)) die("addr template read failed");
+            if (ferror(table) || close_in(table)) die_at(input_location, "addr template read failed");
             table = buffer_file(&bound);
             install_delta_text(g, table, 'r', numeric_domain(0, 257), NULL,
                                NULL, 0, 0, NULL, "START");
-            if (close_in(table)) die("addr template install failed");
+            if (close_in(table)) die_at(input_location, "addr template install failed");
             free(global); free(done);
         }
         row++; free(s);
         if (row == 2) break;
     }
-    if (close_in(manifest) || row != 2) die("addr template rows missing");
+    if (close_in(manifest) || row != 2) die_at(input_location, "addr template rows missing");
     return env;
 }
 static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
-    FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/addr-manifest.tsv", "rb");
     char *s; int row = 0, found = 0;
-    if (!manifest || !env) die("addr auto inputs missing");
+    if (!manifest || !env) die_at(input_location, "addr auto inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("addr auto manifest columns");
+        if (n != 9) die_at(input_location, "addr auto manifest columns");
         if (row == 2) {
             const char *keys[] = {"local_test", "static_return", "frame_test", "auto_end"};
             const char *kinds[] = {"b", "r", "b", "r"};
-            if (strcmp(f[0], "let")) die("addr auto fresh declaration changed");
+            if (strcmp(f[0], "let")) die_at(input_location, "addr auto fresh declaration changed");
             for (size_t i = 0; i < 4; i++) {
                 char *label = fresh_label(entry, kinds[i]);
                 value_put(env, keys[i], value_string(label)); free(label);
@@ -7338,7 +7589,7 @@ static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
         } else if (row == 3) {
             Value *seqs = value_new(JOBJ), *bindings = value_new(JOBJ);
             if (strcmp(f[0], "rows") || strcmp(f[1], "helpers") ||
-                strcmp(f[2], "address-auto")) die("addr auto row changed");
+                strcmp(f[2], "address-auto")) die_at(input_location, "addr auto row changed");
             parse2_addr_out_bindings(seqs, f[6], env);
             direct_bindings(bindings, f[7], env);
             install_section_classes(g, "exec/parse2/helpers-byte.tsv", "address-auto", 'b',
@@ -7350,18 +7601,18 @@ static void parse2_addr_auto(Graph *g, const char *entry, Value *env) {
         row++; free(s);
         if (row == 4) break;
     }
-    if (close_in(manifest) || row != 4 || found != 1) die("addr auto row missing");
+    if (close_in(manifest) || row != 4 || found != 1) die_at(input_location, "addr auto row missing");
 }
 static void parse2_addr_main(Graph *g, Value *env) {
-    FILE *manifest = fopen("exec/parse2/addr-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/addr-manifest.tsv", "rb");
     Value *constants = load_fact("parse-constants");
     char *s; int row = 0, found = 0;
-    if (!manifest || !constants || !env) die("addr main inputs missing");
+    if (!manifest || !constants || !env) die_at(input_location, "addr main inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("addr main manifest columns");
+        if (n != 9) die_at(input_location, "addr main manifest columns");
         if (row == 4) {
             Value *seqs = value_new(JOBJ), *bindings = value_new(JOBJ);
             Value *opts = value_json(f[8], "addr main options");
@@ -7369,7 +7620,7 @@ static void parse2_addr_main(Graph *g, Value *env) {
             char *cell = copy(f[7]), *mark = strstr(cell, ",GMARK=");
             if (strcmp(f[0], "rows") || strcmp(f[1], "helpers") ||
                 strcmp(f[2], "address") || strcmp(f[4], "parse-constants") || !mark)
-                die("addr main declaration changed");
+                die_at(input_location, "addr main declaration changed");
             *mark = 0;
             parse2_addr_out_bindings(seqs, f[6], env);
             for (size_t i = 0; i < mapped->n; i++)
@@ -7385,11 +7636,11 @@ static void parse2_addr_main(Graph *g, Value *env) {
         row++; free(s);
         if (row == 5) break;
     }
-    if (close_in(manifest) || row != 5 || found != 1) die("addr main row missing");
+    if (close_in(manifest) || row != 5 || found != 1) die_at(input_location, "addr main row missing");
 }
 static void parse2_unary_compound(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
-    FILE *control = fopen("exec/parse2/control-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/unarycontrol-manifest.tsv", "rb");
+    FILE *control = open_input("exec/parse2/control-manifest.tsv", "rb");
     Value *facts = load_fact("k2-control"), *bindings = value_new(JOBJ);
     Value *genfacts = load_fact("k2-gen2");
     Value *extra = value_path(genfacts, "unaryenv.ucx");
@@ -7398,24 +7649,24 @@ static void parse2_unary_compound(Graph *g) {
     char *s; int rows = 0, declared = 0;
     if (!manifest || !control || !consts || consts->kind != JOBJ ||
         !extra || extra->kind != JOBJ || !classes)
-        die("unary compound inputs missing");
+        die_at(input_location, "unary compound inputs missing");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("unarycontrol manifest column count");
+        if (n != 9) die_at(input_location, "unarycontrol manifest column count");
         if (rows++ < 2) { free(s); continue; }
         if (strcmp(f[0], "call") || strcmp(f[1], "control") ||
             strcmp(f[4], "k2-unary") || strcmp(f[7], "control_section=@str:compound,statement=@str:STMT,extra=$ucx,seqb=empty"))
-            die("unary compound call changed");
+            die_at(input_location, "unary compound call changed");
         free(s); break;
     }
-    if (close_in(manifest) || rows != 3) die("unary compound call missing");
+    if (close_in(manifest) || rows != 3) die_at(input_location, "unary compound call missing");
     while ((s = line(control))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("control manifest column count");
+        if (n != 9) die_at(input_location, "control manifest column count");
         if (!declared && !strcmp(f[0], "rows") && !strcmp(f[1], "control") &&
             !strcmp(f[3], "!fact:control_export")) {
             Value *opts = value_json(f[8], "unary compound control options");
@@ -7424,7 +7675,7 @@ static void parse2_unary_compound(Graph *g) {
         free(s);
     }
     if (ferror(control) || close_in(control) || declared != 1)
-        die("control manifest declaration missing");
+        die_at(input_location, "control manifest declaration missing");
     for (size_t i = 0; i < consts->n; i++)
         value_put(bindings, consts->items[i].key, consts->items[i].value);
     for (size_t i = 0; i < extra->n; i++)
@@ -7436,21 +7687,21 @@ static void parse2_unary_compound(Graph *g) {
                             bindings, sequences, classes);
 }
 static void parse2_unary_cast_void(Graph *g) {
-    FILE *manifest = fopen("exec/parse2/unarycontrol-manifest.tsv", "rb");
+    FILE *manifest = open_input("exec/parse2/unarycontrol-manifest.tsv", "rb");
     char *s; int row = 0, found = 0;
-    if (!manifest) die("cannot open unarycontrol manifest");
+    if (!manifest) die_at(input_location, "cannot open unarycontrol manifest");
     while ((s = line(manifest))) {
         char *f[9]; int n;
         if (!*s || *s == '#') { free(s); continue; }
         n = fields_tab(s, f, 9);
-        if (n != 9) die("unarycontrol manifest column count");
+        if (n != 9) die_at(input_location, "unarycontrol manifest column count");
         if (row++ < 3) { free(s); continue; }
         if (strcmp(f[0], "rows") || strcmp(f[1], "width") ||
             strcmp(f[2], "cast-void") || strcmp(f[4], "-"))
-            die("unarycontrol cast-void declaration changed");
+            die_at(input_location, "unarycontrol cast-void declaration changed");
         found++; free(s); break;
     }
-    if (close_in(manifest) || found != 1) die("unarycontrol cast-void missing");
+    if (close_in(manifest) || found != 1) die_at(input_location, "unarycontrol cast-void missing");
     install_section(g, "exec/parse2/width-byte.tsv", "cast-void", 'b', NULL, NULL);
     install_section(g, "exec/parse2/width-result.tsv", "cast-void", 'r', NULL, NULL);
 }
@@ -7459,8 +7710,8 @@ static void inspect_parse2_startup_graph(const char *outpath) {
     build_parse2_token_graph(&g);
     parse2_startup_edits(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_startup_control_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7468,8 +7719,8 @@ static void inspect_parse2_startup_control_graph(const char *outpath) {
     parse2_startup_edits(&g);
     parse2_startup_control(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_startup_strings_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7477,8 +7728,8 @@ static void inspect_parse2_startup_strings_graph(const char *outpath) {
     parse2_startup_edits(&g);
     parse2_string_span(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_startup_prefix_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7487,8 +7738,8 @@ static void inspect_parse2_startup_prefix_graph(const char *outpath) {
     parse2_startup_control(&g);
     parse2_string_span(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_initializer_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7498,8 +7749,8 @@ static void inspect_parse2_initializer_head_graph(const char *outpath) {
     parse2_string_span(&g);
     parse2_string_initializer_head(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_strwalk_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7510,8 +7761,8 @@ static void inspect_parse2_strwalk_head_graph(const char *outpath) {
     parse2_string_initializer_head(&g);
     parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_strwalk_escape_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7523,8 +7774,8 @@ static void inspect_parse2_strwalk_escape_graph(const char *outpath) {
     parse2_string_walk_head(&g, "SI.walk", "SI.byte", "SI.end");
     parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_strwalk_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7537,8 +7788,8 @@ static void inspect_parse2_strwalk_graph(const char *outpath) {
     parse2_string_walk_escape(&g, "SI.walk", "SI.byte");
     parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_startup_branch_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7552,8 +7803,8 @@ static void inspect_parse2_startup_branch_graph(const char *outpath) {
     parse2_string_walk_tail(&g, "SI.walk", "SI.byte", "SI.end");
     parse2_string_initializer_tail(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_numeric_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7568,8 +7819,8 @@ static void inspect_parse2_numeric_graph(const char *outpath) {
     parse2_string_initializer_tail(&g);
     parse2_numeric(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_float_boundary_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7585,8 +7836,8 @@ static void inspect_parse2_float_boundary_graph(const char *outpath) {
     parse2_numeric(&g);
     parse2_float_boundary(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_float_entry_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7603,8 +7854,8 @@ static void inspect_parse2_float_entry_graph(const char *outpath) {
     parse2_float_boundary(&g);
     parse2_float_entry(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_float_digits_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7622,8 +7873,8 @@ static void inspect_parse2_float_digits_graph(const char *outpath) {
     parse2_float_entry(&g);
     parse2_float_digits(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_float_rows_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7642,8 +7893,8 @@ static void inspect_parse2_float_rows_graph(const char *outpath) {
     parse2_float_digits(&g);
     parse2_float_rows(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_autoscan_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7663,8 +7914,8 @@ static void inspect_parse2_autoscan_graph(const char *outpath) {
     parse2_float_rows(&g);
     parse2_autoscan(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7685,8 +7936,8 @@ static void inspect_parse2_unary_head_graph(const char *outpath) {
     parse2_autoscan(&g);
     parse2_unary_head(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_compound_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7708,8 +7959,8 @@ static void inspect_parse2_unary_compound_graph(const char *outpath) {
     parse2_unary_head(&g);
     parse2_unary_compound(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7732,8 +7983,8 @@ static void inspect_parse2_unary_cast_void_graph(const char *outpath) {
     parse2_unary_compound(&g);
     parse2_unary_cast_void(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_part4_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7757,8 +8008,8 @@ static void inspect_parse2_unary_part4_graph(const char *outpath) {
     parse2_unary_cast_void(&g);
     parse2_unary_part4(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_float_d_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7783,8 +8034,8 @@ static void inspect_parse2_unary_float_d_graph(const char *outpath) {
     parse2_unary_part4(&g);
     parse2_unary_float_d(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_float_s_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7810,8 +8061,8 @@ static void inspect_parse2_unary_float_s_graph(const char *outpath) {
     parse2_unary_float_d(&g);
     parse2_unary_float_s(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_int_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7839,8 +8090,8 @@ static void inspect_parse2_unary_int_graph(const char *outpath) {
     parse2_unary_int_i(&g);
     parse2_unary_int_u(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_unary_part6_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7869,8 +8120,8 @@ static void inspect_parse2_unary_part6_graph(const char *outpath) {
     parse2_unary_int_u(&g);
     parse2_unary_part6(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_printfallback_head_graph(const char *outpath) {
     Graph g = {0}; FILE *out;
@@ -7900,8 +8151,8 @@ static void inspect_parse2_printfallback_head_graph(const char *outpath) {
     parse2_unary_part6(&g);
     parse2_printfallback_head(&g);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     Graph g = {0}; FILE *out; char *entry;
@@ -7932,8 +8183,8 @@ static void inspect_parse2_printfallback_dispatch_graph(const char *outpath) {
     entry = parse2_printfallback_head(&g);
     parse2_printfallback_more(&g, entry, 2, 3);
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int last, int control0, int strwalk, int append, int part1, int fmtwalk) {
     Graph g = {0}; FILE *out; char *entry;
@@ -7996,8 +8247,8 @@ static void inspect_parse2_printfallback_bodies_graph(const char *outpath, int l
         free(addr_entry);
     }
     finish(&g);
-    out = fopen(outpath, "wb"); if (!out) die("cannot open output");
-    output_graph(out, &g, "START", NULL); if (close_in(out)) die("output close failed");
+    out = open_input(outpath, "wb"); if (!out) die_at(input_location, "cannot open output");
+    output_graph(out, &g, "START", NULL); if (close_in(out)) die_at(input_location, "output close failed");
 }
 int main(int argc, char **argv) {
     Graph g = {0}; FILE *out;
@@ -8016,9 +8267,9 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "dimensions");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-dimensions-tail-graph")) {
@@ -8026,9 +8277,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "dimensions");
         parse2_gen2_control(&g, "dimensions-tail");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-prefix-graph")) {
@@ -8038,9 +8289,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "type-prefix");
         parse2_gen2_control(&g, "structure");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-typedef-graph")) {
@@ -8051,9 +8302,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "structure");
         parse2_gen2_control(&g, "type-typedef");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-tail-graph")) {
@@ -8065,9 +8316,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "type-typedef");
         parse2_gen2_control(&g, "type-tail");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-word-graph")) {
@@ -8080,9 +8331,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "type-tail");
         parse2_gen2_type_words(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-type-entry-graph")) {
@@ -8096,9 +8347,9 @@ int main(int argc, char **argv) {
         parse2_gen2_type_words(&g);
         parse2_gen2_type_entry(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-tytail-graph")) {
@@ -8113,18 +8364,18 @@ int main(int argc, char **argv) {
         parse2_gen2_type_entry(&g);
         parse2_gen2_tytail(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-e-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_ladder_reject(&g, "E");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-reject-ec-graph")) {
@@ -8132,81 +8383,81 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder_reject(&g, "E");
         parse2_gen2_ladder_reject(&g, "C");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-e-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_ladder(&g, 'E');
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladder-c-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_ladder(&g, 'C');
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-prefix-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 0);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-select-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 1);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-body-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 2);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-reject-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 3);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-pointer-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 4);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-operator-full-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_operator_prefix(&g, 5);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-ladders-graph")) {
@@ -8218,16 +8469,16 @@ int main(int argc, char **argv) {
         parse2_gen2_ladder(&g, 'C');
         parse2_gen2_ladder_reject(&g, "C");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-family-graph")) {
         Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
         Value *inc = value_new(JOBJ), *dec = value_new(JOBJ);
         Value *address, *ret1 = value_new(JOBJ), *qt3 = value_new(JOBJ), *end;
-        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        if (!floats || floats->kind != JARR || floats->n != 2) die_at(input_location, "return floating facts changed");
         value_put(inc, "update_entry", value_string("LP.inc"));
         value_put(inc, "update_target", value_string("POST.+"));
         value_put(dec, "update_entry", value_string("LP.dec"));
@@ -8252,15 +8503,15 @@ int main(int argc, char **argv) {
         value_put(qt3, "integer_end", end);
         parse2_gen2_return_ex(&g, "qt3", qt3);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt-full-graph")) {
         Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
         Value *extra = value_new(JOBJ), *end;
-        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        if (!floats || floats->kind != JARR || floats->n != 2) die_at(input_location, "return floating facts changed");
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "qt1");
         for (size_t i = 0; i < floats->n; i++)
@@ -8270,75 +8521,75 @@ int main(int argc, char **argv) {
         value_put(extra, "integer_end", end);
         parse2_gen2_return_ex(&g, "qt3", extra);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-ints-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return_integers(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-int-first-graph")) {
         Value *ints = value_get(load_fact("k2-gen2"), "retint"), *extra = value_new(JOBJ);
         Value *code;
-        if (!ints || ints->kind != JARR || ints->n != 8) die("return integer facts changed");
+        if (!ints || ints->kind != JARR || ints->n != 8) die_at(input_location, "return integer facts changed");
         code = value_get(ints->items[0].value, "code");
-        if (!code || code->kind != JINT) die("return integer code missing");
+        if (!code || code->kind != JINT) die_at(input_location, "return integer code missing");
         value_put(extra, "integer_current", value_string("QT.scalar"));
         value_put(extra, "integer_code", code);
         build_parse2_token_graph(&g);
         parse2_gen2_return_ex(&g, "integer", extra);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt2-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "qt2");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-pair-graph")) {
         Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
-        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        if (!floats || floats->kind != JARR || floats->n != 2) die_at(input_location, "return floating facts changed");
         build_parse2_token_graph(&g);
         for (size_t i = 0; i < floats->n; i++)
             parse2_gen2_return_float(&g, floats->items[i].value);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-float-first-graph")) {
         Value *floats = value_get(load_fact("k2-gen2"), "retfloat");
-        if (!floats || floats->kind != JARR || floats->n != 2) die("return floating facts changed");
+        if (!floats || floats->kind != JARR || floats->n != 2) die_at(input_location, "return floating facts changed");
         build_parse2_token_graph(&g);
         parse2_gen2_return_float(&g, floats->items[0].value);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt1-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "qt1");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-full-graph")) {
@@ -8346,18 +8597,18 @@ int main(int argc, char **argv) {
         parse2_gen2_return(&g, "qt0");
         parse2_gen2_conditional(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-qt0-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "qt0");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return0-full-graph")) {
@@ -8370,9 +8621,9 @@ int main(int argc, char **argv) {
         value_put(extra, "addr_end", value_get(address, "done"));
         parse2_gen2_return_ex(&g, "ret1", extra);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-expression-graph")) {
@@ -8386,18 +8637,18 @@ int main(int argc, char **argv) {
         parse2_gen2_return_ex(&g, "update", inc);
         parse2_gen2_return_ex(&g, "update", dec);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-expr0-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "expr0");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-updates-graph")) {
@@ -8410,9 +8661,9 @@ int main(int argc, char **argv) {
         parse2_gen2_return_ex(&g, "update", inc);
         parse2_gen2_return_ex(&g, "update", dec);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return-update-graph")) {
@@ -8422,18 +8673,18 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         parse2_gen2_return_ex(&g, "update", extra);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-return0-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_return(&g, "ret0");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-if-loops-graph")) {
@@ -8442,18 +8693,18 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "switch");
         parse2_gen2_control(&g, "loops");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-parse2-gen2-control-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, argv[2]);
         finish(&g);
-        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[3], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-full-graph")) {
@@ -8462,9 +8713,9 @@ int main(int argc, char **argv) {
         parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 0, 2);
         parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 1, 2);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-first-walk-graph")) {
@@ -8472,18 +8723,18 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "sizeof2");
         parse2_gen2_manifest_strwalk(&g, "fact:seg_sizeof2", 0, 2);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof2-control-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "sizeof2");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof1-full-graph")) {
@@ -8491,9 +8742,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "sizeof1");
         parse2_gen2_shape_simple(&g, "sizeof-object");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof0-full-graph")) {
@@ -8501,36 +8752,36 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "sizeof0");
         parse2_gen2_shape_simple(&g, "sizeof-type");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-sizeof0-control-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "sizeof0");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-parameter-declarators-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "parameter-declarators");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-staticauto-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_control(&g, "ordinary-staticauto");
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-guard-graph")) {
@@ -8538,9 +8789,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-full-graph")) {
@@ -8554,9 +8805,9 @@ int main(int argc, char **argv) {
         parse2_gen2_control(&g, "ordinary-staticauto");
         parse2_gen2_startup_guard(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-init-graph")) {
@@ -8568,9 +8819,9 @@ int main(int argc, char **argv) {
         parse2_gen2_initializers_main(&g);
         parse2_gen2_statics_strwalk(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-main-graph")) {
@@ -8581,9 +8832,9 @@ int main(int argc, char **argv) {
         parse2_gen2_initializers_hook(&g);
         parse2_gen2_initializers_main(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-initializers-hook-graph")) {
@@ -8593,18 +8844,18 @@ int main(int argc, char **argv) {
         parse2_gen2_statics(&g);
         parse2_gen2_initializers_hook(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-gen2-statics-graph")) {
         build_parse2_token_graph(&g);
         parse2_gen2_statics(&g);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-parse2-token-graph")) {
@@ -8815,10 +9066,6 @@ int main(int argc, char **argv) {
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-through-body")) {
         inspect_pp_through_linedir(argv[2], 2); return 0;
     }
-    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--shared-predefines"))) && !strcmp(argv[1], "pp") &&
-        !getenv("SEED_GEN_GENERIC")) {
-        pp_shared_predefines = argc == 4; inspect_pp_through_linedir(argv[2], 3); return 0;
-    }
     if (argc == 3 && !strcmp(argv[1], "inspect-pp-call-autoinc")) {
         inspect_pp_call_autoinc(argv[2]); return 0;
     }
@@ -8831,22 +9078,22 @@ int main(int argc, char **argv) {
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-emit")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
-        if (end == argv[2] || *end) die("invalid pp emit index");
+        if (end == argv[2] || *end) die_at(input_location, "invalid pp emit index");
         inspect_pp_emit(argv[3], index); return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-header")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
-        if (end == argv[2] || *end) die("invalid pp header index");
+        if (end == argv[2] || *end) die_at(input_location, "invalid pp header index");
         inspect_pp_header(argv[3], index); return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-body")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
-        if (end == argv[2] || *end) die("invalid pp body index");
+        if (end == argv[2] || *end) die_at(input_location, "invalid pp body index");
         inspect_pp_body(argv[3], index); return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-key")) {
         char *end; unsigned long index = strtoul(argv[2], &end, 10);
-        if (end == argv[2] || *end) die("invalid pp key index");
+        if (end == argv[2] || *end) die_at(input_location, "invalid pp key index");
         inspect_pp_key(argv[3], index); return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-pp-autoinc")) {
@@ -8879,9 +9126,9 @@ int main(int argc, char **argv) {
                             has_flag(argc - 3, argv + 3, "locations") ||
                             has_flag(argc - 3, argv + 3, "sourcefacts") ? "SF.start" : "DISPATCH";
         construct_lex(&g, argc - 3, argv + 3, start);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, start, tok_names);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         fprintf(stderr, "lex states %lu\n", (unsigned long)g.n);
         return 0;
     }
@@ -8896,11 +9143,11 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && !strcmp(argv[1], "opt") &&
         !(argc == 3 || (argc == 4 && !strcmp(argv[3], "--o2"))))
-        die("opt accepts only --o2");
+        die_at(input_location, "opt accepts only --o2");
     if ((argc == 3 || argc == 4) && !strcmp(argv[1], "opt")) {
         construct_opt(&g, argc == 4);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (close_in(out)) die("output close failed");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
+        output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
         fprintf(stderr, "opt states %lu\n", (unsigned long)g.n);
         return 0;
     }
@@ -8910,15 +9157,15 @@ int main(int argc, char **argv) {
         if (sub) {
             char *stage = copy_n(argv[2], (size_t)(sub - argv[2]));
             if (snprintf(path, sizeof(path), "exec/%s/%s-manifest.tsv", stage, sub + 1) >= (int)sizeof(path))
-                die("manifest path too long");
+                die_at(input_location, "manifest path too long");
             free(stage);
         } else if (snprintf(path, sizeof(path), "exec/%s/gen-manifest.tsv", argv[2]) >= (int)sizeof(path))
-            die("manifest path too long");
-        f = fopen(path, "rb"); if (!f) die("cannot open manifest");
+            die_at(input_location, "manifest path too long");
+        f = open_input(path, "rb"); if (!f) die_at(input_location, "cannot open manifest");
         while ((s = line(f))) {
             char *field[9]; int n;
             if (!*s || *s == '#') { free(s); continue; }
-            n = fields_tab(s, field, 9); if (n != 9) die("manifest column count");
+            n = fields_tab(s, field, 9); if (n != 9) die_at(input_location, "manifest column count");
             if (!strcmp(field[0], "let") && field[8][0] == '{' &&
                 when_true(field[3], argc - 4, argv + 4)) {
                 Value *opts = value_json(field[8], "manifest options");
@@ -8927,26 +9174,26 @@ int main(int argc, char **argv) {
                     Value *sequences;
                     if (bindmap) {
                         Value *source = value_path(facts, value_text(bindmap));
-                        if (source->kind != JOBJ) die("mapseq bindmap is not an object");
+                        if (source->kind != JOBJ) die_at(input_location, "mapseq bindmap is not an object");
                         for (size_t i = 0; i < source->n; i++)
                             value_put(facts, source->items[i].key, source->items[i].value);
                     }
                     sequences = mapseq_construct(opts, facts);
-                    if (++found > 1) die("ambiguous mapseq row");
-                    out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-                    value_write(out, sequences); if (close_in(out)) die("output close failed");
+                    if (++found > 1) die_at(input_location, "ambiguous mapseq row");
+                    out = open_input(argv[3], "wb"); if (!out) die_at(input_location, "cannot open output");
+                    value_write(out, sequences); if (close_in(out)) die_at(input_location, "output close failed");
                 }
             }
             free(s);
         }
-        if (ferror(f) || close_in(f)) die("manifest read failed");
-        if (!found) die("mapseq row not found");
+        if (ferror(f) || close_in(f)) die_at(input_location, "manifest read failed");
+        if (!found) die_at(input_location, "mapseq row not found");
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "inspect-prn")) {
         install_prn_call(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (close_in(out)) die("output close failed"); return 0;
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
+        output(out, &g); if (close_in(out)) die_at(input_location, "output close failed"); return 0;
     }
     if (argc == 6 && !strcmp(argv[1], "inspect-bound-rows")) {
         inspect_bound_rows(argv[2], argv[3], argv[4], argv[5]); return 0;
@@ -8956,10 +9203,10 @@ int main(int argc, char **argv) {
     }
     if (argc == 5 && !strcmp(argv[1], "inspect-rows")) {
         Value *empty = value_new(JOBJ);
-        if (strcmp(argv[4], "b") && strcmp(argv[4], "r")) die("inspect-rows mode must be b or r");
+        if (strcmp(argv[4], "b") && strcmp(argv[4], "r")) die_at(input_location, "inspect-rows mode must be b or r");
         install_plain(&g, argv[2], argv[4][0], empty, empty);
-        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-        output(out, &g); if (close_in(out)) die("output close failed");
+        out = open_input(argv[3], "wb"); if (!out) die_at(input_location, "cannot open output");
+        output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if ((argc == 6 || argc == 7) && !strcmp(argv[1], "inspect-manifest-graph")) {
@@ -8971,8 +9218,8 @@ int main(int argc, char **argv) {
     }
     if (argc == 4 && !strcmp(argv[1], "inspect-facts")) {
         Value *v = load_fact(argv[2]);
-        out = fopen(argv[3], "wb"); if (!out) die("cannot open output");
-        value_write(out, v); if (close_in(out)) die("output close failed");
+        out = open_input(argv[3], "wb"); if (!out) die_at(input_location, "cannot open output");
+        value_write(out, v); if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc >= 3 && argc <= 8 && (!strcmp(argv[1], "enc") || !strcmp(argv[1], "enc/arm") || !strcmp(argv[1], "lower"))) {
@@ -8986,7 +9233,7 @@ int main(int argc, char **argv) {
         for (int i = 3; i < argc; i++) {
             int ok = 0;
             for (int j = 0; j < nn; j++) if (!strncmp(argv[i], "--", 2) && !strcmp(argv[i] + 2, names[j])) ok = 1;
-            if (!ok) die("usage: seed-gen enc|enc/arm|lower OUT.json [--FLAG...]");
+            if (!ok) die_at(input_location, "usage: seed-gen enc|enc/arm|lower OUT.json [--FLAG...]");
         }
         for (int i = 0; i < nn; i++) {
             Value *v = value_new(JBOOL); v->number = has_flag(argc - 3, argv + 3, names[i]);
@@ -8995,9 +9242,9 @@ int main(int argc, char **argv) {
         ctx.graph = &g; ctx.dir = lower ? "exec/lower" : "exec/enc"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
         manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, "START", NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc >= 3 && argc <= 6 && !strcmp(argv[1], "parse2")) {
@@ -9008,7 +9255,7 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i], "--locations")) locations = 1;
             else if (!strcmp(argv[i], "--warnings")) warnings = 1;
             else if (!strcmp(argv[i], "--errors")) errors = 1;
-            else die("unknown parse2 flag");
+            else die_at(input_location, "unknown parse2 flag");
         }
         const char *names[] = {"locations", "warnings", "errors"};
         int values[] = {locations, warnings, errors};
@@ -9018,10 +9265,11 @@ int main(int argc, char **argv) {
         build_parse2_token_graph(&g);
         ctx.graph = &g; ctx.dir = "exec/parse2"; ctx.flags = flags; ctx.accum = value_new(JOBJ);
         manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
+        g.external_start = value_text(value_get(env, "ex_ret"));
         finish(&g);
-        out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+        out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
         output_graph(out, &g, value_text(value_get(env, "ex_ret")), NULL);
-        if (close_in(out)) die("output close failed");
+        if (close_in(out)) die_at(input_location, "output close failed");
         return 0;
     }
     if (argc >= 3 && strcmp(argv[1], "prune")) {
@@ -9031,7 +9279,7 @@ int main(int argc, char **argv) {
         int other = 0, parse2base = 0;
         if (slash) snprintf(man, sizeof man, "exec/%.*s/%s-manifest.tsv", (int)(slash - argv[1]), argv[1], slash + 1);
         else snprintf(man, sizeof man, "exec/%s/gen-manifest.tsv", argv[1]);
-        if (!(f = fopen(man, "rb"))) die("usage: seed-gen STAGE OUT.json [--FLAG...]");
+        if (!(f = open_input(man, "rb"))) die_at(input_location, "usage: seed-gen STAGE OUT.json [--FLAG...]");
         while ((s = line(f))) {
             if (!strncmp(s, "#! flags ", 9)) snprintf(flagline, sizeof flagline, " %s ", s + 9);
             else if (!strncmp(s, "#! start ", 9)) snprintf(start, sizeof start, "%s", s + 9);
@@ -9044,7 +9292,7 @@ int main(int argc, char **argv) {
             free(s);
         }
         close_in(f);
-        if (other) die("seed-gen: this stage's manifest head is not yet covered");
+        if (other) die_at(input_location, "seed-gen: this stage's manifest head is not yet covered");
         {
             ManifestRows rows = manifest_rows(man);
             ManifestGraph ctx = {0}; Value *flags = value_new(JOBJ), *env = value_new(JOBJ);
@@ -9052,7 +9300,7 @@ int main(int argc, char **argv) {
             for (int i = 3; i < argc; i++) {
                 char want[128];
                 snprintf(want, sizeof want, " %s ", argv[i] + 2);
-                if (strncmp(argv[i], "--", 2) || !strstr(flagline, want)) die("seed-gen: unknown stage flag");
+                if (strncmp(argv[i], "--", 2) || !strstr(flagline, want)) die_at(input_location, "seed-gen: unknown stage flag");
             }
             for (char *p = strtok(flagline, " "); p; p = strtok(NULL, " ")) {
                 Value *v = value_new(JBOOL); v->number = has_flag(argc - 3, argv + 3, p);
@@ -9066,18 +9314,19 @@ int main(int argc, char **argv) {
             ctx.graph = &g; ctx.dir = dir; ctx.flags = flags; ctx.accum = value_new(JOBJ);
             manifest_walk_block(&rows, 0, rows.n, flags, env, NULL, manifest_graph_visit, &ctx);
             if (start[0] == '$') st = value_text(value_get(env, start + 1));
+            g.external_start = st;
             finish(&g);
-            out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
+            out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
             output_graph(out, &g, st, NULL);
-            if (close_in(out)) die("output close failed");
+            if (close_in(out)) die_at(input_location, "output close failed");
             return 0;
         }
     }
-    if ((argc != 3 && argc != 4) || strcmp(argv[1], "prune")) die("usage: seed-gen prune OUT.json [RULE_DIR]");
+    if ((argc != 3 && argc != 4) || strcmp(argv[1], "prune")) die_at(input_location, "usage: seed-gen prune OUT.json [RULE_DIR]");
     manifest(&g, argc == 4 ? argv[3] : "exec/prune");
     finish(&g);
-    out = fopen(argv[2], "wb"); if (!out) die("cannot open output");
-    output(out, &g); if (close_in(out)) die("output close failed");
+    out = open_input(argv[2], "wb"); if (!out) die_at(input_location, "cannot open output");
+    output(out, &g); if (close_in(out)) die_at(input_location, "output close failed");
     fprintf(stderr, "prune states %lu\n", (unsigned long)g.n);
     return 0;
 }

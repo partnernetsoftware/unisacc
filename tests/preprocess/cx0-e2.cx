@@ -1,4 +1,4 @@
-/* ROOT E2_READER MODEL NEW_ABS_OUT. Independent UNIPP1 decoder and semantic
+/* ROOT E2_READER MODEL NEW_ABS_OUT. Independent UNIPP2 decoder and semantic
  * gold; runs the real model against sealed bytes before/after live mutation. */
 #pragma unisa use bundle
 #pragma unisa use cxlib.netpack
@@ -8,12 +8,26 @@ static void ck(int ok,const char *s){checks++;if(!ok)failed++;printf("%s\tcx0-e2
 static void path(char *out,size_t cap,const char *name){if(cx_path_join(out,cap,work,name))die("path");}
 static void save(const char *name,const void *p,size_t n){char file[4400];path(file,sizeof file,name);if(cx_write(file,p,n))die("save");}
 static unsigned le(const unsigned char *p){return (unsigned)p[0]|(unsigned)p[1]<<8|(unsigned)p[2]<<16|(unsigned)p[3]<<24;}
-static int body(const np_result *r,const unsigned char **p,size_t *n){
- const unsigned char *b=(const unsigned char *)r->out;size_t at=27;if(r->rc||r->errn||r->outn<27||memcmp(b,"UNIPP1\0",7))return 0;
- unsigned sp=le(b+19),inc=le(b+23);if(sp>(r->outn-at)/4)return 0;at+=4*(size_t)sp;
- for(unsigned i=0;i<inc;i++){if(r->outn-at<12)return 0;unsigned nn=le(b+at+8);at+=12;if(nn>r->outn-at)return 0;at+=nn;}
- if(le(b+7)!=r->outn-at)return 0;*p=b+at;*n=r->outn-at;return 1;
+static int unipp2_body(const unsigned char *b,size_t n,const unsigned char **body,size_t *bn){
+ if(n<31||n>2147483647ULL||memcmp(b,"UNIPP2\0",7))return 0;
+ unsigned len=le(b+7),sc=le(b+19),ic=le(b+23),lc=le(b+27),prev=0;size_t at=31;
+ if(len>2147483647U||le(b+11)>2147483647U||le(b+15)>2147483647U||sc>2147483647U||ic>2147483647U||lc>2147483647U||sc>(n-at)/4)return 0;
+ for(unsigned i=0;i<sc;i++){unsigned pos=le(b+at);if(pos>2147483647U||(i&&pos<=prev))return 0;prev=pos;at+=4;}
+ prev=0;
+ for(unsigned i=0;i<ic;i++){
+  if(n-at<12)return 0;unsigned pos=le(b+at),lines=le(b+at+4),names=le(b+at+8);at+=12;
+  if(pos>2147483647U||lines>2147483647U||(unsigned long long)pos+lines>2147483647ULL||(i&&pos<prev)||names>n-at||memchr(b+at,0,names))return 0;
+  prev=pos;at+=names;
+ }
+ prev=0;
+ for(unsigned i=0;i<lc;i++){
+  if(n-at<16)return 0;unsigned pos=le(b+at),user=le(b+at+4),number=le(b+at+8),names=le(b+at+12);at+=16;
+  if(pos>2147483647U||user>2147483647U||number>2147483647U||(i&&pos<=prev))return 0;
+  if(names!=4294967295U){if(names>n-at||memchr(b+at,0,names))return 0;at+=names;}prev=pos;
+ }
+ if(len!=n-at)return 0;*body=b+at;*bn=len;return 1;
 }
+static int body(const np_result *r,const unsigned char **p,size_t *n){return !r->rc&&!r->errn&&unipp2_body((const unsigned char *)r->out,r->outn,p,n);}
 static int has(const unsigned char *p,size_t n,const char *text){size_t m=strlen(text);for(size_t i=0;m<=n&&i<=n-m;i++)if(!memcmp(p+i,text,m))return 1;return 0;}
 static int compact_has(const unsigned char *p,size_t n,const char *text){char *s=malloc(n+1);if(!s)die("allocation");size_t at=0;for(size_t i=0;i<n;i++)if(p[i]>32)s[at++]=(char)p[i];s[at]=0;int ok=strstr(s,text)!=0;free(s);return ok;}
 static np_result run(const char *packet,const char *index,const char *mp,const char *label){
@@ -29,7 +43,7 @@ int main(int argc,char **argv){
  const char *mod="#pragma unisa module dep\n#ifdef FROM_ROOT\n#error MACRO_LEAK\n#endif\nstatic int hidden(void){return 7;}\nint shown(void){return hidden();}\n";
  save("entry.cx",src,strlen(src));save("dep.cx",mod,strlen(mod));char prelude[]="#define FROZEN_VALUE 7\n";cxb_input extra={1,"cx.h",prelude,strlen(prelude)};cxb_options options={"lnx/x86_64","unisa-c99-v1",model};char *sources[]={entry};
  cxb_result sealed=cxb_seal(sources,1,interfaces,&options,&extra,1);ck(!sealed.status,"real-cx0-seal");if(sealed.status){fprintf(stderr,"%s\n",sealed.why);return 1;}save("sealed.cxb",sealed.data,sealed.bytes);
- const unsigned char *p=0;size_t n=0;np_result first=run("sealed.cxb","0",modelpath,"root-before");int ok=body(&first,&p,&n);ck(ok,"root-model-accepts-unipp1");ck(ok&&compact_has(p,n,"intfrozen_result=7;")&&compact_has(p,n,"intshown(void);")&&!has(p,n,"hidden("),"public-interface-and-frozen-macro-gold");
+ const unsigned char *p=0;size_t n=0;np_result first=run("sealed.cxb","0",modelpath,"root-before");int ok=body(&first,&p,&n);ck(ok,"root-model-accepts-unipp2");ck(ok&&compact_has(p,n,"intfrozen_result=7;")&&compact_has(p,n,"intshown(void);")&&!has(p,n,"hidden("),"public-interface-and-frozen-macro-gold");
  save("entry.cx","#error LIVE_SOURCE\n",strlen("#error LIVE_SOURCE\n"));save("dep.cx","#error LIVE_MODULE\n",strlen("#error LIVE_MODULE\n"));prelude[21]='9';
  cxb_bundle b={0};char why[256];if(cxb_read(sealed.data,sealed.bytes,&b,why,sizeof why))die(why);
  for(int i=0;i<b.resource_count;i++)if(b.resources[i].kind==2){char file[4096];if(b.resources[i].name_bytes>=sizeof file)die("resource-name");{void *cx_kept=memcpy(file,b.resources[i].name,b.resources[i].name_bytes);(void)cx_kept;}file[b.resources[i].name_bytes]=0;if(unlink(file))die("unlink-owned-interface");}cxb_clear(&b);if(unlink(entry)||unlink(dep))die("unlink-owned-source");

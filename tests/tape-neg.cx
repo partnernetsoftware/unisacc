@@ -5,8 +5,8 @@
  *
  * The fixture tape is the product's own -S output for `int main(void){return 7;}`; one operand of its
  * `imm r0, 7` line (physical line L) is replaced, then the tape is compiled with -O0 -b lnx/x86_64 under a 20 s bound:
- *   neg001          a tape that is just "?\n", on -S and on -c with -o FILE: rc 1, stdout empty, no FILE,
- *                   "tape domain line 1: unknown opcode"
+ *   neg001          a complete tape containing `?` followed by `.end`, on -S and on -c with -o FILE:
+ *                   rc 1, stdout empty, no FILE, "tape domain line 1: unknown opcode"
  *   integer-range   2^64 and -2^63-1: rc 1, stdout empty, "tape domain line L: integer literal out of 64-bit word
  *                   range"; the bounds 2^64-1 and -2^63 are accepted
  *   underscore      1_000 and 0x_1f: rc 1, stdout empty, "tape domain line L: invalid integer literal"; 0x1f accepted
@@ -59,6 +59,34 @@ static void literal(const char *name, const char *value, const char *reason) {
     np_free(&r);
 }
 
+/* Mutations of the product's own complete tape, not synthetic opcode errors.
+   A rejected tape must never leave an object behind. */
+static void frame_bad(const char *name, const char *b, long n) {
+    char leaf[160], obj[160], path[4600]; np_result r; sy_stat_t s;
+    if (cx_fmt(leaf, sizeof leaf, "frame-%s.tape", name) || cx_fmt(obj, sizeof obj, "frame-%s.o", name) || cx_fmt(path, sizeof path, "%s/%s", work, obj)) die("frame path");
+    put(leaf, b, n);
+    r = run("-c", leaf, obj);
+    ck(r.rc == 1 && !r.outn && has(&r, "reject: tape truncated") && sy_lstat(path, &s) == -ENOENT, name);
+    np_free(&r);
+}
+
+static void frame_insert(const char *name, const char *record, int valid) {
+    long at = tx_chr(tape, tape_n, '\n') + 1, rn = tx_len(record, 256);
+    char *b = mm_alloc(tape_n + rn + 1);
+    if (at <= 0 || !b) die("frame insertion");
+    mm_copy(b, tape_n + rn + 1, tape, at);
+    mm_copy(b + at, tape_n + rn + 1 - at, record, rn);
+    mm_copy(b + at + rn, tape_n + 1 - at, tape + at, tape_n - at);
+    if (valid) {
+        char leaf[160]; np_result r;
+        if (cx_fmt(leaf, sizeof leaf, "frame-%s.tape", name)) die("frame name");
+        put(leaf, b, tape_n + rn); r = run("-S", leaf, "-");
+        ck(r.rc == 0 && !r.errn && r.outn == (size_t)(tape_n + rn) && mm_same(r.out, b, tape_n + rn), name);
+        np_free(&r);
+    } else frame_bad(name, b, tape_n + rn);
+    mm_free(b);
+}
+
 int main(void) {
     char p[4600]; np_result r; size_t sn; sy_stat_t s; long k;
     if (sy_cwd(root, sizeof root) < 0) die("cwd");
@@ -72,7 +100,7 @@ int main(void) {
     imm_line = 1; for (k = 0; k < imm_at; k++) if (tape[k] == '\n') imm_line++;
     imm_at += 10;   /* the operand */
 
-    put("bad.tape", "?\n", 2);
+    put("bad.tape", "?\n.end\n", 7);
     r = run("-S", "bad.tape", "-"); ck(r.rc == 1 && !r.outn && has(&r, "tape domain line 1: unknown opcode"), "neg001-S"); np_free(&r);
     r = run("-c", "bad.tape", "bad.o"); if (cx_fmt(p, sizeof p, "%s/bad.o", work)) die("path");
     ck(r.rc == 1 && !r.outn && has(&r, "tape domain line 1: unknown opcode") && sy_lstat(p, &s) == -ENOENT, "neg001-c-no-output"); np_free(&r);
@@ -84,6 +112,54 @@ int main(void) {
     literal("underscore-decimal", "1_000", "invalid integer literal");
     literal("underscore-hex", "0x_1f", "invalid integer literal");
     literal("hex-accepted", "0x1f", 0);
+
+    /* The terminator is required, newline included, and nothing follows it.
+       Retain the historical first-three-line truncations as separate cases. */
+    {
+        long end = tx_find(tape, tape_n, ".end\n", 5), i, lines = 0;
+        char *b;
+        if (end < 0 || end + 5 != tape_n || (end && tape[end - 1] != '\n')) die("fixture has no terminal .end");
+        frame_bad("missing-end", tape, end);
+        for (i = 1; i < 5; i++) {
+            char name[64]; if (cx_fmt(name, sizeof name, "short-end-%ld", i)) die("frame name");
+            frame_bad(name, tape, end + i);
+        }
+        for (i = 0; i < end && lines < 3; i++) if (tape[i] == '\n') {
+            char name[64]; lines++;
+            if (cx_fmt(name, sizeof name, "prefix-%ld", lines)) die("frame name");
+            frame_bad(name, tape, i + 1);
+        }
+        b = mm_alloc(tape_n + 16); if (!b) die("frame allocation");
+        mm_copy(b, tape_n + 16, tape, tape_n);
+        b[tape_n] = '\n'; frame_bad("after-end-newline", b, tape_n + 1);
+        b[tape_n] = 'x'; frame_bad("after-end-content", b, tape_n + 1);
+        mm_copy(b + tape_n, 16, ".end\n", 5); frame_bad("duplicate-end", b, tape_n + 5);
+        mm_free(b);
+    }
+    frame_insert("unit-negative", ".unit -1 1:61\n", 0);
+    frame_insert("unit-leading-zero", ".unit 00 1:61\n", 0);
+    frame_insert("unit-over-cap", ".unit 128 1:61\n", 0);
+    frame_insert("unit-empty-extra-hex", ".unit 0 0:61\n", 0);
+    frame_insert("unit-short-hex", ".unit 0 2:61\n", 0);
+    frame_insert("unit-long-hex", ".unit 0 1:6162\n", 0);
+    frame_insert("unit-uppercase-hex", ".unit 0 1:6A\n", 0);
+    frame_insert("unit-nul-name", ".unit 0 1:00\n", 0);
+    frame_insert("unit-trailing-field", ".unit 0 1:61 extra\n", 0);
+    frame_insert("unit-version-in-body", ".unit 2\n", 0);
+    frame_insert("unit-empty-clears-context", ".unit 0 1:61\n.unit 0 0:\n.unit 0 1:62\n", 1);
+    frame_insert("directive-prefix-labels", ".unit0:\n.unitfoo:\n.endfoo:\n.end0:\n", 1);
+    frame_insert("unindented-exit", ".exit r0\n", 1);
+    {
+        static const int leading[] = {9, 11, 12, 13, 28, 29, 30, 32, 133, 160};
+        int i; char name[80], record[96];
+        for (i = 0; i < (int)(sizeof leading / sizeof leading[0]); i++) {
+            if (cx_fmt(name, sizeof name, "unit-leading-byte-%d", leading[i]) || cx_fmt(record, sizeof record, "%c.unit 999 0:\n", leading[i])) die("leading fixture");
+            frame_insert(name, record, 0);
+        }
+    }
+    frame_insert("unit-after-comment-control", "; ordinary\v.unit 999 0:\n", 0);
+    frame_insert("indented-end", "  .end\n", 0);
+    frame_insert("ordinary-indented-exit", "\t  .exit r0\n", 1);
 
     /* if.route.tapecheck-pass: a valid tape on -O0 -S (the tapecheck route) comes out byte-exact, for the fixture
        and for a larger program (loop, globals, calls) */

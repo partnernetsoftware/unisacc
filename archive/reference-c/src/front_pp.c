@@ -934,13 +934,29 @@ int nireg;
 #define MAXSPL 4096
 long spl_at[MAXSPL]; int nspl;   /* joined continuation lines: the file line of each backslash, ascending */
 int isp_reg[MAXSPL]; long isp_at[MAXSPL]; int nisp;   /* a header's joined lines: its region, and the buffer line in it */
-char fnpool[8192]; int nfnpool;
+char *fnpool; int nfnpool; int fncapacity;
+/* Names grow from their actual input extent; offsets survive relocation. */
+int pp_name_room(char **buf, int *capacity, long need) {
+    char *next; long want; int k;
+    if (need < 0 || need > 2147483647) { __write(2, "origin name overflow\n", 21); __exit(1); }
+    if (need <= *capacity) return 0;
+    want = need;
+    if (*capacity > 0 && (long)*capacity * 2 > want) want = (long)*capacity * 2;
+    if (want > 2147483647) want = need;
+    next = calloc(want, 1);
+    if (next == 0) { __write(2, "origin name allocation failed\n", 30); __exit(1); }
+    k = 0; while (k < *capacity) { next[k] = (*buf)[k]; k = k + 1; }
+    if (*buf != 0) free(*buf);
+    *buf = next; *capacity = want;
+    return 0;
+}
 /* #line N ["file"] (C99 6.10.4) [R14-3].  Each directive is recorded with
    the include region it sits in and its own line as the user counts it; a
    later position in the same region then reads line N + (its line - the
    directive's line - 1), and the file name if one was given. */
 #define MAXLD 4096
 int nld; int ld_reg[MAXLD]; long ld_line[MAXLD]; long ld_num[MAXLD]; int ld_nm[MAXLD];
+long ld_phys[MAXLD]; /* directive line in the flattened, joined PP text */
 int ld_raw;              /* line_at without the remap: used while recording one */
 int line_at_inside;      /* (tentative; defined with line_at below) */
 char *line_at_fname;     /* set by line_at: the name __FILE__ reads, after #line */
@@ -991,13 +1007,12 @@ int linedir(long ls, long ns, long ne, long le) {
     if (q < le) {
         if ((src[q] & 255) != 34) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
         q = q + 1; nm = nfnpool;
+        pp_name_room(&fnpool, &fncapacity, (long)nfnpool + (le - q) + 1);
         while (q < le && (src[q] & 255) != 34) {
-            if (nfnpool >= 8000) { err_at(ns, "#line file name capacity exceeded"); __exit(1); }
             if ((src[q] & 255) == 92) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }   /* escapes: not covered, as in E2 */
             fnpool[nfnpool] = src[q]; nfnpool = nfnpool + 1; q = q + 1;
         }
         if (q >= le) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }                  /* unterminated */
-        if (nfnpool >= 8000) { err_at(ns, "#line file name capacity exceeded"); __exit(1); }
         fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
         q = q + 1; while (q < le) { if (wsat(q) == 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; } q = q + 1; }
     }
@@ -1008,12 +1023,87 @@ int linedir(long ls, long ns, long ne, long le) {
     /* Main-file #line only, like the E2 network: a header that renumbers
        itself is refused where it says so rather than half-supported. */
     if (inside >= 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
+    k = 0; q = 1;
+    while (k < ls) { if (src[k] == 10) q = q + 1; k = k + 1; }
+    ld_phys[nld] = q;
     ld_reg[nld] = inside; ld_line[nld] = here; ld_num[nld] = v; ld_nm[nld] = nm; nld = nld + 1;
     return 0;
 }
-char incname[64];                 /* the header being spliced, for the table */
+char *incname; int inccapacity;    /* complete header spelling, before splicing */
 int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
+/* Independent checker API: call after preprocessing (before semantic source
+   appends), with src/nsrc and the origin tables still belonging to that unit.
+   Returns 0 on success, -1 on invalid state or any failed/short write.
+   No UA_LOCATION_MAP instrumentation or driver stdout redirection is needed. */
+int pp_origin_u32(int fd, long v) {
+    char b[4]; int k;
+    k = 0; while (k < 4) { b[k] = v & 255; v = v >> 8; k = k + 1; }
+    return __write(fd, b, 4) == 4 ? 0 : 0 - 1;
+}
+int pp_origin_namelen(int at) {
+    int n;
+    if (at < 0 || at >= nfnpool) return 0 - 1;
+    n = 0;
+    while (n < nfnpool - at) { if (fnpool[at + n] == 0) return n; n = n + 1; }
+    return 0 - 1;
+}
+int pp_origin_write(int fd) {
+    int i; int n; long extent; long lines;
+    if (nsrc < 0 || prelines < 0 || nautoinc < 0 || nspl < 0 || nspl > MAXSPL ||
+        nireg < 0 || nireg > MAXIREG || nld < 0 || nld > MAXLD ||
+        nfnpool < 0 || nfnpool > fncapacity || (nfnpool > 0 && fnpool == 0) ||
+        (nsrc > 0 && src == 0)) return 0 - 1;
+    lines = 1; i = 0;
+    while (i < nsrc) { if (src[i] == 0) return 0 - 1; if (src[i] == 10) lines = lines + 1; i = i + 1; }
+    extent = 31 + (long)nspl * 4 + nsrc;
+    i = 0;
+    while (i < nspl) {
+        if (spl_at[i] <= 0 || spl_at[i] > 2147483647 || (i > 0 && spl_at[i] <= spl_at[i - 1])) return 0 - 1;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nireg) {
+        n = pp_origin_namelen(ireg_nm[i]);
+        if (n < 0 || ireg_ln[i] <= 0 || ireg_ln[i] > lines ||
+            ireg_nl[i] < 0 || ireg_nl[i] > 2147483647 ||
+            (i > 0 && ireg_ln[i] < ireg_ln[i - 1])) return 0 - 1;
+        extent = extent + 12 + n; i = i + 1;
+    }
+    i = 0;
+    while (i < nld) {
+        n = ld_nm[i] < 0 ? 0 : pp_origin_namelen(ld_nm[i]);
+        if (n < 0 || ld_nm[i] < -1 || ld_phys[i] <= 0 || ld_phys[i] > lines ||
+            ld_line[i] <= 0 || ld_line[i] > 2147483647 ||
+            ld_num[i] <= 0 || ld_num[i] > 2147483647 ||
+            (i > 0 && ld_phys[i] <= ld_phys[i - 1])) return 0 - 1;
+        extent = extent + 16 + n; i = i + 1;
+    }
+    if (extent > 2147483647) return 0 - 1;
+    if (__write(fd, "UNIPP2", 7) != 7 || pp_origin_u32(fd, nsrc) ||
+        pp_origin_u32(fd, prelines) || pp_origin_u32(fd, nautoinc) ||
+        pp_origin_u32(fd, nspl) || pp_origin_u32(fd, nireg) || pp_origin_u32(fd, nld)) return 0 - 1;
+    i = 0;
+    while (i < nspl) { if (pp_origin_u32(fd, spl_at[i])) return 0 - 1; i = i + 1; }
+    i = 0;
+    while (i < nireg) {
+        n = pp_origin_namelen(ireg_nm[i]);
+        if (pp_origin_u32(fd, ireg_ln[i]) || pp_origin_u32(fd, ireg_nl[i]) ||
+            pp_origin_u32(fd, n)) return 0 - 1;
+        if (n > 0 && __write(fd, fnpool + ireg_nm[i], n) != n) return 0 - 1;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nld) {
+        n = ld_nm[i] < 0 ? 0 : pp_origin_namelen(ld_nm[i]);
+        if (pp_origin_u32(fd, ld_phys[i]) || pp_origin_u32(fd, ld_line[i]) ||
+            pp_origin_u32(fd, ld_num[i]) || pp_origin_u32(fd, ld_nm[i] < 0 ? 4294967295L : n)) return 0 - 1;
+        if (n > 0 && __write(fd, fnpool + ld_nm[i], n) != n) return 0 - 1;
+        i = i + 1;
+    }
+    if (nsrc > 0 && __write(fd, src, nsrc) != nsrc) return 0 - 1;
+    return 0;
+}
 char optincdir[512]; int optincdl;   /* unused: kept so the symbols stay */
 int iincdl[16];                      /* each -I, normalised with a trailing slash */
 char incdir[16][512];                /* ...and the normalised text itself: a temp
@@ -1173,8 +1263,9 @@ int incdo(int ls, int le, int from) {
        the 200th was dropped (lparser.c on: "undefined function 'main'"). */
     if (nincl > 4000) { err_at(nm, "more than 4000 #include splices (a header that includes itself?)"); __exit(1); }
     {   int q2;                              /* the name, before the shift */
+        pp_name_room(&incname, &inccapacity, (long)nl + 1);
         incname[0] = 0; q2 = 0;
-        while (q2 < nl && q2 < 62) { incname[q2] = src[nm + q2]; q2 = q2 + 1; }
+        while (q2 < nl) { incname[q2] = src[nm + q2]; q2 = q2 + 1; }
         incname[q2] = 0;
     }
     n = 0 - 1; incdisk = 0;
@@ -1267,9 +1358,11 @@ int incdo(int ls, int le, int from) {
             while (incpath[q]) { incpaths[nincpaths] = incpath[q]; nincpaths = nincpaths + 1; q = q + 1; }
             incpaths[nincpaths] = 0; nincpaths = nincpaths + 1;
         }
+        q = 0; while (incname[q]) q = q + 1;
+        pp_name_room(&fnpool, &fncapacity, (long)nfnpool + q + 1);
         ireg_nm[nireg] = nfnpool;
         q = 0;
-        while (incname[q] && nfnpool < 8000) { fnpool[nfnpool] = incname[q]; nfnpool = nfnpool + 1; q = q + 1; }
+        while (incname[q]) { fnpool[nfnpool] = incname[q]; nfnpool = nfnpool + 1; q = q + 1; }
         fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
         nireg = nireg + 1;
     }
@@ -1670,7 +1763,16 @@ int preprocess(void) {
             if (d < 0) { if (live) { if (we - ws == 6) { if (srcis(ws, 6, "pragma")) {
                 pushpop(ls, we, i);
             } } } }
-            if (d < 0) { if (live) { if (we - ws == 4) { if (srcis(ws, 4, "line")) { linedir(ls, ns, ne, i); } } } }
+            if (d < 0) { if (live) { if (we - ws == 4) { if (srcis(ws, 4, "line")) {
+                int line_end; line_end = ne;
+                /* pp_idend intentionally excludes an initial digit. A #line
+                   literal operand is a digit-sequence, not an identifier. */
+                if (ns < i && isdi(src[ns] & 255)) {
+                    line_end = ns;
+                    while (line_end < i && isdi(src[line_end] & 255)) line_end = line_end + 1;
+                }
+                linedir(ls, ns, line_end, i);
+            } } } }
             /* C99 6.10.5: a live #error stops the translation (it was ignored
                until 0.0.21 -- `#include <unisacc_ffi.h>` compiled on Linux) */
             if (d < 0) { if (live) { if (we - ws == 5) { if (srcis(ws, 5, "error")) {

@@ -118,17 +118,20 @@ The metadata-only commands are `tools/bound 20 sh ./unisacc.com tests/plan.cx --
 专属宿主头需求过滤。符号链接逐 tracked 别名跟随编译，并在结果中标记
 `mode=symlink-follow`；损坏链接同样失败。普通源必须同时满足 run=0、rc=0、
 residue=0 和非空对象才 PASS；超时、异常、缺结果和外层 fork/wait 错误必须失败，
-并收割已启动的同批子进程。唯一失败预期表 `tests/tools-compile-expected.tsv` 每行四列：
-exact source、类别、诊断片段（`|` 分隔）、中文原因。所有源仍实际编译，不删源、不 skip。
-类别 `known-debt` 与 `fixture-negative` 只有精确路径且 run=0、rc=1、object=0、residue=0、
-全部诊断命中 stderr 才 XFAIL；其意外成功为 XPASS 并失败，须移除过期项，漂移也失败。
+并收割已启动的同批子进程。唯一失败预期表 `tests/tools-compile-expected.tsv` 有四个必选列：
+exact source、类别、诊断片段（`|` 分隔）、中文原因；可为 `known-debt` 追加第五列
+`semantic-line=N;opcode=...`。所有源仍实际编译，不删源、不 skip。默认消费者保持原诊断匹配；
+显式消费者的第五列必须捕获同次编译的真实三阶段 IR，核拒绝处 opcode 及剥除规范定位/结束帧后的行号，
+原 stderr 与原诊断数字不改，其他诊断片段仍全部命中。捕获在原八路全部回收后、同源40秒剩余预算内执行，
+任何接口、捕获、映射或预算失败仍 FAIL。其余 `known-debt` 与 `fixture-negative` 仍须精确路径、
+run=0、rc=1、object=0、residue=0 且原诊断全部命中才 XFAIL；意外成功为 XPASS 并失败，漂移不能重 pin。
 `scanner-input` 没有必须编译失败的合同：诊断列只描述基线，不锁定拒绝，正常rc0/非空对象
 记 INPUT-COMPILED，正常rc1/无对象记 INPUT-REJECTED，均不记普通工具PASS；run异常、
 残留进程、其他rc或对象状态不一致仍必红。所有结果写类别原因；重复路径、缺原因、路径
 不在完整inventory或格式错误直接拒绝。其他未知工具失败必红，不能更新清单掩盖回归。
 
-永久批次当前为 `tools-compile-000` 至 `tools-compile-071`，完整登记570源/72个非空片，
-最后一片2源；片数始终按实时索引源数向上除以8，不设568源或71片的旧上限。
+永久批次当前为 `tools-compile-000` 至 `tools-compile-078`，完整登记629源/79个非空片，
+最后一片5源；片数始终按实时索引源数向上除以8，不设旧的源数或片数上限。
 每片取 Git 索引顺序连续最多八个源，八路并发，每子进程40秒（使用既有
 `sysx.process` 的 `np_run` 清理进程树），各自隔离 `TMPDIR`、对象与完整输出。
 每片注册预算仍为55秒。`tests/tools-compile-sources.tsv` 是唯一完整人工审阅库存，
@@ -1527,3 +1530,10 @@ Original time limits are unchanged.
 - 新6a实际验收：`CHECK_PINS pins=11 failed=0 stale=30 hostdep=0`；准备器边界注册批8/0、BATCH_RUN PASS；元数据677批/542覆盖、valid_metadata=1、executed_batches=0。输出保存在 `out/t2-rebase6a`，不声称daily/release资格。
 - 原main已退役的 `tests/toolsloc.tsv` 原字节保留，不恢复LOC拦截或写其基线；新增额度仅按本次staged实际净增单独报cc。pin逐行变更及依据见 `plans/t2-pin-rationale.tsv`。
 
+### T1 tapebin 显式消费者与默认路径回归
+
+`sh ./unisacc.com tools/tapebin-roundtrip.cx -- ROOT ABS_NEW_OUT --compiler ABS_PRODUCT --models ABS_MODELS` 使用成对绝对材料；缺一、相对路径、缺文件或目录均拒绝。输出 `candidate-consumer`、实际消费者/载体 SHA 与 argv，不声称 ROOT 的 APE 已验证。省略配对参数仍走原 `ROOT/unisacc.com` 默认合同；默认旧新返回同样 rc1 不能改记默认全绿。
+
+默认回归在独立 `tests/check-tapebin-consumer.cx`，不在生产工具里提供自检 CLI。参数为 `ROOT ABS_NEW_OUT OLD_CHECKER_BIN NEW_CHECKER_BIN ABS_COMPILER ABS_MODELS`；检查旧新默认 67 个产物、stdout/stderr 和退出状态逐字节相同，并检查八类绑定拒绝。每日批次 `tapebin-consumer` 显式声明 `before-checker,after-checker,new-product,new-models`，通过 `tests/run-batch.cx ROOT CANONICAL_OUT_PARENT tapebin-consumer before-checker=ABS ...` 绑定，材料路径必须是 realpath 后的真实规范路径，不能以 `ROOT/out` 软链别名冒充。只计该批实际执行结果，不缓存 PASS。
+
+正式完整 roundtrip 的五个 `origin-target` 失败按 cc 裁定为 `TAPEBIN-ORIGIN-5` KNOWN-GAP，原断言不删不改；其余 67 项实际通过。每日 consumer 的 9/0 只表示默认等价与绑定拒绝，不覆盖或豁免这五项。s9 必须附源码身份及该缺口，0.0.49 独立调查。

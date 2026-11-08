@@ -15,7 +15,7 @@ Python 在这条路径上是离线构造工具；旧 C/Python 预处理器用于
 | `rescan-*` | 对象/函数宏、参数帧、跨帧续接、隐藏标记、`_Pragma` |
 | `directive-scan-*`、`directive-action-*` | 指令识别、条件入口、决策之后的动作 |
 | `directive-body-*`、`include-location-*` | 宏体读取、头文件搜索和读入 |
-| `location-*` | UNIPP1 位置封装 |
+| `location-*` | UNIPP2 位置封装（完整 include 名及已解析的 `#line` 映射；布局见 `../pipeline/formats.md`） |
 | `predefines.tsv` | 六目标的预定义宏名称与顺序 |
 
 `weights/gold/pp.tsv` 的 schema 给出指令顺序，标签选择 `directive-action` 分节；
@@ -49,3 +49,39 @@ LF 计数行保持独立，字符串/字符字面量和注释状态不做字节�
 实际网络由宏/位置检查与固定源码到 tape 链检验；隔离生成不提供旧 kernel、
 `gold.py` 或产品 `src/`。临时修改 `pp.tsv` 的 `ifdef/0` 标签使实际网络输出
 NO→YES，证明声明决策确实被读取。这些证据证明迁移保行为，不证明完整 C99 语义。
+
+UNIPP2 的独立来源协议对拍入口是 `tests/check-unipp2-reference.cx`：
+`sh ./unisacc.com tests/check-unipp2-reference.cx -- "$PWD" PP_RUN PP_NET NEW_ABS_OUT`。
+`PP_RUN` 与 `PP_NET` 必须显式指定同候选冻结后的 E2 执行器和位置模型；检查器不构造或运行完整产品链。
+它将 `archive/reference-c/src/front_pp.c` 作为“活参考，非历史归档”，经既有 `tools/sourceflat.cx`
+显式构建参考程序，并逐字比较相同输入的 UNIPP2 全部字节，包括完整 UTF-8 长名、三层 include、
+`#line` 默认 TU 哨兵、显式空名及继承。其他 `archive/reference-py` 检查器仍为历史归档，不参与此入口。
+只读经典参考源、当前 kernel/include/共享声明、宿主 C 编译器以及 `tools/refshim.h` 都是显式参考依赖；
+检查器保留导出输入清单和摘要，不宣称这些依赖或历史 Python/host C 债已经清零。
+
+`LDRAW` 在 include 区域撤销前保存展开后 PP 文本的绝对物理行；`LDUSER` 才保存撤销
+include、前奏及续行映射后的主文件用户行。PP 的逻辑名/行号选择与诊断均按同一物理坐标
+选择 `#line` 记录，再按 `user - LDUSER - 1 + LDNUM` 还原逻辑行；头文件区域不应用主文件
+的 `#line`。`tests/stream-e3.cx` 的独立手造帧保留 include 在指令前/后、三层 include、
+以及 raw/user 不同的诊断断言；上述活参考对拍另保留同形源码与宏输出的一致性检查。
+
+独立 C 参考入口直接初始化并调用既有 `splice/decomment/autoinc/preprocess/expandsrc` 和
+`pp_origin_write`，不调用经典 `main/fe_units` 路由。字符和 UCN 判断真实定义来自只读
+`archive/reference-c/cx/compiler/srcgate.cx` 与 `frontpp.cx`；检查器记录它们的摘要，
+并通过函数/数据 section 和链接 GC 去除未使用的后端，不能用 stub 或忽略未定义符号代替。
+这些宿主 C 参考依赖也以正式 `L` 行登记，不声称模型 PP 被用作自己的参考。
+
+共享预定义模型的对拍通过 runner 现有 `--ri-snapshot/--upstream-stage` 接口显式输入完整
+`cli/f1`、空 `cli/attributes`、实际 `cli/source`、`cli/target` 和目标预定义列表；二进制键均保留前导 NUL。
+列表按 `predefines.tsv` 的目标行顺序派生为 NUL 分隔名字，不在宿主胶水硬编码宏串。
+快照由既有 `exec/c/resourceledger.h` 写入器生成并验证同一 source-stage 身份，不用更简模型替换共享模型。
+`cli/source` 的值按当前产品 `src/drive.cx` / `src/stages.cx` 的实际绑定包含末 NUL，
+不是历史 standalone `archive/reference-c/exec/c/run.c` 的 `strlen(src)` 无末 NUL 形态。
+检查器快照匹配产品合同；`cli/target` 则仍是无末 NUL 的目标字节。
+
+include 记录保留稳定遇见顺序、`IRLN` 非降序；同起点外层在前，不能排序或去重。
+`IRNL` 是该头插入当时的换行数加一，不是递归展开后的最终跨度，合法 child 可长于 outer。
+不同实际目录的同名 `dir/x.h` 可产生完全相同 wire 记录；本布局不能证明同起点父子关系，
+故只拒 `IRLN` 下降，不把同起点完全重复或不可证明非嵌套当负例。splice/line 仍严格递增。
+独立对拍保留四层、child 更长、不同 IRPATH 同 wire 三类合法源码，E1/E3 保留下降负例；
+0.0.49 的“布局带父深度”仅是设计债，本候选不新增字段、N 语义或容量。

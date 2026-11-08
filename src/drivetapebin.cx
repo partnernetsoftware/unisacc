@@ -2,8 +2,8 @@
    when a source ends in .tapebin. The tapegate checks (tb2_*) and the path
    classifiers (cxp_tapebin_*) are separate objects; this module only joins
    them into the check the driver used to run inline. On success the caller's
-   byte buffer is swapped for the decoded text tape and *as_tape is set; on
-   failure 1 is returned and the caller owns the dv_fail sentence. */
+   byte buffer is swapped for the decoded text tape and *as_tape is set.
+   Failure 2 means incomplete framing; 1 retains the format/origin sentence. */
 #pragma unisa module drivetapebin
 
 #pragma unisa use compiler.tapegate
@@ -31,6 +31,10 @@ int dv_tapebin_check(const char *src, const char *tgt,
     char *text;
     if (!cxp_tapebin_path(src)) return 0;
     origin = cxp_tapebin_target(tgt);
+    if (*gotn <= 33554432L && (*gotn < 136 || !tb2_origin(*gotb, (int)*gotn, origin, 0)) &&
+        tb2_carrier(*gotb, (int)*gotn) == 2) {
+        free(*gotb); return 2;
+    }
     mag = "UTAPEBIN";
     magic = *gotn >= 136 && *gotb != 0;
     k = 0;
@@ -70,16 +74,14 @@ int dv_tapebin_check(const char *src, const char *tgt,
             }
             i = i + 1;
         }
-        if (!bad && (i != nsec ||
-                     tb2_extra(nsec, nsec == 4 ? rlen : 0, nsec == 4 ? rcnt : 0) ||
-                     tb2_end(end, (int)*gotn) ||
-                     tb2_text(*gotb, (int)*gotn, minor, soff, slen, scnt, &text, &textn)))
-            bad = 1;
+        if (!bad && (i != nsec || tb2_extra(nsec, nsec == 4 ? rlen : 0, nsec == 4 ? rcnt : 0))) bad = 1;
+        if (!bad && tb2_end(end, (int)*gotn)) bad = 2;
+        if (!bad) bad = tb2_text(*gotb, (int)*gotn, minor, soff, slen, scnt, &text, &textn);
     }
     if (bad) {
         free(text);
         free(*gotb);
-        return 1;
+        return bad == 2 ? 2 : 1;
     }
     free(*gotb);
     *gotb = (unsigned char *)text;

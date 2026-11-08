@@ -22,7 +22,13 @@ typedef struct { int type; int kid, next, last; long key, klen; long str, slen; 
 typedef struct { JNode *n; long nn, cap; char *buf; long blen, bcap; const char *src; long len, pos; const char *path; } JDoc;
 
 static void jdie(JDoc *d, const char *what) {
+    /* Optional client diagnostic sink; jdie still terminates with rc 2.
+       Without JFAIL every other seed client retains the original diagnostic. */
+#ifdef JFAIL
+    JFAIL(d, what);
+#else
     fprintf(stderr, "json: %s: %s at byte %ld\n", d->path, what, d->pos);
+#endif
     exit(2);
 }
 static long jnew(JDoc *d, int type) {

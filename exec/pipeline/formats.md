@@ -23,11 +23,50 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
   other data sections may follow it; the file ends with a newline.  A unit
   without `main` never reaches this format -- e3 refuses it first
   (`not covered: no main`).
-  The e4/prune/lower entry states check only the first line (`_start:\n`) and
-  the last byte (`\n`); everything else is left to the stages downstream.
-  `tape.text` has no end marker, so a tape cut exactly at a line end is a
-  complete prefix and passes the entry check -- see the "known unfinished"
-  section of plans/release-notes-0.0.45.md and TAPE-END (0.0.45).
+  Tape payloads retain the `_start:` first line on image routes. A complete
+  payload ends with exactly `.end` LF; no byte, including another newline,
+  may follow it. Missing/short terminators, trailing bytes and malformed
+  location records reject as `tape truncated`, never receive an implicit tail.
+
+  Source-location records are real directives: `.unit N B:HEX` LF. N is
+  canonical unsigned decimal below `tokenlocations.UNIT_MAX`; B is a canonical
+  decimal byte length; HEX is exactly twice B lowercase hexadecimal digits
+  encoding a filename without NUL. B=0 and empty HEX explicitly clear the
+  current logical filename (`.unit N 0:` LF), rather than inheriting an old name.
+  Other filename bytes, including
+  whitespace, are not restricted by the transport. For example `main.c` is
+  `.unit 0 6:6d61696e2e63`. N always identifies a translation unit; repeated N
+  records may switch the current logical filename on include/#line transitions.
+  No new unit ordinal is allocated for an included filename. These records are
+  preserved by optimization and pruning and do not consume
+  code, data, symbol-address or relocation positions. Lowering preserves the
+  location records in target text and emits its own final `.end` after runtime
+  tails. Encoders consume location metadata without encoding instructions.
+  A bare model input with neither source resource nor source directory emits
+  no invented filename frame; it still requires `.end`. Located CLI/UNITOK
+  inputs retain real include/#line name transitions, including explicit empty
+  names. These location frames identify the current logical file, not a new TU.
+
+  The existing object-version header `.unit 2` is a distinct **two-field**
+  record allowed only at the beginning of an object tape; it is not source
+  unit 2 and does not permit trailing fields. Object linking drops individual
+  terminators, renumbers source location ordinals across objects, and emits
+  exactly one final terminator. Before a nonempty object's first semantic
+  output row without an active source frame, the linker emits `.unit N 0:`
+  LF to clear the previous object's filename. If a real source frame follows,
+  N is the mapping of its first local TU; its later filename is not applied
+  retroactively. With no source frames, N is a distinct anonymous TU ordinal.
+  Blank/comment-only objects and link-only `.global`, `.extern`, `.gdef`
+  records allocate no anonymous ordinal. Labels, instructions and emitted
+  data/directives are semantic rows; tape whitespace and comment controls
+  follow `exec/facts/tape-space.tsv`. Anonymous and real source TUs share the
+  existing `tokenlocations.UNIT_MAX` budget (128 ordinals, 0..127); object
+  headers and repeated filenames do not consume extra slots. This is a link
+  boundary, not an invented filename frame from a raw model.
+  The shared `exec/tapeframe` validator scans
+  only the decoded text payload, restores the input cursor, and uses existing
+  unit-directory capacity facts; binary attribute/container validation keeps
+  its original outer-layer rejection priority.
 
 The E1/E3 connection also carries constructor and destructor marks. With
 `\0cli/f1`, E1 frames its typed tokens as `USLATTR1`, two LE32 words (mark
@@ -125,16 +164,40 @@ plain **pp.text**. The envelope is produced by model actions; the C/ASM host
 does not interpret its fields. The optional E1/E3 location modes consume it as described below. It is not
 yet connected to the compiler CLI route and does not make `-Wall` available.
 
-- Magic: `UNIPP1` followed by NUL (7 bytes total).
-- Five little-endian unsigned 32-bit words: preprocessed text byte length,
-  forced-include prefix line count, automatically inserted include line count,
-  splice-record count, include-record count.
-- One 32-bit byte offset for each joined continuation, in encounter order.
-- Each include record: 32-bit insertion line, inserted line count, name byte
-  length, then the name bytes (no terminator). As in the current reference
-  diagnostic map, names are limited to their first 62 bytes. Records retain
-  insertion order; nested regions must be undone from last to first.
-- Exactly the declared number of preprocessed text bytes, with no trailer.
+- Magic: `UNIPP2` followed by NUL (7 bytes total).
+- Six LE32 fields at byte 7: preprocessed text byte length, CLI forced-prefix
+  lines, automatic-include lines, splice count, include count, and #line count.
+  The fixed header is 31 bytes.
+- Each splice record is one LE32 byte offset.
+- Each include record is LE32 insertion line (`IRLN`), recorded inserted line
+  count (`IRNL`), filename byte length, then the complete filename bytes.
+  `IRNL` is the original included header body's `NL + 1` at insertion time,
+  not the final recursive expansion span. A nested child's recorded count may
+  therefore exceed its
+  parent's; containment must not be inferred from these counts. There is no
+  62-byte filename truncation and no terminator.
+- Include records retain stable encounter order with nondecreasing `IRLN`.
+  When records have the same insertion line, the outer include precedes the
+  inner include. The wire carries `(IRLN, IRNL, name)`, not resolved paths or
+  parent depth: two relative `dir/x.h` names can resolve to different actual
+  directories and still produce identical records. Same-start duplicate or
+  apparently non-nested records are consequently not rejected on that basis;
+  the wire cannot prove their parent-child relationship. Existing field and
+  extent checks still apply. Adding parent depth is a 0.0.49 design candidate,
+  not implemented in this layout; see `plans/v0.0.48-unisacc.md` §11.
+- Each #line record is LE32 physical PP directive line (`LDRAW`), adjusted
+  user directive line (`LDUSER`), requested line number (`LDNUM`), filename byte
+  length, and filename bytes. The filename is the already-resolved inherited
+  name: a missing name inheriting `a.c` carries `a.c`, not a sentinel. Length
+  `0xffffffff` is reserved for the default-TU `LDNM=-1` state and carries no
+  bytes; length zero is an explicitly empty logical name. Subsequent logical
+  lines use `user_line - LDUSER - 1 + LDNUM`.
+- Exactly the declared preprocessed text bytes follow; no padding or trailer.
+  Splice and #line records have strictly increasing, nonduplicated source
+  positions; include records follow the nondecreasing/tie rule above. Names
+  contain no NUL. Counts, products and extents are validated in a wider domain
+  before narrowing to the existing nonnegative signed-LE32 cursor domain;
+  filename lengths independently must fit the remaining input.
 
 These are the reference's diagnostic inputs, not raw-source offsets: macro
 expansion can change columns, and inserted headers change line counts. The
@@ -272,8 +335,8 @@ scanner, preserving physical qualifiers and multiline adjacent string tokens.
 Its output is:
 
 - Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..128).
-- In unit order: LE32 filename byte length, filename bytes, LE32 UNIPP1 length,
-  and the exact UNIPP1 envelope (source, splice map and include map).
+- In unit order: LE32 filename byte length, filename bytes, LE32 UNIPP2 length,
+  and the exact UNIPP2 envelope (source, splice/include/#line maps).
 - Typed token stream. Each prefix is `@`, LE32 unit index, LE32 source offset,
   LF, then the ordinary typed token. The existing @unit0/@unit+ marker tokens
   also receive a prefix. There is one final prefixed eof token.

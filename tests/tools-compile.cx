@@ -1,4 +1,6 @@
-/* ROOT NEW_OUT SHARD: permanent installed-product consumer check.
+/* ROOT NEW_OUT SHARD [--compiler ABS_PRODUCT --models ABS_PKG].
+ * Default: installed-consumer via sh ROOT/unisacc.com. Explicit binding:
+ * candidate-consumer (ELF executes directly), not installed qualification.
  * SHARD is 0..ceil(inventory/8)-1; shards cover git ls-files -s -z -- tools,
  * recursively, including every tracked .cx symlink (compiled through its
  * tracked alias, never silently deduplicated). Non-.cx entries are not sources.
@@ -10,20 +12,44 @@
  * stale expectations are fatal. Full stdout/stderr and per-source results
  * remain in NEW_OUT. Aggregate every results.tsv and shard summary.
  * Run every shard even after failure. An empty registered shard is an error.
+ * Explicit mode only: identity.tsv binds the actual consumer and package;
+ * each *.argv records the actual inner compiler argv, one argument per line.
+ * --default-regression ROOT FRESH_OUT SHARD OLD_CHECKER NEW_CHECKER
+ *   OLD_SOURCE NEW_SOURCE runs two real default consumers (22 seconds each),
+ *   compares normalized results/diagnostics and exact object bytes. Bound the
+ *   complete regression invocation at 55 seconds; use a fixed light shard.
+ * Explicit known-debt assertions capture current pre-check tape only after all
+ * compile children are reaped, within the same per-source 40-second deadline.
  */
 #pragma unisa use sysx.process
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use runtime.tape_frame
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use mem.bytes
 
 static void die(const char *s) { fprintf(stderr,"tools-compile: %s\n",s); exit(2); }
 static char root[4096], work[4096], product[4400];
+static char models[4096];
+static int explicit_consumer, native_consumer;
 static char **sources;
 static int *links, count;
 static char **category, **diagnostics, **reason;
+static char **semantic;
+static long compile_deadline;
 static void path(char *p,size_t cap,const char *base,const char *leaf);
+/* Four-field legacy rows remain valid; an optional fifth field is not an
+   arbitrary diagnostic override and is validated even for default consumers. */
+static long semantic_spec(const char *s,const char **opcode) {
+    if(strncmp(s,"semantic-line=",14)||s[14]<'1'||s[14]>'9')return 0;
+    long line=0;size_t at=14;
+    while(s[at]>='0'&&s[at]<='9'){int digit=s[at++]-'0';if(line>(2147483647-digit)/10)return 0;line=line*10+digit;}
+    if(strncmp(s+at,";opcode=",8)||!s[at+8]||strchr(s+at+8,'\r'))return 0;
+    *opcode=s+at+8;return line;
+}
 static void expectations(void) {
     char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-expected.tsv");
     FILE *f=fopen(p,"rb");if(!f)die("expected table open");
@@ -33,12 +59,14 @@ static void expectations(void) {
         char *a=strchr(line,'\t');if(!a)die("expected table fields");*a++=0;
         char *b=strchr(a,'\t');if(!b)die("expected table fields");*b++=0;
         char *c=strchr(b,'\t');if(!c)die("expected table fields");*c++=0;
-        if(strchr(c,'\t')||!*c||!*b||(strcmp(a,"known-debt")&&strcmp(a,"fixture-negative")&&strcmp(a,"scanner-input")))die("expected table category, diagnostics or reason");
+        char *d=strchr(c,'\t');if(d)*d++=0;
+        if((d&&(!*d||strchr(d,'\t')))||!*c||!*b||(strcmp(a,"known-debt")&&strcmp(a,"fixture-negative")&&strcmp(a,"scanner-input")))die("expected table category, diagnostics or reason");
         if(*b=='|'||b[strlen(b)-1]=='|'||strstr(b,"||"))die("empty diagnostic fragment");
         int i;for(i=0;i<count;i++)if(!strcmp(line,sources[i]))break;
         if(i==count)die("expected source absent from complete inventory");
         if(category[i])die("duplicate expected source");
         category[i]=strdup(a);diagnostics[i]=strdup(b);reason[i]=strdup(c);
+        if(d){const char *op;if(strcmp(a,"known-debt")||!semantic_spec(d,&op))die("semantic expectation");semantic[i]=strdup(d);if(!semantic[i])die("allocation");}
         if(!category[i]||!diagnostics[i]||!reason[i])die("allocation");
     }
     if(ferror(f)||fclose(f))die("expected table read");
@@ -58,6 +86,104 @@ static void path(char *p,size_t cap,const char *base,const char *leaf) {
 static void save(const char *p,const char *s,size_t n) {
     FILE *f=fopen(p,"wb"); if(!f)die("open evidence");
     if(n&&fwrite(s,1,n,f)!=n)die("write evidence"); if(fclose(f))die("close evidence");
+}
+/* Physical stderr remains untouched; all other original fragments still apply. */
+static int debt_fragments(int i,const char *text,long expected) {
+    char physical[100];tx_snprintf(physical,sizeof physical,"tape domain line %ld: unknown opcode",expected);
+    char *p=diagnostics[i];int saw=0;
+    while(*p){char *end=strchr(p,'|');if(end)*end=0;
+        int skip=!strcmp(p,physical),ok=skip||(text&&strstr(text,p));if(skip)saw++;
+        if(end)*end='|';if(!ok)return 0;if(!end)break;p=end+1;
+    }return saw==1;
+}
+static int debt_call(char **av,char **adds,const char *outpath,const char *errpath) {
+    long now=sy_now_ms();long left=(compile_deadline-now)/1000;if(now<0||left<=0)return 0;
+    np_result r={0};char why[2048]={0};int run=np_run(av,root,adds,(int)left,&r,why,sizeof why);
+    save(outpath,r.out?r.out:"",r.outn);save(errpath,r.err?r.err:"",r.errn);
+    long finished=sy_now_ms();int ok=!run&&!r.rc&&!r.residue&&finished>=0&&finished<compile_deadline;np_free(&r);return ok;
+}
+static int location_frame(const char *s,size_t n) {
+    if(n==4&&!memcmp(s,".end",4))return 1;
+    if(n<6||n>2147483647u||memcmp(s,".unit ",6))return 0;
+    int unit,bytes,hex;return !tb2_source_frame((const unsigned char *)s,6,(int)n,&unit,&bytes,&hex);
+}
+static int debt_identity(int i) {
+    char *end;const char *opcode;long expected=semantic_spec(semantic[i],&opcode);if(!expected)return 0;
+    char prefix[4400],temp[4400],err[4400],p[4400],q[4400],leaf[80];
+    tx_snprintf(leaf,sizeof leaf,"%04d",i);path(prefix,sizeof prefix,work,leaf);
+    tx_snprintf(temp,sizeof temp,"%s.tmp",prefix);tx_snprintf(err,sizeof err,"%s.stderr",prefix);
+    size_t en;char *stderr_text=cx_read(err,&en);if(!stderr_text)return 0;
+    char *report=strstr(stderr_text,"\ntape domain line ");long physical=0;
+    if(report){physical=strtol(report+18,&end,10);if(physical<=0||strncmp(end,": unknown opcode\n",17))physical=0;}
+    char source_line[4400];tx_snprintf(source_line,sizeof source_line,"\n%s:%ld: ",sources[i],physical);
+    int valid=physical>0&&strstr(stderr_text,source_line)&&debt_fragments(i,stderr_text,expected);free(stderr_text);if(!valid)return 0;
+    char envtmp[4500];tx_snprintf(envtmp,sizeof envtmp,"TMPDIR=%s",temp);char *adds[]={envtmp,"UNISA_JOBS=1",0};
+    tx_snprintf(p,sizeof p,"%s.interfaces",prefix);tx_snprintf(q,sizeof q,"%s.interfaces.stderr",prefix);
+    char *scan[]={"sh","-c","for f in \"$1\"/ua-cxif-*.h; do test -f \"$f\" && printf '%s\\n' \"$f\"; done","sh",temp,0};
+    if(!debt_call(scan,adds,p,q))return 0;
+    size_t ln;char *list=cx_read(p,&ln);if(!list)return 0;
+    char module[4400];path(module,sizeof module,root,"tools/cxlib/netpack.cx");size_t mn;char *ms=cx_read(module,&mn);if(!ms){free(list);return 0;}
+    char sha[65];cx_sha256_hex(ms,mn,sha);free(ms);
+    /* CXIF hashes cxm_load's cleaned scan bytes, not raw source bytes.
+       Ask this same consumer's existing full-interface projection, then
+       require exact bytes and the generator's content-addressed filename. */
+    tx_snprintf(p,sizeof p,"%s.interface-expected.stdout",prefix);tx_snprintf(q,sizeof q,"%s.interface-expected.stderr",prefix);
+    char *project[9];int pn=0;if(!native_consumer)project[pn++]="sh";project[pn++]=product;project[pn++]="--models";project[pn++]=models;project[pn++]="-cx-interface";project[pn++]=module;project[pn]=0;
+    if(!debt_call(project,adds,p,q)){free(list);return 0;}
+    size_t projected_n;char *projected=cx_read(p,&projected_n);if(!projected){free(list);return 0;}
+    const char *full="/* CXIF v0 module netpack src-sha256 ";
+    if(projected_n<strlen(full)||memcmp(projected,full,strlen(full))){free(projected);free(list);return 0;}
+    char interface_sha[65],expected_path[4400];cx_sha256_hex(projected,projected_n,interface_sha);
+    tx_snprintf(expected_path,sizeof expected_path,"%s/ua-cxif-%.16s.h",temp,interface_sha);
+    char iface[4400]={0};int found=0;
+    for(char *s=list;*s;){char *nl=strchr(s,'\n');if(!nl)break;*nl=0;
+        struct stat st;if(!strcmp(s,expected_path)&&!lstat(s,&st)&&S_ISREG(st.st_mode)&&st.st_uid==getuid()){
+            size_t hn;char *h=cx_read(s,&hn);if(h){if(hn==projected_n&&!memcmp(h,projected,hn)){found++;if(tx_copy(iface,sizeof iface,s,strlen(s)))found=2;}free(h);}}
+        s=nl+1;
+    }free(projected);free(list);if(found!=1)return 0;
+    tx_snprintf(p,sizeof p,"%s.includes",prefix);char includes[4406];memcpy(includes,"cx.h",5);size_t il=strlen(iface)+1;if(mm_copy(includes+5,sizeof includes-5,iface,il))return 0;save(p,includes,5+il);
+    char includes_arg[4500];tx_snprintf(includes_arg,sizeof includes_arg,"includes=%s",p);
+    char input[4400];path(input,sizeof input,root,sources[i]);
+    const char *stages[]={"e2","e1","e3"};
+    for(int stage=0;stage<3;stage++){
+        tx_snprintf(p,sizeof p,"%s.debt-%s.stdout",prefix,stages[stage]);tx_snprintf(q,sizeof q,"%s.debt-%s.stderr",prefix,stages[stage]);
+        char *av[32];int n=0;av[n++]="sh";av[n++]="-c";av[n++]="input=$1; shift; exec \"$@\" < \"$input\"";av[n++]="sh";av[n++]=input;
+        if(!native_consumer)av[n++]="sh";av[n++]=product;av[n++]="stream";av[n++]=(char *)stages[stage];av[n++]="--models";av[n++]=models;
+        av[n++]="--source";av[n++]=sources[i];av[n++]="--target";av[n++]="lnx/x86_64";av[n++]="--res";av[n++]="funit";
+        if(stage!=1){av[n++]="--res";av[n++]="object";}if(!stage){av[n++]="--res";av[n++]=includes_arg;}if(stage==2)av[n++]="--raw";av[n]=0;
+        char argvpath[4400];tx_snprintf(argvpath,sizeof argvpath,"%s.debt-%s.argv",prefix,stages[stage]);FILE *af=fopen(argvpath,"wb");if(!af)return 0;for(int a=0;a<n;a++)fprintf(af,"%s\n",av[a]);if(fclose(af))return 0;
+        if(!debt_call(av,adds,p,q))return 0;if(tx_copy(input,sizeof input,p,strlen(p)))return 0;
+    }
+    /* --raw delegates attribute-carrier removal to the existing stream API. */
+    size_t bn;char *body=cx_read(input,&bn);if(!body)return 0;size_t off=0;
+    if(bn>2147483647u||tb2_tape_frame((const unsigned char *)body,(int)bn)){free(body);return 0;}
+    tx_snprintf(p,sizeof p,"%s.debt-full.tape",prefix);save(p,body+off,bn-off);
+    tx_snprintf(p,sizeof p,"%s.debt-semantic.tape",prefix);FILE *normalized=fopen(p,"wb");if(!normalized){free(body);return 0;}
+    size_t context_start=0,context_size=0;long line=0,semantic_line=0,mapped=0;int same=0;
+    for(size_t at=off;at<bn;){size_t stop=at;while(stop<bn&&body[stop]!='\n')stop++;size_t len=stop-at;line++;
+        int frame=location_frame(body+at,len);if(!frame){semantic_line++;size_t bytes=len+(stop<bn);if(fwrite(body+at,1,bytes,normalized)!=bytes)die("semantic tape write");}
+        if(line==physical){mapped=semantic_line;same=!frame&&len==strlen(opcode)&&!memcmp(body+at,opcode,len);}
+        if(line>=physical-3&&line<=physical+3){if(!context_size)context_start=at;context_size+=len+(stop<bn);}at=stop+(stop<bn);
+    }
+    if(fclose(normalized))die("semantic tape close");tx_snprintf(p,sizeof p,"%s.debt-context7",prefix);save(p,body+context_start,context_size);
+    tx_snprintf(p,sizeof p,"%s.debt-identity.tsv",prefix);FILE *f=fopen(p,"wb");if(!f){free(body);return 0;}
+    fprintf(f,"source\t%s\ninterface\t%s\nmodule-sha256\t%s\nphysical-line\t%ld\nsemantic-line\t%ld\nopcode\t%s\n",sources[i],iface,sha,physical,mapped,opcode);int written=!fclose(f);
+    free(body);long finished=sy_now_ms();return written&&same&&mapped==expected&&finished>=0&&finished<compile_deadline;
+}
+static void bound_file(FILE *f,const char *label,const char *p) {
+    size_t n;char h[65];char *s=cx_read(p,&n);if(!s)die("identity input read");
+    cx_sha256_hex(s,n,h);free(s);fprintf(f,"%s\t%s\n%s-sha256\t%s\n",label,p,label,h);
+}
+static int native_product(const char *p) {
+    unsigned char magic[4];FILE *f=fopen(p,"rb");if(!f)die("product open");
+    size_t n=fread(magic,1,sizeof magic,f);int bad=ferror(f);
+    if(fclose(f)||bad)die("product magic read");return n==4&&!memcmp(magic,"\177ELF",4);
+}
+static void identity(void) {
+    char p[4400];path(p,sizeof p,work,"identity.tsv");FILE *f=fopen(p,"wb");if(!f)die("identity evidence");
+    fprintf(f,"tools-compile-consumer-v1\nscope\t%s\nroot\t%s\n",explicit_consumer?"candidate-consumer-not-installed-qualification":"installed-consumer",root);
+    bound_file(f,"product",product);if(explicit_consumer)bound_file(f,"models",models);
+    if(ferror(f)||fclose(f))die("identity write");
 }
 static int compile(int i) {
     char obj[4400],out[4400],err[4400],result[4400],leaf[64],why[2048]={0};
@@ -81,7 +207,18 @@ static int compile(int i) {
     len=tx_snprintf(leaf,sizeof leaf,"%04d.result",i);
     if(len<0||(size_t)len>=sizeof leaf)die("result leaf bound");
     path(result,sizeof result,work,leaf);
-    char *av[]={"sh",product,"-c","-funit","-b","lnx/x86_64",sources[i],"-o",obj,0};
+    char *av[14];int an=0;
+    if(!native_consumer)av[an++]="sh";av[an++]=product;
+    if(explicit_consumer){av[an++]="--models";av[an++]=models;}
+    av[an++]="-c";av[an++]="-funit";av[an++]="-b";av[an++]="lnx/x86_64";
+    av[an++]=sources[i];av[an++]="-o";av[an++]=obj;av[an]=0;
+    if(explicit_consumer) {
+        len=tx_snprintf(leaf,sizeof leaf,"%04d.argv",i);
+        if(len<0||(size_t)len>=sizeof leaf)die("argv leaf bound");
+        char args[4400];path(args,sizeof args,work,leaf);FILE *af=fopen(args,"wb");if(!af)die("argv evidence");
+        for(int a=0;a<an;a++)fprintf(af,"%s\n",av[a]);
+        if(ferror(af)||fclose(af))die("argv write");
+    }
     np_result r;int run=np_run(av,root,adds,40,&r,why,sizeof why);
     save(out,r.out?r.out:"",r.outn);save(err,r.err?r.err:"",r.errn);
     if(run) { FILE *f=fopen(err,"ab");if(!f)die("timeout evidence");fprintf(f,"%s\n",why);fclose(f); }
@@ -90,11 +227,12 @@ static int compile(int i) {
     int known=category[i]!=0;
     int scanner=known&&!strcmp(category[i],"scanner-input");
     int input_ok=scanner&&!run&&!r.residue&&(ok||(r.rc==1&&!object));
-    int xfail=known&&!scanner&&!run&&r.rc==1&&!object&&!r.residue&&matches(i,r.err);
+    int deferred=explicit_consumer&&semantic[i]&&!run&&r.rc==1&&!object&&!r.residue;
+    int xfail=!deferred&&known&&!scanner&&!run&&r.rc==1&&!object&&!r.residue&&matches(i,r.err);
     const char *status=scanner?(input_ok?(ok?"INPUT-COMPILED":"INPUT-REJECTED"):"FAIL"):(known?(ok?"XPASS":(xfail?"XFAIL":"FAIL")):(ok?"PASS":"FAIL"));
     FILE *f=fopen(result,"wb");if(!f)die("result evidence");
     fprintf(f,"%s\t%s\tmode=%s\trun=%d\trc=%d\tobject=%d\tresidue=%d\traw_compile_failure=%d\tcategory=%s\treason=%s\tstderr=%s\n",status,sources[i],links[i]?"symlink-follow":"regular",run,r.rc,object,r.residue,r.rc!=0,known?category[i]:"-",known?reason[i]:"-",err);
-    if(fclose(f))die("result close");np_free(&r);return xfail||input_ok?3:(!known&&ok?0:1);
+    if(fclose(f))die("result close");np_free(&r);return deferred?4:(xfail||input_ok?3:(!known&&ok?0:1));
 }
 static void registry(int update,const char *destination) {
     char p[4400],line[8192];path(p,sizeof p,root,"tests/tools-compile-sources.tsv");
@@ -136,22 +274,89 @@ static void batches(int shards) {
         if(strncmp(line,"tools-compile-",14))continue;
         char *end;errno=0;long i=strtol(line+14,&end,10);
         if(errno||end==line+14||*end!='\t'||i<0||i>=shards)die("REFUSE batch shard range");
-        int n=tx_snprintf(expected,sizeof expected,"tools-compile-%03ld\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%ld\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\n",i,i);
-        if(n<0||(size_t)n>=sizeof expected||strcmp(line,expected)||seen[i])die("REFUSE batch contract or duplicate");
+        int n=tx_snprintf(expected,sizeof expected,"tools-compile-%03ld\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%ld\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\t",i,i);
+        if(n<0||(size_t)n>=sizeof expected||strncmp(line,expected,(size_t)n)||(strcmp(line+n,"daily\n")&&strcmp(line+n,"commit\n"))||seen[i])die("REFUSE batch contract or duplicate");
         seen[i]=1;
     }
     if(ferror(f)||fclose(f))die("REFUSE batches read");
     for(int i=0;i<shards;i++)if(!seen[i])die("REFUSE missing registered shard");
     free(seen);
 }
+/* Normalize only the lane output prefix, never compiler diagnostics or status. */
+static size_t normalize(char *s,size_t n,const char *prefix) {
+    size_t pn=strlen(prefix),a=0,b=0;
+    while(a<n){if(pn<=n-a&&!memcmp(s+a,prefix,pn)){s[b++]='@';a+=pn;}else s[b++]=s[a++];}
+    return b;
+}
+static char *reg_read(const char *p,size_t *n) {
+    char *s=cx_read(p,n);if(!s)die("default regression evidence read");return s;
+}
+static void reg_equal(const char *oldout,const char *newout,const char *leaf,int text) {
+    char a[4400],b[4400];path(a,sizeof a,oldout,leaf);path(b,sizeof b,newout,leaf);
+    size_t an,bn;char *as=reg_read(a,&an),*bs=reg_read(b,&bn);
+    if(text){an=normalize(as,an,oldout);bn=normalize(bs,bn,newout);}
+    int same=an==bn&&!memcmp(as,bs,an);free(as);free(bs);
+    if(!same){fprintf(stderr,"default regression differs: %s\n",leaf);die("default regression bytes");}
+}
+static int default_regression(int argc,char **argv) {
+    if(argc!=9)die("usage: --default-regression ROOT FRESH_OUT SHARD OLD_CHECKER NEW_CHECKER OLD_SOURCE NEW_SOURCE");
+    if(!realpath(argv[2],root)||argv[3][0]!='/'||tx_copy(work,sizeof work,argv[3],strlen(argv[3])))die("regression root/output");
+    char *end;errno=0;long shard=strtol(argv[4],&end,10);
+    if(errno||!*argv[4]||*end||shard<0||shard>268435454)die("regression shard");
+    char inputs[4][4096];for(int i=0;i<4;i++)if(argv[5+i][0]!='/'||!realpath(argv[5+i],inputs[i]))die("regression absolute checker/source required");
+    if(!strcmp(inputs[0],inputs[1])||!strcmp(inputs[2],inputs[3]))die("distinct regression checker/source paths required");
+    if(mkdir(work,0700))die("new regression output required");
+    char oldout[4400],newout[4400],p[4400];path(oldout,sizeof oldout,work,"old");path(newout,sizeof newout,work,"new");
+    path(p,sizeof p,work,"identity.tsv");FILE *f=fopen(p,"wb");if(!f)die("regression identity");
+    fprintf(f,"tools-compile-default-regression-v1\nscope\tinstalled-consumer-default-equivalence-not-release-qualification\nroot\t%s\nshard\t%ld\n",root,shard);
+    const char *labels[]={"old-checker","new-checker","old-source","new-source"};
+    for(int i=0;i<4;i++)bound_file(f,labels[i],inputs[i]);
+    path(product,sizeof product,root,"unisacc.com");bound_file(f,"installed-product",product);
+    for(int lane=0;lane<2;lane++) {
+        char *outdir=lane?newout:oldout;char *v[]={inputs[lane],root,outdir,argv[4],0};
+        for(int a=0;v[a];a++)fprintf(f,"%s-argv\t%d\t%s\n",lane?"new":"old",a,v[a]);
+        np_result r={0};char why[1024];int run=np_run(v,root,0,22,&r,why,sizeof why);
+        path(p,sizeof p,work,lane?"new.stdout":"old.stdout");save(p,r.out?r.out:"",r.outn);
+        path(p,sizeof p,work,lane?"new.stderr":"old.stderr");save(p,r.err?r.err:"",r.errn);
+        fprintf(f,"%s-status\trun=%d\trc=%d\tresidue=%d\n",lane?"new":"old",run,r.rc,r.residue);
+        int bad=run||r.rc||r.residue;np_free(&r);if(bad){fclose(f);die("default regression checker failed");}
+    }
+    /* The top-level lane captures live beside, rather than inside, lane outputs. */
+    char a[4400],b[4400];size_t an,bn;
+    const char *streams[]={"stdout","stderr"};
+    for(int i=0;i<2;i++) {
+        char leaf[40];tx_snprintf(leaf,sizeof leaf,"old.%s",streams[i]);path(a,sizeof a,work,leaf);
+        tx_snprintf(leaf,sizeof leaf,"new.%s",streams[i]);path(b,sizeof b,work,leaf);
+        char *as=reg_read(a,&an),*bs=reg_read(b,&bn);an=normalize(as,an,oldout);bn=normalize(bs,bn,newout);
+        int same=an==bn&&!memcmp(as,bs,an);free(as);free(bs);if(!same)die("default regression checker output");
+    }
+    reg_equal(oldout,newout,"results.tsv",1);path(p,sizeof p,oldout,"results.tsv");
+    size_t tn;char *table=reg_read(p,&tn);int rows=0;for(size_t i=0;i<tn;i++)if(table[i]=='\n')rows++;free(table);
+    if(rows<1||rows>8)die("default regression nonempty shard required");
+    int objects=0;
+    for(int j=0;j<rows;j++) {
+        int index=(int)shard*8+j;char leaf[64];const char *suffix[]={"result","stdout","stderr"};
+        for(int k=0;k<3;k++){tx_snprintf(leaf,sizeof leaf,"%04d.%s",index,suffix[k]);reg_equal(oldout,newout,leaf,1);}
+        tx_snprintf(leaf,sizeof leaf,"%04d.o",index);path(a,sizeof a,oldout,leaf);path(b,sizeof b,newout,leaf);
+        struct stat sa,sb;int ar=stat(a,&sa),ae=errno,br=stat(b,&sb),be=errno;
+        if(ar||br){if(!ar||!br||ae!=ENOENT||be!=ENOENT)die("default regression object presence");continue;}
+        if(!S_ISREG(sa.st_mode)||!S_ISREG(sb.st_mode)||sa.st_size<=0||sb.st_size<=0)die("default regression object extent");
+        reg_equal(oldout,newout,leaf,0);bound_file(f,"equal-object",a);objects++;
+    }
+    if(!objects)die("default regression requires real compiled objects");
+    if(ferror(f)||fclose(f))die("regression identity write");
+    printf("TOOLS_COMPILE_DEFAULT_REGRESSION\tPASS\tshard=%ld\tsources=%d\tobjects=%d\n",shard,rows,objects);return 0;
+}
 int main(int argc,char **argv) {
+    if(argc>1&&!strcmp(argv[1],"--default-regression"))return default_regression(argc,argv);
     if(argc==4&&!strcmp(argv[1],"--boundaries")) {
         char script[4400];path(script,sizeof script,argv[2],"tests/tools-compile-boundaries.py");
         char *av[]={"python3",script,argv[2],argv[3],0};execvp(av[0],av);die("boundary runner exec");
     }
     int update=argc==4&&!strcmp(argv[1],"--register");
     int listing=argc==3&&!strcmp(argv[1],"--shards");
-    if(argc!=4&&!listing)die("usage: ROOT NEW_OUT SHARD | --shards ROOT | --register ROOT NEW_REGISTRY");
+    explicit_consumer=argc==8&&!strcmp(argv[4],"--compiler")&&!strcmp(argv[6],"--models");
+    if(argc!=4&&!listing&&!explicit_consumer)die("usage: ROOT NEW_OUT SHARD [--compiler ABS_PRODUCT --models ABS_PKG] | --shards ROOT | --register ROOT NEW_REGISTRY");
     if(!realpath(argv[update||listing?2:1],root))die("root");
     char *end;long shard=0;
     if(!update&&!listing){errno=0;shard=strtol(argv[3],&end,10);if(errno||!*argv[3]||*end||shard<0)die("shard");}
@@ -160,13 +365,18 @@ int main(int argc,char **argv) {
         if(tx_copy(work,sizeof work,argv[2],strlen(argv[2])))die("output path bound");
     }
     path(product,sizeof product,root,"unisacc.com");
+    if(explicit_consumer) {
+        if(argv[5][0]!='/'||argv[7][0]!='/'||!realpath(argv[5],product)||!realpath(argv[7],models))die("absolute compiler and models paths required");
+        if(strchr(product,'\n')||strchr(product,'\t')||strchr(models,'\n')||strchr(models,'\t'))die("identity path cannot be represented");
+        native_consumer=native_product(product);
+    }
     char *gv[]={"git","ls-files","-s","-z","--","tools",0},why[1024];np_result list;
     if(np_run(gv,root,0,3,&list,why,sizeof why)||list.rc||list.errn)die("git inventory failed");
     size_t capacity=0;for(size_t j=0;j<list.outn;j++)if(!list.out[j])capacity++;
     if(!capacity||capacity>2147483640u||capacity>((size_t)-1)/sizeof(char *))die("inventory allocation bound");
     sources=calloc(capacity,sizeof *sources);links=calloc(capacity,sizeof *links);
-    category=calloc(capacity,sizeof *category);diagnostics=calloc(capacity,sizeof *diagnostics);reason=calloc(capacity,sizeof *reason);
-    if(!sources||!links||!category||!diagnostics||!reason)die("allocation");
+    category=calloc(capacity,sizeof *category);diagnostics=calloc(capacity,sizeof *diagnostics);reason=calloc(capacity,sizeof *reason);semantic=calloc(capacity,sizeof *semantic);
+    if(!sources||!links||!category||!diagnostics||!reason||!semantic)die("allocation");
     size_t at=0;while(at<list.outn){char *s=list.out+at;size_t n=0;while(n<list.outn-at&&s[n])n++;
         if(n==list.outn-at)die("unterminated inventory");char *tab=memchr(s,'\t',n);if(!tab)die("inventory fields");
         char *p=tab+1;size_t pn=n-(size_t)(p-s);
@@ -186,9 +396,11 @@ int main(int argc,char **argv) {
     if(shard>=shards)die("shard outside inventory");
     expectations();
     if(mkdir(work,0700))die("new output required");
+    if(explicit_consumer)identity();
     int first=(int)shard*8,last=count-first>8?first+8:count;
-    int pid[8],n=0,failed=0,compile_pass=0,known_failures=0,raw_failures=0,scanner_inputs=0,scanner_failures=0,debt=0,negative=0;fflush(stdout);fflush(stderr);
+    int pid[8],pending[8]={0};long deadlines[8];int n=0,failed=0,compile_pass=0,known_failures=0,raw_failures=0,scanner_inputs=0,scanner_failures=0,debt=0,negative=0;fflush(stdout);fflush(stderr);
     for(int i=first;i<last;i++){
+        long started=explicit_consumer?sy_now_ms():0;if(started<0)die("monotonic clock");compile_deadline=started+40000;deadlines[n]=compile_deadline;
         int p=fork();
         if(p<0){fprintf(stderr,"tools-compile: fork: %s\n",strerror(errno));failed++;break;}
         if(!p)_exit(compile(i));
@@ -204,7 +416,17 @@ int main(int argc,char **argv) {
             fprintf(stderr,"tools-compile: wait: %s\n",strerror(e));failed++;
             if(e==ECHILD)break;
         }
-        if(got<0||!WIFEXITED(st)||(WEXITSTATUS(st)&&WEXITSTATUS(st)!=3))failed++;
+        if(got>=0&&WIFEXITED(st)&&WEXITSTATUS(st)==4)pending[j]=1;
+        else if(got<0||!WIFEXITED(st)||(WEXITSTATUS(st)&&WEXITSTATUS(st)!=3))failed++;
+    }
+    /* No capture can hold up np_run's in-flight compile-child cleanup. */
+    for(int j=0;j<n;j++)if(pending[j]){
+        int i=first+j;compile_deadline=deadlines[j];
+        if(!debt_identity(i)){failed++;continue;}
+        char p[4400],leaf[80];tx_snprintf(leaf,sizeof leaf,"%04d.result",i);path(p,sizeof p,work,leaf);
+        size_t rn;char *r=cx_read(p,&rn);if(!r||rn<5||memcmp(r,"FAIL\t",5))die("deferred result");
+        FILE *f=fopen(p,"wb");if(!f)die("deferred result open");
+        if(fwrite("XFAIL\t",1,6,f)!=6||fwrite(r+5,1,rn-5,f)!=rn-5)die("deferred result write");free(r);if(fclose(f))die("deferred result close");
     }
     char table[4400];path(table,sizeof table,work,"results.tsv");FILE *f=fopen(table,"wb");if(!f)die("results table");
     for(int i=first;i<last;i++){
