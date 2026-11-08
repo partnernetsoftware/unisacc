@@ -392,7 +392,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 棘轮 | 13 项，以 `tools/ratchets.cx` 末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、§2.2 |
 | 事实表 | 事实→生成器（须带 `--check`）→产物 | `exec/facts/`、§2.4 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与普查 | 源码/模型表示普查与 Linux 两片模块字节账已核；其它四片 whole-o 重放镜像相等，模块来源仍 DOING；link-map 边车方案保留 | `tools/module-byte-map.cx`、[两片模块摘要与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
+| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；仅工具预算 +243 待批，不称全仓绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布（历史）
@@ -409,6 +409,31 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ### 9.5 优化线索
 
 2026-11-03 实测的优化线索表（libc 闭包、整树 SID、生成代码性能、资源段、执行内核/loader 体积等）已登记到各版计划与 `agentwork/items.tsv`，此处不复写；入口见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)，旧表全文见 §10 的完整旧版。
+
+### 9.6 0.0.47 逻辑分布普查结论（2026-11-08，本机实测）
+
+产品身份仍为 `f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82`，5,818,178 B、0.0.47、NOT_RELEASE。driver 四个正式批次20/0，六目标最小镜像格式、裸-c、链接并执行23、默认-run23均有实际证据；本次统计工具变化未重建或刷新产品。公开版本同名不迁移CI资格。
+
+源码测量冻结于 `ce710d583`（合入远程 net-deps 后；随后 `99e24cd8a` 仅 PRD 变化）。`logic-distribution --sources` 重新实跑：2320个已跟踪普通源码，根为src/cx/exec/seed/weights/tools，总14,096,270 B。表5,771,926 B（40.9464%）、生成器源码1,450,565 B（10.2904%）、经典机制源码6,873,779 B（48.7631%）；该口径的已跟踪网络表示源文件为0，不等于产品没有网络。工具也在此分母，不能把源码字节或branch token冒充语义决策占比。
+
+当前产品包另实跑40个kind N模型，raw总4,833,789 B：生成动作程序2,886,663 B（59.7184%）、选择器1,757,294 B（36.3544%）、常量189,035 B（3.9107%）、头797 B；精确守恒。压缩模型1,315,916 B、资源241,070 B、元数据108,280 B合为包1,665,266 B，未按raw比例虚摊压缩段。源码/模型/压缩包是三个分母，不相加；生成器源码也不等于生成动作程序。
+
+六片逐模块明细和SHA链见[普查结果](research/c47-logic-distribution-20261108/summary.md)。下表为字节；MODULE是发射上下文来源，非排他数据所有权；各片SHARED均为0，只代表本次没有核到多源融合区间。
+
+| 目标 | 解压映像 | MODULE | UNKNOWN代码 | SYNTHETIC | HEADER | DATA/ALIGN | RESOURCE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| lnx/x86_64 | 1880862 | 1803567 | 36795 | 411 | 176 | 39913 | 0 |
+| lnx/arm64 | 1889006 | 1793808 | 52860 | 1324 | 176 | 40838 | 0 |
+| osx/x86_64 | 2410978 | 2177228 | 148248 | 6941 | 1020 | 77541 | 0 |
+| osx/arm64 | 3071458 | 2811856 | 169396 | 10160 | 1020 | 79026 | 0 |
+| win/x86_64 外PE | 2664960 | 2379225 | 235958 | 0 | 2048 | 47217 | 512 |
+| win/arm64 | 3369472 | 3074840 | 246224 | 0 | 1024 | 47384 | 0 |
+
+六个mapper均真实exit0；独立默认-run探针逐行重算、核原映像SHA也exit0。Win x64先核bare 2663424 B，再验证正文整体平移1024 B、HEADER增加1024 B及版本资源512 B，得到外PE 2664960 B；整个APE余尾不算该切片。Mach83单元中的forward stub单列SYNTHETIC。后改写、函数区间外和未覆盖lower规则保留UNKNOWN，不把守恒等同100%归因。
+
+D1数据结论：模型大半raw字节是生成动作程序，选择器只是其中一部分；这些表示计数没有证明“以网消除逻辑”。机制代码、跨目标合同与独立于参考C的语义oracle仍须分别验证；本次逐字节对拍和来源一致性不是独立语义oracle。whole观察的快核目前依赖out私有HOSTCC/ASM诊断原型及实际execution身份，不声称已迁入共享sim或形成可移植产品能力。
+
+全部新增工具及最终参数模式均已正式登记实跑，包含8个encoder双段profile；静态和动态错配拒绝保留。最终工具行数实测585文件83,279行，对已合入的cc基线83,036仍超243行；未改基线，扩额待答复。局部功能和登记通过不称全仓棘轮/--all/六宿主CI通过；首次超时、静态profile拒绝与未知状态均保留。
 
 ## 10. 归档索引
 
