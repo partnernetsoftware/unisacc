@@ -346,6 +346,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话） |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
+| `work/`、`release/`、`roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 任务看板与账（work/，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整四组地图见 [docs/REPO-MAP.md](docs/REPO-MAP.md) |
 
 <a id="current-plans"></a>
 ## 9. 当前状态与路线
