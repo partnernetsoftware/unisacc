@@ -13,9 +13,18 @@ static void fresh(const char *dir,const char *name,const void *p,long n){
  int fd=sy_open_new(path,0600);if(fd<0)bad("exclusive file create");int wr=sy_write_all(fd,p,n),cl=sy_close(fd);if(wr||cl)bad("output write");
 }
 static void append(char *ledger,long *used,const char *s,long n){if(n<0||n>1048576-*used)bad("ledger bound");memcpy(ledger+*used,s,n);*used+=n;}
+static void put32(unsigned char *p,unsigned long v){for(int i=0;i<4;i++)p[i]=(unsigned char)(v>>(8*i));}
+static unsigned long attrs_valid(const unsigned char *at,unsigned long an,int count,int required){
+ if(an<4)bad("attribute header");unsigned long ac=u32(at);if(ac>1000000||an!=4+ac*9)bad("attribute extent/tail");
+ unsigned char *sorted=malloc(ac?ac*9:1),*tmp=malloc(ac?ac*9:1);if(!sorted||!tmp)bad("attribute allocation");if(ac)memcpy(sorted,at+4,ac*9);
+ for(unsigned long i=0;i<ac;i++){unsigned long u=u32(at+4+i*9);if(u>=(unsigned long)count||(required>=0&&u!=(unsigned long)required))bad("attribute unit");}
+ for(int key=8;key>=0;key--){unsigned long bins[256]={0},off[256],sum=0;for(unsigned long i=0;i<ac;i++)bins[sorted[i*9+key]]++;for(int i=0;i<256;i++){off[i]=sum;sum+=bins[i];}for(unsigned long i=0;i<ac;i++){unsigned long j=off[sorted[i*9+key]]++;memcpy(tmp+j*9,sorted+i*9,9);}unsigned char *swap=sorted;sorted=tmp;tmp=swap;}
+ for(unsigned long i=1;i<ac;i++)if(!memcmp(sorted+(i-1)*9,sorted+i*9,9))bad("duplicate attribute record");free(sorted);free(tmp);return ac;
+}
+
 int main(int argc,char **argv){
- if(argc!=3)bad("usage PHASE NEW_OUTDIR");struct stat st;if(stat(argv[1],&st))bad(errno==ENOENT?"phase missing":"phase stat");
- if(!S_ISREG(st.st_mode)||st.st_size<8||st.st_size>WS_BYTES)bad("phase extent");size_t n;unsigned char *b=(unsigned char *)cx_read(argv[1],&n);if(!b||n!=(size_t)st.st_size)bad("phase read");
+ int splice=argc==6&&!strcmp(argv[1],"--splice-stub");if(argc!=3&&!splice)bad("usage PHASE NEW_OUTDIR | --splice-stub PHASE STUB_CARRIER STUB_ABS_PATH NEW_OUTDIR");const char *input=argv[splice?2:1],*directory=argv[splice?5:2];struct stat st;if(stat(input,&st))bad(errno==ENOENT?"phase missing":"phase stat");
+ if(!S_ISREG(st.st_mode)||st.st_size<8||st.st_size>WS_BYTES)bad("phase extent");size_t n;unsigned char *b=(unsigned char *)cx_read(input,&n);if(!b||n!=(size_t)st.st_size)bad("phase read");
  unsigned long fn=u32(b),an=u32(b+4);if(!fn||an<4||fn>n-8||an!=n-8-fn)bad("phase framing/tail");
  unsigned char *fr=b+8,*at=fr+fn;unsigned long ac=u32(at);if(ac>1000000||an!=4+ac*9)bad("attribute extent/tail");
  char names[WS_MAX][4096],ph[WS_MAX][65];long flo[WS_MAX],fhi[WS_MAX],plo[WS_MAX],pn[WS_MAX];int count=0;long pos=0;
@@ -28,20 +37,33 @@ int main(int argc,char **argv){
   flo[count]=pos;fhi[count]=pos+4+z;plo[count]=po;pn[count]=len;hash(fr+po,len,ph[count]);count++;pos+=4+z;
  }
  if(!count||pos!=(long)fn)bad("empty frames/tail");
- /* Sort a private fixed-record copy for duplicate detection; preserve source order. */
- unsigned char *sorted=malloc(ac?ac*9:1);if(!sorted)bad("attribute allocation");if(ac)memcpy(sorted,at+4,ac*9);
- for(unsigned long i=0;i<ac;i++)if(u32(at+4+i*9)>=(unsigned long)count)bad("attribute unit");
- /* Nine radix passes avoid quadratic behavior for the million-record format bound. */
- unsigned char *tmp=malloc(ac?ac*9:1);if(!tmp)bad("attribute sort allocation");
- for(int key=8;key>=0;key--){unsigned long bins[256]={0},off[256],sum=0;for(unsigned long i=0;i<ac;i++)bins[sorted[i*9+key]]++;for(int i=0;i<256;i++){off[i]=sum;sum+=bins[i];}for(unsigned long i=0;i<ac;i++){unsigned long j=off[sorted[i*9+key]]++;memcpy(tmp+j*9,sorted+i*9,9);}unsigned char *swap=sorted;sorted=tmp;tmp=swap;}
- for(unsigned long i=1;i<ac;i++)if(!memcmp(sorted+(i-1)*9,sorted+i*9,9))bad("duplicate attribute record");free(sorted);free(tmp);
- long cn=12+an+fn;unsigned char *carrier=malloc(cn);if(!carrier)bad("carrier allocation");memcpy(carrier,"USLATTRT",8);memcpy(carrier+8,b+4,4);memcpy(carrier+12,at,an);memcpy(carrier+12+an,fr,fn);
+ ac=attrs_valid(at,an,count,-1);
+ char stubh[65]={0};
+ if(splice){
+  if(count>=WS_MAX)bad("splice frame capacity");long nl=strlen(argv[4]);if(nl<1||nl>=4096||argv[4][0]!='/')bad("stub absolute path");
+  for(long j=0;j<nl;j++)if((unsigned char)argv[4][j]<32||(unsigned char)argv[4][j]==127)bad("stub path control");for(int j=0;j<count;j++)if(!strcmp(names[j],argv[4]))bad("duplicate stub path");
+  struct stat ss;if(stat(argv[3],&ss))bad(errno==ENOENT?"stub carrier missing":"stub carrier stat");if(!S_ISREG(ss.st_mode)||ss.st_size<16||ss.st_size>WS_BYTES)bad("stub carrier extent");size_t sn;unsigned char *sb=(unsigned char *)cx_read(argv[3],&sn);if(!sb||sn!=(size_t)ss.st_size||memcmp(sb,"USLATTRT",8))bad("stub carrier identity");
+  unsigned long san=u32(sb+8);if(san>sn-12)bad("stub attribute extent");unsigned long sac=attrs_valid(sb+12,san,2,1);long spn=sn-12-san;unsigned char *sp=sb+12+san;if(spn<=8||memcmp(sp,"UNITOK1\0",8))bad("stub UNITOK1 identity");hash(sb,sn,stubh);
+  if(sac>1000000-ac)bad("splice attribute capacity");long sf=8+nl+spn;if(sf>WS_BYTES-(long)fn||12+sf+fn+4+9*(ac+sac)>WS_BYTES)bad("splice byte capacity");
+  unsigned char *joined=malloc(fn+sf),*joined_at=malloc(4+9*(ac+sac));if(!joined||!joined_at)bad("splice allocation");long head=fhi[0];memcpy(joined,fr,head);put32(joined+head,4+nl+spn);put32(joined+head+4,nl);memcpy(joined+head+8,argv[4],nl);memcpy(joined+head+8+nl,sp,spn);memcpy(joined+head+sf,fr+head,fn-head);
+  /* Match dv_fwd_splice: group original records by unit, preserving in-unit order. */
+  long used_at=4;put32(joined_at,ac+sac);
+  for(int unit=0;unit<count;unit++){
+   for(unsigned long j=0;j<ac;j++)if(u32(at+4+j*9)==(unsigned long)unit){put32(joined_at+used_at,unit?unit+1:0);memcpy(joined_at+used_at+4,at+8+j*9,5);used_at+=9;}
+   if(unit==0){if(sac)memcpy(joined_at+used_at,sb+16,sac*9);used_at+=sac*9;}
+  }
+  if(used_at!=4+9*(ac+sac))bad("splice attribute conservation");
+  for(int j=count;j>1;j--){memcpy(names[j],names[j-1],4096);memcpy(ph[j],ph[j-1],65);flo[j]=flo[j-1]+sf;fhi[j]=fhi[j-1]+sf;plo[j]=plo[j-1]+sf;pn[j]=pn[j-1];}
+  memcpy(names[1],argv[4],nl+1);hash(sp,spn,ph[1]);flo[1]=head;fhi[1]=head+sf;plo[1]=head+8+nl;pn[1]=spn;count++;fr=joined;fn+=sf;at=joined_at;ac+=sac;an=used_at;free(sb);
+ }
+ long cn=12+an+fn;unsigned char *carrier=malloc(cn);if(!carrier)bad("carrier allocation");memcpy(carrier,"USLATTRT",8);put32(carrier+8,an);memcpy(carrier+12,at,an);memcpy(carrier+12+an,fr,fn);
  char phaseh[65],frameh[65],attrh[65],carrierh[65];hash(b,n,phaseh);hash(fr,fn,frameh);hash(at,an,attrh);hash(carrier,cn,carrierh);
  char *ledger=malloc(1048576),line[8192];long used=0;if(!ledger)bad("ledger allocation");
  int z=snprintf(line,sizeof line,"WHOLE_STAGE_MATERIAL\tversion=1\tstatus=PREPARED\tclaim=material-only\tphase_sha=%s\tphase_bytes=%ld\tframes_sha=%s\tframes_bytes=%lu\tattrs_sha=%s\tattrs_bytes=%lu\tattributes=%lu\tcarrier_sha=%s\tcarrier_bytes=%ld\n",phaseh,(long)n,frameh,fn,attrh,an,ac,carrierh,cn);if(z<0||z>=sizeof line)bad("ledger header");append(ledger,&used,line,z);
+ if(splice){z=snprintf(line,sizeof line,"SPLICE\tstub_carrier_sha=%s\tstub_path=%s\tinserted_unit=1\toriginal_frames=%d\tclaim=material-only\n",stubh,argv[4],count-1);if(z<0||z>=sizeof line)bad("splice ledger");append(ledger,&used,line,z);}
  for(int i=0;i<count;i++){z=snprintf(line,sizeof line,"FRAME\t%d\tpath=%s\tframe_lo=%ld\tframe_hi=%ld\tpayload_lo=%ld\tpayload_bytes=%ld\tpayload_sha=%s\n",i,names[i],flo[i],fhi[i],plo[i],pn[i],ph[i]);if(z<0||z>=sizeof line)bad("ledger row");append(ledger,&used,line,z);}
  z=snprintf(line,sizeof line,"COMPLETE\tstatus=PREPARED\tframes=%d\tattributes=%lu\tcarrier_sha=%s\n",count,ac,carrierh);if(z<0||z>=sizeof line)bad("ledger completion");append(ledger,&used,line,z);
- if(strlen(argv[2])>8000)bad("output directory path");if(sy_mkdir(argv[2],0700))bad("exclusive new directory");
- fresh(argv[2],"frames.bin",fr,fn);fresh(argv[2],"attrs.bin",at,an);fresh(argv[2],"units-input.carrier",carrier,cn);fresh(argv[2],"material.tsv",ledger,used);
+ if(strlen(directory)>8000)bad("output directory path");if(sy_mkdir(directory,0700))bad("exclusive new directory");
+ fresh(directory,"frames.bin",fr,fn);fresh(directory,"attrs.bin",at,an);fresh(directory,"units-input.carrier",carrier,cn);fresh(directory,"material.tsv",ledger,used);
  char lh[65];hash(ledger,used,lh);printf("WHOLE_STAGE_MATERIAL\tstatus=PREPARED\tframes=%d\tattributes=%lu\tphase_sha=%s\tcarrier_sha=%s\tledger_sha=%s\n",count,ac,phaseh,carrierh,lh);return 0;
 }
