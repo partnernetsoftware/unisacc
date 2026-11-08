@@ -148,6 +148,21 @@ static void job_paths(const char *id,SpJob j,char dir[4400],char output[4400],ch
 static void verify_job(const char *id,int depth);
 static int job_index(SpJob j){int at=j.tool>=0?j.tool:5+j.recipe*3+j.phase;if(SP_JOB_COUNT>1024||at<0||at>=SP_JOB_COUNT)die("job-recipe-capacity");return at;}
 static void dependency(np_buf *b,const char *id,int depth){verify_job(id,depth+1);SpJob j=find_job(id);int at=job_index(j);char dir[4400],out[4400],receipt[4400];job_paths(id,j,dir,out,receipt);row(b,id,job_receipt_sha[at]);row(b,out,job_output_sha[at]);}
+static void verify_job_argv(const char *id,const char *dir){
+ /* Recheck the complete command evidence against the sole argv builder.
+  * Compare bounded byte spans directly; no second argv serialization buffer. */
+ char *v[20],evidence[4400];int n=0;
+ if(sp_job_command(root,jobs,cc,bound,id,v,&n)||n<1||n>=20||v[n])die("job-command-bound");
+ path(evidence,dir,"command.argv.tsv");SpObservedFile *argv=sp_observe(evidence,1);size_t pos=0;
+ for(int i=0;i<n;i++){
+  clean(v[i]);char key[32];int z=snprintf(key,sizeof key,"arg-%d\t",i);size_t len=strlen(v[i]);
+  if(z<0||(size_t)z>=sizeof key||(size_t)z>argv->n-pos||memcmp(argv->bytes+pos,key,(size_t)z))die("job-command-argv-mismatch");
+  pos+=(size_t)z;
+  if(len>argv->n-pos||memcmp(argv->bytes+pos,v[i],len))die("job-command-argv-mismatch");
+  pos+=len;if(pos==argv->n||argv->bytes[pos++]!='\n')die("job-command-argv-mismatch");
+ }
+ if(pos!=argv->n)die("job-command-argv-mismatch");
+}
 /* Use the producer's canonical verifier for this job and its actual ancestors.
  * check_context begins a fresh canonical endpoint; within it shared ancestors
  * are observed once, never reused across the before/after source controls. */
@@ -156,6 +171,7 @@ static void verify_job(const char *id,int depth){
  SpJob j=find_job(id);int at=job_index(j);if(job_seen[at])return;
  if(sp_job_verified(id))die("job-not-verified");
  char dir[4400],out[4400],receipt[4400];job_paths(id,j,dir,out,receipt);
+ verify_job_argv(id,dir);
  digest(out,job_output_sha[at]);digest(receipt,job_receipt_sha[at]);job_seen[at]=1;
 }
 /* Consumer output remains separate from SOURCE_CTX. Phase receipts are honest

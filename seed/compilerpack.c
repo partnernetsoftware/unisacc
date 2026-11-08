@@ -152,7 +152,6 @@ int main(int argc, char **argv) {
             for (int j = 0; j < 7; j++) {
                 const char *name = T->stage[j][1], *outf = T->stage[j][3], *mod = T->stage[j][4];
                 if (!strcmp(name, "e4") && !strcmp(T->spec[k].opt, "none")) continue;
-                if (!strncmp(T->spec[k].suffix, "object/", 7) && !strcmp(name, "prune")) continue;
                 if (!strcmp(name, "e4") && !strcmp(T->spec[k].opt, "O1")) mod = o1r;
                 if (!strncmp(T->spec[k].suffix, "object/", 7) && !strcmp(name, "elf")) outf = "object-v1";
                 add(&rows, route, name, T->stage[j][2], outf, mod);
