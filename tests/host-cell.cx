@@ -2,23 +2,27 @@
  *
  *   sh ./unisacc.com tests/host-cell.cx -- ROOT CANDIDATE_SHA
  *
- * CANDIDATE_SHA is sha256(ROOT/unisacc.com) as the release published it, in strict
+ * CANDIDATE_SHA is the caller's explicit expected pp_product_digest(ROOT), in strict
  * lowercase hex.  On a host this product builds for, the file is hashed here and
  * compared: PASS or MISMATCH (rc 0 / 1).  The product version is read from the one
  * authority, exec/facts/limits.tsv (PRODUCT_VERSION), never from a literal.
  * On any other host the same line is printed with status=NOT_RUN and a reason, and
  * the exit code is 3 -- a host that did not run is never PASS.
+ * ROOT and CANDIDATE_SHA are mandatory; no sidecar supplies an implicit candidate.
+ * The actual product is hashed before the host gate; a foreign-host digest mismatch is
+ * refused (rc 2), so NOT_RUN cannot hide a wrong binding. Linux keeps MISMATCH (rc 1).
  * Malformed arguments are a refusal (rc 2), not NOT_RUN.
  * Line: HOST_CELL<TAB>HOST<TAB>sha=<64hex><TAB>version=<...><TAB>status=<...> */
 #pragma unisa use cxlib.productpkg
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.hostid
 #pragma unisa use text.text
 static char hc_root[4096];
 static void hc_die(const char *s) { fprintf(stderr, "host-cell: REFUSE %s errno=%d\n", s, errno); exit(2); }
 static int hc_hex64(const char *s) {
     int i;
-    if (!s) return 0;
+    if (!s || strlen(s) != 64) return 0;
     for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
     return s[64] == 0;
 }
@@ -50,58 +54,25 @@ static int hc_version(char *out, int cap) {
     free(s);
     return vlen > 0;
 }
-/* the recorded product digest from ROOT/unisacc.com.build.json ("product_digest") */
-static int hc_recorded(char *out, int cap) {
-    char p[4400], *s;
-    size_t n = 0, at = 0;
-    if (snprintf(p, sizeof p, "%s/unisacc.com.build.json", hc_root) >= (int)sizeof p) hc_die("path-bound");
-    if (!(s = cx_read(p, &n))) return 0;
-    for (at = 0; at + 16 < n; at++) {
-        if (memcmp(s + at, "\"product_digest\"", 16)) continue;
-        at += 16;
-        while (at < n && s[at] != ':') at++;
-        if (at >= n) break;
-        at++;
-        while (at < n && (s[at] == ' ' || s[at] == '\t')) at++;
-        if (at >= n || s[at] != '"') break;
-        at++;
-        if (at + 64 >= n) break;
-        {   int q, ok = 1;
-            for (q = 0; q < 64; q++) {
-                char c = s[at + q];
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { ok = 0; break; }
-            }
-            if (!ok) break;
-        }
-        if (cap < 65) hc_die("digest-cap");
-        for (int q = 0; q < 64; q++) out[q] = s[at + q];
-        out[64] = 0;
-        free(s);
-        return 1;
-    }
-    free(s);
-    return 0;
-}
 int main(int argc, char **argv) {
-    char expect[65];
-    const char *rp = argc >= 2 ? argv[1] : ".";
-    if (argc > 3 || !realpath(rp, hc_root)) hc_die("usage [ROOT] [CANDIDATE_SHA]");
-    if (argc == 3) {
-        if (!hc_hex64(argv[2])) hc_die("sha must be 64 lowercase hex");
-        memcpy(expect, argv[2], 65);
-    } else if (!hc_recorded(expect, (int)sizeof expect)) hc_die("no-argument and no-recorded-product-digest");
+    char expect[65], got[65];
+    if (argc != 3) hc_die("explicit ROOT and CANDIDATE_SHA required");
+    if (!hc_hex64(argv[2])) hc_die("sha must be 64 lowercase hex");
+    if (!realpath(argv[1], hc_root)) hc_die("canonical root");
+    memcpy(expect, argv[2], sizeof expect);
+    if (pp_product_digest(hc_root, got)) hc_die("product-digest");
 #if defined(__linux__) && defined(__x86_64__)
     {
-        char ver[64], got[65];
-        if (pp_product_digest(hc_root, got)) hc_die("product-digest");
+        char ver[64];
         if (!hc_version(ver, (int)sizeof ver)) hc_die("no-product-version-row");
         printf("HOST_CELL\tlnx/x86_64\tsha=%s\tversion=%s\texpected=%s\tstatus=%s\n", got, ver, expect,
                strcmp(got, expect) ? "MISMATCH" : "PASS");
         return strcmp(got, expect) ? 1 : 0;
     }
 #else
+    if (strcmp(got, expect)) hc_die("candidate-digest-mismatch");
     printf("HOST_CELL\t%s\tsha=%s\tversion=UNMEASURED\texpected=%s\tstatus=NOT_RUN\treason=no-native-build-for-this-host\n",
-           __x86_64__ ? "other-x86_64" : "other-host", expect, expect);
+           tn_self() ? tn_self() : "UNKNOWN", got, expect);
     return 3;
 #endif
 }
