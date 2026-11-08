@@ -1,0 +1,65 @@
+/* tools/check-precommit-freeze.cx -- tools/precommit.cx 冻结窗口闸的检查(夹具在 sy_tmpdir 下的临时 git 仓)。
+ *
+ *   sh ./unisacc.com tools/check-precommit-freeze.cx
+ *
+ * 1) 冻结有效且 staged 命中产品输入前缀 → 拒绝(rc1,提示『冻结中』);2) UNISACC_INTEGRATOR=owner → 通过;
+ * 3) deadline 已过期 → 通过(不死锁);4) 无 freeze.tsv → 通过;5) 冻结有效但只 staged tools/ → 通过;
+ * 6) freeze.tsv 列数不对 → 拒绝。输出 PASS/FAIL 与 CHECK_PRECOMMIT_FREEZE<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char td[320], root[400];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-precommit-freeze.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-precommit-freeze.%s\n", name); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    return rc;
+}
+static int run2(const char *freeze, const char *stage, const char *env, char *out, size_t cap) {
+    char cmd[2800], w[1200];
+    if (freeze[0]) { if (cx_fmt(w, sizeof w, "printf '%s' > agentwork/freeze.tsv && ", freeze)) return 99; } else w[0] = 0;
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && rm -rf exec tools agentwork && mkdir -p exec tools agentwork && echo x > '%s' && %s"
+        "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+        td, stage, w, env, root, root)) return 99;
+    return sh(cmd, out, cap);
+}
+static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 100000), n, tx_len(n, 100)) >= 0; }
+
+int main(void) {
+    char out[4096], cwd[400]; char *o = 0; size_t n = 0;
+    {   char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+        mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
+        mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
+    if (cx_fmt(td, sizeof td, "%s/precommit-freeze-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
+    {   char cmd[700]; if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t", td) || sh(cmd, 0, 0)) { ck(0, "git-init"); return 1; } }
+    const char *FAR = "sid1\\tbase1\\tcdx\\t4102444800\\texec src seed\\n";
+    const char *PAST = "sid1\\tbase1\\tcdx\\t1000000000\\texec src seed\\n";
+    int rc;
+    rc = run2(FAR, "exec/a.tsv", "", out, sizeof out);
+    ck(rc == 1 && has(out, "冻结中"), "frozen-product-path-refused");
+    rc = run2(FAR, "exec/a.tsv", "UNISACC_INTEGRATOR=cdx", out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0"), "integrator-passes");
+    rc = run2(FAR, "exec/a.tsv", "UNISACC_INTEGRATOR=other", out, sizeof out);
+    ck(rc == 1, "other-owner-refused");
+    rc = run2(PAST, "exec/a.tsv", "", out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0"), "expired-freeze-passes");
+    rc = run2("", "exec/a.tsv", "", out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0"), "no-freeze-file-passes");
+    rc = run2(FAR, "tools/a.tsv", "", out, sizeof out);
+    ck(rc == 0 && has(out, "blocked=0"), "unfrozen-path-passes-during-freeze");
+    rc = run2("sid1\\tbase1\\tcdx\\n", "exec/a.tsv", "", out, sizeof out);
+    ck(rc == 1 && has(out, "malformed"), "malformed-freeze-refused");
+    {   char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
+    sy_printf("CHECK_PRECOMMIT_FREEZE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

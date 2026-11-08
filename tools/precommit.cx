@@ -13,7 +13,11 @@
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use sys.time
 
+static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static char *slurp(char **argv, long *n) {
     int ofd, pid; long cap = 1 << 16, r; char *b = mm_alloc(cap);
     *n = 0;
@@ -26,7 +30,7 @@ static char *slurp(char **argv, long *n) {
     }
     { int ex = 0, code = 0, sig = 0;
       sy_close(ofd);
-      if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code != 0) { mm_free(b); *n = 0; return 0; }
+      if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code < 0 || code > slurp_okrc) { mm_free(b); *n = 0; return 0; }
     }
     b[*n] = 0;
     return b;
@@ -80,6 +84,49 @@ static int new_tools(void) {
         mm_free(blob);
     }
     mm_free(names); mm_free(batches); return blocked;
+}
+
+
+/* 冻结窗口闸(fable 咨询 2026-11-08):agentwork/freeze.tsv 存在且未过期时,staged 路径命中冻结前缀、
+ * 且 UNISACC_INTEGRATOR 不等于 owner 的提交被拒。列:candidate_sid base_commit owner deadline_epoch_s paths(空格分隔)。
+ * 冻结是有界事件:deadline 过期即不拦;tools/ tests/ plans/ agentwork/ 不在 paths 内,永不受影响。 */
+static int freeze_gate(void) {
+    size_t zn = 0; char *z = (char *)cx_read("agentwork/freeze.tsv", &zn), *f[6]; long fn = 0, now, dl = 0, i;
+    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
+    char *names, line[1200], *p; int blocked = 0, nf = 0; const char *who;
+    if (!z) return 0;                                   /* 无标记文件=无冻结(ENOENT) */
+    for (p = z; *p; ) {                                  /* 取第一条非注释行 */
+        char *e = p; while (*e && *e != '\n') e++;
+        if (*p != '#' && e > p && (size_t)(e - p) < sizeof line) { mm_copy(line, sizeof line, p, (size_t)(e - p)); line[e - p] = 0; break; }
+        p = *e ? e + 1 : e; line[0] = 0;
+    }
+    if (!line[0]) return 0;
+    f[nf++] = line;
+    for (p = line; *p && nf < 6; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
+    if (nf != 5) { sy_eprintf("precommit: freeze.tsv malformed (need 5 columns)\n"); return 1; }
+    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
+    now = sy_wall_s();   /* 墙钟秒;sy_now_ms 是单调钟,不能与 epoch 截止时间比 */
+    if (i == 0 || now >= dl) return 0;                   /* 过期即失效,不死锁 */
+    who = sy_env("UNISACC_INTEGRATOR");
+    if (who && tx_eqz(who, f[2])) return 0;
+    names = slurp(dv, &fn); if (!names) return 0;
+    for (long at = 0; at < fn; ) {
+        long nl = tx_len(names + at, fn - at); char *q;
+        if (nl <= 0) break;
+        for (q = f[4]; *q; ) {
+            char *s = q, *t; long pl;
+            while (*q && *q != ' ') q++;
+            pl = q - s; t = s; (void)t;
+            if (pl > 0 && nl > pl && names[at + pl] == '/' && tx_prefix(names + at, nl, s, pl)) {
+                sy_eprintf("precommit: 冻结中(candidate %s,至 epoch %s):产品输入 %.*s 经集成者 patch 提交\n", f[0], f[3], (int)nl, names + at);
+                blocked++; break;
+            }
+            while (*q == ' ') q++;
+        }
+        at += nl + 1;
+    }
+    mm_free(names);
+    return blocked;
 }
 
 int main(void) {
@@ -151,32 +198,32 @@ int main(void) {
           }
       }
     }
+    blocked += freeze_gate();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();
-    { int product_cx = 0;
-      for (at = 0; at < sn; ) {
-          long l = tx_len(names + at, sn - at);
-          if (!tx_prefix(names + at, l, "tools/", 6) && !tx_prefix(names + at, l, "tests/", 6)) product_cx = 1;
-          at += l + 1;
-      }
-      /* These paths were already excluded from the row blocker below. Their
-       * support, metadata and source-classification gates above still run. */
-      if (!product_cx) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked); return blocked ? 1 : 0; }
-    }
-    rows = slurp(rv, &rn);
+    /* 不再因「只改 tools/tests」而短路:cxtrunc/cxapis/outdep 本来就面向 tools/tests(fable 咨询 2026-11-08)。 */
+    { char rp[1200]; const char *wt = sy_env("GIT_WORK_TREE"); int ex;   /* 工作树里有没有棘轮:夹具仓(GIT_WORK_TREE)无则跳过 */
+      if (cx_fmt(rp, sizeof rp, "%s%stools/ratchets.cx", wt ? wt : "", wt ? "/" : "")) { sy_eprintf("precommit: path too long\n"); return 1; }
+      ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
+      if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
+      if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); return blocked ? 1 : 0; } }
+    slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
         const char *r = rows + at;
         if (l > 2 && r[0] == ' ' && r[1] == ' ' && (s = tx_chr(r, l, ':')) > 0 && s + 2 < l) {
             long p = s + 2, q, a2;
+            int soft = tx_prefix(r + 2, l - 2, "cxlibc:", 7) || tx_prefix(r + 2, l - 2, "cxraw:", 6);   /* printf 类对 tools/tests 仍豁免 */
+            int byfile = tx_prefix(r + 2, l - 2, "outdep:", 7);   /* outdep 行以批次名开头,路径在 "in PATH" 里 */
             if (tx_prefix(r + p, l - p, "module ", 7)) p += 7;
             q = p; while (q < l && r[q] != ' ') q++;
             for (a2 = 0; a2 < sn; ) {
                 long nl = tx_len(names + a2, sn - a2);
                 if (nl <= 0) break;
-                if (tx_same(names + a2, nl, r + p, q - p)) {
-                    if (!tx_prefix(names + a2, nl, "tools/", 6) && !tx_prefix(names + a2, nl, "tests/", 6)) {
+                if (tx_same(names + a2, nl, r + p, q - p) || (byfile && tx_find(r, l, names + a2, nl) >= 0)) {
+                    int toolish = tx_prefix(names + a2, nl, "tools/", 6) || tx_prefix(names + a2, nl, "tests/", 6);
+                    if (!toolish || !soft) {
                         sy_eprintf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1); blocked++;
                     }
                     break;
