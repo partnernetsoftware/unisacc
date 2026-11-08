@@ -33,7 +33,7 @@ NET 与 TABLE 分别作为 MODEL 以 `RUN MODEL INPUT SRCPATH` 调用，绝不�
 OLD_PRODUCT 继续用 embedded 旧包。产品前四字节为 ELF magic 时直接 exec，否则保留 APE 的
 `sh PRODUCT` 路径；实际 argv 原样存证。每产品仍限 25 秒，五案例乘六目标共 30 片，
 只比较跨产品输出图像，不能把该比较当成目标平台原生执行资格。
-参考旧 0.0.47 产品的独立片为
+参考旧 0.0.48 产品的独立片为
 `reference ROOT A B OUT CASE TARGET --reference-product ABS_LEGACY [--new-models SAME_B_PKG]`。
 它要求同版本检查器 prepare 的正式 material 及既有 A/B 片，复用同一固定源码绝对路径、
 目标和编译参数，只执行第三 legacy 通道一次（25 秒），不重编 A/B；没有历史 harness 例外。
@@ -41,7 +41,7 @@ OLD_PRODUCT 继续用 embedded 旧包。产品前四字节为 ELF magic 时直�
 保留为 REJECT，图像不存在时明确记 ABSENT，不填伪造 SHA。传输失败不作语义拒绝。
 `reference-summary ROOT A B OUT --reference-product ABS_LEGACY [--new-models SAME_B_PKG]`
 只读真实 30 片，输出每案例/六目标的 legacy/A/B SHA 及 legacy 对 A 的 SAME/DIFF/REJECT。
-同源 B 与 A 的逐字节相同始终是强断言；旧 0.0.47 仅作参考，不能迁移候选资格。
+同源 B 与 A 的逐字节相同始终是强断言；旧 0.0.48 仅作参考，不能迁移候选资格。
 
 | Stage | Declaration sources already used | Remaining handwritten construction |
 |---|---|---|
