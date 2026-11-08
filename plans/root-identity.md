@@ -9,8 +9,8 @@
 
 <!-- identity-begin -->
 product_kind	ape1
-product_digest	f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82
-unisacc.com	f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82	5818178
+product_digest	3d0e237dae4ca2c277c1692dfa4c3e8fdcd58637e914ed7ddd2eb18d51263645
+unisacc.com	3d0e237dae4ca2c277c1692dfa4c3e8fdcd58637e914ed7ddd2eb18d51263645	6425630
 <!-- identity-end -->
 
 上块的 `product_kind=ape1` 表示 `product_digest` 是整个 APE 的 SHA256；split 布局才是成员集合身份。
