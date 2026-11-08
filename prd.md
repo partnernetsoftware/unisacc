@@ -85,6 +85,7 @@
 #### 2.2 测试（棘轮、门禁、批次）
 
 | 动作 | 现成用法 | 说明 |
+| 核对队友报告里的事实 | `sh ./unisacc.com tools/report-verify.cx -- CLAIMS.tsv`；校验 `tools/check-report-verify.cx` | commit/tsvcount/receipts/sha256/ratchets 五类断言逐条核实，输出 OK/MISMATCH/MISSING，有 MISMATCH 退出 1 |
 |---|---|---|
 | 查模块层向与包边界 | `sh ./unisacc.com tools/check-cx-layers.cx [PRODUCT]`（`-- --fixtures` 跑夹具） | 编号层 L0–L3 直接 `use`，向上越层即红；`ext/` 是包层：产品层（`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`、`cx/cx0`、`cx/workspace` 与 `tests/cx-module-freeze.tsv` 的 core 模块）`use` 到 `ext/` 即红；core 模块文件集合按冻结表只许减（新增行即红、行无文件亦红） |
 | core 导出面棘轮 | `sh ./unisacc.com tests/coreapi.cx -- --check`（`--write` 下调，`--fixtures` 跑夹具） | 26 个冻结 core 模块的每个非 static 定义各占一行：新符号红、行缺失红、签名变动红、`DEPRECATED-ALIAS` 的调用方文件数超上限红；`core_run` 一行标 `DUAL-IMPL linked=cx/sys/kernel.cx`，两条链接由 `cx-core-run-diff` 逐字节比对 |
@@ -137,6 +138,7 @@
 #### 2.4 生成器（事实表→生成器→表）
 
 | 动作 | 现成用法 | 说明 |
+| 切片 NN 迁移清单 | `sh ./unisacc.com tools/slice-migration-gen.cx -- --write\|--check`；校验 `tools/check-slice-migration-gen.cx` | 由 `plans/unit-text.tsv` + `plans/slice-units.tsv` 生成 `plans/slice-nn-migration.md`；`--check` 核两表键 1:1、源文件存在、文档与重生成文本一致 |
 |---|---|---|
 | 表单元里的 SBOUT 字节反解成文本 | `sh ./unisacc.com tools/decode-sbout.cx [-- FILE] [--min N]`（批次 `decode-sbout`） | 只读；把一段 `["SBOUT",N]` 还原成 `@bytes` 标签要携带的字符串，含 `\0`/`\xNN` 转义；默认扫 `exec/pp/*.tsv`，`--min` 按段长过滤；校验 `tools/check-decode-sbout.cx` |
 | 网表裸立即数换成常量引用 | `sh ./unisacc.com tools/lit-const.cx -- FILE OLD NEW [--apply]`（批次 `lit-const`） | OLD/NEW 是整条动作原文，只换完全相同的那条，找不到退出 1；配合 `tools/facts-gen.cx` 派生常量 + manifest 绑定，改后用现装 `out/rtl3/ctx/jobs/tool-{gen,tbl,net}` 重打相关网，JSON 与网 `cmp` 全等才算行为不变；校验 `tools/check-lit-const.cx` |
@@ -154,6 +156,7 @@
 #### 2.5 诊断（度量、盘点、普查）
 
 | 动作 | 现成用法 | 说明 |
+| 模型输入影响面投影（遗留 Python） | `python3 tools/affected-model-inputs.py CONTEXT_OR_TAR [--check]`；数据 `tools/affected-model-inputs.tsv` | 不运行生成器，仅由 source-package gen 读记录推影响的模型输入；遗留 Python 依赖，待 cx 化 |
 |---|---|---|
 | 普查红批次 | `sh ./unisacc.com tools/census.cx -- $PWD out/census` | 无材料批次逐个实跑找回归 |
 | 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
@@ -175,23 +178,23 @@
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前发布 0.0.46 = c46-3 APE `884adfef…`（6,163,990 字节），实跑取数如下；pkg.bin 1,663,382 字节（P4：40 模型、1823 阶段路由行、77 资源）。win/arm64 不在 APE 的 gzip 切片段里，作为独立发布资产 `slice-win-arm64`（3,325,440 字节）随发，见 [plans/release-notes-0.0.46.md](plans/release-notes-0.0.46.md)。
+用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前发布 0.0.47 = APE `fde2db18…`（6,215,778 字节），实跑取数如下；pkg.bin 1,665,282 字节（P4：40 模型、1823 阶段路由行、77 资源）。win/arm64 不在 APE 的 gzip 切片段里，作为独立发布资产 `slice-win-arm64`（3,367,424 字节）随发，见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
 
 ```
-unisacc.com  6,163,990 B  sha 884adfef…
-├─ head: PE 镜像 + shell 启动器      2,631,168 (42.6%)  win/x86_64 原样存；DOS stub 放 sh 启动器
-├─ slice lnx/x86_64                    369,493 ( 5.9%)  gzip → 解出 1,864,326 B
-├─ slice lnx/arm64                     348,402 ( 5.6%)  gzip → 解出 1,868,374 B
-├─ slice osx/x86_64                    380,888 ( 6.1%)  gzip → 解出 2,394,466 B
-├─ slice osx/arm64                     375,282 ( 6.0%)  gzip → 解出 3,038,434 B
-├─ (padding 合计)                      395,342 ( 6.4%)
-└─ package (P4)                      1,663,382 (26.9%)  40 模型 + 1823 阶段路由行 + 77 资源
+unisacc.com  6,215,778 B  sha fde2db18…
+├─ head: PE 镜像 + shell 启动器      2,663,424 (42.8%)  win/x86_64 原样存；DOS stub 放 sh 启动器
+├─ slice lnx/x86_64                    372,017 ( 5.9%)  gzip → 解出 1,880,766 B
+├─ slice lnx/arm64                     351,487 ( 5.6%)  gzip → 解出 1,884,814 B
+├─ slice osx/x86_64                    383,660 ( 6.1%)  gzip → 解出 2,410,978 B
+├─ slice osx/arm64                     379,590 ( 6.1%)  gzip → 解出 3,071,458 B
+├─ (padding 合计)                      400,318 ( 6.4%)
+└─ package (P4)                      1,665,282 (26.7%)  40 模型 + 1823 阶段路由行 + 77 资源
    ├─ stage routing (D rows)            104,052
-   ├─ models                          1,315,090        40 模型（deflate）
+   ├─ models                          1,316,990        40 模型（deflate）
    └─ resources                         244,209        77 资源（@hdr/* 69 个头文件 227,391；最大 cx-flat.h 101,204）
 ```
 
-六片 = 四片 gzip 的 Unix 编译器 + 外层 win/x86_64 PE 头 + 独立资产 win/arm64 切片，共用一份 P4 模型包。
+六片 = 四片 gzip 的 Unix 编译器 + 外层 win/x86_64 PE 头 + 独立资产 win/arm64 切片（`slice-win-arm64` 3,367,424 B，不计入上述 APE 字节），共用一份 P4 模型包。
 
 <a id="pipeline-design"></a>
 ## 4. 架构：模型流水线
@@ -298,15 +301,15 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 | 层 | 覆盖行数 | 内容 |
 |---|---|---|
-| contract | 165 | 语言/流/网合同（正反例、拒绝） |
-| interfaces | 189 | 流间接口、模块接口、L0 接口 |
+| contract | 169 | 语言/流/网合同（正反例、拒绝） |
+| interfaces | 199 | 流间接口、模块接口、L0 接口 |
 | negative | 32 | 具名拒绝、坏输入、语义级坏包 |
-| product | 31 | 产品端到端（编译/运行/镜像字节） |
+| product | 32 | 产品端到端（编译/运行/镜像字节） |
 | library | 15 | 库/ABI（libunisacc、头布局） |
 | platform | 6 | 跨平台（六目标写程序；六 ISA 切片需求与现状缺口见 §1） |
 | properties | 9 | 优化/property 性质 |
 
-以上为 2026-11-07 在克隆实跑 `sh ./unisacc.com tests/run.cx -- --list` 的取数，覆盖行合计 447；`PLAN` 行：batches=460（implemented 448 / planned 12）、implemented_coverage=436、unresolved=6、`qualification=NOT_EXECUTED`（`--list` 不执行批次）。数字随注册表变化，以 `--list` 为准。
+以上为 2026-11-08 在克隆实跑 `sh ./unisacc.com tests/run.cx -- --list` 的取数，覆盖行合计 462；`PLAN` 行：metadata_valid=1、batches=550（implemented 538 / planned 12）、implemented_coverage=451、unresolved=6、unprepared_batches=167、`qualification=NOT_EXECUTED`（`--list` 不执行批次）。数字随注册表变化，以 `--list` 为准。
 
 ### 7.4 19 张域矩阵（tests/*-domain-matrix.tsv）
 
@@ -350,26 +353,22 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前节点（2026-11-07）：**0.0.46 已正式发布**（tag `v0.0.46`，main 提交 `e01714f441`；APE sha256 `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`，6,163,990 字节；原生 CI 运行 `42353236985` 同候选 QUALIFIED 42/0）。全批 s8b 终态 PASS230 / FAIL27 / UNKNOWN4 / NOT-AVAIL162 / KNOWN-GAP20，**NOT_QUALIFIED**；Windows 两格 stdio/stream 仅 portable 子集，完整 POSIX 未声称。事实见 [plans/release-notes-0.0.46.md](plans/release-notes-0.0.46.md)、[plans/s8b-terminal.md](plans/s8b-terminal.md)。
+当前版本：**0.0.47 已于 2026-11-08 正式发布**（tag `v0.0.47`，提交 `e8309f0488`；GitHub Release 非 draft 非 prerelease；APE sha256 `fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe`，6,215,778 字节；冻结产品源 `7b98ec2c06`；同候选六目标原生 CI 运行 `42408207540` 为 42/0）。全批 s9：445 批 = 380 PASS + 0 真 FAIL + 32 KNOWN-GAP + 10 INFRA + 23 NOT-AVAIL，**NOT_QUALIFIED**。上一版 0.0.46 同日早些时候发布。事实见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
 
-下一版 **0.0.47，主题「可信」**：里程碑、车道规则、风险与发布判据见 [plans/v0.0.47-unisacc.md](plans/v0.0.47-unisacc.md)；当前任务与状态以 `work/items.tsv`、进度以 `work/ledger.tsv` 为准，本节不再复述条目状态。
+下一版：**0.0.48**，计划见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)；任务状态以 `work/items.tsv`、进度以 `work/ledger.tsv` 为准，本节不复述条目状态。
 
-```text
-0.0.47「可信」（六个里程碑见 plans/v0.0.47-unisacc.md）
-├─ 全批资格：把 FAIL/UNKNOWN/NOT-AVAIL 收敛，六格原生同候选证据，逐片固定点
-├─ 三层布局与 CORE-MIN：loader(APE 头) / ISA 切片(只留 syscall/ABI/ffi/dl 对接) / 模型(UNIPKG1 包)；实测依据 plans/layout-measure-2026-11-05.md，试点 plans/slice-shrink.md
-├─ 「TSV 表达动态逻辑」范式：事实表→生成器(带 --check)→表→网，见 §4.2、§6
-└─ 其余方向与 DRAFT 项见 work/items.tsv；历史方向见 plans/v0.0.46-unisacc.md
-```
-
+三个最大阻塞：
+- 全批资格：32 KNOWN-GAP / 10 INFRA / 23 NOT-AVAIL 未收敛，全批仍 NOT_QUALIFIED。
+- Windows 两格 stdio/stream 仅 portable 子集，完整 POSIX 与六目标全部原生验证未声称。
+- 已披露的既有缺陷与推迟项（A5 conflicting-function-types、TAPE-END、对象编译合同债等）：限制清单见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md) 的「已知限制」与 [README.md](README.md) 的 Known limitations 表，此处不复写。
 <a id="memory-palace"></a>
 ### 9.2 记忆宫殿（索引；此处是唯一索引，正文各节只指向本表）
 
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 任务队列 | `work/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `work/ledger.tsv` | [WORKFLOW.md](WORKFLOW.md) |
-| 当前发布 | 0.0.46 已发布（见 §9.1）；c46-3 资格不迁移到后续候选 | [发布说明](plans/release-notes-0.0.46.md)、[s8b 终态](plans/s8b-terminal.md) |
-| 下一版 | 0.0.47「可信」；c47-1冻结7b98/c84全131、六片、两代FP及独立WinARM已实跑，最终APE fde2db18；私有draft四资产回读全同，CI42408207540已触发待终态；负例45/14 FAIL不改绿，s9另轨 | [里程碑](plans/v0.0.47-unisacc.md)、[构造配方与当前证据](plans/c47-1-build-recipe.md) |
+| 当前发布 | 0.0.47 已发布（见 §9.1）；0.0.46 同日早些时候发布；旧候选资格不迁移 | [0.0.47 发布说明](plans/release-notes-0.0.47.md) |
+| 下一版 | 0.0.48 | [计划](plans/v0.0.48-unisacc.md)、`work/items.tsv` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
@@ -385,27 +384,15 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 0.0.43 历史见 [plans/release-0.0.43.md](plans/release-0.0.43.md)；0.0.45 公开预发布见 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)；逐版身份见 §10 归档索引。
 
 ### 9.4 路线
-
-- **0.0.43 / 0.0.44 / 0.0.45**：已收口（历史，计划见 [plans/v0.0.43.md](plans/v0.0.43.md)、[plans/v0.0.44.md](plans/v0.0.44.md)、[plans/v0.0.45.md](plans/v0.0.45.md)）。
-- **0.0.46**：已于 2026-11-07 正式发布，本体计划 [plans/v0.0.46-unisacc.md](plans/v0.0.46-unisacc.md)；agent harness（cx-csih）仍归 csih 车道，见 [plans/v0.0.46.md](plans/v0.0.46.md)。
-- **0.0.47**：主题「可信」，见 [plans/v0.0.47-unisacc.md](plans/v0.0.47-unisacc.md)。
+- **0.0.43 – 0.0.47**：已收口（历史计划见 `plans/v0.0.4x*.md`，当前发布见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)）；agent harness（cx-csih）仍归 csih 车道。
+- **0.0.48**：见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)。
+- **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
 <a id="optimization-leads"></a>
-### 9.5 优化线索（2026-11-03 实测来源，已登记到计划）
+### 9.5 优化线索
 
-| 线索 | 实测 | 去向 |
-|---|---|---|
-| libc 闭包被编进每个对象 | 60B 的 host.c：elf 推理 305ms、lower 135ms（empty.c 2.5ms）；host.o 227,704B 对 empty.o 3,016B，67 个对象各带一份相同的 printf 函数体 | C44-LIBCUNIT-01 |
-| 整树 SID 让无关 job 一起作废 | 改一个头文件只影响 pp 一张网，却要全链重跑约 12 分钟（131 job 9m13s + pack 2m35s） | C44-IDENTITY-JOB-01 |
-| 生成代码运行慢 | 同一 8MB SHA-256：生成代码 0.939s、宿主 0.068s（约 14 倍）、AF_ALG 0.091s | C44-PROFILE-01 |
-| 模型解析也是固定成本 | `-funit` 热缓存后仍约 60ms 在模型解析（sh_apply）；解压由 modelcache 覆盖（`-o` 路线 8f8197c81b，对象路线 d1a6f36d06） | C44-PROFILE-01 之后定刀 |
-| 资源段是最大单块 | 单流去重后资源段占 56.3%（830,037B，69 个头文件），7 个单流产物 8,271,508→1,474,726B（5.6 倍） | C44-SIZE-01、C45-STAGEBENCH-01 |
-| 执行内核很小，周边很大 | UNIKERN 7,144B（arm64 7,096B），而 loader 模板每 ISA 约 406KB（boot 102,886 + base 302,684），重复 libc/sha + O0 runtime | C45-LOADER-01（目标 30–60KB/ISA） |
-| FTRIM 读头文件原文 | 预处理等价的头文件改写会改变裁剪结果 | C44-FTRIM-ANCHOR-01 |
-| 模块符号链接农场 | 约 170 个链接只为"use 只在旁边找"而存在；包根解析已实现（c3ee8ee247） | C44-CX-ROOT-01（待产品安装） |
-| 所有权只靠运行期 | 函数内源码检查覆盖不到产品（产品仅 60 个局部 owner），所有权在字段与包装分配器 | C44-CX-OWN-01 → C45-CX-OWN-C-01 |
-| 文档里的产品事实手写 | 一天内过期两次 | C44-FACTS-DOC-01 |
+2026-11-03 实测的优化线索表（libc 闭包、整树 SID、生成代码性能、资源段、执行内核/loader 体积等）已登记到各版计划与 `work/items.tsv`，此处不复写；入口见 [plans/v0.0.48-unisacc.md](plans/v0.0.48-unisacc.md)，旧表全文见 §10 的完整旧版。
 
 ## 10. 归档索引
 
