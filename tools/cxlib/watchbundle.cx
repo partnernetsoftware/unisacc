@@ -1,0 +1,49 @@
+/* Explicit bounded concatenation transport. No implicit legacy-mode fallback.
+ * Execution metadata is content-bound, not independently attested. */
+#pragma unisa module watchbundle
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+static long wb_events;
+long wb_event_count(void){return wb_events;}
+static void wb_die(const char *why){fprintf(stderr,"watch-bundle: %s\n",why);exit(2);}
+static void *wb_alloc(size_t n){void *p=malloc(n?n:1);if(!p)wb_die("allocation");return p;}
+static long wb_num(const char *s){if(!s||!*s||(s[0]=='0'&&s[1]))wb_die("noncanonical number");long n=0;for(;*s;s++){if(*s<'0'||*s>'9'||n>(9223372036854775807L-(*s-'0'))/10)wb_die("number range");n=n*10+*s-'0';}return n;}
+static int wb_hex(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+static char *wb_value(char *s,const char *key){size_t n=strlen(key);if(strncmp(s,key,n)||s[n]!='=')wb_die("field order/name");return s+n+1;}
+static long wb_nv(char *s,const char *key){return wb_num(wb_value(s,key));}
+static char *wb_hv(char *s,const char *key){char *v=wb_value(s,key);if(!wb_hex(v))wb_die("SHA syntax");return v;}
+static void wb_hash(const char *s,size_t n,char h[65]){if(sy_sha256_hex(s,n,h)&&cx_sha256_hex(s,n,h))wb_die("SHA failure");}
+static void wb_text(const char *s,size_t n){if(!n||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))wb_die("text framing");}
+static char *wb_load(const char *path,size_t cap,size_t *n,struct stat *st){if(lstat(path,st)||!S_ISREG(st->st_mode)||st->st_size<0||(unsigned long)st->st_size>cap)wb_die("file type/size");char *s=cx_read(path,n);struct stat after;if(!s||*n!=(size_t)st->st_size||lstat(path,&after)||after.st_dev!=st->st_dev||after.st_ino!=st->st_ino||after.st_size!=st->st_size)wb_die("read identity");wb_text(s,*n);return s;}
+/* Only the parsing copy is modified; output body bytes remain byte-for-byte. */
+static int wb_fields(char *line,char **f,int cap){int n=1;f[0]=line;for(char *p=line;*p;p++)if(*p=='\t'){*p=0;if(n==cap)wb_die("field count");f[n++]=p+1;}return n;}
+static char *wb_line(char **p){char *s=*p,*e=strchr(s,'\n');if(!e)wb_die("missing line");*e=0;*p=e+1;return s;}
+static void wb_same(const char *a,const char *b){if(strcmp(a,b))wb_die("identity mismatch");}
+static void wb_base(const char *s){if(!*s||strchr(s,'/')||strstr(s,"..")||!strcmp(s,"execution.tsv"))wb_die("basename");for(;*s;s++)if(!((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||(*s>='0'&&*s<='9')||*s=='.'||*s=='_'||*s=='-'))wb_die("basename character");}
+typedef struct wb_frame {long id,end;} wb_frame;
+static wb_frame *wb_frames;static size_t wb_fc,wb_fn;
+static size_t wb_index(long id,size_t cap){return ((unsigned long)id*11400714819323198485UL)&(cap-1);}
+static wb_frame *wb_frame_find(long id,int create){
+ if(id<=0)wb_die("frame id");
+ if(create&&(!wb_fc||wb_fn*2>=wb_fc)){size_t nc=wb_fc?wb_fc*2:16;wb_frame *a=wb_alloc(nc*sizeof *a);memset(a,0,nc*sizeof *a);for(size_t i=0;i<wb_fc;i++)if(wb_frames[i].id){size_t j=wb_index(wb_frames[i].id,nc);while(a[j].id)j=(j+1)&(nc-1);a[j]=wb_frames[i];}free(wb_frames);wb_frames=a;wb_fc=nc;}
+ if(!wb_fc)wb_die("undefined frame");size_t j=wb_index(id,wb_fc);while(wb_frames[j].id&&wb_frames[j].id!=id)j=(j+1)&(wb_fc-1);if(create){if(wb_frames[j].id)wb_die("duplicate frame");wb_frames[j].id=id;wb_fn++;}else if(!wb_frames[j].id)wb_die("undefined frame");return wb_frames+j;
+}
+char *wb_watch(const char *manifest,size_t *bytes,char manifest_sha[65]){
+ const size_t hard=134217728;size_t mn,en;struct stat ms,es,ss[2];char *m=wb_load(manifest,65536,&mn,&ms);wb_hash(m,mn,manifest_sha);char *mp=m,*f[32];int nf=wb_fields(wb_line(&mp),f,32);if(nf!=14)wb_die("manifest header fields");wb_same(f[0],"WATCH_BUNDLE");wb_same(f[1],"version=1");wb_same(f[2],"watch_format=compact-v1");wb_same(f[3],"claim=STATE_OBSERVATION_ONLY");char d[65],in[65],cfg[65],out[65],eh[65];strcpy(d,wb_hv(f[4],"delta_sha"));strcpy(in,wb_hv(f[5],"input_sha"));strcpy(cfg,wb_hv(f[6],"config_sha"));strcpy(out,wb_hv(f[7],"output_sha"));long outn=wb_nv(f[8],"output_bytes"),evlim=wb_nv(f[9],"part_event_limit"),blim=wb_nv(f[10],"part_byte_limit"),parts=wb_nv(f[11],"parts");strcpy(eh,wb_hv(f[12],"execution_sha"));long exn=wb_nv(f[13],"execution_bytes");if(evlim<1||evlim>1000000||blim<1||blim>67108864||parts<1||parts>2||exn>1048576)wb_die("limits");
+ char dir[8192],path[16384];if(strlen(manifest)>=sizeof dir)wb_die("path length");strcpy(dir,manifest);char *slash=strrchr(dir,'/');if(slash)slash[1]=0;else strcpy(dir,"");if(cx_fmt(path,sizeof path,"%sexecution.tsv",dir))wb_die("path length");char *execution=wb_load(path,1048576,&en,&es);char h[65];wb_hash(execution,en,h);if(en!=(size_t)exn||strcmp(h,eh))wb_die("execution bytes/SHA");free(execution);
+ char names[2][1024],shas[2][65];long lens[2],counts[2],first[2],last[2];long sum=0,total=0;for(int k=0;k<parts;k++){nf=wb_fields(wb_line(&mp),f,32);if(nf!=8)wb_die("PART fields");wb_same(f[0],"PART");if(wb_num(f[1])!=k)wb_die("PART order");char *name=wb_value(f[2],"file");wb_base(name);if(strlen(name)>=sizeof names[k])wb_die("basename length");strcpy(names[k],name);strcpy(shas[k],wb_hv(f[3],"sha"));lens[k]=wb_nv(f[4],"bytes");counts[k]=wb_nv(f[5],"events");first[k]=wb_nv(f[6],"first_seq");last[k]=wb_nv(f[7],"last_seq");if(lens[k]>blim||counts[k]>evlim||(!counts[k]&&(parts!=1||first[k]||last[k]))||(counts[k]&&(first[k]!=total+1||last[k]!=total+counts[k])))wb_die("PART ranges");sum+=lens[k];total+=counts[k];}
+ nf=wb_fields(wb_line(&mp),f,32);if(nf!=5||*mp)wb_die("manifest footer/trailing");wb_same(f[0],"COMPLETE");if(wb_nv(f[1],"parts")!=parts||wb_nv(f[2],"events")!=total||wb_nv(f[3],"segments_bytes")!=sum)wb_die("manifest totals");char rh[65];strcpy(rh,wb_hv(f[4],"records_sha"));if(total>2000000||total>2*evlim||mn+en+(size_t)sum>hard||mn+en+(size_t)sum>(size_t)blim*2)wb_die("total budget");
+ char *result=wb_alloc((size_t)sum+1024);size_t used=0,body_start;int hn=snprintf(result,1024,"WRITE_EVENTS\tversion=1\tdelta_sha=%s\tinput_sha=%s\toutput_sha=%s\toutput_bytes=%ld\tclaim=STATE_OBSERVATION_ONLY\tconfig_sha=%s\twatch_format=compact-v1\n",d,in,out,outn,cfg);if(hn<0||hn>=1024)wb_die("header size");used=hn;body_start=used;long seq=0;free(wb_frames);wb_frames=0;wb_fc=0;wb_fn=0;
+ for(int k=0;k<parts;k++){
+  if(cx_fmt(path,sizeof path,"%s%s",dir,names[k]))wb_die("path length");size_t sn;char *s=wb_load(path,67108864,&sn,&ss[k]);if(sn!=(size_t)lens[k])wb_die("segment bytes");if((ss[k].st_dev==es.st_dev&&ss[k].st_ino==es.st_ino)||(ss[k].st_dev==ms.st_dev&&ss[k].st_ino==ms.st_ino)||(k&&ss[k].st_dev==ss[0].st_dev&&ss[k].st_ino==ss[0].st_ino))wb_die("reused inode");wb_hash(s,sn,h);wb_same(h,shas[k]);char *p=s,*lf=strchr(p,'\n');size_t headn=lf-p+1;char *copy=wb_alloc(headn+1);memcpy(copy,p,headn);copy[headn-1]=0;nf=wb_fields(copy,f,32);if(nf!=10)wb_die("segment header fields");wb_same(f[0],"WATCH_SEGMENT");wb_same(f[1],"version=1");if(wb_nv(f[2],"part")!=k)wb_die("segment index");wb_same(wb_hv(f[3],"delta_sha"),d);wb_same(wb_hv(f[4],"input_sha"),in);wb_same(wb_hv(f[5],"config_sha"),cfg);wb_same(wb_hv(f[6],"output_sha"),out);if(wb_nv(f[7],"output_bytes")!=outn)wb_die("output size");wb_same(f[8],"watch_format=compact-v1");wb_same(f[9],"claim=STATE_OBSERVATION_ONLY");free(copy);p+=headn;long local=0;
+  while(*p){lf=strchr(p,'\n');size_t ln=lf-p+1;copy=wb_alloc(ln+1);memcpy(copy,p,ln);copy[ln-1]=0;nf=wb_fields(copy,f,32);
+   if(!strcmp(f[0],"SEGMENT_COMPLETE")){if(nf!=5||wb_nv(f[1],"part")!=k||wb_nv(f[2],"events")!=local||wb_nv(f[3],"first_seq")!=first[k]||wb_nv(f[4],"last_seq")!=last[k]||p+ln!=s+sn||local!=counts[k])wb_die("segment footer");free(copy);p+=ln;break;}
+   if(!strcmp(f[0],"FRAME")){if(nf!=5||!wb_hex(f[3]))wb_die("FRAME fields");long id=wb_num(f[2]),end=wb_num(f[4]);wb_frame_find(id,1)->end=end;}
+   else if(!strcmp(f[0],"WATCHC")){if(nf<9||nf>25)wb_die("WATCHC fields");wb_num(f[2]);wb_frame *frame=wb_frame_find(wb_num(f[3]),0);if(wb_num(f[4])>frame->end)wb_die("cursor range");for(int j=5;j<9;j++)wb_num(f[j]);for(int j=9;j<nf;j++){const char *v=f[j];if(*v=='-'){v++;if(!*v||*v=='0')wb_die("signed value");}if(strcmp(f[j],"-9223372036854775808"))wb_num(v);}}
+   else wb_die("record kind");if(wb_num(f[1])!=++seq)wb_die("global sequence");local++;if(local>counts[k])wb_die("record excess");memcpy(result+used,p,ln);used+=ln;free(copy);p+=ln;
+  }
+  /* A body ending without the mandatory footer cannot satisfy the count. */
+  if(p!=s+sn||local!=counts[k]||!strstr(s,"\nSEGMENT_COMPLETE\t"))wb_die("missing footer");free(s);
+ }
+ if(seq!=total)wb_die("record total");wb_hash(result+body_start,used-body_start,h);wb_same(h,rh);int tail=snprintf(result+used,1024,"COMPLETE\tevents=%ld\n",total);if(tail<0||tail>=1024||used+(size_t)tail>hard)wb_die("view budget");used+=tail;result[used]=0;wb_events=total;*bytes=used;free(wb_frames);wb_frames=0;wb_fc=wb_fn=0;free(m);return result;
+}
