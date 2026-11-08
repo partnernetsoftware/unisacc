@@ -1,0 +1,396 @@
+/* Planning and isolated ad-hoc runtime tests only. Never Developer-ID signs,
+ * submits to Apple, staples, uploads or mutates input artifacts. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+static char out[4096];
+static long deadline;
+static void die(const char *s) {
+  fprintf(stderr, "macos-signing: REFUSE %s errno=%d\n", s, errno);
+  exit(2);
+}
+static void path(char *p, size_t cap, const char *a, const char *b) {
+  if (cx_fmt(p, cap, "%s/%s", a, b))
+    die("path bound");
+}
+static int hex(const char *s, int n) {
+  if (strlen(s) != (size_t)n)
+    return 0;
+  for (int i = 0; i < n; i++)
+    if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
+      return 0;
+  return 1;
+}
+static char *readfile(const char *p, size_t *n) {
+  struct stat st;
+  if (lstat(p, &st) || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+      st.st_size > 134217728)
+    die("bounded regular input");
+  char *b = cx_read(p, n);
+  if (!b || *n != (size_t)st.st_size)
+    die("read changed");
+  return b;
+}
+static void digest(const char *p, char h[65]) {
+  size_t n;
+  char *b = readfile(p, &n);
+  cx_sha256_hex(b, n, h);
+  free(b);
+}
+static void checkhash(const char *p, const char *want) {
+  char h[65];
+  if (!hex(want, 64))
+    die("SHA syntax");
+  digest(p, h);
+  if (strcmp(h, want))
+    die("input SHA mismatch");
+}
+static void put(const char *p, const void *b, size_t n) {
+  int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+  if (fd < 0)
+    die("exclusive output");
+  size_t at = 0;
+  while (at < n) {
+    ssize_t z = write(fd, (const char *)b + at, n - at);
+    if (z < 0 && errno == EINTR)
+      continue;
+    if (z <= 0)
+      die("write");
+    at += z;
+  }
+  if (close(fd))
+    die("close");
+}
+static void fresh(const char *p) {
+  if (mkdir(p, 0700) || !realpath(p, out))
+    die("new output directory");
+}
+static void image(const char *p, int arm) {
+  size_t n;
+  unsigned char *b = (unsigned char *)readfile(p, &n);
+  if (n < 32 || memcmp(b, "\xcf\xfa\xed\xfe", 4) || b[4] != (arm ? 12 : 7) ||
+      b[5] || b[6] || b[7] != 1 || b[12] != 2 || b[13] || b[14] || b[15])
+    die("MachO executable CPU mismatch");
+  free(b);
+}
+static void models(const char *p) {
+  size_t n;
+  char *b = readfile(p, &n);
+  PackageFooter f;
+  if (!packagefooter_locate_bytes((unsigned char *)b, n, &f))
+    die("models footer");
+  free(b);
+}
+static int command(char **av, const char *tag, int cap) {
+  if (deadline - sy_now_ms() < (long)(cap + 1) * 1000) {
+    fprintf(stderr, "PENDING\tfull child budget unavailable\n");
+    exit(3);
+  }
+  char p[4400], name[150], why[1024], status[100];
+  np_buf args = {0};
+  for (int i = 0; av[i]; i++) {
+    char key[30];
+    if (cx_fmt(key, sizeof key, "arg%d", i))
+      die("argv key");
+    np_puts(&args, key);
+    np_puts(&args, "\t");
+    np_puts(&args, av[i]);
+    np_puts(&args, "\n");
+  }
+  if (cx_fmt(name, sizeof name, "%s.argv.tsv", tag))
+    die("tag");
+  path(p, sizeof p, out, name);
+  put(p, args.p, args.n);
+  free(args.p);
+  np_result r = {0};
+  long start = sy_now_ms();
+  if (np_run(av, 0, 0, cap, &r, why, sizeof why))
+    die(why);
+  if (cx_fmt(name, sizeof name, "%s.stdout", tag))
+    die("tag");
+  path(p, sizeof p, out, name);
+  put(p, r.out, r.outn);
+  if (cx_fmt(name, sizeof name, "%s.stderr", tag))
+    die("tag");
+  path(p, sizeof p, out, name);
+  put(p, r.err, r.errn);
+  if (cx_fmt(name, sizeof name, "%s.status.tsv", tag) ||
+      cx_fmt(status, sizeof status, "rc\t%d\nresidue\t%d\nelapsed_ms\t%ld\n",
+             r.rc, r.residue, sy_now_ms() - start))
+    die("status");
+  path(p, sizeof p, out, name);
+  put(p, status, strlen(status));
+  int rc = r.residue ? 125 : r.rc;
+  np_free(&r);
+  return rc;
+}
+static void adhoc(char **argv, int unsigned_kernel) {
+  int arm = !strcmp(argv[2], "osx/arm64");
+  if (!arm && strcmp(argv[2], "osx/x86_64"))
+    die("Mac target required");
+  checkhash(argv[3], argv[4]);
+  checkhash(argv[5], argv[6]);
+  image(argv[3], arm);
+  models(argv[5]);
+  fresh(argv[7]);
+  char copy[4400], p[4400], identifier[100], envmodel[4500];
+  path(copy, sizeof copy, out, "signed-fixture");
+  size_t n;
+  char *b = readfile(argv[3], &n);
+  put(copy, b, n);
+  free(b);
+  if (chmod(copy, 0700))
+    die("private executable mode");
+  const char *plist =
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC "
+      "\"-//Apple//DTD PLIST 1.0//EN\" "
+      "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist "
+      "version=\"1.0\"><dict/></plist>\n";
+  if (unsigned_kernel)
+    plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC "
+            "\"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist "
+            "version=\"1.0\"><dict><key>com.apple.security.cs.allow-unsigned-"
+            "executable-memory</key><true/></dict></plist>\n";
+  path(p, sizeof p, out, "entitlements.plist");
+  put(p, plist, strlen(plist));
+  if (cx_fmt(identifier, sizeof identifier, "org.unisacc.adhoc.%s.%s",
+             arm ? "arm64" : "x86_64",
+             unsigned_kernel ? "unsignedkernel" : "empty"))
+    die("identifier");
+  char *sign[] = {"/usr/bin/codesign",
+                  "--force",
+                  "--sign",
+                  "-",
+                  "--options",
+                  "runtime",
+                  "--timestamp=none",
+                  "--identifier",
+                  identifier,
+                  "--entitlements",
+                  p,
+                  copy,
+                  0};
+  if (command(sign, "adhoc-sign", 10))
+    die("ad-hoc signing failed; attempt retained");
+  char *verify[] = {"/usr/bin/codesign", "--verify", "--strict",
+                    "--verbose=2",       copy,       0};
+  if (command(verify, "verify", 10))
+    die("signature structure");
+  char *display[] = {"/usr/bin/codesign",
+                     "--display",
+                     "--verbose=4",
+                     "--entitlements",
+                     ":-",
+                     copy,
+                     0};
+  if (command(display, "runtime-entitlements", 10))
+    die("signature display");
+  if (cx_fmt(envmodel, sizeof envmodel, "UNISA_CONTAINER=%s", argv[5]))
+    die("models environment");
+  char tmp[4400], envtmp[4500];
+  path(tmp, sizeof tmp, out, "tmp");
+  if (mkdir(tmp, 0700) || cx_fmt(envtmp, sizeof envtmp, "TMPDIR=%s", tmp))
+    die("private execution tmp");
+  char *version[] = {"env",  "-i", "PATH=/usr/bin:/bin", envmodel,
+                     envtmp, copy, "--version",          0};
+  if (command(version, "compiler-version", 10))
+    die("compiler version");
+  char source[4400];
+  path(source, sizeof source, out, "hello.c");
+  const char *hello = "int main(void){return 7;}\n";
+  put(source, hello, strlen(hello));
+  char *run[] = {"env",    "-i",   "PATH=/usr/bin:/bin",
+                 envmodel, envtmp, copy,
+                 "-run",   source, 0};
+  if (command(run, "compiler-hello-run", 20) != 7)
+    die("compiler default-run expected seven");
+  char ffi[4400];
+  path(ffi, sizeof ffi, out, "ffi.cx");
+  const char *ffisource = "#pragma unisa use sys.ffi\nint main(void){void "
+                          "*f=sy_ffi_dlsym(sy_ffi_default(),\"abs\");int "
+                          "x=-7,r=0,k[1]={SY_FFI_INT};void "
+                          "*v[1]={&x};if(!f||sy_ffi_call(f,SY_FFI_INT,k,v,1,1,&"
+                          "r))return 2;return r==7?0:1;}\n";
+  put(ffi, ffisource, strlen(ffisource));
+  char *ffirun[] = {"env",    "-i",   "PATH=/usr/bin:/bin",
+                    envmodel, envtmp, copy,
+                    "-run",   ffi,    0};
+  if (command(ffirun, "compiler-system-ffi-run", 20))
+    die("compiler system FFI runtime probe");
+  char *gate[] = {"/usr/sbin/spctl", "--assess", "--type", "execute",
+                  "--verbose=4",     copy,       0};
+  int gate_rc = command(gate, "gatekeeper-observation", 5);
+  char *staple[] = {"/usr/bin/xcrun", "stapler", "validate", copy, 0};
+  int staple_rc = command(staple, "bare-stapler-observation", 5);
+  checkhash(argv[3], argv[4]);
+  checkhash(argv[5], argv[6]);
+  char after[65], receipt[1000];
+  digest(copy, after);
+  if (cx_fmt(receipt, sizeof receipt,
+             "mode\tADHOC_RUNTIME_ONLY\ntarget\t%s\ninput_sha\t%s\nsigned_"
+             "sha\t%s\nmodels_sha\t%s\nhello_rc\t7\nsystem_ffi_"
+             "rc\t0\nexecution_environment\tclean-PATH-explicit-models-private-"
+             "TMPDIR\nspctl_rc\t%d\nbare_stapler_"
+             "rc\t%d\nDeveloper_ID\tNOT_PERFORMED\nnotarization\tNOT_"
+             "SUBMITTED\nqualification\tNOT_CLAIMED\n",
+             argv[2], argv[4], after, argv[6], gate_rc, staple_rc))
+    die("receipt");
+  path(p, sizeof p, out, "receipt.tsv");
+  put(p, receipt, strlen(receipt));
+  path(p, sizeof p, out, "entitlement-profile.txt");
+  const char *profile = unsigned_kernel ? "unsigned-kernel\n" : "empty\n";
+  put(p, profile, strlen(profile));
+  printf("MACOS_ADHOC_TEST\tCOMPLETE\ttarget=%s\nsigned_sha=%s\ttrust=NOT_"
+         "CLAIMED\n",
+         argv[2], after);
+}
+static const char *roles[] = {"osx-arm64",    "osx-x86_64", "cache-arm64",
+                              "cache-x86_64", "models",     "candidate"};
+static void dryrun(const char *config, const char *dest) {
+  size_t n;
+  char *b = readfile(config, &n);
+  if (n > 65536 || memchr(b, 0, n) || memchr(b, '\r', n) || b[n - 1] != '\n')
+    die("manifest wire");
+  char paths[6][4096], hashes[6][65], commit[41] = {0}, draft[40] = {0};
+  int seen[6] = {0}, version = 0, source = 0, release = 0, header = 0;
+  for (char *p = b; *p;) {
+    char *e = strchr(p, '\n');
+    if (!e)
+      die("manifest newline");
+    *e = 0;
+    char *f[5] = {p};
+    int nf = 1;
+    for (char *q = p; *q; q++)
+      if (*q == '\t') {
+        *q = 0;
+        if (nf == 5)
+          die("manifest columns");
+        f[nf++] = q + 1;
+      }
+    if (!header) {
+      if (nf != 2 || strcmp(f[0], "MACOS_SIGNING") || strcmp(f[1], "1"))
+        die("manifest header");
+      header = 1;
+    } else if (!strcmp(f[0], "release_version")) {
+      if (nf != 2 || version++ || strcmp(f[1], "0.0.48"))
+        die("only future 0.0.48 release plan");
+    } else if (!strcmp(f[0], "source_commit")) {
+      if (nf != 2 || source++ || !hex(f[1], 40) ||
+          mm_copy(commit, sizeof commit, f[1], 41))
+        die("source commit");
+    } else if (!strcmp(f[0], "draft_release_id")) {
+      if (nf != 2 || release++ || !f[1][0] || f[1][0] == '0' ||
+          strlen(f[1]) >= sizeof draft)
+        die("Draft ID");
+      for (char *q = f[1]; *q; q++)
+        if (*q < '0' || *q > '9')
+          die("Draft ID syntax");
+      if (mm_copy(draft, sizeof draft, f[1], strlen(f[1]) + 1))
+        die("Draft ID copy");
+    } else if (!strcmp(f[0], "artifact")) {
+      if (nf != 4 || f[2][0] != '/')
+        die("artifact shape");
+      int k;
+      for (k = 0; k < 6; k++)
+        if (!strcmp(f[1], roles[k]))
+          break;
+      if (k == 6 || seen[k]++ || strlen(f[2]) >= sizeof paths[k] ||
+          !hex(f[3], 64))
+        die("artifact key");
+      if (mm_copy(paths[k], sizeof paths[k], f[2], strlen(f[2]) + 1) ||
+          mm_copy(hashes[k], sizeof hashes[k], f[3], 65))
+        die("artifact copy");
+      checkhash(paths[k], hashes[k]);
+      if (k < 4)
+        image(paths[k], k == 0 || k == 2);
+      if (k == 4)
+        models(paths[k]);
+    } else
+      die("unknown manifest key");
+    p = e + 1;
+  }
+  if (!version || !source || !release)
+    die("missing metadata");
+  for (int i = 0; i < 6; i++)
+    if (!seen[i])
+      die("missing artifact");
+  fresh(dest);
+  char p[4400], h[65];
+  cx_sha256_hex(b, n, h);
+  free(b);
+  digest(config, h);
+  char identity[500];
+  if (cx_fmt(identity, sizeof identity,
+             "mode\tDRY_RUN_NO_EXECUTION\nconfig_sha\t%s\nrequested_version\t0."
+             "0.48\nsource_commit\t%s\nDraft_release_id\t%s\nsource_and_"
+             "candidate_qualification\tNOT_CLAIMED\n",
+             h, commit, draft))
+    die("identity");
+  path(p, sizeof p, out, "identity.tsv");
+  put(p, identity, strlen(identity));
+  np_buf plan = {0};
+  for (int i = 0; i < 4; i++) {
+    np_puts(&plan, "COPY_AND_SIGN\t");
+    np_puts(&plan, roles[i]);
+    np_puts(&plan, "\t");
+    np_puts(&plan, paths[i]);
+    np_puts(&plan, "\t");
+    np_puts(&plan, hashes[i]);
+    np_puts(&plan, "\tcodesign --force --sign <CI_DEVELOPER_ID_SHA1> --options "
+                   "runtime --timestamp --entitlements ");
+    np_puts(&plan, i < 2 ? "<reviewed-unsigned-kernel.plist>"
+                         : "<reviewed-empty.plist>");
+    np_puts(&plan, " <private-copy>\n");
+  }
+  np_puts(
+      &plan,
+      "VERIFY\tcodesign --verify --strict --verbose=2 <each-signed-copy>; "
+      "actual compiler --version/-run/FFI probes\nREPACK_REQUIRED\trelease-ape "
+      "pack --cache-manager-osx <signed-x64-helper> <signed-arm64-helper> "
+      "<NEW_OUT> <fixed-models> "
+      "<owner-sealed-six-slices-with-signed-Mac-substitution>; regenerate "
+      "CRC/SHA/receipts; no old signed-byte pins reused\nDMG\thdiutil create "
+      "-format UDZO -srcfolder <private-distribution-directory> "
+      "<NEW.dmg>\nSIGN_DMG\tcodesign --sign <CI_DEVELOPER_ID_SHA1> --timestamp "
+      "<NEW.dmg>\nSUBMIT_CI_ONLY\txcrun notarytool submit <SIGNED.dmg> --key "
+      "<CI_API_KEY_FILE> --key-id <CI_API_KEY_ID> --issuer <CI_ISSUER> "
+      "--no-wait --output-format json\nPOLL_CI_ONLY\txcrun notarytool info "
+      "<saved-submission-id> --key <CI_API_KEY_FILE> --key-id <CI_API_KEY_ID> "
+      "--issuer <CI_ISSUER> --output-format json; one bounded read per "
+      "invocation; In Progress is PENDING\nACCEPTED_ONLY\txcrun stapler staple "
+      "<SIGNED.dmg>; xcrun stapler validate <SIGNED.dmg>; spctl --assess "
+      "--type open --context context:primary-signature --verbose=4 "
+      "<SIGNED.dmg>\nFINAL\tnew DMG SHA after staple; new APE SHA; verify "
+      "actual downloads/quarantine/minimum-OS and signed runtime before manual "
+      "Draft asset approval; no automatic publish\n");
+  path(p, sizeof p, out, "plan.tsv");
+  put(p, plan.p, plan.n);
+  free(plan.p);
+  puts("MACOS_SIGNING_PLAN\tPREPARED\tno-sign-no-submit-no-staple-no-"
+       "upload\tqualification=NOT_CLAIMED");
+}
+int main(int argc, char **argv) {
+  deadline = sy_now_ms() + 55000;
+  if (argc == 4 && !strcmp(argv[1], "--dry-run")) {
+    dryrun(argv[2], argv[3]);
+    return 0;
+  }
+  if (argc == 8 && !strcmp(argv[1], "--adhoc-test")) {
+    adhoc(argv, 0);
+    return 0;
+  }
+  if (argc == 10 && !strcmp(argv[1], "--adhoc-test") &&
+      !strcmp(argv[8], "--entitlement-profile") &&
+      !strcmp(argv[9], "unsigned-kernel")) {
+    adhoc(argv, 1);
+    return 0;
+  }
+  fprintf(stderr, "usage: --dry-run CONFIG NEW_OUT | --adhoc-test osx/ARCH "
+                  "INPUT SHA MODELS MODELS_SHA NEW_OUT; real "
+                  "signing/submission is CI-only and not implemented here\n");
+  return 2;
+}
