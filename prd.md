@@ -280,7 +280,7 @@ L3 资源                    头文件、事实表等
 | EXT | `ext/sysx` `ext/memx` `ext/textx` `ext/crypto` | 13/1271、5/488、5/610、15/3432 | **否** | 上层扩展包；`use sysx.*`/`crypto.*` 经根目录 `cxroot.tsv`（CX-U-7）按前缀映射到目录 |
 | 工具库 | `tools/cxlib` | — | 部分 | `cxroot.tsv` 也映射 `cxlib`；仅 10 个工具支撑文件进源 SID |
 
-**已核事实**：`ext/` 不在 `seed/ident.c` 的目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 10 文件，共 1586 文件）；`cxroot.tsv` 只映射 `sysx`、`crypto`，**未映射 `memx`、`textx`**（其解析方式未核）。**未核/待办**：EXT 包的变更由哪个身份覆盖（PC/GEN/收据）、是否随 APE 发布、`memx/textx` 与 `cxroot.tsv` 的关系；内部包接口摘要与依赖设计见 `plans/v0.0.48-unisacc.md` §12–§13（C0 分治身份）。
+**已核事实**：`ext/` 不在 `seed/ident.c` 的目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 10 文件，共 1586 文件）；`cxroot.tsv` 只映射 `sysx`、`crypto`，**未映射 `memx`、`textx`**（其解析方式未核）。**使用者（`git grep` 实测，除自身目录、archive、plans、research）**：`sysx`、`crypto` 有仓内引用（测试、工具、技能示例）；**`memx`、`textx` 仓内零引用**（不在 `cxroot.tsv`），疑为未接线或待删，须裁定。**未核/待办**：EXT 包的变更由哪个身份覆盖（PC/GEN/收据）、是否随 APE 发布、`memx/textx` 与 `cxroot.tsv` 的关系；内部包接口摘要与依赖设计见 `plans/v0.0.48-unisacc.md` §12–§13（C0 分治身份）。
 - `cx/core/`（L1）：执行器（kernel/execute/stack/output/bytes/memory）。
 - `cx/driver/`（L1）：path/compat/args/output/deps/cli/route。
 - `cx/runtime/`（L1）：model_decode/package_*/stream_*/source_frame 等。
