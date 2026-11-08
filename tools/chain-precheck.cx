@@ -8,7 +8,7 @@
  * 相对例（在 /work）：sh private/unisacc.com private/tools/chain-precheck.cx -- private chain precheck init --files files
  * ROOT 必须是与 HEAD 一致的私有链克隆；本工具不安装、不提交。
  * probe/slice/slice-link 优先 CHAIN_OUT/ctrl/unisacc.com.dev/entry.elf；
- * 仅该路径ENOENT时用 CHAIN_OUT/sl-lnx/candidate，要求可执行native ELF。
+ * 仅该路径ENOENT时用 CHAIN_OUT/sl-lnx/candidate，要求可执行且匹配真实宿主OS/CPU的native image。
  * 直接执行并通过UNISA_CONTAINER使用NEW_OUT/pkg.bin；init不要求构造器。
  * 复制链正式入口仍为本工具；从记录的tool argv识别原ctx/jobs，
  * 输入输出迁移NEW_OUT/jobs，执行器固定使用副本CHAIN_OUT原生工具。
@@ -20,6 +20,7 @@
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use mem.heap
 #pragma unisa use sys.env
 #pragma unisa use text.text
 static char root[4096],chain[4096],out[4096],oldroot[4096],jobs[4400],ctor[4400],pkg[4400];
@@ -27,9 +28,27 @@ static void die(const char *s){fprintf(stderr,"CHAIN_PRECHECK\tREFUSE\t%s\trc=2\
 static void fit(char *d,size_t c,const char *s){size_t n=strlen(s);if(n>=c)die("copy-bound");for(size_t i=0;i<=n;i++)d[i]=s[i];}
 static void path(char *d,const char *a,const char *b){if(cx_fmt(d,4400,"%s/%s",a,b))die("path-bound");}
 static char *load(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die(p);char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("read-extent");return s;}
+/* Host executable identity is separate from the Linux cross-probe target. */
+static unsigned native_le(const unsigned char *p,int n){unsigned v=0;for(int i=n-1;i>=0;i--)v=v*256+p[i];return v;}
+static int native_host(const char *bytes,size_t n){const unsigned char *p=(const unsigned char *)bytes;
+#if defined(__APPLE__) && defined(__aarch64__)
+ return n>=32&&native_le(p,4)==0xfeedfacfU&&native_le(p+4,4)==0x100000cU&&native_le(p+12,4)==2;
+#elif defined(__APPLE__) && defined(__x86_64__)
+ return n>=32&&native_le(p,4)==0xfeedfacfU&&native_le(p+4,4)==0x1000007U&&native_le(p+12,4)==2;
+#elif defined(__linux__) && (defined(__aarch64__) || defined(__x86_64__))
+ if(n<64||memcmp(p,"\177ELF",4)||p[4]!=2||p[5]!=1||p[6]!=1||(native_le(p+16,2)!=2&&native_le(p+16,2)!=3))return 0;
+#if defined(__aarch64__)
+ return native_le(p+18,2)==183&&native_le(p+20,4)==1&&native_le(p+52,2)==64;
+#else
+ return native_le(p+18,2)==62&&native_le(p+20,4)==1&&native_le(p+52,2)==64;
+#endif
+#else
+ return 0;
+#endif
+}
 static void save(const char *p,const char *s,size_t n){int f=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(f<0)die("exclusive-output");while(n){ssize_t k=write(f,s,n);if(k<0&&errno==EINTR)continue;if(k<=0)die("write");s+=k;n-=(size_t)k;}if(close(f))die("close");}
 static void copy(const char *a,const char *b,int executable){size_t n;char *s=load(a,&n);save(b,s,n);free(s);if(executable&&chmod(b,0700))die("chmod");}
-static int run(char **v,const char *cwd,const char *name,char **env,int expected){np_result r;char why[1400],p[4400],status[120];path(p,out,name);if(mkdir(p,0700))die("exclusive-phase");int t=np_run(v,cwd,env,58,&r,why,sizeof why);char q[4400];path(q,p,"command.stdout");save(q,r.out?r.out:"",r.outn);path(q,p,"command.stderr");save(q,t?why:(r.err?r.err:""),t?strlen(why):r.errn);path(q,p,"command.status");int z=snprintf(status,sizeof status,"rc\t%d\ntransport\t%d\nresidue\t%d\n",t?124:r.rc,t,r.residue);if(z<0||(size_t)z>=sizeof status)die("status format bound");save(q,status,(size_t)z);int rc=t?124:r.rc;int good=!t&&!r.residue&&rc==expected;np_free(&r);printf("CHAIN_PRECHECK\t%s\t%s\trc=%d\n",name,good?"PREPARED":"FAIL",rc);return good?0:1;}
+static int run(char **v,const char *cwd,const char *name,char **env,int expected){np_result r;char why[1400],p[4400],status[120];path(p,out,name);if(mkdir(p,0700))die("exclusive-phase");int t=np_run(v,cwd,env,55,&r,why,sizeof why);char q[4400];path(q,p,"command.stdout");save(q,r.out?r.out:"",r.outn);path(q,p,"command.stderr");save(q,t?why:(r.err?r.err:""),t?strlen(why):r.errn);path(q,p,"command.status");int z=snprintf(status,sizeof status,"rc\t%d\ntransport\t%d\nresidue\t%d\n",t?124:r.rc,t,r.residue);if(z<0||(size_t)z>=sizeof status)die("status format bound");save(q,status,(size_t)z);int rc=t?124:r.rc;int good=!t&&!r.residue&&rc==expected;np_free(&r);printf("CHAIN_PRECHECK\t%s\t%s\trc=%d\n",name,good?"PREPARED":"FAIL",rc);return good?0:1;}
 static void checked(char **v,const char *cwd,const char *name,char **env){if(run(v,cwd,name,env,0))exit(1);}
 static char *capture(char **v){np_result r;char why[1400];if(np_run(v,root,0,15,&r,why,sizeof why)||r.rc||r.residue)die("git-query");char *s=malloc(r.outn+1);if(!s)die("allocation");for(size_t i=0;i<r.outn;i++)s[i]=r.out[i];s[r.outn]=0;np_free(&r);return s;}
 static int zero(const char *dir){char p[4400];size_t n;path(p,dir,"command.status");char *s=load(p,&n);const char *full="rc\t0\ntransport\t0\nresidue\t0\n";int ok=(n==5&&!memcmp(s,"rc\t0\n",5))||(n==strlen(full)&&!memcmp(s,full,n));free(s);return ok;}
@@ -77,8 +96,8 @@ static long mtime_ns(const struct stat *s){
 }
 static void tree_snapshot(const char *dir,np_buf *b,int depth){
  if(depth>64)die("chain snapshot depth");DIR *d=opendir(dir);if(!d)path_error("chain snapshot open",dir);char *names[4096];size_t count=0;struct dirent *e;
- while((e=readdir(d))){if(tx_eqz(e->d_name,".")||tx_eqz(e->d_name,".."))continue;if(count==4096)die("chain snapshot entries");names[count]=strdup(e->d_name);if(!names[count++])die("allocation");}if(closedir(d))die("chain snapshot close");qsort(names,count,sizeof names[0],namecmp);
- for(size_t i=0;i<count;i++){char p[4400],row[4700];path(p,dir,names[i]);free(names[i]);struct stat st;if(lstat(p,&st))path_error("chain snapshot stat",p);if(cx_fmt(row,sizeof row,"%s\t%lu\t%lld\t%lld\t%ld\n",p,(unsigned long)st.st_mode,(long long)st.st_size,(long long)st.st_mtime,mtime_ns(&st)))die("chain snapshot bound");if(b->n>67108864-strlen(row))die("chain snapshot extent");np_puts(b,row);if(S_ISDIR(st.st_mode))tree_snapshot(p,b,depth+1);}
+ while((e=readdir(d))){if(tx_eqz(e->d_name,".")||tx_eqz(e->d_name,".."))continue;if(count==4096)die("chain snapshot entries");names[count]=mm_strdup(e->d_name);if(!names[count++])die("allocation");}if(closedir(d))die("chain snapshot close");qsort(names,count,sizeof names[0],namecmp);
+ for(size_t i=0;i<count;i++){char p[4400],row[4700];path(p,dir,names[i]);mm_free(names[i]);struct stat st;if(lstat(p,&st))path_error("chain snapshot stat",p);if(cx_fmt(row,sizeof row,"%s\t%lu\t%lld\t%lld\t%ld\n",p,(unsigned long)st.st_mode,(long long)st.st_size,(long long)st.st_mtime,mtime_ns(&st)))die("chain snapshot bound");if(b->n>67108864-strlen(row))die("chain snapshot extent");np_puts(b,row);if(S_ISDIR(st.st_mode))tree_snapshot(p,b,depth+1);}
 }
 static void frozen(const char *dir,np_buf *before,const char *label){np_buf after={0};tree_snapshot(dir,&after,0);if(before->n!=after.n||memcmp(before->p,after.p,after.n)){char p[4400];path(p,out,label);save(p,after.p,after.n);fprintf(stderr,"CHAIN_PRECHECK\tREFUSE\tchain changed concurrently\tpath=%s\trc=2\n",dir);exit(2);}free(after.p);}
 static void job(const char *id){if(strpbrk(id,"/\\\r\n\t"))die("job not selected");char gen[300];if(!strncmp(id,"gen-",4))fit(gen,sizeof gen,id);else if(!strncmp(id,"tbl-",4)||!strncmp(id,"net-",4)){if(cx_fmt(gen,sizeof gen,"gen-%s",id+4))die("job-id bound");}else die("job not selected");if(!selected(gen))die("job not selected");char src[4400],dst[4400],p[4400];path(p,chain,"ctx/jobs");path(src,p,id);path(dst,jobs,id);if(mkdir(dst,0700))die("job output exists");if(!strncmp(id,"tbl-",4)||!strncmp(id,"net-",4)){char dep[300];if(cx_fmt(dep,sizeof dep,"%s%s",!strncmp(id,"tbl-",4)?"gen-":"tbl-",id+4))die("dependency");path(p,jobs,dep);if(!zero(p))die("dependency status failed");}
@@ -89,7 +108,7 @@ static void job(const char *id){if(strpbrk(id,"/\\\r\n\t"))die("job not selected
  path(expected,jobs,leaf);if(strcmp(v[4],expected)&&!under(v[4],oldjobs))die("job output must match own result");
  if(genjob){if(!relative(v[3]))die("gen mode contract");const char *flags[]={"--shared-predefines","--errors","--elf","--full","--arm64","--object","--osx","--win","--no-autoinc","--locations","--typed","--o2","--macho","--pe","--warnings"};for(int i=5;i<k;i++){int known=0;for(size_t j=0;j<sizeof flags/sizeof flags[0];j++)if(tx_eqz(v[i],flags[j]))known=1;if(!known)die("gen option contract");}}else{char dep[400];if(cx_fmt(dep,sizeof dep,"%s%s/result.%s",!strncmp(id,"tbl-",4)?"gen-":"tbl-",id+4,!strncmp(id,"tbl-",4)?"json":"tbl"))die("input leaf");path(expected,oldjobs,dep);if(strcmp(v[3],expected))die("job input contract");}
  char bound[4400];path(bound,root,"tools/bound");struct stat st;if(lstat(bound,&st)||!S_ISREG(st.st_mode)||access(bound,X_OK))die("private bound unavailable");v[0]=bound;if(!tx_eqz(v[1],"40"))die("job deadline contract");
- char native[4400],mapped[64][4400];path(p,chain,"ctx/jobs");path(native,p,which);if(lstat(native,&st)||!S_ISREG(st.st_mode)||access(native,X_OK))die("job native tool unavailable");size_t nn;char *nb=load(native,&nn);if(nn<4||memcmp(nb,"\177ELF",4))die("job native tool ELF");free(nb);
+ char native[4400],mapped[64][4400];path(p,chain,"ctx/jobs");path(native,p,which);if(lstat(native,&st)||!S_ISREG(st.st_mode)||access(native,X_OK))die("job native tool unavailable");size_t nn;char *nb=load(native,&nn);if(!native_host(nb,nn))die("job native tool host format/CPU");free(nb);
  for(int i=3;i<k;i++){const char *base=under(v[i],oldjobs)?oldjobs:under(v[i],oldroot)?oldroot:0;if(base){if(cx_fmt(mapped[i],sizeof mapped[i],"%s%s",base==oldjobs?jobs:root,v[i]+strlen(base)))die("job mapping bound");v[i]=mapped[i];}}v[2]=native;
  if(under(out,recorded)||under(out,chain)||tx_eqz(out,recorded)||tx_eqz(out,chain))die("NEW_OUT overlaps protected chain");
  if(!under(v[4],jobs))die("job output outside authorized NEW_OUT");np_buf before={0},copied={0};tree_snapshot(recorded,&before,0);tree_snapshot(chain,&copied,0);char name[350],receipt[400];if(cx_fmt(name,sizeof name,"run-%s",id)||cx_fmt(receipt,sizeof receipt,"%s.original.before",id))die("phase-name");path(p,out,receipt);save(p,before.p,before.n);frozen(recorded,&before,"original.concurrent-before");frozen(chain,&copied,"copy.concurrent-before");int failed=run(v,root,name,0,0);frozen(recorded,&before,"original.changed-after");frozen(chain,&copied,"copy.changed-after");free(before.p);free(copied.p);
@@ -108,7 +127,7 @@ static void unchanged_inputs(void){char base[4400],p[4400];path(base,chain,"ctx/
 static void reuse(void){char base[4400],p[4400],q[4400],dst[4400];path(base,chain,"ctx/jobs");DIR *d=opendir(base);struct dirent *e;np_buf receipt={0};int count=0;if(!d)die("reuse jobs");while((e=readdir(d))){int tool=!strncmp(e->d_name,"tool-",5),net=!strncmp(e->d_name,"net-",4),tbl=!strncmp(e->d_name,"tbl-",4);if(!tool&&!net&&!tbl)continue;char gen[300];if(!tool){if(cx_fmt(gen,sizeof gen,"gen-%s",e->d_name+4))die("reuse-id");if(selected(gen))continue;}path(p,base,e->d_name);if(!zero(p))die("reuse source status failed");path(dst,jobs,e->d_name);if(mkdir(dst,0700))die("reuse destination");const char *leaf=tool?"result.exe":net?"result.net":"result.tbl";path(q,p,leaf);char target[4400];path(target,dst,leaf);size_t n;char *b=load(q,&n);char h[65];cx_sha256_hex(b,n,h);save(target,b,n);free(b);b=load(target,&n);char h2[65];cx_sha256_hex(b,n,h2);free(b);if(strcmp(h,h2))die("reuse sha mismatch");if(tool&&chmod(target,0700))die("tool chmod");np_puts(&receipt,e->d_name);np_puts(&receipt,"\t");np_puts(&receipt,h);np_puts(&receipt,"\n");count++;}closedir(d);path(p,out,"reused-unaffected.tsv");save(p,receipt.p,receipt.n);free(receipt.p);printf("CHAIN_PRECHECK\treuse\tPREPARED\treused-unaffected=%d\trc=0\n",count);}
 static void assert_selected_done(void){char p[4400];size_t n;path(p,out,"selected.tsv");char *s=load(p,&n),*a=s;while(*a){char *z=strchr(a,'\n');if(z)*z=0;path(p,jobs,a);if(!zero(p))die("selected gen incomplete");char id[300];const char *phases[]={"tbl-","net-"};for(int i=0;i<2;i++){if(cx_fmt(id,sizeof id,"%s%s",phases[i],a+4))die("selected id");path(p,jobs,id);if(!zero(p))die("selected tbl/net incomplete");}if(!z)break;a=z+1;}free(s);}
 /* 仅执行probe/slice时需要构造器；旧控制器缺失才使用链的真实native候选。 */
-static void resolve_constructor(void){struct stat st;path(ctor,chain,"ctrl/unisacc.com.dev/entry.elf");if(lstat(ctor,&st)){if(errno!=ENOENT)path_error("constructor preferred stat failed",ctor);path(ctor,chain,"sl-lnx/candidate");if(lstat(ctor,&st))path_error("constructor candidate unavailable",ctor);}if(!S_ISREG(st.st_mode))die("constructor must be a regular native ELF");if(access(ctor,X_OK))path_error("constructor executable access failed",ctor);size_t n;char *s=load(ctor,&n);if(n<4||memcmp(s,"\177ELF",4))die("constructor must be a native ELF");char hash[65];cx_sha256_hex(s,n,hash);free(s);printf("CHAIN_PRECHECK\tconstructor\tpath=%s\tsha256=%s\n",ctor,hash);}
+static void resolve_constructor(void){struct stat st;path(ctor,chain,"ctrl/unisacc.com.dev/entry.elf");if(lstat(ctor,&st)){if(errno!=ENOENT)path_error("constructor preferred stat failed",ctor);path(ctor,chain,"sl-lnx/candidate");if(lstat(ctor,&st))path_error("constructor candidate unavailable",ctor);}if(!S_ISREG(st.st_mode))die("constructor must be a regular native image");if(access(ctor,X_OK))path_error("constructor executable access failed",ctor);size_t n;char *s=load(ctor,&n);if(!native_host(s,n))die("constructor native host format/CPU");char hash[65];cx_sha256_hex(s,n,hash);free(s);printf("CHAIN_PRECHECK\tconstructor\tpath=%s\tsha256=%s\n",ctor,hash);}
 static void phase(const char *what,const char *arg){char com[4400],tool[4400],p[4400],q[4400],envtext[4500];path(com,root,"unisacc.com");if(cx_fmt(envtext,sizeof envtext,"UNISA_CONTAINER=%s",pkg))die("env bound");char *env[]={envtext,0};
  if(tx_eqz(what,"probe")||tx_eqz(what,"slice")||tx_eqz(what,"slice-link"))resolve_constructor();
  if(tx_eqz(what,"reuse"))unchanged_inputs();

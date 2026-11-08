@@ -1,16 +1,17 @@
 # unisacc
 
-> **看不清目录?** 先读 [docs/REPO-MAP.md](docs/REPO-MAP.md):30 个顶层目录按用途分四组,标出哪些是冻结的「产品输入」。
-
 ## Quick start
 
 ```sh
-curl -LO https://github.com/partnernetsoftware/unisacc/releases/download/v0.0.46/unisacc.com
-chmod +x unisacc.com
-sh ./unisacc.com --version                         # unisacc 0.0.46
+curl -LO https://github.com/partnernetsoftware/unisacc/releases/download/v0.0.47/unisacc.com
+printf '%s  unisacc.com\n' fde2db1812533a9a56a66d8e0d1870c310fdcc77d444a2d33210ca96e9ef98fe | shasum -a 256 -c -
 printf 'int main(void){return 7;}\n' > hello.c
 sh ./unisacc.com hello.c; echo $?                  # 7 (default -run)
 ```
+
+macOS：镜像声明最低版本13.0；本次在26.5.1实测，13.0本身未实测。发布镜像仅有ad-hoc签名，Gatekeeper评估未认可；上面的命令行运行成功不代表Gatekeeper信任通过。Safari直连GitHub曾返回504；同SHA官方资产经本机HTTP转存后由Safari下载，天然quarantine标记前后保留，私有缓存下版本及hello运行成功。该测试没有删除隔离标记或关闭系统保护，也不等于Safari直连公开资产成功。
+
+目录说明：[docs/REPO-MAP.md](docs/REPO-MAP.md)。
 
 Windows x86-64: CI uses PowerShell to launch `unisacc.com` without renaming it; see [Windows使用](plans/release-notes-0.0.46.md#windows使用) for the verified invocation and helper.
 Windows arm64: CI copies `slice-win-arm64` to an `.exe` and sets `UNISA_CONTAINER` to `pkg.bin` before compilation; see [Windows使用](plans/release-notes-0.0.46.md#windows使用).
@@ -19,7 +20,7 @@ the downloaded files; roll back by restoring the previous Release's files.
 
 ## What is not claimed
 
-- Native self-hosting on Windows or macOS is not claimed.
+- Windows原生自举尚未声明；本机macOS arm64已实测固定包、44根编译器裸片gen2==gen3，详见[证据](research/c48-native-selfhost/report.md)。这不是重建NN、宿主工具或完整六片APE的自举证明。
 - Windows stdio-crossunit and stream-pipe cover portable subsets; POSIX
   sub-checks were not run and are not counted as passed.
 - Full-batch qualification is separate from native CI; see the
