@@ -1,12 +1,13 @@
-/* tools/check-precommit-toolsloc.cx -- real indexed hook checks, in independent bounded batches.
- * Run --loc, --source and --symlink separately; every batch uses its own real git repository.
- * The real hook still runs the complete real ratchets from the caller's repository.
- */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
-static int npass,nfail;
+#pragma unisa use cxlib.toolsloc
+static int npass,nfail,target;
 static char hook[300];
-static void ck(int ok,const char *n){printf("%s\t%s\n",ok?"PASS":"FAIL",n);if(ok)npass++;else nfail++;}
+static const char *modes[]={"--loc","--loc-indexed-repair","--loc-per-file","--loc-total-report","--loc-new-601","--loc-baseline-launder","--loc-new-check","--loc-broken-baseline","--loc-missing-baseline",
+    "--source","--source-bash","--source-new-cli","--source-working-check","--source-working-batches","--source-shebang","--source-source-registration","--source-entry-registration",
+    "--symlink","--symlink-unstaged","--symlink-new-alias","--symlink-new-regular"};
+#define BOUND(N,...) do{if(target==(N)){fixture_hook(__VA_ARGS__);goto cleanup;}}while(0)
+static void ck(int ok,const char *n){printf("%s\t%s\n",ok?"PASS":"FAIL",n);fflush(stdout);if(ok)npass++;else nfail++;}
 static int fixture_run(char **v,const char *cwd){
     np_result r; char why[400]; int ok;
     if(np_run(v,cwd,0,40,&r,why,sizeof why)){fprintf(stderr,"fixture command %s in %s: %s\n",v[0],cwd,why);return 0;}
@@ -20,88 +21,118 @@ static int fixture_write(const char *td,const char *name,const char *text){
     f=fopen(path,"wb"); if(!f) return 0;
     {int ok=fputs(text,f)>=0; return fclose(f)==0&&ok;}
 }
-static void fixture_hook(const char *td,int rc,const char *text,const char *label,const char *forbidden){
+static void fixture_hook(const char *td,int rc,const char *text,const char *label,const char *extra){
     char gd[500],why[400]; np_result r; char *p[]={hook,0};
     if(cx_fmt(gd,sizeof gd,"%s/.git",td)){ck(0,label);return;}
     setenv("GIT_DIR",gd,1); setenv("GIT_WORK_TREE",td,1);
-    if(np_run(p,".",0,40,&r,why,sizeof why)){ck(0,label);if(forbidden)ck(0,"retired-baseline-diagnostic-absent");}
+    if(np_run(p,".",0,40,&r,why,sizeof why)){ck(0,label);if(extra)ck(0,extra);}
     else {
-        int good=(r.rc==rc)&&(!text||(r.errn&&strstr(r.err,text)));
-        ck(good,label);
-        if(!good&&r.errn)fwrite(r.err,1,r.errn,stderr);
-        if(forbidden)ck(!r.errn||!strstr(r.err,forbidden),"retired-baseline-diagnostic-absent");
+        ck((rc<0||r.rc==rc)&&(!text||(r.errn&&strstr(r.err,text))),label);
+        if(extra)ck(r.errn&&strstr(r.err,"先写基线+理由"),extra);
         np_free(&r);
     }
     unsetenv("GIT_DIR"); unsetenv("GIT_WORK_TREE");
 }
 static int stage(const char *td,const char *name){char *v[]={"git","add","--",(char *)name,0};return fixture_run(v,td);}
-/* Keep the indexed registrations real; each added ordinary tool has its own check entry. */
-static int fixture_registry(const char *td,int shebang,int newtool){
-    char batches[5000],coverage[2000];
-    const char *bh="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n";
-    const char *ch="id\tlayer\timplementation\texpected_or_gap\tsource\n";
-    if(cx_fmt(batches,sizeof batches,"%ssource\tIMPLEMENTED\tinterfaces\ttools/check-source.cx\tSOURCE\tlnx/x86_64\t10\t-\ttools/check-source.cx\t-\tinterfaces.source\trc0:FIXTURE_CHECK\tproduct\n%s%s",bh,
-        shebang?"shebang\tIMPLEMENTED\tinterfaces\ttools/check-_cx_shebang.cx\tSOURCE\tlnx/x86_64\t10\t-\ttools/check-_cx_shebang.cx\t-\tinterfaces.shebang\trc0:FIXTURE_CHECK\tproduct\n":"",
-        newtool?"new\tIMPLEMENTED\tinterfaces\ttools/check-new.cx\tSOURCE\tlnx/x86_64\t10\t-\ttools/check-new.cx\t-\tinterfaces.new\trc0:FIXTURE_CHECK\tproduct\n":""))return 0;
-    if(cx_fmt(coverage,sizeof coverage,"%sinterfaces.source\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture source\ttools/source.cx tools/check-source.cx\n%s%s",ch,
-        shebang?"interfaces.shebang\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture shebang\ttools/_cx_shebang.cx tools/check-_cx_shebang.cx\n":"",
-        newtool?"interfaces.new\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture new\ttools/new.cx tools/check-new.cx\n":""))return 0;
-    return fixture_write(td,"tests/batches.tsv",batches)&&fixture_write(td,"tests/coverage.tsv",coverage)&&stage(td,"tests");
-}
-static void fixture(const char *mode){
+static void fixture(void){
     char td[200],path[500]; int ok;
     if(cx_fmt(td,sizeof td,"%s/pc-link-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td)){ck(0,"symlink-fixture-create");return;}
     {char *v[]={"git","init","-q",0};ok=fixture_run(v,td);}
     {char *v[]={"mkdir","tools","tests",0};ok=fixture_run(v,td)&&ok;}
-    ok=fixture_write(td,"tools/source.cx","int x;")&&ok;
-    ok=fixture_write(td,"tools/check-source.cx","int main(void){printf(\"FIXTURE_CHECK\\n\");return 0;}\n")&&ok;
-    ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\n")&&fixture_registry(td,0,0)&&ok;
+    ok=fixture_write(td,"tools/source.cx","int main(void){return 0;}")&&ok;
+    ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\ntools/source.cx\t1\n")&&ok;
     if(cx_fmt(path,sizeof path,"%s/tools/alias.cx",td)||symlink("source.cx",path)) ok=0;
-    ok=stage(td,"tools")&&ok;
+    ok=stage(td,"tools")&&stage(td,"tests/toolsloc.tsv")&&ok;
+    {char *v[]={"git","-c","user.name=fixture","-c","user.email=fixture@example.invalid","-c","core.hooksPath=/dev/null","commit","-q","-m","fixture",0};ok=fixture_run(v,td)&&ok;}
+    ok=fixture_write(td,"tools/source.cx","int main(void){return 1;}")&&stage(td,"tools/source.cx")&&ok;
     ck(ok,"symlink-fixture-real-index");
-    if(ok&&strcmp(mode,"--loc")==0){
+    if(ok&&target<9){
         ok=fixture_write(td,"tools/source.cx","int x;\nint y;\n")&&stage(td,"tools/source.cx");
-        ck(ok,"over-historical-baseline-real-index");
-        if(ok)fixture_hook(td,0,0,"over-historical-baseline-not-blocked","先写基线+理由");
+        ck(ok,"over-baseline-real-index");
+        if(target==0){
+            ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+            if(ok)fixture_hook(td,0,0,"over-historical-baseline-not-blocked",0);
+            ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\ntools/source.cx\t1\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        }
+        if(ok)BOUND(0,td,1,0,"over-baseline-rc1","over-baseline-text");
+        ok=fixture_write(td,"tools/source.cx","int x;")&&ok;
+        if(ok)BOUND(1,td,1,0,"indexed-growth-working-tree-repaired-still-refused",0);
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t99999\ntools/source.cx\t1\n")&&stage(td,"tests/toolsloc.tsv");
+        if(ok)BOUND(2,td,1,"tools/source.cx has 2 lines > baseline 1","per-file-total-is-report-only",0);
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t0\ntools/source.cx\t2\n")&&stage(td,"tests/toolsloc.tsv");
+        if(ok)BOUND(3,td,0,0,"per-file-total-increase-is-report-only",0);
+        {FILE *f;cx_fmt(path,sizeof path,"%s/tools/over600.cx",td);f=fopen(path,"wb");if(!f)ok=0;else{for(int k=0;k<601;k++)fputs(k?"int x;\n":"int main(void){return 0;}\n",f);ok=fclose(f)==0&&ok;}}
+        ok=stage(td,"tools/over600.cx")&&ok;
+        if(ok)BOUND(4,td,1,"tools/over600.cx has 601 lines","new-file-601-refused",0);
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t603\ntools/source.cx\t2\ntools/over600.cx\t601\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        if(ok)BOUND(5,td,1,"new-file limit 600","same-commit-baseline-cannot-launder-601",0);
+        {char *v[]={"git","rm","-f","-q","--","tools/over600.cx",0};ok=fixture_run(v,td)&&ok;}
+        ok=fixture_write(td,"tools/check-unregistered.cx","int main(void){return 0;}\n")&&stage(td,"tools/check-unregistered.cx")&&ok;
+        if(ok)BOUND(6,td,1,"new CLI tools/check-unregistered.cx","new-check-itself-needs-registration",0);
+        {char *v[]={"git","rm","-f","-q","--","tools/check-unregistered.cx",0};ok=fixture_run(v,td)&&ok;}
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t99999\ntools/source.cx\tbad\n")&&stage(td,"tests/toolsloc.tsv");
+        if(ok)BOUND(7,td,1,"malformed baseline","broken-baseline-refused",0);
+        {char *v[]={"git","rm","-f","-q","--","tests/toolsloc.tsv",0};ok=fixture_run(v,td);}
+        if(ok)BOUND(8,td,1,"missing baseline","missing-baseline-refused",0);
     }
-    if(ok&&strcmp(mode,"--source")==0){
+    if(ok&&target>=9&&target<17){
         ok=fixture_write(td,"tools/_untracked_huge.cx","int untracked;\n");
         if(ok){FILE *f;cx_fmt(path,sizeof path,"%s/tools/_untracked_huge.cx",td);f=fopen(path,"ab");if(f){for(int k=0;k<400;k++)fputs("int x;\n",f);ok=fclose(f)==0;}else ok=0;}
         ck(ok,"untracked-huge-fixture-write");
-        if(ok)fixture_hook(td,0,0,"untracked-huge-not-gated",0);
+        if(ok)BOUND(9,td,0,0,"untracked-huge-not-counted",0);
         ok=fixture_write(td,"tools/_bash_fake.cx","#!/usr/bin/env bash\necho x\n")&&stage(td,"tools/_bash_fake.cx");
         ck(ok,"bash-fake-real-index");
-        if(ok)fixture_hook(td,1,".cx 只放 cx 源码","bash-fake-cx-refused",0);
+        if(ok)BOUND(10,td,1,".cx 只放 cx 源码","bash-fake-cx-refused",0);
+        /* This file is newly staged, not committed: git rm needs -f to remove its indexed content. */
         {char *v[]={"git","rm","-f","-q","--","tools/_bash_fake.cx",0};ok=fixture_run(v,td);}
         ok=fixture_write(td,"tools/_cx_shebang.cx","#!/usr/bin/env unisacc.com -run\nint main(void){return 0;}\n")&&stage(td,"tools/_cx_shebang.cx")&&ok;
-        ok=fixture_write(td,"tools/check-_cx_shebang.cx","int main(void){printf(\"FIXTURE_CHECK\\n\");return 0;}\n")&&stage(td,"tools/check-_cx_shebang.cx")&&fixture_registry(td,1,0)&&ok;
-        ck(ok,"unisacc-shebang-checked-registered-real-index");
-        if(ok)fixture_hook(td,0,0,"unisacc-shebang-allowed",0);else ck(0,"unisacc-shebang-allowed");
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t3\ntools/source.cx\t1\ntools/_cx_shebang.cx\t2\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        ck(ok,"unisacc-shebang-real-index");
+        if(ok)BOUND(11,td,1,"new CLI","new-cli-without-registration-refused",0);
+        ok=fixture_write(td,"tools/check-_cx_shebang.cx","int main(void){return 0;}\n")&&ok;
+        ok=fixture_write(td,"tests/batches.tsv","id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ncli\tIMPLEMENTED\tinterfaces\ttools/_cx_shebang.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/_cx_shebang.cx\t-\tfixture.cli\trc0\tproduct\ncheck\tIMPLEMENTED\tinterfaces\ttools/check-_cx_shebang.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/check-_cx_shebang.cx\t-\tfixture.check\trc0\tproduct\n")&&ok;
+        if(ok)BOUND(12,td,1,"new CLI","working-check-and-batches-cannot-repair-index",0);
+        ok=stage(td,"tools/check-_cx_shebang.cx")&&ok;
+        if(ok)BOUND(13,td,1,"new CLI","working-batches-cannot-repair-index",0);
+        ok=stage(td,"tests/batches.tsv")&&ok;
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t4\ntools/source.cx\t1\ntools/_cx_shebang.cx\t2\ntools/check-_cx_shebang.cx\t1\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        if(ok)BOUND(14,td,0,0,"unisacc-shebang-allowed",0);else ck(0,"unisacc-shebang-allowed"); ok=fixture_write(td,"tests/batches.tsv","id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ncli\tIMPLEMENTED\tinterfaces\ttools/_cx_shebang.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/other.cx\t-\tfixture.cli\trc0\tproduct\ncheck\tIMPLEMENTED\tinterfaces\ttools/check-_cx_shebang.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/other.cx\t-\tfixture.check\trc0\tproduct\n")&&stage(td,"tests/batches.tsv")&&ok; if(ok)BOUND(15,td,0,0,"source-only-registration-allowed",0);else ck(0,"source-only-registration-allowed"); ok=fixture_write(td,"tests/batches.tsv","id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ncli\tIMPLEMENTED\tinterfaces\ttools/other.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/_cx_shebang.cx\t-\tfixture.cli\trc0\tproduct\ncheck\tIMPLEMENTED\tinterfaces\ttools/other.cx\tSOURCE\tlnx/x86_64\t45\t-\ttools/check-_cx_shebang.cx\t-\tfixture.check\trc0\tproduct\n")&&stage(td,"tests/batches.tsv")&&ok; if(ok)BOUND(16,td,0,0,"entry-only-registration-allowed",0);else ck(0,"entry-only-registration-allowed");
     }
-    if(ok&&strcmp(mode,"--symlink")==0){
-        fixture_hook(td,0,0,"symlink-alias-without-separate-check-allowed-no-final-lf",0);
+    if(ok&&target>=17){
+        BOUND(17,td,0,0,"symlink-alias-not-double-counted-no-final-lf",0);
         ok=fixture_write(td,"tools/source.cx","int x;\nint y;\n");
         ck(ok,"symlink-fixture-worktree-write");
-        if(ok)fixture_hook(td,0,0,"unstaged-regular-growth-not-gated",0);
+        {size_t n=0;char *s;cx_fmt(path,sizeof path,"%s/tools/source.cx",td);s=cx_read(path,&n);ck(s&&tl_lines(s,n)==2,"working-tree-count-observes-unstaged-growth");free(s);}
+        if(ok)BOUND(18,td,0,0,"unstaged-regular-growth-not-counted",0);
+        if(cx_fmt(path,sizeof path,"%s/tools/new-alias.cx",td)||symlink("source.cx",path))ok=0;
+        ok=stage(td,"tools/new-alias.cx")&&ok;
+        ck(tl_lines("x",1)==1&&tl_lines("x\n",2)==1&&tl_lines("x\ny",3)==2&&tl_lines("",0)==0,"actual-lf-plus-final-fragment");
+        if(ok)BOUND(19,td,1,"new symlink alias","new-symlink-alias-registration-refused",0);
+        {char *v[]={"git","rm","-f","-q","--","tools/new-alias.cx",0};ok=fixture_run(v,td)&&ok;}
         ok=fixture_write(td,"tools/new.cx","int z;\n")&&stage(td,"tools/new.cx");
-        ck(ok,"new-tool-without-check-real-index");
+        ck(ok,"symlink-fixture-new-regular-index");
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t1\ntools/source.cx\t1\ntools/new.cx\t0\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
+        if(ok)fixture_hook(td,1,"tools/new.cx has 1 lines > baseline 0","new-regular-line-still-refused",0);
+        /* Preserve main's independent module/check support gates after satisfying LOC. */
+        ok=fixture_write(td,"tests/toolsloc.tsv","TOTAL\t3\ntools/source.cx\t1\ntools/new.cx\t1\n")&&stage(td,"tests/toolsloc.tsv")&&ok;
         if(ok)fixture_hook(td,1,"missing check-*.cx","new-tool-without-check-and-registration-refused",0);
-        ok=fixture_write(td,"tools/check-new.cx","int main(void){printf(\"FIXTURE_CHECK\\n\");return 0;}\n")&&stage(td,"tools/check-new.cx");
-        ck(ok,"new-tool-with-check-real-index");
+        ok=fixture_write(td,"tools/check-new.cx","int main(void){printf(\"FIXTURE_CHECK\\n\");return 0;}\n")&&stage(td,"tools/check-new.cx")&&ok;
         if(ok)fixture_hook(td,1,"check missing batch registration","new-tool-with-check-without-registration-refused",0);
-        ok=fixture_registry(td,0,1);
-        ck(ok,"new-tool-check-batch-real-index");
+        ok=fixture_write(td,"tests/batches.tsv","id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\nnew\tIMPLEMENTED\tinterfaces\ttools/check-new.cx\tSOURCE\tlnx/x86_64\t10\t-\ttools/check-new.cx\t-\tinterfaces.new\trc0:FIXTURE_CHECK\tproduct\n")&&stage(td,"tests/batches.tsv")&&ok;
+        ok=fixture_write(td,"tests/coverage.tsv","id\tlayer\timplementation\texpected_or_gap\tsource\ninterfaces.new\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture new\ttools/new.cx tools/check-new.cx\n")&&stage(td,"tests/coverage.tsv")&&ok;
         if(ok)fixture_hook(td,0,0,"new-checked-registered-tool-allowed",0);
     }
-    {char *v[]={"rm","-rf","--",td,0};ck(fixture_run(v,"."),"symlink-fixture-cleanup");}
+cleanup: {char *v[]={"rm","-rf","--",td,0};ck(fixture_run(v,"."),"symlink-fixture-cleanup");}
 }
 int main(int argc,char **argv){
     char td[200];
-    if(argc!=2||(strcmp(argv[1],"--loc")&&strcmp(argv[1],"--source")&&strcmp(argv[1],"--symlink"))){fprintf(stderr,"usage: check-precommit-toolsloc --loc | --source | --symlink (run all three batches)\n");return 2;}
+    target=-1;if(argc==2)for(int i=0;i<(int)(sizeof modes/sizeof modes[0]);i++)if(!strcmp(argv[1],modes[i]))target=i;if(target<0){fprintf(stderr,"usage: check-precommit-toolsloc MODE (run every registered boundary separately)\n");return 2;}
+    /* Fixture git commands select their own cwd/index, even under commit-own. */
+    unsetenv("GIT_DIR");unsetenv("GIT_WORK_TREE");unsetenv("GIT_INDEX_FILE");
     if(cx_fmt(td,sizeof td,"%s/pc-ts-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td))return 2;
     if(cx_fmt(hook,sizeof hook,"%s/precommit",td))return 2;
     {char *v[]={"sh","./unisacc.com","tools/precommit.cx","-o",hook,0};int ok=fixture_run(v,".");ck(ok,"build-real-precommit-once");if(!ok)return 2;}
-    fixture(argv[1]);
+    fixture();
     unlink(hook);rmdir(td);
     printf("PRECOMMIT_TOOLSLOC\tbatch=%s\tpass=%d\tfail=%d\n",argv[1],npass,nfail);
     return nfail?1:0;

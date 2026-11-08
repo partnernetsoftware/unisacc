@@ -115,16 +115,14 @@ static int rg_marker_ok(const char *m) {
     return 1;
 }
 
-/* The pre-check of the row about to be appended, in memory: twelve TAB-separated fields and a last field
-   that is exactly "rc0:" + MARKER.  A malformed row is refused here instead of surfacing later as a
-   metadata_valid!=1 from tests/run.cx --list (or, worse, after a commit, as every batch refusing). */
+/* Check the generated fourteen-column row before append: expect is rc0:MARKER,
+   followed by the headers contract and commit (or platform release) tier. */
 static int rg_row_ok(const char *row, const char *marker) {
-    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *prev = row, *last = row;
-    for (; *at; at++) if (*at == '\t') { fields++; prev = last; last = at + 1; }
-    /* prev is the expect field, last the headers field: "rc0:" + MARKER + TAB, then product|tree */
-    if (fields != 12 || strncmp(prev, "rc0:", 4) || (size_t)(last - prev) != 4 + ml + 1) return 0;
-    if (memcmp(prev + 4, marker, ml) || last[-1] != '\t') return 0;
-    return tx_eqz(last, "product\n") || tx_eqz(last, "tree\n");
+    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *expect = 0, *headers = 0, *tier = 0;
+    for (; *at; at++) if (*at == '\t') { fields++; if(fields==11)expect=at+1;if(fields==12)headers=at+1;if(fields==13)tier=at+1; }
+    if(fields!=13||!expect||!headers||!tier||strncmp(expect,"rc0:",4)||(size_t)(headers-expect)!=ml+5||memcmp(expect+4,marker,ml))return 0;
+    if(!((tier-headers==8&&!memcmp(headers,"product\t",8))||(tier-headers==5&&!memcmp(headers,"tree\t",5))))return 0;
+    return tx_eqz(tier,"commit\n")||tx_eqz(tier,"release\n");
 }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
@@ -199,7 +197,7 @@ int main(int argc, char **argv) {
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
     if (has_key(rg_bpath(), id)) rg_die("batch already registered", id);
     if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
-    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\trc0:%s\t%s\n", id, layer, check, check, arguments, cid, marker, headers) >= (int)sizeof brow
+    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\trc0:%s\t%s\t%s\n", id, layer, check, check, arguments, cid, marker, headers, tx_eqz(layer,"platform")?"release":"commit") >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
     if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());

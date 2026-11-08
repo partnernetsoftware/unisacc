@@ -1,0 +1,91 @@
+/* ROOT: exact observable forecast checks using the real CLI, not host math. */
+#pragma unisa use cxlib.tierruntime
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.env
+
+static int cf_summary(ct_table *t,const char *scope,const char *pool){
+    for(int i=0;i<t->n;i++)
+        if(ct_eq(ct_get(t,i,"scope"),scope)&&ct_eq(ct_get(t,i,"pool"),pool))return i;
+    ct_die("missing forecast summary");
+    return -1;
+}
+static int cf_value(ct_table *t,int row,const char *key,const char *expected){
+    return !ct_eq(ct_get(t,row,key),expected);
+}
+int main(int argc,char **argv){
+    if(argc!=2)ct_die("usage: ROOT");
+    char tmp[]="/tmp/check-forecast-tier-XXXXXX",path[4400];
+    if(!mkdtemp(tmp))ct_die("mkdtemp");
+    ct_path(path,tmp,"tests");
+    if(mkdir(path,0700))ct_die("mkdir fixture tests");
+    np_buf registry={0},timing={0},domains={0};
+    np_puts(&registry,"id\timplementation\ttier\tplatform\tmaterials\tbudget_seconds\n");
+    np_puts(&registry,"a\tIMPLEMENTED\tcommit\tlnx/x86_64\t-\t5\n");
+    np_puts(&registry,"b\tPLANNED\tdaily\tlnx/x86_64\tm\t9\n");
+    np_puts(&registry,"c\tIMPLEMENTED\trelease\tlnx/x86_64\tm\t7\n");
+    np_puts(&timing,"# startup_ns=47464787754\n# wave_reserve_ns=10000000000\n");
+    np_puts(&timing,"id\tstatus\tcompletion_ns\tobserved_wall_ns\ttimeout_lower_bound_ns\treason\tsource_log\tsource_line\n");
+    np_puts(&timing,"a\tFAIL\t-\t40000000000\t39000000000\tbatch-fail\tout/fixture.log\t1\n");
+    np_puts(&timing,"c\tPASS\t2000000000\t2000000000\t0\tbatch-pass\tout/fixture.log\t2\n");
+    np_puts(&domains,"# fixture: no constraints\n");
+    ct_write(tmp,"tests/batches.tsv",&registry);
+    ct_write(tmp,"tests/wave-domains.tsv",&domains);
+    ct_write(tmp,"timing.tsv",&timing);
+    char candidate[4400],source[4400];
+    ct_path(candidate,argv[1],"unisacc.com");
+    ct_path(source,argv[1],"tools/forecast-tier-runtime.cx");
+    char *command[]={"sh",candidate,source,"--",tmp,"timing.tsv","estimates.tsv","summary.tsv",0};
+    np_result result={0};
+    char why[512]={0};
+    int transport=np_run(command,argv[1],0,55,&result,why,sizeof why);
+    if(transport||result.rc){
+        fprintf(stderr,"forecast fixture: %s\n%s\n",why,result.err?result.err:"");
+        return 1;
+    }
+    ct_table estimates={0},summary={0};
+    ct_load(tmp,"estimates.tsv",&estimates);
+    ct_load(tmp,"summary.tsv",&summary);
+    int failures=estimates.n!=3;
+    int a=ct_find(&estimates,"a"),b=ct_find(&estimates,"b"),c=ct_find(&estimates,"c");
+    if(a<0||b<0||c<0)ct_die("missing estimate row");
+    failures+=cf_value(&estimates,a,"estimate_ns","5000000000");
+    failures+=cf_value(&estimates,a,"estimate_source","registry-budget");
+    failures+=cf_value(&estimates,a,"timeout_lower_bound_ns","39000000000");
+    failures+=cf_value(&estimates,b,"estimate_ns","-");
+    failures+=cf_value(&estimates,b,"estimate_source","excluded-planned");
+    failures+=cf_value(&estimates,b,"execution_condition","not-executable");
+    failures+=cf_value(&estimates,c,"estimate_ns","2000000000");
+    failures+=cf_value(&estimates,c,"material_build_seconds","UNESTIMATED");
+    failures+=cf_value(&estimates,c,"platform_wait_seconds","UNESTIMATED");
+    failures+=cf_value(&estimates,c,"execution_condition","materials-ready-and-native-host-available");
+    const char *scopes[]={"commit-layer","daily-layer","release-layer","daily-cumulative","release-cumulative","all"};
+    const char *registered[]={"1","1","1","2","3","3"};
+    const char *implemented[]={"1","0","1","1","2","2"};
+    const char *ids[]={"a","-","c","a","a;c","a;c"};
+    for(int i=0;i<6;i++){
+        int r=cf_summary(&summary,scopes[i],"all-executable");
+        failures+=cf_value(&summary,r,"registered",registered[i]);
+        failures+=cf_value(&summary,r,"implemented",implemented[i]);
+        failures+=cf_value(&summary,r,"window_ids",ids[i]);
+        failures+=cf_value(&summary,r,"end_to_end_seconds","UNESTIMATED");
+    }
+    int daily=cf_summary(&summary,"daily-cumulative","all-executable");
+    failures+=cf_value(&summary,daily,"raw_execution_ns","62464787754");
+    failures+=cf_value(&summary,daily,"planned","1");
+    int all=cf_summary(&summary,"all","all-executable");
+    failures+=cf_value(&summary,all,"raw_execution_ns","74464787754");
+    failures+=cf_value(&summary,all,"material_build_seconds","UNESTIMATED");
+    int heavy=cf_summary(&summary,"all","materials-heavy");
+    failures+=cf_value(&summary,heavy,"registered","2");
+    failures+=cf_value(&summary,heavy,"implemented","1");
+    failures+=cf_value(&summary,heavy,"window_ids","c");
+    if(!failures){
+        const char *files[]={"tests/batches.tsv","tests/wave-domains.tsv","timing.tsv","estimates.tsv","summary.tsv"};
+        for(int i=0;i<5;i++){ct_path(path,tmp,files[i]);if(unlink(path))ct_die("cleanup");}
+        ct_path(path,tmp,"tests");
+        if(rmdir(path)||rmdir(tmp))ct_die("cleanup directories");
+    }else fprintf(stderr,"forecast fixture retained: %s\n",tmp);
+    np_free(&result);
+    printf("CHECK_FORECAST_TIER_RUNTIME\tfailed=%d\n",failures);
+    return failures?1:0;
+}

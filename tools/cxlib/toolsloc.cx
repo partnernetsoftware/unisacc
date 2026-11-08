@@ -1,0 +1,96 @@
+#pragma unisa module toolsloc
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+/* One implementation for the working-tree command and the indexed commit gate. */
+typedef struct { char *path; long lines; } tl_row;
+int tl_bad(const char *why){fprintf(stderr,"toolsloc: FAIL: %s\n",why);return 2;}
+static char *tl_git(char **v,size_t *n){
+    np_result r;char why[400];
+    if(np_run(v,".",0,40,&r,why,sizeof why)){fprintf(stderr,"toolsloc: %s\n",why);return 0;}
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    char *s=0;if(!r.rc){s=malloc(r.outn+1);if(s){if(mm_copy(s,r.outn+1,r.out,r.outn)){free(s);s=0;}else{s[r.outn]=0;*n=r.outn;}}}
+    np_free(&r);return s;
+}
+static char *tl_read(const char *path,int index,size_t *n){
+    if(index){char spec[4600];char *v[]={"git","show",spec,0};if(cx_fmt(spec,sizeof spec,":%s",path))return 0;return tl_git(v,n);}
+    return cx_read(path,n);
+}
+static int tl_index_regular(const char *p){
+    size_t n=0;char *v[]={"git","ls-files","--stage","-z","--",(char *)p,0};char *s=tl_git(v,&n);int ok=0;
+    if(s&&n){char *t=strchr(s,'\t');ok=t&&t[-1]=='0'&&(!strncmp(s,"100644 ",7)||!strncmp(s,"100755 ",7));}free(s);return ok;
+}
+static int tl_regular(const char *p){
+    char part[4600];size_t n=strlen(p);struct stat st;
+    if(n>=sizeof part)return -1;if(mm_copy(part,sizeof part,p,n+1))return -1;
+    for(size_t i=0;i<=n;i++)if(part[i]=='/'||i==n){char c=part[i];part[i]=0;if(lstat(part,&st))return -1;part[i]=c;if(S_ISLNK(st.st_mode))return 0;if(i==n)return S_ISREG(st.st_mode);}
+    return 0;
+}
+int tl_cli(const char *s,size_t n){
+    /* Recognize directives only outside comments/strings at a logical line start. */
+    for(size_t i=0;i<n;i++){
+        if(i+1<n&&s[i]=='/'&&s[i+1]=='/'){while(i<n&&s[i]!='\n')i++;continue;}
+        if(i+1<n&&s[i]=='/'&&s[i+1]=='*'){i+=2;while(i+1<n&&(s[i]!='*'||s[i+1]!='/'))i++;i++;continue;}
+        if(s[i]=='"'||s[i]=='\''){char q=s[i++];while(i<n&&s[i]!=q){if(s[i]=='\\')i++;i++;}continue;}
+        if(s[i]=='#'&&i+21<=n&&!memcmp(s+i,"#pragma unisa module ",21)){size_t b=i;while(b&&s[b-1]!='\n'&&(s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r'))b--;if(!b||s[b-1]=='\n')return 0;} if(i+4<=n&&!memcmp(s+i,"main",4)&&(i==0||!((s[i-1]>='a'&&s[i-1]<='z')||(s[i-1]>='A'&&s[i-1]<='Z')||(s[i-1]>='0'&&s[i-1]<='9')||s[i-1]=='_'))){size_t j=i+4;while(j<n&&(s[j]==' '||s[j]=='\t'||s[j]=='\n'||s[j]=='\r'))j++;if(j<n&&s[j]=='(')return 1;}
+    }return 0;
+}
+long tl_lines(const char *s,size_t n){long k=0;for(size_t i=0;i<n;i++)if(s[i]=='\n')k++;return k+(n&&s[n-1]!='\n');}
+static int tl_number(const char *s,long n,long *out){long x=0;if(!n)return 0;for(long i=0;i<n;i++){if(s[i]<'0'||s[i]>'9'||x>214748364)return 0;x=x*10+s[i]-'0';}*out=x;return 1;}
+static long tl_find(tl_row *r,long n,const char *p){for(long i=0;i<n;i++)if(!strcmp(r[i].path,p))return i;return -1;}
+static int tl_registered(const char *s,size_t n,const char *path){
+    size_t a=0;while(a<n){size_t e=a;int col=0,source=0,entry=0;while(e<n&&s[e]!='\n')e++;
+        for(size_t b=a;b<e;){size_t z=b;while(z<e&&s[z]!='\t')z++;if(strlen(path)==z-b&&!memcmp(s+b,path,z-b)){if(col==3)source=1;if(col==8)entry=1;}col++;b=z+1;}
+        if(source||entry)return 1;a=e+1;
+    }return 0;
+}
+int tl_run(int index,int mode){
+    size_t ln=0,bn=0,an=0;long nr=0,nb=0,total=0,base=-1;int fail=0;char *list,*baseline,*added;tl_row *rows=0,*bases=0;
+    char *lv[]={"git","ls-files","-s","-z","--","tools",0};
+    char *av[]={"git","diff","--cached","--name-only","--diff-filter=A","-z","--","tools",0};
+    list=tl_git(lv,&ln);if(!list)return tl_bad("git ls-files failed");
+    for(size_t a=0;a<ln;){char *rec=list+a,*tab=strchr(rec,'\t');size_t len=strlen(rec);a+=len+1;if(!tab)return tl_bad("malformed index row");
+        if(strncmp(rec,"100644 ",7)&&strncmp(rec,"100755 ",7))continue;
+        if(tab[-1]!='0')return tl_bad("unmerged tools index");
+        char *p=tab+1;size_t pl=strlen(p);if(pl<3||strcmp(p+pl-3,".cx"))continue;
+        if(!index){int regular=tl_regular(p);if(regular<0)return tl_bad("cannot stat tracked source");if(!regular)continue;}
+        size_t n;char *s=tl_read(p,index,&n);if(!s)return tl_bad("cannot read tracked source");
+        rows=realloc(rows,(nr+1)*sizeof *rows);if(!rows)return tl_bad("allocation failed");rows[nr].path=strdup(p);rows[nr].lines=tl_lines(s,n);total+=rows[nr++].lines;free(s);
+    }
+    baseline=tl_read("tests/toolsloc.tsv",index,&bn);
+    if(mode==2&&baseline)return tl_bad("--init refuses an existing baseline");
+    if(!baseline&&mode!=2)return tl_bad("missing baseline tests/toolsloc.tsv");
+    if(baseline){size_t a=0;while(a<bn){size_t e=a;while(e<bn&&baseline[e]!='\n')e++;if(e==a||baseline[a]=='#'){a=e+1;continue;}
+        char *tab=memchr(baseline+a,'\t',e-a);long value;if(!tab||!tl_number(tab+1,e-(tab-baseline)-1,&value))return tl_bad("malformed baseline row");
+        *tab=0;if(!strcmp(baseline+a,"TOTAL")){if(nb||base>=0)return tl_bad("TOTAL must be first");base=value;}
+        else{if(strncmp(baseline+a,"tools/",6)||tl_find(bases,nb,baseline+a)>=0)return tl_bad("invalid or duplicate baseline path");bases=realloc(bases,(nb+1)*sizeof *bases);if(!bases)return tl_bad("allocation failed");bases[nb].path=strdup(baseline+a);bases[nb++].lines=value;}
+        a=e+1;
+    }if(base<0)return tl_bad("missing TOTAL header");}
+    /* --write explicitly migrates legacy TOTAL to the first complete per-file table. */
+    for(long i=0;i<nr;i++){long b=tl_find(bases,nb,rows[i].path),limit=b<0?600:bases[b].lines;if((nb||mode==2)&&rows[i].lines>limit){fprintf(stderr,"toolsloc: FAIL: %s has %ld lines > baseline %ld\n",rows[i].path,rows[i].lines,limit);fail=1;}}
+    added=tl_git(av,&an);if(!added)return tl_bad("cannot identify added tools");
+    for(size_t a=0;a<an;){char *p=added+a;a+=strlen(p)+1;long i=tl_find(rows,nr,p);
+        if(i<0){
+            for(size_t z=0;z<ln;){char *rec=list+z,*tab=strchr(rec,'\t');z+=strlen(rec)+1;if(tab&&!strcmp(tab+1,p)&&!strncmp(rec,"120000 ",7)&&strlen(p)>3&&!strcmp(p+strlen(p)-3,".cx")){
+                size_t mn=0;char *m=tl_read("tests/batches.tsv",index,&mn);if(!m||!tl_registered(m,mn,p)){fprintf(stderr,"toolsloc: FAIL: new symlink alias %s requires batches source/entry registration\n",p);fail=1;}free(m);
+            }}continue;
+        }
+        size_t n;char *s=tl_read(p,index,&n);if(!s)return tl_bad("cannot inspect added tool");
+        if(rows[i].lines>600){fprintf(stderr,"toolsloc: FAIL: %s has %ld lines > new-file limit 600\n",p,rows[i].lines);fail=1;}
+        if(tl_cli(s,n)){
+            char check[4600];const char *name=strrchr(p,'/');name=name?name+1:p;int ischeck=!strncmp(name,"check-",6);
+            size_t mn=0;char *m=tl_read("tests/batches.tsv",index,&mn);int paired=ischeck;
+            if(!ischeck)for(int dir=0;dir<2;dir++){
+                if(cx_fmt(check,sizeof check,"%s/check-%s",dir?"tests":"tools",name))return tl_bad("check path too long");
+                if(tl_index_regular(check)&&m&&tl_registered(m,mn,check))paired=1;
+            }
+            if(!m||!tl_registered(m,mn,p)||!paired){fprintf(stderr,"toolsloc: FAIL: new CLI %s requires check and batches source/entry registration\n",p);fail=1;}free(m);
+        }free(s);
+    }
+    long previous=base<0?0:base,growth=total-previous;
+    printf("TOTAL_GROWTH\tthreshold_percent=1\tprevious=%ld\tcurrent=%ld\tgrowth=%ld\tapproval=%s\n",previous,total,growth,growth>0&&growth>previous/100?"REQUIRED":"NOT_REQUIRED");
+    fflush(stdout);
+    if(fail)return 1;
+    if(mode==1||mode==2){FILE *f=fopen("tests/toolsloc.tsv","wb");if(!f)return tl_bad("cannot write baseline");fprintf(f,"TOTAL\t%ld\n",total);for(long i=0;i<nr;i++)fprintf(f,"%s\t%ld\n",rows[i].path,rows[i].lines);if(fclose(f))return tl_bad("cannot finish baseline");}
+    printf("toolsloc: ok: %ld files, %ld lines; %s baseline\nTOOLSLOC\n",nr,total,nb?"per-file":"legacy TOTAL");return 0;
+}

@@ -1,0 +1,58 @@
+/* tools/check-phase-budget.cx -- tools/phase-budget.cx 的检查(夹具写入 sy_tmpdir 下,不依赖 out/)。
+ *
+ *   sh ./unisacc.com tools/check-phase-budget.cx
+ *
+ * 1) 全部在预算内 → 退出 0;2) 超限且无 waiver → 退出 1(FAIL);3) 超限带有效 waiver → 0(WAIVED);
+ * 4) waiver 过期 → 1(EXPIRED);5) measured 非数字 → UNMEASURED 且不失败;6) 列数不对 → 1;
+ * 7) 真实 agentwork/phase-times.tsv 在今天解析通过。输出 PASS/FAIL 与 CHECK_PHASE_BUDGET<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-phase-budget.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-phase-budget.%s\n", name); }
+}
+static char dir[320];
+/* 写夹具并运行 phase-budget,返回退出码,输出放入 out */
+static int run_fixture(const char *name, const char *body, const char *today, char *out, size_t cap) {
+    char path[400], cmd[1200]; char *o = 0; size_t n = 0;
+    if (cx_fmt(path, sizeof path, "%s/%s.tsv", dir, name)) return 99;
+    if (cx_write(path, body, tx_len(body, 100000))) return 98;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/phase-budget.cx -- '%s' --today %s", path, today)) return 97;
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 40, &o, &n);
+    out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+static int has(const char *hay, const char *needle) { return tx_find(hay, tx_len(hay, 100000), needle, tx_len(needle, 100)) >= 0; }
+
+int main(void) {
+    char out[8192];
+    if (cx_fmt(dir, sizeof dir, "%s/phase-budget-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    const char *H = "# phase\tscope\tbudget_s\tmeasured_s\tsource\twaiver_task\twaiver_until\n";
+    char b[1024];
+    cx_fmt(b, sizeof b, "%sa\top\t300\t100\ts\t-\t-\nb\twhole\t7200\t7000\ts\t-\t-\n", H);
+    ck(run_fixture("ok", b, "2026-11-08", out, sizeof out) == 0 && has(out, "failed=0"), "all-within-budget");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t301\ts\t-\t-\n", H);
+    ck(run_fixture("nowaiver", b, "2026-11-08", out, sizeof out) == 1 && has(out, "no waiver"), "over-without-waiver-fails");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t900\ts\tT1\t2026-11-30\n", H);
+    ck(run_fixture("waived", b, "2026-11-08", out, sizeof out) == 0 && has(out, "WAIVED"), "over-with-waiver-passes");
+    ck(run_fixture("expired", b, "2026-12-01", out, sizeof out) == 1 && has(out, "EXPIRED"), "expired-waiver-fails");
+    cx_fmt(b, sizeof b, "%sa\top\t300\tUNMEASURED\ts\t-\t-\n", H);
+    ck(run_fixture("unm", b, "2026-11-08", out, sizeof out) == 0 && has(out, "unmeasured=1"), "unmeasured-reported-not-failed");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t1\n", H);
+    ck(run_fixture("cols", b, "2026-11-08", out, sizeof out) == 1 && has(out, "columns"), "bad-column-count-fails");
+    cx_fmt(b, sizeof b, "%sa\tweird\t300\t1\ts\t-\t-\n", H);
+    ck(run_fixture("scope", b, "2026-11-08", out, sizeof out) == 1, "bad-scope-fails");
+    {   char *v[] = {"sh", "./unisacc.com", "tools/phase-budget.cx", "--", 0}; char *o = 0; size_t n = 0;
+        int rc = cx_runv_timeout(v, 40, &o, &n);
+        ck(rc == 0 && o && n > 0, "real-phase-times-parses"); }
+    {   char *rm[] = {"rm", "-rf", dir, 0}; char *o = 0; size_t n = 0; cx_runv_timeout(rm, 20, &o, &n); }
+    sy_printf("CHECK_PHASE_BUDGET\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

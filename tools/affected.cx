@@ -320,15 +320,17 @@ static void mark_guards(const char *id) {
 }
 
 /* ---------- registry ---------- */
-typedef struct { char *id, *source, *entry, *args, *materials; } Batch;
+typedef struct { char *id, *source, *entry, *args, *materials, *tier; } Batch;
 static Batch batch[MAXBATCH];
 static int nbatch;
+static const char *selected_tier;
 static void on_batch(const tp_batch_view *v, void *ctx) {
     (void)ctx;
     if (!tx_eqz(v->implementation, "IMPLEMENTED") || !tx_eqz(v->mode, "SOURCE")) return;
     if (nbatch == MAXBATCH) die("too many batches");
     batch[nbatch].id = zkeep(v->id); batch[nbatch].source = zkeep(v->source); batch[nbatch].entry = zkeep(v->entry);
     batch[nbatch].args = zkeep(v->args); batch[nbatch].materials = zkeep(v->materials);
+    batch[nbatch].tier = zkeep(v->tier);
     nbatch++;
 }
 static void on_cov(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
@@ -547,6 +549,7 @@ int main(int argc, char **argv) {
             src += ids ? 100 : 1;
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
+        else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
@@ -568,6 +571,7 @@ int main(int argc, char **argv) {
         for (k = 0; k < nfiles; k++) {
             for (b = 0; b < nbatch && !tx_eqz(batch[b].id, files[k]); b++) {}
             if (b == nbatch) { fprintf(stderr, "affected: REFUSE id %s is not an IMPLEMENTED SOURCE batch\n", files[k]); return 2; }
+            if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
             sel[nsel++] = b;
             printf("SELECTED\t%s\n", batch[b].id);
         }
@@ -583,6 +587,7 @@ int main(int argc, char **argv) {
         }
     } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
     for (b = 0; b < nbatch; b++) {
+        if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
         int why = -1, v;
         mark_batch(&batch[b]);
         v = match(changed, nch, &why);

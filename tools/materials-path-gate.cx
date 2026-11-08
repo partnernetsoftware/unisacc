@@ -1,0 +1,56 @@
+/* Material producer source gate, not an artifact or historical-document scan.
+ * sh ./unisacc.com tools/materials-path-gate.cx -- [--file SOURCE ...] | --selected NAME
+ * Default: direct regular tools/*-material.cx, *-prepare.cx and materials-prepare.cx.
+ * Tests, check-* fixtures, generated output and historical documents are excluded.
+ * --file checks each supplied source; --selected prints 0/1 and exits 0 without reading files.
+ * All source bytes count (comments and generated shell strings included).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static int mpg_suffix(const char *s,const char *tail){size_t n=strlen(s),m=strlen(tail);return n>=m&&!memcmp(s+n-m,tail,m);}
+static int mpg_selected(const char *s){return strncmp(s,"check-",6)&&
+    (mpg_suffix(s,"-material.cx")||mpg_suffix(s,"-prepare.cx"));}
+static int mpg_token(const char *s,size_t n,size_t at){
+    if(n-at>=5&&!memcmp(s+at,"/tmp/",5))return 1;
+    if(n-at>=5&&!memcmp(s+at,"$HOME",5))return 2;
+    return 0;
+}
+static int mpg_scan(const char *path){
+    struct stat st;size_t n=0,i,line=1;char *s;int bad=0;
+    if(lstat(path,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>16777216){
+        fprintf(stderr,"materials-path-gate\tREFUSE\t%s\tregular source required\n",path);return 1;
+    }
+    s=cx_read(path,&n);
+    if(!s||n!=(size_t)st.st_size){free(s);fprintf(stderr,"materials-path-gate\tREFUSE\t%s\tread\n",path);return 1;}
+    for(i=0;i<n;i++){
+        int token=mpg_token(s,n,i);
+        if(token){fprintf(stderr,"materials-path-gate\tREFUSE\t%s:%zu\t%s\n",path,line,token==1?"literal temporary path":"literal home variable");bad=1;}
+        if(s[i]=='\n')line++;
+    }
+    free(s);return bad;
+}
+int main(int argc,char **argv){
+    int i=1,bad=0,count=0;
+    if(i<argc&&!strcmp(argv[i],"--"))i++;
+    if(i<argc&&!strcmp(argv[i],"--selected")){
+        if(i+2!=argc){fprintf(stderr,"materials-path-gate: --selected NAME required\n");return 2;}
+        printf("%d\n",mpg_selected(argv[i+1])?1:0);return 0;
+    }
+    if(i<argc){
+        for(;i<argc;i++){
+            if(strcmp(argv[i],"--file")||i+1>=argc){fprintf(stderr,"materials-path-gate: usage [--file SOURCE ...]\n");return 2;}
+            bad|=mpg_scan(argv[++i]);count++;
+        }
+    }else{
+        DIR *d=opendir("tools");struct dirent *e;
+        if(!d){fprintf(stderr,"materials-path-gate: tools directory required\n");return 2;}
+        while((e=readdir(d))){char p[4400];if(!mpg_selected(e->d_name))continue;
+            if(cx_fmt(p,sizeof p,"tools/%s",e->d_name)){bad=1;continue;}
+            count++;bad|=mpg_scan(p);
+        }
+        if(closedir(d))bad=1;
+    }
+    if(!count){fprintf(stderr,"materials-path-gate: no material sources\n");return 2;}
+    if(bad)return 1;
+    printf("MATERIALS_PATH_GATE\tPASS\tsources=%d\n",count);return 0;
+}

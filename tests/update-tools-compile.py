@@ -5,8 +5,9 @@ import subprocess
 import sys
 
 
-def batch(i):
-    return (f"tools-compile-{i:03d}\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{{root}};{{out}};{i}\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\n")
+def batch(i, tier=None):
+    suffix = f"\t{tier}" if tier else ""
+    return (f"tools-compile-{i:03d}\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{{root}};{{out}};{i}\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct{suffix}\n")
 
 
 def main():
@@ -21,8 +22,15 @@ def main():
     shards = (count + 7) // 8
     lines = (root / "tests/batches.tsv").read_text().splitlines(keepends=True)
     first = next(i for i, line in enumerate(lines) if line.startswith("tools-compile-"))
+    tier = None
+    if lines[0].rstrip("\n").endswith("\ttier"):
+        tiers = {line.rstrip("\n").split("\t")[-1]
+                 for line in lines if line.startswith("tools-compile-")}
+        if len(tiers) != 1 or not tiers <= {"commit", "daily", "release"}:
+            raise SystemExit("工具编译片档位不一致，拒绝隐式重分档")
+        tier = tiers.pop()
     kept = [line for line in lines if not line.startswith("tools-compile-")]
-    kept[first:first] = [batch(i) for i in range(shards)]
+    kept[first:first] = [batch(i, tier) for i in range(shards)]
     (out / "batches.tsv").write_text("".join(kept))
     # coverage只描述动态契约；实际数量由source清单和batch结构行给出。
     (out / "coverage.tsv").write_bytes((root / "tests/coverage.tsv").read_bytes())

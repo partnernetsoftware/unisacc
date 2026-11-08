@@ -1,0 +1,225 @@
+/* Shared integer-only TSV and conflict-window machinery for tier forecasts.
+ * Inputs are frozen observations from multiple actual snapshots, not current
+ * source qualification. No process execution or test result cache.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+enum { CT_MAX = 4096, CT_COLS = 64 };
+typedef struct { char *v[CT_COLS]; int n; } ct_row;
+typedef struct {
+    ct_row header;
+    ct_row *row;
+    int n;
+    long long startup,reserve;
+} ct_table;
+typedef struct {
+    const char *id,*tier,*status,*completion;
+    const char *domains,*materials,*platform,*impl,*budget;
+    long long cost;
+    int passed;
+} ct_item;
+typedef struct { int ids[16],n; long long peak; } ct_wave;
+
+void ct_die(const char *s){
+    fprintf(stderr,"tier-runtime: %s\n",s);
+    exit(2);
+}
+int ct_eq(const char *a,const char *b){return !strcmp(a,b);}
+char *ct_dup(const char *s,size_t n){
+    char *p=malloc(n+1);
+    if(!p)ct_die("allocation");
+    if(mm_copy(p,n+1,s,n))ct_die("copy bound");
+    p[n]=0;
+    return p;
+}
+long long ct_num(const char *s){
+    char *e=0;
+    long long v=strtoll(s,&e,10);
+    if(!*s||*e||v<0||v>1000000000000000LL)
+        ct_die("invalid or oversized integer");
+    return v;
+}
+void ct_path(char *p,const char *root,const char *rel){
+    if(rel[0]=='/'){
+        if(cx_fmt(p,4400,"%s",rel))ct_die("path length");
+    }else if(cx_fmt(p,4400,"%s/%s",root,rel))ct_die("path length");
+}
+/* Doubled quote decoding handles csv.writer's quoted JSON history cells. */
+static void ct_parse(const char *s,size_t n,ct_row *r){
+    memset(r,0,sizeof(ct_row));
+    size_t at=0;
+    for(;;){
+        np_buf b={0};
+        int quoted=at<n&&s[at]=='"';
+        if(quoted)at++;
+        int closed=!quoted;
+        while(at<n){
+            char c=s[at++];
+            if(quoted&&c=='"'){
+                if(at<n&&s[at]=='"'){
+                    at++;
+                    np_put(&b,"\"",1);
+                    continue;
+                }
+                closed=1;
+                break;
+            }
+            if(!quoted&&c=='\t'){at--;break;}
+            np_put(&b,&c,1);
+        }
+        if(!closed)ct_die("unclosed TSV quote");
+        if(r->n==CT_COLS)ct_die("too many TSV columns");
+        r->v[r->n++]=ct_dup(b.p?b.p:"",b.n);
+        free(b.p);
+        if(at==n)break;
+        if(s[at++]!='\t')ct_die("TSV delimiter");
+    }
+}
+static void ct_load_rows(const char *root,const char *rel,ct_table *t,int has_header){
+    char p[4400];
+    ct_path(p,root,rel);
+    size_t n=0;
+    char *s=cx_read(p,&n);
+    if(!s)ct_die("cannot read input");
+    memset(t,0,sizeof(ct_table));
+    t->row=calloc(CT_MAX,sizeof(ct_row));
+    if(!t->row)ct_die("allocation");
+    size_t at=0;
+    int header=0;
+    while(at<n){
+        size_t end=at;
+        while(end<n&&s[end]!='\n')end++;
+        size_t len=end-at;
+        if(len&&s[at+len-1]=='\r')len--;
+        if(len&&s[at]=='#'){
+            if(len>13&&!strncmp(s+at,"# startup_ns=",13))
+                t->startup=strtoll(s+at+13,0,10);
+            if(len>18&&!strncmp(s+at,"# wave_reserve_ns=",18))
+                t->reserve=strtoll(s+at+18,0,10);
+        }else if(len){
+            if(has_header&&!header){ct_parse(s+at,len,&t->header);header=1;}
+            else{
+                if(t->n==CT_MAX)ct_die("too many rows");
+                ct_parse(s+at,len,&t->row[t->n]);
+                if(has_header&&t->row[t->n].n!=t->header.n)ct_die("TSV column count");
+                t->n++;
+            }
+        }
+        at=end+1;
+    }
+    free(s);
+    if(has_header&&!header)ct_die("missing TSV header");
+}
+void ct_load(const char *root,const char *rel,ct_table *t){
+    ct_load_rows(root,rel,t,1);
+}
+const char *ct_get(ct_table *t,int row,const char *key){
+    for(int i=0;i<t->header.n;i++)
+        if(ct_eq(t->header.v[i],key))return t->row[row].v[i];
+    ct_die("missing TSV column");
+    return "";
+}
+const char *ct_get_or(ct_table *t,int row,const char *key,const char *fallback){
+    if(row>=0)return ct_get(t,row,key);
+    return fallback;
+}
+int ct_find(ct_table *t,const char *id){
+    for(int i=0;i<t->n;i++)if(ct_eq(ct_get(t,i,"id"),id))return i;
+    return -1;
+}
+static int ct_token(const char *list,const char *token){
+    size_t z=strlen(token);
+    const char *p=list;
+    while(*p){
+        const char *e=strchr(p,',');
+        size_t n=e?(size_t)(e-p):strlen(p);
+        if(n==z&&!memcmp(p,token,z))return 1;
+        if(!e)break;
+        p=e+1;
+    }
+    return 0;
+}
+static int ct_intersect(const char *a,const char *b){
+    if(ct_eq(a,"-")||ct_eq(b,"-"))return 0;
+    const char *p=a;
+    while(*p){
+        const char *e=strchr(p,',');
+        size_t n=e?(size_t)(e-p):strlen(p);
+        const char *q=b;
+        while(*q){
+            const char *f=strchr(q,',');
+            size_t m=f?(size_t)(f-q):strlen(q);
+            if(n==m&&!memcmp(p,q,n))return 1;
+            if(!f)break;
+            q=f+1;
+        }
+        if(!e)break;
+        p=e+1;
+    }
+    return 0;
+}
+int ct_compatible(ct_wave *w,ct_item *items,int index,int jobs){
+    ct_item *a=&items[index];
+    if(w->n>=jobs||!ct_eq(a->materials,"-"))return 0;
+    for(int k=0;k<w->n;k++){
+        ct_item *b=&items[w->ids[k]];
+        if(!ct_eq(b->materials,"-")||ct_token(a->domains,"serial")||
+           ct_token(b->domains,"serial")||ct_intersect(a->domains,b->domains))
+            return 0;
+    }
+    return 1;
+}
+void ct_add(ct_wave *w,ct_item *items,int index){
+    if(w->n==16)ct_die("wave capacity");
+    w->ids[w->n++]=index;
+    if(items[index].cost>w->peak)w->peak=items[index].cost;
+}
+long long ct_margin(long long n){return (n*5+3)/4;}
+long long ct_seconds_ns(long long seconds){return seconds*1000000000LL;}
+void ct_format_seconds(char *out,size_t cap,long long ns){
+    if(cx_fmt(out,cap,"%lld.%09lld",ns/1000000000LL,ns%1000000000LL))
+        ct_die("seconds formatting");
+}
+static void ct_cell(np_buf *b,const char *s){
+    int q=strchr(s,'\t')||strchr(s,'\n')||strchr(s,'"');
+    if(q)np_puts(b,"\"");
+    for(const char *p=s;*p;p++){
+        if(*p=='"')np_puts(b,"\"");
+        np_put(b,p,1);
+    }
+    if(q)np_puts(b,"\"");
+}
+void ct_text(np_buf *b,const char *s){ct_cell(b,s);np_puts(b,"\t");}
+void ct_int(np_buf *b,long long n){np_putll(b,n);np_puts(b,"\t");}
+void ct_last(np_buf *b,const char *s){ct_cell(b,s);np_puts(b,"\n");}
+void ct_write(const char *root,const char *rel,np_buf *b){
+    char p[4400];
+    ct_path(p,root,rel);
+    char parent[4400];
+    if(cx_fmt(parent,sizeof parent,"%s",p))ct_die("output parent length");
+    char *slash=strrchr(parent,'/');
+    if(!slash||slash==parent)ct_die("output parent path");
+    *slash=0;
+    struct stat st;
+    if(stat(parent,&st)&&
+       (errno!=ENOENT||mkdir(parent,0700)))ct_die("cannot create output parent");
+    if(np_writefile(p,b->p,b->n))ct_die("cannot write output");
+}
+void ct_ids(np_buf *b,ct_wave *w,ct_item *items){
+    for(int k=0;k<w->n;k++){
+        if(k)np_puts(b,",");
+        np_puts(b,items[w->ids[k]].id);
+    }
+}
+void ct_meta(ct_table *t){
+    if(t->startup!=47464787754LL||t->reserve!=10000000000LL)
+        ct_die("unexpected frozen cost baseline");
+}
+void ct_domains(const char *root,ct_table *t){
+    ct_load_rows(root,"tests/wave-domains.tsv",t,0);
+}
+const char *ct_domain(ct_table *d,const char *id){
+    for(int i=0;i<d->n;i++)
+        if(d->row[i].n>=2&&ct_eq(d->row[i].v[0],id))return d->row[i].v[1];
+    return "-";
+}

@@ -1,0 +1,156 @@
+/* CLI: select-commit-tier ROOT [TIMINGS OUTPUT [JOBS]]
+ * Defaults: tests/commit-tier-timings.tsv, tests/commit-tier-selection.tsv, 16.
+ * Frozen multiple-snapshot TSV is read-only. Extract/observe ingestion is NOT
+ * provided by this CLI; it consumes the already frozen 289-ID timing evidence.
+ * PASS observations predict runtime, never qualify the current source tree.
+ */
+#pragma unisa use cxlib.tierruntime
+#pragma unisa use cxlib.netpack
+
+int main(int argc,char **argv){
+    if(argc!=2&&argc!=4&&argc!=5)
+        ct_die("usage: ROOT [TIMINGS OUTPUT [JOBS]]");
+    const char *root=argv[1];
+    const char *timing=argc>=4?argv[2]:"tests/commit-tier-timings.tsv";
+    const char *output=argc>=4?argv[3]:"tests/commit-tier-selection.tsv";
+    int jobs=argc==5?(int)ct_num(argv[4]):16;
+    if(jobs<1||jobs>16)ct_die("jobs must be 1..16");
+    ct_table t={0},reg={0};
+    ct_load(root,timing,&t);
+    ct_load(root,"tests/batches.tsv",&reg);
+    ct_meta(&t);
+    if(t.n!=289)ct_die("expected frozen 289 timing IDs");
+    ct_item *items=calloc(t.n,sizeof(ct_item));
+    int *order=calloc(t.n,sizeof(int));
+    int *chosen=calloc(t.n,sizeof(int));
+    int *placement=calloc(t.n,sizeof(int));
+    long long *cumulative=calloc(t.n,sizeof(long long));
+    const char **reason=calloc(t.n,sizeof(char*));
+    ct_wave *waves=calloc(t.n,sizeof(ct_wave));
+    if(!items||!order||!chosen||!placement||!cumulative||!reason||!waves)
+        ct_die("allocation");
+    int eligible=0,nwave=0,nchosen=0;
+    long long raw=t.startup;
+    for(int i=0;i<t.n;i++){
+        ct_item *a=&items[i];
+        a->id=ct_get(&t,i,"id");
+        a->tier=ct_get(&t,i,"original_tier");
+        a->status=ct_get(&t,i,"status");
+        a->completion=ct_get(&t,i,"completion_ns");
+        a->domains=ct_get(&t,i,"domains");
+        a->materials=ct_get(&t,i,"materials");
+        for(int j=0;j<i;j++)
+            if(ct_eq(items[j].id,a->id))ct_die("duplicate timing ID");
+        if(!ct_eq(a->tier,"commit"))reason[i]="preserve-original-tier";
+        else if(!ct_eq(a->status,"PASS")||ct_eq(a->completion,"-")){
+            np_buf b={0};
+            np_puts(&b,"incomplete-or-nonpass:");
+            np_puts(&b,a->status);
+            reason[i]=ct_dup(b.p,b.n);
+            free(b.p);
+        }else{
+            a->cost=ct_num(a->completion);
+            order[eligible++]=i;
+        }
+    }
+    /* Stable insertion sort: complete elapsed ns, then bytewise ID. */
+    for(int i=1;i<eligible;i++){
+        int value=order[i],j=i;
+        while(j>0){
+            int prev=order[j-1];
+            if(items[prev].cost<items[value].cost||
+               (items[prev].cost==items[value].cost&&
+                strcmp(items[prev].id,items[value].id)<=0))break;
+            order[j]=prev;
+            j--;
+        }
+        order[j]=value;
+    }
+    for(int k=0;k<eligible;k++){
+        int index=order[k],best=nwave;
+        long long delta=t.reserve+items[index].cost;
+        for(int w=0;w<nwave;w++){
+            if(!ct_compatible(&waves[w],items,index,jobs))continue;
+            long long d=items[index].cost>waves[w].peak?
+                items[index].cost-waves[w].peak:0;
+            if(d<delta||(d==delta&&w<best)){
+                best=w;
+                delta=d;
+            }
+        }
+        if(ct_margin(raw+delta)<=240000000000LL){
+            if(best==nwave)nwave++;
+            ct_add(&waves[best],items,index);
+            raw+=delta;
+            chosen[index]=1;
+            nchosen++;
+        }else reason[index]="prediction-budget";
+    }
+    np_buf out={0};
+    np_puts(&out,"# rule=fastest-pass-first;least-incremental-wave-cost;id-ties;integer-ns\n# jobs=");
+    np_putll(&out,jobs);
+    np_puts(&out,";margin=5/4;limit_ns=240000000000;startup_ns=");
+    np_putll(&out,t.startup);
+    np_puts(&out,";wave_reserve_ns=");
+    np_putll(&out,t.reserve);
+    np_puts(&out,"\n# selected=");
+    np_putll(&out,nchosen);
+    np_puts(&out,";measured=");
+    np_putll(&out,t.n);
+    np_puts(&out,";waves=");
+    np_putll(&out,nwave);
+    np_puts(&out,";predicted_ns=");
+    np_putll(&out,ct_margin(raw));
+    np_puts(&out,"\n# daily includes all commit and daily rows; release is unchanged; no qualification asserted\n");
+    np_puts(&out,"kind\tid\ttier\twave\treason\twave_predicted_ns\tcumulative_predicted_ns\n");
+    long long running=t.startup;
+    for(int w=0;w<nwave;w++){
+        long long cost=t.reserve+waves[w].peak;
+        running+=cost;
+        long long total=ct_margin(running);
+        np_buf ids={0};
+        ct_ids(&ids,&waves[w],items);
+        ct_text(&out,"wave");
+        ct_text(&out,ids.p);
+        free(ids.p);
+        ct_text(&out,"commit");
+        ct_int(&out,w+1);
+        ct_text(&out,ct_eq(items[waves[w].ids[0]].materials,"-")?"light":"heavy");
+        ct_int(&out,ct_margin(cost));
+        np_putll(&out,total);
+        np_puts(&out,"\n");
+        for(int k=0;k<waves[w].n;k++){
+            int i=waves[w].ids[k];
+            placement[i]=w+1;
+            cumulative[i]=total;
+        }
+    }
+    for(int r=0;r<reg.n;r++){
+        const char *id=ct_get(&reg,r,"id");
+        int i=ct_find(&t,id);
+        const char *original;
+        if(i<0)original=ct_get(&reg,r,"tier");
+        else original=items[i].tier;
+        int selected=i>=0&&chosen[i];
+        const char *tier=original;
+        if(selected)tier="commit";
+        else if(ct_eq(original,"commit"))tier="daily";
+        ct_text(&out,"batch");
+        ct_text(&out,id);
+        ct_text(&out,tier);
+        if(selected)ct_int(&out,placement[i]);else ct_text(&out,"-");
+        const char *selection_reason="unmeasured-preserve-tier";
+        if(selected)selection_reason="measured-pass-selected";
+        else if(i>=0)selection_reason=reason[i];
+        ct_text(&out,selection_reason);
+        ct_text(&out,"-");
+        if(selected){
+            np_putll(&out,cumulative[i]);
+            np_puts(&out,"\n");
+        }else ct_last(&out,"-");
+    }
+    ct_write(root,output,&out);
+    printf("SELECT_COMMIT_TIER\tselected=%d\tmeasured=%d\twaves=%d\tpredicted_ns=%lld\n",
+           nchosen,t.n,nwave,ct_margin(raw));
+    return 0;
+}

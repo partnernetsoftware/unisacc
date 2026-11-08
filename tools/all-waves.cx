@@ -11,7 +11,7 @@
  * NAME<TAB>VALUE: a canonical path for bare/:path registry declarations, or a strict lowercase
  * 64-byte hex literal for :sha256. Each is independently identity-hashed by its own
  * `material` command before a wave may use it.  A light wave runs at most four materials-free
- * batches concurrently; a heavy wave runs exactly one batch of any kind.  Each child is
+ * batches concurrently; a heavy wave runs exactly one batch of any kind. Each child uses
  *   tools/bound --status F S sh ROOT/unisacc.com tests/run-batch.cx -- ROOT SESSION/wave-N ID [m=path...]
  * where S = min(registry budget, --child-seconds, what is left of the outer window minus 12 s for
  * the after-measurements), so the runner always outlives its children and writes every receipt.
@@ -117,9 +117,21 @@ static int cmd_material(int argc,char **argv){
  printf("MATERIAL\t%s\tpath=%s\tcontent=%s\tfingerprint=%s\tentries=%ld\thash_ns=%lld\tstate=PREPARED-identity-only\n",argv[4],path,content,fp1,entries,as_now()-t0);as_free(&m);close(lock);return 0;
 }
 static int decided(const as_manifest *m,const char *id){for(int i=0;i<m->nref;i++)if(tx_eqz(m->ref[i].id, id)&&!tx_eqz(m->ref[i].verdict, "UNKNOWN"))return 1;return 0;}
+/* Tier is a caller selection only: the session registry and qualification stay complete. */
+static const char *tier_filter;
+static char tier_ids[2048][128];static int tier_count;
+static void tier_batch(const tp_batch_view *v,void *ctx){(void)ctx;if(!strcmp(v->implementation,"IMPLEMENTED")&&tp_tier_includes(tier_filter,v->tier)){if(tier_count==2048)die("tier-limit",v->id);if(cx_fmt(tier_ids[tier_count],sizeof tier_ids[0],"%s",v->id))die("tier-id-bound",v->id);tier_count++;}}
+static void tier_cov(const tp_coverage_view *v,void *ctx){(void)v;(void)ctx;}
+static void select_tier(const char *value){
+ if(strcmp(value,"commit")&&strcmp(value,"daily")&&strcmp(value,"release"))die("unknown-tier",value);tier_filter=value;tier_count=0;
+ char p[4400];size_t rn,cn;join(p,sizeof p,root,"tests/batches.tsv");char *r=as_read(p,0,&rn,why,sizeof why);join(p,sizeof p,root,"tests/coverage.tsv");char *c=as_read(p,0,&cn,why,sizeof why);if(!r||!c)die("registry-metadata",why);
+ tp_summary s;tp_observer ob={tier_batch,tier_cov,0};if(tp_visit(root,r,rn,c,cn,&ob,&s,why,sizeof why))die("registry-metadata",why);free(r);free(c);
+}
+static int tier_selected(const char *id){if(!tier_filter)return 1;for(int i=0;i<tier_count;i++)if(!strcmp(id,tier_ids[i]))return 1;return 0;}
 static int cmd_pending(int argc,char **argv){
- if(argc!=4)die("usage","pending ROOT SESSION");canonical_root(argv[2]);existing_session(argv[3]);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int n=0;
+ if(argc!=4&&!(argc==6&&!strcmp(argv[4],"--tier")))die("usage","pending ROOT SESSION [--tier commit|daily|release]");canonical_root(argv[2]);existing_session(argv[3]);if(argc==6)select_tier(argv[5]);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);int n=0;
  for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];if(!tx_eqz(b->impl, "IMPLEMENTED")||decided(&m,b->id))continue;n++;int ready=1;if(!tx_eqz(b->materials, "-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const as_material *x=as_find_material(&m,d.name);if(!x||x->kind!=d.kind)ready=0;}}
+  if(!tier_selected(b->id)){n--;continue;}
   printf("PENDING\t%s\twave_class=%s\tbudget=%d\tmaterials=%s\tmaterials_registered=%s\n",b->id,strcmp(b->materials,"-")?"heavy":"light-or-heavy",b->budget,b->materials,ready?"yes":"no");}
  int open=0;for(int i=0;i<m.nwave;i++){const as_wave *w=&m.wave[i];if(!tx_eqz(w->mode, "split")||w->finished)continue;open++;printf("OPEN_ATTEMPT\t%s\tattempt=%s\tstate=%s\n",w->ids,w->nonce,w->superseded?"SUPERSEDED-UNKNOWN":w->run?"RUN-SEALED-AWAITING-FINISH":"STARTED-AWAITING-RUN");}
  printf("PENDING_SUMMARY\tundecided=%d\topen_attempts=%d\texecutor=%s\tqualification=NOT_DECIDED_HERE\n",n,open,m.has_executor?"REGISTERED":"ABSENT");as_registry_free(&reg);as_free(&m);return 0;
@@ -217,8 +229,13 @@ static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];
 }
 static int cmd_wave(int argc,char **argv){
  if(argc<6)die("usage","wave ROOT SESSION [--child-seconds N] --light ID... | --heavy ID");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
- int at=4,cap_seconds=55;if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
+ int at=4,cap_seconds=55;if(at+1<argc&&!strcmp(argv[at],"--tier")){select_tier(argv[at+1]);at+=2;}if(at>=argc)die("usage","wave selection missing");if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
  int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(count<1||count>WAVE_JOBS_MAX)die("wave-shape","light-or-heavy-takes-one-to-WAVE_JOBS_MAX-ids");
+ /* Selection may omit a known batch, but must not hide a misspelled ID. */
+ if(tier_filter){as_registry selected_reg;if(as_registry_load(root,&selected_reg,why,sizeof why))die("registry-metadata",why);
+  for(int i=at;i<argc;i++)if(!as_find_batch(&selected_reg,argv[i]))die("unknown-batch",argv[i]);
+  as_registry_free(&selected_reg);}
+ if(tier_filter){int kept=0;for(int i=at;i<argc;i++)if(tier_selected(argv[i]))argv[at+kept++]=argv[i];count=kept;argc=at+kept;if(!count){printf("WAVE_SELECTION\ttier=%s\tselected=0\n",tier_filter);return 0;}}
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);
  for(int i=0;i<m.nwave;i++)if(m.wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);

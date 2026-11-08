@@ -1028,3 +1028,31 @@ python3 tools/affected-model-inputs.py CONTEXT_OR_TAR --check
 `tools/affected-model-inputs.tsv` 含当前 42 模型的 3970 条去重排序输入边，可由普通 source-package context 或其归档中的实际读取记录再生；去掉 `--check` 才写投影。优先读取 `job-reads.before.tsv`，缺失才用 `command.reads.tsv`，两者均按每行一个路径处理；根前缀来自 `context.tsv`，搬迁材料可显式给 `--root-prefix`。缺模型、空记录、越界和投影漂移均拒绝。
 
 模型消费者只通过精确模型/job/artifact 字面量及现有 use/literal 工具闭包关联；不是整个 `exec/` 的粗 guard。包含通用配方模块的批次会保守扩散，计算所得的动态模型选择仍未完整建模；本映射不证明生成字节等价，也不改变发布资格。
+
+## 0.0.48 M8：原生实测分档及逐文件棘轮
+
+第十四列 `tier` 为 commit/daily/release。提交档是实测选择子集，daily累计commit与daily，release及默认无过滤仍覆盖全部登记；旧十二/十三列兼容，不减少原断言、40/45/55秒预算或发布条件。子集PASS不是全量发布资格。
+
+两算法原生 `.cx`，不调用宿主算法。本轮误增的两份Python算法已撤回并从开发树删除，当前补丁不新增`.py`。现有`tests/update-tools-compile.py`仅作为明确登记的遗留库存入口保留，本轮适配十四列，不据此允许新增Python算法。
+
+```sh
+sh ./unisacc.com tools/select-commit-tier.cx -- "$ROOT"
+sh ./unisacc.com tools/forecast-tier-runtime.cx -- "$ROOT"
+```
+
+显式接口：选择器`ROOT TIMINGS OUTPUT [JOBS]`，估时器`ROOT TIMINGS ESTIMATES SUMMARY [JOBS]`。只消费冻结289唯一批次的多快照实测TSV；原型extract/observe未保留，不自动用验收结果改档。输入保存原日志行号与历史观测，完整日志和SHA随包交付，不将旧快照测量冒作当前源码资格。
+
+规则为完整PASS耗时升序、ID平局、最小增量关键路径成本，最多16任务；域互斥，serial/材料重项独窗。启动47.464787754秒、每波预留十秒，整数纳秒乘5/4，预测帽240秒。非PASS/未测/未选归daily，既有release不降级。旧冻结输入82项七波预测222.090062702秒曾逐字复现；按4102实测为cx-bounded补串行约束后，原生重算仍82项七波，预测212.885888647秒。当前新计划尚未完整重跑，不是通过声明。
+
+当前单包基点`4102b514115b3bd23b35e6af5f6b00fc5165ade6`，保留所有tip新增行，649登记82/528/39，daily累计610、release/default649（637已实现、12PLANNED不虚构执行）。本tip整跑外墙210.836秒但只有81PASS/1UNKNOWN：cx-bounded在16任务波原20秒预算超时；失败保留，不标提交档全绿。同预算独立窗实际1.706842662秒PASS，身份STABLE，按cc授权登记serial域，冷启动不并行、不放宽20秒或删断言。串行约束原生重算后ucn-identities进入commit、cx-childdepth移daily（非名单特判）；全量覆盖不减，新计划资格待完整实测。旧78b4的82/82外墙209.492秒只属历史支持，不能替代本tip验收。
+
+估时两表列完整清单、平台、材料与完成/预算来源；lnx/x86_64 daily累计16443.712749917秒，release/default16968.614173520秒。非PASS用原预算，材料构造与外平台等待未估；登记顺序估时不替代实际选择波，重叠scope/pool不可相加。
+
+逐文件限额等于当前每个普通`.cx`实测，无预留；608个文件逐项核对608/608，tip的ratchets105、check-net-deps141、check-interface-digest74均按实际设线。新增CLI必须真实check及source/entry批次登记，新库在coverage显式关联已登记行为检查，新文件最多600行。I2旧TOTAL退役只报告，不恢复其否决；完整逐文件表仍拒绝现存文件加行。TOTAL保留输出及证据，严格增长超过`X=1%`时打印`TOTAL_GROWTH threshold_percent=1 previous/current/growth approval=REQUIRED`，整数比较，不把报告变成TOTAL否决。实际无check的601行新CLI及现存文件逐文件增长两负例均5/0，通过的含义是原hook真实拒绝。
+
+主线历史TOTAL83733不是当前HEAD实测：未暂存索引实测84079；候选85229，实际/物理净增1150，低于cc批准1157，无历史推导差额豁免。首次迁移保留增长报告`previous=83733 current=85229 growth=1496 approval=REQUIRED`；逐文件差异及批准边界随包交对账。
+
+完整库存626源/79片，含18 symlink，与608普通文件指标分开。全部三补丁的有界拷贝、CLI选择查询均已合入；上层检查不再include工具源码。支持性行为原日志附各自基点，不冒充4102提交档全绿。WT原八断言保留在daily问题`M8-WT-NEG-CONSTRUCT`，不扩大缓存框架；T2.c十INFRA和T2.a材料另循真实证据交付，不回填历史s9资格。
+
+既有遗留`tests/update-tools-compile.py`本轮只改十四列兼容：`batch(i,tier=None)`无tier仍输出原十三列、有tier才追加；仅当表头末列为tier才读取既有编译片档位；要求档位唯一且合法，混合档位真实拒绝；再生编译片沿用该既有档位，不隐式改档。原索引regular/symlink发现、每8源向上取整、独立候选输出及coverage字节复制流程均未改，具体diff随包列明。
+

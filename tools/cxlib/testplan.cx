@@ -13,7 +13,7 @@ typedef struct {
 /* Read-only borrowed views, valid only during their callback. All rows have
  * passed the same complete validation before any callback occurs. Views and
  * strings must not escape; this API neither executes nor prepares batches. */
-typedef struct {const char *id,*implementation,*layer,*source,*mode,*platform,*budget,*materials,*entry,*args,*coverage,*expect,*headers;int source_present;} tp_batch_view;
+typedef struct {const char *id,*implementation,*layer,*source,*mode,*platform,*budget,*materials,*entry,*args,*coverage,*expect,*headers;int source_present;const char *tier;} tp_batch_view;
 typedef struct {const char *id,*layer,*implementation,*expected,*source;int mapped,implemented_batch;} tp_coverage_view;
 typedef struct {void (*batch)(const tp_batch_view *,void *);void (*coverage)(const tp_coverage_view *,void *);void *context;} tp_observer;
 /* Generic material declarations: kind 1=canonical path, 2=SHA256 literal.
@@ -30,6 +30,8 @@ static int tp_platform(const char *s,int planned){return !strcmp(s,"lnx/x86_64")
 static int tp_budget(const char *s){int n=0;if(!*s||*s=='0')return 0;while(*s){int d=*s++-'0';if(d<0||d>9||n>(55-d)/10)return 0;n=n*10+d;}return n>=1&&n<=55;}
 static int tp_implemented(const char *s){return !strcmp(s,"IMPLEMENTED")||!strcmp(s,"IMPLEMENTED_SEPARATE_BATCH");}
 static int tp_coverage_state(const char *s){return tp_implemented(s)||!strcmp(s,"NOT_READY")||!strcmp(s,"NOT_IMPLEMENTED")||!strcmp(s,"PLANNED")||tx_eqz(s,"DECLARED_DEPENDENCY");}
+/* Caller-side upper bound only; this does not qualify or execute a batch. */
+int tp_tier_includes(const char *limit,const char *tier){int a=!strcmp(limit,"commit")?1:!strcmp(limit,"daily")?2:!strcmp(limit,"release")?3:0;int b=!strcmp(tier,"commit")?1:!strcmp(tier,"daily")?2:!strcmp(tier,"release")?3:0;return a&&b&&b<=a;}
 static int tp_table(char *s,size_t n,const char *header,int cols,char **fields,int limit,int *rows,char *why,size_t cap){
  size_t at,hn=strlen(header),i;int count=0;
  if(!n||n>4194304||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n))return tp_bad(why,cap,"table-wire",0,0);
@@ -64,13 +66,17 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
  int nb=0,nc=0,i,j,rc=-1;tp_summary summary;memset(&summary,0,sizeof summary);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;
  if(!root||!registry||!coverage||!out||!why||!cap||root[0]!='/'||strlen(root)>4095){if(why&&cap)tp_bad(why,cap,"arguments",0,0);return -1;}
  if(rn>4194304||cn>4194304)return tp_bad(why,cap,"table-limit",0,0);
- r=malloc(rn+1);c=malloc(cn+1);bf=calloc(2048*13,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(2048,sizeof *source_present);
+ r=malloc(rn+1);c=malloc(cn+1);bf=calloc(2048*14,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(2048,sizeof *source_present);
  if(!r||!c||!bf||!cf||!mapped||!implemented||!last||!source_present){tp_bad(why,cap,"allocation",0,0);goto done;}
  memcpy(r,registry,rn);r[rn]=0;memcpy(c,coverage,cn);c[cn]=0;
- if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,2048,&nb,why,cap)){
-  /* A registry written before the headers column existed still reads: every row means product. */
-  if(strncmp(why,"table-header",12)||tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,2048,&nb,why,cap))goto done;
-  for(i=nb;i-->0;){memmove(bf+i*13,bf+i*12,12*sizeof *bf);bf[i*13+12]="product";}
+ int cols=14;
+ if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",14,bf,2048,&nb,why,cap)){
+  if(strncmp(why,"table-header",12))goto done;
+  cols=13;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,2048,&nb,why,cap)){
+   if(strncmp(why,"table-header",12))goto done;
+   cols=12;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,2048,&nb,why,cap))goto done;
+  }
+  for(i=nb;i-->0;){memmove(bf+i*14,bf+i*cols,cols*sizeof *bf);char **v=bf+i*14;if(cols==12)v[12]="product";v[13]=strcmp(v[1],"IMPLEMENTED")||!strcmp(v[2],"platform")?"release":!strcmp(v[7],"-")?"commit":"daily";}
  }
  if(tp_table(c,cn,"id\tlayer\timplementation\texpected_or_gap\tsource\n",5,cf,8192,&nc,why,cap))goto done;
  for(i=0;i<nc;i++){
@@ -79,20 +85,23 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
   if(tp_implemented(v[2]))summary.implemented_coverage++;else if(tx_eqz(v[2],"DECLARED_DEPENDENCY"))summary.declared_coverage++;else summary.unresolved_coverage++;
  }
  for(i=0;i<nb;i++){
-  char **v=bf+i*13;int planned=!strcmp(v[1],"PLANNED");char full[5200];struct stat st;
-  if(!tp_name(v[0])){tp_bad(why,cap,"batch-id",i+1,v[0]);goto done;}for(j=0;j<i;j++)if(!strcmp(v[0],bf[j*13])){tp_bad(why,cap,"duplicate-batch",i+1,v[0]);goto done;}
+  char **v=bf+i*14;int planned=!strcmp(v[1],"PLANNED");char full[5200];struct stat st;
+  if(!tp_name(v[0])){tp_bad(why,cap,"batch-id",i+1,v[0]);goto done;}for(j=0;j<i;j++)if(!strcmp(v[0],bf[j*14])){tp_bad(why,cap,"duplicate-batch",i+1,v[0]);goto done;}
   if(strcmp(v[1],"IMPLEMENTED")&&!planned){tp_bad(why,cap,"batch-state",i+1,v[0]);goto done;}
   if(!tp_layer(v[2])||!tp_source_path(v[3])){tp_bad(why,cap,"source-path",i+1,v[0]);goto done;}
   if(strcmp(v[4],"SOURCE")&&strcmp(v[4],"PREPARED")){tp_bad(why,cap,"batch-mode",i+1,v[0]);goto done;}
   if(!tp_platform(v[5],planned)){tp_bad(why,cap,"batch-platform",i+1,v[0]);goto done;}
   if(!tp_budget(v[6])){tp_bad(why,cap,"batch-budget",i+1,v[0]);goto done;}
   if(!tp_materials(v[7])){tp_bad(why,cap,"batch-materials",i+1,v[0]);goto done;}
-  {const char *at=v[7];tp_material_decl d;while(tp_material_next(&at,&d)>0)for(j=0;j<i;j++){int kind=tp_material_kind(bf[j*13+7],d.name,strlen(d.name));if(kind>0&&kind!=d.kind){tp_bad(why,cap,"material-type-conflict",i+1,d.name);goto done;}}}
+  {const char *at=v[7];tp_material_decl d;while(tp_material_next(&at,&d)>0)for(j=0;j<i;j++){int kind=tp_material_kind(bf[j*14+7],d.name,strlen(d.name));if(kind>0&&kind!=d.kind){tp_bad(why,cap,"material-type-conflict",i+1,d.name);goto done;}}}
   if(!strcmp(v[4],"SOURCE")){if(strcmp(v[8],v[3])){tp_bad(why,cap,"entry-source-mismatch",i+1,v[0]);goto done;}}
   else if(!strcmp(v[7],"-")||!tp_placeholder(v[8],v[7],0)||!strstr(v[8],"}/")||strcmp(v[8]+strlen(v[8])-3,".cx")){tp_bad(why,cap,"prepared-entry",i+1,v[0]);goto done;}
   if(!tp_args(v[9],v[7])){tp_bad(why,cap,"batch-args",i+1,v[0]);goto done;}
   if(!tp_expect(v[11],planned)){tp_bad(why,cap,"batch-expect",i+1,v[0]);goto done;}
   if(!tp_headers(v[12])){tp_bad(why,cap,"unknown-headers",i+1,v[0]);goto done;}
+  if(strcmp(v[13],"commit")&&strcmp(v[13],"daily")&&strcmp(v[13],"release")){tp_bad(why,cap,"unknown-tier",i+1,v[0]);goto done;}
+  if(!strcmp(v[13],"commit")&&strcmp(v[7],"-")){tp_bad(why,cap,"commit-materials",i+1,v[0]);goto done;}
+  if((planned||!strcmp(v[2],"platform"))&&strcmp(v[13],"release")){tp_bad(why,cap,"tier-state-conflict",i+1,v[0]);goto done;}
   if(!strcmp(v[12],"tree")){if(planned){tp_bad(why,cap,"tree-headers-planned",i+1,v[0]);goto done;}summary.headers_tree++;}else summary.headers_product++;
   int z=snprintf(full,sizeof full,"%s/%s",root,v[3]);if(z<0||(size_t)z>=sizeof full){tp_bad(why,cap,"source-path",i+1,v[0]);goto done;}
   errno=0;if(lstat(full,&st)){int e=errno;if(e!=ENOENT){snprintf(why,cap,"source-io row=%d id=%s errno=%d",i+1,v[0],e);goto done;}if(!planned){tp_bad(why,cap,"missing-implemented-source",i+1,v[0]);goto done;}summary.planned_missing_sources++;}
@@ -102,9 +111,9 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
  }
  for(i=0;i<nc;i++){if(tx_eqz(cf[i*5+2],"DECLARED_DEPENDENCY"))continue;if(tp_implemented(cf[i*5+2])&&!implemented[i]){tp_bad(why,cap,"implemented-coverage-unmapped",i+1,cf[i*5]);goto done;}if(!tp_implemented(cf[i*5+2])&&!mapped[i])summary.unmapped_unresolved++;}
  summary.batches=nb;summary.coverage_rows=nc;*out=summary;rc=0;
- if(emit){for(i=0;i<nb;i++){char **v=bf+i*13;const char *state=!strcmp(v[1],"PLANNED")?"PLANNED":strcmp(v[7],"-")?"UNPREPARED":"NOT_RUN";printf("BATCH\t%s\t%s\timplementation=%s\tlayer=%s\tsource=%s\tsource_state=%s\tmode=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tentry=%s\targs=%s\tcoverage=%s\texpect=%s\theaders=%s\n",v[0],state,v[1],v[2],v[3],source_present[i]?"PRESENT":"MISSING",v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12]);}
+ if(emit){for(i=0;i<nb;i++){char **v=bf+i*14;const char *state=!strcmp(v[1],"PLANNED")?"PLANNED":strcmp(v[7],"-")?"UNPREPARED":"NOT_RUN";printf("BATCH\t%s\t%s\timplementation=%s\tlayer=%s\tsource=%s\tsource_state=%s\tmode=%s\tplatform=%s\tbudget=%s\tmaterials=%s\tentry=%s\targs=%s\tcoverage=%s\texpect=%s\theaders=%s\ttier=%s\n",v[0],state,v[1],v[2],v[3],source_present[i]?"PRESENT":"MISSING",v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13]);}
   for(i=0;i<nc;i++)printf("COVERAGE\t%s\t%s\tmapped=%d\timplemented_batch=%d\toracle=%s\n",cf[i*5],cf[i*5+2],mapped[i],implemented[i],cf[i*5+3]);}
- if(observer){for(i=0;i<nb;i++){char **v=bf+i*13;tp_batch_view view={v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],source_present[i]};observer->batch(&view,observer->context);}for(i=0;i<nc;i++){char **v=cf+i*5;tp_coverage_view view={v[0],v[1],v[2],v[3],v[4],mapped[i],implemented[i]};observer->coverage(&view,observer->context);}}
+ if(observer){for(i=0;i<nb;i++){char **v=bf+i*14;tp_batch_view view={v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],source_present[i],v[13]};observer->batch(&view,observer->context);}for(i=0;i<nc;i++){char **v=cf+i*5;tp_coverage_view view={v[0],v[1],v[2],v[3],v[4],mapped[i],implemented[i]};observer->coverage(&view,observer->context);}}
  done:free(r);free(c);free(bf);free(cf);free(mapped);free(implemented);free(last);free(source_present);return rc;
 }
 

@@ -4,9 +4,10 @@
  * All three run within a caller-owned <=20-second watchdog. */
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
+#pragma unisa use cxlib.allsession
 static int checks,failures;
 typedef struct {int batches,coverage,valid;} probe_counts;
-static void observe_batch(const tp_batch_view *v,void *context){probe_counts *p=context;p->batches++;if(!v->id||!v->implementation||!v->source||!v->coverage||!v->expect)p->valid=0;}
+static void observe_batch(const tp_batch_view *v,void *context){probe_counts *p=context;p->batches++;if(!v->id||!v->implementation||!v->source||!v->coverage||!v->expect||!v->tier||(strcmp(v->tier,"commit")&&strcmp(v->tier,"daily")&&strcmp(v->tier,"release")))p->valid=0;}
 static void observe_coverage(const tp_coverage_view *v,void *context){probe_counts *p=context;p->coverage++;if(!v->id||!v->implementation||!v->expected||!v->source)p->valid=0;}
 static void check(int ok,const char *name){checks++;if(!ok)failures++;printf("%s\ttestplan.%s\n",ok?"PASS":"FAIL",name);}
 static char *read_regular(const char *p,size_t *n){struct stat st;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>4194304){fprintf(stderr,"testplan: regular metadata input required: %s errno=%d\n",p,errno);return 0;}char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size){free(s);return 0;}return s;}
@@ -16,20 +17,28 @@ static char *strip_last_field(const char *s,size_t n,size_t *outn){char *b=mallo
 static void reject(const char *root,const char *reg,size_t rn,const char *cov,size_t cn,const char *reason,const char *name){char why[600];tp_summary summary;int rc=tp_analyze(root,reg,rn,cov,cn,0,&summary,why,sizeof why);int ok=rc!=0&&strstr(why,reason)&&summary.batches==0;check(ok,name);if(!ok)fprintf(stderr,"testplan %s actual rc=%d why=%s\n",name,rc,why);}
 static void mutation(const char *root,const char *reg,size_t rn,const char *cov,size_t cn,int change_cov,const char *old,const char *fresh,const char *reason,const char *name){size_t n;char *changed=replace_once(change_cov?cov:reg,change_cov?cn:rn,old,fresh,&n);if(!changed){check(0,name);return;}reject(root,change_cov?reg:changed,change_cov?rn:n,change_cov?changed:cov,change_cov?n:cn,reason,name);free(changed);}
 static int selftest(const char *root,const char *reg,size_t rn,const char *cov,size_t cn){char why[600];tp_summary summary;int rc=tp_analyze(root,reg,rn,cov,cn,0,&summary,why,sizeof why);check(rc==0,"valid-current-plan");if(rc){fprintf(stderr,"testplan baseline: %s\n",why);return 1;}check(summary.executed_batches==0,"metadata-executes-no-batches");
+ check(tp_tier_includes("commit","commit")&&!tp_tier_includes("commit","daily")&&!tp_tier_includes("commit","release"),"commit-upper-bound");
+ check(tp_tier_includes("daily","commit")&&tp_tier_includes("daily","daily")&&!tp_tier_includes("daily","release"),"daily-upper-bound");
+ check(tp_tier_includes("release","commit")&&tp_tier_includes("release","daily")&&tp_tier_includes("release","release"),"release-upper-bound");
+ check(!tp_tier_includes("unknown","commit")&&!tp_tier_includes("release","unknown"),"unknown-tier-not-selected");
  probe_counts visits={0,0,1};tp_observer observer={observe_batch,observe_coverage,&visits};rc=tp_visit(root,reg,rn,cov,cn,&observer,&summary,why,sizeof why);check(rc==0&&visits.valid&&visits.batches==summary.batches&&visits.coverage==summary.coverage_rows&&summary.executed_batches==0,"strict-observer-complete-borrowed-views");
- tp_summary base=summary;const char *probe="testplan-control-planned\tPLANNED\tproduct\ttests/__testplan_planned_absent__.cx\tSOURCE\tall-six\t55\tnew-material\ttests/__testplan_planned_absent__.cx\t-\tproduct.function\tNOT_READY\tproduct\n" "testplan-control-unprepared\tIMPLEMENTED\tproduct\ttests/run.cx\tSOURCE\tlnx/x86_64\t55\tnew-material\ttests/run.cx\t--smoke\tproduct.function\trc0:SMOKE\tproduct\n";size_t pn=strlen(probe);char *augmented=malloc(rn+pn+1);if(!augmented)return 2;memcpy(augmented,reg,rn);memcpy(augmented+rn,probe,pn+1);rc=tp_analyze(root,augmented,rn+pn,cov,cn,0,&summary,why,sizeof why);check(rc==0&&summary.planned_batches==base.planned_batches+1&&summary.planned_missing_sources==base.planned_missing_sources+1&&summary.unprepared_batches==base.unprepared_batches+1&&summary.executed_batches==0,"planned-unprepared-gaps-retained");free(augmented);
- mutation(root,reg,rn,cov,cn,0,"rc0:SMOKE\tproduct\n","rc0:SMOKE\tboxed\n","unknown-headers","unknown-headers-refused");
- {   const char *row="testplan-control-tree-planned\tPLANNED\tproduct\ttests/__testplan_planned_absent__.cx\tSOURCE\tall-six\t55\tnew-material\ttests/__testplan_planned_absent__.cx\t-\tproduct.function\tNOT_READY\ttree\n";
+ {as_registry all;if(as_registry_load(root,&all,why,sizeof why))check(0,"session-registry-retains-all-tiers");else{check(all.nb==summary.batches,"session-registry-retains-all-tiers");as_registry_free(&all);}}
+ tp_summary base=summary;const char *probe="testplan-control-planned\tPLANNED\tproduct\ttests/__testplan_planned_absent__.cx\tSOURCE\tall-six\t55\tnew-material\ttests/__testplan_planned_absent__.cx\t-\tproduct.function\tNOT_READY\tproduct\trelease\n" "testplan-control-unprepared\tIMPLEMENTED\tproduct\ttests/run.cx\tSOURCE\tlnx/x86_64\t55\tnew-material\ttests/run.cx\t--smoke\tproduct.function\trc0:SMOKE\tproduct\tdaily\n";size_t pn=strlen(probe);char *augmented=malloc(rn+pn+1);if(!augmented)return 2;memcpy(augmented,reg,rn);memcpy(augmented+rn,probe,pn+1);rc=tp_analyze(root,augmented,rn+pn,cov,cn,0,&summary,why,sizeof why);check(rc==0&&summary.planned_batches==base.planned_batches+1&&summary.planned_missing_sources==base.planned_missing_sources+1&&summary.unprepared_batches==base.unprepared_batches+1&&summary.executed_batches==0,"planned-unprepared-gaps-retained");mutation(root,augmented,rn+pn,cov,cn,0,"product.function\tNOT_READY\tproduct\trelease\n","product.function\tNOT_READY\tproduct\tdaily\n","tier-state-conflict","planned-daily-refused");mutation(root,augmented,rn+pn,cov,cn,0,"rc0:SMOKE\tproduct\tdaily\n","rc0:SMOKE\tproduct\tcommit\n","commit-materials","explicit-commit-materials-refused");free(augmented);
+ mutation(root,reg,rn,cov,cn,0,"rc0:SMOKE\tproduct\tcommit\n","rc0:SMOKE\tboxed\tcommit\n","unknown-headers","unknown-headers-refused");
+ {   const char *row="testplan-control-tree-planned\tPLANNED\tproduct\ttests/__testplan_planned_absent__.cx\tSOURCE\tall-six\t55\tnew-material\ttests/__testplan_planned_absent__.cx\t-\tproduct.function\tNOT_READY\ttree\trelease\n";
      size_t qn=strlen(row); char *one=malloc(rn+qn+1);
      if(!one){check(0,"tree-headers-planned-refused");}
      else { {void *cx_kept=memcpy(one,reg,rn);(void)cx_kept;} {void *cx_kept=memcpy(one+rn,row,qn+1);(void)cx_kept;} reject(root,one,rn+qn,cov,cn,"tree-headers-planned","tree-headers-planned-refused"); free(one); }
  }
- {   size_t dn; char *legacy=strip_last_field(reg,rn,&dn); tp_summary s12;
+ {   size_t dn,tn; char *thirteen=strip_last_field(reg,rn,&tn); char *legacy=thirteen?strip_last_field(thirteen,tn,&dn):0; tp_summary s12; if(thirteen){check(tp_analyze(root,thirteen,tn,cov,cn,0,&s12,why,sizeof why)==0&&s12.batches==base.batches,"legacy-thirteen-column-registry");free(thirteen);}
      if(!legacy){check(0,"legacy-twelve-column-registry");}
      else { int r12=tp_analyze(root,legacy,dn,cov,cn,0,&s12,why,sizeof why);
             check(r12==0&&s12.batches==base.batches&&s12.headers_product==s12.batches&&s12.headers_tree==0,"legacy-twelve-column-registry-reads-as-product");
             if(r12)fprintf(stderr,"testplan legacy: %s\n",why); free(legacy); }
  }
+ mutation(root,reg,rn,cov,cn,0,"rc0:SMOKE\tproduct\tcommit\n","rc0:SMOKE\tproduct\tunknown\n","unknown-tier","unknown-tier-refused");
+ mutation(root,reg,rn,cov,cn,0,"20\t-\ttests/run.cx\t--smoke","20\tnets\ttests/run.cx\t--smoke","commit-materials","commit-materials-refused");
+ mutation(root,reg,rn,cov,cn,0,"product\ttests/run.cx\tSOURCE","platform\ttests/run.cx\tSOURCE","tier-state-conflict","platform-commit-refused");
  rc=tp_analyze(root,reg,rn,cov,cn,0,&summary,0,1);check(rc!=0&&summary.batches==0,"null-diagnostic-rejected");
  const char *first=strchr(reg,'\n')+1,*end=strchr(first,'\n');size_t row=(size_t)(end-first)+1;char *duplicate=malloc(rn+row+1);if(!duplicate)return 2;memcpy(duplicate,reg,rn);memcpy(duplicate+rn,first,row);duplicate[rn+row]=0;reject(root,duplicate,rn+row,cov,cn,"duplicate-batch","duplicate-batch-id");visits.batches=visits.coverage=0;rc=tp_visit(root,duplicate,rn+row,cov,cn,&observer,&summary,why,sizeof why);check(rc!=0&&visits.batches==0&&visits.coverage==0&&summary.batches==0,"observer-no-partial-callback-on-invalid-table");free(duplicate);rc=tp_visit(root,reg,rn,cov,cn,0,&summary,why,sizeof why);check(rc!=0&&summary.batches==0,"null-observer-refused");
  mutation(root,reg,rn,cov,cn,0,"product.function,product.recursion","product.unknown,product.recursion","unknown-coverage","unknown-coverage-id");

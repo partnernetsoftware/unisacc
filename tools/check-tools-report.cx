@@ -1,0 +1,60 @@
+/* Contract C integration checks: compile the real report once, use a real private
+ * git index, and exercise LF boundaries, registration, symlinks and data errors.
+ * This checker never changes the caller's registry or index. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+static int pass,fail;
+static void ck(int ok,const char *s){printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(ok)pass++;else fail++;}
+static int run(char **v,const char *cwd){np_result r;char why[400];if(np_run(v,cwd,0,15,&r,why,sizeof why))return 0;int ok=!r.rc;if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return ok;}
+static int put(const char *td,const char *name,const char *s){char p[4096];if(cx_fmt(p,sizeof p,"%s/%s",td,name))return 0;return cx_write(p,s,strlen(s))==0;}
+static void report(const char *bin,const char *td,int expected,const char *text,const char *label){
+    char *v[]={(char *)bin,(char *)td,0},why[400];np_result r;
+    if(np_run(v,".",0,10,&r,why,sizeof why)){ck(0,label);return;}
+    ck(r.rc==expected&&(!text||(r.outn&&strstr(r.out,text)))&&(expected==0||!strstr(r.out?r.out:"","TOOLS_REPORT")),label);np_free(&r);
+}
+int main(void){
+    char td[300],bin[500],p[500];int ok;
+    const char *header="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+    const char *table="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\nfixture\tIMPLEMENTED\tinterfaces\ttools/cx-one.cx\tSOURCE\tlnx/x86_64\t10\t-\ttools/cx-one.cx\t-\tinterfaces.fixture\trc0:X\tproduct\tcommit\n";
+    if(cx_fmt(td,sizeof td,"%s/tools-report-XXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp")||!mkdtemp(td))return 2;
+    if(cx_fmt(bin,sizeof bin,"%s/report",td))return 2;
+    {char *v[]={"sh","./unisacc.com","tools/tools-report.cx","-o",bin,0};ok=run(v,".");}ck(ok,"compile-real-report");
+    if(ok){char *v[]={"git","init","-q",td,0};ok=run(v,".");}
+    if(ok){char *v[]={"mkdir","tools","tests",0};ok=run(v,td);}
+    ok=put(td,"tools/cx-one.cx","one\ntwo")&&put(td,"tools/check-stream-one.cx","\n")&&put(td,"tools/check-crypto-one.cx","")&&put(td,"tools/check-one.cx","x\n")&&put(td,"tools/plain.cx","x\r\ny\n")&&put(td,"tests/batches.tsv",table)&&ok;
+    cx_fmt(p,sizeof p,"%s/tools/alias.cx",td);ok=symlink("cx-one.cx",p)==0&&ok;
+    {char *v[]={"git","add","tools","tests/batches.tsv",0};ok=run(v,td)&&ok;}
+    ok=put(td,"tools/untracked.cx","ignored\n")&&ok;ck(ok,"real-index-fixture");
+    if(ok){
+        report(bin,td,0,"TOOLS_REPORT\tfiles=5\tlines=6\tregistered=1\tunregistered=4\n","tracked-regular-LF-and-final-fragment");
+        report(bin,td,0,"CLUSTER\tstream-\tfiles=1\tlines=1\tregistered=0\tunregistered=1\n","check-subfamily-zero-registration-visible");
+        report(bin,td,0,"CLUSTER\tcrypto-\tfiles=1\tlines=0\tregistered=0\tunregistered=1\n","empty-file-and-crypto-check-subfamily");
+        report(bin,td,0,"CLUSTER\tcx-\tfiles=1\tlines=2\tregistered=1\tunregistered=0\n","source-entry-deduplicated");
+        {size_t n;char *s;cx_fmt(p,sizeof p,"%s/tests/batches.tsv",td);s=cx_read(p,&n);ck(s&&n==strlen(table)&&!memcmp(s,table,n),"report-keeps-registry-bytes");free(s);
+         cx_fmt(p,sizeof p,"%s/tools/cx-one.cx",td);s=cx_read(p,&n);ck(s&&n==7&&!memcmp(s,"one\ntwo",7),"report-keeps-source-bytes");free(s);}
+        cx_fmt(p,sizeof p,"%s/tests",td);report(bin,p,2,0,"non-repository-data-not-green");
+        for(int width=12;width<=13;width++){
+            char old[1000];size_t at=0;int col=1;
+            for(size_t j=0;table[j];j++){
+                if(table[j]=='\n'){old[at++]='\n';col=1;}
+                else if(table[j]=='\t'){col++;if(col<=width)old[at++]='\t';}
+                else if(col<=width)old[at++]=table[j];
+            }
+            old[at]=0;ck(put(td,"tests/batches.tsv",old),"legacy-registry-fixture");
+            report(bin,td,0,"TOOLS_REPORT\tfiles=5\tlines=6\tregistered=1\tunregistered=4\n",width==12?"legacy-twelve-column-registry":"legacy-thirteen-column-registry");
+        }
+        ck(put(td,"tests/batches.tsv",header),"empty-registry-fixture");
+        report(bin,td,0,"TOOLS_REPORT\tfiles=5\tlines=6\tregistered=0\tunregistered=5\n","no-hidden-second-registry");
+        ck(put(td,"tests/batches.tsv","broken\n"),"malformed-registry-fixture");
+        report(bin,td,2,0,"malformed-registry-not-green");
+        ck(put(td,"tests/batches.tsv",table),"restore-registry-fixture");
+        cx_fmt(p,sizeof p,"%s/tools/plain.cx",td);ck(unlink(p)==0,"missing-tracked-fixture");
+        report(bin,td,2,0,"missing-tracked-source-not-green");
+        ck(symlink("cx-one.cx",p)==0,"worktree-symlink-fixture");
+        report(bin,td,0,"TOOLS_REPORT\tfiles=4\tlines=4\tregistered=1\tunregistered=3\n","tracked-regular-replaced-by-symlink-skipped");
+        cx_fmt(p,sizeof p,"%s/tests/batches.tsv",td);ck(unlink(p)==0,"missing-registry-fixture");
+        report(bin,td,2,0,"missing-registry-not-green");
+    }
+    {char *v[]={"rm","-rf","--",td,0};ck(run(v,"."),"private-fixture-cleanup");}
+    printf("CHECK_TOOLS_REPORT\tpass=%d\tfail=%d\n",pass,fail);return fail?1:0;
+}

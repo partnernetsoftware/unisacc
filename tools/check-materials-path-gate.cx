@@ -1,0 +1,49 @@
+/* CLI red/green and source-selection regression; fixtures stay outside default scope.
+ * sh ./unisacc.com tools/check-materials-path-gate.cx
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+static int failed;
+static void expect(int ok,const char *what){if(!ok){fprintf(stderr,"check-materials-path-gate\tFAIL\t%s\n",what);failed++;}}
+static int selected(const char *name){
+    char *out=0;size_t n=0;
+    char *v[]={"sh","./unisacc.com","tools/materials-path-gate.cx","--","--selected",(char *)name,0};
+    int rc=cx_runv_timeout(v,30,&out,&n);
+    expect(rc==0&&out&&n==2&&(out[0]=='0'||out[0]=='1')&&out[1]=='\n',"selection query CLI");
+    int yes=out&&n==2&&out[0]=='1';free(out);return yes;
+}
+static void probe(const char *p,const char *body,int want,const char *mark){
+    char *out=0;size_t n=0;int rc;
+    char *v[]={"sh","-c","sh ./unisacc.com tools/materials-path-gate.cx -- --file \"$1\" 2>&1","materials-path-gate",(char *)p,0};
+    if(cx_write(p,body,strlen(body))){expect(0,"fixture write");return;}
+    rc=cx_runv_timeout(v,30,&out,&n);
+    expect(rc==want,mark);expect(out&&strstr(out,mark),"CLI diagnostic");
+    free(out);
+}
+int main(void){
+    char dir[4400],p[4400];const char *base=getenv("TMPDIR");
+    expect(selected("streams-material.cx"),"existing producer");
+    expect(selected("units-prepare.cx"),"existing preparer");
+    expect(selected("materials-prepare.cx"),"aggregate preparer");
+    expect(!selected("check-example-material.cx"),"check fixture excluded");
+    expect(!selected("material-notes.md"),"documents excluded");
+    expect(!selected("materials-path-gate.cx"),"gate excluded");
+    if(!base||!base[0])base=".";
+    if(cx_fmt(dir,sizeof dir,"%s/material-path-check.XXXXXX",base)||!mkdtemp(dir)){
+        expect(0,"fixture directory");return 1;
+    }
+    if(cx_fmt(p,sizeof p,"%s/source.cx",dir)){expect(0,"fixture path");cx_rmtree(dir);return 1;}
+    probe(p,"/* portable source */\nconst char *p=\"${MATERIAL_ROOT}/input\";\n",0,"PASS");
+    probe(p,"/* source line one */\nconst char *p=\"/tmp/material\";\n",1,"source.cx:2");
+    probe(p,"const char *p=\"$HOME/material\";\n",1,"literal home variable");
+    probe(p,"/* /tmp/comment counts as source */\n",1,"literal temporary path");
+    probe(p,"const char *p=\"relative/input\";\n",0,"PASS");
+    if(unlink(p))expect(0,"fixture unlink");
+    {
+        char *out=0;size_t n=0;char *v[]={"sh","./unisacc.com","tools/materials-path-gate.cx","--","--file",p,0};
+        expect(cx_runv_timeout(v,30,&out,&n)!=0,"missing source refused");free(out);
+    }
+    if(rmdir(dir))expect(0,"fixture cleanup");
+    if(!failed)printf("CHECK_MATERIALS_PATH_GATE\tPASS\tCLI red/green and selection\n");
+    return failed?1:0;
+}

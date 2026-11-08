@@ -1,0 +1,83 @@
+/* Read-only contract C: git tracked regular tools .cx plus tests/batches.tsv.
+ * Lines are LF bytes plus a nonempty final fragment. No registry is written.
+ * Families are disjoint; cx-/stream-/crypto- include their check- subfamilies.
+ * Registration means a structural source/entry match, not execution eligibility.
+ * This report validates table shape only; tier values and execution qualification
+ * remain the responsibility of the authoritative testplan consumers.
+ * Usage: tools-report [ROOT]. Data errors return 2, never a success marker. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+static const char *families[]={"cx-","stream-","crypto-","check-","other"};
+typedef struct {long files,lines,registered;} tr_count;
+static int tr_regular(const char *p){
+    char b[4096];struct stat st;size_t n=strlen(p);
+    if(n>=sizeof b)return -1;
+    if(cx_fmt(b,sizeof b,"%s",p))return -1;
+    for(size_t i=1;i<=n;i++)if(b[i]=='/'||!b[i]){
+        char c=b[i];b[i]=0;
+        if(lstat(b,&st))return -1;
+        b[i]=c;if(S_ISLNK(st.st_mode))return 0;
+        if(!c)return S_ISREG(st.st_mode)?1:-1;
+        if(!S_ISDIR(st.st_mode))return -1;
+    }
+    return -1;
+}
+static int tr_family(const char *p){
+    const char *b=strrchr(p,'/');b=b?b+1:p;
+    const char *s=!strncmp(b,"check-",6)?b+6:b;
+    for(int i=0;i<3;i++)if(!strncmp(s,families[i],strlen(families[i])))return i;
+    return !strncmp(b,"check-",6)?3:4;
+}
+int main(int argc,char **argv){
+    const char *root=argc==2?argv[1]:".";
+    char path[4096],why[400];size_t rn;char *registry;np_result r;
+    tr_count counts[5]={{0}},total={0};
+    char *gv[]={"git","ls-files","--stage","-z","--","tools",0};
+    if(argc>2){fprintf(stderr,"usage: tools-report [ROOT]\n");return 2;}
+    if(cx_fmt(path,sizeof path,"%s/tests/batches.tsv",root)||tr_regular(path)!=1)goto bad;
+    registry=cx_read(path,&rn);if(!registry)goto bad;
+    if(memchr(registry,0,rn)||memchr(registry,'\r',rn))goto bad_registry;
+    /* Accept the historical 12/13-column table and the tier-extended table.
+     * Every row must match its header; source/entry retain their column positions. */
+    int width=0;
+    {const char *headers[]={
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect",
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders",
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier"};
+     for(int i=0;i<3;i++){size_t hn=strlen(headers[i]);if(rn>=hn&&!memcmp(registry,headers[i],hn)&&(rn==hn||registry[hn]=='\n'))width=12+i;}
+     if(!width)goto bad_registry;}
+    for(size_t a=0;a<rn;){size_t e=a;int cols=1;while(e<rn&&registry[e]!='\n'){if(registry[e]=='\t')cols++;e++;}
+        if(e==a||cols!=width||registry[a]=='\t'||registry[e-1]=='\t')goto bad_registry;
+        for(size_t j=a;j+1<e;j++)if(registry[j]=='\t'&&registry[j+1]=='\t')goto bad_registry;
+        a=e+(e<rn);
+    }
+    if(np_run(gv,root,0,10,&r,why,sizeof why))goto bad_registry;
+    if(r.rc){np_free(&r);goto bad_registry;}
+    for(size_t a=0;a<r.outn;){
+        size_t e=a;while(e<r.outn&&r.out[e])e++;
+        if(e==r.outn){np_free(&r);goto bad_registry;}
+        char *rec=r.out+a,*p=memchr(rec,'\t',e-a);a=e+1;
+        if(!p||p-rec<9){np_free(&r);goto bad_registry;}
+        if(strncmp(rec,"100644 ",7)&&strncmp(rec,"100755 ",7))continue;
+        if(p[-2]!=' '||p[-1]!='0'){np_free(&r);goto bad_registry;}
+        p++;size_t n=strlen(p);if(n<9||strncmp(p,"tools/",6)||strcmp(p+n-3,".cx"))continue;
+        if(cx_fmt(path,sizeof path,"%s/%s",root,p)){np_free(&r);goto bad_registry;}
+        int regular=tr_regular(path);if(!regular)continue;if(regular<0){np_free(&r);goto bad_registry;}
+        size_t sn;char *src=cx_read(path,&sn);if(!src){np_free(&r);goto bad_registry;}
+        long lines=sn&&src[sn-1]!='\n';for(size_t j=0;j<sn;j++)if(src[j]=='\n')lines++;free(src);
+        int registered=0;
+        for(size_t b=0;b<rn;){size_t z=b;int col=0;while(z<rn&&registry[z]!='\n')z++;
+            size_t start=b;for(size_t j=b;j<=z;j++)if(j==z||registry[j]=='\t'){
+                if((col==3||col==8)&&j-start==n&&!memcmp(registry+start,p,n))registered=1;
+                col++;start=j+1;
+            }b=z+(z<rn);
+        }
+        int f=tr_family(p);counts[f].files++;counts[f].lines+=lines;counts[f].registered+=registered;
+        total.files++;total.lines+=lines;total.registered+=registered;
+    }
+    np_free(&r);free(registry);
+    for(int i=0;i<5;i++)printf("CLUSTER\t%s\tfiles=%ld\tlines=%ld\tregistered=%ld\tunregistered=%ld\n",families[i],counts[i].files,counts[i].lines,counts[i].registered,counts[i].files-counts[i].registered);
+    printf("TOOLS_REPORT\tfiles=%ld\tlines=%ld\tregistered=%ld\tunregistered=%ld\n",total.files,total.lines,total.registered,total.files-total.registered);return 0;
+bad_registry:free(registry);
+bad:fprintf(stderr,"tools-report: invalid or unreadable report data\n");return 2;
+}

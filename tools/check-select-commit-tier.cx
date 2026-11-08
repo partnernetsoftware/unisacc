@@ -1,0 +1,81 @@
+/* ROOT: exercise the actual selector with deterministic synthetic timing input.
+ * The input is a scheduling fixture, never a product-result or PASS substitute.
+ */
+#pragma unisa use cxlib.tierruntime
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.env
+
+static int cs_batch(ct_table *t,const char *id){
+    for(int i=0;i<t->n;i++)
+        if(ct_eq(ct_get(t,i,"kind"),"batch")&&ct_eq(ct_get(t,i,"id"),id))return i;
+    ct_die("missing selector fixture row");
+    return -1;
+}
+int main(int argc,char **argv){
+    if(argc!=2)ct_die("usage: ROOT");
+    char tmp[]="/tmp/check-select-tier-XXXXXX";
+    if(!mkdtemp(tmp))ct_die("mkdtemp");
+    char dir[4400];
+    ct_path(dir,tmp,"tests");
+    if(mkdir(dir,0700))ct_die("mkdir fixture tests");
+    np_buf timing={0},registry={0};
+    np_puts(&timing,"# startup_ns=47464787754\n# wave_reserve_ns=10000000000\nid\tstatus\tcompletion_ns\toriginal_tier\tdomains\tmaterials\n");
+    /* Reverse tie input order: output must still order a before b. */
+    np_puts(&timing,"b\tPASS\t1\tcommit\twt\t-\na\tPASS\t1\tcommit\twt\t-\ns\tPASS\t2\tcommit\tserial\t-\nu\tUNKNOWN\t-\tcommit\t-\t-\nf\tFAIL\t-\tcommit\t-\t-\nz\tPASS\t200000000000\tcommit\t-\t-\n");
+    np_puts(&registry,"id\ttier\nb\tcommit\na\tcommit\ns\tcommit\nu\tcommit\nf\tcommit\nz\tcommit\n");
+    for(int i=0;i<283;i++){
+        char id[40];
+        if(cx_fmt(id,sizeof id,"padding-%03d",i))ct_die("fixture ID");
+        np_puts(&timing,id);
+        np_puts(&timing,"\tUNKNOWN\t-\tcommit\t-\t-\n");
+        np_puts(&registry,id);
+        np_puts(&registry,"\tcommit\n");
+    }
+    ct_write(tmp,"timing.tsv",&timing);
+    ct_write(tmp,"tests/batches.tsv",&registry);
+    char candidate[4400],source[4400];
+    ct_path(candidate,argv[1],"unisacc.com");
+    ct_path(source,argv[1],"tools/select-commit-tier.cx");
+    char *command[]={"sh",candidate,source,"--",tmp,"timing.tsv","selection.tsv",0};
+    np_result result={0};
+    char why[512]={0};
+    int transport=np_run(command,argv[1],0,55,&result,why,sizeof why);
+    if(transport||result.rc){
+        fprintf(stderr,"selector fixture: %s\n%s\n",why,result.err?result.err:"");
+        return 1;
+    }
+    ct_table output={0};
+    ct_load(tmp,"selection.tsv",&output);
+    int failures=0,waves=0;
+    const char *expected[]={"a","b","s"};
+    for(int i=0;i<output.n;i++){
+        if(!ct_eq(ct_get(&output,i,"kind"),"wave"))continue;
+        if(waves>=3||!ct_eq(ct_get(&output,i,"id"),expected[waves]))failures++;
+        waves++;
+        if(waves==3&&ct_num(ct_get(&output,i,"cumulative_predicted_ns"))!=96830984698LL)
+            failures++;
+    }
+    failures+=waves!=3;
+    for(int k=0;k<3;k++){
+        int r=cs_batch(&output,expected[k]);
+        failures+=!ct_eq(ct_get(&output,r,"tier"),"commit");
+        failures+=ct_num(ct_get(&output,r,"wave"))!=k+1;
+    }
+    const char *excluded[]={"u","f","z"};
+    const char *reasons[]={"incomplete-or-nonpass:UNKNOWN","incomplete-or-nonpass:FAIL","prediction-budget"};
+    for(int k=0;k<3;k++){
+        int r=cs_batch(&output,excluded[k]);
+        failures+=!ct_eq(ct_get(&output,r,"tier"),"daily");
+        failures+=!ct_eq(ct_get(&output,r,"reason"),reasons[k]);
+    }
+    /* Leave failed evidence intact; remove only this check's own fixture files. */
+    if(!failures){
+        const char *files[]={"timing.tsv","selection.tsv","tests/batches.tsv"};
+        for(int i=0;i<3;i++){ct_path(dir,tmp,files[i]);if(unlink(dir))ct_die("cleanup");}
+        ct_path(dir,tmp,"tests");
+        if(rmdir(dir)||rmdir(tmp))ct_die("cleanup directories");
+    }else fprintf(stderr,"selector fixture retained: %s\n",tmp);
+    np_free(&result);
+    printf("CHECK_SELECT_COMMIT_TIER\tfailed=%d\n",failures);
+    return failures?1:0;
+}
