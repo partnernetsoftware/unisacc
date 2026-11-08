@@ -1,3 +1,4 @@
+#pragma unisa use sys.hostid
 /* Execute one validated registry row. No PASS cache or preparation shortcut. */
 #pragma unisa use sys.sha
 #pragma unisa use cxlib.netpack
@@ -40,12 +41,18 @@ static void supplied(int argc,char **argv){if(argc-4!=nmaterial)die("material ar
 static const char *binding(const char *s,size_t n){if(n==4&&!memcmp(s,"root",4))return root;if(n==3&&!memcmp(s,"out",3))return work;if(n==9&&!memcmp(s,"candidate",9))return candidate;for(int i=0;i<nmaterial;i++)if(strlen(material[i].name)==n&&!memcmp(s,material[i].name,n))return material[i].path;die("unbound placeholder");return 0;}
 static void expand(const char *token,char out[4400]){if(token[0]!='{'){copy(out,4400,token);return;}const char *end=strchr(token,'}');if(!end)die("placeholder end");size_t n=(size_t)(end-token-1);const char *base=binding(token+1,n);if(!end[1])copy(out,4400,base);else if(end[1]=='/'&&end[2]){if(tp_material_kind(selected.materials,token+1,n)==2)die("sha256 material has path suffix");path(out,4400,base,end+2);}else die("placeholder suffix");}
 static int marker(const char *p,size_t n,const char *want){size_t at=0,wn=strlen(want);int count=0;while(at<n){size_t end=at;while(end<n&&p[end]!='\n')end++;if(end-at>=wn&&!memcmp(p+at,want,wn)&&(end-at==wn||p[at+wn]=='\t'))count++;at=end<n?end+1:end;}return count;}
+/* Keep the historical Linux label route; add only the Darwin arm64 host. */
+static int batch_platform_allowed(const char *p){
+ if(tx_eqz(p,"lnx/x86_64"))return 1;
+ const char *host=tn_self();
+ return host&&tx_eqz(host,"osx/arm64")&&tx_eqz(p,host);
+}
 int main(int argc,char **argv){
  if(argc<4){fputs("usage: ROOT ABS_OUT_PARENT BATCH_ID [material=ABS_PATH ...]\n",stderr);return 2;}
  if(argv[1][0]!='/'||argv[2][0]!='/'||!realpath(argv[1],root)||!realpath(argv[2],parent)||!tx_eqz(argv[1], root)||!tx_eqz(argv[2], parent))die("canonical root and output parent");
  char outbase[4400],registry[4400],coverage_path[4400],why[1200];path(outbase,sizeof outbase,root,"out");char canonical[4096];if(!realpath(outbase,canonical)||!within(parent,canonical)||tx_eqz(parent, canonical))die("output parent must be below root/out");
  copy(selected.id,sizeof selected.id,argv[3]);table_path(registry,sizeof registry,"batches.tsv");table_path(coverage_path,sizeof coverage_path,"coverage.tsv");size_t rn,cn;char *r=read_regular(registry,&rn),*c=read_regular(coverage_path,&cn);tp_summary summary;tp_observer observer={batch,coverage,0};int rc=tp_visit(root,r,rn,c,cn,&observer,&summary,why,sizeof why);free(r);free(c);if(rc)die(why);if(selected.found!=1||!tx_eqz(selected.implementation, "IMPLEMENTED")||!selected.source_present)die("batch not implemented or source missing");
- if(!tx_eqz(selected.platform, "lnx/x86_64"))die("batch requires another native host");if(!tx_eqz(selected.headers, "product")&&!tx_eqz(selected.headers, "tree"))die("batch headers source");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
+ if(!batch_platform_allowed(selected.platform))die("batch requires another native host");if(!tx_eqz(selected.headers, "product")&&!tx_eqz(selected.headers, "tree"))die("batch headers source");int seconds=atoi(selected.budget);if(seconds<1||seconds>55)die("batch budget");parse_materials();supplied(argc,argv);
  path(candidate,sizeof candidate,root,"unisacc.com");char before[65],after[65];product_digest(root,before);path(work,sizeof work,parent,selected.id);struct stat prior;errno=0;if(!lstat(work,&prior)||errno!=ENOENT)die("exclusive output path");
  char entry[4400];if(tx_eqz(selected.mode, "SOURCE"))path(entry,sizeof entry,root,selected.entry);else expand(selected.entry,entry);size_t en;char *source=read_regular(entry,&en);free(source);
  char storage[64][4400],*args[72];int na=0;char incflag[4400];args[na++]="sh";args[na++]=candidate;
