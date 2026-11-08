@@ -64,3 +64,16 @@ cc已裁定Linux格归远程，标PENDING-REMOTE；本机无lnx入口是预期�
 下一冻结窗口须交新版本候选APE与完整SHA、对应修复后源SID/构造回执、完整42模型包及SHA；Mac只复验本机原生格与材料接口。Linux同候选全批归远程，需ROOT绝对路径、ROOT/out/全新SESSION、typed MAP及材料原始回执，至少提供`prune-dut`/`prune-models`与全批要求的全部材料；不得复用修复前e586/3d0e的PASS。远程可直接调用`tools/prune-route-placement.cx --objects ROOT NEW_OUT DUT MODELS TARGET both`逐目标验证，并以-funit provider/consumer真链接exit7完成Linux格。保持PENDING-REMOTE，本机不等Linux入口。
 
 链接复验输入固定为`provider.c`: `extern int entry(void); int helper(int x){return x+1;} int main(void){return entry();}`，`consumer.c`: `extern int helper(int); int entry(void){return helper(6);}`。Mac各自裸`-c -o provider.o provider.c`和`-c -o consumer.o consumer.c`后，用同DUT链接两对象，原生执行须exit7；Linux使用显式`-b lnx/ARCH -funit`构造可由产品链接的unit对象，两个子编译、链接及执行各≤8秒，不能把raw ELF系统链接支持混入此断言。
+
+### 修复前后实际构造对照（cc裁定后补）
+
+两次独立`tools/osx-chain.cx ROOT REV PKG NEW_RUN --fixed-package`，各执行一次`--step RUN slice-arm64`，真实退出均0：修复前`02a7a0d2d^=3b84b3a3aad16306e97e9facdf70fd837d767f84`生成9083a6cc…（3120994B，32.255286秒），修复后02a7a0d2d生成848e0404…（3137506B，32.703603秒）。两者使用同一实际f069包，不认作同源NN/完整T1候选；before/after plan、构造argv、原始进程退出和receipt均在`out/obj-c-prunes-external/source-controls/`。
+
+用户最小输入固定为`int ext_f(int x){return x+1;} int main(void){return 0;}`。比较进程99472真实exit0，四次DUT编译都exit0；独立解析器实际结果如下，完整命令/原始日志见同目录`comparison/`和`comparison.log`：
+
+| 候选 | osx本机裸-c | 显式Linux raw-c（无-funit） |
+|---|---|---|
+| 修复前9083a6cc | ext_f保留，负例未复现 | ext_f丢失，oracle exit1 |
+| 修复后848e0404 | ext_f保留，oracle exit0 | ext_f保留，oracle exit0 |
+
+这证明固定包下Linux ELF格的源修复红→绿；不能把修复前osx的保守保留冒充原3d0e反证。原3d0e实物不在本机，按cc裁定不等它，核对仍留OBJ-C-PRUNES-REMOTE/PENDING-REMOTE。ROOT-RECORD-HOST-SPLIT另登记本机实测根[osx记录](root-identity-osx-local.md)，保留`ape-receipt.txt`及`root-identity.md`中的他机记录。
