@@ -47,4 +47,4 @@ lane每次执行一个原有阶段或完整批次窗口，结果保存stdout/std
 
 队列实现第一阶段验证：源ed33f38f…、native1fac17ce…；原default14和scheduler30保留，新init12、完整单job PASS/FAIL各12及恢复重核各1全部实际退出0。最初把恢复末重核合成13项导致两次55秒超时142，原日志保留；按12+1拆成独立步骤，断言未删且预算未提高。主树正式`osx-lane-queue`为12/0/PASS；这些都不是24批全绿。实际冻结ae1e06的动态24批独立推进，终态另记。
 
-控制器最终交付：主树六正式批全部实际PASS/rc0/transport0，总51/0，prepare16、execution10、bisect10、UNKNOWN5、伪wait5、无base红5；最终十三闸13/13。日志`out/osx-sentinel-dev/formal/`，source SHA2b3b4adc…、check SHA b6a5ce7c…、native SHA e43dce3e…。既有`cxlib.toolselfpath`通过宿主能力读取真实进程映像；独立SOURCE入口探针也实际exec同版e43缓存，并非把bootstrap当controller。周期命令仍显式native以保留完整时间窗口。所有证据限工具协议/本机开发范围，不迁成31批全绿或同源NN资格。
+控制器最终交付：主树六正式批全部实际PASS/rc0/transport0，总51/0，prepare16、execution10、bisect10、UNKNOWN5、伪wait5、无base红5；最终十三闸13/13。日志`out/osx-sentinel-dev/formal/`，source SHA2b3b4adc…、check SHA b6a5ce7c…、native SHA e43dce3e…。既有`cxlib.toolselfpath`通过宿主能力读取真实进程映像；独立SOURCE入口探针也实际exec同版e43缓存，并非把bootstrap当controller。周期命令仍显式native以保留完整时间窗口。所有证据限工具协议/本机开发范围，不迁成当前主树全批绿或同源NN资格。

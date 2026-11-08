@@ -76,3 +76,5 @@ init 后必须 `s8c-bind` 对 MAP 每名 `all-waves material`，否则 `material
 `plans/s9-vs-s8b.tsv`：`batch<TAB>c46-3<TAB>c47-1`。s9 出结果再填第三列。
 
 P0 OBJ-C-PRUNES-EXTERNAL源修复已经02a7a0d2d推送，旧e586/3d0e不是修复后的冻结身份。新源SID9023ad22…、本机ARM848e0404…和固定f06940模型仅作本机开发分账；六目标符号保留已验，新42包unit闭合/链接尚未验。下一候选须按[源修复集成清单](c48-2-binding-status.md#obj-c-prunes-external源修复集成通道)提供APE/模型完整SHA、ROOT/全新SESSION/typed MAP/原始回执；Linux同候选全批仍PENDING-REMOTE，本机不做、不等。
+
+当前更正：a3a32d8a0已用CLI统一unit-object默认取代并完整撤回02a方案，前文9023/848仅历史。新321a10091冻结源SID9967da6e…、ARM f95b623b…与固定f06940模型完成六目标各12/0、bare5/0、canonical unit ELF/旧raw ELF独立oracle36/0；不授新42候选资格。远程ROOT/新SESSION/MAP和原3d0e核对保持PENDING-REMOTE，须以实际新冻结身份填写，不能沿用9023。

@@ -53,7 +53,7 @@ cc已裁定Linux格归远程，标PENDING-REMOTE；本机无lnx入口是预期�
 
 ## OBJ-C-PRUNES-EXTERNAL源修复集成通道
 
-修复提交`02a7a0d2d8aeef29a0d3ed781ed89a0523710689`：driver对象路径前端至tapecheck/e4后直接lower，兼容旧目录仍含prune的包；对象tape的O0从lower恢复。compilerpack新对象目录及warning/multi克隆均不含prune，image/run保留。原placement六断言保留。
+历史方案（已被a3a32d8a0完整撤回，当前采用CLI统一unit-object默认）：提交`02a7a0d2d8aeef29a0d3ed781ed89a0523710689`曾做如下修改：driver对象路径前端至tapecheck/e4后直接lower，兼容旧目录仍含prune的包；对象tape的O0从lower恢复。compilerpack新对象目录及warning/multi克隆均不含prune，image/run保留。原placement六断言保留。
 
 正规冻结源SID=`9023ad22ba3b605fc4eeb0c04ea0a243278646b08cddf941ca7a2c85525e5044`，本机ARM slice=`848e0404e032e75f6dee5fd70cdac911e8b2f28a211eb5d39f97a5ded2ff283c`，3137506B、31.400049秒；`out/obj-c-prunes-external/integrated-arm64/receipt.txt`为真实构造回执。编译/检查bootstrap和固定模型仍为f069（40模型），不是修复前e586/3d0e的42模型候选或新版本发布件。
 
@@ -77,3 +77,11 @@ cc已裁定Linux格归远程，标PENDING-REMOTE；本机无lnx入口是预期�
 | 修复后848e0404 | ext_f保留，oracle exit0 | ext_f保留，oracle exit0 |
 
 这证明固定包下Linux ELF格的源修复红→绿；不能把修复前osx的保守保留冒充原3d0e反证。原3d0e实物不在本机，按cc裁定不等它，核对仍留OBJ-C-PRUNES-REMOTE/PENDING-REMOTE。ROOT-RECORD-HOST-SPLIT另登记本机实测根[osx记录](root-identity-osx-local.md)，保留`ape-receipt.txt`及`root-identity.md`中的他机记录。
+
+### 当前统一unit-object默认（取代历史02a方案）
+
+远程cc的a3a32d8a0已完整撤回02a路由改法，当前只在CLI令所有目标的-c默认funit。此处保留该政策，不恢复已删除模块/生成器跳步/批次。原9023/848前后对照仍为历史真实证据。
+
+为支持当前默认表示，`prune-route-placement`先独立解析六目标unit导出（Linux使用`.unisa.tape` ELF section），并保留旧raw ELF符号定义分支；不是以字符串匹配或LOCAL绑定放宽当前unit导出要求。原反证全部保留，新增两Linux unit的正确、截断、注释global及CPU错配共8项，独立oracle由28增至36/0。
+
+正规冻结321a100914a9b06e2a3d8433743a13030252a945，源SID=`9967da6e78efe4d398040ac4d6675994e920a6e3ee16958b967f4169d4f067a1`；ARM私有DUT=`f95b623b29ec575e3cf5cfe45ab750b996b6eca54efc484c8c2a4b5a6a5d1dfe`，3120994B、31.292673秒。仍固定f06940模型，不装根，不授42模型同源NN/发布资格。当前六目标正式批各12/0、bare5/0、oracle36/0，八个真实PASS/rc0/transport0；十三闸13/13。证据`out/obj-c-prunes-external/unit-policy/`，先前.end缺口与原3d0e实物核对仍按远程清单办。
