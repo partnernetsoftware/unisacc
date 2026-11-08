@@ -1,0 +1,34 @@
+/* Independent hand-built transcript/standard ELF fixture, not a simulator run. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+static char target[4400],cfg[4400],watch[4400],image[4400],com[4400],tool[4400];static int checks,bad;
+static const char *configuration="LW.i\tnpc,ws,we\nWRITE\tnpc,endo,memory_mode,host_dyn,target_os\nWR.nx\tq\nLIB.imagebegin\tendo,npc,lib_present\nEH.r821\ttext_blob,endo\nEI.pad\tendo\n";
+static const char *source="ret form=x86\nret form=x86\n";
+static const char *ds="bcf30b2297085486f8aff96a10242b7e91c2d1b2e7260d96abc2d560f67fba98";
+static void ck(int v,const char *s){checks++;printf("%s\t%s\n",v?"PASS":"FAIL",s);if(!v)bad++;}
+static void die(void){fprintf(stderr,"encoder fixture IO\n");exit(2);}
+static void put(unsigned char *s,int at,unsigned long long n,int width){for(int i=0;i<width;i++){s[at+i]=n&255;n>>=8;}}
+static void fixture_image(void){unsigned char b[178]={0};memcpy(b,"\177ELF\2\1\1",7);put(b,16,2,2);put(b,18,62,2);put(b,20,1,4);put(b,24,4194304+176,8);put(b,32,64,8);put(b,52,64,2);put(b,54,56,2);put(b,56,2,2);put(b,64,1,4);put(b,68,5,4);put(b,80,4194304,8);put(b,96,178,8);put(b,104,178,8);put(b,112,4096,8);put(b,120,1,4);put(b,124,6,4);put(b,128,178,8);b[176]=195;b[177]=195;if(cx_write(image,b,sizeof b))die();}
+static void transcript(int mode,int longform){
+ size_t n;char *im=cx_read(image,&n),th[65],ch[65],ih[65];if(!im)die();cx_sha256_hex(source,strlen(source),th);cx_sha256_hex(configuration,strlen(configuration),ch);cx_sha256_hex(im,n,ih);free(im);
+ FILE *f=fopen(watch,"wb");if(!f)die();fprintf(f,"WRITE_EVENTS\tversion=1\tdelta_sha=%s\tinput_sha=%s\toutput_sha=%s\toutput_bytes=178\tclaim=STATE_OBSERVATION_ONLY\tconfig_sha=%s%s\n",ds,th,ih,ch,longform?"":"\twatch_format=compact-v1");
+ long seq=0;if(!longform)fprintf(f,"FRAME\t%ld\t1\t%s\t26\n",++seq,th);
+ int slots[8]={0,0,1,2,2,3,4,5};long cursors[8]={3,16,26,26,26,26,26,26},outs[8]={0,0,0,1,2,2,176,178};
+ long values[8][5]={{0,0,3},{1,13,16},{2,2,0,0,1},{0},{1},{2,2,0},{1,2},{2}};
+ if(mode==1)values[1][0]=0;if(mode==3)values[4][0]=0;if(mode==5)outs[6]=175;if(mode==6)values[2][1]=3;if(mode==7)values[2][3]=1;
+ const char *hex[6]={"4c572e69","5752495445","57522e6e78","4c49422e696d616765626567696e","45482e72383231","45492e706164"};int arity[6]={3,5,1,3,2,1};const char *names[6][5]={{"npc","ws","we"},{"npc","endo","memory_mode","host_dyn","target_os"},{"q"},{"endo","npc","lib_present"},{"text_blob","endo"},{"endo"}};
+ for(int i=0;i<8;i++){
+  if((mode==2&&i==1)||(mode==4&&i==4))continue;int slot=slots[i];
+  if(longform)fprintf(f,"WATCH\t%ld\tstate_hex=%s\tframe_instance=1\tframe_sha=%s\tcursor=%ld\tframe_end=26\toutput_generation=0\toutput_len=%ld\tscratch_generation=0\tscratch_len=0",++seq,hex[slot],th,cursors[i],outs[i]);
+  else fprintf(f,"WATCHC\t%ld\t%d\t1\t%ld\t0\t%ld\t0\t0",++seq,slot,cursors[i],outs[i]);
+  for(int j=0;j<arity[slot];j++){if(longform)fprintf(f,"\tvalue:%s=%ld",names[slot][j],values[i][j]);else fprintf(f,"\t%ld",values[i][j]);}fputc('\n',f);
+ }
+ fprintf(f,"COMPLETE\tevents=%ld\n",seq);if(fclose(f))die();
+}
+static void run(int expected,const char *label){char *v[]={"sh",com,tool,"--",target,cfg,watch,image,0};np_result r={0};char why[256]={0};int e=np_run(v,0,0,10,&r,why,sizeof why);int ok=!e&&!r.residue&&r.rc==expected;if(expected==0)ok=ok&&strstr(r.out,"RECORD\t0\ttarget_lo=0\ttarget_hi=13\ttext_lo=0\ttext_hi=1\tfile_lo=176\tfile_hi=177")&&strstr(r.out,"RECORD\t1\ttarget_lo=13\ttarget_hi=26\ttext_lo=1\ttext_hi=2\tfile_lo=177\tfile_hi=178");else ok=ok&&r.outn==0;ck(ok,label);if(!ok)fprintf(stderr,"transport%d rc%d %s %s\n",e,r.rc,why,r.err?r.err:"");np_free(&r);}
+int main(void){char root[4400],dir[]="/tmp/encoder-origin-XXXXXX";if(!realpath(".",root)||!mkdtemp(dir))die();cx_fmt(com,sizeof com,"%s/unisacc.com",root);cx_fmt(tool,sizeof tool,"%s/tools/encoder-record-origin.cx",root);cx_fmt(target,sizeof target,"%s/target",dir);cx_fmt(cfg,sizeof cfg,"%s/config",dir);cx_fmt(watch,sizeof watch,"%s/watch",dir);cx_fmt(image,sizeof image,"%s/image",dir);if(cx_write(target,source,strlen(source))||cx_write(cfg,configuration,strlen(configuration)))die();fixture_image();
+ transcript(0,0);run(0,"independent compact two-ret fixture exact intervals");transcript(0,1);run(0,"independent long fixture same exact intervals");
+ const char *labels[7]={"duplicate LW refuses","missing LW refuses","duplicate q refuses","missing q refuses","changed H refuses","changed T refuses","nonstatic refuses"};for(int i=1;i<=7;i++){transcript(i,0);run(2,labels[i-1]);}
+ transcript(0,0);if(cx_write(target,"ret form=x85\nret form=x86\n",26))die();run(2,"changed target identity refuses");if(cx_write(target,source,strlen(source))||cx_write(cfg,"wrong\n",6))die();run(2,"wrong config refuses");
+ unlink(target);unlink(cfg);unlink(watch);unlink(image);rmdir(dir);printf("ENCODER_RECORD_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}

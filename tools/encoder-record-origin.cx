@@ -1,0 +1,94 @@
+/* C47/model12 static Linux x86_64 record certificate. This verifies a transcript,
+ * not its authenticity; module ownership requires a separately proved row map.
+ * TARGET CONFIG WATCH IMAGE. No output records are published before validation. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#define ER_DELTA "bcf30b2297085486f8aff96a10242b7e91c2d1b2e7260d96abc2d560f67fba98"
+#define ER_CONFIG "397fedac0eec749d48b5c9515450a40231abe188ed261adbd375e216900e3829"
+typedef struct {long lo,hi,ws,we,begin,end;} Record;
+static Record *records;static long count,capacity;
+static char record_buffer[65536];static long record_used;
+static void flush_records(void);
+static void refuse(const char *s){fprintf(stderr,"ENCODER_RECORD_ORIGIN REFUSE %s\n",s);exit(2);}
+static void flush_records(void){
+ if(record_used&&sy_write_all(1,record_buffer,record_used))refuse("output write");
+ record_used=0;
+}
+static void append_record_line(const char *line,int n,long cap){
+ if(n<0||n>=cap||n>sizeof record_buffer)refuse("output line bound");
+ if(record_used+n>sizeof record_buffer)flush_records();
+ memcpy(record_buffer+record_used,line,n);record_used+=n;
+}
+static void emit_record(long i,long h){
+ char line[320];
+ int n=snprintf(line,sizeof line,"RECORD\t%ld\ttarget_lo=%ld\ttarget_hi=%ld\ttext_lo=%ld\ttext_hi=%ld\tfile_lo=%ld\tfile_hi=%ld\tobject_module=UNKNOWN\n",i,records[i].lo,records[i].hi,records[i].begin,records[i].end,h+records[i].begin,h+records[i].end);
+ append_record_line(line,n,sizeof line);
+}
+static char *load(const char *p,size_t *n,long cap,int textual){struct stat st;if(stat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>cap)refuse("file extent");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size||(textual&&memchr(s,0,*n)))refuse("read or NUL");return s;}
+static void hash(const char *s,long n,char *out){if(sy_sha256_hex(s,n,out))cx_sha256_hex(s,n,out);}
+static long number(const char *s){char *e;errno=0;long n=strtol(s,&e,10);if(!*s||*e||errno||n<0)refuse("number");return n;}
+static int split(char *s,char **f){int n=0;for(;;){if(n==32)refuse("field count");f[n++]=s;char *e=strchr(s,'\t');if(!e)break;*e=0;s=e+1;}return n;}
+static const char *value(char **f,int n,const char *key){long z=strlen(key);const char *out=0;for(int i=2;i<n;i++)if(!strncmp(f[i],key,z)&&f[i][z]=='='){if(out)refuse("duplicate key");out=f[i]+z+1;}if(!out)refuse("missing key");return out;}
+static const char *header(char **f,int n,const char *key){long z=strlen(key);const char *out=0;for(int i=1;i<n;i++)if(!strncmp(f[i],key,z)&&f[i][z]=='='){if(out)refuse("duplicate header key");out=f[i]+z+1;}if(!out)refuse("missing header key");return out;}
+static void target_rows(const char *s,long n){
+ for(long lo=0;lo<n;){long hi=lo;while(hi<n&&s[hi]!='\n')hi++;if(hi==n)refuse("target truncated line");hi++;long a=lo;while(a<hi&&(s[a]==' '||s[a]=='\t'))a++;long b=a;while(b<hi&&s[b]!=' '&&s[b]!='\t'&&s[b]!='\r'&&s[b]!='\n')b++;
+  if(b>a&&s[a]!='@'&&s[b-1]!=':'){
+   if(count==1000000)refuse("row budget");if(count==capacity){capacity=capacity?capacity*2:1024;records=realloc(records,capacity*sizeof(Record));if(!records)refuse("allocation");}
+   Record *r=&records[count++];r->lo=lo;r->hi=hi;r->ws=a;r->we=b;
+  }else if(b>a&&s[b-1]==':'){long p=b;while(p<hi&&(s[p]==' '||s[p]=='\t'||s[p]=='\r'||s[p]=='\n'))p++;if(p!=hi)refuse("inline label content");}
+  lo=hi;
+ }
+}
+static unsigned long long le(const unsigned char *s,long n,long off,int width){if(off<0||off>n||width>n-off)refuse("ELF extent");unsigned long long v=0;for(int i=0;i<width;i++)v|=(unsigned long long)s[off+i]<<(i*8);return v;}
+static void elf(const unsigned char *s,long n,long text,long pad){
+ if(n<176||memcmp(s,"\177ELF\2\1\1",7)||le(s,n,16,2)!=2||le(s,n,18,2)!=62||le(s,n,20,4)!=1||le(s,n,40,8)!=0||le(s,n,52,2)!=64||le(s,n,32,8)!=64||le(s,n,54,2)!=56||le(s,n,56,2)!=2)refuse("static ELF header");
+ int rx=0,data=0;for(int i=0;i<2;i++){long p=64+i*56;if(le(s,n,p,4)==1&&(le(s,n,p+4,4)&1)){
+  if(rx++||le(s,n,p+4,4)!=5||le(s,n,p+8,8)!=0||le(s,n,p+32,8)!=(unsigned long long)(176+text)||le(s,n,p+40,8)<le(s,n,p+32,8))refuse("ELF executable extent");
+  unsigned long long va=le(s,n,p+16,8),entry=le(s,n,24,8);if(va+176+text<va||entry<va+176||entry>=va+176+text)refuse("ELF entry");
+ }else if(le(s,n,p,4)==1){
+  if(data++||le(s,n,p+4,4)!=6||le(s,n,p+8,8)!=(unsigned long long)pad||pad>n||le(s,n,p+32,8)>(unsigned long long)(n-pad)||le(s,n,p+40,8)<le(s,n,p+32,8))refuse("ELF data/padding closure");
+ }}if(rx!=1||data!=1||text>n-176)refuse("ELF load segments");
+}
+static const char *states[6]={"4c572e69","5752495445","57522e6e78","4c49422e696d616765626567696e","45482e72383231","45492e706164"};
+static int arity[6]={3,5,1,3,2,1};
+static const char *regs[6][5]={{"npc","ws","we"},{"npc","endo","memory_mode","host_dyn","target_os"},{"q"},{"endo","npc","lib_present"},{"text_blob","endo"},{"endo"}};
+int main(int argc,char **argv){
+ if(argc!=5)refuse("usage TARGET CONFIG WATCH IMAGE");size_t tn,cn,wn,in;
+ char *target=load(argv[1],&tn,134217728,1),*cfg=load(argv[2],&cn,65536,1),*watch=load(argv[3],&wn,67108864,1),*image=load(argv[4],&in,134217728,0);
+ char th[65],ch[65],wh[65],ih[65];hash(target,tn,th);hash(cfg,cn,ch);hash(watch,wn,wh);hash(image,in,ih);if(strcmp(ch,ER_CONFIG))refuse("certificate config SHA");target_rows(target,tn);
+ long seq=0,lw=0,q=0,text=-1,h=-1,last=0,pad=-1,phase=0;int compact=0,root=0,complete=0,head=0;
+ for(char *p=watch;*p;){char *end=strchr(p,'\n');if(!end)refuse("truncated transcript");*end=0;char *f[32];int nf=split(p,f);
+  if(!head){
+   if(strcmp(f[0],"WRITE_EVENTS")||strcmp(header(f,nf,"version"),"1")||strcmp(header(f,nf,"delta_sha"),ER_DELTA)||strcmp(header(f,nf,"config_sha"),ch)||strcmp(header(f,nf,"input_sha"),th)||strcmp(header(f,nf,"output_sha"),ih)||number(header(f,nf,"output_bytes"))!=(long)in||strcmp(header(f,nf,"claim"),"STATE_OBSERVATION_ONLY"))refuse("transcript binding");
+   for(int i=1;i<nf;i++)if(!strncmp(f[i],"watch_format=",13)){if(compact||strcmp(f[i]+13,"compact-v1"))refuse("watch format");compact=1;}
+   if(nf!=(compact?9:8))refuse("header shape");head=1;p=end+1;continue;
+  }
+  if(!strcmp(f[0],"COMPLETE")){if(nf!=2||strncmp(f[1],"events=",7)||number(f[1]+7)!=seq||end[1]||phase!=4||q!=count||lw!=count)refuse("incomplete transcript");complete=1;break;}
+  if(nf<2||number(f[1])!=++seq||seq>1000000)refuse("record sequence");
+  if(!strcmp(f[0],"FRAME")){if(!compact||nf!=5||root||number(f[2])!=1||strcmp(f[3],th)||number(f[4])!=(long)tn)refuse("root frame identity");root=1;p=end+1;continue;}
+  int slot=-1;long cursor,ogen,on,v[5];
+  if(compact){
+   if(strcmp(f[0],"WATCHC")||!root||nf<9)refuse("compact record");slot=number(f[2]);if(slot>5||nf!=9+arity[slot]||number(f[3])!=1)refuse("compact slot/frame");cursor=number(f[4]);ogen=number(f[5]);on=number(f[6]);number(f[7]);number(f[8]);for(int j=0;j<arity[slot];j++)v[j]=number(f[9+j]);
+  }else{
+   if(strcmp(f[0],"WATCH"))refuse("long record");const char *st=value(f,nf,"state_hex");for(int j=0;j<6;j++)if(!strcmp(st,states[j]))slot=j;
+   if(slot<0||nf!=11+arity[slot]||number(value(f,nf,"frame_instance"))!=1||strcmp(value(f,nf,"frame_sha"),th)||number(value(f,nf,"frame_end"))!=(long)tn)refuse("long root identity");cursor=number(value(f,nf,"cursor"));ogen=number(value(f,nf,"output_generation"));on=number(value(f,nf,"output_len"));number(value(f,nf,"scratch_generation"));number(value(f,nf,"scratch_len"));
+   for(int j=0;j<arity[slot];j++){char key[80];snprintf(key,sizeof key,"value:%s",regs[slot][j]);v[j]=number(value(f,nf,key));}
+  }
+  if(cursor>(long)tn||ogen||on>(long)in)refuse("observation extent/generation");
+  if(slot==0){if(phase||lw>=count||v[0]!=lw||v[1]!=records[lw].ws||v[2]!=records[lw].we||cursor!=v[2])refuse("LW row/npc");lw++;}
+  else if(slot==1){if(phase||lw!=count||v[0]!=count||v[1]>(long)in-176||v[2]||v[3]||v[4]!=1||on)refuse("WRITE/static/N");text=v[1];phase=1;}
+  else if(slot==2){if(phase!=1||q>=count||v[0]!=q||on<last||on>text)refuse("q interval");records[q].begin=last;records[q].end=on;last=on;q++;}
+  else if(slot==3){if(phase!=1||q!=count||last!=text||v[0]!=text||v[1]!=count||v[2]||on!=text)refuse("text blob closure");phase=2;}
+  else if(slot==4){if(phase!=2||!v[0]||v[1]!=text||on!=176)refuse("static text copy header");h=on;phase=3;}
+  else {if((phase!=3&&phase!=4)||v[0]!=text||(phase==3?on!=h+text:on!=pad+1))refuse("copy/padding closure");pad=on;phase=4;}
+  p=end+1;
+ }
+ if(!complete||!head||!count||h!=176)refuse("missing closure");elf((unsigned char *)image,in,text,pad);
+ char line[1024];
+ int n=snprintf(line,sizeof line,"ENCODER_RECORD_ID\tcertificate=c47-model12-static-v1\tdelta_sha=%s\tconfig_sha=%s\ttarget_sha=%s\twatch_sha=%s\timage_sha=%s\tclaim=target-row-lineage-only\tobject_module=UNKNOWN\n",ER_DELTA,ch,th,wh,ih);
+ append_record_line(line,n,sizeof line);
+ for(long i=0;i<count;i++)emit_record(i,h);
+ n=snprintf(line,sizeof line,"OTHER\tHEADER\tfile_lo=0\tfile_hi=176\tobject_module=UNKNOWN\nOTHER\tDATA_OR_ALIGN\tfile_lo=%ld\tfile_hi=%ld\tobject_module=UNKNOWN\nENCODER_RECORD_ORIGIN\trecords=%ld\ttext_bytes=%ld\timage_bytes=%ld\n",h+text,(long)in,count,text,(long)in);
+ append_record_line(line,n,sizeof line);flush_records();return 0;
+}

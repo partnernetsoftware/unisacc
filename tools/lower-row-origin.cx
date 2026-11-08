@@ -139,7 +139,140 @@ static void emit_row(long i) {
 }
 
 static void copyrow(const char *src,long sn,long cur,long len,long gen){if(cur<previous_cursor||cur>sn||len<previous_len||gen!=previous_gen)fail("data pass order/append generation");long a=previous_cursor,z=cur-a,added=len-previous_len;if(z){if(src[cur-1]!='\n'||memchr(src+a,'\n',z-1))fail("LINE is not exactly one source row");if(added){if(added!=z||previous_len!=cn||nr==LR_ROWS)fail("copy length or continuity");rows[nr].slo=a;rows[nr].shi=cur;rows[nr].clo=cn;rows[nr].chi=cn+z;memcpy(code+cn,src+a,z);cn+=z;nr++;}}else if(added||cur!=sn)fail("duplicate/reversed LINE");previous_cursor=cur;previous_len=len;previous_gen=gen;}
-int main(int argc,char **argv){if(argc!=6)fail("usage SOURCE DELTA CONFIG WATCH OUTPUT");size_t sn,dn,gn,wn,on;char *src=load(argv[1],&sn),*delta=load(argv[2],&dn),*cfg=load(argv[3],&gn),*watch=load(argv[4],&wn),*output=load(argv[5],&on);char sh[65],dh[65],gh[65],oh[65],ch[65];hash(src,sn,sh);hash(delta,dn,dh);hash(cfg,gn,gh);hash(output,on,oh);if(!strstr(cfg,"LINE\tline\n")||!strstr(cfg,"LAY\tcode\n")||!strstr(cfg,"C.init\tcode,nc\n")||!strstr(cfg,"C.next\tnc,na\n")||!strstr(cfg,"C.label\tnc,tok\n"))fail("profile config missing required states");rows=calloc(LR_ROWS,sizeof *rows);code=malloc(sn+1);if(!rows||!code)fail("allocation");char *p=watch,*e=strchr(p,'\n');if(!e)fail("header");*e=0;char *f[64];int nf=fields(p,f);if(strcmp(f[0],"WRITE_EVENTS")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"input_sha"),sh)||strcmp(value(f,nf,"config_sha"),gh)||strcmp(value(f,nf,"output_sha"),oh)||number(value(f,nf,"output_bytes"))!=(long)on)fail("watch content SHA/extent mismatch");int compact=0;for(int i=0;i<nf;i++)if(!strncmp(f[i],"watch_format=",13)){if(strcmp(f[i],"watch_format=compact-v1"))fail("unknown watch_format");compact=1;}if(compact)configure_slots(cfg);p=e+1;long seq=0,next=0,frame=-1;int lay=0,init=0,complete=0;while(*p){e=strchr(p,'\n');if(!e)fail("truncated record");*e=0;nf=fields(p,f);if(!strcmp(f[0],"COMPLETE")){if(complete||number(value(f,nf,"events"))!=seq||e[1])fail("COMPLETE count/trailing records");complete=1;break;}if(compact){if(!strcmp(f[0],"FRAME")){if(nf<2||number(f[1])!=++seq)fail("compact FRAME order/id");define_frame(f,nf);p=e+1;continue;}if(strcmp(f[0],"WATCHC"))fail("compact transport record");nf=normalize_compact(f,nf);}if(nf<2||strcmp(f[0],"WATCH")||number(f[1])!=++seq)fail("watch order/duplicate/id");char st[128];state(value(f,nf,"state_hex"),st);long cur=number(value(f,nf,"cursor")),end=number(value(f,nf,"frame_end")),len=number(value(f,nf,"output_len")),gen=number(value(f,nf,"output_generation")),fi=number(value(f,nf,"frame_instance"));const char *fh=value(f,nf,"frame_sha");if(!strcmp(st,"LINE")||!strcmp(st,"LAY")){if(lay||init||strcmp(fh,sh)||end!=(long)sn||cur>end)fail("source frame identity/order");if(!have_line){if(strcmp(st,"LINE")||cur||len)fail("first LINE must start at zero");previous_cursor=cur;previous_len=len;previous_gen=gen;have_line=1;}else copyrow(src,sn,cur,len,gen);if(!strcmp(st,"LAY")){if(cur!=(long)sn||len!=cn)fail("data pass does not close");hash(code,cn,ch);lay=1;}}
+typedef struct { long lo,hi,first,count; int rule; } Episode;
+static void append_text(const char *text) {
+    long n = strlen(text);
+    if (n > sizeof output_buffer) fail("episode line budget");
+    if (output_used + n > sizeof output_buffer) flush_rows();
+    memcpy(output_buffer + output_used, text, n);
+    output_used += n;
+}
+static int boundary(const char *target, long n, long at) {
+    return at >= 0 && at <= n && (!at || target[at-1] == '\n');
+}
+static void sha_shape(const char *s) {
+    if (strlen(s) != 64) fail("row ledger SHA shape");
+    for (int i=0;i<64;i++)
+        if (!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f'))) fail("row ledger SHA encoding");
+}
+static int episodes(int argc, char **argv) {
+    if (argc != 7) fail("usage --episodes ROW_LEDGER DELTA CONFIG WATCH TARGET");
+    size_t rn,dn,gn,wn,tn;
+    char *ledger=load(argv[2],&rn), *delta=load(argv[3],&dn);
+    char *cfg=load(argv[4],&gn), *watch=load(argv[5],&wn), *target=load(argv[6],&tn);
+    char dh[65],gh[65],th[65],rh[65],source_sha[65],code_sha[65],row_cfg[65];
+    hash(delta,dn,dh); hash(cfg,gn,gh); hash(target,tn,th); hash(ledger,rn,rh);
+    rows=calloc(LR_ROWS,sizeof *rows);
+    Episode *ep=calloc(LR_ROWS,sizeof *ep);
+    if(!rows||!ep)fail("episode allocation");
+    char *p=ledger,*end=strchr(p,'\n'),*f[64];
+    if(!end)fail("row ledger header"); *end=0;
+    int nf=fields(p,f);
+    if(strcmp(f[0],"LOWER_ROW_ID")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"output_sha"),th))
+        fail("row ledger actual delta/target SHA");
+    bounded_copy(source_sha,sizeof source_sha,value(f,nf,"source_sha")); sha_shape(source_sha);
+    bounded_copy(code_sha,sizeof code_sha,value(f,nf,"code_sha")); sha_shape(code_sha);
+    bounded_copy(row_cfg,sizeof row_cfg,value(f,nf,"config_sha")); sha_shape(row_cfg);
+    cn=number(value(f,nf,"code_bytes")); p=end+1;
+    int row_complete=0;
+    while(*p){
+        end=strchr(p,'\n');if(!end)fail("truncated row ledger");*end=0;nf=fields(p,f);
+        if(!strcmp(f[0],"LOWER_ROW_ORIGIN")){
+            if(number(value(f,nf,"rows"))!=nr||number(value(f,nf,"entities"))!=nr||number(value(f,nf,"code_bytes"))!=cn||end[1])
+                fail("row ledger footer/count");
+            row_complete=1;break;
+        }
+        if(strcmp(f[0],"ENTITY")||nf<2||number(f[1])!=nr||nr==LR_ROWS)fail("row ledger ENTITY sequence");
+        Row *r=&rows[nr];
+        r->clo=number(value(f,nf,"code_lo")); r->chi=number(value(f,nf,"code_hi"));
+        r->slo=number(value(f,nf,"source_lo")); r->shi=number(value(f,nf,"source_hi"));
+        if(r->clo!=(nr?rows[nr-1].chi:0)||r->chi<=r->clo||r->shi<=r->slo||r->chi-r->clo!=r->shi-r->slo||
+           (nr&&r->slo<rows[nr-1].shi))fail("row ledger source/code ranges");
+        nr++;p=end+1;
+    }
+    if(!row_complete||!nr||rows[nr-1].chi!=cn)fail("incomplete row ledger");
+    if(!strstr(cfg,"GENERIC\tci,kind,op,ldp_dry\n")||!strstr(cfg,"C.advance\tci,nc,ldp_dry\n")||
+       !strstr(cfg,"LDP.original.PF.emit\tci,nc,ldp_dry\n")||!strstr(cfg,"LDP.original.PL.emit\tci,nc,ldp_dry\n"))
+        fail("episode profile config");
+    p=watch;end=strchr(p,'\n');if(!end)fail("episode watch header");*end=0;nf=fields(p,f);
+    if(strcmp(f[0],"WRITE_EVENTS")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"input_sha"),source_sha)||
+       strcmp(value(f,nf,"config_sha"),gh)||strcmp(value(f,nf,"output_sha"),th)||number(value(f,nf,"output_bytes"))!=(long)tn)
+        fail("episode watch SHA/extent");
+    int compact=0;
+    for(int i=0;i<nf;i++)if(!strncmp(f[i],"watch_format=",13)){
+        if(strcmp(f[i],"watch_format=compact-v1"))fail("episode watch format");compact=1;
+    }
+    if(compact)configure_slots(cfg);
+    long seq=0,ne=0,unknown=0,dry_count=0,last_hi=0,last_generation=0,pending_ci=0,pending_len=0,pending_gen=0,pending_frame=0;
+    int pending=0,pending_rule=0,complete=0;
+    p=end+1;
+    while(*p){
+        end=strchr(p,'\n');if(!end)fail("truncated episode watch");*end=0;nf=fields(p,f);
+        if(!strcmp(f[0],"COMPLETE")){
+            if(number(value(f,nf,"events"))!=seq||end[1]||pending)fail("unclosed episode/COMPLETE");complete=1;break;
+        }
+        if(compact){
+            if(!strcmp(f[0],"FRAME")){
+                if(nf<2||number(f[1])!=++seq)fail("episode FRAME sequence");
+                define_frame(f,nf);p=end+1;continue;
+            }
+            if(strcmp(f[0],"WATCHC"))fail("episode compact record");nf=normalize_compact(f,nf);
+        }
+        if(nf<2||strcmp(f[0],"WATCH")||number(f[1])!=++seq)fail("episode WATCH sequence");
+        char st[128];state(value(f,nf,"state_hex"),st);
+        long len=number(value(f,nf,"output_len")),gen=number(value(f,nf,"output_generation"));
+        long fi=number(value(f,nf,"frame_instance")),ce=number(value(f,nf,"frame_end"));
+        if(strcmp(value(f,nf,"frame_sha"),code_sha)||ce!=cn||number(value(f,nf,"cursor"))>cn)
+            fail("episode code frame identity");
+        long ci=number(value(f,nf,"value:ci")),dry=number(value(f,nf,"value:ldp_dry"));
+        if(dry>1)fail("episode dry flag");
+        if(dry){if(pending)fail("dry pass inside live episode");dry_count++;p=end+1;continue;}
+        if(ne&&(len<last_hi||gen!=last_generation))fail("output reset after completed episode");
+        int rule=!strcmp(st,"LDP.original.PF.emit")?2:!strcmp(st,"LDP.original.PL.emit")?3:0;
+        if(!strcmp(st,"GENERIC")){
+            if(number(value(f,nf,"value:kind"))==2)rule=1;
+            else{if(pending)fail("nested unknown GENERIC");unknown++;p=end+1;continue;}
+        }
+        if(rule){
+            if(pending||ci>=nr||len>(long)tn||len<last_hi||!boundary(target,tn,len))fail("overlapping/invalid episode start");
+            pending=1;pending_rule=rule;pending_ci=ci;pending_len=len;pending_gen=gen;pending_frame=fi;
+        }else if(!strcmp(st,"C.advance")){
+            if(number(value(f,nf,"value:nc"))!=nr)fail("episode nc coverage");
+            if(!pending){unknown++;p=end+1;continue;}
+            long count=pending_rule==1?1:2,expected=pending_ci+count-1;
+            if(ci!=expected||pending_ci+count>nr||gen!=pending_gen||fi!=pending_frame||len<pending_len||len>(long)tn||
+               !boundary(target,tn,len))fail("episode close ci/generation/range");
+            if(len==pending_len)unknown++;
+            else{
+                if(ne==LR_ROWS||pending_len<last_hi)fail("episode overlap/budget");
+                ep[ne].lo=pending_len;ep[ne].hi=len;ep[ne].first=pending_ci;ep[ne].count=count;ep[ne].rule=pending_rule;
+                last_hi=len;last_generation=gen;ne++;
+            }
+            pending=0;
+        }else{if(pending)fail("uncovered state inside episode");unknown++;}
+        p=end+1;
+    }
+    if(!complete)fail("missing episode COMPLETE");
+    char line[1024];
+    snprintf(line,sizeof line,"LOWER_EPISODE_ID\trows_sha=%s\tdelta_sha=%s\tconfig_sha=%s\toutput_sha=%s\tclaim=source-row-lineage-only\tobject_module=UNKNOWN\n",rh,dh,gh,th);
+    append_text(line);
+    long covered_end=0,unknown_bytes=0;
+    for(long i=0;i<ne;i++){
+        Episode *x=&ep[i];
+        if(x->lo>covered_end){
+            snprintf(line,sizeof line,"UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n",covered_end,x->lo);
+            append_text(line);unknown_bytes+=x->lo-covered_end;
+        }
+        covered_end=x->hi;
+        Row *a=&rows[x->first],*b=&rows[x->first+x->count-1];
+        snprintf(line,sizeof line,"EPISODE\t%ld\trule=%s\ttarget_lo=%ld\ttarget_hi=%ld\tnc_lo=%ld\tnc_hi=%ld\tsource0_lo=%ld\tsource0_hi=%ld\tsource1_lo=%ld\tsource1_hi=%ld\tobject_module=UNKNOWN\n",i,x->rule==1?"GENERIC":x->rule==2?"PF":"PL",x->lo,x->hi,x->first,x->first+x->count,a->slo,a->shi,x->count==2?b->slo:-1,x->count==2?b->shi:-1);
+        append_text(line);
+    }
+    if(covered_end<(long)tn){snprintf(line,sizeof line,"UNKNOWN\ttarget_lo=%ld\ttarget_hi=%ld\treason=outside-completed-profile\n",covered_end,(long)tn);append_text(line);unknown_bytes+=(long)tn-covered_end;}
+    snprintf(line,sizeof line,"LOWER_EPISODES\tepisodes=%ld\tunknown_observations=%ld\tdry_excluded=%ld\tuncovered_target_bytes=%ld\tobject_module=UNKNOWN\n",ne,unknown,dry_count,unknown_bytes);
+    append_text(line);flush_rows();return 0;
+}
+int main(int argc,char **argv){if(argc>1&&!strcmp(argv[1],"--episodes"))return episodes(argc,argv);if(argc!=6)fail("usage SOURCE DELTA CONFIG WATCH OUTPUT");size_t sn,dn,gn,wn,on;char *src=load(argv[1],&sn),*delta=load(argv[2],&dn),*cfg=load(argv[3],&gn),*watch=load(argv[4],&wn),*output=load(argv[5],&on);char sh[65],dh[65],gh[65],oh[65],ch[65];hash(src,sn,sh);hash(delta,dn,dh);hash(cfg,gn,gh);hash(output,on,oh);if(!strstr(cfg,"LINE\tline\n")||!strstr(cfg,"LAY\tcode\n")||!strstr(cfg,"C.init\tcode,nc\n")||!strstr(cfg,"C.next\tnc,na\n")||!strstr(cfg,"C.label\tnc,tok\n"))fail("profile config missing required states");rows=calloc(LR_ROWS,sizeof *rows);code=malloc(sn+1);if(!rows||!code)fail("allocation");char *p=watch,*e=strchr(p,'\n');if(!e)fail("header");*e=0;char *f[64];int nf=fields(p,f);if(strcmp(f[0],"WRITE_EVENTS")||strcmp(value(f,nf,"delta_sha"),dh)||strcmp(value(f,nf,"input_sha"),sh)||strcmp(value(f,nf,"config_sha"),gh)||strcmp(value(f,nf,"output_sha"),oh)||number(value(f,nf,"output_bytes"))!=(long)on)fail("watch content SHA/extent mismatch");int compact=0;for(int i=0;i<nf;i++)if(!strncmp(f[i],"watch_format=",13)){if(strcmp(f[i],"watch_format=compact-v1"))fail("unknown watch_format");compact=1;}if(compact)configure_slots(cfg);p=e+1;long seq=0,next=0,frame=-1;int lay=0,init=0,complete=0;while(*p){e=strchr(p,'\n');if(!e)fail("truncated record");*e=0;nf=fields(p,f);if(!strcmp(f[0],"COMPLETE")){if(complete||number(value(f,nf,"events"))!=seq||e[1])fail("COMPLETE count/trailing records");complete=1;break;}if(compact){if(!strcmp(f[0],"FRAME")){if(nf<2||number(f[1])!=++seq)fail("compact FRAME order/id");define_frame(f,nf);p=e+1;continue;}if(strcmp(f[0],"WATCHC"))fail("compact transport record");nf=normalize_compact(f,nf);}if(nf<2||strcmp(f[0],"WATCH")||number(f[1])!=++seq)fail("watch order/duplicate/id");char st[128];state(value(f,nf,"state_hex"),st);long cur=number(value(f,nf,"cursor")),end=number(value(f,nf,"frame_end")),len=number(value(f,nf,"output_len")),gen=number(value(f,nf,"output_generation")),fi=number(value(f,nf,"frame_instance"));const char *fh=value(f,nf,"frame_sha");if(!strcmp(st,"LINE")||!strcmp(st,"LAY")){if(lay||init||strcmp(fh,sh)||end!=(long)sn||cur>end)fail("source frame identity/order");if(!have_line){if(strcmp(st,"LINE")||cur||len)fail("first LINE must start at zero");previous_cursor=cur;previous_len=len;previous_gen=gen;have_line=1;}else copyrow(src,sn,cur,len,gen);if(!strcmp(st,"LAY")){if(cur!=(long)sn||len!=cn)fail("data pass does not close");hash(code,cn,ch);lay=1;}}
 else if(!strcmp(st,"C.init")){if(!lay||init||strcmp(fh,ch)||end!=cn||cur||number(value(f,nf,"value:nc")))fail("C.init code frame SHA/end/order");frame=fi;init=1;}
 else if(!strcmp(st,"C.next")||!strcmp(st,"C.label")){if(!init||fi!=frame||strcmp(fh,ch)||end!=cn)fail("entity code frame mismatch");long nc=number(value(f,nf,"value:nc"));if(nc!=next||nc>=nr||cur<rows[nc].clo||cur>=rows[nc].chi)fail("entity row cursor/order");if(!strcmp(st,"C.label")){if(rows[nc].label)fail("duplicate label entity");rows[nc].label=1;}else{if(cur!=rows[nc].chi-1)fail("C.next is not complete code row");next++;}}
 p=e+1;}if(!complete||!lay||!init||next!=nr)fail("incomplete row/entity coverage");printf("LOWER_ROW_ID\tsource_sha=%s\tdelta_sha=%s\tconfig_sha=%s\toutput_sha=%s\tcode_sha=%s\tcode_bytes=%ld\tclaim=source-row-lineage-only\tobject_module=UNKNOWN\n",sh,dh,gh,oh,ch,cn);for(long i=0;i<nr;i++)emit_row(i);flush_rows();printf("LOWER_ROW_ORIGIN\trows=%ld\tcode_bytes=%ld\tentities=%ld\tother_rules=UNKNOWN\n",nr,cn,next);return 0;}
