@@ -43,12 +43,13 @@ executes in memory on Linux and from a private temporary file on macOS.
 Relocatable objects are Linux only. `-c -b lnx/x86_64|lnx/arm64 -o FILE.o` writes an ELF
 `ET_REL` object; GNU `ld` links that whole-program object into a runnable static
 program on its own, and `cc` cannot (`_start` collides with the crt, and the
-calling convention is not SysV or AAPCS64). `-c -b osx/*|win/*` is refused by
-name: "object output (-c -b) for this target is not on the product route yet
-(Linux targets are); the reference compiler writes Mach-O and COFF objects"
-(exit 1). `-c -b T -funit` writes a *unit* object for the Linux targets; for
-the other four it is documented as `NOT_IMPLEMENTED object`, but the rc3 product
-in fact writes a Mach-O or COFF object (OBJ-UNSUPPORTED-CONTRACT, 0.0.45); `unisacc a.o
+calling convention is not SysV or AAPCS64).
+当前 main 的开发修复支持 `--target T` / `--target=T`，只选目标，不覆盖 `-E/-S/-c` 模式；
+裸 `-c` 默认宿主目标并写 `.o`，可用 `-o` 指定路径。非 Linux 的 `-c` 使用已有 unit 合同：
+Mach-O/COFF 容器只携带 unit tape，供 unisacc 自己链接，不是系统链接器对象。
+`-c --tapebin` 与 `-S` 保留显式 tape 输出。公开 0.0.47 原资产未含此开发修复，身份见
+[本地记录](plans/root-identity.md)与[发布记录](plans/release-notes-0.0.47.md)。
+`-c -b T -funit` 显式选择 unit 对象；`unisacc a.o
 b.a [-o prog]` links unit objects and archives, and `unisacc ar rcs|t|x` writes
 them (measured: two unit objects plus an archive, linked and run). The product
 writes no assembly text: `-S -b lnx/ARCH -o FILE.s` stops with
@@ -186,16 +187,16 @@ needs travel inside it.
   of a program in one invocation. Each unit is preprocessed on its own, and a
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
-- **Not a `cc` drop-in yet:** bare `-c` and bare `-S` (no `-b`) write the compiler's
-  intermediate *tape* (so does `-S -b T` without a `.s` output); `-S -b lnx/ARCH -o FILE.s`
+- **尚非 `cc` 替代品：** 当前开发修复的裸 `-c` 写宿主对象；裸 `-S`、`-S -b T`
+  （无 `.s` 输出）与 `-c --tapebin` 保留中间 tape。`-S -b lnx/ARCH -o FILE.s`
   asks for GNU assembly, which the model product does not write yet (`NOT_IMPLEMENTED
   object`, exit 2). `unisacc as` takes the subset its own back end defines (plus
   `.text/.data/.bss`, `.globl`, `.byte/.ascii/.zero`); other instructions, Intel
   syntax, inline `asm` and the tape text are refused by name. `-c -b lnx/ARCH` writes
   an ELF object: a whole-program object links with GNU `ld` on its own, while `cc`
   cannot link it (`_start` collides with the crt and the calling convention is not
-  SysV or AAPCS64); Mach-O and COFF objects are written by the archived reference
-  compiler, not by this product. Unit
+  SysV or AAPCS64); 产品的 Mach-O/COFF 对象仅为携带 tape 的 unit 容器，
+  原归档参考的机器码对象合同不能迁移到产品。Unit
   objects (`-funit`) are linked by `unisacc` itself, not by the system linker,
   because only unisacc chains every unit's initialisers. `-l`/`-L` are still
   accepted and ignored; pass archives by path. C11 features and GCC extensions (statement

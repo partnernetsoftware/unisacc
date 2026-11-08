@@ -868,3 +868,6 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 
 **LB-8**（0.0.43 2c1，非稳定库数据接线）`us_declare_injected_data`声明无地址kind1需求并限制injected-only，`us_register_data_provider`独立登记/替换借用地址与有效供给描述，不修改需求合同；更换供给使镜像失效，须重新relocate。`us_library_data_fragment`返回最近成功E3数据片段，`us_library_data_lower_unbound`返回本轮成功未绑定lower数据UNILOW1收据；缺provider保留收据，模型拒绝不返回上轮成功收据。重定位逐项比较六类型字段、要求供给extent≥需求extent≥类型宽度且供给自身extent≥宽度；writable需求必须有可写供给，只读需求不因供给可写而扩权。data-type-mismatch、data-extent-mismatch、missing-provider具名ID/name，失败不得发布可调用镜像。旧us_add_symbol数据注入兼容；旧外部自动解析仅沿用声明metadata，不计独立ABI核验。类型/供给地址不得回流模型，Windows另案。
+
+
+**U-47A**（2026-11-08，0.0.47 发布后开发修复）`--target T`及`--target=T`选择编译目标，不覆盖显式-E/-S/-c模式；缺值、未覆盖目标必须拒绝，不默认为宿主执行。普通-c在未指定目标时使用当前宿主目标，缺-o时创建源文件对应.o，不向stdout冒充成功输出tape；Linux沿已有ELF对象合同，非Linux按已有-funit的Mach-O/COFF unit tape容器合同供产品链接，不承诺系统链接器兼容。-S和-c --tapebin保持显式tape路径。六目标最小程序--target -o须核实际镜像格式和架构；默认-run、宿主对象→产品链接→执行、参数拒绝必须另验。本条不迁移已公开0.0.47原字节或CI资格。
