@@ -1,7 +1,7 @@
 /* tools/driver-diagnostics.cx -- named-refusal contract of the driver and `ar` on wrong inputs (CLAUDE.md: refusals
  * must be named; prd.md:771 unit-link route; exec/c/compiler.c product_ar). Found 2026-10-28 on f3705dfa.
  *   sh ./unisacc.com tools/driver-diagnostics.cx -- ROOT ABS_OUT
- * Every row: rc != 0, no output file, stderr non-empty AND names the offending input path (or the operation). Rows that
+ * Refusal rows: rc != 0, no output file, stderr non-empty AND names the offending input path (or the operation). Rows that
  * hold today (green): link of a whole-program object (`carries no unit tape`), unit + whole-program mixed, `ar t` on a
  * non-archive, `ar rcs` with a missing member (`cannot open ... ENOENT`), `ar rcs` to an unwritable path, `ar x` into an
  * unwritable directory, `ar zz` on a non-empty archive. Rows that are red today (known diagnostic defects, see
@@ -31,10 +31,31 @@ int main(int argc, char **argv) {
     { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\n", h); }
     char p[4400]; const char *A = "int f(void){return 1;}\n", *M = "int f(void);int main(void){return f();}\n";
     path(p, sizeof p, outdir, "a.c"); saved(p, A, strlen(A)); path(p, sizeof p, outdir, "m.c"); saved(p, M, strlen(M));
-    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "a.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); char *w[] = { "-c", "-b", "lnx/x86_64", "-o", "m.o", "m.c", 0 }; if (prod(w, &r) || r.rc) die("m.o"); np_free(&r); char *a[] = { "ar", "rcs", "ok.a", "u.o", 0 }; if (prod(a, &r) || r.rc) die("ok.a"); np_free(&r); char *e[] = { "ar", "rcs", "empty.a", 0 }; if (prod(e, &r) || r.rc) die("empty.a"); np_free(&r); }
+    /* Bare -c now emits a unit object. Keep this refusal fixture on the
+       existing -c -S/non-.s whole-program object route (sawS skips unit defaults). */
+    { char *v[] = { "-c", "-b", "lnx/x86_64", "-funit", "-o", "u.o", "a.c", 0 }; np_result r; if (prod(v, &r) || r.rc) die("u.o"); np_free(&r); char *w[] = { "-c", "-S", "-b", "lnx/x86_64", "-o", "m.o", "m.c", 0 }; if (prod(w, &r) || r.rc) die("m.o"); np_free(&r); char *a[] = { "ar", "rcs", "ok.a", "u.o", 0 }; if (prod(a, &r) || r.rc) die("ok.a"); np_free(&r); char *e[] = { "ar", "rcs", "empty.a", 0 }; if (prod(e, &r) || r.rc) die("empty.a"); np_free(&r); }
     /* green today */
     { char *v[] = { "-o", "p1", "m.o", "u.o", 0 }; named(outdir, "link.whole-program-object.named", v, "p1", "m.o", -1); }
     { char *v[] = { "-o", "p2", "u.o", "m.o", 0 }; named(outdir, "link.unit-plus-whole.named", v, "p2", "m.o", -1); }
+    /* A bare Linux -c must retain main's external reference to f from u.o. */
+    {
+        int compiled = -1, linked = -1, ran = -1; np_result r; char d[160];
+        char *v[] = { "-c", "-b", "lnx/x86_64", "-o", "bare-m.o", "m.c", 0 };
+        if (prod(v, &r)) die("bare-m.o transport");
+        compiled = r.rc; np_free(&r);
+        if (!compiled) {
+            char *w[] = { "-o", "p4", "bare-m.o", "u.o", 0 };
+            if (prod(w, &r)) die("bare unit link transport");
+            linked = r.rc; np_free(&r);
+        }
+        if (!compiled && !linked) {
+            char *w[] = { "./p4", 0 }; char why[1024];
+            if (np_run(w, outdir, 0, 20, &r, why, sizeof why)) die("bare unit run transport");
+            ran = r.rc; np_free(&r);
+        }
+        if (cx_fmt(d, sizeof d, "compile=%d link=%d run=%d expected-run=1 (f from u.o)", compiled, linked, ran)) die("bare unit detail");
+        check(compiled == 0 && linked == 0 && ran == 1, "link.bare-c-unit-object", d);
+    }
     { char *v[] = { "ar", "t", "a.c", 0 }; named(outdir, "ar.t-non-archive.named", v, 0, "not an archive", -1); }
     { char *v[] = { "ar", "rcs", "miss.a", "u.o", "nope.o", 0 }; named(outdir, "ar.rcs-missing-member.named-enoent", v, "miss.a", "nope.o", -1); }
     { char *v[] = { "ar", "rcs", "/proc/nope.a", "u.o", 0 }; named(outdir, "ar.rcs-unwritable.named", v, 0, "/proc/nope.a", -1); }
