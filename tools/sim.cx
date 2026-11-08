@@ -29,7 +29,9 @@ static void bputc(Bytes *b, int c) { bgrow(b, 1); b->s[b->n++] = (unsigned char)
 /* Opt-in write association only. No module ownership or causal completeness claim. */
 static const char *we_path;
 static const char *ws_path;static char ws_sha[65];static int *ws_index,ws_n,ws_regs[64][16],ws_counts[64],ws_edges[64];
-static int ws_compact;
+static int ws_compact,ws_marks,ws_spans,ws_active;
+static long ws_mark_seq,ws_mark_lo,ws_mark_gen,ws_mark_frame,ws_mark_end;
+static const unsigned char *ws_mark_bytes;
 typedef struct {const unsigned char *bytes;long end;char sha[65];} WSFrame;
 static WSFrame *ws_frame(long id,const unsigned char *bytes,long end,int *fresh);
 static long we_count,we_limit=100000,we_byte_limit=16777216,we_generation,we_scratch_generation,we_frame_serial=1,we_active_frame;
@@ -46,15 +48,15 @@ static void ws_load(dl_delta *d){
  if(!ws_path)return;if(!we_path)die("--watch-states requires --write-events");
  FILE *f=fopen(ws_path,"rb");if(!f)die("watch config open");char *b=xmalloc(65538);long n=fread(b,1,65537,f);int bad=ferror(f);fclose(f);if(bad||n<1||n>65536||memchr(b,0,n))die("watch config size or NUL");we_hash((unsigned char *)b,n,ws_sha);b[n]=0;
  ws_index=xmalloc(d->ns*sizeof(int));memset(ws_index,0,d->ns*sizeof(int));
- char *p=b;while(*p){char *end=strchr(p,'\n');if(end)*end=0;char *tab=strchr(p,'\t');if(!tab||tab==p||!tab[1]||strchr(p,'\r'))die("watch config TSV shape");char *policy=strchr(tab+1,'\t');if(policy){*policy++=0;if(strcmp(policy,"frame-edges")||!tab[1])die("watch config policy");}*tab=0;int state=-1;for(int i=0;i<d->ns;i++)if(!strcmp(p,d->s[i].name)){state=i;break;}if(state<0)die("watch unknown state");if(ws_n==64||ws_index[state])die("watch duplicate state or state limit");int slot=ws_n++;ws_index[state]=slot+1;ws_edges[slot]=policy!=0;p=tab+1;
+ char *p=b;while(*p){char *end=strchr(p,'\n');if(end)*end=0;char *tab=strchr(p,'\t');if(!tab||tab==p||!tab[1]||strchr(p,'\r'))die("watch config TSV shape");char *policy=strchr(tab+1,'\t');if(policy){*policy++=0;if((strcmp(policy,"frame-edges")&&strcmp(policy,"output-mark")&&strcmp(policy,"output-span"))||!tab[1])die("watch config policy");}*tab=0;int state=-1;for(int i=0;i<d->ns;i++)if(!strcmp(p,d->s[i].name)){state=i;break;}if(state<0)die("watch unknown state");if(ws_n==64||ws_index[state])die("watch duplicate state or state limit");int slot=ws_n++;ws_index[state]=slot+1;ws_edges[slot]=!policy?0:!strcmp(policy,"frame-edges")?1:!strcmp(policy,"output-mark")?2:3;if(ws_edges[slot]==2)ws_marks++;if(ws_edges[slot]==3)ws_spans++;p=tab+1;
   for(;;){char *comma=strchr(p,',');if(comma)*comma=0;if(!*p||ws_counts[slot]==16)die("watch field shape or limit");int reg=0;for(int i=1;i<=d->nreg;i++)if(!strcmp(p,dl_regname(d,i))){reg=i;break;}if(!reg)die("watch unknown register");for(int i=0;i<ws_counts[slot];i++)if(ws_regs[slot][i]==reg)die("watch duplicate register");ws_regs[slot][ws_counts[slot]++]=reg;if(!comma)break;p=comma+1;}
   if(!end)break;p=end+1;
- }free(b);
+ }free(b);if((ws_marks||ws_spans)&&(ws_marks!=1||ws_spans!=1))die("snapshot requires exactly one mark and span policy");
 }
-static void ws_record(dl_delta *d,int state,const long long *w,long frame,const unsigned char *bytes,long cursor,long end,long outlen,long scratchlen){
+static void ws_record(dl_delta *d,int state,const long long *w,long frame,const unsigned char *bytes,long cursor,long end,long outlen,long scratchlen,const unsigned char *output){
  if(!ws_path||!ws_index[state])return;
  int slot=ws_index[state]-1,n;char line[4096],st[1024],sha[65];
- if(ws_edges[slot]&&cursor!=0&&cursor!=end)return;
+ if(ws_edges[slot]==1&&cursor!=0&&cursor!=end)return;
  if(ws_compact){
   int fresh=0;WSFrame *f=ws_frame(frame,bytes,end,&fresh);
   if(fresh){
@@ -76,6 +78,21 @@ static void ws_record(dl_delta *d,int state,const long long *w,long frame,const 
   if(k<0||k>=sizeof line-n)die("watch value bound");n+=k;
  }
  if(n+2>=sizeof line)die("watch line bound");line[n++]='\n';line[n]=0;we_add(line);
+ if(ws_edges[slot]==2||ws_edges[slot]==3){
+  if(outlen<0||cursor<0||cursor>end||(outlen&&(!output||output[outlen-1]!='\n')))die("snapshot full output line boundary");
+  we_frame_hash(bytes,end,sha);
+  if(ws_edges[slot]==2){
+   if(ws_active)die("snapshot nested mark");ws_active=1;ws_mark_lo=outlen;ws_mark_gen=we_generation;ws_mark_frame=frame;ws_mark_bytes=bytes;ws_mark_end=end;
+   if(++we_count>we_limit)die("write-events event budget exceeded");ws_mark_seq=we_count;
+   n=snprintf(line,sizeof line,"OUTPUT_MARK\t%ld\tmark_seq=%ld\tframe_instance=%ld\tframe_sha=%s\tframe_end=%ld\toutput_generation=%ld\toutput_lo=%ld\n",we_count,ws_mark_seq,frame,sha,end,we_generation,outlen);
+  }else{
+   if(!ws_active||ws_mark_gen!=we_generation||frame!=ws_mark_frame||bytes!=ws_mark_bytes||end!=ws_mark_end||outlen<ws_mark_lo||(ws_mark_lo&&output[ws_mark_lo-1]!='\n'))die("snapshot missing mark/generation/frame/range");
+   char slice[65];we_hash(output?output+ws_mark_lo:(const unsigned char *)"",outlen-ws_mark_lo,slice);
+   if(++we_count>we_limit)die("write-events event budget exceeded");
+   n=snprintf(line,sizeof line,"OUTPUT_SPAN\t%ld\tmark_seq=%ld\tframe_instance=%ld\tframe_sha=%s\tframe_end=%ld\toutput_generation=%ld\toutput_lo=%ld\toutput_hi=%ld\tspan_sha=%s\n",we_count,ws_mark_seq,frame,sha,end,we_generation,ws_mark_lo,outlen,slice);ws_active=0;
+  }
+  if(n<0||n>=sizeof line)die("snapshot line budget");we_add(line);
+ }
 }
 /* Identity edges do not infer ownership. Blob IDs distinguish equal content. */
 static void we_edge(const char *state,int key,int ai,const char *op,const char *src,long generation,long lo,long hi,const char *dst,long id,const unsigned char *bytes,long n){if(ws_path)return;char line[2048],st[1024],sha[65];long source_blob=!strcmp(src,"blob")?generation:-1;if(++we_count>we_limit)die("write-events event budget exceeded");we_hex(state,st,sizeof st);we_hash(bytes?bytes:(const unsigned char *)"",n,sha);int k=snprintf(line,sizeof line,"EDGE\t%ld\tstate_hex=%s\tkey=%d\taction_index=%d\taction=%s\tsource_buffer=%s\tsource_generation=%ld\tsource_blob_id=%ld\tsource_lo=%ld\tsource_hi=%ld\tsource_frame_instance=%ld\tdestination=%s\tdestination_id=%ld\tsha=%s\tbytes=%ld\tmodule=UNKNOWN\n",we_count,st,key,ai,op,src,source_blob>=0?0:generation,source_blob,lo,hi,we_active_frame,dst,id,sha,n);if(k<0||k>=sizeof line)die("write-events edge line bound");we_add(line);}
@@ -87,6 +104,7 @@ static void we_publish(const Bytes *o){
  int fd=open(tmp,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)die("write-events create temp");
  if(ws_path)snprintf(line,sizeof line,"WRITE_EVENTS\tversion=1\tdelta_sha=%s\tinput_sha=%s\toutput_sha=%s\toutput_bytes=%ld\tclaim=STATE_OBSERVATION_ONLY\tconfig_sha=%s%s\n",we_delta_sha,we_input_sha,sha,o->n,ws_sha,ws_compact?"\twatch_format=compact-v1":"");
  else snprintf(line,sizeof line,"WRITE_EVENTS\tversion=1\tdelta_sha=%s\tinput_sha=%s\toutput_sha=%s\toutput_bytes=%ld\tclaim=association-only\n",we_delta_sha,we_input_sha,sha,o->n);
+ if(ws_marks){long z=strlen(line);if(!z||line[z-1]!='\n')die("snapshot header");snprintf(line+z-1,sizeof line-z+1,"\tsnapshot_policy=single-active-output-v1\n");}
  Bytes all={0};bput(&all,(unsigned char *)line,strlen(line));bput(&all,we_log.s,we_log.n);
  snprintf(line,sizeof line,"COMPLETE\tevents=%ld\n",we_count);bput(&all,(unsigned char *)line,strlen(line));
  if(all.n>we_byte_limit){close(fd);unlink(tmp);die("write-events file budget exceeded including metadata");}
@@ -269,7 +287,7 @@ int main(int argc, char **argv) {
     int trace = 0;
     { int ti; for (ti = 1; ti < argc; ti++) if (tx_eqz(argv[ti], "--trace")) trace = 1; }
     for (;;) {
-        steps++;if(ws_path)ws_record(&D,q,W,fr->diagnostic_id,fr->b,fr->cur,fr->end,o.n,sb.n);
+        steps++;if(ws_path)ws_record(&D,q,W,fr->diagnostic_id,fr->b,fr->cur,fr->end,o.n,sb.n,o.s);
         dl_state *st = &D.s[q]; dl_edge *ed; int key;
         laststate = st->name;
         if (st->mode == 'b') { key = fr->cur < fr->end ? fr->b[fr->cur] : DL_EOF; ed = &st->byte[key]; }
@@ -356,7 +374,7 @@ done:
         for (long i = 1; i < li; i++) { char *t = lines[i]; long j = i - 1; while (j >= 0 && strcmp(lines[j], t) > 0) { lines[j + 1] = lines[j]; j--; } lines[j + 1] = t; }
         FILE *cf = fopen(covpath, "wb"); if (!cf) die("cannot write coverage"); for (long i = 0; i < li; i++) { fputs(lines[i], cf); fputc('\n', cf); } if (fclose(cf)) die("coverage write");
     }
-    if (result == 0) { if(we_path)we_publish(&o); if (o.n) fwrite(o.s, 1, (size_t)o.n, stdout); if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr); return 0; }
+    if (result == 0) { if(ws_active)die("snapshot unclosed mark at ACCEPT");if(we_path)we_publish(&o); if (o.n) fwrite(o.s, 1, (size_t)o.n, stdout); if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr); return 0; }
     if (rejname && *rejname) {
         if (laststate) fprintf(stderr, "AT\tstate=%s\tobs=%d\tcur=%ld\n", laststate, lastkey, fr->cur);
         fprintf(stderr, "reject: %s\n", rejname);

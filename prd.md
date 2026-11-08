@@ -377,7 +377,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 棘轮 | 13 项，以 `tools/ratchets.cx` 末行为准；默认只降不升，功能性工具行数扩额须授权、实测并分清既有偏差 | `tools/ratchets.cx`、§2.2 |
 | 事实表 | 事实→生成器（须带 `--check`）→产物 | `exec/facts/`、§2.4 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与试点 | 对象清单已交付，镜像单元贡献仍 UNATTRIBUTED；link-map 边车方案保留不实施 | `tools/image-contrib.cx`、[plans/slice-shrink.md](plans/slice-shrink.md)、[plans/link-map-sidecar.md](plans/link-map-sidecar.md) |
+| 结构盘点与普查 | 源码/模型表示普查与 Linux 两片模块字节账已核；其它四片 whole-o 重放镜像相等，模块来源仍 DOING；link-map 边车方案保留 | `tools/module-byte-map.cx`、[两片模块摘要与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布（历史）
@@ -553,3 +553,11 @@ Win/x86_64正常whole-o原44roots路线实际重放成功，bare2663424B SHA7624
 〔C47 ARM外格式实际门禁〕新MachO ARM独立4/0、PE ARM forward5/0，原Linux11/0保留；真实最小producer/consumer均exit0（1349records/text6524/image33250及1765records/text9820/image13824）。两个新注册批最终均PASS/rc0/transport0/ARM_FOREIGN_CHECK，绑定现候选f069d4c9…。register无args，初次默认11只算注册准备，父改精确args/marker后正式新跑；另首次手动run-batch漏ROOT/OUT参数正确usage拒绝，已保留原日志，正确完整参数调用才记PASS。能力速查：arm-encoder-record-origin --profile osx/arm64|win/arm64-forward TARGET CONFIG WATCH IMAGE；配置SHA d64f933c…/edc2f841…。四目标whole-o材料身份已固化research/c47-logic-distribution-20261108/whole-o-material-identities.tsv，但函数来源/四片最终模块表仍未完成。
 
 〔C47 holdframe原生材料能力已实跑〕新增whole-stage-material/check默认14独立断言，显式--real额外Win原Python载体cmp为15/0；实际工具Win提取82frames/82attrs且carrier/frames/attrs均cmp原0，正式注册批PASS/rc0/transport0。父对其余三片各自原holdframe调用也均exit0，全部只记PREPARED。能力速查：`sh ./unisacc.com tools/whole-stage-material.cx -- PHASE NEW_OUTDIR`，全校验后独占发布frames.bin/attrs.bin/units-input.carrier/material.tsv，ledger有完整SHA与原序路径，不覆盖旧目录。默认check不隐读out；旧Python提取债在这条新材料入口已替代，但不冒称全构造链Python清零。
+
+〔C47函数来源下一窄合同〕采用已审输出快照方案作独立诊断原型：CT.afterfn output-mark保存同generation起点，FN.nx output-span对当时真实[A,B)哈希；最终bare tape同offset逐快照核，后改写者UNKNOWN、区间外UNKNOWN，不搜索平移，不称最后写者或排他所有权。单active mark、嵌套/无mark/未闭合/换代拒绝；配置SHA绑定新policy且新record显式区分旧WATCHC。先私有sim副本+独立check，HOSTCC在途观察继续冻结共享sim；原型通过后再明确集成。工具预算最新576文件82265行，比基线81824多441，已替代旧257异步请求授权，答复前不动基线。
+
+〔C47目标分支继续收窄〕其余三片units/e3均真实exit0。Mach两架构sidecar各明确rc1报告5 hostslot，不能套Win cnt0路线；正常捕获的独占TMPDIR均留有2534B forwarding stub，后续需核真实增量merge来源。WinARM sidecar/prune/lower/elf均exit0，最终3369472B SHAfcfcc413…与原候选slice cmp0；这闭合第二条whole-o kernel材料链，不替代函数上下文账。共享sim尚f5810a66，新增snapshot只在私有原型验证中，尚未记生产能力。
+
+〔C47输出快照诊断已集成〕私有原型首夹具参数错误rc1保留，最终14/0后父按原sim f5810a66与私有9c90c332双SHA断言、精确diff集成。共享源实跑旧watch19/0、完整事件29/0、frame-edges11/0均exit0，新snapshot正式注册批14/0/PASS/rc0/transport0；原1M/64MiB上限不变。第三列output-mark/output-span须各恰一状态，单active，记录OUTPUT_MARK/OUTPUT_SPAN与同generation/full-line[A,B)SHA；嵌套/无mark/未闭合/换代/换帧/边界/预算拒绝，后改写快照不等不冒充最终来源。能力速查：sim --watch-states CONFIG --watch-compact --write-events NEW；snapshot配置SHA与header snapshot_policy=single-active-output-v1显式绑定。当前只是观察器能力，还没全片producer/consumer，不报四片模块完成。
+
+〔C47最后短采样诊断〕HOSTCC完整仍50s超时；一次15秒轻采样实际rc142，JSON解析281ms、712ms开始执行、约2.94秒完成UC前扫描、唯一39MB framehash141ms，至33M steps未再hash。3.17至14.905秒主要在RET/NX/IX/AU/DL.tokenunit/DL.offset路径且cursor持续前进、out0；排除了本样本JSON卡住/重复framehash说法，未泛化全程，不再无变更重试完整观察。另unit上下文前置报告已纠正：UC.finish可达SWAP，CT的hl_pos不能直接索引原units.payload；须取得实际normalized immutable frame并核其map/prefix才归属，否则UNKNOWN。
