@@ -1518,3 +1518,12 @@ original01 timeout remains; fclose is now SOURCE_FIXED/PRODUCT_NOT_REBUILT,
 and old Source329 qualification is not transferred to changed source;
 classic18 source construction, foreign hosts and 19 broad gaps remain open.
 Original time limits are unchanged.
+
+## T2 重基6a与79历史验收（2026-11-08）
+
+- `materials-prepare ROOT ABS_OUT native|chain|seal` 实际生产RI；`units-prepare ROOT ABS_OUT SLICE MODELS VERSION CARRIERS loader|swap|seal|seal-loader` 替代旧复制接口。原20/40/55秒预算与拒绝不变，不保留兼容入口。
+- 16 PREPARED/7真实缺口和23格全量是历史根结果；79根的RI/loader三阶段、所选消费者与十INFRA逐项实际PASS仍只绑定79，不冒称在新6a全部重验。原失败完整保留，见两份材料/INFRA处置表。
+- 按cc方案(b)撤下 `materials-prepare-native` 注册，只在 `agentwork/items.tsv` 的 `T2A-NATIVE-PHASE-20S` 保留编号KNOWN-GAP、原20秒失败与拆分方案；不是把红标绿，也不常红污染daily。现有准备器边界批次保留，8断言不降。
+- 新6a实际验收：`CHECK_PINS pins=11 failed=0 stale=30 hostdep=0`；准备器边界注册批8/0、BATCH_RUN PASS；元数据677批/542覆盖、valid_metadata=1、executed_batches=0。输出保存在 `out/t2-rebase6a`，不声称daily/release资格。
+- 原main已退役的 `tests/toolsloc.tsv` 原字节保留，不恢复LOC拦截或写其基线；新增额度仅按本次staged实际净增单独报cc。pin逐行变更及依据见 `plans/t2-pin-rationale.tsv`。
+

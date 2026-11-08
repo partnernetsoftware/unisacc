@@ -1,50 +1,74 @@
-/* 准备 fan --env 材料到绝对 OUT。幂等只报 PREPARED。不宣称发布资格。
- * sh ./unisacc.com tools/units-prepare.cx -- --out ABS --root ABS --loader ABS --slice ABS --pkg ABS --carriers ABS
- * 输入为既有冻结材料：loader、slice、pkg 文件和含 carrier.0 至 carrier.5 的目录。
+/* 显式部件开发材料，不认证 slice/pkg 与整 APE 同候选或发布资格。
+ * ROOT ABS_OUT SLICE MODELS VERSION CARRIERS|- loader|swap|seal|seal-loader。
+ * loader 创建新 OUT 并实际编译 test-loader；swap 编译现有 p3-swap；
+ * seal 检查全部常规叶、记录实际 SHA，最后输出 loader.env。不使用历史临时文件。
+ * SLICE/MODELS 必须由调用者从真实 APE 提取并独立核身份；VERSION 显式指定。
  */
-#pragma unisa use sys.fs
+#pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
-static void die(const char *s){fprintf(stderr,"units-prepare: %s\n",s);exit(2);}
-static void cpy(const char *a,const char *b){
-    size_t n;char *s=cx_read(a,&n);if(!s)die("copy src");if(cx_write(b,s,n))die("copy dst");free(s);
+static char root[4096],out[4096],slice[4096],models[4096],carriers[4096],product[4400],bound[4400];
+static void die(const char *s){fprintf(stderr,"units-prepare: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int z=snprintf(p,4400,"%s/%s",a,b);if(z<0||z>=4400)die("path bound");}
+static char *load(const char *p,size_t *n){struct stat a,b;if(lstat(p,&a)||!S_ISREG(a.st_mode)||a.st_size<=0||a.st_size>16777216)die("bounded regular input");int fd=open(p,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);if(fd<0||fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size)die("input descriptor");*n=(size_t)a.st_size;char *s=malloc(*n+1);if(!s)die("allocation");size_t at=0;while(at<*n){ssize_t z=read(fd,s+at,*n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("input read");at+=(size_t)z;}char extra;ssize_t z;do{z=read(fd,&extra,1);}while(z<0&&errno==EINTR);int changed=fstat(fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size;int closed=close(fd);if(z||changed||closed)die("input changed");s[*n]=0;return s;}
+static void save(const char *name,const char *s,size_t n,int mode){char p[4400];path(p,out,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0||fchmod(fd,(mode_t)mode))die("exclusive output");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("output write");at+=(size_t)z;}int a=fsync(fd),b=close(fd);if(a||b)die("output close");}
+static void digest(np_buf *b,const char *name,const char *p){
+ size_t n;char h[65],text[100];char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);
+ np_puts(b,name);np_puts(b,"\t");np_puts(b,h);
+ if(cx_fmt(text,sizeof text,"\t%lu\n",(unsigned long)n))die("digest size bound");
+ np_put(b,text,strlen(text));
+}
+static void compile(const char *rel,const char *name){
+ char source[4400],why[1400];path(source,root,rel);
+ char *v[]={bound,"40","sh",product,"-b","lnx/x86_64",source,"-o","-",0};
+ np_result r;if(np_run(v,root,0,42,&r,why,sizeof why))die(why);
+ char log[100];
+ if(cx_fmt(log,sizeof log,"%s.stderr",name))die("stderr name bound");
+ save(log,r.err,r.errn,0600);
+ char rc[40];
+ if(cx_fmt(rc,sizeof rc,"rc\t%d\n",r.rc))die("status bound");
+ if(cx_fmt(log,sizeof log,"%s.status",name))die("status name bound");
+ save(log,rc,strlen(rc),0600);
+ if(r.rc||r.errn||r.outn<64||memcmp(r.out,"\177ELF",4)){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native tool compiler refused");}
+ save(name,r.out,r.outn,0700);np_free(&r);
 }
 int main(int argc,char **argv){
-    const char *out=0,*root=0,*src_loader=0,*src_slice=0,*src_pkg=0,*src_car=0;
-    char envp[4400],slice[4400],pkg[4400],loader[4400],car[4400],body[24000];int i;
-    for(i=1;i<argc;i++){
-        if(!strcmp(argv[i],"--out")&&i+1<argc)out=argv[++i];
-        else if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];
-        else if(!strcmp(argv[i],"--loader")&&i+1<argc)src_loader=argv[++i];
-        else if(!strcmp(argv[i],"--slice")&&i+1<argc)src_slice=argv[++i];
-        else if(!strcmp(argv[i],"--pkg")&&i+1<argc)src_pkg=argv[++i];
-        else if(!strcmp(argv[i],"--carriers")&&i+1<argc)src_car=argv[++i];
-        else if(!strcmp(argv[i],"--"))continue;
-        else die("usage --out ABS --root ABS --loader ABS --slice ABS --pkg ABS --carriers ABS");
-    }
-    if(!out||out[0]!='/')die("--out must be absolute");
-    if(!root||root[0]!='/'||!src_loader||src_loader[0]!='/'||!src_slice||src_slice[0]!='/'
-       ||!src_pkg||src_pkg[0]!='/'||!src_car||src_car[0]!='/')die("absolute material bindings required");
-    if(cx_fmt(envp,sizeof envp,"%s/loader.env",out))die("path");
-    if(!access(envp,R_OK)){printf("PREPARED\tout=%s\talready=1\n",out);return 0;}
-    if(mkdir(out,0700)&&errno!=EEXIST)die("mkdir");
-    if(access(src_loader,R_OK)||access(src_slice,R_OK)||access(src_pkg,R_OK)||access(src_car,R_OK))
-        die("frozen extract missing; need loader + slice/pkg + six carriers");
-    if(cx_fmt(loader,sizeof loader,"%s/test-loader",out)||cx_fmt(slice,sizeof slice,"%s/slice",out)
-       ||cx_fmt(pkg,sizeof pkg,"%s/pkg",out)||cx_fmt(car,sizeof car,"%s/carriers",out))die("path");
-    if(mkdir(car,0700)&&errno!=EEXIST)die("carriers mkdir");
-    cpy(src_loader,loader);chmod(loader,0755);
-    cpy(src_slice,slice);chmod(slice,0755);
-    cpy(src_pkg,pkg);
-    {const char *n[]={"carrier.0","carrier.1","carrier.2","carrier.3","carrier.4","carrier.5",0};int k;
-     for(k=0;n[k];k++){char a[4400],b[4400];
-      if(cx_fmt(a,sizeof a,"%s/%s",src_car,n[k])||cx_fmt(b,sizeof b,"%s/%s",car,n[k]))die("cpath");
-      cpy(a,b);}
-    }
-    if(cx_fmt(body,sizeof body,
-        "TEST_LOADER_ROOT=%s\nTEST_LOADER_LOADER=%s\nTEST_LOADER_SLICE=%s\nTEST_LOADER_MODELS=%s\nTEST_LOADER_CARRIER_DIR=%s\n",
-        root,loader,slice,pkg,car))die("env");
-    if(cx_write(envp,body,strlen(body)))die("env write");
-    printf("PREPARED\tout=%s\tenv=%s\tscope=development-evidence\n",out,envp);
-    return 0;
+ if(argc!=8||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof out||!realpath(argv[3],slice)||!realpath(argv[4],models)||!argv[5][0])die("usage ROOT ABS_OUT SLICE MODELS VERSION CARRIERS|- loader|swap|seal|seal-loader");
+ if(strcmp(argv[6],"-")&&!realpath(argv[6],carriers))die("carrier directory");
+ if(mm_copy(out,sizeof out,argv[2],strlen(argv[2])+1))die("output bound");
+ const char *safe[]={root,out,slice,models,argv[5],carriers};
+ for(int i=0;i<6;i++)if(strpbrk(safe[i],"'\r\n\t"))die("environment quoting");
+ path(product,root,"unisacc.com");path(bound,root,"tools/bound");
+ if(!strcmp(argv[7],"loader")){
+  if(mkdir(out,0700))die("new output required");compile("tools/test-loader.cx","test-loader");
+ }else{
+  struct stat st;if(lstat(out,&st)||!S_ISDIR(st.st_mode))die("real output directory");
+  if(!strcmp(argv[7],"swap"))compile("tools/lab-loader/p3-swap.cx","p3-swap");
+  else if(!strcmp(argv[7],"seal")||!strcmp(argv[7],"seal-loader")){
+   int loader_only=!strcmp(argv[7],"seal-loader");if(!loader_only&&!carriers[0])die("fan seal requires explicit carriers");
+   char loader[4400],swap[4400],source[4400];path(loader,out,"test-loader");path(swap,out,"p3-swap");
+   if(access(loader,X_OK)||access(swap,X_OK)||access(slice,X_OK))die("executable materials required");
+   np_buf receipt={0},env={0},fan={0};
+   np_puts(&receipt,"units-material-v1\nstatus\tPREPARED\nscope\tdevelopment-evidence-no-same-candidate-claim\n");
+   digest(&receipt,"bootstrap",product);digest(&receipt,"slice",slice);digest(&receipt,"models",models);digest(&receipt,"loader",loader);digest(&receipt,"swap",swap);
+   const char *sources[]={"tools/units-prepare.cx","tools/test-loader.cx","tools/lab-loader/p3-swap.cx"};
+   for(int i=0;i<3;i++){path(source,root,sources[i]);digest(&receipt,sources[i],source);}
+   if(!loader_only)for(int i=0;i<6;i++){
+    char leaf[30];
+    if(cx_fmt(leaf,sizeof leaf,"carrier.%d",i))die("carrier name bound");
+    path(source,carriers,leaf);digest(&receipt,leaf,source);
+   }
+   np_puts(&receipt,"version\t");np_puts(&receipt,argv[5]);np_puts(&receipt,"\n");save(loader_only?"loader6-material.tsv":"material.tsv",receipt.p,receipt.n,0600);
+   const char *keys[]={"TEST_LOADER_ROOT","TEST_LOADER_LOADER","TEST_LOADER_SLICE","TEST_LOADER_MODELS","TEST_LOADER_SWAP","TEST_LOADER_CARRIER_DIR","TEST_LOADER_TARGET","TEST_LOADER_VERSION"};
+   const char *values[]={root,loader,slice,models,swap,carriers,"lnx/x86_64",argv[5]};
+   for(int i=0;i<8;i++){
+    if(loader_only&&i==5)continue;
+    np_puts(&env,"export ");np_puts(&env,keys[i]);np_puts(&env,"='");np_puts(&env,values[i]);np_puts(&env,"'\n");
+    if(i<6){np_puts(&fan,keys[i]);np_puts(&fan,"=");np_puts(&fan,values[i]);np_puts(&fan,"\n");}
+   }
+   if(loader_only)save("loader6.env",env.p,env.n,0600);else{save("loader-shell.env",env.p,env.n,0600);save("loader.env",fan.p,fan.n,0600);}
+   free(fan.p);free(env.p);free(receipt.p);
+  }else die("unknown stage");
+ }
+ printf("PREPARED\tunits-material\tstage=%s\tno-test-result\n",argv[7]);return 0;
 }

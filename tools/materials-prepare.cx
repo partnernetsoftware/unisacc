@@ -1,0 +1,27 @@
+/* 可重复 RI 材料生产入口；每阶段由调用者 tools/bound 55 包裹。
+ * ROOT ABS_OUT native|chain|seal；native 创建全新 OUT，随后 chain、seal。
+ * seal 只在既有生产者的两个验证器接受后写 MAP；PREPARED 不是批次 PASS。
+ * 不提供伪独立 stream，不恢复冻结参考，不推导外部候选身份。 */
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+static char root[4096],out[4096],product[4400],bound[4400];
+static void die(const char *s){fprintf(stderr,"materials-prepare: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static void save(const char *name,const char *s,size_t n){char p[4400];path(p,out,name);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(fd<0)die("exclusive output");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("output write");at+=(size_t)z;}int a=fsync(fd),b=close(fd);if(a||b)die("output close");}
+static void call(const char *stage,const char *tool,const char *action,const char *material,const char *fixture,const char *tail){
+ char source[4400],why[1400],name[120],seconds[12];path(source,root,tool);
+ if(cx_fmt(seconds,sizeof seconds,"%d",!strcmp(action,"--build")?40:18))die("seconds bound");
+ char *v[14];int k=0;v[k++]=bound;v[k++]=seconds;v[k++]="sh";v[k++]=product;v[k++]=source;v[k++]="--";if(action[0])v[k++]=(char *)action;v[k++]=root;v[k++]=(char *)material;if(fixture)v[k++]=(char *)fixture;v[k]=0;
+ np_result r;if(np_run(v,root,0,42,&r,why,sizeof why))die(why);
+ if(cx_fmt(name,sizeof name,"%s.stdout",stage))die("stdout name bound");
+ save(name,r.out,r.outn);
+ if(cx_fmt(name,sizeof name,"%s.stderr",stage))die("stderr name bound");
+ save(name,r.err,r.errn);
+ char status[40];
+ if(cx_fmt(status,sizeof status,"rc\t%d\n",r.rc))die("status bound");
+ if(cx_fmt(name,sizeof name,"%s.status",stage))die("status name bound");
+ save(name,status,strlen(status));
+ size_t tn=strlen(tail);int ok=!r.rc&&!r.errn&&r.outn>=tn&&!memcmp(r.out+r.outn-tn,tail,tn);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("producer or verifier refused; transcript retained");
+}
+int main(int argc,char **argv){if(argc!=4||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof out||strpbrk(argv[2],"\t\r\n"))die("usage ROOT ABS_OUT native|chain|seal");if(mm_copy(out,sizeof out,argv[2],strlen(argv[2])+1))die("output bound");path(product,root,"unisacc.com");path(bound,root,"tools/bound");char native[4400],chain[4400];path(native,out,"ri-cli");path(chain,out,"ri-chain");if(!strcmp(argv[3],"native")){if(mkdir(out,0700))die("new output directory required");call("native-build","tools/ri-material.cx","--build",native,"tests/cases/ri-cli.cx","PREPARED\tri-material\tno-test-result\n");}else{struct stat st;if(lstat(out,&st)||!S_ISDIR(st.st_mode))die("real existing output directory required");if(!strcmp(argv[3],"chain")){call("chain-prepare","tools/ri-chain-material.cx","",chain,0,"PREPARED\tri-chain-material\tno-test-result\n");}else if(!strcmp(argv[3],"seal")){call("native-verify","tools/ri-material.cx","--verify-native",native,"tests/cases/ri-cli.cx","VERIFIED\tri-material\tno-test-result\n");call("chain-verify","tools/ri-chain-material.cx","--verify",chain,0,"VERIFIED\tri-chain-material\tno-test-result\n");np_buf map={0};np_puts(&map,"ri-cli\t");np_puts(&map,native);np_puts(&map,"\nri-chain\t");np_puts(&map,chain);np_puts(&map,"\n");save("materials.tsv",map.p,map.n);free(map.p);}else die("unknown stage");}printf("PREPARED\tri-materials\tstage=%s\tno-test-result\n",argv[3]);return 0;}

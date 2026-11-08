@@ -1,5 +1,6 @@
 /* ROOT OUT GCC TCC [BATCHES=1..100]; no args: cwd, private temporary output, HOST_CC/gcc and TCC/tcc. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
 static int launch(char **v,const char *root,const char *prefix,int expected){np_result r={0};char why[800]={0},p[8192],s[100];int e=np_run(v,root,0,55,&r,why,sizeof why);if(cx_fmt(p,sizeof p,"%s.stdout",prefix))exit(2);int bad=np_writefile(p,r.out?r.out:"",r.outn);if(cx_fmt(p,sizeof p,"%s.stderr",prefix))exit(2);bad|=np_writefile(p,r.err?r.err:"",r.errn);if(cx_fmt(p,sizeof p,"%s.status",prefix))exit(2);if(cx_fmt(s,sizeof s,"transport=%d rc=%d residue=%d\n",e,r.rc,r.residue))exit(2);bad|=np_writefile(p,s,strlen(s));if(e){if(cx_fmt(p,sizeof p,"%s.error",prefix))exit(2);bad|=np_writefile(p,why,strlen(why));}bad|=e||r.rc!=expected||r.residue;np_free(&r);return bad;}
 static int same(const char *a,const char *b,const char *file){char p[8192];np_buf x={0},y={0};if(cx_fmt(p,sizeof p,"%s/%s",a,file))exit(2);int bad=np_readfile(p,&x);if(cx_fmt(p,sizeof p,"%s/%s",b,file))exit(2);bad|=np_readfile(p,&y);bad|=x.n!=y.n||(x.n&&memcmp(x.p,y.p,x.n));free(x.p);free(y.p);return !bad;}
 static int check_main(int argc,char **argv){
@@ -13,7 +14,29 @@ static int check_main(int argc,char **argv){
     if(cx_fmt(dst,sizeof dst,"%s/missing-compiler",argv[2]))exit(2);if(cx_fmt(seed,sizeof seed,"%s","47"))exit(2);v[6]="/nonexistent/random-expr-compiler";fail|=launch(v,argv[1],dst,1);char evidence[8192];np_buf status={0};if(cx_fmt(evidence,sizeof evidence,"%s/result.txt",dst))exit(2);fail|=np_readfile(evidence,&status)||!strstr(status.p?status.p:"","status=FAIL");free(status.p);
     v[6]=argv[3];if(cx_fmt(dst,sizeof dst,"%s",first))exit(2);if(cx_fmt(evidence,sizeof evidence,"%s/existing-output",argv[2]))exit(2);fail|=launch(v,argv[1],evidence,2);printf("CHECK_RANDOM_EXPR\tbatches=%ld\tboundary=0,4294967295\tdeterministic=2\tstatus=%s\n",batches+3,fail?"FAIL":"PASS");return fail?1:0;
 }
+/* A real no-argument consumer failure must leave its original oracle evidence. */
+static int preservation(int argc,char **argv){
+    char product[8192],tool[8192],why[800],dir[8192],p[8192];np_result r={0};np_buf b={0};struct stat st;int bad=0;
+    if(argc!=3||argv[2][0]!='/')return 2;
+    if(cx_fmt(product,sizeof product,"%s/unisacc.com",argv[2])||cx_fmt(tool,sizeof tool,"%s/tools/check-random-expr.cx",argv[2]))return 2;
+    char *v[]={"sh",product,tool,0};char *env[]={"HOST_CC=/nonexistent/random-expr-host-compiler","TCC=/nonexistent/random-expr-tcc-compiler",0};
+    int e=np_run(v,argv[2],env,55,&r,why,sizeof why);bad=e||r.rc!=1||r.residue;
+    const char *tag="CHECK_RANDOM_EXPR_EVIDENCE\t",*at=strstr(r.err?r.err:"",tag);
+    if(!at)bad=1;
+    else {
+        at+=strlen(tag);const char *end=strchr(at,'\n');size_t n=end?(size_t)(end-at):0;
+        if(!n||n>=sizeof dir||strncmp(at,"/tmp/check-random-expr-",23))bad=1;
+        else {
+            if(mm_copy(dir,sizeof dir,at,(long)n)){np_free(&r);return 2;}dir[n]=0;bad|=lstat(dir,&st)||!S_ISDIR(st.st_mode);
+            const char *files[]={"input.c","manifest.txt","gcc.identity.status","tcc.identity.status","result.txt"};
+            for(int i=0;i<5;i++){if(cx_fmt(p,sizeof p,"%s/run/batch-0/%s",dir,files[i])){bad=1;break;}bad|=np_readfile(p,&b);if(i==4)bad|=!strstr(b.p?b.p:"","status=FAIL");free(b.p);b.p=0;b.n=0;b.cap=0;}
+            printf("CHECK_RANDOM_EXPR_PRESERVED\t%s\n",dir);
+        }
+    }
+    printf("CHECK_RANDOM_EXPR_PRESERVATION\tstatus=%s\n",bad?"FAIL":"PASS");np_free(&r);return bad?1:0;
+}
 int main(int argc,char **argv){
+    if(argc>1&&!strcmp(argv[1],"--preservation"))return preservation(argc,argv);
     if(argc!=1)return check_main(argc,argv);char root[4096],out[4096],tmp[]="/tmp/check-random-expr-XXXXXX",why[800];char *gcc=getenv("HOST_CC"),*tcc=getenv("TCC");if(!getcwd(root,sizeof root)||!mkdtemp(tmp))return 2;
-    int rc=2;if(!cx_fmt(out,sizeof out,"%s/run",tmp)){char *v[]={argv[0],root,out,gcc&&*gcc?gcc:"gcc",tcc&&*tcc?tcc:"tcc",0};rc=check_main(5,v);}char *rm[]={"rm","-rf","--",tmp,0};np_result r={0};int e=np_run(rm,root,0,5,&r,why,sizeof why);if(e||r.rc||r.residue)rc=2;np_free(&r);return rc;
+    int rc=2;if(!cx_fmt(out,sizeof out,"%s/run",tmp)){char *v[]={argv[0],root,out,gcc&&*gcc?gcc:"gcc",tcc&&*tcc?tcc:"tcc",0};rc=check_main(5,v);}if(rc){fprintf(stderr,"CHECK_RANDOM_EXPR_EVIDENCE\t%s\n",tmp);return rc;}char *rm[]={"rm","-rf","--",tmp,0};np_result r={0};int e=np_run(rm,root,0,5,&r,why,sizeof why);if(e||r.rc||r.residue)rc=2;np_free(&r);return rc;
 }

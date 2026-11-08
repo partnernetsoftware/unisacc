@@ -6,6 +6,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 static char root[4096],original[4096],work[4096],clone[4400],product[4400],tool[4400],bound[4400];
+static char inc[4400];
 static const char *leaves[]={"runtime.c","material.tsv","native.tsv","runtime-native"};
 static char *bytes[4];static size_t sizes[4];static char hashes[4][65];static int assertions,failures;
 static void die(const char *s){fprintf(stderr,"ri-material-controls: REFUSE %s errno=%d\n",s,errno);exit(2);}
@@ -18,7 +19,7 @@ static np_result verify(const char *material,const char *fixture,const char *lab
 /* errno is incidental state, not the named rejection contract: accept exactly
  * one reason line, followed only by a signed decimal errno and its newline. */
 static int reason_is(const np_result *r,const char *reason){char prefix[300];int n=snprintf(prefix,sizeof prefix,"ri-material: REFUSE %s errno=",reason);if(n<0||(size_t)n>=sizeof prefix||r->errn<(size_t)n+2||memcmp(r->err,prefix,(size_t)n))return 0;size_t at=(size_t)n;if(r->err[at]=='-')at++;size_t start=at;while(at<r->errn&&r->err[at]>='0'&&r->err[at]<='9')at++;return at>start&&at+1==r->errn&&r->err[at]=='\n';}
-static int accepted(const np_result *r){char expected[9500];int n=snprintf(expected,sizeof expected,"VERIFIED\tri-native\tartifact=%s\tbytes=%lu\tflags=-O2 -fno-trim-libc -b lnx/x86_64 -I %s/exec/c %s/tools/ri-shim/cxsf_close_fail.c -o -\tno-test-result\nVERIFIED\tri-material\tno-test-result\n",hashes[3],(unsigned long)sizes[3],root,root);return n>0&&(size_t)n<sizeof expected&&!r->rc&&!r->errn&&r->outn==(size_t)n&&!memcmp(r->out,expected,(size_t)n);}
+static int accepted(const np_result *r){char expected[9500];int n=snprintf(expected,sizeof expected,"VERIFIED\tri-native\tartifact=%s\tbytes=%lu\tflags=-O2 -fno-trim-libc -b lnx/x86_64 -I %s %s/tools/ri-shim/cxsf_close_fail.c -o -\tno-test-result\nVERIFIED\tri-material\tno-test-result\n",hashes[3],(unsigned long)sizes[3],inc,root);return n>0&&(size_t)n<sizeof expected&&!r->rc&&!r->errn&&r->outn==(size_t)n&&!memcmp(r->out,expected,(size_t)n);}
 static int within(const char *p,const char *dir){size_t n=strlen(dir);return !strncmp(p,dir,n)&&(!p[n]||p[n]=='/');}
 /* Fault injection removes only the argv include pair from a private producer.
  * Source matching constructs the fault; acceptance depends on actual compilation. */
@@ -38,6 +39,7 @@ int main(int argc,char **argv){
  /* Canonicalize the existing parent, keeping the output leaf genuinely new.
   * A clone may not be created inside the original material directory. */
  char parent[4096],canonical[4096];strcpy(parent,argv[4]);char *slash=strrchr(parent,'/');if(!slash||!slash[1]||tx_eqz(slash+1, ".")||tx_eqz(slash+1, ".."))die("output leaf");char leaf[4096];strcpy(leaf,slash+1);if(slash==parent)slash[1]=0;else *slash=0;if(!realpath(parent,canonical))die("output parent");int z=snprintf(work,sizeof work,"%s%s%s",canonical,tx_eqz(canonical, "/")?"":"/",leaf);if(z<0||(size_t)z>=sizeof work||within(work,original))die("output aliases original material");if(mkdir(work,0700))die("new private output required");join(clone,work,"material");if(mkdir(clone,0700))die("new clone directory");join(bound,root,"tools/bound");join(product,root,"unisacc.com");join(tool,root,"tools/ri-material.cx");
+ {char header[4400];struct stat st;join(header,root,"exec/c/core.h");if(lstat(header,&st)){if(errno!=ENOENT)die("include probe");join(header,root,"archive/reference-c/exec/c/core.h");}if(lstat(header,&st)||!S_ISREG(st.st_mode))die("include material");char *slash=strrchr(header,'/');*slash=0;if(cx_fmt(inc,sizeof inc,"%s",header))die("include path bound");}
  for(int i=0;i<4;i++){char p[4400],q[4400];join(p,original,leaves[i]);bytes[i]=readfile(p,&sizes[i]);cx_sha256_hex(bytes[i],sizes[i],hashes[i]);join(q,clone,leaves[i]);writefile(q,bytes[i],sizes[i],i==3?0700:0600,1);size_t n;char *copy=readfile(q,&n);ck(n==sizes[i]&&!memcmp(copy,bytes[i],n),leaves[i]);free(copy);printf("ORIGINAL\t%s\tsha256=%s\tbytes=%lu\n",leaves[i],hashes[i],(unsigned long)sizes[i]);}
  np_result baseline=verify(original,argv[3],"original-valid");int valid=accepted(&baseline);ck(valid,"original-valid");np_free(&baseline);if(!valid)die("original material must verify before mutation");
  char p[4400];const char *reason=0;
@@ -46,7 +48,7 @@ int main(int argc,char **argv){
  if(which==3){char target[4400];join(p,clone,"runtime-native");join(target,original,"runtime-native");if(unlink(p)||symlink(target,p))die("private native symlink");reason="material leaf is not regular";}
  if(which==4){join(p,clone,"native.tsv");if(unlink(p))die("private receipt removal");/* Linux x86_64 syscall_64.tbl: mknodat=259. */if(_unisa_ret(__syscall6(259,-100,(long)p,S_IFIFO|0600,0,0)))die("private FIFO creation");reason="material leaf is not regular";}
  if(which==5){if(!sizes[0])die("runtime source empty");bytes[0][0]^=1;join(p,clone,"runtime.c");writefile(p,bytes[0],sizes[0],0600,0);reason="material changed";}
- if(which==6){char needle[9100];int z=snprintf(needle,sizeof needle,"\nflags\t-O2 -fno-trim-libc -b lnx/x86_64 -I %s/exec/c %s/tools/ri-shim/cxsf_close_fail.c -o -\n",root,root);if(z<0||(size_t)z>=sizeof needle)die("flags bound");char *at=strstr(bytes[2],needle);if(!at||strstr(at+1,needle))die("unique native flags");at[strlen("\nflags\t-O")]='3';join(p,clone,"native.tsv");writefile(p,bytes[2],sizes[2],0600,0);reason="material changed";}
+ if(which==6){char needle[9100];int z=snprintf(needle,sizeof needle,"\nflags\t-O2 -fno-trim-libc -b lnx/x86_64 -I %s %s/tools/ri-shim/cxsf_close_fail.c -o -\n",inc,root);if(z<0||(size_t)z>=sizeof needle)die("flags bound");char *at=strstr(bytes[2],needle);if(!at||strstr(at+1,needle))die("unique native flags");at[strlen("\nflags\t-O")]='3';join(p,clone,"native.tsv");writefile(p,bytes[2],sizes[2],0600,0);reason="material changed";}
  if(which==7)missing_include(argv[3]);else {np_result result=verify(clone,argv[3],names[which]);ck(which==0?accepted(&result):result.rc==2&&!result.outn&&reason_is(&result,reason),names[which]);np_free(&result);}
  for(int i=0;i<4;i++){char q[4400],h[65],label[100];size_t n;join(q,original,leaves[i]);char *s=readfile(q,&n);cx_sha256_hex(s,n,h);snprintf(label,sizeof label,"original-unchanged.%s",leaves[i]);ck(n==sizes[i]&&tx_eqz(h, hashes[i]),label);free(s);free(bytes[i]);}
  puts("NOT_CLAIMED\tfixture-behavior-product-rebuild-foreign-hosts-or-general-filesystem-race-safety");puts("TIMING\tstartup_construction_loading_output_validation_cold_hot=UNMEASURED");printf("RI_MATERIAL_CONTROLS\tcase=%s\tassertions=%d\tfailed=%d\texecuted-cases=1\n",names[which],assertions,failures);return failures?1:0;

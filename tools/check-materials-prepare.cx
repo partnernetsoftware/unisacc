@@ -1,0 +1,43 @@
+/* 准备器真实错误边界；无构造、无替身。ROOT NEW_ABS_OUT；省略则使用当前仓与私有目录。
+ * 正向 native/chain/seal 另由真实材料制备证明，本检查不 mock 生产者。 */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static char root[4096],work[4096],bound[4400],product[4400],tool[4400];
+static int assertions,failures;
+static void die(const char *s){fprintf(stderr,"check-materials-prepare: REFUSE %s errno=%d\n",s,errno);exit(2);}
+static void path(char *p,const char *a,const char *b){int n=snprintf(p,4400,"%s/%s",a,b);if(n<0||n>=4400)die("path bound");}
+static void ck(int yes,const char *name){assertions++;if(!yes)failures++;printf("%s\tmaterials-prepare.%s\n",yes?"PASS":"FAIL",name);}
+static void save(const char *p,const char *s,size_t n){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)die("exclusive evidence");size_t at=0;while(at<n){ssize_t z=write(fd,s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("evidence write");at+=(size_t)z;}if(close(fd))die("evidence close");}
+static int absent(const char *p){struct stat st;errno=0;return lstat(p,&st)&&errno==ENOENT;}
+static void run(const char *name,const char *out,const char *mode,const char *reason){
+ char *v[12];int k=0;v[k++]=bound;v[k++]="18";v[k++]="sh";v[k++]=product;v[k++]=tool;v[k++]="--";
+ if(out){v[k++]=root;v[k++]=(char *)out;if(mode)v[k++]=(char *)mode;}v[k]=0;
+ char why[1400];np_result r;if(np_run(v,root,0,20,&r,why,sizeof why))die(why);
+ char leaf[120],p[4400],status[40];
+ if(cx_fmt(leaf,sizeof leaf,"%s.stdout",name))die("stdout name bound");
+ path(p,work,leaf);save(p,r.out,r.outn);
+ if(cx_fmt(leaf,sizeof leaf,"%s.stderr",name))die("stderr name bound");
+ path(p,work,leaf);save(p,r.err,r.errn);
+ if(cx_fmt(status,sizeof status,"rc\t%d\n",r.rc))die("status bound");
+ if(cx_fmt(leaf,sizeof leaf,"%s.status",name))die("status name bound");
+ path(p,work,leaf);save(p,status,strlen(status));
+ ck(r.rc==2&&!r.outn&&strstr(r.err,reason),name);np_free(&r);
+}
+int main(int argc,char **argv){
+ if(argc!=1&&argc!=3)die("usage [ROOT NEW_ABS_OUT]");if(!realpath(argc==3?argv[1]:".",root))die("root");
+ if(argc==3){if(argv[2][0]!='/'||strlen(argv[2])>=sizeof work||mkdir(argv[2],0700)||!realpath(argv[2],work))die("new output directory");}
+ else {char temp[4400];path(temp,root,".check-materials-prepare-XXXXXX");if(!mkdtemp(temp)||!realpath(temp,work))die("private output directory");}
+ path(bound,root,"tools/bound");path(product,root,"unisacc.com");path(tool,root,"tools/materials-prepare.cx");
+ char existing[4400],sentinel[4400],incomplete[4400],map[4400],native[4400];path(existing,work,"existing");path(incomplete,work,"incomplete");if(mkdir(existing,0700)||mkdir(incomplete,0700))die("case directories");
+ path(sentinel,existing,"sentinel");const char *text="caller-owned-sentinel\n";save(sentinel,text,strlen(text));struct stat before,after;if(lstat(sentinel,&before))die("sentinel stat");
+ run("missing-args",0,0,"materials-prepare: REFUSE usage ROOT ABS_OUT native|chain|seal errno=");
+ run("missing-mode",existing,0,"materials-prepare: REFUSE usage ROOT ABS_OUT native|chain|seal errno=");
+ run("invalid-mode",existing,"invalid","materials-prepare: REFUSE unknown stage errno=");
+ run("native-existing",existing,"native","materials-prepare: REFUSE new output directory required errno=");
+ path(map,existing,"materials.tsv");path(native,existing,"ri-cli");ck(absent(map)&&absent(native),"refusals-no-map-or-native");
+ run("seal-incomplete",incomplete,"seal","materials-prepare: REFUSE producer or verifier refused; transcript retained errno=");
+ path(map,incomplete,"materials.tsv");ck(absent(map),"incomplete-seal-no-map");
+ size_t n;char *actual=cx_read(sentinel,&n);ck(actual&&n==strlen(text)&&!memcmp(actual,text,n)&&!lstat(sentinel,&after)&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_mode==after.st_mode,"sentinel-preserved");free(actual);
+ printf("CHECK_MATERIALS_PREPARE\tassertions=%d\tfailed=%d\tevidence=%s\n",assertions,failures,work);return failures?1:0;
+}
