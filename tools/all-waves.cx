@@ -5,6 +5,10 @@
  *   tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- material ROOT SESSION NAME
  *   tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave     ROOT SESSION [--child-seconds N] --light ID [ID ID ID]
  *   tools/bound 55 sh ./unisacc.com tools/all-waves.cx -- wave     ROOT SESSION [--child-seconds N] --heavy ID
+ * S9's native descendant supervisor instead invokes the frozen executor with
+ * wave ROOT SESSION --s9-supervised --heavy ID... and its inherited remaining
+ * deadline (at most 300 s). No whole-wave bound 55 surrounds identity/receipts;
+ * every spawned run-batch still retains its own bound of at most 55 s.
  *   sh ./unisacc.com tools/all-waves.cx -- pending ROOT SESSION      (read-only listing; no verdicts)
  * SESSION is a new absolute directory below ROOT/out.  CANDIDATE must be ROOT/unisacc.com, because
  * tests/run-batch.cx (the only executor) binds that path. MATERIALS_MAP has lines
@@ -43,6 +47,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 /* Concurrency ceiling and fallback live in exec/facts/limits.tsv, so the number exists once.
    Core count comes from `nproc` through the same capture helper every other probe uses; when it is
    unavailable the fallback applies, which is the pre-split behaviour. */
@@ -65,7 +70,8 @@ static double deadline;
 static void die(const char *name,const char *detail){printf("REFUSE\t%s\t%s\n",name,detail?detail:"-");fprintf(stderr,"all-waves: REFUSE %s %s\n",name,detail?detail:"-");exit(2);}
 static void join(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);if(n<0||(size_t)n>=cap)die("path-bound",b);}
 static double now_s(void){long long t=as_now();if(t<0)die("monotonic-clock",0);return (double)t/1e9;}
-static void outer_window(void){const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","run under tools/bound 55");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>57.5)die("outer-bound-55-required",d);}
+static void outer_window_limit(double maximum){const char *d=getenv("UNISACC_BOUND_DEADLINE_MONO");char *end=0;if(!d||!*d)die("outer-bound-required","supervisor deadline required");deadline=strtod(d,&end);double left=deadline-now_s();if(!end||*end||left<=0||left>maximum)die("outer-window-range",d);}
+static void outer_window(void){outer_window_limit(57.5);}
 static void canonical_root(const char *arg){if(arg[0]!='/'||!realpath(arg,root)||!tx_eqz(root, arg))die("canonical-root",arg);join(candidate,sizeof candidate,root,"unisacc.com");join(bound,sizeof bound,root,"tools/bound");join(runner,sizeof runner,root,"tests/run-batch.cx");}
 static void below_out(const char *p){char base[4400],canon[4096];join(base,sizeof base,root,"out");if(!realpath(base,canon))die("root-out",base);size_t n=strlen(canon);if(strncmp(p,canon,n)||p[n]!='/'||!p[n+1])die("session-must-be-below-ROOT/out",p);}
 static void existing_session(const char *arg){if(arg[0]!='/'||!realpath(arg,session)||!tx_eqz(session, arg))die("canonical-session",arg);below_out(session);}
@@ -146,31 +152,96 @@ static void plan_inputs(Job *j){char *v[]={"sh",candidate,"-cx-plan",j->entry,0}
 static void hash_inputs(Job *j,char (*dst)[65]){for(int i=0;i<j->ninput;i++)if(as_sha_file(j->input[i],1,dst[i],0,why,sizeof why))die("input-hash",why);}
 /* the first TAB-separated column of buf[at..e); 0 when the line has no such column */
 static int col0(const char *buf,size_t at,size_t e,char *dst,size_t cap){size_t k=0;if(at>=e||buf[at]=='\t')return 0;while(at<e&&buf[at]!='\t'&&k+1<cap)dst[k++]=buf[at++];dst[k]=0;return k>0;}
-/* The wt gate: `git status --porcelain` snapshotted before and after a wave, minus each batch's own
-   out/ tree.  Any shared path that moved makes every receipt in the wave UNKNOWN.  The harness
-   digest covers only tests/, tools/ and cx/, so src/, include/, exec/, kernel/, seed/ and shared
-   out/ paths were invisible before this.  Returns the moved paths ("" when none); UNMEASURED when
-   git is unavailable, because an unmeasurable gate must not turn a passing run into a failure. */
+/* Content snapshots include tracked (even missing) and untracked inputs. Only the
+   append-only integration ledger is excluded; registry tables remain inputs.
+   Unlike porcelain, this detects a second edit of an already dirty file. */
 static char *wt_scan(const char *r, size_t *n, np_buf *buf) {
-    char *v[] = {"git", "-C", (char *)r, "status", "--porcelain", 0};
-    np_result x = {0}; char why2[512] = {0};
-    if (np_run(v, r, 0, 10, &x, why2, sizeof why2) || x.rc) { np_free(&x); *n = 0; return 0; }
-    *n = x.outn; np_put(buf, x.out, x.outn); np_free(&x); return buf->p;
-}
-static int wt_diff(const char *a, size_t an, const char *b, size_t bn, np_buf *out) {
-    int moved = 0; size_t at = 0;
-    while (at < bn) {
-        size_t e = at, k, p = 0; int inout = 0, found = 0;
-        while (e < bn && b[e] != '\n') e++;
-        if (e == at) { at = e + 1; continue; }
-        for (k = at; k + 4 <= e; k++) if (!memcmp(b + k, "out/", 4) && (k == at || b[k - 1] == ' ' || b[k - 1] == '\t')) inout = 1;
-        if (!inout) {
-            while (p + (e - at) <= an) { if (!memcmp(a + p, b + at, e - at)) { found = 1; break; } p++; }
-            if (!found) { np_put(out, b + at, e - at); np_puts(out, "\n"); moved++; }
-        }
-        at = e + 1;
+    char *v[] = {"git", "-C", (char *)r, "ls-files", "-c", "-o", "--exclude-standard", "-z", 0};
+    np_result x = {0}; char reason[1700] = {0};
+    if (np_run(v,r,0,10,&x,reason,sizeof reason)||x.rc) die("worktree-unmeasured",reason);
+    size_t at=0;
+    while(at<x.outn){
+        const char *rel=x.out+at;size_t z=strlen(rel);at+=z+1;
+        if(!z||!strncmp(rel,"out/",4)||!strcmp(rel,"agentwork/ledger.tsv")||!strncmp(rel,"agentwork/ledger/",17))continue;
+        if(strchr(rel,'\n')||strchr(rel,'\t'))die("worktree-path-wire",rel);
+        char p[4400],h[65];struct stat st;
+        join(p,sizeof p,r,rel);errno=0;
+        np_puts(buf,"?? ");np_puts(buf,rel);np_puts(buf,"\t");
+        if(lstat(p,&st)){
+            if(errno!=ENOENT)die("worktree-stat",p);
+            np_puts(buf,"ABSENT");
+        }else if(S_ISLNK(st.st_mode)){
+            char link[4400],target[4096];ssize_t k=readlink(p,link,sizeof link-1);
+            if(k<0||(size_t)k>=sizeof link-1)die("worktree-link",p);link[k]=0;
+            cx_sha256_hex(link,(size_t)k,h);np_puts(buf,h);np_puts(buf,"\t");
+            if(!realpath(p,target)){
+                if(errno!=ENOENT)die("worktree-link-target",p);
+                np_puts(buf,"DANGLING");
+            }else{
+                if(as_tree(target,1,h,0,reason,sizeof reason))die("worktree-link-input",reason);
+                np_puts(buf,h);
+            }
+        }else if(S_ISREG(st.st_mode)){
+            if(as_sha_file(p,0,h,0,reason,sizeof reason))die("worktree-input",reason);
+            np_puts(buf,h);
+        }else die("worktree-input-shape",p);
+        np_puts(buf,"\n");
     }
-    return moved;
+    np_free(&x);*n=buf->n;return buf->p;
+}
+/* Borrow bytes, index by path/full line, then emit in legacy after/before order.
+   Existing output paths participate in indexed deduplication. No snapshot copies. */
+typedef struct {const char *p;size_t n,path,seq;unsigned side,emit;} wt_line;
+static int wt_bytes(const char *a,size_t an,const char *b,size_t bn){
+    size_t n=an<bn?an:bn;int c=n?memcmp(a,b,n):0;
+    return c?c:an<bn?-1:an>bn?1:0;
+}
+static int wt_order(const void *av,const void *bv){
+    const wt_line *a=av,*b=bv;int c=wt_bytes(a->p,a->path,b->p,b->path);
+    return c?c:wt_bytes(a->p,a->n,b->p,b->n);
+}
+static int wt_sequence(const void *av,const void *bv){
+    const wt_line *a=av,*b=bv;return a->seq<b->seq?-1:a->seq>b->seq?1:0;
+}
+static int wt_diff(const char *a,size_t an,const char *b,size_t bn,np_buf *out){
+    /* Identical bytes need neither an index nor output mutation. */
+    if(an==bn&&(!an||!memcmp(a,b,an)))return 0;
+    size_t count=0;
+    for(int pass=0;pass<3;pass++){
+        const char *s=pass==0?b:pass==1?a:out->p;size_t n=pass==0?bn:pass==1?an:out->n;
+        for(size_t at=0;at<n;){
+            if(count==(size_t)-1/sizeof(wt_line))die("worktree-index-size",0);
+            count++;while(at<n&&s[at]!='\n')at++;if(at<n)at++;
+        }
+    }
+    wt_line *lines=malloc(count*sizeof *lines);if(!lines)die("allocation",0);
+    size_t used=0;
+    for(int pass=0;pass<3;pass++){
+        const char *s=pass==0?b:pass==1?a:out->p;size_t n=pass==0?bn:pass==1?an:out->n,at=0;
+        while(at<n){size_t end=at,path=at;while(end<n&&s[end]!='\n')end++;
+            if(pass==2)path=end;else while(path<end&&s[path]!='\t')path++;
+            lines[used].p=s+at;lines[used].n=end-at;lines[used].path=path-at;
+            lines[used].seq=used;lines[used].emit=0;lines[used].side=pass==2?4:pass==0?2:1;used++;at=end<n?end+1:end;
+        }
+    }
+    qsort(lines,count,sizeof *lines,wt_order);
+    size_t at=0;
+    while(at<count){size_t first=at,best=count;int existing=0;
+        while(at<count&&!wt_bytes(lines[first].p,lines[first].path,lines[at].p,lines[at].path)){
+            size_t line=at;unsigned sides=0;
+            do{sides|=lines[at].side;if(lines[at].side==4)existing=1;at++;}
+            while(at<count&&!wt_order(&lines[line],&lines[at]));
+            if((sides&3)!=3)for(size_t k=line;k<at;k++)if(lines[k].side!=4&&(best==count||lines[k].seq<lines[best].seq))best=k;
+        }
+        if(!existing&&best<count)lines[best].emit=1;
+    }
+    qsort(lines,count,sizeof *lines,wt_sequence);
+    int moved=0;
+    for(size_t k=0;k<count;k++)if(lines[k].emit){
+        if(moved==2147483647)die("worktree-path-count",0);
+        np_put(out,lines[k].p,lines[k].path);np_puts(out,"\n");moved++;
+    }
+    free(lines);return moved;
 }
 /* ---- wave domains -----------------------------------------------------------------------------
    tests/wave-domains.tsv says which batches may not share a wave.  One predicate for all four
@@ -228,8 +299,8 @@ static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];
  j->pid=pid;
 }
 static int cmd_wave(int argc,char **argv){
- if(argc<6)die("usage","wave ROOT SESSION [--child-seconds N] --light ID... | --heavy ID");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
- int at=4,cap_seconds=55;if(at+1<argc&&!strcmp(argv[at],"--tier")){select_tier(argv[at+1]);at+=2;}if(at>=argc)die("usage","wave selection missing");if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
+ if(argc<6)die("usage","wave ROOT SESSION [--s9-supervised] [--child-seconds N] --light ID... | --heavy ID");int supervised=!strcmp(argv[4],"--s9-supervised");outer_window_limit(supervised?300.5:57.5);canonical_root(argv[2]);existing_session(argv[3]);
+ int at=supervised?5:4,cap_seconds=55;if(at+1<argc&&!strcmp(argv[at],"--tier")){select_tier(argv[at+1]);at+=2;}if(at>=argc)die("usage","wave selection missing");if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
  int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(count<1||count>WAVE_JOBS_MAX)die("wave-shape","light-or-heavy-takes-one-to-WAVE_JOBS_MAX-ids");
  /* Selection may omit a known batch, but must not hide a misspelled ID. */
  if(tier_filter){as_registry selected_reg;if(as_registry_load(root,&selected_reg,why,sizeof why))die("registry-metadata",why);
@@ -240,7 +311,7 @@ static int cmd_wave(int argc,char **argv){
  for(int i=0;i<m.nwave;i++)if(m.wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);
  Job *job=calloc((size_t)count,sizeof *job);if(!job)die("allocation",0);np_buf ids={0,0,0};
- for(int i=0;i<count;i++){const char *id=argv[at+i];const as_batch *b=as_find_batch(&reg,id);if(!b)die("unknown-batch",id);if(!tx_eqz(b->impl, "IMPLEMENTED"))die("batch-not-implemented",id);if(!tx_eqz(b->platform, "lnx/x86_64"))die("batch-needs-another-native-host",id);
+ for(int i=0;i<count;i++){const char *id=argv[at+i];const as_batch *b=as_find_batch(&reg,id);if(!b)die("unknown-batch",id);if(!tx_eqz(b->impl, "IMPLEMENTED"))die("batch-not-implemented",id);if(!as_wave_platform_allowed(b->platform))die("batch-needs-another-native-host",id);
   for(int k=0;k<i;k++)if(tx_eqz(job[k].b->id, id))die("duplicate-batch",id);if(decided(&m,id))die("batch-already-decided-in-session",id);if(light&&!tx_eqz(b->materials, "-"))die("light-wave-requires-materials-free-batch",id);
   job[i].b=b;if(as_entry(root,b,&m,job[i].entry,why,sizeof why))die("batch-entry",why);char src[4400];join(src,sizeof src,root,b->source);add_input(&job[i],src);add_input(&job[i],job[i].entry);plan_inputs(&job[i]);
   if(!tx_eqz(b->materials, "-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||!tx_eqz(fp, x->fingerprint))die("material-changed-since-registration",name);}}
@@ -333,16 +404,21 @@ static int cmd_wave(int argc,char **argv){
 static void refuse_changed_session(const as_manifest *m){for(int i=0;i<m->nwave;i++)if(m->wave[i].changed)die("session-identity-changed-during-earlier-wave","start-a-new-session");}
 static void die_why(void){char name[200];const char *t=strchr(why,'\t');size_t n=t?(size_t)(t-why):strlen(why);if(n>=sizeof name)n=sizeof name-1;{ void *cx_kept = memcpy(name,why,n); (void)cx_kept; }name[n]=0;die(name,t?t+1:"-");}
 static int cmd_executor(int argc,char **argv){
- if(argc!=4)die("usage","executor ROOT SESSION");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
+ if(argc!=4&&argc!=5)die("usage","executor ROOT SESSION [all-waves|run-batch|seal]");outer_window();canonical_root(argv[2]);existing_session(argv[3]);
+ int part=-1;if(argc==5){part=!strcmp(argv[4],"all-waves")?0:!strcmp(argv[4],"run-batch")?1:!strcmp(argv[4],"seal")?2:-1;if(part<0)die("executor-part",argv[4]);}
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);refuse_changed_session(&m);
  if(m.has_executor)die("executor-already-registered",session);
- char dir[4400];join(dir,sizeof dir,session,"executor");if(mkdir(dir,0700))die("executor-dir-must-be-new",dir);
- static const char *src[2]={"tools/all-waves.cx","tests/run-batch.cx"},*leaf[2]={"all-waves","run-batch"};char sha[2][65];long long each[2],t0=as_now();
- for(int i=0;i<2;i++){char s[4400],d[4400],reason[1200];join(s,sizeof s,root,src[i]);join(d,sizeof d,dir,leaf[i]);char *v[]={"sh",candidate,s,"-o",d,0};np_result r;long long a=as_now();
-  if(np_run(v,root,0,25,&r,reason,sizeof reason))die("executor-compile-transport",reason);int ok=!r.rc;if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("executor-compile",src[i]);each[i]=as_now()-a;if(as_sha_file(d,0,sha[i],0,why,sizeof why))die("executor-hash",why);}
- /* the compile must have read the session's candidate and harness trees */
+ char dir[4400];join(dir,sizeof dir,session,"executor");if(mkdir(dir,0700)){struct stat st;if(part<0||errno!=EEXIST||lstat(dir,&st)||!S_ISDIR(st.st_mode))die("executor-dir-must-be-new",dir);}
+ static const char *src[2]={"tools/all-waves.cx","tests/run-batch.cx"},*leaf[2]={"all-waves","run-batch"};char sha[2][65];long long each[2]={0,0},t0=as_now();
+ for(int i=0;i<2;i++){char s[4400],d[4400],record[4400],name[80],reason[1200];join(s,sizeof s,root,src[i]);join(d,sizeof d,dir,leaf[i]);if(cx_fmt(name,sizeof name,"%s.stage",leaf[i]))die("executor-stage-path",leaf[i]);join(record,sizeof record,dir,name);
+  if(part==2){size_t n;char *wire=as_read(record,0,&n,why,sizeof why);if(!wire||!n||wire[n-1]!='\n')die("executor-stage",record);wire[n-1]=0;char *f[4];long long created;if(as_split(wire,f,4)!=4||as_digits(f[1],&each[i])||strcmp(f[2],session)||as_digits(f[3],&created)||created!=m.created||as_sha_file(d,0,sha[i],0,why,sizeof why)||strcmp(f[0],sha[i]))die("executor-stage-changed",record);free(wire);continue;}
+  if(part>=0&&part!=i)continue;struct stat st;errno=0;if(!lstat(d,&st)||errno!=ENOENT)die("executor-output-must-be-new",d);
+  char *v[]={"sh",candidate,s,"-o",d,0};np_result r={0};long long a=as_now();if(np_run(v,root,0,25,&r,reason,sizeof reason))die("executor-compile-transport",reason);int ok=!r.rc;if(!ok){if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);}np_free(&r);if(!ok)die("executor-compile",src[i]);each[i]=as_now()-a;if(as_sha_file(d,0,sha[i],0,why,sizeof why))die("executor-hash",why);
+  as_ident post;if(as_identity(root,0,&post,why,sizeof why))die("live-identity",why);const char *diff=as_ident_diff(&post,&m.ident);if(diff)die("session-identity-changed-during-executor-compile",diff);
+  if(part>=0){np_buf stage={0};np_puts(&stage,sha[i]);np_puts(&stage,"\t");np_putll(&stage,each[i]);np_puts(&stage,"\t");np_puts(&stage,session);np_puts(&stage,"\t");np_putll(&stage,m.created);np_puts(&stage,"\n");if(as_save_new(record,stage.p,stage.n,why,sizeof why))die("executor-stage-write",why);free(stage.p);printf("EXECUTOR_PART\tname=%s\tsha256=%s\tcompile_ns=%lld\tstate=PREPARED-not-registered\n",leaf[i],sha[i],each[i]);as_free(&m);close(lock);return 0;}
+ }
  as_ident post;if(as_identity(root,0,&post,why,sizeof why))die("live-identity",why);const char *d=as_ident_diff(&post,&m.ident);if(d)die("session-identity-changed-during-executor-compile",d);
- np_buf b={0,0,0};np_puts(&b,"EXECUTOR\tall_waves=");np_puts(&b,sha[0]);np_puts(&b,"\trun_batch=");np_puts(&b,sha[1]);np_puts(&b,"\tcompile_ns=");np_putll(&b,as_now()-t0);np_puts(&b,"\n");
+ np_buf b={0};np_puts(&b,"EXECUTOR\tall_waves=");np_puts(&b,sha[0]);np_puts(&b,"\trun_batch=");np_puts(&b,sha[1]);np_puts(&b,"\tcompile_ns=");np_putll(&b,part==2?each[0]+each[1]:as_now()-t0);np_puts(&b,"\n");
  char mp[4400];join(mp,sizeof mp,session,"session.tsv");int fd=open(mp,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",mp);if(as_append(fd,session,"executor",m.seq+1,b.p,b.n,why,sizeof why))die("manifest-append",why);close(fd);free(b.p);
  printf("EXECUTOR\tall_waves=%s\tall_waves_compile_ns=%lld\trun_batch=%s\trun_batch_compile_ns=%lld\tdir=%s\tstate=PREPARED-startup-cache-not-a-result\n",sha[0],each[0],sha[1],each[1],dir);as_free(&m);close(lock);return 0;
 }
@@ -352,7 +428,7 @@ static int cmd_start(int argc,char **argv){
  int lock=as_lock(session,1,why,sizeof why);if(lock<0)die("session-lock",why);as_manifest m;if(as_load(session,&m,why,sizeof why))die("session-manifest",why);as_ident live;check_identity(&m,&live);refuse_changed_session(&m);
  if(!m.has_executor)die("executor-not-registered","run all-waves executor ROOT SESSION first");
  as_registry reg;if(as_registry_load(root,&reg,why,sizeof why))die("registry-metadata",why);const as_batch *b=as_find_batch(&reg,id);
- if(!b)die("unknown-batch",id);if(!tx_eqz(b->impl, "IMPLEMENTED"))die("batch-not-implemented",id);if(!tx_eqz(b->platform, "lnx/x86_64"))die("batch-needs-another-native-host",id);if(decided(&m,id))die("batch-already-decided-in-session",id);
+ if(!b)die("unknown-batch",id);if(!tx_eqz(b->impl, "IMPLEMENTED"))die("batch-not-implemented",id);if(!as_wave_platform_allowed(b->platform))die("batch-needs-another-native-host",id);if(decided(&m,id))die("batch-already-decided-in-session",id);
  Job j;memset(&j,0,sizeof j);j.b=b;if(as_entry(root,b,&m,j.entry,why,sizeof why))die("batch-entry",why);char src[4400];join(src,sizeof src,root,b->source);add_input(&j,src);add_input(&j,j.entry);plan_inputs(&j);
  np_buf mat={0,0,0};
  if(!tx_eqz(b->materials, "-")){const char *q=b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;const as_material *x=as_find_material(&m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);char fp[65];if(as_material_fp(x,fp,why,sizeof why)||!tx_eqz(fp, x->fingerprint))die("material-changed-since-registration",name);
@@ -400,7 +476,7 @@ static int cmd_run(int argc,char **argv){
  char mp[4400];join(mp,sizeof mp,session,"session.tsv");int fd=open(mp,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",mp);if(as_append(fd,session,"run",m.seq+1,rb2.p,rb2.n,why,sizeof why))die("manifest-append",why);close(fd);free(rb2.p);
  /* A separate exclusive seal catches edits to the final RUN block before FINISH.
     A missing seal leaves the interrupted attempt UNKNOWN. */
- {as_manifest sealed;if(as_load(session,&sealed,why,sizeof why))die("run-seal-manifest",why);const as_wave *sw=0;for(int i=0;i<sealed.nwave;i++)if(tx_eqz(sealed.wave[i].nonce, w->nonce))sw=&sealed.wave[i];if(!sw||!sw->run)die("run-seal-block",id);char seal[4400],leaf[200],value[66];jobpath(seal,base,id,"runseal");memcpy(value,sw->run_sha,64);value[64]='\n';value[65]=0;save_new(seal,value,65);as_free(&sealed);}
+ {as_manifest sealed;if(as_load(session,&sealed,why,sizeof why))die("run-seal-manifest",why);const as_wave *sw=0;for(int i=0;i<sealed.nwave;i++)if(tx_eqz(sealed.wave[i].nonce, w->nonce))sw=&sealed.wave[i];if(!sw||!sw->run)die("run-seal-block",id);char seal[4400],leaf[200],value[66];jobpath(seal,base,id,"runseal");if(mm_copy(value,sizeof value,sw->run_sha,64))die("run-seal-bound",id);value[64]='\n';value[65]=0;save_new(seal,value,65);as_free(&sealed);}
  printf("RUN\t%s\tattempt=%s\tbound_seconds=%d\tbound_rc=%d\tchild_status=%s%lld\tbatch_wall_ns=%lld\touter_left_at_entry_s=%.3f\touter_left_at_fork_s=%.3f\touter_left_after_seal_s=%.3f\tverdict=DECIDED_BY_FINISH\n",id,w->nonce,seconds,bound_rc,known?"":"ABSENT",known?raw:0LL,t1-t0,left_at_entry,left_at_fork,deadline-now_s());
  as_registry_free(&reg);as_free(&m);close(lock);return 0;
 }
@@ -414,6 +490,14 @@ int main(int argc,char **argv){
  fputs("all-waves: NOT_RUN requires Linux/x86_64 (run-batch's single native host)\n",stderr);return 3;
 #endif
  if(argc<2)die("usage","init|material|wave|pending|executor|start|run|finish ...");
+ if(argc==3&&!strcmp(argv[1],"inputs")){canonical_root(argv[2]);np_buf snapshot={0};size_t n;wt_scan(root,&n,&snapshot);if(n&&fwrite(snapshot.p,1,n,stdout)!=n)die("inputs-write",0);free(snapshot.p);return 0;}
+ /* Consumer control: compare saved input snapshots with the very same wave gate. */
+ if((argc==4||argc==5)&&!strcmp(argv[1],"inputs-diff")){
+    size_t an=0,bn=0;char *a=cx_read(argv[2],&an),*b=cx_read(argv[3],&bn);
+    if(!a||!b)die("inputs-diff-read",0);np_buf out={0};if(argc==5)np_puts(&out,argv[4]);int moved=wt_diff(a,an,b,bn,&out);
+    printf("WT_CHANGED\tpaths=%d\n",moved);if(out.n&&fwrite(out.p,1,out.n,stdout)!=out.n)die("inputs-diff-write",0);
+    free(a);free(b);free(out.p);return 0;
+ }
  if(tx_eqz(argv[1], "init"))return cmd_init(argc,argv);if(tx_eqz(argv[1], "material"))return cmd_material(argc,argv);if(tx_eqz(argv[1], "wave"))return cmd_wave(argc,argv);if(tx_eqz(argv[1], "pending"))return cmd_pending(argc,argv);
  if(tx_eqz(argv[1], "executor"))return cmd_executor(argc,argv);if(tx_eqz(argv[1], "start"))return cmd_start(argc,argv);if(tx_eqz(argv[1], "run"))return cmd_run(argc,argv);if(tx_eqz(argv[1], "finish"))return cmd_finish(argc,argv);
  die("usage","init|material|wave|pending|executor|start|run|finish ...");return 2;

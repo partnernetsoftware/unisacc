@@ -1,0 +1,118 @@
+/* Separate original-budget control phases:
+ * check-s9-shards.cx ROOT inputs|schedule
+ * inputs compiles and exercises the real all-waves scan and diff input gate on
+ * a private Git fixture, plus saved-snapshot set controls through inputs-diff.
+ * schedule compiles and invokes the real driver's planning/liveness controls.
+ * Neither fixture supplies a product PASS or qualification receipt.
+ * Standalone evidence (outside the unchanged batch budget):
+ * check-s9-shards.cx ROOT equivalence BEFORE AFTER NATIVE_ALL_WAVES
+ * reads raw saved snapshots and compares the legacy oracle with the native gate.
+ */
+#pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+static char root[4096],why[1700],diff_binary[4400],diff_a[4400],diff_b[4400];static int failures;
+static void die(const char *s){fprintf(stderr,"check-s9: %s %s\n",s,why);exit(2);}
+static void join(char *p,const char *a,const char *b){if(as_join(p,4400,a,b))die("path");}
+static void ck(int yes,const char *name){printf("S9_CHECK\t%s\t%s\n",name,yes?"PASS":"FAIL");if(!yes)failures++;}
+static int run(char **v,const char *cwd){np_result r={0};if(np_run(v,cwd,0,30,&r,why,sizeof why))die("transport");if(r.errn)fwrite(r.err,1,r.errn,stderr);int rc=r.rc;np_free(&r);return rc;}
+static void put(const char *p,const char *s){int fd=open(p,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);if(fd<0||write(fd,s,strlen(s))!=(ssize_t)strlen(s)||close(fd))die("fixture-write");}
+static char *snapshot(const char *binary,const char *fixture,size_t *n){char *v[]={(char *)binary,"inputs",(char *)fixture,0};np_result r={0};if(np_run(v,fixture,0,10,&r,why,sizeof why)||r.rc)die("snapshot");char *s=malloc(r.outn+1);if(!s)die("allocation");if(mm_copy(s,r.outn+1,r.out,r.outn))die("copy-bound");s[r.outn]=0;*n=r.outn;np_free(&r);return s;}
+/* Frozen legacy oracle: deliberately quadratic, used only by this check. */
+static int oracle_has(const char *s,size_t n,const char *line,size_t len){
+ size_t at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;
+  if(e-at==len&&!memcmp(s+at,line,len))return 1;at=e+1;}return 0;
+}
+static int oracle_diff(const char *a,size_t an,const char *b,size_t bn,np_buf *out){
+ int moved=0;for(int pass=0;pass<2;pass++){
+  const char *s=pass?a:b,*other=pass?b:a;size_t n=pass?an:bn,on=pass?bn:an,at=0;
+  while(at<n){size_t e=at,p=at;while(e<n&&s[e]!='\n')e++;
+   if(!oracle_has(other,on,s+at,e-at)){while(p<e&&s[p]!='\t')p++;
+    int already=0;size_t q=0;while(q<out->n){size_t t=q;while(t<out->n&&out->p[t]!='\n')t++;
+     if(t-q==p-at&&!memcmp(out->p+q,s+at,p-at))already=1;q=t+1;}
+    if(!already){np_put(out,s+at,p-at);np_puts(out,"\n");moved++;}}
+   at=e+1;}}
+ return moved;
+}
+/* Every fixture comparison invokes the native wave gate, not a second diff. */
+static char *difference_seed(const char *a,size_t an,const char *b,size_t bn,const char *seed,size_t *n){
+ const char *paths[]={diff_a,diff_b};const char *data[]={a,b};size_t sizes[]={an,bn};
+ for(int i=0;i<2;i++){int fd=open(paths[i],O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);
+  if(fd<0||write(fd,data[i],sizes[i])!=(ssize_t)sizes[i]||close(fd))die("diff-fixture-write");}
+ char *v[]={diff_binary,"inputs-diff",diff_a,diff_b,(char *)seed,0};np_result r={0};
+ long long native_start=as_now();if(np_run(v,root,0,10,&r,why,sizeof why)||r.rc)die("diff-consumer");long long native_ns=as_now()-native_start;
+ np_buf old={0},expected={0};if(seed)np_puts(&old,seed);long long oracle_start=as_now();int moved=oracle_diff(a,an,b,bn,&old);long long oracle_ns=as_now()-oracle_start;
+ np_puts(&expected,"WT_CHANGED\tpaths=");np_putll(&expected,moved);np_puts(&expected,"\n");if(old.n)np_put(&expected,old.p,old.n);
+ int identical=r.outn==expected.n&&!memcmp(r.out,expected.p,expected.n);char oldsha[65],newsha[65];
+ cx_sha256_hex(expected.p,expected.n,oldsha);cx_sha256_hex(r.out,r.outn,newsha);
+ printf("WT_EQUIVALENCE\tbefore_bytes=%zu\tafter_bytes=%zu\told_moved=%d\tbyte_identical=%d\told_sha256=%s\tnew_sha256=%s\n",an,bn,moved,identical,oldsha,newsha);
+ printf("WT_EQUIVALENCE_TIME\tnative_process_ns=%lld\tlegacy_diff_ns=%lld\n",native_ns,oracle_ns);
+ ck(identical,"legacy-oracle-byte-identical");free(old.p);free(expected.p);
+ if(r.outn==(size_t)-1)die("diff-output-size");char *s=malloc(r.outn+1);if(!s)die("allocation");
+ if(mm_copy(s,r.outn+1,r.out,r.outn))die("copy-bound");s[r.outn]=0;*n=r.outn;np_free(&r);return s;
+}
+static char *difference(const char *a,size_t an,const char *b,size_t bn,size_t *n){return difference_seed(a,an,b,bn,0,n);}
+static int equal(const char *a,size_t an,const char *b,size_t bn){
+ size_t n;char *s=difference(a,an,b,bn,&n);const char *zero="WT_CHANGED\tpaths=0\n";
+ int same=n==strlen(zero)&&!memcmp(s,zero,n);free(s);return same;
+}
+static void diff_check(const char *a,const char *b,const char *expected,const char *name){
+ size_t n;char *s=difference(a,strlen(a),b,strlen(b),&n);
+ ck(n==strlen(expected)&&!memcmp(s,expected,n),name);free(s);
+}
+static int contains(const char *s,size_t n,const char *needle){size_t k=strlen(needle);for(size_t i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return 1;return 0;}
+int main(int argc,char **argv){
+ if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
+ char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
+ if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
+ else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};if(run(compile,root))die("compile");}
+ if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
+ if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}
+ else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");np_free(&r);}
+ else{
+  char fixture[4400],p[4400],q[4400],target[4400];join(fixture,tmp,"root");if(mkdir(fixture,0700))die("fixture");join(p,fixture,"src");if(mkdir(p,0700))die("src");join(p,fixture,"agentwork");if(mkdir(p,0700))die("agentwork");
+  char *git[]={"git","init","-q",fixture,0};if(run(git,tmp))die("git-init");join(p,fixture,"src/input.cx");put(p,"original\n");join(p,fixture,"agentwork/ledger.tsv");put(p,"ledger\n");join(p,fixture,"agentwork/items.tsv");put(p,"items\n");char *add[]={"git","-C",fixture,"add","src/input.cx","agentwork/ledger.tsv","agentwork/items.tsv",0};if(run(add,tmp))die("git-add");
+  diff_check("?? a\tx\n","?? a\tx\n","WT_CHANGED\tpaths=0\n","diff-identical");
+  diff_check("?? a\tx\n","?? a\ty\n","WT_CHANGED\tpaths=1\n?? a\n","diff-changed-path-once");
+  diff_check("","?? a\tx\n","WT_CHANGED\tpaths=1\n?? a\n","diff-add");
+  diff_check("?? a\tx\n","","WT_CHANGED\tpaths=1\n?? a\n","diff-delete");
+  diff_check("?? a\tx\n","?? b\tx\n","WT_CHANGED\tpaths=2\n?? b\n?? a\n","diff-rename");
+  diff_check("?? a\tx\n?? a\tx\n","?? a\tx\n","WT_CHANGED\tpaths=0\n","diff-duplicate-line-set");
+  diff_check("?? a\tx\n?? b\ty\n","?? b\ty\n?? a\tx\n","WT_CHANGED\tpaths=0\n","diff-reordered-line-set");
+  diff_check("?? a\tx\n?? a\tx\n?? a\tz\n","?? a\ty\n?? a\ty\n","WT_CHANGED\tpaths=1\n?? a\n","diff-multiple-lines-one-path");
+  diff_check("","","WT_CHANGED\tpaths=0\n","diff-empty");
+  diff_check("?? z\tx\n?? a\tx\n","?? z\ty\n?? b\ty\n","WT_CHANGED\tpaths=3\n?? z\n?? b\n?? a\n","diff-legacy-pass-row-order");
+  {size_t n;const char *a="?? a\tx\n?? a\tx\n",*b="?? b\ty\n?? a\ty\n";char *s=difference_seed(a,strlen(a),b,strlen(b),"?? a\n",&n);ck(!strcmp(s,"WT_CHANGED\tpaths=1\n?? a\n?? b\n"),"diff-existing-output-path");free(s);}
+  size_t an,bn;char *a=snapshot(binary,fixture,&an),*b;
+  join(p,fixture,"agentwork/ledger.tsv");put(p,"ledger\nappend\n");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"ledger-only-stable");free(b);
+  join(p,fixture,"agentwork/ledger");if(mkdir(p,0700))die("ledger-dir");join(p,fixture,"agentwork/ledger/fixture.tsv");put(p,"ledger-shard\n");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"ledger-shard-create-stable");free(b);
+  char *ledger_add[]={"git","-C",fixture,"add","agentwork/ledger/fixture.tsv",0};if(run(ledger_add,tmp))die("ledger-shard-add");int ledger_fd=open(p,O_WRONLY|O_APPEND|O_CLOEXEC);const char *entry="append\n";if(ledger_fd<0||write(ledger_fd,entry,strlen(entry))!=(ssize_t)strlen(entry)||close(ledger_fd))die("ledger-shard-append");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"ledger-shard-append-stable");free(b);
+  if(unlink(p))die("ledger-shard-delete");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"ledger-shard-delete-stable");free(b);
+  join(p,fixture,"agentwork/items");if(mkdir(p,0700))die("items-dir");join(p,fixture,"agentwork/items/fixture.tsv");put(p,"item-one\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"items-shard-create-detected");free(a);a=b;an=bn;put(p,"item-two\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"items-shard-change-detected");free(a);a=b;an=bn;
+  join(p,fixture,"agentwork/ledgerish.tsv");put(p,"neighbor\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"ledgerish-file-not-excluded");free(a);a=b;an=bn;join(p,fixture,"agentwork/ledgerish");if(mkdir(p,0700))die("ledgerish-dir");join(p,fixture,"agentwork/ledgerish/fixture.tsv");put(p,"neighbor-shard\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"ledgerish-directory-not-excluded");free(a);a=b;an=bn;
+  join(p,fixture,"agentwork/items.tsv");put(p,"items-changed\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"not-whole-agentwork-excluded");free(a);a=b;an=bn;
+  join(p,fixture,"src/input.cx");put(p,"dirty-one\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"product-input-change");free(a);a=b;an=bn;
+  put(p,"dirty-two\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"already-dirty-second-change");diff_check(a,b,"WT_CHANGED\tpaths=1\n?? src/input.cx\n","dirty-second-change-path-once");free(a);a=b;an=bn;
+  join(q,fixture,"src/renamed.cx");if(rename(p,q))die("rename");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"rename-detected");
+  /* Oracle above checks legacy order byte-for-byte. This checks the path set,
+     independent of Git listing untracked paths before tracked ABSENT entries. */
+  {size_t n;char *s=difference(a,an,b,bn,&n);const char *header="WT_CHANGED\tpaths=2\n";
+   int old_path=0,new_path=0,other=0;size_t at=strlen(header);
+   int valid=n>=at&&!memcmp(s,header,at);
+   while(valid&&at<n){size_t end=at;while(end<n&&s[end]!='\n')end++;
+    if(end==n){valid=0;break;}
+    if(end-at==strlen("?? src/input.cx")&&!memcmp(s+at,"?? src/input.cx",end-at))old_path++;
+    else if(end-at==strlen("?? src/renamed.cx")&&!memcmp(s+at,"?? src/renamed.cx",end-at))new_path++;
+    else other++;at=end+1;
+   }
+   ck(valid&&old_path==1&&new_path==1&&!other,"real-rename-path-set");free(s);}
+  free(a);a=b;an=bn;
+  if(unlink(q))die("delete");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"delete-detected");diff_check(a,b,"WT_CHANGED\tpaths=1\n?? src/renamed.cx\n","real-delete-path-once");free(a);a=b;an=bn;
+  join(target,tmp,"external-input");put(target,"target-one\n");join(p,fixture,"src/link.cx");if(symlink(target,p))die("symlink");free(a);a=snapshot(binary,fixture,&an);put(target,"target-two\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"external-link-target-change");free(a);free(b);
+  if(unlink(target))die("link-target-remove");a=snapshot(binary,fixture,&an);ck(strstr(a,"\tDANGLING\n")!=0,"dangling-link-recorded");
+  put(target,"target-restored\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"dangling-target-appears");free(b);
+  if(unlink(target))die("link-target-remove");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"link-target-disappears-restores-dangling");free(a);free(b);
+ }
+ if(!failures){char *clean[]={"rm","-rf","--",tmp,0};if(run(clean,root))die("private-fixture-clean");}else fprintf(stderr,"fixture retained: %s\n",tmp);
+ printf("CHECK_S9_SHARDS\tphase=%s\tfailed=%d\n",argv[2],failures);return failures?1:0;
+}

@@ -1179,3 +1179,35 @@ sh ./unisacc.com tools/integrate-patch.cx -- --resume ~/unisacc-integration
 `--prepare-only` 只产生 `PREPARED`、`qualification=NOT_QUALIFIED`，不是PASS。只有真实gate完成才报告 `READY_TO_COMMIT`、`qualification=GATES_ONLY`，不是全产品或全批资格；不自动commit/push。每次调用原120秒总限额、子进程最多55秒保持不变，预算未完阶段可报告PENDING，不冒称成功。
 
 父已观测的**首轮历史版本**保留：泛型17/0、3.36秒；领域28/0、10.09秒；integrator真实夹具17/0、47.16秒。后续函数指针schema导出曾被当前编译器拒绝，已改为纯值schema参数；去除平方级路径及不必要hex拷贝并加入checked-copy后的**最终版本**由父真实验收：泛型17/0、3.33秒；领域33/0、10.36秒；integrator真实夹具17/0、43.06秒，均在各自55秒预算内。这些仅证明对应工具/夹具检查，不授全产品或全批资格。
+
+## 0.0.49 S9：同 RUN 原生分片与工作树差分
+
+这是普通 main 候选的工具线，不修改产品源码或 SID。当前 `--tier commit` 仅为 Linux/x64（`lnx/x86_64`）的已实现提交档，输出 `COMMIT_ONLY`、`qualification=NOT_FULL`；其他平台明确 NOT_APPLICABLE，未实现项明确 NOT_AVAIL，不作为通过。省略选择参数才是完整登记范围；`--files`/`--since` 是回归选择，不能冒充完整资格。
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/s9-shards.cx -o out/s9-shards
+out/s9-shards init . out/s9-run - --tier commit
+out/s9-shards prepare . out/s9-run checker
+out/s9-shards prepare . out/s9-run executor-all-waves
+out/s9-shards prepare . out/s9-run executor-run-batch
+out/s9-shards prepare . out/s9-run executor
+out/s9-shards prepare . out/s9-run driver
+out/s9-shards prepare . out/s9-run selection
+out/s9-run/driver step . out/s9-run
+out/s9-run/driver aggregate . out/s9-run
+```
+
+`init ROOT NEW_RUN MAP|-` 要求新目录；需材料的映射批次另逐项执行 `out/s9-shards prepare ROOT RUN material NAME`。checker及 native executor在同 RUN 按当前身份构造、认证并封存，不能复制其他 RUN 的工具、材料收据或 PASS 结果充数。init/prepare由原生监督器分相位；step/aggregate使用 RUN 内 driver。原 batch 55 秒及 native 整 step 300 秒不变，不能用扩大的 `tools/bound` 参数代替监督器；bound接口仅接受1..60秒。PENDING返回3，不是PASS；中断未封存保持UNKNOWN，不静默重跑。
+
+并发上限15 slots，三档共享总量；writerexclusive须跨commit/daily/release排空并独占，不能只在本档互斥。source/tree/SID、输入和材料在执行前后重新观察并核对，不缓存内容摘要。工作树账本例外仅为 `agentwork/ledger.tsv`、`agentwork/ledger/` 及精确 namespace 规则；不是忽略整个 `agentwork/`，items、注册表、选择表与其他测试输入仍受闸约束。
+
+### wt_diff 的平方级证据与保序修复
+
+原实现对每行反复全表查找，造成平方级差分。真实1101803字节相同快照的同单元实测：原 `wt_diff` 51.301455538秒，修后5.962208毫秒；前后全内容扫描仍各约6.5秒，未靠缓存摘要规避扫描。修法借用原快照字节，按路径/整行排序索引、分组集合比较和路径去重，再按原序号排序输出，保持旧算法“after再before”的首遇顺序及已有输出路径去重；相同字节可直接返回。真实规模仅一个摘要改变的非快路328.659817毫秒、moved=1，不能只用相同快照快路作证。
+
+`out/wtdiff-evidence/original-profile.tsv`、`fixed-profile.tsv`、`changed-profile.tsv` 保存同单元分相位证据。另一组真实pair在 `profile-before.wt`、`profile-after.wt`，完整结果见 `real-snapshot-equivalence.tsv`：旧oracle diff为65.084956897秒，新 `native_process` 为16.699770毫秒（含文件读取及启动），完整输出双方SHA256均为 `b8b0ff1c9e48a6fa1bd7b27dbb44fcab06e261f1bff6bbc5fbc2f0ea295cc6c4`。该pair的进程时间与前述同单元diff计时口径不同，不混为一个倍率。旧oracle仅留在check作独立对照，不进生产执行路径。
+
+父已实测inputs的11个对抗及17个动态场景，新旧输出全部逐字节一致；11项完整对照在 `out/wtdiff-evidence/adversarial-results.tsv`。首轮误写改名输出顺序断言的原失败保存在 `inputs-first-failure.tsv`，已修的是断言；当时旧oracle输出仍一致，不抹去失败或改称实现回归。
+
+正式完整89项功能收据为 **89 PASS、0 bad、0 pending**，来自同RUN两次step：255.77秒 + 165.62秒 = **421.39秒**；这不是单step≤300秒完成，SPEED-C、EFF1仍为 **DOING**。旧两个RUN的255.79秒全未决、295.09秒仅7有效/16pending均保留，不借历史RUN补绿。上述差分证据不等于整step或发布资格。H候选2仍只是静态方案，cc同意等F后再冻结。
+

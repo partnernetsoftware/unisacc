@@ -82,7 +82,7 @@ typedef struct {
 static int as_bad(char *why,size_t cap,const char *reason,const char *detail,int err){snprintf(why,cap,"%s\t%.1500s\terrno=%d",reason,detail?detail:"-",err);return -1;}
 static int as_ishex(const char *s){size_t i;if(strlen(s)!=64)return 0;for(i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
 static int as_copy(char *dst,size_t cap,const char *src){size_t n=strlen(src);if(n>=cap)return -1;{unsigned char *cxb_d=(unsigned char *)(dst);const unsigned char *cxb_s=(const unsigned char *)(src);size_t cxb_n=(size_t)(n+1),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};return 0;}
-static int as_join(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);return n<0||(size_t)n>=cap?-1:0;}
+int as_join(char *out,size_t cap,const char *a,const char *b){int n=snprintf(out,cap,"%s/%s",a,b);return n<0||(size_t)n>=cap?-1:0;}
 static char *as_dup(const char *s){size_t n=strlen(s);char *d=malloc(n+1);if(!d){fputs("MemoryError\n",stderr);exit(1);}{unsigned char *cxb_d=(unsigned char *)(d);const unsigned char *cxb_s=(const unsigned char *)(s);size_t cxb_n=(size_t)(n+1),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};return d;}
 
 /* Monotonic nanoseconds (CLOCK_MONOTONIC, the clock tools/bound shares through its deadline). */
@@ -188,6 +188,7 @@ typedef struct {as_registry *r;} as_collect;
 static void as_on_batch(const tp_batch_view *v,void *ctx){as_registry *r=((as_collect *)ctx)->r;as_batch *g=realloc(r->b,(size_t)(r->nb+1)*sizeof *r->b);if(!g){r->failed=1;return;}r->b=g;as_batch *b=&r->b[r->nb++];memset(b,0,sizeof *b);
  b->id=as_dup(v->id);b->impl=as_dup(v->implementation);b->source=as_dup(v->source);b->mode=as_dup(v->mode);b->platform=as_dup(v->platform);b->materials=as_dup(v->materials);b->entry=as_dup(v->entry);b->coverage=as_dup(v->coverage);b->expect=as_dup(v->expect);b->headers=as_dup(v->headers);b->budget=atoi(v->budget);}
 static void as_on_cov(const tp_coverage_view *v,void *ctx){as_registry *r=((as_collect *)ctx)->r;as_cov *g=realloc(r->c,(size_t)(r->nc+1)*sizeof *r->c);if(!g){r->failed=1;return;}r->c=g;r->c[r->nc].id=as_dup(v->id);r->c[r->nc].impl=as_dup(v->implementation);r->nc++;}
+int as_wave_platform_allowed(const char *platform){return !strcmp(platform,"lnx/x86_64");}
 void as_registry_free(as_registry *r){for(int i=0;i<r->nb;i++){as_batch *b=&r->b[i];free(b->id);free(b->impl);free(b->source);free(b->mode);free(b->platform);free(b->materials);free(b->entry);free(b->coverage);free(b->expect);free(b->headers);}for(int i=0;i<r->nc;i++){free(r->c[i].id);free(r->c[i].impl);}free(r->b);free(r->c);memset(r,0,sizeof *r);}
 int as_registry_load(const char *root,as_registry *r,char *why,size_t cap){
  char bp[4400],cp[4400],tw[1200];size_t bn,cn;memset(r,0,sizeof *r);if(as_join(bp,sizeof bp,root,"tests/batches.tsv")||as_join(cp,sizeof cp,root,"tests/coverage.tsv"))return as_bad(why,cap,"registry-path",root,0);
@@ -203,13 +204,13 @@ int as_material_kind(const as_registry *r,const char *name){int kind=0;for(int i
 
 /* ---- manifest -------------------------------------------------------------------------------------- */
 void as_free(as_manifest *m){free(m->material);free(m->ref);free(m->wave);free(m->bytes);memset(m,0,sizeof *m);}
-static int as_split(char *line,char **f,int max){int n=0;f[n++]=line;for(char *p=line;*p;p++)if(*p=='\t'){if(n==max)return -1;*p=0;f[n++]=p+1;}return n;}
+int as_split(char *line,char **f,int max){int n=0;f[n++]=line;for(char *p=line;*p;p++)if(*p=='\t'){if(n==max)return -1;*p=0;f[n++]=p+1;}return n;}
 static const char *as_kv(const char *field,const char *key){size_t n=strlen(key);return !strncmp(field,key,n)&&field[n]=='='?field+n+1:0;}
 static int as_wire_material_kind(int nf,int legacy,char **f){if(nf==legacy)return 1;if(nf!=legacy+1)return 0;return !strcmp(f[legacy],"type=sha256")?2:!strcmp(f[legacy],"type=path")?1:0;}
 static int as_hexfield(char out[65],const char *v){if(!v||!as_ishex(v))return -1;memcpy(out,v,65);return 0;}
-static int as_digits(const char *s,long long *v){long long x=0;if(!*s||(s[0]=='0'&&s[1]))return -1;for(;*s;s++){if(*s<'0'||*s>'9'||x>(LLONG_MAX-9)/10)return -1;x=x*10+(*s-'0');}*v=x;return 0;}
-static int as_relok(const char *s){size_t n=strlen(s);if(!n||n>=600||s[0]=='/'||strstr(s,".."))return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'||s[i]=='/'))return 0;return 1;}
-static int as_inlist(const char *csv,const char *id){size_t n=strlen(id);while(*csv){const char *e=strchr(csv,',');size_t z=e?(size_t)(e-csv):strlen(csv);if(z==n&&!memcmp(csv,id,n))return 1;if(!e)return 0;csv=e+1;}return 0;}
+int as_digits(const char *s,long long *v){long long x=0;if(!*s||(s[0]=='0'&&s[1]))return -1;for(;*s;s++){if(*s<'0'||*s>'9'||x>(LLONG_MAX-9)/10)return -1;x=x*10+(*s-'0');}*v=x;return 0;}
+int as_relok(const char *s){size_t n=strlen(s);if(!n||n>=600||s[0]=='/'||strstr(s,".."))return 0;for(size_t i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'||s[i]=='/'))return 0;return 1;}
+int as_inlist(const char *csv,const char *id){size_t n=strlen(id);while(*csv){const char *e=strchr(csv,',');size_t z=e?(size_t)(e-csv):strlen(csv);if(z==n&&!memcmp(csv,id,n))return 1;if(!e)return 0;csv=e+1;}return 0;}
 int as_load(const char *session,as_manifest *m,char *why,size_t cap){
  static const char *keys[10]={"root","candidate_sha","batches_sha","coverage_sha","registry_sha","source_sid","harness_sha","materials_map_sha","created_ns","candidate_kind"};
  char p[4400];memset(m,0,sizeof *m);if(as_join(p,sizeof p,session,"session.tsv"))return as_bad(why,cap,"manifest-path",session,0);
@@ -467,7 +468,7 @@ static const char *as_check_split(const char *session,const char *dir,const char
  return 0;
 }
 /* Re-verify one receipt.  0 with *verdict/*reason re-derived, or -1 with *reason naming the refusal. */
-static int as_check_receipt(const char *root,const char *session,const as_manifest *m,const as_ref *r,const as_batch *b,const as_ident *live,const char **verdict,char reason[200]){
+int as_check_receipt(const char *root,const char *session,const as_manifest *m,const as_ref *r,const as_batch *b,const as_ident *live,const char **verdict,char reason[200]){
  char p[4400],dir[700],why[1700],h[65];size_t n;const char *slash=strrchr(r->rel,'/');
  if(!slash||(size_t)(slash-r->rel)>=sizeof dir){snprintf(reason,200,"receipt-path");return -1;}{unsigned char *cxb_d=(unsigned char *)(dir);const unsigned char *cxb_s=(const unsigned char *)(r->rel);size_t cxb_n=(size_t)((size_t)(slash-r->rel)),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};dir[slash-r->rel]=0;
  char want_leaf[200];{int z=snprintf(want_leaf,sizeof want_leaf,"%s.receipt",r->id);if(z<0||(size_t)z>=sizeof want_leaf){fprintf(stderr,"bound-format\n");exit(2);}};if(strcmp(slash+1,want_leaf)){snprintf(reason,200,"receipt-leaf");return -1;}
@@ -532,6 +533,22 @@ static int as_check_receipt(const char *root,const char *session,const as_manife
  const char *why_v;const char *v=as_verdict(&fa,&why_v);int agree=!strcmp(v,rv)&&!strcmp(why_v,rr)&&!strcmp(v,r->verdict);free(saved[0]);free(saved[1]);free(text);
  if(!agree){snprintf(reason,200,"receipt-verdict-not-rederivable");return -1;}*verdict=v;{int z=snprintf(reason,200,"%s",why_v);if(z<0||(size_t)z>=200){fprintf(stderr,"bound-format\n");exit(2);}};return 0;
 }
+/* Shared complete-coverage predicate, also used by same-run shards. */
+int as_report_states(as_registry reg,as_manifest m,as_state *st){
+ int implemented=0,npass=0,nfail=0,nunknown=0,nmissing=0,nrefused=0;
+ for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];as_state *s=&st[i];if(strcmp(b->impl,"IMPLEMENTED"))continue;implemented++;const char *state;
+  if(s->refused){state="REFUSED";nrefused++;}else if(s->fail){state="FAIL";nfail++;}else if(s->last=='P'){state="PASS";npass++;snprintf(s->reason,sizeof s->reason,"batch-pass");}else if(s->attempts){state="UNKNOWN";nunknown++;}else{state="MISSING";nmissing++;snprintf(s->reason,sizeof s->reason,"no-receipt-in-session");}
+  printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",b->id,state,s->attempts,s->unknown,s->reason);}
+ int satisfied=0,unsatisfied=0,unresolved=0,declared=0;
+ for(int c=0;c<reg.nc;c++){as_cov *cv=&reg.c[c];if(tx_eqz(cv->impl,"DECLARED_DEPENDENCY")){declared++;continue;}int implemented_row=!strcmp(cv->impl,"IMPLEMENTED")||!strcmp(cv->impl,"IMPLEMENTED_SEPARATE_BATCH");np_buf blocking={0,0,0};int planned=0,mapped=0;
+  for(int i=0;i<reg.nb;i++){if(!as_inlist(reg.b[i].coverage,cv->id))continue;mapped++;if(strcmp(reg.b[i].impl,"IMPLEMENTED")){planned++;continue;}as_state *s=&st[i];int ok=s->last=='P'&&!s->fail&&!s->refused;if(!ok){if(blocking.n)np_puts(&blocking,",");np_puts(&blocking,reg.b[i].id);}}
+  if(!implemented_row||planned){unresolved++;printf("COVERAGE\t%s\tUNRESOLVED\timplementation=%s\tplanned_batches=%d\n",cv->id,cv->impl,planned);}
+  else if(blocking.n||!mapped){unsatisfied++;printf("COVERAGE\t%s\tUNSATISFIED\tblocking=%s\n",cv->id,blocking.n?blocking.p:"no-implemented-batch");}
+  else{satisfied++;printf("COVERAGE\t%s\tSATISFIED\n",cv->id);}free(blocking.p);}
+ int qualified=implemented>0&&npass==implemented&&!unsatisfied&&!unresolved;
+ printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.legacy_kind?"legacy-split1":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none")));
+ return qualified?0:1;
+}
 /* 0 QUALIFIED, 1 NOT_QUALIFIED (every reason named), 2 session refused. */
 int as_aggregate(const char *root_arg,const char *session_arg){
  char root[4096],session[4096],outbase[4400],canonical_out[4096],why[1700];
@@ -566,17 +583,6 @@ int as_aggregate(const char *root_arg,const char *session_arg){
     /* FAIL and REFUSED are sticky for the whole session; between PASS and UNKNOWN the latest attempt decides */
     if(!strcmp(v,"PASS")){s->pass++;s->last='P';}else if(!strcmp(v,"FAIL")){s->fail++;s->last='F';if(!s->refused){int z=snprintf(s->reason,sizeof s->reason,"%s",reason);if(z<0||(size_t)z>=sizeof s->reason){fprintf(stderr,"bound-format\n");exit(2);}};}
     else{s->unknown++;s->last='U';if(!s->fail&&!s->refused){int z=snprintf(s->reason,sizeof s->reason,"%s",reason);if(z<0||(size_t)z>=sizeof s->reason){fprintf(stderr,"bound-format\n");exit(2);}};}}}}
- int implemented=0,npass=0,nfail=0,nunknown=0,nmissing=0,nrefused=0;
- for(int i=0;i<reg.nb;i++){as_batch *b=&reg.b[i];as_state *s=&st[i];if(strcmp(b->impl,"IMPLEMENTED"))continue;implemented++;const char *state;
-  if(s->refused){state="REFUSED";nrefused++;}else if(s->fail){state="FAIL";nfail++;}else if(s->last=='P'){state="PASS";npass++;snprintf(s->reason,sizeof s->reason,"batch-pass");}else if(s->attempts){state="UNKNOWN";nunknown++;}else{state="MISSING";nmissing++;snprintf(s->reason,sizeof s->reason,"no-receipt-in-session");}
-  printf("BATCH\t%s\t%s\tattempts=%d\tunknown_attempts=%d\treason=%s\n",b->id,state,s->attempts,s->unknown,s->reason);}
- int satisfied=0,unsatisfied=0,unresolved=0,declared=0;
- for(int c=0;c<reg.nc;c++){as_cov *cv=&reg.c[c];if(tx_eqz(cv->impl,"DECLARED_DEPENDENCY")){declared++;continue;}int implemented_row=!strcmp(cv->impl,"IMPLEMENTED")||!strcmp(cv->impl,"IMPLEMENTED_SEPARATE_BATCH");np_buf blocking={0,0,0};int planned=0,mapped=0;
-  for(int i=0;i<reg.nb;i++){if(!as_inlist(reg.b[i].coverage,cv->id))continue;mapped++;if(strcmp(reg.b[i].impl,"IMPLEMENTED")){planned++;continue;}as_state *s=&st[i];int ok=s->last=='P'&&!s->fail&&!s->refused;if(!ok){if(blocking.n)np_puts(&blocking,",");np_puts(&blocking,reg.b[i].id);}}
-  if(!implemented_row||planned){unresolved++;printf("COVERAGE\t%s\tUNRESOLVED\timplementation=%s\tplanned_batches=%d\n",cv->id,cv->impl,planned);}
-  else if(blocking.n||!mapped){unsatisfied++;printf("COVERAGE\t%s\tUNSATISFIED\tblocking=%s\n",cv->id,blocking.n?blocking.p:"no-implemented-batch");}
-  else{satisfied++;printf("COVERAGE\t%s\tSATISFIED\n",cv->id);}free(blocking.p);}
- int qualified=implemented>0&&npass==implemented&&!unsatisfied&&!unresolved;
- printf("AGGREGATE\t%s\timplemented_batches=%d\tpass=%d\tfail=%d\tunknown=%d\tmissing=%d\trefused=%d\tcoverage=%d\tsatisfied=%d\tunsatisfied=%d\tunresolved=%d\tdeclared=%d\tcandidate=%s\tregistry=%s\tsid=%s\tharness=%s\twaves=%d\tidentity_scope=%s\n",qualified?"QUALIFIED":"NOT_QUALIFIED",implemented,npass,nfail,nunknown,nmissing,nrefused,reg.nc,satisfied,unsatisfied,unresolved,declared,m.ident.candidate,m.ident.registry,m.ident.sid,m.ident.harness,m.nwave,m.legacy_no_kind?"legacy-no-kind":(m.legacy_kind?"legacy-split1":(m.ident.candidate_kind[0]?m.ident.candidate_kind:"none")));
- free(st);as_registry_free(&reg);as_free(&m);close(lock);return qualified?0:1;
+ int result=as_report_states(reg,m,st);
+ free(st);as_registry_free(&reg);as_free(&m);close(lock);return result;
 }
