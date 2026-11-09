@@ -1,7 +1,7 @@
 name: macOS signing and notarization
 # plans/macos-signing.md: 发布顺序 5/6 and CI secrets.  workflow_dispatch only; no Release publish step.
 # Environment release-signing holds
-#   secrets  MACOS_CERT_P12_BASE64 MACOS_CERT_P12_PASSWORD ASC_API_KEY_P8_BASE64 ASC_API_KEY_ID ASC_API_ISSUER_ID
+#   secrets  MACOS_CERT_P12_BASE64 MACOS_CERT_P12_PASSWORD ASC_API_KEY_P8_BASE64 ASC_API_KEY_ID (individual key: no issuer)
 #   variable MACOS_SIGN_IDENTITY
 # The draft carries members.tsv (ROLE<TAB>ASSET_NAME<TAB>SHA256; roles ape osx-arm64 osx-x86_64
 # cache-arm64 cache-x86_64); members_sha256 pins that file, and every member is checked against it.
@@ -174,15 +174,13 @@ jobs:
         env:
           ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
         run: |
           set -euo pipefail
           bound() { perl -e 'alarm 60; exec @ARGV' -- "$@"; }
           p8="$RUNNER_TEMP/asc_api_key.p8"
           printf '%s' "$ASC_API_KEY_P8_BASE64" | base64 -d >"$p8"
           trap 'rm -f "$p8"' EXIT
-          res="$(bound xcrun notarytool submit out/unisacc-macos.dmg --key "$p8" --key-id "$ASC_API_KEY_ID" \
-            --issuer "$ASC_API_ISSUER_ID" --no-wait --output-format json)"
+          res="$(bound xcrun notarytool submit out/unisacc-macos.dmg --key "$p8" --key-id "$ASC_API_KEY_ID" --no-wait --output-format json)"
           id="$(jq -r .id <<<"$res")"
           [[ "$id" =~ ^[0-9a-f-]{36}$ ]] || { echo "no submission id in notarytool reply (UNKNOWN_SUBMISSION; do not resubmit blindly)" >&2; exit 1; }
           printf '%s\n' "$id" >out/submission-id.txt
@@ -220,7 +218,6 @@ jobs:
         env:
           ASC_API_KEY_P8_BASE64: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
           SUBMISSION_ID: ${{ needs.sign-and-submit.outputs.submission_id }}
           DMG_SHA256: ${{ needs.sign-and-submit.outputs.dmg_sha256 }}
           GH_TOKEN: ${{ github.token }}
@@ -232,8 +229,7 @@ jobs:
           p8="$RUNNER_TEMP/asc_api_key.p8"
           printf '%s' "$ASC_API_KEY_P8_BASE64" | base64 -d >"$p8"
           trap 'rm -f "$p8"' EXIT
-          res="$(perl -e 'alarm 55; exec @ARGV' -- xcrun notarytool info "$SUBMISSION_ID" --key "$p8" --key-id "$ASC_API_KEY_ID" \
-            --issuer "$ASC_API_ISSUER_ID" --output-format json)" || { echo "status=UNKNOWN (info did not finish in 55 s)"; exit 1; }
+          res="$(perl -e 'alarm 55; exec @ARGV' -- xcrun notarytool info "$SUBMISSION_ID" --key "$p8" --key-id "$ASC_API_KEY_ID" --output-format json)" || { echo "status=UNKNOWN (info did not finish in 55 s)"; exit 1; }
           status="$(jq -r .status <<<"$res")"
           echo "notary status: $status"
           case "$status" in
