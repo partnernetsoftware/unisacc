@@ -1,0 +1,110 @@
+/* tools/check-cx-lint.cx -- fixtures for tools/cx-lint.cx (run from the repo root).
+ *
+ *   sh ./unisacc.com tools/check-cx-lint.cx
+ *
+ * Writes small positive/negative .cx samples under sy_tmpdir()/cx-lint-check-PID/, runs
+ * tools/cx-lint.cx on each (bounded 50 s) and asserts the exact count per rule: every rule has
+ * at least two positive and two negative samples, including comment/string/char/continuation
+ * traps for the lexer.  Then three real 0.0.49 rework samples from git history:
+ *   6eec399892^:tools/chain-step.cx   R2-sep must be reported (missing "--" before --rev),
+ *   6eec399892:tools/chain-step.cx    R2-sep must not be reported (fixed),
+ *   60a7dd0cd8^:tools/kernel-route.cx R1-product must be reported (hard-wired ROOT/unisacc.com).
+ * Skipped (SKIP line, not PASS) when a history object is missing in a shallow checkout.
+ * Prints CHECK_CX_LINT<TAB>passed=N<TAB>failed=M<TAB>skipped=K; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char dir[4096];
+static int passed, failed, skipped;
+
+static int put(const char *name, const char *body, long n, char *path, int cap) {
+    int fd;
+    if (cx_fmt(path, cap, "%s/%s", dir, name)) return -1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, body, n)) { sy_close(fd); return -1; }
+    return sy_close(fd);
+}
+
+/* count of LINT rows with RULE in cx-lint's output for PATH, -1 on run failure */
+static int count(const char *path, const char *rule) {
+    char *v[] = {"sh", "./unisacc.com", "tools/cx-lint.cx", "--", (char *)path, 0};
+    char *out = 0; size_t n = 0; char pat[64]; int c;
+    if (cx_runv_timeout(v, 50, &out, &n) || !out) return -1;
+    if (cx_fmt(pat, sizeof pat, "LINT\t%s\t", rule)) return -1;
+    c = (int)tx_count(out, (long)n, pat, tx_len(pat, 64));
+    if (!tx_contains(out, (long)n, "CX_LINT\tfiles=1\t", 16)) c = -1;
+    mm_free(out);
+    return c;
+}
+
+static void expect(const char *name, const char *body, const char *rule, int want) {
+    char p[4400]; int got;
+    if (put(name, body, tx_len(body, 1 << 20), p, sizeof p)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
+    got = count(p, rule);
+    if (got == want) { printf("PASS\t%s\t%s=%d\n", name, rule, got); passed++; }
+    else { printf("FAIL\t%s\t%s want=%d got=%d\n", name, rule, want, got); failed++; }
+    sy_unlink(p);
+}
+
+static void history(const char *rev, const char *file, const char *name, const char *rule, int at_least) {
+    char spec[512], p[4400]; char *out = 0; size_t n = 0; int got;
+    char *v[] = {"git", "show", spec, 0};
+    if (cx_fmt(spec, sizeof spec, "%s:%s", rev, file)) { failed++; return; }
+    if (cx_runv_timeout(v, 20, &out, &n) || !out || n == 0) { printf("SKIP\t%s\tno history object %s\n", name, spec); skipped++; return; }
+    if (put(name, out, (long)n, p, sizeof p)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
+    mm_free(out);
+    got = count(p, rule);
+    if (at_least ? got >= 1 : got == 0) { printf("PASS\t%s\t%s=%d\n", name, rule, got); passed++; }
+    else { printf("FAIL\t%s\t%s want %s got=%d\n", name, rule, at_least ? ">=1" : "0", got); failed++; }
+    sy_unlink(p);
+}
+
+int main(void) {
+    if (cx_fmt(dir, sizeof dir, "%s/cx-lint-check-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) {
+        fprintf(stderr, "check-cx-lint: cannot create scratch dir\n"); return 2;
+    }
+    /* R1-version */
+    expect("v1.cx", "static const char *v = \"0.0.49\";\n", "R1-version", 1);
+    expect("v2.cx", "int f(void){ return puts(\"unisacc 0.0.50 ready\"); }\n", "R1-version", 1);
+    expect("v3.cx", "/* \"0.0.49\" in a comment */\n// \"unisacc 0.0.49\"\nint x = '0';\n", "R1-version", 0);
+    expect("v4.cx", "static const char *a = \"0.0.0\", *b = \"10.0.49x\", *c = \"\\\"0.0.\\\"\";\n", "R1-version", 0);
+    /* R1-product */
+    expect("p1.cx", "int f(char *o){ char c[64]; cx_fmt(c, 64, \"%s/unisacc.com\", o);\n"
+                    " char *v[] = {\"sh\", c, 0}; return sy_run(v, o, 1, 0); }\n", "R1-product", 1);
+    expect("p2.cx", "static char prod[64];\nint g(char **v,int n){ path(prod,64,\".\",\"unisacc.com\");\n"
+                    " v[n++]=prod; v[n]=0; return child(v); }\n", "R1-product", 1);
+    expect("p3.cx", "int f(void){ return puts(\"sh ./unisacc.com tools/x.cx\"); }\n"
+                    "int g(char **v){ return cx_runv_timeout(v, 5, 0, 0); }\n", "R1-product", 0);
+    expect("p4.cx", "/* \"unisacc.com\" */ int f(char **v){ return sy_run(v, 0, 0, 0); }\n"
+                    "int h(void){ return puts(\"unisacc.com\"); }\n", "R1-product", 0);
+    /* R2-timeout */
+    expect("t1.cx", "int f(char **v,char *o){ return sy_run(v, o, 64, 0); }\n", "R2-timeout", 1);
+    expect("t2.cx", "int f(char **v){ int e, o; return sy_spawn_pipe(v, \".\", 0, &o, &e); }\n"
+                    "int g(char *c){ char *o; size_t n; return cx_run(c, &o, &n); }\n", "R2-timeout", 2);
+    expect("t3.cx", "int f(char **v,char *o){ char *w[]={\"./tools/bound\",\"30\",v[0],0}; return sy_run(w, o, 64, 0); }\n",
+                    "R2-timeout", 0);
+    expect("t4.cx", "int f(char **v){ char *o; size_t n; /* sy_run(v) */ return cx_runv_timeout(v, 9, &o, &n); }\n"
+                    "static const char *s = \"sy_spawn(x)\";\n#define M(x) \\\n  sy_run_bound(x)\n", "R2-timeout", 0);
+    /* R2-sep */
+    expect("s1.cx", "int f(char *s,char **a){ char com[99], tool[99]; int n=0;\n"
+                    " cx_fmt(com, 99, \"%s/unisacc.com\", s); cx_fmt(tool, 99, \"%s/tools/rb.cx\", s);\n"
+                    " a[n++]=\"sh\"; a[n++]=com; a[n++]=tool; a[n++]=\"--rev\"; a[n]=0; return 0; }\n", "R2-sep", 1);
+    expect("s2.cx", "int f(void){ char *o; size_t n; return cx_run_timeout(\"sh ./unisacc.com tools/x.cx --check\", 9, &o, &n); }\n",
+                    "R2-sep", 1);
+    expect("s3.cx", "int f(char **a){ int n=0; a[n++]=\"sh\"; a[n++]=\"./unisacc.com\"; a[n++]=\"tools/x.cx\";\n"
+                    " a[n++]=\"--\"; a[n++]=\"--rev\"; a[n]=0; return 0; }\n", "R2-sep", 0);
+    expect("s4.cx", "static const char *u = \"sh ./unisacc.com tools/x.cx -- --check\";\n"
+                    "/* sh ./unisacc.com tools/y.cx --bad */ static char *w[] = {\"sh\", \"./unisacc.com\", \"t.cx\", \"--\", \"--x\", 0};\n",
+                    "R2-sep", 0);
+    /* real 0.0.49 rework samples */
+    history("6eec399892^", "tools/chain-step.cx", "h-chain-step-before.cx", "R2-sep", 1);
+    history("6eec399892", "tools/chain-step.cx", "h-chain-step-after.cx", "R2-sep", 0);
+    history("60a7dd0cd8^", "tools/kernel-route.cx", "h-kernel-route-before.cx", "R1-product", 1);
+    sy_rmdir(dir);
+    printf("CHECK_CX_LINT\tpassed=%d\tfailed=%d\tskipped=%d\n", passed, failed, skipped);
+    return failed ? 1 : 0;
+}

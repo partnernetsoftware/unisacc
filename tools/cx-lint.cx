@@ -1,0 +1,260 @@
+/* tools/cx-lint.cx -- token-level lint for .cx tools and tests (report only).
+ *
+ *   sh ./unisacc.com tools/cx-lint.cx [-- [--strict] [PATH...]]
+ *
+ * Without PATH, lints every tracked tools/ and tests/ .cx file (git ls-files, bounded 30 s).
+ * A small C lexer skips // and block comments, string/char literals (with escapes) and
+ * backslash-newline continuations; rules then run on the token stream of each top-level
+ * brace block (a function body; file-scope tokens form one block of their own).
+ *
+ *   R1 second source of truth
+ *     R1-version  a string literal holding a release version "0.0.N" with N >= 10 or
+ *                 "unisacc 0.0." outside tools/cxlib/releaseversion.cx.
+ *     R1-product  a string literal naming the product path ("unisacc.com" or ".../unisacc.com",
+ *                 no spaces) in a block that also starts a child process (a run API call, or an
+ *                 identifier filled from that literal stored into an argv slot "v[n++]=com" /
+ *                 "{com, ...}").  APPROXIMATION: block scope, not data flow; the literal may be
+ *                 only a label, and calls through local wrappers are seen only via the argv slot.
+ *   R2 child processes
+ *     R2-timeout  sy_run / sy_spawn / sy_spawn_inherit / sy_spawn_pipe / cx_run / cx_runv
+ *                 (APIs with no time-limit parameter) called in a block that names no
+ *                 bound/timeout/deadline (identifier or literal).  APPROXIMATION: any such
+ *                 word in the block counts as a guard.
+ *     R2-sep      an argv built as <unisacc.com> <TOOL.cx> "--x..." (the product, then a .cx
+ *                 tool, then a literal starting with "--" that is not "--") or one shell
+ *                 literal "... unisacc.com T.cx --x".  The product/tool may be literals or
+ *                 identifiers first filled from a call with such a literal (cx_fmt(com, ..,
+ *                 "%s/unisacc.com")).
+ *
+ * Output:  LINT<TAB>rule<TAB>path:line<TAB>summary, then
+ *          CX_LINT<TAB>files=N<TAB>findings=M<TAB>elapsed_ms=T
+ * Exit 0 always; with --strict, 1 when any finding; 2 on IO errors.  A path that is ENOENT (a
+ * dangling tracked symlink) is skipped with a stderr note and not counted in files=. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+enum { T_ID, T_STR, T_CHR, T_NUM, T_P };
+typedef struct { int kind, line; const char *s; long n; } Tok;
+
+static Tok *toks; static long ntok, captok;
+static long findings, missing;
+static const char *cur_path;
+
+static void push(int kind, int line, const char *s, long n) {
+    if (ntok == captok) {
+        long c = captok ? captok * 2 : 4096;
+        Tok *g = mm_grow(toks, c * (long)sizeof(Tok));
+        if (!g) { fprintf(stderr, "cx-lint: out of memory\n"); exit(2); }
+        toks = g; captok = c;
+    }
+    toks[ntok].kind = kind; toks[ntok].line = line; toks[ntok].s = s; toks[ntok].n = n; ntok++;
+}
+static int idc(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9'); }
+
+/* Lex B[0..n); string/char tokens hold the raw bytes between the quotes. */
+static void lex(const char *b, long n) {
+    long i = 0; int line = 1;
+    ntok = 0;
+    while (i < n) {
+        char c = b[i];
+        if (c == '\n') { line++; i++; continue; }
+        if (c == '\\' && i + 1 < n && b[i + 1] == '\n') { line++; i += 2; continue; }
+        if (c == '\\' && i + 2 < n && b[i + 1] == '\r' && b[i + 2] == '\n') { line++; i += 3; continue; }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') {
+            while (i < n && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n && b[i + 1] == '\n') { line++; i++; } i++; }
+            continue;
+        }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') {
+            i += 2;
+            while (i < n && !(b[i] == '*' && i + 1 < n && b[i + 1] == '/')) { if (b[i] == '\n') line++; i++; }
+            i += 2; continue;
+        }
+        if (c == '"' || c == '\'') {
+            long s = ++i; int l0 = line;
+            while (i < n && b[i] != c && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n) { if (b[i + 1] == '\n') line++; i++; } i++; }
+            push(c == '"' ? T_STR : T_CHR, l0, b + s, i - s);
+            if (i < n && b[i] == c) i++;
+            continue;
+        }
+        if (idc(c)) {
+            long s = i;
+            if (c >= '0' && c <= '9') { while (i < n && (idc(b[i]) || b[i] == '.')) i++; push(T_NUM, line, b + s, i - s); }
+            else { while (i < n && idc(b[i])) i++; push(T_ID, line, b + s, i - s); }
+            continue;
+        }
+        push(T_P, line, b + i, 1); i++;
+    }
+}
+
+static int is(const Tok *t, int kind, const char *w) { return t->kind == kind && tx_same(t->s, t->n, w, tx_len(w, 256)); }
+static int has(const Tok *t, const char *w) { return tx_contains(t->s, t->n, w, tx_len(w, 256)); }
+static int ends(const Tok *t, const char *w) { return tx_suffix(t->s, t->n, w, tx_len(w, 256)); }
+
+static void report(const char *rule, int line, const char *fmt, const Tok *t) {
+    int k = t ? (int)(t->n > 60 ? 60 : t->n) : 0;
+    printf("LINT\t%s\t%s:%d\t", rule, cur_path, line);
+    printf(fmt, k, t ? t->s : "");
+    printf("\n");
+    findings++;
+}
+
+static int product_lit(const Tok *t) {
+    return t->kind == T_STR && tx_chr(t->s, t->n, ' ') < 0 &&
+           (is(t, T_STR, "unisacc.com") || ends(t, "/unisacc.com"));
+}
+static int version_lit(const Tok *t) {
+    long i;
+    if (t->kind != T_STR) return 0;
+    if (has(t, "unisacc 0.0.")) return 1;
+    for (i = 0; i + 5 < t->n; i++) {
+        const char *s = t->s + i;
+        if ((i == 0 || !(s[-1] >= '0' && s[-1] <= '9') ) && s[0] == '0' && s[1] == '.' && s[2] == '0' && s[3] == '.' &&
+            s[4] >= '1' && s[4] <= '9' && i + 5 < t->n && s[5] >= '0' && s[5] <= '9') return 1;
+    }
+    return 0;
+}
+static const char *untimed[] = {"sy_run", "sy_spawn", "sy_spawn_inherit", "sy_spawn_pipe", "cx_run", "cx_runv", 0};
+static int untimed_call(long k, long e) {
+    int j;
+    if (toks[k].kind != T_ID || k + 1 >= e || !is(&toks[k + 1], T_P, "(")) return 0;
+    for (j = 0; untimed[j]; j++) if (is(&toks[k], T_ID, untimed[j])) return 1;
+    return 0;
+}
+static int run_call(long k, long e) {
+    if (toks[k].kind != T_ID || k + 1 >= e || !is(&toks[k + 1], T_P, "(")) return 0;
+    return untimed_call(k, e) || is(&toks[k], T_ID, "cx_run_timeout") || is(&toks[k], T_ID, "cx_runv_timeout") ||
+           is(&toks[k], T_ID, "runv");
+}
+static int guard_word(const Tok *t) {
+    if (t->kind != T_ID && t->kind != T_STR) return 0;
+    return has(t, "bound") || has(t, "timeout") || has(t, "deadline") || has(t, "Timeout") || has(t, "Deadline");
+}
+
+#define MAXT 64
+typedef struct { const char *s; long n; int kind; } Taint;   /* kind 1 product, 2 .cx tool */
+static Taint taint[MAXT]; static int ntaint;
+static int taint_of(const Tok *t) {
+    int j;
+    if (t->kind == T_STR) return product_lit(t) ? 1 : ends(t, ".cx") ? 2 : 0;
+    if (t->kind != T_ID) return 0;
+    for (j = 0; j < ntaint; j++) if (tx_same(taint[j].s, taint[j].n, t->s, t->n)) return taint[j].kind;
+    return 0;
+}
+
+/* Rules over the tokens [b, e) of one top-level block. */
+static void block(long b, long e, int versions_ok) {
+    long k, s; int runs = 0, guarded = 0;
+    ntaint = 0;
+    for (k = b; k < e; k++) { if (run_call(k, e)) runs = 1; if (guard_word(&toks[k])) guarded = 1; }
+    /* taint: statement with a product/.cx literal -> its first call's first identifier argument, or the
+       identifier left of '=' */
+    for (s = b; s < e; ) {
+        long t = s, lit = 0; int kind = 0;
+        while (t < e && !is(&toks[t], T_P, ";") && !is(&toks[t], T_P, "{") && !is(&toks[t], T_P, "}")) {
+            if (!kind && toks[t].kind == T_STR) { kind = product_lit(&toks[t]) ? 1 : ends(&toks[t], ".cx") ? 2 : 0; lit = t; }
+            t++;
+        }
+        if (kind && ntaint < MAXT) {
+            long q;
+            for (q = s; q < lit; q++) {
+                if (is(&toks[q], T_P, "(") && toks[q + 1].kind == T_ID && q + 2 < lit && is(&toks[q + 2], T_P, ",")) {
+                    taint[ntaint].s = toks[q + 1].s; taint[ntaint].n = toks[q + 1].n; taint[ntaint++].kind = kind; break;
+                }
+                if (is(&toks[q], T_P, "=") && q > s && toks[q - 1].kind == T_ID && !is(&toks[q + 1], T_P, "=")) {
+                    taint[ntaint].s = toks[q - 1].s; taint[ntaint].n = toks[q - 1].n; taint[ntaint++].kind = kind; break;
+                }
+            }
+        }
+        s = t + 1;
+    }
+    /* a product-path identifier stored into an argv slot (v[n++]=com; or {..., com, ...}) also starts a child */
+    for (k = b + 2; k < e; k++)
+        if (toks[k].kind == T_ID && taint_of(&toks[k]) == 1 &&
+            ((is(&toks[k - 1], T_P, "=") && is(&toks[k - 2], T_P, "]")) || is(&toks[k - 1], T_P, "{"))) runs = 1;
+    for (k = b; k < e; k++) {
+        Tok *t = &toks[k];
+        if (!versions_ok && version_lit(t)) report("R1-version", t->line, "version literal \"%.*s\" outside releaseversion", t);
+        if (runs && product_lit(t)) report("R1-product", t->line, "product path literal \"%.*s\" in a block that starts children (approx: block scope)", t);
+        if (untimed_call(k, e) && !guarded) report("R2-timeout", t->line, "%.*s( with no bound/timeout/deadline in the block", t);
+        if (t->kind == T_STR) {   /* one shell literal "... unisacc.com X.cx --opt" */
+            long p = tx_find(t->s, t->n, "unisacc.com ", 12);
+            if (p >= 0) {
+                long q = tx_find(t->s + p, t->n - p, ".cx ", 4);
+                if (q >= 0) {
+                    const char *a = t->s + p + q + 4; long rest = t->n - p - q - 4;
+                    if (rest >= 3 && a[0] == '-' && a[1] == '-' && a[2] != ' ')
+                        report("R2-sep", t->line, "shell literal runs a .cx tool with --option but no -- separator: \"%.*s\"", t);
+                }
+            }
+        }
+        if (taint_of(t) == 1 && !is(&toks[k - 1], T_P, "(")) {   /* argv element, not a cx_fmt destination */
+            long q, lim = k + 24 < e ? k + 24 : e;
+            for (q = k + 1; q < lim; q++) {
+                if (is(&toks[q], T_P, ";") && q + 1 < lim && is(&toks[q + 1], T_P, "}")) break;
+                if (taint_of(&toks[q]) == 2 && !is(&toks[q - 1], T_P, "(")) {
+                    long r;
+                    for (r = q + 1; r < lim + 12 && r < e; r++) {
+                        if (toks[r].kind == T_STR) {
+                            if (toks[r].n > 2 && toks[r].s[0] == '-' && toks[r].s[1] == '-')
+                                report("R2-sep", toks[r].line, "argv runs a .cx tool then \"%.*s\" with no \"--\" separator", &toks[r]);
+                            break;
+                        }
+                        if (toks[r].kind == T_ID && taint_of(&toks[r]) == 0 && !is(&toks[r], T_ID, "char") && !is(&toks[r], T_ID, "n") &&
+                            !is(&toks[r], T_ID, "a") && !is(&toks[r], T_ID, "av") && !is(&toks[r], T_ID, "argv") && !is(&toks[r], T_ID, "v")) {
+                            if (r + 1 < e && (is(&toks[r + 1], T_P, ",") || is(&toks[r + 1], T_P, ";") || is(&toks[r + 1], T_P, "}"))) break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static void lint_file(const char *path) {
+    int fd = sy_open_read(path); long n, k, start = 0; int depth = 0; char *b;
+    int versions_ok;
+    if (fd == -2) { fprintf(stderr, "cx-lint: skip %s (ENOENT, e.g. dangling tracked symlink)\n", path); missing++; return; }
+    if (fd < 0) { fprintf(stderr, "cx-lint: cannot open %s (rc %d)\n", path, fd); exit(2); }
+    n = sy_reg_size(fd);
+    if (n < 0) { fprintf(stderr, "cx-lint: cannot size %s\n", path); exit(2); }
+    b = mm_alloc(n + 1);
+    if (!b || sy_read_full(fd, b, n)) { fprintf(stderr, "cx-lint: cannot read %s\n", path); exit(2); }
+    sy_close(fd);
+    b[n] = 0;
+    cur_path = path;
+    versions_ok = tx_suffix(path, tx_len(path, 4096), "cxlib/releaseversion.cx", 23);
+    lex(b, n);
+    for (k = 0; k < ntok; k++) {
+        if (is(&toks[k], T_P, "{")) { if (depth++ == 0) { block(start, k, versions_ok); start = k; } }
+        else if (is(&toks[k], T_P, "}") && depth > 0) { if (--depth == 0) { block(start, k + 1, versions_ok); start = k + 1; } }
+    }
+    block(start, ntok, versions_ok);
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms(), files = 0; int i, strict = 0, given = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--strict")) strict = 1;
+        else if (tx_eqz(argv[i], "--")) continue;
+        else { given = 1; lint_file(argv[i]); files++; }
+    }
+    if (!given) {
+        char *v[] = {"git", "ls-files", "--", "tools/*.cx", "tests/*.cx", 0};
+        char *out = 0; size_t n = 0; long p = 0;
+        if (cx_runv_timeout(v, 30, &out, &n) || !out) { fprintf(stderr, "cx-lint: git ls-files failed\n"); return 2; }
+        while (p < (long)n) {
+            long q = p;
+            while (q < (long)n && out[q] != '\n') q++;
+            out[q] = 0;
+            if (q > p) { lint_file(out + p); files++; }
+            p = q + 1;
+        }
+    }
+    printf("CX_LINT\tfiles=%ld\tfindings=%ld\telapsed_ms=%ld\n", files - missing, findings, sy_now_ms() - t0);
+    if (missing) fprintf(stderr, "cx-lint: %ld tracked path(s) missing on disk, not linted\n", missing);
+    return strict && findings ? 1 : 0;
+}
