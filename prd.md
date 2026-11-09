@@ -491,3 +491,11 @@ OSX-LAUNCH-SLOW交接身份已实际固定：草稿v0.0.48.1-osx-launch-rc1、so
 OSX-LAUNCH-SLOW草稿回读完成：12资产独立重新下载，严格layout与members check真实exit0；metadataAPI核draft=true/tag/targetf099/12唯一，独立CX审计逐文件完整SHA/bytes与远端digest全部一致，members仍4e1a51b8…，保留初始EOF/notfound日志。六个native格现均success，汇总report尚在途；不提前授42/0。证据out/osx-launch-slow/v0481/draft-readback-{report.md,audit.tsv}。
 
 OSX-LAUNCH-SLOW未签候选最终资格：CI42555350465实际completed/success，下载新artifact表绑定bdd52246全SHA+f099精确提交，六目标七检查=42 PASS/0FAIL/0NOTRUN/0INVALID；Windows portable子集范围以原notes为准，不称完整--all或全POSIX。本车道目标已到可真签交接：0.0.48.1草稿12资产和members4e1a51b8…经远端回读完全一致，正式candidate表固定CIID，四成员签后替换入口28/0。首真签归cc，未触发真签/公证/Latest/根替换，签后新身份须重新资格。热性能仅Terminal既有责任应用上下文通过，非豁免旧失败保留。证据out/osx-launch-slow/v0481/ci-evidence-bdd/table.md与draft-readback-report.md。
+
+OSX-SIGN-ROSETTA P0接续：cc首真签run42556245736公证Accepted/arm64签后可跑，但DeveloperID+hardened runtime x64 Rosetta --version挂起，同源ad-hoc同entitlements正常。先核run2原始字节/签名/同包环境，建立最小RW→RX内存执行对照，MAP_JIT/pthread_jit_write_protect/allow-jit仅为待证路线，不把Rosetta采样位置当根因。cc三签名路径不改；L0/core冻结继续，若产品修复必要只给明确单路径候选补丁并实际验证，不覆盖远程车道。所有复现子≤8秒/外≤60，留原hang并清进程；未过团队签名+Rosetta真实复验不得宣称修复完成。
+
+OSX-SIGN-ROSETTA最小裁判：先比较完全无动态执行内存的return7程序，由unisacc与系统clang各生成x64，私有副本仅本机现有DeveloperID/runtime/无timestamp与ad-hoc签名对照；目的是区分Mach-O加载/AOT与kn_load执行，不上传、不公证、不碰原件或签名workflow/证书配置。当前任务明确团队签后差异，必要私有签对照在本任务范围内；不以本机签字节代替后续cc正式签验收。若无JIT程序也挂，停止把MAP_JIT当既定修法。
+
+OSX-SIGN-ROSETTA反证实测：原路径签后3679a611在统一cleanenv+P4 fffa两次8s超时142；同字节cp -p新副本DeveloperID/同runtime/同唯一entitlement正常version0，原路径sample全Rosetta routines/约200K无应用符号，原材料SHA不变。独立systemclang return7内存执行23子实测：RW→RX在全部ad-hoc profiles正常，无hang；只MAP_JIT无allow-jit被EACCES拒绝，allow-jit MAP_JIT正常，supported_np=0。尚不认kn_load/RW→RX为根因，不加泛权限或动冻结L0。下一步从公证DMG私有读出四Mac已签成员，严格原字节重包到新内容key/新inode，核真实Rosetta和冷/热两路径；若通过给无源变更的签后修复候选。另本机DeveloperID私有最小样本签名尝试因errSecInternalComponent失败，仅ad-hoc旧字节，不计团队签名测试。
+
+OSX-SIGN-ROSETTA调用链收窄：所绑src/unisacc main→dv_main→dv_parse_args/entrybind --version分类→dv_parse直接ex_ri_say→sy_printf→return，未到kn_call/core_run，查无静态constructor触发kn_load；因此正常version控制流的这次挂起不能由后续kn_load RW→RX修复，sample单独不证明何时停。公证DMG四签成员复制保留quarantine，直exec8s挂与无xattr副本成功不得混为同变量。继续用正常sh APE原字节解压新内容key复验；不删任何xattr/不关策略，不扩entitlements。
