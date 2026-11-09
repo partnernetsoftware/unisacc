@@ -1,0 +1,94 @@
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+/* Synthetic six-slice contract. Uses the real packer in stored-gzip mode,
+ * with exclusive 0700 /tmp output and an isolated candidate table. */
+static const char slot[32]="UNISACC_VERSION_SLOT_0000000000";
+static char dir[4400],paths[6][4600],output[4600],version[24],stamp[32];
+static char root[4096],exe[4400],tool[4400],release[4400],table[4400];
+static void ck(int yes,const char *what);
+static void candidate(void){
+ char source[4400];ck(!cx_fmt(source,sizeof source,"%s/release/candidate.tsv",root),"candidate path capacity");size_t n;char *text=cx_read(source,&n);ck(text!=0,"candidate source");
+ long header=0;while(header<(long)n&&text[header]!='\n')header++;ck(header<(long)n,"candidate header");
+ long at=header+1;for(int i=0;i<3;i++){while(at<(long)n&&text[at]!='\t'&&text[at]!='\n')at++;ck(at<(long)n&&text[at]=='\t',"candidate version column");at++;}
+ long end=at;while(end<(long)n&&text[end]!='\t'&&text[end]!='\n')end++;
+ FILE *f=fopen(table,"wb");ck(f!=0,"isolated candidate open");ck(fwrite(text,1,at,f)==(size_t)at,"candidate prefix");ck(fwrite(version,1,strlen(version),f)==strlen(version),"candidate version");ck(fwrite(text+end,1,n-end,f)==n-end,"candidate suffix");ck(!fclose(f),"candidate close");free(text);
+}
+static void ck(int yes,const char *what){if(!yes){fprintf(stderr,"release-version-pack: FAIL %s\n",what);exit(1);}}
+static void put32(unsigned char *p,unsigned long v){for(int i=0;i<4;i++)p[i]=(unsigned char)(v>>(8*i));}
+static void putbe(unsigned char *p,unsigned long v){for(int i=0;i<4;i++)p[3-i]=(unsigned char)(v>>(8*i));}
+static long find(const unsigned char *b,long n,const void *s,long z);
+static unsigned long get32(const unsigned char *p){return p[0]|(unsigned long)p[1]<<8|(unsigned long)p[2]<<16|(unsigned long)p[3]<<24;}
+static void pe_contract(const unsigned char *image,long n){
+ ck(n>=1536&&image[0]=='M'&&image[1]=='Z',"PE magic");unsigned long p=get32(image+60);ck(p+24<=n&&!memcmp(image+p,"PE\0\0",4),"PE signature");
+ unsigned long opt=image[p+20]|image[p+21]<<8,section=p+24+opt;ck(section+40<=n,"PE section extent");unsigned long raw=get32(image+section+20);ck(raw<=n&&512<=n-raw,"PE raw extent");
+ unsigned char expected[512];memset(expected,0,512);memcpy(expected+76,stamp,32);ck(!memcmp(image+raw,expected,512),"PE non-slot section bytes unchanged");ck(find(image,n,".rsrc",5)>=0,"PE resource section");
+ unsigned char wide[48];memset(wide,0,sizeof wide);for(int i=0;version[i];i++)wide[2*i]=version[i];ck(find(image,n,wide,2*(strlen(version)+1))>=0,"PE version resource text");
+ unsigned part[4]={0,0,0,0};int count=sscanf(version,"%u.%u.%u.%u",part,part+1,part+2,part+3);ck(count==3||count==4,"PE expected version components");
+ unsigned char fixed[24];put32(fixed,0xfeef04bdUL);put32(fixed+4,0x10000);put32(fixed+8,(unsigned long)part[0]<<16|part[1]);put32(fixed+12,(unsigned long)part[2]<<16|part[3]);memcpy(fixed+16,fixed+8,8);
+ ck(find(image,n,fixed,sizeof fixed)>=0,"PE fixed file and product versions all four words");
+}
+static long find(const unsigned char *b,long n,const void *s,long z){for(long i=0;i+z<=n;i++)if(!memcmp(b+i,s,z))return i;return -1;}
+static void pe(unsigned char *b){
+ memset(b,0,1536);b[0]='M';b[1]='Z';put32(b+60,64);memcpy(b+64,"PE\0\0",4);b[68]=0x64;b[69]=0x86;b[70]=1;b[84]=240;
+ b[88]=0x0b;b[89]=2;put32(b+120,4096);put32(b+124,512);put32(b+144,8192);put32(b+148,1024);put32(b+196,16);
+ memcpy(b+328,".text",5);put32(b+336,512);put32(b+340,4096);put32(b+344,512);put32(b+348,1024);memcpy(b+1100,slot,32);
+}
+static void mach(unsigned char *b){
+ memset(b,0,4244);put32(b,0xfeedfacfUL);put32(b+4,0x100000c);put32(b+12,2);put32(b+16,1);put32(b+20,16);
+ put32(b+32,29);put32(b+36,16);put32(b+40,4096);put32(b+44,148);memcpy(b+80,slot,32);
+ unsigned long sb[5]={0xfade0cc0UL,148,1,0,20},cd[9]={0xfade0c02UL,128,0x20400,2,96,88,0,1,4096};
+ for(int i=0;i<5;i++)putbe(b+4096+4*i,sb[i]);for(int i=0;i<9;i++)putbe(b+4116+4*i,cd[i]);
+ b[4152]=32;b[4153]=2;b[4155]=12;memcpy(b+4204,"unisa",6);
+}
+static int pack(void){
+ char *av[]={"sh",exe,"-run",tool,"--","--product","unisacc",version,output,paths[0],paths[1],paths[2],paths[3],paths[4],paths[5],0};
+ np_result r={0};char why[256];int rc=np_run(av,dir,0,55,&r,why,sizeof why);int result=rc?2:r.rc;np_free(&r);return result;
+}
+/* Independent RFC1952/RFC1951 stored-member reader for this packer's default.
+ * Return exact member extent so optional win/arm64 can be found after padding. */
+static long unpack(const unsigned char *b,long n,unsigned char *out,long *length){
+ ck(n>=18&&b[0]==31&&b[1]==139&&b[2]==8&&b[3]==0,"gzip header");long at=10,total=0;int last=0;
+ while(!last){ck(at+5<=n,"stored header bounds");int h=b[at++];last=h&1;ck((h&254)==0,"stored block");long z=b[at]|b[at+1]<<8;long nz=b[at+2]|b[at+3]<<8;at+=4;ck((z^nz)==65535&&z<=n-at&&z<=8192-total,"stored length");ck(!mm_copy(out+total,8192-total,b+at,z),"stored payload capacity");total+=z;at+=z;}
+ ck(at+8<=n,"gzip trailer");*length=total;return at+8;
+}
+static void check_version(void){
+ unsigned char b[8192],raw[8192];candidate();memset(stamp,0,32);ck(!mm_copy(stamp,sizeof stamp,version,strlen(version)),"version stamp capacity");
+ for(int i=0;i<6;i++){
+  ck(!cx_fmt(paths[i],sizeof paths[i],"%s/%d",dir,i),"slice path capacity");long n;
+  if(i==0||i==5){pe(b);n=1536;}else if(i==3||i==4){mach(b);n=4244;}else{memcpy(b,"ELF",3);memcpy(b+3,slot,32);n=35;}
+  ck(!cx_write(paths[i],b,n),"fixture write");
+ }
+ ck(!pack(),"pack six slices");size_t size;unsigned char *packed=(unsigned char *)cx_read(output,&size);ck(packed!=0,"read packed");
+ ck(find(packed,size,slot,32)<0,"no remaining slot");ck(find(packed,size,stamp,32)>=0,"Windows version");
+ pe_contract(packed,size);
+ long cursor=0,end=0;
+ for(int i=0;i<4;i++){
+  long hit=find(packed+cursor,(long)size-cursor," o=",3);ck(hit>=0,"dispatch record");cursor+=hit;
+  long off=0,len=0;ck(sscanf((char *)packed+cursor," o=%ld n=%ld",&off,&len)==2&&off>0&&len>0&&off-1+len<=(long)size,"dispatch extent");cursor+=3;
+  long n;ck(unpack(packed+off-1,len,raw,&n)==len,"member extent");ck(find(raw,n,slot,32)<0&&find(raw,n,stamp,32)>=0,"slice stamp");
+  if(i<2)ck(n==35&&!memcmp(raw,"ELF",3)&&!memcmp(raw+3,stamp,32),"ELF non-slot bytes unchanged");
+  if(i>=2){mach(b);memcpy(b+80,stamp,32);ck(n==4244&&!memcmp(raw,b,4212),"Mach non-slot bytes unchanged");}
+  if(i>=2){char hex[65];cx_sha256_hex(raw,4096,hex);for(int j=0;j<32;j++){int a=hex[2*j],c=hex[2*j+1];int v=(a<='9'?a-'0':a-'a'+10)*16+(c<='9'?c-'0':c-'a'+10);ck(raw[4212+j]==v,"Mach page hash");}}
+  end=off-1+len;
+ }
+ long start=(end+15)/16*16,n;unpack(packed+start,(long)size-start,raw,&n);ck(find(raw,n,stamp,32)>=0&&find(raw,n,".rsrc",5)>=0,"Windows ARM64 resource");pe_contract(raw,n);free(packed);
+ ck(!cx_write(paths[1],"no slot",7),"missing fixture");ck(pack()!=0,"missing slot refusal");memcpy(b,slot,32);memcpy(b+32,slot,32);ck(!cx_write(paths[1],b,64),"duplicate fixture");ck(pack()!=0,"duplicate slot refusal");
+ for(int i=0;i<6;i++)remove(paths[i]);remove(output);
+}
+int main(void){
+ ck(!sy_cwd(root,sizeof root),"root cwd");ck(!cx_fmt(exe,sizeof exe,"%s/unisacc.com",root),"compiler path capacity");ck(!cx_fmt(tool,sizeof tool,"%s/tools/ape-pack.cx",root),"packer path capacity");
+ ck(!cx_fmt(dir,sizeof dir,"/tmp/release-version-pack-%d",sy_pid()),"private path capacity");ck(!sy_mkdir(dir,0700),"private directory");
+ const char *links[]={"tools","cx","ext","cxroot.tsv"};
+ for(int i=0;i<4;i++){char source[4400],target[4400],why[256];ck(!cx_fmt(source,sizeof source,"%s/%s",root,links[i]),"symlink source capacity");ck(!cx_fmt(target,sizeof target,"%s/%s",dir,links[i]),"symlink target capacity");char *av[]={"ln","-s",source,target,0};np_result r={0};int rc=np_run(av,0,0,10,&r,why,sizeof why);ck(!rc&&!r.rc,"isolation symlink");np_free(&r);}
+ ck(!cx_fmt(release,sizeof release,"%s/release",dir),"release path capacity");ck(!sy_mkdir(release,0700),"private release");ck(!cx_fmt(table,sizeof table,"%s/candidate.tsv",release),"candidate table capacity");ck(!cx_fmt(output,sizeof output,"%s/packed.com",dir),"packed path capacity");
+ ck(!tx_copy(version,sizeof version,"0.0.48",6),"short version capacity");check_version();ck(!tx_copy(version,sizeof version,"65535.65535.65535",17),"maximum three-part version capacity");check_version();
+ ck(!tx_copy(version,sizeof version,"0.0.48.1",8),"official four-part version capacity");check_version();ck(!tx_copy(version,sizeof version,"65535.65535.65535.65535",23),"maximum four-part version capacity");check_version();
+ const char *bad[]={"1.2.3.65536","1.2.3.01","1.2.3.4.5","65536.65535.65535.65535"};
+ for(int i=0;i<sizeof bad/sizeof bad[0];i++){ck(!tx_copy(version,sizeof version,bad[i],strlen(bad[i])),"invalid version capacity");candidate();ck(pack()!=0&&!sy_exists(output),"invalid four-part pack refused without product");}
+ remove(table);rmdir(release);for(int i=0;i<4;i++){char target[4400];ck(!cx_fmt(target,sizeof target,"%s/%s",dir,links[i]),"cleanup path capacity");remove(target);}rmdir(dir);puts("RELEASE_VERSION_PACK\tok");return 0;
+}

@@ -9,6 +9,7 @@
  * body identities must remain distinct. This is necessary-input applicability,
  * not NN inference, model adoption, full PP equivalence or product qualification.
  */
+#pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.nninputs
 #pragma unisa use text.text
 static int nit_assertions,nit_failures;
@@ -113,10 +114,22 @@ static void nit_stable(const ni_result *a,const ni_result *b){
     nit_check(a->data_files==b->data_files&&a->data_dirs==b->data_dirs&&a->data_symlinks==b->data_symlinks&&a->ctor_files==b->ctor_files&&a->ordered_headers==b->ordered_headers&&a->full_triggers==b->full_triggers&&a->facts_triggers==b->facts_triggers,"recovery-all-logical-domain-counts-stable");
     nit_check(a->physical_reads==b->physical_reads&&a->current_reads==b->current_reads&&a->origin_reads==b->origin_reads&&a->support_reads==b->support_reads&&a->native_table_calls==b->native_table_calls&&a->native_internal_reads==b->native_internal_reads,"recovery-all-actual-read-counts-stable-without-timing-equality");
 }
+/* Separate actual cache lane: --cache-v2 ROOT ORIGIN MATERIAL FAST REFERENCE.
+ * Only invocation-private copies are changed; pinned originals stay intact. */
+static void nit_cache_write(const char *p,const void *s,size_t n,int mode){int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,mode);if(fd<0)nit_die("cache-fixture-exclusive-create");size_t at=0;while(at<n){ssize_t z=write(fd,(const char *)s+at,n-at);if(z<0&&errno==EINTR)continue;if(z<=0)nit_die("cache-fixture-write");at+=(size_t)z;}if(close(fd))nit_die("cache-fixture-close");}
+static int nit_cache_lane(char **argv){
+ char root[4096],origin[4096],material[4096],fast[4096],reference[4096];if(!realpath(argv[2],root)||!realpath(argv[3],origin)||!realpath(argv[4],material)||!realpath(argv[5],fast)||!realpath(argv[6],reference))nit_die("cache-lane-realpaths");
+ char dir[]="/tmp/unisacc-ni-cache-v2-XXXXXX";if(!mkdtemp(dir))nit_die("cache-lane-mkdtemp");char reader[4400],profile[4400];if(snprintf(reader,sizeof reader,"%s/reader",dir)>=(int)sizeof reader||snprintf(profile,sizeof profile,"%s.source-packages-v2.cache.tsv",reader)>=(int)sizeof profile)nit_die("cache-lane-path");size_t bytes;char *elf=nit_load(fast,&bytes);nit_cache_write(reader,elf,bytes,0700);free(elf);
+ ni_result legacy={0},result={0};char why[1400];if(ni_compare(root,origin,reference,&legacy,why,sizeof why))nit_die(why);np_buf valid={0};if(ni_fast_profile_text(root,origin,material,reader,reference,legacy.current_include,&valid,why,sizeof why))nit_die(why);
+ const char *old="libneed-native-code-cache-v1\n";nit_cache_write(profile,old,strlen(old),0600);int rc=ni_compare(root,origin,reader,&result,why,sizeof why);nit_check(rc==-1&&strstr(why,"legacy-or-wrong-code-cache-schema-refused"),"cache-v2.old-schema-refused-by-real-consumer");if(unlink(profile))nit_die("cache-fixture-unlink");
+ const char *required[]={"identity-schema\t","current-necessary-source-inputs-sha256\t","origin-necessary-source-inputs-sha256\t","execution-key-sha256\t"};for(int i=0;i<4;i++){char *a=strstr(valid.p,required[i]),*end=a?strchr(a,'\n'):0;if(!a||!end)nit_die("cache-schema-field-required");np_buf missing={0};np_put(&missing,valid.p,(size_t)(a-valid.p));np_put(&missing,end+1,valid.n-(size_t)(end+1-valid.p));nit_cache_write(profile,missing.p,missing.n,0600);free(missing.p);rc=ni_compare(root,origin,reader,&result,why,sizeof why);nit_part(rc==-1&&strstr(why,"code-profile-unique-field"),"cache-v2.missing-field-refused-by-real-consumer",required[i]);if(unlink(profile))nit_die("cache-fixture-unlink");}
+ nit_cache_write(profile,valid.p,valid.n,0600);rc=ni_compare(root,origin,reader,&result,why,sizeof why);nit_check(!rc&&result.native_source_kind==2&&result.native_table_calls==2&&nit_hex(result.native_profile),"cache-v2.rebuilt-profile-adopted-by-real-consumer");free(valid.p);if(unlink(profile)||unlink(reader)||rmdir(dir))nit_die("cache-fixture-cleanup");printf("NN_CACHE_V2\tassertions=%d\tfailed=%d\n",nit_assertions,nit_failures);return nit_failures?1:0;
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
     fputs("NOT_RUN nn-inputs requires Linux/x86_64-LP64\n",stderr);return 3;
 #else
+    if(argc==7&&tx_eqz(argv[1],"--cache-v2"))return nit_cache_lane(argv);
     if(argc!=4||sizeof(long)!=8||sizeof(void *)!=8)nit_die("usage ROOT SNAPSHOT_ROOT TRUSTED_READER");
     char root_arg[4096],origin[4096],reader[4096],wrong[4400],missing[4400],module[4400],reader_sha[65],module_sha[65],unknown[4400],unknown_sha[65];
     if(!realpath(argv[1],root_arg)||!realpath(argv[2],origin)||!realpath(argv[3],reader)||tx_eqz(root_arg, origin))nit_die("distinct-real-roots-and-existing-reader-required");

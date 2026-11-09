@@ -1,0 +1,34 @@
+/* tools/check-releaseversion.cx -- 直接检查 cxlib.releaseversion 的版本合法性与槽注入合同。
+ * 不构造编译器、不改产品;版本表加载与打包注入的端到端验收在 tests/release-version*.cx。 */
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use text.text
+static int failed,checks;
+static void ck(int ok,const char *name){checks++;printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static const char slot[32]="UNISACC_VERSION_SLOT_0000000000";
+int main(void){
+ ck(rv_valid("0.0.48"),"valid.three-part");
+ ck(rv_valid("0.0.48.1"),"valid.four-part");
+ ck(rv_valid("65535.65535.65535.65535"),"valid.four-part-max");
+ ck(!rv_valid("0.0"),"refuse.two-part");
+ ck(!rv_valid("0.0.48.1.2"),"refuse.five-part");
+ ck(!rv_valid("0.0.65536"),"refuse.part-over-65535");
+ ck(!rv_valid("0.01.48"),"refuse.leading-zero");
+ ck(!rv_valid("0..48"),"refuse.empty-part");
+ ck(!rv_valid(" 0.0.48"),"refuse.leading-space");
+ ck(!rv_valid(""),"refuse.empty");
+ {unsigned char b[96];for(int i=0;i<96;i++)b[i]=0xAA;for(int i=0;i<32;i++)b[40+i]=(unsigned char)slot[i];
+  int ok=rv_inject_slot(b,96,"0.0.48.1")==0&&!memcmp(b+40,"0.0.48.1",8);
+  for(int i=48;i<72;i++)if(b[i])ok=0;
+  for(int i=0;i<40;i++)if(b[i]!=0xAA)ok=0;
+  for(int i=72;i<96;i++)if(b[i]!=0xAA)ok=0;
+  ck(ok,"inject.zero-padded-slot-only");}
+ {unsigned char b[96];for(int i=0;i<96;i++)b[i]=0xAA;for(int i=0;i<32;i++)b[8+i]=b[50+i]=(unsigned char)slot[i];
+  unsigned char before[96];memcpy(before,b,96);
+  ck(rv_inject_slot(b,96,"0.0.49")!=0&&!memcmp(b,before,96),"inject.refuse-duplicate-slot-unchanged");}
+ {unsigned char b[64];for(int i=0;i<64;i++)b[i]=0xAA;unsigned char before[64];memcpy(before,b,64);
+  ck(rv_inject_slot(b,64,"0.0.49")!=0&&!memcmp(b,before,64),"inject.refuse-missing-slot-unchanged");}
+ {unsigned char b[64];for(int i=0;i<32;i++)b[i]=(unsigned char)slot[i];for(int i=32;i<64;i++)b[i]=0;unsigned char before[64];memcpy(before,b,64);
+  ck(rv_inject_slot(b,64,"0.0.65536")!=0&&!memcmp(b,before,64),"inject.refuse-invalid-version-unchanged");}
+ printf("RELEASEVERSION_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);
+ return failed?1:0;
+}

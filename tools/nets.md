@@ -54,3 +54,51 @@ These results cover the local classic integer-kernel contract. They do not prove
 the complete P3 route, stream interfaces, resources, all six native hosts or
 release qualification. Internal timing phases remain UNMEASURED. The main --all
 entry reports these implemented but unscheduled nets as NOT_RUN until integration.
+
+## 增量演练执行缓存（source-packages-v2）
+
+`tools/net-deps.cx` 的 `shared_gen` 数组只描述全42网共享生成器闭包上界，
+不是持久缓存。实际执行缓存由 `tools/net-incremental-rehearsal.cx` 的
+`cache` 写入，`build`、`validate`、`compare`、`report` 路径通过 `cached` 消费。
+新文件名为 `profile-source-packages-v2.exe`、`checker-source-packages-v2.exe`
+及各自 `*-source-packages-v2-cache.tsv`；旧命名空间不查找、不回退。
+
+必需字段包含 schema、规范物理仓库根、kind、权威十二包表摘要、代码输入
+profile、源码/产品/实际ELF/实际编译参数摘要及 execution_key。普通CX编译不假定
+额外生成 `.build.json`；本缓存只声明实际执行过的固定编译命令与观察到的输入/ELF。
+包表通过已有 `seed/ident.c ROOT packages` 权威入口观测，必须是完整且有序的
+`source-packages-v2` 表。profile保守包含实际入口源码与tools/cxlib、cx、include、ext
+完整物理目录文件（包括gitignore忽略的私有头）；不是最小运行时读取闭包证明。
+创建前后重读包表与代码输入；消费时重算。
+物理根参与执行键，因此相同内容搬家不能沿用执行缓存；内容型NET_DIGEST不改，
+编译器物理 `#line` 不改。字段缺失、为空、重复、旧schema或根不匹配均拒绝。
+
+独立行为边界检查（本次修改未运行）：
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/check-net-incremental-rehearsal.cx
+```
+
+该检查通过真实 `compare -> window -> cached` 消费链覆盖旧schema、v2缺字段、
+不同物理根和重复字段拒绝；不授予42网全量构造或功能PASS。
+
+有效v2重建及真实采用另分阶段执行，每条均单独受55秒watchdog约束。
+先选新的绝对路径 `CHECK`、`CONTROLLER` 和尚不存在的绝对目录 `RUN`，例如：
+
+```sh
+CHECK=/tmp/speed049-cache-check
+CONTROLLER=/tmp/speed049-cache-controller
+RUN=/tmp/speed049-cache-run
+tools/bound 55 sh ./unisacc.com tools/check-net-incremental-rehearsal.cx -o "$CHECK"
+tools/bound 55 sh ./unisacc.com tools/net-incremental-rehearsal.cx -o "$CONTROLLER"
+tools/bound 55 "$CHECK" --cache-create "$CONTROLLER" "$RUN"
+tools/bound 55 "$CHECK" --cache-adopt "$CONTROLLER" "$RUN"
+```
+
+创建阶段调用真实 `cache RUN profile` 重建当前v2可执行缓存。采用阶段调用
+`cache-list RUN`：先执行与build共用的 `cached`，再实际运行缓存profile的
+`--list`，同时要求RECIPE输出与CACHE_ADOPTED标记；不是单独receipt validator。
+采用阶段还创建两个物理根及逐字节相同的输入文件，使用同一份真实receipt全部字段，
+仅替换物理根，调用生产执行键编码 `cache_key_at`，断言键不同。
+`cache-key RUN ROOT` 只是该编码的诊断入口，不验证或授予缓存采用资格；
+异根真实消费拒绝由前述独立边界检查覆盖。上述命令本次均未运行。

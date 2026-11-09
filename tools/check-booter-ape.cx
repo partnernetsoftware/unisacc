@@ -2,22 +2,23 @@
  *
  * 验证：
  *   1. dev-lnx 头生成两次字节相同（确定性，无时间戳/随机）
- *   2. 生成的头在本机 Linux x86_64 能启动（--version 报 0.0.48.1）
+ *   2. dev-lnx包装在本机 Linux x86_64 启动，--version精确报告candidate版本
  *   3. 头文本含 booter 逻辑（uname 识别 + manifest 读取 + UNISA_KERNEL 导出）
  *   4. 无 manifest 时回退内嵌（启动正常）
  *
  * 外置基座路径生效（设 UNISA_KERNEL 后走外置 kernel）依赖产品重建编入 B3 的
  * kernel.cx 改动，本 check 标注 PRODUCT_REBUILD_REQUIRED。
  *
- * 用法：sh ./unisacc.com tools/check-booter-ape.cx
- * 输入：已装的 unisacc.com.dev/p3-package.bin（P4，带 UNIPKG1 footer）+ unisacc.com.dev/entry.elf；
- *       manifest 用的 base kernel 由 tools/kernel-route.cx 现编（与 tests/check-kernel-base.cx 同源）。
- *       两者都在全新克隆里可得，不再依赖任何 out/ 历史产物。
+ * 用法：sh ./unisacc.com tools/check-booter-ape.cx -- ABS_RAW_LINUX_ELF
+ * 输入：已装产品的P3包及显式未注入的Linux原片（唯一完整32字节槽）；
+ *       manifest 用的 base kernel 由 tools/kernel-route.cx 现编。
+ *       原片须由本轮构造显式提供，不接受已注入产品反向恢复槽。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sysx.process
 #pragma unisa use text.text
 #pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.releaseversion
 
 static int failed;
 static void ck(int ok,const char *name){
@@ -27,20 +28,16 @@ static void ck(int ok,const char *name){
 static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b){h[0]=0;return;}cx_sha256_hex(b,n,h);free(b);}
 
 int main(int argc,char **argv){
-    (void)argc; (void)argv;
+    if(argc!=2 || argv[1][0]!='/'){fprintf(stderr,"usage: check-booter-ape.cx ABS_RAW_LINUX_ELF\n");return 2;}
     char root[4096],p3[4400],elf[4400],tool[4400],out1[4400],out2[4400];
     char com1[4400],com2[4400],h1[65],h2[65];
     if(!realpath(".",root)){fprintf(stderr,"root\n");return 2;}
-    /* P3 包：PP_SPLIT 用 unisacc.com.dev/p3-package.bin；PP_APE 用仓根包。elf 同布局。 */
+    /* 已装产品只提供P3，ELF必须单独绑定未注入原材料。 */
     if (pp_package_path(root, p3, (int)sizeof p3) || !sy_exists(p3)) {
         fprintf(stderr, "check-booter-ape: no package at %s\n", p3);
         return 2;
     }
-    if (!strcmp(pp_layout_name(pp_layout(root)), "ape")) {
-        if (cx_fmt(elf, sizeof elf, "%s", p3)) return 2;
-    } else {
-        if (cx_fmt(elf, sizeof elf, "%s/unisacc.com.dev/entry.elf", root)) return 2;
-    }
+    if(!realpath(argv[1],elf)){fprintf(stderr,"raw ELF realpath\n");return 2;}
     if(cx_fmt(tool,sizeof tool,"%s/tools/release-ape.cx",root))return 2;
     /* 两次生成的输出目录放在 /tmp 的 mkdtemp 里（cx_rmtree 白名单含 /tmp），不写仓内 out/。 */
     if(cx_fmt(out1,sizeof out1,"/tmp/booter-ape-1-XXXXXX")||!mkdtemp(out1))return 2;
@@ -83,9 +80,10 @@ int main(int argc,char **argv){
     {
         char *v[]={(char*)"sh",(char*)"tools/bound",(char*)"30",(char*)"sh",com1,(char*)"--version",0};
         np_result r={0}; char why[512];
+        char version[24], expected[64]; if(rv_load("release/candidate.tsv",version)||cx_fmt(expected,sizeof expected,"unisacc %s\n",version))return 2;
         if(np_run(v,root,0,30,&r,why,sizeof why)){ck(0,"run-version");}
         else {
-            ck(r.rc==0 && r.out && strstr(r.out,"unisacc 0.0.48.1"),"head-launches-version");
+            ck(r.rc==0 && r.out && r.outn==strlen(expected) && !memcmp(r.out,expected,r.outn),"head-launches-version");
             np_free(&r);
         }
     }

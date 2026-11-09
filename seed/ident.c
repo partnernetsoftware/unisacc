@@ -1,19 +1,13 @@
-/* seed/ident.c -- the product source identity, in C99 + POSIX (0.0.32 B5).
- *
- * Prints what `exec/c/provenance.py identity` prints: SHA-256 over the
- * models.closure() file set (exec unisa src kernel include weights seed,
- * filtered the same way, plus iterate/kernel/typekw.tsv), followed by
- * the .S files in exec/c/asm.  Each file contributes its POSIX path, a NUL, and the raw
- * 32-byte SHA-256 of its contents.  Paths sort by their parts, byte-wise
- * (Python's sorted(key=parts)), which is plain byte order with '/' lowest.
- *
- * Usage: ident [ROOT]                          the identity (default ROOT: .)
- *        ident ROOT write ARTIFACT START_DIGEST  ARTIFACT.build.json, as provenance.py write
- *        ident ROOT check ARTIFACT               verify it, as provenance.py check
- *        ident ROOT manifest identity|write|check TREE STAGE   buildcompiler stage records
- * The record is byte-equal to Python's json.dumps(indent=2, sort_keys=True).
+/* seed/ident.c -- canonical source-packages-v2 identity, C99 + POSIX.
+ * Default: one combined SHA256 line. ROOT packages emits its canonical table;
+ * ROOT changes OLD_TABLE compares it; list-current lists physical inputs;
+ * list-aliases and package-inputs expose topology and ownership respectively.
+ * legacy-projection/list-legacy retain only the historical projected algorithm.
+ * write/check/manifest keep their record protocol, with the new source SID.
  */
+#define _XOPEN_SOURCE 700
 #include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +92,11 @@ static void file_entry(Sha *h, const char *rel) {
     sha_put(h, rel, strlen(rel) + 1);
     sha_put(h, dg, 32);
 }
-static void identity(char hex[65]) {
+static void historical_identity(char hex[65]) {
+    /* Release metadata (release/candidate.tsv) is deliberately outside this
+       closure. Product sources, including the fixed version injection slot and
+       every byte of limits/drive/version declarations, remain ordinary inputs:
+       no version-value projection may hide a semantic edit in those files. */
     /* "unisa" left the list on 2026-10-30: its last Python files were archived and their data moved to exec/ */
     static const char *const dirs[] = {"exec", "src", "kernel", "include", "weights", "seed", "cx"};
     Sha h; unsigned char out[32]; size_t i, first; int j;
@@ -113,8 +111,9 @@ static void identity(char hex[65]) {
     {   /* Keep parity with models.closure: construction adapters affect inputs.
            The bootstrap product itself is recorded separately, not a source. */
         static const char *const support[] = {"bound", "bound.c", "cxbin", "safedel.cx", "lib.sh",
-            "build_ref.sh", "export_ref.sh", "refshim.h", "reffoot.h", "sourceflat.cx"};
-        for (j = 0; j < 10; j++) {
+            "build_ref.sh", "export_ref.sh", "refshim.h", "reffoot.h", "sourceflat.cx",
+            "ape-pack.cx", "release-ape.cx", "cxlib/releaseversion.cx"};
+        for (j = 0; j < (int)(sizeof support / sizeof *support); j++) {
             char path[128]; snprintf(path, sizeof path, "tools/%s", support[j]); file_entry(&h, path);
         }
     }
@@ -133,6 +132,176 @@ static void identity(char hex[65]) {
     for (i = first; i < npaths; i++) file_entry(&h, paths[i]);
     sha_end(&h, out);
     for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", out[i]);
+}
+
+/* Canonical source-packages-v2: physical bytes and alias topology are separate. */
+static const char *const packages[] = {"cx/sys", "cx/mem", "cx/text", "cx/core", "cx/driver", "cx/runtime", "cx/compiler", "src", "exec", "seed", "weights", "include"};
+typedef struct { char *path; int owner, support; char digest[65]; } Input;
+typedef struct { char *logical, *target; int owner; } Alias;
+static Input *inputs; static size_t ni;
+static Alias *aliases; static size_t na;
+static char **visited; static size_t nv;
+static char root_real[4096], package_hex[12][65];
+static int output_mode;
+static char *copy_string(const char *s) {
+    char *p = malloc(strlen(s) + 1); if (!p) die("out of memory", s); strcpy(p, s); return p;
+}
+static void *grow(void *p, size_t n) { p = realloc(p, n); if (!p) die("out of memory", "source packages"); return p; }
+static int under(const char *p, const char *base) { size_t n = strlen(base); return !strncmp(p, base, n) && (!p[n] || p[n] == '/'); }
+static int owner_of(const char *p) {
+    int i;
+    if (!strcmp(p, "iterate/kernel/typekw.tsv")) return 8;
+    for (i = 0; i < 12; i++) if (under(p, packages[i])) return i;
+    if (under(p, "cx")) return 3;
+    if (under(p, "ext/memx")) return 1;
+    if (under(p, "ext/textx")) return 2;
+    if (under(p, "ext/sysx")) return 0;
+    if (under(p, "ext/crypto") || under(p, "ext/flownet") || under(p, "flownet")) return 3;
+    return 9;
+}
+static void canonical(const char *p, char out[4096]) {
+    char abs[4096]; size_t n = strlen(root_real);
+    if (!realpath(p, abs)) die("cannot resolve source (dangling, loop, or inaccessible)", p);
+    if (strncmp(abs, root_real, n) || (abs[n] && abs[n] != '/')) die("source escapes ROOT", p);
+    if (!abs[n]) strcpy(out, "."); else strcpy(out, abs + n + 1);
+    if (strchr(out, '\t') || strchr(out, '\n') || strchr(out, '\r')) die("noncanonical source path", p);
+}
+static void remember_alias(const char *logical, const char *target) {
+    char parent[4096], physical_parent[4096], declaration[4096];
+    const char *slash, *base; struct stat st; size_t i, n; int z, owner;
+    if (!strcmp(logical, target)) return;
+    if (lstat(logical, &st)) die("cannot inspect source alias", logical);
+    /* A different resolved path can be inherited from a directory alias.
+       Only a link declared at this leaf contributes a topology record. */
+    if (!S_ISLNK(st.st_mode)) return;
+    slash = strrchr(logical, '/'); base = slash ? slash + 1 : logical;
+    if (slash) {
+        n = (size_t)(slash - logical);
+        if (n >= sizeof parent) die("source alias parent too long", logical);
+        memcpy(parent, logical, n); parent[n] = 0;
+    } else strcpy(parent, ".");
+    canonical(parent, physical_parent);
+    if (!strcmp(physical_parent, ".")) z = snprintf(declaration, sizeof declaration, "%s", base);
+    else z = snprintf(declaration, sizeof declaration, "%s/%s", physical_parent, base);
+    if (z < 0 || (size_t)z >= sizeof declaration) die("source alias declaration too long", logical);
+    owner = owner_of(declaration);
+    for (i = 0; i < na; i++) if (!strcmp(aliases[i].logical, declaration) && !strcmp(aliases[i].target, target)) return;
+    aliases = grow(aliases, (na + 1) * sizeof *aliases);
+    aliases[na].logical = copy_string(declaration); aliases[na].target = copy_string(target); aliases[na++].owner = owner;
+}
+static int string_cmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int assembly(const char *p) { return under(p, "exec/c/asm") && !strcmp(suffix(p), ".S"); }
+/* Only named documentation and Finder metadata are known non-source here.
+   Cache/artifact-looking names and unknown suffixes may be real inputs. */
+static int conservative_excluded(const char *p) {
+    const char *base = strrchr(p, '/');
+    base = base ? base + 1 : p;
+    return !strcmp(base, "README.md") || !strcmp(base, ".DS_Store");
+}
+static void collect(const char *logical, int force) {
+    char physical[4096]; struct stat st; size_t i;
+    int conservative = under(logical, "seed") || under(logical, "include");
+    if (!force && conservative && conservative_excluded(logical)) return;
+    canonical(logical, physical);
+    conservative = conservative || under(physical, "seed") || under(physical, "include");
+    if (stat(physical, &st)) die("cannot stat source", logical);
+    if (force && !S_ISREG(st.st_mode)) die("mandatory support is not a regular file", logical);
+    if ((S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) && !(st.st_mode & 0444)) die("source has no read permission", logical);
+    if (S_ISDIR(st.st_mode) && !(st.st_mode & 0111)) die("source directory has no search permission", logical);
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d; struct dirent *e; char **children = NULL; size_t nc = 0;
+        remember_alias(logical, physical);
+        for (i = 0; i < nv; i++) if (!strcmp(visited[i], physical)) return;
+        visited = grow(visited, (nv + 1) * sizeof *visited); visited[nv++] = copy_string(physical);
+        d = opendir(physical); if (!d) die("cannot open source directory", logical);
+        for (;;) {
+            errno = 0; e = readdir(d);
+            if (!e) { if (errno) die("cannot read source directory", logical); break; }
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            children = grow(children, (nc + 1) * sizeof *children); children[nc++] = copy_string(e->d_name);
+        }
+        if (closedir(d)) die("cannot close source directory", logical);
+        qsort(children, nc, sizeof *children, string_cmp);
+        for (i = 0; i < nc; i++) {
+            char *p = malloc(strlen(logical) + strlen(children[i]) + 2); if (!p) die("out of memory", logical);
+            sprintf(p, "%s/%s", logical, children[i]); collect(p, force); free(p); free(children[i]);
+        }
+        free(children);
+        return;
+    }
+    if (!S_ISREG(st.st_mode)) return;
+    if (!force && !conservative && !keep(logical) && !assembly(logical)) return;
+    remember_alias(logical, physical);
+    for (i = 0; i < ni; i++) if (!strcmp(inputs[i].path, physical)) return;
+    inputs = grow(inputs, (ni + 1) * sizeof *inputs);
+    inputs[ni].path = copy_string(physical); inputs[ni].owner = owner_of(physical);
+    inputs[ni].support = !under(physical, packages[inputs[ni].owner]); ni++;
+}
+static int input_cmp(const void *a, const void *b) {
+    const Input *x = a, *y = b; return x->owner != y->owner ? x->owner - y->owner : strcmp(x->path, y->path);
+}
+static int alias_cmp(const void *a, const void *b) {
+    const Alias *x = a, *y = b; int c;
+    if (x->owner != y->owner) return x->owner - y->owner;
+    c = strcmp(x->logical, y->logical); return c ? c : strcmp(x->target, y->target);
+}
+static void finish_hex(Sha *h, char hex[65]) {
+    unsigned char dg[32]; int j; sha_end(h, dg); for (j = 0; j < 32; j++) sprintf(hex + 2*j, "%02x", dg[j]);
+}
+static void combined(char rows[12][65], char hex[65]) {
+    Sha h; int j; sha_init(&h); sha_put(&h, "source-packages-v2\n", 19);
+    for (j = 0; j < 12; j++) { sha_put(&h, packages[j], strlen(packages[j])); sha_put(&h, "\t", 1); sha_put(&h, rows[j], 64); sha_put(&h, "\n", 1); }
+    finish_hex(&h, hex);
+}
+static long file_digest(const char *path, char hex[65]);
+static void identity(char hex[65]) {
+    static const char *const support[] = {"bound", "bound.c", "cxbin", "safedel.cx", "lib.sh", "build_ref.sh", "export_ref.sh", "refshim.h", "reffoot.h", "sourceflat.cx", "ape-pack.cx", "release-ape.cx", "cxlib/releaseversion.cx"};
+    size_t i; int j; char p[256];
+    if (legacy_projection) { historical_identity(hex); return; }
+    if (!realpath(".", root_real)) die("cannot resolve ROOT", ".");
+    visited = grow(visited, sizeof *visited); visited[0] = copy_string("."); nv = 1;
+    /* Conservative roots first: a prior narrower directory alias must not
+       mark their physical trees visited before unknown inputs are collected. */
+    collect("seed", 0); collect("include", 0);
+    for (j = 0; j < 12; j++) if (j != 9 && j != 11) collect(packages[j], 0);
+    collect("cx", 0); collect("kernel", 0); collect("iterate/kernel/typekw.tsv", 1);
+    for (i = 0; i < sizeof support / sizeof *support; i++) { snprintf(p, sizeof p, "tools/%s", support[i]); collect(p, 1); }
+    qsort(inputs, ni, sizeof *inputs, input_cmp); qsort(aliases, na, sizeof *aliases, alias_cmp);
+    for (i = 0; i < ni; i++) file_digest(inputs[i].path, inputs[i].digest);
+    for (j = 0; j < 12; j++) {
+        Sha h; sha_init(&h); sha_put(&h, "package-files-v1\n", 17);
+        for (i = 0; i < ni; i++) if (inputs[i].owner == j) {
+            sha_put(&h, inputs[i].path, strlen(inputs[i].path) + 1); sha_put(&h, inputs[i].digest, 64); sha_put(&h, "\n", 1);
+        }
+        sha_put(&h, "package-aliases-v1\n", 19);
+        for (i = 0; i < na; i++) if (aliases[i].owner == j) {
+            sha_put(&h, aliases[i].logical, strlen(aliases[i].logical) + 1); sha_put(&h, aliases[i].target, strlen(aliases[i].target) + 1);
+        }
+        finish_hex(&h, package_hex[j]);
+    }
+    combined(package_hex, hex);
+    if (output_mode == 1) {
+        puts("source-packages-v2"); for (j = 0; j < 12; j++) printf("%s\t%s\n", packages[j], package_hex[j]);
+    } else if (output_mode == 2) {
+        for (i = 0; i < na; i++) printf("%s\t%s\t%s\n", packages[aliases[i].owner], aliases[i].logical, aliases[i].target);
+    } else if (output_mode == 3) {
+        for (i = 0; i < ni; i++) printf("%s\t%s\t%s\t%s\n", packages[inputs[i].owner], inputs[i].support ? "support" : "file", inputs[i].path, inputs[i].digest);
+    } else if (list_paths) for (i = 0; i < ni; i++) printf("%s\t%s\n", inputs[i].path, inputs[i].digest);
+}
+static void changes(const char *path) {
+    char old[12][65], line[256], before[65], after[65]; int j, k; FILE *f = fopen(path, "rb");
+    if (!f) die("cannot open old package table", path);
+    if (!fgets(line, sizeof line, f) || strcmp(line, "source-packages-v2\n")) die("invalid package table header", path);
+    for (j = 0; j < 12; j++) {
+        size_t n = strlen(packages[j]);
+        if (!fgets(line, sizeof line, f) || strlen(line) != n + 66 || strncmp(line, packages[j], n) || line[n] != '\t' || line[n+65] != '\n') die("invalid package table row", path);
+        for (k = 0; k < 64; k++) if (!((line[n+1+k] >= '0' && line[n+1+k] <= '9') || (line[n+1+k] >= 'a' && line[n+1+k] <= 'f'))) die("invalid package digest", path);
+        memcpy(old[j], line+n+1, 64); old[j][64] = 0;
+    }
+    if (fgetc(f) != EOF || ferror(f)) die("trailing or unreadable package table", path);
+    fclose(f); combined(old, before); identity(after);
+    for (j = 0; j < 12; j++) if (strcmp(old[j], package_hex[j])) printf("%s\t%s\t%s\n", packages[j], old[j], package_hex[j]);
+    printf("before\t%s\nafter\t%s\n", before, after);
 }
 /* sha256 of a file (absolute or relative to ROOT) and its size */
 /* B5c: HEX may be NULL -- the build record no longer stores the artifact digest,
@@ -471,6 +640,15 @@ int main(int argc, char **argv) {
         if (chdir(root)) die("cannot enter", root);
         stage_manifest(argv[3], t, argv[5]);
         return 0;
+    }
+    if (argc == 3 && (!strcmp(argv[2], "packages") || !strcmp(argv[2], "list-aliases") || !strcmp(argv[2], "package-inputs"))) {
+        output_mode = !strcmp(argv[2], "packages") ? 1 : !strcmp(argv[2], "list-aliases") ? 2 : 3;
+        if (chdir(root)) die("cannot enter", root); identity(hex); return 0;
+    }
+    if (argc == 4 && !strcmp(argv[2], "changes")) {
+        if (argv[3][0] == '/') { if (strlen(argv[3]) >= sizeof abs1) die("path too long", argv[3]); strcpy(abs1, argv[3]); }
+        else { if (!getcwd(abs1, sizeof abs1 - strlen(argv[3]) - 2)) die("getcwd failed", argv[3]); strcat(abs1, "/"); strcat(abs1, argv[3]); }
+        if (chdir(root)) die("cannot enter", root); changes(abs1); return 0;
     }
     if (argc == 3 && (!strcmp(argv[2], "list-current") || !strcmp(argv[2], "list-legacy"))) { if (chdir(root)) die("cannot enter", root); legacy_projection = !strcmp(argv[2], "list-legacy"); list_paths = 1; identity(hex); return 0; }
     if (argc == 3 && !strcmp(argv[2], "legacy-projection")) { if (chdir(root)) die("cannot enter", root); legacy_projection = 1; identity(hex); puts(hex); return 0; }

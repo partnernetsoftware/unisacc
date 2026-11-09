@@ -1,38 +1,76 @@
-/* Construction-source identity regression. Minimal isolated tree, no copied PASS. */
+/* Independent two-level package oracle; every mutation is in a private tree. */
 #pragma unisa use cxlib.netpack
-static const char *support[]={"bound","bound.c","cxbin","safedel.cx","lib.sh","build_ref.sh","export_ref.sh","refshim.h","reffoot.h","sourceflat.cx"};
+static const char *support[]={"bound","bound.c","cxbin","safedel.cx","lib.sh","build_ref.sh","export_ref.sh","refshim.h","reffoot.h","sourceflat.cx","ape-pack.cx","release-ape.cx","cxlib/releaseversion.cx"};
+static const char *packages[]={"cx/sys","cx/mem","cx/text","cx/core","cx/driver","cx/runtime","cx/compiler","src","exec","seed","weights","include"};
 static char root[4096],fixture[4096],ident[4096],watchdog[4200];
 static int checks,bad;
+static const char *check_owner;
 static void fatal(const char *s){fprintf(stderr,"identity contract: %s\n",s);exit(2);}
-static void check(int ok,const char *s){checks++;if(!ok)bad++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);}
-static void full(char *out,size_t cap,const char *relative){int n=snprintf(out,cap,"%s/%s",fixture,relative);if(n<0||(size_t)n>=cap)fatal("path length");}
+static void check(int ok,const char *s){checks++;if(!ok)bad++;printf("%s\t%s",ok?"PASS":"FAIL",s);if(check_owner)printf("\towner=%s",check_owner);printf("\n");}
+static void full(char *out,size_t cap,const char *relative){if(cx_fmt(out,cap,"%s/%s",fixture,relative))fatal("path length");}
 static void put(const char *relative,const char *bytes){char p[4400];full(p,sizeof p,relative);if(cx_write(p,bytes,strlen(bytes)))fatal(p);}
-static void entry(char *bytes,size_t *n,const char *relative){char p[4400];size_t z;unsigned char sha[32];full(p,sizeof p,relative);char *s=cx_read(p,&z);if(!s)fatal(p);cx_sha256(s,z,sha);free(s);size_t k=strlen(relative)+1;if(*n+k+32>4096)fatal("hash payload overflow");memcpy(bytes+*n,relative,k);*n+=k;memcpy(bytes+*n,sha,32);*n+=32;}
-static void expected(char *hex){char bytes[4096],name[200];size_t n=0;entry(bytes,&n,"iterate/kernel/typekw.tsv");int i;for(i=0;i<10;i++){snprintf(name,sizeof name,"tools/%s",support[i]);entry(bytes,&n,name);}cx_sha256_hex(bytes,n,hex);}
-static np_result actual(void){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
-static np_result projection(void){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,"legacy-projection",0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
-static np_result listing(const char *mode){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,(char *)mode,0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
+static void remove_file(const char *s){char p[4400];full(p,sizeof p,s);if(unlink(p))fatal("unlink fixture");}
+static void link_file(const char *target,const char *s){char p[4400];full(p,sizeof p,s);if(symlink(target,p))fatal("symlink fixture");}
+static np_result invoke(const char *mode,const char *arg){np_result r;char why[1024];char *v[]={watchdog,"5",ident,fixture,(char *)mode,(char *)arg,0};if(np_run(v,root,0,7,&r,why,sizeof why))fatal(why);return r;}
 static int matches(np_result *r,const char *sha){return !r->rc&&!r->errn&&r->outn==65&&!memcmp(r->out,sha,64)&&r->out[64]=='\n';}
+/* This inventory is deliberately independent of the implementation's traversal. */
+static char *files[100];static int owners[100],nf;
+static const char *alias_name,*alias_target;static int alias_owner;
+static void add(const char *s,int owner){if(nf==100)fatal("oracle capacity");files[nf]=strdup(s);if(!files[nf])fatal("allocation");owners[nf++]=owner;}
+static void drop(const char *s){for(int i=0;i<nf;i++)if(!strcmp(files[i],s)){free(files[i]);nf--;files[i]=files[nf];owners[i]=owners[nf];return;}fatal("oracle missing entry");}
+static int cmp(const void *a,const void *b){return strcmp(*(char *const *)a,*(char *const *)b);}
+static void digest_file(const char *s,char hex[65]){char p[4400];size_t n;full(p,sizeof p,s);char *v=cx_read(p,&n);if(!v)fatal("oracle read");cx_sha256_hex(v,n,hex);free(v);}
+static void expected(np_buf *table,char sid[65]){np_puts(table,"source-packages-v2\n");for(int p=0;p<12;p++){np_buf b={0,0,0};char *ordered[100],hex[65];int n=0;for(int i=0;i<nf;i++)if(owners[i]==p)ordered[n++]=files[i];qsort(ordered,n,sizeof ordered[0],cmp);np_puts(&b,"package-files-v1\n");for(int i=0;i<n;i++){digest_file(ordered[i],hex);np_put(&b,ordered[i],strlen(ordered[i])+1);np_puts(&b,hex);np_puts(&b,"\n");}np_puts(&b,"package-aliases-v1\n");if(alias_name&&alias_owner==p){np_put(&b,alias_name,strlen(alias_name)+1);np_put(&b,alias_target,strlen(alias_target)+1);}cx_sha256_hex(b.p,b.n,hex);free(b.p);np_puts(table,packages[p]);np_puts(table,"\t");np_puts(table,hex);np_puts(table,"\n");}cx_sha256_hex(table->p,table->n,sid);}
+static void oracle_check(const char *label){np_buf t={0,0,0};char sid[65];expected(&t,sid);np_result r=invoke(0,0);check(matches(&r,sid),label);np_free(&r);r=invoke("packages",0);check(!r.rc&&!r.errn&&r.outn==t.n&&!memcmp(r.out,t.p,t.n),"identity.canonical-package-table");np_free(&r);free(t.p);}
+static void mutation_bytes(const char *path,const char *label,int owner,const char *bytes){check_owner=packages[owner];np_buf before={0,0,0},after={0,0,0},changes={0,0,0};char bs[65],as[65],oldpath[4400];expected(&before,bs);put("old-packages.tsv",before.p);full(oldpath,sizeof oldpath,"old-packages.tsv");put(path,bytes);expected(&after,as);const char *a=before.p+strlen("source-packages-v2\n"),*b=after.p+strlen("source-packages-v2\n");int changed=0;for(int i=0;i<12;i++){size_t n=strlen(packages[i])+66;if(memcmp(a,b,n)){changed++;check(i==owner,"identity.only-owner-changed");np_puts(&changes,packages[i]);np_puts(&changes,"\t");np_put(&changes,a+strlen(packages[i])+1,64);np_puts(&changes,"\t");np_put(&changes,b+strlen(packages[i])+1,64);np_puts(&changes,"\n");}a+=n;b+=n;}check(changed==1&&strcmp(bs,as),label);np_puts(&changes,"before\t");np_puts(&changes,bs);np_puts(&changes,"\nafter\t");np_puts(&changes,as);np_puts(&changes,"\n");np_result r=invoke("changes",oldpath);check(!r.rc&&!r.errn&&r.outn==changes.n&&!memcmp(r.out,changes.p,changes.n),"identity.changed-list-exact");np_free(&r);oracle_check("identity.mutation-oracle");free(before.p);free(after.p);free(changes.p);check_owner=0;}
+static void mutation(const char *path,const char *label,int owner){mutation_bytes(path,label,owner,"changed");put(path,"x");}
+static void refused(const char *label){np_result r=invoke(0,0);check(r.rc==1&&!r.outn&&r.errn,label);np_free(&r);}
+static void directory_exporter_refused(void){np_result r=invoke(0,0);check(r.rc==1&&!r.outn&&r.errn&&strstr(r.err,"tools/sourceflat.cx")&&r.residue==0,"identity.directory-exporter-refused");np_free(&r);}
+static void old_flat_distinct(void){np_buf old={0,0,0},table={0,0,0};char fresh[65],flat[65];for(int i=0;i<nf;i++){char p[4400];size_t n;unsigned char raw[32];full(p,sizeof p,files[i]);char *s=cx_read(p,&n);if(!s)fatal("flat read");cx_sha256(s,n,raw);free(s);np_put(&old,files[i],strlen(files[i])+1);np_put(&old,(char *)raw,32);}cx_sha256_hex(old.p,old.n,flat);expected(&table,fresh);check(strcmp(flat,fresh)!=0,"identity.old-flat-not-reused");free(old.p);free(table.p);}
+static void table_refused(const char *s,const char *label){char p[4400];put("old-packages.tsv",s);full(p,sizeof p,"old-packages.tsv");np_result r=invoke("changes",p);check(r.rc==1&&!r.outn&&r.errn,label);np_free(&r);}
+/* Creation has its own before-table: the new file must not enter the oracle early. */
+static void creation(const char *path,const char *label,int owner){check_owner=packages[owner];np_buf before={0,0,0},after={0,0,0},changes={0,0,0};char bs[65],as[65],oldpath[4400];expected(&before,bs);put("old-packages.tsv",before.p);full(oldpath,sizeof oldpath,"old-packages.tsv");put(path,"x");add(path,owner);expected(&after,as);const char *a=before.p+strlen("source-packages-v2\n"),*b=after.p+strlen("source-packages-v2\n");int changed=0;for(int i=0;i<12;i++){size_t n=strlen(packages[i])+66;if(memcmp(a,b,n)){changed++;check(i==owner,"identity.creation-only-owner-changed");np_puts(&changes,packages[i]);np_puts(&changes,"\t");np_put(&changes,a+strlen(packages[i])+1,64);np_puts(&changes,"\t");np_put(&changes,b+strlen(packages[i])+1,64);np_puts(&changes,"\n");}a+=n;b+=n;}check(changed==1&&strcmp(bs,as),label);np_puts(&changes,"before\t");np_puts(&changes,bs);np_puts(&changes,"\nafter\t");np_puts(&changes,as);np_puts(&changes,"\n");np_result r=invoke("changes",oldpath);check(!r.rc&&!r.errn&&r.outn==changes.n&&!memcmp(r.out,changes.p,changes.n),"identity.creation-changed-list-exact");np_free(&r);oracle_check("identity.creation-oracle");free(before.p);free(after.p);free(changes.p);check_owner=0;}
 int main(int argc,char **argv){
- if(argc!=4){fprintf(stderr,"usage: ROOT IDENT_BINARY NEW_ABSOLUTE_FIXTURE\n");return 2;}
- if(!realpath(argv[1],root)||!realpath(argv[2],ident))fatal("resolve inputs");
- if(argv[3][0]!='/'||strlen(argv[3])>=sizeof fixture)fatal("absolute fixture path required");strcpy(fixture,argv[3]);if(mkdir(fixture,0700))fatal("fixture must not exist");
- const char *dirs[]={"exec","exec/c","exec/c/asm","src","kernel","include","weights","seed","iterate","iterate/kernel","tools","cx"};int i;char p[4400];for(i=0;i<12;i++){full(p,sizeof p,dirs[i]);if(mkdir(p,0700))fatal(p);}
- put("iterate/kernel/typekw.tsv","x");char name[200],baseline[65],sha[65];for(i=0;i<10;i++){snprintf(name,sizeof name,"tools/%s",support[i]);put(name,"x");}
- int z=snprintf(watchdog,sizeof watchdog,"%s/tools/bound",root);if(z<0||(size_t)z>=sizeof watchdog)fatal("watchdog path");
- expected(baseline);np_result r=actual();check(matches(&r,baseline),"identity.independent-ordered-payload");np_free(&r);
- for(i=0;i<10;i++){
-  snprintf(name,sizeof name,"tools/%s",support[i]);put(name,"changed");expected(sha);r=actual();check(strcmp(sha,baseline)&&matches(&r,sha),name);np_free(&r);put(name,"x");
- }
- r=actual();check(matches(&r,baseline),"identity.restoration-exact");np_free(&r);
- full(p,sizeof p,"tools/sourceflat.cx");if(unlink(p))fatal("remove fixture");r=actual();check(r.rc==1&&!r.outn&&strstr(r.err,"cannot open"),"identity.missing-exporter-refused");np_free(&r);
- if(mkdir(p,0700))fatal("directory fixture");r=actual();check(r.rc==1&&!r.outn&&strstr(r.err,"read failed"),"identity.directory-exporter-refused");np_free(&r);
- if(rmdir(p))fatal("remove fixture directory");put("tools/sourceflat.cx","x");r=actual();check(matches(&r,baseline),"identity.error-recovery-exact");np_free(&r);
- put("cx/module.cx","module-v1");r=actual();check(!r.rc&&!r.errn&&r.outn==65&&memcmp(r.out,baseline,64),"identity.cx-module-included");char cx_baseline[65];if(r.rc||r.errn||r.outn!=65)fatal("CX identity");memcpy(cx_baseline,r.out,64);cx_baseline[64]=0;np_free(&r);
- r=projection();check(matches(&r,baseline),"identity.legacy-excludes-cx-module");np_free(&r);
- r=listing("list-current");check(!r.rc&&!r.errn&&strstr(r.out,"cx/module.cx\t")&&!strstr(r.out,"seed/ident.c\t"),"identity.current-list-uses-requested-root");np_free(&r);
- r=listing("list-legacy");check(!r.rc&&!r.errn&&!strstr(r.out,"cx/module.cx\t")&&strstr(r.out,"tools/bound\t"),"identity.legacy-list-uses-requested-root");np_free(&r);
- put("cx/check_memory.cx","test-v1");put("cx/check_owned.cx","test-v1");put("exec/c/examplecheck.cx","test-v1");r=actual();check(matches(&r,cx_baseline),"identity.cx-validation-excluded");np_free(&r);
- put("cx/module.cx","module-v2");r=actual();check(!r.rc&&!r.errn&&r.outn==65&&memcmp(r.out,cx_baseline,64),"identity.cx-module-change-observed");np_free(&r);
- printf("IDENTITY\tchecks=%d\tfailed=%d\tscope=construction-support-closure\n",checks,bad);return bad?1:0;
+ if(argc!=4)fatal("usage: ROOT IDENT_BINARY NEW_ABSOLUTE_FIXTURE");if(!realpath(argv[1],root)||!realpath(argv[2],ident))fatal("resolve inputs");if(argv[3][0]!='/'||strlen(argv[3])>=sizeof fixture)fatal("absolute fixture required");strcpy(fixture,argv[3]);if(mkdir(fixture,0700))fatal("fixture must not exist");
+ const char *dirs[]={"exec","exec/c","exec/c/asm","exec/facts","src","kernel","include","weights","seed","iterate","iterate/kernel","tools","tools/cxlib","cx","cx/sys","cx/mem","cx/text","cx/core","cx/driver","cx/runtime","cx/compiler","release"};char p[4400],name[200];for(int i=0;i<(int)(sizeof dirs/sizeof *dirs);i++){full(p,sizeof p,dirs[i]);if(mkdir(p,0700))fatal(p);}if(cx_fmt(watchdog,sizeof watchdog,"%s/tools/bound",root))fatal("watchdog path");
+ put("iterate/kernel/typekw.tsv","x");add("iterate/kernel/typekw.tsv",8);for(int i=0;i<(int)(sizeof support/sizeof *support);i++){if(cx_fmt(name,sizeof name,"tools/%s",support[i]))fatal("support path");put(name,"x");add(name,9);}oracle_check("identity.independent-two-level-oracle");oracle_check("identity.L1-repeated-same-tree");
+ old_flat_distinct();
+ for(int i=0;i<(int)(sizeof support/sizeof *support);i++){if(cx_fmt(name,sizeof name,"tools/%s",support[i]))fatal("support path");mutation(name,name,9);}mutation("iterate/kernel/typekw.tsv","identity.typekw-owner",8);
+ /* Every package now admits unit.cx, including seed. */
+ for(int i=0;i<12;i++){if(cx_fmt(name,sizeof name,"%s/%s",packages[i],"unit.cx"))fatal("unit path");put(name,"x");add(name,i);mutation(name,"identity.L2-single-owner",i);remove_file(name);drop(name);}
+ const char *conservative[]={"seed/new-fragment.inc","seed/private.h","seed/nonstandard.partx","include/private.h","include/nonstandard.partx"};
+ for(int i=0;i<5;i++){int owner=i<3?9:11;creation(conservative[i],"identity.conservative-new-input",owner);mutation(conservative[i],"identity.conservative-content",owner);remove_file(conservative[i]);drop(conservative[i]);}
+ full(p,sizeof p,"seed/out");if(mkdir(p,0700))fatal("seed output-looking directory");
+ creation("seed/out/input","identity.output-looking-extensionless-input",9);mutation("seed/out/input","identity.output-looking-input-content",9);remove_file("seed/out/input");drop("seed/out/input");full(p,sizeof p,"seed/out");if(rmdir(p))fatal("seed out rmdir");
+ creation("seed/first.part","identity.first-real-manifest-fragment",9);creation("seed/second.part","identity.second-real-manifest-fragment",9);
+ creation("seed/ordered.inputs","identity.ordered-manifest-created",9);
+ put("seed/ordered.inputs","first.part\nsecond.part\n");
+ mutation_bytes("seed/ordered.inputs","identity.same-set-order-changes-seed-and-SID",9,"second.part\nfirst.part\n");
+ remove_file("seed/ordered.inputs");drop("seed/ordered.inputs");
+ remove_file("seed/first.part");drop("seed/first.part");remove_file("seed/second.part");drop("seed/second.part");
+ put("seed/README.md","documentation");put("include/README.md","documentation");put("seed/.DS_Store","Finder metadata");
+ oracle_check("identity.explicit-nonsource-excluded");
+ put("seed/README.md","changed documentation");put("seed/.DS_Store","changed metadata");oracle_check("identity.explicit-nonsource-content-excluded");
+ remove_file("tools/sourceflat.cx");refused("identity.missing-exporter-refused");full(p,sizeof p,"tools/sourceflat.cx");if(mkdir(p,0700))fatal("directory fixture");directory_exporter_refused();if(rmdir(p))fatal("rmdir");put("tools/sourceflat.cx","x");oracle_check("identity.error-recovery-exact");
+ put("release/candidate.tsv","version\n0.0.49\n");oracle_check("identity.release-metadata-excluded");put("release/candidate.tsv","version\n0.0.50\n");oracle_check("identity.release-version-change-excluded");
+ const char *semantic[]={"src/drive.cx","src/version.h","exec/facts/limits.tsv","cx/module.cx","kernel/unit.c"};const int so[]={7,7,8,3,9};for(int i=0;i<5;i++){put(semantic[i],"x");add(semantic[i],so[i]);mutation(semantic[i],"identity.full-source-semantics",so[i]);remove_file(semantic[i]);drop(semantic[i]);}
+ put("cx/check_memory.cx","test-v1");put("cx/check_owned.cx","test-v1");put("exec/c/examplecheck.cx","test-v1");oracle_check("identity.validation-excluded");
+ put("cx/core/unit.cx","x");add("cx/core/unit.cx",3);link_file("../cx/core","src/shared");alias_name="src/shared";alias_target="cx/core";alias_owner=7;oracle_check("identity.L3-directory-alias");mutation("cx/core/unit.cx","identity.L3-target-content-only-owner",3);
+ np_result r=invoke("list-current",0);check(!r.rc&&!r.errn&&np_count(r.out,r.outn,"cx/core/unit.cx\t",16)==1&&!strstr(r.out,"src/shared/unit.cx"),"identity.physical-content-once");np_free(&r);r=invoke("list-aliases",0);check(!r.rc&&!r.errn&&!strcmp(r.out,"src\tsrc/shared\tcx/core\n"),"identity.alias-topology-visible");np_free(&r);r=invoke("package-inputs",0);check(!r.rc&&!r.errn&&strstr(r.out,"cx/core\tfile\tcx/core/unit.cx\t")&&strstr(r.out,"seed\tsupport\ttools/bound\t"),"identity.package-input-categories");np_free(&r);
+ remove_file("src/shared");link_file("../cx/core/unit.cx","src/shared.cx");alias_name="src/shared.cx";alias_target="cx/core/unit.cx";oracle_check("identity.L3-file-alias");mutation("cx/core/unit.cx","identity.L3-file-content-only-owner",3);put("cx/core/other.cx","x");add("cx/core/other.cx",3);np_result prior=invoke(0,0);remove_file("src/shared.cx");link_file("../cx/core/other.cx","src/shared.cx");alias_target="cx/core/other.cx";oracle_check("identity.alias-retarget-observed");r=invoke(0,0);check(!prior.rc&&!r.rc&&prior.outn==65&&r.outn==65&&memcmp(prior.out,r.out,64),"identity.same-content-retarget-changes-SID");np_free(&prior);np_free(&r);remove_file("src/shared.cx");alias_name=0;
+ /* Stage aliases separately so the independent single-alias oracle stays exact. */
+ full(p,sizeof p,"ext");if(mkdir(p,0700))fatal("ext fixture");full(p,sizeof p,"ext/sysx");if(mkdir(p,0700))fatal("sysx fixture");
+ put("ext/sysx/target.dat","x");add("ext/sysx/target.dat",0);link_file("../ext/sysx/target.dat","src/a.cx");alias_name="src/a.cx";alias_target="ext/sysx/target.dat";alias_owner=7;
+ oracle_check("identity.logical-source-keeps-nonsemantic-target");mutation("ext/sysx/target.dat","identity.nonsemantic-target-only-natural-owner",0);
+ r=invoke("list-current",0);check(!r.rc&&!r.errn&&np_count(r.out,r.outn,"ext/sysx/target.dat\t",strlen("ext/sysx/target.dat\t"))==1&&!strstr(r.out,"src/a.cx\t"),"identity.nonsemantic-target-physical-once");np_free(&r);r=invoke("list-aliases",0);check(!r.rc&&!r.errn&&!strcmp(r.out,"src\tsrc/a.cx\text/sysx/target.dat\n"),"identity.nonsemantic-target-explicit-alias-only");np_free(&r);
+ remove_file("src/a.cx");alias_name=0;remove_file("ext/sysx/target.dat");drop("ext/sysx/target.dat");
+ link_file("../ext/sysx","src/sysx");alias_name="src/sysx";alias_target="ext/sysx";alias_owner=7;oracle_check("identity.external-directory-alias-empty");
+ creation("ext/sysx/unit.cx","identity.external-directory-create-only-natural-owner",0);mutation("ext/sysx/unit.cx","identity.external-directory-content-only-natural-owner",0);
+ r=invoke("list-current",0);check(!r.rc&&!r.errn&&np_count(r.out,r.outn,"ext/sysx/unit.cx\t",strlen("ext/sysx/unit.cx\t"))==1&&!strstr(r.out,"src/sysx/unit.cx"),"identity.external-directory-physical-once");np_free(&r);r=invoke("list-aliases",0);check(!r.rc&&!r.errn&&!strcmp(r.out,"src\tsrc/sysx\text/sysx\n"),"identity.inherited-regular-file-is-not-alias");np_free(&r);
+ remove_file("src/sysx");alias_name=0;remove_file("ext/sysx/unit.cx");drop("ext/sysx/unit.cx");
+ link_file(".","src/self");alias_name="src/self";alias_target="src";alias_owner=7;oracle_check("identity.ancestor-directory-cycle-finite");remove_file("src/self");alias_name=0;
+ link_file("absent.cx","src/bad.cx");refused("identity.dangling-refused");remove_file("src/bad.cx");link_file("bad.cx","src/bad.cx");refused("identity.file-cycle-refused");remove_file("src/bad.cx");link_file("/etc/passwd","src/bad.cx");refused("identity.outside-root-refused");remove_file("src/bad.cx");
+ full(p,sizeof p,"cx/core/unit.cx");if(chmod(p,0000))fatal("chmod");refused("identity.permission-refused");if(chmod(p,0600))fatal("restore mode");oracle_check("identity.final-recovery");
+ np_buf t={0,0,0};char sid[65];expected(&t,sid);table_refused("source-packages-v2\n","identity.truncated-old-table-refused");table_refused("source-packages-v1\n","identity.wrong-schema-refused");np_buf old={0,0,0};np_put(&old,t.p,t.n);old.p[17]='1';table_refused(old.p,"identity.complete-v1-table-refused");free(old.p);np_buf extra={0,0,0};np_put(&extra,t.p,t.n);np_puts(&extra,"extra\n");table_refused(extra.p,"identity.trailing-old-table-refused");free(extra.p);np_buf reordered={0,0,0};size_t head=strlen("source-packages-v2\n"),first=strlen(packages[0])+66,second=strlen(packages[1])+66;np_put(&reordered,t.p,head);np_put(&reordered,t.p+head+first,second);np_put(&reordered,t.p+head,first);np_put(&reordered,t.p+head+first+second,t.n-head-first-second);table_refused(reordered.p,"identity.reordered-old-table-refused");free(reordered.p);np_buf duplicate={0,0,0};np_put(&duplicate,t.p,head+first);np_put(&duplicate,t.p+head,first);np_put(&duplicate,t.p+head+first+second,t.n-head-first-second);table_refused(duplicate.p,"identity.duplicate-old-package-refused");free(duplicate.p);t.p[t.n-2]='G';table_refused(t.p,"identity.nonhex-old-table-refused");free(t.p);
+ printf("IDENTITY\tchecks=%d\tfailed=%d\tscope=twelve-package-two-level-identity\n",checks,bad);return bad?1:0;
 }

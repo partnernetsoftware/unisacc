@@ -135,6 +135,8 @@ jobs:
     needs: fetch
     runs-on: ubuntu-24.04
     timeout-minutes: 8
+    outputs:
+      release_version: ${{ steps.release-metadata.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -145,6 +147,16 @@ jobs:
         with:
           name: candidate-ape
           path: candidate
+      - name: Read the candidate release version
+        id: release-metadata
+        shell: bash
+        run: |
+          set -eu
+          got=$(sha256sum candidate/unisacc.com | cut -d' ' -f1)
+          if [ "$got" != "$APE_SHA" ]; then echo "::error::host hash $got, expected $APE_SHA"; exit 1; fi
+          cp candidate/unisacc.com ./unisacc.com; chmod +x ./unisacc.com
+          version=$(timeout 55 sh ./unisacc.com tools/ci-candidate-check.cx -- --release-version "$PWD")
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Cross-compile the cell tool with the candidate
         shell: bash
         run: |
@@ -185,8 +197,8 @@ jobs:
       TARGET: ${{ matrix.os }}/${{ matrix.arch }}
       EVIDENCE: evidence/${{ matrix.os }}-${{ matrix.arch }}.tsv
       NATIVE_SLICE: ${{ matrix.native_slice }}
-      # Same literal as exec/facts/limits.tsv; POSIX cells read that table directly.
-      VERSION_RE: '^unisacc 0\.0\.48\.1\r?\n$'
+      # Parsed once by the shared .cx reader from this exact checkout, never from candidate output.
+      RELEASE_VERSION: ${{ needs.cell-tools.outputs.release_version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -249,6 +261,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if (!$env:RELEASE_VERSION) { throw 'missing candidate release version metadata' }
+          $versionPattern = '^unisacc ' + [regex]::Escape($env:RELEASE_VERSION) + '\r?\n\z'
           # Bounded single command; Kill($true) requests owned-tree cleanup. No JobObject tree watchdog exists yet.
           function Invoke-Bounded([string]$file, [string[]]$arguments) {
             $info = [Diagnostics.ProcessStartInfo]::new()
@@ -315,7 +329,7 @@ jobs:
                 $sexe = Join-Path $PWD 'out/slice-win-arm64.exe'
                 Copy-Item -LiteralPath $slicePath $sexe
                 $sv = Invoke-Bounded $sexe @('--version')
-                Add-Row 'version' $(if ($sv.Code -eq 0 -and !$sv.Err -and $sv.Out -cmatch $env:VERSION_RE) { 'PASS' } else { 'FAIL' }) $sv.Code "slice-win-arm64 sha=$sha $($sv.Out) $($sv.Err)"
+                Add-Row 'version' $(if ($sv.Code -eq 0 -and !$sv.Err -and $sv.Out -cmatch $versionPattern) { 'PASS' } else { 'FAIL' }) $sv.Code "slice-win-arm64 sha=$sha $($sv.Out) $($sv.Err)"
                 if ($sv.Code -eq 0) {
                   # Same package the x86_64 cells find inside the APE: the slice file has none appended, so point it at pkg.bin.
                   $pkgPath = Join-Path $PWD 'slice/pkg.bin'
@@ -356,7 +370,7 @@ jobs:
             exit 0
           }
           $version = Invoke-Bounded $com @('--version')
-          Add-Row 'version' $(if ($version.Code -eq 0 -and !$version.Err -and $version.Out -cmatch $env:VERSION_RE) { 'PASS' } else { 'FAIL' }) $version.Code "$($version.Out) $($version.Err)"
+          Add-Row 'version' $(if ($version.Code -eq 0 -and !$version.Err -and $version.Out -cmatch $versionPattern) { 'PASS' } else { 'FAIL' }) $version.Code "$($version.Out) $($version.Err)"
           [IO.File]::WriteAllText((Join-Path $PWD 'out/hello.c'), "#include <stdio.h>`nint main(void){puts(`"candidate-hello`");return 0;}`n")
           $build = Invoke-Bounded $com @('-o', 'out/hello.exe', 'out/hello.c')
           if ($build.Code -ne 0) { Add-Row 'hello' 'FAIL' $build.Code "compile: $($build.Err)" }

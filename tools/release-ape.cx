@@ -11,7 +11,7 @@
  *   the end, read by every slice through UNISA_CONTAINER).  The lnx slices are entry.elf (no P3 of their own).
  *   Writes OUT/ape-receipt.txt (every input and the output with sha256 and bytes) and checks that the packed
  *   package bytes equal OUT/p3-package.body.
- * smoke: runs the packed file the way users do (sh FILE ...) under tools/bound: --version names 0.0.43; -run of a
+ * smoke: runs the packed file the way users do (sh FILE ...) under tools/bound: --version names the candidate version; -run of a
  *   C program exits 7; -S prints a tape; a .cx program that calls the host C library (sy_printf) prints its line
  *   -- the memory-image route that 5ed7ba69 broke; and tests/srcshape.cx --check exits 0.  Prints
  *   RELEASE_APE<TAB>SMOKE<TAB>ok=N<TAB>failed=M; exit 0 only when nothing failed.
@@ -23,6 +23,7 @@
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.releaseversion
 
 static void ra_die(const char *a, const char *b) { sy_eprintf("release-ape: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
 
@@ -60,6 +61,7 @@ static void ra_macho(const char *path,unsigned long cpu) {
 static int pack(char **argv, int nslice) {
     const char *out = argv[0], *p3 = argv[1], *keys[8] = {"p3", "win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/arm64"};
     char payload[4400], com[4400], rp[4400], log[8192], receipt[8192]; size_t pn; long at = 0; int i, rc; PackageFooter foot;
+    char version[24]; if (rv_load("release/candidate.tsv", version)) ra_die("invalid release version", "release/candidate.tsv");
     if (nslice != 5 && nslice != 6) ra_die("slice count", "pack takes 5 or 6 slices");
     const char *source_osx[2]={argv[5],argv[6]};char before[4][65];long before_bytes[4];
     if(ra_osx[0]){
@@ -94,7 +96,7 @@ static int pack(char **argv, int nslice) {
            subcommand it is about to run. The old 300000 was for the 237936 KB
            mapping era. Re-measure if any floor moves. */
         char *av[28] = {"sh", "./unisacc.com", "-run", "tools/ape-pack.cx", "--", "--payload", payload, "--tool", "unisacc", "--need", "53248", "--deflate",
-                      "--product", "unisacc", "0.0.48.1", com, argv[2], argv[3], argv[4], argv[5], argv[6], 0, 0};
+                      "--product", "unisacc", version, com, argv[2], argv[3], argv[4], argv[5], argv[6], 0, 0};
         if (nslice == 6) { av[21] = argv[7]; av[22] = 0; }   /* WIN_ARM64 is the optional sixth slice */
         if(ra_manager[0]){int k=nslice==6?22:21;av[k++]="--cache-manager-osx";av[k++]=(char*)ra_manager[0];av[k++]=(char*)ra_manager[1];av[k]=0;
             /* Packer options precede positional inputs. */
@@ -134,6 +136,8 @@ static void ck(int good, const char *name, const char *log) {
 
 static int smoke(const char *com) {
     char log[8192], dir[4400], c[4400], cx[4400];
+    char version[24], expected[64];
+    if (rv_load("release/candidate.tsv", version) || cx_fmt(expected, sizeof expected, "unisacc %s", version)) ra_die("invalid release version", "release/candidate.tsv");
     if (sy_exists(com) != 1) ra_die("no such file", com);
     if (cx_fmt(dir, sizeof dir, "out/release-ape-smoke") || (sy_mkdir(dir, 0755) && sy_exists(dir) != 1)) ra_die("cannot make", dir);
     if (cx_fmt(c, sizeof c, "%s/seven.c", dir) || cx_write(c, "int main(void){return 7;}\n", 26)) ra_die("cannot write", c);
@@ -149,7 +153,7 @@ static int smoke(const char *com) {
     {   const char *s = "#pragma unisa use sys.io\nint main(void){sy_printf(\"release-ape-hostc\\n\");return 0;}\n";
         if (cx_write(cx, s, (size_t)tx_len(s, 256))) ra_die("cannot write", cx); }
     {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "--version", 0}; int rc = run(av, log, sizeof log);
-        ck(rc == 0 && tx_find(log, tx_len(log, sizeof log), "unisacc 0.0.48.1", 16) >= 0, "version-0.0.48.1", log); }
+        ck(rc == 0 && tx_find(log, tx_len(log, sizeof log), expected, tx_len(expected, sizeof expected)) >= 0, "candidate-version", log); }
     {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "-run", c, 0}; int rc = run(av, log, sizeof log);
         ck(rc == 7, "run-c-exit-7", log); }
     {   char *av[] = {"./tools/bound", "30", "sh", (char *)com, "-O0", "-b", "lnx/x86_64", "-S", c, "-o", "-", 0}; int rc = run(av, log, sizeof log);
@@ -171,6 +175,7 @@ static int smoke(const char *com) {
 static int devlnx(const char *out, const char *p3, const char *lnxelf) {
     char dir[4400], elfdst[4400], pkgdst[4400], com[4400], rp[4400], receipt[8192], hex[65];
     long at = 0, n = 0; size_t pn; PackageFooter foot;
+    char version[24]; if(rv_load("release/candidate.tsv",version))ra_die("invalid release version","release/candidate.tsv");
     /* Booter head: identify OS/arch via uname, read the side manifest.tsv to
        locate the external base (kernel), export UNISA_KERNEL(+_SHA) when the
        external file is present, then hand off to the existing entry ELF.
@@ -224,6 +229,7 @@ static int devlnx(const char *out, const char *p3, const char *lnxelf) {
     }
     {   char *e = cx_read(lnxelf, &n);
         if (!e || n == 0) ra_die("cannot read slice", lnxelf);
+        if(rv_inject_slot((unsigned char *)e,(size_t)n,version))ra_die("invalid version slot",lnxelf);
         if (cx_write(elfdst, e, n)) ra_die("cannot write slice", elfdst);
         mm_free(e);
     }

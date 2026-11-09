@@ -24,25 +24,16 @@ static void save(const char *name,const np_buf *b){char p[4400];path(p,mat,name)
 static void equal(const char *p,const np_buf *b){size_t n;char *s=load(p,&n);int ok=n==b->n&&!memcmp(s,b->p,n);free(s);if(!ok)die("exact-artifact-or-receipt-mismatch");}
 static int absent(const char *p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("existence-stat");return 1;}
 static void source(char h[65]){if(unsetenv("UNISACC_RF_CAPTURE")||unsetenv("UNISA_ATTRIBUTES"))die("clear-ambient-resource-state");char *v[]={bound,"8","sh",product,ident,"--",root,0};np_result r;char why[1400];if(np_run(v,root,0,10,&r,why,sizeof why))die(why);int ok=!r.rc&&!r.errn&&r.outn==65&&r.out[64]=='\n';if(ok){memcpy(h,r.out,64);h[64]=0;for(int i=0;i<64;i++)if(!((h[i]>='0'&&h[i]<='9')||(h[i]>='a'&&h[i]<='f')))ok=0;}if(!ok&&r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);if(!ok)die("full-source-observation");}
-static int suffix(const char *p,const char *s){size_t a=strlen(p),b=strlen(s);return a>=b&&tx_eqz(p+a-b, s);}
-static int selected(const char *rel){
- if(tx_eqz(rel, "kernel/unisa_core.c")||tx_eqz(rel, "kernel/unisa_self.c"))return 0;
- const char *ext=strrchr(rel,'.');if(!ext)return 0;
- if(!strncmp(rel,"exec/c/asm/",11)&&!strchr(rel+11,'/')&&tx_eqz(ext, ".S"))return 1;
- if(!tx_eqz(ext, ".py")&&!tx_eqz(ext, ".c")&&!tx_eqz(ext, ".h")&&!tx_eqz(ext, ".inc")&&!tx_eqz(ext, ".tsv")&&!tx_eqz(ext, ".json")&&!tx_eqz(ext, ".sh"))return 0;
- if(!strncmp(rel,"seed/",5)){const char *base=strrchr(rel,'/')+1;const char *names[]={"tbl.c","net.c","json.h","gen.c","facts.h","ident.c","blob.c","sha256.h","pack.c","compilerpack.c","ape.c"};for(int i=0;i<11;i++)if(tx_eqz(base, names[i]))return 1;return 0;}
- if(!strncmp(rel,"exec/",5)&&(suffix(rel,"check.sh")||suffix(rel,"check.py")))return 0;
- if((tx_eqz(ext, ".c")||tx_eqz(ext, ".h"))&&(!strncmp(rel,"probes/",7)||strstr(rel,"/probes/")))return 0;
- if(!strncmp(rel,"exec/build/",11))return !strchr(rel+11,'/')&&tx_eqz(ext, ".py");
- return 1;
-}
 static void add(const char *rel){if(count==16384||!rel[0]||strpbrk(rel,"\r\n\t"))die("manifest-capacity-or-path");for(int i=0;i<count;i++)if(tx_eqz(inputs[i].name, rel))die("duplicate-manifest-input");char p[4400];path(p,root,rel);size_t n;char *s=load(p,&n);Input *e=&inputs[count++];e->name=strdup(rel);if(!e->name)die("allocation");e->bytes=n;cx_sha256_hex(s,n,e->sha);free(s);}
-static void walk(const char *rel,int depth){if(depth>64)die("source-directory-depth");if(!strncmp(rel,"exec/build/",11)&&strchr(rel+11,'/'))return;char p[4400];path(p,root,rel);struct stat st;if(lstat(p,&st))die("source-stat");if(!S_ISDIR(st.st_mode)){if(selected(rel))add(rel);return;}DIR *d=opendir(p);if(!d)die("source-directory-open");for(;;){errno=0;struct dirent *e=readdir(d);if(!e){int saved=errno,closed=closedir(d);if(saved||closed)die("source-directory-read-or-close");break;}if(tx_eqz(e->d_name, ".")||tx_eqz(e->d_name, ".."))continue;char child[4400];path(child,rel,e->d_name);walk(child,depth+1);}}
 static int compare(const void *a,const void *b){return strcmp(((const Input *)a)->name,((const Input *)b)->name);}
 static void require_input(const char *name){for(int i=0;i<count;i++)if(tx_eqz(inputs[i].name, name))return;die("required-NN-input-absent");}
 static np_buf manifest(void){
- for(int i=0;i<count;i++)free(inputs[i].name);count=0;const char *dirs[]={"exec","src","kernel","include","weights","seed"};for(int i=0;i<6;i++)walk(dirs[i],0);
- add("iterate/kernel/typekw.tsv");const char *support[]={"tools/bound","tools/bound.c","tools/cxbin","tools/safedel.cx","tools/lib.sh","tools/build_ref.sh","tools/export_ref.sh","tools/refshim.h","tools/reffoot.h","tools/sourceflat.cx","tools/table-kernel-export.cx","tools/cxlib/netpack.cx","unisacc.com"};for(int i=0;i<13;i++)add(support[i]);
+ for(int i=0;i<count;i++)free(inputs[i].name);count=0;
+ /* Consume the authoritative canonical inventory, never a second semantic selector. */
+ char *v[]={bound,"8","sh",product,ident,"--",root,"list-current",0};np_result r;char why[1400];if(np_run(v,root,0,10,&r,why,sizeof why))die(why);
+ if(r.rc||r.errn||!r.outn||r.out[r.outn-1]!='\n'||memchr(r.out,0,r.outn)||memchr(r.out,'\r',r.outn))die("source-inventory-wire");
+ char *at=r.out,*end=r.out+r.outn;while(at<end){char *nl=memchr(at,'\n',(size_t)(end-at));if(!nl)die("source-inventory-row");char *tab=memchr(at,'\t',(size_t)(nl-at));if(!tab||tab==at||nl-tab!=65)die("source-inventory-row");for(char *h=tab+1;h<nl;h++)if(!((*h>='0'&&*h<='9')||(*h>='a'&&*h<='f')))die("source-inventory-sha");*tab=0;*nl=0;if(at[0]=='/'||strstr(at,"../")||strpbrk(at,"\t\r\n"))die("source-inventory-path");if(strcmp(at,"kernel/unisa_core.c")&&strcmp(at,"kernel/unisa_self.c")){add(at);if(strcmp(inputs[count-1].sha,tab+1))die("source-inventory-changed");}at=nl+1;}np_free(&r);
+ const char *support[]={"tools/table-kernel-export.cx","tools/cxlib/netpack.cx","unisacc.com"};for(size_t i=0;i<sizeof support/sizeof *support;i++){int found=0;for(int j=0;j<count;j++)if(tx_eqz(inputs[j].name,support[i]))found=1;if(!found)add(support[i]);}
  require_input("kernel/unisa_model.inc");require_input("kernel/unisa_cases.inc");require_input("kernel/unisa_headers.inc");
  const char *stages[]={"pp","lex","parse","type","scope","irsel","enc","reloc","regmap","tyinfo","pfconv","peep","opinfo","prec","binsel","isel","abi","combo"};for(int i=0;i<18;i++){char name[120];snprintf(name,sizeof name,"kernel/weight.%s.inc",stages[i]);require_input(name);snprintf(name,sizeof name,"kernel/dense.%s.inc",stages[i]);require_input(name);}
  qsort(inputs,(size_t)count,sizeof inputs[0],compare);np_buf b={0};np_puts(&b,"table-kernel-applicable-inputs-v1\nscope\tSID-selected-source-except-two-generated-math-targets-plus-explicit-producer-support\n");for(int i=0;i<count;i++){char size[40];snprintf(size,sizeof size,"%lu",(unsigned long)inputs[i].bytes);np_puts(&b,"input\t");np_puts(&b,inputs[i].name);np_puts(&b,"\t");np_puts(&b,size);np_puts(&b,"\t");np_puts(&b,inputs[i].sha);np_puts(&b,"\n");}return b;

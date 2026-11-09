@@ -8,7 +8,7 @@
  * HOSTCC ELF 5c6a7756fa4de143a3e74ec14f392fc8ee736755ad55043cb976ace0fb2bb011.
  * The second, finite admissible reader is the independently exercised CX ELF
  * e4b627f06557a27b4cc71e854f3b4e26d137c8aaeae736279312ccb704df6020,
- * with FAST_ELF.cache.tsv canonical code-cache profile and all pinned material
+ * with FAST_ELF.source-packages-v2.cache.tsv canonical code-cache profile and all pinned material
  * inputs verified before/after. Its compiled-include v2 identity must match
  * the actual current-before observation before either native table call.
  * This pins exercised readers and unsigned input consistency, not historical
@@ -166,10 +166,19 @@ done:ni_endpoint_free(&observed);free(prefix.p);return rc;}
 /* Read-only canonical encoder, shared with tools/libneed-native-profile.cx.
  * Caller of the public encoder must obtain include_sha from an ACTUAL legacy
  * ni_compare, not from a receipt. Fast ni_compare independently rechecks it. */
+/* Bind physically observed necessary inputs, never fabricate a full source
+ * SID. The caller separately proves both fresh current and origin SIDs. */
+static int ni_profile_inputs(NiContext *c,const char *base,char h[65]){
+ NiEndpoint observed={0};np_buf b={0};int rc=-1;char order_sha[65];memcpy(order_sha,c->order_sha,sizeof order_sha);
+ if(ni_digest_file(c,base,"exec/facts/pp-autoinc.tsv",c->order_sha)||ni_tree(c,base,0,&observed)||ni_cdeps(c,base,&observed.cdeps)||ni_tree(c,base,1,&observed))goto done;
+ char data[65],deps[65],include[65];if(ni_hash(c,observed.data.p,observed.data.n,data)||ni_hash(c,observed.cdeps.p,observed.cdeps.n,deps)||ni_hash(c,observed.include.p,observed.include.n,include))goto done;np_puts(&b,"source-packages-v2-necessary-input-association\nnot-claimed\tfull-source-SID-or-NN-PASS\n");ni_row(&b,"data",data);ni_row(&b,"constructor-repository-Cdeps",deps);ni_row(&b,"include",include);rc=ni_hash(c,b.p,b.n,h);
+done:memcpy(c->order_sha,order_sha,sizeof order_sha);ni_endpoint_free(&observed);free(b.p);return rc;
+}
 static int ni_profile_build(NiContext *c,const char *material,const char *reference,const char *include_sha,np_buf *out,ni_result *r){
  np_buf files[6]={{0}},profile={0};char material_root[4096],reference_path[4096],p[4400],field[4400];int rc=-1;struct stat st;
  if(!ni_hex64(include_sha)||material[0]!='/'||reference[0]!='/'||!realpath(material,material_root)||!realpath(reference,reference_path)||lstat(material_root,&st)||!S_ISDIR(st.st_mode)){ni_bad(c,"fast-code-profile-arguments",material);goto done;}
- np_puts(&profile,"libneed-native-code-cache-v1\nstatus\tCODE_CACHE\nscope\tmeasured-sorted-lookup-CX-reader-not-NN-or-functional-PASS\n");ni_row(&profile,"root",c->root);ni_row(&profile,"origin-snapshot-root",c->origin);ni_row(&profile,"material",material_root);ni_row(&profile,"artifact-path",c->native);ni_row(&profile,"legacy-reference-path",reference_path);ni_row(&profile,"compiled-include-canonical-v2",include_sha);
+ np_puts(&profile,"libneed-native-code-cache-v2\nstatus\tCODE_CACHE\nscope\tmeasured-sorted-lookup-CX-reader-not-NN-or-functional-PASS\n");ni_row(&profile,"identity-schema","source-packages-v2");ni_row(&profile,"root",c->root);ni_row(&profile,"origin-snapshot-root",c->origin);ni_row(&profile,"material",material_root);ni_row(&profile,"artifact-path",c->native);ni_row(&profile,"legacy-reference-path",reference_path);ni_row(&profile,"compiled-include-canonical-v2",include_sha);
+ char current_inputs[65],origin_inputs[65];if(ni_profile_inputs(c,c->root,current_inputs)||ni_profile_inputs(c,c->origin,origin_inputs))goto done;ni_row(&profile,"current-necessary-source-inputs-sha256",current_inputs);ni_row(&profile,"origin-necessary-source-inputs-sha256",origin_inputs);ni_row(&profile,"source-package-binding","caller-fresh-current-and-origin-source-SIDs-required-separately");
  for(int i=0;i<6;i++){if(ni_ancestors(c,material_root,ni_material_files[i])||ni_path(c,p,material_root,ni_material_files[i])||ni_pinned_bytes(c,p,ni_material_hashes[i],&files[i],&profile,ni_material_files[i]))goto done;}
  if(ni_profile_field(c,&files[0],"root",field)||strcmp(field,c->root)){ni_bad(c,"material-original-root-mismatch",material_root);goto done;}
  if(ni_profile_field(c,&files[0],"saved-bootstrap-path",field))goto done;if(field[0]!='/'){ni_bad(c,"material-original-bootstrap-path-not-absolute",field);goto done;}
@@ -178,10 +187,13 @@ static int ni_profile_build(NiContext *c,const char *material,const char *refere
  if(ni_profile_elf(c,c->native,ni_fast_elf,&profile,"actual-CX-native-ELF64-x86_64")||ni_profile_elf(c,reference_path,ni_native_elf,&profile,"legacy-HOSTCC-reference-ELF64-x86_64"))goto done;
  if(ni_material_headers(c,&files[1],include_sha))goto done;
  ni_row(&profile,"compiler-command-kind","sh MAT/bootstrap-input.com");ni_row(&profile,"compiler-original-recorded-source","329cdb7077891074f638634dc7abdcd59ee39c368ad6ba1c2fcf867c3c63de2e");ni_row(&profile,"compiler-artifact-sha256",ni_material_hashes[4]);ni_row(&profile,"compiler-original-record-sha256",ni_material_hashes[5]);np_puts(&profile,"flags\t-I ");np_puts(&profile,c->root);np_puts(&profile,"/include -O2 -b lnx/x86_64\n");ni_row(&profile,"derived-CX-sha256",ni_material_hashes[3]);ni_row(&profile,"base-C-sha256",ni_native_c);ni_row(&profile,"native-artifact-sha256",ni_fast_elf);ni_row(&profile,"material-original-receipt-sha256",ni_material_hashes[0]);ni_row(&profile,"material-original-inputs-sha256",ni_material_hashes[1]);ni_row(&profile,"trust","unsigned-code-cache-input-consistency-not-historical-compilation-proof;legacy-reference-HOSTCC-nonhermetic;base-C-reused-not-NN-reconstruction");
+ char execution_key[65];if(ni_hash(c,profile.p,profile.n,execution_key))goto done;ni_row(&profile,"execution-key-sha256",execution_key);
  strcpy(r->compiled_include,include_sha);strcpy(r->compiled_material,ni_material_hashes[0]);strcpy(r->derived_source,ni_material_hashes[3]);strcpy(r->compiler_artifact,ni_material_hashes[4]);strcpy(r->compiler_record,ni_material_hashes[5]);*out=profile;memset(&profile,0,sizeof profile);rc=0;
 done:for(int i=0;i<6;i++)free(files[i].p);free(profile.p);return rc;
 }
-static int ni_profile_check(NiContext *c,np_buf *support,ni_result *r){char p[4400];int n=snprintf(p,sizeof p,"%s.cache.tsv",c->native);if(n<0||n>=sizeof p)return ni_bad(c,"fast-code-profile-path-bound",c->native);size_t bytes;unsigned mode;char *s=ni_read(c,p,&bytes,&mode);if(!s)return -1;np_buf actual={0},expected={0};np_put(&actual,s,bytes);free(s);char root_field[4400],origin_field[4400],artifact_field[4400],material_field[4400],reference_field[4400],include_field[4400];int rc=-1;
+static int ni_profile_check(NiContext *c,np_buf *support,ni_result *r){char p[4400];int n=snprintf(p,sizeof p,"%s.source-packages-v2.cache.tsv",c->native);if(n<0||n>=sizeof p)return ni_bad(c,"fast-code-profile-path-bound",c->native);size_t bytes;unsigned mode;char *s=ni_read(c,p,&bytes,&mode);if(!s)return -1;np_buf actual={0},expected={0};np_put(&actual,s,bytes);free(s);char root_field[4400],origin_field[4400],artifact_field[4400],material_field[4400],reference_field[4400],include_field[4400];int rc=-1;
+ if(actual.n<strlen("libneed-native-code-cache-v2\n")||memcmp(actual.p,"libneed-native-code-cache-v2\n",strlen("libneed-native-code-cache-v2\n"))){ni_bad(c,"legacy-or-wrong-code-cache-schema-refused",p);goto done;}
+ char required[4400];const char *keys[]={"identity-schema","current-necessary-source-inputs-sha256","origin-necessary-source-inputs-sha256","execution-key-sha256"};for(int i=0;i<4;i++){if(ni_profile_field(c,&actual,keys[i],required))goto done;if(i?!ni_hex64(required):strcmp(required,"source-packages-v2")){ni_bad(c,"code-cache-v2-required-identity-field",keys[i]);goto done;}}
  if(ni_profile_field(c,&actual,"root",root_field)||ni_profile_field(c,&actual,"origin-snapshot-root",origin_field)||ni_profile_field(c,&actual,"artifact-path",artifact_field)||ni_profile_field(c,&actual,"material",material_field)||ni_profile_field(c,&actual,"legacy-reference-path",reference_field)||ni_profile_field(c,&actual,"compiled-include-canonical-v2",include_field))goto done;
  if(strcmp(root_field,c->root)||strcmp(origin_field,c->origin)||strcmp(artifact_field,c->native)){ni_bad(c,"fast-code-profile-role-path-mismatch",p);goto done;}
  if(ni_profile_build(c,material_field,reference_field,include_field,&expected,r)||ni_equal(c,&actual,&expected,"fast-code-profile-canonical-bytes-mismatch")||ni_hash(c,actual.p,actual.n,r->native_profile))goto done;

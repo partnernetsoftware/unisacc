@@ -244,13 +244,24 @@ cold path has been removed. A direct self-hosted run of the old watchdog source
 currently fails on the uncarried `sys/prctl.h`; this is an active migration gap.
 Existing model coordinators still containing Python are not described as native.
 
-The construction source identity includes the ten support inputs bound, bound.c,
-cxbin, safedel.cx, lib.sh, build_ref.sh, export_ref.sh, refshim.h, reffoot.h and
-sourceflat.cx under tools/. The native seed/ident.c and compatibility coordinator
-declare the same ordered list. A native isolated-tree regression independently
-assembles path-NUL plus binary SHA256 payloads and checks each input mutation,
-restoration, and missing/directory refusal (15 checks). Run it after constructing
-the native identity tool:
+现行源身份以 `seed/ident.c` 的 `source-packages-v2` 为唯一权威；归档 Python
+和平铺 path-NUL/raw32 算法不作现行实现。默认输出仍严格为64个小写hex加换行
+（65 bytes），不增加构造provenance字段。新组合SID不继承旧SID的候选资格。
+`packages` 输出标题 `source-packages-v2` 和固定顺序12行包名/SHA：
+`cx/sys,cx/mem,cx/text,cx/core,cx/driver,cx/runtime,cx/compiler,src,exec,seed,weights,include`。
+kernel及旧十三个tools构造支持归seed，iterate/typekw归exec，cx根其余源码归cx/core。
+规范真身全字节只计一次；alias拓扑独立哈希，不夹带目标content digest。
+`package-inputs` 列owner/类别/规范真身路径/SHA，`list-aliases` 列owner/logicalalias/真身，
+`list-current` 保持真身路径/SHA两列，`changes OLD_TABLE` 严格校验旧表后报告变更包及前后SID。
+seed/include整体保守纳入，只排除明确README.md与.DS_Store；新分片、私有头、未知后缀、无后缀及有序组装清单不能被basename白名单漏掉。清单原始字节受哈希，同集合换序也变seed摘要；H组装过程本身不在F实现。真实include逐边闭包延期0.0.50 G1，不把目录树哈希称为逐边证明。
+版本注入和平台资源生成规则仍属于源码语义，只有release/candidate.tsv发布数据排除；
+limits、drive、version声明文件仍整文件计入，不靠排除整文件隐藏语义。
+`table-kernel-export.cx` 直接消费权威 `list-current`，仅排除两个生成math目标，
+另绑定producer支持及产品，不维护第二份语义选择器；NN及产物bytes合同不变。
+`identity-material.cx` 保留完整核心算法；其固定base pin必须绑定最终实际核心SHA，
+历史P53 bootstrap pin仅说明材料来源，不授予当前候选资格。
+nativefirst v4桥标记 `source-packages-v2`，保留显式历史legacy-projection，
+不宣称旧新SID相等。v1包表与缺少新schema/身份字段的旧缓存不能补字段重标；物理#line保持，物理根参与执行身份，不引入source-map。构造身份工具后的回归入口：
 
 ```
 tools/bound 40 sh ./unisacc.com -O2 -fno-trim-libc seed/ident.c -o out/ident
@@ -797,6 +808,27 @@ All93 obligations remain, plus11 shape/private non-executable ELF-clone and
 unknown-artifact refusal premises. The clone is only read, never executed.
 SP/wrapper/origin-test commit02bb4c614d and NI/material/profile/test commit
 789e7d4c6f record these mechanisms.
+
+#### F：source-packages-v2 必要输入缓存迁移
+
+上述 `E4.cache.tsv` 与 104/0 是历史证据，不转授新身份资格。
+活动读写路径为 `tools/libneed-native-profile.cx` →
+`ni_fast_profile_text` → `FAST_ELF.source-packages-v2.cache.tsv` →
+`nninputs.ni_profile_check`。旧 `.cache.tsv` 不读取、不补字段、不回退；
+放进新路径的 v1、错误 schema、缺字段或非规范字节均拒绝。
+新档案强制 `identity-schema=source-packages-v2`、规范物理 root/origin、
+两端实际必要输入摘要与 `execution-key-sha256`。执行键覆盖键之前全部规范
+档案字节，包含实际 reader ELF、原材料、编译 include、模块源码、flags 和物理路径；
+相同源码字节换物理根不能复用执行身份。保留原物理 `#line`，不做 source-map。
+必要输入摘要不是完整 SID：fresh current/origin SID 与原 SP DAG 仍由调用者另证，
+没有 NN PASS、重构 NN 或历史编译证明。所有原 material/compiler/artifact pin 保持原值。
+
+迁移须用当前 writer/模块重新编译调用者并 EXCL 新建新命名空间档案；不得给旧档案
+追加字段。当前改动尚未实跑。父代理运行原 `tests/nn-inputs.cx ROOT ORIGIN READER`
+外，再运行 `tools/bound 55 sh ./unisacc.com tests/nn-inputs.cx -- --cache-v2 ROOT ORIGIN MATERIAL FAST_ELF LEGACY_REFERENCE_ELF`。
+新模式在私有临时 ELF 副本旁依次放入 v1、缺 identity-schema、实际重建 v2，
+通过真实 `ni_compare` 消费链断言前两者拒绝、后者执行两次 native table 调用。
+
 
 The new adoption producer a546/native03 9457 actually completed prepare03,
 pack01, seal01 and verify01, each within original55, for

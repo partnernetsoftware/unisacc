@@ -1,0 +1,55 @@
+#pragma unisa module releaseversion
+/* Release identity is data, not a compiler/source identity input. */
+int rv_valid(const char *s) {
+ int at=0;
+ for(int part=0;part<4;part++){
+  int start=at,v=0;
+  while(s[at]>='0'&&s[at]<='9'){
+   if(at-start==5)return 0;
+   v=v*10+s[at++]-'0';
+  }
+  if(at==start||v>65535||(at-start>1&&s[start]=='0'))return 0;
+  if(!s[at])return part>=2&&at<=23;
+  if(s[at++]!='.')return 0;
+ }
+ return 0;
+}
+/* Refuse missing/ambiguous slots before mutating any byte; stage the complete
+ * zero-padded slot before committing it with the remaining byte capacity. */
+int rv_inject_slot(unsigned char *bytes,long n,const char *version) {
+ static const char slot[32]="UNISACC_VERSION_SLOT_0000000000";
+ char next[32]={0};long found=-1;
+ if(!bytes||!version||n<32||!rv_valid(version))return -1;
+ for(long i=0;i<=n-32;i++)if(!memcmp(bytes+i,slot,32)){
+  if(found>=0)return -1;
+  found=i;
+ }
+ if(found<0)return -1;
+ if(cx_fmt(next,sizeof next,"%s",version))return -1;
+ /* The complete destination span was proven present before staging. No
+    fallible work remains, so a fixed-width commit preserves atomic refusal. */
+ for(int i=0;i<32;i++)bytes[found+i]=(unsigned char)next[i];
+ return 0;
+}
+/* Read exactly one version column and one data row; other columns are opaque.
+ * Reject ambiguity, CR/NUL, truncated files and oversized version fields. */
+int rv_load(const char *path,char out[24]) {
+ char b[8192],next[24];int fd=open(path,O_RDONLY),n=0,col=0,version=-1,columns=0,row=0,start=0,seen=0;long k;
+ struct stat st;
+ if(fd<0)return -1;
+ if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>=sizeof b){close(fd);return -1;}
+ while(n<sizeof b){k=read(fd,b+n,sizeof b-n);if(k<0){close(fd);return -1;}if(!k)break;n+=(int)k;}
+ if(close(fd)||n==sizeof b)return -1;
+ for(int i=0;i<=n;i++){
+  if(i<n&&b[i]!='\t'&&b[i]!='\n'){if(!b[i]||b[i]=='\r')return -1;continue;}
+  if(i==n&&start==n&&col==0)break;
+  if(row>1)return -1;
+  int len=i-start;
+  if(row==0&&len==7&&!memcmp(b+start,"version",7)){if(version>=0)return -1;version=col;}
+  if(row==1&&col==version){if(len<1||len>23||cx_fmt(next,sizeof next,"%.*s",len,b+start))return -1;seen++;}
+  col++;start=i+1;
+  if(i==n||b[i]=='\n'){if(!row)columns=col;else if(col!=columns)return -1;row++;col=0;}
+ }
+ if(row!=2||version<0||seen!=1||!rv_valid(next))return -1;
+ return cx_fmt(out,24,"%s",next)?-1:0;
+}

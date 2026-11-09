@@ -1,3 +1,24 @@
+## 十二包源码身份回归
+
+`identity.cx` 保持 `ROOT IDENT_BINARY NEW_ABSOLUTE_FIXTURE` 参数和已注册的 55 秒批次时限；每次辅助程序调用仍由既有 `tools/bound 5` 限时。所有变异仅写新建独占 fixture，包括同名 `cx/sys`、`cx/mem`、`cx/text`、`cx/core`，不改仓库冻结树。
+
+独立 oracle 使用固定十二包顺序：`cx/sys,cx/mem,cx/text,cx/core,cx/driver,cx/runtime,cx/compiler,src,exec,seed,weights,include`。包内按真身路径字节序，哈希 `package-files-v1\n`、逐文件 `path+NUL+64hex+LF`，再接 `package-aliases-v1\n` 与逻辑别名、真身路径各自 NUL 结尾；组合 SID 是规范 `source-packages-v2\n` 加十二行 `pkg<TAB>64hex<LF>` 的 SHA-256。oracle 的显式 fixture 清单不调用产品的枚举或哈希函数。旧平铺身份不继承新身份资格。
+
+L1 重复同树逐字节比较规范包表和 65 字节 SID；L2 对十二包及原十三支持文件、typekw 逐项修改，核对仅 owner 包和 SID 改变，并逐字节核对 `changes` 的包集合、前后包 hash 和前后 SID。保留源码语义变化、发布 version 不改 SID、验证脚本排除及错误后恢复控制。L3 检查文件/目录别名的真身只计一次、目标内容只影响真身 owner、不改变 src 别名包，以及同内容不同目标的 alias 拓扑变化。祖先目录回链必须有限结束；文件自循环、悬空、越界和不可读文件必须明确拒绝。旧表截断或非十六进制必须拒绝。`typed-materials.cx` 的私有 fixture 同样提供十二自然包根，不新增产品 SDK 依赖。
+
+新增两个分阶段的真实 alias fixture，继续使用独立单 alias oracle，不并存多个声明：`src/a.cx -> ../ext/sysx/target.dat` 要求按 logical 源后缀保留非语义后缀真身，内容只进入自然 owner `cx/sys`；`src/sysx -> ../ext/sysx` 要求新建及修改唯一 `unit.cx` 仅改变 `cx/sys` 和 SID。每阶段逐字节核对规范包表及 `changes`，`list-current` 核真身一次，`list-aliases` 核只有显式声明、不为继承目录 alias 的普通子文件新增拓扑。未给 `.dat` 特殊白名单，也不引入 hardlink 机制。原 204 个断言保留；新增 23 个，正常路径预期总数 227（未运行，不代表 PASS）。
+
+父代理使用已构造的当前 identity helper 和候选入口，从仓根执行：`tools/bound 55 sh ./unisacc.com tests/identity.cx -- "$PWD" "$IDENT_BINARY" "$NEW_ABSOLUTE_FIXTURE"`；后两个变量分别为当前 helper 的绝对路径及尚不存在的独占 fixture 绝对路径。注册批次仍为 `identity`、55 秒，每次 helper 调用仍为 5 秒；本次不改时限。
+
+v2 保留原 227 项行为覆盖，新增 seed/unit.cx、新分片、私有头、非标准后缀、
+seed/out 下无扩展实际输入的创建/内容变更；独立 oracle 核对只有所属包及 SID 变化。
+两个真实 `.part` 文件和一份 `seed/ordered.inputs` 的两行保持同集合，仅换序，
+逐字节核对 seed 摘要/SID 与 `changes`，不制造 H profile。完整 v1 表负控也必须拒绝，
+不只检查截断旧表。明确非源码排除仅 README.md 文档、.DS_Store Finder 元数据；
+未知文件、生成/缓存形目录名及后缀均不作为排除证据。历史 227/0 不转授 v2。
+
+以上为测试契约说明，不宣称已运行或通过；注册批次与时限不变。
+
 ## 枚举常量的翻译单元隔离
 
 `repro-enum-unit-a.c` 与 `repro-enum-unit-b.c` 在各自翻译单元合法定义同名、不同值枚举；同时编译应成功。再追加 `repro-enum-unit-duplicate.c` 形成三个翻译单元时，第三单元内的第二次定义必须报 `enumerator redeclared`。将第二单元改为 `repro-enum-unit-stale.c` 时必须拒绝未声明标识符，不能读取前一单元的枚举值。`repro-enum-unit-interface.cx` 则必须拒绝同一单元内接口导入与正文的同名枚举，即使值相等。
@@ -1541,4 +1562,18 @@ Original time limits are unchanged.
 ### s9 提交档选择与注册表一致性
 
 `select-commit-tier` 的成本仍来自冻结timings，但准入档位以生成当次 `tests/batches.tsv` 为准，历史commit不能覆盖当前daily/release。检查同时覆盖反向历史daily/当前commit，并核持久选择表中有wave的批次仍注册commit；注册表事后变动也会显式失败，不能等all-waves静默过滤。生成器只写调用指定输出；重生成并检查后才能安装计划。当前修复计划81个已测选择、7波、预测213128144423ns，不是整档实际资格。
+
+## SPEED-049-F 版本数据与打包验收
+
+唯一版本来源是 `release/candidate.tsv` 的 `version` 列。`src/version.h` 保留 `UNISACC_VERSION_SLOT_0000000000`（31字符加NUL，共32字节），不是第二份版本记录。`tools/build_ref.sh` 与 raw/context/whole 中间编译保持槽，不能在编译前注入候选版本；最终 `tools/ape-pack.cx` 必须在全部5/6片中唯一定位槽、仅修改输出副本。`tools/release-ape.cx pack` 加载候选版本传入，`smoke` 动态核对最终版本；`dev-lnx`同样在输出ELF副本注入候选版本。hostseed两个step入口统一运行同一个packer并保留原 `--deflate --product Unisacc VERSION` 产品名，不再编译 `seed/ape.c`。
+
+以下是待执行配方，不是本轮通过声明：
+
+1. `sh ./unisacc.com tests/release-version.cx` 检查规范三段及四段十进制（每段0..65535，最长23字符，32字节槽内补零），保留三段合法输入；官方 `0.0.48.1` 与四段最大值必须完整加载及注入，非法版本、重复列/坏行拒绝。`sh ./unisacc.com tests/release-version-pack.cx` 运行六片PE/Mach-O/ELF合成格式与槽拒绝回归，同时核对PE字符串及文件/产品固定版本的全部四个16-bit word，不能丢弃末段。运行前记录源码SID、产品SHA、所有原材料SHA、命令和计时；合成材料不授予真实产品资格。本轮重基保留官方candidate完整0.0.48.1数据行及资产字段不变。
+2. 身份基线与变异按 `seed/README.md` 的身份配方执行。父代理提供的冻结基线是 `/tmp/unisacc-speed049-base-cdx/out/ident-before`，SID `798321e8919815b8e4a6c5860be5210c8cd702a8cd7c8b280218acb539b011d4`（父证据，非本段作者实跑）。相同helper测当前根后，仅改candidate版本必须SID不变；改真实语义输入必须SID改变；恢复源后复测。不把旧SID或旧产物资格转授新材料。
+3. 保留同一组已经构造完成的5/6片、P3和cache-manager输入及其SHA；先用候选版本运行 `./tools/bound 55 sh ./unisacc.com tools/release-ape.cx -- pack --cache-manager-osx X64 ARM64 OUT_A P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 [WIN_ARM64]`。只改candidate版本列，在不同OUT_B用完全相同输入再打包，不重新构造链；必须显式复用已有两个manager，不能省略参数触发默认构造并混入编译成本。每次包装单独受外层55秒限制，计时只覆盖真实包装命令，不将UNMEASURED解释为收益。分别运行 `./tools/bound 55 sh ./unisacc.com tools/release-ape.cx -- smoke OUT_X/unisacc-next.com`，保存receipt、耗时、stdout/stderr与退出码。比较前后原输入SHA必须不变。
+4. 双版本格式对比沿用既有L1–L4全部合同：只允许固定32字节槽、PE版本资源及其必要结构字段、Mach签名hash派生变化；gzip校验与长度/偏移、页/段/节边界、签名覆盖及所有非版本字节/结构原断言不得放宽。真实五/六片及原生运行资格仍须各自重验，合成fixture或旧材料不能替代。
+5. 在隔离候选表中写入非法版本（如 `00.0.48`、`65536.0.0`、缺列/重复列），确认加载/打包非零退出且不产生可用发布产物。恢复唯一版本列；保留其余candidate历史证据原字节，不伪造新tag、commit、hash或CI资格。
+6. 计时运行 `tests/phase-timing-stamps.cx ROOT FINAL_PRODUCT ABS_NEW_OUT`，其版本预期来自candidate；格式批沿用 `formats-elf-ape` 与既有PE/Mach合同，记录独立结果。以上所有检查由集成者运行，本工作节点未运行构建、测试或格式化。
+7. `cx-booter-ape` 批次显式绑定 `booter-raw-elf=ABS_RAW_LINUX_ELF`，独立原片须带唯一完整32字节槽；已安装产品只供P3。用 `sh ./unisacc.com tests/run-batch.cx -- ROOT ABS_NEW_OUT cx-booter-ape booter-raw-elf=ABS_RAW_LINUX_ELF` 执行；未准备材料应保持PREPARED缺口/未执行，不能冒称PASS或从已注入产物逆向恢复槽。
 

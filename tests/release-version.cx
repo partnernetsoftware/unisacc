@@ -1,0 +1,52 @@
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use text.text
+#pragma unisa use sys.proc
+/* Run from repository root. No compiler build or product mutation. */
+static int failed;
+static void ck(int yes,const char *name){if(!yes){fprintf(stderr,"release-version: FAIL %s\n",name);failed++;}}
+static void fixture(const char *path,const char *body,int accept){
+ char out[24]="unchanged";ck(!cx_write(path,body,strlen(body)),"fixture-write");
+ int rc=rv_load(path,out);ck((rc==0)==accept,body);
+ if(!accept)ck(!strcmp(out,"unchanged"),"failed-load-preserves-output");
+}
+int main(void){
+ const char *good[]={"0.0.0","0.0.48","65535.65535.65535","1.20.300","0.0.48.1","65535.65535.65535.65535","0.0.0.0"};
+ const char *bad[]={"","0","0.0","0.0.0.0.0","00.0.0","0.01.0","0.0.00","65536.0.0","999999999.0.0","-1.0.0","+1.0.0","1.2.3 "," 1.2.3","1..3","1.2.3\n","1.2.3.65536","1.2.3.01","1.2.3.","1.2.3.4 ","65535.65535.65535.655350"};
+ for(int i=0;i<sizeof good/sizeof good[0];i++)ck(rv_valid(good[i]),good[i]);
+ for(int i=0;i<sizeof bad/sizeof bad[0];i++)ck(!rv_valid(bad[i]),bad[i]);
+ char path[256],out[24];ck(!cx_fmt(path,sizeof path,"/tmp/release-version-%d.tsv",sy_pid()),"fixture-path-capacity");
+ fixture(path,"other\tversion\nopaque\t65535.65535.65535\n",1);
+ fixture(path,"version\n65535.65535.65535.65535\n",1);
+ ck(!rv_load(path,out)&&!strcmp(out,"65535.65535.65535.65535"),"four-component-load-exact");
+ fixture(path,"version\n0.0.48.1\n",1);
+ ck(!rv_load(path,out)&&!strcmp(out,"0.0.48.1"),"official-version-load-exact");
+ fixture(path,"version\n1.2.3.65536\n",0);
+ fixture(path,"version\n1.2.3.4.5\n",0);
+ fixture(path,"version\n0.0.48",1);
+ fixture(path,"version\tversion\n0.0.48\t0.0.48\n",0);
+ fixture(path,"other\n0.0.48\n",0);
+ fixture(path,"version\n0.0.48\n0.0.49\n",0);
+ fixture(path,"version\n00.0.48\n",0);
+ fixture(path,"version\n0.0.48\r\n",0);
+ fixture(path,"version\tother\n0.0.48\n",0);
+ remove(path);
+ ck(!rv_load("release/candidate.tsv",out),"canonical-candidate");
+ ck(sizeof("UNISACC_VERSION_SLOT_0000000000")==32,"slot-is-31-plus-NUL");
+ {unsigned char bytes[66],saved[66],expected[66];const char slot[32]="UNISACC_VERSION_SLOT_0000000000";
+  memset(bytes,'x',sizeof bytes);memcpy(bytes+1,slot,32);memcpy(saved,bytes,sizeof bytes);
+  ck(rv_inject_slot(bytes,sizeof bytes,"01.2.3")!=0&&!memcmp(bytes,saved,sizeof bytes),"invalid-injection-atomic");
+  memcpy(expected,bytes,sizeof bytes);memset(expected+1,0,32);memcpy(expected+1,"1.2.3",5);
+  ck(!rv_inject_slot(bytes,sizeof bytes,"1.2.3")&&!memcmp(bytes,expected,sizeof bytes),"injection-padding-and-neighbors");
+  ck(rv_inject_slot(bytes,sizeof bytes,"1.2.3")!=0&&!memcmp(bytes,expected,sizeof bytes),"missing-slot-refusal-atomic");
+  memcpy(bytes,saved,sizeof bytes);memcpy(bytes+33,slot,32);memcpy(saved,bytes,sizeof bytes);
+  ck(rv_inject_slot(bytes,sizeof bytes,"1.2.3")!=0&&!memcmp(bytes,saved,sizeof bytes),"duplicate-injection-atomic");
+  ck(rv_inject_slot(bytes,31,"1.2.3")!=0,"truncated-slot-refusal");
+  memset(bytes,'x',sizeof bytes);memcpy(bytes+1,slot,32);memcpy(expected,bytes,sizeof bytes);
+  memset(expected+1,0,32);memcpy(expected+1,"65535.65535.65535",17);
+  ck(!rv_inject_slot(bytes,sizeof bytes,"65535.65535.65535")&&!memcmp(bytes,expected,sizeof bytes),"maximum-version-32-byte-padding");
+  memset(bytes,'x',sizeof bytes);memcpy(bytes+1,slot,32);memcpy(expected,bytes,sizeof bytes);
+  memset(expected+1,0,32);memcpy(expected+1,"65535.65535.65535.65535",23);
+  ck(!rv_inject_slot(bytes,sizeof bytes,"65535.65535.65535.65535")&&!memcmp(bytes,expected,sizeof bytes),"four-component-maximum-padding-and-neighbors");
+ }
+ printf("RELEASE_VERSION\tfailed=%d\n",failed);return failed?1:0;
+}
