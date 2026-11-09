@@ -1,0 +1,123 @@
+/* ROOT PATCH NEW_PRIVATE_CLONE [--base REV] [--prepare-only]
+ * --resume PRIVATE_CLONE continues bounded, identity-bound real gate phases.
+ * No source-root writes, network, commit, push, or cached test qualification.
+ * Each invocation has 120 seconds; children receive at most 55 seconds. The
+ * independent main snapshot and candidate are never scanned while being edited.
+ * 本地普通克隆仅硬链接Git不可变对象；refs/index/工作树独立，无alternates。
+ * Logs/three-side materials/receipts live in PRIVATE_CLONE/.git/integrate. */
+#pragma unisa use cxlib.appendmerge
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.kernelsha
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+static char root[4096],candidate[4096],state[4400],baseline[4400],base[65],patchsha[65],product[65],tree[65];
+static long deadline;static int serial,phase;static char why[1000];
+static const char *phasefiles[]={"metadata.stdout","ratchets-base.stdout","ratchets-head.stdout","precommit.stdout"};
+static char phasehash[4][65];
+static void die(const char *s){fprintf(stderr,"integrate-patch: REFUSE %s\n",s);exit(2);}
+static void path(char *p,size_t c,const char *a,const char *b){if(cx_fmt(p,c,"%s/%s",a,b))die("path-bound");}
+static void put(const char *p,const char *s,size_t n){if(cx_write(p,s,n))die("write-material");}
+static char *load(const char *p,size_t *n){sy_stat_t st;if(sy_lstat(p,&st)||st.kind!='f'||st.size<0||st.size>134217728)die("regular-bounded-material");char *s=cx_read(p,n);if(!s)die("read-material");return s;}
+static void digest(const char *p,char h[65]){size_t n;char *s=load(p,&n);cx_sha256_hex(s,n,h);free(s);}
+static void material(const char *name,const char *s,size_t n){char p[4700];path(p,sizeof p,state,name);put(p,s,n);}
+static void save(void);
+static void pending(void){if(!phase)die("prepare-budget-exhausted-retained-materials-not-resumable");save();printf("INTEGRATE_PATCH\tstatus=PENDING\tnext_phase=%d\tqualification=NOT_QUALIFIED\n",phase);exit(3);}
+static np_result call(const char *label,char **v,const char *cwd,char **env,int seconds){
+ if(seconds>55||seconds<1)die("child-budget");long available=(deadline-sy_now_ms()-2000)/1000;if(available<1)pending();if(available<seconds)seconds=(int)available;
+ np_result r={0};long start=sy_now_ms();int tr=np_run(v,cwd,env,seconds,&r,why,sizeof why);char file[200],row[300];
+ if(cx_fmt(file,sizeof file,"%03d-%s.stdout",++serial,label))die("log-name");material(file,r.out?r.out:"",r.outn);
+ if(cx_fmt(file,sizeof file,"%03d-%s.stderr",serial,label))die("log-name");material(file,r.err?r.err:"",r.errn);
+ if(cx_fmt(row,sizeof row,"transport=%d\trc=%d\tresidue=%d\telapsed_ms=%ld\n",tr,r.rc,r.residue,sy_now_ms()-start)||cx_fmt(file,sizeof file,"%03d-%s.status",serial,label))die("status-format");material(file,row,strlen(row));
+ if(tr||r.residue){np_free(&r);die("child-transport-or-residue-see-stage-logs");}return r;
+}
+static void success(const char *label,char **v,const char *cwd,char **env,int seconds){np_result r=call(label,v,cwd,env,seconds);int rc=r.rc;np_free(&r);if(rc)die("child-nonzero-see-stage-logs");}
+static np_result git(const char *label,const char *where,const char *a,const char *b,const char *c,const char *d,char **env){char *v[]={"git","-C",(char*)where,(char*)a,(char*)b,(char*)c,(char*)d,0};return call(label,v,0,env,12);}
+static void text(np_result *r,char *s,size_t cap){size_t n=r->outn;if(r->rc||!n||n>=cap||r->out[n-1]!='\n'||memchr(r->out,0,n))die("git-identity-output");n--;if(memchr(r->out,'\n',n))die("git-identity-lines");if(mm_copy(s,(long)cap,r->out,(long)n))die("git-identity-copy-bound");s[n]=0;np_free(r);}
+static void identity(const char *where,const char *rev,char *out,size_t cap){char spec[200];if(cx_fmt(spec,sizeof spec,"%s^{commit}",rev))die("revision-bound");np_result r=git("revision",where,"rev-parse","--verify",spec,0,0);text(&r,out,cap);}
+static void treeid(char out[65]){np_result r=git("index-tree",candidate,"write-tree",0,0,0,0);text(&r,out,65);}
+static void save(void){np_buf b={0};np_puts(&b,"INTEGRATE_PATCH1\nroot\t");np_puts(&b,root);np_puts(&b,"\nbase\t");np_puts(&b,base);np_puts(&b,"\npatch\t");np_puts(&b,patchsha);np_puts(&b,"\nproduct\t");np_puts(&b,product);np_puts(&b,"\ntree\t");np_puts(&b,tree);np_puts(&b,"\nphase\t");np_putll(&b,phase);np_puts(&b,"\nserial\t");np_putll(&b,serial);np_puts(&b,"\n");for(int i=0;i<4;i++){np_puts(&b,phasefiles[i]);np_puts(&b,"\t");np_puts(&b,phasehash[i][0]?phasehash[i]:"-");np_puts(&b,"\n");}material("receipt.tsv",b.p,b.n);free(b.p);}
+static const char *field(char **at,const char *key){char *s=*at,*e=strchr(s,'\n');size_t n=strlen(key);if(!e||strncmp(s,key,n)||s[n]!='\t')die("receipt-schema");*e=0;*at=e+1;return s+n+1;}
+static void copyfield(char *s,size_t cap,const char *v){if(cx_fmt(s,cap,"%s",v))die("receipt-field-bound");}
+static void readreceipt(void){char p[4700];path(p,sizeof p,state,"receipt.tsv");size_t n;char *s=load(p,&n);if(n<17||strncmp(s,"INTEGRATE_PATCH1\n",17)||memchr(s,0,n)||memchr(s,'\r',n))die("receipt-wire");char *at=s+17;copyfield(root,sizeof root,field(&at,"root"));copyfield(base,sizeof base,field(&at,"base"));copyfield(patchsha,sizeof patchsha,field(&at,"patch"));copyfield(product,sizeof product,field(&at,"product"));copyfield(tree,sizeof tree,field(&at,"tree"));const char *v=field(&at,"phase");char *end;phase=(int)strtol(v,&end,10);if(*end||phase<1||phase>6)die("receipt-phase");v=field(&at,"serial");serial=(int)strtol(v,&end,10);if(*end||serial<0||serial>10000)die("receipt-serial");for(int i=0;i<4;i++){v=field(&at,phasefiles[i]);if(i<phase-1){if(strlen(v)!=64)die("completed-phase-digest");copyfield(phasehash[i],65,v);}else if(strcmp(v,"-"))die("unexecuted-phase-digest");}if(*at)die("receipt-extra-fields");free(s);}
+static void productcheck(const char *where){char h[65];if(pp_product_digest(where,h)||strcmp(h,product))die("product-identity-changed");}
+static void verify(void){char h[65];identity(candidate,"HEAD",h,sizeof h);if(strcmp(h,base))die("candidate-HEAD-changed");identity(candidate,"refs/heads/main",h,sizeof h);if(strcmp(h,base))die("candidate-main-changed");treeid(h);if(strcmp(h,tree))die("candidate-index-changed");np_result r=git("unstaged",candidate,"diff","--quiet",0,0,0);if(r.rc)die("candidate-unstaged-changes");np_free(&r);r=git("untracked",candidate,"ls-files","--others","--exclude-standard",0,0);if(r.rc||r.outn)die("candidate-untracked-inputs");np_free(&r);productcheck(candidate);productcheck(baseline);identity(baseline,"HEAD",h,sizeof h);if(strcmp(h,base))die("baseline-HEAD-changed");r=git("baseline-clean",baseline,"diff","--quiet","HEAD",0,0);if(r.rc)die("baseline-inputs-changed");np_free(&r);char p[4700];path(p,sizeof p,state,"patch.diff");digest(p,h);if(strcmp(h,patchsha))die("patch-identity-changed");}
+static void clone(const char *target,const char *label){char *v[]={"git","clone","--local","--no-checkout",root,(char*)target,0};success(label,v,0,0,45);char *ck[]={"git","-C",(char*)target,"checkout","-B","main",base,0};success("checkout-main",ck,0,0,15);if(pp_copy_product(root,target))die("freeze-product-copy");}
+static char *indexblob(const char *name,char **env,size_t *n,int *present){char *lv[]={"git","-C",candidate,"ls-files","--error-unmatch","--",(char*)name,0};np_result r=call("table-presence",lv,0,env,5);if(r.rc==1){np_free(&r);*present=0;*n=0;return 0;}if(r.rc)die("index-table-presence");np_free(&r);char spec[200];if(cx_fmt(spec,sizeof spec,":%s",name))die("table-spec");r=git("table-blob",candidate,"show",spec,0,0,env);if(r.rc)die("table-blob");char *s=r.out;r.out=0;*n=r.outn;*present=1;np_free(&r);return s;}
+static void prepare(const char *patch){
+ char p[4700],fake[4700],fakearg[4800],envindex[4800];path(p,sizeof p,state,"patch.diff");size_t pn;char *bytes=load(patch,&pn);cx_sha256_hex(bytes,pn,patchsha);put(p,bytes,pn);free(bytes);
+ save(); /* Preserve root/base/patch/product identities even on later conflicts. */
+ clone(baseline,"clone-main-snapshot");productcheck(candidate);productcheck(baseline);
+ path(fake,sizeof fake,state,"patch.index");if(cx_fmt(fakearg,sizeof fakearg,"--build-fake-ancestor=%s",fake)||cx_fmt(envindex,sizeof envindex,"GIT_INDEX_FILE=%s",fake))die("fake-index-bound");char *env[]={envindex,0};
+ char *av[]={"git","-C",candidate,"apply",fakearg,p,0};success("patch-ancestor",av,0,0,15);
+ char *b[4]={0},*o[4]={0},*t[4]={0};size_t bn[4]={0},on[4]={0},tn[4]={0};int touched[4]={0},removed[4]={0};
+ for(int k=0;k<4;k++){int present;b[k]=indexblob(am_path(k),env,&bn[k],&present);touched[k]=present;int ours;o[k]=indexblob(am_path(k),0,&on[k],&ours);if(!ours){on[k]=strlen(am_header(k));o[k]=strdup(am_header(k));}}
+ char *pv[]={"git","-C",candidate,"apply","--cached",p,0};success("patch-side",pv,0,env,15);
+ for(int k=0;k<4;k++){int present;t[k]=indexblob(am_path(k),env,&tn[k],&present);removed[k]=b[k]&&!present;if(present)touched[k]=1;if(!b[k]){bn[k]=strlen(am_header(k));b[k]=strdup(am_header(k));}if(!t[k]){tn[k]=strlen(am_header(k));t[k]=strdup(am_header(k));}if(!b[k]||!o[k]||!t[k])die("table-allocation");}
+ char *apply[]={"git","-C",candidate,"apply","--3way",p,0};np_result applied=call("apply-threeway",apply,0,0,20);if(applied.rc!=0&&applied.rc!=1)die("patch-apply-failed");int arc=applied.rc;np_free(&applied);int conflicts=0;
+ for(int k=0;k<4;k++){if(!touched[k]){free(b[k]);free(o[k]);free(t[k]);continue;}np_buf merged={0},problem={0};char name[100];
+  if(cx_fmt(name,sizeof name,"table-%d.base",k))die("material-name");material(name,b[k],bn[k]);if(cx_fmt(name,sizeof name,"table-%d.ours",k))die("material-name");material(name,o[k],on[k]);if(cx_fmt(name,sizeof name,"table-%d.theirs",k))die("material-name");material(name,t[k],tn[k]);
+  int rc;if(removed[k]){rc=1;np_puts(&problem,"CONFLICT\ttable-file-deletion-not-an-append\n");}else rc=am_merge(k,b[k],bn[k],o[k],on[k],t[k],tn[k],&merged,&problem);free(b[k]);free(o[k]);free(t[k]);
+  if(rc){conflicts++;if(cx_fmt(name,sizeof name,"table-%d.conflicts",k))die("material-name");material(name,problem.p,problem.n);}
+  else{char target[4700];path(target,sizeof target,candidate,am_path(k));put(target,merged.p,merged.n);char *add[]={"git","-C",candidate,"add","--",(char*)am_path(k),0};success("stage-table",add,0,0,5);}
+  free(merged.p);free(problem.p);
+ }
+ np_result u=git("conflict-list",candidate,"diff","--name-only","--diff-filter=U",0,0);if(u.rc)die("conflict-query");material("conflicts.paths",u.out?u.out:"",u.outn);if(u.outn)conflicts++;np_free(&u);
+ if(conflicts){puts("INTEGRATE_PATCH\tstatus=CONFLICT\tqualification=NOT_QUALIFIED\tmaterials=.git/integrate");exit(1);}
+ if(arc){/* Exit one is acceptable only for table conflicts we resolved. */np_result d=git("apply-result",candidate,"diff","--cached","--name-only",0,0);if(d.rc||!d.outn)die("apply-nonzero-without-staged-result");np_free(&d);}
+ treeid(tree);phase=1;save();
+}
+static int hasline(const char *s,size_t n,const char *line,size_t ln){for(size_t at=0;at<n;){const char *e=memchr(s+at,'\n',n-at);size_t z=e?(size_t)(e-s-at):n-at;if(z==ln&&!memcmp(s+at,line,z))return 1;at+=z+1;}return 0;}
+static int contains(const char *s,size_t n,const char *part){size_t pn=strlen(part);for(size_t i=0;i+pn<=n;i++)if(!memcmp(s+i,part,pn))return 1;return 0;}
+static int ratchet_valid(const char *s,size_t n){int count=0,summary=0,expected=-1;const char *names[128];size_t lengths[128];for(size_t at=0;at<n;){const char *e=memchr(s+at,'\n',n-at);if(!e)return 0;size_t z=(size_t)(e-s-at);if(z>8&&!memcmp(s+at,"RATCHET\t",8)){const char *tab=memchr(s+at+8,'\t',z-8);if(!tab||count==128||(!contains(s+at,z,"\tok\t")&&!contains(s+at,z,"\tFAIL\t")))return 0;size_t kn=(size_t)(tab-s-at-8);if(!kn)return 0;for(int i=0;i<count;i++)if(lengths[i]==kn&&!memcmp(names[i],s+at+8,kn))return 0;names[count]=s+at+8;lengths[count++]=kn;}if(z>12&&!memcmp(s+at,"RATCHETS\tok=",12)){char *end;long ok=strtol(s+at+12,&end,10);if(ok<0||ok>128||strncmp(end,"\tfail=",6))return 0;long bad=strtol(end+6,&end,10);if(bad<0||bad>128||end>e||strncmp(end,"\telapsed_ms=",12))return 0;expected=(int)(ok+bad);summary++;}at+=z+1;}return count>0&&count==expected&&summary==1;}
+static int gate_present(const char *s,size_t n,const char *name,size_t kn){for(size_t at=0;at<n;){const char *e=memchr(s+at,'\n',n-at);if(!e)return 0;size_t z=(size_t)(e-s-at);if(z>kn+8&&!memcmp(s+at,"RATCHET\t",8)&&!memcmp(s+at+8,name,kn)&&s[at+8+kn]=='\t')return 1;at+=z+1;}return 0;}
+static int gate_red_detail(const char *s,size_t n,const char *name,size_t kn,int detail){for(size_t at=0;at<n;){const char *e=memchr(s+at,'\n',n-at);if(!e)return 0;size_t z=(size_t)(e-s-at);if(detail){if(z>kn+2&&s[at]==' '&&s[at+1]==' '&&!memcmp(s+at+2,name,kn)&&s[at+2+kn]==':')return 1;}else if(z>kn+14&&!memcmp(s+at,"RATCHET\t",8)&&!memcmp(s+at+8,name,kn)&&!memcmp(s+at+8+kn,"\tFAIL\t",6))return 1;at+=z+1;}return 0;}
+static int ratchet_delta(void){
+ char p[4700];size_t bn,hn;path(p,sizeof p,state,"ratchets-base.stdout");char *b=load(p,&bn);path(p,sizeof p,state,"ratchets-head.stdout");char *h=load(p,&hn);np_buf delta={0};
+ if(!ratchet_valid(b,bn)||!ratchet_valid(h,hn))die("incomplete-ratchet-report");
+ for(size_t at=0;at<bn;){const char *e=memchr(b+at,'\n',bn-at);size_t z=(size_t)(e-b-at);if(z>8&&!memcmp(b+at,"RATCHET\t",8)){const char *tab=memchr(b+at+8,'\t',z-8);if(!gate_present(h,hn,b+at+8,(size_t)(tab-b-at-8)))die("ratchet-gate-removed");}at+=z+1;}
+ for(size_t at=0;at<hn;){const char *e=memchr(h+at,'\n',hn-at);size_t z=(size_t)(e-h-at);int red=z>2&&h[at]==' '&&h[at+1]==' ';
+  if(z>8&&!memcmp(h+at,"RATCHET\t",8)&&contains(h+at,z,"\tFAIL\t")){const char *tab=memchr(h+at+8,'\t',z-8);size_t kn=(size_t)(tab-h-at-8);const char *name=h+at+8;
+   /* A changed total/file-count summary is not new debt when both genuine
+    * scans expose the existing failing gate's concrete offending rows. Those
+    * rows are compared independently below, with no path exemptions. */
+   red=!(gate_red_detail(b,bn,name,kn,0)&&gate_red_detail(b,bn,name,kn,1)&&gate_red_detail(h,hn,name,kn,1));
+  }
+  if(red&&!hasline(b,bn,h+at,z)){np_put(&delta,h+at,z);np_puts(&delta,"\n");}at+=z+1;
+ }
+ material("ratchets.new-red",delta.p?delta.p:"",delta.n);int fail=delta.n!=0;free(b);free(h);free(delta.p);return fail;
+}
+static void ratchets_pair(void){
+ char dir[4700];if(cx_fmt(dir,sizeof dir,"%s/ratchets-pair-%05d-XXXXXX",state,serial+1)||!mkdtemp(dir))die("ratchets-pair-directory");
+ /* 两个真实扫描各自独立目录和日志；同一有界进程组负责超时清理。 */
+ const char *script="(cd \"$1\" && exec sh ./unisacc.com tools/ratchets.cx) >\"$3/base.stdout\" 2>\"$3/base.stderr\" & a=$!\n(cd \"$2\" && exec sh ./unisacc.com tools/ratchets.cx) >\"$3/head.stdout\" 2>\"$3/head.stderr\" & b=$!\nwait \"$a\"; ra=$?\nprintf '%s\\n' \"$ra\" >\"$3/base.status\"\nwait \"$b\"; rb=$?\nprintf '%s\\n' \"$rb\" >\"$3/head.status\"\n[ \"$ra\" -le 1 ] && [ \"$rb\" -le 1 ]";
+ char *v[]={"sh","-c",(char*)script,"ratchets-pair",baseline,candidate,dir,0};np_result r=call("ratchets-pair",v,0,0,55);int rc=r.rc;np_free(&r);if(rc)die("ratchets-pair-not-completed");
+ for(int i=0;i<2;i++){char p[5000];size_t n;path(p,sizeof p,dir,i?"head.stdout":"base.stdout");char *s=load(p,&n);if(!ratchet_valid(s,n)){free(s);die("ratchets-error-or-incomplete");}material(phasefiles[i+1],s,n);free(s);}
+ if(ratchet_delta()){puts("INTEGRATE_PATCH\tstatus=NEW_RATCHET_RED\tqualification=NOT_QUALIFIED");exit(1);}
+ for(int i=1;i<=2;i++){char p[4700];path(p,sizeof p,state,phasefiles[i]);digest(p,phasehash[i]);}phase=4;save();
+}
+static void gates(void){
+ for(;phase<6;){for(int i=0;i<4&&i<phase-1;i++){char p[4700],h[65];path(p,sizeof p,state,phasefiles[i]);digest(p,h);if(strcmp(h,phasehash[i]))die("completed-phase-output-changed");}verify();if(deadline-sy_now_ms()<3000)pending();
+  if(phase==1){char *v[]={"sh","./unisacc.com","tests/run.cx","--","--list",0};np_result r=call("metadata",v,candidate,0,55);int ok=!r.rc&&r.out&&strstr(r.out,"metadata_valid=1");material("metadata.stdout",r.out?r.out:"",r.outn);np_free(&r);if(!ok)die("metadata-invalid");}
+  else if(phase==2){ratchets_pair();continue;}
+  else if(phase==3){char *v[]={"sh","./unisacc.com","tools/ratchets.cx",0};np_result r=call("ratchets-head",v,candidate,0,55);if(r.rc!=0&&r.rc!=1)die("ratchets-not-completed");if(!ratchet_valid(r.out?r.out:"",r.outn))die("ratchets-error-or-incomplete");material("ratchets-head.stdout",r.out,r.outn);np_free(&r);if(ratchet_delta()){puts("INTEGRATE_PATCH\tstatus=NEW_RATCHET_RED\tqualification=NOT_QUALIFIED");exit(1);}}
+  else if(phase==4){char *v[]={"sh","./unisacc.com","tools/precommit.cx",0};np_result r=call("precommit",v,candidate,0,55);int ok=!r.rc&&r.out&&strstr(r.out,"PRECOMMIT\t")&&strstr(r.out,"blocked=0");material("precommit.stdout",r.out?r.out:"",r.outn);np_free(&r);if(!ok){puts("INTEGRATE_PATCH\tstatus=PRECOMMIT_FAILED\tqualification=NOT_QUALIFIED");exit(1);}}
+  else if(phase==5){if(ratchet_delta())die("ratchet-delta-changed");verify();const char *ready="INTEGRATE_READY1\nstatus\tREADY_TO_COMMIT\nscope\tmetadata-ratchets-precommit-only\npushed\t0\n";material("ready.tsv",ready,strlen(ready));}
+  if(phase<=4){char p[4700];path(p,sizeof p,state,phasefiles[phase-1]);digest(p,phasehash[phase-1]);}
+  phase++;save();
+ }
+ for(int i=0;i<4;i++){char p[4700],h[65];path(p,sizeof p,state,phasefiles[i]);digest(p,h);if(strcmp(h,phasehash[i]))die("completed-phase-output-changed");}verify();
+ {char p[4700];size_t n;path(p,sizeof p,state,"ratchets-base.stdout");char *b=load(p,&n);int oldred=contains(b,n,"\tFAIL\t");free(b);printf("INTEGRATE_PATCH\tstatus=READY_TO_COMMIT\tbase=%s\ttree=%s\tbaseline_red=%s\tpushed=0\tqualification=GATES_ONLY\n",base,tree,oldred?"PRESENT":"NONE");}
+}
+int main(int argc,char **argv){
+ deadline=sy_now_ms()+120000;const char *clear[]={"GIT_INDEX_FILE","GIT_DIR","GIT_WORK_TREE","GIT_COMMON_DIR","UNISA_CONTAINER","UNISA_ATTRIBUTES","UNISACC_RF_CAPTURE",0};for(int k=0;clear[k];k++)if(sy_unsetenv(clear[k]))die("ambient-execution-environment");
+ if(argc==3&&!strcmp(argv[1],"--resume")){if(sy_realpath(argv[2],candidate,sizeof candidate)<0)die("candidate-realpath");path(state,sizeof state,candidate,".git/integrate");path(baseline,sizeof baseline,state,"main-snapshot");readreceipt();gates();return 0;}
+ if(argc<4||argc>7)die("usage ROOT PATCH NEW_PRIVATE_CLONE [--base REV] [--prepare-only] | --resume CLONE");const char *rev="refs/heads/main";int prepareonly=0;for(int i=4;i<argc;i++){if(!strcmp(argv[i],"--prepare-only"))prepareonly=1;else if(!strcmp(argv[i],"--base")&&i+1<argc)rev=argv[++i];else die("unknown-option");}
+ if(sy_realpath(argv[1],root,sizeof root)<0||strpbrk(root,"\t\r\n"))die("root-realpath");char patch[4096];if(sy_realpath(argv[2],patch,sizeof patch)<0)die("patch-realpath");
+ char target[4096];if(cx_fmt(target,sizeof target,"%s",argv[3])||target[0]!='/'||strpbrk(target,"\t\r\n"))die("absolute-new-clone-required");char *slash=strrchr(target,'/');if(!slash||!slash[1])die("clone-path");char name[4096],parent[4096];copyfield(name,sizeof name,slash+1);*slash=0;if(!strcmp(name,".")||!strcmp(name,"..")||sy_realpath(*target?target:"/",parent,sizeof parent)<0)die("clone-parent");path(candidate,sizeof candidate,parent,name);if(!strcmp(candidate,root)||(!strncmp(candidate,root,strlen(root))&&candidate[strlen(root)]=='/'))die("source-root-must-remain-read-only");if(sy_exists(candidate)!=0)die("clone-must-not-exist");
+ /* Resolve before state exists, without invoking our logged runner. */char spec[300];if(cx_fmt(spec,sizeof spec,"%s^{commit}",rev))die("revision-bound");char *rv[]={"git","-C",root,"rev-parse","--verify",spec,0};np_result r={0};if(np_run(rv,0,0,10,&r,why,sizeof why)||r.residue)die("resolve-base");text(&r,base,sizeof base);if(pp_product_digest(root,product))die("source-product-identity");
+ char *cv[]={"git","clone","--local","--no-checkout",root,candidate,0};if(np_run(cv,0,0,45,&r,why,sizeof why)||r.rc||r.residue){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("create-private-clone");}
+ path(state,sizeof state,candidate,".git/integrate");if(sy_mkdir(state,0700))die("create-state");material("000-clone.stdout",r.out?r.out:"",r.outn);material("000-clone.stderr",r.err?r.err:"",r.errn);material("000-clone.status","transport=0\trc=0\tresidue=0\n",strlen("transport=0\trc=0\tresidue=0\n"));np_free(&r);path(baseline,sizeof baseline,state,"main-snapshot");char *ck[]={"git","-C",candidate,"checkout","-B","main",base,0};success("checkout-candidate",ck,0,0,15);if(pp_copy_product(root,candidate))die("freeze-candidate-product");prepare(patch);if(prepareonly){printf("INTEGRATE_PATCH\tstatus=PREPARED\tnext_phase=1\tqualification=NOT_QUALIFIED\n");return 0;}gates();return 0;
+}

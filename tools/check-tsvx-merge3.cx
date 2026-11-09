@@ -1,0 +1,27 @@
+/* Strict generic merge contract, independent of shared-table policy. */
+#pragma unisa use tsvx.merge3
+static int checks,failed;
+static void ck(int ok,const char *name){checks++;printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static int merge(const char *b,const char *o,const char *t,tsm_buf *out,tsm_buf *why){return tsm_merge("id\tvalue\n",2,1,b,strlen(b),o,strlen(o),t,strlen(t),out,why);}
+static void release(tsm_buf *b){free(b->p);*b=(tsm_buf){0};}
+int main(void){
+ const char *b="id\tvalue\na\tbase\nb\tkeep\n",*o="id\tvalue\na\tnew\nb\tkeep\n",*t="id\tvalue\na\tother\nb\tkeep\n";
+ tsm_buf out={0},why={0};
+ int rc=merge(b,o,o,&out,&why);ck(!rc&&out.n==strlen(o)&&!memcmp(out.p,o,out.n),"same-change-once");release(&out);release(&why);
+ rc=merge(b,"id\tvalue\nb\tkeep\nc\tadd\n",b,&out,&why);ck(!rc&&!strcmp(out.p,"id\tvalue\nb\tkeep\nc\tadd\n"),"one-sided-add-delete");release(&out);release(&why);
+ rc=merge("id\tvalue\n","id\tvalue\nx\tone\n","id\tvalue\ny\ttwo\n",&out,&why);ck(!rc&&!strcmp(out.p,"id\tvalue\nx\tone\ny\ttwo\n"),"deterministic-add-order");release(&out);release(&why);
+ tsm_puts(&out,"sentinel");char *saved=out.p;size_t size=out.n;
+ rc=merge(b,o,t,&out,&why);ck(rc==1&&out.p==saved&&out.n==size&&!strcmp(out.p,"sentinel")&&strstr(why.p,"key\ta\n")&&strstr(why.p,"base\ta\tbase\n")&&strstr(why.p,"ours\ta\tnew\n")&&strstr(why.p,"theirs\ta\tother\n"),"conflict-preserves-owned-output-and-three-rows");release(&why);
+ rc=merge(b,"id\tvalue\nb\tkeep\n",o,&out,&why);ck(rc==1&&out.p==saved&&strstr(why.p,"ours\t<ABSENT>\n"),"delete-versus-edit");release(&why);
+ rc=merge(b,"id\tvalue\na\tx\na\ty\n",b,&out,&why);ck(rc==2&&out.p==saved&&strstr(why.p,"duplicate-key"),"duplicate-key-schema");release(&why);
+ rc=merge(b,"id\tvalue\na\tx\na\tx\n",b,&out,&why);ck(!rc&&!strcmp(out.p,"id\tvalue\na\tx\n"),"identical-duplicate-idempotent");release(&out);release(&why);
+ const char *bad[]={"wrong\tvalue\na\tx\n","id\tvalue\na\n","id\tvalue\n\tx\n","id\tvalue\na\tx","id\tvalue\na\tx\textra\n","id\tvalue\na\tx\r\n"};
+ for(int i=0;i<6;i++){rc=merge(b,bad[i],b,&out,&why);ck(rc==2&&!out.p&&!out.n,"strict-schema-no-partial-output");release(&why);}
+ const char nul[]={ 'i','d','\t','v','a','l','u','e','\n','a','\t',0,'\n' };
+ rc=tsm_merge("id\tvalue\n",2,1,b,strlen(b),nul,sizeof nul,b,strlen(b),&out,&why);ck(rc==2&&!out.p,"embedded-nul-refused");release(&why);
+ rc=tsm_merge("id\tvalue\n",3,1,b,strlen(b),b,strlen(b),b,strlen(b),&out,&why);ck(rc==2&&!out.p,"explicit-header-column-contract");release(&why);
+ const char *h="time\tevent\n",*lb="time\tevent\nsame\tfirst\n",*lo="time\tevent\nsame\tfirst\nsame\tsecond\n",*lt="time\tevent\nsame\tfirst\nsame\tthird\n";
+ rc=tsm_merge(h,2,0,lb,strlen(lb),lo,strlen(lo),lt,strlen(lt),&out,&why);ck(!rc&&!strcmp(out.p,"time\tevent\nsame\tfirst\nsame\tsecond\nsame\tthird\n"),"whole-row-ledger-independent-events");release(&out);release(&why);
+ rc=tsm_merge(h,2,0,lb,strlen(lb),h,strlen(h),lb,strlen(lb),&out,&why);ck(!rc&&!strcmp(out.p,h),"whole-row-delete");release(&out);release(&why);
+ printf("TSVX_MERGE3_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;
+}

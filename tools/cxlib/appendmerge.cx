@@ -1,0 +1,33 @@
+/* Strict three-way merge for the four shared tables. No filesystem writes.
+ * Entity tables key on column one; ledger keys on the complete event row.
+ * Identical rows are idempotent, competing changes are never selected by order. */
+#pragma unisa module appendmerge
+#pragma unisa use netpack
+#pragma unisa use tsvx.merge3
+static const char *am_paths[]={"agentwork/ledger.tsv","agentwork/items.tsv","tests/batches.tsv","tests/coverage.tsv"};
+static const char *am_headers[]={
+ "时间\tid\t事件\tcommit\t证据\t角色/模型\n",
+ "id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck\n",
+ "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",
+ "id\tlayer\timplementation\texpected_or_gap\tsource\n"};
+static const char *am_legacy_batches="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n";
+static const int am_columns[]={6,11,14,5};
+int am_kind(const char *path){for(int i=0;i<4;i++)if(!strcmp(path,am_paths[i]))return i;return -1;}
+const char *am_path(int kind){return kind>=0&&kind<4?am_paths[kind]:0;}
+const char *am_header(int kind){return kind>=0&&kind<4?am_headers[kind]:0;}
+
+/* Only the upper ledger policy opts into inherited widths of at least five
+ * columns; every other shared table uses the strict generic schema. */
+int am_merge(int kind,const char *base,size_t bn,const char *ours,size_t on,const char *theirs,size_t tn,np_buf *out,np_buf *conflicts){
+ if(kind<0||kind>3){np_puts(conflicts,"SCHEMA\tunknown-table\n");return 2;}
+ if(!base||!ours||!theirs||bn>16777216||on>16777216||tn>16777216){np_puts(conflicts,"SCHEMA\tinput-limit\n");return 2;}
+ tsm_buf result={0},why={0};int rc=0;
+ if(kind==2&&base&&bn>=strlen(am_legacy_batches)&&!memcmp(base,am_legacy_batches,strlen(am_legacy_batches))){
+  if(!ours||bn!=on||memcmp(base,ours,bn)){np_puts(conflicts,"CONFLICT\tlegacy-batches-schema-competing-change\n");rc=1;}
+  else{rc=tsm_merge(am_legacy_batches,13,1,base,bn,base,bn,base,bn,&result,&why);
+   if(!rc)rc=tsm_merge(am_headers[2],14,1,theirs,tn,theirs,tn,theirs,tn,&result,&why);
+   if(!rc){np_buf migrated={0};np_put(&migrated,theirs,tn);free(out->p);*out=migrated;}}
+ }else{rc=tsm_merge_schema(am_headers[kind],am_columns[kind],kind?1:0,base,bn,ours,on,theirs,tn,&result,&why,kind==0?5:0);
+  if(!rc){free(out->p);out->p=result.p;out->n=result.n;out->cap=result.cap;result=(tsm_buf){0};}}
+ if(why.n)np_put(conflicts,why.p,why.n);free(result.p);free(why.p);return rc;
+}

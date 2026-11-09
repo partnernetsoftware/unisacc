@@ -1144,3 +1144,38 @@ tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- append-concurrent
 同owner使用稳定 `.aw-append-OWNER.lock` 和最多10秒的原生flock等待；同owner串行检查重复并发布，不同owner独立。独占 `.aw-append-OWNER.tmp` 经完整写入、fsync、关闭、rename发布；未知已有暂存拒绝且保留，写失败保留原目标。锁与暂存仅窄范围忽略，不忽略业务分片。不写items、旧表或其他owner；不承诺跨文件事务。
 
 父实测append 12.99秒、append-concurrent 13.15秒，均failed=0；pure回归6.76秒failed=0。原并发检查单次读取即关闭输出管道存在SIGPIPE风险，已改为读至EOF并保存逐轮逐子完整输出/退出状态；原失败现场保留，未观测原signal，不将风险推断写成既证根因。
+
+## TSV 三方合并与补丁集成
+
+泛型库由 `use tsvx.merge3` 引入，不提供独立 merge CLI。API 为：
+
+```c
+int tsm_merge(const char *header, int columns, int keymode,
+              const char *base, size_t bn, const char *ours, size_t on,
+              const char *theirs, size_t tn, tsm_buf *out, tsm_buf *conflicts);
+int tsm_merge_schema(const char *header, int columns, int keymode,
+                     const char *base, size_t bn, const char *ours, size_t on,
+                     const char *theirs, size_t tn, tsm_buf *out,
+                     tsm_buf *conflicts, int inherited_min_columns);
+```
+
+`keymode=0` 按整行键集合并（相同行幂等），`keymode=1` 按首列键合并并检查重复键；表头和列数按声明检查。返回 `0` 为干净合并，`1` 为冲突，`2` 为输入/schema/key或资源错误。冲突材料使用可读 `base/ours/theirs` 内容，不以十六进制代替；失败不向 `out` 发布部分结果。`tsm_buf` 含 `char *p; size_t n,cap; int failed;`，调用方零初始化并最终 `free(p)`。`tsm_merge` 保持严格默认；`tsm_merge_schema` 的 `inherited_min_columns=0` 同样严格，正值仅允许base行宽不少于该值、且侧异常行完整等于同key的base行。领域历史兼容政策留在 `cxlib.appendmerge` 上层：ledger选择5，其余选择0，不作为泛型默认放宽。
+
+三个真实原生检查各自独立55秒（包括编译），登记批次分别为 `tsvx-merge3`（commit）、`appendmerge`（daily）、`integrate-patch`（daily），不将三个检查塞入同一55秒窗：
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/check-tsvx-merge3.cx
+tools/bound 55 sh ./unisacc.com tools/check-appendmerge.cx
+tools/bound 55 sh ./unisacc.com tools/check-integrate-patch.cx
+```
+
+成功标记分别为 `TSVX_MERGE3_CHECK`、`APPENDMERGE_CHECK`、`INTEGRATE_PATCH_CHECK`，均带 `checks=N`、`failed=0`。integrator检查无参会编译真实工具，也支持 `--native ABS_INTEGRATE ROOT` 绑定已有原生工具。集成CLI为：
+
+```sh
+sh ./unisacc.com tools/integrate-patch.cx -- ROOT PATCH ~/unisacc-integration [--base REV] [--prepare-only]
+sh ./unisacc.com tools/integrate-patch.cx -- --resume ~/unisacc-integration
+```
+
+`--prepare-only` 只产生 `PREPARED`、`qualification=NOT_QUALIFIED`，不是PASS。只有真实gate完成才报告 `READY_TO_COMMIT`、`qualification=GATES_ONLY`，不是全产品或全批资格；不自动commit/push。每次调用原120秒总限额、子进程最多55秒保持不变，预算未完阶段可报告PENDING，不冒称成功。
+
+父已观测的**首轮历史版本**保留：泛型17/0、3.36秒；领域28/0、10.09秒；integrator真实夹具17/0、47.16秒。后续函数指针schema导出曾被当前编译器拒绝，已改为纯值schema参数；去除平方级路径及不必要hex拷贝并加入checked-copy后的**最终版本**由父真实验收：泛型17/0、3.33秒；领域33/0、10.36秒；integrator真实夹具17/0、43.06秒，均在各自55秒预算内。这些仅证明对应工具/夹具检查，不授全产品或全批资格。

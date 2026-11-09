@@ -1,0 +1,37 @@
+/* Independent local Git contracts, not historical replay qualification.
+ * --native ABS_INTEGRATE ROOT supplies the actual built integrator and product.
+ * 无参入口用当前ROOT真实产品构建唯一临时native，再运行同一组用例。
+ * No fake metadata/ratchet/precommit programs are installed in fixture roots;
+ * --prepare-only is deliberately NOT a gate verdict. Parent separately runs
+ * five real 0.0.48 patches through the production gates and their budgets. */
+#pragma unisa use cxlib.appendmerge
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.time
+static int checks,failed;static char why[1000];static long deadline;
+static void die(const char *s){fprintf(stderr,"check-integrate-patch: %s\n",s);exit(2);}
+static void ck(int ok,const char *s){checks++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)failed++;}
+static void path(char *p,size_t c,const char *a,const char *b){if(cx_fmt(p,c,"%s/%s",a,b))die("path");}
+static void put(const char *p,const char *s,size_t n){if(cx_write(p,s,n))die("write");}
+static np_result run(char **v,const char *cwd,int secs){long remaining=(deadline-sy_now_ms()-1000)/1000;if(remaining<1)die("check-deadline");if(remaining<secs)secs=(int)remaining;np_result r={0};if(np_run(v,cwd,0,secs,&r,why,sizeof why)||r.residue)die("transport");return r;}
+static void ok(char **v,const char *cwd){np_result r=run(v,cwd,12);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);die("git-command");}np_free(&r);}
+static void commit(const char *where){char *a[]={"git","-C",(char*)where,"add","--all",0};ok(a,0);char *c[]={"git","-C",(char*)where,"-c","user.name=Fixture","-c","user.email=you@example.com","-c","core.hooksPath=/dev/null","commit","-m","fixture",0};ok(c,0);}
+static void append(const char *where,const char *key){for(int k=0;k<4;k++){char p[4400],row[2000];path(p,sizeof p,where,am_path(k));if(k==0){if(cx_fmt(row,sizeof row,"2026-11-09\tSHARED\t%s\t-\tevidence-%s\tfixture\n",key,key))die("row");}else if(k==1){if(cx_fmt(row,sizeof row,"%s\tg\timplementer\td\tg\tc\t1\t-\tREADY\to\tc\n",key))die("row");}else if(k==2){if(cx_fmt(row,sizeof row,"%s\tPLANNED\tinterfaces\ttools/a.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/a.cx\t-\tcov\trc0:A\tproduct\trelease\n",key))die("row");}else{if(cx_fmt(row,sizeof row,"%s\tinterfaces\tDECLARED_DEPENDENCY\t%s\ta\n",key,key))die("row");}size_t n;char *old=cx_read(p,&n);if(!old)die("table-read");np_buf b={0};np_put(&b,old,n);np_puts(&b,row);put(p,b.p,b.n);free(old);free(b.p);}}
+static void fixture(const char *top,const char *native,const char *productroot,int conflict){
+ char seed[4400],root[4400],other[4400],dest[4400],patch[4400],p[4400];if(cx_fmt(seed,sizeof seed,"%s/seed-%d",top,conflict)||cx_fmt(root,sizeof root,"%s/root-%d",top,conflict)||cx_fmt(other,sizeof other,"%s/other-%d",top,conflict)||cx_fmt(dest,sizeof dest,"%s/candidate-%d",top,conflict)||cx_fmt(patch,sizeof patch,"%s/patch-%d.diff",top,conflict))die("fixture-path");char *init[]={"git","init","-b","main",seed,0};ok(init,0);
+ path(p,sizeof p,seed,"agentwork");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,seed,"tests");if(sy_mkdir(p,0700))die("mkdir");for(int k=0;k<4;k++){path(p,sizeof p,seed,am_path(k));put(p,am_header(k),strlen(am_header(k)));}
+ const char *ignore="unisacc.com\nunisacc.com.dev/\n";path(p,sizeof p,seed,".gitignore");put(p,ignore,strlen(ignore));const char *attrs="* -text\nagentwork/ledger.tsv merge=binary\nagentwork/items.tsv merge=binary\ntests/batches.tsv merge=binary\ntests/coverage.tsv merge=binary\n";path(p,sizeof p,seed,".gitattributes");put(p,attrs,strlen(attrs));path(p,sizeof p,seed,"plain.txt");put(p,"base\n",5);commit(seed);
+ /* Independent main clones retain the common base without a development branch. */
+ char *cr[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,root,0};ok(cr,0);char *cl[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,other,0};ok(cl,0);if(pp_copy_product(productroot,root))die("product-copy");append(other,"theirs");if(conflict){path(p,sizeof p,other,"plain.txt");put(p,"theirs\n",7);}commit(other);char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("patch-diff");put(patch,r.out,r.outn);np_free(&r);
+ append(root,"ours");if(conflict){path(p,sizeof p,root,"plain.txt");put(p,"ours\n",5);}commit(root);
+ char *head[]={"git","-C",root,"rev-parse","HEAD",0};r=run(head,0,12);if(r.rc)die("head");char before[65];if(r.outn>=sizeof before)die("head-bound");if(mm_copy(before,sizeof before,r.out,(long)r.outn))die("head-copy-bound");before[r.outn]=0;np_free(&r);
+ char *apply[]={(char*)native,root,patch,dest,"--prepare-only",0};r=run(apply,0,55);ck(r.rc==(conflict?1:0),conflict?"non-table-conflict-is-nonzero":"real-stale-patch-threeway-prepare");ck(r.out&&!strstr(r.out,"READY_TO_COMMIT")&&!strstr(r.out,"GATES_ONLY"),"prepare-never-claims-gate-pass");if(!conflict)ck(r.out&&strstr(r.out,"status=PREPARED"),"prepared-phase-explicit");np_free(&r);
+ r=run(head,0,12);ck(!r.rc&&r.out&&!strcmp(r.out,before),"source-HEAD-unchanged");np_free(&r);char *clean[]={"git","-C",root,"diff","--exit-code","HEAD",0};r=run(clean,0,12);ck(!r.rc&&!r.outn,"source-index-and-working-tree-unchanged");np_free(&r);
+ if(!conflict){for(int k=0;k<4;k++){path(p,sizeof p,dest,am_path(k));size_t n;char *s=cx_read(p,&n);ck(s&&strstr(s,"ours")&&strstr(s,"theirs"),"both-table-sides-preserved");free(s);}char *hb[]={"git","-C",dest,"symbolic-ref","--short","HEAD",0};r=run(hb,0,12);ck(!r.rc&&r.out&&!strcmp(r.out,"main\n"),"candidate-HEAD-is-main");np_free(&r);r=run(apply,0,55);ck(r.rc==2,"existing-target-refused");np_free(&r);
+  /* Resume must validate the frozen index/tree before attempting any gates. */path(p,sizeof p,dest,"plain.txt");put(p,"tampered\n",9);char *resume[]={(char*)native,"--resume",dest,0};r=run(resume,0,30);ck(r.rc==2&&r.err&&strstr(r.err,"candidate-unstaged-changes"),"resume-rejects-changed-input");np_free(&r);
+ }else{char *u[]={"git","-C",dest,"ls-files","--unmerged",0};r=run(u,0,12);ck(!r.rc&&r.out&&strstr(r.out," 1\tplain.txt")&&strstr(r.out," 2\tplain.txt")&&strstr(r.out," 3\tplain.txt"),"non-table-three-sides-retained-in-index");np_free(&r);}
+}
+int main(int argc,char **argv){deadline=sy_now_ms()+55000;if(argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT]");char native[4096],root[4096],temp[4400];if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");if(argc==1){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");fixture(temp,native,root,0);fixture(temp,native,root,1);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
