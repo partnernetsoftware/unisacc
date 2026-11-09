@@ -487,3 +487,7 @@ OSX-LAUNCH-SLOW新候选bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b
 OSX-LAUNCH-SLOW最终正式五批补验：冻结f09969d9d0efb81976b3eaf486731f120df22cbe的独立ROOT，精确bdd52246副本，Terminal.app既有上下文。interface15/0、两cache各108/0、ARM热version/run12/99ms、Rosetta42/246.5ms，各mode10次中位，五个BATCH_RUN均PASS/rc0/transport0，candidate完整SHA一致。正式入口未拒绝/未迁旧数据，平台同osx/arm64含Rosetta，非原生Intel资格由同候选CI补；详out/osx-launch-slow/v0481/formal-*.log。
 
 OSX-LAUNCH-SLOW交接身份已实际固定：草稿v0.0.48.1-osx-launch-rc1、source_commit=f09969d9d0efb81976b3eaf486731f120df22cbe、APE=bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3；七标准资产+四Mac+members五角色共12资产上传全actual0。members SHA4e1a51b8bc0d2dbdf8aefad6bca25cf615556fb572044abc3b89e008565225d1，正式清单/表均在release/candidate-osx-launch*.tsv。新CI42555350465实派发且fetch/ffi成功，正在原生格前工具准备；完成前不授42/0。cc按tag/source_commit/membersSHA绑定首真签，四成员签后重包须新CI；不改cc签名路径。
+
+OSX-LAUNCH-SLOW草稿回读完成：12资产独立重新下载，严格layout与members check真实exit0；metadataAPI核draft=true/tag/targetf099/12唯一，独立CX审计逐文件完整SHA/bytes与远端digest全部一致，members仍4e1a51b8…，保留初始EOF/notfound日志。六个native格现均success，汇总report尚在途；不提前授42/0。证据out/osx-launch-slow/v0481/draft-readback-{report.md,audit.tsv}。
+
+OSX-LAUNCH-SLOW未签候选最终资格：CI42555350465实际completed/success，下载新artifact表绑定bdd52246全SHA+f099精确提交，六目标七检查=42 PASS/0FAIL/0NOTRUN/0INVALID；Windows portable子集范围以原notes为准，不称完整--all或全POSIX。本车道目标已到可真签交接：0.0.48.1草稿12资产和members4e1a51b8…经远端回读完全一致，正式candidate表固定CIID，四成员签后替换入口28/0。首真签归cc，未触发真签/公证/Latest/根替换，签后新身份须重新资格。热性能仅Terminal既有责任应用上下文通过，非豁免旧失败保留。证据out/osx-launch-slow/v0481/ci-evidence-bdd/table.md与draft-readback-report.md。

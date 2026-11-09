@@ -35,10 +35,12 @@
 
 新同候选六目标CI必须绑定新APE SHA和精确测试提交，不能沿用559705的42/0。CI未实际完成前仅PREPARED/LOCAL_CHECKED。本轮不安装本机根、不改Latest、不签名或提交公证。若候选失败，保留草稿与证据，修复用新冻结身份；必要时`gh release delete v0.0.48-osx-launch-rc1 --cleanup-tag`撤回本次草稿，原v0.0.48资产保留。
 
-执行进展：独立草稿已实际创建并上传七资产；唯一新候选pins见`release/candidate-osx-launch.tsv`。精确测试提交3da2b3b1df6f4ec05a03bae48b51a045969d1b24，wrapper构造提交6318a0491，原片来源559705。新CI为42551819720（https://github.com/partnernetsoftware/unisacc/actions/runs/42551819720），派发及fetch已实际成功，资格尚在途。草稿全部七资产重新下载后严格layout校验PASS；完整既有readback入口正在独立新目录运行，其退出后再记结果。
+历史首草稿已上传七资产，归档pins见`release/candidate-osx-launch-rc1.tsv`。测试提交3da2b3b1df6f4ec05a03bae48b51a045969d1b24，wrapper构造6318a0491，原片来自559705。旧CI42551819720已完成六格42/0，但该候选仍是0.0.48且热lease未回收，不能移授0.0.48.1。旧草稿七资产回读strict layout PASS；Linux限定COMM readback在Mac旧根f069上实际拒绝，保留失败，不宣称完整COMM通过。
 
 ## 0.0.48.1 首真签交接
 
 草稿tag：`v0.0.48.1-osx-launch-rc1`；source_commit：`f09969d9d0efb81976b3eaf486731f120df22cbe`。12资产已全部真实上传：七标准资产、四Mac成员、无header五角色members.tsv。清单SHA：`4e1a51b8bc0d2dbdf8aefad6bca25cf615556fb572044abc3b89e008565225d1`；跟踪副本见release/candidate-osx-launch-members.tsv。该清单同时固定APE bdd52246…及四成员完整SHA，签后不得逐次重写manager。cc可据此绑定首真签。
 
-新六目标CI：42555350465（https://github.com/partnernetsoftware/unisacc/actions/runs/42555350465），绑定bdd完整SHA和f099精确测试提交，正在运行，尚未授QUALIFIED。最终正式五批interface15/0、cache两格108/0，性能ARM12/99ms与Rosetta42/246.5ms，日志out/osx-launch-slow/v0481/formal-five-report.md。
+新六目标CI：42555350465（https://github.com/partnernetsoftware/unisacc/actions/runs/42555350465）已completed/success，证据表绑定bdd完整SHA和f099精确测试提交，QUALIFIED 42/0、not_run=0、invalid=0。这是现行七检查×六格的资格，Windows标准库批包含portable子集，未跑POSIX子项在原证据notes中保留；不宣称全API或完整--all。最终正式五批interface15/0、cache两格108/0，性能ARM12/99ms与Rosetta42/246.5ms，日志out/osx-launch-slow/v0481/formal-five-report.md。12资产重新下载后strict layout与members PASS，逐文件SHA/bytes与远端digest全部相符。证据在out/osx-launch-slow/v0481/ci-evidence-bdd与draft-readback-report.md。交cc据上述tag/source_commit/membersSHA触首真签；未签资格不移授签后APE。
+
+最终独立证据审计：CI artifact下载actual0；现candidate-qualify aggregate actual0重新得到QUALIFIED42/0/0/0。独立CX审计六TSV各7条、42唯一target/check、全PASS/rc0、完整bdd SHA/f099提交与六格版本0.0.48.1；重聚合表与远端artifact整字节相同，SHA b486d61a2885494dd27d7d2b0e52b3b332d370ddaef359df99e07c622b3ef2af。四条Windows portable范围notes保留。所有本车道作业终态，无悬挂。
