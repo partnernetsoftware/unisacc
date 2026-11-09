@@ -5,7 +5,7 @@
  * CANDIDATE_SHA is the caller's explicit expected pp_product_digest(ROOT), in strict
  * lowercase hex.  On a host this product builds for, the file is hashed here and
  * compared: PASS or MISMATCH (rc 0 / 1).  The product version is read from the one
- * authority, exec/facts/limits.tsv (PRODUCT_VERSION), never from a literal.
+ * authority, ROOT/release/candidate.tsv, outside the source SID (F-v2).
  * On any other host the same line is printed with status=NOT_RUN and a reason, and
  * the exit code is 3 -- a host that did not run is never PASS.
  * ROOT and CANDIDATE_SHA are mandatory; no sidecar supplies an implicit candidate.
@@ -14,6 +14,8 @@
  * Malformed arguments are a refusal (rc 2), not NOT_RUN.
  * Line: HOST_CELL<TAB>HOST<TAB>sha=<64hex><TAB>version=<...><TAB>status=<...> */
 #pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use mem.bytes
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.hostid
@@ -26,33 +28,14 @@ static int hc_hex64(const char *s) {
     for (i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
     return s[64] == 0;
 }
-/* the PRODUCT_VERSION value from ROOT/exec/facts/limits.tsv; every row must agree */
-static int hc_version(char *out, int cap) {
-    char p[4400], *s;
-    size_t n = 0, at = 0, vlen = 0;
-    if (snprintf(p, sizeof p, "%s/exec/facts/limits.tsv", hc_root) >= (int)sizeof p) hc_die("path-bound");
-    if (!(s = cx_read(p, &n))) hc_die("limits-read");
-    while (at < n) {
-        size_t end = at, col = 0, vs = 0, ve = 0;
-        while (end < n && s[end] != '\n') end++;
-        if (at < end && s[at] != '#') {
-            for (size_t i = at; i < end && col < 2; i++) {
-                if (s[i] != '\t') continue;
-                if (col == 0) { if (i - at != 15 || memcmp(s + at, "PRODUCT_VERSION", 15)) { col = 99; break; } vs = i + 1; }
-                else ve = i;
-                col++;
-                if (col == 2) break;
-            }
-            if (col == 2 && ve > vs) {
-                size_t k = ve - vs;
-                if (!vlen) { size_t q; if (k >= (size_t)cap) hc_die("version-cap"); for (q = 0; q < k; q++) out[q] = s[vs + q]; out[k] = 0; vlen = k; }
-                else if (k != vlen || memcmp(s + vs, out, k)) hc_die("version-rows-disagree");
-            }
-        }
-        at = end + 1;
-    }
-    free(s);
-    return vlen > 0;
+/* F-v2 release identity is metadata, not a retired PRODUCT_VERSION source row. */
+static void hc_version(char *out, int cap) {
+    char p[4400], version[24];
+    if (snprintf(p, sizeof p, "%s/release/candidate.tsv", hc_root) >= (int)sizeof p) hc_die("path-bound");
+    if (rv_load(p, version)) hc_die("release-version");
+    size_t n = strlen(version);
+    if (n >= (size_t)cap) hc_die("version-cap");
+    if (mm_copy(out, cap, version, n + 1)) hc_die("version-copy");
 }
 int main(int argc, char **argv) {
     char expect[65], got[65];
@@ -64,7 +47,7 @@ int main(int argc, char **argv) {
 #if defined(__linux__) && defined(__x86_64__)
     {
         char ver[64];
-        if (!hc_version(ver, (int)sizeof ver)) hc_die("no-product-version-row");
+        hc_version(ver, (int)sizeof ver);
         printf("HOST_CELL\tlnx/x86_64\tsha=%s\tversion=%s\texpected=%s\tstatus=%s\n", got, ver, expect,
                strcmp(got, expect) ? "MISMATCH" : "PASS");
         return strcmp(got, expect) ? 1 : 0;
