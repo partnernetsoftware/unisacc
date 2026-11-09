@@ -21,6 +21,10 @@ on:
         description: Owner-reviewed SHA256 of members.tsv in the draft
         type: string
         required: true
+      repack_pins_sha256:
+        description: SHA256 of the draft asset repack-inputs.sha256 (pins of the five repack auxiliary assets)
+        type: string
+        required: true
 permissions:
   contents: write  # a draft is invisible to a read-only token; nothing is published here
 concurrency:
@@ -50,8 +54,10 @@ jobs:
           DRAFT_TAG: ${{ inputs.draft_tag }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           MEMBERS_SHA256: ${{ inputs.members_sha256 }}
+          REPACK_PINS_SHA256: ${{ inputs.repack_pins_sha256 }}
         run: |
           set -euo pipefail
+          [[ "$REPACK_PINS_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "repack_pins_sha256 is not 64-hex" >&2; exit 1; }
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "source_commit is not 40-hex" >&2; exit 1; }
           [[ "$MEMBERS_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "members_sha256 is not 64-hex" >&2; exit 1; }
           [[ "$DRAFT_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "draft_tag has illegal characters" >&2; exit 1; }
@@ -152,16 +158,99 @@ jobs:
             # no other entitlement key may be present
             [[ "$(bound codesign -d --entitlements - --xml "work/$r" 2>/dev/null | grep -c '<key>')" == 1 ]]
           done
+      - name: Download and verify the repack auxiliary inputs (pins file hash is a workflow input)
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT_TAG: ${{ inputs.draft_tag }}
+          REPACK_PINS_SHA256: ${{ inputs.repack_pins_sha256 }}
+        run: |
+          set -euo pipefail
+          bound() { perl -e 'alarm 55; exec @ARGV' -- "$@"; }
+          mkdir -p in out
+          bound gh release download "$DRAFT_TAG" --repo "$GITHUB_REPOSITORY" --pattern repack-inputs.sha256 --dir in
+          [[ "$(shasum -a 256 in/repack-inputs.sha256 | cut -d' ' -f1)" == "$REPACK_PINS_SHA256" ]] || { echo "repack-inputs.sha256 hash mismatch" >&2; exit 1; }
+          n=0
+          while read -r sha path extra; do
+            [[ -z "$extra" && "$sha" =~ ^[0-9a-f]{64}$ && "$path" =~ ^in/repack-inputs/[A-Za-z0-9._-]+$ ]] || { echo "bad pins row" >&2; exit 1; }
+            n=$((n+1))
+          done < in/repack-inputs.sha256
+          [[ "$n" == 5 ]] || { echo "pins file must list exactly 5 assets, got $n" >&2; exit 1; }
+          rm -rf in/repack-inputs
+          mkdir in/repack-inputs   # fresh directory, no --clobber
+          pats=()
+          while read -r sha path; do pats+=(--pattern "${path#in/repack-inputs/}"); done < in/repack-inputs.sha256
+          bound gh release download "$DRAFT_TAG" --repo "$GITHUB_REPOSITORY" "${pats[@]}" --dir in/repack-inputs
+          [[ "$(ls in/repack-inputs | wc -l | tr -d ' ')" == 5 ]] || { echo "unexpected files in in/repack-inputs" >&2; exit 1; }
+          cp in/repack-inputs.sha256 out/repack-inputs.sha256
+          bound shasum -a 256 --check out/repack-inputs.sha256
+      - name: Repack the APE with the signed members (release-ape pack, no signing)
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          bound() { perl -e 'alarm 55; exec @ARGV' -- "$@"; }
+          # Bootstrap pins come from the already-verified members.tsv (in/ keeps the unsigned originals).
+          : >out/repack-bootstrap.sha256
+          while IFS=$'\t' read -r role name sha; do
+            case "$role" in
+              ape) printf '%s  %s\n' "$sha" work/ape >>out/repack-bootstrap.sha256 ;;
+              osx-x86_64) printf '%s  %s\n' "$sha" "in/$name" >>out/repack-bootstrap.sha256; OSX_X64="in/$name" ;;
+              osx-arm64) printf '%s  %s\n' "$sha" "in/$name" >>out/repack-bootstrap.sha256; OSX_ARM="in/$name" ;;
+            esac
+          done < in/members.tsv
+          [[ "$(wc -l <out/repack-bootstrap.sha256 | tr -d ' ')" == 3 && -n "${OSX_X64:-}" && -n "${OSX_ARM:-}" ]] || { echo "bootstrap pins incomplete" >&2; exit 1; }
+          bound shasum -a 256 --check out/repack-bootstrap.sha256
+          cp work/ape ./unisacc.com
+          cmp work/ape ./unisacc.com
+          chmod 755 ./unisacc.com
+          unset UNISA_CONTAINER UNISA_KERNEL UNISA_KERNEL_SHA
+          # Signed originals only get the exec bit; no re-sign, content and entitlements unchanged.
+          chmod 755 work/osx-x86_64 work/osx-arm64 work/cache-x86_64 work/cache-arm64
+          for r in osx-x86_64 osx-arm64 cache-x86_64 cache-arm64; do
+            bound codesign --verify --strict --verbose=2 "work/$r"
+          done
+          bound shasum -a 256 work/osx-x86_64 work/osx-arm64 work/cache-x86_64 work/cache-arm64 >out/repack-signed-inputs.sha256
+          # pack tolerates an existing OUT, so reject stale products and dangling links here.
+          test ! -e work/repacked
+          test ! -L work/repacked
+          bound sh ./unisacc.com tools/release-ape.cx -- pack \
+            --osx-slices work/osx-x86_64 work/osx-arm64 \
+            --cache-manager-osx work/cache-x86_64 work/cache-arm64 \
+            work/repacked \
+            in/repack-inputs/pkg.bin \
+            in/repack-inputs/slice-win-x86_64 \
+            in/repack-inputs/slice-lnx-x86_64 \
+            in/repack-inputs/slice-lnx-arm64 \
+            "$OSX_X64" "$OSX_ARM" \
+            in/repack-inputs/slice-win-arm64 \
+            >out/repack.log 2>&1
+          bound shasum -a 256 --check out/repack-signed-inputs.sha256
+          bound shasum -a 256 --check out/repack-inputs.sha256
+          bound shasum -a 256 --check out/repack-bootstrap.sha256
+          grep -Fx $'cache-manager-mode\tEXPLICIT_INPUTS' work/repacked/ape-receipt.txt
+          ape_sha=$(shasum -a 256 work/repacked/unisacc-next.com | awk '{print $1}')
+          receipt_sha=$(awk -F '\t' '$1=="unisacc-next.com" { sub(/^sha=/,"",$3); print $3 }' work/repacked/ape-receipt.txt)
+          [[ "$ape_sha" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ape_sha" == "$receipt_sha" ]]
+          printf '%s\n' "$ape_sha" >out/repacked-ape-sha256.txt
+          cp work/repacked/ape-receipt.txt out/repacked-ape-receipt.txt
+          cp work/repacked/unisacc-next.com out/unisacc-signed.com
+          cmp work/repacked/unisacc-next.com out/unisacc-signed.com
       - name: Build the UDZO DMG (APE plus the four signed Mach-O members)
         timeout-minutes: 2
         run: |
           set -euo pipefail
           bound() { perl -e 'alarm 60; exec @ARGV' -- "$@"; }
-          # NOTE: APE repack with the signed members (release-ape pack --cache-manager-osx) is a
-          # separate owner step; this job ships the draft APE as-is next to the signed Mach-Os.
+          bound shasum -a 256 --check out/repack-signed-inputs.sha256
+          printf '%s  %s\n' "$(cat out/repacked-ape-sha256.txt)" out/unisacc-signed.com | bound shasum -a 256 --check -
           mkdir -p work/dmgroot
-          cp work/ape work/dmgroot/unisacc.com
-          for r in osx-arm64 osx-x86_64 cache-arm64 cache-x86_64; do cp "work/$r" "work/dmgroot/$r"; done
+          cp out/unisacc-signed.com work/dmgroot/unisacc.com
+          for r in osx-arm64 osx-x86_64 cache-arm64 cache-x86_64; do
+            cp "work/$r" "work/dmgroot/$r"
+            cmp "work/$r" "work/dmgroot/$r"
+          done
+          cmp out/unisacc-signed.com work/dmgroot/unisacc.com
+          chmod 755 work/dmgroot/*
           bound hdiutil create -volname Unisacc -srcfolder work/dmgroot -ov -format UDZO out/unisacc-macos.dmg
       - name: Sign the DMG
         timeout-minutes: 2
