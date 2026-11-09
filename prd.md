@@ -465,3 +465,5 @@ cc报告发布件559705热启动每次创建并执行新manager inode，Darwin�
 OSX-LAUNCH-SLOW能力入口：`tools/osx-launch-profile.cx APE arm64|x86_64`显式候选逐次测量与10次中位；配对check独立15项。`tools/check-ape-pack.cx APE ARCH`验证冷清理/热manager不执行/lease/recency及symlink隔离；c869历史候选两格各45/0。五个osx批次已登记，真实候选性能不借工具夹具PASS；ARM15/224ms已过，Rosetta70/423ms未过；裸x64 run388.5ms、旧f069同入口405.5ms，保留300ms门继续核验。
 
 OSX-LAUNCH-SLOW最终wrapper开发冻结07a90387…、候选01b16ae0…：热合一uname并仅缺目录才mkdir，ARM12.5/253.5ms、Rosetta48/512.5ms；后者run仍FAIL，旧f069 Rosetta同测405.5ms，裸c48 slice388.5ms。阈值不放宽，未发布或授QUALIFIED。测量check15/0及13棘轮13/13；工具库存由现git index完整重算，核补已有cache-retain/check、toolselfpath、precommit-freeze遗漏并剔除误列tests路径，现651源/82分片，明确只登记未全编。下一步查r7具体输入/运行相位并推进新候选CI。
+
+OSX-LAUNCH-SLOW宿主分账：Rosetta两批是在ARM宿主强制arch x86_64的跨架构探针，platform须标osx/arm64；此前误标osx/x86_64，被run-batch既有宿主门拒绝，原4份REFUSE日志保留，未改宿主门或把拒绝当功能失败。Terminal.app责任应用已有Developer Tools豁免，不改系统设置；同01b16ae0在该上下文x64独立10次中位48/246ms过门，非豁免Codex上下文run512.5ms失败单列，根因另有既有-run临时程序新inode；源码runcache也只启用lnx/x64。正式ARM批在Terminal已15/101.5ms PASS，配对接口15/0、cache ARM45/0；修正platform后再跑Rosetta正式批，不迁原独立结果。
