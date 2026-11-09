@@ -57,3 +57,7 @@ workflow/action采用仓库已有固定commit pin模式，source checkout固定4
 - 签后 osx-arm64：--version 0.00s，默认 -run hello=7（0.27s，需 UNISA_CONTAINER 或经 APE）。DMG 内 APE 带 quarantine 经 sh：--version 正常，-run 0.21–0.24s（首跑 0.70s）。
 - **缺口1**：签后 osx-x86_64 在 Rosetta 下 --version 挂起（采样停在 Rosetta Runtime Routines，55s 超时）；同源未签切片与本机 ad-hoc+同 entitlements 均 0。疑 Developer ID/团队签名 + hardened runtime 与 kn_load RW→RX 在 Rosetta 下冲突；Intel 实机未测。待查。
 - **缺口2**：DMG 内裸 Mach-O 成员无执行位（-rw-r--r--）；带 quarantine 直接 exec 裸 CLI 会等 Gatekeeper 交互（非 app），用户路径应为 `sh unisacc.com`。
+
+## 签名链路打通（2026-11-09，run 42561596269）
+
+签→APE重包(签后四成员)→DMG→公证 Accepted→staple。本机验收：带 quarantine DMG spctl accepted(Notarized Developer ID)、stapler validate；DMG 成员均 755；`sh unisacc.com` arm64 与 Rosetta x64 默认 -run 均 7，热 -run 0.22–0.25s、--version 0.01s；APE 解出的缓存切片 TeamIdentifier=L2N7M5M544。前述 Rosetta"挂起"已证为裸成员 Gatekeeper 提示等待（research/c48-osx-sign-rosetta/）。剩余：Intel 实机/macOS13 未测；签后 DMG 尚未挂到公开 release（随 0.0.48.1 发布执行）。
