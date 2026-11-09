@@ -1,0 +1,66 @@
+/* tools/check-release-decide.cx -- sy_tmpdir 夹具:缺 pkg 尾、缺 win-arm64、CI 非 QUALIFIED、s9 未跑。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char td[320], root[400], tool[500], com[500];
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-release-decide.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-release-decide.%s\n", n); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    return rc;
+}
+static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 100000), n, tx_len(n, 80)) >= 0; }
+static int putf(const char *rel, const char *body) {
+    char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
+    return cx_write(p, body, tx_len(body, 4000));
+}
+
+int main(void) {
+    char out[8192], cwd[400]; char *o = 0; size_t n = 0; char cmd[2000];
+    { char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
+      mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
+    if (cx_fmt(td, sizeof td, "%s/release-decide-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
+    if (cx_fmt(tool, sizeof tool, "%s/tools/release-decide.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) { ck(0, "path"); return 1; }
+    putf("c.tsv", "repo\ttag\tcommit\tversion\twf\tref\trun\tape\tsha\tpkg\tpsha\twin\twsha\trec\trsha\talias\tasha\tzip\tzsha\tsums\tssha\n"
+         "r\tv\tc0\t0.0.48\tw\tmain\t1\tunisacc.com\ta\tpkg.bin\tb\tslice-win-arm64\tc\trec\td\tbuild.json\te\tzip\tf\tSHA256SUMS\tg\n");
+
+    /* 正控: 证据全 PASS */
+    putf("ev.ok", "1\tPASS\ta\n2\tPASS\tb\n3\tPASS\tc\n4\tPASS\ts9\n5\tPASS\tlay\n6\tPASS\tas\n7\tPASS\tci\n8\tPASS\trb\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- --candidate c.tsv --evidence ev.ok", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) == 0 && has(out, "QUALIFIED\tYES"), "all-pass");
+
+    /* s9 未跑 */
+    putf("ev.s9", "1\tPASS\ta\n2\tPASS\tb\n3\tPASS\tc\n4\tUNKNOWN\ts9-daily-release-not-run\n5\tPASS\tl\n6\tPASS\ta\n7\tPASS\tci\n8\tPASS\tr\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- --candidate c.tsv --evidence ev.s9", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) == 0 && has(out, "UNKNOWN") && has(out, "NOT_QUALIFIED") && has(out, "s9"), "s9-not-run");
+
+    /* CI 非 QUALIFIED */
+    putf("ev.ci", "1\tPASS\ta\n2\tPASS\tb\n3\tPASS\tc\n4\tPASS\ts9\n5\tPASS\tl\n6\tPASS\ta\n7\tFAIL\tci-not-qualified\n8\tPASS\tr\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- --candidate c.tsv --evidence ev.ci", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) != 0 || has(out, "NOT_QUALIFIED"), "ci-not-qualified");
+    /* 缺 win-arm64 */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p assets && printf 'UNIPKG1\\n........' > assets/pkg.bin && sh '%s' '%s' -- --candidate c.tsv --assets assets", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) != 0 || has(out, "FAIL"), "missing-win-arm64");
+    /* 缺 pkg 尾 */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p assets2 && echo x > assets2/slice-win-arm64 && echo naked > assets2/pkg.bin && sh '%s' '%s' -- --candidate c.tsv --assets assets2", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) != 0 || has(out, "FAIL"), "missing-pkg-footer");
+
+    /* 0.0.48 重放：s9 UNKNOWN → NOT_QUALIFIED */
+    putf("ev.048", "1\tPASS\tplans/release-notes-0.0.48.md\n2\tPASS\tnotes\n3\tPASS\t55970509\n4\tUNKNOWN\ts9-daily-release-not-run\n5\tPASS\tlayout\n6\tPASS\tassets\n7\tPASS\t42545543777\n8\tPASS\treadback\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- --candidate c.tsv --evidence ev.048", td, com, tool)) return 1;
+    ck(sh(cmd, out, sizeof out) == 0 && has(out, "NOT_QUALIFIED") && has(out, "UNKNOWN"), "replay-048");
+
+    { char rm[600]; if (!cx_fmt(rm, sizeof rm, "rm -rf '%s'", td)) sh(rm, 0, 0); }
+    sy_printf("CHECK_RELEASE_DECIDE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

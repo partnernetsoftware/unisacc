@@ -1,0 +1,107 @@
+/* tools/release-decide.cx -- 一次命令输出 8 步发布裁决清单。
+ *
+ *   sh ./unisacc.com tools/release-decide.cx -- --candidate TABLE [--evidence EVID.tsv] [--assets DIR]
+ *
+ * 证据表列: step<TAB>verdict<TAB>path  verdict 仅 PASS/FAIL/UNKNOWN。
+ * 缺行一律 UNKNOWN，不猜。--assets 机查 slice-win-arm64 与 pkg.bin 16 字节 UNIPKG1 尾。
+ * 输出 STEP 行、NOTES_IDENTITY、NOTES_LIMITS；不写行为变化正文。
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static const char *names[8] = {
+    "freeze-sid","construct","ape-pack","s9","layout-check","draft-assets","ci-qualified","readback"
+};
+static char verd[8][16];
+static char pathv[8][200];
+
+static int step_i(const char *s) {
+    if (s[0] >= '1' && s[0] <= '8' && !s[1]) return s[0] - '1';
+    return -1;
+}
+static void setu(int i) {
+    if (!verd[i][0]) { mm_copy(verd[i], 16, "UNKNOWN", 8); mm_copy(pathv[i], 200, "-", 2); }
+}
+static int pkg_footer(const char *p) {
+    size_t n = 0; char *b = (char *)cx_read(p, &n);
+    if (!b || n < 16) return 0;
+    return tx_same(b + n - 16, 8, "UNIPKG1\n", 8);
+}
+static void load_ev(const char *p) {
+    size_t n = 0; char *b = (char *)cx_read(p, &n); long at = 0;
+    if (!b) return;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
+        if (l > 0 && b[at] != '#') {
+            long t1 = tx_chr(b + at, l, '\t'), t2;
+            int i;
+            if (t1 > 0) {
+                char st[8]; mm_copy(st, 8, b + at, t1 < 7 ? t1 : 7); st[t1 < 7 ? t1 : 7] = 0;
+                i = step_i(st);
+                if (i >= 0) {
+                    t2 = tx_chr(b + at + t1 + 1, l - t1 - 1, '\t');
+                    if (t2 < 0) t2 = l - t1 - 1;
+                    if (t2 > 0 && t2 < 15) {
+                        mm_copy(verd[i], 16, b + at + t1 + 1, t2); verd[i][t2] = 0;
+                    }
+                    if (t2 >= 0 && t1 + 1 + t2 + 1 < l) {
+                        long rest = l - t1 - 2 - t2; if (rest > 199) rest = 199;
+                        mm_copy(pathv[i], 200, b + at + t1 + 2 + t2, rest); pathv[i][rest] = 0;
+                    }
+                }
+            }
+        }
+        at += l + 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *table = 0, *ev = 0, *assets = 0;
+    int i, unk = 0, fail = 0, nq = 0;
+    char cand[400];
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--candidate") && i + 1 < argc) { table = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--evidence") && i + 1 < argc) { ev = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--assets") && i + 1 < argc) { assets = argv[++i]; continue; }
+        sy_eprintf("usage: --candidate TABLE [--evidence EVID] [--assets DIR]\n"); return 2;
+    }
+    if (!table) { sy_eprintf("usage: --candidate TABLE\n"); return 2; }
+    { size_t n = 0; char *b = (char *)cx_read(table, &n);
+      if (!b) { sy_eprintf("release-decide: no candidate table\n"); return 1; }
+      mm_copy(cand, sizeof cand, table, tx_len(table, 399) + 1); }
+    for (i = 0; i < 8; i++) verd[i][0] = 0;
+    if (ev) load_ev(ev);
+    if (assets) {
+        char p[400];
+        if (cx_fmt(p, sizeof p, "%s/slice-win-arm64", assets)) return 1;
+        if (sy_exists(p) != 1) { mm_copy(verd[5], 16, "FAIL", 5); mm_copy(pathv[5], 200, p, tx_len(p, 199) + 1); }
+        if (cx_fmt(p, sizeof p, "%s/pkg.bin", assets)) return 1;
+        if (sy_exists(p) != 1 || !pkg_footer(p)) {
+            mm_copy(verd[5], 16, "FAIL", 5); mm_copy(pathv[5], 200, p, tx_len(p, 199) + 1);
+        } else if (!verd[5][0]) { mm_copy(verd[5], 16, "PASS", 5); mm_copy(pathv[5], 200, assets, tx_len(assets, 199) + 1); }
+    }
+    for (i = 0; i < 8; i++) setu(i);
+    sy_printf("RELEASE_DECIDE\tcandidate=%s\n", cand);
+    for (i = 0; i < 8; i++) {
+        sy_printf("STEP\t%d\t%s\t%s\t%s\n", i + 1, names[i], verd[i], pathv[i][0] ? pathv[i] : "-");
+        if (tx_eqz(verd[i], "UNKNOWN")) unk++;
+        if (tx_eqz(verd[i], "FAIL")) fail++;
+        if (i == 3 && !tx_eqz(verd[i], "PASS")) nq = 1;
+        if (i == 6 && !tx_eqz(verd[i], "PASS")) nq = 1;
+    }
+    sy_printf("QUALIFIED\t%s\tunknown=%d\tfail=%d\n", (fail || unk || nq) ? "NOT_QUALIFIED" : "YES", unk, fail);
+    sy_printf("NOTES_IDENTITY\n");
+    sy_printf("| 对象 | 身份 | 说明 |\n|---|---|---|\n");
+    sy_printf("| candidate | %s | 表路径，非猜测 |\n", cand);
+    for (i = 0; i < 8; i++)
+        sy_printf("| 步%d %s | %s | %s |\n", i + 1, names[i], verd[i], pathv[i]);
+    sy_printf("NOTES_LIMITS\n");
+    if (tx_eqz(verd[3], "UNKNOWN") || tx_eqz(verd[3], "FAIL"))
+        sy_printf("- s9 未跑或未过：不得称全批资格（NOT_QUALIFIED）\n");
+    if (unk) sy_printf("- 缺证据步一律 UNKNOWN，未猜\n");
+    sy_printf("NOTES_BEHAVIOR\tnot-generated\n");
+    return fail ? 1 : 0;
+}
