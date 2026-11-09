@@ -50,3 +50,10 @@ workflow/action采用仓库已有固定commit pin模式，source checkout固定4
 
 `--adhoc-test osx/ARCH INPUT SHA MODELS MODELS_SHA NEW_OUT`仅签私有复制，硬固定sign `-`/无timestamp/空entitlements；尾加`--entitlement-profile unsigned-kernel`才启用唯一已审例外，其它profile拒绝。实际version、hello默认-run、系统FFI使用干净环境和固定材料，收集只读spctl/裸stapler状态。任何Developer ID身份、submit、staple写入或上传入口均未暴露。默认check不隐读out材料，真实G3测试由显式CLI单独执行。ARM空配置明确失败保留，单例外本机可跑也不包装成全流程可签发布。
 - 工作流：`.github/workflows/macos-sign.yml`（workflow_dispatch，环境 release-signing；entitlements 见 `release/entitlements-unsigned-kernel.plist`；未运行）
+
+## 首次真签结果（2026-11-09，run 42556245736，候选 v0.0.48.1-osx-launch-rc1，members 4e1a51b8）
+
+- Developer ID 签名 + Apple 公证 **Accepted**；DMG staple validate 通过；带 quarantine 的 DMG `spctl -t open` = accepted, source=Notarized Developer ID。
+- 签后 osx-arm64：--version 0.00s，默认 -run hello=7（0.27s，需 UNISA_CONTAINER 或经 APE）。DMG 内 APE 带 quarantine 经 sh：--version 正常，-run 0.21–0.24s（首跑 0.70s）。
+- **缺口1**：签后 osx-x86_64 在 Rosetta 下 --version 挂起（采样停在 Rosetta Runtime Routines，55s 超时）；同源未签切片与本机 ad-hoc+同 entitlements 均 0。疑 Developer ID/团队签名 + hardened runtime 与 kn_load RW→RX 在 Rosetta 下冲突；Intel 实机未测。待查。
+- **缺口2**：DMG 内裸 Mach-O 成员无执行位（-rw-r--r--）；带 quarantine 直接 exec 裸 CLI 会等 Gatekeeper 交互（非 app），用户路径应为 `sh unisacc.com`。
