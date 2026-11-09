@@ -99,10 +99,54 @@ static int identity(const char *native, const char *helper, const char *source) 
     return failed ? 1 : 0;
 }
 
+/* --argv INSTALLED_COM ROOT REAL_FROZEN_S REV：只检查真实驱动/消费者边界。
+   ROOT 必须已有 out/release-snap-<REV前10位>，且 S 是该目录的绝对路径；
+   先核对完整 revision marker，避免隐式创建大快照。release-build 仍会刷新
+   快照内 compiler/build receipt；请勿与使用同一 S 的切片并发。
+   不带 -- 必须由旧驱动拒绝 --rev；带 -- 必须到达 release-build 的
+   slice target 拒绝，绝不构造真实切片。示例（从仓库根运行）：
+   sh ./unisacc.com tools/check-fixedpoint-sample.cx -- --argv 
+     /absolute/installed/unisacc.com /absolute/repo /absolute/repo/out/release-snap-0123456789 FULL_REV
+   本模式不走默认抽样/identity，也不创建临时快照。 */
+static int argv_boundary(const char *installed, const char *repo, const char *source, const char *rev) {
+    char script[500]; char *o = 0; size_t n = 0;
+    const char *body =
+        "set -eu\n"
+        "com=$1; repo=$2; source=$3; rev=$4; work=$5\n"
+        "case $com in /*) ;; *) echo 'REFUSE installed compiler must be absolute'; exit 1;; esac\n"
+        "test -f \"$com\"\n"
+        "repo=$(cd \"$repo\" && pwd -P)\n"
+        "source=$(cd \"$source\" && pwd -P)\n"
+        "full=$(git -C \"$repo\" rev-parse --verify \"$rev^{commit}\")\n"
+        "brief=$(printf '%s' \"$full\" | cut -c 1-10)\n"
+        "test \"$source\" = \"$repo/out/release-snap-$brief\"\n"
+        "test \"$(cat \"$source/.release-rev\")\" = \"$full\"\n"
+        "tool=$repo/tools/release-build.cx\n"
+        "cd \"$work\"\n"
+        "if sh \"$com\" \"$tool\" --rev \"$full\" slice \"$repo\" absent.pkg unused-out --target argv-invalid/none > missing 2>&1; then cat missing; exit 1; fi\n"
+        "if ! grep -Fq 'option not migrated' missing; then cat missing; exit 1; fi\n"
+        "if grep -Fq 'release-build:' missing; then cat missing; exit 1; fi\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.argv-missing-separator\\n'\n"
+        "if sh \"$com\" \"$tool\" -- --rev \"$full\" slice \"$repo\" absent.pkg unused-out --target argv-invalid/none > forwarded 2>&1; then cat forwarded; exit 1; fi\n"
+        "if ! grep -Fxq 'release-build: slice target' forwarded; then cat forwarded; exit 1; fi\n"
+        "if grep -Fq 'option not migrated' forwarded; then cat forwarded; exit 1; fi\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.argv-forwarded-consumer-refusal\\n'\n";
+    if (cx_fmt(td, sizeof td, "%s/fp-argv-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "argv-tmpdir"); return 1; }
+    if (cx_fmt(script, sizeof script, "%s/check.sh", td) || cx_write(script, body, tx_len(body, 16000))) { ck(0, "argv-script"); return 1; }
+    char *v[] = {"sh", script, (char *)installed, (char *)repo, (char *)source, (char *)rev, td, 0};
+    int rc = cx_runv_timeout(v, 53, &o, &n);
+    if (o) sy_printf("%s", o);
+    ck(rc == 0, "argv-complete");
+    { char *rm[] = {"rm", "-rf", td, 0}; char *discard = 0; size_t count = 0; cx_runv_timeout(rm, 2, &discard, &count); }
+    sy_printf("CHECK_FIXEDPOINT_SAMPLE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         if (argc == 5 && tx_eqz(argv[1], "--identity")) return identity(argv[2], argv[3], argv[4]);
-        sy_printf("usage: check-fixedpoint-sample [--identity CHAIN_NATIVE IDENT_HELPER REAL_FROZEN_S]\n");
+        if (argc == 6 && tx_eqz(argv[1], "--argv")) return argv_boundary(argv[2], argv[3], argv[4], argv[5]);
+        sy_printf("usage: check-fixedpoint-sample [--identity CHAIN_NATIVE IDENT_HELPER REAL_FROZEN_S | --argv INSTALLED_COM ROOT REAL_FROZEN_S REV]\n");
         return 2;
     }
     char out[4096], cwd[400], cmd[2200]; char *o = 0; size_t n = 0;
