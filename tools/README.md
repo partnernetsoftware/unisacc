@@ -1099,7 +1099,7 @@ tools/bound 55 sh ./unisacc.com tools/aw.cx -- migrate --root out/aw-fixture
 
 `check` 有旧表时分别逐行比较多重集（包含重复及行尾换行存在位）；缺任一旧表明确报告 `equivalence=unavailable`，仅剩结构检查，不作迁移验收声明。仅物理行起点的Git冲突标记触发非零拒绝，字段内普通标记文字可读。诊断仅输出相对文件及双方安全ID/state/owner，不输出goal/context/check、分支标签或URL查询；diff3基段不作为一方。pure模式包含实际stderr隔离及保留域查询脱漏回归。
 
-只有 `migrate` 写入：先验证旧表与看板唯一ID，再在私有 `.aw-migrate-stage/` 写入、fsync并验证逐行等价，然后依次rename两个目录。**不是跨目录原子事务**。旧文件不变；收据保留于暂存目录。目标存在（包括空目录）或暂存现场存在均拒绝，不覆盖、不清理、不自动修复部分发布；读侧检测未完成现场并拒绝。没有每次写者更新的共享manifest。真实迁移只由cc静默窗口执行，本工具线仅使用自建夹具。
+`migrate` 先验证旧表与看板唯一ID，再在私有 `.aw-migrate-stage/` 写入、fsync并验证逐行等价，然后依次rename两个目录。**不是跨目录原子事务**。旧文件不变；收据保留于暂存目录。目标存在（包括空目录）或暂存现场存在均拒绝，不覆盖、不清理、不自动修复部分发布；读侧检测未完成现场并拒绝。没有每次写者更新的共享manifest。真实迁移只由cc静默窗口执行，本工具线仅使用自建夹具。
 
 真实CLI检查分三项，各自55秒总预算（包含原生编译），不能将三项包装为同一55秒批：
 
@@ -1110,3 +1110,17 @@ tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- conflict
 ```
 
 每模式创建唯一合成夹具，编译原生aw后真实执行；parallel另编译原生写者，两个独立main克隆的两个进程各追加20条自己的月/owner账本并改不同项，真实提交合并零冲突；conflict验证同ID冲突仅一个文件及双方状态。父最终实测pure 10.85秒、parallel 16.01秒、conflict 10.40秒，各原55秒不变，三者 `CHECK_AW failed=0`。源码仓旧表原字节及新目录存在性/身份均未变；无LF末行排序粘连、合法空owner误拒绝均已先复现再实测修复。旧items空owner及自由文本owner/state原样迁移，筛选允许空值与干净UTF8按字段相等。真实数据从未迁移；正式迁移、删旧及25处读写引用切换仅由cc静默窗口执行。
+
+### 原生追加单条事件
+
+```sh
+tools/bound 55 sh ./unisacc.com tools/aw.cx -- append --owner agent-a --id ITEM-1 --event verified --evidence fixture --root out/aw-fixture
+tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- append
+tools/bound 55 sh ./unisacc.com tools/check-aw.cx -- append-concurrent
+```
+
+`append` 只接受已迁移布局，默认真实UTC日期及commit `-`，可显式指定 `--date YYYY-MM-DD`、`--commit COMMIT`。校验六列、日期与分片键后写入 `ledger/YYYY-MM/OWNER.tsv`；完整六列事件相同为 `ALREADY_PRESENT rows_added=0`，同ID的不同事件仍追加。输出仅状态及相对分片路径，不回显证据。
+
+同owner使用稳定 `.aw-append-OWNER.lock` 和最多10秒的原生flock等待；同owner串行检查重复并发布，不同owner独立。独占 `.aw-append-OWNER.tmp` 经完整写入、fsync、关闭、rename发布；未知已有暂存拒绝且保留，写失败保留原目标。锁与暂存仅窄范围忽略，不忽略业务分片。不写items、旧表或其他owner；不承诺跨文件事务。
+
+父实测append 12.99秒、append-concurrent 13.15秒，均failed=0；pure回归6.76秒failed=0。原并发检查单次读取即关闭输出管道存在SIGPIPE风险，已改为读至EOF并保存逐轮逐子完整输出/退出状态；原失败现场保留，未观测原signal，不将风险推断写成既证根因。

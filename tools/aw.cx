@@ -1,21 +1,25 @@
-/* Read-only views; migrate is the only writing command. */
+/* TSV views, migration and owner-serialized atomic append. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
 static const char *lh="时间\tid\t事件\tcommit\t证据\t角色/模型";
 static const char *ih="id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck";
 static const char *root=".",*owner=0,*since=0,*state=0;
 typedef struct {char *s;long n;int end;} Row;
 typedef struct {Row *v;long n,cap;} Rows;
 static Rows ledger,items;
-static void fail(const char *s){fprintf(stderr,"aw: 拒绝 %s errno=%d\n",s,errno);exit(2);}
+static int appending;
+static void fail(const char *s){long n=tx_len(s,1048576);if(appending&&(s[0]=='/'||(n>=0&&tx_chr(s,n,'?')>=0)))s="路径或IO校验失败";fprintf(stderr,"aw: 拒绝 %s errno=%d\n",s,errno);exit(2);}
 static long len(const char *s){long n=tx_len(s,1048576);if(n<0)fail("字符串过长");return n;}
 static void path(char *b,const char *a,const char *c){int n=snprintf(b,4096,"%s/%s",a,c);if(n<0||n>=4096)fail("路径过长");}
 static int kind(const char *p){sy_stat_t st;int r=sy_lstat(p,&st);if(r==-ENOENT)return 0;if(r)fail(p);if(st.kind=='l')fail(p);return st.kind;}
 static void safe_path(const char *p){char b[4096];long i,n=len(p);if(n>=4096)fail("路径过长");for(i=0;i<=n;i++){b[i]=p[i];if(p[i]=='/'||!p[i]){char c=b[i];b[i]=0;if(i&&kind(b)!='d')fail(b);b[i]=c;}}}
 static int token(const char *s,long n){long i;if(n<1||n>128||s[0]=='.')return 0;for(i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;return !tx_contains(s,n,"..",2);}
 static int month(const char *s,long n){int i,m;if(n!=7||s[4]!='-')return 0;for(i=0;i<7;i++)if(i!=4&&(s[i]<'0'||s[i]>'9'))return 0;m=(s[5]-'0')*10+s[6]-'0';return m>=1&&m<=12;}
+static int clean(const char *s,long n){long i;if(!n)return 0;for(i=0;i<n;i++)if(!s[i]||s[i]=='\t'||s[i]=='\r'||s[i]=='\n')return 0;return 1;}
 static int date(const char *s,long n){
     int d,m,y,max;
     if(n<10||!month(s,7)||s[7]!='-'||s[8]<'0'||s[8]>'9'||s[9]<'0'||s[9]>'9')return 0;
@@ -29,7 +33,7 @@ static void add(Rows *a,const char *s,long n,int end){Row *p;if(a->n==a->cap){lo
 static char *readfile(const char *p,long *n){int fd;char *s;sy_stat_t st;if(kind(p)!='f')fail(p);fd=sy_open_read(p);if(fd<0||sy_fstat(fd,&st)||st.kind!='f'||st.size<0||st.size>67108864)fail(p);*n=st.size;s=mm_alloc(*n+1);if(!s||sy_read_full(fd,s,*n)||sy_close(fd))fail(p);s[*n]=0;if(tx_chr(s,*n,0)>=0)fail("文件含NUL");return s;}
 static void field(Row *r,int k,long *o,long *n){if(tx_field(r->s,r->n,'\t',k,o,n))fail("缺少字段");}
 static int feq(Row *r,int k,const char *s){long o,n;field(r,k,&o,&n);return tx_same(r->s+o,n,s,len(s));}
-static int regular(Row *r){long a,b,c,d;field(r,0,&a,&b);field(r,1,&c,&d);if(tx_fields(r->s,r->n,'\t')!=6||!date(r->s+a,b)||!token(r->s+c,d))return 0;field(r,5,&a,&b);return token(r->s+a,b);}
+static int regular(Row *r){long a,b,c,d;if(tx_fields(r->s,r->n,'\t')!=6)return 0;field(r,0,&a,&b);field(r,1,&c,&d);if(!date(r->s+a,b)||!clean(r->s+c,d))return 0;field(r,5,&a,&b);return token(r->s+a,b);}
 static void itemvalid(Row *r,const char *id){long o,n;if(tx_fields(r->s,r->n,'\t')!=11)fail("items必须11列");field(r,0,&o,&n);if(!token(r->s+o,n)||(id&&!tx_same(r->s+o,n,id,len(id))))fail("items ID与文件名不符");}
 static int filtertext(const char *s){
     long i=0,n=len(s);
@@ -158,22 +162,81 @@ static void migrate(const char *base){
     path(dest,base,"items");if(kind(dest)||sy_rename(a,dest))fail("部分发布；保留现场，禁止自动重入");
     fprintf(stderr,"aw: 迁移完成；旧表保留，收据及暂存目录保留于 %s\n",stage);
 }
+static const char *aid=0,*event=0,*evidence=0,*commit="-",*day=0;
+static void utcday(char *b){
+    long t=sy_wall_s(),z,era,doe,yoe,y,doy,mp,d,m;
+    if(t<0)fail("UTC时钟不可用");
+    z=t/86400+719468;era=z/146097;doe=z-era*146097;
+    yoe=(doe-doe/1460+doe/36524-doe/146096)/365;y=yoe+era*400;
+    doy=doe-(365*yoe+yoe/4-yoe/100);mp=(5*doy+2)/153;
+    d=doy-(153*mp+2)/5+1;m=mp+(mp<10?3:-9);y+=m<=2;
+    if(y<1||y>9999||cx_fmt(b,11,"%04ld-%02ld-%02ld",y,m,d))fail("UTC日期不可表示");
+}
+static void append_event(const char *base){
+    char mon[8],dir[4096],target[4096],lock[4096],tmp[4096],rel[256],today[11];
+    char *row,*old=0,*all;long n=0,rn,total,i,b=0;int fd,r,line=0,found=0;sy_stat_t st;
+    if(!owner||!aid||!event||!evidence)fail("append缺少owner/id/event/evidence");
+    if(!clean(aid,len(aid))||!clean(event,len(event))||!clean(evidence,len(evidence))||!clean(commit,len(commit)))fail("append字段无效");
+    if(!day){utcday(today);day=today;}if(len(day)!=10||!date(day,10))fail("append日期无效");
+    path(dir,base,"ledger");if(kind(dir)!='d')fail("append要求已迁移ledger");
+    path(target,base,"items");if(kind(target)!='d')fail("append要求已迁移items");
+    if(cx_fmt(rel,sizeof rel,".aw-append-%s.lock",owner))fail("锁路径过长");path(lock,base,rel);
+    if(kind(lock)&&kind(lock)!='f')fail("锁目标无效");
+    fd=sy_open(lock,O_RDWR|O_CREAT|O_NOFOLLOW,0600);if(fd<0||sy_fstat(fd,&st)||st.kind!='f')fail("owner锁失败");
+    {long start=sy_now_ms(),now;if(start<0)fail("锁时钟失败");for(;;){r=sy_flock(fd,2|4);if(!r)break;if(r!=-EAGAIN&&r!=-EWOULDBLOCK&&r!=-EINTR)fail("owner锁失败");now=sy_now_ms();if(now<0||now-start>=10000)fail("owner锁超时");if(sy_sleep_ms(5))fail("owner锁等待失败");}}
+    if(tx_copy(mon,sizeof mon,day,7))fail("月份过长");path(target,dir,mon);
+    r=sy_mkdirat(sy_at_fdcwd(),target,0700);if(r&&r!=-EEXIST)fail("月份目录创建失败");if(kind(target)!='d')fail("月份目标无效");
+    if(sy_lstat(target,&st)||!(st.mode&0222))fail("月份目录只读");
+    if(cx_fmt(rel,sizeof rel,"%s.tsv",owner))fail("owner路径过长");path(dir,target,rel);
+    rn=len(day)+len(aid)+len(event)+len(commit)+len(evidence)+len(owner)+6;
+    row=mm_alloc(rn+1);if(!row||cx_fmt(row,rn+1,"%s\t%s\t%s\t%s\t%s\t%s\n",day,aid,event,commit,evidence,owner))fail("事件过长");
+    if(kind(dir)){
+        if(sy_lstat(dir,&st)||!(st.mode&0222))fail("分片只读");
+        old=readfile(dir,&n);if(!n||old[n-1]!='\n')fail("分片缺完整结尾");
+        for(i=0;i<n;i++)if(old[i]=='\n'){
+            Row q;q.s=old+b;q.n=i-b;q.end=1;
+            if(!line){if(!tx_same(q.s,q.n,lh,len(lh)))fail("分片表头无效");}
+            else {long j,o,z;field(&q,0,&o,&z);if(z!=10||!regular(&q)||!tx_same(q.s,7,mon,7)||!feq(&q,5,owner))fail("分片键或六列无效");for(j=0;j<q.n;j++)if(!q.s[j]||q.s[j]=='\r')fail("分片控制字符无效");if(tx_same(q.s,q.n,row,rn-1))found=1;}
+            line++;b=i+1;
+        }
+    }
+    if(!found){
+        total=(old?n:len(lh)+1)+rn;all=mm_alloc(total+1);if(!all)fail("内存不足");
+        if(cx_fmt(all,total+1,"%s%s%s",old?old:lh,old?"":"\n",row))fail("事件缓冲失败");
+        if(cx_fmt(rel,sizeof rel,".aw-append-%s.tmp",owner))fail("暂存路径过长");path(tmp,base,rel);
+        r=sy_open_new(tmp,0600);if(r<0)fail("暂存创建失败");
+        if(sy_write_all(r,all,total)||sy_fsync(r)){sy_close(r);sy_unlink(tmp);fail("事件写入失败");}
+        if(sy_close(r)){sy_unlink(tmp);fail("事件关闭失败");}
+        if(sy_rename(tmp,dir)){sy_unlink(tmp);fail("事件发布失败");}
+        mm_free(all);
+    }
+    if(sy_flock(fd,8)||sy_close(fd))fail("owner解锁失败");
+    printf("%s\trows_added=%d\tledger/%s/%s.tsv\n",found?"ALREADY_PRESENT":"APPENDED",found?0:1,mon,owner);
+    mm_free(row);mm_free(old);
+}
 int main(int argc,char **argv){
     const char *cmd;char base[4096],p[4096];int i;
-    if(argc<2)fail("用法 ledger|items|check|migrate [--root ROOT] [--owner X] [--since D] [--state S]");
+    if(argc<2)fail("用法 ledger|items|check|migrate [--root ROOT]；append --owner OWNER --id ID --event EVENT --evidence TEXT [--commit COMMIT] [--date YYYY-MM-DD] [--root ROOT]");
     cmd=argv[1];
+    appending=tx_eqz(cmd,"append");
     for(i=2;i<argc;i++){
         const char *v;if(i+1>=argc)fail("选项缺值");v=argv[++i];
         if(tx_eqz(argv[i-1],"--root"))root=v;
         else if(tx_eqz(argv[i-1],"--owner"))owner=v;
         else if(tx_eqz(argv[i-1],"--since"))since=v;
         else if(tx_eqz(argv[i-1],"--state"))state=v;
+        else if(tx_eqz(argv[i-1],"--id"))aid=v;
+        else if(tx_eqz(argv[i-1],"--event"))event=v;
+        else if(tx_eqz(argv[i-1],"--evidence"))evidence=v;
+        else if(tx_eqz(argv[i-1],"--commit"))commit=v;
+        else if(tx_eqz(argv[i-1],"--date"))day=v;
         else fail("未知选项");
     }
     if(owner&&(tx_eqz(cmd,"items")?!filtertext(owner):!token(owner,len(owner))))fail("owner筛选无效");
     if(since&&(len(since)!=10||!date(since,10)))fail("since无效");
     if(state&&!filtertext(state))fail("state筛选无效");
-    if(!tx_eqz(cmd,"ledger")&&!tx_eqz(cmd,"items")&&!tx_eqz(cmd,"check")&&!tx_eqz(cmd,"migrate"))fail("未知子命令");
+    if(!tx_eqz(cmd,"ledger")&&!tx_eqz(cmd,"items")&&!tx_eqz(cmd,"check")&&!tx_eqz(cmd,"migrate")&&!tx_eqz(cmd,"append"))fail("未知子命令");
+    if(!tx_eqz(cmd,"append")&&(aid||event||evidence||day||!tx_eqz(commit,"-")))fail("append选项不适用");
     if((since&&!tx_eqz(cmd,"ledger"))||(state&&!tx_eqz(cmd,"items"))||(owner&&(tx_eqz(cmd,"check")||tx_eqz(cmd,"migrate"))))fail("选项不适用");
     if(tx_contains(root,len(root),"..",2))fail("root路径穿越");
     safe_path(root);path(base,root,"agentwork");if(kind(base)!='d')fail(base);
@@ -185,6 +248,7 @@ int main(int argc,char **argv){
         path(q,base,"ledger");if(kind(q)!='d')fail("ledger尚未发布");
         path(q,base,"items");if(kind(q)!='d')fail("items尚未发布");
     }
+    if(tx_eqz(cmd,"append")){append_event(base);return 0;}
     if(tx_eqz(cmd,"ledger")||tx_eqz(cmd,"check"))shards(base,0);
     if(tx_eqz(cmd,"items")||tx_eqz(cmd,"check")){shards(base,1);unique();}
     if(tx_eqz(cmd,"check")){check(base);return 0;}

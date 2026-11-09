@@ -4,6 +4,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 static char dir[4096],bin[4096],out[262144];
 static long deadline;
 static const char *lh="时间\tid\t事件\tcommit\t证据\t角色/模型\n";
@@ -213,11 +214,82 @@ static void unassigned(void){
     expect(aw(r,"items","--state","bad\nstate")!=0,"state筛选拒LF");
     expect(aw(r,"items","--owner","\300\257")!=0,"筛选拒非法UTF8");
 }
+static int ap(const char *r,const char *who,const char *id,const char *ev,const char *text,const char *date){
+    char *v[]={bin,"append","--root",(char *)r,"--owner",(char *)who,"--id",(char *)id,"--event",(char *)ev,"--evidence",(char *)text,"--date",(char *)date,0};
+    if(!date)v[12]=0;return run(v);
+}
+static void appendcases(void){
+    char r[4096],p[4096],q[4096],other[4096],saved[4096];char *cmp[]={"cmp",p,q,0};char *isolated[]={"cmp",other,saved,0};long before=sy_wall_s()/86400;
+    const char *bad[]={"2025-02-29","2024-02-30","2024-00-01","2024-13-01","0000-01-01","2024-01-00","2024-01-01x"};int i;
+    join(r,dir,"append");fixture(r);snapshot(r,"ledger");snapshot(r,"items");
+    expect(ap(r,"alice","中文 / ID","事件","证据",0)!=0,"未迁移拒绝");
+    expect(!aw(r,"migrate",0,0),"追加夹具迁移");
+    join(other,r,"agentwork/ledger/2026-10/bob.tsv");join(saved,r,"bob-before.tsv");if(sy_copy(other,saved,0600))die("其它owner快照");
+    expect(!ap(r,"alice","中文 / ID","事件","证据",0)&&tx_contains(out,ln(out),"APPENDED\trows_added=1",21),"原生UTC自动日期追加");
+    expect(!aw(r,"ledger","--owner","alice")&&tx_contains(out,ln(out),"\t中文 / ID\t事件\t-\t证据\talice\n",ln("\t中文 / ID\t事件\t-\t证据\talice\n")),"六列UTF8非路径ID及默认commit");
+    {long k,b=0,n=ln(out);int seen=0;for(k=0;k<n;k++)if(out[k]=='\n'){if(tx_contains(out+b,k-b,"\t中文 / ID\t",ln("\t中文 / ID\t"))){long y,m,d,era,yoe,doy,days;y=(out[b]-'0')*1000+(out[b+1]-'0')*100+(out[b+2]-'0')*10+out[b+3]-'0';m=(out[b+5]-'0')*10+out[b+6]-'0';d=(out[b+8]-'0')*10+out[b+9]-'0';y-=m<=2;era=y/400;yoe=y-era*400;doy=(153*(m+(m>2?-3:9))+2)/5+d-1;days=era*146097+yoe*365+yoe/4-yoe/100+doy-719468;expect(days>=before&&days<=sy_wall_s()/86400,"自动日期真实UTC日");seen=1;}b=k+1;}expect(seen,"自动日期事件存在");}
+    expect(!ap(r,"alice","闰日","event","evidence","2024-02-29"),"显式闰日");
+    join(p,r,"agentwork/ledger/2024-02/alice.tsv");join(q,r,"saved.tsv");if(sy_copy(p,q,0600))die("追加快照");
+    expect(!ap(r,"alice","闰日","event","evidence","2024-02-29")&&tx_contains(out,ln(out),"ALREADY_PRESENT\trows_added=0",27),"完整事件幂等");expect(!run(cmp),"幂等不重写历史");
+    for(i=0;i<7;i++)expect(ap(r,"alice","bad","e","x",bad[i])!=0,"非法日期拒绝");
+    expect(ap(r,"alice","bad\tid","e","x","2024-02-29")!=0,"ID拒TAB");
+    expect(ap(r,"alice","bad","e\r","x","2024-02-29")!=0,"事件拒CR");
+    expect(ap(r,"alice","bad","e","x\n","2024-02-29")!=0,"证据拒LF");expect(!run(cmp),"拒绝保持目标字节");
+    expect(!ap(r,"alice","闰日","next","evidence","2024-02-29"),"同ID不同事件追加");
+    expect(!ap(r,"alice","闰日","event","different evidence","2024-02-29"),"同ID不同证据追加");
+    if(sy_copy(p,q,0600))die("IO失败快照");{char blocked[4096];join(blocked,r,"agentwork/.aw-append-alice.tmp");if(sy_mkdirat(sy_at_fdcwd(),blocked,0700))die("IO失败夹具");expect(ap(r,"alice","io","e","x","2024-02-29")!=0&&!run(cmp),"暂存写入失败不截断");if(sy_unlinkat(sy_at_fdcwd(),blocked,1))die("清理IO失败夹具");}
+    {char blocked[4096];join(blocked,r,"agentwork/.aw-append-locked.lock");if(sy_symlink(q,blocked))die("锁失败夹具");expect(ap(r,"locked","i","e","x","2024-02-29")!=0,"锁路径失败非零");}
+    put(p,"broken\n",0);if(sy_copy(p,q,0600))die("坏表快照");expect(ap(r,"alice","bad","e","x","2024-02-29")!=0&&!run(cmp),"坏表头拒绝不截断");
+    put(p,lh,0);put(p,"2024-02-29\tx\te\t-\tx\tbob\n",1);expect(ap(r,"alice","bad","e","x","2024-02-29")!=0,"错误分片键拒绝");
+    put(p,lh,0);put(p,"2024-02-29\tx\te\t-\tx\talice\n",1);if(sy_copy(p,q,0600)||sy_chmod(p,0400))die("只读夹具");
+    expect(ap(r,"alice","bad","e","x","2024-02-29")!=0&&!run(cmp),"只读失败不截断");if(sy_chmod(p,0600))die("恢复夹具权限");
+    if(sy_unlink(p)||sy_symlink(q,p))die("符号链接夹具");expect(ap(r,"alice","bad","e","x","2024-02-29")!=0,"符号链接拒绝");if(sy_unlink(p))die("清理夹具链接");
+    put(p,lh,0);put(p,"2024-02-29\tx\te\t-\tx\talice\textra\n",1);if(sy_copy(p,q,0600))die("坏行快照");expect(ap(r,"alice","bad","e","x","2024-02-29")!=0&&!run(cmp),"坏六列拒绝不截断");
+    put(p,lh,0);{int f=sy_open(p,O_WRONLY|O_APPEND,0);const char raw[]="2024-02-29\tx\te\t-\tx\000y\talice\n";if(f<0||sy_write_all(f,raw,sizeof raw-1)||sy_close(f))die("NUL夹具");}if(sy_copy(p,q,0600))die("NUL快照");expect(ap(r,"alice","bad","e","x","2024-02-29")!=0&&!run(cmp),"NUL行拒绝不截断");
+    expect(!run(isolated),"其它owner字节不变");
+    join(other,r,"agentwork/items/A.tsv");join(saved,r,"item-before.tsv");if(sy_copy(other,saved,0600))die("看板快照");expect(!ap(r,"independent","i","e","x","2024-02-29")&&!run(isolated),"追加不写items");
+    join(p,r,"agentwork/.aw-migrate-stage/receipt.tsv");if(sy_unlink(p))die("未完成迁移夹具");expect(ap(r,"new-owner","i","e","x","2024-02-29")!=0,"未完成迁移现场拒绝");
+    sameold(r,"ledger");sameold(r,"items");
+}
+static int appendchild(int round,int child,int pid,int pipefd){
+    char log[4096],meta[512],buf[4096];int f,ex=-1,code=-1,sig=-1,w=-1,readrc=0,closerc=0,logrc=0;long n;
+    if(cx_fmt(log,sizeof log,"%s/append-%02d-child-%d.log",dir,round,child))die("并发日志路径");
+    f=sy_open_new(log,0600);if(f<0)die("并发日志创建");
+    if(pid>0){
+        for(;;){n=sy_read(pipefd,buf,sizeof buf);if(n==-EINTR)continue;if(n<0){readrc=(int)n;break;}if(!n)break;if(sy_write_all(f,buf,n))logrc=1;}
+        closerc=sy_close(pipefd);w=sy_wait_status(pid,0,&ex,&code,&sig);
+    }
+    if(cx_fmt(meta,sizeof meta,"\nround=%d child=%d spawn=%d wait=%d exited=%d code=%d signal=%d read=%d close=%d log=%d\n",round,child,pid,w,ex,code,sig,readrc,closerc,logrc))die("并发状态格式");
+    if(sy_write_all(f,meta,ln(meta))||sy_close(f))die("并发状态保存");
+    if(pid<=0||w!=pid||ex!=1||code||readrc||closerc||logrc){
+        fprintf(stderr,"CHECK_AW 并发失败 round=%d child=%d spawn=%d wait=%d exited=%d code=%d signal=%d read=%d close=%d log=%d；详见append-%02d-child-%d.log\n",round,child,pid,w,ex,code,sig,readrc,closerc,logrc,round,child);
+        return 0;
+    }
+    return 1;
+}
+static void appendconcurrent(void){
+    char r[4096],key[64],sec[32];int round,j,pid[2],fd[2],ok[2];long left;
+    join(r,dir,"append-concurrent");fixture(r);expect(!aw(r,"migrate",0,0),"并发追加迁移");
+    for(round=0;round<22;round++){
+        char a[64],b[64];const char *wa=round<2?"alice":"writer-a",*wb=round<2?"alice":"writer-b";
+        char *x[]={"timeout","--signal=KILL",sec,bin,"append","--root",r,"--owner",(char *)wa,"--id",a,"--event","event","--evidence","e","--date","2024-02-29",0};
+        char *y[]={"timeout","--signal=KILL",sec,bin,"append","--root",r,"--owner",(char *)wb,"--id",b,"--event","event","--evidence","e","--date","2024-02-29",0};
+        if(cx_fmt(a,sizeof a,"a-%d",round)||cx_fmt(b,sizeof b,round==0?"a-%d":"b-%d",round))die("并发ID");
+        left=deadline-sy_now_ms();if(left<=0||cx_fmt(sec,sizeof sec,"%ld.%03ld",left/1000,left%1000))die("并发55秒预算耗尽");
+        fd[0]=fd[1]=-1;pid[0]=sy_spawn_pipe(x,0,0,&fd[0],0);pid[1]=sy_spawn_pipe(y,0,0,&fd[1],0);
+        for(j=0;j<2;j++)ok[j]=appendchild(round,j,pid[j],fd[j]);
+        out[0]=0;if(!ok[0]||!ok[1])die("并发追加失败；完整输出及实际状态已分别保存，未回显字段内容");
+    }
+    expect(!aw(r,"ledger",0,0),"并发后账本可读");
+    expect(tx_count(out,ln(out),"\ta-0\tevent\t",11)==1,"同owner同事件exact1");
+    expect(tx_count(out,ln(out),"\ta-1\tevent\t",11)==1&&tx_count(out,ln(out),"\tb-1\tevent\t",11)==1,"同owner不同事件不丢");
+    for(round=2;round<22;round++)for(j=0;j<2;j++){if(cx_fmt(key,sizeof key,"\t%c-%d\tevent\t",j?'b':'a',round))die("并发验证键");expect(tx_count(out,ln(out),key,ln(key))==1,"不同owner各20项完整");}
+}
 int main(int argc,char **argv){
     char native[4096];const char *mode=argc>1?argv[1]:"pure";char *v[16];int i;
     if(argc==4&&tx_eqz(argv[1],"--writer"))return writer(argv[2],argv[3]);
     deadline=sy_now_ms()+55000;
-    if(!tx_eqz(mode,"pure")&&!tx_eqz(mode,"parallel")&&!tx_eqz(mode,"conflict"))die("用法 pure|parallel|conflict");
+    if(!tx_eqz(mode,"pure")&&!tx_eqz(mode,"parallel")&&!tx_eqz(mode,"conflict")&&!tx_eqz(mode,"append")&&!tx_eqz(mode,"append-concurrent"))die("用法 pure|parallel|conflict|append|append-concurrent");
     if(cx_fmt(dir,sizeof dir,"/tmp/check-aw-%d-%ld",sy_pid(),sy_now_ms()))die("唯一夹具目录路径过长");
     if(sy_mkdirat(sy_at_fdcwd(),dir,0700))die("唯一夹具目录");
     protect_source();
@@ -228,7 +300,7 @@ int main(int argc,char **argv){
         join(native,dir,"check-aw-native");v[2]="tools/check-aw.cx";v[4]=native;
         expect(!run(v),"真实原生编译写者");
     }
-    if(tx_eqz(mode,"pure")){pure();edges();conflictprivacy();eolviews();unassigned();}else gitcases(tx_eqz(mode,"conflict"));
+    if(tx_eqz(mode,"pure")){pure();edges();conflictprivacy();eolviews();unassigned();}else if(tx_eqz(mode,"append"))appendcases();else if(tx_eqz(mode,"append-concurrent"))appendconcurrent();else gitcases(tx_eqz(mode,"conflict"));
     expect(source_ok(),"源码仓旧表原字节及新目录存在状态不变");
     i=(int)(55000-(deadline-sy_now_ms()));
     printf("CHECK_AW\tmode=%s\tfailed=0\telapsed_ms=%d\tfixture=%s\n",mode,i,dir);

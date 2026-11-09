@@ -33,9 +33,11 @@
 
 ## 实现备注（工具线交付，未实测）
 
-- `tools/aw.cx` 提供 `ledger/items/check/migrate`，子命令后统一支持 `--root ROOT`（默认当前目录）；只读视图直接stdout，不写out、不回读旧表伪装迁移完成。
+- `tools/aw.cx` 提供 `ledger/items/check/migrate/append`，子命令后统一支持 `--root ROOT`（默认当前目录）；只读视图直接stdout，不写out、不回读旧表伪装迁移完成。
 - 六列规范账本按日期月份及第六列安全owner拆分，不猜测作者；5/7列和其他不能安全推断的历史行进入严格的 `ledger/legacy.tsv`。容器严格双列表头 `aw-legacy-v1-hex<TAB>newline`，每行严格两列：原行小写十六进制及行尾换行存在位，读侧可逆还原。重复事件保留，正常分片仍拒绝错误列数/日期/ID/键。
 - `check` 比较旧表与分片逐行多重集（含行尾位），旧文件缺失只结构检查并明确 `equivalence=unavailable`；不伪造迁移验收。Git冲突仅按物理行起点标记识别，字段内标记文字不误拒；诊断只含相对文件及双方安全ID/state/owner，不回显上下文/检查字段或URL查询，diff3基段不冒成一方，仍非零退出。pure新增真实CLI的合法标记及独立stderr隐私断言，未由本工具线运行。
 - 迁移先校验，私有 `.aw-migrate-stage/` 构造/fsync/等价验收，收据记录schema、行数及发布边界；然后两个目录分别rename。不是跨目录原子事务，部分完成保留现场并拒绝重入。所有既有目标（含空目录）及暂存目录拒绝覆盖，不删旧文件，不改25处引用，无写者共享manifest。
 - `check-aw.cx -- pure|parallel|conflict` 三模式分别55秒总预算，真实编译原生aw到唯一仓外夹具；parallel使用两个独立main克隆和两个进程，各20事件及不同项的真实提交合并；conflict只允许同ID文件冲突并核对双方状态。具体命令见tools/README.md。父统一登记与实测，本工具线未运行编译、检查、真实迁移、提交或推送。真实迁移/删旧/引用切换仍仅cc静默窗口负责。
 - 所有夹具迁移均显式传唯一合成 `--root`；pure另测未知迁移参数严格拒绝。各模式启动前仅在夹具内保存源码仓旧两表快照，并记录源码仓 `agentwork/ledger`、`agentwork/items` 存在性和身份；成功结束及失败报告均核对旧表原字节、原有目录身份或原先不存在的目录仍不存在，避免只比较旧表而漏掉误建新分片。默认ledger/items成功输出仅TSV。
+- `append --owner OWNER --id ID --event EVENT --evidence TEXT [--commit COMMIT] [--date YYYY-MM-DD]` 默认真实UTC日期、commit `-`，只向已迁移布局追加严格六列事件。完整事件相同幂等，同ID不同事件仍保留。稳定owner锁覆盖读、校验、去重与独占暂存/fsync/rename发布；不写items、旧表或其他owner。未知暂存拒绝且保留，原目标失败不变，不承诺跨文件原子事务。
+- 父真实追加检查：append 12.99秒、append-concurrent 13.15秒、pure回归6.76秒，均failed=0，原55秒预算不变。并发检查改为读至EOF再关闭子管道并保存逐子完整输出与退出状态；原失败保留，未记录的原signal不推断为事实。
