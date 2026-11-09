@@ -45,6 +45,12 @@ static const char *g_self;
 static int cs_fp_active;
 static const char *cs_fp_helper;
 static char cs_fp_source[65];
+static const char *cs_span_driver, *cs_span_prepared;
+static const char *cs_span_dirs[3];
+static int cs_span_count, cs_span_index;
+static const char *cs_receipt_producer, *cs_kernel_result;
+static char *cs_span_value(const char *text, const char *key);
+static void cs_span_absolute(const char *p);
 
 static void cs_die(const char *a, const char *b) {
     sy_eprintf("chain-step: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -601,6 +607,24 @@ static void cs_source(const char *s, char out[65]) {
 static void cs_fp_record(const char *s, const char *rev, const char *pkg, const char *ctor,
                          const char *artifact, const char *receipt, int reuse, long wall) {
     char source[65], ph[65], ch[65], ah[65], hh[65], self[65], tool[4400], th[65], text[16384]; long n;
+    /* Old records retain their real native producer identity. Never substitute
+     * its SHA into a new record; only that verified executable may revalidate. */
+    if(reuse){
+        long rn=0;char *r=cs_load(receipt,&rn);if(!r)cs_die("REFUSE missing receipt",receipt);
+        char *producer=cs_span_value(r,"chain_sha"),current[65];cs_sha("/proc/self/exe",current);
+        if(strcmp(producer,current)){
+            if(!cs_receipt_producer)cs_die("REFUSE explicit receipt producer required",receipt);
+            cs_span_absolute(cs_receipt_producer);char before[65],after[65],hdr[4];int fd=sy_open(cs_receipt_producer,O_RDONLY,0);
+            if(fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4)||access(cs_receipt_producer,X_OK))cs_die("REFUSE native receipt producer",cs_receipt_producer);
+            cs_sha(cs_receipt_producer,before);if(strcmp(before,producer))cs_die("REFUSE receipt producer SHA mismatch",receipt);
+            char *v[]={(char *)cs_receipt_producer,"fp-identity",(char *)s,(char *)rev,(char *)pkg,(char *)ctor,(char *)artifact,(char *)receipt,(char *)cs_fp_helper,0};
+            char *output=0;size_t bytes=0;int rc=cx_runv_timeout(v,45,&output,&bytes);
+            if(output&&sy_write_all(1,output,bytes))cs_die("producer output",receipt);free(output);cs_sha(cs_receipt_producer,after);
+            if(rc||strcmp(before,after))cs_die("REFUSE producer revalidation",receipt);
+            free(producer);free(r);return;
+        }
+        free(producer);free(r);
+    }
     if (cx_fmt(source, sizeof source, "%s", cs_fp_source)) cs_die("source identity", s);
     cs_sha(pkg, ph); cs_sha(ctor, ch); cs_tree(artifact, 0, ah);
     if (cx_fmt(tool, sizeof tool, "%s/tools/release-build.cx", s)) cs_die("path", s); cs_sha(tool, th);
@@ -621,16 +645,26 @@ static void cs_fp_record(const char *s, const char *rev, const char *pkg, const 
     }
     sy_printf("PREPARED\tfixedpoint\tartifact=%s\tsha=%s\tconstructor_sha=%s\tsource_sha=%s\twall_ms=%ld\treused=%d\n", artifact, ah, ch, source, wall, reuse);
 }
-/* 一代：两个 ISA 的 kernel 落到同一目录（复用 cs_routes_kernels 的调用方式）。 */
-static int cs_fp_kernels(const char *s, const char *dir) {
-    char kdir[4400], iso[4400], launcher[4400], tool[4400], dst[4400];
-    char *v[8]; int n = 0, a;
+/* 两 ISA 使用当代已验证 phase-0/link 的 native candidate；源码与工具仍取冻结 S。
+ * 显式传 P4 与实际构造器 SHA，route 收据不匹配即拒绝，不接受 ROOT launcher 身份。 */
+static int cs_fp_kernels(const char *s, const char *dir, const char *ctor, const char *pkg) {
+    char kdir[4400], tool[4400], iso[4400], dst[4400], declared[65], receipt[4400], needle[100], actual_ctor[4400], selector[8900];
+    char *v[14]; int n = 0, a;
+    if (!ctor || ctor[0] != '/') cs_die("REFUSE explicit kernel constructor required", ctor);
+    if (sy_realpath(ctor, actual_ctor, sizeof actual_ctor) < 0) cs_die("REFUSE kernel constructor resolution", ctor);
+    {int fd;char hdr[4];fd=sy_open(ctor,O_RDONLY,0);if(fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4))cs_die("REFUSE kernel phase requires native ELF constructor",ctor);}
     if (cx_fmt(kdir, sizeof kdir, "%s/kernel-route", dir)) cs_die("path", dir);
-    if (cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", s)) cs_die("path", s);
     if (cx_fmt(tool, sizeof tool, "%s/tools/kernel-route.cx", s)) cs_die("path", s);
-    v[n++] = (char *)"sh"; v[n++] = launcher; v[n++] = tool; v[n++] = (char *)"--";
-    v[n++] = (char *)s; v[n++] = kdir; v[n] = 0;
+    cs_sha(ctor, declared);
+    if (sy_setenv("UNISA_CONTAINER", pkg, 1)) cs_die("kernel package", pkg);
+    v[n++] = (char *)ctor; v[n++] = tool; v[n++] = (char *)"--";
+    v[n++] = (char *)s; v[n++] = kdir; v[n++] = "--constructor"; v[n++] = (char *)ctor;
+    v[n++] = "--constructor-sha"; v[n++] = declared; v[n++] = "--package"; v[n++] = (char *)pkg; v[n] = 0;
     if (cs_run(v, ".")) cs_die("kernel-route", kdir);
+    if (cx_fmt(receipt, sizeof receipt, "%s/route.tsv", kdir) || cx_fmt(needle, sizeof needle, "\nconstructor_sha\t%s\n", declared)) cs_die("receipt path", kdir);
+    /* Equal bytes do not imply equal generation roles: require the explicit selector too. */
+    if (cx_fmt(selector, sizeof selector, "\nconstructor\t%s\nconstructor_path\t%s\n", actual_ctor, actual_ctor)) cs_die("receipt constructor path", ctor);
+    {long rn=0;char *r=cs_load(receipt,&rn);if(!r||!strstr(r,needle)||!strstr(r,selector))cs_die("REFUSE kernel constructor receipt mismatch",receipt);free(r);}
     for (a = 0; a < 2; a++) {
         if (cx_fmt(iso, sizeof iso, "%s/%s.kernel", kdir, a ? "arm64" : "x86_64")) cs_die("path", kdir);
         if (cs_file_size(iso) < 0) cs_die("kernel-route wrote no kernel", iso);
@@ -650,8 +684,145 @@ static int cs_fp_step(const char *sub, const char *step, long wall, int save) {
     if (old) cs_put(text, n + len + 1, &at, old, n);
     cs_puts(text, n + len + 1, &at, line); cs_save(path, text, at); free(old); free(text); return 0;
 }
-/* One invocation is exactly one bounded construction phase or a fresh comparison.
-   A resume receipt is material provenance, never a cached comparison/PASS. */
+/* X bridge: one fresh native --resume per invocation, ordered durable evidence.
+ * Repeat --span in construction order; --span-index is 1-based. Failed attempts
+ * are retained and never overwritten. No constructor history is synthesized. */
+/* fixedpoint REV S P4 GEN1 OUT --phase g2|g3 --target T
+ * --identity-helper /ABS/F-v2 --span-driver /ABS/whole-front-native
+ * --span-prepared /ABS/PREPARED --span /ABS/UNITS_E3
+ * --span /ABS/PRUNE_ELF --span-index 1; repeat full list with index 2 (Mac).
+ * Mac forward-stub path/SHA must agree in both top-level ready prefixes;
+ * the real stub is passed through to native --resume, never synthesized here.
+ * Win: UNITS_UNITS, E3_E3, PRUNE_ELF, indexes 1,2,3 (no forward stub).
+ * Every invocation performs a real --resume; cursors bind material and order.
+ * Failed attempts require a new OUT and remain untouched. */
+static char *cs_span_value(const char *text, const char *key) {
+    char needle[128]; const char *p,*e; long at=0; char *v;
+    if(cx_fmt(needle,sizeof needle,"\n%s\t",key))cs_die("span key",key);
+    p=strstr(text,needle);if(!p||strstr(p+1,needle))cs_die("REFUSE missing/duplicate span field",key);
+    p+=strlen(needle);e=strchr(p,'\n');if(!e)cs_die("span wire",key);
+    v=malloc(e-p+1);if(!v)cs_die("alloc",key);cs_put(v,e-p+1,&at,p,e-p);return v;
+}
+static void cs_span_match(const char *text,const char *key,const char *want){char *v=cs_span_value(text,key);if(strcmp(v,want))cs_die("REFUSE span generation binding",key);free(v);}
+/* --kernel-result ABS accepts completed real AS material. Rehash all 34
+ * inputs, 22 sources, 22 objects, 2 kernels; record adoption, not construction. */
+/* fixedpoint ... --phase kernels-g2|kernels-g3 --kernel-result /ABS/ROUTE
+ * --identity-helper /ABS/F-v2 [--receipt-producer /ABS/OLD_CHAIN_NATIVE].
+ * --receipt-producer also applies to normal g2/g3 and compare dependency
+ * validation only when a receipt names that executable's actual SHA. New
+ * records always name /proc/self/exe, never the supplied old producer. */
+static void cs_kernel_copy_tree(const char *from,const char *to){
+    if(sy_mkdir(to,0755))cs_die("exclusive kernel destination",to);
+    DIR *dp=opendir(from);struct dirent *e;if(!dp)cs_die("kernel directory",from);
+    while((e=readdir(dp))){if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        char a[4400],b[4400];struct stat st;if(cx_fmt(a,sizeof a,"%s/%s",from,e->d_name)||cx_fmt(b,sizeof b,"%s/%s",to,e->d_name)||lstat(a,&st))cs_die("kernel copy path",from);
+        if(S_ISDIR(st.st_mode))cs_kernel_copy_tree(a,b);else if(S_ISREG(st.st_mode))cs_copy(a,b);else cs_die("REFUSE nonregular kernel material",a);
+    }closedir(dp);
+}
+static void cs_fp_accept_kernels(const char *s,const char *pkg,const char *ctor,const char *dir,const char *sub){
+    const char *units[]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};const char *arch[]={"x86_64","arm64"};
+    const char *base[]={"unisacc.com","constructor-package","tools/kernel-route.cx","tools/asm-source.cx","tools/kernel-link.cx","tools/cxlib/elfkernel.cx","tools/cxlib/netpack.cx","tools/bound","tools/bound.c","asm/layout.h","asm/actions.h","asm/../core.h"};
+    char expected[34][160],sources[22][160],objects[22][160],p[4400],actual[4400],h[65],before[65],after[65];int seen[80];int i,a,u;long n=0;
+    memset(seen,0,sizeof seen);cs_span_absolute(cs_kernel_result);cs_tree(cs_kernel_result,0,before);
+    for(i=0;i<12;i++)if(cx_fmt(expected[i],sizeof expected[i],"%s",base[i]))cs_die("kernel key",base[i]);
+    for(a=0;a<2;a++)for(u=0;u<11;u++){i=a*11+u;if(cx_fmt(expected[12+i],sizeof expected[12+i],"asm/%s_%s.S",units[u],arch[a])||cx_fmt(sources[i],sizeof sources[i],"%s/%s.s",arch[a],units[u])||cx_fmt(objects[i],sizeof objects[i],"%s/%s.o",arch[a],units[u]))cs_die("kernel key",sub);}
+    if(cx_fmt(p,sizeof p,"%s/route.tsv",cs_kernel_result))cs_die("kernel route",sub);
+    char *receipt=cs_load(p,&n);if(!receipt||n<1||receipt[n-1]!='\n'||memchr(receipt,0,n)||strncmp(receipt,"unisacc-kernel-route-v1\n",24))cs_die("REFUSE kernel receipt",p);
+    cs_span_match(receipt,"status","PREPARED");cs_span_match(receipt,"canonical","YES");cs_span_match(receipt,"spec","AS-1,AS-8,AS-9");cs_span_match(receipt,"units","transition,arith,buffer,memory,intern,bytes,format,stack,action,run,bridge");
+    if(sy_realpath(ctor,actual,sizeof actual)<0)cs_die("kernel constructor",ctor);cs_span_match(receipt,"constructor",actual);cs_span_match(receipt,"constructor_path",actual);cs_sha(ctor,h);cs_span_match(receipt,"constructor_sha",h);
+    if(sy_realpath(pkg,actual,sizeof actual)<0)cs_die("kernel package",pkg);cs_span_match(receipt,"package",actual);cs_span_match(receipt,"timing","preprocess,assemble,link=UNMEASURED(no portable clock in the prelude)");
+    char *row=strchr(receipt,'\n')+1;
+    while(*row){char *end=strchr(row,'\n');if(!end)cs_die("kernel row",sub);*end=0;char *key=strchr(row,'\t');if(!key)cs_die("kernel columns",sub);*key++=0;int offset=-1,count=0;
+        if(!strcmp(row,"input")){offset=0;count=34;}else if(!strcmp(row,"source")){offset=34;count=22;}else if(!strcmp(row,"object")){offset=56;count=22;}else if(!strcmp(row,"kernel")){offset=78;count=2;}
+        if(offset>=0){char *sha=strchr(key,'\t');if(!sha)cs_die("kernel digest column",sub);*sha++=0;int found=-1;
+            for(i=0;i<count;i++){const char *want=offset==0?expected[i]:offset==34?sources[i]:offset==56?objects[i]:i?"arm64.kernel":"x86_64.kernel";if(!strcmp(key,want))found=i;}
+            if(found<0||seen[offset+found]++)cs_die("REFUSE unknown/duplicate kernel material",key);
+            if(offset==0){if(!found){if(cx_fmt(actual,sizeof actual,"%s",ctor))cs_die("path",ctor);}else if(found==1){if(cx_fmt(actual,sizeof actual,"%s",pkg))cs_die("path",pkg);}else if(!strncmp(key,"asm/",4)){if(cx_fmt(actual,sizeof actual,"%s/exec/c/%s",s,key))cs_die("path",key);}else if(cx_fmt(actual,sizeof actual,"%s/%s",s,key))cs_die("path",key);}
+            else if(cx_fmt(actual,sizeof actual,"%s/%s",cs_kernel_result,key))cs_die("path",key);
+            cs_sha(actual,h);if(strcmp(h,sha))cs_die("REFUSE kernel material SHA mismatch",actual);
+        }else if(strcmp(row,"status")&&strcmp(row,"canonical")&&strcmp(row,"spec")&&strcmp(row,"units")&&strcmp(row,"constructor")&&strcmp(row,"constructor_path")&&strcmp(row,"constructor_sha")&&strcmp(row,"package")&&strcmp(row,"timing"))cs_die("REFUSE unknown kernel metadata",row);
+        row=end+1;
+    }
+    for(i=0;i<80;i++)if(seen[i]!=1)cs_die("REFUSE incomplete 34/22/22/2 kernel material set",sub);
+    free(receipt);cs_tree(cs_kernel_result,0,after);if(strcmp(before,after))cs_die("REFUSE kernel result changed",sub);
+    cs_kernel_copy_tree(cs_kernel_result,sub);cs_tree(sub,0,after);if(strcmp(before,after))cs_die("REFUSE kernel copy identity",sub);
+    for(a=0;a<2;a++){if(cx_fmt(p,sizeof p,"%s/%s.kernel",sub,arch[a])||cx_fmt(actual,sizeof actual,"%s/%s.kernel",dir,arch[a]))cs_die("kernel output",sub);if(sy_exists(actual))cs_die("REFUSE existing canonical kernel",actual);cs_copy(p,actual);}
+}
+static void cs_span_absolute(const char *p){char r[4400];if(!p||p[0]!='/'||sy_realpath(p,r,sizeof r)<0||strcmp(p,r)||strpbrk(p,"\t\r\n"))cs_die("REFUSE canonical absolute path",p);}
+static int cs_fp_accept_span(const char *s,const char *pkg,const char *ctor,const char *dir,const char *sub,int target){
+    char p[4400],r[4400],cursor[4400],binding[32768],h[65],line[128];long n=0,at=0,start=sy_now_ms();int i;
+    char *ready[3],*input[3],*first[3],*last[3];
+    char *stub=0,*roots_text,*roots[44];int nr=0;
+    if(cs_span_count!=(target<4?2:3)||cs_span_index<1||cs_span_index>cs_span_count)cs_die("REFUSE Mac 2/Win 3 spans, 1-based index required",sub);
+    cs_span_absolute(cs_span_driver);cs_span_absolute(cs_span_prepared);
+    {char hdr[4];int fd=sy_open(cs_span_driver,O_RDONLY,0);if(fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4)||access(cs_span_driver,X_OK))cs_die("REFUSE native span driver",cs_span_driver);}
+    if(cx_fmt(p,sizeof p,"%s/receipt.txt",cs_span_prepared))cs_die("path",sub);
+    char *prep=cs_load(p,&n);if(!prep||strncmp(prep,"whole-front-prepare-v1\n",23))cs_die("REFUSE prepared receipt",p);
+    const char *files[]={s,pkg,ctor};const char *keys[]={"root","pkg","ctor"};
+    for(i=0;i<3;i++){if(sy_realpath(files[i],r,sizeof r)<0)cs_die("realpath",files[i]);cs_span_match(prep,keys[i],r);}
+    cs_sha(pkg,h);cs_span_match(prep,"pkg_sha",h);cs_sha(ctor,h);cs_span_match(prep,"ctor_sha",h);cs_span_match(prep,"source_sid",cs_fp_source);
+    if(cx_fmt(p,sizeof p,"%s/lnx-x86_64",dir)||sy_realpath(p,r,sizeof r)<0)cs_die("objects",dir);cs_span_match(prep,"objects",r);free(prep);
+    binding[0]=0;cs_puts(binding,sizeof binding,&at,"chain-span-adoption-v1\n");cs_puts(binding,sizeof binding,&at,cs_fp_source);
+    const char *bound[]={cs_span_driver,cs_span_prepared,pkg,ctor,r,sub};
+    for(i=0;i<6;i++){cs_puts(binding,sizeof binding,&at,"\n");cs_puts(binding,sizeof binding,&at,bound[i]);}
+    char driver_before[65];cs_sha(cs_span_driver,driver_before);cs_puts(binding,sizeof binding,&at,driver_before);
+    if(cx_fmt(p,sizeof p,"%s/receipt.txt",cs_span_prepared))cs_die("path",sub);cs_sha(p,h);cs_puts(binding,sizeof binding,&at,h);
+    for(i=0;i<cs_span_count;i++){
+        cs_span_absolute(cs_span_dirs[i]);if(cx_fmt(p,sizeof p,"%s.control/ready.tsv",cs_span_dirs[i]))cs_die("path",sub);
+        ready[i]=cs_load(p,&n);if(!ready[i]||strncmp(ready[i],"whole-front-span-v1\n",20))cs_die("REFUSE span receipt",p);
+        cs_sha(p,h);cs_puts(binding,sizeof binding,&at,cs_span_dirs[i]);cs_puts(binding,sizeof binding,&at,h);
+        char *top_end=strstr(ready[i],"\nctx_before_bytes\t");if(!top_end)cs_die("REFUSE missing span context boundary",p);*top_end=0;
+        cs_span_match(ready[i],"prepared",cs_span_prepared);cs_span_match(ready[i],"target",cs_fp_targets[target]);cs_span_match(ready[i],"output",cs_span_dirs[i]);
+        input[i]=cs_span_value(ready[i],"input");first[i]=cs_span_value(ready[i],"first");last[i]=cs_span_value(ready[i],"last");
+        if(i&&strcmp(input[i],cs_span_dirs[i-1]))cs_die("REFUSE disconnected spans",sub);
+        if(target<4){
+            char *actual=cs_span_value(ready[i],"forward_stub");cs_span_absolute(actual);cs_sha(actual,h);cs_span_match(ready[i],"forward_stub_sha",h);
+            if(i&&strcmp(stub,actual))cs_die("REFUSE Mac span stub changed",sub);
+            if(!i)stub=actual;else free(actual);
+            cs_puts(binding,sizeof binding,&at,stub);cs_puts(binding,sizeof binding,&at,h);
+        }else if(strstr(ready[i],"\nforward_stub\t"))cs_die("REFUSE Win forward stub",sub);
+        cs_tree(cs_span_dirs[i],0,h);cs_puts(binding,sizeof binding,&at,h);
+        if(!i){cs_sha(input[i],h);cs_puts(binding,sizeof binding,&at,h);}
+    }
+    if(target<4){if(strcmp(first[0],"units")||strcmp(last[0],"e3")||strcmp(first[1],"prune")||strcmp(last[1],"elf"))cs_die("REFUSE Mac span boundaries",sub);}
+    else if(strcmp(first[0],"units")||strcmp(last[0],"units")||strcmp(first[1],"e3")||strcmp(last[1],"e3")||strcmp(first[2],"prune")||strcmp(last[2],"elf"))cs_die("REFUSE Win span boundaries",sub);
+    if(cx_fmt(p,sizeof p,"%s/roots.txt",cs_span_prepared))cs_die("roots path",sub);
+    cs_sha(p,h);cs_puts(binding,sizeof binding,&at,h);roots_text=cs_load(p,&n);
+    if(!roots_text||n<1||roots_text[n-1]!='\n'||memchr(roots_text,0,n)||memchr(roots_text,'\r',n))cs_die("REFUSE roots wire",p);
+    /* A frames bind logical aliases (src/runtime -> cx/runtime) byte-for-byte.
+     * Resolve only for containment/type validation; pass the original argv. */
+    char source_root[4400];if(sy_realpath(s,source_root,sizeof source_root)<0)cs_die("REFUSE frozen source root",s);long source_len=strlen(source_root);
+    char *next=roots_text;while(*next){
+        char *end=strchr(next,'\n');if(!end||end==next||nr==44)cs_die("REFUSE 44 source roots required",p);*end=0;
+        if(next[0]!='/')cs_die("REFUSE absolute logical source root required",next);
+        long j;for(j=0;next[j];j++)if((unsigned char)next[j]<32||(unsigned char)next[j]==127)cs_die("REFUSE source root text",next);
+        char resolved[4400];struct stat st;
+        if(sy_realpath(next,resolved,sizeof resolved)<0||strncmp(resolved,source_root,source_len)||resolved[source_len]!='/'||stat(next,&st)||!S_ISREG(st.st_mode))cs_die("REFUSE source root outside frozen S/nonregular",next);
+        roots[nr++]=next;next=end+1;
+    }
+    if(nr!=44)cs_die("REFUSE exactly 44 source roots required",p);
+    cs_puts(binding,sizeof binding,&at,"\n");
+    if(cx_fmt(cursor,sizeof cursor,"%s/.span-%d-%d",dir,target,cs_span_index))cs_die("cursor",sub);
+    if(sy_exists(cursor)||sy_exists(sub))cs_die("REFUSE existing adoption attempt/destination",cursor);
+    if(cs_span_index>1){if(cx_fmt(p,sizeof p,"%s/.span-%d-%d.ok",dir,target,cs_span_index-1))cs_die("cursor",sub);char *old=cs_load(p,&n);if(!old||n<at||memcmp(old,binding,at))cs_die("REFUSE changed adoption sequence",p);free(old);}
+    { int fd=sy_open(cursor,O_WRONLY|O_CREAT|O_EXCL,0644);if(fd<0||sy_write_all(fd,binding,at)||sy_close(fd))cs_die("exclusive adoption attempt",cursor); }
+    int k=cs_span_index-1,ac=0;char *v[64];v[ac++]=(char *)cs_span_driver;v[ac++]="span";v[ac++]=(char *)cs_span_prepared;v[ac++]=(char *)cs_fp_targets[target];v[ac++]=input[k];v[ac++]=(char *)cs_span_dirs[k];v[ac++]=first[k];v[ac++]=last[k];
+    for(i=0;i<nr;i++)v[ac++]=roots[i];
+    if(stub){v[ac++]="--forward-stub";v[ac++]=stub;}
+    v[ac++]="--resume";v[ac]=0;
+    char *output=0;size_t bytes=0;int rc=cx_runv_timeout(v,45,&output,&bytes);if(output&&sy_write_all(1,output,bytes))cs_die("span output",sub);free(output);
+    if(rc||sy_now_ms()-start>60000)cs_die("REFUSE revalidation failed/deadline",cursor);
+    if(cx_fmt(line,sizeof line,"revalidation_ms\t%ld\n",sy_now_ms()-start))cs_die("wall",sub);cs_puts(binding,sizeof binding,&at,line);
+    char driver_after[65];cs_sha(cs_span_driver,driver_after);if(strcmp(driver_before,driver_after))cs_die("REFUSE driver changed",cursor);
+    if(cx_fmt(p,sizeof p,"%s.ok",cursor))cs_die("cursor",sub);cs_save(p,binding,at);
+    if(cs_span_index!=cs_span_count)return 0;
+    if(sy_mkdir(sub,0755))cs_die("exclusive adoption destination",sub);
+    char from[4400],to[4400],leaf[128];if(cx_fmt(leaf,sizeof leaf,"slice-%s",cs_fp_targets[target]))cs_die("slice",sub);for(i=0;leaf[i];i++)if(leaf[i]=='/')leaf[i]='-';
+    if(cx_fmt(from,sizeof from,"%s/image",cs_span_dirs[k])||cx_fmt(to,sizeof to,"%s/%s",sub,leaf))cs_die("image",sub);cs_copy(from,to);
+    for(i=0;i<cs_span_count;i++){if(cx_fmt(from,sizeof from,"%s/.span-%d-%d.ok",dir,target,i+1)||cx_fmt(to,sizeof to,"%s/adopt-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);if(cx_fmt(from,sizeof from,"%s.control/ready.tsv",cs_span_dirs[i])||cx_fmt(to,sizeof to,"%s/span-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);}
+    return 1;
+}
+/* Resume receipts are material provenance, never a cached comparison/PASS. */
 static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
                          const char *target, const char *phase, int resume, const char *object, int link) {
     char dir[4400], sub[4400], ctor[4400], rec[4400], g2[4400], g3[4400];
@@ -685,16 +856,15 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
             if (!compare && (kernel ? !tx_eqz(phase, g == 2 ? "kernels-g2" : "kernels-g3") : (i != selected || !tx_eqz(phase, g == 2 ? "g2" : "g3")))) continue;
             if (cx_fmt(sub, sizeof sub, "%s/%s", dir, kernel ? "kernel-route" : i == 0 ? "lnx-x86_64" : i == 1 ? "lnx-arm64" : i == 2 ? "osx-x86_64" : i == 3 ? "osx-arm64" : i == 4 ? "win-x86_64" : "win-arm64")) cs_die("path", dir);
             if (cx_fmt(rec, sizeof rec, "%s/phase-%d.tsv", dir, i)) cs_die("path", dir);
-            if (kernel) { if (cx_fmt(ctor, sizeof ctor, "%s/unisacc.com", s)) cs_die("path", s); }
-            else if (i >= 2) { if (cx_fmt(ctor, sizeof ctor, "%s/lnx-x86_64/candidate", dir)) cs_die("path", dir); }
+            if (kernel || i >= 2) { if (cx_fmt(ctor, sizeof ctor, "%s/lnx-x86_64/candidate", dir)) cs_die("path", dir); }
             else if (g == 2) { if (cx_fmt(ctor, sizeof ctor, "%s", gen1)) cs_die("path", gen1); }
             else if (cx_fmt(ctor, sizeof ctor, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2);
             /* Validate the constructor's provenance, not merely its current bytes. */
-            if (!kernel && (g == 3 || i >= 2)) {
+            if (kernel || g == 3 || i >= 2) {
                 char dep[4400], dr[4400], dc[4400];
-                const char *base = i >= 2 ? dir : g2;
+                const char *base = (kernel || i >= 2) ? dir : g2;
                 if (cx_fmt(dep, sizeof dep, "%s/lnx-x86_64", base) || cx_fmt(dr, sizeof dr, "%s/phase-0.tsv", base)) cs_die("path", base);
-                if (i >= 2 && g == 3) { if (cx_fmt(dc, sizeof dc, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2); }
+                if ((kernel || i >= 2) && g == 3) { if (cx_fmt(dc, sizeof dc, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2); }
                 else if (cx_fmt(dc, sizeof dc, "%s", gen1)) cs_die("path", gen1);
                 cs_fp_record(s, rev, pkg, dc, dep, dr, 1, 0);
                 if (!cs_fp_step(dep, "link", 0, 0)) cs_die("REFUSE incomplete constructor", dep);
@@ -710,7 +880,8 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
             char before_source[65], before_pkg[65], before_ctor[65];
             if (cx_fmt(before_source, sizeof before_source, "%s", cs_fp_source)) cs_die("identity", s);
             cs_sha(pkg, before_pkg); cs_sha(ctor, before_ctor);
-            if (kernel) { if (cs_fp_kernels(s, dir)) return 2; }
+            if (cs_span_driver) { if (!cs_fp_accept_span(s, pkg, ctor, dir, sub, i)) return 0; }
+            else if (kernel) { if(cs_kernel_result)cs_fp_accept_kernels(s,pkg,ctor,dir,sub);else if (cs_fp_kernels(s, dir, ctor, pkg)) return 2; }
             else {
                 char *a[8] = {(char *)pkg, sub, "--target", (char *)cs_fp_targets[i], 0}; int an = 4;
                 if (object) { a[an++] = "--only"; a[an++] = (char *)object; }
@@ -840,10 +1011,11 @@ static int cs_slice(const char *rev, const char *s, int argc, char **argv) {
 }
 
 static int cs_pack(int argc, char **argv) {
-    char *a[12];
+    char *a[16];
     int n = 0, i;
+    if (argc < 0 || argc > (int)(sizeof(a) / sizeof(*a)) - 2) cs_die("REFUSE pack argument capacity", 0);
     a[n++] = (char *)"pack";
-    for (i = 0; i < argc && n + 1 < 12; i++) a[n++] = argv[i];
+    for (i = 0; i < argc; i++) a[n++] = argv[i];
     a[n] = 0;
     return cs_tool(".", "tools/release-ape.cx", a);
 }
@@ -944,6 +1116,12 @@ int main(int argc, char **argv) {
                 if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc && !cs_fp_helper) { cs_fp_helper = argv[++i]; continue; }
                 if (tx_eqz(argv[i], "--object") && i + 1 < argc && !object) { object = argv[++i]; continue; }
                 if (tx_eqz(argv[i], "--link-only") && !link) { link = 1; continue; }
+                if (tx_eqz(argv[i], "--receipt-producer") && i + 1 < argc && !cs_receipt_producer) { cs_receipt_producer=argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--kernel-result") && i + 1 < argc && !cs_kernel_result) { cs_kernel_result=argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--span-driver") && i + 1 < argc && !cs_span_driver) { cs_span_driver = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--span-prepared") && i + 1 < argc && !cs_span_prepared) { cs_span_prepared = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--span") && i + 1 < argc && cs_span_count < 3) { cs_span_dirs[cs_span_count++] = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--span-index") && i + 1 < argc && !cs_span_index) { const char *v=argv[++i]; if(strlen(v)!=1||v[0]<'1'||v[0]>'3')cs_die("REFUSE span index",v);cs_span_index=v[0]-'0';continue; }
                 if (tx_eqz(argv[i], "--sample")) { sample = 1; continue; }
                 if (tx_eqz(argv[i], "--non-release")) { nonrel = 1; continue; }
                 cs_die("REFUSE unknown/duplicate option", argv[i]);
@@ -951,6 +1129,10 @@ int main(int argc, char **argv) {
             if (sample && !nonrel) cs_die("REFUSE sample on release-candidate fixedpoint (default FULL)", 0);
             if (sample || nonrel) cs_die("REFUSE sampled fixedpoint", 0);
             if (!phase) cs_die("REFUSE fixedpoint needs --phase", 0);
+            if(cs_kernel_result&&(cs_span_driver||object||link||resume||target||(strcmp(phase,"kernels-g2")&&strcmp(phase,"kernels-g3"))))cs_die("REFUSE incompatible kernel result options",phase);
+            if (cs_span_driver || cs_span_prepared || cs_span_count || cs_span_index) {
+                if (!cs_span_driver || !cs_span_prepared || !cs_span_count || !cs_span_index || object || link || resume || !target || (strcmp(phase,"g2") && strcmp(phase,"g3")) || (strncmp(target,"osx/",4) && strncmp(target,"win/",4))) cs_die("REFUSE incomplete/incompatible span options", phase);
+            }
             return cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target, phase, resume, object, link);
         }
     }

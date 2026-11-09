@@ -1,0 +1,194 @@
+/* Private whole-program phase worker; linked against the candidate objects.
+   part.tsv lists the complete expanded order, not merely this wave. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+extern int cxi_read(const char *, unsigned char **, long *, char *, long);
+extern int dv_expand(int *, const char **, int);
+extern int dv_cx(const char *);
+extern int hs_read(const char *, unsigned char **, long *, char *, int);
+extern int pm_open(const unsigned char *, long, char *, int);
+extern int pm_close(void);
+extern int ex_ri_arm(const char *, int, const unsigned char *, long);
+extern int ex_touch(void);
+extern int bd_touch(void);
+extern int st_touch(void);
+extern int st_extra_reset(void);
+extern int st_dirs(const unsigned char *, int, const unsigned char *, int, const unsigned char *, int);
+extern int st_attr_reset(void);
+extern int st_includebase(const unsigned char *, int);
+extern int st_units(int);
+extern int st_attr_exchange(unsigned char **, long *, long *);
+extern int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+extern int fr_add(unsigned char **, long *, long *, const char *, long, const unsigned char *, long);
+extern int hf_keep(const unsigned char *, long, const unsigned char *, long);
+extern int dv_run_lower(const char *, const char *, const char *, int, int, int, unsigned char *, long, unsigned char **, long *, char *, int, int *, int);
+extern int dv_fwd_replay(void);
+extern const char *dv_fwd_file(void);
+extern int cx_fmt(char *, int, const char *, ...);
+
+static const char *wf_src[128];
+static char wf_why[256];
+static long long wf_now(void) {
+    sy_ts_t t;
+    if (sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + t.nsec;
+}
+static int wf_fail(const char *s) {
+    sy_eprintf("worker: %s: %s\n", s, wf_why);
+    return 1;
+}
+static int wf_num(const char *s, int *out) {
+    long v = 0;
+    if (!s || !s[0]) return 1;
+    while (*s) {
+        if (*s < '0' || *s > '9' || v > 214748364L) return 1;
+        v = v * 10 + *s - '0';
+        if (v > 2147483647L) return 1;
+        s++;
+    }
+    *out = (int)v;
+    return 0;
+}
+static int wf_read(const char *path, unsigned char **b, long *n) {
+    int rc = cxi_read(path, b, n, wf_why, 256);
+    if (rc || *n < 0 || *n > 2147483647L) return wf_fail(path);
+    return 0;
+}
+static int wf_write(const char *dir, const char *name, const unsigned char *b, long n) {
+    char path[8192];
+    int fd, rc, cl;
+    if (n < 0 || (n && !b) || cx_fmt(path, 8192, "%s/%s", dir, name)) return 1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return wf_fail(path);
+    rc = sy_write_all(fd, b, n);
+    cl = sy_close(fd);
+    return rc || cl ? wf_fail(path) : 0;
+}
+static int wf_manifest(const char *dir, int first, int count, int n) {
+    char path[8192], line[128];
+    int fd, rc, cl, i;
+    if (cx_fmt(path, 8192, "%s/part.tsv", dir) ||
+        cx_fmt(line, 128, "first\t%d\ncount\t%d\ntotal\t%d\n", first, count, n)) return 1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return 1;
+    rc = sy_write_all(fd, line, tx_len(line, 128));
+    for (i = 0; !rc && i < n; i++) {
+        long len = tx_len(wf_src[i], 2147483647L);
+        if (len < 0 || tx_chr(wf_src[i], len, '\n') >= 0 || tx_chr(wf_src[i], len, '\t') >= 0) { rc = 1; break; }
+        if (cx_fmt(line, 128, "%d\t", i)) { rc = 1; break; }
+        rc = sy_write_all(fd, line, tx_len(line, 128));
+        if (!rc) rc = sy_write_all(fd, wf_src[i], len);
+        if (!rc) rc = sy_write_all(fd, "\n", 1);
+    }
+    cl = sy_close(fd);
+    return rc || cl;
+}
+static int wf_front(const char *target, const char *dir, int first, int count, int n) {
+    char route[96];
+    unsigned char *frames = 0, *attrs = 0;
+    long fn = 0, fc = 0, an = 0, ac = 0;
+    int i;
+    if (first > n || count > n - first || count < 1 || cx_fmt(route, 96, "%s/unit", target)) return 1;
+    for (i = first; i < first + count; i++) {
+        unsigned char *src = 0, *out = 0;
+        long sn = 0, on = 0;
+        long long start, end;
+        int rc;
+        if (wf_read(wf_src[i], &src, &sn)) return 1;
+        start = wf_now();
+        if (start < 0) return 1;
+        rc = st_span(route, target, wf_src[i], dv_cx(wf_src[i]), (unsigned)i, 0, 0, src, sn, &out, &on, wf_why, 256);
+        end = wf_now();
+        sy_eprintf("WORKER_TIME\tfront\tunit=%d\tns=%lld\tpath=%s\n", i, end < 0 ? -1LL : end - start, wf_src[i]);
+        if (rc || end < 0 || on < 0 || on > 2147483647L) return wf_fail(wf_src[i]);
+        if (fr_add(&frames, &fn, &fc, wf_src[i], tx_len(wf_src[i], 2147483647L), out, on)) return 1;
+        mm_free(out);
+    }
+    if (st_attr_exchange(&attrs, &an, &ac)) return 1;
+    if (wf_write(dir, "frames.bin", frames, fn) || wf_write(dir, "attrs.bin", attrs, an) || wf_manifest(dir, first, count, n)) return 1;
+    mm_free(frames);
+    mm_free(attrs);
+    return 0;
+}
+static long wf_u32(const unsigned char *p) {
+    return (long)p[0] | ((long)p[1] << 8) | ((long)p[2] << 16) | ((long)p[3] << 24);
+}
+static int wf_stub(const char *target, const char *phase, const char *dir, int n) {
+    unsigned char *raw = 0, *frames, *attrs = 0, *out = 0, *stub = 0;
+    long rn = 0, fn, an, ac, on = 0, sn = 0, pos = 0, units = 0;
+    char route[96], replay[8192];
+    const char *path;
+    int execf = 0, rc;
+    long long start, end;
+    if (wf_read(phase, &raw, &rn) || rn < 8) return 1;
+    fn = wf_u32(raw); an = wf_u32(raw + 4);
+    if (fn <= 0 || fn > rn - 8 || an != rn - 8 - fn) return 1;
+    frames = raw + 8;
+    while (pos < fn) {
+        long z, nl;
+        if (fn - pos < 8) return 1;
+        z = wf_u32(frames + pos); nl = wf_u32(frames + pos + 4);
+        if (z < 4 || z > fn - pos - 4 || nl > z - 4) return 1;
+        if (units >= n || tx_len(wf_src[units], 2147483647L) != nl || !mm_same(frames + pos + 8, wf_src[units], nl)) return 1;
+        pos += 4 + z; units++;
+    }
+    if (units != n) return 1;
+    if (an && (an < 4 || wf_u32(raw + 8 + fn) > 1000000L || an != 4 + 9 * wf_u32(raw + 8 + fn))) return 1;
+    for (long k = 4; k < an; k += 9) if (wf_u32(raw + 8 + fn + k) >= n) return 1;
+    if (cx_fmt(route, 96, "%s/multi/image/O0", target) || cx_fmt(replay, 8192, "%s/replay.phase", dir)) return 1;
+    if (sy_setenv("UNISACC_PHASE", "A2", 1) || sy_setenv("UNISACC_PHASE_OUT", replay, 1)) return 1;
+    if (hf_keep(frames, fn, raw + 8 + fn, an)) return 1;
+    ac = an;
+    if (an) {
+        attrs = mm_alloc(an);
+        if (!attrs || mm_copy(attrs, an, raw + 8 + fn, an)) return 1;
+    }
+    if (st_attr_exchange(&attrs, &an, &ac)) return 1;
+    frames = mm_alloc(fn);
+    if (!frames || mm_copy(frames, fn, raw + 8, fn)) return 1;
+    mm_free(raw);
+    start = wf_now();
+    if (start < 0) return 1;
+    rc = dv_run_lower(route, target, wf_src[0], dv_cx(wf_src[0]), 0, n, frames, fn, &out, &on, wf_why, 256, &execf, 0);
+    end = wf_now();
+    sy_eprintf("WORKER_TIME\tstub\tns=%lld\n", end < 0 ? -1LL : end - start);
+    mm_free(out);
+    if (rc || end < 0 || !dv_fwd_replay()) return wf_fail("forward replay required");
+    path = dv_fwd_file();
+    if (!path || wf_read(path, &stub, &sn) || !sn) return 1;
+    if (wf_write(dir, "stub.c", stub, sn) || wf_write(dir, "stub-path.txt", (const unsigned char *)path, tx_len(path, 8192))) return 1;
+    mm_free(stub);
+    return 0;
+}
+int main(int argc, char **argv) {
+    unsigned char *pkg = 0;
+    long pn = 0;
+    char route[96];
+    int stub, root, n, i, first = 0, count = 0, rc;
+    const char *dir;
+    if (argc < 2) return 2;
+    stub = tx_eqz(argv[1], "stub");
+    if (!stub && !tx_eqz(argv[1], "front")) return 2;
+    root = stub ? 6 : 7;
+    if (argc - root != 44) return 2;
+    dir = stub ? argv[5] : argv[4];
+    if (!stub && (wf_num(argv[5], &first) || wf_num(argv[6], &count))) return 2;
+    n = argc - root;
+    for (i = 0; i < n; i++) wf_src[i] = argv[root + i];
+    if (sy_setenv("UNISACC_PHASE", "", 1) || sy_setenv("UNISACC_PHASE_OUT", "", 1) || sy_setenv("UNISA_CONTAINER", argv[2], 1)) return 1;
+    if (dv_expand(&n, wf_src, 0)) return wf_fail("expand");
+    if (cx_fmt(route, 96, "%s/unit", argv[3]) || ex_ri_arm(route, 0, 0, 0) || ex_touch() || bd_touch() || st_touch()) return 1;
+    if (hs_read(argv[2], &pkg, &pn, wf_why, 256) || pm_open(pkg, pn, wf_why, 256)) return wf_fail("package");
+    if (st_extra_reset() || st_dirs(0, 0, 0, 0, 0, 0) || st_attr_reset() || st_includebase(0, 0) || st_units(n)) return 1;
+    if (sy_mkdir(dir, 0755)) return wf_fail("new output directory required");
+    rc = stub ? wf_stub(argv[3], argv[4], dir, n) : wf_front(argv[3], dir, first, count, n);
+    if (pm_close()) rc = 1;
+    mm_free(pkg);
+    return rc;
+}

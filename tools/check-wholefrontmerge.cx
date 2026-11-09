@@ -1,0 +1,43 @@
+/* 公开结构合并接口：多记录全局编号与顺序、非相邻重复、零单位双空编码。
+ * 不运行产品阶段，不重跑 check-whole-front 的九项合同。 */
+#pragma unisa use cxlib.wholefrontmerge
+#pragma unisa use cxlib.pytempfile
+#pragma unisa use sys.fs
+static int failed;
+static char base[8192],part[2][8192];
+static const unsigned char frames0[]={5,0,0,0,1,0,0,0,'a',5,0,0,0,1,0,0,0,'b'};
+static const unsigned char frames1[]={5,0,0,0,1,0,0,0,'c'};
+/* 全局单位1先于0；相同单位的不同属性合法，opaque字节不参与重编号。 */
+static const unsigned char attrs0[]={3,0,0,0,1,0,0,0,255,128,0,7,9,0,0,0,0,3,0,0,0,1,1,0,0,0,255,128,0,7,8};
+static const unsigned char attrs1[]={1,0,0,0,2,0,0,0,3,0,0,0,1};
+/* 独立手写phase，不能从实际输出或生产编码器导出。 */
+static const unsigned char expected[]={27,0,0,0,40,0,0,0,
+ 5,0,0,0,1,0,0,0,'a',5,0,0,0,1,0,0,0,'b',5,0,0,0,1,0,0,0,'c',
+ 4,0,0,0,1,0,0,0,255,128,0,7,9,0,0,0,0,3,0,0,0,1,1,0,0,0,255,128,0,7,8,2,0,0,0,3,0,0,0,1};
+static const unsigned char emptyphase[]={0,0,0,0,4,0,0,0,0,0,0,0};
+static void ck(int ok,const char *name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static int store(int k,const char *leaf,const void *bytes,size_t n){char p[8192];return cx_fmt(p,sizeof p,"%s/%s",part[k],leaf)||cx_write(p,bytes,n);}
+static int exact(const char *p,const unsigned char *want,size_t z){size_t n=0;char *b=cx_read(p,&n);int ok=b&&n==z&&!memcmp(b,want,z);free(b);return ok;}
+static int absent(const char *p){int fd=sy_open_new(p,0600);if(fd<0)return 0;int cl=sy_close(fd),rm=sy_unlink(p);return !cl&&!rm;}
+static int fixture(void){
+ const char *m0="first\t0\ncount\t2\ntotal\t3\n0\ta\n1\tb\n2\tc\n",*m1="first\t2\ncount\t1\ntotal\t3\n0\ta\n1\tb\n2\tc\n";
+ return store(0,"part.tsv",m0,strlen(m0))||store(1,"part.tsv",m1,strlen(m1))||store(0,"frames.bin",frames0,sizeof frames0)||store(1,"frames.bin",frames1,sizeof frames1)||store(0,"attrs.bin",attrs0,sizeof attrs0)||store(1,"attrs.bin",attrs1,sizeof attrs1);
+}
+static void one(int mode,const char *name){
+ char out[8192],why[256]={0};const char *dirs[]={part[0],part[1]};int setup=fixture();
+ if(cx_fmt(out,sizeof out,"%s/result-%d",base,mode))setup=1;
+ if(mode==1){unsigned char a[sizeof attrs0];memcpy(a,attrs0,sizeof a);a[30]=9;setup=setup||store(0,"attrs.bin",a,sizeof a);}
+ if(mode==2){const char *m="first\t0\ncount\t0\ntotal\t0\n";const unsigned char zero[]={0,0,0,0};for(int k=0;k<2;k++)setup=setup||store(k,"part.tsv",m,strlen(m))||store(k,"frames.bin","",0)||store(k,"attrs.bin",k?zero:(const unsigned char *)"",k?sizeof zero:0);}
+ if(setup){ck(0,"fixture-write");return;}
+ int rc=wf_merge_parts(dirs,2,out,why,sizeof why),ok=0;
+ if(mode==1)ok=rc==2&&!strcmp(why,"duplicate attribute record")&&absent(out);
+ else {ok=rc==0&&why[0]==0&&exact(out,mode==2?emptyphase:expected,mode==2?sizeof emptyphase:sizeof expected);if(!rc&&sy_unlink(out))ok=0;}
+ ck(ok,name);if(!ok)fprintf(stderr,"case=%d rc=%d why=%s\n",mode,rc,why);
+}
+int main(void){
+ int owned=!ptf_mkdtemp(0,"wholefrontmerge-check-",base,sizeof base);
+ if(!owned||cx_fmt(part[0],sizeof part[0],"%s/p0",base)||cx_fmt(part[1],sizeof part[1],"%s/p1",base)||sy_mkdir(part[0],0700)||sy_mkdir(part[1],0700))ck(0,"exclusive-fixture");
+ else {one(0,"multiple-attributes-global-units-order-and-opaque-bytes");one(1,"nonadjacent-duplicate-record-no-output");one(2,"zero-units-empty-and-zero-count-attributes-exact-phase");}
+ if(owned)ptf_rmtree(base);
+ printf("CHECK_WHOLEFRONTMERGE\tfailed=%d\n",failed);return failed?1:0;
+}

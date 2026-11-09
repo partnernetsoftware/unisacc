@@ -1249,37 +1249,115 @@ RUN/driver aggregate ROOT RUN
 
 ## 0.0.49：六片 fixedpoint 逐相位恢复
 
-`chain-step.cx fixedpoint` 不再隐式运行整条双代链。每次调用只执行一个目标的一个对象、链接、whole-o、kernel阶段，或重新比较。当前分相位构造工具限定Linux宿主；Linux原生工具交叉构造六目标不等于在六种宿主上执行。以下占位变量必须先绑定真实材料：`REV` 为40位小写完整revision，`S` 为当前工作根下 `out/release-snap-${REV前10位}` 的规范绝对路径（含匹配的 `.release-rev`），`PKG` 为同一冻结包，`GEN1` 为第一代 Linux/x86_64 candidate，`FP` 为新的私有绝对输出目录，`HELPER` 为实际执行 F-v2 源身份观察的已构造原生helper。`PRIVATE_ROOT` 为本私有补丁树的规范绝对路径，`CHAIN` 为构造后的原生chain-step映像绝对路径。必须先用绝对源路径实编native再调用fixedpoint，不可使用快照中的旧工具或default-run临时映像。其它原chain命令仍可按原方式default-run。
+`chain-step.cx fixedpoint` 每次只执行一个目标的一个对象、链接、切片接纳、kernel阶段或重新比较。分相位工具限定Linux宿主；交叉构造六目标不等于六宿主原生CI。以下是**单条原生命令模板和参数表**，不是shell算法流水脚本；逐项调度实际使用 `.cx` 工具（`whole-front.cx`、`chain-step.cx`），不依赖忽略的 `out/` 协调器作为唯一实现。
+
+`REV` 为40位小写revision；`S` 为当前工作根下 `out/release-snap-${REV前10位}` 的规范绝对路径，含匹配 `.release-rev`；`PKG` 为同一冻结包；`GEN1` 为第一代Linux/x86_64 candidate；`FP` 为新私有绝对目录；`HELPER` 为实际F-v2源身份原生helper。`PRIVATE_ROOT` 为本私有补丁树，`CHAIN`、`WF` 为从其绝对源路径实编的原生映像。所有路径占位必须先绑定真实材料，不用快照旧工具或default-run临时映像替代。
 
 ```sh
-# 先独立构造一次，恢复时复用同一实际映像；不在每个阶段default-run重编。
-tools/bound 55 sh ./unisacc.com -O2 "$PRIVATE_ROOT/tools/chain-step.cx" -o "$CHAIN"
-# 每条 fp 调用单独受既有阶段限额约束；不是用一个外层watchdog包住所有调用。
-fp() {
-  "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" \
-    --identity-helper "$HELPER" "$@"
-}
-OBJECT_KEYS='drive.o host.o stages.o routestep.o stagehandoff.o runexec.o attributeframe.o bind.o cli.o compat.o route.o deps.o input.o args.o path.o entrybind.o memlayout.o driveface.o driveroute.o cxmod.o tapegate.o fwdstub.o executor.o transition.o codec.o modeldecode.o modelnumber.o packmodel.o modelload.o bindstage.o entryexec.o hostnative.o tapelink.o drivelink.o drivetapebin.o driveargs.o driveplan.o driveutil.o driveunits.o driverun.o hostout.o hostres.o rescache.o drivestream.o'
-for generation in g2 g3; do
-  for target in lnx/x86_64 lnx/arm64; do
-    for key in $OBJECT_KEYS; do
-      fp --phase "$generation" --target "$target" --object "$key" --resume || exit $?
-    done
-    fp --phase "$generation" --target "$target" --link-only --resume || exit $?
-  done
-  for target in osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
-    fp --phase "$generation" --target "$target" --resume || exit $?
-  done
-  fp --phase "kernels-$generation" --resume || exit $?
-done
-fp --phase compare
+tools/bound 45 sh ./unisacc.com -O2 "$PRIVATE_ROOT/tools/chain-step.cx" -o "$CHAIN"
+tools/bound 45 sh ./unisacc.com -O2 "$PRIVATE_ROOT/tools/whole-front.cx" -o "$WF"
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase "$G" --target "$T" --object "$KEY" --resume
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase "$G" --target "$T" --link-only --resume
+```
+
+Linux两代对象/链接入口保持：依次 `G=g2,g3`，各代先 `T=lnx/x86_64` 后 `lnx/arm64`，逐个完成下列44个 `KEY` 后才 `--link-only`。不是用一次整段watchdog包住全部工作。
+
+```text
+drive.o host.o stages.o routestep.o stagehandoff.o runexec.o attributeframe.o bind.o cli.o compat.o route.o deps.o input.o args.o path.o entrybind.o memlayout.o driveface.o driveroute.o cxmod.o tapegate.o fwdstub.o executor.o transition.o codec.o modeldecode.o modelnumber.o packmodel.o modelload.o bindstage.o entryexec.o hostnative.o tapelink.o drivelink.o drivetapebin.o driveargs.o driveplan.o driveutil.o driveunits.o driverun.o hostout.o hostres.o rescache.o drivestream.o
+```
+
+### 四Mac/Win本版生产入口：front分片与通用span
+
+每代Linux两片完成后，四片 `T=osx/x86_64,osx/arm64,win/x86_64,win/arm64` **必须**用以下入口；原来直接无对象参数的四个whole-o整段循环不是本版生产入口。每次原生调用独立45秒**总预算**，包括其身份观察、哈希、子进程与收据验证，不为子步骤重置预算。
+
+|参数|绑定与顺序|
+|---|---|
+|`G`、`CTOR`、`OBJECTS`|g2用 `FP/g2/lnx-x86_64/candidate`、`FP/g2/lnx-x86_64`；g3用对应 `FP/g3/...`。四片使用**当代**Linux/x86_64 product与对象收据，不用GEN1或上一代对象|
+|`D`|每代每目标独立新目录；Mac两ISA各有独立 `D/front-prepared`、`D/span-prepared` 及它们自己的 `tmp`，不得共用或覆写真实FWD桩|
+|`F`、`B`|分别为 `D/front-prepared`、`D/span-prepared`；front模板与通用span模板分别prepare，均绑定同一当代CTOR/OBJECTS|
+|`ROOT_1 ... ROOT_44`|逐个独立argv，严格取 `F/roots.txt` 与 `B/roots.txt` 的相同44行顺序；保持逻辑路径原文（如src/runtime别名），不能排序、realpath改写或合成单字符串|
+|front0..2|FIRST/COUNT依次 `0/32`、`32/32`、`64/21`，共85输入；merge严格按front0、front1、front2顺序|
+
+以下每一行都是独立调用模板；`UNISACC_IDENTITY_HELPER` 显式绑定实际helper。prepare会创建并绑定自身 `TMPDIR=PREPARED/tmp`，后续原生调用重验路径/dev/ino及字节。
+
+```sh
+UNISACC_IDENTITY_HELPER="$HELPER" tools/bound 45 "$WF" prepare "$S" "$PKG" "$CTOR" "$OBJECTS" "$F" --template "$PRIVATE_ROOT/tools/templates/whole-front.cx.in"
+UNISACC_IDENTITY_HELPER="$HELPER" tools/bound 45 "$WF" prepare "$S" "$PKG" "$CTOR" "$OBJECTS" "$B" --template "$PRIVATE_ROOT/tools/templates/whole-win-span.cx.in"
+tools/bound 45 "$WF" front "$F" "$T" "$D/front0" 0 32
+tools/bound 45 "$WF" front "$F" "$T" "$D/front1" 32 32
+tools/bound 45 "$WF" front "$F" "$T" "$D/front2" 64 21
+tools/bound 45 "$WF" merge "$F" "$T" "$D/A.phase" "$D/front0" "$D/front1" "$D/front2"
+```
+
+Mac两片先执行真实stub生成。`STUB` 必须是 `D/stub/stub-path.txt` 记录的 **F/tmp/unisacc-forward-entry.c** 绝对路径，其真实TMPDIR文件字节须与 `D/stub/stub.c` 相同；不能用stub.c副本路径、空桩或另一ISA的桩冒充。两个span都传同一真实路径及重核SHA。
+
+```sh
+tools/bound 45 "$WF" stub "$F" "$T" "$D/A.phase" "$D/stub"
+tools/bound 45 "$WF" span "$B" "$T" "$D/A.phase" "$D/units-e3" units e3 ROOT_1 ... ROOT_44 --forward-stub "$STUB"
+tools/bound 45 "$WF" span "$B" "$T" "$D/units-e3" "$D/prune-elf" prune elf ROOT_1 ... ROOT_44 --forward-stub "$STUB"
+```
+
+Win两片无forward-stub，必须三相，而非把units..e3塞进一次调用：
+
+```sh
+tools/bound 45 "$WF" span "$B" "$T" "$D/A.phase" "$D/units" units units ROOT_1 ... ROOT_44
+tools/bound 45 "$WF" span "$B" "$T" "$D/units" "$D/e3" e3 e3 ROOT_1 ... ROOT_44
+tools/bound 45 "$WF" span "$B" "$T" "$D/e3" "$D/prune-elf" prune elf ROOT_1 ... ROOT_44
+```
+
+`ROOT_1 ... ROOT_44` 是参数表占位，不是可直接执行的字面参数。恢复已存在材料时在对应front/merge/stub/span原命令末尾加 `--resume`，由工具重新验完整上下文；不能删除收据绕过拒绝。Mac切片不使用旧 `UNISACC_PHASE=B` 双相整段路径或image-build路径。
+
+### 有序接纳、旧producer与kernel结果
+
+接纳桥每次只对一个索引发起新的真实原生 `span --resume` 验证，不伪造constructor历史。Mac命令重复完整同序span列表，依次 `I=1,2`；Win重复完整同序列表，依次 `I=1,2,3`。不得省略前项、换序或并发同片索引；失败尝试保留，不能覆写历史。
+
+```sh
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase "$G" --target "$T" --span-driver "$WF" --span-prepared "$B" --span "$D/units-e3" --span "$D/prune-elf" --span-index "$I"
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase "$G" --target "$T" --span-driver "$WF" --span-prepared "$B" --span "$D/units" --span "$D/e3" --span "$D/prune-elf" --span-index "$I"
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase "kernels-$G" --kernel-result "$REAL_KERNEL_ROUTE"
+tools/bound 45 "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" --identity-helper "$HELPER" --phase compare
 sh ./unisacc.com tests/chain-fixed-point.cx -- "$GEN1" "$FP"
 sh ./unisacc.com tests/chain-fixed-point.cx -- --self-test
 ```
 
+若依赖收据由旧chain映像产生，在上述相关fixedpoint调用显式追加 `--receipt-producer "$OLD_CHAIN_NATIVE"`：必须提供仍存在的真实旧原生映像，现场重核其实际SHA并与收据producer匹配；不接受手写SHA、源文件SHA或把新映像重命名为旧producer。新收据始终绑定当前 `/proc/self/exe`，该参数仅允许验证匹配旧producer的依赖，不改写历史。
+
+`REAL_KERNEL_ROUTE` 是相应代真实已完成kernel-route旧输出目录，不是占位收据或新造空树。`--kernel-result` 接纳重新核对其constructor/package、完整34 inputs、22 sources、22 objects、2 kernels及复制前后树字节；记录的是验证接纳，不能宣称当前调用重新构造。没有旧真实输出则使用原 `--phase kernels-g2|kernels-g3 --resume` 构造入口，不能用接纳跳过构造。每代先完成Linux两片、四切片接纳及本代kernels再进入下一代；最终compare新验完整依赖，仍不等于独立第二次构造或六平台原生CI。
+
+### FWD中等夹具与已废弃证据
+
+`tests/fixtures/whole-front-medium/main_fwd.cx` 来自已验证真实FWD根源码，复用同目录records/hash/sort/graph/report五模块，保留256记录、双向稳定排序、排列/袋哈希及独立图算法断言；通过 `sys.dlcall` 的实际 `sy_dlopen(NULL,2)` / `sy_dlclose` 触发dock，不造extern假接口、桩或缩规模。原main.cx及五模块不变。
+
+决定性历史证据是 `out/c49-slow-cdx-979b56e4/mac-medium-forward-proof/sys-dlcall/`：正常whole未设置PHASE，与真实A捕获后units..e3/prune..elf输出cmp rc=0；真实桩1693B，图像115810B，SHA256 `525fb0c9372af2588aa8bebc1a74b3a8a2d71fc7637a404b49b9e6cab603529b`。这是osx/x86_64对应夹具证据，不外推其他ISA或原生CI。旧envB `st_nunit1` 证据标为 **SUPERSEDED / 0.0.50Y已知问题**，保留失败记录但不作为本版Mac切片入口或成功证据。
+
+父代理最窄FWD fixture实编入口（本段不宣称已运行；CTOR绑定真实product，输出用新绝对路径）：
+
+```sh
+tools/bound 45 "$CTOR" --target=osx/x86_64 "$PRIVATE_ROOT/tests/fixtures/whole-front-medium/main_fwd.cx" -o "$FWD_IMAGE"
+```
+
 上述对象键对应当前 `entry-build.cx` 的44个显式入口对象；源闭包对象仍由实际entry-build规则处理，不用伪造空对象。目标参数使用 `OS/ARCH`，目录使用连字符。每代六片的真实路径分别是 `lnx-x86_64/candidate`、`lnx-arm64/candidate`、`osx-x86_64/slice-osx-x86_64`、`osx-arm64/slice-osx-arm64`、`win-x86_64/slice-win-x86_64`、`win-arm64/slice-win-arm64`，均在 `FP/g2` 或 `FP/g3` 下。对应收据是代目录下 `phase-0.tsv` 至 `phase-5.tsv`；`phase-6.tsv` 绑定 `kernel-route`。不能读取旧的 `g2/candidate` 或 `g2/receipt.txt` 代替它们。
 
-`--resume` 可用于第一次调用；已有阶段必须重新验证源身份、包、constructor、工具/helper及产物树字节和wall证据，且只跳过已记录的对应步骤，不缓存PASS。`chain_sha` 绑定 `/proc/self/exe` 的实际执行映像SHA，不是可能来自另一棵树的 `__FILE__` 源字节；不要default-run改变映像后期待旧收据可resume。无收据的已有产物、身份改变或已链接片再增改对象均拒绝；恢复时保持全部输入冻结，不删除收据来绕过拒绝。Linux两片由上一代product构造，四个whole-o片由本代Linux/x86_64 product构造，因此必须保持上述代际/目标顺序。`compare` 每次新验完整六片与kernel收据，再实际比较objects/kernels/slices/product/package。
+`--resume` 可用于第一次fixedpoint调用；已有阶段必须重新验证源身份、包、constructor、工具/helper及产物树字节和wall证据，且只跳过已记录的对应步骤，不缓存PASS。`chain_sha` 绑定 `/proc/self/exe` 的实际执行映像SHA，不是可能来自另一棵树的 `__FILE__` 源字节；不要default-run改变映像后期待旧收据可resume。无收据的已有产物、身份改变或已链接片再增改对象均拒绝；恢复时保持全部输入冻结，不删除收据来绕过拒绝。Linux两片由上一代product构造，四切片由本代Linux/x86_64 product构造，保持上述代际/目标顺序。`compare` 每次新验完整六片与kernel收据，再实际比较objects/kernels/slices/product/package。
 
 `tests/chain-fixed-point.cx` 保留F1–F4代际、包与根断言，并对两代所有六片检查存在性、字节相等和各片constructor/包/根绑定。其自测保留原有异字节、断代和异包负控，另对两代每片逐一执行缺失与异字节拒绝（含Windows/arm64）。这些命令是验证入口，不是本文宣称已通过的运行收据；同一运行的固定点也不代表独立第二次构造。
+
+### wholefrontmerge：独立模块检查
+
+| 能力 | 入口 | 边界 |
+|---|---|---|
+| 多属性记录保留全局单位编号、输入记录顺序与opaque字节；同单位不同属性合法；非相邻相同记录具名拒绝且无输出；零单位的空attrs与四字节零计数合并为精确12字节phase | `tools/check-wholefrontmerge.cx` / `CHECK_WHOLEFRONTMERGE` | 直接调用 `wf_merge_parts(dirs,count,new_output,why,cap)`，三个确定性文件夹具检查；不替代 `check-whole-front.cx` 原九项，不代表产品阶段等价、resume或候选资格 |
+
+新入口basename对应 `tools/cxlib/wholefrontmerge.cx`。当前已在最终已装2d3852候选实际3项/0失败；注册器实际BATCH PASS并REGISTERED（其隔离根产品559仅为工具启动材料，不转授候选资格）。没有增加baseline。以下为可复用登记命令；会登记后实际运行batch，不缓存PASS，生成wholefrontmerge和interfaces.wholefrontmerge两行。
+
+```sh
+sh ./unisacc.com tools/register.cx -- wholefrontmerge tools/check-wholefrontmerge.cx CHECK_WHOLEFRONTMERGE "多属性全局单位编号、顺序与opaque字节；非相邻重复具名拒绝无输出；零单位双空属性编码精确phase；模块检查，非产品资格" "tools/check-wholefrontmerge.cx + tools/cxlib/wholefrontmerge.cx" interfaces product
+```
+
+精确登记行（由上述工具生成，不手工追加）：
+
+```tsv
+wholefrontmerge	IMPLEMENTED	interfaces	tools/check-wholefrontmerge.cx	SOURCE	lnx/x86_64	55	-	tools/check-wholefrontmerge.cx	-	interfaces.wholefrontmerge	rc0:CHECK_WHOLEFRONTMERGE	product	commit
+interfaces.wholefrontmerge	interfaces	IMPLEMENTED_SEPARATE_BATCH	多属性全局单位编号、顺序与opaque字节；非相邻重复具名拒绝无输出；零单位双空属性编码精确phase；模块检查，非产品资格	tools/check-wholefrontmerge.cx + tools/cxlib/wholefrontmerge.cx
+```
 

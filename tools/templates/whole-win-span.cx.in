@@ -1,0 +1,289 @@
+/* 独立诊断 worker；父进程必须以 <=45 秒 bound 启动每次调用。
+   worker span PKG TARGET INPUT NEW_OUT FIRST LAST ROOT... [--forward-stub STUB]
+   B 仅允许 units..e3、prune..elf；原 A 帧先保留再由真实 dv_fwd_splice 插桩。
+   ready 为 fr_add 编码的有序元数据记录，最后创建；无 ready 的目录不可续接。
+   UNISACC_RR_TIME 原样继承，由真实 st_span 输出逐模型计时。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+extern int cxi_read(const char *, unsigned char **, long *, char *, long);
+extern int dv_expand(int *, const char **, int);
+extern int dv_cx(const char *);
+extern int hs_read(const char *, unsigned char **, long *, char *, int);
+extern void hs_cxm_sha(char *, int, char *);
+extern int pm_open(const unsigned char *, long, char *, int);
+extern int pm_close(void);
+extern int ex_ri_arm(const char *, int, const unsigned char *, long);
+extern int ex_touch(void);
+extern int bd_touch(void);
+extern int st_touch(void);
+extern int st_extra_reset(void);
+extern int st_extra_put(const char *, int, const unsigned char *, int);
+extern int hf_keep(const unsigned char *, long, const unsigned char *, long);
+extern int dv_fwd_splice(const char *, int, const char **, unsigned char **, long *, char *, int);
+extern int st_dirs(const unsigned char *, int, const unsigned char *, int, const unsigned char *, int);
+extern int st_attr_reset(void);
+extern int st_includebase(const unsigned char *, int);
+extern int st_units(int);
+extern int st_attr_exchange(unsigned char **, long *, long *);
+extern int st_span(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+extern int fr_add(unsigned char **, long *, long *, const char *, long, const unsigned char *, long);
+extern int cx_fmt(char *, int, const char *, ...);
+
+static const char *wf_src[128];
+static const char *wf_stub;
+static char wf_stub_sha[65];
+static int wf_original_n;
+static char wf_why[256];
+static long long wf_now(void) {
+    sy_ts_t t;
+    if (sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + t.nsec;
+}
+static int wf_fail(const char *s) {
+    sy_eprintf("worker: %s: %s\n", s, wf_why);
+    return 1;
+}
+static long wf_u32(const unsigned char *p) {
+    return (long)p[0] | ((long)p[1] << 8) | ((long)p[2] << 16) | ((long)p[3] << 24);
+}
+static int wf_read(const char *path, unsigned char **b, long *n) {
+    if (cxi_read(path, b, n, wf_why, 256) || *n < 0 || *n > 2147483647L) return wf_fail(path);
+    return 0;
+}
+static int wf_file(const char *dir, const char *name, unsigned char **b, long *n) {
+    char path[8192];
+    if (cx_fmt(path, 8192, "%s/%s", dir, name)) return 1;
+    return wf_read(path, b, n);
+}
+static int wf_write(const char *dir, const char *name, const unsigned char *b, long n) {
+    char path[8192];
+    int fd, rc, cl;
+    if (n < 0 || (n && !b) || cx_fmt(path, 8192, "%s/%s", dir, name)) return 1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return wf_fail(path);
+    rc = sy_write_all(fd, b, n);
+    cl = sy_close(fd);
+    return rc || cl ? wf_fail(path) : 0;
+}
+static int wf_add(unsigned char **b, long *n, long *cap, const char *key, const unsigned char *value, long len) {
+    return fr_add(b, n, cap, key, tx_len(key, 128), value, len);
+}
+static int wf_text(unsigned char **b, long *n, long *cap, const char *key, const char *value) {
+    long len = tx_len(value, 8192);
+    if (len < 0 || len >= 8192) return 1;
+    return wf_add(b, n, cap, key, (const unsigned char *)value, len);
+}
+/* 返回单条记录的值；长度检查不允许越界、尾部垃圾或截断记录。 */
+static int wf_take(const unsigned char *b, long n, long *at, const char *key, const unsigned char **v, long *vn) {
+    long z, kn, want = tx_len(key, 128);
+    if (*at < 0 || *at > n || n - *at < 8) return 1;
+    z = wf_u32(b + *at); kn = wf_u32(b + *at + 4);
+    if (z < 4 || z > n - *at - 4 || kn > z - 4 || kn != want || !mm_same(b + *at + 8, key, kn)) return 1;
+    *v = b + *at + 8 + kn; *vn = z - 4 - kn;
+    *at += 4 + z;
+    return 0;
+}
+static int wf_stage(const unsigned char *s, long n) {
+    long i;
+    if (n < 1 || n > 63) return 1;
+    for (i = 0; i < n; i++) if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-')) return 1;
+    return 0;
+}
+static int wf_stage_index(const unsigned char *s, long n) {
+    static const char *names[] = {"units", "e3", "prune", "lower", "elf"};
+    int i;
+    for (i = 0; i < 5; i++) if (tx_len(names[i], 16) == n && mm_same(s, names[i], n)) return i;
+    return -1;
+}
+static int wf_attrs(const unsigned char *b, long len, int n) {
+    long k, count;
+    if (!len) return 0;
+    if (!b || len < 4 || len > 2147483647L) return 1;
+    count = wf_u32(b);
+    if (count > (len - 4) / 9 || len != 4 + 9 * count) return 1;
+    for (k = 4; k < len; k += 9) if (wf_u32(b + k) >= n) return 1;
+    return 0;
+}
+static int wf_frames(const unsigned char *b, long len, int n) {
+    long pos = 0, units = 0;
+    while (pos < len) {
+        long z, nl;
+        if (len - pos < 8) return 1;
+        z = wf_u32(b + pos); nl = wf_u32(b + pos + 4);
+        if (z < 4 || z > len - pos - 4 || nl > z - 4) return 1;
+        if (units >= n || tx_len(wf_src[units], 8192) != nl || !mm_same(b + pos + 8, wf_src[units], nl)) return 1;
+        pos += 4 + z; units++;
+    }
+    return units != n;
+}
+static int wf_identity(unsigned char **id, long *in, long *ic, char **argv, int roots, int n, const char *sha) {
+    char num[32];
+    int i;
+    if (wf_text(id, in, ic, "format", "WIN_SPAN_CHECKPOINT_1") ||
+        wf_text(id, in, ic, "pkg", argv[2]) || wf_text(id, in, ic, "pkg_sha256", sha) ||
+        wf_text(id, in, ic, "target", argv[3]) || cx_fmt(num, 32, "%d", roots) ||
+        wf_text(id, in, ic, "roots_count", num)) return 1;
+    for (i = 0; i < roots; i++) if (wf_text(id, in, ic, "root", argv[8 + i])) return 1;
+    if (cx_fmt(num, 32, "%d", n) || wf_text(id, in, ic, "n", num)) return 1;
+    for (i = 0; i < n; i++) if (wf_text(id, in, ic, "source", wf_src[i])) return 1;
+    if (wf_stub && (wf_text(id, in, ic, "forward_stub", wf_stub) || wf_text(id, in, ic, "forward_stub_sha256", wf_stub_sha))) return 1;
+    return 0;
+}
+static int wf_input(const char *input, const char *first, int n, const unsigned char *id, long in,
+                    unsigned char **body, long *bn, unsigned char **attrs, long *an) {
+    unsigned char *raw = 0;
+    const unsigned char *v;
+    long rn = 0, at, vn;
+    char bh[65], ah[65];
+    if (tx_eqz(first, "units")) {
+        long fn, len;
+        if (wf_read(input, &raw, &rn) || rn < 8) return wf_fail("incomplete hf phase");
+        fn = wf_u32(raw); len = wf_u32(raw + 4);
+        if (fn <= 0 || fn > rn - 8 || len != rn - 8 - fn ||
+            wf_frames(raw + 8, fn, n) || wf_attrs(raw + 8 + fn, len, n)) return wf_fail("invalid hf frames or attrs");
+        *body = mm_alloc(fn);
+        if (!*body || mm_copy(*body, fn, raw + 8, fn)) return 1;
+        if (len) {
+            *attrs = mm_alloc(len);
+            if (!*attrs || mm_copy(*attrs, len, raw + 8 + fn, len)) return 1;
+        }
+        *bn = fn; *an = len;
+        mm_free(raw);
+        return 0;
+    }
+    if (wf_file(input, "ready", &raw, &rn) || rn < in || !mm_same(raw, id, in)) return wf_fail("checkpoint identity mismatch or missing ready");
+    at = in;
+    if (wf_take(raw, rn, &at, "first", &v, &vn) || wf_stage(v, vn)) return wf_fail("checkpoint first stage");
+    int fi = wf_stage_index(v, vn);
+    if (wf_take(raw, rn, &at, "last", &v, &vn) || wf_stage(v, vn)) return wf_fail("checkpoint last stage");
+    int li = wf_stage_index(v, vn);
+    if (fi < 0 || li < fi || li + 1 != wf_stage_index((const unsigned char *)first, tx_len(first, 64))) return wf_fail("checkpoint stage successor");
+    if (wf_stub && (fi != 0 || li != 1)) return wf_fail("B checkpoint must be units..e3");
+    if (wf_file(input, "body.bin", body, bn) || wf_file(input, "attrs.bin", attrs, an) || wf_attrs(*attrs, *an, n)) return wf_fail("incomplete checkpoint body or attrs");
+    hs_cxm_sha((char *)*body, (int)*bn, bh);
+    hs_cxm_sha((char *)*attrs, (int)*an, ah);
+    if (wf_take(raw, rn, &at, "body_sha256", &v, &vn) || vn != 64 || !mm_same(v, bh, 64) ||
+        wf_take(raw, rn, &at, "attrs_sha256", &v, &vn) || vn != 64 || !mm_same(v, ah, 64) ||
+        wf_take(raw, rn, &at, "kind", &v, &vn) ||
+        !((vn == 6 && mm_same(v, "OPAQUE", 6)) || (vn == 12 && mm_same(v, "DIRECT_IMAGE", 12)) || (vn == 13 && mm_same(v, "FORWARD_FRAME", 13))) ||
+        at != rn) return wf_fail("checkpoint SHA or metadata mismatch");
+    mm_free(raw);
+    return 0;
+}
+static int wf_pe(const unsigned char *b, long n) {
+    long p;
+    if (n < 64 || b[0] != 'M' || b[1] != 'Z') return 0;
+    p = wf_u32(b + 60);
+    return p >= 64 && p <= n - 24 && b[p] == 'P' && b[p + 1] == 'E' && !b[p + 2] && !b[p + 3];
+}
+static int wf_image(const unsigned char *b, long n, const char *target) {
+    if (tx_eqz(target, "win/x86_64") || tx_eqz(target, "win/arm64")) return wf_pe(b, n);
+    if (n < 32 || wf_u32(b) != 0xfeedfacfL) return 0;
+    return wf_u32(b + 4) == (tx_eqz(target, "osx/arm64") ? 0x100000cL : 0x1000007L);
+}
+static int wf_span(char **argv, int n, unsigned char *id, long in, long ic) {
+    unsigned char *body = 0, *attrs = 0, *out = 0;
+    long bn = 0, an = 0, ac, on = 0, j;
+    char route[96], bh[65], ah[65], magic[33];
+    const char *kind = "OPAQUE", *hex = "0123456789abcdef";
+    long long start, end, ws, we;
+    int rc;
+    if (wf_stub && tx_eqz(argv[6], "units")) {
+        const char *saved = wf_src[1];
+        int k;
+        for (k = 1; k < wf_original_n; k++) wf_src[k] = wf_src[k + 1];
+        rc = wf_input(argv[4], argv[6], wf_original_n, id, in, &body, &bn, &attrs, &an);
+        for (k = wf_original_n; k > 1; k--) wf_src[k] = wf_src[k - 1];
+        wf_src[1] = saved;
+        if (rc || hf_keep(body, bn, attrs, an) || sy_setenv("UNISACC_PHASE", "B", 1)) return wf_fail("retain A phase");
+        mm_free(body); body = 0; bn = 0;
+        mm_free(attrs); attrs = 0; an = 0;
+        if (dv_fwd_splice(argv[3], n, wf_src, &body, &bn, wf_why, 256)) return wf_fail("forward splice");
+        ac = 0;
+        if (st_attr_exchange(&attrs, &an, &ac)) return 1;
+    } else if (wf_input(argv[4], argv[6], n, id, in, &body, &bn, &attrs, &an)) return 1;
+    if (wf_stub) {
+        static const unsigned char one = 1;
+        if (sy_setenv("UNISACC_PHASE", "B", 1) || st_extra_put("\0cli/ccw", 8, &one, 1)) return wf_fail("B cli resources");
+    }
+    ac = an;
+    if (st_attr_exchange(&attrs, &an, &ac)) return 1;
+    mm_free(attrs); attrs = 0; an = 0; ac = 0;
+    if (cx_fmt(route, 96, "%s/multi/image/O0", argv[3])) return 1;
+    start = wf_now();
+    if (start < 0) return 1;
+    rc = st_span(route, argv[3], wf_src[0], dv_cx(wf_src[0]), 0, argv[6], argv[7], body, bn, &out, &on, wf_why, 256);
+    end = wf_now();
+    sy_printf("WORKER_TIME\tspan\tfirst=%s\tlast=%s\trc=%d\tns=%lld\n", argv[6], argv[7], rc, end < 0 ? -1LL : end - start);
+    sy_eprintf("WORKER_TIME\tspan\tfirst=%s\tlast=%s\trc=%d\tns=%lld\n", argv[6], argv[7], rc, end < 0 ? -1LL : end - start);
+    if (rc || end < start || on < 0 || on > 2147483647L || (on && !out)) return wf_fail("st_span");
+    if (st_attr_exchange(&attrs, &an, &ac) || wf_attrs(attrs, an, n)) return wf_fail("output attrs");
+    if (on >= 6 && mm_same(out, "USLFW1", 6)) kind = "FORWARD_FRAME";
+    else if (tx_eqz(argv[7], "elf")) {
+        if (!wf_image(out, on, argv[3])) return wf_fail("elf result is neither target image nor USLFW1 frame");
+        kind = "DIRECT_IMAGE";
+    }
+    for (j = 0; j < on && j < 16; j++) {
+        magic[2*j] = hex[out[j] >> 4]; magic[2*j+1] = hex[out[j] & 15];
+    }
+    magic[2*j] = 0;
+    ws = wf_now();
+    if (ws < 0) return 1;
+    hs_cxm_sha((char *)out, (int)on, bh);
+    hs_cxm_sha((char *)attrs, (int)an, ah);
+    if (wf_text(&id, &in, &ic, "first", argv[6]) || wf_text(&id, &in, &ic, "last", argv[7]) ||
+        wf_text(&id, &in, &ic, "body_sha256", bh) || wf_text(&id, &in, &ic, "attrs_sha256", ah) ||
+        wf_text(&id, &in, &ic, "kind", kind)) return 1;
+    if (wf_write(argv[5], "body.bin", out, on) || wf_write(argv[5], "attrs.bin", attrs, an) ||
+        wf_write(argv[5], "kind.txt", (const unsigned char *)kind, tx_len(kind, 32))) return 1;
+    if (tx_eqz(kind, "DIRECT_IMAGE") && wf_write(argv[5], "image", out, on)) return 1;
+    /* pm_close 失败也不发布 ready；ready 是完整写入并关闭后的最后一份文件。 */
+    if (pm_close() || wf_write(argv[5], "ready", id, in)) return wf_fail("checkpoint commit");
+    we = wf_now();
+    if (we < ws) return 1;
+    sy_printf("SPAN_RESULT\tfirst=%s\tlast=%s\tkind=%s\tbytes=%ld\tmagic=%s\tbody_sha256=%s\tattrs_sha256=%s\tspan_ns=%lld\twrite_ns=%lld\n", argv[6], argv[7], kind, on, magic, bh, ah, end-start, we-ws);
+    sy_eprintf("SPAN_RESULT\tfirst=%s\tlast=%s\tkind=%s\tbytes=%ld\tmagic=%s\tbody_sha256=%s\tattrs_sha256=%s\tspan_ns=%lld\twrite_ns=%lld\n", argv[6], argv[7], kind, on, magic, bh, ah, end-start, we-ws);
+    mm_free(out); mm_free(attrs); mm_free(id);
+    return 0;
+}
+int main(int argc, char **argv) {
+    unsigned char *pkg = 0, *id = 0;
+    long pn = 0, in = 0, ic = 0;
+    char route[96], sha[65];
+    int roots, n, i, rc;
+    if (argc < 9 || argc > 138 || !tx_eqz(argv[1], "span")) return 2;
+    roots = argc - 8;
+    if (roots >= 3 && tx_eqz(argv[argc - 2], "--forward-stub")) {
+        unsigned char *stub = 0; long sn = 0;
+        wf_stub = argv[argc - 1]; roots -= 2;
+        if (wf_read(wf_stub, &stub, &sn)) return 1;
+        hs_cxm_sha((char *)stub, (int)sn, wf_stub_sha); mm_free(stub);
+    }
+    n = roots;
+    if (wf_stub && !((tx_eqz(argv[6], "units") && tx_eqz(argv[7], "e3")) || (tx_eqz(argv[6], "prune") && tx_eqz(argv[7], "elf")))) return wf_fail("B requires units..e3 or prune..elf");
+    if (wf_stage((const unsigned char *)argv[6], tx_len(argv[6], 64)) || wf_stage((const unsigned char *)argv[7], tx_len(argv[7], 64))) return 2;
+    for (i = 0; i < roots; i++) wf_src[i] = argv[8 + i];
+    if (sy_setenv("UNISACC_PHASE", "", 1) || sy_setenv("UNISACC_PHASE_OUT", "", 1) || sy_setenv("UNISA_CONTAINER", argv[2], 1)) return 1;
+    if (dv_expand(&n, wf_src, 0) || n < 1 || n > 128) return wf_fail("expand");
+    wf_original_n = n;
+    if (wf_stub) {
+        if (n == 128) return wf_fail("stub source bound");
+        for (i = n; i > 1; i--) wf_src[i] = wf_src[i - 1];
+        wf_src[1] = wf_stub; n++;
+    }
+    if (cx_fmt(route, 96, "%s/unit", argv[3]) || ex_ri_arm(route, 0, 0, 0) || ex_touch() || bd_touch() || st_touch()) return 1;
+    if (hs_read(argv[2], &pkg, &pn, wf_why, 256) || pn < 0 || pn > 2147483647L || pm_open(pkg, pn, wf_why, 256)) return wf_fail("package");
+    hs_cxm_sha((char *)pkg, (int)pn, sha);
+    if (st_extra_reset() || st_dirs(0, 0, 0, 0, 0, 0) || st_attr_reset() || st_includebase(0, 0) || st_units(n)) return 1;
+    if (wf_identity(&id, &in, &ic, argv, roots, n, sha)) return wf_fail("identity");
+    if (sy_mkdir(argv[5], 0755)) return wf_fail("new output directory required");
+    rc = wf_span(argv, n, id, in, ic);
+    mm_free(pkg);
+    return rc;
+}

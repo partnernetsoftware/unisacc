@@ -1,0 +1,79 @@
+/* Structural merge only: root/pkg/ctor identity and ready receipts belong to
+ * the coordinator. Payloads are opaque; no compilation is performed here.
+ * part.tsv: first<TAB>N LF count<TAB>N LF total<TAB>N LF, then total
+ * index<TAB>sourcepath LF rows. All numbers are canonical decimal. */
+#pragma unisa module wholefrontmerge
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+/* Checked copies preserve complete manifests and opaque attribute bytes. */
+#define WFM_LIMIT 536870912UL
+#define WFM_ATTRS 1000000UL
+typedef struct { unsigned char *frames,*attrs; unsigned long fn,an; } wfm_part;
+static unsigned long wfm_u32(const unsigned char *p){return (unsigned long)p[0]|((unsigned long)p[1]<<8)|((unsigned long)p[2]<<16)|((unsigned long)p[3]<<24);}
+static void wfm_put32(unsigned char *p,unsigned long n){for(int i=0;i<4;i++)p[i]=(unsigned char)(n>>(8*i));}
+static int wfm_why(char *why,int cap,const char *s){if(why&&cap>0){int i=0;while(s[i]&&i<cap-1){why[i]=s[i];i++;}why[i]=0;}return 2;}
+static unsigned char *wfm_load(const char *dir,const char *leaf,unsigned long *n){
+ char path[8192];if(!dir||cx_fmt(path,sizeof path,"%s/%s",dir,leaf))return 0;
+ int fd=sy_open(path,O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW,0);if(fd<0)return 0;
+ long z=sy_reg_size(fd);if(z<0||(unsigned long)z>WFM_LIMIT){sy_close(fd);return 0;}
+ unsigned char *p=malloc((size_t)z+1);if(!p){sy_close(fd);return 0;}
+ int rc=sy_read_full(fd,p,z);unsigned char tail;long extra=rc?0:sy_read(fd,&tail,1);long after=sy_reg_size(fd);int cl=sy_close(fd);
+ if(rc||extra!=0||after!=z||cl){free(p);return 0;}p[z]=0;*n=(unsigned long)z;return p;
+}
+static char *wfm_line(char **cursor){char *p=*cursor,*e=strchr(p,'\n');if(!e)return 0;*e=0;*cursor=e+1;return p;}
+static int wfm_number(const char *s,unsigned long *v){unsigned long n=0;if(!s||!*s||(s[0]=='0'&&s[1]))return 1;for(;*s;s++){if(*s<'0'||*s>'9'||n>(128UL-(unsigned long)(*s-'0'))/10)return 1;n=n*10+(unsigned long)(*s-'0');if(n>128)return 1;}*v=n;return 0;}
+static int wfm_field(char **p,const char *key,unsigned long *n){char *s=wfm_line(p);size_t z=strlen(key);if(!s||strncmp(s,key,z)||s[z]!='\t')return 1;return wfm_number(s+z+1,n);}
+static int wfm_record_cmp(const void *a,const void *b){return memcmp(a,b,9);}
+int wf_merge_parts(const char *const *dirs,int count,const char *new_output,char *why,int cap){
+ wfm_part *parts=0;char *order=0,*namedata=0;char *names[128];unsigned long lengths[128];unsigned char *records=0,*sorted=0;
+ unsigned long total=0,next=0,fn=0,ac=0;int rc=2,fd=-1,owned=0;const char *error="invalid merge arguments";
+ if(why&&cap>0)why[0]=0;
+ if(!dirs||count<=0||!new_output||!*new_output||(unsigned long)count>WFM_LIMIT/sizeof(wfm_part))goto finish;
+ parts=calloc((size_t)count,sizeof(wfm_part));if(!parts){error="part allocation";goto finish;}
+ for(int k=0;k<count;k++){
+  unsigned long mn=0,first=0,local=0,t=0;unsigned char *manifest=wfm_load(dirs[k],"part.tsv",&mn);char *p=(char *)manifest;
+  error="part.tsv missing, unreadable, or invalid";
+  if(!manifest)goto finish;
+  if(!mn||memchr(manifest,0,mn)||memchr(manifest,'\r',mn)||wfm_field(&p,"first",&first)||wfm_field(&p,"count",&local)||wfm_field(&p,"total",&t)||first!=next||local>t||first>t-local||(k&&t!=total)){free(manifest);goto finish;}
+  if(!k){total=t;size_t on=strlen(p);order=malloc(on+1);if(!order){free(manifest);error="order allocation";goto finish;}if(mm_copy(order,(long)on+1,p,(long)on+1)){free(manifest);error="order copy bound";goto finish;}}
+  else if(strcmp(order,p)){free(manifest);error="global source order differs";goto finish;}
+  for(unsigned long i=0;i<t;i++){
+   char *line=wfm_line(&p),*tab=line?strchr(line,'\t'):0;unsigned long index=0;
+   if(!tab){free(manifest);goto finish;}*tab=0;
+   if(wfm_number(line,&index)||index!=i||!tab[1]||strchr(tab+1,'\t')){free(manifest);goto finish;}
+   for(char *s=tab+1;*s;s++)if((unsigned char)*s<32||(unsigned char)*s==127){free(manifest);goto finish;}
+  }
+  if(*p){free(manifest);goto finish;}free(manifest);
+  if(!k){size_t on=strlen(order);namedata=malloc(on+1);if(!namedata){error="source name allocation";goto finish;}if(mm_copy(namedata,(long)on+1,order,(long)on+1)){error="source name copy bound";goto finish;}char *q=namedata;for(unsigned long i=0;i<total;i++){char *line=wfm_line(&q);names[i]=strchr(line,'\t')+1;lengths[i]=strlen(names[i]);}}
+  if(!k)for(unsigned long i=0;i<total;i++)for(unsigned long j=0;j<i;j++)if(lengths[i]==lengths[j]&&!memcmp(names[i],names[j],lengths[i])){error="duplicate source path";goto finish;}
+  parts[k].frames=wfm_load(dirs[k],"frames.bin",&parts[k].fn);parts[k].attrs=wfm_load(dirs[k],"attrs.bin",&parts[k].an);
+  error="part binary missing or unreadable";if(!parts[k].frames||!parts[k].attrs)goto finish;
+  unsigned long pos=0;error="frame extent, name, or trailing bytes";
+  for(unsigned long i=0;i<local;i++){
+   if(parts[k].fn-pos<8)goto finish;unsigned char *f=parts[k].frames+pos;unsigned long z=wfm_u32(f),nl=wfm_u32(f+4);
+   if(z<4||z>parts[k].fn-pos-4||nl>z-4||nl!=lengths[first+i]||memcmp(f+8,names[first+i],nl))goto finish;pos+=4+z;
+  }
+  if(pos!=parts[k].fn)goto finish;
+  error="attribute extent, count, or unit";unsigned long a=0;
+  if(parts[k].an){if(parts[k].an<4)goto finish;a=wfm_u32(parts[k].attrs);if(a>WFM_ATTRS||parts[k].an!=4+a*9)goto finish;}
+  if(a>WFM_ATTRS-ac)goto finish;
+  for(unsigned long j=0;j<a;j++){unsigned long u=wfm_u32(parts[k].attrs+4+j*9);if(u<first||u>=first+local)goto finish;}
+  if(parts[k].fn>WFM_LIMIT-fn)goto finish;fn+=parts[k].fn;ac+=a;next+=local;
+ }
+ error="incomplete partition or phase size limit";if(next!=total||fn>WFM_LIMIT-12||ac>(WFM_LIMIT-12-fn)/9)goto finish;
+ records=malloc(ac?ac*9:1);sorted=malloc(ac?ac*9:1);if(!records||!sorted){error="attribute allocation";goto finish;}
+ unsigned long used=0;for(int k=0;k<count;k++)if(parts[k].an){unsigned long n=parts[k].an-4;if(n&&mm_copy(records+used,(long)(ac*9-used),parts[k].attrs+4,(long)n)){error="attribute copy bound";goto finish;}used+=n;}
+ if(ac&&mm_copy(sorted,(long)(ac*9),records,(long)(ac*9))){error="attribute sort copy bound";goto finish;}qsort(sorted,(size_t)ac,9,wfm_record_cmp);
+ error="duplicate attribute record";for(unsigned long j=1;j<ac;j++)if(!memcmp(sorted+(j-1)*9,sorted+j*9,9))goto finish;
+ error="exclusive output creation";fd=sy_open_new(new_output,0600);if(fd<0)goto finish;owned=1;
+ unsigned char header[8],attrhead[4];wfm_put32(header,fn);wfm_put32(header+4,4+ac*9);wfm_put32(attrhead,ac);
+ error="output write or sync";if(sy_write_all(fd,header,8))goto finish;
+ for(int k=0;k<count;k++)if(sy_write_all(fd,parts[k].frames,(long)parts[k].fn))goto finish;
+ if(sy_write_all(fd,attrhead,4)||sy_write_all(fd,records,(long)(ac*9))||sy_fsync(fd))goto finish;
+ {int cl=sy_close(fd);fd=-1;if(cl)goto finish;}rc=0;
+finish:
+ if(fd>=0)sy_close(fd);
+ if(rc&&owned&&sy_unlink(new_output))error="output failure; removing partial output failed";
+ if(parts){for(int k=0;k<count;k++){free(parts[k].frames);free(parts[k].attrs);}free(parts);}free(order);free(namedata);free(records);free(sorted);
+ return rc?wfm_why(why,cap,error):0;
+}

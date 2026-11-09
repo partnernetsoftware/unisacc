@@ -1,6 +1,6 @@
 /* Release chain for one slice at a time.
    sh ./unisacc.com tools/release-build.cx -- [--rev REV] p3 ROOT SRC_PKG OUT_PKG
-   sh ./unisacc.com tools/release-build.cx -- [--rev REV] slice ROOT PKG OUT [--target TARGET]
+   sh ./unisacc.com tools/release-build.cx -- [--rev REV] slice ROOT PKG OUT [--target TARGET] [--whole-phase A|B]
 
    p3 writes P 4 by default (every \0hdr/ header deflated, 2.04MB -> 1.44MB,
    46.33s vs 46.98s); --no-compress-resources writes the input's version
@@ -17,13 +17,17 @@
    resource \0hdr/cx-flat.h must then match that include/cx-flat.h byte for
    byte. Models are not rebuilt and package-refresh is not called.
 
-   slice has two routes. whole-o (osx, win): one child under an internal 60s
-   watchdog. The unused rb_phase helper can use OUT/slice-lnx-x86_64 as the
-   constructor: PHASE=A writes the frames and stops, PHASE=B writes the image.
-   Each child is bounded; the image matches a whole-o of the same sources and
-   has no P3. objects (lnx): one child under tools/bound RB_OBJ_WALL (the
-   entry-build wall clock; its own compiles are each bound 55/45/50).
-   The tool writes OUT/receipt.txt. Other targets are refused.
+   slice has two routes. whole-o (osx, win) defaults to one child under an
+   internal 60s watchdog. Explicit --whole-phase A|B runs exactly one child:
+   A has 45s to write native frames, B has 50s to write the image. Both require
+   UNISACC_CTOR and UNISACC_IDENTITY_HELPER (native CTX F-v2 helper: ROOT ->
+   64 lowercase hex digits plus LF). UNISA_CONTAINER is the supplied PKG.
+   OUT/slice-<os>-<arch>.phase is unchanged compiler-native data. Its successful
+   A.receipt binds frame/package/constructor/helper SHA, target, physical root,
+   frozen revision and F-v2 source identities; B recomputes them before use.
+   Per-target A/B receipts record actual child ns and SHA. A never writes the
+   final slice; failed phases remove partial images and failed A invalidates
+   its frames/readiness. objects (lnx) retains the entry-build route and receipt.
    This does not install and does not wrap. */
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
@@ -76,7 +80,11 @@ typedef struct { char rel[RB_REL]; char full[RB_FULL]; } RbFile;
 static RbFile rb_files[RB_FILES];
 static int rb_nfiles;
 
+static char rb_phase_cleanup_image[RB_FULL], rb_phase_cleanup_ready[RB_FULL], rb_phase_cleanup_frame[RB_FULL];
 static void rb_die(const char *s) {
+    if (rb_phase_cleanup_image[0]) sy_unlink(rb_phase_cleanup_image);
+    if (rb_phase_cleanup_ready[0]) sy_unlink(rb_phase_cleanup_ready);
+    if (rb_phase_cleanup_frame[0]) sy_unlink(rb_phase_cleanup_frame);
     sy_eprintf("release-build: %s\n", s);
     sy_exit(1);
 }
@@ -682,6 +690,7 @@ static char rb_rev_full[48];
 static char rb_snap[RB_FULL];
 static char rb_out_abs[RB_FULL];
 static char rb_pkg_abs[RB_FULL];
+static char rb_physical_root[RB_FULL];
 
 static int rb_pipe(char **argv, const char *cwd, char *out, int cap) {
     int fd, pid, exited, code, bad, n;
@@ -719,6 +728,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
     int i, n;
     if (!rev || !rev[0] || !root_slot || !*root_slot) rb_die("rev");
     if (sy_realpath(*root_slot, root, RB_FULL) < 0) rb_die("root");
+    rb_cat(rb_physical_root, RB_FULL, root, 0, "");
     if (cx_fmt(spec, sizeof spec, "%s^{commit}", rev)) rb_die("rev");
     vp[0] = "git";
     vp[1] = "rev-parse";
@@ -856,10 +866,21 @@ static const char *rb_slice_target(int argc, char **argv) {
     return t;
 }
 
+static const char *rb_phase_option(int argc, char **argv) {
+    const char *phase = 0;
+    int i;
+    for (i = 5; i < argc; i++) {
+        if (tx_eqz(argv[i], "--target")) { i++; continue; }
+        if (!tx_eqz(argv[i], "--whole-phase") || phase || i + 1 >= argc) rb_die("slice flags");
+        phase = argv[++i];
+        if (!tx_eqz(phase, "A") && !tx_eqz(phase, "B")) rb_die("whole phase A|B required");
+    }
+    return phase;
+}
 static void rb_whole_flags(int argc, char **argv) {
     int i;
     for (i = 5; i < argc; i++) {
-        if (tx_eqz(argv[i], "--target")) {
+        if (tx_eqz(argv[i], "--target") || tx_eqz(argv[i], "--whole-phase")) {
             if (i + 1 >= argc) rb_die("slice target");
             i++;
             continue;
@@ -1017,99 +1038,119 @@ static int rb_whole(int argc, char **argv, const char *target) {
     return 0;
 }
 
-/* osx/arm64 whole-o sits on the 60s bound. The lnx slice stops after the
-   frames (PHASE=A) and finishes the image in PHASE=B. */
+/* The compiler owns native phase frames; receipts bind their actual bytes. */
+static void rb_phase_hash(const char *path, char sha[65]) {
+    size_t n;
+    char *p = cx_read(path, &n);
+    if (!p || !n) rb_die("phase identity file missing/empty");
+    cx_sha256_hex(p, n, sha); mm_free(p);
+}
+
+static void rb_phase_source(const char *helper, const char *root, char sid[65]) {
+    char before[65], after[65];
+    char *v[3];
+    RbBuf cap = {0, 0, 0};
+    int pid, fd, exited = 0, code = 1, i, timed;
+    rb_phase_hash(helper, before);
+    v[0] = (char *)helper; v[1] = (char *)root; v[2] = 0;
+    pid = sy_spawn_pipe(v, root, SY_SPAWN_NO_PATH, &fd, 0);
+    if (pid < 0) rb_die("identity helper spawn");
+    if (sy_fd_nonblock(fd, 1)) { sy_kill(pid); rb_die("identity helper pipe"); }
+    timed = rb_wait_child(pid, fd, &cap, 8000, &exited, &code);
+    if (sy_close(fd)) rb_die("identity helper close");
+    rb_phase_hash(helper, after);
+    if (timed || !exited || code || !tx_eqz(before, after) || cap.n != 65 || cap.p[64] != 10) rb_die("REFUSE F-v2 source identity");
+    for (i = 0; i < 64; i++) {
+        char c = cap.p[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) rb_die("REFUSE source SID wire");
+        sid[i] = c;
+    }
+    sid[64] = 0; mm_free(cap.p);
+}
+
+static void rb_phase_identity(char *text, int size, const char *root, const char *pkg,
+                              const char *ctor, const char *helper, const char *target) {
+    char source[65], physical[65], ph[65], ch[65], hh[65];
+    rb_phase_source(helper, root, source); rb_phase_source(helper, rb_physical_root, physical);
+    rb_phase_hash(pkg, ph); rb_phase_hash(ctor, ch); rb_phase_hash(helper, hh);
+    if (cx_fmt(text, size, "whole-phase-v1\nroot\t%s\nsnapshot\t%s\nrev\t%s\ntarget\t%s\nsource_sid\t%s\nphysical_sid\t%s\npkg\t%s\npkg_sha\t%s\nctor\t%s\nctor_sha\t%s\nhelper\t%s\nhelper_sha\t%s\n",
+               rb_physical_root, root, rb_rev_full, target, source, physical, pkg, ph, ctor, ch, helper, hh)) rb_die("phase identity overflow");
+}
+
 static int rb_phase(int argc, char **argv, const char *target) {
-    char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
-    char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
-    char srcs[RB_WHOLE_SRC][RB_FULL], ctor[RB_FULL], phase[RB_FULL], cont[RB_FULL];
-    char sha[65];
-    RbBuf cap;
+    char *v[RB_WHOLE_SRC + 6];
+    char image[RB_FULL], frame[RB_FULL], ready[RB_FULL], rec[RB_FULL];
+    char ctor[RB_FULL], helper[RB_FULL], srcs[RB_WHOLE_SRC][RB_FULL];
+    char identity[4096], after[4096], record[4608], sha[65], frame_sha[65];
+    const char *phase = rb_phase_option(argc, argv), *env;
+    RbBuf cap = {0, 0, 0};
     sy_ts_t t0, t1;
-    int n, i, pass, fd, pid, exited, code, rfd;
-    long bytes;
-    size_t zn;
-    char *img;
+    size_t zn, oldn;
+    char *old, *img;
+    long prefix, k;
+    int n = 0, i, pid, fd, exited = 0, code = 1, timed, rfd, is_a = tx_eqz(phase, "A");
     rb_whole_flags(argc, argv);
-    if (!argv[3] || !argv[3][0] || !sy_exists(argv[3])) rb_die("pkg");
     sy_mkdir(argv[4], 0755);
     if (sy_realpath(argv[4], rb_out_abs, RB_FULL) < 0) rb_die("out");
-    argv[4] = rb_out_abs;
-    rb_cat(ctor, RB_FULL, argv[4], 1, "slice-lnx-x86_64");
-    if (!sy_exists(ctor)) rb_die("osx needs slice-lnx-x86_64");
-    rb_cat(image, RB_FULL, argv[4], 1, rb_whole_slug(target));
-    rb_cat(phase, RB_FULL, argv[4], 1, tx_eqz(target, "osx/arm64") ? "osx-arm64.phase" : "osx-x86_64.phase");
-    rb_cat(bound, RB_FULL, argv[2], 1, "tools/bound");
-    rb_cat(cont, RB_FULL, argv[2], 1, "unisacc.com");
-    if (sy_setenv("UNISA_CONTAINER", cont, 1) || sy_setenv("UNISACC_RUN_CACHE", "0", 1)) rb_die("env");
-    if (sy_mono(&t0)) rb_die("clock");
-    for (pass = 0; pass < 2; pass++) {
-        if (pass == 0) {
-            if (sy_setenv("UNISACC_PHASE", "A", 1) || sy_setenv("UNISACC_PHASE_OUT", phase, 1) || sy_unsetenv("UNISACC_PHASE_IN")) rb_die("env");
-        } else if (sy_setenv("UNISACC_PHASE", "B", 1) || sy_setenv("UNISACC_PHASE_IN", phase, 1) || sy_unsetenv("UNISACC_PHASE_OUT")) rb_die("env");
-        n = 0;
-        v[n++] = bound;
-        v[n++] = pass ? "50" : "45";
-        v[n++] = ctor;
-        v[n++] = "-b";
-        v[n++] = (char *)target;
-        v[n++] = "-o";
-        v[n++] = image;
-        for (i = 0; i < RB_WHOLE_SRC; i++) {
-            rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]);
-            v[n++] = srcs[i];
-        }
-        v[n] = 0;
-        pid = sy_spawn_pipe(v, argv[2], SY_SPAWN_NO_PATH, &fd, 0);
-        if (pid < 0) rb_die("spawn");
-        cap.p = 0;
-        cap.n = 0;
-        cap.cap = 0;
-        for (;;) {
-            char tmp[4096];
-            long k = sy_read(fd, tmp, 4096);
-            if (k < 0) rb_die("read child");
-            if (k == 0) break;
-            rb_put(&cap, tmp, k);
-        }
-        if (sy_close(fd)) rb_die("close child");
-        if (sy_wait_status(pid, 0, &exited, &code, 0) < 0) rb_die("wait");
-        rb_put(&cap, "", 1);
-        sy_printf("%s", (char *)cap.p);
-        mm_free(cap.p);
-        if (!exited || code) rb_die(pass ? "phase-b" : "phase-a");
+    rb_cat(image, RB_FULL, rb_out_abs, 1, rb_whole_slug(target));
+    if (cx_fmt(frame, sizeof frame, "%s.phase", image) || cx_fmt(ready, sizeof ready, "%s.A.receipt", image) || cx_fmt(rec, sizeof rec, "%s.%s.receipt", image, phase)) rb_die("phase path");
+    rb_cat(rb_phase_cleanup_image, RB_FULL, image, 0, "");
+    rb_cat(rb_phase_cleanup_ready, RB_FULL, rec, 0, "");
+    if (sy_unlink(image) && sy_exists(image)) rb_die("remove previous image");
+    if (is_a) {
+        rb_cat(rb_phase_cleanup_ready, RB_FULL, ready, 0, "");
+        rb_cat(rb_phase_cleanup_frame, RB_FULL, frame, 0, "");
+        if ((sy_unlink(ready) && sy_exists(ready)) || (sy_unlink(frame) && sy_exists(frame))) rb_die("invalidate phase A");
+    } else if (sy_unlink(rec) && sy_exists(rec)) rb_die("invalidate phase B");
+    env = sy_env("UNISACC_CTOR");
+    if (!env || !env[0] || sy_realpath(env, ctor, RB_FULL) < 0) rb_die("explicit UNISACC_CTOR required");
+    env = sy_env("UNISACC_IDENTITY_HELPER");
+    if (!env || !env[0] || sy_realpath(env, helper, RB_FULL) < 0) rb_die("explicit UNISACC_IDENTITY_HELPER required");
+    if (sy_realpath(argv[3], rb_pkg_abs, RB_FULL) < 0) rb_die("pkg");
+    rb_phase_identity(identity, sizeof identity, argv[2], rb_pkg_abs, ctor, helper, target);
+    if (!is_a) {
+        rb_phase_hash(frame, frame_sha);
+        if (cx_fmt(record, sizeof record, "%sframe_sha\t%s\nrc\t0\nns\t", identity, frame_sha)) rb_die("phase record");
+        prefix = tx_len(record, sizeof record); old = cx_read(ready, &oldn);
+        if (!old || oldn <= (size_t)(prefix + 1) || !mm_same(old, record, prefix)) rb_die("REFUSE phase A identity receipt");
+        for (k = prefix; k < (long)oldn - 1; k++) if (old[k] < '0' || old[k] > '9') rb_die("REFUSE phase A wall evidence");
+        if (old[oldn - 1] != 10) rb_die("REFUSE phase A receipt terminator");
+        mm_free(old);
     }
-    sy_unsetenv("UNISACC_PHASE");
-    sy_unsetenv("UNISACC_PHASE_IN");
-    sy_unsetenv("UNISACC_PHASE_OUT");
+    if (sy_setenv("UNISA_CONTAINER", rb_pkg_abs, 1) || sy_setenv("UNISACC_RUN_CACHE", "0", 1) || sy_setenv("UNISACC_PHASE", phase, 1)) rb_die("phase env");
+    if (is_a) {
+        if (sy_setenv("UNISACC_PHASE_OUT", frame, 1) || sy_unsetenv("UNISACC_PHASE_IN")) rb_die("phase env");
+    } else if (sy_setenv("UNISACC_PHASE_IN", frame, 1) || sy_unsetenv("UNISACC_PHASE_OUT")) rb_die("phase env");
+    v[n++] = ctor; v[n++] = "-b"; v[n++] = (char *)target; v[n++] = "-o"; v[n++] = image;
+    for (i = 0; i < RB_WHOLE_SRC; i++) { rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]); v[n++] = srcs[i]; }
+    v[n] = 0;
+    if (sy_mono(&t0)) rb_die("clock");
+    pid = sy_spawn_pipe(v, argv[2], SY_SPAWN_NO_PATH, &fd, 0);
+    if (pid < 0) rb_die("phase spawn");
+    if (sy_fd_nonblock(fd, 1)) { sy_kill(pid); rb_die("phase nonblock"); }
+    timed = rb_wait_child(pid, fd, &cap, is_a ? 45000 : 50000, &exited, &code);
     if (sy_mono(&t1)) rb_die("clock");
-    img = cx_read(image, &zn);
-    if (!img || zn > 2147483647UL) rb_die("image");
-    cx_sha256_hex(img, zn, sha);
-    bytes = (long)zn;
-    mm_free(img);
-    rb_cat(rec, RB_FULL, argv[4], 1, "receipt.txt");
-    rfd = sy_open(rec, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (rfd < 0) rb_die("receipt");
-    if (cx_fmt(line, sizeof line, "route\tphase-ab\n")) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "target\t%s\n", target)) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "rev\t%s\n", rb_rev_full)) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "sha\t%s\n", sha)) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "bytes\t%ld\n", bytes)) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "ns\t%lld\n", rb_span(&t0, &t1))) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (cx_fmt(line, sizeof line, "rc\t0\n")) rb_die("receipt");
-    rb_wline(rfd, line);
-    if (sy_close(rfd)) rb_die("receipt");
-    if (cx_fmt(line, sizeof line, "release-build\tphase-ab\ttarget=%s\tsha=%s\tbytes=%ld\tns=%lld\trc=0\n",
-               target, sha, bytes, rb_span(&t0, &t1)))
-        rb_die("report");
-    sy_printf("%s", line);
+    if (rb_span(&t0, &t1) > (is_a ? 45000000000LL : 50000000000LL)) timed = 1;
+    if (sy_close(fd)) rb_die("phase close");
+    rb_put(&cap, "", 1); sy_printf("%s", (char *)cap.p); mm_free(cap.p);
+    sy_printf("release-build\twhole-phase\tphase=%s\ttarget=%s\tns=%lld\trc=%d\n", phase, target, rb_span(&t0, &t1), timed ? 124 : code);
+    if (timed || !exited || code) rb_die("whole phase failed");
+    rb_phase_identity(after, sizeof after, argv[2], rb_pkg_abs, ctor, helper, target);
+    if (!tx_eqz(identity, after)) rb_die("phase inputs changed");
+    rb_phase_hash(frame, sha);
+    if (!is_a && !tx_eqz(sha, frame_sha)) rb_die("phase frame changed");
+    if (is_a && sy_exists(image)) rb_die("phase A wrote final image");
+    if (cx_fmt(record, sizeof record, "%sframe_sha\t%s\nrc\t0\nns\t%lld\n", identity, sha, rb_span(&t0, &t1))) rb_die("phase record");
+    if (!is_a) {
+        img = cx_read(image, &zn); if (!img || !zn) rb_die("phase image");
+        cx_sha256_hex(img, zn, sha); mm_free(img);
+        k = tx_len(record, sizeof record);
+        if (cx_fmt(record + k, sizeof record - k, "image_sha\t%s\nbytes\t%ld\n", sha, (long)zn)) rb_die("phase image record");
+    }
+    rfd = sy_open(rec, O_WRONLY | O_CREAT | O_TRUNC, 0644); k = tx_len(record, sizeof record);
+    if (rfd < 0 || sy_write_all(rfd, record, k) || sy_close(rfd)) rb_die("phase receipt write");
+    rb_phase_cleanup_image[0] = rb_phase_cleanup_ready[0] = rb_phase_cleanup_frame[0] = 0;
+    sy_printf("release-build\twhole-phase\tphase=%s\tsha=%s\tns=%lld\trc=0\n", phase, sha, rb_span(&t0, &t1));
     return 0;
 }
 
@@ -1125,7 +1166,11 @@ static int rb_slice(int argc, char **argv) {
     if (argc < 5) rb_die("usage: slice ROOT PKG OUT [--target TARGET]");
     if (argc - 5 > 66) rb_die("argv");
     target = rb_slice_target(argc, argv);
-    if (rb_is_whole(target)) return rb_whole(argc, argv, target);
+    if (rb_is_whole(target)) {
+        if (rb_phase_option(argc, argv)) return rb_phase(argc, argv, target);
+        return rb_whole(argc, argv, target);
+    }
+    for (i = 5; i < argc; i++) if (tx_eqz(argv[i], "--whole-phase")) rb_die("whole phase requires osx/win target");
     if (!rb_is_objects(target)) rb_die("slice target");
     if (sy_realpath(argv[3], rb_pkg_abs, RB_FULL) < 0) rb_die("pkg");
     argv[3] = rb_pkg_abs;

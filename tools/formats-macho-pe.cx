@@ -3,6 +3,12 @@
  *   pe.{x86_64,arm64}.sections, pe.{x86_64,arm64}.imports-reloc-loadconfig
  *   sh ./unisacc.com tools/formats-macho-pe.cx -- ROOT ABS_OUT
  *   sh ./unisacc.com tools/formats-macho-pe.cx -- --pe FILE
+ *   sh ./unisacc.com tools/formats-macho-pe.cx -- --macho FILE
+ *   sh ./unisacc.com tools/formats-macho-pe.cx -- --macho-compare OLD NEW
+ * --macho reuses all Mach-O cells, including page hashes and the negative control.
+ * --macho-compare additionally compares exact structural bytes and referenced symbol,
+ * relocation and dyld payloads, not section contents (including version strings) or
+ * CodeDirectory page-hash slots. Every differing byte reports its old/new value.
  * --pe runs the same PE cells on one existing file and writes them to stdout.
  * It does not compile fixtures and it does not loosen the cells.
  * Two inline fixtures (a bare `return 7` and a data + printf program) are compiled by the installed product at -O2 for
@@ -167,9 +173,95 @@ static int pe_file(const char *path) {
     return nfail || nnotrun ? 1 : 0;
 }
 
+static int macho_cpu(const unsigned char *p, size_t n, const char *label) {
+    unsigned long long cpu = n >= 8 ? get(p + 4, 4) : 0;
+    if (n >= 32 && get(p, 4) == 0xfeedfacfULL && (cpu == 0x1000007ULL || cpu == 0x100000cULL)) return cpu == 0x100000cULL;
+    char d[160]; if (cx_fmt(d, sizeof d, "old/new input cputype=0x%llx; require MH_MAGIC_64 and x86_64/arm64", cpu)) die("cpu detail");
+    row("FAIL", "macho", label, d); return -1;
+}
+
+/* Byte-indexed fields deliberately retain unknown command fields and padding too:
+ * no offset, count, command type or reserved byte is normalized away. */
+static void macho_bytes(const char *label, const unsigned char *a, size_t an, const unsigned char *b, size_t bn) {
+    char d[200]; int same = an == bn;
+    if (an != bn) { if (cx_fmt(d, sizeof d, "size old=%llu new=%llu", (unsigned long long)an, (unsigned long long)bn)) die("compare detail"); row("FAIL", "macho.compare", label, d); }
+    size_t common = an < bn ? an : bn;
+    for (size_t i = 0; i < common; i++) if (a[i] != b[i]) {
+        same = 0; if (cx_fmt(d, sizeof d, "byte[%llu] old=0x%02x new=0x%02x", (unsigned long long)i, (unsigned)a[i], (unsigned)b[i])) die("compare detail"); row("FAIL", "macho.compare", label, d);
+    }
+    /* Report missing bytes as well, rather than stopping at the first mismatch. */
+    for (size_t i = common; i < an; i++) { if (cx_fmt(d, sizeof d, "byte[%llu] old=0x%02x new=absent", (unsigned long long)i, (unsigned)a[i])) die("compare detail"); row("FAIL", "macho.compare", label, d); }
+    for (size_t i = common; i < bn; i++) { if (cx_fmt(d, sizeof d, "byte[%llu] old=absent new=0x%02x", (unsigned long long)i, (unsigned)b[i])) die("compare detail"); row("FAIL", "macho.compare", label, d); }
+    if (same) row("PASS", "macho.compare", label, "old/new bytes identical");
+}
+static void macho_payload(const char *label, const unsigned char *a, size_t an, unsigned long long ao, unsigned long long al, const unsigned char *b, size_t bn, unsigned long long bo, unsigned long long bl) {
+    char d[240];
+    if (ao != bo || al != bl) { if (cx_fmt(d, sizeof d, "offset old=%llu new=%llu; size old=%llu new=%llu", ao, bo, al, bl)) die("compare detail"); row("FAIL", "macho.compare", label, d); }
+    int av = span(an, ao, al), bv = span(bn, bo, bl);
+    if (!av || !bv) { if (cx_fmt(d, sizeof d, "in-bounds old=%d new=%d; offset old=%llu new=%llu; size old=%llu new=%llu", av, bv, ao, bo, al, bl)) die("compare detail"); row("FAIL", "macho.compare", label, d); return; }
+    macho_bytes(label, a + ao, (size_t)al, b + bo, (size_t)bl);
+}
+static int macho_commands_valid(const unsigned char *p, size_t n, const char *label) {
+    if (n < 32 || !span(n, 32, get(p + 20, 4))) { row("FAIL", "macho.compare", label, "command extent out of bounds"); return 0; }
+    unsigned long long at = 32, end = 32 + get(p + 20, 4), count = get(p + 16, 4);
+    for (unsigned long long i = 0; i < count; i++) {
+        if (end - at < 8) { row("FAIL", "macho.compare", label, "command header out of bounds"); return 0; }
+        unsigned long long len = get(p + at + 4, 4), cmd = get(p + at, 4);
+        if (len < 8 || len > end - at || (cmd == 0x19 && (len < 72 || len != 72 + 80 * get(p + at + 64, 4))) || (cmd == 2 && len != 24) || ((cmd == 0x22 || cmd == 0x80000022ULL) && len != 48)) { row("FAIL", "macho.compare", label, "invalid command size"); return 0; }
+        at += len;
+    }
+    if (at != end) { row("FAIL", "macho.compare", label, "ncmds/sizeofcmds disagree"); return 0; }
+    return 1;
+}
+static void macho_compare(const unsigned char *a, size_t an, const unsigned char *b, size_t bn) {
+    int av = macho_commands_valid(a, an, "old.commands"), bv = macho_commands_valid(b, bn, "new.commands");
+    macho_bytes("mach_header_64", a, an < 32 ? an : 32, b, bn < 32 ? bn : 32);
+    if (!av || !bv) return;
+    unsigned long long ac = get(a + 16, 4), bc = get(b + 16, 4), aa = 32, ba = 32;
+    for (unsigned long long i = 0; i < ac || i < bc; i++) {
+        unsigned long long al = i < ac ? get(a + aa + 4, 4) : 0, bl = i < bc ? get(b + ba + 4, 4) : 0;
+        unsigned long long at = al ? get(a + aa, 4) : 0, bt = bl ? get(b + ba, 4) : 0;
+        const unsigned char *ap = a + aa, *bp = b + ba; char label[200];
+        if (cx_fmt(label, sizeof label, "load-command[%llu] (segment/section fields included)", i)) die("compare label");
+        macho_bytes(label, ap, (size_t)al, bp, (size_t)bl);
+        /* Enumerate both command types even when they differ: structural failure
+         * must not suppress payload diagnostics for either side. */
+        for (int kind = 0; kind < 3; kind++) {
+            int ax = kind == 0 ? at == 2 : kind == 1 ? at == 0x19 : at == 0x22 || at == 0x80000022ULL;
+            int bx = kind == 0 ? bt == 2 : kind == 1 ? bt == 0x19 : bt == 0x22 || bt == 0x80000022ULL;
+            unsigned long long count = kind == 0 ? 2 : kind == 2 ? 5 : 0;
+            if (kind == 1) { unsigned long long as = ax ? get(ap + 64, 4) : 0, bs = bx ? get(bp + 64, 4) : 0; count = as > bs ? as : bs; }
+            if (!ax && !bx) continue;
+            for (unsigned long long k = 0; k < count; k++) {
+                unsigned long long ao = 0, az = 0, bo = 0, bz = 0;
+                if (kind == 0) { if (ax) { ao = get(ap + 8 + 8 * k, 4); az = get(ap + 12 + 8 * k, 4) * (k ? 1 : 16); } if (bx) { bo = get(bp + 8 + 8 * k, 4); bz = get(bp + 12 + 8 * k, 4) * (k ? 1 : 16); } }
+                else if (kind == 2) { if (ax) { ao = get(ap + 8 + 8 * k, 4); az = get(ap + 12 + 8 * k, 4); } if (bx) { bo = get(bp + 8 + 8 * k, 4); bz = get(bp + 12 + 8 * k, 4); } }
+                else { if (ax && k < get(ap + 64, 4)) { ao = get(ap + 72 + 80 * k + 56, 4); az = 8 * get(ap + 72 + 80 * k + 60, 4); } if (bx && k < get(bp + 64, 4)) { bo = get(bp + 72 + 80 * k + 56, 4); bz = 8 * get(bp + 72 + 80 * k + 60, 4); } }
+                const char *name = kind == 0 ? (k ? "strtab" : "nlist_64") : kind == 1 ? "section-relocations" : k == 0 ? "rebase" : k == 1 ? "bind" : k == 2 ? "weak-bind" : k == 3 ? "lazy-bind" : "export";
+                if (cx_fmt(label, sizeof label, "load-command[%llu].%s[%llu]", i, name, k)) die("compare label");
+                macho_payload(label, a, an, ao, az, b, bn, bo, bz);
+            }
+        }
+        aa += al; ba += bl;
+    }
+}
+static int macho_file(const char *oldpath, const char *newpath) {
+    size_t an, bn = 0; unsigned char *a = (unsigned char *)cx_read(oldpath, &an), *b = 0;
+    if (!a) die("read old Mach-O");
+    if (newpath) { b = (unsigned char *)cx_read(newpath, &bn); if (!b) die("read new Mach-O"); }
+    res = stdout;
+    int arm = macho_cpu(a, an, newpath ? "old.cpu" : "file.cpu");
+    if (arm >= 0) macho_cells(a, an, arm, newpath ? "old" : "file");
+    if (newpath) { int barm = macho_cpu(b, bn, "new.cpu"); if (barm >= 0) macho_cells(b, bn, barm, "new"); macho_compare(a, an, b, bn); }
+    printf("SUMMARY\tpass=%d\tfail=%d\tnot_run=%d\n", npass, nfail, nnotrun);
+    return nfail || nnotrun ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && tx_eqz(argv[1], "--pe")) return pe_file(argv[2]);
-    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n       --pe FILE\n", stderr); return 2; }
+    if (argc == 3 && tx_eqz(argv[1], "--macho")) return macho_file(argv[2], 0);
+    if (argc == 4 && tx_eqz(argv[1], "--macho-compare")) return macho_file(argv[2], argv[3]);
+    if (argc != 3 || !realpath(argv[1], root) || argv[2][0] != '/') { fputs("usage: ROOT ABS_OUT\n       --pe FILE\n       --macho FILE\n       --macho-compare OLD NEW\n", stderr); return 2; }
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "formats-macho-pe: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700)) die("new out dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");

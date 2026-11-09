@@ -1,0 +1,63 @@
+/* 只证明分片合并的材料合同；产品阶段等价与真实 resume 需要另外的真实证据。
+ * 全部检查在进程内使用微小独占 fixture，无编译或子进程，默认整体预算 55 秒。
+ */
+#pragma unisa use cxlib.wholefrontmerge
+#pragma unisa use cxlib.pytempfile
+#pragma unisa use sys.fs
+static int failed,owned;
+static char base[8192],part[2][8192];
+static const unsigned char frame0[]={15,0,0,0,2,0,0,0,'/','a','U','N','I','T','O','K','1',0,'X'};
+static const unsigned char frame1[]={15,0,0,0,2,0,0,0,'/','b','U','N','I','T','O','K','1',0,'Y'};
+static const unsigned char attr0[]={1,0,0,0,0,0,0,0,3,0,0,0,1};
+static const unsigned char attr1[]={1,0,0,0,1,0,0,0,4,0,0,0,2};
+/* 独立手写 phase：不是调用生产编码器，也不从实际输出拼装期望。 */
+static const unsigned char expected[]={
+ 38,0,0,0,22,0,0,0,
+ 15,0,0,0,2,0,0,0,'/','a','U','N','I','T','O','K','1',0,'X',
+ 15,0,0,0,2,0,0,0,'/','b','U','N','I','T','O','K','1',0,'Y',
+ 2,0,0,0,0,0,0,0,3,0,0,0,1,1,0,0,0,4,0,0,0,2
+};
+static void ck(int ok,const char *name){printf("%s\t%s\n",ok?"PASS":"FAIL",name);if(!ok)failed++;}
+static int store(int k,const char *leaf,const void *bytes,size_t n){char p[8192];return cx_fmt(p,sizeof p,"%s/%s",part[k],leaf)||cx_write(p,bytes,n);}
+static int manifest(int k,int first,int duplicate){char text[256];if(cx_fmt(text,sizeof text,"first\t%d\ncount\t1\ntotal\t2\n0\t/a\n1\t/%s\n",first,duplicate?"a":"b"))return 1;return store(k,"part.tsv",text,strlen(text));}
+static int fixture(void){return manifest(0,0,0)||manifest(1,1,0)||store(0,"frames.bin",frame0,sizeof frame0)||store(1,"frames.bin",frame1,sizeof frame1)||store(0,"attrs.bin",attr0,sizeof attr0)||store(1,"attrs.bin",attr1,sizeof attr1);}
+/* 独占创建探针证明路径确实未留下文件，不能仅把任意 open 失败当成 ENOENT。
+ * 创建成功也证明父目录仍可写；探针立即关闭删除，不重复断言同一路径。 */
+static int absent(const char *p){int fd=sy_open_new(p,0600);if(fd<0)return 0;int cl=sy_close(fd),rm=sy_unlink(p);return !cl&&!rm;}
+static int exact(const char *p){size_t n=0;char *bytes=cx_read(p,&n);int ok=bytes&&n==sizeof expected&&!memcmp(bytes,expected,sizeof expected);free(bytes);return ok;}
+static void one(int mode,const char *name){
+ char out[8192],why[256]={0};const char *dirs[]={part[0],part[1]};int count=2;
+ if(fixture()||cx_fmt(out,sizeof out,"%s/output-%d.phase",base,mode)){ck(0,"fixture-write");return;}
+ unsigned char changed[32];int setup=0;
+ if(mode==1)count=1;
+ if(mode==2){dirs[0]=part[1];dirs[1]=part[0];}
+ if(mode==3)setup=manifest(1,0,0);
+ if(mode==4){setup=manifest(0,0,1)||manifest(1,1,1);memcpy(changed,frame1,sizeof frame1);changed[9]='a';setup=setup||store(1,"frames.bin",changed,sizeof frame1);}
+ if(mode==5){memcpy(changed,attr1,sizeof attr1);changed[4]=0;setup=store(1,"attrs.bin",changed,sizeof attr1);}
+ if(mode==6){memcpy(changed,frame1,sizeof frame1);changed[9]='z';setup=store(1,"frames.bin",changed,sizeof frame1);}
+ if(mode==7)setup=store(1,"frames.bin",frame1,sizeof frame1-1);
+ if(mode==8)setup=store(1,"attrs.bin",attr1,sizeof attr1-1);
+ if(setup){ck(0,"mutation-write");return;}
+ int rc=wf_merge_parts(dirs,count,out,why,sizeof why);
+ int ok;if(!mode){ok=!rc&&exact(out);if(!rc&&sy_unlink(out))ok=0;}
+ else {int missing=absent(out);ok=rc!=0&&why[0]&&missing;}
+ ck(ok,name);if(!ok)fprintf(stderr,"case=%d rc=%d why=%s\n",mode,rc,why);
+}
+int main(void){
+ if(!ptf_mkdtemp(0,"whole-front-check-",base,sizeof base))owned=1;
+ if(!owned||cx_fmt(part[0],sizeof part[0],"%s/part0",base)||cx_fmt(part[1],sizeof part[1],"%s/part1",base)||sy_mkdir(part[0],0700)||sy_mkdir(part[1],0700)){
+  ck(0,"exclusive-fixture");
+ }else{
+  one(0,"two-parts-independent-phase-bytes");
+  one(1,"missing-part-no-output");
+  one(2,"out-of-order-no-output");
+  one(3,"overlap-no-output");
+  one(4,"duplicate-unit-path-no-output");
+  one(5,"cross-part-global-unit-attribute-no-output");
+  one(6,"frame-name-manifest-mismatch-no-output");
+  one(7,"truncated-frame-tail-no-output");
+  one(8,"attribute-length-mismatch-no-output");
+ }
+ if(owned)ptf_rmtree(base);
+ printf("CHECK_WHOLE_FRONT\tfailed=%d\n",failed);return failed?1:0;
+}
