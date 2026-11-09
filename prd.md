@@ -457,3 +457,11 @@ prd.md                 当前状态（本文件，只写当前事实）
 - [archive/reference-c/](archive/reference-c/)、[archive/reference-py/](archive/reference-py/) —— 旧 C/Python 参考实现。
 - [archive/plans/](archive/plans/) —— 历史计划与设计探针。
 
+
+### OSX-LAUNCH-SLOW（0.0.48 发布回归 P0）
+
+cc报告发布件559705热启动每次创建并执行新manager inode，Darwin安全评估使--version/-run约1秒。本机实际根仍f069，需下载并核559705，不以安装记录代字节。首版manager内容缓存真实未过性能：隔离缓存仍高CPU重算MB摘要；原失败日志保留。改用新解压/marker异常才运行manager，热路径匹配内置完整slice SHA的原marker行、原子新增PID lease并touch recency，不启动manager；冷路径仍完整摘要校验/最近4清理/隔离fallback。manager保存在私有.managers内容哈希目录，冷构造原子发布。验收两Mac架构各热version/run r7逐次10次与中位数≤50/300ms，首解压仍清理旧缓存；新候选按发布流程绑定独立身份，未实测不记PASS。
+
+OSX-LAUNCH-SLOW能力入口：`tools/osx-launch-profile.cx APE arm64|x86_64`显式候选逐次测量与10次中位；配对check独立15项。`tools/check-ape-pack.cx APE ARCH`验证冷清理/热manager不执行/lease/recency及symlink隔离；c869历史候选两格各45/0。五个osx批次已登记，真实候选性能不借工具夹具PASS；ARM15/224ms已过，Rosetta70/423ms未过；裸x64 run388.5ms、旧f069同入口405.5ms，保留300ms门继续核验。
+
+OSX-LAUNCH-SLOW最终wrapper开发冻结07a90387…、候选01b16ae0…：热合一uname并仅缺目录才mkdir，ARM12.5/253.5ms、Rosetta48/512.5ms；后者run仍FAIL，旧f069 Rosetta同测405.5ms，裸c48 slice388.5ms。阈值不放宽，未发布或授QUALIFIED。测量check15/0及13棘轮13/13；工具库存由现git index完整重算，核补已有cache-retain/check、toolselfpath、precommit-freeze遗漏并剔除误列tests路径，现651源/82分片，明确只登记未全编。下一步查r7具体输入/运行相位并推进新候选CI。
