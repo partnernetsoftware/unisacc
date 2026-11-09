@@ -74,6 +74,10 @@
 
 ## 2. 有什么功能（已实现能力速查）
 
+签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界。配套`tools/check-release-members.cx ROOT`独立夹具实际21/0（会话69831），只证明字节/结构，不认证签名或最终候选资格。
+登记补齐：`release-members-interface`注册器实际BATCH PASS（92725），显式Mac宿主daily接口；库存经`tests/tools-compile.cx --register`原生重算并仅加入两新源，从652到654，仍82片。此处仅库存登记，不称654源全编通过。
+收尾实证：最终Mac daily批62131实际21/0+BATCH PASS；清单59661 metadata_valid1/757批，分片9196实测82；首次棘轮12/1的两处未检查拷贝改真容量mm_copy，最终90679实际13/13，无扩基线或删覆盖。
+
 #### 2.1 日常（运行、改写、查询）
 
 | 动作 | 现成用法 | 说明 |
@@ -475,3 +479,7 @@ OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；
 OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到release/candidate-osx-launch-rc1.tsv，当前release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。
 
 OSX-LAUNCH-SLOW新源Linux构造入口缺口：两目标首批尚未构造对象即被entry-build覆盖UNISA_CONTAINER拒绝；显式constructor仅认bare ELF，Mac裸片被错误unset包。正规entry接口已声明显式constructor直接执行，现补Mach-O64识别保留同显式P4，APE/薄头仍清外部包；不换产品源/NN/SID，不以shell包装掩盖构造器身份。失败OUT保留，新native工具与新冻结源根另开批次，最终完整44根/closure/link逐项核。
+
+OSX-LAUNCH-SLOW最终53ff候选首测：ARM性能过门，两架构缓存各108/0且四Mac成员/P4严格字节同；Rosetta version54.5ms FAIL、run262.5ms PASS，材料仅PREPARED不授可发布。热wrapper仍外部uname+chmod，下一小步用bash只读BASH_VERSINFO[5]识别Darwin架构(实测ARM/Rosetta及覆写HOSTTYPE/OSTYPE/MACHTYPE不影响)，不支持的POSIX shell/未知平台回退原uname，不信可覆盖环境变量。保留chmod私有目录与全部cache安全合同；新wrapper必出新SHA再独立性能/功能/CI，不迁53ff结果。
+
+OSX-LAUNCH-SLOW新候选bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3/6429038B：实际两架构逐次10次性能ARM14/101.5ms、Rosetta43/257.5ms通过50/300ms门，Terminal.app既有责任应用上下文；53ff失败完整保留，不改安全设置。release-ape新接口28/0、members独立21/0与最终13棘轮13/13。将用独立草稿v0.0.48.1-osx-launch-rc1上传七标准资产+四Mac成员+五行无header members.tsv，交cc触真签；签后重包新SHA须重验，不迁未签资格。对外动作回滚为删除本草稿和本tag(gh release delete v0.0.48.1-osx-launch-rc1 --cleanup-tag)，不覆盖已发v0.0.48/Latest/根。本车道不改cc三签名路径。
