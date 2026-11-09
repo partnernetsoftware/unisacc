@@ -1,0 +1,109 @@
+/* tools/fixedpoint-sample.cx -- 非发布候选两代抽样/拆波;发布候选拒绝抽样。
+ *
+ *   sh ./unisacc.com tools/fixedpoint-sample.cx -- sample --seed N UNITS GEN2 GEN3
+ *   sh ./unisacc.com tools/fixedpoint-sample.cx -- release --sample   # 拒绝
+ *   sh ./unisacc.com tools/fixedpoint-sample.cx -- release GEN2 GEN3
+ *   sh ./unisacc.com tools/fixedpoint-sample.cx -- wave PARTDIR OUT
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static unsigned h32(const char *s, unsigned seed) {
+    unsigned h = 2166136261u ^ seed; long i;
+    for (i = 0; s[i]; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+    return h;
+}
+static int cmp_pair(const char *a, const char *b) {
+    size_t na = 0, nb = 0; char *x = (char *)cx_read(a, &na), *y = (char *)cx_read(b, &nb);
+    if (!x || !y) return 1;
+    if (na != nb) return 1;
+    return !tx_same(x, (long)na, y, (long)nb);
+}
+
+int main(int argc, char **argv) {
+    const char *cmd = 0, *units = 0, *g2 = 0, *g3 = 0, *partd = 0, *outp = 0;
+    unsigned seed = 1; int i, want_sample = 0, tot = 0, picked = 0, bad = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--sample")) { want_sample = 1; continue; }
+        if (tx_eqz(argv[i], "--seed") && i + 1 < argc) {
+            const char *s = argv[++i]; seed = 0; while (*s >= '0' && *s <= '9') seed = seed * 10 + (unsigned)(*s++ - '0');
+            continue;
+        }
+        if (!cmd) { cmd = argv[i]; continue; }
+        if (tx_eqz(cmd, "sample")) {
+            if (!units) units = argv[i]; else if (!g2) g2 = argv[i]; else g3 = argv[i];
+            continue;
+        }
+        if (tx_eqz(cmd, "release")) {
+            if (!g2) g2 = argv[i]; else g3 = argv[i];
+            continue;
+        }
+        if (tx_eqz(cmd, "wave")) {
+            if (!partd) partd = argv[i]; else outp = argv[i];
+            continue;
+        }
+        sy_eprintf("fixedpoint-sample: bad arg\n"); return 2;
+    }
+    if (tx_eqz(cmd, "release") && want_sample) {
+        sy_eprintf("REFUSE\trelease-candidate-forbids-sample\n"); return 2;
+    }
+    if (tx_eqz(cmd, "sample")) {
+        size_t n = 0; char *b; long at = 0;
+        if (!units || !g2 || !g3) { sy_eprintf("usage: sample --seed N UNITS GEN2 GEN3\n"); return 2; }
+        b = (char *)cx_read(units, &n); if (!b) return 1;
+        while (at < (long)n) {
+            long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
+            if (l > 0 && b[at] != '#') {
+                char name[200], p2[400], p3[400];
+                mm_copy(name, 200, b + at, l < 199 ? l : 199); name[l < 199 ? l : 199] = 0;
+                tot++;
+                if ((h32(name, seed) % 4) == 0) {
+                    picked++;
+                    if (cx_fmt(p2, sizeof p2, "%s/%s", g2, name) || cx_fmt(p3, sizeof p3, "%s/%s", g3, name)) return 1;
+                    if (cmp_pair(p2, p3)) { sy_printf("MISMATCH\t%s\n", name); bad++; }
+                }
+            }
+            at += l + 1;
+        }
+        sy_printf("FIXEDPOINT_SAMPLE\tmode=SAMPLED\tseed=%u\ttotal=%d\tpicked=%d\tmismatch=%d\n", seed, tot, picked, bad);
+        return bad ? 1 : 0;
+    }
+    if (tx_eqz(cmd, "release")) {
+        char list[400]; size_t n = 0; char *b; long at = 0;
+        if (!g2 || !g3) return 2;
+        if (cx_fmt(list, sizeof list, "%s/all.lst", g2)) return 1;
+        b = (char *)cx_read(list, &n); if (!b) { sy_eprintf("release: need GEN2/all.lst\n"); return 2; }
+        while (at < (long)n) {
+            long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
+            if (l > 0) {
+                char name[200], p2[400], p3[400];
+                mm_copy(name, 200, b + at, l < 199 ? l : 199); name[l < 199 ? l : 199] = 0;
+                tot++;
+                if (cx_fmt(p2, sizeof p2, "%s/%s", g2, name) || cx_fmt(p3, sizeof p3, "%s/%s", g3, name)) return 1;
+                if (cmp_pair(p2, p3)) { sy_printf("MISMATCH\t%s\n", name); bad++; }
+            }
+            at += l + 1;
+        }
+        sy_printf("FIXEDPOINT_SAMPLE\tmode=FULL\ttotal=%d\tmismatch=%d\n", tot, bad);
+        return bad ? 1 : 0;
+    }
+    if (tx_eqz(cmd, "wave")) {
+        char acc[4000]; long an = 0; int w;
+        if (!partd || !outp) return 2;
+        for (w = 0; w < 16; w++) {
+            char p[400]; size_t zn = 0; char *z;
+            if (cx_fmt(p, sizeof p, "%s/%02d.dat", partd, w)) return 1;
+            if (sy_exists(p) != 1) break;
+            z = (char *)cx_read(p, &zn); if (!z) return 1;
+            if (an + (long)zn >= (long)sizeof acc) return 1;
+            mm_copy(acc + an, (long)sizeof acc - an, z, (long)zn); an += (long)zn;
+        }
+        if (cx_write(outp, acc, (size_t)an)) return 1;
+        sy_printf("FIXEDPOINT_WAVE\tbytes=%ld\twaves=%d\n", an, w);
+        return 0;
+    }
+    sy_eprintf("usage: sample|release|wave\n"); return 2;
+}
