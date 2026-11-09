@@ -1,0 +1,87 @@
+/* tools/check-freeze-plan.cx -- freeze-plan 夹具(sy_tmpdir):符号链接漏冻结、清单缺文件、前缀过宽。
+ *
+ *   sh ./unisacc.com tools/check-freeze-plan.cx
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char td[320], root[400], tool[500], com[500];
+
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-freeze-plan.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-freeze-plan.%s\n", name); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    return rc;
+}
+static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 100000), n, tx_len(n, 100)) >= 0; }
+static int putf(const char *rel, const char *body) {
+    char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
+    return cx_write(p, body, tx_len(body, 8000));
+}
+
+int main(void) {
+    char out[8192], cwd[400]; char *o = 0; size_t n = 0;
+    {   char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+        mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
+        mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
+    if (cx_fmt(td, sizeof td, "%s/freeze-plan-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
+    if (cx_fmt(tool, sizeof tool, "%s/tools/freeze-plan.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) { ck(0, "path"); return 1; }
+
+    /* 正控: ident 文件均在 src/ 与 ext/memx, 前缀 src ext/memx */
+    putf("ident.ok", "src/a.cx\tabc\next/memx/heap.cx\tdef\n");
+    putf("draft.ok", "# h\nSID\tbase\town\t4102444800\tsrc ext/memx\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.ok --draft draft.ok", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "uncovered_or_wide=0"), "ok-cover"); }
+
+    /* 负控1: 符号链接真身 ext/memx 未进前缀 → UNCOVERED */
+    putf("ident.leak", "cx/mem/heap.cx\tabc\next/memx/heap.cx\tdef\n");
+    putf("draft.leak", "SID\tbase\town\t4102444800\tcx/mem\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.leak --draft draft.leak", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "UNCOVERED") && has(out, "ext/memx/heap.cx"), "symlink-leak"); }
+
+    /* 负控2: 前缀过宽 tools/ */
+    putf("ident.wide", "src/a.cx\tabc\n");
+    putf("draft.wide", "SID\tbase\town\t4102444800\tsrc tools\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.wide --draft draft.wide", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "WIDE") && has(out, "tools"), "prefix-too-wide"); }
+
+    /* 负控3: 启动清单缺文件 */
+    putf("boot.ok", "ident.ok\n");
+    putf("boot.bad", "ident.ok\nno-such-file.cx\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- boot-list boot.ok", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "missing=0"), "boot-list-ok");
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- boot-list boot.bad", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 || has(out, "missing=1") || has(out, "MISSING"), "boot-list-missing");
+    }
+    /* drill: 临时 git 仓,冻结路径 staged → precommit 拦;符号链接目标同拦 */
+    { char cmd[2200];
+      if (cx_fmt(cmd, sizeof cmd,
+          "cd '%s' && rm -rf drill && mkdir drill && cd drill && git init -q . && git config user.email a@b && git config user.name t && "
+          "mkdir -p exec agentwork ext/memx tools && echo x > exec/a.tsv && echo y > ext/memx/t.cx && ln -s ../ext/memx/t.cx cxlink.cx && "
+          "printf 'sid1\\tbase1\\tcdx\\t4102444800\\texec ext/memx\\n' > agentwork/freeze.tsv && "
+          "git add exec/a.tsv && GIT_DIR=.git sh '%s' '%s/tools/precommit.cx' 2>&1",
+          td, com, root)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 1 && has(out, "冻结中"), "drill-frozen-path"); }
+    { char cmd[2200];
+      if (cx_fmt(cmd, sizeof cmd,
+          "cd '%s/drill' && git reset -q && git add ext/memx/t.cx && GIT_DIR=.git sh '%s' '%s/tools/precommit.cx' 2>&1",
+          td, com, root)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 1 && has(out, "冻结中"), "drill-symlink-target"); }
+
+    { char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
+    sy_printf("CHECK_FREEZE_PLAN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

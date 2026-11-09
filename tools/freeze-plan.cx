@@ -1,0 +1,245 @@
+/* tools/freeze-plan.cx -- 由 ident 导出 freeze.tsv 草案并核覆盖。
+ *
+ *   sh ./unisacc.com tools/freeze-plan.cx -- plan ROOT OUTDIR [--ident BIN] [--sid SID] [--owner NAME]
+ *   sh ./unisacc.com tools/freeze-plan.cx -- check [--ident-list FILE] [--draft FILE]
+ *   sh ./unisacc.com tools/freeze-plan.cx -- boot-list LIST
+ *
+ * 永不写 agentwork/freeze.tsv。tools/tests/plans/agentwork 永不作为冻结前缀。
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char pool[12000];
+static long pooln;
+static char *files[80];
+static int nfiles;
+static char *prefs[40];
+static int npref;
+static char *aliases[20];
+static int nalias;
+
+static char *intern(const char *s, long n) {
+    if (n < 0) n = tx_len(s, 400);
+    if (pooln + n + 1 > (long)sizeof pool) return 0;
+    mm_copy(pool + pooln, (long)sizeof pool - pooln, s, n);
+    pool[pooln + n] = 0;
+    { char *p = pool + pooln; pooln += n + 1; return p; }
+}
+static int under(const char *p, const char *b) {
+    long n = tx_len(b, 80);
+    return tx_prefix(p, tx_len(p, 400), b, n) && (!p[n] || p[n] == '/');
+}
+static int never_p(const char *p) {
+    return under(p, "tools") || under(p, "tests") || under(p, "plans") || under(p, "agentwork");
+}
+static int covered(const char *f, const char *pr) {
+    long fl = tx_len(f, 400), pl = tx_len(pr, 120);
+    if (pl <= 0) return 0;
+    if (fl == pl && tx_same(f, fl, pr, pl)) return 1;
+    return fl > pl && f[pl] == '/' && tx_prefix(f, fl, pr, pl);
+}
+static int add_pref(const char *p) {
+    int i; char *q;
+    if (!p || !p[0]) return 0;
+    for (i = 0; i < npref; i++) if (tx_eqz(prefs[i], p)) return 0;
+    if (npref >= 40) return 1;
+    q = intern(p, -1); if (!q) return 1;
+    prefs[npref++] = q; return 0;
+}
+static int add_file(const char *p) {
+    int i; char *q;
+    for (i = 0; i < nfiles; i++) if (tx_eqz(files[i], p)) return 0;
+    if (nfiles >= 80) return 1;
+    q = intern(p, -1); if (!q) return 1;
+    files[nfiles++] = q; return 0;
+}
+static void dir_pref(const char *path, char *out, long cap) {
+    long i, sl = 0, n = tx_len(path, 400);
+    out[0] = 0;
+    if (never_p(path)) return;
+    if (tx_prefix(path, n, "cx/", 3)) {
+        for (i = 3; i < n; i++) if (path[i] == '/') { sl = i; break; }
+        if (sl) { mm_copy(out, cap, path, sl); out[sl] = 0; return; }
+    }
+    for (i = 0; i < n; i++) if (path[i] == '/') { sl = i; break; }
+    if (sl) { mm_copy(out, cap, path, sl); out[sl] = 0; }
+    else mm_copy(out, cap, path, n + 1);
+}
+static int parse_ident_list(const char *b, long n) {
+    long at = 0;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e, tab;
+        if (l > 0 && b[at] != '#') {
+            tab = tx_chr(b + at, l, '\t'); if (tab < 0) tab = l;
+            if (tab > 0 && tab < 200) {
+                char p[200]; mm_copy(p, 200, b + at, tab); p[tab] = 0;
+                if (add_file(p)) return 1;
+            }
+        }
+        at += l + 1;
+    }
+    return 0;
+}
+static int parse_aliases(const char *b, long n) {
+    long at = 0;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && b[at] != '#') {
+            long f = 0, pos = 0; const char *cols[4]; long cl[4];
+            while (pos <= l && f < 4) {
+                long t = tx_chr(b + at + pos, l - pos, '\t'), len = t < 0 ? l - pos : t;
+                cols[f] = b + at + pos; cl[f] = len; f++; if (t < 0) break; pos += len + 1;
+            }
+            if (f >= 3 && nalias < 20) {
+                char row[200], d[96];
+                if (cx_fmt(row, sizeof row, "%.*s -> %.*s", (int)cl[1], cols[1], (int)cl[2], cols[2])) return 1;
+                aliases[nalias] = intern(row, -1); if (!aliases[nalias]) return 1; nalias++;
+                dir_pref(cols[2], d, 96); add_pref(d);
+                dir_pref(cols[1], d, 96); add_pref(d);
+            }
+        }
+        at += l + 1;
+    }
+    return 0;
+}
+static void merge_prefs(void) {
+    int i; char d[96];
+    for (i = 0; i < nfiles; i++) { dir_pref(files[i], d, 96); add_pref(d); }
+}
+static int parse_draft_paths(const char *b, long n) {
+    long at = 0; char line[800];
+    npref = 0;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && b[at] != '#') {
+            char *f[6]; int nf = 0; char *p;
+            if (l >= (long)sizeof line) return 1;
+            mm_copy(line, sizeof line, b + at, l); line[l] = 0;
+            f[nf++] = line;
+            for (p = line; *p && nf < 6; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
+            if (nf != 5) { sy_eprintf("freeze-plan: draft malformed (need 5 columns)\n"); return 1; }
+            for (p = f[4]; *p; ) {
+                char *s = p; long pl; char pr[96];
+                while (*p && *p != ' ') p++;
+                pl = p - s;
+                if (pl > 0 && pl < 95) { mm_copy(pr, 96, s, pl); pr[pl] = 0; add_pref(pr); }
+                while (*p == ' ') p++;
+            }
+            return 0;
+        }
+        at += l + 1;
+    }
+    sy_eprintf("freeze-plan: empty draft\n"); return 1;
+}
+static int do_check(void) {
+    int i, j, bad = 0;
+    for (i = 0; i < npref; i++) if (never_p(prefs[i])) { sy_printf("WIDE\t%s\n", prefs[i]); bad++; }
+    for (i = 0; i < nfiles; i++) {
+        int ok = 0;
+        if (never_p(files[i])) continue;
+        for (j = 0; j < npref; j++) if (covered(files[i], prefs[j])) { ok = 1; break; }
+        if (!ok) { sy_printf("UNCOVERED\t%s\n", files[i]); bad++; }
+    }
+    sy_printf("FREEZE_PLAN_CHECK\tuncovered_or_wide=%d\tfiles=%d\tprefixes=%d\n", bad, nfiles, npref);
+    return bad ? 1 : 0;
+}
+static int boot_list(const char *path) {
+    size_t n = 0; char *b = (char *)cx_read(path, &n); long at = 0; int bad = 0, rows = 0;
+    if (!b) { sy_eprintf("freeze-plan: boot-list missing %s\n", path); return 1; }
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
+        if (l > 0 && b[at] != '#') {
+            char p[400];
+            if (l >= 399) { bad++; at += l + 1; continue; }
+            mm_copy(p, 400, b + at, l); p[l] = 0; rows++;
+            if (sy_exists(p) != 1) { sy_eprintf("MISSING\t%s\n", p); bad++; }
+        }
+        at += l + 1;
+    }
+    sy_printf("FREEZE_BOOT_LIST\tmissing=%d\trows=%d\n", bad, rows);
+    return bad ? 1 : 0;
+}
+static int slurp_v(char **argv, char *out, long cap, long *n) {
+    int ofd, pid; long r; *n = 0;
+    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    if (pid < 0) return 1;
+    while ((r = sy_read(ofd, out + *n, cap - 1 - *n)) > 0) { *n += r; if (*n + 1 >= cap) break; }
+    { int ex = 0, code = 0, sig = 0; sy_close(ofd);
+      if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code != 0) return 1; }
+    out[*n] = 0; return 0;
+}
+
+int main(int argc, char **argv) {
+    int i; const char *cmd = 0, *root = ".", *outdir = 0, *ident = 0, *sid = "PLAN-SID", *owner = "plan";
+    const char *ident_list = 0, *draft = 0, *boot = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (!cmd) { cmd = argv[i]; continue; }
+        if (tx_eqz(argv[i], "--ident") && i + 1 < argc) { ident = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--sid") && i + 1 < argc) { sid = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--owner") && i + 1 < argc) { owner = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--ident-list") && i + 1 < argc) { ident_list = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--draft") && i + 1 < argc) { draft = argv[++i]; continue; }
+        if (tx_eqz(cmd, "plan")) { if (tx_eqz(root, ".")) root = argv[i]; else outdir = argv[i]; continue; }
+        if (tx_eqz(cmd, "boot-list") && !boot) { boot = argv[i]; continue; }
+        sy_eprintf("freeze-plan: bad argument %s\n", argv[i]); return 2;
+    }
+    if (!cmd) { sy_eprintf("usage: freeze-plan plan|check|boot-list\n"); return 2; }
+    if (tx_eqz(cmd, "boot-list")) {
+        if (!boot) { sy_eprintf("freeze-plan: boot-list LIST\n"); return 2; }
+        return boot_list(boot);
+    }
+    if (tx_eqz(cmd, "check")) {
+        if (ident_list) {
+            size_t n = 0; char *b = (char *)cx_read(ident_list, &n);
+            if (!b || parse_ident_list(b, (long)n)) { sy_eprintf("freeze-plan: ident-list\n"); return 1; }
+        } else { sy_eprintf("freeze-plan: check needs --ident-list\n"); return 2; }
+        if (!draft) { sy_eprintf("freeze-plan: check needs --draft FILE\n"); return 2; }
+        { size_t n = 0; char *b = (char *)cx_read(draft, &n); if (!b || parse_draft_paths(b, (long)n)) return 1; }
+        return do_check();
+    }
+    if (tx_eqz(cmd, "plan")) {
+        char commit[80], outp[400], pathrow[900]; int k; long dl, n = 0, an = 0;
+        const char *bin = ident ? ident : "./seed/ident";
+        char *av[] = {(char *)bin, (char *)root, "list-current", 0};
+        char *al[] = {(char *)bin, (char *)root, "list-aliases", 0};
+        char *gv[] = {"git", "rev-parse", "--short=10", "HEAD", 0};
+        char *buf, *abuf;
+        if (!outdir) outdir = "out";
+        if (tx_find(outdir, tx_len(outdir, 400), "agentwork", 9) >= 0) {
+            sy_eprintf("freeze-plan: refuse writing under agentwork/\n"); return 2;
+        }
+        buf = mm_alloc(65536); abuf = mm_alloc(16384); if (!buf || !abuf) return 1;
+        if (slurp_v(av, buf, 65536, &n) || parse_ident_list(buf, n)) {
+            sy_eprintf("freeze-plan: ident list-current failed (pass --ident BIN)\n"); return 1;
+        }
+        if (!slurp_v(al, abuf, 16384, &an)) parse_aliases(abuf, an);
+        merge_prefs();
+        if (slurp_v(gv, commit, sizeof commit, &n) == 0) {
+            while (n > 0 && (commit[n - 1] == '\n' || commit[n - 1] == '\r')) commit[--n] = 0;
+        } else mm_copy(commit, sizeof commit, "unknown", 8);
+        if (sy_exists(outdir) != 1) sy_mkdir(outdir, 0755);
+        if (cx_fmt(outp, sizeof outp, "%s/freeze.tsv", outdir)) return 1;
+        pathrow[0] = 0;
+        for (k = 0; k < npref; k++) {
+            long used = tx_len(pathrow, sizeof pathrow);
+            if (used) { pathrow[used] = ' '; pathrow[used + 1] = 0; used++; }
+            if (tx_copy(pathrow + used, (long)sizeof pathrow - used, prefs[k], tx_len(prefs[k], 90))) return 1;
+        }
+        dl = sy_wall_s() + 14 * 24 * 3600;
+        { char row[1200];
+          if (cx_fmt(row, sizeof row, "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n%s\t%s\t%s\t%ld\t%s\n",
+                     sid, commit, owner, dl, pathrow[0] ? pathrow : "src")) return 1;
+          if (cx_write(outp, row, (size_t)tx_len(row, sizeof row))) return 1; }
+        { int a; for (a = 0; a < nalias; a++) sy_printf("ALIAS\t%s\n", aliases[a]); }
+        sy_printf("FREEZE_PLAN\tpath=%s\tprefixes=%d\tfiles=%d\taliases=%d\n", outp, npref, nfiles, nalias);
+        return 0;
+    }
+    sy_eprintf("freeze-plan: unknown command\n"); return 2;
+}
