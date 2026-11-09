@@ -49,3 +49,4 @@ workflow/action采用仓库已有固定commit pin模式，source checkout固定4
 `tools/macos-signing.cx --dry-run CONFIG NEW_OUT`只验配置与实际成员、生成identity.tsv/完整流程计划。配置严格TSV：`MACOS_SIGNING\t1`；release_version/source_commit/draft_release_id各一次；artifact行依次ROLE、绝对PATH、实际SHA，六角色必须恰一：osx-arm64、osx-x86_64、cache-arm64、cache-x86_64、models、candidate。工具拒绝旧0.0.47发布计划、坏hash/CPU/重复缺失/NUL/CR/符号链接及覆盖。它**不证明Draft真实存在、source↔candidate↔成员来源关系或实际二进制版本**；未来资格job必须调用现有seal验证补齐，plan含待提供材料的REPACK_REQUIRED，不冒可直接执行的CI工作流。
 
 `--adhoc-test osx/ARCH INPUT SHA MODELS MODELS_SHA NEW_OUT`仅签私有复制，硬固定sign `-`/无timestamp/空entitlements；尾加`--entitlement-profile unsigned-kernel`才启用唯一已审例外，其它profile拒绝。实际version、hello默认-run、系统FFI使用干净环境和固定材料，收集只读spctl/裸stapler状态。任何Developer ID身份、submit、staple写入或上传入口均未暴露。默认check不隐读out材料，真实G3测试由显式CLI单独执行。ARM空配置明确失败保留，单例外本机可跑也不包装成全流程可签发布。
+- 工作流：`.github/workflows/macos-sign.yml`（workflow_dispatch，环境 release-signing；entitlements 见 `release/entitlements-unsigned-kernel.plist`；未运行）
