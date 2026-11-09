@@ -1,6 +1,8 @@
 # OSX-LAUNCH-SLOW：0.0.48.1 发布修复
 
-当前按cc新裁定构造0.0.48.1：轻量--touch回收热lease，固定两Mac切片与两manager字节，草稿提供五角色members.tsv和四独立Mac资产；首真签由cc负责，本车道不改其三签名路径。新源SID5f0f183f…，最终新APE/成员SHA尚待新源六片构造后冻结。旧0.0.48表已归档为release/candidate-osx-launch-rc1.tsv；当前候选表在实际就绪后重建并通知cc。下文01b16证据仅历史，不能签名或移授新候选。
+当前候选为0.0.48.1，APE `bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3`，6429038B；产品源SID `5f0f183f3897129a82bf65743d2c729be350f607ede45bdfdaab096d7fad0bd8`，六片实际新源构造。轻量--touch回收热lease，两Mac切片/两manager固定，提取独立逐字节与原P4核验通过，两格缓存各108/0；热性能ARM14/101.5ms、Rosetta43/257.5ms（各mode10样本，Terminal.app既有责任应用，不改安全设置）。旧53ff候选Rosetta54.5ms失败保留；只读bash架构快路省去外部uname，未知POSIX shell回退原路径，chmod与最近四合同保持。测试冻结提交f09969d9d0efb81976b3eaf486731f120df22cbe，候选六格CI尚未完成，不借历史42/0。
+
+交接草稿tag `v0.0.48.1-osx-launch-rc1`，七标准资产外另附五行无header members.tsv及四Mac独立资产；正式候选表为release/candidate-osx-launch.tsv。首真签由cc触发，本车道不改其三签名路径。签后四成员通过release-ape pack --osx-slices X64 ARM64 --cache-manager-osx X64 ARM64重包，保留原输入字节，新APE SHA必须重新验收，不转移未签资格。若本草稿失败，仅删除此草稿/tag撤回，保留v0.0.48、Latest与本机根。旧0.0.48表在release/candidate-osx-launch-rc1.tsv，下文01b16证据仅历史。
 
 热lease审计补漏已修：新版cachedmanager热模式跳payload摘要/排序，严格V2全文/root/锁/parentPID，清本tool全部dead lease（仅ESRCH，EPERM保留，pid0拒绝），刷新recency并记新lease。冷模式最近四/完整摘要/legacy与隔离合同保持；已有超4096历史目录仍隔离fallback，不宣称自动恢复。27项helper及临时probe两格各108项、12个真实新父PID热调用无积累已实跑；最终0.0.48.1须另验证。
 
@@ -34,3 +36,9 @@
 新同候选六目标CI必须绑定新APE SHA和精确测试提交，不能沿用559705的42/0。CI未实际完成前仅PREPARED/LOCAL_CHECKED。本轮不安装本机根、不改Latest、不签名或提交公证。若候选失败，保留草稿与证据，修复用新冻结身份；必要时`gh release delete v0.0.48-osx-launch-rc1 --cleanup-tag`撤回本次草稿，原v0.0.48资产保留。
 
 执行进展：独立草稿已实际创建并上传七资产；唯一新候选pins见`release/candidate-osx-launch.tsv`。精确测试提交3da2b3b1df6f4ec05a03bae48b51a045969d1b24，wrapper构造提交6318a0491，原片来源559705。新CI为42551819720（https://github.com/partnernetsoftware/unisacc/actions/runs/42551819720），派发及fetch已实际成功，资格尚在途。草稿全部七资产重新下载后严格layout校验PASS；完整既有readback入口正在独立新目录运行，其退出后再记结果。
+
+## 0.0.48.1 首真签交接
+
+草稿tag：`v0.0.48.1-osx-launch-rc1`；source_commit：`f09969d9d0efb81976b3eaf486731f120df22cbe`。12资产已全部真实上传：七标准资产、四Mac成员、无header五角色members.tsv。清单SHA：`4e1a51b8bc0d2dbdf8aefad6bca25cf615556fb572044abc3b89e008565225d1`；跟踪副本见release/candidate-osx-launch-members.tsv。该清单同时固定APE bdd52246…及四成员完整SHA，签后不得逐次重写manager。cc可据此绑定首真签。
+
+新六目标CI：42555350465（https://github.com/partnernetsoftware/unisacc/actions/runs/42555350465），绑定bdd完整SHA和f099精确测试提交，正在运行，尚未授QUALIFIED。最终正式五批interface15/0、cache两格108/0，性能ARM12/99ms与Rosetta42/246.5ms，日志out/osx-launch-slow/v0481/formal-five-report.md。
