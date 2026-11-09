@@ -8,8 +8,8 @@
  * cell runs from a checkout root whose ./unisacc.com is the candidate (POSIX hosts; Windows has its own adapter
  * in candidate-native.yml writing the same rows).  It first proves identity: HEAD == COMMIT, no tracked file
  * changed, sha256(./unisacc.com) == APE_SHA, uname == TARGET.  On any mismatch every later check is NOT_RUN and
- * the exit is 1.  Then, each under its own 55 s process-group bound: --version equals the PRODUCT_VERSION row of
- * exec/facts/limits.tsv, hello compiles and runs, run (the default mode: `sh ./unisacc.com FILE.cx` prints the
+ * the exit is 1.  Then, each under its own 55 s process-group bound: --version equals the version column of
+ * release/candidate.tsv (F-v2 single authority), hello compiles and runs, run (the default mode: `sh ./unisacc.com FILE.cx` prints the
  * literal it was given), tests/stdio-crossunit.cx, tests/check-stream-pipe.cx, tests/run.cx --smoke. On Mac,
  * smoke also verifies the same-source clock binding contract and compiles/runs darwin-monotonic.c (50..500 ms).
  * The candidate is hashed again at the end. rc 0 only when all seven rows are PASS.
@@ -21,6 +21,7 @@
  * Exit: 1 on any FAIL or INVALID; 3 when nothing failed but something is NOT_RUN; 0 only when all 42 cells PASS.
  * Prints CANDIDATE_QUALIFY<TAB>verdict=..; the verdict is computed, never a constant. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releaseversion
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
@@ -178,13 +179,13 @@ static void cq_batch(const char *check, char **argv, const char *marker) {
     if (rc >= 0 || r.out || r.err) np_free(&r);
 }
 
+/* F-v2: the release version is metadata in release/candidate.tsv (single authority, cxlib.releaseversion);
+   the PRODUCT_VERSION row of exec/facts/limits.tsv was retired and must not be read as a second source. */
 static int cq_limits_version(char v[64]) {
-    size_t n = 0; char *b = cq_slurp("exec/facts/limits.tsv", &n), *p; int k = 0;
-    if (!b) return -1;
-    p = strstr(b, "\nPRODUCT_VERSION\t");
-    if (p) { p += 17; while (*p && *p != '\t' && k < 63) v[k++] = *p++; v[k] = 0; }
-    free(b);
-    return p && k ? 0 : -1;
+    char rv[24];
+    if (rv_load("release/candidate.tsv", rv)) return -1;
+    if (cx_fmt(v, 64, "%s", rv)) return -1;
+    return v[0] ? 0 : -1;
 }
 
 static int cq_identity(const char *target, char *why, size_t wl) {
@@ -222,7 +223,7 @@ static int cq_cell(const char *target, const char *out) {
         return 1;
     }
     cq_row("identity", "PASS", 0, sy_now_ms() - t0, "HEAD, tracked bytes, ape sha and host all agree");
-    if (cq_limits_version(ver)) { fprintf(stderr, "candidate-qualify: no PRODUCT_VERSION row\n"); return 2; }
+    if (cq_limits_version(ver)) { fprintf(stderr, "candidate-qualify: no release version in release/candidate.tsv\n"); return 2; }
     {   char *v[] = {"sh", "./unisacc.com", "--version", 0}; np_result r; char w[512]; long t = sy_now_ms(); int rc = cq_exec(v, &r, w, sizeof w), good;
         { if (cx_fmt(line, sizeof line, "unisacc %s\n", ver)) line[0] = 0; }
         good = rc == 0 && r.outn == strlen(line) && !memcmp(r.out, line, r.outn) && r.errn == 0;
