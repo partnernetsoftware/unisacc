@@ -16,7 +16,7 @@
  * 64-byte hex literal for :sha256. Each is independently identity-hashed by its own
  * `material` command before a wave may use it.  A light wave runs at most four materials-free
  * batches concurrently; a heavy wave runs exactly one batch of any kind. Each child uses
- *   tools/bound --status F S sh ROOT/unisacc.com tests/run-batch.cx -- ROOT SESSION/wave-N ID [m=path...]
+ *   tools/bound --status F S RUN/executor/run-batch ROOT SESSION/wave-N ID [m=path...]
  * where S = min(registry budget, --child-seconds, what is left of the outer window minus 12 s for
  * the after-measurements), so the runner always outlives its children and writes every receipt.
  * A wave refuses before starting when the candidate, registry, source SID, harness trees, materials
@@ -291,8 +291,10 @@ static unsigned long long domain_of(const char *tab, size_t tn, const char *id) 
     }
     return 0;
 }
-static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
- v[n++]=bound;v[n++]="--status";v[n++]=j->status;v[n++]=secs;v[n++]="sh";v[n++]=candidate;v[n++]=runner;v[n++]="--";v[n++]=root;v[n++]=(char *)wavedir;v[n++]=j->b->id;
+static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];char native[4400],h[65],self[4096];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
+ if(m->has_executor){join(native,sizeof native,session,"executor/run-batch");if(as_sha_file(native,0,h,0,why,sizeof why)||strcmp(h,m->runner_sha))die("runner-sha-mismatch",native);}
+ else{if(!realpath("/proc/self/exe",self))die("self-exe",session);{char *slash=strrchr(self,'/');if(!slash)die("self-exe",self);*slash=0;}join(native,sizeof native,self,"run-batch");if(as_sha_file(native,0,h,0,why,sizeof why))die("executor-run-batch-required",native);}
+ v[n++]=bound;v[n++]="--status";v[n++]=j->status;v[n++]=secs;v[n++]=native;v[n++]=root;v[n++]=(char *)wavedir;v[n++]=j->b->id;
  if(!tx_eqz(j->b->materials, "-")){const char *q=j->b->materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){const char *name=d.name;if(s==32)die("material-args",j->b->id);const as_material *x=as_find_material(m,name);if(!x||x->kind!=d.kind)die("material-unregistered-or-type",name);{int z=snprintf(storage[s],sizeof storage[s],"%s=%s",name,x->path);if(z<0||(size_t)z>=sizeof storage[s]){fprintf(stderr,"bound-format\n");exit(2);}};v[n++]=storage[s++];}}
  v[n]=0;j->t0=as_now();pid_t pid=fork();if(pid<0)die("fork",j->b->id);
  if(!pid){int o=open(j->out,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);int e=open(j->err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(o<0||e<0||dup2(o,1)<0||dup2(e,2)<0||chdir(root))_exit(126);execv(bound,v);_exit(127);}
