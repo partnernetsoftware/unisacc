@@ -1,0 +1,206 @@
+/* Read-only views; migrate is the only writing command. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+static const char *lh="时间\tid\t事件\tcommit\t证据\t角色/模型";
+static const char *ih="id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck";
+static const char *root=".",*owner=0,*since=0,*state=0;
+typedef struct {char *s;long n;int end;} Row;
+typedef struct {Row *v;long n,cap;} Rows;
+static Rows ledger,items;
+static void fail(const char *s){fprintf(stderr,"aw: 拒绝 %s errno=%d\n",s,errno);exit(2);}
+static long len(const char *s){long n=tx_len(s,1048576);if(n<0)fail("字符串过长");return n;}
+static void path(char *b,const char *a,const char *c){int n=snprintf(b,4096,"%s/%s",a,c);if(n<0||n>=4096)fail("路径过长");}
+static int kind(const char *p){sy_stat_t st;int r=sy_lstat(p,&st);if(r==-ENOENT)return 0;if(r)fail(p);if(st.kind=='l')fail(p);return st.kind;}
+static void safe_path(const char *p){char b[4096];long i,n=len(p);if(n>=4096)fail("路径过长");for(i=0;i<=n;i++){b[i]=p[i];if(p[i]=='/'||!p[i]){char c=b[i];b[i]=0;if(i&&kind(b)!='d')fail(b);b[i]=c;}}}
+static int token(const char *s,long n){long i;if(n<1||n>128||s[0]=='.')return 0;for(i=0;i<n;i++)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_'||s[i]=='.'))return 0;return !tx_contains(s,n,"..",2);}
+static int month(const char *s,long n){int i,m;if(n!=7||s[4]!='-')return 0;for(i=0;i<7;i++)if(i!=4&&(s[i]<'0'||s[i]>'9'))return 0;m=(s[5]-'0')*10+s[6]-'0';return m>=1&&m<=12;}
+static int date(const char *s,long n){
+    int d,m,y,max;
+    if(n<10||!month(s,7)||s[7]!='-'||s[8]<'0'||s[8]>'9'||s[9]<'0'||s[9]>'9')return 0;
+    y=(s[0]-'0')*1000+(s[1]-'0')*100+(s[2]-'0')*10+s[3]-'0';
+    m=(s[5]-'0')*10+s[6]-'0';d=(s[8]-'0')*10+s[9]-'0';
+    max=m==2?((y%4==0&&(y%100!=0||y%400==0))?29:28):((m==4||m==6||m==9||m==11)?30:31);
+    return y>0&&d>=1&&d<=max;
+}
+static char *copy(const char *s,long n){char *p=mm_alloc(n+1);if(!p||tx_copy(p,n+1,s,n))fail("内存不足");return p;}
+static void add(Rows *a,const char *s,long n,int end){Row *p;if(a->n==a->cap){long c=a->cap?a->cap*2:64;p=mm_grow(a->v,c*sizeof(Row));if(!p)fail("内存不足");a->v=p;a->cap=c;}a->v[a->n].s=copy(s,n);a->v[a->n].n=n;a->v[a->n].end=end;a->n++;}
+static char *readfile(const char *p,long *n){int fd;char *s;sy_stat_t st;if(kind(p)!='f')fail(p);fd=sy_open_read(p);if(fd<0||sy_fstat(fd,&st)||st.kind!='f'||st.size<0||st.size>67108864)fail(p);*n=st.size;s=mm_alloc(*n+1);if(!s||sy_read_full(fd,s,*n)||sy_close(fd))fail(p);s[*n]=0;if(tx_chr(s,*n,0)>=0)fail("文件含NUL");return s;}
+static void field(Row *r,int k,long *o,long *n){if(tx_field(r->s,r->n,'\t',k,o,n))fail("缺少字段");}
+static int feq(Row *r,int k,const char *s){long o,n;field(r,k,&o,&n);return tx_same(r->s+o,n,s,len(s));}
+static int regular(Row *r){long a,b,c,d;field(r,0,&a,&b);field(r,1,&c,&d);if(tx_fields(r->s,r->n,'\t')!=6||!date(r->s+a,b)||!token(r->s+c,d))return 0;field(r,5,&a,&b);return token(r->s+a,b);}
+static void itemvalid(Row *r,const char *id){long o,n;if(tx_fields(r->s,r->n,'\t')!=11)fail("items必须11列");field(r,0,&o,&n);if(!token(r->s+o,n)||(id&&!tx_same(r->s+o,n,id,len(id))))fail("items ID与文件名不符");}
+static int filtertext(const char *s){
+    long i=0,n=len(s);
+    while(i<n){
+        unsigned long cp;int count,j;unsigned char c=(unsigned char)s[i++];
+        if(c<128){if(c<32||c==127)return 0;continue;}
+        if(c>=194&&c<=223){cp=c&31;count=1;}
+        else if(c>=224&&c<=239){cp=c&15;count=2;}
+        else if(c>=240&&c<=244){cp=c&7;count=3;}
+        else return 0;
+        if(n-i<count)return 0;
+        for(j=0;j<count;j++){unsigned char d=(unsigned char)s[i++];if(d<128||d>191)return 0;cp=(cp<<6)|(d&63);}
+        if((count==2&&cp<2048)||(count==3&&cp<65536)||cp>1114111||(cp>=55296&&cp<=57343)||(cp>=128&&cp<=159))return 0;
+    }
+    return 1;
+}
+static int marker(const char *s,long n,int c){
+    long i;if(n<7)return 0;for(i=0;i<7;i++)if(s[i]!=c)return 0;
+    if(c=='=')return n==7||(n==8&&s[7]=='\r');
+    return n==7||s[7]==' '||s[7]=='\t'||s[7]=='\r';
+}
+static void conflictrow(const char *s,long n,int side){
+    long io,in,so,sn,oo,on;
+    if(tx_fields(s,n,'\t')!=11)return;
+    if(tx_field(s,n,'\t',0,&io,&in)||tx_field(s,n,'\t',8,&so,&sn)||tx_field(s,n,'\t',9,&oo,&on))return;
+    if(!token(s+io,in)||!token(s+so,sn)||!token(s+oo,on)){
+        fprintf(stderr,"aw: %s ID/state/owner不可安全解析\n",side==1?"ours":"theirs");return;
+    }
+    fprintf(stderr,"aw: %s id=%.*s state=%.*s owner=%.*s\n",side==1?"ours":"theirs",(int)in,s+io,(int)sn,s+so,(int)on,s+oo);
+}
+static void conflicts(const char *s,long n,const char *p){
+    long b=0,i;int found=0,side=0;
+    for(i=0;i<=n;i++)if(i==n||s[i]=='\n'){
+        const char *r=s+b;long z=i-b;int start=marker(r,z,'<'),base=marker(r,z,'|'),sep=marker(r,z,'='),end=marker(r,z,'>');
+        if(start||base||sep||end){
+            if(!found){
+                long off=tx_rchr(p,len(p),'/');const char *name=p+off+1;long size=len(name);
+                fprintf(stderr,"aw: 冲突文件 %s/%.*s\n",tx_fields(s,n,'\t')>0&&tx_prefix(s,n,ih,len(ih))?"items":"ledger",token(name,size)?(int)size:0,name);
+            }
+            found=1;
+            if(start)side=1;else if(base)side=2;else if(sep)side=3;else side=0;
+        }else if(side==1||side==3)conflictrow(r,z,side);
+        b=i+1;
+    }
+    if(found)fail("请解决双方状态冲突");
+}
+static void load(const char *p,Rows *a,const char *header,int mode,const char *id){long n,b=0,i;char *s=readfile(p,&n);int line=0;conflicts(s,n,p);for(i=0;i<=n;i++)if(i==n||s[i]=='\n'){Row r;if(i==n&&i==b)break;if(!line){if(!tx_same(s+b,i-b,header,len(header)))fail("表头不符");}else {r.s=s+b;r.n=i-b;r.end=i<n;if(mode==1){if(!regular(&r))fail("非规范ledger分片");}if(mode==2)itemvalid(&r,id);add(a,s+b,i-b,i<n);}line++;b=i+1;}if(!line)fail("缺表头");if(mode==2&&line!=2)fail("items必须表头加单行");mm_free(s);}
+static char *names(const char *p,int *count){long cap=4096;char *b;int fd,r;if(kind(p)!='d')fail(p);fd=sy_open_read(p);if(fd<0)fail(p);for(;;){b=mm_alloc(cap);if(!b)fail("内存不足");r=sy_dir_names(fd,b,cap);if(r!=-ENOSPC)break;mm_free(b);cap*=2;if(cap>16777216)fail("目录过大");}if(sy_close(fd)||r<0)fail(p);*count=r;return b;}
+static int hexval(int c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;return -1;}
+static void legacy(const char *p){
+    long n,i,b=0;char *s=readfile(p,&n);int line=0;
+    if(n<25||s[n-1]!='\n')fail("legacy容器缺失完整表头或结尾");
+    for(i=0;i<n;i++)if(s[i]=='\n'){
+        long j,z;char *v;
+        if(!line){if(!tx_same(s+b,i-b,"aw-legacy-v1-hex\tnewline",24))fail("legacy表头无效");}
+        else {
+            long t=tx_chr(s+b,i-b,'\t');
+            if(t<0||t%2||i-b!=t+2||(s[b+t+1]!='0'&&s[b+t+1]!='1'))fail("legacy容器无效");
+            z=t/2;v=mm_alloc(z+1);if(!v)fail("内存不足");
+            for(j=0;j<z;j++){
+                int h=hexval(s[b+j*2]),l=hexval(s[b+j*2+1]);
+                if(h<0||l<0)fail("legacy编码无效");v[j]=h*16+l;
+                if(!v[j]||v[j]=='\n')fail("legacy原行无效");
+            }
+            v[z]=0;
+            {Row r;r.s=v;r.n=z;r.end=s[b+t+1]=='1';
+             if(tx_fields(v,z,'\t')==6&&regular(&r))fail("规范行不得进legacy");
+             add(&ledger,v,z,r.end);}
+            mm_free(v);
+        }
+        line++;b=i+1;
+    }
+    mm_free(s);
+}
+static void shards(const char *base,int item){char p[4096],q[4096],r[4096];char *ns,*at;int count,i;path(p,base,item?"items":"ledger");ns=names(p,&count);at=ns;for(i=0;i<count;i++){long n=len(at);path(q,p,at);if(item){char *id;if(n<5||!tx_suffix(at,n,".tsv",4))fail(q);id=copy(at,n-4);if(!token(id,n-4))fail(q);load(q,&items,ih,2,id);mm_free(id);}else if(tx_eqz(at,"legacy.tsv"))legacy(q);else {int k,j;char *fs,*f;if(!month(at,n)||kind(q)!='d')fail(q);fs=names(q,&k);f=fs;for(j=0;j<k;j++){long m=len(f),start=ledger.n,t;char *own;if(m<5||!tx_suffix(f,m,".tsv",4)||!token(f,m-4))fail(f);own=copy(f,m-4);path(r,q,f);load(r,&ledger,lh,1,0);for(t=start;t<ledger.n;t++){long o,z;field(&ledger.v[t],0,&o,&z);if(!tx_same(ledger.v[t].s+o,7,at,7)||!feq(&ledger.v[t],5,own))fail("ledger分片键不符");}mm_free(own);f+=m+1;}mm_free(fs);}at+=n+1;}mm_free(ns);}
+static int cmp(const void *a,const void *b){const Row *x=a,*y=b;int c=tx_cmp(x->s,x->n,y->s,y->n);return c?c:x->end-y->end;}
+static void sort(Rows *a){qsort(a->v,a->n,sizeof(Row),cmp);}
+static void unique(void){long i;sort(&items);for(i=1;i<items.n;i++){long a,b,c,d;field(&items.v[i-1],0,&a,&b);field(&items.v[i],0,&c,&d);if(tx_same(items.v[i-1].s+a,b,items.v[i].s+c,d))fail("重复items ID");}}
+static void equal(Rows *a,Rows *b){long i;sort(a);sort(b);if(a->n!=b->n)fail("迁移行数不等价");for(i=0;i<a->n;i++)if(cmp(&a->v[i],&b->v[i]))fail("迁移逐行多重集不等价");}
+static void check(const char *base){char p[4096];Rows old={0};int available=0;path(p,base,"ledger.tsv");if(kind(p)){load(p,&old,lh,0,0);equal(&ledger,&old);available++;}old.v=0;old.n=old.cap=0;path(p,base,"items.tsv");if(kind(p)){load(p,&old,ih,0,0);equal(&items,&old);available++;}fprintf(stderr,"aw: 结构有效 ledger=%ld items=%ld; equivalence=%s (%d/2旧表)\n",ledger.n,items.n,available==2?"available":"unavailable",available);}
+static void writebytes(const char *p,const char *s,long n,int append){int fd,r;if(append){if(kind(p)!='f')fail(p);fd=sy_open(p,O_WRONLY|O_APPEND,0);}else fd=sy_open_new(p,0600);if(fd<0)fail(p);r=sy_write_all(fd,s,n);if(!r)r=sy_fsync(fd);if(sy_close(fd)||r)fail(p);}
+static void mkdirnew(const char *p){if(sy_mkdirat(sy_at_fdcwd(),p,0700))fail(p);}
+static void writerow(const char *p,const char *h,Row *r,int append){if(!append){writebytes(p,h,len(h),0);writebytes(p,"\n",1,1);}writebytes(p,r->s,r->n,1);if(r->end)writebytes(p,"\n",1,1);}
+static void migrate(const char *base){
+    Rows l={0},it={0};char p[4096],stage[4096],a[4096],b[4096],dest[4096];long i;
+    path(p,base,"ledger.tsv");load(p,&l,lh,0,0);
+    path(p,base,"items.tsv");load(p,&it,ih,0,0);
+    items=it;for(i=0;i<it.n;i++)itemvalid(&it.v[i],0);unique();
+    path(p,base,"ledger");path(a,base,"items");
+    if(kind(p)||kind(a))fail("目标已存在；保留现场，先check核对，不自动覆盖");
+    path(stage,base,".aw-migrate-stage");mkdirnew(stage);
+    path(p,stage,"ledger");mkdirnew(p);path(a,stage,"items");mkdirnew(a);
+    for(i=0;i<l.n;i++){
+        Row *r=&l.v[i];
+        if(tx_fields(r->s,r->n,'\t')==6&&regular(r)){
+            long o,n;char mon[8],own[129],f[4096];int z;
+            if(tx_copy(mon,sizeof mon,r->s,7))fail("月份过长");
+            field(r,5,&o,&n);if(tx_copy(own,sizeof own,r->s+o,n))fail("owner过长");
+            path(b,p,mon);if(!kind(b))mkdirnew(b);path(dest,b,own);
+            z=snprintf(f,sizeof f,"%s.tsv",dest);if(z<0||z>=sizeof f)fail("路径过长");
+            writerow(f,lh,r,kind(f)!=0);
+        }else {
+            static const char *hex="0123456789abcdef";long j;char *enc=mm_alloc(r->n*2+4);
+            path(b,p,"legacy.tsv");if(!kind(b))writebytes(b,"aw-legacy-v1-hex\tnewline\n",25,0);
+            if(!enc)fail("内存不足");
+            for(j=0;j<r->n;j++){enc[j*2]=hex[(unsigned char)r->s[j]>>4];enc[j*2+1]=hex[(unsigned char)r->s[j]&15];}
+            enc[r->n*2]='\t';enc[r->n*2+1]=r->end?'1':'0';enc[r->n*2+2]='\n';
+            writebytes(b,enc,r->n*2+3,1);mm_free(enc);
+        }
+    }
+    for(i=0;i<it.n;i++){
+        long o,n;char id[129],f[140];int z;field(&it.v[i],0,&o,&n);
+        if(tx_copy(id,sizeof id,it.v[i].s+o,n))fail("ID过长");
+        z=snprintf(f,sizeof f,"%s.tsv",id);if(z<0||z>=sizeof f)fail("ID过长");
+        path(b,a,f);writerow(b,ih,&it.v[i],0);
+    }
+    ledger.v=0;ledger.n=ledger.cap=0;items.v=0;items.n=items.cap=0;
+    shards(stage,0);shards(stage,1);unique();equal(&ledger,&l);equal(&items,&it);
+    path(b,stage,"receipt.tsv");
+    writebytes(b,"schema\taw-migrate-v1\n旧表\t保留原字节\n发布\t两个目录依次rename，非跨目录事务\n",len("schema\taw-migrate-v1\n旧表\t保留原字节\n发布\t两个目录依次rename，非跨目录事务\n"),0);
+    {
+        char receipt[256];int z=snprintf(receipt,sizeof receipt,"ledger_rows\t%ld\nitems_rows\t%ld\nequivalence\t逐行多重集相同\n",l.n,it.n);
+        if(z<0||z>=sizeof receipt)fail("收据过长");writebytes(b,receipt,z,1);
+    }
+    path(dest,base,"ledger");if(kind(dest)||sy_rename(p,dest))fail("发布ledger失败；保留暂存现场");
+    path(dest,base,"items");if(kind(dest)||sy_rename(a,dest))fail("部分发布；保留现场，禁止自动重入");
+    fprintf(stderr,"aw: 迁移完成；旧表保留，收据及暂存目录保留于 %s\n",stage);
+}
+int main(int argc,char **argv){
+    const char *cmd;char base[4096],p[4096];int i;
+    if(argc<2)fail("用法 ledger|items|check|migrate [--root ROOT] [--owner X] [--since D] [--state S]");
+    cmd=argv[1];
+    for(i=2;i<argc;i++){
+        const char *v;if(i+1>=argc)fail("选项缺值");v=argv[++i];
+        if(tx_eqz(argv[i-1],"--root"))root=v;
+        else if(tx_eqz(argv[i-1],"--owner"))owner=v;
+        else if(tx_eqz(argv[i-1],"--since"))since=v;
+        else if(tx_eqz(argv[i-1],"--state"))state=v;
+        else fail("未知选项");
+    }
+    if(owner&&(tx_eqz(cmd,"items")?!filtertext(owner):!token(owner,len(owner))))fail("owner筛选无效");
+    if(since&&(len(since)!=10||!date(since,10)))fail("since无效");
+    if(state&&!filtertext(state))fail("state筛选无效");
+    if(!tx_eqz(cmd,"ledger")&&!tx_eqz(cmd,"items")&&!tx_eqz(cmd,"check")&&!tx_eqz(cmd,"migrate"))fail("未知子命令");
+    if((since&&!tx_eqz(cmd,"ledger"))||(state&&!tx_eqz(cmd,"items"))||(owner&&(tx_eqz(cmd,"check")||tx_eqz(cmd,"migrate"))))fail("选项不适用");
+    if(tx_contains(root,len(root),"..",2))fail("root路径穿越");
+    safe_path(root);path(base,root,"agentwork");if(kind(base)!='d')fail(base);
+    if(tx_eqz(cmd,"migrate")){migrate(base);return 0;}
+    path(p,base,".aw-migrate-stage");
+    if(kind(p)){
+        char q[4096];if(kind(p)!='d')fail("迁移现场不是目录");
+        path(q,p,"receipt.tsv");if(kind(q)!='f')fail("迁移未完成；保留现场");
+        path(q,base,"ledger");if(kind(q)!='d')fail("ledger尚未发布");
+        path(q,base,"items");if(kind(q)!='d')fail("items尚未发布");
+    }
+    if(tx_eqz(cmd,"ledger")||tx_eqz(cmd,"check"))shards(base,0);
+    if(tx_eqz(cmd,"items")||tx_eqz(cmd,"check")){shards(base,1);unique();}
+    if(tx_eqz(cmd,"check")){check(base);return 0;}
+    {
+        int item=tx_eqz(cmd,"items");Rows *a=item?&items:&ledger;const char *h=item?ih:lh;long j;
+        Row *pending=0;
+        sort(a);if(sy_write_all(1,h,len(h))||sy_write_all(1,"\n",1))fail("输出失败");
+        for(j=0;j<a->n;j++){
+            Row *r=&a->v[j];
+            if(owner&&(tx_fields(r->s,r->n,'\t')!=(item?11:6)||!feq(r,item?9:5,owner)))continue;
+            if(state&&!feq(r,8,state))continue;
+            if(since&&(!date(r->s,r->n)||tx_cmp(r->s,10,since,10)<0))continue;
+            if(pending&&(sy_write_all(1,pending->s,pending->n)||sy_write_all(1,"\n",1)))fail("输出失败");
+            pending=r;
+        }
+        if(pending&&(sy_write_all(1,pending->s,pending->n)||(pending->end&&sy_write_all(1,"\n",1))))fail("输出失败");
+    }
+    return 0;
+}

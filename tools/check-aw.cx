@@ -1,0 +1,236 @@
+/* Synthetic fixtures only. Modes each have a single 55-second deadline. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+static char dir[4096],bin[4096],out[262144];
+static long deadline;
+static const char *lh="时间\tid\t事件\tcommit\t证据\t角色/模型\n";
+static const char *ih="id\tgoal\trole\tdomain\tgate\tcontext\tbudget_min\tdeps\tstate\towner\tcheck\n";
+static int protected_source,source_present[4];
+static sy_stat_t source_stat[4];
+static const char *source_path[4]={"agentwork/ledger.tsv","agentwork/items.tsv","agentwork/ledger","agentwork/items"};
+static int source_ok(void){
+    int i;
+    if(!protected_source)return 1;
+    for(i=0;i<4;i++){
+        sy_stat_t st;int rc=sy_lstat(source_path[i],&st);
+        if(!source_present[i]){if(rc!=-ENOENT)return 0;continue;}
+        if(rc||st.kind!=source_stat[i].kind||st.ino!=source_stat[i].ino||st.dev!=source_stat[i].dev)return 0;
+        if(i<2){
+            char p[4096],a[8192],b[8192];int x,y;long an,bn;
+            if(cx_fmt(p,sizeof p,"%s/source-before-%d.tsv",dir,i))return 0;
+            x=sy_open_read(source_path[i]);y=sy_open_read(p);
+            if(x<0||y<0){if(x>=0)sy_close(x);if(y>=0)sy_close(y);return 0;}
+            do {an=sy_read(x,a,sizeof a);bn=sy_read(y,b,sizeof b);if(an<0||bn<0||!tx_same(a,an,b,bn)){sy_close(x);sy_close(y);return 0;}}while(an);
+            if(sy_close(x)||sy_close(y))return 0;
+        }
+    }
+    return 1;
+}
+static void die(const char *s){fprintf(stderr,"CHECK_AW\tFAIL\t%s\n夹具保留=%s\n最近输出：\n%s\n",s,dir,out);if(!source_ok())fprintf(stderr,"CHECK_AW\tFAIL\t源码仓旧表或新目录发生变化\n");exit(1);}
+static long ln(const char *s){long n=tx_len(s,262144);if(n<0)die("字符串超长");return n;}
+static void join(char *b,const char *a,const char *c){int n=snprintf(b,4096,"%s/%s",a,c);if(n<0||n>=4096)die("路径超长");}
+static void put(const char *p,const char *s,int append){int fd=sy_open(p,O_WRONLY|O_CREAT|(append?O_APPEND:O_TRUNC),0600);if(fd<0||sy_write_all(fd,s,ln(s))||sy_close(fd))die(p);}
+static int run(char **av){
+    static int sequence;char sec[32],log[4096],meta[256];char *v[128];int i,k=0,cut=0,rc,z;
+    long left=deadline-sy_now_ms();if(left<=0)die("55秒预算耗尽");
+    if(cx_fmt(sec,sizeof sec,"%ld.%03ld",left/1000,left%1000))die("预算字符串过长");
+    v[k++]="timeout";v[k++]="--signal=KILL";v[k++]=sec;
+    for(i=0;av[i];i++){if(k>=126)die("参数过多");v[k++]=av[i];}v[k]=0;
+    rc=sy_run(v,out,sizeof out,&cut);
+    z=snprintf(log,sizeof log,"%s/command-%03d.log",dir,++sequence);
+    if(z<0||z>=sizeof log)die("日志路径过长");put(log,out,0);
+    z=snprintf(meta,sizeof meta,"\nexit=%d\ttruncated=%d\n",rc,cut);
+    if(z<0||z>=sizeof meta)die("日志状态过长");put(log,meta,1);
+    if(cut)die("输出截断");return rc;
+}
+static void command(const char *cwd,const char *s){char *v[]={"git","-C",(char *)cwd,0,0};char script[16384];char *av[]={"sh","-c",script,0};int n;(void)v;n=snprintf(script,sizeof script,"cd '%s' && %s",cwd,s);if(n<0||n>=sizeof script||run(av))die(s);}
+static int aw(const char *root,const char *cmd,const char *opt,const char *val){char *a[]={bin,(char *)cmd,"--root",(char *)root,(char *)opt,(char *)val,0};if(!opt)a[4]=0;return run(a);}
+static void expect(int ok,const char *s){if(!ok)die(s);printf("PASS\taw.%s\n",s);}
+static void fixture(const char *root){char p[4096],a[4096];if(sy_mkdirat(sy_at_fdcwd(),root,0700))die(root);join(a,root,"agentwork");if(sy_mkdirat(sy_at_fdcwd(),a,0700))die(a);join(p,a,"ledger.tsv");put(p,lh,0);put(p,"2026-11-01\tA\tstart\tc\te\talice\n2026-11-01\tA\tstart\tc\te\talice\n2026-10-02\tB\tdone\tc\te\tbob\nold\tfive\traw\tbytes\tend\nold\tseven\traw\tbytes\tend\tx\ty\n",1);join(p,a,"items.tsv");put(p,ih,0);put(p,"A\tg\tr\td\tgate\tc\t1\t-\topen\talice\tcheck\nB\tg\tr\td\tgate\tc\t1\t-\topen\tbob\tcheck\n",1);}
+static void snapshot(const char *root,const char *name){char src[4096],dst[4096],rel[128];if(cx_fmt(rel,sizeof rel,"agentwork/%s.tsv",name))die("快照源路径过长");join(src,root,rel);if(cx_fmt(rel,sizeof rel,"%s-before.tsv",name))die("快照目标路径过长");join(dst,root,rel);if(sy_copy(src,dst,0600))die("快照失败");}
+static void sameold(const char *root,const char *name){char a[4096],b[4096],rel[128];char *v[]={"cmp",a,b,0};if(cx_fmt(rel,sizeof rel,"agentwork/%s.tsv",name))die("旧表路径过长");join(a,root,rel);if(cx_fmt(rel,sizeof rel,"%s-before.tsv",name))die("旧表快照路径过长");join(b,root,rel);expect(!run(v),"旧文件原字节未变");}
+static void item(const char *root,const char *id,const char *state,const char *owner){char p[4096],r[512],rel[256];if(cx_fmt(rel,sizeof rel,"agentwork/items/%s.tsv",id))die("夹具项路径过长");join(p,root,rel);put(p,ih,0);if(cx_fmt(r,sizeof r,"%s\tg\tr\td\tgate\tc\t1\t-\t%s\t%s\tcheck\n",id,state,owner))die("夹具项行过长");put(p,r,1);}
+static int writer(const char *root,const char *who){
+    char p[4096],r[512],rel[256];int i,e;
+    if(!tx_prefixz(root,"/tmp/check-aw-",14)||tx_contains(root,ln(root),"..",2)||(!tx_eqz(who,"alice")&&!tx_eqz(who,"bob")))die("写者仅接受自建夹具及合成owner");
+    if(cx_fmt(rel,sizeof rel,"agentwork/ledger/2026-11/%s.tsv",who))die("写者路径过长");join(p,root,rel);
+    e=sy_exists(p);if(e<0)die("写者目标检查失败");if(!e)put(p,lh,0);
+    for(i=0;i<20;i++){
+        if(cx_fmt(r,sizeof r,"2026-11-09\t%s-%02d\tappend\tc\te\t%s\n",who,i,who))die("写者事件过长");put(p,r,1);
+    }
+    item(root,tx_eqz(who,"alice")?"A":"B",tx_eqz(who,"alice")?"done":"blocked",who);
+    return 0;
+}
+static void pure(void){char r[4096],p[4096],q[4096];join(r,dir,"pure");fixture(r);snapshot(r,"ledger");snapshot(r,"items");expect(!aw(r,"migrate",0,0),"迁移");sameold(r,"ledger");sameold(r,"items");expect(!aw(r,"check",0,0),"逐行多重集等价");expect(!aw(r,"ledger",0,0)&&tx_contains(out,ln(out),"old\tfive\traw\tbytes\tend\n",23)&&tx_contains(out,ln(out),"old\tseven\traw\tbytes\tend\tx\ty\n",28)&&tx_count(out,ln(out),"2026-11-01\tA\tstart\tc\te\talice\n",29)==2,"重复及5/7列回放");expect(!aw(r,"ledger","--owner","alice")&&tx_count(out,ln(out),"alice",5)==2&&!tx_contains(out,ln(out),"bob",3),"owner过滤");expect(!aw(r,"ledger","--since","2026-11-01")&&!tx_contains(out,ln(out),"2026-10-02",10),"since过滤");expect(!aw(r,"items","--state","open")&&tx_count(out,ln(out),"\topen\t",6)==2,"state过滤");expect(!aw(r,"items","--owner","bob")&&!tx_contains(out,ln(out),"alice",5),"items-owner过滤");expect(aw(r,"migrate",0,0)!=0,"非空目标拒绝");sameold(r,"ledger");join(p,r,"agentwork/items/A.tsv");join(q,r,"A-good.tsv");if(sy_copy(p,q,0600))die("备份");put(p,"bad\tcolumns\n",1);expect(aw(r,"items",0,0)!=0,"items多行拒绝");if(sy_copy(q,p,0600))die("恢复");item(r,"A","open","alice");put(p,ih,0);put(p,"A\tg\tr\td\tgate\tc\t1\t-\topen\talice\n",1);expect(aw(r,"items",0,0)!=0,"items列数拒绝");if(sy_copy(q,p,0600))die("恢复");join(p,r,"agentwork/items/C.tsv");if(sy_copy(q,p,0600))die("复制");expect(aw(r,"items",0,0)!=0,"文件名ID及重复拒绝");if(sy_unlink(p))die("移除自建夹具");join(p,r,"agentwork/items.tsv");if(sy_unlink(p))die("移除自建旧表");join(p,r,"agentwork/ledger.tsv");if(sy_unlink(p))die("移除自建旧表");expect(!aw(r,"check",0,0)&&tx_contains(out,ln(out),"equivalence=unavailable",23),"旧表缺失明确报告");join(p,r,"agentwork/items/C.tsv");if(sy_symlink("A.tsv",p))die("自建链接");expect(aw(r,"items",0,0)!=0,"symlink拒绝");expect(aw(r,"ledger","--owner","../bad")!=0,"路径穿越拒绝");}
+static void gitcases(int conflict){
+    char seed[4096],a[4096],b[4096],p[4096],self[4096];char *v[16];int i,status;
+    join(seed,dir,"seed");fixture(seed);expect(!aw(seed,"migrate",0,0),"Git夹具迁移");
+    join(p,seed,"agentwork/ledger.tsv");if(sy_unlink(p))die("夹具删旧");
+    join(p,seed,"agentwork/items.tsv");if(sy_unlink(p))die("夹具删旧");
+    command(seed,"git init -q -b main && git config user.email you@example.com && git config user.name fixture && git add agentwork && git commit -qm seed");
+    join(a,dir,"a");join(b,dir,"b");
+    v[0]="git";v[1]="clone";v[2]="-q";v[3]=seed;v[4]=a;v[5]=0;
+    expect(!run(v),"独立main克隆一");v[4]=b;expect(!run(v),"独立main克隆二");
+    command(a,"git config user.email you@example.com && git config user.name fixture && test $(git branch --show-current) = main");
+    command(b,"git config user.email you@example.com && git config user.name fixture && test $(git branch --show-current) = main");
+    if(conflict){item(a,"A","done","alice");item(b,"A","blocked","alice");}
+    else {
+        char sec[32],buf[4096],log[4096];int pid[2],fd[2],rc[2],ex[2],j;long left=deadline-sy_now_ms();
+        char *x[]={"timeout","--signal=KILL",sec,self,"--writer",a,"alice",0};
+        char *y[]={"timeout","--signal=KILL",sec,self,"--writer",b,"bob",0};
+        if(left<=0)die("并发写者预算耗尽");
+        if(cx_fmt(sec,sizeof sec,"%ld.%03ld",left/1000,left%1000))die("并发预算字符串过长");join(self,dir,"check-aw-native");
+        pid[0]=sy_spawn_pipe(x,0,0,&fd[0],0);pid[1]=sy_spawn_pipe(y,0,0,&fd[1],0);
+        if(pid[0]<0||pid[1]<0)die("并发写者启动");
+        for(j=0;j<2;j++){
+            long n=sy_read(fd[j],buf,sizeof buf-1);int close_rc;
+            if(n<0)die("写者输出读取失败");buf[n]=0;
+            if(cx_fmt(log,sizeof log,"%s/writer-%d.log",dir,j))die("写者日志路径过长");put(log,buf,0);
+            close_rc=sy_close(fd[j]);rc[j]=-1;ex[j]=0;
+            if(close_rc||sy_wait_status(pid[j],0,&ex[j],&rc[j],0)!=pid[j]||!ex[j]||rc[j])die("写者失败；原始输出保留");
+        }
+    }
+    command(a,"git add agentwork && git commit -qm writer-a");
+    command(b,"git add agentwork && git commit -qm writer-b");
+    v[0]="git";v[1]="-C";v[2]=a;v[3]="fetch";v[4]="-q";v[5]=b;v[6]="main";v[7]=0;
+    expect(!run(v),"真实提交抓取");
+    v[3]="merge";v[4]="--no-edit";v[5]="FETCH_HEAD";v[6]=0;status=run(v);
+    if(conflict){
+        expect(status!=0,"同项真实Git冲突");
+        v[3]="diff";v[4]="--name-only";v[5]="--diff-filter=U";v[6]=0;
+        expect(!run(v)&&tx_eqz(out,"agentwork/items/A.tsv\n"),"冲突仅同ID文件");
+        expect(aw(a,"items",0,0)!=0&&tx_contains(out,ln(out),"done",4)&&tx_contains(out,ln(out),"blocked",7),"aw双方状态及非零");
+    }else {
+        expect(!status,"独立分片合并零冲突");expect(!aw(a,"check",0,0),"合并结构有效");
+        expect(!aw(a,"ledger",0,0),"合并账本可读");
+        for(i=0;i<20;i++){
+            char key[64];if(cx_fmt(key,sizeof key,"alice-%02d\tappend",i))die("alice事件键过长");
+            expect(tx_count(out,ln(out),key,ln(key))==1,"alice逐项完整");
+            if(cx_fmt(key,sizeof key,"bob-%02d\tappend",i))die("bob事件键过长");
+            expect(tx_count(out,ln(out),key,ln(key))==1,"bob逐项完整");
+        }
+        expect(!aw(a,"items",0,0)&&tx_contains(out,ln(out),"\tdone\talice\t",12)&&tx_contains(out,ln(out),"\tblocked\tbob\t",13),"两状态完整");
+    }
+}
+static void edges(void){
+    char r[4096],p[4096],backup[4096];
+    join(r,dir,"edges");fixture(r);
+    expect(aw(r,"migrate","--unknown","x")!=0,"迁移未知参数拒绝且不回落cwd");
+    expect(source_ok(),"拒绝未知参数后源码仓无新分片目录");
+    join(p,r,"agentwork/ledger.tsv");
+    put(p,"historical\tfive\twithout\tfinal\tnewline",1);
+    expect(!aw(r,"migrate",0,0),"无末尾换行历史迁移");
+    expect(!aw(r,"ledger",0,0),"无末尾换行读侧");
+    {
+        const char *expected="时间\tid\t事件\tcommit\t证据\t角色/模型\n2026-10-02\tB\tdone\tc\te\tbob\n2026-11-01\tA\tstart\tc\te\talice\n2026-11-01\tA\tstart\tc\te\talice\nhistorical\tfive\twithout\tfinal\tnewline\nold\tfive\traw\tbytes\tend\nold\tseven\traw\tbytes\tend\tx\ty\n";
+        expect(tx_eqz(out,expected),"独立预期逐字节及重复多重集");
+    }
+    expect(!aw(r,"check",0,0),"无末尾换行等价");
+    join(p,r,"agentwork/ledger/legacy.tsv");join(backup,r,"legacy-backup.tsv");
+    if(sy_copy(p,backup,0600))die("legacy备份");
+    put(p,"zz\t1\n",1);expect(aw(r,"check",0,0)!=0,"legacy坏编码拒绝");
+    if(sy_copy(backup,p,0600))die("legacy恢复");
+    join(p,r,"agentwork/ledger/2026-11/alice.tsv");join(backup,r,"normal-backup.tsv");
+    if(sy_copy(p,backup,0600))die("分片备份");
+    expect(aw(r,"migrate",0,0)!=0,"已有目标失败不截断");
+    {char *v[]={"cmp",p,backup,0};expect(!run(v),"失败目标字节不变");}
+    put(p,"2026-11-09\tBAD\te\tc\te\talice\textra\n",1);
+    expect(aw(r,"ledger",0,0)!=0,"正常分片坏列拒绝");
+    if(sy_copy(backup,p,0600))die("分片恢复");
+    expect(aw(r,"ledger","--since","2026-02-31")!=0,"非法日期拒绝");
+    join(p,r,"agentwork/items/A.tsv");put(p,ih,0);
+    put(p,"../A\tg\tr\td\tgate\tc\t1\t-\topen\talice\tcheck\n",1);
+    expect(aw(r,"items",0,0)!=0,"非法ID拒绝");
+}
+static void protect_source(void){
+    int i;
+    for(i=0;i<4;i++){
+        int rc=sy_lstat(source_path[i],&source_stat[i]);
+        if(rc==-ENOENT){source_present[i]=0;continue;}
+        if(rc)die("源码仓输入状态读取失败");source_present[i]=1;
+        if(i<2){char p[4096];if(source_stat[i].kind!='f')die("源码仓旧表不是普通文件");if(cx_fmt(p,sizeof p,"%s/source-before-%d.tsv",dir,i))die("源码快照路径过长");if(sy_copy(source_path[i],p,0600))die("源码仓旧表快照失败");}
+    }
+    protected_source=1;
+}
+static void conflictprivacy(void){
+    char r[4096],p[4096],stdout_path[4096],stderr_path[4096],err[4096];int fd;long n;
+    char *v[]={"sh","-c","\"$1\" items --root \"$2\" >\"$3\" 2>\"$4\"","sh",bin,r,stdout_path,stderr_path,0};
+    join(r,dir,"privacy");fixture(r);expect(!aw(r,"migrate",0,0),"诊断合成夹具迁移");
+    join(p,r,"agentwork/items/A.tsv");put(p,ih,0);
+    put(p,"A\tliteral <<<<<<< text and ======= and >>>>>>>\tr\td\tgate\tcontext ||||||| text\t1\t-\topen\talice\tcheck\n",1);
+    expect(!aw(r,"items",0,0)&&tx_contains(out,ln(out),"literal <<<<<<< text",20),"字段内标记文字合法可读");
+    put(p,ih,0);
+    put(p,"<<<<<<< ours\nA\tprivate-goal\tr\td\tgate\thttps://example.com/?token=<TOKEN>\t1\t-\tdone\talice\tprivate-check\n||||||| base\nA\tprivate-goal\tr\td\tgate\thttps://example.com/?token=<TOKEN>\t1\t-\tbaseonly\talice\tprivate-check\n=======\nA\tprivate-goal\tr\td\tgate\thttps://example.com/?token=<TOKEN>\t1\t-\tblocked\talice\tprivate-check\n>>>>>>> theirs\n",1);
+    join(stdout_path,r,"conflict.stdout");join(stderr_path,r,"conflict.stderr");
+    expect(run(v)!=0,"真实冲突仍非零");
+    fd=sy_open_read(stderr_path);if(fd<0)die("诊断stderr读取");
+    n=sy_read(fd,err,sizeof err-1);if(n<0||sy_close(fd))die("诊断stderr读取");err[n]=0;
+    expect(tx_contains(err,n,"items/A.tsv",11)&&tx_contains(err,n,"ours id=A state=done owner=alice",32)&&tx_contains(err,n,"theirs id=A state=blocked owner=alice",37),"安全相对文件及双方状态");
+    expect(!tx_contains(err,n,"https://",8)&&!tx_contains(err,n,"example.com",11)&&!tx_contains(err,n,"token=",6)&&!tx_contains(err,n,"<TOKEN>",7)&&!tx_contains(err,n,"private-",8)&&!tx_contains(err,n,"baseonly",8),"stderr不泄露URL查询上下文且不冒认diff3基段");
+    {sy_stat_t st;expect(!sy_lstat(stdout_path,&st)&&st.size==0,"冲突不输出部分TSV");}
+}
+static void eolviews(void){
+    char r[4096],p[4096],expected[1024];
+    const char *la="2026-11-01\tA\te\tc\te\talice",*lb="2026-11-10\tB\te\tc\te\tbob\n";
+    const char *ia="A\tg\tr\td\tgate\tc\t1\t-\tdone\talice\tcheck",*ib="B\tg\tr\td\tgate\tc\t1\t-\topen\tbob\tcheck\n";
+    join(r,dir,"eol-views");fixture(r);
+    join(p,r,"agentwork/ledger.tsv");put(p,lh,0);put(p,lb,1);put(p,la,1);
+    join(p,r,"agentwork/items.tsv");put(p,ih,0);put(p,ib,1);put(p,ia,1);
+    expect(!aw(r,"migrate",0,0),"逆序无末尾换行双表迁移");
+    if(cx_fmt(expected,sizeof expected,"%s%s\n%s",lh,la,lb))die("账本行尾预期过长");
+    expect(!aw(r,"ledger",0,0)&&tx_eqz(out,expected)&&tx_count(out,ln(out),"\n",1)==3,"账本无LF末行排序到中间仍独立记录");
+    if(cx_fmt(expected,sizeof expected,"%s%s\n%s",ih,ia,ib))die("看板行尾预期过长");
+    expect(!aw(r,"items",0,0)&&tx_eqz(out,expected)&&tx_count(out,ln(out),"\n",1)==3,"看板无LF末行排序到中间仍独立记录");
+    if(cx_fmt(expected,sizeof expected,"%s%s",lh,la))die("账本过滤行尾预期过长");
+    expect(!aw(r,"ledger","--owner","alice")&&tx_eqz(out,expected)&&out[ln(out)-1]!='\n',"账本过滤最后匹配保持原EOF位");
+    if(cx_fmt(expected,sizeof expected,"%s%s",ih,ia))die("看板过滤行尾预期过长");
+    expect(!aw(r,"items","--owner","alice")&&tx_eqz(out,expected)&&out[ln(out)-1]!='\n',"看板owner过滤保持原EOF位");
+    expect(!aw(r,"items","--state","done")&&tx_eqz(out,expected)&&out[ln(out)-1]!='\n',"看板state过滤保持原EOF位");
+    expect(!aw(r,"check",0,0),"排序视图不改变迁移行尾位等价");
+}
+static void unassigned(void){
+    char r[4096],p[4096],expected[2048];
+    const char *a="UNASSIGNED\tg\tr\td\tgate\tc\t1\t-\tDRAFT\t\tcheck\n";
+    const char *b="UTFOWNER\tg\tr\td\tgate\tc\t1\t-\t\t协作 窗口/甲\tcheck\n";
+    const char *c="UTFSTATE\tg\tr\td\tgate\tc\t1\t-\t待 审/核\tbob\tcheck\n";
+    join(r,dir,"unassigned");fixture(r);join(p,r,"agentwork/items.tsv");
+    put(p,ih,0);put(p,a,1);put(p,b,1);put(p,c,1);snapshot(r,"items");
+    expect(!aw(r,"migrate",0,0),"空owner及自由文本owner-state迁移");
+    sameold(r,"items");expect(!aw(r,"check",0,0),"未分配看板逐行等价");
+    if(cx_fmt(expected,sizeof expected,"%s%s%s%s",ih,a,b,c))die("未分配读回预期过长");
+    expect(!aw(r,"items",0,0)&&tx_eqz(out,expected),"空owner及自由字段原字节读回");
+    if(cx_fmt(expected,sizeof expected,"%s%s",ih,a))die("空owner预期过长");
+    expect(!aw(r,"items","--owner","")&&tx_eqz(out,expected),"空owner筛选不是未指定");
+    if(cx_fmt(expected,sizeof expected,"%s%s",ih,b))die("空state预期过长");
+    expect(!aw(r,"items","--state","")&&tx_eqz(out,expected),"空state筛选不是未指定");
+    expect(!aw(r,"items","--owner","协作 窗口/甲")&&tx_eqz(out,expected),"UTF8及非路径owner字段相等筛选");
+    if(cx_fmt(expected,sizeof expected,"%s%s",ih,c))die("UTF8状态预期过长");
+    expect(!aw(r,"items","--state","待 审/核")&&tx_eqz(out,expected),"UTF8及非路径state字段相等筛选");
+    expect(aw(r,"items","--owner","bad\towner")!=0,"owner筛选拒TAB");
+    expect(aw(r,"items","--state","bad\nstate")!=0,"state筛选拒LF");
+    expect(aw(r,"items","--owner","\300\257")!=0,"筛选拒非法UTF8");
+}
+int main(int argc,char **argv){
+    char native[4096];const char *mode=argc>1?argv[1]:"pure";char *v[16];int i;
+    if(argc==4&&tx_eqz(argv[1],"--writer"))return writer(argv[2],argv[3]);
+    deadline=sy_now_ms()+55000;
+    if(!tx_eqz(mode,"pure")&&!tx_eqz(mode,"parallel")&&!tx_eqz(mode,"conflict"))die("用法 pure|parallel|conflict");
+    if(cx_fmt(dir,sizeof dir,"/tmp/check-aw-%d-%ld",sy_pid(),sy_now_ms()))die("唯一夹具目录路径过长");
+    if(sy_mkdirat(sy_at_fdcwd(),dir,0700))die("唯一夹具目录");
+    protect_source();
+    join(bin,dir,"aw");
+    v[0]="sh";v[1]="./unisacc.com";v[2]="tools/aw.cx";v[3]="-o";v[4]=bin;v[5]=0;
+    expect(!run(v),"真实原生编译aw");
+    if(tx_eqz(mode,"parallel")){
+        join(native,dir,"check-aw-native");v[2]="tools/check-aw.cx";v[4]=native;
+        expect(!run(v),"真实原生编译写者");
+    }
+    if(tx_eqz(mode,"pure")){pure();edges();conflictprivacy();eolviews();unassigned();}else gitcases(tx_eqz(mode,"conflict"));
+    expect(source_ok(),"源码仓旧表原字节及新目录存在状态不变");
+    i=(int)(55000-(deadline-sy_now_ms()));
+    printf("CHECK_AW\tmode=%s\tfailed=0\telapsed_ms=%d\tfixture=%s\n",mode,i,dir);
+    return 0;
+}
