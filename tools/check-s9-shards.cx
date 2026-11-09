@@ -2,7 +2,10 @@
  * check-s9-shards.cx ROOT inputs|schedule
  * inputs compiles and exercises the real all-waves scan and diff input gate on
  * a private Git fixture, plus saved-snapshot set controls through inputs-diff.
- * schedule compiles and invokes the real driver's planning/liveness controls.
+ * inputs also drives the S9 wave-level gate (all-waves wt-close): unchanged -> STABLE, a tracked
+ * edit made by a concurrent worker during the wave -> rc 2 CHANGED, records are exclusive.
+ * schedule compiles and invokes the real driver's planning/liveness controls, the epoch-record
+ * consumer controls, and a real child wave in --shared-wt mode that must take zero scans.
  * Neither fixture supplies a product PASS or qualification receipt.
  * Standalone evidence (outside the unchanged batch budget):
  * check-s9-shards.cx ROOT equivalence BEFORE AFTER NATIVE_ALL_WAVES
@@ -65,7 +68,10 @@ int main(int argc,char **argv){
  if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
  char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
  if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
- else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};if(run(compile,root))die("compile");}
+ else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};
+  /* schedule also needs the real wave executor for the shared-worktree control; compile it alongside. */
+  pid_t aw=-1;if(!strcmp(argv[2],"schedule")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
+  if(run(compile,root))die("compile");if(aw>0){int st;if(waitpid(aw,&st,0)!=aw||!WIFEXITED(st)||WEXITSTATUS(st))die("compile-all-waves");}}
  if(!strcmp(argv[2],"inputs")){
   char dl[80],sess[4400],miss[4400],bad[4400],empty[4400],cand[4400],wire[4400];
   long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");
@@ -98,7 +104,20 @@ int main(int argc,char **argv){
  }
  if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
  if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}
- else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");np_free(&r);}
+ else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");ck(r.rc==0&&contains(r.out,r.outn,"wt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=1"),"wt-epoch-consumer-refuses-moved-missing-unlisted");np_free(&r);
+  /* Real wave executor in S9 shared-worktree mode: it must reach child spawn with zero worktree
+     scans of its own (no run-batch beside this private binary, so it refuses right there). */
+  char aw[4400],cand[4400],out[4400],par[4400],ch[4400],dl[80],epoch[4400];join(aw,tmp,"all-waves");join(cand,root,"unisacc.com");join(out,root,"out");join(par,out,"check-s9-wtshare-parent");join(ch,out,"check-s9-wtshare-child");join(epoch,tmp,"wt-epoch-1");
+  {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}
+  if(cx_fmt(dl,sizeof dl,"%.9f",(double)as_now()/1e9+50)||setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");unsetenv("UNISACC_IDENTITY_PARENT");
+  {char *v[]={aw,"init",root,par,cand,"-",0};np_result ir={0};if(np_run(v,root,0,25,&ir,why,sizeof why)||ir.rc)die("wtshare-parent-init");np_free(&ir);}
+  if(setenv("UNISACC_IDENTITY_PARENT",par,1))die("parent-env");{char *v[]={aw,"init",root,ch,cand,"-",0};np_result ir={0};if(np_run(v,root,0,20,&ir,why,sizeof why)||ir.rc)die("wtshare-child-init");np_free(&ir);}unsetenv("UNISACC_IDENTITY_PARENT");
+  {char *v[]={aw,"wave",root,ch,"--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,20,&wr,why,sizeof why))die("wave-transport");ck(wr.rc==2&&contains(wr.out,wr.outn,"shared-wt-requires-s9-supervised")&&!contains(wr.out,wr.outn,"WT_GATE"),"shared-wt-refused-outside-s9-supervisor");np_free(&wr);}
+  {char *v[]={aw,"wave",root,ch,"--s9-supervised","--shared-wt",epoch,"--heavy","s9-shards-schedule",0};np_result wr={0};if(np_run(v,root,0,25,&wr,why,sizeof why))die("wave-transport");if(wr.outn)fwrite(wr.out,1,wr.outn,stdout);
+   char marker[4400];join(marker,ch,"wt-shared");size_t mn=0;char *mk=cx_read(marker,&mn);
+   ck(contains(wr.out,wr.outn,"WT_GATE\tbefore\tmode=SHARED\tscans=0\t")&&contains(wr.out,wr.outn,"executor-run-batch-required"),"child-wave-shared-mode-zero-worktree-scans");
+   ck(mk&&mn==strlen(epoch)+1&&!memcmp(mk,epoch,strlen(epoch))&&mk[mn-1]=='\n',"child-wave-binds-epoch-marker-before-start");free(mk);np_free(&wr);}
+  {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}}
  else{
   char fixture[4400],p[4400],q[4400],target[4400];join(fixture,tmp,"root");if(mkdir(fixture,0700))die("fixture");join(p,fixture,"src");if(mkdir(p,0700))die("src");join(p,fixture,"agentwork");if(mkdir(p,0700))die("agentwork");
   char *git[]={"git","init","-q",fixture,0};if(run(git,tmp))die("git-init");join(p,fixture,"src/input.cx");put(p,"original\n");join(p,fixture,"agentwork/ledger.tsv");put(p,"ledger\n");join(p,fixture,"agentwork/items.tsv");put(p,"items\n");char *add[]={"git","-C",fixture,"add","src/input.cx","agentwork/ledger.tsv","agentwork/items.tsv",0};if(run(add,tmp))die("git-add");
@@ -142,6 +161,15 @@ int main(int argc,char **argv){
   if(unlink(target))die("link-target-remove");a=snapshot(binary,fixture,&an);ck(strstr(a,"\tDANGLING\n")!=0,"dangling-link-recorded");
   put(target,"target-restored\n");b=snapshot(binary,fixture,&bn);ck(!equal(a,an,b,bn),"dangling-target-appears");free(b);
   if(unlink(target))die("link-target-remove");b=snapshot(binary,fixture,&bn);ck(equal(a,an,b,bn),"link-target-disappears-restores-dangling");free(a);free(b);
+  /* S9 wave-level gate (wt-close): one snapshot before the wave, one fresh scan after it. */
+  {char before[4400],rec[4400];join(before,tmp,"epoch.before");a=snapshot(binary,fixture,&an);{int fd=open(before,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||write(fd,a,an)!=(ssize_t)an||close(fd))die("epoch-before-write");}free(a);
+   join(rec,tmp,"wt-epoch-stable");{char *v[]={binary,"wt-close",fixture,before,rec,"slice-0-0","slice-1-1",0};np_result r={0};if(np_run(v,fixture,0,10,&r,why,sizeof why))die("wt-close-transport");size_t n=0;char *s=cx_read(rec,&n);
+    ck(r.rc==0&&contains(r.out,r.outn,"WT_EPOCH\tSTABLE\tmoved=0\tscans=1\t")&&s&&contains(s,n,"\nmoved\t0\n")&&contains(s,n,"\nslice\tslice-1-1\n"),"wt-close-unchanged-wave-stable");free(s);np_free(&r);}
+   /* A concurrent wave worker edits a tracked file while the wave runs. */
+   join(p,fixture,"agentwork/items.tsv");pid_t w=fork();if(w<0)die("wave-worker-fork");if(!w){int fd=open(p,O_WRONLY|O_APPEND|O_CLOEXEC);_exit(fd<0||write(fd,"mid-wave\n",9)!=9||close(fd)?1:0);}{int st;if(waitpid(w,&st,0)!=w||!WIFEXITED(st)||WEXITSTATUS(st))die("wave-worker");}
+   join(rec,tmp,"wt-epoch-moved");{char *v[]={binary,"wt-close",fixture,before,rec,"slice-0-0",0};np_result r={0};if(np_run(v,fixture,0,10,&r,why,sizeof why))die("wt-close-transport");size_t n=0;char *s=cx_read(rec,&n);
+    ck(r.rc==2&&contains(r.out,r.outn,"WT_EPOCH\tCHANGED\tmoved=1\t")&&s&&contains(s,n,"\nmoved\t1\n")&&contains(s,n,"\npath\t?? agentwork/items.tsv\n"),"wt-close-tracked-edit-during-wave-refuses");free(s);np_free(&r);}
+   {char *v[]={binary,"wt-close",fixture,before,rec,"slice-0-0",0};np_result r={0};if(np_run(v,fixture,0,10,&r,why,sizeof why))die("wt-close-transport");ck(r.rc==2&&contains(r.out,r.outn,"REFUSE\texclusive-write"),"wt-close-record-never-reused");np_free(&r);}}
  }
  if(!failures){char *clean[]={"rm","-rf","--",tmp,0};if(run(clean,root))die("private-fixture-clean");}else fprintf(stderr,"fixture retained: %s\n",tmp);
  printf("CHECK_S9_SHARDS\tphase=%s\tfailed=%d\n",argv[2],failures);return failures?1:0;

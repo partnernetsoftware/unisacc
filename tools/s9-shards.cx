@@ -141,7 +141,24 @@ static void child(const char *session,const char *ids){
  for(int i=0;i<reg.nb;i++)if(as_inlist(ids,reg.b[i].id)){const char *q=reg.b[i].materials;tp_material_decl d;while(tp_material_next(&q,&d)>0){int seen=0;for(int k=0;k<nn;k++)if(!strcmp(names[k],d.name))seen=1;if(!seen){const as_material *expected=as_find_material(&parent,d.name);char h[65];if(!expected){printf("S9\tNOT_AVAIL\tmaterial=%s\n",d.name);exit(2);}if(expected->kind!=d.kind||as_material_fp(expected,h,sw,sizeof sw)||strcmp(h,expected->fingerprint))fail("frozen-material-changed");if(nn==S9_MAX||strlen(d.name)>=sizeof names[0])fail("material-bound");if(cx_fmt(names[nn++],sizeof names[0],"%s",d.name))fail("copy-bound");if(aw("material",session,d.name,0))exit(2);}}}as_free(&parent);
  /* The native S9 supervisor owns this whole descendant tree and the inherited
     remaining deadline. Only run-batch, not identity/receipt closure, gets 55 s. */
- char copy[1024];if(strlen(ids)>=sizeof copy)fail("ids");if(cx_fmt(copy,sizeof copy,"%s",ids))fail("copy-bound");char *v[32];int n=0;v[n++]=se;v[n++]="wave";v[n++]=sr;v[n++]=(char *)session;v[n++]="--s9-supervised";v[n++]="--heavy";char *q=copy;while(q&&*q){char *e=strchr(q,',');if(e)*e=0;v[n++]=q;q=e?e+1:0;}v[n]=0;char p[4400];path(p,session,"wave.log");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)fail("wave-log");close(fd);execv(se,v);fail("wave-exec");
+ /* The step owns the worktree gate for every child it launches (epoch record, see wt_epoch_ok). */
+ const char *epoch=getenv("UNISACC_S9_WT_EPOCH");char eprefix[4400];path(eprefix,sd,"wt-epoch-");if(!epoch||strncmp(epoch,eprefix,strlen(eprefix))||strchr(epoch+strlen(eprefix),'/'))fail("wt-epoch-required");
+ char copy[1024];if(strlen(ids)>=sizeof copy)fail("ids");if(cx_fmt(copy,sizeof copy,"%s",ids))fail("copy-bound");char *v[32];int n=0;v[n++]=se;v[n++]="wave";v[n++]=sr;v[n++]=(char *)session;v[n++]="--s9-supervised";v[n++]="--shared-wt";v[n++]=(char *)epoch;v[n++]="--heavy";char *q=copy;while(q&&*q){char *e=strchr(q,',');if(e)*e=0;v[n++]=q;q=e?e+1:0;}v[n]=0;char p[4400];path(p,session,"wave.log");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)fail("wave-log");close(fd);execv(se,v);fail("wave-exec");
+}
+static int has_bytes(const char *s,size_t n,const char *needle){size_t k=strlen(needle);for(size_t i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return 1;return 0;}
+/* Wave-level worktree gate consumer.  A child session that ran a wave must name the epoch record of
+   the step that launched it; that record must be sealed, measured against this run's sealed inputs,
+   list this slice and report moved=0.  Anything else (missing, interrupted, changed, foreign) refuses. */
+static int wt_epoch_ok(const char *session,const char *leaf){
+ char p[4400],eprefix[4400],ih[65],want[200];path(p,session,"wt-shared");size_t n;char *e=as_read(p,0,&n,sw,sizeof sw);if(!e)return 0;
+ path(eprefix,sd,"wt-epoch-");size_t pl=strlen(eprefix);int ok=n>pl+1&&n<4000&&e[n-1]=='\n';if(ok){e[n-1]=0;ok=!strncmp(e,eprefix,pl)&&!strchr(e+pl,'/')&&!strchr(e,'\t');}
+ size_t rn=0,hn=0;char *r=0,*h=0,rh[65];if(ok){r=as_read(e,0,&rn,sw,sizeof sw);char hp[4400];int z=snprintf(hp,sizeof hp,"%s.sha256",e);if(z<0||(size_t)z>=sizeof hp)ok=0;else h=as_read(hp,0,&hn,sw,sizeof sw);}
+ if(ok)ok=r&&h&&hn==65&&h[64]=='\n'&&!as_sha_file(e,0,rh,0,sw,sizeof sw)&&!memcmp(rh,h,64);
+ path(p,sd,"inputs");if(ok)ok=!as_sha_file(p,0,ih,0,sw,sizeof sw);
+ if(ok)ok=rn>20&&!memcmp(r,"S9_WT_EPOCH\tv1\n",15)&&rn>=5&&!memcmp(r+rn-5,"\nEND\n",5)&&has_bytes(r,rn,"\nmoved\t0\n");
+ if(ok){if(cx_fmt(want,sizeof want,"\nbefore\t%s\n",ih))ok=0;else ok=has_bytes(r,rn,want);}
+ if(ok){if(cx_fmt(want,sizeof want,"\nslice\t%s\n",leaf))ok=0;else ok=has_bytes(r,rn,want);}
+ free(e);free(r);free(h);return ok;
 }
 static int aggregate(void){
  freeze_check();load_plan();as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");as_state *states=calloc((size_t)reg.nb,sizeof *states);if(!states)fail("allocation");
@@ -156,8 +173,9 @@ static int aggregate(void){
    if(as_material_bind(session,&m,sw,sizeof sw))fail("child-map");for(int j=0;j<m.nmaterial;j++){const as_material *expected=as_find_material(&parent,m.material[j].name);if(!expected||expected->kind!=m.material[j].kind||strcmp(expected->path,m.material[j].path)||strcmp(expected->content,m.material[j].content)||strcmp(expected->fingerprint,m.material[j].fingerprint))fail("foreign-child-material");if(as_material_fp(&m.material[j],hash,sw,sizeof sw)||strcmp(hash,m.material[j].fingerprint))fail("child-material");}
    for(int j=0;j<m.nref;j++)if(!as_inlist(s->ids,m.ref[j].id))fail("unassigned-receipt");waves+=m.nwave;
   }
+  int wt_ok=!loaded||!m.nwave||wt_epoch_ok(session,s->leaf);if(!wt_ok)printf("S9_WT\tREFUSE\tslice=%s\treason=epoch-missing-changed-or-unlisted\n",s->leaf);
   for(int i=0;i<reg.nb;i++)if(as_inlist(s->ids,reg.b[i].id)){as_state *state=&states[i];if(started){state->attempts++;state->last='U';state->unknown++;}
-   if(loaded){for(int j=0;j<m.nref;j++)if(!strcmp(m.ref[j].id,reg.b[i].id)){const char *v;char why[200];if(as_check_receipt(sr,session,&m,&m.ref[j],&reg.b[i],&parent.ident,&v,why)){state->refused++;state->last='R';continue;}if(!strcmp(v,"FAIL")){state->fail++;state->last='F';}else if(!strcmp(v,"PASS")&&!state->fail)state->last='P';else if(!state->fail)state->last='U';}for(int j=0;j<m.nwave;j++)if(m.wave[j].changed)state->refused++;}
+   if(loaded){for(int j=0;j<m.nref;j++)if(!strcmp(m.ref[j].id,reg.b[i].id)){const char *v;char why[200];if(as_check_receipt(sr,session,&m,&m.ref[j],&reg.b[i],&parent.ident,&v,why)){state->refused++;state->last='R';continue;}if(!strcmp(v,"FAIL")){state->fail++;state->last='F';}else if(!strcmp(v,"PASS")&&!state->fail)state->last='P';else if(!state->fail)state->last='U';}for(int j=0;j<m.nwave;j++)if(m.wave[j].changed)state->refused++;if(!wt_ok){state->refused++;state->last='R';}}
    close_slice_state(state,started,complete,begin,end,rc);
   }if(loaded)as_free(&m);free(d);
  }
@@ -192,21 +210,51 @@ static int choose_slice(const int *pending,int active,int writer_active,s9_sched
 static int step(void){
  freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");int active=0,alone=0;s9_schedule queue={-1,0,0};
  for(int i=0;i<nslices;i++)if(running(&slices[i])){close(lock);printf("S9\tPENDING\treason=live-prior-attempt\n");return 3;}
+ /* Wave-level worktree gate: freeze_check above just measured the tree equal to the sealed RUN/inputs;
+    this step's children skip their own scans and wt-close measures once after all of them ended. */
+ char epoch[4400],eleaf[80],edl[64];int launched_any=0;if(cx_fmt(eleaf,sizeof eleaf,"wt-epoch-%lld",as_now()))fail("format-bound");path(epoch,sd,eleaf);if(present(epoch))fail("wt-epoch-exists");
+ if(cx_fmt(edl,sizeof edl,"%.9f",outer_end-15.0))fail("format-bound");np_buf eslices={0};
  for(;;){
   double left=outer_end-(double)as_now()/1e9;
   if(left>75){int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p);}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
     slice_path(p,s,"start");
     s->start=as_now();char session[4400];path(session,sd,s->leaf);int gate[2];if(pipe(gate))fail("start-pipe");
-    pid_t pid=fork();if(pid<0)fail("fork");if(!pid){close(lock);close(gate[1]);setpgid(0,0);char go;if(read(gate[0],&go,1)!=1)_exit(2);close(gate[0]);char log[4400];slice_path(log,s,"log");int fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)_exit(2);close(fd);char *v[]={driver,"child",sr,sd,session,s->ids,0};execv(driver,v);_exit(2);}
-    close(gate[0]);setpgid(pid,pid);long long tick=proc_start(pid);if(!tick)fail("child-starttime");char np[4400];size_t nn;path(np,sd,"nonce");char *nonce=as_read(np,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");np_buf start={0};np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,tick);np_puts(&start,"\t");np_put(&start,nonce,64);np_puts(&start,"\t");np_putll(&start,s->start);np_puts(&start,"\n");save(p,start.p,start.n);free(start.p);free(nonce);if(write(gate[1],"G",1)!=1)fail("start-release");close(gate[1]);s->pid=pid;active++;alone=s->alone;
+    pid_t pid=fork();if(pid<0)fail("fork");if(!pid){close(lock);close(gate[1]);setpgid(0,0);char go;if(read(gate[0],&go,1)!=1)_exit(2);close(gate[0]);char log[4400];slice_path(log,s,"log");int fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)_exit(2);close(fd);if(setenv("UNISACC_S9_WT_EPOCH",epoch,1)||setenv("UNISACC_BOUND_DEADLINE_MONO",edl,1))_exit(2);char *v[]={driver,"child",sr,sd,session,s->ids,0};execv(driver,v);_exit(2);}
+    close(gate[0]);setpgid(pid,pid);long long tick=proc_start(pid);if(!tick)fail("child-starttime");char np[4400];size_t nn;path(np,sd,"nonce");char *nonce=as_read(np,0,&nn,sw,sizeof sw);if(!nonce||nn!=65)fail("nonce");np_buf start={0};np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,pid);np_puts(&start,"\t");np_putll(&start,tick);np_puts(&start,"\t");np_put(&start,nonce,64);np_puts(&start,"\t");np_putll(&start,s->start);np_puts(&start,"\n");save(p,start.p,start.n);free(start.p);free(nonce);if(write(gate[1],"G",1)!=1)fail("start-release");close(gate[1]);s->pid=pid;active++;alone=s->alone;launched_any=1;np_puts(&eslices,s->leaf);np_puts(&eslices,"\n");
   }}
   if(!active)break;int status;pid_t pid;do{pid=waitpid(-1,&status,0);}while(pid<0&&errno==EINTR);if(pid<0)fail("wait");
   for(int i=0;i<nslices;i++)if(slices[i].pid==pid){s9_slice *s=&slices[i];char session[4400],h[65];path(session,sd,s->leaf);path(p,session,"session.tsv");if(as_sha_file(p,0,h,0,sw,sizeof sw))if(cx_fmt(h,sizeof h,"%s","ABSENT"))fail("copy-bound");np_buf b={0};np_putll(&b,s->start);np_puts(&b,"\t");np_putll(&b,as_now());np_puts(&b,"\t");np_putll(&b,WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status));np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");slice_path(p,s,"done");save(p,b.p,b.n);free(b.p);s->pid=0;active--;alone=0;}
  }
+ if(launched_any){char *v[S9_MAX+8];int n=0;char checker[4400],inputs[4400],log[4500];path(checker,sd,"checker");path(inputs,sd,"inputs");v[n++]=sb;v[n++]="55";v[n++]=checker;v[n++]="wt-close";v[n++]=sr;v[n++]=inputs;v[n++]=epoch;
+  for(size_t at=0;at<eslices.n;){size_t e=at;while(eslices.p[e]!='\n')e++;eslices.p[e]=0;if(n==S9_MAX+7)fail("wt-epoch-slices");v[n++]=eslices.p+at;at=e+1;}v[n]=0;
+  if(cx_fmt(log,sizeof log,"%s.log",epoch))fail("format-bound");int rc=command(v,log,57);
+  printf("S9_WT\tepoch=%s\tstatus=%s\trc=%d\tslices=%d\tchild_scans=0\n",eleaf,rc==0?"STABLE":rc==2?"CHANGED-REFUSE":"UNMEASURED-REFUSE",rc,n-7);}
+ free(eslices.p);
  close(lock);printf("S9\tSTEP_FINISHED\tqualification=NOT_DECIDED_HERE\n");return 3;
 }
 static void write_plan(void){
  make_plan();np_buf plan={0};char p[4400];for(int i=0;i<nslices;i++){s9_slice *s=&slices[i];np_puts(&plan,s->leaf);np_puts(&plan,"\t");np_putll(&plan,s->tier);np_puts(&plan,"\t");np_putll(&plan,s->alone);np_puts(&plan,"\t");np_puts(&plan,s->ids);np_puts(&plan,"\n");}path(p,sd,"plan.tsv");save(p,plan.p,plan.n);free(plan.p);
+}
+/* Consumer controls on private fixtures under the controls RUN directory. */
+static void ctl_epoch(const char *leaf,const char *before,int moved,const char *slice,int seal,char *made,size_t cap){
+ char p[4400];path(p,sd,leaf);np_buf r={0};np_puts(&r,"S9_WT_EPOCH\tv1\nbefore\t");np_puts(&r,before);np_puts(&r,"\nafter\t");np_puts(&r,before);np_puts(&r,"\nmoved\t");np_putll(&r,moved);np_puts(&r,"\nslice\t");np_puts(&r,slice);np_puts(&r,"\nEND\n");save(p,r.p,r.n);
+ char h[66],hp[4400];cx_sha256_hex(r.p,r.n,h);if(!seal)h[0]=h[0]=='0'?'1':'0';h[64]='\n';h[65]=0;if(cx_fmt(hp,sizeof hp,"%s.sha256",p))fail("format-bound");save(hp,h,65);free(r.p);if(cx_fmt(made,cap,"%s",p))fail("copy-bound");
+}
+static int wt_epoch_controls(void){
+ int bad=0;char p[4400],sess[4400],ih[65],made[4400],other[4400];path(p,sd,"inputs");save(p,"?? a\tx\n",7);if(as_sha_file(p,0,ih,0,sw,sizeof sw))fail("control-inputs");path(sess,sd,"slice-0-0");if(mkdir(sess,0700))fail("control-session");char marker[4400];path(marker,sess,"wt-shared");
+ if(wt_epoch_ok(sess,"slice-0-0"))bad++;                                  /* marker absent */
+ struct {const char *leaf;int moved;const char *slice;int seal;int before_ok;int expect;} k[]={
+  {"wt-epoch-1",0,"slice-0-0",1,1,1},  /* sealed, stable, listed: accept */
+  {"wt-epoch-2",1,"slice-0-0",1,1,0},  /* tracked file moved during the wave: refuse */
+  {"wt-epoch-3",0,"slice-9-9",1,1,0},  /* epoch does not list this slice: refuse */
+  {"wt-epoch-4",0,"slice-0-0",0,1,0},  /* record edited after sealing: refuse */
+  {"wt-epoch-5",0,"slice-0-0",1,0,0}}; /* measured against another snapshot: refuse */
+ for(size_t i=0;i<sizeof k/sizeof k[0];i++){ctl_epoch(k[i].leaf,k[i].before_ok?ih:"0000000000000000000000000000000000000000000000000000000000000000",k[i].moved,k[i].slice,k[i].seal,made,sizeof made);np_buf m={0};np_puts(&m,made);np_puts(&m,"\n");save(marker,m.p,m.n);free(m.p);if(wt_epoch_ok(sess,"slice-0-0")!=k[i].expect)bad++;if(unlink(marker))fail("control-clean");}
+ path(other,sd,"wt-epoch-6");np_buf m={0};np_puts(&m,other);np_puts(&m,"\n");save(marker,m.p,m.n);free(m.p);if(wt_epoch_ok(sess,"slice-0-0"))bad++;if(unlink(marker))fail("control-clean"); /* interrupted step: record never written */
+ save(marker,"/tmp/wt-epoch-1\n",16);if(wt_epoch_ok(sess,"slice-0-0"))bad++;if(unlink(marker))fail("control-clean");  /* foreign record path */
+ for(int i=1;i<=5;i++){char leaf[64];if(cx_fmt(leaf,sizeof leaf,"wt-epoch-%d",i))fail("format-bound");path(p,sd,leaf);if(unlink(p))fail("control-clean");if(cx_fmt(leaf,sizeof leaf,"wt-epoch-%d.sha256",i))fail("format-bound");path(p,sd,leaf);if(unlink(p))fail("control-clean");}
+ path(p,sd,"inputs");if(unlink(p)||rmdir(sess))fail("control-clean");
+ printf("S9_CONTROL\twt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=%d\n",bad?0:1);return bad;
 }
 static int controls(void){
  int bad=0;char tmp[]="/tmp/s9-controls-XXXXXX";if(!mkdtemp(tmp))fail("controls-temp");if(cx_fmt(sd,sizeof sd,"%s",tmp))fail("copy-bound");
@@ -262,6 +310,7 @@ static int controls(void){
  np_buf b={0};np_putll(&b,getpid());np_puts(&b,"\t");np_putll(&b,getpid());np_puts(&b,"\t");np_putll(&b,proc_start(getpid()));np_puts(&b,"\t");np_put(&b,nonce,64);np_puts(&b,"\t1\n");save(p,b.p,b.n);free(b.p);if(!present(p)||!running(&x))bad++;
  /* Resume must not duplicate START; PID reuse must not look in-flight. */
  if(unlink(p))fail("control-unlink");np_buf stale={0};np_putll(&stale,getpid());np_puts(&stale,"\t");np_putll(&stale,getpid());np_puts(&stale,"\t1\t");np_put(&stale,nonce,64);np_puts(&stale,"\t1\n");save(p,stale.p,stale.n);free(stale.p);if(running(&x))bad++;
+ bad+=wt_epoch_controls();
  if(unlink(p))fail("control-clean");path(p,sd,"nonce");if(unlink(p)||rmdir(sd))fail("control-clean");free(reg.b);printf("S9_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
 }
 static int operate(int argc,char **argv){

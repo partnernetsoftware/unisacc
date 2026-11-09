@@ -9,6 +9,9 @@
  * wave ROOT SESSION --s9-supervised --heavy ID... and its inherited remaining
  * deadline (at most 300 s). No whole-wave bound 55 surrounds identity/receipts;
  * every spawned run-batch still retains its own bound of at most 55 s.
+ * With --shared-wt RUN/wt-epoch-N the child skips its own worktree scans; the S9 step measures
+ * once before (freeze_check) and once after all its children (wt-close ROOT BEFORE RECORD LEAF...),
+ * and the S9 aggregate refuses the session unless that record lists it with moved=0.
  *   sh ./unisacc.com tools/all-waves.cx -- pending ROOT SESSION      (read-only listing; no verdicts)
  * SESSION is a new absolute directory below ROOT/out.  CANDIDATE must be ROOT/unisacc.com, because
  * tests/run-batch.cx (the only executor) binds that path. MATERIALS_MAP has lines
@@ -155,7 +158,9 @@ static int col0(const char *buf,size_t at,size_t e,char *dst,size_t cap){size_t 
 /* Content snapshots include tracked (even missing) and untracked inputs. Only the
    append-only integration ledger is excluded; registry tables remain inputs.
    Unlike porcelain, this detects a second edit of an already dirty file. */
+static int g_wt_scans;   /* full worktree measurements taken by this process; printed as evidence */
 static char *wt_scan(const char *r, size_t *n, np_buf *buf) {
+    g_wt_scans++;
     char *v[] = {"git", "-C", (char *)r, "ls-files", "-c", "-o", "--exclude-standard", "-z", 0};
     np_result x = {0}; char reason[1700] = {0};
     if (np_run(v,r,0,10,&x,reason,sizeof reason)||x.rc) die("worktree-unmeasured",reason);
@@ -301,8 +306,15 @@ static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];
  j->pid=pid;
 }
 static int cmd_wave(int argc,char **argv){
- if(argc<6)die("usage","wave ROOT SESSION [--s9-supervised] [--child-seconds N] --light ID... | --heavy ID");int supervised=!strcmp(argv[4],"--s9-supervised");outer_window_limit(supervised?300.5:57.5);canonical_root(argv[2]);existing_session(argv[3]);
- int at=supervised?5:4,cap_seconds=55;if(at+1<argc&&!strcmp(argv[at],"--tier")){select_tier(argv[at+1]);at+=2;}if(at>=argc)die("usage","wave selection missing");if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
+ if(argc<6)die("usage","wave ROOT SESSION [--s9-supervised [--shared-wt RUN/wt-epoch-N]] [--child-seconds N] --light ID... | --heavy ID");int supervised=!strcmp(argv[4],"--s9-supervised");outer_window_limit(supervised?300.5:57.5);canonical_root(argv[2]);existing_session(argv[3]);
+ if(!supervised&&!strcmp(argv[4],"--shared-wt"))die("shared-wt-requires-s9-supervised",argv[4]);
+ int at=supervised?5:4,cap_seconds=55;
+ /* S9 wave-level worktree gate: the supervisor measured the tree against its sealed snapshot
+    before launching this child and measures it once more after every child of the step has
+    ended (wt-close).  The aggregate refuses this session unless that epoch record lists it with
+    moved=0, so skipping the per-child scans never skips the measurement itself. */
+ const char *shared_wt=0;if(supervised&&at+1<argc&&!strcmp(argv[at],"--shared-wt")){shared_wt=argv[at+1];if(shared_wt[0]!='/'||!strstr(shared_wt,"/wt-epoch-")||strchr(shared_wt,'\n')||strchr(shared_wt,'\t'))die("shared-wt-path",shared_wt);at+=2;}
+ if(at+1<argc&&!strcmp(argv[at],"--tier")){select_tier(argv[at+1]);at+=2;}if(at>=argc)die("usage","wave selection missing");if(tx_eqz(argv[at], "--child-seconds")){if(at+2>=argc)die("usage","--child-seconds N");cap_seconds=atoi(argv[at+1]);if(cap_seconds<1||cap_seconds>55)die("child-seconds-range",argv[at+1]);at+=2;}
  int heavy=!strcmp(argv[at],"--heavy"),light=!strcmp(argv[at],"--light");if(!heavy&&!light)die("usage","--light or --heavy");at++;int count=argc-at;if(count<1||count>WAVE_JOBS_MAX)die("wave-shape","light-or-heavy-takes-one-to-WAVE_JOBS_MAX-ids");
  /* Selection may omit a known batch, but must not hide a misspelled ID. */
  if(tier_filter){as_registry selected_reg;if(as_registry_load(root,&selected_reg,why,sizeof why))die("registry-metadata",why);
@@ -323,6 +335,7 @@ static int cmd_wave(int argc,char **argv){
  for(int i=0;i<count;i++){int s=job[i].b->budget;if(s>cap_seconds)s=cap_seconds;if(s>window)s=window;job[i].seconds=s;}
  int seq=m.seq+1;char dir[64],wavedir[4400];{int z=snprintf(dir,sizeof dir,"wave-%d",seq);if(z<0||(size_t)z>=sizeof dir){fprintf(stderr,"bound-format\n");exit(2);}};join(wavedir,sizeof wavedir,session,dir);
  char mp[4400];join(mp,sizeof mp,session,"session.tsv");int fd=open(mp,O_WRONLY|O_APPEND|O_CLOEXEC|O_NOFOLLOW);if(fd<0)die("manifest-open",mp);
+ if(shared_wt){char mk[4400];join(mk,sizeof mk,session,"wt-shared");np_buf mb={0,0,0};np_puts(&mb,shared_wt);np_puts(&mb,"\n");save_new(mk,mb.p,mb.n);free(mb.p);}
  np_buf sb={0,0,0};np_puts(&sb,"START\tmode=");np_puts(&sb,heavy?"heavy":"light");np_puts(&sb,"\tdir=");np_puts(&sb,dir);np_puts(&sb,"\tids=");np_puts(&sb,ids.p);np_puts(&sb,"\n");if(as_append(fd,session,"start",seq,sb.p,sb.n,why,sizeof why))die("manifest-append",why);free(sb.p);
  if(mkdir(wavedir,0700))die("wave-dir-must-be-new",wavedir);
  char before[65];{ if (cx_fmt(before, sizeof before, "%s",live.candidate)) { fprintf(stderr, "all-waves: text too long for before\n"); exit(2); } }
@@ -331,7 +344,8 @@ static int cmd_wave(int argc,char **argv){
     git-status snapshot before and one after, with each batch's own out/<id> output excluded, is
     enough: any difference means shared state moved and every receipt in this wave becomes UNKNOWN. */
  np_buf wtb={0,0,0},wta={0,0,0};size_t wbn=0,wan=0;
- wt_scan(root,&wbn,&wtb);
+ if(!shared_wt)wt_scan(root,&wbn,&wtb);
+ printf("WT_GATE\tbefore\tmode=%s\tscans=%d\tepoch=%s\n",shared_wt?"SHARED":"LOCAL",g_wt_scans,shared_wt?shared_wt:"-");fflush(stdout);
  long long w0=as_now();
  /* Placement honours the domain masks from tests/wave-domains.tsv: a job starts only when its mask
     does not intersect any running job's mask, so serial/wt/hs/mi never overlap.  The window
@@ -366,10 +380,11 @@ static int cmd_wave(int argc,char **argv){
     job[f2].t1=as_now();job[f2].bound_rc=WIFEXITED(st2)?WEXITSTATUS(st2):128+(WIFSIGNALED(st2)?WTERMSIG(st2):0);left--;active--;}}}
  long long w1=as_now();
  int wt_gate_failed=0;
- wt_scan(root,&wan,&wta);
+ if(!shared_wt){wt_scan(root,&wan,&wta);
  {np_buf wtmoved={0,0,0};int moved=wt_diff(wtb.p,wbn,wta.p,wan,&wtmoved);
   if(moved>0){printf("WT_CHANGED\tpaths=%d\t%s",moved,wtmoved.p?wtmoved.p:"");fflush(stdout);wt_gate_failed=moved;}
-  free(wtmoved.p);}
+  free(wtmoved.p);}}
+ printf("WT_GATE\tafter\tmode=%s\tscans=%d\tverdict=%s\n",shared_wt?"SHARED":"LOCAL",g_wt_scans,shared_wt?"DECIDED_BY_S9_EPOCH":wt_gate_failed?"CHANGED":"STABLE");fflush(stdout);
  free(wtb.p);free(wta.p);
  /* after-measurements: candidate, registry, harness, SID, materials, inputs */
  as_ident after;int measured=!as_identity(root,1,&after,why,sizeof why);const char *changed=!measured?"after-measurement-failed":as_ident_diff(&after,&m.ident)?as_ident_diff(&after,&m.ident):strcmp(after.sid,m.ident.sid)?"sid":0;int identity_stable=!changed;
@@ -499,6 +514,21 @@ int main(int argc,char **argv){
     if(!a||!b)die("inputs-diff-read",0);np_buf out={0};if(argc==5)np_puts(&out,argv[4]);int moved=wt_diff(a,an,b,bn,&out);
     printf("WT_CHANGED\tpaths=%d\n",moved);if(out.n&&fwrite(out.p,1,out.n,stdout)!=out.n)die("inputs-diff-write",0);
     free(a);free(b);free(out.p);return 0;
+ }
+ /* S9 epoch close: one fresh worktree measurement after every child of a step ended, compared with
+    the snapshot the supervisor verified before launching them.  Writes the record exclusively and
+    never reads an earlier record, so no scan result is reused across epochs.  rc 2 = changed. */
+ if(argc>=6&&!strcmp(argv[1],"wt-close")){
+    canonical_root(argv[2]);const char *rec=argv[4];if(rec[0]!='/'||!strstr(rec,"/wt-epoch-"))die("wt-epoch-path",rec);
+    size_t an=0;char *a=cx_read(argv[3],&an);if(!a)die("wt-close-before-read",argv[3]);
+    long long t0=as_now();np_buf now={0,0,0};size_t bn=0;wt_scan(root,&bn,&now);long long scan_ns=as_now()-t0;
+    np_buf paths={0,0,0};int moved=wt_diff(a,an,now.p,bn,&paths);char hb[65],ha[65];cx_sha256_hex(a,an,hb);cx_sha256_hex(now.p?now.p:"",bn,ha);
+    np_buf r={0,0,0};np_puts(&r,"S9_WT_EPOCH\tv1\nbefore\t");np_puts(&r,hb);np_puts(&r,"\nafter\t");np_puts(&r,ha);np_puts(&r,"\nmoved\t");np_putll(&r,moved);np_puts(&r,"\nscan_ns\t");np_putll(&r,scan_ns);np_puts(&r,"\nclosed_ns\t");np_putll(&r,as_now());np_puts(&r,"\n");
+    for(int i=5;i<argc;i++){if(!argv[i][0]||strchr(argv[i],'\n')||strchr(argv[i],'\t')||strchr(argv[i],'/'))die("wt-epoch-leaf",argv[i]);np_puts(&r,"slice\t");np_puts(&r,argv[i]);np_puts(&r,"\n");}
+    for(size_t at=0;at<paths.n;){size_t e=at;while(e<paths.n&&paths.p[e]!='\n')e++;np_puts(&r,"path\t");np_put(&r,paths.p+at,e-at);np_puts(&r,"\n");at=e+1;}
+    np_puts(&r,"END\n");save_new(rec,r.p,r.n);char rh[66],sp[4400];cx_sha256_hex(r.p,r.n,rh);rh[64]='\n';rh[65]=0;{int z=snprintf(sp,sizeof sp,"%s.sha256",rec);if(z<0||(size_t)z>=sizeof sp)die("path-bound",rec);}save_new(sp,rh,65);
+    printf("WT_EPOCH\t%s\tmoved=%d\tscans=%d\tscan_ns=%lld\tslices=%d\trecord=%s\n",moved?"CHANGED":"STABLE",moved,g_wt_scans,scan_ns,argc-5,rec);if(moved&&paths.n)fwrite(paths.p,1,paths.n,stdout);
+    free(a);free(now.p);free(paths.p);free(r.p);return moved?2:0;
  }
  if(tx_eqz(argv[1], "init"))return cmd_init(argc,argv);if(tx_eqz(argv[1], "material"))return cmd_material(argc,argv);if(tx_eqz(argv[1], "wave"))return cmd_wave(argc,argv);if(tx_eqz(argv[1], "pending"))return cmd_pending(argc,argv);
  if(tx_eqz(argv[1], "executor"))return cmd_executor(argc,argv);if(tx_eqz(argv[1], "start"))return cmd_start(argc,argv);if(tx_eqz(argv[1], "run"))return cmd_run(argc,argv);if(tx_eqz(argv[1], "finish"))return cmd_finish(argc,argv);
