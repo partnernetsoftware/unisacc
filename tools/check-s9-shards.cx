@@ -66,6 +66,36 @@ int main(int argc,char **argv){
  char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
  if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
  else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};if(run(compile,root))die("compile");}
+ if(!strcmp(argv[2],"inputs")){
+  char dl[80],sess[4400],miss[4400],bad[4400],empty[4400],cand[4400],wire[4400];
+  long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");
+  if(setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");
+  join(cand,root,"unisacc.com");join(sess,root,"out");
+  join(miss,sess,"check-s9-ident-miss");join(bad,sess,"check-s9-ident-bad");join(empty,sess,"check-s9-ident-empty");
+  if(setenv("UNISACC_IDENTITY_PARENT","/no/such/session",1))die("parent-env");
+  {char *v[]={binary,"init",root,miss,cand,"-",0};np_result r={0};if(np_run(v,root,0,20,&r,why,sizeof why))die("miss-transport");ck(r.rc==2&&contains(r.err,r.errn,"identity-parent"),"identity-parent-missing-refuse");np_free(&r);}
+  if(mkdir(empty,0700)&&errno!=EEXIST)die("empty-dir");join(wire,empty,"session.tsv");put(wire,"not-a-manifest\n");
+  if(setenv("UNISACC_IDENTITY_PARENT",empty,1))die("parent-env");
+  {char *v[]={binary,"init",root,bad,cand,"-",0};np_result r={0};if(np_run(v,root,0,20,&r,why,sizeof why))die("bad-transport");ck(r.rc==2&&contains(r.err,r.errn,"identity-parent"),"identity-parent-corrupt-refuse");np_free(&r);}
+  unsetenv("UNISACC_IDENTITY_PARENT");
+  {char par[4400],ch[4400],srcf[4400];join(par,sess,"check-s9-ident-live-parent");join(ch,sess,"ident-sid-child");join(srcf,root,"src/runcache.cx");
+   {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}
+   unsetenv("UNISACC_IDENTITY_PARENT");
+   {char *v[]={binary,"init",root,par,cand,"-",0};np_result r={0};int pok=!np_run(v,root,0,25,&r,why,sizeof why)&&r.rc==0;np_free(&r);
+    if(!pok)ck(0,"identity-parent-sid-changed-refuse");
+    else if(setenv("UNISACC_IDENTITY_PARENT",par,1))die("parent-env");
+    else{
+     char *c[]={binary,"init",root,ch,cand,"-",0};np_result cr={0};int cok=!np_run(c,root,0,20,&cr,why,sizeof why)&&cr.rc==0;np_free(&cr);
+     unsetenv("UNISACC_IDENTITY_PARENT");
+     if(!cok)ck(0,"identity-parent-sid-changed-refuse");
+     else{int fd=open(srcf,O_WRONLY|O_APPEND|O_CLOEXEC);if(fd<0||write(fd,"\n",1)!=1||close(fd))die("sid-touch");
+      {char *w[]={binary,"wave",root,ch,"--heavy","smoke",0};np_result wr={0};if(np_run(w,root,0,20,&wr,why,sizeof why))die("wave-transport");ck(wr.rc==2&&(contains(wr.err,wr.errn,"session-sid-changed")||contains(wr.out,wr.outn,"session-sid-changed")),"identity-parent-sid-changed-refuse");np_free(&wr);}
+      {char *g[]={"git","-C",root,"checkout","--","src/runcache.cx",0};run(g,root);}
+     }
+    }
+   }
+  }
+ }
  if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
  if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}
  else if(!strcmp(argv[2],"schedule")){char *v[]={binary,"controls",0};np_result r={0};if(np_run(v,root,0,30,&r,why,sizeof why))die("controls-transport");if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);ck(r.rc==0,"real-planner-global-writer-resume-pid-identity");ck(r.rc==0&&contains(r.out,r.outn,"bounded-backfill-fixed-quota-drain-reserved-writer-first"),"real-planner-bounded-reservation-drain");ck(r.rc==0&&contains(r.out,r.outn,"backfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss"),"real-planner-backfill-global-contract");ck(r.rc==0&&contains(r.out,r.outn,"completed-receipt-after-55s-retains-pass"),"completed-receipt-after-original-wave-window");ck(r.rc==0&&contains(r.out,r.outn,"timeout-unsealed-missing-failed-receipts-never-pass"),"timeout-and-incomplete-receipt-consumer-refusal");np_free(&r);}
