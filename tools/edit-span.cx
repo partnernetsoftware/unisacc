@@ -7,18 +7,90 @@
  * line LAST starts with LAST_TEXT, and FIRST <= LAST lie inside the file.  For moving generated-table
  * producers out of a source file without retyping them; no pattern search, no regex.
  */
+/* FILE --text OLD NEW [OLD NEW ...]: every nonempty OLD must occur exactly
+ * once in the original bytes, including overlapping occurrences. Disjoint
+ * matches are applied in original-position order; NEW is never searched.
+ * Both modes publish by same-directory exclusive temporary file + rename.
+ * This is single-file atomic visibility, not concurrent CAS or a transaction. */
+#pragma unisa use sys.fs
 #pragma unisa use text.text
 #pragma unisa use mem.arena
 #define ES_CAP 1048576
 
 static void es_die(const char *a, const char *b) { fprintf(stderr, "edit-span: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 
+static void es_publish(const char *path, const char *out, long n, int mode) {
+    char tmp[4096]; int fd, bad;
+    if (cx_fmt(tmp, sizeof tmp, "%s.edit-span-XXXXXX", path)) es_die("path too long", path);
+    fd = mkstemp(tmp);
+    if (fd < 0) es_die("cannot create temporary file", path);
+    bad = sy_write_all(fd, out, n);
+    if (!bad) bad = sy_chmod(tmp, mode);
+    if (!bad) bad = sy_fsync(fd);
+    if (sy_close(fd)) bad = 1;
+    if (!bad && sy_rename(tmp, path)) bad = 1;
+    if (bad) { sy_unlink(tmp); es_die("cannot publish", path); }
+}
+
+typedef struct { long at, oldn, newn; const char *newtext; } EsMatch;
+static int es_order(const void *a, const void *b) {
+    const EsMatch *x = a, *y = b;
+    return x->at < y->at ? -1 : x->at > y->at;
+}
+static int es_text(int argc, char **argv, int ar, int mode) {
+    size_t size; char *b, *out; EsMatch *m;
+    long n, count = (argc - 3) / 2, k, j, total, at = 0, o = 0;
+    b = cx_read(argv[1], &size); if (!b) es_die("cannot read", argv[1]);
+    if (size >= (1UL << 30)) es_die("out of memory", 0);
+    n = (long)size; total = n;
+    m = ar_alloc(ar, count * sizeof(EsMatch)); if (!m) es_die("out of memory", 0);
+    for (k = 0; k < count; k++) {
+        const char *old = argv[3 + k * 2]; long found = -1;
+        m[k].oldn = tx_len(old, ES_CAP); m[k].newtext = argv[4 + k * 2];
+        m[k].newn = tx_len(m[k].newtext, ES_CAP);
+        if (m[k].oldn <= 0 || m[k].newn < 0) es_die("empty or oversized OLD/NEW", 0);
+        for (j = 0; j <= n - m[k].oldn; j++) {
+            if (tx_same(b + j, m[k].oldn, old, m[k].oldn)) {
+                if (found >= 0) es_die("OLD occurs more than once", 0);
+                found = j;
+            }
+        }
+        if (found < 0) es_die("OLD is missing", 0);
+        m[k].at = found;
+    }
+    qsort(m, count, sizeof(EsMatch), es_order);
+    for (k = 0; k < count; k++) {
+        if (k && m[k].at < m[k-1].at + m[k-1].oldn) es_die("OLD matches overlap", 0);
+        total -= m[k].oldn;
+    }
+    for (k = 0; k < count; k++) {
+        if (m[k].newn >= (1L << 30) - total) es_die("out of memory", 0);
+        total += m[k].newn;
+    }
+    out = ar_alloc(ar, total + 1); if (!out) es_die("out of memory", 0);
+    for (k = 0; k < count; k++) {
+        while (at < m[k].at) out[o++] = b[at++];
+        for (j = 0; j < m[k].newn; j++) out[o++] = m[k].newtext[j];
+        at += m[k].oldn;
+    }
+    while (at < n) out[o++] = b[at++];
+    es_publish(argv[1], out, o, mode);
+    printf("REPLACED\t%s\ttext %ld\t%ld bytes -> %ld bytes\n", argv[1], count, n, total);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     size_t n, rn;
     char *b, *r, *out, *end;
     long first, last, line = 1, at = 0, s0 = -1, s1 = -1, flen, llen, i, o = 0;
+    sy_stat_t st;
     int ar = ar_new(1L << 30);
-    if (argc != 7) es_die("usage", "FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT");
+    if (argc < 3) es_die("usage", "FILE --text OLD NEW [OLD NEW...] | FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT");
+    if (tx_eqz(argv[2], "--text")) {
+        if (argc < 5 || !(argc & 1)) es_die("usage", "FILE --text OLD NEW [OLD NEW...]");
+    } else if (argc != 7) es_die("usage", "FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT");
+    if (sy_lstat(argv[1], &st) || st.kind != 'f') es_die("not a regular file", argv[1]);
+    if (tx_eqz(argv[2], "--text")) return es_text(argc, argv, ar, st.mode);
     first = strtol(argv[2], &end, 10); if (*end || first < 1) es_die("bad FIRST", argv[2]);
     last = strtol(argv[3], &end, 10); if (*end || last < first) es_die("bad LAST", argv[3]);
     b = cx_read(argv[1], &n); if (!b) es_die("cannot read", argv[1]);
@@ -47,7 +119,7 @@ int main(int argc, char **argv) {
     for (i = 0; i < s0; i++) out[o++] = b[i];
     for (i = 0; i < (long)rn; i++) out[o++] = r[i];
     for (i = s1; i < (long)n; i++) out[o++] = b[i];
-    if (cx_write(argv[1], out, (size_t)o)) es_die("cannot write", argv[1]);
+    es_publish(argv[1], out, o, st.mode);
     printf("REPLACED\t%s\tlines %ld..%ld\t%ld bytes -> %ld bytes\n", argv[1], first, last, s1 - s0, (long)rn);
     return 0;
 }

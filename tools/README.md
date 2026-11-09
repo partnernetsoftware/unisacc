@@ -2,6 +2,26 @@
 
 Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.
 
+## edit-span：断言替换与原子可见边界
+
+```sh
+sh ./unisacc.com tools/edit-span.cx -- FILE FIRST LAST FIRST_TEXT LAST_TEXT REPLACEMENT
+sh ./unisacc.com tools/edit-span.cx -- FILE --text OLD NEW [OLD NEW ...]
+sh ./unisacc.com tools/check-edit-span.cx -- [EDIT_SPAN_BINARY]
+```
+
+旧行模式保留1基闭区间及首末行前缀断言；`REPLACEMENT`是替换文件。`--text`的每个非空`OLD`必须在原始文件字节中恰好出现一次，自重叠出现也计数；各匹配须互不重叠，按原位置顺序一次替换，不在`NEW`里继续搜索。`NEW`可为空，可删除全部内容；UTF-8按字节精确匹配。成功rc0并输出`REPLACED`；参数不成对、空OLD、缺失、重复或重叠匹配rc2且不写原件，诊断不回显OLD内容。仅接受普通文件，拒绝符号链接，保留文件权限。
+
+两模式均使用同目录独占临时文件，完整写入、设置权限、fsync并关闭后rename发布；这是**单文件原子可见性，不是并发CAS，也不是多文件事务**，不提供并发写者冲突检测或目录fsync持久性保证。独立批`check-edit-span`原预算55秒、daily、无材料依赖，以真实文件及子进程退出码检验合同；可选`EDIT_SPAN_BINARY`用于复用已编译子工具。父已观测8.63秒、14项PASS及`CHECK_EDIT_SPAN failed=0`；该历史观测不冒认当前候选或已安装产品资格，本次登记未重跑。
+
+新增源库存只通过既有显式候选入口生成；下列命令由父统一运行，输出目录必须尚不存在，生成后仍须人工审阅，不自动安装。本次未生成、未运行库存：
+
+```sh
+python3 tests/update-tools-compile.py /tmp/omp-cdx2-editspan-text-20261109 /tmp/omp-cdx2-editspan-text-20261109-tools-compile-review
+```
+
+`agentwork/pkg-gaps.tsv`当前缺cc13–15记录，本次不补造、不改动；登记不等于库存或包缺口已闭合。
+
 Darwin 时钟常量以 `exec/facts/clock-targets.tsv` 为唯一事实，
 `tools/clock-targets-gen.cx` 维护 `include/time.h` 的标记块。
 先生成并检查常量，再展平及导出携带头；`tools/check-clock-targets.cx`

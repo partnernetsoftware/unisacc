@@ -1,0 +1,89 @@
+/* From repository root: sh ./unisacc.com tools/check-edit-span.cx -- [EDIT_SPAN_BINARY]
+ * Optional binary avoids rebuilding the child for each case. Real files and child exit status only. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int failed;
+static const char *binary;
+static char file[4096];
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\tedit-span.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int run(char **args) {
+    char *av[32], junk[4096]; int i = 0, k, fd, pid, ex = 0, code = 0, sig = 0;
+    if (binary) av[i++] = (char *)binary;
+    else { av[i++] = "sh"; av[i++] = "./unisacc.com"; av[i++] = "tools/edit-span.cx"; av[i++] = "--"; }
+    for (k = 0; args[k] && i < 31; k++) av[i++] = args[k];
+    if (args[k]) return -1;
+    av[i] = 0;
+    pid = sy_spawn_pipe(av, 0, 0, &fd, 0); if (pid < 0) return -1;
+    while (sy_read(fd, junk, sizeof junk) > 0) {}
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || sig) return -1;
+    return code;
+}
+static int same(const char *p, const char *want) {
+    size_t n; char *b = cx_read(p, &n);
+    return b && tx_same(b, (long)n, want, tx_len(want, 1048576));
+}
+static void seed(const char *s) {
+    if (cx_write(file, s, (size_t)tx_len(s, 1048576)) || sy_chmod(file, 0640)) exit(2);
+}
+static void textcase(const char *name, const char *before, const char *after, int success,
+                     char *old1, char *new1, char *old2, char *new2) {
+    char *args[8]; int rc; sy_stat_t st;
+    args[0] = file; args[1] = "--text"; args[2] = old1; args[3] = new1;
+    args[4] = old2; args[5] = new2; args[6] = 0;
+    seed(before); rc = run(args);
+    ck((success ? rc == 0 : rc == 2) && same(file, after) &&
+       !sy_lstat(file, &st) && st.kind == 'f' && st.mode == 0640, name);
+}
+int main(int argc, char **argv) {
+    char td[4096], replacement[4096], link[4096]; int rc;
+    if (argc > 2) return 2;
+    binary = argc == 2 ? argv[1] : 0;
+    if (cx_fmt(td, sizeof td, "%s/check-edit-span-XXXXXX", sy_env_or("TMPDIR", "/tmp")) ||
+        !mkdtemp(td) || cx_fmt(file, sizeof file, "%s/input", td) ||
+        cx_fmt(replacement, sizeof replacement, "%s/replacement", td) ||
+        cx_fmt(link, sizeof link, "%s/link", td)) return 2;
+    textcase("original-order-and-no-cascade", "alpha beta gamma", "beta delta gamma", 1,
+             "beta", "delta", "alpha", "beta");
+    textcase("utf8-and-delete", "头猫尾\n", "头犬\n", 1, "尾", "", "猫", "犬");
+    textcase("delete-entire-file", "erase", "", 1, "erase", "", 0, 0);
+    textcase("duplicate-refused-unchanged", "one one", "one one", 0, "one", "x", 0, 0);
+    textcase("self-overlapping-duplicate", "aaa", "aaa", 0, "aa", "x", 0, 0);
+    textcase("missing-after-valid-unchanged", "alpha beta", "alpha beta", 0,
+             "alpha", "changed", "absent", "x");
+    textcase("overlap-refused-unchanged", "abcd", "abcd", 0, "abc", "x", "bcd", "y");
+    textcase("same-old-refused", "abcd", "abcd", 0, "ab", "x", "ab", "y");
+    textcase("empty-old-refused", "abc", "abc", 0, "", "x", 0, 0);
+    textcase("adjacent-disjoint", "abcd", "XY", 1, "cd", "Y", "ab", "X");
+    {
+        char *args[] = {file, "--text", "abc", 0};
+        seed("abc"); rc = run(args);
+        ck(rc == 2 && same(file, "abc"), "missing-new-refused-unchanged");
+    }
+    {
+        char *args[] = {file, "2", "3", "first", "last", replacement, 0};
+        const char *before = "keep\nfirst suffix\nlast suffix\nend\n";
+        seed(before);
+        if (cx_write(replacement, "new\n", 4)) return 2;
+        rc = run(args);
+        ck(rc == 0 && same(file, "keep\nnew\nend\n"), "legacy-prefix-compatible");
+        seed(before); args[3] = "wrong"; rc = run(args);
+        ck(rc == 2 && same(file, before), "legacy-assertion-failure-unchanged");
+    }
+    {
+        char *args[] = {link, "--text", "abc", "x", 0};
+        sy_stat_t st; seed("abc");
+        if (sy_symlink(file, link)) return 2;
+        rc = run(args);
+        ck(rc == 2 && same(file, "abc") && !sy_lstat(link, &st) && st.kind == 'l', "symlink-refused");
+    }
+    sy_unlink(link); sy_unlink(replacement); sy_unlink(file); sy_rmdir(td);
+    printf("CHECK_EDIT_SPAN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
