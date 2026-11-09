@@ -166,16 +166,35 @@ static int aggregate(void){
  free(nonce);free(mode);free(states);as_free(&parent);return result;
 }
 static int can_launch(int writer,int active,int writer_active){return active<3&&!writer_active&&(!writer||!active);}
-static int choose_slice(const int *pending,int active,int writer_active,int *drain){
- if(active>=3||writer_active||*drain)return -1;int busy[3]={0},first[3]={-1,-1,-1};for(int i=0;i<nslices;i++){if(slices[i].pid)busy[slices[i].tier]++;if(pending[i]&&first[slices[i].tier]<0)first[slices[i].tier]=i;}int chosen=-1;for(int t=0;t<3;t++)if(first[t]>=0&&(chosen<0||busy[t]<busy[slices[chosen].tier]))chosen=first[t];if(chosen>=0&&!can_launch(slices[chosen].alone,active,writer_active)){*drain=1;return -1;}return chosen;
+typedef struct {int reserved,quota,turn;} s9_schedule;
+static int choose_slice(const int *pending,int active,int writer_active,s9_schedule *q){
+ if(active>=3||writer_active)return -1;
+ if(q->reserved>=0&&!active){int next=q->reserved;q->reserved=-1;q->quota=0;q->turn=(slices[next].tier+1)%3;return next;}
+ if(q->reserved>=0&&!q->quota)return -1;
+ int busy[3]={0},first[3]={-1,-1,-1};
+ for(int i=0;i<nslices;i++)if(slices[i].pid)busy[slices[i].tier]++;
+ /* Each tier's next writer is a fence. Only its preceding independent
+    nonwriters may pass a reservation; never skip a second writer. */
+ for(int t=0;t<3;t++)for(int i=0;i<nslices;i++)if(pending[i]&&slices[i].tier==t){
+  if(q->reserved>=0&&i==q->reserved)continue;
+  if(q->reserved>=0&&slices[i].alone)break;
+  first[t]=i;break;
+ }
+ int chosen=-1;for(int n=0;n<3;n++){int t=(q->turn+n)%3;if(first[t]>=0&&(chosen<0||busy[t]<busy[slices[chosen].tier]))chosen=first[t];}
+ if(chosen<0)return -1;
+ if(!can_launch(slices[chosen].alone,active,writer_active)){
+  q->reserved=chosen;q->quota=3-active;if(q->quota>2)q->quota=2;
+  return choose_slice(pending,active,writer_active,q);
+ }
+ if(q->reserved>=0)q->quota--;
+ q->turn=(slices[chosen].tier+1)%3;return chosen;
 }
 static int step(void){
- freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");int active=0,alone=0,drain=0;
+ freeze_check();load_plan();char p[4400],driver[4400];path(driver,sd,"driver");int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");int active=0,alone=0;s9_schedule queue={-1,0,0};
  for(int i=0;i<nslices;i++)if(running(&slices[i])){close(lock);printf("S9\tPENDING\treason=live-prior-attempt\n");return 3;}
  for(;;){
-  if(!active)drain=0;
   double left=outer_end-(double)as_now()/1e9;
-  if(left>75){int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p);}for(;;){int next=choose_slice(pending,active,alone,&drain);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
+  if(left>75){int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p);}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
     slice_path(p,s,"start");
     s->start=as_now();char session[4400];path(session,sd,s->leaf);int gate[2];if(pipe(gate))fail("start-pipe");
     pid_t pid=fork();if(pid<0)fail("fork");if(!pid){close(lock);close(gate[1]);setpgid(0,0);char go;if(read(gate[0],&go,1)!=1)_exit(2);close(gate[0]);char log[4400];slice_path(log,s,"log");int fd=open(log,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,1)<0||dup2(fd,2)<0)_exit(2);close(fd);char *v[]={driver,"child",sr,sd,session,s->ids,0};execv(driver,v);_exit(2);}
@@ -197,9 +216,44 @@ static int controls(void){
  if(can_launch(1,1,0)||can_launch(0,1,1)||!can_launch(1,0,0)||!can_launch(0,2,0))bad++;
  char p[4400],nonce[66];memset(nonce,'0',64);nonce[64]='\n';nonce[65]=0;path(p,sd,"nonce");save(p,nonce,65);s9_slice x={0};if(cx_fmt(x.leaf,sizeof x.leaf,"%s","attempt"))fail("copy-bound");slice_path(p,&x,"start");if(present(p))bad++;
  as_manifest cm={0};cm.created=1;np_buf identity={0};checker_wire(&cm,"source",nonce,"binary",&identity);if(!checker_matches(&identity,identity.p,identity.n))bad++;for(int field=0;field<9;field++){char saved=sd[strlen(sd)-1];if(field==1)cm.ident.candidate[0]='x';if(field==2)nonce[0]='1';if(field==3)cm.created=2;if(field==5)sr[0]='x';if(field==6)sd[strlen(sd)-1]=saved=='x'?'y':'x';if(field==7)cm.ident.harness[0]='x';if(field==8)cm.ident.candidate_kind[0]='x';np_buf changed={0};checker_wire(&cm,field==0?"other":"source",nonce,field==4?"other":"binary",&changed);if(checker_matches(&identity,changed.p,changed.n))bad++;free(changed.p);cm.ident.candidate[0]=0;nonce[0]='0';cm.created=1;sr[0]=0;sd[strlen(sd)-1]=saved;cm.ident.harness[0]=0;cm.ident.candidate_kind[0]=0;}free(identity.p);printf("S9_CONTROL\tchecker-copy-binds-source-candidate-nonce-run-created-binary\tchecked=1\n");
- for(int i=0;i<reg.nb;i++){tiers[i]=0;exclusive[i]=0;selected[i]=1;}make_plan();if(nslices!=3)bad++;int one_seen[15]={0},pending[S9_MAX]={0},drain=0;for(int k=0;k<nslices;k++){pending[k]=1;for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,ids[i]))one_seen[i]++;}for(int i=0;i<reg.nb;i++)if(one_seen[i]!=1)bad++;for(int active=0;active<3;active++){int k=choose_slice(pending,active,0,&drain);if(k<0){bad++;break;}pending[k]=0;slices[k].pid=1;}if(choose_slice(pending,3,0,&drain)>=0)bad++;printf("S9_CONTROL\tsingle-tier-three-slots\tchecked=1\n");
- for(int i=0;i<reg.nb;i++)tiers[i]=i%3;make_plan();int fair_seen[15]={0},tier_seen[3]={0};drain=0;for(int k=0;k<S9_MAX;k++)pending[k]=k<nslices;for(int active=0;active<3;active++){int k=choose_slice(pending,active,0,&drain);if(k<0){bad++;break;}if(tier_seen[slices[k].tier]++)bad++;pending[k]=0;slices[k].pid=1;for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,ids[i]))fair_seen[i]++;}for(int t=0;t<3;t++)if(tier_seen[t]!=1)bad++;for(int i=0;i<reg.nb;i++)if(fair_seen[i]!=1)bad++;if(choose_slice(pending,0,0,&drain)>=0)bad++;printf("S9_CONTROL\tthree-tier-fair-no-duplicates-no-loss\tchecked=1\n");
- for(int k=0;k<nslices;k++)slices[k].pid=0;pending[0]=1;slices[0].alone=1;drain=0;if(choose_slice(pending,1,0,&drain)>=0||!drain)bad++;drain=0;if(choose_slice(pending,0,1,&drain)>=0)bad++;if(choose_slice(pending,0,0,&drain)!=0)bad++;
+ for(int i=0;i<reg.nb;i++){tiers[i]=0;exclusive[i]=0;selected[i]=1;}make_plan();if(nslices!=3)bad++;int one_seen[15]={0},pending[S9_MAX]={0};s9_schedule queue={-1,0,0};for(int k=0;k<nslices;k++){pending[k]=1;for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,ids[i]))one_seen[i]++;}for(int i=0;i<reg.nb;i++)if(one_seen[i]!=1)bad++;for(int active=0;active<3;active++){int k=choose_slice(pending,active,0,&queue);if(k<0){bad++;break;}pending[k]=0;slices[k].pid=1;}if(choose_slice(pending,3,0,&queue)>=0)bad++;printf("S9_CONTROL\tsingle-tier-three-slots\tchecked=1\n");
+ for(int i=0;i<reg.nb;i++)tiers[i]=i%3;make_plan();int fair_seen[15]={0},tier_seen[3]={0};queue=(s9_schedule){-1,0,0};for(int k=0;k<S9_MAX;k++)pending[k]=k<nslices;for(int active=0;active<3;active++){int k=choose_slice(pending,active,0,&queue);if(k<0){bad++;break;}if(tier_seen[slices[k].tier]++)bad++;pending[k]=0;slices[k].pid=1;for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,ids[i]))fair_seen[i]++;}for(int t=0;t<3;t++)if(tier_seen[t]!=1)bad++;for(int i=0;i<reg.nb;i++)if(fair_seen[i]!=1)bad++;if(choose_slice(pending,0,0,&queue)>=0)bad++;printf("S9_CONTROL\tthree-tier-fair-no-duplicates-no-loss\tchecked=1\n");
+ for(int k=0;k<nslices;k++)slices[k].pid=0;pending[0]=1;slices[0].alone=1;queue=(s9_schedule){-1,0,0};if(choose_slice(pending,1,0,&queue)>=0||queue.reserved!=0)bad++;if(choose_slice(pending,0,1,&queue)>=0)bad++;if(choose_slice(pending,0,0,&queue)!=0)bad++;
+ /* Drive the same chooser as step, with completions between admissions.
+    t0 has the blocked writer and a second writer fence; t1/t2 can fill
+    the two empty slots once, but completion cannot replenish that quota. */
+ nslices=9;for(int k=0;k<nslices;k++){memset(&slices[k],0,sizeof slices[k]);pending[k]=1;slices[k].tier=k<4?0:k<7?1:2;}
+ slices[0].alone=1;slices[2].alone=1;slices[5].alone=1;
+ pending[8]=0;slices[8].pid=1;queue=(s9_schedule){-1,0,0};
+ int first_fill=choose_slice(pending,1,0,&queue);
+ if(first_fill!=1||queue.reserved!=0||queue.quota!=1)bad++;
+ if(first_fill>=0){pending[first_fill]=0;slices[first_fill].pid=1;}
+ int second_fill=choose_slice(pending,2,0,&queue);
+ if(second_fill!=4||queue.reserved!=0||queue.quota!=0)bad++;
+ if(second_fill>=0){pending[second_fill]=0;slices[second_fill].pid=1;}
+ if(choose_slice(pending,3,0,&queue)>=0)bad++;
+ if(first_fill>=0)slices[first_fill].pid=0;
+ if(choose_slice(pending,2,0,&queue)>=0||queue.quota!=0)bad++;
+ if(second_fill>=0)slices[second_fill].pid=0;
+ if(choose_slice(pending,1,0,&queue)>=0)bad++;
+ slices[8].pid=0;int reserved=choose_slice(pending,0,0,&queue);
+ if(reserved!=0||queue.reserved!=-1)bad++;
+ if(reserved>=0){pending[reserved]=0;slices[reserved].pid=1;}
+ if(choose_slice(pending,1,1,&queue)>=0)bad++;
+ printf("S9_TIMELINE\tbefore\tactive=1 writer=blocked empty=2 -> drain -> active=0 writer\n");
+ printf("S9_TIMELINE\tafter\tactive=1 reserve=0 quota=2 -> fill=%d,%d quota=0 -> completion-no-refill -> drain -> writer=%d\n",first_fill,second_fill,reserved);
+ printf("S9_CONTROL\tbounded-backfill-fixed-quota-drain-reserved-writer-first\tchecked=1\n");
+ /* Consume every remaining slice, checking writer fences, absolute global
+    exclusion and exactly-once coverage across all three tiers. */
+ int consumed[9]={0};consumed[8]=1;if(first_fill>=0)consumed[first_fill]++;if(second_fill>=0)consumed[second_fill]++;if(reserved>=0){consumed[reserved]++;slices[reserved].pid=0;}
+ for(int round=0;round<18;round++){
+  int live=0,writer=0;for(int k=0;k<nslices;k++)if(slices[k].pid){live++;writer+=slices[k].alone;}
+  int next=choose_slice(pending,live,writer,&queue);
+  if(next>=0){if(!pending[next]||consumed[next]++||!can_launch(slices[next].alone,live,writer))bad++;pending[next]=0;slices[next].pid=1;}
+  else {int finished=-1;for(int k=0;k<nslices;k++)if(slices[k].pid){finished=k;break;}if(finished<0)break;slices[finished].pid=0;}
+ }
+ for(int k=0;k<nslices;k++)if(consumed[k]!=1||pending[k]||slices[k].pid)bad++;
+ printf("S9_CONTROL\tbackfill-cross-tier-fences-global-exclusive-no-duplicates-no-loss\tchecked=1\n");
  char *tier_args[]={"driver","init","root","run","-","--tier","commit"};select_inputs(7,tier_args);for(int i=0;i<reg.nb;i++)if(selected[i]!=(tiers[i]==0))bad++;make_plan();for(int k=0;k<nslices;k++)if(slices[k].tier!=0)bad++;printf("S9_CONTROL\tcommit-selection-only\tchecked=1\n");
  const char *other_platforms[]={"lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64","all-six"};if(!as_wave_platform_allowed("lnx/x86_64"))bad++;for(int i=0;i<6;i++)if(as_wave_platform_allowed(other_platforms[i]))bad++;
  reg.b[3].platform="osx/arm64";reg.b[6].platform="win/x86_64";reg.b[9].platform="lnx/arm64";select_inputs(7,tier_args);for(int i=0;i<reg.nb;i++)if(selected[i]!=(i==0||i==12))bad++;make_plan();int scoped_seen[15]={0};for(int k=0;k<nslices;k++)for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,ids[i]))scoped_seen[i]++;for(int i=0;i<reg.nb;i++)if(scoped_seen[i]!=(i==0||i==12))bad++;as_state failed={0};failed.attempts=1;failed.last='F';failed.fail=1;if(!selected[0]||!commit_member(0)||!state_bad(&failed))bad++;printf("S9_CONTROL\tcommit-host-scope-no-loss-no-fail-filter\tchecked=1\n");

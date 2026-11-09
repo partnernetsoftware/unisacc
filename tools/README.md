@@ -1186,20 +1186,24 @@ sh ./unisacc.com tools/integrate-patch.cx -- --resume ~/unisacc-integration
 
 ```sh
 tools/bound 55 sh ./unisacc.com tools/s9-shards.cx -o out/s9-shards
-out/s9-shards init . out/s9-run - --tier commit
-out/s9-shards prepare . out/s9-run checker
-out/s9-shards prepare . out/s9-run executor-all-waves
-out/s9-shards prepare . out/s9-run executor-run-batch
-out/s9-shards prepare . out/s9-run executor
-out/s9-shards prepare . out/s9-run driver
-out/s9-shards prepare . out/s9-run selection
-out/s9-run/driver step . out/s9-run
-out/s9-run/driver aggregate . out/s9-run
+out/s9-shards init ROOT RUN - --tier commit
+out/s9-shards prepare ROOT RUN checker
+out/s9-shards prepare ROOT RUN executor-all-waves
+out/s9-shards prepare ROOT RUN executor-run-batch
+out/s9-shards prepare ROOT RUN executor
+out/s9-shards prepare ROOT RUN driver
+out/s9-shards prepare ROOT RUN selection
+RUN/driver step ROOT RUN
+RUN/driver aggregate ROOT RUN
 ```
+
+`ROOT`、`RUN` 是参数占位，须在运行时替换为规范化绝对路径；`.` 会被 canonical-root 闸拒绝，不能照旧示例直接传入。
 
 `init ROOT NEW_RUN MAP|-` 要求新目录；需材料的映射批次另逐项执行 `out/s9-shards prepare ROOT RUN material NAME`。checker及 native executor在同 RUN 按当前身份构造、认证并封存，不能复制其他 RUN 的工具、材料收据或 PASS 结果充数。init/prepare由原生监督器分相位；step/aggregate使用 RUN 内 driver。原 batch 55 秒及 native 整 step 300 秒不变，不能用扩大的 `tools/bound` 参数代替监督器；bound接口仅接受1..60秒。PENDING返回3，不是PASS；中断未封存保持UNKNOWN，不静默重跑。
 
 并发上限15 slots，三档共享总量；writerexclusive须跨commit/daily/release排空并独占，不能只在本档互斥。source/tree/SID、输入和材料在执行前后重新观察并核对，不缓存内容摘要。工作树账本例外仅为 `agentwork/ledger.tsv`、`agentwork/ledger/` 及精确 namespace 规则；不是忽略整个 `agentwork/`，items、注册表、选择表与其他测试输入仍受闸约束。
+
+调度维持3个slice、每slice最多5个batch。首个被活动nonwriter阻挡的writer获得固定预约；仅按预约时空槽数一次回填最多2个独立nonwriter，不补充耗尽的quota，不跨过各档下一writer。quota耗尽后强制drain，活动清零时预约writer优先；无预约时按各档忙槽数择最少者，同值轮转。原75秒准入余量、batch预算及整step监督限额不变。真实运行时间线与逻辑planner夹具分开取证；writer独占期间保留的空槽不是可消除的HOL浪费。
 
 ### wt_diff 的平方级证据与保序修复
 
