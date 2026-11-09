@@ -508,3 +508,7 @@ OSX-SIGN-ROSETTA当前交接结论：只读syspolicyd日志11:29/11:38对团队L
 OSX签后重包runner交接：用户要完整自举命令写research/c48-osx-sign-rosetta/repack-cmd.md；完整checkout冻结f099并把核SHA的草稿bdd APE放runner根unisacc.com，因release-ape内层固定sh ./unisacc.com再运行ape-pack。需要6裸片+完整footer P4；现draft缺Winx64/Linux2三辅助原裸片，将按既有完整SHA补充(不改5角色成员/pins)。不可逆PE资源回注不能把从APE剥出的带.rsrc Win片直接再当pack输入。固定首签四bytes回放应5e11；新的timestamp签名原字节变，新APE SHA必须实算，不硬码历史输出。
 
 OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.md三bash代码块经CX提取，在独立完整f099检出/草稿bdd根bootstrap下回放；step1同draft5输入远端重下载SHA全OK、step2实际0输出精确5e110594…，四签后源与原输入前后SHA均同、receipt输出SHA核同。补充Winx64/Linux2三辅助资产上传actual0并远端digest/下载核同，不改原5members/pins。文档给DMG接线并区分历史5e11回放与未来timestamp新SHA，不改cc工作流。
+
+0.0.48.1 macOS发行附件裁定：cc确认run42561596269完成签→重包→DMG→公证Accepted→staple，本机Gatekeeper/ARM及Rosetta -run7与热0.22s验收通过。公开0.0.48.1时必须附该run的macos-stapled-dmg内最终DMG，并明确Intel实机/macOS13未测。本车道先取artifact核staple后完整SHA、验证签名/票据，将同字节DMG及独立SHA附件准备到现0.0.48.1草稿，发布说明写入待发布文案；不据本通知提前公开/改Latest，不改cc三签名路径。签后APE身份与原未签bdd42/0继续分账。
+
+0.0.48.1 macOS附件已就绪：从run42561596269/macos-stapled-dmg下载并核post-staple DMG6e25e7c9f9efec717c1a0cf33bc7a35ad8c2bfccc2a0b2ab9e807ff2b40f0cc0/5475910B，stapler validate0、Gatekeeper accepted(Notarized Developer ID)。以unisacc-0.0.48.1-macos.dmg及独立sha256资产附到现v0.0.48.1-osx-launch-rc1草稿，上传真实0且远端重新下载SHA核同。发布说明plans/release-notes-0.0.48.1.md与release/macos-0.0.48.1.tsv固定run/DMG/内嵌签后APE988a528d…身份，明确Intel实机/macOS13未测，原bdd未签42/0不迁用。公开仍待按原发布流程执行，不修改Latest/cc三路径。
