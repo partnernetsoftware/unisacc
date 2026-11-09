@@ -26,3 +26,5 @@
 新tag使用v0.0.48-osx-launch-rc1，draft=true、prerelease=false。七资产由release-layout构造并严格核验；pkg.bin须保留UNIPKG1 footer，原完整SHAfffa2311…；winARM为41719a8a…不变。新paired record绑定新APE字节、当前SID、wrapper构造提交；原record中ce291旧源摘要不复制给新身份。源码测试提交、wrapper构造提交和原slice来源分账。
 
 新同候选六目标CI必须绑定新APE SHA和精确测试提交，不能沿用559705的42/0。CI未实际完成前仅PREPARED/LOCAL_CHECKED。本轮不安装本机根、不改Latest、不签名或提交公证。若候选失败，保留草稿与证据，修复用新冻结身份；必要时`gh release delete v0.0.48-osx-launch-rc1 --cleanup-tag`撤回本次草稿，原v0.0.48资产保留。
+
+执行进展：独立草稿已实际创建并上传七资产；唯一新候选pins见`release/candidate-osx-launch.tsv`。精确测试提交3da2b3b1df6f4ec05a03bae48b51a045969d1b24，wrapper构造提交6318a0491，原片来源559705。新CI为42551819720（https://github.com/partnernetsoftware/unisacc/actions/runs/42551819720），派发及fetch已实际成功，资格尚在途。草稿全部七资产重新下载后严格layout校验PASS；完整既有readback入口正在独立新目录运行，其退出后再记结果。
