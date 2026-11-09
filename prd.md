@@ -467,3 +467,9 @@ OSX-LAUNCH-SLOW能力入口：`tools/osx-launch-profile.cx APE arm64|x86_64`显�
 OSX-LAUNCH-SLOW最终wrapper开发冻结07a90387…、候选01b16ae0…：热合一uname并仅缺目录才mkdir，ARM12.5/253.5ms、Rosetta48/512.5ms；后者run仍FAIL，旧f069 Rosetta同测405.5ms，裸c48 slice388.5ms。阈值不放宽，未发布或授QUALIFIED。测量check15/0及13棘轮13/13；工具库存由现git index完整重算，核补已有cache-retain/check、toolselfpath、precommit-freeze遗漏并剔除误列tests路径，现651源/82分片，明确只登记未全编。下一步查r7具体输入/运行相位并推进新候选CI。
 
 OSX-LAUNCH-SLOW宿主分账：Rosetta两批是在ARM宿主强制arch x86_64的跨架构探针，platform须标osx/arm64；此前误标osx/x86_64，被run-batch既有宿主门拒绝，原4份REFUSE日志保留，未改宿主门或把拒绝当功能失败。Terminal.app责任应用已有Developer Tools豁免，不改系统设置；同01b16ae0在该上下文x64独立10次中位48/246ms过门，非豁免Codex上下文run512.5ms失败单列，根因另有既有-run临时程序新inode；源码runcache也只启用lnx/x64。正式ARM批在Terminal已15/101.5ms PASS，配对接口15/0、cache ARM45/0；修正platform后再跑Rosetta正式批，不迁原独立结果。
+
+OSX-LAUNCH-SLOW完成审计补漏：01b16候选CI42551819720已全六目标成功，但热shell每次创建lease而仅cold清理，会在长期热调用后积累死lease触4096扫描预算，故不是最终交付。修tools/cache-retain新增轻量--touch全SHA模式，复用同inode但不digest MB载荷，严格marker/root/lock/parentPID并清本tool全部dead lease、保留active/EPERM、更新recency和新lease；full mode仍cold做完整摘要/四载荷清理。健康新缓存不积累；既有超预算目录不宣称自动恢复，保留隔离fallback。双manager将新构造，必须新候选SHA及新CI，不迁01b16绿。
+
+OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；本车道负责version事实/配套站点、热lease维护、固定四Mac成员与重包接口，cc独占.github/workflows/macos-sign.yml、tools/macos-signing.cx、plans/macos-signing.md，本车道不改。草稿附members.tsv五角色及四Mac独立资产，最终tag/candidateSHA/member清单SHA写release/candidate-osx-launch.tsv并交cc触真签。版本必须实际新源构造，不把0.0.48 wrapper候选冒称0.0.48.1；签后四成员显式替换重包保留字节，新签后身份重新资格，不沿用未签CI。旧01b16已六目标CI成功但lease缺口/版本不满足最终裁定，仍仅历史对照。
+
+OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到release/candidate-osx-launch-rc1.tsv，当前release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。

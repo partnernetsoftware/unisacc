@@ -2,17 +2,38 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.sha
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
 static int ok,bad;static char dir[4096],exe[4096];
+static char childout[8192];
+static int bounded(char **av,int seconds){np_result r={0};char why[1024];int t=np_run(av,0,0,seconds,&r,why,sizeof why);size_t n=r.outn;if(n>=sizeof childout)n=sizeof childout-1;if(n&&mm_copy(childout,sizeof childout,r.out,n))exit(2);childout[n]=0;int rc=t||r.residue?-1:r.rc;np_free(&r);return rc;}
 static void ck(int yes,const char *s){printf("%s\t%s\n",yes?"PASS":"FAIL",s);if(yes)ok++;else bad++;}
 static void path(char *o,const char *s){if(cx_fmt(o,4400,"%s/%s",dir,s))exit(2);}
 static void payload(const char *body,char key[17]){char h[65],p[4400],s[256];cx_sha256_hex(body,strlen(body),h);memcpy(key,h,16);key[16]=0;if(cx_fmt(s,sizeof s,"probe-%s",key))exit(2);path(p,s);if(cx_write(p,body,strlen(body)))exit(2);chmod(p,0700);}
-static int run(const char *k,const char *keep){char pid[32],out[1024];if(cx_fmt(pid,sizeof pid,"%ld",(long)getpid()))exit(2);char *av[]={exe,dir,"probe",(char*)k,(char*)keep,pid,0};int cut;return sy_run(av,out,sizeof out,&cut);}
+static int run(const char *k,const char *keep){char pid[32];if(cx_fmt(pid,sizeof pid,"%ld",(long)getpid()))exit(2);char *av[]={exe,dir,"probe",(char*)k,(char*)keep,pid,0};return bounded(av,5);}
 static void unlease(const char *k){char s[256],p[4400];if(cx_fmt(s,sizeof s,"probe.lease-v1-%s-%ld",k,(long)getpid()))exit(2);path(p,s);unlink(p);}
 static int exists(const char *k){char s[256],p[4400];if(cx_fmt(s,sizeof s,"probe-%s",k))exit(2);path(p,s);struct stat st;return lstat(p,&st)==0;}
-static int mode(const char *k,int dry,const char *list){char pid[32],out[4096];if(cx_fmt(pid,sizeof pid,"%ld",(long)getpid()))exit(2);char *av[13];int n=0;av[n++]=exe;if(dry)av[n++]="--dry-run";if(list){av[n++]="--adopt-legacy";av[n++]=(char*)list;}av[n++]=dir;av[n++]="probe";av[n++]=(char*)k;av[n++]="1";av[n++]=pid;av[n]=0;int cut;return sy_run(av,out,sizeof out,&cut);}
+static int mode(const char *k,int dry,const char *list){char pid[32];if(cx_fmt(pid,sizeof pid,"%ld",(long)getpid()))exit(2);char *av[13];int n=0;av[n++]=exe;if(dry)av[n++]="--dry-run";if(list){av[n++]="--adopt-legacy";av[n++]=(char*)list;}av[n++]=dir;av[n++]="probe";av[n++]=(char*)k;av[n++]="1";av[n++]=pid;av[n]=0;return bounded(av,5);}
+static int touch(const char *k,const char *sha){char pid[32];if(cx_fmt(pid,sizeof pid,"%ld",(long)getpid()))exit(2);char *av[]={exe,"--touch",(char*)sha,dir,"probe",(char*)k,"1",pid,0};return bounded(av,5);}
+static int leasecount(void){DIR *d=opendir(dir);if(!d)exit(2);int n=0;struct dirent *e;while((e=readdir(d)))if(!strncmp(e->d_name,"probe.lease-v1-",15))n++;closedir(d);return n;}
+static void deadlease(const char *k,char p[4400]){pid_t child=fork();if(child<0)exit(2);if(!child)_exit(0);int status;if(waitpid(child,&status,0)!=child)exit(2);char name[256];if(cx_fmt(name,sizeof name,"probe.lease-v1-%s-%ld",k,(long)child))exit(2);path(p,name);if(cx_write(p,"",0)||chmod(p,0600))exit(2);}
+static void hotchecks(const char *k){
+ char sha[65],wrong[65],mark[4400],backup[4400],name[256],dead[4400],active[4400];cx_sha256_hex("D",1,sha);
+ ck(touch(k,sha)==0&&strstr(childout,"CACHE_TOUCH\tsha="),"touch-current-full-sha");
+ memcpy(wrong,sha,65);wrong[63]=wrong[63]=='0'?'1':'0';ck(touch(k,wrong)==75,"touch-reject-full-sha-mismatch");
+ wrong[0]=wrong[0]=='0'?'1':'0';ck(touch(k,wrong)==2&&touch(k,"bad")==2,"touch-reject-prefix-and-sha-syntax");
+ if(cx_fmt(name,sizeof name,"probe.managed-v1-%s",k))exit(2);path(mark,name);path(backup,"saved.marker");if(rename(mark,backup))exit(2);ck(touch(k,sha)==75,"touch-reject-missing-marker");if(rename(backup,mark))exit(2);
+ if(rename(mark,backup))exit(2);char v1[100];if(cx_fmt(v1,sizeof v1,"APE_CACHE_V1\tsha=%s\n",sha)||cx_write(mark,v1,strlen(v1)))exit(2);ck(touch(k,sha)==75,"touch-reject-v1-marker");if(unlink(mark)||rename(backup,mark))exit(2);
+ deadlease(k,dead);ck(touch(k,sha)==0&&access(dead,F_OK)!=0,"touch-cleans-dead-lease");
+ if(cx_fmt(name,sizeof name,"probe.lease-v1-%s-%ld",k,(long)getpid()))exit(2);path(active,name);ck(access(active,F_OK)==0&&touch(k,sha)==0&&access(active,F_OK)==0,"touch-preserves-alive-lease");
+ int before=leasecount(),good=1;for(int i=0;i<3;i++){deadlease(k,dead);if(touch(k,sha)||access(dead,F_OK)==0||leasecount()!=before)good=0;}ck(good,"repeated-touch-no-dead-lease-accumulation");
+ good=1;for(int i=0;i<4;i++){pid_t worker=fork();if(worker<0)exit(2);if(!worker)_exit(touch(k,sha)?1:0);int status;if(waitpid(worker,&status,0)!=worker||!WIFEXITED(status)||WEXITSTATUS(status)||leasecount()!=before+1)good=0;}if(touch(k,sha)||leasecount()!=before)good=0;ck(good,"independent-launcher-pids-no-lease-accumulation");
+ if(cx_fmt(name,sizeof name,"probe.lease-v1-%s-0",k))exit(2);path(dead,name);if(cx_write(dead,"",0))exit(2);ck(touch(k,sha)==75,"touch-reject-pid-zero");if(unlink(dead))exit(2);
+ char data[4400];if(cx_fmt(name,sizeof name,"probe-%s",k))exit(2);path(data,name);if(unlink(data)||symlink("/dev/null",data))exit(2);ck(touch(k,sha)==75,"touch-reject-payload-symlink");
+}
 static void extra(const char *k){char lock[4400],list[4400],legacy[4400],mark[4400],body[4800];path(lock,".cache-retain.lock");unlink(lock);path(list,"active.tsv");path(legacy,"probe-0000000000000000");path(mark,"probe.managed-v1-0000000000000000");struct stat before,after;stat(legacy,&before);ck(mode(k,1,0)==0&&stat(legacy,&after)==0&&before.st_mtime==after.st_mtime&&access(mark,F_OK)!=0,"dryrun-no-marker-or-mtime");
  if(cx_fmt(body,sizeof body,"CACHE_ACTIVE_V1\t%s\nprobe-0000000000000000\t%ld\n",dir,(long)getpid()))exit(2);cx_write(list,body,strlen(body));ck(mode(k,0,list)==0&&access(legacy,F_OK)==0&&access(mark,F_OK)==0,"adopt-compressed-key-active");char activelease[4400],name[256];if(cx_fmt(name,sizeof name,"probe.lease-v1-0000000000000000-%ld",(long)getpid()))exit(2);path(activelease,name);ck(access(activelease,F_OK)==0,"adopt-real-active-pid-lease");
  unlink(activelease);if(cx_fmt(body,sizeof body,"CACHE_ACTIVE_V1\t%s\n",dir))exit(2);cx_write(list,body,strlen(body));ck(mode(k,0,list)==0&&access(legacy,F_OK)!=0,"adopt-legacy-under-same-N");cx_write(list,"CACHE_ACTIVE_V1\t/wrong\n",23);ck(mode(k,0,list)==75,"reject-active-list-directory");int fd=open(lock,O_RDWR);sy_flock(fd,2|4);ck(run(k,"1")==75,"lock-contention-fallback");sy_flock(fd,8);close(fd);}
 int main(void){char temp[4096];if(cx_fmt(temp,sizeof temp,"%s/cache-retain.XXXXXXXX",getenv("TMPDIR")?getenv("TMPDIR"):"/tmp"))exit(2);if(!mkdtemp(temp)||!realpath(temp,dir))return 2;if(cx_fmt(exe,sizeof exe,"%s/helper",dir))exit(2);char log[2048];int cut;char *build[]={"./tools/bound","35","sh","./unisacc.com","tools/cache-retain.cx","-o",exe,0};int rc=sy_run(build,log,sizeof log,&cut);ck(rc==0,"compile-current-helper");if(rc)return 1;
  char a[17],b[17],c[17],d[17];payload("A",a);ck(run(a,"2")==0,"register-a");unlease(a);payload("B",b);ck(run(b,"2")==0,"register-b");unlease(b);payload("C",c);ck(run(c,"2")==0,"retain-two");ck(exists(c)&&exists(a)+exists(b)==1,"current-and-one-recent");payload("D",d);ck(run(d,"1")==0&&exists(c)&&exists(d),"active-lease-extra");
- char p[4400];path(p,"probe-0000000000000000");cx_write(p,"legacy",6);ck(run(d,"1")==0&&access(p,F_OK)==0,"legacy-preserved");ck(run(d,"0")!=0,"reject-keep-zero");chmod(dir,0755);ck(run(d,"2")==75,"reject-public-directory");chmod(dir,0700);char lockpath[4400];path(lockpath,".cache-retain.lock");unlink(lockpath);symlink("/dev/null",lockpath);ck(run(d,"2")==75,"reject-lock-symlink");extra(d);printf("CACHE_RETAIN_CHECK\tok=%d\tfailed=%d\n",ok,bad);return bad?1:0;}
+ char p[4400];path(p,"probe-0000000000000000");cx_write(p,"legacy",6);ck(run(d,"1")==0&&access(p,F_OK)==0,"legacy-preserved");ck(run(d,"0")!=0,"reject-keep-zero");chmod(dir,0755);ck(run(d,"2")==75,"reject-public-directory");chmod(dir,0700);char lockpath[4400];path(lockpath,".cache-retain.lock");unlink(lockpath);symlink("/dev/null",lockpath);ck(run(d,"2")==75,"reject-lock-symlink");extra(d);hotchecks(d);printf("CACHE_RETAIN_CHECK\tok=%d\tfailed=%d\n",ok,bad);return bad?1:0;}

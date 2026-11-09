@@ -1,0 +1,35 @@
+/* Independent binary fixtures: repacking preserves bytes, never proves signing. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+static char base[4096],exe[4400],f[10][4400],out[4400];
+static int checks,bad;
+static long deadline;
+static void die(const char *s){fprintf(stderr,"check-release-ape: %s\n",s);exit(2);}
+static void ck(int yes,const char *s){printf("%s\t%s\n",yes?"PASS":"FAIL",s);checks++;if(!yes)bad++;}
+static void path(char *p,const char *n){if(cx_fmt(p,4400,"%s/%s",base,n))die("path");}
+static void put(const char *p,const void *b,long n){if(cx_write(p,b,n))die("write fixture");}
+static void w32(unsigned char *p,unsigned long n){for(int i=0;i<4;i++)p[i]=n>>(i*8);}
+static np_result run(char **v){np_result r={0};char why[1024];long left=deadline-sy_now_ms();int sec=left/1000;if(sec>40)sec=40;if(sec<1)die("deadline");if(np_run(v,0,0,sec,&r,why,sizeof why)){fprintf(stderr,"%s\n",why);die("transport");}return r;}
+static void macho(const char *p,unsigned long cpu,int tag){unsigned char b[80]={0};w32(b,0xfeedfacfUL);w32(b+4,cpu);w32(b+8,3);w32(b+12,2);w32(b+16,1);w32(b+20,16);w32(b+32,0x1d);w32(b+36,16);w32(b+40,48);w32(b+44,32);for(int i=48;i<80;i++)b[i]=tag+i;put(p,b,sizeof b);}
+static int pack(int six,int replace,int mode){char name[64];if(cx_fmt(name,sizeof name,"pack-%d-%d-%d",six,replace,mode))die("name");path(out,name);char *v[28];int n=0;v[n++]=exe;v[n++]="pack";v[n++]="--cache-manager-osx";v[n++]=f[6];v[n++]=f[7];if(replace){v[n++]="--osx-slices";v[n++]=mode==1?f[9]:mode==2?"/definitely-missing-release-ape-slice":f[4];v[n++]=f[5];}v[n++]=out;v[n++]=f[0];v[n++]=f[1];v[n++]=f[2];v[n++]=f[3];v[n++]=f[8];v[n++]=f[9];if(six)v[n++]=f[2];v[n]=0;np_result r=run(v);int rc=r.rc;if(rc&&mode==0)fprintf(stderr,"%s\n%s",r.out?r.out:"",r.err?r.err:"");np_free(&r);return rc;}
+static int member(const char *ape,const char *line,const char *expected,int manager){size_t an,en;char *a=cx_read(ape,&an),*e=cx_read(expected,&en);if(!a||!e)die("read member");char *s=0;size_t ln=strlen(line);for(size_t i=0;i+ln<=an;i++)if(!memcmp(a+i,line,ln)){s=a+i;break;}long o,n,h,z;char key[32];if(!s||sscanf(s+ln," o=%ld n=%ld k=%16s h=%ld z=%ld",&o,&n,key,&h,&z)!=5)die("dispatcher");if(manager){o=h;n=z;}if(o<1||n<1||o-1>(long)an||n>(long)an-o+1)die("member extent");char p[4400];path(p,"member.gz");put(p,a+o-1,n);char *v[]={"gzip","-dc",p,0};np_result r=run(v);int yes=!r.rc&&r.outn==en&&!memcmp(r.out,e,en);np_free(&r);free(a);free(e);return yes;}
+static void digest(const char *p,char h[65]){size_t n;char *b=cx_read(p,&n);if(!b)die("digest");cx_sha256_hex(b,n,h);free(b);}
+int main(void){deadline=sy_now_ms()+52000;char pattern[]="/tmp/check-release-ape-XXXXXX";if(!mkdtemp(pattern)||!realpath(pattern,base))die("private root");path(exe,"release-ape");char *build[]={"sh","./unisacc.com","tools/release-ape.cx","-o",exe,0};np_result r=run(build);ck(r.rc==0,"compile current release packer once");if(r.rc){fprintf(stderr,"%s",r.err?r.err:"");return 1;}np_free(&r);
+for(int i=0;i<10;i++){char name[30];if(cx_fmt(name,sizeof name,"input-%d",i))die("name");path(f[i],name);}
+unsigned char p4[22]={'P',' ','4',' ','\n',0};if(mm_copy(p4+6,16,"UNIPKG1\n",8))die("copy footer");p4[14]=6;put(f[0],p4,sizeof p4);
+unsigned char pe[1536]={0};pe[0]='M';pe[1]='Z';w32(pe+60,64);pe[64]='P';pe[65]='E';pe[68]=0x64;pe[69]=0x86;pe[70]=1;pe[84]=240;pe[88]=0x0b;pe[89]=2;w32(pe+120,4096);w32(pe+124,512);w32(pe+144,8192);w32(pe+148,1024);w32(pe+196,16);if(mm_copy(pe+328,sizeof pe-328,".text",5))die("section");w32(pe+336,16);w32(pe+340,4096);w32(pe+344,512);w32(pe+348,1024);put(f[1],pe,sizeof pe);put(f[2],"linux-one",9);put(f[3],"linux-two",9);
+macho(f[4],0x1000007UL,41);macho(f[5],0x100000cUL,42);macho(f[6],0x1000007UL,43);macho(f[7],0x100000cUL,44);macho(f[8],0x1000007UL,1);macho(f[9],0x100000cUL,2);
+char before[10][65];for(int i=0;i<10;i++)digest(f[i],before[i]);
+ck(pack(0,1,0)==0,"five-slice explicit replacement pack succeeds");char ape[4400],rec[4400];if(cx_fmt(ape,sizeof ape,"%s/unisacc-next.com",out)||cx_fmt(rec,sizeof rec,"%s/ape-receipt.txt",out))die("output path");
+ck(member(ape,"Darwinx86_64)",f[4],0),"replacement x64 bytes including opaque signature suffix survive");ck(member(ape,"Darwinarm64)",f[5],0),"replacement ARM bytes including opaque signature suffix survive");ck(member(ape,"Darwinx86_64)",f[6],1)&&member(ape,"Darwinarm64)",f[7],1),"explicit managers survive without reconstruction");
+size_t rn;char *receipt=cx_read(rec,&rn);ck(receipt&&strstr(receipt,"source/osx/x86_64\t")&&strstr(receipt,"replacement/osx/arm64\t")&&strstr(receipt,"EXPLICIT_INPUTS")&&strstr(receipt,"NOT_SIGNATURE_VERIFICATION"),"receipt distinguishes source replacement and trust boundary");
+for(int i=4;i<8;i++){char field[100];if(cx_fmt(field,sizeof field,"sha=%s\tbytes=80\n",before[i]))die("receipt field");ck(receipt&&strstr(receipt,field),"receipt records actual member full SHA and byte count");}free(receipt);
+ck(pack(1,1,0)==0,"six-slice replacement remains supported");ck(pack(0,0,0)==0,"legacy five positional inputs with explicit managers remain supported");if(cx_fmt(ape,sizeof ape,"%s/unisacc-next.com",out))die("path");ck(member(ape,"Darwinx86_64)",f[8],0)&&member(ape,"Darwinarm64)",f[9],0),"without replacement flag original Mac slices are used");
+ck(pack(1,0,0)==0,"legacy six positional inputs remain supported");
+char *no_manager[]={exe,"pack","--osx-slices",f[4],f[5],out,f[0],f[1],f[2],f[3],f[8],f[9],0};r=run(no_manager);ck(r.rc==2&&r.err&&strstr(r.err,"requires explicit"),"replacement cannot silently reconstruct managers");np_free(&r);
+char *duplicate[]={exe,"pack","--osx-slices",f[4],f[5],"--osx-slices",f[4],f[5],0};r=run(duplicate);ck(r.rc==2&&r.err&&strstr(r.err,"duplicate"),"duplicate replacement option rejected");np_free(&r);
+ck(pack(0,1,1)==2,"wrong replacement CPU rejected");ck(pack(0,1,2)==2,"missing replacement rejected");for(int i=0;i<10;i++){char h[65];digest(f[i],h);ck(!strcmp(h,before[i]),"original and replacement inputs remain unchanged");}
+printf("RELEASE_APE_CHECK\tchecks=%d\tfailed=%d\tretained=%s\tclaim=BYTE_PRESERVATION_ONLY\n",checks,bad,base);return bad?1:0;}

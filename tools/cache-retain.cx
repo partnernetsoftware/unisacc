@@ -5,7 +5,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use sys.posix
 #pragma unisa use mem.bytes
-static int rootfd=-1,lockfd=-1,dry,adopt;static const char *tool;static long keep,pid;
+static int rootfd=-1,lockfd=-1,dry,adopt,strictmarker;static const char *tool;static long keep,pid;
 static char protected[65537],canonical[4096];
 static char active_names[512][256];static long active_pids[512];static int nactive;
 static void fail(const char *s){fprintf(stderr,"CACHE_RETAIN FALLBACK %s\n",s);exit(75);}
@@ -24,14 +24,45 @@ static int cmp(const void *a,const void *b){const Item *x=a,*y=b;if(x->current!=
 static int alive(long p){if(kill(p,0)==0)return 1;if(errno==EPERM)return 1;if(errno==ESRCH)return 0;fail("pid probe");return 1;}
 static int protected_name(const char *name){for(int i=0;i<nactive;i++)if(!strcmp(name,active_names[i]))return 1;return 0;}
 static void load_protected(const char *file){size_t n;char *b=cx_read(file,&n);if(!b||n>65536||memchr(b,0,n)||memchr(b,'\r',n))fail("active list");if(mm_copy(protected,sizeof protected,b,n))fail("active list copy");protected[n]=0;free(b);char header[4200];if(cx_fmt(header,sizeof header,"CACHE_ACTIVE_V1\t%s\n",canonical))fail("active header bound");if(strncmp(protected,header,strlen(header)))fail("active list directory");char *p=protected+strlen(header);while(*p){char *e=strchr(p,'\n');if(!e||nactive==512)fail("active list bound/newline");*e=0;char *t=strchr(p,'\t');if(!t||strchr(t+1,'\t'))fail("active list fields");*t=0;if(!payload_name(p))fail("active list name");long ap=number(t+1);if(ap<1)fail("active pid");for(int i=0;i<nactive;i++)if(ap==active_pids[i]&&!strcmp(p,active_names[i]))fail("active list duplicate");if(mm_copy(active_names[nactive],sizeof active_names[nactive],p,strlen(p)+1))fail("active name bound");active_pids[nactive++]=ap;p=e+1;}}
-static void marker(Item *it,int write_it){char name[256],expected[512],old[100];filename(name,".managed-v1-",it->key);if(cx_fmt(expected,sizeof expected,"APE_CACHE_V2\tname=%s\ttype=%s\tsha=%s\n",it->name,it->legacy?"legacy-compressed-key":"raw-key",it->sha))fail("marker bound");int n=strlen(expected);int fd=cr_openat(rootfd,name,O_RDONLY|O_NOFOLLOW,0);if(fd>=0){regular(fd);char b[513];long z=read(fd,b,sizeof b);close(fd);if(cx_fmt(old,sizeof old,"APE_CACHE_V1\tsha=%s\n",it->sha))fail("old marker bound");int on=strlen(old);if(!((z==n&&!memcmp(b,expected,n))||(!it->legacy&&z==on&&!memcmp(b,old,on))))fail("marker identity");it->hasmarker=1;struct stat s;if(fstatat(rootfd,name,&s,AT_SYMLINK_NOFOLLOW))fail("marker stat");it->stamp=s.st_mtime;}else if(errno!=ENOENT)fail("marker open");if(write_it&&!dry){fd=opened(name,it->hasmarker?O_WRONLY|O_TRUNC:O_WRONLY|O_CREAT|O_EXCL);if(sy_write_all(fd,expected,n)||close(fd))fail("marker write");it->hasmarker=1;}}
+static void marker(Item *it,int write_it){char name[256],expected[512],old[100];filename(name,".managed-v1-",it->key);if(cx_fmt(expected,sizeof expected,"APE_CACHE_V2\tname=%s\ttype=%s\tsha=%s\n",it->name,it->legacy?"legacy-compressed-key":"raw-key",it->sha))fail("marker bound");int n=strlen(expected);int fd=cr_openat(rootfd,name,O_RDONLY|O_NOFOLLOW,0);if(fd>=0){regular(fd);char b[513];long z=read(fd,b,sizeof b);struct stat fs;if(fstat(fd,&fs)||close(fd))fail("marker descriptor");if(cx_fmt(old,sizeof old,"APE_CACHE_V1\tsha=%s\n",it->sha))fail("old marker bound");int on=strlen(old);if(!((z==n&&fs.st_size==n&&!memcmp(b,expected,n))||(!strictmarker&&!it->legacy&&z==on&&fs.st_size==on&&!memcmp(b,old,on))))fail("marker identity");it->hasmarker=1;it->stamp=fs.st_mtime;}else if(errno!=ENOENT)fail("marker open");if(write_it&&!dry){fd=opened(name,it->hasmarker?O_WRONLY|O_TRUNC:O_WRONLY|O_CREAT|O_EXCL);if(sy_write_all(fd,expected,n)||close(fd))fail("marker write");it->hasmarker=1;}}
 static void lease(const char *k,long p){if(dry)return;char name[256];if(cx_fmt(name,sizeof name,"%s.lease-v1-%s-%ld",tool,k,p))fail("lease name bound");int fd=cr_openat(rootfd,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0){if(errno!=EEXIST)fail("lease create");fd=opened(name,O_WRONLY);}regular(fd);if(close(fd))fail("lease close");}
 static DIR *scan(void){int fd=cr_openat(rootfd,".",O_RDONLY|O_DIRECTORY,0);DIR *d=fdopendir(fd);if(!d)fail("scan open");return d;}
-int main(int argc,char **argv){const char *list=0;while(argc>1&&argv[1][0]=='-'){if(!strcmp(argv[1],"--dry-run")){dry=1;argv++;argc--;}else if(!strcmp(argv[1],"--adopt-legacy")&&argc>2){adopt=1;list=argv[2];argv+=2;argc-=2;}else return 2;}if(argc!=6)return 2;tool=argv[2];if(!*tool||strlen(tool)>64)return 2;for(const char *s=tool;*s;s++)if(!((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||(*s>='0'&&*s<='9')||*s=='_'||*s=='-'))return 2;if(!key(argv[3]))return 2;keep=number(argv[4]);pid=number(argv[5]);if(keep<1||keep>32||pid!=getppid())return 2;
+static void scan_leases(void){
+ DIR *d=scan();struct dirent *e;int scanned=0;char prefix[100];
+ if(cx_fmt(prefix,sizeof prefix,"%s.lease-v1-",tool))fail("lease prefix bound");
+ size_t z=strlen(prefix);
+ while(1){
+  errno=0;e=readdir(d);if(!e){if(errno||closedir(d))fail("lease scan");break;}
+  if(++scanned>4096)fail("lease scan budget");
+  if(strncmp(e->d_name,prefix,z))continue;
+  const char *k=e->d_name+z;if(strlen(k)<18||k[16]!='-')fail("lease syntax");
+  char id[17];memcpy(id,k,16);id[16]=0;if(!key(id))fail("lease key");
+  long p=number(k+17);if(p<1)fail("lease pid");
+  int fd=opened(e->d_name,O_RDONLY);if(close(fd))fail("lease read close");
+  if(alive(p)){for(int i=0;i<count;i++)if(!strcmp(items[i].key,id))items[i].active=1;}
+  else remove_name(e->d_name);
+ }
+}
+static void unlock(void){if(lockfd>=0){sy_flock(lockfd,8);close(lockfd);}sy_flock(rootfd,8);close(rootfd);}
+static int fullsha(const char *s){if(strlen(s)!=64)return 0;for(int i=0;i<64;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;return 1;}
+int main(int argc,char **argv){const char *list=0,*touch=0;while(argc>1&&argv[1][0]=='-'){if(!strcmp(argv[1],"--dry-run")){dry=1;argv++;argc--;}else if(!strcmp(argv[1],"--adopt-legacy")&&argc>2){adopt=1;list=argv[2];argv+=2;argc-=2;}else if(!strcmp(argv[1],"--touch")&&argc>2&&!touch){touch=argv[2];argv+=2;argc-=2;}else return 2;}if(argc!=6)return 2;if(touch&&(!fullsha(touch)||dry||adopt||strncmp(touch,argv[3],16)))return 2;tool=argv[2];if(!*tool||strlen(tool)>64)return 2;for(const char *s=tool;*s;s++)if(!((*s>='a'&&*s<='z')||(*s>='A'&&*s<='Z')||(*s>='0'&&*s<='9')||*s=='_'||*s=='-'))return 2;if(!key(argv[3]))return 2;keep=number(argv[4]);pid=number(argv[5]);if(keep<1||keep>32||pid!=getppid())return 2;
  rootfd=open(argv[1],O_RDONLY|O_DIRECTORY|O_NOFOLLOW);struct stat ds;if(rootfd<0||fstat(rootfd,&ds)||!S_ISDIR(ds.st_mode)||ds.st_uid!=getuid()||(ds.st_mode&0077))fail("private directory required");if(!realpath(argv[1],canonical))fail("canonical directory");if(sy_flock(rootfd,2|4))fail("directory lock busy");if(!dry){lockfd=opened(".cache-retain.lock",O_RDWR|O_CREAT);if(sy_flock(lockfd,2|4))fail("lock busy");}if(adopt)load_protected(list);
- char current[256],h[65];filename(current,"-",argv[3]);digest(current,h);if(strncmp(h,argv[3],16))fail("current payload key");
+ char current[256],h[65];filename(current,"-",argv[3]);
+ if(touch){
+  /* Hot maintenance trusts an existing full-SHA marker, not payload hashing.
+   * Missing or mismatched registration falls back to the cold digest path. */
+  int fd=opened(current,O_RDONLY);if(close(fd))fail("current close");
+  Item *it=items;memset(it,0,sizeof *it);
+  if(mm_copy(it->name,sizeof it->name,current,strlen(current)+1)||
+     mm_copy(it->key,sizeof it->key,argv[3],17)||
+     mm_copy(it->sha,sizeof it->sha,touch,65))fail("touch identity copy");
+  it->current=1;count=1;strictmarker=1;marker(it,0);if(!it->hasmarker)fail("touch requires registration");
+  scan_leases();marker(it,1);lease(it->key,pid);unlock();
+  printf("CACHE_TOUCH\tsha=%s\tlease_pid=%ld\tactive=%d\tmode=MARKER_MAINTENANCE\n",touch,pid,it->active);return 0;
+ }
+ digest(current,h);if(strncmp(h,argv[3],16))fail("current payload key");
  DIR *d=scan();struct dirent *e;int scanned=0;long unknown=0;while(1){errno=0;e=readdir(d);if(!e){if(errno||closedir(d))fail("scan read");break;}if(++scanned>4096)fail("scan budget");if(!payload_name(e->d_name))continue;if(count==512)fail("candidate budget");Item it;memset(&it,0,sizeof it);if(mm_copy(it.name,sizeof it.name,e->d_name,strlen(e->d_name)+1)||mm_copy(it.key,sizeof it.key,e->d_name+strlen(tool)+1,17))fail("payload name bound");it.current=!strcmp(it.key,argv[3]);struct stat st;if(fstatat(rootfd,it.name,&st,AT_SYMLINK_NOFOLLOW))fail("payload stat");if(!S_ISREG(st.st_mode)||st.st_uid!=getuid()||st.st_nlink!=1||(st.st_mode&0022)){unknown++;continue;}it.stamp=st.st_mtime;digest(it.name,it.sha);it.legacy=strncmp(it.sha,it.key,16)!=0;marker(&it,0);if(!it.hasmarker&&!it.current&&!adopt){unknown++;continue;}if(it.legacy&&!it.hasmarker&&!adopt){unknown++;continue;}if(protected_name(it.name))it.active=1;items[count++]=it;}
  int found=0;for(int i=0;i<count;i++)if(items[i].current)found=1;if(!found)fail("current not managed");
- d=scan();while(1){errno=0;e=readdir(d);if(!e){if(errno||closedir(d))fail("lease scan");break;}char prefix[100];if(cx_fmt(prefix,sizeof prefix,"%s.lease-v1-",tool))fail("lease prefix bound");size_t z=strlen(prefix);if(strncmp(e->d_name,prefix,z))continue;const char *k=e->d_name+z;if(strlen(k)<18||k[16]!='-')fail("lease syntax");char id[17];memcpy(id,k,16);id[16]=0;if(!key(id))fail("lease key");long p=number(k+17);int fd=opened(e->d_name,O_RDONLY);close(fd);if(alive(p)){for(int i=0;i<count;i++)if(!strcmp(items[i].key,id))items[i].active=1;}else remove_name(e->d_name);}
+ scan_leases();
  qsort(items,count,sizeof items[0],cmp);long deleted=0,active=0;for(int i=0;i<count;i++){Item *it=items+i;int retain=i<keep||it->active||it->current;if(it->active)active++;printf("CACHE_PLAN\t%s\t%s\ttype=%s\tsha=%s\n",retain?"KEEP":"DELETE",it->name,it->legacy?"legacy-compressed-key":"raw-key",it->sha);if(retain){if(adopt||it->current)marker(it,1);if(it->current)lease(it->key,pid);/* Explicit adopted active legacy files remain protected until a later audited migration. */if(it->active&&adopt)for(int j=0;j<nactive;j++)if(!strcmp(it->name,active_names[j]))lease(it->key,active_pids[j]);}else{char m[256];filename(m,".managed-v1-",it->key);remove_name(it->name);if(it->hasmarker)remove_name(m);deleted++;}}
- if(lockfd>=0){sy_flock(lockfd,8);close(lockfd);}sy_flock(rootfd,8);close(rootfd);printf("CACHE_RETAIN\tmode=%s\tmanaged=%d\tdeleted=%ld\tactive=%ld\tunmanaged_preserved=%ld\tkeep=%ld\n",dry?"DRY_RUN":"APPLY",count,deleted,active,unknown,keep);return 0;}
+ unlock();printf("CACHE_RETAIN\tmode=%s\tmanaged=%d\tdeleted=%ld\tactive=%ld\tunmanaged_preserved=%ld\tkeep=%ld\n",dry?"DRY_RUN":"APPLY",count,deleted,active,unknown,keep);return 0;}

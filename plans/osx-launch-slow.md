@@ -1,4 +1,10 @@
-# OSX-LAUNCH-SLOW：0.0.48 wrapper 修复候选
+# OSX-LAUNCH-SLOW：0.0.48.1 发布修复
+
+当前按cc新裁定构造0.0.48.1：轻量--touch回收热lease，固定两Mac切片与两manager字节，草稿提供五角色members.tsv和四独立Mac资产；首真签由cc负责，本车道不改其三签名路径。新源SID5f0f183f…，最终新APE/成员SHA尚待新源六片构造后冻结。旧0.0.48表已归档为release/candidate-osx-launch-rc1.tsv；当前候选表在实际就绪后重建并通知cc。下文01b16证据仅历史，不能签名或移授新候选。
+
+热lease审计补漏已修：新版cachedmanager热模式跳payload摘要/排序，严格V2全文/root/锁/parentPID，清本tool全部dead lease（仅ESRCH，EPERM保留，pid0拒绝），刷新recency并记新lease。冷模式最近四/完整摘要/legacy与隔离合同保持；已有超4096历史目录仍隔离fallback，不宣称自动恢复。27项helper及临时probe两格各108项、12个真实新父PID热调用无积累已实跑；最终0.0.48.1须另验证。
+
+## 历史首候选
 
 原发布件为559705097427cf8f4e483bb6e5f702e0714623a81644991c087b17e3505d9032。新候选为01b16ae0a2938268a54fe89f3ec62692b774b391e4baba031401148065c9b15a，6427278字节，版本仍0.0.48；仅替换APE分发脚本，复用原六片、两manager与P4原文。产品源SID仍798321e8919815b8e4a6c5860be5210c8cd702a8cd7c8b280218acb539b011d4。它是下一wrapper候选，不冒称0.0.48.1，也不覆盖已发布v0.0.48。
 
