@@ -1,0 +1,195 @@
+#pragma unisa module frameparts
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* Immutable intermediate wire chunks. Matching requires both the hash and
+ * every byte: offsets, names, literals and origin records are never inferred
+ * or relocated. This shares generic exact output chunks, not macro evaluation.
+ * The consumer receives the original contiguous wire exactly once. */
+enum { FP_BUCKETS = 1024 };
+#define FP_MAX 2147483647L
+#define FP_MIN 1024
+#define FP_CHUNK 8192
+typedef struct FpBlock { struct FpBlock *next; unsigned hash; long n; long id; long refs; } FpBlock;
+typedef struct FpPart { struct FpPart *next; FpBlock *block; int owned; } FpPart;
+typedef struct { FpBlock *buckets[FP_BUCKETS]; FpPart *first; FpPart *last; long n; int failed; } FpStore;
+
+void *fp_new(void) {
+    FpStore *s = mm_alloc((long)sizeof(FpStore));
+    if (!s) return 0;
+    for (int i = 0; i < FP_BUCKETS; i++) s->buckets[i] = 0;
+    s->first = 0; s->last = 0; s->n = 0; s->failed = 0;
+    return s;
+}
+
+static int fp_append(FpStore *s, const unsigned char *p, long n, int share) {
+    unsigned h = 2166136261u;
+    FpBlock *b = 0;
+    FpPart *part;
+    if (!s || s->failed || n < 0 || (n && !p) || n > FP_MAX - s->n) return 1;
+    if (!n) return 0;
+    if (share) {
+        for (long i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+        b = s->buckets[h % FP_BUCKETS];
+        while (b) {
+            if (b->hash == h && b->n == n && mm_same(b + 1, p, n)) break;
+            b = b->next;
+        }
+    }
+    part = mm_alloc((long)sizeof(FpPart));
+    if (!part) { s->failed = 1; return 1; }
+    if (!b) {
+        b = mm_alloc((long)sizeof(FpBlock) + n);
+        if (!b) { mm_free(part); s->failed = 1; return 1; }
+        b->hash = h; b->n = n; b->next = 0;
+        if (mm_copy(b + 1, n, p, n)) { mm_free(b); mm_free(part); s->failed = 1; return 1; }
+        if (share) { b->next = s->buckets[h % FP_BUCKETS]; s->buckets[h % FP_BUCKETS] = b; }
+    }
+    part->block = b; part->owned = !share; part->next = 0;
+    if (s->last) s->last->next = part; else s->first = part;
+    s->last = part; s->n += n;
+    return 0;
+}
+
+int fp_add(void *store, const char *name, long namelen, const unsigned char *text, long textn) {
+    FpStore *s = store;
+    unsigned char header[8];
+    long framed;
+    if (!s || s->failed || namelen < 0 || (namelen && !name) || textn < 0 || (textn && !text) || namelen > FP_MAX - 8 || textn > FP_MAX - 8 - namelen || s->n > FP_MAX - 8 - namelen - textn) return 1;
+    framed = 4 + namelen + textn;
+    for (int k = 0; k < 4; k++) { header[k] = (unsigned char)((framed >> (8*k)) & 255); header[k+4] = (unsigned char)((namelen >> (8*k)) & 255); }
+    if (fp_append(s, header, 8, 0) || fp_append(s, (const unsigned char *)name, namelen, 0)) return 1;
+    /* Content-defined boundaries resynchronize after a TU-specific prefix.
+     * The 32-bit shift forgets earlier bytes; boundaries are only a storage
+     * choice, never a token/line/origin interpretation. */
+    {
+        long start = 0;
+        unsigned boundary = 0;
+        for (long at = 0; at < textn; at++) {
+            long take = at + 1 - start;
+            boundary = (boundary << 1) + ((unsigned)text[at] + 1u) * 2654435761u;
+            if (take >= FP_MIN && (!(boundary & 4095u) || take == FP_CHUNK)) {
+                if (fp_append(s, text + start, take, 1)) return 1;
+                start = at + 1;
+            }
+        }
+        if (start < textn && fp_append(s, text + start, textn - start, 1)) return 1;
+    }
+    return 0;
+}
+
+int fp_materialize(void *store, unsigned char **bytes, long *n) {
+    FpStore *s = store;
+    unsigned char *p;
+    long at = 0;
+    if (!s || s->failed || !bytes || !n || !s->n) return 1;
+    p = mm_alloc(s->n);
+    if (!p) return 1;
+    for (FpPart *part = s->first; part; part = part->next) {
+        FpBlock *b = part->block;
+        if (mm_copy(p + at, s->n - at, b + 1, b->n)) { mm_free(p); return 1; }
+        at += b->n;
+    }
+    *bytes = p; *n = s->n;
+    return 0;
+}
+
+/* UNIFP1: magic[8], logical bytes, dictionary count, reference count,
+ * then length-prefixed dictionary entries and ordered LE32 references.
+ * Generic exact-byte chunks are not claimed to be semantic headers. */
+static void fp_put(unsigned char *p, long v) {
+    for (int k = 0; k < 4; k++) p[k] = (unsigned char)((v >> (8*k)) & 255);
+}
+static long fp_get(const unsigned char *p) {
+    return (long)p[0] | ((long)p[1]<<8) | ((long)p[2]<<16) | ((long)p[3]<<24);
+}
+int fp_pack(void *store, unsigned char **bytes, long *n, long *dictionary, long *shared) {
+    FpStore *s = store;
+    long dc = 0, rc = 0, size = 20, at, dn = 0, sn = 0;
+    unsigned char *p;
+    if (!s || s->failed || !s->n || !bytes || !n) return 1;
+    for (FpPart *r = s->first; r; r = r->next) { r->block->id = -1; r->block->refs = 0; }
+    for (FpPart *r = s->first; r; r = r->next) {
+        if (size > FP_MAX - 4) return 1;
+        size += 4; rc++;
+        r->block->refs++;
+        if (r->block->id < 0) {
+            if (r->block->n > FP_MAX - size - 4) return 1;
+            size += 4 + r->block->n; r->block->id = dc++;
+        }
+    }
+    p = mm_alloc(size); if (!p) return 1;
+    mm_copy(p, size, "UNIFP1\0\0", 8);
+    fp_put(p+8, s->n); fp_put(p+12, dc); fp_put(p+16, rc); at = 20;
+    dc = 0;
+    for (FpPart *r = s->first; r; r = r->next) if (r->block->id == dc) {
+        FpBlock *b = r->block;
+        dn += b->n; if (b->refs > 1) sn += b->n;
+        fp_put(p+at, b->n); at += 4;
+        mm_copy(p+at, size-at, b+1, b->n); at += b->n; dc++;
+    }
+    for (FpPart *r = s->first; r; r = r->next) { fp_put(p+at, r->block->id); at += 4; }
+    if (dictionary) *dictionary = dn;
+    if (shared) *shared = sn;
+    *bytes = p; *n = size; return 0;
+}
+/* Reject all extents, invalid references, unused entries and trailing bytes
+ * before allocating the restored logical wire. Output is untouched on error. */
+int fp_unpack(const unsigned char *p, long n, unsigned char **bytes, long *len,
+              long *dictionary, long *shared) {
+    long logical, dc, rc, at = 20, total = 0, dn = 0;
+    long *offset = 0, *sizes = 0, *uses = 0;
+    unsigned char *out = 0;
+    if (!p || n < 20 || !bytes || !len || !mm_same(p, "UNIFP1\0\0", 8)) return 1;
+    logical = fp_get(p+8); dc = fp_get(p+12); rc = fp_get(p+16);
+    if (logical <= 0 || logical > FP_MAX || dc <= 0 || dc > (n-20)/5 || rc <= 0 || rc > (n-20)/4) return 1;
+    offset = mm_alloc(dc * (long)sizeof(long)); sizes = mm_alloc(dc * (long)sizeof(long)); uses = mm_alloc(dc * (long)sizeof(long));
+    if (!offset || !sizes || !uses) goto fail;
+    for (long i = 0; i < dc; i++) {
+        long z;
+        if (n-at < 4) goto fail;
+        z = fp_get(p+at); at += 4;
+        if (z <= 0 || z > n-at) goto fail;
+        offset[i] = at; sizes[i] = z; uses[i] = 0; dn += z; at += z;
+    }
+    if (rc != (n-at)/4 || (n-at)%4) goto fail;
+    for (long i = 0; i < rc; i++) {
+        long id = fp_get(p+at+i*4);
+        if (id < 0 || id >= dc || sizes[id] > logical-total) goto fail;
+        total += sizes[id]; uses[id]++;
+    }
+    if (total != logical) goto fail;
+    for (long i = 0; i < dc; i++) if (!uses[i]) goto fail;
+    out = mm_alloc(logical); if (!out) goto fail;
+    total = 0;
+    for (long i = 0; i < rc; i++) {
+        long id = fp_get(p+at+i*4);
+        mm_copy(out+total, logical-total, p+offset[id], sizes[id]); total += sizes[id];
+    }
+    {
+        long pos = 0;
+        while (pos < logical) {
+            long z, nl;
+            if (logical-pos < 8) goto fail;
+            z = fp_get(out+pos); nl = fp_get(out+pos+4);
+            if (z < 4 || z > logical-pos-4 || nl < 0 || nl > z-4) goto fail;
+            pos += 4+z;
+        }
+    }
+    if (dictionary) *dictionary = dn;
+    if (shared) { *shared = 0; for (long i = 0; i < dc; i++) if (uses[i] > 1) *shared += sizes[i]; }
+    mm_free(offset); mm_free(sizes); mm_free(uses);
+    *bytes = out; *len = logical; return 0;
+fail:
+    mm_free(offset); mm_free(sizes); mm_free(uses); mm_free(out); return 1;
+}
+void fp_drop(void *store) {
+    FpStore *s = store;
+    if (!s) return;
+    FpPart *part = s->first;
+    while (part) { FpPart *next = part->next; if (part->owned) mm_free(part->block); mm_free(part); part = next; }
+    for (int i = 0; i < FP_BUCKETS; i++) {
+        FpBlock *b = s->buckets[i];
+        while (b) { FpBlock *next = b->next; mm_free(b); b = next; }
+    }
+    mm_free(s);
+}

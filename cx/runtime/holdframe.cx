@@ -2,6 +2,41 @@
 #pragma unisa use mem.heap
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
+#pragma unisa use compiler.frames
+#pragma unisa use sys.time
+#pragma unisa use sys.io
+
+static long long hf_now(void) {
+    sy_ts_t t; if (sy_mono(&t)) return -1;
+    return (long long)t.sec * 1000000000LL + t.nsec;
+}
+static void hf_metric(const char *op, long physical, long logical, long attrs,
+                      long dictionary, long shared, long long start) {
+    const char *e = sy_env("UNISACC_RR_TIME"); long long end;
+    if (!e || !e[0]) return;
+    end = hf_now();
+    sy_eprintf("RR_TIME\tphase-material\top=%s\tphase_physical_bytes=%ld\tframe_logical_bytes=%ld\tattrs_bytes=%ld\tunique_dictionary_bytes=%ld\tshared_dictionary_bytes=%ld\tdictionary_kind=generic-exact-chunks\tunique_header_bytes=UNMEASURED\trestore_consume_bytes=%ld\tns=%lld\tmacro_evaluation_skipped=0\tparse_skipped=0\n", op, physical, logical, attrs, dictionary, shared, op[0]=='w'?0:logical, start < 0 || end < 0 ? -1LL : end-start);
+}
+static long hf_u32(const unsigned char *p) {
+    return (long)p[0] | ((long)p[1]<<8) | ((long)p[2]<<16) | ((long)p[3]<<24);
+}
+static int hf_valid(const unsigned char *fr, long fn, const unsigned char *at, long an) {
+    long pos = 0, units = 0, count;
+    while (pos < fn) {
+        long z, nl;
+        if (fn-pos < 8) return 1;
+        z = hf_u32(fr+pos); nl = hf_u32(fr+pos+4);
+        if (z < 4 || z > fn-pos-4 || nl < 0 || nl > z-4) return 1;
+        units++; pos += 4+z;
+    }
+    if (!units) return 1;
+    if (!an) return 0;
+    if (!at || an < 4) return 1;
+    count = hf_u32(at);
+    if (count < 0 || count > 1000000L || an != 4+count*9) return 1;
+    for (long i=0; i<count; i++) if (hf_u32(at+4+i*9) >= units) return 1;
+    return 0;
+}
 /* First-pass unit frames and their attribute table. Plain bytes, no handles.
    Upper layer: no #include, no libc. Allocation is mm_*. */
 static unsigned char *hf_fr;
@@ -58,19 +93,41 @@ int hf_keep(const unsigned char *fr, long frn, const unsigned char *at, long atn
         unsigned char nb[8];
         long i;
         unsigned long v;
+        unsigned char *packed = 0;
+        const unsigned char *physical = hf_fr;
+        long physicaln = hf_frn;
+        long dictionary = 0, shared = 0;
+        const char *compact = sy_env("UNISACC_PP_COMPACT");
+        const char *timing = sy_env("UNISACC_RR_TIME");
+        long long started = timing && timing[0] ? hf_now() : -1;
         path = sy_env("UNISACC_PHASE_OUT");
         if (path && path[0]) {
+            if (compact && compact[0] == '1' && !compact[1]) {
+                if (fr_phase_pack(hf_fr, hf_frn, &packed, &physicaln, &dictionary, &shared)) return 1;
+                physical = packed;
+            }
+            {
+              if (timing && timing[0]) {
+                  long long end = hf_now();
+                  sy_eprintf("RR_TIME\tphase-pack\tpack_ns=%lld\n", started < 0 || end < 0 ? -1LL : end-started);
+              }
+            }
             fd = sy_open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-            if (fd >= 0) {
-                v = (unsigned long)hf_frn;
+            if (fd < 0) { mm_free(packed); return 1; }
+            {
+                v = (unsigned long)physicaln;
                 i = 0;
                 while (i < 4) { nb[i] = (unsigned char)((v >> (8 * i)) & 255); i = i + 1; }
                 v = (unsigned long)hf_atn;
                 while (i < 8) { nb[i] = (unsigned char)((v >> (8 * (i - 4))) & 255); i = i + 1; }
-                if (sy_write_all(fd, nb, 8) == 0) sy_write_all(fd, hf_fr, hf_frn);
-                if (hf_atn > 0) sy_write_all(fd, hf_at, hf_atn);
-                sy_close(fd);
+                int wr = sy_write_all(fd, nb, 8);
+                if (!wr) wr = sy_write_all(fd, physical, physicaln);
+                if (!wr && hf_atn > 0) wr = sy_write_all(fd, hf_at, hf_atn);
+                int cl = sy_close(fd);
+                if (wr || cl) { mm_free(packed); return 1; }
             }
+            hf_metric("write", 8+physicaln+hf_atn, hf_frn, hf_atn, dictionary, shared, started);
+            mm_free(packed);
         }
     }
     return 0;
@@ -84,6 +141,9 @@ static int hf_load(void) {
     long atn;
     unsigned char *fr;
     unsigned char *at;
+    long physicaln, dictionary = 0, shared = 0;
+    const char *timing = sy_env("UNISACC_RR_TIME");
+    long long started = timing && timing[0] ? hf_now() : -1;
     path = sy_env("UNISACC_PHASE_IN");
     if (!path || !path[0]) return 1;
     fd = sy_open_read(path);
@@ -91,7 +151,8 @@ static int hf_load(void) {
     if (sy_read_full(fd, nb, 8)) { sy_close(fd); return 1; }
     frn = (long)nb[0] | ((long)nb[1] << 8) | ((long)nb[2] << 16) | ((long)nb[3] << 24);
     atn = (long)nb[4] | ((long)nb[5] << 8) | ((long)nb[6] << 16) | ((long)nb[7] << 24);
-    if (frn <= 0 || atn < 0) { sy_close(fd); return 1; }
+    if (frn <= 0 || frn > 2147483647L || atn < 0 || atn > 2147483647L) { sy_close(fd); return 1; }
+    physicaln = frn;
     fr = mm_alloc(frn);
     at = atn ? mm_alloc(atn) : 0;
     if (!fr || (atn && !at) || sy_read_full(fd, fr, frn) || (atn && sy_read_full(fd, at, atn))) {
@@ -100,7 +161,15 @@ static int hf_load(void) {
         sy_close(fd);
         return 1;
     }
+    if (sy_reg_size(fd) != 8+physicaln+atn) { mm_free(fr); mm_free(at); sy_close(fd); return 1; }
     sy_close(fd);
+    if (frn >= 8 && fr[0] == 'U' && fr[1] == 'N' && fr[2] == 'I' && fr[3] == 'F') {
+        unsigned char *restored = 0; long restoredn = 0;
+        if (fr_phase_unpack(fr, frn, &restored, &restoredn, &dictionary, &shared)) { mm_free(fr); mm_free(at); return 1; }
+        mm_free(fr); fr = restored; frn = restoredn;
+    }
+    if (hf_valid(fr, frn, at, atn)) { mm_free(fr); mm_free(at); return 1; }
+    hf_metric("restore", 8+physicaln+atn, frn, atn, dictionary, shared, started);
     hf_fr = fr;
     hf_frn = frn;
     hf_at = at;

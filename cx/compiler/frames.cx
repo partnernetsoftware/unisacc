@@ -10,6 +10,7 @@
    or 1 when refused. */
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use compiler.frameparts
 #define FR_MAXN 2147483647L
 #define FR_ROOM 1073741824L
 
@@ -56,4 +57,43 @@ int fr_add(unsigned char **b, long *n, long *cap, const char *name, long namelen
     if (textn > 0 && mm_copy(*b + *n, *cap - *n, text, textn) != 0) return 1;
     *n = *n + textn;
     return 0;
+}
+
+/* Shared intermediate frames own exact payload chunks until materialization.
+ * The returned contiguous wire is independent of STORE and caller-owned. */
+void *fr_shared_new(void) { return fp_new(); }
+int fr_shared_add(void *store, const char *name, long namelen,
+                  const unsigned char *text, long textn) {
+    return fp_add(store, name, namelen, text, textn);
+}
+int fr_shared_materialize(void *store, unsigned char **bytes, long *n) {
+    return fp_materialize(store, bytes, n);
+}
+void fr_shared_drop(void *store) { fp_drop(store); }
+/* Internal phase transport only. Public framed wire stays byte-identical.
+ * UNISACC_PP_COMPACT=1 selects UNIFP1 in holdframe's phase body only;
+ * legacy phase bodies remain readable. Dictionary entries are generic exact
+ * chunks, not semantically identified headers. Restoration intentionally
+ * recreates the entire logical wire: macro evaluation/parsing is not skipped.
+ * The outer LE32 body length and untouched ATTRT bytes retain their framing. */
+int fr_phase_pack(const unsigned char *wire, long wn, unsigned char **out, long *on,
+                  long *dictionary, long *shared) {
+    void *s = fp_new(); long at = 0; int rc = 1;
+    if (!s || !wire || wn <= 0) { fp_drop(s); return 1; }
+    while (at < wn) {
+        long z, nl;
+        if (wn-at < 8) goto end;
+        z = (long)wire[at] | ((long)wire[at+1]<<8) | ((long)wire[at+2]<<16) | ((long)wire[at+3]<<24);
+        nl = (long)wire[at+4] | ((long)wire[at+5]<<8) | ((long)wire[at+6]<<16) | ((long)wire[at+7]<<24);
+        if (z < 4 || z > wn-at-4 || nl < 0 || nl > z-4) goto end;
+        if (fp_add(s, (const char *)wire+at+8, nl, wire+at+8+nl, z-4-nl)) goto end;
+        at += 4+z;
+    }
+    rc = fp_pack(s, out, on, dictionary, shared);
+end:
+    fp_drop(s); return rc;
+}
+int fr_phase_unpack(const unsigned char *p, long n, unsigned char **out, long *on,
+                    long *dictionary, long *shared) {
+    return fp_unpack(p, n, out, on, dictionary, shared);
 }

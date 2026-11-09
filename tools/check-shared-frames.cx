@@ -1,0 +1,65 @@
+#pragma unisa use compiler.frames
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* sh ./unisacc.com tools/check-shared-frames.cx
+ * Byte equality includes embedded zeroes and source-specific frame names.
+ * Inputs are overwritten before materialization to enforce immutable storage. */
+static int checks, failed;
+static void ck(int yes, const char *name) {
+    checks++; if (!yes) failed++;
+    printf("%s\t%s\n", yes ? "PASS" : "FAIL", name);
+}
+int main(void) {
+    unsigned char text[32771];
+    unsigned char *expected = 0, *actual = 0;
+    long en = 0, cap = 0, an = 0;
+    void *store = fr_shared_new();
+    ck(store != 0, "allocate-shared-store");
+    if (!store) return 1;
+    for (long i = 0; i < (long)sizeof text; i++) text[i] = (unsigned char)((i * 73 + (i / 19) * 11) & 255);
+    for (int unit = 0; unit < 84; unit++) {
+        const char *name = unit & 1 ? "nested/source-with-long-name.cx" : "short.cx";
+        long nn = unit & 1 ? 31 : 8;
+        /* A private prefix changes without changing the repeated header body. */
+        text[0] = (unsigned char)unit;
+        int a = fr_add(&expected, &en, &cap, name, nn, text, sizeof text);
+        int b = fr_shared_add(store, name, nn, text, sizeof text);
+        ck(!a && !b, "append-source-specific-frame");
+        if (a || b) { fr_shared_drop(store); mm_free(expected); return 1; }
+    }
+    for (long i = 0; i < (long)sizeof text; i++) text[i] = 0;
+    ck(!fr_shared_materialize(store, &actual, &an), "materialize-once");
+    fr_shared_drop(store);
+    ck(actual && an == en && mm_same(actual, expected, en), "exact-wire-after-source-and-store-release");
+    {
+        unsigned char *packed = 0, *restored = 0; long packedn = 0, rn = 0, dictionary = 0, shared = 0;
+        long pack_dictionary=0, pack_shared=0;
+        ck(!fr_phase_pack(expected, en, &packed, &packedn, &pack_dictionary, &pack_shared), "physical-dictionary-pack");
+        if (packed) {
+            ck(packedn < en, "physical-dictionary-smaller-than-logical");
+            ck(!fr_phase_unpack(packed, packedn, &restored, &rn, &dictionary, &shared), "physical-dictionary-consume");
+            ck(restored && rn == en && mm_same(restored, expected, en), "physical-restores-original-source-frame-wire");
+            ck(dictionary > 0 && shared > 0 && dictionary < en, "dictionary-metrics-not-header-claim");
+            ck(dictionary==pack_dictionary && shared==pack_shared, "pack-consume-dictionary-metrics-identical");
+            mm_free(restored); restored = 0;
+            ck(fr_phase_unpack(packed, packedn-1, &restored, &rn, 0, 0) != 0, "reject-truncated-reference");
+            unsigned char saved = packed[0]; packed[0] = 'X';
+            ck(fr_phase_unpack(packed, packedn, &restored, &rn, 0, 0) != 0, "reject-dictionary-identity"); packed[0] = saved;
+            saved = packed[8]; packed[8] ^= 1;
+            ck(fr_phase_unpack(packed, packedn, &restored, &rn, 0, 0) != 0, "reject-logical-length-mismatch"); packed[8] = saved;
+            unsigned char tail[4]; for(int i=0;i<4;i++){tail[i]=packed[packedn-4+i];packed[packedn-4+i]=255;}
+            ck(fr_phase_unpack(packed, packedn, &restored, &rn, 0, 0) != 0, "reject-dictionary-reference-range");
+            for(int i=0;i<4;i++)packed[packedn-4+i]=tail[i];
+            unsigned char *extra=mm_alloc(packedn+1);if(extra){mm_copy(extra,packedn+1,packed,packedn);extra[packedn]=0;ck(fr_phase_unpack(extra,packedn+1,&restored,&rn,0,0)!=0,"reject-physical-tail");mm_free(extra);}
+            mm_free(packed);
+        }
+        ck(fr_phase_pack(expected, en-1, &packed, &packedn, 0, 0) != 0, "reject-truncated-source-frame");
+        ck(fr_phase_unpack(0, 0, &restored, &rn, 0, 0) != 0, "reject-null-physical-input");
+    }
+    mm_free(actual); mm_free(expected);
+    ck(fr_shared_add(0, "x", 1, text, sizeof text) != 0, "reject-null-store");
+    ck(fr_shared_materialize(0, &actual, &an) != 0, "reject-null-materialize");
+    fr_shared_drop(0);
+    printf("SHARED_FRAMES\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

@@ -369,3 +369,29 @@ limitations acquire a location but keep their not-covered reason and stop.
 `parse2/errorcheck.py` compares 17 complete results and checks one such
 limitation separately. `c/multiwarningcheck.sh` additionally compares 18
 cross-unit error results, covering order, recovery and limits.
+
+## Internal compact phase dictionary (`UNIFP1`)
+
+Only explicit internal `UNISACC_PP_COMPACT=1` phase material uses this physical
+representation. The phase outer header remains LE32(frame physical bytes),
+LE32(attribute bytes), followed by physical frame payload and the original
+attribute table. Ordinary phases and public stream bytes keep the old format.
+
+The physical frame payload starts with the eight bytes `UNIFP1\0\0`, then
+LE32 logical-frame bytes, dictionary-entry count and ordered-reference count.
+Each dictionary entry is LE32 length followed by exact bytes; the remaining
+LE32 values index those entries in original logical order. This is not zstd or
+a model/source cache. Consumers reject invalid extents, references, unused
+entries, logical sum mismatch and trailing bytes, then restore the exact old
+framed `UNITOK1` wire and original attributes. No unit IDs or source mapping
+records are rewritten, and no macro evaluation or parsing is skipped.
+
+Material metrics distinguish raw source reads, token payloads, logical frames,
+physical phase bytes, unique dictionary bytes, multiply referenced dictionary
+bytes and actual restored/consumed bytes. The dictionary uses generic exact
+chunks, not semantic header identities. `unique_header_bytes` remains
+`UNMEASURED`: UNIPP2 include records contain insertion-time `(IRLN, IRNL, name)`
+without resolved identity/parent depth or final recursive expanded span; the
+UNITOK1 offsets refer to the complete expanded text, not an additional header
+boundary map. These records cannot prove unique header byte ranges. A measured
+physical reduction is not evidence that semantic input was not restored.
