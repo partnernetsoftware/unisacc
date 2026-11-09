@@ -4,12 +4,13 @@
  *   sh ./unisacc.com tests/chain-fixed-point.cx -- --self-test     the negative controls
  *
  * GEN1 is the first-generation candidate (the lnx/x86_64 slice candidate of the chain), FPDIR the OUT of
- * `tools/chain-step.cx fixedpoint`: FPDIR/g2 and FPDIR/g3, each with candidate and receipt.txt.
+ * `tools/chain-step.cx fixedpoint`: FPDIR/g2 and FPDIR/g3 contain six target directories
+ * and phase-0.tsv through phase-5.tsv receipts (phase-6.tsv is the kernel phase).
  * Passes only when all of these hold:
- *   F1  g2/candidate and g3/candidate exist and have the same sha256 (the fixed point)
- *   F2  g2/receipt.txt constructor_sha == sha256(GEN1): g2 was built by generation 1
- *   F3  g3/receipt.txt constructor_sha == sha256(g2/candidate): g3 was built by generation 2
- *   F4  both receipts name the same p3_sha and root (one package, one snapshot)
+ *   F1  all six generation-2/3 slices exist and have matching sha256 (the fixed point)
+ *   F2  g2/phase-0.tsv constructor_sha == sha256(GEN1): g2 was built by generation 1
+ *   F3  g3/phase-0.tsv constructor_sha == sha256(g2/lnx-x86_64/candidate)
+ *   F4  all slice receipts name the same p3_sha and root (one package, one snapshot)
  * F2 and F3 make a copied file fail: equal bytes alone do not show that each generation built the next.
  * What it does not show: two independent constructions. Both generations come from one chain run on one
  * host with one snapshot; an independent second construction (another host, another checkout) is not
@@ -55,11 +56,15 @@ static int fp_row(const char *path, const char *key, char *o, int cap) {
     mm_free(b);
     return -1;
 }
+static const char *fp_slices[6] = {"lnx-x86_64/candidate", "lnx-arm64/candidate",
+    "osx-x86_64/slice-osx-x86_64", "osx-arm64/slice-osx-arm64",
+    "win-x86_64/slice-win-x86_64", "win-arm64/slice-win-arm64"};
+static const char *fp_targets[6] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
 static int fp_judge(const char *gen1, const char *fp) {
     char p2[4400], p3[4400], r2[4400], r3[4400], h1[65], h2[65], h3[65], c2[128], c3[128], k2[128], k3[128], o2[4400], o3[4400];
     int before = fp_failed;
-    if (cx_fmt(p2, sizeof p2, "%s/g2/candidate", fp) || cx_fmt(p3, sizeof p3, "%s/g3/candidate", fp) ||
-        cx_fmt(r2, sizeof r2, "%s/g2/receipt.txt", fp) || cx_fmt(r3, sizeof r3, "%s/g3/receipt.txt", fp)) return 2;
+    if (cx_fmt(p2, sizeof p2, "%s/g2/lnx-x86_64/candidate", fp) || cx_fmt(p3, sizeof p3, "%s/g3/lnx-x86_64/candidate", fp) ||
+        cx_fmt(r2, sizeof r2, "%s/g2/phase-0.tsv", fp) || cx_fmt(r3, sizeof r3, "%s/g3/phase-0.tsv", fp)) return 2;
     fp_sha(gen1, h1); fp_sha(p2, h2); fp_sha(p3, h3);
     fp_ck(h2[0] && h3[0] && tx_eqz(h2, h3), "F1.gen2-equals-gen3", h2[0] ? h2 : "gen2 missing");
     fp_row(r2, "constructor_sha", c2, sizeof c2);
@@ -69,24 +74,51 @@ static int fp_judge(const char *gen1, const char *fp) {
     fp_row(r2, "p3_sha", k2, sizeof k2); fp_row(r3, "p3_sha", k3, sizeof k3);
     fp_row(r2, "root", o2, sizeof o2); fp_row(r3, "root", o3, sizeof o3);
     fp_ck(k2[0] && tx_eqz(k2, k3) && o2[0] && tx_eqz(o2, o3), "F4.same-package-and-snapshot", k2[0] ? k2 : "no p3_sha");
+    {
+        int i, g;
+        char base_pkg[128], base_root[4400], label[128], hs2[65], hs3[65];
+        cx_fmt(base_pkg, sizeof base_pkg, "%s", k2); cx_fmt(base_root, sizeof base_root, "%s", o2);
+        for (i = 0; i < 6; i++) {
+            cx_fmt(p2, sizeof p2, "%s/g2/%s", fp, fp_slices[i]); cx_fmt(p3, sizeof p3, "%s/g3/%s", fp, fp_slices[i]);
+            fp_sha(p2, hs2); fp_sha(p3, hs3);
+            cx_fmt(label, sizeof label, "F1.slice.%s", fp_targets[i]);
+            fp_ck(hs2[0] && hs3[0] && tx_eqz(hs2, hs3), label, hs2[0] ? hs2 : "gen2 slice missing");
+            for (g = 2; g <= 3; g++) {
+                const char *expected = i < 2 ? (g == 2 ? h1 : h2) : (g == 2 ? h2 : h3);
+                cx_fmt(r2, sizeof r2, "%s/g%d/phase-%d.tsv", fp, g, i);
+                fp_row(r2, "constructor_sha", c2, sizeof c2);
+                cx_fmt(label, sizeof label, "F%d.constructor.%s", g, fp_targets[i]);
+                fp_ck(expected[0] && c2[0] && tx_eqz(c2, expected), label, c2[0] ? c2 : "no constructor_sha");
+                fp_row(r2, "p3_sha", k2, sizeof k2); fp_row(r2, "root", o2, sizeof o2);
+                cx_fmt(label, sizeof label, "F4.g%d.%s", g, fp_targets[i]);
+                fp_ck(base_pkg[0] && tx_eqz(k2, base_pkg) && base_root[0] && tx_eqz(o2, base_root), label, k2[0] ? k2 : "no p3_sha");
+            }
+        }
+    }
     return fp_failed > before ? 1 : 0;
 }
-/* Negative controls: a scratch fixed point built from a real small file, then broken three ways. */
+/* Negative controls retain generation/package failures and exercise every slice. */
 static char fp_dir[4400];
 static void fp_put(const char *rel, const char *b, size_t n) {
     char p[4400];
     if (cx_fmt(p, sizeof p, "%s/%s", fp_dir, rel) || cx_write(p, b, n)) { sy_eprintf("chain-fixed-point: cannot write %s\n", rel); exit(2); }
 }
 static void fp_mk(const char *g1, const char *g2, const char *g3, const char *c2, const char *c3, const char *pkg3) {
-    char r[1024];
-    char p[4400];
-    cx_fmt(p, sizeof p, "%s/g2", fp_dir); sy_mkdir(p, 0755);
-    cx_fmt(p, sizeof p, "%s/g3", fp_dir); sy_mkdir(p, 0755);
+    char r[1024], p[4400], rel[256], h2[65], h3[65];
+    int i, g;
+    cx_sha256_hex(g2, tx_len(g2, 4096), h2); cx_sha256_hex(g3, tx_len(g3, 4096), h3);
     fp_put("g1", g1, tx_len(g1, 4096));
-    fp_put("g2/candidate", g2, tx_len(g2, 4096));
-    fp_put("g3/candidate", g3, tx_len(g3, 4096));
-    cx_fmt(r, sizeof r, "root\t/snap\np3_sha\taaaa\nconstructor_sha\t%s\n", c2); fp_put("g2/receipt.txt", r, tx_len(r, sizeof r));
-    cx_fmt(r, sizeof r, "root\t/snap\np3_sha\t%s\nconstructor_sha\t%s\n", pkg3, c3); fp_put("g3/receipt.txt", r, tx_len(r, sizeof r));
+    for (g = 2; g <= 3; g++) {
+        cx_fmt(p, sizeof p, "%s/g%d", fp_dir, g); sy_mkdir(p, 0755);
+        for (i = 0; i < 6; i++) {
+            const char *bytes = g == 2 ? g2 : g3;
+            const char *ctor = i < 2 ? (g == 2 ? c2 : c3) : (g == 2 ? h2 : h3);
+            cx_fmt(p, sizeof p, "%s/g%d/%s", fp_dir, g, fp_targets[i]); sy_mkdir(p, 0755);
+            cx_fmt(rel, sizeof rel, "g%d/%s", g, fp_slices[i]); fp_put(rel, bytes, tx_len(bytes, 4096));
+            cx_fmt(r, sizeof r, "root\t/snap\np3_sha\t%s\nconstructor_sha\t%s\n", g == 2 ? "aaaa" : pkg3, ctor);
+            cx_fmt(rel, sizeof rel, "g%d/phase-%d.tsv", g, i); fp_put(rel, r, tx_len(r, sizeof r));
+        }
+    }
 }
 static int fp_self(void) {
     const char *tmp = getenv("TMPDIR");
@@ -105,6 +137,22 @@ static int fp_self(void) {
     if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.chain-broken-refused\n"); bad++; } else sy_printf("PASS\tself.chain-broken-refused\n");
     fp_mk("generation-one", "fixed", "fixed", h1, h2, "bbbb");
     if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.package-differs-refused\n"); bad++; } else sy_printf("PASS\tself.package-differs-refused\n");
+    {
+        int i, g;
+        char rel[256], cmd[4600];
+        for (i = 0; i < 6; i++) for (g = 2; g <= 3; g++) {
+            fp_mk("generation-one", "fixed", "fixed", h1, h2, "aaaa");
+            cx_fmt(rel, sizeof rel, "g%d/%s", g, fp_slices[i]);
+            fp_put(rel, "fixeD", 5);
+            if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.g%d.%s.differs-refused\n", g, fp_targets[i]); bad++; }
+            else sy_printf("PASS\tself.g%d.%s.differs-refused\n", g, fp_targets[i]);
+            fp_mk("generation-one", "fixed", "fixed", h1, h2, "aaaa");
+            cx_fmt(cmd, sizeof cmd, "rm -f %s/%s", fp_dir, rel);
+            if (system(cmd) != 0) bad++;
+            if (fp_judge(g1, fp_dir) == 0) { sy_printf("FAIL\tself.g%d.%s.missing-refused\n", g, fp_targets[i]); bad++; }
+            else sy_printf("PASS\tself.g%d.%s.missing-refused\n", g, fp_targets[i]);
+        }
+    }
     fp_failed = saved;
     {   char cmd[4600]; cx_fmt(cmd, sizeof cmd, "rm -rf %s", fp_dir); if (system(cmd) != 0) bad++; }
     sy_printf("CHAIN_FIXED_POINT\tfailed=%d\n", bad);

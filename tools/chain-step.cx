@@ -38,9 +38,13 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use text.text
+#pragma unisa use sys.time
 #pragma unisa use mem.heap
 
 static const char *g_self;
+static int cs_fp_active;
+static const char *cs_fp_helper;
+static char cs_fp_source[65];
 
 static void cs_die(const char *a, const char *b) {
     sy_eprintf("chain-step: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -50,6 +54,12 @@ static void cs_die(const char *a, const char *b) {
 /* argv: 在 cwd 里跑一个程序，返回退出码；子进程 stdout+stderr 都转回本进程。 */
 static int cs_run(char **argv, const char *cwd) {
     int ofd = -1, pid, ex = 0, code = 0, sig = 0;
+    if (cs_fp_active) {
+        char *out = 0; size_t n = 0;
+        int rc = cx_runv_timeout(argv, 270, &out, &n);
+        if (out && sy_write_all(1, out, n)) cs_die("child output", argv[0]);
+        free(out); return rc;
+    }
     pid = sy_spawn_pipe(argv, cwd, 0, &ofd, 0);
     if (pid < 0) cs_die("spawn", argv[0]);
     if (ofd >= 0) {
@@ -512,70 +522,104 @@ static int cs_fp_objects(const char *d2, const char *d3) {
     }
     closedir(dp);
     if (n2 != n3) { sy_printf("CHAIN\tfixedpoint\tobjects=MISMATCH\tcount %d vs %d\n", n2, n3); return 1; }
+    if (n2 == 0) { sy_printf("CHAIN\tfixedpoint\tobjects=MISSING\n"); return 1; }
     if (ok != n2) { sy_printf("CHAIN\tfixedpoint\tobjects=MISMATCH\tok=%d/%d\t%s\n", ok, n2, why); return 1; }
     sy_printf("CHAIN\tfixedpoint\tobjects=same\tcount=%d\n", n2);
     return 0;
 }
-/* 一代的五片各在 <代目录>/<os>-<arch>/ 里：objects 路由（lnx 两片）的产物叫 candidate，
-   whole-o 路由（osx 两片、win）的产物叫 slice-<os>-<arch>，与 release-build 的真实落盘一致。 */
-static const char *cs_fp_slices[5] = {"lnx-x86_64/candidate", "lnx-arm64/candidate",
+/* 六片位于各代目标目录；objects 路由名 candidate，whole-o 名 slice-<target>。 */
+static const char *cs_fp_slices[6] = {"lnx-x86_64/candidate", "lnx-arm64/candidate",
                                       "osx-x86_64/slice-osx-x86_64", "osx-arm64/slice-osx-arm64",
-                                      "win-x86_64/slice-win-x86_64"};
+                                      "win-x86_64/slice-win-x86_64", "win-arm64/slice-win-arm64"};
 /* 五项：objects / kernels / slices / product / package。每项恰好一行，任一不一致返回 1。
    objects 比 lnx/x86_64 子目录里的 .o（product 就由它们链接而成）。 */
 static int cs_fp_five(const char *g2, const char *g3, const char *pkg) {
-    static const char *kernels[2] = {"x86_64.kernel", "arm64.kernel"};
+    static const char *kernels[2] = {"kernel-route/x86_64.kernel", "kernel-route/arm64.kernel"};
     char a[4400], b[4400], why[512];
     int bad = 0;
     if (cx_fmt(a, sizeof a, "%s/lnx-x86_64", g2) || cx_fmt(b, sizeof b, "%s/lnx-x86_64", g3)) cs_die("path", "objects");
     if (cs_fp_objects(a, b)) bad = 1;
     if (cs_fp_set(g2, g3, "kernels", kernels, 2)) bad = 1;
-    if (cs_fp_set(g2, g3, "slices", cs_fp_slices, 5)) bad = 1;
+    if (cs_fp_set(g2, g3, "slices", cs_fp_slices, 6)) bad = 1;
     if (cx_fmt(a, sizeof a, "%s/%s", g2, cs_fp_slices[0]) || cx_fmt(b, sizeof b, "%s/%s", g3, cs_fp_slices[0]))
         cs_die("path", "product");
     if (cs_fp_eq(a, b, "candidate", why, sizeof why)) sy_printf("CHAIN\tfixedpoint\tproduct=same\n");
     else { sy_printf("CHAIN\tfixedpoint\tproduct=MISMATCH\t%s\n", why); bad = 1; }
     if (cs_file_size(pkg) < 0) { sy_printf("CHAIN\tfixedpoint\tpackage=MISSING\n"); bad = 1; }
-    else { char h[65]; cs_sha(pkg, h); sy_printf("CHAIN\tfixedpoint\tpackage=same\tsha=%.16s\n", h); }
+    else { char h[65]; cs_sha(pkg, h); sy_printf("CHAIN\tfixedpoint\tpackage=present\tsha=%s\n", h); }
     return bad;
 }
 static int cs_fp_compare(const char *d2, const char *d3, const char *pkg) {
     return cs_fp_five(d2, d3, pkg) ? 1 : 0;
 }
-/* 一代：五片按目标清单构造，每片落在自己的子目录（见 cs_fp_slices），CTOR 的取法分两类：
-   1) lnx/x86_64 与 lnx/arm64 走 objects 路由：两片都用上一代 product 作 CTOR；
-      lnx/x86_64 的 candidate 同时是本代的 product；
-   2) 三个 whole-o 片（osx/x86_64、osx/arm64、win/x86_64）统一用**本代** lnx/x86_64 candidate。
-   CTOR 经环境变量 UNISACC_CTOR 传给 release-build，每次 cs_slice 之前重新 setenv。 */
-static const char *cs_fp_targets[5] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64"};
-static int cs_fp_gen(const char *rev, const char *s, const char *pkg, const char *dir,
-                     const char *ctor, char *product, long cap) {
-    char cur[4400], sub[4400], lnx[4400];
-    int i;
-    if (cx_fmt(cur, sizeof cur, "%s", ctor)) cs_die("path", "ctor");
-    if (cx_fmt(lnx, sizeof lnx, "%s/%s", dir, cs_fp_slices[0])) cs_die("path", dir);
-    if (sy_mkdir(dir, 0755) && cs_file_size(dir) < 0) cs_die("mkdir", dir);
-    for (i = 0; i < 5; i++) {
-        char *a[10];
-        int n = 0, k;
-        const char *sl = cs_fp_slices[i];
-        for (k = 0; sl[k] && sl[k] != '/'; k++) {}
-        if (cx_fmt(sub, sizeof sub, "%s/%.*s", dir, k, sl)) cs_die("path", dir);
-        if (i >= 2) {
-            if (cs_file_size(lnx) < 0) cs_die("lnx candidate missing before whole-o", lnx);
-            if (cx_fmt(cur, sizeof cur, "%s", lnx)) cs_die("path", dir);
-        }
-        if (sy_setenv("UNISACC_CTOR", cur, 1)) cs_die("env", "UNISACC_CTOR");
-        a[n++] = (char *)pkg; a[n++] = sub;
-        a[n++] = (char *)"--target"; a[n++] = (char *)cs_fp_targets[i]; a[n] = 0;
-        if (cs_slice(rev, s, n, a)) return 2;
-        {   char got[4400];
-            if (cx_fmt(got, sizeof got, "%s/%s", dir, sl)) cs_die("path", dir);
-            if (cs_file_size(got) < 0) cs_die("slice product missing", got);
-        }
+/* 两个 objects 目标绑定上一代 product；四个 whole-o 目标绑定本代 product。 */
+static const char *cs_fp_targets[6] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+/* Canonical recursive content identity. Unknown file types and symlinks refuse;
+   only source-root .git/out are excluded, never artifact descendants. */
+static int cs_namecmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static void cs_tree(const char *dir, int source, char out[65]) {
+    DIR *dp = opendir(dir); struct dirent *e; char **names = 0; long count = 0, cap = 0, at = 0, i;
+    char *text;
+    if (!dp) cs_die("identity directory", dir);
+    while ((e = readdir(dp))) {
+        long n = strlen(e->d_name), k;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (source && (!strcmp(e->d_name, ".git") || !strcmp(e->d_name, "out"))) continue;
+        for (k = 0; k < n; k++) if ((unsigned char)e->d_name[k] < 32) cs_die("identity name", dir);
+        if (count == cap) { cap = cap ? cap * 2 : 32; names = realloc(names, cap * sizeof *names); if (!names) cs_die("alloc", dir); }
+        names[count] = malloc(n + 1); if (!names[count]) cs_die("alloc", dir);
+        long pos = 0; cs_put(names[count++], n + 1, &pos, e->d_name, n);
     }
-    if (cx_fmt(product, cap, "%s", lnx)) cs_die("path", dir);
-    return 0;
+    closedir(dp); qsort(names, count, sizeof *names, cs_namecmp);
+    cap = 1;
+    for (i = 0; i < count; i++) cap += strlen(names[i]) + 70;
+    text = malloc(cap); if (!text) cs_die("alloc", dir); text[0] = 0;
+    for (i = 0; i < count; i++) {
+        char p[4400], h[65]; struct stat st;
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, names[i]) || lstat(p, &st)) cs_die("identity stat", dir);
+        if (S_ISDIR(st.st_mode)) { cs_tree(p, 0, h); cs_puts(text, cap, &at, "D\t"); }
+        else if (S_ISREG(st.st_mode)) { cs_sha(p, h); cs_puts(text, cap, &at, "F\t"); }
+        else cs_die("identity unknown file type", p);
+        cs_puts(text, cap, &at, names[i]); cs_puts(text, cap, &at, "\t");
+        cs_puts(text, cap, &at, h); cs_puts(text, cap, &at, "\n"); free(names[i]);
+    }
+    if (sy_sha256_hex(text, at, out)) cs_die("identity hash", dir);
+    free(text); free(names);
+}
+/* The existing F-v2 helper owns physical source bytes and alias topology. */
+static void cs_source(const char *s, char out[65]) {
+    char *text = 0, before[65], after[65]; size_t n = 0; int k;
+    if (!cs_fp_helper) cs_die("REFUSE --identity-helper required", s);
+    cs_sha(cs_fp_helper, before);
+    char *v[] = {(char *)cs_fp_helper, (char *)s, 0};
+    int rc = cx_runv_timeout(v, 8, &text, &n);
+    cs_sha(cs_fp_helper, after);
+    if (rc || strcmp(before, after) || !text || n != 65 || text[64] != '\n') cs_die("REFUSE F-v2 source identity", s);
+    for (k = 0; k < 64; k++) { if (!((text[k] >= '0' && text[k] <= '9') || (text[k] >= 'a' && text[k] <= 'f'))) cs_die("REFUSE source SID wire", s); out[k] = text[k]; }
+    out[64] = 0; free(text);
+}
+static void cs_fp_record(const char *s, const char *rev, const char *pkg, const char *ctor,
+                         const char *artifact, const char *receipt, int reuse, long wall) {
+    char source[65], ph[65], ch[65], ah[65], hh[65], self[65], tool[4400], th[65], text[16384]; long n;
+    if (cx_fmt(source, sizeof source, "%s", cs_fp_source)) cs_die("source identity", s);
+    cs_sha(pkg, ph); cs_sha(ctor, ch); cs_tree(artifact, 0, ah);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/release-build.cx", s)) cs_die("path", s); cs_sha(tool, th);
+    cs_sha(cs_fp_helper, hh); cs_sha("/proc/self/exe", self);
+    if (cx_fmt(text, sizeof text, "chain-fixedpoint-v3\nroot\t%s\nrev\t%s\nsource_sha\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nrelease_sha\t%s\nartifact\t%s\nartifact_sha\t%s\nhelper_sha\t%s\nchain_sha\t%s\n", s, rev, source, ph, ctor, ch, th, artifact, ah, hh, self)) cs_die("identity overflow", artifact);
+    n = strlen(text);
+    if (reuse) {
+        long size = 0; char *old = cs_load(receipt, &size);
+        if (!old || size < n + 10 || memcmp(old, text, n) || strncmp(old + n, "wall_ms\t", 8)) cs_die("REFUSE resume identity", receipt);
+        long k = n + 8; wall = 0;
+        while (k < size - 1 && old[k] >= '0' && old[k] <= '9') { if (wall > 300000) cs_die("REFUSE wall evidence", receipt); wall = wall * 10 + old[k++] - '0'; }
+        if (k != size - 1 || old[k] != '\n' || wall > 300000) cs_die("REFUSE wall evidence", receipt);
+        free(old);
+    } else {
+        char tail[80]; long at = n;
+        if (cx_fmt(tail, sizeof tail, "wall_ms\t%ld\n", wall)) cs_die("wall", receipt);
+        cs_puts(text, sizeof text, &at, tail); cs_save(receipt, text, at);
+    }
+    sy_printf("PREPARED\tfixedpoint\tartifact=%s\tsha=%s\tconstructor_sha=%s\tsource_sha=%s\twall_ms=%ld\treused=%d\n", artifact, ah, ch, source, wall, reuse);
 }
 /* 一代：两个 ISA 的 kernel 落到同一目录（复用 cs_routes_kernels 的调用方式）。 */
 static int cs_fp_kernels(const char *s, const char *dir) {
@@ -595,29 +639,95 @@ static int cs_fp_kernels(const char *s, const char *dir) {
     }
     return 0;
 }
+static int cs_fp_step(const char *sub, const char *step, long wall, int save) {
+    char path[4400], needle[256], line[320]; long n = 0; char *old;
+    if (cx_fmt(path, sizeof path, "%s/.chain-steps", sub) || cx_fmt(needle, sizeof needle, "\n%s\t", step)) cs_die("step path", sub);
+    old = cs_load(path, &n);
+    if (!save) { int found = old && strstr(old, needle); free(old); return found; }
+    if (cx_fmt(line, sizeof line, "\n%s\t%ld\n", step, wall)) cs_die("step wall", sub);
+    long len = strlen(line), at = 0; char *text = malloc(n + len + 1);
+    if (!text) cs_die("alloc", sub); text[0] = 0;
+    if (old) cs_put(text, n + len + 1, &at, old, n);
+    cs_puts(text, n + len + 1, &at, line); cs_save(path, text, at); free(old); free(text); return 0;
+}
+/* One invocation is exactly one bounded construction phase or a fresh comparison.
+   A resume receipt is material provenance, never a cached comparison/PASS. */
 static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
-                         const char *target) {
-    char g2[4400], g3[4400], c2[4400], c3[4400];
-    if (cs_file_size(gen1) < 0) cs_die("gen1 candidate missing", gen1);
-    if (cx_fmt(g2, sizeof g2, "%s/g2", out)) cs_die("path", out);
-    if (cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
-    /* 两代都跑全五片：门槛 8 要求 kernels 与 slices 也在每代树里，才能五项逐字节比。
-       target 参数保留只为兼容旧调用，实际按固定五片清单执行。 */
-    (void)target;
-    if (cs_fp_gen(rev, s, pkg, g2, gen1, c2, sizeof c2)) return 2;
-    if (cs_fp_gen(rev, s, pkg, g3, c2, c3, sizeof c3)) return 2;
-    if (cs_fp_kernels(s, g2) || cs_fp_kernels(s, g3)) return 2;
-    if (cs_fp_five(g2, g3, pkg)) {
-        sy_printf("CHAIN\tfixedpoint\tMISMATCH\tgen2=%s\tgen3=%s\n", c2, c3);
-        return 1;
+                         const char *target, const char *phase, int resume, const char *object, int link) {
+    char dir[4400], sub[4400], ctor[4400], rec[4400], g2[4400], g3[4400];
+    int g, i, selected = -1, compare = tx_eqz(phase, "compare");
+    cs_fp_active = 1;
+    if (cx_fmt(g2, sizeof g2, "%s/g2", out) || cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
+    for (i = 0; i < 6; i++) if (target && tx_eqz(target, cs_fp_targets[i])) selected = i;
+    if (!compare && selected < 0 && !tx_eqz(phase, "kernels-g2") && !tx_eqz(phase, "kernels-g3")) cs_die("REFUSE unknown target", target);
+    if (!compare && !tx_eqz(phase, "g2") && !tx_eqz(phase, "g3") && !tx_eqz(phase, "kernels-g2") && !tx_eqz(phase, "kernels-g3")) cs_die("REFUSE unknown phase", phase);
+    if (target && selected < 0) cs_die("REFUSE unknown target", target);
+    if (compare && (object || link)) cs_die("REFUSE compare object options", phase);
+    if (!compare && selected < 2 && selected >= 0 && !object && !link) cs_die("REFUSE objects needs --object KEY or --link-only", target);
+    if ((object || link) && (selected < 0 || selected >= 2 || (object && link))) cs_die("REFUSE object options", target);
+    if (object) { long k; for (k = 0; object[k]; k++) if (!(object[k] == '.' || object[k] == '_' || (object[k] >= 'a' && object[k] <= 'z') || (object[k] >= '0' && object[k] <= '9'))) cs_die("REFUSE object key", object); }
+    if (strlen(rev) != 40) cs_die("REFUSE full revision required", rev);
+    for (i = 0; i < 40; i++) if (!((rev[i] >= '0' && rev[i] <= '9') || (rev[i] >= 'a' && rev[i] <= 'f'))) cs_die("REFUSE revision", rev);
+    {
+        char cwd[4400], expected[4400], actual[4400], marker[4400]; long n = 0; char *m;
+        if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_realpath(s, actual, sizeof actual) < 0 || cx_fmt(expected, sizeof expected, "%s/out/release-snap-%.10s", cwd, rev) || strcmp(expected, actual)) cs_die("REFUSE release snapshot path", s);
+        if (cx_fmt(marker, sizeof marker, "%s/.release-rev", s)) cs_die("path", s);
+        m = cs_load(marker, &n); if (!m || n != 40 || memcmp(m, rev, 40)) cs_die("REFUSE snapshot revision", s); free(m);
     }
-    {   char h2[65], h3[65];
-        cs_sha(c2, h2);
-        cs_sha(c3, h3);
-        sy_printf("CHAIN\tfixedpoint\tgen2=%.16s\tgen3=%.16s\tbytes=%ld\tsame=1\titems=5\n",
-                  h2, h3, cs_file_size(c2));
+    if (sy_mkdir(out, 0755) && cs_file_size(out) < 0) cs_die("mkdir", out);
+    cs_source(s, cs_fp_source);
+    for (g = 2; g <= 3; g++) {
+        if (!compare && ((g == 2) != (tx_eqz(phase, "g2") || tx_eqz(phase, "kernels-g2")))) continue;
+        if (cx_fmt(dir, sizeof dir, "%s/g%d", out, g)) cs_die("path", out);
+        if (sy_mkdir(dir, 0755) && cs_file_size(dir) < 0) cs_die("mkdir", dir);
+        for (i = 0; i < 7; i++) {
+            int kernel = i == 6; long start;
+            if (!compare && (kernel ? !tx_eqz(phase, g == 2 ? "kernels-g2" : "kernels-g3") : (i != selected || !tx_eqz(phase, g == 2 ? "g2" : "g3")))) continue;
+            if (cx_fmt(sub, sizeof sub, "%s/%s", dir, kernel ? "kernel-route" : i == 0 ? "lnx-x86_64" : i == 1 ? "lnx-arm64" : i == 2 ? "osx-x86_64" : i == 3 ? "osx-arm64" : i == 4 ? "win-x86_64" : "win-arm64")) cs_die("path", dir);
+            if (cx_fmt(rec, sizeof rec, "%s/phase-%d.tsv", dir, i)) cs_die("path", dir);
+            if (kernel) { if (cx_fmt(ctor, sizeof ctor, "%s/unisacc.com", s)) cs_die("path", s); }
+            else if (i >= 2) { if (cx_fmt(ctor, sizeof ctor, "%s/lnx-x86_64/candidate", dir)) cs_die("path", dir); }
+            else if (g == 2) { if (cx_fmt(ctor, sizeof ctor, "%s", gen1)) cs_die("path", gen1); }
+            else if (cx_fmt(ctor, sizeof ctor, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2);
+            /* Validate the constructor's provenance, not merely its current bytes. */
+            if (!kernel && (g == 3 || i >= 2)) {
+                char dep[4400], dr[4400], dc[4400];
+                const char *base = i >= 2 ? dir : g2;
+                if (cx_fmt(dep, sizeof dep, "%s/lnx-x86_64", base) || cx_fmt(dr, sizeof dr, "%s/phase-0.tsv", base)) cs_die("path", base);
+                if (i >= 2 && g == 3) { if (cx_fmt(dc, sizeof dc, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2); }
+                else if (cx_fmt(dc, sizeof dc, "%s", gen1)) cs_die("path", gen1);
+                cs_fp_record(s, rev, pkg, dc, dep, dr, 1, 0);
+                if (!cs_fp_step(dep, "link", 0, 0)) cs_die("REFUSE incomplete constructor", dep);
+            }
+            const char *step = kernel ? "kernels" : i < 2 ? (object ? object : "link") : "whole-o";
+            if (compare || (resume && sy_exists(rec))) {
+                cs_fp_record(s, rev, pkg, ctor, sub, rec, 1, 0);
+                if (compare) { if (!cs_fp_step(sub, kernel ? "kernels" : i < 2 ? "link" : "whole-o", 0, 0)) cs_die("REFUSE incomplete phase", sub); continue; }
+                if (cs_fp_step(sub, step, 0, 0)) continue;
+                if (cs_fp_step(sub, "link", 0, 0)) cs_die("REFUSE modifying linked slice", sub);
+            } else if (sy_exists(sub) || sy_exists(rec)) cs_die("REFUSE unrecorded/existing phase", sub);
+            start = sy_now_ms();
+            char before_source[65], before_pkg[65], before_ctor[65];
+            if (cx_fmt(before_source, sizeof before_source, "%s", cs_fp_source)) cs_die("identity", s);
+            cs_sha(pkg, before_pkg); cs_sha(ctor, before_ctor);
+            if (kernel) { if (cs_fp_kernels(s, dir)) return 2; }
+            else {
+                char *a[8] = {(char *)pkg, sub, "--target", (char *)cs_fp_targets[i], 0}; int an = 4;
+                if (object) { a[an++] = "--only"; a[an++] = (char *)object; }
+                if (link) a[an++] = "--link-only";
+                a[an] = 0;
+                if (sy_setenv("UNISACC_CTOR", ctor, 1)) cs_die("env", ctor);
+                if (cs_slice(rev, s, an, a)) return 2;
+            }
+            char after_pkg[65], after_ctor[65];
+            cs_source(s, cs_fp_source); cs_sha(pkg, after_pkg); cs_sha(ctor, after_ctor);
+            if (strcmp(before_source, cs_fp_source) || strcmp(before_pkg, after_pkg) || strcmp(before_ctor, after_ctor)) cs_die("REFUSE phase inputs changed", sub);
+            cs_fp_step(sub, step, sy_now_ms() - start, 1);
+            cs_fp_record(s, rev, pkg, ctor, sub, rec, 0, sy_now_ms() - start);
+        }
     }
-    return 0;
+    if (!compare) return 0;
+    return cs_fp_five(g2, g3, pkg);
 }
 
 static int cs_build(const char *rev, const char *s, const char *b) {
@@ -809,25 +919,38 @@ int main(int argc, char **argv) {
         if (argc < 6) cs_die("routes needs REV S CTX OUT", 0);
         return cs_routes(argv[2], argv[3], argv[4], argv[5]);
     }
+    if (tx_eqz(argv[1], "fp-identity")) {
+        if (argc != 9) cs_die("fp-identity needs S REV PKG CTOR ARTIFACT RECEIPT IDENTITY_HELPER", 0);
+        cs_fp_helper = argv[8]; cs_source(argv[2], cs_fp_source);
+        cs_fp_record(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], 1, 0);
+        return 0;
+    }
     /* 回放用：fp-compare DIR2 DIR3 PKG —— 不跑链，只对已有两代产物做五项比较。 */
     if (tx_eqz(argv[1], "fp-compare")) {
         if (argc < 5) cs_die("fp-compare needs DIR2 DIR3 PKG", 0);
         return cs_fp_compare(argv[2], argv[3], argv[4]) ? 1 : 0;
     }
     if (tx_eqz(argv[1], "fixedpoint")) {
-        /* fixedpoint REV S PKG GEN1 OUT --target T [--sample|--non-release]
-           默认完整两代; --sample 无 --non-release 即发布候选路径,拒绝抽样。 */
-        if (argc < 7) cs_die("fixedpoint needs REV S PKG GEN1 OUT --target T", 0);
+        /* fixedpoint REV S PKG GEN1 OUT --phase g2|g3|kernels-g2|kernels-g3|compare
+           --target T selects exactly one of six slices; no implicit long chain. */
+        if (argc < 9) cs_die("fixedpoint needs REV S PKG GEN1 OUT --phase PHASE", 0);
         {
-            const char *target = 0; int i, sample = 0, nonrel = 0;
-            for (i = 2; i < argc; i++) {
-                if (tx_eqz(argv[i], "--target") && i + 1 < argc) target = argv[i + 1];
-                if (tx_eqz(argv[i], "--sample")) sample = 1;
-                if (tx_eqz(argv[i], "--non-release")) nonrel = 1;
+            const char *target = 0, *phase = 0, *object = 0; int i, sample = 0, nonrel = 0, resume = 0, link = 0;
+            for (i = 7; i < argc; i++) {
+                if (tx_eqz(argv[i], "--target") && i + 1 < argc && !target) { target = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--phase") && i + 1 < argc && !phase) { phase = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--resume") && !resume) { resume = 1; continue; }
+                if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc && !cs_fp_helper) { cs_fp_helper = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--object") && i + 1 < argc && !object) { object = argv[++i]; continue; }
+                if (tx_eqz(argv[i], "--link-only") && !link) { link = 1; continue; }
+                if (tx_eqz(argv[i], "--sample")) { sample = 1; continue; }
+                if (tx_eqz(argv[i], "--non-release")) { nonrel = 1; continue; }
+                cs_die("REFUSE unknown/duplicate option", argv[i]);
             }
             if (sample && !nonrel) cs_die("REFUSE sample on release-candidate fixedpoint (default FULL)", 0);
-            if (!target) cs_die("fixedpoint needs --target T", 0);
-            return cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target);
+            if (sample || nonrel) cs_die("REFUSE sampled fixedpoint", 0);
+            if (!phase) cs_die("REFUSE fixedpoint needs --phase", 0);
+            return cs_fixedpoint(argv[2], argv[3], argv[4], argv[5], argv[6], target, phase, resume, object, link);
         }
     }
     sy_eprintf("chain-step: unknown step %s\n", argv[1]);

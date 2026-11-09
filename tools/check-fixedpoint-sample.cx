@@ -23,8 +23,88 @@ static int putf(const char *rel, const char *body) {
     char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
     return cx_write(p, body, tx_len(body, 2000));
 }
+/* 使用真实 chain-step 消费者；不以输出伪桩代替比较。 */
+static int chain(const char *args, char *out, size_t cap) {
+    char cmd[2200];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s/tools/chain-step.cx' -- %s 2>&1", td, com, root, args)) return 1;
+    return sh(cmd, out, cap);
+}
 
-int main(void) {
+/* --identity 只消费恢复收据；所有可变输入均在临时目录，S 始终只读。
+   SHA 使用外部 sha256sum 独立编制，不调用 chain 的收据生产路径。 */
+static int identity(const char *native, const char *helper, const char *source) {
+    char script[500]; char *o = 0; size_t n = 0;
+    const char *body =
+        "set -eu\n"
+        "chain=$1; helper=$2; source=$3; work=$4\n"
+        "cd \"$work\"\n"
+        "hash() { sha256sum -- \"$1\" | cut -d ' ' -f 1; }\n"
+        "mkdir artifact\n"
+        "printf artifact > artifact/item\n"
+        "printf package > package\n"
+        "printf constructor > constructor\n"
+        "sid=$(\"$helper\" \"$source\")\n"
+        "test ${#sid} -eq 64\n"
+        "ph=$(hash package); ch=$(hash constructor)\n"
+        "rh=$(hash \"$source/tools/release-build.cx\")\n"
+        "hh=$(hash \"$helper\"); nh=$(hash \"$chain\")\n"
+        "ih=$(hash artifact/item)\n"
+        "printf 'F\\titem\\t%s\\n' \"$ih\" > tree-input\n"
+        "ah=$(hash tree-input)\n"
+        "receipt() {\n"
+        " printf 'chain-fixedpoint-v3\\nroot\\t%s\\nrev\\tidentity-check\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor\\tconstructor\\nconstructor_sha\\t%s\\nrelease_sha\\t%s\\nartifact\\tartifact\\nartifact_sha\\t%s\\nhelper_sha\\t%s\\nchain_sha\\t%s\\nwall_ms\\t%s\\n' \"$1\" \"$2\" \"$ph\" \"$ch\" \"$rh\" \"$ah\" \"$hh\" \"$nh\" \"$3\" > receipt\n"
+        "}\n"
+        "consume() { \"$chain\" fp-identity \"$source\" identity-check package constructor artifact receipt \"$helper\" > consumer-output 2>&1; }\n"
+        "positive() {\n"
+        " if consume && grep -q 'PREPARED.*reused=1' consumer-output; then printf 'PASS\\tcheck-fixedpoint-sample.identity-%s\\n' \"$1\"; else cat consumer-output; exit 1; fi\n"
+        "}\n"
+        "negative() {\n"
+        " if consume; then cat consumer-output; printf 'FAIL\\tcheck-fixedpoint-sample.identity-%s\\n' \"$1\"; exit 1; fi\n"
+        " if ! grep -Eq 'REFUSE (resume identity|wall evidence)' consumer-output; then cat consumer-output; exit 1; fi\n"
+        " printf 'PASS\\tcheck-fixedpoint-sample.identity-%s\\n' \"$1\"\n"
+        "}\n"
+        "receipt \"$source\" \"$sid\" 1\n"
+        "positive initial\n"
+        "rm receipt\n"
+        "negative missing-receipt\n"
+        "receipt \"$source\" \"$sid\" 1\n"
+        "printf changed > artifact/item\n"
+        "negative artifact\n"
+        "printf artifact > artifact/item\n"
+        "printf changed > package\n"
+        "negative package\n"
+        "printf package > package\n"
+        "printf changed > constructor\n"
+        "negative constructor\n"
+        "printf constructor > constructor\n"
+        "receipt \"$source\" 0000000000000000000000000000000000000000000000000000000000000000 1\n"
+        "negative source-sha\n"
+        "receipt \"$work\" \"$sid\" 1\n"
+        "negative root\n"
+        "for wall in -1 invalid 300001 ''; do\n"
+        " receipt \"$source\" \"$sid\" \"$wall\"\n"
+        " negative wall-\"$wall\"\n"
+        "done\n"
+        "receipt \"$source\" \"$sid\" 1\n"
+        "positive restored\n";
+    if (cx_fmt(td, sizeof td, "%s/fp-identity-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "identity-tmpdir"); return 1; }
+    if (cx_fmt(script, sizeof script, "%s/check.sh", td) || cx_write(script, body, tx_len(body, 16000))) { ck(0, "identity-script"); return 1; }
+    /* 消费者共用 53 秒，清理最多 2 秒，总界 55 秒。 */
+    char *v[] = {"sh", script, (char *)native, (char *)helper, (char *)source, td, 0};
+    int rc = cx_runv_timeout(v, 53, &o, &n);
+    if (o) sy_printf("%s", o);
+    ck(rc == 0, "identity-complete");
+    { char *rm[] = {"rm", "-rf", td, 0}; char *discard = 0; size_t count = 0; cx_runv_timeout(rm, 2, &discard, &count); }
+    sy_printf("CHECK_FIXEDPOINT_SAMPLE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        if (argc == 5 && tx_eqz(argv[1], "--identity")) return identity(argv[2], argv[3], argv[4]);
+        sy_printf("usage: check-fixedpoint-sample [--identity CHAIN_NATIVE IDENT_HELPER REAL_FROZEN_S]\n");
+        return 2;
+    }
     char out[4096], cwd[400], cmd[2200]; char *o = 0; size_t n = 0;
     { char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
       mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
@@ -49,6 +129,32 @@ int main(void) {
     ck(sh(cmd, out, sizeof out) == 0 && has(out, "WAVE_EQ"), "wave-equals-oneshot");
     if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s/tools/chain-step.cx' -- fixedpoint r s p g1 o --target lnx/x86_64 --sample 2>&1", com, root)) return 1;
     ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE"), "chain-step-release-forbids-sample");
+
+    /* 六片、非空 objects 和双 ISA kernels 都必须参与真实比较。 */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p full2/lnx-x86_64 full2/lnx-arm64 full2/osx-x86_64 full2/osx-arm64 full2/win-x86_64 full2/win-arm64 full2/kernel-route && printf product > full2/lnx-x86_64/candidate && printf object > full2/lnx-x86_64/unit.o && printf arm > full2/lnx-arm64/candidate && printf osx64 > full2/osx-x86_64/slice-osx-x86_64 && printf osxarm > full2/osx-arm64/slice-osx-arm64 && printf win64 > full2/win-x86_64/slice-win-x86_64 && printf winarm > full2/win-arm64/slice-win-arm64 && printf kernel64 > full2/kernel-route/x86_64.kernel && printf kernelarm > full2/kernel-route/arm64.kernel && cp -R full2 full3 && printf package > fp.pkg", td)) return 1;
+    ck(sh(cmd, out, sizeof out) == 0, "six-slice-fixture");
+    ck(chain("fp-compare full2 full3 fp.pkg", out, sizeof out) == 0 &&
+       has(out, "objects=same\tcount=1") && has(out, "kernels=same\tcount=2") &&
+       has(out, "slices=same\tcount=6") && has(out, "product=same") &&
+       has(out, "package=present"), "six-slice-compare-positive");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && rm full3/win-arm64/slice-win-arm64", td)) return 1;
+    ck(sh(cmd, out, sizeof out) == 0, "remove-win-arm64-fixture");
+    ck(chain("fp-compare full2 full3 fp.pkg", out, sizeof out) != 0 &&
+       has(out, "slices=MISMATCH") && has(out, "win-arm64/slice-win-arm64"), "compare-refuses-missing-win-arm64");
+    ck(putf("full3/win-arm64/slice-win-arm64", "winArm") == 0, "change-win-arm64-fixture");
+    ck(chain("fp-compare full2 full3 fp.pkg", out, sizeof out) != 0 &&
+       has(out, "slices=MISMATCH") && has(out, "win-arm64/slice-win-arm64: first diff offset 3"), "compare-refuses-win-arm64-byte-diff");
+    ck(putf("full3/win-arm64/slice-win-arm64", "winarm") == 0, "restore-win-arm64-fixture");
+    ck(chain("fp-compare full2 full3 fp.pkg", out, sizeof out) == 0 &&
+       has(out, "slices=same\tcount=6"), "six-slice-compare-restored");
+
+    /* 参数错误须在读取虚拟路径或开始构造之前被拒绝。 */
+    ck(chain("fixedpoint r s p g1 o --target win/arm64", out, sizeof out) != 0 &&
+       has(out, "REFUSE fixedpoint needs --phase"), "fixedpoint-refuses-missing-phase");
+    ck(chain("fixedpoint r s p g1 o --phase g2 --target unknown/arm64", out, sizeof out) != 0 &&
+       has(out, "REFUSE unknown target"), "fixedpoint-refuses-unknown-target");
+    ck(chain("fixedpoint r s p g1 o --phase g2 --target win/arm64 --unknown", out, sizeof out) != 0 &&
+       has(out, "REFUSE unknown/duplicate option"), "fixedpoint-refuses-unknown-option");
     { char rm[600]; if (!cx_fmt(rm, sizeof rm, "rm -rf '%s'", td)) sh(rm, 0, 0); }
     sy_printf("CHECK_FIXEDPOINT_SAMPLE\tfailed=%d\n", failed);
     return failed ? 1 : 0;

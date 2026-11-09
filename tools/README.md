@@ -1247,3 +1247,39 @@ RUN/driver aggregate ROOT RUN
 
 正式完整89项功能收据为 **89 PASS、0 bad、0 pending**，来自同RUN两次step：255.77秒 + 165.62秒 = **421.39秒**；这不是单step≤300秒完成，SPEED-C、EFF1仍为 **DOING**。旧两个RUN的255.79秒全未决、295.09秒仅7有效/16pending均保留，不借历史RUN补绿。上述差分证据不等于整step或发布资格。H候选2仍只是静态方案，cc同意等F后再冻结。
 
+## 0.0.49：六片 fixedpoint 逐相位恢复
+
+`chain-step.cx fixedpoint` 不再隐式运行整条双代链。每次调用只执行一个目标的一个对象、链接、whole-o、kernel阶段，或重新比较。当前分相位构造工具限定Linux宿主；Linux原生工具交叉构造六目标不等于在六种宿主上执行。以下占位变量必须先绑定真实材料：`REV` 为40位小写完整revision，`S` 为当前工作根下 `out/release-snap-${REV前10位}` 的规范绝对路径（含匹配的 `.release-rev`），`PKG` 为同一冻结包，`GEN1` 为第一代 Linux/x86_64 candidate，`FP` 为新的私有绝对输出目录，`HELPER` 为实际执行 F-v2 源身份观察的已构造原生helper。`PRIVATE_ROOT` 为本私有补丁树的规范绝对路径，`CHAIN` 为构造后的原生chain-step映像绝对路径。必须先用绝对源路径实编native再调用fixedpoint，不可使用快照中的旧工具或default-run临时映像。其它原chain命令仍可按原方式default-run。
+
+```sh
+# 先独立构造一次，恢复时复用同一实际映像；不在每个阶段default-run重编。
+tools/bound 55 sh ./unisacc.com -O2 "$PRIVATE_ROOT/tools/chain-step.cx" -o "$CHAIN"
+# 每条 fp 调用单独受既有阶段限额约束；不是用一个外层watchdog包住所有调用。
+fp() {
+  "$CHAIN" fixedpoint "$REV" "$S" "$PKG" "$GEN1" "$FP" \
+    --identity-helper "$HELPER" "$@"
+}
+OBJECT_KEYS='drive.o host.o stages.o routestep.o stagehandoff.o runexec.o attributeframe.o bind.o cli.o compat.o route.o deps.o input.o args.o path.o entrybind.o memlayout.o driveface.o driveroute.o cxmod.o tapegate.o fwdstub.o executor.o transition.o codec.o modeldecode.o modelnumber.o packmodel.o modelload.o bindstage.o entryexec.o hostnative.o tapelink.o drivelink.o drivetapebin.o driveargs.o driveplan.o driveutil.o driveunits.o driverun.o hostout.o hostres.o rescache.o drivestream.o'
+for generation in g2 g3; do
+  for target in lnx/x86_64 lnx/arm64; do
+    for key in $OBJECT_KEYS; do
+      fp --phase "$generation" --target "$target" --object "$key" --resume || exit $?
+    done
+    fp --phase "$generation" --target "$target" --link-only --resume || exit $?
+  done
+  for target in osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
+    fp --phase "$generation" --target "$target" --resume || exit $?
+  done
+  fp --phase "kernels-$generation" --resume || exit $?
+done
+fp --phase compare
+sh ./unisacc.com tests/chain-fixed-point.cx -- "$GEN1" "$FP"
+sh ./unisacc.com tests/chain-fixed-point.cx -- --self-test
+```
+
+上述对象键对应当前 `entry-build.cx` 的44个显式入口对象；源闭包对象仍由实际entry-build规则处理，不用伪造空对象。目标参数使用 `OS/ARCH`，目录使用连字符。每代六片的真实路径分别是 `lnx-x86_64/candidate`、`lnx-arm64/candidate`、`osx-x86_64/slice-osx-x86_64`、`osx-arm64/slice-osx-arm64`、`win-x86_64/slice-win-x86_64`、`win-arm64/slice-win-arm64`，均在 `FP/g2` 或 `FP/g3` 下。对应收据是代目录下 `phase-0.tsv` 至 `phase-5.tsv`；`phase-6.tsv` 绑定 `kernel-route`。不能读取旧的 `g2/candidate` 或 `g2/receipt.txt` 代替它们。
+
+`--resume` 可用于第一次调用；已有阶段必须重新验证源身份、包、constructor、工具/helper及产物树字节和wall证据，且只跳过已记录的对应步骤，不缓存PASS。`chain_sha` 绑定 `/proc/self/exe` 的实际执行映像SHA，不是可能来自另一棵树的 `__FILE__` 源字节；不要default-run改变映像后期待旧收据可resume。无收据的已有产物、身份改变或已链接片再增改对象均拒绝；恢复时保持全部输入冻结，不删除收据来绕过拒绝。Linux两片由上一代product构造，四个whole-o片由本代Linux/x86_64 product构造，因此必须保持上述代际/目标顺序。`compare` 每次新验完整六片与kernel收据，再实际比较objects/kernels/slices/product/package。
+
+`tests/chain-fixed-point.cx` 保留F1–F4代际、包与根断言，并对两代所有六片检查存在性、字节相等和各片constructor/包/根绑定。其自测保留原有异字节、断代和异包负控，另对两代每片逐一执行缺失与异字节拒绝（含Windows/arm64）。这些命令是验证入口，不是本文宣称已通过的运行收据；同一运行的固定点也不代表独立第二次构造。
+
