@@ -1,5 +1,7 @@
 /* E7 kernel assembly contract batch, spec §4.8 [AS-1..AS-11].
  * Run: tests/kernel-route.cx -- ROOT ROUTE_DIR NEW_ABS_OUT GROUP
+ * Independent early-refusal mode: --constructor-inputs ROOT CANDIDATE_NATIVE PKG NEW_ABS_OUT
+ *   Uses real products with distinct SHA256; never constructs kernels or needs ROUTE_DIR.
  *   ROUTE_DIR  PREPARED output of tools/kernel-route.cx (both ISAs, canonical=YES); its receipt
  *              must match the current inputs or every group that reads it refuses.
  *   GROUP      encoding       (i)   enc/dir rows of tests/asm-golden/{x86_64,arm64}.tsv
@@ -21,9 +23,9 @@
 #pragma unisa use cases.kernel_route_shape
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.elfkernel
+#pragma unisa use text.text
 extern int fork(void);
 extern int waitpid(int,int *,int);
-#pragma unisa use text.text
 static char root[4096],route[4096],work[4096],product[4400],bound[4400],golden[4400];
 static const char *units[11]={"transition","arith","buffer","memory","intern","bytes","format","stack","action","run","bridge"};
 static const char *isas[2]={"x86_64","arm64"};
@@ -321,7 +323,27 @@ static void option_checks(void){run_t x;char out[4400];
  {char *extra[]={"--units","bad","--isa","x86_64"};path(out,sizeof out,work,"invalid-units");route_cmd(extra,4,out,&x);ck(x.rc==2&&strstr(x.err,"unit order differs from AS-1 canonical order")&&absent(out),"units-branch-followed-by-isa");}
  {char *extra[]={"--units","transition,arith,buffer,memory,intern,bytes,format,stack,action,run,bridge","--unknown"};path(out,sizeof out,work,"unknown-after-units");route_cmd(extra,3,out,&x);ck(x.rc==2&&strstr(x.err,"unknown argument --unknown")&&absent(out),"units-branch-does-not-capture-next-else");}
 }
+/* Real constructor input refusals only: neither child may reach output creation. */
+static int constructor_inputs(char **argv){
+ char candidate[4096],pkg[4096],candidate_sha[65],before[65],after[65],out[4400],p[4400];run_t x;
+ if(!realpath(argv[2],root)||!realpath(argv[3],candidate)||!realpath(argv[4],pkg)||argv[5][0]!='/'||strlen(argv[5])>=sizeof work)die("constructor-inputs ROOT CANDIDATE_NATIVE PKG NEW_ABS_OUT");
+ {int z=snprintf(work,sizeof work,"%s",argv[5]);if(z<0||(size_t)z>=sizeof work)die("output path length");}
+ group_name="constructor-inputs";path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");
+ sha_file(product,before);sha_file(candidate,candidate_sha);
+ {size_t n;unsigned char *b=load(candidate,&n);struct stat st;int native=n>=4&&!memcmp(b,"\177ELF",4)&&!stat(candidate,&st)&&(st.st_mode&0111);free(b);if(!native)die("CANDIDATE_NATIVE requires real executable ELF");}
+ if(tx_eqz(before,candidate_sha))die("CANDIDATE_NATIVE SHA must differ from ROOT/unisacc.com");
+ {size_t n;unsigned char *b=load(pkg,&n);free(b);}
+ if(!absent(work))die("NEW_ABS_OUT must not exist");mkdir_new(work);
+ {char *e[]={"--constructor",product,"--constructor-sha",candidate_sha,"--package",pkg};path(out,sizeof out,work,"wrong-declared-sha");route_cmd(e,6,out,&x);
+  ck(x.rc==2,"wrong-declared-sha.rc2");ck(strstr(x.err,"kernel-route: REFUSE declared constructor SHA differs from actual file")!=0,"wrong-declared-sha.named-diagnostic");ck(absent(out),"wrong-declared-sha.no-output-directory");
+  path(p,sizeof p,out,"route.tsv");ck(absent(p),"wrong-declared-sha.no-ready-receipt");path(p,sizeof p,out,"x86_64.kernel");ck(absent(p),"wrong-declared-sha.no-x86-kernel");path(p,sizeof p,out,"arm64.kernel");ck(absent(p),"wrong-declared-sha.no-arm-kernel");if(x.rc!=2)fprintf(stderr,"DETAIL\t%s\n",x.err);}
+ {char *e[]={"--constructor-sha",candidate_sha,"--package",pkg};path(out,sizeof out,work,"missing-constructor");route_cmd(e,4,out,&x);
+  ck(x.rc==2,"missing-constructor.rc2");ck(strstr(x.err,"kernel-route: REFUSE constructor declaration/package requires --constructor")!=0,"missing-constructor.named-diagnostic");ck(absent(out),"missing-constructor.no-output-directory");if(x.rc!=2)fprintf(stderr,"DETAIL\t%s\n",x.err);}
+ sha_file(product,after);ck(tx_eqz(before,after),"root-product-unchanged");sha_file(candidate,after);ck(tx_eqz(candidate_sha,after),"candidate-unchanged");
+ printf("KERNEL_ROUTE\tgroup=%s\tassertions=%d\tfailed=%d\troot_sha=%s\tcandidate_sha=%s\n",group_name,checks,failed,before,candidate_sha);return failed?1:0;
+}
 int main(int argc,char **argv){
+ if(argc>1&&tx_eqz(argv[1],"--constructor-inputs")){if(argc!=6){fprintf(stderr,"usage: --constructor-inputs ROOT CANDIDATE_NATIVE PKG NEW_ABS_OUT\n");return 2;}return constructor_inputs(argv);}
  if(argc!=5){fprintf(stderr,"usage: ROOT ROUTE_DIR NEW_ABS_OUT encoding|encoding-x86|encoding-x86-a|encoding-x86-b|encoding-arm|relocation|object|refusal|route-refusal|route-recovery|pin-mutation|coverage|pins|shape|options\n");return 2;}
  if(!realpath(argv[1],root)||!realpath(argv[2],route)||argv[3][0]!='/'||strlen(argv[3])>=sizeof work)die("ROOT ROUTE_DIR NEW_ABS_OUT");{int z=snprintf(work,sizeof work,"%s",argv[3]);if(z<0||(size_t)z>=sizeof work){fprintf(stderr,"bound-format\n");exit(2);}};group_name=argv[4];
  path(product,sizeof product,root,"unisacc.com");path(bound,sizeof bound,root,"tools/bound");path(golden,sizeof golden,root,"tests/asm-golden");
