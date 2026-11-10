@@ -1,0 +1,49 @@
+/* tools/check-cache-manager-determinism.cx -- two osx/x86_64 builds, same sha.
+ *
+ *   sh ./unisacc.com tools/check-cache-manager-determinism.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.kernelsha
+
+static int failed;
+static char root[4096], why[1000];
+static void die(const char *s) { fprintf(stderr, "check-cache-manager-determinism: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) { printf("%s\tcheck-cm.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+
+int main(void) {
+    char product[4400], dir[4400], a[4400], b[4400], ha[65], hb[65];
+    np_result r = {0};
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/cm-det-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("mkdtemp");
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
+        cx_fmt(a, sizeof a, "%s/a", dir) ||
+        cx_fmt(b, sizeof b, "%s/b", dir)) die("path");
+    {
+        char *v[] = {"sh", product, "tools/cache-retain.cx", "-b", "osx/x86_64", "-o", a, 0};
+        long t0 = sy_now_ms();
+        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) { np_free(&r); die("build-a"); }
+        np_free(&r);
+        printf("CHECK_CM\tphase=build-a\telapsed_ms=%ld\n", sy_now_ms() - t0);
+    }
+    {
+        char *v[] = {"sh", product, "tools/cache-retain.cx", "-b", "osx/x86_64", "-o", b, 0};
+        r = (np_result){0};
+        long t0 = sy_now_ms();
+        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) { np_free(&r); die("build-b"); }
+        np_free(&r);
+        printf("CHECK_CM\tphase=build-b\telapsed_ms=%ld\n", sy_now_ms() - t0);
+    }
+    {
+        size_t na, nb; char *sa = cx_read(a, &na), *sb = cx_read(b, &nb);
+        if (!sa || !sb) die("read");
+        cx_sha256_hex(sa, na, ha); cx_sha256_hex(sb, nb, hb);
+        ck(na == nb && !strcmp(ha, hb), "two-builds-same-sha");
+        free(sa); free(sb);
+    }
+    sy_unlink(a); sy_unlink(b); sy_rmdir(dir);
+    printf("CHECK_CACHE_MANAGER_DETERMINISM\tfailed=%d\tsha=%s\n", failed, ha);
+    return failed ? 1 : 0;
+}
