@@ -11,7 +11,7 @@
  *   sh ./unisacc.com tools/chain-step.cx -- final   S CTX B                 source-job-wave final
  *   sh ./unisacc.com tools/chain-step.cx -- p3      REV S SRC_PKG OUT --nets CTX/jobs --routes R
  *   sh ./unisacc.com tools/chain-step.cx -- slice   REV S PKG OUT --target T [--ctor CAND]
- *   sh ./unisacc.com tools/chain-step.cx -- pack    OUT P3 WIN LNX LNXARM OSX OSXARM
+ *   sh ./unisacc.com tools/chain-step.cx -- pack    ABS_ROOT OUT P3 WIN LNX LNXARM OSX OSXARM
  *        (lnx 两片传 <slice>/entry.elf: APE 尾部只放一份包, 片内带 UNIPKG1 会被 ape-pack 拒绝)
  *   sh ./unisacc.com tools/chain-step.cx -- smoke   APE
  *   sh ./unisacc.com tools/chain-step.cx -- check   APE                     check-install-fixes
@@ -400,6 +400,7 @@ static int cs_snap(const char *rev, const char *out) {
         char got[128];
         int ofd = -1, pid, ex = 0, code = 0, sig = 0;
         char *v[5];
+        long timeout_deadline_ms = sy_now_ms() + 10000; /* bound: git rev-parse is fast; refuse hangs */
         v[0] = "/bin/sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
         pid = sy_spawn_pipe(v, ".", SY_SPAWN_NO_PATH, &ofd, 0);
         if (pid < 0) cs_die("spawn", "git");
@@ -409,7 +410,8 @@ static int cs_snap(const char *rev, const char *out) {
             if (r > 0) n = r;
             sy_close(ofd);
         }
-        if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0 || (ex ? code : 128 + sig)) {
+        if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0 || sy_now_ms() > timeout_deadline_ms || (ex ? code : 128 + sig)) {
+            sy_kill(pid);
             sy_eprintf("chain-step: rev-parse ex=%d code=%d sig=%d got=%.80s\n", ex, code, sig, got);
             cs_die("rev", rev);
         }
@@ -1011,13 +1013,15 @@ static int cs_slice(const char *rev, const char *s, int argc, char **argv) {
 }
 
 static int cs_pack(int argc, char **argv) {
-    char *a[16];
+    char *a[16]; char root[4096];
     int n = 0, i;
-    if (argc < 0 || argc > (int)(sizeof(a) / sizeof(*a)) - 2) cs_die("REFUSE pack argument capacity", 0);
+    if (argc < 1 || argc > (int)(sizeof(a) / sizeof(*a)) - 3) cs_die("REFUSE pack argument capacity", 0);
+    if (argv[0][0] != '/' || sy_realpath(argv[0], root, sizeof root) < 0)
+        cs_die("pack needs ABSOLUTE ROOT first (0.0.50 D-5: no implicit cwd)", argv[0]);
     a[n++] = (char *)"pack";
-    for (i = 0; i < argc; i++) a[n++] = argv[i];
+    for (i = 1; i < argc; i++) a[n++] = argv[i];
     a[n] = 0;
-    return cs_tool(".", "tools/release-ape.cx", a);
+    return cs_tool(root, "tools/release-ape.cx", a);
 }
 
 static int cs_ape_smoke(const char *ape) {
@@ -1071,7 +1075,7 @@ int main(int argc, char **argv) {
         return cs_slice(argv[2], argv[3], argc - 4, argv + 4);
     }
     if (tx_eqz(argv[1], "pack")) {
-        if (argc < 9) cs_die("pack needs OUT P3 WIN LNX LNXARM OSX OSXARM", 0);
+        if (argc < 10) cs_die("pack needs ABS_ROOT OUT P3 WIN LNX LNXARM OSX OSXARM", 0);
         return cs_pack(argc - 2, argv + 2);
     }
     if (tx_eqz(argv[1], "smoke")) {

@@ -1,0 +1,95 @@
+/* tools/release-run.cx -- 0.0.50 R:一键发布可续跑流程(发布编排,不构造候选)。
+ *
+ * 串 runbook 步骤 8-19 为带状态机的可续跑流程;严格按「提交 X(候选表)触发 CI ->
+ * 提交 Y 回填 run id」两段提交;所有 gh 带 -R partnernetsoftware/unisacc。
+ *
+ *   sh ./unisacc.com tools/release-run.cx -- --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR
+ *     本地重放:release-layout --check、SHA256SUMS 校验、release-dispatch --dry-run、
+ *     release-decide(证据取 OUT_DIR/evidence.tsv,缺则 8xUNKNOWN)。不创建/修改 release,
+ *     不触发 CI,不 push。输出与人工逐步执行逐行对照。
+ *   sh ./unisacc.com tools/release-run.cx -- --resume OUT_DIR
+ *     从 OUT_DIR/state.tsv 记录的下一未完步继续;每步先核对前置产物身份。
+ *
+ * 步骤(state.tsv 追加 STEP<TAB>idx<TAB>name<TAB>DONE|REFUSED):
+ *   0 layout-check  1 sums-check  2 dispatch-replay  3 decide
+ * 真跑(--run,后续补丁扩展 4..12)按 runbook:提交X -> 草稿 -> 分批上传 -> 机查 ->
+ * workflow run(commit=X) -> 回填 run id 提交Y -> 终裁 -> 公开 -> 读回。
+ * 子进程均 <=50s 有界。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use sys.sig
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+
+static char root[4096], table[4048], layout[4048], out[4048], statep[4448];
+static RcCandidate cand;
+
+static void die(const char *s) { sy_eprintf("release-run: REFUSE %s\n", s); sy_exit(2); }
+static long tlen(const char *s) { return tx_len(s, 1 << 20); }
+static void emit(const char *tag, const char *a, const char *b) {
+    sy_printf("RELEASE_RUN\t%s\t%s%s%s\n", tag, a, b ? "\t" : "", b ? b : "");
+}
+static void mark(int idx, const char *name, const char *verdict) {
+    char line[256];
+    if (cx_fmt(line, sizeof line, "STEP\t%d\t%s\t%s\n", idx, name, verdict)) die("state-format");
+    { int f = sy_open(statep, O_WRONLY | O_CREAT | O_APPEND, 0600);
+      if (f < 0 || sy_write_all(f, line, tlen(line)) || sy_close(f)) die("state-write"); }
+    emit("STEP", name, verdict);
+}
+static int child(char **v, const char *cwd) {
+    np_result r = {0}; char why[512] = {0}; int rc;
+    if (np_run(v, cwd, 0, 50, &r, why, sizeof why)) { np_free(&r); die("child-transport"); }
+    rc = r.rc;
+    if (r.outn) sy_write_all(1, r.out ? r.out : "", r.outn);
+    if (r.errn) sy_write_all(2, r.err, r.errn);
+    np_free(&r);
+    return rc;
+}
+static void step_layout_check(void) {
+    char *v[] = {"sh", "unisacc.com", "tools/release-layout.cx", "--", "--candidate", table, "--check", layout, 0};
+    if (child(v, root)) die("layout --check");
+    mark(0, "layout-check", "DONE");
+}
+static void step_sums(void) {
+    char *v[] = {"sha256sum", "--check", "SHA256SUMS", 0};
+    if (child(v, layout)) die("sha256sum --check");
+    mark(1, "sums-check", "DONE");
+}
+static void step_dispatch(void) {
+    char *v[] = {"sh", "unisacc.com", "tools/release-dispatch.cx", "--", "--dry-run", table, layout, 0};
+    if (child(v, root)) die("dispatch replay");
+    mark(2, "dispatch-replay", "DONE");
+}
+static void step_decide(void) {
+    char p[4400]; char *v[10]; int n = 0;
+    if (cx_fmt(p, sizeof p, "%s/evidence.tsv", out)) die("path");
+    v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-decide.cx"; v[n++] = "--";
+    v[n++] = "--candidate"; v[n++] = table;
+    v[n++] = "--evidence"; v[n++] = p;
+    v[n++] = "--assets"; v[n++] = layout; v[n] = 0;
+    if (child(v, root)) die("decide");
+    mark(3, "decide", "DONE");
+}
+int main(int argc, char **argv) {
+    char why[1024];
+    if (argc != 6 || !tx_eqz(argv[1], "--dry-run"))
+        die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR (driver strips --)");
+    if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
+    if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
+    if (sy_realpath(argv[4], layout, sizeof layout) < 0) die("layout dir");
+    if (cx_fmt(out, sizeof out, "%s", argv[5]) || out[0] != '/') die("out dir absolute");
+    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) die("out dir");
+    if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
+    if (rcand_load(table, &cand, why, sizeof why)) die(why);
+    emit("MODE", "DRY_RUN", cand.tag);
+    step_layout_check();
+    step_sums();
+    step_dispatch();
+    step_decide();
+    emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
+    return 0;
+}
