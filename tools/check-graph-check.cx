@@ -9,6 +9,13 @@
  * in another order -> rc 1 / order_mismatch=1; a hardwire hit is counted.  Finally the real
  * build/graph.tsv against the real tools/chain-step.cx: structure must pass (no FAIL row,
  * cycles=0, nodes=203); order_mismatch and hardwire are only RECORDED, not asserted, in this step.
+ * Route cases (--route): a fixture chain source with a gated route function, a second route function
+ * and an inline mark against a fixture graph -> route_mismatch=0; the same with the gate passed 1
+ * (stub run but not declared), with the two calls swapped (order), and with a declared phase the
+ * chain never runs -> one named ROUTE_MISMATCH row each.  The real build/graph.tsv against the real
+ * tools/candidate-chain.cx must give route_mismatch=0, and against a copy whose two Win targets are
+ * routed like Mac (stub on, st_span calls gone: the 2026-11-10 defect) route_mismatch=8 with the
+ * stub and units rows named.  Old cases run with --no-route.
  * Prints CHECK_GRAPH_CHECK<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -51,9 +58,10 @@ static const char *CHAIN_BAD =
     "  \"osx-x86_64/slice-osx-x86_64\", \"osx-arm64/slice-osx-arm64\", \"win-x86_64/slice-win-x86_64\", \"win-arm64/slice-win-arm64\"};\n"
     "x = kernel ? \"kernel-route\" : i == 0 ? \"lnx-x86_64\" : i == 1 ? \"lnx-arm64\" : i == 2 ? \"osx-x86_64\" : i == 3 ? \"osx-arm64\" : i == 4 ? \"win-x86_64\" : \"win-arm64\";\n";
 
-/* run graph-check; returns rc (or -1), copies stdout into *out */
-static int run(const char *graph, const char *chain, const char *hardwire, char **out, size_t *n) {
-    char *v[] = {"sh", "./unisacc.com", "tools/graph-check.cx", "--", "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire, 0};
+/* run graph-check; returns rc (or -1), copies stdout into *out.  ROUTE 0 = --no-route */
+static int run(const char *graph, const char *chain, const char *hardwire, const char *route, char **out, size_t *n) {
+    char *v[] = {"sh", "./unisacc.com", "tools/graph-check.cx", "--", "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire,
+                 route ? "--route" : "--no-route", (char *)route, 0};
     int rc = cx_runv_timeout(v, 50, out, n);
     if (!*out) return -1;
     return rc;
@@ -67,7 +75,7 @@ static long field(const char *out, size_t n, const char *key) {
 static void expect(const char *name, const char *body, const char *chain, int want_rc, const char *want_row, long want_mism) {
     char p[4400]; char *out = 0; size_t n = 0; int rc; long m; int ok;
     if (put(name, body, p, sizeof p)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
-    rc = run(p, chain, hard, &out, &n);
+    rc = run(p, chain, hard, 0, &out, &n);
     m = out ? field(out, n, "order_mismatch=") : -1;
     ok = out && (rc != 0) == (want_rc != 0) && m == want_mism && tx_contains(out, (long)n, "GRAPH_CHECK\t", 12)
          && (!want_row || tx_contains(out, (long)n, want_row, tx_len(want_row, 128)));
@@ -75,6 +83,77 @@ static void expect(const char *name, const char *body, const char *chain, int wa
     else { printf("FAIL\t%s\twant rc%s %s order_mismatch=%ld, got rc=%d order_mismatch=%ld\n", name, want_rc ? "!=0" : "=0", want_row ? want_row : "-", want_mism, rc, m); failed++; }
     if (out) mm_free(out);
     sy_unlink(p);
+}
+/* ---- route fixtures ---- */
+static const char *ROUTE_FN =
+    "static int rf(const char *t, const char *slug, int want_stub) {\n"
+    "    fmt(tag, \"gen1-%s-front%d\", slug, 0);\n"
+    "    fmt(tag, \"gen1-%s-merge\", slug);\n"
+    "    if (!want_stub) return 0;\n"
+    "    fmt(tag, \"gen1-%s-stub\", slug);\n"
+    "    return 0;\n"
+    "}\n"
+    "static int rs(const char *t, const char *slug);\n"
+    "static int rs(const char *t, const char *slug) { fmt(tag, \"gen1-%s-units\", slug); return 0; }\n";
+static const char *ROUTE_GRAPH =
+    "gen1.win-x86_64.prep\tslice-phase\twin-x86_64\tfreeze\tprepare\ti\to\t1\t44\te\t-\tno\tstages\t1\n"
+    "gen1.win-x86_64.front0\tslice-phase\twin-x86_64\tfreeze\tfront 0\ti\to\t1\t44\te\t-\tno\tstages\t1\n"
+    "gen1.win-x86_64.front1\tslice-phase\twin-x86_64\tfreeze\tfront 1\ti\to\t1\t44\te\t-\tno\tstages\t1\n"
+    "gen1.win-x86_64.merge\tslice-phase\twin-x86_64\tfreeze\tmerge\ti\to\t1\t44\te\t-\tno\tstages\t1\n"
+    "gen1.win-x86_64.units\tslice-phase\twin-x86_64\tfreeze\tspan units\ti\to\t1\t44\te\t-\tno\tstages\t1\n"
+    "gen1.osx-arm64.merge\tslice-phase\tosx-arm64\tfreeze\tmerge\ti\to\t1\t44\te\t-\tno\tstages\t1\n";
+static void route_expect(const char *name, const char *graph, const char *route, long want_rm, const char *row1, const char *row2) {
+    char *out = 0; size_t n = 0; int rc; long m; int ok;
+    rc = run(graph, chain_ok, hard, route, &out, &n);
+    m = out ? field(out, n, "route_mismatch=") : -1;
+    ok = out && m == want_rm && (rc != 0) == (want_rm != 0)
+         && (!row1 || tx_contains(out, (long)n, row1, tx_len(row1, 256))) && (!row2 || tx_contains(out, (long)n, row2, tx_len(row2, 256)));
+    if (ok) { printf("PASS\t%s\trc=%d\troute_mismatch=%ld\n", name, rc, m); passed++; }
+    else { printf("FAIL\t%s\twant route_mismatch=%ld %s %s, got rc=%d route_mismatch=%ld\n%s\n", name, want_rm, row1 ? row1 : "-", row2 ? row2 : "-", rc, m, out ? out : "(none)"); failed++; }
+    if (out) mm_free(out);
+}
+/* overwrite every FROM in b[0..n) by TO (same length); the number of hits */
+static int swap_all(char *b, long n, const char *from, const char *to) {
+    long fl = tx_len(from, 128), i = 0; int hits = 0;
+    if (fl != tx_len(to, 128)) return -1;
+    for (;;) { long at = tx_find(b + i, n - i, from, fl), k; if (at < 0) break; at += i; for (k = 0; k < fl; k++) b[at + k] = to[k]; i = at + fl; hits++; }
+    return hits;
+}
+static void route_cases(void) {
+    static char g[1 << 14], src[1 << 13]; char gp[4400], gp2[4400], rp[4400];
+    if (cx_fmt(g, sizeof g, "%s%s%s", HDR, SIX, ROUTE_GRAPH) || put("route.tsv", g, gp, sizeof gp)
+        || cx_fmt(g, sizeof g, "%s%s%sgen1.osx-arm64.image\tslice-phase\tosx-arm64\tfreeze\tprune + image\ti\to\t1\t44\te\t-\tno\tstages\t1\n", HDR, SIX, ROUTE_GRAPH)
+        || put("route-extra.tsv", g, gp2, sizeof gp2)) { printf("FAIL\troute-fixtures\twrite\n"); failed++; return; }
+    /* consistent: gate 0 keeps stub out, prep is not a chain phase, the inline mark counts */
+    if (cx_fmt(src, sizeof src, "%sint main(void) {\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    if (rs(\"win/x86_64\", \"win-x86_64\")) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n    mark(outdir, \"gen1-osx-arm64\", 0);\n}\n", ROUTE_FN)
+        || put("route-ok.cx", src, rp, sizeof rp)) { printf("FAIL\troute-ok\twrite\n"); failed++; return; }
+    route_expect("route-ok", gp, rp, 0, 0, 0);
+    route_expect("route-declared-not-run", gp2, rp, 1, "ROUTE_MISMATCH\tosx-arm64\timage\tgraph=gen1.osx-arm64.image (", "command: prune + image\tchain=absent (");
+    sy_unlink(rp);
+    /* the gate passed 1: the chain runs a stub the graph does not declare */
+    if (cx_fmt(src, sizeof src, "%sint main(void) {\n    if (rf(\"win/x86_64\", \"win-x86_64\", 1)) return 1;\n    if (rs(\"win/x86_64\", \"win-x86_64\")) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN)
+        || put("route-stub.cx", src, rp, sizeof rp)) { printf("FAIL\troute-stub\twrite\n"); failed++; return; }
+    route_expect("route-run-not-declared", gp, rp, 1, "ROUTE_MISMATCH\twin-x86_64\tstub\tgraph=absent (no slice-phase node gen1.win-x86_64.stub)\tchain=runs it (", ":11 via rf)");
+    sy_unlink(rp);
+    /* same phases, units before front/merge */
+    if (cx_fmt(src, sizeof src, "%sint main(void) {\n    if (rs(\"win/x86_64\", \"win-x86_64\")) return 1;\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN)
+        || put("route-order.cx", src, rp, sizeof rp)) { printf("FAIL\troute-order\twrite\n"); failed++; return; }
+    route_expect("route-order", gp, rp, 1, "ROUTE_MISMATCH\twin-x86_64\t(order)\tgraph=front,merge,units (", "chain=units,front,merge (");
+    sy_unlink(rp); sy_unlink(gp); sy_unlink(gp2);
+    /* the real graph against the real chain driver, then against a copy that routes Win like Mac */
+    route_expect("route-real", "build/graph.tsv", "tools/candidate-chain.cx", 0, 0, 0);
+    {   size_t n = 0; char *b = cx_read("tools/candidate-chain.cx", &n); int h1, h2, h3;
+        if (!b) { printf("FAIL\troute-real-win-as-mac\tcannot read tools/candidate-chain.cx\n"); failed++; return; }
+        h1 = swap_all(b, (long)n, "\"win-x86_64\", 0)", "\"win-x86_64\", 1)");
+        h2 = swap_all(b, (long)n, "\"win-arm64\", 0)", "\"win-arm64\", 1)");
+        h3 = swap_all(b, (long)n, "(wf_win_span(root, outdir", "(wf_win_skip(root, outdir");
+        if (h1 != 1 || h2 != 1 || h3 != 2 || cx_fmt(rp, sizeof rp, "%s/chain-win-as-mac.cx", dir) || cx_write(rp, b, n)) {
+            printf("FAIL\troute-real-win-as-mac\tanchors moved in tools/candidate-chain.cx (hits %d %d %d, want 1 1 2) or write failed\n", h1, h2, h3); failed++; free(b); return;
+        }
+        free(b);
+        route_expect("route-real-win-as-mac", "build/graph.tsv", rp, 8, "ROUTE_MISMATCH\twin-x86_64\tstub\tgraph=absent (", "ROUTE_MISMATCH\twin-arm64\tunits\tgraph=gen1.win-arm64.units (build/graph.tsv:");
+        sy_unlink(rp);
+    }
 }
 
 int main(void) {
@@ -91,7 +170,7 @@ int main(void) {
     expect("ok.tsv", g, chain_ok, 0, "HARDWIRE\t", 0);
     { char *out = 0; size_t n = 0; char p[4400]; int rc;
       if (put("ok2.tsv", g, p, sizeof p)) return 2;
-      rc = run(p, chain_ok, hard, &out, &n);
+      rc = run(p, chain_ok, hard, 0, &out, &n);
       if (rc == 0 && out && field(out, n, "hardwire=") == 1 && field(out, n, "nodes=") == 10 && field(out, n, "edges=") == 16 && field(out, n, "cycles=") == 0)
           { printf("PASS\tok-counts\tnodes=10 edges=16 hardwire=1\n"); passed++; }
       else { printf("FAIL\tok-counts\trc=%d out=%s\n", rc, out ? out : "(none)"); failed++; }
@@ -102,7 +181,7 @@ int main(void) {
     expect("cycle.tsv", g, chain_ok, 1, "FAIL\tstructure\t", 0);
     { char *out = 0; size_t n = 0; char p[4400]; int rc;
       if (put("cycle2.tsv", g, p, sizeof p)) return 2;
-      rc = run(p, chain_ok, hard, &out, &n);
+      rc = run(p, chain_ok, hard, 0, &out, &n);
       if (rc != 0 && out && field(out, n, "cycles=") >= 1 && tx_contains(out, (long)n, "\tcycle\t", 7)) { printf("PASS\tcycle-row\n"); passed++; }
       else { printf("FAIL\tcycle-row\t%s\n", out ? out : "(none)"); failed++; }
       if (out) mm_free(out); sy_unlink(p); }
@@ -135,12 +214,13 @@ int main(void) {
     expect("min0.tsv", g, chain_ok, 1, "\tsplit_min\t0", 0);
     /* 7 real graph: structure must pass; order/hardwire recorded */
     { char *out = 0; size_t n = 0; int rc;
-      rc = run("build/graph.tsv", "tools/chain-step.cx", "build/hardwire.tsv", &out, &n);
+      rc = run("build/graph.tsv", "tools/chain-step.cx", "build/hardwire.tsv", 0, &out, &n);
       if (out && !tx_contains(out, (long)n, "FAIL\tstructure\t", 15) && field(out, n, "cycles=") == 0 && field(out, n, "nodes=") == 203) {
           printf("PASS\treal-structure\tnodes=203 cycles=0\n"); passed++;
           printf("RECORD\treal\trc=%d\torder_mismatch=%ld\thardwire=%ld\tedges=%ld\n", rc, field(out, n, "order_mismatch="), field(out, n, "hardwire="), field(out, n, "edges="));
       } else { printf("FAIL\treal-structure\trc=%d\n", rc); failed++; }
       if (out) mm_free(out); }
+    route_cases();
 
     sy_unlink(chain_ok); sy_unlink(chain_bad); sy_unlink(hit); sy_unlink(hard); sy_rmdir(dir);
     printf("CHECK_GRAPH_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);

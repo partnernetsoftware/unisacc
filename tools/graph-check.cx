@@ -1,6 +1,6 @@
 /* tools/graph-check.cx -- machine check of the construction graph build/graph.tsv (read-only).
  *
- *   sh ./unisacc.com tools/graph-check.cx [-- [--graph F] [--chain F] [--hardwire F] [--no-hardwire]]
+ *   sh ./unisacc.com tools/graph-check.cx [-- [--graph F] [--chain F] [--hardwire F] [--no-hardwire] [--route F] [--no-route]]
  *
  * (a) structure: 12 named columns; kind in the fixed enumeration; every depends_on entry exists
  *     (a trailing * expands to every node with that prefix, "-" is none); no cycle; budget_s is an
@@ -13,10 +13,22 @@
  *     one ORDER_MISMATCH row naming file:line.
  * (c) hardwire: every row of build/hardwire.tsv (file, literal pattern) is scanned line by line;
  *     each hit is HARDWIRE<TAB>file:line<TAB>id:pattern.  Report only, not a gate in this step.
+ * (d) route: per target, the gen1 slice phases the chain driver tools/candidate-chain.cx (--route F)
+ *     really runs must be the ones the graph declares.  The graph is the truth: slice-phase nodes
+ *     gen1.TARGET.PHASE (front0..2 count as front).  The chain side is read from its source: every
+ *     function holding a "gen1-%s-PHASE" tag is a route function, each of its call sites that passes a
+ *     "TARGET" literal runs those phases for that target (a phase behind `if (!PARAM) return 0;` only
+ *     when the call does not pass 0 there), and mark(outdir, "gen1-TARGET-PHASE" in the driver body
+ *     is a phase run inline.  Compared phases: front merge stub units e3 image plus every phase name
+ *     the chain source holds; graph-only names outside that set (prep, whole, B, ...) are not route
+ *     phases of the chain and are ignored.  Each difference is one row
+ *       ROUTE_MISMATCH<TAB>target<TAB>phase<TAB>graph=...<TAB>chain=...
+ *     (present on one side only, or the same phases in another order).  g2/g3 aggregate nodes are
+ *     not compared: the chain builds only the linux slices there.
  *
- * Output: FAIL/ORDER_MISMATCH/HARDWIRE rows, then
- *   GRAPH_CHECK<TAB>nodes=N<TAB>edges=M<TAB>cycles=C<TAB>order_mismatch=K<TAB>hardwire=H
- * Exit 0 when no structure failure and K == 0; 1 otherwise; 2 on IO/usage errors. */
+ * Output: FAIL/ORDER_MISMATCH/HARDWIRE/ROUTE_MISMATCH rows, then
+ *   GRAPH_CHECK<TAB>nodes=N<TAB>edges=M<TAB>cycles=C<TAB>order_mismatch=K<TAB>hardwire=H<TAB>route_mismatch=R
+ * Exit 0 when no structure failure and K == 0 and R == 0; 1 otherwise; 2 on IO/usage errors. */
 #pragma unisa use sys.fs
 #pragma unisa use text.text
 #pragma unisa use mem.heap
@@ -27,10 +39,11 @@ static const char *kinds[NKIND] = {"freeze", "snap", "tool", "ctx", "wave", "com
                                    "fixedpoint", "kernel", "pack", "install", "s9", "gen", "tbl", "net"};
 #define NDIM 5
 static const char *dims[NDIM] = {"jobs", "units", "targets", "stages", "none"};
-typedef struct { char id[128], kind[32], target[32]; char *deps; int line; int *adj, nadj; int color; } Node;
+typedef struct { char id[128], kind[32], target[32]; char *deps, *cmd; int line; int *adj, nadj; int color; } Node;
 static Node nodes[MAXN]; static int nn;
-static long fails, edges, cycles, mism, hard;
+static long fails, edges, cycles, mism, hard, rmis;
 static const char *graph_path = "build/graph.tsv", *chain_path = "tools/chain-step.cx", *hard_path = "build/hardwire.tsv";
+static const char *route_path = "tools/candidate-chain.cx";
 
 static char *slurp(const char *p, long *n) {
     int fd = sy_open_read(p); char *b;
@@ -76,6 +89,7 @@ static void load_graph(void) {
         if (i == NKIND) fail((int)lineno, "kind", nodes[nn].kind);
         tx_field(b + p, q - p, '\t', 2, &off, &len); tx_copy(nodes[nn].target, 32, b + p + off, len);
         tx_field(b + p, q - p, '\t', 3, &off, &len); nodes[nn].deps = mm_alloc(len + 1); tx_copy(nodes[nn].deps, len + 1, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 4, &off, &len); nodes[nn].cmd = mm_alloc(len + 1); if (!nodes[nn].cmd) exit(2); tx_copy(nodes[nn].cmd, len + 1, b + p + off, len);
         tx_field(b + p, q - p, '\t', 8, &off, &len);
         if (!budget_ok(b + p + off, len)) { char d[64]; tx_copy(d, 64, b + p + off, len); fail((int)lineno, "budget_s", d); }
         tx_field(b + p, q - p, '\t', 11, &off, &len);
@@ -204,14 +218,192 @@ static void check_hardwire(void) {
     }
     mm_free(b);
 }
+/* ---- route ---- */
+typedef struct { char fn[64], phase[32]; int gate, line; } RFn;        /* one "gen1-%s-PHASE" tag inside function fn */
+typedef struct { char target[32], phase[32], via[64]; int line; long pos; } REv;   /* the chain runs PHASE for TARGET */
+static RFn rfn[64]; static int nrfn;
+static REv rev[512]; static int nrev;
+static char rvocab[32][32]; static int nrv;
+static int ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static void put_s(char *dst, long cap, const char *s, long n) { if (n > cap - 1) n = cap - 1; if (n < 0) n = 0; tx_copy(dst, cap, s, n); dst[n] = 0; }
+/* front0, front1, front%d are the one phase "front" */
+static void phase_norm(char *dst, const char *s, long n) { if (n >= 5 && tx_same(s, 5, "front", 5)) n = 5; put_s(dst, 32, s, n); }
+static void vocab(const char *p) {
+    int k; for (k = 0; k < nrv; k++) if (tx_eqz(rvocab[k], p)) return;
+    if (nrv == 32) { fprintf(stderr, "graph-check: more than 32 route phase names\n"); exit(2); }
+    put_s(rvocab[nrv++], 32, p, tx_len(p, 32));
+}
+static void route_event(const char *target, const char *phase, const char *via, int line, long pos) {
+    if (nrev == 512) { fprintf(stderr, "graph-check: more than 512 route events in %s\n", route_path); exit(2); }
+    put_s(rev[nrev].target, 32, target, tx_len(target, 32)); put_s(rev[nrev].phase, 32, phase, tx_len(phase, 32));
+    put_s(rev[nrev].via, 64, via, tx_len(via, 64)); rev[nrev].line = line; rev[nrev].pos = pos; nrev++; vocab(phase);
+}
+/* every "gen1-%s-PHASE" literal: its enclosing function (the last column-0 `static ` line before it) and,
+   when an `if (!PARAM) return 0;` stands between the function head and the literal, PARAM's position */
+static void route_functions(const char *b, long n) {
+    long i = 0;
+    for (;;) {
+        long at = tx_find(b + i, n - i, "\"gen1-%s-", 9), s, e, fs, paren, ns, j;
+        if (at < 0) break;
+        at += i; s = at + 9; e = s;
+        while (e < n && b[e] != '"' && b[e] != '\n') e++;
+        i = e;
+        for (fs = at; fs >= 0; fs--) if ((fs == 0 || b[fs - 1] == '\n') && n - fs >= 7 && tx_same(b + fs, 7, "static ", 7)) break;
+        if (fs < 0) continue;
+        for (paren = fs; paren < at && b[paren] != '('; paren++) ;
+        if (paren == at) continue;
+        for (ns = paren; ns > fs && ident(b[ns - 1]); ns--) ;
+        if (nrfn == 64) { fprintf(stderr, "graph-check: more than 64 route tags in %s\n", route_path); exit(2); }
+        put_s(rfn[nrfn].fn, 64, b + ns, paren - ns); phase_norm(rfn[nrfn].phase, b + s, e - s);
+        rfn[nrfn].gate = -1; rfn[nrfn].line = line_of(b, at);
+        for (j = paren; j < at; ) {
+            long g = tx_find(b + j, at - j, "if (!", 5), ge;
+            if (g < 0) break;
+            g += j + 5; for (ge = g; ge < at && ident(b[ge]); ge++) ;
+            j = ge;
+            if (ge > g && at - ge >= 11 && tx_same(b + ge, 11, ") return 0;", 11)) {
+                long p = paren + 1, ps = p; int idx = 0, depth = 0;
+                for (; p < at; p++) {
+                    if (b[p] == '(') depth++;
+                    else if (b[p] == ')' && depth > 0) depth--;
+                    else if (b[p] == ',' || b[p] == ')') {
+                        long z = p, a;
+                        while (z > ps && !ident(b[z - 1])) z--;
+                        for (a = z; a > ps && ident(b[a - 1]); a--) ;
+                        if (tx_same(b + a, z - a, b + g, ge - g)) rfn[nrfn].gate = idx;
+                        if (b[p] == ')') break;
+                        idx++; ps = p + 1;
+                    }
+                }
+            }
+        }
+        vocab(rfn[nrfn].phase); nrfn++;
+    }
+}
+/* every call of a route function that passes one of the six targets as a string literal */
+static void route_calls(const char *b, long n) {
+    int f, k;
+    for (f = 0; f < nrfn; f++) {
+        long fl = tx_len(rfn[f].fn, 64), i = 0;
+        for (k = 0; k < f; k++) if (tx_eqz(rfn[k].fn, rfn[f].fn)) break;
+        if (k < f) continue;
+        for (;;) {
+            static char arg[12][96];
+            long at = tx_find(b + i, n - i, rfn[f].fn, fl), ls, p, as; int na = 0, depth = 0, q = 0, t = -1, a, g;
+            if (at < 0) break;
+            at += i; i = at + fl;
+            if ((at > 0 && ident(b[at - 1])) || at + fl >= n || b[at + fl] != '(') continue;
+            for (ls = at; ls > 0 && b[ls - 1] != '\n'; ls--) ;
+            if (n - ls >= 7 && tx_same(b + ls, 7, "static ", 7)) continue;   /* the definition or a prototype */
+            for (p = at + fl + 1, as = p; p < n; p++) {
+                char c = b[p];
+                if (q) { if (c == '\\') p++; else if (c == '"') q = 0; continue; }
+                if (c == '"') { q = 1; continue; }
+                if (c == '(') { depth++; continue; }
+                if (c == ')' && depth > 0) { depth--; continue; }
+                if (c == ')' || (c == ',' && depth == 0)) {
+                    long x = as, z = p;
+                    while (x < z && (b[x] == ' ' || b[x] == '\n')) x++;
+                    while (z > x && (b[z - 1] == ' ' || b[z - 1] == '\n')) z--;
+                    if (na < 12) put_s(arg[na++], 96, b + x, z - x);
+                    as = p + 1;
+                    if (c == ')') break;
+                }
+            }
+            for (a = 0; a < na && t < 0; a++) {
+                long al = tx_len(arg[a], 96);
+                if (al < 3 || arg[a][0] != '"' || arg[a][al - 1] != '"') continue;
+                for (g = 0; g < ngo; g++) if (tx_same(arg[a] + 1, al - 2, gorder[g], tx_len(gorder[g], 32))) { t = g; break; }
+            }
+            if (t < 0) continue;
+            for (k = f; k < nrfn; k++) {
+                if (!tx_eqz(rfn[k].fn, rfn[f].fn)) continue;
+                if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "0")) continue;
+                route_event(gorder[t], rfn[k].phase, rfn[k].fn, line_of(b, at), at);
+            }
+        }
+    }
+}
+/* mark(outdir, "gen1-TARGET-PHASE": a phase the driver body runs itself */
+static void route_inline(const char *b, long n) {
+    static const char *K = "mark(outdir, \"gen1-"; long kl = tx_len(K, 64), i = 0;
+    for (;;) {
+        long at = tx_find(b + i, n - i, K, kl), s, e; int g; char ph[32];
+        if (at < 0) break;
+        at += i; s = at + kl; i = s;
+        for (g = 0; g < ngo; g++) {
+            long gl = tx_len(gorder[g], 32);
+            if (n - s > gl && tx_same(b + s, gl, gorder[g], gl) && b[s + gl] == '-') {
+                for (e = s + gl + 1; e < n && b[e] != '"' && b[e] != '\n'; e++) ;
+                phase_norm(ph, b + s + gl + 1, e - (s + gl + 1));
+                route_event(gorder[g], ph, "inline", line_of(b, at), at);
+                break;
+            }
+        }
+    }
+}
+/* 1 and the normalised PHASE when node I is the slice-phase node gen1.TARGET.PHASE */
+static int node_phase(int i, const char *target, char *ph) {
+    const char *id = nodes[i].id; long il = tx_len(id, 128), tl = tx_len(target, 32);
+    if (!tx_eqz(nodes[i].kind, "slice-phase") || il < 5 + tl + 2 || !tx_same(id, 5, "gen1.", 5)) return 0;
+    if (!tx_same(id + 5, tl, target, tl) || id[5 + tl] != '.') return 0;
+    phase_norm(ph, id + 5 + tl + 1, il - (5 + tl + 1));
+    return 1;
+}
+/* append PH to the comma list SEQ unless it is already one of its items */
+static void seq_add(char *seq, long cap, const char *ph) {
+    long sl = tx_len(seq, cap), pl = tx_len(ph, 32), a = 0, z;
+    while (a < sl) { for (z = a; z < sl && seq[z] != ','; z++) ; if (tx_same(seq + a, z - a, ph, pl)) return; a = z + 1; }
+    if (sl + pl + 2 >= cap) return;
+    if (sl) seq[sl++] = ',';
+    tx_copy(seq + sl, cap - sl, ph, pl); seq[sl + pl] = 0;
+}
+static void check_route(void) {
+    static const char *base[6] = {"front", "merge", "stub", "units", "e3", "image"};
+    long n; char *b; int t, v, i, k;
+    if (ngo != 6) return;
+    b = slurp(route_path, &n);
+    for (k = 0; k < 6; k++) vocab(base[k]);
+    route_functions(b, n); route_calls(b, n); route_inline(b, n);
+    for (i = 1; i < nrev; i++) {   /* source order; stable, so one call keeps its phases in tag order */
+        REv x = rev[i]; for (k = i; k > 0 && rev[k - 1].pos > x.pos; k--) rev[k] = rev[k - 1];
+        rev[k] = x;
+    }
+    for (t = 0; t < 6; t++) {
+        char gs[512], cs[512], ph[32]; int bad = 0;
+        gs[0] = 0; cs[0] = 0;
+        for (v = 0; v < nrv; v++) {
+            int gi = -1, ci = -1;
+            for (i = 0; i < nn && gi < 0; i++) if (node_phase(i, gorder[t], ph) && tx_eqz(ph, rvocab[v])) gi = i;
+            for (i = 0; i < nrev && ci < 0; i++) if (tx_eqz(rev[i].target, gorder[t]) && tx_eqz(rev[i].phase, rvocab[v])) ci = i;
+            if ((gi < 0) == (ci < 0)) continue;
+            bad = 1; rmis++;
+            printf("ROUTE_MISMATCH\t%s\t%s\t", gorder[t], rvocab[v]);
+            if (gi >= 0) printf("graph=%s (%s:%d) command: %s\t", nodes[gi].id, graph_path, nodes[gi].line, nodes[gi].cmd);
+            else printf("graph=absent (no slice-phase node gen1.%s.%s)\t", gorder[t], rvocab[v]);
+            if (ci >= 0) printf("chain=runs it (%s:%d via %s)\n", route_path, rev[ci].line, rev[ci].via);
+            else printf("chain=absent (%s never runs gen1-%s-%s)\n", route_path, gorder[t], rvocab[v]);
+        }
+        if (bad) continue;
+        for (i = 0; i < nn; i++) if (node_phase(i, gorder[t], ph)) {
+            for (v = 0; v < nrv; v++) if (tx_eqz(ph, rvocab[v])) break;
+            if (v < nrv) seq_add(gs, 512, ph);
+        }
+        for (i = 0; i < nrev; i++) if (tx_eqz(rev[i].target, gorder[t])) seq_add(cs, 512, rev[i].phase);
+        if (!tx_eqz(gs, cs)) { printf("ROUTE_MISMATCH\t%s\t(order)\tgraph=%s (%s)\tchain=%s (%s)\n", gorder[t], gs, graph_path, cs, route_path); rmis++; }
+    }
+    mm_free(b);
+}
 int main(int argc, char **argv) {
-    int i, no_hard = 0;
+    int i, no_hard = 0, no_route = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         else if (tx_eqz(argv[i], "--graph") && i + 1 < argc) graph_path = argv[++i];
         else if (tx_eqz(argv[i], "--chain") && i + 1 < argc) chain_path = argv[++i];
         else if (tx_eqz(argv[i], "--hardwire") && i + 1 < argc) hard_path = argv[++i];
         else if (tx_eqz(argv[i], "--no-hardwire")) no_hard = 1;
+        else if (tx_eqz(argv[i], "--route") && i + 1 < argc) route_path = argv[++i];
+        else if (tx_eqz(argv[i], "--no-route")) no_route = 1;
         else { fprintf(stderr, "graph-check: unknown argument %s\n", argv[i]); return 2; }
     }
     load_graph();
@@ -219,6 +411,7 @@ int main(int argc, char **argv) {
     graph_order();
     check_order();
     if (!no_hard) check_hardwire();
-    printf("GRAPH_CHECK\tnodes=%d\tedges=%ld\tcycles=%ld\torder_mismatch=%ld\thardwire=%ld\n", nn, edges, cycles, mism, hard);
-    return fails || mism ? 1 : 0;
+    if (!no_route) check_route();
+    printf("GRAPH_CHECK\tnodes=%d\tedges=%ld\tcycles=%ld\torder_mismatch=%ld\thardwire=%ld\troute_mismatch=%ld\n", nn, edges, cycles, mism, hard, rmis);
+    return fails || mism || rmis ? 1 : 0;
 }
