@@ -57,6 +57,20 @@
 | 4 | 独立资产 slice-win-arm64 没有注入工具,0.0.49 时靠临时程序 | 注入只在 ape-pack 内存里做 | `tools/version-inject.cx` + `check-version-inject`(批次 version-inject) | 提交 `114ef751be` |
 | 5 | 后备路径从接手到公开 50 分钟(CI 10 分钟),主路径 Y-0 链自 11-09 起多次停摆未完成 | 停摆无人察觉、隐性前提、门后回归(0.0.51 计划 1b) | 0.0.51 第零批 W/PF/RA/LD 先于任何产品候选 | [plans/v0.0.51-unisacc.md](plans/v0.0.51-unisacc.md) 1b |
 
+## 3d. 0.0.51 发布教训
+
+| # | 现象 | 根因 | 规则 | 证据 |
+|---|---|---|---|---|
+| 1 | 打包输入 sources.tsv 写了 0.0.50 的旧源 SID e764a816,若发布则新版记录带别人的身份 | sources.tsv 由人手从已装根的纪元记录抄来,没有从构造源现算 | 身份值一律由快照现算并校验(identity-helper 对冻结快照复算);release-run --pack 的 sid 现算校验(rr-sid) | 账本 REL051;提交 X(7a964ec8b5)作废、X'(30d1c3cd67) |
+| 2 | 在仓根跑 release-run --pack 静默得到 0.0.50 的 APE | ape-pack 读 ROOT/release/candidate.tsv 的 version,仓根表仍是旧版 | ROOT 必须是带目标版本表的私有克隆;--pack 开头比较 ROOT 表与 CANDIDATE_TSV 的 version(rr-ver) | 提交 bb82fe386d |
+| 3 | 草稿 release 尚未创建就触发 CI,fetch 作业失败 | CI 的 fetch 从 release_tag 下载草稿资产 | 顺序:草稿创建与七资产上传 -> 提交 X -> 触发 CI;记录文件有误时取消运行再重做 | CI 运行 42809224934、42809291021 作废 |
+| 4 | 补丁落地后 chain-step.cx 编不过 | 作者在集成者冻结后覆盖了同名补丁文件补全声明,落地前没核 sha 也没编译 | 门核冻结 sha 与作者路径内容一致、对涉及的 tools 编译验证(H6 ld2);交出后改补丁一律换新文件名 | 提交 65a4cd7aa3 增量修复;ld2 de419e8569 |
+| 5 | 集成门屡屡 rc=124 / transport=-1,要手工反复续跑 | 门的 call() 在整体预算剩余不足时把子进程超时缩短到剩余预算(precommit 需约 48s 只剩约 25s 被杀) | 预算不足就转入 pending 由 --until-done 续跑,不缩短硬跑;--land 的 git commit 用 -F;夹具用真 git | 提交 4b919b20ea |
+| 6 | 全新 rev 一条命令起链,0.15s 即死 | chain_work 在冻结前 mkdir;修复补丁只加了冻结后的 mkdir,没删冻结前的 | 凡声称「一条命令」的链必须用从未冻结过的 rev 真起一次;--bootstrap 无默认,且不安装旁边的纪元记录(ctx 记录其 sha,事后补则 REFUSE context-record-changed) | 不间断从零复现(0.0.52 A1 基线) |
+| 7 | 集成门与长链争 CPU,链的 45-60s 相位超时 | 门并行 13 项棘轮把 loadavg 抬到 4-6 | 门与长链错峰;链运行期间门排队 | 账本 |
+| 8 | 磁盘写满(/tmp 153GB)中断所有窗口 | /tmp 下工作目录无清理规则 | 工作目录命名带窗口与任务,完成即清;定期清理工具(待建) | 2026-11-10 |
+| 9 | 决策守卫连续违规后窗口无声停摆 | 守卫把协议文本失败合成 block 并转外部等待,无通知 | 停摆必须通知集成者;chain-watch 类机制覆盖窗口 | tmp-cdx 修复线 |
+
 ## 4. 版本串与签名
 
 - **0.0.49 起版本串不在源 SID 内**（提交 `c66fa850e6`，SPEED-049-F source-packages-v2）：唯一版本列为 `release/candidate.tsv`，打包时注入 32 字节槽；源 SID 为十二包摘要组合。改版本不再重建整链。读版本一律 `cxlib.releaseversion`，不再 grep `limits.tsv`。
