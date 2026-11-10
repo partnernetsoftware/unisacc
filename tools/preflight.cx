@@ -26,7 +26,7 @@
  *   env-set NAME VALUE     environment NAME is set and equals VALUE (unset or different FAILs)
  *   receipt-if-present D F D absent, or D exists and holds F (a leftover exclusive output dir without
  *                          its receipt blocks the producer that refuses an existing NEW_OUT)
- *
+ *   dir-not-symlink P       P exists as a real directory; a symlink is refused
  * Prints PASS|FAIL|SKIP<TAB>row<TAB>phase<TAB>assert[<TAB>detail<TAB>error_text] per rule and
  * PREFLIGHT<TAB>failed=N<TAB>skipped=M<TAB>passed=K.  Exit 0 when failed=0, 1 when a rule failed,
  * 2 on usage or a malformed table.  Reads only; no command it runs exceeds a few seconds. */
@@ -203,7 +203,14 @@ static int op_receipt(const char *dir, const char *name) {
     cx_fmt(detail, sizeof detail, "leftover without %s: %s", name, dir);
     return 0;
 }
-
+static int op_dir_not_symlink(const char *p) {
+    sy_stat_t st;
+    int r = sy_lstat(p, &st);
+    if (r) { cx_fmt(detail, sizeof detail, "missing errno=%d: %s", -r, p); return 0; }
+    if (st.kind == 'l') { cx_fmt(detail, sizeof detail, "REFUSE release snapshot path: symlink %s", p); return 0; }
+    if (st.kind != 'd') { cx_fmt(detail, sizeof detail, "REFUSE release snapshot path: not a directory %s", p); return 0; }
+    return 1;
+}
 static int op_env(const char *name, const char *want) {
     const char *v = sy_env(name);
     if (!v || !v[0]) { cx_fmt(detail, sizeof detail, "%s unset (want %s)", name, want); return 0; }
@@ -274,6 +281,7 @@ static int run_assert(char *f, int row) {
     if (tx_eqz(op, "pkg-headers") && n == 1) return op_pkg(tok[0]);
     if (tx_eqz(op, "env-set") && n == 2) return op_env(tok[0], tok[1]);
     if (tx_eqz(op, "receipt-if-present") && n == 2) return op_receipt(tok[0], tok[1]);
+    if (tx_eqz(op, "dir-not-symlink") && n == 1) return op_dir_not_symlink(tok[0]);
     fprintf(stderr, "preflight: row %d: unknown or malformed assert: %s\n", row, op);
     exit(2);
 }
