@@ -315,8 +315,8 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
 }
 
 
-static const char *g_phases[26] = {
-    "snap", "build", "ctx", "host", "list",
+static const char *g_phases[27] = {
+    "snap", "build", "ctx", "host", "list", "warmup",
     "jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net", "final",
     "routes", "p3", "gen1-lnx-x86_64", "gen1-lnx-arm64",
     "gen1-osx-x86_64", "gen1-osx-arm64", "gen1-win-x86_64", "gen1-win-arm64",
@@ -326,8 +326,8 @@ static const char *g_phases[26] = {
 static const char *until_phase;
 static void plan(void) {
     int i;
-    sy_printf("CANDIDATE_CHAIN\tplan\tphases=26\n");
-    for (i = 0; i < 26; i++)
+    sy_printf("CANDIDATE_CHAIN\tplan\tphases=27\n");
+    for (i = 0; i < 27; i++)
         sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
     sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
@@ -386,6 +386,23 @@ static void mark(const char *dir, const char *phase, long wall) {
         sy_printf("CANDIDATE_CHAIN\tstatus=UNTIL\tphase=%s\n", phase);
         exit(0);
     }
+}
+static int warmup_tools(const char *root) {
+    static const char *w[] = {
+        "tools/chain-step.cx", "tools/release-build.cx", "tools/whole-front.cx",
+        "tools/source-job-wave.cx", "tools/preflight.cx", "tools/entry-build.cx",
+        "tools/release-ape.cx", 0
+    };
+    int i;
+    for (i = 0; w[i]; i++) {
+        char p[4400];
+        char *a[3];
+        if (cx_fmt(p, sizeof p, "%s/%s", root, w[i])) die("path", w[i]);
+        a[0] = p; a[1] = (char *)"-c"; a[2] = 0;
+        if (bound_sh_secs(root, a, 55)) die("warmup", w[i]);
+        sy_printf("WARMUP\t%s\n", w[i]);
+    }
+    return 0;
 }
 
 static int sjw(const char *s, const char *ctx, const char *b, const char *phase, int first, int count, const char *act) {
@@ -602,7 +619,7 @@ int main(int argc, char **argv) {
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
     if (until_phase) {
         int u = 0, pi;
-        for (pi = 0; pi < 26; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
+        for (pi = 0; pi < 27; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
         if (!u) die("REFUSE --until unknown phase", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
@@ -638,6 +655,13 @@ int main(int argc, char **argv) {
     }
 
     if (sy_mkdir(build, 0755) && fsize(build) < 0) die("mkdir", build);
+    if (!boot || !boot[0]) {
+        static char defboot[4400];
+        if (cx_fmt(defboot, sizeof defboot, "%s/unisacc.com", root)) die("path", "defboot");
+        if (fsize(defboot) < 0) die("REFUSE default bootstrap missing", defboot);
+        boot = defboot;
+        sy_printf("BOOTSTRAP_FROM\tdefault=%s\n", defboot);
+    }
     if (boot && boot[0]) {
         char dst[4400];
         size_t bn = 0;
@@ -646,6 +670,15 @@ int main(int argc, char **argv) {
         bb = cx_read(boot, &bn);
         if (!bb || cx_write(dst, bb, bn)) { free(bb); die("install bootstrap", dst); }
         free(bb);
+        sy_chmod(dst, 0755);
+        /* The epoch record travels with the product: ctx records its sha (bootstrap-build-record-sha)
+           and source-wave refuses a list whose record changed, so install it before ctx, not after. */
+        {   char srec[4400], drec[4400];
+            if (cx_fmt(srec, sizeof srec, "%s.build.json", boot) || cx_fmt(drec, sizeof drec, "%s.build.json", dst)) die("path", "boot-record");
+            bb = cx_read(srec, &bn);
+            if (!bb || cx_write(drec, bb, bn)) { free(bb); die("install bootstrap record", drec); }
+            free(bb);
+        }
         sy_printf("BOOTSTRAP\t%s\n", dst);
     }
     {   /* rule 6 (verify-snap) accepts a receipt commit other than REV only when BOOTSTRAP_FROM
@@ -694,6 +727,12 @@ int main(int argc, char **argv) {
         if (step(root, a)) die("list", "list");
         mark(outdir, "list", sy_now_ms() - t0);
     } else sy_printf("RESUME\tlist\n");
+
+    if (!(resume && ck_done(outdir, "warmup"))) {
+        long t0 = sy_now_ms();
+        if (warmup_tools(root)) die("warmup", "compile");
+        mark(outdir, "warmup", sy_now_ms() - t0);
+    } else sy_printf("RESUME\twarmup\n");
 
     if (!(resume && ck_done(outdir, "jobs-tool"))) {
         long t0 = sy_now_ms();
