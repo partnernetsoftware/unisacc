@@ -1,0 +1,152 @@
+/* tools/check-chain-watch.cx -- W 链看门狗三态与续跑上限的负控/正控。
+ * 临时目录伪造 checkpoint.tsv,用 sy_set_mtime 固定进展时间,用 --now 固定观测时间(不依赖时区与墙钟)。
+ *   RUNNING: idle 300s < 10 分钟;STALLED: idle 900s;DONE: checkpoint 含 final 相位;
+ *   --resume-cmd 在 STALLED 下执行且总次数封顶(默认 3,第 4 次 exhausted rc3);RUNNING 下不执行。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-chain-watch.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-chain-watch.%s\n", n); }
+}
+static int has(const char *buf, size_t n, const char *needle) {
+    return buf && tx_find(buf, (long)n, needle, tx_len(needle, 200)) >= 0;
+}
+static int count_lines(const char *p) {
+    size_t n = 0, i;
+    int c = 0;
+    char *b = cx_read(p, &n);
+    if (!b) return -1;
+    for (i = 0; i < n; i++) if (b[i] == '\n') c++;
+    free(b);
+    return c;
+}
+
+static char com[500], tool[500], dir[200];
+static long base = 1700000000;
+
+/* 运行一次看门狗:now = base+off;返回 rc,输出放 *out */
+static int watch(long off, const char *extra1, const char *extra2, char **out, size_t *n) {
+    char nows[32];
+    char *v[12];
+    int k = 0;
+    if (cx_fmt(nows, sizeof nows, "%ld", base + off)) return -1;
+    v[k++] = (char *)"sh"; v[k++] = com; v[k++] = tool; v[k++] = (char *)"--"; v[k++] = dir;
+    v[k++] = (char *)"--now"; v[k++] = nows;
+    if (extra1) v[k++] = (char *)extra1;
+    if (extra2) v[k++] = (char *)extra2;
+    v[k] = 0;
+    return cx_runv_timeout(v, 50, out, n);
+}
+
+int main(void) {
+    char cwd[400], ckp[300], logs[300], resumed[300], cmd[400], *o = 0;
+    size_t n = 0;
+    int rc;
+    { char *v[] = {"pwd", 0};
+      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; free(o); o = 0;
+      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
+    }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/chain-watch.cx", cwd)
+        || cx_fmt(dir, sizeof dir, "/tmp/check-chain-watch-%ld", sy_now_ms())
+        || cx_fmt(ckp, sizeof ckp, "%s/checkpoint.tsv", dir) || cx_fmt(logs, sizeof logs, "%s/logs", dir)
+        /* 续跑标记放在被看目录之外:写进 DIR 会被当成链进展(那是真实语义,不是本检查要测的) */
+        || cx_fmt(resumed, sizeof resumed, "%s.resumed", dir)
+        || cx_fmt(cmd, sizeof cmd, "echo R >> %s.resumed", dir)) { ck(0, "path"); return 1; }
+    cx_rmtree(dir);
+    sy_unlink(resumed);
+    if (sy_mkdir(dir, 0755) || sy_mkdir(logs, 0755)) { ck(0, "mkdir"); return 1; }
+    {
+        const char *body = "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tctx\twall_ms=2\tsha=-\n";
+        if (cx_write(ckp, body, tx_len(body, 200))) { ck(0, "write-ckp"); return 1; }
+    }
+    /* 进展时间固定在 base:checkpoint、logs 与目录本身 */
+    ck(!sy_set_mtime(ckp, base) && !sy_set_mtime(logs, base) && !sy_set_mtime(dir, base), "set-mtime");
+
+    /* (1) RUNNING: 300s < 600s */
+    rc = watch(300, 0, 0, &o, &n);
+    ck(rc == 0 && has(o, n, "CHAIN_WATCH\tstatus=RUNNING\tlast_phase=ctx\tidle_s=300\n"), "running");
+    free(o); o = 0;
+    /* state.md 由看门狗自己写,不得算作链进展:第二次仍 RUNNING 且 idle 不归零 */
+    rc = watch(300, 0, 0, &o, &n);
+    ck(rc == 0 && has(o, n, "idle_s=300\n"), "own-files-not-progress");
+    free(o); o = 0;
+    /* RUNNING 下给了 --resume-cmd 也不执行 */
+    rc = watch(300, "--resume-cmd", cmd, &o, &n);
+    ck(rc == 0 && !has(o, n, "CHAIN_RESUME") && count_lines(resumed) < 0, "running-no-resume");
+    free(o); o = 0;
+
+    /* (2) STALLED: 900s >= 600s,无 --resume-cmd 退 1 */
+    rc = watch(900, 0, 0, &o, &n);
+    ck(rc == 1 && has(o, n, "CHAIN_WATCH\tstatus=STALLED\tlast_phase=ctx\tidle_s=900\n"), "stalled");
+    free(o); o = 0;
+    /* --idle-min 20 把同一现场判回 RUNNING */
+    rc = watch(900, "--idle-min", "20", &o, &n);
+    ck(rc == 0 && has(o, n, "status=RUNNING"), "idle-min-option");
+    free(o); o = 0;
+
+    /* (3) 续跑三次封顶:n=1..3 执行,第 4 次 exhausted rc3,resumed.txt 恰 3 行 */
+    {
+        int i, ok = 1;
+        for (i = 1; i <= 3; i++) {
+            char want[64];
+            if (cx_fmt(want, sizeof want, "CHAIN_RESUME\tn=%d/3\trc=0\n", i)) { ok = 0; break; }
+            rc = watch(900, "--resume-cmd", cmd, &o, &n);
+            if (rc != 1 || !has(o, n, want)) ok = 0;
+            free(o); o = 0;
+        }
+        ck(ok, "resume-three");
+        rc = watch(900, "--resume-cmd", cmd, &o, &n);
+        ck(rc == 3 && has(o, n, "CHAIN_RESUME\texhausted\tn=3/3\n"), "resume-exhausted");
+        free(o); o = 0;
+        ck(count_lines(resumed) == 3, "resume-count-file");
+        {
+            char cw[300], *b;
+            size_t bn = 0;
+            if (cx_fmt(cw, sizeof cw, "%s/chain-watch.tsv", dir)) { ck(0, "path2"); return 1; }
+            b = cx_read(cw, &bn);
+            ck(count_lines(cw) == 3 && has(b, bn, "RESUME\t") && has(b, bn, cmd), "resume-ledger");
+            free(b);
+        }
+        {
+            char st[300], *b;
+            size_t bn = 0;
+            if (cx_fmt(st, sizeof st, "%s/state.md", dir)) { ck(0, "path3"); return 1; }
+            b = cx_read(st, &bn);
+            ck(has(b, bn, "status: STALLED\n") && has(b, bn, "last_phase: ctx\n") && has(b, bn, "resumes: 3/3\n"), "state-md");
+            free(b);
+        }
+    }
+
+    /* (4) DONE: checkpoint 含 final 相位(默认 pack);再久也不判 STALLED,也不续跑 */
+    {
+        const char *body = "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tctx\twall_ms=2\tsha=-\nDONE\tpack\twall_ms=3\tsha=-\n";
+        if (cx_write(ckp, body, tx_len(body, 200)) || sy_set_mtime(ckp, base)) { ck(0, "write-done"); return 1; }
+        rc = watch(99999, "--resume-cmd", cmd, &o, &n);
+        ck(rc == 0 && has(o, n, "CHAIN_WATCH\tstatus=DONE\tlast_phase=pack\tidle_s=99999\n") && !has(o, n, "CHAIN_RESUME"), "done");
+        free(o); o = 0;
+        /* --final 换名后同一 checkpoint 不算 DONE */
+        rc = watch(99999, "--final", "publish", &o, &n);
+        ck(rc == 1 && has(o, n, "status=STALLED\tlast_phase=pack"), "final-option");
+        free(o); o = 0;
+    }
+
+    /* (5) 负控: 目录不存在 rc2;未知选项 rc2 */
+    { char *v[] = {"sh", com, tool, "--", "/no/such/chain-watch-dir", 0};
+      ck(cx_runv_timeout(v, 50, 0, 0) == 2, "missing-dir"); }
+    rc = watch(0, "--bogus", "1", &o, &n);
+    ck(rc == 2, "unknown-option");
+    free(o); o = 0;
+
+    cx_rmtree(dir);
+    sy_unlink(resumed);
+    sy_printf("CHECK_CHAIN_WATCH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
