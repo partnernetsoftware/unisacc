@@ -22,7 +22,7 @@
 | `tools/cxlib/` | 工具共享库(.cx):`rechunk`(自动再分块)、`netpack`、`resolver`、`releasecandidate`、`wholefrontmerge`、`kernelsha` 等,以及 `mem/sys/sysx/text` 子库。`toolsloc.cx` 对应的 toolsloc 已退役,文件仅保留 | 否 | 主线 |
 | `ext/` | 扩展包:`sysx`、`memx`、`textx`、`crypto`(aes/gcm/p256/der 等)、`tsvx`(TSV 读写与三方合并 `merge3.cx`,2026-11 新增) | 否(`memx/textx` 经符号链接间接参与) | 主线 |
 | `tests/` | 新测试体系:`batches.tsv`、`coverage.tsv`、`run.cx`、域矩阵及棘轮基线 `*.tsv`(管理表,不构造成网);入口 `sh ./unisacc.com tests/run.cx -- --list` | 否 | 主线 |
-| `build/` | 构造图与前提规则表(2026-11 新增):`graph.tsv`(一个候选的构造图,203 节点,含 split_dim/split_min,由 `tools/graph-check.cx` 校验)、`hardwire.tsv`(构造工具中「第二真值」硬连线模式清单,G1)、`preflight-rules.tsv`(0.0.50 候选链撞到的隐性前提,9 行,是 0.0.51 PF 预检工具的输入,omp-opus 整理) | 否 | 构造链维护者(G0/G1/PF 工作包) |
+| `build/` | 构造图与前提规则表(2026-11 新增):`graph.tsv`(一个候选的构造图,205 节点,含 split_dim/split_min,由 `tools/graph-check.cx` 校验)、`hardwire.tsv`(构造工具中「第二真值」硬连线模式清单,G1)、`preflight-rules.tsv`(0.0.50 候选链撞到的隐性前提,9 行,是 0.0.51 PF 预检工具的输入,omp-opus 整理) | 否 | 构造链维护者(G0/G1/PF 工作包) |
 | `release/` | 发布材料:`candidate.tsv`(候选身份唯一来源)、读回/布局工具说明,见 `release/README.md` | 否(版本串由 candidate.tsv 注入) | 集成者 |
 | `agentwork/` | 管理账:`items.tsv`(任务)、`ledger.tsv`(进度)、`units.tsv`、`freeze.tsv`、`phase-times.tsv`(超限相位与整改)、`pkg-gaps.tsv`(库包缺口)、`WORKFLOW.md`、`roles/`(角色提示词)。不是产品事实表 | 否 | 集成者写 main,各窗口按行追加 |
 | `.github/` | CI 工作流:`candidate-native.yml`、`ci.yml`、`candidate-raw-export.yml`、`admission-capsule.yml`、`defender-scan.yml`、`macos-sign.yml`、`windows-signing.yml` | 否 | 集成者 |

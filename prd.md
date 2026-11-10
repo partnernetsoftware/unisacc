@@ -130,7 +130,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 上层禁 libc/POSIX | `sh ./unisacc.com tests/cxlibc.cx -- --check` | 名单不手写，按前导分类 |
 | 看某域还差什么 | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN` | 逐格读矩阵，印 OPEN 行 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.44.tsv --check` | R 行理由 + W 行豁免 |
-| 构造图检查（G1） | `sh ./unisacc.com tools/graph-check.cx [-- --graph F --chain F --hardwire F --no-hardwire]` | 读 `build/graph.tsv`（203 节点事实表）：无环/依赖存在/kind 枚举/budget≤60；六目标次序与 `tools/chain-step.cx` 三份常量比对（不一致 ORDER_MISMATCH+rc1）；`build/hardwire.tsv` 32 条第二真相源模式逐行扫描只计数；末行 `GRAPH_CHECK\tnodes=\tedges=\tcycles=\torder_mismatch=\thardwire=`；夹具 `tools/check-graph-check.cx` |
+| 构造图检查（G1） | `sh ./unisacc.com tools/graph-check.cx [-- --graph F --chain F --hardwire F --no-hardwire]` | 读 `build/graph.tsv`（205 节点事实表）：无环/依赖存在/kind 枚举/budget≤60；六目标次序与 `tools/chain-step.cx` 三份常量比对（不一致 ORDER_MISMATCH+rc1）；`build/hardwire.tsv` 32 条第二真相源模式逐行扫描只计数；末行 `GRAPH_CHECK\tnodes=\tedges=\tcycles=\torder_mismatch=\thardwire=`；夹具 `tools/check-graph-check.cx` |
 | 根独立/帧规范化（0.0.50） | `sh ./unisacc.com tools/root-canon.cx -- --map PREFIX=PLACE... [--diff A B \| --scan F \| F]`；`tools/root-independent.cx -- --a DIRA --b DIRB --list F --map ...` | 多前缀最长优先替换，按 formats.md 重算 phase/单元/UNIPP2 LE32 长度；末行 `ROOT_CANON_DIFF\traw_equal\traw_len_delta\tprefix_bytes\tnonprefix_bytes\tcanon_equal`；独立性 list 行 `node\tproduct\|frame\trelpath`，product 逐字节且不含根、frame 规范化相等；`build/graph.tsv` 第 12 列 root_dependent 由 graph-check 校验；夹具 `tools/check-root-canon.cx`、`tools/check-root-independent.cx` |
 | 链看门狗（0.0.51 W/W2） | `sh ./unisacc.com tools/chain-watch.cx -- DIR [--idle-min N] [--final PHASE] [--resume-cmd 'CMD'] [--max-resumes K] [--now EPOCH_S]` | 读 `DIR/checkpoint.tsv`（candidate-chain 的 `DONE\tphase\t...` 行）取 last_phase，进展时间取 checkpoint/DIR 顶层/`DIR/logs` 最新 mtime；N 分钟（默认 10）无进展判 STALLED，含 final 相位（默认 pack）判 DONE；STALLED 前核 `DIR/heartbeat.tsv` 末行（`epoch\tphase\tpid\tpgid[\tstart\|end]`，由链每相位写）的 pid/pgid 存活：liveness=HUNG（存活）\|DEAD（不存活）\|UNKNOWN（无心跳），三者都续跑；一行 `CHAIN_WATCH\tstatus=RUNNING\|STALLED\|DONE\tlast_phase=\tidle_s=\tliveness=`，现场写 `DIR/state.md`；STALLED 且给 `--resume-cmd` 时经 `sh -c` 执行一次（55s 上界），次数记 `DIR/chain-watch.tsv` 封顶 K（默认 3，耗尽 rc3 不再重启）；退出码 0 RUNNING/DONE、1 STALLED、3 耗尽、2 用法；夹具 `tools/check-chain-watch.cx`（临时目录伪造三态、HUNG/DEAD 与封顶，19 项） |
 | 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal/net-deps；toolsloc退役，新增net-deps沿计划保留第14号门称呼；旧通过记录不迁移 |
@@ -402,7 +402,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
 | `tools/` | 开发工具（约 565 个 .cx，个数以 `ls tools/*.cx` 为准：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
 | `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
-| `build/` | 构造图与前提规则表：graph.tsv（203 节点构造图）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
+| `build/` | 构造图与前提规则表：graph.tsv（205 节点构造图）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计（约 120 个）：现行 v0.0.50/51/52-unisacc.md、y-design-050.md、rechunk-design.md、standing-goal.md、release-notes-0.0.45 至 0.0.50；已完成的归档到 archive/plans |
 | `docs/` | 规格/术语与目录地图（docs/REPO-MAP.md、glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
@@ -455,7 +455,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md)、§8 |
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；新增第14号net-deps，toolsloc已退役；工具行数只统计 | `tools/ratchets.cx`、§2.2 |
 | 事实表 | 事实 -> 生成器（须带 `--check`）-> 产物 | `exec/facts/`、§2.4 |
-| 构造图 | `build/graph.tsv` 203 节点/833 边 + `build/hardwire.tsv` 32 条第二真相源模式；`graph-check` 9/0（84df77f4b2） | §2.2、[plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md) G1 |
+| 构造图 | `build/graph.tsv` 205 节点/835 边 + `build/hardwire.tsv` 32 条第二真相源模式；`graph-check` 9/0（84df77f4b2） | §2.2、[plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md) G1 |
 | .cx lint | `tools/cx-lint.cx` R1（第二真相源，只报告）/R2（子进程时限与 `--`，precommit 拦截）；check 41（8a07e8e119） | §2.2 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
 | 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
