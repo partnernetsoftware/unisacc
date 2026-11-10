@@ -1,0 +1,85 @@
+/* tools/check-s9-nightly.cx -- 假 s9 验证编排顺序、超时与失败停止。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { tool_die("check-s9-nightly", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-s9-nightly.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc) {
+    np_result r = {0};
+    if (np_run(v, cwd, 0, sec, &r, why, sizeof why)) die(why);
+    *rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && n && mm_copy(out, cap, r.out, (long)n)) die("copy");
+        out[n] = 0;
+    }
+    np_free(&r);
+    return 0;
+}
+
+int main(void) {
+    char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
+    char *v[16];
+    int rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/s9n-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(fake, sizeof fake, "%s/fake.bin", dir) ||
+        cx_fmt(runp, sizeof runp, "%s/run", dir) ||
+        cx_fmt(outd, sizeof outd, "%s/out", dir) ||
+        cx_fmt(logp, sizeof logp, "%s/fake.log", dir) ||
+        cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-nightly-fake.cx", root) ||
+        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tools/s9-nightly.cx", root)) die("fmt");
+    {
+        char *b[] = {"sh", com, src, "-o", fake, 0};
+        runv(b, root, 20, buf, sizeof buf, &rc);
+        ck(rc == 0, "fake-compile");
+    }
+    {
+        char *mk[] = {"mkdir", "-p", outd, runp, 0};
+        runv(mk, dir, 5, buf, sizeof buf, &rc);
+    }
+    setenv("S9_FAKE_LOG", logp, 1);
+    v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = dir; v[5] = runp;
+    v[6] = "--tier"; v[7] = "commit"; v[8] = "--date"; v[9] = "2026-11-10"; v[10] = "--fake"; v[11] = fake; v[12] = 0;
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "order-pass");
+    {
+        size_t n; char *s = cx_read(logp, &n);
+        ck(s && strstr(s, "build") && strstr(s, "init") && strstr(s, "prepare") && strstr(s, "step") && strstr(s, "aggregate"), "order-log");
+        free(s);
+    }
+    setenv("S9_FAKE_FAIL", "driver", 1);
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 1 && strstr(buf, "prepare-driver"), "fail-stop");
+    {
+        size_t n; char *s = cx_read(logp, &n);
+        ck(s && !strstr(s, "selection"), "fail-no-later-prep");
+        free(s);
+    }
+    unsetenv("S9_FAKE_FAIL");
+    setenv("S9_FAKE_SLEEP", "3", 1);
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    v[12] = "--step-s"; v[13] = "1"; v[14] = 0;
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 1 && strstr(buf, "step"), "timeout-stop");
+    printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

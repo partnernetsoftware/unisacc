@@ -1,0 +1,46 @@
+/* tests/fixtures/s9-nightly-fake.cx -- 夹具假 s9,不跑真批次。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static void die(const char *s) { fprintf(stderr, "s9-nightly-fake: %s\n", s); exit(2); }
+
+int main(int argc, char **argv) {
+    const char *logp, *fail, *slp, *verb, *arg4;
+    FILE *fp;
+    if (argc < 2) die("verb");
+    verb = argv[1];
+    arg4 = argc > 4 ? argv[4] : "";
+    logp = getenv("S9_FAKE_LOG");
+    if (!logp || !logp[0]) die("S9_FAKE_LOG");
+    fp = fopen(logp, "a");
+    if (!fp) die("open-log");
+    fprintf(fp, "%s %s\n", verb, arg4);
+    fclose(fp);
+    fail = getenv("S9_FAKE_FAIL");
+    slp = getenv("S9_FAKE_SLEEP");
+    if (!strcmp(verb, "build")) { printf("BUILD\n"); return 0; }
+    if (!strcmp(verb, "init")) { printf("S9 INITIALIZED qualification=NOT_EXECUTED\n"); return 3; }
+    if (!strcmp(verb, "prepare")) {
+        if (fail && fail[0] && !strcmp(fail, arg4)) { printf("FAIL_PREP\n"); return 2; }
+        printf("PREP\n");
+        return 0;
+    }
+    if (!strcmp(verb, "step")) {
+        size_t n; char *s;
+        if (slp && slp[0] == '3') sy_sleep_ms(3000);
+        s = cx_read(logp, &n);
+        if (s) {
+            int steps = 0; size_t i;
+            for (i = 0; i + 4 < n; i++) if (s[i] == 's' && s[i + 1] == 't' && s[i + 2] == 'e' && s[i + 3] == 'p') steps++;
+            free(s);
+            if (steps < 2) { printf("STEP_FINISHED PENDING\n"); return 3; }
+        }
+        printf("STEP_DONE\n");
+        return 0;
+    }
+    if (!strcmp(verb, "aggregate")) { printf("S9 COMMIT_ONLY status=PASS pending=0\n"); return 0; }
+    return 2;
+}

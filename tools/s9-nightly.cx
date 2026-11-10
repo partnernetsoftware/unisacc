@@ -1,0 +1,132 @@
+/* tools/s9-nightly.cx -- 私有克隆内按手册编排 s9,本工具不代替真跑资格。
+ *
+ *   sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit|daily [--date YYYY-MM-DD] [--fake SCRIPT]
+ *
+ * 顺序: s9-native build -> init --tier T -> prepare checker, executor-all-waves,
+ * executor-run-batch, executor, driver, selection -> step 直到非 PENDING -> aggregate。
+ * --fake 用 SCRIPT 代替 s9-native/driver,供夹具验证顺序/超时/失败停止。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static char root[4096], why[512];
+static const char *fake;
+static int pass_n, fail_n, notexec_n;
+static char logbuf[8000];
+static int logn;
+static void die(const char *a, const char *b) { tool_die("s9-nightly", a, b, 2); }
+static void note(const char *s) {
+    int n = (int)strlen(s);
+    if (logn + n + 2 >= (int)sizeof logbuf) die("log-bound", 0);
+    if (tx_copy(logbuf + logn, (long)(sizeof logbuf - logn), s, n)) die("log", 0);
+    logn += n;
+    logbuf[logn++] = '\n';
+    logbuf[logn] = 0;
+}
+static int run_step(char **v, const char *cwd, int sec, np_result *r) {
+    if (np_run(v, cwd, 0, sec, r, why, sizeof why)) { np_free(r); return 99; }
+    return r->rc;
+}
+static int invoke(const char *verb, const char *a1, const char *a2, const char *a3, int sec, char *out, int ocap) {
+    char com[4400], tool[4400];
+    char *v[16];
+    int k = 0, rc;
+    np_result r = {0};
+    if (fake) {
+        v[k++] = (char *)fake;
+        v[k++] = (char *)verb;
+        if (a1) v[k++] = (char *)a1;
+        if (a2) v[k++] = (char *)a2;
+        if (a3) v[k++] = (char *)a3;
+        v[k] = 0;
+        rc = run_step(v, root, sec, &r);
+    } else {
+        if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+            cx_fmt(tool, sizeof tool, "%s/tools/s9-native.cx", root)) die("path", 0);
+        v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--";
+        v[k++] = (char *)verb;
+        if (a1) v[k++] = (char *)a1;
+        if (a2) v[k++] = (char *)a2;
+        if (a3) v[k++] = (char *)a3;
+        v[k] = 0;
+        rc = run_step(v, root, sec, &r);
+    }
+    if (out && ocap > 0) {
+        size_t n = r.outn < (size_t)(ocap - 1) ? r.outn : (size_t)(ocap - 1);
+        if (r.out && n && mm_copy(out, ocap, r.out, (long)n)) { np_free(&r); die("copy", 0); }
+        out[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+static int is_pending(const char *s) {
+    return s && (strstr(s, "PENDING") || strstr(s, "NOT_DECIDED") || strstr(s, "STEP_FINISHED"));
+}
+static void write_report(const char *path, const char *status) {
+    char body[9000];
+    int n;
+    n = snprintf(body, sizeof body,
+                 "s9-nightly\nstatus\t%s\npass\t%d\nfail\t%d\nnot_executed\t%d\nlog\n%s",
+                 status, pass_n, fail_n, notexec_n, logbuf);
+    if (n < 0 || n >= (int)sizeof body) die("report-bound", 0);
+    if (cx_write(path, body, (size_t)n)) die("write", path);
+}
+
+int main(int argc, char **argv) {
+    const char *run = 0, *tier = "commit", *date = "1970-01-01";
+    char report[4400], tmp[4000];
+    int i, rc, steps, max_steps = 4, step_s = 55;
+    static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
+    if (argc < 3) die("usage", "ROOT RUN --tier commit|daily [--date D] [--fake SCRIPT]");
+    if (sy_realpath(argv[1], root, sizeof root) < 0) die("root", argv[1]);
+    run = argv[2];
+    fake = 0;
+    for (i = 3; i < argc; i++) {
+        if (!strcmp(argv[i], "--tier") && i + 1 < argc) tier = argv[++i];
+        else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
+        else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
+        else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) step_s = atoi(argv[++i]);
+        else die("unknown", argv[i]);
+    }
+    if (strcmp(tier, "commit") && strcmp(tier, "daily")) die("tier", tier);
+    if (cx_fmt(report, sizeof report, "%s/%s/s9-nightly-%s-%s.md", root, "out", date, tier)) die("report", 0);
+    pass_n = fail_n = 0;
+    notexec_n = 1;
+    note("begin");
+    rc = invoke("build", 0, 0, 0, 55, tmp, sizeof tmp);
+    note("build");
+    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\n", rc); return 1; }
+    pass_n++;
+    rc = invoke("init", root, run, "-", 55, tmp, sizeof tmp);
+    note("init");
+    if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\n", rc); return 1; }
+    pass_n++;
+    for (i = 0; i < 6; i++) {
+        rc = invoke("prepare", root, run, preps[i], 55, tmp, sizeof tmp);
+        note(preps[i]);
+        if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\n", preps[i], rc); return 1; }
+        pass_n++;
+    }
+    for (steps = 0; steps < max_steps; steps++) {
+        rc = invoke("step", root, run, 0, step_s, tmp, sizeof tmp);
+        note("step");
+        if (rc == 0 && !is_pending(tmp)) { pass_n++; break; }
+        if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step\trc=%d\n", rc); return 1; }
+        if (!is_pending(tmp) && rc == 3) { pass_n++; break; }
+        if (steps == max_steps - 1 && is_pending(tmp)) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step-pending\n"); return 1; }
+        pass_n++;
+    }
+    rc = invoke("aggregate", root, run, 0, 55, tmp, sizeof tmp);
+    note("aggregate");
+    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\n", rc); return 1; }
+    pass_n++;
+    notexec_n = 0;
+    write_report(report, "PASS");
+    printf("S9_NIGHTLY\tstatus=PASS\tpass=%d\tfail=%d\tnot_executed=%d\treport=%s\n", pass_n, fail_n, notexec_n, report);
+    return 0;
+}
