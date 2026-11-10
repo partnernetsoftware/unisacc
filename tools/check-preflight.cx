@@ -1,0 +1,151 @@
+/* tools/check-preflight.cx -- tools/preflight.cx against positive and negative fixtures of every rule.
+ *
+ *   sh ./unisacc.com tools/check-preflight.cx        (from the repo root)
+ *
+ * Builds fixtures under sy_tmpdir()/check-preflight-PID from the positive/negative example columns of
+ * build/preflight-rules.tsv and runs the real tool three times:
+ *   neg   every one of the ten rules must FAIL (stale outer/host-libz, APE-only root without the
+ *         build record, non-canonical record, receipt commit != rev without BOOTSTRAP_FROM, a
+ *         release-build.cx lacking both texts, a 0600 constructor, a P4 package without the
+ *         embedded headers, its FAIL carrying bytes and sha256) and the exit must be 1
+ *   pos   rows 1-4 and 6-10 must PASS on a split fixture root with a clean BUILD and an exact snap
+ *   boot  ROOT is this checkout: row 5 (the production canonical-record consumer on the installed
+ *         record) and row 6 under BOOTSTRAP_FROM=HEAD~1 with receipt commit HEAD~1 must PASS
+ * Prints PASS/FAIL per assertion and CHECK_PREFLIGHT<TAB>failed=N; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096], work[4400], out[32768];
+
+static void die(const char *s) { fprintf(stderr, "check-preflight: %s\n", s); exit(2); }
+static void ck(int ok, const char *name) { printf("%s\tcheck-preflight.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+
+static void p(char *dst, const char *rel) { if (cx_fmt(dst, 4400, "%s/%s", work, rel)) die("path"); }
+static void mk(const char *rel) { char d[4400]; p(d, rel); if (sy_mkdir(d, 0700)) die(d); }
+static void put(const char *rel, const char *s, int mode) {
+    char d[4400]; p(d, rel);
+    if (cx_write(d, s, strlen(s)) || sy_chmod(d, mode)) die(d);
+}
+
+static void git_rev(const char *spec, char c[41]) {
+    np_result r = {0}; char why[512] = {0};
+    char *av[] = {"git", "rev-parse", (char *)spec, 0};
+    if (np_run(av, root, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 40) die("git rev-parse");
+    if (mm_copy(c, 41, r.out, 40)) die("copy"); c[40] = 0;
+    np_free(&r);
+}
+
+/* Status word ("PASS"/"FAIL"/"SKIP") printed for rule ROW in the last run, or 0. */
+static int row_is(int row, const char *word) {
+    char want[32];
+    const char *q = out;
+    if (cx_fmt(want, sizeof want, "%s\t%d\t", word, row)) die("fmt");
+    for (;;) {
+        if (!strncmp(q, want, strlen(want))) return 1;
+        q = strchr(q, '\n');
+        if (!q) return 0;
+        q++;
+    }
+}
+
+/* CTOR non-null sets UNISACC_CTOR for row 11; otherwise it is removed so the parent's
+   environment cannot make the negative run pass. Each run has its own 50s bound. */
+static int run(const char *boot, const char *ctor, const char *r, const char *b, const char *s, const char *rev) {
+    char ra[4500], ba[4500], sa[4500], va[64], ea[80], pa[4500], ca[4500];
+    np_result res = {0}; char why[512] = {0};
+    int k = 0, rc = -1;
+    long n;
+    char *av[20];
+    cx_fmt(ra, sizeof ra, "ROOT=%s", r); cx_fmt(ba, sizeof ba, "BUILD=%s", b);
+    cx_fmt(sa, sizeof sa, "SNAP=%s", s); cx_fmt(va, sizeof va, "REV=%s", rev);
+    cx_fmt(pa, sizeof pa, "PKG=%s/compiler.p4.pkg", r);
+    av[k++] = "env"; av[k++] = "-u"; av[k++] = "UNISACC_CTOR";
+    if (boot) { cx_fmt(ea, sizeof ea, "BOOTSTRAP_FROM=%s", boot); av[k++] = ea; }
+    if (ctor) { cx_fmt(ca, sizeof ca, "UNISACC_CTOR=%s", ctor); av[k++] = ca; }
+    av[k++] = "sh"; av[k++] = "./unisacc.com"; /* lint:allow R1-product 本检查的目的就是用已装产品实跑 tools/preflight.cx,产品路径是其合同而非第二真值源 */
+    av[k++] = "tools/preflight.cx"; av[k++] = "--";
+    av[k++] = "build/preflight-rules.tsv"; av[k++] = ra; av[k++] = ba; av[k++] = sa; av[k++] = va; av[k++] = pa; av[k] = 0;
+    out[0] = 0;
+    if (np_run(av, root, 0, 50, &res, why, sizeof why) == 0) {
+        n = (long)res.outn; if (n > (long)sizeof out - 1) n = sizeof out - 1;
+        if (n > 0 && mm_copy(out, (long)sizeof out, res.out, n)) die("copy");
+        out[n] = 0;
+        rc = res.rc;
+    }
+    np_free(&res);
+    return rc;
+}
+
+int main(void) {
+    char head[41], prev[41], json[512], d1[4400], d2[4400], d3[4400];
+    int rc, row;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/check-preflight-%d", sy_tmpdir(), (int)getpid())) die("work");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("work mkdir");
+    git_rev("HEAD", head);
+    git_rev("HEAD~1", prev);
+
+    /* negative fixtures */
+    mk("nroot"); mk("nroot/tools"); mk("nbuild"); mk("nbuild/outer"); mk("nbuild/host-libz"); mk("nsnap");
+    put("nroot/unisacc.com", "#!/bin/sh\n", 0755);
+    put("nroot/tools/release-build.cx", "/* neither text */\n", 0644);
+    put("nbuild/source-package-O2.elf", "x", 0600);
+    put("nroot/compiler.p4.pkg", "P4 index without embedded headers hdr/cx-nested.h\n", 0644);
+    put("nsnap/.release-rev", head, 0644);
+    cx_fmt(json, sizeof json, "{\n  \"commit\": \"%s\"\n}\n", prev);
+    put("nsnap/unisacc.com.build.json", json, 0644);
+    p(d1, "nroot"); p(d2, "nbuild"); p(d3, "nsnap");
+    rc = run(0, 0, d1, d2, d3, head);
+    ck(rc == 1, "neg.exit1");
+    for (row = 1; row <= 11; row++) {
+        char name[64]; cx_fmt(name, sizeof name, "neg.row%d.FAIL", row);
+        ck(row_is(row, "FAIL"), name);
+    }
+    ck(strstr(out, "PREFLIGHT\tfailed=11\tskipped=0\tpassed=0\n") != 0, "neg.summary");
+    ck(strstr(out, "source-wave: exclusive host-libz directory errno=17") != 0, "neg.error_text");
+    ck(strstr(out, "P4 缺嵌入头") != 0 && strstr(out, "missing hdr/cx.h") != 0 && strstr(out, "sha256=") != 0, "neg.row10.evidence");
+    ck(strstr(out, "UNISACC_CTOR unset") != 0 && strstr(out, "release-build: opguard needs explicit UNISACC_CTOR") != 0, "neg.row11.unset");
+
+    /* the BUILD record is required by row 4; a non-canonical one is row 5's negative example.
+       Without it row 5 fails on the missing record, so give it one and rerun only for the reason. */
+    put("nroot/unisacc.com.build.json", "{\n  \"settings\": {\"opt\": 1}\n}\n", 0644);
+    rc = run(0, 0, d1, d2, d3, head);
+    ck(row_is(5, "FAIL") && strstr(out, "root-epoch-record-shape") != 0, "neg.row5.noncanonical");
+
+    /* positive fixtures */
+    mk("proot"); mk("proot/tools"); mk("proot/unisacc.com.dev"); mk("pbuild"); mk("psnap");
+    put("proot/unisacc.com", "#!/bin/sh\n", 0755);
+    put("proot/unisacc.com.build.json", "{}\n", 0644);
+    put("proot/unisacc.com.dev/p3-package.bin", "pkg", 0644);
+    put("proot/tools/release-build.cx", "long pipe_timeout_ms = 55000;\nsy_eprintf(\"release-build: %s timeout after %ld ms (child killed)\\n\", label, ms);\n", 0644);
+    put("proot/compiler.p4.pkg", "P4 index hdr/cx.h hdr/cx-flat.h hdr/cx-nested.h\n", 0644);
+    put("pbuild/source-package-O2.elf", "x", 0700);
+    put("psnap/.release-rev", head, 0644);
+    cx_fmt(json, sizeof json, "{\n  \"commit\": \"%s\"\n}\n", head);
+    put("psnap/unisacc.com.build.json", json, 0644);
+    p(d1, "proot"); p(d2, "pbuild"); p(d3, "psnap");
+    {   char ctor[4400]; p(ctor, "pbuild/Root41-bootstrap.com");
+        rc = run(0, ctor, d1, d2, d3, head); }
+    for (row = 1; row <= 11; row++) {
+        char name[64];
+        if (row == 5) continue;
+        cx_fmt(name, sizeof name, "pos.row%d.PASS", row);
+        ck(row_is(row, "PASS"), name);
+    }
+
+    /* bootstrap: receipt commit HEAD~1, an ancestor of HEAD, declared by BOOTSTRAP_FROM */
+    p(d3, "nsnap");
+    rc = run(prev, 0, root, d2, d3, head);
+    ck(row_is(6, "PASS"), "boot.row6.ancestor.PASS");
+    ck(row_is(5, "PASS"), "boot.row5.installed-record.PASS");
+    (void)rc;
+
+    if (cx_rmtree(work)) die("cleanup");
+    printf("CHECK_PREFLIGHT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
