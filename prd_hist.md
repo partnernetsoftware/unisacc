@@ -236,3 +236,57 @@ D1数据结论：模型大半raw字节是生成动作程序，选择器只是其
 
 全部新增工具及最终参数模式均已正式登记实跑，包含8个encoder双段profile；静态和动态错配拒绝保留。C47最终测量585文件83,279行；2026-11-08主人最终裁定工具行数门退役，C47据已有功能证据DONE。先前13项实测9绿、cxapis/cxtrunc/outdep红及coreapi ERROR仍保留，统计制度改变不使其余门变绿。局部功能和登记通过不称全仓棘轮/--all/六宿主CI通过；首次超时、静态profile拒绝与未知状态均保留。
 
+## 0.0.49 收尾（2026-11-10 自 prd.md §10 末尾逐字迁出；0.0.48.1 macOS 车道记录与 0.0.49 发布事实）
+
+迁出说明：以下 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 段落原在 prd.md「§10 子文档与归档索引」之后（提交 bb3e43d218 时第 476–525 行），顺序未改、内容逐字；箭头符号按 AGENTS.md 规则改写为 `->`，其余未动。0.0.49 发布事实本身（APE 2d3852a8、冻结源 979b56e4、CI 42661106290 QUALIFIED 42/0、s9 提交档 96/96、提交 X e3fc485793 / Y 35cfdd1e3a）见 [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md) 与 `agentwork/ledger.tsv` 2026-11-10 `RELEASE-0.0.49 PUBLISH_DECIDED` 行；教训见 [prd_release.md](prd_release.md) §3b。
+
+### OSX-LAUNCH-SLOW（0.0.48 发布回归 P0）
+
+cc报告发布件559705热启动每次创建并执行新manager inode，Darwin安全评估使--version/-run约1秒。本机实际根仍f069，需下载并核559705，不以安装记录代字节。首版manager内容缓存真实未过性能：隔离缓存仍高CPU重算MB摘要；原失败日志保留。改用新解压/marker异常才运行manager，热路径匹配内置完整slice SHA的原marker行、原子新增PID lease并touch recency，不启动manager；冷路径仍完整摘要校验/最近4清理/隔离fallback。manager保存在私有.managers内容哈希目录，冷构造原子发布。验收两Mac架构各热version/run r7逐次10次与中位数≤50/300ms，首解压仍清理旧缓存；新候选按发布流程绑定独立身份，未实测不记PASS。
+
+OSX-LAUNCH-SLOW能力入口：`tools/osx-launch-profile.cx APE arm64|x86_64`显式候选逐次测量与10次中位；配对check独立15项。`tools/check-ape-pack.cx APE ARCH`验证冷清理/热manager不执行/lease/recency及symlink隔离；c869历史候选两格各45/0。五个osx批次已登记，真实候选性能不借工具夹具PASS；ARM15/224ms已过，Rosetta70/423ms未过；裸x64 run388.5ms、旧f069同入口405.5ms，保留300ms门继续核验。
+
+OSX-LAUNCH-SLOW最终wrapper开发冻结07a90387…、候选01b16ae0…：热合一uname并仅缺目录才mkdir，ARM12.5/253.5ms、Rosetta48/512.5ms；后者run仍FAIL，旧f069 Rosetta同测405.5ms，裸c48 slice388.5ms。阈值不放宽，未发布或授QUALIFIED。测量check15/0及13棘轮13/13；工具库存由现git index完整重算，核补已有cache-retain/check、toolselfpath、precommit-freeze遗漏并剔除误列tests路径，现651源/82分片，明确只登记未全编。下一步查r7具体输入/运行相位并推进新候选CI。
+
+OSX-LAUNCH-SLOW宿主分账：Rosetta两批是在ARM宿主强制arch x86_64的跨架构探针，platform须标osx/arm64；此前误标osx/x86_64，被run-batch既有宿主门拒绝，原4份REFUSE日志保留，未改宿主门或把拒绝当功能失败。Terminal.app责任应用已有Developer Tools豁免，不改系统设置；同01b16ae0在该上下文x64独立10次中位48/246ms过门，非豁免Codex上下文run512.5ms失败单列，根因另有既有-run临时程序新inode；源码runcache也只启用lnx/x64。正式ARM批在Terminal已15/101.5ms PASS，配对接口15/0、cache ARM45/0；修正platform后再跑Rosetta正式批，不迁原独立结果。
+
+OSX-LAUNCH-SLOW完成审计补漏：01b16候选CI42551819720已全六目标成功，但热shell每次创建lease而仅cold清理，会在长期热调用后积累死lease触4096扫描预算，故不是最终交付。修tools/cache-retain新增轻量--touch全SHA模式，复用同inode但不digest MB载荷，严格marker/root/lock/parentPID并清本tool全部dead lease、保留active/EPERM、更新recency和新lease；full mode仍cold做完整摘要/四载荷清理。健康新缓存不积累；既有超预算目录不宣称自动恢复，保留隔离fallback。双manager将新构造，必须新候选SHA及新CI，不迁01b16绿。
+
+OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；本车道负责version事实/配套站点、热lease维护、固定四Mac成员与重包接口，cc独占.github/workflows/macos-sign.yml、tools/macos-signing.cx、plans/macos-signing.md，本车道不改。草稿附members.tsv五角色及四Mac独立资产，最终tag/candidateSHA/member清单SHA写release/candidate-osx-launch.tsv并交cc触真签。版本必须实际新源构造，不把0.0.48 wrapper候选冒称0.0.48.1；签后四成员显式替换重包保留字节，新签后身份重新资格，不沿用未签CI。旧01b16已六目标CI成功但lease缺口/版本不满足最终裁定，仍仅历史对照。
+
+OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到release/candidate-osx-launch-rc1.tsv，当前release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。
+
+OSX-LAUNCH-SLOW新源Linux构造入口缺口：两目标首批尚未构造对象即被entry-build覆盖UNISA_CONTAINER拒绝；显式constructor仅认bare ELF，Mac裸片被错误unset包。正规entry接口已声明显式constructor直接执行，现补Mach-O64识别保留同显式P4，APE/薄头仍清外部包；不换产品源/NN/SID，不以shell包装掩盖构造器身份。失败OUT保留，新native工具与新冻结源根另开批次，最终完整44根/closure/link逐项核。
+
+OSX-LAUNCH-SLOW最终53ff候选首测：ARM性能过门，两架构缓存各108/0且四Mac成员/P4严格字节同；Rosetta version54.5ms FAIL、run262.5ms PASS，材料仅PREPARED不授可发布。热wrapper仍外部uname+chmod，下一小步用bash只读BASH_VERSINFO[5]识别Darwin架构(实测ARM/Rosetta及覆写HOSTTYPE/OSTYPE/MACHTYPE不影响)，不支持的POSIX shell/未知平台回退原uname，不信可覆盖环境变量。保留chmod私有目录与全部cache安全合同；新wrapper必出新SHA再独立性能/功能/CI，不迁53ff结果。
+
+OSX-LAUNCH-SLOW新候选bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3/6429038B：实际两架构逐次10次性能ARM14/101.5ms、Rosetta43/257.5ms通过50/300ms门，Terminal.app既有责任应用上下文；53ff失败完整保留，不改安全设置。release-ape新接口28/0、members独立21/0与最终13棘轮13/13。将用独立草稿v0.0.48.1-osx-launch-rc1上传七标准资产+四Mac成员+五行无header members.tsv，交cc触真签；签后重包新SHA须重验，不迁未签资格。对外动作回滚为删除本草稿和本tag(gh release delete v0.0.48.1-osx-launch-rc1 --cleanup-tag)，不覆盖已发v0.0.48/Latest/根。本车道不改cc三签名路径。
+
+OSX-LAUNCH-SLOW最终正式五批补验：冻结f09969d9d0efb81976b3eaf486731f120df22cbe的独立ROOT，精确bdd52246副本，Terminal.app既有上下文。interface15/0、两cache各108/0、ARM热version/run12/99ms、Rosetta42/246.5ms，各mode10次中位，五个BATCH_RUN均PASS/rc0/transport0，candidate完整SHA一致。正式入口未拒绝/未迁旧数据，平台同osx/arm64含Rosetta，非原生Intel资格由同候选CI补；详out/osx-launch-slow/v0481/formal-*.log。
+
+OSX-LAUNCH-SLOW交接身份已实际固定：草稿v0.0.48.1-osx-launch-rc1、source_commit=f09969d9d0efb81976b3eaf486731f120df22cbe、APE=bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3；七标准资产+四Mac+members五角色共12资产上传全actual0。members SHA4e1a51b8bc0d2dbdf8aefad6bca25cf615556fb572044abc3b89e008565225d1，正式清单/表均在release/candidate-osx-launch*.tsv。新CI42555350465实派发且fetch/ffi成功，正在原生格前工具准备；完成前不授42/0。cc按tag/source_commit/membersSHA绑定首真签，四成员签后重包须新CI；不改cc签名路径。
+
+OSX-LAUNCH-SLOW草稿回读完成：12资产独立重新下载，严格layout与members check真实exit0；metadataAPI核draft=true/tag/targetf099/12唯一，独立CX审计逐文件完整SHA/bytes与远端digest全部一致，members仍4e1a51b8…，保留初始EOF/notfound日志。六个native格现均success，汇总report尚在途；不提前授42/0。证据out/osx-launch-slow/v0481/draft-readback-{report.md,audit.tsv}。
+
+OSX-LAUNCH-SLOW未签候选最终资格：CI42555350465实际completed/success，下载新artifact表绑定bdd52246全SHA+f099精确提交，六目标七检查=42 PASS/0FAIL/0NOTRUN/0INVALID；Windows portable子集范围以原notes为准，不称完整--all或全POSIX。本车道目标已到可真签交接：0.0.48.1草稿12资产和members4e1a51b8…经远端回读完全一致，正式candidate表固定CIID，四成员签后替换入口28/0。首真签归cc，未触发真签/公证/Latest/根替换，签后新身份须重新资格。热性能仅Terminal既有责任应用上下文通过，非豁免旧失败保留。证据out/osx-launch-slow/v0481/ci-evidence-bdd/table.md与draft-readback-report.md。
+
+OSX-SIGN-ROSETTA P0接续：cc首真签run42556245736公证Accepted/arm64签后可跑，但DeveloperID+hardened runtime x64 Rosetta --version挂起，同源ad-hoc同entitlements正常。先核run2原始字节/签名/同包环境，建立最小RW->RX内存执行对照，MAP_JIT/pthread_jit_write_protect/allow-jit仅为待证路线，不把Rosetta采样位置当根因。cc三签名路径不改；L0/core冻结继续，若产品修复必要只给明确单路径候选补丁并实际验证，不覆盖远程车道。所有复现子≤8秒/外≤60，留原hang并清进程；未过团队签名+Rosetta真实复验不得宣称修复完成。
+
+OSX-SIGN-ROSETTA最小裁判：先比较完全无动态执行内存的return7程序，由unisacc与系统clang各生成x64，私有副本仅本机现有DeveloperID/runtime/无timestamp与ad-hoc签名对照；目的是区分Mach-O加载/AOT与kn_load执行，不上传、不公证、不碰原件或签名workflow/证书配置。当前任务明确团队签后差异，必要私有签对照在本任务范围内；不以本机签字节代替后续cc正式签验收。若无JIT程序也挂，停止把MAP_JIT当既定修法。
+
+OSX-SIGN-ROSETTA反证实测：原路径签后3679a611在统一cleanenv+P4 fffa两次8s超时142；同字节cp -p新副本DeveloperID/同runtime/同唯一entitlement正常version0，原路径sample全Rosetta routines/约200K无应用符号，原材料SHA不变。独立systemclang return7内存执行23子实测：RW->RX在全部ad-hoc profiles正常，无hang；只MAP_JIT无allow-jit被EACCES拒绝，allow-jit MAP_JIT正常，supported_np=0。尚不认kn_load/RW->RX为根因，不加泛权限或动冻结L0。下一步从公证DMG私有读出四Mac已签成员，严格原字节重包到新内容key/新inode，核真实Rosetta和冷/热两路径；若通过给无源变更的签后修复候选。另本机DeveloperID私有最小样本签名尝试因errSecInternalComponent失败，仅ad-hoc旧字节，不计团队签名测试。
+
+OSX-SIGN-ROSETTA调用链收窄：所绑src/unisacc main->dv_main->dv_parse_args/entrybind --version分类->dv_parse直接ex_ri_say->sy_printf->return，未到kn_call/core_run，查无静态constructor触发kn_load；因此正常version控制流的这次挂起不能由后续kn_load RW->RX修复，sample单独不证明何时停。公证DMG四签成员复制保留quarantine，直exec8s挂与无xattr副本成功不得混为同变量。继续用正常sh APE原字节解压新内容key复验；不删任何xattr/不关策略，不扩entitlements。
+
+OSX-SIGN-ROSETTA签后原字节候选实测：release-ape显式替换四公证DMG内DeveloperID成员，APE5e110594033cbaa9e81d59c8677eef4c2727efa79269d35366ff556b37ec177c/6450974B。不改kn_load/entitlement/冻结源，不覆盖原未签候选。正常sh用户路径两格冷version0、cold/hot -run r7均7，四缓存strictverify0；两独立cache检查各108/0且改写fixture也过，无残留。原裸路径两次142与带quarantine私有直exec142保留。此为LOCAL-CHECKED签后重包候选，不转移bdd原六格CI，也不声称新APE已公证或原宿主Rosetta状态已根治。
+
+OSX-SIGN-ROSETTA当前交接结论：只读syspolicyd日志11:29/11:38对团队L2/id osx-x86_64/NOT_A_BUNDLE明确Prompt shown/waiting for response，支持相关裸成员启动阻塞在Gatekeeper评估，不能因path散列把全部8s超时唯一归到同prompt。正常--version链不触kn_load，团队签名新APE实际-run7与FFI0两格又证现RW->RX可工作；无理由改冻结L0/allow-jit。候选out/osx-sign-rosetta/candidate/unisacc.com SHA5e110594…/6450974B，members96ab2e58be8e5a3fd6cb63c3ce7f686d652c45f7aafb7056aa4423c36615af81，两格cache108/0、热10样本ARM12/96ms及Rosetta45/254.5ms通过(既有Terminal上下文)。四签成员原字节/签名/原P4不变，原DMG只读卸载，无残留；LOCAL-CHECKED不迁旧CI、不冒新DMG公证，cc三签名路径未动。完整最小对照和集成边界research/c48-osx-sign-rosetta/result.md，后继cc将签后APE与同字节成员入最终DMG并按新身份走CI/签公证。原裸CLI/私有quarantine直exec142保留不涂绿。
+
+OSX签后重包runner交接：用户要完整自举命令写research/c48-osx-sign-rosetta/repack-cmd.md；完整checkout冻结f099并把核SHA的草稿bdd APE放runner根unisacc.com，因release-ape内层固定sh ./unisacc.com再运行ape-pack。需要6裸片+完整footer P4；现draft缺Winx64/Linux2三辅助原裸片，将按既有完整SHA补充(不改5角色成员/pins)。不可逆PE资源回注不能把从APE剥出的带.rsrc Win片直接再当pack输入。固定首签四bytes回放应5e11；新的timestamp签名原字节变，新APE SHA必须实算，不硬码历史输出。
+
+OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.md三bash代码块经CX提取，在独立完整f099检出/草稿bdd根bootstrap下回放；step1同draft5输入远端重下载SHA全OK、step2实际0输出精确5e110594…，四签后源与原输入前后SHA均同、receipt输出SHA核同。补充Winx64/Linux2三辅助资产上传actual0并远端digest/下载核同，不改原5members/pins。文档给DMG接线并区分历史5e11回放与未来timestamp新SHA，不改cc工作流。
+
+0.0.48.1 macOS发行附件裁定：cc确认run42561596269完成签->重包->DMG->公证Accepted->staple，本机Gatekeeper/ARM及Rosetta -run7与热0.22s验收通过。公开0.0.48.1时必须附该run的macos-stapled-dmg内最终DMG，并明确Intel实机/macOS13未测。本车道先取artifact核staple后完整SHA、验证签名/票据，将同字节DMG及独立SHA附件准备到现0.0.48.1草稿，发布说明写入待发布文案；不据本通知提前公开/改Latest，不改cc三签名路径。签后APE身份与原未签bdd42/0继续分账。
+
+0.0.48.1 macOS附件已就绪：从run42561596269/macos-stapled-dmg下载并核post-staple DMG6e25e7c9f9efec717c1a0cf33bc7a35ad8c2bfccc2a0b2ab9e807ff2b40f0cc0/5475910B，stapler validate0、Gatekeeper accepted(Notarized Developer ID)。以unisacc-0.0.48.1-macos.dmg及独立sha256资产附到现v0.0.48.1-osx-launch-rc1草稿，上传真实0且远端重新下载SHA核同。发布说明plans/release-notes-0.0.48.1.md与release/macos-0.0.48.1.tsv固定run/DMG/内嵌签后APE988a528d…身份，明确Intel实机/macOS13未测，原bdd未签42/0不迁用。公开仍待按原发布流程执行，不修改Latest/cc三路径。
+

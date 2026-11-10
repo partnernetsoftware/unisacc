@@ -8,13 +8,13 @@
 
 | 层 | 唯一名 | 含义 | 数量 | 真源 |
 |---|---|---|---|---|
-| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 → 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf） | `exec/pipeline/image-stages.tsv` |
+| L1 | **Stream**（别名 Flow） | 字节管道阶段：输入格式 -> 输出格式 | unisacc **7**（e2/e1/e3/e4/prune/lower/elf） | `exec/pipeline/image-stages.tsv` |
 | L2 | **Net** | ask 事实网：一张有限表 + 全键穷举 exact | **18**（8770 键） | `weights/gold/*.tsv`（权威；规则形式 `seed/gold_<阶段>_label.c`，由 `tools/gold-table.cx --check` 核对） |
 | L3 | **Segment** | 训练合并段（多网合一的 masked 多任务模型） | 3（s1/s2/s3） | 负结果证据已归档 |
 | L4 | **Book phase** | 一次推导中 ask 的记账阶段 | 由 contract 声明 | `flownet/contract.cx` |
 | L5 | **Release phase** | 发布流程阶段 | 10 | 已归档 |
 
-**两类 `.tsv` 不要混**：`exec/`、`weights/` 里的 `.tsv` 是**产品事实表**，由生成器构造成网（TSV→NN），参与源 SID；`tests/`（51 个：批次表、覆盖表、棘轮基线、域矩阵、冻结/分档表）和 `agentwork/`（任务与账）里的 `.tsv` 是**管理表**，只被测试/流程工具按列读写，不构造成网、不进源 SID。读者按目录判断。
+**两类 `.tsv` 不要混**：`exec/`、`weights/` 里的 `.tsv` 是**产品事实表**，由生成器构造成网（TSV -> NN），参与源 SID；`tests/`（51 个：批次表、覆盖表、棘轮基线、域矩阵、冻结/分档表）和 `agentwork/`（任务与账）里的 `.tsv` 是**管理表**，只被测试/流程工具按列读写，不构造成网、不进源 SID。读者按目录判断。
 
 **六条常见误解**（不要按直觉读）：
 
@@ -29,12 +29,12 @@
 
 ### 0.1 范式与核心概念（定义；全文以此为准）
 
-**范式一句话**：用 NN 替代逻辑——编译器中的表状决策先写成**事实表**，再由生成器**确定性构造**成 NN，由一个通用执行器运行。「以网换逻辑」「NN 替代逻辑」「TSV→NN」是同一命题的三种说法，不存在冲突。
+**范式一句话**：用 NN 替代逻辑——编译器中的表状决策先写成**事实表**，再由生成器**确定性构造**成 NN，由一个通用执行器运行。「以网换逻辑」「NN 替代逻辑」「TSV -> NN」是同一命题的三种说法，不存在冲突。
 
 | 概念 | 定义 | 不是什么 |
 |---|---|---|
 | **事实表**（tsv） | 有限定义域上的决策映射，人可审、可 diff；范式的**源** | 不是生成物，不手改生成结果 |
-| **生成器** | 表 → 网/程序 的确定性构造程序（`tools/*-gen.cx`、`seed/gen.c`），带 `--check` | 不是训练 |
+| **生成器** | 表 -> 网/程序 的确定性构造程序（`tools/*-gen.cx`、`seed/gen.c`），带 `--check` | 不是训练 |
 | **网**（NN） | 由事实表构造的小整数阈值神经网络；在表的**全定义域逐键验证 = 表** | 不是训练所得，不声称泛化；验证只证「网 = 表」，不证「表 = C99」 |
 | **生成程序** | 生成器产出的转移/动作序列，由执行器运行（承担网之外的动作落地） | 不是手写代码 |
 | **模型**（kind N） | 包里的执行单元 = 选择器（网）+ 生成程序 + 常量；P4 包 40 个 | 不等于「网」的个数 |
@@ -43,7 +43,7 @@
 
 **两套计数不混用**：经典参考 **18 张金表网**（`weights/gold`，其中 5 张为对照臂）；默认产品阶段包 **42 张构造阈值网**（分布在 40 个模型里）。
 
-**替代发生在哪一步**：逻辑 → 事实表 这一步把决策从代码里拿出来；表 → 网 是等价的执行形式转换。覆盖度的度量看「决策进表的比例」，现状见 [prd_hist.md](prd_hist.md)「0.0.47 逻辑分布普查结论」（源码中机制代码约 49%，是后续推进空间）。
+**替代发生在哪一步**：逻辑 -> 事实表 这一步把决策从代码里拿出来；表 -> 网 是等价的执行形式转换。覆盖度的度量看「决策进表的比例」，现状见 [prd_hist.md](prd_hist.md)「0.0.47 逻辑分布普查结论」（源码中机制代码约 49%，是后续推进空间）。
 
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
@@ -56,19 +56,19 @@
 - **写出六目标程序**（真）：能编出 {Linux, macOS, Windows} × {x86-64, arm64} 六个目标的可执行文件（ELF / Mach-O / PE），**映像不经汇编器和链接器**（模型路由直接编码写出）。
 - **六 ISA 切片是核心需求，不可降级**（主人 2026-11-06 两次重申）：lnx/x86_64、lnx/arm64、osx/x86_64、osx/arm64、win/x86_64、win/arm64，每个目标都要同候选原生证据；当前候选的原生 CI 结果与 Windows 两格仅 portable 子集的限制见 §9.1。
 - 参考编译器可写三种格式的可重定位 `.o`，产品自带链接器与 `ar`；
-- **自举**：宿主构建 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。
+- **自举**：宿主构建 `unisacc-seed.com` -> 种子自建 -> 再自建，三个 sha256 相等（N22）。
 
 **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度按逐条款账本 [archive/testing-c43-legacy/tests/c99/clauses.tsv](archive/testing-c43-legacy/tests/c99/clauses.tsv)，缺口在 [README.md](README.md) 限制表逐条点名。
 
 **方法**（论文 A 的范式）：编译器里每个**表状决策**（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答——权重从真值表派生，在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。范式一句话：
 
 ```
-事实表 → 生成器 → 网 → 一个通用执行器 + 按包跑阶段
+事实表 -> 生成器 -> 网 -> 一个通用执行器 + 按包跑阶段
 ```
 
 四条范式支柱：**有限表表达决策**、**共用执行器提供机制**、**显式流接口连接阶段**、**晚绑定合同隔离声明需求与宿主供给**。
 
-**动态逻辑进表的范式（2026-11-05，实例：arity、type、stmt）**：运行值先**分类**成有限键（机制行），再用**决策表**选标签（`weights/**/*.tsv` → `tools/decide-gen.cx` → 网行，逐键 T1，批次 `check-decide`），最后由机制把标签落成动作；值放 `exec/facts`，动作只写 `["constant",NAME]`（棘轮 `check-literal`，跨处一致 `check-limits`）。能进表：一步决策（选标签、选后继）。留在机制或生成器：循环与递归结构、带副作用的序列。T1 只证“网 = 表”，表是否对另靠产物比对和外部裁判。第四例（E4 窥孔，`weights/gold/peep.tsv` 1632 键）证明范式跨流成立：两级都动态时用 `decide-gen --each a=... --select REG`，第一级 `RLD pa_` 选态、第二级 `RLD b*12+rel` 选标签，START 的 1632 条 STX 池写入归零；opt 的生成器是手写清单解释器（`seed/gen.c construct_opt`），接入新 rows 要在白名单加 stem。
+**动态逻辑进表的范式（2026-11-05，实例：arity、type、stmt）**：运行值先**分类**成有限键（机制行），再用**决策表**选标签（`weights/**/*.tsv` -> `tools/decide-gen.cx` -> 网行，逐键 T1，批次 `check-decide`），最后由机制把标签落成动作；值放 `exec/facts`，动作只写 `["constant",NAME]`（棘轮 `check-literal`，跨处一致 `check-limits`）。能进表：一步决策（选标签、选后继）。留在机制或生成器：循环与递归结构、带副作用的序列。T1 只证“网 = 表”，表是否对另靠产物比对和外部裁判。第四例（E4 窥孔，`weights/gold/peep.tsv` 1632 键）证明范式跨流成立：两级都动态时用 `decide-gen --each a=... --select REG`，第一级 `RLD pa_` 选态、第二级 `RLD b*12+rel` 选标签，START 的 1632 条 STX 池写入归零；opt 的生成器是手写清单解释器（`seed/gen.c construct_opt`），接入新 rows 要在白名单加 stem。
 
 **两条实现路线**：C 参考编译器（`archive/reference-c/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍。
 
@@ -105,10 +105,10 @@
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
 | 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |
 | 只提交自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed PATH KEY` | 多人同改文件（prd/batches/coverage） |
-| agentwork分片读侧与迁移工具 | `sh ./unisacc.com tools/aw.cx -- ledger/items/check/migrate [筛选] [--root ROOT]`；检查 `tools/check-aw.cx -- pure/parallel/conflict` | 按月/owner账本、按ID看板，历史5/7列及重复/行尾位无损容器；新布局严格校验，真实并发夹具零冲突，同项双方状态可读；工具交付不代表真实数据已迁移，迁移/删旧/引用切换仅由cc静默执行 |
+| agentwork分片读侧、迁移与账本追加 | `sh ./unisacc.com tools/aw.cx -- ledger/items/check/migrate [筛选] [--root ROOT]`；`-- append --owner OWNER --id ID --event EVENT --evidence TEXT [--commit C] [--date D]`；检查 `tools/check-aw.cx -- pure/parallel/conflict` | 按月/owner账本、按ID看板，历史5/7列及重复/行尾位无损容器；新布局严格校验，真实并发夹具零冲突，同项双方状态可读；append 为 owner 串行化原子追加（O_APPEND+fsync，路径/IO 校验失败 rc2）；工具交付不代表真实数据已迁移，迁移/删旧/引用切换仅由cc静默执行 |
 | 装前判产品能不能用 | `sh ./unisacc.com tools/check-dev-product.cx -- ROOT PRODUCT` | 六条：shell 头 / `sh --version` / 不带 `UNISA_CONTAINER` 能编译 / 写入产物 / 内嵌包是新头 |
 | 失控与超数量`.cx`进程守卫 | `sh ./unisacc.com tools/procguard.cx --once`（默认dry）；`--enforce`才回收；`--only-parent PID`收窄受控扫描；检查`tools/check-procguard.cx`（批`cx-procguard`） | 每10s扫描同uid/.cx；保留同文件数>`PG_MAX`(100)规则，另将累计CPU>=90%且存活>10分钟、cwd已删、ppid1且>30分钟非tmux树列候选。只日志不默认信号；enforce逐PID先STOP后KILL并复核starttime/uid/保护，绝不按pgid/session杀。`CLK_TCK`真实读取，读失败不启CPU/orphan判定；沿用本身/祖先/原名单及tmux/pane保护，orphan判定排除tmux子树。日志`~/.cache/procguard/log`，旧组回收后的fresh-scan `residue=KEY:N`合同保留。 |
-| 超时作业的整棵树清理 | `#pragma unisa use sys.process` → `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
+| 超时作业的整棵树清理 | `#pragma unisa use sys.process` -> `sy_child_subreaper()`、`sy_kill_tree(root, ms, keep, nkeep, rep, cap)` | 先冻结根、反复扫 `/proc` 把新后代与同组进程也 SIGSTOP（被停进程不能再 fork），到不动点后全杀，返回残留数（0 才算干净）；starttime 防 pid 复用；subreaper 让双 fork 的孤儿仍可见；非 Linux 返回 -ENOSYS。检查：`sh ./unisacc.com tools/check-reaper.cx` |
 | 子进程超时契约（run/capture + residue） | `sh ./unisacc.com tools/check-netpack.cx` | 双管EOF后仍按原deadline非阻塞等待，超时冻结整树后击杀并有界定向回收直接子，不抢调用者的其他子进程；`np_result.residue` 0才算干净。孤儿可见性仍需调用方先`np_subreaper()`。`UNISACC_NP_FAULT=residue`为tools与run-batch的显式注入缝，默认关，其它值具名拒绝；sysx产品单次回收疑点另列0.0.47，不混同此测试库修复。 |
 | e2stream 包装契约 | `sh ./unisacc.com tools/check-e2stream.cx` | 自建进程组 + 整树击杀（含 setsid 逃逸）+ `TimeoutExpired` 文案；干净超时不带 `survived)` 后缀 |
 | 督导观察 agent 面板 | `sh ./unisacc.com tools/observe-agents.cx -- [--panes a,b,c] [--no-git] [--ratchets] [--fixture FILE]` | 逐个 tmux 面板读 `PANE`（state 取 mind 块首行 `▶`=busy / `○ 空闲`=idle，busy_for 取底部栏相对时长）/`PLAN`/`TOPIC`/`TASK`，并按 `agentwork/items.tsv` 第 9 列标 `STALE`（DONE、CLOSED…、SUPERSEDED）与 `PARTIAL`（DONE-\*，尾巴未收）；`--fixture` 用文本面板，`tests/check-observe-agents.cx` 即其批次；输出 ≤30 行 |
@@ -136,12 +136,12 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | .cx token 层 lint（第二真相源/子进程） | `sh ./unisacc.com tools/cx-lint.cx -- [--strict] [--rules R2,R1-version] [PATH...]` | R1-version（版本字面量；tests/、check-* 的拒绝数据与文件名豁免）、R1-product（产品路径字面量经名字数据流进 argv 槽/run 首参才报）、R2-timeout（无界子进程）、R2-sep（.cx 工具 --opt 前缺 `--`）；`/* lint:allow R1 原因 */` 行尾显式豁免 R1（必须带原因）；精确计数夹具 `tools/check-cx-lint.cx`；precommit 对 staged .cx 跑 `--rules R2 --strict` 拦截 |
 | 预冻结演练(SPEED-049-E) | `sh ./unisacc.com tools/freeze-plan.cx -- plan ROOT out/`；`-- check --ident-list FILE --draft FILE`；`-- boot-list LIST`；夹具 `tools/check-freeze-plan.cx` | ident list-current 导出 freeze.tsv 草案到 out/（不写 agentwork/）；覆盖/过宽非零；启动清单缺文件启动前拒；符号链接真身须覆盖。不覆盖现行 L0-CORE-FREEZE-049 |
 | SPEED-049-F 版本数据解耦 | `sh ./unisacc.com tests/release-version.cx`；打包与身份验收见 `tests/README.md` 的 SPEED-049-F 配方 | 唯一版本列为 `release/candidate.tsv`；源固定32字节槽，打包注入。解析测试已登记，未经本轮执行不得转授旧材料资格；L1–L4 非版本格式断言保持。 |
-| SPEED-049-A 两代抽样 | `sh ./unisacc.com tools/fixedpoint-sample.cx -- sample --seed N UNITS GEN2 GEN3`；`-- release` 拒 `--sample`；`-- wave PART OUT`；夹具 `tools/check-fixedpoint-sample.cx` | 非发布候选确定性抽样(收据 SAMPLED);发布候选强制 FULL;拆波拼接=一次跑。gen1–gen3 整链墙钟本会话 UNMEASURED |
+| SPEED-049-A 两代抽样 | `sh ./unisacc.com tools/fixedpoint-sample.cx -- sample --seed N UNITS GEN2 GEN3`；`-- release` 拒 `--sample`；`-- wave PART OUT`；夹具 `tools/check-fixedpoint-sample.cx`；链内开关 `tools/chain-step.cx fixedpoint … --sample --non-release`（979b56e4d9） | 非发布候选确定性抽样(收据 SAMPLED);发布候选强制 FULL;拆波拼接=一次跑。chain-step 默认完整两代，`--sample` 不配 `--non-release` 按发布候选拒绝（check `chain-step-release-forbids-sample`）；0.0.49 发布候选按 FULL 跑，g2==g3（发布说明）。gen1–gen3 整链并行端到端墙钟 UNMEASURED（`agentwork/phase-times.tsv` 第 11 行） |
 | C49 X全闭包分相构造 | `tools/whole-front.cx` prepare/front/merge/stub/span；固定点由 `tools/chain-step.cx fixedpoint --span-driver/--span-prepared/--span-index` 逐步接纳 | 真实85单元32/32/21，Mac真实桩后units..e3与prune..elf，Win三段；子相总45秒，来源与checkpoint实际哈希重核；当代Ctor与P4显式绑定，旧env-B路径不用，原生CI资格独立 |
 | 分相结构合并及独立边界 | `tools/check-whole-front.cx`；`tools/check-wholefrontmerge.cx`，批次whole-front/wholefrontmerge | 原9项合同保留；另实测3项多属性顺序/opaque字节、非相邻重复拒绝无输出、零单位双空编码；模块检查不冒充产品等价或候选资格 |
 | 分片测试：显式绑定 slice/pkg 启动 | `tools/test-loader.cx`（`--slice ABS --models ABS --identity ABS`、`--net STAGE=ABS --swap-tool ABS` 单网替换、`--e2-adapter`）；检查 `tools/check-test-loader.cx`（批 test-loader-com，需 5 个 `TEST_LOADER_*` 绝对路径环境绑定） | 开发证据，不是发布资格；缺绑定非零，不回落读 `./unisacc.com`；规格见 plans/test-loader-com.md |
 | 波次哪些批不能同跑 | `sh ./unisacc.com tests/check-wave-domains.cx`（批次 `wave-domains`） | `tests/wave-domains.tsv` 每行 `id<TAB>domains<TAB>reason<TAB>evidence`；domains 取 `serial`（独占一波）/`wt`（写共享路径）/`hs`（写 harness 三树）/`mi:<材料名>`，空=无约束；all-waves 按掩码两两不相交放置 |
-| 单阶段过滤器（分段编译管道） | `./unisacc.com stream STAGE [--route R] [--res NAME[=FILE]] [--models PKG] [--raw] < in > out`；`stream frame --in L=F...`；`stream sidecar` | 同一 st_span/包/`\0cli/*` 跑一个阶段；属性表随流（USLATTRT）；`e2\|e1\|e3\|sidecar\|prune\|lower\|elf` 与 `-o` 逐字节同；校验 `tests/check-stream-pipe.cx`；改表→`tools/lab-loader/p3-swap.cx --model`→`--models` 实测 ≈8s |
+| 单阶段过滤器（分段编译管道） | `./unisacc.com stream STAGE [--route R] [--res NAME[=FILE]] [--models PKG] [--raw] < in > out`；`stream frame --in L=F...`；`stream sidecar` | 同一 st_span/包/`\0cli/*` 跑一个阶段；属性表随流（USLATTRT）；`e2\|e1\|e3\|sidecar\|prune\|lower\|elf` 与 `-o` 逐字节同；校验 `tests/check-stream-pipe.cx`；改表 -> `tools/lab-loader/p3-swap.cx --model` -> `--models` 实测 ≈8s |
 | stream 路由目标一致性 | `sh ./unisacc.com tools/check-stream-target.cx`（批次 `stream-target`）；开发可指定 `PRODUCT/ROOT/BASELINE_PRODUCT` | route-only 从事实表 cell 前缀导出目标，显式 target 冲突一行拒绝；六 cell 宏与 direct 相等且互异、E3 long 字宽、显式一致及默认宿主逐次实跑；旧公开预发布的 route-only 曾错误沿用宿主宏，新候选重建后生效，未供旧产品伪报通过 |
 | 分段单阶段用例（逐段字节 golden） | `sh ./unisacc.com tests/check-stages.cx [-- PRODUCT ROOT]`（批次 `stages`） | `tests/stages/<段>/` 每段 `args/in/expect`，可选 `bad/bad.err/bad.args`，喂 `unisacc stream STAGE`；无拒绝用例的段记 GAP。tape 入口校验撤回，本批如实红（见 CHANGELOG 已知限制） |
 | 矩阵 BLOCKED 格归属 | `sh ./unisacc.com tests/check-roll-up-open.cx`（批次 `rollup-open`，输出 `ROLLUP_OPEN domains=19 failed=0`） | 19 张域矩阵 roll-up；lnx/x86_64 必需格不得 MISSING，每个 BLOCKED 格必须引用 `agentwork/items.tsv` 里存在的条目；`--self-test` 含 unowned-blocked-refuse |
@@ -166,11 +166,12 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | streams 旧合同壳材料 (unisacc-stream1..7.com) | `sh ./unisacc.com tools/streams-material.cx -- ROOT NEW_OUTDIR [LEVEL [TARGET]]`;校验 `tests/check-streams-material.cx`(批次 streams-material) | 7 个 <=40B 薄壳转调 `unisacc stream STAGE`,分派器 `s` 烘入 ROOT;e1 经 `tools/streams-e1-frame.cx` 把 USLATTRT 转 USLATTR1;收据 streams.json scope=product-stream-shim + NOT_CLAIMED,不是独立 runner,与 streampack 8 容器无关;钉子由 tests/cases/stream_pin.cx `stream_receipt_pin` 取自收据。lower 阶段产品会追加运行库尾部,依赖精确 lower 输出的用例仍红 |
 | 两代不动点（读 chain-step 产物） | `sh ./unisacc.com tests/chain-fixed-point.cx`（批次 `chain-fixed-point`，材料 `chain-gen1`、`chain-fixedpoint`） | F1 gen2 sha==gen3 sha；F2/F3 receipt 的 constructor_sha 依次指向上一代，防复制同一文件冒充；不重跑构造。材料必须绑到候选文件而非其父目录（RC1-MATERIAL-BIND） |
 | 全量会话（all-waves） | `sh ./unisacc.com tools/all-waves.cx -- init/material/wave/pending`（每条外包 `tools/bound 55`） | 会话是 ROOT/out 下新目录，候选必须是 ROOT/unisacc.com；light 波最多 4 个无材料批并发，heavy 波一次 1 批；要点：init 前取最终 MAP_READY 材料，init 后 diff `materials.tsv`，按批次参数形态（文件/目录）写 map——会话内材料绑错会造出假 FAIL，单跑才是 HEAD 事实（ledger RC1-MATERIAL-BIND） |
-| 会话图内材料一键绑定 | `sh ./unisacc.com tools/s8c-bind.cx -- ROOT SESSION CANDIDATE MAP`（薄壳 `tools/s8c-bind.sh`；批次 `s8c-bind`） | init 后对 MAP 每名独立 `all-waves material`（各 bound 55）。PREPARED≠PASS。scratch 14 名后 heavy yes 0→84 |
+| 会话图内材料一键绑定 | `sh ./unisacc.com tools/s8c-bind.cx -- ROOT SESSION CANDIDATE MAP`（薄壳 `tools/s8c-bind.sh`；批次 `s8c-bind`） | init 后对 MAP 每名独立 `all-waves material`（各 bound 55）。PREPARED≠PASS。scratch 14 名后 heavy yes 0 -> 84 |
+| S9 三项提速（0.0.49，已上 main） | `tools/all-waves.cx` child：(1) 会话内预编译 native run-batch 执行器（27c1b76f86，核 SHA==manifest.runner_sha，缺失或不符拒绝）；(2) 身份继承（34c8a6865a，child 复制父会话 ident 含 harness_sha，wave-before 实测 SID 与父逐字比较）；(3) `--shared-wt`（6fccc10255，仅 `--s9-supervised` 下接受，wave 级共享工作树扫描，aggregate 新增 `wt_epoch_ok`） | child init 4.68s -> 0.84s（34c8a6865a）；不再每 child 源码重编 run-batch（约 13.7s，27c1b76f86）；封条/epoch 缺失或不符使该 slice 全部批次 refused。0.0.49 提交档实测两 step 255.13s+61.94s（022caf53b1），单 step ≤300s 未达成，剩余项见计划 S 包 |
 | 候选 P3 自指钉 | `sh ./unisacc.com tools/s9-p3-pins.cx -- PKG MAP`（批次 `s9-p3-pins`） | 同一 pkg/APE 现算 file/p3 sha 写 MAP；c46-3 空跑 p3=14a69316…；篡改一字节必红。禁止旧候选拷钉 |
 | 身份派生校对 | `sh ./unisacc.com tools/identity-derive.cx -- ROOT --check|--write`（批次 `identity-derive`） | 编排 `check-root-identity` emit/check；--check 不一致打印 DIFF。尚未接 ape-receipt/build.json/pins |
 | 发布目录布局与校验 | `sh ./unisacc.com tools/release-layout.cx -- --candidate release/candidate.tsv SOURCE NEW_OUT`；`-- --candidate release/candidate.tsv --check OUT`（批次 `release-layout`；旧 `--version VERSION SOURCE NEW_OUT` 形式保留） | 候选身份只来自 `release/candidate.tsv` 唯一一行；生成六文件及 SHA256SUMS 与 WinARM ZIP，`--check` 重算全部 sha 并拒非法 ZIP；见 `release/README.md` |
-| SPEED-049-G 发布裁决清单 | `sh ./unisacc.com tools/release-decide.cx -- --candidate TABLE [--evidence EVID] [--assets DIR]`；夹具 `tools/check-release-decide.cx` | 8 步 PASS/FAIL/UNKNOWN 不得猜；生成身份表与已知限制，不写行为变化。0.0.48 重放 s9 未跑→UNKNOWN/NOT_QUALIFIED |
+| SPEED-049-G 发布裁决清单 | `sh ./unisacc.com tools/release-decide.cx -- --candidate TABLE [--evidence EVID] [--assets DIR]`；夹具 `tools/check-release-decide.cx` | 8 步 PASS/FAIL/UNKNOWN 不得猜；生成身份表与已知限制，不写行为变化。0.0.48 重放 s9 未跑 -> UNKNOWN/NOT_QUALIFIED；0.0.49 实跑 8 步 PASS、QUALIFIED YES（账本 2026-11-10 `RELEASE-0.0.49`，证据 out/c49-release-evidence） |
 | 只读发布资产完整读回 | `sh ./unisacc.com release/tools/c47-1-readback.cx -- ROOT TABLE NEW_OUT OLD_APE true\|false` | 身份与资产 sha 均取自 `release/candidate.tsv`；新目录从 draft（true）或正式 release（false）下载，核元数据/sha/版本/冒烟/进程名/ZIP；`tools/release-dispatch.cx -- --dry-run TABLE ASSETS` 只打印将创建的 draft、上传项与 workflow 输入，不做任何外部操作 |
 | 固定220例外部语料与期望配对 | `sh ./unisacc.com tools/ctestsuite.cx -- ROOT MATERIAL NEW_OUT START COUNT`，每片≤20；批次`ctestsuite` | 上游rev/归档SHA/每例源码与期望SHA在`tests/corpus-ctestsuite/`；源码不重分发。真实c46-3首轮216符合、4拒绝、0错值、0未知；仅1个拒绝最小例为严格C99，另3个为GNU/C11扩展。输出接受/拒绝/错值/未知和原件，不删拒绝例换绿。 |
 | 三方编译差分与百例整型值差分 | 旧`opt-corpus-gen`的`ccdiff[-2/-3/-4] HOST_CC [TCC]`追加第二oracle；`sh ./unisacc.com tools/random-expr.cx -- ROOT NEW_OUT GCC TCC [SEED]`；批次`random-expr` | 原产品O0/O2及HOST_CC字面期望不变；TCC无优化flag，编译警告和三方不一致单列原件。随机每批100个unsigned表达式，固定seed、非零除数、界内移位，逐值比较两个真实oracle。缺编译器非零；默认check读取HOST_CC/TCC，tcc私有安装不入库。 |
@@ -179,7 +180,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 仓根换成真 APE（旧脚本留为 unisacc-dev,可回退） | `sh ./unisacc.com tools/install-ape.cx -- ROOT APE SHA256 [--write]`；回退 `-- ROOT --rollback [--write]`；检查 `tools/check-install-ape.cx` | 校验整文件 sha、UNIPKG1 尾、`--version`；同目录临时文件复核后原子 rename；旧启动脚本存 `unisacc-dev`、`.dev/` 让位为 `.dev.split-prev`、记录备份 `.split-prev`。build.json 同步 `ape1`/digest/**实际 bytes**；`ALREADY --write` 修陈旧记录，干净记录不重写，不带 `--write` 不改。两源包生产入口共享 `productpkg.pp_execution_record_error` 规范校验；更新生产者自钉后旧代材料必须重新准备；批次 `install-ape` |
 | win/arm64分片固定点证据检查 | `sh ./unisacc.com tools/check-win-arm64-fixedpoint.cx -- MANIFEST [--test-loader LOADER PROBE]` | 必需 `root` 为 win 实际源根、`native_root` 为 Linux 构造器实际源根；双方收据均核同一 rev，另核候选/包/两代构造器与收据SHA、AA64、独立产物字节；缺代际rc3，坏PE/身份rc1；负控批 `win-arm64-fixedpoint-controls`，不冒认Windows原生自举 |
 
-#### 2.4 生成器（事实表→生成器→表）
+#### 2.4 生成器（事实表 -> 生成器 -> 表）
 
 | 动作 | 现成用法 | 说明 |
 | 切片 NN 迁移清单 | `sh ./unisacc.com tools/slice-migration-gen.cx -- --write\|--check`；校验 `tools/check-slice-migration-gen.cx` | 由 `plans/unit-text.tsv` + `plans/slice-units.tsv` 生成 `plans/slice-nn-migration.md`；`--check` 核两表键 1:1、源文件存在、文档与重生成文本一致 |
@@ -206,13 +207,13 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 普查红批次 | `sh ./unisacc.com tools/census.cx -- $PWD out/census` | 无材料批次逐个实跑找回归 |
 | 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
 | 模型解码产物的逐模型 sha(解码器改写的 oracle) | `sh ./unisacc.com tools/model-decode-sha.cx -- EXPLODED_DIR [--reps N]`（批次 `model-decode-sha`） | EXPLODED_DIR 由 `tools/p3-explode.cx -- PKG OUT` 产出;每个模型 inflate 后 `cxmd_decode`,把 CxModel 逐字段渲染后取 sha,打 `MDSHA` 行与总 `all=`;`--reps` 只改计时(`decode_ns`,不含 inflate);改 `cx/runtime/model_decode.cx` 前后 `all=` 必须相同;校验 `tools/check-model-decode-sha.cx` |
-| 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序→标签→用户数升序→名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
+| 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序 -> 标签 -> 用户数升序 -> 名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
 | 单元分流 fan + 材料准备 | `tools/bound 55 sh ./unisacc.com tools/units-prepare.cx -- ROOT ABS_OUT SLICE MODELS VERSION CARRIERS STAGE`，STAGE 依次 `loader`、`swap`、`seal`；`sh ./unisacc.com tools/fan.cx -- -j N --env ABS_OUT/loader.env` | T2.a clean cutover：不再提供 M8 复制式选项或幂等复用；loader 创建新 OUT 实编译 test-loader，swap 实编译 p3-swap，seal 记录真实源/部件/六 carrier.N SHA，原冻结 carrier pin 仍由消费者检查。仅 loader 六批可将 CARRIERS 设为 `-` 并以 `seal-loader` 输出 loader6.env，不得冒作 fan 材料。精确 VERSION 与提取来源由调用者绑定；PREPARED 非 PASS、非同候选发布资格。RI 入口为 `tools/materials-prepare.cx -- ROOT ABS_OUT native\|chain\|seal`，每阶段外包55秒；历史16项就绪/7项未备及原始Root归属见 `plans/m7-material-spec.md`、`plans/l-tests-materials-prepared.tsv`。 |
 | 切片镜像归属度量（不改产品） | `sh ./unisacc.com tools/image-contrib.cx -- --objects a.o... [--image FILE] [--src KEY=PATH]`；`sh ./unisacc.com tools/check-image-contrib.cx` | 合并tape的`tl_unit` emit按单元计数；最终镜像列恒UNATTRIBUTED（prune/lower/elf丢来源）。分类TRANSFORM/FINITE/UNBOUNDED/SYS-IO来自源码扫描不是对象体积。批次`image-contrib`。试点设计`plans/slice-shrink.md`，fable评审前不动产品 |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | libc99posix 缺口扫描 | `sh ./unisacc.com tools/libc99posix-audit.cx`；校验 `tools/check-libc99posix-audit.cx` | 扫 include/*.h 的 static 函数名对照契约表；GAP 按头文件；UCRT? 为下划线导出候选(未读 PE) |
 | 未初始化局部扫描 | `sh ./unisacc.com tools/uninit-scan.cx [-- FILE...]`；校验 `tools/check-uninit-scan.cx` | 流敏感 UNINIT/SUSPECT；正例 `int n=0, owner;`（e91eb31bcf^ kernel.cx）；第一版清单不进棘轮 |
-| 改表验证闭环（A12） | `sh ./unisacc.com tools/a12-cycle.cx -- [--dry-run] [--only STEP] [--build B] [--flags F] [--src C [--reject]] [--neg43 EXE]` | gen→tbl→net→UNINETB1(bin) → e2/e1/sim 探针 → decide CTX/RTC → check-decide → ratchets → 冻结43例；G=B/tools 由 main 构造，缺则具名 MISSING；每步 `STEP name rc s receipt`，首败即停；UNISACC_WAVE_REUSE=1 仅子进程；检查 tools/check-a12-cycle.cx（批次 a12-cycle） |
+| 改表验证闭环（A12） | `sh ./unisacc.com tools/a12-cycle.cx -- [--dry-run] [--only STEP] [--build B] [--flags F] [--src C [--reject]] [--neg43 EXE]` | gen -> tbl -> net -> UNINETB1(bin) -> e2/e1/sim 探针 -> decide CTX/RTC -> check-decide -> ratchets -> 冻结43例；G=B/tools 由 main 构造，缺则具名 MISSING；每步 `STEP name rc s receipt`，首败即停；UNISACC_WAVE_REUSE=1 仅子进程；检查 tools/check-a12-cycle.cx（批次 a12-cycle） |
 
 
 
@@ -223,15 +224,15 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 <a id="model-function-bytes"></a>
 ## 3. 结构组成（unisacc.com 的内部）
 
-用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前发布 0.0.47 = APE `fde2db18…`（6,215,778 字节），实跑取数如下；pkg.bin 1,665,282 字节（P4：40 模型、1823 阶段路由行、77 资源）。win/arm64 不在 APE 的 gzip 切片段里，作为独立发布资产 `slice-win-arm64`（3,367,424 字节）随发，见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
+用 `sh ./unisacc.com tools/com-tree.cx` 看实时结构。当前公开发布是 0.0.49（APE `2d3852a8…`，6,501,348 字节，§9.1），其 com-tree 取数未在本文重跑（未测）；下面是 0.0.47 APE `fde2db18…`（6,215,778 字节）的实跑取数，只作结构示例；pkg.bin 1,665,282 字节（P4：40 模型、1823 阶段路由行、77 资源）。win/arm64 不在 APE 的 gzip 切片段里，作为独立发布资产 `slice-win-arm64`（3,367,424 字节）随发，见 [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md)。
 
 ```
 unisacc.com  6,215,778 B  sha fde2db18…
 ├─ head: PE 镜像 + shell 启动器      2,663,424 (42.8%)  win/x86_64 原样存；DOS stub 放 sh 启动器
-├─ slice lnx/x86_64                    372,017 ( 5.9%)  gzip → 解出 1,880,766 B
-├─ slice lnx/arm64                     351,487 ( 5.6%)  gzip → 解出 1,884,814 B
-├─ slice osx/x86_64                    383,660 ( 6.1%)  gzip → 解出 2,410,978 B
-├─ slice osx/arm64                     379,590 ( 6.1%)  gzip → 解出 3,071,458 B
+├─ slice lnx/x86_64                    372,017 ( 5.9%)  gzip -> 解出 1,880,766 B
+├─ slice lnx/arm64                     351,487 ( 5.6%)  gzip -> 解出 1,884,814 B
+├─ slice osx/x86_64                    383,660 ( 6.1%)  gzip -> 解出 2,410,978 B
+├─ slice osx/arm64                     379,590 ( 6.1%)  gzip -> 解出 3,071,458 B
 ├─ (padding 合计)                      400,318 ( 6.4%)
 └─ package (P4)                      1,665,282 (26.7%)  40 模型 + 1823 阶段路由行 + 77 资源
    ├─ stage routing (D rows)            104,052
@@ -249,15 +250,15 @@ unisacc.com  6,215,778 B  sha fde2db18…
 
 真源 `exec/pipeline/image-stages.tsv`：
 
-| 流名 | 输入 → 输出 | 功能 | 主要网 |
+| 流名 | 输入 -> 输出 | 功能 | 主要网 |
 |---|---|---|---|
-| **e2** | `src.c` → `pp.text` | 预处理：续行/注释/指令/宏/条件/include | pp |
-| **e1** | `pp.text` → `tokens.typed` | 词法：关键字/标识/算符/字面量最长匹配 | lex |
-| **e3** | `tokens.typed` → `tape.text` | 语法+类型等合成段 → tape（parse/type 等物理嵌此） | parse, type, scope, irsel, tyinfo, pfconv, binsel, prec |
-| **e4** | `tape.text` → `tape.text` | opt：peephole / 栈→寄存器类改写 | opinfo, peep |
-| **prune** | `tape.text` → `tape.text` | 按根/导出剪不可达整函数 | （无 18 网，政策在代码） |
-| **lower** | `tape.text` → `target.text` | ABI/regmap/syscall/布局/reloc 降到目标 ops | abi, regmap, reloc |
-| **elf** | `target.text` → `image.bytes` | 编码 + ELF/Mach-O/PE 写出 | enc |
+| **e2** | `src.c` -> `pp.text` | 预处理：续行/注释/指令/宏/条件/include | pp |
+| **e1** | `pp.text` -> `tokens.typed` | 词法：关键字/标识/算符/字面量最长匹配 | lex |
+| **e3** | `tokens.typed` -> `tape.text` | 语法+类型等合成段 -> tape（parse/type 等物理嵌此） | parse, type, scope, irsel, tyinfo, pfconv, binsel, prec |
+| **e4** | `tape.text` -> `tape.text` | opt：peephole / 栈 -> 寄存器类改写 | opinfo, peep |
+| **prune** | `tape.text` -> `tape.text` | 按根/导出剪不可达整函数 | （无 18 网，政策在代码） |
+| **lower** | `tape.text` -> `target.text` | ABI/regmap/syscall/布局/reloc 降到目标 ops | abi, regmap, reloc |
+| **elf** | `target.text` -> `image.bytes` | 编码 + ELF/Mach-O/PE 写出 | enc |
 
 ### 4.1 十八网（ask 事实表）
 
@@ -266,28 +267,28 @@ unisacc.com  6,215,778 B  sha fde2db18…
 ### 4.2 构造链
 
 ```
-有限表（.tsv）→ 生成器（tools/*-gen.cx，带 --check）→ 网权重 → 通用执行器（cx/core/kernel.cx 的 UNIKERN1）
+有限表（.tsv）-> 生成器（tools/*-gen.cx，带 --check）-> 网权重 -> 通用执行器（cx/core/kernel.cx 的 UNIKERN1）
 ```
 
-- 有限表只经「事实表 → 生成器（--check）→ 表」修改，不手改。
+- 有限表只经「事实表 -> 生成器（--check）-> 表」修改，不手改。
 - 通用执行器：定宽运算、栈/存储、字节/帧、资源与接受/拒绝。语言、ABI 与布局语义仍由阶段规则拥有。
 - 模型包 P3 = 32 模型 + 阶段路由 + 资源，装载由 `cx/runtime/model_decode.cx` / `packagemodel` 处理。
 
 ### 4.3 分层:booter / 基座 / 阶段权重 / 资源(架构方向,2026-11-02 主人定)
 
 ```
-L0 booter(APE com,极小)   识别 OS/架构 → 按 manifest 找到并校验基座与阶段权重 → 交给基座执行
+L0 booter(APE com,极小)   识别 OS/架构 -> 按 manifest 找到并校验基座与阶段权重 -> 交给基座执行
 L1 基座(每架构一个文件)    通用执行器("权重换逻辑"的机器,即 kernel);外部文件,按内容哈希寻址
 L2 阶段权重(7 流/18 网)    e2/e1/e3/e4/prune/lower/elf 各一个模型文件;外部文件,按内容哈希寻址
 L3 资源                    头文件、事实表等
 ```
 
 - **一切按内容哈希寻址;内置 pack 只是 resolver 的另一个来源**,与外部目录行为完全一致。
-- `manifest.tsv`:`name kind(base|stage|resource) arch sha256 size order`。来源顺序:`UNISA_HOME` → com 旁目录 → 用户缓存 → 内嵌 pack(UNIPKG1 footer)。命中必校验 sha256,不符具名拒绝,**不静默回退**到别的来源。
+- `manifest.tsv`:`name kind(base|stage|resource) arch sha256 size order`。来源顺序:`UNISA_HOME` -> com 旁目录 -> 用户缓存 -> 内嵌 pack(UNIPKG1 footer)。命中必校验 sha256,不符具名拒绝,**不静默回退**到别的来源。
 - **产品身份 = manifest 的 sha256(Merkle 根)**。取代 `pp_product_digest` / `ape-receipt` / `build.json` artifact 段等多处各算一份的口径(见 `plans/identity-inventory-2026-11-02.md`、`plans/identity-unify-2026-11-02.md`)。kernel context 仍独立于它(判断 kernel 可否复用,不随全树变),两代 GEN 互证仍保留。
-- 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节→输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
+- 目的:每一层单独固化、单独开发、单独测试;阶段测试=输入流字节 -> 输出流字节的 golden;换基座不动权重、换权重不动基座;慢车道缩成"只重算被改文件及其下游哈希"。
 - 单文件发布(pack 内嵌)保留;外部目录形态用于开发。启动开销是主要风险(现热 `-run` ≈10ms),每步测量。
-- 进度与分步:见 `agentwork/items.tsv`(B0 P3 explode/implode → B1 resolver → B2 阶段测试台 → B3 基座外置 → B4 booter APE 头 → B5 身份收敛到 manifest)。
+- 进度与分步:见 `agentwork/items.tsv`(B0 P3 explode/implode -> B1 resolver -> B2 阶段测试台 -> B3 基座外置 -> B4 booter APE 头 -> B5 身份收敛到 manifest)。
 - 现状(2026-11-06):L1/L2/L3 的外置与 booter 分离([B3][B4][B5c])未完成,发布形态仍是单文件 APE(尾部一份包);已落地的是 resolver/explode 工具与 `unisacc stream STAGE` 阶段过滤器。三层口径(loader / ISA 切片 / 模型)与 CORE-MIN 见 §9.1。
 
 ## 5. 源码结构（src/ 六层 + cx/ 树）
@@ -332,7 +333,7 @@ L3 资源                    头文件、事实表等
 
 ## 6. 事实表与权重（exec/ 与 weights/ 与 seed/）
 
-- `exec/facts/`：编译各阶段的**事实表**（pp-targets、lex-consts、lower-abi、image-elf/macho/pe…），经 `tools/facts-gen.cx` 生成，只经「事实表 → 生成器 → 表」修改。
+- `exec/facts/`：编译各阶段的**事实表**（pp-targets、lex-consts、lower-abi、image-elf/macho/pe…），经 `tools/facts-gen.cx` 生成，只经「事实表 -> 生成器 -> 表」修改。
 - `exec/`（enc/lex/lower/opt/parse/pp/prune/tapecheck…）：各阶段网络的事实与构造（含 `exec/c/` 旧 C 参考，只供对照）。
 - `weights/gold/`：十八网金表；`weights/*.f32/i8.unisa`：构造出的权重。
 - `seed/`：C 种子构造器（`gold_<阶段>_label.c` 规则形式、`ident.c` 身份、`ape.c` 打包）。
@@ -411,14 +412,24 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-当前版本：**0.0.48 已于 2026-11-09 正式发布**（tag `v0.0.48`，提交 `f8af9cbf3`；非 draft 非 prerelease，Latest）。APE `unisacc.com` sha256 `559705097427cf8f4e483bb6e5f702e0714623a81644991c087b17e3505d9032`（6426254 字节），源 SID `798321e8919815b8e4a6c5860be5210c8cd702a8cd7c8b280218acb539b011d4`；同候选六目标原生 CI **QUALIFIED 42/0**（运行 42545543777）；发布后读回 `SHA256SUMS` 六项 OK、`--version` = `unisacc 0.0.48`。发布说明：[plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md)；发布与 CI 手册及教训：[prd_release.md](prd_release.md)。
+当前已发布：**0.0.49 已于 2026-11-10 公开**（tag `v0.0.49` 指向提交 `35cfdd1e`，非 draft 非 prerelease）。APE `unisacc.com` sha256 `2d3852a8404e1ba372de0fd28e69d6da7d9412d7b8b259d0d2e36593dac8e44d`（6501348 字节），冻结源 `979b56e4`、源 SID `e764a816…`（版本串已移出 SID，提交 c66fa850e6）、构造器 `8224ff13…`；同候选六目标原生 CI **QUALIFIED 42/0**（运行 42661106290，测试提交 e5b26c5c；首轮 42659892210 因资格工具未迁移版本源四格 rc2）；s9 **仅提交档 96/96**，daily/release 档未跑。发布链实际走法：提交 X `e3fc485793`（候选表换 0.0.49，ci_run_id=0）触发 CI，提交 Y `35cfdd1e3a` 回填 run id。发布说明：[plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md)；发布手册与 0.0.49 教训：[prd_release.md](prd_release.md)；0.0.49 收尾的逐条记录：[prd_hist.md](prd_hist.md)「0.0.49 收尾」。
 
-下一版：**0.0.49，主题「提速」**（冻结→可发布 440 分钟 → 目标 ≤44 分钟），计划见 [plans/v0.0.49-unisacc.md](plans/v0.0.49-unisacc.md)；开发效率条目为 P0。任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv` 为准，本节只写当前节点。
+当前版本：**0.0.50，主题「构造即图，阶段原生」**，计划 [plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md)（§0 五项可机查目标：冻结 -> 可发布 ≤20 分钟、改一张表 -> 可安装候选 ≤5 分钟、Mac/Win 单相余量 ≥30%、S9 commit 档单 step ≤300s、第二真相源机器检查为 0）。任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准，本节只写当前节点。
 
-三个最大阻塞：
-- **全批资格**：s9 仅提交档 81 项通过；daily 约 544 项与 release 约 39 项**未跑**，`p1-baseline`、`check-cx-entry` 无批次注册，全批仍 **NOT_QUALIFIED**。
-- **构造耗时**：候选构造约 2 小时（含手工准备漏项造成的返工），whole-o 单作业 72–100 秒贴着 60 秒线，两代不动点约 13 分钟；0.0.49 的 P0/P1 专攻。
-- **已披露的既有缺陷与推迟项**：`TAPEBIN-ORIGIN-5`（五项 origin-target 断言红）、T1 的限期棘轮豁免（`D2.ratchet-T1` 等）、`mm_copy` 目标容量、`ext/memx|textx` 互指符号链接、生产图 strict 零告警；限制清单见 [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md)。
+已上 main（`git log 35cfdd1e..origin/main`）：
+- L 两步：`87016b122d`（`tools/cx-lint.cx` 原型，check 19/0）、`8a07e8e119`（R1 数据流判据、`lint:allow`、R2 接入 precommit 拦截，check 41）；顺带修出潜伏缺陷 `bf395ec282`（check-utf8 子进程缺 `--`）。
+- G1 第一步：`84df77f4b2`（`build/graph.tsv` 203 节点/833 边、`build/hardwire.tsv` 32 条、`tools/graph-check.cx` check 9/0）。
+- 0.0.49 工具总补丁 `ba945f3238`（whole-front 分相、chain-step 不截 argv、release-build 容量 API）；phase-times 回写 `022caf53b1`（131 作业波 276.89s、42 网全键 7.18s、S9 255.13s+61.94s）。
+
+在途（未上 main，证据在各窗口 out/ 与账本）：
+- G0 一条命令复现：六片 g1 已全部在私有根逐字节复现（lnx/x86_64 8224ff13、lnx/arm64 f7ddb573、osx/x86_64 eddda34a、osx/arm64 e1087d14、win/x86_64 64782d36、win/arm64 2f520450；Linux 两片与 `agentwork/phase-times.tsv` 第 51/53 行一致，其余四片以派工回执为准），g2/g3 在跑。
+- Y（e3 产品原生阶段化）设计结论（fable，/tmp/y-design.md，已写入计划 §2 Y 行）：「由 e2 推导未定义符号」不成立（侧车需 e3 的 UD 可达性/类型 kind/ccw 计数）；改为首遍 e3 tape 作检查点 + 重放只编桩单元 + fwm_merge，拆 Y-0 -> Y-A -> Y-B -> Y-C。
+- D（遗留债清零）、R（一键发布）、S（S9 单 step 剩余项）、自动再分块（rechunk）、根无关性检查工具均在途；`candidate-chain`、`root-canon`、`rechunk`、`release-run` 尚不在 main，不写入 §2。
+
+三个最大阻塞（对应计划 §0 目标与 §5 风险）：
+- **冻结 -> 可发布墙钟**：0.0.49 实际十余小时（计划 §0；端到端计算之和约 31 分钟，见发布说明），目标 ≤20 分钟；取决于 G0 持久检查点 + R 一键发布落地。风险：六片并行 CPU 争用撞 60 秒闸，预案按实测降并行度、贴线相位串行。
+- **Mac/Win 相位贴线与方案 X 的工具层依赖**：0.0.49 Mac Intel B 相 43.1s 贴 45s 闸（发布说明「已知限制」）；根治靠产品候选 Y。风险：Y-A tape 合并不等价（取址函数、static 隔离、ccw 顺序），预案同源中等程序 cmp0 卡死、不等则保留 X。
+- **全批资格与第二真相源**：s9 daily（约 544 项）/release 档自 0.0.47 起未跑，全批仍 **NOT_QUALIFIED**（计划 §1b 要求 0.0.50 至少跑一次 daily）；版本/构造器/相位次序硬写 0.0.49 返工 ≥5 次（计划 §0），已由 `build/hardwire.tsv` 32 条计数、`cx-lint` R1 只报告，归零未达成。风险：图描述与工具实际读集不一致，预案 `graph-check` 进 commit 档。
 
 历史完成记录与证据不再追加到本文件：见 [prd_hist.md](prd_hist.md)；新记录写 `agentwork/ledger.tsv`。
 <a id="memory-palace"></a>
@@ -427,42 +438,49 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
-| 当前发布 | 0.0.47 已发布（见 §9.1）；0.0.46 同日早些时候发布；旧候选资格不迁移 | [0.0.47 发布说明](plans/release-notes-0.0.47.md) |
-| 下一版 | 0.0.48 | [计划](plans/v0.0.48-unisacc.md)、`agentwork/items.tsv` |
+| 当前发布 | 0.0.49 已公开（见 §9.1；APE 2d3852a8、CI 42661106290 QUALIFIED 42/0、s9 仅提交档）；旧候选资格不迁移 | [0.0.49 发布说明](plans/release-notes-0.0.49.md)、[prd_release.md](prd_release.md) |
+| 当前版本 | 0.0.50「构造即图，阶段原生」；已上 main：L 两步、G1 第一步；在途：G0/Y/D/R/S | [计划](plans/v0.0.50-unisacc.md)、`build/graph.tsv`、`agentwork/items.tsv` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |
 | 分层 | L0 `cx/sys`·`cx/mem`·`cx/text`；包层 `ext/crypto`；L1 `cx/core`·`cx/driver`·`cx/runtime`·`cx/compiler` | [plans/cx-layers.md](plans/cx-layers.md)、§8 |
 | 棘轮 | 13项，以`tools/ratchets.cx`末行为准；新增第14号net-deps，toolsloc已退役；工具行数只统计 | `tools/ratchets.cx`、§2.2 |
-| 事实表 | 事实→生成器（须带 `--check`）→产物 | `exec/facts/`、§2.4 |
+| 事实表 | 事实 -> 生成器（须带 `--check`）-> 产物 | `exec/facts/`、§2.4 |
+| 构造图 | `build/graph.tsv` 203 节点/833 边 + `build/hardwire.tsv` 32 条第二真相源模式；`graph-check` 9/0（84df77f4b2） | §2.2、[plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md) G1 |
+| .cx lint | `tools/cx-lint.cx` R1（第二真相源，只报告）/R2（子进程时限与 `--`，precommit 拦截）；check 41（8a07e8e119） | §2.2 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
 | 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[plans/slice-shrink.md](plans/slice-shrink.md) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布与历史（索引）
 
-逐版发布历史见 [prd_release.md](prd_release.md) §往期发布；0.0.43 见 [plans/release-0.0.43.md](plans/release-0.0.43.md)，0.0.45 见 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)，0.0.48 见 [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md)。0.0.47 逻辑分布普查结论已迁入 [prd_hist.md](prd_hist.md)。
+逐版发布历史见 [prd_release.md](prd_release.md) §往期发布；0.0.43 见 [plans/release-0.0.43.md](plans/release-0.0.43.md)，0.0.45 见 [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md)，0.0.48 见 [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md)，0.0.49 见 [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md)。0.0.47 逻辑分布普查结论与 0.0.48.1/0.0.49 收尾记录已迁入 [prd_hist.md](prd_hist.md)。
 
 ### 9.4 路线
-- **0.0.43 – 0.0.48**：已收口并发布（计划见 `plans/v0.0.4x*.md`，当前发布 [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md)）；agent harness（cx-csih）仍归 csih 车道。
-- **0.0.49**：主题「提速」，见 [plans/v0.0.49-unisacc.md](plans/v0.0.49-unisacc.md)。
+- **0.0.43 – 0.0.49**：已收口并发布（计划见 `plans/v0.0.4x*.md`，当前发布 [plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md)）；agent harness（cx-csih）仍归 csih 车道。
+- **0.0.50**：主题「构造即图，阶段原生」，见 [plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md)；产品候选顺序 Y -> B2 -> H，工具包 G0 -> G0b -> G1 -> G2。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）。
 
 <a id="optimization-leads"></a>
 ### 9.5 优化线索
 
-已登记到各版计划与 `agentwork/items.tsv`，入口见 [plans/v0.0.49-unisacc.md](plans/v0.0.49-unisacc.md)。
+已登记到各版计划与 `agentwork/items.tsv`，入口见 [plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md)（§1 设计判断、§1b 预见）。
 
 ## 10. 子文档与归档索引（树）
 
 ```
 prd.md                 当前状态（本文件，只写当前事实）
-├─ prd_release.md      发布与 CI 手册、教训、往期发布身份
+├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
 ├─ prd_hist.md         历史完成记录与证据（逐字迁出，只读；新记录写 agentwork/ledger.tsv）
 ├─ plans/              各版计划与发布说明
-├─ agentwork/          任务看板 items.tsv、账本 ledger.tsv、WORKFLOW.md
+│  ├─ v0.0.50-unisacc.md         当前版本计划（§0 目标、§2 工作包、§5 风险）
+│  └─ release-notes-0.0.49.md    当前已发布版本说明
+├─ build/graph.tsv     构造图事实表（G1；graph-check 读）
+├─ agentwork/          任务看板 items.tsv、账本 ledger.tsv、phase-times.tsv、WORKFLOW.md
 └─ archive/            旧实现与旧文档（见下）
 ```
+
+子文档存在性核对（2026-11-10 私有克隆 `ls`）：[plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md)、[plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md)、[prd_release.md](prd_release.md)、[prd_hist.md](prd_hist.md)、[build/graph.tsv](build/graph.tsv)、[docs/REPO-MAP.md](docs/REPO-MAP.md) 均存在。
 
 
 - [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md) —— 本文件重写前的完整旧版（含思维树/记忆宫殿全流水、能力速查全文、§3 架构全文、§5 路线全文、§6 未解决问题）。
@@ -473,52 +491,4 @@ prd.md                 当前状态（本文件，只写当前事实）
 - [archive/plans/](archive/plans/) —— 历史计划与设计探针。
 
 
-### OSX-LAUNCH-SLOW（0.0.48 发布回归 P0）
-
-cc报告发布件559705热启动每次创建并执行新manager inode，Darwin安全评估使--version/-run约1秒。本机实际根仍f069，需下载并核559705，不以安装记录代字节。首版manager内容缓存真实未过性能：隔离缓存仍高CPU重算MB摘要；原失败日志保留。改用新解压/marker异常才运行manager，热路径匹配内置完整slice SHA的原marker行、原子新增PID lease并touch recency，不启动manager；冷路径仍完整摘要校验/最近4清理/隔离fallback。manager保存在私有.managers内容哈希目录，冷构造原子发布。验收两Mac架构各热version/run r7逐次10次与中位数≤50/300ms，首解压仍清理旧缓存；新候选按发布流程绑定独立身份，未实测不记PASS。
-
-OSX-LAUNCH-SLOW能力入口：`tools/osx-launch-profile.cx APE arm64|x86_64`显式候选逐次测量与10次中位；配对check独立15项。`tools/check-ape-pack.cx APE ARCH`验证冷清理/热manager不执行/lease/recency及symlink隔离；c869历史候选两格各45/0。五个osx批次已登记，真实候选性能不借工具夹具PASS；ARM15/224ms已过，Rosetta70/423ms未过；裸x64 run388.5ms、旧f069同入口405.5ms，保留300ms门继续核验。
-
-OSX-LAUNCH-SLOW最终wrapper开发冻结07a90387…、候选01b16ae0…：热合一uname并仅缺目录才mkdir，ARM12.5/253.5ms、Rosetta48/512.5ms；后者run仍FAIL，旧f069 Rosetta同测405.5ms，裸c48 slice388.5ms。阈值不放宽，未发布或授QUALIFIED。测量check15/0及13棘轮13/13；工具库存由现git index完整重算，核补已有cache-retain/check、toolselfpath、precommit-freeze遗漏并剔除误列tests路径，现651源/82分片，明确只登记未全编。下一步查r7具体输入/运行相位并推进新候选CI。
-
-OSX-LAUNCH-SLOW宿主分账：Rosetta两批是在ARM宿主强制arch x86_64的跨架构探针，platform须标osx/arm64；此前误标osx/x86_64，被run-batch既有宿主门拒绝，原4份REFUSE日志保留，未改宿主门或把拒绝当功能失败。Terminal.app责任应用已有Developer Tools豁免，不改系统设置；同01b16ae0在该上下文x64独立10次中位48/246ms过门，非豁免Codex上下文run512.5ms失败单列，根因另有既有-run临时程序新inode；源码runcache也只启用lnx/x64。正式ARM批在Terminal已15/101.5ms PASS，配对接口15/0、cache ARM45/0；修正platform后再跑Rosetta正式批，不迁原独立结果。
-
-OSX-LAUNCH-SLOW完成审计补漏：01b16候选CI42551819720已全六目标成功，但热shell每次创建lease而仅cold清理，会在长期热调用后积累死lease触4096扫描预算，故不是最终交付。修tools/cache-retain新增轻量--touch全SHA模式，复用同inode但不digest MB载荷，严格marker/root/lock/parentPID并清本tool全部dead lease、保留active/EPERM、更新recency和新lease；full mode仍cold做完整摘要/四载荷清理。健康新缓存不积累；既有超预算目录不宣称自动恢复，保留隔离fallback。双manager将新构造，必须新候选SHA及新CI，不迁01b16绿。
-
-OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；本车道负责version事实/配套站点、热lease维护、固定四Mac成员与重包接口，cc独占.github/workflows/macos-sign.yml、tools/macos-signing.cx、plans/macos-signing.md，本车道不改。草稿附members.tsv五角色及四Mac独立资产，最终tag/candidateSHA/member清单SHA写release/candidate-osx-launch.tsv并交cc触真签。版本必须实际新源构造，不把0.0.48 wrapper候选冒称0.0.48.1；签后四成员显式替换重包保留字节，新签后身份重新资格，不沿用未签CI。旧01b16已六目标CI成功但lease缺口/版本不满足最终裁定，仍仅历史对照。
-
-OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到release/candidate-osx-launch-rc1.tsv，当前release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。
-
-OSX-LAUNCH-SLOW新源Linux构造入口缺口：两目标首批尚未构造对象即被entry-build覆盖UNISA_CONTAINER拒绝；显式constructor仅认bare ELF，Mac裸片被错误unset包。正规entry接口已声明显式constructor直接执行，现补Mach-O64识别保留同显式P4，APE/薄头仍清外部包；不换产品源/NN/SID，不以shell包装掩盖构造器身份。失败OUT保留，新native工具与新冻结源根另开批次，最终完整44根/closure/link逐项核。
-
-OSX-LAUNCH-SLOW最终53ff候选首测：ARM性能过门，两架构缓存各108/0且四Mac成员/P4严格字节同；Rosetta version54.5ms FAIL、run262.5ms PASS，材料仅PREPARED不授可发布。热wrapper仍外部uname+chmod，下一小步用bash只读BASH_VERSINFO[5]识别Darwin架构(实测ARM/Rosetta及覆写HOSTTYPE/OSTYPE/MACHTYPE不影响)，不支持的POSIX shell/未知平台回退原uname，不信可覆盖环境变量。保留chmod私有目录与全部cache安全合同；新wrapper必出新SHA再独立性能/功能/CI，不迁53ff结果。
-
-OSX-LAUNCH-SLOW新候选bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3/6429038B：实际两架构逐次10次性能ARM14/101.5ms、Rosetta43/257.5ms通过50/300ms门，Terminal.app既有责任应用上下文；53ff失败完整保留，不改安全设置。release-ape新接口28/0、members独立21/0与最终13棘轮13/13。将用独立草稿v0.0.48.1-osx-launch-rc1上传七标准资产+四Mac成员+五行无header members.tsv，交cc触真签；签后重包新SHA须重验，不迁未签资格。对外动作回滚为删除本草稿和本tag(gh release delete v0.0.48.1-osx-launch-rc1 --cleanup-tag)，不覆盖已发v0.0.48/Latest/根。本车道不改cc三签名路径。
-
-OSX-LAUNCH-SLOW最终正式五批补验：冻结f09969d9d0efb81976b3eaf486731f120df22cbe的独立ROOT，精确bdd52246副本，Terminal.app既有上下文。interface15/0、两cache各108/0、ARM热version/run12/99ms、Rosetta42/246.5ms，各mode10次中位，五个BATCH_RUN均PASS/rc0/transport0，candidate完整SHA一致。正式入口未拒绝/未迁旧数据，平台同osx/arm64含Rosetta，非原生Intel资格由同候选CI补；详out/osx-launch-slow/v0481/formal-*.log。
-
-OSX-LAUNCH-SLOW交接身份已实际固定：草稿v0.0.48.1-osx-launch-rc1、source_commit=f09969d9d0efb81976b3eaf486731f120df22cbe、APE=bdd52246c4ba52becff3c1404b20976a51f955e8c3e2218443123d1b464adaa3；七标准资产+四Mac+members五角色共12资产上传全actual0。members SHA4e1a51b8bc0d2dbdf8aefad6bca25cf615556fb572044abc3b89e008565225d1，正式清单/表均在release/candidate-osx-launch*.tsv。新CI42555350465实派发且fetch/ffi成功，正在原生格前工具准备；完成前不授42/0。cc按tag/source_commit/membersSHA绑定首真签，四成员签后重包须新CI；不改cc签名路径。
-
-OSX-LAUNCH-SLOW草稿回读完成：12资产独立重新下载，严格layout与members check真实exit0；metadataAPI核draft=true/tag/targetf099/12唯一，独立CX审计逐文件完整SHA/bytes与远端digest全部一致，members仍4e1a51b8…，保留初始EOF/notfound日志。六个native格现均success，汇总report尚在途；不提前授42/0。证据out/osx-launch-slow/v0481/draft-readback-{report.md,audit.tsv}。
-
-OSX-LAUNCH-SLOW未签候选最终资格：CI42555350465实际completed/success，下载新artifact表绑定bdd52246全SHA+f099精确提交，六目标七检查=42 PASS/0FAIL/0NOTRUN/0INVALID；Windows portable子集范围以原notes为准，不称完整--all或全POSIX。本车道目标已到可真签交接：0.0.48.1草稿12资产和members4e1a51b8…经远端回读完全一致，正式candidate表固定CIID，四成员签后替换入口28/0。首真签归cc，未触发真签/公证/Latest/根替换，签后新身份须重新资格。热性能仅Terminal既有责任应用上下文通过，非豁免旧失败保留。证据out/osx-launch-slow/v0481/ci-evidence-bdd/table.md与draft-readback-report.md。
-
-OSX-SIGN-ROSETTA P0接续：cc首真签run42556245736公证Accepted/arm64签后可跑，但DeveloperID+hardened runtime x64 Rosetta --version挂起，同源ad-hoc同entitlements正常。先核run2原始字节/签名/同包环境，建立最小RW→RX内存执行对照，MAP_JIT/pthread_jit_write_protect/allow-jit仅为待证路线，不把Rosetta采样位置当根因。cc三签名路径不改；L0/core冻结继续，若产品修复必要只给明确单路径候选补丁并实际验证，不覆盖远程车道。所有复现子≤8秒/外≤60，留原hang并清进程；未过团队签名+Rosetta真实复验不得宣称修复完成。
-
-OSX-SIGN-ROSETTA最小裁判：先比较完全无动态执行内存的return7程序，由unisacc与系统clang各生成x64，私有副本仅本机现有DeveloperID/runtime/无timestamp与ad-hoc签名对照；目的是区分Mach-O加载/AOT与kn_load执行，不上传、不公证、不碰原件或签名workflow/证书配置。当前任务明确团队签后差异，必要私有签对照在本任务范围内；不以本机签字节代替后续cc正式签验收。若无JIT程序也挂，停止把MAP_JIT当既定修法。
-
-OSX-SIGN-ROSETTA反证实测：原路径签后3679a611在统一cleanenv+P4 fffa两次8s超时142；同字节cp -p新副本DeveloperID/同runtime/同唯一entitlement正常version0，原路径sample全Rosetta routines/约200K无应用符号，原材料SHA不变。独立systemclang return7内存执行23子实测：RW→RX在全部ad-hoc profiles正常，无hang；只MAP_JIT无allow-jit被EACCES拒绝，allow-jit MAP_JIT正常，supported_np=0。尚不认kn_load/RW→RX为根因，不加泛权限或动冻结L0。下一步从公证DMG私有读出四Mac已签成员，严格原字节重包到新内容key/新inode，核真实Rosetta和冷/热两路径；若通过给无源变更的签后修复候选。另本机DeveloperID私有最小样本签名尝试因errSecInternalComponent失败，仅ad-hoc旧字节，不计团队签名测试。
-
-OSX-SIGN-ROSETTA调用链收窄：所绑src/unisacc main→dv_main→dv_parse_args/entrybind --version分类→dv_parse直接ex_ri_say→sy_printf→return，未到kn_call/core_run，查无静态constructor触发kn_load；因此正常version控制流的这次挂起不能由后续kn_load RW→RX修复，sample单独不证明何时停。公证DMG四签成员复制保留quarantine，直exec8s挂与无xattr副本成功不得混为同变量。继续用正常sh APE原字节解压新内容key复验；不删任何xattr/不关策略，不扩entitlements。
-
-OSX-SIGN-ROSETTA签后原字节候选实测：release-ape显式替换四公证DMG内DeveloperID成员，APE5e110594033cbaa9e81d59c8677eef4c2727efa79269d35366ff556b37ec177c/6450974B。不改kn_load/entitlement/冻结源，不覆盖原未签候选。正常sh用户路径两格冷version0、cold/hot -run r7均7，四缓存strictverify0；两独立cache检查各108/0且改写fixture也过，无残留。原裸路径两次142与带quarantine私有直exec142保留。此为LOCAL-CHECKED签后重包候选，不转移bdd原六格CI，也不声称新APE已公证或原宿主Rosetta状态已根治。
-
-OSX-SIGN-ROSETTA当前交接结论：只读syspolicyd日志11:29/11:38对团队L2/id osx-x86_64/NOT_A_BUNDLE明确Prompt shown/waiting for response，支持相关裸成员启动阻塞在Gatekeeper评估，不能因path散列把全部8s超时唯一归到同prompt。正常--version链不触kn_load，团队签名新APE实际-run7与FFI0两格又证现RW→RX可工作；无理由改冻结L0/allow-jit。候选out/osx-sign-rosetta/candidate/unisacc.com SHA5e110594…/6450974B，members96ab2e58be8e5a3fd6cb63c3ce7f686d652c45f7aafb7056aa4423c36615af81，两格cache108/0、热10样本ARM12/96ms及Rosetta45/254.5ms通过(既有Terminal上下文)。四签成员原字节/签名/原P4不变，原DMG只读卸载，无残留；LOCAL-CHECKED不迁旧CI、不冒新DMG公证，cc三签名路径未动。完整最小对照和集成边界research/c48-osx-sign-rosetta/result.md，后继cc将签后APE与同字节成员入最终DMG并按新身份走CI/签公证。原裸CLI/私有quarantine直exec142保留不涂绿。
-
-OSX签后重包runner交接：用户要完整自举命令写research/c48-osx-sign-rosetta/repack-cmd.md；完整checkout冻结f099并把核SHA的草稿bdd APE放runner根unisacc.com，因release-ape内层固定sh ./unisacc.com再运行ape-pack。需要6裸片+完整footer P4；现draft缺Winx64/Linux2三辅助原裸片，将按既有完整SHA补充(不改5角色成员/pins)。不可逆PE资源回注不能把从APE剥出的带.rsrc Win片直接再当pack输入。固定首签四bytes回放应5e11；新的timestamp签名原字节变，新APE SHA必须实算，不硬码历史输出。
-
-OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.md三bash代码块经CX提取，在独立完整f099检出/草稿bdd根bootstrap下回放；step1同draft5输入远端重下载SHA全OK、step2实际0输出精确5e110594…，四签后源与原输入前后SHA均同、receipt输出SHA核同。补充Winx64/Linux2三辅助资产上传actual0并远端digest/下载核同，不改原5members/pins。文档给DMG接线并区分历史5e11回放与未来timestamp新SHA，不改cc工作流。
-
-0.0.48.1 macOS发行附件裁定：cc确认run42561596269完成签→重包→DMG→公证Accepted→staple，本机Gatekeeper/ARM及Rosetta -run7与热0.22s验收通过。公开0.0.48.1时必须附该run的macos-stapled-dmg内最终DMG，并明确Intel实机/macOS13未测。本车道先取artifact核staple后完整SHA、验证签名/票据，将同字节DMG及独立SHA附件准备到现0.0.48.1草稿，发布说明写入待发布文案；不据本通知提前公开/改Latest，不改cc三签名路径。签后APE身份与原未签bdd42/0继续分账。
-
-0.0.48.1 macOS附件已就绪：从run42561596269/macos-stapled-dmg下载并核post-staple DMG6e25e7c9f9efec717c1a0cf33bc7a35ad8c2bfccc2a0b2ab9e807ff2b40f0cc0/5475910B，stapler validate0、Gatekeeper accepted(Notarized Developer ID)。以unisacc-0.0.48.1-macos.dmg及独立sha256资产附到现v0.0.48.1-osx-launch-rc1草稿，上传真实0且远端重新下载SHA核同。发布说明plans/release-notes-0.0.48.1.md与release/macos-0.0.48.1.tsv固定run/DMG/内嵌签后APE988a528d…身份，明确Intel实机/macOS13未测，原bdd未签42/0不迁用。公开仍待按原发布流程执行，不修改Latest/cc三路径。
+0.0.48.1 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 与 0.0.49 收尾的逐条完成记录已逐字迁入 [prd_hist.md](prd_hist.md)「0.0.49 收尾」；本文件不再保留。
