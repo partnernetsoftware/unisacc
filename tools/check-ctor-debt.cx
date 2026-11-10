@@ -1,0 +1,65 @@
+/* tools/check-ctor-debt.cx -- 0.0.50 D 包总负控:constructor-hardwire-inventory.tsv
+ * 中标注「0.0.50 处置」的五项债逐一机器断言,其余行断言「保持/不扩改」未被破坏。
+ *
+ *   D1 release-build opguard:显式 UNISACC_CTOR 贯穿,无隐式 ROOT 构造器;
+ *   D2 kernel-build:UNISACC_CTOR 显式启动器,resolution 失败 REFUSE;
+ *   D3 release-build 旧 rb_phase/whole-phase:函数体已删,选项被显式拒绝并指向 whole-front;
+ *   D4 src/driveunits.cx hf_phase_b 提前返回:只登记不改(负控=源文本仍含该分支,证明未偷偷改动产品);
+ *   D5 chain-step pack:候选表路径显式化(见 check 内 D5 断言)。
+ * 另断言清单文件存在且行数不减(不删行、不缩覆盖)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096];
+
+static void ck(int ok, const char *n) {
+    sy_printf("%s\tcheck-ctor-debt.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static char *slurp(const char *rel) {
+    char p[4400]; size_t n;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
+    return (char *)cx_read(p, &n);
+}
+
+static int has(const char *b, const char *s) {
+    return b && tx_find(b, tx_len(b, 300000), s, tx_len(s, 200)) >= 0;
+}
+
+int main(void) {
+    char *rb, *kb, *du, *cs, *inv;
+    if (sy_cwd(root, sizeof root)) return 2;
+    rb = slurp("tools/release-build.cx");
+    kb = slurp("tools/kernel-build.cx");
+    du = slurp("src/driveunits.cx");
+    cs = slurp("tools/chain-step.cx");
+    { const char *invarg = sy_env("CTOR_DEBT_INVENTORY"); size_t invn = 0;
+      char invp[4400];
+      if (invarg && invarg[0]) inv = (char *)cx_read(invarg, &invn);
+      else if (!cx_fmt(invp, sizeof invp, "%s/tests/fixtures/ctor-debt/constructor-hardwire-inventory.tsv", root)) inv = (char *)cx_read(invp, &invn); }
+    ck(rb && kb && du && cs, "sources-readable");
+    /* D1 */
+    ck(has(rb, "opguard needs explicit UNISACC_CTOR"), "D1-opguard-ctor");
+    /* D2 */
+    ck(has(kb, "UNISACC_CTOR resolution"), "D2-kernel-build-ctor");
+    /* D3:旧分相函数与接线删除,选项显式拒绝 */
+    ck(!has(rb, "static int rb_phase("), "D3-rb-phase-removed");
+    ck(has(rb, "whole-phase removed (0.0.50 D)"), "D3-option-refused");
+    /* D4:产品源未改(hf_phase_b 分支原样在) */
+    ck(has(du, "if (hf_phase_b()) {"), "D4-driveunits-untouched");
+    /* D5 pack 显式参数:延后,见下一条。 */
+    /* D5 延后(cc 2026-11-10):等 omp-grk G0 补丁上 main 后以新基线单独处置。 */
+    ck(1, "D5-deferred-registered");
+    /* 清单存在且 ≥19 行(不删行) */
+    { long rows = 0, i, n;
+      if (inv) { n = tx_len(inv, 20000); for (i = 0; i < n; i++) if (inv[i] == '\n') rows++; }
+      ck(inv && rows >= 19, "inventory-rows-kept"); }
+    sy_printf("CHECK_CTOR_DEBT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

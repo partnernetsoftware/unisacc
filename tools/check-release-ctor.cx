@@ -1,0 +1,55 @@
+/* tools/check-release-ctor.cx -- D 包负控(0.0.50):release-build opguard 的 P3 路径
+ * 必须贯穿显式 UNISACC_CTOR,不得再隐式用 ROOT/unisacc.com 作构造器。
+ *
+ * 正控:tools/release-build.cx 源文本含 UNISACC_CTOR 读取与 kernel-route --constructor 传递;
+ * 负控:opguard 调用行不再出现 "sh","unisacc.com" 的隐式构造器字样(仅 opguard 段);
+ * 负控2:缺 UNISACC_CTOR 时 rb_base_check 路径以显式 REFUSE 文案退出(源文本断言 rb_die 文案存在)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096], src[4096];
+
+static void ck(int ok, const char *n) {
+    sy_printf("%s\tcheck-release-ctor.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+int main(void) {
+    char *b = 0; size_t n = 0; long len;
+    const char *needle1 = "sy_env(\"UNISACC_CTOR\")";
+    const char *needle2 = "opguard needs explicit UNISACC_CTOR";
+    if (sy_cwd(root, sizeof root)) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root)) return 2;
+    b = (char *)cx_read(src, &n);
+    if (!b) return 2;
+    len = (long)n;
+    /* 正控:opguard 段读取 UNISACC_CTOR */
+    ck(tx_find(b, len, needle1, tx_len(needle1, 64)) >= 0, "ctor-env-read");
+    /* 正控:opguard 拒绝缺失 ctor 的显式文案存在 */
+    ck(tx_find(b, len, needle2, tx_len(needle2, 80)) >= 0, "ctor-refuse-message");
+    {   /* 负控:opguard 调用向量里不再有 "sh","unisacc.com" 相邻隐式构造器。
+           旧行曾是 {"sh", bnd, "55", "sh", "unisacc.com", "tools/kernel-route.cx", ...}。*/
+        static const char *route = "tools/kernel-route.cx";
+        static const char *implicit = "\"unisacc.com\"";
+        long rl = tx_len(route, 64);
+        long il = tx_len(implicit, 32);
+        long at = tx_find(b, len, route, rl);
+        int bad = 0;
+        while (at >= 0 && !bad) {
+            long lo = at - 400; if (lo < 0) lo = 0;
+            if (tx_find(b + lo, at - lo, implicit, il) >= 0) bad = 1;
+            else { long nx = tx_find(b + at + 1, len - at - 1, route, rl); at = nx < 0 ? -1 : nx + at + 1; }
+        }
+        ck(!bad, "opguard-no-implicit-root-constructor");
+    }
+    /* 正控:--constructor 显式传递存在 */
+    ck(tx_find(b, len, "\"--constructor\"", 15) >= 0, "kernel-route-constructor-flag");
+    (void)b;
+    sy_printf("CHECK_RELEASE_CTOR\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
