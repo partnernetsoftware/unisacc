@@ -820,6 +820,8 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     if (!compare && !tx_eqz(phase, "g2") && !tx_eqz(phase, "g3") && !tx_eqz(phase, "kernels-g2") && !tx_eqz(phase, "kernels-g3")) cs_die("REFUSE unknown phase", phase);
     if (target && selected < 0) cs_die("REFUSE unknown target", target);
     if (compare && (object || link)) cs_die("REFUSE compare object options", phase);
+    if (cs_from_image && !compare && selected >= 0 && selected < 2) cs_die("REFUSE --from-image linux", target);
+    if (cs_from_image && !compare && cs_file_size(cs_from_image) < 1) cs_die("REFUSE empty/from-image", cs_from_image);
     /* linux 全片 slice 写 phase-N.tsv/.chain-steps; --object/--link-only 仍是分波. */
     if ((object || link) && (selected < 0 || selected >= 2 || (object && link))) cs_die("REFUSE object options", target);
     if (object) { long k; for (k = 0; object[k]; k++) if (!(object[k] == '.' || object[k] == '_' || (object[k] >= 'a' && object[k] <= 'z') || (object[k] >= '0' && object[k] <= '9'))) cs_die("REFUSE object key", object); }
@@ -874,8 +876,15 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
                 imgb = cs_load(cs_from_image, &imgn);
                 if (!imgb || imgn < 1) { free(imgb); cs_die("REFUSE empty/from-image", cs_from_image); }
                 if (sy_mkdir(sub, 0755)) { free(imgb); cs_die("mkdir", sub); }
-                if (cx_fmt(destimg, sizeof destimg, "%s/image", sub)) { free(imgb); cs_die("path", sub); }
-                if (cs_save(destimg, imgb, imgn)) { free(imgb); cs_die("save image", destimg); }
+                {   /* 直接按 slice-<target> 命名落位(fp-compare 期望名),不再落 image 后人工改名 */
+                    char leaf[128], h1[65], h2[65]; int k;
+                    if (cx_fmt(leaf, sizeof leaf, "slice-%s", cs_fp_targets[i])) { free(imgb); cs_die("slice", sub); }
+                    for (k = 0; leaf[k]; k++) if (leaf[k] == '/') leaf[k] = '-';
+                    if (cx_fmt(destimg, sizeof destimg, "%s/%s", sub, leaf)) { free(imgb); cs_die("path", sub); }
+                    if (cs_save(destimg, imgb, imgn)) { free(imgb); cs_die("save image", destimg); }
+                    cs_sha(cs_from_image, h1); cs_sha(destimg, h2);
+                    if (strcmp(h1, h2)) { free(imgb); cs_die("REFUSE from-image sha mismatch", destimg); }
+                }
                 free(imgb);
             }
             else {
