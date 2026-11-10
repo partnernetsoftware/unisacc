@@ -1,0 +1,79 @@
+/* tools/check-newcx-check.cx -- tools/newcx-check.cx on a violating and a clean temporary file.
+ *
+ *   sh ./unisacc.com tools/check-newcx-check.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "check-newcx-check: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-newcx-check.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static const char *bad_src =
+    "int f(char *b, const char *s, int n) {\n"
+    "    snprintf(b, 8, \"%s\", s);\n"
+    "    memcpy(b, s, n);\n"
+    "    strncpy(b, s, 4);\n"
+    "    const char *p = \"ou" "t/leftover\";\n"
+    "    return 0;\n"
+    "}\n";
+static const char *good_src =
+    "/* snprintf(b, 8, \"x\"); memcpy(b, s, n); a comment never counts */\n"
+    "int f(char *b, const char *s, int n) {\n"
+    "    int r = snprintf(b, 8, \"%s\", s);\n"
+    "    if (mm_copy(b, 8, s, n)) return 1;\n"
+    "    memcpy(b, s, 4);\n"
+    "    const char *q = \"memcpy(b, s, n); is text\";\n"
+    "    return r;\n"
+    "}\n";
+
+static char *run(const char *file, int *rc) {
+    char com[4400], tool[4400];
+    char *v[8];
+    np_result r = {0};
+    char *out;
+    if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tools/newcx-check.cx", root)) die("path");
+    v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = (char *)file; v[5] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die("run");
+    *rc = r.rc;
+    out = r.out ? strdup(r.out) : strdup("");
+    np_free(&r);
+    return out;
+}
+
+int main(void) {
+    char dir[4400], bad[4400], good[4400];
+    char *o;
+    int rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/newcx-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(bad, sizeof bad, "%s/bad.cx", dir) || cx_fmt(good, sizeof good, "%s/good.cx", dir)) die("path");
+    if (cx_write(bad, bad_src, strlen(bad_src)) || cx_write(good, good_src, strlen(good_src))) die("write");
+    o = run(bad, &rc);
+    ck(rc == 1, "bad-exit1");
+    ck(strstr(o, "cxtrunc\t") && strstr(o, ":2\t"), "bad-snprintf-line2");
+    ck(strstr(o, ":3\t") != 0, "bad-memcpy-line3");
+    ck(strstr(o, ":4\t") != 0, "bad-strncpy-line4");
+    ck(strstr(o, "outdep\t") && strstr(o, ":5\t"), "bad-outdep-line5");
+    ck(strstr(o, "NEWCX_CHECK\tfailed=4") != 0, "bad-summary");
+    free(o);
+    o = run(good, &rc);
+    ck(rc == 0, "good-exit0");
+    ck(strstr(o, "NEWCX_CHECK\tfailed=0") != 0, "good-summary");
+    ck(!strstr(o, "cxtrunc\t") && !strstr(o, "outdep\t"), "good-no-violation");
+    free(o);
+    remove(bad);
+    remove(good);
+    rmdir(dir);
+    printf("CHECK_NEWCX_CHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

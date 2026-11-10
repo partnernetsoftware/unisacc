@@ -1,0 +1,186 @@
+/* tools/newcx-check.cx -- local self-check of new .cx files against the gates that reject them.
+ *
+ *   sh ./unisacc.com tools/newcx-check.cx -- FILE...
+ *
+ * Three classes, each violation printed as CLASS<TAB>FILE:LINE<TAB>detail:
+ *   cxtrunc  a statement-position snprintf/strncpy/memcpy (result discarded).  Conservative superset
+ *            of tests/cxtrunc.cx: a memcpy bounded by sizeof or a decimal literal is not flagged;
+ *            snprintf/strncpy are flagged whatever the bound.  tests/cxtrunc.cx stays the authority.
+ *   outdep   a string literal starting with out/, %s/out/, /home/ or /tmp/../ (tests/outdep.cx rule).
+ *   lint     every finding of tools/cx-lint.cx (R1-R3 and the rest) on the files.
+ * Summary line NEWCX_CHECK<TAB>failed=N; exit 1 when N > 0, 2 on usage or read errors.
+ * Run from the repo root (needs ./unisacc.com for the lint pass).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+
+static int is_id(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= '0' && c <= '9');
+}
+static int has_pre(const char *s, long n, const char *w) {
+    long k = 0;
+    while (w[k]) { if (k >= n || s[k] != w[k]) return 0; k++; }
+    return 1;
+}
+static void report(const char *cls, const char *file, int line, const char *detail) {
+    printf("%s\t%s:%d\t%s\n", cls, file, line, detail);
+    failed++;
+}
+
+/* Replace comments and literal contents by spaces (newlines kept); report out/ literal starts. */
+static char *mask(const char *s, size_t n, const char *file) {
+    char *m = malloc(n + 1);
+    size_t i = 0;
+    int line = 1;
+    if (!m) return 0;
+    if (mm_copy(m, (long)(n + 1), s, (long)n)) { free(m); return 0; }
+    m[n] = 0;
+    while (i < n) {
+        if (s[i] == '\n') { line++; i++; continue; }
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+            m[i] = m[i + 1] = ' ';
+            i += 2;
+            while (i < n && !(s[i] == '*' && i + 1 < n && s[i + 1] == '/')) {
+                if (s[i] == '\n') line++; else m[i] = ' ';
+                i++;
+            }
+            if (i < n) { m[i] = ' '; if (i + 1 < n) m[i + 1] = ' '; i += 2; }
+            continue;
+        }
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') { m[i] = ' '; i++; }
+            continue;
+        }
+        if (s[i] == '\'' || s[i] == '"') {
+            char q = s[i];
+            size_t j = i + 1;
+            if (q == '"') {
+                long r = (long)(n - j);
+                if (has_pre(s + j, r, "ou" "t/") || has_pre(s + j, r, "%s/ou" "t/") ||
+                    has_pre(s + j, r, "/ho" "me/") || has_pre(s + j, r, "/tm" "p/../"))
+                    report("outdep", file, line, "string literal names an out/ or absolute checkout path");
+            }
+            while (j < n && s[j] != q) {
+                if (s[j] == '\\' && j + 1 < n) { m[j] = ' '; j++; }
+                if (s[j] == '\n') line++; else m[j] = ' ';
+                j++;
+            }
+            i = j + 1;
+            continue;
+        }
+        i++;
+    }
+    return m;
+}
+
+static size_t skip_ws_back(const char *m, size_t i) {
+    while (i > 0 && (m[i - 1] == ' ' || m[i - 1] == '\t' || m[i - 1] == '\n' || m[i - 1] == '\r')) i--;
+    return i;
+}
+
+/* Last top-level argument of the call opening at m[open] == '(': 1 when it starts with sizeof or a digit. */
+static int last_arg_bounded(const char *m, size_t n, size_t open) {
+    int depth = 0;
+    size_t i = open, last = open + 1;
+    for (; i < n; i++) {
+        if (m[i] == '(') depth++;
+        else if (m[i] == ')') { depth--; if (depth == 0) break; }
+        else if (m[i] == ',' && depth == 1) last = i + 1;
+    }
+    while (last < i && (m[last] == ' ' || m[last] == '\t' || m[last] == '\n')) last++;
+    return has_pre(m + last, (long)(i - last), "sizeof") || (m[last] >= '0' && m[last] <= '9');
+}
+
+static void scan_trunc(const char *m, size_t n, const char *file) {
+    static const char *names[] = {"snprintf", "strncpy", "memcpy"};
+    size_t i = 0;
+    int line = 1, k;
+    while (i < n) {
+        if (m[i] == '\n') line++;
+        if (is_id((unsigned char)m[i]) && (i == 0 || !is_id((unsigned char)m[i - 1]))) {
+            size_t e = i;
+            while (e < n && is_id((unsigned char)m[e])) e++;
+            for (k = 0; k < 3; k++) {
+                size_t w = 0;
+                while (names[k][w]) w++;
+                if (e - i == w && has_pre(m + i, (long)w, names[k])) {
+                    size_t o = e, p = skip_ws_back(m, i);
+                    char prev = p ? m[p - 1] : ';';
+                    while (o < n && (m[o] == ' ' || m[o] == '\t')) o++;
+                    if (o < n && m[o] == '(' && (prev == ';' || prev == '{' || prev == '}' || prev == ')' || prev == ':')) {
+                        if (k == 2 && last_arg_bounded(m, n, o)) break;
+                        report("cxtrunc", file, line, k == 0 ? "discarded snprintf: use cx_fmt and check it"
+                                                      : k == 1 ? "discarded strncpy: use mm_copy and check it"
+                                                               : "discarded memcpy: use mm_copy and check it");
+                    }
+                    break;
+                }
+            }
+            i = e;
+            continue;
+        }
+        i++;
+    }
+}
+
+static void lint_pass(int argc, char **argv) {
+    char root[4096], why[512], com[4400];
+    char *v[4096];
+    int k = 0, i;
+    np_result r = {0};
+    if (argc + 6 > 4096) return;
+    const char *pname = getenv("NEWCX_PRODUCT");   /* default: the product file in the repo root */
+    if (!pname) pname = "unisacc" ".com";
+    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/%s", root, pname)) {
+        report("lint", "-", 0, "cannot resolve repo root");
+        return;
+    }
+    v[k++] = "sh"; v[k++] = com; v[k++] = "tools/cx-lint.cx"; v[k++] = "--";
+    for (i = 1; i < argc; i++) v[k++] = argv[i];
+    v[k] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) {
+        report("lint", "-", 0, "cx-lint did not run");
+        np_free(&r);
+        return;
+    }
+    if (r.out) {
+        char *p = r.out;
+        while (*p) {
+            char *e = strchr(p, '\n');
+            size_t ln = e ? (size_t)(e - p) : strlen(p);
+            if (ln && !(ln >= 7 && has_pre(p, (long)ln, "CX_LINT"))) {
+                printf("lint\t%.*s\n", (int)ln, p);
+                failed++;
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (r.rc > 1) report("lint", "-", 0, "cx-lint exit status above 1");
+    np_free(&r);
+}
+
+int main(int argc, char **argv) {
+    int i;
+    if (argc < 2) { fprintf(stderr, "usage: newcx-check.cx FILE...\n"); return 2; }
+    for (i = 1; i < argc; i++) {
+        size_t n;
+        char *s = cx_read(argv[i], &n);
+        char *m;
+        if (!s) { fprintf(stderr, "newcx-check: cannot read %s\n", argv[i]); return 2; }
+        m = mask(s, n, argv[i]);
+        if (!m) { free(s); fprintf(stderr, "newcx-check: out of memory\n"); return 2; }
+        scan_trunc(m, n, argv[i]);
+        free(m);
+        free(s);
+    }
+    lint_pass(argc, argv);
+    printf("NEWCX_CHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
