@@ -387,6 +387,37 @@ static void mark(const char *dir, const char *phase, long wall) {
         exit(0);
     }
 }
+/* 相位原子清理: 相位未 DONE 时,删除上次失败留下的独占输出(下游工具以目标不存在为前提)。
+   只删调用方登记的路径;已 DONE 的相位不动;有完成收据(receipt 非空且存在)的不动;
+   范围限定在 --out 目录与快照树 out/chain(chain_work)之内,越界或含 .. 即拒绝。 */
+static int under_dir(const char *path, const char *dir) {
+    long dn = tx_len(dir, 4400);
+    if (dn < 1 || !tx_prefix(path, tx_len(path, 4400), dir, dn)) return 0;
+    return path[dn] == '/' && path[dn + 1] != 0;
+}
+static int has_dotdot(const char *p) {
+    long i, n = tx_len(p, 4400);
+    for (i = 0; i + 1 < n; i++)
+        if (p[i] == '.' && p[i + 1] == '.' && (i == 0 || p[i - 1] == '/') && (i + 2 == n || p[i + 2] == '/')) return 1;
+    return 0;
+}
+static int clean_phase_path(const char *outdir, const char *phase, const char *path, const char *receipt) {
+    if (!path || !*path) die("REFUSE cleanup empty path", phase);
+    if (has_dotdot(path) || !(under_dir(path, outdir) || (chain_work[0] && under_dir(path, chain_work))))
+        die("REFUSE cleanup path outside out/chain", path);
+    if (ck_done(outdir, phase)) return 0;
+    if (fsize(path) < 0) return 0;
+    if (receipt && *receipt && fsize(receipt) >= 0) return 0;
+    sy_printf("CLEANUP\t%s\t%s\n", phase, path);
+    if (cx_rmtree(path)) die("cleanup failed", path);
+    return 1;
+}
+/* fixedpoint g2/g3: 独占输出为 FP/gN/<target>,完成收据为 FP/gN/phase-<i>.tsv。 */
+static void clean_fp_phase(const char *outdir, const char *fp, const char *phase, int g, const char *slug, int idx) {
+    char d[4400], rc[4400];
+    if (cx_fmt(d, sizeof d, "%s/g%d/%s", fp, g, slug) || cx_fmt(rc, sizeof rc, "%s/g%d/phase-%d.tsv", fp, g, idx)) die("path", phase);
+    clean_phase_path(outdir, phase, d, rc);
+}
 static int warmup_tools(const char *root) {
     static const char *w[] = {
         "tools/chain-step.cx", "tools/release-build.cx", "tools/whole-front.cx",
@@ -591,6 +622,11 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
         if (tx_eqz(argv[i], "--worker-nm") && i + 1 < argc) { wnm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--resume")) { resume = 1; continue; }
+        if (tx_eqz(argv[i], "--clean-phase") && i + 5 < argc) {
+            /* 夹具入口: --clean-phase OUT WORK PHASE PATH RECEIPT(- 为无) */
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            return clean_phase_path(argv[i + 1], argv[i + 3], argv[i + 4], tx_eqz(argv[i + 5], "-") ? 0 : argv[i + 5]) ? 0 : 3;
+        }
         if (tx_eqz(argv[i], "--verify-snap") && i + 2 < argc) { vs_dir = argv[++i]; vs_rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
@@ -723,6 +759,9 @@ int main(int argc, char **argv) {
     if (!(resume && ck_done(outdir, "list"))) {
         long t0 = sy_now_ms();
         char *a[5];
+        char louter[4400];
+        if (cx_fmt(louter, sizeof louter, "%s/outer", build)) die("path", "louter");
+        clean_phase_path(outdir, "list", louter, 0);
         a[0] = (char *)"list"; a[1] = snap; a[2] = ctx; a[3] = build; a[4] = 0;
         if (step(root, a)) die("list", "list");
         mark(outdir, "list", sy_now_ms() - t0);
@@ -769,6 +808,12 @@ int main(int argc, char **argv) {
         char jobs[4400];
         char *a[6];
         if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx)) die("path", "jobs");
+        {
+            char kr[4400];
+            if (cx_fmt(kr, sizeof kr, "%s/kernel-route", routes)) die("path", "kr");
+            clean_phase_path(outdir, "routes", kr, 0);
+            clean_phase_path(outdir, "routes", routes, 0);
+        }
         a[0] = (char *)"routes"; a[1] = (char *)rev; a[2] = snap; a[3] = jobs; a[4] = routes; a[5] = 0;
         if (step(root, a)) die("routes", routes);
         mark(outdir, "routes", sy_now_ms() - t0);
@@ -864,6 +909,11 @@ int main(int argc, char **argv) {
         if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
         if (cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("path", "objs");
         if (cx_fmt(nout, sizeof nout, "%s/wf-prep", chain_work)) die("path", "wfp");
+        {
+            char wrc[4400];
+            if (cx_fmt(wrc, sizeof wrc, "%s/receipt.txt", nout)) die("path", "wrc");
+            clean_phase_path(outdir, "wf-prepare", nout, wrc);
+        }
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
         {
@@ -1001,6 +1051,7 @@ int main(int argc, char **argv) {
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
     if (!(resume && ck_done(outdir, "g2-lnx-x86_64"))) {
+        clean_fp_phase(outdir, fp, "g2-lnx-x86_64", 2, "lnx-x86_64", 0);
         long t0 = sy_now_ms();
         char *a[14];
         sy_mkdir(fp, 0755);
@@ -1012,6 +1063,7 @@ int main(int argc, char **argv) {
     } else sy_printf("RESUME\tg2-lnx-x86_64\n");
 
     if (!(resume && ck_done(outdir, "g2-lnx-arm64"))) {
+        clean_fp_phase(outdir, fp, "g2-lnx-arm64", 2, "lnx-arm64", 1);
         long t0 = sy_now_ms();
         char *a[13];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
@@ -1022,6 +1074,7 @@ int main(int argc, char **argv) {
     } else sy_printf("RESUME\tg2-lnx-arm64\n");
 
     if (!(resume && ck_done(outdir, "g3-lnx-x86_64"))) {
+        clean_fp_phase(outdir, fp, "g3-lnx-x86_64", 3, "lnx-x86_64", 0);
         long t0 = sy_now_ms();
         char *a[13];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
@@ -1032,6 +1085,7 @@ int main(int argc, char **argv) {
     } else sy_printf("RESUME\tg3-lnx-x86_64\n");
 
     if (!(resume && ck_done(outdir, "g3-lnx-arm64"))) {
+        clean_fp_phase(outdir, fp, "g3-lnx-arm64", 3, "lnx-arm64", 1);
         long t0 = sy_now_ms();
         char *a[13];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;

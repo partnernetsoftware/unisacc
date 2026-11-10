@@ -118,6 +118,37 @@ int main(void) {
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "WORKER_NM_OK"), "worker-nm-good-env");
       }
     }
+    {
+        char td[400], o[500], w[500], ckf[600], d1[600], d2[600], d3[600], rc[600], outside[500], cmd[3000];
+        const char *done = "DONE\tdoneph\twall_ms=1\tsha=-\n";
+        if (cx_fmt(td, sizeof td, "%s/cc-clean-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "clean-tmpdir"); return 1; }
+        if (cx_fmt(o, sizeof o, "%s/o", td) || cx_fmt(w, sizeof w, "%s/w", td) || cx_fmt(ckf, sizeof ckf, "%s/checkpoint.tsv", o)
+            || cx_fmt(d1, sizeof d1, "%s/build/outer", o) || cx_fmt(d2, sizeof d2, "%s/done-dir", o)
+            || cx_fmt(d3, sizeof d3, "%s/wf-prep", w) || cx_fmt(rc, sizeof rc, "%s/receipt.txt", d3)
+            || cx_fmt(outside, sizeof outside, "%s/outside", td)) { ck(0, "clean-fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/x' '%s/x' '%s' '%s' '%s' && : > '%s/x/f'", d1, d2, d3, w, outside, d1)) { ck(0, "clean-fmt"); return 1; }
+        if (sh(cmd, out, sizeof out) || cx_write(ckf, done, tx_len(done, 100))) { ck(0, "clean-setup"); return 1; }
+        /* 未 DONE 相位的残留被清理并打印 CLEANUP */
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, d1, d1)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tlist\t"), "clean-undone-removed");
+        /* 已 DONE 相位不动 */
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' doneph '%s' - 2>&1; test -d '%s/x'", com, tool, o, w, d2, d2)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP"), "clean-done-kept");
+        /* 快照树 out/chain 内、有完成收据的不动;无收据则清理 */
+        if (cx_write(rc, "r\n", 2)) { ck(0, "clean-rc"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test -d '%s'", com, tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP"), "clean-receipt-kept");
+        if (cx_fmt(cmd, sizeof cmd, "rm -f '%s'; sh '%s' '%s' -- --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test ! -e '%s'", rc, com, tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\twf-prepare\t"), "clean-workdir-removed");
+        /* 越界与含 .. 的路径具名拒绝,目录不被动 */
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s' - 2>&1", com, tool, o, w, outside)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE cleanup path outside") && has(out, outside), "clean-outside-refused");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s/../outside' - 2>&1; test -d '%s'", com, tool, o, w, o, outside)) { ck(0, "fmt"); return 1; }
+        ck(has(out, "REFUSE cleanup path outside") && sh("true", 0, 0) == 0, "clean-dotdot-refused");
+        if (cx_fmt(cmd, sizeof cmd, "test -d '%s/x' -o -d '%s'", d2, outside)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, 0, 0) == 0, "clean-refused-untouched");
+        cx_rmtree(td);
+    }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
