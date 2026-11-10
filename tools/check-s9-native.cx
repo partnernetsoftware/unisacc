@@ -1,0 +1,101 @@
+/* tools/check-s9-native.cx -- cache identity for tools/s9-native.cx on a tiny source.
+ *
+ *   sh ./unisacc.com tools/check-s9-native.cx
+ *
+ * Does not run s9 daily or full s9-shards compile. step/aggregate remain UNMEASURED.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], work[4400], wrap[4400], why[1000];
+static void die(const char *s) { fprintf(stderr, "check-s9-native: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) { printf("%s\tcheck-s9-native.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static void join(char *p, const char *a, const char *b) { if (cx_fmt(p, 4400, "%s/%s", a, b)) die("path"); }
+
+static np_result runv(char **v, int secs) {
+    np_result r = {0};
+    if (np_run(v, root, 0, secs, &r, why, sizeof why)) die("transport");
+    return r;
+}
+
+int main(void) {
+    char product[4400], srcn[4400], tiny[4400], tiny2[4400], elfpath[4400], cache[4400];
+    np_result r;
+    elfpath[0] = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(work, sizeof work, "%s/s9n-XXXXXX", sy_tmpdir()) || !mkdtemp(work)) die("work");
+    join(product, root, "unisacc.com");
+    join(srcn, root, "tools/s9-native.cx");
+    join(wrap, work, "s9-native");
+    join(tiny, work, "tiny.cx");
+    join(tiny2, work, "tiny2.cx");
+    join(cache, work, "cache");
+    if (sy_mkdir(cache, 0700)) die("cache");
+    {
+        char body[80];
+        if (cx_fmt(body, sizeof body, "int main(void){return %d;}\n", (int)getpid() & 127)) die("tiny-body");
+        if (cx_write(tiny, body, strlen(body))) die("tiny");
+    }
+    {
+        char *v[] = {"sh", product, srcn, "-o", wrap, 0};
+        r = runv(v, 55);
+        if (r.rc) { if (r.errn) fwrite(r.err, 1, r.errn, stderr); np_free(&r); die("wrap"); }
+        np_free(&r);
+    }
+    {
+        char *v[] = {wrap, "--src", tiny, "--cache", cache, "build", 0};
+        r = runv(v, 55);
+        ck(!r.rc && r.out && strstr(r.out, "hit=0"), "cold.miss");
+        ck(r.out && strstr(r.out, "compile_ms=") && !strstr(r.out, "compile_ms=-1"), "cold.timed");
+        printf("S9_NATIVE_CHECK\tphase=cold-build\tinit_ms=UNMEASURED\tstep_ms=UNMEASURED\taggregate_ms=UNMEASURED\n");
+        np_free(&r);
+    }
+    {
+        char *v[] = {wrap, "--src", tiny, "--cache", cache, "build", 0};
+        r = runv(v, 55);
+        ck(!r.rc && r.out && strstr(r.out, "hit=1"), "hot.hit-source-and-elf-sha");
+        np_free(&r);
+    }
+    {
+        char body[80];
+        if (cx_fmt(body, sizeof body, "int main(void){return 3;} /* %d */\n", (int)getpid())) die("tiny2-body");
+        if (cx_write(tiny2, body, strlen(body))) die("tiny2");
+    }
+    {
+        char *v[] = {wrap, "--src", tiny2, "--cache", cache, "build", 0};
+        r = runv(v, 55);
+        ck(!r.rc && r.out && strstr(r.out, "hit=0"), "source-change.recompile");
+        np_free(&r);
+    }
+    {
+        char *v[] = {wrap, "--src", tiny, "--cache", cache, "build", 0};
+        r = runv(v, 55);
+        if (r.out && strstr(r.out, "elf=")) {
+            const char *p = strstr(r.out, "elf=");
+            const char *e;
+            p += 4;
+            e = p;
+            while (*e && *e != '\t' && *e != '\n') e++;
+            if ((size_t)(e - p) < sizeof elfpath) {
+                if (mm_copy(elfpath, sizeof elfpath, p, (long)(e - p))) die("copy");
+                elfpath[e - p] = 0;
+            }
+        }
+        np_free(&r);
+        if (elfpath[0]) {
+            if (cx_write(elfpath, "not-an-elf\n", 11)) die("tamper");
+            {
+                char *v2[] = {wrap, "--src", tiny, "--cache", cache, "build", 0};
+                r = runv(v2, 55);
+                ck(r.rc == 2 && r.err && strstr(r.err, "cache-identity-mismatch"), "tamper.refuse");
+                np_free(&r);
+            }
+        } else ck(0, "tamper.locate-elf");
+    }
+    printf("CHECK_S9_NATIVE\tfailed=%d\tstep_ms=UNMEASURED\taggregate_ms=UNMEASURED\n", failed);
+    return failed ? 1 : 0;
+}

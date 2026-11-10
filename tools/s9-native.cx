@@ -1,0 +1,147 @@
+/* tools/s9-native.cx -- compile-cache for s9-shards.cx and all-waves.cx, then exec s9.
+ *
+ *   sh ./unisacc.com tools/s9-native.cx -- [--src FILE] build
+ *   sh ./unisacc.com tools/s9-native.cx -- init|prepare|step|aggregate|retry|controls ...
+ *
+ * Cache key is sha256 of the source bytes. ROOT/out/s9-native/<key>/<leaf> plus
+ * <leaf>.sha256. Hit re-hashes source and ELF; mismatch REFUSE cache-identity-mismatch.
+ * Never caches a test verdict. Sets S9_ALLWAVES_ELF to the cached all-waves ELF
+ * so s9-shards init/inputs skip sh ./unisacc.com tools/all-waves.cx.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.kernelsha
+#pragma unisa use cxlib.netpack
+
+static char root[4096], srcp[4400], why[1000], cachedir[4400];
+static void die(const char *s) { fprintf(stderr, "s9-native: REFUSE %s\n", s); exit(2); }
+static void join(char *p, size_t c, const char *a, const char *b) { if (cx_fmt(p, c, "%s/%s", a, b)) die("path"); }
+
+static int file_sha(const char *p, char h[65]) {
+    size_t n; char *s = cx_read(p, &n);
+    if (!s) return -1;
+    cx_sha256_hex(s, n, h);
+    free(s);
+    return 0;
+}
+
+static int src_sha_path(const char *p, char h[65]) {
+    if (file_sha(p, h)) die("read-source");
+    return 0;
+}
+
+static int cache_paths(const char *key, const char *leaf, char dir[4400], char elf[4400], char rec[4400]) {
+    if (sy_exists(cachedir) != 1 && sy_mkdir(cachedir, 0700)) die("cache-parent");
+    if (cx_fmt(dir, 4400, "%s/%s", cachedir, key)) die("cache-dir");
+    join(elf, 4400, dir, leaf);
+    if (cx_fmt(rec, 4400, "%s/%s.sha256", dir, leaf)) die("rec-path");
+    return 0;
+}
+
+static int verify_hit(const char *key, const char *src, const char *elf, const char *rec) {
+    char want[66], got[65], srcsha[65];
+    size_t n; char *s;
+    if (sy_exists(elf) != 1 || sy_exists(rec) != 1) return 0;
+    s = cx_read(rec, &n);
+    if (!s || n < 64) { free(s); return 0; }
+    if (mm_copy(want, 65, s, 64)) { free(s); return 0; }
+    want[64] = 0;
+    free(s);
+    if (file_sha(elf, got) || strcmp(want, got)) return 0;
+    if (src_sha_path(src, srcsha) || strcmp(srcsha, key)) return 0;
+    return 1;
+}
+
+static void build_one(const char *src, const char *leaf, char elf_out[4400], int *hit, long *compile_ms) {
+    char key[65], dir[4400], rec[4400], product[4400];
+    src_sha_path(src, key);
+    cache_paths(key, leaf, dir, elf_out, rec);
+    *compile_ms = -1;
+    if (sy_exists(elf_out) == 1 || sy_exists(rec) == 1) {
+        if (!verify_hit(key, src, elf_out, rec)) die("cache-identity-mismatch");
+        *hit = 1;
+        return;
+    }
+    *hit = 0;
+    if (sy_exists(dir) != 1 && sy_mkdir(dir, 0700)) die("cache-mkdir");
+    join(product, sizeof product, root, "unisacc.com");
+    if (sy_exists(product) != 1) die("no-unisacc.com");
+    {
+        char *v[] = {"sh", product, (char *)src, "-o", elf_out, 0};
+        np_result r = {0};
+        long t0 = sy_now_ms();
+        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc || r.residue) {
+            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+            np_free(&r);
+            die("compile");
+        }
+        *compile_ms = sy_now_ms() - t0;
+        np_free(&r);
+    }
+    {
+        char h[65], line[80];
+        if (file_sha(elf_out, h)) die("elf-sha");
+        if (cx_fmt(line, sizeof line, "%s\n", h)) die("rec");
+        if (cx_write(rec, line, strlen(line))) die("write-rec");
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *verb;
+    char s9elf[4400], awelf[4400], awsrc[4400];
+    int hit = 0, awhit = 0, i, narg = 0, src_set = 0;
+    long compile_ms = -1, aw_ms = -1;
+    char *rest[64];
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    join(srcp, sizeof srcp, root, "tools/s9-shards.cx");
+    join(awsrc, sizeof awsrc, root, "tools/all-waves.cx");
+    join(cachedir, sizeof cachedir, root, "out/s9-native");
+    if (argc < 2) die("usage: [--src FILE] [--cache DIR] build|init|...");
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--src") && i + 1 < argc) {
+            if (sy_realpath(argv[++i], srcp, sizeof srcp) < 0) die("src-realpath");
+            src_set = 1;
+        } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) {
+            if (sy_realpath(argv[++i], cachedir, sizeof cachedir) < 0) {
+                if (cx_fmt(cachedir, sizeof cachedir, "%s", argv[i])) die("cache");
+            }
+        } else {
+            if (narg == 63) die("args");
+            rest[narg++] = argv[i];
+        }
+    }
+    if (!narg) die("verb");
+    verb = rest[0];
+    if (!strcmp(verb, "build")) {
+        long t0 = sy_now_ms();
+        build_one(srcp, "s9-shards", s9elf, &hit, &compile_ms);
+        if (!src_set && sy_exists(awsrc) == 1) build_one(awsrc, "all-waves", awelf, &awhit, &aw_ms);
+        printf("S9_NATIVE\tphase=build\thit=%d\telf=%s\tcompile_ms=%ld\tallwaves_hit=%d\tallwaves_ms=%ld\telapsed_ms=%ld\tinit_ms=UNMEASURED\tstep_ms=UNMEASURED\taggregate_ms=UNMEASURED\n",
+               hit, s9elf, compile_ms, awhit, aw_ms, sy_now_ms() - t0);
+        return 0;
+    }
+    if (strcmp(verb, "init") && strcmp(verb, "prepare") && strcmp(verb, "step") &&
+        strcmp(verb, "aggregate") && strcmp(verb, "retry") && strcmp(verb, "controls") &&
+        strcmp(verb, "child"))
+        die("unknown-verb");
+    build_one(srcp, "s9-shards", s9elf, &hit, &compile_ms);
+    if (!src_set && sy_exists(awsrc) == 1) {
+        build_one(awsrc, "all-waves", awelf, &awhit, &aw_ms);
+        if (sy_setenv("S9_ALLWAVES_ELF", awelf, 1)) die("setenv-allwaves");
+    }
+    printf("S9_NATIVE\tphase=exec\thit=%d\telf=%s\tcompile_ms=%ld\tallwaves_hit=%d\tallwaves_ms=%ld\tverb=%s\n",
+           hit, s9elf, compile_ms, awhit, aw_ms, verb);
+    fflush(stdout);
+    {
+        char *ev[65];
+        int k;
+        ev[0] = s9elf;
+        for (k = 0; k < narg; k++) ev[k + 1] = rest[k];
+        ev[narg + 1] = 0;
+        execv(s9elf, ev);
+        die("exec");
+    }
+    return 2;
+}
