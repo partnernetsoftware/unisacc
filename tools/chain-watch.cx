@@ -7,8 +7,10 @@
  * 进展时间 = max(checkpoint.tsv、DIR 顶层文件、DIR/logs 下文件 的 mtime)。idle_s = now - 进展时间。
  *   DONE     checkpoint 含 final 相位(默认 pack)
  *   RUNNING  idle_s < N 分钟(默认 10)
- *   STALLED  否则
- * 输出一行 CHAIN_WATCH<TAB>status=..<TAB>last_phase=..<TAB>idle_s=..;并把现场写到 DIR/state.md(接手者读文件即可续)。
+ *   STALLED  否则;再核 DIR/heartbeat.tsv 末行(epoch<TAB>phase<TAB>pid<TAB>pgid[<TAB>start|end],由链每相位写)
+ *            的 pid/pgid 是否存活:liveness=HUNG(存活)|DEAD(不存活)|UNKNOWN(无心跳),三者都需续跑。
+ * 输出一行 CHAIN_WATCH<TAB>status=..<TAB>last_phase=..<TAB>idle_s=..<TAB>liveness=..;有心跳另打 CHAIN_HEARTBEAT 行;
+ * 现场写到 DIR/state.md(接手者读文件即可续)。heartbeat.tsv 的 mtime 也算进展(它在 DIR 顶层)。
  * --resume-cmd:STALLED 时经 sh -c 执行一次 CMD(cx_run_timeout 55s,CMD 自己负责后台化或分片),
  * 次数记在 DIR/chain-watch.tsv(RESUME<TAB>epoch<TAB>n<TAB>rc),总次数上限 --max-resumes(默认 3),超限不再重启。
  * 退出码:0 RUNNING/DONE;1 STALLED(未续跑或已续跑);3 STALLED 且续跑次数耗尽;2 用法/IO 错误。
@@ -120,15 +122,52 @@ static void append_line(const char *dir, const char *file, const char *line) {
     if (fd < 0 || sy_write_all(fd, line, tx_len(line, 4000)) || sy_close(fd)) die("append", p);
 }
 
-static void write_state(const char *dir, const char *status, const char *last, long idle, int resumes, int maxr, const char *cmd) {
+static void write_state(const char *dir, const char *status, const char *last, long idle, int resumes, int maxr, const char *cmd, const char *liveness) {
     char p[4400], body[4000];
     if (cx_fmt(p, sizeof p, "%s/state.md", dir)) die("path", dir);
     if (cx_fmt(body, sizeof body,
-               "# chain state (chain-watch)\n\nstatus: %s\nlast_phase: %s\nidle_s: %ld\nresumes: %d/%d\nresume_cmd: %s\n\n"
-               "接手:若 STALLED,按 resume_cmd 续跑(--resume 跳过 checkpoint.tsv 已 DONE 相位);次数耗尽则人工查 DIR 最新日志。\n",
-               status, last, idle, resumes, maxr, cmd ? cmd : "-"))
+               "# chain state (chain-watch)\n\nstatus: %s\nliveness: %s\nlast_phase: %s\nidle_s: %ld\nresumes: %d/%d\nresume_cmd: %s\n\n"
+               "接手:若 STALLED,按 resume_cmd 续跑(--resume 跳过 checkpoint.tsv 已 DONE 相位);HUNG 表示进程仍在,续跑前先 kill 其 pgid;次数耗尽则人工查 DIR 最新日志。\n",
+               status, liveness, last, idle, resumes, maxr, cmd ? cmd : "-"))
         die("fmt", "state");
     if (cx_write(p, body, tx_len(body, 4000))) die("write", p);
+}
+
+/* heartbeat.tsv 末行:epoch<TAB>phase<TAB>pid<TAB>pgid[<TAB>start|end]。返回 1 有心跳,0 无。 */
+static int read_heartbeat(const char *dir, char *phase, int cap, long *pid, long *pgid) {
+    char p[4400];
+    size_t n = 0;
+    char *b;
+    long i = 0, ls = -1, le = -1;
+    if (cx_fmt(p, sizeof p, "%s/heartbeat.tsv", dir)) die("path", dir);
+    if (mtime_of(p) < 0) return 0;
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    while (i < (long)n) {
+        long e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e > i) { ls = i; le = e; }
+        i = e + 1;
+    }
+    if (ls < 0) { free(b); return 0; }
+    {
+        long f[4], fn = 0, s = ls, k = 0;
+        int col = 0;
+        f[0] = f[1] = f[2] = f[3] = 0;
+        phase[0] = 0;
+        while (s < le && col < 5) {
+            long t = s;
+            while (t < le && b[t] != '\t') t++;
+            if (col == 1) { for (k = 0; s + k < t && k < cap - 1; k++) phase[k] = b[s + k]; phase[k] = 0; }
+            else if (col == 0 || col == 2 || col == 3) { long v = 0; long q; for (q = s; q < t; q++) if (b[q] >= '0' && b[q] <= '9') v = v * 10 + (b[q] - '0'); f[fn++] = v; }
+            s = t + 1;
+            col++;
+        }
+        *pid = fn > 1 ? f[1] : 0;
+        *pgid = fn > 2 ? f[2] : 0;
+    }
+    free(b);
+    return phase[0] != 0;
 }
 
 int main(int argc, char **argv) {
@@ -136,7 +175,7 @@ int main(int argc, char **argv) {
     long idle_min = 10, now = 0, progress = -1, m, idle;
     int maxr = 3, i, has_final = 0, resumes;
     char last[256], logs[4400], ckp[4400], line[4400];
-    const char *status;
+    const char *status, *liveness = "-";
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--idle-min") && i + 1 < argc) idle_min = atol(argv[++i]);
         else if (tx_eqz(argv[i], "--final") && i + 1 < argc) final = argv[++i];
@@ -162,9 +201,22 @@ int main(int argc, char **argv) {
 
     read_checkpoint(dir, last, sizeof last, final, &has_final);
     resumes = resume_count(dir);
-    status = has_final ? "DONE" : (idle >= idle_min * 60 ? "STALLED" : "RUNNING");
-    sy_printf("CHAIN_WATCH\tstatus=%s\tlast_phase=%s\tidle_s=%ld\n", status, last, idle);
-    write_state(dir, status, last, idle, resumes, maxr, cmd);
+    /* W2:DIR/heartbeat.tsv(candidate-chain 每相位 start/end 追加:epoch<TAB>phase<TAB>pid<TAB>pgid<TAB>start|end)。
+       STALLED 前核末行 pid/pgid 是否仍存活:存活记 HUNG,不存活记 DEAD,无心跳 UNKNOWN;三者都算需续跑。 */
+    {
+        long hb_pid = 0, hb_pgid = 0;
+        char hb_phase[256];
+        int has_hb = read_heartbeat(dir, hb_phase, sizeof hb_phase, &hb_pid, &hb_pgid);
+        if (has_hb && tx_eqz(last, "-")) { long k; for (k = 0; hb_phase[k] && k < 255; k++) last[k] = hb_phase[k]; last[k] = 0; }
+        status = has_final ? "DONE" : (idle >= idle_min * 60 ? "STALLED" : "RUNNING");
+        if (tx_eqz(status, "STALLED") && has_hb)
+            liveness = (sy_getpgid((int)hb_pid) >= 0 || (hb_pgid > 0 && sy_getpgid((int)hb_pgid) >= 0)) ? "HUNG" : "DEAD";
+        else if (tx_eqz(status, "STALLED")) liveness = "UNKNOWN";
+        else liveness = "-";
+        if (has_hb) sy_printf("CHAIN_HEARTBEAT\tphase=%s\tpid=%ld\tpgid=%ld\n", hb_phase, hb_pid, hb_pgid);
+    }
+    sy_printf("CHAIN_WATCH\tstatus=%s\tlast_phase=%s\tidle_s=%ld\tliveness=%s\n", status, last, idle, liveness);
+    write_state(dir, status, last, idle, resumes, maxr, cmd, liveness);
     if (!tx_eqz(status, "STALLED")) return 0;
     if (!cmd) return 1;
     if (resumes >= maxr) {
@@ -177,7 +229,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(line, sizeof line, "RESUME\t%ld\t%d\t%d\t%s\n", now, resumes, rc, cmd)) die("fmt", "resume");
         append_line(dir, "chain-watch.tsv", line);
         sy_printf("CHAIN_RESUME\tn=%d/%d\trc=%d\n", resumes, maxr, rc);
-        write_state(dir, status, last, idle, resumes, maxr, cmd);
+        write_state(dir, status, last, idle, resumes, maxr, cmd, liveness);
     }
     return 1;
 }
