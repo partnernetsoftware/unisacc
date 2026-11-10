@@ -48,7 +48,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
 #pragma unisa use cxlib.releaseversion
-static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448];
+static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448], snapdir[4096];
 static RcCandidate cand;
 
 static void die(const char *s) { sy_eprintf("release-run: REFUSE %s\n", s); sy_exit(2); }
@@ -154,21 +154,84 @@ static void step_inject(void) {
     if (child(v, root)) die("version-inject");
     mark(5, "inject", "DONE");
 }
-/* 读 sources.tsv:单行 64 位十六进制(允许尾随换行)。 */
+/* 读 sources.tsv:可有 # 来源注释,再取一行 64 位十六进制。 */
 static void read_sources_sha(char sha[65]) {
-    char p[4400], b[128]; size_t n; long got; int f, i;
+    char p[4400]; size_t n; char *b; size_t i = 0, k;
     if (cx_fmt(p, sizeof p, "%s/sources.tsv", srcdir)) die("path");
-    f = sy_open_read(p);
-    if (f < 0) die("sources.tsv");
-    got = sy_read(f, b, sizeof b - 1);
-    if (sy_close(f) || got < 64) die("sources.tsv short");
-    b[got] = 0;
-    for (i = 0; i < 64; i++)
-        if (!((b[i] >= '0' && b[i] <= '9') || (b[i] >= 'a' && b[i] <= 'f'))) die("sources_sha256 hex");
-    for (i = 64; i < got; i++) if (b[i] != '\n' && b[i] != '\r') die("sources.tsv trailing");
-    for (i = 0; i < 65; i++) sha[i] = b[i];
-    sha[64] = 0;
-    (void)n;
+    b = cx_read(p, &n);
+    if (!b) die("sources.tsv");
+    while (i < n) {
+        if (b[i] == '#') { while (i < n && b[i] != '\n') i++; if (i < n) i++; continue; }
+        if (b[i] == '\n' || b[i] == '\r') { i++; continue; }
+        if (i + 64 > n) { free(b); die("sources.tsv short"); }
+        for (k = 0; k < 64; k++)
+            if (!((b[i + k] >= '0' && b[i + k] <= '9') || (b[i + k] >= 'a' && b[i + k] <= 'f'))) { free(b); die("sources_sha256 hex"); }
+        for (k = 0; k < 64; k++) sha[k] = b[i + k];
+        sha[64] = 0;
+        free(b);
+        return;
+    }
+    free(b);
+    die("sources.tsv empty");
+}
+static int sources_has_origin_comment(void) {
+    char p[4400]; size_t n, i; char *b;
+    if (cx_fmt(p, sizeof p, "%s/sources.tsv", srcdir)) return 0;
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    for (i = 0; i < n; i++) {
+        if (b[i] == '#') { free(b); return 1; }
+        if (b[i] != ' ' && b[i] != '\t' && b[i] != '\n' && b[i] != '\r') break;
+    }
+    free(b);
+    return 0;
+}
+static void require_sources_sid(void) {
+    char file_sid[65], live[65], snap[4400], helper[4400], whyb[256];
+    const char *e;
+    np_result r = {0};
+    int i;
+    read_sources_sha(file_sid);
+    if (snapdir[0]) {
+        if (cx_fmt(snap, sizeof snap, "%s", snapdir)) die("path");
+    } else if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-REV10", root)) die("path");
+    if (sy_exists(snap) != 1) {
+        if (!snapdir[0] && !(cx_fmt(snap, sizeof snap, "%s/out/release-snap-%s", root, cand.commit) || sy_exists(snap) == 1)) {
+            /* fall through */
+        }
+        if (sy_exists(snap) != 1) {
+            if (!sources_has_origin_comment()) {
+                sy_eprintf("release-run: REFUSE sources-tsv-unverified-without-origin-comment\n");
+                sy_exit(2);
+            }
+            emit("SOURCES_SID", "UNVERIFIED", file_sid);
+            return;
+        }
+    }
+    e = sy_env("UNISACC_IDENT_HELPER");
+    if (e && e[0]) {
+        if (sy_realpath((char *)e, helper, sizeof helper) < 0) die("identity-helper");
+    } else {
+        if (cx_fmt(helper, sizeof helper, "%s/ctx/identity-helper", root)) die("path");
+        if (sy_exists(helper) != 1) {
+            if (cx_fmt(helper, sizeof helper, "%s/out/epoch-context-01/identity-helper", root)) die("path");
+            if (sy_exists(helper) != 1) die("identity-helper missing");
+        }
+    }
+    { char *v[] = { helper, snap, 0 };
+      if (np_run(v, snap, 0, 8, &r, whyb, sizeof whyb) || r.rc || r.outn < 64) {
+          np_free(&r);
+          die("identity-helper sid");
+      }
+      for (i = 0; i < 64; i++) live[i] = r.out[i];
+      live[64] = 0;
+      np_free(&r);
+    }
+    if (!tx_eqz(file_sid, live)) {
+        sy_eprintf("release-run: REFUSE sources-sid-mismatch file=%s live=%s snap=%s helper=%s\n", file_sid, live, snap, helper);
+        sy_exit(2);
+    }
+    emit("SOURCES_SID", "VERIFIED", file_sid);
 }
 static void write_build_json(const char *path, long bytes, const char *sources_sha, const char *digest) {
     char text[1024];
@@ -313,8 +376,13 @@ int main(int argc, char **argv) {
         emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
         return 0;
     }
-    if (argc == 6 && tx_eqz(argv[1], "--pack")) {
+    if ((argc == 6 || argc == 8) && tx_eqz(argv[1], "--pack")) {
         char root_tsv[4400], vr[24], vt[24];
+        snapdir[0] = 0;
+        if (argc == 8) {
+            if (!tx_eqz(argv[6], "--snap")) die("usage --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR [--snap DIR]");
+            if (sy_realpath(argv[7], snapdir, sizeof snapdir) < 0) die("snap");
+        }
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
         if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
         if (sy_realpath(argv[4], srcdir, sizeof srcdir) < 0) die("src dir");
@@ -331,6 +399,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
         if (rcand_load(table, &cand, why, sizeof why)) die(why);
         need(srcdir, "sources.tsv");
+        require_sources_sid();
         emit("MODE", "PACK", cand.tag);
         step_ape_pack();
         step_inject();
@@ -341,6 +410,6 @@ int main(int argc, char **argv) {
         emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
         return 0;
     }
-    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR");
+    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR [--snap DIR]");
     return 2;
 }
