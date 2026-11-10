@@ -25,6 +25,8 @@
 #define NKIND 17
 static const char *kinds[NKIND] = {"freeze", "snap", "tool", "ctx", "wave", "compare", "route", "p4", "slice-phase",
                                    "fixedpoint", "kernel", "pack", "install", "s9", "gen", "tbl", "net"};
+#define NDIM 5
+static const char *dims[NDIM] = {"jobs", "units", "targets", "stages", "none"};
 typedef struct { char id[128], kind[32], target[32]; char *deps; int line; int *adj, nadj; int color; } Node;
 static Node nodes[MAXN]; static int nn;
 static long fails, edges, cycles, mism, hard;
@@ -60,12 +62,12 @@ static void load_graph(void) {
         while (q < n && b[q] != '\n') q++;
         if (q == p || b[p] == '#') { p = q + 1; continue; }
         if (!header) {
-            static const char *H = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\troot_dependent";
+            static const char *H = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\troot_dependent\tsplit_dim\tsplit_min";
             if (!tx_same(b + p, q - p, H, tx_len(H, 256)))
-                { fail((int)lineno, "header", "expected the 12 named columns"); exit(1); }
+                { fail((int)lineno, "header", "expected the 14 named columns"); exit(1); }
             header = 1; p = q + 1; continue;
         }
-        if (tx_fields(b + p, q - p, '\t') != 12) { fail((int)lineno, "columns", "row must have 12 tab-separated fields"); p = q + 1; continue; }
+        if (tx_fields(b + p, q - p, '\t') != 14) { fail((int)lineno, "columns", "row must have 14 tab-separated fields"); p = q + 1; continue; }
         if (nn == MAXN) { fail((int)lineno, "capacity", "more than MAXN nodes"); exit(2); }
         tx_field(b + p, q - p, '\t', 0, &off, &len); tx_copy(nodes[nn].id, 128, b + p + off, len);
         if (len == 0 || find(b + p + off, len) >= 0) fail((int)lineno, "node_id", len ? "duplicate node_id" : "empty node_id");
@@ -81,6 +83,17 @@ static void load_graph(void) {
             static const char *prod[10] = {"tool", "gen", "tbl", "net", "route", "p4", "fixedpoint", "kernel", "pack", "install"}; int k;
             for (k = 0; k < 10; k++) if (tx_eqz(nodes[nn].kind, prod[k])) { fail((int)lineno, "root_dependent", "product node marked yes"); break; }
         } else if (!tx_same(b + p + off, len, "no", 2)) { char d[64]; tx_copy(d, 64, b + p + off, len); fail((int)lineno, "root_dependent", d); }
+        { long bv = 0, k2, noff, nlen, doff, dlen, moff, mlen; int d2;
+          tx_field(b + p, q - p, '\t', 8, &off, &len);
+          for (k2 = 0; k2 < len && b[p + off + k2] >= '0' && b[p + off + k2] <= '9'; k2++) bv = bv * 10 + (b[p + off + k2] - '0');
+          tx_field(b + p, q - p, '\t', 10, &noff, &nlen);
+          tx_field(b + p, q - p, '\t', 12, &doff, &dlen);
+          for (d2 = 0; d2 < NDIM; d2++) if (tx_same(b + p + doff, dlen, dims[d2], tx_len(dims[d2], 16))) break;
+          if (d2 == NDIM) { char d[64]; tx_copy(d, 64, b + p + doff, dlen); fail((int)lineno, "split_dim", d); }
+          else if (d2 == NDIM - 1 && bv >= 45 && tx_find(b + p + noff, nlen, "split:none ", 11) < 0) fail((int)lineno, "split_dim", "budget_s>=45 and split_dim none needs 'split:none <reason>' in note");
+          tx_field(b + p, q - p, '\t', 13, &moff, &mlen);
+          { long mv = 0, k3; for (k3 = 0; k3 < mlen && b[p + moff + k3] >= '0' && b[p + moff + k3] <= '9'; k3++) mv = mv * 10 + (b[p + moff + k3] - '0');
+            if (mlen < 1 || k3 != mlen || mv < 1) { char d[64]; tx_copy(d, 64, b + p + moff, mlen); fail((int)lineno, "split_min", d); } } }
         nodes[nn].line = (int)lineno; nn++;
         p = q + 1;
     }

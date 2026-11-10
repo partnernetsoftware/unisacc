@@ -1,0 +1,57 @@
+/* cxlib.rechunk -- adaptive re-chunking of one splittable graph node (G2 prerequisite).
+ *
+ * A node of build/graph.tsv declares split_dim (jobs/units/targets/stages/none) and split_min (the
+ * smallest chunk).  The scheduler runs the node in waves of COUNT items starting at item FIRST and
+ * asks this library for the next COUNT from the wall time of the wave it just ran.  Pure integer
+ * arithmetic, no I/O, no clock: callers measure wall_ms and own the checkpoint file.
+ *
+ *   rc_next(total, first, prev_count, prev_wall_ms, budget_s, min, max)  -> next count (>= min, <= remaining)
+ *   rc_first(first, count)      -> cursor after a finished wave (first + count)
+ *   rc_tag(buf, cap, phase, first, count)  -> "jobs-PHASE-FIRST-COUNT" (the checkpoint tag of
+ *                                   tools/candidate-chain.cx wave_phase; 0 on success)
+ *   rc_over(prev_wall_ms, budget_s)  -> 1 when the wave exceeded the budget
+ *   rc_stuck(prev_count, prev_wall_ms, budget_s, min) -> 1 when over budget at the granularity floor
+ *
+ * Rules (the budget itself is never relaxed; it is only an input):
+ *   target band of one wave = 45..75 % of budget; prev_wall_ms > budget -> count halves;
+ *   prev_wall_ms > 75 % -> count shrinks proportionally toward 60 % (at least by one);
+ *   prev_wall_ms < 40 % -> count grows proportionally toward 60 % (at least by one), capped at max;
+ *   40..75 % -> unchanged.  The result is clamped to [min, max] and to total - first.
+ *   prev_count <= 0 (no previous wave) -> the initial count min(max, total - first), at least min.
+ * Over budget with count already at min cannot shrink: rc_next returns min and rc_stuck reports it
+ * so the caller fails loudly instead of relaxing the budget.
+ * No exported objects (CXIF v0). */
+#pragma unisa module rechunk
+
+long rc_over(long prev_wall_ms, long budget_s) { return prev_wall_ms > budget_s * 1000; }
+long rc_stuck(long prev_count, long prev_wall_ms, long budget_s, long min) {
+    return prev_count <= min && rc_over(prev_wall_ms, budget_s);
+}
+long rc_first(long first, long count) { return first + count; }
+static long rc_clamp(long v, long first, long total, long min, long max) {
+    long rem = total - first;
+    if (v > max) v = max;
+    if (v < min) v = min;
+    if (v > rem) v = rem;
+    return v < 0 ? 0 : v;
+}
+long rc_next(long total, long first, long prev_count, long prev_wall_ms, long budget_s, long min, long max) {
+    long ms = budget_s * 1000, c, want;
+    if (min < 1) min = 1;
+    if (max < min) max = min;
+    if (first >= total) return 0;
+    if (prev_count <= 0) return rc_clamp(max, first, total, min, max);
+    c = prev_count;
+    if (prev_wall_ms > ms) c = c / 2;                                   /* over budget: halve, never relax */
+    else if (prev_wall_ms * 100 > ms * 75) {                            /* above the band: shrink toward 60 % */
+        want = prev_wall_ms > 0 ? c * (ms * 60 / 100) / prev_wall_ms : c;
+        c = want < c ? want : c - 1;
+    } else if (prev_wall_ms * 100 < ms * 40) {                          /* below 40 %: grow toward 60 % */
+        want = prev_wall_ms > 0 ? c * (ms * 60 / 100) / prev_wall_ms : c * 2;
+        c = want > c ? want : c + 1;
+    }
+    return rc_clamp(c, first, total, min, max);
+}
+int rc_tag(char *buf, long cap, const char *phase, long first, long count) {
+    return cx_fmt(buf, cap, "jobs-%s-%ld-%ld", phase, first, count);
+}

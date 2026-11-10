@@ -1,0 +1,77 @@
+/* tools/check-rechunk.cx -- fixtures for tools/cxlib/rechunk.cx (pure arithmetic, no I/O).
+ *
+ *   sh ./unisacc.com tools/check-rechunk.cx
+ *
+ * Fixtures: initial wave, in-band unchanged, over budget halves, above band shrinks, below 40 %
+ * grows, growth capped at max, granularity floor + stuck report, budget never relaxed (the same
+ * wall is judged against the same budget; a smaller budget never yields a larger count), tail
+ * clamp to the remaining items, finished node returns 0, checkpoint tag is jobs-PHASE-FIRST-COUNT,
+ * and a simulated run (cost model 1.5 s/item + 4 s fixed, budget 60 s) covers every item exactly
+ * once with every wave inside the budget after the first adaptation.
+ * Prints CHECK_RECHUNK<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.rechunk
+
+static int passed, failed;
+static void ck(int ok, const char *name, long got, long want) {
+    if (ok) { printf("PASS\t%s\n", name); passed++; }
+    else { printf("FAIL\t%s\tgot=%ld\twant=%ld\n", name, got, want); failed++; }
+}
+static void eq(const char *name, long got, long want) { ck(got == want, name, got, want); }
+
+int main(void) {
+    long v; char tag[80];
+    /* total=131 first=0 budget=60 s min=1 max=16 */
+    eq("initial-wave", rc_next(131, 0, 0, 0, 60, 1, 16), 16);
+    eq("initial-wave-small-total", rc_next(5, 0, 0, 0, 60, 1, 16), 5);
+    eq("in-band-unchanged", rc_next(131, 8, 8, 36000, 60, 1, 16), 8);              /* 60 % of budget */
+    eq("band-lower-edge-unchanged", rc_next(131, 8, 8, 27000, 60, 1, 16), 8);      /* 45 % */
+    eq("dead-zone-40-45-unchanged", rc_next(131, 8, 8, 25000, 60, 1, 16), 8);      /* 41.7 % */
+    eq("over-budget-halves", rc_next(131, 16, 16, 61000, 60, 1, 16), 8);
+    eq("over-budget-odd-halves", rc_next(131, 9, 9, 75000, 60, 1, 16), 4);
+    v = rc_next(131, 16, 16, 48000, 60, 1, 16);                                    /* 80 % -> shrink toward 60 % */
+    ck(v < 16 && v >= 12, "above-band-shrinks", v, 12);
+    v = rc_next(131, 4, 4, 6000, 60, 1, 16);                                       /* 10 % -> grow toward 60 % */
+    ck(v > 4 && v <= 16, "below-40-grows", v, 16);
+    eq("growth-capped-at-max", rc_next(131, 8, 8, 1000, 60, 1, 12), 12);
+    eq("zero-wall-grows-by-doubling-capped", rc_next(131, 4, 4, 0, 60, 1, 16), 8);
+    eq("granularity-floor-on-halving", rc_next(131, 2, 2, 90000, 60, 2, 16), 2);
+    eq("granularity-floor-count1", rc_next(131, 5, 1, 90000, 60, 1, 16), 1);
+    ck(rc_stuck(1, 90000, 60, 1) == 1, "stuck-at-floor-over-budget", rc_stuck(1, 90000, 60, 1), 1);
+    ck(rc_stuck(4, 90000, 60, 1) == 0, "not-stuck-above-floor", rc_stuck(4, 90000, 60, 1), 0);
+    ck(rc_stuck(1, 30000, 60, 1) == 0, "not-stuck-within-budget", rc_stuck(1, 30000, 60, 1), 0);
+    /* budget never relaxed: same wall, smaller budget never gives a larger count */
+    ck(rc_next(131, 8, 8, 40000, 45, 1, 16) <= rc_next(131, 8, 8, 40000, 60, 1, 16), "smaller-budget-not-larger",
+       rc_next(131, 8, 8, 40000, 45, 1, 16), rc_next(131, 8, 8, 40000, 60, 1, 16));
+    eq("budget-45-wall-46-halves", rc_next(131, 8, 8, 46000, 45, 1, 16), 4);
+    eq("tail-clamped-to-remaining", rc_next(131, 128, 8, 36000, 60, 1, 16), 3);
+    eq("finished-returns-zero", rc_next(131, 131, 8, 36000, 60, 1, 16), 0);
+    eq("cursor-advances", rc_first(16, 8), 24);
+    ck(rc_tag(tag, sizeof tag, "gen", 8, 16) == 0 && tx_eqz(tag, "jobs-gen-8-16"), "tag-format-jobs-PHASE-first-count", 0, 0);
+    /* simulated run: 131 items, cost = 4 s + 1.5 s per item, budget 60 s, min 1, max 16 */
+    { long total = 131, first = 0, count = 0, wall = 0, covered = 0, waves = 0, over_after_first = 0;
+      while (first < total) {
+          count = rc_next(total, first, count, wall, 60, 1, 16);
+          if (count < 1) break;
+          wall = 4000 + 1500 * count;
+          if (waves > 0 && wall > 60000) over_after_first++;
+          covered += count; first = rc_first(first, count); waves++;
+      }
+      ck(covered == 131 && first == 131, "simulation-covers-every-item-once", covered, 131);
+      ck(over_after_first == 0, "simulation-no-wave-over-budget", over_after_first, 0);
+      ck(waves <= 20, "simulation-bounded-waves", waves, 20); }
+    /* simulated slow node (cost 20 s per item): must settle at 2 per wave, never over budget after adapting */
+    { long total = 12, first = 0, count = 0, wall = 0, covered = 0, over = 0, w = 0;
+      while (first < total && w++ < 40) {
+          count = rc_next(total, first, count, wall, 60, 1, 8);
+          if (count < 1) break;
+          wall = 20000 * count;
+          if (wall > 60000) over++;
+          covered += count; first = rc_first(first, count);
+      }
+      ck(covered == 12 && over <= 2, "simulation-slow-node-converges", over, 2); }
+    printf("CHECK_RECHUNK\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

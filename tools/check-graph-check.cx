@@ -27,19 +27,19 @@ static int put(const char *name, const char *body, char *path, int cap) {
     if (sy_write_all(fd, body, tx_len(body, 1 << 20))) { sy_close(fd); return -1; }
     return sy_close(fd);
 }
-static const char *HDR = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\troot_dependent\n";
+static const char *HDR = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\troot_dependent\tsplit_dim\tsplit_min\n";
 /* six slice rows in the canonical order, each depending on PREV */
 static const char *SIX =
-    "freeze\tfreeze\tshared\t-\tc\ti\to\t1\t60\te\t-\tyes\n"
-    "s.lnx-x86_64\tslice-phase\tlnx-x86_64\tfreeze\tc\ti\to\t1\t45\te\t-\tyes\n"
-    "s.lnx-arm64\tslice-phase\tlnx-arm64\tfreeze\tc\ti\to\t1\t45\te\t-\tno\n"
-    "s.osx-x86_64\tslice-phase\tosx-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\n"
-    "s.osx-arm64\tslice-phase\tosx-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\n"
-    "s.win-x86_64\tslice-phase\twin-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\n"
-    "s.win-arm64\tslice-phase\twin-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\n"
-    "job:a\tgen\tshared\tfreeze\tc\ti\to\t1\t40\te\t-\tno\n"
-    "job:b\ttbl\tshared\tjob:a\tc\ti\to\t1\t40\te\t-\tno\n"
-    "pack\tpack\tall\ts.*,job:*\tc\ti\to\t1\t60\te\t-\tno\n";
+    "freeze\tfreeze\tshared\t-\tc\ti\to\t1\t60\te\tsplit:none single process\tyes\tnone\t1\n"
+    "s.lnx-x86_64\tslice-phase\tlnx-x86_64\tfreeze\tc\ti\to\t1\t45\te\tsplit:none single process\tyes\tnone\t1\n"
+    "s.lnx-arm64\tslice-phase\tlnx-arm64\tfreeze\tc\ti\to\t1\t45\te\tsplit:none single process\tno\tnone\t1\n"
+    "s.osx-x86_64\tslice-phase\tosx-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\tstages\t1\n"
+    "s.osx-arm64\tslice-phase\tosx-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\tstages\t1\n"
+    "s.win-x86_64\tslice-phase\twin-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\tstages\t1\n"
+    "s.win-arm64\tslice-phase\twin-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\tno\tstages\t1\n"
+    "job:a\tgen\tshared\tfreeze\tc\ti\to\t1\t40\te\t-\tno\tjobs\t1\n"
+    "job:b\ttbl\tshared\tjob:a\tc\ti\to\t1\t40\te\t-\tno\tjobs\t1\n"
+    "pack\tpack\tall\ts.*,job:*\tc\ti\to\t1\t60\te\tsplit:none single process\tno\tnone\t1\n";
 static const char *CHAIN_OK =
     "static const char *cs_target[6] = {\"lnx-x86_64\", \"lnx-arm64\", \"osx-x86_64\", \"osx-arm64\", \"win-x86_64\", \"win-arm64\"};\n"
     "static const char *cs_fp_slices[6] = {\"lnx-x86_64/candidate\", \"lnx-arm64/candidate\",\n"
@@ -98,7 +98,7 @@ int main(void) {
       if (out) mm_free(out); sy_unlink(p); }
     /* 2 cycle: freeze depends on pack */
     k = tx_chr(SIX, tx_len(SIX, 4096), '\n') + 1;   /* SIX without its first (freeze) row */
-    if (cx_fmt(g, sizeof g, "%sfreeze\tfreeze\tshared\tpack\tc\ti\to\t1\t60\te\t-\tyes\n%s", HDR, SIX + k)) return 2;
+    if (cx_fmt(g, sizeof g, "%sfreeze\tfreeze\tshared\tpack\tc\ti\to\t1\t60\te\tsplit:none single process\tyes\tnone\t1\n%s", HDR, SIX + k)) return 2;
     expect("cycle.tsv", g, chain_ok, 1, "FAIL\tstructure\t", 0);
     { char *out = 0; size_t n = 0; char p[4400]; int rc;
       if (put("cycle2.tsv", g, p, sizeof p)) return 2;
@@ -107,23 +107,32 @@ int main(void) {
       else { printf("FAIL\tcycle-row\t%s\n", out ? out : "(none)"); failed++; }
       if (out) mm_free(out); sy_unlink(p); }
     /* 3 dangling */
-    if (cx_fmt(g, sizeof g, "%s%sorphan\ttool\tshared\tnope,job:zz*\tc\ti\to\t1\t60\te\t-\tno\n", HDR, SIX)) return 2;
+    if (cx_fmt(g, sizeof g, "%s%sorphan\ttool\tshared\tnope,job:zz*\tc\ti\to\t1\t60\te\tsplit:none x\tno\tnone\t1\n", HDR, SIX)) return 2;
     expect("dangling.tsv", g, chain_ok, 1, "\tdepends_on\tnope", 0);
     /* 4 budget 61 */
-    if (cx_fmt(g, sizeof g, "%s%sslow\ttool\tshared\tfreeze\tc\ti\to\t1\t61\te\t-\tno\n", HDR, SIX)) return 2;
+    if (cx_fmt(g, sizeof g, "%s%sslow\ttool\tshared\tfreeze\tc\ti\to\t1\t61\te\tsplit:none x\tno\tnone\t1\n", HDR, SIX)) return 2;
     expect("budget61.tsv", g, chain_ok, 1, "\tbudget_s\t61", 0);
     /* 5 unknown kind */
-    if (cx_fmt(g, sizeof g, "%s%sodd\tmagic\tshared\tfreeze\tc\ti\to\t1\t60\te\t-\tno\n", HDR, SIX)) return 2;
+    if (cx_fmt(g, sizeof g, "%s%sodd\tmagic\tshared\tfreeze\tc\ti\to\t1\t60\te\tsplit:none x\tno\tnone\t1\n", HDR, SIX)) return 2;
     expect("kind.tsv", g, chain_ok, 1, "\tkind\tmagic", 0);
     /* 5b negative control: a product node (kernel) marked root_dependent=yes */
-    if (cx_fmt(g, sizeof g, "%s%sk\tkernel\tshared\tfreeze\tc\ti\to\t1\t60\te\t-\tyes\n", HDR, SIX)) return 2;
+    if (cx_fmt(g, sizeof g, "%s%sk\tkernel\tshared\tfreeze\tc\ti\to\t1\t60\te\tsplit:none x\tyes\tnone\t1\n", HDR, SIX)) return 2;
     expect("rootdep-product.tsv", g, chain_ok, 1, "\troot_dependent\tproduct node marked yes", 0);
     /* 5c root_dependent outside yes|no */
-    if (cx_fmt(g, sizeof g, "%s%sk\tkernel\tshared\tfreeze\tc\ti\to\t1\t60\te\t-\tmaybe\n", HDR, SIX)) return 2;
+    if (cx_fmt(g, sizeof g, "%s%sk\tkernel\tshared\tfreeze\tc\ti\to\t1\t60\te\tsplit:none x\tmaybe\tnone\t1\n", HDR, SIX)) return 2;
     expect("rootdep-value.tsv", g, chain_ok, 1, "\troot_dependent\tmaybe", 0);
     /* 6 order mismatch in cs_target only */
     if (cx_fmt(g, sizeof g, "%s%s", HDR, SIX)) return 2;
     expect("order.tsv", g, chain_bad, 1, "ORDER_MISMATCH\t", 1);
+    /* 6b split_dim enumeration, budget>=45 none needs a reason, split_min integer >= 1 */
+    if (cx_fmt(g, sizeof g, "%s%sbad\ttool\tshared\tfreeze\tc\ti\to\t1\t30\te\t-\tno\tslices\t1\n", HDR, SIX)) return 2;
+    expect("dim.tsv", g, chain_ok, 1, "\tsplit_dim\tslices", 0);
+    if (cx_fmt(g, sizeof g, "%s%sbad\ttool\tshared\tfreeze\tc\ti\to\t1\t45\te\tno reason\tno\tnone\t1\n", HDR, SIX)) return 2;
+    expect("none-noreason.tsv", g, chain_ok, 1, "\tsplit_dim\tbudget_s>=45", 0);
+    if (cx_fmt(g, sizeof g, "%s%sok\ttool\tshared\tfreeze\tc\ti\to\t1\t44\te\tno reason needed under 45\tno\tnone\t1\n", HDR, SIX)) return 2;
+    expect("none-under45.tsv", g, chain_ok, 0, 0, 0);
+    if (cx_fmt(g, sizeof g, "%s%sbad\ttool\tshared\tfreeze\tc\ti\to\t1\t30\te\t-\tno\tjobs\t0\n", HDR, SIX)) return 2;
+    expect("min0.tsv", g, chain_ok, 1, "\tsplit_min\t0", 0);
     /* 7 real graph: structure must pass; order/hardwire recorded */
     { char *out = 0; size_t n = 0; int rc;
       rc = run("build/graph.tsv", "tools/chain-step.cx", "build/hardwire.tsv", &out, &n);
