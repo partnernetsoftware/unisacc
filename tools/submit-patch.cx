@@ -105,6 +105,49 @@ static int added_new_tools_cx(const char *names) {
     }
     return 0;
 }
+static int sources_has(const char *path) {
+    size_t n = 0, pn;
+    char *b, *q;
+    b = cx_read("tests/tools-compile-sources.tsv", &n);
+    if (!b) return 0;
+    pn = strlen(path);
+    q = b;
+    while (*q) {
+        char *nl = strchr(q, '\n');
+        size_t L = nl ? (size_t)(nl - q) : strlen(q);
+        if (L > pn && !memcmp(q, path, pn) && q[pn] == '\t') { free(b); return 1; }
+        if (!nl) break;
+        q = nl + 1;
+    }
+    free(b);
+    return 0;
+}
+static void check_new_cx_sources(const char *names) {
+    const char *q = names;
+    while (*q) {
+        char st[8], path[4400];
+        const char *nl = strchr(q, '\n');
+        size_t L = nl ? (size_t)(nl - q) : strlen(q);
+        char line[4400];
+        if (L >= sizeof line) L = sizeof line - 1;
+        if (mm_copy(line, sizeof line, q, (long)L)) die("copy", 0);
+        line[L] = 0;
+        if (parse_added_line(line, st, path, sizeof path) && st[0] == 'A' && is_tools_cx(path) && !sources_has(path))
+            refuse("missing-compile-source", path);
+        if (!nl) break;
+        q = nl + 1;
+    }
+}
+static void check_compile_shards(void) {
+    char com[4400], *out = 0;
+    int rc;
+    char *v[8];
+    if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com")) die("fmt", 0);
+    v[0] = "sh"; v[1] = com; v[2] = "tests/tools-compile.cx"; v[3] = "--"; v[4] = "--shards"; v[5] = root; v[6] = 0;
+    runv(v, &out, &rc, 55);
+    if (rc) { free(out); refuse("compile-shards", "tools-compile.cx --shards"); }
+    free(out);
+}
 
 static int own_id_ok(const char *line, const char *id) {
     size_t n = strlen(id);
@@ -215,6 +258,8 @@ int main(int argc, char **argv) {
         (!status_has(names, "tests/batches.tsv") || !status_has(names, "tests/coverage.tsv"))) {
         free(diff); free(names); refuse("missing-registry", "tests/batches.tsv+coverage.tsv");
     }
+    check_new_cx_sources(names);
+    if (added_new_tools_cx(names)) check_compile_shards();
     if ((strstr(diff, "tests/batches.tsv") || strstr(diff, "tests/coverage.tsv")) && !*own) {
         free(diff); free(names); refuse("need-own-id", 0);
     }

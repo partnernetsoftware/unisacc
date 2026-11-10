@@ -34,7 +34,7 @@ static int sh(const char *cmd, char *out, int cap) {
 }
 
 int main(void) {
-    char dir[4400], cmd[2200], out[8000];
+    char dir[4400], cmd[3200], out[8000], sp[4400];
     int rc;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     if (cx_fmt(dir, sizeof dir, "%s/submit-patch-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
@@ -43,9 +43,10 @@ int main(void) {
         "printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
         "printf 'int main(void){return 1;}\\n' > a.c", dir)) die("fmt");
     ck(sh(cmd, out, sizeof out) == 0, "seed-repo");
-    if (cx_fmt(cmd, sizeof cmd,
-        "cd '%s' && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/p.patch' 2>&1", dir, root, root, dir))
-        die("fmt");
+    if (cx_fmt(sp, sizeof sp, "%s/submit-patch-bin", sy_tmpdir()) ||
+        cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -o '%s'", root, root, sp)) die("fmt");
+    ck(sh(cmd, out, sizeof out) == 0, "compile-sp");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && GIT_DIR=.git '%s' '%s/p.patch' 2>&1", dir, sp, dir)) die("fmt");
     rc = sh(cmd, out, sizeof out);
     ck(rc == 0 && strstr(out, "SUBMIT_PATCH\t") && strstr(out, "\tok"), "ok-line");
     ck(strstr(out, "files=1") != 0, "files-1");
@@ -55,9 +56,8 @@ int main(void) {
         b = cx_read(p, &n);
         ck(b && n && strstr(b, "\nindex "), "has-index");
         free(b);
-        /* 覆盖拒绝: 先占名再提交 */
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && printf 'x\\n' > a.c && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/p.patch' 2>&1", dir, root, root, dir))
+            "cd '%s' && printf 'x\\n' > a.c && GIT_DIR=.git '%s' '%s/p.patch' 2>&1", dir, sp, dir))
             die("fmt");
         rc = sh(cmd, out, sizeof out);
         ck(rc == 0 && strstr(out, "p.patch.1"), "suffix-not-overwrite");
@@ -71,10 +71,47 @@ int main(void) {
             "printf 'int main(void){return 0;}\\n' > tools/n3neg.cx", d2)) die("fmt");
         ck(sh(cmd, out, sizeof out) == 0, "neg-seed");
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/neg.patch' 2>&1", d2, root, root, d2))
+            "cd '%s' && GIT_DIR=.git '%s' '%s/neg.patch' 2>&1", d2, sp, d2))
             die("fmt");
         rc = sh(cmd, out, sizeof out);
         ck(rc == 1 && strstr(out, "missing-registry"), "neg-missing-registry");
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", d2)) die("fmt");
+        sh(cmd, out, sizeof out);
+    }
+    {
+        char d2[4400];
+        if (cx_fmt(d2, sizeof d2, "%s/srcneg-XXXXXX", sy_tmpdir()) || !mkdtemp(d2)) die("tmpdir");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+            "mkdir -p tools tests && printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
+            "printf 'int main(void){return 0;}\\n' > tools/n4neg.cx && "
+            "printf 'n4neg\\tIMPLEMENTED\\tinterfaces\\t-\\tSOURCE\\tlnx/x86_64\\t55\\t-\\t-\\t-\\t-\\trc0:X\\tproduct\\tcommit\\n' > tests/batches.tsv && "
+            "printf 'interfaces.n4neg\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\ttools/n4neg.cx\\n' > tests/coverage.tsv", d2)) die("fmt");
+        ck(sh(cmd, out, sizeof out) == 0, "srcneg-seed");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && GIT_DIR=.git '%s' '%s/neg.patch' n4neg 2>&1", d2, sp, d2))
+            die("fmt");
+        rc = sh(cmd, out, sizeof out);
+        ck(rc == 1 && strstr(out, "missing-compile-source"), "neg-missing-compile-source");
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", d2)) die("fmt");
+        sh(cmd, out, sizeof out);
+    }
+    {
+        char d2[4400];
+        if (cx_fmt(d2, sizeof d2, "%s/shneg-XXXXXX", sy_tmpdir()) || !mkdtemp(d2)) die("tmpdir");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+            "mkdir -p tools tests && printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
+            "printf 'int main(void){return 0;}\\n' > tools/n5neg.cx && "
+            "printf 'tools/n5neg.cx\\tregular\\n' > tests/tools-compile-sources.tsv && "
+            "printf 'n5neg\\tIMPLEMENTED\\tinterfaces\\t-\\tSOURCE\\tlnx/x86_64\\t55\\t-\\t-\\t-\\t-\\trc0:X\\tproduct\\tcommit\\n' > tests/batches.tsv && "
+            "printf 'interfaces.n5neg\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\ttools/n5neg.cx\\n' > tests/coverage.tsv", d2)) die("fmt");
+        ck(sh(cmd, out, sizeof out) == 0, "shneg-seed");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && GIT_DIR=.git '%s' '%s/neg.patch' n5neg 2>&1", d2, sp, d2))
+            die("fmt");
+        rc = sh(cmd, out, sizeof out);
+        ck(rc == 1 && strstr(out, "compile-shards"), "neg-compile-shards");
         if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", d2)) die("fmt");
         sh(cmd, out, sizeof out);
     }
