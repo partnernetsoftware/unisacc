@@ -138,8 +138,18 @@ static char *cs_load(const char *p, long *n) {
     if (sz > 0) { fd = sy_open(p, O_RDONLY, 0); if (fd < 0 || sy_read_full(fd, b, sz) || sy_close(fd)) { free(b); cs_die("read", p); } }
     b[sz] = 0; if (n) *n = sz; (void)at; return b;
 }
-static void cs_save(const char *p, const char *b, long n) { int fd = sy_open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0 || sy_write_all(fd, b, n) || sy_close(fd)) cs_die("write", p); }
-static void cs_copy(const char *from, const char *to) { long n = 0; char *b = cs_load(from, &n); if (!b) cs_die("missing input", from); cs_save(to, b, n); free(b); }
+static void cs_save(const char *p, const char *b, long n) {
+    char tmp[4400]; int fd;
+    if (cx_fmt(tmp, sizeof tmp, "%s.tmp", p)) cs_die("path", p);
+    fd = sy_open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || sy_write_all(fd, b, n) || sy_close(fd)) cs_die("write", p);
+    if (sy_rename(tmp, p)) cs_die("rename", p);
+}
+static void cs_copy(const char *from, const char *to) {
+    long n = 0; char *b;
+    if (sy_exists(to) == 1) cs_die("REFUSE backup exists", to);
+    b = cs_load(from, &n); if (!b) cs_die("missing input", from); cs_save(to, b, n); free(b);
+}
 /* 有界追加：dst[*at..] 写入 n 字节，越界即失败。用它取代 strcat/strcpy/memcpy，
    两处棘轮（cxapis 的 strcat/strcpy、cxtrunc 的丢弃拷贝）因此都是 0。 */
 static void cs_put(char *dst, long cap, long *at, const char *src, long n) {
@@ -590,45 +600,97 @@ static void cs_source(const char *s, char out[65]) {
     for (k = 0; k < 64; k++) { if (!((text[k] >= '0' && text[k] <= '9') || (text[k] >= 'a' && text[k] <= 'f'))) cs_die("REFUSE source SID wire", s); out[k] = text[k]; }
     out[64] = 0; free(text);
 }
+static void cs_fp_idtext(char *id, long cap, long *at, const char *rev, const char *phase, const char *target,
+    const char *source, const char *ph, const char *ch, const char *ah) {
+    *at = 0;
+    cs_puts(id, cap, at, "identity_version\t4\nrev\t"); cs_puts(id, cap, at, rev);
+    cs_puts(id, cap, at, "\nphase\t"); cs_puts(id, cap, at, phase);
+    cs_puts(id, cap, at, "\ntarget\t"); cs_puts(id, cap, at, target);
+    cs_puts(id, cap, at, "\nsource_sha\t"); cs_puts(id, cap, at, source);
+    cs_puts(id, cap, at, "\np3_sha\t"); cs_puts(id, cap, at, ph);
+    cs_puts(id, cap, at, "\nconstructor_sha\t"); cs_puts(id, cap, at, ch);
+    cs_puts(id, cap, at, "\nartifact_sha\t"); cs_puts(id, cap, at, ah);
+    cs_puts(id, cap, at, "\n");
+}
+/* release-build.cx is invoked as the slice driver (cs_slice -> cs_release),
+   but SID (cs_source of snapshot S) already hashes that file. --object/--link-only
+   are argv to the same snapshot tool; they do not add bytes outside SID/pkg/ctor.
+   release_sha is therefore diagnostic, not compared. */
 static void cs_fp_record(const char *s, const char *rev, const char *pkg, const char *ctor,
-                         const char *artifact, const char *receipt, int reuse, long wall) {
-    char source[65], ph[65], ch[65], ah[65], hh[65], self[65], tool[4400], th[65], text[16384]; long n;
-    /* Old records retain their real native producer identity. Never substitute
-     * its SHA into a new record; only that verified executable may revalidate. */
-    if(reuse){
-        long rn=0;char *r=cs_load(receipt,&rn);if(!r)cs_die("REFUSE missing receipt",receipt);
-        char *producer=cs_span_value(r,"chain_sha"),current[65];cs_sha("/proc/self/exe",current);
-        if(strcmp(producer,current)){
-            if(!cs_receipt_producer)cs_die("REFUSE explicit receipt producer required",receipt);
-            cs_span_absolute(cs_receipt_producer);char before[65],after[65],hdr[4];int fd=sy_open(cs_receipt_producer,O_RDONLY,0);
-            if(fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4)||access(cs_receipt_producer,X_OK))cs_die("REFUSE native receipt producer",cs_receipt_producer);
-            cs_sha(cs_receipt_producer,before);if(strcmp(before,producer))cs_die("REFUSE receipt producer SHA mismatch",receipt);
-            char *v[]={(char *)cs_receipt_producer,"fp-identity",(char *)s,(char *)rev,(char *)pkg,(char *)ctor,(char *)artifact,(char *)receipt,(char *)cs_fp_helper,0};
-            char *output=0;size_t bytes=0;int rc=cx_runv_timeout(v,45,&output,&bytes);
-            if(output&&sy_write_all(1,output,bytes))cs_die("producer output",receipt);free(output);cs_sha(cs_receipt_producer,after);
-            if(rc||strcmp(before,after))cs_die("REFUSE producer revalidation",receipt);
-            free(producer);free(r);return;
+                         const char *artifact, const char *receipt, int reuse, long wall,
+                         const char *phase, const char *target) {
+    char source[65], ph[65], ch[65], ah[65], hh[65], self[65], tool[4400], th[65], text[16384], id[2048], product[65]; long n, idn;
+    if (reuse) {
+        long rn=0; char *r=cs_load(receipt,&rn); if(!r) cs_die("REFUSE missing receipt", receipt);
+        if (!strncmp(r, "chain-fixedpoint-v3\n", 20)) {
+            char *producer=cs_span_value(r,"chain_sha"), current[65]; cs_sha("/proc/self/exe", current);
+            if (strcmp(producer, current)) {
+                if (!cs_receipt_producer) cs_die("REFUSE explicit receipt producer required", receipt);
+                cs_span_absolute(cs_receipt_producer); char before[65], after[65], hdr[4]; int fd=sy_open(cs_receipt_producer,O_RDONLY,0);
+                if (fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4)||access(cs_receipt_producer,X_OK)) cs_die("REFUSE native receipt producer", cs_receipt_producer);
+                cs_sha(cs_receipt_producer, before); if (strcmp(before, producer)) cs_die("REFUSE receipt producer SHA mismatch", receipt);
+                char *v[]={(char *)cs_receipt_producer,"fp-identity",(char *)s,(char *)rev,(char *)pkg,(char *)ctor,(char *)artifact,(char *)receipt,(char *)cs_fp_helper,0};
+                char *output=0; size_t bytes=0; int rc=cx_runv_timeout(v,45,&output,&bytes);
+                if (output&&sy_write_all(1,output,bytes)) cs_die("producer output", receipt); free(output); cs_sha(cs_receipt_producer, after);
+                if (rc||strcmp(before,after)) cs_die("REFUSE producer revalidation", receipt);
+                free(producer); free(r); return;
+            }
+            free(producer); free(r);
+            if (cx_fmt(source, sizeof source, "%s", cs_fp_source)) cs_die("source identity", s);
+            cs_sha(pkg, ph); cs_sha(ctor, ch); cs_tree(artifact, 0, ah);
+            if (cx_fmt(tool, sizeof tool, "%s/tools/release-build.cx", s)) cs_die("path", s); cs_sha(tool, th);
+            cs_sha(cs_fp_helper, hh); cs_sha("/proc/self/exe", self);
+            if (cx_fmt(text, sizeof text, "chain-fixedpoint-v3\nroot\t%s\nrev\t%s\nsource_sha\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nrelease_sha\t%s\nartifact\t%s\nartifact_sha\t%s\nhelper_sha\t%s\nchain_sha\t%s\n", s, rev, source, ph, ctor, ch, th, artifact, ah, hh, self)) cs_die("identity overflow", artifact);
+            n = strlen(text);
+            { long size=0; char *old=cs_load(receipt,&size);
+              if (!old || size < n + 10 || memcmp(old, text, n) || strncmp(old + n, "wall_ms\t", 8)) cs_die("REFUSE resume identity", receipt);
+              long k = n + 8; wall = 0;
+              while (k < size - 1 && old[k] >= '0' && old[k] <= '9') { if (wall > 300000) cs_die("REFUSE wall evidence", receipt); wall = wall * 10 + old[k++] - '0'; }
+              if (k != size - 1 || old[k] != '\n' || wall > 300000) cs_die("REFUSE wall evidence", receipt);
+              free(old); }
+            sy_printf("PREPARED\tfixedpoint\tartifact=%s\tsha=%s\tconstructor_sha=%s\tsource_sha=%s\twall_ms=%ld\treused=%d\n", artifact, ah, ch, source, wall, reuse);
+            return;
         }
-        free(producer);free(r);
+        if (strncmp(r, "chain-fixedpoint-v4\n", 20)) { free(r); cs_die("REFUSE unknown receipt version", receipt); }
+        if (cx_fmt(source, sizeof source, "%s", cs_fp_source)) { free(r); cs_die("source identity", s); }
+        cs_sha(pkg, ph); cs_sha(ctor, ch); cs_tree(artifact, 0, ah);
+        { char *rv=cs_span_value(r,"rev"), *ps=cs_span_value(r,"phase"), *tg=cs_span_value(r,"target");
+          char *ss=cs_span_value(r,"source_sha"), *p3=cs_span_value(r,"p3_sha"), *cs=cs_span_value(r,"constructor_sha");
+          char *as=cs_span_value(r,"artifact_sha"), *pd=cs_span_value(r,"product_sha");
+          if (!phase || !target) { free(rv);free(ps);free(tg);free(ss);free(p3);free(cs);free(as);free(pd);free(r); cs_die("REFUSE phase/target required", receipt); }
+          if (strcmp(rv, rev) || strcmp(ps, phase) || strcmp(tg, target)
+              || strcmp(ss, source) || strcmp(p3, ph) || strcmp(cs, ch) || strcmp(as, ah))
+            { free(rv);free(ps);free(tg);free(ss);free(p3);free(cs);free(as);free(pd);free(r); cs_die("REFUSE resume identity", receipt); }
+          cs_fp_idtext(id, sizeof id, &idn, rev, ps, tg, source, ph, ch, ah);
+          if (sy_sha256_hex(id, idn, product) || strcmp(product, pd))
+            { free(rv);free(ps);free(tg);free(ss);free(p3);free(cs);free(as);free(pd);free(r); cs_die("REFUSE resume identity", receipt); }
+          { char *wm=strstr(r, "\nwall_ms\t"); long k; if (!wm) { free(rv);free(ps);free(tg);free(ss);free(p3);free(cs);free(as);free(pd);free(r); cs_die("REFUSE wall evidence", receipt); }
+            k = 9; wall = 0;
+            while (wm[k] >= '0' && wm[k] <= '9') { if (wall > 300000) cs_die("REFUSE wall evidence", receipt); wall = wall * 10 + wm[k++] - '0'; }
+            if (wm[k] != '\n' || wall > 300000) cs_die("REFUSE wall evidence", receipt); }
+          free(rv);free(ps);free(tg);free(ss);free(p3);free(cs);free(as);free(pd); free(r); }
+        sy_printf("PREPARED\tfixedpoint\tartifact=%s\tsha=%s\tconstructor_sha=%s\tsource_sha=%s\twall_ms=%ld\treused=%d\n", artifact, ah, ch, source, wall, reuse);
+        return;
     }
+    if (!phase || !target) cs_die("REFUSE phase/target required", receipt);
     if (cx_fmt(source, sizeof source, "%s", cs_fp_source)) cs_die("source identity", s);
     cs_sha(pkg, ph); cs_sha(ctor, ch); cs_tree(artifact, 0, ah);
     if (cx_fmt(tool, sizeof tool, "%s/tools/release-build.cx", s)) cs_die("path", s); cs_sha(tool, th);
     cs_sha(cs_fp_helper, hh); cs_sha("/proc/self/exe", self);
-    if (cx_fmt(text, sizeof text, "chain-fixedpoint-v3\nroot\t%s\nrev\t%s\nsource_sha\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nrelease_sha\t%s\nartifact\t%s\nartifact_sha\t%s\nhelper_sha\t%s\nchain_sha\t%s\n", s, rev, source, ph, ctor, ch, th, artifact, ah, hh, self)) cs_die("identity overflow", artifact);
-    n = strlen(text);
-    if (reuse) {
-        long size = 0; char *old = cs_load(receipt, &size);
-        if (!old || size < n + 10 || memcmp(old, text, n) || strncmp(old + n, "wall_ms\t", 8)) cs_die("REFUSE resume identity", receipt);
-        long k = n + 8; wall = 0;
-        while (k < size - 1 && old[k] >= '0' && old[k] <= '9') { if (wall > 300000) cs_die("REFUSE wall evidence", receipt); wall = wall * 10 + old[k++] - '0'; }
-        if (k != size - 1 || old[k] != '\n' || wall > 300000) cs_die("REFUSE wall evidence", receipt);
-        free(old);
-    } else {
-        char tail[80]; long at = n;
-        if (cx_fmt(tail, sizeof tail, "wall_ms\t%ld\n", wall)) cs_die("wall", receipt);
-        cs_puts(text, sizeof text, &at, tail); cs_save(receipt, text, at);
-    }
+    cs_fp_idtext(id, sizeof id, &idn, rev, phase, target, source, ph, ch, ah);
+    if (sy_sha256_hex(id, idn, product)) cs_die("product_sha", receipt);
+    n = 0;
+    cs_puts(text, sizeof text, &n, "chain-fixedpoint-v4\n"); cs_puts(text, sizeof text, &n, id);
+    cs_puts(text, sizeof text, &n, "product_sha\t"); cs_puts(text, sizeof text, &n, product);
+    cs_puts(text, sizeof text, &n, "\nroot\t"); cs_puts(text, sizeof text, &n, s);
+    cs_puts(text, sizeof text, &n, "\nconstructor\t"); cs_puts(text, sizeof text, &n, ctor);
+    cs_puts(text, sizeof text, &n, "\nartifact\t"); cs_puts(text, sizeof text, &n, artifact);
+    cs_puts(text, sizeof text, &n, "\nrelease_sha\t"); cs_puts(text, sizeof text, &n, th);
+    cs_puts(text, sizeof text, &n, "\nhelper_sha\t"); cs_puts(text, sizeof text, &n, hh);
+    cs_puts(text, sizeof text, &n, "\nchain_sha\t"); cs_puts(text, sizeof text, &n, self);
+    cs_puts(text, sizeof text, &n, "\n");
+    { char tail[80]; if (cx_fmt(tail, sizeof tail, "wall_ms\t%ld\n", wall)) cs_die("wall", receipt);
+      cs_puts(text, sizeof text, &n, tail); cs_save(receipt, text, n); }
     sy_printf("PREPARED\tfixedpoint\tartifact=%s\tsha=%s\tconstructor_sha=%s\tsource_sha=%s\twall_ms=%ld\treused=%d\n", artifact, ah, ch, source, wall, reuse);
 }
 /* 两 ISA 使用当代已验证 phase-0/link 的 native candidate；源码与工具仍取冻结 S。
@@ -854,12 +916,12 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
                 if (cx_fmt(dep, sizeof dep, "%s/lnx-x86_64", base) || cx_fmt(dr, sizeof dr, "%s/phase-0.tsv", base)) cs_die("path", base);
                 if ((kernel || i >= 2) && g == 3) { if (cx_fmt(dc, sizeof dc, "%s/lnx-x86_64/candidate", g2)) cs_die("path", g2); }
                 else if (cx_fmt(dc, sizeof dc, "%s", gen1)) cs_die("path", gen1);
-                cs_fp_record(s, rev, pkg, dc, dep, dr, 1, 0);
+                cs_fp_record(s, rev, pkg, dc, dep, dr, 1, 0, (kernel || i >= 2) ? (g == 2 ? "g2" : "g3") : "g2", "lnx/x86_64");
                 if (!cs_fp_step(dep, "link", 0, 0)) cs_die("REFUSE incomplete constructor", dep);
             }
             const char *step = kernel ? "kernels" : i < 2 ? (object ? object : "link") : "whole-o";
             if (compare || (resume && sy_exists(rec))) {
-                cs_fp_record(s, rev, pkg, ctor, sub, rec, 1, 0);
+                cs_fp_record(s, rev, pkg, ctor, sub, rec, 1, 0, kernel ? (g == 2 ? "kernels-g2" : "kernels-g3") : (g == 2 ? "g2" : "g3"), kernel ? "kernel-route" : cs_fp_targets[i]);
                 if (compare) { if (!cs_fp_step(sub, kernel ? "kernels" : i < 2 ? "link" : "whole-o", 0, 0)) cs_die("REFUSE incomplete phase", sub); continue; }
                 if (cs_fp_step(sub, step, 0, 0)) continue;
                 if (cs_fp_step(sub, "link", 0, 0)) cs_die("REFUSE modifying linked slice", sub);
@@ -911,7 +973,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
             cs_source(s, cs_fp_source); cs_sha(pkg, after_pkg); cs_sha(ctor, after_ctor);
             if (strcmp(before_source, cs_fp_source) || strcmp(before_pkg, after_pkg) || strcmp(before_ctor, after_ctor)) cs_die("REFUSE phase inputs changed", sub);
             cs_fp_step(sub, step, sy_now_ms() - start, 1);
-            cs_fp_record(s, rev, pkg, ctor, sub, rec, 0, sy_now_ms() - start);
+            cs_fp_record(s, rev, pkg, ctor, sub, rec, 0, sy_now_ms() - start, kernel ? (g == 2 ? "kernels-g2" : "kernels-g3") : (g == 2 ? "g2" : "g3"), kernel ? "kernel-route" : cs_fp_targets[i]);
         }
     }
     if (!compare) return 0;
@@ -1112,9 +1174,31 @@ int main(int argc, char **argv) {
         return cs_routes(argv[2], argv[3], argv[4], argv[5]);
     }
     if (tx_eqz(argv[1], "fp-identity")) {
-        if (argc != 9) cs_die("fp-identity needs S REV PKG CTOR ARTIFACT RECEIPT IDENTITY_HELPER", 0);
+        if (argc != 11) cs_die("fp-identity needs S REV PKG CTOR ARTIFACT RECEIPT IDENTITY_HELPER PHASE TARGET", 0);
         cs_fp_helper = argv[8]; cs_source(argv[2], cs_fp_source);
-        cs_fp_record(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], 1, 0);
+        cs_fp_record(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], 1, 0, argv[9], argv[10]);
+        return 0;
+    }
+    if (tx_eqz(argv[1], "receipt-upgrade")) {
+        char bak[4400]; long rn=0, keep_wall=0; char *old, *wm; int k;
+        if (argc != 11) cs_die("receipt-upgrade needs S REV PKG CTOR ARTIFACT RECEIPT HELPER PHASE TARGET", 0);
+        if (!argv[9][0] || !argv[10][0]) cs_die("REFUSE phase/target required", argv[7]);
+        cs_fp_helper = argv[8]; cs_source(argv[2], cs_fp_source);
+        old = cs_load(argv[7], &rn); if (!old) cs_die("REFUSE missing receipt", argv[7]);
+        if (!strncmp(old, "chain-fixedpoint-v4\n", 20)) { free(old); cs_die("REFUSE already v4", argv[7]); }
+        if (strncmp(old, "chain-fixedpoint-v3\n", 20)) { free(old); cs_die("REFUSE unknown receipt version", argv[7]); }
+        wm = strstr(old, "\nwall_ms\t"); if (!wm) { free(old); cs_die("REFUSE wall evidence", argv[7]); }
+        k = 9; while (wm[k] >= '0' && wm[k] <= '9') { if (keep_wall > 300000) { free(old); cs_die("REFUSE wall evidence", argv[7]); } keep_wall = keep_wall * 10 + wm[k++] - '0'; }
+        if (wm[k] != '\n') { free(old); cs_die("REFUSE wall evidence", argv[7]); }
+        { char ah[65]; char *as=cs_span_value(old,"artifact_sha"); cs_tree(argv[6], 0, ah);
+          if (!as || strcmp(as, ah)) { free(as); free(old); cs_die("REFUSE resume identity", argv[7]); }
+          free(as); }
+        free(old);
+        if (cx_fmt(bak, sizeof bak, "%s.v3", argv[7])) cs_die("path", argv[7]);
+        if (sy_exists(bak)) cs_die("REFUSE backup exists", bak);
+        cs_copy(argv[7], bak);
+        cs_fp_record(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], 0, keep_wall, argv[9], argv[10]);
+        sy_printf("PREPARED\treceipt-upgrade\tv4=%s\tv3=%s\n", argv[7], bak);
         return 0;
     }
     /* 回放用：fp-compare DIR2 DIR3 PKG —— 不跑链，只对已有两代产物做五项比较。 */

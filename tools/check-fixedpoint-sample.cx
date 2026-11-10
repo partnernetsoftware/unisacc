@@ -143,11 +143,12 @@ static int argv_boundary(const char *installed, const char *repo, const char *so
 }
 
 int main(int argc, char **argv) {
+    int only_v4 = 0;
     if (argc > 1) {
-        if (argc == 5 && tx_eqz(argv[1], "--identity")) return identity(argv[2], argv[3], argv[4]);
-        if (argc == 6 && tx_eqz(argv[1], "--argv")) return argv_boundary(argv[2], argv[3], argv[4], argv[5]);
-        sy_printf("usage: check-fixedpoint-sample [--identity CHAIN_NATIVE IDENT_HELPER REAL_FROZEN_S | --argv INSTALLED_COM ROOT REAL_FROZEN_S REV]\n");
-        return 2;
+        if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "v4")) || (argc == 2 && tx_eqz(argv[1], "--part-v4"))) only_v4 = 1;
+        else if (argc == 5 && tx_eqz(argv[1], "--identity")) return identity(argv[2], argv[3], argv[4]);
+        else if (argc == 6 && tx_eqz(argv[1], "--argv")) return argv_boundary(argv[2], argv[3], argv[4], argv[5]);
+        else { sy_printf("usage: check-fixedpoint-sample [--part v4 | --part-v4 | --identity CHAIN_NATIVE IDENT_HELPER REAL_FROZEN_S | --argv INSTALLED_COM ROOT REAL_FROZEN_S REV]\n"); return 2; }
     }
     char out[4096], cwd[400], cmd[2200]; char *o = 0; size_t n = 0;
     { char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
@@ -155,7 +156,7 @@ int main(int argc, char **argv) {
       mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
     if (cx_fmt(td, sizeof td, "%s/fp-sample-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
     if (cx_fmt(tool, sizeof tool, "%s/tools/fixedpoint-sample.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) { ck(0, "path"); return 1; }
-
+    if (!only_v4) {
     /* 发布候选 + --sample → 拒绝 */
     if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- release --sample g2 g3", td, com, tool)) return 1;
     ck(sh(cmd, out, sizeof out) == 2 || has(out, "REFUSE") || has(out, "forbids-sample"), "release-forbids-sample");
@@ -203,7 +204,127 @@ int main(int argc, char **argv) {
        has(out, "REFUSE empty/from-image"), "fixedpoint-from-image-refuses-missing");
     ck(chain("fixedpoint r s p g1 o --phase g2 --target win/arm64 --unknown", out, sizeof out) != 0 &&
        has(out, "REFUSE unknown/duplicate option"), "fixedpoint-refuses-unknown-option");
+    }
+    if (only_v4) {
+      char script[500]; char *o = 0; size_t nn = 0; int rc;
+      const char *body =
+        "set -eu\n"
+        "root=$1; work=$2; com=$3\n"
+        "cd \"$work\"\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > helper\n"
+        "chmod +x helper\n"
+        "mkdir art && printf artifact > art/item\n"
+        "printf package > pkg\n"
+        "printf constructor > ctor\n"
+        "sid=$(./helper .)\n"
+        "ph=$(sha256sum pkg | cut -d ' ' -f 1)\n"
+        "ch=$(sha256sum ctor | cut -d ' ' -f 1)\n"
+        "ih=$(sha256sum art/item | cut -d ' ' -f 1)\n"
+        "printf 'F\\titem\\t%s\\n' \"$ih\" > tree-input\n"
+        "ah=$(sha256sum tree-input | cut -d ' ' -f 1)\n"
+        "printf 'identity_version\\t4\\nrev\\tidentity-check\\nphase\\tg2\\ntarget\\tlnx/x86_64\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor_sha\\t%s\\nartifact_sha\\t%s\\n' \"$sid\" \"$ph\" \"$ch\" \"$ah\" > id.txt\n"
+        "ps=$(sha256sum id.txt | cut -d ' ' -f 1)\n"
+        "write() { { printf 'chain-fixedpoint-v4\\n'; cat id.txt; printf 'product_sha\\t%s\\nroot\\t%s\\nconstructor\\tctor\\nartifact\\tart\\nrelease_sha\\t0\\nhelper_sha\\t0\\nchain_sha\\t%s\\nwall_ms\\t1\\n' \"$ps\" \"$work\" \"$1\"; } > rec; }\n"
+        "run() { sh \"$com\" \"$root/tools/chain-step.cx\" -- fp-identity \"$work\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1 || true; }\n"
+        "write 0\n"
+        "run\n"
+        "grep -q 'reused=1' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-reuse\\n'\n"
+        "write deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n"
+        "run\n"
+        "grep -q 'reused=1' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-chain-sha-ignored\\n'\n"
+        "printf changed > art/item\n"
+        "run\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-artifact\\n'\n"
+        "printf artifact > art/item\n"
+        "printf changed > pkg\n"
+        "run\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-package\\n'\n"
+        "printf package > pkg\n"
+        "printf 'chain-fixedpoint-v3\\nroot\\t%s\\nrev\\tidentity-check\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor\\tctor\\nconstructor_sha\\t%s\\nrelease_sha\\t0\\nartifact\\tart\\nartifact_sha\\t%s\\nhelper_sha\\t0\\nchain_sha\\t0000000000000000000000000000000000000000000000000000000000000000\\nwall_ms\\t1\\n' \"$work\" \"$sid\" \"$ph\" \"$ch\" \"$ah\" > rec\n"
+        "run\n"
+        "grep -q 'explicit receipt producer required' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v3-producer-required\\n'\n"
+        "nh=$(sha256sum \"$com\" | cut -d ' ' -f 1)\n"
+        "rh=$(sha256sum \"$root/tools/release-build.cx\" | cut -d ' ' -f 1)\n"
+        "hh=$(sha256sum helper | cut -d ' ' -f 1)\n"
+        "printf 'chain-fixedpoint-v3\\nroot\\t%s\\nrev\\tidentity-check\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor\\t%s\\nconstructor_sha\\t%s\\nrelease_sha\\t%s\\nartifact\\t%s\\nartifact_sha\\t%s\\nhelper_sha\\t%s\\nchain_sha\\t%s\\nwall_ms\\t1\\n' \"$root\" \"$sid\" \"$ph\" \"$work/ctor\" \"$ch\" \"$rh\" \"$work/art\" \"$ah\" \"$hh\" \"$nh\" > rec\n"
+        "sh \"$com\" \"$root/tools/chain-step.cx\" -- receipt-upgrade \"$root\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1\n"
+        "grep -q wall_ms rec\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.upgrade-v3-to-v4\\n'\n"
+        "grep -q 'chain-fixedpoint-v4' rec\n"
+        "grep -q 'chain-fixedpoint-v3' rec.v3\n"
+        "rm -f rec.v3\n"
+        "printf 'chain-fixedpoint-v3\\nroot\\t%s\\nrev\\tidentity-check\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor\\t%s\\nconstructor_sha\\t%s\\nrelease_sha\\t%s\\nartifact\\t%s\\nartifact_sha\\tffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\\nhelper_sha\\t%s\\nchain_sha\\t%s\\nwall_ms\\t1\\n' \"$root\" \"$sid\" \"$ph\" \"$work/ctor\" \"$ch\" \"$rh\" \"$work/art\" \"$hh\" \"$nh\" > rec\n"
+        "if sh \"$com\" \"$root/tools/chain-step.cx\" -- receipt-upgrade \"$root\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1; then exit 1; fi\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.upgrade-forged-v3\\n'\n"
+        "write 0\n"
+        "run\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > helper\n"
+        "chmod +x helper\n"
+        "run\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-sid\\n'\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > helper\n"
+        "chmod +x helper\n"
+        "write 0\n"
+        "printf constructor2 > ctor\n"
+        "run\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-ctor\\n'\n"
+        "printf constructor > ctor\n"
+        "write 0\n"
+        "sh \"$com\" \"$root/tools/chain-step.cx\" -- fp-identity \"$work\" other-rev \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1 || true\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-rev\\n'\n"
+        "sh \"$com\" \"$root/tools/chain-step.cx\" -- fp-identity \"$work\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g3 lnx/x86_64 > out 2>&1 || true\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-phase\\n'\n"
+        "sh \"$com\" \"$root/tools/chain-step.cx\" -- fp-identity \"$work\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 osx/arm64 > out 2>&1 || true\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-target\\n'\n"
+        "write 0\n"
+        "python3 -c 'd=open(\"rec\").read();i=d.find(\"product_sha\");open(\"rec\",\"w\").write(d[:i+13]+\"0\"+d[i+14:])'\n"
+        "run\n"
+        "grep -q 'REFUSE resume identity' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-product-sha\\n'\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' '#x' > helper\n"
+        "chmod +x helper\n"
+        "write 0\n"
+        "run\n"
+        "grep -q 'reused=1' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-helper-same-sid\\n'\n"
+        "write 0\n"
+        "sed -i 's/wall_ms\\t1/wall_ms\\t2/' rec\n"
+        "run\n"
+        "grep -q 'reused=1' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.v4-wall-ignored\\n'\n"
+        "write 0\n"
+        "if sh \"$com\" \"$root/tools/chain-step.cx\" -- receipt-upgrade \"$root\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1; then exit 1; fi\n"
+        "grep -q 'already v4' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.upgrade-already-v4\\n'\n"
+        "printf 'chain-fixedpoint-v9\\n' > rec\n"
+        "if sh \"$com\" \"$root/tools/chain-step.cx\" -- receipt-upgrade \"$root\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1; then exit 1; fi\n"
+        "grep -q 'unknown receipt version' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.upgrade-unknown-version\\n'\n"
+        "printf 'chain-fixedpoint-v3\\nroot\\t%s\\nrev\\tidentity-check\\nsource_sha\\t%s\\np3_sha\\t%s\\nconstructor\\t%s\\nconstructor_sha\\t%s\\nrelease_sha\\t%s\\nartifact\\t%s\\nartifact_sha\\t%s\\nhelper_sha\\t%s\\nchain_sha\\t%s\\nwall_ms\\t1\\n' \"$root\" \"$sid\" \"$ph\" \"$work/ctor\" \"$ch\" \"$rh\" \"$work/art\" \"$ah\" \"$hh\" \"$nh\" > rec\n"
+        "printf x > rec.v3\n"
+        "if sh \"$com\" \"$root/tools/chain-step.cx\" -- receipt-upgrade \"$root\" identity-check \"$work/pkg\" \"$work/ctor\" \"$work/art\" \"$work/rec\" \"$work/helper\" g2 lnx/x86_64 > out 2>&1; then exit 1; fi\n"
+        "grep -q 'backup exists' out\n"
+        "printf 'PASS\\tcheck-fixedpoint-sample.upgrade-v3-exists\\n'\n";
+      if (cx_fmt(script, sizeof script, "%s/v4.sh", td) || cx_write(script, body, tx_len(body, 24000))) ck(0, "v4-script");
+      else {
+            char *v[] = {"sh", script, root, td, com, 0};
+            rc = cx_runv_timeout(v, 35, &o, &nn);
+            if (o) sy_printf("%s", o);
+            ck(rc == 0 && o && has(o, "v4-reuse") && has(o, "v4-sid") && has(o, "v4-ctor") && has(o, "v4-rev") && has(o, "v4-phase") && has(o, "v4-target") && has(o, "v4-product-sha") && has(o, "v4-helper-same-sid") && has(o, "v4-wall-ignored") && has(o, "upgrade-already-v4") && has(o, "upgrade-unknown-version") && has(o, "upgrade-v3-exists") && has(o, "upgrade-v3-to-v4") && has(o, "upgrade-forged-v3"), "v4-identity");
+      }
+    }
     { char rm[600]; if (!cx_fmt(rm, sizeof rm, "rm -rf '%s'", td)) sh(rm, 0, 0); }
-    sy_printf("CHECK_FIXEDPOINT_SAMPLE\tfailed=%d\n", failed);
-    return failed ? 1 : 0;
+    if (only_v4) sy_printf("CHECK_FIXEDPOINT_SAMPLE_V4\tfailed=%d\n", failed);
+    else sy_printf("CHECK_FIXEDPOINT_SAMPLE\tfailed=%d\n", failed);
 }
