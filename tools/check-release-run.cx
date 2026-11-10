@@ -82,6 +82,56 @@ int main(void) {
       w[k++] = (char *)"--dry-run"; w[k++] = root; w[k++] = cand; w[k++] = layout; w[k++] = odir; w[k] = 0;
       rc = run(w, root, out, sizeof out);
       ck(rc != 0, "negative: tampered asset refuses"); }
+    /* H8: --pack 本地重放(需要 RELEASE_RUN_PACK_SRC 指向候选目录;未设置时跳过并明示) */
+    { const char *psrc = sy_env("RELEASE_RUN_PACK_SRC");
+      if (psrc && psrc[0]) {
+        char podir[4400], cand2[4448];
+        const char *ct2 = sy_env("RELEASE_RUN_PACK_CANDIDATE");
+        if (!ct2 || !ct2[0]) { sy_eprintf("check-release-run: set RELEASE_RUN_PACK_CANDIDATE\n"); return 2; }
+        if (cx_fmt(cand2, sizeof cand2, "%s/cand2.tsv", work)) return 2;
+        { char *cv[] = {"cp", (char *)ct2, cand2, 0}; if (run(cv, root, 0, 0)) return 2; }
+        if (cx_fmt(podir, sizeof podir, "%s/pack-out", work)) return 2;
+        { char *w[12]; int k = 0;
+          for (i = 0; i < 7; i++) w[k++] = v[i];
+          w[k++] = (char *)"--pack"; w[k++] = root; w[k++] = cand2; w[k++] = (char *)psrc; w[k++] = podir; w[k] = 0;
+          rc = run(w, root, out, sizeof out); }
+        ck(rc == 0, "P0 pack rc0");
+        ck(has(out, "STEP\tape-pack\tDONE"), "P1a ape-pack DONE");
+        ck(has(out, "STEP\tinject\tDONE"), "P1b inject DONE");
+        ck(has(out, "STEP\tlayout-gen\tDONE"), "P1c layout-gen DONE");
+        ck(has(out, "STEP\tbackfill\tDONE"), "P1d backfill DONE");
+        ck(has(out, "STEP\tsums\tDONE"), "P1e sums DONE");
+        ck(has(out, "STEP\tcommands\tDONE"), "P1f commands DONE");
+        ck(has(out, "PACK_OK\tlocal replay only, no network, no gh, no push"), "P2 no external ops");
+        ck(has(out, "NEXT gh -R partnernetsoftware/unisacc release create"), "P3a draft command");
+        ck(has(out, "workflow run candidate-native.yml --ref main -f commit="), "P3b CI command");
+        ck(has(out, "release edit v0.0.50-c050-candidate --tag v0.0.50 --target 979b56e4d918894670a71080970149112499d223"), "P3c retag edit-tag-target 40hex");
+        ck(has(out, "release edit v0.0.50 --draft=false --latest"), "P3d publish command");
+        /* 无删标签命令 */
+        ck(!has(out, "push origin :refs/tags") && !has(out, "tag -d") && !has(out, "delete-tag"), "P4 no tag delete");
+        /* 六清单资产逐一与公开 v0.0.50 相同;SHA256SUMS 自身哈希核回填表。 */
+        {
+          char sums[4600], sumsline[180], *sb; size_t sn; int j, all = 1;
+          if (cx_fmt(sums, sizeof sums, "%s/layout/SHA256SUMS", podir)) return 2;
+          sb = (char *)cx_read(sums, &sn);
+          ck(sb != 0, "P5 SHA256SUMS present");
+          { const char *names[6] = {"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json","build.json","unisacc-0.0.50-win-arm64.zip"};
+            const char *want[6] = {"76ed4200aaaf71b2ac9dd13e6dde6ad31632016ddea8fe43893a4ffe32484967","56efea531e104b4114b314d5bdb4e5efc2a6debb96f974fa5d6e32675a637db8","38b8ab0ec17532b5b57e3276c6daf33c1cb5de861cd991873fb1a04bb2ed4656","d9eb46dd55ac31d800df1ed271156dd51b51332b79ed6b13dccbd7803242b39f","d9eb46dd55ac31d800df1ed271156dd51b51332b79ed6b13dccbd7803242b39f","8da47aefcd1909ab8cef4cd0ddbb95ca01f9c2c34f7ed9d7713504faceb7bae9"};
+            for (j = 0; sb && j < 6; j++) {
+              if (cx_fmt(sumsline, sizeof sumsline, "%s  %s\n", want[j], names[j])) return 2;
+              if (!has(sb, sumsline)) all = 0;
+            } }
+          ck(sb && all, "P5 six manifest assets identical to public v0.0.50");
+          { char tbl[4600], *tb; size_t tn; int found = 0;
+            if (cx_fmt(tbl, sizeof tbl, "%s/candidate.tsv", podir)) return 2;
+            tb = (char *)cx_read(tbl, &tn);
+            ck(tb != 0, "P6 backfilled table present");
+            if (tb && has(tb, "6adaec4cd40eef6f111fdfe3dfa4080476555a2dc26cb63927d9b1e19f29f9e5")) found = 1;
+            ck(found, "P6 SHA256SUMS digest backfilled from file"); }
+        }
+      } else {
+        sy_printf("SKIP\tcheck-release-run.pack (set RELEASE_RUN_PACK_SRC)\n");
+      } }
     sy_printf("CHECK_RELEASE_RUN\tfailed=%d\n", failed);
     if (b) { (void)b; }
 }

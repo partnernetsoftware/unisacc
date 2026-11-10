@@ -1,4 +1,4 @@
-/* tools/release-run.cx -- 0.0.50 R:一键发布可续跑流程(发布编排,不构造候选)。
+/* tools/release-run.cx -- 0.0.50 R / 0.0.51 H8:一键发布可续跑流程(发布编排,不构造候选)。
  *
  * 串 runbook 步骤 8-19 为带状态机的可续跑流程;严格按「提交 X(候选表)触发 CI ->
  * 提交 Y 回填 run id」两段提交;所有 gh 带 -R partnernetsoftware/unisacc。
@@ -7,12 +7,35 @@
  *     本地重放:release-layout --check、SHA256SUMS 校验、release-dispatch --dry-run、
  *     release-decide(证据取 OUT_DIR/evidence.tsv,缺则 8xUNKNOWN)。不创建/修改 release,
  *     不触发 CI,不 push。输出与人工逐步执行逐行对照。
+ *   sh ./unisacc.com tools/release-run.cx -- --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR
+ *     H8 实跑化(本地重放打包,零网络零 gh):输入=ROOT 内候选表私有副本 + SRC_DIR
+ *     候选目录(六片 + P4 + cache-manager 两份 + sources.tsv),自动:
+ *       4 ape-pack   release-ape pack --osx-slices --cache-manager-osx 显式输入,
+ *                    OUT_DIR/ape/unisacc-next.com 即 unisacc.com;
+ *       5 inject     tools/version-inject.cx 对第六片注入表内版本,得 slice-win-arm64;
+ *       6 layout     p3-package.body -> pkg.bin;按表 commit/version 与 sources.tsv 的
+ *                    sources_sha256、APE sha 生成 build.json 与别名
+ *                    unisacc.com.build.json;release-layout --candidate 生成
+ *                    OUT_DIR/layout(含 zip 与 SHA256SUMS)并自带 --check;
+ *       7 backfill   候选表 7 个哈希列由 OUT_DIR/layout 内产物文件 sha256 计算回填
+ *                    (不手填),写 OUT_DIR/candidate.tsv 并 rcand_verify 7 资产;
+ *       8 sums       layout 内 sha256sum --check;
+ *       9 commands   只打印下一步命令:草稿创建 gh release create --draft、资产上传
+ *                    gh release upload、CI 触发 gh workflow run(commit=提交 X)、
+ *                    公开 gh release edit --draft=false --latest、改标签
+ *                    gh release edit --tag NEW --target 完整 40 位(先改标签后公开,
+ *                    永不先删旧标签;target 非 40 位拒绝)。全部仅打印,不执行;
+ *                    CI 与公开两步保持人工确认。
  *   sh ./unisacc.com tools/release-run.cx -- --resume OUT_DIR
  *     从 OUT_DIR/state.tsv 记录的下一未完步继续;每步先核对前置产物身份。
  *
+ * SRC_DIR 输入约定(H8,与 0.0.50 后备重放 /tmp/cc-rel50 一致的文件名):
+ *   p3.pkg win-x86_64 lnx-x86_64 lnx-arm64 osx-x86_64 osx-arm64 win-arm64
+ *   cache-manager-x64 cache-manager-arm64 sources.tsv(一行 64 位 sources_sha256)
  * 步骤(state.tsv 追加 STEP<TAB>idx<TAB>name<TAB>DONE|REFUSED):
  *   0 layout-check  1 sums-check  2 dispatch-replay  3 decide
- * 真跑(--run,后续补丁扩展 4..12)按 runbook:提交X -> 草稿 -> 分批上传 -> 机查 ->
+ *   4 ape-pack  5 inject  6 layout-gen  7 backfill  8 sums  9 commands
+ * 真跑(--run,后续补丁扩展 10..)按 runbook:提交X -> 草稿 -> 分批上传 -> 机查 ->
  * workflow run(commit=X) -> 回填 run id 提交Y -> 终裁 -> 公开 -> 读回。
  * 子进程均 <=50s 有界。 */
 #pragma unisa use sys.fs
@@ -25,7 +48,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
 
-static char root[4096], table[4048], layout[4048], out[4048], statep[4448];
+static char root[4096], table[4048], layout[4048], out[4048], statep[4448], srcdir[4048], layoutout[4448];
 static RcCandidate cand;
 
 static void die(const char *s) { sy_eprintf("release-run: REFUSE %s\n", s); sy_exit(2); }
@@ -45,7 +68,7 @@ static int child(char **v, const char *cwd) {
     if (np_run(v, cwd, 0, 50, &r, why, sizeof why)) { np_free(&r); die("child-transport"); }
     rc = r.rc;
     if (r.outn) sy_write_all(1, r.out ? r.out : "", r.outn);
-    if (r.errn) sy_write_all(2, r.err, r.errn);
+    if (r.errn) sy_write_all(2, r.err ? r.err : "", r.errn);
     np_free(&r);
     return rc;
 }
@@ -65,31 +88,250 @@ static void step_dispatch(void) {
     mark(2, "dispatch-replay", "DONE");
 }
 static void step_decide(void) {
-    char p[4400]; char *v[10]; int n = 0;
+    char p[4400]; char *v[12]; int n = 0;
     if (cx_fmt(p, sizeof p, "%s/evidence.tsv", out)) die("path");
     v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-decide.cx"; v[n++] = "--";
     v[n++] = "--candidate"; v[n++] = table;
     v[n++] = "--evidence"; v[n++] = p;
-    v[n++] = "--assets"; v[n++] = layout; v[n] = 0;
+    v[n++] = "--assets"; v[n++] = layout;
+    v[n] = 0;
     if (child(v, root)) die("decide");
     mark(3, "decide", "DONE");
 }
+
+/* ---- H8: --pack 本地重放 -------------------------------------------------- */
+
+static void sha_of(const char *cwd, const char *path, char hex[65]) {
+    char *v[] = {"sha256sum", "--", (char *)path, 0};
+    np_result r = {0}; char why[256] = {0}; int i, bad = 0;
+    if (np_run(v, cwd, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 66) die("sha256sum");
+    for (i = 0; i < 64; i++) {
+        char c = r.out[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) bad = 1;
+        hex[i] = c;
+    }
+    hex[64] = 0; np_free(&r);
+    if (bad) die("digest");
+}
+static void need(const char *dir, const char *name) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) die("path");
+    if (sy_exists(p) != 1) die(name);
+}
+/* 步 4:显式 --osx-slices + --cache-manager-osx。不用 BUILT_CURRENT_PRODUCT:
+ * 那会拿当前产品重造 manager,产物身份随宿主漂移,重放不再确定。 */
+static void step_ape_pack(void) {
+    char apedir[4400], ox[4400], om[4400], cmx[4400], cma[4400];
+    char p3p[4400], wx[4400], lx[4400], la[4400], wa[4400];
+    char *v[20]; int n = 0;
+    const char *src[9] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64", "cache-manager-x64", "cache-manager-arm64"};
+    int i;
+    for (i = 0; i < 9; i++) need(srcdir, src[i]);
+    if (cx_fmt(apedir, sizeof apedir, "%s/ape", out)) die("path");
+    if (sy_mkdir(apedir, 0755) && sy_exists(apedir) != 1) die("ape dir");
+    if (cx_fmt(ox, sizeof ox, "%s/osx-x86_64", srcdir) || cx_fmt(om, sizeof om, "%s/osx-arm64", srcdir)) die("path");
+    if (cx_fmt(cmx, sizeof cmx, "%s/cache-manager-x64", srcdir) || cx_fmt(cma, sizeof cma, "%s/cache-manager-arm64", srcdir)) die("path");
+    if (cx_fmt(p3p, sizeof p3p, "%s/p3.pkg", srcdir)) die("path");
+    if (cx_fmt(wx, sizeof wx, "%s/win-x86_64", srcdir) || cx_fmt(lx, sizeof lx, "%s/lnx-x86_64", srcdir)) die("path");
+    if (cx_fmt(la, sizeof la, "%s/lnx-arm64", srcdir) || cx_fmt(wa, sizeof wa, "%s/win-arm64", srcdir)) die("path");
+    v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-ape.cx"; v[n++] = "pack";
+    v[n++] = "--osx-slices"; v[n++] = ox; v[n++] = om;
+    v[n++] = "--cache-manager-osx"; v[n++] = cmx; v[n++] = cma;
+    v[n++] = apedir; v[n++] = p3p; v[n++] = wx; v[n++] = lx; v[n++] = la; v[n++] = ox; v[n++] = om; v[n++] = wa;
+    v[n] = 0;
+    if (child(v, root)) die("release-ape pack");
+    { char com[4400];
+      if (cx_fmt(com, sizeof com, "%s/unisacc-next.com", apedir)) die("path");
+      if (sy_exists(com) != 1) die("unisacc-next.com"); }
+    mark(4, "ape-pack", "DONE");
+}
+/* 步 5:version-inject 用表内版本注入第六片,得独立资产 slice-win-arm64。 */
+static void step_inject(void) {
+    char in[4400], inj[4400], *v[8]; int n = 0;
+    if (cx_fmt(in, sizeof in, "%s/win-arm64", srcdir) || cx_fmt(inj, sizeof inj, "%s/inject", out)) die("path");
+    v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/version-inject.cx"; v[n++] = "--";
+    v[n++] = in; v[n++] = inj; v[n++] = table; v[n] = 0;
+    if (child(v, root)) die("version-inject");
+    mark(5, "inject", "DONE");
+}
+/* 读 sources.tsv:单行 64 位十六进制(允许尾随换行)。 */
+static void read_sources_sha(char sha[65]) {
+    char p[4400], b[128]; size_t n; long got; int f, i;
+    if (cx_fmt(p, sizeof p, "%s/sources.tsv", srcdir)) die("path");
+    f = sy_open_read(p);
+    if (f < 0) die("sources.tsv");
+    got = sy_read(f, b, sizeof b - 1);
+    if (sy_close(f) || got < 64) die("sources.tsv short");
+    b[got] = 0;
+    for (i = 0; i < 64; i++)
+        if (!((b[i] >= '0' && b[i] <= '9') || (b[i] >= 'a' && b[i] <= 'f'))) die("sources_sha256 hex");
+    for (i = 64; i < got; i++) if (b[i] != '\n' && b[i] != '\r') die("sources.tsv trailing");
+    for (i = 0; i < 65; i++) sha[i] = b[i];
+    sha[64] = 0;
+    (void)n;
+}
+static void write_build_json(const char *path, long bytes, const char *sources_sha, const char *digest) {
+    char text[1024];
+    if (cx_fmt(text, sizeof text,
+        "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n"
+        "  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",
+        bytes, cand.commit, sources_sha, digest)) die("build.json format");
+    if (cx_write(path, text, (size_t)tlen(text))) die("build.json write");
+}
+/* 步 6:装配 layout 输入目录再交给 release-layout 生成(自带 --check)。
+ * release-layout 源目录须含 name[0..3]:unisacc.com(APE)、pkg.bin、slice-win-arm64、
+ * record;生成时复制出 build.json 别名与 zip、SHA256SUMS。 */
+static void step_layout_gen(void) {
+    char stagedir[4400], a[4400], b[4400], sources_sha[65], ape_sha[65], q[4400];
+    long ape_bytes;
+    char *v[8]; int n = 0;
+    if (cx_fmt(stagedir, sizeof stagedir, "%s/stage", out) || cx_fmt(layoutout, sizeof layoutout, "%s/layout", out)) die("path");
+    if (sy_mkdir(stagedir, 0755) && sy_exists(stagedir) != 1) die("stage dir");
+    /* release-layout 要求 NEW_OUT 不存在;layout 由它创建,本工具不预建。 */
+    if (sy_exists(layoutout) == 1) die("layout dir already exists");
+    read_sources_sha(sources_sha);
+    if (cx_fmt(a, sizeof a, "%s/ape/unisacc-next.com", out)) die("path");
+    { np_result r = {0}; char why[256] = {0}; char *sv[] = {"stat", "-c", "%s", a, 0};
+      if (np_run(sv, "/", 0, 10, &r, why, sizeof why) || r.rc || r.outn < 2) die("stat ape");
+      ape_bytes = 0;
+      { size_t i; for (i = 0; i < r.outn && r.out[i] >= '0' && r.out[i] <= '9'; i++) ape_bytes = ape_bytes * 10 + (r.out[i] - '0'); }
+      np_free(&r);
+      if (ape_bytes <= 0) die("ape bytes"); }
+    sha_of(root, a, ape_sha);
+    /* stagedir 内以表内资产名放四件:unisacc.com、pkg.bin、slice-win-arm64、record。 */
+    if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[0]) || sy_copy(a, b, 0755)) die("stage ape");
+    if (cx_fmt(a, sizeof a, "%s/p3.pkg", srcdir) || cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[1]) || sy_copy(a, b, 0600)) die("stage pkg");
+    if (cx_fmt(a, sizeof a, "%s/inject", out) || cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[2]) || sy_copy(a, b, 0755)) die("stage slice");
+    if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[3])) die("path");
+    write_build_json(b, ape_bytes, sources_sha, ape_sha);
+    v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-layout.cx"; v[n++] = "--";
+    v[n++] = "--candidate"; v[n++] = table; v[n++] = stagedir; v[n++] = layoutout; v[n] = 0;
+    if (child(v, root)) die("release-layout generate");
+    if (cx_fmt(q, sizeof q, "%s/%s", layoutout, cand.name[0]) && 0) die("never");
+    mark(6, "layout-gen", "DONE");
+}
+/* 步 7:由 layout 产物文件计算 7 个 sha 回填候选表(列 8/10/12/14/16/18/20,0 基)。
+ * 表头与其余列原样保留;输出 OUT_DIR/candidate.tsv。 */
+static void step_backfill(void) {
+    char line[8192], hex[7][65], outtable[4448];
+    size_t n; char *b; long at = 0, i, col;
+    int f, k;
+    for (k = 0; k < 7; k++) {
+        char p[4400];
+        if (cx_fmt(p, sizeof p, "%s/%s", layoutout, cand.name[k])) die("path");
+        if (sy_exists(p) != 1) die(cand.name[k]);
+        sha_of(root, p, hex[k]);
+    }
+    b = cx_read(table, &n);
+    if (!b || n < 10 || n >= sizeof line) die("candidate read");
+    for (i = 0; (long)i < (long)n; i++) {
+        line[at++] = b[i];
+        if (b[i] == '\n' || i + 1 == (long)n) {
+            /* 只回填数据行(第二行);表头与空行原样。 */
+            static char second[8192]; static long slen; static int have_second;
+            long j = at - 1; while (j >= 0 && line[j] != '\n') j--;
+            (void)j;
+            if (!have_second) {
+                long m = at; if (line[m - 1] == '\n') m--;
+                if (m > 0) { for (j = 0; j < m; j++) second[j] = line[j]; slen = m; have_second = 1; }
+            }
+            at = 0;
+        }
+    }
+    /* 用 rcand 结构重写数据行:非哈希列取 cand 原值,哈希列用 hex。 */
+    { const char *cols[21];
+      cols[0] = cand.repo; cols[1] = cand.tag; cols[2] = cand.commit; cols[3] = cand.version;
+      cols[4] = cand.workflow; cols[5] = cand.workflow_ref; cols[6] = cand.ci_run_id;
+      for (k = 0; k < 7; k++) { cols[7 + 2 * k] = cand.name[k]; cols[8 + 2 * k] = hex[k]; }
+      if (cx_fmt(outtable, sizeof outtable, "%s/candidate.tsv", out)) die("path");
+      f = sy_open(outtable, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+      if (f < 0) die("backfill write");
+      { char head[8192]; long m = 0;
+        b = cx_read(table, &n);
+        if (!b) die("candidate reread");
+        while (m < (long)n && b[m] != '\n') m++;
+        if (m >= (long)n) die("header");
+        if (sy_write_all(f, b, m + 1)) die("header write");
+        for (col = 0; col < 21; col++) {
+          if (sy_write_all(f, cols[col], tlen(cols[col]))) die("row write");
+          if (sy_write_all(f, col == 20 ? "\n" : "\t", 1)) die("row write");
+        }
+        /* 原表第二行之后的附加行(如有)原样保留。 */
+        { long p = 0, q = 0, lines = 0;
+          while (p < (long)n) { if (b[p] == '\n') { lines++; if (lines == 2) { p++; break; } } p++; }
+          if (lines == 2 && p < (long)n) { if (sy_write_all(f, b + p, (long)n - p)) die("tail write"); } }
+      }
+      if (sy_close(f)) die("close");
+    }
+    { char why[512]; RcCandidate check;
+      if (cx_fmt(outtable, outtable, "%s/candidate.tsv", out)) die("path");
+      if (rcand_load(outtable, &check, why, sizeof why)) die(why);
+      if (rcand_verify(&check, layoutout, 7, why, sizeof why)) die(why);
+      for (k = 0; k < 7; k++) if (!tx_eqz(check.sha[k], hex[k])) die("backfill mismatch"); }
+    emit("BACKFILL", "candidate.tsv", outtable);
+    mark(7, "backfill", "DONE");
+}
+static void step_sums2(void) {
+    char *v[] = {"sha256sum", "--check", "SHA256SUMS", 0};
+    if (child(v, layoutout)) die("sha256sum --check");
+    mark(8, "sums", "DONE");
+}
+/* 步 9:只打印命令。CI 触发与公开保持人工确认;命令参数由表值拼出并校验。 */
+static void step_commands(void) {
+    const char *R = "-R partnernetsoftware/unisacc";
+    int i;
+    if (tlen(cand.commit) != 40) die("commit not 40 hex");
+    { int c = 0; for (i = 0; cand.commit[i]; i++)
+        if (!((cand.commit[i] >= '0' && cand.commit[i] <= '9') || (cand.commit[i] >= 'a' && cand.commit[i] <= 'f'))) c = 1;
+      if (c) die("commit not hex"); }
+    sy_printf("NEXT gh %s release create %s --draft --title %s --target %s\n", R, cand.tag, cand.version, cand.commit);
+    for (i = 0; i < 7; i++)
+        sy_printf("NEXT gh %s release upload %s %s/%s --clobber\n", R, cand.tag, layoutout, cand.name[i]);
+    /* CI 触发:提交 X = 候选表进仓的那次提交;commit 参数用表内 40 位构造源。 */
+    sy_printf("NEXT gh %s workflow run %s --ref main -f commit=%s\n", R, cand.workflow, cand.commit);
+    /* 改标签:只 edit --tag/--target,完整 40 位;不先删旧标签。 */
+    sy_printf("NEXT gh %s release edit %s --tag v%s --target %s\n", R, cand.tag, cand.version, cand.commit);
+    sy_printf("NEXT gh %s release edit v%s --draft=false --latest\n", R, cand.version);
+    sy_printf("RELEASE_RUN\tCOMMANDS\tmanual_confirm=CI+publish\tno_tag_delete=1\n");
+    mark(9, "commands", "DONE");
+}
 int main(int argc, char **argv) {
     char why[1024];
-    if (argc != 6 || !tx_eqz(argv[1], "--dry-run"))
-        die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR (driver strips --)");
-    if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
-    if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
-    if (sy_realpath(argv[4], layout, sizeof layout) < 0) die("layout dir");
-    if (cx_fmt(out, sizeof out, "%s", argv[5]) || out[0] != '/') die("out dir absolute");
-    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) die("out dir");
-    if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
-    if (rcand_load(table, &cand, why, sizeof why)) die(why);
-    emit("MODE", "DRY_RUN", cand.tag);
-    step_layout_check();
-    step_sums();
-    step_dispatch();
-    step_decide();
-    emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
-    return 0;
+    if (argc == 6 && tx_eqz(argv[1], "--dry-run")) {
+        if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
+        if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
+        if (sy_realpath(argv[4], layout, sizeof layout) < 0) die("layout dir");
+        if (cx_fmt(out, sizeof out, "%s", argv[5]) || out[0] != '/') die("out dir absolute");
+        if (sy_mkdir(out, 0755) && sy_exists(out) != 1) die("out dir");
+        if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
+        if (rcand_load(table, &cand, why, sizeof why)) die(why);
+        emit("MODE", "DRY_RUN", cand.tag);
+        step_layout_check();
+        step_sums();
+        step_dispatch();
+        step_decide();
+        emit("RESULT", "DRY_RUN_OK", "no release created, no CI, no push");
+        return 0;
+    }
+    if (argc == 6 && tx_eqz(argv[1], "--pack")) {
+        if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
+        if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
+        if (sy_realpath(argv[4], srcdir, sizeof srcdir) < 0) die("src dir");
+        if (cx_fmt(out, sizeof out, "%s", argv[5]) || out[0] != '/') die("out dir absolute");
+        if (sy_mkdir(out, 0755) && sy_exists(out) != 1) die("out dir");
+        if (cx_fmt(statep, sizeof statep, "%s/state.tsv", out)) die("state path");
+        if (rcand_load(table, &cand, why, sizeof why)) die(why);
+        need(srcdir, "sources.tsv");
+        emit("MODE", "PACK", cand.tag);
+        step_ape_pack();
+        step_inject();
+        step_layout_gen();
+        step_backfill();
+        step_sums2();
+        step_commands();
+        emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
+        return 0;
+    }
+    die("usage --dry-run ROOT CANDIDATE_TSV LAYOUT_DIR OUT_DIR | --pack ROOT CANDIDATE_TSV SRC_DIR OUT_DIR");
+    return 2;
 }
