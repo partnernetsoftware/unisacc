@@ -128,6 +128,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 上层禁 libc/POSIX | `sh ./unisacc.com tests/cxlibc.cx -- --check` | 名单不手写，按前导分类 |
 | 看某域还差什么 | `sh ./unisacc.com tests/full-domain.cx -- . DOMAIN` | 逐格读矩阵，印 OPEN 行 |
 | 记录已知缺口 | `sh ./unisacc.com tools/matrix-waive.cx -- . tests/waivers-0.0.44.tsv --check` | R 行理由 + W 行豁免 |
+| 构造图检查（G1） | `sh ./unisacc.com tools/graph-check.cx [-- --graph F --chain F --hardwire F --no-hardwire]` | 读 `build/graph.tsv`（203 节点事实表）：无环/依赖存在/kind 枚举/budget≤60；六目标次序与 `tools/chain-step.cx` 三份常量比对（不一致 ORDER_MISMATCH+rc1）；`build/hardwire.tsv` 32 条第二真相源模式逐行扫描只计数；末行 `GRAPH_CHECK\tnodes=\tedges=\tcycles=\torder_mismatch=\thardwire=`；夹具 `tools/check-graph-check.cx` |
 | 仓级棘轮（13 项） | `sh ./unisacc.com tools/ratchets.cx` | cxraw/cxinclude/cxapis/cxtrunc/cxlibc/cxplatform/srcshape/coreapi/verwriter/aluiwidth/outdep/check-literal/net-deps；toolsloc退役，新增net-deps沿计划保留第14号门称呼；旧通过记录不迁移 |
 | tools 统计与候选清理 | `sh ./unisacc.com tools/tool-inventory.cx -- --recent 10` | 总行数、按目录/文件及近N次提交增量；无调用者/无批次/疑似重复只报告；不设总量或逐文件上限。tests/toolsloc.tsv退役保留；precommit只对新增tool缺check或批次登记拦截 |
 | osx X1旧项复核（2026-11-08） | `tests/driver-target-object.cx ROOT cli`：9/0；平台宏最小源见`tests/cases/driver-default-platform.cx` | Darwin arm64 26.5.1、产品SHA f069d4c92b7f5ede508809aa3abd21e326cbecadb2fb9eccf0bd1ac7004c3e82。默认-run原生、裸-c产宿主Mach-O对象并由产品链接执行，NATIVE-RUN-HOST-TARGET核销；不承诺系统链接器兼容。裸-S仍用lnx/x86_64预定义：平台源bare/显式lnx tape SHA同为d7bb734dae19…，显式osx为e02cac44f622…；DEFAULT-TARGET-S-C保留READY，只剩-S语义裁定/修复，不重复-c修复，也不迁移六宿主CI资格 |

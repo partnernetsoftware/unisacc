@@ -1,0 +1,133 @@
+/* tools/check-graph-check.cx -- fixtures for tools/graph-check.cx (run from the repo root).
+ *
+ *   sh ./unisacc.com tools/check-graph-check.cx
+ *
+ * Writes small graphs, a fake chain-step.cx (the three six-target constants) and a hardwire table
+ * under sy_tmpdir()/graph-check-PID/, runs tools/graph-check.cx on each (bounded 50 s) and asserts
+ * exit code and summary fields: consistent graph -> rc 0 / order_mismatch=0; a cycle, a dangling
+ * dependency, budget_s 61, an unknown kind -> rc 1 with the matching FAIL row; a chain-step copy
+ * in another order -> rc 1 / order_mismatch=1; a hardwire hit is counted.  Finally the real
+ * build/graph.tsv against the real tools/chain-step.cx: structure must pass (no FAIL row,
+ * cycles=0, nodes=203); order_mismatch and hardwire are only RECORDED, not asserted, in this step.
+ * Prints CHECK_GRAPH_CHECK<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char dir[4096], chain_ok[4400], chain_bad[4400], hard[4400], hit[4400];
+static int passed, failed;
+
+static int put(const char *name, const char *body, char *path, int cap) {
+    int fd;
+    if (cx_fmt(path, cap, "%s/%s", dir, name)) return -1;
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, body, tx_len(body, 1 << 20))) { sy_close(fd); return -1; }
+    return sy_close(fd);
+}
+static const char *HDR = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\n";
+/* six slice rows in the canonical order, each depending on PREV */
+static const char *SIX =
+    "freeze\tfreeze\tshared\t-\tc\ti\to\t1\t60\te\t-\n"
+    "s.lnx-x86_64\tslice-phase\tlnx-x86_64\tfreeze\tc\ti\to\t1\t45\te\t-\n"
+    "s.lnx-arm64\tslice-phase\tlnx-arm64\tfreeze\tc\ti\to\t1\t45\te\t-\n"
+    "s.osx-x86_64\tslice-phase\tosx-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\n"
+    "s.osx-arm64\tslice-phase\tosx-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\n"
+    "s.win-x86_64\tslice-phase\twin-x86_64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\n"
+    "s.win-arm64\tslice-phase\twin-arm64\ts.lnx-x86_64\tc\ti\to\t1\t45\te\t-\n"
+    "job:a\tgen\tshared\tfreeze\tc\ti\to\t1\t40\te\t-\n"
+    "job:b\ttbl\tshared\tjob:a\tc\ti\to\t1\t40\te\t-\n"
+    "pack\tpack\tall\ts.*,job:*\tc\ti\to\t1\t60\te\t-\n";
+static const char *CHAIN_OK =
+    "static const char *cs_target[6] = {\"lnx-x86_64\", \"lnx-arm64\", \"osx-x86_64\", \"osx-arm64\", \"win-x86_64\", \"win-arm64\"};\n"
+    "static const char *cs_fp_slices[6] = {\"lnx-x86_64/candidate\", \"lnx-arm64/candidate\",\n"
+    "  \"osx-x86_64/slice-osx-x86_64\", \"osx-arm64/slice-osx-arm64\", \"win-x86_64/slice-win-x86_64\", \"win-arm64/slice-win-arm64\"};\n"
+    "x = kernel ? \"kernel-route\" : i == 0 ? \"lnx-x86_64\" : i == 1 ? \"lnx-arm64\" : i == 2 ? \"osx-x86_64\" : i == 3 ? \"osx-arm64\" : i == 4 ? \"win-x86_64\" : \"win-arm64\";\n";
+static const char *CHAIN_BAD =
+    "static const char *cs_target[6] = {\"lnx-arm64\", \"lnx-x86_64\", \"osx-arm64\", \"osx-x86_64\", \"win-arm64\", \"win-x86_64\"};\n"
+    "static const char *cs_fp_slices[6] = {\"lnx-x86_64/candidate\", \"lnx-arm64/candidate\",\n"
+    "  \"osx-x86_64/slice-osx-x86_64\", \"osx-arm64/slice-osx-arm64\", \"win-x86_64/slice-win-x86_64\", \"win-arm64/slice-win-arm64\"};\n"
+    "x = kernel ? \"kernel-route\" : i == 0 ? \"lnx-x86_64\" : i == 1 ? \"lnx-arm64\" : i == 2 ? \"osx-x86_64\" : i == 3 ? \"osx-arm64\" : i == 4 ? \"win-x86_64\" : \"win-arm64\";\n";
+
+/* run graph-check; returns rc (or -1), copies stdout into *out */
+static int run(const char *graph, const char *chain, const char *hardwire, char **out, size_t *n) {
+    char *v[] = {"sh", "./unisacc.com", "tools/graph-check.cx", "--", "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire, 0};
+    int rc = cx_runv_timeout(v, 50, out, n);
+    if (!*out) return -1;
+    return rc;
+}
+static long field(const char *out, size_t n, const char *key) {
+    long at = tx_find(out, (long)n, key, tx_len(key, 64)), v = 0, i;
+    if (at < 0) return -1;
+    for (i = at + tx_len(key, 64); i < (long)n && out[i] >= '0' && out[i] <= '9'; i++) v = v * 10 + (out[i] - '0');
+    return v;
+}
+static void expect(const char *name, const char *body, const char *chain, int want_rc, const char *want_row, long want_mism) {
+    char p[4400]; char *out = 0; size_t n = 0; int rc; long m; int ok;
+    if (put(name, body, p, sizeof p)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
+    rc = run(p, chain, hard, &out, &n);
+    m = out ? field(out, n, "order_mismatch=") : -1;
+    ok = out && (rc != 0) == (want_rc != 0) && m == want_mism && tx_contains(out, (long)n, "GRAPH_CHECK\t", 12)
+         && (!want_row || tx_contains(out, (long)n, want_row, tx_len(want_row, 128)));
+    if (ok) { printf("PASS\t%s\trc=%d\torder_mismatch=%ld\n", name, rc, m); passed++; }
+    else { printf("FAIL\t%s\twant rc%s %s order_mismatch=%ld, got rc=%d order_mismatch=%ld\n", name, want_rc ? "!=0" : "=0", want_row ? want_row : "-", want_mism, rc, m); failed++; }
+    if (out) mm_free(out);
+    sy_unlink(p);
+}
+
+int main(void) {
+    char g[1 << 14]; long k;
+    if (cx_fmt(dir, sizeof dir, "%s/graph-check-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) {
+        fprintf(stderr, "check-graph-check: cannot create scratch dir\n"); return 2;
+    }
+    if (put("chain-ok.cx", CHAIN_OK, chain_ok, sizeof chain_ok) || put("chain-bad.cx", CHAIN_BAD, chain_bad, sizeof chain_bad)
+        || put("hit.txt", "a\nsh unisacc.com x\nb\n", hit, sizeof hit)) { fprintf(stderr, "check-graph-check: fixtures\n"); return 2; }
+    if (cx_fmt(g, sizeof g, "id\tfile\tpattern\tnote\nX1\t%s\tunisacc.com\tfixture\n", hit) || put("hardwire.tsv", g, hard, sizeof hard)) return 2;
+
+    /* 1 consistent */
+    if (cx_fmt(g, sizeof g, "# c\n%s%s", HDR, SIX)) return 2;
+    expect("ok.tsv", g, chain_ok, 0, "HARDWIRE\t", 0);
+    { char *out = 0; size_t n = 0; char p[4400]; int rc;
+      if (put("ok2.tsv", g, p, sizeof p)) return 2;
+      rc = run(p, chain_ok, hard, &out, &n);
+      if (rc == 0 && out && field(out, n, "hardwire=") == 1 && field(out, n, "nodes=") == 10 && field(out, n, "edges=") == 16 && field(out, n, "cycles=") == 0)
+          { printf("PASS\tok-counts\tnodes=10 edges=16 hardwire=1\n"); passed++; }
+      else { printf("FAIL\tok-counts\trc=%d out=%s\n", rc, out ? out : "(none)"); failed++; }
+      if (out) mm_free(out); sy_unlink(p); }
+    /* 2 cycle: freeze depends on pack */
+    k = tx_chr(SIX, tx_len(SIX, 4096), '\n') + 1;   /* SIX without its first (freeze) row */
+    if (cx_fmt(g, sizeof g, "%sfreeze\tfreeze\tshared\tpack\tc\ti\to\t1\t60\te\t-\n%s", HDR, SIX + k)) return 2;
+    expect("cycle.tsv", g, chain_ok, 1, "FAIL\tstructure\t", 0);
+    { char *out = 0; size_t n = 0; char p[4400]; int rc;
+      if (put("cycle2.tsv", g, p, sizeof p)) return 2;
+      rc = run(p, chain_ok, hard, &out, &n);
+      if (rc != 0 && out && field(out, n, "cycles=") >= 1 && tx_contains(out, (long)n, "\tcycle\t", 7)) { printf("PASS\tcycle-row\n"); passed++; }
+      else { printf("FAIL\tcycle-row\t%s\n", out ? out : "(none)"); failed++; }
+      if (out) mm_free(out); sy_unlink(p); }
+    /* 3 dangling */
+    if (cx_fmt(g, sizeof g, "%s%sorphan\ttool\tshared\tnope,job:zz*\tc\ti\to\t1\t60\te\t-\n", HDR, SIX)) return 2;
+    expect("dangling.tsv", g, chain_ok, 1, "\tdepends_on\tnope", 0);
+    /* 4 budget 61 */
+    if (cx_fmt(g, sizeof g, "%s%sslow\ttool\tshared\tfreeze\tc\ti\to\t1\t61\te\t-\n", HDR, SIX)) return 2;
+    expect("budget61.tsv", g, chain_ok, 1, "\tbudget_s\t61", 0);
+    /* 5 unknown kind */
+    if (cx_fmt(g, sizeof g, "%s%sodd\tmagic\tshared\tfreeze\tc\ti\to\t1\t60\te\t-\n", HDR, SIX)) return 2;
+    expect("kind.tsv", g, chain_ok, 1, "\tkind\tmagic", 0);
+    /* 6 order mismatch in cs_target only */
+    if (cx_fmt(g, sizeof g, "%s%s", HDR, SIX)) return 2;
+    expect("order.tsv", g, chain_bad, 1, "ORDER_MISMATCH\t", 1);
+    /* 7 real graph: structure must pass; order/hardwire recorded */
+    { char *out = 0; size_t n = 0; int rc;
+      rc = run("build/graph.tsv", "tools/chain-step.cx", "build/hardwire.tsv", &out, &n);
+      if (out && !tx_contains(out, (long)n, "FAIL\tstructure\t", 15) && field(out, n, "cycles=") == 0 && field(out, n, "nodes=") == 203) {
+          printf("PASS\treal-structure\tnodes=203 cycles=0\n"); passed++;
+          printf("RECORD\treal\trc=%d\torder_mismatch=%ld\thardwire=%ld\tedges=%ld\n", rc, field(out, n, "order_mismatch="), field(out, n, "hardwire="), field(out, n, "edges="));
+      } else { printf("FAIL\treal-structure\trc=%d\n", rc); failed++; }
+      if (out) mm_free(out); }
+
+    sy_unlink(chain_ok); sy_unlink(chain_bad); sy_unlink(hit); sy_unlink(hard); sy_rmdir(dir);
+    printf("CHECK_GRAPH_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

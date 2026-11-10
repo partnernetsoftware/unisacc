@@ -1,0 +1,204 @@
+/* tools/graph-check.cx -- machine check of the construction graph build/graph.tsv (read-only).
+ *
+ *   sh ./unisacc.com tools/graph-check.cx [-- [--graph F] [--chain F] [--hardwire F] [--no-hardwire]]
+ *
+ * (a) structure: 11 named columns; kind in the fixed enumeration; every depends_on entry exists
+ *     (a trailing * expands to every node with that prefix, "-" is none); no cycle; budget_s is an
+ *     integer 1..60 (one child process; aggregate nodes carry per-step bounds).
+ * (b) order: the six targets in first-appearance order of column 3 (shared/all excluded) are the
+ *     fixedpoint phase order; they must equal the three copies in tools/chain-step.cx
+ *     (cs_target[6], cs_fp_slices[6] and the i == 0 ? ... ternary chain) -- each differing copy is
+ *     one ORDER_MISMATCH row naming file:line.
+ * (c) hardwire: every row of build/hardwire.tsv (file, literal pattern) is scanned line by line;
+ *     each hit is HARDWIRE<TAB>file:line<TAB>id:pattern.  Report only, not a gate in this step.
+ *
+ * Output: FAIL/ORDER_MISMATCH/HARDWIRE rows, then
+ *   GRAPH_CHECK<TAB>nodes=N<TAB>edges=M<TAB>cycles=C<TAB>order_mismatch=K<TAB>hardwire=H
+ * Exit 0 when no structure failure and K == 0; 1 otherwise; 2 on IO/usage errors. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define MAXN 4096
+#define NKIND 17
+static const char *kinds[NKIND] = {"freeze", "snap", "tool", "ctx", "wave", "compare", "route", "p4", "slice-phase",
+                                   "fixedpoint", "kernel", "pack", "install", "s9", "gen", "tbl", "net"};
+typedef struct { char id[128], kind[32], target[32]; char *deps; int line; int *adj, nadj; int color; } Node;
+static Node nodes[MAXN]; static int nn;
+static long fails, edges, cycles, mism, hard;
+static const char *graph_path = "build/graph.tsv", *chain_path = "tools/chain-step.cx", *hard_path = "build/hardwire.tsv";
+
+static char *slurp(const char *p, long *n) {
+    int fd = sy_open_read(p); char *b;
+    if (fd < 0) { fprintf(stderr, "graph-check: cannot open %s (rc %d)\n", p, fd); exit(2); }
+    *n = sy_reg_size(fd);
+    if (*n < 0) { fprintf(stderr, "graph-check: cannot size %s\n", p); exit(2); }
+    b = mm_alloc(*n + 1);
+    if (!b || sy_read_full(fd, b, *n)) { fprintf(stderr, "graph-check: cannot read %s\n", p); exit(2); }
+    sy_close(fd); b[*n] = 0; return b;
+}
+static void fail(int line, const char *what, const char *detail) {
+    printf("FAIL\tstructure\t%s:%d\t%s\t%s\n", graph_path, line, what, detail); fails++;
+}
+static int find(const char *id, long n) { int i; for (i = 0; i < nn; i++) if (tx_same(nodes[i].id, tx_len(nodes[i].id, 128), id, n)) return i; return -1; }
+static void addedge(int from, int to) {
+    Node *a = &nodes[from];
+    if (a->nadj % 64 == 0) { int *g = mm_grow(a->adj, (a->nadj + 64) * (long)sizeof(int)); if (!g) exit(2); a->adj = g; }
+    a->adj[a->nadj++] = to; edges++;
+}
+static int budget_ok(const char *s, long n) {
+    long i, v = 0; if (n < 1 || n > 3) return 0;
+    for (i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return 0; v = v * 10 + (s[i] - '0'); }
+    return v >= 1 && v <= 60;
+}
+static void load_graph(void) {
+    long n, p = 0, lineno = 0; int header = 0, i; char *b = slurp(graph_path, &n);
+    while (p < n) {
+        long q = p, off, len; lineno++;
+        while (q < n && b[q] != '\n') q++;
+        if (q == p || b[p] == '#') { p = q + 1; continue; }
+        if (!header) {
+            static const char *H = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote";
+            if (!tx_same(b + p, q - p, H, tx_len(H, 256)))
+                { fail((int)lineno, "header", "expected the 11 named columns"); exit(1); }
+            header = 1; p = q + 1; continue;
+        }
+        if (tx_fields(b + p, q - p, '\t') != 11) { fail((int)lineno, "columns", "row must have 11 tab-separated fields"); p = q + 1; continue; }
+        if (nn == MAXN) { fail((int)lineno, "capacity", "more than MAXN nodes"); exit(2); }
+        tx_field(b + p, q - p, '\t', 0, &off, &len); tx_copy(nodes[nn].id, 128, b + p + off, len);
+        if (len == 0 || find(b + p + off, len) >= 0) fail((int)lineno, "node_id", len ? "duplicate node_id" : "empty node_id");
+        tx_field(b + p, q - p, '\t', 1, &off, &len); tx_copy(nodes[nn].kind, 32, b + p + off, len);
+        for (i = 0; i < NKIND; i++) if (tx_same(b + p + off, len, kinds[i], tx_len(kinds[i], 32))) break;
+        if (i == NKIND) fail((int)lineno, "kind", nodes[nn].kind);
+        tx_field(b + p, q - p, '\t', 2, &off, &len); tx_copy(nodes[nn].target, 32, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 3, &off, &len); nodes[nn].deps = mm_alloc(len + 1); tx_copy(nodes[nn].deps, len + 1, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 8, &off, &len);
+        if (!budget_ok(b + p + off, len)) { char d[64]; tx_copy(d, 64, b + p + off, len); fail((int)lineno, "budget_s", d); }
+        nodes[nn].line = (int)lineno; nn++;
+        p = q + 1;
+    }
+    if (!header) { fail(0, "header", "no header row"); exit(1); }
+    /* edges, after all ids are known */
+    for (i = 0; i < nn; i++) {
+        const char *d = nodes[i].deps; long dn = tx_len(d, 1 << 20), k, nf;
+        if (tx_eqz(d, "-") || dn == 0) continue;
+        nf = tx_fields(d, dn, ',');
+        for (k = 0; k < nf; k++) {
+            long off, len; int j, any = 0;
+            tx_field(d, dn, ',', k, &off, &len);
+            if (len > 1 && d[off + len - 1] == '*') {
+                for (j = 0; j < nn; j++) if (j != i && tx_prefix(nodes[j].id, tx_len(nodes[j].id, 128), d + off, len - 1)) { addedge(i, j); any = 1; }
+                if (!any) { char x[128]; tx_copy(x, 128, d + off, len); fail(nodes[i].line, "depends_on", x); }
+            } else {
+                j = find(d + off, len);
+                if (j < 0) { char x[128]; tx_copy(x, 128, d + off, len); fail(nodes[i].line, "depends_on", x); }
+                else if (j == i) fail(nodes[i].line, "depends_on", "self dependency");
+                else addedge(i, j);
+            }
+        }
+    }
+}
+/* DFS colouring; the first back edge found per start node is one cycle. */
+static int dfs(int v) {
+    int k; nodes[v].color = 1;
+    for (k = 0; k < nodes[v].nadj; k++) {
+        int w = nodes[v].adj[k];
+        if (nodes[w].color == 1) { char d[300]; if (cx_fmt(d, sizeof d, "%s -> %s", nodes[v].id, nodes[w].id)) d[0] = 0; fail(nodes[v].line, "cycle", d); cycles++; return 1; }
+        if (nodes[w].color == 0 && dfs(w)) return 1;
+    }
+    nodes[v].color = 2; return 0;
+}
+/* ---- order ---- */
+static char gorder[6][32]; static int ngo;
+static void graph_order(void) {
+    int i, k;
+    for (i = 0; i < nn; i++) {
+        const char *t = nodes[i].target;
+        if (tx_eqz(t, "shared") || tx_eqz(t, "all") || t[0] == 0) continue;
+        for (k = 0; k < ngo; k++) if (tx_eqz(gorder[k], t)) break;
+        if (k < ngo) continue;
+        if (ngo == 6) { fail(nodes[i].line, "target", t); continue; }
+        tx_copy(gorder[ngo++], 32, t, tx_len(t, 32));
+    }
+    if (ngo != 6) { char d[64]; if (cx_fmt(d, sizeof d, "%d distinct targets, want 6", ngo)) d[0] = 0; fail(0, "targets", d); }
+}
+/* the next COUNT string literals after position AT in b[0..n); each cut at '/'; returns count found */
+static int literals(const char *b, long n, long at, int count, char out[][32]) {
+    int got = 0; long i = at;
+    while (got < count && i < n) {
+        if (b[i] == '"') {
+            long j = i + 1, len; while (j < n && b[j] != '"') j++;
+            len = j - i - 1; { long s = tx_chr(b + i + 1, len, '/'); if (s >= 0) len = s; }
+            tx_copy(out[got++], 32, b + i + 1, len); i = j + 1;
+        } else i++;
+    }
+    return got;
+}
+static int line_of(const char *b, long at) { long i; int l = 1; for (i = 0; i < at; i++) if (b[i] == '\n') l++; return l; }
+static void compare_copy(const char *b, long n, const char *anchor, const char *name, int skip) {
+    long at = tx_find(b, n, anchor, tx_len(anchor, 128)); char got[8][32]; int k, same = 1; char g[256], w[256]; long gl = 0, wl = 0;
+    if (at < 0) { printf("ORDER_MISMATCH\t%s:0\t%s\tconstant not found\n", chain_path, name); mism++; return; }
+    if (literals(b, n, at, 6 + skip, got) != 6 + skip) { printf("ORDER_MISMATCH\t%s:%d\t%s\tfewer than 6 literals\n", chain_path, line_of(b, at), name); mism++; return; }
+    for (k = 0; k < 6; k++) {
+        long a = tx_len(got[k + skip], 32), c = tx_len(gorder[k], 32);
+        if (!tx_same(got[k + skip], a, gorder[k], c)) same = 0;
+        tx_copy(g + gl, 256 - gl, got[k + skip], a); gl += a; g[gl++] = ','; tx_copy(w + wl, 256 - wl, gorder[k], c); wl += c; w[wl++] = ',';
+    }
+    g[gl ? gl - 1 : 0] = 0; w[wl ? wl - 1 : 0] = 0;
+    if (!same) { printf("ORDER_MISMATCH\t%s:%d\t%s\tgot=%s\twant=%s\n", chain_path, line_of(b, at), name, g, w); mism++; }
+}
+static void check_order(void) {
+    long n; char *b = slurp(chain_path, &n);
+    if (ngo != 6) return;
+    compare_copy(b, n, "cs_target[6] = {", "cs_target", 0);
+    compare_copy(b, n, "cs_fp_slices[6] = {", "cs_fp_slices", 0);
+    compare_copy(b, n, "\"kernel-route\" : i == 0 ?", "phase-ternary", 1);
+    mm_free(b);
+}
+/* ---- hardwire ---- */
+static void scan_file(const char *id, const char *file, const char *pat) {
+    long n, p = 0, pl = tx_len(pat, 512); int line = 0; int fd = sy_open_read(file); char *b;
+    if (fd < 0) { printf("HARDWIRE\t%s:0\t%s:%s\t(file unreadable rc %d)\n", file, id, pat, fd); hard++; return; }
+    sy_close(fd); b = slurp(file, &n);
+    while (p < n) {
+        long q = p; line++;
+        while (q < n && b[q] != '\n') q++;
+        if (tx_contains(b + p, q - p, pat, pl)) { printf("HARDWIRE\t%s:%d\t%s:%s\n", file, line, id, pat); hard++; }
+        p = q + 1;
+    }
+    mm_free(b);
+}
+static void check_hardwire(void) {
+    long n, p = 0; int header = 0; char *b = slurp(hard_path, &n);
+    while (p < n) {
+        long q = p, off, len; char id[32], file[512], pat[512];
+        while (q < n && b[q] != '\n') q++;
+        if (q == p || b[p] == '#') { p = q + 1; continue; }
+        if (!header) { header = 1; p = q + 1; continue; }
+        if (tx_fields(b + p, q - p, '\t') < 3) { fprintf(stderr, "graph-check: bad hardwire row\n"); exit(2); }
+        tx_field(b + p, q - p, '\t', 0, &off, &len); tx_copy(id, 32, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 1, &off, &len); tx_copy(file, 512, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 2, &off, &len); tx_copy(pat, 512, b + p + off, len);
+        scan_file(id, file, pat);
+        p = q + 1;
+    }
+    mm_free(b);
+}
+int main(int argc, char **argv) {
+    int i, no_hard = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--graph") && i + 1 < argc) graph_path = argv[++i];
+        else if (tx_eqz(argv[i], "--chain") && i + 1 < argc) chain_path = argv[++i];
+        else if (tx_eqz(argv[i], "--hardwire") && i + 1 < argc) hard_path = argv[++i];
+        else if (tx_eqz(argv[i], "--no-hardwire")) no_hard = 1;
+        else { fprintf(stderr, "graph-check: unknown argument %s\n", argv[i]); return 2; }
+    }
+    load_graph();
+    for (i = 0; i < nn; i++) if (nodes[i].color == 0) dfs(i);
+    graph_order();
+    check_order();
+    if (!no_hard) check_hardwire();
+    printf("GRAPH_CHECK\tnodes=%d\tedges=%ld\tcycles=%ld\torder_mismatch=%ld\thardwire=%ld\n", nn, edges, cycles, mism, hard);
+    return fails || mism ? 1 : 0;
+}
