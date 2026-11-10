@@ -105,7 +105,7 @@ int main(void) {
         char rp[4400]; size_t n; char *s;
         cx_fmt(rp, sizeof rp, "%s", report_path);
         s = cx_read(rp, &n);
-        ck(s && strstr(s, "wall_ms") && strstr(s, "step\t") && strstr(s, "truncated\t0"), "wall-ms-column");
+        ck(s && strstr(s, "wall_ms") && strstr(s, "step ") && strstr(s, "\t") && strstr(s, "truncated\t0"), "wall-ms-column");
         free(s);
     }
     /* daily 档: init 不带 --tier */
@@ -145,8 +145,29 @@ int main(void) {
         runv(w, dir, 20, buf, sizeof buf, &rc);
         ck(rc == 0 && strstr(buf, "report=") && !strstr(buf, "1970-01-01"), "date-default-today");
     }
-    /* 日志截断: 假 s9 不能造 8000 字节, 以大 max-steps 无法触发; 此处只验证截断标记字段存在 */
-    printf("INFO\tcheck-s9-nightly.truncation 由长日志路径保证(note 封顶标 TRUNCATED), 未单测 UNMEASURED\n");
+    /* 日志截断: S9_FAKE_LONG 令假 s9 连续 PENDING 1500 步, 每步一行日志, 总量超 8000 字节 */
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        char *w[16];
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+        setenv("S9_FAKE_LONG", "80", 1);
+        w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = runp;
+        w[6] = "--tier"; w[7] = "commit"; w[8] = "--date"; w[9] = "2026-11-11"; w[10] = "--fake"; w[11] = fake;
+        w[12] = "--max-steps"; w[13] = "200"; w[14] = 0;
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "truncate-exit-contract");
+        {
+            const char *r = strstr(buf, "\treport=");
+            char rp[4400]; size_t k = 0, n; char *s;
+            rp[0] = 0;
+            if (r) { r += 8; while (r[k] && r[k] != '\n' && k + 1 < sizeof rp) { rp[k] = r[k]; k++; } rp[k] = 0; }
+            s = k ? cx_read(rp, &n) : 0;
+            ck(s && strstr(s, "truncated\t1") && strstr(s, "TRUNCATED"), "truncate-marked");
+            free(s);
+        }
+        unsetenv("S9_FAKE_LONG");
+    }
+    printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
