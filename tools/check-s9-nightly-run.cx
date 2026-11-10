@@ -51,6 +51,21 @@ int main(void) {
         char *b1[] = {"sh", com, src, "-o", fake, 0};
         rc = runv(g1, dir, 30, buf, sizeof buf);
         ck(rc == 0, "origin-commit");
+        /* 门里补丁只暂存未提交:克隆拿到的是 HEAD,故把被测根工作树版本覆盖进 origin 并在 origin 提交
+         * (夜跑入口会把克隆 reset 到 origin/main,只覆盖克隆会被抹掉) */
+        {
+            static const char *ov[] = {"tools/s9-nightly.cx", "tools/s9-nightly-run.cx", "tests/fixtures/s9-nightly-fake.cx"};
+            char *gc[] = {"git", "-C", org, "-c", "user.name=chk", "-c", "user.email=chk@x", "commit", "-q", "-a", "--allow-empty", "-m", "overlay worktree", 0};
+            for (int q = 0; q < 3; q++) {
+                char from[4400], to[4400];
+                char *cp3[] = {"cp", from, to, 0};
+                if (cx_fmt(from, sizeof from, "%s/%s", root, ov[q]) || cx_fmt(to, sizeof to, "%s/%s", org, ov[q])) die("fmt");
+                rc = runv(cp3, dir, 10, buf, sizeof buf);
+                ck(rc == 0, "overlay-worktree");
+            }
+            rc = runv(gc, dir, 10, buf, sizeof buf);
+            ck(rc == 0, "overlay-commit");
+        }
         rc = runv(g4, dir, 20, buf, sizeof buf);
         ck(rc == 0, "clone");
         runv(cp2, dir, 10, buf, sizeof buf);
@@ -85,6 +100,21 @@ int main(void) {
         ck(s && n > 0 && strstr(s, "\tcommit\tPASS\t"), "index-row");
         free(s);
     }
+    /* 负例: FAIL 时 index 行 report 列非 '-' */
+    setenv("S9_FAKE_FAIL", "driver", 1);
+    {   /* 运行目录名含秒级时钟,避免同秒重名 */
+        char *sl[] = {"sleep", "2", 0};
+        runv(sl, root, 5, buf, sizeof buf);
+    }
+    rc = runv(v, root, 50, buf, sizeof buf);
+    ck(rc != 0 && strstr(buf, "S9_NIGHTLY_RUN status=FAIL"), "fail-run-fail");
+    {
+        char *s = cx_read(idx, &n), *ln;
+        ln = s ? strstr(s, "\tcommit\tFAIL\t") : 0;
+        ck(ln && strncmp(ln + 13, "-\t", 2) != 0 && ln[13] == '/', "fail-index-report-not-dash");
+        free(s);
+    }
+    unsetenv("S9_FAKE_FAIL");
     printf("check-s9-nightly-run failed=%d\n", failed);
     if (!failed) printf("S9_NIGHTLY_RUN_OK\n");
     return failed ? 1 : 0;

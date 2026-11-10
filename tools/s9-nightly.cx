@@ -143,7 +143,7 @@ int main(int argc, char **argv) {
     char report[4400], tmp[4000], datebuf[32];
     int i, rc, steps, max_steps = 4, step_s = 290, step_done = 0;
     static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
-    if (argc < 3) die("usage", "ROOT RUN --tier commit|daily [--date D] [--fake SCRIPT]");
+    if (argc < 3) die("usage", "ROOT RUN --tier commit|daily|release [--date D] [--fake SCRIPT]");
     if (sy_realpath(argv[1], root, sizeof root) < 0) die("root", argv[1]);
     run = argv[2];
     fake = 0;
@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
         else die("unknown", argv[i]);
     }
     if (max_steps < 1) die("max-steps", "need >= 1");
-    if (strcmp(tier, "commit") && strcmp(tier, "daily")) die("tier", tier);
+    if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) die("tier", tier);
     if (!date) {
         long ws = sy_wall_s();
         if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");
@@ -168,19 +168,19 @@ int main(int argc, char **argv) {
     note("begin");
     rc = invoke("build", 0, 0, 0, 55, tmp, sizeof tmp);
     note("build");
-    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\n", rc); return 1; }
+    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
-    /* s9-shards init 只接受 --tier commit;daily 档不带 --tier,即全层(commit+daily+release)选择。 */
-    if (!strcmp(tier, "commit")) { xa4 = "--tier"; xa5 = "commit"; }
+    /* s9-shards init: commit 与 release 透传 --tier; daily 不带 --tier 即 FULL。 */
+    if (!strcmp(tier, "commit") || !strcmp(tier, "release")) { xa4 = "--tier"; xa5 = (char *)tier; }
     rc = invoke("init", root, run, "-", 55, tmp, sizeof tmp);
     xa4 = xa5 = 0;
     note("init");
-    if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\n", rc); return 1; }
+    if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
     for (i = 0; i < 6; i++) {
         rc = invoke("prepare", root, run, preps[i], 55, tmp, sizeof tmp);
         note(preps[i]);
-        if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\n", preps[i], rc); return 1; }
+        if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[i], rc, report); return 1; }
         pass_n++;
     }
     for (steps = 0; steps < max_steps; steps++) {
@@ -196,13 +196,13 @@ int main(int argc, char **argv) {
             sn[q] = 0;
             note(sn);
         }
-        if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step\trc=%d\n", rc); return 1; }
+        if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step\trc=%d\treport=%s\n", rc, report); return 1; }
         /* 出口仅一条:本步输出无 S9_WT 行(本步没有新发片)。start==done 不是出口(可能仍有未发片),只用于 retry 判断。 */
         nu = scan_run(run, &starts, &dones);
         if (!has_wt(tmp)) finished = 1;
         pass_n++;
         if (finished) { step_done = 1; break; }
-        if (steps == max_steps - 1) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step-pending\n"); return 1; }
+        if (steps == max_steps - 1) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step-pending\treport=%s\n", report); return 1; }
         (void)nu;
     }
     /* 有 start 无 done 的片(UNKNOWN):每片调 retry 一次,再 aggregate;结果由 aggregate 定 */
@@ -216,7 +216,7 @@ int main(int argc, char **argv) {
     (void)step_done;
     rc = invoke("aggregate", root, run, 0, 55, tmp, sizeof tmp);
     note("aggregate");
-    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\n", rc); return 1; }
+    if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
     notexec_n = 0;
     write_report(report, "PASS");

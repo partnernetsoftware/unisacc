@@ -1,0 +1,101 @@
+/* tools/check-s9-release-tier.cx -- C7p2: list-tier release ids == batches.tsv tier=release. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-s9-release-tier.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void die(const char *s) { fprintf(stderr, "check-s9-release-tier: %s\n", s); exit(2); }
+int main(int argc, char **argv) {
+    char root[4400], run[4400], bat[4400], why[512], *tsv;
+    size_t tn = 0;
+    np_result r = {0};
+    int exp = 0, got = 0, miss = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (argc < 2 || argv[1][0] != '/') die("usage: check-s9-release-tier ABS_OUT_DIR");
+    {
+        char *mo[] = {"mkdir", "-p", argv[1], 0};
+        if (np_run(mo, 0, 0, 5, &r, why, sizeof why) || r.rc) { np_free(&r); die("mkdir-out"); }
+        np_free(&r);
+    }
+    if (cx_fmt(run, sizeof run, "%s/s9rt-XXXXXX", argv[1]) || !mkdtemp(run)) die("tmpdir");
+    if (cx_fmt(bat, sizeof bat, "%s/tests/batches.tsv", root)) die("p");
+    {
+        char *mk[] = {"mkdir", "-p", run, 0};
+        if (np_run(mk, 0, 0, 5, &r, why, sizeof why) || r.rc) { np_free(&r); die("mkdir"); }
+        np_free(&r);
+    }
+    tsv = cx_read(bat, &tn);
+    if (!tsv) die("batches");
+    {
+        size_t i = 0;
+        while (i < tn) {
+            size_t e = i, col[16], nc = 0;
+            col[0] = i;
+            while (e < tn && tsv[e] != '\n') {
+                if (tsv[e] == '\t' && nc + 1 < 16) col[++nc] = e + 1;
+                e++;
+            }
+            if (tsv[i] != '#' && nc >= 6) {
+                size_t last = col[nc], lastn = e > last ? e - last : 0;
+                size_t i1 = col[1], n1 = col[2] > col[1] + 1 ? col[2] - col[1] - 1 : 0;
+                size_t i5 = col[5], n5 = col[6] > col[5] + 1 ? col[6] - col[5] - 1 : 0;
+                if (lastn == 7 && !memcmp(tsv + last, "release", 7) && n1 == 11 && !memcmp(tsv + i1, "IMPLEMENTED", 11) && n5 == 10 && !memcmp(tsv + i5, "lnx/x86_64", 10)) exp++;
+            }
+            i = e < tn ? e + 1 : e;
+        }
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/s9-shards.cx", "--", "list-tier", root, run, "release", 0};
+        r.out = 0; r.err = 0;
+        if (np_run(v, root, 0, 30, &r, why, sizeof why)) { np_free(&r); free(tsv); die("list-tier"); }
+        ck(r.rc == 0, "list-tier-rc0");
+        if (r.out) {
+            const char *p = r.out;
+            while ((p = strstr(p, "S9_LIST_TIER\tid="))) {
+                const char *id = p + 16;
+                const char *nl = strchr(id, '\n');
+                const char *tab = strchr(id, '\t');
+                size_t idn = 0;
+                int found = 0;
+                size_t j;
+                got++;
+                if (tab && (!nl || tab < nl)) nl = tab;
+                if (!nl) nl = id + strlen(id);
+                idn = (size_t)(nl - id);
+                j = 0;
+                while (j < tn) {
+                    size_t e = j, tabs = 0, last = j, idend = j;
+                    if (tsv[j] != '#' && tsv[j] != '\n') {
+                        while (e < tn && tsv[e] != '\t' && tsv[e] != '\n') e++;
+                        idend = e;
+                        while (e < tn && tsv[e] != '\n') {
+                            if (tsv[e] == '\t') { tabs++; last = e + 1; }
+                            e++;
+                        }
+                        if (tabs >= 1 && (size_t)(idend - j) == idn && !memcmp(tsv + j, id, idn) && e > last && e - last == 7 && !memcmp(tsv + last, "release", 7))
+                            found = 1;
+                    } else {
+                        while (e < tn && tsv[e] != '\n') e++;
+                    }
+                    j = e < tn ? e + 1 : e;
+                }
+                if (!found) miss++;
+                p = nl;
+            }
+        }
+        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+        np_free(&r);
+    }
+    free(tsv);
+    ck(exp > 0 && got == exp && miss == 0, "release-set-equals-tsv");
+    printf("INFO\texp=%d\tgot=%d\tmiss=%d\n", exp, got, miss);
+    printf("CHECK_S9_RELEASE_TIER\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
