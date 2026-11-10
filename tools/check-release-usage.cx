@@ -1,9 +1,14 @@
-/* tools/check-release-usage.cx -- 负控(0.0.50):release-build 缺参数必须干净退出。
- * 背景:rb_die 在 D 集成时丢了 sy_exit(1),p3 只给 ROOT 时打印 usage 后继续执行,
- * 越界读 argv[3] 以 SIGSEGV(139) 退出;0.0.49 同调用是干净的 rc1。本检查钉住:
- *   U1 p3 只给 ROOT(缺 SRC_PKG/OUT_PKG) -> rc1 且 stderr 有 usage 行,绝不能 139/11;
- *   U2 slice 只给 ROOT(缺 PKG/OUT) -> 同上;
- *   U3 rb_die 源文本必须含 sy_exit(回归钉:防再次被误删)。 */
+/* tools/check-release-usage.cx -- release-build 缺参数必须干净退出,且 freeze 必须真的成功(0.0.50)。
+ * 背景:(1)rb_die 在 D 集成时丢了 sy_exit(1),p3 只给 ROOT 时打印 usage 后继续执行,越界读 argv
+ * 以 SIGSEGV(139) 退出;(2)D5R 重写 rb_pipe 后不再去掉尾部换行,rb_freeze 把 "<40 hex>\n" 读成 41 字节,
+ * 每条 freeze 路径都在 "rev" 处 die——在 (1) 未修时这个失败是静默的。
+ * main() 对 p3/slice 总是先 freeze(rev 默认 HEAD),freeze 会在 ROOT/out 建快照,所以每个用例都在
+ * 各自的临时共享克隆里跑(幂等),工具源取被测 ROOT 的工作树。
+ *   U1 p3 只给 ROOT:freeze 成功(stdout 有 "release-build\trev\t" 成功行、stderr 无 "release-build: rev"
+ *      die 文本),随后缺参以 rc1 退出且 stderr 有 usage 行,绝不能 139/11;
+ *   U2 slice 只给 ROOT:同上 rc1 且干净;
+ *   U3 rb_die 源文本必须含 sy_exit(回归钉);
+ *   U4 rb_pipe 源文本必须含尾部换行修剪(回归钉)。 */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -11,6 +16,7 @@
 #pragma unisa use text.text
 #pragma unisa use sys.sig
 #pragma unisa use cxlib.netpack
+#pragma unisa use mem.heap
 
 static int failed;
 static char root[4096];
@@ -20,38 +26,57 @@ static void ck(int ok, const char *n) {
     if (!ok) failed++;
 }
 static long tlen(const char *s) { return tx_len(s, 1 << 20); }
-static int run(char **v, char *err, int cap) {
-    np_result r = {0}; char why[512] = {0}; int rc;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { np_free(&r); return 125; }
-    rc = r.rc;
-    if (err) { long m = (long)r.errn; if (m > cap - 1) m = cap - 1;
-      { long i; for (i = 0; i < m; i++) err[i] = r.err[i]; } err[m > 0 ? m : 0] = 0; }
-    np_free(&r);
-    return rc;
-}
 static int has(const char *b, const char *s) { return tx_find(b, tlen(b), s, tlen(s)) >= 0; }
 
+/* 在临时共享克隆 TMP/r 里以 ROOT 的工具跑 release-build <sub> TMP/r;stdout+stderr 合并进 buf。 */
+static int fresh_run(const char *sub, char *buf, long cap) {
+    char tmp[4400], cmd[9000], rmc[4600]; np_result r = {0}; char why[512] = {0}; int rc = -1;
+    char *sh[4];
+    buf[0] = 0;
+    if (cx_fmt(tmp, sizeof tmp, "%s/release-usage-XXXXXX", sy_tmpdir()) || !mkdtemp(tmp)) return -2;
+    if (cx_fmt(cmd, sizeof cmd,
+        "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/r/unisacc.com' && "
+        "cp '%s/unisacc.com.build.json' '%s/r/unisacc.com.build.json' 2>/dev/null; "
+        "mkdir -p '%s/r/out' && cd '%s/r' && sh '%s/unisacc.com' '%s/tools/release-build.cx' -- %s '%s/r'",
+        root, tmp, root, tmp, root, tmp, tmp, tmp, root, root, sub, tmp)) return -3;
+    sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+    if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+        long m = (long)r.errn, o = (long)r.outn, i;
+        if (m > cap - 1) m = cap - 1;
+        for (i = 0; i < m; i++) buf[i] = r.err[i];
+        if (m + o > cap - 1) o = cap - 1 - m;
+        for (i = 0; i < o; i++) buf[m + i] = r.out[i];
+        buf[m + o] = 0;
+        rc = r.rc;
+    }
+    np_free(&r);
+    if (!cx_fmt(rmc, sizeof rmc, "rm -rf '%s'", tmp)) { np_result q = {0}; char w2[128] = {0};
+        sh[2] = rmc; np_run(sh, root, 0, 20, &q, w2, sizeof w2); np_free(&q); }
+    return rc;
+}
+
 int main(void) {
-    char err[8192]; char *v[6]; int rc;
+    char buf[16384]; int rc;
     if (sy_cwd(root, sizeof root)) return 2;
-    v[0] = "sh"; v[1] = "unisacc.com"; v[2] = "tools/release-build.cx"; v[3] = "--";
-    v[4] = "p3"; v[5] = ".";
-    { char *w[7]; int k; for (k = 0; k < 6; k++) w[k] = v[k]; w[6] = 0;
-      rc = run(w, err, sizeof err); }
+    /* U1 */
+    rc = fresh_run("p3", buf, sizeof buf);
     ck(rc == 1, "U1 p3 missing args exits 1 (not segv)");
-    ck(has(err, "release-build: rev") || has(err, "usage"), "U1 clean refusal on stderr");
-    ck(has(err, "usage: p3 ROOT SRC_PKG OUT_PKG") || has(err, "release-build: rev"), "U1 refusal line present");
-    /* U2: slice 只给 ROOT */
-    v[4] = "slice"; v[5] = root; { char *w[7]; int k; for (k = 0; k < 6; k++) w[k] = v[k]; w[6] = 0;
-      rc = run(w, err, sizeof err); }
+    ck(has(buf, "release-build\trev\t"), "U1 freeze rev succeeded (success line present)");
+    ck(!has(buf, "release-build: rev"), "U1 no rev die text (rb_pipe trims trailing newline)");
+    ck(has(buf, "usage: p3 ROOT SRC_PKG OUT_PKG"), "U1 usage line present");
+    /* U2 */
+    rc = fresh_run("slice", buf, sizeof buf);
     ck(rc == 1, "U2 slice missing args exits 1 (not segv)");
-    ck(has(err, "release-build:") , "U2 clean refusal");
-    /* U3: rb_die 必须退出 */
+    ck(has(buf, "release-build\trev\t") && !has(buf, "release-build: rev"), "U2 freeze ok before refusal");
+    ck(has(buf, "release-build:"), "U2 clean refusal");
+    /* U3 + U4: 源文本回归钉 */
     { char p[4400]; size_t n; char *b;
       if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) return 2;
       b = (char *)cx_read(p, &n);
       ck(b && tx_find(b, (long)n, "sy_eprintf(\"release-build: %s\\n\", s);\n    sy_exit(1);", 53) >= 0, "U3 rb_die exits");
-      if (b) (void)b; }
+      { const char *pin = "while (m > 0 && (out[m - 1] == '\\n' || out[m - 1] == '\\r')) m--;";
+        ck(b && tx_find(b, (long)n, pin, tlen(pin)) >= 0, "U4 rb_pipe trims trailing newline (source pin)"); }
+      if (b) mm_free(b); }
     sy_printf("CHECK_RELEASE_USAGE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
