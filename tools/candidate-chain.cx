@@ -16,6 +16,7 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.procrun
+#pragma unisa use sys.posix
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -331,6 +332,18 @@ static int ck_done(const char *dir, const char *phase) {
     free(b);
     return hit;
 }
+/* W2 heartbeat: append epoch<TAB>phase<TAB>pid<TAB>pgid<TAB>start|end to DIR/heartbeat.tsv.
+   tools/chain-watch.cx reads the last row before it calls a chain STALLED and checks pid/pgid
+   (HUNG when alive, DEAD when not).  mark() writes the end row of each phase and main writes
+   "chain start" once --out exists; per-phase start rows are left to the H4 executor. */
+static void hb(const char *dir, const char *phase, const char *ev) {
+    char p[4400], line[800];
+    int fd;
+    if (cx_fmt(p, sizeof p, "%s/heartbeat.tsv", dir)) die("path", dir);
+    if (cx_fmt(line, sizeof line, "%ld\t%s\t%d\t%ld\t%s\n", sy_wall_s(), phase, sy_pid(), sy_getpgid(0), ev)) die("fmt", phase);
+    fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("heartbeat", p);
+}
 static void mark(const char *dir, const char *phase, long wall) {
     char p[4400], line[800];
     int fd;
@@ -338,6 +351,7 @@ static void mark(const char *dir, const char *phase, long wall) {
     if (cx_fmt(line, sizeof line, "DONE\t%s\twall_ms=%ld\tsha=-\n", phase, wall)) die("fmt", phase);
     fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("checkpoint", p);
+    hb(dir, phase, "end");
     sy_printf("RECEIPT\t%s\twall_ms=%ld\n", phase, wall);
 }
 
@@ -554,6 +568,7 @@ int main(int argc, char **argv) {
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+    hb(outdir, "chain", "start");
     if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-%.10s", root, rev)) die("path", "snap");
     {
         char mid[4400];
