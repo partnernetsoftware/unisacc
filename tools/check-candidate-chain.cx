@@ -138,18 +138,28 @@ int main(void) {
       }
     }
     {
-        char td[400], o[500], w[500], ckf[600], d1[600], d2[600], d3[600], rc[600], outside[500], cmd[3000];
+        char td[400], o[500], w[500], ckf[600], d1[600], d2[600], d3[600], dctx[600], rc[600], outside[500], cmd[3000];
         const char *done = "DONE\tdoneph\twall_ms=1\tsha=-\n";
         if (cx_fmt(td, sizeof td, "%s/cc-clean-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "clean-tmpdir"); return 1; }
         if (cx_fmt(o, sizeof o, "%s/o", td) || cx_fmt(w, sizeof w, "%s/w", td) || cx_fmt(ckf, sizeof ckf, "%s/checkpoint.tsv", o)
             || cx_fmt(d1, sizeof d1, "%s/build/outer", o) || cx_fmt(d2, sizeof d2, "%s/done-dir", o)
             || cx_fmt(d3, sizeof d3, "%s/wf-prep", w) || cx_fmt(rc, sizeof rc, "%s/receipt.txt", d3)
-            || cx_fmt(outside, sizeof outside, "%s/outside", td)) { ck(0, "clean-fmt"); return 1; }
-        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/x' '%s/x' '%s' '%s' '%s' && : > '%s/x/f'", d1, d2, d3, w, outside, d1)) { ck(0, "clean-fmt"); return 1; }
+            || cx_fmt(outside, sizeof outside, "%s/outside", td) || cx_fmt(dctx, sizeof dctx, "%s/ctx", o)) { ck(0, "clean-fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/x' '%s/x' '%s' '%s' '%s' '%s/x' && : > '%s/x/f'", d1, d2, d3, w, outside, dctx, d1)) { ck(0, "clean-fmt"); return 1; }
         if (sh(cmd, out, sizeof out) || cx_write(ckf, done, tx_len(done, 100))) { ck(0, "clean-setup"); return 1; }
         /* 未 DONE 相位的残留被清理并打印 CLEANUP */
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, d1, d1)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tlist\t"), "clean-undone-removed");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' ctx '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, dctx, dctx)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tctx\t"), "ctx-kill-resume-cleaned");
+        {
+            char aso[700];
+            if (cx_fmt(aso, sizeof aso, "%s/routes/kernel-route/asm-source/OUTPUT.s", o)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/routes/kernel-route/asm-source' && echo x > '%s'", o, aso)) { ck(0, "fmt"); return 1; }
+            if (sh(cmd, out, sizeof out)) { ck(0, "aso-setup"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' routes '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, aso, aso)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\troutes\t"), "routes-kill-resume-cleaned");
+        }
         /* 已 DONE 相位不动 */
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' doneph '%s' - 2>&1; test -d '%s/x'", com, tool, o, w, d2, d2)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP"), "clean-done-kept");
@@ -177,6 +187,17 @@ int main(void) {
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tgen-killed\t"), "job-kill-resume-cleaned");
           if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' gen-kept 2>&1; test -f '%s' && test -f '%s/start-job-gen-kept.argv.tsv'", com, tool, o, w, ctx, bld, rec2, ov)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP\tgen-kept\t"), "job-complete-kept");
+          {
+            char recp[700], stj[800], fnj[800], fns[800];
+            if (cx_fmt(recp, sizeof recp, "%s/jobs/tool-finpart/record.tsv", ctx) || cx_fmt(stj, sizeof stj, "%s/start-job-tool-finpart.argv.tsv", ov)
+                || cx_fmt(fnj, sizeof fnj, "%s/finish-job-tool-finpart.argv.tsv", ov) || cx_fmt(fns, sizeof fns, "%s/finish-job-tool-findone.status", ov)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/jobs/tool-finpart' '%s/jobs/tool-findone' && echo rec > '%s' && echo s > '%s' && echo f > '%s' && echo rec > '%s/jobs/tool-findone/record.tsv' && echo ok > '%s'", ctx, ctx, recp, stj, fnj, ctx, fns)) { ck(0, "fmt"); return 1; }
+            if (sh(cmd, out, sizeof out)) { ck(0, "fin-setup"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' tool-finpart 2>&1; test ! -e '%s' && test -f '%s' && test -f '%s'", com, tool, o, w, ctx, bld, fnj, recp, stj)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\ttool-finpart\t"), "finish-kill-resume-cleaned");
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' tool-findone 2>&1; test -f '%s'", com, tool, o, w, ctx, bld, fns)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP\ttool-findone\t"), "finish-done-kept");
+          }
         }
         {
           char zck[600], prod[600], miss[600];

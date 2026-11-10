@@ -1,0 +1,69 @@
+/* tools/check-no-out-snap.cx -- M1: clone without ROOT/out; freeze dest from patched tree. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-no-out-snap.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void die(const char *s) { fprintf(stderr, "check-no-out-snap: %s\n", s); exit(2); }
+int main(void) {
+    char root[4400], dest[4400], outp[4400], why[512], rev[64], snapd[4400];
+    char *cl[] = {"git", "clone", "-q", "--shared", 0, 0, 0};
+    char *gv[] = {"git", "rev-parse", "HEAD", 0};
+    np_result r = {0};
+    int i, j;
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (cx_fmt(dest, sizeof dest, "%s/no-out-snap-%d", sy_tmpdir(), (int)getpid())) die("dest");
+    cl[4] = root; cl[5] = dest;
+    if (np_run(cl, 0, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("clone"); }
+    np_free(&r);
+    if (cx_fmt(outp, sizeof outp, "%s/out", dest)) die("p");
+    ck(sy_exists(outp) != 1, "no-out-dir");
+    r.out = 0; r.err = 0;
+    if (np_run(gv, dest, 0, 10, &r, why, sizeof why) || r.rc || !r.out) { np_free(&r); die("rev"); }
+    for (i = 0; i < 40 && r.out[i] && r.out[i] != '\n'; i++) rev[i] = r.out[i];
+    rev[i] = 0;
+    np_free(&r);
+    if (i != 40) die("rev40");
+    for (j = 0; j < 2; j++) {
+        char src[4400], dst[4400];
+        char *cp[] = {"cp", 0, 0, 0};
+        if (cx_fmt(src, sizeof src, "%s/%s", root, j ? "unisacc.com.build.json" : "unisacc.com")) die("p");
+        if (cx_fmt(dst, sizeof dst, "%s/%s", dest, j ? "unisacc.com.build.json" : "unisacc.com")) die("p");
+        cp[1] = src; cp[2] = dst;
+        r.out = 0; r.err = 0;
+        if (np_run(cp, 0, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("cp product"); }
+        np_free(&r);
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--", "freeze", dest, 0};
+        r.out = 0; r.err = 0;
+        if (np_run(v, root, 0, 40, &r, why, sizeof why)) { np_free(&r); die("transport"); }
+        (void)r.rc;
+        if (r.rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+        snapd[0] = 0;
+        if (r.out) {
+            const char *s = strstr(r.out, "snap=");
+            if (s) {
+                s += 5;
+                for (j = 0; s[j] && s[j] != '\n' && s[j] != '\t' && j + 1 < (int)sizeof snapd; j++) snapd[j] = s[j];
+                snapd[j] = 0;
+            }
+        }
+        np_free(&r);
+    }
+    ck(snapd[0] && sy_exists(snapd) == 1, "snap-dir-created");
+    {
+        char *rm[] = {"rm", "-rf", dest, 0};
+        np_run(rm, 0, 0, 10, &r, why, sizeof why);
+        np_free(&r);
+    }
+    printf("CHECK_NO_OUT_SNAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

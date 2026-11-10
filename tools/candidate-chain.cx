@@ -541,12 +541,20 @@ static int job_has_record(const char *ctx, const char *id) {
     return fsize(rec) >= 0;
 }
 static int clean_stale_job(const char *outdir, const char *ctx, const char *build, const char *id) {
-    char jobd[4400], p[4400];
+    char jobd[4400], p[4400], fst[4400];
     static const char *kind[2] = {"start-job", "finish-job"};
     static const char *suf[5] = {"argv.tsv", "env", "status", "stderr", "stdout"};
     int k, s, n = 0;
     if (!id || !*id || has_dotdot(id) || strchr(id, '/')) die("REFUSE job id", id);
-    if (job_has_record(ctx, id)) return 0;
+    if (cx_fmt(fst, sizeof fst, "%s/outer/finish-job-%s.status", build, id)) die("path", id);
+    if (job_has_record(ctx, id) && fsize(fst) >= 0) return 0;
+    if (job_has_record(ctx, id)) {
+        for (s = 0; s < 5; s++) {
+            if (cx_fmt(p, sizeof p, "%s/outer/finish-job-%s.%s", build, id, suf[s])) die("path", id);
+            if (fsize(p) >= 0) n += clean_phase_path(outdir, id, p, 0);
+        }
+        return n;
+    }
     for (k = 0; k < 2; k++) for (s = 0; s < 5; s++) {
         if (cx_fmt(p, sizeof p, "%s/outer/%s-%s.%s", build, kind[k], id, suf[s])) die("path", id);
         if (fsize(p) >= 0) n += clean_phase_path(outdir, id, p, 0);
@@ -935,6 +943,7 @@ int main(int argc, char **argv) {
     if (!(resume && ck_done(outdir, "ctx"))) {
         long t0 = sy_now_ms();
         char *a[7];
+        clean_phase_path(outdir, "ctx", ctx, 0);
         a[0] = (char *)"ctx"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = ctx; a[5] = (char *)cc; a[6] = 0;
         if (step(root, a)) die("ctx", ctx);
         mark(outdir, "ctx", sy_now_ms() - t0);
@@ -1001,8 +1010,9 @@ int main(int argc, char **argv) {
         char *a[6];
         if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx)) die("path", "jobs");
         {
-            char kr[4400];
-            if (cx_fmt(kr, sizeof kr, "%s/kernel-route", routes)) die("path", "kr");
+            char kr[4400], aso[4400];
+            if (cx_fmt(kr, sizeof kr, "%s/kernel-route", routes) || cx_fmt(aso, sizeof aso, "%s/kernel-route/asm-source/OUTPUT.s", routes)) die("path", "kr");
+            clean_phase_path(outdir, "routes", aso, 0);
             clean_phase_path(outdir, "routes", kr, 0);
             clean_phase_path(outdir, "routes", routes, 0);
         }
