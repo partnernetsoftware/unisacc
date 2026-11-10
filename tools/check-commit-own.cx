@@ -15,6 +15,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 
 static int failed;
@@ -23,8 +24,14 @@ static void die(const char *s) { sy_eprintf("check-commit-own: REFUSE %s\n", s);
 
 /* sh -c SCRIPT in the clone; stdout+stderr into OUT */
 static int sh(const char *script, char *out, int cap) {
-    char *av[] = {"sh", "-c", (char *)script, 0}; int cut;
-    return sy_run(av, out, cap, &cut);
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, 50, &o, &on);   /* 50 s bound (the check budget is 55 s) */
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
 }
 
 static void case_(const char *name, int lock_s) {
@@ -70,10 +77,33 @@ static void case_dirlink(void) {
            tx_find(out, tx_len(out, sizeof out), t, tx_len(t, 64)) >= 0, "dir-symlink-commits-120000-with-target-string"); }
 }
 
+/* --keyed KEY is a whole TAB-delimited field, not a substring: rows A (whose text mentions A-B) and A-B coexist. */
+static void case_keyed(void) {
+    char out[8192], script[4096];
+    /* (1) --keyed A-B: A's row is removed in the work tree by someone else and A-B is edited; A must stay in the commit. */
+    if (cx_fmt(script, sizeof script,
+        "cd out/check-commit-own/clone && printf 'x\\nA\\tsee A-B\\nA-B\\tone\\ny\\n' > k1.tsv && git add k1.tsv && git commit -qm k1 -- k1.tsv && "
+        "printf 'x\\nA-B\\ttwo\\ny\\n' > k1.tsv && "
+        "sh ./unisacc.com tools/commit-own.cx -- -m k1b --keyed k1.tsv A-B >/dev/null 2>&1; echo SHOW; git show HEAD:k1.tsv",
+        0, 0, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    ck(tx_find(out, tx_len(out, sizeof out), "\nA\tsee A-B\n", 11) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) >= 0 &&
+       tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) < 0, "keyed-AB-keeps-A-row");
+    /* (2) --keyed A: A-B is edited by someone else; only the new A row is added. */
+    if (cx_fmt(script, sizeof script,
+        "cd out/check-commit-own/clone && printf 'x\\nA-B\\tone\\ny\\nz\\n' > k2.tsv && git add k2.tsv && git commit -qm k2 -- k2.tsv && "
+        "printf 'x\\nA-B\\ttwo\\ny\\nz\\nA\\tnew\\n' > k2.tsv && "
+        "sh ./unisacc.com tools/commit-own.cx -- -m k2b --keyed k2.tsv A >/dev/null 2>&1; echo SHOW; git show HEAD:k2.tsv",
+        0, 0, 0, 0, 0)) die("script");
+    sh(script, out, sizeof out);
+    ck(tx_find(out, tx_len(out, sizeof out), "\nA-B\tone\n", 9) >= 0 && tx_find(out, tx_len(out, sizeof out), "\nA\tnew\n", 7) >= 0 &&
+       tx_find(out, tx_len(out, sizeof out), "\nA-B\ttwo\n", 9) < 0, "keyed-A-leaves-AB-row");
+}
+
 int main(void) {
     char out[8192];
     if (sh("rm -rf out/check-commit-own && mkdir -p out/check-commit-own && git clone -q --local . out/check-commit-own/clone && "
-           "cp tools/commit-own.cx out/check-commit-own/clone/tools/ && "
+           "cp tools/commit-own.cx tools/own-diff.cx out/check-commit-own/clone/tools/ && "
            "mkdir -p out/check-commit-own/clone/out && cd out/check-commit-own/clone && git config user.email t@t && git config user.name t", out, sizeof out) != 0)
         die("cannot prepare the clone");
     /* The product into the clone: which files make up "the product" is a layout question, so ask
@@ -88,6 +118,7 @@ int main(void) {
     case_("lock", 4);
     case_symlink();
     case_dirlink();
+    case_keyed();
     {   char out[8192], script[2048];
         if (cx_fmt(script, sizeof script,
             "cd out/check-commit-own/clone && printf 'f\\n' > foreign.txt && git add -- foreign.txt && printf 'm\\n' > mine-own.txt && "

@@ -19,6 +19,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.io
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 
@@ -28,15 +29,16 @@ static void co_die(const char *a, const char *b) { fprintf(stderr, "commit-own: 
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
 static int run(char **argv, char *out, long cap) {
-    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
-    if (pid < 0) return -1;
-    while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
-    while (sy_read(ofd, junk, sizeof junk) > 0) {}
-    sy_close(ofd);
+    char *o = 0; size_t on = 0; long n; int code;
+    code = cx_runv_timeout(argv, 30, &o, &on);   /* 30 s bound; stdout captured, stderr inherited */
+    out[0] = 0;
+    if (code < 0) { if (o) mm_free(o); return -1; }
+    n = o ? (long)on : 0;
+    if (n > cap - 1) n = cap - 1;
+    if (n > 0) tx_copy(out, (size_t)cap, o, n);
     while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) n--;
     out[n] = 0;
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    if (o) mm_free(o);
     return code;
 }
 
@@ -93,7 +95,7 @@ int main(int argc, char **argv) {
             char *ov[64], kc[1024], *p = kc; int n = 0;
             if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
             if (tx_snprintf(src, sizeof src, "out/commit-own-%d-%d.part", sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
-            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
+            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
             while (*p && n < 62) { ov[n++] = p; while (*p && *p != ',') p++; if (*p) *p++ = 0; }
             ov[n] = 0;
             if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);

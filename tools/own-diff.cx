@@ -12,6 +12,7 @@
  * commit by path takes the whole file, including lines another agent appended a minute ago. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
+#pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
@@ -20,16 +21,15 @@ typedef struct { const char *p; long n; int used; } Ln;
 static void od_die(const char *a, const char *b) { fprintf(stderr, "own-diff: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 
 static char *slurp_cmd(char **argv, long *n) {
-    int ofd, pid; long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    char *o = 0, *b; size_t on = 0;
     *n = 0;
-    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
-    if (pid < 0 || !b) return 0;
-    while ((r = sy_read(ofd, b + *n, cap - 1 - *n)) > 0) {
-        *n += r;
-        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) od_die("out of memory", 0); b = g; cap *= 2; }
-    }
-    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
-    b[*n] = 0;
+    cx_runv_timeout(argv, 30, &o, &on);   /* 30 s bound; an unreadable git leaves o empty, as before */
+    b = mm_alloc((long)on + 1);
+    if (!b) { if (o) mm_free(o); return 0; }
+    if (o && on) tx_copy(b, (long)on + 1, o, (long)on);
+    b[on] = 0;
+    if (o) mm_free(o);
+    *n = (long)on;
     return b;
 }
 
@@ -46,14 +46,24 @@ static Ln *split(const char *b, long n, long *count) {
     return v;
 }
 
+static int field_mode;   /* --field: a KEY must equal a whole TAB-delimited field of the line, not a substring */
+
 static int mine(const Ln *l, char **keys, int nk) {
     int k;
-    for (k = 0; k < nk; k++) if (tx_find(l->p, l->n, keys[k], tx_len(keys[k], 4096)) >= 0) return 1;
+    for (k = 0; k < nk; k++) {
+        long kn = tx_len(keys[k], 4096);
+        if (!field_mode) { if (tx_find(l->p, l->n, keys[k], kn) >= 0) return 1; continue; }
+        {   long s = 0, i;
+            for (i = 0; i <= l->n; i++)
+                if (i == l->n || l->p[i] == '\t') { if (i - s == kn && tx_same(l->p + s, kn, keys[k], kn)) return 1; s = i + 1; }
+        }
+    }
     return 0;
 }
 
 int main(int argc, char **argv) {
     const char *file, *emit = 0; char *base = 0, *work; long bn = 0, i, j, nb, nw; size_t wn; Ln *b, *w; int a = 1, own = 0, foreign = 0, nk;
+    if (argc - a >= 1 && tx_eqz(argv[a], "--field")) { field_mode = 1; a++; }
     if (argc - a >= 2 && tx_eqz(argv[a], "--emit")) { emit = argv[a + 1]; a += 2; }
     if (argc - a >= 2 && tx_eqz(argv[a], "--base")) {
         size_t z; base = cx_read(argv[a + 1], &z); if (!base) od_die("cannot read", argv[a + 1]); bn = (long)z; a += 2;
