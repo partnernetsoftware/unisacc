@@ -1,0 +1,91 @@
+/* tools/check-s9-nightly-run.cx -- s9-nightly-run 的负例与假 s9 走通。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char why[512];
+static void die(const char *s) { tool_die("check-s9-nightly-run", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-s9-nightly-run.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int runv(char **v, const char *cwd, int sec, char *out, int cap) {
+    np_result r = {0};
+    int rc;
+    if (np_run(v, cwd, 0, sec, &r, why, sizeof why)) die(why);
+    rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && n && mm_copy(out, cap, r.out, (long)n)) die("copy");
+        out[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char root[4096], dir[4400], org[4400], cl[4400], ev[4400], fake[4400], src[4400], com[4400], tool[4400], logp[4400], idx[4400], buf[8000], nr[4400], nocl[4400];
+    char *v[24];
+    int rc;
+    size_t n;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/s9nr-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(org, sizeof org, "%s/origin", dir) || cx_fmt(cl, sizeof cl, "%s/clone", dir) ||
+        cx_fmt(ev, sizeof ev, "%s/evidence", dir) || cx_fmt(fake, sizeof fake, "%s/fake.bin", dir) ||
+        cx_fmt(src, sizeof src, "%s/tests/fixtures/s9-nightly-fake.cx", root) ||
+        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tools/s9-nightly-run.cx", root) ||
+        cx_fmt(logp, sizeof logp, "%s/fake.log", dir) || cx_fmt(idx, sizeof idx, "%s/index.tsv", ev) ||
+        cx_fmt(nr, sizeof nr, "%s/noroot", dir) ||
+        cx_fmt(nocl, sizeof nocl, "%s/nonexistent", dir)) die("fmt");
+    /* origin = 本检出 HEAD 的共享克隆(含 cx/ 库与 tools/s9-nightly.cx),分支 main */
+    {
+        char *g1[] = {"git", "clone", "-q", "--shared", root, org, 0};
+        char *g4[] = {"git", "clone", "-q", org, cl, 0};
+        char *cp2[] = {"cp", com, cl, 0};
+        char *b1[] = {"sh", com, src, "-o", fake, 0};
+        rc = runv(g1, dir, 30, buf, sizeof buf);
+        ck(rc == 0, "origin-commit");
+        rc = runv(g4, dir, 20, buf, sizeof buf);
+        ck(rc == 0, "clone");
+        runv(cp2, dir, 10, buf, sizeof buf);
+        rc = runv(b1, root, 30, buf, sizeof buf);
+        ck(rc == 0, "fake-compile");
+    }
+    setenv("S9_FAKE_LOG", logp, 1);
+    v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = "--clone"; v[5] = cl; v[6] = "--evidence"; v[7] = ev;
+    v[8] = "--tier"; v[9] = "commit"; v[10] = "--max-steps"; v[11] = "8"; v[12] = "--load-max"; v[13] = "0"; v[14] = 0;
+    rc = runv(v, root, 20, buf, sizeof buf);
+    ck(rc == 4 && strstr(buf, "S9_NIGHTLY_RUN status=SKIPPED_LOAD"), "load-skip");
+    ck(!sy_exists(idx), "load-skip-no-index");
+    v[13] = "1000";
+    rc = runv(v, root, 20, buf, sizeof buf);
+    ck(rc == 2 && !sy_exists(idx), "unmarked-clone-refused");
+    {
+        char mk[4400]; FILE *f;
+        if (cx_fmt(mk, sizeof mk, "%s/.s9-nightly-clone", cl)) die("fmt");
+        f = fopen(mk, "w"); ck(f != 0, "mark-create"); if (f) fclose(f);
+    }
+    v[5] = nr;
+    { char *m[] = {"mkdir", "-p", nr, 0}; char mk[4400]; FILE *f; runv(m, root, 5, buf, sizeof buf);
+      if (cx_fmt(mk, sizeof mk, "%s/.s9-nightly-clone", nr)) die("fmt");
+      f = fopen(mk, "w"); if (f) fclose(f); }
+    rc = runv(v, root, 20, buf, sizeof buf);
+    ck(rc == 2 && strstr(buf, "REFUSED reason=no-root"), "no-root");
+    v[5] = cl; v[14] = "--fake"; v[15] = fake; v[16] = 0;
+    rc = runv(v, root, 50, buf, sizeof buf);
+    ck(rc == 0 && strstr(buf, "S9_NIGHTLY_RUN status=PASS"), "fake-run-pass");
+    {
+        char *s = cx_read(idx, &n);
+        ck(s && n > 0 && strstr(s, "\tcommit\tPASS\t"), "index-row");
+        free(s);
+    }
+    printf("check-s9-nightly-run failed=%d\n", failed);
+    if (!failed) printf("S9_NIGHTLY_RUN_OK\n");
+    return failed ? 1 : 0;
+}
