@@ -323,6 +323,7 @@ static const char *g_phases[26] = {
     "g2-lnx-x86_64", "g2-lnx-arm64", "g3-lnx-x86_64", "g3-lnx-arm64",
     "kernels-g2", "kernels-g3", "compare", "pack"
 };
+static const char *until_phase;
 static void plan(void) {
     int i;
     sy_printf("CANDIDATE_CHAIN\tplan\tphases=26\n");
@@ -381,6 +382,10 @@ static void mark(const char *dir, const char *phase, long wall) {
     if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("checkpoint", p);
     hb(dir, phase, "end");
     sy_printf("RECEIPT\t%s\twall_ms=%ld\n", phase, wall);
+    if (until_phase && tx_eqz(phase, until_phase)) {
+        sy_printf("CANDIDATE_CHAIN\tstatus=UNTIL\tphase=%s\n", phase);
+        exit(0);
+    }
 }
 
 static int sjw(const char *s, const char *ctx, const char *b, const char *phase, int first, int count, const char *act) {
@@ -576,6 +581,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--cc") && i + 1 < argc) { cc = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--cache-manager-osx") && i + 2 < argc) { cm64 = argv[++i]; cmarm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--bootstrap") && i + 1 < argc) { boot = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--until") && i + 1 < argc) { until_phase = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--parallel") && i + 1 < argc) {
             parallel = parse_par(argv[++i]);
             if (parallel < 1) die("REFUSE parallel 1..16", argv[i]);
@@ -594,17 +600,16 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
+    if (until_phase) {
+        int u = 0, pi;
+        for (pi = 0; pi < 26; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
+        if (!u) die("REFUSE --until unknown phase", until_phase);
+    }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
     hb(outdir, "chain", "start");
     if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-%.10s", root, rev)) die("path", "snap");
-    {
-        char mid[4400];
-        if (cx_fmt(mid, sizeof mid, "%s/out", snap)) die("path", "snap-out");
-        sy_mkdir(mid, 0755);
-        if (cx_fmt(chain_work, sizeof chain_work, "%s/out/chain", snap)) die("path", "chain");
-        if (sy_mkdir(chain_work, 0755) && fsize(chain_work) < 0) die("mkdir", chain_work);
-    }
+    if (cx_fmt(chain_work, sizeof chain_work, "%s/out/chain", snap)) die("path", "chain");
     if (cx_fmt(build, sizeof build, "%s/build", outdir)) die("path", "build");
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("path", "ctx");
     if (cx_fmt(routes, sizeof routes, "%s/routes", outdir)) die("path", "routes");
@@ -823,7 +828,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
         {
-            const char *want = "10ec72603f455fa764f229be94cb67829d35d93fc31f7976730357aa926ef31e";
+            const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
             size_t tn = 0; char *tb = cx_read(tmpl, &tn), th[65];
             if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template sha", tmpl); }
             free(tb);

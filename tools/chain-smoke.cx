@@ -1,0 +1,149 @@
+/* tools/chain-smoke.cx -- clean-clone candidate-chain until host/list.
+ *   sh ./unisacc.com tools/chain-smoke.cx -- [--root R] [--rev 40hex] [--until list|host] [--scan SRC] [--trigger NAMES...]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static void die(const char *w, const char *a) {
+    sy_printf("REFUSE\tsmoke-%s\t%s\n", w, a ? a : "-");
+    exit(1);
+}
+static int hex40(const char *s) {
+    int i;
+    if (!s) return 0;
+    for (i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[40] == 0;
+}
+static int hit(const char *b, long n, const char *p) {
+    return tx_find(b, n, p, tx_len(p, 80)) >= 0;
+}
+static long pos(const char *b, long n, const char *p) {
+    return tx_find(b, n, p, tx_len(p, 120));
+}
+static int triggered(int argc, char **argv) {
+    static const char *keys[] = {
+        "tools/candidate-chain.cx", "tools/chain-step.cx", "tools/whole-front.cx",
+        "tools/release-build.cx", "tools/preflight.cx", "build/graph.tsv"
+    };
+    int i, k;
+    for (i = 0; i < argc; i++) {
+        for (k = 0; k < 6; k++) if (tx_eqz(argv[i], keys[k])) {
+            sy_printf("CHAIN_SMOKE\ttrigger=1\tfile=%s\n", keys[k]);
+            return 0;
+        }
+    }
+    sy_printf("CHAIN_SMOKE\ttrigger=0\n");
+    return 1;
+}
+static int scan_src(const char *src, const char *root) {
+    size_t n = 0;
+    char *b;
+    long pm, ps;
+    char tmpl[4400], want[65], th[65];
+    size_t tn = 0;
+    char *tb;
+    const char *q;
+    b = cx_read(src, &n);
+    if (!b) die("scan-read", src);
+    pm = pos(b, (long)n, "sy_mkdir(chain_work");
+    ps = pos(b, (long)n, "a[0] = (char *)\"snap\"");
+    if (pm >= 0 && (ps < 0 || pm < ps)) { free(b); die("mkdir-before-snap", src); }
+    if (hit(b, (long)n, "if (boot && boot[0])") && !hit(b, (long)n, "BOOTSTRAP\\t")) {
+        free(b); die("bootstrap-record", src);
+    }
+    q = strstr(b, "const char *want = \"");
+    if (!q) { free(b); die("template-pin-missing", src); }
+    q += 20;
+    if (mm_copy(want, 65, q, 64)) { free(b); die("want-copy", src); }
+    want[64] = 0;
+    free(b);
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
+    tb = cx_read(tmpl, &tn);
+    if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template-sha", tmpl); }
+    free(tb);
+    if (!tx_eqz(th, want)) die("template-pin", th);
+    sy_printf("CHAIN_SMOKE\tscan=OK\ttemplate=%s\n", th);
+    return 0;
+}
+static int run_clone(const char *root, const char *rev, const char *untilp) {
+    char dest[4400], outd[4400], why[512];
+    char *v[20];
+    np_result r = {0};
+    int k = 0;
+    if (cx_fmt(dest, sizeof dest, "%s/chain-smoke-%d", sy_tmpdir(), sy_pid())) die("path", "dest");
+    {
+        char *c[] = {"git", "clone", "--shared", "--no-hardlinks", (char *)root, dest, 0};
+        if (np_run(c, 0, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("clone", why); }
+        np_free(&r);
+    }
+    if (cx_fmt(outd, sizeof outd, "%s/out", dest) || sy_mkdir(outd, 0755)) die("mkdir-out", dest);
+    {
+        char src[4400], dstc[4400];
+        size_t n = 0;
+        char *b;
+        if (cx_fmt(src, sizeof src, "%s/unisacc.com", root) || cx_fmt(dstc, sizeof dstc, "%s/unisacc.com", dest)) die("path", "com"); /* lint:allow R1-product 拷贝启动器到干净克隆,不进子进程 argv */
+        b = cx_read(src, &n);
+        if (!b || cx_write(dstc, b, n)) { free(b); die("copy-com", dstc); }
+        free(b);
+    }
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/candidate-chain.cx"; v[k++] = "--"; /* lint:allow R1-product 干净克隆内用已拷贝启动器 */
+    v[k++] = "--rev"; v[k++] = (char *)rev; v[k++] = "--out"; v[k++] = outd;
+    v[k++] = "--until"; v[k++] = (char *)untilp; v[k++] = 0;
+    r.out = 0; r.err = 0;
+    if (np_run(v, dest, 0, 55, &r, why, sizeof why)) { np_free(&r); die("transport", why); }
+    if (r.rc) {
+        const char *msg = r.err && r.errn ? r.err : (r.out ? r.out : why);
+        sy_printf("REFUSE\tsmoke-phase\t%s\n", msg);
+        np_free(&r);
+        return 1;
+    }
+    if (!r.out || !hit(r.out, (long)r.outn, "status=UNTIL")) {
+        np_free(&r);
+        die("until-missing", untilp);
+    }
+    sy_printf("CHAIN_SMOKE\tstatus=PASS\trev=%s\tuntil=%s\n", rev, untilp);
+    np_free(&r);
+    return 0;
+}
+int main(int argc, char **argv) {
+    const char *root = 0, *rev = 0, *untilp = "list", *scan = 0;
+    int i, trig = 0, t0 = 0;
+    char cwd[4400], head[64];
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) { root = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--until") && i + 1 < argc) { untilp = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--scan") && i + 1 < argc) { scan = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--trigger")) { trig = 1; t0 = i + 1; break; }
+        die("unknown", argv[i]);
+    }
+    if (trig) return triggered(argc - t0, argv + t0);
+    if (sy_realpath(root ? root : ".", cwd, sizeof cwd) < 0) die("cwd", root);
+    if (scan) return scan_src(scan, cwd);
+    if (!rev) {
+        char *g[] = {"git", "-C", cwd, "rev-parse", "HEAD", 0};
+        np_result r = {0};
+        char why[256];
+        size_t n;
+        if (np_run(g, 0, 0, 8, &r, why, sizeof why) || r.rc || !r.out) { np_free(&r); die("rev-parse", why); }
+        n = r.outn;
+        if (n && r.out[n - 1] == '\n') n--;
+        if (n != 40) { np_free(&r); die("rev-len", r.out); }
+        if (mm_copy(head, 64, r.out, 40)) { np_free(&r); die("rev-copy", 0); }
+        head[40] = 0;
+        np_free(&r);
+        rev = head;
+    }
+    if (!hex40(rev)) die("rev-40hex", rev);
+    if (!(tx_eqz(untilp, "list") || tx_eqz(untilp, "host"))) die("until", untilp);
+    return run_clone(cwd, rev, untilp);
+}

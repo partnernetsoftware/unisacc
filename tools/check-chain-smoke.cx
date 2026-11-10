@@ -1,0 +1,109 @@
+/* tools/check-chain-smoke.cx -- N1 scan/trigger/until fixtures, no full snap.
+ *   sh ./unisacc.com tools/check-chain-smoke.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "check-chain-smoke: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-chain-smoke.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static char *runv(char **v, int *rc) {
+    np_result r = {0};
+    char *out;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why)) die("run");
+    *rc = r.rc;
+    out = r.out ? strdup(r.out) : strdup("");
+    np_free(&r);
+    return out;
+}
+int main(void) {
+    char tool[64], src[64], dir[4400], bad[4400];
+    char *o;
+    int rc;
+    const char *good;
+    size_t n = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(tool, sizeof tool, "tools/chain-smoke.cx") ||
+        cx_fmt(src, sizeof src, "tools/candidate-chain.cx")) die("path");
+    {
+        char *v[] = {"sh", "./unisacc.com", tool, "--", "--trigger", "tools/foo.cx", 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+        o = runv(v, &rc); ck(rc == 1 && strstr(o, "trigger=0"), "trigger-miss"); free(o);
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", tool, "--", "--trigger", "tools/candidate-chain.cx", 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+        o = runv(v, &rc); ck(rc == 0 && strstr(o, "trigger=1"), "trigger-chain"); free(o);
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", tool, "--", "--trigger", "build/graph.tsv", 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+        o = runv(v, &rc); ck(rc == 0 && strstr(o, "trigger=1"), "trigger-graph"); free(o);
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", tool, "--", "--scan", src, 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+        o = runv(v, &rc); ck(rc == 0 && strstr(o, "scan=OK"), "scan-current"); free(o);
+    }
+    {
+        char *v[] = {"sh", "./unisacc.com", tool, "--", "--until", "nope", 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+        o = runv(v, &rc); ck(rc != 0 && strstr(o, "until"), "until-unknown"); free(o);
+    }
+    good = cx_read(src, &n);
+    if (!good) die("read-src");
+    if (cx_fmt(dir, sizeof dir, "%s/chain-smoke-XXXXXX", sy_tmpdir()) || !mkdtemp(dir) ||
+        cx_fmt(bad, sizeof bad, "%s/bad.cx", dir)) die("tmp");
+    {
+        char head[] = "sy_mkdir(chain_work, 0755);\n";
+        size_t hl = strlen(head);
+        char *mut = malloc(n + hl + 1);
+        if (!mut) die("alloc");
+        if (mm_copy(mut, (long)(n + hl + 1), head, (long)hl)) die("copy");
+        if (mm_copy(mut + hl, (long)(n + 1), good, (long)n)) die("copy2");
+        mut[hl + n] = 0;
+        if (cx_write(bad, mut, hl + n)) die("write-a");
+        free(mut);
+        {
+            char *v[] = {"sh", "./unisacc.com", tool, "--", "--scan", bad, 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+            o = runv(v, &rc); ck(rc == 1 && strstr(o, "mkdir-before-snap"), "neg-a"); free(o);
+        }
+    }
+    {
+        char *mut = malloc(n + 8);
+        char *p;
+        if (!mut) die("alloc");
+        if (mm_copy(mut, (long)n + 8, good, (long)n)) die("copy");
+        mut[n] = 0;
+        p = strstr(mut, "BOOTSTRAP\\t");
+        if (p) { p[0] = 'X'; p[1] = 'X'; }
+        if (cx_write(bad, mut, strlen(mut))) die("write-b");
+        free(mut);
+        {
+            char *v[] = {"sh", "./unisacc.com", tool, "--", "--scan", bad, 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+            o = runv(v, &rc); ck(rc == 1 && strstr(o, "bootstrap-record"), "neg-b"); free(o);
+        }
+    }
+    {
+        char *mut = malloc(n + 8);
+        char *p;
+        if (!mut) die("alloc");
+        if (mm_copy(mut, (long)n + 8, good, (long)n)) die("copy");
+        mut[n] = 0;
+        p = strstr(mut, "const char *want = \"");
+        if (p) p[20] = (p[20] == '0' ? '1' : '0');
+        if (cx_write(bad, mut, strlen(mut))) die("write-c");
+        free(mut);
+        {
+            char *v[] = {"sh", "./unisacc.com", tool, "--", "--scan", bad, 0}; /* lint:allow R1-product 检查合同就是跑已装产品 */
+            o = runv(v, &rc); ck(rc == 1 && strstr(o, "template-pin"), "neg-c"); free(o);
+        }
+    }
+    free((void *)good);
+    printf("CHECK_CHAIN_SMOKE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
