@@ -1,0 +1,61 @@
+/* tools/check-release-guard.cx -- C4p2: good NEXT pass; short target/commit and delete refuse. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-release-guard.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void die(const char *s) { fprintf(stderr, "check-release-guard: %s\n", s); exit(2); }
+static void putlf(char *d, long *n, const char *s) {
+    long i;
+    for (i = 0; s[i]; i++) d[(*n)++] = s[i];
+    d[(*n)++] = 10;
+    d[*n] = 0;
+}
+int main(void) {
+    pr_result r;
+    char root[4400], com[4400], tool[4400], dir[4400], f[4400], body[800];
+    long n;
+    int t;
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(tool, sizeof tool, "%s/tools/release-guard.cx", root)) die("p");
+    if (cx_fmt(dir, sizeof dir, "%s/check-rg-%d", sy_tmpdir(), (int)getpid())) die("dir");
+    if (sy_exists(dir) == 1 && cx_rmtree(dir)) die("old");
+    if (sy_mkdir(dir, 0700)) die("mkdir");
+    if (cx_fmt(f, sizeof f, "%s/cmds", dir)) die("f");
+    n = 0;
+    putlf(body, &n, "NEXT gh release edit v0 --tag v1 --target 23e6a567dd3ab5e481dbe3c98491bc87dd2a3b95");
+    putlf(body, &n, "NEXT gh workflow run ci.yml --ref main -f commit=23e6a567dd3ab5e481dbe3c98491bc87dd2a3b95");
+    if (cx_write(f, body, (size_t)n)) die("w");
+    {
+        char *av[] = {"sh", com, tool, "--", f, 0};
+        t = pr_run("rg-ok", av, root, 0, 40, &r);
+        ck(t == 0 && r.rc == 0, "good-cmds-rc0");
+        if (t == 0) pr_free(&r);
+    }
+    n = 0;
+    putlf(body, &n, "NEXT gh release edit v0 --tag v1 --target deadbeef");
+    if (cx_write(f, body, (size_t)n)) die("w2");
+    {
+        char *av[] = {"sh", com, tool, "--", f, 0};
+        t = pr_run("rg-short", av, root, 0, 40, &r);
+        ck(t == 0 && r.rc != 0, "short-target-refuse");
+        if (t == 0) pr_free(&r);
+    }
+    n = 0;
+    putlf(body, &n, "gh release delete v0.0.53");
+    if (cx_write(f, body, (size_t)n)) die("w3");
+    {
+        char *av[] = {"sh", com, tool, "--", f, 0};
+        t = pr_run("rg-del", av, root, 0, 40, &r);
+        ck(t == 0 && r.rc != 0, "delete-refuse");
+        if (t == 0) pr_free(&r);
+    }
+    if (cx_rmtree(dir)) die("cleanup");
+    printf("CHECK_RELEASE_GUARD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
