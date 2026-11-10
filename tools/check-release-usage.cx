@@ -8,7 +8,12 @@
  *      die 文本),随后缺参以 rc1 退出且 stderr 有 usage 行,绝不能 139/11;
  *   U2 slice 只给 ROOT:同上 rc1 且干净;
  *   U3 rb_die 源文本必须含 sy_exit(回归钉);
- *   U4 rb_pipe 源文本必须含尾部换行修剪(回归钉)。 */
+ *   U4 rb_pipe 源文本必须含尾部换行修剪(回归钉);
+ *   U5 freeze 的 rev 子进程(git rev-parse --verify X^{commit})换成 sleep 20、UNISACC_RB_PIPE_MS=1500:
+ *      必须以 "release-build: rev timeout after 1500 ms" 具名退出 rc1(非 139),不能落成普通 rev 失败;
+ *   U6 快照根(无 .git、有 include/cx-flat.h):不冻结,打印 snapshot 行后缺参 rc1;
+ *   U7 既非 git 也非快照的目录:具名拒绝 neither a git work tree,无 git archive 文本。
+ * release-build 只编一次(rb_bin),U1/U2/U5/U6/U7 都复用它,总耗时须 <60s。 */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -28,8 +33,22 @@ static void ck(int ok, const char *n) {
 static long tlen(const char *s) { return tx_len(s, 1 << 20); }
 static int has(const char *b, const char *s) { return tx_find(b, tlen(b), s, tlen(s)) >= 0; }
 
-/* 在临时共享克隆 TMP/r 里以 ROOT 的工具跑 release-build <sub> TMP/r;stdout+stderr 合并进 buf。 */
-static int fresh_run(const char *sub, char *buf, long cap) {
+/* 被测 ROOT 的 release-build 只编一次到 rb_bin(测量:单次编译约 16s,三用例各编一次会超 60s 上限),
+   各用例在临时共享克隆 TMP/r 里跑 [PRE]rb_bin <sub> TMP/r;stdout+stderr 合并进 buf。
+   PRE 是加在命令前的环境赋值(U5 用),其余用例传 ""。 */
+static char rb_dir[4400], rb_bin[4400];
+static int build_rb(void) {
+    np_result r = {0}; char why[512] = {0}; char src[4400]; int rc;
+    char *v[] = {"sh", "unisacc.com", src, "-o", rb_bin, 0};
+    if (cx_fmt(rb_dir, sizeof rb_dir, "%s/release-usage-bin-XXXXXX", sy_tmpdir()) || !mkdtemp(rb_dir)) return -1;
+    if (cx_fmt(rb_bin, sizeof rb_bin, "%s/release-build", rb_dir) ||
+        cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root)) return -1;
+    rc = np_run(v, root, 0, 50, &r, why, sizeof why) || r.rc ? -1 : 0;
+    if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+static int fresh_run(const char *pre, const char *sub, char *buf, long cap) {
     char tmp[4400], cmd[9000], rmc[4600]; np_result r = {0}; char why[512] = {0}; int rc = -1;
     char *sh[4];
     buf[0] = 0;
@@ -37,8 +56,8 @@ static int fresh_run(const char *sub, char *buf, long cap) {
     if (cx_fmt(cmd, sizeof cmd,
         "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/r/unisacc.com' && "
         "cp '%s/unisacc.com.build.json' '%s/r/unisacc.com.build.json' 2>/dev/null; "
-        "mkdir -p '%s/r/out' && cd '%s/r' && sh '%s/unisacc.com' '%s/tools/release-build.cx' -- %s '%s/r'",
-        root, tmp, root, tmp, root, tmp, tmp, tmp, root, root, sub, tmp)) return -3;
+        "mkdir -p '%s/r/out' && cd '%s/r' && %s'%s' %s '%s/r'",
+        root, tmp, root, tmp, root, tmp, tmp, tmp, pre, rb_bin, sub, tmp)) return -3;
     sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
     if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
         long m = (long)r.errn, o = (long)r.outn, i;
@@ -58,17 +77,38 @@ static int fresh_run(const char *sub, char *buf, long cap) {
 int main(void) {
     char buf[16384]; int rc;
     if (sy_cwd(root, sizeof root)) return 2;
+    if (build_rb()) { sy_eprintf("check-release-usage: release-build compile failed\n"); return 2; }
     /* U1 */
-    rc = fresh_run("p3", buf, sizeof buf);
+    rc = fresh_run("", "p3", buf, sizeof buf);
     ck(rc == 1, "U1 p3 missing args exits 1 (not segv)");
     ck(has(buf, "release-build\trev\t"), "U1 freeze rev succeeded (success line present)");
     ck(!has(buf, "release-build: rev"), "U1 no rev die text (rb_pipe trims trailing newline)");
     ck(has(buf, "usage: p3 ROOT SRC_PKG OUT_PKG"), "U1 usage line present");
     /* U2 */
-    rc = fresh_run("slice", buf, sizeof buf);
+    rc = fresh_run("", "slice", buf, sizeof buf);
     ck(rc == 1, "U2 slice missing args exits 1 (not segv)");
     ck(has(buf, "release-build\trev\t") && !has(buf, "release-build: rev"), "U2 freeze ok before refusal");
     ck(has(buf, "release-build:"), "U2 clean refusal");
+    /* U6 + U7:复用单次编译的 rb_bin,不再各编一次。 */
+    { char td[4400], cmd[9000]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, o, i;
+      if (cx_fmt(td, sizeof td, "%s/release-usage-snap-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+      if (cx_fmt(cmd, sizeof cmd,
+          "mkdir -p '%s/s/include' '%s/s/out' '%s/n' && cp '%s/include/cx-flat.h' '%s/s/include/' && "
+          "'%s' p3 '%s/s'; echo rc=$?; '%s' p3 '%s/n'; echo rc=$?; rm -rf '%s'",
+          td, td, td, root, td, rb_bin, td, rb_bin, td, td)) return 2;
+      sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0; buf[0] = 0;
+      if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+          m = (long)r.errn; o = (long)r.outn; if (m > (long)sizeof buf - 1) m = sizeof buf - 1;
+          for (i = 0; i < m; i++) buf[i] = r.err[i];
+          if (m + o > (long)sizeof buf - 1) o = sizeof buf - 1 - m;
+          for (i = 0; i < o; i++) buf[m + i] = r.out[i];
+          buf[m + o] = 0;
+      }
+      np_free(&r);
+      ck(has(buf, "release-build\tsnapshot\t") && !has(buf, "release-build\trev\t"), "U6 snapshot root not frozen");
+      ck(has(buf, "usage: p3 ROOT SRC_PKG OUT_PKG") && has(buf, "rc=1\n"), "U6 snapshot root then missing args rc1");
+      ck(has(buf, "neither a git work tree") && !has(buf, "git archive"), "U7 plain dir refused by name");
+    }
     /* U3 + U4: 源文本回归钉 */
     { char p[4400]; size_t n; char *b;
       if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) return 2;
@@ -77,6 +117,23 @@ int main(void) {
       { const char *pin = "while (m > 0 && (out[m - 1] == '\\n' || out[m - 1] == '\\r')) m--;";
         ck(b && tx_find(b, (long)n, pin, tlen(pin)) >= 0, "U4 rb_pipe trims trailing newline (source pin)"); }
       if (b) mm_free(b); }
+    /* U5: freeze 的 rev 子进程换成 sleep,上限压到 1500ms:必须以具名 timeout 死(含相位名与毫秒),
+       rc 为 1 而不是 139,也不能落到调用方的普通 "release-build: rev" 文本。 */
+    { char fb[4400], git[4400], real[512], script[1024], pre[4600]; int cut = 0;
+      char *wh[] = {"sh", "-c", "command -v git", 0};
+      if (sy_run(wh, real, sizeof real, &cut) || !real[0]) return 2;
+      { long k = tlen(real); while (k > 0 && (real[k - 1] == '\n' || real[k - 1] == '\r')) real[--k] = 0; }
+      if (cx_fmt(fb, sizeof fb, "%s/release-usage-fb-%d", sy_tmpdir(), (int)getpid()) ||
+          cx_fmt(git, sizeof git, "%s/git", fb) ||
+          cx_fmt(script, sizeof script, "#!/bin/sh\ncase \"$*\" in \"rev-parse --verify \"*\"^{commit}\") exec sleep 20;; esac\nexec '%s' \"$@\"\n", real) ||
+          cx_fmt(pre, sizeof pre, "PATH='%s':\"$PATH\" UNISACC_RB_PIPE_MS=1500 ", fb)) return 2;
+      if (sy_mkdir(fb, 0700) || cx_write(git, script, (size_t)tlen(script)) || sy_chmod(git, 0700)) return 2;
+      rc = fresh_run(pre, "p3", buf, sizeof buf);
+      ck(rc != 139 && rc != 11 && rc == 1, "U5 pipe timeout exits 1 (not segv)");
+      ck(has(buf, "release-build: rev timeout after 1500 ms"), "U5 timeout named with phase and ceiling ms");
+      ck(!has(buf, "release-build: rev\n"), "U5 timeout not reported as ordinary rev failure");
+      if (cx_rmtree(fb)) return 2; }
+    if (cx_rmtree(rb_dir)) return 2;
     sy_printf("CHECK_RELEASE_USAGE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

@@ -344,7 +344,7 @@ static void rb_base_check(const char *root, const unsigned char *body, const CxP
       d[m++] = "--constructor"; d[m++] = ctor;
       d[m++] = "--isa"; d[m++] = "x86_64"; d[m++] = "--isa"; d[m++] = "arm64";
       d[m] = 0;
-      if (rb_pipe(d, root, 0, 0)) rb_die("opguard kernel-route"); }
+      if (rb_pipe("opguard kernel-route", d, root, 0, 0)) rb_die("opguard kernel-route"); }
     for (j = 0; j < 2; j++) {
         size_t kn; char *kb; int hit = 0;
         if (cx_fmt(kf, sizeof kf, "%s/%s.kernel", out, isa[j]) || !(kb = cx_read(kf, &kn))) rb_die("opguard kernel read");
@@ -386,12 +386,12 @@ static void rb_nets_guard(const char *nets, const char *root) {
     if (cx_fmt(helper, sizeof helper, "%s/identity-helper", ctx)) rb_die("--nets path");
     if (cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("--nets path");
     v[0] = "sh"; v[1] = bnd; v[2] = "6"; v[3] = helper; v[4] = (char *)root; v[5] = 0;
-    if (rb_pipe(v, root, got, 80)) rb_die("--nets sid probe");
+    if (rb_pipe("--nets sid probe", v, root, got, 80)) rb_die("--nets sid probe");
     if (tx_len(got, 80) < 64 || memcmp(got, want, 64)) rb_die("--nets SID mismatch");
     /* T1: every net that enters the package is checked key by key against its own table. */
     if (cx_fmt(rb_t1, sizeof rb_t1, "%s.t1-net-check", ctx)) rb_die("--nets path");
     { char *c[9] = {"sh", bnd, "55", "sh", "unisacc.com", "tools/lab-loader/net-check.cx", "-o", rb_t1, 0};
-      if (rb_pipe(c, root, 0, 0)) rb_die("--nets T1 checker build"); }
+      if (rb_pipe("--nets T1 checker build", c, root, 0, 0)) rb_die("--nets T1 checker build"); }
 }
 
 /* 从包内 D 段与 routes 表推出 model 索引 -> net 名。D 行是
@@ -461,7 +461,7 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
         {   char tp[RB_FULL], np[RB_FULL], *c[4];
             if (cx_fmt(tp, sizeof tp, "%s/tbl-%s/result.tbl", nets, names[i]) || cx_fmt(np, sizeof np, "%s/net-%s/result.net", nets, names[i])) rb_die("nets path");
             c[0] = rb_t1; c[1] = tp; c[2] = np; c[3] = 0;
-            if (rb_pipe(c, ".", 0, 0)) rb_die(np); }
+            if (rb_pipe("--nets T1 check", c, ".", 0, 0)) rb_die(np); }
         if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("nets path");
         text = cx_read(path, &tn);
         if (!text) rb_die(path);
@@ -691,15 +691,31 @@ static char rb_out_abs[RB_FULL];
 static char rb_pkg_abs[RB_FULL];
 static char rb_physical_root[RB_FULL];
 
-static int rb_pipe(char **argv, const char *cwd, char *out, int cap) {
+/* The pipe ceiling is overridable only so a test can shrink it and watch the timeout
+   path fire with a sleeping child; it can only shorten the 55s bound. */
+static long rb_pipe_deadline(void) {
+    const char *v = sy_env("UNISACC_RB_PIPE_MS");
+    long ms = 0;
+    const char *p;
+    if (!v || !v[0]) return 55000;
+    for (p = v; *p >= '0' && *p <= '9'; p++) ms = ms * 10 + (*p - '0');
+    if (*p || ms < 1 || ms > 55000) return 55000;
+    return ms;
+}
+
+/* LABEL names the phase. A child that outlives the ceiling is killed and the run dies
+   here with "LABEL timeout after N ms": a timeout is not an ordinary failure and must not
+   reach the caller's generic message. A child that exits nonzero is reported with its rc
+   and returns -1 so the caller still dies with its own phase text. */
+static int rb_pipe(const char *label, char **argv, const char *cwd, char *out, int cap) {
     /* 0.0.50 D: bounded child (55s ceiling, cx-lint R2-timeout) via the same
        wait helper the whole-o route uses; captured bytes still land in OUT. */
     int fd, pid, exited = 0, code = 1, bad = 0, timed;
     RbBuf capbuf = {0, 0, 0};
     long m;
-    long pipe_timeout_ms = 55000; /* bound: 55s ceiling (cx-lint R2-timeout) */
+    long pipe_timeout_ms = rb_pipe_deadline(); /* bound: 55s ceiling (cx-lint R2-timeout) */
     pid = sy_spawn_pipe(argv, cwd, 0, &fd, 0);
-    if (pid < 0) return -1;
+    if (pid < 0) { sy_eprintf("release-build: %s spawn failed\n", label); return -1; }
     if (out && cap > 0) out[0] = 0;
     if (sy_fd_nonblock(fd, 1)) { sy_kill(pid); return -1; }
     timed = rb_wait_child(pid, fd, &capbuf, pipe_timeout_ms, &exited, &code);
@@ -714,7 +730,12 @@ static int rb_pipe(char **argv, const char *cwd, char *out, int cap) {
         if (m >= 0) out[m] = 0;
     }
     if (capbuf.p) mm_free(capbuf.p);
-    if (bad || timed || !exited || code) return -1;
+    if (timed) {
+        sy_eprintf("release-build: %s timeout after %ld ms (child killed)\n", label, pipe_timeout_ms);
+        sy_exit(1);
+    }
+    if (exited && code) sy_eprintf("release-build: %s child exited rc=%d\n", label, code);
+    if (bad || !exited || code) return -1;
     return 0;
 }
 
@@ -735,7 +756,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
     vp[2] = "--verify";
     vp[3] = spec;
     vp[4] = 0;
-    if (rb_pipe(vp, root, got, 80)) rb_die("rev");
+    if (rb_pipe("rev", vp, root, got, 80)) rb_die("rev");
     n = 0;
     while (got[n]) n++;
     if (n != 40) rb_die("rev");
@@ -759,7 +780,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
         sh[1] = "-c";
         sh[2] = cmd;
         sh[3] = 0;
-        if (rb_pipe(sh, root, 0, 0)) rb_die("git archive");
+        if (rb_pipe("git archive", sh, root, 0, 0)) rb_die("git archive");
         {
             int fd = sy_open(mark, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd < 0 || sy_write_all(fd, rb_rev_full, 40) || sy_close(fd)) rb_die("snapshot marker");
@@ -776,7 +797,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
     sh[1] = "-c";
     sh[2] = cmd;
     sh[3] = 0;
-    if (rb_pipe(sh, root, 0, 0)) rb_die("copy compiler");
+    if (rb_pipe("copy compiler", sh, root, 0, 0)) rb_die("copy compiler");
     n = 0;
     while (dir[n]) {
         if (n + 1 >= RB_FULL) rb_die("path");
