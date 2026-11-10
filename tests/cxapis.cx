@@ -1,4 +1,5 @@
 #pragma unisa use text.text
+#pragma unisa use cxlib.netpack
 #!/usr/bin/env -S unisacc.com -run
 /* cxapis.cx -- CX4 ratchet of plans/cx-modules.md: per tracked .cx file, calls of
    strcpy, strcat, sprintf and gets.  Comments and string or character literals do not
@@ -126,8 +127,21 @@ int main(int argc, char **argv) {
     char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0, selfn = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
     char *self;
+    if (argc >= 3 && !strcmp(argv[1], "--file")) {
+        int i;
+        self = cx_read("tests/cxapis.cx", &selfn);
+        if (!self || count_calls(self, selfn) != 0) { fprintf(stderr, "cxapis: scanner self-check failed\n"); free(self); return 2; }
+        free(self);
+        for (i = 2; i < argc; i++) {
+            size_t n; char *src = cx_read(argv[i], &n); int c;
+            if (!src) { fprintf(stderr, "cxapis: cannot read %s\n", argv[i]); return 2; }
+            c = count_calls(src, n); free(src);
+            if (c > 0) { printf("cxapis: %s has %d calls and no baseline row (a new .cx must have 0)\n", argv[i], c); over++; }
+        }
+        return over ? 1 : 0;
+    }
     if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
-        fprintf(stderr, "usage: cxapis.cx --check | --write   (from the repo root)\n"); return 2;
+        fprintf(stderr, "usage: cxapis.cx --check | --write | --file FILE...   (from the repo root)\n"); return 2;
     }
     self = cx_read("tests/cxapis.cx", &selfn);
     if (!self || count_calls(self, selfn) != 0) {
@@ -137,10 +151,24 @@ int main(int argc, char **argv) {
     }
     free(self);
     check = tx_eq(argv[1], "--check", 1L << 20);
-    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    {
+        char *gv[] = {"git", "rev-parse", "--show-cdup", 0};
+        np_result r = {0}; char why[256];
+        if (np_run(gv, 0, 0, 15, &r, why, sizeof why)) { np_free(&r); fprintf(stderr, "cxapis: run from the repo root\n"); return 2; }
+        rc = r.rc; cl = r.outn; cdup = r.out && cl ? (char *)malloc(cl + 1) : 0;
+        if (cdup && r.out) { size_t i; for (i = 0; i < cl; i++) cdup[i] = r.out[i]; cdup[cl] = 0; }
+        np_free(&r);
+    }
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxapis: run from the repo root\n"); return 2; }
     if (check && load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only */
+    {
+        char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", ":(exclude)archive/", 0};
+        np_result r = {0}; char why[256];
+        if (np_run(gv, 0, 0, 55, &r, why, sizeof why)) { np_free(&r); fprintf(stderr, "cxapis: git ls-files failed\n"); return 2; }
+        rc = r.rc; ln = r.outn; list = r.out && ln ? (char *)malloc(ln + 1) : 0;
+        if (list && r.out) { size_t i; for (i = 0; i < ln; i++) list[i] = r.out[i]; list[ln] = 0; }
+        np_free(&r);
+    }
     if (rc != 0 || !list) { fprintf(stderr, "cxapis: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
         append(&out, &olen, &ocap, "# tests/cxapis.tsv -- written by tests/cxapis.cx --write.\n");

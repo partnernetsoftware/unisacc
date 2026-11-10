@@ -1,0 +1,85 @@
+/* tools/check-submit-patch.cx -- 私有 git 夹具测 submit-patch 正例与拒绝覆盖。
+ *   sh ./unisacc.com tools/check-submit-patch.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { tool_die("check-submit-patch", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-submit-patch.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+static int sh(const char *cmd, char *out, int cap) {
+    char *v[5];
+    np_result r = {0};
+    int rc;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && mm_copy(out, cap, r.out, (long)n)) die("copy");
+        out[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char dir[4400], cmd[2200], out[8000];
+    int rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/submit-patch-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+        "printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
+        "printf 'int main(void){return 1;}\\n' > a.c", dir)) die("fmt");
+    ck(sh(cmd, out, sizeof out) == 0, "seed-repo");
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/p.patch' 2>&1", dir, root, root, dir))
+        die("fmt");
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0 && strstr(out, "SUBMIT_PATCH\t") && strstr(out, "\tok"), "ok-line");
+    ck(strstr(out, "files=1") != 0, "files-1");
+    {
+        char p[4400]; size_t n; char *b;
+        if (cx_fmt(p, sizeof p, "%s/p.patch", dir)) die("fmt");
+        b = cx_read(p, &n);
+        ck(b && n && strstr(b, "\nindex "), "has-index");
+        free(b);
+        /* 覆盖拒绝: 先占名再提交 */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'x\\n' > a.c && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/p.patch' 2>&1", dir, root, root, dir))
+            die("fmt");
+        rc = sh(cmd, out, sizeof out);
+        ck(rc == 0 && strstr(out, "p.patch.1"), "suffix-not-overwrite");
+    }
+    {
+        char d2[4400];
+        if (cx_fmt(d2, sizeof d2, "%s/neg-XXXXXX", sy_tmpdir()) || !mkdtemp(d2)) die("tmpdir");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+            "mkdir -p tools tests && printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
+            "printf 'int main(void){return 0;}\\n' > tools/n3neg.cx", d2)) die("fmt");
+        ck(sh(cmd, out, sizeof out) == 0, "neg-seed");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && GIT_DIR=.git sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -- '%s/neg.patch' 2>&1", d2, root, root, d2))
+            die("fmt");
+        rc = sh(cmd, out, sizeof out);
+        ck(rc == 1 && strstr(out, "missing-registry"), "neg-missing-registry");
+        if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", d2)) die("fmt");
+        sh(cmd, out, sizeof out);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", dir)) die("fmt");
+    sh(cmd, out, sizeof out);
+    printf("CHECK_SUBMIT_PATCH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,267 @@
+/* tools/submit-patch.cx -- 私有克隆一条命令出补丁并自检。
+ *
+ *   sh ./unisacc.com tools/submit-patch.cx -- OUT.patch [OWN_ID]
+ *
+ * git add -A; git diff --cached --full-index 写新名补丁(已存在则 .1 .2 ..., 拒绝覆盖);
+ * sha256; 涉及 tools/*.cx 逐个 sh ./unisacc.com -c; 新增 .cx 调 newcx-check;
+ * 补丁内 tests/batches.tsv 与 tests/coverage.tsv 只含 OWN_ID 行且 IMPLEMENTED 的 check 文件存在;
+ * 格式须含 index 行。成功一行 SUBMIT_PATCH<TAB>path<TAB>sha256<TAB>files=N<TAB>ok
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static char root[4096], why[512];
+static void die(const char *a, const char *b) { tool_die("submit-patch", a, b, 2); }
+static void refuse(const char *a, const char *b) {
+    fprintf(stderr, "submit-patch: REFUSE %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    exit(1);
+}
+
+static int runv(char **v, char **outp, int *rc, int ms) {
+    np_result r = {0};
+    if (np_run(v, root, 0, ms, &r, why, sizeof why)) die(why, v[0]);
+    *rc = r.rc;
+    *outp = r.out ? strdup(r.out) : strdup("");
+    np_free(&r);
+    return 0;
+}
+
+static int exists_reg(const char *p) {
+    sy_stat_t st;
+    if (sy_stat(p, &st)) return 0;
+    return 1;
+}
+
+static void unique_path(const char *want, char *out, int cap) {
+    int i;
+    if ((int)strlen(want) + 8 >= cap) die("path bound", want);
+    if (tx_copy(out, cap, want, (long)strlen(want))) die("path bound", want);
+    if (!exists_reg(out)) return;
+    for (i = 1; i < 100; i++) {
+        if (cx_fmt(out, cap, "%s.%d", want, i)) die("path bound", want);
+        if (!exists_reg(out)) return;
+    }
+    refuse("name-exists", want);
+}
+
+static int is_tools_cx(const char *p) {
+    size_t n = strlen(p);
+    return n > 10 && !strncmp(p, "tools/", 6) && n > 3 && !strcmp(p + n - 3, ".cx") && !strchr(p + 6, '/');
+}
+static int is_cx(const char *p) {
+    size_t n = strlen(p);
+    return n > 3 && !strcmp(p + n - 3, ".cx");
+}
+
+static int parse_added_line(const char *line, char *st, char *path, int pcap) {
+    /* name-status: A\tpath  or M\tpath */
+    const char *t = strchr(line, '\t');
+    if (!t || t == line) return 0;
+    if (t - line > 7) return 0;
+    if (mm_copy(st, 8, line, (long)(t - line))) return 0;
+    st[t - line] = 0;
+    if (strlen(t + 1) >= (size_t)pcap) return 0;
+    if (tx_copy(path, pcap, t + 1, (long)strlen(t + 1))) return 0;
+    return 1;
+}
+
+static int status_has(const char *names, const char *path) {
+    const char *q = names;
+    size_t pn = strlen(path);
+    while (*q) {
+        const char *nl = strchr(q, '\n');
+        size_t L = nl ? (size_t)(nl - q) : strlen(q);
+        const char *tab = 0;
+        size_t i;
+        for (i = 0; i < L; i++) if (q[i] == '\t') { tab = q + i; break; }
+        if (tab) {
+            size_t pl = (size_t)((q + L) - (tab + 1));
+            if (pl == pn && !memcmp(tab + 1, path, pn)) return 1;
+        }
+        if (!nl) break;
+        q = nl + 1;
+    }
+    return 0;
+}
+static int added_new_tools_cx(const char *names) {
+    const char *q = names;
+    while (*q) {
+        char st[8], path[4400];
+        const char *nl = strchr(q, '\n');
+        size_t L = nl ? (size_t)(nl - q) : strlen(q);
+        char line[4400];
+        if (L >= sizeof line) L = sizeof line - 1;
+        if (mm_copy(line, sizeof line, q, (long)L)) die("copy", 0);
+        line[L] = 0;
+        if (parse_added_line(line, st, path, sizeof path) && st[0] == 'A' && is_tools_cx(path))
+            return 1;
+        if (!nl) break;
+        q = nl + 1;
+    }
+    return 0;
+}
+
+static int own_id_ok(const char *line, const char *id) {
+    size_t n = strlen(id);
+    const char *s, *tab, *dot;
+    if (!n) return 0;
+    if (line[0] != '+' && line[0] != '-') return 1;
+    if (line[1] == '+' || line[1] == '-') return 1;
+    if (!strncmp(line + 1, "id\t", 3)) return 1;
+    s = line + 1;
+    if (!strncmp(s, id, n) && s[n] == '\t') return 1;
+    tab = strchr(s, '\t');
+    if (!tab || (size_t)(tab - s) < n + 1) return 0;
+    dot = tab - (long)n - 1;
+    return *dot == '.' && !strncmp(dot + 1, id, n);
+}
+
+static void check_table_hunks(const char *diff, const char *id, const char *which) {
+    const char *p = diff;
+    int in = 0;
+    char needle[256];
+    if (cx_fmt(needle, sizeof needle, "diff --git a/%s b/%s", which, which)) die("fmt", which);
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t L = nl ? (size_t)(nl - p) : strlen(p);
+        char line[4096];
+        if (L >= sizeof line) L = sizeof line - 1;
+        if (mm_copy(line, sizeof line, p, (long)L)) die("copy", 0); line[L] = 0;
+        if (!strncmp(line, "diff --git ", 11)) in = !strncmp(line, needle, strlen(needle));
+        else if (in && (line[0] == '+' || line[0] == '-') && !own_id_ok(line, id))
+            refuse("foreign-id", which);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+static void check_implemented_files(const char *diff) {
+    const char *p = diff;
+    int in_b = 0;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t L = nl ? (size_t)(nl - p) : strlen(p);
+        char line[4096];
+        if (L >= sizeof line) L = sizeof line - 1;
+        if (mm_copy(line, sizeof line, p, (long)L)) die("copy", 0); line[L] = 0;
+        if (!strncmp(line, "diff --git ", 11))
+            in_b = strstr(line, " a/tests/batches.tsv b/tests/batches.tsv") != 0;
+        else if (in_b && line[0] == '+' && line[1] != '+') {
+            /* id\timplementation\t...\tsource */
+            char *s = line + 1;
+            char *f1 = strchr(s, '\t');
+            char *f2, *f3, *f4;
+            if (f1) {
+                f2 = strchr(f1 + 1, '\t');
+                f3 = f2 ? strchr(f2 + 1, '\t') : 0;
+                f4 = f3 ? strchr(f3 + 1, '\t') : 0;
+                if (f2 && !strncmp(f1 + 1, "IMPLEMENTED", 11) && f1[1 + 11] == '\t') {
+                    char chk[4400];
+                    size_t n;
+                    if (!f3 || !f4) refuse("batch-shape", s);
+                    n = (size_t)(f4 - (f3 + 1));
+                    if (n >= sizeof chk) refuse("check-path", s);
+                    if (mm_copy(chk, sizeof chk, f3 + 1, (long)n)) refuse("check-path", s); chk[n] = 0;
+                    if (strcmp(chk, "-") && !exists_reg(chk)) refuse("missing-check", chk);
+                }
+            }
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    char outp[4400], hex[65];
+    char *stout, *diff, *names;
+    int rc, files = 0;
+    const char *own = "";
+    char *v[8];
+    size_t n;
+    char *body;
+    if (argc < 2) die("usage", "OUT.patch [OWN_ID]");
+    if (argc >= 3) own = argv[2];
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
+    unique_path(argv[1], outp, sizeof outp);
+    v[0] = "git"; v[1] = "add"; v[2] = "-A"; v[3] = 0;
+    runv(v, &stout, &rc, 55); free(stout);
+    if (rc) refuse("git-add", "nonzero");
+    v[0] = "git"; v[1] = "diff"; v[2] = "--cached"; v[3] = "--name-status"; v[4] = 0;
+    runv(v, &names, &rc, 55);
+    if (rc) { free(names); refuse("git-name-status", "nonzero"); }
+    {
+        const char *q = names;
+        while (*q) {
+            const char *nl = strchr(q, '\n');
+            size_t L = nl ? (size_t)(nl - q) : strlen(q);
+            if (L) files++;
+            if (!nl) break;
+            q = nl + 1;
+        }
+    }
+    if (!files) { free(names); refuse("empty-index", 0); }
+    v[0] = "git"; v[1] = "diff"; v[2] = "--cached"; v[3] = "--full-index"; v[4] = 0;
+    runv(v, &diff, &rc, 55);
+    if (rc) { free(diff); free(names); refuse("git-diff", "nonzero"); }
+    if (!strstr(diff, "\nindex ") && strncmp(diff, "index ", 6)) {
+        free(diff); free(names); refuse("missing-index-line", 0);
+    }
+    if (added_new_tools_cx(names) &&
+        (!status_has(names, "tests/batches.tsv") || !status_has(names, "tests/coverage.tsv"))) {
+        free(diff); free(names); refuse("missing-registry", "tests/batches.tsv+coverage.tsv");
+    }
+    if ((strstr(diff, "tests/batches.tsv") || strstr(diff, "tests/coverage.tsv")) && !*own) {
+        free(diff); free(names); refuse("need-own-id", 0);
+    }
+    if (*own) {
+        check_table_hunks(diff, own, "tests/batches.tsv");
+        check_table_hunks(diff, own, "tests/coverage.tsv");
+        check_implemented_files(diff);
+    }
+    if (cx_write(outp, diff, strlen(diff))) die("write", outp);
+    body = cx_read(outp, &n);
+    if (!body) die("read", outp);
+    cx_sha256_hex(body, n, hex);
+    free(body);
+    {
+        char *q = names;
+        while (*q) {
+            char st[8], path[4400];
+            char *nl = strchr(q, '\n');
+            if (nl) *nl = 0;
+            if (*q && parse_added_line(q, st, path, sizeof path)) {
+                if (is_tools_cx(path) && (st[0] == 'A' || st[0] == 'M')) {
+                    char com[4400], *co;
+                    int crc;
+                    char *cv[8];
+                    if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com")) die("fmt", 0);
+                    cv[0] = "sh"; cv[1] = com; cv[2] = "-c"; cv[3] = path; cv[4] = 0;
+                    runv(cv, &co, &crc, 55); free(co);
+                    if (crc) refuse("compile", path);
+                }
+                if (is_cx(path) && st[0] == 'A') {
+                    char com[4400], tool[4400], *co;
+                    int crc;
+                    char *cv[8];
+                    if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+                        cx_fmt(tool, sizeof tool, "%s/tools/newcx-check.cx", root)) die("fmt", 0);
+                    cv[0] = "sh"; cv[1] = com; cv[2] = tool; cv[3] = "--"; cv[4] = path; cv[5] = 0;
+                    runv(cv, &co, &crc, 55);
+                    if (crc) { free(co); refuse("newcx-check", path); }
+                    free(co);
+                }
+            }
+            if (!nl) break;
+            q = nl + 1;
+        }
+    }
+    free(names);
+    free(diff);
+    printf("SUBMIT_PATCH\t%s\t%s\tfiles=%d\tok\n", outp, hex, files);
+    return 0;
+}

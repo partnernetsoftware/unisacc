@@ -8,6 +8,7 @@
  *            snprintf/strncpy are flagged whatever the bound.  tests/cxtrunc.cx stays the authority.
  *   outdep   a string literal starting with out/, %s/out/, /home/ or /tmp/../ (tests/outdep.cx rule).
  *   lint     every finding of tools/cx-lint.cx (R1-R3 and the rest) on the files.
+ *   cxapis  strcpy/strcat/sprintf/gets calls (tests/cxapis.cx rule; comments/strings ignored via mask).
  * Summary line NEWCX_CHECK<TAB>failed=N; exit 1 when N > 0, 2 on usage or read errors.
  * Run from the repo root (needs ./unisacc.com for the lint pass).
  */
@@ -129,6 +130,7 @@ static void scan_trunc(const char *m, size_t n, const char *file) {
     }
 }
 
+
 static void lint_pass(int argc, char **argv) {
     char root[4096], why[512], com[4400];
     char *v[4096];
@@ -166,6 +168,32 @@ static void lint_pass(int argc, char **argv) {
     np_free(&r);
 }
 
+static void cxapis_pass(int argc, char **argv) {
+    char root[4096], why[512], com[4400], tool[4400];
+    char *v[4096];
+    int k = 0, i;
+    np_result r = {0};
+    if (sy_realpath(".", root, sizeof root) < 0) { report("cxapis", "-", 0, "cwd"); return; }
+    if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tests/cxapis.cx", root)) { report("cxapis", "-", 0, "path"); return; }
+    v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; v[k++] = "--file";
+    for (i = 1; i < argc; i++) v[k++] = argv[i];
+    v[k] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { report("cxapis", "-", 0, "cxapis.cx did not run"); np_free(&r); return; }
+    if (r.out) {
+        char *p = r.out;
+        while (*p) {
+            char *e = strchr(p, '\n');
+            size_t ln = e ? (size_t)(e - p) : strlen(p);
+            if (ln) { printf("cxapis\t%.*s\n", (int)ln, p); failed++; }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    if (r.rc > 1) report("cxapis", "-", 0, "cxapis exit status above 1");
+    np_free(&r);
+}
+
 int main(int argc, char **argv) {
     int i;
     if (argc < 2) { fprintf(stderr, "usage: newcx-check.cx FILE...\n"); return 2; }
@@ -181,6 +209,7 @@ int main(int argc, char **argv) {
         free(s);
     }
     lint_pass(argc, argv);
+    cxapis_pass(argc, argv);
     printf("NEWCX_CHECK\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
