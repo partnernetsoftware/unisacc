@@ -50,7 +50,7 @@ def main():
             r = call("--register", root, manifest)
             assert r.returncode == 0, r.stderr
             size = len(manifest.read_bytes().splitlines())
-            batches.write_text("".join(registration.batch(i) for i in range((size + 7) // 8)))
+            batches.write_text("".join(registration.batch(i, "daily") for i in range((size + 7) // 8)))
         def shard(index=0):
             nonlocal sequence
             sequence += 1
@@ -109,7 +109,7 @@ def main():
             refuse(b"REFUSE")
         manifest.write_bytes(good)
         good_batches = batches.read_text()
-        for bad in ["".join(good_batches.splitlines(keepends=True)[1:]), good_batches + registration.batch(0), good_batches + registration.batch(total)]:
+        for bad in ["".join(good_batches.splitlines(keepends=True)[1:]), good_batches + registration.batch(0, "daily"), good_batches + registration.batch(total, "daily")]:
             batches.write_text(bad)
             refuse(b"REFUSE")
         batches.write_text(good_batches)
