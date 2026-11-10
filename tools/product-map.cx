@@ -1,7 +1,7 @@
 /* tools/product-map.cx -- phase 1: layers + six APE slices into build/product-map.tsv
  * and prd.md <!-- product-map:begin --> ... <!-- product-map:end -->.
  *
- *   sh ./unisacc.com tools/product-map.cx -- --write|--check
+ *   sh ./unisacc.com tools/product-map.cx -- --write|--check [--root DIR]
  *
  * Slice authority: logic-distribution --ape ROOT/unisacc.com (installed APE).
  * Module bytes: UNATTRIBUTED until origin chain exists. Numbers from commands only.
@@ -12,8 +12,16 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
+#pragma unisa use sys.sha
+#pragma unisa use runtime.codec
+#pragma unisa use runtime.model_number
+#pragma unisa use runtime.model_decode
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use compiler.bindstage
 
 static char root[4096], why[512];
+static void *pm_alloc(void *p, size_t n) { return realloc(p, n ? n : 1); }
 static void die(const char *s) { fprintf(stderr, "product-map: REFUSE %s\n", s); exit(2); }
 static void join(char *p, size_t c, const char *a, const char *b) {
     if (cx_fmt(p, c, "%s/%s", a, b)) die("path");
@@ -123,71 +131,87 @@ static void ape_census(void) {
     }
 }
 
-static void rev_now(char rev[65]) {
-    char *v[] = {"git", "rev-parse", "HEAD", 0};
+/* Stable revision: last commit touching the given input paths (not HEAD), so unrelated commits do not change it. */
+static void rev_last(char rev[65], const char *p1, const char *p2, const char *p3, const char *p4) {
+    char *v[12] = {"git", "log", "-1", "--format=%H", "--", 0};
+    int k = 5;
     np_result r = {0};
+    if (p1) v[k++] = (char *)p1;
+    if (p2) v[k++] = (char *)p2;
+    if (p3) v[k++] = (char *)p3;
+    if (p4) v[k++] = (char *)p4;
+    v[k] = 0;
     if (np_run(v, root, 0, 8, &r, why, sizeof why) || r.rc || r.outn < 40) {
         np_free(&r);
-        die("rev-parse");
+        die("rev-log");
     }
     if (mm_copy(rev, 41, r.out, 40)) die("rev");
     rev[40] = 0;
     np_free(&r);
 }
 
-static void emit_tsv(char *buf, size_t cap, size_t *n, const char *rev,
+static void emit_tsv(char *buf, size_t cap, size_t *n,
                      long l0, long l1, long shost, long spack, long sex, long sst, long sdrive, long sbind) {
     const char *hdr = "kind\tid\tparent\tfunction\tsize_bytes\tsize_note\tsha256\taux\tcmd\tverified_rev\tcold_s\thot_s\tlast_s\n";
     size_t at = 0;
     int i;
+    char rev[65];
     if (at + strlen(hdr) >= cap) die("tsv");
     if (mm_copy(buf + at, (long)(cap - at), hdr, (long)strlen(hdr))) die("tsv-copy");
     at += strlen(hdr);
     {
         char line[1200];
         const char *cmd = "git ls-files -z -- DIR && stat bytes";
+        rev_last(rev, "cx/sys", "cx/mem", "cx/text", 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tL0\t-\tL0 sy/mem/text\t%ld\tsource-bytes\t-\tdirs=cx/sys,cx/mem,cx/text\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    l0, cmd, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "cx/core", "cx/driver", "cx/runtime", "cx/compiler");
         if (cx_fmt(line, sizeof line,
                    "layer\tL1\t-\tL1 core/driver/runtime/compiler\t%ld\tsource-bytes\t-\tdirs=cx/core,cx/driver,cx/runtime,cx/compiler\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    l1, cmd, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/host.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.host\tsrc\thost launch\t%ld\tsource-bytes\t-\tfile=src/host.cx\tstat src/host.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    shost, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/packmodel.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.packmodel\tsrc\tpack model\t%ld\tsource-bytes\t-\tfile=src/packmodel.cx\tstat src/packmodel.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    spack, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/executor.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.executor\tsrc\texecutor\t%ld\tsource-bytes\t-\tfile=src/executor.cx\tstat src/executor.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sex, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/stages.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.stages\tsrc\tseven flows bind\t%ld\tsource-bytes\t-\tfile=src/stages.cx\tstat src/stages.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sst, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/drive.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.drive\tsrc\tdrive\t%ld\tsource-bytes\t-\tfile=src/drive.cx\tstat src/drive.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sdrive, rev)) die("row");
         if (at + strlen(line) >= cap) die("tsv");
         if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
         at += strlen(line);
+        rev_last(rev, "src/bind.cx", 0, 0, 0);
         if (cx_fmt(line, sizeof line,
                    "layer\tsrc.bind\tsrc\tbind\t%ld\tsource-bytes\t-\tfile=src/bind.cx\tstat src/bind.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
                    sbind, rev)) die("row");
@@ -197,6 +221,8 @@ static void emit_tsv(char *buf, size_t cap, size_t *n, const char *rev,
     }
     for (i = 0; i < 6; i++) {
         char line[1600], sizeb[32], sha[80], aux[200];
+        /* slice rows come from the installed APE, not a git path: stable id is the slice sha itself */
+        if (cx_fmt(rev, 65, "%s", slices[i].seen ? slices[i].sha : "-")) die("rev");
         if (!slices[i].seen) {
             if (cx_fmt(line, sizeof line,
                        "slice\t%s\tape\tembedded target image\tUNMEASURED\ttarget-image-bytes\tUNMEASURED\taux=UNATTRIBUTED missing_from_ape\tsh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
@@ -220,8 +246,8 @@ static void emit_tsv(char *buf, size_t cap, size_t *n, const char *rev,
 
 static void emit_prd(char *buf, size_t cap, size_t *n, const char *tsv) {
     size_t at = 0;
-    const char *p = "<!-- product-map:begin -->\n产品全景表阶段一(层+六片)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。\n\n```\n";
-    const char *e = "```\n<!-- product-map:end -->\n";
+    const char *p = "<!-- product-map:begin -->\n产品全景表阶段一(层+六片)与阶段二(七流+42构造网)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。\n\n```\n";
+    const char *e = "```\n";
     if (at + strlen(p) >= cap) die("prd");
     if (mm_copy(buf + at, (long)(cap - at), p, (long)strlen(p))) die("prd-copy");
     at += strlen(p);
@@ -265,10 +291,395 @@ static void patch_prd(const char *block, size_t bn) {
     free(s);
 }
 
+
+/* ---- phase 2: seven flows + 42 construction nets + three-calibre glossary ---- */
+#define MAXG 40
+static char gname[MAXG][32];
+static long gsize[MAXG];
+static int ng;
+static long gold_total;
+static char pkgpath[4400];
+static int have_pkg;
+static char pkg_sha[65];
+
+typedef struct { char id[40], stage[40], args[120]; } Recipe;
+static Recipe rec[64];
+static int nrec;
+
+static int gidx(const char *n) {
+    int i;
+    for (i = 0; i < ng; i++) if (!strcmp(gname[i], n)) return i;
+    return -1;
+}
+
+static void load_gold(void) {
+    char *v[] = {"git", "ls-files", "-z", "--", "weights/gold", 0};
+    np_result r = {0};
+    size_t at = 0;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("gold-ls"); }
+    ng = 0;
+    gold_total = 0;
+    while (at < r.outn) {
+        const char *s = r.out + at;
+        size_t z = strlen(s);
+        const char *b = strrchr(s, '/');
+        size_t bl;
+        char full[4400];
+        struct stat st;
+        b = b ? b + 1 : s;
+        bl = strlen(b);
+        if (bl > 4 && !strcmp(b + bl - 4, ".tsv")) {
+            if (ng >= MAXG || bl - 4 >= sizeof gname[0]) die("gold-many");
+            if (mm_copy(gname[ng], (long)sizeof gname[ng], b, (long)(bl - 4))) die("gold-name");
+            gname[ng][bl - 4] = 0;
+            join(full, sizeof full, root, s);
+            if (lstat(full, &st) || !S_ISREG(st.st_mode)) die("gold-stat");
+            gsize[ng] = (long)st.st_size;
+            gold_total += gsize[ng];
+            ng++;
+        }
+        at += z + 1;
+    }
+    np_free(&r);
+}
+
+static int count_rows(const char *rel) {
+    char p[4400];
+    size_t n, i;
+    int rows = 0;
+    char *s;
+    join(p, sizeof p, root, rel);
+    s = cx_read(p, &n);
+    if (!s) die(rel);
+    for (i = 0; i < n;) {
+        size_t e = i;
+        while (e < n && s[e] != '\n') e++;
+        if (e > i && s[i] != '#') rows++;
+        i = e + 1;
+    }
+    free(s);
+    return rows;
+}
+
+static void load_recipes(void) {
+    char p[4400];
+    size_t n;
+    char *s, *b, *e, *q;
+    join(p, sizeof p, root, "tools/source-package.cx");
+    s = cx_read(p, &n);
+    if (!s) die("source-package");
+    b = strstr(s, "recipes[]={");
+    e = b ? strstr(b, "\n};") : 0;
+    if (!b || !e) { free(s); die("recipes-block"); }
+    *e = 0;
+    nrec = 0;
+    for (q = b; (q = strstr(q, "{\"")) != 0;) {
+        char *a1 = q + 2, *a2, *c1, *c2, *d1, *d2;
+        a2 = strchr(a1, '"');
+        c1 = a2 ? strstr(a2, ",\"") : 0;
+        c2 = c1 ? strchr(c1 + 2, '"') : 0;
+        d1 = c2 ? strchr(c2, '{') : 0;
+        d2 = d1 ? strchr(d1, '}') : 0;
+        if (!a2 || !c2 || !d2) { free(s); die("recipes-parse"); }
+        if (nrec >= 64 || (size_t)(a2 - a1) >= sizeof rec[0].id || (size_t)(c2 - c1 - 2) >= sizeof rec[0].stage) { free(s); die("recipes-size"); }
+        {
+            char args[160];
+            size_t k, w = 0;
+            if (mm_copy(rec[nrec].id, (long)sizeof rec[nrec].id, a1, (long)(a2 - a1))) die("rid");
+            rec[nrec].id[a2 - a1] = 0;
+            if (mm_copy(rec[nrec].stage, (long)sizeof rec[nrec].stage, c1 + 2, (long)(c2 - c1 - 2))) die("rstage");
+            rec[nrec].stage[c2 - c1 - 2] = 0;
+            for (k = 0; d1 + 1 + k < d2 && w + 2 < sizeof args; k++) {
+                char ch = d1[1 + k];
+                if (ch == '"' || ch == '0') continue;
+                if (ch == ',') ch = ' ';
+                args[w++] = ch;
+            }
+            while (w && args[w - 1] == ' ') w--;
+            args[w] = 0;
+            {
+                size_t i2, o = 0;
+                char out2[160];
+                int prev_sp = 1;
+                for (i2 = 0; i2 < w; i2++) {
+                    if (args[i2] == ' ') { if (prev_sp) continue; prev_sp = 1; out2[o++] = ','; }
+                    else { prev_sp = 0; out2[o++] = args[i2]; }
+                }
+                if (o && out2[o - 1] == ',') o--;
+                out2[o] = 0;
+                if (cx_fmt(rec[nrec].args, sizeof rec[nrec].args, "%s", o ? out2 : "-")) die("rargs");
+            }
+        }
+        nrec++;
+        q = d2;
+    }
+    free(s);
+}
+
+static const char *flow_of_gold(const char *g) {
+    static const char *tab[][2] = {
+        {"pp", "e2"}, {"lex", "e1"}, {"lexcls", "e1"}, {"lexword", "e1"},
+        {"parse", "e3"}, {"type", "e3"}, {"scope", "e3"}, {"irsel", "e3"}, {"tyinfo", "e3"},
+        {"pfconv", "e3"}, {"binsel", "e3"}, {"prec", "e3"}, {"opinfo", "e4"}, {"peep", "e4"},
+        {"abi", "lower"}, {"regmap", "lower"}, {"reloc", "lower"}, {"enc", "elf"}};
+    size_t i;
+    for (i = 0; i < sizeof tab / sizeof tab[0]; i++) if (!strcmp(tab[i][0], g)) return tab[i][1];
+    return 0;
+}
+
+static const char *flow_fn(const char *f) {
+    if (!strcmp(f, "e2")) return "preprocess: continuation/comment/directive/macro/conditional/include";
+    if (!strcmp(f, "e1")) return "lex: keyword/identifier/operator/literal longest match";
+    if (!strcmp(f, "e3")) return "parse+type etc. into tape";
+    if (!strcmp(f, "e4")) return "opt: peephole and stack-to-register rewrite";
+    if (!strcmp(f, "prune")) return "prune unreachable whole functions by roots/exports";
+    if (!strcmp(f, "lower")) return "lowering: ABI/regmap/syscall/layout/reloc to target ops";
+    if (!strcmp(f, "elf")) return "encode and write ELF/Mach-O/PE";
+    return "UNMEASURED";
+}
+
+static const char *net_flow(const char *stage) {
+    if (!strcmp(stage, "pp")) return "e2";
+    if (!strcmp(stage, "lex")) return "e1";
+    if (!strncmp(stage, "parse2", 6)) return "e3";
+    if (!strcmp(stage, "opt")) return "e4";
+    if (!strcmp(stage, "prune")) return "prune";
+    if (!strcmp(stage, "nativeabi") || !strncmp(stage, "lower", 5)) return "lower";
+    if (!strncmp(stage, "enc", 3)) return "elf";
+    return "-";
+}
+
+static void app(char *buf, size_t cap, size_t *at, const char *line) {
+    size_t z = strlen(line);
+    if (*at + z >= cap) die("tsv-cap");
+    if (mm_copy(buf + *at, (long)(cap - *at), line, (long)z)) die("tsv-copy");
+    *at += z;
+}
+
+#define MAXM 64
+static long mraw[MAXM], mact[MAXM], msel[MAXM];
+static int nmod;
+static int stage_models[8][MAXM];
+static int stage_nm[8];
+static const char *fl[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
+
+static void census_package(void) {
+    unsigned char *s;
+    size_t n;
+    CxPackageDecode d = {0};
+    char ape[4400], tool[4400];
+    int i, k;
+    np_result r = {0};
+    const char *p;
+    s = (unsigned char *)cx_read(pkgpath, &n);
+    if (!s) die("package-read");
+    if (sy_sha256_hex(s, n, pkg_sha)) die("package-sha");
+    d.allocate = pm_alloc;
+    d.release = free;
+    if (cxpk_decode(&d, s, (long)n)) die("package-decode(bare package expected)");
+    for (i = 0; i < 7; i++) stage_nm[i] = 0;
+    for (i = 0; i < d.package.s; i++) {
+        for (k = 0; k < 7; k++) {
+            if (!strcmp(d.package.stages[i].name, fl[k])) {
+                int j, dup = 0, m = d.package.stages[i].model;
+                for (j = 0; j < stage_nm[k]; j++) if (stage_models[k][j] == m) dup = 1;
+                if (!dup) {
+                    if (stage_nm[k] >= MAXM) die("stage-models");
+                    stage_models[k][stage_nm[k]++] = m;
+                }
+            }
+        }
+    }
+    d.package.file = 0;
+    cxpl_release(&d.package, free);
+    free(s);
+    join(ape, sizeof ape, root, "unisacc.com");
+    join(tool, sizeof tool, root, "tools/model-program-census.cx");
+    {
+        char *v[] = {"sh", ape, tool, "--", "--package", pkgpath, 0};
+        if (np_run(v, root, 0, 50, &r, why, sizeof why) || r.rc) { np_free(&r); die("package-census"); }
+    }
+    nmod = 0;
+    for (p = r.out; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t z = nl ? (size_t)(nl - p) : strlen(p);
+        char line[900];
+        if (z >= sizeof line) z = sizeof line - 1;
+        if (mm_copy(line, sizeof line, p, (long)z)) die("line");
+        line[z] = 0;
+        if (!strncmp(line, "MODEL\t", 6)) {
+            long ix = 0, raw = 0, hd = 0, cn = 0, pr = 0, sl = 0, stored = 0;
+            char kd = 0;
+            if (sscanf(line, "MODEL\t%ld\tkind=%c\tstored=%ld\traw=%ld\traw_header=%ld\traw_constants=%ld\traw_action_program=%ld\traw_selector_bytes=%ld",
+                       &ix, &kd, &stored, &raw, &hd, &cn, &pr, &sl) != 8 || ix < 0 || ix >= MAXM) die("model-line");
+            mraw[ix] = raw;
+            mact[ix] = pr;
+            msel[ix] = sl;
+            if (ix + 1 > nmod) nmod = (int)ix + 1;
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    np_free(&r);
+}
+
+static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
+    char rev[65], line[3000], old[16000];
+    size_t oldn = 0;
+    int i, j, flows;
+    char ip[4400];
+    size_t n;
+    char *s;
+    long gfl[7] = {0}, gcount[7] = {0};
+    char gl[7][400];
+    long unassigned = 0;
+    load_gold();
+    load_recipes();
+    flows = count_rows("exec/pipeline/image-stages.tsv");
+    if (flows != 7) die("image-stages rows != 7");
+    old[0] = 0;
+    join(ip, sizeof ip, root, "build/product-map.tsv");
+    s = cx_read(ip, &n);
+    if (s) {
+        char *q = s;
+        while (q && *q) {
+            char *nl = strchr(q, '\n');
+            size_t z = nl ? (size_t)(nl - q + 1) : strlen(q);
+            if (!strncmp(q, "flow-model\t", 11)) {
+                if (oldn + z >= sizeof old) die("old-cap");
+                if (mm_copy(old + oldn, (long)(sizeof old - oldn), q, (long)z)) die("old");
+                oldn += z;
+                old[oldn] = 0;
+            }
+            q = nl ? nl + 1 : 0;
+        }
+        free(s);
+    }
+    for (j = 0; j < 7; j++) gl[j][0] = 0;
+    /* gold rows grouped by flow */
+    for (i = 0; i < ng; i++) {
+        const char *f = flow_of_gold(gname[i]);
+        int k = -1;
+        if (f) for (j = 0; j < 7; j++) if (!strcmp(fl[j], f)) k = j;
+        if (k < 0) {
+            unassigned += gsize[i];
+            if (cx_fmt(line, sizeof line,
+                       "gold-unassigned\t%s\t-\tno stream in prd 4.0 flow table\t%ld\tgold-table-bytes\t-\tfile=weights/gold/%s.tsv\tstat weights/gold/%s.tsv\t-\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       gname[i], gsize[i], gname[i], gname[i])) die("row");
+            continue;
+        }
+        gfl[k] += gsize[i];
+        gcount[k]++;
+        {
+            char t[80];
+            size_t cur = strlen(gl[k]);
+            if (cx_fmt(t, sizeof t, "%s%s:%ld", cur ? "," : "", gname[i], gsize[i])) die("gl");
+            if (cur + strlen(t) >= sizeof gl[k]) die("gl-cap");
+            if (mm_copy(gl[k] + cur, (long)(sizeof gl[k] - cur), t, (long)strlen(t) + 1)) die("gl-copy");
+        }
+    }
+    rev_last(rev, "exec/pipeline/image-stages.tsv", "weights/gold", 0, 0);
+    for (j = 0; j < 7; j++) {
+        char in[40] = "", out2[40] = "", mf[40] = "", nm[16];
+        char *t = 0;
+        size_t m2;
+        join(ip, sizeof ip, root, "exec/pipeline/image-stages.tsv");
+        t = cx_read(ip, &m2);
+        if (!t) die("stages");
+        {
+            char *q = t;
+            while (q && *q) {
+                char *nl = strchr(q, '\n');
+                size_t kl = strlen(fl[j]);
+                if (!strncmp(q, fl[j], kl) && q[kl] == '\t') {
+                    if (nl) *nl = 0;
+                    if (sscanf(q, "%15s\t%39s\t%39s\t%39s", nm, in, out2, mf) != 4) die("stages-parse");
+                    break;
+                }
+                q = nl ? nl + 1 : 0;
+            }
+        }
+        free(t);
+        if (!in[0]) die("stage-missing");
+        if (cx_fmt(line, sizeof line,
+                   "flow\t%s\t-\t%s\t%ld\tgold-table-bytes\t-\tin=%s;out=%s;model_file=%s;gold_files=%ld;gold=%s\tcat exec/pipeline/image-stages.tsv && stat weights/gold/*.tsv\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   fl[j], flow_fn(fl[j]), gfl[j], in, out2, mf, gcount[j], gl[j][0] ? gl[j] : "-", rev)) die("row");
+        app(buf, cap, at, line);
+    }
+    /* unassigned gold rows */
+    for (i = 0; i < ng; i++) {
+        if (flow_of_gold(gname[i])) continue;
+        if (cx_fmt(line, sizeof line,
+                   "gold-unassigned\t%s\t-\tno stream in prd 4.0 flow table\t%ld\tgold-table-bytes\t-\tfile=weights/gold/%s.tsv\tstat weights/gold/%s.tsv\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   gname[i], gsize[i], gname[i], gname[i], rev)) die("row");
+        app(buf, cap, at, line);
+    }
+    (void)unassigned;
+    /* flow-model rows */
+    if (have_pkg) {
+        census_package();
+        for (j = 0; j < 7; j++) {
+            long raw = 0, act = 0, sel = 0;
+            char ml[200] = "";
+            for (i = 0; i < stage_nm[j]; i++) {
+                int m = stage_models[j][i];
+                char t[24];
+                if (m >= nmod) die("model-index");
+                raw += mraw[m];
+                act += mact[m];
+                sel += msel[m];
+                if (cx_fmt(t, sizeof t, "%s%d", i ? "+" : "", m)) die("ml");
+                if (strlen(ml) + strlen(t) >= sizeof ml) die("ml-cap");
+                if (mm_copy(ml + strlen(ml), (long)(sizeof ml - strlen(ml)), t, (long)strlen(t) + 1)) die("ml-copy");
+            }
+            if (cx_fmt(line, sizeof line,
+                       "flow-model\t%s\t%s\tUNINETB1 models of stream %s in package\t%ld\tuninetb1-raw\t%s\tmodels=%s;action_bytes=%ld;selector_bytes=%ld;action_permille=%ld;selector_permille=%ld;tier=daily\tsh ./unisacc.com tools/model-program-census.cx -- --package PKG\t%.40s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       fl[j], fl[j], fl[j], raw, pkg_sha, ml[0] ? ml : "-", act, sel,
+                       raw ? act * 1000 / raw : 0L, raw ? sel * 1000 / raw : 0L, pkg_sha)) die("row");
+            app(buf, cap, at, line);
+        }
+    } else if (oldn) {
+        app(buf, cap, at, old);
+    } else {
+        for (j = 0; j < 7; j++) {
+            if (cx_fmt(line, sizeof line,
+                       "flow-model\t%s\t%s\tUNINETB1 models of stream %s in package\tUNMEASURED\tuninetb1-raw\tUNMEASURED\tmodels=UNMEASURED;tier=daily\tsh ./unisacc.com tools/model-program-census.cx -- --package PKG\t-\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       fl[j], fl[j], fl[j])) die("row");
+            app(buf, cap, at, line);
+        }
+    }
+    /* nets */
+    rev_last(rev, "tools/source-package.cx", 0, 0, 0);
+    for (i = 0; i < nrec; i++) {
+        const char *f = net_flow(rec[i].stage);
+        int g = gidx(rec[i].stage);
+        char sz[24];
+        if (g >= 0) { if (cx_fmt(sz, sizeof sz, "%ld", gsize[g])) die("sz"); }
+        else if (cx_fmt(sz, sizeof sz, "%s", "-")) die("sz");
+        if (cx_fmt(line, sizeof line,
+                   "net\t%s\t%s\tconstruction net: generator %s args %s\t%s\t%s\t-\tstage=%s;args=%s;model_raw=UNMEASURED;action_permille=UNMEASURED;selector_permille=UNMEASURED;note=recipe-to-model-map-not-in-package\tscan recipes[] in tools/source-package.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   rec[i].id, f, rec[i].stage, rec[i].args, sz, g >= 0 ? "gold-table-bytes" : "no-direct-gold-table",
+                   rec[i].stage, rec[i].args, rev)) die("row");
+        app(buf, cap, at, line);
+    }
+}
+
+static void gloss(char *out, size_t cap, size_t *at) {
+    char t[2600];
+    int g18 = count_rows("exec/pipeline/gold-stages.tsv");
+    if (cx_fmt(t, sizeof t,
+               "\n术语表(三口径,互不相加,数字由本工具重算):\n"
+               "(1) ask 事实表 %d 张:`exec/pipeline/gold-stages.tsv` 的行数,即 prd 4.1 的十八网;每张有限表加全键穷举 exact。\n"
+               "(2) `weights/gold/*.tsv` 目录 %d 个文件,共 %ld 字节:比 (1) 多出的是 lexcls、lexword 两个词法辅助表(无独立 ask 网)。\n"
+               "(3) 构造网 %d 张:`tools/source-package.cx` 的 recipes[],即 job list 中 gen=tbl=net=%d 的来源;它是模型构造口径,与 (1)(2) 不一一对应,不得互相换算。\n"
+               "七流 %d 个(`exec/pipeline/image-stages.tsv`)是字节管道阶段;流与网的对应只在 `flow`/`net` 行的 parent 列。"
+               "isel、combo 两张 ask 表在 prd 4.0 流表中无归属,记为 gold-unassigned。"
+               "逐网模型字节(recipe 到模型的映射不在包内)记 UNMEASURED;按流的 UNINETB1 普查见 flow-model 行(daily 档,需 --package)。\n",
+               g18, ng, gold_total, nrec, nrec, count_rows("exec/pipeline/image-stages.tsv"))) die("gloss");
+    app(out, cap, at, t);
+}
 static void build(char **tsv_out, size_t *tn, char **prd_out, size_t *pn) {
-    char rev[65];
     long l0, l1, a, b, c, d, e, f;
-    static char tsv[16000], prd[18000];
+    static char tsv[64000], prd[72000];
     slice_init();
     ape_census();
     l0 = dir_bytes("cx/sys") + dir_bytes("cx/mem") + dir_bytes("cx/text");
@@ -279,10 +690,12 @@ static void build(char **tsv_out, size_t *tn, char **prd_out, size_t *pn) {
     d = file_bytes("src/stages.cx");
     e = file_bytes("src/drive.cx");
     f = file_bytes("src/bind.cx");
-    rev_now(rev);
-    emit_tsv(tsv, sizeof tsv, tn, rev, l0, l1, a, b, c, d, e, f);
+    emit_tsv(tsv, sizeof tsv, tn, l0, l1, a, b, c, d, e, f);
+    emit_stage_rows(tsv, sizeof tsv, tn);
     tsv[*tn] = 0;
     emit_prd(prd, sizeof prd, pn, tsv);
+    gloss(prd, sizeof prd - 64, pn);
+    app(prd, sizeof prd, pn, "```\n<!-- product-map:end -->\n");
     prd[*pn] = 0;
     *tsv_out = tsv;
     *prd_out = prd;
@@ -324,11 +737,20 @@ static void extract_prd_block(char *dst, size_t cap, size_t *dn) {
 int main(int argc, char **argv) {
     char *tsv, *prd;
     size_t tn, pn;
-    int check = 0, writef = 0;
+    int check = 0, writef = 0, daily = 0, i;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
-    if (argc == 2 && !strcmp(argv[1], "--write")) writef = 1;
-    else if (argc == 2 && !strcmp(argv[1], "--check")) check = 1;
-    else die("usage --write|--check");
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--write")) writef = 1;
+        else if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--daily")) daily = 1;
+        else if (!strcmp(argv[i], "--package") && i + 1 < argc) {
+            if (sy_realpath(argv[++i], pkgpath, sizeof pkgpath) < 0) die("package-path");
+            have_pkg = 1;
+        } else if (!strcmp(argv[i], "--root") && i + 1 < argc) {
+            if (sy_realpath(argv[++i], root, sizeof root) < 0) die("root-path");
+        } else die("usage --write|--check [--daily] [--package BARE_PKG] [--root DIR]");
+    }
+    if (writef == check || (daily && !check) || (daily && !have_pkg)) die("usage --write|--check [--daily --package BARE_PKG]");
     build(&tsv, &tn, &prd, &pn);
     if (writef) {
         char tp[4400];
@@ -339,12 +761,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (check) {
-        char have[20000];
+        static char have[80000];
         size_t hn;
         if (!same_file("build/product-map.tsv", tsv, tn)) die("tsv-drift");
         extract_prd_block(have, sizeof have, &hn);
         if (hn != pn || memcmp(have, prd, pn)) die("prd-block-drift");
-        printf("PRODUCT_MAP\tstatus=CHECK\tqualification=COMMIT_FAST\n");
+        printf("PRODUCT_MAP\tstatus=CHECK\tqualification=%s\n", daily ? "DAILY" : "COMMIT_FAST");
         return 0;
     }
     return 2;

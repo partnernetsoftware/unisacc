@@ -1,0 +1,144 @@
+/* tools/check-product-map-fixtures.cx -- daily scenes, empty <=25s.
+ *   sh ./unisacc.com tools/check-product-map-fixtures.cx -- unrelated|prd-red|prd-restore|input-change
+ * Mutate a git clone only. product-map is started from the original tree
+ * (default -run) with --root CLONE so cwd/source stay on the original tree.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "check-product-map-fixtures: %s\n", s); exit(2); }
+static int sh(char **v, const char *cwd, char *err, size_t ec) {
+    np_result r = {0};
+    int rc;
+    if (np_run(v, cwd, 0, 40, &r, why, sizeof why)) { np_free(&r); return -1; }
+    rc = r.rc;
+    if (err && ec) { size_t k = r.errn < ec - 1 ? r.errn : ec - 1; if (k && mm_copy(err, (long)ec, r.err, (long)k)) { np_free(&r); return rc; } err[k] = 0; }
+    np_free(&r);
+    return rc;
+}
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-product-map-fixtures.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int setup(char *dir, int dcap, char *product, char *e, size_t ec) {
+    char f[4400];
+    if (cx_fmt(dir, dcap, "%s/unisacc-pmchk.%d.%d", sy_tmpdir(), sy_pid(), (int)(sy_now_ms() & 0xffffff))) die("fxdir");
+    {
+        char *cl[] = {"git", "clone", "-q", "--shared", root, dir, 0};
+        if (sh(cl, root, e, ec) != 0) die("fx-clone");
+    }
+    if (cx_fmt(f, sizeof f, "%s/%s", dir, "unisacc" ".com")) die("fx");
+    {
+        char *cp[] = {"cp", product, f, 0};
+        if (sh(cp, root, e, ec) != 0) die("fx-cp");
+    }
+    {
+        char bdir[4400], sdir[4400];
+        if (cx_fmt(bdir, sizeof bdir, "%s/build", dir) || cx_fmt(sdir, sizeof sdir, "%s/src", dir)) die("fx");
+        { char *mk[] = {"mkdir", "-p", bdir, sdir, 0}; sh(mk, root, e, ec); }
+    }
+    {
+        char srcp[4400], dstp[4400];
+        if (cx_fmt(srcp, sizeof srcp, "%s/prd.md", root) || cx_fmt(dstp, sizeof dstp, "%s/prd.md", dir)) die("fx");
+        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-prd"); }
+        if (cx_fmt(srcp, sizeof srcp, "%s/build/product-map.tsv", root) || cx_fmt(dstp, sizeof dstp, "%s/build/product-map.tsv", dir)) die("fx");
+        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-tsv"); }
+        if (cx_fmt(srcp, sizeof srcp, "%s/src/host.cx", root) || cx_fmt(dstp, sizeof dstp, "%s/src/host.cx", dir)) die("fx");
+        { char *cp[] = {"cp", srcp, dstp, 0}; if (sh(cp, root, e, ec) != 0) die("fx-host"); }
+    }
+    return 0;
+}
+static void cleanup(const char *dir, char *e, size_t ec) {
+    char *rm[] = {"rm", "-rf", (char *)dir, 0};
+    sh(rm, root, e, ec);
+}
+static void scene_unrelated(char *product, char *light) {
+    char dir[4400], e[600], f[4400];
+    char *ck2[] = {"sh", product, light, 0};
+    setup(dir, sizeof dir, product, e, sizeof e);
+    if (cx_fmt(f, sizeof f, "%s/UNRELATED.txt", dir)) die("fx");
+    cx_write(f, "x\n", 2);
+    ck(sh(ck2, root, e, sizeof e) == 0, "fx-unrelated-commit-still-pass");
+    cleanup(dir, e, sizeof e);
+}
+static void scene_prd_red(char *product, char *tool) {
+    char dir[4400], e[600], f[4400];
+    char *ck2[] = {"sh", product, tool, "--", "--check", "--root", dir, 0};
+    size_t n;
+    char *s;
+    setup(dir, sizeof dir, product, e, sizeof e);
+    if (cx_fmt(f, sizeof f, "%s/prd.md", dir)) die("fx");
+    s = cx_read(f, &n);
+    ck(s != 0, "fx-prd-read");
+    if (s) {
+        char *bg = strstr(s, "<!-- product-map:begin -->");
+        char *p = bg ? strstr(bg, "产品全景表阶段一") : 0;
+        ck(p != 0, "fx-prd-marker-text");
+        if (p) { p[0] = 'X'; cx_write(f, s, n); ck(sh(ck2, root, e, sizeof e) != 0 && strstr(e, "prd-block-drift"), "fx-prd-edit-red"); }
+        free(s);
+    }
+    cleanup(dir, e, sizeof e);
+}
+static void scene_prd_restore(char *product, char *tool) {
+    char dir[4400], e[600], f[4400];
+    char *ck2[] = {"sh", product, tool, "--", "--check", "--root", dir, 0};
+    size_t n;
+    char *s;
+    setup(dir, sizeof dir, product, e, sizeof e);
+    if (cx_fmt(f, sizeof f, "%s/prd.md", dir)) die("fx");
+    s = cx_read(f, &n);
+    ck(s != 0, "fx-prd-read");
+    if (s) {
+        char *bg = strstr(s, "<!-- product-map:begin -->");
+        char *p = bg ? strstr(bg, "产品全景表阶段一") : 0;
+        ck(p != 0, "fx-prd-marker-text");
+        if (p) { p[0] = 'X'; cx_write(f, s, n); p[0] = (char)0xE4; cx_write(f, s, n); }
+        free(s);
+    }
+    ck(sh(ck2, root, e, sizeof e) == 0, "fx-prd-restored-pass");
+    cleanup(dir, e, sizeof e);
+}
+static void scene_input(char *product, char *tool) {
+    char dir[4400], e[600], d2[4400];
+    char *ck2[] = {"sh", product, tool, "--", "--check", "--root", dir, 0};
+    size_t n;
+    char *s;
+    setup(dir, sizeof dir, product, e, sizeof e);
+    if (cx_fmt(d2, sizeof d2, "%s/src/host.cx", dir)) die("fx");
+    s = cx_read(d2, &n);
+    ck(s != 0, "fx-host-read");
+    if (s) {
+        char *t = malloc(n + 8);
+        if (!t) die("alloc");
+        if (mm_copy(t, (long)(n + 8), s, (long)n)) die("copy");
+        if (mm_copy(t + n, 8, "\n/* x */", 8)) die("copy2");
+        cx_write(d2, t, n + 8);
+        ck(sh(ck2, root, e, sizeof e) != 0 && strstr(e, "tsv-drift"), "fx-input-change-red");
+        free(t);
+        free(s);
+    }
+    cleanup(dir, e, sizeof e);
+}
+int main(int argc, char **argv) {
+    char product[4400], tool[4400], light[4400];
+    const char *which;
+    if (argc < 2) die("usage: unrelated|prd-red|prd-restore|input-change");
+    which = argv[1];
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(product, sizeof product, "%s/%s", root, "unisacc" ".com") ||
+        cx_fmt(tool, sizeof tool, "%s/tools/product-map.cx", root) ||
+        cx_fmt(light, sizeof light, "%s/tools/check-product-map.cx", root)) die("path");
+    if (!strcmp(which, "unrelated")) scene_unrelated(product, light);
+    else if (!strcmp(which, "prd-red")) scene_prd_red(product, tool);
+    else if (!strcmp(which, "prd-restore")) scene_prd_restore(product, tool);
+    else if (!strcmp(which, "input-change")) scene_input(product, tool);
+    else die("usage: unrelated|prd-red|prd-restore|input-change");
+    printf("CHECK_PRODUCT_MAP_FIXTURES\tfailed=%d\tscene=%s\n", failed, which);
+    return failed ? 1 : 0;
+}

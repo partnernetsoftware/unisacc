@@ -1,47 +1,70 @@
-/* tools/check-product-map.cx -- commit-fast: write then --check, six slice rows.
- *
+/* tools/check-product-map.cx -- commit-fast: assert existing tsv+prd, no --write.
+ * Heavy clone scenes live in check-product-map-fixtures.cx (daily).
  *   sh ./unisacc.com tools/check-product-map.cx
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
-#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
 
 static int failed;
-static char root[4096], why[512];
+static char root[4096];
 static void die(const char *s) { fprintf(stderr, "check-product-map: %s\n", s); exit(2); }
 static void ck(int ok, const char *n) {
     printf("%s\tcheck-product-map.%s\n", ok ? "PASS" : "FAIL", n);
     if (!ok) failed++;
 }
 
+static int col(const char *line, int want, char *o, size_t oc) {
+    int c = 0;
+    const char *p = line;
+    while (c < want) { p = strchr(p, '\t'); if (!p) return 0; p++; c++; }
+    { size_t k = 0; while (p[k] && p[k] != '\t' && p[k] != '\n') k++; if (k >= oc) return 0; if (k && mm_copy(o, (long)oc, p, (long)k)) return 0; o[k] = 0; }
+    return 1;
+}
+static void stage2(const char *s) {
+    int flows = 0, nets = 0, models = 0, un = 0, badpair = 0, files = 0;
+    long fsum = 0, usum = 0;
+    const char *p = s;
+    while (p && *p) {
+        char kind[40], note[60], sz[40], aux[600];
+        const char *nl = strchr(p, '\n');
+        if (col(p, 0, kind, sizeof kind) && col(p, 5, note, sizeof note) && col(p, 4, sz, sizeof sz)) {
+            int ok = 1;
+            if (!strcmp(kind, "flow")) { flows++; ok = !strcmp(note, "gold-table-bytes"); fsum += atol(sz); if (col(p, 7, aux, sizeof aux)) { const char *g = strstr(aux, "gold_files="); if (g) files += atoi(g + 11); } }
+            else if (!strcmp(kind, "flow-model")) { models++; ok = !strcmp(note, "uninetb1-raw"); }
+            else if (!strcmp(kind, "gold-unassigned")) { un++; ok = !strcmp(note, "gold-table-bytes"); usum += atol(sz); }
+            else if (!strcmp(kind, "net")) { nets++; ok = !strcmp(note, "gold-table-bytes") || !strcmp(note, "no-direct-gold-table"); }
+            else if (!strcmp(kind, "layer")) ok = !strcmp(note, "source-bytes");
+            else if (!strcmp(kind, "slice")) ok = !strcmp(note, "target-image-bytes");
+            if (!ok) badpair++;
+        }
+        p = nl ? nl + 1 : 0;
+    }
+    ck(flows == 7, "flow-rows-7");
+    ck(nets == 42, "net-rows-42");
+    ck(models == 7, "flow-model-rows-7");
+    ck(badpair == 0, "kind-note-pairing-no-mixed-sum");
+    ck(un == 2, "gold-unassigned-2");
+    ck(files + un == 20 && fsum + usum > 0, "gold-files-accounted-20");
+}
+static void prd_gloss(void) {
+    char p[4400];
+    size_t n;
+    char *s;
+    if (cx_fmt(p, sizeof p, "%s/prd.md", root)) die("path");
+    s = cx_read(p, &n);
+    ck(s != 0, "prd-read2");
+    if (s) {
+        char *g = strstr(s, "术语表(三口径");
+        ck(g && strstr(g, "(1) ask 事实表 18 张") && strstr(g, "(2) `weights/gold/*.tsv` 目录 20 个文件") && strstr(g, "(3) 构造网 42 张"), "prd-glossary-three-calibres");
+        free(s);
+    }
+}
+
 int main(void) {
-    char product[4400], tool[4400], tsv[4400];
-    np_result r = {0};
+    char tsv[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
-    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
-        cx_fmt(tool, sizeof tool, "%s/tools/product-map.cx", root) ||
-        cx_fmt(tsv, sizeof tsv, "%s/build/product-map.tsv", root)) die("path");
-    {
-        char *v[] = {"sh", product, tool, "--", "--write", 0};
-        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) {
-            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
-            np_free(&r);
-            die("write");
-        }
-        ck(r.out && strstr(r.out, "PRODUCT_MAP\tstatus=WRITE"), "write-line");
-        np_free(&r);
-    }
-    {
-        char *v[] = {"sh", product, tool, "--", "--check", 0};
-        r = (np_result){0};
-        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) {
-            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
-            np_free(&r);
-            die("check");
-        }
-        ck(r.out && strstr(r.out, "PRODUCT_MAP\tstatus=CHECK"), "check-line");
-        np_free(&r);
-    }
+    if (cx_fmt(tsv, sizeof tsv, "%s/build/product-map.tsv", root)) die("path");
     {
         size_t n;
         char *s = cx_read(tsv, &n);
@@ -52,7 +75,9 @@ int main(void) {
         ck(s && strstr(s, "slice\twin/x86_64\t"), "slice-win-x64");
         ck(s && strstr(s, "UNATTRIBUTED"), "unattributed-visible");
         ck(s && strstr(s, "target-image-bytes"), "kind-not-summed");
+        stage2(s);
         free(s);
+        prd_gloss();
     }
     printf("CHECK_PRODUCT_MAP\tfailed=%d\n", failed);
     return failed ? 1 : 0;
