@@ -1,0 +1,680 @@
+/* tools/candidate-chain.cx -- G0 一条命令编排 chain-step 全链。
+ *
+ *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
+ *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
+ *
+ * 子进程一律 tools/bound 55。131 作业:start-job 与 finish-job 分两次调用;
+ * 每波作业数按上一波 wall_ms 自适应(目标每次 <55s),超时按作业粒度 --resume。
+ * --resume 跳过 checkpoint.tsv 已 DONE 相位。编排只在本 .cx 内,不经 .sh。
+ */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static void die(const char *a, const char *b) {
+    fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    exit(2);
+}
+static long fsize(const char *p) {
+    sy_stat_t st;
+    if (sy_stat(p, &st)) return -1;
+    return st.size;
+}
+static int runv_secs(char **v, int secs) {
+    char *out = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(v, secs, &out, &n);
+    if (out && n) sy_write_all(1, out, n);
+    free(out);
+    return rc;
+}
+static int bound_sh_secs(const char *root, char **rest, int secs) {
+    char bound[4400], com[4400], secbuf[8];
+    char *v[72];
+    int n = 0, i = 0;
+    if (secs < 1 || secs > 60) die("bound secs", "1..60");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("path", "bound");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", secs)) die("fmt", "secs");
+    v[n++] = bound;
+    v[n++] = secbuf;
+    v[n++] = (char *)"sh";
+    v[n++] = com;
+    while (rest[i] && n + 1 < 72) {
+        v[n++] = rest[i];
+        i++;
+    }
+    v[n] = 0;
+    return runv_secs(v, secs);
+}
+static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
+static int step_secs(const char *root, char **args, int secs) {
+    char tool[4400];
+    char *v[64];
+    int n = 0, i = 0;
+    if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
+    v[n++] = tool;
+    v[n++] = (char *)"--";
+    while (args[i] && n + 1 < 64) {
+        v[n++] = args[i];
+        i++;
+    }
+    v[n] = 0;
+    return bound_sh_secs(root, v, secs);
+}
+static int step(const char *root, char **args) { return step_secs(root, args, 55); }
+
+static const char *g_phases[26] = {
+    "snap", "build", "ctx", "host", "list",
+    "jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net", "final",
+    "routes", "p3", "gen1-lnx-x86_64", "gen1-lnx-arm64",
+    "gen1-osx-x86_64", "gen1-osx-arm64", "gen1-win-x86_64", "gen1-win-arm64",
+    "g2-lnx-x86_64", "g2-lnx-arm64", "g3-lnx-x86_64", "g3-lnx-arm64",
+    "kernels-g2", "kernels-g3", "compare", "pack"
+};
+static void plan(void) {
+    int i;
+    sy_printf("CANDIDATE_CHAIN\tplan\tphases=26\n");
+    for (i = 0; i < 26; i++)
+        sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
+    sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
+    sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
+}
+
+static int hex40(const char *s) {
+    int i;
+    if (!s) return 0;
+    for (i = 0; i < 40; i++) {
+        char c = s[i];
+        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!ok) return 0;
+    }
+    return s[40] == 0;
+}
+
+static int ck_done(const char *dir, const char *phase) {
+    char p[4400], needle[256];
+    size_t n = 0;
+    char *b;
+    int hit;
+    if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", dir)) die("path", dir);
+    if (fsize(p) < 0) return 0;
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    if (cx_fmt(needle, sizeof needle, "DONE\t%s\t", phase)) {
+        free(b);
+        die("fmt", phase);
+    }
+    hit = tx_find(b, (long)n, needle, tx_len(needle, 200)) >= 0;
+    free(b);
+    return hit;
+}
+static void mark(const char *dir, const char *phase, long wall) {
+    char p[4400], line[800];
+    int fd;
+    if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", dir)) die("path", dir);
+    if (cx_fmt(line, sizeof line, "DONE\t%s\twall_ms=%ld\tsha=-\n", phase, wall)) die("fmt", phase);
+    fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("checkpoint", p);
+    sy_printf("RECEIPT\t%s\twall_ms=%ld\n", phase, wall);
+}
+
+static int sjw(const char *s, const char *ctx, const char *b, const char *phase, int first, int count, const char *act) {
+    char tool[4400], firsts[16], counts[16];
+    char *v[12];
+    int n = 0;
+    if (cx_fmt(tool, sizeof tool, "%s/tools/source-job-wave.cx", s)) die("path", "sjw");
+    if (cx_fmt(firsts, sizeof firsts, "%d", first)) die("fmt", "first");
+    if (cx_fmt(counts, sizeof counts, "%d", count)) die("fmt", "count");
+    v[n++] = tool;
+    v[n++] = (char *)"--";
+    v[n++] = (char *)s;
+    v[n++] = (char *)ctx;
+    v[n++] = (char *)b;
+    v[n++] = (char *)"wave";
+    v[n++] = (char *)phase;
+    v[n++] = firsts;
+    v[n++] = counts;
+    v[n++] = (char *)act;
+    v[n++] = 0;
+    return bound_sh(s, v);
+}
+static int wave_phase(const char *outdir, const char *s, const char *ctx, const char *b,
+                      const char *phase, int total, int resume) {
+    int first = 0, count = total > 8 ? 8 : total;
+    if (total == 5) count = 5;
+    while (first < total) {
+        char tag[80];
+        long t0, wall;
+        if (first + count > total) count = total - first;
+        if (cx_fmt(tag, sizeof tag, "jobs-%s-%d-%d", phase, first, count)) die("fmt", phase);
+        if (resume && ck_done(outdir, tag)) {
+            sy_printf("RESUME\t%s\n", tag);
+            first += count;
+            continue;
+        }
+        t0 = sy_now_ms();
+        if (sjw(s, ctx, b, phase, first, count, "start-job")) die("start-job", tag);
+        if (sjw(s, ctx, b, phase, first, count, "finish-job")) die("finish-job", tag);
+        wall = sy_now_ms() - t0;
+        mark(outdir, tag, wall);
+        sy_printf("WAVE_ADAPT\t%s\tfirst=%d\tcount=%d\twall_ms=%ld\n", phase, first, count, wall);
+        first += count;
+        if (wall > 40000 && count > 1) {
+            count = count / 2;
+            if (count < 1) count = 1;
+        } else if (wall < 25000 && count < 16) {
+            count = count + 4;
+            if (count > 16) count = 16;
+        }
+    }
+    return 0;
+}
+static int jobs_ok(const char *ctx) {
+    char jobs[4400], p[4400], stpath[4400];
+    DIR *d;
+    struct dirent *e;
+    int n = 0;
+    if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx)) die("path", "jobs");
+    d = opendir(jobs);
+    if (!d) die("opendir", jobs);
+    while ((e = readdir(d))) {
+        size_t nst = 0;
+        char *st;
+        if (e->d_name[0] == '.') continue;
+        if (cx_fmt(p, sizeof p, "%s/%s/record.tsv", jobs, e->d_name)) die("path", "record");
+        if (fsize(p) < 1) { closedir(d); die("missing record", p); }
+        if (cx_fmt(stpath, sizeof stpath, "%s/%s/command.status", jobs, e->d_name)) die("path", "status");
+        st = cx_read(stpath, &nst);
+        if (!st || nst != 5 || st[0] != 'r' || st[1] != 'c' || st[2] != '\t' || st[3] != '0' || st[4] != '\n') {
+            free(st); closedir(d); die("job command.status", stpath);
+        }
+        free(st);
+        n++;
+    }
+    closedir(d);
+    if (n != 131) die("job count not 131", jobs);
+    sy_printf("FINAL\tjobs=131\tcommand_rc=0\trecords=present\n");
+    return 0;
+}
+static int json_quoted(const char *j, size_t n, const char *key, char *dst, int want) {
+    char pat[80];
+    long at, i;
+    if (cx_fmt(pat, sizeof pat, "\"%s\": \"", key)) return 1;
+    at = tx_find(j, (long)n, pat, tx_len(pat, 80));
+    if (at < 0) return 1;
+    at += tx_len(pat, 80);
+    for (i = 0; i < want; i++) {
+        char c;
+        if (at + i >= (long)n) return 1;
+        c = j[at + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 1;
+        dst[i] = c;
+    }
+    dst[want] = 0;
+    return 0;
+}
+static int snap_ok(const char *dir, const char *rev, const char *helper) {
+    char mark[4400], js[4400], ape[4400], h[65], commit[41], sid[65], dig[65], live[65];
+    size_t mn = 0, jn = 0, an = 0, hn = 0;
+    char *m, *j, *a, *text = 0;
+    int rc, k;
+    if (!helper || !helper[0]) die("REFUSE identity-helper required", dir);
+    if (cx_fmt(mark, sizeof mark, "%s/.release-rev", dir)) die("path", "revmark");
+    if (cx_fmt(js, sizeof js, "%s/unisacc.com.build.json", dir)) die("path", "json");
+    if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", dir)) die("path", "ape");
+    m = cx_read(mark, &mn);
+    if (!m || mn < 40 || !hex40(rev)) { free(m); die("REFUSE snap rev marker", mark); }
+    if (mn > 40 && m[40] != '\n' && m[40] != 0) { free(m); die("REFUSE snap rev marker", mark); }
+    m[40] = 0;
+    if (!hex40(m) || !tx_eqz(m, rev)) { free(m); die("REFUSE snap rev mismatch", mark); }
+    free(m);
+    j = cx_read(js, &jn);
+    if (!j) die("REFUSE snap receipt", js);
+    if (json_quoted(j, jn, "commit", commit, 40) || !tx_eqz(commit, rev)) { free(j); die("REFUSE snap receipt commit", js); }
+    if (json_quoted(j, jn, "sources_sha256", sid, 64)) { free(j); die("REFUSE snap receipt SID", js); }
+    if (json_quoted(j, jn, "product_digest", dig, 64)) { free(j); die("REFUSE snap receipt digest", js); }
+    free(j);
+    a = cx_read(ape, &an);
+    if (!a) die("REFUSE snap product", ape);
+    if (sy_sha256_hex(a, (long)an, h)) { free(a); die("sha", ape); }
+    free(a);
+    if (!tx_eqz(h, dig)) die("REFUSE snap product SHA mismatch", ape);
+    {
+        char *v[3];
+        v[0] = (char *)helper; v[1] = (char *)dir; v[2] = 0;
+        rc = cx_runv_timeout(v, 8, &text, &hn);
+        if (rc || !text || hn != 65 || text[64] != '\n') { free(text); die("REFUSE live source SID", helper); }
+        for (k = 0; k < 64; k++) {
+            char c = text[k];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { free(text); die("REFUSE live source SID", helper); }
+            live[k] = c;
+        }
+        live[64] = 0;
+        free(text);
+    }
+    if (!tx_eqz(live, sid)) die("REFUSE snap source SID mismatch", dir);
+    sy_printf("SNAP_OK\trev=%s\tsid=%.16s\tproduct=%.16s\tbytes=%lu\tlive_sid=1\n", rev, sid, dig, (unsigned long)an);
+    return 0;
+}
+
+static int parse_par(const char *s) {
+    int n = 0, i;
+    if (!s || !s[0]) return -1;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        n = n * 10 + (s[i] - '0');
+        if (n > 16) return -1;
+    }
+    if (n < 1) return -1;
+    return n;
+}
+
+int main(int argc, char **argv) {
+    const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
+    const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0;
+    int resume = 0, parallel = 0, i, plan_only = 0;
+    char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
+        if (tx_eqz(argv[i], "--resume")) { resume = 1; continue; }
+        if (tx_eqz(argv[i], "--verify-snap") && i + 2 < argc) { vs_dir = argv[++i]; vs_rev = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--out") && i + 1 < argc) { outdir = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--cc") && i + 1 < argc) { cc = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--parallel") && i + 1 < argc) {
+            parallel = parse_par(argv[++i]);
+            if (parallel < 1) die("REFUSE parallel 1..16", argv[i]);
+            continue;
+        }
+        die("REFUSE unknown/duplicate option", argv[i]);
+    }
+    if (vs_dir) {
+        if (!vs_rev || !hex40(vs_rev)) die("REFUSE --rev 40-hex required", vs_rev);
+        if (!idhelp) die("REFUSE --identity-helper required", vs_dir);
+        return snap_ok(vs_dir, vs_rev, idhelp);
+    }
+    if (plan_only) {
+        plan();
+        return 0;
+    }
+    if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
+    if (!outdir || !*outdir) die("REFUSE --out required", 0);
+    if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+    if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-%.10s", root, rev)) die("path", "snap");
+    if (cx_fmt(build, sizeof build, "%s/build", outdir)) die("path", "build");
+    if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("path", "ctx");
+    if (cx_fmt(routes, sizeof routes, "%s/routes", outdir)) die("path", "routes");
+    if (cx_fmt(pkg, sizeof pkg, "%s/compiler.p4.pkg", outdir)) die("path", "pkg");
+    if (cx_fmt(fp, sizeof fp, "%s/fixedpoint", outdir)) die("path", "fp");
+    if (cx_fmt(gen1, sizeof gen1, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "gen1");
+    if (cx_fmt(helper, sizeof helper, "%s/identity-helper", ctx)) die("path", "helper");
+
+    sy_printf("CANDIDATE_CHAIN\trev=%s\tout=%s\tresume=%d\tparallel=%d\n", rev, outdir, resume, parallel);
+
+    if (!(resume && ck_done(outdir, "snap"))) {
+        long t0 = sy_now_ms();
+        char *a[4];
+        a[0] = (char *)"snap"; a[1] = (char *)rev; a[2] = (char *)"out"; a[3] = 0;
+        if (step(root, a)) die("snap", snap);
+        mark(outdir, "snap", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tsnap\n");
+
+    if (sy_mkdir(build, 0755) && fsize(build) < 0) die("mkdir", build);
+
+    if (!(resume && ck_done(outdir, "build"))) {
+        long t0 = sy_now_ms();
+        char *a[5];
+        a[0] = (char *)"build"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = 0;
+        if (step(root, a)) die("build", build);
+        mark(outdir, "build", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tbuild\n");
+
+    if (!(resume && ck_done(outdir, "ctx"))) {
+        long t0 = sy_now_ms();
+        char *a[7];
+        a[0] = (char *)"ctx"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = ctx; a[5] = (char *)cc; a[6] = 0;
+        if (step(root, a)) die("ctx", ctx);
+        mark(outdir, "ctx", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tctx\n");
+
+    if (!(resume && ck_done(outdir, "host"))) {
+        long t0 = sy_now_ms();
+        char *a[5];
+        a[0] = (char *)"host"; a[1] = snap; a[2] = ctx; a[3] = build; a[4] = 0;
+        if (step(root, a)) die("host", "host");
+        mark(outdir, "host", sy_now_ms() - t0);
+    } else sy_printf("RESUME\thost\n");
+
+    if (!(resume && ck_done(outdir, "list"))) {
+        long t0 = sy_now_ms();
+        char *a[5];
+        a[0] = (char *)"list"; a[1] = snap; a[2] = ctx; a[3] = build; a[4] = 0;
+        if (step(root, a)) die("list", "list");
+        mark(outdir, "list", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tlist\n");
+
+    if (!(resume && ck_done(outdir, "jobs-tool"))) {
+        long t0 = sy_now_ms();
+        if (wave_phase(outdir, snap, ctx, build, "tool", 5, resume)) die("jobs-tool", "wave");
+        mark(outdir, "jobs-tool", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tjobs-tool\n");
+
+    if (!(resume && ck_done(outdir, "jobs-gen"))) {
+        long t0 = sy_now_ms();
+        if (wave_phase(outdir, snap, ctx, build, "gen", 42, resume)) die("jobs-gen", "wave");
+        mark(outdir, "jobs-gen", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tjobs-gen\n");
+
+    if (!(resume && ck_done(outdir, "jobs-tbl"))) {
+        long t0 = sy_now_ms();
+        if (wave_phase(outdir, snap, ctx, build, "tbl", 42, resume)) die("jobs-tbl", "wave");
+        mark(outdir, "jobs-tbl", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tjobs-tbl\n");
+
+    if (!(resume && ck_done(outdir, "jobs-net"))) {
+        long t0 = sy_now_ms();
+        if (wave_phase(outdir, snap, ctx, build, "net", 42, resume)) die("jobs-net", "wave");
+        mark(outdir, "jobs-net", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tjobs-net\n");
+
+    if (!(resume && ck_done(outdir, "final"))) {
+        long t0 = sy_now_ms();
+        if (jobs_ok(ctx)) die("final", "jobs");
+        mark(outdir, "final", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tfinal\n");
+
+    if (!(resume && ck_done(outdir, "routes"))) {
+        long t0 = sy_now_ms();
+        char jobs[4400];
+        char *a[6];
+        if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx)) die("path", "jobs");
+        a[0] = (char *)"routes"; a[1] = (char *)rev; a[2] = snap; a[3] = jobs; a[4] = routes; a[5] = 0;
+        if (step(root, a)) die("routes", routes);
+        mark(outdir, "routes", sy_now_ms() - t0);
+    } else sy_printf("RESUME\troutes\n");
+
+    if (!(resume && ck_done(outdir, "p3"))) {
+        long t0 = sy_now_ms();
+        char nets[4400], rts[4400], srcpkg[4400], rbt[4400];
+        char *v[16];
+        int n = 0;
+        if (snap_ok(snap, rev, helper)) die("snap", snap);
+        if (cx_fmt(nets, sizeof nets, "%s/jobs", ctx)) die("path", "nets");
+        if (cx_fmt(rts, sizeof rts, "%s/declaration/routes.tsv", routes)) die("path", "rts");
+        if (cx_fmt(srcpkg, sizeof srcpkg, "%s/compiler.pkg", routes)) die("path", "srcpkg");
+        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        /* snap 已是 freeze 产物,不再 --rev(否则每次 pp_copy_product ~6MB,0.0.49 整调用多约16s) */
+        v[n++] = rbt; v[n++] = (char *)"--";
+        v[n++] = (char *)"p3"; v[n++] = snap; v[n++] = srcpkg; v[n++] = pkg;
+        v[n++] = (char *)"--nets"; v[n++] = nets; v[n++] = (char *)"--routes"; v[n++] = rts;
+        v[n++] = 0;
+        if (bound_sh_secs(root, v, 60)) die("p3", pkg);
+        mark(outdir, "p3", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tp3\n");
+
+    if (!(resume && ck_done(outdir, "gen1-lnx-x86_64"))) {
+        long t0 = sy_now_ms();
+        char gout[4400], p[4400], ctor[4400], rbt[4400];
+        char *v[16];
+        int n = 0;
+        if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
+        if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-x86_64", outdir)) die("path", "g1");
+        if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
+        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        sy_mkdir(p, 0755);
+        if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
+        if (snap_ok(snap, rev, helper)) die("snap", snap);
+        if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
+        {
+            size_t cn = 0; char *cb = cx_read(ctor, &cn), ch[65];
+            if (!cb || sy_sha256_hex(cb, (long)cn, ch)) { free(cb); die("ctor sha", ctor); }
+            free(cb);
+            sy_printf("GEN1_CTOR\tpath=%s\tsha=%s\tbytes=%lu\tsource=c49-gen1-lnx-x86_64/receipt.txt\n", ctor, ch, (unsigned long)cn);
+        }
+        v[n++] = rbt; v[n++] = (char *)"--";
+        v[n++] = (char *)"slice"; v[n++] = snap; v[n++] = pkg; v[n++] = gout;
+        v[n++] = (char *)"--target"; v[n++] = (char *)"lnx/x86_64"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 55)) die("gen1", gout);
+        mark(outdir, "gen1-lnx-x86_64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-lnx-x86_64\n");
+
+    if (!(resume && ck_done(outdir, "gen1-lnx-arm64"))) {
+        long t0 = sy_now_ms();
+        char gout[4400], p[4400], ctor[4400], rbt[4400];
+        char *v[16];
+        int n = 0;
+        if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
+        if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-arm64", outdir)) die("path", "g1a");
+        if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
+        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        sy_mkdir(p, 0755);
+        if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
+        if (snap_ok(snap, rev, helper)) die("snap", snap);
+        if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
+        v[n++] = rbt; v[n++] = (char *)"--";
+        v[n++] = (char *)"slice"; v[n++] = snap; v[n++] = pkg; v[n++] = gout;
+        v[n++] = (char *)"--target"; v[n++] = (char *)"lnx/arm64"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 55)) die("gen1-arm", gout);
+        mark(outdir, "gen1-lnx-arm64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-lnx-arm64\n");
+
+    if (!(resume && ck_done(outdir, "wf-prepare"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], objs[4400], nout[4400], ctor[4400], tmpl[4400];
+        char *v[16];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("path", "objs");
+        if (cx_fmt(nout, sizeof nout, "%s/wf-prep", outdir)) die("path", "wfp");
+        if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
+        if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
+        {
+            const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
+            size_t tn = 0; char *tb = cx_read(tmpl, &tn), th[65];
+            if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template sha", tmpl); }
+            free(tb);
+            if (!tx_eqz(th, want)) die("REFUSE template SHA != ba945f3238 tools/templates/whole-front.cx.in", th);
+            sy_printf("TEMPLATE\tpath=%s\tsha=%s\tsource_commit=ba945f3238\tbytes=%lu\n", tmpl, th, (unsigned long)tn);
+        }
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        {
+            char rec[4400];
+            if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout) || fsize(rec) < 0) {
+                v[n++] = wft; v[n++] = (char *)"--";
+                v[n++] = (char *)"prepare"; v[n++] = snap; v[n++] = pkg; v[n++] = ctor; v[n++] = objs; v[n++] = nout;
+                v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
+                if (bound_sh_secs(root, v, 45)) die("wf-prepare", nout);
+            } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
+        }
+        mark(outdir, "wf-prepare", sy_now_ms() - t0);
+    } else sy_printf("RESUME\twf-prepare\n");
+
+    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front0"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], prep[4400], part[4400];
+        char *v[12];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front0", outdir)) die("path", "part");
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
+        v[n++] = (char *)"0"; v[n++] = (char *)"32"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die("osx-x86-front0", part);
+        mark(outdir, "gen1-osx-x86_64-front0", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-osx-x86_64-front0\n");
+
+    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front1"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], prep[4400], part[4400];
+        char *v[12];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front1", outdir)) die("path", "part");
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
+        v[n++] = (char *)"32"; v[n++] = (char *)"32"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die("osx-x86-front1", part);
+        mark(outdir, "gen1-osx-x86_64-front1", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-osx-x86_64-front1\n");
+
+    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front2"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], prep[4400], part[4400];
+        char *v[12];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front2", outdir)) die("path", "part");
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
+        v[n++] = (char *)"64"; v[n++] = (char *)"21"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die("osx-x86-front2", part);
+        mark(outdir, "gen1-osx-x86_64-front2", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-osx-x86_64-front2\n");
+
+    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-merge"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], prep[4400], phase[4400], p0[4400], p1[4400], p2[4400];
+        char *v[16];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+        if (cx_fmt(phase, sizeof phase, "%s/gen1/osx-x86_64-merged", outdir)) die("path", "phase");
+        if (cx_fmt(p0, sizeof p0, "%s/gen1/osx-x86_64-front0", outdir)) die("path", "p0");
+        if (cx_fmt(p1, sizeof p1, "%s/gen1/osx-x86_64-front1", outdir)) die("path", "p1");
+        if (cx_fmt(p2, sizeof p2, "%s/gen1/osx-x86_64-front2", outdir)) die("path", "p2");
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = phase;
+        v[n++] = p0; v[n++] = p1; v[n++] = p2; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die("osx-x86-merge", phase);
+        mark(outdir, "gen1-osx-x86_64-merge", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-osx-x86_64-merge\n");
+
+    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-stub"))) {
+        long t0 = sy_now_ms();
+        char wft[4400], prep[4400], phase[4400], dest[4400];
+        char *v[12];
+        int n = 0;
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+        if (cx_fmt(phase, sizeof phase, "%s/gen1/osx-x86_64-merged", outdir)) die("path", "phase");
+        if (cx_fmt(dest, sizeof dest, "%s/gen1/osx-x86_64-stub", outdir)) die("path", "stub");
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = phase; v[n++] = dest; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die("osx-x86-stub", dest);
+        mark(outdir, "gen1-osx-x86_64-stub", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tgen1-osx-x86_64-stub\n");
+
+    if (!ck_done(outdir, "gen1-osx-x86_64") || !ck_done(outdir, "gen1-osx-arm64")
+        || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
+        die("REFUSE gen1 six slices incomplete", "osx/win fronts after wf-prepare; will not start g2");
+
+    if (!(resume && ck_done(outdir, "g2-lnx-x86_64"))) {
+        long t0 = sy_now_ms();
+        char gout[4400], ctor[4400], rbt[4400], p[4400];
+        char *v[16];
+        int n = 0;
+        if (cx_fmt(p, sizeof p, "%s/g2", fp) || cx_fmt(gout, sizeof gout, "%s/g2/lnx-x86_64", fp)) die("path", "g2");
+        if (cx_fmt(ctor, sizeof ctor, "%s", gen1)) die("path", "g2ctor");
+        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        sy_mkdir(fp, 0755);
+        sy_mkdir(p, 0755);
+        if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
+        if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", ctor);
+        v[n++] = rbt; v[n++] = (char *)"--";
+        v[n++] = (char *)"slice"; v[n++] = snap; v[n++] = pkg; v[n++] = gout;
+        v[n++] = (char *)"--target"; v[n++] = (char *)"lnx/x86_64"; v[n++] = 0;
+        if (bound_sh_secs(root, v, 55)) die("g2-lnx-x86_64", gout);
+        mark(outdir, "g2-lnx-x86_64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tg2-lnx-x86_64\n");
+
+    if (!(resume && ck_done(outdir, "g2-lnx-arm64"))) {
+        long t0 = sy_now_ms();
+        char *a[14];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"g2"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/arm64";
+        a[10] = (char *)"--link-only"; a[11] = (char *)"--identity-helper"; a[12] = helper; a[13] = 0;
+        if (step(root, a)) die("g2-lnx-arm64", fp);
+        mark(outdir, "g2-lnx-arm64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tg2-lnx-arm64\n");
+
+    if (!(resume && ck_done(outdir, "g3-lnx-x86_64"))) {
+        long t0 = sy_now_ms();
+        char *a[14];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"g3"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/x86_64";
+        a[10] = (char *)"--link-only"; a[11] = (char *)"--identity-helper"; a[12] = helper; a[13] = 0;
+        if (step(root, a)) die("g3-lnx-x86_64", fp);
+        mark(outdir, "g3-lnx-x86_64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tg3-lnx-x86_64\n");
+
+    if (!(resume && ck_done(outdir, "g3-lnx-arm64"))) {
+        long t0 = sy_now_ms();
+        char *a[14];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"g3"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/arm64";
+        a[10] = (char *)"--link-only"; a[11] = (char *)"--identity-helper"; a[12] = helper; a[13] = 0;
+        if (step(root, a)) die("g3-lnx-arm64", fp);
+        mark(outdir, "g3-lnx-arm64", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tg3-lnx-arm64\n");
+
+    if (!(resume && ck_done(outdir, "kernels-g2"))) {
+        long t0 = sy_now_ms();
+        char *a[11];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g2"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        if (step(root, a)) die("kernels-g2", fp);
+        mark(outdir, "kernels-g2", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tkernels-g2\n");
+
+    if (!(resume && ck_done(outdir, "kernels-g3"))) {
+        long t0 = sy_now_ms();
+        char *a[11];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g3"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        if (step(root, a)) die("kernels-g3", fp);
+        mark(outdir, "kernels-g3", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tkernels-g3\n");
+
+    if (!(resume && ck_done(outdir, "compare"))) {
+        long t0 = sy_now_ms();
+        char *a[11];
+        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
+        a[6] = (char *)"--phase"; a[7] = (char *)"compare"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        if (step(root, a)) die("compare", fp);
+        mark(outdir, "compare", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tcompare\n");
+
+    if (!(resume && ck_done(outdir, "pack"))) {
+        long t0 = sy_now_ms();
+        char g3lnx[4400], g3arm[4400], ape[4400];
+        char *a[9];
+        if (cx_fmt(g3lnx, sizeof g3lnx, "%s/g3/lnx-x86_64/candidate", fp)) die("path", "g3lnx");
+        if (cx_fmt(g3arm, sizeof g3arm, "%s/g3/lnx-arm64/candidate", fp)) die("path", "g3arm");
+        if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", outdir)) die("path", "ape");
+        if (fsize(g3lnx) < 0) die("pack needs g3 lnx-x86_64", g3lnx);
+        sy_printf("NOTE\tpack uses Linux slices as placeholders until osx/win phases land\n");
+        a[0] = (char *)"pack"; a[1] = ape; a[2] = pkg; a[3] = g3lnx; a[4] = g3lnx;
+        a[5] = g3arm; a[6] = g3lnx; a[7] = g3arm; a[8] = 0;
+        if (step(root, a)) die("pack", ape);
+        mark(outdir, "pack", sy_now_ms() - t0);
+    } else sy_printf("RESUME\tpack\n");
+
+    sy_printf("CANDIDATE_CHAIN\tstatus=PREPARED\tnot=PASS\trev=%s\n", rev);
+    return 0;
+}

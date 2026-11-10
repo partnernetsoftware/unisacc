@@ -1,0 +1,95 @@
+/* tools/check-candidate-chain.cx -- candidate-chain 负控夹具，不跑全链。
+ *   sh ./unisacc.com tools/check-candidate-chain.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-candidate-chain.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-candidate-chain.%s\n", n); }
+}
+static int sh(const char *cmd, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    char *o = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (out) {
+        out[0] = 0;
+        if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    }
+    free(o);
+    return rc;
+}
+static int has(const char *h, const char *n) {
+    return tx_find(h, tx_len(h, 100000), n, tx_len(n, 80)) >= 0;
+}
+
+int main(void) {
+    char cwd[400], com[500], tool[500], out[8192], *o = 0;
+    size_t n = 0;
+    const char *rev = "979b56e4d918894670a71080970149112499d223";
+    { char *v[] = {"pwd", 0};
+      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0;
+      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
+    }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/candidate-chain.cx", cwd)) {
+        ck(0, "path"); return 1;
+    }
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=26") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=55"), "plan"); }
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "--rev"), "missing-rev"); }
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev not-a-rev --out /tmp/cc-x 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE"), "bad-rev"); }
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 979b56e4d918894670a71080970149112499d223 --out /tmp/cc-x --bogus 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "unknown"), "unknown-opt"); }
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 979b56e4d918894670a71080970149112499d223 --out /tmp/cc-x --parallel 99 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "parallel"), "parallel-range"); }
+    {
+      char td[320], ape[400], js[400], mk[400], srcp[400], hp[400], hash[65], sidh[65], json[800], cmd[2400];
+      const char *payload = "product-input\n";
+      const char *srcbody = "src-a\n";
+      const char *helptxt = "#!/bin/sh\nset -- `sha256sum \"$1/src/a.cx\"`\nprintf '%s\\n' \"$1\"\n";
+      long pn = tx_len(payload, 32), sn = tx_len(srcbody, 16);
+      if (cx_fmt(td, sizeof td, "%s/cc-snap-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
+      if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", td) || cx_fmt(js, sizeof js, "%s/unisacc.com.build.json", td)
+          || cx_fmt(mk, sizeof mk, "%s/.release-rev", td) || cx_fmt(srcp, sizeof srcp, "%s/src/a.cx", td)
+          || cx_fmt(hp, sizeof hp, "%s/ident-helper", td)) { ck(0, "fmt"); return 1; }
+      { char sd[400]; if (cx_fmt(sd, sizeof sd, "%s/src", td) || sy_mkdir(sd, 0755)) { ck(0, "mkdirsrc"); return 1; } }
+      if (cx_write(ape, payload, pn) || cx_write(mk, rev, 40) || cx_write(srcp, srcbody, sn) || cx_write(hp, helptxt, tx_len(helptxt, 200))) { ck(0, "write"); return 1; }
+      if (sy_sha256_hex(payload, pn, hash) || sy_sha256_hex(srcbody, sn, sidh)) { ck(0, "sha"); return 1; }
+      if (cx_fmt(json, sizeof json,
+          "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",
+          pn, rev, sidh, hash)) { ck(0, "json"); return 1; }
+      if (cx_write(js, json, tx_len(json, 800))) { ck(0, "jsonw"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s' && sh '%s' '%s' -- --verify-snap '%s' %s --identity-helper '%s' 2>&1", hp, com, tool, td, rev, hp)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "SNAP_OK") && has(out, "live_sid=1"), "snap-ok");
+      if (cx_write(srcp, "src-a-tampered\n", 15)) { ck(0, "tamper-src"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "SID"), "snap-source-tamper-refuse");
+      if (cx_write(srcp, srcbody, sn) || cx_write(ape, "tampered-product-input\n", 23)) { ck(0, "tamper-ape"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "SHA"), "snap-tamper-refuse");
+    }
+    {
+      char tp[500], *tb, th[65];
+      size_t tn = 0;
+      const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
+      if (cx_fmt(tp, sizeof tp, "%s/tools/templates/whole-front.cx.in", cwd)) { ck(0, "tmplpath"); return 1; }
+      tb = cx_read(tp, &tn);
+      ck(tb && !sy_sha256_hex(tb, (long)tn, th) && tx_eqz(th, want), "template-ba945f");
+      free(tb);
+    }
+    sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
