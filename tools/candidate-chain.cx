@@ -235,6 +235,56 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     mark(outdir, tag, 0);
     return 0;
 }
+static int span_one_fwd(const char *root, const char *outdir, const char *helper,
+    const char *prep, const char *target, const char *input, const char *dest,
+    const char *first, const char *last, const char *stub, const char *tag);
+
+static int wf_mac_b(const char *root, const char *outdir, const char *helper, const char *target, const char *slug) {
+    char prep[4400], phase[4400], stubdir[4400], stubp[4400], be3[4400], img[4400], tag[80], slice[80];
+    char stub[4400];
+    size_t sn = 0;
+    char *sb;
+    if (cx_fmt(prep, sizeof prep, "%s/wf-span-prep", chain_work)) die("path", "bprep");
+    if (load_span_roots(prep)) die("roots", prep);
+    if (cx_fmt(phase, sizeof phase, "%s/gen1/%s-merged", chain_work, slug)) die("path", "mph");
+    if (cx_fmt(stubdir, sizeof stubdir, "%s/gen1/%s-stub", chain_work, slug)) die("path", "mst");
+    if (cx_fmt(stubp, sizeof stubp, "%s/stub-path.txt", stubdir)) die("path", "msp");
+    sb = cx_read(stubp, &sn);
+    if (!sb || !sn || sn >= sizeof stub) { free(sb); die("stub-path", stubp); }
+    if (sb[sn - 1] == '\n') sb[--sn] = 0;
+    if (tx_copy(stub, sizeof stub, sb, (long)sn)) { free(sb); die("stub copy", stubp); }
+    free(sb);
+    if (cx_fmt(be3, sizeof be3, "%s/gen1/%s-b-units-e3", chain_work, slug)) die("path", "be3");
+    if (cx_fmt(img, sizeof img, "%s/gen1/%s-b2", chain_work, slug)) die("path", "b2");
+    if (cx_fmt(tag, sizeof tag, "gen1-%s-b-units-e3", slug)) die("fmt", slug);
+    if (span_one_fwd(root, outdir, helper, prep, target, phase, be3, "units", "e3", stub, tag)) return 1;
+    if (cx_fmt(tag, sizeof tag, "gen1-%s-b2", slug)) die("fmt", slug);
+    if (span_one_fwd(root, outdir, helper, prep, target, be3, img, "prune", "elf", stub, tag)) return 1;
+    if (cx_fmt(slice, sizeof slice, "gen1-%s", slug)) die("fmt", slug);
+    if (!ck_done(outdir, slice)) mark(outdir, slice, 0);
+    return 0;
+}
+static int span_one_fwd(const char *root, const char *outdir, const char *helper,
+    const char *prep, const char *target, const char *input, const char *dest,
+    const char *first, const char *last, const char *stub, const char *tag) {
+    char wft[4400];
+    char *v[72];
+    int n = 0, i;
+    if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+    v[n++] = wft; v[n++] = (char *)"--";
+    v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
+    v[n++] = (char *)input; v[n++] = (char *)dest;
+    v[n++] = (char *)first; v[n++] = (char *)last;
+    for (i = 0; i < 44; i++) v[n++] = span_roots[i];
+    v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
+    v[n] = 0;
+    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    mark(outdir, tag, 0);
+    return 0;
+}
+
 
 static const char *g_phases[26] = {
     "snap", "build", "ctx", "host", "list",
@@ -823,15 +873,14 @@ int main(int argc, char **argv) {
         if (bound_sh_secs(root, v, 45)) die("osx-x86-stub", dest);
         mark(outdir, "gen1-osx-x86_64-stub", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-osx-x86_64-stub\n");
-    if (!ck_done(outdir, "gen1-osx-x86_64")) mark(outdir, "gen1-osx-x86_64", 0);
-
-    if (wf_fronts(root, outdir, helper, "osx/arm64", "osx-arm64", 1)) die("osx-arm64", outdir);
-    if (!ck_done(outdir, "gen1-osx-arm64")) mark(outdir, "gen1-osx-arm64", 0);
     {
         char objs[4400];
         if (cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("path", "wobjs");
         if (wf_span_prep(root, outdir, helper, snap, pkg, gen1, objs)) die("wf-span-prep", objs);
     }
+    if (wf_mac_b(root, outdir, helper, "osx/x86_64", "osx-x86_64")) die("osx-x86-b2", outdir);
+    if (wf_fronts(root, outdir, helper, "osx/arm64", "osx-arm64", 1)) die("osx-arm64", outdir);
+    if (wf_mac_b(root, outdir, helper, "osx/arm64", "osx-arm64")) die("osx-arm-b2", outdir);
     if (wf_fronts(root, outdir, helper, "win/x86_64", "win-x86_64", 0)) die("win-x86_64", outdir);
     if (wf_win_span(root, outdir, helper, "win/x86_64", "win-x86_64")) die("win-x86_64-span", outdir);
     if (wf_fronts(root, outdir, helper, "win/arm64", "win-arm64", 0)) die("win-arm64", outdir);
