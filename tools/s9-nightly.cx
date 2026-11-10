@@ -1,6 +1,9 @@
 /* tools/s9-nightly.cx -- 私有克隆内按手册编排 s9,本工具不代替真跑资格。
  *
- *   sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit|daily [--date YYYY-MM-DD] [--fake SCRIPT]
+ *   sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit|daily [--date YYYY-MM-DD] [--max-steps N] [--step-s S] [--fake SCRIPT]
+ *
+ * tier: commit -> init 带 "--tier commit";daily -> init 不带 --tier(s9-shards 只认 commit,缺省即全层)。
+ * --date 缺省取当日(sy_wall_s + sy_local_fmt);--max-steps 缺省 4。每步记墙钟毫秒;日志超 8000 字节截断标 TRUNCATED。
  *
  * 顺序: s9-native build -> init --tier T -> prepare checker, executor-all-waves,
  * executor-run-batch, executor, driver, selection -> step 直到非 PENDING -> aggregate。
@@ -18,12 +21,26 @@ static char root[4096], why[512];
 static const char *fake;
 static int pass_n, fail_n, notexec_n;
 static char logbuf[8000];
-static int logn;
+static int logn, truncated;
+static long last_ms;
+static const char *xa4, *xa5;
 static void die(const char *a, const char *b) { tool_die("s9-nightly", a, b, 2); }
+/* 每行 "名称\t墙钟毫秒";超过上限(预留 16 字节给标记)则截断并记 TRUNCATED,不 die。 */
 static void note(const char *s) {
-    int n = (int)strlen(s);
-    if (logn + n + 2 >= (int)sizeof logbuf) die("log-bound", 0);
-    if (tx_copy(logbuf + logn, (long)(sizeof logbuf - logn), s, n)) die("log", 0);
+    char line[256];
+    int n;
+    if (cx_fmt(line, sizeof line, "%s\t%ld", s, last_ms)) { truncated = 1; return; }
+    n = (int)strlen(line);
+    if (truncated || logn + n + 2 >= (int)sizeof logbuf - 16) {
+        if (!truncated) {
+            truncated = 1;
+            if (tx_copy(logbuf + logn, (long)(sizeof logbuf - logn), "TRUNCATED\n", 10)) die("log", 0);
+            logn += 10;
+            logbuf[logn] = 0;
+        }
+        return;
+    }
+    if (tx_copy(logbuf + logn, (long)(sizeof logbuf - logn), line, n)) die("log", 0);
     logn += n;
     logbuf[logn++] = '\n';
     logbuf[logn] = 0;
@@ -36,6 +53,7 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
     char com[4400], tool[4400];
     char *v[16];
     int k = 0, rc;
+    long t0 = sy_now_ms();
     np_result r = {0};
     if (fake) {
         v[k++] = (char *)fake;
@@ -43,6 +61,8 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         if (a1) v[k++] = (char *)a1;
         if (a2) v[k++] = (char *)a2;
         if (a3) v[k++] = (char *)a3;
+        if (xa4) v[k++] = (char *)xa4;
+        if (xa5) v[k++] = (char *)xa5;
         v[k] = 0;
         rc = run_step(v, root, sec, &r);
     } else {
@@ -53,9 +73,12 @@ static int invoke(const char *verb, const char *a1, const char *a2, const char *
         if (a1) v[k++] = (char *)a1;
         if (a2) v[k++] = (char *)a2;
         if (a3) v[k++] = (char *)a3;
+        if (xa4) v[k++] = (char *)xa4;
+        if (xa5) v[k++] = (char *)xa5;
         v[k] = 0;
         rc = run_step(v, root, sec, &r);
     }
+    last_ms = sy_now_ms() - t0;
     if (out && ocap > 0) {
         size_t n = r.outn < (size_t)(ocap - 1) ? r.outn : (size_t)(ocap - 1);
         if (r.out && n && mm_copy(out, ocap, r.out, (long)n)) { np_free(&r); die("copy", 0); }
@@ -71,15 +94,15 @@ static void write_report(const char *path, const char *status) {
     char body[9000];
     int n;
     n = snprintf(body, sizeof body,
-                 "s9-nightly\nstatus\t%s\npass\t%d\nfail\t%d\nnot_executed\t%d\nlog\n%s",
-                 status, pass_n, fail_n, notexec_n, logbuf);
+                 "s9-nightly\nstatus\t%s\npass\t%d\nfail\t%d\nnot_executed\t%d\ntruncated\t%d\nlog\tname\twall_ms\n%s",
+                 status, pass_n, fail_n, notexec_n, truncated, logbuf);
     if (n < 0 || n >= (int)sizeof body) die("report-bound", 0);
     if (cx_write(path, body, (size_t)n)) die("write", path);
 }
 
 int main(int argc, char **argv) {
-    const char *run = 0, *tier = "commit", *date = "1970-01-01";
-    char report[4400], tmp[4000];
+    const char *run = 0, *tier = "commit", *date = 0;
+    char report[4400], tmp[4000], datebuf[32];
     int i, rc, steps, max_steps = 4, step_s = 55;
     static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
     if (argc < 3) die("usage", "ROOT RUN --tier commit|daily [--date D] [--fake SCRIPT]");
@@ -91,9 +114,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
         else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) step_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = atoi(argv[++i]);
         else die("unknown", argv[i]);
     }
+    if (max_steps < 1) die("max-steps", "need >= 1");
     if (strcmp(tier, "commit") && strcmp(tier, "daily")) die("tier", tier);
+    if (!date) {
+        long ws = sy_wall_s();
+        if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");
+        date = datebuf;
+    }
     if (cx_fmt(report, sizeof report, "%s/%s/s9-nightly-%s-%s.md", root, "out", date, tier)) die("report", 0);
     pass_n = fail_n = 0;
     notexec_n = 1;
@@ -102,7 +132,10 @@ int main(int argc, char **argv) {
     note("build");
     if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=build\trc=%d\n", rc); return 1; }
     pass_n++;
+    /* s9-shards init 只接受 --tier commit;daily 档不带 --tier,即全层(commit+daily+release)选择。 */
+    if (!strcmp(tier, "commit")) { xa4 = "--tier"; xa5 = "commit"; }
     rc = invoke("init", root, run, "-", 55, tmp, sizeof tmp);
+    xa4 = xa5 = 0;
     note("init");
     if (rc != 0 && rc != 3) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=init\trc=%d\n", rc); return 1; }
     pass_n++;

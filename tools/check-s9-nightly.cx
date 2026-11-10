@@ -8,7 +8,7 @@
 #pragma unisa use cxlib.die
 
 static int failed;
-static char root[4096], why[512];
+static char root[4096], why[512], report_path[4400];
 static void die(const char *s) { tool_die("check-s9-nightly", s, 0, 2); }
 static void ck(int ok, const char *n) {
     printf("%s\tcheck-s9-nightly.%s\n", ok ? "PASS" : "FAIL", n);
@@ -55,6 +55,13 @@ int main(void) {
     runv(v, dir, 20, buf, sizeof buf, &rc);
     ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "order-pass");
     {
+        const char *r = strstr(buf, "\treport=");
+        size_t k = 0;
+        if (r) { r += 8; while (r[k] && r[k] != '\n' && k + 1 < sizeof report_path) { report_path[k] = r[k]; k++; } }
+        report_path[k] = 0;
+        ck(k > 0, "report-path");
+    }
+    {
         size_t n; char *s = cx_read(logp, &n);
         ck(s && strstr(s, "build") && strstr(s, "init") && strstr(s, "prepare") && strstr(s, "step") && strstr(s, "aggregate"), "order-log");
         free(s);
@@ -80,6 +87,66 @@ int main(void) {
     v[12] = "--step-s"; v[13] = "1"; v[14] = 0;
     runv(v, dir, 20, buf, sizeof buf, &rc);
     ck(rc == 1 && strstr(buf, "step"), "timeout-stop");
+    v[12] = 0;
+    setenv("S9_FAKE_SLEEP", "0", 1);
+    /* commit 档: init 带 --tier commit,每步耗时列存在 */
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 0, "tier-commit-pass");
+    {
+        size_t n; char *s = cx_read(logp, &n);
+        ck(s && strstr(s, "init - --tier commit"), "tier-commit-passthrough");
+        free(s);
+    }
+    {
+        char rp[4400]; size_t n; char *s;
+        cx_fmt(rp, sizeof rp, "%s", report_path);
+        s = cx_read(rp, &n);
+        ck(s && strstr(s, "wall_ms") && strstr(s, "step\t") && strstr(s, "truncated\t0"), "wall-ms-column");
+        free(s);
+    }
+    /* daily 档: init 不带 --tier */
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    v[7] = "daily";
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    {
+        size_t n; char *s = cx_read(logp, &n);
+        ck(rc == 0 && s && strstr(s, "init -\n") && !strstr(s, "--tier"), "tier-daily-no-flag");
+        free(s);
+    }
+    /* max-steps: 假 s9 需 2 步才完成, --max-steps 1 必须 FAIL(step-pending) */
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    v[12] = "--max-steps"; v[13] = "1"; v[14] = 0;
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 1 && strstr(buf, "step-pending"), "max-steps-reached-fail");
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    v[13] = "0";
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 2, "max-steps-zero-rejected");
+    /* 缺 --date: 取当日, 绝不是 1970-01-01 */
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        char *w[16];
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+        w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = runp;
+        w[6] = "--tier"; w[7] = "commit"; w[8] = "--fake"; w[9] = fake; w[10] = 0;
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        ck(rc == 0 && strstr(buf, "report=") && !strstr(buf, "1970-01-01"), "date-default-today");
+    }
+    /* 日志截断: 假 s9 不能造 8000 字节, 以大 max-steps 无法触发; 此处只验证截断标记字段存在 */
+    printf("INFO\tcheck-s9-nightly.truncation 由长日志路径保证(note 封顶标 TRUNCATED), 未单测 UNMEASURED\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
