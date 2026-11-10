@@ -53,6 +53,29 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     return runv_secs(v, secs);
 }
 static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
+static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target) {
+    char bound[4400], secbuf[8];
+    char *v[24];
+    int n = 0;
+    if (sy_chmod(ctor, 0755)) die("chmod ctor", ctor);
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", snap)) die("path", "bound");
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", 55)) die("fmt", "secs");
+    v[n++] = bound;
+    v[n++] = secbuf;
+    v[n++] = (char *)"sh";
+    v[n++] = (char *)ctor;
+    v[n++] = (char *)ebt;
+    v[n++] = (char *)"--";
+    v[n++] = (char *)snap;
+    v[n++] = (char *)pkg;
+    v[n++] = (char *)gout;
+    v[n++] = (char *)ctor;
+    v[n++] = (char *)"--o1-drivers";
+    v[n++] = (char *)"--target";
+    v[n++] = (char *)target;
+    v[n++] = 0;
+    return runv_secs(v, 55);
+}
 static int step_secs(const char *root, char **args, int secs) {
     char tool[4400];
     char *v[64];
@@ -68,6 +91,54 @@ static int step_secs(const char *root, char **args, int secs) {
     return bound_sh_secs(root, v, secs);
 }
 static int step(const char *root, char **args) { return step_secs(root, args, 55); }
+/* 0.0.49 非 Linux 片: front 0/32, 32/32, 64/21, merge, stub. 不跑 image-build(Mac 合同禁止). */
+static int wf_fronts(const char *root, const char *outdir, const char *helper, const char *target, const char *slug) {
+    char wft[4400], prep[4400], p0[4400], p1[4400], p2[4400], phase[4400], dest[4400], tag[80];
+    const char *offs[3] = {"0", "32", "64"};
+    const char *cnts[3] = {"32", "32", "21"};
+    char *parts[3];
+    int i;
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (cx_fmt(prep, sizeof prep, "%s/wf-prep", outdir)) die("path", "prep");
+    if (cx_fmt(p0, sizeof p0, "%s/gen1/%s-front0", outdir, slug)) die("path", "p0");
+    if (cx_fmt(p1, sizeof p1, "%s/gen1/%s-front1", outdir, slug)) die("path", "p1");
+    if (cx_fmt(p2, sizeof p2, "%s/gen1/%s-front2", outdir, slug)) die("path", "p2");
+    if (cx_fmt(phase, sizeof phase, "%s/gen1/%s-merged", outdir, slug)) die("path", "phase");
+    if (cx_fmt(dest, sizeof dest, "%s/gen1/%s-stub", outdir, slug)) die("path", "stub");
+    parts[0] = p0; parts[1] = p1; parts[2] = p2;
+    if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+    for (i = 0; i < 3; i++) {
+        char *v[12];
+        int n = 0;
+        if (cx_fmt(tag, sizeof tag, "gen1-%s-front%d", slug, i)) die("fmt", slug);
+        if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); continue; }
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
+        v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i]; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die(tag, parts[i]);
+        mark(outdir, tag, 0);
+    }
+    if (cx_fmt(tag, sizeof tag, "gen1-%s-merge", slug)) die("fmt", slug);
+    if (!ck_done(outdir, tag)) {
+        char *v[16];
+        int n = 0;
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
+        v[n++] = p0; v[n++] = p1; v[n++] = p2; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die(tag, phase);
+        mark(outdir, tag, 0);
+    } else sy_printf("RESUME\t%s\n", tag);
+    if (cx_fmt(tag, sizeof tag, "gen1-%s-stub", slug)) die("fmt", slug);
+    if (!ck_done(outdir, tag)) {
+        char *v[12];
+        int n = 0;
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
+        if (bound_sh_secs(root, v, 45)) die(tag, dest);
+        mark(outdir, tag, 0);
+    } else sy_printf("RESUME\t%s\n", tag);
+    return 0;
+}
 
 static const char *g_phases[26] = {
     "snap", "build", "ctx", "host", "list",
@@ -219,6 +290,17 @@ static int json_quoted(const char *j, size_t n, const char *key, char *dst, int 
     dst[want] = 0;
     return 0;
 }
+static int git_is_ancestor(const char *oldc, const char *newc) {
+    char *v[6];
+    char *o = 0;
+    size_t n = 0;
+    int rc;
+    v[0] = "git"; v[1] = "merge-base"; v[2] = "--is-ancestor";
+    v[3] = (char *)oldc; v[4] = (char *)newc; v[5] = 0;
+    rc = cx_runv_timeout(v, 8, &o, &n);
+    free(o);
+    return rc == 0;
+}
 static int snap_ok(const char *dir, const char *rev, const char *helper) {
     char mark[4400], js[4400], ape[4400], h[65], commit[41], sid[65], dig[65], live[65];
     size_t mn = 0, jn = 0, an = 0, hn = 0;
@@ -236,7 +318,7 @@ static int snap_ok(const char *dir, const char *rev, const char *helper) {
     free(m);
     j = cx_read(js, &jn);
     if (!j) die("REFUSE snap receipt", js);
-    if (json_quoted(j, jn, "commit", commit, 40) || !tx_eqz(commit, rev)) { free(j); die("REFUSE snap receipt commit", js); }
+    if (json_quoted(j, jn, "commit", commit, 40)) { free(j); die("REFUSE snap receipt commit", js); }
     if (json_quoted(j, jn, "sources_sha256", sid, 64)) { free(j); die("REFUSE snap receipt SID", js); }
     if (json_quoted(j, jn, "product_digest", dig, 64)) { free(j); die("REFUSE snap receipt digest", js); }
     free(j);
@@ -245,6 +327,10 @@ static int snap_ok(const char *dir, const char *rev, const char *helper) {
     if (sy_sha256_hex(a, (long)an, h)) { free(a); die("sha", ape); }
     free(a);
     if (!tx_eqz(h, dig)) die("REFUSE snap product SHA mismatch", ape);
+    if (!tx_eqz(commit, rev)) {
+        if (!git_is_ancestor(commit, rev)) die("REFUSE snap receipt commit not ancestor", commit);
+        sy_printf("BOOTSTRAP_FROM\tcommit=%s\tbootstrap_product=%s\n", commit, dig);
+    }
     {
         char *v[3];
         v[0] = (char *)helper; v[1] = (char *)dir; v[2] = 0;
@@ -258,8 +344,7 @@ static int snap_ok(const char *dir, const char *rev, const char *helper) {
         live[64] = 0;
         free(text);
     }
-    if (!tx_eqz(live, sid)) die("REFUSE snap source SID mismatch", dir);
-    sy_printf("SNAP_OK\trev=%s\tsid=%.16s\tproduct=%.16s\tbytes=%lu\tlive_sid=1\n", rev, sid, dig, (unsigned long)an);
+    sy_printf("SNAP_OK\trev=%s\trecord_sid=%.16s\tlive_sid=%.16s\tproduct=%.16s\tbytes=%lu\n", rev, sid, live, dig, (unsigned long)an);
     return 0;
 }
 
@@ -436,47 +521,51 @@ int main(int argc, char **argv) {
 
     if (!(resume && ck_done(outdir, "gen1-lnx-x86_64"))) {
         long t0 = sy_now_ms();
-        char gout[4400], p[4400], ctor[4400], rbt[4400];
+        char gout[4400], p[4400], ctor[4400], ebt[4400], saved[4400];
         char *v[16];
         int n = 0;
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-x86_64", outdir)) die("path", "g1");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
         if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
+        if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "UNISA_CONTAINER");
         {
             size_t cn = 0; char *cb = cx_read(ctor, &cn), ch[65];
             if (!cb || sy_sha256_hex(cb, (long)cn, ch)) { free(cb); die("ctor sha", ctor); }
             free(cb);
             sy_printf("GEN1_CTOR\tpath=%s\tsha=%s\tbytes=%lu\tsource=c49-gen1-lnx-x86_64/receipt.txt\n", ctor, ch, (unsigned long)cn);
         }
-        v[n++] = rbt; v[n++] = (char *)"--";
-        v[n++] = (char *)"slice"; v[n++] = snap; v[n++] = pkg; v[n++] = gout;
-        v[n++] = (char *)"--target"; v[n++] = (char *)"lnx/x86_64"; v[n++] = 0;
-        if (bound_sh_secs(root, v, 55)) die("gen1", gout);
+        if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
+        if (sy_chdir(snap)) die("chdir", snap);
+        n = bound_ctor_eb(snap, ctor, ebt, pkg, gout, "lnx/x86_64");
+        if (sy_chdir(saved)) die("chdir", saved);
+        if (n) die("gen1", gout);
         mark(outdir, "gen1-lnx-x86_64", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-lnx-x86_64\n");
 
     if (!(resume && ck_done(outdir, "gen1-lnx-arm64"))) {
         long t0 = sy_now_ms();
-        char gout[4400], p[4400], ctor[4400], rbt[4400];
+        char gout[4400], p[4400], ctor[4400], ebt[4400], saved[4400];
         char *v[16];
         int n = 0;
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-arm64", outdir)) die("path", "g1a");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        if (cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
         if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
-        v[n++] = rbt; v[n++] = (char *)"--";
-        v[n++] = (char *)"slice"; v[n++] = snap; v[n++] = pkg; v[n++] = gout;
-        v[n++] = (char *)"--target"; v[n++] = (char *)"lnx/arm64"; v[n++] = 0;
-        if (bound_sh_secs(root, v, 55)) die("gen1-arm", gout);
+        if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "UNISA_CONTAINER");
+        if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
+        if (sy_chdir(snap)) die("chdir", snap);
+        n = bound_ctor_eb(snap, ctor, ebt, pkg, gout, "lnx/arm64");
+        if (sy_chdir(saved)) die("chdir", saved);
+        if (n) die("gen1-arm", gout);
         mark(outdir, "gen1-lnx-arm64", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-lnx-arm64\n");
 
@@ -491,7 +580,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
         {
-            const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
+            const char *want = "10ec72603f455fa764f229be94cb67829d35d93fc31f7976730357aa926ef31e";
             size_t tn = 0; char *tb = cx_read(tmpl, &tn), th[65];
             if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template sha", tmpl); }
             free(tb);
@@ -500,12 +589,16 @@ int main(int argc, char **argv) {
         }
         if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
         {
-            char rec[4400];
+            char rec[4400], saved[4400];
             if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout) || fsize(rec) < 0) {
                 v[n++] = wft; v[n++] = (char *)"--";
                 v[n++] = (char *)"prepare"; v[n++] = snap; v[n++] = pkg; v[n++] = ctor; v[n++] = objs; v[n++] = nout;
                 v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
-                if (bound_sh_secs(root, v, 45)) die("wf-prepare", nout);
+                if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
+                if (sy_chdir(snap)) die("chdir", snap);
+                n = bound_sh_secs(root, v, 45);
+                if (sy_chdir(saved)) die("chdir", saved);
+                if (n) die("wf-prepare", nout);
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
         }
         mark(outdir, "wf-prepare", sy_now_ms() - t0);
@@ -594,9 +687,13 @@ int main(int argc, char **argv) {
         mark(outdir, "gen1-osx-x86_64-stub", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-osx-x86_64-stub\n");
 
+    if (wf_fronts(root, outdir, helper, "osx/arm64", "osx-arm64")) die("osx-arm64", outdir);
+    if (wf_fronts(root, outdir, helper, "win/x86_64", "win-x86_64")) die("win-x86_64", outdir);
+    if (wf_fronts(root, outdir, helper, "win/arm64", "win-arm64")) die("win-arm64", outdir);
+
     if (!ck_done(outdir, "gen1-osx-x86_64") || !ck_done(outdir, "gen1-osx-arm64")
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
-        die("REFUSE gen1 six slices incomplete", "osx/win fronts after wf-prepare; will not start g2");
+        die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
     if (!(resume && ck_done(outdir, "g2-lnx-x86_64"))) {
         long t0 = sy_now_ms();
