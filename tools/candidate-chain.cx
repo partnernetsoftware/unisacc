@@ -208,6 +208,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
     } else sy_printf("RESUME\t%s\n", tag);
     return 0;
 }
+static int clean_phase_path(const char *outdir, const char *phase, const char *path, const char *receipt);
 static int wf_span_prep(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
     char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
     char *v[16];
@@ -216,6 +217,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
     span_prep_tag(ptag, sizeof ptag, gen);
     if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout)) die("path", "wsprec");
     if (ck_done(outdir, ptag) && fsize(rec) >= 0) { sy_printf("RESUME\t%s\n", ptag); return 0; }
+    if (gen > 1) clean_phase_path(outdir, ptag, nout, rec);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-win-span.cx.in", root)) die("path", "wtmpl");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
@@ -330,19 +332,93 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
 }
 
 
-static const char *g_phases[27] = {
+static void check_whole_front_template(const char *tmpl) {
+    const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
+    size_t tn = 0; char *tb = cx_read(tmpl, &tn), th[65];
+    if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template sha", tmpl); }
+    free(tb);
+    if (!tx_eqz(th, want)) die("REFUSE template SHA != ba945f3238 tools/templates/whole-front.cx.in", th);
+    sy_printf("TEMPLATE\tpath=%s\tsha=%s\tsource_commit=ba945f3238\tbytes=%lu\n", tmpl, th, (unsigned long)tn);
+}
+/* P2: g2/g3 的 Mac/Win 分相。构造器与对象目录取 fixedpoint/g<N>/lnx-x86_64(candidate 与 .o,
+   与 chain-step 对 i>=2 的构造器选择一致);prepare 目录按代各建(wf-prep-g<N>、wf-span-prep-g<N>),不复用 gen1。 */
+static const char *g_mt_target[4] = {"osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+static const char *g_mt_slug[4] = {"osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+static int wf_prepare_gen(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
+    char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
+    char *v[16];
+    int n = 0;
+    prep_dir(nout, sizeof nout, gen, "wf-prep");
+    if (cx_fmt(ptag, sizeof ptag, "wf-prep-g%d", gen)) die("fmt", "wf-prep-g");
+    if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout)) die("path", "wfgrec");
+    if (ck_done(outdir, ptag) && fsize(rec) >= 0) { sy_printf("RESUME\t%s\n", ptag); return 0; }
+    clean_phase_path(outdir, ptag, nout, rec);
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "wtmpl");
+    check_whole_front_template(tmpl);
+    if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+    if (fsize(rec) < 0) {
+        v[n++] = wft; v[n++] = (char *)"--";
+        v[n++] = (char *)"prepare"; v[n++] = (char *)snap; v[n++] = (char *)pkg; v[n++] = (char *)ctor; v[n++] = (char *)objs; v[n++] = nout;
+        v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
+        if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
+        if (sy_chdir(snap)) die("chdir", snap);
+        n = bound_sh_secs(root, v, 45);
+        if (sy_chdir(saved)) die("chdir", saved);
+        if (n) die(ptag, nout);
+    }
+    if (fsize(rec) < 0) die("wf-prep receipt", rec);
+    mark(outdir, ptag, 0);
+    return 0;
+}
+static void gen_slice_phase(const char *root, const char *outdir, const char *helper, const char *rev, const char *snap,
+    const char *pkg, const char *gen1, const char *fp, int gen, int ti, int resume) {
+    char ptag[80], objs[4400], ctor[4400], img[4400], phs[8];
+    char *a[16];
+    long t0 = sy_now_ms();
+    check_gen(gen);
+    if (gen < 2 || ti < 0 || ti > 3) die("REFUSE gen slice phase gen 2..3 target 0..3", 0);
+    if (cx_fmt(ptag, sizeof ptag, "g%d-%s", gen, g_mt_slug[ti])) die("fmt", "gptag");
+    if (resume && ck_done(outdir, ptag)) { sy_printf("RESUME\t%s\n", ptag); return; }
+    if (cx_fmt(objs, sizeof objs, "%s/g%d/lnx-x86_64", fp, gen) || cx_fmt(ctor, sizeof ctor, "%s/candidate", objs)) die("path", ptag);
+    if (fsize(ctor) < 0) die("REFUSE missing g-constructor", ctor);
+    if (wf_prepare_gen(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-prep-gen", ptag);
+    if (wf_span_prep(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-span-prep-gen", ptag);
+    if (wf_fronts(root, outdir, helper, gen, g_mt_target[ti], g_mt_slug[ti], ti < 2)) die(ptag, outdir);
+    if (ti < 2) {
+        if (wf_mac_b(root, outdir, helper, gen, g_mt_target[ti], g_mt_slug[ti])) die(ptag, outdir);
+        if (cx_fmt(img, sizeof img, "%s/gen%d/%s-b2/image", chain_work, gen, g_mt_slug[ti])) die("path", ptag);
+    } else {
+        int wrc = wf_win_span(root, outdir, helper, gen, g_mt_target[ti], g_mt_slug[ti]);
+        if (wrc) die(ptag, outdir);
+        if (cx_fmt(img, sizeof img, "%s/gen%d/%s-image/image", chain_work, gen, g_mt_slug[ti])) die("path", ptag);
+    }
+    if (fsize(img) < 1) die("REFUSE missing slice image", img);
+    if (cx_fmt(phs, sizeof phs, "g%d", gen)) die("fmt", "phs");
+    clean_fp_phase(outdir, fp, ptag, gen, g_mt_slug[ti], ti + 2);
+    a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = (char *)snap; a[3] = (char *)pkg; a[4] = (char *)gen1; a[5] = (char *)fp;
+    a[6] = (char *)"--phase"; a[7] = phs; a[8] = (char *)"--target"; a[9] = (char *)g_mt_target[ti];
+    a[10] = (char *)"--from-image"; a[11] = img; a[12] = (char *)"--identity-helper"; a[13] = (char *)helper; a[14] = 0;
+    if (step(root, a)) die(ptag, fp);
+    mark(outdir, ptag, sy_now_ms() - t0);
+}
+
+static const char *g_phases[35] = {
     "snap", "build", "ctx", "host", "list", "warmup",
     "jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net", "final",
     "routes", "p3", "gen1-lnx-x86_64", "gen1-lnx-arm64",
     "gen1-osx-x86_64", "gen1-osx-arm64", "gen1-win-x86_64", "gen1-win-arm64",
     "g2-lnx-x86_64", "g2-lnx-arm64", "g3-lnx-x86_64", "g3-lnx-arm64",
-    "kernels-g2", "kernels-g3", "compare", "pack"
+    "kernels-g2", "kernels-g3",
+    "g2-osx-x86_64", "g2-osx-arm64", "g2-win-x86_64", "g2-win-arm64",
+    "g3-osx-x86_64", "g3-osx-arm64", "g3-win-x86_64", "g3-win-arm64",
+    "compare", "pack"
 };
 static const char *until_phase;
 static void plan(void) {
     int i;
-    sy_printf("CANDIDATE_CHAIN\tplan\tphases=27\n");
-    for (i = 0; i < 27; i++)
+    sy_printf("CANDIDATE_CHAIN\tplan\tphases=35\n");
+    for (i = 0; i < 35; i++)
         sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
     sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
@@ -650,6 +726,12 @@ int main(int argc, char **argv) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             return clean_phase_path(argv[i + 1], argv[i + 3], argv[i + 4], tx_eqz(argv[i + 5], "-") ? 0 : argv[i + 5]) ? 0 : 3;
         }
+        if (tx_eqz(argv[i], "--check-template") && i + 1 < argc) {
+            /* 夹具:g2/g3 prepare 与 gen1 共用的模板钉;负例改一字节应 REFUSE */
+            check_whole_front_template(argv[i + 1]);
+            sy_printf("WF_PREP_G2_TEMPLATE_OK\t%s\n", argv[i + 1]);
+            return 0;
+        }
         if (tx_eqz(argv[i], "--verify-snap") && i + 2 < argc) { vs_dir = argv[++i]; vs_rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
@@ -678,7 +760,7 @@ int main(int argc, char **argv) {
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
     if (until_phase) {
         int u = 0, pi;
-        for (pi = 0; pi < 27; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
+        for (pi = 0; pi < 35; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
         if (!u) die("REFUSE --until unknown phase", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
@@ -939,14 +1021,7 @@ int main(int argc, char **argv) {
         }
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
-        {
-            const char *want = "ca2c54a6938c498093e2962bbc1c19c24c6e730266b60d471265cbc6d43a3982";
-            size_t tn = 0; char *tb = cx_read(tmpl, &tn), th[65];
-            if (!tb || sy_sha256_hex(tb, (long)tn, th)) { free(tb); die("template sha", tmpl); }
-            free(tb);
-            if (!tx_eqz(th, want)) die("REFUSE template SHA != ba945f3238 tools/templates/whole-front.cx.in", th);
-            sy_printf("TEMPLATE\tpath=%s\tsha=%s\tsource_commit=ba945f3238\tbytes=%lu\n", tmpl, th, (unsigned long)tn);
-        }
+        check_whole_front_template(tmpl);
         if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
         {
             char rec[4400], saved[4400];
@@ -1135,6 +1210,13 @@ int main(int argc, char **argv) {
         if (step(root, a)) die("kernels-g3", fp);
         mark(outdir, "kernels-g3", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g3\n");
+
+    {   /* P2: g2 四个 Mac/Win 目标,再 g3 四个;每目标一个相位,Mac B 在 wf_mac_b 内串行 */
+        int pg, pt;
+        for (pg = 2; pg <= 3; pg++)
+            for (pt = 0; pt < 4; pt++)
+                gen_slice_phase(root, outdir, helper, rev, snap, pkg, gen1, fp, pg, pt, resume);
+    }
 
     if (!(resume && ck_done(outdir, "compare"))) {
         long t0 = sy_now_ms();
