@@ -433,7 +433,27 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前版本：**0.0.52，主题「兑现增量与自含，模型层度量先行」**（计划 [plans/v0.0.52-unisacc.md](plans/v0.0.52-unisacc.md)，经 fable 咨询调整：A 段兑现 0.0.51 欠账为门槛，A1 G2 增量 + A3 chain_sha 收窄 + A7 s9 夜跑三项过门后 B 段模型层 M1-M4 才开工，否则顺延 0.0.53；A0 产品全景表为第一优先，主人关切「每一层/切片/流/网的功能与大小可追踪并与 prd 对齐」）。0.0.51 尾部在途：链收尾（fresh-start 已落、from-image 命名、D2）、不间断从零复现并计量墙钟、noborrow、s9 提交档用 native 缓存真跑、新 .cx 本地自查工具、产品全景表阶段一。任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准，本节只写当前节点。
 在途（未上 main，证据在各窗口 out/ 与账本）：
-- G0 一条命令复现：六片 g1 已全部在私有根逐字节复现（lnx/x86_64 8224ff13、lnx/arm64 f7ddb573、osx/x86_64 eddda34a、osx/arm64 e1087d14、win/x86_64 64782d36、win/arm64 2f520450；Linux 两片与 `agentwork/phase-times.tsv` 第 51/53 行一致，其余四片以派工回执为准），g2/g3 在跑。
+<!-- product-map:begin -->
+产品全景表阶段一(层+六片)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。
+
+```
+kind	id	parent	function	size_bytes	size_note	sha256	aux	cmd	verified_rev	cold_s	hot_s	last_s
+layer	L0	-	L0 sy/mem/text	128030	source-bytes	-	dirs=cx/sys,cx/mem,cx/text	git ls-files -z -- DIR && stat bytes	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	L1	-	L1 core/driver/runtime/compiler	796701	source-bytes	-	dirs=cx/core,cx/driver,cx/runtime,cx/compiler	git ls-files -z -- DIR && stat bytes	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.host	src	host launch	16383	source-bytes	-	file=src/host.cx	stat src/host.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.packmodel	src	pack model	4925	source-bytes	-	file=src/packmodel.cx	stat src/packmodel.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.executor	src	executor	9100	source-bytes	-	file=src/executor.cx	stat src/executor.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.stages	src	seven flows bind	15118	source-bytes	-	file=src/stages.cx	stat src/stages.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.drive	src	drive	39724	source-bytes	-	file=src/drive.cx	stat src/drive.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+layer	src.bind	src	bind	205	source-bytes	-	file=src/bind.cx	stat src/bind.cx	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	lnx/x86_64	ape	embedded target image	1943158	target-image-bytes	18993fd7d1e39f873cceb6f0414daff4a14dcbafa843d4bc40dace4597f56d7b	format=ELF;unattributed_bytes=1943158;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	lnx/arm64	ape	embedded target image	1951302	target-image-bytes	5e33829af1aed1c085612ebef3457c7fa77cc2a483561f7d68a9aa6fc26f0dfc	format=ELF;unattributed_bytes=1951302;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	osx/x86_64	ape	embedded target image	2493538	target-image-bytes	2f570f2ce5f7e6bfa9ae068d0d49496d5eb4021e5bc406f4a698801af2276d25	format=MACHO;unattributed_bytes=2493538;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	osx/arm64	ape	embedded target image	3170530	target-image-bytes	d569482af4dca12059b6a3cf7cbc2249549fde79dec9630dade471616371120c	format=MACHO;unattributed_bytes=3170530;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	win/x86_64	ape	embedded target image	2760192	target-image-bytes	88d7a715e7bb7188f02652118fa479465b9051feb876a6a9584025ff0a2c6f7a	format=PE;unattributed_bytes=2760192;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+slice	win/arm64	ape	embedded target image	UNMEASURED	target-image-bytes	UNMEASURED	aux=UNATTRIBUTED missing_from_ape	sh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com	6ca27147cc8cfb119f62eeea8ea6cd941f42f4bf	UNMEASURED	UNMEASURED	UNMEASURED
+```
+<!-- product-map:end -->
 - Y（e3 产品原生阶段化）设计结论（fable，/tmp/y-design.md，已写入计划 §2 Y 行）：「由 e2 推导未定义符号」不成立（侧车需 e3 的 UD 可达性/类型 kind/ccw 计数）；改为首遍 e3 tape 作检查点 + 重放只编桩单元 + fwm_merge，拆 Y-0 -> Y-A -> Y-B -> Y-C。
 - D（遗留债清零）、R（一键发布）、S（S9 单 step 剩余项）、自动再分块（rechunk）、根无关性检查工具均在途；`candidate-chain`、`root-canon`、`rechunk`、`release-run` 尚不在 main，不写入 §2。
 

@@ -1,0 +1,351 @@
+/* tools/product-map.cx -- phase 1: layers + six APE slices into build/product-map.tsv
+ * and prd.md <!-- product-map:begin --> ... <!-- product-map:end -->.
+ *
+ *   sh ./unisacc.com tools/product-map.cx -- --write|--check
+ *
+ * Slice authority: logic-distribution --ape ROOT/unisacc.com (installed APE).
+ * Module bytes: UNATTRIBUTED until origin chain exists. Numbers from commands only.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "product-map: REFUSE %s\n", s); exit(2); }
+static void join(char *p, size_t c, const char *a, const char *b) {
+    if (cx_fmt(p, c, "%s/%s", a, b)) die("path");
+}
+
+static long dir_bytes(const char *rel) {
+    char *v[] = {"git", "ls-files", "-z", "--", (char *)rel, 0};
+    np_result r = {0};
+    long sum = 0;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("git-ls-files"); }
+    size_t at = 0;
+    while (at < r.outn) {
+        const char *s = r.out + at;
+        size_t z = strlen(s);
+        char full[4400];
+        struct stat st;
+        join(full, sizeof full, root, s);
+        if (!lstat(full, &st) && S_ISREG(st.st_mode)) sum += (long)st.st_size;
+        at += z + 1;
+    }
+    np_free(&r);
+    return sum;
+}
+
+static long file_bytes(const char *rel) {
+    char full[4400];
+    struct stat st;
+    join(full, sizeof full, root, rel);
+    if (lstat(full, &st) || !S_ISREG(st.st_mode)) die(rel);
+    return (long)st.st_size;
+}
+
+typedef struct {
+    char id[32], fmt[16], sha[65];
+    long bytes, unattr;
+    int seen;
+} Slice;
+static Slice slices[6];
+
+static void slice_init(void) {
+    const char *ids[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    int i;
+    for (i = 0; i < 6; i++) {
+        if (cx_fmt(slices[i].id, sizeof slices[i].id, "%s", ids[i])) die("id");
+        slices[i].bytes = -1;
+        slices[i].unattr = -1;
+        slices[i].seen = 0;
+        slices[i].sha[0] = 0;
+        slices[i].fmt[0] = 0;
+    }
+}
+
+static int slice_ix(const char *id) {
+    int i;
+    for (i = 0; i < 6; i++) if (!strcmp(slices[i].id, id)) return i;
+    return -1;
+}
+
+static void parse_ape(const char *text) {
+    const char *p = text;
+    while (p && *p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[800];
+        if (n >= sizeof line) n = sizeof line - 1;
+        if (mm_copy(line, sizeof line, p, (long)n)) die("line");
+        line[n] = 0;
+        if (!strncmp(line, "SLICE\t", 6)) {
+            char id[32], fmt[16], sha[65];
+            long bytes = 0;
+            if (sscanf(line, "SLICE\t%31[^\t]\tformat=%15[^\t]\tbytes=%ld\tsha256=%64[0-9a-f]",
+                       id, fmt, &bytes, sha) == 4) {
+                int i = slice_ix(id);
+                if (i >= 0) {
+                    slices[i].bytes = bytes;
+                    slices[i].seen = 1;
+                    if (cx_fmt(slices[i].fmt, sizeof slices[i].fmt, "%s", fmt)) die("fmt");
+                    if (cx_fmt(slices[i].sha, sizeof slices[i].sha, "%s", sha)) die("sha");
+                }
+            }
+        } else if (!strncmp(line, "MODULE\t", 7) && strstr(line, "UNATTRIBUTED")) {
+            char id[32];
+            long bytes = 0;
+            if (sscanf(line, "MODULE\t%31[^\t]\tUNATTRIBUTED\tbytes=%ld", id, &bytes) == 2) {
+                int i = slice_ix(id);
+                if (i >= 0) slices[i].unattr = bytes;
+            }
+        }
+        p = nl ? nl + 1 : 0;
+    }
+}
+
+static void ape_census(void) {
+    char ape[4400], tool[4400];
+    join(ape, sizeof ape, root, "unisacc.com");
+    join(tool, sizeof tool, root, "tools/logic-distribution.cx");
+    {
+        char *v[] = {"sh", ape, tool, "--", "--ape", ape, 0};
+        np_result r = {0};
+        if (np_run(v, root, 0, 50, &r, why, sizeof why) || r.rc) {
+            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+            np_free(&r);
+            die("ape-census");
+        }
+        parse_ape(r.out ? r.out : "");
+        np_free(&r);
+    }
+}
+
+static void rev_now(char rev[65]) {
+    char *v[] = {"git", "rev-parse", "HEAD", 0};
+    np_result r = {0};
+    if (np_run(v, root, 0, 8, &r, why, sizeof why) || r.rc || r.outn < 40) {
+        np_free(&r);
+        die("rev-parse");
+    }
+    if (mm_copy(rev, 41, r.out, 40)) die("rev");
+    rev[40] = 0;
+    np_free(&r);
+}
+
+static void emit_tsv(char *buf, size_t cap, size_t *n, const char *rev,
+                     long l0, long l1, long shost, long spack, long sex, long sst, long sdrive, long sbind) {
+    const char *hdr = "kind\tid\tparent\tfunction\tsize_bytes\tsize_note\tsha256\taux\tcmd\tverified_rev\tcold_s\thot_s\tlast_s\n";
+    size_t at = 0;
+    int i;
+    if (at + strlen(hdr) >= cap) die("tsv");
+    if (mm_copy(buf + at, (long)(cap - at), hdr, (long)strlen(hdr))) die("tsv-copy");
+    at += strlen(hdr);
+    {
+        char line[1200];
+        const char *cmd = "git ls-files -z -- DIR && stat bytes";
+        if (cx_fmt(line, sizeof line,
+                   "layer\tL0\t-\tL0 sy/mem/text\t%ld\tsource-bytes\t-\tdirs=cx/sys,cx/mem,cx/text\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   l0, cmd, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tL1\t-\tL1 core/driver/runtime/compiler\t%ld\tsource-bytes\t-\tdirs=cx/core,cx/driver,cx/runtime,cx/compiler\t%s\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   l1, cmd, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.host\tsrc\thost launch\t%ld\tsource-bytes\t-\tfile=src/host.cx\tstat src/host.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   shost, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.packmodel\tsrc\tpack model\t%ld\tsource-bytes\t-\tfile=src/packmodel.cx\tstat src/packmodel.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   spack, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.executor\tsrc\texecutor\t%ld\tsource-bytes\t-\tfile=src/executor.cx\tstat src/executor.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   sex, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.stages\tsrc\tseven flows bind\t%ld\tsource-bytes\t-\tfile=src/stages.cx\tstat src/stages.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   sst, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.drive\tsrc\tdrive\t%ld\tsource-bytes\t-\tfile=src/drive.cx\tstat src/drive.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   sdrive, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+        if (cx_fmt(line, sizeof line,
+                   "layer\tsrc.bind\tsrc\tbind\t%ld\tsource-bytes\t-\tfile=src/bind.cx\tstat src/bind.cx\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                   sbind, rev)) die("row");
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+    }
+    for (i = 0; i < 6; i++) {
+        char line[1600], sizeb[32], sha[80], aux[200];
+        if (!slices[i].seen) {
+            if (cx_fmt(line, sizeof line,
+                       "slice\t%s\tape\tembedded target image\tUNMEASURED\ttarget-image-bytes\tUNMEASURED\taux=UNATTRIBUTED missing_from_ape\tsh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       slices[i].id, rev)) die("row");
+        } else {
+            long ua = slices[i].unattr >= 0 ? slices[i].unattr : slices[i].bytes;
+            if (cx_fmt(sizeb, sizeof sizeb, "%ld", slices[i].bytes)) die("sz");
+            if (cx_fmt(sha, sizeof sha, "%s", slices[i].sha)) die("sha");
+            if (cx_fmt(aux, sizeof aux, "format=%s;unattributed_bytes=%ld;attributed_bytes=0;unattributed_frac=1;note=module-byte-map-not-exclusive",
+                       slices[i].fmt, ua)) die("aux");
+            if (cx_fmt(line, sizeof line,
+                       "slice\t%s\tape\tembedded target image\t%s\ttarget-image-bytes\t%s\t%s\tsh ./unisacc.com tools/logic-distribution.cx -- --ape unisacc.com\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       slices[i].id, sizeb, sha, aux, rev)) die("row");
+        }
+        if (at + strlen(line) >= cap) die("tsv");
+        if (mm_copy(buf + at, (long)(cap - at), line, (long)strlen(line))) die("tsv-copy");
+        at += strlen(line);
+    }
+    *n = at;
+}
+
+static void emit_prd(char *buf, size_t cap, size_t *n, const char *tsv) {
+    size_t at = 0;
+    const char *p = "<!-- product-map:begin -->\n产品全景表阶段一(层+六片)。数字由 `tools/product-map.cx` 重算。kind 分开源码字节与目标镜像字节,禁止相加。模块字节无 origin 时 UNATTRIBUTED。\n\n```\n";
+    const char *e = "```\n<!-- product-map:end -->\n";
+    if (at + strlen(p) >= cap) die("prd");
+    if (mm_copy(buf + at, (long)(cap - at), p, (long)strlen(p))) die("prd-copy");
+    at += strlen(p);
+    if (at + strlen(tsv) >= cap) die("prd");
+    if (mm_copy(buf + at, (long)(cap - at), tsv, (long)strlen(tsv))) die("prd-copy");
+    at += strlen(tsv);
+    if (at + strlen(e) >= cap) die("prd");
+    if (mm_copy(buf + at, (long)(cap - at), e, (long)strlen(e))) die("prd-copy");
+    at += strlen(e);
+    *n = at;
+}
+
+static void patch_prd(const char *block, size_t bn) {
+    char path[4400];
+    size_t n;
+    char *s;
+    const char *bgn = "<!-- product-map:begin -->";
+    const char *end = "<!-- product-map:end -->";
+    join(path, sizeof path, root, "prd.md");
+    s = cx_read(path, &n);
+    if (!s) die("prd-read");
+    {
+        char *pb = strstr(s, bgn);
+        char *pe = pb ? strstr(pb, end) : 0;
+        size_t pre, post;
+        char *out;
+        if (!pb || !pe) { free(s); die("prd-markers"); }
+        pe += strlen(end);
+        if (*pe == '\n') pe++;
+        pre = (size_t)(pb - s);
+        post = n - (size_t)(pe - s);
+        out = malloc(pre + bn + post + 1);
+        if (!out) die("alloc");
+        if (mm_copy(out, (long)(pre + bn + post + 1), s, (long)pre)) die("prd-copy");
+        if (mm_copy(out + pre, (long)(bn + post + 1), block, (long)bn)) die("prd-copy");
+        if (mm_copy(out + pre + bn, (long)(post + 1), pe, (long)post)) die("prd-copy");
+        out[pre + bn + post] = 0;
+        if (cx_write(path, out, pre + bn + post)) die("prd-write");
+        free(out);
+    }
+    free(s);
+}
+
+static void build(char **tsv_out, size_t *tn, char **prd_out, size_t *pn) {
+    char rev[65];
+    long l0, l1, a, b, c, d, e, f;
+    static char tsv[16000], prd[18000];
+    slice_init();
+    ape_census();
+    l0 = dir_bytes("cx/sys") + dir_bytes("cx/mem") + dir_bytes("cx/text");
+    l1 = dir_bytes("cx/core") + dir_bytes("cx/driver") + dir_bytes("cx/runtime") + dir_bytes("cx/compiler");
+    a = file_bytes("src/host.cx");
+    b = file_bytes("src/packmodel.cx");
+    c = file_bytes("src/executor.cx");
+    d = file_bytes("src/stages.cx");
+    e = file_bytes("src/drive.cx");
+    f = file_bytes("src/bind.cx");
+    rev_now(rev);
+    emit_tsv(tsv, sizeof tsv, tn, rev, l0, l1, a, b, c, d, e, f);
+    tsv[*tn] = 0;
+    emit_prd(prd, sizeof prd, pn, tsv);
+    prd[*pn] = 0;
+    *tsv_out = tsv;
+    *prd_out = prd;
+}
+
+static int same_file(const char *rel, const char *want, size_t wn) {
+    char p[4400];
+    size_t n;
+    char *s;
+    join(p, sizeof p, root, rel);
+    s = cx_read(p, &n);
+    if (!s) return 0;
+    {
+        int ok = n == wn && !memcmp(s, want, wn);
+        free(s);
+        return ok;
+    }
+}
+
+static void extract_prd_block(char *dst, size_t cap, size_t *dn) {
+    char p[4400];
+    size_t n;
+    char *s, *pb, *pe;
+    join(p, sizeof p, root, "prd.md");
+    s = cx_read(p, &n);
+    if (!s) die("prd");
+    pb = strstr(s, "<!-- product-map:begin -->");
+    pe = pb ? strstr(pb, "<!-- product-map:end -->") : 0;
+    if (!pb || !pe) { free(s); die("prd-markers"); }
+    pe += strlen("<!-- product-map:end -->");
+    if (*pe == '\n') pe++;
+    *dn = (size_t)(pe - pb);
+    if (*dn >= cap) { free(s); die("block"); }
+    if (mm_copy(dst, (long)cap, pb, (long)*dn)) { free(s); die("block-copy"); }
+    dst[*dn] = 0;
+    free(s);
+}
+
+int main(int argc, char **argv) {
+    char *tsv, *prd;
+    size_t tn, pn;
+    int check = 0, writef = 0;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (argc == 2 && !strcmp(argv[1], "--write")) writef = 1;
+    else if (argc == 2 && !strcmp(argv[1], "--check")) check = 1;
+    else die("usage --write|--check");
+    build(&tsv, &tn, &prd, &pn);
+    if (writef) {
+        char tp[4400];
+        join(tp, sizeof tp, root, "build/product-map.tsv");
+        if (cx_write(tp, tsv, tn)) die("tsv-write");
+        patch_prd(prd, pn);
+        printf("PRODUCT_MAP\tstatus=WRITE\tbytes=%ld\n", (long)tn);
+        return 0;
+    }
+    if (check) {
+        char have[20000];
+        size_t hn;
+        if (!same_file("build/product-map.tsv", tsv, tn)) die("tsv-drift");
+        extract_prd_block(have, sizeof have, &hn);
+        if (hn != pn || memcmp(have, prd, pn)) die("prd-block-drift");
+        printf("PRODUCT_MAP\tstatus=CHECK\tqualification=COMMIT_FAST\n");
+        return 0;
+    }
+    return 2;
+}

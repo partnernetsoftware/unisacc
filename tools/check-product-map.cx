@@ -1,0 +1,59 @@
+/* tools/check-product-map.cx -- commit-fast: write then --check, six slice rows.
+ *
+ *   sh ./unisacc.com tools/check-product-map.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "check-product-map: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-product-map.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+
+int main(void) {
+    char product[4400], tool[4400], tsv[4400];
+    np_result r = {0};
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/product-map.cx", root) ||
+        cx_fmt(tsv, sizeof tsv, "%s/build/product-map.tsv", root)) die("path");
+    {
+        char *v[] = {"sh", product, tool, "--", "--write", 0};
+        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) {
+            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+            np_free(&r);
+            die("write");
+        }
+        ck(r.out && strstr(r.out, "PRODUCT_MAP\tstatus=WRITE"), "write-line");
+        np_free(&r);
+    }
+    {
+        char *v[] = {"sh", product, tool, "--", "--check", 0};
+        r = (np_result){0};
+        if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.rc) {
+            if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+            np_free(&r);
+            die("check");
+        }
+        ck(r.out && strstr(r.out, "PRODUCT_MAP\tstatus=CHECK"), "check-line");
+        np_free(&r);
+    }
+    {
+        size_t n;
+        char *s = cx_read(tsv, &n);
+        ck(s && strstr(s, "kind\tid\tparent"), "tsv-header");
+        ck(s && strstr(s, "layer\tL0\t"), "layer-L0");
+        ck(s && strstr(s, "layer\tL1\t"), "layer-L1");
+        ck(s && strstr(s, "slice\tlnx/x86_64\t"), "slice-lnx-x64");
+        ck(s && strstr(s, "slice\twin/x86_64\t"), "slice-win-x64");
+        ck(s && strstr(s, "UNATTRIBUTED"), "unattributed-visible");
+        ck(s && strstr(s, "target-image-bytes"), "kind-not-summed");
+        free(s);
+    }
+    printf("CHECK_PRODUCT_MAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
