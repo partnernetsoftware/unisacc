@@ -154,6 +154,7 @@ static void span_prep_tag(char *buf, long cap, int gen) {
     check_gen(gen);
     if (gen == 1 ? cx_fmt(buf, cap, "wf-span-prep") : cx_fmt(buf, cap, "wf-span-prep-g%d", gen)) die("fmt", "span-prep-tag");
 }
+static void wf_scrub_dest(const char *outdir, const char *dest);
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
     char wft[4400], prep[4400], p0[4400], p1[4400], p2[4400], phase[4400], dest[4400], tag[80];
     const char *offs[3] = {"0", "32", "64"};
@@ -180,6 +181,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         int n = 0;
         if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-front%d", slug, i) : cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slug, i))) die("fmt", slug);
         if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); continue; }
+        wf_scrub_dest(outdir, parts[i]);
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
         v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i]; v[n++] = 0;
@@ -190,6 +192,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
     if (!ck_done(outdir, tag)) {
         char *v[16];
         int n = 0;
+        wf_scrub_dest(outdir, phase);
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
         v[n++] = p0; v[n++] = p1; v[n++] = p2; v[n++] = 0;
@@ -198,14 +201,19 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
     } else sy_printf("RESUME\t%s\n", tag);
     if (!want_stub) return 0;
     if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-stub", slug) : cx_fmt(tag, sizeof tag, "gen%d-%s-stub", gen, slug))) die("fmt", slug);
-    if (!ck_done(outdir, tag)) {
+    {
+        char sc[4400];
+        if (cx_fmt(sc, sizeof sc, "%s/stub.c", dest)) die("path", "stubc");
+        if (ck_complete(outdir, tag, sc)) { sy_printf("RESUME\t%s\n", tag); }
+        else {
         char *v[12];
-        int n = 0;
+        int n = 0; long t0 = sy_now_ms();
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
         if (bound_sh_secs(root, v, 45)) die(tag, dest);
-        mark(outdir, tag, 0);
-    } else sy_printf("RESUME\t%s\n", tag);
+        mark(outdir, tag, sy_now_ms() - t0);
+        }
+    }
     return 0;
 }
 static int clean_phase_path(const char *outdir, const char *phase, const char *path, const char *receipt);
@@ -258,13 +266,23 @@ static int wf_win_span(const char *root, const char *outdir, const char *helper,
     else sy_printf("RESUME\t%s\n", slice);
     return 0;
 }
+static void wf_scrub_dest(const char *outdir, const char *dest) {
+    char ctl[4400];
+    if (!dest || !*dest) die("path", "dest");
+    if (!under_dir(dest, outdir) && !(chain_work[0] && under_dir(dest, chain_work))) die("REFUSE dest", dest);
+    if (cx_fmt(ctl, sizeof ctl, "%s.control", dest)) die("path", dest);
+    if (fsize(dest) >= 0) { if (cx_rmtree(dest)) die("rm dest", dest); sy_printf("CLEANUP\t%s\n", dest); }
+    if (fsize(ctl) >= 0) { if (cx_rmtree(ctl)) die("rm control", ctl); sy_printf("CLEANUP\t%s\n", ctl); }
+}
 static int span_one_missing(const char *root, const char *outdir, const char *helper,
     const char *prep, const char *target, const char *input, const char *dest,
     const char *first, const char *last, const char *tag) {
-    char wft[4400];
+    char wft[4400], prod[4400];
     char *v[72];
     int n = 0, i;
-    if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
+    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    wf_scrub_dest(outdir, dest);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     v[n++] = wft; v[n++] = (char *)"--";
@@ -309,12 +327,13 @@ static int wf_mac_b(const char *root, const char *outdir, const char *helper, in
 static int span_one_fwd(const char *root, const char *outdir, const char *helper,
     const char *prep, const char *target, const char *input, const char *dest,
     const char *first, const char *last, const char *stub, const char *tag) {
-    char wft[4400], ctrl[4400];
+    char wft[4400], prod[4400];
     char *v[72];
     int n = 0, i;
-    if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
+    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    wf_scrub_dest(outdir, dest);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-    if (cx_fmt(ctrl, sizeof ctrl, "%s.control", dest)) die("path", "ctrl");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
@@ -322,9 +341,6 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     v[n++] = (char *)first; v[n++] = (char *)last;
     for (i = 0; i < 44; i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
-    /* whole-front.cx:163-164: 非 resume 要求 dest ENOENT 且 mkdir dest.control;
-       049/chain-step 对已有 span 走 --resume. G0j 漏传,dest 已有则 exclusive. */
-    if (fsize(ctrl) >= 0) v[n++] = (char *)"--resume";
     v[n] = 0;
     if (bound_sh_secs(root, v, 45)) die(tag, dest);
     mark(outdir, tag, 0);
@@ -444,13 +460,15 @@ static int ck_done(const char *dir, const char *phase) {
     if (fsize(p) < 0) return 0;
     b = cx_read(p, &n);
     if (!b) return 0;
-    if (cx_fmt(needle, sizeof needle, "DONE\t%s\t", phase)) {
-        free(b);
-        die("fmt", phase);
-    }
+    if (cx_fmt(needle, sizeof needle, "DONE\t%s\t", phase)) { free(b); die("fmt", phase); }
     hit = tx_find(b, (long)n, needle, tx_len(needle, 200)) >= 0;
     free(b);
     return hit;
+}
+static int ck_complete(const char *dir, const char *phase, const char *product) {
+    if (!ck_done(dir, phase)) return 0;
+    if (product && *product && fsize(product) <= 0) return 0;
+    return 1;
 }
 /* W2 heartbeat: append epoch<TAB>phase<TAB>pid<TAB>pgid<TAB>start|end to DIR/heartbeat.tsv.
    tools/chain-watch.cx reads the last row before it calls a chain STALLED and checks pid/pgid
@@ -509,6 +527,39 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
     if (cx_fmt(d, sizeof d, "%s/g%d/%s", fp, g, slug) || cx_fmt(rc, sizeof rc, "%s/g%d/phase-%d.tsv", fp, g, idx)) die("path", phase);
     clean_phase_path(outdir, phase, d, rc);
 }
+static int job_has_record(const char *ctx, const char *id) {
+    char rec[4400];
+    if (cx_fmt(rec, sizeof rec, "%s/jobs/%s/record.tsv", ctx, id)) die("path", id);
+    return fsize(rec) >= 0;
+}
+static int clean_stale_job(const char *outdir, const char *ctx, const char *build, const char *id) {
+    char jobd[4400], p[4400];
+    static const char *kind[2] = {"start-job", "finish-job"};
+    static const char *suf[5] = {"argv.tsv", "env", "status", "stderr", "stdout"};
+    int k, s, n = 0;
+    if (!id || !*id || has_dotdot(id) || strchr(id, '/')) die("REFUSE job id", id);
+    if (job_has_record(ctx, id)) return 0;
+    for (k = 0; k < 2; k++) for (s = 0; s < 5; s++) {
+        if (cx_fmt(p, sizeof p, "%s/outer/%s-%s.%s", build, kind[k], id, suf[s])) die("path", id);
+        if (fsize(p) >= 0) n += clean_phase_path(outdir, id, p, 0);
+    }
+    if (cx_fmt(jobd, sizeof jobd, "%s/jobs/%s", ctx, id)) die("path", id);
+    if (fsize(jobd) >= 0) n += clean_phase_path(outdir, id, jobd, 0);
+    return n;
+}
+static void scrub_wave_jobs(const char *outdir, const char *ctx, const char *build, const char *phase) {
+    char jobs[4400], prefix[32];
+    DIR *d; struct dirent *e;
+    if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx) || cx_fmt(prefix, sizeof prefix, "%s-", phase)) die("path", phase);
+    d = opendir(jobs);
+    if (!d) return;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        if (strncmp(e->d_name, prefix, strlen(prefix))) continue;
+        clean_stale_job(outdir, ctx, build, e->d_name);
+    }
+    closedir(d);
+}
 static int warmup_tools(const char *root) {
     static const char *w[] = {
         "tools/chain-step.cx", "tools/release-build.cx", "tools/whole-front.cx",
@@ -561,6 +612,7 @@ static int wave_phase(const char *outdir, const char *s, const char *ctx, const 
             first += count;
             continue;
         }
+        if (resume) scrub_wave_jobs(outdir, ctx, b, phase);
         t0 = sy_now_ms();
         if (sjw(s, ctx, b, phase, first, count, "start-job")) die("start-job", tag);
         if (sjw(s, ctx, b, phase, first, count, "finish-job")) die("finish-job", tag);
@@ -725,6 +777,24 @@ int main(int argc, char **argv) {
             /* 夹具入口: --clean-phase OUT WORK PHASE PATH RECEIPT(- 为无) */
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             return clean_phase_path(argv[i + 1], argv[i + 3], argv[i + 4], tx_eqz(argv[i + 5], "-") ? 0 : argv[i + 5]) ? 0 : 3;
+        }
+        if (tx_eqz(argv[i], "--clean-job") && i + 5 < argc) {
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            clean_stale_job(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5]);
+            return 0;
+        }
+        if (tx_eqz(argv[i], "--ck-done") && i + 2 < argc) {
+            const char *prod = (i + 3 < argc) ? argv[i + 3] : "";
+            sy_printf("CK_DONE\t%s\t%s\n", argv[i + 2], ck_complete(argv[i + 1], argv[i + 2], prod) ? "yes" : "no");
+            return 0;
+        }
+        if (tx_eqz(argv[i], "--clean-wf-dest") && i + 4 < argc) {
+            char prod[4400];
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            if (cx_fmt(prod, sizeof prod, "%s/body.bin", argv[i + 3])) die("path", argv[i + 3]);
+            if (ck_complete(argv[i + 1], argv[i + 4], prod)) { sy_printf("WF_DEST_KEPT\t%s\n", argv[i + 3]); return 0; }
+            wf_scrub_dest(argv[i + 1], argv[i + 3]);
+            return 0;
         }
         if (tx_eqz(argv[i], "--check-template") && i + 1 < argc) {
             /* 夹具:g2/g3 prepare 与 gen1 共用的模板钉;负例改一字节应 REFUSE */

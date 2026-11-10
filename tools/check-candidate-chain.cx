@@ -105,6 +105,17 @@ int main(void) {
       free(tb);
     }
     {
+      char tp[500], *tb; size_t tn = 0;
+      if (cx_fmt(tp, sizeof tp, "%s/tools/templates/whole-win-span.cx.in", cwd)) { ck(0, "wspan"); return 1; }
+      tb = cx_read(tp, &tn);
+      ck(tb && tn && tx_find(tb, (long)tn, "empty stage output", 18) >= 0, "win-span-rejects-empty-non-elf");
+      free(tb);
+      if (cx_fmt(tp, sizeof tp, "%s/tools/whole-front.cx", cwd)) { ck(0, "wfpath"); return 1; }
+      tb = cx_read(tp, &tn);
+      ck(tb && tn && tx_find(tb, (long)tn, "span empty opaque body", 22) >= 0, "opaque-body-nonempty");
+      free(tb);
+    }
+    {
       char td[500], bad[600], good[600], bo[600], go[600], sc[900], cmd[2400];
       const char *env;
       const char *bs = ".text\n.globl foo\nfoo:\ncall setpgid\n";
@@ -155,6 +166,43 @@ int main(void) {
         ck(has(out, "REFUSE cleanup path outside") && sh("true", 0, 0) == 0, "clean-dotdot-refused");
         if (cx_fmt(cmd, sizeof cmd, "test -d '%s/x' -o -d '%s'", d2, outside)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, 0, 0) == 0, "clean-refused-untouched");
+        {
+          char ctx[600], bld[600], dead[700], kept[700], rec2[700], ov[800];
+          if (cx_fmt(ctx, sizeof ctx, "%s/ctx", o) || cx_fmt(bld, sizeof bld, "%s/build", o)
+              || cx_fmt(dead, sizeof dead, "%s/jobs/gen-killed", ctx) || cx_fmt(kept, sizeof kept, "%s/jobs/gen-kept", ctx)
+              || cx_fmt(rec2, sizeof rec2, "%s/record.tsv", kept) || cx_fmt(ov, sizeof ov, "%s/outer", bld)) { ck(0, "job-fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' '%s' '%s' && echo leftover > '%s/partial' && echo x > '%s/start-job-gen-killed.argv.tsv' && echo rec > '%s' && echo y > '%s/start-job-gen-kept.argv.tsv'", dead, kept, ov, dead, ov, rec2, ov)) { ck(0, "job-fmt"); return 1; }
+          if (sh(cmd, out, sizeof out)) { ck(0, "job-kill-setup"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' gen-killed 2>&1; test ! -e '%s' && test ! -e '%s/start-job-gen-killed.argv.tsv'", com, tool, o, w, ctx, bld, dead, ov)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tgen-killed\t"), "job-kill-resume-cleaned");
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' gen-kept 2>&1; test -f '%s' && test -f '%s/start-job-gen-kept.argv.tsv'", com, tool, o, w, ctx, bld, rec2, ov)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP\tgen-kept\t"), "job-complete-kept");
+        }
+        {
+          char zck[600], prod[600], miss[600];
+          const char *zrow = "DONE\tgen1-osx-arm64-stub\twall_ms=0\tsha=-\nDONE\tfailph\twall_ms=12\tsha=-\n";
+          if (cx_fmt(zck, sizeof zck, "%s/checkpoint.tsv", o) || cx_fmt(prod, sizeof prod, "%s/stub.c", o) || cx_fmt(miss, sizeof miss, "%s/missing.bin", o)) { ck(0, "zck"); return 1; }
+          if (cx_write(zck, zrow, tx_len(zrow, 160))) { ck(0, "zwrite"); return 1; }
+          if (cx_write(prod, "x", 1)) { ck(0, "pwrite"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --ck-done '%s' gen1-osx-arm64-stub '%s' 2>&1", com, tool, o, prod)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && has(out, "CK_DONE\tgen1-osx-arm64-stub\tyes"), "zero-wall-with-product-done");
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --ck-done '%s' failph '%s' 2>&1", com, tool, o, miss)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && has(out, "CK_DONE\tfailph\tno"), "failed-no-product-not-done");
+        }
+        {
+          char dead[700], kept[700], kctl[720], body[720], zck[600];
+          const char *krow = "DONE\twfkept\twall_ms=0\tsha=-\n";
+          if (cx_fmt(dead, sizeof dead, "%s/wfkilled", o) || cx_fmt(kept, sizeof kept, "%s/wfkept", o)
+              || cx_fmt(kctl, sizeof kctl, "%s.control", kept) || cx_fmt(body, sizeof body, "%s/body.bin", kept)
+              || cx_fmt(zck, sizeof zck, "%s/checkpoint.tsv", o)) { ck(0, "wf-fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' '%s.control' '%s' '%s' && echo leftover > '%s/x' && echo y > '%s.control/z'", dead, dead, kept, kctl, dead, dead)) { ck(0, "fmt"); return 1; }
+          if (sh(cmd, out, sizeof out)) { ck(0, "wf-kill-setup"); return 1; }
+          if (cx_write(body, "bin", 3) || cx_write(zck, krow, tx_len(krow, 80))) { ck(0, "wf-kept-setup"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-wf-dest '%s' '%s' '%s' wfkilled 2>&1; test ! -e '%s' && test ! -e '%s.control'", com, tool, o, o, dead, dead, dead)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\t"), "wf-dest-kill-resume-cleaned");
+          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-wf-dest '%s' '%s' '%s' wfkept 2>&1; test -d '%s' && test -f '%s'", com, tool, o, o, kept, kept, body)) { ck(0, "fmt"); return 1; }
+          ck(sh(cmd, out, sizeof out) == 0 && has(out, "WF_DEST_KEPT\t"), "wf-dest-complete-kept");
+        }
         cx_rmtree(td);
     }
     {
