@@ -10,7 +10,11 @@
  * (b) order: the six targets in first-appearance order of column 3 (shared/all excluded) are the
  *     fixedpoint phase order; they must equal the three copies in tools/chain-step.cx
  *     (cs_target[6], cs_fp_slices[6] and the i == 0 ? ... ternary chain) -- each differing copy is
- *     one ORDER_MISMATCH row naming file:line.
+ *     one ORDER_MISMATCH row naming file:line.  build/order-domains.tsv (--domains F) may pin a constant
+ *     as a frozen exception (frozen_order = its exact six-target list, e.g. cs_target, whose order is part
+ *     of the published routes/compiler.pkg bytes): that constant is compared with frozen_order instead of
+ *     the graph and a difference is a FROZEN_ORDER_CHANGED row (counted in order_mismatch).  Undeclared
+ *     constants, or a missing table, compare strictly with the graph.  Prints ORDER_DOMAINS declared=N frozen=M.
  * (c) hardwire: every row of build/hardwire.tsv (file, literal pattern) is scanned line by line;
  *     each hit is HARDWIRE<TAB>file:line<TAB>id:pattern.  Report only, not a gate in this step.
  * (d) route: per target, the gen1 slice phases the chain driver tools/candidate-chain.cx (--route F)
@@ -174,24 +178,61 @@ static int literals(const char *b, long n, long at, int count, char out[][32]) {
     return got;
 }
 static int line_of(const char *b, long at) { long i; int l = 1; for (i = 0; i < at; i++) if (b[i] == '\n') l++; return l; }
-static void compare_copy(const char *b, long n, const char *anchor, const char *name, int skip) {
+static void compare_copy(const char *b, long n, const char *anchor, const char *name, int skip, char want[][32], const char *row) {
     long at = tx_find(b, n, anchor, tx_len(anchor, 128)); char got[8][32]; int k, same = 1; char g[256], w[256]; long gl = 0, wl = 0;
     if (at < 0) { printf("ORDER_MISMATCH\t%s:0\t%s\tconstant not found\n", chain_path, name); mism++; return; }
     if (literals(b, n, at, 6 + skip, got) != 6 + skip) { printf("ORDER_MISMATCH\t%s:%d\t%s\tfewer than 6 literals\n", chain_path, line_of(b, at), name); mism++; return; }
     for (k = 0; k < 6; k++) {
-        long a = tx_len(got[k + skip], 32), c = tx_len(gorder[k], 32);
-        if (!tx_same(got[k + skip], a, gorder[k], c)) same = 0;
-        tx_copy(g + gl, 256 - gl, got[k + skip], a); gl += a; g[gl++] = ','; tx_copy(w + wl, 256 - wl, gorder[k], c); wl += c; w[wl++] = ',';
+        long a = tx_len(got[k + skip], 32), c = tx_len(want[k], 32);
+        if (!tx_same(got[k + skip], a, want[k], c)) same = 0;
+        tx_copy(g + gl, 256 - gl, got[k + skip], a); gl += a; g[gl++] = ','; tx_copy(w + wl, 256 - wl, want[k], c); wl += c; w[wl++] = ',';
     }
     g[gl ? gl - 1 : 0] = 0; w[wl ? wl - 1 : 0] = 0;
-    if (!same) { printf("ORDER_MISMATCH\t%s:%d\t%s\tgot=%s\twant=%s\n", chain_path, line_of(b, at), name, g, w); mism++; }
+    if (!same) { printf("%s\t%s:%d\t%s\tgot=%s\twant=%s\n", row, chain_path, line_of(b, at), name, g, w); mism++; }
+}
+/* build/order-domains.tsv: constant, file, line_hint, domain, frozen_order, reason, evidence.  A constant whose
+   frozen_order is a six-target list is a pinned exception: its source order must equal that list exactly
+   (else FROZEN_ORDER_CHANGED, counted in order_mismatch).  Every other constant -- declared graph-order or not
+   declared at all (or no table) -- is compared with the graph order. */
+static char dconst[16][64], dfrozen[16][256]; static int ndom, nfrozen;
+static const char *dom_path = "build/order-domains.tsv";
+static void dput(char *dst, long cap, const char *s, long n) { if (n > cap - 1) n = cap - 1; if (n < 0) n = 0; tx_copy(dst, cap, s, n); dst[n] = 0; }
+static void load_domains(void) {
+    long n, p = 0; int header = 0, fd = sy_open_read(dom_path); char *b;
+    if (fd < 0) return;   /* absent table: strict mode */
+    sy_close(fd); b = slurp(dom_path, &n);
+    while (p < n) {
+        long q = p, off, len;
+        while (q < n && b[q] != '\n') q++;
+        if (q == p || b[p] == '#') { p = q + 1; continue; }
+        if (!header) { header = 1; p = q + 1; continue; }
+        if (tx_fields(b + p, q - p, '\t') < 7 || ndom == 16) { fprintf(stderr, "graph-check: bad order-domains row\n"); exit(2); }
+        tx_field(b + p, q - p, '\t', 0, &off, &len); dput(dconst[ndom], 64, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 4, &off, &len); dput(dfrozen[ndom], 256, b + p + off, len);
+        if (dfrozen[ndom][0] == '-' && dfrozen[ndom][1] == 0) dfrozen[ndom][0] = 0;
+        if (dfrozen[ndom][0]) nfrozen++;
+        ndom++; p = q + 1;
+    }
+    mm_free(b);
+}
+static void check_one(const char *b, long n, const char *name, const char *anchor, int skip) {
+    int d; char want[6][32];
+    for (d = 0; d < ndom; d++) if (tx_eqz(dconst[d], name)) break;
+    if (d < ndom && dfrozen[d][0]) {
+        const char *f = dfrozen[d]; long fl = tx_len(f, 256); int k;
+        if (tx_fields(f, fl, ',') != 6) { printf("FROZEN_ORDER_CHANGED\t%s\t%s\tfrozen_order must list 6 targets\n", dom_path, name); mism++; return; }
+        for (k = 0; k < 6; k++) { long off, len; tx_field(f, fl, ',', k, &off, &len); dput(want[k], 32, f + off, len); }
+        compare_copy(b, n, anchor, name, skip, want, "FROZEN_ORDER_CHANGED");
+    } else compare_copy(b, n, anchor, name, skip, gorder, "ORDER_MISMATCH");
 }
 static void check_order(void) {
     long n; char *b = slurp(chain_path, &n);
+    load_domains();
+    printf("ORDER_DOMAINS\tdeclared=%d\tfrozen=%d\n", ndom, nfrozen);
     if (ngo != 6) return;
-    compare_copy(b, n, "cs_target[6] = {", "cs_target", 0);
-    compare_copy(b, n, "cs_fp_slices[6] = {", "cs_fp_slices", 0);
-    compare_copy(b, n, "\"kernel-route\" : i == 0 ?", "phase-ternary", 1);
+    check_one(b, n, "cs_target", "cs_target[6] = {", 0);
+    check_one(b, n, "cs_fp_slices", "cs_fp_slices[6] = {", 0);
+    check_one(b, n, "phase-ternary", "\"kernel-route\" : i == 0 ?", 1);
     mm_free(b);
 }
 /* ---- hardwire ---- */
@@ -415,6 +456,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--no-hardwire")) no_hard = 1;
         else if (tx_eqz(argv[i], "--route") && i + 1 < argc) route_path = argv[++i];
         else if (tx_eqz(argv[i], "--no-route")) no_route = 1;
+        else if (tx_eqz(argv[i], "--domains") && i + 1 < argc) dom_path = argv[++i];
         else { fprintf(stderr, "graph-check: unknown argument %s\n", argv[i]); return 2; }
     }
     load_graph();

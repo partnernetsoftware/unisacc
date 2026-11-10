@@ -59,9 +59,10 @@ static const char *CHAIN_BAD =
     "x = kernel ? \"kernel-route\" : i == 0 ? \"lnx-x86_64\" : i == 1 ? \"lnx-arm64\" : i == 2 ? \"osx-x86_64\" : i == 3 ? \"osx-arm64\" : i == 4 ? \"win-x86_64\" : \"win-arm64\";\n";
 
 /* run graph-check; returns rc (or -1), copies stdout into *out.  ROUTE 0 = --no-route */
+static const char *domains = 0;   /* 0: a path that does not exist (strict mode) */
 static int run(const char *graph, const char *chain, const char *hardwire, const char *route, char **out, size_t *n) {
     char *v[] = {"sh", "./unisacc.com", "tools/graph-check.cx", "--", "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire,
-                 route ? "--route" : "--no-route", (char *)route, 0};
+                 "--domains", (char *)(domains ? domains : "/nonexistent/order-domains.tsv"), route ? "--route" : "--no-route", (char *)route, 0};
     int rc = cx_runv_timeout(v, 50, out, n);
     if (!*out) return -1;
     return rc;
@@ -126,6 +127,56 @@ static int swap_all(char *b, long n, const char *from, const char *to) {
     if (fl != tx_len(to, 128)) return -1;
     for (;;) { long at = tx_find(b + i, n - i, from, fl), k; if (at < 0) break; at += i; for (k = 0; k < fl; k++) b[at + k] = to[k]; i = at + fl; hits++; }
     return hits;
+}
+/* ---- order domains ---- */
+static const char *DOM_HDR = "constant\tfile\tline_hint\tdomain\tfrozen_order\treason\tevidence\n";
+static const char *FROZEN6 = "lnx-arm64,lnx-x86_64,osx-arm64,osx-x86_64,win-arm64,win-x86_64";
+/* run with domains file DP (0 = strict) and CHAIN; true when rc/ORDER fields/rows match */
+static void dom_expect(const char *name, const char *dp, const char *chain, int want_rc, long want_mism, long want_frozen, const char *row) {
+    char gp[4400], gbuf[1 << 12]; char *out = 0; size_t n = 0; int rc, ok; long m, fz;
+    if (cx_fmt(gbuf, sizeof gbuf, "%s%s", HDR, SIX) || put("dom-graph.tsv", gbuf, gp, sizeof gp)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
+    domains = dp; rc = run(gp, chain, hard, 0, &out, &n); domains = 0;
+    m = out ? field(out, n, "order_mismatch=") : -1;
+    fz = out ? field(out, n, "frozen=") : -1;
+    ok = out && (rc != 0) == (want_rc != 0) && m == want_mism && (want_frozen < 0 || fz == want_frozen)
+         && (!row || tx_contains(out, (long)n, row, tx_len(row, 128)));
+    if (ok) { printf("PASS\t%s\trc=%d\torder_mismatch=%ld\tfrozen=%ld\n", name, rc, m, fz); passed++; }
+    else { printf("FAIL\t%s\twant rc%s order_mismatch=%ld frozen=%ld %s, got rc=%d order_mismatch=%ld frozen=%ld\n%s\n", name, want_rc ? "!=0" : "=0", want_mism, want_frozen, row ? row : "-", rc, m, fz, out ? out : "(none)"); failed++; }
+    if (out) mm_free(out);
+    sy_unlink(gp);
+}
+static void domain_cases(void) {
+    char dp[4400], dp2[4400], dp3[4400], chain_fp[4400], body[1 << 11];
+    /* frozen cs_target + the other two declared graph-order; the fixture graph has lnx-x86_64 first */
+    if (cx_fmt(body, sizeof body, "%scs_target\tf\t1\tctx-manifest-order\t%s\tr\te\ncs_fp_slices\tf\t2\tgraph-order\t-\tr\t-\nphase-ternary\tf\t3\tgraph-order\t-\tr\t-\n", DOM_HDR, FROZEN6)
+        || put("dom-ok.tsv", body, dp, sizeof dp)
+        || cx_fmt(body, sizeof body, "%scs_target\tf\t1\tctx-manifest-order\tlnx-x86_64,lnx-arm64,osx-x86_64,osx-arm64,win-x86_64,win-arm64\tr\te\n", DOM_HDR)
+        || put("dom-other.tsv", body, dp2, sizeof dp2)
+        || cx_fmt(body, sizeof body, "%scs_target\tf\t1\tctx-manifest-order\t%s\tr\te\n", DOM_HDR, FROZEN6)
+        || put("dom-only-cs.tsv", body, dp3, sizeof dp3)
+        || put("chain-fpbad.cx", "static const char *cs_target[6] = {\"lnx-arm64\", \"lnx-x86_64\", \"osx-arm64\", \"osx-x86_64\", \"win-arm64\", \"win-x86_64\"};\n"
+               "static const char *cs_fp_slices[6] = {\"lnx-arm64/candidate\", \"lnx-x86_64/candidate\",\n"
+               "  \"osx-x86_64/slice-osx-x86_64\", \"osx-arm64/slice-osx-arm64\", \"win-x86_64/slice-win-x86_64\", \"win-arm64/slice-win-arm64\"};\n"
+               "x = kernel ? \"kernel-route\" : i == 0 ? \"lnx-x86_64\" : i == 1 ? \"lnx-arm64\" : i == 2 ? \"osx-x86_64\" : i == 3 ? \"osx-arm64\" : i == 4 ? \"win-x86_64\" : \"win-arm64\";\n", chain_fp, sizeof chain_fp)) {
+        printf("FAIL\tdomain-fixtures\twrite\n"); failed++; return; }
+    /* (a-fixture) frozen cs_target in the pinned order passes though it differs from the graph; frozen=1 */
+    dom_expect("domain-frozen-ok", dp, chain_bad, 0, 0, 1, "ORDER_DOMAINS\tdeclared=3\tfrozen=1");
+    /* (b) cs_target in another order than the pin -> FROZEN_ORDER_CHANGED (chain_ok has x86_64 first) */
+    dom_expect("domain-frozen-changed", dp, chain_ok, 1, 1, 1, "FROZEN_ORDER_CHANGED\t");
+    /* (c) an undeclared constant (cs_fp_slices) differing from the graph is a plain mismatch even with a table */
+    dom_expect("domain-undeclared-strict", dp3, chain_fp, 1, 1, 1, "ORDER_MISMATCH\t");
+    /* (d) table missing: strict, all three compared with the graph (cs_target arm64 first is one mismatch) */
+    dom_expect("domain-table-missing", 0, chain_bad, 1, 1, 0, "ORDER_DOMAINS\tdeclared=0\tfrozen=0");
+    /* a pin in another order than the graph also holds exactly: pin = graph order, chain_bad then changes */
+    dom_expect("domain-pin-is-exact", dp2, chain_bad, 1, 1, 1, "FROZEN_ORDER_CHANGED\t");
+    sy_unlink(dp); sy_unlink(dp2); sy_unlink(dp3); sy_unlink(chain_fp);
+    /* (a) the real tree: order_mismatch=0 and frozen=1 */
+    {   char *out = 0; size_t n = 0; int rc; domains = "build/order-domains.tsv";
+        rc = run("build/graph.tsv", "tools/chain-step.cx", "build/hardwire.tsv", 0, &out, &n); domains = 0;
+        if (out && field(out, n, "order_mismatch=") == 0 && field(out, n, "frozen=") == 1 && tx_contains(out, (long)n, "ORDER_DOMAINS\tdeclared=3\tfrozen=1", 30))
+            { printf("PASS\tdomain-real\trc=%d\torder_mismatch=0\tfrozen=1\n", rc); passed++; }
+        else { printf("FAIL\tdomain-real\trc=%d\n%s\n", rc, out ? out : "(none)"); failed++; }
+        if (out) mm_free(out); }
 }
 static void route_cases(void) {
     static char g[1 << 14], src[1 << 13]; char gp[4400], gp2[4400], rp[4400];
@@ -229,6 +280,7 @@ int main(void) {
     /* 6 order mismatch in cs_target only */
     if (cx_fmt(g, sizeof g, "%s%s", HDR, SIX)) return 2;
     expect("order.tsv", g, chain_bad, 1, "ORDER_MISMATCH\t", 1);
+    domain_cases();
     /* 6b split_dim enumeration, budget>=45 none needs a reason, split_min integer >= 1 */
     if (cx_fmt(g, sizeof g, "%s%sbad\ttool\tshared\tfreeze\tc\ti\to\t1\t30\te\t-\tno\tslices\t1\n", HDR, SIX)) return 2;
     expect("dim.tsv", g, chain_ok, 1, "\tsplit_dim\tslices", 0);
