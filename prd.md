@@ -395,17 +395,19 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `seed/` | C 种子构造器（gold label 规则、ident.c 身份、ape 打包） |
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
-| `tools/` | 开发工具（个数以 `ls tools/*.cx` 为准：生成器/棘轮/refactor/symindex/all-waves…） |
-| `plans/` | 活跃计划（v0.0.4x 路线 + 架构/分层/缺陷；已完成的归档到 archive/plans） |
-| `docs/` | 规格/术语（spec.md 在根、docs/glossary.md、docs/cx/） |
+| `tools/` | 开发工具（约 565 个 .cx，个数以 `ls tools/*.cx` 为准：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
+| `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
+| `build/` | 构造图与前提规则表：graph.tsv（203 节点构造图）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
+| `plans/` | 计划与设计（约 120 个）：现行 v0.0.50/51/52-unisacc.md、y-design-050.md、rechunk-design.md、standing-goal.md、release-notes-0.0.45 至 0.0.50；已完成的归档到 archive/plans |
+| `docs/` | 规格/术语与目录地图（docs/REPO-MAP.md、glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
 | `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、prd 历史 |
 | `apps/csih/` | csih 车道（归 csih 主人） |
 | `ujs/` | 论文 B（归论文 B 主人，unisacc 侧不碰） |
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
-| `out/` | 临时产物（gitignore，日志/候选/材料/会话） |
+| `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `agentwork/`、`release/`、`agentwork/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 任务看板与账（agentwork/，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整四组地图见 [docs/REPO-MAP.md](docs/REPO-MAP.md) |
+| `agentwork/`、`release/`、`agentwork/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；任务看板与账（agentwork/：items/ledger/units/freeze/phase-times/pkg-gaps，管理账不是事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整四组地图见 [docs/REPO-MAP.md](docs/REPO-MAP.md) |
 
 <a id="current-plans"></a>
 ## 9. 当前状态与路线
