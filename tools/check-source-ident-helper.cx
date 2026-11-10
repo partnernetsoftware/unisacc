@@ -1,0 +1,45 @@
+/* tools/check-source-ident-helper.cx -- S(1) 负控.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *n) {
+    if (ok) sy_printf("PASS\tcheck-source-ident-helper.%s\n", n);
+    else { failed++; sy_printf("FAIL\tcheck-source-ident-helper.%s\n", n); }
+}
+static int hasfile(const char *p, const char *n) {
+    size_t zn = 0;
+    char *b = cx_read(p, &zn);
+    int ok = b && tx_find(b, (long)zn, n, tx_len(n, 80)) >= 0;
+    free(b);
+    return ok;
+}
+
+int main(void) {
+    char cwd[400], com[500], tool[500], *o = 0;
+    size_t n = 0;
+    { char *v[] = {"pwd", 0};
+      if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
+      mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; free(o);
+      { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
+    }
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/source-package.cx", cwd)) {
+        ck(0, "path"); return 1;
+    }
+    {
+      char *v[] = {"sh", "-c", "exec sh \"$1\" \"$2\" -- prepare-context \"$3\" /tmp/x /usr/bin/true /tmp/s1-ctx-rel --identity-helper rel/helper > /tmp/s1-ident-rel.out 2>&1", "sh", com, tool, cwd, 0};
+      cx_runv_timeout(v, 40, 0, 0);
+      ck(hasfile("/tmp/s1-ident-rel.out", "identity-helper-absolute-path-required"), "relative-path");
+    }
+    {
+      char *v[] = {"sh", "-c", "exec sh \"$1\" \"$2\" -- prepare-context \"$3\" \"$1\" /usr/bin/x86_64-linux-gnu-gcc-11 /tmp/s1-ctx-miss --identity-helper /no/such/ident-helper > /tmp/s1-ident-miss.out 2>&1", "sh", com, tool, cwd, 0};
+      cx_runv_timeout(v, 40, 0, 0);
+      ck(hasfile("/tmp/s1-ident-miss.out", "identity-helper-absolute-path-required") || hasfile("/tmp/s1-ident-miss.out", "identity-helper-not-executable"), "missing-path");
+    }
+    sy_printf("CHECK_SOURCE_IDENT_HELPER\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
