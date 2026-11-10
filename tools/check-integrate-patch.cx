@@ -106,6 +106,28 @@ static void land_real(const char *top,const char *native,const char *productroot
  { char *lv[]={"git","--git-dir",bare,"log","-1","--format=%s",0};np_result r=run(lv,0,8);ck(!r.rc&&r.out&&strstr(r.out,"land fixture"),"land-real-log");np_free(&r); }
  { char *sv[]={"git","ls-remote",bare,"refs/heads/main",0};np_result r=run(sv,0,8);ck(!r.rc&&r.outn>40,"land-real-ls-remote");np_free(&r); }
 }
+static void aff_resume(const char *top,const char *native,const char *productroot){
+ char bare[4400],root[4400],other[4400],dest[4400],patch[4400],log[4400],lenv[4500],p[4400];
+ if(cx_fmt(bare,sizeof bare,"%s/af.git",top)||cx_fmt(root,sizeof root,"%s/af-root",top)||cx_fmt(other,sizeof other,"%s/af-other",top)||cx_fmt(dest,sizeof dest,"%s/af-dest",top)||cx_fmt(patch,sizeof patch,"%s/af.patch",top)||cx_fmt(log,sizeof log,"%s/af.log",top)||cx_fmt(lenv,sizeof lenv,"INTEGRATE_FAKE_AFF_LOG=%s",log))die("af-path");
+ char *bi[]={"git","init","--bare","-b","main",bare,0};ok(bi,0);
+ char *cl[]={"git","clone",bare,root,0};ok(cl,0);
+ path(p,sizeof p,root,"agentwork");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,root,"tests");if(sy_mkdir(p,0700))die("mkdir");
+ for(int k=0;k<4;k++){path(p,sizeof p,root,am_path(k));put(p,am_header(k),strlen(am_header(k)));}
+ path(p,sizeof p,root,".gitignore");put(p,"unisacc.com\n",12);path(p,sizeof p,root,"plain.txt");put(p,"base\n",5);commit(root);
+ { char *pv[]={"git","-C",root,"push","-u","origin","main",0};ok(pv,0); }
+ if(pp_copy_product(productroot,root))die("product-copy");
+ char *co[]={"git","clone",bare,other,0};ok(co,0);
+ path(p,sizeof p,other,"plain.txt");put(p,"affx\n",5);commit(other);
+ { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("af-diff");put(patch,r.out,r.outn);np_free(&r); }
+ { char *ap[]={(char*)native,root,patch,dest,"--prepare-only",0};np_result r=run(ap,0,55);ck(!r.rc,"affected-resume-prep");np_free(&r); }
+ { char *a1[]={"env","INTEGRATE_FAKE_AFF_IDS=a1,b2,c3","INTEGRATE_FAKE_AFF_MAX=2",lenv,(char*)native,"--test-affected",dest,0};np_result r=run(a1,0,20);ck(r.rc==3,"affected-first-run-pending-after-two");np_free(&r); }
+ { char *a2[]={"env","INTEGRATE_FAKE_AFF_IDS=a1,b2,c3","INTEGRATE_FAKE_AFF_MAX=2",lenv,(char*)native,"--test-affected",dest,0};np_result r=run(a2,0,20);size_t ln;char *lg=cx_read(log,&ln);
+   ck(!r.rc&&r.out&&strstr(r.out,"SKIP\tid=a1")&&strstr(r.out,"SKIP\tid=b2")&&lg&&ln==9&&!memcmp(lg,"a1\nb2\nc3\n",9),"affected-resume-skips-passed-batches");free(lg);np_free(&r); }
+ { char rp[4400];size_t rn;path(rp,sizeof rp,dest,".git/integrate/receipt.tsv");char *rs=cx_read(rp,&rn);char *t=rs?strstr(rs,"\ntree\t"):0;
+   if(t){t+=6;while(*t&&*t!='\n')*t++='0';put(rp,rs,rn);}ck(t!=0,"affected-identity-tampered");free(rs); }
+ { char *a3[]={"env","INTEGRATE_FAKE_AFF_IDS=a1,b2,c3","INTEGRATE_FAKE_AFF_MAX=2",lenv,(char*)native,"--test-affected",dest,0};np_result r=run(a3,0,20);size_t ln;char *lg=cx_read(log,&ln);
+   ck(r.rc==3&&r.out&&!strstr(r.out,"SKIP")&&lg&&ln==15&&!memcmp(lg,"a1\nb2\nc3\na1\nb2\n",15),"affected-identity-change-invalidates-record");free(lg);np_free(&r); }
+}
 static void registry_neg(const char *top,const char *native){
  char dir[4400],okp[4400],pat[4400],mis[4400];
  if(cx_fmt(dir,sizeof dir,"%s/reg",top)||cx_fmt(okp,sizeof okp,"%s/tools/ok.cx",dir)||cx_fmt(pat,sizeof pat,"%s/ok.patch",dir)||cx_fmt(mis,sizeof mis,"%s/miss.patch",dir))die("reg-path");
@@ -120,12 +142,13 @@ static void registry_neg(const char *top,const char *native){
 
 int main(int argc,char **argv){
  deadline=sy_now_ms()+55000;
- int land_only=argc==2&&!strcmp(argv[1],"--land-only");
+ int aff_only=argc==2&&!strcmp(argv[1],"--affected-only");
+ int land_only=(argc==2&&!strcmp(argv[1],"--land-only"))||aff_only;
  if(!land_only&&argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT] | --land-only");
  char native[4096],root[4096],temp[4400];
  if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");
  if(argc==1||land_only){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}
  else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");
- if(land_only){land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+ if(land_only){if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
  fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);registry_neg(temp,native);
  printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
