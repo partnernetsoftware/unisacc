@@ -1,0 +1,31 @@
+/* tools/version-inject.cx -- 把 release/candidate.tsv 的版本注入一个独立切片的 32 字节版本槽,写到新文件。
+ *   sh ./unisacc.com tools/version-inject.cx -- IN OUT [TABLE]
+ * 与 ape-pack 打包时对每片做的注入(rv_inject_slot)完全相同,用于独立发布资产 slice-win-arm64:
+ * CI 对独立切片直接跑 --version 精确匹配,未注入的 whole-o 原始切片会 FAIL。
+ * 槽缺失/重复、版本非法、表非法一律拒绝且不写 OUT;IN 不被改动。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.releaseversion
+
+static int die(const char *what, const char *p) {
+    sy_eprintf("version-inject: %s%s%s\n", what, p ? " " : "", p ? p : "");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    const char *in, *out, *table = "release/candidate.tsv";
+    char version[24]; char *b; size_t n;
+    if (argc != 3 && argc != 4) { sy_eprintf("usage: version-inject.cx IN OUT [TABLE]\n"); return 2; }
+    in = argv[1]; out = argv[2]; if (argc == 4) table = argv[3];
+    if (rv_load(table, version)) return die("invalid release version in", table);
+    b = cx_read(in, &n);
+    if (!b || n == 0) return die("cannot read", in);
+    if (rv_inject_slot((unsigned char *)b, (long)n, version)) { mm_free(b); return die("missing/duplicate version slot in", in); }
+    if (cx_write(out, b, n)) { mm_free(b); return die("cannot write", out); }
+    mm_free(b);
+    sy_chmod(out, 0755);
+    sy_printf("VERSION_INJECT\t%s\t%s\tbytes=%ld\n", version, out, (long)n);
+    return 0;
+}

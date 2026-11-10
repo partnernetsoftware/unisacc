@@ -1,0 +1,70 @@
+/* tools/check-version-inject.cx -- version-inject 合同:只改 32 字节槽、拒绝缺槽/双槽/坏表、IN 不动、拒绝时不写 OUT。
+ * 在临时目录用自造的小文件和私有候选表跑,不依赖真实切片。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static int failed; static char root[4096], td[4400];
+static void ck(int ok, const char *n) { sy_printf("%s\tcheck-version-inject.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static int put(const char *name, const char *data, long n) { char p[4600]; if (cx_fmt(p, sizeof p, "%s/%s", td, name)) return 1; return cx_write(p, data, (size_t)n) != 0; }
+static char *get(const char *name, size_t *n) { char p[4600]; if (cx_fmt(p, sizeof p, "%s/%s", td, name)) return 0; return cx_read(p, n); }
+static int run(const char *in, const char *out, const char *table, char *buf, long cap) {
+    char tool[4400], a[4600], b[4600], c[4600]; np_result r = {0}; char why[512] = {0}; int rc = -1;
+    char *v[9];
+    if (cx_fmt(tool, sizeof tool, "%s/tools/version-inject.cx", root) || cx_fmt(a, sizeof a, "%s/%s", td, in) ||
+        cx_fmt(b, sizeof b, "%s/%s", td, out) || cx_fmt(c, sizeof c, "%s/%s", td, table)) return -2;
+    v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = tool; v[3] = "--"; v[4] = a; v[5] = b; v[6] = c; v[7] = 0;
+    buf[0] = 0;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why) == 0) {
+        long m = (long)r.errn, o = (long)r.outn, i; if (m > cap - 1) m = cap - 1;
+        for (i = 0; i < m; i++) buf[i] = r.err[i];
+        if (m + o > cap - 1) o = cap - 1 - m;
+        for (i = 0; i < o; i++) buf[m + i] = r.out[i];
+        buf[m + o] = 0; rc = r.rc;
+    }
+    np_free(&r); return rc;
+}
+static int has(const char *b, const char *s) { return tx_find(b, tx_len(b, 1 << 16), s, tx_len(s, 256)) >= 0; }
+
+int main(void) {
+    static const char slot[32] = "UNISACC_VERSION_SLOT_0000000000";
+    char buf[8192], one[96], two[128], none[64]; size_t n; char *o; long i; int rc;
+    if (sy_cwd(root, sizeof root)) return 2;
+    if (cx_fmt(td, sizeof td, "%s/version-inject-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+    for (i = 0; i < 96; i++) one[i] = (char)('a' + i % 26);
+    for (i = 0; i < 32; i++) one[40 + i] = slot[i];
+    for (i = 0; i < 128; i++) two[i] = (char)('a' + i % 26);
+    for (i = 0; i < 32; i++) { two[8 + i] = slot[i]; two[80 + i] = slot[i]; }
+    for (i = 0; i < 64; i++) none[i] = (char)('a' + i % 26);
+    ck(!put("one", one, 96) && !put("two", two, 128) && !put("none", none, 64) &&
+       !put("good.tsv", "repo\ttag\tcommit\tversion\nr\tv\tc\t0.0.50\n", 37) &&
+       !put("bad.tsv", "repo\ttag\tcommit\tversion\nr\tv\tc\t0.0.65536\n", 40), "fixtures");
+    /* T1 单槽:只改槽内 6 字节 + 零填充,其余字节不变,IN 不动 */
+    rc = run("one", "one.out", "good.tsv", buf, sizeof buf);
+    ck(rc == 0 && has(buf, "VERSION_INJECT\t0.0.50\t"), "T1 single slot rc0 receipt");
+    o = get("one.out", &n);
+    ck(o && n == 96 && !memcmp(o, one, 40) && !memcmp(o + 40, "0.0.50", 6) && !memcmp(o + 72, one + 72, 24), "T1 only slot bytes changed");
+    { long z = o != 0; if (o) for (i = 46; i < 72; i++) if (o[i] != 0) z = 0; ck(z, "T1 slot zero padded"); }
+    if (o) mm_free(o);
+    o = get("one", &n); ck(o && n == 96 && !memcmp(o, one, 96), "T1 input untouched"); if (o) mm_free(o);
+    /* T2 双槽拒绝,不写 OUT */
+    rc = run("two", "two.out", "good.tsv", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "missing/duplicate version slot"), "T2 duplicate slot refused");
+    o = get("two.out", &n); ck(o == 0, "T2 no output written"); if (o) mm_free(o);
+    /* T3 无槽拒绝 */
+    rc = run("none", "none.out", "good.tsv", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "missing/duplicate version slot"), "T3 missing slot refused");
+    o = get("none.out", &n); ck(o == 0, "T3 no output written"); if (o) mm_free(o);
+    /* T4 坏表拒绝,不读 IN 之外任何东西 */
+    rc = run("one", "bad.out", "bad.tsv", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "invalid release version"), "T4 invalid table refused");
+    o = get("bad.out", &n); ck(o == 0, "T4 no output written"); if (o) mm_free(o);
+    { char rmc[4600]; char *v[4] = {"sh", "-c", rmc, 0}; np_result q = {0}; char w[128] = {0};
+      if (!cx_fmt(rmc, sizeof rmc, "rm -rf '%s'", td)) { np_run(v, root, 0, 20, &q, w, sizeof w); np_free(&q); } }
+    sy_printf("CHECK_VERSION_INJECT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
