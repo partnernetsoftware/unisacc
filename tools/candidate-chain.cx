@@ -360,6 +360,14 @@ static void check_whole_front_template(const char *tmpl) {
    与 chain-step 对 i>=2 的构造器选择一致);prepare 目录按代各建(wf-prep-g<N>、wf-span-prep-g<N>),不复用 gen1。 */
 static const char *g_mt_target[4] = {"osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
 static const char *g_mt_slug[4] = {"osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+/* pack 取 osx/win 切片:与 g 相位同址(osx 为 gen1/<slug>-b2/image,win 为 gen1/<slug>-image/image,均在 chain_work)。
+   不用 outdir/gen1/<slug>/image:P1/P2 后该处不再产出。返回非 0 表示 slug 不是 osx/win 之一。 */
+static int pack_slice(char *buf, long cap, const char *slug) {
+    int ti;
+    for (ti = 0; ti < 4; ti++) if (tx_eqz(slug, g_mt_slug[ti])) break;
+    if (ti == 4) return 1;
+    return cx_fmt(buf, cap, ti < 2 ? "%s/gen1/%s-b2/image" : "%s/gen1/%s-image/image", chain_work, slug);
+}
 static int wf_prepare_gen(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
     char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
     char *v[16];
@@ -765,6 +773,15 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
         if (tx_eqz(argv[i], "--worker-nm") && i + 1 < argc) { wnm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--resume")) { resume = 1; continue; }
+        if (tx_eqz(argv[i], "--slice-path") && i + 2 < argc) {
+            /* 夹具入口: --slice-path WORK SLUG,打印 pack 取用的 osx/win 切片路径;文件缺失即拒绝 */
+            char sb[4400];
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 1], tx_len(argv[i + 1], 4000));
+            if (pack_slice(sb, sizeof sb, argv[i + 2])) die("REFUSE unknown slice slug", argv[i + 2]);
+            if (fsize(sb) < 1) die("REFUSE missing slice image", sb);
+            sy_printf("SLICE_PATH\t%s\n", sb);
+            return 0;
+        }
         if (tx_eqz(argv[i], "--prep-path") && i + 3 < argc) {
             /* 夹具入口: --prep-path WORK GEN BASE,打印该代 prepare 目录;gen 越界即拒绝 */
             char pb[4400];
@@ -1305,12 +1322,12 @@ int main(int argc, char **argv) {
         if (!cm64 || !cmarm) die("REFUSE pack needs --cache-manager-osx X64 ARM64 (borrowed until in-chain)", 0);
         if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
         if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
-        if (cx_fmt(win64, sizeof win64, "%s/gen1/win-x86_64/image", outdir)) die("path", "w64");
+        if (pack_slice(win64, sizeof win64, "win-x86_64")) die("path", "w64");
         if (cx_fmt(lnx64, sizeof lnx64, "%s/fixedpoint/g3/lnx-x86_64/entry.elf", outdir)) die("path", "l64");
         if (cx_fmt(lnxarm, sizeof lnxarm, "%s/fixedpoint/g2/lnx-arm64/entry.elf", outdir)) die("path", "larm");
-        if (cx_fmt(osx64, sizeof osx64, "%s/gen1/osx-x86_64/image", outdir)) die("path", "o64");
-        if (cx_fmt(osxarm, sizeof osxarm, "%s/gen1/osx-arm64/image", outdir)) die("path", "oarm");
-        if (cx_fmt(winarm, sizeof winarm, "%s/gen1/win-arm64/image", outdir)) die("path", "warm");
+        if (pack_slice(osx64, sizeof osx64, "osx-x86_64")) die("path", "o64");
+        if (pack_slice(osxarm, sizeof osxarm, "osx-arm64")) die("path", "oarm");
+        if (pack_slice(winarm, sizeof winarm, "win-arm64")) die("path", "warm");
         if (fsize(win64) < 0 || fsize(lnx64) < 0 || fsize(osx64) < 0) die("pack missing slice", win64);
         sy_mkdir(packed, 0755);
         if (chdir(snap)) die("chdir snap for pack version", snap);
