@@ -903,6 +903,24 @@ static void rb_wline(int fd, const char *s) {
     if (n < 0 || sy_write_all(fd, s, n)) rb_die("receipt");
 }
 
+/* "tool_sha<TAB>HEX<LF>" (75 bytes) into DST[96]: the sha256 of ROOT/tools/release-build.cx, the
+   source this run is expected to be.  A receipt written by a defective tool revision (rb_die
+   without its exit, 01ac82b13c..3d6589c0d7) can then be voided by this value.  It is ROOT's
+   copy: a run started from another checkout's source is not detected here.  A ROOT without
+   that file (a minimal fixture) records "tool_sha<TAB>UNREADABLE": the receipt says it cannot
+   name its tool, it does not become a new way for a finished build to fail. */
+static void rb_tool_sha_line(const char *root, char *dst) {
+    char p[RB_FULL], hex[65];
+    char *src;
+    size_t n;
+    rb_cat(p, RB_FULL, root, 1, "tools/release-build.cx");
+    src = cx_read(p, &n);
+    hex[0] = 0;
+    if (src) cx_sha256_hex(src, n, hex);
+    mm_free(src);
+    if (cx_fmt(dst, 96, "tool_sha\t%s\n", hex[0] ? hex : "UNREADABLE")) rb_die("tool sha");
+}
+
 /* Read a child's stdout until it exits or the wall clock expires. Both routes
    that spawn a bounded child (whole-o and the objects route) use this one loop:
    poll, drain, reaped-check, deadline. On expiry the child's whole process group
@@ -1037,6 +1055,8 @@ static int rb_whole(int argc, char **argv, const char *target) {
     rb_wline(rfd, line);
     if (cx_fmt(line, sizeof line, "ns\t%lld\n", rb_span(&t0, &t1))) rb_die("receipt");
     rb_wline(rfd, line);
+    rb_tool_sha_line(argv[2], line);
+    rb_wline(rfd, line);
     if (cx_fmt(line, sizeof line, "rc\t0\n")) rb_die("receipt");
     rb_wline(rfd, line);
     if (sy_close(rfd)) rb_die("receipt");
@@ -1122,13 +1142,16 @@ static int rb_slice(int argc, char **argv) {
     {
         char rec[RB_FULL], line[80];
         int rfd;
-        long ln;
+        long ln, ln2;
+        char tsl[96];
         rb_cat(rec, RB_FULL, argv[4], 1, "receipt.txt");
         if (cx_fmt(line, sizeof line, "rev\t%s\n", rb_rev_full)) rb_die("report");
         ln = tx_len(line, 80);
         if (ln < 0) rb_die("report");
+        rb_tool_sha_line(argv[2], tsl);
+        ln2 = tx_len(tsl, 96);
         rfd = sy_open(rec, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (rfd < 0 || sy_write_all(rfd, line, ln) || sy_close(rfd)) rb_die("receipt rev");
+        if (rfd < 0 || sy_write_all(rfd, line, ln) || ln2 < 0 || sy_write_all(rfd, tsl, ln2) || sy_close(rfd)) rb_die("receipt rev");
     }
     return 0;
 }

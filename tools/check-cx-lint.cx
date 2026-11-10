@@ -7,8 +7,10 @@
  * and asserts the exact count per rule: every rule has at least two positive and two negative
  * samples, including comment/string/char/continuation traps for the lexer, the lint:allow comment
  * (with and without a reason, wrong rule), the R1-product data-flow cases (existence check, guard,
- * label, literal in an argv slot, run first argument, NULL-terminated initializer) and --rules.
- * Then three real 0.0.49 rework samples from git history:
+ * label, literal in an argv slot, run first argument, NULL-terminated initializer), --rules and
+ * R3-die (missing / conditional / non-final exit, delegation, int die, _or_die, lint:allow).
+ * Then the 0.0.50 rb_die defect from git history (3d6589c0d7^ reported, 3d6589c0d7 clean) and
+ * three real 0.0.49 rework samples:
  *   6eec399892^:tools/chain-step.cx   R2-sep must be reported (missing "--" before --rev),
  *   6eec399892:tools/chain-step.cx    R2-sep must not be reported (fixed),
  *   60a7dd0cd8^:tools/kernel-route.cx R1-product must be reported (hard-wired ROOT/unisacc.com).
@@ -147,6 +149,21 @@ int main(void) {
     history("6eec399892^", "tools/chain-step.cx", "h-chain-step-before.cx", "R2-sep", 1);
     history("6eec399892", "tools/chain-step.cx", "h-chain-step-after.cx", "R2-sep", 0);
     history("60a7dd0cd8^", "tools/kernel-route.cx", "h-kernel-route-before.cx", "R1-product", 1);
+    /* R3-die */
+    expect("d1.cx", "static void rb_die(const char *s) {\n    sy_eprintf(\"x: %s\\n\", s);\n}\n", "R3-die", 1);
+    expect("d2.cx", "static void die(const char *s){ if (s) exit(2); }\nvoid x_die(void){ exit(2); cleanup(); }\n", "R3-die", 2);
+    expect("d3.cx", "static void die(const char *s){ fprintf(stderr, \"%s\\n\", s); exit(2); }\n"
+                    "static void cs_die(const char *a){ sy_eprintf(\"%s (%d)\\n\", a, f(1)); sy_exit(1); }\n"
+                    "void t_die(const char *a){ note(a); die(a); }\n", "R3-die", 0);
+    expect("d4.cx", "/* void die(void){ } */ static const char *s = \"void die(void){ }\";\n"
+                    "static int die(const char *m){ puts(m); return 2; }\n"
+                    "void pp_digest_or_die(const char *r){ if (!r) exit(2); }\nvoid diet(void){ }\nvoid die(void);\n", "R3-die", 0);
+    expect("d5.cx", "static void die(void){ done(2); }   /* lint:allow R3-die done() exits after cleanup */\n"
+                    "static void b_die(void){ done(2); }   /* lint:allow R3-die */\n", "R3-die", 1);
+    expect_rules("d6.cx", "static void die(void){ }\nint f(char **v,char *o){ return sy_run(v, o, 64, 0); }\n", "R2,R3", "R3-die", 1);
+    /* the 0.0.50 defect: rb_die lost its sy_exit (01ac82b13c), restored in 3d6589c0d7 */
+    history("3d6589c0d7^", "tools/release-build.cx", "h-release-build-before.cx", "R3-die", 1);
+    history("3d6589c0d7", "tools/release-build.cx", "h-release-build-after.cx", "R3-die", 0);
     {   char sub[4400]; if (!cx_fmt(sub, sizeof sub, "%s/tests", dir)) sy_rmdir(sub); }
     sy_rmdir(dir);
     printf("CHECK_CX_LINT\tpassed=%d\tfailed=%d\tskipped=%d\n", passed, failed, skipped);

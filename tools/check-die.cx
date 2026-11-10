@@ -1,0 +1,71 @@
+/* tools/check-die.cx -- cxlib.die tool_die, the one failure exit for tools, against a real child.
+ *
+ *   sh ./unisacc.com tools/check-die.cx
+ *
+ * A probe .cx that calls tool_die is run through the product in a temp directory (its cxlib/ is a
+ * symlink to this root's tools/cxlib, so the probe resolves the module under test, not a copy).
+ * Cases: with a detail the child exits with the given code and stderr is exactly "TOOL: WHAT: DETAIL";
+ * with detail 0 it is exactly "TOOL: WHAT"; in both the statement after tool_die never runs (its
+ * stdout marker and its marker file are absent, and the exit code is not main's 0) while the statement
+ * before it did.  The probe uses stdio for its markers: a module-less temp directory resolves only
+ * what the cxlib link provides.  Prints PASS/FAIL per case and CHECK_DIE<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+static int failed;
+static char work[4400];
+
+static void die(const char *s) { fprintf(stderr, "check-die: %s\n", s); exit(2); }
+static void ck(int ok, const char *name) { printf("%s\tcheck-die.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static int has(const char *s, const char *t) { return s && strstr(s, t) != 0; }
+
+static const char *probe_src =
+    "#pragma unisa use cxlib.die\n"
+    "static int mark(const char *p) { FILE *f = fopen(p, \"w\"); if (!f) return 1; fputs(\"m\", f); return fclose(f) != 0; }\n"
+    "int main(int argc, char **argv) {\n"
+    "    if (argc < 3) return 9;\n"
+    "    if (mark(argv[1])) return 8;\n"
+    "    printf(\"BEFORE-DIE\\n\"); fflush(stdout);\n"
+    "    tool_die(\"die-probe\", \"bad input\", argc > 3 ? argv[3] : 0, argc > 3 ? 7 : 3);\n"
+    "    printf(\"AFTER-DIE\\n\"); fflush(stdout);\n"
+    "    mark(argv[2]);\n"
+    "    return 0;\n"
+    "}\n";
+
+int main(void) {
+    pr_result r;
+    char root[4400], com[4400], libs[4400], link[4400], probe[4400], before[4400], after[4400];
+    int t;
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(libs, sizeof libs, "%s/tools/cxlib", root)) die("root paths");
+    if (cx_fmt(work, sizeof work, "%s/check-die-%d", sy_tmpdir(), (int)getpid())) die("work");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(link, sizeof link, "%s/cxlib", work) || cx_fmt(probe, sizeof probe, "%s/probe.cx", work) ||
+        cx_fmt(before, sizeof before, "%s/before", work) || cx_fmt(after, sizeof after, "%s/after", work)) die("path");
+    if (sy_symlink(libs, link)) die("cxlib link");
+    if (cx_write(probe, probe_src, strlen(probe_src))) die("probe write");
+
+    {   char *av[] = {"sh", com, probe, "--", before, after, "line 7", 0};
+        t = pr_run("die-detail", av, work, 0, 50, &r);
+        ck(t == 0 && r.rc == 7, "detail.exit-code-is-rc-argument");
+        ck(t == 0 && r.err && !strcmp(r.err, "die-probe: bad input: line 7\n"), "detail.stderr-tool-what-detail");
+        ck(t == 0 && has(r.out, "BEFORE-DIE") && sy_exists(before) == 1, "detail.statement-before-ran");
+        ck(t == 0 && !has(r.out, "AFTER-DIE") && sy_exists(after) != 1, "detail.statement-after-not-run");
+        if (t == 0) pr_free(&r);
+    }
+    if (sy_exists(before) == 1 && sy_unlink(before)) die("reset marker");
+    {   char *av[] = {"sh", com, probe, "--", before, after, 0};
+        t = pr_run("die-nodetail", av, work, 0, 50, &r);
+        ck(t == 0 && r.rc == 3, "nodetail.exit-code-is-rc-argument");
+        ck(t == 0 && r.err && !strcmp(r.err, "die-probe: bad input\n"), "nodetail.stderr-tool-what-only");
+        ck(t == 0 && has(r.out, "BEFORE-DIE") && sy_exists(before) == 1, "nodetail.statement-before-ran");
+        ck(t == 0 && !has(r.out, "AFTER-DIE") && sy_exists(after) != 1, "nodetail.statement-after-not-run");
+        if (t == 0) pr_free(&r);
+    }
+    if (cx_rmtree(work)) die("cleanup");
+    printf("CHECK_DIE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
