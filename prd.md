@@ -418,6 +418,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 
 当前已发布：**0.0.50 已于 2026-11-10 14:58 公开**（tag `v0.0.50` 指向发布提交 Y `31c5886469`，Latest）。APE sha256 `76ed4200aaaf71b2ac9dd13e6dde6ad31632016ddea8fe43893a4ffe32484967`（6501348 字节）；**后备候选**：产品字节由 0.0.49 冻结源 `979b56e4` 的同一组 g3 六片 + P4 `56efea53` 以 version=0.0.50 的候选表重打包（候选表 commit 列=构造源 979b56e4，真值不改写），唯一变更输入是版本串；六目标原生 CI **QUALIFIED 42/0**（运行 42767415154，提交 X `114ef751be`，约 10 分钟）；s9 三档未跑。产品候选 Y-0（`77b5e559b3`，e3 阶段检查点）在候选链中暴露 worker.o 的 `setpgid` 降级为 libc 符号的产品回归（`out/c050-y0/y0-setpgid-regression.md`，items `Y0-SETPGID-REGRESSION`），**不进 0.0.50**，留 0.0.51。发布说明：[plans/release-notes-0.0.50.md](plans/release-notes-0.0.50.md)。独立切片版本注入新工具 `tools/version-inject.cx`。
 
+上一发布：**0.0.49 已于 2026-11-10 公开**（tag `v0.0.49` 指向提交 `35cfdd1e`，非 draft 非 prerelease）。APE `unisacc.com` sha256 `2d3852a8404e1ba372de0fd28e69d6da7d9412d7b8b259d0d2e36593dac8e44d`（6501348 字节），冻结源 `979b56e4`、源 SID `e764a816…`（版本串已移出 SID，提交 c66fa850e6）、构造器 `8224ff13…`；同候选六目标原生 CI **QUALIFIED 42/0**（运行 42661106290，测试提交 e5b26c5c；首轮 42659892210 因资格工具未迁移版本源四格 rc2）；s9 **仅提交档 96/96**，daily/release 档未跑。发布链实际走法：提交 X `e3fc485793`（候选表换 0.0.49，ci_run_id=0）触发 CI，提交 Y `35cfdd1e3a` 回填 run id。发布说明：[plans/release-notes-0.0.49.md](plans/release-notes-0.0.49.md)；发布手册与 0.0.49 教训：[prd_release.md](prd_release.md)；0.0.49 收尾的逐条记录：[prd_hist.md](prd_hist.md)「0.0.49 收尾」。
 当前版本：**0.0.50，主题「构造即图，阶段原生」**，计划 [plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md)（§0 五项可机查目标：冻结 -> 可发布 ≤20 分钟、改一张表 -> 可安装候选 ≤5 分钟、Mac/Win 单相余量 ≥30%、S9 commit 档单 step ≤300s、第二真相源机器检查为 0）。任务状态以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准，本节只写当前节点。
 
 已上 main（`git log 35cfdd1e..origin/main`）：
@@ -443,7 +444,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 |---|---|---|
 | 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
 | 当前发布 | 0.0.50 已公开（见 §9.1；APE 76ed4200、CI 42767415154 QUALIFIED 42/0、产品字节同 0.0.49 源只换版本、s9 未跑）；旧候选资格不迁移 | [0.0.50 发布说明](plans/release-notes-0.0.50.md)、[prd_release.md](prd_release.md) |
-| 当前发布 | 0.0.49 已公开（见 §9.1；APE 2d3852a8、CI 42661106290 QUALIFIED 42/0、s9 仅提交档）；旧候选资格不迁移 | [0.0.49 发布说明](plans/release-notes-0.0.49.md)、[prd_release.md](prd_release.md) |
+| 当前版本 | 0.0.51「增量、自含、一键」；第零批 W（fable）/PF（opus）/RA（sonnet）/LD（zai）并行中；Y-0 setpgid 回归（grk 定位）为产品候选前置 | [计划](plans/v0.0.51-unisacc.md)、`agentwork/items.tsv` |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 流 + 18 网 | §0、§4 |
 | 测试入口 | `sh ./unisacc.com tests/run.cx -- --smoke/--all/--list` | §7.1、`tests/batches.tsv`、`tests/coverage.tsv` |

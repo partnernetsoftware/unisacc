@@ -47,6 +47,16 @@
 | 8 | 与 0.0.48 镜像结构对照 28 处差异 | 源码不同，跨版本结构对照无判别力 | 等价证据只用同源小规模 oracle（中等程序默认 vs 分相镜像 cmp0）+ 两代不动点 + CI；跨版本对照只作信息记录 | 发布说明「已知限制」；计划 §1 |
 | 9 | 冻结 -> 公开十余小时，计算之和约 31 分钟 | 相位间人工/代理间隙、临时设计 Mac/Win 分相方案 X、工具缺陷返工 | 0.0.50 §0：一条命令到草稿 release ≤20 分钟 | 发布说明「已知限制」；计划 §0 |
 
+## 3c. 0.0.50 发布教训
+
+| # | 现象 | 根因 | 规则 | 证据 |
+|---|---|---|---|---|
+| 1 | 已公开的 release 退回 Draft 约 5 分钟 | 改公开标签时先 `git push origin :refs/tags/旧标签`,GitHub 把失去标签的 release 视为草稿 | 改标签只用 `gh release edit TAG --tag NEW --target <完整 40 位>`(缩写提交号被拒 `target_commitish is invalid`),之后再 `--draft=false --latest`;旧标签由 GitHub 自己替换,不手删 | 账本 2026-11-10 `REL050-FALLBACK RETAG` |
+| 2 | 候选链 worker.o 出现 `setpgid` libc 外部引用,六片 g1 链接不过,先被判为产品回归 | 链准备的 worker 源与 0.0.49 不同(模板 `st_includebase(0,0)` 改 `include`、编译带 `-I include`),编译器本身无差异(同一 min.cx 两版输出逐字节相同) | 判「产品回归」前先做同源最小对照;链在 wf-prepare 后断言 worker.o 外部引用只许 `sy_*`;模板按 SHA 钉入收据 | `out/c050-y0/y0-setpgid-regression.md`;items `Y0-SETPGID-REGRESSION` |
+| 3 | 后备候选的记录 `commit` 该写什么 | 产品字节来自 979b56e4,打包时 main 头已前进且含未进产品的 Y-0 | 候选表/记录 `commit` 永远写真实构造源;main 头只出现在提交 X/Y 与 CI 的 `-f commit`;发布说明写清两者关系 | 0.0.50 发布说明「身份与证据」 |
+| 4 | 独立资产 slice-win-arm64 没有注入工具,0.0.49 时靠临时程序 | 注入只在 ape-pack 内存里做 | `tools/version-inject.cx` + `check-version-inject`(批次 version-inject) | 提交 `114ef751be` |
+| 5 | 后备路径从接手到公开 50 分钟(CI 10 分钟),主路径 Y-0 链自 11-09 起多次停摆未完成 | 停摆无人察觉、隐性前提、门后回归(0.0.51 计划 1b) | 0.0.51 第零批 W/PF/RA/LD 先于任何产品候选 | [plans/v0.0.51-unisacc.md](plans/v0.0.51-unisacc.md) 1b |
+
 ## 4. 版本串与签名
 
 - **0.0.49 起版本串不在源 SID 内**（提交 `c66fa850e6`，SPEED-049-F source-packages-v2）：唯一版本列为 `release/candidate.tsv`，打包时注入 32 字节槽；源 SID 为十二包摘要组合。改版本不再重建整链。读版本一律 `cxlib.releaseversion`，不再 grep `limits.tsv`。
