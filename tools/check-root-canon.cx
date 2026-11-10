@@ -1,0 +1,92 @@
+/* tools/check-root-canon.cx -- fixtures for tools/root-canon.cx (run from the repo root).
+ *
+ *   sh ./unisacc.com tools/check-root-canon.cx
+ *
+ * Builds synthetic phase files (LE32 frame bytes, LE32 attribute bytes, units = LE32 payload length +
+ * LE32 filename length + filename + "UNITOK1\0" + LE32 UNIPP2 length + UNIPP2 + tokens) under two roots
+ * of DIFFERENT length, so every container length differs.  Asserts:
+ *   1 --diff on the two-root pair: canon_equal=1, nonprefix_bytes=0, framed=4 (container lengths recomputed);
+ *   2 a one-byte content change in the token stream: canon_equal=0, rc 1, DIFF row;
+ *   3 --scan finds the root in a frame (rc 1, hits=4) and none in a clean product (rc 0).
+ * Prints CHECK_ROOT_CANON<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char dir[4096];
+static int passed, failed;
+typedef struct { char b[8192]; long n; } W;
+
+static void w32(W *w, long v) { w->b[w->n++] = (char)(v & 255); w->b[w->n++] = (char)(v >> 8 & 255); w->b[w->n++] = (char)(v >> 16 & 255); w->b[w->n++] = (char)(v >> 24 & 255); }
+static void ws(W *w, const char *s, long n) { mm_copy(w->b + w->n, sizeof w->b - (size_t)w->n, s, (size_t)n); w->n += n; }
+static void wz(W *w, const char *s) { ws(w, s, tx_len(s, 4096)); }
+static void put32at(W *w, long at, long v) { long s = w->n; w->n = at; w32(w, v); w->n = s; }
+/* one unit naming ROOT/src/NAME, with one UNIPP2 #line record naming ROOT/inc/x.h and token text TOK */
+static void unit(W *w, const char *root, const char *name, const char *tok) {
+    char fn[512], inc[512]; long pl_at, pp_at, start;
+    if (cx_fmt(fn, sizeof fn, "%s/src/%s", root, name) || cx_fmt(inc, sizeof inc, "%s/inc/x.h", root)) exit(2);
+    pl_at = w->n; w32(w, 0); start = w->n;
+    w32(w, tx_len(fn, 512)); wz(w, fn); ws(w, "UNITOK1\0", 8);
+    pp_at = w->n; w32(w, 0);
+    { long s = w->n; ws(w, "UNIPP2\0", 7); w32(w, 3); w32(w, 0); w32(w, 0); w32(w, 0); w32(w, 0); w32(w, 1);
+      w32(w, 7); w32(w, tx_len(inc, 512)); wz(w, inc); wz(w, "int"); put32at(w, pp_at, w->n - s); }
+    wz(w, tok);
+    put32at(w, pl_at, w->n - start);
+}
+static void phase(W *w, const char *root, const char *tok2) {
+    long f_at; w->n = 0; f_at = 0; w32(w, 0); w32(w, 0);
+    unit(w, root, "a.cx", "@unit0\nint a;\n"); unit(w, root, "b.cx", tok2);
+    put32at(w, f_at, w->n - 8); wz(w, "ATTR"); put32at(w, 4, 4);
+}
+static int save(const char *name, const char *b, long n, char *path, int cap) {
+    int fd;
+    if (cx_fmt(path, cap, "%s/%s", dir, name)) return -1;
+    sy_unlink(path);
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, b, n)) { sy_close(fd); return -1; }
+    return sy_close(fd);
+}
+static int run(char **v, char **out, size_t *n) { int rc = cx_runv_timeout(v, 55, out, n); return *out ? rc : -1; }
+static void verdict(const char *name, int ok, const char *out) {
+    if (ok) { printf("PASS\t%s\n", name); passed++; } else { printf("FAIL\t%s\t%s\n", name, out ? out : "(no output)"); failed++; }
+}
+static int has(const char *out, size_t n, const char *s) { return out && tx_contains(out, (long)n, s, tx_len(s, 256)); }
+
+int main(void) {
+    static W pa, pb, pc; char fa[4400], fb[4400], fc[4400], ra[4400], rb[4400], ma[4400], mb[4400];
+    static const char *RA = "/r/aaa", *RB = "/r/bbbbbbbbbb";
+    char *out; size_t n; int rc;
+    if (cx_fmt(dir, sizeof dir, "%s/root-canon-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { fprintf(stderr, "check-root-canon: scratch dir\n"); return 2; }
+    if (cx_fmt(ra, sizeof ra, "%s/A", dir) || sy_mkdir(ra, 0700) || cx_fmt(rb, sizeof rb, "%s/B", dir) || sy_mkdir(rb, 0700)) return 2;
+    if (cx_fmt(ma, sizeof ma, "%s=$R", RA) || cx_fmt(mb, sizeof mb, "%s=$R", RB)) return 2;
+    phase(&pa, RA, "int b;\n"); phase(&pb, RB, "int b;\n"); phase(&pc, RB, "int c;\n");
+    if (save("A/f.phase", pa.b, pa.n, fa, sizeof fa) || save("B/f.phase", pb.b, pb.n, fb, sizeof fb) || save("c.phase", pc.b, pc.n, fc, sizeof fc)) return 2;
+
+    { char *v[] = {"sh", "./unisacc.com", "tools/root-canon.cx", "--", "--map", ma, "--map", mb, "--diff", fa, fb, 0};
+      out = 0; rc = run(v, &out, &n);
+      verdict("canon-equal-two-roots", rc == 0 && has(out, n, "canon_equal=1") && has(out, n, "nonprefix_bytes=0") && has(out, n, "framed=4") && !has(out, n, "raw_len_delta=0\t"), out);
+      if (out) mm_free(out); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/root-canon.cx", "--", "--map", ma, "--map", mb, "--diff", fa, fc, 0};
+      out = 0; rc = run(v, &out, &n);
+      verdict("canon-content-change-red", rc == 1 && has(out, n, "canon_equal=0") && has(out, n, "DIFF\tcanon_offset="), out);
+      if (out) mm_free(out); }
+    { char *v[] = {"sh", "./unisacc.com", "tools/root-canon.cx", "--", "--map", ma, "--scan", fa, 0};
+      out = 0; rc = run(v, &out, &n);
+      verdict("scan-frame-hit", rc == 1 && has(out, n, "hits=4"), out);
+      if (out) mm_free(out); }
+
+    /* a clean product has no root hit */
+    { char p1[4400];
+      static const char IMG[] = "\177ELF....product-bytes....";
+      if (save("A/image", IMG, sizeof IMG - 1, p1, sizeof p1)) return 2;
+      { char *v[] = {"sh", "./unisacc.com", "tools/root-canon.cx", "--", "--map", ma, "--scan", p1, 0};
+        out = 0; rc = run(v, &out, &n); verdict("scan-product-clean", rc == 0 && has(out, n, "hits=0"), out); if (out) mm_free(out); }
+      sy_unlink(p1); }
+    sy_unlink(fa); sy_unlink(fb); sy_unlink(fc); sy_rmdir(ra); sy_rmdir(rb); sy_rmdir(dir);
+    printf("CHECK_ROOT_CANON\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

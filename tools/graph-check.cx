@@ -2,9 +2,11 @@
  *
  *   sh ./unisacc.com tools/graph-check.cx [-- [--graph F] [--chain F] [--hardwire F] [--no-hardwire]]
  *
- * (a) structure: 11 named columns; kind in the fixed enumeration; every depends_on entry exists
+ * (a) structure: 12 named columns; kind in the fixed enumeration; every depends_on entry exists
  *     (a trailing * expands to every node with that prefix, "-" is none); no cycle; budget_s is an
- *     integer 1..60 (one child process; aggregate nodes carry per-step bounds).
+ *     integer 1..60 (one child process; aggregate nodes carry per-step bounds); root_dependent is
+ *     yes|no and a product kind (tool gen tbl net route p4 fixedpoint kernel pack install) marked yes
+ *     is a FAIL row "root_dependent" (products must not depend on the physical build root).
  * (b) order: the six targets in first-appearance order of column 3 (shared/all excluded) are the
  *     fixedpoint phase order; they must equal the three copies in tools/chain-step.cx
  *     (cs_target[6], cs_fp_slices[6] and the i == 0 ? ... ternary chain) -- each differing copy is
@@ -58,12 +60,12 @@ static void load_graph(void) {
         while (q < n && b[q] != '\n') q++;
         if (q == p || b[p] == '#') { p = q + 1; continue; }
         if (!header) {
-            static const char *H = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote";
+            static const char *H = "node_id\tkind\ttarget\tdepends_on\tcommand\tinputs\toutputs\tobserved_wall_s\tbudget_s\tevidence_path\tnote\troot_dependent";
             if (!tx_same(b + p, q - p, H, tx_len(H, 256)))
-                { fail((int)lineno, "header", "expected the 11 named columns"); exit(1); }
+                { fail((int)lineno, "header", "expected the 12 named columns"); exit(1); }
             header = 1; p = q + 1; continue;
         }
-        if (tx_fields(b + p, q - p, '\t') != 11) { fail((int)lineno, "columns", "row must have 11 tab-separated fields"); p = q + 1; continue; }
+        if (tx_fields(b + p, q - p, '\t') != 12) { fail((int)lineno, "columns", "row must have 12 tab-separated fields"); p = q + 1; continue; }
         if (nn == MAXN) { fail((int)lineno, "capacity", "more than MAXN nodes"); exit(2); }
         tx_field(b + p, q - p, '\t', 0, &off, &len); tx_copy(nodes[nn].id, 128, b + p + off, len);
         if (len == 0 || find(b + p + off, len) >= 0) fail((int)lineno, "node_id", len ? "duplicate node_id" : "empty node_id");
@@ -74,6 +76,11 @@ static void load_graph(void) {
         tx_field(b + p, q - p, '\t', 3, &off, &len); nodes[nn].deps = mm_alloc(len + 1); tx_copy(nodes[nn].deps, len + 1, b + p + off, len);
         tx_field(b + p, q - p, '\t', 8, &off, &len);
         if (!budget_ok(b + p + off, len)) { char d[64]; tx_copy(d, 64, b + p + off, len); fail((int)lineno, "budget_s", d); }
+        tx_field(b + p, q - p, '\t', 11, &off, &len);
+        if (tx_same(b + p + off, len, "yes", 3)) {
+            static const char *prod[10] = {"tool", "gen", "tbl", "net", "route", "p4", "fixedpoint", "kernel", "pack", "install"}; int k;
+            for (k = 0; k < 10; k++) if (tx_eqz(nodes[nn].kind, prod[k])) { fail((int)lineno, "root_dependent", "product node marked yes"); break; }
+        } else if (!tx_same(b + p + off, len, "no", 2)) { char d[64]; tx_copy(d, 64, b + p + off, len); fail((int)lineno, "root_dependent", d); }
         nodes[nn].line = (int)lineno; nn++;
         p = q + 1;
     }

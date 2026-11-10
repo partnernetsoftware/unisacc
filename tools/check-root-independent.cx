@@ -1,0 +1,101 @@
+/* tools/check-root-independent.cx -- fixtures for tools/root-independent.cx (run from the repo root).
+ *
+ *   sh ./unisacc.com tools/check-root-independent.cx
+ *
+ * Two output directories A and B built "under" roots of different length: a product image and a
+ * synthetic phase frame (same layout as tools/check-root-canon.cx).  Asserts:
+ *   1 equal products + canonically equal frames -> rc 0, checked=2 failed=0;
+ *   2 negative control: the root path written into the product (both sides identical) -> rc 1, "embeds root";
+ *   3 negative control: products differing in one byte -> rc 1 with first_diff=9;
+ *   4 frame with a content change -> rc 1, frame FAIL row, failed=1.
+ * Prints CHECK_ROOT_INDEPENDENT<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static char dir[4096];
+static int passed, failed;
+typedef struct { char b[8192]; long n; } W;
+
+static void w32(W *w, long v) { w->b[w->n++] = (char)(v & 255); w->b[w->n++] = (char)(v >> 8 & 255); w->b[w->n++] = (char)(v >> 16 & 255); w->b[w->n++] = (char)(v >> 24 & 255); }
+static void ws(W *w, const char *s, long n) { mm_copy(w->b + w->n, sizeof w->b - (size_t)w->n, s, (size_t)n); w->n += n; }
+static void wz(W *w, const char *s) { ws(w, s, tx_len(s, 4096)); }
+static void put32at(W *w, long at, long v) { long s = w->n; w->n = at; w32(w, v); w->n = s; }
+/* one unit naming ROOT/src/NAME, with one UNIPP2 #line record naming ROOT/inc/x.h and token text TOK */
+static void unit(W *w, const char *root, const char *name, const char *tok) {
+    char fn[512], inc[512]; long pl_at, pp_at, start;
+    if (cx_fmt(fn, sizeof fn, "%s/src/%s", root, name) || cx_fmt(inc, sizeof inc, "%s/inc/x.h", root)) exit(2);
+    pl_at = w->n; w32(w, 0); start = w->n;
+    w32(w, tx_len(fn, 512)); wz(w, fn); ws(w, "UNITOK1\0", 8);
+    pp_at = w->n; w32(w, 0);
+    { long s = w->n; ws(w, "UNIPP2\0", 7); w32(w, 3); w32(w, 0); w32(w, 0); w32(w, 0); w32(w, 0); w32(w, 1);
+      w32(w, 7); w32(w, tx_len(inc, 512)); wz(w, inc); wz(w, "int"); put32at(w, pp_at, w->n - s); }
+    wz(w, tok);
+    put32at(w, pl_at, w->n - start);
+}
+static void phase(W *w, const char *root, const char *tok2) {
+    long f_at; w->n = 0; f_at = 0; w32(w, 0); w32(w, 0);
+    unit(w, root, "a.cx", "@unit0\nint a;\n"); unit(w, root, "b.cx", tok2);
+    put32at(w, f_at, w->n - 8); wz(w, "ATTR"); put32at(w, 4, 4);
+}
+static int save(const char *name, const char *b, long n, char *path, int cap) {
+    int fd;
+    if (cx_fmt(path, cap, "%s/%s", dir, name)) return -1;
+    sy_unlink(path);
+    fd = sy_open_new(path, 0644);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, b, n)) { sy_close(fd); return -1; }
+    return sy_close(fd);
+}
+static int run(char **v, char **out, size_t *n) { int rc = cx_runv_timeout(v, 55, out, n); return *out ? rc : -1; }
+static void verdict(const char *name, int ok, const char *out) {
+    if (ok) { printf("PASS\t%s\n", name); passed++; } else { printf("FAIL\t%s\t%s\n", name, out ? out : "(no output)"); failed++; }
+}
+static int has(const char *out, size_t n, const char *s) { return out && tx_contains(out, (long)n, s, tx_len(s, 256)); }
+
+int main(void) {
+    static W pa, pb, pc; char fa[4400], fb[4400], fc[4400], ra[4400], rb[4400], ma[4400], mb[4400];
+    static const char *RA = "/r/aaa", *RB = "/r/bbbbbbbbbb";
+    char *out; size_t n; int rc;
+    if (cx_fmt(dir, sizeof dir, "%s/root-canon-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { fprintf(stderr, "check-root-canon: scratch dir\n"); return 2; }
+    if (cx_fmt(ra, sizeof ra, "%s/A", dir) || sy_mkdir(ra, 0700) || cx_fmt(rb, sizeof rb, "%s/B", dir) || sy_mkdir(rb, 0700)) return 2;
+    if (cx_fmt(ma, sizeof ma, "%s=$R", RA) || cx_fmt(mb, sizeof mb, "%s=$R", RB)) return 2;
+    phase(&pa, RA, "int b;\n"); phase(&pb, RB, "int b;\n"); phase(&pc, RB, "int c;\n");
+    if (save("A/f.phase", pa.b, pa.n, fa, sizeof fa) || save("B/f.phase", pb.b, pb.n, fb, sizeof fb) || save("c.phase", pc.b, pc.n, fc, sizeof fc)) return 2;
+
+    /* products: identical clean image; then root-embedded; then one-byte difference */
+    { char p1[4400], p2[4400], l[4400], cr[4400], cb[4400]; char lst[512];
+      static const char IMG[] = "\177ELF....product-bytes....";
+      char bad[128]; long bl;
+      (void)fc;
+      if (save("A/image", IMG, sizeof IMG - 1, p1, sizeof p1) || save("B/image", IMG, sizeof IMG - 1, p2, sizeof p2)) return 2;
+      if (cx_fmt(lst, sizeof lst, "# node\tclass\trelpath\nslice.image\tproduct\timage\nfront.merge\tframe\tf.phase\n") || save("list.tsv", lst, tx_len(lst, 512), l, sizeof l)) return 2;
+      { char *v[] = {"sh", "./unisacc.com", "tools/root-independent.cx", "--", "--a", ra, "--b", rb, "--list", l, "--map", ma, "--map", mb, 0};
+        out = 0; rc = run(v, &out, &n);
+        verdict("independent-ok", rc == 0 && has(out, n, "checked=2\tfailed=0"), out); if (out) mm_free(out); }
+      /* 5 negative control: root path written into the product on both sides */
+      if (cx_fmt(bad, sizeof bad, "\177ELF..%s/src/x.cx..", RA)) return 2;
+      bl = tx_len(bad, 128);
+      if (save("A/image", bad, bl, cr, sizeof cr) || save("B/image", bad, bl, cb, sizeof cb)) return 2;
+      { char *v[] = {"sh", "./unisacc.com", "tools/root-independent.cx", "--", "--a", ra, "--b", rb, "--list", l, "--map", ma, "--map", mb, 0};
+        out = 0; rc = run(v, &out, &n);
+        verdict("negctl-product-embeds-root", rc == 1 && has(out, n, "FAIL\tslice.image\tproduct\tembeds root /r/aaa\tfirst_diff=6"), out); if (out) mm_free(out); }
+      /* 6 negative control: one differing byte */
+      if (save("A/image", IMG, sizeof IMG - 1, cr, sizeof cr)) return 2;
+      { char d[sizeof IMG]; mm_copy(d, sizeof d, IMG, sizeof IMG); d[9] = 'X'; if (save("B/image", d, sizeof IMG - 1, cb, sizeof cb)) return 2; }
+      { char *v[] = {"sh", "./unisacc.com", "tools/root-independent.cx", "--", "--a", ra, "--b", rb, "--list", l, "--map", ma, "--map", mb, 0};
+        out = 0; rc = run(v, &out, &n);
+        verdict("negctl-product-byte", rc == 1 && has(out, n, "FAIL\tslice.image\tproduct\tbytes differ") && has(out, n, "first_diff=9"), out); if (out) mm_free(out); }
+      /* 7 frame content change */
+      if (save("B/image", IMG, sizeof IMG - 1, cb, sizeof cb) || save("B/f.phase", pc.b, pc.n, fb, sizeof fb)) return 2;
+      { char *v[] = {"sh", "./unisacc.com", "tools/root-independent.cx", "--", "--a", ra, "--b", rb, "--list", l, "--map", ma, "--map", mb, 0};
+        out = 0; rc = run(v, &out, &n);
+        verdict("negctl-frame-content", rc == 1 && has(out, n, "FAIL\tfront.merge\tframe\t") && has(out, n, "checked=2\tfailed=1"), out); if (out) mm_free(out); }
+      sy_unlink(p1); sy_unlink(p2); sy_unlink(l); }
+    sy_unlink(fa); sy_unlink(fb); sy_unlink(fc); sy_rmdir(ra); sy_rmdir(rb); sy_rmdir(dir);
+    printf("CHECK_ROOT_INDEPENDENT\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,175 @@
+/* tools/root-canon.cx -- canonicalize physical root prefixes inside a frame/receipt (read-only on inputs).
+ *
+ *   sh ./unisacc.com tools/root-canon.cx -- [--map PREFIX=PLACE]... [--out F] FILE
+ *   sh ./unisacc.com tools/root-canon.cx -- [--map PREFIX=PLACE]... --diff A B
+ *   sh ./unisacc.com tools/root-canon.cx -- [--map PREFIX=PLACE]... --scan FILE
+ *
+ * Every occurrence of a PREFIX (longest map first at each byte) is replaced by its PLACE; no other byte
+ * changes.  Frame path records are length-prefixed (LE32 byte length, then the path bytes, see the
+ * #line/.unit records of exec/pipeline/formats.md): when the four bytes immediately before a matched
+ * prefix are an LE32 L with prefix_len <= L <= 65536, the whole record is rewritten -- every prefix inside
+ * its L bytes canonicalized and L replaced by the new length -- so a record is "framed".  A match without
+ * such a length is replaced in place and counted "unframed".  Enclosing container sizes are NOT rewritten:
+ * if they differ after canonicalization they remain non-prefix difference bytes and --diff reports them.
+ *
+ * Output (single file): CANON<TAB>file=F<TAB>bytes=RAW<TAB>canon_bytes=N<TAB>framed=R<TAB>unframed=U<TAB>sha256=H
+ * --diff: two CANON rows, then DIFF rows (first 8 differing canonical offsets with a 16-byte hex window)
+ *   and ROOT_CANON_DIFF<TAB>raw_equal=0|1<TAB>raw_len_delta=D<TAB>prefix_bytes=P<TAB>nonprefix_bytes=Q<TAB>canon_equal=0|1
+ *   prefix_bytes = raw bytes covered by the replaced prefixes in either file (what canonicalization explains);
+ *   nonprefix_bytes = differing canonical bytes position-by-position plus the canonical length delta.
+ * --scan: ROOT_SCAN<TAB>file=F<TAB>hits=N (raw prefix occurrences; rc 1 when N > 0).
+ * Exit: 0 single/equal/no hits; 1 canon differs or scan hit; 2 IO/usage. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXMAP 32
+static const char *pre[MAXMAP], *plc[MAXMAP]; static long prel[MAXMAP], plcl[MAXMAP]; static int nmap;
+typedef struct { char *p; long n, cap; long framed, unframed, covered; } Buf;
+
+static char *slurp(const char *path, long *n) {
+    int fd = sy_open_read(path); char *b;
+    if (fd < 0) { fprintf(stderr, "root-canon: cannot open %s (rc %d)\n", path, fd); exit(2); }
+    *n = sy_reg_size(fd);
+    if (*n < 0) { fprintf(stderr, "root-canon: cannot size %s\n", path); exit(2); }
+    b = mm_alloc(*n + 1);
+    if (!b || sy_read_full(fd, b, *n)) { fprintf(stderr, "root-canon: cannot read %s\n", path); exit(2); }
+    sy_close(fd); b[*n] = 0; return b;
+}
+static void put(Buf *o, const char *s, long n) {
+    if (o->n + n > o->cap) {
+        long c = o->cap ? o->cap : 1 << 16; char *g;
+        while (c < o->n + n) c *= 2;
+        g = mm_grow(o->p, c); if (!g) { fprintf(stderr, "root-canon: out of memory\n"); exit(2); }
+        o->p = g; o->cap = c;
+    }
+    mm_copy(o->p + o->n, (size_t)(o->cap - o->n), s, (size_t)n); o->n += n;
+}
+/* index of the longest map whose prefix starts at b[i..n), or -1 */
+static int match(const char *b, long n, long i) {
+    int k, best = -1;
+    for (k = 0; k < nmap; k++)
+        if (i + prel[k] <= n && b[i] == pre[k][0] && tx_same(b + i, prel[k], pre[k], prel[k]) && (best < 0 || prel[k] > prel[best])) best = k;
+    return best;
+}
+static unsigned long le32(const char *b) {
+    const unsigned char *u = (const unsigned char *)b;
+    return u[0] | (unsigned long)u[1] << 8 | (unsigned long)u[2] << 16 | (unsigned long)u[3] << 24;
+}
+/* canonicalize b[0..n) into o; framed records rewrite their LE32 length */
+static void canon(const char *b, long n, Buf *o) {
+    long i = 0, lit = 0;
+    while (i < n) {
+        int k;
+        if (i + 4 < n && (k = match(b, n, i + 4)) >= 0) {
+            unsigned long L = le32(b + i);
+            if (L >= (unsigned long)prel[k] && L <= 65536 && i + 4 + (long)L <= n) {
+                long j = i + 4, e = i + 4 + (long)L, nl = 0, s; char lb[4];
+                for (s = j; s < e;) { int m = match(b, e, s); if (m >= 0) { nl += plcl[m]; s += prel[m]; } else { nl++; s++; } }
+                put(o, b + lit, i - lit);
+                lb[0] = (char)(nl & 255); lb[1] = (char)(nl >> 8 & 255); lb[2] = (char)(nl >> 16 & 255); lb[3] = (char)(nl >> 24 & 255);
+                put(o, lb, 4);
+                for (s = j; s < e;) {
+                    int m = match(b, e, s);
+                    if (m >= 0) { put(o, plc[m], plcl[m]); o->covered += prel[m]; s += prel[m]; }
+                    else { long t = s + 1; while (t < e && match(b, e, t) < 0) t++; put(o, b + s, t - s); s = t; }
+                }
+                o->framed++; i = lit = e; continue;
+            }
+        }
+        if ((k = match(b, n, i)) >= 0) {
+            put(o, b + lit, i - lit); put(o, plc[k], plcl[k]); o->covered += prel[k]; o->unframed++;
+            i += prel[k]; lit = i; continue;
+        }
+        i++;
+    }
+    put(o, b + lit, n - lit);
+}
+static void put32(Buf *o, long v) { char lb[4]; lb[0] = (char)(v & 255); lb[1] = (char)(v >> 8 & 255); lb[2] = (char)(v >> 16 & 255); lb[3] = (char)(v >> 24 & 255); put(o, lb, 4); }
+static void absorb(Buf *o, Buf *t) { put(o, t->p, t->n); o->framed += t->framed; o->unframed += t->unframed; o->covered += t->covered; mm_free(t->p); }
+/* one unit payload: LE32 filename length, filename, "UNITOK1\0", LE32 UNIPP2 length, UNIPP2, token stream.
+   Returns 0 when the shape does not match (caller then falls back to the generic scan). */
+static int canon_unit(const char *u, long n, Buf *o) {
+    long fl, p, ul; Buf t = {0};
+    if (n < 4) return 0;
+    fl = (long)le32(u); p = 4 + fl;
+    if (fl > 65536 || p + 12 > n || !tx_same(u + p, 8, "UNITOK1\0", 8)) return 0;
+    ul = (long)le32(u + p + 8);
+    if (p + 12 + ul > n) return 0;
+    canon(u, p, &t); absorb(o, &t);                 /* framed filename record */
+    put(o, u + p, 8);
+    { Buf pp = {0}; canon(u + p + 12, ul, &pp); put32(o, pp.n); absorb(o, &pp); }
+    { Buf r = {0}; canon(u + p + 12 + ul, n - p - 12 - ul, &r); absorb(o, &r); }
+    return 1;
+}
+/* phase: LE32 frame bytes F, LE32 attribute bytes A, F frame bytes (units: LE32 payload length + payload), A attribute bytes.
+   Every container length is recomputed; any other shape is canonicalized by the generic scan. */
+static void canon_file(const char *b, long n, Buf *o) {
+    long F, A, p; Buf fr = {0};
+    if (n < 8) { canon(b, n, o); return; }
+    F = (long)le32(b); A = (long)le32(b + 4);
+    if (8 + F + A != n) { canon(b, n, o); return; }
+    for (p = 8; p < 8 + F;) {
+        long pl = p + 4 <= 8 + F ? (long)le32(b + p) : -1; Buf u = {0};
+        if (pl < 0 || p + 4 + pl > 8 + F || !canon_unit(b + p + 4, pl, &u)) { mm_free(u.p); canon(b + p, 8 + F - p, &fr); break; }
+        put32(&fr, u.n); absorb(&fr, &u); p += 4 + pl;
+    }
+    put32(o, fr.n);
+    { Buf at = {0}; canon(b + 8 + F, A, &at); put32(o, at.n); absorb(o, &fr); absorb(o, &at); }
+}
+static void report(const char *f, long raw, Buf *o, char hex[65]) {
+    cx_sha256_hex(o->p, (size_t)o->n, hex);
+    printf("CANON\tfile=%s\tbytes=%ld\tcanon_bytes=%ld\tframed=%ld\tunframed=%ld\tsha256=%s\n", f, raw, o->n, o->framed, o->unframed, hex);
+}
+int main(int argc, char **argv) {
+    int i, mode = 0; const char *f1 = 0, *f2 = 0, *outp = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--map") && i + 1 < argc) {
+            const char *m = argv[++i]; long ml = tx_len(m, 4096), eq = tx_chr(m, ml, '=');
+            if (eq <= 0 || nmap == MAXMAP) { fprintf(stderr, "root-canon: bad --map %s\n", m); return 2; }
+            { char *p = mm_alloc(eq + 1); tx_copy(p, eq + 1, m, eq); pre[nmap] = p; prel[nmap] = eq; }
+            plc[nmap] = m + eq + 1; plcl[nmap] = ml - eq - 1; nmap++;
+        }
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (tx_eqz(argv[i], "--diff") && i + 2 < argc) { mode = 1; f1 = argv[++i]; f2 = argv[++i]; }
+        else if (tx_eqz(argv[i], "--scan") && i + 1 < argc) { mode = 2; f1 = argv[++i]; }
+        else if (argv[i][0] != '-' && !f1) f1 = argv[i];
+        else { fprintf(stderr, "root-canon: unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (!f1 || nmap == 0) { fprintf(stderr, "root-canon: need --map PREFIX=PLACE and a file\n"); return 2; }
+    if (mode == 2) {
+        long n, k, hits = 0; char *b = slurp(f1, &n);
+        for (k = 0; k < n; k++) { int m = match(b, n, k); if (m >= 0) { if (hits < 4) printf("HIT\t%s\toffset=%ld\t%s\n", f1, k, pre[m]); hits++; k += prel[m] - 1; } }
+        printf("ROOT_SCAN\tfile=%s\thits=%ld\n", f1, hits);
+        return hits ? 1 : 0;
+    }
+    if (mode == 0) {
+        long n; char *b = slurp(f1, &n); Buf o = {0}; char h[65];
+        canon_file(b, n, &o); report(f1, n, &o, h);
+        if (outp) {
+            int fd = sy_open_new(outp, 0644);
+            if (fd < 0 || sy_write_all(fd, o.p, o.n) || sy_close(fd)) { fprintf(stderr, "root-canon: cannot write %s\n", outp); return 2; }
+        }
+        return 0;
+    }
+    {
+        long na, nb, k, m, diffs = 0, shown = 0; char *a = slurp(f1, &na), *b = slurp(f2, &nb); Buf oa = {0}, ob = {0}; char ha[65], hb[65]; int raw_eq, eq;
+        raw_eq = na == nb && tx_same(a, na, b, nb);
+        canon_file(a, na, &oa); canon_file(b, nb, &ob); report(f1, na, &oa, ha); report(f2, nb, &ob, hb);
+        m = oa.n < ob.n ? oa.n : ob.n;
+        for (k = 0; k < m; k++) if (oa.p[k] != ob.p[k]) {
+            if (shown < 8) {
+                long w, e = k + 16 < m ? k + 16 : m; printf("DIFF\tcanon_offset=%ld\ta=", k);
+                for (w = k; w < e; w++) printf("%02x", (unsigned char)oa.p[w]);
+                printf("\tb="); for (w = k; w < e; w++) printf("%02x", (unsigned char)ob.p[w]); printf("\n"); shown++;
+            }
+            diffs++;
+        }
+        diffs += oa.n > ob.n ? oa.n - ob.n : ob.n - oa.n;
+        eq = diffs == 0;
+        printf("ROOT_CANON_DIFF\traw_equal=%d\traw_len_delta=%ld\tprefix_bytes=%ld\tnonprefix_bytes=%ld\tcanon_equal=%d\n", raw_eq, nb - na, oa.covered + ob.covered, diffs, eq);
+        return eq ? 0 : 1;
+    }
+}

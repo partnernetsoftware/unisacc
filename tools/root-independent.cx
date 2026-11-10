@@ -1,0 +1,94 @@
+/* tools/root-independent.cx -- root-independence invariant over two construction outputs built under different roots.
+ * (Named without the check- prefix: precommit reserves tools/check-*.cx for fixtures; its fixtures are
+ * tools/check-root-independent.cx.)  Diagnostics keep the prefix "check-root-independent:".
+ *
+ *   sh ./unisacc.com tools/root-independent.cx -- --a DIR_A --b DIR_B --list F [--map PREFIX=PLACE]...
+ *
+ * F rows (TAB, '#' comments): node<TAB>class<TAB>relpath.  class:
+ *   product -- slice image, kernel, P4, APE: DIR_A/relpath and DIR_B/relpath must be byte-identical and
+ *              contain no --map prefix (a product that embeds a physical root is red even if both match);
+ *   frame   -- phase/receipt: tools/root-canon.cx --diff with the same --map list must report canon_equal=1.
+ * Rows: OK<TAB>node<TAB>class / FAIL<TAB>node<TAB>class<TAB>reason[<TAB>first_diff=OFFSET]
+ * Summary ROOT_INDEPENDENT<TAB>checked=N<TAB>failed=M; exit 0 only when M == 0 (2 on IO/usage). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define MAXMAP 32
+static const char *maps[MAXMAP]; static const char *pre[MAXMAP]; static long prel[MAXMAP]; static int nmap;
+static long checked, failed;
+
+static char *slurp(const char *p, long *n) {
+    int fd = sy_open_read(p); char *b;
+    if (fd < 0) return 0;
+    *n = sy_reg_size(fd);
+    if (*n < 0) { sy_close(fd); return 0; }
+    b = mm_alloc(*n + 1);
+    if (!b || sy_read_full(fd, b, *n)) { sy_close(fd); return 0; }
+    sy_close(fd); b[*n] = 0; return b;
+}
+static void product(const char *node, const char *pa, const char *pb) {
+    long na, nb, k, m; char *a = slurp(pa, &na), *b = slurp(pb, &nb); int i;
+    checked++;
+    if (!a || !b) { printf("FAIL\t%s\tproduct\tunreadable %s\n", node, a ? pb : pa); failed++; return; }
+    m = na < nb ? na : nb;
+    for (k = 0; k < m && a[k] == b[k]; k++) {}
+    if (k < m || na != nb) { printf("FAIL\t%s\tproduct\tbytes differ (%ld vs %ld)\tfirst_diff=%ld\n", node, na, nb, k); failed++; }
+    else {
+        for (i = 0; i < nmap; i++) {
+            long at = tx_find(a, na, pre[i], prel[i]);
+            if (at >= 0) { printf("FAIL\t%s\tproduct\tembeds root %s\tfirst_diff=%ld\n", node, pre[i], at); failed++; break; }
+        }
+        if (i == nmap) printf("OK\t%s\tproduct\n", node);
+    }
+    mm_free(a); mm_free(b);
+}
+static void frame(const char *node, const char *pa, const char *pb) {
+    char *v[8 + 2 * MAXMAP]; int c = 0, i, rc; char *out = 0; size_t n = 0;
+    v[c++] = "sh"; v[c++] = "./unisacc.com"; v[c++] = "tools/root-canon.cx"; v[c++] = "--";
+    for (i = 0; i < nmap; i++) { v[c++] = "--map"; v[c++] = (char *)maps[i]; }
+    v[c++] = "--diff"; v[c++] = (char *)pa; v[c++] = (char *)pb; v[c] = 0;
+    checked++;
+    rc = cx_runv_timeout(v, 55, &out, &n);
+    if (out && rc == 0 && tx_contains(out, (long)n, "canon_equal=1", 13)) printf("OK\t%s\tframe\n", node);
+    else {
+        long at = out ? tx_find(out, (long)n, "canon_offset=", 13) : -1, off = -1, j;
+        if (at >= 0) for (off = 0, j = at + 13; j < (long)n && out[j] >= '0' && out[j] <= '9'; j++) off = off * 10 + (out[j] - '0');
+        printf("FAIL\t%s\tframe\tcanonical bytes differ (root-canon rc=%d)\tfirst_diff=%ld\n", node, rc, off); failed++;
+    }
+    if (out) mm_free(out);
+}
+int main(int argc, char **argv) {
+    const char *da = 0, *db = 0, *lp = 0; int i; long n, p = 0; char *b;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--a") && i + 1 < argc) da = argv[++i];
+        else if (tx_eqz(argv[i], "--b") && i + 1 < argc) db = argv[++i];
+        else if (tx_eqz(argv[i], "--list") && i + 1 < argc) lp = argv[++i];
+        else if (tx_eqz(argv[i], "--map") && i + 1 < argc && nmap < MAXMAP) {
+            const char *m = argv[++i]; long ml = tx_len(m, 4096), eq = tx_chr(m, ml, '='); char *q;
+            if (eq <= 0) { fprintf(stderr, "check-root-independent: bad --map %s\n", m); return 2; }
+            q = mm_alloc(eq + 1); tx_copy(q, eq + 1, m, eq); maps[nmap] = m; pre[nmap] = q; prel[nmap] = eq; nmap++;
+        }
+        else { fprintf(stderr, "check-root-independent: unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (!da || !db || !lp) { fprintf(stderr, "check-root-independent: need --a --b --list\n"); return 2; }
+    if (!(b = slurp(lp, &n))) { fprintf(stderr, "check-root-independent: cannot read %s\n", lp); return 2; }
+    while (p < n) {
+        long q = p, off, len; char node[256], cls[32], rel[2048], pa[4400], pb[4400];
+        while (q < n && b[q] != '\n') q++;
+        if (q == p || b[p] == '#') { p = q + 1; continue; }
+        if (tx_fields(b + p, q - p, '\t') != 3) { fprintf(stderr, "check-root-independent: list row needs 3 fields\n"); return 2; }
+        tx_field(b + p, q - p, '\t', 0, &off, &len); tx_copy(node, sizeof node, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 1, &off, &len); tx_copy(cls, sizeof cls, b + p + off, len);
+        tx_field(b + p, q - p, '\t', 2, &off, &len); tx_copy(rel, sizeof rel, b + p + off, len);
+        if (cx_fmt(pa, sizeof pa, "%s/%s", da, rel) || cx_fmt(pb, sizeof pb, "%s/%s", db, rel)) return 2;
+        if (tx_eqz(cls, "product")) product(node, pa, pb);
+        else if (tx_eqz(cls, "frame")) frame(node, pa, pb);
+        else { fprintf(stderr, "check-root-independent: class %s is not product|frame\n", cls); return 2; }
+        p = q + 1;
+    }
+    printf("ROOT_INDEPENDENT\tchecked=%ld\tfailed=%ld\n", checked, failed);
+    return failed ? 1 : 0;
+}
