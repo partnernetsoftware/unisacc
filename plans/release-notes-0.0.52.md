@@ -1,6 +1,6 @@
-# unisacc 0.0.52 -- 发布说明(草稿,未发布;占位以 {{...}} 标出,未实跑一律写未跑)
+# unisacc 0.0.52 -- 发布说明(未实跑一律写未跑)
 
-本版产品候选尚未冻结。下面只记已经进 main 的构造体系事实,以及明确未完成的缺口。产品身份段留占位。
+候选构造源 `23e6a567dd`,候选记录提交 `90f5144a31`。下面记已进 main 的构造体系事实,以及明确未完成的缺口。git 范围:合入提交自 `b751e8f51e` 至 `90f5144a31`(origin/main)。
 
 ## 是什么
 
@@ -10,50 +10,65 @@
 
 | 对象 | 身份 | 说明 |
 |---|---|---|
-| APE `unisacc.com` | {{APE_SHA256}},{{APE_BYTES}} 字节 | 尚无 0.0.52 候选;勿把 0.0.51 的 d5d6d002 当作本版 |
-| 构造源 | {{SRC_COMMIT}},源 SID {{SRC_SID}} | 未冻结 |
-| 六片 | {{SLICE_TABLE}} | 未跑 |
-| 不动点 | {{FP_COMPARE}} | 未跑 |
-| P4 包 | {{P4_SHA}} | 未跑 |
-| s9 | 未跑(commit/daily/release) | 不称全批通过;native 缓存已在 0.0.51 落地(`bce6f28ef8`),0.0.52 夜跑编排工具已写未提交、未实跑 |
-| 原生 CI | 未跑 | 无 0.0.52 ci_run_id |
+| APE `unisacc.com` | 1bffabbaf45ee3495ab5a750e8f3d9918ccf2a6cf2c5d57147baff45ff55ee19,6529460 字节 | `--version` 输出 `unisacc 0.0.52` |
+| 构造源 | 23e6a567dd3ab5e481dbe3c98491bc87dd2a3b95,源 SID(sources_sha256)4001d3e26a177be391571b9341665af1c67af1dc27c121069396fb29a13652fd | 候选记录于提交 X `90f5144a31beabf773994d4f25420252e5aaeaf8`(release/candidate.tsv) |
+| 六片 | sha 前缀:lnx-x86_64 e6f40686、lnx-arm64 accc75b0、osx-x86_64 3be1542c、osx-arm64 345aebd4、win-x86_64 e2016465、win-arm64 749617b4;slice-win-arm64 a4f71b32...(3485184 字节) | 其余资产:build.json 97ace00e...,zip 988eb956...,SHA256SUMS af342391...(均为前缀,全文见 release/candidate.tsv) |
+| 不动点 | compare:objects=same 85、kernels=same 2、slices=same 6、product=same | 已实跑 |
+| P4 包 | pkg.bin 56efea531e104b4114b314d5bdb4e5efc2a6debb96f974fa5d6e32675a637db8,1763636 字节 | 与 0.0.51 相同 |
+| s9 | commit 档手工逐步实跑 129 批,128 PASS、1 FAIL(release-run 缺 RELEASE_RUN_FIXTURE 材料,harness 缺口);qualification NOT_FULL;daily/release 档未跑 | 不称全批通过;A7 夜跑工具真实调用必败(55s 调 300s step),夜报未跑 |
+| 原生 CI | 同候选运行 42881292964(检出提交 X 90f5144a31,ape_sha256 1bffabba):QUALIFIED pass=42 fail=0 not_run=0 invalid=0 | 六目标原生单元格实跑;不含 s9 daily/release 档 |
 
 ## 行为变化(升级前请读)
 
-产品行为相对 0.0.51 的增量以未来候选表为准。本草稿不声称任何产品语义变化。
+`23e6a567dd` A8 步0 是本版**唯一已合入的产品输入**(src/drive.cx、driveunits.cx 行数回收,Y0-SRCSHAPE-EXEMPT 撤销)。候选须重建并核身份。why 补丁未进。其余合入多为工具/链/表,不在此声称产品语义。
 
-## 本版已落地的构造体系(以 git log 为准)
+## 本版已落地的构造体系(git log `b751e8f51e`..`23e6a567dd`)
 
-- **N1 干净克隆冒烟进门禁**:`08f65bc124` `tools/chain-smoke.cx`;补丁触及链文件时门在 `clone --shared` 的干净克隆里跑 candidate-chain 前几相位(`--until list`,总 280s);`candidate-chain --until PHASE`;chain_work 的 mkdir 移到 snap 之后。
-- **顺序域与 D2**:`39f59c7dee` `build/order-domains.tsv`;graph-check 对 `cs_target` 按 frozen_order 校验,`order_mismatch` 1 -> 0;check-graph-check 29 项 failed=0。
-- **A1 一条命令缺口 2/3/6**:`2f9b4b79a5` `--bootstrap` 缺省 ROOT/unisacc.com;`--bootstrap` 同时安装旁边 `.build.json`;list 后 warmup 相位预编重工具,`graph.tsv` 206 节点。缺口 1(全新 rev 真起)已在 0.0.51 `4411153ff8` 修过 mkdir-before-snap。
-- **N6 研发耗时账本**:`08dd41cee5` `agentwork/devtime.tsv` 与 `tools/devtime.cx` append/report;回填 20 条;strcpy 改 tx_copy。账本汇总 `d98fa00eac`(窗口停摆 40%/链缺陷 23%,样本小待复核)。
-- **N3 提交器**:`feac30a7cf` `tools/submit-patch.cx`(私有克隆 git add -A、写新名补丁、编译涉及工具、新增 .cx 调 newcx-check、校验登记行);同提交已含 `tests/cxapis.cx --file` 单文件模式与 np_run 带上限;check-submit-patch、check-newcx-check 负例全绿(以提交说明为准)。
-- **A0 产品全景表阶段一**:`1f85946110` `build/product-map.tsv` 与 `tools/product-map.cx`;prd 标记段 `--check`;阶段二夹具拆分补丁 `/tmp/grk2-pm-split.patch` 针对 4d984e16ec,对现行 HEAD 未核 apply,未跑不算落地。
-- **newcx-check**:`8f43bdfe1e` 本地自查 cxtrunc/outdep/cx-lint;cxapis 判据已由 `feac30a7cf` 改为直接调 `tests/cxapis.cx --file`。
-- **集成门预算与 --land**:`4b919b20ea` 阶段剩余不足 57s 转 pending 由 `--until-done` 续跑,不再缩短子进程超时;`--land` 用 git `-F`;推送失败 `--soft` 回滚。H6 基线 `13c97a1444` `429183aa03` `de419e8569`。
-- **land 不再整包重跑 affected**:`05a154977e`(integrate-patch la4):入口检查修正、`--land` 不重跑 affected、land 夹具拆独立 daily 批次 `integrate-patch-land`;call() 不再把子进程上限缩到剩余预算(transport=-1 的一个根因假设,未证实已关闭),预算不足改 PENDING;需另一原生宿主的 RUN_REFUSED 记 INTEGRATE_DEFERRED 不算红。门:仅 GATES_ONLY(READY_TO_COMMIT),非全批。
 - **基线修复**:`b751e8f51e` tools-compile-sources 补登 13 个新工具、tools-compile-089 分片;部分分片单跑 PASS,其余未重跑;runner-platform 与 osx-* 需另一原生宿主、tools-default-regression 缺材料,均未记 PASS。
-- **0.0.53 计划草稿**:`b2b9bd21fb`(随 72 小时裁决分两支)。
-- **s9-native 缓存**:已在 0.0.51 `bce6f28ef8`(热 init 16.8s)。0.0.52 A7 夜跑编排工具 `tools/s9-nightly.cx`、`check-s9-nightly.cx` 已写、尚未提交入库,未实跑。
+- **N3 提交器**:`feac30a7cf` `tools/submit-patch.cx`;`1fa6c22395` 新 `.cx` 必须登 tools-compile-sources 并核 `--shards`。
+- **A0 pm-split**:`6614c48421` 默认 product-map 只读检查 3.28s;4 个 daily 夹具批次,prd-red 冷 38.72s、批次上限 55。
+- **A3 chain_sha 收窄**:`e13eedcf4e` 收据 v4 增 product_sha,chain_sha 降为诊断;receipt-upgrade v3->v4;门 fixedpoint-sample/-v4 实跑(提交说明)。『改编排后 --resume 仍可续』待链演练,未记 PASS。
+- **A7 s9 夜跑工具**:`44b6461455` `s9-nightly.cx`;`1ab7aa41fb` 档/截断/wall_ms;`567432bcb7` `s9-nightly-run.cx` 与 systemd 模板(未安装);`629511ef11` 截断负例。夜报首跑结果待填,三档未跑,不称 QUALIFIED。
+- **A8 步0**:`23e6a567dd` srcshape 5854,豁免撤销,coreapi new=0,实编 drive/driveunits/driveroute rc=0。why 未进。
+- **A1 前置(非整包增量)**:`6d46366dad` 失败相位清独占;`c3aad71f45` P1 Mac/Win 相位进链;`deb6304b7b` P2+P2b prepare,plan phases=35;`78e5d3699a` chainfix(残留清理、完成判据、空 body 拒绝)。G2 增量调度(A1 本体)未做。
+- **integrate-patch**:`05a154977e` la4;`9d30ff6b3d` cxlib `-c`;`38672dbbc4` DEFERRED needs-materials。
+- **pins**:`4e4ebe33c0` 行号与补登,pins 与 sourcepackage-pins 提交说明记 PASS;`60b9eea8e0` pins 批次 args 分号路径。
+- **账本 72h**:`0b5b21a4a9` 记 A1/A3/A7 未全过、B 段顺延 0.0.53、不阻发布。裁决正文仍由 cc 填下节占位。
+- **M0 对照**:`44b6461455` research/m0-0052(逻辑分布 14.9s、包 1763620B、42 网 1.45s;网输入取自 c49 产物仅对照)。
+- 此前已在 main:`08f65bc124` N1;`39f59c7dee` 顺序域;`2f9b4b79a5` A1 缺口 2/3/6;`08dd41cee5` N6;`1f85946110` A0 阶段一;`8f43bdfe1e` newcx-check;`4b919b20ea` 门预算。
 
 ## 已知限制与未声称的性质
 
-- **p3 贴线未拆**:0.0.51 记冷编加本体约 80s 超 60s;`2f9b4b79a5` warmup 意在去掉冷编占用,但 p3 本体是否仍贴线未跑。
-- **Mac/Win g2/g3 未自动编排**:0.0.51 用 `--from-image`/`staged-from-image`;0.0.52 无新的自动编排实跑。
-- **s9 未跑**:commit/daily/release 三档均未跑;不得用提交档或账本顶替 QUALIFIED。
-- **A1 增量未做**:G2 增量(<=5 分钟实测)未做;仅落地缺口 2/3/6。
-- **A2 未做**:产品改动,未做。A3(chain_sha 收窄)、A8 为计划包,无合入提交可引用,状态未完成。
-- **模型层 M1-M4 未达**:顺延 0.0.53(见 `b2b9bd21fb` 草稿),以 72 小时裁决为准。
-- **72 小时裁决**:待定(cc 填)。
-- **affected-run 间歇 transport=-1**:门日志 5-9s 空输出(A1 oneshot2 078,N3d 084);未在本草稿称为已修。land-affected 改为按批 `--ids` 降低一次 `-j8` 风暴,根因(np_run/sy_spawn_pipe)未关闭。
-- **pm-split 补丁**(`/tmp/grk2-pm-split.patch`)前 80 条提交无落地,对现行 HEAD 未核 apply,不写入身份表。
-- 身份表 `{{...}}` 占位(审计实为 6 个,非 7)均无冻结候选收据,保留占位,对应项未测/未跑。
+- **g2 余量约 3s 或拆分落地视结果**:未在本草稿记 PASS;以链实跑为准。
+- **p3 42.9s**:贴线/余量未在本范围用全链重测关闭;warmup(`2f9b4b79a5`)后本体是否仍贴线未跑完整发布资格。
+- **e3 空 body 根因未明**:`78e5d3699a` 增加非空拒绝与 `out/sub-e3-span.md`;根因未关闭。
+- **why 补丁未进**:不与 A8 同候选(srcshape 叠 why 红)。
+- **A1 增量未做**:G2 增量 <=5 分钟实测未做。
+- **A1『一条命令』不成立**:候选链 MANUAL 1-4(out/ 父目录、ctx 残留、jobs finish-job outer、routes OUTPUT.s)与自动挪残留次数;不能写成一条命令过链。
+- **A2 未做**:单元前端缓存未做。
+- **M1-M4 顺延 0.0.53**。
+- **夜报首跑结果待填**:工具在库,systemd 未装,三档未跑。
+- **s9 未全跑**:commit 档 128/129,daily/release 档未跑,qualification NOT_FULL,不称 QUALIFIED。
+- **原生 CI**:运行 42881292964 结果待填;六片/不动点/P4/APE 身份见上表。
+- **affected-run 间歇 transport=-1**:根因未关闭。
+- **stages 0.0.51 起即红 13 项**:10 正向输出不符、3 拒绝合同 e3/elf/tapecheck;源与测试相对 `bc5b04bf14` 无改动,非回归。见 out/grk2-stages-baseline.md。
+
+## 72 小时裁决
+
+- A1:未过。一条命令不成立,MANUAL 1-7。
+- A3:部分。v4 收据落地,resume 实测未做。
+- A7:未过。夜跑工具真实调用必败(55s 调 300s step),夜报未跑。
+- B 段 M1-M4 顺延 0.0.53;0.0.52 只做 M0(收据 research/m0-0052)。
+- 不阻发布;账本见 `0b5b21a4a9`。
+
+## 未跑范围
+
+外层先 55s 分段后改逐相位 `--until`(外层 <=300s 挂死保险,子进程 55s 不变;依据 AGENTS 正规构造链工具例外类推)。非一条命令六片。MANUAL 1-4 与自动挪残留见上。s9 daily/release 档;s9 夜报;resume 实测;0.0.52 六目标 CI 结果(运行 42881292964 待填)。tools-compile 除已单跑分片外未重跑。stages 基线红 13 项见已知限制。
 
 ## 验证入口
 
-1. 核哈希:待 0.0.52 候选后填 `sha256sum unisacc.com`。
-2. `sh ./unisacc.com --version` 待输出 `unisacc 0.0.52`。
+1. 核哈希:`sha256sum unisacc.com` 应为 1bffabba...ff55ee19(6529460 字节)。
+2. `sh ./unisacc.com --version` 输出 `unisacc 0.0.52`。
 3. 冒烟:未跑。
 4. 复现:`release-run --pack` 未跑。
 5. 原生 CI:未跑。
