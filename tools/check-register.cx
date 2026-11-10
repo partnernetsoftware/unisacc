@@ -24,13 +24,16 @@
  *   6. after the check removes its own rows both registries are byte-identical to the originals.
  * The fixture batches are real: tools/register-fixture.cx prints REGISTER_FIXTURE_OK, so run-batch passes.
  * Rows are removed by exact line content, never by restoring the whole file, so a row someone else
- * appended meanwhile stays. */
+ * appended meanwhile stays.
+ * Mode --root-preflight (batch register-root-preflight, marker CX_REGISTER_ROOT): register started in a
+ * root without out/ and/or ./unisacc.com refuses by name with the fixing command, exit 2, nothing written. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
 
 static int failed, checks;
 static char root[4096], fx[4400], bpath[4400], cpath[4400], tables[4400], rbpath[4400], rcpath[4400], envtables[4440];
@@ -95,21 +98,18 @@ static int take_out(const char *path, const char *line) {
     return 1;
 }
 
-/* run ARGV, merged stdout+stderr into OUT (terminated, tail-trimmed by half when full): exit code or -1 */
+/* run ARGV bounded at 58 s (cxlib.procrun: on timeout the process group is killed and the reason is in OUT);
+   the last cap-1 bytes of stderr followed by stdout into OUT (terminated): exit code, or -1 when it did not run to an exit */
 static int run(char **argv, char *out, long cap) {
-    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
-    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
-    if (pid < 0) return -1;
-    for (;;) {
-        if (n == cap - 1) { for (k = 0; k < n - half; k++) out[k] = out[k + half]; n -= half; }
-        r = sy_read(ofd, out + n, cap - 1 - n);
-        if (r <= 0) break;
-        n += r;
-    }
+    pr_result r; int rc; long en, on, skip, k, n = 0;
+    out[0] = 0;
+    if (pr_run("check-register child", argv, 0, 0, 58, &r)) { if (cx_fmt(out, (size_t)cap, "%s", r.why)) out[0] = 0; return -1; }
+    en = r.err ? (long)r.errn : 0; on = r.out ? (long)r.outn : 0;
+    skip = en + on > cap - 1 ? en + on - (cap - 1) : 0;
+    for (k = skip; k < en + on; k++) out[n++] = k < en ? r.err[k] : r.out[k - en];
     out[n] = 0;
-    sy_close(ofd);
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
-    return code;
+    rc = r.rc; pr_free(&r);
+    return rc < 0 ? -1 : rc;
 }
 
 /* the two registry lines tools/register.cx appends for ID/MARKER/TEXT */
@@ -164,10 +164,66 @@ static int metadata_rollback(const char *driver) {
     return failed?1:0;
 }
 
+/* run ARGV with CWD as the child's directory, bounded at 30 s; stderr then stdout into OUT; exit code or -1 */
+static int run_in(const char *cwd, char **argv, char *out, long cap) {
+    pr_result r; int rc;
+    out[0] = 0;
+    if (pr_run("register-root", argv, cwd, 0, 30, &r)) { cx_fmt(out, (size_t)cap, "%s", r.why); return -1; }
+    if (cx_fmt(out, (size_t)cap, "%s%s", r.err ? r.err : "", r.out ? r.out : "")) out[0] = 0;
+    rc = r.rc; pr_free(&r);
+    return rc;
+}
+static void sha_of(const char *p, char *h) { size_t n = 0; char *b = cx_read(p, &n); if (!b) die("read", p); cx_sha256_hex(b, (long)n, h); free(b); }
+
+/* --root-preflight: register started in a root without ./unisacc.com and/or out/ (a private clone) must
+   refuse by name with the fixing command and exit 2 before anything is written.  The root is an empty
+   temp directory used as the child's cwd; register itself is this checkout's, started by absolute path. */
+static int root_preflight(void) {
+    static char out[1 << 15]; char hold[4400], com[4400], drv[4400], outdir[4400], fake[4400], hb[65], hc[65], h[65]; int rc;
+    char *a[] = {"env", envtables, "sh", com, drv, "--", "cr-root", "tools/register-fixture.cx", "REGISTER_FIXTURE_OK", "root preflight row", "tools/register-fixture.cx", "interfaces", 0};
+    if (cx_fmt(hold, sizeof hold, "/tmp/check-register-root-XXXXXX") || !mkdtemp(hold)) die("mkdtemp", "root");
+    pjoin(com, sizeof com, root, "unisacc.com"); pjoin(drv, sizeof drv, root, DRIVER);
+    pjoin(outdir, sizeof outdir, hold, "out"); pjoin(fake, sizeof fake, hold, "unisacc.com");
+    sha_of(bpath, hb); sha_of(cpath, hc);
+    /* neither: both are named, each with its fix */
+    rc = run_in(hold, a, out, sizeof out);
+    ok(rc == 2, "a root with neither out/ nor unisacc.com is refused with exit 2");
+    ok(strstr(out, "REFUSE no out/ directory in this root") && strstr(out, "fix: mkdir out"), "missing out/ is named with the fixing command");
+    ok(strstr(out, "REFUSE no ./unisacc.com in this root") && strstr(out, "fix: cp SHARED_ROOT/unisacc.com"), "missing unisacc.com is named with the fixing command");
+    ok(!strstr(out, "ROLLED_BACK") && strstr(out, "nothing was written"), "the refusal is not a rollback and says nothing was written");
+    /* out/ only: unisacc.com alone is named */
+    if (sy_mkdir(outdir, 0700)) die("mkdir", outdir);
+    rc = run_in(hold, a, out, sizeof out);
+    ok(rc == 2 && strstr(out, "REFUSE no ./unisacc.com in this root") && !strstr(out, "no out/ directory"), "with out/ present only the missing unisacc.com is named");
+    /* unisacc.com only: out/ alone is named */
+    if (sy_rmdir(outdir)) die("rmdir", outdir);
+    {   FILE *f = fopen(fake, "wb"); if (!f || fputs("placeholder\n", f) == EOF || fclose(f)) die("write", fake); }
+    rc = run_in(hold, a, out, sizeof out);
+    ok(rc == 2 && strstr(out, "REFUSE no out/ directory in this root") && !strstr(out, "no ./unisacc.com"), "with unisacc.com present only the missing out/ is named");
+    /* out as a regular file is not a directory */
+    {   FILE *f = fopen(outdir, "wb"); if (!f || fclose(f)) die("write", outdir); }
+    rc = run_in(hold, a, out, sizeof out);
+    ok(rc == 2 && strstr(out, "REFUSE no out/ directory in this root"), "out as a regular file is still refused by name");
+    if (sy_unlink(outdir)) die("unlink", outdir);
+    /* both present: the preflight lets the call through to the next refusal (the check path does not exist in this root) */
+    if (sy_mkdir(outdir, 0700)) die("mkdir", outdir);
+    rc = run_in(hold, a, out, sizeof out);
+    ok(rc == 2 && strstr(out, "no such check") && !strstr(out, "REFUSE no "), "with both present the root preflight passes (next refusal: no such check)");
+    sha_of(bpath, h); ok(!strcmp(h, hb), "no refused call wrote batches.tsv");
+    sha_of(cpath, h); ok(!strcmp(h, hc), "no refused call wrote coverage.tsv");
+    sy_unlink(fake); sy_rmdir(outdir);
+    ok(sy_rmdir(hold) == 0, "the refused calls left nothing in the root (no out/register-* reservation, no lock)");
+    sy_unlink(bpath); sy_unlink(cpath);
+    {   char p[4400]; pjoin(p, sizeof p, tables, ".register.lock"); sy_unlink(p); sy_rmdir(tables); }
+    printf("CX_REGISTER_ROOT\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc,char **argv) {
     int args_only=argc==2&&!strcmp(argv[1],"--args-check");
     int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
-    if(argc!=1&&!args_only&&!metadata_only)return 2;
+    int root_only=argc==2&&!strcmp(argv[1],"--root-preflight");
+    if(argc!=1&&!args_only&&!metadata_only&&!root_only)return 2;
     static char abuf[1 << 15], bbuf[1 << 15];
     char *av0[16], *av1[16], *v[2] = { av0, av1 };
     const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
@@ -205,6 +261,7 @@ int main(int argc,char **argv) {
     if (!sy_exists(fx)) die("missing fixture", fx);
 
     if(metadata_only)return metadata_rollback(argc==3?argv[2]:DRIVER);
+    if(root_only)return root_preflight();
 
     if(args_only){
         char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0};

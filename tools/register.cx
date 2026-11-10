@@ -33,7 +33,13 @@
  * UNISACC_TABLES names the table directory (default tests): the two tables, their lock, and the tables that
  * tests/run.cx --list and tests/run-batch.cx read all move together.  A check that registers fixtures points
  * it at a private copy, so its fixture rows never meet another lane's writes (the byte-for-byte restore
- * assertions of tools/check-register.cx cannot hold while a third party appends in the same window). */
+ * assertions of tools/check-register.cx cannot hold while a third party appends in the same window).
+ *
+ * The root it runs in (the current directory) must hold ./unisacc.com and an out/ directory: --list and
+ * run-batch are started as `sh ./unisacc.com ...` and the trial run writes out/register-ID-PID/.  A private
+ * clone has neither (both are untracked), and the call then used to end in a bare ROLLED_BACK rc=1 with no
+ * reason.  Both are checked before the lock and before anything is written: each missing one is named on
+ * stderr with the command that fixes it, and the exit is 2. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
@@ -114,6 +120,20 @@ static int rg_marker_ok(const char *m) {
     for (; *m; m++) if (!((*m >= 'A' && *m <= 'Z') || (*m >= '0' && *m <= '9') || *m == '_')) return 0;
     return 1;
 }
+/* The two untracked things a root needs before a registration can be tried; every missing one is named
+   with its fix.  0 when the root is usable. */
+static int rg_root_missing(void) {
+    int bad = 0;
+    if (sy_exists("unisacc.com") != 1) {
+        fprintf(stderr, "register: REFUSE no ./unisacc.com in this root: the registry listing and the trial batch run are started as `sh ./unisacc.com ...` (a private clone does not carry it); fix: cp SHARED_ROOT/unisacc.com SHARED_ROOT/unisacc.com.build.json .\n");
+        bad++;
+    }
+    if (sy_exists("out/.") != 1) {
+        fprintf(stderr, "register: REFUSE no out/ directory in this root: the trial batch run writes out/register-ID-PID/ (out/ is untracked, a fresh clone has none); fix: mkdir out\n");
+        bad++;
+    }
+    return bad;
+}
 
 /* Check the generated fourteen-column row before append: expect is rc0:MARKER,
    followed by the headers contract and commit (or platform release) tier. */
@@ -163,9 +183,13 @@ static int take_out(const char *path, const char *line) {
     return 1;
 }
 
-/* run ARGV, the LAST cap-1 bytes of stdout+stderr into OUT (terminated): the summaries come last; exit code or -1 */
+/* run ARGV, the LAST cap-1 bytes of stdout+stderr into OUT (terminated): the summaries come last; exit code or -1.
+   Every child is started under ./tools/bound SECONDS (argv[0], argv[1]): that is its time bound, and an argv
+   without it is not run. */
 static int run(char **argv, char *out, long cap) {
     int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r, k, half = (cap - 1) / 2;
+    out[0] = 0;
+    if (!argv[0] || !tx_eqz(argv[0], "./tools/bound") || !argv[1]) return -1;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return -1;
     for (;;) {
@@ -192,6 +216,7 @@ int main(int argc, char **argv) {
     if (!clean(id) || !clean(check) || !clean(marker) || !clean(text) || !clean(files) || !clean(layer) || !*id || !*marker) rg_die("empty field, TAB or newline in a field", 0);
     if (!tx_eqz(headers, "product") && !tx_eqz(headers, "tree")) rg_die("HEADERS must be product or tree", headers);
     if (!rg_marker_ok(marker)) rg_die("MARKER must be one rc0: tail ([A-Z0-9_]+), register adds the \"rc0:\" itself", marker);
+    if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (id %s)\n", id); return 2; }
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
@@ -216,7 +241,7 @@ int main(int argc, char **argv) {
            registers (tools/check-register.cx) would otherwise wait on a lock its own parent holds. */
         rg_unlock(lk); lk = -1;
         if (sy_realpath(".", root, sizeof root) < 0 || tx_snprintf(parent, sizeof parent, "%s/out/register-%s-%d", root, id, sy_pid()) >= (int)sizeof parent
-            || sy_mkdir(parent, 0700) != 0) okrun = 0;
+            || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory out/register-%s-%d under %s (is out/ a writable directory?)\n", id, sy_pid(), root); parent[0] = 0; }
         else {
             char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tests/run-batch.cx", "--", root, parent, (char *)id, 0};
             rc = run(v, buf, sizeof buf);
