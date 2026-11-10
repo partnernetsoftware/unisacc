@@ -277,7 +277,7 @@ static int parse_par(const char *s) {
 
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
-    const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0;
+    const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
@@ -289,6 +289,8 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--out") && i + 1 < argc) { outdir = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--cc") && i + 1 < argc) { cc = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--cache-manager-osx") && i + 2 < argc) { cm64 = argv[++i]; cmarm = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--bootstrap") && i + 1 < argc) { boot = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--parallel") && i + 1 < argc) {
             parallel = parse_par(argv[++i]);
             if (parallel < 1) die("REFUSE parallel 1..16", argv[i]);
@@ -318,6 +320,8 @@ int main(int argc, char **argv) {
     if (cx_fmt(helper, sizeof helper, "%s/identity-helper", ctx)) die("path", "helper");
 
     sy_printf("CANDIDATE_CHAIN\trev=%s\tout=%s\tresume=%d\tparallel=%d\n", rev, outdir, resume, parallel);
+    if (parallel > 1)
+        sy_printf("G0b\tparallel=%d\tmac_B=serial\twrite_domains=per-target-dir\tderate=measured\n", parallel);
 
     if (!(resume && ck_done(outdir, "snap"))) {
         long t0 = sy_now_ms();
@@ -328,6 +332,16 @@ int main(int argc, char **argv) {
     } else sy_printf("RESUME\tsnap\n");
 
     if (sy_mkdir(build, 0755) && fsize(build) < 0) die("mkdir", build);
+    if (boot && boot[0]) {
+        char dst[4400];
+        size_t bn = 0;
+        char *bb;
+        if (cx_fmt(dst, sizeof dst, "%s/Root41-bootstrap.com", build)) die("path", "boot");
+        bb = cx_read(boot, &bn);
+        if (!bb || cx_write(dst, bb, bn)) { free(bb); die("install bootstrap", dst); }
+        free(bb);
+        sy_printf("BOOTSTRAP\t%s\n", dst);
+    }
 
     if (!(resume && ck_done(outdir, "build"))) {
         long t0 = sy_now_ms();
@@ -662,16 +676,27 @@ int main(int argc, char **argv) {
 
     if (!(resume && ck_done(outdir, "pack"))) {
         long t0 = sy_now_ms();
-        char g3lnx[4400], g3arm[4400], ape[4400];
-        char *a[9];
-        if (cx_fmt(g3lnx, sizeof g3lnx, "%s/g3/lnx-x86_64/candidate", fp)) die("path", "g3lnx");
-        if (cx_fmt(g3arm, sizeof g3arm, "%s/g3/lnx-arm64/candidate", fp)) die("path", "g3arm");
-        if (cx_fmt(ape, sizeof ape, "%s/unisacc.com", outdir)) die("path", "ape");
-        if (fsize(g3lnx) < 0) die("pack needs g3 lnx-x86_64", g3lnx);
-        sy_printf("NOTE\tpack uses Linux slices as placeholders until osx/win phases land\n");
-        a[0] = (char *)"pack"; a[1] = ape; a[2] = pkg; a[3] = g3lnx; a[4] = g3lnx;
-        a[5] = g3arm; a[6] = g3lnx; a[7] = g3arm; a[8] = 0;
-        if (step(root, a)) die("pack", ape);
+        char ape_tool[4400], packed[4400], win64[4400], lnx64[4400], lnxarm[4400], osx64[4400], osxarm[4400], winarm[4400];
+        char *v[24];
+        int n = 0;
+        if (!cm64 || !cmarm) die("REFUSE pack needs --cache-manager-osx X64 ARM64 (borrowed until in-chain)", 0);
+        if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
+        if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
+        if (cx_fmt(win64, sizeof win64, "%s/gen1/win-x86_64/image", outdir)) die("path", "w64");
+        if (cx_fmt(lnx64, sizeof lnx64, "%s/fixedpoint/g3/lnx-x86_64/entry.elf", outdir)) die("path", "l64");
+        if (cx_fmt(lnxarm, sizeof lnxarm, "%s/fixedpoint/g2/lnx-arm64/entry.elf", outdir)) die("path", "larm");
+        if (cx_fmt(osx64, sizeof osx64, "%s/gen1/osx-x86_64/image", outdir)) die("path", "o64");
+        if (cx_fmt(osxarm, sizeof osxarm, "%s/gen1/osx-arm64/image", outdir)) die("path", "oarm");
+        if (cx_fmt(winarm, sizeof winarm, "%s/gen1/win-arm64/image", outdir)) die("path", "warm");
+        if (fsize(win64) < 0 || fsize(lnx64) < 0 || fsize(osx64) < 0) die("pack missing slice", win64);
+        sy_mkdir(packed, 0755);
+        if (chdir(snap)) die("chdir snap for pack version", snap);
+        v[n++] = ape_tool; v[n++] = (char *)"--";
+        v[n++] = (char *)"pack"; v[n++] = (char *)"--cache-manager-osx"; v[n++] = (char *)cm64; v[n++] = (char *)cmarm;
+        v[n++] = packed; v[n++] = pkg; v[n++] = win64; v[n++] = lnx64; v[n++] = lnxarm;
+        v[n++] = osx64; v[n++] = osxarm; v[n++] = winarm; v[n++] = 0;
+        if (bound_sh_secs(root, v, 55)) die("pack", packed);
+        if (chdir(root)) die("chdir root", root);
         mark(outdir, "pack", sy_now_ms() - t0);
     } else sy_printf("RESUME\tpack\n");
 
