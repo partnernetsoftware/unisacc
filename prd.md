@@ -498,4 +498,4 @@ prd.md                 当前状态（本文件，只写当前事实）
 
 
 0.0.48.1 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 与 0.0.49 收尾的逐条完成记录已逐字迁入 [prd_hist.md](prd_hist.md)「0.0.49 收尾」；本文件不再保留。
-| 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;断言 absent/present/exec-if-present/layout-split/epoch-canonical/release-rev/src-has/pkg-headers/env-set),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;变量未给的规则记 SKIP 不记 PASS;失败退出 1 |
+| 候选链相位预检(隐性前提) | `sh ./unisacc.com tools/preflight.cx -- build/preflight-rules.tsv ROOT=DIR [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry\|post-snap\|pre-p3\|post-p3] [--strict]`；检查 `tools/check-preflight.cx`(批次 preflight-tool) | 逐条执行规则表 assert 列(规则表行数以表为准;hook 列标挂点;断言 absent/present/exec-if-present/epoch-canonical/release-rev/src-has/src-lacks/pkg-headers/env-set/receipt-if-present),输出 PASS/FAIL/SKIP 与 error_text,汇总 `PREFLIGHT<TAB>failed=N`;PHASE= 只跑该挂点规则,且该挂点应已产出的变量缺失记 FAIL;变量未给的规则记 SKIP 不记 PASS,`--strict` 下有 SKIP 即退出 1;失败退出 1 |

@@ -1,24 +1,31 @@
 /* tools/preflight.cx -- candidate-chain phase preflight: refuse known hidden input preconditions up front.
  *
  *   sh ./unisacc.com tools/preflight.cx -- RULES.tsv [ROOT=DIR] [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE]
+ *                                            [PHASE=entry|post-snap|pre-p3|post-p3] [--strict]
  *
- * RULES is build/preflight-rules.tsv: a header row, then one rule per row with seven TAB fields
- * phase check evidence_file_line positive_example negative_example error_text assert.  Only the
+ * RULES is build/preflight-rules.tsv: a header row, then one rule per row with eight TAB fields
+ * phase check evidence_file_line positive_example negative_example error_text assert hook.  Only the
  * assert field is executed; the others are the human contract and error_text is printed on FAIL.
  * The assert field is one operator followed by space separated arguments; $ROOT $BUILD $SNAP $REV $PKG
  * expand from the command line, and a rule that names an unset variable is SKIP (not PASS).
+ * hook is the candidate-chain point the rule runs at.  PHASE=H runs only rules whose hook is H and
+ * first requires every variable the chain has produced by H (entry: ROOT REV BUILD; post-snap and
+ * pre-p3: also SNAP; post-p3: also PKG); a missing one is a FAIL line "var NAME".  --strict makes
+ * any SKIP exit 1, so a chain run cannot pass a rule it did not check.
  *
  *   absent P...            every P is absent (only ENOENT counts as absent; other errors FAIL)
  *   present P...           every P exists
  *   exec-if-present P...   every P that exists is a regular file with the owner execute bit
- *   layout-split R         R has the split product layout (chain-step snap copies unisacc.com.dev)
  *   epoch-canonical R      R/unisacc.com.build.json passes pp_execution_record_error (production consumer)
  *   release-rev S REV      S/.release-rev is REV; S/unisacc.com.build.json commit is REV, or the
  *                          environment BOOTSTRAP_FROM equals that commit and it is an ancestor of REV
  *   src-has F TEXT...      file F contains TEXT (the rest of the field, spaces kept)
+ *   src-lacks F TEXT...    file F does not contain TEXT (a removed hazard must stay removed)
  *   pkg-headers P          P4 package P names the embedded headers hdr/cx.h and hdr/cx-flat.h;
  *                          detail carries the package bytes and sha256 as evidence
  *   env-set NAME VALUE     environment NAME is set and equals VALUE (unset or different FAILs)
+ *   receipt-if-present D F D absent, or D exists and holds F (a leftover exclusive output dir without
+ *                          its receipt blocks the producer that refuses an existing NEW_OUT)
  *
  * Prints PASS|FAIL|SKIP<TAB>row<TAB>phase<TAB>assert[<TAB>detail<TAB>error_text] per rule and
  * PREFLIGHT<TAB>failed=N<TAB>skipped=M<TAB>passed=K.  Exit 0 when failed=0, 1 when a rule failed,
@@ -106,13 +113,6 @@ static int op_exec(char **a, int n) {
     return 1;
 }
 
-static int op_split(const char *root) {
-    int l = pp_layout(root);
-    if (l >= 0 && tx_eqz(pp_layout_name(l), "split")) return 1;
-    cx_fmt(detail, sizeof detail, "layout=%s: %s", l < 0 ? "none" : pp_layout_name(l), root);
-    return 0;
-}
-
 static int op_epoch(const char *root) {
     char path[4400], com[4400], digest[65];
     size_t n = 0;
@@ -180,6 +180,30 @@ static int op_has(const char *file, const char *text) {
     return ok;
 }
 
+static int op_lacks(const char *file, const char *text) {
+    size_t n = 0;
+    char *s = cx_read(file, &n);
+    int ok;
+    if (!s) { cx_fmt(detail, sizeof detail, "unreadable: %s", file); return 0; }
+    ok = strstr(s, text) == 0;
+    free(s);
+    if (!ok) cx_fmt(detail, sizeof detail, "text present in %s: %s", file, text);
+    return ok;
+}
+
+static int op_receipt(const char *dir, const char *name) {
+    char p[4400];
+    sy_stat_t st;
+    int r = sy_lstat(dir, &st);
+    if (r == -ENOENT) return 1;
+    if (r) { cx_fmt(detail, sizeof detail, "stat errno=%d: %s", -r, dir); return 0; }
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) { cx_fmt(detail, sizeof detail, "path"); return 0; }
+    r = sy_lstat(p, &st);
+    if (r == 0 && st.kind == 'f') return 1;
+    cx_fmt(detail, sizeof detail, "leftover without %s: %s", name, dir);
+    return 0;
+}
+
 static int op_env(const char *name, const char *want) {
     const char *v = sy_env(name);
     if (!v || !v[0]) { cx_fmt(detail, sizeof detail, "%s unset (want %s)", name, want); return 0; }
@@ -216,7 +240,7 @@ static int run_assert(char *f, int row) {
     op = p;
     while (*p && *p != ' ') p++;
     if (*p) *p++ = 0;
-    if (tx_eqz(op, "src-has")) {
+    if (tx_eqz(op, "src-has") || tx_eqz(op, "src-lacks")) {
         while (*p == ' ') p++;
         tok[0] = p;
         while (*p && *p != ' ') p++;
@@ -243,46 +267,78 @@ static int run_assert(char *f, int row) {
     if (tx_eqz(op, "absent") && n) return op_absent(tok, n);
     if (tx_eqz(op, "present") && n) return op_present(tok, n);
     if (tx_eqz(op, "exec-if-present") && n) return op_exec(tok, n);
-    if (tx_eqz(op, "layout-split") && n == 1) return op_split(tok[0]);
     if (tx_eqz(op, "epoch-canonical") && n == 1) return op_epoch(tok[0]);
     if (tx_eqz(op, "release-rev") && n == 2) return op_rev(tok[0], tok[1]);
     if (tx_eqz(op, "src-has") && n == 1 && rest && *rest) return op_has(tok[0], rest);
+    if (tx_eqz(op, "src-lacks") && n == 1 && rest && *rest) return op_lacks(tok[0], rest);
     if (tx_eqz(op, "pkg-headers") && n == 1) return op_pkg(tok[0]);
     if (tx_eqz(op, "env-set") && n == 2) return op_env(tok[0], tok[1]);
+    if (tx_eqz(op, "receipt-if-present") && n == 2) return op_receipt(tok[0], tok[1]);
     fprintf(stderr, "preflight: row %d: unknown or malformed assert: %s\n", row, op);
     exit(2);
+}
+
+/* Variables a hook point must have: by then the chain has produced them (phase table of
+   tools/candidate-chain.cx), so a missing one is a broken chain state, not a SKIP. */
+static int hook_vars(const char *hook) {
+    struct { const char *name; const char **v; const char *hooks; } need[] = {
+        {"ROOT", &v_root, "entry post-snap pre-p3 post-p3"},
+        {"REV", &v_rev, "entry post-snap pre-p3 post-p3"},
+        {"BUILD", &v_build, "entry post-snap pre-p3 post-p3"},
+        {"SNAP", &v_snap, "post-snap pre-p3 post-p3"},
+        {"PKG", &v_pkg, "post-p3"},
+    };
+    int k, bad = 0;
+    for (k = 0; k < 5; k++) {
+        if (!strstr(need[k].hooks, hook)) continue;
+        if (!*need[k].v || !(*need[k].v)[0]) {
+            printf("FAIL\t0\t%s\tvar %s\tunset at hook %s\n", hook, need[k].name, hook);
+            bad++;
+        }
+    }
+    return bad;
 }
 
 int main(int argc, char **argv) {
     size_t n = 0;
     char *s, *line;
-    int i, row = 0;
-    if (argc < 2) die("usage: RULES.tsv [ROOT=DIR] [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE]");
+    const char *phase = 0;
+    int i, row = 0, strict = 0, hooks_ok = 0;
+    if (argc < 2) die("usage: RULES.tsv [ROOT=DIR] [BUILD=DIR] [SNAP=DIR] [REV=SHA40] [PKG=FILE] [PHASE=entry|post-snap|pre-p3|post-p3] [--strict]");
     for (i = 2; i < argc; i++) {
         if (!strncmp(argv[i], "ROOT=", 5)) v_root = argv[i] + 5;
         else if (!strncmp(argv[i], "BUILD=", 6)) v_build = argv[i] + 6;
         else if (!strncmp(argv[i], "SNAP=", 5)) v_snap = argv[i] + 5;
         else if (!strncmp(argv[i], "REV=", 4)) v_rev = argv[i] + 4;
         else if (!strncmp(argv[i], "PKG=", 4)) v_pkg = argv[i] + 4;
-        else die("unknown argument (expected ROOT= BUILD= SNAP= REV= PKG=)");
+        else if (!strncmp(argv[i], "PHASE=", 6)) phase = argv[i] + 6;
+        else if (tx_eqz(argv[i], "--strict")) strict = 1;
+        else die("unknown argument (expected ROOT= BUILD= SNAP= REV= PKG= PHASE= --strict)");
     }
+    if (phase && !tx_eqz(phase, "entry") && !tx_eqz(phase, "post-snap") && !tx_eqz(phase, "pre-p3") && !tx_eqz(phase, "post-p3"))
+        die("PHASE must be entry, post-snap, pre-p3 or post-p3");
+    if (phase) failed += hook_vars(phase);
     s = cx_read(argv[1], &n);
     if (!s || !n || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("rules table unreadable or not LF text");
     for (line = s; *line; ) {
-        char *end = strchr(line, '\n'), *f[7], *p;
+        char *end = strchr(line, '\n'), *f[8], *p;
         int k, r;
         *end = 0;
         p = line;
-        for (k = 0; k < 7; k++) {
+        for (k = 0; k < 8; k++) {
             f[k] = p;
             p = strchr(p, '\t');
-            if (k < 6) { if (!p) die("rules row needs seven TAB fields"); *p++ = 0; }
-            else if (p) die("rules row has more than seven fields");
+            if (k < 7) { if (!p) die("rules row needs eight TAB fields"); *p++ = 0; }
+            else if (p) die("rules row has more than eight fields");
         }
         if (row == 0) {
-            if (!tx_eqz(f[0], "phase") || !tx_eqz(f[5], "error_text") || !tx_eqz(f[6], "assert")) die("rules header");
-        } else {
+            if (!tx_eqz(f[0], "phase") || !tx_eqz(f[5], "error_text") || !tx_eqz(f[6], "assert") || !tx_eqz(f[7], "hook")) die("rules header");
+        } else if (!tx_eqz(f[7], "entry") && !tx_eqz(f[7], "post-snap") && !tx_eqz(f[7], "pre-p3") && !tx_eqz(f[7], "post-p3")) {
+            fprintf(stderr, "preflight: row %d: unknown hook %s\n", row, f[7]);
+            exit(2);
+        } else if (!phase || tx_eqz(phase, f[7])) {
             char shown[4400];
+            hooks_ok++;
             cx_fmt(shown, sizeof shown, "%s", f[6]);
             r = run_assert(f[6], row);
             if (r > 0) { passed++; printf("PASS\t%d\t%s\t%s\n", row, f[0], shown); }
@@ -294,6 +350,7 @@ int main(int argc, char **argv) {
     }
     free(s);
     if (row < 2) die("rules table has no rules");
-    printf("PREFLIGHT\tfailed=%d\tskipped=%d\tpassed=%d\n", failed, skipped, passed);
-    return failed ? 1 : 0;
+    if (phase && !hooks_ok) die("no rule carries this hook");
+    printf("PREFLIGHT\tfailed=%d\tskipped=%d\tpassed=%d%s\n", failed, skipped, passed, strict ? "\tstrict=1" : "");
+    return failed || (strict && skipped) ? 1 : 0;
 }

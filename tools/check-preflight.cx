@@ -3,14 +3,16 @@
  *   sh ./unisacc.com tools/check-preflight.cx        (from the repo root)
  *
  * Builds fixtures under sy_tmpdir()/check-preflight-PID from the positive/negative example columns of
- * build/preflight-rules.tsv and runs the real tool three times:
- *   neg   every one of the ten rules must FAIL (stale outer/host-libz, APE-only root without the
- *         build record, non-canonical record, receipt commit != rev without BOOTSTRAP_FROM, a
- *         release-build.cx lacking both texts, a 0600 constructor, a P4 package without the
- *         embedded headers, its FAIL carrying bytes and sha256) and the exit must be 1
- *   pos   rows 1-4 and 6-10 must PASS on a split fixture root with a clean BUILD and an exact snap
+ * build/preflight-rules.tsv and runs the real tool:
+ *   neg   every one of the eleven rules must FAIL (stale outer/host-libz, a chain-step.cx that copies
+ *         unisacc.com.dev unconditionally, APE-only root without the build record, non-canonical record,
+ *         receipt commit != rev without BOOTSTRAP_FROM, a release-build.cx lacking both texts, a 0600
+ *         constructor, a P4 package without the embedded headers, UNISACC_CTOR unset) and the exit is 1
+ *   pos   rows 1-4 and 6-11 must PASS on a fixture root with a clean BUILD and an exact snap
  *   boot  ROOT is this checkout: row 5 (the production canonical-record consumer on the installed
  *         record) and row 6 under BOOTSTRAP_FROM=HEAD~1 with receipt commit HEAD~1 must PASS
+ *   hook  PHASE=post-p3 runs row 10 only; PHASE=post-p3 without PKG is a "var PKG" FAIL; --strict turns
+ *         a SKIP into exit 1 while the same run without --strict exits 0; an unknown PHASE exits 2
  * Prints PASS/FAIL per assertion and CHECK_PREFLIGHT<TAB>failed=N; exit 0 only when failed=0. */
 #pragma unisa use sys.fs
 #pragma unisa use text.text
@@ -53,22 +55,28 @@ static int row_is(int row, const char *word) {
 }
 
 /* CTOR non-null sets UNISACC_CTOR for row 11; otherwise it is removed so the parent's
-   environment cannot make the negative run pass. Each run has its own 50s bound. */
-static int run(const char *boot, const char *ctor, const char *r, const char *b, const char *s, const char *rev) {
+   environment cannot make the negative run pass. S null omits SNAP=, PKG 0 omits PKG=;
+   X1/X2 are extra arguments (PHASE=, --strict). Each run has its own 50s bound. */
+static int run(const char *boot, const char *ctor, const char *r, const char *b, const char *s, const char *rev,
+               int pkg, const char *x1, const char *x2) {
     char ra[4500], ba[4500], sa[4500], va[64], ea[80], pa[4500], ca[4500];
     np_result res = {0}; char why[512] = {0};
     int k = 0, rc = -1;
     long n;
-    char *av[20];
+    char *av[24];
     cx_fmt(ra, sizeof ra, "ROOT=%s", r); cx_fmt(ba, sizeof ba, "BUILD=%s", b);
-    cx_fmt(sa, sizeof sa, "SNAP=%s", s); cx_fmt(va, sizeof va, "REV=%s", rev);
-    cx_fmt(pa, sizeof pa, "PKG=%s/compiler.p4.pkg", r);
+    cx_fmt(va, sizeof va, "REV=%s", rev);
     av[k++] = "env"; av[k++] = "-u"; av[k++] = "UNISACC_CTOR";
     if (boot) { cx_fmt(ea, sizeof ea, "BOOTSTRAP_FROM=%s", boot); av[k++] = ea; }
     if (ctor) { cx_fmt(ca, sizeof ca, "UNISACC_CTOR=%s", ctor); av[k++] = ca; }
     av[k++] = "sh"; av[k++] = "./unisacc.com"; /* lint:allow R1-product 本检查的目的就是用已装产品实跑 tools/preflight.cx,产品路径是其合同而非第二真值源 */
     av[k++] = "tools/preflight.cx"; av[k++] = "--";
-    av[k++] = "build/preflight-rules.tsv"; av[k++] = ra; av[k++] = ba; av[k++] = sa; av[k++] = va; av[k++] = pa; av[k] = 0;
+    av[k++] = "build/preflight-rules.tsv"; av[k++] = ra; av[k++] = ba; av[k++] = va;
+    if (s) { cx_fmt(sa, sizeof sa, "SNAP=%s", s); av[k++] = sa; }
+    if (pkg) { cx_fmt(pa, sizeof pa, "PKG=%s/compiler.p4.pkg", r); av[k++] = pa; }
+    if (x1) av[k++] = (char *)x1;
+    if (x2) av[k++] = (char *)x2;
+    av[k] = 0;
     out[0] = 0;
     if (np_run(av, root, 0, 50, &res, why, sizeof why) == 0) {
         n = (long)res.outn; if (n > (long)sizeof out - 1) n = sizeof out - 1;
@@ -92,21 +100,24 @@ int main(void) {
 
     /* negative fixtures */
     mk("nroot"); mk("nroot/tools"); mk("nbuild"); mk("nbuild/outer"); mk("nbuild/host-libz"); mk("nsnap");
+    mk("nsnap/out"); mk("nsnap/out/chain"); mk("nsnap/out/chain/wf-prep");
     put("nroot/unisacc.com", "#!/bin/sh\n", 0755);
     put("nroot/tools/release-build.cx", "/* neither text */\n", 0644);
+    put("nroot/tools/chain-step.cx", "cp unisacc.com %s && cp -a unisacc.com.dev %s/unisacc.com.dev\n", 0644);
     put("nbuild/source-package-O2.elf", "x", 0600);
     put("nroot/compiler.p4.pkg", "P4 index without embedded headers hdr/cx-nested.h\n", 0644);
     put("nsnap/.release-rev", head, 0644);
     cx_fmt(json, sizeof json, "{\n  \"commit\": \"%s\"\n}\n", prev);
     put("nsnap/unisacc.com.build.json", json, 0644);
     p(d1, "nroot"); p(d2, "nbuild"); p(d3, "nsnap");
-    rc = run(0, 0, d1, d2, d3, head);
+    rc = run(0, 0, d1, d2, d3, head, 1, 0, 0);
     ck(rc == 1, "neg.exit1");
-    for (row = 1; row <= 11; row++) {
+    for (row = 1; row <= 12; row++) {
         char name[64]; cx_fmt(name, sizeof name, "neg.row%d.FAIL", row);
         ck(row_is(row, "FAIL"), name);
     }
-    ck(strstr(out, "PREFLIGHT\tfailed=11\tskipped=0\tpassed=0\n") != 0, "neg.summary");
+    ck(strstr(out, "PREFLIGHT\tfailed=12\tskipped=0\tpassed=0\n") != 0, "neg.summary");
+    ck(strstr(out, "残留无收据 wf-prep 挡住 exclusive 输出") != 0 && strstr(out, "leftover without receipt.txt") != 0, "neg.row12.leftover");
     ck(strstr(out, "source-wave: exclusive host-libz directory errno=17") != 0, "neg.error_text");
     ck(strstr(out, "P4 缺嵌入头") != 0 && strstr(out, "missing hdr/cx.h") != 0 && strstr(out, "sha256=") != 0, "neg.row10.evidence");
     ck(strstr(out, "UNISACC_CTOR unset") != 0 && strstr(out, "release-build: opguard needs explicit UNISACC_CTOR") != 0, "neg.row11.unset");
@@ -114,15 +125,15 @@ int main(void) {
     /* the BUILD record is required by row 4; a non-canonical one is row 5's negative example.
        Without it row 5 fails on the missing record, so give it one and rerun only for the reason. */
     put("nroot/unisacc.com.build.json", "{\n  \"settings\": {\"opt\": 1}\n}\n", 0644);
-    rc = run(0, 0, d1, d2, d3, head);
+    rc = run(0, 0, d1, d2, d3, head, 1, 0, 0);
     ck(row_is(5, "FAIL") && strstr(out, "root-epoch-record-shape") != 0, "neg.row5.noncanonical");
 
     /* positive fixtures */
-    mk("proot"); mk("proot/tools"); mk("proot/unisacc.com.dev"); mk("pbuild"); mk("psnap");
+    mk("proot"); mk("proot/tools"); mk("pbuild"); mk("psnap");
     put("proot/unisacc.com", "#!/bin/sh\n", 0755);
     put("proot/unisacc.com.build.json", "{}\n", 0644);
-    put("proot/unisacc.com.dev/p3-package.bin", "pkg", 0644);
-    put("proot/tools/release-build.cx", "long pipe_timeout_ms = 55000;\nsy_eprintf(\"release-build: %s timeout after %ld ms (child killed)\\n\", label, ms);\n", 0644);
+    put("proot/tools/chain-step.cx", "v[4] = \"--rev\"; v[6] = \"freeze\";\n", 0644);
+    put("proot/tools/release-build.cx", "    if (*p || ms < 1 || ms > 55000) return 55000;\nsy_eprintf(\"release-build: %s timeout after %ld ms (child killed)\\n\", label, ms);\n", 0644);
     put("proot/compiler.p4.pkg", "P4 index hdr/cx.h hdr/cx-flat.h hdr/cx-nested.h\n", 0644);
     put("pbuild/source-package-O2.elf", "x", 0700);
     put("psnap/.release-rev", head, 0644);
@@ -130,8 +141,8 @@ int main(void) {
     put("psnap/unisacc.com.build.json", json, 0644);
     p(d1, "proot"); p(d2, "pbuild"); p(d3, "psnap");
     {   char ctor[4400]; p(ctor, "pbuild/Root41-bootstrap.com");
-        rc = run(0, ctor, d1, d2, d3, head); }
-    for (row = 1; row <= 11; row++) {
+        rc = run(0, ctor, d1, d2, d3, head, 1, 0, 0); }
+    for (row = 1; row <= 12; row++) {
         char name[64];
         if (row == 5) continue;
         cx_fmt(name, sizeof name, "pos.row%d.PASS", row);
@@ -140,10 +151,37 @@ int main(void) {
 
     /* bootstrap: receipt commit HEAD~1, an ancestor of HEAD, declared by BOOTSTRAP_FROM */
     p(d3, "nsnap");
-    rc = run(prev, 0, root, d2, d3, head);
+    rc = run(prev, 0, root, d2, d3, head, 1, 0, 0);
     ck(row_is(6, "PASS"), "boot.row6.ancestor.PASS");
     ck(row_is(5, "PASS"), "boot.row5.installed-record.PASS");
-    (void)rc;
+
+    /* row 12: a wf-prep that holds its receipt passes */
+    put("nsnap/out/chain/wf-prep/receipt.txt", "ok\n", 0644);
+    rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", 0);
+    ck(row_is(12, "PASS"), "pos.row12.receipt-present.PASS");
+
+    /* hook filter and strict */
+    p(d1, "proot"); p(d2, "pbuild"); p(d3, "psnap");
+    rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+    ck(rc == 0 && row_is(10, "PASS") && row_is(12, "PASS") && !row_is(1, "PASS") && !row_is(11, "FAIL") &&
+       strstr(out, "PREFLIGHT\tfailed=0\tskipped=0\tpassed=2\tstrict=1\n") != 0, "hook.post-p3.only-rows10-12");
+    rc = run(0, 0, d1, d2, d3, head, 0, "PHASE=post-p3", 0);
+    ck(rc == 1 && strstr(out, "var PKG\tunset at hook post-p3") != 0, "hook.post-p3.missing-PKG.FAIL");
+    rc = run(0, 0, d1, d2, 0, head, 1, "PHASE=post-snap", 0);
+    ck(rc == 1 && strstr(out, "var SNAP\tunset at hook post-snap") != 0, "hook.post-snap.missing-SNAP.FAIL");
+    {   char ctor[4400]; p(ctor, "pbuild/Root41-bootstrap.com");
+        /* this checkout, no SNAP and no PKG: rows 6, 10, 12 SKIP and nothing fails */
+        rc = run(0, ctor, root, d2, 0, head, 0, 0, 0);
+        ck(rc == 0 && row_is(6, "SKIP") && row_is(10, "SKIP") && !strstr(out, "FAIL\t"), "strict.off.skip-exits0");
+        rc = run(0, ctor, root, d2, 0, head, 0, "--strict", 0);
+        ck(rc == 1 && row_is(6, "SKIP") && !strstr(out, "FAIL\t"), "strict.on.skip-exits1");
+        rc = run(0, ctor, d1, d2, d3, head, 1, "PHASE=pre-p3", "--strict");
+        ck(rc == 0 && row_is(11, "PASS") && row_is(9, "PASS"), "hook.pre-p3.pass");
+        rc = run(0, ctor, d1, d2, d3, head, 1, "PHASE=post-snap", "--strict");
+        ck(rc == 0 && row_is(6, "PASS"), "hook.post-snap.strict.pass");
+    }
+    rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=nowhere", 0);
+    ck(rc == 2, "hook.unknown.exit2");
 
     if (cx_rmtree(work)) die("cleanup");
     printf("CHECK_PREFLIGHT\tfailed=%d\n", failed);
