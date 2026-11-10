@@ -1,0 +1,67 @@
+#pragma unisa module records
+
+/* Field-wise checks deliberately avoid structure padding and host byte order. */
+typedef unsigned long long medium_u64;
+typedef struct medium_record {
+    unsigned int key;
+    unsigned int origin;
+    medium_u64 value;
+    char tag[8];
+} medium_record;
+
+static const unsigned int medium_record_count = 256;
+static const unsigned int medium_key_count = 23;
+
+unsigned int medium_count(void) { return medium_record_count; }
+
+static medium_u64 helper(medium_u64 *state) {
+    medium_u64 x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
+
+void medium_generate(medium_record *out, unsigned int n) {
+    medium_u64 state = 0x6a09e667f3bcc909ULL;
+    unsigned int i;
+    unsigned int j;
+    for (i = 0; i < n; i++) {
+        medium_u64 x = helper(&state);
+        out[i].key = (unsigned int)(x % medium_key_count);
+        out[i].origin = i;
+        out[i].value = helper(&state) ^ ((medium_u64)i << 40);
+        for (j = 0; j < 7; j++) {
+            out[i].tag[j] = (char)('a' + (unsigned int)(x % 26));
+            x = x / 26;
+        }
+        out[i].tag[7] = 0;
+    }
+}
+
+int medium_equal(const medium_record *a, const medium_record *b) {
+    unsigned int j;
+    if (a->key != b->key || a->origin != b->origin) return 0;
+    if (a->value != b->value) return 0;
+    for (j = 0; j < 8; j++) {
+        if (a->tag[j] != b->tag[j]) return 0;
+    }
+    return 1;
+}
+
+int medium_permutation(const medium_record *a, const medium_record *source,
+                       unsigned int n) {
+    unsigned int seen[256];
+    unsigned int i;
+    if (n != medium_record_count) return 0;
+    for (i = 0; i < n; i++) seen[i] = 0;
+    for (i = 0; i < n; i++) {
+        unsigned int k = a[i].origin;
+        if (k >= n) return 0;
+        if (seen[k]) return 0;
+        seen[k] = 1;
+        if (!medium_equal(&a[i], &source[k])) return 0;
+    }
+    return 1;
+}

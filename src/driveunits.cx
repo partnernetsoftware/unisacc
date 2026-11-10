@@ -43,14 +43,16 @@ int dv_units(const char *tgt, int nsrc, const char **srcv, unsigned char **out, 
     long fcap;
     int j;
     int st_units(int);
+    /* Phase B restores first-pass frames instead of re-running the unit front end, but the
+       link still spans every source: publish the unit count first, or rt-shared macros are
+       chosen as for one unit and the image differs from a normal whole compile. A failed
+       restore (unreadable UNISACC_PHASE_IN, receipt mismatch) refuses, never falls back. */
     if (hf_phase_b()) {
-        unsigned char *d;
-        d = hs_alloc(8);
-        if (!d) return 1;
-        *out = d;
+        if (st_units(nsrc) || !(*out = hs_alloc(8))) return 1;
         *outn = 8;
         return 0;
     }
+    if (hf_phase_refused()) { dv_why(why, cap, "phase checkpoint: UNISACC_PHASE_IN unreadable or receipt mismatch"); return 1; }
     if (dv_unit_route(uroute, 96, tgt)) {
         if (why && cap > 0) why[0] = 0;
         return 1;
@@ -447,5 +449,19 @@ int dv_fwd_splice(const char *tgt, int nsrc, const char **srcv, unsigned char **
     dv_hold_drop();
     *out = joined;
     *outn = total;
+    return 0;
+}
+
+/* Phase B restart when the first pass found no host slot: no stub unit is
+   spliced; the kept frames and attribute table (validated on load) are
+   handed back as they were before e3 and the whole route continues. */
+int dv_fwd_restore(unsigned char **out, long *outn, char *why, int cap) {
+    unsigned char *ab = 0;
+    long an = 0, ac = 0;
+    if (st_attr_reset() || hf_take(out, outn, &ab, &an) || (ac = an, st_attr_exchange(&ab, &an, &ac))) {
+        hs_free(ab);
+        dv_why(why, cap, "phase checkpoint");
+        return 1;
+    }
     return 0;
 }

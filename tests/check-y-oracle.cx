@@ -1,0 +1,98 @@
+/* Y-0 oracle (0.0.50 product candidate Y, e3 native phasing).
+ * usage: ROOT CANDIDATE NEW_OUTDIR   (batch args {root};{candidate};{out})
+ * Same-source medium program (six modules, root takes a sys.dlcall dlopen
+ * forwarding branch) is compiled three ways per cross target:
+ *   default   normal whole -o, no phase variables           -> default.image
+ *   capture   UNISACC_PHASE=A, UNISACC_PHASE_OUT=A.phase    -> capture.image, A.phase(+.sha256)
+ *   restore   UNISACC_PHASE=B, UNISACC_PHASE_IN=A.phase     -> restore.image
+ * PASS requires default == capture == restore byte for byte (cmp0) on
+ * osx/x86_64 and win/x86_64, every phase under the 60 s gate with >=30 %
+ * headroom (<=42 s), a receipt next to A.phase, and the negative control:
+ * a receipt with one flipped digit makes restore refuse (rc!=0, no image).
+ * The stub file must come from the same TMPDIR in capture and restore. */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.text
+static char root[4096], cand[4096], out[4096], bound[4400];
+static int failures, checks;
+static void say(int ok, const char *label) { checks++; if (!ok) failures++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", label); }
+static int run(char **v, char **env, const char *label, long *ms) {
+    np_result r = {0}; char why[512]; long t = sy_now_ms();
+    int tr = np_run(v, root, env, 55, &r, why, sizeof why);
+    *ms = sy_now_ms() - t;
+    int bad = tr || r.rc || r.residue;
+    if (bad) { fprintf(stderr, "%s: transport=%d rc=%d residue=%d why=%s\n", label, tr, r.rc, r.residue, why); if (r.errn) fwrite(r.err, 1, r.errn, stderr); }
+    int rc = r.rc; np_free(&r);
+    return bad ? (rc ? rc : 1) : 0;
+}
+static int same(const char *a, const char *b, char ha[65]) {
+    size_t na, nb; char *pa = cx_read(a, &na), *pb = cx_read(b, &nb); int eq;
+    if (!pa || !pb) { free(pa); free(pb); return 0; }
+    cx_sha256_hex(pa, na, ha);
+    eq = na == nb && !memcmp(pa, pb, na);
+    free(pa); free(pb); return eq;
+}
+static int flip_receipt(const char *phase) {
+    char rp[4400]; size_t n; if (cx_fmt(rp, sizeof rp, "%s.sha256", phase)) return 1;
+    char *s = cx_read(rp, &n); if (!s || n != 65) { free(s); return 1; }
+    s[0] = s[0] == 'a' ? 'b' : 'a';
+    int rc = cx_write(rp, s, n); free(s); return rc;
+}
+static int one_target(const char *target, const char *slug) {
+    char dir[4400], tmp[4400], a[4400], d[4400], c[4400], b[4400], n[4400], main_cx[4400];
+    char e_tmp[4400], e_phase_a[32], e_out[4400], e_phase_b[32], e_in[4400];
+    char h[3][65], label[160]; long ms; int rc, all = 1;
+    if (cx_fmt(dir, sizeof dir, "%s/%s", out, slug) || cx_fmt(tmp, sizeof tmp, "%s/tmp", dir) ||
+        cx_fmt(a, sizeof a, "%s/A.phase", dir) || cx_fmt(d, sizeof d, "%s/default.image", dir) ||
+        cx_fmt(c, sizeof c, "%s/capture.image", dir) || cx_fmt(b, sizeof b, "%s/restore.image", dir) ||
+        cx_fmt(n, sizeof n, "%s/negative.image", dir) ||
+        cx_fmt(main_cx, sizeof main_cx, "%s/tests/cases/y-oracle/main.cx", root) ||
+        cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", tmp) ||
+        cx_fmt(e_phase_a, sizeof e_phase_a, "UNISACC_PHASE=A") || cx_fmt(e_out, sizeof e_out, "UNISACC_PHASE_OUT=%s", a) ||
+        cx_fmt(e_phase_b, sizeof e_phase_b, "UNISACC_PHASE=B") || cx_fmt(e_in, sizeof e_in, "UNISACC_PHASE_IN=%s", a)) return 0;
+    if (mkdir(dir, 0700) || mkdir(tmp, 0700)) { perror(dir); return 0; }
+    char tgt[64]; if (cx_fmt(tgt, sizeof tgt, "--target=%s", target)) return 0;
+    {   char *v[] = {bound, "55", cand, tgt, main_cx, "-o", d, 0};
+        char *env[] = {e_tmp, 0};
+        rc = run(v, env, "default", &ms); cx_fmt(label, sizeof label, "%s default rc0 wall_ms=%ld", slug, ms); say(!rc, label);
+        cx_fmt(label, sizeof label, "%s default headroom>=30%% (<=42000ms)", slug); say(ms <= 42000, label); if (rc) all = 0; }
+    {   char *v[] = {bound, "55", cand, tgt, main_cx, "-o", c, 0};
+        char *env[] = {e_tmp, e_phase_a, e_out, 0};
+        rc = run(v, env, "capture", &ms); cx_fmt(label, sizeof label, "%s capture(A) rc0 wall_ms=%ld", slug, ms); say(!rc, label);
+        cx_fmt(label, sizeof label, "%s capture headroom>=30%%", slug); say(ms <= 42000, label); if (rc) all = 0; }
+    {   char rp[4400]; size_t rn; cx_fmt(rp, sizeof rp, "%s.sha256", a); char *s = cx_read(rp, &rn);
+        cx_fmt(label, sizeof label, "%s A.phase.sha256 receipt present (65 bytes)", slug); say(s && rn == 65 && s[64] == '\n', label); free(s); }
+    {   char *v[] = {bound, "55", cand, tgt, main_cx, "-o", b, 0};
+        char *env[] = {e_tmp, e_phase_b, e_in, 0};
+        rc = run(v, env, "restore", &ms); cx_fmt(label, sizeof label, "%s restore(B) rc0 wall_ms=%ld", slug, ms); say(!rc, label);
+        cx_fmt(label, sizeof label, "%s restore headroom>=30%%", slug); say(ms <= 42000, label); if (rc) all = 0; }
+    if (all) {
+        int e2 = same(d, b, h[1]);
+        cx_fmt(label, sizeof label, "%s default==restore cmp0 sha=%s", slug, h[1]); say(e2, label);
+        /* A first pass with a host slot stops at the checkpoint (no image);
+           one without a host slot runs through, and its image must match. */
+        if (sy_exists(c) == 0) { cx_fmt(label, sizeof label, "%s capture(A) stopped at checkpoint (host slot)", slug); say(1, label); }
+        else { int e1 = same(d, c, h[0]); cx_fmt(label, sizeof label, "%s capture(A) ran through (no host slot): default==capture cmp0", slug); say(e1, label); if (!e1) all = 0; }
+        if (!e2) all = 0;
+    } else { say(0, "cmp skipped: a phase failed"); }
+    {   char *v[] = {bound, "55", cand, tgt, main_cx, "-o", n, 0};
+        char *env[] = {e_tmp, e_phase_b, e_in, 0};
+        int fl = flip_receipt(a);
+        rc = fl ? 0 : run(v, env, "negative", &ms);
+        cx_fmt(label, sizeof label, "%s negative: flipped receipt refuses restore (rc=%d)", slug, rc); say(!fl && rc != 0, label);
+        cx_fmt(label, sizeof label, "%s negative: no image written", slug); say(sy_exists(n) == 0, label); }
+    return all;
+}
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], cand) || argv[3][0] != '/' || strlen(argv[3]) >= sizeof out) { fputs("usage: ROOT CANDIDATE NEW_OUTDIR\n", stderr); return 2; }
+    if (cx_fmt(out, sizeof out, "%s", argv[3]) || mkdir(out, 0700)) { perror("output directory"); return 2; }
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+    char before[65], after[65]; { size_t n; char *s = cx_read(cand, &n); if (!s) return 2; cx_sha256_hex(s, n, before); free(s); }
+    one_target("osx/x86_64", "osx-x86_64");
+    one_target("win/x86_64", "win-x86_64");
+    { size_t n; char *s = cx_read(cand, &n); if (!s) return 2; cx_sha256_hex(s, n, after); free(s); }
+    if (!tx_eqz(before, after)) { fputs("candidate changed\n", stderr); return 2; }
+    printf("Y_ORACLE\tchecks=%d\tfailed=%d\tcandidate=%s\n", checks, failures, before);
+    return failures ? 1 : 0;
+}

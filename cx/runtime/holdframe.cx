@@ -53,6 +53,74 @@ static void hf_copy(unsigned char *d, const unsigned char *s, long n) {
     }
 }
 
+/* Checkpoint receipt: <path>.sha256 holds the SHA-256 of the whole phase
+   file (header, physical frames, attribute table) as 64 hex digits and LF.
+   Written after the file; a restore without a matching receipt is refused,
+   so a truncated, edited or mismatched checkpoint never silently continues. */
+static int hf_receipt_path(const char *path, char *dst, long cap) {
+    long i;
+    const char *suf;
+    i = 0;
+    while (path[i]) { if (i + 8 >= cap) return 1; dst[i] = path[i]; i = i + 1; }
+    suf = ".sha256";
+    while (*suf) { dst[i] = *suf; i = i + 1; suf = suf + 1; }
+    dst[i] = 0;
+    return 0;
+}
+
+static int hf_receipt_digest(const unsigned char *hdr, const unsigned char *body, long bodyn,
+                             const unsigned char *at, long atn, char hex[65]) {
+    unsigned char *all;
+    long n;
+    n = 8 + bodyn + atn;
+    all = mm_alloc(n);
+    if (!all) return 1;
+    hf_copy(all, hdr, 8);
+    hf_copy(all + 8, body, bodyn);
+    if (atn > 0) hf_copy(all + 8 + bodyn, at, atn);
+    cx_sha256_hex(all, (size_t)n, hex);
+    mm_free(all);
+    return 0;
+}
+
+static int hf_receipt_write(const char *path, const unsigned char *hdr, const unsigned char *body, long bodyn,
+                            const unsigned char *at, long atn) {
+    char rp[4400];
+    char hex[66];
+    int fd;
+    int wr;
+    int cl;
+    if (hf_receipt_path(path, rp, 4400)) return 1;
+    if (hf_receipt_digest(hdr, body, bodyn, at, atn, hex)) return 1;
+    hex[64] = '\n';
+    hex[65] = 0;
+    fd = sy_open(rp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (fd < 0) return 1;
+    wr = sy_write_all(fd, hex, 65);
+    cl = sy_close(fd);
+    return wr || cl;
+}
+
+/* 0 when <path>.sha256 matches the raw bytes read from PATH. */
+static int hf_receipt_check(const char *path, const unsigned char *hdr, const unsigned char *body, long bodyn,
+                            const unsigned char *at, long atn) {
+    char rp[4400];
+    char hex[65];
+    unsigned char got[65];
+    int fd;
+    long i;
+    if (hf_receipt_path(path, rp, 4400)) return 1;
+    fd = sy_open_read(rp);
+    if (fd < 0) return 1;
+    if (sy_reg_size(fd) != 65 || sy_read_full(fd, got, 65)) { sy_close(fd); return 1; }
+    sy_close(fd);
+    if (got[64] != '\n') return 1;
+    if (hf_receipt_digest(hdr, body, bodyn, at, atn, hex)) return 1;
+    i = 0;
+    while (i < 64) { if ((unsigned char)hex[i] != got[i]) return 1; i = i + 1; }
+    return 0;
+}
+
 void hf_drop(void) {
     mm_free(hf_fr);
     mm_free(hf_at);
@@ -126,6 +194,7 @@ int hf_keep(const unsigned char *fr, long frn, const unsigned char *at, long atn
                 int cl = sy_close(fd);
                 if (wr || cl) { mm_free(packed); return 1; }
             }
+            if (hf_receipt_write(path, nb, physical, physicaln, hf_at, hf_atn)) { mm_free(packed); return 1; }
             hf_metric("write", 8+physicaln+hf_atn, hf_frn, hf_atn, dictionary, shared, started);
             mm_free(packed);
         }
@@ -163,6 +232,7 @@ static int hf_load(void) {
     }
     if (sy_reg_size(fd) != 8+physicaln+atn) { mm_free(fr); mm_free(at); sy_close(fd); return 1; }
     sy_close(fd);
+    if (hf_receipt_check(path, nb, fr, physicaln, at, atn)) { mm_free(fr); mm_free(at); return 1; }
     if (frn >= 8 && fr[0] == 'U' && fr[1] == 'N' && fr[2] == 'I' && fr[3] == 'F') {
         unsigned char *restored = 0; long restoredn = 0;
         if (fr_phase_unpack(fr, frn, &restored, &restoredn, &dictionary, &shared)) { mm_free(fr); mm_free(at); return 1; }
@@ -177,10 +247,52 @@ static int hf_load(void) {
     return 0;
 }
 
+/* A phase B restore that fails (absent file, bad extent, receipt mismatch)
+   is a refusal, never a silent fall back to a fresh whole compile: the
+   driver reads hf_phase_refused and stops. The flag is sticky per process. */
+static int hf_refused;
+
 unsigned char *hf_frames(long *n) {
-    if (!hf_fr) hf_load();
+    if (!hf_fr) {
+        const char *e = sy_env("UNISACC_PHASE");
+        if (hf_load() && e && e[0] == 'B' && e[1] == 0) hf_refused = 1;
+    }
     if (n) *n = hf_frn;
     return hf_fr;
+}
+
+/* Hand the kept frames and attribute table back as fresh copies (frames
+   are never empty after a load; attrs may be 0/0) and drop the hold. The
+   copies belong to the caller. 1 when nothing is held or memory is short. */
+int hf_take(unsigned char **fr, long *frn, unsigned char **at, long *atn) {
+    unsigned char *f;
+    unsigned char *a;
+    *fr = 0; *frn = 0; *at = 0; *atn = 0;
+    if (!hf_frames(0) || hf_frn <= 0) return 1;
+    f = mm_alloc(hf_frn);
+    if (!f) return 1;
+    hf_copy(f, hf_fr, hf_frn);
+    a = 0;
+    if (hf_atn > 0) {
+        a = mm_alloc(hf_atn);
+        if (!a) { mm_free(f); return 1; }
+        hf_copy(a, hf_at, hf_atn);
+    }
+    *fr = f; *frn = hf_frn; *at = a; *atn = hf_atn;
+    hf_drop();
+    return 0;
+}
+
+/* 1 when the first-pass forwarding stub exists at PATH; absent or no path is 0.
+   Any other stat failure also counts as present so the stub route reports the
+   real error instead of silently going stub-less. */
+int hf_stub_present(const char *path) {
+    if (!path || !path[0]) return 0;
+    return sy_exists(path) != 0;
+}
+
+int hf_phase_refused(void) {
+    return hf_refused;
 }
 
 unsigned char *hf_attrs(long *n) {
