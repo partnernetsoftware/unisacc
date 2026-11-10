@@ -1,0 +1,88 @@
+/* tools/check-devtime.cx -- append/report 与 UNMEASURED。
+ *   sh ./unisacc.com tools/check-devtime.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { tool_die("check-devtime", s, 0, 2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-devtime.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int run_tool(char **v, char *out, int cap, int *rc) {
+    np_result r = {0};
+    if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+    *rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        if (r.out && mm_copy(out, cap, r.out, (long)n)) die("copy");
+        out[n] = 0;
+    }
+    np_free(&r);
+    return 0;
+}
+
+int main(void) {
+    char dir[4400], tool[4400], file[4400], out[4000];
+    char *v[16];
+    int rc;
+    FILE *fp;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/devtime-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(file, sizeof file, "%s/agentwork/devtime.tsv", dir) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/devtime.cx", root)) die("fmt");
+    if (mkdir(dir, 0700) && errno != EEXIST) die("mkdir");
+    {
+        char aw[4400];
+        if (cx_fmt(aw, sizeof aw, "%s/agentwork", dir)) die("fmt");
+        mkdir(aw, 0700);
+        fp = fopen(file, "w");
+        if (!fp) die("open tsv");
+        fputs("task_id\t窗口\t开始\t交付\t落地\t阻塞原因类别\t备注\n", fp);
+        fclose(fp);
+    }
+    {
+        char com[4400];
+        if (cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com")) die("fmt");
+        v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = "append";
+        v[5] = "T1"; v[6] = "omp-grk2"; v[7] = "100"; v[8] = "160"; v[9] = "200";
+        v[10] = "链缺陷"; v[11] = "src=ledger"; v[12] = 0;
+        /* append writes cwd/agentwork -- chdir via np cwd=dir */
+        {
+            np_result r = {0};
+            if (np_run(v, dir, 0, 55, &r, why, sizeof why)) die(why);
+            rc = r.rc;
+            ck(rc == 0 && r.out && strstr(r.out, "DEVTIME_APPEND"), "append");
+            np_free(&r);
+        }
+        v[4] = "append"; v[5] = "T2"; v[7] = "UNMEASURED"; v[8] = "UNMEASURED"; v[9] = "UNMEASURED";
+        v[10] = "其它"; v[11] = "src=/tmp/x.patch";
+        {
+            np_result r = {0};
+            if (np_run(v, dir, 0, 55, &r, why, sizeof why)) die(why);
+            ck(r.rc == 0, "append-unmeasured");
+            np_free(&r);
+        }
+        v[4] = "report"; v[5] = file; v[6] = 0;
+        run_tool(v, out, sizeof out, &rc);
+        ck(rc == 0 && strstr(out, "DEVTIME_REPORT"), "report-line");
+        ck(strstr(out, "链缺陷\t60\t") != 0, "cat-seconds");
+        ck(strstr(out, "unmeasured=1") != 0, "unmeasured-count");
+        v[4] = "append"; v[5] = "T3"; v[6] = "w"; v[7] = "1"; v[8] = "2"; v[9] = "3"; v[10] = "不是类别"; v[11] = "x"; v[12] = 0;
+        {
+            np_result r = {0};
+            if (np_run(v, dir, 0, 55, &r, why, sizeof why)) die(why);
+            ck(r.rc == 2, "bad-category-rc2");
+            np_free(&r);
+        }
+    }
+    printf("CHECK_DEVTIME\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
