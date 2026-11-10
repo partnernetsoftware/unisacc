@@ -167,6 +167,51 @@ int main(void) {
         }
         unsetenv("S9_FAKE_LONG");
     }
+    /* 出口与 deadline: 假 s9 要求 step 带 UNISACC_BOUND_DEADLINE_MONO(缺则 rc=2, 编排 FAIL step=step) */
+    {
+        char *w[16];
+        char *rmx[] = {"rm", "-f", logp, 0, 0, 0};
+        char pa[4400], pb[4400], pc[4400];
+        cx_fmt(pa, sizeof pa, "%s/a.start", runp); cx_fmt(pb, sizeof pb, "%s/a.done", runp); cx_fmt(pc, sizeof pc, "%s/b.start", runp);
+        w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = runp;
+        w[6] = "--tier"; w[7] = "commit"; w[8] = "--date"; w[9] = "2026-11-12"; w[10] = "--fake"; w[11] = fake; w[12] = 0;
+        unsetenv("S9_FAKE_LONG");
+        setenv("S9_FAKE_SLEEP", "0", 1);
+        /* 无 S9_WT 行即转 aggregate(一步即出口, 状态 PASS) */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        setenv("S9_FAKE_MODE", "nowt", 1);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        {
+            size_t n; char *s = cx_read(logp, &n); int steps = 0; const char *q = s;
+            while (q && (q = strstr(q, "step\n"))) { steps++; q += 5; }
+            ck(rc == 0 && strstr(buf, "status=PASS") && s && steps == 1 && strstr(s, "aggregate"), "no-wt-goes-aggregate");
+            free(s);
+        }
+        /* 有 S9_WT 且 start==done: 不转 aggregate, 继续 step(第 2 步无 S9_WT 才结束) */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        { char *r2[] = {"rm", "-f", pa, pb, pc, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
+        setenv("S9_FAKE_MODE", "alldone", 1);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        {
+            size_t n; char *s = cx_read(logp, &n); int steps = 0; const char *q = s;
+            while (q && (q = strstr(q, "step\n"))) { steps++; q += 5; }
+            ck(rc == 0 && strstr(buf, "status=PASS") && steps == 2, "start-eq-done-with-wt-continues");
+            free(s);
+        }
+        /* UNKNOWN: b 有 start 无 done, 对 b 调 retry 一次再 aggregate */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        { char *r2[] = {"rm", "-f", pa, pb, pc, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
+        setenv("S9_FAKE_MODE", "unk", 1);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        {
+            size_t n; char *s = cx_read(logp, &n);
+            const char *r1 = s ? strstr(s, "retry") : 0;
+            ck(rc == 0 && r1 && strstr(r1, " b") && !strstr(r1 + 5, "retry") && strstr(s, "aggregate"), "unknown-retry-once-then-aggregate");
+            free(s);
+        }
+        { char *r2[] = {"rm", "-f", pa, pb, pc, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
+        unsetenv("S9_FAKE_MODE");
+    }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
     return failed ? 1 : 0;

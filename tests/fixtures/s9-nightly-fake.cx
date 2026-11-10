@@ -33,7 +33,46 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(verb, "step")) {
         size_t n; char *s;
-        if (slp && slp[0] == '3') sy_sleep_ms(3000);
+        /* 与真 s9-shards 同合同:必须带 UNISACC_BOUND_DEADLINE_MONO,且剩余在 (0,300.5] 内(单调时钟) */
+        {
+            const char *dl = getenv("UNISACC_BOUND_DEADLINE_MONO");
+            char *e = 0;
+            sy_ts_t t;
+            double end, left;
+            if (!dl) { printf("FAIL supervisor-deadline-required\n"); return 2; }
+            end = strtod(dl, &e);
+            if (!e || *e || sy_mono(&t)) { printf("FAIL deadline-parse\n"); return 2; }
+            left = end - ((double)t.sec + (double)t.nsec / 1e9);
+            if (left <= 0 || left > 300.5) { printf("FAIL outer-budget-300\n"); return 2; }
+        }
+        if (slp && slp[0] == '3') sy_sleep_ms(8000);
+        {
+            const char *m = getenv("S9_FAKE_MODE");
+            if (m && !strcmp(m, "nowt")) { printf("STEP_FINISHED\n"); return 3; }   /* 无 S9_WT:无新片 */
+            if (m && !strcmp(m, "unk") && argc > 3) {                               /* a 完成, b 有 start 无 done */
+                char p[4400];
+                const char *names[] = {"a.start", "a.done", "b.start"};
+                for (int q = 0; q < 3; q++) {
+                    FILE *f;
+                    if (cx_fmt(p, sizeof p, "%s/%s", argv[3], names[q])) die("path");
+                    f = fopen(p, "w");
+                    if (f) { fputs("x\n", f); fclose(f); }
+                }
+                printf("S9\tUNKNOWN\n");
+                return 3;
+            }
+            if (m && !strcmp(m, "alldone") && argc > 3) {                           /* start==done 且仍有 S9_WT */
+                char p[4400];
+                const char *names[] = {"a.start", "a.done"};
+                for (int q = 0; q < 2; q++) {
+                    FILE *f;
+                    if (cx_fmt(p, sizeof p, "%s/%s", argv[3], names[q])) die("path");
+                    f = fopen(p, "w");
+                    if (f) { fputs("x\n", f); fclose(f); }
+                }
+                /* 落到下面通用逻辑: 第 1 步 S9_WT 待续, 第 2 步无 S9_WT 结束 */
+            }
+        }
         s = cx_read(logp, &n);
         if (s) {
             int steps = 0; size_t i;
@@ -43,14 +82,15 @@ int main(int argc, char **argv) {
             int need = (lg && lg[0]) ? atoi(lg) : 2; /* S9_FAKE_LONG=N: 前 N-1 次 step 均 PENDING,使编排日志超限 */
             if (steps < need) {
                 /* LONG 模式: 每步一行约 150 字节状态文本, 使日志快速超限 */
-                if (lg && lg[0]) printf("STEP_FINISHED PENDING shard-status-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789\n");
-                else printf("STEP_FINISHED PENDING\n");
+                if (lg && lg[0]) printf("S9_WT\tshard-status-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789-0123456789\n");
+                else printf("S9_WT\tSTEP_FINISHED PENDING\n");
                 return 3;
             }
         }
         printf("STEP_DONE\n");
         return 0;
     }
+    if (!strcmp(verb, "retry")) { printf("S9\tPENDING\treason=explicit-unknown-retry\n"); return 3; }
     if (!strcmp(verb, "aggregate")) { printf("S9 COMMIT_ONLY status=PASS pending=0\n"); return 0; }
     return 2;
 }
