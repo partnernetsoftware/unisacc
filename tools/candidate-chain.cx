@@ -359,15 +359,28 @@ static int parse_par(const char *s) {
     if (n < 1) return -1;
     return n;
 }
+static void worker_nm_ok(const char *obj) {
+    char *v[4];
+    char *text = 0;
+    size_t n = 0;
+    long at;
+    v[0] = "nm"; v[1] = "-u"; v[2] = (char *)obj; v[3] = 0;
+    if (cx_runv_timeout(v, 8, &text, &n) || !text) { free(text); die("nm", obj); }
+    at = tx_find(text, (long)n, "setpgid", 7);
+    free(text);
+    if (at >= 0) die("REFUSE worker.o libc setpgid", obj);
+}
+
 
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
-    const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0;
+    const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
+        if (tx_eqz(argv[i], "--worker-nm") && i + 1 < argc) { wnm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--resume")) { resume = 1; continue; }
         if (tx_eqz(argv[i], "--verify-snap") && i + 2 < argc) { vs_dir = argv[++i]; vs_rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
@@ -383,6 +396,7 @@ int main(int argc, char **argv) {
         }
         die("REFUSE unknown/duplicate option", argv[i]);
     }
+    if (wnm) { worker_nm_ok(wnm); sy_printf("WORKER_NM_OK\t%s\n", wnm); return 0; }
     if (vs_dir) {
         if (!vs_rev || !hex40(vs_rev)) die("REFUSE --rev 40-hex required", vs_rev);
         if (!idhelp) die("REFUSE --identity-helper required", vs_dir);
@@ -602,6 +616,11 @@ int main(int argc, char **argv) {
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
         }
         mark(outdir, "wf-prepare", sy_now_ms() - t0);
+        {
+            char wo[4400];
+            if (cx_fmt(wo, sizeof wo, "%s/worker.o", nout)) die("path", "wo");
+            worker_nm_ok(wo);
+        }
     } else sy_printf("RESUME\twf-prepare\n");
 
     if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front0"))) {
