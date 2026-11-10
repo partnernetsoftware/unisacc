@@ -1123,8 +1123,21 @@ int main(int argc, char **argv) {
         argv[argc] = 0;
     }
     if (argc >= 2 && (tx_eqz(argv[1], "p3") || tx_eqz(argv[1], "slice"))) {
+        /* ROOT is either a git work tree (frozen here into ROOT/out/release-snap-<rev>, as every
+           caller since 0.0.44 expects) or an already-frozen snapshot (no .git; must carry
+           include/cx-flat.h, the p3 header source).  candidate-chain passes the snapshot: freezing
+           it ran `git archive` outside a repository, and while rb_die did not exit (0.0.50 D) the
+           failure was silent, argv[2] pointed at an empty snapshot and p3 built a 1534381-byte
+           package with no \0hdr/ resources (chain g1 then failed "no such file cx.h"). */
+        char gitdir[4400], flat[4400];
         if (argc < 3) rb_die("root");
-        rb_freeze(rev, &argv[2]);
+        if (cx_fmt(gitdir, sizeof gitdir, "%s/.git", argv[2]) || cx_fmt(flat, sizeof flat, "%s/include/cx-flat.h", argv[2])) rb_die("root path");
+        if (sy_exists(gitdir) == 1) rb_freeze(rev, &argv[2]);
+        else if (sy_exists(flat) == 1) {
+            if (!tx_eqz(rev, "HEAD")) rb_die("--rev needs a git work tree root, got a snapshot");
+            sy_printf("release-build\tsnapshot\t%s\n", argv[2]);
+        }
+        else rb_die("root is neither a git work tree (.git) nor a frozen snapshot (include/cx-flat.h)");
     }
     if (argc >= 2 && tx_eqz(argv[1], "p3")) return rb_p3(argc, argv);
     if (argc >= 2 && tx_eqz(argv[1], "slice")) return rb_slice(argc, argv);
