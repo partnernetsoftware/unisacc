@@ -1,0 +1,114 @@
+/* tools/check-real-input-check.cx -- real-input-check 合同:用私有表验证正控与负控。
+ * 正控:rc/文本/sha 前缀全符合则 PASS;负控:rc 不符、输出缺片段、requires 缺失、sha 前缀不符、
+ * 坏表头、重复 id、超时越界各自必须变红(FAIL 行或退出码 2)。只用 true/echo 类系统命令的等价物:
+ * 以 `sh ./unisacc.com -c` 不可得,故用 tools/version-inject.cx 的缺参 rc2 与 release-layout 缺参作被测命令。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096], td[4400];
+static void ck(int ok, const char *n) {
+    sy_printf("%s\tcheck-real-input-check.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static int has(const char *b, const char *s) { return tx_find(b, tx_len(b, 1 << 16), s, tx_len(s, 256)) >= 0; }
+
+#define HDR "id\targs\texpect_rc\texpect_text\ttimeout_s\trequires\tpost_sha\n"
+
+/* 写私有表并运行工具;返回子进程 rc(-1 spawn 失败),输出拼入 buf */
+static int run_table(const char *rows, char *buf, long cap) {
+    char tbl[4600], tool[4600], body[4096], com[4600];
+    char *v[8];
+    np_result r = {0};
+    char why[256] = {0};
+    int rc = -1;
+    long i, m, o;
+    if (cx_fmt(tbl, sizeof tbl, "%s/t.tsv", td) || cx_fmt(tool, sizeof tool, "%s/tools/real-input-check.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return -2;
+    if (cx_fmt(body, sizeof body, "%s", rows)) return -2;
+    if (cx_write(tbl, body, (size_t)tx_len(body, sizeof body))) return -2;
+    v[0] = (char *)"sh"; v[1] = com; v[2] = tool; v[3] = (char *)"--";
+    v[4] = (char *)"--table"; v[5] = tbl; v[6] = 0;
+    buf[0] = 0;
+    if (np_run(v, root, 0, 55, &r, why, sizeof why) == 0) {
+        m = (long)r.errn; o = (long)r.outn;
+        if (m > cap - 1) m = cap - 1;
+        for (i = 0; i < m; i++) buf[i] = r.err[i];
+        if (m + o > cap - 1) o = cap - 1 - m;
+        for (i = 0; i < o; i++) buf[m + i] = r.out[i];
+        buf[m + o] = 0;
+        rc = r.rc;
+    }
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char buf[8192];
+    int rc;
+    if (sy_cwd(root, sizeof root)) return 2;
+    if (cx_fmt(td, sizeof td, "%s/real-input-check-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+
+    /* 被测命令:release-build 无参 rc1 + "release-build: root";version-inject 无参 rc2 + usage */
+    rc = run_table(HDR "ok\ttools/release-build.cx;--;p3\t1\trelease-build: root\t55\t-\t-\n", buf, sizeof buf);
+    ck(rc == 0 && has(buf, "PASS\treal-input.ok") && has(buf, "REAL_INPUT\tfailed=0"), "positive-control");
+
+    rc = run_table(HDR "r\ttools/release-build.cx;--;p3\t0\trelease-build: root\t55\t-\t-\n", buf, sizeof buf);
+    ck(rc == 1 && has(buf, "FAIL\treal-input.r") && has(buf, "rc=1 want 0") && has(buf, "failed=1"), "neg-rc-mismatch");
+
+    rc = run_table(HDR "t\ttools/release-build.cx;--;p3\t1\tNO_SUCH_TEXT_XYZ\t55\t-\t-\n", buf, sizeof buf);
+    ck(rc == 1 && has(buf, "FAIL\treal-input.t") && has(buf, "output lacks"), "neg-text-missing");
+
+    rc = run_table(HDR "q\ttools/release-build.cx;--;p3\t1\t-\t55\t/no/such/real/input\t-\n", buf, sizeof buf);
+    ck(rc == 1 && has(buf, "FAIL\treal-input.q") && has(buf, "missing real input"), "neg-requires-missing-is-red-not-skip");
+
+    rc = run_table(HDR "s\ttools/release-build.cx;--;p3\t1\t-\t55\t-\t{tmp}/none=00\n", buf, sizeof buf);
+    ck(rc == 1 && has(buf, "FAIL\treal-input.s") && has(buf, "post_sha: cannot read"), "neg-post-sha-unreadable");
+
+    rc = run_table(HDR "s\ttools/release-build.cx;--;p3\t1\t-\t55\ttools/real-input-check.cx\ttools/real-input-check.cx=ffffffff\n", buf, sizeof buf);
+    ck(rc == 1 && has(buf, "FAIL\treal-input.s") && has(buf, "lacks prefix"), "neg-post-sha-prefix");
+
+    rc = run_table("id\targs\n", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "table error") && has(buf, "header"), "neg-bad-header");
+
+    rc = run_table(HDR "d\ttools/release-build.cx;--;p3\t1\t-\t55\t-\t-\nd\ttools/release-build.cx;--;p3\t1\t-\t55\t-\t-\n", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "duplicate id"), "neg-duplicate-id");
+
+    rc = run_table(HDR "w\ttools/release-build.cx;--;p3\t1\t-\t61\t-\t-\n", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "timeout_s must be 1..60"), "neg-timeout-over-60");
+
+    rc = run_table(HDR "c\ttools/release-build.cx;--;p3\t1\t-\t55\t-\n", buf, sizeof buf);
+    ck(rc == 2 && has(buf, "exactly 7 TAB fields"), "neg-short-row");
+
+    /* 真实清单:列表必须含四类首批输入 */
+    {
+        char tool[4600], com[4600];
+        char *v[7];
+        np_result r = {0};
+        char why[128] = {0};
+        int ok = 0;
+        if (!cx_fmt(tool, sizeof tool, "%s/tools/real-input-check.cx", root) && !cx_fmt(com, sizeof com, "%s/unisacc.com", root)) {
+            v[0] = (char *)"sh"; v[1] = com; v[2] = tool; v[3] = (char *)"--"; v[4] = (char *)"--list"; v[5] = 0;
+            if (np_run(v, root, 0, 55, &r, why, sizeof why) == 0 && r.rc == 0) {
+                ok = has((const char *)r.out, "release-build-p3-missing-args") && has((const char *)r.out, "release-build-slice-missing-args") &&
+                     has((const char *)r.out, "release-ape-smoke-installed-product") && has((const char *)r.out, "version-inject-win-arm64-b2-image") &&
+                     has((const char *)r.out, "release-layout-check-rel50");
+            }
+            np_free(&r);
+        }
+        ck(ok, "real-table-has-first-batch");
+    }
+    {
+        char rmc[4600];
+        char *v[4] = {(char *)"sh", (char *)"-c", rmc, 0};
+        np_result q = {0};
+        char w[128] = {0};
+        if (!cx_fmt(rmc, sizeof rmc, "rm -rf '%s'", td)) { np_run(v, root, 0, 20, &q, w, sizeof w); np_free(&q); }
+    }
+    sy_printf("CHECK_REAL_INPUT_CHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
