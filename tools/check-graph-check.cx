@@ -112,6 +112,14 @@ static void route_expect(const char *name, const char *graph, const char *route,
     else { printf("FAIL\t%s\twant route_mismatch=%ld %s %s, got rc=%d route_mismatch=%ld\n%s\n", name, want_rm, row1 ? row1 : "-", row2 ? row2 : "-", rc, m, out ? out : "(none)"); failed++; }
     if (out) mm_free(out);
 }
+/* one summary field of graph-check run on GRAPH with chain source ROUTE; -1 when it did not run */
+static long route_field(const char *graph, const char *route, const char *key) {
+    char *out = 0; size_t n = 0; long m;
+    run(graph, chain_ok, hard, route, &out, &n);
+    m = out ? field(out, n, key) : -1;
+    if (out) mm_free(out);
+    return m;
+}
 /* overwrite every FROM in b[0..n) by TO (same length); the number of hits */
 static int swap_all(char *b, long n, const char *from, const char *to) {
     long fl = tx_len(from, 128), i = 0; int hits = 0;
@@ -139,8 +147,25 @@ static void route_cases(void) {
     if (cx_fmt(src, sizeof src, "%sint main(void) {\n    if (rs(\"win/x86_64\", \"win-x86_64\")) return 1;\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN)
         || put("route-order.cx", src, rp, sizeof rp)) { printf("FAIL\troute-order\twrite\n"); failed++; return; }
     route_expect("route-order", gp, rp, 1, "ROUTE_MISMATCH\twin-x86_64\t(order)\tgraph=front,merge,units (", "chain=units,front,merge (");
-    sy_unlink(rp); sy_unlink(gp); sy_unlink(gp2);
-    /* the real graph against the real chain driver, then against a copy that routes Win like Mac */
+    sy_unlink(rp);
+    /* a chain source with no "gen1-%s-" tag at all (a rewritten driver): named, exit != 0, never "0 mismatches" */
+    {   char *out = 0; size_t n = 0; int rc, ok;
+        if (put("route-notags.cx", "static int go(const char *t) { return run_table(t); }\nint main(void) {\n    if (go(\"win/x86_64\")) return 1;\n    mark(outdir, \"done\", 0);\n}\n", rp, sizeof rp)) { printf("FAIL\troute-unrecognized\twrite\n"); failed++; return; }
+        rc = run(gp, chain_ok, hard, rp, &out, &n);
+        ok = out && rc != 0 && rc != -1 && tx_contains(out, (long)n, "ROUTE_UNRECOGNIZED\t", 19) && tx_contains(out, (long)n, "route-notags.cx\tno function holds a \"gen1-%s-PHASE\" tag", 55)
+             && field(out, n, "route_fns=") == 0;
+        if (ok) { printf("PASS\troute-unrecognized\trc=%d\troute_fns=0\n", rc); passed++; }
+        else { printf("FAIL\troute-unrecognized\twant rc!=0 with a ROUTE_UNRECOGNIZED row and route_fns=0, got rc=%d\n%s\n", rc, out ? out : "(none)"); failed++; }
+        if (out) mm_free(out);
+        sy_unlink(rp);
+    }
+    sy_unlink(gp); sy_unlink(gp2);
+    /* the real graph against the real chain driver: what is recognised, then that nothing differs, then a
+       copy that routes Win like Mac.  The copy's count is the real count plus 8, so a difference that is
+       already in the tree is reported once (by route-real), not twice. */
+    {   long fns = route_field("build/graph.tsv", "tools/candidate-chain.cx", "route_fns="), evs = route_field("build/graph.tsv", "tools/candidate-chain.cx", "route_events=");
+        if (fns >= 2 && evs >= 12) { printf("PASS\troute-real-recognized\troute_fns=%ld\troute_events=%ld\n", fns, evs); passed++; }
+        else { printf("FAIL\troute-real-recognized\twant route_fns>=2 route_events>=12, got %ld %ld\n", fns, evs); failed++; } }
     route_expect("route-real", "build/graph.tsv", "tools/candidate-chain.cx", 0, 0, 0);
     {   size_t n = 0; char *b = cx_read("tools/candidate-chain.cx", &n); int h1, h2, h3;
         if (!b) { printf("FAIL\troute-real-win-as-mac\tcannot read tools/candidate-chain.cx\n"); failed++; return; }
@@ -151,7 +176,8 @@ static void route_cases(void) {
             printf("FAIL\troute-real-win-as-mac\tanchors moved in tools/candidate-chain.cx (hits %d %d %d, want 1 1 2) or write failed\n", h1, h2, h3); failed++; free(b); return;
         }
         free(b);
-        route_expect("route-real-win-as-mac", "build/graph.tsv", rp, 8, "ROUTE_MISMATCH\twin-x86_64\tstub\tgraph=absent (", "ROUTE_MISMATCH\twin-arm64\tunits\tgraph=gen1.win-arm64.units (build/graph.tsv:");
+        {   long base = route_field("build/graph.tsv", "tools/candidate-chain.cx", "route_mismatch=");
+            route_expect("route-real-win-as-mac", "build/graph.tsv", rp, base + 8, "ROUTE_MISMATCH\twin-x86_64\tstub\tgraph=absent (", "ROUTE_MISMATCH\twin-arm64\tunits\tgraph=gen1.win-arm64.units (build/graph.tsv:"); }
         sy_unlink(rp);
     }
 }

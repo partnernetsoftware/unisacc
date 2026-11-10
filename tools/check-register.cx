@@ -175,14 +175,19 @@ static int run_in(const char *cwd, char **argv, char *out, long cap) {
 }
 static void sha_of(const char *p, char *h) { size_t n = 0; char *b = cx_read(p, &n); if (!b) die("read", p); cx_sha256_hex(b, (long)n, h); free(b); }
 
-/* --root-preflight: register started in a root without ./unisacc.com and/or out/ (a private clone) must
-   refuse by name with the fixing command and exit 2 before anything is written.  The root is an empty
-   temp directory used as the child's cwd; register itself is this checkout's, started by absolute path. */
-static int root_preflight(void) {
+/* --root-preflight [DRIVER]: register started in a root without ./unisacc.com and/or out/ (a private clone)
+   must refuse by name with the fixing command and exit 2 before anything is written.  The root is an empty
+   temp directory used as the child's cwd; register itself is this checkout's, started by absolute path.
+   DRIVER (absolute, or relative to this root) selects another register source for a paired run: the
+   pre-fix register (git show eae7faf84a^:tools/register.cx) must turn the named-refusal items red. */
+static int root_preflight(const char *driver) {
     static char out[1 << 15]; char hold[4400], com[4400], drv[4400], outdir[4400], fake[4400], hb[65], hc[65], h[65]; int rc;
     char *a[] = {"env", envtables, "sh", com, drv, "--", "cr-root", "tools/register-fixture.cx", "REGISTER_FIXTURE_OK", "root preflight row", "tools/register-fixture.cx", "interfaces", 0};
     if (cx_fmt(hold, sizeof hold, "/tmp/check-register-root-XXXXXX") || !mkdtemp(hold)) die("mkdtemp", "root");
-    pjoin(com, sizeof com, root, "unisacc.com"); pjoin(drv, sizeof drv, root, DRIVER);
+    pjoin(com, sizeof com, root, "unisacc.com");
+    if (driver[0] == '/') { if (cx_fmt(drv, sizeof drv, "%s", driver)) die("path bound", driver); } else pjoin(drv, sizeof drv, root, driver);
+    if (sy_exists(drv) != 1) die("no such driver", drv);
+    printf("ROOT_PREFLIGHT_DRIVER\t%s\n", drv);
     pjoin(outdir, sizeof outdir, hold, "out"); pjoin(fake, sizeof fake, hold, "unisacc.com");
     sha_of(bpath, hb); sha_of(cpath, hc);
     /* neither: both are named, each with its fix */
@@ -222,7 +227,7 @@ static int root_preflight(void) {
 int main(int argc,char **argv) {
     int args_only=argc==2&&!strcmp(argv[1],"--args-check");
     int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
-    int root_only=argc==2&&!strcmp(argv[1],"--root-preflight");
+    int root_only=(argc==2||argc==3)&&!strcmp(argv[1],"--root-preflight");
     if(argc!=1&&!args_only&&!metadata_only&&!root_only)return 2;
     static char abuf[1 << 15], bbuf[1 << 15];
     char *av0[16], *av1[16], *v[2] = { av0, av1 };
@@ -261,7 +266,7 @@ int main(int argc,char **argv) {
     if (!sy_exists(fx)) die("missing fixture", fx);
 
     if(metadata_only)return metadata_rollback(argc==3?argv[2]:DRIVER);
-    if(root_only)return root_preflight();
+    if(root_only)return root_preflight(argc==3?argv[2]:DRIVER);
 
     if(args_only){
         char *args[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-args",fx,"REGISTER_FIXTURE_ARGS_OK","explicit argv fixture",fx,"interfaces","product","--args","alpha;beta",0};

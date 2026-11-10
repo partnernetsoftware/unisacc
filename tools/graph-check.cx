@@ -24,11 +24,16 @@
  *     phases of the chain and are ignored.  Each difference is one row
  *       ROUTE_MISMATCH<TAB>target<TAB>phase<TAB>graph=...<TAB>chain=...
  *     (present on one side only, or the same phases in another order).  g2/g3 aggregate nodes are
- *     not compared: the chain builds only the linux slices there.
+ *     not compared: the chain builds only the linux slices there.  The chain side is recognised by
+ *     source shape, so the summary says how much was seen: route_fns (distinct route functions) and
+ *     route_events (target/phase runs).  A chain source with no route function at all is a row
+ *       ROUTE_UNRECOGNIZED<TAB>file<TAB>reason
+ *     and exit 1: a rewritten driver must not pass as "no mismatch".
  *
- * Output: FAIL/ORDER_MISMATCH/HARDWIRE/ROUTE_MISMATCH rows, then
- *   GRAPH_CHECK<TAB>nodes=N<TAB>edges=M<TAB>cycles=C<TAB>order_mismatch=K<TAB>hardwire=H<TAB>route_mismatch=R
- * Exit 0 when no structure failure and K == 0 and R == 0; 1 otherwise; 2 on IO/usage errors. */
+ * Output: FAIL/ORDER_MISMATCH/HARDWIRE/ROUTE_MISMATCH/ROUTE_UNRECOGNIZED rows, then
+ *   GRAPH_CHECK<TAB>nodes=N<TAB>edges=M<TAB>cycles=C<TAB>order_mismatch=K<TAB>hardwire=H<TAB>route_mismatch=R<TAB>route_fns=F<TAB>route_events=E
+ * (F and E are 0 under --no-route).  Exit 0 when no structure failure, K == 0, R == 0 and no
+ * ROUTE_UNRECOGNIZED row; 1 otherwise; 2 on IO/usage errors. */
 #pragma unisa use sys.fs
 #pragma unisa use text.text
 #pragma unisa use mem.heap
@@ -224,6 +229,7 @@ typedef struct { char target[32], phase[32], via[64]; int line; long pos; } REv;
 static RFn rfn[64]; static int nrfn;
 static REv rev[512]; static int nrev;
 static char rvocab[32][32]; static int nrv;
+static int route_fns, route_blind;
 static int ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 static void put_s(char *dst, long cap, const char *s, long n) { if (n > cap - 1) n = cap - 1; if (n < 0) n = 0; tx_copy(dst, cap, s, n); dst[n] = 0; }
 /* front0, front1, front%d are the one phase "front" */
@@ -365,6 +371,11 @@ static void check_route(void) {
     b = slurp(route_path, &n);
     for (k = 0; k < 6; k++) vocab(base[k]);
     route_functions(b, n); route_calls(b, n); route_inline(b, n);
+    for (i = 0; i < nrfn; i++) { for (k = 0; k < i; k++) if (tx_eqz(rfn[k].fn, rfn[i].fn)) break; if (k == i) route_fns++; }
+    if (!route_fns) {   /* the reader is shape based: seeing nothing is a blind check, not a consistent route */
+        printf("ROUTE_UNRECOGNIZED\t%s\tno function holds a \"gen1-%%s-PHASE\" tag: the chain driver's route shape changed and this check cannot see its per-target phases\n", route_path);
+        route_blind = 1;
+    }
     for (i = 1; i < nrev; i++) {   /* source order; stable, so one call keeps its phases in tag order */
         REv x = rev[i]; for (k = i; k > 0 && rev[k - 1].pos > x.pos; k--) rev[k] = rev[k - 1];
         rev[k] = x;
@@ -412,6 +423,6 @@ int main(int argc, char **argv) {
     check_order();
     if (!no_hard) check_hardwire();
     if (!no_route) check_route();
-    printf("GRAPH_CHECK\tnodes=%d\tedges=%ld\tcycles=%ld\torder_mismatch=%ld\thardwire=%ld\troute_mismatch=%ld\n", nn, edges, cycles, mism, hard, rmis);
-    return fails || mism || rmis ? 1 : 0;
+    printf("GRAPH_CHECK\tnodes=%d\tedges=%ld\tcycles=%ld\torder_mismatch=%ld\thardwire=%ld\troute_mismatch=%ld\troute_fns=%d\troute_events=%d\n", nn, edges, cycles, mism, hard, rmis, route_fns, nrev);
+    return fails || mism || rmis || route_blind ? 1 : 0;
 }
