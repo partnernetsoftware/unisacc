@@ -1,0 +1,57 @@
+/* tools/check-release-usage.cx -- 负控(0.0.50):release-build 缺参数必须干净退出。
+ * 背景:rb_die 在 D 集成时丢了 sy_exit(1),p3 只给 ROOT 时打印 usage 后继续执行,
+ * 越界读 argv[3] 以 SIGSEGV(139) 退出;0.0.49 同调用是干净的 rc1。本检查钉住:
+ *   U1 p3 只给 ROOT(缺 SRC_PKG/OUT_PKG) -> rc1 且 stderr 有 usage 行,绝不能 139/11;
+ *   U2 slice 只给 ROOT(缺 PKG/OUT) -> 同上;
+ *   U3 rb_die 源文本必须含 sy_exit(回归钉:防再次被误删)。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use sys.sig
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static char root[4096];
+
+static void ck(int ok, const char *n) {
+    sy_printf("%s\tcheck-release-usage.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static long tlen(const char *s) { return tx_len(s, 1 << 20); }
+static int run(char **v, char *err, int cap) {
+    np_result r = {0}; char why[512] = {0}; int rc;
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { np_free(&r); return 125; }
+    rc = r.rc;
+    if (err) { long m = (long)r.errn; if (m > cap - 1) m = cap - 1;
+      { long i; for (i = 0; i < m; i++) err[i] = r.err[i]; } err[m > 0 ? m : 0] = 0; }
+    np_free(&r);
+    return rc;
+}
+static int has(const char *b, const char *s) { return tx_find(b, tlen(b), s, tlen(s)) >= 0; }
+
+int main(void) {
+    char err[8192]; char *v[6]; int rc;
+    if (sy_cwd(root, sizeof root)) return 2;
+    v[0] = "sh"; v[1] = "unisacc.com"; v[2] = "tools/release-build.cx"; v[3] = "--";
+    v[4] = "p3"; v[5] = ".";
+    { char *w[7]; int k; for (k = 0; k < 6; k++) w[k] = v[k]; w[6] = 0;
+      rc = run(w, err, sizeof err); }
+    ck(rc == 1, "U1 p3 missing args exits 1 (not segv)");
+    ck(has(err, "release-build: rev") || has(err, "usage"), "U1 clean refusal on stderr");
+    ck(has(err, "usage: p3 ROOT SRC_PKG OUT_PKG") || has(err, "release-build: rev"), "U1 refusal line present");
+    /* U2: slice 只给 ROOT */
+    v[4] = "slice"; v[5] = root; { char *w[7]; int k; for (k = 0; k < 6; k++) w[k] = v[k]; w[6] = 0;
+      rc = run(w, err, sizeof err); }
+    ck(rc == 1, "U2 slice missing args exits 1 (not segv)");
+    ck(has(err, "release-build:") , "U2 clean refusal");
+    /* U3: rb_die 必须退出 */
+    { char p[4400]; size_t n; char *b;
+      if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) return 2;
+      b = (char *)cx_read(p, &n);
+      ck(b && tx_find(b, (long)n, "sy_eprintf(\"release-build: %s\\n\", s);\n    sy_exit(1);", 53) >= 0, "U3 rb_die exits");
+      if (b) (void)b; }
+    sy_printf("CHECK_RELEASE_USAGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
