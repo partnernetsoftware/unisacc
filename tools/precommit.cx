@@ -7,6 +7,8 @@
  * (exit 1) when any offending ratchet row names one of those paths: a new #include, a new direct libc/POSIX
  * call, a new platform #if or raw syscall outside L0, a new unbounded call -- the drift back to traditional C.
  * Rows about files not in this commit (other agents' work) do not block it.  No staged .cx: exit 0 at once.
+ * Also runs tools/cx-lint.cx over the staged .cx index blobs: R2 findings (unbounded child call, missing
+ * "--" before a .cx tool's --option) block, R1 findings are printed as report-only.
  * Prints PRECOMMIT<TAB>staged_cx=N<TAB>blocked=B. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
@@ -16,15 +18,26 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.env
 #pragma unisa use sys.time
+#pragma unisa use sys.poll
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
+#define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
 static char *slurp(char **argv, long *n) {
-    int ofd, pid; long cap = 1 << 16, r; char *b = mm_alloc(cap);
+    int ofd, pid; long cap = 1 << 16, r, deadline; char *b = mm_alloc(cap);
     *n = 0;
     if (!b) return 0;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return 0;
-    while ((r = sy_read(ofd, b + *n, cap - 1 - *n)) > 0) {
+    deadline = sy_now_ms() + SLURP_DEADLINE_MS;
+    for (;;) {
+        sy_pollfd_t pf; long left = deadline - sy_now_ms();
+        pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
+        if (left <= 0 || sy_poll(&pf, 1, left) <= 0) {
+            sy_eprintf("precommit: %s timed out after %d ms\n", argv[0], SLURP_DEADLINE_MS);
+            sy_close(ofd); sy_kill(pid); mm_free(b); return 0;
+        }
+        r = sy_read(ofd, b + *n, cap - 1 - *n);
+        if (r <= 0) break;
         *n += r;
         if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) return 0; b = g; cap *= 2; }
     }
@@ -129,8 +142,68 @@ static int freeze_gate(void) {
     return blocked;
 }
 
+/* 子进程闸(0.0.50 L):对本次 staged 的 .cx 索引内容跑 tools/cx-lint.cx。R2(R2-timeout/R2-sep,缺 -- 分隔或无界的
+ * 子进程调用)有发现即 blocked;R1(第二真相源)只打印不拦。索引 blob 写到 sy_tmpdir()/precommit-lint-PID/<原路径>,
+ * 保留目录结构让 cx-lint 的 tests/ 判定仍成立。cwd 下没有 ./unisacc.com 或 tools/cx-lint.cx(夹具仓)时跳过,打印 lint=absent。 */
+static int mkdirs(char *path) {   /* 逐级建目录;已存在视为成功 */
+    long i;
+    for (i = 1; path[i]; i++) if (path[i] == '/') { path[i] = 0; if (sy_mkdir(path, 0700) && sy_exists(path) != 1) { path[i] = '/'; return -1; } path[i] = '/'; }
+    return 0;
+}
+static int lint_gate(const char *names, long sn, int *absent) {
+    char dir[1200], **paths; long at, np = 0, i; int blocked = 0;
+    *absent = 0;
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/cx-lint.cx") != 1) { *absent = 1; return 0; }
+    if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    paths = mm_alloc((size_t)(sn + 8) * sizeof *paths);
+    if (!paths) return 1;
+    for (at = 0; at < sn; ) {
+        long nl = tx_len(names + at, sn - at), bn; char spec[4410], *blob, *p; char *sv[] = {"git", "show", spec, 0}; int fd;
+        if (nl <= 0) break;
+        if (nl < 4398 && nl >= 3 && tx_same(names + at + nl - 3, 3, ".cx", 3)) {
+            spec[0] = ':'; mm_copy(spec + 1, sizeof spec - 1, names + at, (size_t)nl); spec[nl + 1] = 0;
+            blob = slurp(sv, &bn);
+            p = mm_alloc((size_t)(tx_len(dir, 1200) + nl + 2));
+            if (blob && p && !cx_fmt(p, (size_t)(tx_len(dir, 1200) + nl + 2), "%s/%.*s", dir, (int)nl, names + at) && !mkdirs(p) &&
+                (fd = sy_open_new(p, 0600)) >= 0) {
+                if (sy_write_all(fd, blob, bn) == 0) paths[np++] = p; else mm_free(p);
+                sy_close(fd);
+            } else { sy_eprintf("precommit: lint: cannot stage %.*s for cx-lint\n", (int)nl, names + at); mm_free(p); blocked++; }
+            mm_free(blob);
+        }
+        at += nl + 1;
+    }
+    if (np) {
+        char **lv = mm_alloc((size_t)(np + 8) * sizeof *lv); long rn, k; char *rows; int j;
+        if (!lv) return 1;
+        for (j = 0; j < 2; j++) {   /* 第一遍 R2 --strict(拦),第二遍 R1(只报告) */
+            k = 0; lv[k++] = "sh"; lv[k++] = "./unisacc.com"; lv[k++] = "tools/cx-lint.cx"; lv[k++] = "--";
+            lv[k++] = "--rules"; lv[k++] = j ? "R1" : "R2"; if (!j) lv[k++] = "--strict";
+            for (i = 0; i < np; i++) lv[k++] = paths[i];
+            lv[k] = 0;
+            slurp_okrc = 1; rows = slurp(lv, &rn); slurp_okrc = 0;
+            if (!rows) { sy_eprintf("precommit: tools/cx-lint.cx did not run\n"); blocked++; continue; }
+            for (at = 0; at < rn; ) {
+                long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, d = tx_find(rows + at, l, dir, tx_len(dir, 1200));
+                if (tx_prefix(rows + at, l, "LINT\t", 5)) {
+                    long dl = tx_len(dir, 1200);   /* 去掉临时目录前缀,打印原路径 */
+                    if (d >= 0) sy_eprintf("precommit: %s%.*s%.*s\n", j ? "lint(report-only):" : "blocked:lint:", (int)d, rows + at, (int)(l - d - dl - 1), rows + at + d + dl + 1);
+                    else sy_eprintf("precommit: %s%.*s\n", j ? "lint(report-only):" : "blocked:lint:", (int)l, rows + at);
+                    if (!j) blocked++;
+                }
+                at += l + 1;
+            }
+            mm_free(rows);
+        }
+        mm_free(lv);
+    }
+    for (i = 0; i < np; i++) { sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
+    mm_free(paths);
+    return blocked;
+}
+
 int main(void) {
-    long sn, rn, at; int staged = 0, blocked = 0;
+    long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "include", "exec/facts", 0};
@@ -201,6 +274,8 @@ int main(void) {
     blocked += freeze_gate();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();
+    blocked += lint_gate(names, sn, &lint_absent);
+    if (lint_absent) sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
     /* 不再因「只改 tools/tests」而短路:cxtrunc/cxapis/outdep 本来就面向 tools/tests(fable 咨询 2026-11-08)。 */
     { char rp[1200]; const char *wt = sy_env("GIT_WORK_TREE"); int ex;   /* 工作树里有没有棘轮:夹具仓(GIT_WORK_TREE)无则跳过 */
       if (cx_fmt(rp, sizeof rp, "%s%stools/ratchets.cx", wt ? wt : "", wt ? "/" : "")) { sy_eprintf("precommit: path too long\n"); return 1; }

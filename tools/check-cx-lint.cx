@@ -2,10 +2,13 @@
  *
  *   sh ./unisacc.com tools/check-cx-lint.cx
  *
- * Writes small positive/negative .cx samples under sy_tmpdir()/cx-lint-check-PID/, runs
- * tools/cx-lint.cx on each (bounded 50 s) and asserts the exact count per rule: every rule has
- * at least two positive and two negative samples, including comment/string/char/continuation
- * traps for the lexer.  Then three real 0.0.49 rework samples from git history:
+ * Writes small positive/negative .cx samples under sy_tmpdir()/cx-lint-check-PID/ (and a tests/
+ * subdirectory for the R1-version refusal exemption), runs tools/cx-lint.cx on each (bounded 50 s)
+ * and asserts the exact count per rule: every rule has at least two positive and two negative
+ * samples, including comment/string/char/continuation traps for the lexer, the lint:allow comment
+ * (with and without a reason, wrong rule), the R1-product data-flow cases (existence check, guard,
+ * label, literal in an argv slot, run first argument, NULL-terminated initializer) and --rules.
+ * Then three real 0.0.49 rework samples from git history:
  *   6eec399892^:tools/chain-step.cx   R2-sep must be reported (missing "--" before --rev),
  *   6eec399892:tools/chain-step.cx    R2-sep must not be reported (fixed),
  *   60a7dd0cd8^:tools/kernel-route.cx R1-product must be reported (hard-wired ROOT/unisacc.com).
@@ -29,10 +32,11 @@ static int put(const char *name, const char *body, long n, char *path, int cap) 
     return sy_close(fd);
 }
 
-/* count of LINT rows with RULE in cx-lint's output for PATH, -1 on run failure */
-static int count(const char *path, const char *rule) {
-    char *v[] = {"sh", "./unisacc.com", "tools/cx-lint.cx", "--", (char *)path, 0};
+/* count of LINT rows with RULE in cx-lint's output for PATH (optionally under --rules FILTER), -1 on run failure */
+static int count_rules(const char *path, const char *filter, const char *rule) {
+    char *v[] = {"sh", "./unisacc.com", "tools/cx-lint.cx", "--", (char *)path, 0, 0, 0};
     char *out = 0; size_t n = 0; char pat[64]; int c;
+    if (filter) { v[4] = "--rules"; v[5] = (char *)filter; v[6] = (char *)path; }
     if (cx_runv_timeout(v, 50, &out, &n) || !out) return -1;
     if (cx_fmt(pat, sizeof pat, "LINT\t%s\t", rule)) return -1;
     c = (int)tx_count(out, (long)n, pat, tx_len(pat, 64));
@@ -40,15 +44,18 @@ static int count(const char *path, const char *rule) {
     mm_free(out);
     return c;
 }
+static int count(const char *path, const char *rule) { return count_rules(path, 0, rule); }
 
-static void expect(const char *name, const char *body, const char *rule, int want) {
+/* NAME may carry a tests/ prefix (the R1-version refusal exemption keys on the path) */
+static void expect_rules(const char *name, const char *body, const char *filter, const char *rule, int want) {
     char p[4400]; int got;
     if (put(name, body, tx_len(body, 1 << 20), p, sizeof p)) { printf("FAIL\t%s\twrite\n", name); failed++; return; }
-    got = count(p, rule);
+    got = count_rules(p, filter, rule);
     if (got == want) { printf("PASS\t%s\t%s=%d\n", name, rule, got); passed++; }
     else { printf("FAIL\t%s\t%s want=%d got=%d\n", name, rule, want, got); failed++; }
     sy_unlink(p);
 }
+static void expect(const char *name, const char *body, const char *rule, int want) { expect_rules(name, body, 0, rule, want); }
 
 static void history(const char *rev, const char *file, const char *name, const char *rule, int at_least) {
     char spec[512], p[4400]; char *out = 0; size_t n = 0; int got;
@@ -67,11 +74,24 @@ int main(void) {
     if (cx_fmt(dir, sizeof dir, "%s/cx-lint-check-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) {
         fprintf(stderr, "check-cx-lint: cannot create scratch dir\n"); return 2;
     }
+    {   char sub[4400];
+        if (cx_fmt(sub, sizeof sub, "%s/tests", dir) || sy_mkdir(sub, 0700)) { fprintf(stderr, "check-cx-lint: cannot create scratch tests dir\n"); return 2; } }
     /* R1-version */
     expect("v1.cx", "static const char *v = \"0.0.49\";\n", "R1-version", 1);
     expect("v2.cx", "int f(void){ return puts(\"unisacc 0.0.50 ready\"); }\n", "R1-version", 1);
     expect("v3.cx", "/* \"0.0.49\" in a comment */\n// \"unisacc 0.0.49\"\nint x = '0';\n", "R1-version", 0);
     expect("v4.cx", "static const char *a = \"0.0.0\", *b = \"10.0.49x\", *c = \"\\\"0.0.\\\"\";\n", "R1-version", 0);
+    expect("v5.cx", "int main(void){ ck(!rv_valid(\"0.0.48.1.2\"),\"five-part\"); return 0; }\n", "R1-version", 1);   /* tool, not test code: ck(!) does not exempt */
+    expect("tests/v6.cx", "int main(void){ ck(!rv_valid(\"0.0.48.1.2\"),\"five-part\"); return 0; }\n", "R1-version", 0);
+    expect("tests/v7.cx", "int main(void){ fixture(\"version\\n0.0.48\\n\",1); fixture(\"other\\n0.0.48\\n\",0); return 0; }\n", "R1-version", 2);
+    expect("tests/v8.cx", "int main(void){ replace_reject(\"v.tsv\",\"version\\t0.0.43\\n\",\"bad\"); return 0; }\n", "R1-version", 0);
+    expect("check-v9.cx", "int main(void){ ck(rv_valid(\"0.0.48\"),\"ok\"); ck(!rv_valid(\" 0.0.48\"),\"refuse.space\"); return 0; }\n", "R1-version", 0);
+    expect("v10.cx", "static const char *v = \"0.0.49\";   /* lint:allow R1-version test pin for the 0.0.49 oracle */\n"
+                     "static const char *w = \"0.0.49\";   // lint:allow R1 same pin\n", "R1-version", 0);
+    expect("v11.cx", "static const char *v = \"0.0.49\";   /* lint:allow R1-version */\n"
+                     "static const char *w = \"0.0.49\"; // lint:allow\n"
+                     "static const char *x = \"0.0.49\"; /* lint:allow R2-timeout wrong rule */\n", "R1-version", 3);
+    expect("v12.cx", "static const char *a = \"plans/release-0.0.43.md\", *b = \"waivers-0.0.44.tsv\", *c = \"release-0.0.43.md\";\n", "R1-version", 0);
     /* R1-product */
     expect("p1.cx", "int f(char *o){ char c[64]; cx_fmt(c, 64, \"%s/unisacc.com\", o);\n"
                     " char *v[] = {\"sh\", c, 0}; return sy_run(v, o, 1, 0); }\n", "R1-product", 1);
@@ -81,6 +101,22 @@ int main(void) {
                     "int g(char **v){ return cx_runv_timeout(v, 5, 0, 0); }\n", "R1-product", 0);
     expect("p4.cx", "/* \"unisacc.com\" */ int f(char **v){ return sy_run(v, 0, 0, 0); }\n"
                     "int h(void){ return puts(\"unisacc.com\"); }\n", "R1-product", 0);
+    expect("p5.cx", "int f(char **v,char *o){ char p[64]; cx_fmt(p, 64, \"%s/unisacc.com\", o);\n"
+                    " if (!exists(p)) return 1; return sy_run(v, o, 64, 0); }\n", "R1-product", 0);   /* existence check only */
+    expect("p6.cx", "int f(char **v,char *o){ guard_path(o, \"unisacc.com\"); puts(\"unisacc.com\"); return sy_run(v, o, 64, 0); }\n",
+                    "R1-product", 0);   /* guard + label in a block that runs children */
+    expect("p7.cx", "int f(char *t){ char *v[] = {\"sh\", \"./unisacc.com\", t, 0}; return wrapper(v); }\n", "R1-product", 1);   /* literal in argv slot */
+    expect("p8.cx", "int f(char **v,int n){ v[n++] = (char *)\"./unisacc.com\"; v[n] = 0; return 0; }\n", "R1-product", 1);
+    expect("p9.cx", "int f(char *o){ char c[64]; cx_fmt(c, 64, \"%s/unisacc.com\", o); return sy_run(c, o, 64, 0); }\n", "R1-product", 1);   /* run first arg */
+    expect("p10.cx", "static const char *m[] = {\"unisacc.com\", \"unisacc.com.build.json\"};\n"
+                     "int f(char *o){ char c[64]; cx_fmt(c, 64, \"%s/unisacc.com\", o); return tx_eqz(c, o) ? 0 : sy_run(m, o, 64, 0); }\n",
+                     "R1-product", 0);   /* name list without NULL terminator; compared, not run */
+    expect("p11.cx", "int f(char *o){ char c[64]; cx_fmt(c, 64, \"%s/unisacc.com\", o);\n"
+                     " char *v[] = {\"sh\", c, 0}; char *w[] = {\"sh\", c, \"x\", 0}; return child(v) + child(w); }\n", "R1-product", 1);   /* one report per literal */
+    expect("p12.cx", "int f(char *r){ char p[64]; path(p, r, \"unisacc.com\"); hash(p); path(p, r, \"seed.c\");\n"
+                     " char *v[] = {\"sh\", p, 0}; return child(v); }\n", "R1-product", 0);   /* name refilled without the literal */
+    expect("p13.cx", "int f(char *r){ char p[64]; path(p, r, \"unisacc.com\"); hash(p); path(p, r, \"seed.c\"); hash(p);\n"
+                     " path(p, r, \"unisacc.com\"); { char *v[] = {\"sh\", p, 0}; return child(v); } }\n", "R1-product", 1);   /* refilled with it again */
     /* R2-timeout */
     expect("t1.cx", "int f(char **v,char *o){ return sy_run(v, o, 64, 0); }\n", "R2-timeout", 1);
     expect("t2.cx", "int f(char **v){ int e, o; return sy_spawn_pipe(v, \".\", 0, &o, &e); }\n"
@@ -100,10 +136,18 @@ int main(void) {
     expect("s4.cx", "static const char *u = \"sh ./unisacc.com tools/x.cx -- --check\";\n"
                     "/* sh ./unisacc.com tools/y.cx --bad */ static char *w[] = {\"sh\", \"./unisacc.com\", \"t.cx\", \"--\", \"--x\", 0};\n",
                     "R2-sep", 0);
+    expect("s5.cx", "static const char *fixture = \"int f(void){ return run(\\\"sh ./unisacc.com tools/x.cx --check\\\"); }\";\n", "R2-sep", 0);
+    expect("s6.cx", "int f(void){ char *o; size_t n; return cx_run_timeout(\"sh ./unisacc.com tools/x.cx --check\", 9, &o, &n); }\n"
+                    "int g(void){ char *o; size_t n; return cx_run_timeout(\"sh ./unisacc.com tools/y.cx --write\", 9, &o, &n); }\n", "R2-sep", 2);
+    /* --rules filter */
+    expect_rules("r1.cx", "int f(char **v,char *o){ return sy_run(v, o, 64, 0); }\nstatic const char *x = \"0.0.49\";\n", "R2", "R2-timeout", 1);
+    expect_rules("r2.cx", "int f(char **v,char *o){ return sy_run(v, o, 64, 0); }\nstatic const char *x = \"0.0.49\";\n", "R2", "R1-version", 0);
+    expect_rules("r3.cx", "int f(char **v,char *o){ return sy_run(v, o, 64, 0); }\nstatic const char *x = \"0.0.49\";\n", "R1-version,R2-sep", "R1-version", 1);
     /* real 0.0.49 rework samples */
     history("6eec399892^", "tools/chain-step.cx", "h-chain-step-before.cx", "R2-sep", 1);
     history("6eec399892", "tools/chain-step.cx", "h-chain-step-after.cx", "R2-sep", 0);
     history("60a7dd0cd8^", "tools/kernel-route.cx", "h-kernel-route-before.cx", "R1-product", 1);
+    {   char sub[4400]; if (!cx_fmt(sub, sizeof sub, "%s/tests", dir)) sy_rmdir(sub); }
     sy_rmdir(dir);
     printf("CHECK_CX_LINT\tpassed=%d\tfailed=%d\tskipped=%d\n", passed, failed, skipped);
     return failed ? 1 : 0;
