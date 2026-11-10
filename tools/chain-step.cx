@@ -40,6 +40,7 @@
 #pragma unisa use text.text
 #pragma unisa use sys.time
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
 
 static const char *g_self;
 static int cs_fp_active;
@@ -57,27 +58,19 @@ static void cs_die(const char *a, const char *b) {
     sy_exit(2);
 }
 
-/* argv: 在 cwd 里跑一个程序，返回退出码；子进程 stdout+stderr 都转回本进程。 */
+/* argv: 在 cwd 里跑一个程序,返回退出码;子进程 stdout、stderr 分别转回本进程的 1、2。
+   cxlib.procrun pr_run 的薄调用:原普通路径无时限,现上限 55s(与 candidate-chain 的外层 bound 同);
+   fixedpoint 模式原 cx_runv_timeout 270s 且忽略 cwd,现同为 270s 并遵守 cwd。
+   超时打印具名原因并返回 124(cx_runv_timeout 的超时码);被信号杀返回 128+sig;起不来 cs_die。 */
 static int cs_run(char **argv, const char *cwd) {
-    int ofd = -1, pid, ex = 0, code = 0, sig = 0;
-    if (cs_fp_active) {
-        char *out = 0; size_t n = 0;
-        int rc = cx_runv_timeout(argv, 270, &out, &n);
-        if (out && sy_write_all(1, out, n)) cs_die("child output", argv[0]);
-        free(out); return rc;
-    }
-    pid = sy_spawn_pipe(argv, cwd, 0, &ofd, 0);
-    if (pid < 0) cs_die("spawn", argv[0]);
-    if (ofd >= 0) {
-        char chunk[8192];
-        long r;
-        while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) {
-            if (sy_write_all(1, chunk, r)) break;
-        }
-        sy_close(ofd);
-    }
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0) cs_die("wait", argv[0]);
-    return ex ? code : 128 + sig;
+    pr_result r;
+    int t = pr_run(argv[0], argv, cwd, 0, cs_fp_active ? 270 : 55, &r);
+    if (t && r.timed_out) { sy_eprintf("chain-step: %s\n", r.why); return 124; }
+    if (t) cs_die("spawn", r.why);
+    pr_echo(&r);
+    t = r.rc < 0 ? 128 - r.rc : r.rc;
+    pr_free(&r);
+    return t;
 }
 
 /* 统一的 "sh <root>/unisacc.com <tool> -- <args...>" 调用。 */

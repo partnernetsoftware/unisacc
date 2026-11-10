@@ -1,0 +1,92 @@
+/* tools/check-procrun.cx -- cxlib.procrun pr_run, the single child-process entry, against real children.
+ *
+ *   sh ./unisacc.com tools/check-procrun.cx
+ *
+ * Cases: a missing bound (0) and an over-long one (601) are refused before anything runs (the child would
+ * have created a marker file); stdout and stderr come back apart with the exit code; a child that ignores
+ * its bound is killed at 1 s with a named timeout carrying label and bound, and a grandchild it forked is
+ * dead afterwards (process group killed); cwd and env reach the child; a missing binary is a named spawn
+ * failure, not a timeout.  Prints PASS/FAIL per case and CHECK_PROCRUN<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use sys.time
+
+static int failed;
+static char work[4400];
+
+static void die(const char *s) { fprintf(stderr, "check-procrun: %s\n", s); exit(2); }
+static void ck(int ok, const char *name) { printf("%s\tcheck-procrun.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+static int has(const char *s, const char *t) { return s && strstr(s, t) != 0; }
+/* /proc/PID/stat exists and its state field is not Z. */
+static int alive(const char *stat) {
+    size_t n = 0;
+    char *s = cx_read(stat, &n), *p;
+    int z;
+    if (!s) return 0;
+    p = strrchr(s, ')');
+    z = p && p[1] == ' ' && p[2] == 'Z';
+    free(s);
+    return !z;
+}
+
+int main(void) {
+    pr_result r;
+    char marker[4400], pidf[4400], cmd[9000];
+    int t;
+    if (cx_fmt(work, sizeof work, "%s/check-procrun-%d", sy_tmpdir(), (int)getpid())) die("work");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700)) die("mkdir");
+    if (cx_fmt(marker, sizeof marker, "%s/ran", work) || cx_fmt(pidf, sizeof pidf, "%s/grandchild.pid", work)) die("path");
+
+    {   char *av[] = {"touch", marker, 0};
+        t = pr_run("lbl-zero", av, 0, 0, 0, &r);
+        ck(t == -1 && !r.timed_out && has(r.why, "lbl-zero refused: deadline 0 s") && sy_exists(marker) != 1, "bound-zero-refused-before-spawn");
+        t = pr_run("lbl-big", av, 0, 0, 601, &r);
+        ck(t == -1 && has(r.why, "lbl-big refused: deadline 601 s outside 1..600") && sy_exists(marker) != 1, "bound-over-max-refused");
+        t = pr_run("lbl-neg", av, 0, 0, -5, &r);
+        ck(t == -1 && has(r.why, "refused") && sy_exists(marker) != 1, "bound-negative-refused");
+    }
+    {   char *av[] = {"sh", "-c", "printf out-bytes; printf err-bytes >&2; exit 3", 0};
+        t = pr_run("lbl-cap", av, 0, 0, 10, &r);
+        ck(t == 0 && r.rc == 3 && r.outn == 9 && !strcmp(r.out, "out-bytes") && r.errn == 9 && !strcmp(r.err, "err-bytes"),
+           "stdout-stderr-apart-rc");
+        pr_free(&r);
+    }
+    {   char *av[] = {"sh", "-c", cmd, 0};
+        size_t n = 0; char *pb; char proc[64]; long gp; int k;
+        if (cx_fmt(cmd, sizeof cmd, "sleep 30 & echo $! > '%s'; wait", pidf)) die("cmd");
+        t = pr_run("lbl-slow", av, 0, 0, 1, &r);
+        ck(t == -1 && r.timed_out == 1 && has(r.why, "lbl-slow timeout after 1 s (process group killed)"), "timeout-named-label-bound");
+        pb = cx_read(pidf, &n);
+        gp = pb ? strtol(pb, 0, 10) : 0;
+        free(pb);
+        /* Dead means gone or a zombie: under a subreaper (tools/bound, run-batch) the killed grandchild
+           is reparented there and stays Z until that ancestor reaps it. */
+        if (cx_fmt(proc, sizeof proc, "/proc/%ld/stat", gp)) die("proc");
+        for (k = 0; k < 50 && gp > 0 && alive(proc); k++) sy_sleep_ms(20);
+        ck(gp > 0 && !alive(proc), "timeout-kills-grandchild");
+        pr_free(&r);
+    }
+    {   char *av[] = {"sh", "-c", "pwd -P; printf %s \"$PR_CHECK_VAR\"", 0};
+        char *env[] = {"PR_CHECK_VAR=seven", 0};
+        char real[4400], want[4500];
+        if (sy_realpath(work, real, sizeof real) < 0 || cx_fmt(want, sizeof want, "%s\nseven", real)) die("realpath");
+        t = pr_run("lbl-env", av, work, env, 10, &r);
+        ck(t == 0 && r.rc == 0 && r.out && !strcmp(r.out, want), "cwd-and-env-reach-child");
+        pr_free(&r);
+    }
+    {   char *av[] = {"/nonexistent/procrun-no-such-binary", 0};
+        t = pr_run("lbl-missing", av, 0, 0, 10, &r);
+        ck(t == -1 && !r.timed_out && has(r.why, "lbl-missing spawn failed: "), "spawn-failure-named-not-timeout");
+    }
+    {   char *av[] = {"sh", "-c", "kill -TERM $$", 0};
+        t = pr_run("lbl-sig", av, 0, 0, 10, &r);
+        ck(t == 0 && r.rc == -15, "signal-exit-negative-rc");
+        pr_free(&r);
+    }
+    if (cx_rmtree(work)) die("cleanup");
+    printf("CHECK_PROCRUN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

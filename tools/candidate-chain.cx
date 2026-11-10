@@ -15,6 +15,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -25,24 +26,27 @@ static long fsize(const char *p) {
     if (sy_stat(p, &st)) return -1;
     return st.size;
 }
-static int runv_secs(char **v, int secs) {
-    char *out = 0;
-    size_t n = 0;
-    int rc = cx_runv_timeout(v, secs, &out, &n);
-    if (out && n) sy_write_all(1, out, n);
-    free(out);
-    return rc;
+/* Child exit as the old cx_runv_timeout callers read it: the code, 128+signal, or 124 on a timeout
+   (now also named on stderr by cxlib.procrun). stdout and stderr are echoed after the child ends. */
+static int pr_code(const char *label, char **v, int secs) {
+    pr_result r;
+    int t = pr_run(label, v, 0, 0, secs, &r);
+    if (t && r.timed_out) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 124; }
+    if (t) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 127; }
+    pr_echo(&r);
+    t = r.rc < 0 ? 128 - r.rc : r.rc;
+    pr_free(&r);
+    return t;
 }
+static int runv_secs(char **v, int secs) { return pr_code(v[0], v, secs); }
+/* "sh ROOT/unisacc.com REST..." bounded by SECS: a thin call of pr_run, which owns the process
+   group and kills it at the bound (the tools/bound wrapper this used to add is no longer needed). */
 static int bound_sh_secs(const char *root, char **rest, int secs) {
-    char bound[4400], com[4400], secbuf[8];
+    char com[4400];
     char *v[72];
     int n = 0, i = 0;
     if (secs < 1 || secs > 60) die("bound secs", "1..60");
-    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("path", "bound");
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
-    if (cx_fmt(secbuf, sizeof secbuf, "%d", secs)) die("fmt", "secs");
-    v[n++] = bound;
-    v[n++] = secbuf;
     v[n++] = (char *)"sh";
     v[n++] = com;
     while (rest[i] && n + 1 < 72) {
@@ -50,7 +54,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
         i++;
     }
     v[n] = 0;
-    return runv_secs(v, secs);
+    return pr_code(rest[0] ? rest[0] : "sh", v, secs);
 }
 static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target) {

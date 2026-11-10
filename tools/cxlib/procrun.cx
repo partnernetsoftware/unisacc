@@ -1,0 +1,84 @@
+/* procrun.cx -- the one way a tool runs a child process: pr_run.
+ *
+ *   pr_result r;
+ *   int t = pr_run(label, argv, cwd, env, deadline_s, &r);
+ *
+ * Built on cxlib.netpack np_run (own process group, stdout and stderr captured apart, at the bound
+ * the whole tree is frozen and killed through sysx.reaper, residue counted).  What pr_run adds:
+ *   - the bound is required: deadline_s must be 1..PR_MAX_SECS; 0, negative or larger is refused
+ *     before anything is spawned (t = -1, r.why names label and the value);
+ *   - a timeout is named: r.timed_out = 1 and r.why = "LABEL timeout after N s (process group killed)",
+ *     with " (... survived)" appended when the reaper saw residue; t = -1;
+ *   - a spawn or cwd failure keeps netpack's OSError text, prefixed by "LABEL spawn failed: "; t = -1;
+ *   - a child that ran gives t = 0 and r.rc = its exit code (or -signal), stdout in r.out/r.outn and
+ *     stderr in r.err/r.errn, each NUL terminated.
+ * cwd 0 keeps the caller's directory; env 0 or {0} keeps the environment, otherwise each "K=V" replaces
+ * or adds K.  pr_free releases the buffers.  pr_echo writes the captured stdout to fd 1 and stderr to
+ * fd 2 for wrappers that used to let the child inherit them.
+ *
+ * Contract and sites: out/opus-h2-survey.md; check tools/check-procrun.cx. */
+#pragma unisa module procrun
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define PR_MAX_SECS 600
+
+typedef struct pr_result {
+    int rc;
+    int timed_out;
+    int residue;
+    char *out;
+    size_t outn;
+    char *err;
+    size_t errn;
+    char why[1024];
+} pr_result;
+
+void pr_free(pr_result *r) {
+    free(r->out);
+    free(r->err);
+    r->out = r->err = 0;
+    r->outn = r->errn = 0;
+}
+
+int pr_run(const char *label, char *const argv[], const char *cwd, char *const env[], int deadline_s, pr_result *r) {
+    np_result n = {0};
+    char why[1024];
+    int t;
+    if (!label || !label[0]) label = "child";
+    r->rc = -1; r->timed_out = 0; r->residue = 0;
+    r->out = r->err = 0; r->outn = r->errn = 0; r->why[0] = 0;
+    if (deadline_s < 1 || deadline_s > PR_MAX_SECS) {
+        if (cx_fmt(r->why, sizeof r->why, "%s refused: deadline %d s outside 1..%d (a bound is required)",
+                   label, deadline_s, PR_MAX_SECS)) r->why[0] = 0;
+        return -1;
+    }
+    if (!argv || !argv[0]) {
+        if (cx_fmt(r->why, sizeof r->why, "%s refused: empty argv", label)) r->why[0] = 0;
+        return -1;
+    }
+    why[0] = 0;
+    t = np_run(argv, cwd, env, deadline_s, &n, why, sizeof why);
+    r->residue = n.residue;
+    if (t) {
+        r->timed_out = n.timed_out;
+        if (n.timed_out) {
+            const char *sv = strstr(why, " seconds (");
+            if (sv) sv += 8;
+            if (cx_fmt(r->why, sizeof r->why, "%s timeout after %d s (process group killed)%s",
+                       label, deadline_s, sv ? sv : "")) r->why[0] = 0;
+        } else if (cx_fmt(r->why, sizeof r->why, "%s spawn failed: %s", label, why)) r->why[0] = 0;
+        np_free(&n);
+        return -1;
+    }
+    r->rc = n.rc;
+    r->out = n.out; r->outn = n.outn;
+    r->err = n.err; r->errn = n.errn;
+    return 0;
+}
+
+void pr_echo(const pr_result *r) {
+    if (r->out && r->outn) (void)sy_write_all(1, r->out, (long)r->outn);
+    if (r->err && r->errn) (void)sy_write_all(2, r->err, (long)r->errn);
+}

@@ -42,6 +42,7 @@
 #pragma unisa use runtime.codec
 #pragma unisa use cxlib.netwire
 #pragma unisa use cxlib.productpkg
+#pragma unisa use cxlib.procrun
 
 #define RB_FILES 128
 #define RB_REL 192
@@ -692,7 +693,8 @@ static char rb_pkg_abs[RB_FULL];
 static char rb_physical_root[RB_FULL];
 
 /* The pipe ceiling is overridable only so a test can shrink it and watch the timeout
-   path fire with a sleeping child; it can only shorten the 55s bound. */
+   path fire with a sleeping child; it can only shorten the 55s bound.  pr_run bounds in
+   whole seconds, so a value that is not a multiple of 1000 keeps the default. */
 static long rb_pipe_deadline(void) {
     const char *v = sy_env("UNISACC_RB_PIPE_MS");
     long ms = 0;
@@ -700,42 +702,39 @@ static long rb_pipe_deadline(void) {
     if (!v || !v[0]) return 55000;
     for (p = v; *p >= '0' && *p <= '9'; p++) ms = ms * 10 + (*p - '0');
     if (*p || ms < 1 || ms > 55000) return 55000;
+    if (ms % 1000) return 55000;
     return ms;
 }
 
-/* LABEL names the phase. A child that outlives the ceiling is killed and the run dies
-   here with "LABEL timeout after N ms": a timeout is not an ordinary failure and must not
-   reach the caller's generic message. A child that exits nonzero is reported with its rc
+/* LABEL names the phase. A thin call of cxlib.procrun pr_run (process group killed at the
+   bound, stdout captured, stderr passed through). A child that outlives the ceiling makes the
+   run die here with "LABEL timeout after N ms": a timeout is not an ordinary failure and must
+   not reach the caller's generic message. A child that exits nonzero is reported with its rc
    and returns -1 so the caller still dies with its own phase text. */
 static int rb_pipe(const char *label, char **argv, const char *cwd, char *out, int cap) {
-    /* 0.0.50 D: bounded child (55s ceiling, cx-lint R2-timeout) via the same
-       wait helper the whole-o route uses; captured bytes still land in OUT. */
-    int fd, pid, exited = 0, code = 1, bad = 0, timed;
-    RbBuf capbuf = {0, 0, 0};
+    pr_result r;
     long m;
     long pipe_timeout_ms = rb_pipe_deadline(); /* bound: 55s ceiling (cx-lint R2-timeout) */
-    pid = sy_spawn_pipe(argv, cwd, 0, &fd, 0);
-    if (pid < 0) { sy_eprintf("release-build: %s spawn failed\n", label); return -1; }
+    int t = pr_run(label, argv, cwd, 0, (int)(pipe_timeout_ms / 1000), &r);
     if (out && cap > 0) out[0] = 0;
-    if (sy_fd_nonblock(fd, 1)) { sy_kill(pid); return -1; }
-    timed = rb_wait_child(pid, fd, &capbuf, pipe_timeout_ms, &exited, &code);
-    if (sy_close(fd)) bad = 1;
-    if (out && cap > 0 && !timed && exited && !code) {
-        m = (long)capbuf.n; if (m > cap - 1) m = cap - 1;
-        if (m > 0 && mm_copy(out, cap, capbuf.p, m)) bad = 1;
+    if (r.err && r.errn) (void)sy_write_all(2, r.err, (long)r.errn);
+    if (t && r.timed_out) {
+        pr_free(&r);
+        sy_eprintf("release-build: %s timeout after %ld ms (child killed)\n", label, pipe_timeout_ms);
+        sy_exit(1);
+    }
+    if (t) { sy_eprintf("release-build: %s\n", r.why); pr_free(&r); return -1; }
+    if (r.rc) { sy_eprintf("release-build: %s child exited rc=%d\n", label, r.rc); pr_free(&r); return -1; }
+    if (out && cap > 0) {
+        m = (long)r.outn; if (m > cap - 1) m = cap - 1;
+        if (m > 0 && mm_copy(out, cap, r.out, m)) { pr_free(&r); return -1; }
         /* Keep the 0.0.49 contract: callers read a trimmed line. The D5R rewrite copied every
            captured byte, so rb_freeze saw 41 ("<40 hex>\n") instead of 40 and died on "rev";
            with rb_die not exiting at the time the failure was silent (0.0.50 lesson). */
         while (m > 0 && (out[m - 1] == '\n' || out[m - 1] == '\r')) m--;
         if (m >= 0) out[m] = 0;
     }
-    if (capbuf.p) mm_free(capbuf.p);
-    if (timed) {
-        sy_eprintf("release-build: %s timeout after %ld ms (child killed)\n", label, pipe_timeout_ms);
-        sy_exit(1);
-    }
-    if (exited && code) sy_eprintf("release-build: %s child exited rc=%d\n", label, code);
-    if (bad || !exited || code) return -1;
+    pr_free(&r);
     return 0;
 }
 

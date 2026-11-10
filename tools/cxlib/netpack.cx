@@ -46,7 +46,9 @@
 #pragma unisa use sys.posix
 
 typedef struct np_buf { char *p; size_t n, cap; } np_buf;
-typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; } np_result;
+/* timed_out is 1 when np_run killed the child at its bound (np_run then returns -1 with the
+   TimeoutExpired text in why); 0 for a spawn/cwd failure or a child that exited. */
+typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result;
 
 /* ---- byte buffers -------------------------------------------------------------------------------------------- */
 void np_put(np_buf *b, const char *s, size_t n) {
@@ -755,7 +757,7 @@ done:
 }
 
 /* ---- subprocess.run(capture_output=True) ---------------------------------------------------------------------- */
-void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; r->residue = 0; }
+void np_free(np_result *r) { free(r->out); free(r->err); r->out = r->err = 0; r->outn = r->errn = 0; r->residue = 0; r->timed_out = 0; }
 /* A double-forked descendant that lost its parent reparents to the nearest subreaper; the sweep below only
    recognises children of this process, so a caller that spawns a tree must call np_subreaper() first (before
    np_run).  Without it the orphan belongs to some ancestor (tmux, systemd --user, an editor) and residue 0
@@ -788,7 +790,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, reaped = 0;
     pid_t pid; ssize_t k; long idle = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
     int fault = np_fault();
-    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0;
+    res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0; res->timed_out = 0;
     if (fault < 0) { snprintf(why, wl, "ValueError: UNISACC_NP_FAULT=%s refused (only residue)", getenv("UNISACC_NP_FAULT")); return -1; }
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
     (void)sy_fd_cloexec(pf[1], 1);
@@ -849,6 +851,7 @@ int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
             int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
             if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
             res->residue = sv;
+            res->timed_out = 1;
             if (fault == 1) { res->residue = 1; fputs("FAULT_INJECTED\tresidue\n", stderr); }
             if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
                 res->residue = 1;

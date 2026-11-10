@@ -9,8 +9,9 @@
  *   U2 slice 只给 ROOT:同上 rc1 且干净;
  *   U3 rb_die 源文本必须含 sy_exit(回归钉);
  *   U4 rb_pipe 源文本必须含尾部换行修剪(回归钉);
- *   U5 freeze 的 rev 子进程(git rev-parse --verify X^{commit})换成 sleep 20、UNISACC_RB_PIPE_MS=1500:
- *      必须以 "release-build: rev timeout after 1500 ms" 具名退出 rc1(非 139),不能落成普通 rev 失败;
+ *   U5 freeze 的 rev 子进程(git rev-parse --verify X^{commit})换成 sleep 20、UNISACC_RB_PIPE_MS=2000:
+ *      必须以 "release-build: rev timeout after 2000 ms" 具名退出 rc1(非 139),不能落成普通 rev 失败
+ *      (rb_pipe 经 cxlib.procrun pr_run 按整秒限时,1500 这类非整秒值回落默认 55s,故用 2000);
  *   U6 快照根(无 .git、有 include/cx-flat.h):不冻结,打印 snapshot 行后缺参 rc1;
  *   U7 既非 git 也非快照的目录:具名拒绝 neither a git work tree,无 git archive 文本。
  * release-build 只编一次(rb_bin),U1/U2/U5/U6/U7 都复用它,总耗时须 <60s。 */
@@ -117,7 +118,7 @@ int main(void) {
       { const char *pin = "while (m > 0 && (out[m - 1] == '\\n' || out[m - 1] == '\\r')) m--;";
         ck(b && tx_find(b, (long)n, pin, tlen(pin)) >= 0, "U4 rb_pipe trims trailing newline (source pin)"); }
       if (b) mm_free(b); }
-    /* U5: freeze 的 rev 子进程换成 sleep,上限压到 1500ms:必须以具名 timeout 死(含相位名与毫秒),
+    /* U5: freeze 的 rev 子进程换成 sleep,上限压到 2000ms:必须以具名 timeout 死(含相位名与毫秒),
        rc 为 1 而不是 139,也不能落到调用方的普通 "release-build: rev" 文本。 */
     { char fb[4400], git[4400], real[512], script[1024], pre[4600]; int cut = 0;
       char *wh[] = {"sh", "-c", "command -v git", 0};
@@ -126,11 +127,11 @@ int main(void) {
       if (cx_fmt(fb, sizeof fb, "%s/release-usage-fb-%d", sy_tmpdir(), (int)getpid()) ||
           cx_fmt(git, sizeof git, "%s/git", fb) ||
           cx_fmt(script, sizeof script, "#!/bin/sh\ncase \"$*\" in \"rev-parse --verify \"*\"^{commit}\") exec sleep 20;; esac\nexec '%s' \"$@\"\n", real) ||
-          cx_fmt(pre, sizeof pre, "PATH='%s':\"$PATH\" UNISACC_RB_PIPE_MS=1500 ", fb)) return 2;
+          cx_fmt(pre, sizeof pre, "PATH='%s':\"$PATH\" UNISACC_RB_PIPE_MS=2000 ", fb)) return 2;
       if (sy_mkdir(fb, 0700) || cx_write(git, script, (size_t)tlen(script)) || sy_chmod(git, 0700)) return 2;
       rc = fresh_run(pre, "p3", buf, sizeof buf);
       ck(rc != 139 && rc != 11 && rc == 1, "U5 pipe timeout exits 1 (not segv)");
-      ck(has(buf, "release-build: rev timeout after 1500 ms"), "U5 timeout named with phase and ceiling ms");
+      ck(has(buf, "release-build: rev timeout after 2000 ms"), "U5 timeout named with phase and ceiling ms");
       ck(!has(buf, "release-build: rev\n"), "U5 timeout not reported as ordinary rev failure");
       if (cx_rmtree(fb)) return 2; }
     if (cx_rmtree(rb_dir)) return 2;
