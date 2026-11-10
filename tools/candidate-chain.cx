@@ -58,6 +58,30 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     return pr_code(rest[0] ? rest[0] : "sh", v, secs);
 }
 static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
+/* Run tools/preflight.cx at one hook point (entry, post-snap, pre-p3, post-p3) under --strict:
+   only that hook's rules from build/preflight-rules.tsv; a variable the chain has produced by
+   then but missing is a FAIL, and a SKIP is a failure too. Any failure stops the chain here,
+   naming the hook; the PASS/FAIL lines are already on stdout. PKG and SNAP are passed always:
+   the tool decides which hook needs them. */
+static void preflight(const char *root, const char *hook, const char *rev, const char *build,
+                      const char *snap, const char *pkg) {
+    char tool[4400], rules[4400], a_root[4500], a_build[4500], a_snap[4500], a_rev[64], a_pkg[4500], a_hook[40];
+    char *v[16];
+    int n = 0;
+    if (cx_fmt(tool, sizeof tool, "%s/tools/preflight.cx", root) ||
+        cx_fmt(rules, sizeof rules, "%s/build/preflight-rules.tsv", root) ||
+        cx_fmt(a_root, sizeof a_root, "ROOT=%s", root) ||
+        cx_fmt(a_build, sizeof a_build, "BUILD=%s", build) ||
+        cx_fmt(a_snap, sizeof a_snap, "SNAP=%s", snap) ||
+        cx_fmt(a_rev, sizeof a_rev, "REV=%s", rev) ||
+        cx_fmt(a_pkg, sizeof a_pkg, "PKG=%s", pkg) ||
+        cx_fmt(a_hook, sizeof a_hook, "PHASE=%s", hook)) die("path", "preflight");
+    v[n++] = tool; v[n++] = (char *)"--"; v[n++] = rules;
+    v[n++] = a_root; v[n++] = a_build; v[n++] = a_snap; v[n++] = a_rev; v[n++] = a_pkg;
+    v[n++] = a_hook; v[n++] = (char *)"--strict"; v[n] = 0;
+    if (bound_sh_secs(root, v, 55)) die("REFUSE preflight", hook);
+    sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
+}
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target) {
     char bound[4400], secbuf[8];
     char *v[24];
@@ -589,6 +613,7 @@ int main(int argc, char **argv) {
     if (parallel > 1)
         sy_printf("G0b\tparallel=%d\tmac_B=serial\twrite_domains=per-target-dir\tderate=measured\n", parallel);
 
+    if (!(resume && ck_done(outdir, "snap"))) preflight(root, "entry", rev, build, snap, pkg);
     if (!(resume && ck_done(outdir, "snap"))) {
         long t0 = sy_now_ms();
         char *a[4];
@@ -608,6 +633,20 @@ int main(int argc, char **argv) {
         free(bb);
         sy_printf("BOOTSTRAP\t%s\n", dst);
     }
+    {   /* rule 6 (verify-snap) accepts a receipt commit other than REV only when BOOTSTRAP_FROM
+           names it; snap_ok already accepts an ancestor, so declare it here the same way it does. */
+        char js[4400], commit[41];
+        size_t jn = 0;
+        char *j;
+        if (cx_fmt(js, sizeof js, "%s/unisacc.com.build.json", snap)) die("path", "json");
+        j = cx_read(js, &jn);
+        if (j && !json_quoted(j, jn, "commit", commit, 40) && !tx_eqz(commit, rev) && git_is_ancestor(commit, rev)) {
+            if (sy_setenv("BOOTSTRAP_FROM", commit, 1)) { free(j); die("env", "BOOTSTRAP_FROM"); }
+            sy_printf("BOOTSTRAP_FROM\tdeclared=%s\n", commit);
+        }
+        free(j);
+    }
+    preflight(root, "post-snap", rev, build, snap, pkg);
 
     if (!(resume && ck_done(outdir, "build"))) {
         long t0 = sy_now_ms();
@@ -701,6 +740,7 @@ int main(int argc, char **argv) {
             if (!cb || sy_sha256_hex(cb, (long)cn, ch)) { free(cb); die("ctor sha", ctor); }
             free(cb);
             sy_printf("P3_CTOR\tpath=%s\tsha=%s\tbytes=%lu\n", ctor, ch, (unsigned long)cn);
+            preflight(root, "pre-p3", rev, build, snap, pkg);
         }
         /* snap 已是 freeze 产物,不再 --rev(否则每次 pp_copy_product ~6MB,0.0.49 整调用多约16s) */
         v[n++] = rbt; v[n++] = (char *)"--";
@@ -710,6 +750,7 @@ int main(int argc, char **argv) {
         if (bound_sh_secs(root, v, 60)) die("p3", pkg);
         mark(outdir, "p3", sy_now_ms() - t0);
     } else sy_printf("RESUME\tp3\n");
+    preflight(root, "post-p3", rev, build, snap, pkg);
 
     if (!(resume && ck_done(outdir, "gen1-lnx-x86_64"))) {
         long t0 = sy_now_ms();
