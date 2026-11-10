@@ -68,4 +68,32 @@ static void freeze_and_compile_neg(const char *top,const char *native,const char
  char *rs[]={(char*)native,"--resume",dest2,0};r=run(rs,0,20);
  ck(r.rc==2&&r.err&&strstr(r.err,"patch-author-rewritten-after-freeze"),"refuse-author-patch-rewritten");np_free(&r);
 }
-int main(int argc,char **argv){deadline=sy_now_ms()+55000;if(argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT]");char native[4096],root[4096],temp[4400];if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");if(argc==1){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+static void land_real(const char *top,const char *native,const char *productroot){
+ char bare[4400],root[4400],other[4400],dest[4400],patch[4400],msg[4400],p[4400];
+ if(cx_fmt(bare,sizeof bare,"%s/land.git",top)||cx_fmt(root,sizeof root,"%s/land-root",top)||cx_fmt(other,sizeof other,"%s/land-other",top)||cx_fmt(dest,sizeof dest,"%s/land-dest",top)||cx_fmt(patch,sizeof patch,"%s/land.patch",top)||cx_fmt(msg,sizeof msg,"%s/land.msg",top))die("land-path");
+ char *bi[]={"git","init","--bare","-b","main",bare,0};ok(bi,0);
+ char *cl[]={"git","clone",bare,root,0};ok(cl,0);
+ path(p,sizeof p,root,"agentwork");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,root,"tests");if(sy_mkdir(p,0700))die("mkdir");
+ for(int k=0;k<4;k++){path(p,sizeof p,root,am_path(k));put(p,am_header(k),strlen(am_header(k)));}
+ path(p,sizeof p,root,".gitignore");put(p,"unisacc.com\n",12);path(p,sizeof p,root,"plain.txt");put(p,"base\n",5);commit(root);
+ { char *pv[]={"git","-C",root,"push","-u","origin","main",0};ok(pv,0); }
+ if(pp_copy_product(productroot,root))die("product-copy");
+ char *co[]={"git","clone",bare,other,0};ok(co,0);
+ path(p,sizeof p,other,"plain.txt");put(p,"landed\n",7);commit(other);
+ { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("land-diff");put(patch,r.out,r.outn);np_free(&r); }
+ put(msg,"land fixture\n",12);
+ { char *ap[]={(char*)native,root,patch,dest,"--prepare-only",0};np_result r=run(ap,0,55);ck(!r.rc,"land-real-prep");np_free(&r); }
+ /* gates are not run in this fixture: install the READY marker exactly as phase 5 writes it, so --land itself (commit -F, push, fetch, sync) runs for real */
+ path(p,sizeof p,dest,".git/integrate/ready.tsv");put(p,"INTEGRATE_READY1\nstatus\tREADY_TO_COMMIT\nscope\tmetadata-ratchets-precommit-only\npushed\t0\n",strlen("INTEGRATE_READY1\nstatus\tREADY_TO_COMMIT\nscope\tmetadata-ratchets-precommit-only\npushed\t0\n"));
+ { char *ld[]={(char*)native,"--land",dest,"--message-file","/no/such/msg",0};np_result r=run(ld,0,15);ck(r.rc==2,"land-missing-message-file");np_free(&r); }
+ /* the target is bare, so receive.denyCurrentBranch cannot refuse: a pre-receive hook gated on a flag file refuses the first push */
+ char hook[4400],flag[4400];path(hook,sizeof hook,bare,"hooks/pre-receive");path(flag,sizeof flag,bare,"deny-push");
+ { const char *h="#!/bin/sh\n[ -e \"$GIT_DIR/deny-push\" ] && exit 1\nexit 0\n";put(hook,h,strlen(h));char *cm[]={"chmod","755",hook,0};ok(cm,0);put(flag,"1\n",2); }
+ { char *ld[]={"env","INTEGRATE_LAND_TEST=1",(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,40);ck(r.rc==2&&r.err&&strstr(r.err,"land-push-failed-rolled-back"),"land-push-deny-rollback");np_free(&r); }
+ { char *rm[]={"rm","-f",flag,0};ok(rm,0); }
+ { char *ld[]={"env","INTEGRATE_LAND_TEST=1",(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,40);ck(!r.rc&&r.out&&strstr(r.out,"status=LANDED"),"land-real-landed");np_free(&r); }
+ { char *lv[]={"git","--git-dir",bare,"log","-1","--format=%s",0};np_result r=run(lv,0,8);ck(!r.rc&&r.out&&strstr(r.out,"land fixture"),"land-real-log");np_free(&r); }
+ { char *sv[]={"git","ls-remote",bare,"refs/heads/main",0};np_result r=run(sv,0,8);ck(!r.rc&&r.outn>40,"land-real-ls-remote");np_free(&r); }
+}
+
+int main(int argc,char **argv){deadline=sy_now_ms()+55000;if(argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT]");char native[4096],root[4096],temp[4400];if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");if(argc==1){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
