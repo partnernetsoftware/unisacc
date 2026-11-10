@@ -3,7 +3,7 @@
  *   sh ./unisacc.com tools/phase-budget.cx -- [FILE] [--today YYYY-MM-DD]
  *
  * FILE 默认 agentwork/phase-times.tsv;列:phase scope budget_s measured_s source waiver_task waiver_until。
- * 判定:measured_s 为数字且 > budget_s → OVER;OVER 且 waiver_task!='-' 且 waiver_until>=today → WAIVED;
+ * 判定:measured_s 为数字(整数或至多六位小数,如 255.13)且 > budget_s → OVER;OVER 且 waiver_task!='-' 且 waiver_until>=today → WAIVED;
  * OVER 且无 waiver → FAIL;waiver 已过期 → EXPIRED(失败);measured_s 非数字 → UNMEASURED(只报告,不失败)。
  * 末行 PHASE_BUDGET<TAB>over=N waived=N expired=N unmeasured=N failed=N;failed>0 时退出 1。 */
 #pragma unisa use sys.io
@@ -17,10 +17,19 @@ static int split(char *line, char *f[], int max) {
     for (char *p = line; *p && n < max; p++) if (*p == '\t') { *p = 0; f[n++] = p + 1; }
     return n;
 }
+/* Seconds as integer microseconds: digits with an optional fraction of at most six digits
+   ("255.13", "0.23"); anything else (UNMEASURED, "1.", ".5", "1e3", seven fraction digits) is not a number. */
 static int number(const char *s, long *v) {
-    long a = 0; int i = 0;
-    if (!s[0]) return 0;
-    for (; s[i]; i++) { if (s[i] < '0' || s[i] > '9') return 0; a = a * 10 + (s[i] - '0'); }
+    long a = 0; int i = 0, frac = -1;
+    if (s[0] < '0' || s[0] > '9') return 0;
+    for (; s[i]; i++) {
+        if (s[i] == '.' && frac < 0) { frac = 0; continue; }
+        if (s[i] < '0' || s[i] > '9' || frac >= 6) return 0;
+        a = a * 10 + (s[i] - '0');
+        if (frac >= 0) frac++;
+    }
+    if (frac == 0) return 0;
+    for (frac = frac < 0 ? 0 : frac; frac < 6; frac++) a *= 10;
     *v = a; return 1;
 }
 static int date_ok(const char *s) {
@@ -62,13 +71,13 @@ int main(int argc, char **argv) {
                 int isop = tx_eqz(f[1], "op"), iswh = tx_eqz(f[1], "whole");
                 if (!bn || (!isop && !iswh)) { sy_printf("FAIL\tline %d: bad scope/budget\n", lineno); failed++; }
                 else if (!mn) { sy_printf("UNMEASURED\t%s\n", f[0]); unmeasured++; }
-                else if (m <= b) sy_printf("OK\t%s\t%ld/%ld\n", f[0], m, b);
+                else if (m <= b) sy_printf("OK\t%s\t%s/%s\n", f[0], f[3], f[2]);
                 else {
                     over++;
                     int has = !tx_eqz(f[5], "-") && date_ok(f[6]);
-                    if (!has) { sy_printf("FAIL\t%s\t%ld>%ld no waiver\n", f[0], m, b); failed++; }
-                    else if (tx_cmp(f[6], 10, today, 10) < 0) { sy_printf("EXPIRED\t%s\t%ld>%ld waiver %s until %s\n", f[0], m, b, f[5], f[6]); expired++; failed++; }
-                    else { sy_printf("WAIVED\t%s\t%ld>%ld %s until %s\n", f[0], m, b, f[5], f[6]); waived++; }
+                    if (!has) { sy_printf("FAIL\t%s\t%s>%s no waiver\n", f[0], f[3], f[2]); failed++; }
+                    else if (tx_cmp(f[6], 10, today, 10) < 0) { sy_printf("EXPIRED\t%s\t%s>%s waiver %s until %s\n", f[0], f[3], f[2], f[5], f[6]); expired++; failed++; }
+                    else { sy_printf("WAIVED\t%s\t%s>%s %s until %s\n", f[0], f[3], f[2], f[5], f[6]); waived++; }
                 }
             }
         }

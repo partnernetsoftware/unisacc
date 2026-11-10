@@ -4,7 +4,8 @@
  *
  * 1) 全部在预算内 → 退出 0;2) 超限且无 waiver → 退出 1(FAIL);3) 超限带有效 waiver → 0(WAIVED);
  * 4) waiver 过期 → 1(EXPIRED);5) measured 非数字 → UNMEASURED 且不失败;6) 列数不对 → 1;
- * 7) 真实 agentwork/phase-times.tsv 在今天解析通过。输出 PASS/FAIL 与 CHECK_PHASE_BUDGET<TAB>failed=N。 */
+ * 7) 真实 agentwork/phase-times.tsv 在今天解析通过;8) 小数 measured_s(0.23、255.13)参与比较,刚过预算即 FAIL,
+ * 畸形小数(1. .5 1e3 1.2.3 七位小数 负数)记 UNMEASURED。输出 PASS/FAIL 与 CHECK_PHASE_BUDGET<TAB>failed=N。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
@@ -45,6 +46,13 @@ int main(void) {
     ck(run_fixture("expired", b, "2026-12-01", out, sizeof out) == 1 && has(out, "EXPIRED"), "expired-waiver-fails");
     cx_fmt(b, sizeof b, "%sa\top\t300\tUNMEASURED\ts\t-\t-\n", H);
     ck(run_fixture("unm", b, "2026-11-08", out, sizeof out) == 0 && has(out, "unmeasured=1"), "unmeasured-reported-not-failed");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t0.23\ts\t-\t-\nb\top\t300\t255.13\ts\t-\t-\nc\top\t300\t300.000000\ts\t-\t-\n", H);
+    ck(run_fixture("dec", b, "2026-11-08", out, sizeof out) == 0 && has(out, "OK\ta\t0.23/300") && has(out, "OK\tb\t255.13/300") &&
+       has(out, "unmeasured=0"), "decimal-within-budget-compared");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t300.000001\ts\t-\t-\n", H);
+    ck(run_fixture("decover", b, "2026-11-08", out, sizeof out) == 1 && has(out, "300.000001>300 no waiver"), "decimal-just-over-fails");
+    cx_fmt(b, sizeof b, "%sa\top\t300\t1.\ts\t-\t-\nb\top\t300\t.5\ts\t-\t-\nc\top\t300\t1e3\ts\t-\t-\nd\top\t300\t1.2.3\ts\t-\t-\ne\top\t300\t1.0000001\ts\t-\t-\nf\top\t300\t-1\ts\t-\t-\n", H);
+    ck(run_fixture("decbad", b, "2026-11-08", out, sizeof out) == 0 && has(out, "unmeasured=6") && has(out, "over=0"), "malformed-decimal-unmeasured");
     cx_fmt(b, sizeof b, "%sa\top\t300\t1\n", H);
     ck(run_fixture("cols", b, "2026-11-08", out, sizeof out) == 1 && has(out, "columns"), "bad-column-count-fails");
     cx_fmt(b, sizeof b, "%sa\tweird\t300\t1\ts\t-\t-\n", H);
