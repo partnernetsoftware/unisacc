@@ -83,17 +83,49 @@ static void land_real(const char *top,const char *native,const char *productroot
  { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("land-diff");put(patch,r.out,r.outn);np_free(&r); }
  put(msg,"land fixture\n",12);
  { char *ap[]={(char*)native,root,patch,dest,"--prepare-only",0};np_result r=run(ap,0,55);ck(!r.rc,"land-real-prep");np_free(&r); }
- /* gates are not run in this fixture: install the READY marker exactly as phase 5 writes it, so --land itself (commit -F, push, fetch, sync) runs for real */
  path(p,sizeof p,dest,".git/integrate/ready.tsv");put(p,"INTEGRATE_READY1\nstatus\tREADY_TO_COMMIT\nscope\tmetadata-ratchets-precommit-only\npushed\t0\n",strlen("INTEGRATE_READY1\nstatus\tREADY_TO_COMMIT\nscope\tmetadata-ratchets-precommit-only\npushed\t0\n"));
+ { char recp[4400];size_t rn;char *rs;path(recp,sizeof recp,dest,".git/integrate/receipt.tsv");rs=cx_read(recp,&rn);ck(rs!=0,"land-receipt-present");
+   if(rs){const char *ps=strstr(rs,"\npatch\t"),*bs=strstr(rs,"\nbase\t");char rec[400];
+    if(ps&&bs){ps+=7;bs+=6;const char *pe=strchr(ps,'\n'),*be=strchr(bs,'\n');
+     if(pe&&be&&(pe-ps)==64&&(be-bs)==64){if(cx_fmt(rec,sizeof rec,"AFFECTED_GATE1\npatch\t%.*s\nbase\t%.*s\nstatus\tPASS\n",64,ps,64,bs))die("aff");path(p,sizeof p,dest,".git/integrate/affected.tsv");put(p,rec,strlen(rec));}}
+    free(rs);}}
+ { char bad[200];if(cx_fmt(bad,sizeof bad,"AFFECTED_GATE1\npatch\t%064d\nbase\t%064d\nstatus\tPASS\n",0,0))die("bad-aff");path(p,sizeof p,dest,".git/integrate/affected.tsv");put(p,bad,strlen(bad));
+   char *ld[]={(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,20);ck(r.rc==2&&r.err&&strstr(r.err,"land-affected-stale-reopen-gates"),"land-stale-affected");np_free(&r); }
+ { char recp[4400];size_t rn;char *rs;path(recp,sizeof recp,dest,".git/integrate/receipt.tsv");rs=cx_read(recp,&rn);
+   if(rs){const char *ps=strstr(rs,"\npatch\t"),*bs=strstr(rs,"\nbase\t");char rec[400];
+    if(ps&&bs){ps+=7;bs+=6;const char *pe=strchr(ps,'\n'),*be=strchr(bs,'\n');
+     if(pe&&be&&(pe-ps)==64&&(be-bs)==64){if(cx_fmt(rec,sizeof rec,"AFFECTED_GATE1\npatch\t%.*s\nbase\t%.*s\nstatus\tPASS\n",64,ps,64,bs))die("aff2");path(p,sizeof p,dest,".git/integrate/affected.tsv");put(p,rec,strlen(rec));}}
+    free(rs);}}
  { char *ld[]={(char*)native,"--land",dest,"--message-file","/no/such/msg",0};np_result r=run(ld,0,15);ck(r.rc==2,"land-missing-message-file");np_free(&r); }
  /* the target is bare, so receive.denyCurrentBranch cannot refuse: a pre-receive hook gated on a flag file refuses the first push */
  char hook[4400],flag[4400];path(hook,sizeof hook,bare,"hooks/pre-receive");path(flag,sizeof flag,bare,"deny-push");
  { const char *h="#!/bin/sh\n[ -e \"$GIT_DIR/deny-push\" ] && exit 1\nexit 0\n";put(hook,h,strlen(h));char *cm[]={"chmod","755",hook,0};ok(cm,0);put(flag,"1\n",2); }
  { char *ld[]={"env","INTEGRATE_LAND_TEST=1",(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,40);ck(r.rc==2&&r.err&&strstr(r.err,"land-push-failed-rolled-back"),"land-push-deny-rollback");np_free(&r); }
  { char *rm[]={"rm","-f",flag,0};ok(rm,0); }
- { char *ld[]={"env","INTEGRATE_LAND_TEST=1",(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,40);ck(!r.rc&&r.out&&strstr(r.out,"status=LANDED"),"land-real-landed");np_free(&r); }
+ { char *ld[]={"env","INTEGRATE_LAND_TEST=1",(char*)native,"--land",dest,"--message-file",msg,0};np_result r=run(ld,0,40);ck(!r.rc&&r.out&&strstr(r.out,"status=LANDED"),"land-skip-affected-run");np_free(&r); }
  { char *lv[]={"git","--git-dir",bare,"log","-1","--format=%s",0};np_result r=run(lv,0,8);ck(!r.rc&&r.out&&strstr(r.out,"land fixture"),"land-real-log");np_free(&r); }
  { char *sv[]={"git","ls-remote",bare,"refs/heads/main",0};np_result r=run(sv,0,8);ck(!r.rc&&r.outn>40,"land-real-ls-remote");np_free(&r); }
 }
+static void registry_neg(const char *top,const char *native){
+ char dir[4400],okp[4400],pat[4400],mis[4400];
+ if(cx_fmt(dir,sizeof dir,"%s/reg",top)||cx_fmt(okp,sizeof okp,"%s/tools/ok.cx",dir)||cx_fmt(pat,sizeof pat,"%s/ok.patch",dir)||cx_fmt(mis,sizeof mis,"%s/miss.patch",dir))die("reg-path");
+ { char *mk[]={"mkdir","-p",dir,0};np_result r=run(mk,0,5);np_free(&r); }
+ { char tools[4400];path(tools,sizeof tools,dir,"tools");if(sy_mkdir(tools,0700)&&sy_exists(tools)!=1)die("reg-tools"); }
+ put(okp,"int main(void){return 0;}\n",24);
+ { const char *okd="diff --git a/tests/batches.tsv b/tests/batches.tsv\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/tests/batches.tsv\n+++ b/tests/batches.tsv\n@@ -1,1 +1,2 @@\n id\timplementation\n+landx\tIMPLEMENTED\tinterfaces\ttools/ok.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/ok.cx\t--land-only\tcov\trc0:A\tproduct\tdaily\ndiff --git a/tools/ok.cx b/tools/ok.cx\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/tools/ok.cx\n+++ b/tools/ok.cx\n@@ -1 +1 @@\n-int main(void){return 1;}\n+int main(void){return 0;}\n";put(pat,okd,strlen(okd)); }
+ { char *v[]={(char*)native,"--check-registry",pat,0};np_result r=run(v,dir,8);ck(!r.rc&&r.out&&strstr(r.out,"REGISTRY_OK"),"registry-modified-check-with-args-ok");np_free(&r); }
+ { const char *bad="diff --git a/tests/batches.tsv b/tests/batches.tsv\nindex 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644\n--- a/tests/batches.tsv\n+++ b/tests/batches.tsv\n@@ -1,1 +1,2 @@\n id\timplementation\n+landy\tIMPLEMENTED\tinterfaces\ttools/missing-check.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/missing-check.cx\t--land-only\tcov\trc0:A\tproduct\tdaily\n";put(mis,bad,strlen(bad)); }
+ { char *v[]={(char*)native,"--check-registry",mis,0};np_result r=run(v,dir,8);ck(r.rc==2&&r.err&&strstr(r.err,"registry-check-missing"),"registry-missing-check-refused");np_free(&r); }
+}
 
-int main(int argc,char **argv){deadline=sy_now_ms()+55000;if(argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT]");char native[4096],root[4096],temp[4400];if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");if(argc==1){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+int main(int argc,char **argv){
+ deadline=sy_now_ms()+55000;
+ int land_only=argc==2&&!strcmp(argv[1],"--land-only");
+ if(!land_only&&argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT] | --land-only");
+ char native[4096],root[4096],temp[4400];
+ if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");
+ if(argc==1||land_only){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}
+ else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");
+ if(land_only){land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+ fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);registry_neg(temp,native);
+ printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
