@@ -1,0 +1,69 @@
+/* tools/check-s9-worker-smoke.cx -- 真实 s9-shards 二进制的片工作进程入口冒烟。
+ *
+ * 背景: c7p2e 合并时误删 main 里 `if(is_child){...child(...)}`, 所有片工作进程 (s9-shards child ROOT RUN IDS)
+ * 落入 usage 分支报 REFUSE usage; 门内其余 s9 检查都用假 s9 夹具, 没拦住。
+ * 本检查编译被测根的 tools/s9-shards.cx 真二进制, 在 ROOT/out 下建一个空运行目录, 以真实参数形态
+ * 调用 `child ROOT RUN SESSION IDS`。有 child 分支时, 未 init 的运行目录进入 child 体内后在 REFUSE parent 或执行器 exec 处失败;
+ * 缺 child 分支时落入 REFUSE usage。断言: 退出码非 0、输出表明进入 child 体 (REFUSE parent / exec 失败)、不含 REFUSE usage。
+ * 范围声明: 完整 init/prepare/step 链实测 checker 单步 36s, 超出 55s 单检查预算, 故此处只验证分派入口;
+ * 片日志 .done / BATCH_RUN 由 s9-nightly 真跑覆盖, 本检查不记这两项。
+ * 用法: check-s9-worker-smoke.cx ABS_OUT_DIR (cwd 为被测根; ABS_OUT_DIR 须在 ROOT/out 下; 运行目录 ABS_OUT_DIR/s9ws-<pid>)
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-s9-worker-smoke.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void die(const char *s) { fprintf(stderr, "check-s9-worker-smoke: %s\n", s); exit(2); }
+static int has(const char *s, size_t n, const char *needle) {
+    size_t k = strlen(needle);
+    if (!s || n < k) return 0;
+    for (size_t i = 0; i + k <= n; i++)
+        if (!memcmp(s + i, needle, k)) return 1;
+    return 0;
+}
+int main(int argc, char **argv) {
+    char root[4400], run[4400], bin[4400], src[4400], prod[4400], why[512], dl[96];
+    np_result r = {0};
+    sy_ts_t t;
+    if (sy_realpath(".", root, sizeof root) < 0) die("root");
+    if (argc < 2 || argv[1][0] != '/') die("usage: check-s9-worker-smoke ABS_OUT_DIR (under ROOT/out)");
+    if (cx_fmt(run, sizeof run, "%s/s9ws-%d", argv[1], (int)getpid())) die("p");
+    if (cx_fmt(bin, sizeof bin, "%s/s9", run) || cx_fmt(src, sizeof src, "%s/tools/s9-shards.cx", root) ||
+        cx_fmt(prod, sizeof prod, "%s/unisacc.com", root)) die("p");
+    {
+        char *mk[] = {"mkdir", "-p", run, 0};
+        if (np_run(mk, 0, 0, 5, &r, why, sizeof why) || r.rc) { np_free(&r); die("mkdir"); }
+        np_free(&r);
+    }
+    {
+        char *cc[] = {"sh", prod, src, "-o", bin, 0};
+        if (np_run(cc, root, 0, 45, &r, why, sizeof why) || r.rc) { np_free(&r); die("compile-s9-shards"); }
+        np_free(&r);
+    }
+    if (sy_mono(&t) || cx_fmt(dl, sizeof dl, "UNISACC_BOUND_DEADLINE_MONO=%.9f", (double)t.sec + (double)t.nsec / 1e9 + 30)) die("deadline");
+    {
+        char sess[4400];
+        char *env[] = {dl, 0};
+        if (cx_fmt(sess, sizeof sess, "%s/sess", run)) die("p");
+        char *mk[] = {"mkdir", "-p", sess, 0};
+        if (np_run(mk, 0, 0, 5, &r, why, sizeof why) || r.rc) { np_free(&r); die("mkdir-sess"); }
+        np_free(&r);
+        char *v[] = {bin, "child", root, run, sess, "none", 0};
+        if (np_run(v, root, env, 20, &r, why, sizeof why)) die("run-child");
+        ck(r.rc != 0, "child-refuses-uninitialized");
+        ck(has(r.err, r.errn, "REFUSE parent") || has(r.out, r.outn, "REFUSE parent") || has(r.err, r.errn, "exec: No such file") || has(r.err, r.errn, "wave-"), "child-reaches-worker-body");
+        ck(!has(r.err, r.errn, "REFUSE usage") && !has(r.out, r.outn, "REFUSE usage"), "child-not-usage-refuse");
+        np_free(&r);
+    }
+    printf("CHECK_S9_WORKER_SMOKE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
