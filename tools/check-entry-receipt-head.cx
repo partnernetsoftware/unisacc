@@ -1,0 +1,84 @@
+/* 收据头只写一次:entry-build 追加模式(--only)连跑两次,receipt.txt 的 entry-build-v3/root/p3/p3_sha/object_level 各恰一行;
+ * 头被改动后再追加必须具名拒绝。真实编译两个小对象,私有目录,子进程各 55 秒封顶。
+ * sh ./unisacc.com tools/check-entry-receipt-head.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+static int bad;
+static void ck(int yes, const char *s) { printf("%s\t%s\n", yes ? "PASS" : "FAIL", s); if (!yes) bad++; }
+static int count(const char *text, const char *needle) { int n = 0; const char *p = text; while ((p = strstr(p, needle))) { n++; p += strlen(needle); } return n; }
+/* --full(手动,约 7 分钟,不入 55 秒批次):完整对象目录 A 连跑两次 --link-only,头各一行;
+ * 另一目录 B 用 --only/--closure-only 每 3 键追加覆盖全部 85 键,头各一行,且 whole-front prepare 过收据校验
+ * (走到写出 worker.cx;其后 worker 编译在本检查中不要求成功);再人为追加第二份头,whole-front 必须报 receipt root mismatch。 */
+static int heads_once(const char *rec) {
+    size_t n; char *t = cx_read(rec, &n);
+    int ok = t && count(t, "entry-build-v3\n") == 1 && count(t, "\nroot\t") == 1 && count(t, "\np3\t") == 1 && count(t, "\np3_sha\t") == 1 && count(t, "\nobject_level\t") == 1;
+    free(t);
+    return ok;
+}
+static int full(const char *root, const char *tmp) {
+    char a[1100], b[1100], cmd[8192], ra[1200], rb[1200];
+    const char *eb = "timeout 55 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com %s";
+    if (cx_fmt(a, sizeof a, "%s/erhA-%d", tmp, (int)getpid()) || cx_fmt(b, sizeof b, "%s/erhB-%d", tmp, (int)getpid())) return 2;
+    if (cx_fmt(ra, sizeof ra, "%s/receipt.txt", a) || cx_fmt(rb, sizeof rb, "%s/receipt.txt", b)) return 2;
+    if (mkdir(a, 0700) || mkdir(b, 0700)) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "timeout 300 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com >/dev/null 2>&1", root, root, root, root, a, root)) return 2;
+    ck(system(cmd) == 0, "full build A");
+    for (int i = 0; i < 2; i++) {
+        char c2[8192];
+        if (cx_fmt(c2, sizeof c2, eb, root, root, root, root, a, root, "--link-only >/dev/null 2>&1")) return 2;
+        ck(system(c2) == 0, "link-only run");
+    }
+    ck(heads_once(ra), "link-only twice: head/root/p3/p3_sha/object_level once");
+    /* 逐键:键表来自 A 的收据(对象行),分组各 3 个。 */
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && grep -E '^[A-Za-z0-9_.]+[.]o\t' %s | cut -f1 > %s/keys.txt && grep -c . %s/keys.txt", root, ra, tmp, tmp)) return 2;
+    ck(system(cmd) == 0, "keys from receipt");
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && run() { n=0; set --; while read k; do set -- \"$@\" $F $k; n=$((n+1)); if [ $n -eq 3 ]; then timeout 55 sh ./unisacc.com tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com \"$@\" >/dev/null 2>&1 || return 1; set --; n=0; fi; done; [ $n -eq 0 ] || timeout 55 sh ./unisacc.com tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com \"$@\" >/dev/null 2>&1; }; F=--only; grep -v '^m[0-9]' %s/keys.txt | run || exit 1; F=--closure-only; grep '^m[0-9]' %s/keys.txt | run", root, root, root, b, root, root, root, b, root, tmp, tmp)) return 2;
+    ck(system(cmd) == 0, "per-3-keys appends");
+    ck(heads_once(rb), "per-key: head/root/p3/p3_sha/object_level once");
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && printf '#!/bin/sh\\nprintf \"%%064d\\\\n\" 0\\n' > %s/fakehelper && chmod +x %s/fakehelper && UNISACC_IDENTITY_HELPER=%s/fakehelper timeout 100 sh ./unisacc.com tools/whole-front.cx -- prepare %s %s/unisacc.com %s/unisacc.com %s %s/wf-ok-%d >/dev/null 2>&1; test -f %s/wf-ok-%d/worker.cx", root, tmp, tmp, tmp, root, root, root, b, tmp, (int)getpid(), tmp, (int)getpid())) return 2;
+    ck(system(cmd) == 0, "whole-front accepts per-key receipt (reaches worker.cx)");
+    if (cx_fmt(cmd, sizeof cmd, "head -n 7 %s >> %s", rb, rb)) return 2;
+    (void)system(cmd);
+    ck(!heads_once(rb), "duplicate head detected");
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && UNISACC_IDENTITY_HELPER=%s/fakehelper timeout 100 sh ./unisacc.com tools/whole-front.cx -- prepare %s %s/unisacc.com %s/unisacc.com %s %s/wf-bad-%d 2>&1 | grep -q 'receipt root mismatch'", root, tmp, root, root, root, b, tmp, (int)getpid())) return 2;
+    ck(system(cmd) == 0, "whole-front refuses duplicate head");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s %s %s/wf-ok-%d %s/wf-bad-%d", a, b, tmp, (int)getpid(), tmp, (int)getpid())) return 2;
+    (void)system(cmd);
+    printf("ENTRY_RECEIPT_HEAD_FULL\tbad=%d\n", bad);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    char root[1024], out[1100], rec[1200], cmd[4096];
+    const char *tmp = getenv("TMPDIR");
+    if (!getcwd(root, sizeof root)) return 2;
+    if (!tmp || !*tmp) tmp = "out";
+    if (argc > 1 && !strcmp(argv[1], "--full")) return full(root, tmp);
+    if (cx_fmt(out, sizeof out, "%s/erh-%d", tmp, (int)getpid()) || cx_fmt(rec, sizeof rec, "%s/receipt.txt", out)) return 2;
+    if (mkdir(out, 0700)) { fprintf(stderr, "mkdir out\n"); return 2; }
+    if (cx_fmt(cmd, sizeof cmd, "timeout 55 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com --only rescache.o >/dev/null 2>&1", root, root, root, root, out, root)) return 2;
+    ck(system(cmd) == 0, "first --only run");
+    if (cx_fmt(cmd, sizeof cmd, "timeout 55 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com --only hostres.o >/dev/null 2>&1", root, root, root, root, out, root)) return 2;
+    ck(system(cmd) == 0, "second --only run (append)");
+    size_t n; char *t = cx_read(rec, &n);
+    ck(t != 0, "receipt readable");
+    if (t) {
+        ck(count(t, "entry-build-v3\n") == 1, "head magic once");
+        ck(count(t, "\nroot\t") == 1, "root once");
+        ck(count(t, "\np3\t") == 1, "p3 once");
+        ck(count(t, "\np3_sha\t") == 1, "p3_sha once");
+        ck(count(t, "\nobject_level\t") == 1, "object_level once");
+        ck(count(t, "\nrescache.o\tsha=") == 1 && count(t, "\nhostres.o\tsha=") == 1, "object lines appended once each");
+        char *v = strstr(t, "\nvia\texec\n");
+        if (v) { v[5] = 's'; v[6] = 'h'; v[7] = '\n'; v[8] = 'x'; }
+        FILE *f = fopen(rec, "wb");
+        if (f) { fwrite(t, 1, n, f); fclose(f); }
+        free(t);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "timeout 55 sh %s/unisacc.com %s/tools/entry-build.cx -- %s %s/unisacc.com %s %s/unisacc.com --only drivestream.o 2>&1 | grep -q 'receipt head mismatch'", root, root, root, root, out, root)) return 2;
+    ck(system(cmd) == 0, "changed head refused by name");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", out)) return 2;
+    (void)system(cmd);
+    printf("ENTRY_RECEIPT_HEAD\tbad=%d\n", bad);
+    return bad ? 1 : 0;
+}

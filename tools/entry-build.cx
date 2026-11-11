@@ -768,9 +768,19 @@ static void eb_line_slow(FILE *f, const char *k, const char *sha, long n, long l
     fprintf(f, "%s\tsha=%s\tbytes=%ld\tns=%lld\tslow_kind=%s\tslow_ns=%lld\tslow_line=%s\tsrc=%s\n", k, sha, n, ns, kind, sn, line, src ? src : "-");
 }
 
+/* Receipt head is written once. On an append open, an existing identical head
+   is kept as is; a differing head (or any nonempty non-head content) is refused. */
+static char eb_head_buf[4096];
+static char *eb_prev_receipt;
 static void eb_open_head(FILE *rf, const char *root, const char *p3, const char *hp, const char *ctor, const char *hc, long nk, int via_sh) {
-    fprintf(rf, "entry-build-v3\nroot\t%s\np3\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nconstructor_bytes\t%ld\nvia\t%s\n",
+    int hn = snprintf(eb_head_buf, sizeof eb_head_buf, "entry-build-v3\nroot\t%s\np3\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nconstructor_bytes\t%ld\nvia\t%s\n",
             root, p3, hp, ctor, hc, nk, via_sh ? "sh" : "exec");
+    if (hn < 0 || hn >= (int)sizeof eb_head_buf) eb_die("receipt head bound");
+    if (eb_prev_receipt && eb_prev_receipt[0]) {
+        if (strncmp(eb_prev_receipt, eb_head_buf, (size_t)hn)) eb_die("receipt head mismatch: existing receipt head differs from this run");
+        return;
+    }
+    fputs(eb_head_buf, rf);
     if (fflush(rf)) eb_die("receipt");
 }
 
@@ -1001,13 +1011,36 @@ int main(int argc, char **argv) {
         k = k + 1;
     }
     rmode = (only_n || closure_n || link_only) ? "ab" : "wb";
+    {
+        struct stat rst;
+        eb_prev_receipt = 0;
+        if (!closure_list && rmode[0] == 'a') {
+            if (stat(receipt, &rst)) {
+                if (errno != ENOENT) eb_die("receipt stat");
+            } else {
+                size_t pn;
+                eb_prev_receipt = cx_read(receipt, &pn);
+                if (!eb_prev_receipt && rst.st_size) eb_die("receipt read");
+            }
+        }
+    }
     rf = closure_list ? tmpfile() : fopen(receipt, rmode);
     if (!rf) eb_die("receipt");
     eb_open_head(rf, root, p3, hp, ctor, hk, nk, via_sh);
-    if (o1_drivers)
-        fprintf(rf, "object_level\tmode=o1-drivers\tdrive.o=-O1\thost.o=-O1\tdriveface.o=-O1\tdriveroute.o=-O1\tcxmod.o=-O1\ttapegate.o=-O1\tother=-O2\ttarget=%s\n", target);
-    else
-        fprintf(rf, "object_level\tmode=default\tall=-O2\ttarget=%s\n", target);
+    {
+        char ol[1024];
+        int on;
+        if (o1_drivers)
+            on = snprintf(ol, sizeof ol, "object_level\tmode=o1-drivers\tdrive.o=-O1\thost.o=-O1\tdriveface.o=-O1\tdriveroute.o=-O1\tcxmod.o=-O1\ttapegate.o=-O1\tother=-O2\ttarget=%s\n", target);
+        else
+            on = snprintf(ol, sizeof ol, "object_level\tmode=default\tall=-O2\ttarget=%s\n", target);
+        if (on < 0 || on >= (int)sizeof ol) eb_die("object_level bound");
+        if (eb_prev_receipt && eb_prev_receipt[0]) {
+            if (strstr(eb_prev_receipt, ol)) on = 0;
+            else if (strstr(eb_prev_receipt, "\nobject_level\t")) eb_die("receipt object_level mismatch");
+        }
+        if (on) fputs(ol, rf);
+    }
     tpar_wall = eb_ns();
     eb_input_root = root;
     eb_snapshot(root, ctor, eb_inputs_identity);
