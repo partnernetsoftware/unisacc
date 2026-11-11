@@ -12,13 +12,35 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use text.text
+
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
 static int assertions, failed;
 static void ok(int c, const char *n) { assertions++; if (!c) failed++; printf("%s\t%s\n", c ? "PASS" : "FAIL", n); }
 static unsigned long long rd(const unsigned char *p, int n) { unsigned long long v = 0; int i; for (i = n - 1; i >= 0; i--) v = (v << 8) | p[i]; return v; }
 static int run_tool(const char *a, const char *b, char *out, int cap) {
     char *av[] = { "sh", "unisacc.com", "tools/formats-elf-text.cx", "--", (char *)a, (char *)b, 0 };
     out[0] = 0;
-    return sy_run(av, out, cap, 0);
+    return bounded_run(av, 50, out, cap, 0);
 }
 /* extract IN to OUT and compare with the recorded ORACLE bytes and sha prefix */
 static int extract_matches(const char *in, const char *oracle, long want_len, const char *sha_prefix, const char *tmp) {
@@ -50,9 +72,9 @@ int main(void) {
         size_t n1 = 0, n2 = 0; char *p1, *p2; int same = 0;
         if (cx_fmt(h1, sizeof h1, "%s/from-obj.h", dir) || cx_fmt(h2, sizeof h2, "%s/from-raw.h", dir)) return 2;
         av[0] = "sh"; av[1] = "unisacc.com"; av[2] = "tools/gen-ffi-bridge.cx"; av[3] = "--"; av[4] = "arm64"; av[5] = ao; av[6] = h1; av[7] = 0;
-        rc = sy_run(av, log, (int)sizeof log, 0);
+        rc = bounded_run(av, 50, log, (int)sizeof log, 0);
         av[5] = ab; av[6] = h2;
-        if (rc == 0) rc = sy_run(av, log, (int)sizeof log, 0);
+        if (rc == 0) rc = bounded_run(av, 50, log, (int)sizeof log, 0);
         p1 = cx_read(h1, &n1); p2 = cx_read(h2, &n2);
         if (rc == 0 && p1 && p2 && n1 == n2 && n1 > 8) { same = 1; for (i = 0; i < n1; i++) if (p1[i] != p2[i]) same = 0; }
         ok(same, "generator-from-object-equals-from-raw");

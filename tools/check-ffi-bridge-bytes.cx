@@ -7,6 +7,28 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
 static int assertions, failed;
 static void ok(int c, const char *n) { assertions++; if (!c) failed++; printf("%s\t%s\n", c ? "PASS" : "FAIL", n); }
 int main(void) {
@@ -23,16 +45,16 @@ int main(void) {
         if (cx_write(raw, fx, 16)) return 2;
     }
     {   char *av[] = { "sh", "unisacc.com", gen, "--", "x86_64", raw, hdr, 0 };
-        out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+        out[0] = 0; rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         ok(rc == 0 && tx_find(out, (long)strlen(out), "WROTE", 5) >= 0, "generate-writes"); }
     {   char *av[] = { "sh", "unisacc.com", gen, "--", "--check", "x86_64", raw, hdr, 0 };
-        out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+        out[0] = 0; rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         ok(rc == 0 && tx_find(out, (long)strlen(out), "CHECK OK", (long)sizeof("CHECK OK") - 1) >= 0, "check-passes"); }
     {   size_t n = 0; char *b = cx_read(hdr, &n);
         ok(b != 0 && n > 8, "table-nonempty");
         if (b) { b[n - 1] = ' '; cx_write(hdr, b, n); free(b); }
         {   char *av[] = { "sh", "unisacc.com", gen, "--", "--check", "x86_64", raw, hdr, 0 };
-            out[0] = 0; rc = sy_run(av, out, (int)sizeof out, 0);
+            out[0] = 0; rc = bounded_run(av, 50, out, (int)sizeof out, 0);
             ok(rc != 0, "tampered-fails"); } }
     /* 只删自己建的文件，再删本次的独占目录：不用通配符，也不碰别人的东西。 */
     {   int left = 0;

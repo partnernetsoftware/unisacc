@@ -11,13 +11,35 @@
 #pragma unisa use sys.io
 #pragma unisa use text.text
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-matrix-waive.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-matrix-waive.%s\n", name); } }
 
 int main(void) {
     char out[4096]; int cut;
     char *a1[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", ".", "tests/waivers-0.0.44.tsv", "--check", 0};
-    ck(sy_run(a1, out, sizeof out, &cut) == 0 && tx_find(out, tx_len(out, sizeof out), "disagree=0", 10) >= 0, "record-and-matrices-agree");
+    ck(bounded_run(a1, 50, out, sizeof out, &cut) == 0 && tx_find(out, tx_len(out, sizeof out), "disagree=0", 10) >= 0, "record-and-matrices-agree");
     {   /* negative control: a root whose hosts matrix has one waived row turned back to required
            (scratch under /tmp via mkdtemp: no out/ dependency) */
         char scratch[2048], cmd[6144];
@@ -30,8 +52,8 @@ int main(void) {
         if (snprintf(wv, sizeof wv, "%s/tests/waivers-0.0.44.tsv", scratch) >= (int)sizeof wv) return 2;
         char *s2[] = {"sh", "./unisacc.com", "tools/matrix-waive.cx", "--", scratch, wv, "--check", 0};
         int r1, r2;
-        r1 = sy_run(s1, out, sizeof out, &cut);
-        r2 = sy_run(s2, out, sizeof out, &cut);
+        r1 = bounded_run(s1, 50, out, sizeof out, &cut);
+        r2 = bounded_run(s2, 50, out, sizeof out, &cut);
         ck(r1 == 0 && r2 == 1 && tx_find(out, tx_len(out, sizeof out), "version-0.0.43", 14) >= 0, "a-waived-row-made-required-is-caught");
     }
     sy_printf("CHECK_MATRIX_WAIVE\tfailed=%d\n", failed);

@@ -15,13 +15,35 @@
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-full-domain.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-full-domain.%s\n", name); } }
 static char fx[2048];   /* 本次运行的夹具根：/tmp 的 mkdtemp，不写仓内 out/ */
 static void put(const char *name, const char *text) { char p[2560]; if (cx_fmt(p, sizeof p, "%s/tests/%s-domain-matrix.tsv", fx, name) || cx_write(p, text, (size_t)tx_len(text, 8192))) { sy_eprintf("check-full-domain: cannot write %s\n", p); sy_exit(2); } }
 static int run(const char *domain, char *out, int cap) {
     char *av[] = {"sh", "./unisacc.com", "tests/full-domain.cx", "--", fx, (char *)domain, 0}; int cut;
-    return sy_run(av, out, cap, &cut);
+    return bounded_run(av, 50, out, cap, &cut);
 }
 static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 4096), s, tx_len(s, 256)) >= 0; }
 
@@ -29,7 +51,7 @@ int main(void) {
     char out[4096], cmd[2200]; int rc;
     if (cx_fmt(fx, sizeof fx, "/tmp/check-full-domain-XXXXXX") || !mkdtemp(fx)) return 2;
     if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s/tests", fx)) return 2;
-    { char *av[] = {"sh", "-c", cmd, 0}; int cut; if (sy_run(av, out, sizeof out, &cut)) return 2; }
+    { char *av[] = {"sh", "-c", cmd, 0}; int cut; if (bounded_run(av, 50, out, sizeof out, &cut)) return 2; }
     put("fx-all", "# fixture\nlnx/x86_64\ta\tyes\tCOVERED_LOCAL\te\tr\nosx/arm64\tb\tyes\tOBSERVED\te\tr\nlnx/x86_64\tc\tyes\tDECLARED_DEPENDENCY\te\tr\n");
     rc = run("fx-all", out, sizeof out); ck(rc == 0 && has(out, "required=3\tsatisfied=3\topen=0\tPASS") && !has(out, "OPEN\t"), "all-satisfied");
     put("fx-open", "lnx/x86_64\ta\tyes\tMISSING\te\tneeds a thing\nosx/arm64\tb\tyes\tNEEDS_FOREIGN_HOST\te\tr\nlnx/x86_64\tc\tyes\tNEEDS_PRODUCT_CHANGE\te\tr\nlnx/x86_64\td\tyes\tBLOCKED:owner-ruling\te\tr\nlnx/x86_64\te\tyes\tCOVERED_LOCAL\te\tr\n");

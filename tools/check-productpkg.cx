@@ -28,6 +28,28 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static char root[4400], com[4400], work[4400];
 static int assertions, failed;
 
@@ -131,7 +153,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(entry, sizeof entry, "%s/unisacc.com", dst)) die("copy launcher");
         av[1] = entry;
         out[0] = 0;
-        rc = sy_run(av, out, (int)sizeof out, 0);
+        rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         { char version[24], expected[64];
           if(rv_load("release/candidate.tsv",version)||cx_fmt(expected,sizeof expected,"unisacc %s",version))die("release version");
           ok(rc == 0 && tx_find(out, (long)strlen(out), expected, tx_len(expected,sizeof expected)) >= 0, "copy-runs"); }
@@ -292,7 +314,7 @@ int main(int argc, char **argv) {
         char out[256];
         int rc;
         out[0] = 0;
-        rc = sy_run(av, out, (int)sizeof out, 0);
+        rc = bounded_run(av, 50, out, (int)sizeof out, 0);
         ok(rc == 2, "identity-failure-refuses-not-empty");
     }
     printf("PRODUCTPKG\tassertions=%d\tfailed=%d\n", assertions, failed);

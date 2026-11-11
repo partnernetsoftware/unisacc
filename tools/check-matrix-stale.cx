@@ -17,6 +17,28 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static int failed;
 static char root[4096], base[4400], tool[4500];
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-matrix-stale.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-matrix-stale.%s\n", name); } }
@@ -38,21 +60,21 @@ int main(void) {
     if (cx_fmt(map, sizeof map, "%s/map.tsv", base) || cx_fmt(outd, sizeof outd, "%s/out", base) || cx_fmt(gen, sizeof gen, "%s/out/x-domain-matrix.tsv", base)) die("paths");
 
     put("map.tsv", "x\tx.alpha\tred on the candidate\n");
-    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut);
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = bounded_run(a, 50, out, sizeof out, &cut);
         g = rc == 0 ? cx_read(gen, &n) : 0;
         {   char want[1024]; int ok = 0;
             if (g && !cx_fmt(want, sizeof want, "%s%s%s%s", row0, "lnx/x86_64\tx.alpha\tyes\tMISSING\tSTALE-RED(red on the candidate): batch-a:alpha\talpha works\tsrc\n", rowB, rowC)) ok = n == (size_t)tx_len(want, sizeof want) && tx_same(g, (long)n, want, tx_len(want, sizeof want));
             ck(ok, "demote-only-the-mapped-cell-others-byte-for-byte"); } if (g) mm_free(g); }
     put("map.tsv", "x\tx.beta\tr\n");
-    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2 && tx_find(out, tx_len(out, sizeof out), "COVERED_LOCAL", 13) >= 0, "refuses-a-cell-that-is-not-covered"); }
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = bounded_run(a, 50, out, sizeof out, &cut); ck(rc == 2 && tx_find(out, tx_len(out, sizeof out), "COVERED_LOCAL", 13) >= 0, "refuses-a-cell-that-is-not-covered"); }
     put("map.tsv", "x\tx.nothing\tr\n");
-    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = sy_run(a, out, sizeof out, &cut); ck(rc == 2, "refuses-an-unmatched-cell"); }
+    {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}; rc = bounded_run(a, 50, out, sizeof out, &cut); ck(rc == 2, "refuses-an-unmatched-cell"); }
     put("map.tsv", "x\tx.alpha\tred on the candidate\n");
     {   char *a[] = {"sh", com, tool, "--", base, map, outd, 0}, *c[] = {"sh", com, tool, "--", base, map, "--check", outd, 0};
-        rc = sy_run(a, out, sizeof out, &cut); if (rc) die("regenerate");
-        rc = sy_run(c, out, sizeof out, &cut); ck(rc == 0, "check-accepts-its-own-generation");
+        rc = bounded_run(a, 50, out, sizeof out, &cut); if (rc) die("regenerate");
+        rc = bounded_run(c, 50, out, sizeof out, &cut); ck(rc == 0, "check-accepts-its-own-generation");
         g = cx_read(gen, &n); if (!g || n < 10) die("read generation"); g[n - 3] ^= 1; if (cx_write(gen, g, n)) die("alter"); mm_free(g);
-        rc = sy_run(c, out, sizeof out, &cut); ck(rc == 2, "check-refuses-an-altered-generation"); }
+        rc = bounded_run(c, 50, out, sizeof out, &cut); ck(rc == 2, "check-refuses-an-altered-generation"); }
     sy_printf("CHECK_MATRIX_STALE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

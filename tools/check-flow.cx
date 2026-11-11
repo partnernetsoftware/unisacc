@@ -16,13 +16,35 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flow.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flow.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-flow: REFUSE %s\n", s); sy_exit(2); }
 static int has(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 128)) >= 0; }
 static int f_atoi(const char *s) { int n = 0; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 9999) return 9999; } return n; }
 static char root[4096], com[4500], tool[4500];
-static int run(char **args, char *out, int cap) { char *v[16]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args; args++) v[k++] = *args; v[k] = 0; { int cut; return sy_run(v, out, cap, &cut); } }
+static int run(char **args, char *out, int cap) { char *v[16]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args; args++) v[k++] = *args; v[k] = 0; { int cut; return bounded_run(v, 50, out, cap, &cut); } }
 
 int main(void) {
     char *out = mm_alloc(1L << 20);
