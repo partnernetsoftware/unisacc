@@ -16,6 +16,28 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 #define OUT "out/csih-ape"
 #define COM "apps/csih/csih.com"
 #define NS 5
@@ -44,7 +66,7 @@ static char g_base[64];
 static int src_digest(char out[65]) {
     char buf[8192];
     char *av[] = { "sh", "-c", "cd \"$1\" && sh apps/csih/csih.sh digest", "sh", g_base[0] ? g_base : ".", 0 };
-    int cut, rc = sy_run(av, buf, sizeof buf, &cut);
+    int cut, rc = bounded_run(av, 50, buf, sizeof buf, &cut);
     long at = tx_find(buf, tx_len(buf, sizeof buf), "\ndigest ", 8);
     if (rc != 0 || at < 0) return -1;
     if (tx_copy(out, 65, buf + at + 8, 64) != 0) return -1;
@@ -125,7 +147,7 @@ static void clean_head(char hash[41]) {
                    "&& git diff --quiet HEAD -- $(cat out/csih-ape/closure.txt) apps/csih/csih.sh "
                    "&& git rev-parse HEAD", 0 };
     hash[0] = 0;
-    if (sy_run(av, out, sizeof out, &cut) == 0 && tx_len(out, sizeof out) >= 40) tx_copy(hash, 41, out, 40);
+    if (bounded_run(av, 50, out, sizeof out, &cut) == 0 && tx_len(out, sizeof out) >= 40) tx_copy(hash, 41, out, 40);
 }
 
 static int write_manifest(const char *d, const char *ver) {
@@ -162,7 +184,7 @@ static int pack(void) {
     {
         char *av[] = { "sh", "./unisacc.com", "-run", "tools/ape-pack.cx", "--", "--tool", "csih", "--deflate", "--product", "csih", ver,
                        com, path[0], path[1], path[2], path[3], path[4], 0 };
-        rc = sy_run(av, out, sizeof out, &cut);
+        rc = bounded_run(av, 50, out, sizeof out, &cut);
     }
     if (rc != 0 || sy_exists(com) != 1) { fprintf(stderr, "csih-ape: ape-pack failed rc=%d\n%s", rc, out); return 1; }
     sy_chmod(com, 0755);
@@ -426,7 +448,7 @@ static int snapshot(const char *rev) {
         char spec[160];
         char *av[] = { "git", "rev-parse", "--verify", spec, 0 };
         if (cx_fmt(spec, sizeof spec, "%s^{commit}", rev)) return 2;
-        rc = sy_run(av, hash, sizeof hash, &cut);
+        rc = bounded_run(av, 50, hash, sizeof hash, &cut);
         if (rc != 0 || tx_len(hash, sizeof hash) < 40) { fprintf(stderr, "csih-ape: no commit %s\n", rev); return 1; }
         hash[40] = 0;
     }
@@ -439,7 +461,7 @@ static int snapshot(const char *rev) {
         char *av[] = { "sh", "-c",
                        "git archive \"$1\" apps/csih cx ujs/product tools/csih-ape.cx tools/sys tools/text | tar -x -C \"$2\"",
                        "sh", hash, tree, 0 };
-        rc = sy_run(av, out, sizeof out, &cut);
+        rc = bounded_run(av, 50, out, sizeof out, &cut);
         if (rc != 0) { fprintf(stderr, "csih-ape: git archive failed rc=%d\n%s", rc, out); return 1; }
     }
     u = cx_read("unisacc.com", &n);

@@ -7,6 +7,28 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
 /* prototype: genffi <arch> <raw.bin> <out.h> | genffi --check <arch> <raw.bin> <out.h> */
 static int same(const char *a, const char *b) { long i = 0; if (!a || !b) return 0; while (a[i] && a[i] == b[i]) i++; return a[i] == b[i]; }
 int main(int argc, char **argv) {
@@ -26,7 +48,7 @@ int main(int argc, char **argv) {
         char *av[] = { "sh", "unisacc.com", "tools/formats-elf-text.cx", "--", (char *)raw, tmp, 0 };
         if (cx_fmt(tmp, sizeof tmp, "%s.text.tmp", out)) return 2;
         log[0] = 0;
-        if (sy_run(av, log, (int)sizeof log, 0) != 0) { printf("genffi: .text extraction failed: %s\n", log); return 2; }
+        if (bounded_run(av, 50, log, (int)sizeof log, 0) != 0) { printf("genffi: .text extraction failed: %s\n", log); return 2; }
         free(b); n = 0;
         b = (unsigned char *)cx_read(tmp, &n);
         sy_unlink(tmp);

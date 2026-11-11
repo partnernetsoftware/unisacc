@@ -1,5 +1,27 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
+
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
 /* Narrow check: cx/compiler/tapeshape.cx is the bytes tools/tapeshape-gen.cx
    emits from exec/facts/tape-shape.tsv. The 72 opcode names and shapes are
    not listed again here.
@@ -8,7 +30,7 @@ int main(void) {
     char *av[] = {"sh", "./unisacc.com", "tools/tapeshape-gen.cx", "--", "--check", 0};
     char buf[4096];
     int cut = 0;
-    int rc = sy_run(av, buf, (int)sizeof buf, &cut);
+    int rc = bounded_run(av, 50, buf, (int)sizeof buf, &cut);
     if (rc != 0 || cut) {
         sy_printf("%s", buf);
         sy_printf("CX_TAPESHAPE\tfailed=1\trc=%d\tcut=%d\n", rc, cut);
