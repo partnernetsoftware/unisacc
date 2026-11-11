@@ -908,6 +908,61 @@ static int rb_pipe(const char *label, char **argv, const char *cwd, char *out, i
 
 
 /* Replace *ROOT with the absolute snapshot of REV. Sources are that commit. */
+/* Two files equal by content (both must exist). */
+static int rb_same_file(const char *a, const char *b) {
+    size_t na = 0, nb = 0;
+    char *x = cx_read(a, &na), *y = cx_read(b, &nb);
+    int same = x && y && na == nb && mm_same(x, y, (long)na);
+    if (x) mm_free(x);
+    if (y) mm_free(y);
+    return same;
+}
+
+/* Put ROOT's product into the snapshot DIR. The run cache keys the compiler
+   identity on mtime/ctime, so rewriting an identical launcher in place makes
+   every later release-build call under DIR compile cold (~22 s). An APE
+   product already in DIR with the same launcher and build record is left
+   untouched (mtime/inode kept). A differing product is staged in a sibling
+   directory and renamed over (per-file atomic, safe against concurrent
+   freezes). A split product (unisacc.com.dev) keeps the plain full copy. */
+static void rb_freeze_product(const char *root, const char *dir) {
+    char sdev[RB_FULL], a[RB_FULL], b[RB_FULL], tmp[RB_FULL], cmd[2048];
+    char *sh[4];
+    if (cx_fmt(sdev, sizeof sdev, "%s/unisacc.com.dev", root)) rb_die("path");
+    if (sy_exists(sdev) == 1) {
+        if (pp_copy_product(root, dir)) rb_die("copy compiler");
+        if (cx_fmt(cmd, sizeof cmd, "cp %s/unisacc.com.build.json %s/unisacc.com.build.json", root, dir)) rb_die("path");
+        sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+        if (rb_pipe("copy compiler", sh, root, 0, 0)) rb_die("copy compiler");
+        return;
+    }
+    {
+        int same = 0;
+        if (cx_fmt(a, sizeof a, "%s/unisacc.com", root) || cx_fmt(b, sizeof b, "%s/unisacc.com", dir)) rb_die("path");
+        same = rb_same_file(a, b);
+        if (same) {
+            if (cx_fmt(a, sizeof a, "%s/unisacc.com.build.json", root) || cx_fmt(b, sizeof b, "%s/unisacc.com.build.json", dir)) rb_die("path");
+            same = rb_same_file(a, b);
+        }
+        if (same) {
+            sy_printf("release-build\tfreeze-product\tunchanged\n");
+            return;
+        }
+    }
+    if (cx_fmt(tmp, sizeof tmp, "%s/.fz-%d", dir, (int)getpid())) rb_die("path");
+    if (sy_exists(tmp) == 1 && cx_rmtree(tmp)) rb_die("copy compiler: stage-rm");
+    if (pp_copy_product(root, tmp)) rb_die("copy compiler: stage-copy");
+    if (cx_fmt(a, sizeof a, "%s/unisacc.com.build.json", root) || cx_fmt(b, sizeof b, "%s/unisacc.com.build.json", tmp)) rb_die("path");
+    if (cx_fmt(cmd, sizeof cmd, "cp %s %s", a, b)) rb_die("path");
+    sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+    if (rb_pipe("copy compiler", sh, root, 0, 0)) rb_die("copy compiler: stage-cp");
+    /* build record first, launcher last: a reader never sees a new launcher with an old record */
+    if (cx_fmt(a, sizeof a, "%s/unisacc.com.build.json", dir) || sy_rename(b, a)) rb_die("copy compiler: rename-record");
+    if (cx_fmt(a, sizeof a, "%s/unisacc.com", tmp) || cx_fmt(b, sizeof b, "%s/unisacc.com", dir) || sy_rename(a, b)) rb_die("copy compiler: rename-launcher");
+    if (cx_rmtree(tmp)) rb_die("copy compiler: stage-cleanup");
+    sy_printf("release-build\tfreeze-product\trewritten\n");
+}
+
 static void rb_freeze(const char *rev, char **root_slot) {
     char root[RB_FULL], spec[96], dir[RB_FULL], mark[RB_FULL], cmd[2048], got[80], brief[11];
     char *vp[5], *sh[4];
@@ -961,13 +1016,7 @@ static void rb_freeze(const char *rev, char **root_slot) {
     /* Copy either the self-contained APE or the receipt-listed split product.
        The root-epoch record must retain the bytes matching THIS launcher;
        git archive carries neither the product nor its build record. */
-    if (pp_copy_product(root, dir)) rb_die("copy compiler");
-    if (cx_fmt(cmd, sizeof cmd, "cp %s/unisacc.com.build.json %s/unisacc.com.build.json", root, dir)) rb_die("path");
-    sh[0] = "sh";
-    sh[1] = "-c";
-    sh[2] = cmd;
-    sh[3] = 0;
-    if (rb_pipe("copy compiler", sh, root, 0, 0)) rb_die("copy compiler");
+    rb_freeze_product(root, dir);
     n = 0;
     while (dir[n]) {
         if (n + 1 >= RB_FULL) rb_die("path");

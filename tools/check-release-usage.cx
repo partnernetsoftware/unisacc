@@ -90,6 +90,29 @@ int main(void) {
     ck(rc == 1, "U2 slice missing args exits 1 (not segv)");
     ck(has(buf, "release-build\trev\t") && !has(buf, "release-build: rev"), "U2 freeze ok before refusal");
     ck(has(buf, "release-build:"), "U2 clean refusal");
+    /* U8: 同快照连续 freeze,产品相同则跳过(inode/mtime/ctime 不变);产品内容变更则重写且字节同根 */
+    { char td[4400], cmd[9000]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, i;
+      if (cx_fmt(td, sizeof td, "%s/release-usage-frz-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+      if (cx_fmt(cmd, sizeof cmd,
+          "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/unisacc.com.build.json' '%s/r/' && mkdir -p '%s/r/out' && cd '%s/r' && "
+          "'%s' freeze . >o1 2>&1; S=$(ls -d out/release-snap-*); s1=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
+          "'%s' freeze . >o2 2>&1; s2=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
+          "[ \"$s1\" = \"$s2\" ] && echo U8_STAT_SAME; grep -q 'freeze-product.unchanged' o2 && echo U8_UNCHANGED_MSG; "
+          "printf x >> $S/unisacc.com; '%s' freeze . >o3 2>&1; s3=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
+          "[ \"$s2\" != \"$s3\" ] && echo U8_STAT_CHANGED; grep -q 'freeze-product.rewritten' o3 && echo U8_REWRITTEN_MSG; "
+          "cmp -s unisacc.com $S/unisacc.com && echo U8_BYTES_EQ; ls -a $S | grep -q '^.fz-' || echo U8_NO_STAGE; cd /; rm -rf '%s'",
+          root, td, root, root, td, td, td, rb_bin, rb_bin, rb_bin, td)) return 2;
+      sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0; buf[0] = 0;
+      if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+          m = (long)r.outn; if (m > (long)sizeof buf - 1) m = sizeof buf - 1;
+          for (i = 0; i < m; i++) buf[i] = r.out[i];
+          buf[m] = 0;
+      }
+      np_free(&r);
+      ck(has(buf, "U8_STAT_SAME") && has(buf, "U8_UNCHANGED_MSG"), "U8 same product: freeze skips copy, inode/mtime/ctime kept");
+      ck(has(buf, "U8_STAT_CHANGED") && has(buf, "U8_REWRITTEN_MSG") && has(buf, "U8_BYTES_EQ"), "U8 changed product: snapshot rewritten, bytes equal root");
+      ck(has(buf, "U8_NO_STAGE"), "U8 staging dir removed");
+    }
     /* U6 + U7:复用单次编译的 rb_bin,不再各编一次。 */
     { char td[4400], cmd[9000]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, o, i;
       if (cx_fmt(td, sizeof td, "%s/release-usage-snap-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
