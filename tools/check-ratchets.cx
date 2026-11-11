@@ -9,6 +9,63 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sysx.poll
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+
+/* an unlinked spool file the drained output of a bounded child goes to */
+static int spool_open(void) {
+    char t[4096];
+    int fd;
+    if (cx_fmt(t, sizeof t, "%s/r2b-XXXXXX", sy_tmpdir())) return -1;
+    fd = mkstemp(t);
+    if (fd >= 0) sy_unlink(t);
+    return fd;
+}
+
+/* sy_spawn_pipe with a 50 s deadline: the child's stdout (and stderr when EFD is given) is drained here with sy_poll
+   into spool files; past the deadline its process group is killed.  OFD/EFD come back as the spool files, rewound,
+   and the child is NOT reaped: the caller's sy_wait_status(pid) still reports its real status (128+9 when killed). */
+static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd, int *efd) {
+    int po = -1, pe = -1, pid, fo, fe = -1, open_o = 1, open_e = efd ? 1 : 0, killed = 0;
+    long deadline = sy_now_ms() + 50000;
+    char chunk[16384];
+    pid = sy_spawn_pipe(argv, cwd, flags, &po, efd ? &pe : 0);
+    if (pid < 0) return pid;
+    fo = spool_open();
+    if (efd) fe = spool_open();
+    if (fo < 0 || (efd && fe < 0)) { sy_killpg(pid, 9); sy_signal(pid, 9); sy_close(po); if (efd) sy_close(pe); return -EIO; }
+    while (open_o || open_e) {
+        sy_pollfd_t p[2];
+        int n = 0, io = -1, ie = -1, r;
+        long left = deadline - sy_now_ms(), g;
+        if (left <= 0) {
+            if (killed) break;
+            sy_killpg(pid, 9); sy_signal(pid, 9); killed = 1; deadline = sy_now_ms() + 2000;
+            continue;
+        }
+        if (open_o) { io = n; p[n].fd = po; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
+        if (open_e) { ie = n; p[n].fd = pe; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
+        r = sy_poll(p, n, left > 200 ? 200 : left);
+        if (r < 0) break;
+        if (io >= 0 && p[io].revents) {
+            g = sy_read(po, chunk, sizeof chunk);
+            if (g > 0) { if (sy_write_all(fo, chunk, g)) break; } else open_o = 0;
+        }
+        if (ie >= 0 && p[ie].revents) {
+            g = sy_read(pe, chunk, sizeof chunk);
+            if (g > 0) { if (sy_write_all(fe, chunk, g)) break; } else open_e = 0;
+        }
+    }
+    if (open_o || open_e) { sy_killpg(pid, 9); sy_signal(pid, 9); }
+    sy_close(po);
+    if (efd) sy_close(pe);
+    sy_lseek(fo, 0, 0);
+    *ofd = fo;
+    if (efd) { sy_lseek(fe, 0, 0); *efd = fe; }
+    return pid;
+}
 
 static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tratchets.%s\n", ok ? "PASS" : "FAIL", name); }
@@ -18,7 +75,7 @@ static int run(char **args, char *out, long cap) {
     argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/ratchets.cx"; argv[i++] = "--";
     for (k = 0; args[k] && i < 11; k++) argv[i++] = args[k];
     argv[i] = 0;
-    pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
+    pid = spawn_pipe_bounded(argv, 0, 0, &ofd, 0);
     if (pid < 0) return -1;
     while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
     out[n] = 0;
