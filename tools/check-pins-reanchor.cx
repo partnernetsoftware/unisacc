@@ -1,0 +1,79 @@
+/* tools/check-pins-reanchor.cx -- fixture check for pins-reanchor + check-pins anchor rules.
+ *
+ *   sh ./unisacc.com tools/check-pins-reanchor.cx
+ *
+ * Builds a fixture root under out/pins-reanchor-fixture, then:
+ *   (1) pos-migrate   a FILE:LINE literal row is migrated to FILE#content (MIGRATED, check-pins failed=0)
+ *   (2) pos-drift     inserting blank lines at the top of the anchored file keeps check-pins failed=0
+ *   (3) neg-new-line  a freshly added FILE:LINE row is LINE_ANCHOR red
+ *   (4) neg-missing   an anchor whose content vanished from the file is ANCHOR_MISSING red
+ *   (5) neg-stale-exc an exception entry with no row is LINE_EXCEPTION_STALE red
+ * Prints PASS/FAIL<TAB>pins-reanchor.NAME and PINS_REANCHOR<TAB>failed=N; exit 0 iff failed==0.
+ */
+#define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "check-pins-reanchor: format error\n"); exit(2); } } while (0)
+static int failed;
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tpins-reanchor.%s\n", ok ? "PASS" : "FAIL", n); }
+
+static char R[100];
+static char HEXBUF[65];
+#define HEX HEXBUF
+
+static void wr(const char *rel, const char *txt) {
+    char p[600];
+    SP(p, sizeof p, "%s/%s", R, rel);
+    cx_write(p, txt, strlen(txt));
+}
+
+/* run command, capture combined output into out; returns exit code */
+static int sh(const char *cmd, char *out, int cap) {
+    FILE *f = popen(cmd, "r");
+    int n = 0, c;
+    if (!f) return -1;
+    while ((c = fgetc(f)) != EOF) if (n < cap - 1) out[n++] = (char)c;
+    out[n] = 0;
+    c = pclose(f);
+    return c;
+}
+
+int main(void) {
+    char cmd[1200], out[40000], body[800];
+    char d[600];
+    memset(HEXBUF, '1', 64);
+    SP(R, sizeof R, "%s/%s", "out", "pins-reanchor-fixture");
+    SP(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/tools", R, R);
+    if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
+    (void)d;
+    wr("tools/source-job-wave.cx", "int a(){return nids!=131;} int b(){return counts[1]!=42;}\n");
+    SP(body, sizeof body, "int x;\nstatic const char *k = \"%s\";\n", HEX);
+    wr("tools/sample.cx", body);
+    SP(body, sizeof body, "path\tkind\ttarget\tvalue\towner\tstatus\ntools/sample.cx:2\tliteral\t-\t%s\ttest\tok\n", HEX);
+    wr("tools/pins.tsv", body);
+    wr("tools/pins-line-exceptions.tsv", "path\tkind\ttarget\tvalue\n");
+
+    SP(cmd, sizeof cmd, "sh ./unisacc.com tools/pins-reanchor.cx -- --root %s --apply 2>&1", R);
+    ck(sh(cmd, out, sizeof out) == 0 && strstr(out, "migrated=1\tunmigrated=0"), "pos-migrate");
+    SP(cmd, sizeof cmd, "sh ./unisacc.com tools/check-pins.cx -- --root %s 2>&1", R);
+    ck(sh(cmd, out, sizeof out) == 0 && strstr(out, "failed=0"), "pos-check");
+
+    SP(body, sizeof body, "\n\n\nint x;\nstatic const char *k = \"%s\";\n", HEX);
+    wr("tools/sample.cx", body);
+    ck(sh(cmd, out, sizeof out) == 0 && strstr(out, "failed=0"), "pos-drift");
+
+    SP(body, sizeof body, "path\tkind\ttarget\tvalue\towner\tstatus\ntools/sample.cx#%s\tliteral\t-\t%s\ttest\tok\ntools/sample.cx:9\tliteral\t-\t%s\ttest\tok\n", HEX, HEX, HEX);
+    wr("tools/pins.tsv", body);
+    ck(sh(cmd, out, sizeof out) != 0 && strstr(out, "LINE_ANCHOR"), "neg-new-line");
+
+    SP(body, sizeof body, "path\tkind\ttarget\tvalue\towner\tstatus\ntools/sample.cx#%s\tliteral\t-\t%s\ttest\tok\n", HEX, HEX);
+    wr("tools/pins.tsv", body);
+    wr("tools/sample.cx", "int x;\n");
+    ck(sh(cmd, out, sizeof out) != 0 && strstr(out, "ANCHOR_MISSING"), "neg-missing");
+
+    SP(body, sizeof body, "int x;\nstatic const char *k = \"%s\";\n", HEX);
+    wr("tools/sample.cx", body);
+    SP(body, sizeof body, "path\tkind\ttarget\tvalue\ntools/sample.cx:2\tliteral\t-\t%s\n", HEX);
+    wr("tools/pins-line-exceptions.tsv", body);
+    ck(sh(cmd, out, sizeof out) != 0 && strstr(out, "LINE_EXCEPTION_STALE"), "neg-stale-exc");
+
+    printf("PINS_REANCHOR\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,156 @@
+/* tools/pins-reanchor.cx -- migrate tools/pins.tsv FILE:LINE anchors to FILE#content anchors.
+ *
+ *   sh ./unisacc.com tools/pins-reanchor.cx [--root DIR]            dry run, report only
+ *   sh ./unisacc.com tools/pins-reanchor.cx [--root DIR] --apply    rewrite pins.tsv and the exception table
+ *
+ * For every row whose path column is FILE:LINE the tool reads that line of FILE and picks
+ * a content anchor that occurs on it: the quoted count value (kind=count), the value, the
+ * target, the target basename, or (last resort) a unique line prefix.  The anchor is written
+ * as FILE#anchor, which check-pins matches by substring on the line (drift-free).
+ * Rows without a usable anchor stay FILE:LINE and are listed in tools/pins-line-exceptions.tsv
+ * (path<TAB>kind<TAB>target<TAB>value); check-pins fails on any line anchor not in that table.
+ * Prints MIGRATED/UNMIGRATED lines and REANCHOR<TAB>migrated=N<TAB>unmigrated=M.
+ */
+#define SP(...) do { if (snprintf(__VA_ARGS__) < 0) { fprintf(stderr, "pins-reanchor: format error\n"); exit(2); } } while (0)
+#define MAXR 900
+#define MAXL 1400
+static char g_root[1024] = ".";
+static char *cols[MAXR][6];
+static int ncols[MAXR];
+static int nrows;
+static char *buf;
+static char *hdr;
+
+static void jp(char *d, int cap, const char *rel) {
+    if (g_root[0] == '.' && !g_root[1]) SP(d, (size_t)cap, "%s", rel);
+    else SP(d, (size_t)cap, "%s/%s", g_root, rel);
+}
+
+static int count_occ(const char *s, const char *needle) {
+    int n = 0; size_t l = strlen(needle);
+    const char *p = s;
+    if (!l) return 0;
+    while ((p = strstr(p, needle)) != 0) { n++; p += l; }
+    return n;
+}
+
+static int anchor_ok(const char *a) {
+    return a[0] && !strchr(a, '\t') && !strchr(a, '#') && !strchr(a, '\n');
+}
+
+/* copy line `ln` (1-based) of text into out */
+static int get_line(const char *text, int ln, char *out, int cap) {
+    const char *p = text; int i = 1;
+    while (i < ln) { p = strchr(p, '\n'); if (!p) return -1; p++; i++; }
+    {
+        const char *e = strchr(p, '\n'); size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n >= (size_t)cap) n = (size_t)cap - 1;
+        SP(out, (size_t)cap, "%.*s", (int)n, p);
+    }
+    return 0;
+}
+
+static const char *basename_of(const char *t) {
+    const char *s = strrchr(t, '/');
+    return s ? s + 1 : t;
+}
+
+int main(int argc, char **argv) {
+    int i, apply = 0, mig = 0, unm = 0;
+    char p[4600], *s, *line, *next;
+    size_t n = 0;
+    static char exc[MAXR][MAXL];
+    int nexc = 0;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) SP(g_root, sizeof g_root, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--apply")) apply = 1;
+        else { fprintf(stderr, "pins-reanchor: unknown argument %s\n", argv[i]); return 2; }
+    }
+    jp(p, sizeof p, "tools/pins.tsv");
+    s = cx_read(p, &n);
+    if (!s) { fprintf(stderr, "pins-reanchor: cannot read pins.tsv\n"); return 2; }
+    buf = s;
+    /* parse every line into columns; header/comment/blank lines kept verbatim via cols[..][0] */
+    line = s;
+    while (line && *line) {
+        int nc = 0; char *q = line, *tab;
+        next = strchr(line, '\n');
+        if (next) *next = 0;
+        if (nrows >= MAXR) { fprintf(stderr, "pins-reanchor: too many rows\n"); return 2; }
+        while (nc < 6) {
+            cols[nrows][nc++] = q;
+            tab = strchr(q, '\t');
+            if (!tab) break;
+            *tab = 0; q = tab + 1;
+        }
+        ncols[nrows++] = nc;
+        line = next ? next + 1 : 0;
+    }
+    for (i = 0; i < nrows; i++) {
+        char *path = cols[i][0], *colon, base[512], fp[4600], ln[MAXL], anchor[200], *src;
+        const char *kind, *target, *value;
+        size_t fn = 0; int lno, ok = 0, k;
+        if (ncols[i] < 4 || *path == '#' || !strcmp(path, "path")) continue;
+        colon = strrchr(path, ':');
+        if (!colon || colon[1] < '0' || colon[1] > '9') continue;
+        lno = atoi(colon + 1);
+        SP(base, sizeof base, "%.*s", (int)(colon - path), path);
+        kind = cols[i][1]; target = cols[i][2]; value = cols[i][3];
+        jp(fp, sizeof fp, base);
+        src = cx_read(fp, &fn);
+        anchor[0] = 0;
+        if (src && get_line(src, lno, ln, sizeof ln) == 0) {
+            char cand[5][200]; int nc = 0;
+            if (!strcmp(kind, "count")) SP(cand[nc++], 200, "\"%s\"", value);
+            SP(cand[nc++], 200, "%s", value);
+            SP(cand[nc++], 200, "%s", target);
+            SP(cand[nc++], 200, "%s", basename_of(target));
+            for (k = 0; k < nc && !ok; k++)
+                if (strlen(cand[k]) >= 3 && anchor_ok(cand[k]) && strstr(ln, cand[k])) { SP(anchor, sizeof anchor, "%s", cand[k]); ok = 1; }
+            if (!ok) {
+                /* last resort: trimmed line prefix, must be unique in the file */
+                char *t = ln; size_t l;
+                while (*t == ' ' || *t == '\t') t++;
+                l = strlen(t); if (l > 48) l = 48;
+                SP(anchor, sizeof anchor, "%.*s", (int)l, t);
+                if (anchor_ok(anchor) && strlen(anchor) >= 8 && count_occ(src, anchor) == 1) ok = 1;
+            }
+        }
+        if (src) free(src);
+        if (ok) {
+            static char np[MAXR][700];
+            SP(np[i], sizeof np[i], "%s#%s", base, anchor);
+            if (strlen(np[i]) < 256) { cols[i][0] = np[i]; mig++; printf("MIGRATED\t%s -> %s\n", path, np[i]); continue; }
+        }
+        unm++;
+        printf("UNMIGRATED\t%s\t%s\t%s\n", path, kind, ok ? "anchor-too-long" : "no-unique-anchor");
+        if (nexc < MAXR) SP(exc[nexc++], MAXL, "%s\t%s\t%s\t%s\n", path, kind, target, value);
+    }
+    if (apply) {
+        FILE *f; char op[4600];
+        jp(op, sizeof op, "tools/pins.tsv.new");
+        f = fopen(op, "w");
+        if (!f) { fprintf(stderr, "pins-reanchor: cannot write\n"); return 2; }
+        for (i = 0; i < nrows; i++) {
+            int c;
+            for (c = 0; c < ncols[i]; c++) fprintf(f, "%s%s", c ? "\t" : "", cols[i][c]);
+            /* the final empty segment after the trailing newline is not a row */
+            if (!(i == nrows - 1 && ncols[i] == 1 && !cols[i][0][0])) fputc('\n', f);
+        }
+        fclose(f);
+        {
+            char dst[4600];
+            jp(dst, sizeof dst, "tools/pins.tsv");
+            if (rename(op, dst)) { fprintf(stderr, "pins-reanchor: rename failed\n"); return 2; }
+        }
+        jp(op, sizeof op, "tools/pins-line-exceptions.tsv");
+        f = fopen(op, "w");
+        if (!f) return 2;
+        fputs("path\tkind\ttarget\tvalue\n", f);
+        for (i = 0; i < nexc; i++) fputs(exc[i], f);
+        fclose(f);
+    }
+    printf("REANCHOR\tmigrated=%d\tunmigrated=%d\tapply=%d\n", mig, unm, apply);
+    (void)hdr; (void)buf;
+    return 0;
+}

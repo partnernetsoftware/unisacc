@@ -257,8 +257,65 @@ static int file_exists(const char *target, int *err) {
     return 1;
 }
 
+/* Line-number anchors (FILE:LINE) drift whenever a line is inserted above them.  New rows must
+   use FILE#content anchors (substring of the anchored line).  Rows that could not be migrated are
+   listed in tools/pins-line-exceptions.tsv (path kind target value); the table may only shrink:
+   a line-anchor row not in it is LINE_ANCHOR, an entry matching no row is LINE_EXCEPTION_STALE. */
+#define MAX_EXC 128
+#define EXC_KEY 1100
+static char exc_key[MAX_EXC][EXC_KEY];
+static char exc_used[MAX_EXC];
+static int nexc;
+
+static int is_line_anchor(const char *path) {
+    const char *c = strrchr(path, ':');
+    return c && c[1] >= '0' && c[1] <= '9' && !strchr(path, '#');
+}
+
+static void load_exceptions(void) {
+    char *s, *line, *next;
+    size_t n = 0;
+    s = load("tools/pins-line-exceptions.tsv", &n);
+    if (!s) return;
+    line = s;
+    while (line && *line) {
+        next = strchr(line, '\n');
+        if (next) *next = 0;
+        if (*line && strncmp(line, "path\t", 5) && nexc < MAX_EXC) copy(exc_key[nexc++], EXC_KEY, line);
+        line = next ? next + 1 : 0;
+    }
+    free(s);
+}
+
+static void check_anchors(void) {
+    int i, j;
+    for (i = 0; i < nrows; i++) {
+        const char *h = strrchr(r_path[i], '#');
+        char key[EXC_KEY];
+        if (is_line_anchor(r_path[i])) {
+            int hit = -1;
+            if (snprintf(key, sizeof key, "%s\t%s\t%s\t%s", r_path[i], r_kind[i], r_target[i], r_value[i]) < 0) key[0] = 0;
+            for (j = 0; j < nexc; j++) if (!strcmp(exc_key[j], key)) { hit = j; break; }
+            if (hit < 0) fail_line("LINE_ANCHOR", r_path[i], 0, r_target[i], "use FILE#content anchor");
+            else exc_used[hit] = 1;
+        } else if (h && strcmp(r_status[i], "known-broken")) {
+            char base[LINEBUF], *s;
+            size_t n = 0;
+            if (snprintf(base, sizeof base, "%.*s", (int)(h - r_path[i]), r_path[i]) < 0) continue;
+            s = load(base, &n);
+            if (!s) { fail_line("ANCHOR_MISSING", r_path[i], 0, r_target[i], "file unreadable"); continue; }
+            if (!strstr(s, h + 1)) fail_line("ANCHOR_MISSING", r_path[i], 0, r_target[i], "content not found");
+            free(s);
+        }
+    }
+    for (j = 0; j < nexc; j++)
+        if (!exc_used[j]) fail_line("LINE_EXCEPTION_STALE", exc_key[j], 0, "-", "no matching line-anchor row");
+}
+
 static void verify_rows(void) {
     int i;
+    load_exceptions();
+    check_anchors();
     for (i = 0; i < nrows; i++) {
         const char *path = r_path[i], *kind = r_kind[i], *target = r_target[i];
         const char *value = r_value[i], *status = r_status[i];
