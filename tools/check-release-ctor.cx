@@ -1,55 +1,375 @@
-/* tools/check-release-ctor.cx -- D 包负控(0.0.50):release-build opguard 的 P3 路径
- * 必须贯穿显式 UNISACC_CTOR,不得再隐式用 ROOT/unisacc.com 作构造器。
- *
- * 正控:tools/release-build.cx 源文本含 UNISACC_CTOR 读取与 kernel-route --constructor 传递;
- * 负控:opguard 调用行不再出现 "sh","unisacc.com" 的隐式构造器字样(仅 opguard 段);
- * 负控2:缺 UNISACC_CTOR 时 rb_base_check 路径以显式 REFUSE 文案退出(源文本断言 rb_die 文案存在)。 */
-#pragma unisa use sys.io
+/* Real release-build consumers, one bounded case per invocation (no source pins).
+ * Compile this check and release-build once, then run under tools/bound 55:
+ *   check --case NAME TOOL ROOT SRC NETS ROUTES RUN CTOR ORACLE
+ * All paths are explicit, canonical copied material; RUN is exclusively held.
+ * Each refusal first passes an assemble+byte-oracle positive control, changes
+ * one boundary, then requires rc1 and an unchanged output. Material is restored
+ * even after child failure. Missing material is NOT_RUN (77), never PASS.
+ * Cases: assemble, ctor-positive, ctor-missing, ctor-invalid, duplicate-init,
+ * root-alias, nets-alias, run-alias, out-alias, source-changed, and
+ * missing-NAME/tamper-NAME for epoch, binding, binding.proof, t1-net-check,
+ * guard-0.proof, models, models.proof, resources, resources.proof.
+ * The former four structural constructor assertions are covered behaviorally:
+ * successful explicit constructor propagation (including its reported digest),
+ * refusal when unset or invalid, and no fallback to ROOT/unisacc.com.
+ * Original 44-phase/negative evidence is retained separately, not relabelled.
+ * Persistent preparation, one separately bounded command per stage:
+ *   --prepare copy REPO SNAP SRC NETS ROUTES CTOR ORACLE NEW_MAT
+ *   --prepare build MAT
+ *   --prepare guard-init|guard-0..39|models|resources|assemble MAT
+ *   --prepare seal MAT
+ * Copy excludes generated ROOT/out and .git, preserves original records and
+ * copies every complete net/table result. Producer source/cxlib stays in MAT.
+ * NEW_MAT belongs in the caller's persistent work output, never a baked path.
+ * seal emits the existing :path location + :sha256 closure map, PREPARED only.
+ * Registered daily cases use --case NAME --material-file LOCATION SEAL as
+ * separate heavy/split batches. RUN is locked from pre-seal through post-seal;
+ * each case still runs real consumers, never a cached verdict. Bare direct
+ * --material MAT SEAL and the original explicit arguments remain available.
+ * --fast ROOT NEW_OUT is the material-free commit contract: actual kernel-route
+ * constructor CLI refusals only. Full P3/env/dual-ISA coverage is in daily cases.
+ */
 #pragma unisa use sys.fs
-#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
 #pragma unisa use sys.proc
-#pragma unisa use text.text
+#pragma unisa use sys.posix
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.netpack
 
-static int failed;
-static char root[4096], src[4096];
+static int failed, checks;
+static int material_lock_held;
+static long long until;
+static char *tool, *root, *source, *nets, *routes, *run, *ctor;
+static char output[4400];
 
-static void ck(int ok, const char *n) {
-    sy_printf("%s\tcheck-release-ctor.%s\n", ok ? "PASS" : "FAIL", n);
-    if (!ok) failed++;
+static void ck(int yes, const char *name) {
+    checks++; if (!yes) failed++;
+    printf("%s\tcheck-release-ctor.%s\n", yes ? "PASS" : "FAIL", name);
+}
+static int not_run(const char *what) {
+    printf("NOT_RUN\tcheck-release-ctor\t%s\n", what); return 77;
+}
+static void path(char *p, const char *base, const char *name) {
+    if (cx_fmt(p, 4400, "%s/%s", base, name)) exit(2);
+}
+static int digest(const char *p, char sha[65]) {
+    size_t n; char *b = cx_read(p, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, sha); free(b); return 0;
+}
+static int call(const char *phase, const char *r, const char *n, const char *u,
+                const char *out, const char *constructor, pr_result *result) {
+    char env[4600]; char *environment[2];
+    char *v[] = {tool, "p3", (char *)r, source, (char *)out,
+        "--nets", (char *)n, "--routes", routes, "--run", (char *)u,
+        "--phase", (char *)phase, 0};
+    long long left = until - sy_now_ms(); int seconds = (int)(left / 1000);
+    if (seconds > 45) seconds = 45;
+    if (seconds < 1 || cx_fmt(env, sizeof env, "UNISACC_CTOR=%s", constructor)) return -1;
+    environment[0] = env; environment[1] = 0;
+    int rc = pr_run(phase, v, 0, environment, seconds, result);
+    pr_echo(result);
+    if (rc) fprintf(stderr, "check-release-ctor: %s\n", result->why);
+    return rc;
+}
+static int contains(const pr_result *r, const char *s) {
+    return (r->out && strstr(r->out, s)) || (r->err && strstr(r->err, s));
+}
+static int check_case(int argc, char **argv) {
+    const char *name, *target = 0; int missing = 0, tamper = 0, known = 0;
+    const char *files[] = {"epoch", "binding", "binding.proof", "t1-net-check",
+        "guard-0.proof", "models", "models.proof", "resources", "resources.proof"};
+    char p[4400], saved[4400], lock[4400], real[4400], expected[65], before[65], after[65];
+    char alias[4400], ctor_sha[65], marker[4600]; char *original = 0; size_t original_n = 0;
+    pr_result result = {0}; int i, fd, transport, restored = 1; sy_stat_t st;
+    if (argc != 11 || strcmp(argv[1], "--case"))
+        return not_run("usage --case NAME TOOL ROOT SRC NETS ROUTES RUN CTOR ORACLE");
+    name = argv[2]; tool = argv[3]; root = argv[4]; source = argv[5];
+    nets = argv[6]; routes = argv[7]; run = argv[8]; ctor = argv[9];
+    for (i = 3; i <= 10; i++) {
+        if (sy_realpath(argv[i], real, sizeof real) < 0 || strcmp(argv[i], real))
+            return not_run("missing/noncanonical explicit material");
+    }
+    if (digest(argv[10], expected) || digest(ctor, ctor_sha)) return not_run("oracle/constructor unreadable");
+    for (i = 0; i < 9; i++) {
+        path(p, run, files[i]);
+        if (sy_stat(p, &st) || st.kind != 'f') return not_run(files[i]);
+        if ((!strncmp(name, "missing-", 8) && !strcmp(name + 8, files[i])) ||
+            (!strncmp(name, "tamper-", 7) && !strcmp(name + 7, files[i]))) target = files[i];
+    }
+    missing = !strncmp(name, "missing-", 8); tamper = !strncmp(name, "tamper-", 7);
+    known = target || !strcmp(name, "assemble") || !strcmp(name, "ctor-positive") ||
+        !strcmp(name, "ctor-missing") || !strcmp(name, "ctor-invalid") ||
+        !strcmp(name, "duplicate-init") || !strcmp(name, "root-alias") ||
+        !strcmp(name, "nets-alias") || !strcmp(name, "run-alias") ||
+        !strcmp(name, "out-alias") || !strcmp(name, "source-changed");
+    if (!known) { fprintf(stderr, "unknown case\n"); return 2; }
+    path(lock, run, "check-release-ctor.lock");
+    if (!material_lock_held) {
+        fd = sy_open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) return not_run("RUN already held by another case");
+        if (sy_close(fd)) return 2;
+    }
+    if (cx_fmt(output, sizeof output, "%s/check-output-%d.pkg", run, sy_pid())) return 2;
+    until = sy_now_ms() + 50000;
+    transport = call("assemble", root, nets, run, output, ctor, &result);
+    ck(!transport && result.rc == 0, "baseline-real-assemble");
+    ck(!digest(output, before) && !strcmp(before, expected), "baseline-byte-oracle");
+    pr_free(&result);
+    if (!failed && strcmp(name, "assemble")) {
+        int backed = 0;
+        if (target || !strcmp(name, "source-changed")) {
+            if (target) path(p, run, target);
+            else path(p, root, "exec/facts/core-ops.tsv");
+            if (cx_fmt(saved, sizeof saved, "%s/check-saved-%d", run, sy_pid())) return 2;
+            if (sy_rename(p, saved)) restored = 0;
+            else {
+                backed = 1;
+                printf("MUTATION_BACKUP\t%s\ttarget=%s\n", saved, p); fflush(stdout);
+                if (!missing) {
+                    original = cx_read(saved, &original_n);
+                    if (!original || !original_n) restored = 0;
+                    else if (target) {
+                        original[0] ^= 1;
+                        if (cx_write(p, original, original_n)) restored = 0;
+                    } else {
+                        char *changed = malloc(original_n + 16);
+                        if (!changed) restored = 0;
+                        else {
+                            if (mm_copy(changed, (long)original_n + 16, original, (long)original_n)) restored = 0;
+                            memcpy(changed + original_n, "# changed-source\n", 16);
+                            if (cx_write(p, changed, original_n + 16)) restored = 0;
+                            free(changed);
+                        }
+                    }
+                }
+            }
+        }
+        if (restored) {
+            const char *phase = "assemble", *r = root, *n = nets, *u = run, *out = output, *c = ctor;
+            if (!strncmp(name, "ctor-", 5)) phase = "models";
+            if (!strcmp(name, "ctor-missing")) c = "";
+            if (!strcmp(name, "ctor-invalid")) c = "/nonexistent-explicit-constructor";
+            if (!strcmp(name, "duplicate-init")) phase = "guard-init";
+            if (!strcmp(name, "root-alias")) { path(alias, root, "."); r = alias; }
+            if (!strcmp(name, "nets-alias")) { path(alias, nets, "."); n = alias; }
+            if (!strcmp(name, "run-alias")) { path(alias, run, "."); u = alias; }
+            if (!strcmp(name, "out-alias")) { if (cx_fmt(alias, sizeof alias, "%s/./check-output-%d.pkg", run, sy_pid())) return 2; out = alias; }
+            transport = call(phase, r, n, u, out, c, &result);
+            if (!strcmp(name, "ctor-positive")) {
+                ck(!transport && result.rc == 0, "explicit-constructor-models-succeeds");
+                if (cx_fmt(marker, sizeof marker, "ASM_CONSTRUCTOR\tpath=%s\tsha=%s", ctor, ctor_sha)) return 2;
+                ck(contains(&result, marker), "kernel-consumer-reports-explicit-constructor-and-digest");
+            } else ck(!transport && result.rc == 1, "consumer-refuses-changed-boundary");
+            ck(!digest(output, after) && !strcmp(before, after), "refusal-or-models-leaves-package-unchanged");
+            pr_free(&result);
+        } else ck(0, "boundary-mutation-succeeds");
+        /* The original stays on disk, including across an external kill. */
+        if (backed) {
+            if (sy_exists(p) && sy_unlink(p)) restored = 0;
+            if (sy_rename(saved, p)) restored = 0;
+        }
+        free(original);
+        ck(restored, "material-restored");
+    }
+    if (sy_unlink(output) && sy_exists(output)) failed++;
+    if (!material_lock_held && sy_unlink(lock)) failed++;
+    printf("CHECK_RELEASE_CTOR\tcase=%s\tchecks=%d\tfailed=%d\tmode=real-consumer\n", name, checks, failed);
+    return failed ? 1 : 0;
 }
 
-int main(void) {
-    char *b = 0; size_t n = 0; long len;
-    const char *needle1 = "sy_env(\"UNISACC_CTOR\")";
-    const char *needle2 = "opguard needs explicit UNISACC_CTOR";
-    if (sy_cwd(root, sizeof root)) return 2;
-    if (cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root)) return 2;
-    b = (char *)cx_read(src, &n);
-    if (!b) return 2;
-    len = (long)n;
-    /* 正控:opguard 段读取 UNISACC_CTOR */
-    ck(tx_find(b, len, needle1, tx_len(needle1, 64)) >= 0, "ctor-env-read");
-    /* 正控:opguard 拒绝缺失 ctor 的显式文案存在 */
-    ck(tx_find(b, len, needle2, tx_len(needle2, 80)) >= 0, "ctor-refuse-message");
-    {   /* 负控:opguard 调用向量里不再有 "sh","unisacc.com" 相邻隐式构造器。
-           旧行曾是 {"sh", bnd, "55", "sh", "unisacc.com", "tools/kernel-route.cx", ...}。*/
-        static const char *route = "tools/kernel-route.cx";
-        static const char *implicit = "\"unisacc.com\"";
-        long rl = tx_len(route, 64);
-        long il = tx_len(implicit, 32);
-        long at = tx_find(b, len, route, rl);
-        int bad = 0;
-        while (at >= 0 && !bad) {
-            long lo = at - 400; if (lo < 0) lo = 0;
-            if (tx_find(b + lo, at - lo, implicit, il) >= 0) bad = 1;
-            else { long nx = tx_find(b + at + 1, len - at - 1, route, rl); at = nx < 0 ? -1 : nx + at + 1; }
-        }
-        ck(!bad, "opguard-no-implicit-root-constructor");
+static int material_seal(const char *mat, char seal[65]) {
+    static const char *names[] = {
+        "location.txt", "repo.txt", "producer/release-build.cx", "source.pkg", "routes.tsv",
+        "constructor.com", "constructor.com.build.json", "oracle.pkg", "tool",
+        "ctx/context.tsv", "ctx/identity-helper", "root/exec/facts/core-ops.tsv",
+        "run/epoch", "run/binding", "run/binding.proof", "run/t1-net-check",
+        "run/models", "run/models.proof", "run/resources", "run/resources.proof",
+        "run/compiler.p4.pkg"
+    };
+    np_buf bytes = {0}; char p[4400], sha[65], key[80];
+    np_puts(&bytes, "release-ctor-material-v1\n"); np_puts(&bytes, mat); np_puts(&bytes, "\n");
+    for (int i = 0; i < (int)(sizeof names / sizeof names[0]); i++) {
+        path(p, mat, names[i]);
+        if (digest(p, sha)) { free(bytes.p); return -1; }
+        np_puts(&bytes, names[i]); np_puts(&bytes, "\t"); np_puts(&bytes, sha); np_puts(&bytes, "\n");
     }
-    /* 正控:--constructor 显式传递存在 */
-    ck(tx_find(b, len, "\"--constructor\"", 15) >= 0, "kernel-route-constructor-flag");
-    (void)b;
-    sy_printf("CHECK_RELEASE_CTOR\tfailed=%d\n", failed);
+    for (int i = 0; i < 40; i++) for (int proof = 0; proof < 2; proof++) {
+        if (cx_fmt(key, sizeof key, "run/guard-%d%s", i, proof ? ".proof" : "")) { free(bytes.p); return -1; }
+        path(p, mat, key);
+        if (digest(p, sha)) { free(bytes.p); return -1; }
+        np_puts(&bytes, key); np_puts(&bytes, "\t"); np_puts(&bytes, sha); np_puts(&bytes, "\n");
+    }
+    cx_sha256_hex(bytes.p, bytes.n, seal); free(bytes.p); return 0;
+}
+static void material_args(const char *mat, char storage[8][4400], char *args[12], const char *name) {
+    static const char *leaves[] = {"tool", "root", "source.pkg", "ctx/jobs", "routes.tsv", "run", "constructor.com", "oracle.pkg"};
+    args[0] = "check-release-ctor"; args[1] = "--case"; args[2] = (char *)name;
+    for (int i = 0; i < 8; i++) { path(storage[i], mat, leaves[i]); args[i + 3] = storage[i]; }
+    args[11] = 0;
+}
+static int prepare_child(char **args, const char *cwd) {
+    pr_result r = {0}; int seconds = (int)((until - sy_now_ms()) / 1000);
+    if (seconds > 45) seconds = 45;
+    if (seconds < 1) return 2;
+    int rc = pr_run("release-ctor-prepare", args, cwd, 0, seconds, &r);
+    pr_echo(&r); int ok = !rc && !r.rc;
+    if (rc) fprintf(stderr, "release-ctor prepare: %s\n", r.why);
+    pr_free(&r); return ok ? 0 : 2;
+}
+static int prepare_copy(const char *from, const char *mat, const char *leaf) {
+    char dest[4400]; path(dest, mat, leaf);
+    char *v[] = {"cp", "-a", (char *)from, dest, 0}; return prepare_child(v, 0);
+}
+static int directory_names(const char *from, char names[32768]) {
+    int fd = sy_open(from, O_RDONLY, 0);
+    if (fd < 0) return -1;
+    int count = sy_dir_names(fd, names, 32768);
+    if (sy_close(fd)) return -1;
+    return count;
+}
+static int prepare_root(const char *from, const char *mat) {
+    char names[32768], dest[4400], src[4400]; int count = directory_names(from, names), at = 0;
+    if (count < 0) return 2;
+    path(dest, mat, "root"); if (sy_mkdir(dest, 0700)) return 2;
+    for (int i = 0; i < count; i++) {
+        const char *name = names + at; at += (int)strlen(name) + 1;
+        if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, "out") || !strcmp(name, ".git")) continue;
+        path(src, from, name); if (prepare_copy(src, dest, name)) return 2;
+    }
+    return 0;
+}
+static int prepare_context(const char *context, const char *jobs, const char *mat) {
+    char names[32768], dest[4400], dest_jobs[4400], src[4400], leaf[4400], result[4400];
+    int count = directory_names(jobs, names), at = 0, copied = 0;
+    if (count < 0) return 2;
+    path(dest, mat, "ctx"); if (sy_mkdir(dest, 0700)) return 2;
+    path(src, context, "context.tsv"); if (prepare_copy(src, dest, "context.tsv")) return 2;
+    path(src, context, "identity-helper"); if (prepare_copy(src, dest, "identity-helper")) return 2;
+    path(dest_jobs, dest, "jobs"); if (sy_mkdir(dest_jobs, 0700)) return 2;
+    for (int i = 0; i < count; i++) {
+        const char *name = names + at; at += (int)strlen(name) + 1;
+        const char *file = !strncmp(name, "net-", 4) ? "result.net" : !strncmp(name, "tbl-", 4) ? "result.tbl" : 0;
+        if (!file) continue;
+        path(src, jobs, name); path(result, src, file);
+        sy_stat_t st;
+        if (sy_lstat(result, &st) || st.kind != 'f') { fprintf(stderr, "release-ctor prepare: missing regular result %s\n", result); return 2; }
+        path(leaf, dest_jobs, name);
+        if (sy_mkdir(leaf, 0700) || prepare_copy(result, leaf, file)) return 2;
+        copied++;
+    }
+    return copied ? 0 : 2;
+}
+static int prepare_material(int argc, char **argv) {
+    const char *stage = argv[2], *mat = argv[argc - 1];
+    char canonical[4400], p[4400], repo[4400], storage[8][4400], *args[12];
+    if (mat[0] != '/' || strpbrk(mat, "\r\n\t")) return not_run("canonical material path required");
+    until = sy_now_ms() + 51000;
+    if (!strcmp(stage, "copy")) {
+        if (argc != 11) return not_run("prepare copy REPO SNAP SRC NETS ROUTES CTOR ORACLE NEW_MAT");
+        for (int i = 3; i <= 9; i++) if (sy_realpath(argv[i], canonical, sizeof canonical) < 0 || strcmp(canonical, argv[i]))
+            return not_run("prepare needs canonical original inputs");
+        if (cx_fmt(p, sizeof p, "%s.build.json", argv[8]) || !sy_exists(p)) return not_run("original constructor build record");
+        char parent[4400], context[4400];
+        if (cx_fmt(parent, sizeof parent, "%s", mat) || cx_fmt(context, sizeof context, "%s", argv[6])) return 2;
+        char *slash = strrchr(parent, '/'), *jobs = strrchr(context, '/');
+        if (!slash || !slash[1] || !strcmp(slash + 1, ".") || !strcmp(slash + 1, "..") || !jobs || strcmp(jobs + 1, "jobs")) return 2;
+        *slash = 0; *jobs = 0;
+        if (sy_realpath(parent, canonical, sizeof canonical) < 0 || strcmp(parent, canonical) || sy_mkdir(mat, 0700)) return 2;
+        path(repo, mat, "repo.txt"); if (cx_write(repo, argv[3], strlen(argv[3]))) return 2;
+        path(repo, mat, "location.txt"); if (cx_write(repo, mat, strlen(mat))) return 2;
+        if (prepare_root(argv[4], mat) || prepare_copy(argv[5], mat, "source.pkg") ||
+            prepare_context(context, argv[6], mat) || prepare_copy(argv[7], mat, "routes.tsv") ||
+            prepare_copy(argv[8], mat, "constructor.com") || prepare_copy(p, mat, "constructor.com.build.json") ||
+            prepare_copy(argv[9], mat, "oracle.pkg")) return 2;
+        char producer[4400]; path(producer, mat, "producer"); if (sy_mkdir(producer, 0700)) return 2;
+        path(p, argv[3], "tools/release-build.cx"); if (prepare_copy(p, producer, "release-build.cx")) return 2;
+        path(p, argv[3], "tools/cxlib"); if (prepare_copy(p, producer, "cxlib")) return 2;
+        path(p, mat, "run"); if (sy_mkdir(p, 0700)) return 2;
+    } else {
+        if (argc != 4 || sy_realpath(mat, canonical, sizeof canonical) < 0 || strcmp(mat, canonical)) return not_run("prepare stage needs canonical material directory");
+        material_args(mat, storage, args, "assemble");
+        tool = args[3]; root = args[4]; source = args[5]; nets = args[6]; routes = args[7]; run = args[8]; ctor = args[9];
+        if (!strcmp(stage, "build")) {
+            path(repo, mat, "producer"); path(p, repo, "release-build.cx");
+            if (sy_exists(tool)) return 2;
+            char *v[] = {"sh", ctor, p, "-o", tool, 0}; if (prepare_child(v, repo)) return 2;
+        } else if (!strcmp(stage, "seal")) {
+            char seal[65], expected[65], actual[65], map[4800], location[4400];
+            path(p, run, "compiler.p4.pkg");
+            if (digest(p, actual) || digest(args[10], expected) || strcmp(actual, expected) || material_seal(mat, seal)) return 2;
+            path(p, mat, "map.tsv"); path(location, mat, "location.txt");
+            if (sy_exists(p) || cx_fmt(map, sizeof map, "release-ctor-location\t%s\nrelease-ctor-proof\t%s\n", location, seal) || cx_write(p, map, strlen(map))) return 2;
+            printf("MATERIAL_MAP\t%s\tidentity=%s\tstatus=PREPARED\n", p, seal);
+        } else {
+            int allowed = !strcmp(stage, "guard-init") || !strcmp(stage, "models") || !strcmp(stage, "resources") || !strcmp(stage, "assemble");
+            if (!strncmp(stage, "guard-", 6) && strcmp(stage, "guard-init")) {
+                char *end; long i = strtol(stage + 6, &end, 10); allowed = !*end && i >= 0 && i < 40;
+            }
+            if (!allowed) return 2;
+            path(output, run, "compiler.p4.pkg"); pr_result result = {0};
+            int rc = call(stage, root, nets, run, output, ctor, &result);
+            int ok = !rc && !result.rc; pr_free(&result); if (!ok) return 2;
+        }
+    }
+    printf("RELEASE_CTOR_MATERIAL\tstatus=PREPARED\tstage=%s\tmaterial=%s\tclaim=identity-and-production-only-no-batch-result\n", stage, mat);
+    return 0;
+}
+static int fast_contract(const char *repo, const char *out) {
+    char canonical[4400], product[4400], route[4400];
+    if (sy_realpath(repo, canonical, sizeof canonical) < 0 || strcmp(repo, canonical) || out[0] != '/' || sy_exists(out)) return not_run("fast needs canonical repository and fresh output path");
+    path(product, repo, "unisacc.com"); path(route, repo, "tools/kernel-route.cx");
+    const char *zero = "0000000000000000000000000000000000000000000000000000000000000000";
+    const char *reason[] = {"--constructor requires one absolute executable", "constructor declaration/package requires --constructor", "declared constructor SHA differs from actual file"};
+    for (int i = 0; i < 3; i++) {
+        char *v[15] = {"sh", product, route, "--", (char *)repo, (char *)out}; int n = 6;
+        if (i == 0) { v[n++] = "--constructor"; v[n++] = "relative-constructor"; }
+        if (i == 2) { v[n++] = "--constructor"; v[n++] = product; }
+        if (i) { v[n++] = "--constructor-sha"; v[n++] = (char *)zero; }
+        v[n] = 0; pr_result result = {0};
+        int transport = pr_run("fast constructor refusal", v, repo, 0, 15, &result);
+        pr_echo(&result);
+        ck(!transport && result.rc == 2, "fast-consumer-refuses-explicit-constructor-boundary");
+        ck(contains(&result, reason[i]), "fast-public-refusal-category");
+        ck(!sy_exists(out), "fast-refusal-creates-no-output");
+        pr_free(&result);
+    }
+    printf("CHECK_RELEASE_CTOR_FAST\tchecks=%d\tfailed=%d\tscope=kernel-constructor-cli-not-full-p3\n", checks, failed);
     return failed ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--fast")) return fast_contract(argv[2], argv[3]);
+    if (argc >= 3 && !strcmp(argv[1], "--prepare")) return prepare_material(argc, argv);
+    if (argc == 6 && !strcmp(argv[1], "--case") && (!strcmp(argv[3], "--material") || !strcmp(argv[3], "--material-file"))) {
+        char canonical[4400], located[4400], before[65], after[65], storage[8][4400], lock[4400], *args[12];
+        const char *mat = argv[4];
+        if (!strcmp(argv[3], "--material-file")) {
+            size_t n; sy_stat_t st; char *s;
+            if (sy_lstat(mat, &st) || st.kind != 'f' || !(s = cx_read(mat, &n))) return not_run("material location unavailable");
+            int valid = n > 0 && n < sizeof located && strlen(s) == n && !strpbrk(s, "\r\n\t") &&
+                sy_realpath(s, located, sizeof located) >= 0 && !strcmp(s, located);
+            free(s);
+            if (valid) { path(canonical, located, "location.txt"); valid = !strcmp(canonical, mat); }
+            if (!valid) return not_run("material location must be its own canonical directory without extra fields");
+            mat = located;
+        }
+        if (sy_realpath(mat, canonical, sizeof canonical) < 0 || strcmp(canonical, mat)) return not_run("sealed release-ctor material unavailable");
+        path(lock, mat, "run/check-release-ctor.lock");
+        int fd = sy_open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) return not_run("RUN already held or unavailable");
+        if (sy_close(fd)) return 2;
+        material_lock_held = 1; int rc = 77;
+        if (material_seal(mat, before)) { not_run("sealed release-ctor material unavailable"); goto done; }
+        if (strlen(argv[5]) != 64 || strcmp(before, argv[5])) { fprintf(stderr, "release-ctor: material seal mismatch\n"); rc = 1; goto done; }
+        material_args(mat, storage, args, argv[2]); rc = check_case(11, args);
+        if (material_seal(mat, after) || strcmp(before, after)) { fprintf(stderr, "release-ctor: material changed during case\n"); rc = 1; goto done; }
+        printf("MATERIAL_BOUND\trelease-ctor-proof\t%s\tcase=%s\tactual-consumer=no-cached-result\n", after, argv[2]);
+    done:
+        material_lock_held = 0;
+        if (sy_unlink(lock)) return 2;
+        return rc;
+    }
+    return check_case(argc, argv);
 }
