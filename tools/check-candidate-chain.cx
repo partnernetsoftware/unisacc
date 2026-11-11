@@ -34,6 +34,80 @@ int main(int argc, char **argv) {
     char cwd[400], com[500], tool[500], out[65536], *o = 0;
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
+    if (argc == 4 && tx_eqz(argv[1], "--g2g3-split")) {
+        char td[4400], fake[4500], trace[4500], fp[4500], cmd[20000], toolpath[4500], dir[4500];
+        const char *script = "#!/bin/sh\ncase \"$*\" in *--closure-list*) i=0; while [ $i -lt ${BATCH_CLOSURES:-3} ]; do printf 'm%s.o\\t%s/src/unit%s.cx\\n' \"$i\" \"$BATCH_SNAP\" \"$i\"; i=$((i+1)); done; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\ncase \"$*\" in *--objects*) exit ${BATCH_OBJECT_RC:-0};; *--link-only*) exit ${BATCH_LINK_RC:-0};; esac\nexit 99\n";
+        if (sy_realpath(".", cwd, sizeof cwd) < 0 || cx_fmt(td, sizeof td, "%s/g2g3-split-XXXXXX", argv[2]) || !mkdtemp(td) ||
+            cx_fmt(fake, sizeof fake, "%s/unisacc.com", td) || cx_fmt(trace, sizeof trace, "%s/trace", td) ||
+            cx_fmt(fp, sizeof fp, "%s/fixedpoint", td) || cx_fmt(toolpath, sizeof toolpath, "%s/tools/candidate-chain.cx", cwd)) return 2;
+        if (cx_write(fake, script, strlen(script)) || sy_mkdir(fp, 0755) || sy_setenv("BATCH_TRACE", trace, 1) || sy_setenv("BATCH_SNAP", td, 1)) return 2;
+        for (int g = 2; g <= 3; g++) {
+            if (cx_fmt(dir, sizeof dir, "%s/g%d", fp, g) || sy_mkdir(dir, 0755)) return 2;
+        }
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g2-batch-objects-until");
+        size_t zn; char *z = cx_read(trace, &zn);
+        char *first = z ? strstr(z, "--objects\t") : 0;
+        char *second = first ? strstr(first + 1, "--objects\t") : 0;
+        ck(first && second && !strstr(second + 1, "--objects\t") && has(first, "drive.o,host.o,stages.o,") && has(first, "rescache.o,drivestream.o") && has(second, "m0.o,m1.o,m2.o") && !has(z, "--object\t") && !has(z, "--link-only"), "g2-two-batches-full-roots-and-closures");
+        char source[4500]; if (cx_fmt(source, sizeof source, "%s/tools/candidate-chain.cx", cwd)) return 2;
+        size_t sn; char *s = cx_read(source, &sn); int covered = 0;
+        char *p = s ? strstr(s, "static const char *lnx_obj[44]") : 0;
+        char *end = p ? strchr(p, ';') : 0;
+        while (p && end && (p = strchr(p, '"')) && p < end) {
+            char *e = strchr(++p, '"'), key[80];
+            if (!e || e >= end || e - p >= 80) break;
+            mm_copy(key, sizeof key, p, e - p); key[e - p] = 0;
+            if (first && strstr(first, key)) covered++;
+            p = e + 1;
+        }
+        ck(covered == 44, "g2-all-44-root-keys-covered"); free(s); free(z);
+        if (cx_write(trace, "", 0) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g3 fresh g3-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g3-objects-until");
+        z = cx_read(trace, &zn);
+        ck(z && has(z, "--phase\tg3") && has(z, "--objects\t") && has(z, "m0.o,m1.o,m2.o") && !has(z, "--link-only"), "g3-objects-before-link"); free(z);
+        if (cx_write(trace, "", 0) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g3 resume - 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\tg3-lnx-x86_64-objects") && has(out, "RECEIPT\tg3-lnx-x86_64\t"), "g3-resume-links");
+        z = cx_read(trace, &zn);
+        ck(z && has(z, "--objects\t") && has(z, "--resume") && has(z, "--link-only"), "g3-resume-reenters-identity-verifier"); free(z);
+        sy_setenv("BATCH_LINK_RC", "37", 1);
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "fixedpoint link"), "g3-link-failure-propagates");
+        sy_setenv("BATCH_LINK_RC", "0", 1); sy_setenv("BATCH_OBJECT_RC", "38", 1);
+        if (cx_write(trace, "", 0)) return 2;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "fixedpoint objects"), "g3-object-failure-propagates");
+        z = cx_read(trace, &zn); ck(z && !has(z, "--link-only"), "g3-object-failure-stops-link"); free(z);
+        sy_setenv("BATCH_OBJECT_RC", "0", 1); sy_setenv("BATCH_CLOSURES", "257", 1);
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-closure-m256.o 2>&1", argv[3], toolpath, td, td, td, fp) || cx_write(trace, "", 0)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "dynamic-257-closures-until");
+        z = cx_read(trace, &zn);
+        ck(z && has(z, "m254.o,m255.o") && has(z, "--objects\tm256.o\t") && !has(z, "--link-only"), "dynamic-closure-batches-cap-256"); free(z);
+        printf("G2G3_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
+        return failed ? 1 : 0;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--gen1-split")) {
+        char td[4400], ctor[4500], trace[4500], cmd[16000], toolpath[4500];
+        const char *fake = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$GEN1_TRACE\"\ncase \"$*\" in *--objects-only*) exit ${GEN1_OBJECT_RC:-0};; *--link-only*) exit ${GEN1_LINK_RC:-0};; esac\nexit 99\n";
+        if (sy_realpath(".", cwd, sizeof cwd) < 0 || cx_fmt(td, sizeof td, "%s/gen1-split-XXXXXX", argv[2]) || !mkdtemp(td) ||
+            cx_fmt(ctor, sizeof ctor, "%s/ctor", td) || cx_fmt(trace, sizeof trace, "%s/trace", td) ||
+            cx_fmt(toolpath, sizeof toolpath, "%s/tools/candidate-chain.cx", cwd)) return 2;
+        if (cx_write(ctor, fake, strlen(fake)) || sy_setenv("GEN1_TRACE", trace, 1)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1", argv[3], toolpath, td, cwd, ctor, td)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "gen1-objects-until");
+        size_t zn; char *z = cx_read(trace, &zn);
+        ck(z && has(z, "--objects-only") && !has(z, "--link-only") && has(z, "lnx/arm64"), "gen1-object-command-no-link"); free(z);
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 resume - 2>&1", argv[3], toolpath, td, cwd, ctor, td)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\tgen1-lnx-fixture-objects") && has(out, "RECEIPT\tgen1-lnx-fixture\t"), "gen1-resume-links");
+        z = cx_read(trace, &zn);
+        char *first = z ? strstr(z, "--objects-only") : 0;
+        ck(first && !strstr(first + 1, "--objects-only") && has(z, "--link-only"), "gen1-resume-does-not-recompile"); free(z);
+        sy_setenv("GEN1_LINK_RC", "37", 1);
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "gen1 link"), "gen1-link-failure-propagates");
+        sy_setenv("GEN1_LINK_RC", "0", 1); sy_setenv("GEN1_OBJECT_RC", "38", 1);
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/x86_64 fresh - 2>&1", argv[3], toolpath, td, cwd, ctor, td)) return 2;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "gen1 objects"), "gen1-object-failure-propagates");
+        printf("GEN1_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
+        return failed ? 1 : 0;
+    }
     { char *v[] = {"pwd", 0};
       if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
       mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0;

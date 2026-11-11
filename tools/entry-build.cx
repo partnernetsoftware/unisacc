@@ -9,6 +9,8 @@
    --o1-drivers is accepted and selects the same six. --target sets
    the compiler -b value. Omitted, it stays lnx/x86_64. --only KEY
    (repeatable) compiles just those objects and does not link.
+   --objects-only compiles all roots and planned closures without linking;
+   follow it with --link-only against the same frozen inputs and OUT.
    --closure-list prints the exact mN.o/source plan without compiling/linking.
    --closure-only KEY (repeatable) compiles only those planned mN.o objects.
    --link-only never compiles: every root and closure must have a matching
@@ -856,6 +858,7 @@ int main(int argc, char **argv) {
     eb_rec_total = 0;
     o1_drivers = 1;
     link_only = 0;
+    int objects_only = 0;
     only_n = 0;
     int closure_list = 0, closure_n = 0;
     const char *closure_keys[128];
@@ -863,6 +866,7 @@ int main(int argc, char **argv) {
     a = 1;
     while (a < argc) {
         if (eb_same(argv[a], "--closure-list")) { closure_list = 1; a++; continue; }
+        if (eb_same(argv[a], "--objects-only")) { objects_only = 1; a++; continue; }
         if (eb_same(argv[a], "--closure-only")) {
             if (a + 1 >= argc || closure_n >= 128) eb_die("closure-only");
             closure_keys[closure_n++] = argv[a + 1]; a += 2; continue;
@@ -900,6 +904,7 @@ int main(int argc, char **argv) {
     }
     argc = w;
     if (link_only && only_n) eb_die("flags");
+    if (objects_only && (link_only || only_n || closure_list || closure_n)) eb_die("flags");
     if ((closure_list && (link_only || only_n || closure_n)) ||
         (closure_n && (link_only || only_n))) eb_die("flags");
     if (!eb_target_ok(target)) eb_die("target");
@@ -1187,7 +1192,7 @@ int main(int argc, char **argv) {
         }
     }
     tpar_wall = eb_ns() - tpar_wall;
-    if (!only_n && !closure_n) {
+    if (!objects_only && !only_n && !closure_n) {
         /* Link consumes objects only. No compile fallback is permitted. */
         char identity[65];
         for (i = 0; i < EB_OBJ; i++) {
@@ -1221,7 +1226,8 @@ int main(int argc, char **argv) {
     fprintf(rf, "ENTRY_BUILD_PARALLEL\tjobs=%d\twall_ns=%lld\n", EB_JOBS, tpar_wall);
     fprintf(rf, "ENTRY_BUILD_SHA\tsha_ns=%lld\trec_ns=%lld\n", eb_sha_total, eb_rec_total);
     if (fclose(rf)) eb_die("receipt close");
-    if (only_n || closure_n) printf("entry-build objects=%d closure_objects=%d\n", only_n, closure_n);
+    if (objects_only) printf("entry-build phase=objects objects=%d closure_objects=%d\n", EB_OBJ, ncl);
+    else if (only_n || closure_n) printf("entry-build objects=%d closure_objects=%d\n", only_n, closure_n);
     else printf("entry-build candidate=%s bytes=%ld\n", hc, nc);
     return 0;
 }

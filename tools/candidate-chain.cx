@@ -102,7 +102,7 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     if (bound_sh_secs(root, v, 55)) die("REFUSE preflight", hook);
     sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
 }
-static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target) {
+static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target, const char *phase) {
     char bound[4400], secbuf[8];
     char *v[24];
     int n = 0;
@@ -122,6 +122,7 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
     v[n++] = (char *)"--o1-drivers";
     v[n++] = (char *)"--target";
     v[n++] = (char *)target;
+    v[n++] = (char *)phase;
     v[n++] = 0;
     return runv_secs(v, 55);
 }
@@ -521,6 +522,10 @@ static void plan(void) {
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
     sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=55\n");
     sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=55\n");
+    sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=55\n");
+    sy_printf("FP_BATCH\tflag=--objects\troots=44\tclosure_batch_max=256\tlink=--link-only\tchild_bound=55\n");
+    sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=55\n");
+    sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=55\n");
 }
 
 static int hex40(const char *s) {
@@ -579,6 +584,27 @@ static void mark(const char *dir, const char *phase, long wall) {
         exit(0);
     }
 }
+/* Object checkpoint is only scheduling evidence: link-only rechecks every
+   object/cache and the raw input identity before it can create a candidate. */
+static void gen1_entry(const char *outdir, const char *snap, const char *ctor,
+                       const char *ebt, const char *pkg, const char *gout,
+                       const char *target, const char *tag, int resume) {
+    char objtag[100];
+    if (cx_fmt(objtag, sizeof objtag, "%s-objects", tag)) die("path", tag);
+    if (!(resume && ck_done(outdir, objtag))) {
+        long t = sy_now_ms();
+        hb(outdir, objtag, "start");
+        if (bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--objects-only")) die("gen1 objects", gout);
+        mark(outdir, objtag, sy_now_ms() - t);
+    } else {
+        sy_printf("RESUME\t%s\n", objtag);
+        if (until_phase && tx_eqz(objtag, until_phase)) exit(0);
+    }
+    hb(outdir, tag, "start");
+    long t = sy_now_ms();
+    if (bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--link-only")) die("gen1 link", gout);
+    mark(outdir, tag, sy_now_ms() - t);
+}
 /* 相位原子清理: 相位未 DONE 时,删除上次失败留下的独占输出(下游工具以目标不存在为前提)。
    只删调用方登记的路径;已 DONE 的相位不动;有完成收据(receipt 非空且存在)的不动;
    范围限定在 --out 目录与快照树 out/chain(chain_work)之内,越界或含 .. 即拒绝。 */
@@ -611,11 +637,27 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
     clean_phase_path(outdir, phase, d, rc);
 }
 static const char *lnx_obj[44] = { "drive.o", "host.o", "stages.o", "routestep.o", "stagehandoff.o", "runexec.o", "attributeframe.o", "bind.o", "cli.o", "compat.o", "route.o", "deps.o", "input.o", "args.o", "path.o", "entrybind.o", "memlayout.o", "driveface.o", "driveroute.o", "cxmod.o", "tapegate.o", "fwdstub.o", "executor.o", "transition.o", "codec.o", "modeldecode.o", "modelnumber.o", "packmodel.o", "modelload.o", "bindstage.o", "entryexec.o", "hostnative.o", "tapelink.o", "drivelink.o", "drivetapebin.o", "driveargs.o", "driveplan.o", "driveutil.o", "driveunits.o", "driverun.o", "hostout.o", "hostres.o", "rescache.o", "drivestream.o" };
+/* Existing --objects API accepts at most 256 keys; checkpoints remain per key.
+   Always re-enter chain-step on resume: it verifies provenance and completed
+   object bytes before adopting them. --until truncates the batch, not coverage. */
+static void fp_batch(const char *root, const char *rev, const char *snap, const char *pkg,
+                     const char *gen1, const char *fp, const char *helper,
+                     const char *target, const char *phase, const char *keys, int resume) {
+    char *a[18]; int n = 0;
+    a[n++] = "fixedpoint"; a[n++] = (char *)rev; a[n++] = (char *)snap; a[n++] = (char *)pkg;
+    a[n++] = (char *)gen1; a[n++] = (char *)fp; a[n++] = "--phase"; a[n++] = (char *)phase;
+    a[n++] = "--target"; a[n++] = (char *)target; a[n++] = "--identity-helper"; a[n++] = (char *)helper;
+    if (keys) { a[n++] = "--objects"; a[n++] = (char *)keys; }
+    else a[n++] = "--link-only";
+    if (resume) a[n++] = "--resume";
+    a[n] = 0;
+    if (step(root, a)) die(keys ? "fixedpoint objects" : "fixedpoint link", phase);
+}
 static void g2_closures(const char *root, const char *outdir, const char *rev, const char *snap, const char *pkg,
-                        const char *ctor, const char *dest, const char *fp, const char *helper,
-                        const char *target, const char *slug, int resume) {
+                        const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,
+                        const char *target, const char *slug, int gen, int resume) {
     char tool[4400], com[4400], manifest[4400], prepare[80], group[80];
-    if (cx_fmt(tool, sizeof tool, "%s/tools/entry-build.cx", snap) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g2/%s.closures.tsv", fp, slug) || cx_fmt(prepare, sizeof prepare, "g2-%s-closure-prepare", slug) || cx_fmt(group, sizeof group, "g2-%s-closure", slug)) die("path", slug);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/entry-build.cx", snap) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
     if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
     char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
     pr_result result; long began = sy_now_ms();
@@ -634,7 +676,7 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
         if (count >= 4096 || cx_fmt(expected, sizeof expected, "m%d.o", count) || strcmp(name, expected)) die("closure order", manifest);
         *e = 0;
         if (!under_dir(tab + 1, snap) || has_dotdot(tab + 1)) die("closure source outside snapshot", tab + 1);
-        if (cx_fmt(tag, sizeof tag, "g2-%s-closure-%s", slug, name)) die("closure tag", name);
+        if (cx_fmt(tag, sizeof tag, "g%d-%s-closure-%s", gen, slug, name)) die("closure tag", name);
         if (until_phase && !strcmp(until_phase, tag)) requested = 1;
         *e = '\n'; count++; p = e + 1;
     }
@@ -642,15 +684,22 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
     if (!(resume && ck_done(outdir, prepare))) mark(outdir, prepare, sy_now_ms() - began);
     else if (until_phase && !strcmp(until_phase, prepare)) exit(0);
     for (char *p = result.out; p && *p;) {
-        char *e = strchr(p, '\n'), *tab = strchr(p, '\t'), name[40], tag[100];
-        if (mm_copy(name, sizeof name, p, (long)(tab - p))) die("closure name copy", manifest); name[tab - p] = 0;
-        if (cx_fmt(tag, sizeof tag, "g2-%s-closure-%s", slug, name)) die("closure tag", name);
-        if (!(resume && ck_done(outdir, tag))) {
-            char *a[] = {"fixedpoint", (char *)rev, (char *)snap, (char *)pkg, (char *)ctor, (char *)fp, "--phase", "g2", "--target", (char *)target, "--identity-helper", (char *)helper, "--object", name, "--resume", 0};
-            long started = sy_now_ms(); if (step(root, a)) die(tag, dest);
-            mark(outdir, tag, sy_now_ms() - started);
-        } else if (until_phase && !strcmp(until_phase, tag)) exit(0);
-        p = e + 1;
+        char keys[12288], tags[256][100]; int nk = 0, used = 0;
+        long started = sy_now_ms();
+        do {
+            char *e = strchr(p, '\n'), *tab = strchr(p, '\t');
+            int len = (int)(tab - p);
+            if (cx_fmt(tags[nk], sizeof tags[nk], "g%d-%s-closure-%.*s", gen, slug, len, p)) die("closure tag", manifest);
+            int n = snprintf(keys + used, sizeof keys - used, "%s%.*s", nk ? "," : "", len, p);
+            if (n < 0 || n >= (int)sizeof keys - used) die("closure batch bound", manifest);
+            used += n; nk++; p = e + 1;
+            if (until_phase && !strcmp(until_phase, tags[nk - 1])) break;
+        } while (*p && nk < 256);
+        fp_batch(root, rev, snap, pkg, gen1, fp, helper, target, gen == 2 ? "g2" : "g3", keys, 1);
+        for (int j = 0; j < nk; j++) {
+            if (!(resume && ck_done(outdir, tags[j]))) mark(outdir, tags[j], sy_now_ms() - started);
+            else if (until_phase && !strcmp(until_phase, tags[j])) exit(0);
+        }
     }
     pr_free(&result);
     if (!(resume && ck_done(outdir, group))) mark(outdir, group, 0);
@@ -659,15 +708,15 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
 static int known_closure_phase(const char *outdir, const char *phase) {
     const char *slugs[] = {"lnx-x86_64", "lnx-arm64"};
     if (!outdir) return 0;
-    for (int i = 0; i < 2; i++) {
+    for (int gen = 2; gen <= 3; gen++) for (int i = 0; i < 2; i++) {
         char prefix[80], file[4400], needle[48]; struct stat st;
-        if (cx_fmt(prefix, sizeof prefix, "g2-%s-closure-", slugs[i])) die("phase", phase);
+        if (cx_fmt(prefix, sizeof prefix, "g%d-%s-closure-", gen, slugs[i])) die("phase", phase);
         size_t z = strlen(prefix); if (strncmp(phase, prefix, z)) continue;
         const char *name = phase + z, *p = name + 1; int index = 0;
         if (*name != 'm' || strlen(name) >= 40 || *p < '0' || *p > '9' || (*p == '0' && p[1] != '.')) return 0;
         while (*p >= '0' && *p <= '9') { if (index > 4095) return 0; index = index * 10 + *p++ - '0'; }
         if (index > 4095 || strcmp(p, ".o")) return 0;
-        if (cx_fmt(file, sizeof file, "%s/fixedpoint/g2/%s.closures.tsv", outdir, slugs[i]) || cx_fmt(needle, sizeof needle, "m%d.o\t", index)) die("path", phase);
+        if (cx_fmt(file, sizeof file, "%s/fixedpoint/g%d/%s.closures.tsv", outdir, gen, slugs[i]) || cx_fmt(needle, sizeof needle, "m%d.o\t", index)) die("path", phase);
         if (lstat(file, &st)) { if (errno == ENOENT) return 0; die("closure manifest stat", file); }
         size_t n = 0; char *text = cx_read(file, &n); if (!text || !n || text[n - 1] != '\n' || memchr(text, 0, n)) { free(text); die("closure manifest text", file); }
         int found = 0; char *at = text;
@@ -678,25 +727,37 @@ static int known_closure_phase(const char *outdir, const char *phase) {
 }
 static void run_g2_lnx(const char *root, const char *outdir, const char *rev, const char *snap,
     const char *pkg, const char *gen1, const char *fp, const char *helper,
-    const char *target, const char *slug, int resume) {
-    char dest[4400], tag[80]; int i;
-    if (cx_fmt(dest, sizeof dest, "%s/g2/%s", fp, slug)) die("path", slug);
+    const char *target, const char *slug, int gen, int resume) {
+    char dest[4400], tag[80], objtag[80], ctor[4400], keys[2048]; int used = 0, count = 44;
+    const char *phase = gen == 2 ? "g2" : "g3";
+    if (cx_fmt(dest, sizeof dest, "%s/g%d/%s", fp, gen, slug) ||
+        cx_fmt(tag, sizeof tag, "g%d-%s", gen, slug) || cx_fmt(objtag, sizeof objtag, "%s-objects", tag) ||
+        (gen == 2 ? cx_fmt(ctor, sizeof ctor, "%s", gen1) : cx_fmt(ctor, sizeof ctor, "%s/g2/lnx-x86_64/candidate", fp))) die("path", slug);
     sy_mkdir(fp, 0755);
-    for (i = 0; i <= 44; i++) {
-        if (i == 44) g2_closures(root, outdir, rev, snap, pkg, gen1, dest, fp, helper, target, slug, resume);
-        char *a[20]; int n = 0; long t0 = sy_now_ms();
-        if (i < 44 ? cx_fmt(tag, sizeof tag, "g2-%s-obj-%d", slug, i) : cx_fmt(tag, sizeof tag, "g2-%s", slug)) die("phase", slug);
-        a[n++] = "fixedpoint"; a[n++] = (char *)rev; a[n++] = (char *)snap; a[n++] = (char *)pkg;
-        a[n++] = (char *)gen1; a[n++] = (char *)fp; a[n++] = "--phase"; a[n++] = "g2";
-        a[n++] = "--target"; a[n++] = (char *)target; a[n++] = "--identity-helper"; a[n++] = (char *)helper;
-        if (i < 44) { a[n++] = "--object"; a[n++] = (char *)lnx_obj[i]; } else a[n++] = "--link-only";
-        if (fsize(dest) >= 0) a[n++] = "--resume";
-        a[n] = 0;
-        /* Existing bytes are adopted only by fixedpoint's identity verifier. */
-        if (step(root, a)) die(tag, dest);
-        if (!(resume && ck_done(outdir, tag))) mark(outdir, tag, sy_now_ms() - t0);
-        else { sy_printf("RESUME\t%s\n", tag); if (until_phase && tx_eqz(tag, until_phase)) exit(0); }
+    if (gen == 3 && !resume) clean_fp_phase(outdir, fp, tag, gen, slug, !strcmp(slug, "lnx-arm64"));
+    long began = sy_now_ms();
+    for (int i = 0; i < 44; i++) {
+        char one[80];
+        if (cx_fmt(one, sizeof one, "g2-%s-obj-%d", slug, i)) die("phase", slug);
+        int n = snprintf(keys + used, sizeof keys - used, "%s%s", i ? "," : "", lnx_obj[i]);
+        if (n < 0 || n >= (int)sizeof keys - used) die("root batch bound", slug);
+        used += n;
+        if (gen == 2 && until_phase && !strcmp(until_phase, one)) { count = i + 1; break; }
     }
+    hb(outdir, objtag, "start");
+    fp_batch(root, rev, snap, pkg, gen1, fp, helper, target, phase, keys, fsize(dest) >= 0);
+    if (gen == 2) for (int i = 0; i < count; i++) {
+        char one[80]; if (cx_fmt(one, sizeof one, "g2-%s-obj-%d", slug, i)) die("phase", slug);
+        if (!(resume && ck_done(outdir, one))) mark(outdir, one, sy_now_ms() - began);
+        else if (until_phase && !strcmp(until_phase, one)) exit(0);
+    }
+    g2_closures(root, outdir, rev, snap, pkg, gen1, ctor, dest, fp, helper, target, slug, gen, resume);
+    if (!(resume && ck_done(outdir, objtag))) mark(outdir, objtag, sy_now_ms() - began);
+    else { sy_printf("RESUME\t%s\n", objtag); if (until_phase && !strcmp(until_phase, objtag)) exit(0); }
+    long started = sy_now_ms(); hb(outdir, tag, "start");
+    fp_batch(root, rev, snap, pkg, gen1, fp, helper, target, phase, 0, 1);
+    if (!(resume && ck_done(outdir, tag))) mark(outdir, tag, sy_now_ms() - started);
+    else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
 }
 static int job_has_record(const char *ctx, const char *id) {
     char rec[4400];
@@ -1162,6 +1223,20 @@ int main(int argc, char **argv) {
     /* 链内产物不得依赖单元前端缓存(plans/unit-frontcache.md):强制关,子进程继承;设不上或读回不是 0 即拒绝 */
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
+    /* Test seam: explicit paths, no snapshot preparation or real construction. */
+    if (argc == 11 && tx_eqz(argv[1], "--gen1-entry-fixture")) {
+        until_phase = tx_eqz(argv[10], "-") ? 0 : argv[10];
+        gen1_entry(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7],
+                   argv[8], "gen1-lnx-fixture", tx_eqz(argv[9], "resume"));
+        return 0;
+    }
+    if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {
+        until_phase = tx_eqz(argv[8], "-") ? 0 : argv[8];
+        run_g2_lnx(argv[2], argv[3], "23a873aaa156440b99c25ef48c2d94f6ca32e858", argv[4],
+                   "package", "constructor", argv[5], "identity-helper", "lnx/x86_64", "lnx-x86_64",
+                   tx_eqz(argv[6], "g3") ? 3 : 2, tx_eqz(argv[7], "resume"));
+        return 0;
+    }
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; sy_printf("ENV\tUNISACC_UNIT_CACHE=0\n"); continue; }
         if (tx_eqz(argv[i], "--uc-guard") && i + 1 < argc) {
@@ -1514,10 +1589,7 @@ int main(int argc, char **argv) {
     preflight(root, "post-p3", rev, build, snap, pkg);
 
     if (!(resume && ck_done(outdir, "gen1-lnx-x86_64"))) {
-        long t0 = sy_now_ms();
         char gout[4400], p[4400], ctor[4400], ebt[4400], saved[4400];
-        char *v[16];
-        int n = 0;
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-x86_64", outdir)) die("path", "g1");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
@@ -1535,17 +1607,12 @@ int main(int argc, char **argv) {
         }
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_ctor_eb(snap, ctor, ebt, pkg, gout, "lnx/x86_64");
+        gen1_entry(outdir, snap, ctor, ebt, pkg, gout, "lnx/x86_64", "gen1-lnx-x86_64", resume);
         if (sy_chdir(saved)) die("chdir", saved);
-        if (n) die("gen1", gout);
-        mark(outdir, "gen1-lnx-x86_64", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-lnx-x86_64\n");
 
     if (!(resume && ck_done(outdir, "gen1-lnx-arm64"))) {
-        long t0 = sy_now_ms();
         char gout[4400], p[4400], ctor[4400], ebt[4400], saved[4400];
-        char *v[16];
-        int n = 0;
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/lnx-arm64", outdir)) die("path", "g1a");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
@@ -1557,10 +1624,8 @@ int main(int argc, char **argv) {
         if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "UNISA_CONTAINER");
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_ctor_eb(snap, ctor, ebt, pkg, gout, "lnx/arm64");
+        gen1_entry(outdir, snap, ctor, ebt, pkg, gout, "lnx/arm64", "gen1-lnx-arm64", resume);
         if (sy_chdir(saved)) die("chdir", saved);
-        if (n) die("gen1-arm", gout);
-        mark(outdir, "gen1-lnx-arm64", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-lnx-arm64\n");
 
     if (!(resume && ck_done(outdir, "wf-prepare"))) {
@@ -1707,30 +1772,10 @@ int main(int argc, char **argv) {
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", resume);
-    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", resume);
-
-    if (!(resume && ck_done(outdir, "g3-lnx-x86_64"))) {
-        clean_fp_phase(outdir, fp, "g3-lnx-x86_64", 3, "lnx-x86_64", 0);
-        long t0 = sy_now_ms();
-        char *a[13];
-        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
-        a[6] = (char *)"--phase"; a[7] = (char *)"g3"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/x86_64";
-        a[10] = (char *)"--identity-helper"; a[11] = helper; a[12] = 0;
-        if (step(root, a)) die("g3-lnx-x86_64", fp);
-        mark(outdir, "g3-lnx-x86_64", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tg3-lnx-x86_64\n");
-
-    if (!(resume && ck_done(outdir, "g3-lnx-arm64"))) {
-        clean_fp_phase(outdir, fp, "g3-lnx-arm64", 3, "lnx-arm64", 1);
-        long t0 = sy_now_ms();
-        char *a[13];
-        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
-        a[6] = (char *)"--phase"; a[7] = (char *)"g3"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/arm64";
-        a[10] = (char *)"--identity-helper"; a[11] = helper; a[12] = 0;
-        if (step(root, a)) die("g3-lnx-arm64", fp);
-        mark(outdir, "g3-lnx-arm64", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tg3-lnx-arm64\n");
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 2, resume);
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 2, resume);
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", 3, resume);
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", 3, resume);
 
     if (!(resume && ck_done(outdir, "kernels-g2"))) {
         long t0 = sy_now_ms();

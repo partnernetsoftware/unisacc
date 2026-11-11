@@ -1,0 +1,226 @@
+/* chain-run: bounded phase-by-phase candidate-chain orchestration, never qualification.
+ * --rev HEX --out ABS [--deadline-s 5400] [--max-resumes 3] [--max-attempts 4096]
+ * [--candidate ABS_EXEC] [--watch ABS_EXEC] [-- child candidate options]
+ * Overrides are native executables with the same argv protocol (also used by the fake fixture).
+ * Persisted deadline/retry/attempt budgets are shared by subsequent invocations, not reset.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
+
+static const char *out;
+static long end_ms;
+static int attempts, resumes, max_attempts=4096, max_resumes=3;
+static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
+static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
+static void append(const char *file,const char *s) {
+    char p[4400]; path(p,file); int fd=sy_open(p,O_WRONLY|O_CREAT|O_APPEND,0644);
+    if(fd<0||sy_write_all(fd,s,strlen(s))||sy_close(fd)) die("append evidence");
+}
+static int blocker(const char *phase,const char *why,int rc) {
+    char s[1024]; if(cx_fmt(s,sizeof s,"BLOCKER\tphase=%s\treason=%s\trc=%d\tattempts=%d\tresumes=%d\n",phase,why,rc,attempts,resumes)) die("blocker bound");
+    append("chain-run.tsv",s); sy_printf("%s",s); return rc;
+}
+static void save(void) {
+    char p[4400], tmp[4400], s[256]; path(p,"chain-run.budget"); path(tmp,"chain-run.budget.new");
+    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
+}
+static int done(const char *phase) {
+    char p[4400], needle[300]; size_t n=0; path(p,"checkpoint.tsv"); char *b=cx_read(p,&n);
+    if(cx_fmt(needle,sizeof needle,"DONE\t%s\t",phase)) die("phase bound");
+    int yes=b && (!strncmp(b,needle,strlen(needle)) || (strstr(b,needle) && strstr(b,needle)[-1]=='\n'));
+    free(b); return yes;
+}
+static int heartbeat_live(void) {
+    char p[4400],phase[256]; path(p,"heartbeat.tsv"); size_t n=0; char *b=cx_read(p,&n); if(!b) return 0;
+    char *last=b;
+    for(char *s=b;*s;s++) if(*s=='\n'&&s[1]) last=s+1;
+    long epoch=0,pid=0,pgid=0;
+    int fields=sscanf(last,"%ld\t%255s\t%ld\t%ld",&epoch,phase,&pid,&pgid); free(b);
+    return fields==4&&((pid>0&&sy_getpgid((int)pid)>=0)||(pgid>0&&sy_getpgid((int)pgid)>=0));
+}
+static char *watch_argv[8];
+static int observe(void) {
+    long left=(end_ms-sy_now_ms())/1000;
+    if(left<1) return blocker("chain-watch","deadline",3);
+    pr_result r; int t=pr_run("chain-watch",watch_argv,0,0,left<55?(int)left:55,&r);
+    pr_echo(&r);
+    char p[4400]; path(p,"chain-run-watch.stdout");
+    if(cx_write(p,r.out?r.out:"",r.outn)) die("watch evidence");
+    int bad=t||r.residue||r.rc>1||r.rc<0;
+    int hung=r.out&&strstr(r.out,"liveness=HUNG");
+    pr_free(&r);
+    if(bad||hung) return blocker("chain-watch",hung?"live-owner":"observation-failed",2);
+    return 0;
+}
+/* A checkpoint alone is not a pack: the producer's output SHA and byte count must match. */
+static int verify_pack(void) {
+    char p[4400],hash[65],want[65],file[4400],key[80]; size_t n=0; long bytes=-1;
+    path(p,"ape-final/ape-receipt.txt"); char *b=cx_read(p,&n); if(!b) return 0;
+    int found=0;
+    for(char *s=b;*s;) { char *e=strchr(s,'\n'); if(!e) break; *e=0;
+        if(!strncmp(s,"unisacc-next.com\t",17)) {
+            if(found||sscanf(s,"%79s\t%4399s\tsha=%64s\tbytes=%ld",key,file,want,&bytes)!=4) { free(b); return 0; }
+            found=1;
+        } s=e+1;
+    }
+    free(b); if(!found||bytes<=0) return 0;
+    path(p,"ape-final/unisacc-next.com"); if(strcmp(file,p)) return 0;
+    b=cx_read(p,&n); if(!b) return 0;
+    int ok=(long)n==bytes&&!sy_sha256_hex(b,(long)n,hash)&&!strcmp(hash,want);
+    free(b); return ok;
+}
+/* No polling: each loop executes one bounded child or consumes a finite phase entry. */
+static int run(const char *phase,char **v,char *fresh_output) {
+    for(;;) {
+        long left=(end_ms-sy_now_ms())/1000;
+        if(left<1) return blocker(phase,"deadline",3);
+        if(attempts>=max_attempts) return blocker(phase,"attempts-exhausted",3);
+        attempts++; save();
+        if(fresh_output&&cx_fmt(fresh_output,4400,"%s/%s-%d",out,phase,attempts)) die("fresh output bound");
+        char argv_path[4400],argv_leaf[100]; cx_fmt(argv_leaf,sizeof argv_leaf,"chain-run-%d.argv",attempts); path(argv_path,argv_leaf);
+        FILE *av=fopen(argv_path,"wb"); if(!av) die("argv evidence");
+        for(int ai=0;v[ai];ai++) if(fprintf(av,"%s\n",v[ai])<0) die("argv evidence");
+        if(fclose(av)) die("argv close");
+        pr_result r; int t=pr_run(phase,v,0,0,left<55?(int)left:55,&r);
+        char name[100],p[4400],row[512];
+        cx_fmt(name,sizeof name,"chain-run-%d.stdout",attempts); path(p,name); if(cx_write(p,r.out?r.out:"",r.outn)) die("stdout evidence");
+        cx_fmt(name,sizeof name,"chain-run-%d.stderr",attempts); path(p,name); if(cx_write(p,r.err?r.err:"",r.errn)) die("stderr evidence");
+        pr_echo(&r);
+        int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc);
+        int retry=(t && r.timed_out)||(!t && (r.rc==-9 || r.rc==-15 || r.rc==124 || r.rc==137 || r.rc==143));
+        int residue=r.residue; pr_free(&r);
+        cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\n",attempts,phase,rc,residue); append("chain-run.tsv",row);
+        if(residue) return blocker(phase,"surviving-processes",2);
+        if(!rc) return 0;
+        if(!retry) return blocker(phase,"first-failure",rc);
+        if(sy_now_ms()>=end_ms) return blocker(phase,"deadline",3);
+        if(resumes>=max_resumes) return blocker(phase,"resumes-exhausted",3);
+        int observed=observe(); if(observed) return observed;
+        resumes++; save();
+        cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tphase=%s\trc=%d\n",sy_wall_s(),resumes,phase,rc); append("chain-run.tsv",row);
+        /* A kill can race the phase receipt: never ask --until for a target it will skip. */
+        if(done(phase)) return 0;
+    }
+}
+static long number(const char *s) { char *e=0; long n=strtol(s,&e,10); if(!*s||*e||n<1||n>10000000) die("invalid positive limit"); return n; }
+int main(int argc,char **argv) {
+    const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0;
+    int rehearse=0, extra=argc, i; long seconds=5400;
+    for(i=1;i<argc;i++) {
+        if(!strcmp(argv[i],"--")) { extra=i+1; break; }
+        if(!strcmp(argv[i],"--rehearse")) { rehearse=1; continue; }
+        if(i+1>=argc) die("missing value");
+        const char *a=argv[i],*b=argv[++i];
+        if(!strcmp(a,"--rev")) rev=b;
+        else if(!strcmp(a,"--out")) out=b;
+        else if(!strcmp(a,"--candidate")) candidate=b;
+        else if(!strcmp(a,"--watch")) watch=b;
+        else if(!strcmp(a,"--deadline-s")) seconds=number(b);
+        else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
+        else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
+        else if(!strcmp(a,"--rehearse-ctor")) ctor=b;
+        else if(!strcmp(a,"--rehearse-objects")) objs=b;
+        else if(!strcmp(a,"--rehearse-pkg")) pkg=b;
+        else die("unknown option");
+    }
+    if(!rev||strlen(rev)!=40||!out||out[0]!='/') die("--rev HEX40 --out ABS required");
+    for(i=0;i<40;i++) if(!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex");
+    if(rehearse&&(!ctor||!objs||!pkg)) die("rehearse requires explicit prepared ctor, objects and pkg");
+    if(rehearse) {
+        sy_stat_t st;
+        if(ctor[0]!='/'||sy_stat(ctor,&st)||st.size<=0) die("rehearse ctor missing or not absolute");
+        if(objs[0]!='/'||sy_stat(objs,&st)||st.kind!='d') die("rehearse objects missing or not absolute");
+        if(pkg[0]!='/'||sy_stat(pkg,&st)||st.size<=0) die("rehearse pkg missing or not absolute");
+    }
+    for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")) die("reserved candidate option");
+    sy_mkdir(out,0755);
+    char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
+    if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");
+    char identity[16000],p[4400];
+    int used=snprintf(identity,sizeof identity,"rev=%s\nmode=%s\ncandidate=%s\nctor=%s\nobjects=%s\npkg=%s\n",rev,rehearse?"rehearse":"full",candidate?candidate:"source",ctor?ctor:"-",objs?objs:"-",pkg?pkg:"-");
+    if(used<0||(size_t)used>=sizeof identity) die("identity bound");
+    char root_id[4400],plan_hash[65]; size_t plan_n=0;
+    if(sy_realpath(".",root_id,sizeof root_id)<0) die("root identity");
+    char *plan_bytes=cx_read("build/chain-phases.tsv",&plan_n);
+    if(!plan_bytes||sy_sha256_hex(plan_bytes,(long)plan_n,plan_hash)) die("plan identity"); free(plan_bytes);
+    int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan=%s\ndeadline-s=%ld\nwatch=%s\n",root_id,plan_hash,seconds,watch?watch:"source");
+    if(bind<0||(size_t)bind>=sizeof identity-used) die("identity bound"); used+=bind;
+    for(i=extra;i<argc;i++) { int n=snprintf(identity+used,sizeof identity-used,"arg=%s\n",argv[i]); if(n<0||(size_t)n>=sizeof identity-used) die("identity bound"); used+=n; }
+    path(p,"chain-run.identity"); size_t n=0; char *old=cx_read(p,&n);
+    if(old) { if(n!=(size_t)used||memcmp(old,identity,n)) die("output identity mismatch"); free(old); }
+    else {
+        path(p,"checkpoint.tsv"); old=cx_read(p,&n);
+        if(old && done("pack")) { free(old); return blocker("pack","unowned-existing-pack",2); } free(old);
+        path(p,"chain-run.identity"); if(cx_write(p,identity,used)) die("identity write");
+    }
+    path(p,"chain-run.budget"); old=cx_read(p,&n);
+    if(old) { int ma,mr; if(sscanf(old,"%ld %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr)!=5||ma!=max_attempts||mr!=max_resumes||attempts<0||resumes<0) die("budget mismatch"); free(old); }
+    else { end_ms=sy_now_ms()+seconds*1000; save(); }
+    int wi=0;
+    if(watch) watch_argv[wi++]=(char*)watch;
+    else { watch_argv[wi++]="sh"; watch_argv[wi++]="./unisacc.com"; watch_argv[wi++]="tools/chain-watch.cx"; watch_argv[wi++]="--"; }
+    watch_argv[wi++]=(char*)out; watch_argv[wi]=0;
+    if(heartbeat_live()) return blocker("heartbeat","live-owner",2);
+    char native_watch[4400],native_candidate[4400]; int prep_rc;
+    if(!watch) {
+        path(native_watch,"chain-run-watch");
+        char *prepare[]={"sh","./unisacc.com","tools/chain-watch.cx","-o",native_watch,0};
+        if((prep_rc=run("prepare-watch",prepare,0))) return prep_rc;
+        watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0;
+    }
+    if(!candidate&&!done("pack")) {
+        path(native_candidate,"chain-run-candidate");
+        char *prepare[]={"sh","./unisacc.com","tools/candidate-chain.cx","-o",native_candidate,0};
+        if((prep_rc=run("prepare-candidate",prepare,0))) return prep_rc;
+        candidate=native_candidate;
+    }
+    char *v[96]; int k=0;
+    if(candidate) v[k++]=(char*)candidate;
+    else { v[k++]="sh"; v[k++]="./unisacc.com"; v[k++]="tools/candidate-chain.cx"; v[k++]="--"; }
+    v[k++]="--rev"; v[k++]=(char*)rev; v[k++]="--out"; v[k++]=(char*)out; v[k++]="--resume";
+    if(heartbeat_live()) return blocker("heartbeat","live-owner",2);
+    for(i=extra;i<argc;i++) { if(k>=90) die("argument bound"); v[k++]=argv[i]; }
+    v[k++]="--until"; int target=k++; v[k]=0;
+    FILE *table=fopen("build/chain-phases.tsv","rb"); if(!table) die("phase table");
+    char line[5000],phase[256]; int count=0,pack=0,rc=0;
+    while(fgets(line,sizeof line,table)) {
+        if(line[0]=='#') continue;
+        int order,bound; char domain[4400];
+        if(sscanf(line,"%d\t%255s\t%4399s\t%d",&order,phase,domain,&bound)!=4||order!=count++||bound!=55) die("phase table invalid");
+        if(rehearse&&strcmp(phase,"snap")&&strcmp(phase,"build")&&strcmp(phase,"ctx")) continue;
+        /* G2 obj-N are legacy explicit --until boundaries, not normal scheduler work.
+           The following closure-prepare/closure/objects/link targets keep --objects batched. */
+        if(!strncmp(phase,"g2-lnx-x86_64-obj-",18)||!strncmp(phase,"g2-lnx-arm64-obj-",17)) continue;
+        /* Existing checkpoints are consumed without calling --until on an already skipped target. */
+        if(!done(phase)) { v[target]=phase; rc=run(phase,v,0); if(rc) break; }
+        if(!done(phase)) { rc=blocker(phase,"missing-checkpoint",2); break; }
+        if(!strcmp(phase,"pack")) { pack=1; break; }
+        if(rehearse&&!strcmp(phase,"ctx")) break;
+    }
+    fclose(table); if(rc) return rc;
+    if(rehearse) {
+        char snap[4400],prep[4400],front[4400],helper[4400],com[4400],tool[4400],tmpl[4400];
+        char root[4400]; if(sy_realpath(".",root,sizeof root)<0) die("root");
+        if(cx_fmt(snap,sizeof snap,"%s/out/release-snap-%.10s",root,rev)||cx_fmt(com,sizeof com,"%s/unisacc.com",root)||cx_fmt(tool,sizeof tool,"%s/tools/whole-front.cx",root)||cx_fmt(tmpl,sizeof tmpl,"%s/tools/templates/whole-front.cx.in",root)) die("rehearse path");
+        path(helper,"ctx/identity-helper");
+        if(sy_setenv("UNISACC_IDENTITY_HELPER",helper,1)||sy_chdir(snap)) die("rehearse frozen root/helper");
+        char *a[]={"sh",com,tool,"--","prepare",snap,(char*)pkg,(char*)ctor,(char*)objs,prep,"--template",tmpl,0};
+        rc=run("rehearse-wf-prepare",a,prep); if(sy_chdir(root)) die("restore root"); if(rc) return rc;
+        char *b[]={"sh",com,tool,"--","front",prep,"osx/x86_64",front,"0","32",0};
+        if((rc=run("rehearse-front0",b,front))) return rc;
+        append("chain-run.tsv","REHEARSED\tpreparatory-only\tnot=FULL\tnot=PASS\n"); sy_printf("CHAIN_RUN\tREHEARSED\tnot=FULL\tnot=PASS\n"); return 0;
+    }
+    if(!pack) return blocker("pack","absent-final-phase",2);
+    if(!verify_pack()) return blocker("pack","missing-or-corrupt-pack-receipt",2);
+    /* chain-watch is observational only; its loose DONE match is not completion authority. */
+    if((rc=observe())) return rc;
+    append("chain-run.tsv","PREPARED\tpack\tnot=PASS\n"); sy_printf("CHAIN_RUN\tPREPARED\tnot=PASS\n");
+    sy_close(lockfd); return 0;
+}

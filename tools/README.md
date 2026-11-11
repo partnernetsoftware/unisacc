@@ -1369,3 +1369,32 @@ wholefrontmerge	IMPLEMENTED	interfaces	tools/check-wholefrontmerge.cx	SOURCE	lnx
 interfaces.wholefrontmerge	interfaces	IMPLEMENTED_SEPARATE_BATCH	多属性全局单位编号、顺序与opaque字节；非相邻重复具名拒绝无输出；零单位双空属性编码精确phase；模块检查，非产品资格	tools/check-wholefrontmerge.cx + tools/cxlib/wholefrontmerge.cx
 ```
 
+
+## 0.0.57：chain-run 有界全链编排
+
+`sh ./unisacc.com tools/chain-run.cx -- --rev HEX40 --out ABS -- --cache-manager-osx X64 ARM64`
+按 `build/chain-phases.tsv` 的实际顺序驱动 `candidate-chain --resume --until PHASE`。
+G2兼容逐键obj-N是外部显式until边界，正常编排跳过，保留实际closure-prepare/closure/objects/link批量相。
+每个子调用至多55秒，总deadline默认5400秒，最多3次异常续跑、4096次相位尝试；
+`--deadline-s`、`--max-resumes`、`--max-attempts` 可显式给定，预算写入OUT，重新启动不会刷新。
+这是一条带总预算的编排命令，不是把单个子命令时限放宽；外层调用者须允许编排总预算，不能误用60秒外界认证整链。
+只有超时124、被杀137/143或实际SIGKILL/SIGTERM可自动续跑；其余首败立即写 `BLOCKER` 到
+`OUT/chain-run.tsv` 并返回原失败码，不自动绕行。deadline或次数耗尽返回3。
+每次尝试保留argv/stdout/stderr，续跑单独记行；`chain-watch` 只观察现场，活心跳owner拒绝接管，
+不以其单独的DONE认定成功。身份文件绑定冻结根、revision、相表与参数；不接纳未绑定的既有pack；
+完成还要核 `ape-final/ape-receipt.txt` 对 `unisacc-next.com` 的SHA与字节数，只记PREPARED/not=PASS。
+非pack检查点可沿既有candidate-chain合同复用；不要跨冻结根或revision搬检查点，复用不迁移资格结论。
+`--candidate ABS_EXEC`、`--watch ABS_EXEC` 可指定同argv协议的已编译原生工具（夹具也使用这个接口）；
+默认先在独立55秒界内把本根watch/candidate编译为本次原生工具，再驱动相位，避免每相支付candidate冷编。
+`--` 后仅传candidate普通选项，不允许覆盖rev/out/until/plan/jobs；准备步骤同样计入总deadline与尝试上限。
+正规build/ctx等相的真实55秒余量未经整链测量；超限只可在上述总次数内续跑或耗尽BLOCKER，不放宽、不无限推进。
+
+预演显式使用已有材料：加 `--rehearse --rehearse-ctor ABS --rehearse-objects ABS --rehearse-pkg ABS`。
+只跑snap/build/ctx，再用上述材料跑whole-front prepare及osx/x86_64 front0一片；缺材料具名拒绝，
+绝不为预演暗跑jobs/p3/gen1。预演输出与全链OUT必须分开，且只记REHEARSED/not=FULL/not=PASS。
+prepare/front0每次尝试使用独占新目录，超时残留保留以便诊断，不清理或复用半成品。
+耗时回写K8另属owner，本工具不生成phase-times。
+
+轻检查：`sh ./unisacc.com tools/check-chain-run.cx`，仅含兼容边界的微型假链，不跑真实构造；
+保留 `out/check-chain-run-*` 的证据。真实整链、真实预演、端到端速度和产品资格仍UNMEASURED。
+
