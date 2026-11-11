@@ -10,6 +10,11 @@
  * 报告写 s9-nightly-DATE-TIER-resume.md,不覆盖首跑报告;日志首行为 resume。
  * --date 缺省取当日(sy_wall_s + sy_local_fmt);--max-steps 缺省 4。每步记墙钟毫秒;日志超 8000 字节截断标 TRUNCATED。
  *
+ * 子阶段(0.0.57,每次调用独立有界、可重复,调用方循环到非 PENDING):
+ *   ROOT RUN --tier T --phase init                 build/init/prepare,退出 0 status=PREPARED
+ *   ROOT --resume RUN --phase steps [--max-steps N] 默认 1 步、每步 240s;仍有新片退出 3 status=PENDING,走完退出 0 STEPS_DONE
+ *   ROOT --resume RUN --phase aggregate [--agg-parts N]  retry UNKNOWN 片,再 N(默认 4)片 aggregate --part K N(已有片记录跳过)+ --merge N
+ * 缺省 --phase all 行为不变(含单次整体 aggregate;--agg-parts N 可在 all 里改用分片)。
  * 顺序: s9-native build -> init --tier T -> prepare checker, executor-all-waves,
  * executor-run-batch, executor, driver, selection -> step 直到非 PENDING -> aggregate。
  * --fake 用 SCRIPT 代替 s9-native/driver,供夹具验证顺序/超时/失败停止。
@@ -145,8 +150,9 @@ static void write_report(const char *path, const char *status) {
 
 int main(int argc, char **argv) {
     const char *run = 0, *tier = "commit", *date = 0;
-    int resume = 0;
+    int resume = 0, phase = 0, agg_parts = 0, max_set = 0, step_set = 0; /* phase: 0 all, 1 init, 2 steps, 3 aggregate */
     char report[4400], tmp[4000], datebuf[32];
+    static const char *const sfxs[] = {"", "-init", "-steps", "-aggregate"};
     int i, rc, steps, max_steps = 4, step_s = 290, step_done = 0;
     static const char *preps[] = {"checker", "executor-all-waves", "executor-run-batch", "executor", "driver", "selection"};
     if (argc < 3) die("usage", "ROOT RUN --tier commit|daily|release [--date D] [--fake SCRIPT]");
@@ -162,10 +168,28 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--tier") && i + 1 < argc) tier = argv[++i];
         else if (!strcmp(argv[i], "--date") && i + 1 < argc) date = argv[++i];
         else if (!strcmp(argv[i], "--fake") && i + 1 < argc) fake = argv[++i];
-        else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) step_s = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) max_steps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--step-s") && i + 1 < argc) { step_s = atoi(argv[++i]); step_set = 1; }
+        else if (!strcmp(argv[i], "--max-steps") && i + 1 < argc) { max_steps = atoi(argv[++i]); max_set = 1; }
+        else if (!strcmp(argv[i], "--agg-parts") && i + 1 < argc) agg_parts = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--phase") && i + 1 < argc) {
+            const char *ph = argv[++i];
+            if (!strcmp(ph, "all")) phase = 0;
+            else if (!strcmp(ph, "init")) phase = 1;
+            else if (!strcmp(ph, "steps")) phase = 2;
+            else if (!strcmp(ph, "aggregate")) phase = 3;
+            else die("phase", ph);
+        }
         else die("unknown", argv[i]);
     }
+    /* 子阶段(0.0.57,0.0.56 起跑 455s 超 5 分钟铁律):init 只做 build/init/prepare;steps 默认只走 1 步且每步 240s;
+     * aggregate 默认分 4 片(s9-shards aggregate --part K N)再 --merge,每次调用都在 55s 内。steps/aggregate 沿用已 init 的 RUN,须配 --resume。
+     * 每个子阶段都可重复执行(已存在的片记录跳过),调用方循环到非 PENDING 即可。 */
+    if (phase == 1 && resume) die("phase", "init takes RUN, not --resume");
+    if ((phase == 2 || phase == 3) && !resume) die("phase", "steps|aggregate need --resume RUN");
+    if (phase == 2 && !max_set) max_steps = 1;
+    if (phase == 2 && !step_set) step_s = 240;
+    if (phase == 3 && !agg_parts) agg_parts = 4;
+    if (agg_parts < 0 || agg_parts > 64) die("agg-parts", "need 0..64");
     if (max_steps < 1) die("max-steps", "need >= 1");
     if (strcmp(tier, "commit") && strcmp(tier, "daily") && strcmp(tier, "release")) die("tier", tier);
     if (!date) {
@@ -173,7 +197,7 @@ int main(int argc, char **argv) {
         if (ws <= 86400 || sy_local_fmt(datebuf, sizeof datebuf, "%Y-%m-%d", ws) != 10) die("date", "wall clock unusable; pass --date");
         date = datebuf;
     }
-    if (cx_fmt(report, sizeof report, "%s/%s/s9-nightly-%s-%s%s.md", root, "out", date, tier, resume ? "-resume" : "")) die("report", 0);
+    if (cx_fmt(report, sizeof report, "%s/%s/s9-nightly-%s-%s%s.md", root, "out", date, tier, phase ? sfxs[phase] : resume ? "-resume" : "")) die("report", 0);
     if (resume) {
         char sess[4400];
         if (cx_fmt(sess, sizeof sess, "%s/session.tsv", run) || sy_exists(sess) != 1) die("resume-no-session", run);
@@ -199,7 +223,13 @@ int main(int argc, char **argv) {
         if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=prepare-%s\trc=%d\treport=%s\n", preps[i], rc, report); return 1; }
         pass_n++;
     }
+    if (phase == 1) {
+        write_report(report, "PREPARED");
+        printf("S9_NIGHTLY\tstatus=PREPARED\tpass=%d\tfail=%d\tnot_executed=%d\treport=%s\n", pass_n, fail_n, notexec_n, report);
+        return 0;
     }
+    }
+    if (phase != 3)
     for (steps = 0; steps < max_steps; steps++) {
         int starts, dones, nu, finished = 0;
         step_s_cur = step_s;
@@ -219,8 +249,19 @@ int main(int argc, char **argv) {
         if (!has_wt(tmp)) finished = 1;
         pass_n++;
         if (finished) { step_done = 1; break; }
+        if (steps == max_steps - 1 && phase == 2) {
+            /* 子阶段 steps:本轮预算用完仍有新片,不是失败;退出码 3 = PENDING,调用方重复本阶段(单步 <= step-s+5 秒) */
+            write_report(report, "PENDING");
+            printf("S9_NIGHTLY\tstatus=PENDING\tstep=steps\treport=%s\n", report);
+            return 3;
+        }
         if (steps == max_steps - 1) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=step-pending\treport=%s\n", report); return 1; }
         (void)nu;
+    }
+    if (phase == 2) {
+        write_report(report, "STEPS_DONE");
+        printf("S9_NIGHTLY\tstatus=STEPS_DONE\tpass=%d\tfail=%d\tnot_executed=%d\treport=%s\n", pass_n, fail_n, notexec_n, report);
+        return 0;
     }
     /* 有 start 无 done 的片(UNKNOWN):每片调 retry 一次,再 aggregate;结果由 aggregate 定 */
     {
@@ -231,8 +272,30 @@ int main(int argc, char **argv) {
         }
     }
     (void)step_done;
+    if (agg_parts > 0) {
+        /* 分片聚合:每片一次独立调用(<=55s);已有片记录的跳过(可续跑);全部就绪后 --merge 出唯一结论 */
+        char ks[16], ns[16], pn[4400], leaf[64];
+        int k;
+        cx_fmt(ns, sizeof ns, "%d", agg_parts);
+        xa4 = ks;
+        xa5 = ns;
+        for (k = 0; k < agg_parts; k++) {
+            cx_fmt(ks, sizeof ks, "%d", k);
+            if (cx_fmt(leaf, sizeof leaf, "agg-part-%d-%d", k, agg_parts) || cx_fmt(pn, sizeof pn, "%s/%s", run, leaf)) die("part-path", 0);
+            if (sy_exists(pn) == 1) { note("aggregate-part-reused"); continue; }
+            rc = invoke("aggregate", root, run, "--part", 55, tmp, sizeof tmp);
+            note("aggregate-part");
+            if (rc != 0) { xa4 = xa5 = 0; fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate-part-%d\trc=%d\treport=%s\n", k, rc, report); return 1; }
+        }
+        xa4 = ns;
+        xa5 = 0;
+        rc = invoke("aggregate", root, run, "--merge", 55, tmp, sizeof tmp);
+        xa4 = xa5 = 0;
+        note("aggregate-merge");
+    } else {
     rc = invoke("aggregate", root, run, 0, 55, tmp, sizeof tmp);
     note("aggregate");
+    }
     if (rc != 0) { fail_n++; write_report(report, "FAIL"); printf("S9_NIGHTLY\tstatus=FAIL\tstep=aggregate\trc=%d\treport=%s\n", rc, report); return 1; }
     pass_n++;
     notexec_n = 0;

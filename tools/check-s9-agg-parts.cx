@@ -1,0 +1,88 @@
+/* tools/check-s9-agg-parts.cx -- s9-shards 分片聚合(aggregate --part K N / --merge N)的参数合同。
+ *
+ *   sh ./unisacc.com tools/check-s9-agg-parts.cx
+ *
+ * 编译真实 tools/s9-shards.cx,逐条喂畸形分片参数:必须按名拒绝(退出 2,stderr 含
+ * "aggregate [--part K N | --merge N]"),且在打开任何会话之前拒绝(用不存在的 RUN 也拿到同一条拒绝,
+ * 而不是 setup 的别的拒绝)。合法形状的参数(--part 0 4、--merge 4)对不存在的 RUN 必须被 setup 拒绝,
+ * 拒绝文本不是分片参数那一条,证明合法形状没被参数门误拦。
+ * 分片与合并的正向等价性(4 片 + merge 对 0.0.56 的 143 批证据给出与整体 aggregate 相同的 FAIL=2 结论)
+ * 需要完整 s9 运行目录,不在本检查内;本检查不产出任何 PASS 资格。 */
+#pragma unisa use cxlib.allsession
+#pragma unisa use cxlib.netpack
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+
+static int failures;
+static char why[512];
+static void die(const char *s) { fprintf(stderr, "check-s9-agg-parts: %s %s\n", s, why); exit(2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-s9-agg-parts.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failures++;
+}
+static const char *MSG = "aggregate [--part K N | --merge N]";
+
+/* 以 ARGS 调 bin aggregate ROOT RUN ...;返回退出码,stderr 是否含 MSG 写入 *named */
+static int try_agg(const char *bin, const char *root, const char *run, char **extra, int ne, int *named) {
+    char *v[16];
+    int k = 0, rc;
+    np_result r = {0};
+    v[k++] = (char *)bin; v[k++] = "aggregate"; v[k++] = (char *)root; v[k++] = (char *)run;
+    for (int i = 0; i < ne; i++) v[k++] = extra[i];
+    v[k] = 0;
+    if (np_run(v, root, 0, 20, &r, why, sizeof why)) die("transport");
+    rc = r.rc;
+    *named = r.err && r.errn && strstr(r.err, MSG) != 0;
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char root[4096], dir[4400], bin[4400], src[4400], com[4400], run[4400], dl[80], buf[2000];
+    np_result r = {0};
+    int named, rc;
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (cx_fmt(dir, sizeof dir, "%s/s9ap-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) die("tmpdir");
+    if (cx_fmt(bin, sizeof bin, "%s/s9-shards.bin", dir) || cx_fmt(src, sizeof src, "%s/tools/s9-shards.cx", root) ||
+        cx_fmt(com, sizeof com, "%s/%s", root, "unisacc" ".com") || cx_fmt(run, sizeof run, "%s/no-such-run", dir)) die("fmt");
+    {
+        char *b[] = {"sh", com, src, "-o", bin, 0};
+        if (np_run(b, root, 0, 45, &r, why, sizeof why)) die("compile-transport");
+        ck(r.rc == 0, "compile-s9-shards");
+        if (r.rc) { np_free(&r); printf("CHECK_S9_AGG_PARTS\tfailed=%d\n", failures); return 1; }
+        np_free(&r);
+    }
+    if (cx_fmt(dl, sizeof dl, "%.9f", (double)as_now() / 1e9 + 50) || setenv("UNISACC_BOUND_DEADLINE_MONO", dl, 1)) die("deadline-env");
+    {
+        char *a1[] = {"--part", "4", "4"};
+        char *a2[] = {"--part", "0", "65"};
+        char *a3[] = {"--part", "0", "0"};
+        char *a4[] = {"--merge", "0"};
+        char *a5[] = {"--merge", "x"};
+        char *a6[] = {"--part", "0", "4", "extra"};
+        char *a7[] = {"--bogus"};
+        char *a8[] = {"--merge", "65"};
+        char *a9[] = {"--part", "01", "4"};
+        rc = try_agg(bin, root, run, a1, 3, &named); ck(rc == 2 && named, "refuse-part-index-not-below-count");
+        rc = try_agg(bin, root, run, a2, 3, &named); ck(rc == 2 && named, "refuse-part-count-over-64");
+        rc = try_agg(bin, root, run, a3, 3, &named); ck(rc == 2 && named, "refuse-part-count-zero");
+        rc = try_agg(bin, root, run, a4, 2, &named); ck(rc == 2 && named, "refuse-merge-zero");
+        rc = try_agg(bin, root, run, a5, 2, &named); ck(rc == 2 && named, "refuse-merge-not-number");
+        rc = try_agg(bin, root, run, a6, 4, &named); ck(rc == 2 && named, "refuse-part-extra-arg");
+        rc = try_agg(bin, root, run, a7, 1, &named); ck(rc == 2 && named, "refuse-unknown-flag");
+        rc = try_agg(bin, root, run, a8, 2, &named); ck(rc == 2 && named, "refuse-merge-over-64");
+        rc = try_agg(bin, root, run, a9, 3, &named); ck(rc == 2 && named, "refuse-part-leading-zero");
+    }
+    {
+        char *g1[] = {"--part", "0", "4"};
+        char *g2[] = {"--merge", "4"};
+        rc = try_agg(bin, root, run, g1, 3, &named); ck(rc == 2 && !named, "valid-part-shape-passes-arg-gate");
+        rc = try_agg(bin, root, run, g2, 2, &named); ck(rc == 2 && !named, "valid-merge-shape-passes-arg-gate");
+    }
+    (void)buf;
+    printf("CHECK_S9_AGG_PARTS\tfailed=%d\n", failures);
+    return failures ? 1 : 0;
+}

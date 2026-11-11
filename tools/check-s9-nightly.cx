@@ -30,8 +30,8 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
 /* 模式: core(顺序/失败停止/档位) | tiers(daily/release 档透传) | limits(max-steps/日期/截断/出口/UNKNOWN) | resume | resume(--resume 4 项);无参两者都跑。各自一个批次,合并在 affected 冷编下超 55s。 */
 int main(int argc, char **argv) {
     const char *am = argc == 2 ? argv[1] : "";
-    int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume");
-    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res)) { fprintf(stderr, "usage: [core|resume]\n"); return 2; }
+    int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume"), ph = !*am || !strcmp(am, "phases");
+    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res && !ph)) { fprintf(stderr, "usage: [core|resume]\n"); return 2; }
     char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
     char *v[16];
     int rc;
@@ -263,6 +263,55 @@ int main(int argc, char **argv) {
         free(s);
         s = cx_read(rep, &n);
         ck(s && strstr(s, "status\tPASS") && strstr(s, "resume\t"), "resume-report-separate-file-marked");
+        free(s);
+    }
+    /* 子阶段 init|steps|aggregate(0.0.57):每次调用独立有界、可重复;steps 默认单步,PENDING=3;aggregate 分 4 片再 merge,已有片记录跳过 */
+    if (ph) {
+        char *w[20];
+        char *rmx[] = {"rm", "-f", logp, 0};
+        char sess[4400], part1[4400], rep[4400];
+        size_t n; char *s;
+        cx_fmt(sess, sizeof sess, "%s/session.tsv", runp);
+        cx_fmt(part1, sizeof part1, "%s/agg-part-1-4", runp);
+        cx_fmt(rep, sizeof rep, "%s/%s/s9-nightly-2026-11-14-commit-steps.md", dir, "out");
+        /* init: RUN 位置参数,只 build/init/prepare */
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = runp; w[6] = "--tier"; w[7] = "commit";
+        w[8] = "--date"; w[9] = "2026-11-14"; w[10] = "--phase"; w[11] = "init"; w[12] = "--fake"; w[13] = fake; w[14] = 0;
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        s = cx_read(logp, &n);
+        ck(rc == 0 && strstr(buf, "status=PREPARED"), "phase-init-prepared");
+        ck(s && strstr(s, "build") && strstr(s, "init") && strstr(s, "prepare") && !strstr(s, "step") && !strstr(s, "aggregate"), "phase-init-only-prepares");
+        free(s);
+        /* 拒绝:steps 不带 --resume;init 带 --resume */
+        w[11] = "steps";
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        ck(rc == 2, "phase-steps-needs-resume");
+        if (cx_write(sess, "resume\n", 7)) die("session-write");
+        /* steps:第 1 次 PENDING(3),第 2 次 STEPS_DONE(0);各只走一步;都不碰 aggregate */
+        w[5] = "--resume"; w[4] = dir; w[6] = runp; w[7] = "--tier"; w[8] = "commit"; w[9] = "--date"; w[10] = "2026-11-14";
+        w[11] = "--phase"; w[12] = "steps"; w[13] = "--fake"; w[14] = fake; w[15] = 0;
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        ck(rc == 3 && strstr(buf, "status=PENDING"), "phase-steps-first-pending");
+        s = cx_read(logp, &n);
+        { int c = 0; if (s) for (size_t q = 0; q + 4 < n; q++) if (!strncmp(s + q, "step", 4)) c++;
+          ck(c == 1 && !strstr(s, "aggregate"), "phase-steps-one-step-per-call"); }
+        free(s);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        ck(rc == 0 && strstr(buf, "status=STEPS_DONE"), "phase-steps-done");
+        s = cx_read(rep, &n);
+        ck(s && strstr(s, "status\tSTEPS_DONE"), "phase-steps-report-own-file");
+        free(s);
+        /* aggregate: 4 片 + merge;预先放好 1 号片记录则跳过它 */
+        if (cx_write(part1, "x\n", 2)) die("part-write");
+        w[12] = "aggregate";
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        s = cx_read(logp, &n);
+        ck(rc == 0 && strstr(buf, "status=PASS"), "phase-aggregate-pass");
+        ck(s && strstr(s, "aggregate --part 0 4") && strstr(s, "aggregate --part 2 4") && strstr(s, "aggregate --part 3 4") && strstr(s, "aggregate --merge 4"), "phase-aggregate-parts-then-merge");
+        ck(s && !strstr(s, "--part 1 4") && !strstr(s, "step"), "phase-aggregate-reuses-existing-part");
         free(s);
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");

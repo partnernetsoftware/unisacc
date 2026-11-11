@@ -6,6 +6,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.toolprep
 
 static int failed;
 static char why[512];
@@ -74,7 +75,25 @@ int main(int argc, char **argv) {
         rc = runv(g4, dir, 20, buf, sizeof buf);
         ck(rc == 0, "clone");
         runv(cp2, dir, 10, buf, sizeof buf);
-        rc = runv(b1, root, 30, buf, sizeof buf);
+        /* 冷编译是耗时主因(单跑 22s 中约 20s;s9 并行负载下超 55s,0.0.56 提交档两批 FAIL)。
+         * 夜跑入口与克隆内 s9-nightly 两个编译与假 s9 编译互不依赖:并行预热后一并等待,墙钟取最长者而非三者之和。
+         * 预热结果不读;入口仍自己运行并判定,预热失败只损失省下的时间。 */
+        if (pass || fm) {
+            char ctool[4400];
+            /* 与真跑同形的命令(无参数,工具立即报用法退出),使运行缓存持有编译;-o 预热不进运行缓存 */
+            char *w1[] = {"sh", com, tool, "--", 0};
+            char clcom[4400];
+            /* 运行缓存也按工作目录分键(实测):克隆内夜跑的 cwd 是克隆,预热同样先 cd 进克隆 */
+            char *w2[] = {"sh", "-c", "cd \"$0\" && exec \"$@\"", cl, "sh", clcom, ctool, "--", 0};
+            int p1, p2;
+            /* 运行缓存按产品路径分键:克隆内的夜跑用克隆自己的 unisacc.com,预热须同路径 */
+            if (cx_fmt(ctool, sizeof ctool, "%s/tools/s9-nightly.cx", cl) || cx_fmt(clcom, sizeof clcom, "%s/%s", cl, "unisacc" ".com")) die("fmt");
+            p1 = tq_warm_start(root, 40, w1);
+            p2 = tq_warm_start(root, 40, w2);
+            rc = runv(b1, root, 30, buf, sizeof buf);
+            tq_warm_join(p1);
+            tq_warm_join(p2);
+        } else rc = runv(b1, root, 30, buf, sizeof buf);
         ck(rc == 0, "fake-compile");
     }
     setenv("S9_FAKE_LOG", logp, 1);
