@@ -483,7 +483,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 **当前版本：0.0.54，主题「梳理与提速」**（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`）：
 - 梳理：prd 系列（本文、[prd_cx.md](prd_cx.md)、prd_hist.md、glossary）以 §3 为唯一结构定义。
 - 提速：每层 / 每流 / 每网的运行速度与开发回路（构造链相位、s9、集成门、单流测试、增量网构造、冷编）。基线数字全在 §3，线索在 §9.5。产品输入改动至多一类。
-- 不做：cx 流网的设计实现（CX0 进表变网、20 个骨架网落行为、CX0 成为第 8 个模型流）归 **0.0.55**，范围与验收见 prd_cx.md §6。
+- 不做：cx 流网的设计实现（CX0 进表变网、20 个骨架网落行为、CX0 成为第 8 个模型流）顺延 **0.0.56/0.0.57**（原定 0.0.55，VER055-SPEED 改判），范围与验收见 prd_cx.md §6/§8。
 - 计划文件 `plans/v0.0.54-unisacc.md` 尚未建；任务以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准。
 
 三个最大阻塞（2026-11-11）：
@@ -590,7 +590,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 |---|---|---|
 | 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
 | 当前发布 | 0.0.53（§9.1）；旧候选资格不迁移 | [0.0.53 发布说明](plans/release-notes-0.0.53.md)、[prd_release.md](prd_release.md) |
-| 当前版本 | 0.0.54「梳理与提速」；0.0.55 为 cx 流网 | §9.1、§9.5、[prd_cx.md](prd_cx.md) §6、`agentwork/items.tsv` |
+| 当前版本 | 0.0.54「梳理与提速」；0.0.55 为提速，cx 流网 0.0.56/0.0.57 | §9.1、§9.5、[prd_cx.md](prd_cx.md) §6、`agentwork/items.tsv` |
 | 结构总表 | 五层、六片、7 + 1 流、网四口径、执行器、格式、事实表、构造链、测试 | §3（唯一权威）；cx 侧在 [prd_cx.md](prd_cx.md) |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 + 1 流；18 金表网 / 20 cx 侧模块 / 42 构造网 / 40 模型 | §0、§3.3、§3.4 |
@@ -611,7 +611,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 ### 9.4 路线
 - **0.0.43 – 0.0.53**：已收口并发布（计划 `plans/v0.0.4x*.md`、`v0.0.5x-unisacc.md`，发布说明 `plans/release-notes-*.md`）；agent harness（cx-csih）仍归 csih 车道。
 - **0.0.54**：梳理与提速（§9.1、§9.5）。
-- **0.0.55**：cx 流网设计与实现（prd_cx.md §6）；0.0.53 计划里的模型层 M1-M4 以 cx 侧骨架网为落点，一并在此版裁定。
+- **0.0.55**：提速（VER055-SPEED 改判，见 9.7）；cx 流网设计与实现顺延 0.0.56/0.0.57（prd_cx.md §6/§8）；模型层 M1-M4 以 cx 侧骨架网为落点，随 0.0.57 裁定。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）；gcc_cx / clang_cx 宿主现状见 prd_cx.md 开篇。
 
 <a id="optimization-leads"></a>
@@ -627,6 +627,17 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 | 集成门 | 81-95 s / 补丁（0.0.48 数据，§3.8） | 棘轮按路径增量、native 工具缓存；重测基线 |
 | 单流测试回路 | `check-stages` 10.7 s 且红 13 项（§3.3） | 先修红，再做「改表 -> p3-swap -> 单流 golden」一条命令 |
 | L0 / APE 体积 | 头 42.2% 未压缩、padding 7.1%（§3.0） | 属产品输入大改，不进 0.0.54 |
+
+### 9.7 未来计划（路线与入口；细节见各版 plans 文件，数字未标出处者为估计）
+
+- **0.0.55 提速**：开发回路根治 D1-D8、P1 产品内单元前端缓存（本版唯一产品输入大改）、T3 增量网接链与相位表、一条命令发布；从 0.0.56 前移两项不触产品输入的提速工具：`unisacc-loader.com` 外置加载器（按带 sha 清单加载外置片与 NN 模型，改表或重编单片不重打 APE 即实测）与按目标独立可执行 `unisacc-{lnx,osx,win}64-{x86,arm}[.exe]`（量化 L0 启动器开销），均在可砍线上。详见 `plans/v0.0.55-unisacc.md`（由提速计划落成，尚未生成）。
+- **0.0.56**：cx 规划器单源与实例化、cx-tri 三宿主一致性门（prd_cx.md §8 B2 55-1..55-3）；交叉编译结构调查（用户程序出码是否链入预编原生对象、nativeabi/symbols 模型作用、e3 类型网是否按目标区分，结论写回 §3）；目标可外部扩展的设计（目标枚举与路由数据驱动，外部包按 manifest 追加模型、路由、预定义、头文件，与 prd_cx.md B3-B5 外置分层合并）；承接 0.0.55 外置加载器作为 L0 booter 原型。详见 `plans/v0.0.56-unisacc.md`。
+- **0.0.57**：cx 入表与第 8 流、骨架网第一批（prd_cx.md B2 55-4..55-6）。
+- **0.0.58 及以后**：
+  - N0 APE 头压缩（省约 36%，单独立版）。
+  - 新目标 lnx-x86-32 先于 lnx-arm-32，以扩展包形式提供，依赖目标可外部扩展；交叉出码到 32 位，编译器本身不在 32 位运行；主要改 L3 lower/elf 模型、enc 表、syscall 分派节、e2 预定义、e3 类型布局、L4 头；ARM32 编码为大头。
+  - 链接单元 CX-W-1。
+  - yb-all 待 0.0.55 测量后定。
 
 ## 10. 子文档与归档索引（树）
 
