@@ -13,6 +13,8 @@
 #pragma unisa use mem.bytes
 #pragma unisa use productpkg
 #pragma unisa use sysx.trace
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
 /* Read-only, one-endpoint material snapshots. fresh_source MUST come from the
  * caller's actual current seed/ident observation; never pass a saved receipt
  * as fresh evidence. Call again after the operation for a physical reread.
@@ -107,7 +109,7 @@ static char sp_job_out[4400],sp_job_exe[4400],sp_job_src[4400],sp_job_inc[4400],
 static char root[4096],ctx[4096],bootstrap[4096],cc[4096],self[4096],product[4400],bound[4400],ident[4400],helper[4400],netpack[4400],bound_c[4400],jobs[4400];
 static char sid[65],context_sha[65],cc_sha[65],cc_version_sha[65],helper_sha[65],bootstrap_sha[65],product_sha[65],self_sha[65],netpack_sha[65],bound_sha[65],bound_c_sha[65],ident_sha[65];
 static char basis[4400],consumer[4096],consumer_sha[65],pc[4096],kgen[4096];
-static const char *basis_pin="e5d78c6e91703990de80beac5ac8946ff4ad7ea40bbe4fbb614655bf243b74af";
+static const char *basis_pin="ad47d8c2dcf2ac6a4ed151cff3ccc8d8e5839b854e47a0bdbfc1f25a7090a5f2";
 static const char *origin_basis_pin="e0391c9018f4c9542ac2482bad5b69d11028bdedf0cbcf16bf54f9dd82a260a2";
 static const char *sp_basis_pin(void){return sp_origin_mode?sp_origin_material.origin_foundation:basis_pin;}
 static void live_root_epoch_bind(void);
@@ -182,8 +184,25 @@ static int sp_file_slot(const char *physical){unsigned at=(unsigned)(sp_path_has
 static int sp_map_slot(const char *logical){unsigned at=(unsigned)(sp_path_hash(logical)&16383ULL);for(int probe=0;probe<16384;probe++){int id=sp_map_index[at];if(!id)return (int)at;if(id<1||id>sp_origin_map_count)die("origin-map-index-invariant");if(!strcmp(sp_origin_maps[id-1].logical,logical))return (int)at;at=(at+1)&16383U;}die("origin-map-index-probe-bound");return -1;}
 static void sp_indices_init(void){if(sp_file_count||sp_origin_map_count)die("endpoint-initial-view-not-empty");memset(sp_file_index,0,sizeof sp_file_index);memset(sp_map_index,0,sizeof sp_map_index);}
 static void sp_map_note(const char *logical,const char *physical){int slot=sp_map_slot(logical),id=sp_map_index[slot];if(id){if(strcmp(physical,sp_origin_maps[id-1].physical))die("origin-mapping-changed");return;}size_t n=strlen(logical)+strlen(physical)+2;if(sp_origin_map_count==8192||n>8388608-sp_origin_map_bytes)die("origin-mapping-bound");SpOriginMap *m=&sp_origin_maps[sp_origin_map_count++];m->logical=mm_strdup(logical);m->physical=mm_strdup(physical);if(!m->logical||!m->physical)die("allocation");sp_origin_map_bytes+=n;sp_map_index[slot]=sp_origin_map_count;}
-static const char *sp_physical(const char *logical){const char *p=logical;if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_product))p=epoch_product;else if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_metadata))p=epoch_metadata;if(!sp_origin_mode)return p;sp_lexical(p);static char mapped[4400];const char *relative=0,*expected=0;if(mp_host_capture(sp_origin_material.id,p,&relative,&expected)){int z=snprintf(mapped,sizeof mapped,"%s/%s",sp_origin_state.snapshot_root,relative);if(z<0||(size_t)z>=sizeof mapped)die("origin-fixed-host-data-path-bound");sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}if(!sp_within(p,sp_origin_state.logical_root))die("origin-path-outside-logical-root");if(sp_within(p,sp_origin_state.snapshot_root))die("origin-physical-path-used-as-logical");size_t n=strlen(sp_origin_state.logical_root);int z=snprintf(mapped,sizeof mapped,"%s%s",sp_origin_state.snapshot_root,p+n);if(z<0||(size_t)z>=sizeof mapped)die("origin-mapped-path-bound");struct stat st;errno=0;if(lstat(mapped,&st)){if(errno!=ENOENT)die("origin-mapped-path-stat");char parent[4400];{ if (cx_fmt(parent, sizeof parent, "%s",mapped)) { fprintf(stderr, "sourcepackage: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||slash==parent)die("origin-mapped-parent");*slash=0;sp_direct_canonical(parent);}else sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}
-static void canonical(const char *p){if(sp_origin_mode){sp_lexical(p);sp_direct_canonical(sp_physical(p));return;}char actual[4400];clean(p);if(p[0]!='/'||!realpath(p,actual)||strcmp(p,actual))die("canonical-input-path-required");}
+/* Private baseline-child mapping. It never changes current-context semantics. */
+static int sp_adopt_mapping;
+static char sp_adopt_lr[4400], sp_adopt_lc[4400], sp_adopt_pr[4400], sp_adopt_pc[4400];
+static const char *sp_adopt_physical(const char *p) {
+    static char mapped[4400]; size_t c = strlen(sp_adopt_lc), r = strlen(sp_adopt_lr);
+    if (!sp_adopt_mapping) return p;
+    sp_lexical(p);
+    if (!strncmp(p, sp_adopt_lc, c) && (!p[c] || p[c] == '/')) {
+        if (cx_fmt(mapped, sizeof mapped, "%s%s", sp_adopt_pc, p + c)) die("adopt-mapping-bound"); return mapped;
+    }
+    if (!strncmp(p, sp_adopt_lr, r) && (!p[r] || p[r] == '/')) {
+        if (cx_fmt(mapped, sizeof mapped, "%s%s", sp_adopt_pr, p + r)) die("adopt-mapping-bound"); return mapped;
+    }
+    /* Only declared host tool paths may stay outside the two capture roots. */
+    if (strncmp(p, "/usr/", 5) && strncmp(p, "/lib/", 5)) die("adopt-baseline-path-outside-capture");
+    return p;
+}
+static const char *sp_physical(const char *logical){const char *p=logical;if(sp_adopt_mapping)return sp_adopt_physical(logical);if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_product))p=epoch_product;else if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_metadata))p=epoch_metadata;if(!sp_origin_mode)return p;sp_lexical(p);static char mapped[4400];const char *relative=0,*expected=0;if(mp_host_capture(sp_origin_material.id,p,&relative,&expected)){int z=snprintf(mapped,sizeof mapped,"%s/%s",sp_origin_state.snapshot_root,relative);if(z<0||(size_t)z>=sizeof mapped)die("origin-fixed-host-data-path-bound");sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}if(!sp_within(p,sp_origin_state.logical_root))die("origin-path-outside-logical-root");if(sp_within(p,sp_origin_state.snapshot_root))die("origin-physical-path-used-as-logical");size_t n=strlen(sp_origin_state.logical_root);int z=snprintf(mapped,sizeof mapped,"%s%s",sp_origin_state.snapshot_root,p+n);if(z<0||(size_t)z>=sizeof mapped)die("origin-mapped-path-bound");struct stat st;errno=0;if(lstat(mapped,&st)){if(errno!=ENOENT)die("origin-mapped-path-stat");char parent[4400];{ if (cx_fmt(parent, sizeof parent, "%s",mapped)) { fprintf(stderr, "sourcepackage: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||slash==parent)die("origin-mapped-parent");*slash=0;sp_direct_canonical(parent);}else sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}
+static void canonical(const char *p){if(sp_adopt_mapping){sp_direct_canonical(sp_physical(p));return;}if(sp_origin_mode){sp_lexical(p);sp_direct_canonical(sp_physical(p));return;}char actual[4400];clean(p);if(p[0]!='/'||!realpath(p,actual)||strcmp(p,actual))die("canonical-input-path-required");}
 static void sp_set_logical(const char *p,char out[4096]){sp_lexical(p);if(!sp_within(p,sp_origin_state.logical_root))die("origin-path-outside-logical-root");strcpy(out,p);canonical(out);}
 static int sp_suffix(const char *p,const char *s){size_t n=strlen(p),z=strlen(s);return n>=z&&!strcmp(p+n-z,s);}
 /* Unique physical reads per endpoint. Large JSON/table/net artifacts retain
@@ -260,6 +279,7 @@ static int job_command(const char *id,SpJob j,char **v,char output[4400],char ex
  * and must lie inside ROOT; a job whose list is empty is never reusable. */
 static const char *sp_reads_name="job-reads.before.tsv";
 static char *sp_reads_bytes(const char *p,size_t *n){
+ p=sp_physical(p);
  struct stat a,b;int fd;size_t at=0;char *s;
  errno=0;
  if(lstat(p,&a))die(errno==ENOENT?"job-reads-record-absent":"job-reads-record-stat");
@@ -285,7 +305,7 @@ static void sp_reads_row(np_buf *b,const char *dir){
   if(mm_copy(line,(long)sizeof line,s+at,(long)z))die("job-reads-line-bound");line[z]=0;at+=(size_t)(e-(s+at))+1;
   if(!line[0])continue;
   { char h[65];struct stat st;errno=0;
-    if(lstat(line,&st)==0&&S_ISREG(st.st_mode))digest(line,h);else if(cx_fmt(h,65,"%s","ABSENT"))return;
+    if(lstat(sp_physical(line),&st)==0&&S_ISREG(st.st_mode))digest(line,h);else if(cx_fmt(h,65,"%s","ABSENT"))return;
     np_puts(b,"read\t");np_puts(b,h);np_puts(b,"\t");np_puts(b,line);np_puts(b,"\n"); }
   rows++;
  }
@@ -440,6 +460,215 @@ char *v[20],out[4400],exe[4400],src[4400],inc[4400],dep[4400];int n=job_command(
 if(!sp_trace_off()){ char rdir[4400];sp_job_dir(id,rdir);sp_reads_row(&b,rdir); }
 np_buf success={0};np_puts(&success,"rc\t0\n");path(evidence,dir,"command.status");if(sp_equal_bytes(evidence,&success)){free(success.p);return sp_invalidate_record(dir);}free(success.p);const char *logs[]={"command.argv.tsv","command.stdout","command.stderr","command.status"};for(int i=0;i<4;i++){path(evidence,dir,logs[i]);digest(evidence,h);row(&b,logs[i],h);}if(j.tool>=0){digest(src,h);row(&b,"actual-seed-source",h);}else{digest(exe,h);row(&b,"actual-native-tool",h);}SpObservedFile *observed=sp_observe(out,0);if(!observed->n)die("empty-job-output");if(j.tool>=0){const unsigned char *bytes=observed->prefix;if(observed->prefix_n<64||memcmp(bytes,"\177ELF",4)||bytes[4]!=2||bytes[5]!=1||bytes[18]!=62||bytes[19]||access(sp_physical(out),X_OK))die("native-tool-not-executable-ELF64-x86_64");}if(mm_copy(h,65,observed->hash,65))return sp_invalidate_record(dir);row(&b,"output",out);row(&b,"output-sha",h);if(actual_output_sha&&mm_copy(actual_output_sha,65,h,65))return sp_invalidate_record(dir);return b;
 }
+/* Adopted jobs have a distinct receipt, never fabricated command evidence.
+ * The baseline remains a required immutable proof input. Global SID is still
+ * checked by the caller's normal context gate; applicability below is per-net. */
+static void sp_adopt_field(const char *s, const char *key, char *out, size_t cap) {
+    char needle[100]; if (cx_fmt(needle, sizeof needle, "\n%s\t", key)) die("adopt-field");
+    const char *p = strstr(s, needle); if (!p || strstr(p + 1, needle)) die("adopt-field-unique");
+    p += strlen(needle); const char *e = strchr(p, '\n');
+    if (!e || e == p || (size_t)(e - p) >= cap) die("adopt-field-bound");
+    if (mm_copy(out, cap, p, e - p)) die("adopt-field-copy"); out[e - p] = 0;
+}
+static void sp_adopt_hash(const char *p, char h[65]) {
+    size_t n; char *s; if (sp_load_file(p, &s, &n)) die("adopt-regular-input");
+    hash_bytes(s, n, h); free(s);
+}
+static np_buf sp_adopt_closure(const char *r, SpJob j) {
+    /* Execute only the current dependency observer; baseline is read-only data. */
+    char com[4400], tool[4400]; path(com, root, "unisacc.com"); path(tool, root, "tools/net-deps.cx");
+    char *v[] = {"sh", com, tool, "--", "--root", (char *)r, 0};
+    np_result result = {0}; char why[300];
+    if (np_run(v, r, 0, 12, &result, why, sizeof why) || result.rc || result.residue) die("adopt-net-deps");
+    if (!result.out || !result.outn || result.out[result.outn - 1] != '\n' || memchr(result.out, 0, result.outn) || memchr(result.out, '\r', result.outn)) die("adopt-net-deps-wire");
+    np_buf key = {0}; np_puts(&key, "source-package-net-closure-v1\n");
+    char p[4400], h[65]; path(p, r, "tools/net-deps.cx"); sp_adopt_hash(p, h); row(&key, "dependency-tool", h);
+    if (j.tool < 0) { row(&key, "stage", recipes[j.recipe].stage); for (int f = 0; f < 4 && recipes[j.recipe].flags[f]; f++) row(&key, "flag", recipes[j.recipe].flags[f]); }
+    int count = 0;
+    for (char *at = result.out; *at;) {
+        char *e = strchr(at, '\n'); *e = 0;
+        if (*at != '#' && strncmp(at, "net\t", 4)) {
+            char *f[5]; int n = 1; f[0] = at;
+            for (char *q = at; *q; q++) if (*q == '\t') { *q = 0; if (n == 5) die("adopt-net-deps-fields"); f[n++] = q + 1; }
+            if (n != 5) die("adopt-net-deps-fields");
+            if ((j.tool < 0 && !strcmp(f[0], recipes[j.recipe].id)) || (j.tool >= 0 && !strcmp(f[0], recipes[0].id) && !strcmp(f[4], "shared-generator"))) {
+                if (!*f[3] || *f[3] == '/' || strstr(f[3], "..") || strpbrk(f[3], "\r\n\t")) die("adopt-net-deps-path");
+                path(p, r, f[3]); sp_adopt_hash(p, h); row(&key, f[3], h); count++;
+            }
+        }
+        at = e + 1;
+    }
+    np_free(&result); if (!count) die("adopt-empty-closure"); return key;
+}
+/* A forked fresh endpoint verifies the original baseline job and ancestors.
+ * It does not call check_context_live with a saved SID, nor weaken that gate.
+ * The old context supplies physical command paths only; the actual command,
+ * reads, dependency records and output must reproduce the canonical receipt. */
+static void sp_adopt_baseline(const char *br, const char *lc, const char *bc, const char *physical_root, const char *id, const char *bcc) {
+    int pid = fork(), st;
+    if (pid < 0) die("adopt-fork");
+    if (!pid) {
+        if (sy_setpgid(0, 0)) _exit(2);
+        if (strcmp(lc, bc) || strcmp(br, physical_root)) {
+            if (cx_fmt(sp_adopt_lr, sizeof sp_adopt_lr, "%s", br) || cx_fmt(sp_adopt_lc, sizeof sp_adopt_lc, "%s", lc) || cx_fmt(sp_adopt_pr, sizeof sp_adopt_pr, "%s", physical_root) || cx_fmt(sp_adopt_pc, sizeof sp_adopt_pc, "%s", bc)) _exit(2);
+            sp_adopt_mapping = 1;
+        }
+        char bj[4400], bb[4400], rec[4400]; path(bj, lc, "jobs"); path(bb, br, "tools/bound");
+        for (int f = 0; f < sp_file_count; f++) { free(sp_files[f].physical); free(sp_files[f].bytes); }
+        memset(sp_files, 0, sizeof sp_files); memset(sp_file_index, 0, sizeof sp_file_index);
+        sp_file_count = 0; sp_observation_hits = 0; sp_kept_bytes = 0;
+        memset(job_seen, 0, sizeof job_seen); memset(job_receipt_sha, 0, sizeof job_receipt_sha); memset(job_output_sha, 0, sizeof job_output_sha);
+        sp_dep_invalid = 0; sp_verify_dep = 0;
+        if (cx_fmt(root, sizeof root, "%s", br) || cx_fmt(jobs, sizeof jobs, "%s", bj) || cx_fmt(cc, sizeof cc, "%s", bcc) || cx_fmt(bound, sizeof bound, "%s", bb)) _exit(2);
+        if (cx_fmt(rec, sizeof rec, "%s/%s/record.tsv", bj, id)) _exit(2);
+        size_t n; char *s = load(rec, &n);
+        if (n < strlen("source-package-job-v1\n") || strncmp(s, "source-package-job-v1\n", strlen("source-package-job-v1\n"))) _exit(2);
+        free(s); _exit(verify_job(id, 0) ? 2 : 0);
+    }
+    sy_setpgid(pid, pid);
+    long deadline = sy_now_ms() + 20000; int got = 0;
+    while (!got) {
+        got = waitpid(pid, &st, WNOHANG); if (got < 0 && errno == EINTR) got = 0;
+        if (!got) {
+            long now = sy_now_ms();
+            if (now < 0 || now >= deadline) {
+                sy_killpg(pid, SIGKILL); kill(pid, SIGKILL);
+                for (int reap = 0; reap < 200; reap++) { got = waitpid(pid, &st, WNOHANG); if (got == pid) break; usleep(1000); }
+                break;
+            }
+            usleep(1000);
+        }
+    }
+    if (got != pid || !WIFEXITED(st) || WEXITSTATUS(st)) die("adopt-baseline-job-not-verified");
+}
+static void sp_adopt_mapped_reads(np_buf *b, const char *record, const char *br, const char *bc) {
+    int count = 0; size_t rl = strlen(br), cl = strlen(bc);
+    for (const char *p = record; (p = strstr(p, "\nread\t"));) {
+        p += 6; const char *tab = strchr(p, '\t'), *e; char wanted[65], old[4400], current[4400], actual[65];
+        if (!tab || (tab - p != 64 && tab - p != 6)) die("adopt-read-wire");
+        if (mm_copy(wanted, sizeof wanted, p, tab - p)) die("adopt-read-copy"); wanted[tab - p] = 0; e = strchr(tab + 1, '\n');
+        if (!e || e == tab + 1 || e - tab - 1 >= (long)sizeof old) die("adopt-read-wire");
+        if (mm_copy(old, sizeof old, tab + 1, e - tab - 1)) die("adopt-read-copy"); old[e - tab - 1] = 0;
+        if (!strncmp(old, bc, cl) && old[cl] == '/') {
+            /* Only job dependency outputs can move from baseline context. */
+            if (strncmp(old + cl, "/jobs/", 6)) die("adopt-read-outside-jobs");
+            const char *suffix = old + cl + 6;
+            if (cx_fmt(current, sizeof current, "%s/%s", jobs, suffix)) die("adopt-read-path");
+        } else if (!strncmp(old, br, rl) && old[rl] == '/') { if (cx_fmt(current, sizeof current, "%s%s", root, old + rl)) die("adopt-read-path"); }
+        else { if (cx_fmt(current, sizeof current, "%s", old)) die("adopt-read-path"); }
+        struct stat st; errno = 0;
+        if (!lstat(current, &st) && S_ISREG(st.st_mode)) sp_adopt_hash(current, actual);
+        else { if (errno && errno != ENOENT && errno != ENOTDIR) die("adopt-read-stat"); strcpy(actual, "ABSENT"); }
+        if (strcmp(wanted, actual)) { fprintf(stderr, "sourcepackage: changed adoption read %s\n", current); die("adopt-read-changed"); }
+        row(b, current, actual); count++; p = e;
+    }
+    if (!count) die("adopt-no-observed-reads");
+}
+static np_buf sp_adoption_build(const char *id, const char *baseline_context, int depth, char output_sha[65], int preparing) {
+    SpJob j = find_job(id); char bc[4400], p[4400], br[4400], bcc[4400], context_hash[65], oldhash[65], h[65];
+    if (!realpath(baseline_context, bc) || strcmp(baseline_context, bc)) die("adopt-baseline-context");
+    path(p, bc, "context.tsv"); size_t n; char *context = load(p, &n);
+    if (!n || context[n - 1] != '\n' || memchr(context, 0, n) || memchr(context, '\r', n)) die("adopt-baseline-context-wire");
+    char lc[4400], physical_root[4400], mapping_sha[65];
+    sp_adopt_field(context, "root", br, sizeof br); sp_adopt_field(context, "context", lc, sizeof lc); sp_adopt_field(context, "cc", bcc, sizeof bcc);
+    canonical(bcc); hash_bytes(context, n, context_hash); free(context);
+    path(p, bc, "adoption-origin.tsv"); struct stat capture;
+    if (!lstat(p, &capture)) {
+        char *origin = load(p, &n), checkroot[4400], checkctx[4400], physical_ctx[4400];
+        sp_adopt_field(origin, "logical-root", checkroot, sizeof checkroot); sp_adopt_field(origin, "logical-context", checkctx, sizeof checkctx);
+        sp_adopt_field(origin, "physical-root", physical_root, sizeof physical_root); sp_adopt_field(origin, "physical-context", physical_ctx, sizeof physical_ctx);
+        if (strcmp(br, checkroot) || strcmp(lc, checkctx) || strcmp(bc, physical_ctx) || !strcmp(br, physical_root) || !strcmp(lc, bc)) die("adopt-capture-roles");
+        canonical(physical_root); sp_lexical(br); sp_lexical(lc);
+        np_buf want = {0}; np_puts(&want, "source-package-baseline-capture-v1\n"); row(&want, "logical-root", br); row(&want, "logical-context", lc); row(&want, "physical-root", physical_root); row(&want, "physical-context", bc);
+        if (want.n != n || memcmp(want.p, origin, n)) die("adopt-capture-schema");
+        hash_bytes(origin, n, mapping_sha); free(origin); free(want.p);
+    } else {
+        if (errno != ENOENT || strcmp(lc, bc)) die("adopt-missing-capture");
+        canonical(br); if (cx_fmt(physical_root, sizeof physical_root, "%s", br)) die("adopt-path"); strcpy(mapping_sha, "ABSENT");
+    }
+    {
+        char recpath[4400], productpath[4400], recorded_sha[65], observed_sha[65]; size_t zn;
+        if (cx_fmt(recpath, sizeof recpath, "%s/jobs/%s/record.tsv", bc, id) || cx_fmt(productpath, sizeof productpath, "%s/jobs/%s/%s", bc, id, j.tool >= 0 ? "result.exe" : j.phase == 0 ? "result.json" : j.phase == 1 ? "result.tbl" : "result.net")) die("adopt-path");
+        char *raw = load(recpath, &zn); sp_adopt_field(raw, "output-sha", recorded_sha, sizeof recorded_sha); free(raw);
+        if (!sp_hex64(recorded_sha)) die("adopt-output-sha-shape"); sp_adopt_hash(productpath, observed_sha);
+        if (strcmp(recorded_sha, observed_sha)) die("adopt-output-sha-mismatch");
+    }
+    sp_adopt_baseline(br, lc, bc, physical_root, id, bcc);
+    np_buf before = sp_adopt_closure(physical_root, j), now = sp_adopt_closure(root, j);
+    if (before.n != now.n || memcmp(before.p, now.p, now.n)) die("adopt-closure-or-generator-changed");
+    np_buf b = {0}; np_puts(&b, "source-package-adopted-job-v1\n");
+    row(&b, "status", "REUSED-verified-inputs-not-executed"); row(&b, "job", id); row(&b, "environment-policy", environment_policy);
+    row(&b, "baseline-context", bc); row(&b, "baseline-context-sha", context_hash);
+    row(&b, "baseline-mapping-sha", mapping_sha);
+    hash_bytes(now.p, now.n, h); row(&b, "net-closure-generator-key", h); free(before.p); free(now.p);
+    if (cx_fmt(p, sizeof p, "%s/jobs/%s/record.tsv", bc, id)) die("adopt-path");
+    char *oldrecord = load(p, &n); hash_bytes(oldrecord, n, oldhash); row(&b, "baseline-record-sha", oldhash);
+    {
+        char *args[20], out[4400], exe[4400], src[4400], inc[4400], dep[4400];
+        int argc = job_command(id, j, args, out, exe, src, inc, dep);
+        size_t bl = strlen(lc), rl = strlen(br);
+        for (int a = 0; a < argc; a++) {
+            char field[40], oldarg[4400], mapped[4400];
+            if (cx_fmt(field, sizeof field, "arg-%d", a)) die("adopt-argv");
+            sp_adopt_field(oldrecord, field, oldarg, sizeof oldarg);
+            if (!strncmp(oldarg, lc, bl) && !strncmp(oldarg + bl, "/jobs/", 6)) {
+                if (cx_fmt(mapped, sizeof mapped, "%s/%s", jobs, oldarg + bl + 6)) die("adopt-argv");
+            } else if (!strncmp(oldarg, br, rl) && oldarg[rl] == '/') {
+                if (cx_fmt(mapped, sizeof mapped, "%s%s", root, oldarg + rl)) die("adopt-argv");
+            } else if (cx_fmt(mapped, sizeof mapped, "%s", oldarg)) die("adopt-argv");
+            if (strcmp(args[a], mapped)) die("adopt-construction-argv-changed");
+            row(&b, field, mapped);
+        }
+        char extra[50]; if (cx_fmt(extra, sizeof extra, "\narg-%d\t", argc) || strstr(oldrecord, extra)) die("adopt-extra-baseline-argument");
+    }
+    sp_adopt_mapped_reads(&b, oldrecord, br, lc); free(oldrecord);
+    /* Native tools and compiler declarations remain actual execution identities. */
+    sp_adopt_hash(bcc, h); char live[65]; sp_adopt_hash(cc, live); if (strcmp(h, live)) die("adopt-compiler-changed"); row(&b, "compiler-sha", live);
+    if (cx_fmt(p, sizeof p, "%s/cc.version", bc)) die("adopt-path"); sp_adopt_hash(p, h);
+    char current_ctx[4400]; if (cx_fmt(current_ctx, sizeof current_ctx, "%s", jobs)) die("adopt-path");
+    char *last = strrchr(current_ctx, '/'); if (!last || strcmp(last, "/jobs")) die("adopt-jobs-path"); *last = 0;
+    path(p, current_ctx, "cc.version"); sp_adopt_hash(p, live); if (strcmp(h, live)) die("adopt-compiler-version-changed"); row(&b, "compiler-version-sha", live);
+    if (j.tool < 0) {
+        char dep[160], oldout[4400], depdir[4400], depout[4400], deprec[4400];
+        for (int k = 0; k < (j.phase ? 2 : 1); k++) {
+            if (k ? cx_fmt(dep, sizeof dep, "%s-%s", j.phase == 1 ? "gen" : "tbl", recipes[j.recipe].id) : cx_fmt(dep, sizeof dep, "tool-%s", tools[j.phase])) die("adopt-dependency");
+            dependency(&b, dep, depth); if (sp_dep_invalid) die("adopt-current-dependency");
+            SpJob dj = find_job(dep); job_paths(dep, dj, depdir, depout, deprec);
+            if (cx_fmt(oldout, sizeof oldout, "%s/jobs/%s/%s", bc, dep, dj.tool >= 0 ? "result.exe" : dj.phase == 0 ? "result.json" : "result.tbl")) die("adopt-path");
+            sp_adopt_hash(oldout, h); sp_adopt_hash(depout, live); if (strcmp(h, live)) die("adopt-tool-or-dependency-changed");
+        }
+    }
+    char dir[4400], out[4400], receipt[4400]; job_paths(id, j, dir, out, receipt);
+    if (cx_fmt(p, sizeof p, "%s/jobs/%s/%s", bc, id, j.tool >= 0 ? "result.exe" : j.phase == 0 ? "result.json" : j.phase == 1 ? "result.tbl" : "result.net")) die("adopt-path");
+    sp_adopt_hash(p, h);
+    if (preparing) { if (mm_copy(live, sizeof live, h, 65)) die("adopt-output-sha-copy"); }
+    else {
+        sp_adopt_hash(out, live); if (strcmp(h, live)) die("adopt-output-sha-mismatch");
+        struct stat st; if (lstat(out, &st) || !S_ISREG(st.st_mode) || !st.st_size || (j.tool >= 0 && access(out, X_OK))) die("adopt-output-type");
+    }
+    row(&b, "output", out); row(&b, "output-sha", live); if (output_sha && mm_copy(output_sha, 65, live, 65)) die("adopt-output-sha-copy");
+    np_buf origin = {0}; np_puts(&origin, "source-package-adoption-v1\n"); row(&origin, "baseline-context", bc); row(&origin, "job", id);
+    hash_bytes(origin.p, origin.n, h); free(origin.p);
+    if (!preparing) { char actual[65]; path(p, dir, "adoption.tsv"); sp_adopt_hash(p, actual); if (strcmp(h, actual)) die("adopt-provenance-changed"); }
+    row(&b, "provenance-sha", h);
+    return b;
+}
+/* Prepare is pure validation: no output directory or synthetic evidence exists. */
+np_buf sp_adoption_prepare(const char *id, const char *baseline_context, int depth, char output_sha[65]) {
+    return sp_adoption_build(id, baseline_context, depth, output_sha, 1);
+}
+np_buf sp_adoption_record(const char *id, const char *baseline_context, int depth, char output_sha[65]) {
+    return sp_adoption_build(id, baseline_context, depth, output_sha, 0);
+}
+static np_buf sp_adoption_expected(const char *id, int depth, char output_sha[65]) {
+    char p[4400], dir[4400], out[4400], receipt[4400], bc[4400]; job_paths(id, find_job(id), dir, out, receipt);
+    path(p, dir, "adoption.tsv"); size_t n; char *s = load(p, &n);
+    if (!n || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("adopt-provenance-wire");
+    sp_adopt_field(s, "baseline-context", bc, sizeof bc);
+    np_buf want = {0}; np_puts(&want, "source-package-adoption-v1\n"); row(&want, "baseline-context", bc); row(&want, "job", id);
+    if (want.n != n || memcmp(want.p, s, n)) die("adopt-provenance-schema"); free(want.p); free(s);
+    return sp_adoption_record(id, bc, depth, output_sha);
+}
 /* Verify one job and every ancestor it depends on. The answer is a verdict,
  * not an exit: 0 verified, 1 this job's record or read list no longer matches,
  * 2 an ancestor does (reason names it). A caller deciding about reuse turns any
@@ -451,8 +680,18 @@ static int verify_job(const char *id,int depth){
  if(job_seen[at])return 0;
  char dir[4400],out[4400],receipt[4400];
  job_paths(id,j,dir,out,receipt);canonical(dir);
+ { char ap[4400]; struct stat ast; path(ap, dir, "adoption.tsv");
+   if (!lstat(sp_physical(ap), &ast)) {
+     if (!S_ISREG(ast.st_mode)) return 1;
+     np_buf a = sp_adoption_expected(id, depth, job_output_sha[at]); size_t an; char *disk = load(receipt, &an);
+     int same = an == a.n && !memcmp(disk, a.p, an); free(disk);
+     if (!same) { free(a.p); return 1; }
+     hash_bytes(a.p, a.n, job_receipt_sha[at]); free(a.p); job_seen[at] = 1; return 0;
+   }
+   if (errno != ENOENT) return 1;
+ }
  { char rp[4400];struct stat st;path(rp,dir,sp_reads_name);errno=0;
-   if(lstat(rp,&st)||!S_ISREG(st.st_mode))return 1; }
+   if(lstat(sp_physical(rp),&st)||!S_ISREG(st.st_mode))return 1; }
  if(j.tool<0){
   char name[160];if(cx_fmt(name,sizeof name,"tool-%s",tools[j.phase]))return 2;
   { int dep=verify_job(name,depth+1);if(dep){sp_verify_dep=name;return 2;} }

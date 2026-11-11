@@ -19,6 +19,9 @@
 #pragma unisa use cxlib.sourcepackage
 #pragma unisa use sysx.trace
 #pragma unisa use text.text
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
 static const SpModel recipes[]={
  {"shared-e2","pp",{"--shared-predefines",0}},
  {"shared-e1","lex",{"--typed",0}}, {"shared-e3","parse2",{"--locations",0}},
@@ -220,6 +223,13 @@ static int reuse_verdict(const char *id){SpJob j=find_job(id);char dir[4400],out
  struct stat st;errno=0;
  if(lstat(dir,&st)||!S_ISDIR(st.st_mode)){printf("REUSE\tmiss\t%s\tno-job-directory\n",id);return 1;}
  errno=0;if(lstat(receipt,&st)||!S_ISREG(st.st_mode)){printf("REUSE\tmiss\t%s\tno-record\n",id);return 1;}
+ path(p,dir,"adoption.tsv");
+ if(!lstat(p,&st)) {
+  int verdict=sp_job_verified(id);
+  printf("REUSE\t%s\t%s\tadopted-inputs-and-output-verified\n",verdict?"miss":"hit",id);
+  return verdict?1:0;
+ }
+ if(errno!=ENOENT)die("adopt-provenance-stat");
  path(p,dir,"dependencies.before.tsv");
  np_buf before=dependency_observation(j);
  size_t n;char *s=load(p,&n);
@@ -260,11 +270,60 @@ static void finish_job(const char *id){
  free(before.p);free(after.p);write_new(receipt,record.p,record.n);free(record.p);if(!trace_off())verify_job(id,0);
  printf("PREPARED\tsource-package-job-v1\t%s\tactual-split-command-and-finish\tno-test-result\n",id);
 }
+/* Reuse is not execution. An adopted job has no command.status or fabricated
+ * argv/stdout; its separate receipt is checked by the canonical verifier. */
+static void adopt_job(const char *baseline, const char *id) {
+    canonical(baseline);
+    check_context_live();
+    char start[65]; if (cx_fmt(start, sizeof start, "%s", context_sha)) die("adopt-context-sha-bound");
+    SpJob j = find_job(id); dependencies_only(j);
+    char dir[4400], out[4400], receipt[4400], source[4400], temporary[4400], expected[65], actual[65];
+    job_paths(id, j, dir, out, receipt); absent(dir);
+    if (cx_fmt(source, sizeof source, "%s/jobs/%s/%s", baseline, id, j.tool >= 0 ? "result.exe" : j.phase == 0 ? "result.json" : j.phase == 1 ? "result.tbl" : "result.net")) die("adopt-path");
+    size_t n; char *bytes = load(source, &n); if (!n) die("adopt-empty-output");
+    struct stat mode; if (lstat(source, &mode) || !S_ISREG(mode.st_mode)) die("adopt-output-type");
+    /* All applicability checks run before any output directory is created. */
+    np_buf record = sp_adoption_prepare(id, baseline, 0, expected);
+    if (n >= 1024) { if (ks_sha256_hex(bytes, n, actual)) die("adopt-digest-provider"); } else cx_sha256_hex(bytes, n, actual);
+    if (strcmp(expected, actual)) die("adopt-output-sha-mismatch");
+    check_context_live(); if (strcmp(start, context_sha)) die("adopt-context-changed");
+    np_buf origin = {0}; np_puts(&origin, "source-package-adoption-v1\n"); row(&origin, "baseline-context", baseline); row(&origin, "job", id);
+    if (cx_fmt(temporary, sizeof temporary, "%s/.%s-adopt-XXXXXX", jobs, id) || !mkdtemp(temporary)) die("adopt-staging-directory");
+    int pid = fork(), status;
+    if (pid < 0) { cx_rmtree(temporary); die("adopt-publish-fork"); }
+    if (!pid) {
+        if (sy_setpgid(0, 0)) _exit(2);
+        char p[4400]; const char *result = j.tool >= 0 ? "result.exe" : j.phase == 0 ? "result.json" : j.phase == 1 ? "result.tbl" : "result.net";
+        path(p, temporary, result); write_new(p, bytes, n); if (chmod(p, mode.st_mode & 0777)) die("adopt-output-mode");
+        path(p, temporary, "adoption.tsv"); write_new(p, origin.p, origin.n);
+        path(p, temporary, "record.tsv"); write_new(p, record.p, record.n);
+        absent(dir); if (sy_rename(temporary, dir)) die("adopt-atomic-publish");
+        _exit(0);
+    }
+    sy_setpgid(pid, pid);
+    long deadline = sy_now_ms() + 15000; int got = 0;
+    while (!got) {
+        got = waitpid(pid, &status, WNOHANG); if (got < 0 && errno == EINTR) got = 0;
+        if (!got) {
+            long now = sy_now_ms();
+            if (now < 0 || now >= deadline) {
+                sy_killpg(pid, SIGKILL); kill(pid, SIGKILL);
+                for (int reap = 0; reap < 200; reap++) { got = waitpid(pid, &status, WNOHANG); if (got == pid) break; usleep(1000); }
+                break;
+            }
+            usleep(1000);
+        }
+    }
+    free(bytes); free(origin.p); free(record.p);
+    if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status)) { if (cx_rmtree(temporary)) die("adopt-staging-cleanup"); die("adopt-publish-failed"); }
+    printf("ADOPTED\t%s\tinputs-output-and-baseline-verified\tclaim=REUSED-not-executed\n", id);
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN source-package foundation requires Linux/x86_64\n",stderr);return 3;
 #endif
  if(sizeof(long)!=8||sizeof(void *)!=8)die("LP64-process-required");
+ if(argc==6&&tx_eqz(argv[1], "adopt-job")){setup(argv[2],argv[3]);adopt_job(argv[4],argv[5]);return 0;}
  if(argc==5&&tx_eqz(argv[1], "reuse-job")){setup(argv[2],argv[3]);return reuse_job(argv[4]);}
  if(argc==5&&tx_eqz(argv[1], "reuse-batch")){reuse_batch(argv[2],argv[3],argv[4]);return batch_misses?1:0;}
 

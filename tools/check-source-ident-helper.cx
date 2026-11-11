@@ -3,8 +3,13 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.sourcepackage
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -19,7 +24,169 @@ static int hasfile(const char *p, const char *n) {
     return ok;
 }
 
-int main(void) {
+/* Opt-in real-material tests. Each case owns a private copy; the baseline is
+ * read-only. Run cases separately under 55s, never cache a prior verdict. */
+static void fixture_copy(const char *src, const char *dst) {
+    size_t n; char *s = cx_read(src, &n); struct stat st;
+    if (!s || lstat(src, &st) || !S_ISREG(st.st_mode) || cx_write(dst, s, n) || chmod(dst, st.st_mode & 0777)) exit(2);
+    free(s);
+}
+static void fixture_job(const char *base, const char *context, const char *id) {
+    char dir[4400], p[4400], src[4400];
+    if (cx_fmt(dir, sizeof dir, "%s/jobs/%s", context, id) || mkdir(dir, 0700)) exit(2);
+    const char *result = !strncmp(id, "tool-", 5) ? "result.exe" : "result.json";
+    if (cx_fmt(src, sizeof src, "%s/jobs/%s/%s", base, id, result) || cx_fmt(p, sizeof p, "%s/%s", dir, result)) exit(2);
+    fixture_copy(src, p);
+    np_buf origin = {0}; np_puts(&origin, "source-package-adoption-v1\n"); np_puts(&origin, "baseline-context\t"); np_puts(&origin, base); np_puts(&origin, "\njob\t"); np_puts(&origin, id); np_puts(&origin, "\n");
+    if (cx_fmt(p, sizeof p, "%s/adoption.tsv", dir) || cx_write(p, origin.p, origin.n)) exit(2); free(origin.p);
+}
+static int adoption_case(const char *name, const char *base) {
+    long case_deadline = sy_now_ms() + 53000;
+    char td[4400], root[4400], context[4400], jobs[4400], original[4400], p[4400], bound[4400], compiler[4400], badbase[4400];
+    if (cx_fmt(td, sizeof td, "%s/adopt-check-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+    if (cx_fmt(root, sizeof root, "%s/root", td) || mkdir(root, 0700) || cx_fmt(context, sizeof context, "%s/ctx", td) || mkdir(context, 0700) || cx_fmt(jobs, sizeof jobs, "%s/jobs", context) || mkdir(jobs, 0700)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/adoption-origin.tsv", base)) return 2;
+    size_t n; char *ctx = cx_read(p, &n); if (!ctx) return 2;
+    const char *at = strstr(ctx, "\nphysical-root\t"); if (!at) return 2; at += strlen("\nphysical-root\t"); const char *e = strchr(at, '\n');
+    if (!e || e - at >= (long)sizeof original || mm_copy(original, sizeof original, at, e - at)) return 2; original[e - at] = 0; free(ctx);
+    if (cx_fmt(p, sizeof p, "%s/context.tsv", base)) return 2; ctx = cx_read(p, &n); if (!ctx) return 2;
+    at = strstr(ctx, "\ncc\t"); if (!at) return 2; at += 4; e = strchr(at, '\n');
+    if (!e || e - at >= (long)sizeof compiler || mm_copy(compiler, sizeof compiler, at, e - at)) return 2; compiler[e - at] = 0; free(ctx);
+    if (access(compiler, X_OK)) { fprintf(stderr, "NOT_RUN adoption material compiler unavailable: %s\n", compiler); return 3; }
+    const char *names[] = {"exec", "seed", "tools", "include", "cx", "unisacc.com", "unisacc.com.build.json"};
+    char source[7][4400]; char *copy[12] = {"cp", "-a"}; int count = 2;
+    for (int i = 0; i < 7; i++) { if (cx_fmt(source[i], 4400, "%s/%s", original, names[i])) return 2; copy[count++] = source[i]; }
+    copy[count++] = root; copy[count] = 0;
+    np_result run = {0}; char why[300]; if (np_run(copy, 0, 0, 15, &run, why, sizeof why) || run.rc) return 2; np_free(&run);
+    char cv[4400]; if (cx_fmt(p, sizeof p, "%s/cc.version", base) || cx_fmt(cv, sizeof cv, "%s/cc.version", context)) return 2; fixture_copy(p, cv);
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || sp_begin_job_endpoint(root, jobs, compiler, bound)) return 2;
+    if (!strcmp(name, "closure")) {
+        fixture_job(base, context, "tool-gen"); np_buf first = sp_adoption_record("tool-gen", base, 0, 0);
+        if (cx_fmt(p, sizeof p, "%s/tool-gen/record.tsv", jobs) || cx_write(p, first.p, first.n)) return 2; free(first.p);
+        if (cx_fmt(p, sizeof p, "%s/exec/lex/count-byte.tsv", root)) return 2;
+    } else if (!strcmp(name, "generator")) { if (cx_fmt(p, sizeof p, "%s/seed/gen.c", root)) return 2; }
+    else if (!strcmp(name, "output")) {
+        /* Corrupt only a private copy of the real baseline job, never its record. */
+        char from[4400], to[4400];
+        if (cx_fmt(badbase, sizeof badbase, "%s/baseline-ctx", td) || mkdir(badbase, 0700) || cx_fmt(to, sizeof to, "%s/jobs", badbase) || mkdir(to, 0700)) return 2;
+        const char *meta[] = {"context.tsv", "cc.version"};
+        for (int i = 0; i < 2; i++) { if (cx_fmt(from, sizeof from, "%s/%s", base, meta[i]) || cx_fmt(to, sizeof to, "%s/%s", badbase, meta[i])) return 2; fixture_copy(from, to); }
+        if (cx_fmt(from, sizeof from, "%s/jobs/tool-gen", base) || cx_fmt(to, sizeof to, "%s/jobs/tool-gen", badbase)) return 2;
+        char *cp[] = {"cp", "-a", from, to, 0}; if (np_run(cp, 0, 0, 10, &run, why, sizeof why) || run.rc) return 2; np_free(&run);
+        if (cx_fmt(from, sizeof from, "%s/adoption-origin.tsv", base)) return 2; char *origin = cx_read(from, &n); if (!origin) return 2;
+        char *tail = strstr(origin, "\nphysical-context\t"); if (!tail) return 2; tail += strlen("\nphysical-context\t");
+        np_buf capture = {0}; np_put(&capture, origin, tail - origin); np_puts(&capture, badbase); np_puts(&capture, "\n"); free(origin);
+        if (cx_fmt(to, sizeof to, "%s/adoption-origin.tsv", badbase) || cx_write(to, capture.p, capture.n)) return 2; free(capture.p);
+        base = badbase; if (cx_fmt(p, sizeof p, "%s/jobs/tool-gen/result.exe", base)) return 2;
+    } else if (strcmp(name, "unchanged") && strcmp(name, "missing")) return 2;
+    if (!strcmp(name, "closure") || !strcmp(name, "generator") || !strcmp(name, "output")) {
+        char *s = cx_read(p, &n); if (!s || !n) return 2; s[n - 1] ^= 1; if (cx_write(p, s, n)) return 2; free(s);
+    }
+    char refused[4400], target[4400];
+    if (cx_fmt(refused, sizeof refused, "%s/refusal.txt", td) || cx_fmt(target, sizeof target, "%s/%s", jobs, !strcmp(name, "closure") ? "gen-shared-e1" : "tool-gen")) return 2;
+    int pid = fork(), status; if (pid < 0) return 2;
+    if (!pid) {
+        if (sy_setpgid(0, 0)) _exit(2);
+        int fd = open(refused, O_WRONLY | O_CREAT | O_EXCL, 0600); if (fd < 0 || dup2(fd, 2) < 0) _exit(3); close(fd);
+        if (sp_begin_job_endpoint(root, jobs, compiler, bound)) _exit(2);
+        np_buf result = sp_adoption_prepare(!strcmp(name, "closure") ? "gen-shared-e1" : "tool-gen", !strcmp(name, "missing") ? "/no/such/adoption-baseline" : base, 0, 0);
+        free(result.p); _exit(0);
+    }
+    sy_setpgid(pid, pid);
+    long deadline = case_deadline < sy_now_ms() + 40000 ? case_deadline : sy_now_ms() + 40000; int got = 0;
+    while (!got) {
+        got = waitpid(pid, &status, WNOHANG); if (got < 0 && errno == EINTR) got = 0;
+        if (!got) {
+            long now = sy_now_ms();
+            if (now < 0 || now >= deadline) {
+                sy_killpg(pid, SIGKILL); kill(pid, SIGKILL);
+                for (int reap = 0; reap < 200; reap++) { got = waitpid(pid, &status, WNOHANG); if (got == pid) break; usleep(1000); }
+                break;
+            }
+            usleep(1000);
+        }
+    }
+    int rc = got == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    const char *reason = !strcmp(name, "missing") ? "adopt-baseline-context" : !strcmp(name, "output") ? "adopt-output-sha-mismatch" : "adopt-closure-or-generator-changed";
+    ck(!strcmp(name, "unchanged") ? rc == 0 : rc == 2 && hasfile(refused, reason), name);
+    struct stat leftover; errno = 0; ck(lstat(target, &leftover) && errno == ENOENT, "failed-job-directory-absent");
+    if (rc) { size_t rn; char *raw = cx_read(refused, &rn); if (raw) { fwrite(raw, 1, rn, stderr); free(raw); } }
+    char cleanup[600]; int clean = unisa_safedel(td, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000, cleanup, sizeof cleanup);
+    if (clean) { fprintf(stderr, "adoption fixture cleanup: %s\n", cleanup); return 2; }
+    printf("CHECK_SOURCE_ADOPTION\tcase=%s\tfailed=%d\n", name, failed); return failed ? 1 : 0;
+}
+/* Copy only: this entry never executes a tool against publication material. */
+static int capture_baseline(const char *base, const char *dest) {
+    char root[4400], context[4400], p[4400], logical[4400];
+    if (mkdir(dest, 0700) || cx_fmt(root, sizeof root, "%s/root", dest) || mkdir(root, 0700) || cx_fmt(context, sizeof context, "%s/ctx", dest)) return 2;
+    np_result r = {0}; char why[300]; char *copy[] = {"cp", "-a", (char *)base, context, 0};
+    if (np_run(copy, 0, 0, 20, &r, why, sizeof why) || r.rc) return 2; np_free(&r);
+    if (cx_fmt(p, sizeof p, "%s/context.tsv", context)) return 2;
+    size_t n; char *s = cx_read(p, &n); if (!s) return 2;
+    const char *at = strstr(s, "\nroot\t"); if (!at) return 2; at += 6; const char *e = strchr(at, '\n');
+    if (!e || e - at >= (long)sizeof logical || mm_copy(logical, sizeof logical, at, e - at)) return 2; logical[e - at] = 0; free(s);
+    const char *names[] = {"exec", "seed", "tools", "include", "cx", "unisacc.com", "unisacc.com.build.json"};
+    char source[7][4400]; char *v[12] = {"cp", "-a"}; int count = 2;
+    for (int i = 0; i < 7; i++) { if (cx_fmt(source[i], 4400, "%s/%s", logical, names[i])) return 2; v[count++] = source[i]; }
+    v[count++] = root; v[count] = 0;
+    if (np_run(v, 0, 0, 20, &r, why, sizeof why) || r.rc) return 2; np_free(&r);
+    np_buf b = {0}; np_puts(&b, "source-package-baseline-capture-v1\nlogical-root\t"); np_puts(&b, logical); np_puts(&b, "\nlogical-context\t"); np_puts(&b, base); np_puts(&b, "\nphysical-root\t"); np_puts(&b, root); np_puts(&b, "\nphysical-context\t"); np_puts(&b, context); np_puts(&b, "\n");
+    if (cx_fmt(p, sizeof p, "%s/adoption-origin.tsv", context) || cx_write(p, b.p, b.n)) return 2; free(b.p);
+    printf("BASELINE_CAPTURE\t%s\tclaim=copy-only-not-verification\n", context); return 0;
+}
+static void fixture_field(const char *text, const char *key, char out[4400]) {
+    char needle[100]; if (cx_fmt(needle, sizeof needle, "\n%s\t", key)) exit(2);
+    const char *p = strstr(text, needle); if (!p) exit(2); p += strlen(needle); const char *e = strchr(p, '\n');
+    if (!e || e == p || e - p >= 4400 || mm_copy(out, 4400, p, e - p)) exit(2); out[e - p] = 0;
+}
+/* Real CLI transactions against a prepared, immutable current context. Only
+ * captured-baseline variants are damaged; the publication source is never read. */
+static int transaction_case(const char *name, const char *root, const char *context, const char *controller, const char *base, const char *logpath) {
+    char td[4400], oldroot[4400], lr[4400], lc[4400], variantroot[4400], variantctx[4400], p[4400], from[4400], to[4400];
+    if (cx_fmt(td, sizeof td, "%s/adopt-transaction-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+    const char *target = !strcmp(name, "closure") ? "gen-shared-e1" : "tool-pack";
+    if (strcmp(name, "missing") && strcmp(name, "closure") && strcmp(name, "generator") && strcmp(name, "output")) return 2;
+    if (cx_fmt(p, sizeof p, "%s/jobs/%s", context, target)) return 2;
+    struct stat st; errno = 0; if (!lstat(p, &st) || errno != ENOENT) { fprintf(stderr, "transaction test requires absent target %s\n", p); return 2; }
+    const char *baseline_arg = "/no/such/adoption-baseline";
+    if (strcmp(name, "missing")) {
+        if (cx_fmt(from, sizeof from, "%s/adoption-origin.tsv", base)) return 2; size_t n; char *origin = cx_read(from, &n); if (!origin) return 2;
+        fixture_field(origin, "physical-root", oldroot); fixture_field(origin, "logical-root", lr); fixture_field(origin, "logical-context", lc); free(origin);
+        if (cx_fmt(variantroot, sizeof variantroot, "%s/root", td) || mkdir(variantroot, 0700) || cx_fmt(variantctx, sizeof variantctx, "%s/ctx", td) || mkdir(variantctx, 0700) || cx_fmt(to, sizeof to, "%s/jobs", variantctx) || mkdir(to, 0700)) return 2;
+        const char *parts[] = {"exec", "seed", "tools", "include", "cx", "unisacc.com", "unisacc.com.build.json"};
+        char source[7][4400]; char *copy[12] = {"cp", "-a"}; int count = 2;
+        for (int i = 0; i < 7; i++) { if (cx_fmt(source[i], 4400, "%s/%s", oldroot, parts[i])) return 2; copy[count++] = source[i]; }
+        copy[count++] = variantroot; copy[count] = 0; np_result copied = {0}; char why[300];
+        if (np_run(copy, 0, 0, 15, &copied, why, sizeof why) || copied.rc) return 2; np_free(&copied);
+        const char *meta[] = {"context.tsv", "cc.version"};
+        for (int i = 0; i < 2; i++) { if (cx_fmt(from, sizeof from, "%s/%s", base, meta[i]) || cx_fmt(to, sizeof to, "%s/%s", variantctx, meta[i])) return 2; fixture_copy(from, to); }
+        const char *ids[] = {target, "tool-gen"}; int extent = !strcmp(name, "closure") ? 2 : 1;
+        for (int i = 0; i < extent; i++) {
+            if (cx_fmt(from, sizeof from, "%s/jobs/%s", base, ids[i]) || cx_fmt(to, sizeof to, "%s/jobs/%s", variantctx, ids[i])) return 2;
+            char *cp[] = {"cp", "-a", from, to, 0}; if (np_run(cp, 0, 0, 10, &copied, why, sizeof why) || copied.rc) return 2; np_free(&copied);
+        }
+        np_buf descriptor = {0}; np_puts(&descriptor, "source-package-baseline-capture-v1\nlogical-root\t"); np_puts(&descriptor, lr); np_puts(&descriptor, "\nlogical-context\t"); np_puts(&descriptor, lc); np_puts(&descriptor, "\nphysical-root\t"); np_puts(&descriptor, variantroot); np_puts(&descriptor, "\nphysical-context\t"); np_puts(&descriptor, variantctx); np_puts(&descriptor, "\n");
+        if (cx_fmt(to, sizeof to, "%s/adoption-origin.tsv", variantctx) || cx_write(to, descriptor.p, descriptor.n)) return 2; free(descriptor.p);
+        if (!strcmp(name, "closure")) { if (cx_fmt(to, sizeof to, "%s/exec/lex/count-byte.tsv", variantroot)) return 2; }
+        else if (!strcmp(name, "generator")) { if (cx_fmt(to, sizeof to, "%s/seed/gen.c", variantroot)) return 2; }
+        else if (cx_fmt(to, sizeof to, "%s/jobs/%s/result.exe", variantctx, target)) return 2;
+        char *bytes = cx_read(to, &n); if (!bytes || !n) return 2; bytes[n - 1] ^= 1; if (cx_write(to, bytes, n)) return 2; free(bytes); baseline_arg = variantctx;
+    }
+    char *v[] = {(char *)controller, "adopt-job", (char *)root, (char *)context, (char *)baseline_arg, (char *)target, 0};
+    np_result r = {0}; char why[300]; int transport = np_run(v, root, 0, 45, &r, why, sizeof why);
+    np_buf log = {0}; if (r.outn) np_put(&log, r.out, r.outn); if (r.errn) np_put(&log, r.err, r.errn); if (transport) np_puts(&log, why);
+    if (cx_write(logpath, log.p ? log.p : "", log.n)) return 2;
+    const char *reason = !strcmp(name, "missing") ? "canonical-input-path-required" : !strcmp(name, "output") ? "adopt-output-sha-mismatch" : !strcmp(name, "closure") ? "adopt-baseline-job-not-verified" : "adopt-closure-or-generator-changed";
+    ck(!transport && r.rc == 2 && log.p && strstr(log.p, reason), name);
+    errno = 0; ck(lstat(p, &st) && errno == ENOENT, "transaction-failed-job-directory-absent");
+    free(log.p); np_free(&r);
+    char cleanup[600]; if (unisa_safedel(td, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000, cleanup, sizeof cleanup)) { fprintf(stderr, "%s\n", cleanup); return 2; }
+    printf("CHECK_ADOPTION_TRANSACTION\tcase=%s\tfailed=%d\n", name, failed); return failed ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    if (argc == 8 && !strcmp(argv[1], "--transaction-case")) return transaction_case(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+    if (argc == 4 && !strcmp(argv[1], "--capture-baseline")) return capture_baseline(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--adoption-case")) return adoption_case(argv[2], argv[3]);
     char cwd[400], com[500], tool[500], *o = 0;
     size_t n = 0;
     { char *v[] = {"pwd", 0};
