@@ -28,6 +28,30 @@
 - 模型 sha:e2/e1 解压后模型字节的 sha(与 modelcache 载荷 sha 同一身份),不用文件名或 mtime;
 - 目标与 ABI:目标三元组加调用约定/类型宽度表的 sha。
 
+### 键字段实测(tools/check-cx-unitkey.cx,批次 cx-unitkey;`stream e2|e1 --multi --unit N`,同单元逐项变化比输出字节)
+
+| 字段 | e2 | e1(输入同一份 e2 输出) | 键处理 |
+|---|---|---|---|
+| 单元源字节 | AFFECTS | 经 e2 输出传递 | 入键(单元源 sha) |
+| 二级头内容(h.h 包含的 h2.h) | AFFECTS | 经 e2 输出传递 | 须入键:传递头 sha 序列 |
+| defines(-D 记录,含值) | AFFECTS | NO_EFFECT | 入键:defines 记录序列 sha |
+| 源标签(\0cli/source) | AFFECTS(源含 __FILE__ 时) | NO_EFFECT | 入键:标签(或证明源无 __FILE__/诊断位置依赖) |
+| 单元序号 --unit | NO_EFFECT(nunit=1) | NO_EFFECT | 不入键;但 nunit>1 时 RT-SHARED 宏随序号变(UNMEASURED,见下) |
+| include-dir 路径(头字节相同) | NO_EFFECT | NO_EFFECT | 路径本身不入键,入键的是 e2 实际读到的头内容 |
+| quote-dir(头字节相同) | NO_EFFECT | 未测 | 同上 |
+| 前序属性表(\0cli/attributes,USLATTRT 载体) | 载荷 NO_EFFECT;载体被原样回带(不带 --raw 的输出含它) | NO_EFFECT | 载荷键不含前序表;但命中回放须把本单元新增属性记录按序号并入累积表,不能直接复用含载体的旧输出 |
+| nunit / RT-SHARED(st_nunit) | UNMEASURED(stream 不设 st_units) | UNMEASURED | 多单元自链接时 \0cli/defines 带 RT-SHARED 宏,须入键:(nunit>1 标志 + 本单元 provider 序号) |
+| hs_file_note 单槽 | UNMEASURED(运行期副作用,stream 无入口) | UNMEASURED | 缓存命中会跳过 e2 的读文件登记,runcache 依赖集将缺项;命中时须回放依赖 |
+| e2/e1 模型、目标、ABI | 不在 stream 变量内 | 同 | 已在键(目标另有 --target 路径) |
+
+实测修正原键字段:原键漏 defines、源标签(含 __FILE__ 时)、传递头内容(二级头);原键含强制头 sha 序列,实测里对应"头内容变则输出变",传递头与强制头同类,须由 e2 读文件登记取得而非预先枚举。
+
+命中时依赖回放要求:
+1. 传递头:缓存条目须附 e2 读到的全部头(路径加内容 sha)清单;命中前逐项核当前内容 sha,任一不符按未命中。头路径解析受 include-dir/quote-dir 影响,故清单记解析后的实际文件,不记目录。
+2. hs_file_note 与 runcache 依赖集:命中必须把清单里的文件回放进 hs_file_note,否则运行缓存键漏依赖(UNMEASURED,产品落地时实测)。
+3. 前序属性表:命中时按单元序号重放本单元的属性记录到累积表;缓存载荷存不含载体的载荷(--raw 形态)。
+4. 源标签:含 __FILE__ 或诊断位置的输出依赖标签,标签入键。
+
 文件格式沿用 modelcache 风格:"UNIUC1\n" + 载荷 sha(64 hex)+ "\n" + 载荷,文件名 uc-<键>;产品版另在头内记键本身并在命中时核对(夹具标 UNMEASURED,须产品落地时补)。写入先写 .tmp.<pid> 再用无覆盖发布(link 发布法)落位;并发写同键内容必然相同。
 
 命中仍核内容:读出后核载荷 sha 与头内键;任何失败(无文件、头坏、sha 不符、截断、长度不符)都按未命中回退重算,不报错;重算后重新发布。缓存结果不替代执行结论,UNISACC_RUN_CACHE=0 同时关读写,路径与现状字节相同。
