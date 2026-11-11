@@ -16,12 +16,17 @@
      sh ./unisacc.com tests/cxlibc.cx -- --init    the first baseline; refused when tests/cxlibc.tsv
                                                    exists
    One symindex query (under tools/bound 50) does the scan; rc 2 when it fails. */
+/* --check --files PATH... intentionally runs the complete check: external-name
+   classification, total debt, move rows and stale rows are global invariants. */
 #define BASELINE "tests/cxlibc.tsv"
 #define LAYERS "tests/cxraw-layers.tsv"
 #define MAXROWS 8192
 #define HN 16384
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.poll
+#pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use text.text
 #pragma unisa use text.num
@@ -135,10 +140,17 @@ static int load_baseline(void) {
 }
 
 /* all of FD into a heap buffer, NUL-terminated */
+static int drain_deadline_hit;
 static char *drain(int fd, long *n) {
-    long cap = 1 << 16, r; char *b = mm_alloc(cap);
-    *n = 0;
-    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+    long cap = 1 << 16, r, deadline = sy_now_ms() + 50000; char *b = mm_alloc(cap);
+    *n = 0; drain_deadline_hit = 0;
+    for (;;) {
+        sy_pollfd_t pf; long left = deadline - sy_now_ms();
+        if (!b) break;
+        pf.fd = fd; pf.events = SY_POLLIN; pf.revents = 0;
+        if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { drain_deadline_hit = 1; break; }
+        r = sy_read(fd, b + *n, cap - 1 - *n);
+        if (r <= 0) break;
         *n += r;
         if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) { mm_free(b); return 0; } b = g; cap *= 2; }
     }
@@ -152,7 +164,8 @@ static char *run(char **argv, long *n, int *rc) {
     if (pid < 0) return 0;
     o = drain(ofd, n);
     sy_close(ofd);
-    if (sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex) *rc = code;
+    if (drain_deadline_hit) { sy_killpg(pid, 9); sy_kill(pid); }   /* deadline 50s: kill the group, rc stays -1 */
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex && !drain_deadline_hit) *rc = code;
     return o;
 }
 
@@ -198,9 +211,11 @@ int main(int argc, char **argv) {
     int check, init, files = 0, over = 0, under = 0, k, rc; long total = 0, base_total = 0, ln, at;
     char *list; Buf out = {0, 0, 0};
     char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", ":(exclude)archive/", ":(exclude)ujs/", 0};
-    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write") && !tx_eqz(argv[1], "--init"))) {
-        sy_eprintf("usage: cxlibc.cx --check | --write | --init   (from the repo root)\n"); return 2;
+    int scoped = argc >= 4 && tx_eqz(argv[1], "--check") && tx_eqz(argv[2], "--files");
+    if (!scoped && (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write") && !tx_eqz(argv[1], "--init")))) {
+        sy_eprintf("usage: cxlibc.cx --check [--files PATH...] | --write | --init\n"); return 2;
     }
+    if (scoped) sy_eprintf("cxlibc: --files retains full scan (global classification, total debt and move invariants)\n");
     check = tx_eqz(argv[1], "--check"); init = tx_eqz(argv[1], "--init");
     if (sy_exists(".git") != 1 || sy_exists(LAYERS) != 1) { sy_eprintf("cxlibc: run from the repo root\n"); return 2; }
     if (init) {

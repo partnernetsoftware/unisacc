@@ -82,18 +82,23 @@ static int put(char **out, long *olen, long *ocap, const char *line) {
     return 0;
 }
 
+/* --check --files PATH... retains the global scan: TOTAL is the actual
+   sum of all tracked non-symlink src/*.cx files, never a baseline estimate. */
 int main(int argc, char **argv) {
     char *list = 0, *out; size_t ln = 0; long at, olen = 0, ocap = 1 << 14, total = 0; int files = 0, over = 0, under = 0, k, mode, rc;
-    if (argc != 2) { sy_eprintf("usage: srcshape.cx --check | --write | --init\n"); return 2; }
+    if (argc < 2 || (argc != 2 && (argc < 4 || !tx_eq(argv[1], "--check", 1L << 20) || !tx_eq(argv[2], "--files", 1L << 20)))) {
+        fprintf(stderr, "usage: srcshape.cx --check [--files PATH...] | --write | --init (from the repo root)\n"); return 2;
+    }
     mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
-    if (mode < 0) { sy_eprintf("usage: srcshape.cx --check | --write | --init\n"); return 2; }
+    if (mode < 0) { sy_eprintf("usage: srcshape.cx --check [--files PATH...] | --write | --init\n"); return 2; }
+    if (argc > 2) sy_eprintf("srcshape: --files retains global scan for TOTAL line invariant\n");
     {   size_t bn; char *b = cx_read(BASELINE, &bn);
         if (mode == 2 && b) { sy_eprintf("srcshape: --init refused, %s exists\n", BASELINE); return 2; }
         if (mode != 2 && !b) { sy_eprintf("srcshape: cannot read %s (run --init once)\n", BASELINE); return 2; }
         if (b) { load(b, (long)bn); mm_free(b); }
         if (mode != 2 && base_total < 0) { sy_eprintf("srcshape: %s has no TOTAL row\n", BASELINE); return 2; }
     }
-    rc = cx_run("git ls-files -s -z -- 'src/*.cx'", &list, &ln);
+    rc = cx_run_timeout("git ls-files -s -z -- 'src/*.cx'", 50, &list, &ln);
     if (rc != 0 || !list) { sy_eprintf("srcshape: git ls-files failed\n"); return 2; }
     out = mm_alloc(ocap); if (!out) return 2;
     if (put(&out, &olen, &ocap, "# tests/srcshape.tsv -- tests/srcshape.cx: per src/*.cx file lines, longest top-level block, `if` count;\n"

@@ -6,6 +6,8 @@
    with tests/aluiwidth.tsv; counts only go down. Report-only in spirit: no site is rejected
    for being wide, only for being new.
      sh ./unisacc.com -run tests/aluiwidth.cx -- --check | --write */
+/* --check --files PATH... scans only named result tables. Changes to manifests,
+   facts, or this ratchet/baseline retain a full scan because bindings are shared. */
 #define BASELINE "tests/aluiwidth.tsv"
 #define MAXR 512
 
@@ -64,7 +66,7 @@ static long fact_value(const char *fact, long fn, const char *rhs, long rn) {
 static void load_binds(const char *dir, long dn, const char *stem, long sn) {
     char pat[400], *list = 0, *rec, *end; size_t ln = 0;
     nbnd = 0;
-    if (cx_fmt(pat, sizeof pat, "git ls-files -z -- 'exec/%.*s/*-manifest.tsv'", (int)dn, dir) || cx_run(pat, &list, &ln) != 0 || !list) return;
+    if (cx_fmt(pat, sizeof pat, "git ls-files -z -- 'exec/%.*s/*-manifest.tsv'", (int)dn, dir) || cx_run_timeout(pat, 50, &list, &ln) != 0 || !list) return;
     for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
         size_t n, i = 0; char *b = *rec ? cx_read(rec, &n) : 0;
         if (!b) continue;
@@ -163,9 +165,12 @@ static int load_baseline(void) {
 
 int main(int argc, char **argv) {
     char *list = 0, *rec, *end; size_t ln = 0; int check, files = 0, total = 0, base_total = 0, over = 0, under = 0, k, rc;
-    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
-        fprintf(stderr, "usage: aluiwidth.cx --check | --write   (from the repo root)\n"); return 2;
+    int scoped = argc >= 4 && tx_eqz(argv[1], "--check") && tx_eqz(argv[2], "--files"), full = !scoped;
+    if (!scoped && (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write")))) {
+        fprintf(stderr, "usage: aluiwidth.cx --check [--files PATH...] | --write\n"); return 2;
     }
+    /* Missing old paths from deletion/rename require the original full discovery. */
+    for (k = 3; scoped && k < argc; k++) if (access(argv[k], F_OK) || !tx_prefixz(argv[k], "exec/", 5) || !tx_suffix(argv[k], tx_len(argv[k], 4096), "-result.tsv", 11)) full = 1;
     if (!self_check()) { fprintf(stderr, "aluiwidth: self-check failed\n"); return 2; }
     check = tx_eqz(argv[1], "--check");
     if (check && load_baseline() < 0) return 2;
@@ -179,6 +184,7 @@ int main(int argc, char **argv) {
         for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
             size_t n; char *src; int c;
             if (!*rec) continue;
+            if (!full) { int selected = 0; for (k = 3; k < argc; k++) if (tx_eqz(rec, argv[k])) selected = 1; if (!selected) continue; }
             src = cx_read(rec, &n);
             {   const char *d = rec + 5, *sl = d, *st, *se;   /* exec/DIR/STEM-result.tsv */
                 while (*sl && *sl != '/') sl++;
@@ -206,7 +212,7 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    for (k = 0; k < nrows; k++) base_total += rows[k].count;
+    for (k = 0; k < nrows; k++) if (full || rows[k].used) base_total += rows[k].count;
     printf("aluiwidth: %s: %d tables, %d wide ALUI (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
            over ? "FAIL" : "ok", files, total, base_total, over, under);
     return over ? 1 : 0;

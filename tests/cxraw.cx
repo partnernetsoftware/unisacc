@@ -198,24 +198,28 @@ static char *ls_path(char *rec) {
     return *rec ? rec + 1 : 0;
 }
 
+/* --check --files PATH... retains a global scan: total debt and move
+   target equality require current counts for every tracked upper-layer unit. */
 int main(int argc, char **argv) {
     char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0, line[4200]; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
     arena = ar_new(1L << 32);
     if (!arena) { fprintf(stderr, "cxraw: cannot create the arena\n"); return 2; }
-    if (argc != 2 || (!tx_eq(argv[1], "--check", CAP) && !tx_eq(argv[1], "--write", CAP))) {
-        fprintf(stderr, "usage: cxraw.cx --check | --write   (from the repo root)\n"); return 2;
+    if (argc < 2 || (argc != 2 && (argc < 4 || !tx_eq(argv[1], "--check", 1L << 20) || !tx_eq(argv[2], "--files", 1L << 20)))) {
+        fprintf(stderr, "usage: cxraw.cx --check [--files PATH...] | --write (from the repo root)\n"); return 2;
     }
+    if (!tx_eq(argv[1], "--check", CAP) && !tx_eq(argv[1], "--write", CAP)) return 2;
     if (count_calls(cxraw_sample, sizeof cxraw_sample - 1) != 1) {
         fprintf(stderr, "cxraw: scanner self-check failed\n");
         return 2;
     }
     check = tx_eq(argv[1], "--check", CAP);
+    if (argc > 2) fprintf(stderr, "cxraw: --files retains global scan for total debt and move invariants\n");
     if (load_layers() < 0) return 2;
-    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    rc = cx_run_timeout("git rev-parse --show-cdup", 50, &cdup, &cl);
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxraw: run from the repo root\n"); return 2; }
     if (load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -s -z -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only; C files are counted where cx/ keeps them */
+    rc = cx_run_timeout("git ls-files -s -z -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'", 50, &list, &ln);   /* archive/ is reference-only; C files are counted where cx/ keeps them */
     if (rc != 0 || !list) { fprintf(stderr, "cxraw: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
         append(&out, &olen, &ocap, "# tests/cxraw.tsv -- written by tests/cxraw.cx --write.\n");

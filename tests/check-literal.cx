@@ -6,6 +6,8 @@
  * referenced as ["constant","NAME"].  Counted: the last argument of CMPI, LDI, ALUI
  * and A64I when it is an integer other than 0 or 1.  tests/literal.tsv only goes
  * down: --check fails naming each file above its row, or a new file above 0. */
+/* --check --files PATH... counts only named discovered result tables; baseline
+ * or checker changes retain a complete scan. No output-only filtering. */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use text.text
@@ -55,7 +57,10 @@ static int baseline(const char *t, const char *path) {
 int main(int argc, char **argv) {
     int write = argc > 1 && !strcmp(argv[1], "--write"), bad = 0, total = 0;
     if (argc == 3 && !strcmp(argv[1], "--count")) { printf("LITERAL\t%d\n", count_file(argv[2])); return 0; }
-    if (argc > 2 || (argc == 2 && !write && strcmp(argv[1], "--check"))) { fputs("usage: check-literal.cx --check|--write|--count FILE\n", stderr); return 2; }
+    int scoped = argc >= 4 && !strcmp(argv[1], "--check") && !strcmp(argv[2], "--files"), full = !scoped, scanned = 0;
+    if (!scoped && (argc > 2 || (argc == 2 && !write && strcmp(argv[1], "--check")))) { fputs("usage: check-literal.cx --check [--files PATH...]|--write|--count FILE\n", stderr); return 2; }
+    /* Missing old paths from deletion/rename require the original full discovery. */
+    for (int i = 3; scoped && i < argc; i++) if (access(argv[i], F_OK) || !strcmp(argv[i], "tests/literal.tsv") || !strcmp(argv[i], "tests/check-literal.cx")) full = 1;
     char *old = slurp("tests/literal.tsv"); FILE *o = 0;
     if (!old && !write) { fputs("LITERAL\tno baseline\n", stderr); return 2; }
     if (write) { o = fopen("tests/literal.tsv", "wb"); if (!o) return 2; fputs("# path\tcount\n", o); }
@@ -71,12 +76,14 @@ int main(int argc, char **argv) {
     closedir(e);
     qsort(names, (size_t)nn, 300, (int (*)(const void *, const void *))strcmp);
     for (int i = 0; i < nn; i++) {
+        if (!full) { int selected = 0; for (int j = 3; j < argc; j++) if (!strcmp(names[i], argv[j])) selected = 1; if (!selected) continue; }
+        scanned++;
         int c = count_file(names[i]); if (c < 0) return 2;
         total += c;
         if (write) { if (c) fprintf(o, "%s\t%d\n", names[i], c); }
         else if (c > baseline(old, names[i])) { printf("FAIL\t%s\t%d above %d\n", names[i], c, baseline(old, names[i])); bad++; }
     }
     if (o) fclose(o);
-    printf("LITERAL\tfiles=%d\ttotal=%d\tstatus=%s\n", nn, total, bad ? "FAIL" : "PASS");
+    printf("LITERAL\tfiles=%d\ttotal=%d\tstatus=%s\n", scanned, total, bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }

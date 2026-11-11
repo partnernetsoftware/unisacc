@@ -96,11 +96,31 @@ static int bottom(const char *p) {   /* tests/cxraw-layers.tsv prefixes and exac
 
 static Row *find(const char *p, long pl) { int k; for (k = 0; k < nrows; k++) if (tx_same(rows[k].path, tx_len(rows[k].path, 4096), p, pl)) return &rows[k]; return 0; }
 
+/* --files uses exact repo-relative paths (an optional leading ./ is ignored).
+   Membership is checked before opening source; metadata and scanner self-checks
+   remain global. Full --check and baseline-writing modes are unchanged. */
+static int selected(int argc, char **argv, const char *path) {
+    int i;
+    if (argc == 2) return 1;
+    for (i = 3; i < argc; i++) {
+        const char *p = argv[i];
+        while (p[0] == '.' && p[1] == '/') p += 2;
+        if (tx_eq(p, path, 1L << 20)) return 1;
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
     char *list = 0, *out = 0; size_t ln = 0; long at, olen = 0, ocap = 1 << 16, total = 0, base = 0; int files = 0, over = 0, under = 0, k, mode, rc;
-    if (argc != 2) { sy_eprintf("usage: cxplatform.cx --check | --write | --init\n"); return 2; }
+    if (argc < 2 || (argc != 2 && (argc < 4 || !tx_eq(argv[1], "--check", 1L << 20) || !tx_eq(argv[2], "--files", 1L << 20)))) {
+        fprintf(stderr, "usage: cxplatform.cx --check [--files PATH...] | --write | --init (from the repo root)\n"); return 2;
+    }
     mode = tx_eqz(argv[1], "--check") ? 0 : tx_eqz(argv[1], "--write") ? 1 : tx_eqz(argv[1], "--init") ? 2 : -1;
-    if (mode < 0) { sy_eprintf("usage: cxplatform.cx --check | --write | --init\n"); return 2; }
+    /* Rule/configuration edits affect every file, not just the selected paths. */
+    if (argc > 2 && (selected(argc, argv, "tests/cxplatform.cx") || selected(argc, argv, "tests/cxplatform.tsv") || selected(argc, argv, "tests/cxraw-layers.tsv"))) {
+        fprintf(stderr, "cxplatform: --files expands to full scan for rule/baseline/configuration change\n");
+        argc = 2;
+    }
+    if (mode < 0) { sy_eprintf("usage: cxplatform.cx --check [--files PATH...] | --write | --init\n"); return 2; }
     layers = cx_read(LAYERS, &layers_n); if (!layers) { sy_eprintf("cxplatform: cannot read %s\n", LAYERS); return 2; }
     {   size_t bn; char *b = cx_read(BASELINE, &bn);
         if (mode == 2 && b) { sy_eprintf("cxplatform: --init refused, %s exists\n", BASELINE); return 2; }
@@ -116,7 +136,7 @@ int main(int argc, char **argv) {
             at += l + 1;
         }
     }
-    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/' ':(exclude)ujs/'", &list, &ln);
+    rc = cx_run_timeout("git ls-files -s -z -- '*.cx' ':(exclude)archive/' ':(exclude)ujs/'", 50, &list, &ln);
     if (rc != 0 || !list) { sy_eprintf("cxplatform: git ls-files failed\n"); return 2; }
     out = mm_alloc(ocap); if (!out) return 2;
     {   const char *h = "# tests/cxplatform.tsv -- tests/cxplatform.cx: per upper-layer .cx file, platform conditionals plus raw\n"
@@ -127,6 +147,7 @@ int main(int argc, char **argv) {
         at += rl + 1;
         if (tab < 0 || tx_prefix(rec, rl, "120000", 6)) continue;   /* symlinks count under their target */
         p = rec + tab + 1; pl = rl - tab - 1;
+        if (!selected(argc, argv, p)) continue;
         if (bottom(p)) continue;
         src = cx_read(p, &sn); c = src ? count(src, (long)sn) : 0; if (src) mm_free(src);
         files++; total += c;
@@ -143,7 +164,8 @@ int main(int argc, char **argv) {
             tx_copy(out + olen, ocap - olen, line, ll); olen += ll;
         }
     }
-    for (k = 0; k < nrows; k++) if (!rows[k].used) sy_printf("cxplatform: stale row %s (--write drops it)\n", rows[k].path);
+    for (k = 0; k < nrows; k++) if (selected(argc, argv, rows[k].path) && !rows[k].used) sy_printf("cxplatform: stale row %s (--write drops it)\n", rows[k].path);
+    if (argc > 2) sy_printf("cxplatform: --files subset; baseline total is global\n");
     sy_printf("cxplatform: %s: %d .cx files, %ld platform conditionals/raw syscalls (baseline %ld); %d above baseline, %d below (--write ratchets down)\n",
               over ? "FAIL" : "ok", files, total, base, over, under);
     if (mode == 0) return over ? 1 : 0;

@@ -405,18 +405,37 @@ static char *ls_path(char *rec) {
     return *rec ? rec + 1 : 0;
 }
 
+/* --files uses exact repo-relative paths (an optional leading ./ is ignored).
+   Membership is checked before opening source; metadata and scanner self-checks
+   remain global. Full --check and baseline-writing modes are unchanged. */
+static int selected(int argc, char **argv, const char *path) {
+    int i;
+    if (argc == 2) return 1;
+    for (i = 3; i < argc; i++) {
+        const char *p = argv[i];
+        while (p[0] == '.' && p[1] == '/') p += 2;
+        if (tx_eq(p, path, 1L << 20)) return 1;
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
     char *list = 0, *cdup = 0, *rec, *p, *end, *out = 0; size_t ln = 0, cl = 0, olen = 0, ocap = 0;
     int check, files = 0, total = 0, over = 0, under = 0, base_total = 0, k, rc;
-    if (argc != 2 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
-        fprintf(stderr, "usage: cxtrunc.cx --check | --write   (from the repo root)\n"); return 2;
+    if (argc < 2 || (argc != 2 && (argc < 4 || !tx_eq(argv[1], "--check", 1L << 20) || !tx_eq(argv[2], "--files", 1L << 20)))) {
+        fprintf(stderr, "usage: cxtrunc.cx --check [--files PATH...] | --write (from the repo root)\n"); return 2;
+    }
+    if (!tx_eq(argv[1], "--check", 1L << 20) && !tx_eq(argv[1], "--write", 1L << 20)) return 2;
+    /* Rule/configuration edits affect every file, not just the selected paths. */
+    if (argc > 2 && (selected(argc, argv, "tests/cxtrunc.cx") || selected(argc, argv, "tests/cxtrunc.tsv"))) {
+        fprintf(stderr, "cxtrunc: --files expands to full scan for rule/baseline/configuration change\n");
+        argc = 2;
     }
     if (!self_check()) return 2;
     check = tx_eq(argv[1], "--check", 1L << 20);
-    rc = cx_run("git rev-parse --show-cdup", &cdup, &cl);
+    rc = cx_run_timeout("git rev-parse --show-cdup", 50, &cdup, &cl);
     if (rc != 0 || !cdup || cl > 1) { fprintf(stderr, "cxtrunc: run from the repo root\n"); return 2; }
     if (check && load_baseline() < 0) return 2;
-    rc = cx_run("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", &list, &ln);   /* archive/ is reference-only */
+    rc = cx_run_timeout("git ls-files -s -z -- '*.cx' ':(exclude)archive/'", 50, &list, &ln);   /* archive/ is reference-only */
     if (rc != 0 || !list) { fprintf(stderr, "cxtrunc: git ls-files failed (rc %d)\n", rc); return 2; }
     if (!check) {
         append(&out, &olen, &ocap, "# tests/cxtrunc.tsv -- written by tests/cxtrunc.cx --write.\n");
@@ -428,6 +447,7 @@ int main(int argc, char **argv) {
     for (rec = list, end = list + ln; rec < end; rec += strlen(rec) + 1) {
         size_t n; char *src; int c; Row *r;
         if (!(p = ls_path(rec)) || !*p) continue;
+        if (!selected(argc, argv, p)) continue;
         src = cx_read(p, &n);
         c = src ? count_trunc(src, n) : 0;
         free(src);
@@ -445,11 +465,12 @@ int main(int argc, char **argv) {
         }
     }
     { char *ulist = 0; size_t uln = 0;
-      rc = cx_run("git ls-files -o --exclude-standard -z -- '*.cx'", &ulist, &uln);
+      rc = cx_run_timeout("git ls-files -o --exclude-standard -z -- '*.cx'", 50, &ulist, &uln);
       if (rc == 0 && ulist) {
           for (rec = ulist, end = ulist + uln; rec < end; rec += strlen(rec) + 1) {
               size_t n; char *src; int c; Row *r;
               if (!*rec || tx_prefix(rec, (long)strlen(rec), "archive/", 8)) continue;
+              if (!selected(argc, argv, rec)) continue;
               src = cx_read(rec, &n);
               c = src ? count_trunc(src, n) : 0;
               free(src);
@@ -478,8 +499,9 @@ int main(int argc, char **argv) {
     }
     for (k = 0; k < nrows; k++) {
         base_total += rows[k].count;
-        if (!rows[k].used) printf("cxtrunc: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
+        if (selected(argc, argv, rows[k].path) && !rows[k].used) printf("cxtrunc: stale row %s (not a tracked .cx; --write drops it)\n", rows[k].path);
     }
+    if (argc > 2) printf("cxtrunc: --files subset; baseline total is global; scanner self-check reads tests/cxtrunc.cx\n");
     printf("cxtrunc: %s: %d .cx files, %d calls (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
            over ? "FAIL" : "ok", files, total, base_total, over, under);
     return over ? 1 : 0;

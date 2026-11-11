@@ -9,6 +9,8 @@
    goes down.  A batch that creates and removes its own scratch directory still counts: the fix is
    to take that directory from {out}.
      sh ./unisacc.com -run tests/outdep.cx -- --check | --write */
+/* --check --files PATH... selects IMPLEMENTED rows by entry source before reading
+   it; changing tests/batches.tsv, the baseline, or this checker scans all rows. */
 #define BASELINE "tests/outdep.tsv"
 #define MAXR 1024
 
@@ -64,9 +66,12 @@ static int load_baseline(void) {
 int main(int argc, char **argv) {
     size_t tn; char *tsv; long at = 0; int check, batches = 0, total = 0, over = 0, under = 0, base_total = 0, k;
     char *out = 0; size_t olen = 0, ocap = 0;
-    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write"))) {
-        fprintf(stderr, "usage: outdep.cx --check | --write   (from the repo root)\n"); return 2;
+    int scoped = argc >= 4 && tx_eqz(argv[1], "--check") && tx_eqz(argv[2], "--files"), full = !scoped;
+    if (!scoped && (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write")))) {
+        fprintf(stderr, "usage: outdep.cx --check [--files PATH...] | --write\n"); return 2;
     }
+    /* Missing old paths from deletion/rename require the original full discovery. */
+    for (k = 3; scoped && k < argc; k++) if (access(argv[k], F_OK) || tx_eqz(argv[k], "tests/batches.tsv") || tx_eqz(argv[k], BASELINE) || tx_eqz(argv[k], "tests/outdep.cx")) full = 1;
     if (!self_check()) { fprintf(stderr, "outdep: self-check failed\n"); return 2; }
     check = tx_eqz(argv[1], "--check");
     if (check && load_baseline() < 0) return 2;
@@ -89,6 +94,7 @@ int main(int argc, char **argv) {
         }
         at = e + 1;
         if (nf < 9 || !tx_eqz(f[1], "IMPLEMENTED")) continue;
+        if (!full) { int selected = 0; for (k = 3; k < argc; k++) if (tx_eqz(f[8], argv[k])) selected = 1; if (!selected) continue; }
         {   size_t n; char *src = cx_read(f[8], &n); int c;
             if (!src) continue;
             c = count_out(src, (long)n); free(src);
@@ -112,7 +118,7 @@ int main(int argc, char **argv) {
         printf("outdep: wrote %s: %d batches, %d out/ literals\n", BASELINE, batches, total);
         return 0;
     }
-    for (k = 0; k < nbase; k++) base_total += base[k].count;
+    for (k = 0; k < nbase; k++) if (full || base[k].used) base_total += base[k].count;
     printf("outdep: %s: %d batches, %d out/ literals (baseline %d); %d above baseline, %d below (--write ratchets down)\n",
            over ? "FAIL" : "ok", batches, total, base_total, over, under);
     return over ? 1 : 0;
