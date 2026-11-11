@@ -1,0 +1,458 @@
+#pragma unisa module unitcache
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use runtime.rcident
+#pragma unisa use runtime.modelcache
+#pragma unisa use runtime.attribute_frame
+#pragma unisa use runtime.runexec
+/* cx/runtime/unitcache.cx -- the unit front-end result cache (plans/unit-frontcache.md).
+
+   One entry is the unit route's output (e2 then e1) for one source unit: the payload, the
+   attribute records the stages stripped, and the stderr bytes they wrote. A different root
+   program that uses the same module unit reuses it. Pure accelerator: a hit and a miss give the
+   same bytes on every channel, and every failure (no directory, corrupt entry, changed header,
+   full disk) is a miss that recomputes.
+
+   The driver stays the owner of the stages: uc_span is handed st_span, st_pub and
+   st_attr_exchange and calls nothing upward by name. Three taps feed it: uc_cli_put (every key
+   st_pub publishes), uc_strip (attribute frames) and uc_err (stage stderr). The file receipt
+   registry (uc_note*) is shared with the run cache, so a hit can replay the unit's header reads
+   into the run cache's dependency set.
+
+   Key: sha256 of "UNIUC3", the product identity (rc_hex_ident of the container: covers the e2/e1
+   models, packaged headers, the interpreter and the ABI tables), the unit route, the sha of the
+   published \0cli state (source tag, defines with the RT-SHARED macros, includes, directories,
+   target, extras; not \0cli/attributes and not \0process/, which e2/e1 never fetch), and the sha
+   of the unit bytes. The unit ordinal and unit count are not in the key: they reach e2 only
+   through \0cli/defines.
+
+   Entry uc-<64 hex key>, in the model cache directory under its lock and byte budget:
+     "UNIUC3\n\0", six LE32 (payload, records, present files, absent paths, frame flag, stderr),
+     the key, the entry sha, then present files (LE16 length, path, 64 hex sha of the bytes the
+     stage read), absent paths (LE16 length, path), 5-byte records, stderr, payload.
+     The entry sha is of the whole file with its own 64-byte slot filled with '0': the counts,
+     the frame flag, the key and the receipts are covered, not only the body.
+   A hit needs the magic, the entry sha, the key and the lengths to hold, every present file to
+   hash the same now and every absent path to be ENOENT still.
+   The temp file is uc-<key>.tmp, written and renamed under the budget lock; one left by a
+   crashed writer is removed by the next mc_trim (cx/runtime/modelcache.cx).
+
+   On only where it was verified: host target lnx/x86_64, no tape, no deps, no resource-flow
+   capture. UNISACC_RUN_CACHE=0 never reaches uc_open, so nothing here runs. UNISACC_UNIT_CACHE=0
+   turns only this cache off and says so once per unit under UNISACC_RR_TIME:
+     RR_TIME<TAB>unitcache<TAB>result=hit|miss|store|off<TAB>ns=N */
+
+#define UC_HEAD 160
+
+typedef struct { char *b; long n; long cap; int count; } uc_list;
+
+static void (*uc_notes[4])(const char *, int);
+static int uc_noten;
+static int uc_on;
+static char uc_prod[65];
+static char uc_key[65];
+static unsigned char *uc_cli;
+static long uc_clin, uc_clicap;
+static int uc_cli_rec, uc_cli_bad;
+static int uc_strips;
+static unsigned char *uc_errb;
+static long uc_errn, uc_errcap;
+static int uc_rec, uc_bad;
+static uc_list uc_have, uc_miss;
+
+/* File receipts. Adding the same function twice is one entry. */
+int uc_note_set(void (*fn)(const char *, int)) {
+    int i;
+    if (!fn) return 4;
+    for (i = 0; i < uc_noten; i++) if (uc_notes[i] == fn) return 0;
+    if (uc_noten >= 4) return 1;
+    uc_notes[uc_noten++] = fn;
+    return 0;
+}
+
+int uc_note_drop(void (*fn)(const char *, int)) {
+    int i, w = 0;
+    for (i = 0; i < uc_noten; i++) if (uc_notes[i] != fn) uc_notes[w++] = uc_notes[i];
+    uc_noten = w;
+    return 0;
+}
+
+static int uc_grow(unsigned char **b, long *cap, long need) {
+    unsigned char *nb;
+    long c;
+    if (need <= *cap) return 0;
+    c = *cap ? *cap : 1024;
+    while (c < need) { if (c > 1073741824L) return 1; c = c * 2; }
+    nb = mm_grow(*b, c);
+    if (!nb) return 1;
+    *b = nb;
+    *cap = c;
+    return 0;
+}
+
+static int uc_app(unsigned char **b, long *n, long *cap, const void *p, long k) {
+    if (k < 0 || uc_grow(b, cap, *n + k + 1)) return 1;
+    if (k) mm_copy(*b + *n, k, p, k);
+    *n = *n + k;
+    return 0;
+}
+
+static void uc_put32(unsigned char *p, unsigned long v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+static unsigned uc_get32(const unsigned char *p) {
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+/* st_key goes through here: record what st_pub publishes while the key is being made. */
+int uc_cli_put(int (*put)(const unsigned char *, int, const unsigned char *, int),
+               const char *key, int n, const unsigned char *b, int len) {
+    unsigned char le[4];
+    if (uc_cli_rec && n > 0 && len >= 0 && !(n == 15 && mm_same(key, "\0cli/attributes", 15)) &&
+        !(n > 9 && mm_same(key, "\0process/", 9))) {
+        uc_put32(le, (unsigned long)n);
+        if (uc_app(&uc_cli, &uc_clin, &uc_clicap, le, 4) || uc_app(&uc_cli, &uc_clin, &uc_clicap, key, n)) uc_cli_bad = 1;
+        uc_put32(le, (unsigned long)len);
+        if (uc_app(&uc_cli, &uc_clin, &uc_clicap, le, 4) || uc_app(&uc_cli, &uc_clin, &uc_clicap, b, len)) uc_cli_bad = 1;
+    }
+    return put((const unsigned char *)key, n, b, len);
+}
+
+/* cxaf_strip, counting the frames it took. */
+int uc_strip(unsigned char **block, long *length, long *cap, unsigned char *input, long *input_n,
+             unsigned unit, void *(*alloc)(void *, size_t)) {
+    int rc = cxaf_strip(block, length, cap, input, input_n, unit, alloc);
+    if (rc == 1) uc_strips = uc_strips + 1;
+    return rc;
+}
+
+/* A stage's stderr bytes: kept for the entry while a unit is being compiled, always written. */
+void uc_err(const unsigned char *b, long n) {
+    if (n <= 0 || !b) return;
+    if (uc_rec && uc_app(&uc_errb, &uc_errn, &uc_errcap, b, n)) uc_bad = 1;
+    sy_write_all(2, b, n);
+}
+
+static long long uc_ns(void) {
+    sy_ts_t t;
+    if (sy_mono(&t)) return 0;
+    return (long long)t.sec * 1000000000LL + (long long)t.nsec;
+}
+
+static void uc_say(const char *result, long long t0) {
+    const char *e = sy_env("UNISACC_RR_TIME");
+    if (!e || !e[0]) return;
+    sy_eprintf("RR_TIME\tunitcache\tresult=%s\tns=%lld\n", result, t0 ? uc_ns() - t0 : 0LL);
+}
+
+static void uc_hex(const void *p, long n, char hex[65]) {
+    if (n > 0 && sy_sha256_hex(p, n, hex) == 0) return;
+    cx_sha256_hex(n > 0 ? p : "", (size_t)(n > 0 ? n : 0), hex);
+}
+
+static int uc_hex_file(const char *path, char hex[65]) {
+    sy_stat_t st;
+    size_t n = 0;
+    char *b;
+    if (sy_stat(path, &st) || st.kind != 'f' || st.size < 0 || st.size > (1L << 26)) return 1;
+    b = cx_read(path, &n);
+    if (!b || (long)n != st.size) { mm_free(b); return 1; }
+    uc_hex(b, (long)n, hex);
+    mm_free(b);
+    return 0;
+}
+
+/* An entry is the path and its NUL; uc_have entries carry 64 hex and a NUL after it (extra 65).
+   Offset of PATH's entry, or -1. */
+static long uc_list_find(const uc_list *l, const char *path, int extra) {
+    long at = 0;
+    while (at < l->n) {
+        if (tx_eqz(l->b + at, path)) return at;
+        at = at + tx_len(l->b + at, l->n - at) + 1 + extra;
+    }
+    return -1;
+}
+
+static int uc_list_add(uc_list *l, const char *path, const char *hex) {
+    long pl = tx_len(path, 4097);
+    unsigned char *b = (unsigned char *)l->b;
+    int bad;
+    if (pl <= 0 || pl > 4096 || l->count >= 4096) return 1;
+    bad = uc_app(&b, &l->n, &l->cap, path, pl + 1) || (hex && uc_app(&b, &l->n, &l->cap, hex, 65));
+    l->b = (char *)b;
+    if (!bad) l->count = l->count + 1;
+    return bad;
+}
+
+/* The receipt of one read while a unit is compiling. The sha is of the bytes the stage was
+   handed, taken here, so an entry can never pair a payload with a header edited afterwards.
+   A path read twice with different bytes in one unit poisons the store. */
+static void uc_receipt(const char *path, int present, const unsigned char *bytes, long n) {
+    char hex[65];
+    long at;
+    if (!uc_rec || uc_bad || !path || !path[0]) return;
+    if (present) {
+        if (n < 0 || (n > 0 && !bytes)) { uc_bad = 1; return; }
+        uc_hex(bytes, n, hex);
+        hex[64] = 0;
+        at = uc_list_find(&uc_have, path, 65);
+        if (at < 0) { if (uc_list_add(&uc_have, path, hex)) uc_bad = 1; }
+        else if (!mm_same(uc_have.b + at + tx_len(path, 4097) + 1, hex, 64)) uc_bad = 1;
+        return;
+    }
+    if (uc_list_find(&uc_have, path, 65) >= 0 || uc_list_find(&uc_miss, path, 0) >= 0) return;
+    if (uc_list_add(&uc_miss, path, 0)) uc_bad = 1;
+}
+
+/* hs_file reports here: present 1 with the bytes just read, 0 when the open failed with ENOENT.
+   A hit replays its receipts through here too, with no bytes. */
+void uc_note(const char *path, int present, const unsigned char *bytes, long n) {
+    int i;
+    uc_receipt(path, present, bytes, n);
+    for (i = 0; i < uc_noten; i++) uc_notes[i](path, present);
+}
+
+/* rc_open calls this once UNISACC_RUN_CACHE, tape and deps allow caching. Decides whether the
+   unit cache is on for this compile. Returns 1 when resource-flow capture or strict replay pins
+   every stage (then no cache of any kind may be used), else 0. */
+int uc_open(const char *product, const char *target) {
+    const char *e;
+    uc_on = 0;
+    if (ex_flow_pinned()) return 1;
+    e = sy_env("UNISACC_UNIT_CACHE");
+    if (e && tx_eq(e, "0", 8)) { uc_on = -1; return 0; }
+    if (!product || !target || !tx_eq(target, "lnx/x86_64", 32)) return 0;
+    if (rc_hex_ident(product, uc_prod)) return 0;
+    uc_on = 1;
+    return 0;
+}
+
+static int uc_cat(char *dst, int cap, int *at, const char *s) {
+    int i = 0;
+    while (s[i]) {
+        if (*at + 1 >= cap) return 1;
+        dst[(*at)++] = s[i++];
+    }
+    dst[*at] = 0;
+    return 0;
+}
+
+static int uc_keymake(const char *route, const unsigned char *in, long inn) {
+    char blob[512], h1[65], h2[65];
+    int at = 0;
+    uc_hex(uc_cli, uc_clin, h1);
+    uc_hex(in, inn, h2);
+    if (uc_cat(blob, 512, &at, "UNIUC3\nprod=") || uc_cat(blob, 512, &at, uc_prod) ||
+        uc_cat(blob, 512, &at, "\nroute=") || uc_cat(blob, 512, &at, route) ||
+        uc_cat(blob, 512, &at, "\ncli=") || uc_cat(blob, 512, &at, h1) ||
+        uc_cat(blob, 512, &at, "\nsrc=") || uc_cat(blob, 512, &at, h2) || uc_cat(blob, 512, &at, "\n")) return 1;
+    cx_sha256_hex(blob, (size_t)at, uc_key);
+    return 0;
+}
+
+static int uc_path(char *dir, int dcap, char *path, int pcap, const char *suffix) {
+    int at = 0;
+    if (mc_cache_dir(dir, dcap)) return 1;
+    return uc_cat(path, pcap, &at, dir) || uc_cat(path, pcap, &at, "/uc-") || uc_cat(path, pcap, &at, uc_key) ||
+        uc_cat(path, pcap, &at, suffix);
+}
+
+/* Receipts at *at. replay 0: check them against the files now. replay 1: hand them on. */
+static int uc_walk(const unsigned char *f, long n, long *at, unsigned hn, unsigned abn, int replay) {
+    char pp[4097], cur[65];
+    sy_stat_t st;
+    unsigned i, pl;
+    for (i = 0; i < hn + abn; i++) {
+        if (*at + 2 > n) return 1;
+        pl = (unsigned)f[*at] | ((unsigned)f[*at + 1] << 8);
+        *at = *at + 2;
+        if (!pl || pl > 4096 || *at + (long)pl + (i < hn ? 64 : 0) > n) return 1;
+        mm_copy(pp, 4097, f + *at, (long)pl);
+        pp[pl] = 0;
+        *at = *at + (long)pl;
+        if (replay) uc_note(pp, i < hn ? 1 : 0, 0, 0);
+        else if (i < hn ? (uc_hex_file(pp, cur) || !mm_same(cur, f + *at, 64)) : sy_stat(pp, &st) != -ENOENT) {
+            if (sy_env("UNISACC_RR_DEBUG")) sy_eprintf("RR_UNIT_MISS\t%s\t%s\n", i < hn ? "present" : "absent", pp);
+            return 1;
+        }
+        if (i < hn) *at = *at + 64;
+    }
+    return 0;
+}
+
+/* 1 on a verified hit; the caller owns *out, *recs and *err. */
+static int uc_lookup(unsigned char **out, long *outn, unsigned char **recs, long *nrec, int *framed,
+                     unsigned char **err, long *errn) {
+    char dir[4096], path[4400], hex[65], got[64];
+    unsigned char *f = 0, *ob, *rb, *eb;
+    size_t fn = 0;
+    sy_stat_t st;
+    long n, at, at2;
+    unsigned on, rn, hn, abn, en;
+    if (uc_path(dir, (int)sizeof dir, path, (int)sizeof path, "")) return 0;
+    if (sy_lstat(path, &st) || st.kind != 'f' || st.size < UC_HEAD || st.size > (1L << 27)) return 0;
+    f = (unsigned char *)cx_read(path, &fn);
+    n = (long)fn;
+    if (!f || n < UC_HEAD || !mm_same(f, "UNIUC3\n\0", 8)) goto miss;
+    /* the sha is of the whole file with its own slot zero-filled: counts, flag, key, receipts, body */
+    mm_copy(got, 64, f + 96, 64);
+    mm_fill(f + 96, 64, '0', 64);
+    uc_hex(f, n, hex);
+    if (!mm_same(hex, got, 64)) goto miss;
+    on = uc_get32(f + 8);
+    rn = uc_get32(f + 12);
+    hn = uc_get32(f + 16);
+    abn = uc_get32(f + 20);
+    en = uc_get32(f + 28);
+    if (on > (1u << 26) || rn > 1000000u || hn > 4096u || abn > 4096u || en > (1u << 24)) goto miss;
+    if (!mm_same(f + 32, uc_key, 64)) goto miss;
+    at = UC_HEAD;
+    if (uc_walk(f, n, &at, hn, abn, 0)) goto miss;
+    if (n - at != 5L * (long)rn + (long)en + (long)on) goto miss;
+    rb = mm_alloc(rn ? 5L * (long)rn : 1);
+    eb = mm_alloc(en ? (long)en : 1);
+    ob = mm_alloc(on ? (long)on : 1);
+    if (!rb || !eb || !ob) { mm_free(rb); mm_free(eb); mm_free(ob); goto miss; }
+    if (rn) mm_copy(rb, 5L * (long)rn, f + at, 5L * (long)rn);
+    if (en) mm_copy(eb, (long)en, f + at + 5L * (long)rn, (long)en);
+    if (on) mm_copy(ob, (long)on, f + at + 5L * (long)rn + (long)en, (long)on);
+    at2 = UC_HEAD;
+    (void)uc_walk(f, n, &at2, hn, abn, 1);
+    *framed = (int)uc_get32(f + 24);
+    mm_free(f);
+    *out = ob; *outn = (long)on;
+    *recs = rb; *nrec = (long)rn;
+    *err = eb; *errn = (long)en;
+    mc_cache_touch(dir, path);
+    return 1;
+miss:
+    mm_free(f);
+    return 0;
+}
+
+/* Best effort, like mc_put: temp and rename under the budget lock. 1 when published. */
+static int uc_store(const unsigned char *out, long outn, const unsigned char *recs, long nrec, int framed) {
+    char dir[4096], path[4400], tmp[4400], one[65];
+    unsigned char le[24], lb[2];
+    unsigned char *p = 0;
+    long at = 0, cap = 0, pl, off;
+    const uc_list *l;
+    int i, fd, lockfd, ok = 0;
+    if (uc_bad || !out || outn < 0 || outn > (1L << 26) || nrec < 0 || nrec > 1000000L || uc_errn > (1L << 24)) return 0;
+    if (uc_path(dir, (int)sizeof dir, path, (int)sizeof path, "") || uc_path(dir, (int)sizeof dir, tmp, (int)sizeof tmp, ".tmp")) return 0;
+    uc_put32(le, (unsigned long)outn);
+    uc_put32(le + 4, (unsigned long)nrec);
+    uc_put32(le + 8, (unsigned long)uc_have.count);
+    uc_put32(le + 12, (unsigned long)uc_miss.count);
+    uc_put32(le + 16, framed ? 1ul : 0ul);
+    uc_put32(le + 20, (unsigned long)uc_errn);
+    /* the sha slot holds 64 '0' while the whole file is hashed, then the sha */
+    mm_fill(one, 64, '0', 64);
+    if (uc_app(&p, &at, &cap, "UNIUC3\n\0", 8) || uc_app(&p, &at, &cap, le, 24) ||
+        uc_app(&p, &at, &cap, uc_key, 64) || uc_app(&p, &at, &cap, one, 64)) goto done;
+    for (i = 0; i < 2; i++) {
+        l = i ? &uc_miss : &uc_have;
+        off = 0;
+        while (off < l->n) {
+            pl = tx_len(l->b + off, l->n - off);
+            lb[0] = (unsigned char)(pl & 255);
+            lb[1] = (unsigned char)((pl >> 8) & 255);
+            if (uc_app(&p, &at, &cap, lb, 2) || uc_app(&p, &at, &cap, l->b + off, pl)) goto done;
+            /* the sha taken when the stage read the file, not a re-read */
+            if (!i && uc_app(&p, &at, &cap, l->b + off + pl + 1, 64)) goto done;
+            off = off + pl + 1 + (i ? 0 : 65);
+        }
+    }
+    if (uc_app(&p, &at, &cap, recs, 5 * nrec) || uc_app(&p, &at, &cap, uc_errb, uc_errn) || uc_app(&p, &at, &cap, out, outn)) goto done;
+    uc_hex(p, at, one);
+    mm_copy(p + 96, 64, one, 64);
+    lockfd = mc_cache_lock(dir);
+    if (lockfd < 0) goto done;
+    sy_unlink(tmp);
+    fd = sy_open_new(tmp, 0600);
+    if (fd < 0) { sy_close(lockfd); goto done; }
+    if (sy_write_all(fd, p, at) != 0 || sy_fsync(fd) != 0) { sy_close(fd); sy_unlink(tmp); sy_close(lockfd); goto done; }
+    if (sy_close(fd) != 0) { sy_unlink(tmp); sy_close(lockfd); goto done; }
+    if (mc_cache_publish(dir, tmp, path, lockfd)) sy_unlink(tmp);
+    else ok = 1;
+done:
+    mm_free(p);
+    return ok;
+}
+
+static void *uc_realloc(void *p, size_t n) { return mm_grow(p, (long)n); }
+
+/* st_span over the unit route through the cache. span/pub/xchg are the driver's st_span, st_pub
+   and st_attr_exchange. Takes in, like st_span; returns what st_span returns. */
+int uc_span(int (*span)(const char *, const char *, const char *, int, unsigned, const char *, const char *,
+                        unsigned char *, long, unsigned char **, long *, char *, int),
+            int (*pub)(const char *, const char *, int, unsigned),
+            int (*xchg)(unsigned char **, long *, long *),
+            const char *route, const char *tgt, const char *src, int cx, unsigned unit,
+            unsigned char *in, long inn, unsigned char **out, long *outn, char *why, int cap) {
+    unsigned char *recs = 0, *err = 0, *tb = 0;
+    long nrec = 0, errn = 0, tn = 0, tc = 0, an0, from, k;
+    long long t0;
+    int framed = 0, pr, s0;
+    if (uc_on < 0) uc_say("off", 0);
+    if (uc_on <= 0) return span(route, tgt, src, cx, unit, 0, 0, in, inn, out, outn, why, cap);
+    t0 = uc_ns();
+    uc_clin = 0;
+    uc_cli_bad = 0;
+    uc_cli_rec = 1;
+    pr = pub(tgt, src, cx, unit);
+    uc_cli_rec = 0;
+    if (pr || uc_cli_bad || uc_keymake(route, in, inn)) return span(route, tgt, src, cx, unit, 0, 0, in, inn, out, outn, why, cap);
+    if (uc_lookup(out, outn, &recs, &nrec, &framed, &err, &errn) == 1) {
+        mm_free(in);
+        if (errn) sy_write_all(2, err, errn);
+        pr = xchg(&tb, &tn, &tc) != 0;
+        if (!pr) {
+            if (nrec > 0) pr = cxaf_merge(&tb, &tn, &tc, recs, nrec, unit, uc_realloc) != 1;
+            else if (framed && tn == 0) {
+                /* cxaf_strip commits a zero-count header on an empty table */
+                mm_free(tb);
+                tb = mm_zalloc(256);
+                if (tb) { tn = 4; tc = 256; } else { tc = 0; pr = 1; }
+            }
+            if (xchg(&tb, &tn, &tc)) pr = 1;
+        }
+        mm_free(recs);
+        mm_free(err);
+        if (pr) { mm_free(*out); *out = 0; *outn = 0; if (why && cap > 0) why[0] = 0; return 1; }
+        uc_say("hit", t0);
+        return 0;
+    }
+    uc_say("miss", t0);
+    /* the table length before this unit: swap it out and straight back */
+    if (xchg(&tb, &tn, &tc)) { mm_free(in); return 1; }
+    an0 = tn;
+    if (xchg(&tb, &tn, &tc)) { mm_free(in); return 1; }
+    s0 = uc_strips;
+    uc_have.n = 0; uc_have.count = 0;
+    uc_miss.n = 0; uc_miss.count = 0;
+    uc_errn = 0;
+    uc_bad = 0;
+    uc_rec = 1;
+    pr = span(route, tgt, src, cx, unit, 0, 0, in, inn, out, outn, why, cap);
+    uc_rec = 0;
+    if (pr) return pr;
+    t0 = uc_ns();
+    tb = 0; tn = 0; tc = 0;
+    if (xchg(&tb, &tn, &tc)) return 0;
+    from = an0 > 4 ? an0 : 4;
+    nrec = tn > from ? (tn - from) / 9 : 0;
+    recs = nrec ? mm_alloc(nrec * 5) : 0;
+    for (k = 0; recs && k < nrec; k++) mm_copy(recs + 5 * k, 5, tb + from + 9 * k + 4, 5);
+    (void)xchg(&tb, &tn, &tc);
+    if ((!nrec || recs) && uc_store(*out, *outn, recs, nrec, uc_strips != s0)) uc_say("store", t0);
+    mm_free(recs);
+    return 0;
+}

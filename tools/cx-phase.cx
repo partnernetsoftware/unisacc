@@ -4,6 +4,7 @@
  *
  * 模式:
  *   cold  UNISACC_RUN_CACHE=0(运行缓存与模型缓存都关)
+ *   first 缓存开但目录全空的首跑(模型缓存与单元前端缓存的写入都计入);--product CMD 换被测产品命令
  *   half  运行缓存未命中(源码带新随机注释)而模型缓存命中(UNISACC_E3CACHE 指向 OUTDIR/mc,先用另一份源码预热)
  *   hot   同一份源码再跑一次(运行缓存命中)
  * 输出 TSV 到 stdout(同时写 OUTDIR/cxphase.tsv):
@@ -90,9 +91,10 @@ static int write_src(const char *path, int nuse, long nonce) {
     char t[64]; cx_fmt(t, sizeof t, "/* nonce %ld */\n", nonce); tx_cat(b, sizeof b, t);
     return cx_write(path, b, tx_len(b, sizeof b));
 }
+static const char *PRODUCT = "sh ./unisacc.com";   /* --product CMD:换成候选产品命令 */
 static long run_one(const char *src, const char *env, char *out, int cap, int *rc) {
     char cmd[1000]; long t0 = sy_now_ms();
-    cx_fmt(cmd, sizeof cmd, "%s UNISACC_RR_TIME=1 sh ./unisacc.com '%s' 2>&1", env, src);
+    cx_fmt(cmd, sizeof cmd, "%s UNISACC_RR_TIME=1 %s '%s' 2>&1", env, PRODUCT, src);
     char *v[] = {"sh", "-c", cmd, 0};
     char *o = 0; size_t on = 0;
     *rc = cx_runv_timeout(v, 55, &o, &on);
@@ -116,7 +118,8 @@ static int do_case(const char *dir, const char *cs, char *tsv, int cap) {
     /* 预热模型缓存(丢弃),再用新源码跑半冷 */
     cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", mc);
     write_src(src2, nuse, nonce + 1);
-    run_one(src2, env, out, 262144, &rc);
+    w = run_one(src2, env, out, 262144, &rc);
+    parse(a, out, tx_len(out, 262144)); emit(cs, units, "first", w, rc, a, tsv, cap);   /* 缓存开但全空:含模型缓存与单元缓存的写入 */
     write_src(src, nuse, nonce + 2);
     w = run_one(src, env, out, 262144, &rc);
     parse(a, out, tx_len(out, 262144)); emit(cs, units, "half", w, rc, a, tsv, cap);
@@ -132,6 +135,7 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         if (tx_eq(argv[i], "--case", 8) && i + 1 < argc) { if (ncase < 8) cases[ncase++] = argv[++i]; }
         else if (tx_eq(argv[i], "--parse", 8) && i + 1 < argc) pf = argv[++i];
+        else if (tx_eq(argv[i], "--product", 10) && i + 1 < argc) PRODUCT = argv[++i];
         else dir = argv[i];
     }
     if (pf) {

@@ -99,6 +99,11 @@ static int mc_entry_name(const char *s) {
         while (s[i] >= '0' && s[i] <= '9') i++;
         return s[i] == 0;
     }
+    if (s[0] == 'u' && s[1] == 'c' && s[2] == '-') { /* unit front-end result, cx/runtime/unitcache.cx */
+        i = 3;
+        while (i < 67) { if (!mc_hexchar(s[i])) return 0; i++; }
+        return s[i] == 0;
+    }
     i = 0;
     while (i < 64) { if (!mc_hexchar(s[i])) return 0; i++; }
     return s[i] == 0 || tx_eqz(s + i, ".host");
@@ -167,6 +172,7 @@ static int mc_complete(const char *path, const char *name, const sy_stat_t *st) 
         sy_read_full(fd, head, 8) == 0;
     sy_close(fd);
     if (!ok) return 0;
+    if (name[0] == 'u') return st->size >= 160 && tx_same(head, 8, "UNIUC3\n\0", 8);
     if (name[0] != 'm') return st->size >= 88 &&
         (tx_same(head, 8, "USE33\n\0\0", 8) || tx_same(head, 8, "USE34\n\0\0", 8));
     if (!tx_same(head, 6, MC_MAGIC, 6)) return 0;
@@ -260,6 +266,10 @@ static void mc_trim(const char *dir) {
         const char *name = names + at;
         long len = tx_len(name, cap - at);
         at += len + 1;
+        /* uc-<key>.tmp exists only while its writer holds the budget lock, which this caller
+           holds now: one seen here was left by a crashed writer */
+        if (len == 71 && name[0] == 'u' && name[1] == 'c' && name[2] == '-' && tx_eqz(name + 67, ".tmp") &&
+            !mc_join(path, sizeof path, dir, name)) { sy_unlink(path); continue; }
         if (len >= 96 || !mc_entry_name(name) || mc_join(path, sizeof path, dir, name)) continue;
         if (sy_lstat(path, &st) || !mc_complete(path, name, &st)) continue;
         if (total > 18446744073709551615ull - (unsigned long long)st.size) goto done;

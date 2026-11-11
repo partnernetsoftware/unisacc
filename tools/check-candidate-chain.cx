@@ -30,7 +30,7 @@ static int has(const char *h, const char *n) {
     return tx_find(h, tx_len(h, 100000), n, tx_len(n, 80)) >= 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char cwd[400], com[500], tool[500], out[65536], *o = 0;
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
@@ -45,6 +45,17 @@ int main(void) {
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=55") && has(out, "p3-models") && has(out, "g2-lnx-x86_64-obj-0") && has(out, "g2-lnx-arm64-obj-43") && has(out, "jobs-net-41-finish"), "plan"); }
+    /* 链内单元前端缓存强制关:plan 首行声明;守卫夹具在调用方把开关设成 1 时仍读到 0 且 RR_TIME 无 unitcache 命中/未命中/存储行。
+       守卫目录建在批次的 {out} 下,守卫自己清掉它写的文件,事后目录能被 rmdir 即无残留 */
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "ENV\tUNISACC_UNIT_CACHE=0"), "plan-unit-cache-forced-off"); }
+    { char cmd[1800], gd[700];
+      if (argc > 1) sy_mkdir(argv[1], 0755);   /* 批次传 {out};不带参数时退回临时目录 */
+      if (cx_fmt(gd, sizeof gd, "%s/cc-ucguard-XXXXXX", argc > 1 ? argv[1] : sy_tmpdir()) || !mkdtemp(gd)) { ck(0, "ucguard-dir"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 sh '%s' '%s' -- --uc-guard '%s' 2>&1", com, tool, gd)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "UC_GUARD\tok\tlines=0"), "chain-no-unitcache-lines");
+      ck(sy_rmdir(gd) == 0, "chain-guard-leaves-nothing"); }
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "--rev"), "missing-rev"); }

@@ -1083,6 +1083,41 @@ static void worker_nm_ok(const char *obj) {
     if (at >= 0) die("REFUSE worker.o libc setpgid", obj);
 }
 
+/* 链内单元前端缓存必须关:在 DIR 里用 ROOT/unisacc.com 带 RR_TIME 编一个两单元夹具,
+   stderr 不得出现 unitcache result=hit|miss|store。返回 0 通过,非 0 为出现的行数或跑不起来(-1)。 */
+static int uc_guard(const char *root, const char *dir) {
+    char a[4400], b[4400], err[4400], cmd[14000]; char *e; size_t en = 0; int n = 0, k; long at;
+    static const char *pat[3] = {"unitcache\tresult=hit", "unitcache\tresult=miss", "unitcache\tresult=store"};
+    if (cx_fmt(a, sizeof a, "%s/uc-guard-a.c", dir) || cx_fmt(b, sizeof b, "%s/uc-guard-b.c", dir) || cx_fmt(err, sizeof err, "%s/uc-guard.err", dir)) return -1;
+    static const char sa[] = "int bf(int);\nint main(void){ return bf(1) - 2; }\n", sb[] = "int bf(int x){ return x + 1; }\n";
+    if (cx_write(a, sa, sizeof sa - 1) || cx_write(b, sb, sizeof sb - 1)) return -1;
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_RR_TIME=1 UNISACC_E3CACHE='%s/uc-guard-cache' sh '%s/unisacc.com' '%s' '%s' -o '%s/uc-guard.bin' 2>'%s'", dir, root, a, b, dir, err)) return -1;
+    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, 55)) return -1; }
+    e = cx_read(err, &en);
+    if (!e) return -1;
+    for (k = 0; k < 3; k++) {
+        at = 0;
+        while (at < (long)en) { int p = tx_find(e + at, (int)((long)en - at), pat[k], tx_len(pat[k], 64)); if (p < 0) break; n++; at += p + 1; }
+    }
+    free(e);
+    /* 守卫只留结论:删掉自己写的四个文件与私有缓存目录里的条目(逐名 unlink,目录用 rmdir) */
+    {
+        char p[4400], names[16384]; int fd, cnt, j; long off = 0;
+        sy_unlink(a); sy_unlink(b); sy_unlink(err);
+        if (!cx_fmt(p, sizeof p, "%s/uc-guard.bin", dir)) sy_unlink(p);
+        if (!cx_fmt(cmd, 4400, "%s/uc-guard-cache", dir) && (fd = sy_open_read(cmd)) >= 0) {
+            cnt = sy_dir_names(fd, names, (int)sizeof names);
+            sy_close(fd);
+            for (j = 0; j < cnt; j++) {
+                if (!cx_fmt(p, sizeof p, "%s/%s", cmd, names + off)) sy_unlink(p);
+                off += tx_len(names + off, (long)sizeof names - off) + 1;
+            }
+            sy_rmdir(cmd);
+        }
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
@@ -1090,8 +1125,17 @@ int main(int argc, char **argv) {
     int resume = 0, parallel = 0, i, plan_only = 0;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
+    /* 链内产物不得依赖单元前端缓存(plans/unit-frontcache.md):强制关,子进程继承;设不上或读回不是 0 即拒绝 */
+    if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
+        die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     for (i = 1; i < argc; i++) {
-        if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
+        if (tx_eqz(argv[i], "--plan")) { plan_only = 1; sy_printf("ENV\tUNISACC_UNIT_CACHE=0\n"); continue; }
+        if (tx_eqz(argv[i], "--uc-guard") && i + 1 < argc) {
+            /* 夹具入口: --uc-guard DIR,在本进程已强制的环境下跑一次守卫 */
+            int g = uc_guard(root, argv[i + 1]);
+            sy_printf("UC_GUARD\t%s\tlines=%d\n", g == 0 ? "ok" : "REFUSE", g);
+            return g == 0 ? 0 : 3;
+        }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--baseline-ctx") && i + 1 < argc) { baseline_ctx = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--job-index") && i + 1 < argc) {
@@ -1223,6 +1267,7 @@ int main(int argc, char **argv) {
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+    if (uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
     hb(outdir, "chain", "start");
     if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-%.10s", root, rev)) die("path", "snap");
     if (cx_fmt(chain_work, sizeof chain_work, "%s/out/chain", snap)) die("path", "chain");

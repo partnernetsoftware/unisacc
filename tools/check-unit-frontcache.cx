@@ -1,0 +1,510 @@
+/* tools/check-unit-frontcache.cx -- 产品内单元前端(e2/e1)缓存的回归(plans/unit-frontcache.md)。
+ *
+ *   sh ./unisacc.com tools/check-unit-frontcache.cx -- OUT MODE [--product CMD] [--base CMD]
+ *
+ * OUT 须在仓内(夹具 .cx 要能解析模块)。CMD 默认 "sh ./unisacc.com";--base 给出改动前的产品时,
+ * switch 模式另核 UNISACC_RUN_CACHE=0 产物与改动前逐字节相同。每个模式一次调用,内层子进程各自有界。
+ *   equiv0..equiv4  26 例分五片,片内并行。每例三编:关缓存、存储跑、移走运行缓存条目后的全命中跑;
+ *                   三份 -o 镜像逐字节相同,存储跑与命中跑写出的运行缓存条目(含依赖清单)逐字节相同,
+ *                   命中跑不得有未命中。
+ *   neg             负例:头内容变、只改一个源、-D 变、换序、翻字节、截断、遮蔽头出现、改帧标志、改依赖清单路径;每步产物与关缓存相同。
+ *   race            编译中途改头(延迟 0.05-0.30 s 六次):事后走缓存的产物与关缓存相同。
+ *   stderr          -Wall 的警告在命中跑不丢;伪造带 stderr 的条目,命中时原样回放一次。
+ *   switch          UNISACC_UNIT_CACHE=0 与 UNISACC_RUN_CACHE=0 的产物、缓存目录与输出行;非宿主目标不启用。
+ *   concurrent      2 个与 4 个进程同时编同一程序(同键并发写):全部成功、产物相同、无残留临时文件、随后全命中。
+ *   budget          UNISACC_E3CACHE_MAX_BYTES 小于一次编译的条目总量与为 0:产物不变,留存条目不超预算。
+ * 产品没有单元缓存(RR_TIME 下不出 unitcache 行)时打印 DEFERRED needs-product-with-unitcache 并返回 3,不记 PASS。
+ * 输出 PASS/FAIL<TAB>check-unit-frontcache.<项> 与 CHECK_UNIT_FRONTCACHE<TAB>mode=..<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *PROD = "sh ./unisacc.com";
+static const char *BASE = 0;
+static const char *OUT = 0;
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-unit-frontcache.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-unit-frontcache.%s\n", name); }
+}
+static int sh(const char *cmd) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    char *o = 0; size_t on = 0; int rc;
+    rc = cx_runv_timeout(v, 52, &o, &on);
+    mm_free(o);
+    return rc;
+}
+static char *slurp(const char *path, long *n) {
+    size_t k = 0; char *b = cx_read(path, &k);
+    *n = b ? (long)k : 0;
+    return b;
+}
+static void fsha(const char *path, char hex[65]) {
+    long n; char *b = slurp(path, &n);
+    if (!b) { hex[0] = '-'; hex[1] = 0; return; }
+    sy_sha256_hex(b, n, hex);
+    mm_free(b);
+}
+static int same(const char *a, const char *b) {
+    char ha[65], hb[65];
+    fsha(a, ha); fsha(b, hb);
+    return ha[0] != '-' && tx_eqz(ha, hb);
+}
+static int count(const char *path, const char *pat) {
+    long n; char *b = slurp(path, &n); int c = 0, pl = (int)tx_len(pat, 64); long at = 0;
+    if (!b) return -1;
+    while (at + pl <= n) { int p = tx_find(b + at, (int)(n - at), pat, pl); if (p < 0) break; c++; at += p + pl; }
+    mm_free(b);
+    return c;
+}
+static int hits(const char *err) { return count(err, "unitcache\tresult=hit"); }
+static int misses(const char *err) { return count(err, "unitcache\tresult=miss"); }
+static int stores(const char *err) { return count(err, "unitcache\tresult=store"); }
+static void put(const char *dir, const char *name, const char *body) {
+    char p[900];
+    cx_fmt(p, sizeof p, "%s/%s", dir, name);
+    if (cx_write(p, body, tx_len(body, 100000))) failed++;
+}
+/* 一次编译:env 前缀、参数串、-o 到 W/NAME.bin,stderr 到 W/NAME.err;返回 rc */
+static int cc(const char *prod, const char *env, const char *args, const char *w, const char *name) {
+    char cmd[4000];
+    cx_fmt(cmd, sizeof cmd, "%s %s %s -o %s/o.bin 2>%s/%s.err; r=$?; mv %s/o.bin %s/%s.bin 2>/dev/null; exit $r", env, prod, args, w, w, name, w, w, name);
+    return sh(cmd);
+}
+/* 把缓存目录里的运行缓存条目(非 uc-、非 mc-)移到 TO,迫使下一次走单元缓存 */
+static void drop_run(const char *d, const char *to) {
+    char cmd[2400];
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s; for f in %s/*; do case \"${f##*/}\" in uc-*|mc-*|\\*) ;; *) mv \"$f\" %s/ ;; esac; done", to, d, to);
+    sh(cmd);
+}
+/* 列目录里前缀为 PRE 的条目名(换行分隔),调用方释放 */
+static char *names(const char *d, const char *pre, long *n) {
+    char cmd[1400], lst[900];
+    cx_fmt(lst, sizeof lst, "%s.names", d);
+    cx_fmt(cmd, sizeof cmd, "ls %s 2>/dev/null | grep '^%s' > %s; true", d, pre, lst);
+    sh(cmd);
+    return slurp(lst, n);
+}
+static int nnames(const char *d, const char *pre) {
+    long n, i; int c = 0; char *b = names(d, pre, &n);
+    for (i = 0; b && i < n; i++) if (b[i] == '\n') c++;
+    mm_free(b);
+    return c;
+}
+/* 产品是否带单元缓存:两单元夹具在 RR_TIME 下应出 unitcache 行 */
+static int have_feature(void) {
+    char w[700], env[900], args[1500];
+    cx_fmt(w, sizeof w, "%s/probe", OUT); sy_mkdir(w, 0755);
+    put(w, "a.c", "int bf(int);\nint main(void){ return bf(1) - 2; }\n");
+    put(w, "b.c", "int bf(int x){ return x + 1; }\n");
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s/D UNISACC_RR_TIME=1", w);
+    cx_fmt(args, sizeof args, "%s/a.c %s/b.c", w, w);
+    if (cc(PROD, env, args, w, "p")) return 0;
+    cx_fmt(args, sizeof args, "%s/p.err", w);
+    return count(args, "\tunitcache\t") > 0;
+}
+
+/* ---- equiv ---- */
+static const char *CASES[] = {
+    "tests/repro-enum-unit-interface.cx", "tools/register-fixture-slow.cx", "tools/tape-gap.cx", "tests/check-limits.cx",
+    "tests/kernelsha.cx", "tests/arity-controls.cx", "tests/runcache.cx", "tests/run.cx", "tools/edit-span.cx",
+    "tools/check-driver-input.cx", "tools/lower-row-origin.cx", "tools/check-cx-std.cx", "tools/doc-links.cx",
+    "tests/c99-whitespace.cx", "tests/libneed-attributes.cx", "tools/own-diff.cx", "tools/pp-gold-material.cx",
+    "tools/check-full-domain.cx", "tools/check-stage-lower.cx", "tools/refactor.cx", "tests/bound-rc142.cx",
+    "tools/check-cx-phase.cx", "@ab", "@abc", "@cba", "@cx"};
+#define NCASE 26
+
+static void fixtures(const char *w) {
+    put(w, "a.c", "#include <stdio.h>\n#include \"bh.h\"\nint main(void){ printf(\"%d %s\\n\", bf(BH), __FILE__); return 0; }\n");
+    put(w, "b.c", "#include \"bh.h\"\n#include <string.h>\nint bf(int x){ return x + (int)strlen(__FILE__) + BH; }\n");
+    put(w, "bh.h", "#define BH 5\nint bf(int);\n");
+    put(w, "c.c", "#include <stdlib.h>\nint cf(void){ return atoi(\"7\"); }\n__attribute__((constructor)) static void ci(void){}\n");
+    put(w, "x.cx", "#pragma unisa use sys.io\n#pragma unisa use text.text\n#include \"bh.h\"\nint bf(int x){ return x; }\nint main(void){ sy_printf(\"%d\\n\", (int)tx_len(\"abc\", 8) + bf(BH)); return 0; }\n");
+}
+static int one_case(int k) {
+    char w[700], args[2400], env[900], a[900], b[900], d[900], ds[900], dt[900], cmd[3000];
+    int rx, rc_, rd, ok, dq;
+    if (k < 0 || k >= NCASE) return 2;
+    cx_fmt(w, sizeof w, "%s/c%d", OUT, k); sy_mkdir(w, 0755);
+    if (CASES[k][0] == '@') {
+        fixtures(w);
+        if (tx_eqz(CASES[k], "@ab")) cx_fmt(args, sizeof args, "%s/a.c %s/b.c", w, w);
+        else if (tx_eqz(CASES[k], "@abc")) cx_fmt(args, sizeof args, "%s/a.c %s/b.c %s/c.c", w, w, w);
+        else if (tx_eqz(CASES[k], "@cba")) cx_fmt(args, sizeof args, "%s/c.c %s/b.c %s/a.c", w, w, w);
+        else cx_fmt(args, sizeof args, "%s/x.cx", w);
+    } else {
+        sy_stat_t st;
+        if (sy_stat(CASES[k], &st)) { sy_printf("CASE\t%s\tFAIL\tmissing corpus file\n", CASES[k]); return 1; }
+        cx_fmt(args, sizeof args, "%s", CASES[k]);
+    }
+    cx_fmt(d, sizeof d, "%s/D", w); cx_fmt(ds, sizeof ds, "%s/Ds", w); cx_fmt(dt, sizeof dt, "%s/Dt", w);
+    rx = cc(PROD, "UNISACC_RUN_CACHE=0", args, w, "x");
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    rc_ = cc(PROD, env, args, w, "c");
+    drop_run(d, ds);
+    rd = cc(PROD, env, args, w, "d");
+    drop_run(d, dt);
+    cx_fmt(cmd, sizeof cmd, "test -n \"$(ls %s)\" && diff -rq %s %s >/dev/null", ds, ds, dt);
+    dq = sh(cmd);
+    cx_fmt(a, sizeof a, "%s/x.bin", w);
+    ok = rx == rc_ && rx == rd;
+    if (rx == 0) {
+        cx_fmt(b, sizeof b, "%s/c.bin", w); ok = ok && same(a, b);
+        cx_fmt(b, sizeof b, "%s/d.bin", w); ok = ok && same(a, b);
+        ok = ok && dq == 0;
+    }
+    cx_fmt(b, sizeof b, "%s/d.err", w);
+    ok = ok && misses(b) == 0 && hits(b) >= (rx == 0 ? 1 : 0);
+    sy_printf("CASE\t%s\t%s\trc=%d/%d/%d\thit=%d\tmiss=%d\tdeps=%s\n", CASES[k], ok ? "PASS" : "FAIL", rx, rc_, rd, hits(b), misses(b), dq == 0 ? "EQ" : "DIFF");
+    return ok ? 0 : 1;
+}
+static void mode_equiv(int shard) {
+    char cmd[8000], one[900], res[900], nm[64]; int k, at = 0; long n; char *b;
+    cmd[0] = 0;
+    for (k = shard; k < NCASE; k += 5) {
+        cx_fmt(one, sizeof one, "(sh ./unisacc.com tools/check-unit-frontcache.cx -- %s case%d --product '%s' > %s/case%d.txt 2>&1) & ", OUT, k, PROD, OUT, k);
+        at = (int)tx_len(cmd, sizeof cmd);
+        if (at + tx_len(one, sizeof one) + 8 < (long)sizeof cmd) mm_copy(cmd + at, (long)sizeof cmd - at, one, tx_len(one, sizeof one) + 1);
+    }
+    at = (int)tx_len(cmd, sizeof cmd);
+    mm_copy(cmd + at, (long)sizeof cmd - at, "wait", 5);
+    sh(cmd);
+    for (k = shard; k < NCASE; k += 5) {
+        cx_fmt(res, sizeof res, "%s/case%d.txt", OUT, k);
+        b = slurp(res, &n);
+        cx_fmt(nm, sizeof nm, "equiv.%d", k);
+        if (b) sy_printf("%s", b);
+        ck(b && tx_find(b, (int)n, "\tPASS\t", 6) >= 0 && tx_find(b, (int)n, "\tFAIL\t", 6) < 0, nm);
+        mm_free(b);
+    }
+}
+
+/* ---- neg ---- */
+static char NW[700], ND[900], NENV[1000], NFL[1500];
+/* 关缓存参考与走单元缓存各编一次;核产物相同与命中/未命中计数(-1 不核) */
+static void nstep(const char *name, const char *args, int want_hit, int want_miss) {
+    char a[900], b[900], dz[900]; int r0, r1;
+    cx_fmt(dz, sizeof dz, "%s/Dz", NW);
+    drop_run(ND, dz);
+    r0 = cc(PROD, "UNISACC_RUN_CACHE=0", args, NW, "ref");
+    r1 = cc(PROD, NENV, args, NW, "run");
+    cx_fmt(a, sizeof a, "%s/ref.bin", NW); cx_fmt(b, sizeof b, "%s/run.bin", NW);
+    r0 = r0 == 0 && r1 == 0 && same(a, b);
+    cx_fmt(b, sizeof b, "%s/run.err", NW);
+    if (want_hit >= 0) r0 = r0 && hits(b) == want_hit;
+    if (want_miss >= 0) r0 = r0 && misses(b) == want_miss;
+    if (!r0) sy_printf("NEG\t%s\thit=%d\tmiss=%d\twant=%d/%d\n", name, hits(b), misses(b), want_hit, want_miss);
+    ck(r0, name);
+}
+/* 对每个 uc 条目:how 0 翻末字节(载荷),1 截到 100 字节,2 翻帧标志(头偏移 24),3 把依赖清单里的 absent 路径 inc1/br.h 改成 inc1/bx.h*/
+static void damage(int how) {
+    long n, i, st = 0, fn; char *b = names(ND, "uc-", &n), p[1200], *f;
+    for (i = 0; b && i < n; i++) if (b[i] == '\n') {
+        b[i] = 0;
+        cx_fmt(p, sizeof p, "%s/%s", ND, b + st);
+        f = slurp(p, &fn);
+        if (f && fn > 300) {
+            if (how == 1) cx_write(p, f, 100);
+            else if (how == 3) { int q = tx_find(f, (int)fn, "inc1/br.h", 9); if (q >= 0) { f[q + 6] = 'x'; cx_write(p, f, fn); } }
+            else { f[how == 0 ? fn - 1 : 24] ^= 1; cx_write(p, f, fn); }
+        }
+        mm_free(f);
+        st = i + 1;
+    }
+    mm_free(b);
+}
+static void mode_neg(int race) {
+    char ab[1500], ba[1500], dz[1500], inc[900];
+    cx_fmt(NW, sizeof NW, "%s/neg", OUT); sy_mkdir(NW, 0755);
+    cx_fmt(inc, sizeof inc, "%s/inc1", NW); sy_mkdir(inc, 0755);
+    cx_fmt(inc, sizeof inc, "%s/inc2", NW); sy_mkdir(inc, 0755);
+    put(NW, "a.c", "#include <stdio.h>\n#include <bq.h>\n#include <br.h>\n#include \"bh.h\"\nint main(void){ printf(\"%d %d\\n\", bf(BH), BQ + BR); return 0; }\n");
+    put(NW, "inc2/br.h", "#define BR 10\n");
+    put(NW, "b.c", "#include \"bh.h\"\nint bf(int x){ return x + BH; }\n");
+    put(NW, "bh.h", "#define BH 5\nint bf(int);\n");
+    put(NW, "inc2/bq.h", "#define BQ 1\n");
+    cx_fmt(ND, sizeof ND, "%s/D", NW);
+    cx_fmt(NENV, sizeof NENV, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", ND);
+    cx_fmt(NFL, sizeof NFL, "-I %s/inc1 -I %s/inc2", NW, NW);
+    cx_fmt(ab, sizeof ab, "%s %s/a.c %s/b.c", NFL, NW, NW);
+    cx_fmt(ba, sizeof ba, "%s %s/b.c %s/a.c", NFL, NW, NW);
+    cx_fmt(dz, sizeof dz, "-DZ=1 %s", ab);
+    nstep("neg.store", ab, 0, 2);
+    if (race) {
+        /* 编译中途改头:条目里的头 sha 取自阶段读到的字节,事后产物必须与关缓存一致 */
+        int k; char cmd[4000], nm[64];
+        for (k = 0; k < 6; k++) {
+            cx_fmt(cmd, sizeof cmd, "printf '#define BH %d\\nint bf(int);\\n' > %s/bh.h; (sleep 0.%02d; printf '#define BH %d\\nint bf(int);\\n' > %s/bh.h) & UNISACC_E3CACHE=%s %s %s -o %s/race.bin 2>/dev/null; wait",
+                   20 + k, NW, 5 + 5 * k, 40 + k, NW, ND, PROD, ab, NW);
+            sh(cmd);
+            cx_fmt(nm, sizeof nm, "race.header-during-compile.%d", k);
+            nstep(nm, ab, -1, -1);
+        }
+        return;
+    }
+    nstep("neg.hit", ab, 2, 0);
+    put(NW, "bh.h", "#define BH 6\nint bf(int);\n");
+    nstep("neg.header-content", ab, 0, 2);
+    put(NW, "a.c", "#include <stdio.h>\n#include <bq.h>\n#include <br.h>\n#include \"bh.h\"\nint main(void){ printf(\"%d %d!\\n\", bf(BH), BQ + BR); return 0; }\n");
+    nstep("neg.one-source", ab, 1, 1);
+    nstep("neg.define", dz, 0, 2);
+    nstep("neg.order", ba, 0, 2);
+    damage(0);
+    nstep("neg.corrupt-byte", ab, 0, 2);
+    nstep("neg.republished", ab, 2, 0);
+    damage(1);
+    nstep("neg.truncated", ab, 0, 2);
+    put(NW, "inc1/bq.h", "#define BQ 2\n");
+    nstep("neg.shadow-header", ab, 1, 1);
+    /* 条目 sha 覆盖头字段与依赖清单:改帧标志、改清单里的路径都必须按未命中 */
+    nstep("neg.rehit", ab, 2, 0);
+    damage(2);
+    nstep("neg.frame-flag-flipped", ab, 0, 2);
+    /* 把条目里 absent 路径 inc1/br.h 改成 inc1/bx.h(条目不再盯真正的路径),再新建遮蔽头 inc1/br.h:
+       sha 不覆盖清单的话 a.c 会带着旧 BR 命中;必须 a.c 未命中、b.c 命中、产物随新头 */
+    damage(3);
+    put(NW, "inc1/br.h", "#define BR 20\n");
+    nstep("neg.absent-path-edited-then-shadow", ab, 1, 1);
+}
+
+/* ---- stderr ---- */
+static void mode_stderr(void) {
+    char w[700], d[900], env[1000], envt[1000], args[1500], wargs[1500], a[900], b[900], dz[900], p[1200]; long n, i, st = 0; char *nm; int forged = 0;
+    const char *probe = "UCF-STDERR-PROBE\n";
+    cx_fmt(w, sizeof w, "%s/err", OUT); sy_mkdir(w, 0755);
+    put(w, "a.c", "int bf(int);\nint main(void){ return bf(1) - 2; }\n");
+    put(w, "b.c", "int bf(int x){ int unused; return x + 1; }\n");
+    cx_fmt(d, sizeof d, "%s/D", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", d);
+    cx_fmt(envt, sizeof envt, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    cx_fmt(args, sizeof args, "%s/a.c %s/b.c", w, w);
+    cx_fmt(wargs, sizeof wargs, "-Wall %s/a.c %s/b.c", w, w);
+    /* -Wall:警告来自 e3;单元命中后 e3 照跑,stderr 与关缓存逐字节相同 */
+    ck(cc(PROD, "UNISACC_RUN_CACHE=0", wargs, w, "wx") == 0, "stderr.wall-ref-rc0");
+    ck(cc(PROD, env, wargs, w, "wc") == 0, "stderr.wall-store-rc0");
+    ck(cc(PROD, env, wargs, w, "wd") == 0, "stderr.wall-hit-rc0");
+    cc(PROD, envt, wargs, w, "we");
+    cx_fmt(a, sizeof a, "%s/wx.err", w);
+    ck(count(a, "warning:") >= 1, "stderr.wall-has-warning");
+    cx_fmt(b, sizeof b, "%s/wc.err", w); ck(same(a, b), "stderr.wall-store-same");
+    cx_fmt(b, sizeof b, "%s/wd.err", w); ck(same(a, b), "stderr.wall-hit-same");
+    cx_fmt(b, sizeof b, "%s/we.err", w); ck(hits(b) == 2 && misses(b) == 0, "stderr.wall-unit-hits");
+    cx_fmt(a, sizeof a, "%s/wx.bin", w); cx_fmt(b, sizeof b, "%s/wd.bin", w); ck(same(a, b), "stderr.wall-image-same");
+    /* 伪造:给每个不带 -Wall 的 uc 条目塞进 stderr 字节并重算 sha,命中时应原样回放一次 */
+    cx_fmt(d, sizeof d, "%s/F", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", d);
+    cx_fmt(envt, sizeof envt, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    cx_fmt(dz, sizeof dz, "%s/Fz", w);
+    ck(cc(PROD, env, args, w, "fs") == 0, "stderr.forge-store-rc0");
+    drop_run(d, dz);
+    nm = names(d, "uc-", &n);
+    for (i = 0; nm && i < n; i++) if (nm[i] == '\n') {
+        long fn, at, k, pl = tx_len(probe, 64); unsigned on, rn, hn, abn, en; unsigned char *f, *g; char hex[65];
+        nm[i] = 0;
+        cx_fmt(p, sizeof p, "%s/%s", d, nm + st);
+        st = i + 1;
+        f = (unsigned char *)slurp(p, &fn);
+        if (!f || fn < 160) { mm_free(f); continue; }
+        on = f[8] | (f[9] << 8) | (f[10] << 16) | ((unsigned)f[11] << 24);
+        rn = f[12] | (f[13] << 8) | (f[14] << 16) | ((unsigned)f[15] << 24);
+        hn = f[16] | (f[17] << 8); abn = f[20] | (f[21] << 8);
+        en = f[28] | (f[29] << 8) | (f[30] << 16) | ((unsigned)f[31] << 24);
+        (void)hn; (void)abn;
+        at = fn - (long)on - (long)en;              /* stderr 段起点:载荷之前 */
+        if (en != 0 || at < 160 + 5L * (long)rn) { mm_free(f); continue; }
+        g = mm_alloc(fn + pl);
+        mm_copy(g, fn + pl, f, at);
+        mm_copy(g + at, pl, probe, pl);
+        mm_copy(g + at + pl, (long)on, f + at, (long)on);
+        g[28] = (unsigned char)pl; g[29] = 0; g[30] = 0; g[31] = 0;
+        (void)k;
+        mm_fill(g + 96, 64, '0', 64);              /* 条目 sha:整个文件,sha 槽填 '0' */
+        sy_sha256_hex(g, fn + pl, hex);
+        mm_copy(g + 96, 64, hex, 64);
+        if (cx_write(p, (char *)g, fn + pl) == 0) forged++;
+        mm_free(f); mm_free(g);
+    }
+    mm_free(nm);
+    ck(forged == 2, "stderr.forged-two-entries");
+    ck(cc(PROD, envt, args, w, "fh") == 0, "stderr.forge-hit-rc0");
+    cx_fmt(b, sizeof b, "%s/fh.err", w);
+    ck(hits(b) == 2 && misses(b) == 0, "stderr.forge-unit-hits");
+    ck(count(b, "UCF-STDERR-PROBE\n") == forged, "stderr.replayed-once-per-unit");
+    cx_fmt(a, sizeof a, "%s/fs.bin", w); cx_fmt(b, sizeof b, "%s/fh.bin", w); ck(same(a, b), "stderr.forge-image-same");
+}
+
+/* ---- switch ---- */
+static void mode_switch(void) {
+    char w[700], env[1000], args[1500], targs[1600], a[900], b[900], d[900]; sy_stat_t st;
+    cx_fmt(w, sizeof w, "%s/sw", OUT); sy_mkdir(w, 0755);
+    fixtures(w);
+    cx_fmt(args, sizeof args, "%s/a.c %s/b.c %s/c.c", w, w, w);
+    ck(cc(PROD, "UNISACC_RUN_CACHE=0", args, w, "x") == 0, "switch.ref-rc0");
+    cx_fmt(a, sizeof a, "%s/x.bin", w);
+    /* 只关单元缓存 */
+    cx_fmt(d, sizeof d, "%s/S1", w);
+    cx_fmt(env, sizeof env, "UNISACC_UNIT_CACHE=0 UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    ck(cc(PROD, env, args, w, "u") == 0, "switch.unit-off-rc0");
+    cx_fmt(b, sizeof b, "%s/u.bin", w); ck(same(a, b), "switch.unit-off-image-same");
+    cx_fmt(b, sizeof b, "%s/u.err", w);
+    ck(count(b, "unitcache\tresult=off") >= 3 && hits(b) == 0 && misses(b) == 0 && stores(b) == 0, "switch.unit-off-lines");
+    ck(nnames(d, "uc-") == 0 && nnames(d, "mc-") > 0, "switch.unit-off-no-entries");
+    /* 全关:不建目录、不出行 */
+    cx_fmt(d, sizeof d, "%s/S2", w);
+    cx_fmt(env, sizeof env, "UNISACC_RUN_CACHE=0 UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    ck(cc(PROD, env, args, w, "r") == 0, "switch.run-off-rc0");
+    cx_fmt(b, sizeof b, "%s/r.bin", w); ck(same(a, b), "switch.run-off-image-same");
+    cx_fmt(b, sizeof b, "%s/r.err", w); ck(count(b, "\tunitcache\t") == 0, "switch.run-off-no-lines");
+    ck(sy_stat(d, &st) == -ENOENT, "switch.run-off-no-directory");
+    /* 非宿主目标:只在已验证的 lnx/x86_64 启用 */
+    cx_fmt(d, sizeof d, "%s/S3", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    cx_fmt(targs, sizeof targs, "-b lnx/arm64 %s", args);
+    ck(cc(PROD, env, targs, w, "t") == 0, "switch.other-target-rc0");
+    cx_fmt(b, sizeof b, "%s/t.err", w); ck(count(b, "\tunitcache\t") == 0 && nnames(d, "uc-") == 0, "switch.other-target-not-enabled");
+    if (BASE) {
+        ck(cc(BASE, "UNISACC_RUN_CACHE=0", args, w, "base") == 0, "switch.base-rc0");
+        cx_fmt(b, sizeof b, "%s/base.bin", w); ck(same(a, b), "switch.run-off-image-same-as-base");
+        cx_fmt(a, sizeof a, "%s/x.err", w); cx_fmt(b, sizeof b, "%s/base.err", w); ck(same(a, b), "switch.run-off-stderr-same-as-base");
+        cx_fmt(a, sizeof a, "%s/x.bin", w); cx_fmt(b, sizeof b, "%s/u.bin", w); ck(same(a, b), "switch.unit-off-image-same-as-base");
+    } else sy_printf("UNMEASURED\tcheck-unit-frontcache.switch.same-as-base\tno --base product\n");
+}
+
+/* ---- concurrent ---- */
+static void conc(int np, const char *w, const char *args, const char *ref) {
+    char cmd[6000], one[1200], d[900], dz[900], env[1000], b[900], nm[64]; int i, at, ok = 1;
+    cx_fmt(d, sizeof d, "%s/C%d", w, np);
+    cmd[0] = 0;
+    for (i = 0; i < np; i++) {
+        cx_fmt(one, sizeof one, "(UNISACC_E3CACHE=%s %s %s -o %s/p%d-%d.bin 2>%s/p%d-%d.err; echo $? > %s/p%d-%d.rc) & ", d, PROD, args, w, np, i, w, np, i, w, np, i);
+        at = (int)tx_len(cmd, sizeof cmd);
+        mm_copy(cmd + at, (long)sizeof cmd - at, one, tx_len(one, sizeof one) + 1);
+    }
+    at = (int)tx_len(cmd, sizeof cmd);
+    mm_copy(cmd + at, (long)sizeof cmd - at, "wait", 5);
+    sh(cmd);
+    for (i = 0; i < np; i++) {
+        long n; char *r;
+        cx_fmt(b, sizeof b, "%s/p%d-%d.rc", w, np, i);
+        r = slurp(b, &n);
+        if (!r || n < 1 || r[0] != '0') ok = 0;
+        mm_free(r);
+        cx_fmt(b, sizeof b, "%s/p%d-%d.bin", w, np, i);
+        if (!same(ref, b)) ok = 0;
+    }
+    cx_fmt(nm, sizeof nm, "concurrent.%d-all-rc0-same-image", np); ck(ok, nm);
+    cx_fmt(nm, sizeof nm, "concurrent.%d-no-temp-left", np); ck(nnames(d, ".*tmp") == 0 && nnames(d, "uc-.*[.]") == 0, nm);
+    cx_fmt(nm, sizeof nm, "concurrent.%d-one-entry-per-unit", np); ck(nnames(d, "uc-") == 3, nm);
+    cx_fmt(dz, sizeof dz, "%s/Cz%d", w, np);
+    drop_run(d, dz);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    cx_fmt(nm, sizeof nm, "after%d", np);
+    cc(PROD, env, args, w, nm);
+    cx_fmt(b, sizeof b, "%s/after%d.err", w, np);
+    cx_fmt(nm, sizeof nm, "concurrent.%d-then-all-hit", np); ck(hits(b) == 3 && misses(b) == 0, nm);
+    cx_fmt(b, sizeof b, "%s/after%d.bin", w, np);
+    cx_fmt(nm, sizeof nm, "concurrent.%d-hit-image-same", np); ck(same(ref, b), nm);
+}
+static void mode_concurrent(void) {
+    char w[700], args[1500], ref[900];
+    cx_fmt(w, sizeof w, "%s/cc", OUT); sy_mkdir(w, 0755);
+    fixtures(w);
+    cx_fmt(args, sizeof args, "%s/a.c %s/b.c %s/c.c", w, w, w);
+    ck(cc(PROD, "UNISACC_RUN_CACHE=0", args, w, "x") == 0, "concurrent.ref-rc0");
+    cx_fmt(ref, sizeof ref, "%s/x.bin", w);
+    conc(2, w, args, ref);
+    conc(4, w, args, ref);
+}
+
+/* ---- budget ---- */
+static long dir_bytes(const char *d, const char *pre) {
+    long n, i, st = 0, total = 0; char *b = names(d, pre, &n), p[1200]; sy_stat_t s;
+    for (i = 0; b && i < n; i++) if (b[i] == '\n') {
+        b[i] = 0;
+        cx_fmt(p, sizeof p, "%s/%s", d, b + st);
+        if (sy_stat(p, &s) == 0) total += s.size;
+        st = i + 1;
+    }
+    mm_free(b);
+    return total;
+}
+static void mode_budget(void) {
+    char w[700], args[1500], ref[900], d[900], env[1000], b[900]; long total;
+    cx_fmt(w, sizeof w, "%s/bg", OUT); sy_mkdir(w, 0755);
+    fixtures(w);
+    cx_fmt(args, sizeof args, "%s/a.c %s/b.c %s/c.c", w, w, w);
+    ck(cc(PROD, "UNISACC_RUN_CACHE=0", args, w, "x") == 0, "budget.ref-rc0");
+    cx_fmt(ref, sizeof ref, "%s/x.bin", w);
+    /* 不设限时的条目总量,用来确认下面的预算确实小于它 */
+    cx_fmt(d, sizeof d, "%s/B0", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s", d);
+    cc(PROD, env, args, w, "free");
+    total = dir_bytes(d, "[um0-9a-f]");
+    sy_printf("BUDGET\tunlimited_bytes=%ld\tuc_entries=%d\n", total, nnames(d, "uc-"));
+    ck(total > 300000 && nnames(d, "uc-") == 3, "budget.unlimited-has-entries");
+    /* 预算 300000:小于总量,淘汰最旧的,留存不超预算 */
+    cx_fmt(d, sizeof d, "%s/B1", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE_MAX_BYTES=300000 UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    ck(cc(PROD, env, args, w, "small") == 0, "budget.small-rc0");
+    cx_fmt(b, sizeof b, "%s/small.bin", w); ck(same(ref, b), "budget.small-image-same");
+    total = dir_bytes(d, "[um0-9a-f]");
+    sy_printf("BUDGET\tlimit=300000\tkept_bytes=%ld\tuc_entries=%d\n", total, nnames(d, "uc-"));
+    ck(total <= 300000, "budget.small-kept-within-limit");
+    ck(cc(PROD, env, args, w, "small2") == 0, "budget.small-again-rc0");
+    cx_fmt(b, sizeof b, "%s/small2.bin", w); ck(same(ref, b), "budget.small-again-image-same");
+    /* 预算 0:不留任何完成的条目 */
+    cx_fmt(d, sizeof d, "%s/B2", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE_MAX_BYTES=0 UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    ck(cc(PROD, env, args, w, "zero") == 0, "budget.zero-rc0");
+    cx_fmt(b, sizeof b, "%s/zero.bin", w); ck(same(ref, b), "budget.zero-image-same");
+    ck(dir_bytes(d, "[um0-9a-f]") == 0, "budget.zero-keeps-nothing");
+    /* 崩溃的写入者留下的 uc-<键>.tmp:下一次发布(换序产生新键,必然存储)时的 trim 清掉 */
+    cx_fmt(d, sizeof d, "%s/B3", w);
+    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    cc(PROD, env, args, w, "t1");
+    put(d, "uc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp", "stale");
+    ck(nnames(d, "uc-.*[.]tmp") == 1, "budget.stale-temp-planted");
+    cx_fmt(args, sizeof args, "%s/c.c %s/b.c %s/a.c", w, w, w);
+    ck(cc(PROD, env, args, w, "t2") == 0, "budget.stale-temp-next-store-rc0");
+    cx_fmt(b, sizeof b, "%s/t2.err", w);
+    ck(stores(b) >= 1 && nnames(d, "uc-.*[.]tmp") == 0, "budget.stale-temp-removed");
+}
+
+int main(int argc, char **argv) {
+    const char *mode = 0; int i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--product") && i + 1 < argc) PROD = argv[++i];
+        else if (tx_eqz(argv[i], "--base") && i + 1 < argc) BASE = argv[++i];
+        else if (!OUT) OUT = argv[i];
+        else if (!mode) mode = argv[i];
+    }
+    if (!OUT || !mode) { sy_printf("usage: check-unit-frontcache.cx -- OUT equiv0..equiv4|neg|race|stderr|switch|concurrent|budget [--product CMD] [--base CMD]\n"); return 2; }
+    sy_mkdir(OUT, 0755);
+    if (tx_len(mode, 16) > 4 && tx_same(mode, 4, "case", 4)) {
+        int k = 0;
+        for (i = 4; mode[i] >= '0' && mode[i] <= '9'; i++) k = k * 10 + (mode[i] - '0');
+        return one_case(k);
+    }
+    if (!have_feature()) {
+        sy_printf("DEFERRED\tneeds-product-with-unitcache\t%s\n", PROD);
+        sy_printf("CHECK_UNIT_FRONTCACHE\tmode=%s\tfailed=0\tdeferred=1\n", mode);
+        return 3;
+    }
+    if (tx_len(mode, 16) == 6 && tx_same(mode, 5, "equiv", 5) && mode[5] >= '0' && mode[5] <= '4') mode_equiv(mode[5] - '0');
+    else if (tx_eqz(mode, "neg")) mode_neg(0);
+    else if (tx_eqz(mode, "race")) mode_neg(1);
+    else if (tx_eqz(mode, "stderr")) mode_stderr();
+    else if (tx_eqz(mode, "switch")) mode_switch();
+    else if (tx_eqz(mode, "concurrent")) mode_concurrent();
+    else if (tx_eqz(mode, "budget")) mode_budget();
+    else { sy_printf("REFUSE\tunknown mode %s\n", mode); return 2; }
+    sy_printf("CHECK_UNIT_FRONTCACHE\tmode=%s\tfailed=%d\n", mode, failed);
+    return failed ? 1 : 0;
+}
