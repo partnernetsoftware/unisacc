@@ -27,7 +27,11 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap, int *rc)
     return 0;
 }
 
-int main(void) {
+/* 模式: core(顺序/失败停止/档位) | tiers(daily/release 档透传) | limits(max-steps/日期/截断/出口/UNKNOWN) | resume | resume(--resume 4 项);无参两者都跑。各自一个批次,合并在 affected 冷编下超 55s。 */
+int main(int argc, char **argv) {
+    const char *am = argc == 2 ? argv[1] : "";
+    int core = !*am || !strcmp(am, "core"), tiers = !*am || !strcmp(am, "tiers"), lim = !*am || !strcmp(am, "limits"), res = !*am || !strcmp(am, "resume");
+    if (argc > 2 || (argc == 2 && !core && !tiers && !lim && !res)) { fprintf(stderr, "usage: [core|resume]\n"); return 2; }
     char dir[4400], fake[4400], runp[4400], outd[4400], tool[4400], com[4400], logp[4400], src[4400], buf[4000];
     char *v[16];
     int rc;
@@ -52,6 +56,7 @@ int main(void) {
     setenv("S9_FAKE_LOG", logp, 1);
     v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = dir; v[5] = runp;
     v[6] = "--tier"; v[7] = "commit"; v[8] = "--date"; v[9] = "2026-11-10"; v[10] = "--fake"; v[11] = fake; v[12] = 0;
+    if (core) {
     runv(v, dir, 20, buf, sizeof buf, &rc);
     ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS"), "order-pass");
     {
@@ -79,16 +84,6 @@ int main(void) {
         free(s);
     }
     unsetenv("S9_FAKE_FAIL");
-    setenv("S9_FAKE_SLEEP", "3", 1);
-    {
-        char *rm[] = {"rm", "-f", logp, 0};
-        runv(rm, dir, 5, buf, sizeof buf, &rc);
-    }
-    v[12] = "--step-s"; v[13] = "1"; v[14] = 0;
-    runv(v, dir, 20, buf, sizeof buf, &rc);
-    ck(rc == 1 && strstr(buf, "step"), "timeout-stop");
-    v[12] = 0;
-    setenv("S9_FAKE_SLEEP", "0", 1);
     /* commit 档: init 带 --tier commit,每步耗时列存在 */
     {
         char *rm[] = {"rm", "-f", logp, 0};
@@ -108,6 +103,8 @@ int main(void) {
         ck(s && strstr(s, "wall_ms") && strstr(s, "step ") && strstr(s, "\t") && strstr(s, "truncated\t0"), "wall-ms-column");
         free(s);
     }
+    }
+    if (tiers) {
     /* daily 档: init 不带 --tier */
     {
         char *rm[] = {"rm", "-f", logp, 0};
@@ -132,6 +129,21 @@ int main(void) {
         ck(rc == 0 && s && strstr(s, "init - --tier release"), "tier-release-passthrough");
         free(s);
     }
+    v[7] = "daily";
+    }
+    if (lim) {
+    v[7] = "daily";
+    v[7] = "commit";
+    setenv("S9_FAKE_SLEEP", "3", 1);
+    {
+        char *rm[] = {"rm", "-f", logp, 0};
+        runv(rm, dir, 5, buf, sizeof buf, &rc);
+    }
+    v[12] = "--step-s"; v[13] = "1"; v[14] = 0;
+    runv(v, dir, 20, buf, sizeof buf, &rc);
+    ck(rc == 1 && strstr(buf, "step"), "timeout-stop");
+    v[12] = 0;
+    setenv("S9_FAKE_SLEEP", "0", 1);
     v[7] = "daily";
     /* max-steps: 假 s9 需 2 步才完成, --max-steps 1 必须 FAIL(step-pending) */
     {
@@ -224,6 +236,34 @@ int main(void) {
         }
         { char *r2[] = {"rm", "-f", pa, pb, pc, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
         unsetenv("S9_FAKE_MODE");
+    }
+    }
+    /* --resume RUN: 沿用同一 RUN,跳过 build/init/prepare,只 step/aggregate;step 仍带自动 deadline */
+    if (res) {
+        char *w[16];
+        char *rmx[] = {"rm", "-f", logp, 0};
+        char sess[4400], rep[4400];
+        size_t n; char *s;
+        cx_fmt(sess, sizeof sess, "%s/session.tsv", runp);
+        cx_fmt(rep, sizeof rep, "%s/%s/s9-nightly-2026-11-13-commit-resume.md", dir, "out");
+        w[0] = "sh"; w[1] = com; w[2] = tool; w[3] = "--"; w[4] = dir; w[5] = "--resume"; w[6] = runp;
+        w[7] = "--tier"; w[8] = "commit"; w[9] = "--date"; w[10] = "2026-11-13"; w[11] = "--fake"; w[12] = fake; w[13] = 0;
+        { char *r2[] = {"rm", "-f", sess, 0}; runv(r2, dir, 5, buf, sizeof buf, &rc); }
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        s = cx_read(logp, &n);
+        ck(rc == 2 && !s, "resume-without-session-refused-no-step");
+        free(s);
+        if (cx_write(sess, "resume\n", 7)) die("session-write");
+        runv(rmx, dir, 5, buf, sizeof buf, &rc);
+        runv(w, dir, 20, buf, sizeof buf, &rc);
+        s = cx_read(logp, &n);
+        ck(rc == 0 && strstr(buf, "S9_NIGHTLY\tstatus=PASS") && s && strstr(s, "step") && strstr(s, "aggregate"), "resume-steps-then-aggregate");
+        ck(s && !strstr(s, "build") && !strstr(s, "init") && !strstr(s, "prepare"), "resume-skips-build-init-prepare");
+        free(s);
+        s = cx_read(rep, &n);
+        ck(s && strstr(s, "status\tPASS") && strstr(s, "resume\t"), "resume-report-separate-file-marked");
+        free(s);
     }
     printf("INFO\tcheck-s9-nightly.truncation 已单测(S9_FAKE_LONG)\n");
     printf("CHECK_S9_NIGHTLY\tfailed=%d\n", failed);
