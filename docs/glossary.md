@@ -39,6 +39,8 @@
 
 ## 3. 统一后的五层（此后只有这五层）
 
+> 2026-11-11 消歧：本节的「五层 L1-L5」是**术语层**（五个易混词各自的唯一含义），在 `prd.md §0` 里写作 T1-T5。它与 `prd.md §3.1` 的**结构五层**（L0 loader / L1 base / L2 program / L3 nets / L4 runtime，讲产品由哪五部分组成）、与 `.cx` 源码的**模块层** cx-L0..cx-L3 是三套不同的编号；流的个数（7 + cx 侧 CX0）与网的四个口径（18 / 20 / 42 / 40）以 `prd.md §3.3、§3.4` 为准，下表的数量列是 2026-10-23 的盘点。
+
 | 层 | 唯一名字 | 含义 | 数量 | 真源 |
 |---|---|---|---|---|
 | L1 | **Stream**（别名 Flow / stream-stage） | 字节管道阶段：输入格式 → 输出格式 | unisacc 7（e2/e1/e3/e4/prune/lower/elf）· m4/ujs 4（lex/front/select/encode）· tdesc 3（declare/context/size） | `exec/pipeline/image-stages.tsv`、`m4/contract.py FLOWS`、`flownet/tdesc/contract.tsv` |
