@@ -3,24 +3,17 @@
  * Keep evidence/interfaces in caller-owned NEW_OUT; never use the global temp tree.
  */
 #pragma unisa use cx0.plan
+#pragma unisa use cxlib.chainfacts
 static char work[4400],paths[64][4400];
 static char *sources[64];
 static void die(const char *s){fprintf(stderr,"WF_EXPAND REFUSE %s\n",s);exit(2);}
 static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path bound");}
 static void store(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("write evidence");}
-/* Read the authoritative root array, not a second copy of its 44 entries. */
+/* Ordered source roots, never the expanded unit count. */
 static int roots(const char *root){
- char p[4400];size_t n;path(p,root,"tools/release-build.cx");char *b=cx_read(p,&n);if(!b||memchr(b,0,n))die("root source");
- const char *anchor="static const char *rb_whole_src[RB_WHOLE_SRC] = {";
- char *s=strstr(b,anchor);if(!s||strstr(s+strlen(anchor),anchor))die("root declaration");s+=strlen(anchor);int nr=0;
- for(;;){
-  while(*s&&(*s==' '||*s=='\t'||*s=='\r'||*s=='\n'||*s==','))s++;
-  if(s[0]=='/'&&s[1]=='*'){s=strstr(s+2,"*/");if(!s)die("root comment");s+=2;continue;}
-  if(*s=='}'&&s[1]==';')break;
-  if(*s++!='\"'||nr==64)die("root syntax/count");char *e=strchr(s,'\"');if(!e||e-s>=512)die("root string");
-  *e=0;if(strncmp(s,"src/",4)||strstr(s,"..")||strpbrk(s,"\t\r\n"))die("root path");path(paths[nr],root,s);sources[nr]=paths[nr];nr++;s=e+1;
- }
- free(b);if(!nr)die("empty roots");return nr;
+ int nr=cf_root_count();if(nr>64)die("root capacity");
+ for(int i=0;i<nr;i++){path(paths[i],root,cf_root_source(i));sources[i]=paths[i];}
+ return nr;
 }
 static int units(const cx0_result *r){
  if(r->status||!r->text||strncmp(r->text,"CX0PLAN1\n",9))return -1;
@@ -40,20 +33,37 @@ static int evaluate(int nr,int argc,char **argv){
  cx0_result r=cx0_plan(0,sources,nr,0,0,work);int n=units(&r);char p[4400];path(p,work,"diagnostic.txt");store(p,r.diagnostic?r.diagnostic:"");
  if(n<0){fprintf(stderr,"WF_EXPAND REFUSE expansion status=%d\n%s",r.status,r.diagnostic?r.diagnostic:"");cx0_release(&r);return 1;}
  path(p,work,"plan.tsv");store(p,r.text);cx0_release(&r);
- /* Same bounded three-wave contract as candidate-chain: tail derives from total. */
- char tail[32];if(cx_fmt(tail,sizeof tail,"%d",n-64))die("tail bound");char *dynamic[]={"0","32","32","32","64",tail};
- int bad=partition(n,argc?argc:6,argc?argv:dynamic);
+ /* Independently partition the expanded total, including a fourth tail. */
+ char nums[8][32];char *dynamic[8];int count=0;
+ for(int first=0;first<n&&count<8;first+=32){int amount=n-first;if(amount>32)amount=32;
+  if(cx_fmt(nums[count],32,"%d",first)||cx_fmt(nums[count+1],32,"%d",amount))die("partition bound");
+  dynamic[count]=nums[count];dynamic[count+1]=nums[count+1];count+=2;
+ }
+ int bad=n>128||partition(n,argc?argc:count,argc?argv:dynamic);
  printf("WF_EXPAND\tunits=%d\tpartition=%s\n",n,bad?"REFUSE":"PASS");return bad;
 }
 /* Fail closed if the known production wiring changes; not arbitrary C analysis. */
 static int chain_check(const char *root){
  char p[4400];size_t n;path(p,root,"tools/candidate-chain.cx");char *s=cx_read(p,&n);
  int ok=s&&!memchr(s,0,n)
-  &&strstr(s,"const char *offs[3] = {\"0\", \"32\", \"64\"};")
-  &&strstr(s,"const char *cnts[3] = {\"32\", \"32\", 0};")
-  &&strstr(s,"if (i == 2) { wf_tail_count(p0, 64, tailc, sizeof tailc); cnts[2] = tailc; }")
-  &&strstr(s,"v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i];")
-  &&strstr(s,"v[n++] = (char *)\"64\"; v[n++] = tailc; v[n++] = 0;");
+  &&strstr(s,"if (cx_fmt(pt, sizeof pt, \"%s/part.tsv\", front0))")
+  &&strstr(s,"b = cx_read(pt, &n);")
+  &&strstr(s,"b[i] == 't' && b[i + 1] == 'o' && b[i + 2] == 't' && b[i + 3] == 'a' && b[i + 4] == 'l' && b[i + 5] == '\\t'")
+  &&strstr(s,"total = total * 10 + (b[k] - '0');")
+  &&strstr(s,"return (int)total;")
+  &&strstr(s,"int total = wf_total(front0), count = total - first;")
+  &&strstr(s,"if (count > cf_front_slice()) count = cf_front_slice();")
+  &&strstr(s,"cx_fmt(buf, cap, \"%d\", count)")
+  &&strstr(s,"int total = wf_total(front0), slice = cf_front_slice();")
+  &&strstr(s,"int slices = (total + slice - 1) / slice;")
+  &&strstr(s,"int count = total - i * slice;")
+  &&strstr(s,"for (i = 0; i < slices; i++) {")
+  &&strstr(s,"if (i) wf_tail_count(parts[0], i * cf_front_slice(), amount, sizeof amount);")
+  &&strstr(s,"cx_fmt(offset, sizeof offset, \"%d\", i * cf_front_slice())")
+  &&strstr(s,"v[n++] = offset; v[n++] = amount; v[n++] = 0;")
+  &&strstr(s,"if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);")
+  &&strstr(s,"for (i = 0; i < slices; i++) v[n++] = parts[i];")
+  &&!strstr(s,"const char *offs[3]")&&!strstr(s,"const char *cnts[3]");
  free(s);printf("%s\tchain-dynamic-tail-wiring\n",ok?"PASS":"FAIL");return !ok;
 }
 static int selftest(const char *root){

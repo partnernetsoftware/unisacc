@@ -35,6 +35,7 @@
    objects (lnx) retains the entry-build route and receipt.
    This does not install and does not wrap. */
 #pragma unisa use runtime.package_decode
+#pragma unisa use cxlib.chainfacts
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use cxlib.packagefooter
 #pragma unisa use runtime.model_number
@@ -507,13 +508,13 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
     RbBuf b = {0}; char names[64][64] = {{0}};
     char run[RB_FULL], path[RB_FULL], ctx[RB_FULL], helper[RB_FULL], got[80], conf[RB_FULL];
     char epoch[128], flags[32], *e, *t; size_t en, tn; int i, fd; long z; sy_ts_t now;
-    if (!rb_run || !nets || !routes || pkg->m != 40 ||
+    if (!rb_run || !nets || !routes || pkg->m != cf_p3_guard_count() ||
         sy_realpath(rb_run, run, RB_FULL) < 0 || strcmp(run, rb_run)) rb_die("phase needs canonical --run, --nets and --routes");
     z = (long)strlen(run);
     if (sy_realpath(nets, path, RB_FULL) < 0 || strcmp(path, nets)) rb_die("phase nets must be canonical");
     if (sy_realpath(root, path, RB_FULL) < 0 || strcmp(path, root)) rb_die("phase root must be canonical");
     if (rb_route_names(routes, body, ds, ms, pkg->m, names)) rb_die("phase routes");
-    for (i = 0; i < 40; i++) if (!names[i][0]) rb_die("--nets unbound model");
+    for (i = 0; i < cf_p3_guard_count(); i++) if (!names[i][0]) rb_die("--nets unbound model");
     rb_phase_path(path, "epoch");
     if (tx_eqz(rb_phase, "guard-init") && sy_exists(path)) rb_die("phase already initialized; use a new run");
     if (tx_eqz(rb_phase, "guard-init")) {
@@ -543,7 +544,7 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
       if (!found) rb_die("phase SID mismatch"); }
     mm_free(t); rb_put(&b, got, 64);
     for (i = 0; i < rb_nfiles; i++) rb_phase_hash(&b, rb_files[i].full);
-    for (i = 0; i < 40; i++) {
+    for (i = 0; i < cf_p3_guard_count(); i++) {
         if (cx_fmt(path, sizeof path, "%s/tbl-%s/result.tbl", nets, names[i])) rb_die("phase table");
         rb_phase_hash(&b, path);
         if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("phase net");
@@ -554,7 +555,7 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
     else { e = rb_phase_read("binding", &en); if (en != 64 || memcmp(e, rb_binding, 64)) rb_die("phase binding changed"); mm_free(e); }
     if (!strncmp(rb_phase, "guard-", 6) && !tx_eqz(rb_phase, "guard-init")) {
         char *end; long index = strtol(rb_phase + 6, &end, 10); char tp[RB_FULL], np[RB_FULL], key[32];
-        if (*end || index < 0 || index >= 40) rb_die("phase guard index 0..39");
+        if (*end || index < 0 || index >= cf_p3_guard_count()) rb_die("phase guard index out of range");
         if (cx_fmt(tp, sizeof tp, "%s/tbl-%s/result.tbl", nets, names[index]) ||
             cx_fmt(np, sizeof np, "%s/net-%s/result.net", nets, names[index]) ||
             cx_fmt(key, sizeof key, "guard-%ld", index)) rb_die("phase guard path");
@@ -562,7 +563,7 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
         rb_phase_seal(key, rb_binding, 64);
     } else if (!tx_eqz(rb_phase, "guard-init")) {
         if (!tx_eqz(rb_phase, "models") && !tx_eqz(rb_phase, "resources") && !tx_eqz(rb_phase, "assemble")) rb_die("unknown p3 phase");
-        for (i = 0; i < 40; i++) {
+        for (i = 0; i < cf_p3_guard_count(); i++) {
             char key[32]; if (cx_fmt(key, sizeof key, "guard-%d", i)) rb_die("phase guard key");
             e = rb_phase_read(key, &en); if (en != 64 || memcmp(e, rb_binding, 64)) rb_die("phase guard incomplete"); mm_free(e);
         }
@@ -573,7 +574,7 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
                            long d_start, long m_start, const char *nets, const char *routes) {
     static char names[64][64];
     long at = m_start, i, k = d_start;
-    if (pkg->m != 40 || pkg->m > 64) rb_die("--nets expects 40 model records");
+    if (pkg->m != cf_p3_guard_count() || pkg->m > 64) rb_die("--nets model record count");
     /* model 索引 -> net 名取自包内 D 段 + routes 表(两处同源), 不另存静态表。 */
     if (rb_route_names(routes, body, d_start, m_start, pkg->m, names)) rb_die("--nets routes");
     for (i = 0; i < pkg->m; i++) if (!names[i][0]) rb_die("--nets unbound model");
@@ -1029,49 +1030,8 @@ static void rb_freeze(const char *rev, char **root_slot) {
     sy_printf("%s", cmd);
 }
 
-/* One entry per object entry-build compiles; keep the two lists equal. */
-#define RB_WHOLE_SRC 44
-static const char *rb_whole_src[RB_WHOLE_SRC] = {
-    "src/unisacc.cx",
-    "src/host.cx",
-    "src/stages.cx",
-    "src/runtime/routestep.cx",
-    "src/runtime/stagehandoff.cx",
-    "src/runtime/runexec.cx",
-    "src/runtime/attribute_frame.cx",
-    "src/bind.cx",
-    "src/driver/cli.cx",
-    "src/driver/compat.cx",
-    "src/driver/route.cx",
-    "src/driver/deps.cx",
-    "src/driver/input.cx",
-    "src/driver/args.cx",
-    "src/driver/path.cx",
-    "src/entrybind.cx",
-    "src/runtime/memlayout.cx",
-    "src/driveface.cx",
-    "src/driveroute.cx",
-    "src/compiler/cxmod.cx",
-    "src/compiler/tapegate.cx",
-    "src/compiler/fwdstub.cx",
-    "src/executor.cx",
-    "src/core/transition.cx",
-    "src/runtime/codec.cx",
-    "src/runtime/model_decode.cx",
-    "src/runtime/model_number.cx",
-    "src/packmodel.cx",
-    "src/runtime/modelload.cx",
-    "src/runtime/compiler/bindstage.cx",
-    "src/entryexec.cx",
-    "src/hostnative.cx",
-    "src/compiler/tapelink.cx",
-    /* entry-build compiles 44 objects (keys 0..43); whole-o must list the same
-       set or the link misses symbols such as hs_file_note_set. Keep equal. */
-    "src/drivelink.cx", "src/drivetapebin.cx", "src/driveargs.cx",
-    "src/driveplan.cx", "src/driveutil.cx", "src/driveunits.cx",
-    "src/driverun.cx", "src/hostout.cx", "src/hostres.cx",
-    "src/runtime/rescache.cx", "src/drivestream.cx"
-};
+/* Root objects and whole-o share the ordered construction fact table. */
+#define RB_WHOLE_SRC cf_root_count()
 
 static int rb_is_whole(const char *t) {
     return tx_eqz(t, "osx/x86_64") || tx_eqz(t, "osx/arm64") || tx_eqz(t, "win/x86_64") || tx_eqz(t, "win/arm64");
@@ -1187,9 +1147,9 @@ static int rb_wait_child(int pid, int fd, RbBuf *cap, long deadline_ms,
 
 /* One complete whole -o with the internal 60s watchdog. No P3 splicing. */
 static int rb_whole(int argc, char **argv, const char *target) {
-    char *v[2 + 2 + 4 + RB_WHOLE_SRC + 1];
+    char *v[2 + 2 + 4 + 128 + 1];
     char bound[RB_FULL], image[RB_FULL], rec[RB_FULL], line[240];
-    char srcs[RB_WHOLE_SRC][RB_FULL];
+    char srcs[128][RB_FULL];
     char sha[65];
     const char *slug;
     RbBuf cap;
@@ -1236,7 +1196,7 @@ static int rb_whole(int argc, char **argv, const char *target) {
     v[n++] = "-o";
     v[n++] = image;
     for (i = 0; i < RB_WHOLE_SRC; i++) {
-        rb_cat(srcs[i], RB_FULL, argv[2], 1, rb_whole_src[i]);
+        rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source(i));
         v[n++] = srcs[i];
     }
     v[n] = 0;

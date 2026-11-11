@@ -9,6 +9,7 @@
  * list in release-build and the object list in entry-build must be the same set. */
 #pragma unisa use sys.io
 #pragma unisa use text.text
+#pragma unisa use cxlib.chainfacts
 static int failed;
 static char *slurp(const char *p, size_t *np) {
     FILE *f = fopen(p, "rb"); size_t cap = 1 << 26, n = 0; char *b;
@@ -18,17 +19,52 @@ static char *slurp(const char *p, size_t *np) {
     return b;
 }
 static void bad(const char *what, const char *a, const char *b) { printf("FAIL\t%s\t%s\t%s\n", what, a, b); failed++; }
-static int collect(const char *b, const char *end, char out[][160], int cap) {
-    int n = 0;
-    while (b < end && (b = strstr(b, ".cx\"")) && b < end) {
-        const char *s = b; while (s[-1] != '"') s--;
-        if (n < cap && b + 3 - s < 160) { int z = 0; while (s + z < b + 3) { out[n][z] = s[z]; z++; } out[n][z] = 0; n++; }
-        b += 4;
+/* Read the authority independently of the generated API, preserving ordered
+ * key/source equality and rejecting duplicates rather than comparing copies. */
+static void roots_check(void) {
+    char *t = slurp("build/chain-facts.tsv", 0);
+    char keys[128][160], sources[128][160]; int n = 0;
+    if (!t) { bad("object-list-unreadable", "build/chain-facts.tsv", "-"); return; }
+    for (char *p = t; p && *p; ) {
+        char *nl = strchr(p, '\n'); if (nl) *nl = 0;
+        if (!strncmp(p, "root\t", 5)) {
+            char *k = p + 5, *s = strchr(k, '\t');
+            if (!s || strchr(s + 1, '\t') || n == 128) { bad("object-root-row", p, "-"); }
+            else {
+                *s++ = 0;
+                if (!*k || !*s || strlen(k) >= 160 || strlen(s) >= 160) bad("object-root-bound", k, s);
+                else {
+                    for (int j = 0; j < n; j++) if (!strcmp(keys[j], k) || !strcmp(sources[j], s)) bad("object-root-duplicate", k, s);
+                    if (cx_fmt(keys[n], sizeof keys[n], "%s", k) || cx_fmt(sources[n], sizeof sources[n], "%s", s)) bad("object-root-bound", k, s);
+                    const char *gk = cf_root_key(n), *gs = cf_root_source(n);
+                    if (!gk || strcmp(k, gk)) bad("object-key", k, gk ? gk : "-");
+                    if (!gs || strcmp(s, gs)) bad("object-source", s, gs ? gs : "-");
+                    n++;
+                }
+            }
+        }
+        p = nl ? nl + 1 : 0;
     }
-    return n;
+    if (!n || n != cf_root_count()) bad("object-count", "facts", "generated");
+    free(t);
+    static const char *sites[] = {"tools/release-build.cx", "tools/entry-build.cx"};
+    static const char *contracts[][4] = {
+        {"#define RB_WHOLE_SRC cf_root_count()", "for (i = 0; i < RB_WHOLE_SRC; i++) {", "rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source(i));", "v[n++] = srcs[i];"},
+        {"#define EB_OBJ cf_root_count()", "for (i = 0; i < EB_OBJ; i++) {", "keys[i] = cf_root_key(i); src_rel[i] = cf_root_source(i);", "eb_join(srcs_b[i], 576, root, src_rel[i]);"}
+    };
+    for (int i = 0; i < 2; i++) {
+        char *b = slurp(sites[i], 0);
+        if (!b) { bad("object-list-unreadable", sites[i], "-"); continue; }
+        if (!strstr(b, "#pragma unisa use cxlib.chainfacts")) bad("object-consumer-module", sites[i], "-");
+        for (int j = 0; j < 4; j++) if (!strstr(b, contracts[i][j])) bad("object-consumer", sites[i], contracts[i][j]);
+        if (strstr(b, "rb_whole_src[") || strstr(b, "src_rel[EB_OBJ] =") || strstr(b, "keys[EB_OBJ] =")) bad("object-local-table", sites[i], "-");
+        for (int j = 0; j < n; j++) {
+            char quoted[164]; cx_fmt(quoted, sizeof quoted, "\"%s\"", sources[j]);
+            if (strstr(b, quoted)) bad("object-local-source", sites[i], sources[j]);
+        }
+        free(b);
+    }
 }
-static int has(char l[][160], int n, const char *s) { for (int i = 0; i < n; i++) if (!strcmp(l[i], s)) return 1; return 0; }
-static char ra[128][160], eb[128][160];
 
 /* ---- NN-NF: op index / arity / print name have ONE source, exec/facts/core-ops.tsv ----
  * Eight copies of the arity table and three literal 56s (plus OP_COUNT) must agree with it,
@@ -183,15 +219,7 @@ int main(int argc, char **argv) {
         }
         line = nl ? nl + 1 : 0;
     }
-    char *rb = slurp("tools/release-build.cx", 0), *ep = slurp("tools/entry-build.cx", 0);
-    char *rs = rb ? strstr(rb, "rb_whole_src[RB_WHOLE_SRC] = {") : 0, *re = rs ? strstr(rs, "};") : 0;
-    if (!rs || !re || !ep) bad("object-list-unreadable", "-", "-");
-    else {
-        int a = collect(rs, re, ra, 128), e = collect(ep, ep + strlen(ep), eb, 128);
-        if (a != e) bad("object-count", "release", "entry");
-        for (int i = 0; i < a; i++) if (!has(eb, e, ra[i])) bad("object-only-release", ra[i], "-");
-        for (int i = 0; i < e; i++) if (!has(ra, a, eb[i])) bad("object-only-entry", eb[i], "-");
-    }
+    roots_check();
     if (!rows) bad("no-rows", path, "-");
     if (ops_load()) {
         char list[512];

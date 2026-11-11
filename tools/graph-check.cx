@@ -26,6 +26,7 @@
  *     is a phase run inline.  Compared phases: front merge stub units e3 image plus every phase name
  *     the chain source holds; graph-only names outside that set (prep, whole, B, ...) are not route
  *     phases of the chain and are ignored.  Each difference is one row
+ *     Dynamic "gen%d-%s-PHASE" tags are read in source order too, for calls whose gen argument is 1.
  *       ROUTE_MISMATCH<TAB>target<TAB>phase<TAB>graph=...<TAB>chain=...
  *     (present on one side only, or the same phases in another order).  g2/g3 aggregate nodes are
  *     not compared: the chain builds only the linux slices there.  The chain side is recognised by
@@ -265,7 +266,7 @@ static void check_hardwire(void) {
     mm_free(b);
 }
 /* ---- route ---- */
-typedef struct { char fn[64], phase[32]; int gate, line; } RFn;        /* one "gen1-%s-PHASE" tag inside function fn */
+typedef struct { char fn[64], phase[32]; int gate, gen, line; } RFn; /* tag and optional generation parameter */
 typedef struct { char target[32], phase[32], via[64]; int line; long pos; } REv;   /* the chain runs PHASE for TARGET */
 static RFn rfn[64]; static int nrfn;
 static REv rev[512]; static int nrev;
@@ -285,14 +286,16 @@ static void route_event(const char *target, const char *phase, const char *via, 
     put_s(rev[nrev].target, 32, target, tx_len(target, 32)); put_s(rev[nrev].phase, 32, phase, tx_len(phase, 32));
     put_s(rev[nrev].via, 64, via, tx_len(via, 64)); rev[nrev].line = line; rev[nrev].pos = pos; nrev++; vocab(phase);
 }
-/* every "gen1-%s-PHASE" literal: its enclosing function (the last column-0 `static ` line before it) and,
-   when an `if (!PARAM) return 0;` stands between the function head and the literal, PARAM's position */
+/* Literal gen1 and parameterised gen%d tags share the route reader. Dynamic tags
+   require a gen parameter and calls selecting generation 1; phase order and stub gates remain checked. */
 static void route_functions(const char *b, long n) {
     long i = 0;
     for (;;) {
-        long at = tx_find(b + i, n - i, "\"gen1-%s-", 9), s, e, fs, paren, ns, j;
+        long at = tx_find(b + i, n - i, "\"gen1-%s-", 9), dyn = tx_find(b + i, n - i, "\"gen%d-%s-", 10), s, e, fs, paren, ns, j;
+        int dynamic = dyn >= 0 && (at < 0 || dyn < at);
+        if (dynamic) at = dyn;
         if (at < 0) break;
-        at += i; s = at + 9; e = s;
+        at += i; s = at + (dynamic ? 10 : 9); e = s;
         while (e < n && b[e] != '"' && b[e] != '\n') e++;
         i = e;
         for (fs = at; fs >= 0; fs--) if ((fs == 0 || b[fs - 1] == '\n') && n - fs >= 7 && tx_same(b + fs, 7, "static ", 7)) break;
@@ -302,7 +305,20 @@ static void route_functions(const char *b, long n) {
         for (ns = paren; ns > fs && ident(b[ns - 1]); ns--) ;
         if (nrfn == 64) { fprintf(stderr, "graph-check: more than 64 route tags in %s\n", route_path); exit(2); }
         put_s(rfn[nrfn].fn, 64, b + ns, paren - ns); phase_norm(rfn[nrfn].phase, b + s, e - s);
-        rfn[nrfn].gate = -1; rfn[nrfn].line = line_of(b, at);
+        rfn[nrfn].gate = -1; rfn[nrfn].gen = -1; rfn[nrfn].line = line_of(b, at);
+        if (dynamic) {
+            long p = paren + 1, ps = p; int idx = 0;
+            for (; p < at; p++) if (b[p] == ',' || b[p] == ')') {
+                long z = p, a;
+                while (z > ps && !ident(b[z - 1])) z--;
+                for (a = z; a > ps && ident(b[a - 1]); a--) ;
+                if (tx_same(b + a, z - a, "gen", 3)) rfn[nrfn].gen = idx;
+                if (b[p] == ')') break;
+                idx++; ps = p + 1;
+            }
+            /* Without a generation parameter this format cannot identify a gen1 route. */
+            if (rfn[nrfn].gen < 0) continue;
+        }
         for (j = paren; j < at; ) {
             long g = tx_find(b + j, at - j, "if (!", 5), ge;
             if (g < 0) break;
@@ -365,6 +381,7 @@ static void route_calls(const char *b, long n) {
             if (t < 0) continue;
             for (k = f; k < nrfn; k++) {
                 if (!tx_eqz(rfn[k].fn, rfn[f].fn)) continue;
+                if (rfn[k].gen >= 0 && (rfn[k].gen >= na || !tx_eqz(arg[rfn[k].gen], "1"))) continue;
                 if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "0")) continue;
                 route_event(gorder[t], rfn[k].phase, rfn[k].fn, line_of(b, at), at);
             }

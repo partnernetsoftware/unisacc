@@ -19,6 +19,7 @@
 /* Text copies retain the complete span and NUL; byte copies check capacity. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.wholefrontmerge
+#pragma unisa use cxlib.chainfacts
 #define WF_MAX 128
 static long began;
 static char root[4400],pkg[4400],ctor[4400],objects[4400],out[4400],tmpl[4400],helper[4400];
@@ -58,28 +59,13 @@ static void check_objects(void){char p[4400],h[65];enumerate();for(int i=0;i<cou
 static long run(char **v,const char *cwd,char *stdout_path){tick();char a[64],b[64],ep[4400];if(cx_fmt(a,sizeof a,"child-%d.stdout",serial)||cx_fmt(b,sizeof b,"child-%d.stderr",serial++))die("log name");path(stdout_path,out,a);path(ep,out,b);int fo=open(stdout_path,O_WRONLY|O_CREAT|O_EXCL,0600),fe=open(ep,O_WRONLY|O_CREAT|O_EXCL,0600);if(fo<0||fe<0)die("exclusive child logs");long start=sy_now_ms(),end=began+45000;pid_t pid=fork();if(pid<0)die("fork");if(!pid){if(setpgid(0,0)||chdir(cwd)||dup2(fo,1)<0||dup2(fe,2)<0)_exit(126);close(fo);close(fe);execv(v[0],v);_exit(127);}close(fo);close(fe);setpgid(pid,pid);int st=0;for(;;){pid_t z=waitpid(pid,&st,WNOHANG);if(z==pid)break;if(z<0&&errno!=EINTR){kill(-pid,SIGKILL);die("wait child");}if(sy_now_ms()>=end){kill(-pid,SIGKILL);kill(pid,SIGKILL);while(waitpid(pid,&st,0)<0&&errno==EINTR){}die("child/prepare deadline");}usleep(1000);}/* No descendants may escape a completed command. */
  kill(-pid,SIGKILL);tick();if(!WIFEXITED(st)||WEXITSTATUS(st))die("child failed (see exclusive logs)");return sy_now_ms()-start;}
 static void sid(char h[65]){char log[4400];char *v[]={helper,root,0};run(v,root,log);size_t n;char *s=load(log,&n);if(n!=65||s[64]!='\n')die("native Fv2 identity wire");memcpy(h,s,64);h[64]=0;free(s);if(!hex(h))die("native Fv2 identity hex");}
-static void whitespace(char **at){char *p=*at;for(;;){while(*p==' '||*p=='\t'||*p=='\r'||*p=='\n')p++;if(p[0]=='/'&&p[1]=='*'){char *q=strstr(p+2,"*/");if(!q)die("root array comment");p=q+2;}else break;}*at=p;}
 static void roots(void) {
-    char p[4400]; path(p,root,"tools/release-build.cx");
-    size_t n; char *s=load(p,&n); if(memchr(s,0,n))die("root source NUL");
-    const char *anchor="static const char *rb_whole_src[RB_WHOLE_SRC] = {";
-    char *a=strstr(s,anchor); if(!a||strstr(a+strlen(anchor),anchor))die("unknown root array declaration");
-    a+=strlen(anchor); np_buf b={0}; int nr=0;
-    for(;;) {
-        whitespace(&a); if(*a!='\"')die("root array string expected");
-        char *start=++a;
-        while(*a&&*a!='\"') { if(!strchr("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-",*a))die("unknown root array string syntax"); a++; }
-        if(*a!='\"'||a-start<5||strncmp(start,"src/",4))die("root path");
-        size_t z=(size_t)(a-start); char rel[4400],absolute[4400];
-        if(z>=sizeof rel)die("root bound"); if(mm_copy(rel,sizeof rel,start,(long)z))die("root bound"); rel[z]=0;
-        if(strstr(rel,"..")||strstr(rel,"//"))die("unsafe root");
-        path(absolute,root,rel); np_puts(&b,absolute); np_puts(&b,"\n"); nr++; a++;
-        whitespace(&a);
-        if(*a==',') { a++; whitespace(&a); if(*a!='}')continue; }
-        if(*a!='}'||a[1]!=';')die("unknown root array syntax"); break;
+    np_buf b={0};
+    for(int i=0;i<cf_root_count();i++) {
+        char absolute[4400]; path(absolute,root,cf_root_source(i));
+        np_puts(&b,absolute); np_puts(&b,"\n");
     }
-    if(nr!=44)die("root array must contain 44 roots");
-    save("roots.txt",b.p,b.n); free(b.p); free(s);
+    save("roots.txt",b.p,b.n); free(b.p);
 }
 /* Receipt readers reject duplicate and unknown keys, including object entries. */
 typedef struct {char *key,*value;} wf_field;
@@ -106,7 +92,7 @@ static void object_fields(void){
 static void match_hash(const char *file,const char *expected,np_buf *b,const char *key){char h[65];digest(file,h);if(!hex(expected)||strcmp(h,expected))die("prepared input SHA mismatch");add(b,key,h);}
 static void dir_identity(const char *file,np_buf *b,const char *key){struct stat st;if(lstat(file,&st)||!S_ISDIR(st.st_mode))die("directory identity");char v[128];if(cx_fmt(v,sizeof v,"%lu:%lu",(unsigned long)st.st_dev,(unsigned long)st.st_ino))die("directory identity bound");add(b,key,v);}
 static char prepared[4400],part[4400],control[4400],worker_image[4400],tmpdir[4400];
-static char root_args[44][4400];
+static char root_args[128][4400];
 static void inputs(np_buf *b){
  if(epoch_active&&epoch_inputs.p){if(strcmp(prepared,epoch_prepared))die("epoch prepared identity");np_put(b,epoch_inputs.p,epoch_inputs.n);tick();return;}
  char p[4400],h[65];path(p,prepared,"receipt.txt");digest(p,h);add(b,"prepare_receipt_sha",h);read_fields(p,"whole-front-prepare-v1");
@@ -122,13 +108,13 @@ static void inputs(np_buf *b){
  path(worker_image,prepared,"worker");if(digest(worker_image,h)!=number(field("worker_bytes"))||access(worker_image,X_OK))die("worker image bytes/executable");match_hash(worker_image,field("worker_sha"),b,"worker_sha");
  path(p,prepared,"roots.txt");match_hash(p,field("roots_sha"),b,"roots_sha");size_t n;char *text=load(p,&n);if(memchr(text,0,n)||memchr(text,'\r',n))die("roots text");char *at=text,*s;int nr=0;
  while((s=line(&at))){
-     if(nr==44||s[0]!='/'||strpbrk(s,"\t\r\n")||strlen(s)>=4400)die("absolute roots required");
+     if(nr==cf_root_count()||s[0]!='/'||strpbrk(s,"\t\r\n")||strlen(s)>=4400)die("absolute roots required");
      char resolved[4400]; physical(s,resolved); size_t rz=strlen(root);
      if(strncmp(s,root,rz)||strncmp(s+rz,"/src/",5)||strncmp(resolved,root,rz)||resolved[rz]!='/')die("root outside source tree");
      for(int j=0;j<nr;j++)if(!strcmp(root_args[j],s))die("duplicate root");
      if(tx_copy(root_args[nr++],sizeof root_args[nr++],s,(long)strlen(s)))die("text copy bound");
  }
- free(text);if(nr!=44)die("44 roots required");
+ free(text);if(nr!=cf_root_count())die("source root count");
  char source_expected[65],helper_expected[65];if(!hex(field("source_sid"))||!hex(field("helper_sha")))die("source/helper SHA");if(tx_copy(source_expected,sizeof source_expected,field("source_sid"),(long)strlen(field("source_sid"))))die("text copy bound");if(tx_copy(helper_expected,sizeof helper_expected,field("helper_sha"),(long)strlen(field("helper_sha"))))die("text copy bound");
  free(receipt_text);path(tmpdir,prepared,"tmp");char tp[4400];physical(tmpdir,tp);if(strcmp(tmpdir,tp))die("TMPDIR canonical identity");dir_identity(tmpdir,b,"tmp_dev_ino");
  path(p,prepared,"tmp.identity");digest(p,h);add(b,"tmp_receipt_sha",h);read_fields(p,"whole-front-tmp-v1");if(nf!=5||strcmp(field("status"),"PREPARED")||strcmp(field("scope"),"prepare-only")||strcmp(field("path"),tmpdir))die("TMPDIR receipt");struct stat st;if(lstat(tmpdir,&st))die("TMPDIR stat");char dev[64],ino[64];if(cx_fmt(dev,sizeof dev,"%lu",(unsigned long)st.st_dev)||cx_fmt(ino,sizeof ino,"%lu",(unsigned long)st.st_ino)||strcmp(dev,field("dev"))||strcmp(ino,field("ino")))die("TMPDIR changed");free(receipt_text);
@@ -139,9 +125,9 @@ static void inputs(np_buf *b){
 }
 static void part_result(np_buf *b,long first,long amount){
  char p[4400],h[65];path(p,part,"part.tsv");size_t n;char *text=load(p,&n);if(memchr(text,0,n)||memchr(text,'\r',n))die("part text");char *at=text,*s;const char *keys[]={"first","count","total"};long v[3];
- for(int i=0;i<3;i++){s=line(&at);char *t=s?strchr(s,'\t'):0;if(!t)die("part header");*t++=0;if(strcmp(s,keys[i]))die("part header order");v[i]=number(t);}if(v[0]!=first||v[1]!=amount||v[2]<44||v[2]>WF_MAX||first>v[2]||amount>v[2]-first)die("part range/total");
+ for(int i=0;i<3;i++){s=line(&at);char *t=s?strchr(s,'\t'):0;if(!t)die("part header");*t++=0;if(strcmp(s,keys[i]))die("part header order");v[i]=number(t);}if(v[0]!=first||v[1]!=amount||v[2]<cf_root_count()||v[2]>WF_MAX||first>v[2]||amount>v[2]-first)die("part range/total");
  char entries[WF_MAX][4400];int nr=0;while((s=line(&at))){char *t=strchr(s,'\t');if(!t||nr>=v[2])die("part order");*t++=0;if(number(s)!=nr||!*t||strlen(t)>=4400||strchr(t,'\t'))die("part ordered unit");for(int j=0;j<nr;j++)if(!strcmp(entries[j],t))die("part duplicate unit");if(tx_copy(entries[nr++],sizeof entries[nr++],t,(long)strlen(t)))die("text copy bound");}if(nr!=v[2])die("part missing units");
- for(int j=0;j<44;j++){int found=0;for(int i=0;i<nr;i++)if(!strcmp(root_args[j],entries[i]))found=1;if(!found)die("part missing root");}free(text);digest(p,h);add(b,"part_sha",h);addnum(b,"total",v[2]);
+ for(int j=0;j<cf_root_count();j++){int found=0;for(int i=0;i<nr;i++)if(!strcmp(root_args[j],entries[i]))found=1;if(!found)die("part missing root");}free(text);digest(p,h);add(b,"part_sha",h);addnum(b,"total",v[2]);
  path(p,part,"frames.bin");long z=digest(p,h);if(z<=0)die("empty frames");add(b,"frames_sha",h);addnum(b,"frames_bytes",z);path(p,part,"attrs.bin");z=digest(p,h);add(b,"attrs_sha",h);addnum(b,"attrs_bytes",z);dir_identity(part,b,"part_dev_ino");dir_identity(control,b,"control_dev_ino");
 }
 static int front(int argc,char **argv){
@@ -150,7 +136,7 @@ static int front(int argc,char **argv){
  struct stat st;if(resume){if(lstat(control,&st)||!S_ISDIR(st.st_mode))die("missing ready control");}else{if(!lstat(part,&st)||errno!=ENOENT||mkdir(control,0700))die("exclusive NEW_PART/control required");}
  char evidence[4400];path(evidence,control,"check-XXXXXX");if(!mkdtemp(evidence))die("exclusive evidence directory");if(tx_copy(out,sizeof out,evidence,(long)strlen(evidence)))die("text copy bound");
  np_buf before={0},after={0},ready={0};inputs(&before);
- if(!resume){char *args[52];int k=0;args[k++]=worker_image;args[k++]="front";args[k++]=pkg;args[k++]=argv[3];args[k++]=part;args[k++]=argv[5];args[k++]=argv[6];for(int i=0;i<44;i++)args[k++]=root_args[i];args[k]=0;char log[4400];run(args,root,log);}
+ if(!resume){char *args[128+8];int k=0;args[k++]=worker_image;args[k++]="front";args[k++]=pkg;args[k++]=argv[3];args[k++]=part;args[k++]=argv[5];args[k++]=argv[6];for(int i=0;i<cf_root_count();i++)args[k++]=root_args[i];args[k]=0;char log[4400];run(args,root,log);}
  inputs(&after);if(before.n!=after.n||memcmp(before.p,after.p,before.n))die("front input identity changed");
  np_puts(&ready,"whole-front-ready-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&ready,"prepared",prepared);add(&ready,"part",part);add(&ready,"target",argv[3]);addnum(&ready,"first",first);addnum(&ready,"count",amount);np_put(&ready,before.p,before.n);part_result(&ready,first,amount);
  if(resume){char p[4400];path(p,control,"ready.tsv");size_t n;char *old=load(p,&n);if(n!=ready.n||memcmp(old,ready.p,n))die("incomplete or changed ready part");free(old);}else{if(tx_copy(out,sizeof out,control,(long)strlen(control)))die("text copy bound");save("ready.tsv",ready.p,ready.n);}
@@ -173,7 +159,7 @@ static int stub_phase(int argc,char **argv);
  * Receipt readers own no live fields across this boundary. Keep serial monotonic
  * so returning to the parent's evidence directory cannot reuse a log name. */
 static void resume_call(int (*phase)(int,char **),int argc,char **argv){
- struct resume_state {char paths[12][4400],names[WF_MAX][256],hashes[WF_MAX][65],roots[44][4400];long sizes[WF_MAX];int count;} *s=malloc(sizeof *s);
+ struct resume_state {char paths[12][4400],names[WF_MAX][256],hashes[WF_MAX][65],roots[128][4400];long sizes[WF_MAX];int count;} *s=malloc(sizeof *s);
  if(!s)die("resume state allocation");
  char *paths[]={root,pkg,ctor,objects,out,tmpl,helper,prepared,part,control,worker_image,tmpdir};
  for(int i=0;i<12;i++)memcpy(s->paths[i],paths[i],4400);
@@ -213,7 +199,7 @@ static void stub_result(const char *dest,np_buf *r){
 }
 static int stub_phase(int argc,char **argv){
  if((argc!=6&&argc!=7)||(argc==7&&strcmp(argv[6],"--resume"))||!*argv[3]||strlen(argv[3])>64||strpbrk(argv[3],"\t\r\n"))die("usage: stub PREPARED_DIR TARGET PHASE NEW_OUT [--resume]");int resume=argc==7;long long start=phase_now();physical(argv[2],prepared);char phase[4400],dest[4400];physical(argv[4],phase);new_name(argv[5],dest);phase_control(dest,resume);np_buf before={0},merge_before={0},merge_after={0},r={0};inputs(&before);verify_merge(argv[3],phase,&merge_before);char h[65];digest(phase,h);add(&merge_before,"phase_sha",h);
- if(!resume){char *v[51],log[4400];int k=0;v[k++]=worker_image;v[k++]="stub";v[k++]=pkg;v[k++]=argv[3];v[k++]=phase;v[k++]=dest;for(int i=0;i<44;i++)v[k++]=root_args[i];v[k]=0;run(v,root,log);}else{char p[4400],h[65];path(p,dest,"stub.c");if(digest(p,h)<=0)die("resume without stub product identity");path(p,dest,"replay.phase");if(digest(p,h)<=0)die("resume without stub product identity");}
+ if(!resume){char *v[128+7],log[4400];int k=0;v[k++]=worker_image;v[k++]="stub";v[k++]=pkg;v[k++]=argv[3];v[k++]=phase;v[k++]=dest;for(int i=0;i<cf_root_count();i++)v[k++]=root_args[i];v[k]=0;run(v,root,log);}else{char p[4400],h[65];path(p,dest,"stub.c");if(digest(p,h)<=0)die("resume without stub product identity");path(p,dest,"replay.phase");if(digest(p,h)<=0)die("resume without stub product identity");}
  same_inputs(&before);verify_merge(argv[3],phase,&merge_after);digest(phase,h);add(&merge_after,"phase_sha",h);if(merge_before.n!=merge_after.n||memcmp(merge_before.p,merge_after.p,merge_before.n))die("merge changed during stub");np_puts(&r,"whole-front-stub-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&r,"prepared",prepared);add(&r,"target",argv[3]);add(&r,"phase",phase);add(&r,"output",dest);np_put(&r,before.p,before.n);np_put(&r,merge_before.p,merge_before.n);stub_result(dest,&r);dir_identity(control,&r,"control_dev_ino");phase_ready(&r,resume,phase_now()-start);free(before.p);free(merge_before.p);free(merge_after.p);free(r.p);printf("PREPARED\twhole-front\tstub=%s\tresume=%s/ready.tsv\tno-qualification\n",dest,control);return 0;
 }
 /* Image materialization consumes the compiler's native B path, not a second emitter. */
@@ -250,7 +236,7 @@ static int image_phase(int argc,char **argv){
  if(verify||resume){path(p,dest,"INPUT");size_t n;char *s=load(p,&n);if(n!=manifest.n||memcmp(s,manifest.p,n))die("image INPUT changed");free(s);}else{
   if(mkdir(dest,0700))die("exclusive image NEW_OUT");char evidence[4400];if(tx_copy(evidence,sizeof evidence,out,(long)strlen(out)))die("text copy bound");if(tx_copy(out,sizeof out,dest,(long)strlen(dest)))die("text copy bound");save("INPUT",manifest.p,manifest.n);
   if(setenv("TMPDIR",tmpdir,1)||setenv("UNISA_CONTAINER",pkg,1)||setenv("UNISACC_PHASE","B",1)||setenv("UNISACC_PHASE_IN",phase,1)||unsetenv("UNISACC_PHASE_OUT"))die("image environment");
-  char *v[50],log[4400];int k=0;v[k++]=ctor;v[k++]="-o";v[k++]=image;v[k++]="-b";v[k++]=argv[3];for(int i=0;i<44;i++)v[k++]=root_args[i];v[k]=0;epoch_clear();long long t=phase_now();run(v,root,log);long long ns=phase_now()-t;epoch_clear();
+  char *v[128+6],log[4400];int k=0;v[k++]=ctor;v[k++]="-o";v[k++]=image;v[k++]="-b";v[k++]=argv[3];for(int i=0;i<cf_root_count();i++)v[k++]=root_args[i];v[k]=0;epoch_clear();long long t=phase_now();run(v,root,log);long long ns=phase_now()-t;epoch_clear();
   size_t n;char *s=load(log,&n);save("stdout",s,n);free(s);char err[64];if(cx_fmt(err,sizeof err,"child-%d.stderr",serial-1))die("image stderr name");path(p,dest,err);s=load(p,&n);save("stderr",s,n);free(s);np_buf timing={0};np_putll(&timing,ns);np_puts(&timing,"\n");save("construct_ns",timing.p,timing.n);free(timing.p);
   /* PKG already contains its footer: append unchanged, exactly once. */
   size_t ni,np;char *ib=load(image,&ni),*pb=load(pkg,&np);if(ni>536870912-np)die("slice extent");int fd;path(p,dest,slice);fd=open(p,O_WRONLY|O_CREAT|O_EXCL,0700);if(fd<0)die("exclusive slice");const char *blocks[]={ib,pb};size_t lengths[]={ni,np};for(int j=0;j<2;j++){size_t at=0;while(at<lengths[j]){ssize_t z=write(fd,blocks[j]+at,lengths[j]-at);if(z<0&&errno==EINTR)continue;if(z<=0)die("slice write");at+=(size_t)z;tick();}}if(close(fd))die("slice close");free(ib);free(pb);if(tx_copy(out,sizeof out,evidence,(long)strlen(evidence)))die("text copy bound");

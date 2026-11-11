@@ -20,6 +20,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainfacts
 #pragma unisa use sys.posix
 
 static void die(const char *a, const char *b) {
@@ -64,7 +65,7 @@ static int runv_secs(char **v, int secs) { return pr_code(v[0], v, secs); }
    group and kills it at the bound (the tools/bound wrapper this used to add is no longer needed). */
 static int bound_sh_secs(const char *root, char **rest, int secs) {
     char com[4400];
-    char *v[72];
+    char *v[128+28];
     int n = 0, i = 0;
     if (secs < 1 || secs > 60) die("bound secs", "1..60");
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
@@ -143,7 +144,7 @@ static int step_secs(const char *root, char **args, int secs) {
 static int step(const char *root, char **args) { return step_secs(root, args, 55); }
 static char chain_work[4400];
 /* 0.0.49: osx=front/merge/stub; win=front/merge then st_span units/e3/prune-elf. */
-static char span_roots[44][4400];
+static char span_roots[128][4400];
 static int load_span_roots(const char *prep) {
     char p[4400], line[4400];
     FILE *f;
@@ -151,7 +152,8 @@ static int load_span_roots(const char *prep) {
     if (cx_fmt(p, sizeof p, "%s/roots.txt", prep)) die("path", "span-roots");
     f = fopen(p, "rb");
     if (!f) die("open", p);
-    while (i < 44 && fgets(line, (int)sizeof line, f)) {
+    while (fgets(line, (int)sizeof line, f)) {
+        if (i >= cf_root_count()) { fclose(f); die("span roots count", p); }
         size_t n = strlen(line);
         if (n && line[n - 1] == '\n') line[--n] = 0;
         if (!n || n >= sizeof span_roots[0]) { fclose(f); die("root line", p); }
@@ -159,7 +161,7 @@ static int load_span_roots(const char *prep) {
         i++;
     }
     fclose(f);
-    if (i != 44) die("span roots count", p);
+    if (i != cf_root_count()) die("span roots count", p);
     return 0;
 }
 /* P1: gen1 Mac/Win 路由按代(gen=1..3)参数化。gen=1 的目录名、相位 tag、检查点名与参数化前逐字一致;
@@ -176,11 +178,10 @@ static void span_prep_tag(char *buf, long cap, int gen) {
     if (gen == 1 ? cx_fmt(buf, cap, "wf-span-prep") : cx_fmt(buf, cap, "wf-span-prep-g%d", gen)) die("fmt", "span-prep-tag");
 }
 static void wf_scrub_dest(const char *outdir, const char *dest);
-/* Last front slice count = total - FIRST, where total is the whole-program unit count that the
-   completed front0 recorded in FRONT0/part.tsv ("total\tN"). The unit count follows the product
-   sources (85 before unitcache, 86 after), so it is read, never written here. The 45-second bound
-   of the slice is unchanged; a total outside FIRST+1..FIRST+32 is refused, not re-partitioned. */
-static void wf_tail_count(const char *front0, int first, char *buf, long cap) {
+static const char *until_phase;
+/* part.tsv is the authority for partitioning: 32 units per child, WF_MAX=128 unchanged.
+   Existing front0/1/2 names survive; a fourth child is scheduled only when total > 96. */
+static int wf_total(const char *front0) {
     char pt[4400];
     size_t n = 0, i = 0;
     char *b;
@@ -204,17 +205,68 @@ static void wf_tail_count(const char *front0, int first, char *buf, long cap) {
         i = e + 1;
     }
     free(b);
-    if (total <= first || total - first > 32) die("REFUSE front total outside last slice (first+1..first+32)", pt);
-    if (cx_fmt(buf, cap, "%ld", total - first)) die("fmt", "tail count");
-    sy_printf("WF_TAIL\ttotal=%ld\tfirst=%d\tcount=%ld\tsource=%s\n", total, first, total - first, pt);
+    if (total < cf_root_count() || total > cf_wf_max()) die("REFUSE front total outside WF_MAX", pt);
+    return (int)total;
+}
+static void wf_tail_count(const char *front0, int first, char *buf, long cap) {
+    int total = wf_total(front0), count = total - first;
+    if (first < 0 || first >= total) die("REFUSE front slice offset", front0);
+    if (count > cf_front_slice()) count = cf_front_slice();
+    if (cx_fmt(buf, cap, "%d", count)) die("fmt", "tail count");
+    sy_printf("WF_TAIL\ttotal=%d\tfirst=%d\tcount=%d\n", total, first, count);
+}
+static int wf_inventory(const char *outdir, int gen, const char *slug, const char *front0, int want_stub) {
+    char p[4400], bytes[2048];
+    int total = wf_total(front0), slice = cf_front_slice();
+    int used = snprintf(bytes, sizeof bytes, "# total\t%d\n", total);
+    int slices = (total + slice - 1) / slice;
+    for (int i = 0; i < slices; i++) {
+        int count = total - i * slice;
+        if (count > slice) count = slice;
+        int n = snprintf(bytes + used, sizeof bytes - used, "gen%d-%s-front%d\t%d\t%d\n", gen, slug, i, i * slice, count);
+        if (n < 0 || n >= (int)sizeof bytes - used) die("front inventory bound", slug);
+        used += n;
+    }
+    int n = snprintf(bytes + used, sizeof bytes - used, "gen%d-%s-merge\t-1\t0\n", gen, slug);
+    if (n < 0 || n >= (int)sizeof bytes - used) die("front inventory bound", slug);
+    used += n;
+    if (want_stub) {
+        n = snprintf(bytes + used, sizeof bytes - used, "gen%d-%s-stub\t-1\t0\n", gen, slug);
+        if (n < 0 || n >= (int)sizeof bytes - used) die("front inventory bound", slug);
+        used += n;
+    }
+    if (cx_fmt(p, sizeof p, "%s/chain-front-gen%d-%s.tsv", outdir, gen, slug)) die("inventory path", slug);
+    size_t oldn = 0; char *old = cx_read(p, &oldn);
+    if (old && (oldn != (size_t)used || memcmp(old, bytes, oldn))) { free(old); die("REFUSE front inventory changed", p); }
+    if (!old && install_if_changed(p, bytes, used, 0)) die("front inventory write", p);
+    free(old);
+    return slices;
+}
+static int known_front_phase(const char *root, const char *rev, const char *phase) {
+    const char *slugs[] = {"osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+    char tag[80], p0[4400];
+    for (int gen = 1; gen <= 3; gen++) for (int t = 0; t < 4; t++) {
+        for (int i = 0; i < (cf_wf_max() + cf_front_slice() - 1) / cf_front_slice(); i++) {
+            if (cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slugs[t], i)) die("fmt", "front phase");
+            if (strcmp(tag, phase)) continue;
+            if (!i) return 1;
+            if (cx_fmt(p0, sizeof p0, "%s/out/release-snap-%.10s/out/chain/gen%d/%s-front0", root, rev, gen, slugs[t])) die("path", "front phase");
+            return i * cf_front_slice() < wf_total(p0);
+        }
+        if (cx_fmt(tag, sizeof tag, "gen%d-%s-merge", gen, slugs[t])) die("fmt", "merge phase");
+        if (!strcmp(tag, phase)) return 1;
+        if (t < 2) {
+            if (cx_fmt(tag, sizeof tag, "gen%d-%s-stub", gen, slugs[t])) die("fmt", "stub phase");
+            if (!strcmp(tag, phase)) return 1;
+        }
+    }
+    return 0;
 }
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
-    char wft[4400], prep[4400], p0[4400], p1[4400], p2[4400], phase[4400], dest[4400], tag[80];
-    const char *offs[3] = {"0", "32", "64"};
-    char tailc[32];
-    const char *cnts[3] = {"32", "32", 0};
-    char *parts[3];
-    int i;
+    char wft[4400], prep[4400], phase[4400], dest[4400], tag[80];
+    static char parts[128][4400]; /* physical WF_MAX capacity; logical slice count comes from chainfacts */
+    char offset[32], amount[32];
+    int i, slices = 1;
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     {
         char gd[4400];
@@ -223,25 +275,31 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         sy_mkdir(gd, 0755);
     }
     prep_dir(prep, sizeof prep, gen, "wf-prep");
-    if (cx_fmt(p0, sizeof p0, "%s/gen%d/%s-front0", chain_work, gen, slug)) die("path", "p0");
-    if (cx_fmt(p1, sizeof p1, "%s/gen%d/%s-front1", chain_work, gen, slug)) die("path", "p1");
-    if (cx_fmt(p2, sizeof p2, "%s/gen%d/%s-front2", chain_work, gen, slug)) die("path", "p2");
+    for (i = 0; i < (cf_wf_max() + cf_front_slice() - 1) / cf_front_slice(); i++)
+        if (cx_fmt(parts[i], sizeof parts[i], "%s/gen%d/%s-front%d", chain_work, gen, slug, i)) die("path", "front");
     if (cx_fmt(phase, sizeof phase, "%s/gen%d/%s-merged", chain_work, gen, slug)) die("path", "phase");
     if (cx_fmt(dest, sizeof dest, "%s/gen%d/%s-stub", chain_work, gen, slug)) die("path", "stub");
-    parts[0] = p0; parts[1] = p1; parts[2] = p2;
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < slices; i++) {
         char *v[12];
         int n = 0;
-        if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-front%d", slug, i) : cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slug, i))) die("fmt", slug);
-        if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); continue; }
-        wf_scrub_dest(outdir, parts[i]);
-        if (i == 2) { wf_tail_count(p0, 64, tailc, sizeof tailc); cnts[2] = tailc; }
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
-        v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i]; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die(tag, parts[i]);
-        mark(outdir, tag, 0);
+        if (cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slug, i)) die("fmt", slug);
+        if (i) wf_tail_count(parts[0], i * cf_front_slice(), amount, sizeof amount);
+        else if (cx_fmt(amount, sizeof amount, "%d", cf_front_slice())) die("fmt", "front count");
+        if (cx_fmt(offset, sizeof offset, "%d", i * cf_front_slice())) die("fmt", "front offset");
+        if (ck_done(outdir, tag)) {
+            sy_printf("RESUME\t%s\n", tag);
+            if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
+            if (until_phase && !strcmp(until_phase, tag)) exit(0);
+        } else {
+            wf_scrub_dest(outdir, parts[i]);
+            v[n++] = wft; v[n++] = (char *)"--";
+            v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
+            v[n++] = offset; v[n++] = amount; v[n++] = 0;
+            if (bound_sh_secs(root, v, 45)) die(tag, parts[i]);
+            if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
+            mark(outdir, tag, 0);
+        }
     }
     if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-merge", slug) : cx_fmt(tag, sizeof tag, "gen%d-%s-merge", gen, slug))) die("fmt", slug);
     if (!ck_done(outdir, tag)) {
@@ -250,16 +308,17 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         wf_scrub_dest(outdir, phase);
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
-        v[n++] = p0; v[n++] = p1; v[n++] = p2; v[n++] = 0;
+        for (i = 0; i < slices; i++) v[n++] = parts[i];
+        v[n++] = 0;
         if (bound_sh_secs(root, v, 45)) die(tag, phase);
         mark(outdir, tag, 0);
-    } else sy_printf("RESUME\t%s\n", tag);
+    } else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
     if (!want_stub) return 0;
     if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-stub", slug) : cx_fmt(tag, sizeof tag, "gen%d-%s-stub", gen, slug))) die("fmt", slug);
     {
         char sc[4400];
         if (cx_fmt(sc, sizeof sc, "%s/stub.c", dest)) die("path", "stubc");
-        if (ck_complete(outdir, tag, sc)) { sy_printf("RESUME\t%s\n", tag); }
+        if (ck_complete(outdir, tag, sc)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
         else {
         char *v[12];
         int n = 0; long t0 = sy_now_ms();
@@ -333,7 +392,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     const char *prep, const char *target, const char *input, const char *dest,
     const char *first, const char *last, const char *tag) {
     char wft[4400], prod[4400];
-    char *v[72];
+    char *v[128+28];
     int n = 0, i;
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
     if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
@@ -344,7 +403,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
     v[n++] = (char *)input; v[n++] = (char *)dest;
     v[n++] = (char *)first; v[n++] = (char *)last;
-    for (i = 0; i < 44; i++) v[n++] = span_roots[i];
+    for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
     if (bound_sh_secs(root, v, 45)) die(tag, dest);
     mark(outdir, tag, 0);
@@ -383,7 +442,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     const char *prep, const char *target, const char *input, const char *dest,
     const char *first, const char *last, const char *stub, const char *tag) {
     char wft[4400], prod[4400];
-    char *v[72];
+    char *v[128+28];
     int n = 0, i;
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
     if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
@@ -394,7 +453,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
     v[n++] = (char *)input; v[n++] = (char *)dest;
     v[n++] = (char *)first; v[n++] = (char *)last;
-    for (i = 0; i < 44; i++) v[n++] = span_roots[i];
+    for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
     if (bound_sh_secs(root, v, 45)) die(tag, dest);
@@ -523,7 +582,8 @@ static void plan(void) {
     sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=55\n");
     sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=55\n");
     sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=55\n");
-    sy_printf("FP_BATCH\tflag=--objects\troots=44\tclosure_batch_max=256\tlink=--link-only\tchild_bound=55\n");
+    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=45\n");
+    sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=55\n", cf_root_count());
     sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=55\n");
     sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=55\n");
 }
@@ -636,7 +696,6 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
     if (cx_fmt(d, sizeof d, "%s/g%d/%s", fp, g, slug) || cx_fmt(rc, sizeof rc, "%s/g%d/phase-%d.tsv", fp, g, idx)) die("path", phase);
     clean_phase_path(outdir, phase, d, rc);
 }
-static const char *lnx_obj[44] = { "drive.o", "host.o", "stages.o", "routestep.o", "stagehandoff.o", "runexec.o", "attributeframe.o", "bind.o", "cli.o", "compat.o", "route.o", "deps.o", "input.o", "args.o", "path.o", "entrybind.o", "memlayout.o", "driveface.o", "driveroute.o", "cxmod.o", "tapegate.o", "fwdstub.o", "executor.o", "transition.o", "codec.o", "modeldecode.o", "modelnumber.o", "packmodel.o", "modelload.o", "bindstage.o", "entryexec.o", "hostnative.o", "tapelink.o", "drivelink.o", "drivetapebin.o", "driveargs.o", "driveplan.o", "driveutil.o", "driveunits.o", "driverun.o", "hostout.o", "hostres.o", "rescache.o", "drivestream.o" };
 /* Existing --objects API accepts at most 256 keys; checkpoints remain per key.
    Always re-enter chain-step on resume: it verifies provenance and completed
    object bytes before adopting them. --until truncates the batch, not coverage. */
@@ -728,7 +787,7 @@ static int known_closure_phase(const char *outdir, const char *phase) {
 static void run_g2_lnx(const char *root, const char *outdir, const char *rev, const char *snap,
     const char *pkg, const char *gen1, const char *fp, const char *helper,
     const char *target, const char *slug, int gen, int resume) {
-    char dest[4400], tag[80], objtag[80], ctor[4400], keys[2048]; int used = 0, count = 44;
+    char dest[4400], tag[80], objtag[80], ctor[4400], keys[2048]; int used = 0, count = cf_root_count();
     const char *phase = gen == 2 ? "g2" : "g3";
     if (cx_fmt(dest, sizeof dest, "%s/g%d/%s", fp, gen, slug) ||
         cx_fmt(tag, sizeof tag, "g%d-%s", gen, slug) || cx_fmt(objtag, sizeof objtag, "%s-objects", tag) ||
@@ -736,10 +795,10 @@ static void run_g2_lnx(const char *root, const char *outdir, const char *rev, co
     sy_mkdir(fp, 0755);
     if (gen == 3 && !resume) clean_fp_phase(outdir, fp, tag, gen, slug, !strcmp(slug, "lnx-arm64"));
     long began = sy_now_ms();
-    for (int i = 0; i < 44; i++) {
+    for (int i = 0; i < cf_root_count(); i++) {
         char one[80];
         if (cx_fmt(one, sizeof one, "g2-%s-obj-%d", slug, i)) die("phase", slug);
-        int n = snprintf(keys + used, sizeof keys - used, "%s%s", i ? "," : "", lnx_obj[i]);
+        int n = snprintf(keys + used, sizeof keys - used, "%s%s", i ? "," : "", cf_root_key(i));
         if (n < 0 || n >= (int)sizeof keys - used) die("root batch bound", slug);
         used += n;
         if (gen == 2 && until_phase && !strcmp(until_phase, one)) { count = i + 1; break; }
@@ -866,7 +925,7 @@ static void select_nets(const char *s) {
             if (cx_fmt(selected[nselected++], 128, "%s", id)) die("affected id", id);
         } else {
             char want[100];
-            if (cx_fmt(want, sizeof want, "AFFECTED_SUMMARY\tnets=%d\ttotal=42", nselected) || strcmp(p, want) || footer || e[1]) die("REFUSE affected summary", p);
+            if (cx_fmt(want, sizeof want, "AFFECTED_SUMMARY\tnets=%d\ttotal=%d", nselected, cf_net_count()) || strcmp(p, want) || footer || e[1]) die("REFUSE affected summary", p);
             footer = 1;
         }
         p = e + 1;
@@ -905,8 +964,8 @@ static void invalidate_job(const char *outdir, const char *ctx, const char *b, c
 }
 static int wave_phase(const char *outdir, const char *s, const char *ctx, const char *b,
                       const char *phase, int total, int resume) {
-    char list[4400], ids[42][160]; size_t bytes = 0; char *wire;
-    int count = 0, chosen[42];
+    char list[4400], ids[128][160]; size_t bytes = 0; char *wire;
+    int count = 0, chosen[128];
     if (cx_fmt(list, sizeof list, "%s/outer/list.stdout", b)) die("path", phase);
     wire = cx_read(list, &bytes);
     if (!wire || !bytes || wire[bytes - 1] != '\n' || memchr(wire, 0, bytes)) die("REFUSE authoritative jobs list", list);
@@ -915,7 +974,7 @@ static int wave_phase(const char *outdir, const char *s, const char *ctx, const 
         if (tab) {
             *tab = 0;
             if (!strncmp(p, phase, strlen(phase)) && p[strlen(phase)] == '-') {
-                if (count >= total || count >= 42 || cx_fmt(ids[count], 160, "%s", p)) die("REFUSE job list extent", phase);
+                if (count >= total || count >= cf_net_count() || cx_fmt(ids[count], 160, "%s", p)) die("REFUSE job list extent", phase);
                 chosen[count] = !strcmp(phase, "tool") ? !ntouch : net_selected(p + strlen(phase) + 1);
                 count++;
             }
@@ -990,9 +1049,9 @@ static int final_name_cmp(const void *a, const void *b) { return strcmp((const c
 static void final_fingerprint(const char *ctx, const char *net, char out[131072]) {
     const char *tools[] = {"tool-gen","tool-tbl","tool-net","tool-compilerpack","tool-pack"};
     const char *prefix[] = {"gen","tbl","net"}; int used = 0;
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < cf_tool_count() + 3; j++) {
         char job[160], dir[4400], names[64][256]; int count = 0;
-        if (j < 5 ? cx_fmt(job, sizeof job, "%s", tools[j]) : cx_fmt(job, sizeof job, "%s-%s", prefix[j - 5], net)) die("final job", net);
+        if (j < cf_tool_count() ? cx_fmt(job, sizeof job, "%s", tools[j]) : cx_fmt(job, sizeof job, "%s-%s", prefix[j - cf_tool_count()], net)) die("final job", net);
         if (cx_fmt(dir, sizeof dir, "%s/jobs/%s", ctx, job)) die("path", job);
         DIR *d = opendir(dir); struct dirent *e;
         if (!d) die("final job directory", dir);
@@ -1069,7 +1128,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", build)) die("path", "final");
     char *v[] = {controller, "--verify-context", (char *)root, (char *)ctx, 0};
     if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
-    for (int i = 0; i < 42; i++) {
+    for (int i = 0; i < cf_net_count(); i++) {
         char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", i)) die("phase", "final");
         long started = sy_now_ms(); int reuse = resume && ck_done(outdir, tag);
         final_proof(root, ctx, build, outdir, i, reuse);
@@ -1077,7 +1136,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
         else if (until_phase && !strcmp(tag, until_phase)) exit(0);
     }
     if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
-    sy_printf("FINAL\tmodels=42\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n");
+    sy_printf("FINAL\tmodels=%d\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n", cf_net_count());
     return 0;
 }
 static int json_quoted(const char *j, size_t n, const char *key, char *dst, int want) {
@@ -1224,6 +1283,11 @@ int main(int argc, char **argv) {
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
+    if (argc == 6 && tx_eqz(argv[1], "--partition-fixture")) {
+        if (tx_copy(chain_work, sizeof chain_work, argv[4], strlen(argv[4]))) die("fixture path", argv[4]);
+        until_phase = tx_eqz(argv[5], "-") ? 0 : argv[5];
+        return wf_fronts(argv[2], argv[3], "fixture-helper", 1, "osx/x86_64", "osx-x86_64", 1);
+    }
     if (argc == 11 && tx_eqz(argv[1], "--gen1-entry-fixture")) {
         until_phase = tx_eqz(argv[10], "-") ? 0 : argv[10];
         gen1_entry(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7],
@@ -1346,7 +1410,7 @@ int main(int argc, char **argv) {
     if (jobs_root) {
         if (!strcmp(jobs_phase, "final")) {
             if (!outdir || !*outdir) die("REFUSE final --out required", 0);
-            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=42\tchild_bound=55\n"); return 0; }
+            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=%d\tchild_bound=55\n", cf_net_count()); return 0; }
             if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
             if (jobs_index >= 0) {
                 char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", jobs_index)) die("phase", "final");
@@ -1357,10 +1421,10 @@ int main(int argc, char **argv) {
             }
             return jobs_ok(jobs_root, jobs_ctx, jobs_build, outdir, resume);
         }
-        int total = !strcmp(jobs_phase, "tool") ? 5 : 42;
+        int total = !strcmp(jobs_phase, "tool") ? cf_tool_count() : cf_net_count();
         if (strcmp(jobs_phase, "tool") && strcmp(jobs_phase, "gen") && strcmp(jobs_phase, "tbl") && strcmp(jobs_phase, "net")) die("REFUSE jobs phase", jobs_phase);
         select_nets(jobs_root);
-        if (plan_only) { sy_printf("JOBS_PLAN\tphase=%s\taffected=%d\ttotal=42\n", jobs_phase, ntouch ? nselected : 42); return 0; }
+        if (plan_only) { sy_printf("JOBS_PLAN\tphase=%s\taffected=%d\ttotal=%d\n", jobs_phase, ntouch ? nselected : cf_net_count(), cf_net_count()); return 0; }
         if (outdir && sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
         return wave_phase(outdir ? outdir : jobs_build, jobs_root, jobs_ctx, jobs_build, jobs_phase, total, resume);
     }
@@ -1372,7 +1436,7 @@ int main(int argc, char **argv) {
     if (until_phase) {
         int u = 0, pi;
         for (pi = 0; pi < g_nphases; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
-        if (!u && !known_closure_phase(outdir, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
+        if (!u && !known_closure_phase(outdir, until_phase) && !known_front_phase(root, rev, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
@@ -1493,25 +1557,25 @@ int main(int argc, char **argv) {
     select_nets(snap);
     if (ntouch || !(resume && ck_done(outdir, "jobs-tool"))) {
         long t0 = sy_now_ms();
-        if (wave_phase(outdir, snap, ctx, build, "tool", 5, resume)) die("jobs-tool", "wave");
+        if (wave_phase(outdir, snap, ctx, build, "tool", cf_tool_count(), resume)) die("jobs-tool", "wave");
         mark(outdir, "jobs-tool", 0);
     } else sy_printf("RESUME\tjobs-tool\n");
 
     if (ntouch || !(resume && ck_done(outdir, "jobs-gen"))) {
         long t0 = sy_now_ms();
-        if (wave_phase(outdir, snap, ctx, build, "gen", 42, resume)) die("jobs-gen", "wave");
+        if (wave_phase(outdir, snap, ctx, build, "gen", cf_net_count(), resume)) die("jobs-gen", "wave");
         mark(outdir, "jobs-gen", 0);
     } else sy_printf("RESUME\tjobs-gen\n");
 
     if (ntouch || !(resume && ck_done(outdir, "jobs-tbl"))) {
         long t0 = sy_now_ms();
-        if (wave_phase(outdir, snap, ctx, build, "tbl", 42, resume)) die("jobs-tbl", "wave");
+        if (wave_phase(outdir, snap, ctx, build, "tbl", cf_net_count(), resume)) die("jobs-tbl", "wave");
         mark(outdir, "jobs-tbl", 0);
     } else sy_printf("RESUME\tjobs-tbl\n");
 
     if (ntouch || !(resume && ck_done(outdir, "jobs-net"))) {
         long t0 = sy_now_ms();
-        if (wave_phase(outdir, snap, ctx, build, "net", 42, resume)) die("jobs-net", "wave");
+        if (wave_phase(outdir, snap, ctx, build, "net", cf_net_count(), resume)) die("jobs-net", "wave");
         mark(outdir, "jobs-net", 0);
     } else sy_printf("RESUME\tjobs-net\n");
 
@@ -1565,10 +1629,8 @@ int main(int argc, char **argv) {
             char run[4400], phaseout[4400], stage[40], tag[80];
             if (cx_fmt(run, sizeof run, "%s/p3-run", outdir) || cx_fmt(phaseout, sizeof phaseout, "%s/compiler.p4.pkg", run)) die("path", "p3-run");
             if (sy_mkdir(run, 0755) && fsize(run) < 0) die("mkdir", run);
-            for (int pi = 0; pi < 44; pi++) {
-                if (pi == 0) { if (cx_fmt(stage, sizeof stage, "guard-init")) die("phase", "p3"); }
-                else if (pi <= 40) { if (cx_fmt(stage, sizeof stage, "guard-%d", pi - 1)) die("phase", "p3"); }
-                else if (cx_fmt(stage, sizeof stage, "%s", pi == 41 ? "models" : pi == 42 ? "resources" : "assemble")) die("phase", "p3");
+            for (int pi = 0; pi < cf_p3_count(); pi++) {
+                if (cx_fmt(stage, sizeof stage, "%s", cf_p3_phase(pi))) die("phase", "p3");
                 if (cx_fmt(tag, sizeof tag, "p3-%s", stage)) die("phase", "p3");
                 if (resume && ck_done(outdir, tag)) {
                     sy_printf("RESUME\t%s\n", tag);
@@ -1666,95 +1728,7 @@ int main(int argc, char **argv) {
         }
     } else sy_printf("RESUME\twf-prepare\n");
 
-    {
-        char gd[4400];
-        if (cx_fmt(gd, sizeof gd, "%s/gen1", chain_work)) die("path", "g1parent");
-        sy_mkdir(gd, 0755);
-    }
-    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front0"))) {
-        long t0 = sy_now_ms();
-        char wft[4400], prep[4400], part[4400];
-        char *v[12];
-        int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
-        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front0", chain_work)) die("path", "part");
-        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
-        v[n++] = (char *)"0"; v[n++] = (char *)"32"; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die("osx-x86-front0", part);
-        mark(outdir, "gen1-osx-x86_64-front0", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tgen1-osx-x86_64-front0\n");
-
-    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front1"))) {
-        long t0 = sy_now_ms();
-        char wft[4400], prep[4400], part[4400];
-        char *v[12];
-        int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
-        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front1", chain_work)) die("path", "part");
-        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
-        v[n++] = (char *)"32"; v[n++] = (char *)"32"; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die("osx-x86-front1", part);
-        mark(outdir, "gen1-osx-x86_64-front1", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tgen1-osx-x86_64-front1\n");
-
-    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front2"))) {
-        long t0 = sy_now_ms();
-        char wft[4400], prep[4400], part[4400], p0[4400], tailc[32];
-        char *v[12];
-        int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
-        if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front2", chain_work)) die("path", "part");
-        if (cx_fmt(p0, sizeof p0, "%s/gen1/osx-x86_64-front0", chain_work)) die("path", "p0");
-        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-        wf_tail_count(p0, 64, tailc, sizeof tailc);
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
-        v[n++] = (char *)"64"; v[n++] = tailc; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die("osx-x86-front2", part);
-        mark(outdir, "gen1-osx-x86_64-front2", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tgen1-osx-x86_64-front2\n");
-
-    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-merge"))) {
-        long t0 = sy_now_ms();
-        char wft[4400], prep[4400], phase[4400], p0[4400], p1[4400], p2[4400];
-        char *v[16];
-        int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
-        if (cx_fmt(phase, sizeof phase, "%s/gen1/osx-x86_64-merged", chain_work)) die("path", "phase");
-        if (cx_fmt(p0, sizeof p0, "%s/gen1/osx-x86_64-front0", chain_work)) die("path", "p0");
-        if (cx_fmt(p1, sizeof p1, "%s/gen1/osx-x86_64-front1", chain_work)) die("path", "p1");
-        if (cx_fmt(p2, sizeof p2, "%s/gen1/osx-x86_64-front2", chain_work)) die("path", "p2");
-        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = phase;
-        v[n++] = p0; v[n++] = p1; v[n++] = p2; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die("osx-x86-merge", phase);
-        mark(outdir, "gen1-osx-x86_64-merge", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tgen1-osx-x86_64-merge\n");
-
-    if (!(resume && ck_done(outdir, "gen1-osx-x86_64-stub"))) {
-        long t0 = sy_now_ms();
-        char wft[4400], prep[4400], phase[4400], dest[4400];
-        char *v[12];
-        int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-        if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
-        if (cx_fmt(phase, sizeof phase, "%s/gen1/osx-x86_64-merged", chain_work)) die("path", "phase");
-        if (cx_fmt(dest, sizeof dest, "%s/gen1/osx-x86_64-stub", chain_work)) die("path", "stub");
-        if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
-        v[n++] = wft; v[n++] = (char *)"--";
-        v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = phase; v[n++] = dest; v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die("osx-x86-stub", dest);
-        mark(outdir, "gen1-osx-x86_64-stub", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tgen1-osx-x86_64-stub\n");
+    if (wf_fronts(root, outdir, helper, 1, "osx/x86_64", "osx-x86_64", 1)) die("osx-x86_64", outdir);
     {
         char objs[4400];
         if (cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("path", "wobjs");

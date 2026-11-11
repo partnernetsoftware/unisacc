@@ -1,0 +1,31 @@
+/* check-chain-facts ROOT ABS_NEW_OUT ABS_GENERATOR_BIN; never compiles. */
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainfacts
+#pragma unisa use mem.bytes
+static int failed;
+static void die(const char *s){fprintf(stderr,"check-chain-facts: %s\n",s);exit(2);}
+static void ck(int ok,const char *s){if(!ok)failed++;printf("%s\tchain-facts.%s\n",ok?"PASS":"FAIL",s);}
+static void path(char p[4400],const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path bound");}
+static int run(const char *bin,const char *cwd,const char *mode,const char *marker){char *v[]={(char *)bin,(char *)mode,0};pr_result r;int e=pr_run("chain facts generator",v,cwd,0,10,&r);int rc=e||r.residue?-1:r.rc;if(marker&&(!r.out||!strstr(r.out,marker))&&(!r.err||!strstr(r.err,marker)))rc=-1;pr_free(&r);return rc;}
+static int same(const char *p,const char *s,size_t n){size_t z;char *b=cx_read(p,&z);int ok=b&&n==z&&!memcmp(b,s,n);free(b);return ok;}
+int main(int argc,char **argv){
+ if(argc!=4||argv[1][0]!='/'||argv[2][0]!='/'||argv[3][0]!='/')die("usage ROOT ABS_NEW_OUT ABS_GENERATOR_BIN");
+ char facts[4400],lib[4400],p[4400];size_t fn,ln;path(p,argv[1],"build/chain-facts.tsv");char *f=cx_read(p,&fn);path(p,argv[1],"tools/cxlib/chainfacts.cx");char *l=cx_read(p,&ln);if(!f||!l)die("source facts");
+ if(sy_mkdir(argv[2],0700))die("exclusive output");path(p,argv[2],"build");if(sy_mkdir(p,0700))die("build directory");path(p,argv[2],"tools");if(sy_mkdir(p,0700))die("tools directory");path(p,argv[2],"tools/cxlib");if(sy_mkdir(p,0700))die("library directory");path(facts,argv[2],"build/chain-facts.tsv");path(lib,argv[2],"tools/cxlib/chainfacts.cx");if(cx_write(facts,f,fn)||cx_write(lib,l,ln))die("fixture copy");
+ ck(run(argv[3],argv[1],"--check","CHAIN_FACTS\tstatus=CHECK")==0,"check-tree");
+ ck(run(argv[3],argv[2],"--check","CHAIN_FACTS\tstatus=CHECK")==0,"check-copy");
+ ck(run(argv[3],argv[2],"--write","CHAIN_FACTS\tstatus=WRITE")==0&&same(lib,l,ln),"write-deterministic");
+ char *changed=malloc(fn+1);if(!changed||mm_copy(changed,fn+1,f,fn))die("allocation or copy");changed[fn]=0;char *a=strstr(changed,"count\tnets\t");if(!a)die("nets fact");a+=strlen("count\tnets\t");a[1]=a[1]=='9'?'8':(char)(a[1]+1);if(cx_write(facts,changed,fn))die("mutate fact");
+ ck(run(argv[3],argv[2],"--check","chain-facts-gen: DIFF")==1&&same(lib,l,ln)&&same(facts,changed,fn),"input-count-drift-refused-no-write");
+ if(cx_write(facts,f,fn)||mm_copy(changed,fn+1,f,fn))die("restore facts");a=strstr(changed,"src/unisacc.cx");if(!a)die("root fact");a[4]='v';if(cx_write(facts,changed,fn))die("mutate root");
+ ck(run(argv[3],argv[2],"--check","chain-facts-gen: DIFF")==1&&same(lib,l,ln)&&same(facts,changed,fn),"input-root-list-drift-refused-no-write");
+ if(cx_write(facts,f,fn))die("restore root facts");char *mutated=malloc(ln);if(!mutated||mm_copy(mutated,ln,l,ln))die("allocation or copy");mutated[0]='!';if(cx_write(lib,mutated,ln))die("mutate library");
+ ck(run(argv[3],argv[2],"--check","chain-facts-gen: DIFF")==1&&same(lib,mutated,ln),"output-drift-refused-no-write");
+ ck(run(argv[3],argv[2],"--write","CHAIN_FACTS\tstatus=WRITE")==0&&same(lib,l,ln),"write-repairs-derived-library");
+ ck(run(argv[3],argv[2],"--check","CHAIN_FACTS\tstatus=CHECK")==0,"check-repaired");
+ ck(cf_root_count()==44&&cf_p3_count()==44&&cf_net_count()==42&&cf_tool_count()==5,"baseline-counts");
+ ck(!strcmp(cf_root_key(0),"drive.o")&&!strcmp(cf_root_source(0),"src/unisacc.cx")&&!strcmp(cf_root_key(cf_root_count()-1),"drivestream.o")&&!strcmp(cf_p3_phase(0),"guard-init")&&!strcmp(cf_p3_phase(cf_p3_count()-1),"assemble"),"ordered-real-root-and-phase-lists");
+ ck(!cf_root_key(-1)&&!cf_root_source(cf_root_count())&&!cf_p3_phase(cf_p3_count()),"lookup-bounds");
+ free(mutated);free(changed);free(f);free(l);printf("CHECK_CHAIN_FACTS\tfailed=%d\n",failed);return failed?1:0;
+}

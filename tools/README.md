@@ -1468,5 +1468,55 @@ candidate-chain pack 的固定路径收集六片/P4/两份 manager，保留原�
 `release-layout SOURCE NEW_OUT` 在验证四源后现算新生成alias/ZIP/checksums的摘要再核布局；
 `--check OUT` 仍要求输入七摘要严格匹配，生成模式不再因尚未存在的派生摘要而拒绝。
 
+## 0.0.57：FACTS-COUNT 构造事实与静态调用合同
+
+本增量以 `23a873aaa1` 顺序叠加 gen1split、t57-1-r、ib55-1-r、wfcheck、
+g2g3split、chainrun、k7exec 为基线。根清单、Linux根对象清单与动态闭包是不同域：
+`unitcache` 等展开单元由现有 `closure-list` 路径纳入，不能把整程序单元总数当根数。
+whole-front 的 `WF_MAX=128` 保留资源合同；32单元片预算与45秒子调用界不放宽。
+分片总数必须读实际 `part.tsv total`，保持已有front检查点名，并为新增片保留独立相界。
+
+静态调用核对只证明其公开支持域内的源码参数合同，不代替真实构造或运行资格；
+未知表达式、未解析的调用或解析器必须拒绝，不得把未覆盖路径记为通过。
+负控必须修改独立调用点/解析器输入，覆盖缺参、错序及未知构造，不能仅检查同源生成文本。
+本工作不修改产品源、原有断言或时限，不运行真实构造链、发布、CI及s9。
+
+新增工具命名先用 `git log --all --format= --name-only -- tools` 完整历史核查；
+本增量工具名为 `chain-facts-gen`、`check-chain-facts`、`chain-argv-check`、
+`check-chain-argv-check`、`check-chain-partition` 与 `cxlib.chainfacts`。
+三个检查批次分别为 `chain-facts`、`chain-partition`、`chain-argv-check`；
+前两者通过批次材料绑定预编译工具，调用检查在单次轻编译后进程内复用真实分析器。
+
+运行时front子相库存位于 `OUT/chain-front-genN-SLUG.tsv`，表头绑定实际
+`part.tsv total`，各行是 `PHASE<TAB>FIRST<TAB>COUNT`；merge/stub使用 `-1/0`。
+candidate在恢复时逐字比较，chain-run校验total与完整片序后消费同一库存。
+静态 `build/chain-phases.tsv` 仍是顶层调度表；动态front子相不以固定三片伪装成完整库存。
+调用静态分析支持常数下标、数组初始化、`n++`追加及已识别包装器转发；
+未知表达式或数组逃逸均属于拒绝域。源码正控与变异负控不得运行被分析的真实链。
+
+轻夹具实测：`check-chain-facts` 的输入计数/根列表/输出漂移拒绝及确定性恢复
+11项通过；`check-chain-partition` 的44/64/96/97/128单元、129拒绝、逐片until、
+merge/stub边界、恢复不重复子调用及runner库存漂移拒绝均 `failed=0`。
+97单元真实库存为 `0/32,32/32,64/32,96/1`，不是固定前三片或96单元硬顶。
+证据在私有 `out/facts-evidence/{facts-fixture,parts-fixture}.log`；这些是假工具结果，
+不证明真实构造耗时、重建或整链资格。
+
+`build/chain-facts.tsv` 保存有序根对象/源路径及P3相名，`chain-facts-gen --write`
+生成 `tools/cxlib/chainfacts.cx`；`--check` 逐字比较，不写入漂移输入或输出。
+Linux根对象与span根共用映射；展开闭包仍独立由 `entry-build --closure-list` 提供。
+网络/工具列表唯一保留在 `cxlib.sourcepackage`，`sp_model_count()` 与新增
+`sp_tool_count()` 按真实数组长度求值，生成器拒绝事实表计数与该权威列表不符。
+`chain-phases-gen --check` 在比较相表前还核事实表与已生成列表一致；本次实跑
+`CHAIN_PHASES status=CHECK n=485`，不是只核旧表字面行数。
+
+调用检查实测正控核19个调用，11个独立变异负控均拒绝，`CHECK_CHAIN_ARGV_CHECK failed=0`；
+包括缺参、位置交换、裸helper、未知包装器、动态front错序、merge/root未知循环界及callee位置交换。
+只有正控先通过才运行负控，负控还逐例核其诊断，其他共同失败不能冒充负控通过。
+完整原始失败与修订后成功日志均保留在 `out/facts-evidence/argv-fixture*.log`。
+本次索引库存实测773源、97个非空编译片，范围 `tools-compile-000..096`；
+096含5源，097为空不登记。库存登记与`--shards`通过不声称97片全部实编。
+
 K7 的 `release-exec`、`release-prepare` 需要登记的原生工具材料，按现行元数据合同由 commit 改为 daily；材料、检查断言和55秒界不变，但不再计入 commit 档覆盖。
 `check-releaseprepare` 的快照仍在调用者显式输出目录内的独立夹具根中；不再内嵌仓根 out 路径。
+
+配套检查迁移：chain-facts 批次保留，检查名改为 check-chain-facts-gen；check-chainfacts 独立核生成库计数、顺序和边界。chain-argv-check 批次保留全部原有变异断言；check-chainargv 的 chainargv 批次实测原生命令行正控、用法、缺源和 NUL 拒绝。默认 -run 的源码 argv0 不作可执行映像使用；check-chain-run 已自编原生夹具。

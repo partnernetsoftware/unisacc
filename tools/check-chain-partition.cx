@@ -1,0 +1,50 @@
+/* Synthetic partition fixture only; never builds product sources.
+ * Usage: check-chain-partition ROOT ABS_OUT CANDIDATE_EXEC CHAIN_RUN_EXEC.
+ * Exercises real wf_fronts through explicit fake whole-front paths. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+static int bad;
+static char base[4400],fake[4400],candidate[4400];
+static void join(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))exit(2);}
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))exit(2);}
+static int has(const char *p,const char *s){size_t n=0;char *b=cx_read(p,&n);int yes=b&&strstr(b,s);free(b);return yes;}
+static void ck(int yes,const char *s){sy_printf("%s\tpartition.%s\n",yes?"PASS":"FAIL",s);if(!yes)bad++;}
+static int call(const char *dir,const char *until){char *v[]={candidate,"--partition-fixture",fake,(char*)dir,(char*)dir,(char*)until,0};return cx_runv_timeout(v,10,0,0);}
+static void scenario(const char *total,int slices,const char *last){
+ char dir[4400],p[4400],trace[4400],tag[80],needle[120];join(dir,base,total);sy_mkdir(dir,0755);join(trace,dir,"trace");
+ if(sy_setenv("PARTITION_TOTAL",total,1)||sy_setenv("PARTITION_TRACE",trace,1))exit(2);
+ for(int i=0;i<slices;i++){
+  cx_fmt(tag,sizeof tag,"gen1-osx-x86_64-front%d",i);ck(call(dir,tag)==0,"until-front");
+  join(p,dir,"checkpoint.tsv");cx_fmt(needle,sizeof needle,"DONE\t%s\t",tag);ck(has(p,needle),"front-checkpoint");
+  cx_fmt(needle,sizeof needle,"front\t%d\t",i*32);ck(has(trace,needle),"front-offset");
+  cx_fmt(needle,sizeof needle,"front\t%d\t",(i+1)*32);ck(!has(trace,needle),"until-stops-next-front");
+ }
+ join(p,dir,"chain-front-gen1-osx-x86_64.tsv");cx_fmt(needle,sizeof needle,"# total\t%s\n",total);ck(has(p,needle),"persisted-real-inventory");
+ cx_fmt(needle,sizeof needle,"gen1-osx-x86_64-front%d\t",slices-1);ck(has(p,needle),"inventory-last-slice");
+ ck(has(trace,last),"tail-count");
+ ck(call(dir,"gen1-osx-x86_64-merge")==0,"until-merge");ck(has(trace,"merge\n")&&!has(trace,"stub\n"),"merge-boundary");
+ ck(call(dir,"gen1-osx-x86_64-stub")==0,"until-stub");ck(has(trace,"stub\n"),"stub-boundary");
+ size_t before=0,after=0;char *b=cx_read(trace,&before);free(b);ck(call(dir,"gen1-osx-x86_64-front0")==0,"resume-existing-boundary");b=cx_read(trace,&after);free(b);ck(before==after,"resume-no-child");
+}
+int main(int argc,char **argv){
+ if(argc!=5||argv[2][0]!='/'||sy_realpath(argv[3],candidate,sizeof candidate)<0)return 2;
+ char root[4400],p[4400],runner[4400];if(sy_realpath(argv[1],root,sizeof root)<0||sy_realpath(argv[4],runner,sizeof runner)<0)return 2;
+ if(sy_mkdir(argv[2],0755)||sy_realpath(argv[2],base,sizeof base)<0)return 2;
+ join(fake,base,"fake");sy_mkdir(fake,0755);join(p,fake,"unisacc.com");
+ put(p,"#!/bin/sh\nset -eu\ncase \"$3\" in\nfront) mkdir \"$6\"; printf 'first\\t%s\\ncount\\t%s\\ntotal\\t%s\\n' \"$7\" \"$8\" \"$PARTITION_TOTAL\" > \"$6/part.tsv\"; printf 'front\\t%s\\t%s\\n' \"$7\" \"$8\" >> \"$PARTITION_TRACE\";;\nmerge) mkdir \"$6\"; printf 'merge\\n' >> \"$PARTITION_TRACE\";;\nstub) mkdir \"$7\"; printf 'stub\\n' > \"$7/stub.c\"; printf 'stub\\n' >> \"$PARTITION_TRACE\";;\n*) exit 2;;\nesac\n");
+ scenario("44",2,"front\t32\t12\n");scenario("64",2,"front\t32\t32\n");scenario("96",3,"front\t64\t32\n");scenario("97",4,"front\t96\t1\n");scenario("128",4,"front\t96\t32\n");
+ join(p,base,"129");sy_mkdir(p,0755);char trace[4400];join(trace,p,"trace");sy_setenv("PARTITION_TRACE",trace,1);sy_setenv("PARTITION_TOTAL","129",1);
+ ck(call(p,"-")==2,"WF_MAX-refused");ck(!has(trace,"front\t32\t"),"WF_MAX-no-extra-child");
+ char dir[4400];join(dir,base,"runner97");sy_mkdir(dir,0755);join(trace,dir,"trace");sy_setenv("PARTITION_TRACE",trace,1);sy_setenv("PARTITION_TOTAL","97",1);
+ char *v[]={runner,"--partition-fixture",dir,candidate,fake,0};ck(cx_runv_timeout(v,15,0,0)==0,"runner-consumes-inventory");
+ join(p,dir,"checkpoint.tsv");ck(has(p,"DONE\tgen1-osx-x86_64-front3\t")&&has(p,"DONE\tgen1-osx-x86_64-stub\t"),"runner-four-boundaries");
+ join(p,dir,"chain-front-gen1-osx-x86_64.tsv");put(p,"# total\t96\n");ck(cx_runv_timeout(v,10,0,0)==2,"runner-refuses-inventory-drift");
+ ck(call(dir,"gen1-osx-x86_64-front0")==2,"candidate-refuses-inventory-drift");
+ sy_printf("CHECK_CHAIN_PARTITION\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
+}

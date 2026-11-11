@@ -13,6 +13,7 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainfacts
 
 static const char *out;
 static long end_ms;
@@ -110,7 +111,65 @@ static int run(const char *phase,char **v,char *fresh_output) {
     }
 }
 static long number(const char *s) { char *e=0; long n=strtol(s,&e,10); if(!*s||*e||n<1||n>10000000) die("invalid positive limit"); return n; }
+/* Runtime front inventory comes from front0, not the static orchestration table.
+   Every child has its own --until boundary and persisted checkpoint. */
+static const char *partition_work;
+static int front_total(const char *rev, int gen, const char *slug) {
+    char p[4400], line[4400]; int total = -1;
+    if(partition_work) {
+        if(cx_fmt(p,sizeof p,"%s/gen%d/%s-front0/part.tsv",partition_work,gen,slug)) die("fixture manifest path");
+    } else if(cx_fmt(p,sizeof p,"out/release-snap-%.10s/out/chain/gen%d/%s-front0/part.tsv",rev,gen,slug)) die("front manifest path");
+    FILE *f=fopen(p,"rb"); if(!f) die("front manifest missing");
+    while(fgets(line,sizeof line,f)) if(!strncmp(line,"total\t",6)) {
+        char *e=0; long n=strtol(line+6,&e,10);
+        if(total>=0||e==line+6||(*e!='\n'&&*e)||n<cf_root_count()||n>cf_wf_max()) die("front manifest total");
+        total=(int)n;
+    }
+    fclose(f); if(total<0) die("front manifest total missing"); return total;
+}
+static int fronts(const char *outer,const char *rev,char **v,int target) {
+    const char *slugs[]={"osx-x86_64","osx-arm64","win-x86_64","win-arm64"};
+    char expected[80],tag[80];
+    for(int gen=1;gen<=3;gen++) for(int t=0;t<4;t++) {
+        if(cx_fmt(expected,sizeof expected,gen==1?"gen%d-%s":"g%d-%s",gen,slugs[t])) die("front outer");
+        if(strcmp(expected,outer)) continue;
+        if(cx_fmt(tag,sizeof tag,"gen%d-%s-front0",gen,slugs[t])) die("front phase");
+        if(!done(tag)) { v[target]=tag; int rc=run(tag,v,0); if(rc) return rc; }
+        if(!done(tag)) return blocker(tag,"missing-checkpoint",2);
+        int total=front_total(rev,gen,slugs[t]),slice=cf_front_slice();
+        int slices=(total+slice-1)/slice;
+        char leaf[100],inventory[4400],line[300],canonical[300];
+        char phases[128][80];
+        if(cx_fmt(leaf,sizeof leaf,"chain-front-gen%d-%s.tsv",gen,slugs[t])) die("front inventory path");
+        path(inventory,leaf); FILE *f=fopen(inventory,"rb"); if(!f) die("front inventory missing");
+        if(cx_fmt(canonical,sizeof canonical,"# total\t%d\n",total)||!fgets(line,sizeof line,f)||strcmp(line,canonical)) die("front inventory total changed");
+        for(int i=0;i<slices+(t<2?2:1);i++) {
+            int first=-1,amount=0;
+            if(i<slices) {
+                first=i*slice; amount=total-first; if(amount>slice) amount=slice;
+                if(cx_fmt(tag,sizeof tag,"gen%d-%s-front%d",gen,slugs[t],i)) die("front phase");
+            } else if(cx_fmt(tag,sizeof tag,"gen%d-%s-%s",gen,slugs[t],i==slices?"merge":"stub")) die("front terminal");
+            if(cx_fmt(canonical,sizeof canonical,"%s\t%d\t%d\n",tag,first,amount)||!fgets(line,sizeof line,f)||strcmp(line,canonical)) die("front inventory sequence changed");
+            char *tab=strchr(line,'\t'); *tab=0; /* Consume the checked inventory ID, not an implicit phase loop. */
+            if(tx_copy(phases[i],sizeof phases[i],line,strlen(line))) die("front inventory phase bound");
+        }
+        if(fgets(line,sizeof line,f)) die("front inventory extra row");
+        fclose(f);
+        for(int i=0;i<slices+(t<2?2:1);i++) {
+            if(!done(phases[i])) { v[target]=phases[i]; int rc=run(phases[i],v,0); if(rc) return rc; }
+            if(!done(phases[i])) return blocker(phases[i],"missing-checkpoint",2);
+        }
+        break;
+    }
+    return 0;
+}
 int main(int argc,char **argv) {
+    /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
+    if(argc==5&&!strcmp(argv[1],"--partition-fixture")) {
+        out=argv[2]; partition_work=out; end_ms=sy_now_ms()+30000;
+        char *fixture[]={argv[3],"--partition-fixture",argv[4],(char*)out,(char*)out,0,0};
+        return fronts("gen1-osx-x86_64","fixture",fixture,5);
+    }
     const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0;
     int rehearse=0, extra=argc, i; long seconds=5400;
     for(i=1;i<argc;i++) {
@@ -199,6 +258,7 @@ int main(int argc,char **argv) {
            The following closure-prepare/closure/objects/link targets keep --objects batched. */
         if(!strncmp(phase,"g2-lnx-x86_64-obj-",18)||!strncmp(phase,"g2-lnx-arm64-obj-",17)) continue;
         /* Existing checkpoints are consumed without calling --until on an already skipped target. */
+        if(!rehearse&&!done(phase)) { rc=fronts(phase,rev,v,target); if(rc) break; }
         if(!done(phase)) { v[target]=phase; rc=run(phase,v,0); if(rc) break; }
         if(!done(phase)) { rc=blocker(phase,"missing-checkpoint",2); break; }
         if(!strcmp(phase,"pack")) { pack=1; break; }

@@ -1577,3 +1577,29 @@ Original time limits are unchanged.
 6. 计时运行 `tests/phase-timing-stamps.cx ROOT FINAL_PRODUCT ABS_NEW_OUT`，其版本预期来自candidate；格式批沿用 `formats-elf-ape` 与既有PE/Mach合同，记录独立结果。以上所有检查由集成者运行，本工作节点未运行构建、测试或格式化。
 7. `cx-booter-ape` 批次显式绑定 `booter-raw-elf=ABS_RAW_LINUX_ELF`，独立原片须带唯一完整32字节槽；已安装产品只供P3。用 `sh ./unisacc.com tests/run-batch.cx -- ROOT ABS_NEW_OUT cx-booter-ape booter-raw-elf=ABS_RAW_LINUX_ELF` 执行；未准备材料应保持PREPARED缺口/未执行，不能冒称PASS或从已注入产物逆向恢复槽。
 
+## FACTS-COUNT 的最窄构造工具夹具
+
+`chain-facts`、`chain-partition`、`chain-argv-check` 是隔离本地夹具，不执行真实候选链。
+批次使用显式预编译工具材料，把工具准备与原55秒夹具界区分；不能以冷编译超时放宽原界。
+计数检查必须变异输入/生成物，分片检查覆盖96到97及资源上界，调用检查覆盖缺参、错序与未知拒绝。
+未准备的动态front相必须明确记录来源，不能把静态顶层相表的行数当全部运行时子相数。
+实际执行日志、退出码和耗时由本次工作账本引用；登记不代表批次已经运行，假链不授产品资格。
+
+动态子相证据保留在 `chain-front-genN-SLUG.tsv`，必须与front0的total一致；
+恢复中的库存或total漂移属于拒绝，不允许为取得绿色结果悄悄重写旧库存。
+
+链参数核对器与夹具共用 `cxlib.chainargv` 模块，不再用源码 `#include`；正控先行与十一项独立负控保持原断言。
+`chain-facts`、`chain-partition` 需要显式原生工具材料，按现行登记合同由 commit 改为 daily；并非 commit 覆盖不变。
+`check-chain-run` 必须显式传 ROOT 与输出父目录，不再从仓根推导隐式 out 路径。拷贝及格式化越界具名拒绝。
+
+`check-limits` 独立读取 `build/chain-facts.tsv` 的有序 root 键/源，逐项核对生成的
+`cf_root_*` API、数量与重复项；同时核 release/entry 两个生产消费循环及模块绑定，
+拒绝残留本地源表。原 limits 行、操作码数量/元数/名称覆盖保持不变。
+
+`whole-front-expand` 的生产接线检查追踪 `part.tsv` 的 total 解析、动态库存片数、
+按片偏移/尾片数量及 merge 消费，不再要求旧三片字面数组。展开总量仍由真实
+`cx0_plan` 独立求得，32单元/128上界、固定85遗漏负控与真实重复声明拒绝保持。
+
+`whole-o-deadline` 独立读取 root 事实逐项核 `cf_root_key/source` 与真实 release 消费接线，
+再核构造器收到的完整有序 argv、物理 cwd 和容器；数量从事实派生，不保留44/49常量。
+看门狗上限、短超时清理/进程组、成功收据及三种工具源身份断言和原时限保持，夹具只落私有 `out/`。
