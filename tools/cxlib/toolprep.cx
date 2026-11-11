@@ -1,0 +1,88 @@
+/* toolprep.cx -- build a .cx tool to a native image before a check times the step it asserts.
+ *
+ *   char why[256];
+ *   if (tq_native(root, tool_source, native_path, why, sizeof why)) die(why);
+ *   char *v[] = {bound, "18", native_path, ARG..., 0};      // was: bound 18 sh PRODUCT tool_source -- ARG...
+ *
+ * Why: `sh PRODUCT tool.cx -- ARG` compiles the tool and then runs it under one inner bound.  When any
+ * source the tool uses changes, the compile is cold (measured 9 s on a quiet machine, 17-18 s under load)
+ * and the bound that was sized for the run is spent on the compile; a killed run stores nothing, so the
+ * next run is cold again.  tq_native moves the compile out of the asserted step: the build has its own
+ * bound (TQ_PREP_SECS, through ROOT/tools/bound, so an overrun is rc 142 and named), the asserted step
+ * keeps its original bound and now measures the tool only.
+ *
+ * The build is preparation, not a result: one PREPARED line on stdout, never PASS.  Nothing is reused
+ * across checks and no result is cached; every check builds from the sources of its own ROOT with the
+ * product of its own ROOT, into a path the caller owns.  The image is the product's ordinary `-o` output
+ * for the same source, so the tool sees its arguments without the driver's "--".
+ * A failed or overrun build returns -1 with the exit code in WHY; the compiler's own messages have
+ * already gone to this process's stderr (the child inherits it).
+ *
+ * tq_warm_start / tq_warm_join: a tool that itself issues `sh PRODUCT x -- ARG` pays that compile inside
+ * the asserted step.  The check may issue the same command in the background while it builds the tool:
+ * the product's run cache then holds the compile when the tool asks.  The warm run is bounded by
+ * ROOT/tools/bound, its output is discarded and its result is never read; the tool still runs the
+ * command itself and judges it, so a failed warm-up only costs the time it was meant to save.
+ *
+ * Deliberately small: the module exists to protect a check's 55 s budget, and every module a check pulls
+ * in is compiled cold with it.  Measured 2026-11-11 on one check (cold, same machine): 8.0 s with
+ * cxlib.netpack alone, 8.7 s with this module on top of netpack, 10.5 s when it also used sys.time and
+ * text.text, 4.3 s for a check that uses only sys.proc and sys.io.  Hence no netpack here: the child runs
+ * through the runtime's cx_runv_timeout (process group killed at the limit) and sys.proc.
+ *
+ * Check: tools/check-toolprep.cx. */
+#pragma unisa module toolprep
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+
+#define TQ_PREP_SECS 40
+#define TQ_WARM_MAXARGS 24
+
+int tq_native(const char *root, const char *tool, const char *bin, char *why, size_t wl) {
+    char bound[4400], product[4400], secs[16];
+    char *out = 0;
+    size_t outn = 0;
+    int rc;
+    if (!root || !tool || !bin || !why || wl < 64) return -1;
+    why[0] = 0;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
+        cx_fmt(secs, sizeof secs, "%d", TQ_PREP_SECS)) {
+        (void)cx_fmt(why, wl, "tool-prepare path bound");
+        return -1;
+    }
+    {
+        char *v[] = {bound, secs, "sh", product, (char *)tool, "-o", (char *)bin, 0};
+        rc = cx_runv_timeout(v, TQ_PREP_SECS + 2, &out, &outn);
+    }
+    if (out && outn) sy_printf("%s", out);
+    free(out);
+    if (rc) {
+        if (cx_fmt(why, wl, "tool-prepare rc=%d bound=%d (compiler messages on stderr)", rc, TQ_PREP_SECS)) why[0] = 0;
+        return -1;
+    }
+    sy_printf("PREPARED\ttool-native\tbound_s=%d\tno-test-result\t%s\n", TQ_PREP_SECS, tool);
+    return 0;
+}
+
+/* ARGV under ROOT/tools/bound SECS, in the background, output discarded.  The pid for tq_warm_join, or a
+   negative value when nothing was started (bad arguments, SECS outside 1..TQ_PREP_SECS, spawn failure). */
+int tq_warm_start(const char *root, int secs, char *const argv[]) {
+    static char bound[4400], limit[16];
+    char *v[TQ_WARM_MAXARGS + 8];
+    int k = 0, i;
+    if (!root || !argv || !argv[0] || secs < 1 || secs > TQ_PREP_SECS) return -1;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(limit, sizeof limit, "%d", secs)) return -1;
+    v[k++] = "sh"; v[k++] = "-c"; v[k++] = "exec \"$@\" >/dev/null 2>&1"; v[k++] = "sh";
+    v[k++] = bound; v[k++] = limit;
+    for (i = 0; argv[i]; i++) {
+        if (i == TQ_WARM_MAXARGS) return -1;
+        v[k++] = argv[i];
+    }
+    v[k] = 0;
+    return sy_spawn(v);
+}
+
+/* Reap a tq_warm_start child.  Its status is not a result and is not returned. */
+void tq_warm_join(int pid) {
+    if (pid > 0) (void)sy_wait(pid, 0);
+}

@@ -1,0 +1,190 @@
+/* runnerprep.cx -- a .cx runner (tests/run-batch.cx) as a native image, reused by content identity.
+ *
+ *   char bin[4400], why[512]; int reused;
+ *   if (rn_prepare(root, "tests/run-batch.cx", cache_dir, bin, sizeof bin, &reused, why, sizeof why)) die(why);
+ *   char *v[] = {bin, root, out_parent, id, 0};         // was: sh PRODUCT tests/run-batch.cx -- root out_parent id
+ *
+ * Why: a caller that times batches (tools/affected.cx, 54 s) pays the runner's cold compile (14-18 s
+ * measured 2026-11-11) inside every batch's window.  rn_prepare builds the runner before the caller
+ * starts its clock and keeps the image under CACHE_DIR/<identity>/, so the next call with the same
+ * inputs starts it in milliseconds.
+ *
+ * Identity (rn_identity) = sha256 of: the product identity of ROOT (cxlib.productpkg pp_product_digest),
+ * the target, and for every unit of the compiler's own plan for SOURCE (`PRODUCT -cx-plan SOURCE`, the
+ * transitive use closure as the compiler resolves it) its path and the sha256 of its bytes.  Not in the
+ * identity: files reached by `#include "..."` (the plan does not list them) and the environment.
+ *
+ * Reuse is by content only.  An image is reused when CACHE_DIR/<identity>/<leaf> exists and its sha256,
+ * computed now, equals the one in <leaf>.sha256 written when it was built; a missing certificate or a
+ * different sha rebuilds it.  A build goes to a private name in the same directory, the identity is
+ * computed again afterwards (an input that changed during the build refuses), then image and certificate
+ * are renamed into place, image first.  Old identities are left alone: the caller owns CACHE_DIR.
+ *
+ * This is preparation, never a result: one PREPARED line on stdout, no batch verdict is stored or read.
+ * A failure returns -1 with a named reason in WHY and prepares nothing; there is no fallback to
+ * `sh PRODUCT SOURCE`, so one command never has two timing contracts.
+ * SOURCE is relative to ROOT or absolute.  CACHE_DIR must exist.  Bounds: plan 20 s, build 40 s, both
+ * through ROOT/tools/bound.  No cxlib.netpack and no sysx.process here, so users of either can use this.
+ *
+ * Check: tools/check-runnerprep.cx. */
+#pragma unisa module runnerprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use cxlib.productpkg
+#pragma unisa use mem.bytes
+
+#define RN_PLAN_SECS 20
+#define RN_BUILD_SECS 40
+#define RN_IDCAP (1L << 18)
+
+static int rn_fail(char *why, size_t wl, const char *what, const char *detail) {
+    if (why && wl && cx_fmt(why, wl, "runner-prepare %s%s%.300s", what, detail ? ": " : "", detail ? detail : "")) why[0] = 0;
+    return -1;
+}
+
+/* ARGV in CWD under the watchdog BOUND for SECS seconds (ROOT/tools/bound: the tree is killed at the
+   bound, rc 142), stdout and stderr together in *OUT (NUL terminated, caller frees).  The exit code,
+   128+signal, or -1 when nothing ran or memory ran out. */
+static int rn_run(const char *bound, const char *secs, char **argv, const char *cwd, char **out, long *outn) {
+    char *w[40], *b = 0, chunk[16384];
+    long n = 0, cap = 0, r;
+    int k = 0, i, fd = -1, pid, ex = 0, code = 0, sig = 0, lost = 0;
+    *out = 0; *outn = 0;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    w[k++] = (char *)bound; w[k++] = (char *)secs;
+    for (i = 0; argv[i]; i++) { if (k >= 39) return -1; w[k++] = argv[i]; }
+    w[k] = 0;
+    pid = sy_spawn_pipe(w, cwd, 0, &fd, 0);
+    if (pid < 0) return -1;
+    for (;;) {
+        r = sy_read(fd, chunk, sizeof chunk);
+        if (r <= 0) break;
+        if (lost) continue;
+        if (n + r + 1 > cap) {
+            long c = cap ? cap : 65536; char *g;
+            while (c < n + r + 1) c *= 2;
+            g = realloc(b, (size_t)c);
+            if (!g) { lost = 1; continue; }
+            b = g; cap = c;
+        }
+        if (mm_copy(b + n, (size_t)(cap - n), chunk, (size_t)r)) { lost = 1; continue; }
+        n += r;
+    }
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || lost) { free(b); return -1; }
+    if (b) b[n] = 0;
+    *out = b; *outn = n;
+    return ex ? code : 128 + sig;
+}
+
+static int rn_file_sha(const char *path, char hex[65]) {
+    size_t n = 0; char *s = cx_read(path, &n);
+    if (!s) return 1;
+    cx_sha256_hex(s, n, hex);
+    free(s);
+    return 0;
+}
+
+int rn_identity(const char *root, const char *source, char id[65], int *units, char *why, size_t wl) {
+    char bound[4400], product[4400], secs[16], pd[65], path[8192], hex[65];
+    char *plan = 0, *t; long pn = 0, at = 0, tn = 0; int rc, nu = 0;
+    if (!root || !source || !id || !root[0] || !source[0]) return rn_fail(why, wl, "arguments", 0);
+    id[0] = 0;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
+        cx_fmt(secs, sizeof secs, "%d", RN_PLAN_SECS)) return rn_fail(why, wl, "path-bound", 0);
+    if (pp_product_digest(root, pd)) return rn_fail(why, wl, "product-identity", root);
+    {   char *v[] = {"sh", product, "-cx-plan", (char *)source, 0};
+        rc = rn_run(bound, secs, v, root, &plan, &pn);
+    }
+    if (rc) { rn_fail(why, wl, rc == 142 ? "plan-timeout" : "plan-failed", plan ? plan : "-"); free(plan); return -1; }
+    t = malloc(RN_IDCAP);
+    if (!t) { free(plan); return rn_fail(why, wl, "allocation", 0); }
+    if (cx_fmt(t, RN_IDCAP, "RUNNERPREP1\nproduct\t%s\ntarget\tlnx/x86_64\n", pd)) { free(t); free(plan); return rn_fail(why, wl, "identity-bound", 0); }
+    tn = (long)strlen(t);
+    while (at < pn) {   /* row: INDEX<TAB>UNIT-PATH[<TAB>...] */
+        long e = at, p = at, q;
+        while (e < pn && plan[e] != '\n') e++;
+        while (p < e && plan[p] >= '0' && plan[p] <= '9') p++;
+        if (p > at && p < e && plan[p] == '\t') {
+            p++; q = p;
+            while (q < e && plan[q] != '\t') q++;
+            if (q == p || q - p >= 4096) { free(t); free(plan); return rn_fail(why, wl, "plan-row", 0); }
+            plan[q] = 0;
+            if (plan[p] == '/' ? cx_fmt(path, sizeof path, "%s", plan + p) : cx_fmt(path, sizeof path, "%s/%s", root, plan + p)) { free(t); free(plan); return rn_fail(why, wl, "path-bound", 0); }
+            if (rn_file_sha(path, hex)) { rn_fail(why, wl, "unit-unreadable", plan + p); free(t); free(plan); return -1; }
+            if (cx_fmt(t + tn, (size_t)(RN_IDCAP - tn), "unit\t%s\t%s\n", plan + p, hex)) { free(t); free(plan); return rn_fail(why, wl, "identity-bound", 0); }
+            tn += (long)strlen(t + tn);
+            nu++;
+        }
+        at = e + 1;
+    }
+    free(plan);
+    if (!nu) { free(t); return rn_fail(why, wl, "plan-empty", source); }
+    cx_sha256_hex(t, (size_t)tn, id);
+    free(t);
+    if (units) *units = nu;
+    return 0;
+}
+
+/* 1 when BIN exists and its sha256 equals the certificate; *REASON says why not otherwise */
+static int rn_certified(const char *bin, const char *cert, const char **reason) {
+    char now[65]; size_t cn = 0; char *c;
+    if (sy_exists(bin) != 1) { *reason = "fresh"; return 0; }
+    c = cx_read(cert, &cn);
+    if (!c || cn != 65 || c[64] != '\n') { free(c); *reason = "no-certificate"; return 0; }
+    if (rn_file_sha(bin, now) || memcmp(now, c, 64)) { free(c); *reason = "sha-mismatch"; return 0; }
+    free(c);
+    *reason = "identity-hit";
+    return 1;
+}
+
+int rn_prepare(const char *root, const char *source, const char *cache_dir, char *bin, size_t bincap, int *reused, char *why, size_t wl) {
+    char id[65], again[65], dir[4400], cert[4500], tmp[4500], tmpc[4600], bound[4400], product[4400], secs[16], hex[66], leaf[200];
+    const char *base, *reason = "fresh";
+    char *out = 0; long outn = 0, ln; int units = 0, rc, r;
+    if (reused) *reused = 0;
+    if (!root || !source || !cache_dir || !bin || bincap < 64) return rn_fail(why, wl, "arguments", 0);
+    bin[0] = 0;
+    if (sy_exists(cache_dir) != 1) return rn_fail(why, wl, "cache-dir", cache_dir);
+    base = strrchr(source, '/'); base = base ? base + 1 : source;
+    ln = (long)strlen(base);
+    if (ln > 3 && !strcmp(base + ln - 3, ".cx")) ln -= 3;
+    if (ln < 1 || ln >= (long)sizeof leaf) return rn_fail(why, wl, "source-name", source);
+    if (mm_copy(leaf, sizeof leaf, base, (size_t)ln)) return rn_fail(why, wl, "source-name", source);
+    leaf[ln] = 0;
+    if (rn_identity(root, source, id, &units, why, wl)) return -1;
+    if (cx_fmt(dir, sizeof dir, "%s/%s", cache_dir, id) || cx_fmt(bin, bincap, "%s/%s", dir, leaf) || cx_fmt(cert, sizeof cert, "%s/%s.sha256", dir, leaf) ||
+        cx_fmt(tmp, sizeof tmp, "%s/.build-%d", dir, sy_pid()) || cx_fmt(tmpc, sizeof tmpc, "%s.sha256", tmp) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
+        cx_fmt(secs, sizeof secs, "%d", RN_BUILD_SECS)) { bin[0] = 0; return rn_fail(why, wl, "path-bound", 0); }
+    if (rn_certified(bin, cert, &reason)) {
+        if (reused) *reused = 1;
+        sy_printf("PREPARED\trunner-native\tidentity=%s\tunits=%d\treused=1\treason=%s\tno-test-result\t%s\n", id, units, reason, source);
+        return 0;
+    }
+    r = sy_mkdir(dir, 0700);
+    if (r < 0 && r != -EEXIST) { bin[0] = 0; return rn_fail(why, wl, "identity-dir", dir); }
+    {   char *v[] = {"sh", product, (char *)source, "-o", tmp, 0};
+        rc = rn_run(bound, secs, v, root, &out, &outn);
+    }
+    if (rc || sy_exists(tmp) != 1) {
+        char what[64];
+        if (cx_fmt(what, sizeof what, rc == 142 ? "build-timeout rc=%d" : "build-failed rc=%d", rc)) what[0] = 0;
+        rn_fail(why, wl, what, out && outn ? out : "-");
+        free(out); (void)sy_unlink(tmp); bin[0] = 0;
+        return -1;
+    }
+    free(out);
+    if (rn_identity(root, source, again, 0, why, wl)) { (void)sy_unlink(tmp); bin[0] = 0; return -1; }
+    if (memcmp(id, again, 65)) { (void)sy_unlink(tmp); bin[0] = 0; return rn_fail(why, wl, "inputs-changed-during-build", source); }
+    if (rn_file_sha(tmp, hex)) { (void)sy_unlink(tmp); bin[0] = 0; return rn_fail(why, wl, "image-unreadable", tmp); }
+    hex[64] = '\n'; hex[65] = 0;
+    (void)sy_unlink(cert);   /* never leave an old certificate beside a new image */
+    if (cx_write(tmpc, hex, 65) || sy_rename(tmp, bin) < 0 || sy_rename(tmpc, cert) < 0) {
+        (void)sy_unlink(tmp); (void)sy_unlink(tmpc); bin[0] = 0;
+        return rn_fail(why, wl, "publish", dir);
+    }
+    sy_printf("PREPARED\trunner-native\tidentity=%s\tunits=%d\treused=0\treason=%s\tno-test-result\t%s\n", id, units, reason, source);
+    return 0;
+}

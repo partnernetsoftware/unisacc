@@ -1,0 +1,105 @@
+/* tools/check-runnerprep.cx -- cxlib.runnerprep against the real product and a two-unit fixture.
+ *
+ *   sh ./unisacc.com tools/check-runnerprep.cx -- NEW_DIR      (from the repository root)
+ *
+ * A fixture runner (fx.cx using module fxmod beside it) is prepared into a private cache directory:
+ * the first call builds (reused 0) and the image runs with its own arguments and exit code; the second
+ * call reuses it (same identity, same inode); a changed main source and a changed used module each give
+ * another identity, restoring the bytes gives the first one back; after the module change a new image
+ * is built beside the old one, which stays; a tampered image is not reused but rebuilt to its
+ * certificate; a source that does not compile, a missing cache directory and missing arguments are
+ * named failures that hand out no image.  Not exercised: another product (identity carries the
+ * product digest), the 40 s build bound, an input changing during the build.
+ * Prints PASS/FAIL per case and CHECK_RUNNERPREP<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.runnerprep
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char root[4096], dir[4096];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\trunnerprep.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static void leaf(char *p, const char *name) {
+    if (cx_fmt(p, 4400, "%s/%s", dir, name)) { printf("check-runnerprep: path bound\n"); exit(2); }
+}
+static void put(const char *p, const char *s) {
+    if (cx_write(p, s, (size_t)tx_len(s, 8192))) { printf("check-runnerprep: write %s\n", p); exit(2); }
+}
+static int has(const char *s, const char *w) { return s && tx_find(s, tx_len(s, 2048), w, tx_len(w, 256)) >= 0; }
+static long inode(const char *p) { struct stat st; return lstat(p, &st) ? -1 : (long)st.st_ino; }
+/* the image with one argument: 1 when it exits 6 and prints WANT */
+static int runs(const char *bin, const char *want) {
+    char *v[] = {(char *)bin, "arg", 0}, *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, 10, &o, &n), ok;
+    ok = rc == 6 && o && n == (size_t)tx_len(want, 256) && tx_find(o, (long)n, want, (long)n) == 0;
+    free(o);
+    return ok;
+}
+static int certified(const char *bin) {
+    char cert[4600], a[65]; size_t n = 0, cn = 0; char *b = cx_read(bin, &n), *c; int ok;
+    if (!b || cx_fmt(cert, sizeof cert, "%s.sha256", bin)) return 0;
+    cx_sha256_hex(b, n, a); free(b);
+    c = cx_read(cert, &cn);
+    ok = c && cn == 65 && c[64] == '\n' && tx_find(c, 64, a, 64) == 0;
+    free(c);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], mod[4400], bad[4400], cache[4400], nocache[4400], bin1[4400], bin2[4400], bin3[4400], other[4400], why[512];
+    char id1[65], id2[65], id3[65], id4[65];
+    const char *main1 = "#pragma unisa use fxmod\nint main(int argc, char **argv) { printf(\"value=%d argc=%d %s\\n\", fx_value(), argc, argc > 1 ? argv[1] : \"-\"); return 6; }\n";
+    const char *main2 = "#pragma unisa use fxmod\nint main(int argc, char **argv) { printf(\"VALUE=%d argc=%d %s\\n\", fx_value(), argc, argc > 1 ? argv[1] : \"-\"); return 6; }\n";
+    const char *mod7 = "#pragma unisa module fxmod\nint fx_value(void) { return 7; }\n";
+    const char *mod8 = "#pragma unisa module fxmod\nint fx_value(void) { return 8; }\n";
+    int reused = -1, units = 0; long ino;
+    if (argc != 2 || sy_realpath(".", root, sizeof root) < 0 || cx_fmt(dir, sizeof dir, "%s", argv[1])) { printf("usage NEW_DIR\n"); return 2; }
+    if (sy_mkdir(dir, 0700)) { printf("check-runnerprep: NEW_DIR must not exist\n"); return 2; }
+    leaf(src, "fx.cx"); leaf(mod, "fxmod.cx"); leaf(bad, "fxbad.cx"); leaf(cache, "cache"); leaf(nocache, "no-such-cache");
+    if (sy_mkdir(cache, 0700)) return 2;
+    put(src, main1); put(mod, mod7); put(bad, "int main(void) { return undeclared_thing; }\n");
+
+    why[0] = 0;
+    ck(rn_prepare(root, src, cache, bin1, sizeof bin1, &reused, why, sizeof why) == 0 && reused == 0 && sy_exists(bin1) == 1 && certified(bin1), "first-call-builds-certified-image");
+    if (why[0]) printf("NOTE\t%s\n", why);
+    ck(runs(bin1, "value=7 argc=2 arg\n"), "image-runs-with-plain-arguments-and-exit-code");
+    ck(rn_identity(root, src, id1, &units, why, sizeof why) == 0 && units == 2 && has(bin1, id1), "identity-covers-two-units-and-names-the-directory");
+    ino = inode(bin1); reused = -1;
+    ck(rn_prepare(root, src, cache, bin2, sizeof bin2, &reused, why, sizeof why) == 0 && reused == 1 && !strcmp(bin1, bin2) && inode(bin1) == ino, "second-call-reuses-same-image");
+
+    put(src, main2);
+    ck(rn_identity(root, src, id2, 0, why, sizeof why) == 0 && strcmp(id1, id2), "changed-source-changes-identity");
+    put(src, main1);
+    ck(rn_identity(root, src, id3, 0, why, sizeof why) == 0 && !strcmp(id1, id3), "restored-bytes-restore-identity");
+
+    put(mod, mod8); reused = -1;
+    ck(rn_prepare(root, src, cache, bin3, sizeof bin3, &reused, why, sizeof why) == 0 && reused == 0 && strcmp(bin1, bin3) &&
+       rn_identity(root, src, id4, 0, why, sizeof why) == 0 && strcmp(id1, id4) && has(bin3, id4), "changed-used-module-builds-under-new-identity");
+    ck(runs(bin3, "value=8 argc=2 arg\n") && sy_exists(bin1) == 1 && runs(bin1, "value=7 argc=2 arg\n"), "new-image-current-old-image-left-in-place");
+
+    {   size_t n = 0; char *b = cx_read(bin3, &n), *t = b ? malloc(n + 1) : 0;
+        if (!t) return 2;
+        if (mm_copy(t, n + 1, b, n)) return 2;
+        t[n] = 'X';
+        if (cx_write(bin3, t, n + 1)) return 2;
+        free(b); free(t);
+    }
+    ck(!certified(bin3), "tamper-precondition");
+    reused = -1;
+    ck(rn_prepare(root, src, cache, other, sizeof other, &reused, why, sizeof why) == 0 && reused == 0 && !strcmp(other, bin3) && certified(bin3) && runs(bin3, "value=8 argc=2 arg\n"),
+       "tampered-image-not-reused-rebuilt-to-certificate");
+
+    other[0] = 'x'; reused = -1;
+    ck(rn_prepare(root, bad, cache, other, sizeof other, &reused, why, sizeof why) == -1 && has(why, "runner-prepare build-failed rc=") && !other[0] && reused == 0, "compile-failure-named-no-image-handed-out");
+    other[0] = 'x';
+    ck(rn_prepare(root, src, nocache, other, sizeof other, &reused, why, sizeof why) == -1 && has(why, "runner-prepare cache-dir") && !other[0] && sy_exists(nocache) != 1, "missing-cache-dir-refused-not-created");
+    ck(rn_prepare(0, src, cache, other, sizeof other, &reused, why, sizeof why) == -1 && rn_prepare(root, 0, cache, other, sizeof other, &reused, why, sizeof why) == -1 &&
+       rn_prepare(root, src, 0, other, sizeof other, &reused, why, sizeof why) == -1 && rn_prepare(root, src, cache, other, 8, &reused, why, sizeof why) == -1 &&
+       rn_identity(root, "", id2, 0, why, sizeof why) == -1, "bad-arguments-refused");
+    printf("CHECK_RUNNERPREP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

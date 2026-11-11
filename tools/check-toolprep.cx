@@ -1,0 +1,88 @@
+/* tools/check-toolprep.cx -- cxlib.toolprep against the real product and real children.
+ *
+ *   sh ./unisacc.com tools/check-toolprep.cx [-- NEW_DIR]      (from the repository root)
+ *
+ * tq_native: a small source is built by ROOT/unisacc.com into a native image; the image runs under
+ * tools/bound and sees its arguments as given (no driver "--"), with its own exit code; a source that
+ * does not compile and a source that does not exist are named refusals that leave no image; missing
+ * arguments and a reason buffer too small to carry a reason are refused before anything runs.
+ * tq_warm_start/tq_warm_join: the command runs (its marker file appears); a bound of 0 or above
+ * TQ_PREP_SECS and an argv longer than TQ_WARM_MAXARGS start nothing; a command that outlives its bound
+ * is killed, so the join returns.  The 40 s build overrun itself is not exercised (it would cost the
+ * batch its budget); the bound travels through tools/bound, whose rc 142 has its own batch.
+ * Prints PASS/FAIL per case and CHECK_TOOLPREP<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+static int failed;
+static char root[4096], dir[4096];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\ttoolprep.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static void leaf(char *p, const char *name) {
+    if (cx_fmt(p, 4400, "%s/%s", dir, name)) { printf("check-toolprep: path bound\n"); exit(2); }
+}
+static int has(const char *s, const char *w) { return s && tx_find(s, tx_len(s, 1024), w, tx_len(w, 256)) >= 0; }
+
+int main(int argc, char **argv) {
+    char src[4400], bin[4400], bad[4400], badbin[4400], missing[4400], nobin[4400], marker[4400], never[4400];
+    char bound[4400], why[1024], run[1024];
+    const char *good = "int main(int argc, char **argv) { int i; printf(\"argc=%d\", argc); "
+                       "for (i = 1; i < argc; i++) printf(\" %s\", argv[i]); printf(\"\\n\"); return 5; }\n";
+    const char *broken = "int main(void) { return undeclared_thing; }\n";
+    const char *want = "argc=3 a --b\n";
+    np_result r = {0};
+    int t, pid, i;
+    long t0;
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (argc > 1) { if (cx_fmt(dir, sizeof dir, "%s", argv[1])) return 2; }
+    else if (cx_fmt(dir, sizeof dir, "%s/check-toolprep-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (sy_mkdir(dir, 0700)) { printf("check-toolprep: NEW_DIR must not exist\n"); return 2; }
+    leaf(src, "echo-args.cx"); leaf(bin, "echo-args.native"); leaf(bad, "broken.cx"); leaf(badbin, "broken.native");
+    leaf(missing, "absent.cx"); leaf(nobin, "absent.native"); leaf(marker, "warm-ran"); leaf(never, "warm-refused");
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+    ck(cx_write(src, good, (size_t)tx_len(good, 4096)) == 0 && cx_write(bad, broken, (size_t)tx_len(broken, 4096)) == 0, "fixtures-written");
+
+    why[0] = 0;
+    ck(tq_native(root, src, bin, why, sizeof why) == 0 && !why[0] && sy_exists(bin) == 1, "builds-native-image");
+    {   char *v[] = {bound, "10", bin, "a", "--b", 0};
+        t = np_run(v, root, 0, 12, &r, run, sizeof run);
+        ck(!t && r.rc == 5 && r.outn == (size_t)tx_len(want, 64) && tx_find(r.out, (long)r.outn, want, tx_len(want, 64)) == 0 && !r.errn,
+           "image-sees-plain-arguments-and-keeps-exit-code");
+        np_free(&r);
+    }
+    ck(tq_native(root, bad, badbin, why, sizeof why) == -1 && has(why, "tool-prepare rc=") && sy_exists(badbin) != 1, "compile-failure-named-no-image");
+    ck(tq_native(root, missing, nobin, why, sizeof why) == -1 && has(why, "tool-prepare rc=") && sy_exists(nobin) != 1, "missing-source-named-no-image");
+    ck(tq_native(0, src, nobin, why, sizeof why) == -1 && tq_native(root, 0, nobin, why, sizeof why) == -1 &&
+       tq_native(root, src, 0, why, sizeof why) == -1 && tq_native(root, src, nobin, 0, 0) == -1 &&
+       tq_native(root, src, nobin, why, 8) == -1 && sy_exists(nobin) != 1, "bad-arguments-refused-before-build");
+
+    {   char *v[] = {"sh", "-c", "echo discarded; : > \"$0\"", marker, 0};
+        pid = tq_warm_start(root, 10, v);
+        tq_warm_join(pid);
+        ck(pid > 0 && sy_exists(marker) == 1, "warm-command-runs");
+    }
+    {   char *v[] = {"sh", "-c", ": > \"$0\"", never, 0};
+        char *many[40];
+        for (i = 0; i < 30; i++) many[i] = "true";
+        many[30] = 0;
+        /* 41: one above the module's TQ_PREP_SECS (40); module macros are not exported */
+        ck(tq_warm_start(root, 0, v) < 0 && tq_warm_start(root, 41, v) < 0 && tq_warm_start(0, 5, v) < 0 &&
+           tq_warm_start(root, 5, 0) < 0 && tq_warm_start(root, 5, many) < 0 && sy_exists(never) != 1, "warm-refusals-start-nothing");
+    }
+    {   char *v[] = {"sleep", "30", 0};
+        t0 = sy_now_ms();
+        pid = tq_warm_start(root, 1, v);
+        tq_warm_join(pid);
+        ck(pid > 0 && sy_now_ms() - t0 < 10000, "warm-command-killed-at-its-bound");
+    }
+    printf("CHECK_TOOLPREP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
