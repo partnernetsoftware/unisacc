@@ -13,6 +13,28 @@
 #pragma unisa use sys.env
 #pragma unisa use cxlib.productpkg
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-com-tree.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-com-tree.%s\n", name); } }
 
@@ -26,8 +48,8 @@ int main(void) {
     f = (char *)pp_read_package(root, &n);
     if (!f) { sy_eprintf("check-com-tree: cannot read the package\n"); return 2; }
     size = (long)n;
-    ck(sy_run(a1, tree, sizeof tree, &cut) == 0, "tree-runs");
-    ck(sy_run(a2, insp, sizeof insp, &cut) == 0, "apeinspect-runs");
+    ck(bounded_run(a1, 50, tree, sizeof tree, &cut) == 0, "tree-runs");
+    ck(bounded_run(a2, 50, insp, sizeof insp, &cut) == 0, "apeinspect-runs");
     {   long p = tx_find(insp, tx_len(insp, sizeof insp), "\"package_length\": ", 18);
         if (p >= 0) pkglen = tx_strtol(insp + p + 18, 0, 10); }
     /* top-level rows start with "├─ " or "└─ " (UTF-8); their byte column is the first number after the label */
