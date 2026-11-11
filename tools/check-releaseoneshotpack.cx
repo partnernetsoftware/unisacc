@@ -1,0 +1,51 @@
+/* ROOT NEW_OUT [ABS_ONESHOT_TOOL]. Isolated, non-executed format fixtures.
+ * With a prebuilt tool exercise --pack/--check-pack; otherwise call L2 directly.
+ * Never compiles tools, touches release inputs, or deletes retained evidence. */
+#pragma unisa use cxlib.releaseoneshotpack
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.deflate
+#pragma unisa use mem.bytes
+static char cp_base[4400],cp_root[4400],cp_ape[4400],cp_out[4400];static const char *cp_tool;static int cp_checks,cp_failed;
+typedef struct {unsigned char *p;size_t n;} CpBytes;
+static const char *cp_names[6]={"unisacc-lnx64-x86","unisacc-lnx64-arm","unisacc-osx64-x86","unisacc-osx64-arm","unisacc-win64-x86.exe","unisacc-win64-arm.exe"};
+static unsigned char cp_image[32768];static size_t cp_size,cp_pkg,cp_sixth;static CpBytes cp_raw[6];
+static void cp_die(const char *s){fprintf(stderr,"check-releaseoneshotpack: %s\n",s);exit(2);}
+static void cp_ck(int good,const char *s){cp_checks++;cp_failed+=!good;printf("%s\t%s\n",good?"PASS":"FAIL",s);}
+static void cp_path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))cp_die("path bound");}
+static void cp_w(unsigned char *p,unsigned long n,int k){for(int i=0;i<k;i++)p[i]=(unsigned char)(n>>(8*i));}
+static void cp_save(void){if(cx_write(cp_ape,cp_image,cp_size))cp_die("fixture write");}
+static int cp_call(int pack,const char *out){if(!cp_tool)return pack?rop_pack(cp_ape,out):rop_check(cp_ape,out);char *v[]={(char*)cp_tool,pack?"--pack":"--check-pack",cp_ape,(char*)out,0};np_result r={0};char why[1024]={0};int tr=np_run(v,cp_root,0,15,&r,why,sizeof why);if(tr||r.residue)cp_die("tool transport");int rc=r.rc;if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);return rc;}
+static void cp_fixture(void){
+ memset(cp_image,0,sizeof cp_image);memcpy(cp_image,"MZ",2);cp_w(cp_image+60,2048,4);unsigned char *pe=cp_image+2048;memcpy(pe,"PE\0\0",4);cp_w(pe+4,0x8664,2);cp_w(pe+6,1,2);cp_w(pe+20,240,2);cp_w(pe+24,0x20b,2);cp_w(pe+24+60,4096,4);cp_w(pe+24+108,16,4);cp_w(pe+264+16,64,4);cp_w(pe+264+20,4096,4);
+ cp_raw[4].p=cp_image;cp_raw[4].n=4160;
+ size_t at=4160,head=64;const char *keys[]={"Linuxx86_64","Linuxaarch64|Linuxarm64","Darwinx86_64","Darwinarm64"};
+ for(int i=0;i<5;i++){
+ unsigned char raw[128]={0},gz[1024];int slot=i<4?i:5;
+ if(i<2){memcpy(raw,"\177ELF\2\1\1",7);cp_w(raw+16,2,2);cp_w(raw+18,i?183:62,2);}
+ else if(i<4){cp_w(raw,0xfeedfacfUL,4);cp_w(raw+4,i==2?0x1000007UL:0x100000cUL,4);cp_w(raw+12,2,4);}
+ else{memcpy(raw,"MZ",2);cp_w(raw+60,64,4);memcpy(raw+64,"PE\0\0",4);cp_w(raw+68,0xaa64,2);}
+ raw[127]=(unsigned char)(90+i);cp_raw[slot].p=malloc(sizeof raw);if(!cp_raw[slot].p)cp_die("allocation");if(mm_copy(cp_raw[slot].p,sizeof raw,raw,sizeof raw))cp_die("copy");cp_raw[slot].n=sizeof raw;
+ long n=dz_gzip(raw,sizeof raw,gz,sizeof gz);if(n<18)cp_die("fixture compression");
+ if(i<4){char line[200];if(cx_fmt(line,sizeof line,"%s) o=%lu n=%ld k=0000000000000000;;\n",keys[i],(unsigned long)at+1,n))cp_die("dispatcher bound");size_t z=strlen(line);if(mm_copy(cp_image+head,sizeof cp_image-head,line,z))cp_die("dispatcher copy");head+=z;}else cp_sixth=at;
+ if(mm_copy(cp_image+at,sizeof cp_image-at,gz,n))cp_die("gzip copy");at=(at+n+15)/16*16;
+ }
+ cp_pkg=at;const char *p="P 4 1 1 0\nD test one in out 0\nM 1 1 1 0\nx";size_t pn=strlen(p);if(mm_copy(cp_image+at,sizeof cp_image-at,p,pn))cp_die("package copy");at+=pn;memcpy(cp_image+at,"UNIPKG1\n",8);cp_w(cp_image+at+8,pn,8);cp_size=at+16;cp_save();
+}
+int main(int argc,char **argv){
+ if(argc!=3&&argc!=4){fprintf(stderr,"usage: check-releaseoneshotpack ROOT NEW_OUT [ABS_ONESHOT_TOOL]\n");return 2;}
+ if(!realpath(argv[1],cp_root)||mkdir(argv[2],0700)||!realpath(argv[2],cp_base))cp_die("ROOT and fresh NEW_OUT required");if(argc==4){if(argv[3][0]!='/')cp_die("absolute prebuilt tool required");cp_tool=argv[3];}
+ cp_path(cp_ape,cp_base,"fixture.ape");cp_path(cp_out,cp_base,"standalone");cp_fixture();
+ cp_ck(cp_call(1,cp_out)==0,"six-target pack");cp_ck(cp_call(0,cp_out)==0,"six-target check");
+ for(int i=0;i<6;i++){
+ char p[4400],moved[4400],name[100];cp_path(p,cp_out,cp_names[i]);size_t n=0;unsigned char *b=(unsigned char*)cx_read(p,&n);size_t tail=cp_size-cp_pkg;
+ int good=b&&n==cp_raw[i].n+tail&&!memcmp(b,cp_raw[i].p,cp_raw[i].n)&&!memcmp(b+cp_raw[i].n,cp_image+cp_pkg,tail);cp_ck(good,cp_names[i]);if(!good)cp_die("pack did not produce expected fixture bytes");
+ b[cp_raw[i].n-1]^=1;if(cx_write(p,b,n))cp_die("tamper write");cp_ck(cp_call(0,cp_out)!=0,"tampered slice rejected");b[cp_raw[i].n-1]^=1;if(cx_write(p,b,n))cp_die("restore slice");
+ b[n-16]^=1;if(cx_write(p,b,n))cp_die("tail tamper");cp_ck(cp_call(0,cp_out)!=0,"bad standalone footer rejected");b[n-16]^=1;if(cx_write(p,b,n))cp_die("restore footer");
+ if(cx_fmt(name,sizeof name,"missing-%d",i))cp_die("missing name");cp_path(moved,cp_base,name);if(rename(p,moved))cp_die("isolate missing slice");cp_ck(cp_call(0,cp_out)!=0,"missing standalone rejected");if(rename(moved,p))cp_die("restore missing slice");free(b);
+ }
+ char badout[4400];cp_path(badout,cp_base,"bad-footer");cp_image[cp_size-16]^=1;cp_save();cp_ck(cp_call(1,badout)!=0,"bad APE footer rejected");cp_image[cp_size-16]^=1;
+ cp_path(badout,cp_base,"missing-sixth");cp_image[cp_sixth]^=1;cp_save();cp_ck(cp_call(1,badout)!=0,"missing APE win-arm slice rejected");cp_image[cp_sixth]^=1;
+ cp_path(badout,cp_base,"bad-crc");cp_image[cp_sixth+10]^=1;cp_save();cp_ck(cp_call(1,badout)!=0,"tampered APE gzip rejected");cp_image[cp_sixth+10]^=1;cp_save();
+ cp_ck(cp_call(0,cp_out)==0,"restored six-target check");for(int i=0;i<6;i++)if(i!=4)free(cp_raw[i].p);
+ printf("RELEASE_ONESHOT_PACK\tchecks=%d\tfailed=%d\tout=%s\n",cp_checks,cp_failed,cp_base);return cp_failed?1:0;
+}

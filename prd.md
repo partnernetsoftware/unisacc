@@ -179,6 +179,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 
 | 动作 | 现成用法 | 说明 |
 |---|---|---|
+| 发布隔离演练与六片导出 | `tools/release-oneshot.cx -- --dry-run CANDIDATE LAYOUT NEW_STATE`、`--resume STATE`；`--pack APE NEW_DIR`、`--check-pack APE DIR` | 现算SHA后规划X、先草稿后带release_tag的CI、数字裁决证据；仅PLANNED与UNKNOWN，不触网。六片附同P4/尾并逐字节核；win/x86取APE外层PE。两独立夹具批次，不授发布资格 |
 | 同候选原生资格（六目标证据表） | `sh ./unisacc.com tests/candidate-qualify.cx -- cell|aggregate ...` | 由 `.github/workflows/candidate-native.yml` 调度；缺证据或身份不符 rc1，有 NOT_RUN rc3，全 PASS 才 rc0 |
 | streams 旧合同壳材料 (unisacc-stream1..7.com) | `sh ./unisacc.com tools/streams-material.cx -- ROOT NEW_OUTDIR [LEVEL [TARGET]]`;校验 `tests/check-streams-material.cx`(批次 streams-material) | 7 个 <=40B 薄壳转调 `unisacc stream STAGE`,分派器 `s` 烘入 ROOT;e1 经 `tools/streams-e1-frame.cx` 把 USLATTRT 转 USLATTR1;收据 streams.json scope=product-stream-shim + NOT_CLAIMED,不是独立 runner,与 streampack 8 容器无关;钉子由 tests/cases/stream_pin.cx `stream_receipt_pin` 取自收据。lower 阶段产品会追加运行库尾部,依赖精确 lower 输出的用例仍红 |
 | 两代不动点（读 chain-step 产物） | `sh ./unisacc.com tests/chain-fixed-point.cx`（批次 `chain-fixed-point`，材料 `chain-gen1`、`chain-fixedpoint`） | F1 gen2 sha==gen3 sha；F2/F3 receipt 的 constructor_sha 依次指向上一代，防复制同一文件冒充；不重跑构造。材料必须绑到候选文件而非其父目录（RC1-MATERIAL-BIND） |

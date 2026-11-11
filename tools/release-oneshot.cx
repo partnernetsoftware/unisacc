@@ -1,0 +1,79 @@
+/* Local release rehearsal only. No network/push/release execution is exposed.
+ * --dry-run CANDIDATE LAYOUT NEW_STATE [--stop-after PHASE]
+ * --resume STATE [--stop-after PHASE]
+ * --pack APE NEW_DIR | --check-pack APE DIR
+ * Every resume rechecks input bytes; plans are not execution evidence.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.releaseoneshotpack
+
+static const char *phases[] = {"candidate-sha", "commit-x", "push-x", "draft", "upload", "draft-check", "ci-dispatch", "ci-observe", "s9-commit", "s9-release", "s9-daily", "draft-readback", "decide", "commit-y", "push-y", "publish", "public-readback"};
+static char state[4096], table[4096], assets[4096], identity[65];
+static RcCandidate candidate;
+static void refuse(const char *s) { fprintf(stderr,"release-oneshot: REFUSE %s\n",s); exit(2); }
+static void path(char *p,const char *a,const char *b) { if(cx_fmt(p,4400,"%s/%s",a,b))refuse("path bound"); }
+static char *load(const char *p,size_t *n) { char *s=cx_read(p,n); if(!s)refuse("input read"); return s; }
+static void save(const char *p,const char *s) { if(cx_write(p,s,strlen(s)))refuse("output write"); }
+static void canonical(const char *s,char *p) { if(sy_realpath(s,p,4096)<0||strcmp(s,p))refuse("canonical absolute path required"); }
+static void input_identity(void) {
+    np_buf b={0}; size_t n; char why[512], p[4400], sha[65];
+    char *s=load(table,&n); np_puts(&b,table); np_put(&b,s,n); free(s);
+    if(rcand_load(table,&candidate,why,sizeof why))refuse(why);
+    np_puts(&b,assets);
+    for(int i=0;i<7;i++) { path(p,assets,candidate.name[i]); s=load(p,&n); cx_sha256_hex(s,n,sha); free(s); np_puts(&b,candidate.name[i]); np_puts(&b,sha); }
+    cx_sha256_hex(b.p,b.n,identity); free(b.p);
+}
+static void backfill(void) {
+    char p[4400],sha[7][65],why[512]; size_t n;
+    for(int i=0;i<7;i++){path(p,assets,candidate.name[i]);char *s=load(p,&n);cx_sha256_hex(s,n,sha[i]);free(s);}
+    np_buf b={0};
+    np_puts(&b,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
+    const char *v[]={candidate.repo,candidate.tag,candidate.commit,candidate.version,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id};
+    for(int i=0;i<7;i++){if(i)np_puts(&b,"\t");np_puts(&b,v[i]);}
+    for(int i=0;i<7;i++){np_puts(&b,"\t");np_puts(&b,candidate.name[i]);np_puts(&b,"\t");np_puts(&b,sha[i]);}np_puts(&b,"\n");
+    path(p,state,"candidate.tsv");if(cx_write(p,b.p,b.n))refuse("candidate write");free(b.p);
+    RcCandidate actual;if(rcand_load(p,&actual,why,sizeof why)||rcand_verify(&actual,assets,7,why,sizeof why))refuse(why);
+}
+static void plan(int i) {
+    char p[4400]; np_buf b={0}; char line[1600];
+    if(cx_fmt(line,sizeof line,"PHASE\t%s\nMODE\tDRY_RUN\nDEADLINE_S\t55\n",phases[i]))refuse("plan bound"); np_puts(&b,line);
+    if(i==0)np_puts(&b,"ACTION\tcalculate seven asset SHA256 before candidate commit\n");
+    else if(i==3){if(cx_fmt(line,sizeof line,"ARGV\tgh\t-R\t%s\trelease\tcreate\t%s\t--draft\t--target\t%s\n",candidate.repo,candidate.tag,candidate.commit))refuse("plan bound");np_puts(&b,line);}
+    else if(i==4){for(int j=0;j<7;j++){if(cx_fmt(line,sizeof line,"ARGV\tgh\t-R\t%s\trelease\tupload\t%s\t%s/%s\t--clobber\n",candidate.repo,candidate.tag,assets,candidate.name[j]))refuse("plan bound");np_puts(&b,line);}np_puts(&b,"BOUNDARY\tone asset per bounded command\n");}
+    else if(i==6){if(cx_fmt(line,sizeof line,"ARGV\tgh\t-R\t%s\tworkflow\trun\t%s\t--ref\t%s\t-f\tcommit={commit-x}\t-f\tape_sha256={candidate-sha}\t-f\trelease_tag=%s\n",candidate.repo,candidate.workflow,candidate.workflow_ref,candidate.tag))refuse("plan bound");np_puts(&b,line);}
+    else if(i==7)np_puts(&b,"ACTION\tobserve exact dispatched run identity; pending is not PASS; resume bounded observation\n");
+    else if(i>=8&&i<=10)np_puts(&b,"ACTION\trun candidate-bound s9 tier; retain FAIL UNKNOWN and DEFERRED without qualification transfer\n");
+    else if(i==12)np_puts(&b,"ACTION\trelease-decide --candidate candidate.tsv --evidence evidence.tsv --assets readback\n");
+    else if(i==13)np_puts(&b,"ACTION\tcommit exact CI run id, notes, evidence and rollback declaration as Y\n");
+    else if(i==15)np_puts(&b,"ACTION\tpublish only after verified CI, pushed Y, rollback declaration, draft readback and decision\n");
+    else {if(cx_fmt(line,sizeof line,"ACTION\t%s; bind full candidate identity and retain raw command result\n",phases[i]))refuse("plan bound");np_puts(&b,line);}
+    if(cx_fmt(p,sizeof p,"%s/%02d-%s.plan.tsv",state,i,phases[i])||cx_write(p,b.p,b.n))refuse("plan write");free(b.p);
+}
+static int progress(void) {
+    char p[4400];size_t n;path(p,state,"checkpoint.tsv");
+    if(!sy_exists(p))return 0;char *s=load(p,&n);int next=0;char *at=s;
+    while(*at){char expected[160];if(next>=17||cx_fmt(expected,sizeof expected,"%d\t%s\tPLANNED\n",next,phases[next]))refuse("checkpoint bound");size_t k=strlen(expected);if(strncmp(at,expected,k))refuse("checkpoint order/corruption");at+=k;next++;}free(s);return next;
+}
+int main(int argc,char **argv) {
+    if(argc==4&&!strcmp(argv[1],"--pack"))return rop_pack(argv[2],argv[3]);
+    if(argc==4&&!strcmp(argv[1],"--check-pack"))return rop_check(argv[2],argv[3]);
+    int resume=argc>=3&&!strcmp(argv[1],"--resume"),stop=-1,base=resume?3:5;
+    if((!resume&&(argc<5||strcmp(argv[1],"--dry-run")))||(argc!=base&&argc!=base+2))refuse("usage --dry-run CANDIDATE LAYOUT NEW_STATE | --resume STATE [--stop-after PHASE]");
+    if(argc==base+2){if(strcmp(argv[base],"--stop-after"))refuse("unknown argument");for(int i=0;i<17;i++)if(!strcmp(argv[base+1],phases[i]))stop=i;if(stop<0)refuse("unknown stop phase");}
+    if(resume){canonical(argv[2],state);char p[4400];size_t n;path(p,state,"inputs.tsv");char *s=load(p,&n),*t=strchr(s,'\n');if(!t)refuse("inputs schema");*t++=0;char *e=strchr(t,'\n');if(!e||e[1])refuse("inputs schema");*e=0;canonical(s,table);canonical(t,assets);free(s);}
+    else{canonical(argv[2],table);canonical(argv[3],assets);if(argv[4][0]!='/'||sy_mkdir(argv[4],0700))refuse("fresh absolute state required");canonical(argv[4],state);char p[4400],text[8300];path(p,state,"inputs.tsv");if(cx_fmt(text,sizeof text,"%s\n%s\n",table,assets))refuse("inputs bound");save(p,text);}
+    input_identity();char p[4400];path(p,state,"identity.sha256");
+    if(resume){size_t n;char *s=load(p,&n);if(n!=64||memcmp(s,identity,64))refuse("input identity changed");free(s);}else save(p,identity);
+    int next=progress();
+    for(int i=next;i<17;i++){
+        if(i==0)backfill();plan(i);
+        if(i==12){np_buf ev={0};for(int j=1;j<=8;j++){char row[96];if(cx_fmt(row,sizeof row,"%d\tUNKNOWN\tDRY_RUN-not-executed\n",j))refuse("evidence bound");np_puts(&ev,row);}path(p,state,"evidence.tsv");if(cx_write(p,ev.p,ev.n))refuse("evidence write");free(ev.p);}
+        path(p,state,"checkpoint.tsv");int fd=sy_open(p,O_WRONLY|O_CREAT|O_APPEND,0600);char row[160];if(cx_fmt(row,sizeof row,"%d\t%s\tPLANNED\n",i,phases[i])||fd<0||sy_write_all(fd,row,strlen(row))||sy_close(fd))refuse("checkpoint write");
+        printf("RELEASE_ONESHOT\tphase=%s\tstatus=PLANNED\texternal_operations=0\n",phases[i]);if(i==stop){printf("RELEASE_ONESHOT\tstatus=PAUSED\tMANUAL=0\n");return 0;}
+    }
+    printf("RELEASE_ONESHOT\tstatus=DRY_RUN_COMPLETE\tMANUAL=0\texternal_operations=0\tqualification=NOT_EXECUTED\n");return 0;
+}

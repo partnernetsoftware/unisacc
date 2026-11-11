@@ -1,0 +1,74 @@
+#pragma unisa module releaseoneshotpack
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.packagestruct
+#pragma unisa use runtime.codec
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+/* L2 byte-preserving standalone exports of tools/ape-pack.cx's layout.
+ * win/x86_64 is the outer PE through its last raw section, including its
+ * dispatcher/version resources; no attempt is made to reconstruct a pre-APE PE.
+ * Other members retain their exact inflated bytes. No executable is run.
+ * pack requires a fresh directory; failures retain partial output for diagnosis. */
+static const char *rop_names[6]={"unisacc-lnx64-x86","unisacc-lnx64-arm","unisacc-osx64-x86","unisacc-osx64-arm","unisacc-win64-x86.exe","unisacc-win64-arm.exe"};
+typedef struct {unsigned char *p;size_t n;} RopBytes;
+static unsigned long rop_le(const unsigned char *p,int n){unsigned long v=0;for(int i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;}
+static int rop_error(const char *why,const char *p){sy_eprintf("release-oneshot-pack: %s: %s\n",why,p?p:"");return 2;}
+static int rop_gzip(const unsigned char *g,size_t n,RopBytes *out){
+ if(n<18||memcmp(g,"\037\213\010\000",4))return 1;
+ unsigned long raw=rop_le(g+n-4,4);if(!raw||raw>67108864)return 1;
+ unsigned char *p=malloc(raw);if(!p)return 1;
+ CxCodecCrc c;uint32_t crc;cxcodec_crc_init(&c);
+ if(cxcodec_inflate(p,raw,g+10,n-18)||cxcodec_crc(&c,(char*)p,raw,&crc)||crc!=rop_le(g+n-8,4)){free(p);return 1;}
+ out->p=p;out->n=raw;return 0;
+}
+static int rop_cpu(RopBytes b,int i){
+ if(i<2)return b.n>=64&&!memcmp(b.p,"\177ELF\2\1",6)&&rop_le(b.p+16,2)==2&&rop_le(b.p+18,2)==(i?183:62);
+ if(i<4)return b.n>=32&&rop_le(b.p,4)==0xfeedfacfUL&&rop_le(b.p+4,4)==(i==2?0x1000007UL:0x100000cUL)&&rop_le(b.p+12,4)==2;
+ if(b.n<64||memcmp(b.p,"MZ",2))return 0;unsigned long pe=rop_le(b.p+60,4);
+ return pe<=b.n-24&&!memcmp(b.p+pe,"PE\0\0",4)&&rop_le(b.p+pe+4,2)==(i==4?0x8664:0xaa64);
+}
+static int rop_load(const char *ape,RopBytes *file,PackageFooter *f,RopBytes b[6]){
+ file->p=(unsigned char*)cx_read(ape,&file->n);
+ if(!file->p||file->n>2147483647UL||!packagefooter_locate_bytes(file->p,file->n,f))return rop_error("invalid APE/footer",ape);
+ int ver=0;if(cxps_audit(file->p+f->package_offset,f->package_length,&ver)||ver!=4)return rop_error("requires structurally valid P4",ape);
+ unsigned char *a=file->p;size_t limit=f->package_offset;
+ if(limit<64||memcmp(a,"MZ",2))return rop_error("requires PE APE",ape);
+ size_t pe=rop_le(a+60,4);if(pe<64||pe>65536||pe>limit-24||memcmp(a+pe,"PE\0\0",4))return rop_error("invalid PE header",ape);
+ size_t count=rop_le(a+pe+6,2),opt=rop_le(a+pe+20,2),tab=pe+24+opt,end=tab;
+ if(!count||count>96||opt<64||tab>limit||count>(limit-tab)/40)return rop_error("PE section bounds",ape);
+ end=rop_le(a+pe+24+60,4);for(size_t j=0;j<count;j++){size_t s=tab+j*40,n=rop_le(a+s+16,4),o=rop_le(a+s+20,4);if(o>limit||n>limit-o)return rop_error("PE raw extent",ape);if(n&&o+n>end)end=o+n;}
+ if(end>limit)return rop_error("PE extent",ape);b[4].p=malloc(end);if(!b[4].p)return rop_error("allocation",ape);if(mm_copy(b[4].p,end,a,end))return rop_error("copy",ape);b[4].n=end;
+ char *head=malloc(pe+1);if(!head)return rop_error("allocation",ape);if(mm_copy(head,pe+1,a,pe)){free(head);return rop_error("copy",ape);}for(size_t j=0;j<pe;j++)if(!head[j])head[j]=' ';head[pe]=0;
+ const char *keys[]={"Linuxx86_64) o=","Linuxaarch64|Linuxarm64) o=","Darwinx86_64) o=","Darwinarm64) o="};size_t next=(end+15)/16*16;
+ for(int i=0;i<4;i++){char *p=strstr(head,keys[i]),*e;unsigned long o,n;if(!p||strstr(p+strlen(keys[i]),keys[i])){free(head);return rop_error("missing/duplicate dispatcher slice",rop_names[i]);}p+=strlen(keys[i]);errno=0;o=strtoul(p,&e,10);if(errno||e==p||strncmp(e," n=",3)||!o){free(head);return rop_error("dispatcher offset",ape);}p=e+3;errno=0;n=strtoul(p,&e,10);if(errno||e==p||strncmp(e," k=",3)||o-1!=next||o-1>limit||n>limit-(o-1)||rop_gzip(a+o-1,n,b+i)){free(head);return rop_error("invalid compressed slice",rop_names[i]);}size_t stop=o-1+n;next=(stop+15)/16*16;for(size_t j=stop;j<next&&j<limit;j++)if(a[j]){free(head);return rop_error("nonzero slice padding",ape);}}
+ free(head);
+ /* The optional sixth target precedes optional cache-manager gzip members.
+  * Its end is either the next aligned gzip member or the package boundary. */
+ if(next>=limit||limit-next<18||memcmp(a+next,"\037\213\010\000",4))return rop_error("missing win/arm64 slice",ape);
+ int found=0;size_t boundary=next+16;
+ while(!found&&boundary<=limit){
+ if(boundary==limit||(boundary+4<=limit&&!memcmp(a+boundary,"\037\213\010\000",4))){
+ for(size_t pad=0;pad<16&&boundary>=next+18+pad;pad++){size_t stop=boundary-pad;int zero=1;for(size_t j=stop;j<boundary;j++)if(a[j])zero=0;if(zero&&!rop_gzip(a+next,stop-next,b+5)){found=1;break;}}
+ }
+ if(boundary==limit)break;boundary=limit-boundary<16?limit:boundary+16;
+ }
+ if(!found)return rop_error("invalid win/arm64 slice",ape);
+ for(int i=0;i<6;i++)if(!rop_cpu(b[i],i))return rop_error("slice target mismatch",rop_names[i]);return 0;
+}
+static int rop_do(const char *ape,const char *dir,int write_mode){
+ RopBytes file={0},b[6]={{0}};PackageFooter f;int rc=rop_load(ape,&file,&f,b);
+ if(!rc&&write_mode&&sy_mkdir(dir,0755))rc=rop_error("requires fresh output directory",dir);
+ for(int i=0;!rc&&i<6;i++){
+ char path[4400];if(cx_fmt(path,sizeof path,"%s/%s",dir,rop_names[i])){rc=rop_error("path bound",dir);break;}
+ size_t tail=f.package_length+16,total=b[i].n+tail;
+ if(write_mode){FILE *out=fopen(path,"wbx");if(!out){rc=rop_error("exclusive output open",path);break;}int bad=fwrite(b[i].p,1,b[i].n,out)!=b[i].n||fwrite(file.p+f.package_offset,1,tail,out)!=tail;if(fclose(out))bad=1;if(bad||sy_chmod(path,0755)){rc=rop_error("output write/mode",path);break;}}
+ size_t n=0;unsigned char *p=(unsigned char*)cx_read(path,&n);
+ if(!p||n!=total||memcmp(p,b[i].p,b[i].n)||memcmp(p+b[i].n,file.p+f.package_offset,tail))rc=rop_error("standalone slice/P4/footer bytes differ or missing",path);
+ free(p);if(!rc)sy_printf("ONESHOT_PACK\t%s\tbytes=%lu\tBYTE_IDENTICAL\n",rop_names[i],(unsigned long)total);
+ }
+ for(int i=0;i<6;i++)free(b[i].p);free(file.p);return rc;
+}
+int rop_pack(const char *ape,const char *outdir){return rop_do(ape,outdir,1);}
+int rop_check(const char *ape,const char *outdir){return rop_do(ape,outdir,0);}

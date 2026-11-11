@@ -2,6 +2,14 @@
 
 Current source, candidate and installed identities are in prd.md §2 (work tree). Identity narratives before 2026-10-30 (Source329/P53/S447 epochs) are in archive/prd-c43-history-20261030.md and do not transfer to the CX-rewritten entry.
 
+## release-oneshot：隔离发布演练与独立片
+
+`sh ./unisacc.com tools/release-oneshot.cx -- --dry-run CANDIDATE LAYOUT NEW_STATE` 现算七资产SHA，写私有候选表并生成17相发布演练记录；`--stop-after PHASE` 可暂停，`--resume STATE` 续跑且输入变化或断点损坏拒绝。草稿先于CI，CI计划携带release_tag、提交X与APE摘要，release-decide证据使用数字1到8，演练证据全部UNKNOWN。MANUAL=0仅表示演练无人工步骤；此入口不执行网络、提交、上传、CI或公开，PLANNED不等于实跑PASS。
+
+`--pack APE NEW_DIR` 从APE导出六个 `unisacc-{lnx,osx,win}64-{x86,arm}[.exe]`，逐份附同一P4及UNIPKG1尾；`--check-pack APE DIR` 逐字节核验。win/x86取APE外层PE至最后raw section，保留dispatcher与版本资源，不声称还原原plain输入；其余五片保持实际解压字节。两检查批次release-oneshot、release-oneshot-pack只证隔离演练与格式字节合同，不认证发布或六宿主原生资格。
+
+编排夹具要求显式预编材料：先独立有界运行 `sh ./unisacc.com tools/release-oneshot.cx -o ABS_TOOL`，再运行 `sh ./unisacc.com tools/check-release-oneshot.cx -- ROOT NEW_OUT ABS_TOOL`。daily批次材料为 `release-oneshot-tool:path`；无材料记DEFERRED，直接缺参rc77，不把冷编超过12秒伪装成合同失败，也不放宽原时限。pack检查仍为无材料commit批。库存752源、94片，新增4源不跨片界。
+
 ## edit-span：断言替换与原子可见边界
 
 ```sh

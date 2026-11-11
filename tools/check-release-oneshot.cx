@@ -1,0 +1,32 @@
+/* ROOT NEW_OUT [ONESHOT_BINARY]. Isolated fixture, no network or release. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+static int failed;
+static void ck(int ok,const char *s){printf("%s\tcheck-release-oneshot.%s\n",ok?"PASS":"FAIL",s);if(!ok)failed++;}
+static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))exit(2);}
+static int call(char **v,const char *cwd){pr_result r={0};int t=pr_run("oneshot fixture",v,cwd,0,12,&r);pr_echo(&r);int rc=t?125:r.rc;pr_free(&r);return rc;}
+static char *readall(const char *p){size_t n;char *s=cx_read(p,&n);if(!s)exit(2);return s;}
+int main(int argc,char **argv){
+ if(argc!=4){fprintf(stderr,"check-release-oneshot: needs explicit prebuilt ONESHOT_BINARY\n");return 77;}const char *root=argv[1],*out=argv[2];if(out[0]!='/'||sy_mkdir(out,0700))return 2;
+ char bin[4400],table[4400],assets[4400],state[4400],p[4400];
+ if(argv[3][0]!='/'||cx_fmt(bin,sizeof bin,"%s",argv[3]))return 2;
+ path(assets,out,"assets");if(sy_mkdir(assets,0700))return 2;path(table,out,"candidate.tsv");path(state,out,"state");
+ const char *names[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json","build.json","asset.zip","SHA256SUMS"};
+ np_buf b={0};np_puts(&b,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\nfixture/repo\tv1.2.3\t1111111111111111111111111111111111111111\t1.2.3\tcandidate-native.yml\tmain\t0");
+ const char *zero="0000000000000000000000000000000000000000000000000000000000000000";
+ for(int i=0;i<7;i++){char text[80];path(p,assets,names[i]);if(cx_fmt(text,sizeof text,"fixture-asset-%d\n",i)||cx_write(p,text,strlen(text)))return 2;np_puts(&b,"\t");np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,zero);}np_puts(&b,"\n");if(cx_write(table,b.p,b.n))return 2;free(b.p);
+ char *first[]={bin,"--dry-run",table,assets,state,"--stop-after","draft",0};ck(call(first,root)==0,"pause-after-draft");
+ path(p,state,"checkpoint.tsv");char *s=readall(p);ck(strstr(s,"3\tdraft\tPLANNED\n")&&!strstr(s,"ci-dispatch"),"pause-preserves-draft-before-ci");free(s);
+ char why[512];RcCandidate actual;path(p,state,"candidate.tsv");ck(!rcand_load(p,&actual,why,sizeof why)&&!rcand_verify(&actual,assets,7,why,sizeof why),"candidate-digests-recomputed-before-X");
+ char *resume[]={bin,"--resume",state,0};ck(call(resume,root)==0,"resume-completes");
+ path(p,state,"06-ci-dispatch.plan.tsv");s=readall(p);ck(strstr(s,"release_tag=v1.2.3")&&strstr(s,"commit={commit-x}")&&strstr(s,"ape_sha256={candidate-sha}"),"CI-binds-draft-tag-X-and-digest");free(s);
+ path(p,state,"evidence.tsv");s=readall(p);np_buf expected={0};for(int i=1;i<=8;i++){char row[96];cx_fmt(row,sizeof row,"%d\tUNKNOWN\tDRY_RUN-not-executed\n",i);np_puts(&expected,row);}ck(strlen(s)==expected.n&&!memcmp(s,expected.p,expected.n),"numeric-evidence-remains-UNKNOWN");free(s);free(expected.p);
+ path(p,state,"checkpoint.tsv");s=readall(p);size_t before=strlen(s);ck(strstr(s,"16\tpublic-readback\tPLANNED\n")!=0,"full-plan-includes-public-readback");free(s);ck(call(resume,root)==0,"completed-resume-idempotent");s=readall(p);ck(strlen(s)==before,"resume-does-not-duplicate-checkpoints");free(s);
+ path(p,assets,names[0]);if(cx_write(p,"changed",7))return 2;ck(call(resume,root)==2,"changed-input-refuses-resume");
+ if(cx_write(p,"fixture-asset-0\n",strlen("fixture-asset-0\n")))return 2;
+ path(p,state,"checkpoint.tsv");if(cx_write(p,"9\twrong\tPLANNED\n",strlen("9\twrong\tPLANNED\n")))return 2;ck(call(resume,root)==2,"corrupt-checkpoint-refuses");
+ printf("CHECK_RELEASE_ONESHOT\tfailed=%d\tscope=isolated-dry-run\n",failed);return failed?1:0;
+}
