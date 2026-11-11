@@ -15,10 +15,10 @@
 | `SHA256SUMS` | c4e90f6c0e864603fa72c24374d68463b2958f8d01db78506419513f4c0607e6 | 本地自校 6/6 OK,草稿读回 6/6 OK |
 | 其余资产 | pkg.bin 56efea53(与 0.0.55 同字节:链产出的 P4 包 sha 未变),slice-win-arm64 0a7aed29,zip d7f80028 | 见 release/candidate.tsv |
 | 链产物 | 本版整链重建,构造源 b2c3ad8d99;链内 compare:objects=same count=86,kernels=same count=2,slices=same count=6,product=same | 两轮重建、三个阻塞、人工介入见下节;不是无人值守 |
-| s9 commit 档 | 发布时 s9 提交档运行中(23:12 起,候选 APE 088a31c6 加提交 X),结果公开后补记;本说明不含任何 s9 结论 | 按集成者裁定不等 s9 公开;commit 档即便全过也是 NOT_FULL;不称 QUALIFIED |
+| s9 commit 档 | 公开时运行中,公开后(23:24 聚合)补记:候选 APE 088a31c6 加提交 X,selected 143,PASS 141,FAIL 2,UNKNOWN 0,DEFERRED 0;qualification NOT_FULL(12 个 osx 批本机 NOT_APPLICABLE)。FAIL 两批为 s9-nightly-run-pass(检查项 fake-run-pass、index-row)与 s9-nightly-run-fail(检查项 fail-run-fail、fail-index-report-not-dash),都是本版 E 批次治理拆出的夜跑入口自检批,失败原因未定;单独重跑 s9-nightly-run-pass 一次,58 秒内被杀未出结论 | 按集成者裁定不等 s9 公开,公开依据不含 s9;首段加两次 --resume 共 455、201、61 秒;不称 QUALIFIED |
 | s9 release / daily 档 | 本版未跑 | 0.0.54 release 档首跑 15 批全域矩阵 OPEN 格 FAIL 未变 |
 | 原生 CI | 同候选运行 43045967979(检出提交 X 5329396649,ape_sha256 088a31c6,release_tag v0.0.56):QUALIFIED pass=42 fail=0 not_run=0 invalid=0 | 六目标原生单元格实跑,23:12 触发,23:15 结束 |
-| release-decide | 七步 PASS(1 freeze-sid、2 construct、3 ape-pack、5 layout-check、6 draft-assets、7 ci-qualified、8 readback),步 4 s9 UNKNOWN;QUALIFIED 行为 NOT_QUALIFIED unknown=1 fail=0 | 八步原样输出存 cc-work/rel056/decide.txt |
+| release-decide | 七步 PASS(1 freeze-sid、2 construct、3 ape-pack、5 layout-check、6 draft-assets、7 ci-qualified、8 readback),步 4 s9 UNKNOWN;QUALIFIED 行为 NOT_QUALIFIED unknown=1 fail=0(公开时);s9 出结果后步 4 改记 FAIL,重裁输出存 cc-work/rel056/decide2.txt | 八步原样输出存 cc-work/rel056/decide.txt |
 | 六个按目标独立可执行片 | 本地产出六片,release-oneshot --pack 与 --check-pack 均 rc0,逐片 BYTE_IDENTICAL;sha 清单 cc-work/rel056/standalone.sha | 未上传到 release,未在各宿主执行;字节检查不代替宿主执行 |
 
 ## 行为变化(升级前请读)
@@ -96,7 +96,7 @@ MANUAL-4 之后到 pack 无新增介入(MANUAL.tsv 止于 CHECK-44)。第二轮�
 - 顺延未入本版:G1 门本体(D2/D4/D5 main-health)、G2、G3、D6 槽位仲裁、ib55 三件、t57-1(runnerprep 冷编)、D1 selfcheck 03+04。
 - release-oneshot 的真实 git/gh/CI 相均为 PLANNED;本版发布仍按手册逐步人工执行,发布尾部并行由人工编排。
 - 六个按目标独立可执行片未上传、未在各宿主执行;候选表仍是七资产。
-- s9 commit 档在公开时尚未出结果(运行中),公开不以 s9 为依据;s9 克隆里 install-ape 重写了 plans/root-identity.md 的身份块,该克隆工作区与提交 X 相差这一份文档;release 档与 daily 档未跑;全域矩阵 release 档 15 红未回填。s9-nightly 的 `--resume` 在真实会话上本版首次使用。
+- s9 commit 档在公开时尚未出结果(运行中),公开不以 s9 为依据;公开后补记为 141/143,两批夜跑入口自检 FAIL 原因未查明,未修;s9 克隆里 install-ape 重写了 plans/root-identity.md 的身份块,该克隆工作区与提交 X 相差这一份文档;release 档与 daily 档未跑;全域矩阵 release 档 15 红未回填。s9-nightly 的 `--resume` 在真实会话上本版首次使用。
 - 沿 0.0.55 说明、本版未处理也未复核:BASE6 字节 oracle 未重建;p3 的 28 个 release-ctor case 材料未重建(DEFERRED),未记 PASS。
 - 整版超 2 小时铁律:P1 落地 20:05,pack 23:07,公开在其后(约 3 小时以上);超时原因是缺陷晚发现与整链无增量复用,已登记整改(cc-work/plan-forward-057.md,0.0.57 零接触链)。
 - 两代不动点、跨平台原生资格、s9 与 CI 结论以上表实填为准;表中仍是占位或写未跑的项,不称 QUALIFIED。
