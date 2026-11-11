@@ -137,6 +137,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 |---|---|---|
 | 核对队友报告里的事实 | `sh ./unisacc.com tools/report-verify.cx -- CLAIMS.tsv`；校验 `tools/check-report-verify.cx` | commit/tsvcount/receipts/sha256/ratchets 五类断言逐条核实，输出 OK/MISMATCH/MISSING，有 MISMATCH 退出 1 |
 | 查模块层向与包边界 | `sh ./unisacc.com tools/check-cx-layers.cx [PRODUCT]`（`-- --fixtures` 跑夹具） | 编号层 L0–L3 直接 `use`，向上越层即红；`ext/` 是包层：产品层（`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`、`cx/cx0`、`cx/workspace` 与 `tests/cx-module-freeze.tsv` 的 core 模块）`use` 到 `ext/` 即红；core 模块文件集合按冻结表只许减（新增行即红、行无文件亦红） |
+| whole-front 整程序展开预检 | `sh ./unisacc.com tools/check-whole-front-expand.cx -- ROOT NEW_ABS_OUT [--partition FIRST COUNT ...]`；`--selftest` 为轻量负控 | 从 release-build 的实际根表调用 `cx0_plan`，拒绝跨单元定义冲突；默认按实际展开数推导 32/32/末片并核覆盖，不再固定85。保留 plan.tsv/diagnostic.txt；不跑 e2/e3、对象或图像，不代表阶段等价或候选资格。批 whole-front-expand 与 whole-front-expand-controls |
 | core 导出面棘轮 | `sh ./unisacc.com tests/coreapi.cx -- --check`（`--write` 下调，`--fixtures` 跑夹具） | 26 个冻结 core 模块的每个非 static 定义各占一行：新符号红、行缺失红、签名变动红、`DEPRECATED-ALIAS` 的调用方文件数超上限红；`core_run` 一行标 `DUAL-IMPL linked=cx/sys/kernel.cx`，两条链接由 `cx-core-run-diff` 逐字节比对；当前一次构造native symindex后逐查询执行，26模块/194导出实核13.874s、原8夹具14.322s，原55秒不扩，查询结果不缓存 |
 | core_run 双执行器差分 | `sh ./unisacc.com tools/check-core-run-diff.cx -- ROOT KERNELS` | 同一模型与三组固定输入分别喂 `cx/core/execute.cx`（CX 参考实现）与 `cx/sys/kernel.cx`（产品链接的汇编内核），两行整体逐字节比较，末行 `CORE_RUN_DIFF`；KERNELS 是含 `x86_64.kernel` 的目录 |
 | 拒新的模块 `#include` | `sh ./unisacc.com -run tests/cxinclude.cx -- --check` | 新模块必须 0 |

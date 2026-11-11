@@ -1,0 +1,94 @@
+/* Whole-front preflight only: no e2/e3, objects, images or candidate qualification.
+ * ROOT NEW_OUT [--selftest | --partition FIRST COUNT ...]
+ * Keep evidence/interfaces in caller-owned NEW_OUT; never use the global temp tree.
+ */
+#pragma unisa use cx0.plan
+static char work[4400],paths[64][4400];
+static char *sources[64];
+static void die(const char *s){fprintf(stderr,"WF_EXPAND REFUSE %s\n",s);exit(2);}
+static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path bound");}
+static void store(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("write evidence");}
+/* Read the authoritative root array, not a second copy of its 44 entries. */
+static int roots(const char *root){
+ char p[4400];size_t n;path(p,root,"tools/release-build.cx");char *b=cx_read(p,&n);if(!b||memchr(b,0,n))die("root source");
+ const char *anchor="static const char *rb_whole_src[RB_WHOLE_SRC] = {";
+ char *s=strstr(b,anchor);if(!s||strstr(s+strlen(anchor),anchor))die("root declaration");s+=strlen(anchor);int nr=0;
+ for(;;){
+  while(*s&&(*s==' '||*s=='\t'||*s=='\r'||*s=='\n'||*s==','))s++;
+  if(s[0]=='/'&&s[1]=='*'){s=strstr(s+2,"*/");if(!s)die("root comment");s+=2;continue;}
+  if(*s=='}'&&s[1]==';')break;
+  if(*s++!='\"'||nr==64)die("root syntax/count");char *e=strchr(s,'\"');if(!e||e-s>=512)die("root string");
+  *e=0;if(strncmp(s,"src/",4)||strstr(s,"..")||strpbrk(s,"\t\r\n"))die("root path");path(paths[nr],root,s);sources[nr]=paths[nr];nr++;s=e+1;
+ }
+ free(b);if(!nr)die("empty roots");return nr;
+}
+static int units(const cx0_result *r){
+ if(r->status||!r->text||strncmp(r->text,"CX0PLAN1\n",9))return -1;
+ int n=0;const char *p=r->text+9;
+ while(*p){char *e=strchr(p,'\n'),*t=strchr(p,'\t');if(!e||!t||t>=e)return -1;
+  char expected[32];if(cx_fmt(expected,sizeof expected,"%d",n)||strlen(expected)!=(size_t)(t-p)||memcmp(p,expected,(size_t)(t-p)))return -1;
+  n++;p=e+1;
+ }return n;
+}
+static int number(const char *s){if(!*s)return -1;int n=0;for(;*s;s++){if(*s<'0'||*s>'9'||n>128)return -1;n=n*10+*s-'0';}return n;}
+static int partition(int total,int argc,char **argv){
+ int next=0;if(argc<2||argc%2)return 1;
+ for(int i=0;i<argc;i+=2){int first=number(argv[i]),count=number(argv[i+1]);if(first!=next||count<1||count>32||next>total-count)return 1;next+=count;}
+ return next!=total;
+}
+static int evaluate(int nr,int argc,char **argv){
+ cx0_result r=cx0_plan(0,sources,nr,0,0,work);int n=units(&r);char p[4400];path(p,work,"diagnostic.txt");store(p,r.diagnostic?r.diagnostic:"");
+ if(n<0){fprintf(stderr,"WF_EXPAND REFUSE expansion status=%d\n%s",r.status,r.diagnostic?r.diagnostic:"");cx0_release(&r);return 1;}
+ path(p,work,"plan.tsv");store(p,r.text);cx0_release(&r);
+ /* Same bounded three-wave contract as candidate-chain: tail derives from total. */
+ char tail[32];if(cx_fmt(tail,sizeof tail,"%d",n-64))die("tail bound");char *dynamic[]={"0","32","32","32","64",tail};
+ int bad=partition(n,argc?argc:6,argc?argv:dynamic);
+ printf("WF_EXPAND\tunits=%d\tpartition=%s\n",n,bad?"REFUSE":"PASS");return bad;
+}
+/* Fail closed if the known production wiring changes; not arbitrary C analysis. */
+static int chain_check(const char *root){
+ char p[4400];size_t n;path(p,root,"tools/candidate-chain.cx");char *s=cx_read(p,&n);
+ int ok=s&&!memchr(s,0,n)
+  &&strstr(s,"const char *offs[3] = {\"0\", \"32\", \"64\"};")
+  &&strstr(s,"const char *cnts[3] = {\"32\", \"32\", 0};")
+  &&strstr(s,"if (i == 2) { wf_tail_count(p0, 64, tailc, sizeof tailc); cnts[2] = tailc; }")
+  &&strstr(s,"v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i];")
+  &&strstr(s,"v[n++] = (char *)\"64\"; v[n++] = tailc; v[n++] = 0;");
+ free(s);printf("%s\tchain-dynamic-tail-wiring\n",ok?"PASS":"FAIL");return !ok;
+}
+static int selftest(const char *root){
+ int failed=0;char p[4400],text[512];
+ /* 43 real root/module pairs expand to 86: the former 32+32+21 misses one. */
+ for(int i=0;i<43;i++){
+  if(cx_fmt(text,sizeof text,"r%d.cx",i))die("fixture name");path(paths[i],work,text);sources[i]=paths[i];
+  if(cx_fmt(text,sizeof text,"#pragma unisa use m%d\nint root%d(void){return value%d();}\n",i,i,i))die("fixture root");store(paths[i],text);
+  char leaf[32];if(cx_fmt(leaf,sizeof leaf,"m%d.cx",i))die("fixture name");path(p,work,leaf);
+  if(cx_fmt(text,sizeof text,"#pragma unisa module m%d\nint value%d(void){return %d;}\n",i,i,i))die("fixture module");store(p,text);
+ }
+ char *old[]={"0","32","32","32","64","21"};
+ int rc=evaluate(43,0,0);printf("%s\tdynamic-86\n",rc?"FAIL":"PASS");failed+=rc!=0;
+ rc=evaluate(43,6,old);printf("%s\tfixed-85-refused\n",rc?"PASS":"FAIL");failed+=rc==0;
+ /* Copy actual modelcache source twice with distinct module identities. This
+  * exercises real mc_candidate declarations, not a diagnostic substring stub. */
+ size_t z;path(p,root,"cx/runtime/modelcache.cx");char *body=cx_read(p,&z);if(!body)die("modelcache fixture source");
+ char *start=body;
+ for(int i=0;i<2;i++){char leaf[32];if(cx_fmt(leaf,sizeof leaf,"dup%d.cx",i))die("fixture name");path(paths[i],work,leaf);sources[i]=paths[i];
+  char *copy=malloc(z+80);if(!copy)die("fixture allocation");int k=snprintf(copy,z+80,"#pragma unisa module dup%d\n%s",i,start);if(k<0||(size_t)k>=z+80)die("fixture bound");store(paths[i],copy);free(copy);
+ }
+ free(body);
+ /* The same package directories, reached through private relative mappings. */
+ const char *packages[]={"sys","mem","text"};
+ for(int i=0;i<3;i++){char target[4400],leaf[128];if(cx_fmt(leaf,sizeof leaf,"cx/%s",packages[i]))die("package path");path(target,root,leaf);path(p,work,packages[i]);if(symlink(target,p))die("fixture package link");}
+ path(p,work,"cxroot.tsv");store(p,"CXROOT1\nR\tsys\tsys\nR\tmem\tmem\nR\ttext\ttext\n");
+ path(paths[2],work,"collision.cx");store(paths[2],"#pragma unisa use dup0\n#pragma unisa use dup1\nint collision_root(void){return 0;}\n");sources[0]=paths[2];
+ cx0_result r=cx0_plan(0,sources,1,0,0,work);int ok=r.status==1&&r.diagnostic&&strstr(r.diagnostic,"mc_candidate");
+ printf("%s\treal-mc_candidate-duplicate-refused\n%s",ok?"PASS":"FAIL",r.diagnostic?r.diagnostic:"");failed+=!ok;cx0_release(&r);
+ printf("CHECK_WHOLE_FRONT_EXPAND\tfailed=%d\n",failed);return failed?1:0;
+}
+int main(int argc,char **argv){
+ char root[4400];if(argc<3||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("usage ROOT NEW_OUT [--selftest | --partition FIRST COUNT ...]");
+ if(cx_fmt(work,sizeof work,"%s",argv[2])||mkdir(work,0700))die("exclusive NEW_OUT");
+ if(argc==4&&!strcmp(argv[3],"--selftest"))return selftest(root);
+ if(argc>3&&(strcmp(argv[3],"--partition")||argc<6))die("partition arguments");
+ int wiring=chain_check(root);int nr=roots(root),rc=evaluate(nr,argc>3?argc-4:0,argc>3?argv+4:0)||wiring;printf("CHECK_WHOLE_FRONT_EXPAND\tfailed=%d\n",rc);return rc;
+}
