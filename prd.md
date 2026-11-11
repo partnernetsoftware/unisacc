@@ -231,6 +231,17 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | libc99posix 缺口扫描 | `sh ./unisacc.com tools/libc99posix-audit.cx`；校验 `tools/check-libc99posix-audit.cx` | 扫 include/*.h 的 static 函数名对照契约表；GAP 按头文件；UCRT? 为下划线导出候选(未读 PE) |
 | 未初始化局部扫描 | `sh ./unisacc.com tools/uninit-scan.cx [-- FILE...]`；校验 `tools/check-uninit-scan.cx` | 流敏感 UNINIT/SUSPECT；正例 `int n=0, owner;`（e91eb31bcf^ kernel.cx）；第一版清单不进棘轮 |
 | 改表验证闭环（A12） | `sh ./unisacc.com tools/a12-cycle.cx -- [--dry-run] [--only STEP] [--build B] [--flags F] [--src C [--reject]] [--neg43 EXE]` | gen -> tbl -> net -> UNINETB1(bin) -> e2/e1/sim 探针 -> decide CTX/RTC -> check-decide -> ratchets -> 冻结43例；G=B/tools 由 main 构造，缺则具名 MISSING；每步 `STEP name rc s receipt`，首败即停；UNISACC_WAVE_REUSE=1 仅子进程；检查 tools/check-a12-cycle.cx（批次 a12-cycle） |
+| 0.0.55 新工具:链相位表生成 | `sh ./unisacc.com tools/chain-phases-gen.cx -- --check\|--write`；校验 `tools/check-chain-phases-gen.cx` | 由事实生成 build/ 链相位元数据(编排相位不进模型事实),`--check` 比规范字节 |
+| 0.0.55 新工具:R2 无界调用改有界 | `sh ./unisacc.com tools/r2-bound.cx -- FILE LINE [LINE...]`；校验 `tools/check-r2-bound.cx` | 把指定行无界 sy_run/cx_run/sy_spawn_pipe 改写为 50s 有界并按需补帮手;R2 全仓清理用 |
+| 0.0.55 新工具:相位测量 | `sh ./unisacc.com tools/cx-phase.cx -- OUTDIR [--case u1\|u2\|u6\|u12] [--parse FILE]`；校验 `tools/check-cx-phase.cx` | 跑 1/2/6/12 单元用例,读 UNISACC_RR_TIME,按 stage 汇总冷/半冷/热 |
+| 0.0.55 新工具:pins 锚迁移 | `sh ./unisacc.com tools/pins-reanchor.cx [--root DIR] [--apply]`；校验 `tools/check-pins-reanchor.cx` | 把 tools/pins.tsv 的 FILE:LINE 迁为 FILE#内容锚,默认只报告 |
+| 0.0.55 新工具:棘轮未声明读审计 | `sh ./unisacc.com tools/ratchet-read-audit.cx -- --check [ROOT]`；校验 `tools/check-ratchet-read-audit.cx` | 对十三个棘轮各跑两次 `--check`,找出未声明的读取 |
+| 0.0.55 新工具:链批量键校验 | `sh ./unisacc.com tools/check-chain-batchkeys.cx` | 核 chain-step 批量键(fixedpoint `--objects K1,K2,...`)与单键 `--object` 同一路径 |
+| 0.0.55 chain-step 批量对象 | `sh ./unisacc.com tools/chain-step.cx -- fixedpoint ... --objects K1,K2,...` | 按序对每键走与单键 `--object` 同一 cs_fixedpoint,一次启动多键 |
+| 0.0.55 entry-build 收据头 | `sh ./unisacc.com tools/entry-build.cx ...` | receipt.txt 头只写一次:既有头与本次逐字相同不重写,可续跑 |
+| 0.0.55 integrate-patch prepare 续跑 | `sh ./unisacc.com tools/integrate-patch.cx prepare ...`（中断后同命令重跑） | tree 冻结后每个工具编译完记 .git/integrate/prepare-do,续跑跳过已完成项;`--land CLONE` 落提交 |
+| 0.0.55 s9-nightly 续跑 | `sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit\|daily --resume`（在途,未入 main,以 s9-nightly-fake 夹具与 check-s9-nightly 为准,落地后核实） | 夜跑中断后按已完成批次续跑 |
+| 0.0.55 selfcheck / slot | 未作为独立 tools 落地:selfcheck 为 D1 的 tests/*.cx 棘轮接口调整;slot 未见于 v0.0.54..main | 勿当现成工具调用 |
 
 
 
