@@ -312,6 +312,15 @@ static void check_anchors(void) {
         if (!exc_used[j]) fail_line("LINE_EXCEPTION_STALE", exc_key[j], 0, "-", "no matching line-anchor row");
 }
 
+static char **selected_paths;
+static int selected_count;
+/* 目标校验只缩到显式改动的声明源或target；表结构、权威count和锚政策仍全局。 */
+static int row_affected(const char *source,const char *target){
+ if(!selected_paths)return 1;
+ size_t n=strcspn(source,"#:");
+ for(int k=0;k<selected_count;k++)if(!strcmp(target,selected_paths[k])||(strlen(selected_paths[k])==n&&!strncmp(source,selected_paths[k],n)))return 1;
+ return 0;
+}
 static void verify_rows(void) {
     int i;
     load_exceptions();
@@ -329,6 +338,7 @@ static void verify_rows(void) {
         }
         if (!strcmp(status, "known-broken")) { known_line(path, line, target, "explicit audit exception"); continue; }
         if (!strcmp(kind, "literal") || !strcmp(kind, "epoch")) continue;
+        if ((!strcmp(kind,"pin") || !strcmp(kind,"path") || !strcmp(kind,"host-dep")) && !row_affected(path,target)) continue;
         if (!strcmp(kind, "pin")) {
             char full[4600], *b;
             size_t n = 0;
@@ -373,15 +383,28 @@ static void verify_rows(void) {
 }
 
 int main(int argc, char **argv) {
-    int i;
+    int i, first = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc) copy(g_root, sizeof g_root, argv[++i]);
+        else if (!strcmp(argv[i], "--files") && i + 1 < argc) { first = i + 1; break; }
         else { fprintf(stderr, "check-pins: unknown argument %s\n", argv[i]); return 2; }
     }
+    if (first) for (i = first; i < argc; i++)
+        if (!strcmp(argv[i],"tools/pins.tsv") || !strcmp(argv[i],"tools/pins-line-exceptions.tsv") || !strcmp(argv[i],"tools/check-pins.cx")) { first = 0; break; }
     if (load_rows()) { fprintf(stderr, "check-pins: cannot read tools/pins.tsv\n"); return 2; }
     if (parse_authority()) { fprintf(stderr, "check-pins: cannot read authoritative counts\n"); return 2; }
-    scan_dir("tools");
-    scan_dir("tools/cxlib");
+    if(first){selected_paths=argv+first;selected_count=argc-first;}
+    /* 删除及改名按声明源和target两端关联；无参数入口继续完整核验。 */
+    if (first) {
+        for (i = first; i < argc; i++) {
+            const char *p = argv[i]; size_t n = strlen(p); sy_stat_t st; char full[4600];
+            if (strncmp(p,"tools/",6) || n < 3 || strcmp(p+n-3,".cx")) continue;
+            if (join_path(full,sizeof full,p)) return 2;
+            if (sy_lstat(full,&st)) { if (sy_exists(full)==0) continue; return 2; }
+            if (st.kind!='f') { fail_line("READ",p,0,"-","not-regular"); continue; }
+            scan_file(p);
+        }
+    } else { scan_dir("tools"); scan_dir("tools/cxlib"); }
     verify_rows();
     printf("CHECK_PINS\tpins=%d\tfailed=%d\tstale=%d\thostdep=%d\n", npins, failed, stale, hostdep);
     return failed ? 1 : 0;
