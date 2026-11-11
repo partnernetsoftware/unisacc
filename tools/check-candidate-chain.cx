@@ -278,6 +278,22 @@ int main(void) {
         if (cx_fmt(generator, sizeof generator, "%s/tools/chain-phases-gen.cx", cwd) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check 2>&1", com, generator)) { ck(0, "phase-generator-path"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CHAIN_PHASES\tstatus=CHECK"), "phase-generated-table-current");
     }
+    {   /* 引导安装:同内容不重写(inode/mtime 不变),异内容重写,无残留临时文件 */
+        char td[500], src[600], dst[600], tmpf[700], cmd[2400], a[200], b[200], c[200];
+        if (cx_fmt(td, sizeof td, "%s/cc-inst-XXXXXX", sy_tmpdir()) || !mkdtemp(td)
+            || cx_fmt(src, sizeof src, "%s/src", td) || cx_fmt(dst, sizeof dst, "%s/dst", td)
+            || cx_fmt(tmpf, sizeof tmpf, "%s.tmp-install", dst)) { ck(0, "install-tmp"); return 1; }
+        if (cx_write(src, "boot-A\n", 7)) { ck(0, "install-fixture"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --install-file '%s' '%s' 2>&1 && stat -c '%%i %%Y' '%s'", com, tool, src, dst, dst)) { ck(0, "fmt"); return 1; }
+        ck(sh(cmd, a, sizeof a) == 0 && has(a, "INSTALL_FILE_OK"), "install-first");
+        sh("sleep 1.1", 0, 0);
+        ck(sh(cmd, b, sizeof b) == 0 && tx_find(a, tx_len(a, 200), "\n", 1) >= 0 && tx_find(b, tx_len(b, 200), a + tx_find(a, tx_len(a, 200), "\n", 1) + 1, tx_len(a, 200) - tx_find(a, tx_len(a, 200), "\n", 1) - 1) >= 0, "install-same-sha-no-rewrite");
+        if (cx_write(src, "boot-B\n", 7)) { ck(0, "install-fixture2"); return 1; }
+        ck(sh(cmd, c, sizeof c) == 0 && !has(c, a + tx_find(a, tx_len(a, 200), "\n", 1) + 1), "install-changed-rewritten");
+        { size_t dn = 0; char *d = cx_read(dst, &dn); ck(d && dn == 7 && !memcmp(d, "boot-B\n", 7), "install-new-content"); free(d); }
+        { sy_stat_t st; ck(sy_stat(tmpf, &st) != 0, "install-no-temp-residue"); }
+        cx_rmtree(td);
+    }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

@@ -31,6 +31,21 @@ static long fsize(const char *p) {
     if (sy_stat(p, &st)) return -1;
     return st.size;
 }
+/* Install bytes at dst: identical content (same length and bytes) is left untouched so inode/mtime
+   stay put; otherwise write a sibling temp name and rename over dst atomically. Returns 0 or -1. */
+static int install_if_changed(const char *dst, const char *bytes, size_t n, int mode) {
+    size_t on = 0;
+    char *old = cx_read(dst, &on);
+    char tmp[4500];
+    int same = old && on == n && !memcmp(old, bytes, n);
+    free(old);
+    if (same) return 0;
+    if (cx_fmt(tmp, sizeof tmp, "%s.tmp-install", dst)) return -1;
+    if (cx_write(tmp, bytes, n)) { sy_unlink(tmp); return -1; }
+    if (mode) sy_chmod(tmp, mode);
+    if (sy_rename(tmp, dst)) { sy_unlink(tmp); return -1; }
+    return 0;
+}
 /* Child exit as the old cx_runv_timeout callers read it: the code, 128+signal, or 124 on a timeout
    (now also named on stderr by cxlib.procrun). stdout and stderr are echoed after the child ends. */
 static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
@@ -1142,6 +1157,15 @@ int main(int argc, char **argv) {
             sy_printf("WF_PREP_G2_TEMPLATE_OK\t%s\n", argv[i + 1]);
             return 0;
         }
+        if (tx_eqz(argv[i], "--install-file") && i + 2 < argc) {
+            /* 夹具:对 install_if_changed 的独立入口(同内容不重写、异内容原子替换) */
+            size_t fn = 0;
+            char *fb = cx_read(argv[i + 1], &fn);
+            if (!fb || install_if_changed(argv[i + 2], fb, fn, 0755)) { free(fb); die("install-file", argv[i + 2]); }
+            free(fb);
+            sy_printf("INSTALL_FILE_OK\t%s\n", argv[i + 2]);
+            return 0;
+        }
         if (tx_eqz(argv[i], "--verify-snap") && i + 2 < argc) { vs_dir = argv[++i]; vs_rev = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--identity-helper") && i + 1 < argc) { idhelp = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--rev") && i + 1 < argc) { rev = argv[++i]; continue; }
@@ -1243,15 +1267,14 @@ int main(int argc, char **argv) {
         char *bb;
         if (cx_fmt(dst, sizeof dst, "%s/Root41-bootstrap.com", build)) die("path", "boot");
         bb = cx_read(boot, &bn);
-        if (!bb || cx_write(dst, bb, bn)) { free(bb); die("install bootstrap", dst); }
+        if (!bb || install_if_changed(dst, bb, bn, 0755)) { free(bb); die("install bootstrap", dst); }
         free(bb);
-        sy_chmod(dst, 0755);
         /* The epoch record travels with the product: ctx records its sha (bootstrap-build-record-sha)
            and source-wave refuses a list whose record changed, so install it before ctx, not after. */
         {   char srec[4400], drec[4400];
             if (cx_fmt(srec, sizeof srec, "%s.build.json", boot) || cx_fmt(drec, sizeof drec, "%s.build.json", dst)) die("path", "boot-record");
             bb = cx_read(srec, &bn);
-            if (!bb || cx_write(drec, bb, bn)) { free(bb); die("install bootstrap record", drec); }
+            if (!bb || install_if_changed(drec, bb, bn, 0)) { free(bb); die("install bootstrap record", drec); }
             free(bb);
         }
         sy_printf("BOOTSTRAP\t%s\n", dst);
