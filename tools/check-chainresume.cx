@@ -1,0 +1,52 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use sys.time
+static const char *OD="out";
+static int run(char **v){return cx_runv_timeout(v,12,0,0);}
+int main(int ac,char **av){
+ if(ac!=4)return 2;
+ char root[4400];if(sy_realpath(".",root,sizeof root)<0)return 2;
+ char dir[4400];cx_fmt(dir,sizeof dir,"%s/%s/c57-fixture-%ld",root,OD,sy_now_ms());if(sy_mkdir(dir,0755)||sy_chdir(dir))return 2;
+ char *init[]={"git","init","-q",0};if(run(init))return 2;
+ cx_write("a","a",1);cx_write("unisacc.com","fixture",7);cx_write("unisacc.com.build.json","{}",2);
+ char *add[]={"git","add","a",0};if(run(add))return 2;
+ char *commit[]={"git","-c","user.name=fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};if(run(commit))return 2;
+ char *revv[]={"git","rev-parse","HEAD",0},*text=0;size_t n=0;if(cx_runv_timeout(revv,5,&text,&n)||n!=41)return 2;text[40]=0;
+ sy_mkdir("out",0755);char stage[4400],owner[4400],id[9000],h[65];
+ cx_fmt(stage,sizeof stage,"%s/release-snap-%.10s.partial",OD,text);cx_fmt(owner,sizeof owner,"%s.owner",stage);sy_sha256_hex("{}",2,h);
+ char lh[65];sy_sha256_hex("fixture",7,lh);
+ cx_fmt(id,sizeof id,"chain-snap-v1\nroot=%s\nrev=%s\nproduct=%s\n%s\n",dir,text,h,lh);cx_write(owner,id,strlen(id));sy_mkdir(stage,0755);
+ char *step[]={av[1],"snap",text,"out",0};
+ cx_write(owner,"other-owner",11);if(!run(step)||!sy_exists(stage))return 1;
+ printf("PASS\tsnap-other-owner-kept\n");cx_write(owner,id,strlen(id));
+ char *output=0;size_t on=0;int rc=cx_runv_timeout(step,12,&output,&on);
+ if(rc || !output || !strstr(output,"snap-kill-resume-cleaned") || sy_exists(stage))return 1;
+ free(output);
+ printf("PASS\tsnap-kill-resume-cleaned\n");
+ if(run(step))return 1;printf("PASS\tsnap-complete-reused\n");
+ char product[4400];cx_fmt(product,sizeof product,"%s/release-snap-%.10s/unisacc.com",OD,text);cx_write(product,"tampered",8);
+ if(!run(step))return 1;printf("PASS\tsnap-complete-product-mismatch-refused\n");
+ cx_write(product,"fixture",7);
+ char marker[4400];cx_fmt(marker,sizeof marker,"%s/release-snap-%.10s/.release-rev",OD,text);cx_write(marker,"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",40);
+ if(run(step)==0)return 1;printf("PASS\tsnap-different-rev-refused\n");
+ char *runner[]={av[2],"--rev",text,"--out",dir,0};if(run(runner)==0)return 1;printf("PASS\tchain-outside-refused\n");
+ if(sy_chdir(root))return 2;
+ char fake[4400],ctx[4400],build[4400],out[4400],p[4400],script[18000];
+ cx_fmt(fake,sizeof fake,"%s/fake",dir);cx_fmt(ctx,sizeof ctx,"%s/ctx",dir);cx_fmt(build,sizeof build,"%s/build",dir);cx_fmt(out,sizeof out,"%s/jobs",dir);
+ sy_mkdir(fake,0755);sy_mkdir(ctx,0755);sy_mkdir(build,0755);sy_mkdir(out,0755);
+ cx_fmt(p,sizeof p,"%s/outer",build);sy_mkdir(p,0755);
+ cx_fmt(p,sizeof p,"%s/outer/list.stdout",build);cx_write(p,"tool-a\tx\ntool-b\tx\ntool-c\tx\ntool-d\tx\ntool-e\tx\n",45);
+ cx_fmt(script,sizeof script,"#!/bin/sh\nfor a do last=$a; done\nprintf '%%s\\n' \"$last\" >> '%s/trace'\ncase $last in start-job) printf identity > '%s/prepared';; finish-job) test \"$(cat '%s/prepared')\" = identity || exit 37;; *) exit 38;; esac\n",dir,dir,dir);
+ cx_fmt(p,sizeof p,"%s/unisacc.com",fake);cx_write(p,script,strlen(script));
+ char *job[]={av[3],"--jobs",fake,ctx,build,"tool","--job-index","0","--out",out,"--resume","--until","jobs-tool-0-start",0};
+ if(run(job))return 1;
+ cx_fmt(p,sizeof p,"%s/prepared",dir);cx_write(p,"changed",7);job[12]="jobs-tool-0-finish";
+ if(!run(job))return 1;printf("PASS\tuntil-finish-identity-change-refused\n");
+ cx_write(p,"identity",8);if(run(job))return 1;
+ cx_fmt(p,sizeof p,"%s/trace",dir);size_t tn=0;char *trace=cx_read(p,&tn),*first=trace?strstr(trace,"start-job\n"):0;
+ if(!first||strstr(first+1,"start-job\n")||!strstr(trace,"finish-job\n"))return 1;
+ printf("PASS\tuntil-start-once-finish-keeps-output\n");printf("CHECK_CHAINRESUME\tfailed=0\n");free(trace);return 0;
+}

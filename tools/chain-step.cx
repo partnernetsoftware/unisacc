@@ -42,6 +42,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use sys.posix
 
 static const char *g_self;
 static int cs_fp_active;
@@ -428,18 +429,83 @@ static int cs_snap(const char *rev, const char *out) {
     for (i = 0; i < 10; i++) brief[i] = full[i];
     brief[10] = 0;
     if (cx_fmt(dir, sizeof dir, "%s/release-snap-%s", out, brief)) cs_die("path", out);
+    char stage[4400], owner[4400], lock[4400], root[4400], identity[9000], hash[65];
+    if (sy_realpath(".", root, sizeof root) < 0 || strcmp(out, "out")) cs_die("snap requires repository out", out);
+    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) cs_die("mkdir", out);
+    if (cx_fmt(stage,sizeof stage,"%s.partial",dir) || cx_fmt(owner,sizeof owner,"%s.owner",stage) || cx_fmt(lock,sizeof lock,"%s.lock",stage)) cs_die("path",dir);
+    int lockfd=sy_open(lock,O_RDWR|O_CREAT,0600);
+    if(lockfd<0 || sy_flock(lockfd,2|4)) cs_die("snapshot live owner",dir);
+    struct stat st;
+    if(!lstat(stage,&st) && !S_ISDIR(st.st_mode)) cs_die("partial is not a real directory",stage);
+    if(!lstat(dir,&st) && !S_ISDIR(st.st_mode)) cs_die("snapshot is not a real directory",dir);
+    cs_sha("unisacc.com.build.json",hash);
+    if(cx_fmt(identity,sizeof identity,"chain-snap-v1\nroot=%s\nrev=%s\nproduct=%s\n",root,full,hash)) cs_die("identity",dir);
+    char launcher_hash[65]; cs_sha("unisacc.com",launcher_hash);
+    long identity_at=strlen(identity);
+    cs_puts(identity,sizeof identity,&identity_at,launcher_hash);
+    cs_puts(identity,sizeof identity,&identity_at,"\n");
     if (cx_fmt(mark, sizeof mark, "%s/.release-rev", dir)) cs_die("path", dir);
-    if (sy_exists(mark)) {
-        sy_printf("CHAIN\tsnap\treused=%s\trev=%.10s\n", dir, full);
-        return 0;
+    char *old=cs_load(mark,&n);
+    if(old) {
+        if(n!=40 || memcmp(old,full,40)) cs_die("snapshot revision mismatch",dir);
+        free(old);
+        char receipt[4400],actual[65],product[4400];
+        if(cx_fmt(receipt,sizeof receipt,"%s/.chain-snap",dir)) cs_die("path",dir);
+        old=cs_load(receipt,&n);
+        if(!old || n!=(long)strlen(identity) || memcmp(old,identity,n)) cs_die("snapshot identity mismatch or legacy format; quarantine explicitly",dir);
+        free(old);
+        if(cx_fmt(product,sizeof product,"%s/unisacc.com",dir)) cs_die("path",dir);
+        cs_sha(product,actual);if(strcmp(actual,launcher_hash))cs_die("snapshot launcher mismatch",dir);
+        if(cx_fmt(product,sizeof product,"%s/unisacc.com.build.json",dir)) cs_die("path",dir);
+        cs_sha(product,actual);if(strcmp(actual,hash))cs_die("snapshot build record mismatch",dir);
+        sy_close(lockfd);
+        sy_printf("CHAIN\tsnap\treused=%s\trev=%.10s\n",dir,full); return 0;
     }
-    if (sy_exists(dir)) cs_die("snapshot exists without a matching rev marker", dir);
-    {
-        char *v[9];
-        v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = "tools/release-build.cx"; v[3] = "--";
-        v[4] = "--rev"; v[5] = full; v[6] = "freeze"; v[7] = "."; v[8] = 0;
-        if (cs_run(v, ".")) cs_die("release-build freeze", dir);
+    if(sy_exists(dir)) cs_die("unowned snapshot requires explicit quarantine",dir);
+    old=cs_load(owner,&n);
+    if(old && (n!=(long)strlen(identity)||memcmp(old,identity,n))) cs_die("partial snapshot identity mismatch",stage);
+    if(!old && sy_exists(stage)) cs_die("unowned partial snapshot",stage);
+    free(old);
+    cs_save(owner,identity,strlen(identity));
+    if(cx_fmt(mark,sizeof mark,"%s/.release-rev",stage)) cs_die("path",stage);
+    old=cs_load(mark,&n);
+    if(old && (n!=40||memcmp(old,full,40))) cs_die("partial revision mismatch",stage);
+    if(!old) {
+        if(sy_exists(stage)) {
+            if(cx_rmtree(stage)) cs_die("partial cleanup",stage);
+            sy_printf("CLEANUP\tsnap-kill-resume-cleaned\t%s\n",stage);
+        }
+        if(sy_mkdir(stage,0755)) cs_die("mkdir",stage);
+        char archive[4400]; if(cx_fmt(archive,sizeof archive,"%s.archive",stage)) cs_die("path",stage);
+        char *av[]={"git","archive","--format=tar","-o",archive,full,0};
+        if(cs_run(av,".")) cs_die("archive",stage);
+        char *tv[]={"tar","-xf",archive,"-C",stage,0};
+        if(cs_run(tv,".")) cs_die("extract",stage);
+        if(sy_unlink(archive)) cs_die("archive unlink",archive);
+        cs_save(mark,full,40);
     }
+    free(old);
+    /* No second cold compilation of release-build inside the 55-second snap child. */
+    char *cp[]={"cp","-a","unisacc.com","unisacc.com.build.json",stage,0};
+    if(cs_run(cp,".")) cs_die("copy product",stage);
+    if(sy_exists("unisacc.com.dev")) {
+        char devdest[4400];
+        if(cx_fmt(devdest,sizeof devdest,"%s/unisacc.com.dev",stage)) cs_die("path",stage);
+        if(sy_exists(devdest) && cx_rmtree(devdest)) cs_die("partial product cleanup",devdest);
+        char *dev[]={"cp","-a","unisacc.com.dev",stage,0};
+        if(cs_run(dev,".")) cs_die("copy split product",stage);
+    }
+    char copied[4400],copied_hash[65];
+    if(cx_fmt(copied,sizeof copied,"%s/unisacc.com",stage)) cs_die("path",stage);
+    cs_sha(copied,copied_hash);if(strcmp(copied_hash,launcher_hash))cs_die("copied launcher identity changed",stage);
+    if(cx_fmt(copied,sizeof copied,"%s/unisacc.com.build.json",stage)) cs_die("path",stage);
+    cs_sha(copied,copied_hash);if(strcmp(copied_hash,hash))cs_die("copied record identity changed",stage);
+    char receipt[4400];
+    if(cx_fmt(receipt,sizeof receipt,"%s/.chain-snap",stage)) cs_die("path",stage);
+    cs_save(receipt,identity,strlen(identity));
+    if(sy_rename(stage,dir)) cs_die("publish snapshot",dir);
+    if(sy_unlink(owner)) cs_die("owner unlink",owner);
+    sy_close(lockfd);
     sy_printf("CHAIN\tsnap\tfile=%s\trev=%.10s\n", dir, full);
     return 0;
 }

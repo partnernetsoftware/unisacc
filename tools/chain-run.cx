@@ -199,6 +199,21 @@ int main(int argc,char **argv) {
         if(pkg[0]!='/'||sy_stat(pkg,&st)||st.size<=0) die("rehearse pkg missing or not absolute");
     }
     for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")) die("reserved candidate option");
+    char safe_root[4400],safe_out[4400],safe_parent[4400];
+    if(sy_realpath(".",safe_root,sizeof safe_root)<0 || cx_fmt(safe_parent,sizeof safe_parent,"%s/out/",safe_root)) die("output root");
+    if(sy_exists("out")) {
+        char out_root[4400],expected_root[4400];
+        if(cx_fmt(expected_root,sizeof expected_root,"%s/out",safe_root) || sy_realpath("out",out_root,sizeof out_root)<0 || strcmp(out_root,expected_root)) die("repository out root must not redirect cleanup");
+    }
+    if(strncmp(out,safe_parent,strlen(safe_parent)) || strstr(out,"/../") || strstr(out,"/./") || strstr(out,"//") || !out[strlen(safe_parent)]) die("--out must be strictly under repository out (cleanup safety)");
+    /* Existing symlink ancestors must not redirect cleanup outside that root. */
+    if(cx_fmt(safe_out,sizeof safe_out,"%s",out)) die("output bound");
+    for(char *q=safe_out+strlen(safe_parent);;q++) if(*q=='/'||!*q) {
+        char c=*q; *q=0;
+        char resolved[4400];
+        if(sy_exists(safe_out) && (sy_realpath(safe_out,resolved,sizeof resolved)<0 || strncmp(resolved,safe_parent,strlen(safe_parent)))) die("output symlink outside repository out");
+        *q=c; if(!c) break;
+    }
     sy_mkdir(out,0755);
     char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");

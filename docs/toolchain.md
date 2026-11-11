@@ -111,3 +111,32 @@ ELF 头 (64)
 - **符号与重定位**：文件头按符号表顺序列出 `.local`/`.globl`，`as` 按出现顺序重建同一张表。数据与 bss 的引用写成 `.Ldata+N`/`.Lbss+N`，分支目标写成 `.L<十六进制偏移>`；`.L` 名字不进符号表。跨单元调用写成 `call name@PLT` / `bl name`。
 - **验收（门禁 `asmtext`）**：① 语料两个目标全量往返逐字节相同，且没有指令以字节形式打印；② `-funit` 单元目标（带 `.unisa.tape`）往返，重汇编的目标链接出同一个程序；③ 系统汇编器（clang 的 Linux 三元组）接受 `-S` 文本，`.text`、重定位、`.data` 与原目标相同；④ 手写 `tests/asm/hand-*.s`，`unisacc as` 与系统汇编器在 `.text`、`.data`、重定位上一致；⑤ 子集外指令、`-S -b osx`、`as -b osx` 都按名拒绝，失败不留文件。
 - **0.0.19（首次顺延）**：Mach-O 与 COFF 的汇编文本，Intel 语法，内联 `asm`。
+
+## 0.0.57 链恢复补丁合同
+
+- 原补丁基线为 `60acc817b86b0605016f38604ec0dbea5fac4d8d`；本次重基到 `67fb47417b7c053217a1aa1d307eb9ab9a5bef9b`，保留 A2p 动态分片、chainfacts 及全部既有断言。唯一源码冲突为 chain-step 的 use 追加，保留 chainfacts 与 sys.posix 两者。现场 MANUAL.tsv、chain-run.tsv、chain-run-16.stderr 只读，不重跑失败确认。55 秒上限不改。
+- snap 不再嵌套冷编 release-build：直接 git archive 到有 root/rev/product 身份侧收据的 `.partial`，持有 flock；只清理本身份未完成归档。完整 marker 必须精确匹配40位rev；旧无owner半成品具名拒绝，须操作者隔离，不猜测归属。归档完成后可接续产品拷贝，最后 rename 发布。它不自动接管旧现场半成品。
+- chain-run 在创建预算/锁/执行子进程之前拒绝 repo/out 之外的 OUT 和越界软链，不改 cx_rmtree 全局白名单。
+- 基线 wave_phase 只在尚无 start 检查点时清理该作业，跳过 start 时不清理；finish 继续由 controller 校验身份，最终 canonical union 仍重新验证。不得以 checkpoint 缓存资格结论。
+- 最窄原生candidate夹具按`--jobs ... tool --job-index 0 --resume --until jobs-tool-0-start`后单独`--until jobs-tool-0-finish`执行；trace实测start只一次，篡改start产物身份时finish非零，恢复身份后finish通过。60acc基线这条调用路径未发生清掉start重做，因此不额外修改candidate-chain现有清理逻辑；现场失败由仓外OUT前置拒绝避免。
+
+- build 54993ms 是 controller `-O2 source-package.cx` 实编，ctx 51123ms 还会默认冷编同一 source-package 后执行 prepare-context。建议下一集成窗口将 ctx 调用改为已编 controller 的 prepare-context，保持 argv/root/保存bootstrap身份；这需要 controller 行为等价夹具，不在本补丁偷偷改产品构造。build 自身若仍贴界，应拆 controller 前端/对象/链接并保存输入身份收据，禁止55秒无进展盲重试。当前未测各冷编子段，不宣称已获得余量。
+- 旧完整快照只有 `.release-rev`、没有新 `.chain-snap` 时安全拒绝复用，不删除、不写它；集成者可先保全目录再另建，不自动升级现场。新完整收据在发布rename之前原子写入，复用重验root/rev和launcher/build-json实际SHA；原子rename不等同断电fsync保证，半截marker一律拒绝，不当完成。
+- 具体拆分建议(未实测)：`B/source-package-O2.elf prepare-context S B/Root41-bootstrap.com CC CTX` 替换ctx二次源码启动；prepare收据绑定完整rev、S绝对root、bootstrap/controller/cc SHA和argv，完成后原子写入，续跑重验后接纳。build进一步可拆`controller-front`、`controller-objects`、`controller-link`，分别绑定源码闭包与前一相SHA；这些是待实现方案，不是本次已通过的构造路径。
+
+
+## 检查的原生准备与限时消费
+
+`cx-register`、`slice-freeze-tool`、`slice-inventory` 使用显式材料 `regprep-dir=ABS_OUT`，不在 `/tmp` 隐式造夹具。先在仓根分别执行 checker 的 `--prepare ABS_OUT`，再把对应目录交给 `tests/run-batch.cx ROOT ABS_OUT_PARENT ID regprep-dir=ABS_OUT`。三个 checker 分别是 `tools/check-register.cx`、`tests/check-slice-freeze.cx`、`tools/check-slice-inventory.cx`。目录不可混用，不能并发消费同一库存目录。
+
+准备复用既有 `cxlib.runnerprep` 内容身份原生映像；`chain-phases-gen` 沿 `cxlib.toolprep` 在断言前实编生成器。准备输出只记 `PREPARED ... no-test-result`，从不保存或读取 PASS。登记器自身在加锁前准备 `tests/run.cx` 与 `tests/run-batch.cx`，缓存位于当前私有根 `out/register-native`。55 秒批次与 affected 的54秒界均未调整。
+
+库存准备逐个实际编译11个非空 `-funit` 对象，证书绑定产品、每个源及每个真实对象的SHA和大小。消费重新核证书、真实闭包与对象字节，再执行原排序、标签和拒绝断言；同字节排序条件仍复制真实对象，不制造空片，不缓存结论。六个既有分批均保留，依次消费，根外路径负例最后运行。
+
+`tools/slice-inventory.cx` 的直接调用还须显式 `--out ABS_DIR --index-native ABS_BIN`。ABS_BIN由同根 `cxlib.runnerprep` 准备 `tools/symindex.cx`；每次盘点在ABS_DIR下新建索引并执行 `update --verify`，不复用索引结论。现有object-source-replay调用同步迁移，消费者原45秒deadline不变。
+
+
+SFT-FIX 根因是 `pp_copy_product` 在split成员复制前就写入build记录，缺entry/resource虽真实拒绝，却留下误导完成记录。现在先复制全部成员，核源与目标成员SHA，再发布记录；开始复制时撤去旧目标记录。该语义同时影响 release-build、integrate-patch 及使用该API的隔离夹具；缺entry、缺receipt成员两条断言仍原样执行。独立phasesgen补丁的准备意图按本基线必要部分迁入，不重复叠入过期事实计数上下文。
+
+REG-PREP 重基补丁独立基为 `67fb47417b7c053217a1aa1d307eb9ab9a5bef9b`。该基线已包含 A2p 的 `cxlib.chainfacts` 动态阶段计数、事实漂移负例及 phasesgen 独立预编译；重基保留这些实现与登记/调用参数，不再迁入旧475/485或按表行数反推预期的实现。原始基线日志仅作历史记录，不代表本基线执行结果。
+
