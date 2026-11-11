@@ -16,10 +16,10 @@
 | `SHA256SUMS` | 48a91c8fb79033cca00f6c147e663de84e168365c1a94fd0cfd16ae63708dd20 | 本地自校 6/6 OK,草稿读回 6/6 OK,读回七件 sha 与本地逐项相同 |
 | 其余资产 | pkg.bin 56efea53(与 0.0.55、0.0.56 同字节),slice-win-arm64 bc1c4e32,zip 8a16ed22 | 见 release/candidate.tsv |
 | 链产物 | 本版整链重建一轮,构造源 60acc817b8;链内 compare:objects=same count=86,kernels=same count=2,slices=same count=6,product=same | 三个阻塞、人工介入见下节;不是无人值守 |
-| s9 commit 档 | 公开时运行中:候选 APE c116a52f 加提交 X,04:09 prep,`--phase init` 219 秒 status=PREPARED,`--phase steps` 进行中;结果公开后另行追记,公开依据不含 s9 | 新的分相调用(init、steps 重复、aggregate 分 4 片)在真实会话上本版首次使用;s9 不在公开的关键路径上;不称 QUALIFIED |
+| s9 commit 档 | 公开时运行中,公开后(04:26 聚合)补记:候选 APE c116a52f 加提交 X,selected 154,PASS 150,FAIL 2,UNKNOWN 2,DEFERRED 0;qualification NOT_FULL(12 个 osx 批本机 NOT_APPLICABLE,含 osx-sentinel 六批)。FAIL 两批仍是 0.0.56 的那两批、同样的检查项:s9-nightly-run-pass(fake-run-pass、index-row)与 s9-nightly-run-fail(fail-run-fail、fail-index-report-not-dash);s9split 提交称已修,真实会话里没有转绿,原因未查明。UNKNOWN 两批是 55 秒看门狗超时:register-metadata-rollback 与 candidate-chain(后者在 0.0.56 的门内同样 killed-at-deadline);时限未放宽,不记 PASS,也未重跑。分相耗时:prep 23、init 219、steps 四次 174、202、173、14、aggregate(4 片加 merge 加一次读回)124 秒,每次调用都在 5 分钟内 | 新的分相调用(init、steps 重复、aggregate 分 4 片)在真实会话上本版首次使用;s9 不在公开的关键路径上;不称 QUALIFIED |
 | s9 release / daily 档 | 本版未跑 | 0.0.54 release 档首跑 15 批全域矩阵 OPEN 格 FAIL 未变 |
 | 原生 CI | 同候选运行 43094459755(检出提交 X 3d04b5eb06,ape_sha256 c116a52f,release_tag v0.0.57):QUALIFIED pass=42 fail=0 not_run=0 invalid=0,04:13 触发,04:16 结束。此前的首次运行 43093841811 为 FAIL pass=36 fail=1 not_run=0 invalid=5:原因是发布尾部在草稿里只传完 unisacc.com 就触发了 CI,fetch 作业早于 slice-win-arm64 上传,win/arm64 格报 `win/arm64 slice asset missing`;其余五个目标该次全过。七资产传齐后以同一提交、同一 APE sha、同一 tag 重新触发,得到上面的结论。两次运行的日志都留存(cc-work/rel057/ci-run1.log、ci-run.log) | 六目标原生单元格实跑;公开依据是第二次运行 |
-| release-decide | 七步 PASS(1 freeze-sid、2 construct、3 ape-pack、5 layout-check、6 draft-assets、7 ci-qualified、8 readback),步 4 s9 UNKNOWN;QUALIFIED 行为 NOT_QUALIFIED unknown=1 fail=0(公开时) | 八步原样输出存 cc-work/rel057/decide.txt |
+| release-decide | 七步 PASS(1 freeze-sid、2 construct、3 ape-pack、5 layout-check、6 draft-assets、7 ci-qualified、8 readback),步 4 s9 UNKNOWN;QUALIFIED 行为 NOT_QUALIFIED unknown=1 fail=0(公开时);s9 出结果后步 4 改记 FAIL,重裁输出存 cc-work/rel057/decide2.txt | 八步原样输出存 cc-work/rel057/decide.txt |
 | 六个按目标独立可执行片 | 本版未产出 | 候选表仍是七资产 |
 
 ## 行为变化(升级前请读)
@@ -85,6 +85,7 @@
 
 - 整版超 2 小时铁律:冻结 01:07:33 起链,04:07:04 才到 pack(约 180 分钟),公开在其后,整版约 3 个半小时。事先在 FREEZE-057 写的预计是 125 至 135 分钟,实际多出的约 55 分钟来自三个阻塞与 g2g3split 的逐键串行;整改任务 K9(chain-phases 依赖列与按目标并行)到期 0.0.58,登记在 agentwork/phase-times.tsv。
 - chain-run 真实链不可用(BLOCKER-1、BLOCKER-2),g2g3split 的批量键真实链不可用(BLOCKER-3),kill 后续跑在 snap 相与 g2 对象相都会留下工具自己拒绝的现场。三项都只有冻结克隆内的绕行或就地修复,main 上的正式修复未落。
+- s9 commit 档在公开时尚未出结果,公开不以 s9 为依据;公开后补记为 150/154,2 FAIL(两个夜跑入口自检批,与 0.0.56 相同,s9split 的修复在真实会话里未生效)加 2 UNKNOWN(55 秒超时),四批都未查明、未修、未重跑;release-decide 步 4 改记 FAIL,NOT_QUALIFIED unknown=0 fail=1。s9 克隆里 install-ape 重写了 plans/root-identity.md 的身份块,该克隆工作区与提交 X 相差这一份文档。
 - 既有红未在本版处理:slice-inventory 冷跑 killed-at-deadline(53.9s,干净 main 同样被杀,热跑 24.8s 通过;时限未放宽,不记 PASS);osx-sentinel 六个批次需要 osx/arm64 原生宿主,本机 RUN_REFUSED,只能由原生 CI 覆盖的部分覆盖。
 - 四个批次由 commit 档改 daily 档(release-exec、release-prepare、chain-facts、chain-partition),commit 档覆盖因此减少;release-exec、release-prepare、release-oneshot、release-run 批次因缺材料 DEFERRED,未实跑,不记 PASS。
 - 组 A2(factscount)提交说明里的 74 批汇总由作者与协调者提供,门内未逐项复核:32 PASS,34 项缺材料 NOT_RUN,6 项 osx 原生 RUN_REFUSED,slice-inventory 冷跑 TIMEOUT;该提交以 LAND_SKIP_OK 显式放行落地。
