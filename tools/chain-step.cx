@@ -870,6 +870,16 @@ static int cs_fp_accept_span(const char *s,const char *pkg,const char *ctor,cons
     for(i=0;i<cs_span_count;i++){if(cx_fmt(from,sizeof from,"%s/.span-%d-%d.ok",dir,target,i+1)||cx_fmt(to,sizeof to,"%s/adopt-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);if(cx_fmt(from,sizeof from,"%s.control/ready.tsv",cs_span_dirs[i])||cx_fmt(to,sizeof to,"%s/span-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);}
     return 1;
 }
+/* Closure keys are emitted by entry-build --closure-list. Keep every write
+   inside the normal fixedpoint receipt boundary; never inject into its tree. */
+static int cs_fp_closure_key(const char *object) {
+    long k = 1;
+    if (!object || object[0] != 'm' || object[1] < '0' || object[1] > '9') return 0;
+    if (object[1] == '0' && object[2] != '.') cs_die("REFUSE closure object key", object);
+    while (object[k] >= '0' && object[k] <= '9') k++;
+    if (object[k] != '.' || object[k + 1] != 'o' || object[k + 2]) cs_die("REFUSE closure object key", object);
+    return 1;
+}
 /* Resume receipts are material provenance, never a cached comparison/PASS. */
 static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const char *gen1, const char *out,
                          const char *target, const char *phase, int resume, const char *object, int link) {
@@ -887,6 +897,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     /* linux 全片 slice 写 phase-N.tsv/.chain-steps; --object/--link-only 仍是分波. */
     if ((object || link) && (selected < 0 || selected >= 2 || (object && link))) cs_die("REFUSE object options", target);
     if (object) { long k; for (k = 0; object[k]; k++) if (!(object[k] == '.' || object[k] == '_' || (object[k] >= 'a' && object[k] <= 'z') || (object[k] >= '0' && object[k] <= '9'))) cs_die("REFUSE object key", object); }
+    int closure = cs_fp_closure_key(object);
     if (strlen(rev) != 40) cs_die("REFUSE full revision required", rev);
     for (i = 0; i < 40; i++) if (!((rev[i] >= '0' && rev[i] <= '9') || (rev[i] >= 'a' && rev[i] <= 'f'))) cs_die("REFUSE revision", rev);
     {
@@ -951,7 +962,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
             }
             else {
                 char *a[8] = {(char *)pkg, sub, "--target", (char *)cs_fp_targets[i], 0}; int an = 4;
-                if (object) { a[an++] = "--only"; a[an++] = (char *)object; }
+                if (object) { a[an++] = closure ? "--closure-only" : "--only"; a[an++] = (char *)object; }
                 if (link) a[an++] = "--link-only";
                 a[an] = 0;
                 if (sy_setenv("UNISACC_CTOR", ctor, 1)) cs_die("env", ctor);
