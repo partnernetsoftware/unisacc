@@ -1,0 +1,54 @@
+/* Contract check for tools/ratchet-read-audit.cx: one real shard with full declared inputs must be SAME,
+ * the same shard with an incomplete declaration (the scanned src/ tree withheld) must be reported as not SAME,
+ * and the declaration table must list exactly the thirteen ratchets of tools/ratchets.cx.
+ * Run from the repository root: sh ./unisacc.com tools/check-ratchet-read-audit.cx */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+
+static int checks, failed;
+static void ck(int ok, const char *s) { checks++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", s); if (!ok) failed++; }
+
+static np_result shard(const char *root, const char *work, const char *specs) {
+    char why[1000]; np_result r = {0};
+    char *v[] = {"sh", "./unisacc.com", "tools/ratchet-read-audit.cx", "--", "--one", "srcshape", (char *)root, (char *)root, (char *)work, (char *)specs, 0};
+    if (np_run(v, root, 0, 55, &r, why, sizeof why) || r.residue) { fprintf(stderr, "check-ratchet-read-audit: transport %s\n", why); exit(2); }
+    return r;
+}
+
+int main(void) {
+    char root[4096], work[4400], tmpl[4400], p[4500]; size_t n; char *tab, *rat; int rows = 0, listed = 1;
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tools/ratchet-inputs.tsv", root)) return 2;
+    tab = cx_read(p, &n);
+    if (cx_fmt(p, sizeof p, "%s/tools/ratchets.cx", root)) return 2;
+    rat = cx_read(p, &n);
+    ck(tab && rat, "declaration table and ratchet list readable");
+    if (tab && rat) {
+        char *t = tab;
+        while (*t) {
+            char *e = strchr(t, '\n'), *tb; char key[200];
+            if (!e) e = t + strlen(t);
+            if (*t != '#' && (tb = memchr(t, '\t', (size_t)(e - t)))) {
+                rows++;
+                if (cx_fmt(key, sizeof key, "{\"%.*s\"}", (int)(tb - t), t)) listed = 0;
+                if (!strstr(rat, key)) listed = 0;
+            }
+            t = *e ? e + 1 : e;
+        }
+        ck(rows == 13 && listed, "declaration table lists exactly the thirteen ratchets");
+    }
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/ratchet-audit-check-XXXXXX", sy_tmpdir()) || !mkdtemp(tmpl)) return 2;
+    if (cx_fmt(work, sizeof work, "%s", tmpl)) return 2;
+    {   np_result r = shard(root, work, "tests/srcshape.cx tests/srcshape.tsv src");
+        ck(r.rc == 0 && r.out && strstr(r.out, "\tsrcshape\tSAME\t"), "complete declaration -> SAME");
+        np_free(&r); }
+    {   char w2[4500]; np_result r;
+        if (cx_fmt(w2, sizeof w2, "%s/neg", work)) return 2;
+        r = shard(root, w2, "tests/srcshape.cx tests/srcshape.tsv");
+        ck(r.rc != 0 && r.out && (strstr(r.out, "\tsrcshape\tDIFF\t") || strstr(r.out, "\tsrcshape\tERROR\t")), "withheld declared input -> reported as not SAME");
+        np_free(&r); }
+    {   char *rm[] = {"rm", "-rf", work, 0}; char why[1000]; np_result r = {0}; if (!np_run(rm, 0, 0, 30, &r, why, sizeof why)) np_free(&r); }
+    printf("RATCHET_READ_AUDIT_CHECK\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

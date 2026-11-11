@@ -1,0 +1,169 @@
+/* tools/ratchet-read-audit.cx -- find undeclared reads of the thirteen ratchets.
+ *
+ *   sh ./unisacc.com tools/ratchet-read-audit.cx -- --check [ROOT]
+ *   sh ./unisacc.com tools/ratchet-read-audit.cx -- --one NAME FULL ROOT WORK [SPECS]   (one shard)
+ *
+ * Each ratchet (tools/ratchets.cx list) is run twice with `tests/NAME.cx -- --check`: once in a
+ * git archive export that holds ONLY its declared inputs (tools/ratchet-inputs.tsv rows plus the
+ * always-declared library base cxroot.tsv cx ext tools/cxlib tools/bound), once in a full-tree clone
+ * of ROOT HEAD.  Normalized outputs and exit codes must be equal; any difference means the result
+ * depends on something that is not declared (an undeclared tree read, or state outside the tree).
+ * Shards run in parallel, each bounded at 55 seconds.  Output rows:
+ *   RAUDIT<TAB>name<TAB>SAME|DIFF|ERROR<TAB>rc_declared<TAB>rc_full<TAB>detail
+ * and RAUDIT_SUMMARY<TAB>same=N<TAB>diff=M<TAB>error=K; exit 0 only when every row is SAME.
+ * Reads outside the tree (git config, the product cache) are not visible to this differential;
+ * the exported tree has no ancestor state other than the same HOME, so a home-level dependency is
+ * reported in the cache-key notes, not here. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+#define BASE_SPECS "cxroot.tsv cx ext tools/cxlib tools/bound"
+#define MAXR 32
+
+static void die(const char *s) { fprintf(stderr, "ratchet-read-audit: %s\n", s); exit(2); }
+
+static char *slurp_fd(int fd, long *n) {
+    long cap = 1 << 14, r; char *b = malloc((size_t)cap);
+    *n = 0;
+    while (b && (r = sy_read(fd, b + *n, cap - 1 - *n)) > 0) {
+        *n += r;
+        if (*n + 1 >= cap) { char *g = realloc(b, (size_t)cap * 2); if (!g) break; b = g; cap *= 2; }
+    }
+    if (b) b[*n] = 0;
+    return b;
+}
+
+/* Replace every occurrence of ROOTDIR in S by "@" so two export roots compare equal. */
+static char *norm(const char *s, size_t n, const char *dir) {
+    size_t dl = strlen(dir), at = 0, o = 0; char *out = malloc(n + 1);
+    if (!out) die("memory");
+    while (at < n) {
+        if (dl && at + dl <= n && !memcmp(s + at, dir, dl)) { out[o++] = '@'; at += dl; }
+        else out[o++] = s[at++];
+    }
+    out[o] = 0;
+    return out;
+}
+
+static int read_rc(const char *p) {
+    size_t n; char *s = cx_read(p, &n); int v = -1;
+    if (s && n) v = atoi(s);
+    free(s);
+    return v;
+}
+
+static void first_diff(const char *a, const char *b, char *out, size_t cap) {
+    size_t i = 0, ls = 0;
+    while (a[i] && a[i] == b[i]) { if (a[i] == '\n') ls = i + 1; i++; }
+    {   size_t e = ls; char line[220];
+        while (b[e] && b[e] != '\n') e++;
+        {   size_t n = e - ls; if (n > 200) n = 200;
+            if (cx_fmt(line, sizeof line, "%.*s", (int)n, b + ls)) line[0] = 0;
+            for (size_t k = 0; k < n; k++) if (line[k] == '\t') line[k] = ' ';
+            if (cx_fmt(out, cap, "full-side line: %s", line)) out[0] = 0;
+        }
+    }
+}
+
+/* --one: export declared inputs, run both sides at once, compare. */
+static int one(const char *name, const char *full, const char *root, const char *work, const char *specs) {
+    char dir[4400], tests[300]; char why[1000]; np_result r = {0};
+    const char *script =
+        "set -f\nmkdir -p \"$2\" \"$4\" || exit 90\n"
+        "git -C \"$1\" archive HEAD -- " BASE_SPECS " $6 | tar -x -C \"$2\" || exit 91\n"
+        "git -C \"$2\" init -q && git -C \"$2\" add -A >/dev/null 2>&1 || exit 92\n"
+        "cp \"$1/unisacc.com\" \"$2/unisacc.com\" || exit 93\n"
+        "( cd \"$2\" && sh ./unisacc.com \"tests/$5.cx\" -- --check >\"$4/$5.decl.out\" 2>&1; echo $? >\"$4/$5.decl.rc\" ) &\n"
+        "( cd \"$3\" && sh ./unisacc.com \"tests/$5.cx\" -- --check >\"$4/$5.full.out\" 2>&1; echo $? >\"$4/$5.full.rc\" ) &\n"
+        "wait\n";
+    char p1[4500], p2[4500], p3[4500], p4[4500]; int rcd, rcf, same;
+    if (cx_fmt(dir, sizeof dir, "%s/%s-decl", work, name) || cx_fmt(tests, sizeof tests, "tests/%s.cx", name)) die("path");
+    /* positional: $1 root $2 decl dir $3 full dir $4 work $5 name $6 specs */
+    {   char *av[10] = {"sh", "-c", (char *)script, "audit", (char *)root, dir, (char *)full, (char *)work, (char *)name, (char *)specs};
+        char *av2[11]; int i;
+        for (i = 0; i < 10; i++) av2[i] = av[i];
+        av2[10] = 0;
+        if (np_run(av2, 0, 0, 55, &r, why, sizeof why) || r.residue) {
+            printf("RAUDIT\t%s\tERROR\t-1\t-1\ttransport-or-timeout\n", name); np_free(&r); return 1;
+        }
+    }
+    if (r.rc) { printf("RAUDIT\t%s\tERROR\t-1\t-1\texport-step-failed rc=%d\n", name, r.rc); np_free(&r); return 1; }
+    np_free(&r);
+    if (cx_fmt(p1, sizeof p1, "%s/%s.decl.rc", work, name) || cx_fmt(p2, sizeof p2, "%s/%s.full.rc", work, name) ||
+        cx_fmt(p3, sizeof p3, "%s/%s.decl.out", work, name) || cx_fmt(p4, sizeof p4, "%s/%s.full.out", work, name)) die("path");
+    rcd = read_rc(p1); rcf = read_rc(p2);
+    {   size_t an = 0, bn = 0; char *a = cx_read(p3, &an), *b = cx_read(p4, &bn);
+        char *na, *nb; char detail[300] = "-";
+        if (!a || !b || rcd < 0 || rcf < 0) { printf("RAUDIT\t%s\tERROR\t%d\t%d\tmissing-output\n", name, rcd, rcf); free(a); free(b); return 1; }
+        na = norm(a, an, dir); nb = norm(b, bn, full);
+        same = !strcmp(na, nb) && rcd == rcf;
+        if (!same) {
+            if (strcmp(na, nb)) first_diff(na, nb, detail, sizeof detail);
+            else if (cx_fmt(detail, sizeof detail, "exit-code-differs")) detail[0] = 0;
+        }
+        printf("RAUDIT\t%s\t%s\t%d\t%d\t%s\n", name, same ? "SAME" : "DIFF", rcd, rcf, detail);
+        free(a); free(b); free(na); free(nb);
+    }
+    return same ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], full[4400], work[4400], why[1000]; size_t tn; char *tab, *rows[MAXR], *specs[MAXR]; int nrows = 0;
+    long t0 = sy_now_ms(); int same = 0, diff = 0, err = 0, k, pid[MAXR], fd[MAXR];
+    if (argc >= 6 && !strcmp(argv[1], "--one")) return one(argv[2], argv[3], argv[4], argv[5], argc > 6 ? argv[6] : "");
+    if (!(argc == 2 || argc == 3) || strcmp(argv[1], "--check")) die("usage: --check [ROOT] | --one NAME FULL ROOT WORK [SPECS]");
+    if (sy_realpath(argc == 3 ? argv[2] : ".", root, sizeof root) < 0) die("root");
+    {   char p[4500]; char *rt, *line; size_t rn; char *rat;
+        if (cx_fmt(p, sizeof p, "%s/tools/ratchet-inputs.tsv", root)) die("path");
+        tab = cx_read(p, &tn); if (!tab) die("cannot read tools/ratchet-inputs.tsv");
+        if (cx_fmt(p, sizeof p, "%s/tools/ratchets.cx", root)) die("path");
+        rat = cx_read(p, &rn); if (!rat) die("cannot read tools/ratchets.cx");
+        for (line = strtok(tab, "\n"); line; line = strtok(0, "\n")) {
+            char *t, key[200];
+            if (line[0] == '#' || !line[0]) continue;
+            t = strchr(line, '\t'); if (!t || nrows == MAXR) die("bad inputs row");
+            *t = 0; rows[nrows] = line; specs[nrows] = t + 1;
+            if (cx_fmt(key, sizeof key, "{\"%s\"}", line)) die("row name too long");
+            if (!strstr(rat, key)) { fprintf(stderr, "ratchet-read-audit: %s is not in tools/ratchets.cx\n", line); return 2; }
+            nrows++;
+        }
+        (void)rt;
+        if (nrows != 13) { fprintf(stderr, "ratchet-read-audit: %d declared rows, want 13\n", nrows); return 2; }
+    }
+    {   char tmpl[4400]; char *v[8]; np_result r = {0};
+        if (cx_fmt(tmpl, sizeof tmpl, "%s/ratchet-audit-XXXXXX", sy_tmpdir()) || !mkdtemp(tmpl)) die("work dir");
+        if (cx_fmt(work, sizeof work, "%s", tmpl) || cx_fmt(full, sizeof full, "%s/full", tmpl)) die("path");
+        v[0] = "git"; v[1] = "clone"; v[2] = "-q"; v[3] = "--local"; v[4] = root; v[5] = full; v[6] = 0;
+        if (np_run(v, 0, 0, 50, &r, why, sizeof why) || r.rc || r.residue) die("full-tree clone failed");
+        np_free(&r);
+        {   char *cp[] = {"cp", "unisacc.com", full, 0}; char pr[4500];
+            if (cx_fmt(pr, sizeof pr, "%s/unisacc.com", root)) die("path");
+            cp[1] = pr;
+            if (np_run(cp, 0, 0, 20, &r, why, sizeof why) || r.rc) die("product copy failed");
+            np_free(&r);
+        }
+    }
+    for (k = 0; k < nrows; k++) {
+        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/ratchet-read-audit.cx", "--", "--one", rows[k], full, root, work, specs[k], 0};
+        pid[k] = sy_spawn_pipe(v, root, 0, &fd[k], 0);
+        if (pid[k] < 0) die("cannot start shard");
+    }
+    for (k = 0; k < nrows; k++) {
+        long n; int ex = 0, code = 0, sig = 0; char *o = slurp_fd(fd[k], &n);
+        sy_close(fd[k]);
+        sy_wait_status(pid[k], 0, &ex, &code, &sig);
+        if (o && strstr(o, "\tSAME\t")) same++;
+        else if (o && strstr(o, "\tDIFF\t")) diff++;
+        else { err++; if (!o || !strstr(o, "RAUDIT")) printf("RAUDIT\t%s\tERROR\t-1\t-1\tno-shard-output rc=%d\n", rows[k], ex ? code : -1); }
+        if (o) fputs(o, stdout);
+        free(o);
+    }
+    printf("RAUDIT_SUMMARY\tsame=%d\tdiff=%d\terror=%d\telapsed_ms=%ld\n", same, diff, err, sy_now_ms() - t0);
+    {   char *rm[] = {"rm", "-rf", work, 0}; np_result r = {0}; if (!np_run(rm, 0, 0, 30, &r, why, sizeof why)) np_free(&r); }
+    return diff || err ? 1 : 0;
+}

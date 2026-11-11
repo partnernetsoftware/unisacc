@@ -128,6 +128,67 @@ static void aff_resume(const char *top,const char *native,const char *productroo
  { char *a3[]={"env","INTEGRATE_FAKE_AFF_IDS=a1,b2,c3","INTEGRATE_FAKE_AFF_MAX=2",lenv,(char*)native,"--test-affected",dest,0};np_result r=run(a3,0,20);size_t ln;char *lg=cx_read(log,&ln);
    ck(r.rc==3&&r.out&&!strstr(r.out,"SKIP")&&lg&&ln==15&&!memcmp(lg,"a1\nb2\nc3\na1\nb2\n",15),"affected-identity-change-invalidates-record");free(lg);np_free(&r); }
 }
+static int mark_count(const char *mp,int base){size_t n;char *s=cx_read(mp,&n);int c=0;if(!s)return 0;for(size_t at=0;at<n;){const char *e=memchr(s+at,'\n',n-at);size_t z=e?(size_t)(e-s-at):n-at;if(z){int b=0;for(size_t i=0;i+13<=z;i++)if(!memcmp(s+at+i,"main-snapshot",13))b=1;if(b==base)c++;}at+=z+1;}free(s);return c;}
+/* 行为负例:假棘轮工具每次真实运行向标记文件追加其cwd;基线侧(cwd含main-snapshot)与head侧分别计数。 */
+static const char *rc_outdir;   /* 批次 {out}:基线棘轮缓存目录放这里之下 */
+/* 六个 rc 模式共用一份 native integrate-patch:按内容身份(产品字节 + tools/cx/ext/cxroot.tsv 的索引 blob 与工作区差异)
+   缓存在 TMPDIR,命中时再核二进制 sha;只是构造产物复用(PREPARED),不缓存任何检查结论。 */
+static int rc_native(char *root,char *native,size_t cap){
+ char product[4400],source[4400],dir[4400],key[65],bin[4600],shp[4600],tmp[4700],bh[65];
+ if(sy_realpath(".",root,4096)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");
+ { np_buf b={0};size_t n;char *s=cx_read(product,&n);if(!s)die("rc-native-product");np_puts(&b,root);np_put(&b,"\n",1);np_put(&b,s,n);free(s);   /* 键含本树绝对路径:只复用本树构建的 native */
+   char *ls[]={"git","ls-files","-s","--","tools","cx","ext","cxroot.tsv",0};np_result r=run(ls,root,20);if(r.rc)die("rc-native-ls");np_put(&b,r.out,r.outn);np_free(&r);
+   char *df[]={"git","diff","HEAD","--","tools","cx","ext","cxroot.tsv",0};r=run(df,root,20);if(r.rc)die("rc-native-diff");np_put(&b,r.out,r.outn);np_free(&r);
+   cx_sha256_hex(b.p,b.n,key);free(b.p); }
+ if(cx_fmt(dir,sizeof dir,"%s/integrate-patch-native-cache",sy_tmpdir())||cx_fmt(bin,sizeof bin,"%s/%s.bin",dir,key)||cx_fmt(shp,sizeof shp,"%s/%s.sha",dir,key)||cx_fmt(native,cap,"%s",bin))die("rc-native-path");
+ if(sy_exists(bin)==1&&sy_exists(shp)==1){size_t n,m;char *s=cx_read(bin,&n),*h=cx_read(shp,&m);int okb=0;if(s&&h&&m>=64){cx_sha256_hex(s,n,bh);okb=!memcmp(bh,h,64);}free(s);free(h);
+   if(okb){printf("RC_NATIVE\tPREPARED\treused\tkey=%.16s\n",key);return 1;}}
+ sy_mkdir(dir,0700);
+ if(cx_fmt(tmp,sizeof tmp,"%s.tmp%d",bin,(int)getpid()))die("rc-native-path");
+ { char *build[]={"sh",product,source,"-o",tmp,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r); }
+ { size_t n;char *s=cx_read(tmp,&n);if(!s)die("rc-native-read");cx_sha256_hex(s,n,bh);free(s);char st[4800];if(cx_fmt(st,sizeof st,"%s.sha",tmp))die("rc-native-path");put(st,bh,64);
+   if(sy_rename(tmp,bin)||sy_rename(st,shp))die("rc-native-store"); }
+ printf("RC_NATIVE\tPREPARED\tbuilt\tkey=%.16s\n",key);return 1;}
+static void rc_go(const char *top,const char *native,const char *root,const char *patch,const char *mark,const char *name,int want_base,int want_head,int want_hit){
+ char dest[4400],menv[4600],cenv[4600],lbl[200];static int seq;if(cx_fmt(dest,sizeof dest,"%s/rc-dest-%d",top,++seq)||cx_fmt(menv,sizeof menv,"S4_MARK=%s",mark)||cx_fmt(cenv,sizeof cenv,"INTEGRATE_RATCHET_CACHE_DIR=%s/ratchet-cache",rc_outdir))die("rc-path");
+ int b0=mark_count(mark,1),h0=mark_count(mark,0);
+ { char *ap[]={(char*)native,(char*)root,(char*)patch,dest,"--prepare-only",0};np_result r=run(ap,0,30);int rc=r.rc;np_free(&r);if(rc)die("rc-prepare"); }
+ { char *rs[]={"env",menv,cenv,(char*)native,"--resume",dest,0};np_result r=run(rs,0,50);int hit=r.out&&strstr(r.out,"ratchets-base=CACHE_HIT")!=0;
+   int db=mark_count(mark,1)-b0,dh=mark_count(mark,0)-h0;
+   if(cx_fmt(lbl,sizeof lbl,"ratchet-cache %s: base runs %d head runs %d hit %d",name,db,dh,hit))die("lbl");
+   ck(db==want_base&&dh==want_head&&hit==want_hit,lbl);
+   if(!(db==want_base&&dh==want_head&&hit==want_hit)){fprintf(stderr,"rc-resume rc=%d\n",r.rc);if(r.errn)fwrite(r.err,1,r.errn>2000?2000:r.errn,stderr);if(r.outn)fwrite(r.out,1,r.outn>2000?2000:r.outn,stderr);}
+   np_free(&r); }
+}
+/* 改产品摘要:翻转根产品中非本机平台(Darwinarm64)启动行的一个字符,页脚/布局保持有效 */
+static char *rc_find(char *s,size_t n,const char *pat,size_t pn){for(size_t i=0;i+pn<=n;i++)if(!memcmp(s+i,pat,pn))return s+i;return 0;}
+static void rc_flip(const char *root){char p[4400];size_t n;path(p,sizeof p,root,"unisacc.com");char *s=cx_read(p,&n);if(!s)die("rc-flip-read");char *q=rc_find(s,n,"Darwinarm64) o=",15);char *k=q?rc_find(q,(size_t)(s+n-q)," k=",3):0;if(!k)die("rc-flip-anchor");k[3]=k[3]=='0'?'1':'0';put(p,s,n);free(s);}
+static void rc_sh(const char *script,const char *a){char *v[]={"sh","-c",(char*)script,"rc",(char*)a,0};np_result r=run(v,0,10);int rc=r.rc;np_free(&r);if(rc)die("rc-sh");}
+static void ratchet_cache(const char *top,const char *native,const char *productroot,int which){
+ char seed[4400],root[4400],other[4400],patch[4400],mark[4400],cdir[4400],p[4400];
+ if(cx_fmt(seed,sizeof seed,"%s/rc-seed",top)||cx_fmt(root,sizeof root,"%s/rc-root",top)||cx_fmt(other,sizeof other,"%s/rc-other",top)||cx_fmt(patch,sizeof patch,"%s/rc.patch",top)||cx_fmt(mark,sizeof mark,"%s/rc.marks",top)||cx_fmt(cdir,sizeof cdir,"%s/ratchet-cache",rc_outdir))die("rc-path");
+ char *init[]={"git","init","-b","main",seed,0};ok(init,0);
+ path(p,sizeof p,seed,"agentwork");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,seed,"tests");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,seed,"tools");if(sy_mkdir(p,0700))die("mkdir");
+ for(int k=0;k<4;k++){path(p,sizeof p,seed,am_path(k));put(p,am_header(k),strlen(am_header(k)));}
+ path(p,sizeof p,seed,".gitignore");put(p,"unisacc.com\n",12);path(p,sizeof p,seed,"plain.txt");put(p,"base\n",5);
+ path(p,sizeof p,seed,"tests/run.cx");{const char *m="int main(void){puts(\"metadata_valid=1\");return 0;}\n";put(p,m,strlen(m));}
+ path(p,sizeof p,seed,"tests/ratchet-input.txt");put(p,"in0\n",4);
+ path(p,sizeof p,seed,"tools/ratchets.cx");{const char *m="int main(void){const char*mk=getenv(\"S4_MARK\");char cwd[4096],in[100]=\"\";if(!mk||!getcwd(cwd,sizeof cwd))return 2;FILE*f=fopen(mk,\"a\");if(!f)return 2;fprintf(f,\"%s\\n\",cwd);fclose(f);f=fopen(\"tests/ratchet-input.txt\",\"r\");if(f){if(fgets(in,sizeof in,f)){}fclose(f);}for(int i=0;in[i];i++)if(in[i]=='\\n')in[i]=0;printf(\"RATCHET\\tfake\\tok\\t%s\\n\",in);puts(\"RATCHETS\\tok=1\\tfail=0\\telapsed_ms=1\");return 0;}\n";put(p,m,strlen(m));}
+ commit(seed);
+ char *cr[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,root,0};ok(cr,0);char *cl[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,other,0};ok(cl,0);if(pp_copy_product(productroot,root))die("product-copy");
+ /* 夹具根只含 git 跟踪内容 + 单独拷入的产品:删去 pp_copy_product 带入的 build.json 旁记,否则 integrate-patch 判未跟踪输入 */
+ path(p,sizeof p,root,"unisacc.com.build.json");if(sy_exists(p)==1&&sy_unlink(p))die("rc-sidecar");
+ path(p,sizeof p,other,"plain.txt");put(p,"patched\n",8);commit(other);
+ { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("rc-diff");put(patch,r.out,r.outn);np_free(&r); }
+ put(mark,"",0);
+ rc_go(top,native,root,patch,mark,"cold miss runs base and head once each",1,1,0);
+ if(which==1)rc_go(top,native,root,patch,mark,"same key hit runs head only once",0,1,1);
+ else if(which==2){rc_sh("for f in \"$1\"/*; do printf 'garbage\\n' > \"$f\"; done",cdir);
+  rc_go(top,native,root,patch,mark,"corrupted entry reruns base",1,1,0);}
+ else if(which==3){rc_flip(root);rc_go(top,native,root,patch,mark,"changed product digest reruns base",1,1,0);}
+ else if(which==4){path(p,sizeof p,root,"tests/ratchet-input.txt");put(p,"in1\n",4);commit(root);rc_go(top,native,root,patch,mark,"ratchet input one byte changed reruns base",1,1,0);}
+ else if(which==5){path(p,sizeof p,root,"tools/ratchets.cx");{size_t n;char *s=cx_read(p,&n);np_buf b={0};np_put(&b,s,n);np_puts(&b,"/* tool source edit */\n");put(p,b.p,b.n);free(b.p);free(s);}commit(root);rc_go(top,native,root,patch,mark,"ratchet tool source changed reruns base",1,1,0);}
+}
 static void registry_neg(const char *top,const char *native){
  char dir[4400],okp[4400],pat[4400],mis[4400];
  if(cx_fmt(dir,sizeof dir,"%s/reg",top)||cx_fmt(okp,sizeof okp,"%s/tools/ok.cx",dir)||cx_fmt(pat,sizeof pat,"%s/ok.patch",dir)||cx_fmt(mis,sizeof mis,"%s/miss.patch",dir))die("reg-path");
@@ -143,13 +204,17 @@ static void registry_neg(const char *top,const char *native){
 int main(int argc,char **argv){
  deadline=sy_now_ms()+55000;
  int aff_only=argc==2&&!strcmp(argv[1],"--affected-only");
- int land_only=(argc==2&&!strcmp(argv[1],"--land-only"))||aff_only;
+ int rc_which=0;{static const char *fl[]={"--rc-cold","--rc-hit","--rc-corrupt","--rc-product","--rc-input","--rc-tool","--rc-prepare"};for(int i=0;i<7;i++)if(argc==3&&!strcmp(argv[2],fl[i]))rc_which=i+1;}int rc_only=rc_which>0;
+ static char rc_outabs[4096];
+ if(rc_only){sy_mkdir(argv[1],0700);if(sy_realpath(argv[1],rc_outabs,sizeof rc_outabs)<0)die("rc-outdir");rc_outdir=rc_outabs;argc=2;}   /* {out} 可能是相对路径:子进程 cwd 不同,须先取绝对路径 */   /* 批次形态 {out};--rc-X */
+ int land_only=(argc==2&&!strcmp(argv[1],"--land-only"))||aff_only||rc_only;
  if(!land_only&&argc!=1&&(argc!=4||strcmp(argv[1],"--native")))die("usage [--native ABS_INTEGRATE ROOT] | --land-only");
  char native[4096],root[4096],temp[4400];
  if(cx_fmt(temp,sizeof temp,"%s/integrate-patch-check-XXXXXX",sy_tmpdir())||!mkdtemp(temp))die("arguments");
- if(argc==1||land_only){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}
+ if(rc_only&&rc_native(root,native,sizeof native)){}
+ else if(argc==1||land_only){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}
  else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");
- if(land_only){if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+ if(land_only){if(rc_which==7)ck(sy_exists(native)==1,"rc native prepared (PREPARED only, no verdict)");else if(rc_only)ratchet_cache(temp,native,root,rc_which-1);else if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
  fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);registry_neg(temp,native);
  /* 基线棘轮缓存合同:键含基线树id与产品摘要,命中须过ratchet_valid,head侧永远现跑,可用环境变量关闭回完整双扫 */
  {char sp[4400];path(sp,sizeof sp,root,"tools/integrate-patch.cx");size_t sn;char *ss=cx_read(sp,&sn);
