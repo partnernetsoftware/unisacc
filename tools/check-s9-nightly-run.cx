@@ -28,7 +28,9 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap) {
     return rc;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int fm = argc == 2 && !strcmp(argv[1], "fail");   /* fail: 仅假 FAIL 跑;默认: 其余全部 */
+    if (argc > 2 || (argc == 2 && !fm)) die("usage: [fail]");
     char root[4096], dir[4400], org[4400], cl[4400], ev[4400], fake[4400], src[4400], com[4400], tool[4400], logp[4400], idx[4400], buf[8000], nr[4400], nocl[4400];
     char *v[24];
     int rc;
@@ -75,24 +77,31 @@ int main(void) {
     setenv("S9_FAKE_LOG", logp, 1);
     v[0] = "sh"; v[1] = com; v[2] = tool; v[3] = "--"; v[4] = "--clone"; v[5] = cl; v[6] = "--evidence"; v[7] = ev;
     v[8] = "--tier"; v[9] = "commit"; v[10] = "--max-steps"; v[11] = "8"; v[12] = "--load-max"; v[13] = "0"; v[14] = 0;
+    if (!fm) {
     rc = runv(v, root, 20, buf, sizeof buf);
     ck(rc == 4 && strstr(buf, "S9_NIGHTLY_RUN status=SKIPPED_LOAD"), "load-skip");
     ck(!sy_exists(idx), "load-skip-no-index");
+    }
     v[13] = "1000";
+    if (!fm) {
     rc = runv(v, root, 20, buf, sizeof buf);
     ck(rc == 2 && !sy_exists(idx), "unmarked-clone-refused");
+    }
     {
         char mk[4400]; FILE *f;
         if (cx_fmt(mk, sizeof mk, "%s/.s9-nightly-clone", cl)) die("fmt");
         f = fopen(mk, "w"); ck(f != 0, "mark-create"); if (f) fclose(f);
     }
+    if (!fm) {
     v[5] = nr;
     { char *m[] = {"mkdir", "-p", nr, 0}; char mk[4400]; FILE *f; runv(m, root, 5, buf, sizeof buf);
       if (cx_fmt(mk, sizeof mk, "%s/.s9-nightly-clone", nr)) die("fmt");
       f = fopen(mk, "w"); if (f) fclose(f); }
     rc = runv(v, root, 20, buf, sizeof buf);
     ck(rc == 2 && strstr(buf, "REFUSED reason=no-root"), "no-root");
+    }
     v[5] = cl; v[14] = "--fake"; v[15] = fake; v[16] = 0;
+    if (!fm) {
     rc = runv(v, root, 50, buf, sizeof buf);
     ck(rc == 0 && strstr(buf, "S9_NIGHTLY_RUN status=PASS"), "fake-run-pass");
     {
@@ -100,12 +109,10 @@ int main(void) {
         ck(s && n > 0 && strstr(s, "\tcommit\tPASS\t"), "index-row");
         free(s);
     }
-    /* 负例: FAIL 时 index 行 report 列非 '-' */
-    setenv("S9_FAKE_FAIL", "driver", 1);
-    {   /* 运行目录名含秒级时钟,避免同秒重名 */
-        char *sl[] = {"sleep", "2", 0};
-        runv(sl, root, 5, buf, sizeof buf);
     }
+    /* 负例: FAIL 时 index 行 report 列非 '-' (拆为 fail 模式单独批次:两次假跑各约 26s,合并超 55s) */
+    if (fm) {
+    setenv("S9_FAKE_FAIL", "driver", 1);
     rc = runv(v, root, 50, buf, sizeof buf);
     ck(rc != 0 && strstr(buf, "S9_NIGHTLY_RUN status=FAIL"), "fail-run-fail");
     {
@@ -115,6 +122,7 @@ int main(void) {
         free(s);
     }
     unsetenv("S9_FAKE_FAIL");
+    }
     printf("check-s9-nightly-run failed=%d\n", failed);
     if (!failed) printf("S9_NIGHTLY_RUN_OK\n");
     return failed ? 1 : 0;

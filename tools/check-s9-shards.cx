@@ -65,26 +65,38 @@ static void diff_check(const char *a,const char *b,const char *expected,const ch
 }
 static int contains(const char *s,size_t n,const char *needle){size_t k=strlen(needle);for(size_t i=0;i+k<=n;i++)if(!memcmp(s+i,needle,k))return 1;return 0;}
 int main(int argc,char **argv){
- if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
+ if((argc!=3&&argc!=6)||!realpath(argv[1],root)||strcmp(root,argv[1])||(strcmp(argv[2],"inputs")&&strcmp(argv[2],"identity")&&strcmp(argv[2],"identity-sid")&&strcmp(argv[2],"schedule")&&strcmp(argv[2],"equivalence"))||(!strcmp(argv[2],"equivalence")?argc!=6:argc!=3))die("usage: ROOT inputs|schedule|equivalence BEFORE AFTER EXECUTOR");
  char tmp[]="/tmp/check-s9-XXXXXX";if(!mkdtemp(tmp))die("temp");char product[4400],source[4400],binary[4400];
  if(!strcmp(argv[2],"equivalence")){if(mm_copy(binary,sizeof binary,argv[5],strlen(argv[5])+1))die("executor-path");}
  else{join(product,root,"unisacc.com");join(source,root,!strcmp(argv[2],"schedule")?"tools/s9-shards.cx":"tools/all-waves.cx");join(binary,tmp,"native");char *compile[]={"sh",product,source,"-o",binary,0};
   /* schedule also needs the real wave executor for the shared-worktree control; compile it alongside. */
   pid_t aw=-1;if(!strcmp(argv[2],"schedule")){char aws[4400],awb[4400];join(aws,root,"tools/all-waves.cx");join(awb,tmp,"all-waves");aw=fork();if(aw<0)die("compile-fork");if(!aw){char *c[]={"sh",product,aws,"-o",awb,0};_exit(run(c,root)?1:0);}}
   if(run(compile,root))die("compile");if(aw>0){int st;if(waitpid(aw,&st,0)!=aw||!WIFEXITED(st)||WEXITSTATUS(st))die("compile-all-waves");}}
- if(!strcmp(argv[2],"inputs")){
+ /* inputs keeps the same per-process deadline the combined phase used; the identity-parent controls are their own phase (own 55s budget). */
+ if(!strcmp(argv[2],"inputs")){char dl[80];long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");if(setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");}
+ int sidm=!strcmp(argv[2],"identity-sid");   /* identity: missing/corrupt parent refusals; identity-sid: live-parent SID-change refusal (init x2 + wave) */
+ if(!strcmp(argv[2],"identity")||sidm){
   char dl[80],sess[4400],miss[4400],bad[4400],empty[4400],cand[4400],wire[4400];
+  /* All identity-parent controls (incl. the src/runcache.cx touch) run in a private fixture clone of ROOT, never in ROOT itself. */
+  char saved_root[4096],fxr[4400],fxc[4400],fxo[4400],fxp[4400];
+  join(fxr,tmp,"fxroot");join(fxc,root,"unisacc.com");join(fxp,fxr,"unisacc.com");join(fxo,fxr,"out");
+  {char *g[]={"git","clone","-q","--shared",root,fxr,0};if(run(g,tmp))die("fixture-clone");}
+  {char *c[]={"cp",fxc,fxp,0};if(run(c,tmp))die("fixture-product");}
+  if(mkdir(fxo,0700)&&errno!=EEXIST)die("fixture-out");
+  if(mm_copy(saved_root,sizeof saved_root,root,strlen(root)+1)||mm_copy(root,sizeof root,fxr,strlen(fxr)+1))die("fixture-root");
   long long t=as_now();if(t<0||cx_fmt(dl,sizeof dl,"%.9f",(double)t/1e9+50))die("deadline");
   if(setenv("UNISACC_BOUND_DEADLINE_MONO",dl,1))die("deadline-env");
   join(cand,root,"unisacc.com");join(sess,root,"out");
   join(miss,sess,"check-s9-ident-miss");join(bad,sess,"check-s9-ident-bad");join(empty,sess,"check-s9-ident-empty");
+  if(!sidm){
   if(setenv("UNISACC_IDENTITY_PARENT","/no/such/session",1))die("parent-env");
   {char *v[]={binary,"init",root,miss,cand,"-",0};np_result r={0};if(np_run(v,root,0,20,&r,why,sizeof why))die("miss-transport");ck(r.rc==2&&contains(r.err,r.errn,"identity-parent"),"identity-parent-missing-refuse");np_free(&r);}
   if(mkdir(empty,0700)&&errno!=EEXIST)die("empty-dir");join(wire,empty,"session.tsv");put(wire,"not-a-manifest\n");
   if(setenv("UNISACC_IDENTITY_PARENT",empty,1))die("parent-env");
   {char *v[]={binary,"init",root,bad,cand,"-",0};np_result r={0};if(np_run(v,root,0,20,&r,why,sizeof why))die("bad-transport");ck(r.rc==2&&contains(r.err,r.errn,"identity-parent"),"identity-parent-corrupt-refuse");np_free(&r);}
   unsetenv("UNISACC_IDENTITY_PARENT");
-  {char par[4400],ch[4400],srcf[4400];join(par,sess,"check-s9-ident-live-parent");join(ch,sess,"ident-sid-child");join(srcf,root,"src/runcache.cx");
+  }
+  if(sidm){char par[4400],ch[4400],srcf[4400];join(par,sess,"check-s9-ident-live-parent");join(ch,sess,"ident-sid-child");join(srcf,root,"src/runcache.cx");
    {char *rmv[]={"rm","-rf","--",par,ch,0};run(rmv,root);}
    unsetenv("UNISACC_IDENTITY_PARENT");
    {char *v[]={binary,"init",root,par,cand,"-",0};np_result r={0};int pok=!np_run(v,root,0,25,&r,why,sizeof why)&&r.rc==0;np_free(&r);
@@ -101,6 +113,9 @@ int main(int argc,char **argv){
     }
    }
   }
+  if(mm_copy(root,sizeof root,saved_root,strlen(saved_root)+1))die("fixture-restore");
+  if(!failures){char *clean[]={"rm","-rf","--",tmp,0};if(run(clean,root))die("private-fixture-clean");}else fprintf(stderr,"fixture retained: %s\n",tmp);
+  printf("CHECK_S9_SHARDS\tphase=%s\tfailed=%d\n",argv[2],failures);return failures?1:0;
  }
  if(mm_copy(diff_binary,sizeof diff_binary,binary,strlen(binary)+1))die("copy-bound");join(diff_a,tmp,"before.snapshot");join(diff_b,tmp,"after.snapshot");
  if(!strcmp(argv[2],"equivalence")){size_t an,bn,n;char *a=cx_read(argv[3],&an),*b=cx_read(argv[4],&bn);if(!a||!b)die("saved-snapshot-read");char *s=difference(a,an,b,bn,&n);if(n)fwrite(s,1,n,stdout);free(s);free(a);free(b);}

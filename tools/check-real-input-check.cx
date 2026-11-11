@@ -11,7 +11,7 @@
 #pragma unisa use cxlib.netpack
 
 static int failed;
-static char root[4096], td[4400];
+static char root[4096], td[4400], ric[4600];   /* ric: 被测工具编译一次的二进制,各例复用(原每例重编约 12s,合计超 55s) */
 static void ck(int ok, const char *n) {
     sy_printf("%s\tcheck-real-input-check.%s\n", ok ? "PASS" : "FAIL", n);
     if (!ok) failed++;
@@ -22,17 +22,16 @@ static int has(const char *b, const char *s) { return tx_find(b, tx_len(b, 1 << 
 
 /* 写私有表并运行工具;返回子进程 rc(-1 spawn 失败),输出拼入 buf */
 static int run_table(const char *rows, char *buf, long cap) {
-    char tbl[4600], tool[4600], body[4096], com[4600];
+    char tbl[4600], body[4096];
     char *v[8];
     np_result r = {0};
     char why[256] = {0};
     int rc = -1;
     long i, m, o;
-    if (cx_fmt(tbl, sizeof tbl, "%s/t.tsv", td) || cx_fmt(tool, sizeof tool, "%s/tools/real-input-check.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return -2;
+    if (cx_fmt(tbl, sizeof tbl, "%s/t.tsv", td)) return -2;
     if (cx_fmt(body, sizeof body, "%s", rows)) return -2;
     if (cx_write(tbl, body, (size_t)tx_len(body, sizeof body))) return -2;
-    v[0] = (char *)"sh"; v[1] = com; v[2] = tool; v[3] = (char *)"--";
-    v[4] = (char *)"--table"; v[5] = tbl; v[6] = 0;
+    v[0] = ric; v[1] = (char *)"--table"; v[2] = tbl; v[3] = 0;
     buf[0] = 0;
     if (np_run(v, root, 0, 55, &r, why, sizeof why) == 0) {
         m = (long)r.errn; o = (long)r.outn;
@@ -53,6 +52,19 @@ int main(void) {
     if (sy_cwd(root, sizeof root)) return 2;
     if (cx_fmt(td, sizeof td, "%s/real-input-check-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
 
+    {
+        char tool[4600], com[4600];
+        char *b[7];
+        np_result r = {0};
+        char why[256] = {0};
+        int ok = 0;
+        if (cx_fmt(ric, sizeof ric, "%s/real-input-check.bin", td) || cx_fmt(tool, sizeof tool, "%s/tools/real-input-check.cx", root) || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+        b[0] = (char *)"sh"; b[1] = com; b[2] = (char *)"-o"; b[3] = ric; b[4] = tool; b[5] = 0;
+        if (np_run(b, root, 0, 40, &r, why, sizeof why) == 0 && r.rc == 0) ok = 1;
+        np_free(&r);
+        ck(ok, "compile-tool-once");
+        if (!ok) return 1;
+    }
     /* 被测命令:release-build 无参 rc1 + "release-build: root";version-inject 无参 rc2 + usage */
     rc = run_table(HDR "ok\ttools/release-build.cx;--;p3\t1\trelease-build: root\t55\t-\t-\n", buf, sizeof buf);
     ck(rc == 0 && has(buf, "PASS\treal-input.ok") && has(buf, "REAL_INPUT\tfailed=0"), "positive-control");
@@ -86,13 +98,12 @@ int main(void) {
 
     /* 真实清单:列表必须含四类首批输入 */
     {
-        char tool[4600], com[4600];
         char *v[7];
         np_result r = {0};
         char why[128] = {0};
         int ok = 0;
-        if (!cx_fmt(tool, sizeof tool, "%s/tools/real-input-check.cx", root) && !cx_fmt(com, sizeof com, "%s/unisacc.com", root)) {
-            v[0] = (char *)"sh"; v[1] = com; v[2] = tool; v[3] = (char *)"--"; v[4] = (char *)"--list"; v[5] = 0;
+        {
+            v[0] = ric; v[1] = (char *)"--list"; v[2] = 0;
             if (np_run(v, root, 0, 55, &r, why, sizeof why) == 0 && r.rc == 0) {
                 ok = has((const char *)r.out, "release-build-p3-missing-args") && has((const char *)r.out, "release-build-slice-missing-args") &&
                      has((const char *)r.out, "release-ape-smoke-installed-product") && has((const char *)r.out, "version-inject-win-arm64-b2-image") &&
