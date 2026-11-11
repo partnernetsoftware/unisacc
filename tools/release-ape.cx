@@ -25,6 +25,28 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.releaseversion
 
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
+   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[64], *b = 0;
+    size_t n = 0, j;
+    int k = 0, i, rc;
+    if (cut) *cut = 0;
+    if (!argv) return -EINVAL;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
+    if (argv[i]) return -E2BIG;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
+        for (j = 0; b && j < n; j++) out[j] = b[j];
+        out[b ? n : 0] = 0;
+    }
+    free(b);
+    return rc;
+}
+
 static void ra_die(const char *a, const char *b) { sy_eprintf("release-ape: %s%s%s\n", a, b ? ": " : "", b ? b : ""); sy_exit(2); }
 
 static int sha_of(const char *path, char hex[65], long *bytes) {
@@ -35,7 +57,7 @@ static int sha_of(const char *path, char hex[65], long *bytes) {
 }
 
 /* run ARGV; stdout+stderr (truncated to cap) into OUT; the exit code, or -1 */
-static int run(char **argv, char *out, int cap) { int cut; return sy_run(argv, out, cap, &cut); }
+static int run(char **argv, char *out, int cap) { int cut; return bounded_run(argv, 50, out, cap, &cut); }
 
 static int receipt_line(char *r, long cap, long *at, const char *key, const char *path) {
     char hex[65]; long n = 0;
