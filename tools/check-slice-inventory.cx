@@ -1,13 +1,14 @@
 /* 消费行为检查，不证明源码和对象的历史等价；只在私有目录准备真实对象。
- * sh ./unisacc.com tools/check-slice-inventory.cx
- * 每个子命令由 tools/bound 独立封顶；不依赖既有 /tmp 探针。
+ * --prepare ABS_OUT 实编11对象及原生消费器/符号索引；--out ABS_OUT [--part N] 重新消费。
+ * 每个子命令独立封顶；PREPARED不是结论，不依赖系统临时目录夹具。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
-static char home[4400],base[4400],com[4400],bound[4400],tool[4400],receipt[4400];
+#pragma unisa use cxlib.runnerprep
+static char home[4400],base[4400],com[4400],bound[4400],tool[4400],receipt[4400],indexbin[4400];
 static int checks,bad,count,part_number,refusal_index;static char comsha[65];static long combytes;
 static const char *names[]={"top","mid","leaf","purea","pureb","table","io","env","exec","global","unknown"};
 static const char *tags[]={"MIXED","PURE-BYTESTREAM","PURE-BYTESTREAM","PURE-BYTESTREAM","PURE-BYTESTREAM","TABLE-DRIVEN","SYSCALL-IO","MIXED","EXECUTOR","MIXED","MIXED"};
@@ -19,8 +20,6 @@ static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("fix
 static void md(const char *p){if(mkdir(p,0700))die("fixture mkdir");}
 static void ck(int yes,const char *s){checks++;printf("%s\t%s\n",yes?"PASS":"FAIL",s);if(!yes)bad++;}
 static char *duptext(const char *s){size_t n=strlen(s);char *p=malloc(n+1);if(!p||mm_copy(p,n+1,s,n+1))die("allocation/copy");return p;}
-static void cleanup_dir(const char *p){DIR *d=opendir(p);if(!d)return;struct dirent *e;char q[4400];while((e=readdir(d)))if(strcmp(e->d_name,".")&&strcmp(e->d_name,"..")){path(q,p,e->d_name);struct stat st;if(!lstat(q,&st)&&S_ISDIR(st.st_mode))cleanup_dir(q);else unlink(q);}closedir(d);rmdir(p);}
-static void cleanup(void){if(*base)cleanup_dir(base);}
 static char *run(char **args,int expected,const char *needle){char *v[64];int n=0;v[n++]=bound;v[n++]="52";for(int i=0;args[i];i++){if(n==63)die("argv bound");v[n++]=args[i];}v[n]=0;np_result r={0};char why[1400]={0};int tr=np_run(v,base,0,55,&r,why,sizeof why);int yes=!tr&&!r.residue&&r.rc==expected&&(!needle||(r.err&&strstr(r.err,needle)));if(!yes){fprintf(stderr,"child transport=%d rc=%d %s\n",tr,r.rc,why);if(r.out)fwrite(r.out,1,r.outn,stderr);if(r.err)fwrite(r.err,1,r.errn,stderr);}char *out=yes?duptext(r.out?r.out:""):0;np_free(&r);return out;}
 static void digest(const char *p,char *h,long *bytes){size_t n;char *s=cx_read(p,&n);if(!s)die("hash read");cx_sha256_hex(s,n,h);*bytes=(long)n;free(s);}
 static void copyfile(const char *a,const char *b){size_t n;char *s=cx_read(a,&n);if(!s||cx_write(b,s,n))die("object copy");free(s);}
@@ -33,7 +32,7 @@ static void write_receipt(int mode){FILE *f=fopen(receipt,"wb");if(!f)die("recei
  for(int i=0;i<11;i++){if(mode==10&&i==2)continue;fprintf(f,"%s\tsha=%s\tbytes=%ld\tsrc=%s\n",mode==8&&i==0?"../top.o":keys[i],mode==3&&i==0?zero:hashes[i],sizes[i]+(mode==7&&i==0),mode==9&&i==0?sources[2]:"-");}
  if(mode==11)fprintf(f,"%s\tsha=%s\tbytes=%ld\tsrc=-\n",keys[0],hashes[0],sizes[0]);
  if(fclose(f))die("receipt close");}
-static char *consume(int rc,const char *needle){char *v[]={"sh",com,tool,"--","--slice",base,"--tools-root",home,0};return run(v,rc,needle);}
+static char *consume(int rc,const char *needle){char *v[]={tool,"--slice",base,"--tools-root",home,"--out",base,"--index-native",indexbin,0};return run(v,rc,needle);}
 static void refuse(int mode,const char *needle,const char *label){int index=refusal_index++;int bucket=index<5?2:index<9?3:index<11?4:5;if(part_number&&part_number!=bucket)return;write_receipt(mode);char *s=consume(2,needle);ck(s&&!strstr(s,"TOP\t")&&!strstr(s,"SLICE_INVENTORY\t"),label);free(s);}
 static int split(char *s,char **v,int cap){int n=1;v[0]=s;for(;*s;s++)if(*s=='\t'){if(n==cap)return 0;*s=0;v[n++]=s+1;}return n;}
 static int tagnum(const char *s){const char *t[]={"PURE-BYTESTREAM","TABLE-DRIVEN","MIXED","SYSCALL-IO","EXECUTOR"};for(int i=0;i<5;i++)if(!strcmp(s,t[i]))return i;return 99;}
@@ -45,8 +44,22 @@ static void inspect(char *out){int seen[11]={0},direct[11]={0},users[11]={0},ran
  int all=nr==11&&nt==1;for(int i=0;i<11;i++)all=all&&seen[i]==1;ck(all,"只消费收据单元并完整映射真实计划");ck(direct[2]==1&&users[2]==2&&direct[1]==1&&users[1]==1,"use直接与传递反向耦合分开计数");
  int sorted=1,bt=0,lt=0,ut=0,kt=0;for(int j=1;j<nr;j++){int a=rank[j-1],b=rank[j];if(bytes[a]!=bytes[b]){bt++;if(bytes[a]<bytes[b])sorted=0;}else if(labels[a]!=labels[b]){lt++;if(labels[a]>labels[b])sorted=0;}else if(users[a]!=users[b]){ut++;if(users[a]>users[b])sorted=0;}else{kt++;if(strcmp(keys[a],keys[b])>=0)sorted=0;}}
  ck(sequence&&sorted&&bt&&lt&&ut&&kt,"真实字节优先及同字节标签/用户/key完整词典序与连续名次");ck(strstr(out,"INVENTORY_ID\ttarget=lnx/x86_64\t")&&strstr(out,"rev=checker-real-objects")&&strstr(out,"identity=VERIFIED\tclosure=COMPLETE"),"身份rev与闭包状态公开");ck(strstr(out,"io=puts\texecutor_definitions=fixture_decode")!=0,"执行器优先但不隐藏IO匹配");free(copy);}
-int main(int argc,char **argv){if(argc==3&&!strcmp(argv[1],"--part")&&strlen(argv[2])==1&&argv[2][0]>='1'&&argv[2][0]<='6')part_number=argv[2][0]-'0';else if(argc!=1)die("usage [--part 1|2|3|4|5|6]");char p[4400],q[4400],body[12000];if(!realpath(".",home))die("cwd");path(com,home,"unisacc.com");path(bound,home,"tools/bound");path(tool,home,"tools/slice-inventory.cx");fit(base,sizeof base,"/tmp/check-slice-inventory-XXXXXX");if(!mkdtemp(base))die("mkdtemp");char realbase[4400];if(!realpath(base,realbase))die("temp realpath");fit(base,sizeof base,realbase);atexit(cleanup);path(receipt,base,"receipt.txt");path(p,base,"tools");md(p);path(q,p,"entry-build.cx");put(q,"#define EB_OBJ 1\nkeys[0]=\"top.o\"; src_rel[0]=\"src/top.cx\";\n");path(p,base,"src");md(p);path(q,p,"fixture");md(q);
+/* Certificate binds real objects to exact product and sources, never a verdict. */
+static void prepared_identity(int prepare) {
+    char text[16000], cert[4400], p[4400], h[65]; long bytes; size_t at=0;
+    digest(com,h,&bytes);int n=snprintf(text,sizeof text,"REGPREP1\nproduct\t%s\t%ld\n",h,bytes);if(n<0||(size_t)n>=sizeof text)die("identity bound");at=(size_t)n;
+    for(int i=0;i<11;i++) {
+        digest(sources[i],h,&bytes);n=snprintf(text+at,sizeof text-at,"source\t%d\t%s\t%ld\n",i,h,bytes);if(n<0||(size_t)n>=sizeof text-at)die("identity bound");at+=(size_t)n;
+        char name[80];if(cx_fmt(name,sizeof name,"prepared-%d.o",i))die("object name");path(p,base,name);digest(p,h,&bytes);if(bytes<=0)die("empty real object");
+        n=snprintf(text+at,sizeof text-at,"object\t%d\t%s\t%ld\n",i,h,bytes);if(n<0||(size_t)n>=sizeof text-at)die("identity bound");at+=(size_t)n;
+    }
+    path(cert,base,"prepared.identity");
+    if(prepare){if(cx_write(cert,text,at))die("identity write");printf("PREPARED\tslice-inventory\tobjects=11\tno-test-result\n");}
+    else{size_t size;char *old=cx_read(cert,&size);int same=old&&size==at&&!memcmp(old,text,at);free(old);if(!same)die("prepared input identity mismatch");}
+}
+int main(int argc,char **argv){int prepare=argc==3&&!strcmp(argv[1],"--prepare");if(!prepare&&argc==5&&!strcmp(argv[1],"--out")&&!strcmp(argv[3],"--part")&&strlen(argv[4])==1&&argv[4][0]>='1'&&argv[4][0]<='6')part_number=argv[4][0]-'0';else if(!prepare&&(argc!=3||strcmp(argv[1],"--out")))die("usage --prepare ABS_OUT | --out ABS_OUT [--part 1..6]");char p[4400],q[4400],body[12000];if(!realpath(".",home))die("cwd");path(com,home,"unisacc.com");path(bound,home,"tools/bound");if(argv[2][0]!='/')die("absolute output required");fit(base,sizeof base,argv[2]);if(prepare)md(base);else if(sy_exists(base)!=1)die("prepared output missing");path(receipt,base,"receipt.txt");path(p,base,"tools");if(prepare)md(p);path(q,p,"entry-build.cx");if(prepare)put(q,"#define EB_OBJ 1\nkeys[0]=\"top.o\"; src_rel[0]=\"src/top.cx\";\n");path(p,base,"src");if(prepare)md(p);path(q,p,"fixture");if(prepare)md(q);
  for(int i=0;i<11;i++){if(i==0)path(sources[i],p,"top.cx");else{char rel[80];if(cx_fmt(rel,sizeof rel,"%s.cx",names[i]))die("source name");path(sources[i],q,rel);}}
+ if(prepare){
  put(sources[0],"#pragma unisa module top\n#pragma unisa use fixture.mid\n#pragma unisa use fixture.purea\n#pragma unisa use fixture.pureb\n#pragma unisa use fixture.table\n#pragma unisa use fixture.io\n#pragma unisa use fixture.env\n#pragma unisa use fixture.exec\n#pragma unisa use fixture.global\n#pragma unisa use fixture.unknown\nint top_value(void){return 7;}\n");
  for(int i=1;i<=4;i++){if(cx_fmt(body,sizeof body,"#pragma unisa module %s\n%s/* printf(\"fake\"); getenv(\"fake\"); execute(); */\nint %s_bytes(const unsigned char *s,unsigned char *d,int n){const char *hint=\"printf(); getenv(); execute(); switch if if if while\";int i=0;while(i<n){d[i]=s[i];i++;}return n;}\n",names[i],i==1?"#pragma unisa use leaf\n":"",names[i]))die("byte source");put(sources[i],body);}
  put(sources[5],"#pragma unisa module table\nint select_bytes(const unsigned char *s,unsigned char *d,int n){if(n==1)return 1;if(n==2)return 2;if(n==3)return 3;if(n==4)return 4;d[0]=s[0];return 0;}\n");
@@ -55,11 +68,15 @@ int main(int argc,char **argv){if(argc==3&&!strcmp(argv[1],"--part")&&strlen(arg
  put(sources[8],"#pragma unisa module exec\nint fixture_decode(const unsigned char *s,unsigned char *d,int n){puts(\"executor\");d[0]=s[0];return n;}\n");
  put(sources[9],"#pragma unisa module global\nstatic int mutable_state;\nint state_bytes(const unsigned char *s,unsigned char *d,int n){mutable_state=n;d[0]=s[0];return n;}\n");
  put(sources[10],"#pragma unisa module unknown\nint unknown_bytes(const unsigned char *s,unsigned char *d,int n){d[0]=s[0];return abs(n);}\n");
+ }
  /* 所有源先真实编译。随后复制同一真实对象只构造排序同字节条件，绝不声称历史等价。 */
- char batch[6000]={0},waits[1500]={0};
- for(int i=0;i<11;i++){if(part_number>1&&i!=0&&i!=2)continue;size_t sn;char *text=cx_read(sources[i],&sn);if(!text)die("source extent read");for(size_t j=0;j<sn;j++)if(text[j]=='\n')source_lines[i]++;if(sn&&text[sn-1]!='\n')source_lines[i]++;free(text);char name[80];if(cx_fmt(name,sizeof name,"prepared-%d.o",i))die("prepared name");path(p,base,name);{char one[9000];if(cx_fmt(one,sizeof one,"sh '%s' '%s' -c -funit -b lnx/x86_64 -o '%s' >/dev/null 2>&1 & p%d=$!\n",com,sources[i],p,i))die("compile script bound");if(strlen(batch)+strlen(one)+1>sizeof batch)die("compile script bound");mm_copy(batch+strlen(batch),sizeof batch-strlen(batch),one,strlen(one)+1);if(cx_fmt(one,sizeof one,"wait $p%d || r=1\n",i))die("wait script");if(strlen(waits)+strlen(one)+1>sizeof waits)die("compile script bound");mm_copy(waits+strlen(waits),sizeof waits-strlen(waits),one,strlen(one)+1);}}
- {char all[sizeof batch+sizeof waits+16];if(cx_fmt(all,sizeof all,"r=0\n%s%sexit $r\n",batch,waits))die("compile script");char *v[]={"sh","-c",all,0};char *s=run(v,0,0);if(!s)die("real fixture compilation");free(s);}
+ for(int i=0;i<11;i++){size_t sn;char *text=cx_read(sources[i],&sn);if(!text)die("source extent read");for(size_t j=0;j<sn;j++)if(text[j]=='\n')source_lines[i]++;if(sn&&text[sn-1]!='\n')source_lines[i]++;free(text);
+ if(prepare){char name[80];if(cx_fmt(name,sizeof name,"prepared-%d.o",i))die("prepared name");path(p,base,name);char *v[]={"sh",com,sources[i],"-c","-funit","-b","lnx/x86_64","-o",p,0};char *s=run(v,0,0);if(!s)die("real fixture compilation");free(s);printf("PREPARED\tobject\t%s\tno-test-result\n",name);}}
+ {char why[512];int reused;if(rn_prepare(home,"tools/symindex.cx",base,indexbin,sizeof indexbin,&reused,why,sizeof why)||rn_prepare(home,"tools/slice-inventory.cx",base,tool,sizeof tool,&reused,why,sizeof why))die(why);}
+ prepared_identity(prepare);
+ if(prepare)return 0;
  char *pv[]={"sh",com,"-cx-plan",sources[0],0};char *plan=run(pv,0,0);if(!plan)die("real fixture plan");char *at=plan;int module=0;while(*at){char *end=strchr(at,'\n');if(!end)die("plan LF");*end=0;char *v[64];int n=split(at,v,64);if(n<2)die("plan columns");char absolute[4400];if(*v[1]=='/')fit(absolute,sizeof absolute,v[1]);else path(absolute,base,v[1]);char canonical[4400];if(!realpath(absolute,canonical))die("plan path");int i;for(i=0;i<11;i++)if(!strcmp(canonical,sources[i]))break;if(i==11||*keys[i]){fprintf(stderr,"planned=%s index=%d key=%s\n",canonical,i,i==11?"-":keys[i]);die("unexpected/duplicate planned source");}if(i==0)fit(keys[i],sizeof keys[i],"top.o");else if(cx_fmt(keys[i],sizeof keys[i],"m%d.o",module++))die("module key");count++;at=end+1;}free(plan);if(count!=11)die("fixture plan closure");
+ for(int i=0;i<11;i++){char name[80];if(cx_fmt(name,sizeof name,"prepared-%d.o",i))die("prepared object name");path(p,base,name);char h[65];long bytes;digest(p,h,&bytes);if(bytes<=0)die("empty real object");}
  for(int i=0;i<11;i++){path(p,base,i?"prepared-2.o":"prepared-0.o");path(q,base,keys[i]);copyfile(p,q);digest(q,hashes[i],&sizes[i]);}path(p,base,"unreceipted.o");path(q,base,keys[2]);copyfile(q,p);digest(com,comsha,&combytes);write_receipt(0);char *out=0;if(!part_number||part_number==1){out=consume(0,0);ck(out!=0,"真实对象和收据正常消费");if(out){inspect(out);free(out);}}
  refuse(1,"SHA mismatch","构造器SHA篡改拒绝");refuse(2,"SHA mismatch","P3 SHA篡改拒绝");refuse(3,"SHA mismatch","对象SHA篡改拒绝");refuse(4,"incomplete input identity","缺失P3身份拒绝");refuse(5,"target must be","错误target拒绝");refuse(6,"conflicting rev","冲突rev拒绝");refuse(12,"duplicate/conflicting object target","冲突Linux目标拒绝");refuse(13,"duplicate receipt field","重复目标字段拒绝");refuse(7,"object byte mismatch","对象bytes错误拒绝");refuse(8,"duplicate/unsafe object key","越界对象key拒绝");refuse(11,"duplicate/unsafe object key","重复对象key拒绝");refuse(9,"receipt source disagrees","claimed src必须匹配同构造器重建mapping");refuse(10,"receipt missing planned object","真实计划模块缺漏拒绝");
  if(!part_number||part_number==6){write_receipt(0);path(p,base,"tools/entry-build.cx");/* 不创建或修改私有目录外文件：用已存在构造器路径测试根外realpath。 */

@@ -46,6 +46,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use cxlib.runnerprep
 
 static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 
@@ -219,6 +220,11 @@ int main(int argc, char **argv) {
     if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (id %s)\n", id); return 2; }
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
+    char cache[4400], listbin[4400], batchbin[4400], why[512]; int reused;
+    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/out/register-native", root)) rg_die("prepare path", 0);
+    if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
+    if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
+        rn_prepare(root, "tests/run-batch.cx", cache, batchbin, sizeof batchbin, &reused, why, sizeof why)) rg_die(why, 0);
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
     if (has_key(rg_bpath(), id)) rg_die("batch already registered", id);
     if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
@@ -227,7 +233,7 @@ int main(int argc, char **argv) {
     if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());
     if (append(rg_cpath(), crow)) { take_out(rg_bpath(), brow); rg_die("cannot append", rg_cpath()); }
-    {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
+    {   char *v[] = {"./tools/bound", "55", listbin, "--list", 0};
         rc = run(v, buf, sizeof buf);
         okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
         if (!okrun) {
@@ -243,7 +249,7 @@ int main(int argc, char **argv) {
         if (sy_realpath(".", root, sizeof root) < 0 || tx_snprintf(parent, sizeof parent, "%s/out/register-%s-%d", root, id, sy_pid()) >= (int)sizeof parent
             || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory out/register-%s-%d under %s (is out/ a writable directory?)\n", id, sy_pid(), root); parent[0] = 0; }
         else {
-            char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tests/run-batch.cx", "--", root, parent, (char *)id, 0};
+            char *v[] = {"./tools/bound", "58", batchbin, root, parent, (char *)id, 0};
             rc = run(v, buf, sizeof buf);
             at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
             if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }

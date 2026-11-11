@@ -5,6 +5,7 @@
 #pragma unisa use sysx.process
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.runnerprep
 static char home[4400],work[4400],com[4400],tool[4400],invtool[4400],src[4400],obj[4400],ctor[4400],inv[4400],seal[4400],receipt[4400],replay[4400];
 static int checks,failed,part_number;static const char *fixture_target="lnx/x86_64";
 static void die(const char *s){fprintf(stderr,"check-object-source-replay: %s\n",s);exit(2);}
@@ -30,7 +31,8 @@ static int entry_cache_probe(int argc,char **argv){
 int main(int argc,char **argv){if(argc>1&&!strcmp(argv[1],"--entry-cache"))return entry_cache_probe(argc,argv);int arm=0;for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--arm64")&&!arm){arm=1;fixture_target="lnx/arm64";}else if(!strcmp(argv[i],"--part")&&!part_number&&i+1<argc&&strlen(argv[i+1])==1&&argv[i+1][0]>='1'&&argv[i+1][0]<='3')part_number=argv[++i][0]-'0';else die("usage [--arm64] [--part 1|2|3] | --entry-cache ROOT P3 OUT CONSTRUCTOR KEY REASON");}if(!realpath(".",home))die("home");(cx_fmt(work, sizeof work, "%s/object-source-replay-check-XXXXXX", sy_tmpdir()) ? exit(2) : (void)0);if(!mkdtemp(work))die("temp");path(com,home,"unisacc.com");path(tool,home,"tools/object-source-replay.cx");path(invtool,home,"tools/slice-inventory.cx");path(src,work,"probe.cx");path(obj,work,"probe.o");path(ctor,work,"unisacc.com");path(inv,work,"inventory.tsv");path(seal,work,"sources.tsv");path(receipt,work,"receipt.txt");path(replay,work,"replayed");copyfile(com,ctor);put(src,"int proof(void){return 37;}\n");
  char *build[]={"sh",ctor,"-O2","-c","-b",(char *)fixture_target,"-funit","-o",obj,src,0};np_result r=run(build,0,"real-source-object-prepared",0);np_free(&r);
  char cs[65],os[65];long cb=hash(ctor,cs),ob=hash(obj,os);FILE *f=fopen(receipt,"wb");if(!f)die("receipt");fprintf(f,"entry-build-v3\nroot\t%s\np3\t%s\np3_sha\t%s\nconstructor\t%s\nconstructor_sha\t%s\nconstructor_bytes\t%ld\nvia\tsh\nobject_level\tmode=default\tall=-O2\ttarget=%s\nprobe.o\tsha=%s\tbytes=%ld\tsrc=-\n",work,ctor,cs,ctor,cs,cb,fixture_target,os,ob);if(fclose(f))die("close");char p[4400];path(p,work,"tools");if(mkdir(p,0700))die("tools");path(p,work,"tools/entry-build.cx");put(p,"#define EB_OBJ 1\nvoid roots(void){keys[0]=\"probe.o\";src_rel[0]=\"probe.cx\";}\n");
- char *inventory[]={"sh",com,invtool,"--","--slice",work,"--tools-root",home,0};r=run(inventory,0,"real-inventory-verified",0);if(r.rc||!r.out||!strstr(r.out,"identity=VERIFIED"))die("inventory preparation incomplete");if(cx_write(inv,r.out,r.outn))die("inventory capture");np_free(&r);
+ char indexbin[4400],why[512];int reused;if(rn_prepare(home,"tools/symindex.cx",work,indexbin,sizeof indexbin,&reused,why,sizeof why))die(why);
+ char *inventory[]={"sh",com,invtool,"--","--slice",work,"--tools-root",home,"--out",work,"--index-native",indexbin,0};r=run(inventory,0,"real-inventory-verified",0);if(r.rc||!r.out||!strstr(r.out,"identity=VERIFIED"))die("inventory preparation incomplete");if(cx_write(inv,r.out,r.outn))die("inventory capture");np_free(&r);
  char *prepare[]={"sh",com,tool,"--","--inventory",inv,"--slice",work,"--sources",seal,"--prepare",0};r=run(prepare,0,"seal-prepared-not-pass",0);np_free(&r);
  replaycase("0",0,"actual-object-byte-replay",0);
  char target_old[64],target_other[64];(cx_fmt(target_old, sizeof target_old, "target=%s", fixture_target) ? exit(2) : (void)0);(cx_fmt(target_other, sizeof target_other, "target=%s", !strcmp(fixture_target,"lnx/arm64")?"lnx/x86_64":"lnx/arm64") ? exit(2) : (void)0);

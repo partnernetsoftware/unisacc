@@ -502,6 +502,21 @@ static int pp_receipt_line(const char *line, long len, char *name, int cap) {
 /* Copy the installed product from ROOT to DEST. Under PP_SPLIT the launcher goes to DEST and
    every member the receipt names goes under DEST/unisacc.com.dev/; a receipt that is missing
    falls back to the two names this file documents. */
+static int pp_copy_record(const char *root, const char *dst) {
+    char names[PP_MAX_MEMBERS][64], hashes[PP_MAX_MEMBERS][65], got[65], dev[4400], record[4400];
+    long bytes[PP_MAX_MEMBERS];
+    int count = pp_member_list(root, names, hashes, bytes, PP_MAX_MEMBERS);
+    if (count < 1 || pp_join(dst, pp_dev_dir, dev, sizeof dev)) return -1;
+    for (int i = 0; i < count; i++) {
+        const char *dir = pp_is_launcher(names[i]) ? dst : dev;
+        if (pp_file_hex(dir, names[i], got) || pp_cmp(got, hashes[i])) return -1;
+    }
+    if (pp_join(root, "unisacc.com.build.json", record, sizeof record)) return -1;
+    int present = pp_present(record);
+    if (present < 0) return -1;
+    return present ? pp_copy_member(root, dst, "unisacc.com.build.json") : 0;
+}
+
 int pp_copy_product(const char *root, const char *dst) {
     char p[4400], devsrc[4400], devdst[4400], name[256];
     size_t n = 0;
@@ -510,13 +525,13 @@ int pp_copy_product(const char *root, const char *dst) {
     int l = pp_layout(root), copied = 0;
     if (l < 0) return -1;
     if (sy_exists(dst) != 1 && sy_mkdir(dst, 0700)) return -1;
+    if (pp_join(dst, "unisacc.com.build.json", p, sizeof p)) return -1;
+    { int rc = sy_unlink(p); if (rc && rc != -ENOENT) return -1; }
     if (pp_join(root, pp_dev_dir, devsrc, (int)sizeof devsrc)) return -1;   /* no trailing slash: "dev//name" is not what every layer here resolves */
     if (pp_join(dst, pp_dev_dir, devdst, (int)sizeof devdst)) return -1;
     if (pp_copy_member(root, dst, "unisacc.com")) return -1;
-    /* the installed build record travels with the APE: batches such as whole-o-deadline read ROOT/unisacc.com.build.json */
-    if (pp_join(root, "unisacc.com.build.json", p, (int)sizeof p)) return -1;
-    if (sy_exists(p) == 1 && pp_copy_member(root, dst, "unisacc.com.build.json")) return -1;
-    if (l == PP_APE) return 0;
+    /* A build record certifies a complete copy, never a partial split product. */
+    if (l == PP_APE) return pp_copy_record(root, dst);
     if (sy_exists(devdst) != 1 && sy_mkdir(devdst, 0700)) return -1;
     if (pp_join(root, "ape-receipt.txt", p, (int)sizeof p)) return -1;
     r = cx_read(p, &n);
@@ -540,5 +555,5 @@ int pp_copy_product(const char *root, const char *dst) {
         if (pp_copy_member(devsrc, devdst, "entry.elf")) return -1;
         if (pp_copy_member(devsrc, devdst, pp_pkg_name)) return -1;
     }
-    return 0;
+    return pp_copy_record(root, dst);
 }

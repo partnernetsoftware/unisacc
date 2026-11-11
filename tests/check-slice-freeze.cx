@@ -1,8 +1,8 @@
 /* tests/check-slice-freeze.cx -- fixtures for tools/slice-freeze.cx.
- *   sh ./unisacc.com tests/check-slice-freeze.cx -- [ROOT]
- * ROOT defaults to the cwd and only supplies the product; every fixture is built in a
- * mkdtemp git repository under the system temp dir, so nothing in ROOT changes (the last
- * check re-reads git status of ROOT to prove it). Cases:
+ *   sh ./unisacc.com tests/check-slice-freeze.cx -- --prepare ABS_OUT
+ *   sh ./unisacc.com tests/check-slice-freeze.cx -- ABS_OUT
+ * Run from the private root. Preparation supplies native tools, never a verdict;
+ * consumption builds fresh git fixtures below ABS_OUT and keeps every assertion.
  *   hit=0                     a commit outside the frozen surface exits 0 with hit=0
  *   NO_CASE                   a hit without a case for a hit-row batch
  *   NO_APPROVAL               a case but no ledger SLICE-CHANGE row naming cc
@@ -20,6 +20,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use cxlib.runnerprep
 
 #define CK_P 4400
 static char root[CK_P], work[CK_P];
@@ -117,23 +118,7 @@ static int same_file(const char *a, const char *b) {
 static void release_snapshots(void) {
     char d[CK_P], dev[CK_P], snap[CK_P], a[CK_P], b[CK_P], out[32768], rev[80];
     int mode, rc;
-    /* Compile the real tool once; all fixtures exercise this same dispatcher. */
-    {
-        char com[CK_P], src[CK_P], exe[CK_P], status[80];
-        char *v[] = {"sh", com, "-o", exe, src, 0};
-        if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
-            cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root) ||
-            cx_fmt(exe, sizeof exe, "%s/release-build.elf", work)) die("release compile path");
-        rc = run(root, v, out, sizeof out);
-        put(work, "release-compile-output.txt", out);
-        if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("release compile status");
-        put(work, "release-compile-status.txt", status);
-        if (rc != 0 || sy_exists(exe) != 1) {
-            ck(0, "release.compile-tool");
-            fprintf(stderr, "release compile fixture=%s rc=%d\n%s\n", work, rc, out);
-            return;
-        }
-    }
+    /* Prepared native tools are inputs; all release dispatcher assertions still run. */
     for (mode = 0; mode < 5; mode++) {
         int failed_before = failed;
         if (cx_fmt(d, sizeof d, "%s/release-%d", work, mode) || sy_mkdir(d, 0755)) die("release dir");
@@ -273,30 +258,40 @@ static void six_target_receipts(void) {
 }
 int main(int argc, char **argv) {
     char out[1 << 15], fix[CK_P], before[4096], after[4096], rdir[CK_P], bdir[CK_P];
-    if (argc > 2) die("usage [ROOT]");
-    if (argc == 2) { if (sy_realpath(argv[1], root, (int)sizeof root) < 0) die("root"); }
-    else if (sy_realpath(".", root, (int)sizeof root) < 0) die("cwd");
-    { char tmpl[CK_P];
-      if (cx_fmt(tmpl, sizeof tmpl, "/tmp/check-slice-freeze-XXXXXX")) die("path");
-      if (!mkdtemp(tmpl)) die("work dir");
-      if (cx_fmt(work, sizeof work, "%s", tmpl)) die("path"); }
-    { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, before, sizeof before); }
-    /* All slice-freeze cases use one real compiled CLI, not repeated JITs. */
-    {
-        char com[CK_P], src[CK_P], exe[CK_P], status[80]; int rc;
-        char *v[] = {"sh", com, "-o", exe, src, 0};
-        if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
-            cx_fmt(src, sizeof src, "%s/tools/slice-freeze.cx", root) ||
-            cx_fmt(exe, sizeof exe, "%s/slice-freeze.elf", work)) die("slice compile path");
-        rc = run(root, v, out, sizeof out);
-        put(work, "slice-compile-output.txt", out);
-        if (cx_fmt(status, sizeof status, "rc=%d\n", rc)) die("slice compile status");
-        put(work, "slice-compile-status.txt", status);
-        if (rc != 0 || sy_exists(exe) != 1) {
-            fprintf(stderr, "slice compile retained fixtures=%s rc=%d\n%s\n", work, rc, out);
-            return 1;
-        }
+    int prepare = argc == 3 && !strcmp(argv[1], "--prepare");
+    if (argc != 2 && !prepare) die("usage ABS_OUT | --prepare ABS_OUT");
+    if (sy_realpath(".", root, (int)sizeof root) < 0) die("cwd");
+    const char *dest = argv[prepare ? 2 : 1];
+    if (dest[0] != '/' || cx_fmt(work, sizeof work, "%s", dest)) die("absolute output required");
+    if (prepare) {
+        char exe[CK_P], why[512]; int reused;
+        if (sy_mkdir(work, 0700) && sy_exists(work) != 1) die("prepare directory");
+        if (rn_prepare(root, "tools/slice-freeze.cx", work, exe, sizeof exe, &reused, why, sizeof why)) die(why);
+        char alias[CK_P];
+        if (cx_fmt(alias, sizeof alias, "%s/slice-freeze.elf", work)) die("slice prepared path");
+        if (sy_exists(alias)==1 && sy_unlink(alias)) die("slice old prepared link");
+        if (sy_symlink(exe, alias)) die("slice prepared link");
+        if (rn_prepare(root, "tools/release-build.cx", work, exe, sizeof exe, &reused, why, sizeof why)) die(why);
+        if (cx_fmt(alias, sizeof alias, "%s/release-build.elf", work)) die("release prepared path");
+        if (sy_exists(alias)==1 && sy_unlink(alias)) die("release old prepared link");
+        if (sy_symlink(exe, alias)) die("release prepared link");
+        return 0;
     }
+    { char prepared[CK_P], exe[CK_P], alias[CK_P];
+    { char expected[CK_P], alias[CK_P], actual[CK_P], why[512]; int reused;
+      const char *sources[]={"tools/slice-freeze.cx","tools/release-build.cx"};
+      const char *names[]={"slice-freeze.elf","release-build.elf"};
+      for(int i=0;i<2;i++) {
+          if(rn_prepare(root,sources[i],work,expected,sizeof expected,&reused,why,sizeof why)) die(why);
+          if(cx_fmt(alias,sizeof alias,"%s/%s",work,names[i]) || !realpath(alias,actual) || strcmp(actual,expected)) die("prepared native identity mismatch; prepare again");
+      }
+    }
+      if (cx_fmt(prepared,sizeof prepared,"%s",work) || cx_fmt(work,sizeof work,"%s/run-%d",prepared,sy_pid()) || sy_mkdir(work,0700)) die("consumer directory");
+      const char *names[]={"slice-freeze.elf","release-build.elf"};
+      for(int i=0;i<2;i++) { if(cx_fmt(exe,sizeof exe,"%s/%s",prepared,names[i]) || cx_fmt(alias,sizeof alias,"%s/%s",work,names[i]) || sy_exists(exe)!=1 || sy_symlink(exe,alias)) die("prepared native missing"); }
+    }
+    { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, before, sizeof before); }
+    /* Preparation is separate and never a test verdict. */
     /* 1: hit=0 */
     { char d[CK_P];
       if (cx_fmt(d, sizeof d, "%s/hit0", work) || sy_mkdir(d, 0755)) die("dir");
@@ -370,11 +365,7 @@ int main(int argc, char **argv) {
     six_target_receipts();
     { char *v[] = {(char *)"git", (char *)"status", (char *)"--short", 0}; run(root, v, after, sizeof after); }
     ck(strcmp(before, after) == 0, "repo.untouched");
-    if (failed) fprintf(stderr, "check-slice-freeze: retained fixtures=%s\n", work);
-    else {
-        char *v[] = {"rm", "-rf", work, 0}; np_result r = {0}; char why[200];
-        np_run(v, 0, 0, 30, &r, why, sizeof why); np_free(&r);
-    }
+    fprintf(stderr, "check-slice-freeze: retained fixtures=%s\n", work);
     printf("CHECK_SLICE_FREEZE\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;
 }

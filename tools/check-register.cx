@@ -1,14 +1,14 @@
 /* tools/check-register.cx -- the registry lock in tools/register.cx, on a PRIVATE copy of the tables.
  *
- *   sh ./unisacc.com tools/check-register.cx
+ *   sh ./unisacc.com tools/check-register.cx -- --prepare ABS_OUT
  *
  * The fixture rows never touch tests/batches.tsv and tests/coverage.tsv: the check copies them into
- * out/check-register-tables-PID/tests, points the register calls at that copy with UNISACC_TABLES, and
+ * ABS_OUT/check-register-tables-XXXXXX/tests, points register calls at that copy with UNISACC_TABLES, and
  * asserts byte-for-byte on the copy.  The real tables are asserted unchanged at the end, so a concurrent
  * registration lane can no longer make this check fail by writing in the same window (2026-11-02: one
  * such false FAIL).  DRIVER = the register under test (tools/register.cx).
  *
- *   sh ./unisacc.com tools/check-register.cx
+ *   sh ./unisacc.com tools/check-register.cx -- --out ABS_OUT
  *
  * Two registrations overlap on tests/batches.tsv and tests/coverage.tsv; before the lock they saw each
  * other's half-written registry and rolled back through no fault of either row (2026-11-02, three
@@ -34,9 +34,19 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.runnerprep
 
 static int failed, checks;
 static char root[4096], fx[4400], bpath[4400], cpath[4400], tables[4400], rbpath[4400], rcpath[4400], envtables[4440];
+static char prepared_driver[4400], output[4400];
+static void native_args(char **v) {
+    if (!prepared_driver[0]) return;
+    for (int i=0; v[i] && v[i+1] && v[i+2] && v[i+3]; i++) {
+        if (!strcmp(v[i], "sh") && !strcmp(v[i+1], "./unisacc.com") && !strcmp(v[i+2], "tools/register.cx") && !strcmp(v[i+3], "--")) {
+            v[i]=prepared_driver; int j=i+1; do { v[j]=v[j+3]; } while(v[j++]); return;
+        }
+    }
+}
 #define DRIVER "tools/register.cx"
 
 static void ok(int c, const char *what) {
@@ -101,9 +111,12 @@ static int take_out(const char *path, const char *line) {
 /* run ARGV bounded at 58 s (cxlib.procrun: on timeout the process group is killed and the reason is in OUT);
    the last cap-1 bytes of stderr followed by stdout into OUT (terminated): exit code, or -1 when it did not run to an exit */
 static int run(char **argv, char *out, long cap) {
+    char *native[64]; int ai=0;
+    while(argv[ai]) { if(ai==63) die("argv bound",0); native[ai]=argv[ai]; ai++; }
+    native[ai]=0; native_args(native);
     pr_result r; int rc; long en, on, skip, k, n = 0;
     out[0] = 0;
-    if (pr_run("check-register child", argv, 0, 0, 58, &r)) { if (cx_fmt(out, (size_t)cap, "%s", r.why)) out[0] = 0; return -1; }
+    if (pr_run("check-register child", native, 0, 0, 58, &r)) { if (cx_fmt(out, (size_t)cap, "%s", r.why)) out[0] = 0; return -1; }
     en = r.err ? (long)r.errn : 0; on = r.out ? (long)r.outn : 0;
     skip = en + on > cap - 1 ? en + on - (cap - 1) : 0;
     for (k = skip; k < en + on; k++) out[n++] = k < en ? r.err[k] : r.out[k - en];
@@ -137,6 +150,7 @@ static void reg_argv(char **av, const char **store, const char *id, const char *
     (void)store;
     av[0] = "env"; av[1] = (char *)envtables; av[2] = "sh"; av[3] = "./unisacc.com"; av[4] = DRIVER; av[5] = "--";
     av[6] = (char *)id; av[7] = fx; av[8] = (char *)marker; av[9] = (char *)text; av[10] = fx; av[11] = "interfaces"; av[12] = 0;
+    native_args(av);
 }
 
 /* A separate bounded mode keeps the existing concurrency cases unchanged. DRIVER_SOURCE may
@@ -183,7 +197,7 @@ static void sha_of(const char *p, char *h) { size_t n = 0; char *b = cx_read(p, 
 static int root_preflight(const char *driver) {
     static char out[1 << 15]; char hold[4400], com[4400], drv[4400], outdir[4400], fake[4400], hb[65], hc[65], h[65]; int rc;
     char *a[] = {"env", envtables, "sh", com, drv, "--", "cr-root", "tools/register-fixture.cx", "REGISTER_FIXTURE_OK", "root preflight row", "tools/register-fixture.cx", "interfaces", 0};
-    if (cx_fmt(hold, sizeof hold, "/tmp/check-register-root-XXXXXX") || !mkdtemp(hold)) die("mkdtemp", "root");
+    if (cx_fmt(hold, sizeof hold, "%s/check-register-root-XXXXXX", output) || !mkdtemp(hold)) die("mkdtemp", "root");
     pjoin(com, sizeof com, root, "unisacc.com");
     if (driver[0] == '/') { if (cx_fmt(drv, sizeof drv, "%s", driver)) die("path bound", driver); } else pjoin(drv, sizeof drv, root, driver);
     if (sy_exists(drv) != 1) die("no such driver", drv);
@@ -225,6 +239,11 @@ static int root_preflight(const char *driver) {
 }
 
 int main(int argc,char **argv) {
+    int prepare = argc == 3 && !strcmp(argv[1], "--prepare");
+    if (prepare || (argc >= 3 && !strcmp(argv[1], "--out"))) {
+        if (argv[2][0]!='/' || cx_fmt(output,sizeof output,"%s",argv[2])) die("absolute output required",0);
+        if (prepare) argc=1; else { argc-=2; argv+=2; }
+    }
     int args_only=argc==2&&!strcmp(argv[1],"--args-check");
     int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
     int root_only=(argc==2||argc==3)&&!strcmp(argv[1],"--root-preflight");
@@ -237,12 +256,22 @@ int main(int argc,char **argv) {
     char orig_hb[65], orig_hc[65], real_hb[65], real_hc[65];
     int i, j;
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", 0);
+    if (!output[0] && cx_fmt(output,sizeof output,"%s/%s/check-register",root,"out")) die("output path",0);
+    if (sy_mkdir(output,0700) && sy_exists(output)!=1) die("output directory",output);
+    if (!root_only) {
+        char cache[4400], bin[4400], why[512]; int reused;
+        if (rn_prepare(root,DRIVER,output,prepared_driver,sizeof prepared_driver,&reused,why,sizeof why)) die(why,0);
+        if (cx_fmt(cache,sizeof cache,"%s/%s/register-native",root,"out")) die("prepare cache",0);
+        if (sy_mkdir(cache,0700) && sy_exists(cache)!=1) die("prepare cache",cache);
+        if (rn_prepare(root,"tests/run.cx",cache,bin,sizeof bin,&reused,why,sizeof why) || rn_prepare(root,"tests/run-batch.cx",cache,bin,sizeof bin,&reused,why,sizeof why)) die(why,0);
+        if (prepare) return 0;
+    }
     pjoin(rbpath, sizeof rbpath, root, "tests/batches.tsv");
     pjoin(rcpath, sizeof rcpath, root, "tests/coverage.tsv");
     {   /* the private table directory: everything below works on this copy, never on the shared tables.
-           mkdtemp under /tmp keeps the tree free of out/ and run.cx accepts an absolute UNISACC_TABLES. */
+           Explicit output keeps preparation and consumption in the caller-owned directory. */
         char hold[4400];
-        if (cx_fmt(hold, sizeof hold, "/tmp/check-register-tables-XXXXXX")) die("path bound", "tables");
+        if (cx_fmt(hold, sizeof hold, "%s/check-register-tables-XXXXXX", output)) die("path bound", "tables");
         if (!mkdtemp(hold)) die("mkdir", hold);
         if (cx_fmt(tables, sizeof tables, "%s/tests", hold)) die("path bound", "tables");
         {   int r = sy_mkdir(tables, 0700); if (r < 0 && r != -EEXIST) die("mkdir", tables); }
