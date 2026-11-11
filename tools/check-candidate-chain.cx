@@ -31,7 +31,7 @@ static int has(const char *h, const char *n) {
 }
 
 int main(void) {
-    char cwd[400], com[500], tool[500], out[8192], *o = 0;
+    char cwd[400], com[500], tool[500], out[65536], *o = 0;
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
     { char *v[] = {"pwd", 0};
@@ -44,7 +44,7 @@ int main(void) {
     }
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
-      ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=35") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=55"), "plan"); }
+      ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=55") && has(out, "p3-models") && has(out, "g2-lnx-x86_64-obj-0") && has(out, "g2-lnx-arm64-obj-43") && has(out, "jobs-net-41-finish"), "plan"); }
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "--rev"), "missing-rev"); }
@@ -236,6 +236,15 @@ int main(void) {
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE gen must be 1..3"), "gen-out-of-range-refused");
     }
     {
+        char td[4400], fp[4500], gd[4500], manifest[4500], cmd[14000];
+        const char *row = "m1.o\t/tmp/unused-phase-parser-source.cx\n";
+        if (cx_fmt(td, sizeof td, "%s/cc-dynamic-phase-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(fp, sizeof fp, "%s/fixedpoint", td) || cx_fmt(gd, sizeof gd, "%s/g2", fp) || cx_fmt(manifest, sizeof manifest, "%s/lnx-x86_64.closures.tsv", gd)) { ck(0, "dynamic-phase-path"); return 1; }
+        if (sy_mkdir(fp, 0755) || sy_mkdir(gd, 0755) || cx_write(manifest, row, strlen(row))) { ck(0, "dynamic-phase-setup"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 0000000000000000000000000000000000000000 --out '%s' --until g2-lnx-x86_64-closure-m01.o 2>&1", com, tool, td)) { ck(0, "dynamic-phase-command"); return 1; }
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE --until unknown phase"), "dynamic-closure-leading-zero-refused");
+        cx_rmtree(td);
+    }
+    {
         /* pack 切片取址: 只在新位置(chain_work/gen1/...)时找得到;缺失仍拒绝;旧位置不被接受 */
         char cmd[2400];
         const char *w = "/tmp/cc-slice-w";
@@ -250,6 +259,24 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --slice-path %s win-x86_64 2>&1", com, tool, w)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE missing slice image"), "pack-slice-missing-refused");
         sh("rm -rf /tmp/cc-slice-w", 0, 0);
+    }
+    {
+        char td[500], file[600], cmd[2400];
+        const char *bad[] = {"1\tsnap\t-\t55\n", "0\tsnap\t-\t56\n", "0\tsnap\t-\t55\n1\tsnap\t-\t55\n", "0\tsnap\t-\t55", "0\tsnap\t-\t55\textra\n"};
+        const char *names[] = {"phase-order-refused", "phase-bound-refused", "phase-duplicate-refused", "phase-missing-lf-refused", "phase-extra-field-refused"};
+        if (cx_fmt(td, sizeof td, "%s/cc-phases-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(file, sizeof file, "%s/phases.tsv", td)) { ck(0, "phase-tmp"); return 1; }
+        for (int j = 0; j < 5; j++) {
+            if (cx_write(file, bad[j], strlen(bad[j])) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
+            ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE"), names[j]);
+        }
+        if (cx_write(file, "0\tbuild\t-\t55\n1\tsnap\t-\t55\n", strlen("0\tbuild\t-\t55\n1\tsnap\t-\t55\n")) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "PHASE\t0\tbuild") && has(out, "PHASE\t1\tsnap"), "phase-order-consumed");
+        cx_rmtree(td);
+    }
+    {
+        char generator[500], cmd[2400];
+        if (cx_fmt(generator, sizeof generator, "%s/tools/chain-phases-gen.cx", cwd) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check 2>&1", com, generator)) { ck(0, "phase-generator-path"); return 1; }
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "CHAIN_PHASES\tstatus=CHECK"), "phase-generated-table-current");
     }
     sy_printf("CHECK_CANDIDATE_CHAIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;

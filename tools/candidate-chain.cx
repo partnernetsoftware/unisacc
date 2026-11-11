@@ -3,9 +3,12 @@
  *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
  *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
  *
- * 子进程一律 tools/bound 55。131 作业:start-job 与 finish-job 分两次调用;
- * 每波作业数按上一波 wall_ms 自适应(目标每次 <55s),超时按作业粒度 --resume。
- * --resume 跳过 checkpoint.tsv 已 DONE 相位。编排只在本 .cx 内,不经 .sh。
+ * Each child is bounded to 55 seconds. Independent start/finish waves honor
+ * --parallel (default 4) and retain per-job checkpoints. --jobs ROOT CTX BUILD
+ * PHASE --job-index N runs one resumable job; --touch REL selects affected nets.
+ * --baseline-ctx BASE accepts unchanged jobs only through verified adoption.
+ * Final unions and P3 guards have individual --until phases. Frozen-run final
+ * proofs rehash metadata and retain payload stat identity, not an ABA guarantee.
  */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
@@ -15,6 +18,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use sys.posix
 
@@ -29,9 +33,9 @@ static long fsize(const char *p) {
 }
 /* Child exit as the old cx_runv_timeout callers read it: the code, 128+signal, or 124 on a timeout
    (now also named on stderr by cxlib.procrun). stdout and stderr are echoed after the child ends. */
-static int pr_code(const char *label, char **v, int secs) {
+static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
     pr_result r;
-    int t = pr_run(label, v, 0, 0, secs, &r);
+    int t = pr_run(label, v, cwd, 0, secs, &r);
     if (t && r.timed_out) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 124; }
     if (t) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 127; }
     pr_echo(&r);
@@ -39,6 +43,7 @@ static int pr_code(const char *label, char **v, int secs) {
     pr_free(&r);
     return t;
 }
+static int pr_code(const char *label, char **v, int secs) { return pr_code_at(label, v, 0, secs); }
 static int runv_secs(char **v, int secs) { return pr_code(v[0], v, secs); }
 /* "sh ROOT/unisacc.com REST..." bounded by SECS: a thin call of pr_run, which owns the process
    group and kills it at the bound (the tools/bound wrapper this used to add is no longer needed). */
@@ -427,25 +432,46 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
     mark(outdir, ptag, sy_now_ms() - t0);
 }
 
-static const char *g_phases[35] = {
-    "snap", "build", "ctx", "host", "list", "warmup",
-    "jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net", "final",
-    "routes", "p3", "gen1-lnx-x86_64", "gen1-lnx-arm64",
-    "gen1-osx-x86_64", "gen1-osx-arm64", "gen1-win-x86_64", "gen1-win-arm64",
-    "g2-lnx-x86_64", "g2-lnx-arm64", "g3-lnx-x86_64", "g3-lnx-arm64",
-    "kernels-g2", "kernels-g3",
-    "g2-osx-x86_64", "g2-osx-arm64", "g2-win-x86_64", "g2-win-arm64",
-    "g3-osx-x86_64", "g3-osx-arm64", "g3-win-x86_64", "g3-win-arm64",
-    "compare", "pack"
-};
+/* The build table is orchestration metadata, never a model fact input. */
+static char g_phasebuf[512][80];
+static const char *g_phases[512];
+static int g_nphases;
+static const char *phases_file;
+static void load_chain_phases(const char *root) {
+    char path[4400]; size_t n = 0; char *s, *p;
+    if (phases_file) { if (cx_fmt(path, sizeof path, "%s", phases_file)) die("path", "phases"); }
+    else if (cx_fmt(path, sizeof path, "%s/build/chain-phases.tsv", root)) die("path", "phases");
+    s = cx_read(path, &n);
+    if (!s || !n || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("REFUSE chain-phases text", path);
+    p = s; g_nphases = 0;
+    while (*p) {
+        char *e = strchr(p, '\n'), *v[4], *q; int fields = 1, j; char order[20];
+        *e = 0;
+        if (*p == '#') { p = e + 1; continue; }
+        v[0] = p;
+        for (q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 4) die("REFUSE chain-phases fields", path); v[fields++] = q + 1; }
+        if (fields != 4 || g_nphases == 512) die("REFUSE chain-phases fields/count", path);
+        if (cx_fmt(order, sizeof order, "%d", g_nphases) || strcmp(v[0], order)) die("REFUSE chain-phases order", path);
+        if (!*v[1] || strlen(v[1]) >= 80) die("REFUSE chain-phases id", path);
+        for (q = v[1]; *q; q++) if (!((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_')) die("REFUSE chain-phases id", path);
+        for (j = 0; j < g_nphases; j++) if (!strcmp(g_phases[j], v[1])) die("REFUSE chain-phases duplicate", path);
+        if (strcmp(v[2], "-") && strcmp(v[2], "outer")) die("REFUSE chain-phases exclusive_dir", path);
+        if (strcmp(v[3], "55")) die("REFUSE chain-phases timeout", path);
+        if (cx_fmt(g_phasebuf[g_nphases], 80, "%s", v[1])) die("phase id", path);
+        g_phases[g_nphases] = g_phasebuf[g_nphases]; g_nphases++; p = e + 1;
+    }
+    free(s); if (!g_nphases) die("REFUSE empty chain-phases", path);
+}
 static const char *until_phase;
 static void plan(void) {
     int i;
-    sy_printf("CANDIDATE_CHAIN\tplan\tphases=35\n");
-    for (i = 0; i < 35; i++)
+    sy_printf("CANDIDATE_CHAIN\tplan\tphases=%d\n", g_nphases);
+    for (i = 0; i < g_nphases; i++)
         sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
     sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=55\n");
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=55\n");
 }
 
 static int hex40(const char *s) {
@@ -535,6 +561,94 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
     if (cx_fmt(d, sizeof d, "%s/g%d/%s", fp, g, slug) || cx_fmt(rc, sizeof rc, "%s/g%d/phase-%d.tsv", fp, g, idx)) die("path", phase);
     clean_phase_path(outdir, phase, d, rc);
 }
+static const char *lnx_obj[44] = { "drive.o", "host.o", "stages.o", "routestep.o", "stagehandoff.o", "runexec.o", "attributeframe.o", "bind.o", "cli.o", "compat.o", "route.o", "deps.o", "input.o", "args.o", "path.o", "entrybind.o", "memlayout.o", "driveface.o", "driveroute.o", "cxmod.o", "tapegate.o", "fwdstub.o", "executor.o", "transition.o", "codec.o", "modeldecode.o", "modelnumber.o", "packmodel.o", "modelload.o", "bindstage.o", "entryexec.o", "hostnative.o", "tapelink.o", "drivelink.o", "drivetapebin.o", "driveargs.o", "driveplan.o", "driveutil.o", "driveunits.o", "driverun.o", "hostout.o", "hostres.o", "rescache.o", "drivestream.o" };
+static void g2_closures(const char *root, const char *outdir, const char *rev, const char *snap, const char *pkg,
+                        const char *ctor, const char *dest, const char *fp, const char *helper,
+                        const char *target, const char *slug, int resume) {
+    char tool[4400], com[4400], manifest[4400], prepare[80], group[80];
+    if (cx_fmt(tool, sizeof tool, "%s/tools/entry-build.cx", snap) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g2/%s.closures.tsv", fp, slug) || cx_fmt(prepare, sizeof prepare, "g2-%s-closure-prepare", slug) || cx_fmt(group, sizeof group, "g2-%s-closure", slug)) die("path", slug);
+    if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
+    char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
+    pr_result result; long began = sy_now_ms();
+    if (pr_run(prepare, list, 0, 0, 55, &result) || result.rc || result.residue) { pr_echo(&result); pr_free(&result); die("closure list", slug); }
+    if (result.outn && (!result.out || result.out[result.outn - 1] != '\n' || memchr(result.out, 0, result.outn))) { pr_free(&result); die("closure list text", slug); }
+    size_t oldn = 0; char *old = cx_read(manifest, &oldn);
+    if (resume && ck_done(outdir, prepare)) {
+        if (!old || oldn != result.outn || memcmp(old, result.out, oldn)) { free(old); pr_free(&result); die("REFUSE closure plan changed", manifest); }
+    } else if (cx_write(manifest, result.out ? result.out : "", result.outn)) { free(old); pr_free(&result); die("closure manifest", manifest); }
+    free(old);
+    int count = 0, requested = 0;
+    for (char *p = result.out; p && *p;) {
+        char *e = strchr(p, '\n'), *tab = memchr(p, '\t', e - p), name[40], expected[40], tag[100];
+        if (!tab || memchr(tab + 1, '\t', e - tab - 1) || tab == p || tab - p >= 40) { pr_free(&result); die("closure list fields", manifest); }
+        if (mm_copy(name, sizeof name, p, (long)(tab - p))) die("closure name copy", manifest); name[tab - p] = 0;
+        if (count >= 4096 || cx_fmt(expected, sizeof expected, "m%d.o", count) || strcmp(name, expected)) die("closure order", manifest);
+        *e = 0;
+        if (!under_dir(tab + 1, snap) || has_dotdot(tab + 1)) die("closure source outside snapshot", tab + 1);
+        if (cx_fmt(tag, sizeof tag, "g2-%s-closure-%s", slug, name)) die("closure tag", name);
+        if (until_phase && !strcmp(until_phase, tag)) requested = 1;
+        *e = '\n'; count++; p = e + 1;
+    }
+    if (until_phase && !strncmp(until_phase, group, strlen(group)) && strcmp(until_phase, prepare) && strcmp(until_phase, group) && !requested) die("REFUSE closure phase absent from manifest", until_phase);
+    if (!(resume && ck_done(outdir, prepare))) mark(outdir, prepare, sy_now_ms() - began);
+    else if (until_phase && !strcmp(until_phase, prepare)) exit(0);
+    for (char *p = result.out; p && *p;) {
+        char *e = strchr(p, '\n'), *tab = strchr(p, '\t'), name[40], tag[100];
+        if (mm_copy(name, sizeof name, p, (long)(tab - p))) die("closure name copy", manifest); name[tab - p] = 0;
+        if (cx_fmt(tag, sizeof tag, "g2-%s-closure-%s", slug, name)) die("closure tag", name);
+        if (!(resume && ck_done(outdir, tag))) {
+            char *a[] = {"fixedpoint", (char *)rev, (char *)snap, (char *)pkg, (char *)ctor, (char *)fp, (char *)helper, "--phase", "g2", "--target", (char *)target, "--object", name, "--resume", 0};
+            long started = sy_now_ms(); if (step(root, a)) die(tag, dest);
+            mark(outdir, tag, sy_now_ms() - started);
+        } else if (until_phase && !strcmp(until_phase, tag)) exit(0);
+        p = e + 1;
+    }
+    pr_free(&result);
+    if (!(resume && ck_done(outdir, group))) mark(outdir, group, 0);
+    else if (until_phase && !strcmp(until_phase, group)) exit(0);
+}
+static int known_closure_phase(const char *outdir, const char *phase) {
+    const char *slugs[] = {"lnx-x86_64", "lnx-arm64"};
+    if (!outdir) return 0;
+    for (int i = 0; i < 2; i++) {
+        char prefix[80], file[4400], needle[48]; struct stat st;
+        if (cx_fmt(prefix, sizeof prefix, "g2-%s-closure-", slugs[i])) die("phase", phase);
+        size_t z = strlen(prefix); if (strncmp(phase, prefix, z)) continue;
+        const char *name = phase + z, *p = name + 1; int index = 0;
+        if (*name != 'm' || strlen(name) >= 40 || *p < '0' || *p > '9' || (*p == '0' && p[1] != '.')) return 0;
+        while (*p >= '0' && *p <= '9') { if (index > 4095) return 0; index = index * 10 + *p++ - '0'; }
+        if (index > 4095 || strcmp(p, ".o")) return 0;
+        if (cx_fmt(file, sizeof file, "%s/fixedpoint/g2/%s.closures.tsv", outdir, slugs[i]) || cx_fmt(needle, sizeof needle, "m%d.o\t", index)) die("path", phase);
+        if (lstat(file, &st)) { if (errno == ENOENT) return 0; die("closure manifest stat", file); }
+        size_t n = 0; char *text = cx_read(file, &n); if (!text || !n || text[n - 1] != '\n' || memchr(text, 0, n)) { free(text); die("closure manifest text", file); }
+        int found = 0; char *at = text;
+        while ((at = strstr(at, needle))) { if (at == text || at[-1] == '\n') { found = 1; break; } at++; }
+        free(text); return found;
+    }
+    return 0;
+}
+static void run_g2_lnx(const char *root, const char *outdir, const char *rev, const char *snap,
+    const char *pkg, const char *gen1, const char *fp, const char *helper,
+    const char *target, const char *slug, int resume) {
+    char dest[4400], tag[80]; int i;
+    if (cx_fmt(dest, sizeof dest, "%s/g2/%s", fp, slug)) die("path", slug);
+    sy_mkdir(fp, 0755);
+    for (i = 0; i <= 44; i++) {
+        if (i == 44) g2_closures(root, outdir, rev, snap, pkg, gen1, dest, fp, helper, target, slug, resume);
+        char *a[20]; int n = 0; long t0 = sy_now_ms();
+        if (i < 44 ? cx_fmt(tag, sizeof tag, "g2-%s-obj-%d", slug, i) : cx_fmt(tag, sizeof tag, "g2-%s", slug)) die("phase", slug);
+        a[n++] = "fixedpoint"; a[n++] = (char *)rev; a[n++] = (char *)snap; a[n++] = (char *)pkg;
+        a[n++] = (char *)gen1; a[n++] = (char *)fp; a[n++] = "--phase"; a[n++] = "g2";
+        a[n++] = "--target"; a[n++] = (char *)target; a[n++] = "--identity-helper"; a[n++] = (char *)helper;
+        if (i < 44) { a[n++] = "--object"; a[n++] = (char *)lnx_obj[i]; } else a[n++] = "--link-only";
+        if (fsize(dest) >= 0) a[n++] = "--resume";
+        a[n] = 0;
+        /* Existing bytes are adopted only by fixedpoint's identity verifier. */
+        if (step(root, a)) die(tag, dest);
+        if (!(resume && ck_done(outdir, tag))) mark(outdir, tag, sy_now_ms() - t0);
+        else { sy_printf("RESUME\t%s\n", tag); if (until_phase && tx_eqz(tag, until_phase)) exit(0); }
+    }
+}
 static int job_has_record(const char *ctx, const char *id) {
     char rec[4400];
     if (cx_fmt(rec, sizeof rec, "%s/jobs/%s/record.tsv", ctx, id)) die("path", id);
@@ -614,63 +728,246 @@ static int sjw(const char *s, const char *ctx, const char *b, const char *phase,
     v[n++] = 0;
     return bound_sh(s, v);
 }
+/* --touch paths are repository-relative dependency inputs, not output selectors. */
+static const char *touches[48];
+static int ntouch, nselected;
+static int jobs_parallel = 4;
+static int jobs_index = -1;
+static const char *baseline_ctx;
+static char selected[64][128];
+static void select_nets(const char *s) {
+    char com[4400], toolpath[4400]; char *v[60]; int n = 0;
+    if (!ntouch) return;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", s) || cx_fmt(toolpath, sizeof toolpath, "%s/tools/net-deps.cx", s)) die("path", "net-deps");
+    v[n++] = "sh"; v[n++] = com; v[n++] = toolpath; v[n++] = "--"; v[n++] = "--root"; v[n++] = (char *)s; v[n++] = "--touch";
+    for (int i = 0; i < ntouch; i++) v[n++] = (char *)touches[i];
+    v[n] = 0; pr_result r;
+    if (pr_run("net-deps-touch", v, 0, 0, 55, &r) || r.rc) die("REFUSE net-deps --touch", s);
+    if (!r.out || !r.outn || r.out[r.outn - 1] != '\n' || memchr(r.out, 0, r.outn) || memchr(r.out, '\r', r.outn)) die("REFUSE net-deps wire", s);
+    char *p = r.out; int footer = 0; nselected = 0;
+    while (*p) {
+        char *e = strchr(p, '\n'); *e = 0;
+        if (!strncmp(p, "AFFECTED\t", 9) && !footer) {
+            char *id = p + 9, *tab = strchr(id, '\t');
+            if (!tab || !tab[1] || strchr(tab + 1, '\t') || nselected == 64) die("REFUSE affected row", p);
+            *tab = 0;
+            if (!*id || strlen(id) >= 128 || strchr(id, '/') || strstr(id, "..")) die("REFUSE affected id", id);
+            for (int j = 0; j < nselected; j++) if (!strcmp(selected[j], id)) die("REFUSE affected duplicate", id);
+            if (cx_fmt(selected[nselected++], 128, "%s", id)) die("affected id", id);
+        } else {
+            char want[100];
+            if (cx_fmt(want, sizeof want, "AFFECTED_SUMMARY\tnets=%d\ttotal=42", nselected) || strcmp(p, want) || footer || e[1]) die("REFUSE affected summary", p);
+            footer = 1;
+        }
+        p = e + 1;
+    }
+    if (!footer) die("REFUSE affected missing summary", s);
+    pr_free(&r);
+}
+static int net_selected(const char *id) {
+    if (!ntouch) return 1;
+    for (int i = 0; i < nselected; i++) if (!strcmp(selected[i], id)) return 1;
+    return 0;
+}
+static void verify_reuse(const char *s, const char *ctx, const char *b, const char *id) {
+    char controller[4400];
+    if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", b)) die("path", id);
+    if (baseline_ctx && !job_has_record(ctx, id)) {
+        char *a[] = {controller, "adopt-job", (char *)s, (char *)ctx, (char *)baseline_ctx, (char *)id, 0};
+        if (pr_code_at("adopt-job", a, s, 55)) die("REFUSE adoption identity/bytes", id);
+        return; /* adopt-job already performs the canonical final verification. */
+    }
+    char *v[] = {controller, "reuse-job", (char *)s, (char *)ctx, (char *)id, 0};
+    if (pr_code_at("reuse-job", v, s, 55)) die("REFUSE unchanged job identity/bytes", id);
+    sy_printf("REUSED\t%s\tidentity-and-bytes-verified\n", id);
+}
+static void invalidate_job(const char *outdir, const char *ctx, const char *b, const char *id) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/jobs/%s", ctx, id)) die("path", id);
+    if (!under_dir(p, ctx)) die("REFUSE job path", p);
+    if (fsize(p) >= 0 && cx_rmtree(p)) die("remove invalidated job", p);
+    const char *actions[] = {"start-job", "finish-job"};
+    const char *suffix[] = {"argv.tsv", "env", "status", "stderr", "stdout", "error"};
+    for (int a = 0; a < 2; a++) for (int j = 0; j < 6; j++) {
+        if (cx_fmt(p, sizeof p, "%s/outer/%s-%s.%s", b, actions[a], id, suffix[j])) die("path", id);
+        if (fsize(p) >= 0 && sy_unlink(p)) die("remove invalidated evidence", p);
+    }
+}
 static int wave_phase(const char *outdir, const char *s, const char *ctx, const char *b,
                       const char *phase, int total, int resume) {
-    int first = 0, count = total > 8 ? 8 : total;
-    if (total == 5) count = 5;
-    while (first < total) {
-        char tag[80];
-        long t0, wall;
-        if (first + count > total) count = total - first;
-        if (cx_fmt(tag, sizeof tag, "jobs-%s-%d-%d", phase, first, count)) die("fmt", phase);
-        if (resume && ck_done(outdir, tag)) {
-            sy_printf("RESUME\t%s\n", tag);
-            first += count;
-            continue;
+    char list[4400], ids[42][160]; size_t bytes = 0; char *wire;
+    int count = 0, chosen[42];
+    if (cx_fmt(list, sizeof list, "%s/outer/list.stdout", b)) die("path", phase);
+    wire = cx_read(list, &bytes);
+    if (!wire || !bytes || wire[bytes - 1] != '\n' || memchr(wire, 0, bytes)) die("REFUSE authoritative jobs list", list);
+    for (char *p = wire; *p;) {
+        char *e = strchr(p, '\n'), *tab; *e = 0; tab = strchr(p, '\t');
+        if (tab) {
+            *tab = 0;
+            if (!strncmp(p, phase, strlen(phase)) && p[strlen(phase)] == '-') {
+                if (count >= total || count >= 42 || cx_fmt(ids[count], 160, "%s", p)) die("REFUSE job list extent", phase);
+                chosen[count] = !strcmp(phase, "tool") ? !ntouch : net_selected(p + strlen(phase) + 1);
+                count++;
+            }
         }
-        if (resume) scrub_wave_jobs(outdir, ctx, b, phase);
-        t0 = sy_now_ms();
-        if (sjw(s, ctx, b, phase, first, count, "start-job")) die("start-job", tag);
-        if (sjw(s, ctx, b, phase, first, count, "finish-job")) die("finish-job", tag);
-        wall = sy_now_ms() - t0;
-        mark(outdir, tag, wall);
-        sy_printf("WAVE_ADAPT\t%s\tfirst=%d\tcount=%d\twall_ms=%ld\n", phase, first, count, wall);
-        first += count;
-        if (wall > 40000 && count > 1) {
-            count = count / 2;
-            if (count < 1) count = 1;
-        } else if (wall < 25000 && count < 16) {
-            count = count + 4;
-            if (count > 16) count = 16;
+        p = e + 1;
+    }
+    free(wire);
+    if (count != total) die("REFUSE job list count", phase);
+    if (jobs_index >= total) die("REFUSE job index outside phase", phase);
+    for (int first = 0; first < total;) {
+        if (jobs_index >= 0 && first != jobs_index) { first++; continue; }
+        if (!chosen[first]) {
+            char start[80], finish[80];
+            if (cx_fmt(start, sizeof start, "jobs-%s-%d-start", phase, first) || cx_fmt(finish, sizeof finish, "jobs-%s-%d-finish", phase, first)) die("phase", phase);
+            if (!(resume && ck_done(outdir, finish))) {
+                long began = sy_now_ms();
+                verify_reuse(s, ctx, b, ids[first]);
+                if (!(resume && ck_done(outdir, start))) mark(outdir, start, 0);
+                mark(outdir, finish, sy_now_ms() - began);
+            } else {
+                /* Final canonical unions revalidate every checkpoint before routes consume it. */
+                sy_printf("RESUME\t%s\tcanonical-final-required\n", finish);
+                if (until_phase && (!strcmp(start, until_phase) || !strcmp(finish, until_phase))) exit(0);
+            }
+            first++; continue;
         }
+        int end = first + 1;
+        while (jobs_index < 0 && end < total && chosen[end] && end - first < jobs_parallel) end++;
+        /* Both actions retain per-job receipts; a failed wave never marks DONE. */
+        if (ntouch && !resume) for (int j = first; j < end; j++) invalidate_job(outdir, ctx, b, ids[j]);
+        for (int action = 0; action < 2; action++) {
+            int at = first;
+            while (at < end) {
+                char tag[80];
+                if (cx_fmt(tag, sizeof tag, "jobs-%s-%d-%s", phase, at, action ? "finish" : "start")) die("phase", phase);
+                if (resume && ck_done(outdir, tag)) {
+                    if (action) verify_reuse(s, ctx, b, ids[at]);
+                    sy_printf("RESUME\t%s\n", tag);
+                    if (until_phase && !strcmp(tag, until_phase)) exit(0);
+                    at++; continue;
+                }
+                int stop = at + 1;
+                while (stop < end) {
+                    char next[80];
+                    if (cx_fmt(next, sizeof next, "jobs-%s-%d-%s", phase, stop, action ? "finish" : "start")) die("phase", phase);
+                    if (resume && ck_done(outdir, next)) break;
+                    stop++;
+                }
+                if (!action) for (int j = at; j < stop; j++) clean_stale_job(outdir, ctx, b, ids[j]);
+                long t0 = sy_now_ms();
+                if (sjw(s, ctx, b, phase, at, stop - at, action ? "finish-job" : "start-job")) die("job action", tag);
+                long wall = sy_now_ms() - t0;
+                for (int j = at; j < stop; j++) {
+                    if (cx_fmt(tag, sizeof tag, "jobs-%s-%d-%s", phase, j, action ? "finish" : "start")) die("phase", phase);
+                    mark(outdir, tag, wall);
+                }
+                at = stop;
+            }
+        }
+        first = end;
     }
     return 0;
 }
-static int jobs_ok(const char *ctx) {
-    char jobs[4400], p[4400], stpath[4400];
-    DIR *d;
-    struct dirent *e;
-    int n = 0;
-    if (cx_fmt(jobs, sizeof jobs, "%s/jobs", ctx)) die("path", "jobs");
-    d = opendir(jobs);
-    if (!d) die("opendir", jobs);
-    while ((e = readdir(d))) {
-        size_t nst = 0;
-        char *st;
-        if (e->d_name[0] == '.') continue;
-        if (cx_fmt(p, sizeof p, "%s/%s/record.tsv", jobs, e->d_name)) die("path", "record");
-        if (fsize(p) < 1) { closedir(d); die("missing record", p); }
-        if (cx_fmt(stpath, sizeof stpath, "%s/%s/command.status", jobs, e->d_name)) die("path", "status");
-        st = cx_read(stpath, &nst);
-        if (!st || nst != 5 || st[0] != 'r' || st[1] != 'c' || st[2] != '\t' || st[3] != '0' || st[4] != '\n') {
-            free(st); closedir(d); die("job command.status", stpath);
+static void final_hash(const char *path, char hash[65]) {
+    size_t n = 0; char *p = cx_read(path, &n);
+    if (!p || sy_sha256_hex(p, (long)n, hash)) { free(p); die("final hash", path); }
+    free(p);
+}
+static int final_name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+/* Same frozen-run boundary as the incremental rehearsal: small metadata is
+ * rehashed, payloads retain physical stat identity. Not an ABA guarantee. */
+static void final_fingerprint(const char *ctx, const char *net, char out[131072]) {
+    const char *tools[] = {"tool-gen","tool-tbl","tool-net","tool-compilerpack","tool-pack"};
+    const char *prefix[] = {"gen","tbl","net"}; int used = 0;
+    for (int j = 0; j < 8; j++) {
+        char job[160], dir[4400], names[64][256]; int count = 0;
+        if (j < 5 ? cx_fmt(job, sizeof job, "%s", tools[j]) : cx_fmt(job, sizeof job, "%s-%s", prefix[j - 5], net)) die("final job", net);
+        if (cx_fmt(dir, sizeof dir, "%s/jobs/%s", ctx, job)) die("path", job);
+        DIR *d = opendir(dir); struct dirent *e;
+        if (!d) die("final job directory", dir);
+        while ((e = readdir(d))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            if (count == 64 || cx_fmt(names[count++], 256, "%s", e->d_name)) { closedir(d); die("final entries", dir); }
         }
-        free(st);
-        n++;
+        closedir(d); qsort(names, count, sizeof names[0], final_name_cmp);
+        for (int k = 0; k < count; k++) {
+            char path[4400], hash[65] = "-"; struct stat st;
+            if (cx_fmt(path, sizeof path, "%s/%s", dir, names[k]) || lstat(path, &st) || !S_ISREG(st.st_mode)) die("final regular file", dir);
+            if (strncmp(names[k], "result.", 7)) final_hash(path, hash);
+            int n = snprintf(out + used, 131072 - used, "FILE\t%s/%s\t%lu\t%lu\t%ld\t%ld\t%ld\t%s\n", job, names[k], (unsigned long)st.st_dev, (unsigned long)st.st_ino, (long)st.st_size, (long)st.st_mtime, (long)st.st_ctime, hash);
+            if (n < 0 || n >= 131072 - used) die("final fingerprint bound", dir);
+            used += n;
+        }
     }
-    closedir(d);
-    if (n != 131) die("job count not 131", jobs);
-    sy_printf("FINAL\tjobs=131\tcommand_rc=0\trecords=present\n");
+    out[used] = 0;
+}
+static void final_job_id(const char *build, int index, char id[160]) {
+    char path[4400]; size_t n = 0; int at = 0;
+    if (cx_fmt(path, sizeof path, "%s/outer/list.stdout", build)) die("path", "final list");
+    char *text = cx_read(path, &n);
+    if (!text || !n || text[n - 1] != '\n' || memchr(text, 0, n)) die("final list", path);
+    for (char *p = text; *p;) {
+        char *e = strchr(p, '\n');
+        if (!strncmp(p, "net-", 4)) {
+            char *tab = memchr(p, '\t', e - p);
+            if (!tab || tab - p >= 160) die("final list row", path);
+            if (at++ == index) { *tab = 0; if (cx_fmt(id, 160, "%s", p)) die("final id", path); free(text); return; }
+        }
+        p = e + 1;
+    }
+    free(text); die("final net index", path);
+}
+static void final_binding(const char *root, const char *ctx, const char *build, const char *outdir, const char *id, char header[20000]) {
+    char context[4400], controller[4400], ch[65], th[65];
+    if (cx_fmt(context, sizeof context, "%s/context.tsv", ctx) || cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", build)) die("path", "final");
+    final_hash(context, ch); final_hash(controller, th);
+    if (cx_fmt(header, 20000, "FINAL_NET\trun=%s\troot=%s\tctx=%s\tjob=%s\tcontext_sha=%s\tcontroller_sha=%s\n", outdir, root, ctx, id, ch, th)) die("final header", id);
+}
+static void final_proof(const char *root, const char *ctx, const char *build, const char *outdir, int index, int reuse) {
+    char id[160], header[20000], before[131072], after[131072], file[4400], idsfile[4400], controller[4400];
+    final_job_id(build, index, id); final_binding(root, ctx, build, outdir, id, header);
+    final_fingerprint(ctx, id + 4, before);
+    if (cx_fmt(file, sizeof file, "%s/final-net-%d.proof", outdir, index) || cx_fmt(idsfile, sizeof idsfile, "%s/final-net-%d.ids", outdir, index) || cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", build)) die("path", id);
+    if (reuse) {
+        size_t n = 0; char *saved = cx_read(file, &n); size_t hn = strlen(header);
+        if (!saved || n <= hn || memcmp(saved, header, hn)) { free(saved); die("REFUSE final proof binding", file); }
+        char *footer = strstr(saved + hn, "FINAL_PROOF_SHA\t"), hash[65];
+        if (!footer || (footer > saved && footer[-1] != '\n') || n != (size_t)(footer - saved) + 81 || strlen(footer) != 81 || sy_sha256_hex(saved, (long)(footer - saved), hash) || memcmp(footer + 16, hash, 64) || footer[80] != '\n') { free(saved); die("REFUSE final proof digest", file); }
+        *footer = 0;
+        char *end = strchr(saved + hn, '\n');
+        if (strncmp(saved + hn, "VERIFY_JOBS\t", 12) || !end || strcmp(end + 1, before)) { free(saved); die("REFUSE final frozen evidence changed", file); }
+        free(saved); return;
+    }
+    char line[256]; if (cx_fmt(line, sizeof line, "%s\n%s", id, index == 0 ? "tool-compilerpack\ntool-pack\n" : "") || cx_write(idsfile, line, strlen(line))) die("final ids", idsfile);
+    char *v[] = {controller, "verify-jobs", (char *)root, (char *)ctx, idsfile, 0}; pr_result r;
+    if (pr_run("final net verification", v, root, 0, 55, &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
+    if (!r.out || strncmp(r.out, "VERIFY_JOBS\t", 12) || !strchr(r.out, '\n') || strchr(r.out, '\n')[1]) { pr_free(&r); die("final verification wire", id); }
+    final_fingerprint(ctx, id + 4, after);
+    if (strcmp(before, after)) { pr_free(&r); die("final artifacts changed during verification", id); }
+    size_t hn = strlen(header), rn = strlen(r.out), fn = strlen(after);
+    char *proof = malloc(hn + rn + fn + 96);
+    if (!proof) { pr_free(&r); die("allocation", id); }
+    if (mm_copy(proof, (long)(hn + rn + fn + 96), header, (long)hn) || mm_copy(proof + hn, (long)(rn + fn + 96), r.out, (long)rn) || mm_copy(proof + hn + rn, (long)(fn + 96), after, (long)fn)) { free(proof); pr_free(&r); die("final proof copy", file); }
+    char hash[65]; if (sy_sha256_hex(proof, (long)(hn + rn + fn), hash)) { free(proof); pr_free(&r); die("final proof hash", file); }
+    int tail = snprintf(proof + hn + rn + fn, 96, "FINAL_PROOF_SHA\t%s\n", hash);
+    if (tail != 81 || cx_write(file, proof, hn + rn + fn + (size_t)tail)) { free(proof); pr_free(&r); die("final proof write", file); }
+    free(proof); pr_free(&r);
+}
+static int jobs_ok(const char *root, const char *ctx, const char *build, const char *outdir, int resume) {
+    char controller[4400];
+    if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", build)) die("path", "final");
+    char *v[] = {controller, "--verify-context", (char *)root, (char *)ctx, 0};
+    if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
+    for (int i = 0; i < 42; i++) {
+        char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", i)) die("phase", "final");
+        long started = sy_now_ms(); int reuse = resume && ck_done(outdir, tag);
+        final_proof(root, ctx, build, outdir, i, reuse);
+        if (!reuse) mark(outdir, tag, sy_now_ms() - started);
+        else if (until_phase && !strcmp(tag, until_phase)) exit(0);
+    }
+    if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
+    sy_printf("FINAL\tmodels=42\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n");
     return 0;
 }
 static int json_quoted(const char *j, size_t n, const char *key, char *dst, int want) {
@@ -774,11 +1071,29 @@ static void worker_nm_ok(const char *obj) {
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
+    const char *jobs_root = 0, *jobs_ctx = 0, *jobs_build = 0, *jobs_phase = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; continue; }
+        if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--baseline-ctx") && i + 1 < argc) { baseline_ctx = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--job-index") && i + 1 < argc) {
+            const char *p = argv[++i]; int value = 0;
+            if (!*p) die("REFUSE job index", p);
+            for (const char *q = p; *q; q++) {
+                if (*q < '0' || *q > '9' || value > 41) die("REFUSE job index", p);
+                value = value * 10 + *q - '0';
+            }
+            if (value > 41) die("REFUSE job index", p);
+            jobs_index = value; continue;
+        }
+        if (tx_eqz(argv[i], "--touch") && i + 1 < argc) {
+            if (ntouch == 48 || argv[i + 1][0] == '/' || strstr(argv[i + 1], "..") || strpbrk(argv[i + 1], "\t\r\n")) die("REFUSE touch path", argv[i + 1]);
+            touches[ntouch++] = argv[++i]; continue;
+        }
+        if (tx_eqz(argv[i], "--jobs") && i + 4 < argc) { jobs_root = argv[++i]; jobs_ctx = argv[++i]; jobs_build = argv[++i]; jobs_phase = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--worker-nm") && i + 1 < argc) { wnm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--resume")) { resume = 1; continue; }
         if (tx_eqz(argv[i], "--slice-path") && i + 2 < argc) {
@@ -842,11 +1157,35 @@ int main(int argc, char **argv) {
         }
         die("REFUSE unknown/duplicate option", argv[i]);
     }
+    if (jobs_index >= 0 && !jobs_root) die("REFUSE --job-index requires --jobs", 0);
+    jobs_parallel = parallel ? parallel : 4;
     if (wnm) { worker_nm_ok(wnm); sy_printf("WORKER_NM_OK\t%s\n", wnm); return 0; }
     if (vs_dir) {
         if (!vs_rev || !hex40(vs_rev)) die("REFUSE --rev 40-hex required", vs_rev);
         if (!idhelp) die("REFUSE --identity-helper required", vs_dir);
         return snap_ok(vs_dir, vs_rev, idhelp);
+    }
+    load_chain_phases(root);
+    if (jobs_root) {
+        if (!strcmp(jobs_phase, "final")) {
+            if (!outdir || !*outdir) die("REFUSE final --out required", 0);
+            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=42\tchild_bound=55\n"); return 0; }
+            if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+            if (jobs_index >= 0) {
+                char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", jobs_index)) die("phase", "final");
+                long started = sy_now_ms(); int done = resume && ck_done(outdir, tag);
+                final_proof(jobs_root, jobs_ctx, jobs_build, outdir, jobs_index, done);
+                if (!done) mark(outdir, tag, sy_now_ms() - started);
+                return 0;
+            }
+            return jobs_ok(jobs_root, jobs_ctx, jobs_build, outdir, resume);
+        }
+        int total = !strcmp(jobs_phase, "tool") ? 5 : 42;
+        if (strcmp(jobs_phase, "tool") && strcmp(jobs_phase, "gen") && strcmp(jobs_phase, "tbl") && strcmp(jobs_phase, "net")) die("REFUSE jobs phase", jobs_phase);
+        select_nets(jobs_root);
+        if (plan_only) { sy_printf("JOBS_PLAN\tphase=%s\taffected=%d\ttotal=42\n", jobs_phase, ntouch ? nselected : 42); return 0; }
+        if (outdir && sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+        return wave_phase(outdir ? outdir : jobs_build, jobs_root, jobs_ctx, jobs_build, jobs_phase, total, resume);
     }
     if (plan_only) {
         plan();
@@ -855,8 +1194,8 @@ int main(int argc, char **argv) {
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
     if (until_phase) {
         int u = 0, pi;
-        for (pi = 0; pi < 35; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
-        if (!u) die("REFUSE --until unknown phase", until_phase);
+        for (pi = 0; pi < g_nphases; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
+        if (!u && !known_closure_phase(outdir, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
@@ -974,35 +1313,37 @@ int main(int argc, char **argv) {
         mark(outdir, "warmup", sy_now_ms() - t0);
     } else sy_printf("RESUME\twarmup\n");
 
-    if (!(resume && ck_done(outdir, "jobs-tool"))) {
+    select_nets(snap);
+    if (ntouch || !(resume && ck_done(outdir, "jobs-tool"))) {
         long t0 = sy_now_ms();
         if (wave_phase(outdir, snap, ctx, build, "tool", 5, resume)) die("jobs-tool", "wave");
-        mark(outdir, "jobs-tool", sy_now_ms() - t0);
+        mark(outdir, "jobs-tool", 0);
     } else sy_printf("RESUME\tjobs-tool\n");
 
-    if (!(resume && ck_done(outdir, "jobs-gen"))) {
+    if (ntouch || !(resume && ck_done(outdir, "jobs-gen"))) {
         long t0 = sy_now_ms();
         if (wave_phase(outdir, snap, ctx, build, "gen", 42, resume)) die("jobs-gen", "wave");
-        mark(outdir, "jobs-gen", sy_now_ms() - t0);
+        mark(outdir, "jobs-gen", 0);
     } else sy_printf("RESUME\tjobs-gen\n");
 
-    if (!(resume && ck_done(outdir, "jobs-tbl"))) {
+    if (ntouch || !(resume && ck_done(outdir, "jobs-tbl"))) {
         long t0 = sy_now_ms();
         if (wave_phase(outdir, snap, ctx, build, "tbl", 42, resume)) die("jobs-tbl", "wave");
-        mark(outdir, "jobs-tbl", sy_now_ms() - t0);
+        mark(outdir, "jobs-tbl", 0);
     } else sy_printf("RESUME\tjobs-tbl\n");
 
-    if (!(resume && ck_done(outdir, "jobs-net"))) {
+    if (ntouch || !(resume && ck_done(outdir, "jobs-net"))) {
         long t0 = sy_now_ms();
         if (wave_phase(outdir, snap, ctx, build, "net", 42, resume)) die("jobs-net", "wave");
-        mark(outdir, "jobs-net", sy_now_ms() - t0);
+        mark(outdir, "jobs-net", 0);
     } else sy_printf("RESUME\tjobs-net\n");
 
-    if (!(resume && ck_done(outdir, "final"))) {
-        long t0 = sy_now_ms();
-        if (jobs_ok(ctx)) die("final", "jobs");
-        mark(outdir, "final", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tfinal\n");
+    {
+        int done = resume && ck_done(outdir, "final");
+        if (jobs_ok(snap, ctx, build, outdir, resume)) die("final", "jobs");
+        if (!done) mark(outdir, "final", 0);
+        else sy_printf("RESUME\tfinal\tidentity-rechecked\n");
+    }
 
     if (!(resume && ck_done(outdir, "routes"))) {
         long t0 = sy_now_ms();
@@ -1043,13 +1384,30 @@ int main(int argc, char **argv) {
             sy_printf("P3_CTOR\tpath=%s\tsha=%s\tbytes=%lu\n", ctor, ch, (unsigned long)cn);
             preflight(root, "pre-p3", rev, build, snap, pkg);
         }
-        /* snap 已是 freeze 产物,不再 --rev(否则每次 pp_copy_product ~6MB,0.0.49 整调用多约16s) */
-        v[n++] = rbt; v[n++] = (char *)"--";
-        v[n++] = (char *)"p3"; v[n++] = snap; v[n++] = srcpkg; v[n++] = pkg;
-        v[n++] = (char *)"--nets"; v[n++] = nets; v[n++] = (char *)"--routes"; v[n++] = rts;
-        v[n++] = 0;
-        if (bound_sh_secs(root, v, 60)) die("p3", pkg);
-        mark(outdir, "p3", sy_now_ms() - t0);
+        {
+            char run[4400], phaseout[4400], stage[40], tag[80];
+            if (cx_fmt(run, sizeof run, "%s/p3-run", outdir) || cx_fmt(phaseout, sizeof phaseout, "%s/compiler.p4.pkg", run)) die("path", "p3-run");
+            if (sy_mkdir(run, 0755) && fsize(run) < 0) die("mkdir", run);
+            for (int pi = 0; pi < 44; pi++) {
+                if (pi == 0) { if (cx_fmt(stage, sizeof stage, "guard-init")) die("phase", "p3"); }
+                else if (pi <= 40) { if (cx_fmt(stage, sizeof stage, "guard-%d", pi - 1)) die("phase", "p3"); }
+                else if (cx_fmt(stage, sizeof stage, "%s", pi == 41 ? "models" : pi == 42 ? "resources" : "assemble")) die("phase", "p3");
+                if (cx_fmt(tag, sizeof tag, "p3-%s", stage)) die("phase", "p3");
+                if (resume && ck_done(outdir, tag)) {
+                    sy_printf("RESUME\t%s\n", tag);
+                    if (until_phase && tx_eqz(tag, until_phase)) exit(0);
+                    continue;
+                }
+                char *a[] = {rbt, "--", "p3", snap, srcpkg, phaseout, "--nets", nets, "--routes", rts, "--phase", stage, "--run", run, 0};
+                long started = sy_now_ms();
+                if (bound_sh(root, a)) die(tag, run);
+                mark(outdir, tag, sy_now_ms() - started);
+            }
+            size_t pn = 0; char *pb = cx_read(phaseout, &pn);
+            if (!pb || !pn || cx_write(pkg, pb, pn)) { free(pb); die("p3 publish", pkg); }
+            free(pb);
+        }
+        mark(outdir, "p3", 0);
     } else sy_printf("RESUME\tp3\n");
     preflight(root, "post-p3", rev, build, snap, pkg);
 
@@ -1245,28 +1603,8 @@ int main(int argc, char **argv) {
         || !ck_done(outdir, "gen1-win-x86_64") || !ck_done(outdir, "gen1-win-arm64"))
         die("REFUSE gen1 six slices incomplete", "Y0-SETPGID-REGRESSION: do not patch worker; scene kept");
 
-    if (!(resume && ck_done(outdir, "g2-lnx-x86_64"))) {
-        clean_fp_phase(outdir, fp, "g2-lnx-x86_64", 2, "lnx-x86_64", 0);
-        long t0 = sy_now_ms();
-        char *a[14];
-        sy_mkdir(fp, 0755);
-        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
-        a[6] = (char *)"--phase"; a[7] = (char *)"g2"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/x86_64";
-        a[10] = (char *)"--identity-helper"; a[11] = helper; a[12] = 0;
-        if (step(root, a)) die("g2-lnx-x86_64", fp);
-        mark(outdir, "g2-lnx-x86_64", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tg2-lnx-x86_64\n");
-
-    if (!(resume && ck_done(outdir, "g2-lnx-arm64"))) {
-        clean_fp_phase(outdir, fp, "g2-lnx-arm64", 2, "lnx-arm64", 1);
-        long t0 = sy_now_ms();
-        char *a[13];
-        a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
-        a[6] = (char *)"--phase"; a[7] = (char *)"g2"; a[8] = (char *)"--target"; a[9] = (char *)"lnx/arm64";
-        a[10] = (char *)"--identity-helper"; a[11] = helper; a[12] = 0;
-        if (step(root, a)) die("g2-lnx-arm64", fp);
-        mark(outdir, "g2-lnx-arm64", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tg2-lnx-arm64\n");
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/x86_64", "lnx-x86_64", resume);
+    run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, "lnx/arm64", "lnx-arm64", resume);
 
     if (!(resume && ck_done(outdir, "g3-lnx-x86_64"))) {
         clean_fp_phase(outdir, fp, "g3-lnx-x86_64", 3, "lnx-x86_64", 0);
