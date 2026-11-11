@@ -1,0 +1,52 @@
+/* From repository root: sh ./unisacc.com tools/check-r2-bound.cx
+ * Real fixture file under out/, the real tool, and the file's bytes afterwards. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static char fix[4096];
+#define FIX fix
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\tr2-bound.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int run(const char *l1, const char *l2, const char *l3) {
+    char *sv[16], junk[4096]; int fd, pid, k = 0, ex = 0, code = 0, sig = 0;
+    sv[k++] = "timeout"; sv[k++] = "-k"; sv[k++] = "2"; sv[k++] = "50"; sv[k++] = "sh"; sv[k++] = "./unisacc.com";
+    sv[k++] = "tools/r2-bound.cx"; sv[k++] = "--"; sv[k++] = FIX; sv[k++] = (char *)l1;
+    if (l2) sv[k++] = (char *)l2;
+    if (l3) sv[k++] = (char *)l3;
+    sv[k] = 0;
+    pid = sy_spawn_pipe(sv, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while (sy_read(fd, junk, sizeof junk) > 0) {}
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int has(const char *w) { size_t n; char *b = cx_read(FIX, &n); return b && tx_find(b, (long)n, w, tx_len(w, 256)) >= 0; }
+
+int main(int argc, char **argv) {
+    char dir[4096];
+    const char *src =
+        "#pragma unisa use sys.proc\n"
+        "int f(char **av, char *o) { int cut; return sy_run(av, o, 64, &cut); }\n"
+        "int g(void) { char *o = 0; size_t n = 0; return cx_run(\"true\", &o, &n); }\n"
+        "int h(char **av) { int fd; return sy_spawn_pipe(av, 0, 0, &fd, 0); }\n"
+        "int k(void) { return 0; }\n";
+    if (argc > 1) { if (cx_fmt(dir, sizeof dir, "%s", argv[1])) return 2; }
+    else if (cx_fmt(dir, sizeof dir, "%s/check-r2-bound-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (cx_fmt(fix, sizeof fix, "%s/fix.cx", dir)) return 2;
+    sy_mkdir(dir, 0755);
+    ck(cx_write(FIX, src, (size_t)tx_len(src, 4096)) == 0, "fixture-written");
+    ck(run("5", 0, 0) == 2 && has("return 0; }\n") && !has("bounded_run"), "refuses-a-line-without-a-call");
+    ck(run("2", "3", "4") == 0, "tool-exits-0");
+    ck(has("bounded_run(av, 50, o, 64, &cut)") && has("static int bounded_run("), "sy_run-bounded-with-helper");
+    ck(has("cx_run_timeout(\"true\", 50, &o, &n)"), "cx_run-gets-a-timeout");
+    ck(has("spawn_pipe_bounded(av, 0, 0, &fd, 0)") && has("static int spawn_pipe_bounded("), "spawn_pipe-bounded-with-helper");
+    printf("CHECK_R2_BOUND\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,228 @@
+/* tools/r2-bound.cx -- make the R2-timeout sites of one .cx file bounded (cx-lint R2-timeout).
+ *
+ *   sh ./unisacc.com tools/r2-bound.cx -- FILE LINE [LINE...]
+ *
+ * On each given 1-based LINE of FILE, every call is rewritten and the matching helper is added once
+ * (after the last "#pragma unisa use" line of the file's head) when the file does not define it:
+ *   sy_run(A, ...)         -> bounded_run(A, 50, ...)      helper: cx_runv_timeout under sh exec 2>&1, 50 s
+ *   cx_run(A, ...)         -> cx_run_timeout(A, 50, ...)   existing runtime call
+ *   sy_spawn_pipe(A, ...)  -> spawn_pipe_bounded(A, ...)   helper: argv under "timeout -k 2 50"
+ * Refused, nothing written, when a line holds none of these calls, the file has no use line, or a
+ * line is outside the file.  Prints R2_BOUND<TAB>file<TAB>calls<TAB>helpers.  One atomic rename. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define RB_CAP (1L << 22)
+
+static void die(const char *a, const char *b) { fprintf(stderr, "r2-bound: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static const char *HELP_RUN =
+    "/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr\n"
+    "   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */\n"
+    "static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {\n"
+    "    char *w[64], *b = 0;\n"
+    "    size_t n = 0, j;\n"
+    "    int k = 0, i, rc;\n"
+    "    if (cut) *cut = 0;\n"
+    "    if (!argv) return -EINVAL;\n"
+    "    w[k++] = \"sh\"; w[k++] = \"-c\"; w[k++] = \"exec \\\"$@\\\" 2>&1\"; w[k++] = \"sh\";\n"
+    "    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];\n"
+    "    if (argv[i]) return -E2BIG;\n"
+    "    w[k] = 0;\n"
+    "    rc = cx_runv_timeout(w, secs, &b, &n);\n"
+    "    if (cap > 0) {\n"
+    "        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }\n"
+    "        for (j = 0; b && j < n; j++) out[j] = b[j];\n"
+    "        out[b ? n : 0] = 0;\n"
+    "    }\n"
+    "    free(b);\n"
+    "    return rc;\n"
+    "}\n";
+static const char *HELP_PIPE =
+    "/* an unlinked spool file the drained output of a bounded child goes to */\n"
+    "static int spool_open(void) {\n"
+    "    char t[4096];\n"
+    "    int fd;\n"
+    "    if (cx_fmt(t, sizeof t, \"%s/r2b-XXXXXX\", sy_tmpdir())) return -1;\n"
+    "    fd = mkstemp(t);\n"
+    "    if (fd >= 0) sy_unlink(t);\n"
+    "    return fd;\n"
+    "}\n"
+    "\n"
+    "/* sy_spawn_pipe with a 50 s deadline: the child's stdout (and stderr when EFD is given) is drained here with sy_poll\n"
+    "   into spool files; past the deadline its process group is killed.  OFD/EFD come back as the spool files, rewound,\n"
+    "   and the child is NOT reaped: the caller's sy_wait_status(pid) still reports its real status (128+9 when killed). */\n"
+    "static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd, int *efd) {\n"
+    "    int po = -1, pe = -1, pid, fo, fe = -1, open_o = 1, open_e = efd ? 1 : 0, killed = 0;\n"
+    "    long deadline = sy_now_ms() + 50000;\n"
+    "    char chunk[16384];\n"
+    "    pid = sy_spawn_pipe(argv, cwd, flags, &po, efd ? &pe : 0);\n"
+    "    if (pid < 0) return pid;\n"
+    "    fo = spool_open();\n"
+    "    if (efd) fe = spool_open();\n"
+    "    if (fo < 0 || (efd && fe < 0)) { sy_killpg(pid, 9); sy_signal(pid, 9); sy_close(po); if (efd) sy_close(pe); return -EIO; }\n"
+    "    while (open_o || open_e) {\n"
+    "        sy_pollfd_t p[2];\n"
+    "        int n = 0, io = -1, ie = -1, r;\n"
+    "        long left = deadline - sy_now_ms(), g;\n"
+    "        if (left <= 0) {\n"
+    "            if (killed) break;\n"
+    "            sy_killpg(pid, 9); sy_signal(pid, 9); killed = 1; deadline = sy_now_ms() + 2000;\n"
+    "            continue;\n"
+    "        }\n"
+    "        if (open_o) { io = n; p[n].fd = po; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }\n"
+    "        if (open_e) { ie = n; p[n].fd = pe; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }\n"
+    "        r = sy_poll(p, n, left > 200 ? 200 : left);\n"
+    "        if (r < 0) break;\n"
+    "        if (io >= 0 && p[io].revents) {\n"
+    "            g = sy_read(po, chunk, sizeof chunk);\n"
+    "            if (g > 0) { if (sy_write_all(fo, chunk, g)) break; } else open_o = 0;\n"
+    "        }\n"
+    "        if (ie >= 0 && p[ie].revents) {\n"
+    "            g = sy_read(pe, chunk, sizeof chunk);\n"
+    "            if (g > 0) { if (sy_write_all(fe, chunk, g)) break; } else open_e = 0;\n"
+    "        }\n"
+    "    }\n"
+    "    if (open_o || open_e) { sy_killpg(pid, 9); sy_signal(pid, 9); }\n"
+    "    sy_close(po);\n"
+    "    if (efd) sy_close(pe);\n"
+    "    sy_lseek(fo, 0, 0);\n"
+    "    *ofd = fo;\n"
+    "    if (efd) { sy_lseek(fe, 0, 0); *efd = fe; }\n"
+    "    return pid;\n"
+    "}\n";
+
+static char *src, *dst;
+static long sn, dn;
+
+static void emit(const char *s, long n) { long i; if (dn + n >= RB_CAP) die("output too large", 0); for (i = 0; i < n; i++) dst[dn++] = s[i]; }
+static int idc(char c) { return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int at(const char *s, long n, long i, const char *w) { long l = tx_len(w, 64); return i + l <= n && tx_prefix(s + i, l, w, l); }
+
+/* offset just past the first top-level argument of the call whose '(' is at open */
+static long first_arg_end(const char *s, long n, long open) {
+    long i = open + 1; int d = 0; char q = 0;
+    for (; i < n; i++) {
+        char c = s[i];
+        if (q) { if (c == '\\') i++; else if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '(' || c == '[' || c == '{') d++;
+        else if (c == ')' || c == ']' || c == '}') { if (d == 0) return -1; d--; }
+        else if (c == ',' && d == 0) return i;
+    }
+    return -1;
+}
+
+static long calls, helpers;
+static int need_run, need_pipe;
+
+/* rewrite the calls in [b, e) into dst */
+static void line_rewrite(long b, long e) {
+    long i = b, hit = 0;
+    while (i < e) {
+        int kind = 0; long nm = 0;
+        if ((i == b || !idc(src[i - 1]))) {
+            if (at(src, e, i, "sy_spawn_pipe(")) { kind = 3; nm = 13; }
+            else if (at(src, e, i, "sy_run(")) { kind = 1; nm = 6; }
+            else if (at(src, e, i, "cx_run(")) { kind = 2; nm = 6; }
+        }
+        if (!kind) { emit(src + i, 1); i++; continue; }
+        hit = 1; calls++;
+        if (kind == 3) { emit("spawn_pipe_bounded", 18); need_pipe = 1; i += nm; continue; }
+        {
+            long ae = first_arg_end(src, e, i + nm);
+            if (ae < 0) die("call without a second argument on the line", 0);
+            if (kind == 1) { emit("bounded_run", 11); need_run = 1; } else emit("cx_run_timeout", 14);
+            emit(src + i + nm, ae - (i + nm));
+            emit(", 50", 4);
+            i = ae;
+        }
+    }
+    if (!hit) die("no sy_run / cx_run / sy_spawn_pipe call on a given line", 0);
+}
+
+int main(int argc, char **argv) {
+    char *tmp_src; size_t rn; long lines = 0, i, ln, cur = 1, ls = 0, useline = 0, ins = -1, nl;
+    long want[256]; int nw = 0, k;
+    char tmp[4096];
+    if (argc < 3 || argc > 258) die("usage: FILE LINE [LINE...]", 0);
+    for (k = 2; k < argc; k++) {
+        long v = 0; const char *p = argv[k];
+        if (!*p) die("bad line", argv[k]);
+        for (; *p; p++) { if (*p < '0' || *p > '9') die("bad line", argv[k]); v = v * 10 + (*p - '0'); }
+        if (v < 1) die("bad line", argv[k]);
+        want[nw++] = v;
+    }
+    tmp_src = cx_read(argv[1], &rn);
+    if (!tmp_src || rn >= (size_t)RB_CAP / 2) die("cannot read", argv[1]);
+    src = tmp_src; sn = (long)rn;
+    dst = malloc(RB_CAP); if (!dst) die("out of memory", 0);
+    for (i = 0; i < sn; i++) if (src[i] == '\n') lines++;
+    for (k = 0; k < nw; k++) if (want[k] > lines + 1) die("line outside the file", argv[1]);
+    /* the head: last "#pragma unisa use" line among the first 120 lines */
+    for (i = 0, ln = 1; i < sn && ln <= 120; ln++) {
+        long e = i; while (e < sn && src[e] != '\n') e++;
+        if (at(src, e, i, "#pragma unisa use")) { useline = ln; ins = e + 1 > sn ? sn : e + 1; }
+        i = e + 1;
+    }
+    /* pass 1: rewrite the wanted lines into a scratch copy, helper text goes in after the use line */
+    {
+        char *final; long fn;
+        long b = 0;
+        dn = 0;
+        while (b < sn) {
+            long e = b; int w = 0;
+            while (e < sn && src[e] != '\n') e++;
+            nl = e < sn ? e + 1 : e;
+            for (k = 0; k < nw; k++) if (want[k] == cur) w = 1;
+            if (w) { line_rewrite(b, e); if (e < sn) emit("\n", 1); } else emit(src + b, nl - b);
+            b = nl; cur++; ls = b;
+        }
+        (void)ls;
+        /* pass 2: helpers; "static int NAME(" defined already -> not added */
+        final = malloc(RB_CAP + 4096); if (!final) die("out of memory", 0);
+        {
+            const char *r1 = need_run && tx_find(src, sn, "static int bounded_run(", 23) < 0 ? HELP_RUN : 0;
+            const char *r2 = need_pipe && tx_find(src, sn, "static int spawn_pipe_bounded(", 30) < 0 ? HELP_PIPE : 0;
+            long head = 0, pos = 0; fn = 0;
+            if ((r1 || r2) && !useline) die("no #pragma unisa use line in the head of", argv[1]);
+            /* ins counts the original bytes up to the use line's end; the rewrite never touches the head lines
+               unless a wanted line sits there, so map by line count instead */
+            for (i = 0, ln = 1; i < dn && ln <= useline; i++) { if (dst[i] == '\n') ln++; head = i + 1; }
+            if (ln <= useline) die("head lost", 0);
+            for (pos = 0; pos < head; pos++) final[fn++] = dst[pos];
+            if (r2) {
+                static const char *need[] = { "sys.fs", "sys.proc", "sys.time", "sysx.poll", "sys.posix", "sys.env", 0 };
+                int q;
+                for (q = 0; need[q]; q++) {
+                    char pat[64]; long l;
+                    if (cx_fmt(pat, sizeof pat, "unisa use %s\n", need[q])) die("pragma name too long", 0);
+                    if (tx_find(src, sn, pat, tx_len(pat, 64)) < 0) {
+                        if (cx_fmt(pat, sizeof pat, "#pragma unisa use %s\n", need[q])) die("pragma name too long", 0);
+                        l = tx_len(pat, 64); for (i = 0; i < l; i++) final[fn++] = pat[i];
+                    }
+                }
+            }
+            if (r1 || r2) {
+                final[fn++] = '\n';
+                if (r1) { long l = tx_len(r1, 8192); for (i = 0; i < l; i++) final[fn++] = r1[i]; helpers++; }
+                if (r1 && r2) final[fn++] = '\n';
+                if (r2) { long l = tx_len(r2, 8192); for (i = 0; i < l; i++) final[fn++] = r2[i]; helpers++; }
+            }
+            for (pos = head; pos < dn; pos++) final[fn++] = dst[pos];
+        }
+        (void)ins;
+        if (cx_fmt(tmp, sizeof tmp, "%s.r2-bound-XXXXXX", argv[1])) die("path too long", argv[1]);
+        {
+            int fd = mkstemp(tmp), bad;
+            if (fd < 0) die("cannot create temporary file", argv[1]);
+            bad = sy_write_all(fd, final, fn);
+            if (!bad) bad = sy_chmod(tmp, 0644);
+            if (sy_close(fd)) bad = 1;
+            if (!bad && sy_rename(tmp, argv[1])) bad = 1;
+            if (bad) { sy_unlink(tmp); die("cannot publish", argv[1]); }
+        }
+    }
+    printf("R2_BOUND\t%s\t%ld\t%ld\n", argv[1], calls, helpers);
+    return 0;
+}
