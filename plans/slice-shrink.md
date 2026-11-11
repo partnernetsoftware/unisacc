@@ -12,7 +12,7 @@
 | `TOTAL.image_bytes` | 若给 `--image`，整文件长+sha | 整文件，不摊单元 |
 
 不调 `tl_begin`：其 `sy_rlimit_as` 在 `-run` 工具宿主未导出。合并 emit 仍需 sidecar，不得用载荷冒称镜像。
-依据 `plans/link-map-sidecar.md`：prune/lower/elf 丢来源边；无 sidecar 不得把 tape 区间冒称镜像贡献。工具把该事实打成 `image_attr=UNATTRIBUTED`。
+依据 `archive/docs-2026-11/plans/link-map-sidecar.md`：prune/lower/elf 丢来源边；无 sidecar 不得把 tape 区间冒称镜像贡献。工具把该事实打成 `image_attr=UNATTRIBUTED`。
 
 校验：`sh ./unisacc.com tools/check-image-contrib.cx` → `IMAGE_CONTRIB_CHECK failed=0`。
 
@@ -35,9 +35,9 @@
 
 ## 3. 试点：`cx/compiler/asmtext.cx`（fable 首选；评审前不动）
 
-netname 不作首试点。对照 enc 网、gold 往返见 [asmtext-nn-pilot.md](asmtext-nn-pilot.md)。
+netname 不作首试点。对照 enc 网、gold 往返见 [asmtext-nn-pilot.md](../archive/docs-2026-11/plans/asmtext-nn-pilot.md)。
 
-RT-DEDUP/libc 副本与迁 NN 无关，同候选实测见 [rt-dedup-recover.md](rt-dedup-recover.md)。
+RT-DEDUP/libc 副本与迁 NN 无关，同候选实测见 [rt-dedup-recover.md](../archive/docs-2026-11/plans/rt-dedup-recover.md)。
 
 
 ## 4. 明确不做

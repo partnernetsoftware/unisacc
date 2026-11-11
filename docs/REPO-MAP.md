@@ -33,7 +33,7 @@
 |---|---|---|---|
 | `prd.md` | 当前状态与路线(思维树、记忆宫殿、能力速查),先读它;§8 为目录表 | 否 | 多人,用 `commit-own --keyed` |
 | `prd_hist.md`、`prd_release.md` | 状态历史与发布段落 | 否 | 主线 |
-| `plans/` | 版本计划与设计记录(约 120 个文件)。现行:`v0.0.50-unisacc.md`(0.0.50 记录)、`v0.0.51-unisacc.md`(增量、自含、一键)、`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.45` 至 `0.0.50` 与 `0.0.48.1`。过期的进 `archive/plans/`(见下) | 否 | 主线,交接单不再写带日期的 plans |
+| `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.50-unisacc.md`(0.0.50 记录)、`v0.0.51-unisacc.md`(增量、自含、一键)、`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.46` 至 `0.0.48` 与 `0.0.53` 至 `0.0.55`。过期的进 `archive/plans/`,2026-11 文档清理移走的在 `archive/docs-2026-11/plans/`(见下) | 否 | 主线,交接单不再写带日期的 plans |
 | `docs/` | 契约与说明:`glossary.md`、`toolchain.md`、`tapebin-v1*.md/tsv`、`tape-vs-wasm.md`、`host-interop.md`、`cx-spec-draft.md`、`docs/cx/`、本页 | 否 | 主线 |
 | `README.md`、`spec.md`、`ARCHITECTURE.md` | 用户视角入口、条款全文、早期架构叙述(含历史段落,以 `prd.md` 为准) | 否 | 主线 |
 | `AGENTS.md`、`CLAUDE.md` | 协作与工作规则 | 否 | 主人/集成者 |
@@ -48,8 +48,8 @@
 | `m4/`、`flownet/` | m4 探针与 flownet 通用流水线实验(`.cx`) | 否 | 可动 |
 | `iterate/` | 早期构造器 `construct/` 与 `kernel/`;其中 `iterate/kernel/typekw.tsv` 进源 SID | 仅 typekw.tsv | 移动会改产品面 |
 | `bench/`、`examples/`、`skills/` | 基准程序、示例(被 apps 引用)、`skills/unisacc-cx` 技能 | 否 | 可动 |
-| `research/` | 历史研究(约 1400 个文件),被 `cx/`、`exec/`、`prd.md` 引用 | 否 | 按需读,不追加流水账 |
-| `archive/` | 归档(约 3960 个文件):旧计划 `plans/`、旧测试 `testing-c43-legacy/`、参考实现、历史 prd;登记表 `archive/ARCHIVE.tsv` | 否 | 只读参考 |
+| `research/` | 历史研究(约 930 个文件;2026-11 清理移走的在 `archive/docs-2026-11/research/`),被 `cx/`、`exec/`、`prd.md` 引用 | 否 | 按需读,不追加流水账 |
+| `archive/` | 归档(约 4500 个文件):旧计划 `plans/`、2026-11 文档清理 `docs-2026-11/`(543 个,索引 `INDEX.md`)、旧测试 `testing-c43-legacy/`、参考实现、历史 prd;登记表 `archive/ARCHIVE.tsv` | 否 | 只读参考 |
 
 ## 生成物与本地残留(被 git 忽略)
 - `out/`:构建与测试产物、日志、候选、材料。**交接单约定**:各窗口把交接单写成 `out/<窗口>-handoff-*.md`,不入库、不写带日期的 plans;集成者按此路径取。清理:`find out -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} +`(保留最近一天)。

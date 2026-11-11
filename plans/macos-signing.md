@@ -60,4 +60,4 @@ workflow/action采用仓库已有固定commit pin模式，source checkout固定4
 
 ## 签名链路打通（2026-11-09，run 42561596269）
 
-签→APE重包(签后四成员)→DMG→公证 Accepted→staple。本机验收：带 quarantine DMG spctl accepted(Notarized Developer ID)、stapler validate；DMG 成员均 755；`sh unisacc.com` arm64 与 Rosetta x64 默认 -run 均 7，热 -run 0.22–0.25s、--version 0.01s；APE 解出的缓存切片 TeamIdentifier=L2N7M5M544。前述 Rosetta"挂起"已证为裸成员 Gatekeeper 提示等待（research/c48-osx-sign-rosetta/）。剩余：Intel 实机/macOS13 未测；签后 DMG 尚未挂到公开 release（随 0.0.48.1 发布执行）。
+签→APE重包(签后四成员)→DMG→公证 Accepted→staple。本机验收：带 quarantine DMG spctl accepted(Notarized Developer ID)、stapler validate；DMG 成员均 755；`sh unisacc.com` arm64 与 Rosetta x64 默认 -run 均 7，热 -run 0.22–0.25s、--version 0.01s；APE 解出的缓存切片 TeamIdentifier=L2N7M5M544。前述 Rosetta"挂起"已证为裸成员 Gatekeeper 提示等待（archive/docs-2026-11/research/c48-osx-sign-rosetta/）。剩余：Intel 实机/macOS13 未测；签后 DMG 尚未挂到公开 release（随 0.0.48.1 发布执行）。

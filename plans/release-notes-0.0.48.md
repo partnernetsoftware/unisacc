@@ -36,7 +36,7 @@
 - `TAPEBIN-ORIGIN-5`：`tapebin-roundtrip` 的五个 origin-target 夹具与断言不符（旧产品同样如此），按已知缺口登记，未改断言。
 - T1 自有的若干棘轮（`srcshape`、`drivetapebin` 调用数、`net-deps` 共享表、八行 `check-literal`）按限期豁免登记，0.0.49 内降回。
 - `p1-baseline`、`check-cx-entry` 没有批次注册，不在任何测试档里。
-- 构造本身耗时较长（候选构造约 2 小时），0.0.49 的目标是把冻结到发布压到约 10 倍更快；见 `plans/v0.0.49-unisacc.md`。
+- 构造本身耗时较长（候选构造约 2 小时），0.0.49 的目标是把冻结到发布压到约 10 倍更快；见 `archive/docs-2026-11/plans/v0.0.49-unisacc.md`。
 
 ## 验证入口
 

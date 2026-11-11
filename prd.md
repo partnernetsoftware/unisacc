@@ -472,10 +472,10 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
 | `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
-| `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.53）、structure-5-layer.md、standing-goal.md、release-notes-0.0.45 至 0.0.53；已完成的归档到 archive/plans |
+| `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.53）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（docs/REPO-MAP.md、glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
-| `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、prd 历史 |
+| `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、docs-2026-11/（2026-11 文档清理移入的 plans 与 research，索引 INDEX.md）、prd 历史 |
 | `apps/csih/` | csih 车道（归 csih 主人） |
 | `ujs/` | 论文 B（归论文 B 主人，unisacc 侧不碰） |
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
@@ -673,6 +673,7 @@ prd.md                 当前状态（本文件，只写当前事实；结构点
 - [archive/testing-c43-legacy/](archive/testing-c43-legacy/) —— 旧 1333 项测试套件（已停调度）。
 - [archive/reference-c/](archive/reference-c/)、[archive/reference-py/](archive/reference-py/) —— 旧 C/Python 参考实现。
 - [archive/plans/](archive/plans/) —— 历史计划与设计探针。
+- [archive/docs-2026-11/](archive/docs-2026-11/INDEX.md) —— 2026-11-11 文档清理移入的 plans/ 与 research/ 文件（保留原子路径），索引见 INDEX.md。
 
 
 0.0.48.1 OSX-LAUNCH-SLOW / OSX-SIGN-ROSETTA 与 0.0.49 收尾的逐条完成记录已逐字迁入 [prd_hist.md](prd_hist.md)「0.0.49 收尾」；本文件不再保留。

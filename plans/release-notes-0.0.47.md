@@ -18,7 +18,7 @@
 | 同候选原生 CI | 已完成，见下列运行与限定 | 仅 CI 表格资格，不替代全批或发布资格 |
 | 同候选全批 `s9` | 445 = 380 PASS + 0 真 FAIL + 32 KNOWN-GAP + 10 INFRA + 23 NOT-AVAIL | 终态仍为 **NOT_QUALIFIED**，不是全批通过 |
 
-冻结范围为 A1–A4、A6–A8（含 A6b 多 TU 边界与枚举维度读者修复）、M3-a、M3-b、M12、L0' 与版本；见[冻结计划](v0.0.47-unisacc.md)及[A6b 说明](v0.0.47-corpus-feasibility.md#a6b补齐此前遗漏的多翻译单元边界)。合入后主树 `13/13=25620ms`，cc 已复核元数据与关键工具；这些是源码开发证据，不等价于同候选 CI 或全批资格。M8 仅保留私有增量，本次冻结不合入。
+冻结范围为 A1–A4、A6–A8（含 A6b 多 TU 边界与枚举维度读者修复）、M3-a、M3-b、M12、L0' 与版本；见[冻结计划](../archive/docs-2026-11/plans/v0.0.47-unisacc.md)及[A6b 说明](v0.0.47-corpus-feasibility.md#a6b补齐此前遗漏的多翻译单元边界)。合入后主树 `13/13=25620ms`，cc 已复核元数据与关键工具；这些是源码开发证据，不等价于同候选 CI 或全批资格。M8 仅保留私有增量，本次冻结不合入。
 
 ## 相对 0.0.46 修复的缺陷
 
@@ -49,7 +49,7 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 
 - M3-a：修复 form-feed 空白。原 `00216` 默认 `run` 成功，合法与非法边界为 12/0；不把字面量或注释中的字节当空白删除。
 - M3-b：修复 `sizeof` 枚举常量。原例默认运行成功，边界 18/18；仅枚举常量复用不求值路径，不推广为全部标识符的新处理方式。
-- 两项均为开发证据，见[独立修复记录](v0.0.47-unisacc.md#m3-b-sizeof枚举常量独立修复)；不据此宣称 K&R、Lua 或 SQLite 的其它缺口已关闭。
+- 两项均为开发证据，见[独立修复记录](../archive/docs-2026-11/plans/v0.0.47-unisacc.md#m3-b-sizeof枚举常量独立修复)；不据此宣称 K&R、Lua 或 SQLite 的其它缺口已关闭。
 
 ## 开发与测试基础设施
 
@@ -73,7 +73,7 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 - **A5 `conflicting-function-types` 推迟**：网指纹与 pointee qualifier 缺口仍需独立处理；逆向 NPC 未实现。七修复点与固定 29/14 都不能表述为 A12 全绿，更不能表述为完整 C99 诊断。
 - **TAPE-END 推迟**：手工拼接 stream 管道的 tape 仍缺可靠结束标记，仍有截断风险，不把本轮改动称为管道完整性修复。
 - **对象编译合同债未修**：`-c -b osx/*|win/*` 文档写拒绝，实际仍编出对象；[0.0.46 已披露](release-notes-0.0.46.md#管道平台资源与验证边界)，本版未修，grk objects 四批红仍属该合同债。0.0.48 待在“真正拒绝”与“修正文档”之间二选一，尚未裁定，也未宣称已修。
-- **E1-LINT-RDOMAIN 是既有债**：旧新均为 20 条 `ERROR` 与 6 条 `WARN`；未放宽断言，不能写成 lint 通过，见[记录](v0.0.47-unisacc.md#m3-a-c99-form-feed-空白修复私有验收2026-11-07)。
+- **E1-LINT-RDOMAIN 是既有债**：旧新均为 20 条 `ERROR` 与 6 条 `WARN`；未放宽断言，不能写成 lint 通过，见[记录](../archive/docs-2026-11/plans/v0.0.47-unisacc.md#m3-a-c99-form-feed-空白修复私有验收2026-11-07)。
 - GNU 语句表达式 `({…})` 与 C11 `_Generic` 不属于严格 C99 义务；相关拒绝不能混作 C99 误拒，也不能因 M3-a 修复而宣称它们已支持。
 - K&R 旧式参数声明、Lua 未定长 extern 数组与 SQLite 大型 amalgamation 的其它既有缺口未关闭；两项 M3 不等于全部外部语料可用。
 - M12 只限制可识别完成缓存的尽力占用；淘汰失败可超限，且非 Linux 原生边界未补齐，不证明资源安全或跨平台硬配额。
@@ -95,9 +95,9 @@ A1–A4、A6–A8 已纳入冻结源。七个修复点不等于 A12 十二类全
 
 全批口径：`full-*` 登记 20 个 = 19 个矩阵 `OPEN` 汇总（记 `KNOWN-GAP`，非动态产品失败）+ 1 个校验器 `full-domain-check` PASS；旧 `s8b`/`c46-3` 的“20 KNOWN-GAP”是登记数，不是执行数，旧会话无逐个 `full` 收据。原始证据索引见 [s9 失败预归类](s9-fail-triage.tsv)。s9 的 `rollup-open` 仍按原收据列 INFRA：记录侧 `ad755` 新增 12 项未同步声明。后补表层记录已由负责人用正式 c47 APE `fde2db18…` 单批验证 `ROLLUP_OPEN domains=19 failed=0`、`negative product-change=12 other=0`：只统一四个对象合同债格为 `NEEDS_PRODUCT_CHANGE`、保留原观察并声明 12 项，12 个必需 C99 格仍 OPEN，未降覆盖、未闭合产品缺口。该表层修复尚未提交，不回填原 s9 会话 65 条非 PASS 收据，也不预写已推送。
 
-s9 身份：`product_source=7b98ec2c06`，`harness_commit>=4cdbb3ac7d`；[会话说明](s9-session.md)登记的 tests 树 SHA 为 `0d515c9ad48dfbbd62b8e0fc11de243b36037115`，**不是 harness hash**。永久 `session.tsv` 头部完整 `harness_sha=f203b83210b96db5dd063beeb2433093f912b5c5a3f4a2323e8e4c2b94462d58`，绑定本页 APE 与源 SID。
+s9 身份：`product_source=7b98ec2c06`，`harness_commit>=4cdbb3ac7d`；[会话说明](../archive/docs-2026-11/plans/s9-session.md)登记的 tests 树 SHA 为 `0d515c9ad48dfbbd62b8e0fc11de243b36037115`，**不是 harness hash**。永久 `session.tsv` 头部完整 `harness_sha=f203b83210b96db5dd063beeb2433093f912b5c5a3f4a2323e8e4c2b94462d58`，绑定本页 APE 与源 SID。
 
-比较边界：`~/.unisacc-baselines/s8b-summary/s8b-terminal.md` 的计数表记录 s8b 末次收据 PASS 230、NOT-AVAIL 162；当时后者是材料未注册/未入图导致的原始注册批次未运行口径。与 s9 比较为 **通过 230→380、原始注册批次未运行 162→0**：本轮原始注册批次已实际执行并有收据，包含材料一键构造与绑定带来的覆盖推进（入口见 [s9 材料图](s9-session.md)）。这不是同一产品纯修复增益，也不是五类 `NOT-AVAIL=0`：现存 23 项是执行后材料或子检查未达前提，例如 `properties-cases-det pass=13 fail=0 not_run=1`。对 s8e/s8f 不另报未经核实的完整同分母终态数字；现有 [s9 历史记录](s9-session.md)明确 s8f streams 15 PASS，只作材料覆盖对照，不推算其全批总数，不把历史 PASS 迁为当前资格。
+比较边界：`~/.unisacc-baselines/s8b-summary/s8b-terminal.md` 的计数表记录 s8b 末次收据 PASS 230、NOT-AVAIL 162；当时后者是材料未注册/未入图导致的原始注册批次未运行口径。与 s9 比较为 **通过 230→380、原始注册批次未运行 162→0**：本轮原始注册批次已实际执行并有收据，包含材料一键构造与绑定带来的覆盖推进（入口见 [s9 材料图](../archive/docs-2026-11/plans/s9-session.md)）。这不是同一产品纯修复增益，也不是五类 `NOT-AVAIL=0`：现存 23 项是执行后材料或子检查未达前提，例如 `properties-cases-det pass=13 fail=0 not_run=1`。对 s8e/s8f 不另报未经核实的完整同分母终态数字；现有 [s9 历史记录](../archive/docs-2026-11/plans/s9-session.md)明确 s8f streams 15 PASS，只作材料覆盖对照，不推算其全批总数，不把历史 PASS 迁为当前资格。
 
 ## 发布后待证（仅三项）
 

@@ -4,7 +4,7 @@
 
 ## 实测与复算
 
-复用`tools/net-deps.cx`及BASE5的`plans/seed-generator-functions.tsv`（293×42）、`seed-generator-split.md`、`shared-facts-generator-deps.md`，没有另造调用图。静态闭包为42网/925文件、0缺失，条件when/flags未求值；以下不能称运行覆盖。
+复用`tools/net-deps.cx`及BASE5的`archive/docs-2026-11/plans/seed-generator-functions.tsv`（293×42）、`seed-generator-split.md`、`shared-facts-generator-deps.md`，没有另造调用图。静态闭包为42网/925文件、0缺失，条件when/flags未求值；以下不能称运行覆盖。
 
 | 当前共享源 | 总度 | 前端等 | lower | encoder |
 |---|---:|---:|---:|---:|

@@ -6,7 +6,7 @@
 
 ## 是什么
 
-面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.53 是构造链与工具修复版:产品输入相对 0.0.52 零改动。上一发布版见 `plans/release-notes-0.0.52.md`。
+面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.53 是构造链与工具修复版:产品输入相对 0.0.52 零改动。上一发布版见 `archive/docs-2026-11/plans/release-notes-0.0.52.md`。
 
 ## 身份与证据
 

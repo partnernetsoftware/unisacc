@@ -4,7 +4,7 @@
 
 | 层 | 建议内容 | 已验证事实(命令级) | 状态 | 下一动作 |
 |---|---|---|---|---|
-| L0 loader | 选 os/arch→取 manifest→核 sha→交 base;不含任何切片映像 | 头部 2,631,168B=42.6% 是 win/x86_64 PE 原样存放(com-tree);win/arm64 在 APE 之外 | **可行,收益最大** | S1 已评估(plans/structure-s12-findings.md):win/x86_64 头 gzip -9 为 391,110B,省 2,240,058B=APE 的 36.3%;路径=薄 PE+inflate+写 %TEMP% 再 CreateProcessW(与 Unix sh 启动器同构,零新 Windows 能力);PE 固定基址无重定位、仅导入 kernel32 26 符号;需新增 4 项原生验证。→ 0.0.48 主线 N0 |
+| L0 loader | 选 os/arch→取 manifest→核 sha→交 base;不含任何切片映像 | 头部 2,631,168B=42.6% 是 win/x86_64 PE 原样存放(com-tree);win/arm64 在 APE 之外 | **可行,收益最大** | S1 已评估(archive/docs-2026-11/plans/structure-s12-findings.md):win/x86_64 头 gzip -9 为 391,110B,省 2,240,058B=APE 的 36.3%;路径=薄 PE+inflate+写 %TEMP% 再 CreateProcessW(与 Unix sh 启动器同构,零新 Windows 能力);PE 固定基址无重定位、仅导入 kernel32 26 符号;需新增 4 项原生验证。→ 0.0.48 主线 N0 |
 | L1 base(×6) | 执行器、包解码、sha、mmap、syscall、dl、ffi | 薄层 20 单元 395,710B(plans/slice-nn-migration.md);建议的 30–60KB 与实测不符 | 方向确认,量级修正 | M10a 清单已合;薄层合同冻结(sys-syscalls 表化 L0') |
 | L2 program | 平台无关驱动(cxmod/route/source_frame/cache/cli)存一份 tape,L1 现编并缓存 | tape.gz≈原生份额 45%;首编 25–47s;循环依赖:stages/driveunits/runexec/drivelink 是编译 L2 的必需件 | **不列主线** | S2 已量化:单元粒度可迁部分仅 16.1%(闭包外 5 单元 297,442B,实质是 as/view/ar 子命令树 driveface+asmtext);函数级死代码上界 40.5% 但散在 71 个单元不能整单元迁;若 L2 以 tape 分发 27.9%。结论:0.0.48 不把 L2 列主线 |
 | L3 nets | 只放一步决策(表→网) | 现状吻合;「NN」措辞问题已记(评审③) | 保持 | README/glossary 措辞(M6) |
