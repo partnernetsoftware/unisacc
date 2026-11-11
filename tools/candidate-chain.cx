@@ -175,10 +175,43 @@ static void span_prep_tag(char *buf, long cap, int gen) {
     if (gen == 1 ? cx_fmt(buf, cap, "wf-span-prep") : cx_fmt(buf, cap, "wf-span-prep-g%d", gen)) die("fmt", "span-prep-tag");
 }
 static void wf_scrub_dest(const char *outdir, const char *dest);
+/* Last front slice count = total - FIRST, where total is the whole-program unit count that the
+   completed front0 recorded in FRONT0/part.tsv ("total\tN"). The unit count follows the product
+   sources (85 before unitcache, 86 after), so it is read, never written here. The 45-second bound
+   of the slice is unchanged; a total outside FIRST+1..FIRST+32 is refused, not re-partitioned. */
+static void wf_tail_count(const char *front0, int first, char *buf, long cap) {
+    char pt[4400];
+    size_t n = 0, i = 0;
+    char *b;
+    long total = -1;
+    if (cx_fmt(pt, sizeof pt, "%s/part.tsv", front0)) die("path", "part.tsv");
+    b = cx_read(pt, &n);
+    if (!b) die("REFUSE front0 part.tsv unreadable", pt);
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        if (e - i > 6 && b[i] == 't' && b[i + 1] == 'o' && b[i + 2] == 't' && b[i + 3] == 'a' && b[i + 4] == 'l' && b[i + 5] == '\t') {
+            size_t k = i + 6;
+            if (total >= 0) { free(b); die("REFUSE front0 part.tsv duplicate total", pt); }
+            total = 0;
+            while (k < e) {
+                if (b[k] < '0' || b[k] > '9' || total > 100000) { free(b); die("REFUSE front0 part.tsv total", pt); }
+                total = total * 10 + (b[k] - '0');
+                k++;
+            }
+        }
+        i = e + 1;
+    }
+    free(b);
+    if (total <= first || total - first > 32) die("REFUSE front total outside last slice (first+1..first+32)", pt);
+    if (cx_fmt(buf, cap, "%ld", total - first)) die("fmt", "tail count");
+    sy_printf("WF_TAIL\ttotal=%ld\tfirst=%d\tcount=%ld\tsource=%s\n", total, first, total - first, pt);
+}
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
     char wft[4400], prep[4400], p0[4400], p1[4400], p2[4400], phase[4400], dest[4400], tag[80];
     const char *offs[3] = {"0", "32", "64"};
-    const char *cnts[3] = {"32", "32", "21"};
+    char tailc[32];
+    const char *cnts[3] = {"32", "32", 0};
     char *parts[3];
     int i;
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
@@ -202,6 +235,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-front%d", slug, i) : cx_fmt(tag, sizeof tag, "gen%d-%s-front%d", gen, slug, i))) die("fmt", slug);
         if (ck_done(outdir, tag)) { sy_printf("RESUME\t%s\n", tag); continue; }
         wf_scrub_dest(outdir, parts[i]);
+        if (i == 2) { wf_tail_count(p0, 64, tailc, sizeof tailc); cnts[2] = tailc; }
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
         v[n++] = (char *)offs[i]; v[n++] = (char *)cnts[i]; v[n++] = 0;
@@ -1606,16 +1640,18 @@ int main(int argc, char **argv) {
 
     if (!(resume && ck_done(outdir, "gen1-osx-x86_64-front2"))) {
         long t0 = sy_now_ms();
-        char wft[4400], prep[4400], part[4400];
+        char wft[4400], prep[4400], part[4400], p0[4400], tailc[32];
         char *v[12];
         int n = 0;
         if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
         if (cx_fmt(prep, sizeof prep, "%s/wf-prep", chain_work)) die("path", "prep");
         if (cx_fmt(part, sizeof part, "%s/gen1/osx-x86_64-front2", chain_work)) die("path", "part");
+        if (cx_fmt(p0, sizeof p0, "%s/gen1/osx-x86_64-front0", chain_work)) die("path", "p0");
         if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
+        wf_tail_count(p0, 64, tailc, sizeof tailc);
         v[n++] = wft; v[n++] = (char *)"--";
         v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)"osx/x86_64"; v[n++] = part;
-        v[n++] = (char *)"64"; v[n++] = (char *)"21"; v[n++] = 0;
+        v[n++] = (char *)"64"; v[n++] = tailc; v[n++] = 0;
         if (bound_sh_secs(root, v, 45)) die("osx-x86-front2", part);
         mark(outdir, "gen1-osx-x86_64-front2", sy_now_ms() - t0);
     } else sy_printf("RESUME\tgen1-osx-x86_64-front2\n");
