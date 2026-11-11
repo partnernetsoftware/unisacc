@@ -1,0 +1,89 @@
+/* Fixture stand-in for the GitHub CLI, used by tools/check-releaseexec.cx only.  No network.
+ * State lives in $FAKE_GH_DIR: every call appends its argv to `log`; marker files steer it
+ * (uploadfail, cifail, corrupt) and record what happened (draft, public, ci, assets/). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+static char D[4096];
+static void at(char *p, const char *leaf) { if (cx_fmt(p, 4400, "%s/%s", D, leaf)) exit(9); }
+static int have(const char *leaf) { char p[4400]; struct stat st; at(p, leaf); return !stat(p, &st); }
+static void touch(const char *leaf) { char p[4400]; at(p, leaf); if (cx_write(p, "1\n", 2)) exit(9); }
+static int arg(int argc, char **argv, const char *w) { int i; for (i = 1; i < argc; i++) if (!strcmp(argv[i], w)) return i; return 0; }
+static void copy(const char *from, const char *to, int spoil) {
+    size_t n = 0; char *s = cx_read(from, &n);
+    if (!s) exit(9);
+    if (spoil && n) s[0] ^= 1;
+    if (cx_write(to, s, n)) exit(9);
+    free(s);
+}
+int main(int argc, char **argv) {
+    char p[4400], q[4400]; const char *d = getenv("FAKE_GH_DIR"); FILE *f; int i;
+    if (!d || cx_fmt(D, sizeof D, "%s", d) || argc < 3) return 9;
+    at(p, "log"); f = fopen(p, "a"); if (!f) return 9;
+    for (i = 1; i < argc; i++) fprintf(f, "%s%s", i > 1 ? " " : "", argv[i]);
+    fprintf(f, "\n"); fclose(f);
+    if (!strcmp(argv[1], "release") && !strcmp(argv[2], "view")) {
+        DIR *h; struct dirent *e;
+        if (!have("draft")) return 1;
+        puts(have("public") ? "false" : "true");
+        { size_t n = 0; char *s; at(p, "tag"); s = cx_read(p, &n); if (!s) return 9; puts(s); free(s); at(p, "target"); s = cx_read(p, &n); if (!s) return 9; puts(s); free(s); }
+        at(p, "assets"); h = opendir(p);
+        while (h && (e = readdir(h)) != 0) if (e->d_name[0] != '.') puts(e->d_name);
+        if (h) closedir(h);
+        return 0;
+    }
+    if (!strcmp(argv[1], "release") && !strcmp(argv[2], "create")) {
+        int k = arg(argc, argv, "--target"); if (argc < 4 || !k || k + 1 >= argc) return 2;
+        at(p, "tag"); if (cx_write(p, argv[3], strlen(argv[3]))) return 9;
+        at(p, "target"); if (cx_write(p, argv[k + 1], strlen(argv[k + 1]))) return 9;
+        touch("draft"); at(p, "assets"); if (mkdir(p, 0700) && errno != EEXIST) return 9; return 0;
+    }
+    if (!strcmp(argv[1], "release") && !strcmp(argv[2], "upload") && argc > 4) {
+        const char *b = strrchr(argv[4], '/');
+        if (have("uploadfail")) return 1;
+        if (cx_fmt(q, sizeof q, "%s/assets/%s", D, b ? b + 1 : argv[4])) return 9;
+        copy(argv[4], q, 0);
+        return 0;
+    }
+    if (!strcmp(argv[1], "release") && !strcmp(argv[2], "download")) {
+        DIR *h; struct dirent *e; int k = arg(argc, argv, "--dir");
+        if (!k || k + 1 >= argc || (mkdir(argv[k + 1], 0700) && errno != EEXIST)) return 1;
+        at(p, "assets"); h = opendir(p);
+        while (h && (e = readdir(h)) != 0) if (e->d_name[0] != '.') {
+            char a[4600], b[4600];
+            if (cx_fmt(a, sizeof a, "%s/%s", p, e->d_name) || cx_fmt(b, sizeof b, "%s/%s", argv[k + 1], e->d_name)) return 9;
+            copy(a, b, have("corrupt") && !strcmp(e->d_name, "pkg.bin"));
+        }
+        if (h) closedir(h);
+        return 0;
+    }
+    if (!strcmp(argv[1], "release") && !strcmp(argv[2], "edit")) { if (arg(argc, argv, "--draft=false")) touch("public"); return 0; }
+    if (!strcmp(argv[1], "workflow") && !strcmp(argv[2], "run")) {
+        for (i = 3; i < argc; i++) { const char *key = !strncmp(argv[i], "commit=", 7) ? "commit" : !strncmp(argv[i], "ape_sha256=", 11) ? "ape" : 0; if (key) { const char *value = strchr(argv[i], '=') + 1; at(p, key); if (cx_write(p, value, strlen(value))) return 9; } }
+        touch("ci"); return 0;
+    }
+    if (!strcmp(argv[1], "run") && !strcmp(argv[2], "list")) { puts(have("ci") ? "777" : "776"); return 0; }
+    if (!strcmp(argv[1], "run") && !strcmp(argv[2], "download")) {
+        int k=arg(argc,argv,"-D"), a=arg(argc,argv,"-n");size_t n=0;char *s;
+        if(!k||k+1>=argc||!a||a+1>=argc||strcmp(argv[a+1],"candidate-native-evidence"))return 2;
+        if(mkdir(argv[k+1],0700)&&errno!=EEXIST)return 9;
+        if(cx_fmt(q,sizeof q,"%s/table.md",argv[k+1]))return 9;f=fopen(q,"w");if(!f)return 9;
+        if(!have("qualified"))fprintf(f,"FAKE ONLY\nFIXTURE-QUALIFIED pass=42 fail=0 not_run=0 invalid=0\n");
+        else {
+            fprintf(f,"FAKE ONLY: parser fixture, not real CI qualification\n- verdict: **QUALIFIED** pass=42 fail=0 not_run=0 invalid=0\n");
+            at(p,"commit");s=cx_read(p,&n);if(!s){fclose(f);return 9;}fprintf(f,"- commit: `%s`\n",s);free(s);
+            at(p,"ape");s=cx_read(p,&n);if(!s){fclose(f);return 9;}fprintf(f,"- ape_sha256: `%s`\n",s);free(s);
+        }
+        return fclose(f)?9:0;
+    }
+    if (!strcmp(argv[1], "run") && !strcmp(argv[2], "view")) {
+        size_t n = 0; char *s; long polls = 0;
+        at(p, "polls"); s = have("polls") ? cx_read(p, &n) : 0;
+        if (s) polls = strtol(s, 0, 10);
+        free(s);
+        if (cx_fmt(q, sizeof q, "%ld\n", polls + 1) || cx_write(p, q, strlen(q))) return 9;
+        if (have("pending") || polls < 2) puts("in_progress\t"); else puts(have("cifail") ? "completed\tfailure" : "completed\tsuccess");
+        return 0;
+    }
+    return 2;
+}

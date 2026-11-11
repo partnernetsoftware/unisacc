@@ -1,0 +1,28 @@
+/* ROOT NEW_ABS_OUT PREBUILT_ONESHOT PREBUILT_FAKE PREBUILT_RELEASE_RUN. No construction. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releaseprepare
+static int bad;
+static void die(const char *s){sy_eprintf("check-release-prepare: %s\n",s);exit(2);}
+static void ck(int ok,const char *s){sy_printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)bad++;}
+static void path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))die("path");}
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))die("write");}
+static np_result run(char **v,const char *cwd){np_result r={0};char why[512];if(np_run(v,cwd,0,12,&r,why,sizeof why)||r.residue)die("child transport");return r;}
+static void git(char **v,const char *cwd){np_result r=run(v,cwd);if(r.rc)die("fixture git");np_free(&r);}
+int main(int argc,char **argv){
+ if(argc!=6||argv[2][0]!='/'||sy_mkdir(argv[2],0700))die("ROOT NEW_ABS_OUT ONESHOT FAKE RELEASE_RUN");
+ char root[4400],state[4400],config[4400],assets[4400],p[4400],chain[4400],snap[4400],rev[41],text[30000];path(root,argv[2],"root");if(sy_mkdir(root,0700))die("root");path(state,argv[2],"state");path(config,argv[2],"config.tsv");path(assets,state,"rr/layout");path(chain,argv[2],"chain");
+ char *init[]={"git","init","-q",root,0};git(init,argv[1]);path(p,root,"input");put(p,"frozen\n");char *add[]={"git","add","input",0};git(add,root);char *commit[]={"git","-c","user.name=Fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};git(commit,root);char *head[]={"git","rev-parse","HEAD",0};np_result r=run(head,root);if(r.rc||r.outn!=41)die("HEAD");for(int i=0;i<40;i++)rev[i]=r.out[i];rev[40]=0;np_free(&r);
+ path(p,root,"unisacc.com");put(p,"not executed\n");path(p,root,"out");if(sy_mkdir(p,0700)||cx_fmt(snap,sizeof snap,"%s/release-snap-%.10s",p,rev))die("snap");
+ if(cx_fmt(text,sizeof text,"root\t%s\nbuild_rev\t%s\nconstructor\t%s\nidentity_helper\t%s\nchain_out\t%s\nsnap\t%s\nversion\t0.0.57\nrepo\tfixture/release\ntag\tv0.0.57\nworkflow\tcandidate-native.yml\nworkflow_ref\tmain\ncache_manager_x64\t%s\ncache_manager_arm64\t%s\ndeadline_s\t300\nchain_deadline_s\t300\nmax_resumes\t3\ntest_driver\t%s\n",root,rev,argv[4],argv[4],chain,snap,argv[4],argv[4],argv[4]))die("config capacity");put(config,text);
+ char *prepare[]={argv[3],"--prepare",state,config,assets,"--authorize-external-operations",0};r=run(prepare,root);ck(r.rc==1,"first real child failure stops preparation");np_free(&r);
+ path(p,state,"upstream-evidence.tsv");size_t n;char *e=cx_read(p,&n);ck(!e||!strstr(e,"\tPASS\t"),"failed preparation cannot issue PASS");free(e);
+ ck(rp_verify_upstream(state,config,assets)!=0,"test driver never qualifies upstream");
+ size_t z=strlen(text);if(z+3>=sizeof text)die("mutation capacity");text[z]='#';text[z+1]='\n';text[z+2]=0;put(config,text);r=run(prepare,root);ck(r.rc==2,"changed configuration refuses resume");np_free(&r);
+ char rr[4400],src[4400],table[4400],source_table[4400],binding[4400],h[65];path(rr,argv[2],"resume-pack");path(src,argv[2],"resume-src");if(sy_mkdir(rr,0700)||sy_mkdir(src,0700))die("resume fixture");path(table,rr,"initial.tsv");path(source_table,argv[1],"release/candidate.tsv");if(sy_copy(source_table,table,0600)<0)die("initial candidate copy");
+ const char *roles[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};np_buf bind={0};if(cx_fmt(text,sizeof text,"%s\n%s\n%s\n%s\n0000000000000000000000000000000000000000000000000000000000000000\n",root,table,src,snap))die("resume binding");np_puts(&bind,text);cx_sha256_hex("fixture\n",8,h);
+ for(int i=0;i<10;i++){path(p,src,roles[i]);put(p,"fixture\n");np_puts(&bind,roles[i]);np_puts(&bind,"\t");np_puts(&bind,h);np_puts(&bind,"\n");}path(binding,rr,"pack-inputs.tsv");if(cx_write(binding,bind.p,bind.n))die("resume binding write");free(bind.p);
+ char *resume_pack[]={argv[5],"--resume",rr,0};r=run(resume_pack,root);ck(r.rc==2&&r.err&&strstr(r.err,"pack input changed"),"pack resume rejects original table digest mismatch");np_free(&r);
+ sy_printf("RELEASE_PREPARE_CHECK\tfailed=%d\tqualification=NOT_CLAIMED\n",bad);return bad?1:0;
+}

@@ -1,0 +1,165 @@
+#pragma unisa module releaseprepare
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.reaper
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.releaseoneshotpack
+/* G1..G6, local construction only. CONFIG is immutable TSV key/value:
+ * root build_rev constructor identity_helper chain_out snap version repo tag
+ * workflow workflow_ref cache_manager_x64 cache_manager_arm64 deadline_s
+ * chain_deadline_s max_resumes. All paths absolute. assets must be STATE/rr/layout.
+ * Optional test_driver is an absolute executable: DRIVER PHASE STATE CONFIG ASSETS.
+ * It replaces expensive children, never identity checks or evidence qualification.
+ * A test-driver run emits UNKNOWN upstream evidence even on success.
+ * Return 3 retains a bounded unfinished child; invoke again with identical inputs.
+ */
+typedef struct { char *key,*value; } RpKey;
+static RpKey rp_keys[48];
+static int rp_nkeys,rp_seq;
+static const char *rp_state,*rp_config,*rp_assets,*rp_root;
+static long rp_end;
+static char rp_sid[65],rp_ctor[65];
+static const char *rp_roles[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64"};
+static const char *rp_exports[]={"unisacc-lnx64-x86","unisacc-lnx64-arm","unisacc-osx64-x86","unisacc-osx64-arm","unisacc-win64-x86.exe","unisacc-win64-arm.exe"};
+static void rp_die(const char *s){sy_eprintf("RELEASE_PREPARE\tREFUSED\t%s\n",s);exit(2);}
+static void rp_path(char *p,const char *a,const char *b){if(cx_fmt(p,4400,"%s/%s",a,b))rp_die("path capacity");}
+static const char *rp_get(const char *k){for(int i=0;i<rp_nkeys;i++)if(!strcmp(k,rp_keys[i].key))return rp_keys[i].value;return 0;}
+static const char *rp_need(const char *k){const char *s=rp_get(k);if(!s||!*s||strpbrk(s,"\r\n\t"))rp_die(k);return s;}
+static long rp_number(const char *k,long high){const char *s=rp_need(k);char *e=0;long n=strtol(s,&e,10);if(!*s||*e||n<1||n>high)rp_die(k);return n;}
+static void rp_hash(const char *p,char h[65]){size_t n;char *s=cx_read(p,&n);if(!s)rp_die(p);cx_sha256_hex(s,n,h);free(s);}
+static void rp_write(const char *p,const char *s,size_t n){
+ char tmp[4600];if(cx_fmt(tmp,sizeof tmp,"%s.new-%d-%ld",p,sy_pid(),sy_now_ms()))rp_die("atomic path");
+ int fd=sy_open(tmp,O_WRONLY|O_CREAT|O_EXCL,0600);if(fd<0)rp_die("state exclusive open");
+ int bad=sy_write_all(fd,s,(long)n);if(sy_fsync(fd))bad=1;if(sy_close(fd))bad=1;if(bad||sy_rename(tmp,p))rp_die("state durable write");
+ fd=sy_open(rp_state,O_RDONLY,0);if(fd<0)rp_die("state directory open");bad=sy_fsync(fd);if(sy_close(fd))bad=1;if(bad)rp_die("state directory sync");
+}
+static void rp_put(const char *leaf,const char *s){char p[4400];rp_path(p,rp_state,leaf);rp_write(p,s,strlen(s));}
+static int rp_equal(const char *leaf,const char *s,int create){char p[4400];size_t n;rp_path(p,rp_state,leaf);char *old=cx_read(p,&n);if(!old){if(!create)return 0;rp_put(leaf,s);return 1;}int ok=n==strlen(s)&&!memcmp(old,s,n);free(old);return ok;}
+static void rp_load(const char *state,const char *config,const char *assets){
+ rp_state=state;rp_config=config;rp_assets=assets;rp_nkeys=0;rp_seq=0;
+ if(state[0]!='/'||config[0]!='/'||assets[0]!='/')rp_die("absolute paths required");
+ size_t n;char *s=cx_read(config,&n);if(!s||memchr(s,0,n))rp_die("config read");
+ for(char *a=s;*a;){char *e=strchr(a,'\n');if(!e)rp_die("config newline");*e=0;if(*a&&*a!='#'){char *t=strchr(a,'\t');if(!t||rp_nkeys==48)rp_die("config fields");*t++=0;if(rp_get(a))rp_die("duplicate config key");rp_keys[rp_nkeys].key=a;rp_keys[rp_nkeys++].value=t;}a=e+1;}
+ rp_root=rp_need("root");char p[4400];rp_path(p,state,"rr/layout");if(strcmp(p,assets))rp_die("assets must equal STATE/rr/layout");
+ if(strlen(rp_need("build_rev"))!=40||!rcand_hex(rp_need("build_rev"),40))rp_die("build_rev");
+}
+static long rp_mono_end;
+static void rp_map_deadline(void){long left=rp_end-sy_wall_s()*1000;rp_mono_end=sy_now_ms()+(left>0?left:0);}
+/* Adapted from sysx.process: separate exec handshake and both nonblocking streams.
+ * Names remain local to avoid the two public np_* modules colliding. */
+static int rp_capture(char **argv,const char *cwd,long end,np_buf *o,np_buf *e,int *residue){
+ int po[2],pe[2],pf[2],err[2]={0,0},st=0,oo=1,oe=1,of=1,reaped=0;size_t en=0;long k;char buf[16384];
+ if(pipe(po)||pipe(pe)||pipe(pf))return 127;
+ fcntl(pf[1],F_SETFD,FD_CLOEXEC);int pid=fork();if(pid<0)return 127;
+ if(pid==0){setpgid(0,0);close(po[0]);close(pe[0]);close(pf[0]);dup2(po[1],1);dup2(pe[1],2);close(po[1]);close(pe[1]);
+ if(cwd&&chdir(cwd)){err[0]=1;err[1]=errno;k=write(pf[1],err,sizeof err);_exit(255);}execvp(argv[0],argv);err[0]=2;err[1]=errno;k=write(pf[1],err,sizeof err);(void)k;_exit(255);}
+ setpgid(pid,pid);close(po[1]);close(pe[1]);close(pf[1]);fcntl(pf[0],F_SETFL,O_NONBLOCK);fcntl(po[0],F_SETFL,O_NONBLOCK);fcntl(pe[0],F_SETFL,O_NONBLOCK);
+ np_puts(o,"");np_puts(e,"");
+ while(oo||oe||of||!reaped){
+ if(of){k=read(pf[0],(char*)err+en,sizeof err-en);if(k>0)en+=(size_t)k;if(en==sizeof err||k==0||(k<0&&errno!=EAGAIN&&errno!=EINTR)){close(pf[0]);of=0;}}
+ int got=0;if(oo){k=read(po[0],buf,sizeof buf);if(k>0){np_put(o,buf,(size_t)k);got=1;}else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){oo=0;close(po[0]);}}
+ if(oe){k=read(pe[0],buf,sizeof buf);if(k>0){np_put(e,buf,(size_t)k);got=1;}else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){oe=0;close(pe[0]);}}
+ if(!reaped&&waitpid(pid,&st,WNOHANG)==pid)reaped=1;if(!oo&&!oe&&!of&&reaped)break;
+ long now=sy_now_ms();if(now<0||now>=end){char rep[512];*residue=rp_kill_tree(pid,2000,0,0,rep,sizeof rep);if(*residue<0){kill(-pid,SIGKILL);kill(pid,SIGKILL);}int ws=waitpid(pid,&st,WNOHANG);if(!reaped&&ws!=pid&&!(ws<0&&errno==ECHILD))*residue=1;if(oo)close(po[0]);if(oe)close(pe[0]);if(of)close(pf[0]);return *residue?125:142;}
+ if(!got){long left=end-now;usleep((unsigned int)(left<2?left:2)*1000);}
+ }
+ if(en==sizeof err){np_puts(e,"exec/cwd handshake failed\n");return 127;}return WIFSIGNALED(st)?128+WTERMSIG(st):WEXITSTATUS(st);
+}
+static int rp_cmd(const char *phase,char **v,char **out){
+ np_buf b={0},o={0},e={0};char p[4400],leaf[200];int residue=0;
+ long hard=sy_now_ms()+55000;if(hard>rp_mono_end)hard=rp_mono_end;long end=hard-2500;if(out)*out=0;if(end-sy_now_ms()<1000)return 3;
+ for(int i=0;v[i];i++){np_puts(&b,i?"\t":"ARGV\t");np_puts(&b,v[i]);}np_puts(&b,"\nSTDOUT\n");
+ if(rp_subreaper()!=0)return 2;
+ int rc=rp_capture(v,rp_root,end,&o,&e,&residue);
+ if(o.n)np_put(&b,o.p,o.n);np_puts(&b,"\nSTDERR\n");if(e.n)np_put(&b,e.p,e.n);free(e.p);
+ np_puts(&b,"\nRC\t");np_putll(&b,rc);np_puts(&b,"\n");
+ np_puts(&b,"RESIDUE\t");np_putll(&b,residue);np_puts(&b,"\n");
+ if(cx_fmt(leaf,sizeof leaf,"prepare-%s-%ld-%d-%d.log",phase,sy_now_ms(),sy_pid(),rp_seq++))rp_die("log path");rp_path(p,rp_state,leaf);rp_write(p,b.p,b.n);free(b.p);
+ if(out&&!rc){if(!o.p)np_puts(&o,"");*out=o.p;}else free(o.p);
+ return sy_now_ms()>=rp_mono_end||rc==142||rc==124||rc==137||rc==143?3:rc?1:0;
+}
+static int rp_child(const char *phase,char **v){const char *fake=rp_get("test_driver");if(fake){char *a[]={(char*)fake,(char*)phase,(char*)rp_state,(char*)rp_config,(char*)rp_assets,0};return rp_cmd(phase,a,0);}return rp_cmd(phase,v,0);}
+static void rp_bind(int create){
+ char configsha[65],helper[65],product[65],row[14000];rp_hash(rp_config,configsha);rp_hash(rp_need("constructor"),rp_ctor);rp_hash(rp_need("identity_helper"),helper);
+ char p[4400];rp_path(p,rp_root,"unisacc.com");rp_hash(p,product);
+ if(cx_fmt(row,sizeof row,"config\t%s\nroot\t%s\nassets\t%s\nrev\t%s\nconstructor\t%s\t%s\nhelper\t%s\t%s\nproduct\t%s\n",configsha,rp_root,rp_assets,rp_need("build_rev"),rp_need("constructor"),rp_ctor,rp_need("identity_helper"),helper,product))rp_die("binding capacity");
+ if(!rp_equal("prepare.inputs",row,create))rp_die("prepare input changed");
+}
+static int rp_freeze(int create){
+ char *o=0;char *git[]={"git","-C",(char*)rp_root,"rev-parse",(char*)(create?"HEAD":rp_need("build_rev")),0};int rc=rp_cmd("freeze-head",git,&o);if(rc)return rc;
+ int ok=o&&strlen(o)==41&&!strncmp(o,rp_need("build_rev"),40)&&o[40]=='\n';free(o);if(!ok)rp_die("ROOT revision differs from BUILD_REV");
+ char *sid[]={(char*)rp_need("identity_helper"),(char*)(create?rp_root:rp_need("snap")),0};rc=rp_cmd("freeze-sid",sid,&o);if(rc)return rc;
+ if(!o||strlen(o)<64||!rcand_hex(o,64)||(o[64]&&strcmp(o+64,"\n")))rp_die("SID output");for(int i=0;i<64;i++)rp_sid[i]=o[i];rp_sid[64]=0;free(o);
+ char row[14000];if(cx_fmt(row,sizeof row,"BUILD_REV\t%s\nsource_sid\t%s\nconstructor\t%s\nconstructor_sha256\t%s\n",rp_need("build_rev"),rp_sid,rp_need("constructor"),rp_ctor))rp_die("freeze capacity");if(!rp_equal("freeze.tsv",row,create))rp_die("freeze changed");return 0;
+}
+static void rp_sources(int create){
+ char src[4400],p[4400],q[4400],origin[4400],hash[65],copy[65],row[10000];np_buf b={0};rp_path(src,rp_state,"src");if(create&&sy_mkdir(src,0700)&&sy_exists(src)!=1)rp_die("src directory");
+ for(int i=0;i<9;i++){
+ if(i==0)rp_path(origin,rp_need("chain_out"),"compiler.p4.pkg");
+ else if(i==2||i==3)rp_path(origin,rp_need("chain_out"),i==2?"fixedpoint/g3/lnx-x86_64/entry.elf":"fixedpoint/g2/lnx-arm64/entry.elf");
+ else if(i==7||i==8){if(cx_fmt(origin,sizeof origin,"%s",rp_need(i==7?"cache_manager_x64":"cache_manager_arm64")))rp_die("manager path");}
+ else {const char *slug=rp_roles[i];if(cx_fmt(origin,sizeof origin,"%s/out/chain/gen1/%s-%s/image",rp_need("snap"),slug,(i==4||i==5)?"b2":"image"))rp_die("slice path");}
+ rp_hash(origin,hash);rp_path(q,src,rp_roles[i]);if(create&&sy_exists(q)!=1&&sy_copy(origin,q,0600)<0)rp_die("source collect");rp_hash(q,copy);if(strcmp(hash,copy))rp_die("collected source changed");if(cx_fmt(row,sizeof row,"%s\t%s\t%s\n",rp_roles[i],origin,hash))rp_die("manifest capacity");np_puts(&b,row);
+ }
+ if(!rp_equal("src-origins.tsv",b.p,create))rp_die("source origin changed");free(b.p);
+ rp_path(p,src,"sources.tsv");if(cx_fmt(row,sizeof row,"%s\n",rp_sid))rp_die("SID row");if(create&&sy_exists(p)!=1&&cx_write(p,row,strlen(row)))rp_die("sources SID write");size_t n;char *s=cx_read(p,&n);if(!s||n!=65||memcmp(s,row,65))rp_die("sources SID mismatch");free(s);
+}
+static void rp_candidate(void){
+ const char *names[]={"unisacc.com","pkg.bin","slice-win-arm64","build.json","unisacc.com.build.json","unisacc-win-arm64.zip","SHA256SUMS"};np_buf b={0};char row[1000],p[4400],why[400];RcCandidate c;
+ np_puts(&b,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
+ if(cx_fmt(row,sizeof row,"%s\t%s\t%s\t%s\t%s\t%s\t0",rp_need("repo"),rp_need("tag"),rp_need("build_rev"),rp_need("version"),rp_need("workflow"),rp_need("workflow_ref")))rp_die("candidate capacity");np_puts(&b,row);
+ for(int i=0;i<7;i++){np_puts(&b,"\t");np_puts(&b,names[i]);np_puts(&b,"\t0000000000000000000000000000000000000000000000000000000000000000");}np_puts(&b,"\n");if(!rp_equal("candidate-init.tsv",b.p,1))rp_die("candidate initial identity");free(b.p);rp_path(p,rp_state,"candidate-init.tsv");if(rcand_load(p,&c,why,sizeof why))rp_die(why);
+ char root_table[4400];rp_path(root_table,rp_root,"release/candidate.tsv");if(sy_copy(p,root_table,0600)<0)rp_die("private candidate init");
+}
+static void rp_output_seal(int create){
+ char p[4400],h[65],row[4700];np_buf b={0};const char *leaves[]={"freeze.tsv","src-origins.tsv","rr/candidate.tsv","standalone-sha256.tsv"};
+ for(int i=0;i<4;i++){rp_path(p,rp_state,leaves[i]);rp_hash(p,h);if(cx_fmt(row,sizeof row,"%s\t%s\n",leaves[i],h))rp_die("seal capacity");np_puts(&b,row);}
+ RcCandidate c;char why[400];rp_path(p,rp_state,"rr/candidate.tsv");if(rcand_load(p,&c,why,sizeof why)||strcmp(c.commit,rp_need("build_rev"))||rcand_verify(&c,rp_assets,7,why,sizeof why))rp_die("packed candidate identity");
+ const char *chainfiles[]={"chain-run.identity","chain-run.tsv","checkpoint.tsv","ape-final/ape-receipt.txt"};
+ for(int i=0;i<4;i++){rp_path(p,rp_need("chain_out"),chainfiles[i]);rp_hash(p,h);if(cx_fmt(row,sizeof row,"%s\t%s\n",p,h))rp_die("chain seal capacity");np_puts(&b,row);}
+ for(int i=0;i<7;i++){np_puts(&b,c.name[i]);np_puts(&b,"\t");np_puts(&b,c.sha[i]);np_puts(&b,"\n");}
+ if(!rp_equal("prepare.seal",b.p,create))rp_die("prepared output changed");free(b.p);
+}
+int rp_verify_upstream(const char *state,const char *config,const char *assets){
+ char complete[4400],deadline[4400];size_t dn;rp_path(complete,state,"prepare.complete");if(sy_exists(complete)!=1)return 1;
+ rp_load(state,config,assets);if(rp_get("test_driver"))return 1;rp_bind(0);rp_path(deadline,state,"deadline.tsv");char *ds=cx_read(deadline,&dn);long began;if(!ds||sscanf(ds,"%ld\t%ld",&began,&rp_end)!=2){free(ds);return 1;}free(ds);if(rp_end<=sy_wall_s()*1000)return 1;rp_map_deadline();if(rp_freeze(0))return 1;rp_sources(0);rp_output_seal(0);
+ char table[4400],ape[4400],dir[4400],why[400],row[14000];RcCandidate c;rp_path(table,state,"rr/candidate.tsv");if(rcand_load(table,&c,why,sizeof why))return 1;rp_path(ape,assets,c.name[0]);rp_path(dir,state,"standalone");if(rop_check(ape,dir))return 1;
+ if(cx_fmt(row,sizeof row,"1\tPASS\t%s/freeze.tsv\n2\tPASS\t%s/src-origins.tsv\n3\tPASS\t%s/prepare.seal\n",state,state,state))return 1;
+ return rp_equal("prepare.complete","G1 G2 G3 G4 G5 G6\n",0)&&rp_equal("upstream-evidence.tsv",row,0)?0:1;
+}
+static int rp_prepare_run(const char *state,const char *config,const char *assets){
+ rp_load(state,config,assets);if(sy_mkdir(state,0700)&&sy_exists(state)!=1)rp_die("state directory");rp_bind(1);
+ char p[4400],row[10000];size_t n;rp_path(p,state,"deadline.tsv");char *saved=cx_read(p,&n);long start;
+ if(saved){if(sscanf(saved,"%ld\t%ld",&start,&rp_end)!=2)rp_die("deadline state");free(saved);}else{start=sy_wall_s()*1000;rp_end=start+rp_number("deadline_s",7200)*1000;if(cx_fmt(row,sizeof row,"%ld\t%ld\n",start,rp_end))rp_die("deadline capacity");rp_put("deadline.tsv",row);}
+ rp_map_deadline();
+ if(rp_end<=sy_wall_s()*1000)return 3;
+ int rc=rp_freeze(1);if(rc)return rc;
+ char expected_snap[4400];if(cx_fmt(expected_snap,sizeof expected_snap,"%s/out/release-snap-%.10s",rp_root,rp_need("build_rev"))||strcmp(expected_snap,rp_need("snap")))rp_die("snap must be BUILD_REV frozen path");
+ char chain[4400],seconds[32],resumes[32];rp_path(chain,rp_root,"tools/chain-run.cx");if(cx_fmt(seconds,sizeof seconds,"%ld",rp_number("chain_deadline_s",7200))||cx_fmt(resumes,sizeof resumes,"%ld",rp_number("max_resumes",100)))rp_die("chain limit");
+ char com[4400];rp_path(com,rp_root,"unisacc.com");char *cv[]={"sh",com,chain,"--","--rev",(char*)rp_need("build_rev"),"--out",(char*)rp_need("chain_out"),"--deadline-s",seconds,"--max-resumes",resumes,"--","--bootstrap",(char*)rp_need("constructor"),"--cache-manager-osx",(char*)rp_need("cache_manager_x64"),(char*)rp_need("cache_manager_arm64"),0};
+ if((rc=rp_child("chain",cv)))return rc;
+ char *sidout=0;char *snapid[]={(char*)rp_need("identity_helper"),(char*)rp_need("snap"),0};if((rc=rp_cmd("snap-sid",snapid,&sidout)))return rc;if(!sidout||strncmp(sidout,rp_sid,64))rp_die("frozen snapshot SID differs");free(sidout);
+ rp_sources(1);rp_candidate();
+ char rr[4400],src[4400],table[4400],tool[4400],st[4400];rp_path(rr,state,"rr");rp_path(src,state,"src");rp_path(table,state,"candidate-init.tsv");rp_path(tool,rp_root,"tools/release-run.cx");rp_path(st,rr,"state.tsv");
+ if(sy_setenv("UNISACC_IDENT_HELPER",rp_need("identity_helper"),1))rp_die("identity helper environment");
+ char *pack[]={"sh",com,tool,"--","--pack",(char*)rp_root,table,src,rr,"--snap",(char*)rp_need("snap"),0};char *resume[]={"sh",com,tool,"--","--resume",rr,0};
+ if((rc=rp_child("pack",sy_exists(st)==1?resume:pack)))return rc;
+ RcCandidate c;char why[400];rp_path(table,rr,"candidate.tsv");if(rcand_load(table,&c,why,sizeof why)||rcand_verify(&c,assets,7,why,sizeof why))rp_die("pack incomplete");
+ char ape[4400],standalone[4400];rp_path(ape,assets,c.name[0]);rp_path(standalone,state,"standalone");
+ if(rp_get("test_driver")){char *empty[]={0};if((rc=rp_child("standalone",empty)))return rc;}
+ else {if(sy_exists(standalone)!=1){char attempt[4400];if(cx_fmt(attempt,sizeof attempt,"%s/standalone-attempt-%ld-%d",state,sy_wall_s(),sy_pid()))rp_die("standalone attempt");if((rc=rop_pack(ape,attempt)))return rc;if(sy_rename(attempt,standalone))rp_die("standalone publish");}if((rc=rop_check(ape,standalone)))return rc;}
+ np_buf hashes={0};for(int i=0;i<6;i++){char h[65];rp_path(p,standalone,rp_exports[i]);rp_hash(p,h);if(cx_fmt(row,sizeof row,"%s\t%s\n",rp_exports[i],h))rp_die("standalone manifest");np_puts(&hashes,row);}if(!rp_equal("standalone-sha256.tsv",hashes.p,1))rp_die("standalone changed");free(hashes.p);
+ rp_output_seal(1);rp_put("prepare.complete","G1 G2 G3 G4 G5 G6\n");
+ const char *verdict=rp_get("test_driver")?"UNKNOWN":"PASS";if(cx_fmt(row,sizeof row,"1\t%s\t%s/freeze.tsv\n2\t%s\t%s/src-origins.tsv\n3\t%s\t%s/prepare.seal\n",verdict,state,verdict,state,verdict,state))rp_die("evidence capacity");rp_put("upstream-evidence.tsv",row);
+ sy_printf("RELEASE_PREPARE\tstatus=PREPARED\tqualification=NOT_QUALIFIED\n");return 0;
+}
+int rp_prepare(const char *state,const char *config,const char *assets){
+ if(state[0]!='/'||(sy_mkdir(state,0700)&&sy_exists(state)!=1))rp_die("absolute state directory");
+ char lock[4400];rp_path(lock,state,"prepare.lock");int fd=sy_open(lock,O_RDWR|O_CREAT,0600);if(fd<0||sy_flock(fd,2|4))rp_die("prepare already owned");
+ int rc=rp_prepare_run(state,config,assets);if(sy_close(fd))rp_die("prepare lock close");return rc;
+}

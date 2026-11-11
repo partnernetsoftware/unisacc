@@ -1,0 +1,21 @@
+/* Fixture stand-in for the s9 runner, used by tools/check-releaseexec.cx only.
+ * ROOT RUN --tier T  |  ROOT --resume RUN --tier T.  Appends its mode to $FAKE_GH_DIR/s9log, creates
+ * RUN/session.tsv, sleeps $FAKE_S9_MS, and fails when $FAKE_GH_DIR/s9fail-T exists. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+int main(int argc, char **argv) {
+    const char *d = getenv("FAKE_GH_DIR"), *ms = getenv("FAKE_S9_MS"); int resume = argc == 6 && !strcmp(argv[2], "--resume");
+    const char *run = resume ? argv[3] : argc == 5 ? argv[2] : 0, *tier = argc >= 5 ? argv[argc - 1] : 0; char p[4600]; FILE *f; struct stat st;
+    if (!d || !run || strcmp(argv[argc - 2], "--tier") || (strcmp(tier, "commit") && strcmp(tier, "release") && strcmp(tier, "daily"))) return 2;
+    if (cx_fmt(p, sizeof p, "%s/s9log", d) || !(f = fopen(p, "a"))) return 9;
+    fprintf(f, "%s %s %s\n", resume ? "resume" : "fresh", tier, run); fclose(f);
+    if (!resume && mkdir(run, 0700)) return 9;
+    if (cx_fmt(p, sizeof p, "%s/session.tsv", run)) return 9;
+    if (resume) { size_t n = 0; char *s = cx_read(p, &n); int bad = !s || strcmp(s, tier); free(s); if (bad) return 2; }
+    else if (cx_write(p, tier, strlen(tier))) return 9;
+    if (ms) { char *end = 0; long delay = strtol(ms, &end, 10); if (*end || delay < 0 || delay > 55000) return 2; usleep((unsigned)delay * 1000u); }
+    if (cx_fmt(p, sizeof p, "%s/s9fail-%s", d, tier)) return 9;
+    printf("S9_NIGHTLY\tstatus=%s\ttier=%s\n", stat(p, &st) ? "PASS" : "FAIL", tier);
+    return stat(p, &st) ? 0 : 1;
+}

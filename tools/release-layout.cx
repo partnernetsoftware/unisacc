@@ -1,9 +1,11 @@
 /* Candidate layout packaging validates bytes, not Windows execution or CI qualification.
  * --candidate TABLE SOURCE NEW_OUT | --candidate TABLE --check OUT
- * Stored ZIP has fixed members and metadata; manifest covers roles 0..5, never itself. */
+ * Stored ZIP has fixed members and metadata; manifest covers roles 0..5, never itself.
+ * Scratch uses canonical TMPDIR when set, otherwise a private child of OUT. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
+#pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
 #pragma unisa use text.deflate
@@ -18,6 +20,20 @@ static long length(const char *s){long n=tx_len(s,1<<20);if(n<0)sy_exit(2);retur
 static void path(char *p,const char *root,const char *name){int n=tx_snprintf(p,4400,"%s/%s",root,name);if(n<0||n>=4400)sy_exit(2);}
 static void cleanup(void){int i;char p[4400];if(!scratch[0])return;for(i=0;i<4;i++){path(p,scratch,member[i]);sy_unlink(p);}path(p,scratch,"expected.zip");sy_unlink(p);path(p,scratch,"expected.sha");sy_unlink(p);sy_rmdir(scratch);scratch[0]=0;}
 static void fail(const char *s){cleanup();sy_write_all(2,"RELEASE_LAYOUT REFUSE ",22);sy_write_all(2,s,length(s));sy_write_all(2,"\n",1);sy_exit(2);}
+/* Keep temporary bytes beside the caller-owned layout unless TMPDIR explicitly
+ * names another existing private root; never silently use a shared temp tree. */
+static void workspace(const char *root){
+    const char *base=getenv("TMPDIR");char canonical[4096];int attempt;
+    if(!base||!base[0])base=root;
+    if(base[0]!='/'||sy_realpath(base,canonical,sizeof canonical)<0||strcmp(base,canonical))fail("canonical temporary root required");
+    for(attempt=0;attempt<100;attempt++){
+        int n=tx_snprintf(scratch,sizeof scratch,"%s/release-layout-%d-%d",base,sy_pid(),attempt);
+        if(n<0||n>=sizeof scratch)fail("scratch path");
+        if(!sy_mkdir(scratch,0700))return;
+        scratch[0]=0;
+    }
+    fail("private temporary directory");
+}
 static void verify(const char *root,int count){char why[512]={0};if(rcand_verify(&candidate,root,count,why,sizeof why))fail(why);}
 static int openfile(const char *p,int writing){int f=writing?sy_open(p,O_WRONLY|O_CREAT|O_TRUNC,0600):sy_open_read(p);if(f<0)fail(p);return f;}
 static void closefile(int f){if(sy_close(f))fail("close");}
@@ -36,9 +52,9 @@ static void hash(const char *root,const char *name,char *digest){char *v[]={"sha
 static void manifest(const char *root,const char *dest){int i,f=openfile(dest,1);char h[65];for(i=0;i<6;i++){hash(root,candidate.name[i],h);bytes(f,h,64);bytes(f,"  ",2);bytes(f,candidate.name[i],length(candidate.name[i]));bytes(f,"\n",1);}closefile(f);}
 static void literal(const char *root,const char *name,const char *text){char p[4400];int f;path(p,root,name);f=openfile(p,1);bytes(f,text,length(text));closefile(f);}
 static void paired(const char *root){char p[4400],q[4400],h[65],key[128],b[4096];long n,used=0,k;int f,found=0;hash(root,candidate.name[0],h);k=tx_snprintf(key,sizeof key,"\"product_digest\": \"%s\"",h);if(k<0||k>=sizeof key)fail("digest key");path(p,root,candidate.name[3]);f=openfile(p,0);while((n=sy_read(f,b+used,sizeof b-used))>0){long total=used+n;if(tx_contains(b,total,key,k))found=1;used=total<k-1?total:k-1;{long i;for(i=0;i<used;i++)b[i]=b[total-used+i];}}if(n<0)fail("build record read");closefile(f);if(!found)fail("unpaired product digest");path(q,root,candidate.name[4]);if(!equal(p,q))fail("build alias differs from paired record");}
-static void check(const char *root){char p[4400],q[4400];int attempt;
+static void check(const char *root){char p[4400],q[4400];
     verify(root,7);paired(root);
-    for(attempt=0;attempt<100;attempt++){int n=tx_snprintf(scratch,sizeof scratch,"/tmp/release-layout-%d-%d",sy_pid(),attempt);if(n<0||n>=sizeof scratch)fail("scratch path");if(!sy_mkdir(scratch,0700))break;scratch[0]=0;}if(attempt==100)fail("check temporary directory");
+    workspace(root);
     literal(scratch,member[2],launcher);literal(scratch,member[3],readme);
     path(p,root,candidate.name[2]);path(q,scratch,member[0]);copyfile(p,q);path(p,root,candidate.name[1]);path(q,scratch,member[1]);copyfile(p,q);
     path(q,scratch,"expected.zip");zip(scratch,q);path(p,root,candidate.name[5]);if(!equal(p,q))fail("zip fixed contents");
@@ -52,7 +68,11 @@ int main(int argc,char **argv){char src[4096],out[4096],p[4400],q[4400],why[512]
     if(sy_mkdir(argv[4],0700))fail("NEW_OUT must not exist");if(sy_realpath(argv[4],out,sizeof out)<0)fail("output path");
     for(i=0;i<4;i++){path(p,src,candidate.name[i]);path(q,out,candidate.name[i]);copyfile(p,q);}path(p,out,candidate.name[3]);path(q,out,candidate.name[4]);copyfile(p,q);
     /* ZIP construction uses a private workspace so external asset basenames never affect member names. */
-    for(i=0;i<100;i++){int n=tx_snprintf(scratch,sizeof scratch,"/tmp/release-layout-%d-%d",sy_pid(),i);if(n<0||n>=sizeof scratch)fail("scratch path");if(!sy_mkdir(scratch,0700))break;scratch[0]=0;}if(i==100)fail("zip temporary directory");
+    workspace(out);
     path(p,out,candidate.name[2]);path(q,scratch,member[0]);copyfile(p,q);path(p,out,candidate.name[1]);path(q,scratch,member[1]);copyfile(p,q);literal(scratch,member[2],launcher);literal(scratch,member[3],readme);path(p,out,candidate.name[5]);zip(scratch,p);cleanup();
-    path(p,out,candidate.name[6]);manifest(out,p);check(out);return 0;
+    path(p,out,candidate.name[6]);manifest(out,p);
+    /* Derived roles do not exist in SOURCE. Bind their freshly generated bytes
+       before the complete structural check; --check still requires all input digests. */
+    for(i=4;i<7;i++)hash(out,candidate.name[i],candidate.sha[i]);
+    check(out);return 0;
 }

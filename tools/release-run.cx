@@ -41,6 +41,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
+#pragma unisa use sys.time
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use text.fmt
@@ -246,13 +247,14 @@ static void write_build_json(const char *path, long bytes, const char *sources_s
  * release-layout 源目录须含 name[0..3]:unisacc.com(APE)、pkg.bin、slice-win-arm64、
  * record;生成时复制出 build.json 别名与 zip、SHA256SUMS。 */
 static void step_layout_gen(void) {
-    char stagedir[4400], a[4400], b[4400], sources_sha[65], ape_sha[65], q[4400];
+    char stagedir[4400], a[4400], b[4400], sources_sha[65], ape_sha[65], q[4400], attempt[4400];
     long ape_bytes;
     char *v[8]; int n = 0;
     if (cx_fmt(stagedir, sizeof stagedir, "%s/stage", out) || cx_fmt(layoutout, sizeof layoutout, "%s/layout", out)) die("path");
     if (sy_mkdir(stagedir, 0755) && sy_exists(stagedir) != 1) die("stage dir");
     /* release-layout 要求 NEW_OUT 不存在;layout 由它创建,本工具不预建。 */
     if (sy_exists(layoutout) == 1) die("layout dir already exists");
+    if(cx_fmt(attempt,sizeof attempt,"%s/layout-attempt-%ld-%d",out,sy_wall_s(),sy_pid()))die("layout attempt path");
     read_sources_sha(sources_sha);
     if (cx_fmt(a, sizeof a, "%s/ape/unisacc-next.com", out)) die("path");
     { np_result r = {0}; char why[256] = {0}; char *sv[] = {"stat", "-c", "%s", a, 0};
@@ -268,10 +270,18 @@ static void step_layout_gen(void) {
     if (cx_fmt(a, sizeof a, "%s/inject", out) || cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[2]) || sy_copy(a, b, 0755)) die("stage slice");
     if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[3])) die("path");
     write_build_json(b, ape_bytes, sources_sha, ape_sha);
+    /* Initial candidate pins are unknown; derive the four source pins from bytes. */
+    np_buf pinned={0};
+    np_puts(&pinned,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
+    const char *fields[]={cand.repo,cand.tag,cand.commit,cand.version,cand.workflow,cand.workflow_ref,cand.ci_run_id};
+    for(int i=0;i<7;i++){if(i)np_puts(&pinned,"\t");np_puts(&pinned,fields[i]);}
+    for(int i=0;i<7;i++){char digest[65];if(i<4){if(cx_fmt(a,sizeof a,"%s/%s",stagedir,cand.name[i]))die("stage hash path");sha_of(root,a,digest);}else if(cx_fmt(digest,sizeof digest,"%s",cand.sha[i]))die("digest capacity");np_puts(&pinned,"\t");np_puts(&pinned,cand.name[i]);np_puts(&pinned,"\t");np_puts(&pinned,digest);}np_puts(&pinned,"\n");
+    if(cx_fmt(q,sizeof q,"%s/layout-input.tsv",out)||cx_write(q,pinned.p,pinned.n))die("layout input table");free(pinned.p);
     v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-layout.cx"; v[n++] = "--";
-    v[n++] = "--candidate"; v[n++] = table; v[n++] = stagedir; v[n++] = layoutout; v[n] = 0;
+    v[n++] = "--candidate"; v[n++] = q; v[n++] = stagedir; v[n++] = attempt; v[n] = 0;
     if (child(v, root)) die("release-layout generate");
-    if (cx_fmt(q, sizeof q, "%s/%s", layoutout, cand.name[0]) && 0) die("never");
+    if(sy_rename(attempt,layoutout))die("publish layout");
+    /* The atomic rename above leaves failed attempt directories untouched. */
     mark(6, "layout-gen", "DONE");
 }
 /* 步 7:由 layout 产物文件计算 7 个 sha 回填候选表(列 8/10/12/14/16/18/20,0 基)。
@@ -328,7 +338,7 @@ static void step_backfill(void) {
       if (sy_close(f)) die("close");
     }
     { char why[512]; RcCandidate check;
-      if (cx_fmt(outtable, outtable, "%s/candidate.tsv", out)) die("path");
+      if (cx_fmt(outtable, sizeof outtable, "%s/candidate.tsv", out)) die("path");
       if (rcand_load(outtable, &check, why, sizeof why)) die(why);
       if (rcand_verify(&check, layoutout, 7, why, sizeof why)) die(why);
       for (k = 0; k < 7; k++) if (!tx_eqz(check.sha[k], hex[k])) die("backfill mismatch"); }
@@ -351,21 +361,46 @@ static void step_commands(void) {
     sy_printf("NEXT gh %s release create %s --draft --title %s --target %s\n", R, cand.tag, cand.version, cand.commit);
     for (i = 0; i < 7; i++)
         sy_printf("NEXT gh %s release upload %s %s/%s --clobber\n", R, cand.tag, layoutout, cand.name[i]);
-    /* CI 触发:提交 X = 候选表进仓的 git 提交,不是表 commit 列冻结源. RELEASE_X_COMMIT 必填. */
-    {
-        const char *x = sy_env("RELEASE_X_COMMIT");
-        if (!x || !x[0]) die("need RELEASE_X_COMMIT=提交X");
-        if (rs_ci_x(cand.commit, x)) die("commit X must not equal table commit column");
-        sy_printf("NEXT gh %s workflow run %s --ref main -f commit=%s\n", R, cand.workflow, x);
-    }
+    /* X does not exist during local pack; execution resolves it after committing. */
+    sy_printf("NEXT ci commit={commit-x} build_rev=%s\n", cand.commit);
     /* 改标签:只 edit --tag/--target,完整 40 位;不先删旧标签。 */
     sy_printf("NEXT gh %s release edit %s --tag v%s --target %s\n", R, cand.tag, cand.version, cand.commit);
     sy_printf("NEXT gh %s release edit v%s --draft=false --latest\n", R, cand.version);
     sy_printf("RELEASE_RUN\tCOMMANDS\tmanual_confirm=CI+publish\tno_tag_delete=1\n");
     mark(9, "commands", "DONE");
 }
+/* Resume binds all original source bytes and the immutable initial table. */
+static void pack_binding(int create) {
+    const char *names[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};
+    np_buf b={0};char p[4400],h[65],row[9000];size_t n;
+    if(cx_fmt(row,sizeof row,"%s\n%s\n%s\n%s\n",root,table,srcdir,snapdir))die("binding");np_puts(&b,row);
+    sha_of(root,table,h);np_puts(&b,h);np_puts(&b,"\n");
+    for(int i=0;i<10;i++){if(cx_fmt(p,sizeof p,"%s/%s",srcdir,names[i]))die("binding path");sha_of(root,p,h);np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");}
+    if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("binding path");char *old=cx_read(p,&n);
+    if(old){if(n!=b.n||memcmp(old,b.p,n))die("pack input changed");free(old);}else if(!create||cx_write(p,b.p,b.n))die("pack binding missing");free(b.p);
+}
+static int pack_done(int i) {
+    size_t n;char *s=cx_read(statep,&n),needle[100];if(cx_fmt(needle,sizeof needle,"STEP\t%d\t",i))die("checkpoint");int yes=0;
+    for(char *a=s;a&&*a;){char *e=strchr(a,'\n');if(!e)die("checkpoint truncated");if(!strncmp(a,needle,strlen(needle))){char *t=0;for(char *q=a;q<e;q++)if(*q=='\t')t=q;yes=t&&e-t==5&&!strncmp(t,"\tDONE",5);}a=e+1;}free(s);return yes;
+}
+static void pack_continue(void) {
+    pack_binding(0);require_sources_sid();
+    if(cx_fmt(layoutout,sizeof layoutout,"%s/layout",out))die("layout path");
+    if(!pack_done(4))step_ape_pack();if(!pack_done(5))step_inject();
+    if(!pack_done(6))step_layout_gen();if(!pack_done(7))step_backfill();
+    step_sums2();char p[4400],why[400];RcCandidate actual;
+    if(cx_fmt(p,sizeof p,"%s/candidate.tsv",out)||rcand_load(p,&actual,why,sizeof why)||rcand_verify(&actual,layoutout,7,why,sizeof why))die("resume output identity");
+    if(!pack_done(9))step_commands();
+}
 int main(int argc, char **argv) {
     char why[1024];
+    if(argc==3&&tx_eqz(argv[1],"--resume")) {
+        if(sy_realpath(argv[2],out,sizeof out)<0||cx_fmt(statep,sizeof statep,"%s/state.tsv",out))die("resume out");
+        char p[4400];size_t n;if(cx_fmt(p,sizeof p,"%s/pack-inputs.tsv",out))die("resume path");char *s=cx_read(p,&n);if(!s)die("resume inputs");
+        char *dest[]={root,table,srcdir,snapdir};size_t caps[]={sizeof root,sizeof table,sizeof srcdir,sizeof snapdir};char *at=s;
+        for(int i=0;i<4;i++){char *e=strchr(at,'\n');if(!e||(size_t)(e-at)>=caps[i])die("resume schema");*e=0;if(cx_fmt(dest[i],caps[i],"%s",at))die("resume capacity");at=e+1;}free(s);
+        if(rcand_load(table,&cand,why,sizeof why))die(why);pack_continue();return 0;
+    }
     if (argc == 6 && tx_eqz(argv[1], "--dry-run")) {
         if (sy_realpath(argv[2], root, sizeof root) < 0) die("root");
         if (sy_realpath(argv[3], table, sizeof table) < 0) die("candidate table");
@@ -407,12 +442,8 @@ int main(int argc, char **argv) {
         need(srcdir, "sources.tsv");
         require_sources_sid();
         emit("MODE", "PACK", cand.tag);
-        step_ape_pack();
-        step_inject();
-        step_layout_gen();
-        step_backfill();
-        step_sums2();
-        step_commands();
+        pack_binding(1);
+        pack_continue();
         emit("RESULT", "PACK_OK", "local replay only, no network, no gh, no push");
         return 0;
     }

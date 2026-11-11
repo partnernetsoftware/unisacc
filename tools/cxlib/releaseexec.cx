@@ -1,0 +1,688 @@
+/* Explicitly authorized release execution; planning remains in release-oneshot.
+ * CONFIG TSV: root, repo_dir, build_rev, prev_tag, notes, deadline_s; argv prefixes
+ * gh, s9, decide; optional layout_check, s9_tiers, s9_call_s (1..55), poll_ms.
+ * The configuration bytes and original candidate inputs are immutable across resumes.
+ * deadline.tsv persists the preparation+execution wall budget, never refreshed.
+ * Commands retain argv/output/exit status, are bounded by 55s and the remaining
+ * monotonic budget; checkpoint persistence failure terminates before more work.
+ * Interrupted CI dispatch is not repeated. RUNNING s9 resumes its existing session;
+ * the inherited execution lock prevents concurrent or orphaned consumers.
+ * Upstream PASS requires releaseprepare's fixed, recomputed seal, not config text.
+ * s9 runner completion is not FULL qualification: the actual candidate consumer,
+ * all tiers and a full daily summary must be proven. Unknown remains UNKNOWN.
+ * Returns 0 only after all execution phases complete; 1 failure, 2 refusal,
+ * 3 exhausted persistent deadline. No network command is run without CLI authorization.
+ */
+#pragma unisa module releaseexec
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.releaseprepare
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sysx.reaper
+#pragma unisa use cxlib.releaseoneshotpack
+
+#define RX_N 17
+enum { RX_PLANNED, RX_RUNNING, RX_DONE, RX_FAILED, RX_SKIPPED };
+static const char *rx_phase[RX_N] = {"candidate-sha", "commit-x", "push-x", "draft", "upload", "draft-check", "ci-dispatch", "ci-observe", "s9-commit", "s9-release", "s9-daily", "draft-readback", "decide", "commit-y", "push-y", "publish", "public-readback"};
+static const char *rx_sname[5] = {"PLANNED", "RUNNING", "DONE", "FAILED", "SKIPPED"};
+static const char *rx_tier[3] = {"commit", "release", "daily"};
+typedef struct { char *k; char *v[12]; int n; } RxKey;
+static RxKey rx_keys[64];
+static int rx_nk,rx_st[RX_N],rx_seq,rx_s9call=55;
+static long rx_deadline, rx_poll = 15000;
+static char rx_state[4096], rx_assets[4096], rx_why[700], rx_x[64], rx_run[64];
+static const char *rx_root, *rx_repo;
+static RcCandidate rx_c;
+static const char *rx_config_path;
+static int rx_upstream_ok;
+static int rx_s9_bound,rx_s9_full;
+static int rx_lock=-1;
+static int rx_s9_pid=-1;
+static const char *rx_exports[]={"unisacc-lnx64-x86","unisacc-lnx64-arm","unisacc-osx64-x86","unisacc-osx64-arm","unisacc-win64-x86.exe","unisacc-win64-arm.exe","standalone-sha256.tsv"};
+
+static int rx_refuse(const char *a, const char *b) {
+    sy_printf("RELEASE_EXEC\tstatus=REFUSED\treason=%s%s%s\n", a, b ? " " : "", b ? b : "");
+    return 2;
+}
+static int rx_fail(const char *a, const char *b) {
+    if (cx_fmt(rx_why, sizeof rx_why, "%s%s%.500s", a, b ? ": " : "", b ? b : "")) rx_why[0] = 0;
+    return 1;
+}
+static int rx_path(char *p, const char *a, const char *b) { return cx_fmt(p, 4400, "%s/%s", a, b); }
+static RxKey *rx_get(const char *k) {
+    int i;
+    for (i = 0; i < rx_nk; i++) if (!strcmp(rx_keys[i].k, k)) return &rx_keys[i];
+    return 0;
+}
+static const char *rx_one(const char *k) { RxKey *e = rx_get(k); return e && e->n == 1 && e->v[0][0] ? e->v[0] : 0; }
+static int rx_pre(char **v, const char *key) { RxKey *k = rx_get(key); int n = 0; for (; n < k->n; n++) v[n] = k->v[n]; return n; }
+static int rx_config(const char *path) {
+    size_t n = 0; char *s = cx_read(path, &n), *at;
+    if (!s) return 1;
+    at = s;
+    while (*at) {
+        char *e = strchr(at, '\n'), *t; RxKey *k;
+        if (!e) return 1;
+        *e = 0;
+        if (*at && *at != '#') {
+            if(rx_nk==64)return 1;
+            k = &rx_keys[rx_nk++]; k->k = at; k->n = 0;
+            for (t = strchr(at, '\t'); t; t = strchr(t, '\t')) { *t++ = 0; if (k->n == 12) return 1; k->v[k->n++] = t; }
+            if (!k->n || rx_get(k->k) != k) return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+static int rx_num(const char *k, long lo, long hi, long *out) {
+    const char *s = rx_one(k); char *end = 0; long v;
+    if (!s) return 1;
+    v = strtol(s, &end, 10);
+    if (!end || *end || v < lo || v > hi) return 1;
+    *out = v;
+    return 0;
+}
+static void rx_io_stop(void) { sy_printf("RELEASE_EXEC\tstatus=STOPPED\treason=state persistence failure\n"); exit(1); }
+static int rx_write(const char *p,const char *s,size_t n,int flags) {
+    int fd=sy_open(p,O_WRONLY|O_CREAT|O_NOFOLLOW|flags,0600),bad;
+    if(fd<0)return 1;
+    bad=sy_write_all(fd,s,(long)n)!=0;
+    if(sy_fsync(fd)!=0)bad=1;
+    if(sy_close(fd)!=0)bad=1;
+    if(!bad){int dir=sy_open(rx_state,O_RDONLY|O_DIRECTORY,0);if(dir<0)bad=1;else{if(sy_fsync(dir))bad=1;if(sy_close(dir))bad=1;}}
+    return bad;
+}
+static void rx_append(const char *file,const char *row) {
+    char p[4400];if(rx_path(p,rx_state,file)||rx_write(p,row,strlen(row),O_APPEND))rx_io_stop();
+}
+static void rx_mark(int i,int st,int rc,long ms,const char *detail) {
+    char row[1024],clean[701];int j=0;
+    while(detail&&detail[j]&&j<700){clean[j]=(detail[j]=='\t'||detail[j]=='\n'||detail[j]=='\r')?' ':detail[j];j++;}clean[j]=0;
+    if(cx_fmt(row,sizeof row,"%s\t%s\t%d\t%ld\t%s\n",rx_phase[i],rx_sname[st],rc,ms,clean[0]?clean:"-"))rx_io_stop();
+    rx_append("exec.tsv",row);rx_st[i]=st;
+    sy_printf("RELEASE_EXEC\tphase=%s\tstatus=%s\trc=%d\twall_ms=%ld\n",rx_phase[i],rx_sname[st],rc,ms);
+}
+static int rx_progress(void) {
+    char p[4400];size_t n=0;char *s,*at;int i,k;
+    if(rx_path(p,rx_state,"exec.tsv"))return 1;
+    if(sy_exists(p)==0)return 0;
+    s=cx_read(p,&n);if(!s||strlen(s)!=n){free(s);return 1;}
+    for(at=s;*at;){
+        char *e=strchr(at,'\n'),*t=strchr(at,'\t'),*u,*r,*m,*end;long code,ms;
+        if(!e||!t||t>e){free(s);return 1;}*e=0;*t++=0;
+        u=strchr(t,'\t');if(!u){free(s);return 1;}*u++=0;
+        r=strchr(u,'\t');if(!r){free(s);return 1;}*r++=0;
+        m=strchr(r,'\t');if(!m){free(s);return 1;}*m++=0;
+        code=strtol(u,&end,10);if(!*u||*end){free(s);return 1;}
+        ms=strtol(r,&end,10);if(!*r||*end||ms<0){free(s);return 1;}
+        for(i=0;i<RX_N&&strcmp(at,rx_phase[i]);i++);for(k=0;k<5&&strcmp(t,rx_sname[k]);k++);
+        if(i==RX_N||k==5||k==RX_PLANNED||(k==RX_DONE&&code!=0)||(k==RX_SKIPPED&&(i<8||i>10))||((k==RX_DONE||k==RX_FAILED)&&rx_st[i]!=RX_RUNNING)){free(s);return 1;}
+        if(k==RX_RUNNING){int pre=i<=5?i-1:i==6?5:i==7?6:i<=10?5:i==11?7:i-1;if(pre>=0&&rx_st[pre]!=RX_DONE){free(s);return 1;}}
+        rx_st[i]=k;at=e+1;
+    }free(s);return 0;
+}
+/* one bounded command; its record goes to STATE/cmd-TAG-*.txt.  The exit code, 142 at the bound, 127 when
+   it did not start, -3 when the total deadline is over.  *OUT (optional) gets stdout, caller frees. */
+static int rx_capture(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) {
+    int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, open_f = 1, reaped = 0;
+    size_t errn = 0;
+    pid_t pid; ssize_t k; long now = sy_now_ms(), deadline; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
+    res->timed_out=0; res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0;
+    if (now < 0) { snprintf(why, wl, "OSError: cannot read monotonic clock"); return -1; }
+    deadline = now + (long)secs * 1000; if(deadline>rx_deadline-2000)deadline=rx_deadline-2000;
+    if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
+    fcntl(pf[1], F_SETFD, FD_CLOEXEC);
+    pid = fork();
+    if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
+    if (pid == 0) {
+        setpgid(0, 0);   /* own process group: a timeout kills every descendant */
+        close(po[0]); close(pe[0]); close(pf[0]);
+        dup2(po[1], 1); dup2(pe[1], 2); close(po[1]); close(pe[1]);
+        if (envadd && envadd[0]) {
+            /* dict(os.environ, K=V): rebuilt in environ itself (the runtime's setenv() does not reach execvp) */
+            size_t n = 0, a = 0, x, y; char **ne, **v;
+            for (v = environ; *v; v++) n++;
+            while (envadd[a]) a++;
+            ne = malloc((n + a + 1) * sizeof *ne);
+            if (!ne) _exit(255);
+            for (x = 0, v = environ; *v; v++) {
+                int keep = 1;
+                for (y = 0; y < a; y++) {
+                    size_t l = strcspn(envadd[y], "=");
+                    if (!strncmp(*v, envadd[y], l) && (*v)[l] == '=') keep = 0;
+                }
+                if (keep) ne[x++] = *v;
+            }
+            for (y = 0; y < a; y++) ne[x++] = envadd[y];
+            ne[x] = 0;
+            environ = ne;
+        }
+        if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
+        execvp(argv[0], argv);
+        err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
+        _exit(255);
+    }
+    setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
+    close(po[1]); close(pe[1]); close(pf[1]);
+    fcntl(pf[0], F_SETFL, O_NONBLOCK);
+    fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
+    np_put(&o, "", 0); np_put(&e, "", 0);
+    while (open_o || open_e || open_f || !reaped) {
+        if (open_f) {
+            k = read(pf[0], (char *)err + errn, sizeof err - errn);
+            if (k > 0) errn += (size_t)k;
+            if (errn == sizeof err || k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) {
+                close(pf[0]); open_f = 0;
+            }
+        }
+        int got = 0;
+        if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
+        if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
+        if (!reaped) {
+            int w = waitpid(pid, &st, WNOHANG);
+            if (w == pid) reaped = 1;
+        }
+        if (!open_o && !open_e && !open_f && reaped) break;
+        /* EOF never changes the waiting path: process exit and pipe draining
+           share the same monotonic deadline, including the exec handshake. */
+        now = sy_now_ms();
+        if (now < 0 || now >= deadline) {
+            size_t i; char rep[256]; res->timed_out=1;
+            int sv=rp_kill_tree(pid,2000,rx_s9_pid>0?&rx_s9_pid:0,rx_s9_pid>0?1:0,rep,sizeof rep);
+            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
+            res->residue = sv;
+            (void)waitpid(pid, &st, WNOHANG);
+            if (open_o) close(po[0]);
+            if (open_e) close(pe[0]);
+            if (open_f) close(pf[0]);
+            res->out=o.p;res->outn=o.n;res->err=e.p;res->errn=e.n;
+            if (now < 0) { snprintf(why, wl, "OSError: cannot read monotonic clock"); return -1; }
+            {   np_buf l = { 0, 0, 0 };
+                np_puts(&l, "subprocess.TimeoutExpired: Command '[");
+                for (i = 0; argv[i]; i++) { if (i) np_puts(&l, ", "); np_puts(&l, "'"); np_puts(&l, argv[i]); np_puts(&l, "'"); }
+                np_puts(&l, "]' timed out after ");
+                { int cx_kept = snprintf(t, sizeof t, "%d seconds", secs); (void)cx_kept; } np_puts(&l, t);
+                if (sv > 0) { np_puts(&l, " ("); np_puts(&l, rep); np_puts(&l, " survived)"); }
+                snprintf(why, wl, "%s", l.p); free(l.p);
+            }
+            return -1;
+        }
+        if (!got) {
+            long left = deadline - now;
+            usleep((unsigned int)(left < 2 ? left : 2) * 1000);
+        }
+    }
+    if (errn == sizeof err) {
+        free(o.p); free(e.p);
+        np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
+        return -1;
+    }
+    res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
+    res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
+    return 0;
+}
+static int rx_cmd(const char *tag,char **v,const char *cwd,char **out) {
+    long left=rx_deadline-sy_now_ms();np_result r={0};np_buf b={0};char why[600]={0},name[200],p[4400],tmpenv[4400];int rc;
+    if(out)*out=0;if(left<3000)return -3;int secs=(int)((left-2000)/1000);if(secs>53)secs=53;
+    if(cx_fmt(tmpenv,sizeof tmpenv,"TMPDIR=%s",rx_state))return 125;char *env[]={tmpenv,0};
+    if(rx_capture(v,cwd,env,secs,&r,why,sizeof why))rc=r.timed_out?142:127;else rc=r.rc<0?128-r.rc:r.rc;
+    if(r.residue)rc=125;
+    for(int i=0;v[i];i++){np_puts(&b,i?"\t":"ARGV\t");np_puts(&b,v[i]);}np_puts(&b,"\nRC\t");np_putll(&b,rc);np_puts(&b,"\nRESIDUE\t");np_putll(&b,r.residue);np_puts(&b,"\nRUNNER\t");np_puts(&b,why);np_puts(&b,"\nSTDOUT\n");if(r.outn)np_put(&b,r.out,r.outn);np_puts(&b,"\nSTDERR\n");if(r.errn)np_put(&b,r.err,r.errn);
+    if(cx_fmt(name,sizeof name,"cmd-%s-%ld-%d-%d.txt",tag,sy_now_ms(),sy_pid(),rx_seq++)||rx_path(p,rx_state,name)||rx_write(p,b.p,b.n,O_EXCL))rx_io_stop();free(b.p);
+    if(out&&!rc){*out=r.out;r.out=0;}np_free(&r);return sy_now_ms()+2000>=rx_deadline?-3:rc;
+}
+static int rx_hasline(const char *s, const char *w) {
+    size_t n = strlen(w);
+    while (s && *s) {
+        const char *e = strchr(s, '\n'); size_t l = e ? (size_t)(e - s) : strlen(s);
+        if (l == n && !strncmp(s, w, n)) return 1;
+        if (!e) break;
+        s = e + 1;
+    }
+    return 0;
+}
+static void rx_first(const char *s, char *o, int cap) { int k = 0; while (s && s[k] && s[k] != '\n' && k < cap - 1) { o[k] = s[k]; k++; } o[k] = 0; }
+static int rx_save(const char *file,const char *text) { char p[4400];return rx_path(p,rx_state,file)||rx_write(p,text,strlen(text),O_TRUNC); }
+static int rx_loadline(const char *file, char *o, int cap) {
+    char p[4400]; size_t n = 0; char *s;
+    o[0] = 0;
+    if (rx_path(p, rx_state, file) || sy_exists(p) != 1) return 1;
+    s = cx_read(p, &n);
+    if (!s) return 1;
+    rx_first(s, o, cap); free(s);
+    return !o[0];
+}
+static int rx_candidate_write(const char *path, const char *ci) {
+    np_buf b = {0}; int i, bad;
+    const char *v[7];
+    v[0] = rx_c.repo; v[1] = rx_c.tag; v[2] = rx_c.commit; v[3] = rx_c.version; v[4] = rx_c.workflow; v[5] = rx_c.workflow_ref; v[6] = ci;
+    np_puts(&b, "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n");
+    for (i = 0; i < 7; i++) { if (i) np_puts(&b, "\t"); np_puts(&b, v[i]); }
+    for (i = 0; i < 7; i++) { np_puts(&b, "\t"); np_puts(&b, rx_c.name[i]); np_puts(&b, "\t"); np_puts(&b, rx_c.sha[i]); }
+    np_puts(&b, "\n");
+    bad=rx_write(path,b.p,b.n,O_TRUNC);
+    free(b.p);
+    return bad;
+}
+/* commit FILES of repo_dir when they differ from HEAD; HEAD's full id into ID and STATE/SAVE */
+static int rx_commit(const char *tag, const char *subject, const char *f1, const char *f2, char *id, const char *save) {
+    char *o = 0; int rc;
+    char *e1=!strcmp(tag,"commit-y")?"release/evidence.tsv":0,*e2=e1?"release/rollback.txt":0,*e3=e1?"release/decision.txt":0;
+    {char *v[]={"git","-C",(char *)rx_repo,"diff","--cached","--name-only",0};rc=rx_cmd("index-safety",v,rx_repo,&o);if(rc)return rc<0?rc:rx_fail("index inspection",0);for(char *a=o;a&&*a;){char *e=strchr(a,'\n');if(!e){free(o);return rx_fail("index output",0);}*e=0;if(strcmp(a,f1)&&strcmp(a,f2)&&(!e1||(strcmp(a,e1)&&strcmp(a,e2)&&strcmp(a,e3)))){free(o);return rx_fail("unrelated staged changes",0);}a=e+1;}free(o);o=0;}
+    {char *v[]={"git","-C",(char *)rx_repo,"add","--",(char *)f1,(char *)f2,e1,e2,e3,0};
+        rc = rx_cmd(tag, v, rx_repo, 0); if (rc) return rc < 0 ? rc : rx_fail("git add", f1); }
+    {char *v[]={"git","-C",(char *)rx_repo,"diff","--cached","--quiet","--",(char *)f1,(char *)f2,e1,e2,e3,0};
+        rc = rx_cmd(tag, v, rx_repo, 0); if (rc < 0) return rc; }
+    if (rc == 1) {
+        char *v[]={"git","-C",(char *)rx_repo,"commit","-q","-m",(char *)subject,"--",(char *)f1,(char *)f2,e1,e2,e3,0};
+        rc = rx_cmd(tag, v, rx_repo, 0); if (rc) return rc < 0 ? rc : rx_fail("git commit", subject);
+    } else if (rc) return rx_fail("git diff", f1);
+    {   char *v[] = {"git", "-C", (char *)rx_repo, "rev-parse", "HEAD", 0};
+        rc = rx_cmd(tag, v, rx_repo, &o); if (rc) return rc < 0 ? rc : rx_fail("git rev-parse", 0); }
+    rx_first(o, id, 64); free(o);
+    if (strlen(id) != 40 || rx_save(save, id)) return rx_fail("commit id", id);
+    return 0;
+}
+static int rx_push(const char *tag, const char *id) {
+    char ref[200], *o = 0, got[64]; int rc;
+    if(strlen(id)!=40||cx_fmt(ref,sizeof ref,"%s:refs/heads/%s",id,rx_c.workflow_ref))return rx_fail("ref/commit identity",0);
+    {   char *v[] = {"git", "-C", (char *)rx_repo, "push", "-q", "origin", ref, 0};
+        rc = rx_cmd(tag, v, rx_repo, 0); if (rc) return rc < 0 ? rc : rx_fail("git push", ref); }
+    {   char *v[] = {"git", "-C", (char *)rx_repo, "ls-remote", "origin", ref + 41, 0};
+        rc = rx_cmd(tag, v, rx_repo, &o); if (rc) return rc < 0 ? rc : rx_fail("git ls-remote", 0); }
+    rx_first(o, got, 41); free(o);
+    return strcmp(got, id) ? rx_fail("remote head is not the pushed commit", got) : 0;
+}
+static int rx_view(const char *tag, char **out) {
+    char *v[40];int n=rx_pre(v,"gh");
+    v[n++]="release";v[n++]="view";v[n++]=rx_c.tag;v[n++]="-R";v[n++]=rx_c.repo;v[n++]="--json";v[n++]="isDraft,tagName,targetCommitish,assets";v[n++]="--jq";v[n++]=".isDraft, .tagName, .targetCommitish, .assets[].name";v[n]=0;
+    return rx_cmd(tag, v, 0, out);
+}
+static int rx_release_identity(const char *s,const char *draft) {
+    char prefix[300];if(cx_fmt(prefix,sizeof prefix,"%s\n%s\n%s\n",draft,rx_c.tag,rx_c.commit))return 0;
+    return s&&!strncmp(s,prefix,strlen(prefix));
+}
+static int rx_verify(const char *dir) {
+    char *v[12],*o=0;int rc;size_t at=0;
+    v[0]="sha256sum";v[1]="--";for(int i=0;i<7;i++)v[i+2]=rx_c.name[i];v[9]=0;
+    rc=rx_cmd("verify-seven",v,dir,&o);if(rc)return rc<0?rc:rx_fail("seven digest command",dir);
+    for(int i=0;i<7;i++){size_t n=strlen(rx_c.name[i]);if(!o||strlen(o+at)<67+n||strncmp(o+at,rx_c.sha[i],64)||strncmp(o+at+64,"  ",2)||strncmp(o+at+66,rx_c.name[i],n)||o[at+66+n]!='\n'){free(o);return rx_fail("seven digest mismatch",rx_c.name[i]);}at+=67+n;}rc=o[at]!=0;free(o);if(rc)return rx_fail("digest output suffix",0);return 0;
+}
+static int rx_layout(const char *dir) {
+    char candidate[4400],com[4400],tool[4400],*v[40];int n=0,rc=rx_verify(dir);if(rc)return rc;
+    if(rx_path(candidate,rx_state,"candidate.tsv"))return rx_fail("layout path",0);
+    if(rx_get("layout_check"))n=rx_pre(v,"layout_check");
+    else{if(rx_path(com,rx_root,"unisacc.com")||rx_path(tool,rx_root,"tools/release-layout.cx"))return rx_fail("layout path",0);v[n++]="sh";v[n++]=com;v[n++]=tool;v[n++]="--";}
+    v[n++]="--candidate";v[n++]=candidate;v[n++]="--check";v[n++]=(char *)dir;v[n]=0;
+    rc=rx_cmd("layout-check",v,rx_root,0);return rc?rc<0?rc:rx_fail("layout structure",dir):0;
+}
+static int rx_semantics(const char *dir) {
+    char p[4400],expected[160],*o=0;size_t n=0;PackageFooter footer;int rc;
+    if(rx_path(p,dir,rx_c.name[1]))return rx_fail("package path",0);
+    unsigned char *b=(unsigned char *)cx_read(p,&n);int good=b&&n<=2147483647UL&&packagefooter_locate_bytes(b,(long)n,&footer)&&footer.package_offset==0;free(b);
+    if(!good)return rx_fail("package footer/length",0);
+    if(rx_path(p,dir,rx_c.name[3]))return rx_fail("record path",0);
+    o=cx_read(p,&n);cx_fmt(expected,sizeof expected,"\"commit\": \"%s\"",rx_c.commit);good=o&&strlen(o)==n&&strstr(o,expected);free(o);if(!good)return rx_fail("build record source commit identity",0);
+    if(rx_path(p,dir,rx_c.name[0]))return rx_fail("version path",0);
+    char *v[]={"sh",p,"--version",0};rc=rx_cmd("readback-version",v,dir,&o);cx_fmt(expected,sizeof expected,"unisacc %s\n",rx_c.version);good=!rc&&o&&!strcmp(o,expected);free(o);return good?0:rc<0?rc:rx_fail("readback version differs",0);
+}
+/* download the release into a new STATE/BASE[-ms] and compare the seven digests; the directory name into STATE/BASE.dir */
+static int rx_readback(const char *tag, const char *base) {
+    char dir[4400],leaf[200],file[200],*v[40];int n,rc;
+    if (cx_fmt(leaf, sizeof leaf, "%s", base) || rx_path(dir, rx_state, leaf)) return rx_fail("path", 0);
+    if (sy_exists(dir) == 1 && (cx_fmt(leaf, sizeof leaf, "%s-%ld", base, sy_now_ms()) || rx_path(dir, rx_state, leaf))) return rx_fail("path", 0);
+    if (cx_fmt(file, sizeof file, "%s.dir", base) || rx_save(file, dir)) return rx_fail("state write", file);
+    n = rx_pre(v, "gh");
+    v[n++] = "release"; v[n++] = "download"; v[n++] = rx_c.tag; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--dir"; v[n++] = dir; v[n] = 0;
+    rc = rx_cmd(tag, v, 0, 0);
+    if (rc) return rc < 0 ? rc : rx_fail("gh release download", dir);
+    rc=rx_layout(dir);if(rc)return rc;rc=rx_semantics(dir);if(rc)return rc;
+    return 0;
+}
+static int rx_public_readback(void) {
+    char dir[4400],leaf[100],url[1000],p[4400],ape[4400];int rc;
+    if(cx_fmt(leaf,sizeof leaf,"public-%ld-%d",sy_now_ms(),sy_pid())||rx_path(dir,rx_state,leaf)||sy_mkdir(dir,0700))return rx_fail("fresh public directory",0);
+    for(int i=0;i<7+(rx_upstream_ok?7:0);i++){
+        const char *name=i<7?rx_c.name[i]:rx_exports[i-7];
+        if(cx_fmt(url,sizeof url,"https://github.com/%s/releases/download/%s/%s",rx_c.repo,rx_c.tag,name)||rx_path(p,dir,name))return rx_fail("public URL/path",0);
+        char *v[]={"curl","-q","--fail","--silent","--show-error","--location","--proto","=https","--proto-redir","=https","--netrc-file","/dev/null","--output",p,"--",url,0};
+        rc=rx_cmd("public-anonymous-download",v,rx_state,0);if(rc)return rc<0?rc:rx_fail("unauthenticated public download",name);
+    }
+    rc=rx_layout(dir);if(rc)return rc;rc=rx_semantics(dir);if(rc)return rc;
+    if(rx_upstream_ok){rx_path(ape,dir,rx_c.name[0]);if(rop_check(ape,dir))return rx_fail("public six standalone slices differ",0);
+        char expected[4400];size_t a=0,b=0;rx_path(expected,rx_state,"standalone-sha256.tsv");rx_path(p,dir,"standalone-sha256.tsv");char *x=cx_read(expected,&a),*y=cx_read(p,&b);int good=x&&y&&a==b&&!memcmp(x,y,a);free(x);free(y);if(!good)return rx_fail("public standalone digest manifest differs",0);}
+    return rx_save("public.dir",dir)?rx_fail("public directory record",0):0;
+}
+static const char *rx_verdict(int phase) { return rx_st[phase] == RX_DONE ? "PASS" : rx_st[phase] == RX_FAILED ? "FAIL" : "UNKNOWN"; }
+static int rx_evidence(char verdicts[8][8]) {
+    np_buf b = {0}; char row[4600], dir[4400]; const char *up = rx_one("upstream_evidence"); int i, bad, s9fail = 0, s9done = 0;
+    char upv[3][8], upp[3][400];
+    for (i = 0; i < 3; i++) { (void)cx_fmt(upv[i], 8, "UNKNOWN"); (void)cx_fmt(upp[i], 400, "no-upstream-evidence"); }
+    if(rx_upstream_ok){for(i=0;i<3;i++){cx_fmt(upv[i],8,"PASS");cx_fmt(upp[i],400,"%s/upstream-evidence.tsv",rx_state);}}(void)up;
+    for (i = 0; i < 3; i++) { if (rx_st[8 + i] == RX_FAILED) s9fail = 1; if (rx_st[8 + i] == RX_DONE) s9done++; }
+    for (i = 0; i < 3; i++) (void)cx_fmt(verdicts[i], 8, "%s", upv[i]);
+    (void)cx_fmt(verdicts[3],8,"%s",s9fail?"FAIL":s9done==3&&rx_s9_bound&&rx_s9_full?"PASS":"UNKNOWN");
+    (void)cx_fmt(verdicts[4], 8, "%s", rx_verdict(0));
+    (void)cx_fmt(verdicts[5], 8, "%s", rx_verdict(5));
+    (void)cx_fmt(verdicts[6], 8, "%s", rx_verdict(7));
+    (void)cx_fmt(verdicts[7], 8, "%s", rx_verdict(11));
+    for (i = 0; i < 3; i++) if (!cx_fmt(row, sizeof row, "%d\t%s\t%s\n", i + 1, upv[i], upp[i])) np_puts(&b, row);
+    if (!cx_fmt(row, sizeof row, "4\t%s\t%s/exec.tsv\n5\t%s\t%s/exec.tsv\n6\t%s\t%s/exec.tsv\n", verdicts[3], rx_state, verdicts[4], rx_state, verdicts[5], rx_state)) np_puts(&b, row);
+    if (!cx_fmt(row, sizeof row, "7\t%s\thttps://github.com/%s/actions/runs/%s\n", verdicts[6], rx_c.repo, rx_run[0] ? rx_run : "none")) np_puts(&b, row);
+    if (rx_loadline("readback.dir", dir, sizeof dir)) (void)cx_fmt(dir, sizeof dir, "none");
+    if (!cx_fmt(row, sizeof row, "8\t%s\t%s\n", verdicts[7], dir)) np_puts(&b, row);
+    bad=!b.p||rx_path(row,rx_state,"evidence.tsv")||rx_write(row,b.p,b.n,O_TRUNC);
+    free(b.p);
+    return bad;
+}
+
+static int rx_observe(void);
+static int rx_gap_allowed(void) {
+    const char *file=rx_one("s9_gap_ruling");char p[4400],row[200];size_t n=0,m=0;char *s,*old;int good;
+    if(!file||file[0]!='/')return 0;s=cx_read(file,&n);if(!s||strlen(s)!=n||n>8000){free(s);return 0;}
+    cx_fmt(row,sizeof row,"release_tag\t%s",rx_c.tag);good=rx_hasline(s,row);cx_fmt(row,sizeof row,"build_rev\t%s",rx_c.commit);good=good&&rx_hasline(s,row);cx_fmt(row,sizeof row,"ape_sha256\t%s",rx_c.sha[0]);good=good&&rx_hasline(s,row)&&rx_hasline(s,"decision\tALLOW_S9_GAP")&&strstr(s,"reason\t");
+    if(!good){free(s);return 0;}rx_path(p,rx_state,"s9-gap-ruling.txt");if(sy_exists(p)==1){old=cx_read(p,&m);good=old&&m==n&&!memcmp(s,old,n);free(old);}else good=!rx_write(p,s,n,O_EXCL);free(s);return good;
+}
+/* one sequential phase: 0 its check held, 1 failed (rx_why), -3 deadline */
+static int rx_do(int i) {
+    char p[4400], q[4400], why[400], *o = 0, *v[40]; int rc, n, k;
+    rx_why[0] = 0;
+    if (i == 0) {
+        rc=rx_layout(rx_assets);if(rc)return rc;
+        {   char *sv[] = {"sha256sum", "--check", "--quiet", rx_c.name[6], 0};
+            rc = rx_cmd("sums", sv, rx_assets, 0); if (rc) return rc < 0 ? rc : rx_fail("checksum file does not verify", rx_c.name[6]); }
+        return 0;
+    }
+    if (i == 1) {
+        char subject[300];
+        if (rx_path(p, rx_state, "candidate.tsv") || rx_path(q, rx_repo, "release/candidate.tsv") || sy_copy(p, q, 0644) < 0) return rx_fail("candidate copy", q);
+        if (cx_fmt(subject, sizeof subject, "%s X: release/candidate.tsv (seven digests recomputed, ci_run_id pending)", rx_c.version)) return rx_fail("subject", 0);
+        return rx_commit("commit-x", subject, "release/candidate.tsv", "release/candidate.tsv", rx_x, "commit-x.txt");
+    }
+    if (i == 2) return rx_push("push-x", rx_x);
+    if (i == 3) {
+        char first[16];
+        rc = rx_view("draft-view", &o);
+        if (rc < 0) return rc;
+        if(!rc){int good=rx_release_identity(o,"true");free(o);return good?0:rx_fail("existing draft tag/target mismatch",rx_c.tag);}
+        n = rx_pre(v, "gh");
+        v[n++] = "release"; v[n++] = "create"; v[n++] = rx_c.tag; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--draft"; v[n++] = "--title"; v[n++] = rx_c.version; v[n++] = "--target"; v[n++] = (char *)rx_one("build_rev"); v[n] = 0;
+        rc = rx_cmd("draft-create", v, 0, 0);
+        return rc ? (rc < 0 ? rc : rx_fail("gh release create", rx_c.tag)) : 0;
+    }
+    if (i == 4) {
+        for (k = 0; k < 7; k++) {   /* one asset per bounded command */
+            if (rx_path(p, rx_assets, rx_c.name[k])) return rx_fail("path", 0);
+            n = rx_pre(v, "gh");
+            v[n++] = "release"; v[n++] = "upload"; v[n++] = rx_c.tag; v[n++] = p; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--clobber"; v[n] = 0;
+            rc = rx_cmd("upload", v, 0, 0);
+            if (rc) return rc < 0 ? rc : rx_fail("gh release upload", rx_c.name[k]);
+        }
+        if(rx_upstream_ok)for(k=0;k<7;k++){
+            if(k<6){if(cx_fmt(p,sizeof p,"%s/standalone/%s",rx_state,rx_exports[k]))return rx_fail("standalone path",0);}else if(rx_path(p,rx_state,rx_exports[k]))return rx_fail("manifest path",0);
+            n=rx_pre(v,"gh");v[n++]="release";v[n++]="upload";v[n++]=rx_c.tag;v[n++]=p;v[n++]="-R";v[n++]=rx_c.repo;v[n++]="--clobber";v[n]=0;rc=rx_cmd("standalone-upload",v,0,0);if(rc)return rc<0?rc:rx_fail("standalone upload",rx_exports[k]);
+        }
+        return 0;
+    }
+    if (i == 5) {
+        char first[16];
+        rc = rx_view("draft-check", &o);
+        if (rc) return rc < 0 ? rc : rx_fail("gh release view", rx_c.tag);
+        rx_first(o, first, sizeof first);
+        if(!rx_release_identity(o,"true")){free(o);return rx_fail("draft tag/target/isDraft identity",0);}
+        for (k = 0; k < 7; k++) if (!rx_hasline(o, rx_c.name[k])) { free(o); return rx_fail("draft lacks asset", rx_c.name[k]); }
+        free(o);
+        return 0;
+    }
+    if (i == 11) return rx_readback("draft-readback", "readback");
+    if (i == 12) {
+        char verdicts[8][8], dir[4400];
+        if (rx_evidence(verdicts)) return rx_fail("evidence write", 0);
+        if (rx_path(p, rx_state, "candidate.tsv") || rx_path(q, rx_state, "evidence.tsv") || rx_loadline("readback.dir", dir, sizeof dir)) return rx_fail("decide inputs", 0);
+        n = rx_pre(v, "decide");
+        v[n++] = "--candidate"; v[n++] = p; v[n++] = "--evidence"; v[n++] = q; v[n++] = "--assets"; v[n++] = dir; v[n] = 0;
+        rc = rx_cmd("decide", v, rx_root, &o);
+        if (rc) return rc < 0 ? rc : rx_fail("release-decide", 0);
+        if (rx_save("decide.out", o ? o : "")) { free(o); return rx_fail("state write", "decide.out"); }
+        free(o);
+        for (k = 0; k < 8; k++) {
+            char which[64];
+            if(!strcmp(verdicts[k],"PASS")||(k==3&&!strcmp(verdicts[k],"UNKNOWN")&&rx_gap_allowed()))continue;
+            (void)cx_fmt(which, sizeof which, "evidence step %d is %s", k + 1, verdicts[k]);
+            return rx_fail(which, k == 3 ? "no s9_gap_ruling recorded" : "release stops here");
+        }
+        return 0;
+    }
+    if (i == 13) {
+        const char *notes = rx_one("notes"); char text[1200], subject[300], y[64];
+        if (rx_path(p, rx_repo, notes) || sy_exists(p) != 1) return rx_fail("release notes missing", notes);
+        if (cx_fmt(text, sizeof text, "gh -R %s release edit %s --draft=true\ngh -R %s release edit %s --latest\n# no tag is deleted\n", rx_c.repo, rx_c.tag, rx_c.repo, rx_one("prev_tag")) || rx_save("rollback.txt", text))
+            return rx_fail("rollback declaration", 0);
+        if (rx_path(q, rx_repo, "release/candidate.tsv") || rx_candidate_write(q, rx_run)) return rx_fail("candidate write", q);
+        if (cx_fmt(subject, sizeof subject, "%s Y: ci_run_id=%s, release notes", rx_c.version, rx_run)) return rx_fail("subject", 0);
+        {const char *from[]={"evidence.tsv","rollback.txt","decide.out"};const char *to[]={"release/evidence.tsv","release/rollback.txt","release/decision.txt"};for(k=0;k<3;k++){if(rx_path(p,rx_state,from[k])||rx_path(q,rx_repo,to[k])||sy_copy(p,q,0644))return rx_fail("Y evidence/rollback copy",0);}}
+        return rx_commit("commit-y", subject, "release/candidate.tsv", notes, y, "commit-y.txt");
+    }
+    if (i == 14) { char y[64]; if (rx_loadline("commit-y.txt", y, sizeof y)) return rx_fail("no recorded Y", 0); return rx_push("push-y", y); }
+    if (i == 15) {
+        if (rx_path(p, rx_state, "rollback.txt") || sy_exists(p) != 1) return rx_fail("no rollback declaration", 0);
+        if (rx_st[11] != RX_DONE || rx_st[12] != RX_DONE || rx_st[14] != RX_DONE || rx_st[7] != RX_DONE) return rx_fail("publish preconditions", "read-back, decision, pushed Y and CI must be DONE");
+        if(sy_now_ms()+3000>=rx_deadline)return -3;
+        rx_upstream_ok=!rp_verify_upstream(rx_state,rx_config_path,rx_assets);if(!rx_upstream_ok)return rx_fail("publish upstream seal no longer valid",0);
+        rc=rx_verify(rx_assets);if(rc)return rc;
+        if(rx_loadline("readback.dir",p,sizeof p))return rx_fail("publish missing readback",0);rc=rx_layout(p);if(rc)return rc;rc=rx_semantics(p);if(rc)return rc;
+        if(rx_observe()!=1)return rx_fail("publish CI no longer qualified",0);
+        rc=rx_do(12);if(rc)return rc;
+        {char y[64],ref[200],*head=0;RcCandidate actual;
+         if(rx_loadline("commit-y.txt",y,sizeof y)||strlen(y)!=40||!rcand_hex(y,40))return rx_fail("publish missing Y",0);
+         char *h[]={"git","-C",(char *)rx_repo,"rev-parse","HEAD",0};rc=rx_cmd("publish-local-Y",h,rx_repo,&head);int good=!rc&&head&&!strncmp(head,y,40)&&head[40]=='\n';free(head);if(!good)return rc<0?rc:rx_fail("publish checkout differs from Y",0);
+         cx_fmt(ref,sizeof ref,"refs/heads/%s",rx_c.workflow_ref);char *r[]={"git","-C",(char *)rx_repo,"ls-remote","origin",ref,0};rc=rx_cmd("publish-remote-Y",r,rx_repo,&head);good=!rc&&head&&!strncmp(head,y,40)&&head[40]=='\t';free(head);if(!good)return rc<0?rc:rx_fail("publish Y is not remote head",0);
+         rx_path(p,rx_repo,"release/candidate.tsv");if(rcand_load(p,&actual,why,sizeof why)||strcmp(actual.commit,rx_c.commit)||strcmp(actual.ci_run_id,rx_run)||strcmp(actual.tag,rx_c.tag))return rx_fail("publish candidate identity",0);
+         for(k=0;k<7;k++)if(strcmp(actual.name[k],rx_c.name[k])||strcmp(actual.sha[k],rx_c.sha[k]))return rx_fail("publish candidate pins",0);
+        }
+        if (rx_path(q, rx_repo, rx_one("notes"))) return rx_fail("path", 0);
+        n = rx_pre(v, "gh");
+        v[n++] = "release"; v[n++] = "edit"; v[n++] = rx_c.tag; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--notes-file"; v[n++] = q; v[n++] = "--target"; v[n++] = (char *)rx_one("build_rev"); v[n] = 0;
+        rc = rx_cmd("publish-notes", v, 0, 0);
+        if (rc) return rc < 0 ? rc : rx_fail("gh release edit notes", 0);
+        n = rx_pre(v, "gh");
+        v[n++] = "release"; v[n++] = "edit"; v[n++] = rx_c.tag; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--draft=false"; v[n++] = "--latest"; v[n] = 0;
+        rc = rx_cmd("publish", v, 0, 0);
+        return rc ? (rc < 0 ? rc : rx_fail("gh release edit publish", 0)) : 0;
+    }
+    if (i == 16) {
+        char first[16];
+        rc = rx_view("public-view", &o);
+        if (rc) return rc < 0 ? rc : rx_fail("gh release view", rx_c.tag);
+        int good=rx_release_identity(o,"false");free(o);if(!good)return rx_fail("public tag/target/isDraft identity",0);
+        return rx_public_readback();
+    }
+    return rx_fail("no such sequential phase", rx_phase[i]);
+}
+static int rx_run_seq(int i) {
+    long t0 = sy_now_ms(); int rc;
+    if (rx_st[i] == RX_DONE || rx_st[i] == RX_SKIPPED) return 0;
+    rx_mark(i, RX_RUNNING, 0, 0, "");
+    rc = rx_do(i);
+    if (rc == -3) return 3;   /* left RUNNING: the next call runs it again */
+    rx_mark(i, rc ? RX_FAILED : RX_DONE, rc, sy_now_ms() - t0, rx_why);
+    return rc ? 1 : 0;
+}
+static int rx_run_id(char *id) {
+    char *v[40],*o=0;int n=rx_pre(v,"gh"),rc;
+    v[n++]="run";v[n++]="list";v[n++]="-R";v[n++]=rx_c.repo;v[n++]="--workflow";v[n++]=rx_c.workflow;v[n++]="--branch";v[n++]=rx_c.workflow_ref;v[n++]="--event";v[n++]="workflow_dispatch";v[n++]="--limit";v[n++]="1";v[n++]="--json";v[n++]="databaseId";v[n++]="--jq";v[n++]=".[0].databaseId";v[n]=0;
+    rc = rx_cmd("ci-list", v, 0, &o);
+    id[0] = 0;
+    if (!rc) rx_first(o, id, 32);
+    free(o);
+    return rc;
+}
+static int rx_dispatch(void) {
+    char before[64], now[64], f1[80], f2[120], f3[200], *v[32]; int n, rc, tries;
+    rx_why[0] = 0;
+    rc=rx_run_id(before);if(rc)return rc<0?rc:rx_fail("cannot snapshot CI run list",0);
+    if (cx_fmt(f1, sizeof f1, "commit=%s", rx_x) || cx_fmt(f2, sizeof f2, "ape_sha256=%s", rx_c.sha[0]) || cx_fmt(f3, sizeof f3, "release_tag=%s", rx_c.tag)) return rx_fail("inputs", 0);
+    n = rx_pre(v, "gh");
+    v[n++] = "workflow"; v[n++] = "run"; v[n++] = rx_c.workflow; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--ref"; v[n++] = rx_c.workflow_ref; v[n++] = "-f"; v[n++] = f1; v[n++] = "-f"; v[n++] = f2; v[n++] = "-f"; v[n++] = f3; v[n] = 0;
+    rc = rx_cmd("ci-dispatch", v, 0, 0);
+    if (rc) return rc < 0 ? rc : rx_fail("gh workflow run", rx_c.workflow);
+    for (tries = 0; tries < 20; tries++) {   /* the new run is the newest one that was not there before */
+        rc = rx_run_id(now); if (rc < 0) return rc;
+        if(!rc&&now[0]&&strspn(now,"0123456789")==strlen(now)&&strcmp(now,before)){cx_fmt(rx_run,sizeof rx_run,"%s",now);return rx_save("ci-run-id.txt",rx_run)?rx_fail("state write",0):0;}
+        sy_sleep_ms(rx_poll < 3000 ? rx_poll : 3000);
+    }
+    return rx_fail("dispatched run did not appear", before);
+}
+/* 1 concluded and qualified, 0 still running, 2 concluded otherwise (rx_why), -3 deadline */
+static int rx_observe(void) {
+    char *v[40],*o=0,line[80];int n=rx_pre(v,"gh"),rc;
+    v[n++] = "run"; v[n++] = "view"; v[n++] = rx_run; v[n++] = "-R"; v[n++] = rx_c.repo; v[n++] = "--json"; v[n++] = "status,conclusion"; v[n++] = "--jq"; v[n++] = ".status + \"\\t\" + .conclusion"; v[n] = 0;
+    rc = rx_cmd("ci-view", v, 0, &o);
+    if (rc < 0) return rc;
+    if (rc) return 0;   /* a failed observation is not a verdict */
+    rx_first(o,line,sizeof line);free(o);o=0;
+    if (strncmp(line, "completed\t", 10)) return 0;
+    if (strcmp(line + 10, "success")) { rx_fail("CI concluded", line + 10); return 2; }
+    n = rx_pre(v, "gh");
+    char dir[4400],table[4400];size_t bytes=0;
+    if(cx_fmt(dir,sizeof dir,"%s/ci-evidence-%ld-%d-%d",rx_state,sy_now_ms(),sy_pid(),rx_seq++)||sy_mkdir(dir,0700)||rx_path(table,dir,"table.md")){rx_fail("CI artifact fresh exclusive directory",0);return 2;}
+    v[n++]="run";v[n++]="download";v[n++]=rx_run;v[n++]="-R";v[n++]=rx_c.repo;v[n++]="-n";v[n++]="candidate-native-evidence";v[n++]="-D";v[n++]=dir;v[n]=0;
+    rc=rx_cmd("ci-evidence-download",v,0,0);if(rc<0)return rc;
+    if(!rc)o=cx_read(table,&bytes);
+    {char sha[160],commit[160];cx_fmt(sha,sizeof sha,"- ape_sha256: `%s`",rx_c.sha[0]);cx_fmt(commit,sizeof commit,"- commit: `%s`",rx_x);
+    if(rc||!o||strlen(o)!=bytes||!rx_hasline(o,"- verdict: **QUALIFIED** pass=42 fail=0 not_run=0 invalid=0")||!rx_hasline(o,sha)||!rx_hasline(o,commit)){free(o);rx_fail("CI artifact lacks bound real QUALIFIED 42/0/0/0 evidence",0);return 2;}}
+    if(rx_save("ci-evidence.dir",dir)){free(o);rx_fail("CI artifact checkpoint",0);return 2;}
+    free(o);
+    return 1;
+}
+static int rx_tier_wanted(int t) {
+    const char *s = rx_one("s9_tiers"); size_t n = strlen(rx_tier[t]);
+    if (!s) s = "commit";
+    while (*s) {
+        const char *e = strchr(s, ','); size_t l = e ? (size_t)(e - s) : strlen(s);
+        if (l == n && !strncmp(s, rx_tier[t], n)) return 1;
+        if (!e) break;
+        s = e + 1;
+    }
+    return 0;
+}
+static int rx_s9_start(int t) {
+    static char run[4400], session[4500], log[4500], bound[4400], secs[16];
+    char *v[40]; RxKey *k = rx_get("s9"); int n = 0, j, fresh;
+    if (cx_fmt(run, sizeof run, "%s/s9-%s", rx_state, rx_tier[t]) || cx_fmt(session, sizeof session, "%s/session.tsv", run) || cx_fmt(log, sizeof log, "%s/s9-%s.log", rx_state, rx_tier[t]) ||
+        cx_fmt(bound,sizeof bound,"%s/tools/bound",rx_root)||cx_fmt(secs,sizeof secs,"%d",rx_s9call))return -1;
+    fresh = sy_exists(session) != 1;
+    if(rx_write(log,"",0,O_TRUNC))return -1;
+    static char tmpenv[4400];if(cx_fmt(tmpenv,sizeof tmpenv,"TMPDIR=%s",rx_state))return -1;
+    v[n++]="sh";v[n++]="-c";v[n++]="exec \"$@\" >\"$0\" 2>&1";v[n++]=log;v[n++]="env";v[n++]=tmpenv;v[n++]=bound;v[n++]=secs;
+    for (j = 0; j < k->n; j++) v[n++] = k->v[j];
+    v[n++] = (char *)rx_root;
+    if (!fresh) v[n++] = "--resume";
+    v[n++] = run; v[n++] = "--tier"; v[n++] = (char *)rx_tier[t]; v[n] = 0;
+    {np_buf b={0};char leaf[80];for(j=0;v[j];j++){np_puts(&b,j?"\t":"ARGV\t");np_puts(&b,v[j]);}np_puts(&b,"\n");cx_fmt(leaf,sizeof leaf,"s9-%s.argv",rx_tier[t]);if(rx_save(leaf,b.p))rx_io_stop();free(b.p);}
+    return sy_spawn(v);   /* bounded by tools/bound s9_call_s above */
+}
+/* ci-dispatch + ci-observe beside the s9 tiers: 0 CI qualified, 1 CI failed, 3 deadline */
+static int rx_parallel(void) {
+    int t, cur = -1, pid = -1, tried[3] = {0, 0, 0}, ci = rx_st[7] == RX_DONE ? 1 : 0, rc; long t_ci = sy_now_ms(), t_s9 = 0, next = 0;
+    for (t = 0; t < 3; t++) if (!rx_tier_wanted(t) && rx_st[8 + t] != RX_SKIPPED && rx_st[8 + t] != RX_DONE) rx_mark(8 + t, RX_SKIPPED, 0, 0, "tier not in s9_tiers: not run");
+    if (rx_st[6] != RX_DONE) {
+        rx_mark(6, RX_RUNNING, 0, 0, "");
+        rc = rx_dispatch();
+        if (rc == -3) return 3;
+        rx_mark(6, rc ? RX_FAILED : RX_DONE, rc, sy_now_ms() - t_ci, rc ? rx_why : rx_run);
+        if (rc) ci = 2;
+    }
+    if (!ci) { t_ci = sy_now_ms(); rx_mark(7, RX_RUNNING, 0, 0, rx_run); }
+    for (;;) {
+        long now = sy_now_ms(); int left = 0;
+        if (pid > 0) {
+            int w = sy_wait(pid, 1);
+            if(w!=-EAGAIN){char p[4400];size_t n=0;cx_fmt(p,sizeof p,"%s/s9-%s.log",rx_state,rx_tier[cur]);char *s=cx_read(p,&n);int summary=s&&strstr(s,"S9_NIGHTLY\tstatus=PASS\t")&&!strstr(s,"S9_NIGHTLY\tstatus=FAIL");if(!w&&!summary)w=1;if(cur==2&&summary&&strstr(s,"qualification=FULL")&&!strstr(s,"qualification=NOT_FULL")&&!strstr(s,"NOT_QUALIFIED"))rx_s9_full=1;free(s);rx_mark(8+cur,w==0?RX_DONE:RX_FAILED,w,now-t_s9,w==0?"runner summary retained; not automatically FULL":"s9 runner/summary failed");pid=-1;}
+        }
+        rx_s9_pid=pid;int stop_new=ci==2;for(t=8;t<=10;t++)if(rx_st[t]==RX_FAILED)stop_new=1;
+        if(pid<0&&!stop_new)for(t=0;t<3&&pid<0;t++)if(rx_tier_wanted(t)&&rx_st[8+t]!=RX_DONE&&!tried[t]){
+            tried[t] = 1; cur = t; t_s9 = now;
+            rx_mark(8 + t, RX_RUNNING, 0, 0, "");
+            pid=rx_s9_start(t);rx_s9_pid=pid;
+            if (pid < 0) rx_mark(8 + t, RX_FAILED, 127, 0, "s9 runner did not start");
+        }
+        for(t=0;t<3;t++)if(!stop_new&&rx_tier_wanted(t)&&rx_st[8+t]!=RX_DONE&&!tried[t])left=1;
+        if (ci == 0 && now >= next) {
+            rc = rx_observe();
+            if (rc == 1) { rx_mark(7, RX_DONE, 0, sy_now_ms() - t_ci, rx_run); ci = 1; }
+            else if (rc == 2) { rx_mark(7, RX_FAILED, 1, sy_now_ms() - t_ci, rx_why); ci = 2; }
+            next = sy_now_ms() + rx_poll;
+        }
+        if(pid>0&&sy_now_ms()-t_s9>=rx_s9call*1000L){char rep[256];int residue=rp_kill_tree(pid,2000,0,0,rep,sizeof rep);rx_mark(8+cur,RX_FAILED,142,sy_now_ms()-t_s9,residue?"s9 timeout cleanup unconfirmed":"s9 call deadline; residue=0");pid=-1;rx_s9_pid=-1;}
+        if(ci&&pid<0&&!left)break;
+        if(sy_now_ms()+2000>=rx_deadline){
+            if(pid>0){char rep[256];int residue=rp_kill_tree(pid,2000,0,0,rep,sizeof rep);rx_mark(8+cur,RX_FAILED,142,sy_now_ms()-t_s9,residue?"deadline cleanup unconfirmed":"deadline killed tree; residue=0");rx_s9_pid=-1;}
+            return 3;
+        }
+        sy_sleep_ms(100);
+    }
+    if(ci!=1)return 1;for(t=8;t<=10;t++)if(rx_st[t]==RX_FAILED)return 1;return 0;
+}
+
+int rex_execute(const char *state, const char *config, const char *assets) {
+    static const char *need[]={"root","repo_dir","build_rev","prev_tag","notes","deadline_s",0};
+    char p[4400], why[400]; long v = 0; int i, rc;
+    if (!state || !config || !assets || cx_fmt(rx_state, sizeof rx_state, "%s", state) || cx_fmt(rx_assets, sizeof rx_assets, "%s", assets)) return rx_refuse("arguments", 0);
+    rx_config_path=config;
+    if(rp_subreaper())return rx_refuse("process-tree cleanup unavailable",0);
+    if(rx_path(p,rx_state,"execute.lock"))return rx_refuse("lock path",0);
+    rx_lock=sy_open(p,O_RDWR|O_CREAT|O_NOFOLLOW,0600);if(rx_lock<0||sy_flock(rx_lock,6))return rx_refuse("execution state busy",0);
+    {size_t n=0;char *s=cx_read(config,&n),hash[65],old[80];if(!s||strlen(s)!=n){free(s);return rx_refuse("config bytes",0);}cx_sha256_hex(s,n,hash);free(s);
+      if(rx_path(p,rx_state,"execute-config.sha256"))return rx_refuse("config path",0);
+      if(sy_exists(p)==1){if(rx_loadline("execute-config.sha256",old,sizeof old)||strcmp(old,hash))return rx_refuse("execution config identity changed",0);}
+      else if(rx_write(p,hash,64,O_EXCL))return rx_refuse("config identity write",0);
+    }
+    if (rx_config(config)) return rx_refuse("config unreadable or malformed", config);
+    for (i = 0; need[i]; i++) if (!rx_one(need[i])) return rx_refuse("config key missing or not single-valued:", need[i]);
+    if (!rx_get("gh") || !rx_get("s9") || !rx_get("decide")) return rx_refuse("config needs gh, s9 and decide argv prefixes", 0);
+    rx_root = rx_one("root"); rx_repo = rx_one("repo_dir");
+    if(sy_setenv("TMPDIR",rx_state,1))return rx_refuse("TMPDIR environment",0);
+    {char real[4096];if(sy_realpath(rx_root,real,sizeof real)<0||strcmp(real,rx_root)||sy_realpath(rx_repo,real,sizeof real)<0||strcmp(real,rx_repo))return rx_refuse("canonical roots required",0);}
+    {const char *notes=rx_one("notes"),*prev=rx_one("prev_tag");if(notes[0]=='/'||strstr(notes,"..")||strchr(notes,'\n')||prev[0]=='-'||strspn(prev,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")!=strlen(prev))return rx_refuse("unsafe notes/previous tag",0);}
+    if (rx_root[0] != '/' || rx_repo[0] != '/' || strlen(rx_one("build_rev")) != 40) return rx_refuse("root and repo_dir must be absolute, build_rev 40 hex", 0);
+    if (rx_num("deadline_s", 1, 7200, &v)) return rx_refuse("deadline_s outside 1..7200", 0);
+    {char text[128],*s,*t,*e;size_t n=0;long start,finish,now=sy_wall_s()*1000;
+        if(now<0||rx_path(p,rx_state,"deadline.tsv"))return rx_refuse("clock/path",0);
+        if(sy_exists(p)==1){s=cx_read(p,&n);if(!s)return rx_refuse("deadline read",0);start=strtol(s,&t,10);if(t==s||*t++!='\t'){free(s);return rx_refuse("deadline schema",0);}finish=strtol(t,&e,10);if(e==t||strcmp(e,"\n")||start>now||finish<start||finish-start!=v*1000){free(s);return rx_refuse("deadline corrupted, expanded or clock moved backwards",0);}free(s);}
+        else{start=now;finish=now+v*1000;if(cx_fmt(text,sizeof text,"%ld\t%ld\n",start,finish)||rx_write(p,text,strlen(text),O_EXCL))return rx_refuse("deadline persistence",0);}
+        rx_deadline=sy_now_ms()+(finish-now);if(finish<=now)return 3;
+    }
+    if(rx_get("s9_call_s")){if(rx_num("s9_call_s",1,55,&v))return rx_refuse("s9_call_s outside 1..55",0);rx_s9call=(int)v;}
+    if (rx_get("poll_ms")) { if (rx_num("poll_ms", 100, 60000, &v)) return rx_refuse("poll_ms outside 100..60000", 0); rx_poll = v; }
+    if (rx_path(p, rx_state, "candidate.tsv") || rcand_load(p, &rx_c, why, sizeof why)) return rx_refuse("state candidate", why);
+    if(strspn(rx_c.repo,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")!=strlen(rx_c.repo)||!strchr(rx_c.repo,'/')||strchr(strchr(rx_c.repo,'/')+1,'/')||strstr(rx_c.repo,".."))return rx_refuse("unsafe repository identity",0);
+    if(strcmp(rx_c.commit,rx_one("build_rev")))return rx_refuse("candidate commit differs from build_rev",0);
+    if(rx_progress())return rx_refuse("exec checkpoint corrupt",0);
+    if(rx_st[6]==RX_RUNNING||rx_st[6]==RX_FAILED)return rx_refuse("CI dispatch outcome unknown; refusing duplicate dispatch",0);
+    (void)rx_loadline("commit-x.txt", rx_x, sizeof rx_x);
+    (void)rx_loadline("ci-run-id.txt", rx_run, sizeof rx_run);
+    if(rx_st[1]==RX_DONE&&(strlen(rx_x)!=40||!rcand_hex(rx_x,40)))return rx_refuse("missing X identity",0);
+    if(rx_st[6]==RX_DONE&&(!rx_run[0]||strspn(rx_run,"0123456789")!=strlen(rx_run)))return rx_refuse("missing CI run identity",0);
+    rx_upstream_ok=sy_now_ms()+3000<rx_deadline&&!rp_verify_upstream(rx_state,config,rx_assets);
+    {char product[4400],*o=0;rx_path(product,rx_root,"unisacc.com");char *v[]={"sha256sum","--",product,0};int r=rx_cmd("s9-consumer-identity",v,rx_root,&o);rx_s9_bound=!r&&o&&!strncmp(o,rx_c.sha[0],64);free(o);}
+    if(rx_st[10]==RX_DONE){size_t n=0;cx_fmt(p,sizeof p,"%s/s9-daily.log",rx_state);char *s=cx_read(p,&n);rx_s9_full=s&&strstr(s,"qualification=FULL")&&!strstr(s,"qualification=NOT_FULL")&&!strstr(s,"NOT_QUALIFIED");free(s);}
+    for (i = 0; i <= 5; i++) { rc = rx_run_seq(i); if (rc) goto out; }
+    rc = rx_parallel();
+    if (rc) goto out;
+    for (i = 11; i < RX_N; i++) { rc = rx_run_seq(i); if (rc) goto out; }
+out:
+    {   char verdicts[8][8];
+        if(rx_evidence(verdicts))rc=1;
+        if(!rc)for(i=0;i<8;i++)if(strcmp(verdicts[i],"PASS")&&!(i==3&&!strcmp(verdicts[i],"UNKNOWN")&&rx_gap_allowed()))rc=1;
+    }
+    sy_printf("RELEASE_EXEC\tstatus=%s\tx=%s\tci_run=%s\tremaining_ms=%ld\n", rc == 0 ? "COMPLETE" : rc == 3 ? "DEADLINE" : "STOPPED", rx_x[0] ? rx_x : "-", rx_run[0] ? rx_run : "-", rx_deadline - sy_now_ms());
+    sy_close(rx_lock);rx_lock=-1;return rc;
+}

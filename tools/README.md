@@ -1398,3 +1398,75 @@ prepare/front0每次尝试使用独占新目录，超时残留保留以便诊断
 轻检查：`sh ./unisacc.com tools/check-chain-run.cx`，仅含兼容边界的微型假链，不跑真实构造；
 保留 `out/check-chain-run-*` 的证据。真实整链、真实预演、端到端速度和产品资格仍UNMEASURED。
 
+## 0.0.57：release-oneshot 执行边界
+
+规划接口 `--dry-run CANDIDATE LAYOUT NEW_STATE`、`--resume STATE` 和
+`--stop-after PHASE` 仍仅产出计划；`PLANNED` 与 `MANUAL=0` 都不代表发布资格。
+执行必须独立显式授权：
+`release-oneshot --execute STATE CONFIG --authorize-external-operations`。
+CONFIG 是逐行 TSV，命令前缀的每个参数各占一列，不作 shell 拼接或求值。
+执行可能提交和推送 X/Y、触发 CI、运行 s9、上传并公开发布；不得在未经授权的根或
+公共仓库上用它做测试。BUILD_REV、X、Y 与 CI run id 分开保留；输入变化拒绝续跑。
+执行 checkpoint 区分 `PLANNED/RUNNING/DONE/FAILED`；命令原始结果是证据来源，
+失败、deadline、未跑与 UNKNOWN 不得当作 COMPLETE。上游冻结、构造、打包资格
+不得由调用者随意填写 PASS，假命令成功也不授予真实产品或发布资格。
+执行 CONFIG 必填单值键 `root repo_dir build_rev prev_tag notes deadline_s`；`gh s9 decide`
+为多列 ARGV 前缀，`layout_check` 可提供预编译 release-layout 前缀。
+`notes` 是 repo_dir 内的说明路径；`build_rev` 必须与候选构造提交一致，不能以X/Y代替。
+可选 `s9_tiers` 为 commit/release/daily 逗号表，`s9_call_s` 不超过55秒；`poll_ms` 控制观察间隔。
+`deadline.tsv` 是一行 `START_MS<TAB>END_MS`（epoch毫秒），与配置跨度机检绑定。
+CI只承认候选工作流 `candidate-native-evidence` 制品内 `table.md` 的规范QUALIFIED汇总、
+匹配X和APE摘要；由 `gh run download` 获取，不把日志子串或自定义合格文本当资格。
+s9三档命令完成还不等于FULL，须核实际候选消费者及daily完整汇总；未证明保持UNKNOWN。
+可选 `s9_gap_ruling` 指向当版绝对路径裁定文件，必须逐行绑定 `release_tag`、`build_rev`、
+`ape_sha256`、`decision`=`ALLOW_S9_GAP` 与 `reason`，原文保存并在恢复时逐字核对；
+它仅允许明确披露的UNKNOWN缺口，不把UNKNOWN改PASS，也不豁免真实FAIL。
+`tools/check-releaseexec.cx` 仅用隔离本地 git 远端及假 gh/s9；无网络调用。
+批次需要调用者提供预编译 `release-oneshot-tool`、`fake-gh-tool`、`fake-s9-tool`、
+`release-decide-tool`、`release-layout-tool`，避免把多个工具的冷编译计入 55 秒夹具界。
+
+工具编译库存以实时 Git 索引为准，每片至多八源。本增量纳入四个 tools cx 后为
+767 源、96 片，范围 `tools-compile-000..095`；`096` 将是空片，不能登记。
+清单已补 `tools/check-whole-front-expand.cx`，新增假CLI在 tests/cases，不计入tools库存。
+
+`release-layout` 构造/核对 ZIP 的临时目录遵循现有规范绝对 `TMPDIR`；未设置时
+在调用者布局目录下创建独占子目录，不再使用共享临时根。执行夹具全部保留在私有树。
+
+## 0.0.57：发布前置准备 G1..G6
+
+`release-oneshot --prepare STATE CONFIG ASSETS --authorize-external-operations`
+只在调用者授权的私有冻结克隆中操作。ASSETS 必须为 `STATE/rr/layout`。
+配置沿用执行配置，并提供单值 TSV 键 `root build_rev constructor identity_helper
+chain_out snap version repo tag workflow workflow_ref cache_manager_x64
+cache_manager_arm64 deadline_s chain_deadline_s max_resumes`。路径均使用绝对路径；
+`snap` 必须为 `ROOT/out/release-snap-BUILD_REV前10位`。构造器及身份助手需已准备，
+两份 cache-manager 明确记录为外借输入，不声称链内重造。不会联网或赋予发布资格。
+
+准备器冻结 HEAD、源 SID、构造器与配置摘要；驱动有总预算的 chain-run；按现有
+candidate-chain pack 的固定路径收集六片/P4/两份 manager，保留原路径与逐文件摘要；
+生成 ci_run_id=0 的初表并写入私有 ROOT/release/candidate.tsv，再运行本地 pack/resume；
+最后导出、检查六独立片并生成 `standalone-sha256.tsv`。`deadline.tsv` 在恢复时不刷新。
+正式执行入口先用 `sh ./unisacc.com tools/release-oneshot.cx -o ABS_ONESHOT` 预编译；
+该编译仅准备工具，不是发布相完成或产品资格。原生执行启动时建立共享持久总deadline，
+覆盖其后的 prepare、execute、子工具冷编与 resume，恢复不得刷新截止。
+直接 `sh ./unisacc.com tools/release-oneshot.cx -- ...` 的入口冷编发生在模块计时之前，
+不能声称已计入；这种动态入口必须由调用者另包不超过60秒外界，或使用上述原生入口。
+子命令结果保留 `prepare-*.log`；返回3表示预算/中断未完成，非PASS。测试可配置
+`test_driver`：调用 `DRIVER chain|pack|standalone STATE CONFIG ASSETS`，替换昂贵命令，
+但身份、固定清单及七资产摘要仍检查，且上游证据只能 UNKNOWN。
+
+`upstream-evidence.tsv` 的1..3只来自真实完成的准备步骤；执行者必须调用
+`rp_verify_upstream` 重核配置、原输入、收集材料、七资产和六独立片，不能接受任意配置PASS。
+真实准备只证明freeze/construct/pack，不迁移CI或s9资格。本次已轻量实编并运行隔离执行夹具、
+前置失败/身份夹具及原规划回归，均failed=0；未跑真实构造、全门、发布、CI或s9。
+证据保留于私有 `out/k7-compile.log`、`out/k7-exec-fixture-02.log`、
+`out/k7-prepare-fixture-01.log`、`out/k7-plan-fixture-01.log`，假结果不授发布资格。
+
+`release-run --resume OUT` 读取 `pack-inputs.tsv` 并重算初表与十项源材料摘要，
+跳过已完成相，再核七资产与校验和。初次布局使用现场四源摘要而非初表零摘要；
+本地pack不再要求尚未产生的X提交，CI命令只打印 `{commit-x}`，不会执行。
+`release-layout SOURCE NEW_OUT` 在验证四源后现算新生成alias/ZIP/checksums的摘要再核布局；
+`--check OUT` 仍要求输入七摘要严格匹配，生成模式不再因尚未存在的派生摘要而拒绝。
+
+K7 的 `release-exec`、`release-prepare` 需要登记的原生工具材料，按现行元数据合同由 commit 改为 daily；材料、检查断言和55秒界不变，但不再计入 commit 档覆盖。
+`check-releaseprepare` 的快照仍在调用者显式输出目录内的独立夹具根中；不再内嵌仓根 out 路径。
