@@ -318,11 +318,33 @@ static void adopt_job(const char *baseline, const char *id) {
     if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status)) { if (cx_rmtree(temporary)) die("adopt-staging-cleanup"); die("adopt-publish-failed"); }
     printf("ADOPTED\t%s\tinputs-output-and-baseline-verified\tclaim=REUSED-not-executed\n", id);
 }
+/* One bounded canonical union endpoint. stdout is the fixed proof wire only. */
+static void verify_jobs(const char *listpath) {
+    size_t n; char *wire = load(listpath, &n);
+    if (!n || n > 24000 || wire[n - 1] != '\n' || memchr(wire, 0, n) || memchr(wire, '\r', n)) die("verify-jobs-list-wire");
+    const char *ids[131]; int count = 0;
+    for (char *p = wire; *p;) {
+        char *end = strchr(p, '\n'); *end = 0;
+        if (!*p || strlen(p) >= 160 || count == 131) die("verify-jobs-list-count");
+        find_job(p); for (int j = 0; j < count; j++) if (!strcmp(ids[j], p)) die("verify-jobs-duplicate");
+        ids[count++] = p; p = end + 1;
+    }
+    check_context_live(); char source_before[65], context_before[65];
+    if (cx_fmt(source_before, sizeof source_before, "%s", sid) || cx_fmt(context_before, sizeof context_before, "%s", context_sha)) die("verify-jobs-identity-bound");
+    sp_result result; char why[600];
+    if (sp_begin_job_endpoint(root, jobs, cc, bound)) die("verify-jobs-fresh-endpoint");
+    if (sp_verify_jobs_snapshot(root, ctx, ids, count, source_before, 40, &result, why, sizeof why)) { fprintf(stderr, "%s\n", why); die("verify-jobs-snapshot"); }
+    check_context_live();
+    if (strcmp(source_before, sid) || strcmp(context_before, context_sha) || strcmp(result.source, sid) || strcmp(result.manifest, context_sha)) die("verify-jobs-context-changed");
+    printf("VERIFY_JOBS\tsource=%s\tcontext=%s\tartifact=%s\treceipt=%s\twitness=%s\tverifier=%s\tjobs=%d\tmodels=%d\n", result.source, result.manifest, result.artifact, result.receipt, result.witness, result.verifier, result.jobs, result.models);
+    free(wire);
+}
 int main(int argc,char **argv){
 #if !defined(__linux__) || !defined(__x86_64__)
  fputs("NOT_RUN source-package foundation requires Linux/x86_64\n",stderr);return 3;
 #endif
  if(sizeof(long)!=8||sizeof(void *)!=8)die("LP64-process-required");
+ if(argc==5&&tx_eqz(argv[1], "verify-jobs")){setup(argv[2],argv[3]);verify_jobs(argv[4]);return 0;}
  if(argc==6&&tx_eqz(argv[1], "adopt-job")){setup(argv[2],argv[3]);adopt_job(argv[4],argv[5]);return 0;}
  if(argc==5&&tx_eqz(argv[1], "reuse-job")){setup(argv[2],argv[3]);return reuse_job(argv[4]);}
  if(argc==5&&tx_eqz(argv[1], "reuse-batch")){reuse_batch(argv[2],argv[3],argv[4]);return batch_misses?1:0;}

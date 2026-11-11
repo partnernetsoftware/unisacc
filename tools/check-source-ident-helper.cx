@@ -183,7 +183,34 @@ static int transaction_case(const char *name, const char *root, const char *cont
     char cleanup[600]; if (unisa_safedel(td, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 100000, cleanup, sizeof cleanup)) { fprintf(stderr, "%s\n", cleanup); return 2; }
     printf("CHECK_ADOPTION_TRANSACTION\tcase=%s\tfailed=%d\n", name, failed); return failed ? 1 : 0;
 }
+static int capture_path_cases(void) {
+    char td[4400], r[4400], c[4400], outside[4400], a[4400], b[4400], file[4400], p[4400], mapped[4400], expected[4400], link[4400];
+    const char *lr = "/logical/root", *lc = "/logical/context";
+    if (cx_fmt(td, sizeof td, "%s/adopt-path-XXXXXX", sy_tmpdir()) || !mkdtemp(td) ||
+        cx_fmt(r, sizeof r, "%s/root", td) || sy_mkdir(r, 0700) || cx_fmt(c, sizeof c, "%s/context", td) || sy_mkdir(c, 0700) ||
+        cx_fmt(outside, sizeof outside, "%s/outside", td) || sy_mkdir(outside, 0700) || cx_fmt(a, sizeof a, "%s/a", r) || sy_mkdir(a, 0700) ||
+        cx_fmt(b, sizeof b, "%s/b", r) || sy_mkdir(b, 0700) || cx_fmt(file, sizeof file, "%s/file", b) || cx_write(file, "input\n", 6)) return 2;
+    ck(sp_adoption_capture_path("/logical/root/./b/file", lr, lc, r, c, mapped, sizeof mapped) == 0 && !strcmp(mapped, file), "capture-internal-dot");
+    ck(sp_adoption_capture_path("/logical/root/a/../b/file", lr, lc, r, c, mapped, sizeof mapped) == 0 && !strcmp(mapped, file), "capture-internal-parent");
+    if (cx_fmt(expected, sizeof expected, "%s/b/missing/header.h", r)) return 2;
+    ck(sp_adoption_capture_path("/logical/root/b/missing/header.h", lr, lc, r, c, mapped, sizeof mapped) == 0 && !strcmp(mapped, expected), "capture-absent-probe-inside");
+    ck(sp_adoption_capture_path("/logical/root/../../outside/file", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-parent-root-escape-refused");
+    ck(sp_adoption_capture_path("/logical/root/../../../usr/bin/true", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-role-switch-escape-refused");
+    ck(sp_adoption_capture_path("/logical/root-evil/file", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-logical-prefix-collision-refused");
+    ck(sp_adoption_capture_path("/usr-evil/file", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-host-prefix-collision-refused");
+    if (cx_fmt(p, sizeof p, "%s/file", outside) || cx_write(p, "outside\n", 8) || cx_fmt(link, sizeof link, "%s/escape", r) || sy_symlink(outside, link)) return 2;
+    ck(sp_adoption_capture_path("/logical/root/escape/file", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-symlink-root-escape-refused");
+    ck(sp_adoption_capture_path("/logical/root/escape/missing/header.h", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-missing-through-symlink-escape-refused");
+    if (cx_fmt(p, sizeof p, "%s/not-present", td) || cx_fmt(link, sizeof link, "%s/dangling", r) || sy_symlink(p, link)) return 2;
+    ck(sp_adoption_capture_path("/logical/root/dangling/file", lr, lc, r, c, mapped, sizeof mapped) == -EPERM, "capture-dangling-symlink-refused");
+    if (cx_fmt(p, sizeof p, "%s/jobs", c) || sy_mkdir(p, 0700) || cx_fmt(a, sizeof a, "%s/jobs/a", c) || sy_mkdir(a, 0700) ||
+        cx_fmt(b, sizeof b, "%s/jobs/b", c) || sy_mkdir(b, 0700) || cx_fmt(file, sizeof file, "%s/file", b) || cx_write(file, "job\n", 4)) return 2;
+    ck(sp_adoption_capture_path("/logical/context/jobs/a/../b/./file", lr, lc, r, c, mapped, sizeof mapped) == 0 && !strcmp(mapped, file), "capture-context-internal-parent");
+    if (cx_rmtree(td)) return 2;
+    printf("CHECK_ADOPTION_CAPTURE_PATH\tfailed=%d\n", failed); return failed ? 1 : 0;
+}
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--capture-path-cases")) return capture_path_cases();
     if (argc == 8 && !strcmp(argv[1], "--transaction-case")) return transaction_case(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
     if (argc == 4 && !strcmp(argv[1], "--capture-baseline")) return capture_baseline(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "--adoption-case")) return adoption_case(argv[2], argv[3]);

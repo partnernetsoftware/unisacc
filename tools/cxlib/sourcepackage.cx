@@ -15,6 +15,7 @@
 #pragma unisa use sysx.trace
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
+#pragma unisa use sys.fs
 /* Read-only, one-endpoint material snapshots. fresh_source MUST come from the
  * caller's actual current seed/ident observation; never pass a saved receipt
  * as fresh evidence. Call again after the operation for a physical reread.
@@ -109,7 +110,7 @@ static char sp_job_out[4400],sp_job_exe[4400],sp_job_src[4400],sp_job_inc[4400],
 static char root[4096],ctx[4096],bootstrap[4096],cc[4096],self[4096],product[4400],bound[4400],ident[4400],helper[4400],netpack[4400],bound_c[4400],jobs[4400];
 static char sid[65],context_sha[65],cc_sha[65],cc_version_sha[65],helper_sha[65],bootstrap_sha[65],product_sha[65],self_sha[65],netpack_sha[65],bound_sha[65],bound_c_sha[65],ident_sha[65];
 static char basis[4400],consumer[4096],consumer_sha[65],pc[4096],kgen[4096];
-static const char *basis_pin="ad47d8c2dcf2ac6a4ed151cff3ccc8d8e5839b854e47a0bdbfc1f25a7090a5f2";
+static const char *basis_pin="9e0eeab9184271df0abd0b13ee3f81c334b369a199fd3f2b214e797f83731aec";
 static const char *origin_basis_pin="e0391c9018f4c9542ac2482bad5b69d11028bdedf0cbcf16bf54f9dd82a260a2";
 static const char *sp_basis_pin(void){return sp_origin_mode?sp_origin_material.origin_foundation:basis_pin;}
 static void live_root_epoch_bind(void);
@@ -187,19 +188,67 @@ static void sp_map_note(const char *logical,const char *physical){int slot=sp_ma
 /* Private baseline-child mapping. It never changes current-context semantics. */
 static int sp_adopt_mapping;
 static char sp_adopt_lr[4400], sp_adopt_lc[4400], sp_adopt_pr[4400], sp_adopt_pc[4400];
+/* Capture-only spelling normalization. np_pathnorm already removes empty and
+ * dot components; this bounded pass resolves only the remaining parent parts.
+ * Original receipt strings are never rewritten, nor is origin mode relaxed. */
+int sp_adoption_capture_path(const char *path, const char *logical_root, const char *logical_context,
+    const char *physical_root, const char *physical_context, char *out, long cap) {
+    if (!path || !logical_root || !logical_context || !physical_root || !physical_context || !out || cap < 2 || path[0] != '/' || strlen(path) >= 4096 || strpbrk(path, "\r\n\t")) return -EINVAL;
+    char compact[4400], normalized[4400]; size_t ends[512], used = 1; int depth = 0;
+    np_pathnorm(path, compact, sizeof compact); normalized[0] = '/'; normalized[1] = 0;
+    for (const char *p = compact + 1; *p;) {
+        const char *end = strchr(p, '/'); size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (!n) return -EINVAL;
+        if (n == 2 && p[0] == '.' && p[1] == '.') {
+            if (!depth) return -EPERM;
+            used = ends[--depth]; normalized[used] = 0;
+        } else {
+            if (depth == 512 || used + n + 2 > sizeof normalized) return -ENAMETOOLONG;
+            ends[depth++] = used;
+            if (used > 1) normalized[used++] = '/';
+            if (mm_copy(normalized + used, sizeof normalized - used, p, n)) return -ENAMETOOLONG;
+            used += n; normalized[used] = 0;
+        }
+        if (!end) break; p = end + 1;
+    }
+    /* A spelling originating in a declared role may not climb into a different
+     * role, even when that other namespace would independently be allowed. */
+    if ((sp_within(path, logical_context) && !sp_within(normalized, logical_context)) ||
+        (sp_within(path, logical_root) && !sp_within(normalized, logical_root)) ||
+        (!strncmp(path, "/usr/", 5) && strncmp(normalized, "/usr/", 5)) ||
+        (!strncmp(path, "/lib/", 5) && strncmp(normalized, "/lib/", 5))) return -EPERM;
+    const char *physical = 0, *suffix = 0;
+    if (sp_within(normalized, logical_context)) { physical = physical_context; suffix = normalized + strlen(logical_context); }
+    else if (sp_within(normalized, logical_root)) { physical = physical_root; suffix = normalized + strlen(logical_root); }
+    else if (strncmp(normalized, "/usr/", 5) && strncmp(normalized, "/lib/", 5)) return -EPERM;
+    char mapped[4400], probe[4400], resolved[4400];
+    if (physical) {
+        if (sy_realpath(physical, resolved, sizeof resolved) < 0 || strcmp(physical, resolved)) return -EPERM;
+        if (cx_fmt(mapped, sizeof mapped, "%s%s", physical, suffix)) return -ENAMETOOLONG;
+    } else if (cx_fmt(mapped, sizeof mapped, "%s", normalized)) return -ENAMETOOLONG;
+    if (cx_fmt(probe, sizeof probe, "%s", mapped)) return -ENAMETOOLONG;
+    /* GCC probes absent headers too. Resolve the nearest existing ancestor,
+     * refusing dangling symlinks and any resolved physical-root escape. */
+    for (;;) {
+        int rc = sy_realpath(probe, resolved, sizeof resolved);
+        if (rc >= 0) {
+            if (physical ? !sp_within(resolved, physical) : (strncmp(resolved, "/usr/", 5) && strncmp(resolved, "/lib/", 5))) return -EPERM;
+            break;
+        }
+        if (rc != -ENOENT && rc != -ENOTDIR) return rc;
+        sy_stat_t st; int stated = sy_lstat(probe, &st);
+        if (!stated && st.kind == 'l') return -EPERM;
+        if (stated && stated != -ENOENT && stated != -ENOTDIR) return stated;
+        char *slash = strrchr(probe, '/'); if (!slash || slash == probe) return -EPERM;
+        *slash = 0;
+    }
+    return cx_fmt(out, cap, "%s", mapped) ? -ENAMETOOLONG : 0;
+}
 static const char *sp_adopt_physical(const char *p) {
-    static char mapped[4400]; size_t c = strlen(sp_adopt_lc), r = strlen(sp_adopt_lr);
+    static char mapped[4400];
     if (!sp_adopt_mapping) return p;
-    sp_lexical(p);
-    if (!strncmp(p, sp_adopt_lc, c) && (!p[c] || p[c] == '/')) {
-        if (cx_fmt(mapped, sizeof mapped, "%s%s", sp_adopt_pc, p + c)) die("adopt-mapping-bound"); return mapped;
-    }
-    if (!strncmp(p, sp_adopt_lr, r) && (!p[r] || p[r] == '/')) {
-        if (cx_fmt(mapped, sizeof mapped, "%s%s", sp_adopt_pr, p + r)) die("adopt-mapping-bound"); return mapped;
-    }
-    /* Only declared host tool paths may stay outside the two capture roots. */
-    if (strncmp(p, "/usr/", 5) && strncmp(p, "/lib/", 5)) die("adopt-baseline-path-outside-capture");
-    return p;
+    if (sp_adoption_capture_path(p, sp_adopt_lr, sp_adopt_lc, sp_adopt_pr, sp_adopt_pc, mapped, sizeof mapped)) die("adopt-capture-path-boundary");
+    return mapped;
 }
 static const char *sp_physical(const char *logical){const char *p=logical;if(sp_adopt_mapping)return sp_adopt_physical(logical);if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_product))p=epoch_product;else if(sp_origin_mode&&epoch_ready&&!strcmp(p,logical_metadata))p=epoch_metadata;if(!sp_origin_mode)return p;sp_lexical(p);static char mapped[4400];const char *relative=0,*expected=0;if(mp_host_capture(sp_origin_material.id,p,&relative,&expected)){int z=snprintf(mapped,sizeof mapped,"%s/%s",sp_origin_state.snapshot_root,relative);if(z<0||(size_t)z>=sizeof mapped)die("origin-fixed-host-data-path-bound");sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}if(!sp_within(p,sp_origin_state.logical_root))die("origin-path-outside-logical-root");if(sp_within(p,sp_origin_state.snapshot_root))die("origin-physical-path-used-as-logical");size_t n=strlen(sp_origin_state.logical_root);int z=snprintf(mapped,sizeof mapped,"%s%s",sp_origin_state.snapshot_root,p+n);if(z<0||(size_t)z>=sizeof mapped)die("origin-mapped-path-bound");struct stat st;errno=0;if(lstat(mapped,&st)){if(errno!=ENOENT)die("origin-mapped-path-stat");char parent[4400];{ if (cx_fmt(parent, sizeof parent, "%s",mapped)) { fprintf(stderr, "sourcepackage: text too long for parent\n"); exit(2); } }char *slash=strrchr(parent,'/');if(!slash||slash==parent)die("origin-mapped-parent");*slash=0;sp_direct_canonical(parent);}else sp_direct_canonical(mapped);sp_map_note(logical,mapped);return mapped;}
 static void canonical(const char *p){if(sp_adopt_mapping){sp_direct_canonical(sp_physical(p));return;}if(sp_origin_mode){sp_lexical(p);sp_direct_canonical(sp_physical(p));return;}char actual[4400];clean(p);if(p[0]!='/'||!realpath(p,actual)||strcmp(p,actual))die("canonical-input-path-required");}
@@ -542,20 +591,17 @@ static void sp_adopt_baseline(const char *br, const char *lc, const char *bc, co
     if (got != pid || !WIFEXITED(st) || WEXITSTATUS(st)) die("adopt-baseline-job-not-verified");
 }
 static void sp_adopt_mapped_reads(np_buf *b, const char *record, const char *br, const char *bc) {
-    int count = 0; size_t rl = strlen(br), cl = strlen(bc);
+    int count = 0; size_t cl = strlen(bc); char current_context[4400];
+    if (cx_fmt(current_context, sizeof current_context, "%s", jobs)) die("adopt-read-path");
+    char *last = strrchr(current_context, '/'); if (!last || strcmp(last, "/jobs")) die("adopt-jobs-path"); *last = 0;
     for (const char *p = record; (p = strstr(p, "\nread\t"));) {
         p += 6; const char *tab = strchr(p, '\t'), *e; char wanted[65], old[4400], current[4400], actual[65];
         if (!tab || (tab - p != 64 && tab - p != 6)) die("adopt-read-wire");
         if (mm_copy(wanted, sizeof wanted, p, tab - p)) die("adopt-read-copy"); wanted[tab - p] = 0; e = strchr(tab + 1, '\n');
         if (!e || e == tab + 1 || e - tab - 1 >= (long)sizeof old) die("adopt-read-wire");
         if (mm_copy(old, sizeof old, tab + 1, e - tab - 1)) die("adopt-read-copy"); old[e - tab - 1] = 0;
-        if (!strncmp(old, bc, cl) && old[cl] == '/') {
-            /* Only job dependency outputs can move from baseline context. */
-            if (strncmp(old + cl, "/jobs/", 6)) die("adopt-read-outside-jobs");
-            const char *suffix = old + cl + 6;
-            if (cx_fmt(current, sizeof current, "%s/%s", jobs, suffix)) die("adopt-read-path");
-        } else if (!strncmp(old, br, rl) && old[rl] == '/') { if (cx_fmt(current, sizeof current, "%s%s", root, old + rl)) die("adopt-read-path"); }
-        else { if (cx_fmt(current, sizeof current, "%s", old)) die("adopt-read-path"); }
+        if (!strncmp(old, bc, cl) && old[cl] == '/' && strncmp(old + cl, "/jobs/", 6)) die("adopt-read-outside-jobs");
+        if (sp_adoption_capture_path(old, br, bc, root, current_context, current, sizeof current)) die("adopt-current-read-path-boundary");
         struct stat st; errno = 0;
         if (!lstat(current, &st) && S_ISREG(st.st_mode)) sp_adopt_hash(current, actual);
         else { if (errno && errno != ENOENT && errno != ENOTDIR) die("adopt-read-stat"); strcpy(actual, "ABSENT"); }
