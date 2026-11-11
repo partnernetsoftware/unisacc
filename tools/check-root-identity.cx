@@ -23,6 +23,7 @@
 #pragma unisa use cxlib.productpkg
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
+#pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
@@ -31,7 +32,8 @@
 #define RI_MAX 16
 
 static char root[4400], doc[4400];
-static int assertions, failed;
+static int assertions, failed, not_run;
+static char ri_helper[4400], ri_sources[4400];
 
 static void ok(int cond, const char *name) {
     assertions++;
@@ -91,7 +93,11 @@ int main(int argc, char **argv) {
     const char *endmk = "<!-- identity-end -->";
     long bl, el;
     int emit = 0, i;
-    for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--emit")) emit = 1;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--emit")) emit = 1;
+        else if (i + 1 < argc && argv[i + 1][0] == '/' && tx_eqz(argv[i], "--identity-helper")) { if (tx_copy(ri_helper, sizeof ri_helper, argv[i + 1], tx_len(argv[i + 1], sizeof ri_helper))) die("helper"); i++; }
+        else if (i + 1 < argc && argv[i + 1][0] == '/' && tx_eqz(argv[i], "--sources")) { if (tx_copy(ri_sources, sizeof ri_sources, argv[i + 1], tx_len(argv[i + 1], sizeof ri_sources))) die("sources"); i++; }
+    }
     for (i = 1; i < argc && argv[i][0] != '/'; i++) ;
     if (i < argc && argv[i][0] == '/') { if (tx_copy(root, sizeof root, argv[i], tx_len(argv[i], sizeof root))) die("root"); }
     else if (sy_cwd(root, sizeof root) < 0) die("cwd");
@@ -199,6 +205,68 @@ int main(int argc, char **argv) {
                 ok(kind_eq, "build-record-kind-matches-manifest");
                 ok(dg_eq, "build-record-digest-matches-manifest");
             }
+            /* the installed record must be the release asset of the candidate whose ape_sha256 is the installed
+               APE (release/candidate.tsv): (a) such a row exists, (b) the record file's sha256 is the row's
+               record_sha256, (c) its commit is the row's commit and its sources_sha256 equals the SID recomputed
+               by the identity helper (--identity-helper H --sources DIR); without a helper (c-sid) is NOT_RUN. */
+            {
+                char com[4400], ctsv[4400], ahex[65], rhex[65], row_commit[65], row_rsha[65];
+                size_t an = 0, tn = 0;
+                char *ab, *tb;
+                int found = 0, commit_eq = 0;
+                row_commit[0] = row_rsha[0] = 0;
+                if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(ctsv, sizeof ctsv, "%s/release/candidate.tsv", root)) die("path");
+                ab = cx_read(com, &an);
+                if (ab) { cx_sha256_hex(ab, an, ahex); mm_free(ab); } else ahex[0] = 0;
+                tb = cx_read(ctsv, &tn);
+                if (tb && ahex[0]) {
+                    long p = 0;
+                    while (p < (long)tn) {
+                        long e = p, f[24], nf = 0, q;
+                        while (e < (long)tn && tb[e] != '\n') e++;
+                        f[nf++] = p;
+                        for (q = p; q < e && nf < 24; q++) if (tb[q] == '\t') f[nf++] = q + 1;
+                        if (nf > 15 && f[9] - f[8] == 65 && !memcmp(tb + f[8], ahex, 64)) {
+                            long a;
+                            found = 1;
+                            a = f[3] - 1 - f[2];
+                            if (a < 0 || tx_copy(row_commit, sizeof row_commit, tb + f[2], a)) { found = 0; row_commit[0] = 0; }
+                            if (f[15] - f[14] != 65 || tx_copy(row_rsha, sizeof row_rsha, tb + f[14], 64)) row_rsha[0] = 0;
+                            break;
+                        }
+                        p = e + 1;
+                    }
+                    mm_free(tb);
+                }
+                ok(found, "build-record-installed-ape-in-candidate-tsv");
+                cx_sha256_hex(rb ? rb : "", rb ? rn : 0, rhex);
+                ok(found && rb && row_rsha[0] && tx_eqz(rhex, row_rsha), "build-record-sha256-matches-candidate");
+                if (found && rb) {
+                    char pat[160];
+                    if (!cx_fmt(pat, sizeof pat, "\"commit\": \"%s\"", row_commit)) commit_eq = strstr(rb, pat) != 0;
+                }
+                ok(commit_eq, "build-record-commit-matches-candidate");
+                if (!ri_helper[0] || !ri_sources[0]) {
+                    not_run++;
+                    printf("NOT_RUN\tbuild-record-sources-sha256-matches-recomputed\tno --identity-helper/--sources\n");
+                } else {
+                    char *out = 0, pat[160];
+                    size_t on = 0;
+                    int k, good, sid_eq = 0;
+                    char *v[] = {ri_helper, ri_sources, 0};
+                    good = cx_runv_timeout(v, 50, &out, &on) == 0 && out && on == 65 && out[64] == '\n';
+                    for (k = 0; good && k < 64; k++) if (!((out[k] >= '0' && out[k] <= '9') || (out[k] >= 'a' && out[k] <= 'f'))) good = 0;
+                    if (good) {
+                        out[64] = 0;
+                        if (rb && !cx_fmt(pat, sizeof pat, "\"sources_sha256\": \"%s\"", out)) sid_eq = strstr(rb, pat) != 0;
+                        ok(sid_eq, "build-record-sources-sha256-matches-recomputed");
+                    } else {
+                        not_run++;
+                        printf("NOT_RUN\tbuild-record-sources-sha256-matches-recomputed\thelper failed\n");
+                    }
+                    free(out);
+                }
+            }
             if (has) printf("BUILD_RECORD\tSTILL-HAS-artifact_sha256\t%s\n", rec);
             free(rb);
         }
@@ -210,6 +278,6 @@ int main(int argc, char **argv) {
         int n = pp_member_list(root, names, shas, bts, RI_MAX);
         for (i = 0; i < n; i++) printf("MEMBER\t%s\t%s\t%ld\n", names[i], shas[i], bts[i]);
     }
-    printf("ROOT_IDENTITY\tassertions=%d\tfailed=%d\n", assertions, failed);
+    printf("ROOT_IDENTITY\tassertions=%d\tfailed=%d\tnot_run=%d\n", assertions, failed, not_run);
     return failed ? 1 : 0;
 }

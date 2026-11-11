@@ -22,6 +22,28 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry),
+   stdout and stderr merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit). */
+static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
+    char *w[40], *b = 0;
+    size_t n = 0;
+    int k = 0, i, rc;
+    *cut = 0;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
+    for (i = 0; argv[i] && k < 39; i++) w[k++] = argv[i];
+    if (argv[i]) return -1;
+    w[k] = 0;
+    rc = cx_runv_timeout(w, secs, &b, &n);
+    if (cap > 0) {
+        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; *cut = 1; }
+        if (b && n) mm_copy(out, (size_t)cap, b, n);
+        out[n] = 0;
+    }
+    free(b);
+    return rc;
+}
 
 static int failed, notrun;
 static char g_root[4096], g_tool[4400];
@@ -38,7 +60,7 @@ static int tool(const char *root, const char *ape, const char *sha, int write, c
     v[k++] = (char *)root; v[k++] = (char *)ape; v[k++] = (char *)sha;
     if (write) v[k++] = "--write";
     v[k] = 0;
-    return sy_run(v, out, cap, &cut);
+    return bounded_run(v, 50, out, cap, &cut);
 }
 static int has(const char *o, const char *s) { return tx_find(o, tx_len(o, 1 << 14), s, tx_len(s, 256)) >= 0; }
 
@@ -179,11 +201,33 @@ int main(int argc, char **argv) {
                 ck(product_before.ino == product_after.ino && product_before.mtime == product_after.mtime && product_before.ctime == product_after.ctime,
                    "already-keeps-product-identity", "existing APE was rewritten");
             }
+            /* candidate record beside the APE: wrong digest is not used (RECORD_STALE, three-field sync only);
+               a matching digest replaces the whole record (commit and sources_sha256 follow). */
+            {   char cdir[4400], capec[4400], cbj[4400], cj[1400], wrong[65], hr[65], hc[65];
+                const char *cm = "1111111111111111111111111111111111111111";
+                if (cx_fmt(cdir, sizeof cdir, "%s/cand", work) || sy_mkdir(cdir, 0755) ||
+                    cx_fmt(capec, sizeof capec, "%s/unisacc.com", cdir) || cx_fmt(cbj, sizeof cbj, "%s/unisacc.com.build.json", cdir) ||
+                    sy_copy(ape, capec, 0755)) return 2;
+                for (int j = 0; j < 65; j++) wrong[j] = real[j];
+                wrong[0] = real[0] == '0' ? '1' : '0';
+                if (cx_fmt(cj, sizeof cj, "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n", ape_bytes, cm, real, wrong)) return 2;
+                if (write_file(cbj, cj, 0600) || record_fixture(bj, 1, "ape1", real) || sha_of(cbj, hc)) return 2;
+                ck(tool(root, capec, real, 1, out, (int)sizeof out) == 0 && has(out, "RECORD_STALE"), "cand-record-wrong-digest-reports-stale", out);
+                if (sha_of(bj, hr)) return 2;
+                ck(!tx_eqz(hr, hc) && !has(out, "RECORD_REPLACED"), "cand-record-wrong-digest-not-replaced", "mismatching candidate record was used");
+                ck(record_consumer(root, 0), "cand-record-wrong-digest-three-field-sync", "three fields not synced");
+                if (cx_fmt(cj, sizeof cj, "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n", ape_bytes, cm, real, real)) return 2;
+                if (write_file(cbj, cj, 0600) || record_fixture(bj, 1, "ape1", real) || sha_of(cbj, hc)) return 2;
+                ck(tool(root, capec, real, 1, out, (int)sizeof out) == 0 && has(out, "RECORD_REPLACED") && !has(out, "RECORD_STALE"), "cand-record-matching-replaces", out);
+                if (sha_of(bj, hr)) return 2;
+                ck(tx_eqz(hr, hc) && record_consumer(root, 0), "cand-record-replaced-whole", "root record differs from candidate record");
+                if (record_fixture(bj, ape_bytes, "ape1", real)) return 2;
+            }
             ck(sy_exists(sprev) == 1 && sy_exists(sdir) != 1, "split-dir-moved-aside", "unisacc.com.dev state");
             ck(sy_exists(bjp) == 1, "old-record-kept", "no .split-prev record");
             (void)text;
             v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; v[k++] = root; v[k++] = "--rollback"; v[k++] = "--write"; v[k] = 0;
-            rrc = sy_run(v, out, (int)sizeof out, &cut);
+            rrc = bounded_run(v, 50, out, (int)sizeof out, &cut);
             ck(rrc == 0 && has(out, "ROLLED_BACK"), "rollback", out);
             sha_of(com, back);
             ck(tx_eqz(back, h0), "rollback-restores-launcher-bytes", back);
@@ -200,7 +244,7 @@ int main(int argc, char **argv) {
                 if (write_file(idoc, "x\n<!-- identity-begin -->\nproduct_kind\tsplit2\nold\n<!-- identity-end -->\n", 0644)) return 2;
                 if (write_file(rcp, "NOT_RELEASE\tdev-lnx-only\nunisacc.com\ta\tsha=00\tbytes=1\nentry.elf\tb\tsha=11\tbytes=2\n", 0644)) return 2;
                 cv[0] = "sh"; cv[1] = "-c"; cv[2] = cmd; cv[3] = 0;
-                if (sy_run(cv, out, (int)sizeof out, &cc) != 0) return 2;
+                if (bounded_run(cv, 30, out, (int)sizeof out, &cc) != 0) return 2;
                 if (write_file(com, "#!/bin/sh\necho fourth-launcher\n", 0755)) return 2;
                 ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "IDENTITY_EMITTED"), "receipt-identity-install", out);
                 rt = cx_read(rcp, &rtn);
