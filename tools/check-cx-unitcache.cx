@@ -1,0 +1,86 @@
+/* tools/check-cx-unitcache.cx -- 单元前端(e2/e1)身份缓存键合同夹具(plans/unit-frontcache.md)。
+ * 对工具侧原型(uc_key/uc_put/uc_get,落在 sy_tmpdir 夹具目录)验证四类负例:
+ *   命中(同键同内容命中,取回字节相同);失效(单元源/强制头/头顺序/e2 模型/e1 模型/目标/ABI 任一变 -> 键变 -> 未命中);
+ *   损坏(改一字节、截断、魔数错、空文件 -> corrupt,调用方回退重算);键变(同名文件被换内容时按载荷 sha 拒绝)。
+ * 这是合同夹具,不是产品缓存;产品改动见计划书。输出 PASS/FAIL 与 CHECK_CX_UNITCACHE<TAB>failed=N。
+ *   sh ./unisacc.com tools/check-cx-unitcache.cx */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-cx-unitcache.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-cx-unitcache.%s\n", name); }
+}
+static void sha_of(const char *s, char hex[65]) { sy_sha256_hex(s, tx_len(s, 1000000), hex); }
+
+/* 键 = sha256("UNIUCKEY1\n" 单元源sha "\n" 头sha序列(顺序敏感,逐行) e2模型sha "\n" e1模型sha "\n" 目标 "\n" ABI "\n") */
+static void uc_key(char key[65], const char *src, const char **hdr, int nh, const char *e2, const char *e1, const char *tgt, const char *abi) {
+    char buf[4096], h[65]; buf[0] = 0; int n = 0, i;
+    n += cx_fmt(buf + n, sizeof buf - n, "UNIUCKEY1\n"), n = tx_len(buf, sizeof buf);
+    sha_of(src, h); cx_fmt(buf + n, sizeof buf - n, "src=%s\n", h); n = tx_len(buf, sizeof buf);
+    for (i = 0; i < nh; i++) { sha_of(hdr[i], h); cx_fmt(buf + n, sizeof buf - n, "hdr%d=%s\n", i, h); n = tx_len(buf, sizeof buf); }
+    cx_fmt(buf + n, sizeof buf - n, "e2=%s\ne1=%s\ntgt=%s\nabi=%s\n", e2, e1, tgt, abi);
+    sy_sha256_hex(buf, tx_len(buf, sizeof buf), key);
+}
+static void uc_path(char *p, int cap, const char *dir, const char *key) { cx_fmt(p, cap, "%s/uc-%s", dir, key); }
+/* 文件 = "UNIUC1\n" + 载荷sha64hex + "\n" + 载荷;先写 .tmp 再 rename */
+static int uc_put(const char *dir, const char *key, const char *pay, int n) {
+    char p[600], t[640], h[65]; char *b = mm_alloc(n + 80);
+    uc_path(p, sizeof p, dir, key); cx_fmt(t, sizeof t, "%s.tmp.%d", p, (int)getpid());
+    sy_sha256_hex(pay, n, h);
+    int at = cx_fmt(b, n + 80, "UNIUC1\n%s\n", h); at = tx_len(b, n + 80);
+    mm_copy(b + at, n, pay, n);
+    int rc = cx_write(t, b, at + n); mm_free(b);
+    if (rc) return 1;
+    return sy_rename(t, p) ? 1 : 0;
+}
+/* 0 命中(*out 为载荷);1 未命中(无文件);2 损坏 */
+static int uc_get(const char *dir, const char *key, char **out, int *on) {
+    char p[600], h[65]; size_t n = 0; uc_path(p, sizeof p, dir, key);
+    char *b = cx_read(p, &n);
+    if (!b) return 1;
+    if (n < 72 || !tx_same(b, 7, "UNIUC1\n", 7) || b[71] != '\n') return 2;
+    sy_sha256_hex(b + 72, (long)n - 72, h);
+    if (!tx_same(h, 64, b + 7, 64)) return 2;
+    *out = b + 72; *on = (int)n - 72; return 0;
+}
+int main(void) {
+    char dir[320], key[65], k2[65], p[600]; char *o = 0; int on = 0;
+    const char *H[2] = {"#define A 1\n", "#define B 2\n"}, *H2[2] = {"#define B 2\n", "#define A 1\n"}, *H3[2] = {"#define A 1\n", "#define B 3\n"};
+    const char *S = "int f(void){return 1;}\n", *PAY = "E1-OUTPUT-BYTES-0123456789";
+    if (cx_fmt(dir, sizeof dir, "%s/cx-unitcache-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    uc_key(key, S, H, 2, "m2", "m1", "lnx/x86_64", "abi1");
+    ck(uc_get(dir, key, &o, &on) == 1, "miss-when-empty");
+    ck(uc_put(dir, key, PAY, tx_len(PAY, 100)) == 0, "put");
+    ck(uc_get(dir, key, &o, &on) == 0 && on == tx_len(PAY, 100) && tx_same(o, on, PAY, on), "hit-same-bytes");
+    uc_key(k2, S, H, 2, "m2", "m1", "lnx/x86_64", "abi1"); ck(tx_same(key, 64, k2, 64), "key-deterministic");
+    uc_key(k2, "int f(void){return 2;}\n", H, 2, "m2", "m1", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64) && uc_get(dir, k2, &o, &on) == 1, "invalidate-src");
+    uc_key(k2, S, H2, 2, "m2", "m1", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64) && uc_get(dir, k2, &o, &on) == 1, "invalidate-hdr-order");
+    uc_key(k2, S, H3, 2, "m2", "m1", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64), "invalidate-hdr-content");
+    uc_key(k2, S, H, 1, "m2", "m1", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64), "invalidate-hdr-count");
+    uc_key(k2, S, H, 2, "m2x", "m1", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64), "keychange-e2-model");
+    uc_key(k2, S, H, 2, "m2", "m1x", "lnx/x86_64", "abi1"); ck(!tx_same(key, 64, k2, 64), "keychange-e1-model");
+    uc_key(k2, S, H, 2, "m2", "m1", "osx/arm64", "abi1"); ck(!tx_same(key, 64, k2, 64), "keychange-target");
+    uc_key(k2, S, H, 2, "m2", "m1", "lnx/x86_64", "abi2"); ck(!tx_same(key, 64, k2, 64), "keychange-abi");
+    /* 损坏:翻转载荷一字节 */
+    uc_path(p, sizeof p, dir, key); size_t n = 0; char *b = cx_read(p, &n); char *c = mm_alloc((long)n);
+    mm_copy(c, (long)n, b, (long)n); c[n - 1] ^= 1; cx_write(p, c, n);
+    ck(uc_get(dir, key, &o, &on) == 2, "corrupt-flip-byte");
+    cx_write(p, c, n - 3); ck(uc_get(dir, key, &o, &on) == 2, "corrupt-truncate");
+    c[0] = 'X'; cx_write(p, c, n); ck(uc_get(dir, key, &o, &on) == 2, "corrupt-magic");
+    cx_write(p, "", 0); ck(uc_get(dir, key, &o, &on) == 2 || uc_get(dir, key, &o, &on) == 1, "corrupt-empty");
+    /* 回退重算后重新写入,恢复命中且字节与首次相同 */
+    ck(uc_put(dir, key, PAY, tx_len(PAY, 100)) == 0 && uc_get(dir, key, &o, &on) == 0 && tx_same(o, on, PAY, on), "recompute-republish");
+    /* 命中仍核内容:把另一个键的合法文件拷成本键名,载荷 sha 合法也不能当本键命中的"身份证明"; 合同要求文件头同时记 key,此处验证原型 put 的载荷与 key 无关 -> 记为 UNMEASURED */
+    sy_printf("INFO\tcheck-cx-unitcache.key-in-header UNMEASURED(原型头不含键;产品须在头内记键并核对,见计划书)\n");
+    sy_printf("CHECK_CX_UNITCACHE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

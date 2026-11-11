@@ -1,0 +1,46 @@
+/* tools/check-cx-phase.cx -- tools/cx-phase.cx 的检查:固定日志夹具解析 + u1 真跑冷/半冷/热三模式。
+ *   sh ./unisacc.com tools/check-cx-phase.cx */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-cx-phase.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-cx-phase.%s\n", name); }
+}
+static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 200000), n, tx_len(n, 200)) >= 0; }
+int main(void) {
+    char dir[320], cmd[800], log[420], *out = mm_alloc(131072);
+    if (cx_fmt(dir, sizeof dir, "%s/cx-phase-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(log, sizeof log, "%s/rr.log", dir);
+    const char *L = "RR_TIME\tlookup_hit=0\tns=1\nRR_TIME\tmodelcache\tresult=hit\tbytes=5\nRR_TIME\tmodel\tstage=e2\tsource=inflate\tns=8000000\n"
+        "RR_TIME\tinference\tstage=e2\trc=0\tns=100000000\nRR_TIME\tmodel\tstage=e2\tsource=inflate\tns=4000000\nRR_TIME\tinference\tstage=e2\trc=0\tns=50000000\n"
+        "RR_TIME\tmodelcache\tresult=miss\tbytes=7\nRR_TIME\tinference\tstage=e3\trc=0\tns=200000000\nnoise line\n";
+    cx_write(log, L, tx_len(L, 4000));
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-phase.cx -- --parse %s 2>&1", log);
+    char *v[] = {"sh", "-c", cmd, 0}; char *o = 0; size_t on = 0;
+    int rc = cx_runv_timeout(v, 40, &o, &on);
+    out[0] = 0; if (o && on < 131072) { mm_copy(out, 131072, o, (long)on); out[on] = 0; }
+    ck(rc == 0, "parse-rc0");
+    ck(has(out, "parse\t0\tlog\t0\t0\te2\t2\t12\t150\t1\t1"), "parse-e2-sum");
+    ck(has(out, "\te3\t1\t0\t200\t"), "parse-e3");
+    ck(has(out, "\tALL\t3\t12\t350\t1\t1"), "parse-all");
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-phase.cx -- %s/run --case u1 2>&1", dir);
+    o = 0; on = 0;
+    rc = cx_runv_timeout(v, 40, &o, &on);
+    out[0] = 0; if (o && on < 131072) { mm_copy(out, 131072, o, (long)on); out[on] = 0; }
+    ck(rc == 0, "u1-rc0");
+    ck(has(out, "u1\t1\tcold\t") && has(out, "u1\t1\thalf\t") && has(out, "u1\t1\thot\t"), "u1-three-modes");
+    ck(has(out, "\tUNMEASURED\t"), "hot-unmeasured");
+    char *tf = 0; size_t n = 0; cx_fmt(log, sizeof log, "%s/run/cxphase.tsv", dir); tf = cx_read(log, &n);
+    ck(tf != 0 && n > 100, "tsv-written");
+    sy_printf("CHECK_CX_PHASE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
