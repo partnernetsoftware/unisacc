@@ -189,6 +189,52 @@ static void ratchet_cache(const char *top,const char *native,const char *product
  else if(which==4){path(p,sizeof p,root,"tests/ratchet-input.txt");put(p,"in1\n",4);commit(root);rc_go(top,native,root,patch,mark,"ratchet input one byte changed reruns base",1,1,0);}
  else if(which==5){path(p,sizeof p,root,"tools/ratchets.cx");{size_t n;char *s=cx_read(p,&n);np_buf b={0};np_put(&b,s,n);np_puts(&b,"/* tool source edit */\n");put(p,b.p,b.n);free(b.p);free(s);}commit(root);rc_go(top,native,root,patch,mark,"ratchet tool source changed reruns base",1,1,0);}
 }
+/* prepare 编译步续跑合同:8 个改动工具的夹具补丁,真实编译;INTEGRATE_FAKE_PREP_MAX 只限制每次调用的编译个数来代替耗尽预算。 */
+static int occurs(const char *s,const char *part){int c=0;size_t pn=strlen(part);if(!s)return 0;for(const char *q=strstr(s,part);q;q=strstr(q+pn,part))c++;return c;}
+static void prep_step(const char *name,char **v,int want_rc,int want_skip,int want_compiled,const char *out_need,const char *err_need){
+ np_result r=run(v,0,50);int sk=occurs(r.out,"INTEGRATE_PREPARE_SKIP\t"),co=occurs(r.out,"INTEGRATE_PREPARE_COMPILED\t");
+ int good=r.rc==want_rc&&sk==want_skip&&co==want_compiled&&(!out_need||(r.out&&strstr(r.out,out_need)))&&(!err_need||(r.err&&strstr(r.err,err_need)));
+ ck(good,name);
+ if(!good){fprintf(stderr,"prep-step %s rc=%d skip=%d compiled=%d\n",name,r.rc,sk,co);if(r.errn)fwrite(r.err,1,r.errn>2000?2000:r.errn,stderr);if(r.outn)fwrite(r.out,1,r.outn>2000?2000:r.outn,stderr);}
+ np_free(&r);
+}
+static void prep_resume(const char *top,const char *native,const char *productroot){
+ char seed[4400],root[4400],other[4400],dest[4400],patch[4400],p[4400];
+ if(cx_fmt(seed,sizeof seed,"%s/pr-seed",top)||cx_fmt(root,sizeof root,"%s/pr-root",top)||cx_fmt(other,sizeof other,"%s/pr-other",top)||cx_fmt(dest,sizeof dest,"%s/pr-dest",top)||cx_fmt(patch,sizeof patch,"%s/pr.patch",top))die("pr-path");
+ char *init[]={"git","init","-b","main",seed,0};ok(init,0);
+ path(p,sizeof p,seed,"agentwork");if(sy_mkdir(p,0700))die("mkdir");path(p,sizeof p,seed,"tests");if(sy_mkdir(p,0700))die("mkdir");
+ for(int k=0;k<4;k++){path(p,sizeof p,seed,am_path(k));put(p,am_header(k),strlen(am_header(k)));}
+ path(p,sizeof p,seed,".gitignore");put(p,"unisacc.com\n",12);path(p,sizeof p,seed,"plain.txt");put(p,"base\n",5);commit(seed);
+ char *cr[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,root,0};ok(cr,0);char *cl[]={"git","clone","--local","--no-hardlinks","--branch","main",seed,other,0};ok(cl,0);if(pp_copy_product(productroot,root))die("product-copy");
+ path(p,sizeof p,root,"unisacc.com.build.json");if(sy_exists(p)==1&&sy_unlink(p))die("pr-sidecar");
+ path(p,sizeof p,other,"tools");if(sy_mkdir(p,0700))die("pr-tools");
+ for(int i=0;i<8;i++){char rel[100],src[200];if(cx_fmt(rel,sizeof rel,"tools/p%d.cx",i)||cx_fmt(src,sizeof src,"int main(void){return %d;}\n",i))die("pr-tool");path(p,sizeof p,other,rel);put(p,src,strlen(src));}
+ commit(other);
+ { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("pr-diff");put(patch,r.out,r.outn);np_free(&r); }
+ char *first[]={"env","INTEGRATE_FAKE_PREP_MAX=3",(char*)native,root,patch,dest,"--prepare-only",0};
+ char *resume[]={"env","INTEGRATE_FAKE_PREP_MAX=3",(char*)native,"--resume",dest,0};
+ char *limited[]={"env","INTEGRATE_FAKE_PREP_MAX=3",(char*)native,"--test-prepare",dest,0};
+ char *full[]={(char*)native,"--test-prepare",dest,0};
+ prep_step("prepare budget stop is PENDING next_phase=prepare, not REFUSE",first,3,0,3,"status=PENDING\tnext_phase=prepare",0);
+ { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&strstr(s,"\nphase\t0\n"),"pending prepare receipt keeps phase 0");free(s); }
+ prep_step("real --resume verifies identity, skips 3 recorded tools, compiles 3 more",resume,3,3,3,"status=PENDING\tnext_phase=prepare",0);
+ prep_step("third call skips 6 and finishes the last 2",limited,0,6,2,"INTEGRATE_TEST_PREPARE\tdone=1",0);
+ { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&strstr(s,"\nphase\t1\n"),"finished prepare advances receipt to phase 1");free(s); }
+ prep_step("all recorded and unchanged: nothing recompiled",full,0,8,0,"skipped=8\tcompiled=0",0);
+ /* 负例:产物 sha 不符 -> 只重编该工具 */
+ rc_sh("set -- \"$1\"/.git/integrate/compile-out.d/*.bin; [ $# -eq 8 ] && printf 'garbage\\n' > \"$1\"",dest);
+ prep_step("artifact sha mismatch recompiles that tool only",full,0,7,1,"reason=artifact-sha",0);
+ /* 负例:源 sha 变 -> 只重编该工具 */
+ path(p,sizeof p,dest,"tools/p3.cx");put(p,"int main(void){return 33;}\n",27);
+ prep_step("source sha change recompiles that tool only",full,0,7,1,"tool=tools/p3.cx\treason=source-sha",0);
+ /* 负例:绑定身份(tree)变 -> 整份记录作废,全部重编 */
+ { char rp[4400];size_t rn;path(rp,sizeof rp,dest,".git/integrate/receipt.tsv");char *rs=cx_read(rp,&rn);char *t=rs?strstr(rs,"\ntree\t"):0;
+   if(t){t+=6;while(*t&&*t!='\n')*t++='0';put(rp,rs,rn);}ck(t!=0,"prepare-identity-tampered");free(rs); }
+ prep_step("bound identity change voids every record and recompiles all 8",full,0,0,8,"skipped=0\tcompiled=8",0);
+ /* 续跑不放过编译失败 */
+ path(p,sizeof p,dest,"tools/p5.cx");put(p,"int main(void){return NOPE;}\n",28);
+ prep_step("compile failure inside a resumed prepare is still refused",full,2,7,0,0,"tool-compile-failed tools/p5.cx");
+}
 static void registry_neg(const char *top,const char *native){
  char dir[4400],okp[4400],pat[4400],mis[4400];
  if(cx_fmt(dir,sizeof dir,"%s/reg",top)||cx_fmt(okp,sizeof okp,"%s/tools/ok.cx",dir)||cx_fmt(pat,sizeof pat,"%s/ok.patch",dir)||cx_fmt(mis,sizeof mis,"%s/miss.patch",dir))die("reg-path");
@@ -204,7 +250,7 @@ static void registry_neg(const char *top,const char *native){
 int main(int argc,char **argv){
  deadline=sy_now_ms()+55000;
  int aff_only=argc==2&&!strcmp(argv[1],"--affected-only");
- int rc_which=0;{static const char *fl[]={"--rc-cold","--rc-hit","--rc-corrupt","--rc-product","--rc-input","--rc-tool","--rc-prepare"};for(int i=0;i<7;i++)if(argc==3&&!strcmp(argv[2],fl[i]))rc_which=i+1;}int rc_only=rc_which>0;
+ int rc_which=0;{static const char *fl[]={"--rc-cold","--rc-hit","--rc-corrupt","--rc-product","--rc-input","--rc-tool","--rc-prepare","--prep-resume"};for(int i=0;i<8;i++)if(argc==3&&!strcmp(argv[2],fl[i]))rc_which=i+1;}int rc_only=rc_which>0;
  static char rc_outabs[4096];
  if(rc_only){sy_mkdir(argv[1],0700);if(sy_realpath(argv[1],rc_outabs,sizeof rc_outabs)<0)die("rc-outdir");rc_outdir=rc_outabs;argc=2;}   /* {out} 可能是相对路径:子进程 cwd 不同,须先取绝对路径 */   /* 批次形态 {out};--rc-X */
  int land_only=(argc==2&&!strcmp(argv[1],"--land-only"))||aff_only||rc_only;
@@ -214,7 +260,7 @@ int main(int argc,char **argv){
  if(rc_only&&rc_native(root,native,sizeof native)){}
  else if(argc==1||land_only){char product[4400],source[4400];if(sy_realpath(".",root,sizeof root)<0)die("root");path(product,sizeof product,root,"unisacc.com");path(source,sizeof source,root,"tools/integrate-patch.cx");path(native,sizeof native,temp,"integrate-patch");char *build[]={"sh",product,source,"-o",native,0};np_result r=run(build,root,55);if(r.rc){if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);die("native-build");}np_free(&r);}
  else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");
- if(land_only){if(rc_which==7)ck(sy_exists(native)==1,"rc native prepared (PREPARED only, no verdict)");else if(rc_only)ratchet_cache(temp,native,root,rc_which-1);else if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
+ if(land_only){if(rc_which==7)ck(sy_exists(native)==1,"rc native prepared (PREPARED only, no verdict)");else if(rc_which==8)prep_resume(temp,native,root);else if(rc_only)ratchet_cache(temp,native,root,rc_which-1);else if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
  fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);registry_neg(temp,native);
  /* 基线棘轮缓存合同:键含基线树id与产品摘要,命中须过ratchet_valid,head侧永远现跑,可用环境变量关闭回完整双扫 */
  {char sp[4400];path(sp,sizeof sp,root,"tools/integrate-patch.cx");size_t sn;char *ss=cx_read(sp,&sn);

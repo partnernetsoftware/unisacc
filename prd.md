@@ -349,7 +349,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 | 批次档 | commit 140 / daily 650 / release 41 | tier 列；`tools/s9-shards.cx`、`s9-nightly.cx` | commit 档 3 步 252.7 / 87.3 / 12.7 s（0.0.53 夜跑工具修后）；daily、release 档未跑 | 首步贴 300 s；daily 从未跑通一次 |
 | 冒烟 | 16 断言 | `tests/run.cx -- --smoke` | 0.04 s | - |
 | 棘轮 | 13 项，13 / 0 | `tools/ratchets.cx` | 27.8 s（墙钟 33.7 s） | 按改动路径只跑相关项 |
-| 集成门 | 私有克隆三方应用 + 棘轮 + affected 批次 | `tools/integrate-patch.cx`、`tools/affected.cx` | 每补丁 81-95 s（0.0.48 实测，未重测）；affected 批约 42 s | phase 5 已可续跑；棘轮与 native 缓存可增量 |
+| 集成门 | 私有克隆三方应用 + 棘轮 + affected 批次 | `tools/integrate-patch.cx`、`tools/affected.cx` | 每补丁 81-95 s（0.0.48 实测，未重测）；affected 批约 42 s | phase 5 与 prepare 编译步（`prepare-done.tsv`，并行波次）已可续跑；棘轮与 native 缓存可增量 |
 | 域矩阵 | 19 张 | `tests/full-domain.cx`、`check-roll-up-open` | 未测 | - |
 | 原生矩阵 | 六宿主 42 格，0.0.53 QUALIFIED 42 / 0（运行 42914663896） | `.github/workflows/candidate-native.yml`、`tests/candidate-qualify.cx` | 约 10 分钟（0.0.50 账本） | 不在本机关键路径 |
 
