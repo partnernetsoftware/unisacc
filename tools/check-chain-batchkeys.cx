@@ -1,0 +1,71 @@
+/* tools/check-chain-batchkeys.cx -- chain-step fixedpoint --objects 批量键的拒绝合同.
+ *   sh ./unisacc.com tools/check-chain-batchkeys.cx
+ * 覆盖: 重复键/空键/与 --object 并用/非法键字符/已存在未记录目录 均拒绝且不产生 phase 记录。
+ * 逐字节等价与续跑需要真实 g2/g3 材料, 由 0.0.55 慢车道实测, 此处不冒充. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static const char OD[] = "out"; /* 快照路径合同要求 CWD/out 下 */
+static int failed;
+static char root[4096], why[512];
+static void die(const char *s) { fprintf(stderr, "check-chain-batchkeys: %s\n", s); exit(2); }
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-chain-batchkeys.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static const char REV[] = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+static int fp(const char *extra1, const char *extra2, const char *extra3, const char *needle, const char *name) {
+    char snap[4400], out[4400], helper[4400];
+    char *v[28]; int n = 0, rc; np_result r = {0}; int ok;
+    if (cx_fmt(snap, sizeof snap, "%s/%s/release-snap-deadbeefde", root, OD) || cx_fmt(out, sizeof out, "%s/%s/chain-batchkeys-fp", root, OD)) die("path");
+    if (cx_fmt(helper, sizeof helper, "%s/%s/chain-batchkeys-helper.sh", root, OD)) die("path");
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; /* lint:allow R1-product 检查合同就是跑已装产品 */ v[n++] = "tools/chain-step.cx"; v[n++] = "--";
+    v[n++] = "fixedpoint"; v[n++] = (char *)REV; v[n++] = snap; v[n++] = "x.pkg"; v[n++] = "x.gen1"; v[n++] = out;
+    v[n++] = "--identity-helper"; v[n++] = helper;
+    v[n++] = "--phase"; v[n++] = "g2"; v[n++] = "--target"; v[n++] = "lnx/x86_64";
+    if (extra1) v[n++] = (char *)extra1;
+    if (extra2) v[n++] = (char *)extra2;
+    if (extra3) v[n++] = (char *)extra3;
+    v[n] = 0;
+    if (np_run(v, root, 0, 40, &r, why, sizeof why)) die("run");
+    rc = r.rc;
+    ok = rc != 0 && ((r.out && strstr(r.out, needle)) || (r.err && strstr(r.err, needle)));
+    np_free(&r);
+    ck(ok, name);
+    return rc;
+}
+int main(void) {
+    char cmd[4400];
+    int rc;
+    np_result r = {0};
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    fp("--objects", "m1.o,m2.o,m1.o", 0, "REFUSE duplicate object key", "dup-key");
+    fp("--objects", "m1.o,,m2.o", 0, "REFUSE objects list", "empty-key");
+    fp("--objects", "m1.o,m2.o", "--object", "REFUSE unknown/duplicate option", "object-after-missing-arg");
+    fp("--objects", "A.o,m2.o", 0, "REFUSE object key", "bad-char-key");
+    fp("--objects", "m1.o", "--link-only", "REFUSE --objects with --object/--link-only", "with-link-only");
+    /* 假快照 + 已存在未记录的 slice 目录: 首键必须拒绝, 且不写 phase-0.tsv */
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s && cd %s && rm -rf release-snap-deadbeefde chain-batchkeys-fp && printf '#!/bin/sh\\necho 0000000000000000000000000000000000000000000000000000000000000000\\n' > chain-batchkeys-helper.sh && chmod +x chain-batchkeys-helper.sh && mkdir -p release-snap-deadbeefde chain-batchkeys-fp/g2/lnx-x86_64 && printf %%s %s > release-snap-deadbeefde/.release-rev", OD, OD, REV)) die("cmd");
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) die("fixture");
+        np_free(&r);
+    }
+    rc = fp("--objects", "m1.o,m2.o", 0, "REFUSE unrecorded/existing phase", "existing-unrecorded");
+    (void)rc;
+    {
+        char c2[512];
+        char *v[] = {"sh", "-c", c2, 0};
+        if (cx_fmt(c2, sizeof c2, "cd %s && test ! -e chain-batchkeys-fp/g2/phase-0.tsv; r=$?; rm -rf release-snap-deadbeefde chain-batchkeys-fp chain-batchkeys-helper.sh; exit $r", OD)) die("cmd");
+        if (np_run(v, root, 0, 20, &r, why, sizeof why)) die("cleanup");
+        ck(r.rc == 0, "no-phase-record-written");
+        np_free(&r);
+    }
+    printf("CHECK_CHAIN_BATCHKEYS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
