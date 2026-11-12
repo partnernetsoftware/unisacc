@@ -8,7 +8,8 @@
  * refuses a changed owner field, a wrong pad byte and trailing bytes; (6) receipt field lookup;
  * (7) a package table in a private tree: units are the directory's own regular .cx files in
  * path order, a symlinked unit and an excluded unit are not members, deps and exclusions are
- * read, and a missing package, a bad version and a bad deps item are refused. */
+ * read, and a missing package, a bad version and a bad deps item are refused; the optional
+ * opaque field names units of the package only. */
 #pragma unisa use cxlib.tlibpkg
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -131,7 +132,9 @@ int main(int argc, char **argv) {
                 "p.b\t1.0.0\tdef\tpb\t-\tp.a@0.3.0\tnote\n"
                 "p.badver\t1.0\tdef\tpb\t-\t-\tnote\n"
                 "p.baddep\t1.0.0\tdef\tpb\t-\tp.a\tnote\n"
-                "p.empty\t1.0.0\tdef\tbuild\t-\t-\tnote\n");
+                "p.empty\t1.0.0\tdef\tbuild\t-\t-\tnote\n"
+                "p.opq\t1.0.0\tdef\tpa\t-\t-\tnote\tpa/zeta.cx=no-interface\n"
+                "p.badopq\t1.0.0\tdef\tpa\t-\t-\tnote\tpb/real.cx=not-a-unit\n");
     ck(!prep, "table-fixture");
     ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && tx_eqz(pk.version, "0.3.1") && tx_eqz(pk.api_sha, "abc") && pk.nunit == 3 &&
        tx_eqz(pk.unit[0], "pa/alpha.cx") && tx_eqz(pk.unit[1], "pa/zeta.cx") && tx_eqz(pk.unit[2], "top.cx"), "units-own-regular-files-in-path-order");
@@ -144,9 +147,13 @@ int main(int argc, char **argv) {
     {
         long nn = 0;
         char *names = tp_names(work, &nn);
-        ck(names && tx_prefix(names, nn, "p.a\np.b\n", 8) && tx_count(names, nn, "\n", 1) == 5, "package-names-in-table-order");
+        ck(names && tx_prefix(names, nn, "p.a\np.b\n", 8) && tx_count(names, nn, "\n", 1) == 7, "package-names-in-table-order");
         mm_free(names);
     }
+    /* the optional eighth field: a unit packed without interface rows must be a unit of the package */
+    ck(tp_load(work, "p.opq", &pk, why, sizeof why) == 0 && pk.nunit == 3 && pk.nopq == 1 && tp_find_opaque(&pk, "pa/zeta.cx") == 0 &&
+       tx_eqz(pk.opq_why[0], "no-interface") && tp_find_opaque(&pk, "pa/alpha.cx") < 0 && tp_find_unit(&pk, "pa/zeta.cx") >= 0, "opaque-unit-read");
+    ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && pk.nopq == 0 && tp_load(work, "p.badopq", &pk, why, sizeof why) == -1, "opaque-absent-and-non-unit-refused");
     if (cx_fmt(q, sizeof q, "%s/pa/alpha.cx", work) || tp_sha_file(q, name)) name[0] = 0;
     tp_sha("int a;\n", 7, dst);
     ck(name[0] && tx_eqz(name, dst), "file-sha-equals-block-sha");

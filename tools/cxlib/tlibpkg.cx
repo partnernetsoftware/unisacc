@@ -3,7 +3,11 @@
  * Used by tools/layer-api.cx (interface manifest) and tools/tlib.cx (build/check/inspect/link).
  *
  * Package table: ROOT/build/tlib-packages.tsv, one row per package:
- *   pkg  version  api_sha  roots  exclude  deps  note
+ *   pkg  version  api_sha  roots  exclude  deps  note  [opaque]
+ * opaque   optional eighth field, ';' list of PATH=REASON: units that are packed as objects but whose
+ *          interface the product does not print (ext/sysx/process_group.cx defines the prelude's
+ *          setpgid under a target #if, which -cx-interface refuses). No module can `use` such a
+ *          unit; the link takes it by symbol. The manifest names it in a "# opaque" line, no rows.
  * roots    ';' list of directories (their own regular *.cx files, symlinks are NOT members: a
  *          symlinked unit belongs to the package that holds the real file) or single .cx files.
  * exclude  ';' list of PATH=REASON, or '-'. An excluded unit is never packed; a link whose closure
@@ -38,6 +42,9 @@ typedef struct {
     int nexcl;
     char excl[TP_MAXX][TP_NAME];
     char excl_why[TP_MAXX][48];
+    int nopq;
+    char opq[TP_MAXX][TP_NAME];
+    char opq_why[TP_MAXX][48];
     int ndep;
     char dep_pkg[TP_MAXD][64];
     char dep_ver[TP_MAXD][32];
@@ -218,6 +225,24 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
                     }
                     p->nexcl++;
                 }
+                /* optional eighth field: units packed as objects that have no printable interface */
+                {
+                    long oo = 0, ol = 0;
+                    if (!tx_field(b + i, e - i, '\t', 7, &oo, &ol))
+                        for (k = 0;; k++) {
+                            long eq;
+                            int r = tp_item(b + i + oo, ol, k, item, sizeof item);
+                            if (r > 0) break;
+                            eq = r ? -1 : tx_chr(item, tx_len(item, sizeof item), '=');
+                            if (r < 0 || eq <= 0 || p->nopq >= TP_MAXX ||
+                                tx_copy(p->opq[p->nopq], TP_NAME, item, eq) ||
+                                tx_copy(p->opq_why[p->nopq], 48, item + eq + 1, tx_len(item + eq + 1, 512))) {
+                                mm_free(b);
+                                return tp_fail(why, wl, "bad opaque list for ", pkg);
+                            }
+                            p->nopq++;
+                        }
+                }
                 for (k = 0;; k++) {
                     long at;
                     int v[3];
@@ -255,7 +280,18 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
     qsort(p->unit, (size_t)p->nunit, TP_NAME, tp_cmp_names);
     for (k = 1; k < p->nunit; k++)
         if (tx_eqz(p->unit[k - 1], p->unit[k])) return tp_fail(why, wl, "unit listed twice: ", p->unit[k]);
+    for (k = 0; k < p->nopq; k++) {
+        long u;
+        for (u = 0; u < p->nunit && !tx_eqz(p->unit[u], p->opq[k]); u++) {}
+        if (u == p->nunit) return tp_fail(why, wl, "opaque unit is not a unit of the package: ", p->opq[k]);
+    }
     return 0;
+}
+
+int tp_find_opaque(const TpPkg *p, const char *rel) {
+    int i;
+    for (i = 0; i < p->nopq; i++) if (tx_eqz(p->opq[i], rel)) return i;
+    return -1;
 }
 
 /* The package names of the table, one per line, in table order. malloc'd, or 0. */
@@ -394,6 +430,7 @@ static int tp_decl_name(const char *d, long n, char *dst, long cap) {
  *   # layer-api v1 <pkg>
  *   # name<TAB>signature<TAB>sig_sha<TAB>file
  *   # excluded<TAB>path<TAB>reason            (one per exclusion)
+ *   # opaque<TAB>path<TAB>reason              (one per opaque unit)
  *   name<TAB>signature<TAB>sig_sha16<TAB>file  (units in path order, declarations in source order)
  * The version is not part of it: an implementation release point leaves the manifest equal.
  * The caller's directory must be ROOT. malloc'd with *OUT_N bytes and *ROWS rows, or 0 with WHY. */
@@ -411,12 +448,20 @@ char *tp_api(const char *product, const TpPkg *p, long *out_n, int *rows, char *
         tp_puts(&o, p->excl_why[u]);
         tp_puts(&o, "\n");
     }
+    for (u = 0; u < p->nopq; u++) {
+        tp_puts(&o, "# opaque\t");
+        tp_puts(&o, p->opq[u]);
+        tp_puts(&o, "\t");
+        tp_puts(&o, p->opq_why[u]);
+        tp_puts(&o, "\n");
+    }
     for (u = 0; u < p->nunit; u++) {
         char *v[5];
         char *t = 0;
         size_t n = 0;
         long i = 0, e;
         int rc;
+        if (tp_find_opaque(p, p->unit[u]) >= 0) continue;   /* packed, linked by symbol, never `use`d */
         v[0] = "sh"; v[1] = (char *)product; v[2] = "-cx-interface"; v[3] = (char *)p->unit[u]; v[4] = 0;
         rc = cx_runv_timeout(v, 30, &t, &n);
         if (rc != 0 || !t) { mm_free(t); mm_free(o.b); (void)tp_fail(why, wl, "-cx-interface failed for ", p->unit[u]); return 0; }

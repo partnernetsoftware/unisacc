@@ -12,6 +12,7 @@
  *  (4) tamper: one flipped object byte, one flipped receipt byte, a changed header owner field and an
  *      appended byte are each TAMPERED (rc 3), for check and for link;
  *  (5) link with the tlibs behaves as the source build: same stdout and exit code, for two argument sets;
+ *      a tool that names only the dependent package links whatever order the tlibs are given in;
  *  (6) versions: --require at the same major and not newer is accepted (0.1.0, 0.2.1 against 0.2.1); a
  *      newer minor (0.3.0) and another major (1.0.0) are refused (rc 5); a tlib whose dependency is
  *      not provided is refused; a dependency provided at another major is refused (major mismatch);
@@ -201,10 +202,20 @@ int main(int argc, char **argv) {
         cx_fmt(main_cx, sizeof main_cx, "%s/t/main.cx", fx) || cx_fmt(bad_cx, sizeof bad_cx, "%s/t/needbad.cx", fx) ||
         cx_fmt(srcbin, sizeof srcbin, "%s/main.src", work) || cx_fmt(tlbin, sizeof tlbin, "%s/main.tl", work) ||
         cx_fmt(manifest, sizeof manifest, "%s/build/layer-api/fx.a.tsv", fx)) return 2;
-    if (cx_fmt(src, sizeof src, "%s/tools/tlib.cx", root) || tq_native(root, src, tlib, why, sizeof why) ||
-        cx_fmt(src, sizeof src, "%s/tools/layer-api.cx", root) || tq_native(root, src, lapi, why, sizeof why)) {
-        sy_printf("FAIL\ttlib.build-native\t%s\n", why);
-        return 1;
+    /* The two tools are prepared side by side: a child process builds layer-api while this one builds
+       tlib. Each build keeps tq_native's own bound, so the wait below ends within that deadline. */
+    {
+        char src2[4400];
+        int child, st;
+        if (cx_fmt(src, sizeof src, "%s/tools/tlib.cx", root) || cx_fmt(src2, sizeof src2, "%s/tools/layer-api.cx", root)) return 2;
+        child = fork();
+        if (child == 0) _exit(tq_native(root, src2, lapi, why, sizeof why) ? 1 : 0);
+        rc = tq_native(root, src, tlib, why, sizeof why);
+        st = child > 0 ? sy_wait(child, 0) : -1;
+        if (rc || st != 0) {
+            sy_printf("FAIL\ttlib.build-native\ttlib=%d layer-api=%d %s\n", rc, st, why);
+            return 1;
+        }
     }
 
     prep |= sy_mkdir(fx, 0755) || dir("build") || dir("fa") || dir("fb") || dir("fc") || dir("t");
@@ -291,6 +302,21 @@ int main(int argc, char **argv) {
         prep = tq_native(root, main_cx, srcbin, why, sizeof why);
         ck(rc == 0 && is("TLIB_LINK", "src_units=", "1") && is("TLIB_LINK", "tlib_units=", "3"), "link-with-tlibs");
         ck(!prep && same_behaviour(srcbin, tlbin, "A") && same_behaviour(srcbin, tlbin, "z"), "linked-program-behaves-as-source-build");
+    }
+    /* (5b) the tool names only the dependent package; the dependency is given first on the line.
+       The product takes archives in one pass each, in order, so link must put fx.b before fx.a. */
+    {
+        char only[4400], onlybin[4400];
+        char *o = 0;
+        size_t on = 0;
+        prep = cx_fmt(only, sizeof only, "%s/t/only3.cx", fx) || cx_fmt(onlybin, sizeof onlybin, "%s/only3.tl", work) ||
+               put("t/only3.cx", "#pragma unisa use fb.three\nint main(void) { return fb_three(1); }\n");
+        {
+            char *l[] = {"link", only, "-o", onlybin, "--tlib", ta, "--tlib", tb, 0};
+            rc = prep ? -1 : run(tlib, l);
+        }
+        ck(rc == 0 && prog(onlybin, 0, &o, &on) == 7, "dependency-given-first-still-links");
+        mm_free(o);
     }
     /* (6) versions */
     {

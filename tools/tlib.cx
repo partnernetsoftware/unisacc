@@ -562,11 +562,29 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
     k = 0;
     av[k++] = "sh"; av[k++] = product;
     for (i = 0; i < nsrc; i++) av[k++] = jobs[i].v[6];
-    for (i = 0; i < nlibs; i++) {
-        if (cx_fmt(alias[i], 4400, "%s/%s.a", wdir, libs[i].pkg)) return 2;
-        r = sy_unlink(alias[i]);
-        if ((r && r != -ENOENT) || sy_symlink(libs[i].path, alias[i])) return say(1, "FAILED", alias[i], "cannot place the archive alias");
-        av[k++] = alias[i];
+    /* The product resolves archives in argument order, one pass each: a tlib must come before the
+       tlibs it depends on, or the members its objects need are never taken. rank = length of the
+       longest dependency chain below a tlib; highest rank first. */
+    {
+        int rank[MAXLIB], round, a, b2, top = 0;
+        char dpkg[64];
+        for (a = 0; a < nlibs; a++) rank[a] = 0;
+        for (round = 0; round < nlibs; round++)
+            for (a = 0; a < nlibs; a++)
+                for (b2 = 0; !rc_field(&libs[a], "dep", b2, 1, dpkg, sizeof dpkg); b2++) {
+                    int d;
+                    for (d = 0; d < nlibs; d++)
+                        if (tx_eqz(libs[d].pkg, dpkg) && rank[a] < rank[d] + 1) rank[a] = rank[d] + 1;
+                }
+        for (a = 0; a < nlibs; a++) if (rank[a] > top) top = rank[a];
+        for (; top >= 0; top--)
+            for (i = 0; i < nlibs; i++) {
+                if (rank[i] != top) continue;
+                if (cx_fmt(alias[i], 4400, "%s/%s.a", wdir, libs[i].pkg)) return 2;
+                r = sy_unlink(alias[i]);
+                if ((r && r != -ENOENT) || sy_symlink(libs[i].path, alias[i])) return say(1, "FAILED", alias[i], "cannot place the archive alias");
+                av[k++] = alias[i];
+            }
     }
     av[k++] = "-o"; av[k++] = (char *)out; av[k] = 0;
     rc = cx_runv_timeout(av, STEP_SECS, &o, &on);
