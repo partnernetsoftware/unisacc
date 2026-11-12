@@ -199,7 +199,9 @@ L0 是产品的标准库边界，对应 Rust `std::fs` / `Vec` / `str` 的职责
 | **CX-A-2** | `cx/mem`：`heap` 是带长度的分配；`bytes` 带界 copy/move/fill/compare；`arena` 分组释放；`grow` 是 `Vec<u8>`；`slice` 是 `&[u8]` / `Option<&[u8]>`。 |
 | **CX-A-3** | `cx/text`：带界 z-string／span、`text.build`（`String`）、deflate、格式化、数字。新上层 API 应当优先 `(ptr,len)` 或 `ms_slice`，而不是无界 `char*`。 |
 | **CX-A-4** | 前导 `cx_*`（`cx_read`、`cx_write`、`cx_run*` 等）原地认定为 L0 接口，棘轮不计。新代码应当优先 `sy_*` / `mm_*` / `tx_*`。 |
-| **CX-A-5** | 逐函数表在各目录 README。本规格管合同形状，不把每个 `sy_*` 钉成条款。 |
+| **CX-A-5** | 逐函数表是 `build/std-surface.tsv`（事实表，一行一个函数：包、名字、签名、QuickJS/Node/Rust 对照、错误合同、lnx/osx/win 实现或带原因的拒绝、状态）。本规格管合同形状，不把每个 `sy_*` 钉成条款。 |
+
+**CX-A-5 修订（2026-11-12）**：核心面（`cx.sys`、`cx.os`、`cx.path`、`cx.mem`、`cx.text`、`cx.stream`）与扩展面（`ext.net`、`ext.procx`、`ext.textx`、`ext.memx`、`ext.crypto`、`ext.tsvx`）的逐函数表不再放各目录 README，统一为 `build/std-surface.tsv`；README 只作导航。新增或改签名一个公开函数，必须先在该表加一行或改一行，并把所属包版本 `X.Y.Z` 的 Y 位升一；表头 `# out` 列出的范围（线程、事件循环、TLS/HTTP/URL 等）不进核心面，要进先改表头。平台列只许写 `impl`、`impl:说明`、`refuse:原因`，已有实现但未实测的平台写 `unverified`，不记 `impl`。`status=exists` 只认 `build/layer-api/` 的生成接口；实现在 layer-api 排除单元里的函数记 `new` 并在备注写明。检查：`sh ./unisacc.com tools/check-std-surface.cx`（批 `std-surface`）：表行畸形、`status=exists` 的行在 `build/layer-api/` 里不存在或签名不同即失败；核心包已导出但表里还没有行的函数只报数。
 
 ---
 
@@ -279,7 +281,7 @@ L0 各目录的模块名单以该目录 README 为导航，不钉进条款；增
 
 ### 13.1 分层功能树（导航，不是新条款）
 
-增删模块不改 ID。逐函数表在各目录 README（**CX-A-5**）。冲突时以 **CX-S** / **CX-Y** / **CX-A** 为准。
+增删模块不改 ID。逐函数表是 `build/std-surface.tsv`（**CX-A-5**）。冲突时以 **CX-S** / **CX-Y** / **CX-A** 为准。
 
 ```text
 cx
