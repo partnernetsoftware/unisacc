@@ -4,7 +4,7 @@
  *   sh ./unisacc.com tools/tlib.cx -- check FILE.tlib [--fresh]
  *   sh ./unisacc.com tools/tlib.cx -- inspect FILE.tlib [--api|--receipt]
  *   sh ./unisacc.com tools/tlib.cx -- link TOOL.cx -o OUT --tlib FILE.tlib... [--require PKG@X.Y.Z...]
- *                                      [--work DIR] [--jobs N]
+ *                                      [--with MORE.cx...] [--work DIR] [--jobs N]
  *   sh ./unisacc.com tools/tlib.cx -- kit [--out DIR] [--cache DIR] [--jobs N] [--no-cache]
  *   sh ./unisacc.com tools/tlib.cx -- prep TOOL.cx -o OUT [--kit DIR] [--jobs N]
  *   common: [--root ROOT] [--product FILE]      (default ROOT is ".", product ROOT/unisacc.com)
@@ -14,7 +14,7 @@
  *                  dep (pkg, required, provider, content sha), excluded (path, reason),
  *                  unit (path, source sha, member, object sha), content_sha, receipt_sha
  *   __.S.api       the interface manifest, byte-equal to ROOT/build/layer-api/PKG.tsv
- *   <unit>.o       one object tape per unit, from `product -c -funit UNIT` run at ROOT
+ *   <unit>.o       one object tape per unit, from `product -c -funit UNIT -DRT_EXTERN` run at ROOT
  * The product linker skips members whose name begins "__.S", so the two metadata members do not
  * change a linked image. The product takes archives by the ".a" suffix only, so link passes each
  * tlib through a PKG.a symlink in its work directory.
@@ -32,8 +32,14 @@
  *          target, product sha, exclusions, unit set and source shas as ROOT now, and the manifest
  *          equal to build/layer-api.
  * link     verifies every tlib (structure, then versions, then freshness), takes the use closure
- *          of TOOL.cx from the product's -cx-plan, compiles the units no tlib provides (in
- *          parallel) and links them with the tlibs.
+ *          of TOOL.cx (and of every `--with MORE.cx`, a further root unit of the same program)
+ *          from the product's -cx-plan, compiles the units no tlib provides (in parallel) and
+ *          links them with the tlibs. TOOL.cx is compiled as the RT_UNIT unit (the one runtime
+ *          state), every other source unit and every packed unit as RT_EXTERN: a FILE opened in
+ *          one unit works in another, as in a one-invocation compile. Not the same as that
+ *          compile in one respect: an object keeps every function of its unit, so a unit whose
+ *          unused functions name symbols outside the closure does not link (the whole-program
+ *          compile drops such functions).
  * kit      brings DIR (default ROOT/out/tlib) up to date: every package of the table as a tlib,
  *          this tool as DIR/tlib-prep, and DIR/kit.tsv (product sha, the tlib files, path and sha
  *          of every unit of this tool's closure, the image sha, the kit sha). Incremental: only a
@@ -67,7 +73,14 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-#define FLAGS "-c -funit"
+/* Package units are compiled as RT_EXTERN units: they refer to the one runtime state (stdio
+   table, environment heap) instead of each carrying a private copy. link compiles the tool's root
+   unit as the RT_UNIT unit that supplies it and every other source unit as RT_EXTERN. Without
+   this a FILE opened in one unit and written through another loses the write (measured: the
+   product then warns "N objects each carry a private stdio table"). */
+#define FLAGS "-c -funit -DRT_EXTERN"
+#define RT_USER "-DRT_EXTERN"
+#define RT_PROVIDER "-DRT_UNIT"
 #define STEP_SECS 55
 #define MAXLIB 16
 #define MAXJOB 256
@@ -83,7 +96,7 @@ typedef struct {
     int nunit;
 } Lib;
 
-typedef struct { char *v[8]; int pid; int state; int rc; long t0; } Job;
+typedef struct { char *v[10]; int pid; int state; int rc; long t0; } Job;
 
 static char root[4096], product[4400], product_sha[65];
 static TpPkg pk;
@@ -154,10 +167,10 @@ static int run_jobs(int n, int par) {
 }
 
 /* Job K compiles UNIT (ROOT-relative or absolute) into OBJ. */
-static int set_compile(int k, const char *unit, const char *obj) {
+static int set_compile(int k, const char *unit, const char *obj, const char *rt) {
     if (k >= MAXJOB || cx_fmt(jobtext[k][0], 600, "%s", unit) || cx_fmt(jobtext[k][1], 600, "%s", obj)) return -1;
     jobs[k].v[0] = "sh"; jobs[k].v[1] = product; jobs[k].v[2] = "-c"; jobs[k].v[3] = "-funit";
-    jobs[k].v[4] = jobtext[k][0]; jobs[k].v[5] = "-o"; jobs[k].v[6] = jobtext[k][1]; jobs[k].v[7] = 0;
+    jobs[k].v[4] = jobtext[k][0]; jobs[k].v[5] = "-o"; jobs[k].v[6] = jobtext[k][1]; jobs[k].v[7] = (char *)rt; jobs[k].v[8] = 0;
     return 0;
 }
 
@@ -451,7 +464,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     /* cold build */
     if (cx_fmt(stage, sizeof stage, "%s/.stage-%s-%d", outdir, pk.pkg, sy_pid()) || mkdirs(stage)) return say(1, "FAILED", outdir, "cannot create the stage directory");
     for (i = 0; i < pk.nunit; i++) {
-        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i]) || set_compile(i, pk.unit[i], path)) return say(1, "FAILED", pk.unit[i], "path too long");
+        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i]) || set_compile(i, pk.unit[i], path, RT_USER)) return say(1, "FAILED", pk.unit[i], "path too long");
     }
     if (run_jobs(pk.nunit, par)) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "a unit did not compile"); }
     t1 = sy_now_ms();
@@ -532,6 +545,10 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     return 0;
 }
 
+/* link's --with sources: further root units of the same program (absolute paths). */
+static const char *with_src[16];
+static int nwith;
+
 static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char **req, int nreq, const char *work, int par) {
     static char *av[MAXJOB + MAXLIB + 8];
     static char alias[MAXLIB][4400];
@@ -557,8 +574,44 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
     if (work) { if (tx_copy(wdir, sizeof wdir, work, tx_len(work, sizeof wdir))) return 2; }
     else if (cx_fmt(wdir, sizeof wdir, "%s.tlibwork", out)) return 2;
     if (mkdirs(wdir)) return say(2, "UNREADABLE", wdir, "cannot create the work directory");
-    c = tp_closure(root, product, rel, why, sizeof why);
-    if (!c) return say(1, "FAILED", rel, why);
+    /* the closure of the tool and of every --with source, each unit once (first mention) */
+    {
+        TpBuf all;
+        all.b = 0; all.n = 0; all.cap = 0; all.bad = 0;
+        tp_put(&all, "\n", 1);
+        for (k = 0; k <= nwith; k++) {
+            char wrel[4400], wreal[4400];
+            const char *src = rel;
+            long j = 0, je, cl;
+            if (k > 0) {
+                r = sy_realpath(with_src[k - 1], wreal, sizeof wreal);
+                if (r < 0) { mm_free(all.b); return say(2, "UNREADABLE", with_src[k - 1], "no such source"); }
+                if (r > rl && tx_prefix(wreal, r, root, rl) && wreal[rl] == '/') { if (tx_copy(wrel, sizeof wrel, wreal + rl + 1, r - rl - 1)) return 2; }
+                else if (tx_copy(wrel, sizeof wrel, wreal, r)) return 2;
+                src = wrel;
+            }
+            c = tp_closure(root, product, src, why, sizeof why);
+            if (!c) { mm_free(all.b); return say(1, "FAILED", src, why); }
+            cl = tx_len(c, TX_ZCAP);
+            while (j < cl) {
+                je = j;
+                while (je < cl && c[je] != '\n') je++;
+                if (je > j) {
+                    /* "\nPATH\n" is in ALL exactly when PATH was already taken */
+                    char key[4400];
+                    if (je - j + 3 > (long)sizeof key) { mm_free(c); mm_free(all.b); return say(1, "FAILED", src, "closure path too long"); }
+                    key[0] = '\n';
+                    if (mm_copy(key + 1, sizeof key - 1, c + j, je - j)) { mm_free(c); mm_free(all.b); return 2; }
+                    key[je - j + 1] = '\n';
+                    if (tx_find(all.b, all.n, key, je - j + 2) < 0) tp_put(&all, key + 1, je - j + 1);
+                }
+                j = je + 1;
+            }
+            mm_free(c);
+        }
+        if (all.bad || !all.b) { mm_free(all.b); return say(1, "FAILED", rel, "out of memory"); }
+        c = all.b;
+    }
     n = tx_len(c, TX_ZCAP);
     while (i < n) {
         char one[4400], x[TP_NAME + 8];
@@ -586,7 +639,7 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
             else {
                 if (cx_fmt(mem, sizeof mem, "%s", one)) return 2;
                 for (k = 0; mem[k]; k++) if (mem[k] == '/') mem[k] = '.';
-                if (cx_fmt(obj, sizeof obj, "%s/%s.o", wdir, mem[0] == '.' ? mem + 1 : mem) || set_compile(nsrc, one, obj))
+                if (cx_fmt(obj, sizeof obj, "%s/%s.o", wdir, mem[0] == '.' ? mem + 1 : mem) || set_compile(nsrc, one, obj, nsrc ? RT_USER : RT_PROVIDER))
                     return say(1, "FAILED", one, "too many source units or path too long");
                 nsrc++;
             }
@@ -877,6 +930,7 @@ int main(int argc, char **argv) {
         }
         else if (tx_eqz(argv[k], "--tlib") && k + 1 < argc && ntl < MAXLIB - 1) tl[ntl++] = argv[++k];
         else if (tx_eqz(argv[k], "--require") && k + 1 < argc && nreq < 16) req[nreq++] = argv[++k];
+        else if (tx_eqz(argv[k], "--with") && k + 1 < argc && nwith < 16) with_src[nwith++] = argv[++k];
         else if (tx_eqz(argv[k], "--no-cache")) use_cache = 0;
         else if (tx_eqz(argv[k], "--fresh")) want_fresh = 1;
         else if (tx_eqz(argv[k], "--api")) part = "__.S.api";
@@ -886,9 +940,9 @@ int main(int argc, char **argv) {
     }
     if (!cmd || bad || (!subject && !tx_eqz(cmd, "kit")) || (subject && tx_eqz(cmd, "kit")) ||
         !(tx_eqz(cmd, "build") || tx_eqz(cmd, "check") || tx_eqz(cmd, "inspect") || tx_eqz(cmd, "link") || tx_eqz(cmd, "kit") || tx_eqz(cmd, "prep")) ||
-        (tx_eqz(cmd, "link") && (!outarg || ntl < 1)) || (tx_eqz(cmd, "prep") && (!outarg || ntl > 0))) {
+        (tx_eqz(cmd, "link") && (!outarg || ntl < 1)) || (tx_eqz(cmd, "prep") && (!outarg || ntl > 0)) || (nwith && !tx_eqz(cmd, "link"))) {
         sy_eprintf("tlib: usage: build PKG [--out DIR] [--cache DIR] [--jobs N] [--no-cache] | check FILE [--fresh] | "
-                   "inspect FILE [--api|--receipt] | link TOOL.cx -o OUT --tlib FILE... [--require PKG@X.Y.Z...] [--work DIR] [--jobs N] | "
+                   "inspect FILE [--api|--receipt] | link TOOL.cx -o OUT --tlib FILE... [--require PKG@X.Y.Z...] [--with MORE.cx...] [--work DIR] [--jobs N] | "
                    "kit [--out DIR] [--cache DIR] [--jobs N] [--no-cache] | prep TOOL.cx -o OUT [--kit DIR] [--jobs N]; "
                    "common: [--root ROOT] [--product FILE]\n");
         return 2;
@@ -910,6 +964,11 @@ int main(int argc, char **argv) {
         else if (cx_fmt(cache, sizeof cache, "%s/.cache/unisacc/tlib", sy_env_or("HOME", "."))) return 2;
         for (k = 0; k < ntl; k++)
             if (tl[k][0] != '/') { if (cx_fmt(abs_tl[k], 4400, "%s/%s", cwd, tl[k])) return 2; tl[k] = abs_tl[k]; }
+        {
+            static char abs_with[16][4400];
+            for (k = 0; k < nwith; k++)
+                if (with_src[k][0] != '/') { if (cx_fmt(abs_with[k], 4400, "%s/%s", cwd, with_src[k])) return 2; with_src[k] = abs_with[k]; }
+        }
     }
     if (sy_realpath(rarg, root, sizeof root) < 0) return say(2, "UNREADABLE", rarg, "bad root");
     if (parg) { if (sy_realpath(parg, product, sizeof product) < 0) return say(2, "UNREADABLE", parg, "bad product"); }

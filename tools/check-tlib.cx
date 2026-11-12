@@ -1,7 +1,11 @@
 /* tools/check-tlib.cx -- tools/tlib.cx on a private fixture tree (no unit of this checkout is packed here;
  * the real cx.base build is tools/check-tlib-base.cx).
  *
- *   sh ./unisacc.com tools/check-tlib.cx [-- ROOT OUT]
+ *   sh ./unisacc.com tools/check-tlib.cx [-- ROOT OUT [kit]]
+ *
+ * Without the third argument: every case but (6b) (batch tlib). With "kit": the fixture, (1), (2)
+ * and (6b) only (batch tlib-kit); the two lines share the fixture and stay inside one batch
+ * budget each.
  *
  * Fixture: package fx.a@0.2.1 (fa/one.cx, fa/two.cx; fa/bad.cx excluded), fx.b@0.1.0 (fb/three.cx,
  * depends on fx.a@0.2.0), fx.c (a unit that uses the excluded fa/bad.cx), and a tool t/main.cx.
@@ -13,6 +17,9 @@
  *      appended byte are each TAMPERED (rc 3), for check and for link;
  *  (5) link with the tlibs behaves as the source build: same stdout and exit code, for two argument sets;
  *      a tool that names only the dependent package links whatever order the tlibs are given in;
+ *      (5c) a FILE opened in the tool and written by a packed unit keeps the write and stdout
+ *      keeps its order (one runtime state: RT_UNIT root, RT_EXTERN elsewhere); (5d) a second root
+ *      unit given with --with is compiled and linked;
  *  (6) versions: --require at the same major and not newer is accepted (0.1.0, 0.2.1 against 0.2.1); a
  *      newer minor (0.3.0) and another major (1.0.0) are refused (rc 5); a tlib whose dependency is
  *      not provided is refused; a dependency provided at another major is refused (major mismatch);
@@ -199,6 +206,7 @@ int main(int argc, char **argv) {
     char ta[4400], tb[4400], ta1[4400], tam[4400], main_cx[4400], bad_cx[4400], srcbin[4400], tlbin[4400], manifest[4400];
     char c1[65], c2[65], kpath[4400], cpath[4400];
     int rc, prep = 0;
+    int kit_mode = argc >= 4 && tx_eqz(argv[3], "kit");
     long t0 = sy_now_ms();
 
     if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
@@ -239,7 +247,16 @@ int main(int argc, char **argv) {
     prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\n");
     prep |= put("fa/two.cx", "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n");
     prep |= put("fa/bad.cx", "#pragma unisa module bad\nint fa_bad(void) { return 7; }\n");
-    prep |= put("fb/three.cx", "#pragma unisa module three\n#pragma unisa use fa.two\nint fb_three(int x) { return fa_two(x) + 3; }\n");
+    prep |= put("fb/three.cx", "#pragma unisa module three\n#pragma unisa use fa.two\nint fb_three(int x) { return fa_two(x) + 3; }\n"
+                               "void fb_say(FILE *f, int x) { fprintf(f, \"say=%d\\n\", x); }\n");
+    prep |= put("t/stdio.cx", "#pragma unisa use fb.three\n"
+                              "int main(int argc, char **argv) {\n    char line[64];\n    int n = 0;\n    FILE *f = argc > 1 ? fopen(argv[1], \"w\") : 0;\n"
+                              "    if (!f) return 90;\n    fprintf(f, \"main\\n\");\n    fb_say(f, 5);\n    fclose(f);\n"
+                              "    printf(\"first\\n\");\n    fb_say(stdout, 6);\n    printf(\"last\\n\");\n"
+                              "    f = fopen(argv[1], \"r\");\n    while (f && fgets(line, sizeof line, f)) { printf(\"read:%s\", line); n++; }\n"
+                              "    return 10 + n;\n}\n");
+    prep |= put("t/extra.cx", "int extra_twice(int x) { return 2 * x; }\n");
+    prep |= put("t/two-roots.cx", "#pragma unisa use fa.two\nint extra_twice(int);\nint main(void) { return extra_twice(fa_two(1)) + 1; }\n");
     prep |= put("fc/uses.cx", "#pragma unisa module uses\n#pragma unisa use fa.bad\nint fc_uses(void) { return fa_bad(); }\n");
     prep |= put("t/main.cx", "#pragma unisa use fa.two\n#pragma unisa use fb.three\n"
                              "int main(int argc, char **argv) {\n    int n = argc > 1 ? (int)argv[1][0] : 1;\n"
@@ -282,7 +299,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && is("TLIB_BUILD", "units=", "1") && sy_exists(tb) == 1, "dependent-build-after-dependency");
     }
     /* (3) manifest */
-    {
+    if (!kit_mode) {
         char *a[] = {"inspect", ta, "--api", 0};
         size_t mn = 0;
         char *m;
@@ -292,7 +309,7 @@ int main(int argc, char **argv) {
         mm_free(m);
     }
     /* (4) tamper */
-    {
+    if (!kit_mode) {
         char *c[] = {"check", tam, 0};
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", tam, "--tlib", tb, 0};
         int r1, r2, r3, r4, r5;
@@ -312,7 +329,7 @@ int main(int argc, char **argv) {
         ck(!prep && r5 == 3 && sy_exists(tlbin) == 0, "link-refuses-tampered-tlib");
     }
     /* (5) link equals source build */
-    {
+    if (!kit_mode) {
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
         rc = run(tlib, l);
         prep = tq_native(root, main_cx, srcbin, why, sizeof why);
@@ -321,7 +338,7 @@ int main(int argc, char **argv) {
     }
     /* (5b) the tool names only the dependent package; the dependency is given first on the line.
        The product takes archives in one pass each, in order, so link must put fx.b before fx.a. */
-    {
+    if (!kit_mode) {
         char only[4400], onlybin[4400];
         char *o = 0;
         size_t on = 0;
@@ -334,8 +351,40 @@ int main(int argc, char **argv) {
         ck(rc == 0 && prog(onlybin, 0, &o, &on) == 7, "dependency-given-first-still-links");
         mm_free(o);
     }
+    /* (5c) one runtime state: a FILE opened in the tool and written by a packed unit keeps the
+       write, and stdout written from both sides keeps its order; (5d) a second root unit named
+       with --with is compiled and linked with the first. */
+    if (!kit_mode) {
+        char stdio_cx[4400], sbin[4400], tbin[4400], f1[4400], f2[4400], two_cx[4400], extra_cx[4400], twobin[4400];
+        char *oa = 0, *ob = 0;
+        size_t na = 0, nb = 0;
+        int ra, rb;
+        prep = cx_fmt(stdio_cx, sizeof stdio_cx, "%s/t/stdio.cx", fx) || cx_fmt(sbin, sizeof sbin, "%s/stdio.src", work) ||
+               cx_fmt(tbin, sizeof tbin, "%s/stdio.tl", work) || cx_fmt(f1, sizeof f1, "%s/stdio-1.txt", work) || cx_fmt(f2, sizeof f2, "%s/stdio-2.txt", work) ||
+               cx_fmt(two_cx, sizeof two_cx, "%s/t/two-roots.cx", fx) || cx_fmt(extra_cx, sizeof extra_cx, "%s/t/extra.cx", fx) ||
+               cx_fmt(twobin, sizeof twobin, "%s/two-roots.tl", work);
+        {
+            char *l[] = {"link", stdio_cx, "-o", tbin, "--tlib", ta, "--tlib", tb, 0};
+            rc = prep ? -1 : run(tlib, l);
+        }
+        prep |= tq_native(root, stdio_cx, sbin, why, sizeof why);
+        ra = prog(sbin, f1, &oa, &na);
+        rb = prog(tbin, f2, &ob, &nb);
+        ck(!prep && rc == 0 && ra == 12 && rb == 12 && na == nb && na > 0 && oa && ob && mm_same(oa, ob, (long)na) &&
+           tx_find(ob, (long)nb, "read:say=5\n", 11) >= 0 && tx_find(ob, (long)nb, "first\nsay=6\nlast\n", 17) == 0,
+           "file-opened-in-the-tool-and-written-by-a-packed-unit-keeps-the-write");
+        mm_free(oa);
+        mm_free(ob);
+        oa = 0;
+        {
+            char *l[] = {"link", two_cx, "--with", extra_cx, "-o", twobin, "--tlib", ta, 0};
+            rc = prep ? -1 : run(tlib, l);
+        }
+        ck(rc == 0 && is("TLIB_LINK", "src_units=", "2") && is("TLIB_LINK", "tlib_units=", "2") && prog(twobin, 0, &oa, &na) == 9, "second-root-unit-given-with-with-links");
+        mm_free(oa);
+    }
     /* (6) versions */
-    {
+    if (!kit_mode) {
         char *ok1[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.1.0", "--require", "fx.a@0.2.1", "--require", "fx.b@0.1.0", 0};
         char *old[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.3.0", 0};
         char *maj[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@1.0.0", 0};
@@ -356,8 +405,9 @@ int main(int argc, char **argv) {
         ck(!prep && rc == 0, "table-restored-link-ok");
     }
     /* (6b) incremental kit over the fixture packages (fx.c never builds: it is skipped each time).
-       The tool's own sources are reached through a tools link; its image is built once. */
-    {
+       The tool's own sources are reached through a tools link; its image is built once.
+       Runs only as the kit line (third argument "kit", batch tlib-kit), after (1) and (2). */
+    if (kit_mode) {
         char *k[] = {"kit", "--out", out1, "--cache", cache, 0};
         char tools_dir[4400], kitfile[4400], img[4400], c3[65];
         const char *two0 = "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n";
@@ -385,7 +435,8 @@ int main(int argc, char **argv) {
         kept3 = is("PREPARED", "rebuilt=", "2") && is("PREPARED", "image=", "kept");
         ck(!prep && r3 == 0 && n3 == 2 && kept3, "source-change-rebuilds-the-package-and-its-dependent-only");
         rc = run(tlib, l);
-        ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-incremental-kit-behaves-as-before");
+        prep = tq_native(root, main_cx, srcbin, why, sizeof why);
+        ck(!prep && rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-incremental-kit-behaves-as-before");
         /* back to the first source: both come back, by the cache, with the first content sha */
         prep = put("fa/two.cx", two0);
         r4 = run(tlib, k);
@@ -394,7 +445,7 @@ int main(int argc, char **argv) {
         ck(!prep && r4 == 0 && n4 == 2 && rc == 0 && !field("TLIB_CHECK", "content_sha=", c3, sizeof c3) && tx_eqz(c1, c3), "restored-source-gives-the-first-content-sha");
     }
     /* (7) stale */
-    {
+    if (!kit_mode) {
         char *cf[] = {"check", ta, "--fresh", 0};
         char *cs[] = {"check", ta, 0};
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
@@ -412,7 +463,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-rebuild-behaves-as-before");
     }
     /* (8) excluded */
-    {
+    if (!kit_mode) {
         char *l[] = {"link", bad_cx, "-o", tlbin, "--tlib", ta, 0};
         char *b[] = {"build", "fx.c", "--out", out1, "--cache", cache, 0};
         int r1 = run(tlib, l), r2 = run(tlib, b);
@@ -420,14 +471,14 @@ int main(int argc, char **argv) {
         ck(r2 == 6, "build-refuses-unit-that-needs-excluded-unit");
     }
     /* (9) interface changed, manifest not regenerated */
-    {
+    if (!kit_mode) {
         char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
         prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return 1 + x; }\nint fa_extra(void) { return 2; }\n");
         rc = run(tlib, a);
         ck(!prep && rc == 4, "build-refuses-interface-change-without-manifest");
     }
     /* (10) usage */
-    {
+    if (!kit_mode) {
         char *u1[] = {"frobnicate", "x", 0};
         char *u2[] = {"link", main_cx, "--tlib", ta, 0};
         char *u3[] = {"build", "no.such", "--out", out1, "--cache", cache, 0};
