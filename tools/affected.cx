@@ -47,6 +47,7 @@
 #pragma unisa use sysx.process
 #pragma unisa use cxlib.cxroot
 #pragma unisa use sys.env
+#pragma unisa use cxlib.toolprep
 
 /* an unlinked spool file the drained output of a bounded child goes to */
 static int spool_open(void) {
@@ -490,6 +491,38 @@ static int finish(Child *C, int ex, int code, int sig) {
     }
     return 0;
 }
+/* --prepare-materials: resolve each declared material to a canonical path before run-batch.
+   Only `NAME-tool:path` (-> tools/NAME.cx, a regular file) is resolvable today; anything else stays
+   DEFERRED with a named reason.  Each resolved material is printed as PREPARED with its sha256.
+   A receipt is not a PASS and is never reused as one. */
+static int prep_on = 0;
+static char prep_val[32][4400];
+static char built[32][128];
+static int nbuilt = 0;
+static int prepare_materials(const Batch *B, const char **av, int *nav, char *why, int cap) {
+    const char *at = B->materials; tp_material_decl d; int rc, n = 0;
+    while ((rc = tp_material_next(&at, &d)) > 0) {
+        long nl = tx_len(d.name, 256); char src[4400], bin[4400], h[65], w2[256]; size_t sz; char *s; int k, hit = -1;
+        if (n >= 32) { cx_fmt(why, cap, "too-many-materials"); return 1; }
+        if (d.kind == 2 || nl < 6 || !tx_eqz(d.name + nl - 5, "-tool")) { cx_fmt(why, cap, "unpreparable=%s", d.name); return 1; }
+        if (cx_fmt(src, sizeof src, "%s/tools/%.*s.cx", root, (int)(nl - 5), d.name)
+            || cx_fmt(bin, sizeof bin, "%s/mat-%s", outparent, d.name)) { cx_fmt(why, cap, "path-too-long=%s", d.name); return 1; }
+        if (sy_exists(src) != 1) { cx_fmt(why, cap, "source-absent=%s", d.name); return 1; }
+        for (k = 0; k < nbuilt; k++) if (tx_eqz(built[k], d.name)) hit = k;
+        if (hit < 0) {   /* one bounded native build per material per run (toolprep, 40 s) */
+            if (nbuilt >= 32 || tq_native(root, src, bin, w2, sizeof w2)) { cx_fmt(why, cap, "build-failed=%s:%s", d.name, w2); return 1; }
+            cx_fmt(built[nbuilt], sizeof built[nbuilt], "%s", d.name); nbuilt++;
+        }
+        s = cx_read(bin, &sz);
+        if (!s || cx_sha256_hex(s, sz, h)) { cx_fmt(why, cap, "unreadable=%s", d.name); return 1; }
+        free(s);
+        cx_fmt(prep_val[n], sizeof prep_val[n], "%s=%s", d.name, bin);
+        av[(*nav)++] = prep_val[n]; n++;
+        printf("PREPARED\t%s\t%s\tsha256=%s\treused=%d\n", B->id, d.name, h, hit >= 0);
+    }
+    if (rc < 0) { cx_fmt(why, cap, "materials-syntax"); return 1; }
+    return 0;
+}
 static int run(const int *sel, int nsel, int jobs) {
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
@@ -508,8 +541,13 @@ static int run(const int *sel, int nsel, int jobs) {
         long now = sy_now_ms();
         while (nrun < jobs && next < nsel && now - t_main < start_deadline) {
             Batch *B = &batch[sel[next]]; Child *C = &ch[nrun];
-            char *av[] = {"sh", candidate, runner, "--", root, outparent, B->id, 0};
-            if (!tx_eqz(B->materials, "-")) { printf("DEFERRED\t%s\tneeds-materials=%s\n", B->id, B->materials); deferred++; next++; continue; }
+            const char *av[48] = {"sh", candidate, runner, "--", root, outparent, B->id, 0}; int nav = 7;
+            if (!tx_eqz(B->materials, "-")) {
+                char why[200];
+                if (!prep_on) { printf("DEFERRED\t%s\tneeds-materials=%s\n", B->id, B->materials); deferred++; next++; continue; }
+                if (prepare_materials(B, av, &nav, why, sizeof why)) { printf("DEFERRED\t%s\tprepare-failed=%s\n", B->id, why); deferred++; next++; continue; }
+                av[nav] = 0;
+            }
             C->bi = sel[next]; C->out.p = 0; C->out.n = C->out.cap = 0; C->err = C->out;
             C->pid = sy_spawn_pipe(av, root, SY_SPAWN_STDERR_SPLIT, &C->ofd, &C->efd);
             next++;
@@ -613,6 +651,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
+        else if (tx_eqz(argv[a], "--prepare-materials")) { prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
         else if (tx_eqz(argv[a], "--start-deadline-ms") && a + 1 < argc) {   /* test hook: start no batch after N ms */
             start_deadline = parse_long(argv[a + 1], tx_len(argv[a + 1], 8));
