@@ -544,6 +544,27 @@ static void wf_scrub_dest(const char *outdir, const char *dest) {
     if (fsize(dest) >= 0) { if (cx_rmtree(dest)) die("rm dest", dest); sy_printf("CLEANUP\t%s\n", dest); }
     if (fsize(ctl) >= 0) { if (cx_rmtree(ctl)) die("rm control", ctl); sy_printf("CLEANUP\t%s\n", ctl); }
 }
+/* The kernels step of generation G. chain-step runs kernel-route into FP/gG/kernel-route, copies
+   the two kernels to FP/gG and writes FP/gG/phase-6.tsv last; an attempt killed at its bound
+   leaves the directory (and possibly a copied kernel) without that record, and the retry is
+   refused with "REFUSE unrecorded/existing phase" (0.0.58, kernels-g2 after rc 124). Without the
+   record no later step has accepted them, so they are scrubbed before the step runs; with the
+   record nothing is touched. */
+static void kernels_scrub(const char *outdir, const char *fp, int g) {
+    static const char *leaf[3] = {"kernel-route", "x86_64.kernel", "arm64.kernel"};
+    char rec[4400], p[4400];
+    int i;
+    if (!fp || !*fp || (g != 2 && g != 3)) die("path", "kernels scrub");
+    if (!under_dir(fp, outdir) && !(chain_work[0] && under_dir(fp, chain_work))) die("REFUSE fixedpoint", fp);
+    if (cx_fmt(rec, sizeof rec, "%s/g%d/phase-6.tsv", fp, g)) die("path", fp);
+    if (fsize(rec) >= 0) return;
+    for (i = 0; i < 3; i++) {
+        if (cx_fmt(p, sizeof p, "%s/g%d/%s", fp, g, leaf[i])) die("path", fp);
+        if (fsize(p) < 0) continue;
+        if (i ? sy_unlink(p) : cx_rmtree(p)) die("rm kernels residue", p);
+        sy_printf("CLEANUP\t%s\n", p);
+    }
+}
 static int span_one_missing(const char *root, const char *outdir, const char *helper,
     const char *prep, const char *target, const char *input, const char *dest,
     const char *first, const char *last, const char *tag) {
@@ -1845,6 +1866,11 @@ int main(int argc, char **argv) {
         until_phase = tx_eqz(argv[5], "-") ? 0 : argv[5];
         return wf_fronts(argv[2], argv[3], "fixture-helper", 1, "osx/x86_64", "osx-x86_64", 1);
     }
+    if (argc == 5 && tx_eqz(argv[1], "--kernels-scrub-fixture")) {
+        /* OUT FP G: only the scrub that precedes the kernels step. */
+        kernels_scrub(argv[2], argv[3], tx_eqz(argv[4], "3") ? 3 : 2);
+        return 0;
+    }
     if (argc == 9 && tx_eqz(argv[1], "--wf-stub-fixture")) {
         /* ROOT OUT PREP TARGET PHASE DEST TAG: the stub step alone, against a fake ROOT/unisacc.com. */
         char wft[4400];
@@ -2386,6 +2412,7 @@ int main(int argc, char **argv) {
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
         a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g2"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        kernels_scrub(outdir, fp, 2);
         if (step(root, a)) die("kernels-g2", fp);
         mark(outdir, "kernels-g2", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g2\n");
@@ -2395,6 +2422,7 @@ int main(int argc, char **argv) {
         char *a[11];
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
         a[6] = (char *)"--phase"; a[7] = (char *)"kernels-g3"; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
+        kernels_scrub(outdir, fp, 3);
         if (step(root, a)) die("kernels-g3", fp);
         mark(outdir, "kernels-g3", sy_now_ms() - t0);
     } else sy_printf("RESUME\tkernels-g3\n");

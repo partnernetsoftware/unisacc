@@ -169,6 +169,25 @@ int main(int argc, char **argv) {
             ck(grc == 0 && has(out, "RESUME\tgen1-fixture-stub") && !has(out, "CLEANUP\t") && w && wn == 5, "finished-stub-reused-not-scrubbed");
             free(w);
         }
+        /* A kernels attempt killed at its bound leaves g2/kernel-route (and possibly a copied
+           kernel) without phase-6.tsv; chain-step then refuses the retry. The unrecorded residue
+           is scrubbed before the step; a recorded phase is never touched. */
+        {
+            char kout[4600], kfp[4600], kg[4600], kdir[4700], ksub[4800], kk[4700], krec[4700], kcmd[14000];
+            if (cx_fmt(kout, sizeof kout, "%s/ks-out", td) || cx_fmt(kfp, sizeof kfp, "%s/fixedpoint", kout) || cx_fmt(kg, sizeof kg, "%s/g2", kfp) ||
+                cx_fmt(kdir, sizeof kdir, "%s/kernel-route", kg) || cx_fmt(ksub, sizeof ksub, "%s/x86_64", kdir) || cx_fmt(kk, sizeof kk, "%s/x86_64.kernel", kg) ||
+                cx_fmt(krec, sizeof krec, "%s/phase-6.tsv", kg) ||
+                sy_mkdir(kout, 0755) || sy_mkdir(kfp, 0755) || sy_mkdir(kg, 0755) || sy_mkdir(kdir, 0755) || sy_mkdir(ksub, 0755) || cx_write(kk, "partial\n", 8)) return 2;
+            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --kernels-scrub-fixture '%s' '%s' 2 2>&1", candidate, kout, kfp)) return 2;
+            int krc = sh(kcmd, out, sizeof out);
+            ck(krc == 0 && has(out, "CLEANUP\t") && sy_exists(kdir) == 0 && sy_exists(kk) == 0 && sy_exists(kg) == 1, "killed-kernels-residue-scrubbed-before-retry");
+            if (sy_mkdir(kdir, 0755) || cx_write(kk, "kernel\n", 7) || cx_write(krec, "recorded\n", 9)) return 2;
+            krc = sh(kcmd, out, sizeof out);
+            ck(krc == 0 && !has(out, "CLEANUP\t") && sy_exists(kdir) == 1 && sy_exists(kk) == 1 && sy_exists(krec) == 1, "recorded-kernels-phase-not-scrubbed");
+            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --kernels-scrub-fixture '%s' '%s/elsewhere' 2 2>&1", candidate, kout, td)) return 2;
+            krc = sh(kcmd, out, sizeof out);
+            ck(krc != 0 && has(out, "REFUSE fixedpoint"), "kernels-scrub-outside-output-refused");
+        }
         /* 0.0.58: the fixedpoint root objects are many bounded batches. Told that its attempt ends
            soon, the candidate commits one batch and then yields (rc 75, a CANDIDATE_YIELD line
            naming the runner's token and the checkpoint bytes it saw) instead of starting a batch
