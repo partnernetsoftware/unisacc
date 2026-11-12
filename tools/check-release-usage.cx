@@ -32,19 +32,26 @@ static void ck(int ok, const char *n) {
     if (!ok) failed++;
 }
 static long tlen(const char *s) { return tx_len(s, 1 << 20); }
-static int has(const char *b, const char *s) { return tx_find(b, tlen(b), s, tlen(s)) >= 0; }
+/* 在 b[0..bn) 内按位比对找 s(不经源文本锚点助手;输入是子进程输出或回归钉,逐位比对) */
+static int hasn(const char *b, long bn, const char *s, long sn) {
+    long i;
+    for (i = 0; i + sn <= bn; i++) if (tx_same(b + i, sn, s, sn)) return 1;
+    return 0;
+}
+static int has(const char *b, const char *s) { return hasn(b, tlen(b), s, tlen(s)); }
 
 /* 被测 ROOT 的 release-build 只编一次到 rb_bin(测量:单次编译约 16s,三用例各编一次会超 60s 上限),
    各用例在临时共享克隆 TMP/r 里跑 [PRE]rb_bin <sub> TMP/r;stdout+stderr 合并进 buf。
    PRE 是加在命令前的环境赋值(U5 用),其余用例传 ""。 */
 static char rb_dir[4400], rb_bin[4400];
 static int build_rb(void) {
-    np_result r = {0}; char why[512] = {0}; char src[4400]; int rc;
-    char *v[] = {"sh", "unisacc.com", src, "-o", rb_bin, 0};
+    np_result r = {0}; char why[512] = {0}; char src[4400], com[4400]; int rc;
+    char *v[] = {"sh", com, src, "-o", rb_bin, 0};
     if (cx_fmt(rb_dir, sizeof rb_dir, "%s/release-usage-bin-XXXXXX", sy_tmpdir()) || !mkdtemp(rb_dir)) return -1;
     if (cx_fmt(rb_bin, sizeof rb_bin, "%s/release-build", rb_dir) ||
+        cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
         cx_fmt(src, sizeof src, "%s/tools/release-build.cx", root)) return -1;
-    rc = np_run(v, root, 0, 50, &r, why, sizeof why) || r.rc ? -1 : 0;
+    rc = np_run(v, rb_dir, 0, 50, &r, why, sizeof why) || r.rc ? -1 : 0;
     if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
     np_free(&r);
     return rc;
@@ -60,7 +67,7 @@ static int fresh_run(const char *pre, const char *sub, char *buf, long cap) {
         "mkdir -p '%s/r/out' && cd '%s/r' && %s'%s' %s '%s/r'",
         root, tmp, root, tmp, root, tmp, tmp, tmp, pre, rb_bin, sub, tmp)) return -3;
     sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
-    if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+    if (np_run(sh, tmp, 0, 50, &r, why, sizeof why) == 0) {
         long m = (long)r.errn, o = (long)r.outn, i;
         if (m > cap - 1) m = cap - 1;
         for (i = 0; i < m; i++) buf[i] = r.err[i];
@@ -71,13 +78,30 @@ static int fresh_run(const char *pre, const char *sub, char *buf, long cap) {
     }
     np_free(&r);
     if (!cx_fmt(rmc, sizeof rmc, "rm -rf '%s'", tmp)) { np_result q = {0}; char w2[128] = {0};
-        sh[2] = rmc; np_run(sh, root, 0, 20, &q, w2, sizeof w2); np_free(&q); }
+        sh[2] = rmc; np_run(sh, rb_dir, 0, 20, &q, w2, sizeof w2); np_free(&q); }
     return rc;
 }
+
+/* ROOT 残留清单:顶层与 out/ 一层中本检查可能留下的条目(release-snap-*、release-usage*、.fz-*、顶层条目名),排序后比对。 */
+static int root_list(char *o, long cap) {
+    char cmd[9000]; char *sh[4]; np_result r = {0}; char why[128] = {0}; long n, i; int rc;
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && { ls -A; find . -maxdepth 3 \\( -name 'release-snap-*' -o -name 'release-usage*' -o -name '.fz-*' \\) -print; } | sort",
+        root)) return -1;
+    sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
+    rc = np_run(sh, root, 0, 20, &r, why, sizeof why);
+    n = (long)r.outn; if (n > cap - 1) n = cap - 1;
+    for (i = 0; i < n; i++) o[i] = r.out[i];
+    o[n] = 0;
+    np_free(&r);
+    return rc;
+}
+static char lst0[65536], lst1[65536];
 
 int main(void) {
     char buf[16384]; int rc;
     if (sy_cwd(root, sizeof root)) return 2;
+    if (root_list(lst0, sizeof lst0)) return 2;
     if (build_rb()) { sy_eprintf("check-release-usage: release-build compile failed\n"); return 2; }
     /* U1 */
     rc = fresh_run("", "p3", buf, sizeof buf);
@@ -103,7 +127,7 @@ int main(void) {
           "cmp -s unisacc.com $S/unisacc.com && echo U8_BYTES_EQ; ls -a $S | grep -q '^.fz-' || echo U8_NO_STAGE; cd /; rm -rf '%s'",
           root, td, root, root, td, td, td, rb_bin, rb_bin, rb_bin, td)) return 2;
       sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0; buf[0] = 0;
-      if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+      if (np_run(sh, td, 0, 50, &r, why, sizeof why) == 0) {
           m = (long)r.outn; if (m > (long)sizeof buf - 1) m = sizeof buf - 1;
           for (i = 0; i < m; i++) buf[i] = r.out[i];
           buf[m] = 0;
@@ -121,7 +145,7 @@ int main(void) {
           "'%s' p3 '%s/s'; echo rc=$?; '%s' p3 '%s/n'; echo rc=$?; rm -rf '%s'",
           td, td, td, root, td, rb_bin, td, rb_bin, td, td)) return 2;
       sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0; buf[0] = 0;
-      if (np_run(sh, root, 0, 50, &r, why, sizeof why) == 0) {
+      if (np_run(sh, td, 0, 50, &r, why, sizeof why) == 0) {
           m = (long)r.errn; o = (long)r.outn; if (m > (long)sizeof buf - 1) m = sizeof buf - 1;
           for (i = 0; i < m; i++) buf[i] = r.err[i];
           if (m + o > (long)sizeof buf - 1) o = sizeof buf - 1 - m;
@@ -137,9 +161,9 @@ int main(void) {
     { char p[4400]; size_t n; char *b;
       if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root)) return 2;
       b = (char *)cx_read(p, &n);
-      ck(b && tx_find(b, (long)n, "sy_eprintf(\"release-build: %s\\n\", s);\n    sy_exit(1);", 53) >= 0, "U3 rb_die exits");
+      ck(b && hasn(b, (long)n, "sy_eprintf(\"release-build: %s\\n\", s);\n    sy_exit(1);", 53), "U3 rb_die exits");
       { const char *pin = "while (m > 0 && (out[m - 1] == '\\n' || out[m - 1] == '\\r')) m--;";
-        ck(b && tx_find(b, (long)n, pin, tlen(pin)) >= 0, "U4 rb_pipe trims trailing newline (source pin)"); }
+        ck(b && hasn(b, (long)n, pin, tlen(pin)), "U4 rb_pipe trims trailing newline (source pin)"); }
       if (b) mm_free(b); }
     /* U5: freeze 的 rev 子进程换成 sleep,上限压到 2000ms:必须以具名 timeout 死(含相位名与毫秒),
        rc 为 1 而不是 139,也不能落到调用方的普通 "release-build: rev" 文本。 */
@@ -158,6 +182,9 @@ int main(void) {
       ck(!has(buf, "release-build: rev\n"), "U5 timeout not reported as ordinary rev failure");
       if (cx_rmtree(fb)) return 2; }
     if (cx_rmtree(rb_dir)) return 2;
+    /* U9: 失败/拒绝用例都在私有临时目录里跑,ROOT 前后清单必须一致(无新增文件) */
+    if (root_list(lst1, sizeof lst1)) return 2;
+    ck(tx_eqz(lst0, lst1), "U9 ROOT has no new file after failing cases");
     sy_printf("CHECK_RELEASE_USAGE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
