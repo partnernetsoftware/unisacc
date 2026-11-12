@@ -7,7 +7,7 @@
 | 宿主 | 入口 | 怎么处理 `.cx` | 测试入口 | 现状 |
 |---|---|---|---|---|
 | unisacc.com | `sh ./unisacc.com FILE.cx -- ARGS`（默认 -run）、`-cx-plan` | 产品内 `cx/compiler/cxmod.cx` 规划，七流编译 | `cx0-unit`、`cx0-bundle`、`cx0-e2` 批次（daily），`check-cx-layers`、三个 cx 棘轮 | 日常使用；工具 733 个 .cx 都走它 |
-| gcc_cx | `sh ./gcc_cx.com FILE.cx -o OUT`；源 `tools/gcc_cx.cx`（960 B）+ `tools/cxcc.cx`，入口由 `tools/build-cxcc-host.cx` 在本机生成 | 驱动内展开 `use`（链接 `src/cxmod.c`，不调 unisacc.com），强制 `-std=c99 -x c -include include/cx.h` 后交 gcc | 用例 `tests/cxcc_*.cx` 5 个；`tests/batches.tsv` 里 grep 不到 cxcc / gcc_cx 批次（未登记） | 仓内与已装根都没有 `gcc_cx.com`（`ls` 实测），本次未跑 |
+| gcc_cx | `sh ./gcc_cx.com FILE.cx -o OUT`；源 `tools/gcc_cx.cx`（960 B）+ `tools/cxcc.cx`，入口由 `tools/build-cxcc-host.cx` 在本机生成 | 驱动内展开 `use`（链接 `src/cxmod.c`，不调 unisacc.com），强制 `-std=c99 -x c -include include/cx.h` 后交 gcc | 用例 `tests/cxcc_one.cx` 等 5 个；`tests/batches.tsv` 里 grep 不到 cxcc / gcc_cx 批次（未登记） | 仓内与已装根都没有 `gcc_cx.com`（`ls` 实测），本次未跑 |
 | clang_cx | `sh ./clang_cx.com FILE.cx -o OUT`；源 `tools/clang_cx.cx`（1001 B） | 同上，交 clang | 同上 | 同上 |
 
 gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx 头注）：模块可见性由驱动展开保证，运行期所有权来自 cx 库本身，不来自编译器。三宿主的深度对比分析另文，本文只写现状与索引。
@@ -139,7 +139,7 @@ C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个
 
 **已验证**：plan.cx 与投影逐字一致（本次实跑）；批次 `cx0-unit`、`cx0-bundle`、`cx0-e2` 已登记为 daily 档（本次未跑）；模块循环、公开冲突、条件化依赖、模块定义 main 均具名拒绝（cx0 README 所列证据，本次未重跑）。
 
-**未完成（U1 / U2，定义在 plans/v0.0.43-units.md）**：已装产品驱动仍调用原 C 规划器；规范逻辑 ID、完整配置 / 依赖映射、完整 CX0 / E2 合同、CX0 模型化部署都没有做。CXIF v0 与 e2 强制接口仍是文本包含兼容桥。
+**未完成（U1 / U2，见 [cx/spec.md](cx/spec.md) CX-W 节）**：已装产品驱动仍调用原 C 规划器；规范逻辑 ID、完整配置 / 依赖映射、完整 CX0 / E2 合同、CX0 模型化部署都没有做。CXIF v0 与 e2 强制接口仍是文本包含兼容桥。
 
 **与 units 的区别**：units 是包内已有的模型阶段（模型 35，`multi/*` 路由 144 行），在 e1 之后把各单元的 `tokens.typed` 帧合并交给 e3；CX0 决定「有哪些单元、每单元前导什么头」。两者都只在多单元编译里出现，units 已是模型，CX0 还不是。
 
@@ -185,7 +185,7 @@ C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个
 - core 模块冻结表 `tests/cx-module-freeze.tsv` 26 行，只许减；导出面棘轮 `tests/coreapi.cx`。
 - 三个只降不升的棘轮：`tests/cxinclude.cx`（禁新 `#include`）、`tests/cxlibc.cx`（上层禁裸 libc）、`tests/cxraw.cx`。
 - `src/` 下有 7 个目录符号链接（compiler、core、driver、runtime、sys、sysx、text；`git ls-files -s src` 的 120000 项）。
-- 源 SID 与 ext 的已核事实（2026-11-08 更正，自 prd.md §5 迁入，本次未重核）：`ext/` 目录本身不在 `seed/ident.c` 的目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 10 文件，共 1586 文件），但 `cx/mem`、`cx/text` 里有 8 个符号链接指向 `ext/memx`、`ext/textx`（反向亦有互指），`ident` 跟随文件链接，故这两个 ext 目录的内容经链接参与源 SID；`ext/sysx`、`ext/crypto` 不参与。`ext/` 不随 APE 发布（产品二进制无其符号）。W3 判定 arena/slice/grow/num/build/fmt/deflate 七模块产品链路引用为 0、归 ext、原路径留别名，当前状态即该终态；`memx/textx` 经别名使用（`use mem.*`/`use text.*`，`use text.fmt` 169 处），不是孤儿。`sysx`/`crypto` 由 75/14 个检查守住。风险：互指符号链接让同一文件有两个身份、Windows 无符号链接不安全；冻结路径须含 `ext/memx ext/textx`（已补）。待办（原定 0.0.49，未做）：把真身 / 别名收敛为单向并去掉互指。内部包接口摘要见 `plans/v0.0.48-unisacc.md` §12–§13。原文说「`cxroot.tsv` 只映射 sysx、crypto」已过期：现表 13 条 R 行，ext 侧映射 sysx、crypto、tsvx。
+- 源 SID 与 ext 的已核事实（2026-11-08 更正，自 prd.md §5 迁入，本次未重核）：`ext/` 目录本身不在 `seed/ident.c` 的目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 10 文件，共 1586 文件），但 `cx/mem`、`cx/text` 里有 8 个符号链接指向 `ext/memx`、`ext/textx`（反向亦有互指），`ident` 跟随文件链接，故这两个 ext 目录的内容经链接参与源 SID；`ext/sysx`、`ext/crypto` 不参与。`ext/` 不随 APE 发布（产品二进制无其符号）。W3 判定 `arena`、`slice`、`grow`、`num`、`build`、`fmt`、`deflate` 七模块产品链路引用为 0、归 ext、原路径留别名，当前状态即该终态；`memx/textx` 经别名使用（`use mem.*`/`use text.*`，`use text.fmt` 169 处），不是孤儿。`sysx`/`crypto` 由 75/14 个检查守住。风险：互指符号链接让同一文件有两个身份、Windows 无符号链接不安全；冻结路径须含 `ext/memx ext/textx`（已补）。待办（原定 0.0.49，未做）：把真身 / 别名收敛为单向并去掉互指。内部包接口摘要见 [build/std-surface.tsv](build/std-surface.tsv)。原文说「`cxroot.tsv` 只映射 sysx、crypto」已过期：现表 13 条 R 行，ext 侧映射 sysx、crypto、tsvx。
 
 ## 4. 语言与运行期所有权：现状与未声称的性质
 
@@ -210,7 +210,7 @@ C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个
 
 ## 6. 路线：cx 流网设计与实现（0.0.58 至 0.0.60）
 
-版本划分（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`；后经 `VER055-SPEED` 改判，2026-11-12 再按 0.0.58 计划重排）：0.0.54 只做梳理与提速；cx 流网的步骤按每版一项产品改动重排：55-1（规划器单源）= 0.0.58 的 P1，55-2（解析状态实例化）= 0.0.59 的 P59，55-4（CX0 事实表入库与第 8 流）= 0.0.60 的 P60，55-3（cx-tri 门）视矩阵结果随其后（见 prd.md 9.7、plans/v0.0.58-unisacc.md）。下文凡写 0.0.55 处，55-1 按 0.0.58、55-2 按 0.0.59、55-4 及以后按 0.0.60 理解。范围、前置、验收与分步的唯一权威是下文「进化计划」B1（0.0.54 前置）与 B2（0.0.55 主线），B4 为贯穿各版的不变式。补充两条前置：`research/cx2-module-design.md` 没有进表或成网的设计（其 §7 把「现在就用完整 E3 解析器推导 CXIF」列为与约束冲突的做法），0.0.55 须先写 CX0 事实表划分与流格式（B1 54-6）；`check-cx-layers` 的 1 条向上边（`cx/runtime/holdframe.cx:5`）先处置。
+版本划分（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`；后经 `VER055-SPEED` 改判，2026-11-12 再按 0.0.58 计划重排）：0.0.54 只做梳理与提速；cx 流网的步骤按每版一项产品改动重排：55-1（规划器单源）= 0.0.58 的 P1，55-2（解析状态实例化）= 0.0.59 的 P59，55-4（CX0 事实表入库与第 8 流）= 0.0.60 的 P60，55-3（cx-tri 门）视矩阵结果随其后（见 [prd.md](prd.md) §9.7、[plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)）。下文凡写 0.0.55 处，55-1 按 0.0.58、55-2 按 0.0.59、55-4 及以后按 0.0.60 理解。范围、前置、验收与分步的唯一权威是下文「进化计划」B1（0.0.54 前置）与 B2（0.0.55 主线），B4 为贯穿各版的不变式。补充两条前置：`research/cx2-module-design.md` 没有进表或成网的设计（其 §7 把「现在就用完整 E3 解析器推导 CXIF」列为与约束冲突的做法），0.0.55 须先写 CX0 事实表划分与流格式（B1 54-6）；`check-cx-layers` 的 1 条向上边（`cx/runtime/holdframe.cx:5`）先处置。
 
 以下两节（架构分析、进化计划）由独立分析写成，基线同上：HEAD `6a4fa1fa6f`，已装产品 sha256 前缀 `1bffabbaf45ee349`，gcc 11.4.0，clang 15.0.7，实测日 2026-11-11；探针与脚本不入库。
 
@@ -306,7 +306,7 @@ cx = C99 受检查子集 + `#pragma unisa` 配置(`cx/spec.md` CX-L、CX-G)。�
 | 单元上限 | `CXM_MAXU = 128`(`cx/compiler/cxmod.cx:28`) | `CXM_MAXU 96`(`src/cxmod.c:27`、`cx/cx0/plan.cx:78`) | 97 至 128 单元的程序预期产品接受、宿主拒绝(由常量推断,行为未测) |
 | 前导 | `cx-flat.h`(平铺,409,158 B) | `cx-nested.h` 加宿主 libc 头 | `include/cx.h` 按 `__UNISA__` 选择;`tools/cx-flatten.cx --check` 守平铺一致 |
 | L0 库可用性 | 全部可用 | 38 个可解析探针模块中 15 个编译失败 | 实测 `out/cxarch/hostsweep.cx`:gcc_cx 与 clang_cx 均 ok=23 fail=16(含 1 个不存在的 `tsvx.tsv`);失败集:sys.fs sys.proc sys.time sys.posix sys.mem sys.poll sys.tty sys.dl sys.ffi sys.sig sys.kernel sys.process sys.net sysx.poll cxlib.netpack;首因是裸 `__syscall6`(例 `cx/sys/fs.cx:208`、`:268`)与 `unisacc_ffi.h` 缺失(`cx/sys/ffi.cx:15`) |
-| 隐式声明 | 历史上默认运行接受跨单元隐式调用(归档文档记载;本轮未重测) | `-Werror=implicit-function-declaration` 拒绝 | `archive/plans/2026-11-01/cx-architecture-evolution-2026-10-31.md` |
+| 隐式声明 | 历史上默认运行接受跨单元隐式调用(历史记录;本轮未重测) | `-Werror=implicit-function-declaration` 拒绝 | `cx/spec.md` CX-W |
 | 缓存 | `-run` 结果级缓存(`src/runcache.cx`,键含产品、路由、目标、源) | 单元对象缓存 `out/cxcc-cache`(键含编译器、旗标、前导、源、头闭包) | 头注 |
 | 宿主入口引导 | 不适用 | `tools/build-cxcc-host.cx` 头注给的 gcc 引导命令在 HEAD 失败:`implicit declaration of function 'tx_eqz'`(文件首行 `use text.text`,裸 gcc 不展开) | 实测;`tests/cx-host-run.cx` 的私有四步配方可用(实测 gcc 759 ms、clang 597 ms 建成) |
 | 平台 | 六目标 | 仅 Linux 实跑;Windows、macOS 未执行 | `tools/gcc_cx.cx` 头注 |
@@ -331,7 +331,7 @@ cx = C99 受检查子集 + `#pragma unisa` 配置(`cx/spec.md` CX-L、CX-G)。�
 
 1. 规划器三源、两份实现。`cx/cx0/plan.cx`(1329 行,权威)、`src/cxmod.c`(1235 行,投影,逐字门 `cx0-extract --check`)、`cx/compiler/cxmod.cx`(1348 行,产品实际编入,靠人工同步)。事故记录:`agentwork/ledger.tsv:73-74`(DOCK1 只改了前两份,候选 strings 命中 0)。现存漂移:`CXM_MAXU` 128 对 96;`cxm_*` 函数名 88 对 66。`cx/spec.md` CX-G-4 只要求「实现同一文法」,无门。
 2. 权威与产品旁路。README 写「已装产品驱动仍调原 C 规划器」;准确说是产品编入 cxmod.cx,而 plan.cx 的全部调用方是工具链 6 包(`cx/workspace/packages.tsv`)与宿主驱动。权威源不在产品里运行,产品源不在宿主里运行。
-3. C 投影是活依赖。`src/cxmod.c` 被 `tests/cx-host-run.cx:1031`、`tests/check-source-bom.cx:113`、`tools/build-cxcc-host.cx`、`archive/reference-c/unisacc.c:17` 读取,退役前须给宿主驱动另一条取得规划器的路。
+3. C 投影是活依赖。`src/cxmod.c` 被 `tests/cx-host-run.cx:1031`、`tests/check-source-bom.cx:113`、`tools/build-cxcc-host.cx` 读取,退役前须给宿主驱动另一条取得规划器的路。
 4. 骨架网无表无行为。`cx/compiler/net/*.cx` 20 个(18 金表网加 lexcls、lexword)与 `stream/` 7、`image/` 4,函数体全是 `return 0`;`cx/runtime` 再镜像一套。调用方只有检查工具;它们证明的是「名字与事实表一致」,不是行为。
 5. CX0 不是模型流。无事实表、无生成器、无网、不在 `image-stages.tsv`、不在 P4;CX0BND1 链只在工具侧运行,E2 适配器仅 lnx/x86_64。
 6. 冷启动开销随 use 数近线性放大(详见 A8):5 个 use 的 8 行程序冷跑 3.6 至 3.7 s,其中规划只占约 17 ms;同样 5 个 use 换一个根文件(h5b)仍 3570 ms,即模块单元无跨程序复用。
@@ -387,30 +387,30 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 ### B0 目标形态
 
-一句话:cx 前端(CX0)成为三宿主共用的、由事实表驱动的第 8 流;表是唯一真源,unisacc.com 把表构造成网放进 P4,gcc_cx/clang_cx 把同一张表生成的判定代码编进驱动;同一 `.cx` 在三宿主得到相同的计划字节、接口字节与拒绝行。
+一句话:cx 前端(CX0)成为三宿主共用的、由事实表驱动的第 8 流;表是唯一真源,unisacc.com 把表构造成网放进 P4,`gcc_cx` 与 `clang_cx` 把同一张表生成的判定代码编进驱动;同一 `.cx` 在三宿主得到相同的计划字节、接口字节与拒绝行。
 
 (1) 哪些进表(一步决策,有限定义域),哪些留机制:
 
 | 决策 | 键(先由机制分类成有限键) | 标签 | 归属 |
 |---|---|---|---|
-| pragma 词判定 | 词类(module use dock 其它) x 位置(首声明前 / 后) x 条件嵌套(内 / 外) x 文件类(.cx / .c) | 接受为 module / use / dock、忽略、具名拒绝 id | 表 `exec/cx0/pragma.tsv` |
-| 模块名文法 | 状态(段首 段中 点后) x 字符类(小写 数字 下划线 点 其它 结束) | 后继状态或拒绝 | 表 `exec/cx0/name.tsv` |
-| 文件作用域条目的接口去向 | static 与否 x 种类(函数定义 原型 对象 typedef 标签类型 匿名 enum) x 条件内 x 引用模块宏 x 保留前缀 x cxpack 行(无 / 列入 / 未列入) | 导出原型、导出类型、私有、具名拒绝 id | 表 `exec/cx0/export.tsv` |
-| 接口可见性 | use 关系(直接 传递 无) x 部分(类型 函数) x 符号导入(无 匹配 不匹配) | 给出、省略 | 表 `exec/cx0/visible.tsv` |
-| 读失败分类 | 错误类(ENOENT ENOTDIR EACCES 超限 其它) x 角色(源 模块 cxpack cxroot 接口发布) | status 1 / 2 与诊断 id | 表 `exec/cx0/iofail.tsv` |
-| 同 realpath 合并 | 依赖集相等 x 有效公开集相等 | 合并、具名拒绝 | 表 `exec/cx0/merge.tsv` |
-| 名字冲突 | 定义方对(模块-模块 单元-模块 类型-类型) x 字节相同与否 | 接受、拒绝 id | 表 `exec/cx0/collide.tsv` |
+| pragma 词判定 | 词类(module use dock 其它) x 位置(首声明前 / 后) x 条件嵌套(内 / 外) x 文件类(.cx / .c) | 接受为 module / use / dock、忽略、具名拒绝 id | 拟建表 `pragma`(待建) |
+| 模块名文法 | 状态(段首 段中 点后) x 字符类(小写 数字 下划线 点 其它 结束) | 后继状态或拒绝 | 拟建表 `name`(待建) |
+| 文件作用域条目的接口去向 | static 与否 x 种类(函数定义 原型 对象 typedef 标签类型 匿名 enum) x 条件内 x 引用模块宏 x 保留前缀 x cxpack 行(无 / 列入 / 未列入) | 导出原型、导出类型、私有、具名拒绝 id | 拟建表 `export`(待建) |
+| 接口可见性 | use 关系(直接 传递 无) x 部分(类型 函数) x 符号导入(无 匹配 不匹配) | 给出、省略 | 拟建表 `visible`(待建) |
+| 读失败分类 | 错误类(ENOENT ENOTDIR EACCES 超限 其它) x 角色(源 模块 cxpack cxroot 接口发布) | status 1 / 2 与诊断 id | 拟建表 `iofail`(待建) |
+| 同 realpath 合并 | 依赖集相等 x 有效公开集相等 | 合并、具名拒绝 | 拟建表 `merge`(待建) |
+| 名字冲突 | 定义方对(模块-模块 单元-模块 类型-类型) x 字节相同与否 | 接受、拒绝 id | 拟建表 `collide`(待建) |
 | 上限 | UNIT_MAX USE_MAX DECL_MAX 等 | 常量 | `exec/facts/limits.tsv`,动作只写 `["constant",NAME]` |
 
 留在机制或生成器:源扫描循环(续行、注释、字符串)、括号深度跟踪、广度优先闭包与环检测、文件读写与无覆盖发布、SHA、CXIF 文本拼装、别名改写、CX0BND1 封存与读取。这与 prd.md 第 1 节「一步决策进表,循环/递归/带副作用序列留机制」一致。表的规模预计每张 10 至 200 键,合计低于 1000 键(估计,未测)。
 
-(2) 三宿主共享真源:上述表加 `limits.tsv` 是唯一真源。生成器 `tools/cx0-gen.cx`(待建,带 `--check`)同时产出两种等价形式:(a) 给产品的网行(经 `tools/decide-gen.cx` 的 STATE KEY LABEL 行,T1 逐键核「网 = 表」);(b) 给宿主与工具的平铺判定函数(生成的 `cx/cx0/decide.cx`,纯 switch,无 libc),由 `plan.cx` use,并随 `cx0-extract` 投影进 `src/cxmod.c`。再加一条逐键门核「生成判定函数 = 表」。这样 gcc_cx/clang_cx 不需要执行器也与产品同表;0.0.55 的流网化不会只在 unisacc.com 内生效。
+(2) 三宿主共享真源:上述表加 `limits.tsv` 是唯一真源。拟建生成器 `cx0-gen`(待建,带 `--check`)同时产出两种等价形式:(a) 给产品的网行(经 `tools/decide-gen.cx` 的 STATE KEY LABEL 行,T1 逐键核「网 = 表」);(b) 给宿主与工具的平铺判定函数(拟生成模块 `cx0.decide`,纯 switch,无 libc),由 `plan.cx` use,并随 `cx0-extract` 投影进 `src/cxmod.c`。再加一条逐键门核「生成判定函数 = 表」。这样 `gcc_cx` 与 `clang_cx` 不需要执行器也与产品同表;0.0.55 的流网化不会只在 unisacc.com 内生效。
 
 (3) CX0 作为第 8 模型流进 P4:`image-stages.tsv` 增一行 `cx0  src.cx  units.bundle  cx0.net  plan`,输出格式即 CX0BND1;e2 的输入从「源路径加强制头列表」改为「束加单元序号」(`tools/cx0-e2.c` 已证明可行的形态)。非 `.cx` 输入不过 cx0(保持 `.c` 逐字节红线)。执行器内无 fork:解析状态改为按实例拥有(句柄化),去掉工作进程,才能覆盖 win 两格。
 
 (4) 骨架网落行为的顺序:骨架的目标形态是「该网的 cx 侧 ask 接口」,即 `int skn_NAME(键分量..., int *label)`,函数体由生成器从同一张金表生成(与网逐键相等),供 cx 写的工具、检查与将来的 cx 侧阶段调用。顺序按「出货主脊优先、键少优先、已有决策表优先」:第一批 reloc(11 行)regmap(21)tyinfo(22)pp(23)prec(23)binsel(37)lexword(21);第二批 opinfo(79)lex(149)lexcls(262);第三批 irsel(425)enc(528)abi(540)peep(1638,沿用 `decide-gen --each --select` 两级式)type(4281);对照臂 pfconv scope isel parse combo 最后做,并在接口头注标「对照臂,七流不读」。每张落地时 compiler 与 runtime 两份镜像收敛为一份(runtime 侧保留为同文件别名或删去,由调用点普查决定)。stream/ 7 个与 image/ 4 个骨架不落行为,只保留名字与格式访问器,步函数 `return 0` 删去(它不表示任何事实)。
 
-(5) `src/cxmod.c` 投影退役条件(全部满足才退役):宿主驱动改为直接编 `plan.cx` 的一个不依赖 unisacc 的引导形态(或由 `cxcc` 自举:先用上一版驱动展开 plan.cx);`tests/cx-host-run.cx`、`tests/check-source-bom.cx`、`tools/build-cxcc-host.cx` 不再读它;`archive/reference-c` 的对拍不再需要它或改读生成副本。预计不早于 0.0.56。在此之前它保持「投影、逐字门」身份,禁止手改。`cx/compiler/cxmod.cx` 的退役更早:0.0.55 第一步即由产品直接 use `cx0.plan`(或由生成器从 plan.cx 投影出 cxmod.cx 并加逐字门),消灭人工同步。
+(5) `src/cxmod.c` 投影退役条件(全部满足才退役):宿主驱动改为直接编 `plan.cx` 的一个不依赖 unisacc 的引导形态(或由 `cxcc` 自举:先用上一版驱动展开 plan.cx);`tests/cx-host-run.cx`、`tests/check-source-bom.cx`、`tools/build-cxcc-host.cx` 不再读它;历史 C 参考对拍不再需要它或改读生成副本。预计不早于 0.0.56。在此之前它保持「投影、逐字门」身份,禁止手改。`cx/compiler/cxmod.cx` 的退役更早:0.0.55 第一步即由产品直接 use `cx0.plan`(或由生成器从 plan.cx 投影出 cxmod.cx 并加逐字门),消灭人工同步。
 
 ### B1 0.0.54(只做不触产品输入的梳理、测量、设计、提速前置)
 
@@ -418,14 +418,14 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 | 步 | 内容 | 触产品输入 | 验收 gate(命令) | 前置 | 风险 | 规模(估) |
 |---|---|---|---|---|---|---|
-| 54-1 | 三源差异清单:写 `tools/cx0-diff.cx`,按函数对齐 plan.cx 与 cxmod.cx,输出差异表 `plans/cx0-three-source-diff.tsv`(函数、差异类、是否语义)。带 `tools/check-cx0-diff.cx` 并登记批次 | 否 | `sh ./unisacc.com tools/check-cx0-diff.cx`;`sh ./unisacc.com tools/ratchets.cx` | 无 | 对齐靠函数名,改名函数需手工标注 | 工具约 300 行,表约 90 行 |
-| 54-2 | 三宿主一致性矩阵:扩 `tests/cx-host-run.cx` 的对拍为独立工具 `tools/cx-tri.cx`:对语料目录每个 `.cx` 在三入口取 `-cx-plan` 字节、`-cx-interface` 字节、拒绝行与 rc,输出 MATCH/DIFF/UNKNOWN,DIFF 不记 PASS。语料先含:无 use、单 use、多符号、整模块加符号、alias、注释/续行/条件、cxpack、双软链、环、缺模块、未知 pragma、97 单元与 129 单元(暴露 MAXU 分叉) | 否(测试与工具) | `sh ./unisacc.com tools/cx-tri.cx -- tests/cxtri out/cxtri-N`(现状预期非零,差异逐项列出);`sh ./unisacc.com tools/check-cx-tri.cx` | 宿主驱动可建(54-4) | 语料生成 129 单元要控制在 55 秒内,必要时拆两条命令 | 工具约 400 行,语料约 30 文件 |
-| 54-3 | L0 宿主可编译普查入库:把 `out/cxarch/hostsweep.cx` 的做法做成 `tools/cx-host-l0.cx`,遍历 `cx/sys cx/mem cx/text ext/*` 全部模块,输出 `plans/cx-host-l0.tsv`(模块、gcc、clang、首条错误)。只记录,不设绿线 | 否 | `sh ./unisacc.com tools/cx-host-l0.cx -- out/hl0`(分两片,各低于 55 秒);检查 `tools/check-cx-host-l0.cx` | 54-4 | 模块数约 80,每个 0.1 至 0.4 秒,须分片 | 约 200 行 |
+| 54-1 | 三源差异清单:拟写 `cx0-diff`(待建),按函数对齐 plan.cx 与 cxmod.cx,输出差异表 `cx0-three-source-diff`(函数、差异类、是否语义)。带 `check-cx0-diff` 并登记批次 | 否 | `sh ./unisacc.com tools/cx0-extract.cx -- --check`;`sh ./unisacc.com tools/ratchets.cx` | 无 | 对齐靠函数名,改名函数需手工标注 | 工具约 300 行,表约 90 行 |
+| 54-2 | 三宿主一致性矩阵:扩 `tests/cx-host-run.cx` 的对拍为拟建工具 `cx-tri`(待建):对语料目录每个 `.cx` 在三入口取 `-cx-plan` 字节、`-cx-interface` 字节、拒绝行与 rc,输出 MATCH/DIFF/UNKNOWN,DIFF 不记 PASS。语料先含:无 use、单 use、多符号、整模块加符号、alias、注释/续行/条件、cxpack、双软链、环、缺模块、未知 pragma、97 单元与 129 单元(暴露 MAXU 分叉) | 否(测试与工具) | `sh ./unisacc.com tests/cx-host-run.cx` | 宿主驱动可建(54-4) | 语料生成 129 单元要控制在 55 秒内,必要时拆两条命令 | 工具约 400 行,语料约 30 文件 |
+| 54-3 | L0 宿主可编译普查入库:把 `out/cxarch/hostsweep.cx` 的做法做成拟建工具 `cx-host-l0`(待建),遍历 `cx/sys cx/mem cx/text ext/*` 全部模块,输出 `cx-host-l0` 清单(模块、gcc、clang、首条错误)。只记录,不设绿线 | 否 | `sh ./unisacc.com tests/cx-host-run.cx` | 54-4 | 模块数约 80,每个 0.1 至 0.4 秒,须分片 | 约 200 行 |
 | 54-4 | 修宿主引导说明:`tools/build-cxcc-host.cx` 头注命令与实际不符。本版只更正文档与 `cx/cx0/README.md` 的复现节,并在 `agentwork/items.tsv` 立修复项(改代码属 `tools/`,不在源 SID 的 10 文件内则可在本版修:让构建器不依赖 `text.text`,或由 `tests/cx-host-run.cx` 的四步配方抽成共用模块) | 否(先核该文件不在 ident 的 tools 清单) | 文档命令逐条实跑;`sh ./unisacc.com tests/cx-host-run.cx` | 无 | 若该文件在 ident 清单内则顺延到 0.0.55 | 约 60 行 |
 | 54-5 | 相位基线入账:把 A8 的做法做成 `tools/cx-phase.cx`(读 `UNISACC_RR_TIME` 输出,按 stage 汇总冷/热、单元数 1/2/6/12),结果写 `agentwork/phase-times.tsv` 的 cx 行;未测相位标 UNMEASURED | 否 | `sh ./unisacc.com tools/cx-phase.cx -- out/cxphase-N`;`tools/check-cx-phase.cx` | 无 | 12 单元冷跑预计超 7 秒,仍在 60 秒内 | 约 250 行 |
-| 54-6 | CX0 事实表设计稿:写 `plans/cx0-tables.md` 与 7 张表的初稿(B0 表格所列),每张表每个键标注它对应 plan.cx 的哪一行判断;写「表 = 现行实现」的逐键探针方案。不接入任何构建 | 否(表先放 `plans/cx0-draft/`,不进 `exec/`) | 设计评审;`sh ./unisacc.com tools/decide-gen.cx -- --check ...` 对草表可生成(只验证表形合法) | 54-1 | 键分类不全会在 0.0.55 才暴露;用 54-2 语料反查 | 文档约 300 行,表约 600 行 |
-| 54-7 | 单元级缓存设计与离线原型:在工具侧(`tools/cx-pipeline.cx` 链,不动产品)实现「按 CX0BND1 单元身份缓存 e2 输出 UNIPP1」的原型,量化命中时的节省;键 = 单元源 sha、强制头 sha 序列、E2 模型容器 sha、目标、ABI;命中仍核内容身份,只记 PREPARED | 否 | `sh ./unisacc.com tests/preprocess/pipeline.cx -- ...` 不回退;新增 `tools/check-cx-unitcache.cx`(命中、失效、损坏、键变更四类) | 工作区 6 包可建 | 工具链适配器每单元进程隔离,原型数字不等于产品内数字,须标注 | 约 350 行 |
-| 54-8 | 骨架与名表普查:写 `tools/cx-surface-census.cx` 列出 114 处生成文件的生成器、事实表、调用点数;产出候选清理表(不自动删) | 否 | `tools/check-cx-surface-census.cx`;`sh ./unisacc.com tools/surface-gen.cx -- --check` | 无 | 无 | 约 200 行 |
+| 54-6 | CX0 事实表设计稿:拟写 `cx0-tables` 设计稿与 7 张表的初稿(B0 表格所列),每张表每个键标注它对应 plan.cx 的哪一行判断;写「表 = 现行实现」的逐键探针方案。不接入任何构建 | 否(草表不进 `exec/`) | 设计评审;`sh ./unisacc.com tools/decide-gen.cx -- --check ...` 对草表可生成(只验证表形合法) | 54-1 | 键分类不全会在 0.0.55 才暴露;用 54-2 语料反查 | 文档约 300 行,表约 600 行 |
+| 54-7 | 单元级缓存设计与离线原型:在工具侧(`tools/cx-pipeline.cx` 链,不动产品)实现「按 CX0BND1 单元身份缓存 e2 输出 UNIPP1」的原型,量化命中时的节省;键 = 单元源 sha、强制头 sha 序列、E2 模型容器 sha、目标、ABI;命中仍核内容身份,只记 PREPARED | 否 | `sh ./unisacc.com tests/preprocess/pipeline.cx -- ...` 不回退;新增 `tools/check-unit-frontcache.cx`(命中、失效、损坏、键变更四类) | 工作区 6 包可建 | 工具链适配器每单元进程隔离,原型数字不等于产品内数字,须标注 | 约 350 行 |
+| 54-8 | 骨架与名表普查:拟写 `cx-surface-census`(待建)列出 114 处生成文件的生成器、事实表、调用点数;产出候选清理表(不自动删) | 否 | `sh ./unisacc.com tools/surface-gen.cx -- --check` | 无 | 无 | 约 200 行 |
 | 54-9 | 层号裁定稿:给 `cx/cx0`、`cx/workspace` 定层(建议 cx0 为 L2 前端、workspace 为 L3),列出裁定后 `check-cx-layers` 会新报的边;只出补丁不合入(改 `tools/check-cx-layers.cx` 与规格属 0.0.55) | 否 | 补丁在仓外克隆跑 `sh ./unisacc.com tools/check-cx-layers.cx` 的结果附后 | 无 | 可能暴露真实上行边 | 补丁约 40 行 |
 
 0.0.54 的提速只做不触产品输入的部分:54-5 测量、54-7 工具侧原型、以及开发习惯上的两条(同一根源重复跑才命中运行缓存;分析脚本尽量少 use 以降低冷启动,A8 的每 use 约 0.5 至 0.7 秒可作估算)。产品内的缓存与 inflate 修复都触 `src/` 或 `cx/runtime`,不在本版。
@@ -438,9 +438,9 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 |---|---|---|---|---|---|---|
 | 55-1 | 产品规划器单源:`cx/compiler/cxmod.cx` 改为由 `plan.cx` 投影生成(扩 `tools/cx0-extract.cx` 增第二投影目标,带 `--check` 逐字门),或产品直接 `use cx0.plan`。先抹平 54-1 清单里的语义差(MAXU 统一取 `limits.tsv` 的值,三处同数) | 是(`cx/`) | `sh ./unisacc.com tools/cx0-extract.cx -- --check`(两目标均 EXACT);`sh ./unisacc.com tests/preprocess/cx0.cx -- ROOT OUT`;字节等价回归:改前改后对 54-2 语料的 `-cx-plan`、`-cx-interface` 逐字节相同;`sh ./unisacc.com tools/affected.cx --files cx/compiler/cxmod.cx cx/cx0/plan.cx --run` | 54-1、54-2 | plan.cx 的 fork 隔离不能进产品(win 两格);投影须保留产品现有的注入回调形态(`cxm_rd`/`cxm_wr`),即产品形态与工具形态是同一体的两个适配壳 | 生成器约 200 行;cxmod.cx 变生成物 |
 | 55-2 | 解析状态实例化:把 `cxm_*` 文件级全局收进一个实例结构,去掉对工作进程隔离的依赖(工具入口仍可选 fork 作为额外防线) | 是 | 同 55-1 全部;`cx0-unit` 批次;新增同进程连续两次规划、失败后再规划的恢复用例 | 55-1 | 机械改写面大(约 90 个函数);用 `tools/refactor.cx sweep` 分文件验证 | 约 1300 行改写 |
-| 55-3 | 三宿主矩阵转绿并成为门:54-2 的 `cx-tri` 在 lnx/x86_64 上 DIFF=0;登记批次 `cx-tri`,release 档必跑 | 否(测试) | `sh ./unisacc.com tools/cx-tri.cx -- tests/cxtri out/cxtri-N` 退出 0;`sh ./unisacc.com tests/run.cx -- --smoke` | 55-1 | 历史分叉(隐式声明、公开集)需逐项裁定是修产品还是修规格;裁定记账本 | 语料增补 |
-| 55-4 | 事实表入库与双形态生成:7 张表从 `plans/cx0-draft/` 移入 `exec/cx0/`;`tools/cx0-gen.cx --write/--check` 生成网行与 `cx/cx0/decide.cx`;plan.cx 的对应 if 链改为「机制分类成键 -> 调 decide -> 落动作」。此步后产品与宿主仍执行编译出的判定函数(尚未走网) | 是(`exec/`、`cx/`) | `sh ./unisacc.com tools/cx0-gen.cx -- --check`;逐键门 `tools/check-cx0-decide.cx`(判定函数 = 表,全键);`tools/check-literal.cx`、`tools/check-limits.cx`;55-1 的字节等价回归;`cx-tri` 仍 DIFF=0 | 54-6、55-2 | 键分类遗漏导致行为变化;用「每个拒绝 id 至少一个语料」的覆盖表守住 | 表约 600 行;生成器约 400 行;plan.cx 改约 300 行 |
-| 55-5 | CX0 网与第 8 流:`image-stages.tsv` 增 cx0 行;网行经现有构造链进 P4(模型数加 1);驱动对 `.cx` 输入先跑 cx0 流产出 CX0BND1,e2 从束取字节。执行器内的机制部分(扫描、闭包、IO)以生成程序或资源适配壳承担,分两小步:(a) 仅判定走网、机制仍是切片内代码;(b) 束作为 e2 的正式输入格式 | 是(`exec/`、`weights/`、`src/`、`kernel/` 生成物) | T1 逐键(批次 `check-decide` 同款);`sh ./unisacc.com tools/gold-table.cx -- --check`;`sim --cov`;`.c` 红线:同一 `.c` 语料改前改后产物 sha 相同;`.cx` 语料产物字节等价;慢车道正规 context/PC/两代 GEN/安装/全批;同候选六目标 CI | 55-4 | 这是本线最重的一步:改流表会波及 pp/lower/generator/facts(第 14 号门 net-deps);启动开销可能上升(多一次模型装载,按 A8 约 12 至 30 ms),须用 54-5 基线对比;win 两格无 fork 路径必须先由 55-2 保证 | 流表 1 行;驱动改约 400 行;构造链按相位各低于 5 分钟 |
+| 55-3 | 三宿主矩阵转绿并成为门:54-2 的 `cx-tri`(待建)在 lnx/x86_64 上 DIFF=0;登记批次 `cx-tri`,release 档必跑 | 否(测试) | `sh ./unisacc.com tests/cx-host-run.cx`;`sh ./unisacc.com tests/run.cx -- --smoke` | 55-1 | 历史分叉(隐式声明、公开集)需逐项裁定是修产品还是修规格;裁定记账本 | 语料增补 |
+| 55-4 | 事实表入库与双形态生成:7 张草表移入 `exec/` 下拟建 `cx0` 子目录;`cx0-gen --write/--check`(待建)生成网行与 `cx0.decide`;plan.cx 的对应 if 链改为「机制分类成键 -> 调 decide -> 落动作」。此步后产品与宿主仍执行编译出的判定函数(尚未走网) | 是(`exec/`、`cx/`) | 逐键门 `check-cx0-decide`(待建,判定函数 = 表,全键);`tests/check-literal.cx`、`tests/check-limits.cx`;55-1 的字节等价回归;`cx-tri` 仍 DIFF=0 | 54-6、55-2 | 键分类遗漏导致行为变化;用「每个拒绝 id 至少一个语料」的覆盖表守住 | 表约 600 行;生成器约 400 行;plan.cx 改约 300 行 |
+| 55-5 | CX0 网与第 8 流:`image-stages.tsv` 增 cx0 行;网行经现有构造链进 P4(模型数加 1);驱动对 `.cx` 输入先跑 cx0 流产出 CX0BND1,e2 从束取字节。执行器内的机制部分(扫描、闭包、IO)以生成程序或资源适配壳承担,分两小步:(a) 仅判定走网、机制仍是切片内代码;(b) 束作为 e2 的正式输入格式 | 是(`exec/`、`weights/`、`src/`、`kernel/` 生成物) | T1 逐键(批次 `check-decide` 同款);`sh ./unisacc.com tools/gold-table.cx -- --check`;`sim --cov`;`.c` 红线:同一 `.c` 语料改前改后产物 sha 相同;`.cx` 语料产物字节等价;慢车道正规 context、PC、两代 GEN、安装与全批;同候选六目标 CI | 55-4 | 这是本线最重的一步:改流表会波及 pp/lower/generator/facts(第 14 号门 net-deps);启动开销可能上升(多一次模型装载,按 A8 约 12 至 30 ms),须用 54-5 基线对比;win 两格无 fork 路径必须先由 55-2 保证 | 流表 1 行;驱动改约 400 行;构造链按相位各低于 5 分钟 |
 | 55-6 | 骨架网第一批落行为(B0 第 4 点第一批 7 张)并合并 compiler/runtime 镜像;`surface-gen` 改为从金表生成 ask 函数体,`--check` 逐字;新增逐键门「ask 函数 = 金表」 | 是(`cx/` 生成物) | `sh ./unisacc.com tools/surface-gen.cx -- --check`;`tools/check-cx-surface.cx`、`check-cx-decl.cx`、`check-cx-gold.cx`;三宿主各跑一遍逐键门(生成函数无 libc,应三宿主可编) | 54-8 | 与 55-5 同候选会使「一类大改」边界变宽;若慢车道时间超 2 小时则本步移到 0.0.56 | 生成器改约 300 行 |
 | 55-7 | 产品内提速(与主线同输入域,独立小批):(a) 同进程模型 inflate 去重(A8 第 7 项,预期每多一单元省约 24 ms);(b) 按 CX0BND1 单元身份的 e2/e1 结果缓存(预期对 h5 类程序省 5 个模块单元的 e2 加 e1,约 1.0 s 中的大部分;以实测为准) | 是(`src/`、`cx/runtime`) | `tools/cx-phase.cx` 冷/热两组对比入 `phase-times.tsv`;缓存负例:键变更、内容损坏、截断、并发写,均回退重算且结果字节相同;`UNISACC_RUN_CACHE=0` 路径不变 | 54-5、54-7、55-5(b) | 缓存结果不得替代执行结论;命中仍核内容身份;跨进程并发写需无覆盖发布(沿用 link 发布法) | 约 500 行 |
 
@@ -450,19 +450,19 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 | 步 | 内容 | 触产品输入 | 验收 gate | 前置 | 风险 | 规模(估) |
 |---|---|---|---|---|---|---|
-| 56-1 | L0 宿主后端:`cx/sys` 内把裸 `__syscallN` 收进 `_os` 静态帮手的宿主分支(`__UNISA__` 下走内建,否则走宿主 libc),按 54-3 清单逐模块转绿;目标是 L0 三宿主可编 | 是 | `tools/cx-host-l0.cx` 失败数只降不升(棘轮);`tools/check-cx-sys*.cx` 在三宿主各跑 | 54-3 | 导出函数不得包进平台 `#if`(CX-Y-3);产品字节须等价(`__UNISA__` 分支不变) | 15 个模块,每个 20 至 80 行 |
-| 56-2 | 链接单元(CX-W-1)落地:每模块按 realpath 编一只对象;随后 e3 及以后各流的每单元结果可按内容缓存(A8 中 e3 30% 加 prune/lower/elf 约 21% 才可分摊) | 是 | `plans/cx-link-unit-2026-10-31.md` 的验收组;`cx-phase` 对比 | 55-7 | 改变 `-funit` 对象语义;一类大改,独占一个候选 | 大 |
+| 56-1 | L0 宿主后端:`cx/sys` 内把裸 `__syscallN` 收进 `_os` 静态帮手的宿主分支(`__UNISA__` 下走内建,否则走宿主 libc),按 54-3 清单逐模块转绿;目标是 L0 三宿主可编 | 是 | `cx-host-l0`(待建)失败数只降不升(棘轮);`tools/check-cx-sys.cx` 在三宿主各跑 | 54-3 | 导出函数不得包进平台 `#if`(CX-Y-3);产品字节须等价(`__UNISA__` 分支不变) | 15 个模块,每个 20 至 80 行 |
+| 56-2 | 链接单元(CX-W-1)落地:每模块按 realpath 编一只对象;随后 e3 及以后各流的每单元结果可按内容缓存(A8 中 e3 30% 加 prune/lower/elf 约 21% 才可分摊) | 是 | `cx/spec.md` CX-W-1 的验收组;`cx-phase` 对比 | 55-7 | 改变 `-funit` 对象语义;一类大改,独占一个候选 | 大 |
 | 56-3 | `src/cxmod.c` 退役:宿主驱动改由 plan.cx 直接引导(B0 第 5 点条件全部满足后),删除投影与 `compat-prefix.c.in`,`cx0-extract` 降为只守 cxmod 生成物或一并退役 | 是 | `tests/cx-host-run.cx`、`tests/check-source-bom.cx`、`cx-tri` 全绿;全仓无 `src/cxmod.c` 读者(`tools/refactor.cx sites`) | 55-1、56-1 | 宿主自举出现鸡生蛋:保留一份上一版驱动产物作引导并记录依赖 | 小 |
 | 56-4 | 骨架网第二、三批与对照臂(B0 第 4 点);之后 cx 侧可用 ask 接口写阶段级检查 | 是 | 各张逐键门;`surface-gen --check` | 55-6 | type 4281 行生成函数体较大,注意单元编译时间(每命令低于 60 秒) | 中 |
 | 56-5 | 前导裁剪:层感知前导(CX-W-5),上层单元只见 L0 接口声明;或对 `cx-flat.h` 的 e2/e1 结果做身份缓存。先用 54-5 数据判断哪条收益大(空 `.cx` 的约 250 ms 增量是上限) | 是 | `tools/cx-flatten.cx -- --check ROOT`;`tests/cxlibc.cx`;`.cx` 语料产物字节等价 | 55-7 | 改前导波及全部 `.cx`;独占候选 | 中 |
 | 56-6 | CXIF v1(CX-W-8)与编译期所有权(CX-W-4)的设计:接口带效果/布局/所有权字段,由 cx0 流输出结构化记录直接进 e3;v0 文本须可由 v1 逐字再生。三宿主同一检查器(检查在 cx0 流内完成,宿主驱动复用同一判定表),否则不声称 | 是 | 设计评审后另立 | 55-5 | 最大的不确定项;未实现前任何文档不得写「内存安全」 | 大 |
 | 56-7 | 层与软链收敛:cx0/workspace 定层入规格(54-9 补丁);`src/` 7 个目录软链与 mem/text 互指链接按 cxroot 解析淘汰(CX-W-6) | 是 | `tools/check-cx-layers.cx` AMB 计数归零、软链入口计数归零 | 已装产品含 CX-U-7 | Windows 路径行为;csih 仍依赖 `sys.net` 别名,须先发信封给 csih 车道 | 中 |
-| 56-8 | 宿主平台资格:gcc_cx/clang_cx 在 macOS、Windows 实跑 `cx-tri` 与所有权检查 | 否 | 同候选 CI 的宿主作业 | 56-1 | CI 时长;每作业须低于 5 分钟 | 小 |
+| 56-8 | 宿主平台资格:`gcc_cx` 与 `clang_cx` 在 macOS、Windows 实跑 `cx-tri` 与所有权检查 | 否 | 同候选 CI 的宿主作业 | 56-1 | CI 时长;每作业须低于 5 分钟 | 小 |
 
 ### B4 一致性与不变式(贯穿各版)
 
 - 三宿主同语义门:`cx-tri`(54-2 建,55-3 起为门)。判据是同一 `.cx` 的计划字节、接口字节、拒绝行与 rc 三入口相同;DIFF 与 UNKNOWN 都不记 PASS;未执行的平台写未执行。
-- 单一真源链:`exec/cx0/*.tsv` 与 `limits.tsv` -> `tools/cx0-gen.cx --check` ->(网行;`cx/cx0/decide.cx`)-> `plan.cx` ->(投影 `cx/compiler/cxmod.cx`、`src/cxmod.c`,逐字门)。任何一环手改都被 `--check` 报红。
+- 单一真源链:拟建 CX0 事实表与 `exec/facts/limits.tsv` -> `cx0-gen --check`(待建)->(网行;`cx0.decide`)-> `cx/cx0/plan.cx` ->(投影 `cx/compiler/cxmod.cx`、`src/cxmod.c`,逐字门 `tools/cx0-extract.cx -- --check`)。任何一环手改都被 `--check` 报红。
 - `.c` 红线:cx0 流不扫描 `.c`;`.c` 语料的产物 sha 在每一步前后相同。
 - 缓存纪律:只缓存有测量依据的构造产物(单元 e2/e1 结果、模型解包);键含全部输入身份;命中仍核内容;不缓存测试结论;冷/热两组数据与回退负例同时入账。
 - 所有权措辞:运行期合同与句柄检查三宿主可复验(A6 表);编译期所有权在 CX-W-4 落地前三宿主都写「未声称」。
