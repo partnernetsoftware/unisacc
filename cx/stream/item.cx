@@ -1,0 +1,46 @@
+#pragma unisa module item
+#pragma unisa use mem.grow
+#pragma unisa use mem.slice
+/* cx.stream item: one owned byte payload travelling through a pipeline, with the shape
+   number its producer gave it. Shape 0 is the empty item; a real shape is > 0.
+   The item owns its block (a mem.grow buffer): exactly one of the caller, the pipeline
+   or a stage holds it at any time, and a drop frees it and zeroes the struct, so a second
+   drop is a no-op.
+     xs_item_init(it)                       zero the struct (before any other call)
+     xs_item_set(it, shape, p, len, cap)    adopt the heap block p (len bytes used of cap);
+                                            the old content is dropped first. 0, or 4 for a
+                                            bad argument: the block is freed, the item is empty
+     xs_item_bytes(it)                      borrow the bytes; ms_none for an empty item
+     xs_item_drop(it)                       free the block, zero the struct */
+
+typedef struct { mg_buf buf; int shape; } xs_item;
+
+void xs_item_init(xs_item *it) {
+    if (!it) return;
+    mg_init(&it->buf);
+    it->shape = 0;
+}
+
+void xs_item_drop(xs_item *it) {
+    if (!it) return;
+    mg_free(&it->buf);
+    it->shape = 0;
+}
+
+int xs_item_set(xs_item *it, int shape, unsigned char *data, long len, long cap) {
+    mg_buf b;
+    b.data = data; b.len = len; b.cap = cap;
+    xs_item_drop(it);
+    if (!it || shape <= 0 || len < 0 || cap < len || (!data && cap > 0)) {
+        mg_free(&b);
+        return 4;
+    }
+    it->buf = b;
+    it->shape = shape;
+    return 0;
+}
+
+ms_slice xs_item_bytes(const xs_item *it) {
+    if (!it || it->shape <= 0) return ms_none();
+    return ms_of(&it->buf);
+}

@@ -1,0 +1,303 @@
+#pragma unisa module pipe
+#pragma unisa use item
+#pragma unisa use mem.grow
+#pragma unisa use mem.slice
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+/* cx.stream pipe: a bounded pipeline of byte stages with a receipt.
+   A pipeline is a handle into this module's private table. Stages are added in order;
+   each names the shape it takes and the shape it gives, and a stage whose input shape is
+   not the previous stage's output shape is refused when it is added, not when it runs.
+   xs_run moves the input item into the pipeline: whatever happens, the caller's input
+   item is empty afterwards. Each stage receives the current item and an empty output
+   item; it may consume or leave the input (the pipeline drops what is left). On any
+   failure every item still held is freed and zeroed and the output item stays empty.
+   Result codes (1-4 as st_span in src/stages.cx):
+     0 done
+     1 a stage failed
+     2 a stage rejected its input (its diagnostic is the stage's business)
+     3 no such stage boundary: a shape mismatch, or a run on an empty pipeline
+     4 bad argument (null, closed or stale handle, call from inside a running stage)
+     5 bound exceeded: more than XS_MAXPIPE pipelines, more than XS_MAXSTAGE stages, or
+       an item longer than the byte bound given to xs_open. Nothing is ever truncated.
+   A non-zero stage result is returned unchanged.
+     xs_open(&h, bound)                    a new pipeline; items are at most BOUND bytes
+     xs_add(h, id, in, out, fn, ctx)       append stage ID (> 0) taking shape IN, giving OUT
+     xs_tap(h, fn, ctx)                    one observer (0 clears): phase 0 before a stage
+                                           with its input, 1 after it with its output, 2
+                                           after a failure with absent bytes (n == -1)
+     xs_run(h, &in, &out, why, cap)        run every stage; WHY names a pipeline refusal
+     xs_receipt_count(h)                   stages the last run entered, or -1
+     xs_receipt(h, i, &id, &rc, &inn, &outn) one stage of the last run
+     xs_receipt_id(h, hex, cap)            sha256 hex over the receipt records: stage ids,
+                                           results, lengths, input and output digests. The
+                                           same input through the same stages gives the same
+                                           id; cap must be at least 65
+     xs_close(h)                           release the handle; it is refused from then on
+   The pipeline keeps no bytes after a run: a receipt holds digests and lengths only.
+   A stage is int fn(ctx, in, out, why, cap) with IN and OUT each an xs_item *; a tap is
+   void fn(ctx, index, id, phase, p, n). The items travel as void * and the tap's bytes
+   as pointer and length because a function-pointer parameter that names a struct type
+   is not a covered declaration form in an imported interface. */
+
+enum { XS_MAXPIPE = 4, XS_MAXSTAGE = 16 };
+
+/* The table is one anonymous static object, so no type of it reaches the interface. A
+   serialized receipt record is 88 bytes (see xs_receipt_id). */
+static struct {
+    int open, gen, busy, nstage, nrec;
+    long bound;
+    void (*tap)(void *, int, int, int, const unsigned char *, long);
+    void *tapctx;
+    struct { int id, in_shape, out_shape; int (*fn)(void *, void *, void *, char *, int); void *ctx; } st[XS_MAXSTAGE];
+    struct { int id, rc; long in_n, out_n; unsigned char in_d[32], out_d[32]; } rec[XS_MAXSTAGE];
+} xs_tab[XS_MAXPIPE];
+
+static const unsigned xs_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+
+static unsigned xs_rot(unsigned x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void xs_block(unsigned *h, const unsigned char *p) {
+    unsigned w[64];
+    unsigned a[8];
+    unsigned t1;
+    unsigned t2;
+    int i;
+    for (i = 0; i < 16; i++)
+        w[i] = ((unsigned)p[4 * i] << 24) | ((unsigned)p[4 * i + 1] << 16) | ((unsigned)p[4 * i + 2] << 8) | (unsigned)p[4 * i + 3];
+    for (i = 16; i < 64; i++)
+        w[i] = w[i - 16] + (xs_rot(w[i - 15], 7) ^ xs_rot(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 7] +
+               (xs_rot(w[i - 2], 17) ^ xs_rot(w[i - 2], 19) ^ (w[i - 2] >> 10));
+    for (i = 0; i < 8; i++) a[i] = h[i];
+    for (i = 0; i < 64; i++) {
+        t1 = a[7] + (xs_rot(a[4], 6) ^ xs_rot(a[4], 11) ^ xs_rot(a[4], 25)) + ((a[4] & a[5]) ^ (~a[4] & a[6])) + xs_k[i] + w[i];
+        t2 = (xs_rot(a[0], 2) ^ xs_rot(a[0], 13) ^ xs_rot(a[0], 22)) + ((a[0] & a[1]) ^ (a[0] & a[2]) ^ (a[1] & a[2]));
+        a[7] = a[6]; a[6] = a[5]; a[5] = a[4]; a[4] = a[3] + t1;
+        a[3] = a[2]; a[2] = a[1]; a[1] = a[0]; a[0] = t1 + t2;
+    }
+    for (i = 0; i < 8; i++) h[i] = h[i] + a[i];
+}
+
+/* SHA-256 of p[0..n) into d. In this unit because the L0 sys.sha is a Linux kernel
+   socket call and a receipt has to be the same on every target. */
+static void xs_sha(const unsigned char *p, long n, unsigned char *d) {
+    unsigned h[8];
+    unsigned char tail[128];
+    unsigned long long bits;
+    long full;
+    long rem;
+    long tn;
+    long i;
+    h[0] = 0x6a09e667; h[1] = 0xbb67ae85; h[2] = 0x3c6ef372; h[3] = 0xa54ff53a;
+    h[4] = 0x510e527f; h[5] = 0x9b05688c; h[6] = 0x1f83d9ab; h[7] = 0x5be0cd19;
+    full = n / 64 * 64;
+    rem = n - full;
+    bits = (unsigned long long)n * 8;
+    for (i = 0; i < full; i = i + 64) xs_block(h, p + i);
+    mm_fill(tail, 128, 0, 128);
+    if (rem > 0) mm_copy(tail, 128, p + full, rem);
+    tail[rem] = 0x80;
+    tn = rem < 56 ? 64 : 128;
+    for (i = 0; i < 8; i++) tail[tn - 1 - i] = (unsigned char)((bits >> (8 * i)) & 255);
+    xs_block(h, tail);
+    if (tn == 128) xs_block(h, tail + 64);
+    for (i = 0; i < 32; i++) d[i] = (unsigned char)((h[i / 4] >> (24 - 8 * (i % 4))) & 255);
+}
+
+static int xs_no(char *why, int cap, int code) {
+    const char *m;
+    m = code == 3 ? "stream: shape mismatch" : code == 5 ? "stream: bound exceeded" : code == 4 ? "stream: bad argument" : "stream: stage output";
+    if (why && cap > 0 && tx_copy(why, cap, m, tx_len(m, 64))) why[0] = 0;
+    return code;
+}
+
+/* The slot of the open, idle pipeline H names, or -1. A handle carries its slot's
+   generation, so a closed handle stays refused after the slot is reused. */
+static int xs_get(int h) {
+    int s;
+    if (h <= 0) return -1;
+    s = (h - 1) % XS_MAXPIPE;
+    if (!xs_tab[s].open || xs_tab[s].busy || xs_tab[s].gen != (h - 1) / XS_MAXPIPE) return -1;
+    return s;
+}
+
+int xs_open(int *h, long bound) {
+    int i;
+    int gen;
+    if (!h) return 4;
+    *h = 0;
+    if (bound <= 0) return 4;
+    for (i = 0; i < XS_MAXPIPE; i++) {
+        if (xs_tab[i].open) continue;
+        gen = (xs_tab[i].gen + 1) & 0xffffff;
+        mm_fill(&xs_tab[i], sizeof(xs_tab[0]), 0, sizeof(xs_tab[0]));
+        xs_tab[i].open = 1;
+        xs_tab[i].gen = gen;
+        xs_tab[i].bound = bound;
+        *h = gen * XS_MAXPIPE + i + 1;
+        return 0;
+    }
+    return 5;
+}
+
+int xs_add(int h, int id, int in_shape, int out_shape, int (*fn)(void *, void *, void *, char *, int), void *ctx) {
+    int s;
+    int k;
+    s = xs_get(h);
+    if (s < 0 || !fn || id <= 0 || in_shape <= 0 || out_shape <= 0) return 4;
+    k = xs_tab[s].nstage;
+    if (k >= XS_MAXSTAGE) return 5;
+    if (k > 0 && xs_tab[s].st[k - 1].out_shape != in_shape) return 3;
+    xs_tab[s].st[k].id = id;
+    xs_tab[s].st[k].in_shape = in_shape;
+    xs_tab[s].st[k].out_shape = out_shape;
+    xs_tab[s].st[k].fn = fn;
+    xs_tab[s].st[k].ctx = ctx;
+    xs_tab[s].nstage = k + 1;
+    return 0;
+}
+
+int xs_tap(int h, void (*fn)(void *, int, int, int, const unsigned char *, long), void *ctx) {
+    int s;
+    s = xs_get(h);
+    if (s < 0) return 4;
+    xs_tab[s].tap = fn;
+    xs_tab[s].tapctx = fn ? ctx : 0;
+    return 0;
+}
+
+static void xs_see(int s, int i, int phase, const xs_item *it) {
+    ms_slice v;
+    if (!xs_tab[s].tap) return;
+    v = xs_item_bytes(it);
+    xs_tab[s].tap(xs_tab[s].tapctx, i, xs_tab[s].st[i].id, phase, v.p, v.n);
+}
+
+/* Run stage I of slot S on *CUR. On success *CUR is the stage's output; on failure it is empty. */
+static int xs_step(int s, int i, xs_item *cur, char *why, int cap) {
+    xs_item nxt;
+    int rc;
+    mm_fill(&xs_tab[s].rec[i], sizeof(xs_tab[0].rec[0]), 0, sizeof(xs_tab[0].rec[0]));
+    xs_tab[s].rec[i].id = xs_tab[s].st[i].id;
+    xs_tab[s].rec[i].in_n = cur->buf.len;
+    if (i > 0) mm_copy(xs_tab[s].rec[i].in_d, 32, xs_tab[s].rec[i - 1].out_d, 32);
+    else xs_sha(cur->buf.data, cur->buf.len, xs_tab[s].rec[i].in_d);
+    xs_tab[s].nrec = i + 1;
+    xs_see(s, i, 0, cur);
+    xs_item_init(&nxt);
+    rc = xs_tab[s].st[i].fn(xs_tab[s].st[i].ctx, cur, &nxt, why, cap);
+    xs_item_drop(cur);
+    if (!rc && (nxt.buf.len < 0 || nxt.buf.len > nxt.buf.cap || (nxt.buf.cap > 0 && !nxt.buf.data))) {
+        xs_item_init(&nxt);
+        rc = xs_no(why, cap, 1);
+    }
+    if (!rc && nxt.buf.len > xs_tab[s].bound) rc = xs_no(why, cap, 5);
+    if (rc) {
+        xs_item_drop(&nxt);
+        xs_tab[s].rec[i].rc = rc;
+        xs_see(s, i, 2, cur);
+        return rc;
+    }
+    nxt.shape = xs_tab[s].st[i].out_shape;
+    xs_tab[s].rec[i].out_n = nxt.buf.len;
+    xs_sha(nxt.buf.data, nxt.buf.len, xs_tab[s].rec[i].out_d);
+    xs_see(s, i, 1, &nxt);
+    *cur = nxt;
+    return 0;
+}
+
+int xs_run(int h, xs_item *in, xs_item *out, char *why, int cap) {
+    xs_item cur;
+    int s;
+    int i;
+    int rc;
+    s = xs_get(h);
+    if (in != out) xs_item_drop(out);
+    if (s >= 0) xs_tab[s].nrec = 0;
+    rc = s < 0 || !in || !out || in == out ? 4 : xs_tab[s].nstage < 1 || in->shape != xs_tab[s].st[0].in_shape ? 3 : in->buf.len > xs_tab[s].bound ? 5 : 0;
+    if (rc) {
+        xs_item_drop(in);
+        return xs_no(why, cap, rc);
+    }
+    cur = *in;
+    xs_item_init(in);
+    xs_tab[s].busy = 1;
+    for (i = 0; i < xs_tab[s].nstage && !rc; i++) rc = xs_step(s, i, &cur, why, cap);
+    xs_tab[s].busy = 0;
+    if (rc) return rc;
+    *out = cur;
+    return 0;
+}
+
+int xs_receipt_count(int h) {
+    int s;
+    s = xs_get(h);
+    return s < 0 ? -1 : xs_tab[s].nrec;
+}
+
+int xs_receipt(int h, int i, int *id, int *rc, long *in_n, long *out_n) {
+    int s;
+    s = xs_get(h);
+    if (s < 0 || i < 0 || i >= xs_tab[s].nrec || !id || !rc || !in_n || !out_n) return 4;
+    *id = xs_tab[s].rec[i].id;
+    *rc = xs_tab[s].rec[i].rc;
+    *in_n = xs_tab[s].rec[i].in_n;
+    *out_n = xs_tab[s].rec[i].out_n;
+    return 0;
+}
+
+static void xs_le(unsigned char *b, int n, unsigned long long v) {
+    int k;
+    for (k = 0; k < n; k++) b[k] = (unsigned char)((v >> (8 * k)) & 255);
+}
+
+/* The identity is the sha256 of: "XSR1", LE32 record count, then per record (88 bytes)
+   LE32 id, LE32 result, LE64 input length, input digest, LE64 output length, output digest. */
+int xs_receipt_id(int h, char *hex, long cap) {
+    unsigned char ser[8 + XS_MAXSTAGE * 88];
+    unsigned char d[32];
+    unsigned char *b;
+    int s;
+    int i;
+    s = xs_get(h);
+    if (hex && cap > 0) hex[0] = 0;
+    if (s < 0 || !hex || cap < 65) return 4;
+    mm_copy(ser, 4, "XSR1", 4);
+    xs_le(ser + 4, 4, (unsigned long long)xs_tab[s].nrec);
+    for (i = 0; i < xs_tab[s].nrec; i++) {
+        b = ser + 8 + i * 88;
+        xs_le(b, 4, (unsigned long long)(unsigned)xs_tab[s].rec[i].id);
+        xs_le(b + 4, 4, (unsigned long long)(unsigned)xs_tab[s].rec[i].rc);
+        xs_le(b + 8, 8, (unsigned long long)xs_tab[s].rec[i].in_n);
+        mm_copy(b + 16, 32, xs_tab[s].rec[i].in_d, 32);
+        xs_le(b + 48, 8, (unsigned long long)xs_tab[s].rec[i].out_n);
+        mm_copy(b + 56, 32, xs_tab[s].rec[i].out_d, 32);
+    }
+    xs_sha(ser, 8 + (long)xs_tab[s].nrec * 88, d);
+    for (i = 0; i < 32; i++) {
+        hex[2 * i] = "0123456789abcdef"[d[i] >> 4];
+        hex[2 * i + 1] = "0123456789abcdef"[d[i] & 15];
+    }
+    hex[64] = 0;
+    return 0;
+}
+
+int xs_close(int h) {
+    int s;
+    s = xs_get(h);
+    if (s < 0) return 4;
+    xs_tab[s].open = 0;
+    xs_tab[s].nstage = 0;
+    xs_tab[s].nrec = 0;
+    xs_tab[s].tap = 0;
+    xs_tab[s].tapctx = 0;
+    return 0;
+}

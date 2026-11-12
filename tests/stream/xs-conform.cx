@@ -1,0 +1,405 @@
+/* tests/stream/xs-conform.cx -- conformance of the cx.stream core package (cx/stream/item.cx, pipe.cx).
+ *
+ *   sh ./unisacc.com tests/stream/xs-conform.cx
+ *
+ * Every assertion is an exact result code, an exact byte compare or an exact field value:
+ *   item      init/set/bytes/drop, adoption of a heap block, refusal of bad blocks, double drop
+ *   open      handle table bound (a named 5, never a silent reuse), stale handles refused
+ *   assembly  shape mismatch refused when the stage is added, pipeline unchanged; stage bound
+ *   run       bytes through two stages, ownership moved in, input emptied, output shape
+ *   bound     an input or a stage output over the byte bound is 5 and nothing is truncated
+ *   failure   a stage result is returned unchanged, later stages do not run, items are zeroed;
+ *             an allocation refused inside a stage (mg_reserve of an impossible size) is one of them
+ *   receipt   count and fields; the identity is recomputed here from the kernel sha256 (sys.sha, an
+ *             implementation that shares no code with pipe.cx) over lengths 0..1000 that cross every
+ *             padding case; the same run twice gives the same id; a changed input, stage id, output
+ *             or result changes it
+ *   hooks     the tap sees each stage's input and output in order, and phase 2 on a failure
+ *   reentry   a stage cannot run, extend or close the pipeline it is running in
+ * Prints PASS/FAIL per assertion, XS_CONFORM_SUMMARY pass=N failed=M, and a last line XS_CONFORM
+ * only when nothing failed; rc 1 on any FAIL. */
+#pragma unisa use stream.item
+#pragma unisa use stream.pipe
+#pragma unisa use mem.grow
+#pragma unisa use mem.slice
+#pragma unisa use mem.bytes
+#pragma unisa use sys.sha
+
+static int passed, failed;
+static void ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (ok) passed++; else failed++;
+}
+static void ckn(int ok, const char *label, long n) {
+    printf("%s\t%s %ld\n", ok ? "PASS" : "FAIL", label, n);
+    if (ok) passed++; else failed++;
+}
+
+/* an item of shape SHAPE holding n bytes: byte i is (seed + i) & 255 */
+static int mk(xs_item *it, int shape, long n, int seed) {
+    mg_buf b;
+    long i;
+    mg_init(&b);
+    for (i = 0; i < n; i++) if (mg_push(&b, (int)(seed + i))) return 1;
+    return xs_item_set(it, shape, b.data, b.len, b.cap);
+}
+static int empty(const xs_item *it) { return !it->buf.data && it->buf.len == 0 && it->buf.cap == 0 && it->shape == 0; }
+
+static int calls[8];
+/* stage: copy the input and add ctx's byte to every byte */
+static int st_add(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    long i;
+    (void)why; (void)cap;
+    calls[0]++;
+    for (i = 0; i < in->buf.len; i++) if (mg_push(&out->buf, in->buf.data[i] + *(int *)ctx)) return 1;
+    return 0;
+}
+/* stage: in place, move the block to the output and append ctx's byte */
+static int st_tail(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)why; (void)cap;
+    calls[1]++;
+    if (mg_move(&out->buf, &in->buf)) return 1;
+    return mg_push(&out->buf, *(int *)ctx) ? 1 : 0;
+}
+/* stage: fail with ctx's code after writing some output, leaving the input unconsumed */
+static int st_fail(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)in; (void)why; (void)cap;
+    calls[2]++;
+    if (mg_append(&out->buf, "partial", 7)) return 99;
+    return *(int *)ctx;
+}
+/* stage: an allocation the allocator contract refuses */
+static int st_oom(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)ctx; (void)in; (void)why; (void)cap;
+    calls[3]++;
+    if (mg_reserve(&out->buf, 0x7fffffffffffffffL)) return 1;
+    return 0;
+}
+/* stage: double the input (for the output bound) */
+static int st_dbl(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)ctx; (void)why; (void)cap;
+    if (mg_append(&out->buf, in->buf.data, in->buf.len) || mg_append(&out->buf, in->buf.data, in->buf.len)) return 1;
+    return 0;
+}
+/* stage: a block whose length is beyond its capacity */
+static int st_bogus(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    (void)ctx; (void)in; (void)why; (void)cap;
+    out->buf.len = 9;
+    return 0;
+}
+static int re_h, re_rc[4];
+static int st_reenter(void *ctx, void *vin, void *vout, char *why, int cap) {
+    xs_item *in = vin, *out = vout;
+    xs_item a, b;
+    (void)ctx; (void)why; (void)cap;
+    xs_item_init(&a); xs_item_init(&b);
+    re_rc[0] = mk(&a, 1, 3, 0) ? -1 : xs_run(re_h, &a, &b, 0, 0);
+    re_rc[1] = xs_add(re_h, 9, 2, 3, st_dbl, 0);
+    re_rc[2] = xs_close(re_h);
+    re_rc[3] = xs_receipt_count(re_h);
+    return mg_move(&out->buf, &in->buf) ? 1 : 0;
+}
+
+#define TAPN 16
+static struct { int index, id, phase; long n; int first; void *ctx; } tap[TAPN];
+static int ntap;
+static void tapfn(void *ctx, int index, int id, int phase, const unsigned char *p, long n) {
+    if (ntap >= TAPN) return;
+    tap[ntap].index = index; tap[ntap].id = id; tap[ntap].phase = phase; tap[ntap].ctx = ctx;
+    tap[ntap].n = n;
+    tap[ntap].first = n > 0 ? p[0] : -1;
+    ntap++;
+}
+static int tapis(int k, int index, int id, int phase, long n, int first) {
+    return k < ntap && tap[k].index == index && tap[k].id == id && tap[k].phase == phase && tap[k].n == n && tap[k].first == first;
+}
+
+static void t_item(void) {
+    xs_item it;
+    ms_slice v;
+    mg_buf b;
+    xs_item_init(&it);
+    ck(empty(&it), "item: init is empty");
+    v = xs_item_bytes(&it);
+    ck(ms_is_none(&v), "item: bytes of an empty item is absent");
+    ck(mk(&it, 3, 5, 10) == 0 && it.shape == 3 && it.buf.len == 5, "item: set adopts the block");
+    v = xs_item_bytes(&it);
+    ck(ms_len(&v) == 5 && v.p == it.buf.data && v.p[0] == 10 && v.p[4] == 14, "item: bytes borrows the block");
+    ck(mk(&it, 4, 2, 7) == 0 && it.shape == 4 && it.buf.len == 2 && it.buf.data[1] == 8, "item: set replaces the old content");
+    xs_item_drop(&it);
+    ck(empty(&it), "item: drop zeroes");
+    xs_item_drop(&it);
+    ck(empty(&it), "item: second drop is a no-op");
+    ck(xs_item_set(&it, 1, 0, 0, 0) == 0 && it.shape == 1 && it.buf.len == 0, "item: an empty block is a real item");
+    v = xs_item_bytes(&it);
+    ck(!ms_is_none(&v) && ms_len(&v) == 0, "item: empty bytes are present, length 0");
+    ck(mk(&it, 0, 4, 0) == 4 && empty(&it), "item: shape 0 refused, block freed, item empty");
+    mg_init(&b); mg_push(&b, 1);
+    ck(xs_item_set(&it, 1, b.data, -1, b.cap) == 4 && empty(&it), "item: negative length refused");
+    mg_init(&b); mg_push(&b, 1);
+    ck(xs_item_set(&it, 1, b.data, b.cap + 1, b.cap) == 4 && empty(&it), "item: length beyond capacity refused");
+    ck(xs_item_set(&it, 1, 0, 0, 8) == 4 && empty(&it), "item: null block with capacity refused");
+    ck(xs_item_set(0, 1, 0, 0, 0) == 4, "item: null item refused");
+    xs_item_init(0); xs_item_drop(0);
+    v = xs_item_bytes(0);
+    ck(ms_is_none(&v), "item: null item has no bytes");
+}
+
+static void t_open(void) {
+    int h[5], g, i, ok;
+    xs_item a, b;
+    int id, rc; long x, y; char hex[65];
+    ck(xs_open(0, 10) == 4, "open: null handle slot refused");
+    h[0] = 77;
+    ck(xs_open(&h[0], 0) == 4 && h[0] == 0, "open: bound 0 refused, handle zeroed");
+    ck(xs_open(&h[0], -5) == 4, "open: negative bound refused");
+    ok = 1;
+    for (i = 0; i < 4; i++) ok = ok && xs_open(&h[i], 100) == 0 && h[i] > 0;
+    ck(ok && h[0] != h[1] && h[1] != h[2] && h[2] != h[3], "open: four distinct pipelines");
+    h[4] = 77;
+    ck(xs_open(&h[4], 100) == 5 && h[4] == 0, "open: fifth pipeline is bound exceeded");
+    ck(xs_close(h[1]) == 0, "close: open handle");
+    ck(xs_close(h[1]) == 4, "close: second close refused");
+    ck(xs_open(&g, 100) == 0 && g != h[1], "open: a freed slot gives a new handle");
+    ck(xs_add(h[1], 1, 1, 2, st_dbl, 0) == 4, "stale: add refused");
+    ck(xs_tap(h[1], tapfn, 0) == 4, "stale: tap refused");
+    xs_item_init(&a); xs_item_init(&b);
+    ck(mk(&a, 1, 3, 0) == 0 && xs_run(h[1], &a, &b, 0, 0) == 4 && empty(&a) && empty(&b), "stale: run refused, input freed");
+    ck(xs_receipt_count(h[1]) == -1 && xs_receipt(h[1], 0, &id, &rc, &x, &y) == 4 && xs_receipt_id(h[1], hex, 65) == 4, "stale: receipt refused");
+    ck(xs_close(0) == 4 && xs_close(-3) == 4 && xs_add(0, 1, 1, 2, st_dbl, 0) == 4 && xs_receipt_count(1000003) == -1, "handle: 0, negative and never-issued refused");
+    ck(xs_close(h[0]) == 0 && xs_close(h[2]) == 0 && xs_close(h[3]) == 0 && xs_close(g) == 0, "close: all released");
+}
+
+static void t_assembly(void) {
+    int h, i, ok, k = 1;
+    xs_item a, b;
+    xs_open(&h, 1000);
+    ck(xs_add(h, 1, 1, 2, 0, 0) == 4, "add: null stage refused");
+    ck(xs_add(h, 0, 1, 2, st_add, &k) == 4 && xs_add(h, -1, 1, 2, st_add, &k) == 4, "add: id must be positive");
+    ck(xs_add(h, 1, 0, 2, st_add, &k) == 4 && xs_add(h, 1, 1, 0, st_add, &k) == 4, "add: shapes must be positive");
+    ck(xs_add(h, 1, 1, 2, st_add, &k) == 0, "add: first stage 1->2");
+    ck(xs_add(h, 2, 3, 4, st_add, &k) == 3, "add: 3 after 2 is a shape mismatch");
+    ck(xs_add(h, 2, 1, 2, st_add, &k) == 3, "add: 1 after 2 is a shape mismatch");
+    ck(xs_add(h, 2, 2, 5, st_tail, &k) == 0, "add: 2->5 accepted after the refusals");
+    xs_item_init(&a); xs_item_init(&b);
+    calls[0] = calls[1] = 0;
+    ck(mk(&a, 1, 2, 0) == 0 && xs_run(h, &a, &b, 0, 0) == 0 && calls[0] == 1 && calls[1] == 1 && b.shape == 5 && b.buf.len == 3,
+       "add: the refused stages are not in the pipeline");
+    xs_item_drop(&b);
+    xs_close(h);
+    xs_open(&h, 1000);
+    ok = 1;
+    for (i = 0; i < 16; i++) ok = ok && xs_add(h, i + 1, 1, 1, st_add, &k) == 0;
+    ck(ok, "add: sixteen stages accepted");
+    ck(xs_add(h, 17, 1, 1, st_add, &k) == 5, "add: seventeenth stage is bound exceeded");
+    calls[0] = 0;
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(h, &a, &b, 0, 0) == 0 && calls[0] == 16 && b.buf.len == 4 && b.buf.data[0] == 16 && xs_receipt_count(h) == 16,
+       "add: the sixteen run, the seventeenth does not");
+    xs_item_drop(&b);
+    xs_close(h);
+}
+
+static void t_run(void) {
+    int h, k3 = 3, k9 = 9, id, rc;
+    long x, y;
+    xs_item a, b;
+    char why[64];
+    xs_open(&h, 1000);
+    xs_item_init(&a); xs_item_init(&b);
+    why[0] = 'x'; why[1] = 0;
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(h, &a, &b, why, 64) == 3 && empty(&a) && empty(&b), "run: empty pipeline is 3, input freed");
+    ck(mm_same(why, "stream: shape mismatch", 23), "run: the refusal is named");
+    ck(xs_receipt_count(h) == 0, "run: a refused run has no receipt");
+    xs_add(h, 11, 1, 2, st_add, &k3);
+    xs_add(h, 12, 2, 7, st_tail, &k9);
+    ck(mk(&a, 1, 4, 20) == 0 && xs_run(h, &a, &b, why, 64) == 0, "run: two stages");
+    ck(empty(&a), "run: the input item is empty afterwards");
+    ck(b.shape == 7 && b.buf.len == 5 && b.buf.data[0] == 23 && b.buf.data[3] == 26 && b.buf.data[4] == 9, "run: output bytes and shape");
+    ck(xs_receipt_count(h) == 2, "receipt: two records");
+    ck(xs_receipt(h, 0, &id, &rc, &x, &y) == 0 && id == 11 && rc == 0 && x == 4 && y == 4, "receipt: first record");
+    ck(xs_receipt(h, 1, &id, &rc, &x, &y) == 0 && id == 12 && rc == 0 && x == 4 && y == 5, "receipt: second record");
+    ck(xs_receipt(h, 2, &id, &rc, &x, &y) == 4 && xs_receipt(h, -1, &id, &rc, &x, &y) == 4 && xs_receipt(h, 0, 0, &rc, &x, &y) == 4, "receipt: index and null refused");
+    ck(mk(&a, 1, 2, 0) == 0 && xs_run(h, &a, &b, why, 64) == 0 && b.buf.len == 3 && b.buf.data[0] == 3, "run: an occupied output item is replaced");
+    ck(mk(&a, 2, 4, 0) == 0 && xs_run(h, &a, &b, why, 64) == 3 && empty(&a) && empty(&b), "run: wrong input shape is 3, both items empty");
+    ck(xs_run(h, &a, &b, why, 64) == 3, "run: an empty input item is 3");
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(h, &a, 0, why, 64) == 4 && empty(&a), "run: null output refused, input freed");
+    ck(xs_run(h, 0, &b, why, 64) == 4 && mm_same(why, "stream: bad argument", 21), "run: null input refused and named");
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(h, &a, &a, why, 64) == 4 && empty(&a), "run: input and output the same item refused");
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(h, &a, &b, 0, 0) == 0 && b.buf.len == 5, "run: no reason buffer is allowed");
+    xs_item_drop(&b);
+    xs_close(h);
+}
+
+static void t_bound(void) {
+    int h, id, rc;
+    long x, y;
+    xs_item a, b;
+    char why[64];
+    xs_open(&h, 8);
+    xs_add(h, 1, 1, 1, st_dbl, 0);
+    xs_add(h, 2, 1, 1, st_dbl, 0);
+    xs_item_init(&a); xs_item_init(&b);
+    ck(mk(&a, 1, 9, 0) == 0 && xs_run(h, &a, &b, why, 64) == 5 && empty(&a) && empty(&b), "bound: input over the bound is 5, nothing kept");
+    ck(mm_same(why, "stream: bound exceeded", 23) && xs_receipt_count(h) == 0, "bound: named, no stage entered");
+    ck(mk(&a, 1, 2, 5) == 0 && xs_run(h, &a, &b, why, 64) == 0 && b.buf.len == 8 && b.buf.data[7] == 6, "bound: exactly the bound passes whole");
+    ck(mk(&a, 1, 3, 0) == 0 && xs_run(h, &a, &b, why, 64) == 5 && empty(&a) && empty(&b), "bound: stage output over the bound is 5, not truncated");
+    ck(xs_receipt_count(h) == 2 && xs_receipt(h, 1, &id, &rc, &x, &y) == 0 && id == 2 && rc == 5 && x == 6 && y == 0, "bound: the receipt records the refusal");
+    ck(mk(&a, 1, 5, 0) == 0 && xs_run(h, &a, &b, why, 64) == 5 && xs_receipt_count(h) == 1, "bound: first stage over the bound stops the run");
+    xs_close(h);
+}
+
+static void t_failure(void) {
+    int h, code, k1 = 1, id, rc, i;
+    long x, y;
+    xs_item a, b;
+    static const int codes[5] = {1, 2, 3, 4, 7};
+    char why[64];
+    xs_item_init(&a); xs_item_init(&b);
+    for (i = 0; i < 5; i++) {
+        code = codes[i];
+        xs_open(&h, 1000);
+        xs_add(h, 1, 1, 2, st_add, &k1);
+        xs_add(h, 2, 2, 3, st_fail, &code);
+        xs_add(h, 3, 3, 4, st_tail, &k1);
+        calls[0] = calls[1] = calls[2] = 0;
+        why[0] = 0;
+        ckn(mk(&a, 1, 6, 0) == 0 && xs_run(h, &a, &b, why, 64) == code && empty(&a) && empty(&b), "failure: stage result returned unchanged, items empty, code", code);
+        ckn(calls[0] == 1 && calls[2] == 1 && calls[1] == 0 && why[0] == 0, "failure: the next stage does not run and the reason is the stage's, code", code);
+        ckn(xs_receipt_count(h) == 2 && xs_receipt(h, 1, &id, &rc, &x, &y) == 0 && id == 2 && rc == code && x == 6 && y == 0, "failure: receipt holds the result, code", code);
+        xs_close(h);
+    }
+    xs_open(&h, 1000);
+    xs_add(h, 1, 1, 2, st_oom, 0);
+    xs_add(h, 2, 2, 3, st_tail, &k1);
+    calls[1] = calls[3] = 0;
+    ck(mk(&a, 1, 6, 0) == 0 && xs_run(h, &a, &b, why, 64) == 1 && empty(&a) && empty(&b) && calls[3] == 1 && calls[1] == 0, "failure: refused allocation in a stage frees and zeroes");
+    ck(mk(&a, 1, 6, 0) == 0 && xs_run(h, &a, &b, why, 64) == 1 && calls[3] == 2, "failure: the pipeline is usable after a failure");
+    xs_close(h);
+    xs_open(&h, 1000);
+    xs_add(h, 1, 1, 2, st_bogus, 0);
+    ck(mk(&a, 1, 6, 0) == 0 && xs_run(h, &a, &b, why, 64) == 1 && empty(&b) && mm_same(why, "stream: stage output", 21), "failure: a malformed stage output is 1 and named");
+    xs_close(h);
+}
+
+/* the kernel's sha256 of p[0..n) as 32 bytes; 0 on success */
+static int ksha(const unsigned char *p, long n, unsigned char *d) {
+    char hex[65];
+    int i, a, b;
+    if (sy_sha256_hex(p, n, hex)) return 1;
+    for (i = 0; i < 32; i++) {
+        a = hex[2 * i] <= '9' ? hex[2 * i] - '0' : hex[2 * i] - 'a' + 10;
+        b = hex[2 * i + 1] <= '9' ? hex[2 * i + 1] - '0' : hex[2 * i + 1] - 'a' + 10;
+        d[i] = (unsigned char)(a * 16 + b);
+    }
+    return 0;
+}
+static void le(unsigned char *b, int n, unsigned long long v) { int k; for (k = 0; k < n; k++) b[k] = (unsigned char)(v >> (8 * k)); }
+
+/* One run of n bytes (seed) through st_add(+k) as stage ID_A then st_tail(k) as stage ID_B; the id in HEX. */
+static int idrun(long n, int seed, int id_a, int id_b, int k, char *hex) {
+    int h, r;
+    xs_item a, b;
+    xs_item_init(&a); xs_item_init(&b);
+    if (xs_open(&h, 100000) || xs_add(h, id_a, 1, 2, st_add, &k) || xs_add(h, id_b, 2, 3, st_tail, &k)) return 1;
+    r = mk(&a, 1, n, seed) || xs_run(h, &a, &b, 0, 0) || xs_receipt_id(h, hex, 65);
+    xs_item_drop(&b);
+    return xs_close(h) || r;
+}
+
+static void t_receipt(void) {
+    static const long lens[9] = {0, 1, 55, 56, 63, 64, 119, 120, 1000};
+    unsigned char ser[8 + 2 * 88], in[1000], mid[1000], out[1001];
+    char hex[65], want[65], base[65], other[65];
+    int h, i, k = 5, code = 2;
+    long n, j;
+    xs_item a, b;
+    for (i = 0; i < 9; i++) {
+        n = lens[i];
+        for (j = 0; j < n; j++) { in[j] = (unsigned char)(40 + j); mid[j] = (unsigned char)(in[j] + k); out[j] = mid[j]; }
+        out[n] = (unsigned char)k;
+        mm_copy(ser, 4, "XSR1", 4); le(ser + 4, 4, 2);
+        le(ser + 8, 4, 21); le(ser + 12, 4, 0); le(ser + 16, 8, (unsigned long long)n); le(ser + 56, 8, (unsigned long long)n);
+        le(ser + 96, 4, 22); le(ser + 100, 4, 0); le(ser + 104, 8, (unsigned long long)n); le(ser + 144, 8, (unsigned long long)n + 1);
+        hex[0] = 0; want[0] = 1;
+        ckn(!ksha(in, n, ser + 24) && !ksha(mid, n, ser + 64) && !ksha(mid, n, ser + 112) && !ksha(out, n + 1, ser + 152) &&
+            !sy_sha256_hex(ser, sizeof ser, want) && !idrun(n, 40, 21, 22, k, hex) && mm_same(hex, want, 65),
+            "receipt: identity equals the independent sha256, input length", n);
+    }
+    ck(!idrun(100, 1, 21, 22, 5, base) && !idrun(100, 1, 21, 22, 5, other) && mm_same(base, other, 65), "receipt: the same run twice gives the same id");
+    ck(!idrun(100, 2, 21, 22, 5, other) && !mm_same(base, other, 65), "receipt: a changed input changes the id");
+    ck(!idrun(101, 1, 21, 22, 5, other) && !mm_same(base, other, 65), "receipt: a changed input length changes the id");
+    ck(!idrun(100, 1, 23, 22, 5, other) && !mm_same(base, other, 65), "receipt: a changed first stage id changes the id");
+    ck(!idrun(100, 1, 21, 24, 5, other) && !mm_same(base, other, 65), "receipt: a changed second stage id changes the id");
+    ck(!idrun(100, 1, 22, 21, 5, other) && !mm_same(base, other, 65), "receipt: swapped stage ids change the id");
+    ck(!idrun(100, 1, 21, 22, 6, other) && !mm_same(base, other, 65), "receipt: a changed output changes the id");
+    xs_open(&h, 1000);
+    ck(xs_receipt_id(h, base, 65) == 0 && base[64] == 0, "receipt: a pipeline that never ran has an id");
+    ck(xs_receipt_id(h, hex, 64) == 4 && hex[0] == 0 && xs_receipt_id(h, 0, 65) == 4, "receipt: short or null id buffer refused");
+    xs_add(h, 1, 1, 2, st_fail, &code);
+    xs_item_init(&a); xs_item_init(&b);
+    ck(mk(&a, 1, 10, 0) == 0 && xs_run(h, &a, &b, 0, 0) == 2 && xs_receipt_id(h, hex, 65) == 0 && !mm_same(hex, base, 65), "receipt: a failed run has its own id");
+    code = 1;
+    ck(mk(&a, 1, 10, 0) == 0 && xs_run(h, &a, &b, 0, 0) == 1 && xs_receipt_id(h, other, 65) == 0 && !mm_same(hex, other, 65), "receipt: a changed result changes the id");
+    xs_close(h);
+}
+
+static void t_hooks(void) {
+    int h, k3 = 3, k9 = 9, code = 2, mark = 0;
+    xs_item a, b;
+    xs_open(&h, 1000);
+    xs_add(h, 31, 1, 2, st_add, &k3);
+    xs_add(h, 32, 2, 3, st_tail, &k9);
+    ck(xs_tap(h, tapfn, &mark) == 0, "hooks: tap set");
+    xs_item_init(&a); xs_item_init(&b);
+    ntap = 0;
+    ck(mk(&a, 1, 4, 50) == 0 && xs_run(h, &a, &b, 0, 0) == 0 && ntap == 4, "hooks: four calls for two stages");
+    ck(tapis(0, 0, 31, 0, 4, 50) && tapis(1, 0, 31, 1, 4, 53), "hooks: first stage input then output");
+    ck(tapis(2, 1, 32, 0, 4, 53) && tapis(3, 1, 32, 1, 5, 53), "hooks: second stage input then output");
+    ck(tap[0].ctx == &mark && tap[3].ctx == &mark, "hooks: the context is passed through");
+    ck(xs_tap(h, 0, &mark) == 0, "hooks: tap cleared");
+    ntap = 0;
+    ck(mk(&a, 1, 4, 50) == 0 && xs_run(h, &a, &b, 0, 0) == 0 && ntap == 0, "hooks: a cleared tap is not called");
+    xs_item_drop(&b);
+    xs_close(h);
+    xs_open(&h, 1000);
+    xs_add(h, 41, 1, 2, st_fail, &code);
+    xs_add(h, 42, 2, 3, st_tail, &k9);
+    xs_tap(h, tapfn, 0);
+    ntap = 0;
+    ck(mk(&a, 1, 4, 50) == 0 && xs_run(h, &a, &b, 0, 0) == 2 && ntap == 2 && tapis(0, 0, 41, 0, 4, 50) && tapis(1, 0, 41, 2, -1, -1), "hooks: a failure is phase 2 with no bytes");
+    xs_close(h);
+}
+
+static void t_reentry(void) {
+    xs_item a, b;
+    xs_open(&re_h, 1000);
+    xs_add(re_h, 1, 1, 2, st_reenter, 0);
+    xs_item_init(&a); xs_item_init(&b);
+    ck(mk(&a, 1, 4, 0) == 0 && xs_run(re_h, &a, &b, 0, 0) == 0 && b.buf.len == 4, "reentry: the outer run completes");
+    ck(re_rc[0] == 4 && re_rc[1] == 4 && re_rc[2] == 4 && re_rc[3] == -1, "reentry: run, add, close and receipt refused inside a stage");
+    ck(xs_receipt_count(re_h) == 1, "reentry: the outer receipt is intact");
+    xs_item_drop(&b);
+    ck(xs_close(re_h) == 0, "reentry: the pipeline closes afterwards");
+}
+
+int main(void) {
+    t_item();
+    t_open();
+    t_assembly();
+    t_run();
+    t_bound();
+    t_failure();
+    t_receipt();
+    t_hooks();
+    t_reentry();
+    printf("XS_CONFORM_SUMMARY\tpass=%d\tfailed=%d\n", passed, failed);
+    if (failed) return 1;
+    puts("XS_CONFORM");
+    return 0;
+}
