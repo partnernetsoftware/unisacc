@@ -264,8 +264,8 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 看组成结构树 | `sh ./unisacc.com tools/com-tree.cx` | 每段占文件百分比 |
 | 模型解码产物的逐模型 sha(解码器改写的 oracle) | `sh ./unisacc.com tools/model-decode-sha.cx -- EXPLODED_DIR [--reps N]`（批次 `model-decode-sha`） | EXPLODED_DIR 由 `tools/p3-explode.cx -- PKG OUT` 产出;每个模型 inflate 后 `cxmd_decode`,把 CxModel 逐字段渲染后取 sha,打 `MDSHA` 行与总 `all=`;`--reps` 只改计时(`decode_ns`,不含 inflate);改 `cx/runtime/model_decode.cx` 前后 `all=` 必须相同;校验 `tools/check-model-decode-sha.cx` |
 | 切片单元只读盘点 | `sh ./unisacc.com tools/slice-inventory.cx -- --slice DIR [--tools-root ROOT]`；`sh ./unisacc.com tools/check-slice-inventory.cx` | 核对象/构造器/容器SHA与同构造器顺序plan映射，输出字节/物理行/use反向闭包/保守标签与top15；字节降序 -> 标签 -> 用户数升序 -> 名称。`identity=VERIFIED`不证明源码与对象历史等价或产品资格；未知纯度归MIXED，批次`slice-inventory` |
-| 单元分流 fan + 材料准备 | `tools/bound 55 sh ./unisacc.com tools/units-prepare.cx -- ROOT ABS_OUT SLICE MODELS VERSION CARRIERS STAGE`，STAGE 依次 `loader`、`swap`、`seal`；`sh ./unisacc.com tools/fan.cx -- -j N --env ABS_OUT/loader.env` | T2.a clean cutover：不再提供 M8 复制式选项或幂等复用；loader 创建新 OUT 实编译 test-loader，swap 实编译 p3-swap，seal 记录真实源/部件/六 carrier.N SHA，原冻结 carrier pin 仍由消费者检查。仅 loader 六批可将 CARRIERS 设为 `-` 并以 `seal-loader` 输出 loader6.env，不得冒作 fan 材料。精确 VERSION 与提取来源由调用者绑定；PREPARED 非 PASS、非同候选发布资格。RI 入口为 `tools/materials-prepare.cx -- ROOT ABS_OUT native\|chain\|seal`，每阶段外包55秒；历史16项就绪/7项未备及原始Root归属见 `plans/m7-material-spec.md`、`archive/docs-2026-11c/plans/l-tests-materials-prepared.tsv`。 |
-| 切片镜像归属度量（不改产品） | `sh ./unisacc.com tools/image-contrib.cx -- --objects a.o... [--image FILE] [--src KEY=PATH]`；`sh ./unisacc.com tools/check-image-contrib.cx` | 合并tape的`tl_unit` emit按单元计数；最终镜像列恒UNATTRIBUTED（prune/lower/elf丢来源）。分类TRANSFORM/FINITE/UNBOUNDED/SYS-IO来自源码扫描不是对象体积。批次`image-contrib`。试点设计`archive/docs-2026-11c/plans/slice-shrink.md`，fable评审前不动产品 |
+| 单元分流 fan + 材料准备 | `tools/bound 55 sh ./unisacc.com tools/units-prepare.cx -- ROOT ABS_OUT SLICE MODELS VERSION CARRIERS STAGE`，STAGE 依次 `loader`、`swap`、`seal`；`sh ./unisacc.com tools/fan.cx -- -j N --env ABS_OUT/loader.env` | T2.a clean cutover：不再提供 M8 复制式选项或幂等复用；loader 创建新 OUT 实编译 test-loader，swap 实编译 p3-swap，seal 记录真实源/部件/六 carrier.N SHA，原冻结 carrier pin 仍由消费者检查。仅 loader 六批可将 CARRIERS 设为 `-` 并以 `seal-loader` 输出 loader6.env，不得冒作 fan 材料。精确 VERSION 与提取来源由调用者绑定；PREPARED 非 PASS、非同候选发布资格。RI 入口为 `tools/materials-prepare.cx -- ROOT ABS_OUT native\|chain\|seal`，每阶段外包55秒；历史16项就绪/7项未备及原始Root归属见 `plans/m7-material-spec.md`。 |
+| 切片镜像归属度量（不改产品） | `sh ./unisacc.com tools/image-contrib.cx -- --objects a.o... [--image FILE] [--src KEY=PATH]`；`sh ./unisacc.com tools/check-image-contrib.cx` | 合并tape的`tl_unit` emit按单元计数；最终镜像列恒UNATTRIBUTED（prune/lower/elf丢来源）。分类TRANSFORM/FINITE/UNBOUNDED/SYS-IO来自源码扫描不是对象体积。批次`image-contrib`。 |
 | 生成代码运行时性能三档对照 | `sh ./unisacc.com tools/check-bench-gencode.cx -- ROOT [N] [1\|8]` | 同一 `tools/bench-gencode.c` 用 unisacc / gcc -O0 / gcc -O2 各编，1MB+8MB 两档，每项 N 次取中位与 cv；三档 RESULT 校验值必须逐字节相同，否则该项 INVALID；cv>10% 标 NOISY。批次 `cx-bench-gencode` |
 | libc99posix 缺口扫描 | `sh ./unisacc.com tools/libc99posix-audit.cx`；校验 `tools/check-libc99posix-audit.cx` | 扫 include/*.h 的 static 函数名对照契约表；GAP 按头文件；UCRT? 为下划线导出候选(未读 PE) |
 | 未初始化局部扫描 | `sh ./unisacc.com tools/uninit-scan.cx [-- FILE...]`；校验 `tools/check-uninit-scan.cx` | 流敏感 UNINIT/SUSPECT；正例 `int n=0, owner;`（e91eb31bcf^ kernel.cx）；第一版清单不进棘轮 |
@@ -430,7 +430,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 
 ### 4.3 外置与内容寻址(架构方向,2026-11-02 主人定;层名已并入 §3.1 结构五层)
 
-2026-11-02 的四分法(booter / 基座 / 阶段权重 / 资源)在 2026-11-07 改成 §3.1 的结构五层(archive/docs-2026-11c/plans/structure-5-layer.md);旧图的编号不再使用。仍然有效的方向:
+2026-11-02 的四分法(booter / 基座 / 阶段权重 / 资源)在 2026-11-07 改成 §3.1 的结构五层;旧图的编号不再使用。仍然有效的方向:
 
 - **一切按内容哈希寻址;内置 pack 只是 resolver 的另一个来源**,与外部目录行为完全一致。
 - `manifest.tsv`:`name kind(base|stage|resource) arch sha256 size order`。来源顺序:`UNISA_HOME` -> com 旁目录 -> 用户缓存 -> 内嵌 pack(UNIPKG1 footer)。命中必校验 sha256,不符具名拒绝,**不静默回退**到别的来源。
@@ -652,7 +652,7 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 | 构造图与相位 | `build/graph.tsv`、`build/hardwire.tsv`、候选链 35 相位 | §3.7、§2.2 |
 | .cx lint | `tools/cx-lint.cx` R1（第二真相源，只报告）/R2（子进程时限与 `--`，precommit 拦截）；check 41（8a07e8e119） | §2.2 |
 | 静态预检 | 模式/引用/兜底/SB 合同先查；动态及未证明性质单列 PARTIAL，不能替代真实 gen/新包/slice | `tools/tsv-lint.cx`、`tools/chain-precheck.cx` |
-| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/)、[archive/docs-2026-11c/plans/slice-shrink.md](archive/docs-2026-11c/plans/slice-shrink.md) |
+| 结构盘点与普查 | 源码/模型分母与六片模块账全部实核守恒；最终模式全部登记实跑；C47已DONE，行数门按主人新裁定退役，不称全局棘轮或CI绿 | §9.6、`tools/module-byte-map.cx`、[六片账本与材料身份](research/c47-logic-distribution-20261108/) |
 | 归档 | 旧 C/Python 实现、旧 1333 项套件、历史计划与 PRD | §10、`archive/` |
 
 ### 9.3 往期发布与历史（索引）

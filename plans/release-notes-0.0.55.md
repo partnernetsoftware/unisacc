@@ -4,8 +4,7 @@
 
 ## 是什么
 
-面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.55 是开发回路与构造链提速版:产品输入相对 v0.0.54 零改动(`git diff v0.0.54 REV -- src cx exec seed weights kernel include` 为空)。链产物复用 0.0.54 整链构造,两代不动点结论沿用 0.0.54,本版不重新声称。上一发布版见 `archive/docs-2026-11c/plans/release-notes-0.0.54.md`。
-
+面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.55 是开发回路与构造链提速版:产品输入相对 v0.0.54 零改动(`git diff v0.0.54 REV -- src cx exec seed weights kernel include` 为空)。链产物复用 0.0.54 整链构造,两代不动点结论沿用 0.0.54,本版不重新声称。
 原计划唯一产品改动 P1(产品内单元前端缓存,两轮独立审查通过,u12 换根命中 9.8s -> 6.4s)因需整链重建未入本版,顺延 0.0.56。
 
 ## 身份与证据
