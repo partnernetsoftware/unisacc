@@ -1,0 +1,163 @@
+/* tools/check-tlibpkg.cx -- unit checks of tools/cxlib/tlibpkg.cx (no product build, no native tool).
+ *
+ *   sh ./unisacc.com tools/check-tlibpkg.cx [-- ROOT OUT]
+ *
+ * (1) version text: three decimal parts only; (2) the compatibility rule: same major and
+ * minor.patch not older; (3) member names; (4) the ar walk over short and "#1/" long names, the
+ * metadata members included, and the refusals of a cut archive; (5) the canonical-header check
+ * refuses a changed owner field, a wrong pad byte and trailing bytes; (6) receipt field lookup;
+ * (7) a package table in a private tree: units are the directory's own regular .cx files in
+ * path order, a symlinked unit and an excluded unit are not members, deps and exclusions are
+ * read, and a missing package, a bad version and a bad deps item are refused. */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static TpPkg pk;
+static char work[4400];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlibpkg.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* One ar member in the product's spelling; LONGNAME uses the BSD "#1/N" form. */
+static void member(TpBuf *o, const char *name, const char *body, long n, int longname) {
+    char h[64], nm[32];
+    long nl = tx_len(name, 256), size = longname ? n + nl : n;
+    if (longname) { if (cx_fmt(nm, sizeof nm, "#1/%ld", nl)) nm[0] = 0; }
+    else if (cx_fmt(nm, sizeof nm, "%s", name)) nm[0] = 0;
+    if (cx_fmt(h, sizeof h, "%-16s%-12s%-6s%-6s%-8s%-10ld`\n", nm, "0", "0", "0", "100644", size)) { o->bad = 1; return; }
+    tp_put(o, h, 60);
+    if (longname) tp_put(o, name, nl);
+    tp_put(o, body, n);
+    if (size & 1) tp_put(o, "\n", 1);
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", work, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+int main(int argc, char **argv) {
+    char name[300], why[256], dst[128], p[4400], q[4400];
+    const char *d;
+    long len, at;
+    int v[3], prep = 0;
+    TpBuf ar;
+
+    /* (1) (2) versions */
+    ck(!tp_ver_parse("0.1.0", v) && v[0] == 0 && v[1] == 1 && v[2] == 0 && !tp_ver_parse("12.34.56", v) && v[0] == 12 && v[2] == 56, "version-parse");
+    ck(tp_ver_parse("1.2", v) && tp_ver_parse("1.2.3.4", v) && tp_ver_parse("1..3", v) && tp_ver_parse("a.b.c", v) &&
+       tp_ver_parse("", v) && tp_ver_parse("1.2.3 ", v) && tp_ver_parse("1.2.-3", v), "version-refusals");
+    ck(tp_ver_compat("0.1.0", "0.1.0") == 0 && tp_ver_compat("0.2.0", "0.1.5") == 0 && tp_ver_compat("0.1.5", "0.1.2") == 0 &&
+       tp_ver_compat("1.4.0", "1.3.9") == 0, "compat-same-major-not-older");
+    ck(tp_ver_compat("1.0.0", "0.9.9") == 1 && tp_ver_compat("0.9.9", "1.0.0") == 1, "compat-major-mismatch");
+    ck(tp_ver_compat("0.1.0", "0.2.0") == 2 && tp_ver_compat("0.2.1", "0.2.2") == 2, "compat-provider-too-old");
+    ck(tp_ver_compat("0.1", "0.1.0") == -1 && tp_ver_compat("0.1.0", "x") == -1, "compat-bad-version");
+
+    /* (3) member names */
+    ck(!tp_member_name("cx/sys/fs.cx", name, sizeof name) && tx_eqz(name, "cx.sys.fs.o") &&
+       !tp_member_name("cx/owned.cx", name, sizeof name) && tx_eqz(name, "cx.owned.o"), "member-name");
+    ck(tp_member_name("cx/sys/fs.c", name, sizeof name) && tp_member_name("cx/sys/fs.cx", name, 8), "member-name-refusals");
+
+    /* (4) ar walk */
+    ar.b = 0; ar.n = 0; ar.cap = 0; ar.bad = 0;
+    tp_put(&ar, "!<arch>\n", 8);
+    member(&ar, "__.S.receipt", "k\tv\n", 4, 0);
+    member(&ar, "a.o", "odd", 3, 0);
+    member(&ar, "a.very.long.member.name.o", "LONGBODY", 8, 1);
+    ck(!ar.bad, "archive-fixture");
+    at = 0;
+    ck(tp_ar_next(ar.b, ar.n, &at, name, sizeof name, &d, &len) == 0 && tx_eqz(name, "__.S.receipt") && len == 4 &&
+       tp_ar_next(ar.b, ar.n, &at, name, sizeof name, &d, &len) == 0 && tx_eqz(name, "a.o") && len == 3 && mm_same(d, "odd", 3) &&
+       tp_ar_next(ar.b, ar.n, &at, name, sizeof name, &d, &len) == 0 && tx_eqz(name, "a.very.long.member.name.o") && len == 8 && mm_same(d, "LONGBODY", 8) &&
+       tp_ar_next(ar.b, ar.n, &at, name, sizeof name, &d, &len) == 1, "ar-walk-short-long-and-metadata");
+    ck(tp_ar_find(ar.b, ar.n, "a.o", &d, &len) == 0 && len == 3 && tp_ar_find(ar.b, ar.n, "absent.o", &d, &len) == 1, "ar-find");
+    at = 0;
+    ck(tp_ar_next("not an archive at all", 21, &at, name, sizeof name, &d, &len) == -1, "ar-refuses-non-archive");
+    at = 0;
+    ck(tp_ar_next(ar.b, ar.n - 5, &at, name, sizeof name, &d, &len) == 0 && tp_ar_next(ar.b, ar.n - 5, &at, name, sizeof name, &d, &len) == 0 &&
+       tp_ar_next(ar.b, ar.n - 5, &at, name, sizeof name, &d, &len) == -1, "ar-refuses-cut-member");
+
+    /* (5) canonical headers */
+    ck(tp_ar_canon(ar.b, ar.n) == 0, "canon-accepts-product-spelling");
+    ar.b[8 + 16] = '7';                       /* mtime of the first member */
+    ck(tp_ar_canon(ar.b, ar.n) == -1, "canon-refuses-owner-field");
+    ar.b[8 + 16] = '0';
+    ar.b[8 + 60 + 4 + 60 + 3] = ' ';          /* the pad byte after the 3-byte body */
+    ck(tp_ar_canon(ar.b, ar.n) == -1, "canon-refuses-pad-byte");
+    ar.b[8 + 60 + 4 + 60 + 3] = '\n';
+    tp_put(&ar, "x", 1);
+    ck(tp_ar_canon(ar.b, ar.n) == -1 && tp_ar_canon(ar.b, ar.n - 1) == 0, "canon-refuses-trailing-bytes");
+    mm_free(ar.b);
+
+    /* (6) receipt fields */
+    {
+        const char *r = "pkg\tfx\nunit\ta.cx\ts1\ta.o\to1\nunit\tb.cx\ts2\tb.o\to2\ncontent_sha\tcc\n";
+        long rn = tx_len(r, 4096);
+        ck(tp_rc_get(r, rn, "pkg", 0, 1, dst, sizeof dst) == 0 && tx_eqz(dst, "fx") &&
+           tp_rc_get(r, rn, "unit", 1, 3, dst, sizeof dst) == 0 && tx_eqz(dst, "b.o") &&
+           tp_rc_get(r, rn, "unit", 2, 1, dst, sizeof dst) == 1 && tp_rc_get(r, rn, "absent", 0, 1, dst, sizeof dst) == 1 &&
+           tp_rc_get(r, rn, "pkg", 0, 4, dst, sizeof dst) == -1 && tp_rc_get(r, rn, "unit", 0, 2, dst, 2) == -1, "receipt-fields");
+    }
+
+    /* (7) package table in a private tree */
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/tlibpkg-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char root[4096], dot[4400];
+        if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0 || cx_fmt(dot, sizeof dot, "%s/.trash", root) ||
+            cx_fmt(work, sizeof work, "%s/tlibpkg-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(p, sizeof p, "%s/build", work) || sy_mkdir(p, 0755) || cx_fmt(p, sizeof p, "%s/pa", work) || sy_mkdir(p, 0755) ||
+        cx_fmt(p, sizeof p, "%s/pb", work) || sy_mkdir(p, 0755)) return 2;
+    prep |= put("pa/zeta.cx", "int z;\n") || put("pa/alpha.cx", "int a;\n") || put("pa/skip.cx", "int s;\n") || put("pa/note.txt", "x\n");
+    prep |= put("pb/real.cx", "int r;\n") || put("top.cx", "int t;\n");
+    prep |= cx_fmt(p, sizeof p, "%s/pa/linked.cx", work) || sy_symlink("../pb/real.cx", p);
+    prep |= put("build/tlib-packages.tsv",
+                "# comment\n"
+                "p.a\t0.3.1\tabc\tpa;top.cx\tpa/skip.cx=why-not\t-\tnote\n"
+                "p.b\t1.0.0\tdef\tpb\t-\tp.a@0.3.0\tnote\n"
+                "p.badver\t1.0\tdef\tpb\t-\t-\tnote\n"
+                "p.baddep\t1.0.0\tdef\tpb\t-\tp.a\tnote\n"
+                "p.empty\t1.0.0\tdef\tbuild\t-\t-\tnote\n");
+    ck(!prep, "table-fixture");
+    ck(tp_load(work, "p.a", &pk, why, sizeof why) == 0 && tx_eqz(pk.version, "0.3.1") && tx_eqz(pk.api_sha, "abc") && pk.nunit == 3 &&
+       tx_eqz(pk.unit[0], "pa/alpha.cx") && tx_eqz(pk.unit[1], "pa/zeta.cx") && tx_eqz(pk.unit[2], "top.cx"), "units-own-regular-files-in-path-order");
+    ck(tp_find_unit(&pk, "pa/linked.cx") < 0 && tp_find_unit(&pk, "pa/skip.cx") < 0 && tp_find_unit(&pk, "pa/note.txt") < 0 &&
+       pk.nexcl == 1 && tp_find_excl(&pk, "pa/skip.cx") == 0 && tx_eqz(pk.excl_why[0], "why-not") && pk.ndep == 0, "symlink-and-excluded-are-not-members");
+    ck(tp_load(work, "p.b", &pk, why, sizeof why) == 0 && pk.nunit == 1 && tx_eqz(pk.unit[0], "pb/real.cx") && pk.ndep == 1 &&
+       tx_eqz(pk.dep_pkg[0], "p.a") && tx_eqz(pk.dep_ver[0], "0.3.0"), "deps-read");
+    ck(tp_load(work, "p.none", &pk, why, sizeof why) == -1 && tp_load(work, "p.badver", &pk, why, sizeof why) == -1 &&
+       tp_load(work, "p.baddep", &pk, why, sizeof why) == -1 && tp_load(work, "p.empty", &pk, why, sizeof why) == -1, "table-refusals");
+    {
+        long nn = 0;
+        char *names = tp_names(work, &nn);
+        ck(names && tx_prefix(names, nn, "p.a\np.b\n", 8) && tx_count(names, nn, "\n", 1) == 5, "package-names-in-table-order");
+        mm_free(names);
+    }
+    if (cx_fmt(q, sizeof q, "%s/pa/alpha.cx", work) || tp_sha_file(q, name)) name[0] = 0;
+    tp_sha("int a;\n", 7, dst);
+    ck(name[0] && tx_eqz(name, dst), "file-sha-equals-block-sha");
+    {
+        char a[65], b[65];
+        tp_sha("abc", 3, a);
+        cx_sha256_hex("abc", 3, b);
+        ck(tx_eqz(a, b) && tx_eqz(a, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "sha-fast-path-equals-portable");
+    }
+
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_TLIBPKG\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

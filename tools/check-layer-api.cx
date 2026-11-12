@@ -1,0 +1,210 @@
+/* tools/check-layer-api.cx -- tools/layer-api.cx on this checkout and on a private fixture tree.
+ *
+ *   sh ./unisacc.com tools/check-layer-api.cx [-- ROOT OUT]
+ *
+ * (1) real: ROOT's manifests equal the source (every package of build/tlib-packages.tsv), the
+ *     table's api_sha matches, and no unit uses an outer module (cx.base stays inside cx.base);
+ * (2) fixture positive: --write then --check on a two-unit package, and on a second package whose
+ *     only outside use is its declared dependency;
+ * (3) an added public function is refused by --check and classed minor by --write;
+ * (4) a changed signature is classed major;
+ * (5) a rewritten manifest with the old table api_sha is refused until the table carries the new sha;
+ * (6) a unit that uses a module outside the package is refused as outer;
+ * (7) a unit that uses a unit the package excludes is refused;
+ * (8) bad usage is rc 2.
+ * tools/layer-api.cx is built once (tq_native, a PREPARED line, not a result). */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400], fx[4400], bin[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tlayer-api.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int tool(const char *r, const char *mode, const char *pkg) {
+    char *v[8];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin;
+    if (mode) v[k++] = (char *)mode;
+    if (r) { v[k++] = "--root"; v[k++] = (char *)r; }
+    if (pkg) { v[k++] = "--pkg"; v[k++] = (char *)pkg; }
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+
+/* 1 when the tool's last output has a line whose first fields are A, B (and C when given). */
+static int line3(const char *a, const char *b, const char *c) {
+    long i = 0, e, o, l;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, a, tx_len(a, 256)) &&
+            !tx_field(last + i, e - i, '\t', 1, &o, &l) && tx_same(last + i + o, l, b, tx_len(b, 256)) &&
+            (!c || (!tx_field(last + i, e - i, '\t', 2, &o, &l) && tx_same(last + i + o, l, c, tx_len(c, 256))))) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* 1 when the LAYER_API line of PKG carries the field TEXT (for example "bump=minor"). */
+static int has_field(const char *pkg, const char *text) {
+    long i = 0, e, o, l, f, tl = tx_len(text, 256);
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 1, &o, &l) && tx_same(last + i + o, l, pkg, tx_len(pkg, 256)))
+            for (f = 2; !tx_field(last + i, e - i, '\t', f, &o, &l); f++)
+                if (tx_same(last + i + o, l, text, tl)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* The api_sha=... value of PKG's LAYER_API line into SHA. 0, or -1. */
+static int api_sha(const char *pkg, char sha[65]) {
+    long i = 0, e, o, l, f;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, "LAYER_API", 9) &&
+            !tx_field(last + i, e - i, '\t', 1, &o, &l) && tx_same(last + i + o, l, pkg, tx_len(pkg, 256)))
+            for (f = 2; !tx_field(last + i, e - i, '\t', f, &o, &l); f++)
+                if (l == 72 && tx_prefix(last + i + o, l, "api_sha=", 8)) return tx_copy(sha, 65, last + i + o + 8, 64) ? -1 : 0;
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int dir(const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return sy_mkdir(p, 0755);
+}
+
+static int link_to(const char *target, const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return sy_symlink(target, p);
+}
+
+static int table(const char *sha_a, const char *sha_b) {
+    char t[2048];
+    if (cx_fmt(t, sizeof t,
+               "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\n"
+               "fx.a\t0.1.0\t%s\tfa\tfa/bad.cx=fixture-excluded\t-\tfixture\n"
+               "fx.b\t0.1.0\t%s\tfb\t-\tfx.a@0.1.0\tfixture\n", sha_a, sha_b)) return -1;
+    return put("build/tlib-packages.tsv", t);
+}
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], product[4400], sa[65], sb[65], sa2[65];
+    int rc, prep = 0;
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/layer-api-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/layer-api-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+    if (sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/layer-api.cx", root) || cx_fmt(bin, sizeof bin, "%s/layer-api.native", work) ||
+        cx_fmt(fx, sizeof fx, "%s/fx", work) || cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 2;
+    if (tq_native(root, src, bin, why, sizeof why)) {
+        sy_printf("FAIL\tlayer-api.build-native\t%s\n", why);
+        return 1;
+    }
+
+    /* (1) this checkout */
+    rc = tool(root, "--check", 0);
+    if (rc && last) sy_printf("%s", last);
+    ck(rc == 0 && line3("LAYER_API", "cx.base", "ok"), "real-manifest-equals-source-and-no-outer-module");
+
+    /* fixture tree: fa (one, two; bad excluded), fb (three, uses fa.two), fz (outside every package) */
+    prep |= sy_mkdir(fx, 0755) || dir("build") || dir("fa") || dir("fb") || dir("fz");
+    prep |= link_to(product, "unisacc.com") || link_to("../fa", "fb/fa") || link_to("../fz", "fa/fz");
+    prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\n");
+    prep |= put("fa/two.cx", "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n");
+    prep |= put("fa/bad.cx", "#pragma unisa module bad\nint fa_bad(void) { return 7; }\n");
+    prep |= put("fb/three.cx", "#pragma unisa module three\n#pragma unisa use fa.two\nint fb_three(int x) { return fa_two(x) + 3; }\n");
+    prep |= put("fz/out.cx", "#pragma unisa module out\nint fz_out(void) { return 9; }\n");
+    prep |= table("PENDING", "PENDING");
+    if (prep) { sy_printf("FAIL\tlayer-api.fixture-prepare\n"); return 1; }
+
+    /* (2) write, table, check */
+    rc = tool(fx, "--write", 0);
+    ck(rc == 0 && has_field("fx.a", "bump=new") && has_field("fx.a", "rows=3") && has_field("fx.b", "rows=1") &&
+       !api_sha("fx.a", sa) && !table(sa, "PENDING"), "fixture-write-new");
+    ck(!api_sha("fx.b", sb) && !table(sa, sb), "fixture-table-sha");
+    rc = tool(fx, "--check", 0);
+    if (rc && last) sy_printf("%s", last);
+    ck(rc == 0 && line3("LAYER_API", "fx.a", "ok") && line3("LAYER_API", "fx.b", "ok"), "fixture-check-ok-with-declared-dependency");
+
+    /* (3) additive change */
+    prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\nint fa_more(void) { return 4; }\n");
+    rc = tool(fx, "--check", "fx.a");
+    ck(!prep && rc == 1 && line3("DIFF", "fx.a", "manifest-differs-from-source") && line3("LAYER_API", "fx.a", "FAIL"), "added-function-refused");
+    rc = tool(fx, "--write", "fx.a");
+    ck(rc == 0 && has_field("fx.a", "bump=minor") && !api_sha("fx.a", sa2), "added-function-is-minor");
+
+    /* (5) table still carries the old sha */
+    rc = tool(fx, "--check", "fx.a");
+    ck(rc == 1 && line3("DIFF", "fx.a", "table-api-sha"), "stale-table-sha-refused");
+    prep = table(sa2, sb);
+    rc = tool(fx, "--check", "fx.a");
+    ck(!prep && rc == 0, "table-sha-updated-accepted");
+
+    /* (4) breaking change */
+    prep = put("fa/one.cx", "#pragma unisa module one\nlong fa_one(long x) { return x + 1; }\nint fa_more(void) { return 4; }\n");
+    rc = tool(fx, "--write", "fx.a");
+    ck(!prep && rc == 0 && has_field("fx.a", "bump=major") && !api_sha("fx.a", sa2) && !table(sa2, sb), "changed-signature-is-major");
+
+    /* (6) outer module */
+    prep = put("fa/two.cx", "#pragma unisa module two\n#pragma unisa use one\n#pragma unisa use fz.out\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return (int)fa_one(x) * 2 + fz_out(); }\n");
+    rc = tool(fx, "--write", "fx.a");
+    prep |= rc || api_sha("fx.a", sa2) || table(sa2, sb);
+    rc = tool(fx, "--check", "fx.a");
+    ck(!prep && rc == 1 && line3("OUTER", "fa/two.cx", "uses") && has_field("fa/two.cx", "outside-package-and-deps") &&
+       !line3("DIFF", "fx.a", 0), "outer-module-refused");
+
+    /* (7) excluded unit */
+    prep = put("fa/two.cx", "#pragma unisa module two\n#pragma unisa use one\n#pragma unisa use bad\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return (int)fa_one(x) * 2 + fa_bad(); }\n");
+    rc = tool(fx, "--write", "fx.a");
+    prep |= rc || api_sha("fx.a", sa2) || table(sa2, sb);
+    rc = tool(fx, "--check", "fx.a");
+    ck(!prep && rc == 1 && has_field("fa/two.cx", "excluded-from-package") && !line3("DIFF", "fx.a", 0), "excluded-unit-use-refused");
+
+    /* (8) usage */
+    rc = tool(fx, 0, 0);
+    {
+        int rc2 = tool(fx, "--check", "no.such");
+        ck(rc == 2 && rc2 == 2, "usage-and-unknown-package-rc2");
+    }
+
+    mm_free(last);
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_LAYER_API\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

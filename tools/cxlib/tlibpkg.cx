@@ -1,0 +1,557 @@
+/* tools/cxlib/tlibpkg.cx -- shared facts of the tape-library (tlib) packaging tools.
+ *
+ * Used by tools/layer-api.cx (interface manifest) and tools/tlib.cx (build/check/inspect/link).
+ *
+ * Package table: ROOT/build/tlib-packages.tsv, one row per package:
+ *   pkg  version  api_sha  roots  exclude  deps  note
+ * roots    ';' list of directories (their own regular *.cx files, symlinks are NOT members: a
+ *          symlinked unit belongs to the package that holds the real file) or single .cx files.
+ * exclude  ';' list of PATH=REASON, or '-'. An excluded unit is never packed; a link whose closure
+ *          needs it is refused.
+ * deps     ';' list of PKG@X.Y.Z (the minimum provider version), or '-'.
+ * api_sha  sha256 of ROOT/build/layer-api/PKG.tsv at this version: an interface change shows up as
+ *          a table edit next to the version it belongs to.
+ *
+ * Version rule: X breaking interface change, Y additive change, Z implementation release point.
+ * A provider satisfies a requirement when X is equal and (Y,Z) >= the required (Y,Z).
+ *
+ * Every product call here runs with the current directory at ROOT and the unit named by its
+ * ROOT-relative path: the product's object bytes depend on the path text it was given, so one
+ * spelling is the only way to make the same source give the same object sha.
+ *
+ * Check: tools/check-layer-api.cx, tools/check-tlib.cx. */
+#pragma unisa module tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+enum { TP_MAXU = 160, TP_MAXX = 16, TP_MAXD = 8, TP_NAME = 128, TP_SIGSHOW = 400 };
+
+typedef struct {
+    char pkg[64];
+    char version[32];
+    char api_sha[65];
+    int nunit;
+    char unit[TP_MAXU][TP_NAME];
+    int nexcl;
+    char excl[TP_MAXX][TP_NAME];
+    char excl_why[TP_MAXX][48];
+    int ndep;
+    char dep_pkg[TP_MAXD][64];
+    char dep_ver[TP_MAXD][32];
+} TpPkg;
+
+typedef struct { char *b; long n; long cap; int bad; } TpBuf;
+
+static int tp_fail(char *why, long wl, const char *a, const char *b) {
+    if (why && wl > 0 && cx_fmt(why, (size_t)wl, "%s%s", a ? a : "", b ? b : "")) why[0] = 0;
+    return -1;
+}
+
+/* Append N bytes; a failed growth marks the buffer bad and keeps what it had. */
+void tp_put(TpBuf *o, const char *s, long n) {
+    if (!o || o->bad || n < 0 || (n > 0 && !s)) { if (o) o->bad = 1; return; }
+    if (o->n + n + 1 > o->cap) {
+        long want = o->cap ? o->cap : 4096;
+        char *g;
+        while (want < o->n + n + 1) want = want * 2;
+        g = o->b ? mm_grow(o->b, want) : mm_alloc(want);
+        if (!g) { o->bad = 1; return; }
+        o->b = g;
+        o->cap = want;
+    }
+    if (n > 0 && mm_copy(o->b + o->n, o->cap - o->n, s, n)) { o->bad = 1; return; }
+    o->n += n;
+    o->b[o->n] = 0;
+}
+
+void tp_puts(TpBuf *o, const char *s) { tp_put(o, s, s ? tx_len(s, TX_ZCAP) : -1); }
+
+/* sha256 hex of a block: the kernel hash of sys.sha where it answers (measured 37 ms for the
+   6.6 MB product against 739 ms for the prelude's portable one), else the portable one. Both give
+   the same digest; a link pays this for the product and every tlib byte, so the fast path is
+   what keeps verification from eating the time a tlib saves. */
+void tp_sha(const void *data, size_t n, char hex[65]) {
+    if (sy_sha256_hex(data, (long)n, hex)) cx_sha256_hex(data, n, hex);
+}
+
+/* sha256 hex of a file's bytes. 0, or -1 when it cannot be read. */
+int tp_sha_file(const char *path, char hex[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) { hex[0] = 0; return -1; }
+    tp_sha(b, n, hex);
+    mm_free(b);
+    return 0;
+}
+
+/* "X.Y.Z" with decimal parts only. 0, or -1. */
+int tp_ver_parse(const char *s, int v[3]) {
+    int k = 0, digits = 0;
+    long acc = 0;
+    if (!s || !s[0]) return -1;
+    for (;; s++) {
+        if (*s >= '0' && *s <= '9') {
+            acc = acc * 10 + (*s - '0');
+            digits++;
+            if (digits > 6) return -1;
+        } else if (*s == '.' || *s == 0) {
+            if (!digits || k > 2) return -1;
+            v[k++] = (int)acc;
+            acc = 0;
+            digits = 0;
+            if (*s == 0) break;
+        } else return -1;
+    }
+    return k == 3 ? 0 : -1;
+}
+
+/* 0 the provider satisfies the requirement; 1 major differs; 2 same major but the provider is
+   older; -1 either text is not a version. */
+int tp_ver_compat(const char *provider, const char *required) {
+    int p[3], r[3];
+    if (tp_ver_parse(provider, p) || tp_ver_parse(required, r)) return -1;
+    if (p[0] != r[0]) return 1;
+    if (p[1] < r[1] || (p[1] == r[1] && p[2] < r[2])) return 2;
+    return 0;
+}
+
+static int tp_cmp_names(const void *a, const void *b) {
+    return tx_cmp((const char *)a, tx_len((const char *)a, TP_NAME), (const char *)b, tx_len((const char *)b, TP_NAME));
+}
+
+static int tp_is_excl(const TpPkg *p, const char *rel) {
+    int i;
+    for (i = 0; i < p->nexcl; i++) if (tx_eqz(p->excl[i], rel)) return 1;
+    return 0;
+}
+
+static int tp_add_unit(TpPkg *p, const char *rel, char *why, long wl) {
+    if (tp_is_excl(p, rel)) return 0;
+    if (p->nunit >= TP_MAXU) return tp_fail(why, wl, "too many units in ", p->pkg);
+    if (tx_copy(p->unit[p->nunit], TP_NAME, rel, tx_len(rel, TX_ZCAP))) return tp_fail(why, wl, "unit path too long: ", rel);
+    p->nunit++;
+    return 0;
+}
+
+/* One roots item: a .cx file, or a directory whose own regular .cx files are the units. */
+static int tp_add_root(const char *root, TpPkg *p, const char *item, char *why, long wl) {
+    char path[4400], rel[512];
+    sy_stat_t st;
+    DIR *d;
+    struct dirent *e;
+    long il = tx_len(item, TX_ZCAP);
+    if (cx_fmt(path, sizeof path, "%s/%s", root, item)) return tp_fail(why, wl, "root path too long: ", item);
+    if (sy_lstat(path, &st)) return tp_fail(why, wl, "package root missing: ", item);
+    if (st.kind == 'f') {
+        if (!tx_suffix(item, il, ".cx", 3)) return tp_fail(why, wl, "package root is not a .cx: ", item);
+        return tp_add_unit(p, item, why, wl);
+    }
+    if (st.kind != 'd') return tp_fail(why, wl, "package root is neither file nor directory: ", item);
+    d = opendir(path);
+    if (!d) return tp_fail(why, wl, "cannot list ", item);
+    while ((e = readdir(d))) {
+        long nl = tx_len(e->d_name, 256);
+        if (!tx_suffix(e->d_name, nl, ".cx", 3)) continue;
+        if (cx_fmt(rel, sizeof rel, "%s/%s", item, e->d_name) || cx_fmt(path, sizeof path, "%s/%s", root, rel)) {
+            closedir(d);
+            return tp_fail(why, wl, "unit path too long under ", item);
+        }
+        if (sy_lstat(path, &st)) { closedir(d); return tp_fail(why, wl, "cannot stat ", rel); }
+        if (st.kind != 'f') continue;   /* a symlinked unit belongs to the package holding the file */
+        if (tp_add_unit(p, rel, why, wl)) { closedir(d); return -1; }
+    }
+    closedir(d);
+    return 0;
+}
+
+/* The I-th item of a ';' list held in s[0..n); "-" is the empty list. 0 with the item, 1 at the end. */
+static int tp_item(const char *s, long n, long idx, char *dst, long cap) {
+    long off = 0, len = 0;
+    if (n == 1 && s[0] == '-') return 1;
+    if (n <= 0 || idx >= tx_fields(s, n, ';')) return 1;
+    if (tx_field(s, n, ';', idx, &off, &len) || len <= 0) return 1;
+    if (tx_copy(dst, cap, s + off, len)) return -1;
+    return 0;
+}
+
+/* Load package PKG from ROOT/build/tlib-packages.tsv: version, api sha, the unit list (sorted),
+   the exclusions and the dependencies. 0, or -1 with WHY. */
+int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
+    char path[4400], item[512];
+    size_t n = 0;
+    char *b;
+    long i = 0, e, k;
+    int found = 0;
+    if (!root || !pkg || !p) return tp_fail(why, wl, "bad argument", 0);
+    if (mm_fill(p, sizeof *p, 0, sizeof *p)) return tp_fail(why, wl, "bad argument", 0);
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", root)) return tp_fail(why, wl, "root too long", 0);
+    b = cx_read(path, &n);
+    if (!b) return tp_fail(why, wl, "cannot read ", path);
+    while (i < (long)n && !found) {
+        long fo[6], fl[6];
+        int f, ok = 1;
+        e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e > i && b[i] != '#') {
+            for (f = 0; f < 6; f++) if (tx_field(b + i, e - i, '\t', f, &fo[f], &fl[f])) ok = 0;
+            if (ok && tx_same(b + i + fo[0], fl[0], pkg, tx_len(pkg, TX_ZCAP))) {
+                found = 1;
+                if (tx_copy(p->pkg, sizeof p->pkg, pkg, tx_len(pkg, TX_ZCAP)) ||
+                    tx_copy(p->version, sizeof p->version, b + i + fo[1], fl[1]) ||
+                    tx_copy(p->api_sha, sizeof p->api_sha, b + i + fo[2], fl[2])) {
+                    mm_free(b);
+                    return tp_fail(why, wl, "bad table row for ", pkg);
+                }
+                for (k = 0;; k++) {
+                    long eq;
+                    int r = tp_item(b + i + fo[4], fl[4], k, item, sizeof item);
+                    if (r > 0) break;
+                    eq = r ? -1 : tx_chr(item, tx_len(item, sizeof item), '=');
+                    if (r < 0 || eq <= 0 || p->nexcl >= TP_MAXX ||
+                        tx_copy(p->excl[p->nexcl], TP_NAME, item, eq) ||
+                        tx_copy(p->excl_why[p->nexcl], 48, item + eq + 1, tx_len(item + eq + 1, 512))) {
+                        mm_free(b);
+                        return tp_fail(why, wl, "bad exclude list for ", pkg);
+                    }
+                    p->nexcl++;
+                }
+                for (k = 0;; k++) {
+                    long at;
+                    int v[3];
+                    int r = tp_item(b + i + fo[5], fl[5], k, item, sizeof item);
+                    if (r > 0) break;
+                    at = r ? -1 : tx_chr(item, tx_len(item, sizeof item), '@');
+                    if (r < 0 || at <= 0 || p->ndep >= TP_MAXD || tp_ver_parse(item + at + 1, v) ||
+                        tx_copy(p->dep_pkg[p->ndep], 64, item, at) ||
+                        tx_copy(p->dep_ver[p->ndep], 32, item + at + 1, tx_len(item + at + 1, 64))) {
+                        mm_free(b);
+                        return tp_fail(why, wl, "bad deps list for ", pkg);
+                    }
+                    p->ndep++;
+                }
+                for (k = 0;; k++) {
+                    int r = tp_item(b + i + fo[3], fl[3], k, item, sizeof item);
+                    if (r > 0) break;
+                    if (r < 0 || tp_add_root(root, p, item, why, wl)) {
+                        if (r < 0) (void)tp_fail(why, wl, "bad roots list for ", pkg);
+                        mm_free(b);
+                        return -1;
+                    }
+                }
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    if (!found) return tp_fail(why, wl, "no such package in build/tlib-packages.tsv: ", pkg);
+    {
+        int v[3];
+        if (tp_ver_parse(p->version, v)) return tp_fail(why, wl, "bad version for ", pkg);
+    }
+    if (p->nunit < 1) return tp_fail(why, wl, "package has no unit: ", pkg);
+    qsort(p->unit, (size_t)p->nunit, TP_NAME, tp_cmp_names);
+    for (k = 1; k < p->nunit; k++)
+        if (tx_eqz(p->unit[k - 1], p->unit[k])) return tp_fail(why, wl, "unit listed twice: ", p->unit[k]);
+    return 0;
+}
+
+/* The package names of the table, one per line, in table order. malloc'd, or 0. */
+char *tp_names(const char *root, long *out_n) {
+    char path[4400];
+    size_t n = 0;
+    char *b;
+    TpBuf o;
+    long i = 0, e, off, len;
+    o.b = 0; o.n = 0; o.cap = 0; o.bad = 0;
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-packages.tsv", root)) return 0;
+    b = cx_read(path, &n);
+    if (!b) return 0;
+    while (i < (long)n) {
+        e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e > i && b[i] != '#' && !tx_field(b + i, e - i, '\t', 0, &off, &len) && len > 0) {
+            tp_put(&o, b + i + off, len);
+            tp_put(&o, "\n", 1);
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    if (o.bad || !o.b) { mm_free(o.b); return 0; }
+    if (out_n) *out_n = o.n;
+    return o.b;
+}
+
+int tp_find_unit(const TpPkg *p, const char *rel) {
+    int i;
+    for (i = 0; i < p->nunit; i++) if (tx_eqz(p->unit[i], rel)) return i;
+    return -1;
+}
+
+int tp_find_excl(const TpPkg *p, const char *rel) {
+    int i;
+    for (i = 0; i < p->nexcl; i++) if (tx_eqz(p->excl[i], rel)) return i;
+    return -1;
+}
+
+/* The archive member name of a unit: '/' becomes '.', ".cx" becomes ".o". */
+int tp_member_name(const char *rel, char *dst, long cap) {
+    long n = tx_len(rel, TX_ZCAP), i;
+    if (n < 4 || n + 1 > cap || !tx_suffix(rel, n, ".cx", 3)) return -1;
+    for (i = 0; i < n - 3; i++) dst[i] = rel[i] == '/' ? '.' : rel[i];
+    dst[n - 3] = '.';
+    dst[n - 2] = 'o';
+    dst[n - 1] = 0;
+    return 0;
+}
+
+/* The use closure of UNIT (ROOT-relative), from the product's -cx-plan, as ROOT-relative real
+   paths, one per line (the unit itself first). The caller's directory must be ROOT.
+   malloc'd, or 0 with WHY. A path outside ROOT is kept absolute. */
+char *tp_closure(const char *root, const char *product, const char *unit, char *why, long wl) {
+    char *v[5];
+    char *o = 0;
+    size_t n = 0;
+    long i = 0, e, off, len, rl = tx_len(root, TX_ZCAP);
+    TpBuf out;
+    int rc;
+    out.b = 0; out.n = 0; out.cap = 0; out.bad = 0;
+    v[0] = "sh"; v[1] = (char *)product; v[2] = "-cx-plan"; v[3] = (char *)unit; v[4] = 0;
+    rc = cx_runv_timeout(v, 30, &o, &n);
+    if (rc != 0 || !o) { mm_free(o); (void)tp_fail(why, wl, "-cx-plan failed for ", unit); return 0; }
+    while (i < (long)n) {
+        char one[4400], real[4400];
+        e = i;
+        while (e < (long)n && o[e] != '\n') e++;
+        if (e > i) {
+            int r;
+            if (tx_field(o + i, e - i, '\t', 1, &off, &len) || tx_copy(one, sizeof one, o + i + off, len)) { out.bad = 1; break; }
+            r = sy_realpath(one, real, sizeof real);
+            if (r < 0) { out.bad = 1; break; }
+            if (r > rl && tx_prefix(real, r, root, rl) && real[rl] == '/') tp_put(&out, real + rl + 1, r - rl - 1);
+            else tp_put(&out, real, r);
+            tp_put(&out, "\n", 1);
+        }
+        i = e + 1;
+    }
+    mm_free(o);
+    if (out.bad || !out.b) { mm_free(out.b); (void)tp_fail(why, wl, "cannot resolve the closure of ", unit); return 0; }
+    return out.b;
+}
+
+static int tp_idc(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* The declared name of one interface declaration D (whitespace already single spaces).
+   Functions: the identifier before the first '(' at depth 0. typedef: the last identifier, or
+   the one after "(*" for a function pointer. An unnamed enum: "enum:" and its first enumerator. */
+static int tp_decl_name(const char *d, long n, char *dst, long cap) {
+    long i, s, e;
+    if (tx_prefix(d, n, "enum {", 6) || tx_prefix(d, n, "enum{", 5)) {
+        i = tx_chr(d, n, '{') + 1;
+        while (i < n && !tp_idc(d[i])) i++;
+        s = i;
+        while (i < n && tp_idc(d[i])) i++;
+        if (i == s || cx_fmt(dst, (size_t)cap, "enum:%.*s", (int)(i - s), d + s)) return -1;
+        return 0;
+    }
+    if (tx_prefix(d, n, "typedef ", 8)) {
+        long fp = tx_find(d, n, "(*", 2);
+        long br = tx_chr(d, n, '{');
+        if (fp >= 0 && (br < 0 || fp < br)) { s = fp + 2; e = s; while (e < n && tp_idc(d[e])) e++; }
+        else {
+            long cb = tx_rchr(d, n, '}'), lb = tx_rchr(d, n, '[');
+            e = n;
+            if (lb >= 0 && lb > cb) e = lb;   /* an array typedef ends "name[N]" */
+            while (e > 0 && !tp_idc(d[e - 1])) e--;
+            s = e;
+            while (s > 0 && tp_idc(d[s - 1])) s--;
+        }
+        if (e <= s || tx_copy(dst, cap, d + s, e - s)) return -1;
+        return 0;
+    }
+    e = -1;
+    {
+        int depth = 0;
+        for (i = 0; i < n; i++) {
+            if (d[i] == '{') depth++;
+            else if (d[i] == '}') depth--;
+            else if (depth == 0 && (d[i] == '(' || d[i] == '[' || d[i] == '=' || d[i] == ';')) { e = i; break; }
+        }
+    }
+    if (e < 0) e = n;
+    while (e > 0 && !tp_idc(d[e - 1])) e--;
+    s = e;
+    while (s > 0 && tp_idc(d[s - 1])) s--;
+    if (e <= s || tx_copy(dst, cap, d + s, e - s)) return -1;
+    return 0;
+}
+
+/* The interface manifest of package P, from the product's -cx-interface of each unit:
+ *   # layer-api v1 <pkg>
+ *   # name<TAB>signature<TAB>sig_sha<TAB>file
+ *   # excluded<TAB>path<TAB>reason            (one per exclusion)
+ *   name<TAB>signature<TAB>sig_sha16<TAB>file  (units in path order, declarations in source order)
+ * The version is not part of it: an implementation release point leaves the manifest equal.
+ * The caller's directory must be ROOT. malloc'd with *OUT_N bytes and *ROWS rows, or 0 with WHY. */
+char *tp_api(const char *product, const TpPkg *p, long *out_n, int *rows, char *why, long wl) {
+    TpBuf o;
+    int u, count = 0;
+    o.b = 0; o.n = 0; o.cap = 0; o.bad = 0;
+    tp_puts(&o, "# layer-api v1 ");
+    tp_puts(&o, p->pkg);
+    tp_puts(&o, "\n# name\tsignature\tsig_sha\tfile\n");
+    for (u = 0; u < p->nexcl; u++) {
+        tp_puts(&o, "# excluded\t");
+        tp_puts(&o, p->excl[u]);
+        tp_puts(&o, "\t");
+        tp_puts(&o, p->excl_why[u]);
+        tp_puts(&o, "\n");
+    }
+    for (u = 0; u < p->nunit; u++) {
+        char *v[5];
+        char *t = 0;
+        size_t n = 0;
+        long i = 0, e;
+        int rc;
+        v[0] = "sh"; v[1] = (char *)product; v[2] = "-cx-interface"; v[3] = (char *)p->unit[u]; v[4] = 0;
+        rc = cx_runv_timeout(v, 30, &t, &n);
+        if (rc != 0 || !t) { mm_free(t); mm_free(o.b); (void)tp_fail(why, wl, "-cx-interface failed for ", p->unit[u]); return 0; }
+        while (i < (long)n) {
+            char name[256], hex[65];
+            char *sig;
+            long k = 0, j;
+            int sp = 0;
+            e = i;
+            while (e < (long)n && t[e] != '\n') e++;
+            if (e > i && t[i] != '#' && !(t[i] == '/' && i + 1 < e && t[i + 1] == '*')) {
+                /* The declaration in place, whitespace runs collapsed: k never passes j. */
+                sig = t + i;
+                for (j = i; j < e; j++) {
+                    int c = (unsigned char)t[j];
+                    if (c == ' ' || c == '\t' || c == '\r') { sp = k > 0; continue; }
+                    if (sp) { sig[k++] = ' '; sp = 0; }
+                    sig[k++] = (char)c;
+                }
+                if (k > 0) {
+                    if (tp_decl_name(sig, k, name, sizeof name)) {
+                        mm_free(t); mm_free(o.b);
+                        (void)tp_fail(why, wl, "cannot name an interface declaration of ", p->unit[u]);
+                        return 0;
+                    }
+                    tp_sha(sig, (size_t)k, hex);
+                    hex[16] = 0;
+                    tp_puts(&o, name); tp_put(&o, "\t", 1);
+                    /* A long declaration (a generated enum) is shown cut; its sha covers all of it. */
+                    if (k > TP_SIGSHOW) { tp_put(&o, sig, TP_SIGSHOW); tp_puts(&o, " ..."); }
+                    else tp_put(&o, sig, k);
+                    tp_put(&o, "\t", 1);
+                    tp_puts(&o, hex); tp_put(&o, "\t", 1);
+                    tp_puts(&o, p->unit[u]); tp_put(&o, "\n", 1);
+                    count++;
+                }
+            }
+            i = e + 1;
+        }
+        mm_free(t);
+    }
+    if (o.bad || !o.b) { mm_free(o.b); (void)tp_fail(why, wl, "out of memory building the manifest of ", p->pkg); return 0; }
+    if (out_n) *out_n = o.n;
+    if (rows) *rows = count;
+    return o.b;
+}
+
+/* Walk an ar archive B[0..N), every member including "__.S" metadata. *AT starts at 0.
+   0 with NAME, *DATA (borrowed) and *LEN; 1 at the clean end; -1 when malformed. */
+int tp_ar_next(const char *b, long n, long *at, char *name, long cap, const char **data, long *len) {
+    long p, size = 0, i, nl;
+    const char *h;
+    if (!b || !at || !name || !data || !len || cap < 17) return -1;
+    if (*at == 0) {
+        if (n < 8 || !mm_same(b, "!<arch>\n", 8)) return -1;
+        *at = 8;
+    }
+    p = *at;
+    if (p == n) return 1;
+    if (p + 60 > n) return -1;
+    h = b + p;
+    if (h[58] != '`' || h[59] != '\n') return -1;
+    for (i = 48; i < 58 && h[i] >= '0' && h[i] <= '9'; i++) size = size * 10 + (h[i] - '0');
+    if (i == 48 || p + 60 + size > n) return -1;
+    *data = h + 60;
+    *len = size;
+    if (h[0] == '#' && h[1] == '1' && h[2] == '/') {
+        nl = 0;
+        for (i = 3; i < 16 && h[i] >= '0' && h[i] <= '9'; i++) nl = nl * 10 + (h[i] - '0');
+        if (nl <= 0 || nl > size || nl + 1 > cap) return -1;
+        for (i = 0; i < nl && h[60 + i]; i++) name[i] = h[60 + i];
+        name[i] = 0;
+        *data = h + 60 + nl;
+        *len = size - nl;
+    } else {
+        nl = 16;
+        while (nl > 0 && h[nl - 1] == ' ') nl--;
+        if (nl > 1 && h[nl - 1] == '/') nl--;
+        for (i = 0; i < nl; i++) name[i] = h[i];
+        name[nl] = 0;
+    }
+    *at = p + 60 + size + (size & 1);
+    if (*at > n) *at = n;
+    return 0;
+}
+
+/* 0 when every member header of B carries the canonical owner fields the product's ar writes
+   (mtime 0, uid 0, gid 0, mode 100644), every odd body is padded with one newline, and the
+   archive ends exactly after its last member. The member shas of a receipt do not cover these
+   bytes, so a tlib is only accepted in this one spelling. -1 otherwise. */
+int tp_ar_canon(const char *b, long n) {
+    const char *want = "0           0     0     100644  ";
+    long p = 8, size, i;
+    if (!b || n < 8 || !mm_same(b, "!<arch>\n", 8)) return -1;
+    while (p < n) {
+        if (p + 60 > n || !mm_same(b + p + 16, want, 32)) return -1;
+        size = 0;
+        for (i = 48; i < 58 && b[p + i] >= '0' && b[p + i] <= '9'; i++) size = size * 10 + (b[p + i] - '0');
+        for (; i < 58; i++) if (b[p + i] != ' ') return -1;
+        if (p + 60 + size > n) return -1;
+        p += 60 + size;
+        if (size & 1) {
+            if (p >= n || b[p] != '\n') return -1;
+            p++;
+        }
+    }
+    return p == n ? 0 : -1;
+}
+
+/* Find member NAME. 0 with *DATA and *LEN; 1 absent; -1 malformed archive. */
+int tp_ar_find(const char *b, long n, const char *name, const char **data, long *len) {
+    char nm[300];
+    long at = 0;
+    int r;
+    while ((r = tp_ar_next(b, n, &at, nm, sizeof nm, data, len)) == 0)
+        if (tx_eqz(nm, name)) return 0;
+    return r;
+}
+
+/* Field FIELD (0 is the key) of the NTH (0-based) line of receipt R whose key is KEY.
+   0 with DST; 1 when there is no such line; -1 when it does not fit or the field is missing. */
+int tp_rc_get(const char *r, long n, const char *key, int nth, int field, char *dst, long cap) {
+    long i = 0, e, off, len, kl = tx_len(key, TX_ZCAP);
+    int seen = 0;
+    while (i < n) {
+        e = i;
+        while (e < n && r[e] != '\n') e++;
+        if (e > i && !tx_field(r + i, e - i, '\t', 0, &off, &len) && tx_same(r + i + off, len, key, kl)) {
+            if (seen == nth) {
+                if (tx_field(r + i, e - i, '\t', field, &off, &len)) return -1;
+                return tx_copy(dst, cap, r + i + off, len) ? -1 : 0;
+            }
+            seen++;
+        }
+        i = e + 1;
+    }
+    return 1;
+}
