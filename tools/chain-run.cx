@@ -3,6 +3,10 @@
  * [--candidate ABS_EXEC] [--watch ABS_EXEC] [-- child candidate options]
  * Overrides are native executables with the same argv protocol (also used by the fake fixture).
  * Persisted deadline/retry/attempt budgets are shared by subsequent invocations, not reset.
+ * Output identity (LIM-S3): rev, mode, candidate, rehearse inputs, root, watch, argv and the plan
+ * semantics (build/chain-phases.tsv without its timeout_s column). Limits (build/limits.tsv via
+ * cxlib.limits, phase bounds) and --deadline-s are not identity: each invocation writes a LIMITS
+ * row with the sha256 of build/limits.tsv and whether it changed since the previous invocation.
  * Segments (T11): [--segment-s 1..270] bounds one invocation. A phase is started only when its
  * whole bound fits before the segment end, so an expiring segment has no child to kill: it writes
  * a SEGMENT row and exits 75 (continue). [--max-segments N] is persisted with the budget; the
@@ -27,11 +31,13 @@
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.chainrunproc
+#pragma unisa use cxlib.limits
 
 static const char *out;
 static long end_ms;
-static int attempts, resumes, max_attempts=4096, max_resumes=3;
-static int phase_bound=90, parallel=4;
+/* Defaults come from build/limits.tsv (cxlib.limits) at the top of main. */
+static int attempts, resumes, max_attempts, max_resumes;
+static int phase_bound, parallel=4, segment_cap;
 typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
 static int probing; static char pending[256];
@@ -52,7 +58,7 @@ static void validate_plan(void) {
     while(fgets(line,sizeof line,f)) {
         if(line[0]=='#')continue;
         if(plan_count==2048)die("phase count"); task *t=&plan[plan_count];
-        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d\t%4399s\t%255s\t%d %c",&order,t->id,t->domain,&t->bound,t->deps,t->lane,&t->width,&extra)!=7||order!=plan_count||t->bound<1||t->bound>90||t->width<1||t->width>4||lookup(t->id)>=0)die("phase table invalid");
+        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d\t%4399s\t%255s\t%d %c",&order,t->id,t->domain,&t->bound,t->deps,t->lane,&t->width,&extra)!=7||order!=plan_count||t->bound<1||t->bound>(int)lm_max("phase.bound",t->id)||t->width<1||t->width>4||lookup(t->id)>=0)die("phase table invalid");
         plan_count++;
     }
     if(ferror(f)||!plan_count||fclose(f))die("phase table invalid");
@@ -74,6 +80,33 @@ static void validate_plan(void) {
 }
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
+/* Every time/count default is a build/limits.tsv id; an unknown id refuses. */
+static int lim_int(const char *id) { double v=lm_get(id,0); if(v<0) die("unknown limit id"); return (int)v; }
+/* Run identity binds the plan's semantics, not its limits: every non-comment row of
+   build/chain-phases.tsv with column 4 (timeout_s) removed. Changing a phase bound between
+   segments of one run keeps the identity; changing order, id, domain, deps, lane or width
+   changes it and the next segment refuses. */
+static int plan_semantics_hex(char hex[65]) {
+    size_t n=0; char *b=cx_read("build/chain-phases.tsv",&n); if(!b) return -1;
+    char *s=malloc(n+1); if(!s) { free(b); return -1; }
+    size_t k=0; int field=0, comment=0, bol=1;
+    for(size_t i=0;i<n;i++) {
+        char c=b[i];
+        if(bol) { comment=c=='#'; field=0; bol=0; }
+        if(c=='\n') { if(!comment) s[k++]=c; bol=1; continue; }
+        if(comment) continue;
+        if(c=='\t') { field++; if(field==3) continue; }
+        if(field==3) continue;
+        s[k++]=c;
+    }
+    int rc=sy_sha256_hex(s,(long)k,hex); free(s); free(b); return rc;
+}
+/* sha256 of build/limits.tsv bytes, or "-" when the file does not exist. */
+static void limits_hex(char hex[65]) {
+    if(!sy_exists("build/limits.tsv")) { cx_fmt(hex,65,"-"); return; }
+    size_t n=0; char *b=cx_read("build/limits.tsv",&n);
+    if(!b||sy_sha256_hex(b,(long)n,hex)) die("limits identity"); free(b);
+}
 static void append(const char *file,const char *s) {
     char p[4400]; path(p,file); int fd=sy_open(p,O_WRONLY|O_CREAT|O_APPEND,0644);
     if(fd<0||sy_write_all(fd,s,strlen(s))||sy_close(fd)) die("append evidence");
@@ -115,7 +148,7 @@ static int observe(void) {
     /* The read-only observation is capped by the segment (never extended); no segment time left
        means the caller carries it to the next segment. */
     if(seg_end_ms){long seg=(seg_end_ms-sy_now_ms())/1000;if(seg<1)return RC_SEGMENT;if(seg<left)left=seg;}
-    pr_result r; int t=cr_run("chain-watch",watch_argv,left<90?(int)left:90,&r);
+    pr_result r; int t=cr_run("chain-watch",watch_argv,left<phase_bound?(int)left:phase_bound,&r);
     pr_echo(&r);
     char p[4400]; path(p,"chain-run-watch.stdout");
     if(cx_write(p,r.out?r.out:"",r.outn)) die("watch evidence");
@@ -339,8 +372,8 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             int bound=left<t->bound?(int)left:t->bound;
             char group_seconds[16];
             if(group) {
-                long available=seg_end_ms?(seg_end_ms-sy_now_ms())/1000:270;
-                if(available>270)available=270;if(available>left)available=left;
+                long available=seg_end_ms?(seg_end_ms-sy_now_ms())/1000:segment_cap;
+                if(available>segment_cap)available=segment_cap;if(available>left)available=left;
                 if(available<58){if(!held)held=t->id;continue;}
                 bound=(int)available;cx_fmt(group_seconds,sizeof group_seconds,"%d",bound-3);
             }
@@ -471,6 +504,8 @@ static int supervise(int argc,char **argv,int sep,const char *runner) {
     return 3;
 }
 int main(int argc,char **argv) {
+    phase_bound=lim_int("phase.bound"); segment_cap=lim_int("segment");
+    max_attempts=lim_int("attempts"); max_resumes=lim_int("resumes");
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
     if(argc==5&&!strcmp(argv[1],"--partition-fixture")) {
         out=argv[2]; partition_work=out; end_ms=sy_now_ms()+30000;
@@ -478,7 +513,7 @@ int main(int argc,char **argv) {
         return fronts("gen1-osx-x86_64","fixture",fixture,5);
     }
     const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0,*runner=0;
-    int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=5400, entered=sy_now_ms();
+    int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=lim_int("deadline.s"), entered=sy_now_ms();
     for(i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--")) { extra=i+1; break; }
         if(!strcmp(argv[i],"--rehearse")) { rehearse=1; continue; }
@@ -494,7 +529,7 @@ int main(int argc,char **argv) {
         else if(!strcmp(a,"--deadline-s")) seconds=number(b);
         else if(!strcmp(a,"--parallel")) { parallel=(int)number(b);if(parallel>4)die("parallel must be 1..4"); }
         else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
-        else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>270)die("segment must be 1..270 seconds"); }
+        else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>segment_cap){char m[64];cx_fmt(m,sizeof m,"segment must be 1..%d seconds",segment_cap);die(m);} }
         else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>4096)die("max segments must be 1..4096"); }
         else if(!strcmp(a,"--runner")) runner=b;
         else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
@@ -543,11 +578,12 @@ int main(int argc,char **argv) {
     char identity[16000],p[4400];
     int used=snprintf(identity,sizeof identity,"rev=%s\nmode=%s\ncandidate=%s\nctor=%s\nobjects=%s\npkg=%s\n",rev,rehearse?"rehearse":"full",candidate?candidate:"source",ctor?ctor:"-",objs?objs:"-",pkg?pkg:"-");
     if(used<0||(size_t)used>=sizeof identity) die("identity bound");
-    char root_id[4400],plan_hash[65]; size_t plan_n=0;
+    char root_id[4400],plan_hash[65];
     if(sy_realpath(".",root_id,sizeof root_id)<0) die("root identity");
-    char *plan_bytes=cx_read("build/chain-phases.tsv",&plan_n);
-    if(!plan_bytes||sy_sha256_hex(plan_bytes,(long)plan_n,plan_hash)) die("plan identity"); free(plan_bytes);
-    int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan=%s\ndeadline-s=%ld\nwatch=%s\n",root_id,plan_hash,seconds,watch?watch:"source");
+    if(plan_semantics_hex(plan_hash)) die("plan identity");
+    /* --deadline-s is a budget, not identity: the first invocation persists end_ms in
+       chain-run.budget and later invocations never reset it. */
+    int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan-semantics=%s\nwatch=%s\n",root_id,plan_hash,watch?watch:"source");
     if(bind<0||(size_t)bind>=sizeof identity-used) die("identity bound"); used+=bind;
     for(i=extra;i<argc;i++) { int n=snprintf(identity+used,sizeof identity-used,"arg=%s\n",argv[i]); if(n<0||(size_t)n>=sizeof identity-used) die("identity bound"); used+=n; }
     path(p,"chain-run.identity"); size_t n=0; char *old=cx_read(p,&n);
@@ -570,6 +606,16 @@ int main(int argc,char **argv) {
         segments=seg;owed=ow;if(width<parallel)parallel=width; free(old);
     }
     else { end_ms=sy_now_ms()+seconds*1000; save(); }
+    {
+        /* Limits are not identity; each invocation records the limits it runs under, and a
+           change from the previous invocation is a LIMITS row. Budgets are never reset by it. */
+        char lim[65],prev[65]="-",row[400]; int changed=0; lim[0]=0; limits_hex(lim);
+        path(p,"chain-run.limits"); old=cx_read(p,&n);
+        if(old) { if(n>=sizeof prev||tx_copy(prev,sizeof prev,old,n)) die("limits record"); free(old); changed=strcmp(prev,lim)!=0; }
+        if(cx_fmt(row,sizeof row,"LIMITS\t%ld\tn=%d\tlimits=%s\tprev=%s\tchanged=%d\n",sy_wall_s(),segments+(segment_s?1:0),lim,old?prev:"none",changed)) die("limits bound");
+        append("chain-run.tsv",row);
+        if(!old||changed) { if(cx_write(p,lim,strlen(lim))) die("limits write"); }
+    }
     if(segment_s) {
         /* The cap and the count are persisted: a new invocation continues them, it never resets them. */
         if(max_segments&&segments>=max_segments) return blocker("segment","segments-exhausted",3);

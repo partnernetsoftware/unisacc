@@ -245,6 +245,29 @@ static int segment_cases(const char *plan) {
     }
     rc2=runv("segowed","seg","60",seg,0,12);b2=budget_of("segowed");file_of(p,"segowed","chain-run.tsv");
     ck(rc==75&&rc2==75&&has(p,"\towed=settled\n")&&b2.resumes==b1.resumes+1&&!b2.owed&&b2.width==b1.width-1,"owed-resume-settled-before-new-work");
+    /* LIM-S3: limits are not identity. A phase bound or build/limits.tsv change between segments of
+       one run is accepted (same-dir resume, LIMITS row, budgets continue); a plan semantics change is
+       refused before any child. */
+    {
+        char lp[4400],ip[4400],id1[9000],*ib;size_t in=0;join(lp,base,"../build/limits.tsv");
+        const char *seg6[]={"--segment-s","6","--max-segments","9",0};
+        rc=runv("seglim","seg","60",seg6,0,12);b1=budget_of("seglim");file_of(p,"seglim","chain-run.tsv");file_of(q,"seglim","calls");int c1=count(q,"\n");
+        file_of(ip,"seglim","chain-run.identity");ib=cx_read(ip,&in);if(!ib||tx_copy(id1,sizeof id1,ib,in))exit(2);free(ib);
+        ck(rc==75&&count(p,"LIMITS\t")==1&&has(p,"\tlimits=-\tprev=none\tchanged=0\n"),"limits-row-recorded-per-segment");
+        put(lp,"# fixture limits\nphase.bound\ts\t5\t5\t*\t-\t-\n");
+        put_plan(plan,"0\tsnap\t-\t5\n1\ta\t-\t5\n2\tb\t-\t5\n3\tpack\t-\t5\n");
+        rc2=runv("seglim","seg","61",seg6,0,12);b2=budget_of("seglim");ib=cx_read(ip,&in);
+        ck(rc2==75&&ib&&in==strlen(id1)&&!memcmp(ib,id1,in),"identity-unchanged-when-only-phase-bound-changes");free(ib);
+        ck(count(p,"LIMITS\t")==2&&count(p,"\tchanged=1\n")==1&&has(p,"\tprev=-\tchanged=1\n"),"limits-change-recorded-old-new");
+        ck(b2.end==b1.end&&b2.attempts>b1.attempts&&b2.segments==b1.segments+1&&b2.resumes==b1.resumes&&b2.mseg==b1.mseg,"budget-not-reset-when-limits-change");
+        ck(c1>=1&&count(q,"\n")>c1&&count(q,"snap\n")==1&&has(p,"bound=5"),"limits-change-continues-same-run");
+        int calls=count(q,"\n");
+        put_plan(plan,"0\tsnap\t-\t5\n1\tb\t-\t5\n2\ta\t-\t5\n3\tpack\t-\t5\n");
+        ck(runv("seglim","seg","60",seg6,0,12)==2&&count(q,"\n")==calls,"identity-changed-when-order-deps-change-refused");
+        put_plan(plan,"0\tsnap\t-\t5\n1\ta\t-\t5\n2\tc\t-\t5\n3\tpack\t-\t5\n");
+        ck(runv("seglim","seg","60",seg6,0,12)==2&&count(q,"\n")==calls,"identity-changed-when-ids-change-refused");
+        put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    }
     sy_printf("CHECK_CHAIN_RUN_SEGMENTS\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }
 /* `--supervise ROOT OUT [RUNNER]` (batch chain-run-supervise): the supervisor, and the full re-check
