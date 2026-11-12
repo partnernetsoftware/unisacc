@@ -416,7 +416,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 
 ### 4.1 十八网（ask 事实表）
 
-口径、数量与主脊 / 对照臂划分见 §3.4（唯一权威）。补充依据：对照臂的判定来自变异实验（改一键 0 张构造网变化，plans/gold-mutation-2026-11-05.md），它们供 18 网经典批次与 gold 对照工具使用，不删；parse 的语句分派已由 `weights/stmt/stmt.tsv` 决策表替代。
+口径、数量与主脊 / 对照臂划分见 §3.4（唯一权威）。补充依据：对照臂的判定来自变异实验（改一键 0 张构造网变化），它们供 18 网经典批次与 gold 对照工具使用，不删；parse 的语句分派已由 `weights/stmt/stmt.tsv` 决策表替代。
 
 ### 4.2 构造链
 
@@ -489,7 +489,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 格状态：`COVERED_LOCAL`（本机批次断言了）/ `OBSERVED`（原生宿主观测）/ `DECLARED_DEPENDENCY`（有意声明的宿主依赖）= 满足；`MISSING` / `NEEDS_PRODUCT_CHANGE` / `NEEDS_FOREIGN_HOST` / `BLOCKED` = 开着的。
 
 - `full-domain.cx -- . DOMAIN` 逐格判域 PASS（开着的格为 0 才 rc0），19 个 `full-<域>` 批次就是它。
-- **外平台格**（`NEEDS_FOREIGN_HOST`）只能在**该原生宿主**上跑同一候选关掉——模拟/容器/缺席客机一律 BLOCKED/NOT_RUN，永远不算 PASS。逐格 oracle 见 [plans/foreign-host-runbook-cc.md](plans/foreign-host-runbook-cc.md)，原生 runner 见 [.github/workflows/candidate-native.yml](.github/workflows/candidate-native.yml)（ubuntu-24.04 / ubuntu-24.04-arm / macos-15-intel / macos-15 / windows-2025 / windows-11-arm）。
+- **外平台格**（`NEEDS_FOREIGN_HOST`）只能在**该原生宿主**上跑同一候选关掉——模拟/容器/缺席客机一律 BLOCKED/NOT_RUN，永远不算 PASS。原生 runner 见 [.github/workflows/candidate-native.yml](.github/workflows/candidate-native.yml)（ubuntu-24.04 / ubuntu-24.04-arm / macos-15-intel / macos-15 / windows-2025 / windows-11-arm）。
 - **已知缺口豁免**：`tests/waivers-0.0.44.tsv`（R 行理由 + W 行豁免 + F 行已知 FAIL 批次，F 行不改结论），`matrix-waive.cx --check` 保证记录和矩阵一致。
 
 ### 7.5 QUALIFIED 判定
