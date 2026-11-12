@@ -88,6 +88,21 @@ static int fake(int argc,char **argv) {
     if(!strcmp(mode,"fail")) { fprintf(stderr,"FIRST_REAL_FAILURE\n"); return 7; }
     if(!strcmp(mode,"exhaust")) return 124;
     if(!strcmp(mode,"slow")) { sy_sleep_ms(2200); return 124; }
+    if(!strncmp(mode,"yield",5)&&!strcmp(phase,"ctx")) {
+        /* a plain phase that stops itself before its attempt ends: twice, then it completes */
+        char yc[4400],cp[4400],hash[65];join(yc,out,"yields");join(cp,out,"checkpoint.tsv");
+        size_t yn=0;char *yb=cx_read(yc,&yn);free(yb);
+        if(!strcmp(mode,"yield-raw")) return 77;
+        if(yn<2||!strcmp(mode,"yield-forged")) {
+            FILE *yf=fopen(yc,"ab");fputc('y',yf);fclose(yf);
+            size_t cn=0;char *cb=cx_read(cp,&cn);if(!cb||sy_sha256_hex(cb,(long)cn,hash))return 2;free(cb);
+            if(!strcmp(mode,"yield-forged"))hash[0]=hash[0]=='0'?'1':'0';
+            /* another lane appends after this one looked: the named prefix must still verify */
+            if(!yn){FILE *cf=fopen(cp,"ab");fprintf(cf,"DONE\tother-lane\twall_ms=1\tsha=-\n");fclose(cf);}
+            const char *ae=getenv("UNISACC_CHAIN_ATTEMPT_END_MS");join(p,out,"yield-env");put(p,ae?ae:"-");
+            printf("CANDIDATE_YIELD\t%s\t%ld\t%s\n",getenv("UNISACC_CHAIN_SEGMENT_TOKEN"),(long)cn,hash);return 75;
+        }
+    }
     join(p,out,"once");
     if(!strcmp(mode,"resume")&&!sy_exists(p)) { put(p,"timeout\n"); return 137; }
     if((!strcmp(mode,"tree")||!strcmp(mode,"dirty"))&&!sy_exists(p)) {
@@ -338,6 +353,17 @@ int main(int argc,char **argv) {
     join(p,base,"exhaust/chain-run.tsv");ck(has(p,"resumes-exhausted")&&!has(p,"phase=ctx"),"bounded-retries");
     ck(call("fail","fail","30","3",0)==7,"first-failure-rc");
     join(p,base,"fail/chain-run.tsv");ck(has(p,"BLOCKER\tphase=snap\treason=first-failure")&&!has(p,"RESUME\t")&&!has(p,"phase=ctx"),"first-failure-stops");
+    /* 0.0.58: a phase that needs more than one attempt yields (rc 75 with a verified
+       CANDIDATE_YIELD line) instead of running into the bound; the runner runs it again and
+       counts no resume. An unverified line, or a candidate claiming the verified code, fails. */
+    ck(call("yield","yield","120","3",0)==0,"verified-yield-reruns-the-phase");
+    join(p,base,"yield/chain-run.tsv");ck(count(p,"YIELD\t")==2&&!has(p,"RESUME\t")&&has(p,"PREPARED\tpack"),"yield-is-not-a-resume");
+    join(p,base,"yield/calls");ck(count(p,"ctx\n")==3,"yielded-phase-called-until-done");
+    { char e[4400];size_t en=0;join(e,base,"yield/yield-env");char *eb=cx_read(e,&en);ck(eb&&en>8&&eb[0]>='1'&&eb[0]<='9',"attempt-end-handed-to-the-phase");free(eb); }
+    ck(call("yieldforged","yield-forged","30","3",0)==2,"unverified-yield-fails");
+    join(p,base,"yieldforged/chain-run.tsv");ck(has(p,"BLOCKER\tphase=ctx\treason=first-failure")&&!has(p,"YIELD\t"),"unverified-yield-not-rerun");
+    join(p,base,"yieldforged/calls");ck(count(p,"ctx\n")==1,"unverified-yield-called-once");
+    ck(call("yieldraw","yield-raw","30","3",0)==2,"candidate-cannot-claim-verified-yield");
     ck(call("deadline","slow","2","3",0)==3,"deadline-rc3");
     join(p,base,"deadline/chain-run.tsv");ck(has(p,"reason=deadline"),"deadline-evidence");
     join(p,base,"reuse");sy_mkdir(p,0755);join(p,base,"reuse/checkpoint.tsv");put(p,"DONE\tsnap\twall_ms=8\tsha=-\n");

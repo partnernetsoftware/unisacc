@@ -65,6 +65,29 @@ static void segment_admit(int secs) {
         exit(75);
     }
 }
+/* A phase whose work is many bounded calls with its own committed progress (the fixedpoint root
+   and closure objects: one call per batch of keys, each committed key recorded in .chain-steps)
+   can need more than one attempt. Running into the attempt bound is a kill: the in-flight batch
+   is lost and the runner counts a resume, of which a whole chain has three (0.0.58: g2 closure
+   prepare was killed at the bound in every attempt and the chain stopped on resumes-exhausted
+   with 38 of 44 root keys committed). The runner hands each attempt its end
+   (UNISACC_CHAIN_ATTEMPT_END_MS) and a token; when the next call would not fit and this attempt
+   has committed at least one batch, the candidate stops itself: it names the token and the
+   checkpoint bytes it saw (length and sha256; the file only grows, so the prefix stays
+   checkable while other lanes append) and exits 75. The runner verifies the line and runs the
+   phase again without counting a resume. No progress in the attempt means no yield. */
+static long attempt_end;
+static void phase_yield(const char *why, long last_ms, long need_ms) {
+    char p[4400], hash[65]; size_t n = 0;
+    const char *token = sy_env("UNISACC_CHAIN_SEGMENT_TOKEN");
+    if (!token || !jobs_segment_out || cx_fmt(p, sizeof p, "%s/checkpoint.tsv", jobs_segment_out)) die("yield identity", 0);
+    char *b = cx_read(p, &n);
+    if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); die("yield checkpoint", p); }
+    free(b);
+    sy_printf("PHASE_YIELD\t%s\tlast_ms=%ld\tneed_ms=%ld\n", why, last_ms, need_ms);
+    sy_printf("CANDIDATE_YIELD\t%s\t%ld\t%s\n", token, (long)n, hash);
+    exit(75);
+}
 static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
     segment_admit(secs);
     pr_result r;
@@ -908,6 +931,22 @@ static void fp_call(const char *root,const char *rev,const char *snap,const char
     if(keys){a[n++]="--objects";a[n++]=(char *)keys;}else a[n++]="--link-only";
     if(resume)a[n++]="--resume";a[n]=0;if(step(root,a))die(keys?"fixedpoint objects":"fixedpoint link",phase);
 }
+/* One batch of uncommitted keys. Before it starts: if this attempt already committed a batch and
+   the next one is not expected to fit before the attempt ends, yield (phase_yield). The estimate
+   is twice the last batch of this attempt, at least 15 and at most 55 seconds (the measured
+   budget of a batch, build/g2-budget.tsv). */
+static int fp_committed; static long fp_last_ms;
+static void fp_commit(const char *root,const char *rev,const char *snap,const char *pkg,
+                      const char *gen1,const char *fp,const char *helper,
+                      const char *target,const char *phase,const char *batch){
+    if(attempt_end&&fp_committed){
+        long need=fp_last_ms*2;if(need<15000)need=15000;if(need>55000)need=55000;
+        if(sy_now_ms()+need>attempt_end)phase_yield("fixedpoint-batch",fp_last_ms,need);
+    }
+    long t0=sy_now_ms();
+    fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);
+    fp_last_ms=sy_now_ms()-t0;fp_committed++;
+}
 static void fp_batch(const char *root,const char *rev,const char *snap,const char *pkg,
                      const char *gen1,const char *fp,const char *helper,
                      const char *target,const char *phase,const char *keys,int resume){
@@ -927,13 +966,13 @@ static void fp_batch(const char *root,const char *rev,const char *snap,const cha
         const char *e=strchr(p,',');len=e?(int)(e-p):(int)strlen(p);char needle[160];
         if(len<1||cx_fmt(needle,sizeof needle,"\n%.*s\t",len,p))die("batch key",p);
         if(!strstr(steps,needle)){
-            if(pending==limit||pending==256){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);used=0;pending=0;}
+            if(pending==limit||pending==256){fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);used=0;pending=0;}
             int z=snprintf(batch+used,sizeof batch-used,"%s%.*s",pending?",":"",len,p);
             if(z<0||z>=sizeof batch-used)die("batch buffer",p);used+=z;pending++;
         }
         p=e?e+1:p+len;
     }
-    free(steps);if(pending)fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);
+    free(steps);if(pending)fp_commit(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch);
 }
 static void g2_closures(const char *root, const char *outdir, const char *rev, const char *snap, const char *pkg,
                         const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,
@@ -1782,6 +1821,13 @@ int main(int argc, char **argv) {
         return 0;
     }
     /* 链内产物不得依赖单元前端缓存(plans/unit-frontcache.md):强制关,子进程继承;设不上或读回不是 0 即拒绝 */
+    {   const char *ae = sy_env("UNISACC_CHAIN_ATTEMPT_END_MS");
+        if (ae && *ae) {
+            long value = 0;
+            for (const char *q = ae; *q; q++) { if (*q < '0' || *q > '9' || value > 4000000000000L) die("REFUSE attempt end", ae); value = value * 10 + (*q - '0'); }
+            attempt_end = value;
+        }
+    }
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
@@ -1814,6 +1860,7 @@ int main(int argc, char **argv) {
     }
     if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {
         until_phase = tx_eqz(argv[8], "-") ? 0 : argv[8];
+        jobs_segment_out = argv[3];
         run_g2_lnx(argv[2], argv[3], "23a873aaa156440b99c25ef48c2d94f6ca32e858", argv[4],
                    "package", "constructor", argv[5], "identity-helper", "lnx/x86_64", "lnx-x86_64",
                    tx_eqz(argv[6], "g3") ? 3 : 2, tx_eqz(argv[7], "resume"));

@@ -6,6 +6,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use sys.sha
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainfacts
@@ -167,6 +168,43 @@ int main(int argc, char **argv) {
             w = cx_read(wtrace, &wn);
             ck(grc == 0 && has(out, "RESUME\tgen1-fixture-stub") && !has(out, "CLEANUP\t") && w && wn == 5, "finished-stub-reused-not-scrubbed");
             free(w);
+        }
+        /* 0.0.58: the fixedpoint root objects are many bounded batches. Told that its attempt ends
+           soon, the candidate commits one batch and then yields (rc 75, a CANDIDATE_YIELD line
+           naming the runner's token and the checkpoint bytes it saw) instead of starting a batch
+           that would be killed; called again with time, it goes on from the committed keys. */
+        {
+            const char *fakecom = "#!/bin/sh\ncase \"$*\" in *--closure-list*) printf 'm0.o\\t%s/src/unit0.cx\\n' \"$BATCH_SNAP\"; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\n"
+                "phase=; keys=; while [ $# -gt 0 ]; do case \"$1\" in --phase) shift; phase=$1;; --objects) shift; keys=$1;; esac; shift; done\n"
+                "if [ -n \"$keys\" ]; then dest=\"$BATCH_FP/$phase/lnx-x86_64\"; mkdir -p \"$dest\"; old=$IFS; IFS=,; for key in $keys; do printf '\\n%s\\t1\\n' \"$key\" >> \"$dest/.chain-steps\"; done; IFS=$old; fi\nexit 0\n";
+            char yd[4600], yfp[4600], ytrace[4600], ypath[4700], ycp[4700], ycmd[14000], want[300], hex[65], endms[40];
+            size_t bn = 0, cn = 0;
+            char *budget = cx_read("build/g2-budget.tsv", &bn);
+            if (!budget || cx_fmt(yd, sizeof yd, "%s/yield", td) || cx_fmt(yfp, sizeof yfp, "%s/fixedpoint", yd) || cx_fmt(ytrace, sizeof ytrace, "%s/trace", yd) ||
+                cx_fmt(ycp, sizeof ycp, "%s/checkpoint.tsv", yd) || sy_mkdir(yd, 0755) || sy_mkdir(yfp, 0755)) return 2;
+            if (cx_fmt(ypath, sizeof ypath, "%s/g2", yfp) || sy_mkdir(ypath, 0755) || cx_fmt(ypath, sizeof ypath, "%s/build", yd) || sy_mkdir(ypath, 0755) ||
+                cx_fmt(ypath, sizeof ypath, "%s/build/g2-budget.tsv", yd) || cx_write(ypath, budget, bn) ||
+                cx_fmt(ypath, sizeof ypath, "%s/unisacc.com", yd) || cx_write(ypath, fakecom, strlen(fakecom)) ||
+                cx_write(ycp, "DONE\tsnap\twall_ms=1\tsha=-\n", 26)) return 2;
+            free(budget);
+            if (sy_setenv("BATCH_TRACE", ytrace, 1) || sy_setenv("BATCH_FP", yfp, 1) || sy_setenv("BATCH_SNAP", yd, 1) || sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN", "7:g2-fixture", 1) ||
+                cx_fmt(endms, sizeof endms, "%ld", sy_now_ms() + 5000) || sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS", endms, 1)) return 2;
+            if (cx_fmt(ycmd, sizeof ycmd, "'%s' --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1", candidate, yd, yd, yd, yfp)) return 2;
+            int yrc = sh(ycmd, out, sizeof out);
+            char *cb = cx_read(ycp, &cn);
+            if (!cb) return 2;
+            if (sy_sha256_hex(cb, (long)cn, hex)) return 2;
+            free(cb);
+            if (cx_fmt(want, sizeof want, "CANDIDATE_YIELD\t7:g2-fixture\t%ld\t%s\n", (long)cn, hex)) return 2;
+            size_t tn = 0; char *tr = cx_read(ytrace, &tn);
+            int calls = 0; for (const char *q = tr ? find_sub(tr, "--objects\t") : 0; q; q = find_sub(q + 1, "--objects\t")) calls++;
+            ck(yrc == 75 && has(out, "PHASE_YIELD\tfixedpoint-batch") && has(out, want) && !has(out, "status=UNTIL") && calls == 2, "fixedpoint-batches-yield-before-the-attempt-ends");
+            free(tr);
+            if (cx_fmt(endms, sizeof endms, "%ld", sy_now_ms() + 600000) || sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS", endms, 1)) return 2;
+            if (cx_fmt(ycmd, sizeof ycmd, "'%s' --g2g3-fixture '%s' '%s' '%s' '%s' g2 resume g2-lnx-x86_64-objects 2>&1", candidate, yd, yd, yd, yfp)) return 2;
+            yrc = sh(ycmd, out, sizeof out);
+            ck(yrc == 0 && has(out, "status=UNTIL") && !has(out, "CANDIDATE_YIELD"), "yielded-phase-continues-from-committed-keys");
+            if (sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS") || sy_unsetenv("UNISACC_CHAIN_SEGMENT_TOKEN")) return 2;
         }
         printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;

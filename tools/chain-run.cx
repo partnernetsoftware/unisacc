@@ -167,8 +167,16 @@ static void execute(const char *phase,char **v,int bound,int a) {
     else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO_DERIVED"))_exit(2);
     int grouped=0;for(int i=0;v[i];i++)if(!strcmp(v[i],"--jobs-segment-s"))grouped=1;
     char token[300];cx_fmt(token,sizeof token,"%d:%s",a,phase);
-    if(grouped&&sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
-    long started=sy_now_ms();pr_result r;int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
+    if(sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
+    long started=sy_now_ms();pr_result r;
+    /* A plain phase is told when its attempt ends: 14 seconds before the bound, 12 before the
+       owner starts killing (bound - 2). A candidate whose next call would not fit yields
+       instead (see below). Rechecks, job groups and very short bounds get no such end. */
+    {   char at_end[40];
+        if(grouped||pre||bound<30){if(sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS"))_exit(2);}
+        else if(cx_fmt(at_end,sizeof at_end,"%ld",started+(long)(bound-14)*1000)||sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS",at_end,1))_exit(2);
+    }
+    int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
     result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
     result_path(p,a,"stderr");if(cx_write(p,r.err?r.err:"",r.errn))_exit(2);
     char timing[200];cx_fmt(timing,sizeof timing,"\nATTEMPT_TIME\tphase=%s\twall_ms=%ld",phase,sy_now_ms()-started);
@@ -179,6 +187,22 @@ static void execute(const char *phase,char **v,int bound,int a) {
     if(grouped&&!t&&rc==75&&!r.residue) {
         char cp[4400],hash[65],want[450];size_t size=0;path(cp,"checkpoint.tsv");char *bytes=cx_read(cp,&size);
         if(bytes&&!sy_sha256_hex(bytes,(long)size,hash)&&!cx_fmt(want,sizeof want,"CANDIDATE_SEGMENT\t%s\t%s\n",token,hash)&&r.out&&strstr(r.out,want))rc=76;
+        free(bytes);
+    }
+    /* A plain phase's yield: rc 75 with "CANDIDATE_YIELD token length sha256" where the first
+       LENGTH bytes of checkpoint.tsv (append-only; other lanes may have added rows since) hash to
+       SHA256. Verified, it is 77: the phase stays pending and is run again, no resume counted.
+       An unverified 75, or a candidate that returns 77 itself, is a plain failure (2). */
+    if(!grouped&&!t&&rc==77)rc=2;
+    if(!grouped&&!t&&rc==75) {
+        rc=2;
+        char cp[4400],hash[65],lead[400];size_t size=0;path(cp,"checkpoint.tsv");char *bytes=cx_read(cp,&size);
+        const char *line=!r.residue&&r.out&&!cx_fmt(lead,sizeof lead,"CANDIDATE_YIELD\t%s\t",token)?strstr(r.out,lead):0;
+        if(bytes&&line&&(line==r.out||line[-1]=='\n')) {
+            const char *q=line+strlen(lead);long length=0;int digits=0;
+            while(*q>='0'&&*q<='9'&&digits<12){length=length*10+(*q-'0');q++;digits++;}
+            if(digits&&*q=='\t'&&length>0&&(size_t)length<=size&&!sy_sha256_hex(bytes,length,hash)&&!strncmp(q+1,hash,64)&&q[65]=='\n')rc=77;
+        }
         free(bytes);
     }
     int retry=(t&&r.timed_out)||(!t&&(r.rc==-9||r.rc==-15||r.rc==124||r.rc==137||r.rc==143));
@@ -284,6 +308,7 @@ static void settle(task *t,outcome r,int *stop,int *retrying) {
     int pre=t->recheck==1; t->recheck=0;
     if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
     else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;if(!*stop)*stop=RC_SEGMENT;}
+    else if(r.rc==77&&!pre){t->state=0;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);}
     else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
     else if(r.retry){*retrying=1;t->state=0;}
     else if(pre){t->recheck=2;t->state=0;}
