@@ -791,8 +791,10 @@ static int users(const char *file) {
     return 0;
 }
 
+static int closure_dump;
+static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
 static void usage(void) {
-    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID...) [--list-only | --run [-j N]] | --users FILE\n");
+    fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] | --users FILE | --closure-dump\n");
     exit(2);
 }
 int main(int argc, char **argv) {
@@ -819,6 +821,13 @@ int main(int argc, char **argv) {
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
+        else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--layer") && a + 1 < argc) {
+            static const char *known[] = {"base", "ext", "stream", "compiler", "driver", "chain", "release", "all", 0}; int q;
+            layer = argv[a + 1]; a += 2;
+            for (q = 0; known[q] && !tx_eqz(known[q], layer); q++) {}
+            if (!known[q]) die("--layer: base|ext|stream|compiler|driver|chain|release|all");
+        }
         else if (tx_eqz(argv[a], "--run")) { mode_run = 1; a++; }
         else if (tx_eqz(argv[a], "--prepare-materials")) { prep_on = 1; a++; }
         else if (tx_eqz(argv[a], "-j") && a + 1 < argc) { jobs = (int)parse_long(argv[a + 1], tx_len(argv[a + 1], 8)); if (jobs < 1 || jobs > MAXJOBS) die("-j N: 1..8"); a += 2; }
@@ -833,6 +842,40 @@ int main(int argc, char **argv) {
             a += 2;
         }
         else usage();
+    }
+    if (closure_dump) {   /* the facts tools/batch-packages-gen.cx builds build/batch-packages.tsv from */
+        if (src || mode_run) usage();
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            int ni, d;
+            mark_batch(&batch[b]);
+            printf("B\t%s\t%s\t%s\t%s\n", batch[b].id, batch[b].tier, batch[b].materials, batch[b].source);
+            for (ni = 0; ni < nnode; ni++) if (node[ni].mark == epoch) printf("C\t%s\t%s\t%s\n", batch[b].id, via_name[node[ni].via], display(ni));
+            for (d = 0; d < ndirs; d++) printf("D\t%s\t%s\t%s\n", batch[b].id, via_name[dirvia[d]], display(dirs[d]));
+        }
+        printf("CLOSURE_SUMMARY\tbatches=%d\tfiles=%d\n", nbatch, nnode);
+        return 0;
+    }
+    if (layer) {   /* coarse cut: the batches build/batch-packages.tsv puts in LAYER, plus layer `all` and every batch the table does not name */
+        size_t tn; char *t = cx_read("build/batch-packages.tsv", &tn); int own = 0, all = 0, missing = 0;
+        if (src) usage();
+        if (!t) die("cannot read build/batch-packages.tsv (tools/batch-packages-gen.cx -- --write)");
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            char key[400]; long at, kl, ll = 0; const char *lay = "-";
+            if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
+            if (cx_fmt(key, sizeof key, "\nbatch\t%s\t", batch[b].id)) die("id too long");
+            kl = tx_len(key, sizeof key); at = tx_find(t, (long)tn, key, kl);
+            if (at >= 0) { lay = t + at + kl; while (at + kl + ll < (long)tn && lay[ll] != '\t' && lay[ll] != '\n') ll++; }
+            if (at < 0) missing++;
+            else if (ll == 3 && tx_prefix(lay, 3, "all", 3)) all++;
+            else if (ll == tx_len(layer, 64) && tx_prefix(lay, ll, layer, ll)) own++;
+            else continue;
+            printf("LAYER\t%s\tlayer=%.*s\n", batch[b].id, at < 0 ? 7 : (int)ll, at < 0 ? "unknown" : lay);
+            sel[nsel++] = b;
+        }
+        printf("LAYER_SUMMARY\tlayer=%s\tbatches=%d\town=%d\tall=%d\tunknown=%d\tscanned=%d\n", layer, nsel, own, all, missing, nbatch);
+        return mode_run ? run(sel, nsel, jobs) : 0;
     }
     if (src != 1 && src != 100) usage();
     if (prep_on) {   /* the prebuild shares the 60 s command window: leave the kill sweep room to finish inside it */
