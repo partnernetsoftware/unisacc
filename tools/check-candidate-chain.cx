@@ -144,6 +144,30 @@ int main(int argc, char **argv) {
                 free(w);
             }
         }
+        /* A stub attempt killed at its bound leaves DEST and DEST.control; whole-front refuses to
+           run over them. The step must scrub the unfinished DEST, run once, and reuse it after. */
+        {
+            char wroot[4600], wout[4600], wdest[4600], wctl[4600], wtrace[4600], wpath[4700], script[1500], gcmd[14000];
+            if (cx_fmt(wroot, sizeof wroot, "%s/wfs-root", td) || cx_fmt(wout, sizeof wout, "%s/wfs-out", td) || cx_fmt(wdest, sizeof wdest, "%s/x-stub", wout) ||
+                cx_fmt(wctl, sizeof wctl, "%s.control", wdest) || cx_fmt(wtrace, sizeof wtrace, "%s/wfs-trace", td) ||
+                sy_mkdir(wroot, 0755) || sy_mkdir(wout, 0755) || sy_mkdir(wdest, 0755) || sy_mkdir(wctl, 0755)) return 2;
+            if (cx_fmt(wpath, sizeof wpath, "%s/replay.phase", wdest) || cx_write(wpath, "partial\n", 8)) return 2;
+            if (cx_fmt(script, sizeof script,
+                    "#!/bin/sh\nif [ -e \"$7\" ] || [ -e \"$7.control\" ]; then echo 'whole-front: REFUSE exclusive phase/control required' >&2; exit 2; fi\n"
+                    "mkdir \"$7\" \"$7.control\" || exit 3\nprintf 'stub\\n' > \"$7/stub.c\"\nprintf '%%s\\n' \"$3\" >> '%s'\n", wtrace) ||
+                cx_fmt(wpath, sizeof wpath, "%s/unisacc.com", wroot) || cx_write(wpath, script, strlen(script))) return 2;
+            if (cx_fmt(gcmd, sizeof gcmd, "'%s' --wf-stub-fixture '%s' '%s' '%s/wfs-prep' osx/x86_64 '%s/wfs-merged' '%s' gen1-fixture-stub 2>&1",
+                       candidate, wroot, wout, td, td, wdest)) return 2;
+            int grc = sh(gcmd, out, sizeof out);
+            size_t wn = 0; char *w = cx_read(wtrace, &wn);
+            if (cx_fmt(wpath, sizeof wpath, "%s/replay.phase", wdest)) return 2;
+            ck(grc == 0 && has(out, "CLEANUP\t") && !has(out, "REFUSE exclusive") && w && wn == 5 && !memcmp(w, "stub\n", 5) && sy_exists(wpath) == 0, "killed-stub-residue-scrubbed-before-retry");
+            free(w);
+            grc = sh(gcmd, out, sizeof out);
+            w = cx_read(wtrace, &wn);
+            ck(grc == 0 && has(out, "RESUME\tgen1-fixture-stub") && !has(out, "CLEANUP\t") && w && wn == 5, "finished-stub-reused-not-scrubbed");
+            free(w);
+        }
         printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }
