@@ -147,14 +147,24 @@ static int candidate_lock(const char *base, const char *domain) {
     candidate_lock_fd(fd, p);
     return fd;
 }
+static const char *step_out;
+static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap);
 static int bound_sh_secs(const char *root, char **rest, int secs) {
-    char com[4400];
+    char com[4400], pnative[4400];
     char *v[128+28];
     int n = 0, i = 0;
+    const char *pname = 0;
     if (secs < 1 || secs > (int)lm_max("phase.bound", 0)) die("REFUSE bound secs above phase.bound max", 0);
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
-    v[n++] = (char *)"sh";
-    v[n++] = com;
+    if (step_out && rest[0] && rest[1] && !strcmp(rest[1], "--")) pname = tool_pinned(root, rest[0], secs, pnative, sizeof pnative);
+    if (pname) {
+        /* 钉住的链工具:直接跑输出目录内那一份可执行体,不再读工作检出 */
+        v[n++] = pnative;
+        i = 2;
+    } else {
+        v[n++] = (char *)"sh";
+        v[n++] = com;
+    }
     while (rest[i] && n + 1 < 72) {
         v[n++] = rest[i];
         i++;
@@ -255,7 +265,6 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
    output: OUT/chain-step.native, built once from ROOT, with OUT/chain-step.pin recording its
    sha256. Every later call of this output runs that file and refuses when its bytes no longer
    match the record; the checkout is not read again. A new output pins the tool anew. */
-static const char *step_out;
 static char step_native[4400];
 static void step_hash(const char *path, char hash[65]) {
     size_t n = 0; char *b = cx_read(path, &n);
@@ -286,6 +295,54 @@ static void step_pin(const char *root, int secs) {
         sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\n", step_native, hash);
     }
     if (sy_close(lock)) die("candidate unlock", step_native);
+}
+/* 同一机制推广到 whole-front、preflight、release-build、release-ape(0.0.59):每个输出目录内
+   NAME.native 只构造一次,NAME.pin 记录工具名、输出目录、构造时源码 sha 与可执行体 sha256;之后每次
+   (每进程首次)核对,可执行体字节变化拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录
+   拒绝 "REFUSE chain-tool pin dir mismatch"。检出内工具改动不影响本输出,与 chain-step 同。 */
+static int pin_busy;
+static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap) {
+    static const char *names[] = {"whole-front", "preflight", "release-build", "release-ape", 0};
+    static char done[4][4400];
+    const char *name = 0;
+    char want[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], shash[65], text[9000];
+    int k;
+    size_t tl = strlen(tool);
+    if (pin_busy) return 0;
+    for (k = 0; names[k]; k++) {
+        if (cx_fmt(want, sizeof want, "/tools/%s.cx", names[k])) die("path", "tool pin");
+        if (tl > strlen(want) && !strcmp(tool + tl - strlen(want), want)) { name = names[k]; break; }
+    }
+    if (!name) return 0;
+    if (cx_fmt(native, cap, "%s/%s.native", step_out, name) || cx_fmt(pin, sizeof pin, "%s/%s.pin", step_out, name) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "tool pin");
+    if (!strcmp(done[k], native)) return name;
+    int lock = candidate_lock(native, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        char *o = strstr(old, "\nout=");
+        char outl[4500];
+        if (cx_fmt(outl, sizeof outl, "\nout=%s\n", step_out) || !o || memcmp(o, outl, strlen(outl))) die("REFUSE chain-tool pin dir mismatch", pin);
+        step_hash(native, hash);
+        char nl2[200];
+        if (cx_fmt(nl2, sizeof nl2, "\nnative_sha=%s\n", hash) || n < strlen(nl2) || memcmp(old + n - strlen(nl2), nl2, strlen(nl2))) die("REFUSE chain-tool pin mismatch", pin);
+        free(old);
+    } else {
+        char *a[] = {(char *)tool, (char *)"-o", tmp, 0};
+        pin_busy = 1;
+        int rc = bound_sh_secs(root, a, secs);
+        pin_busy = 0;
+        if (rc) die("chain-tool pin build", tool);
+        step_hash(tool, shash);
+        step_hash(tmp, hash);
+        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=%s\n", name, step_out, shash, hash)) die("chain-tool pin record", pin);
+        if (sy_chmod(tmp, 0755) || sy_rename(tmp, native)) die("publish chain-tool native", native);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-tool pin", pin);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, native, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", native);
+    if (cx_fmt(done[k], sizeof done[k], "%s", native)) die("path", "tool pin");
+    return name;
 }
 /* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
    argv through a fake ROOT/unisacc.com ("TOOL -- ARGS") and produce no receipt. A chain run
@@ -1905,6 +1962,15 @@ int main(int argc, char **argv) {
         until_phase = tx_eqz(argv[10], "-") ? 0 : argv[10];
         gen1_entry(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7],
                    argv[8], "gen1-lnx-fixture", tx_eqz(argv[9], "resume"));
+        return 0;
+    }
+    if (argc == 5 && tx_eqz(argv[1], "--tool-pin-fixture")) {
+        /* 夹具入口: --tool-pin-fixture ROOT OUT TOOL.cx,只做钉住并打印可执行体路径 */
+        char nat[4400];
+        step_out = argv[3];
+        const char *nm = tool_pinned(argv[2], argv[4], 50, nat, sizeof nat);
+        if (!nm) die("REFUSE not a pinned chain tool", argv[4]);
+        sy_printf("TOOL_PIN\t%s\t%s\n", nm, nat);
         return 0;
     }
     if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {
