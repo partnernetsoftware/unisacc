@@ -9,6 +9,7 @@
  */
 #pragma unisa use cxlib.allsession
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.limits
 #pragma unisa use cxlib.testplan
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
@@ -27,9 +28,15 @@ static volatile sig_atomic_t interrupted;
 static void stop_requested(int signal_number){interrupted=signal_number;}
 static double outer_end;
 static void fail(const char *s){fprintf(stderr,"s9: REFUSE %s %s\n",s,sw);exit(2);}
+static double L_(const char *id){double v=lm_get(id,0);if(v<0)fail(id);return v;}
+static char *L_CMD(void){static char b[16];if(cx_fmt(b,sizeof b,"%d",(int)L_("s9.cmd")))fail("format-bound");return b;}
+static int L_WAIT(void){return (int)L_("s9.cmd")+2;}
+static long long L_SLICE_NS(void){return (long long)L_("s9.slice")*1000000000LL;}
+static double L_OUTER(void){return L_("s9.outer");}
+static double L_EPOCH_MARGIN(void){return L_("s9.epoch.margin");}
 static void path(char *p,const char *a,const char *b){if(as_join(p,4400,a,b))fail("path");}
 static void save(const char *p,const char *s,size_t n){if(as_save_new(p,s,n,sw,sizeof sw))fail("exclusive-write");}
-static void bounded(void){const char *s=getenv("UNISACC_BOUND_DEADLINE_MONO");char *e=0;if(!s)fail("supervisor-deadline-required");outer_end=strtod(s,&e);double left=outer_end-(double)as_now()/1e9;if(!e||*e||left<=0||left>300.5)fail("outer-budget-300");}
+static void bounded(void){const char *s=getenv("UNISACC_BOUND_DEADLINE_MONO");char *e=0;if(!s)fail("supervisor-deadline-required");outer_end=strtod(s,&e);double left=outer_end-(double)as_now()/1e9;if(!e||*e||left<=0||left>L_OUTER())fail("outer-budget-300");}
 static int present(const char *p){struct stat st;if(!lstat(p,&st))return 1;if(errno==ENOENT)return 0;fail("stat");return 0;}
 static int aw_native(char *elf,size_t cap){const char *e=getenv("S9_ALLWAVES_ELF");if(!e||!e[0]||!present(e))return 0;if(cx_fmt(elf,(int)cap,"%s",e))fail("allwaves-elf");return 1;}
 static void visit_batch(const tp_batch_view *v,void *ctx){(void)ctx;for(int i=0;i<reg.nb;i++)if(!strcmp(v->id,reg.b[i].id))tiers[i]=!strcmp(v->tier,"commit")?0:!strcmp(v->tier,"daily")?1:2;}
@@ -46,12 +53,12 @@ static void setup(const char *root,const char *dir,int fresh){
  for(int i=0;i<reg.nb;i++){size_t at=0,z=strlen(reg.b[i].id);while(at<n){size_t e=at;while(e<n&&d[e]!='\n')e++;if(e-at>z&&d[at]!='#'&&!memcmp(d+at,reg.b[i].id,z)&&d[at+z]=='\t')exclusive[i]=1;at=e+1;}}free(d);
 }
 static int command(char **v,const char *log,int seconds){np_result r={0};if(np_run(v,sr,0,seconds,&r,sw,sizeof sw))fail("command-transport");if(log){np_buf b={0};np_put(&b,r.out,r.outn);np_put(&b,r.err,r.errn);save(log,b.p,b.n);free(b.p);}else if(r.rc){if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);}int rc=r.rc;np_free(&r);return rc;}
-static int aw(const char *cmd,const char *session,const char *arg,const char *tail){char *v[]={sb,"55",se,(char *)cmd,sr,(char *)session,(char *)arg,(char *)tail,0};if(!arg)v[6]=0;else if(!tail)v[7]=0;return command(v,0,57);}
+static int aw(const char *cmd,const char *session,const char *arg,const char *tail){char *v[]={sb,L_CMD(),se,(char *)cmd,sr,(char *)session,(char *)arg,(char *)tail,0};if(!arg)v[6]=0;else if(!tail)v[7]=0;return command(v,0,L_WAIT());}
 /* Full-input snapshot also catches already dirty edits, removals and link targets.
    The snapshot is supplied by the same all-waves implementation as each wave. */
 static char *input_snapshot(size_t *n){
  char checkpath[4400];path(checkpath,sd,"checker");if(!initializing&&!present(checkpath))fail("prepare-checker-required");
- char checker[4400],hp[4400],h[65],awelf[4400];path(checker,sd,"checker");int ready=present(checker);if(ready){path(hp,sd,"checker.sha256");size_t hn;char *want=as_read(hp,0,&hn,sw,sizeof sw);if(!want||hn!=65||want[64]!='\n'||as_sha_file(checker,0,h,0,sw,sizeof sw)||memcmp(want,h,64))fail("checker-identity");free(want);}char *native[]={sb,"55",checker,"inputs",sr,0};char *source[]={sb,"55","sh",sc,"tools/all-waves.cx","--","inputs",sr,0};int hasaw=aw_native(awelf,sizeof awelf);char *cached[]={sb,"55",awelf,"inputs",sr,0};np_result r={0};int transport=np_run(ready?native:(hasaw?cached:source),sr,0,57,&r,sw,sizeof sw);if(transport||r.rc){if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);fprintf(stderr,"s9: inputs transport=%d rc=%d\n",transport,r.rc);np_free(&r);fail("inputs");}char *s=malloc(r.outn+1);if(!s)fail("allocation");if(mm_copy(s,r.outn+1,r.out,r.outn))fail("copy-bound");s[r.outn]=0;*n=r.outn;np_free(&r);return s;
+ char checker[4400],hp[4400],h[65],awelf[4400];path(checker,sd,"checker");int ready=present(checker);if(ready){path(hp,sd,"checker.sha256");size_t hn;char *want=as_read(hp,0,&hn,sw,sizeof sw);if(!want||hn!=65||want[64]!='\n'||as_sha_file(checker,0,h,0,sw,sizeof sw)||memcmp(want,h,64))fail("checker-identity");free(want);}char *native[]={sb,L_CMD(),checker,"inputs",sr,0};char *source[]={sb,L_CMD(),"sh",sc,"tools/all-waves.cx","--","inputs",sr,0};int hasaw=aw_native(awelf,sizeof awelf);char *cached[]={sb,L_CMD(),awelf,"inputs",sr,0};np_result r={0};int transport=np_run(ready?native:(hasaw?cached:source),sr,0,L_WAIT(),&r,sw,sizeof sw);if(transport||r.rc){if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);fprintf(stderr,"s9: inputs transport=%d rc=%d\n",transport,r.rc);np_free(&r);fail("inputs");}char *s=malloc(r.outn+1);if(!s)fail("allocation");if(mm_copy(s,r.outn+1,r.out,r.outn))fail("copy-bound");s[r.outn]=0;*n=r.outn;np_free(&r);return s;
 }
 static void checker_wire(const as_manifest *m,const char *source,const char *nonce,const char *binary,np_buf *b){np_puts(b,"S9_CHECKER\t");np_puts(b,sr);np_puts(b,"\t");np_puts(b,sd);np_puts(b,"\t");np_putll(b,m->created);np_puts(b,"\t");np_puts(b,m->ident.candidate_kind);np_puts(b,"\t");np_puts(b,m->ident.candidate);np_puts(b,"\t");np_puts(b,m->ident.harness);np_puts(b,"\t");np_puts(b,source);np_puts(b,"\t");np_put(b,nonce,64);np_puts(b,"\t");np_puts(b,binary);np_puts(b,"\n");}
 static void checker_provenance(const as_manifest *m,const char *binary,np_buf *b){char p[4400],source[65];path(p,sr,"tools/all-waves.cx");if(as_sha_file(p,0,source,0,sw,sizeof sw))fail("checker-source-sha");path(p,sd,"nonce");size_t n;char *nonce=as_read(p,0,&n,sw,sizeof sw);if(!nonce||n!=65||nonce[64]!='\n')fail("checker-nonce");checker_wire(m,source,nonce,binary,b);free(nonce);}
@@ -71,7 +78,7 @@ static int copy_checker_executor(const char *checker){
 }
 static int state_bad(const as_state *s){return s->attempts&&(s->last!='P'||s->fail||s->refused);}
 /* A validated receipt cannot make an interrupted or unsealed slice PASS. */
-static void close_slice_state(as_state *state,int started,int complete,long long begin,long long end,long long rc){if(started&&(!complete||end-begin>300000000000LL||(rc!=0&&rc!=1)))state->last='U';}
+static void close_slice_state(as_state *state,int started,int complete,long long begin,long long end,long long rc){if(started&&(!complete||end-begin>L_SLICE_NS()||(rc!=0&&rc!=1)))state->last='U';}
 static int commit_member(int i){return tiers[i]==0&&!strcmp(reg.b[i].impl,"IMPLEMENTED")&&as_wave_platform_allowed(reg.b[i].platform);}
 static int release_member(int i){return tiers[i]==2&&!strcmp(reg.b[i].impl,"IMPLEMENTED")&&as_wave_platform_allowed(reg.b[i].platform);}
 static int report_commit_scope(void){int count=0,not_applicable=0,not_available=0;for(int i=0;i<reg.nb;i++)if(tiers[i]==0){const as_batch *b=&reg.b[i];if(!as_wave_platform_allowed(b->platform)){not_applicable++;printf("S9_SCOPE\tNOT_APPLICABLE\tid=%s\tplatform=%s\thost_scope=lnx/x86_64\n",b->id,b->platform);}else if(strcmp(b->impl,"IMPLEMENTED")){not_available++;printf("S9_SCOPE\tNOT_AVAIL\tid=%s\timplementation=%s\tplatform=%s\n",b->id,b->impl,b->platform);}else if(commit_member(i))count++;}printf("S9_SCOPE\tCOMMIT_ONLY\thost_scope=lnx/x86_64\tselected=%d\tnot_applicable=%d\tnot_available=%d\tqualification=NOT_FULL\n",count,not_applicable,not_available);return count;}
@@ -85,15 +92,15 @@ static void select_inputs(int argc,char **argv){
   printf("S9_SELECTION\t%s\ttier=%s\thost_scope=lnx/x86_64\tselected=%d\tqualification=NOT_FULL\n",rel?"RELEASE_ONLY":"COMMIT_ONLY",rel?"release":"commit",count);return;}
  for(int i=0;i<reg.nb;i++)selected[i]=1;if(argc==5)return;
  if(argc<7||(strcmp(argv[5],"--files")&&strcmp(argv[5],"--since")))fail("selection-usage");if(!strcmp(argv[5],"--since")&&argc!=7)fail("since-usage");
- char *v[S9_MAX+16];int n=0;v[n++]=sb;v[n++]="55";v[n++]="sh";v[n++]=sc;v[n++]="tools/affected.cx";v[n++]="--";if(argc>S9_MAX)fail("selection-bound");for(int i=5;i<argc;i++)v[n++]=argv[i];v[n++]="--list-only";v[n]=0;
- char p[4400];path(p,sd,"affected.log");pid_t child=fork();if(child<0)fail("select-fork");if(!child)exit(command(v,p,57));
- char *g[]={sb,"55","sh",sc,"tools/net-deps.cx","--","--check-table-deps",0};path(p,sd,"net-deps.log");int grc=command(g,p,57),status;if(waitpid(child,&status,0)!=child)fail("select-wait");int rc=WIFEXITED(status)?WEXITSTATUS(status):2;
+ char *v[S9_MAX+16];int n=0;v[n++]=sb;v[n++]=L_CMD();v[n++]="sh";v[n++]=sc;v[n++]="tools/affected.cx";v[n++]="--";if(argc>S9_MAX)fail("selection-bound");for(int i=5;i<argc;i++)v[n++]=argv[i];v[n++]="--list-only";v[n]=0;
+ char p[4400];path(p,sd,"affected.log");pid_t child=fork();if(child<0)fail("select-fork");if(!child)exit(command(v,p,L_WAIT()));
+ char *g[]={sb,L_CMD(),"sh",sc,"tools/net-deps.cx","--","--check-table-deps",0};path(p,sd,"net-deps.log");int grc=command(g,p,L_WAIT()),status;if(waitpid(child,&status,0)!=child)fail("select-wait");int rc=WIFEXITED(status)?WEXITSTATUS(status):2;
  /* affected consumes the checked table-deps map and already unions every
     named recipe consumer. Keep the independent net touch set as provenance;
     any missing/unknown graph makes the selection conservative ALL. */
- char *touch[S9_MAX+12];int tn=0;touch[tn++]=sb;touch[tn++]="55";touch[tn++]="sh";touch[tn++]=sc;touch[tn++]="tools/net-deps.cx";touch[tn++]="--";touch[tn++]="--touch";
+ char *touch[S9_MAX+12];int tn=0;touch[tn++]=sb;touch[tn++]=L_CMD();touch[tn++]="sh";touch[tn++]=sc;touch[tn++]="tools/net-deps.cx";touch[tn++]="--";touch[tn++]="--touch";
  if(!strcmp(argv[5],"--files"))for(int i=6;i<argc;i++)if(!strncmp(argv[i],"exec/",5))touch[tn++]=argv[i];touch[tn]=0;
- if(tn>7){path(p,sd,"net-touch.log");if(command(touch,p,57))grc=2;}
+ if(tn>7){path(p,sd,"net-touch.log");if(command(touch,p,L_WAIT()))grc=2;}
  int fallback=rc||grc||strcmp(argv[5],"--files");
  for(int i=6;i<argc;i++){const char *f=argv[i];size_t z=strlen(f);int known=(z>3&&!strcmp(f+z-3,".cx")&&(!strncmp(f,"tools/",6)||!strncmp(f,"tests/",6)))||(z>4&&!strcmp(f+z-4,".tsv")&&!strncmp(f,"exec/",5));if(!known||strstr(f,".."))fallback=1;}
  if(!fallback){
@@ -139,7 +146,7 @@ static int retry_slice(const char *leaf){
  freeze_check();load_plan();int lock=as_lock(sd,1,sw,sizeof sw);if(lock<0)fail("run-busy");s9_slice *s=0;for(int i=0;i<nslices;i++)if(!strcmp(leaf,slices[i].leaf))s=&slices[i];if(!s)fail("retry-id");
  const char *a=strstr(leaf,"-retry");if(a&&strstr(a+6,"-retry"))fail("retry-limit");char p[4400];slice_path(p,s,"start");if(!present(p)||running(s))fail("retry-not-terminal");
  char session[4400],ids[1024]={0};path(session,sd,s->leaf);as_manifest m;int loaded=!as_load(session,&m,sw,sizeof sw);
- int sealed=0;slice_path(p,s,"done");size_t dn;char *done=as_read(p,0,&dn,sw,sizeof sw);if(done&&dn&&done[dn-1]=='\n'){done[dn-1]=0;char *f[4];long long begin,end,rc;if(as_split(done,f,4)==4&&!as_digits(f[0],&begin)&&!as_digits(f[1],&end)&&!as_digits(f[2],&rc)&&end>=begin&&end-begin<=300000000000LL&&(rc==0||rc==1))sealed=1;}free(done);
+ int sealed=0;slice_path(p,s,"done");size_t dn;char *done=as_read(p,0,&dn,sw,sizeof sw);if(done&&dn&&done[dn-1]=='\n'){done[dn-1]=0;char *f[4];long long begin,end,rc;if(as_split(done,f,4)==4&&!as_digits(f[0],&begin)&&!as_digits(f[1],&end)&&!as_digits(f[2],&rc)&&end>=begin&&end-begin<=L_SLICE_NS()&&(rc==0||rc==1))sealed=1;}free(done);
  for(int i=0;i<reg.nb;i++)if(as_inlist(s->ids,reg.b[i].id)){int passed=0;
   if(loaded)for(int j=0;j<m.nref;j++)if(!strcmp(reg.b[i].id,m.ref[j].id)){const char *v;char why[200];if(as_check_receipt(sr,session,&m,&m.ref[j],&reg.b[i],&m.ident,&v,why))fail("retry-receipt");if(!strcmp(v,"FAIL"))fail("sticky-fail");passed=sealed&&!strcmp(v,"PASS");}
   if(!passed){size_t used=strlen(ids);if(cx_fmt(ids+used,sizeof ids-used,"%s%s",used?",":"",reg.b[i].id))fail("ids-bound");}
@@ -284,7 +291,7 @@ static int step(void){
  /* Wave-level worktree gate: freeze_check above just measured the tree equal to the sealed RUN/inputs;
     this step's children skip their own scans and wt-close measures once after all of them ended. */
  char epoch[4400],eleaf[80],edl[64];int launched_any=0;if(cx_fmt(eleaf,sizeof eleaf,"wt-epoch-%lld",as_now()))fail("format-bound");path(epoch,sd,eleaf);if(present(epoch))fail("wt-epoch-exists");
- if(cx_fmt(edl,sizeof edl,"%.9f",outer_end-15.0))fail("format-bound");np_buf eslices={0};
+ if(cx_fmt(edl,sizeof edl,"%.9f",outer_end-L_EPOCH_MARGIN()))fail("format-bound");np_buf eslices={0};
  for(;;){
   double left=outer_end-(double)as_now()/1e9;
   if(left>75){int pending[S9_MAX]={0};for(int i=0;i<nslices;i++){slice_path(p,&slices[i],"start");pending[i]=!slices[i].pid&&!present(p);}for(;;){int next=choose_slice(pending,active,alone,&queue);if(next<0)break;s9_slice *s=&slices[next];pending[next]=0;
@@ -296,9 +303,9 @@ static int step(void){
   if(!active)break;int status;pid_t pid;do{pid=waitpid(-1,&status,0);}while(pid<0&&errno==EINTR);if(pid<0)fail("wait");
   for(int i=0;i<nslices;i++)if(slices[i].pid==pid){s9_slice *s=&slices[i];char session[4400],h[65];path(session,sd,s->leaf);path(p,session,"session.tsv");if(as_sha_file(p,0,h,0,sw,sizeof sw))if(cx_fmt(h,sizeof h,"%s","ABSENT"))fail("copy-bound");np_buf b={0};np_putll(&b,s->start);np_puts(&b,"\t");np_putll(&b,as_now());np_puts(&b,"\t");np_putll(&b,WIFEXITED(status)?WEXITSTATUS(status):128+WTERMSIG(status));np_puts(&b,"\t");np_puts(&b,h);np_puts(&b,"\n");slice_path(p,s,"done");save(p,b.p,b.n);free(b.p);s->pid=0;active--;alone=0;}
  }
- if(launched_any){char *v[S9_MAX+8];int n=0;char checker[4400],inputs[4400],log[4500];path(checker,sd,"checker");path(inputs,sd,"inputs");v[n++]=sb;v[n++]="55";v[n++]=checker;v[n++]="wt-close";v[n++]=sr;v[n++]=inputs;v[n++]=epoch;
+ if(launched_any){char *v[S9_MAX+8];int n=0;char checker[4400],inputs[4400],log[4500];path(checker,sd,"checker");path(inputs,sd,"inputs");v[n++]=sb;v[n++]=L_CMD();v[n++]=checker;v[n++]="wt-close";v[n++]=sr;v[n++]=inputs;v[n++]=epoch;
   for(size_t at=0;at<eslices.n;){size_t e=at;while(eslices.p[e]!='\n')e++;eslices.p[e]=0;if(n==S9_MAX+7)fail("wt-epoch-slices");v[n++]=eslices.p+at;at=e+1;}v[n]=0;
-  if(cx_fmt(log,sizeof log,"%s.log",epoch))fail("format-bound");int rc=command(v,log,57);
+  if(cx_fmt(log,sizeof log,"%s.log",epoch))fail("format-bound");int rc=command(v,log,L_WAIT());
   printf("S9_WT\tepoch=%s\tstatus=%s\trc=%d\tslices=%d\tchild_scans=0\n",eleaf,rc==0?"STABLE":rc==2?"CHANGED-REFUSE":"UNMEASURED-REFUSE",rc,n-7);}
  free(eslices.p);
  close(lock);printf("S9\tSTEP_FINISHED\tqualification=NOT_DECIDED_HERE\n");return 3;
@@ -438,8 +445,8 @@ static int operate(int argc,char **argv){
   if(!present(checker))fail("prepare-checker-required");freeze_check();
   if(!strcmp(argv[4],"executor-all-waves"))return copy_checker_executor(checker);
   if(!strcmp(argv[4],"material")){if(argc!=6)fail("material-name");return aw("material",sd,argv[5],0);}
-  if(!strcmp(argv[4],"executor-run-batch")||!strcmp(argv[4],"executor")){char *part=!strcmp(argv[4],"executor-run-batch")?"run-batch":"seal";char *v[]={sb,"55",checker,"executor",sr,sd,part,0};return command(v,0,57);}
-  if(!strcmp(argv[4],"driver")){char source[4400];path(source,sr,"tools/s9-shards.cx");path(p,sd,"driver");char *v[]={sb,"55","sh",sc,source,"-o",p,0};int rc=command(v,0,57);if(!rc){char h[66],hp[4400];if(as_sha_file(p,0,h,0,sw,sizeof sw))fail("driver-sha");h[64]='\n';h[65]=0;path(hp,sd,"driver.sha256");save(hp,h,65);}return rc;}
+  if(!strcmp(argv[4],"executor-run-batch")||!strcmp(argv[4],"executor")){char *part=!strcmp(argv[4],"executor-run-batch")?"run-batch":"seal";char *v[]={sb,L_CMD(),checker,"executor",sr,sd,part,0};return command(v,0,L_WAIT());}
+  if(!strcmp(argv[4],"driver")){char source[4400];path(source,sr,"tools/s9-shards.cx");path(p,sd,"driver");char *v[]={sb,L_CMD(),"sh",sc,source,"-o",p,0};int rc=command(v,0,L_WAIT());if(!rc){char h[66],hp[4400];if(as_sha_file(p,0,h,0,sw,sizeof sw))fail("driver-sha");h[64]='\n';h[65]=0;path(hp,sd,"driver.sha256");save(hp,h,65);}return rc;}
   if(!strcmp(argv[4],"selection")){path(p,sd,"selection.tsv");size_t n;char *s=as_read(p,0,&n,sw,sizeof sw);if(!s)fail("selection");char *args[S9_MAX];int count=5;size_t at=0;while(at<n){size_t e=at;while(e<n&&s[e]!='\n')e++;if(e==n||count==S9_MAX)fail("selection-wire");s[e]=0;args[count++]=s+at;at=e+1;}select_inputs(count,args);write_plan();free(s);char h[66];path(p,sd,"plan.tsv");if(as_sha_file(p,0,h,0,sw,sizeof sw))fail("plan-sha");h[64]='\n';h[65]=0;path(p,sd,"plan.tsv.sha256");save(p,h,65);return 0;}
   fail("prepare-mode");
  }
@@ -451,7 +458,7 @@ static int operate(int argc,char **argv){
  if(!init){if(argc!=4)fail("usage");if(!strcmp(argv[1],"step"))return step();if(!strcmp(argv[1],"aggregate"))return aggregate(0,0,0);fail("mode");}
  if(argc<5)fail("map-required");
  int commit=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"commit");int rel=argc==7&&!strcmp(argv[5],"--tier")&&!strcmp(argv[6],"release");for(int i=5;i<argc;i++)if(!strcmp(argv[i],"--tier")&&!commit&&!rel)fail("init --tier commit|release cannot combine selection flags");
- {char awelf[4400];int has=aw_native(awelf,sizeof awelf);if(has){char *v[]={sb,"55",awelf,"init",sr,sd,sc,argv[4],0};if(command(v,0,57))fail("parent-init");}else{char *v[]={sb,"55","sh",sc,"tools/all-waves.cx","--","init",sr,sd,sc,argv[4],0};if(command(v,0,57))fail("parent-init");}}
+ {char awelf[4400];int has=aw_native(awelf,sizeof awelf);if(has){char *v[]={sb,L_CMD(),awelf,"init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}else{char *v[]={sb,L_CMD(),"sh",sc,"tools/all-waves.cx","--","init",sr,sd,sc,argv[4],0};if(command(v,0,L_WAIT()))fail("parent-init");}}
  char p[4400],nonce[66];unsigned char random[32];int fd=open("/dev/urandom",O_RDONLY|O_CLOEXEC);if(fd<0||read(fd,random,32)!=32)fail("nonce");close(fd);cx_sha256_hex(random,32,nonce);nonce[64]='\n';nonce[65]=0;path(p,sd,"nonce");save(p,nonce,65);
  np_buf args={0};for(int i=5;i<argc;i++){if(strchr(argv[i],'\n'))fail("selection-wire");np_puts(&args,argv[i]);np_puts(&args,"\n");}path(p,sd,"selection.tsv");save(p,args.p,args.n);free(args.p);path(p,sd,"mode");save(p,commit?"COMMIT_ONLY\n":rel?"RELEASE_ONLY\n":argc>5?"REGRESSION_ONLY\n":"FULL\n",commit?12:rel?13:argc>5?16:5);path(p,sd,"tier");save(p,commit?"commit\n":rel?"release\n":"all\n",commit?7:rel?8:4);
  size_t n;char *inputs=input_snapshot(&n);path(p,sd,"inputs");save(p,inputs,n);free(inputs);
