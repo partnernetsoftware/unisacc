@@ -67,7 +67,10 @@ int main(int argc, char **argv) {
     if (sh(cmd, out, sizeof out) != 0) { printf("FAIL\tfixture\n"); return 2; }
     {char factpath[3000];size_t z;char *facts=cx_read("build/chain-facts.tsv",&z);
      SP(factpath,sizeof factpath,"%s/build/chain-facts.tsv",fix);
-     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tfacts-copy\n");return 2;}free(facts);}
+     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tfacts-copy\n");return 2;}free(facts);
+     facts=cx_read("build/chain-residue.tsv",&z);
+     SP(factpath,sizeof factpath,"%s/build/chain-residue.tsv",fix);
+     if(!facts||cx_write(factpath,facts,z)){free(facts);printf("FAIL\tresidue-facts-copy\n");return 2;}free(facts);}
 
     SP(cmd, sizeof cmd, "%s --check 2>&1", gen);
     rc = sh(cmd, out, sizeof out);
@@ -86,8 +89,35 @@ int main(int argc, char **argv) {
     ck(tree && b && tn == bn && !memcmp(tree, b, tn), "write-equals-tree");
     /* The limit comes from the generator's own output (the single source), not a literal: the snap row's timeout column. */
     {char want[160],*snap=b?strstr(b,"\n0\tsnap\touter\t"):0;int lim=snap?atoi(snap+14):0;
-     SP(want,sizeof want,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t%d\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\n",lim);
-     ck(lim>0 && tree && strstr(tree,"\tdeps\tlane\tparallelism\n") && strstr(tree,want), "dependency-and-parallelism-facts");}
+     SP(want,sizeof want,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t%d\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\t-\t-\t-\n",lim);
+     ck(lim>0 && tree && strstr(tree,"\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n") && strstr(tree,want), "dependency-and-parallelism-facts");
+     /* The residue rule of a phase is a generated column triple; the kernels rows carry the 0.0.58 rule. */
+     ck(tree && strstr(tree,"\tkernels-g2\touter\t") && strstr(tree,"\t1\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route,fixedpoint/g2/*.kernel\n")
+        && strstr(tree,"\t1\tscrub\tfixedpoint/g3/phase-6.tsv\tfixedpoint/g3/kernel-route,fixedpoint/g3/*.kernel\n"), "residue-facts-in-table");}
+
+    /* Residue facts that leave the output dir, name no phase or have no known policy are refused; nothing is written. */
+    {char factpath[3000];size_t z,gn=0;char *facts,*good;int refused=0;
+     static const char *bad_rows[8]={
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\t../outside/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/../../x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\t/tmp/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/*/x\n",
+       "kernels-g2\tscrub\tfixedpoint/g2/phase-6.tsv\ttoplevel\n",
+       "kernels-g2\tscrub\t../phase-6.tsv\tfixedpoint/g2/kernel-route\n",
+       "kernels-g2\twipe\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route\n",
+       "no-such-phase\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route\n"};
+     SP(factpath,sizeof factpath,"%s/build/chain-residue.tsv",fix);good=cx_read(factpath,&gn);
+     SP(cmd, sizeof cmd, "cd '%s' && %s --write 2>&1", fix, gen);
+     facts=cx_read(tbl,&z);
+     for(int j=0;j<8;j++){size_t after=0;char *now;
+       if(cx_write(factpath,bad_rows[j],strlen(bad_rows[j])))return 2;
+       rc=sh(cmd,out,sizeof out);now=cx_read(tbl,&after);
+       if(rc==2&&strstr(out,"chain-phases-gen: REFUSE residue fact")&&!strstr(out,"status=WRITE")&&facts&&now&&after==z&&!memcmp(now,facts,z))refused++;
+       free(now);}
+     ck(refused==8,"neg-residue-fact-refused-no-write");
+     if(!good||cx_write(factpath,good,gn))return 2;
+     free(good);free(facts);
+     SP(cmd, sizeof cmd, "cd '%s' && %s --check 2>&1", fix, gen);}
 
     SP(cmd, sizeof cmd, "cd '%s' && %s --check 2>&1", fix, gen);
     ck(sh(cmd, out, sizeof out) == 0 && strstr(out, count_marker), "check-fixture");
@@ -110,6 +140,7 @@ int main(int argc, char **argv) {
             mn = bn;
             for (i = 0; i < bn; i++) if (b[i] == '\n' && ++nl == 3) { at = i - 1; break; }
             if (at && m[at] >= '0' && m[at] <= '9') m[at] = m[at] == '9' ? '0' : (char)(m[at] + 1);
+            else if (at && m[at] == '-') m[at] = 'x'; /* the row now ends with its residue_paths column */
             else mn = 0;
         }
     }

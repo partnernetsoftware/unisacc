@@ -109,14 +109,14 @@ int main(int argc, char **argv) {
         ck(saved && has(saved, "DONE\twf-prepare\t") && !has(saved, "wf-prep-g1") && !has(saved, "gen1-osx"), "gen1-first-prepare-no-alias-or-sibling-mark");
         free(saved);
         const char *bad_tables[] = {
-            "0\ta\touter\t90\tmissing\t-\t1\n",
-            "0\ta\touter\t90\ta\t-\t1\n",
-            "0\ta\touter\t90\t-\tmissing\t1\n",
-            "0\ta\touter\t90\t-\t-\t5\n",
-            "0\ta\tbogus\t90\t-\t-\t1\n",
-            "0\ta\touter\t90\tb\t-\t1\n1\tb\touter\t90\ta\t-\t1\n",
-            "0\ta\touter\t90\t-\t-\t1\n1\tb\touter\t90\ta,a\t-\t1\n",
-            "0\ta\touter\t120\t-\t-\t1\n"  /* 120 is only the kernels-* override row, never a default row */
+            "0\ta\touter\t90\tmissing\t-\t1\t-\t-\t-\n",
+            "0\ta\touter\t90\ta\t-\t1\t-\t-\t-\n",
+            "0\ta\touter\t90\t-\tmissing\t1\t-\t-\t-\n",
+            "0\ta\touter\t90\t-\t-\t5\t-\t-\t-\n",
+            "0\ta\tbogus\t90\t-\t-\t1\t-\t-\t-\n",
+            "0\ta\touter\t90\tb\t-\t1\t-\t-\t-\n1\tb\touter\t90\ta\t-\t1\t-\t-\t-\n",
+            "0\ta\touter\t90\t-\t-\t1\t-\t-\t-\n1\tb\touter\t90\ta,a\t-\t1\t-\t-\t-\n",
+            "0\ta\touter\t120\t-\t-\t1\t-\t-\t-\n"  /* 120 is only the kernels-* override row, never a default row */
         };
         if (cx_fmt(p, sizeof p, "%s/bad-phases.tsv", td) || cx_fmt(cmd, sizeof cmd, "'%s' --phases '%s' --plan 2>&1", candidate, p)) return 2;
         for (int i = 0; i < 8; i++) {
@@ -184,23 +184,96 @@ int main(int argc, char **argv) {
             free(w);
         }
         /* A kernels attempt killed at its bound leaves g2/kernel-route (and possibly a copied
-           kernel) without phase-6.tsv; chain-step then refuses the retry. The unrecorded residue
-           is scrubbed before the step; a recorded phase is never touched. */
+           kernel) without phase-6.tsv; chain-step then refuses the retry. The rule is a row of the
+           phase table (facts build/chain-residue.tsv), here the real table's kernels-g2 row: the
+           unrecorded residue is scrubbed before the step; a recorded phase is never touched. */
         {
-            char kout[4600], kfp[4600], kg[4600], kdir[4700], ksub[4800], kk[4700], krec[4700], kcmd[14000];
+            char kout[4600], kfp[4600], kg[4600], kdir[4700], ksub[4800], kk[4700], ka[4700], kother[4700], kkeep[4700], krec[4700], kcp[4700], kcmd[14000];
             if (cx_fmt(kout, sizeof kout, "%s/ks-out", td) || cx_fmt(kfp, sizeof kfp, "%s/fixedpoint", kout) || cx_fmt(kg, sizeof kg, "%s/g2", kfp) ||
                 cx_fmt(kdir, sizeof kdir, "%s/kernel-route", kg) || cx_fmt(ksub, sizeof ksub, "%s/x86_64", kdir) || cx_fmt(kk, sizeof kk, "%s/x86_64.kernel", kg) ||
-                cx_fmt(krec, sizeof krec, "%s/phase-6.tsv", kg) ||
-                sy_mkdir(kout, 0755) || sy_mkdir(kfp, 0755) || sy_mkdir(kg, 0755) || sy_mkdir(kdir, 0755) || sy_mkdir(ksub, 0755) || cx_write(kk, "partial\n", 8)) return 2;
-            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --kernels-scrub-fixture '%s' '%s' 2 2>&1", candidate, kout, kfp)) return 2;
+                cx_fmt(ka, sizeof ka, "%s/arm64.kernel", kg) || cx_fmt(kother, sizeof kother, "%s/lnx-x86_64", kg) || cx_fmt(kkeep, sizeof kkeep, "%s/phase-2.tsv", kg) ||
+                cx_fmt(krec, sizeof krec, "%s/phase-6.tsv", kg) || cx_fmt(kcp, sizeof kcp, "%s/checkpoint.tsv", kout) ||
+                sy_mkdir(kout, 0755) || sy_mkdir(kfp, 0755) || sy_mkdir(kg, 0755) || sy_mkdir(kdir, 0755) || sy_mkdir(ksub, 0755) || sy_mkdir(kother, 0755) ||
+                cx_write(kk, "partial\n", 8) || cx_write(ka, "partial\n", 8) || cx_write(kkeep, "other phase\n", 12)) return 2;
+            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' kernels-g2 2>&1", candidate, phases, kout)) return 2;
             int krc = sh(kcmd, out, sizeof out);
-            ck(krc == 0 && has(out, "CLEANUP\t") && sy_exists(kdir) == 0 && sy_exists(kk) == 0 && sy_exists(kg) == 1, "killed-kernels-residue-scrubbed-before-retry");
+            ck(krc == 0 && has(out, "CLEANUP\t") && has(out, "RESIDUE_RULE\tkernels-g2\tapplied") && sy_exists(kdir) == 0 && sy_exists(kk) == 0 && sy_exists(kg) == 1, "killed-kernels-residue-scrubbed-before-retry");
+            ck(krc == 0 && sy_exists(ka) == 0 && sy_exists(kother) == 1 && sy_exists(kkeep) == 1, "residue-scrub-only-table-paths-of-the-phase");
+            krc = sh(kcmd, out, sizeof out);
+            ck(krc == 0 && !has(out, "CLEANUP\t") && has(out, "RESIDUE_RULE\tkernels-g2\tapplied"), "residue-rule-nothing-left-proceeds");
             if (sy_mkdir(kdir, 0755) || cx_write(kk, "kernel\n", 7) || cx_write(krec, "recorded\n", 9)) return 2;
             krc = sh(kcmd, out, sizeof out);
             ck(krc == 0 && !has(out, "CLEANUP\t") && sy_exists(kdir) == 1 && sy_exists(kk) == 1 && sy_exists(krec) == 1, "recorded-kernels-phase-not-scrubbed");
-            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --kernels-scrub-fixture '%s' '%s/elsewhere' 2 2>&1", candidate, kout, td)) return 2;
+            /* A checkpoint row is a recorded success too, even when the record file is gone. */
+            if (sy_unlink(krec) || cx_write(kcp, "DONE\tkernels-g2\t1\n", 19)) return 2;
             krc = sh(kcmd, out, sizeof out);
-            ck(krc != 0 && has(out, "REFUSE fixedpoint"), "kernels-scrub-outside-output-refused");
+            ck(krc == 0 && !has(out, "CLEANUP\t") && sy_exists(kdir) == 1 && sy_exists(kk) == 1, "checkpointed-phase-not-scrubbed");
+            if (sy_unlink(kcp)) return 2;
+            /* A phase without a row has no rule: nothing is touched. */
+            if (cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' compare 2>&1", candidate, phases, kout)) return 2;
+            krc = sh(kcmd, out, sizeof out);
+            ck(krc == 0 && !has(out, "CLEANUP\t") && has(out, "RESIDUE_RULE\tcompare\tnone") && sy_exists(kdir) == 1 && sy_exists(kk) == 1, "phase-without-row-untouched");
+            /* The same table drives any phase: a fixture table with a refuse row and a scrub row. */
+            {
+                char tbl[4700], rout[4700], rdir[4800], rsub[4900], rfile[5000], rrec[4900], elsewhere[4700], victim[4800], link[4900], lout[4700], ldir[4800], lg[4900], lfile[5000];
+                static const char *rows =
+                    "0\tsnap\touter\t90\t-\t-\t1\trefuse\tstage/snap.done\tstage/snap-work\n"
+                    "1\tbuild\touter\t90\tsnap\t-\t1\tscrub\tstage/build.done\tstage/build-work,stage/b-*.tmp\n";
+                if (cx_fmt(tbl, sizeof tbl, "%s/residue-phases.tsv", td) || cx_write(tbl, rows, strlen(rows)) || cx_fmt(rout, sizeof rout, "%s/rs-out", td) ||
+                    cx_fmt(rdir, sizeof rdir, "%s/stage", rout) || cx_fmt(rsub, sizeof rsub, "%s/snap-work", rdir) || cx_fmt(rfile, sizeof rfile, "%s/part", rsub) ||
+                    cx_fmt(rrec, sizeof rrec, "%s/snap.done", rdir) || sy_mkdir(rout, 0755) || sy_mkdir(rdir, 0755) || sy_mkdir(rsub, 0755) || cx_write(rfile, "partial\n", 8)) return 2;
+                if (cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' snap 2>&1", candidate, tbl, rout)) return 2;
+                krc = sh(kcmd, out, sizeof out);
+                ck(krc != 0 && has(out, "REFUSE unrecorded residue of phase") && !has(out, "CLEANUP\t") && sy_exists(rfile) == 1, "refuse-policy-unrecorded-residue-refused-untouched");
+                if (cx_write(rrec, "recorded\n", 9)) return 2;
+                krc = sh(kcmd, out, sizeof out);
+                ck(krc == 0 && !has(out, "CLEANUP\t") && sy_exists(rfile) == 1, "refuse-policy-recorded-phase-proceeds-untouched");
+                /* scrub row of another phase: its directory and its glob go, the neighbour's stay */
+                if (cx_fmt(rsub, sizeof rsub, "%s/build-work", rdir) || sy_mkdir(rsub, 0755) || cx_fmt(victim, sizeof victim, "%s/b-1.tmp", rdir) || cx_write(victim, "t\n", 2) ||
+                    cx_fmt(link, sizeof link, "%s/c-1.tmp", rdir) || cx_write(link, "t\n", 2) ||
+                    cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' build 2>&1", candidate, tbl, rout)) return 2;
+                krc = sh(kcmd, out, sizeof out);
+                ck(krc == 0 && has(out, "CLEANUP\t") && sy_exists(rsub) == 0 && sy_exists(victim) == 0 && sy_exists(link) == 1 && sy_exists(rfile) == 1 && sy_exists(rrec) == 1, "killed-residue-cleared-per-phase-row");
+                /* outside the output dir: a listed entry that is a link to an outside directory */
+                if (cx_fmt(elsewhere, sizeof elsewhere, "%s/elsewhere", td) || sy_mkdir(elsewhere, 0755) || cx_fmt(victim, sizeof victim, "%s/keep", elsewhere) || cx_write(victim, "outside\n", 8) ||
+                    cx_fmt(link, sizeof link, "%s/build-work", rdir) || sy_symlink(elsewhere, link) || cx_fmt(lfile, sizeof lfile, "%s/b-2.tmp", rdir) || cx_write(lfile, "t\n", 2)) return 2;
+                krc = sh(kcmd, out, sizeof out);
+                ck(krc != 0 && has(out, "REFUSE residue link outside output") && !has(out, "CLEANUP\t") && sy_exists(victim) == 1 && sy_exists(lfile) == 1, "residue-link-outside-output-refused-nothing-removed");
+                /* outside the output dir: the listed directory is reached through a link that leaves it */
+                if (cx_fmt(lout, sizeof lout, "%s/rl-out", td) || sy_mkdir(lout, 0755) || cx_fmt(ldir, sizeof ldir, "%s/stage", lout) || sy_symlink(elsewhere, ldir) ||
+                    cx_fmt(lg, sizeof lg, "%s/build-work", elsewhere) || sy_mkdir(lg, 0755) || cx_fmt(lfile, sizeof lfile, "%s/b-3.tmp", elsewhere) || cx_write(lfile, "t\n", 2) ||
+                    cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' build 2>&1", candidate, tbl, lout)) return 2;
+                krc = sh(kcmd, out, sizeof out);
+                ck(krc != 0 && has(out, "REFUSE residue path outside output") && !has(out, "CLEANUP\t") && sy_exists(lg) == 1 && sy_exists(lfile) == 1 && sy_exists(victim) == 1, "kernels-scrub-outside-output-refused");
+                /* outside the output dir by the table itself: such a table is refused when it is read */
+                {
+                    static const char *escape[5] = {
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\tstage/snap.done\t../elsewhere/x\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\tstage/snap.done\tstage/../../elsewhere\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\tstage/snap.done\t/tmp/x\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\tstage/snap.done\t*/x\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\t../snap.done\tstage/x\n"};
+                    int refused = 0;
+                    for (int ei = 0; ei < 5; ei++) {
+                        if (cx_write(tbl, escape[ei], strlen(escape[ei]))) return 2;
+                        if (cx_fmt(kcmd, sizeof kcmd, "'%s' --residue-fixture '%s' '%s' snap 2>&1", candidate, tbl, rout)) return 2;
+                        krc = sh(kcmd, out, sizeof out);
+                        if (krc != 0 && has(out, "REFUSE chain-phases residue") && !has(out, "CLEANUP\t")) refused++;
+                    }
+                    ck(refused == 5 && sy_exists(victim) == 1, "table-glob-escaping-output-refused");
+                    static const char *shape[3] = {
+                        "0\tsnap\touter\t90\t-\t-\t1\twipe\tstage/snap.done\tstage/x\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\t-\tstage/snap.done\t-\n",
+                        "0\tsnap\touter\t90\t-\t-\t1\tscrub\tstage/snap.done\ttop-level-only\n"};
+                    refused = 0;
+                    for (int ei = 0; ei < 3; ei++) {
+                        if (cx_write(tbl, shape[ei], strlen(shape[ei]))) return 2;
+                        krc = sh(kcmd, out, sizeof out);
+                        if (krc != 0 && has(out, "REFUSE chain-phases residue")) refused++;
+                    }
+                    ck(refused == 3, "residue-policy-shape-refused");
+                }
+            }
         }
         /* 0.0.58: the fixedpoint root objects are many bounded batches. Told that its attempt ends
            soon, the candidate commits one batch and then yields (rc 75, a CANDIDATE_YIELD line
@@ -596,15 +669,15 @@ int main(int argc, char **argv) {
     }
     {
         char td[500], file[600], cmd[2400];
-        const char *bad[] = {"1\tsnap\t-\t90\t-\t-\t1\n", "0\tsnap\t-\t91\t-\t-\t1\n", "0\tsnap\t-\t90\t-\t-\t1\n1\tsnap\t-\t90\t-\t-\t1\n", "0\tsnap\t-\t90\t-\t-\t1", "0\tsnap\t-\t90\t-\t-\t1\textra\n"};
-        const char *names[] = {"phase-order-refused", "phase-bound-refused", "phase-duplicate-refused", "phase-missing-lf-refused", "phase-extra-field-refused"};
-        const char *reasons[] = {"chain-phases order", "chain-phases timeout", "chain-phases duplicate", "chain-phases text", "chain-phases fields"};
+        const char *bad[] = {"1\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t91\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n1\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\n", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-", "0\tsnap\t-\t90\t-\t-\t1\t-\t-\t-\textra\n", "0\tsnap\t-\t90\t-\t-\t1\n"};
+        const char *names[] = {"phase-order-refused", "phase-bound-refused", "phase-duplicate-refused", "phase-missing-lf-refused", "phase-extra-field-refused", "phase-seven-column-table-refused"};
+        const char *reasons[] = {"chain-phases order", "chain-phases timeout", "chain-phases duplicate", "chain-phases text", "chain-phases fields", "chain-phases fields"};
         if (cx_fmt(td, sizeof td, "%s/cc-phases-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(file, sizeof file, "%s/phases.tsv", td)) { ck(0, "phase-tmp"); return 1; }
-        for (int j = 0; j < 5; j++) {
+        for (int j = 0; j < 6; j++) {
             if (cx_write(file, bad[j], strlen(bad[j])) || cx_fmt(cmd, sizeof cmd, "'%s' --plan --phases '%s' 2>&1", native_tool, file)) { ck(0, "phase-fixture"); return 1; }
             ck(sh(cmd, out, sizeof out) != 0 && has(out, reasons[j]), names[j]);
         }
-        const char *ordered = "0\tbuild\t-\t90\t-\t-\t1\n1\tsnap\t-\t90\tbuild\t-\t1\n";
+        const char *ordered = "0\tbuild\t-\t90\t-\t-\t1\t-\t-\t-\n1\tsnap\t-\t90\tbuild\t-\t1\t-\t-\t-\n";
         if (cx_write(file, ordered, strlen(ordered)) || cx_fmt(cmd, sizeof cmd, "'%s' --plan --phases '%s' 2>&1", native_tool, file)) { ck(0, "phase-fixture"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PHASE\t0\tbuild") && has(out, "PHASE\t1\tsnap"), "phase-order-consumed");
         cx_rmtree(td);

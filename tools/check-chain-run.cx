@@ -19,7 +19,8 @@ static void put_plan(const char *p,const char *s) {
             int order,bound;char id[256],domain[4400];
             if(*line=='#')fprintf(f,"%s\n",line);
             else { int tabs=0;for(char *q=line;*q;q++)if(*q=='\t')tabs++;
-                if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\n",order,id,domain,bound,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
+                if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\t-\t-\t-\n",order,id,domain,bound,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
+                else if(tabs==6)fprintf(f,"%s\t-\t-\t-\n",line); /* seven semantic columns: no residue rule */
                 else fprintf(f,"%s\n",line);
             }s=e+1;
         }if(fclose(f))exit(2);
@@ -105,6 +106,8 @@ static int fake(int argc,char **argv) {
     }
     join(p,out,"once");
     if(!strcmp(mode,"resume")&&!sy_exists(p)) { put(p,"timeout\n"); return 137; }
+    /* runs into the attempt bound once: the owner kills it (no rc of its own) */
+    if(!strcmp(mode,"boundkill")&&!sy_exists(p)) { put(p,"started\n"); sy_sleep_ms(10000); return 0; }
     if((!strcmp(mode,"tree")||!strcmp(mode,"dirty"))&&!sy_exists(p)) {
         put(p,"started\n");int child=fork();if(child<0)return 2;
         if(!child){sy_setpgid(0,0);int grand=fork();if(grand<0)_exit(2);if(grand)_exit(0);
@@ -182,10 +185,16 @@ static int count(const char *file,const char *needle) {
     size_t n=0;char *b=cx_read(file,&n);int k=0;if(!b)return -1;
     for(char *s=b;(s=strstr(s,needle));s+=strlen(needle))k++;free(b);return k;
 }
-typedef struct { long end; int attempts,resumes,ma,mr,width,segments,mseg,owed,fields; } budget_row;
+typedef struct { long end; int attempts,resumes,ma,mr,width,segments,mseg,owed,kills,version,fields; } budget_row;
 static budget_row budget_of(const char *name) {
     char p[4400],d[4400];join(d,base,name);join(p,d,"chain-run.budget");size_t n=0;char *b=cx_read(p,&n);budget_row r;memset(&r,0,sizeof r);
-    if(b)r.fields=sscanf(b,"%ld %d %d %d %d %d %d %d %d",&r.end,&r.attempts,&r.resumes,&r.ma,&r.mr,&r.width,&r.segments,&r.mseg,&r.owed);free(b);return r;
+    if(b)r.fields=sscanf(b,"%ld %d %d %d %d %d %d %d %d %d v%d",&r.end,&r.attempts,&r.resumes,&r.ma,&r.mr,&r.width,&r.segments,&r.mseg,&r.owed,&r.kills,&r.version);free(b);return r;
+}
+/* Budget format v2: the nine v1 fields, the kills counter and the version word. */
+static void put_budget(const char *name,budget_row r) {
+    char row[300],bp[4400],d[4400];join(d,base,name);join(bp,d,"chain-run.budget");
+    if(cx_fmt(row,sizeof row,"%ld %d %d %d %d %d %d %d %d %d v2\n",r.end,r.attempts,r.resumes,r.ma,r.mr,r.width,r.segments,r.mseg,r.owed,r.kills))exit(2);
+    put(bp,row);
 }
 static void file_of(char *p,const char *name,const char *leaf) { char d[4400];join(d,base,name);join(p,d,leaf); }
 static int segment_cases(const char *plan) {
@@ -199,7 +208,7 @@ static int segment_cases(const char *plan) {
     ck(has(p,"\tn=1\tstart\tsegment-s=5\tmax=9\n")&&has(p,"\tn=1\texpired\tnext=a\t"),"segment-expiry-row-names-next");
     ck(!has(p,"BLOCKER")&&count(p,"\trc=0\tresidue=0\t")==1&&count(p,"ATTEMPT\t")==1&&has(p,"cleanup=0 residue=0"),"segment-expiry-clean-no-child-killed");
     ck(count(q,"\n")==1&&has(q,"snap\n"),"segment-ran-only-what-fit");
-    b1=budget_of("seg");ck(b1.fields==9&&b1.segments==1&&b1.mseg==9&&b1.attempts==1&&!b1.owed,"segment-budget-persisted");
+    b1=budget_of("seg");ck(b1.fields==11&&b1.version==2&&b1.kills==0&&b1.segments==1&&b1.mseg==9&&b1.attempts==1&&!b1.owed,"segment-budget-persisted");
     rc=runv("seg","seg","60",seg,0,12);b2=budget_of("seg");
     ck(rc==75&&count(q,"\n")==2&&count(q,"snap\n")==1&&has(q,"a\n"),"continued-segment-skips-completed-phase");
     ck(b2.end==b1.end&&b1.end>0,"total-deadline-not-reset-across-segments");
@@ -211,10 +220,7 @@ static int segment_cases(const char *plan) {
     ck(count(p,"\texpired\t")==3&&count(p,"\tstart\tsegment-s=5")==4&&budget_of("seg").end==b1.end,"segment-rows-and-deadline-stable");
     /* the persisted total deadline governs a later segment: a segment is not a fresh deadline */
     rc=runv("segdl","seg","60",seg,0,12);b1=budget_of("segdl");
-    {
-        char row[200],bp[4400];file_of(bp,"segdl","chain-run.budget");
-        cx_fmt(row,sizeof row,"%ld %d %d %d %d %d %d %d %d\n",sy_now_ms()-1,b1.attempts,b1.resumes,b1.ma,b1.mr,b1.width,b1.segments,b1.mseg,b1.owed);put(bp,row);
-    }
+    { budget_row past=b1;past.end=sy_now_ms()-1;put_budget("segdl",past); }
     int rc2=runv("segdl","seg","60",seg,0,12);file_of(p,"segdl","chain-run.tsv");file_of(q,"segdl","calls");
     ck(rc==75&&rc2==3&&has(p,"reason=deadline")&&count(q,"\n")==1,"passed-total-deadline-stops-next-segment");
     ck(runv("segdl","seg","60",seg,0,12)==3&&count(q,"\n")==1,"deadline-stop-is-not-reset-by-reinvocation");
@@ -239,12 +245,9 @@ static int segment_cases(const char *plan) {
     ck(runv("seghuge","seg","60",huge,0,12)==2,"segment-over-270-refused");
     /* an owed resume (segment ended between a retryable failure and its observation) is settled first */
     rc=runv("segowed","seg","60",seg,0,12);b1=budget_of("segowed");
-    {
-        char row[200],bp[4400];file_of(bp,"segowed","chain-run.budget");
-        cx_fmt(row,sizeof row,"%ld %d %d %d %d %d %d %d 1\n",b1.end,b1.attempts,b1.resumes,b1.ma,b1.mr,b1.width,b1.segments,b1.mseg);put(bp,row);
-    }
+    { budget_row owing=b1;owing.owed=1;put_budget("segowed",owing); }
     rc2=runv("segowed","seg","60",seg,0,12);b2=budget_of("segowed");file_of(p,"segowed","chain-run.tsv");
-    ck(rc==75&&rc2==75&&has(p,"\towed=settled\n")&&b2.resumes==b1.resumes+1&&!b2.owed&&b2.width==b1.width-1,"owed-resume-settled-before-new-work");
+    ck(rc==75&&rc2==75&&has(p,"\towed=settled\n")&&b2.resumes==b1.resumes+1&&b2.kills==b1.kills&&!b2.owed&&b2.width==b1.width-1,"owed-resume-settled-before-new-work");
     /* LIM-S3: limits are not identity. A phase bound or build/limits.tsv change between segments of
        one run is accepted (same-dir resume, LIMITS row, budgets continue); a plan semantics change is
        refused before any child. */
@@ -411,11 +414,83 @@ int main(int argc,char **argv) {
     ck(call("budget","ok","30","3",0)==0,"phase-budget-accepted");
     join(p,base,"budget/chain-run.tsv");ck(has(p,"bound=3")&&has(p,"bound=4")&&has(p,"bound=5"),"phase-budget-read-not-fixed-90");
     ck(call("tree","tree","30","3",0)==0,"real-residue-tree-cleaned-resumed");
-    join(p,base,"tree/chain-run.tsv");ck(has(p,"cleanup=1 residue=0")&&has(p,"RESUME\t"),"cleanup-terminal-proof-before-resume");
+    /* the attempt was killed by its owner at the bound while the width was 4: a KILL row, no resume */
+    join(p,base,"tree/chain-run.tsv");ck(has(p,"cleanup=1 residue=0")&&has(p,"KILL\t")&&!has(p,"RESUME\t"),"cleanup-terminal-proof-before-resume");
     join(p,base,"tree/residual-pid");size_t pn=0;char *pb=cx_read(p,&pn);int residual=pb?atoi(pb):0;free(pb);
     ck(residual>1&&sy_getpgid(residual)<0,"escaped-grandchild-gone");
     ck(call("dirty","dirty","30","3",0)==2,"cleanup-unconfirmed-refused");
     join(p,base,"dirty/chain-run.tsv");ck(has(p,"reason=surviving-processes")&&!has(p,"RESUME\t"),"unclean-never-resumed");
+    /* RESUME-RULE: which event consumes which counter (the table at the top of chain-run.cx). */
+    {
+        budget_row k1,k2;char q[4400];
+        /* a bound kill at width 4 with no resume left at all: still retried, a kill and one unit of width */
+        ck(call("boundkill","boundkill","30","0",0)==0,"bound-kill-retried-without-a-resume");
+        k1=budget_of("boundkill");join(p,base,"boundkill/chain-run.tsv");
+        ck(k1.fields==11&&k1.version==2&&k1.kills==1&&k1.resumes==0&&k1.mr==0&&k1.width==3&&k1.attempts==5,"bound-kill-counts-a-kill-not-a-resume"); /* snap twice, ctx, pack-recheck, pack */
+        ck(count(p,"KILL\t")==1&&has(p,"\tparallel=3\tload1=")&&has(p,"ATTEMPT\t1\tphase=snap\trc=124\t")&&!has(p,"RESUME\t")&&has(p,"PREPARED\tpack"),"bound-kill-row-with-load-evidence");
+        /* another kill (the child died of signal 9) with no resume left: a real failure consumes a resume */
+        ck(call("realfail","resume","30","0",0)==3,"real-failure-needs-a-resume");
+        k2=budget_of("realfail");join(q,base,"realfail/chain-run.tsv");
+        ck(has(q,"reason=resumes-exhausted")&&!has(q,"KILL\t")&&!has(q,"RESUME\t")&&k2.kills==0&&k2.resumes==0&&k2.attempts==1,"real-failure-not-counted-as-a-kill");
+        /* the same event with one resume available consumes exactly that resume */
+        ck(call("realone","resume","30","1",0)==0,"real-failure-retried-with-a-resume");
+        k2=budget_of("realone");join(q,base,"realone/chain-run.tsv");
+        ck(count(q,"RESUME\t")==1&&!has(q,"KILL\t")&&k2.resumes==1&&k2.kills==0&&k2.width==3,"real-failure-consumes-a-resume");
+        /* a bound kill at width 1: nothing left to derate, it consumes a resume */
+        const char *one[]={"--parallel","1",0};
+        ck(runv("boundone","boundkill","30",one,0,12)==0,"bound-kill-at-width-one-retried");
+        k2=budget_of("boundone");join(q,base,"boundone/chain-run.tsv");
+        ck(count(q,"RESUME\t")==1&&!has(q,"KILL\t")&&k2.resumes==1&&k2.kills==0&&k2.width==1,"bound-kill-at-width-one-consumes-a-resume");
+        /* counters are never reset: a new invocation of the finished dir keeps every one of them */
+        ck(call("boundkill","boundkill","30","0",0)==0,"counters-reinvocation-accepted");
+        k2=budget_of("boundkill");
+        ck(k2.kills==k1.kills&&k2.resumes==k1.resumes&&k2.attempts==k1.attempts&&k2.width==k1.width&&k2.end==k1.end&&count(p,"KILL\t")==1,"counters-never-reset");
+        /* an owed bound kill (the segment ended before its observation) is settled as a kill */
+        { budget_row owing=k2;owing.owed=2;put_budget("boundkill",owing); }
+        ck(call("boundkill","boundkill","30","0",0)==0,"owed-kill-settled");
+        k2=budget_of("boundkill");
+        ck(count(p,"KILL\t")==2&&has(p,"\towed=settled\n")&&!has(p,"RESUME\t")&&k2.kills==k1.kills+1&&k2.resumes==0&&k2.width==k1.width-1&&!k2.owed,"owed-kill-costs-a-kill-not-a-resume");
+        /* a maximum is raised only by a recorded ledger row; never lowered, never above the limits table */
+        char ledger[4400],ld[4400];join(ld,base,"../agentwork");sy_mkdir(ld,0755);join(ledger,base,"../agentwork/ledger.tsv");
+        put(ledger,"2026-11-13\tFIXTURE-OTHER\tunrelated row\t-\t-\tfixture\n");
+        ck(call("raise","exhaust","30","1",0)==3,"raise-base-exhausted");
+        k1=budget_of("raise");join(q,base,"raise/chain-run.tsv");join(p,base,"raise/calls");int before=count(p,"\n");
+        ck(k1.resumes==1&&k1.mr==1&&before==2,"raise-base-budget");
+        ck(call("raise","exhaust","30","2",0)==2&&budget_of("raise").mr==1&&count(p,"\n")==before,"maximum-not-raised-without-a-row");
+        const char *noid[]={"--budget-raise","FIXTURE-RAISE","--max-resumes","2",0},*low[]={"--budget-raise","FIXTURE-RAISE","--max-resumes","0",0},*over[]={"--budget-raise","FIXTURE-RAISE","--max-resumes","4",0};
+        char *rv[24]={runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",0,"--candidate",self,"--watch",self,"--deadline-s","30",0};
+        char rdir[4400];join(rdir,base,"raise");rv[4]=rdir;
+        const char **sets[3]={noid,low,over};int refused=0,rcs[3];
+        for(int s=0;s<4;s++) {
+            /* s 0: the named row is not in the ledger; then it is, and s 1 lowers, s 2 exceeds the table max, s 3 raises */
+            const char **o=s<3?sets[s]:noid;int k=11;
+            if(s==1)put(ledger,"2026-11-13\tFIXTURE-OTHER\tunrelated row\t-\t-\tfixture\n2026-11-13\tFIXTURE-RAISE\traise resumes of the fixture dir to 2\t-\t-\tfixture\n");
+            for(int j=0;o[j];j++)rv[k++]=(char*)o[j];
+            rv[k++]="--";rv[k++]="--fixture-case";rv[k++]="exhaust";rv[k]=0;
+            int r=cx_runv_timeout(rv,12,0,0);
+            if(s<3){rcs[s]=r;if(r==2&&budget_of("raise").mr==1&&budget_of("raise").resumes==1&&count(p,"\n")==before&&count(q,"\nRAISE\t")==0)refused++;}
+            else {
+                k2=budget_of("raise");
+                ck(refused==3,"maximum-raise-refused-unrecorded-lowered-or-above-table");                ck(r==3&&k2.mr==2&&k2.resumes==2&&k2.attempts==k1.attempts+2&&k2.end==k1.end&&count(q,"\nRAISE\t")==1&&has(q,"\tid=FIXTURE-RAISE\tfrom=attempts:4096,resumes:1,segments:0\tto=attempts:4096,resumes:2,segments:0\n"),"maximum-raised-by-recorded-row-counters-kept");
+            }
+        }
+        (void)rcs;
+        /* a budget of the old format is refused before any child */
+        join(ld,base,"oldbudget");sy_mkdir(ld,0755);join(ld,base,"oldbudget/chain-run.budget");
+        { char row[200];cx_fmt(row,sizeof row,"%ld 0 0 4096 3 4 0 0 0\n",sy_now_ms()+30000);put(ld,row); }
+        ck(call("oldbudget","ok","30","3",0)==2,"old-budget-format-refused");
+        join(ld,base,"oldbudget/calls");ck(!sy_exists(ld),"old-budget-format-before-child");
+        /* the residue columns are not run identity: a changed residue row continues the same dir; changed deps do not */
+        put(plan,"0\tsnap\t-\t3\t-\t-\t1\t-\t-\t-\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
+        ck(call("residcol","ok","30","3",0)==0,"residue-column-base-run");
+        put(plan,"0\tsnap\t-\t3\t-\t-\t1\tscrub\tstage/snap.done\tstage/snap-work,stage/s-*.tmp\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
+        ck(call("residcol","ok","30","3",0)==0,"residue-column-not-run-identity");
+        put(plan,"0\tsnap\t-\t3\t-\t-\t1\t-\t-\n1\tpack\t-\t5\tsnap\t-\t1\t-\t-\t-\n");
+        ck(call("residcol","ok","30","3",0)==2,"nine-column-row-refused");
+        put(plan,"0\tsnap\t-\t3\t-\t-\t1\n1\tpack\t-\t5\tsnap\t-\t1\n");
+        ck(call("residcol","ok","30","3",0)==2,"seven-column-table-refused");
+        put_plan(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
+    }
     put_plan(plan,"0\tsnap\t-\t121\n1\tpack\t-\t90\n");  /* one above phase.bound max (120) */
     ck(call("overbound","ok","30","3",0)==2,"over-90-refused-before-child");
     join(p,base,"overbound/calls");ck(!sy_exists(p),"overbound-no-child-executed");
@@ -434,8 +509,9 @@ int main(int argc,char **argv) {
     join(p,base,"siblings/checkpoint.tsv");ck(has(p,"DONE\tb\t")&&has(p,"DONE\tc\t")&&has(p,"DONE\td\t")&&!has(p,"DONE\tpack\t")&&!has(p,"DONE\te\t"),"siblings-finish-no-new-dispatch");
     ck(call("parallel-timeout","parallel-timeout","30","3",0)==0,"restart-keeps-completed-work");
     ck(events("parallel-timeout",0,1),"restart-no-phase-reexecution");
+    /* the one retry was a bound kill at width 4: it cost a kill and one unit of width, not a resume */
     join(p,base,"parallel-timeout/chain-run.budget");size_t bn=0;char *budget=cx_read(p,&bn);long deadline;int attempt,resume,ma,mr,width;
-    ck(budget&&sscanf(budget,"%ld %d %d %d %d %d",&deadline,&attempt,&resume,&ma,&mr,&width)==6&&width==3&&resume==1,"restart-load-cannot-rise");free(budget);
+    ck(budget&&sscanf(budget,"%ld %d %d %d %d %d",&deadline,&attempt,&resume,&ma,&mr,&width)==6&&width==3&&resume==0&&budget_of("parallel-timeout").kills==1,"restart-load-cannot-rise");free(budget);
     put_plan(plan,"0\tsnap\t-\t3\tunknown\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
     ck(call("unknown-dep","ok","30","3",0)==2,"unknown-dependency-rejected");join(p,base,"unknown-dep/calls");ck(!sy_exists(p),"unknown-dependency-before-child");
     put_plan(plan,"0\tsnap\t-\t3\tpack\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
