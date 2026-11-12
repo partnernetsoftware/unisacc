@@ -1,0 +1,83 @@
+/* tools/check-phase-times-calc.cx -- tools/phase-times-calc.cx 的检查(夹具写入 sy_tmpdir 下)。
+ *
+ *   sh ./unisacc.com tools/check-phase-times-calc.cx
+ *
+ * 夹具表 a;b(a);c(a);d(b,c),合成链记录:a 10 秒 + 子相 a-x 5 秒(归 a),b 20,c 5,d 10,未入表的 zz 3 秒。
+ * 期望:合计 53.0、关键路径 a-b-d = 45 加 unplaced 3 = 48.0、wall 60、比值 0.88、余量 5.0;
+ * 域合计与单次最大值;--write 写行且重复写不重复;畸形 wall_ms、前向依赖、未知依赖、无尝试一律退出 2。
+ * 另对真实 build/chain-phases.tsv 校验表能被解析(用合成记录跑,退出 0)。输出 PASS/FAIL 与 CHECK_PHASE_TIMES_CALC<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-phase-times-calc.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-phase-times-calc.%s\n", name); }
+}
+static char dir[320];
+static int has(const char *hay, const char *needle) { return tx_find(hay, tx_len(hay, 100000), needle, tx_len(needle, 200)) >= 0; }
+static void put(const char *name, const char *body) {
+    char path[400];
+    cx_fmt(path, sizeof path, "%s/%s", dir, name);
+    cx_write(path, body, tx_len(body, 100000));
+}
+static int calc(const char *run, const char *tbl, const char *extra, char *out, size_t cap) {
+    char cmd[1500]; char *o = 0; size_t n = 0;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/phase-times-calc.cx -- '%s/%s' '%s/%s' %s 2>&1", dir, run, dir, tbl, extra);
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+
+int main(void) {
+    char out[8192];
+    if (cx_fmt(dir, sizeof dir, "%s/phase-times-calc-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    put("t.tsv", "# order\tid\texclusive_dir\ttimeout_s\tdeps\tlane\tparallelism\n0\ta\touter\t90\t-\t-\t1\n1\tb\touter\t90\ta\t-\t1\n2\tc\touter\t90\ta\t-\t1\n3\td\touter\t90\tb,c\t-\t1\n");
+    put("r.tsv", "SEGMENT\t100\tn=1\tstart\nATTEMPT_TIME\tphase=a\twall_ms=10000\nATTEMPT_TIME\tphase=a-x\twall_ms=5000\n"
+                 "ATTEMPT_TIME\tphase=b\twall_ms=20000\nATTEMPT_TIME\tphase=c\twall_ms=5000\nATTEMPT_TIME\tphase=d\twall_ms=10000\n"
+                 "ATTEMPT_TIME\tphase=zz\twall_ms=3000\nSUPERVISE\t130\titeration=1\trc=75\tresidue=0\nSUPERVISE\t160\titeration=2\trc=0\tresidue=0\n");
+    int rc = calc("r.tsv", "t.tsv", "", out, sizeof out);
+    ck(rc == 0 && has(out, "SUM\tattempts=6\tsum_s=53.0\twall_s=60\tratio=0.88"), "sum-wall-ratio");
+    ck(has(out, "CRITICAL\tcp_s=48.0\tpath_phases=3\tpath_with_time=3\tunplaced_s=3.0\tunplaced_attempts=1"), "critical-path-with-deps");
+    ck(has(out, "PARALLEL\tserial_sum_s=53.0\tcritical_s=48.0\theadroom_s=5.0"), "parallel-headroom");
+    ck(has(out, "PHASE_TIMES_CALC\trc=0"), "rc-marker");
+    ck(has(out, "DOMAIN\tother\t53.0\t20.0\t6"), "domain-total-max-count");
+    rc = calc("r.tsv", "t.tsv", "--start 90", out, sizeof out);
+    ck(rc == 0 && has(out, "wall_s=70"), "start-override");
+    put("w.tsv", "# phase\tscope\tbudget_s\tmeasured_s\tsource\twaiver_task\twaiver_until\n");
+    char ex[600]; cx_fmt(ex, sizeof ex, "--write '%s/w.tsv' --prefix X1 --source S", dir);
+    rc = calc("r.tsv", "t.tsv", ex, out, sizeof out);
+    ck(rc == 0 && has(out, "WROTE\trows=1"), "write-row");
+    rc = calc("r.tsv", "t.tsv", ex, out, sizeof out);
+    ck(rc == 0 && has(out, "WROTE\trows=0"), "write-idempotent");
+    {   char path[400]; cx_fmt(path, sizeof path, "%s/w.tsv", dir); size_t n = 0; char *b = cx_read(path, &n);
+        ck(b && has(b, "X1-other\top\t300\t20.0\tS 域合计 53.0 秒 6 次尝试"), "write-row-format"); }
+    put("bad1.tsv", "ATTEMPT_TIME\tphase=a\twall_ms=12x\n");
+    rc = calc("bad1.tsv", "t.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "malformed ATTEMPT_TIME"), "refuse-bad-wall-ms");
+    put("bad2.tsv", "SEGMENT\t100\tn=1\n");
+    rc = calc("bad2.tsv", "t.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "no ATTEMPT_TIME"), "refuse-no-attempts");
+    put("fwd.tsv", "0\ta\touter\t90\tb\t-\t1\n1\tb\touter\t90\t-\t-\t1\n");
+    rc = calc("r.tsv", "fwd.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "unknown or not earlier"), "refuse-forward-dep");
+    put("unk.tsv", "0\ta\touter\t90\tzzz\t-\t1\n");
+    rc = calc("r.tsv", "unk.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "unknown or not earlier"), "refuse-unknown-dep");
+    put("cols.tsv", "0\ta\touter\n");
+    rc = calc("r.tsv", "cols.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "malformed phase row"), "refuse-short-row");
+    rc = calc("r.tsv", "../../../build/chain-phases.tsv", "", out, sizeof out);
+    { char cmd[800]; char *o = 0; size_t n = 0;
+      cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/phase-times-calc.cx -- '%s/r.tsv' build/chain-phases.tsv 2>&1", dir);
+      char *v[] = {"sh", "-c", cmd, 0};
+      int r2 = cx_runv_timeout(v, 50, &o, &n);
+      ck(r2 == 0 && o && has(o, "PHASE_TIMES_CALC\trc=0"), "real-phase-table-parses"); }
+    sy_printf("CHECK_PHASE_TIMES_CALC\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

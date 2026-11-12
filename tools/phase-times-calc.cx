@@ -1,0 +1,195 @@
+/* tools/phase-times-calc.cx -- 由链自己的记录 chain-run.tsv 重算相位耗时表,并按相位表依赖现算关键路径。
+ *
+ *   sh ./unisacc.com tools/phase-times-calc.cx -- RUN.tsv PHASES.tsv [--start EPOCH] [--write FILE --prefix ID --source TEXT]
+ *
+ * RUN.tsv: 链记录;读 ATTEMPT_TIME(phase=NAME wall_ms=N)、SEGMENT/SUPERVISE 的时间戳(第 2 列 epoch)。
+ * PHASES.tsv: build/chain-phases.tsv(order id exclusive_dir timeout_s deps lane parallelism),deps 逗号分隔,必须指向更早的行。
+ * 相位归属:名字与表 id 完全相同则归该相;否则逐段去掉末尾 -xxx 找表中的父相(如 gen1-osx-arm64-front0 归 gen1-osx-arm64);
+ * 仍找不到的记为 unplaced(如 prepare-watch),计入合计与关键路径的串行前缀,单列报告。每个相位的耗时 = 它全部尝试的 wall_ms 之和(含重试)。
+ * 输出行:DOMAIN name total_s max_attempt_s count / SUM / CRITICAL / PARALLEL / PHASE_TIMES_CALC rc。
+ * wall = 末个 rc=0 的 SUPERVISE 时间戳 - START(默认首个 SEGMENT 时间戳;--start 可给 owner.tsv 首行 epoch)。
+ * --write: 对每个域追加一行 "PREFIX-域 op 300 max_s SOURCE - -" 到 FILE(同 id 已存在则跳过,不重复写)。
+ * 退出:0 成功;2 输入畸形(缺列、依赖未知或前向、wall_ms 非数字、无尝试)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define MAXP 1024
+#define MAXD 16
+static char *pid[MAXP], *pdeps[MAXP];
+static long pdur[MAXP], pfin[MAXP]; static int pcnt[MAXP], ppred[MAXP];
+static int np;
+static const char *dname[MAXD] = {"closure", "gen1", "target-tail", "final-net", "jobs-tbl-net-tool", "kernels", "p3", "pack", "other"};
+static long dtot[MAXD], dmax[MAXD]; static int dcnt[MAXD];
+static char big[400000];
+
+static int split(char *line, char *f[], int max) {
+    int n = 0; f[n++] = line;
+    for (char *p = line; *p && n < max; p++) if (*p == '\t') { *p = 0; f[n++] = p + 1; }
+    return n;
+}
+static int starts(const char *s, const char *p) { int n = (int)tx_len(p, 100); return tx_cmp(s, n, p, n) == 0 && tx_len(s, 200) >= (size_t)n; }
+static int has(const char *s, const char *p) { return tx_find(s, tx_len(s, 200), p, tx_len(p, 100)) >= 0; }
+static int domain(const char *n) {
+    if (has(n, "closure")) return 0;
+    if (starts(n, "gen1")) return 1;
+    if (starts(n, "g2-") || starts(n, "g3-") || starts(n, "gen2-") || starts(n, "gen3-")) return 2;
+    if (starts(n, "final-net")) return 3;
+    if (starts(n, "jobs") || starts(n, "tbl") || starts(n, "net") || starts(n, "tool")) return 4;
+    if (starts(n, "kernels")) return 5;
+    if (starts(n, "p3")) return 6;
+    if (starts(n, "pack")) return 7;
+    return 8;
+}
+static int parse_num(const char *s, long *v) {
+    long a = 0; int i = 0;
+    if (s[0] < '0' || s[0] > '9') return 0;
+    for (; s[i] >= '0' && s[i] <= '9'; i++) a = a * 10 + (s[i] - '0');
+    if (s[i] != 0 && s[i] != '\t') return 0;
+    *v = a; return 1;
+}
+static int find(const char *name) {
+    for (int i = 0; i < np; i++) if (tx_eqz(pid[i], name)) return i;
+    return -1;
+}
+static int place(const char *name) {
+    char t[256];
+    size_t n = tx_len(name, 250);
+    mm_copy(t, sizeof t, name, n); t[n] = 0;
+    for (;;) {
+        int k = find(t); if (k >= 0) return k;
+        int cut = -1;
+        for (int i = 0; t[i]; i++) if (t[i] == '-') cut = i;
+        if (cut <= 0) return -1;
+        t[cut] = 0;
+    }
+}
+/* ms -> "S.D" 一位小数 */
+static void fmts(long ms, char *o, size_t cap) { cx_fmt(o, cap, "%ld.%ld", ms / 1000, (ms % 1000) / 100); }
+
+int main(int argc, char **argv) {
+    const char *run = 0, *ph = 0, *wfile = 0, *prefix = 0, *source = "chain-run.tsv 重算";
+    long start = -1;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--start") && i + 1 < argc) { if (!parse_num(argv[++i], &start)) { sy_eprintf("phase-times-calc: bad --start\n"); return 2; } }
+        else if (tx_eqz(argv[i], "--write") && i + 1 < argc) wfile = argv[++i];
+        else if (tx_eqz(argv[i], "--prefix") && i + 1 < argc) prefix = argv[++i];
+        else if (tx_eqz(argv[i], "--source") && i + 1 < argc) source = argv[++i];
+        else if (!run) run = argv[i];
+        else if (!ph) ph = argv[i];
+        else { sy_eprintf("phase-times-calc: extra arg\n"); return 2; }
+    }
+    if (!run || !ph) { sy_eprintf("usage: phase-times-calc RUN.tsv PHASES.tsv [--start EPOCH] [--write FILE --prefix ID --source TEXT]\n"); return 2; }
+    if (wfile && !prefix) { sy_eprintf("phase-times-calc: --write needs --prefix\n"); return 2; }
+    size_t sz = 0;
+    char *pb = cx_read(ph, &sz);
+    if (!pb) { sy_eprintf("phase-times-calc: cannot read %s\n", ph); return 2; }
+    char *at = pb; int lineno = 0;
+    while (*at) {
+        char *e = at; while (*e && *e != '\n') e++;
+        char save = *e; *e = 0; lineno++;
+        if (at[0] && at[0] != '#') {
+            char *f[8]; int n = split(at, f, 8);
+            if (n != 7 || np >= MAXP) { sy_eprintf("phase-times-calc: %s:%d malformed phase row\n", ph, lineno); return 2; }
+            if (find(f[1]) >= 0) { sy_eprintf("phase-times-calc: %s:%d duplicate id %s\n", ph, lineno, f[1]); return 2; }
+            pid[np] = f[1]; pdeps[np] = f[4]; np++;
+        }
+        *e = save; at = save ? e + 1 : e;
+    }
+    if (np == 0) { sy_eprintf("phase-times-calc: empty phase table\n"); return 2; }
+    char *rb = cx_read(run, &sz);
+    if (!rb) { sy_eprintf("phase-times-calc: cannot read %s\n", run); return 2; }
+    long unplaced = 0, sum = 0, first_seg = -1, last_ok = -1; int attempts = 0, unplaced_n = 0;
+    at = rb; lineno = 0;
+    while (*at) {
+        char *e = at; while (*e && *e != '\n') e++;
+        char save = *e; *e = 0; lineno++;
+        if (starts(at, "ATTEMPT_TIME\t")) {
+            char *f[4]; int n = split(at, f, 4); long ms = 0;
+            if (n < 3 || !starts(f[1], "phase=") || !starts(f[2], "wall_ms=") || !parse_num(f[2] + 8, &ms) || f[1][6] == 0) {
+                sy_eprintf("phase-times-calc: %s:%d malformed ATTEMPT_TIME\n", run, lineno); return 2;
+            }
+            const char *name = f[1] + 6;
+            int k = place(name), d = domain(name);
+            attempts++; sum += ms; dtot[d] += ms; dcnt[d]++; if (ms > dmax[d]) dmax[d] = ms;
+            if (k < 0) { unplaced += ms; unplaced_n++; } else { pdur[k] += ms; pcnt[k]++; }
+        } else if (starts(at, "SEGMENT\t") || starts(at, "SUPERVISE\t")) {
+            int seg = starts(at, "SEGMENT\t");
+            char *f[6]; int n = split(at, f, 6); long ts = 0;
+            if (n >= 2 && parse_num(f[1], &ts)) {
+                if (seg && first_seg < 0) first_seg = ts;
+                if (!seg && n >= 4 && tx_eqz(f[3], "rc=0")) last_ok = ts;
+            }
+        }
+        *e = save; at = save ? e + 1 : e;
+    }
+    if (attempts == 0) { sy_eprintf("phase-times-calc: no ATTEMPT_TIME rows in %s\n", run); return 2; }
+    /* 关键路径:表按序,依赖必须指向更早的行 */
+    long cp = 0; int cpend = -1;
+    for (i = 0; i < np; i++) {
+        long best = 0; int pred = -1;
+        char dcopy[2048]; size_t dl = tx_len(pdeps[i], 2000); mm_copy(dcopy, sizeof dcopy, pdeps[i], dl); dcopy[dl] = 0;
+        if (!tx_eqz(dcopy, "-")) {
+            char *p = dcopy;
+            for (;;) {
+                char *c = p; while (*c && *c != ',') c++;
+                char sv = *c; *c = 0;
+                int k = find(p);
+                if (k < 0 || k >= i) { sy_eprintf("phase-times-calc: phase %s: dependency %s unknown or not earlier\n", pid[i], p); return 2; }
+                if (pfin[k] >= best) { best = pfin[k]; pred = k; }
+                if (!sv) break;
+                p = c + 1;
+            }
+        }
+        pfin[i] = best + pdur[i]; ppred[i] = pred;
+        if (pfin[i] >= cp) { cp = pfin[i]; cpend = i; }
+    }
+    int pathn = 0, pathrun = 0;
+    for (i = cpend; i >= 0; i = ppred[i]) { pathn++; if (pdur[i] > 0) pathrun++; }
+    long wall_s = (last_ok >= 0 && (start >= 0 || first_seg >= 0)) ? last_ok - (start >= 0 ? start : first_seg) : -1;
+    long cp_total = cp + unplaced;
+    char a[32], b[32], c[32];
+    for (i = 0; i < MAXD; i++) {
+        if (!dcnt[i]) continue;
+        fmts(dtot[i], a, sizeof a); fmts(dmax[i], b, sizeof b);
+        sy_printf("DOMAIN\t%s\t%s\t%s\t%d\n", dname[i], a, b, dcnt[i]);
+    }
+    fmts(sum, a, sizeof a);
+    if (wall_s > 0) {
+        long r100 = (sum * 100 / 1000 + wall_s / 2) / wall_s;
+        sy_printf("SUM\tattempts=%d\tsum_s=%s\twall_s=%ld\tratio=%ld.%02ld\n", attempts, a, wall_s, r100 / 100, r100 % 100);
+    } else sy_printf("SUM\tattempts=%d\tsum_s=%s\twall_s=UNMEASURED\tratio=UNMEASURED\n", attempts, a);
+    fmts(cp_total, b, sizeof b); fmts(unplaced, c, sizeof c);
+    sy_printf("CRITICAL\tcp_s=%s\tpath_phases=%d\tpath_with_time=%d\tunplaced_s=%s\tunplaced_attempts=%d\n", b, pathn, pathrun, c, unplaced_n);
+    {
+        long head = sum - cp_total; long pct10 = sum > 0 ? head * 1000 / sum : 0;
+        char h[32]; fmts(head, h, sizeof h);
+        char o[32]; if (wall_s > 0) cx_fmt(o, sizeof o, "%ld.%ld", sum / 1000 - wall_s, 0L); else cx_fmt(o, sizeof o, "UNMEASURED");
+        sy_printf("PARALLEL\tserial_sum_s=%s\tcritical_s=%s\theadroom_s=%s\theadroom_pct=%ld.%ld\tsum_minus_wall_s=%s\n", a, b, h, pct10 / 10, pct10 % 10, o);
+    }
+    if (wfile) {
+        size_t fs = 0; char *old = cx_read(wfile, &fs);
+        if (!old) { sy_eprintf("phase-times-calc: cannot read %s\n", wfile); return 2; }
+        if (fs + 4096 >= sizeof big) { sy_eprintf("phase-times-calc: %s too large\n", wfile); return 2; }
+        mm_copy(big, sizeof big, old, fs); size_t len = fs; big[len] = 0;
+        if (len && big[len - 1] != '\n') big[len++] = '\n';
+        int added = 0;
+        for (i = 0; i < MAXD; i++) {
+            if (!dcnt[i]) continue;
+            char key[160], row[600]; cx_fmt(key, sizeof key, "\n%s-%s\t", prefix, dname[i]);
+            if (tx_find(big, len, key, tx_len(key, 160)) >= 0 || starts(big, key + 1)) continue;
+            fmts(dmax[i], a, sizeof a); fmts(dtot[i], b, sizeof b);
+            cx_fmt(row, sizeof row, "%s-%s\top\t300\t%s\t%s 域合计 %s 秒 %d 次尝试(单次最大值入 measured_s)\t-\t-\n", prefix, dname[i], a, source, b, dcnt[i]);
+            size_t rl = tx_len(row, 599);
+            if (len + rl >= sizeof big) { sy_eprintf("phase-times-calc: buffer\n"); return 2; }
+            mm_copy(big + len, sizeof big - len, row, rl); len += rl; big[len] = 0; added++;
+        }
+        if (added && cx_write(wfile, big, len)) { sy_eprintf("phase-times-calc: cannot write %s\n", wfile); return 2; }
+        sy_printf("WROTE\trows=%d\tfile=%s\n", added, wfile);
+    }
+    sy_printf("PHASE_TIMES_CALC\trc=0\n");
+    return 0;
+}
