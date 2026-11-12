@@ -16,6 +16,9 @@
  *  (6) versions: --require at the same major and not newer is accepted (0.1.0, 0.2.1 against 0.2.1); a
  *      newer minor (0.3.0) and another major (1.0.0) are refused (rc 5); a tlib whose dependency is
  *      not provided is refused; a dependency provided at another major is refused (major mismatch);
+ * (6b) kit is incremental: fresh tlibs are kept (no build line), a second kit builds nothing and
+ *      keeps the image, an implementation change in fx.a builds fx.a and its dependent fx.b only,
+ *      the restored source gives the first content sha again;
  *  (7) stale: a changed unit source is refused by check --fresh and by link (rc 4) while the structure
  *      check still passes; after a rebuild the content sha differs and the link works again;
  *  (8) a tool whose closure needs an excluded unit is refused at link (rc 6); a package whose unit needs
@@ -69,6 +72,19 @@ static int field(const char *tag, const char *key, char *dst, long cap) {
         i = e + 1;
     }
     return -1;
+}
+
+/* The number of output lines whose first field is TAG. */
+static int lines(const char *tag) {
+    long i = 0, e, o, l;
+    int n = 0;
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, tag, tx_len(tag, 64))) n++;
+        i = e + 1;
+    }
+    return n;
 }
 
 static int is(const char *tag, const char *key, const char *want) {
@@ -338,6 +354,44 @@ int main(int argc, char **argv) {
         prep = manifests("0.2.1");
         rc = run(tlib, ok1);
         ck(!prep && rc == 0, "table-restored-link-ok");
+    }
+    /* (6b) incremental kit over the fixture packages (fx.c never builds: it is skipped each time).
+       The tool's own sources are reached through a tools link; its image is built once. */
+    {
+        char *k[] = {"kit", "--out", out1, "--cache", cache, 0};
+        char tools_dir[4400], kitfile[4400], img[4400], c3[65];
+        const char *two0 = "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n";
+        const char *two1 = "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return 2 * fa_one(x); }\n";
+        char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
+        char *cf[] = {"check", ta, "--fresh", 0};
+        int r1, r2, r3, r4, n1, n2, n3, n4, kept1, kept2, kept3;
+        long tk;
+        prep = cx_fmt(tools_dir, sizeof tools_dir, "%s/tools", root) || cx_fmt(kitfile, sizeof kitfile, "%s/kit.tsv", out1) ||
+               cx_fmt(img, sizeof img, "%s/tlib-prep", out1) || link_to(tools_dir, "tools");
+        r1 = prep ? -1 : run(tlib, k);
+        n1 = lines("TLIB_BUILD");
+        kept1 = is("PREPARED", "rebuilt=", "0") && is("PREPARED", "image=", "built") && is("PREPARED", "skipped=", "1");
+        ck(r1 == 0 && n1 == 0 && kept1 && sy_exists(kitfile) == 1 && sy_exists(img) == 1, "kit-keeps-fresh-tlibs-and-builds-the-image");
+        tk = sy_now_ms();
+        r2 = run(tlib, k);
+        n2 = lines("TLIB_BUILD");
+        kept2 = is("PREPARED", "rebuilt=", "0") && is("PREPARED", "image=", "kept");
+        sy_printf("MEASURED\ttlib\tkit_nothing_to_build_ms=%ld\n", sy_now_ms() - tk);
+        ck(r2 == 0 && n2 == 0 && kept2, "second-kit-builds-nothing-and-keeps-the-image");
+        /* an implementation change in fx.a: fx.a is built, and fx.b because its dependency's content moved */
+        prep = put("fa/two.cx", two1);
+        r3 = run(tlib, k);
+        n3 = lines("TLIB_BUILD");
+        kept3 = is("PREPARED", "rebuilt=", "2") && is("PREPARED", "image=", "kept");
+        ck(!prep && r3 == 0 && n3 == 2 && kept3, "source-change-rebuilds-the-package-and-its-dependent-only");
+        rc = run(tlib, l);
+        ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-incremental-kit-behaves-as-before");
+        /* back to the first source: both come back, by the cache, with the first content sha */
+        prep = put("fa/two.cx", two0);
+        r4 = run(tlib, k);
+        n4 = lines("TLIB_BUILD");
+        rc = run(tlib, cf);
+        ck(!prep && r4 == 0 && n4 == 2 && rc == 0 && !field("TLIB_CHECK", "content_sha=", c3, sizeof c3) && tx_eqz(c1, c3), "restored-source-gives-the-first-content-sha");
     }
     /* (7) stale */
     {

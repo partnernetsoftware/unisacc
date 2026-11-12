@@ -5,6 +5,8 @@
  * Real product, real packages of ROOT, a private kit directory (NEW_DIR/kit); the package cache is
  * the default one, whose entries the build verifies by structure and input sha before use.
  *  (1) `tlib kit` leaves the tlibs, the prep image and kit.tsv, and says PREPARED once;
+ *      (1b) a second kit builds nothing and leaves kit.tsv as it is; a removed tlib and a tlib
+ *      with a changed byte are each built again alone, the image is kept, kit.tsv comes out equal;
  *  (2) the kit image links the first tool listed in ROOT/build/tlib-prep.tsv: rc 0, one PREPARED
  *      line, an image, no work directory left behind;
  *  (3) that image and the product's `-o` image of the same source give the same output and exit
@@ -171,6 +173,41 @@ int main(int argc, char **argv) {
     ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
     sy_printf("MEASURED\ttlib-prep\tkit_ms=%ld\n", sy_now_ms() - t0);
     if (rc || !kit) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no kit: the remaining cases cannot run"); }
+
+    /* (1b): the kit is incremental */
+    {
+        char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", kitdir, "--root", root, 0};
+        char first[512], victim[4700];
+        char *again;
+        size_t an = 0, bn = 0;
+        char *lb;
+        int same;
+        t0 = sy_now_ms();
+        rc = run(v, 45);
+        sy_printf("MEASURED\ttlib-prep\tkit_nothing_to_do_ms=%ld\n", sy_now_ms() - t0);
+        again = cx_read(path, &an);
+        same = again && an == kn && mm_same(again, kit, (long)kn);
+        mm_free(again);
+        ck(rc == 0 && has("kit=unchanged") && has("rebuilt=0") && has("image=kept") && count("TLIB_BUILD\t") == 0 && same, "second-kit-builds-nothing-and-writes-nothing");
+        if (tp_rc_get(kit, (long)kn, "lib", 0, 1, first, sizeof first)) fatal("the kit lists no tlib");
+        at(victim, kitdir, first);
+        ok = sy_unlink(victim) == 0;
+        rc = run(v, 45);
+        again = cx_read(path, &an);
+        same = again && an == kn && mm_same(again, kit, (long)kn);
+        mm_free(again);
+        ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && has("kit=written") && same && sy_exists(victim) == 1,
+           "missing-tlib-alone-is-built-again-image-kept");
+        lb = cx_read(victim, &bn);
+        if (lb && bn > 64) lb[bn - 9] ^= 1;
+        ok = lb && bn > 64 && !cx_write(victim, lb, bn);
+        mm_free(lb);
+        rc = run(v, 45);
+        again = cx_read(path, &an);
+        same = again && an == kn && mm_same(again, kit, (long)kn);
+        mm_free(again);
+        ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && same, "damaged-tlib-alone-is-built-again");
+    }
 
     /* (4) (5): refusals, nothing written */
     if (cx_fmt(self, sizeof self, "%s/tools/check-tlib-prep.cx", root)) return 2;

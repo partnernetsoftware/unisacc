@@ -34,9 +34,13 @@
  * link     verifies every tlib (structure, then versions, then freshness), takes the use closure
  *          of TOOL.cx from the product's -cx-plan, compiles the units no tlib provides (in
  *          parallel) and links them with the tlibs.
- * kit      builds every package of the table into DIR (default ROOT/out/tlib), compiles this tool
- *          into DIR/tlib-prep and writes DIR/kit.tsv (product sha, the tlib files, path and sha of
- *          every unit of this tool's closure, the image sha, the kit sha). One PREPARED line.
+ * kit      brings DIR (default ROOT/out/tlib) up to date: every package of the table as a tlib,
+ *          this tool as DIR/tlib-prep, and DIR/kit.tsv (product sha, the tlib files, path and sha
+ *          of every unit of this tool's closure, the image sha, the kit sha). Incremental: only a
+ *          package whose tlib is absent, does not verify, is not fresh or was built from another
+ *          input (a rebuilt dependency included) is built, the image only when the product or this
+ *          tool's closure moved; with nothing to do it writes nothing (kit=unchanged). --no-cache
+ *          builds every package again. One PREPARED line, with rebuilt=N and image=kept|built.
  * prep     what cxlib.toolprep and cxlib.runnerprep run (as DIR/tlib-prep) before they compile:
  *          links TOOL from the kit when TOOL is a row of ROOT/build/tlib-prep.tsv, the kit
  *          verifies and describes ROOT now, and every tlib passes the same structure, version and
@@ -65,7 +69,7 @@
 
 #define FLAGS "-c -funit"
 #define STEP_SECS 55
-#define MAXLIB 8
+#define MAXLIB 16
 #define MAXJOB 256
 #define NOT_APPLICABLE 7
 
@@ -345,6 +349,44 @@ static int closure_inside(const char *unit, const char *lines, TpPkg *deps, int 
 
 static TpPkg bdeps[TP_MAXD];
 
+/* The identity lines that open both the input text and the receipt of package P. */
+static void put_head(TpBuf *in, const TpPkg *p) {
+    tp_puts(in, "tlib\t1\npkg\t"); tp_puts(in, p->pkg);
+    tp_puts(in, "\nversion\t"); tp_puts(in, p->version);
+    tp_puts(in, "\ntarget\t"); tp_puts(in, tn_self());
+    tp_puts(in, "\nflags\t" FLAGS "\nproduct_sha\t"); tp_puts(in, product_sha); tp_puts(in, "\n");
+}
+
+static void put_dep(TpBuf *in, const char *pkg, const char *required, const char *provided, const char *content) {
+    tp_puts(in, "dep\t"); tp_puts(in, pkg); tp_puts(in, "\t"); tp_puts(in, required);
+    tp_puts(in, "\t"); tp_puts(in, provided); tp_puts(in, "\t"); tp_puts(in, content); tp_puts(in, "\n");
+}
+
+static void put_excl(TpBuf *in, const TpPkg *p) {
+    int i;
+    for (i = 0; i < p->nexcl; i++) {
+        tp_puts(in, "excluded\t"); tp_puts(in, p->excl[i]); tp_puts(in, "\t"); tp_puts(in, p->excl_why[i]); tp_puts(in, "\n");
+    }
+}
+
+/* The input sha: the identity lines IN (head, deps, exclusions) and every unit's path and source
+   sha. 0, or -1 after naming the fault. */
+static int input_sha(const TpBuf *in, const TpPkg *p, char input[65]) {
+    char hex[65];
+    TpBuf t;
+    int i;
+    t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+    tp_put(&t, in->b, in->n);
+    for (i = 0; i < p->nunit; i++) {
+        if (tp_sha_file(p->unit[i], hex)) { mm_free(t.b); (void)say(2, "UNREADABLE", p->unit[i], "cannot read the unit"); return -1; }
+        tp_puts(&t, "unit\t"); tp_puts(&t, p->unit[i]); tp_puts(&t, "\t"); tp_puts(&t, hex); tp_puts(&t, "\n");
+    }
+    if (t.bad || in->bad) { mm_free(t.b); (void)say(1, "FAILED", p->pkg, "out of memory"); return -1; }
+    tp_sha(t.b, (size_t)t.n, input);
+    mm_free(t.b);
+    return 0;
+}
+
 static int cmd_build(const char *pkg, const char *outdir, const char *cache, int par, int use_cache) {
     char why[512], path[4400], stage[4400], dst[4400], cdir[4400], cpath[4400], kpath[4400], hex[65], input[65], content[65], apisha[65];
     char member[TP_MAXU][TP_NAME];
@@ -359,10 +401,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
     if (mkdirs(outdir)) return say(2, "UNREADABLE", outdir, "cannot create the output directory");
     /* identity lines shared by the input sha and the receipt */
-    tp_puts(&in, "tlib\t1\npkg\t"); tp_puts(&in, pk.pkg);
-    tp_puts(&in, "\nversion\t"); tp_puts(&in, pk.version);
-    tp_puts(&in, "\ntarget\t"); tp_puts(&in, tn_self());
-    tp_puts(&in, "\nflags\t" FLAGS "\nproduct_sha\t"); tp_puts(&in, product_sha); tp_puts(&in, "\n");
+    put_head(&in, &pk);
     nlibs = 0;
     for (i = 0; i < pk.ndep; i++) {
         Lib *L = &libs[nlibs];
@@ -374,15 +413,12 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         nlibs++;
         rc = tp_ver_compat(L->ver, pk.dep_ver[i]);
         if (rc) return say(5, "INCOMPATIBLE", pk.dep_pkg[i], rc == 1 ? "major mismatch with the dependency" : "dependency provider too old");
-        tp_puts(&in, "dep\t"); tp_puts(&in, pk.dep_pkg[i]); tp_puts(&in, "\t"); tp_puts(&in, pk.dep_ver[i]);
-        tp_puts(&in, "\t"); tp_puts(&in, L->ver); tp_puts(&in, "\t"); tp_puts(&in, L->content); tp_puts(&in, "\n");
+        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], L->ver, L->content);
     }
     /* fresh() reloads pk for each dependency: run it after the lines above, then restore pk. */
     for (i = 0; i < nlibs; i++) { rc = fresh(&libs[i]); if (rc) return rc; }
     if (tp_load(root, pkg, &pk, why, sizeof why)) return say(2, "UNREADABLE", pkg, why);
-    for (i = 0; i < pk.nexcl; i++) {
-        tp_puts(&in, "excluded\t"); tp_puts(&in, pk.excl[i]); tp_puts(&in, "\t"); tp_puts(&in, pk.excl_why[i]); tp_puts(&in, "\n");
-    }
+    put_excl(&in, &pk);
     for (i = 0; i < pk.nunit; i++) {
         char *c = tp_closure(root, product, pk.unit[i], why, sizeof why);
         if (!c) return say(1, "FAILED", pk.unit[i], why);
@@ -392,18 +428,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         if (tp_member_name(pk.unit[i], member[i], TP_NAME)) return say(1, "FAILED", pk.unit[i], "member name too long");
     }
     /* input sha: the identity lines and every unit's path and source sha */
-    {
-        TpBuf t;
-        t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
-        tp_put(&t, in.b, in.n);
-        for (i = 0; i < pk.nunit; i++) {
-            if (tp_sha_file(pk.unit[i], hex)) { mm_free(t.b); return say(2, "UNREADABLE", pk.unit[i], "cannot read the unit"); }
-            tp_puts(&t, "unit\t"); tp_puts(&t, pk.unit[i]); tp_puts(&t, "\t"); tp_puts(&t, hex); tp_puts(&t, "\n");
-        }
-        if (t.bad || in.bad) { mm_free(t.b); return say(1, "FAILED", pkg, "out of memory"); }
-        tp_sha(t.b, (size_t)t.n, input);
-        mm_free(t.b);
-    }
+    if (input_sha(&in, &pk, input)) return 1;
     if (cx_fmt(dst, sizeof dst, "%s/%s@%s.tlib", outdir, pk.pkg, pk.version) ||
         cx_fmt(cdir, sizeof cdir, "%s/%s", cache, pk.pkg) || cx_fmt(kpath, sizeof kpath, "%s/%s.key", cdir, input)) return 2;
     if (use_cache) {
@@ -614,21 +639,88 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
    and named), compile tools/tlib.cx into OUTDIR/tlib-prep, and write OUTDIR/kit.tsv:
      kit 1 / product_sha / lib FILE... / self UNIT SHA... (the use closure of tools/tlib.cx) /
      image_sha / kit_sha (sha256 of everything before that line).
-   The old kit.tsv is removed first, so a kit file never describes another image. */
+   kit is incremental: a package whose tlib in OUTDIR verifies, is fresh against ROOT and carries
+   the input sha a build would compute now (table row, product, the dependency tlibs as they stand
+   after this run, exclusions, unit set and source shas) is kept and not touched; the prep image is
+   kept when the old kit verifies (kit_verify: product, every unit of the tool's closure, image).
+   When everything is kept and the kit lists exactly these tlibs, nothing is written at all.
+   Otherwise the old kit.tsv is removed before the first tlib or the image changes, so a kit file
+   never describes another image or another set of tlibs. */
+typedef struct { char pkg[64], ver[32], content[65]; } KitLib;
+static KitLib kitlibs[MAXLIB];
+
+/* The kit text KB[0..KN): its kit_sha, the product, every `self` unit and the image at IMAGE.
+   0 with *BODY the length before the kit_sha line; 3 TAMPERED, 4 STALE, 2 unreadable product. */
+static int kit_verify(const char *kb, long kn, const char *kit, const char *image, long *body) {
+    char one[4400], want[65], hex[65];
+    long k = tx_rfind(kb, kn, "kit_sha\t", 8), i;
+    int r;
+    if (k < 0 || (k > 0 && kb[k - 1] != '\n') || kn != k + 8 + 64 + 1 || kb[kn - 1] != '\n') return say(3, "TAMPERED", kit, "no final kit_sha line");
+    tp_sha(kb, (size_t)k, hex);
+    if (!mm_same(hex, kb + k + 8, 64)) return say(3, "TAMPERED", kit, "kit sha mismatch");
+    if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
+    if (tp_rc_get(kb, k, "product_sha", 0, 1, want, sizeof want) || !tx_eqz(want, product_sha)) return say(4, "STALE", kit, "the kit was built by another product: run tools/tlib.cx kit");
+    for (i = 0;; i++) {
+        r = tp_rc_get(kb, k, "self", (int)i, 1, one, sizeof one);
+        if (r > 0) break;
+        if (r < 0 || tp_rc_get(kb, k, "self", (int)i, 2, want, sizeof want)) return say(3, "TAMPERED", kit, "bad self line");
+        if (tp_sha_file(one, hex) || !tx_eqz(hex, want)) return say(4, "STALE", one, "the tlib tool changed since the kit: run tools/tlib.cx kit");
+    }
+    if (i < 1) return say(3, "TAMPERED", kit, "no self line");
+    if (tp_rc_get(kb, k, "image_sha", 0, 1, want, sizeof want)) return say(3, "TAMPERED", kit, "no image_sha line");
+    if (tp_sha_file(image, hex) || !tx_eqz(hex, want)) return say(3, "TAMPERED", image, "the prep image is not the kit's");
+    *body = k;
+    return 0;
+}
+
+/* 0 when OUTDIR's tlib of PKG can be kept as it is, given the NDONE packages already settled in
+   kitlibs; the tlib is then in libs[MAXLIB - 1]. Nonzero when it has to be built: a missing tlib
+   says nothing, anything else is named by verify() or fresh() or here. */
+static int kit_keep(const char *pkg, const char *outdir, int ndone) {
+    char why[512], path[4400], input[65];
+    Lib *L = &libs[MAXLIB - 1];
+    TpBuf in;
+    int i, d, rc;
+    in.b = 0; in.n = 0; in.cap = 0; in.bad = 0;
+    if (tp_load(root, pkg, &pk, why, sizeof why)) return 2;
+    if (cx_fmt(path, sizeof path, "%s/%s@%s.tlib", outdir, pk.pkg, pk.version)) return 2;
+    if (sy_exists(path) != 1) return 4;
+    rc = load_lib(L, path);
+    if (rc) return rc;
+    if (!tx_eqz(L->pkg, pkg)) return say(3, "TAMPERED", path, "the tlib is another package");
+    rc = fresh(L);   /* leaves pk loaded for PKG */
+    if (rc) return rc;
+    put_head(&in, &pk);
+    for (i = 0; i < pk.ndep; i++) {
+        for (d = 0; d < ndone && !tx_eqz(kitlibs[d].pkg, pk.dep_pkg[i]); d++) {}
+        if (d == ndone) { mm_free(in.b); return say(5, "INCOMPATIBLE", pk.dep_pkg[i], "dependency not settled before its user: order the table"); }
+        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], kitlibs[d].ver, kitlibs[d].content);
+    }
+    put_excl(&in, &pk);
+    rc = input_sha(&in, &pk, input);
+    mm_free(in.b);
+    if (rc) return 1;
+    if (!tx_eqz(input, L->input)) return say(4, "STALE", pkg, "the build input changed (a dependency tlib, the table row or the flags)");
+    return 0;
+}
+
 static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache) {
     char image[4400], tmp[4400], kit[4400], hex[65], why[512];
-    char *names, *c, *o = 0;
-    long nn = 0, i = 0, e, cn, t0 = sy_now_ms();
-    size_t on = 0;
+    char *names, *c, *o = 0, *old;
+    long nn = 0, i = 0, e, cn, t0 = sy_now_ms(), obody = 0, oself = -1;
+    size_t on = 0, okn = 0;
     TpBuf k;
-    int rc, nlib = 0, nskip = 0, r;
+    int rc, nlib = 0, nskip = 0, nbuilt = 0, r, image_ok = 0, retired = 0;
     k.b = 0; k.n = 0; k.cap = 0; k.bad = 0;
     if (mkdirs(outdir)) return say(2, "UNREADABLE", outdir, "cannot create the output directory");
     if (cx_fmt(image, sizeof image, "%s/tlib-prep", outdir) || cx_fmt(kit, sizeof kit, "%s/kit.tsv", outdir) ||
         cx_fmt(tmp, sizeof tmp, "%s/.kit-%d", outdir, sy_pid())) return 2;
-    r = sy_unlink(kit);
-    if (r && r != -ENOENT) return say(1, "FAILED", kit, "cannot retire the old kit file");
     if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
+    old = cx_read(kit, &okn);
+    if (old && kit_verify(old, (long)okn, kit, image, &obody) == 0) {
+        oself = tx_find(old, obody, "\nself\t", 6);
+        image_ok = oself > 0;
+    }
     tp_puts(&k, "kit\t1\nproduct_sha\t"); tp_puts(&k, product_sha); tp_puts(&k, "\n");
     names = tp_names(root, &nn);
     if (!names) return say(2, "UNREADABLE", "build/tlib-packages.tsv", "no package table");
@@ -637,9 +729,22 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
         e = i;
         while (e < nn && names[e] != '\n') e++;
         if (e > i && !tx_copy(pkg, sizeof pkg, names + i, e - i)) {
-            rc = cmd_build(pkg, outdir, cache, par, use_cache);
+            if (nlib >= MAXLIB - 1) { mm_free(k.b); return say(1, "FAILED", outdir, "more packages than the link takes"); }
+            rc = use_cache ? kit_keep(pkg, outdir, nlib) : 1;
+            if (rc) {
+                if (!retired) {
+                    r = sy_unlink(kit);
+                    if (r && r != -ENOENT) return say(1, "FAILED", kit, "cannot retire the old kit file");
+                    retired = 1;
+                }
+                rc = cmd_build(pkg, outdir, cache, par, use_cache);
+                if (!rc) nbuilt++;
+            }
             if (rc) { nskip++; sy_printf("TLIB_KIT\tskipped\t%s\trc=%d\n", pkg, rc); }
-            else {   /* pk is the package just built */
+            else {   /* pk is the package, libs[MAXLIB - 1] its tlib (kept, built or taken from the cache) */
+                KitLib *K = &kitlibs[nlib];
+                if (cx_fmt(K->pkg, sizeof K->pkg, "%s", pk.pkg) || cx_fmt(K->ver, sizeof K->ver, "%s", pk.version) ||
+                    cx_fmt(K->content, sizeof K->content, "%s", libs[MAXLIB - 1].content)) return 2;
                 tp_puts(&k, "lib\t"); tp_puts(&k, pk.pkg); tp_puts(&k, "@"); tp_puts(&k, pk.version); tp_puts(&k, ".tlib\n");
                 nlib++;
             }
@@ -647,36 +752,53 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
         i = e + 1;
     }
     mm_free(names);
-    if (nlib < 1 || nlib >= MAXLIB) { mm_free(k.b); return say(1, "FAILED", outdir, "no package built, or more than the link takes"); }
-    c = tp_closure(root, product, "tools/tlib.cx", why, sizeof why);
-    if (!c) { mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", why); }
-    cn = tx_len(c, TX_ZCAP);
-    for (i = 0; i < cn; i = e + 1) {
-        char one[4400];
-        e = i;
-        while (e < cn && c[e] != '\n') e++;
-        if (e == i) continue;
-        if (tx_copy(one, sizeof one, c + i, e - i) || tp_sha_file(one, hex)) { mm_free(c); mm_free(k.b); return say(2, "UNREADABLE", "tools/tlib.cx", "a unit of its closure"); }
-        tp_puts(&k, "self\t"); tp_puts(&k, one); tp_puts(&k, "\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
+    if (nlib < 1) { mm_free(k.b); return say(1, "FAILED", outdir, "no package built"); }
+    if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
+    if (image_ok && !retired && oself + 1 == k.n && mm_same(old, k.b, k.n)) {
+        mm_free(k.b);
+        sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=0\timage=kept\tkit=unchanged\t%s\n", nlib, nskip, sy_now_ms() - t0, outdir);
+        return 0;
     }
-    mm_free(c);
-    {
-        char *v[] = {"sh", product, "tools/tlib.cx", "-o", tmp, 0};
-        rc = cx_runv_timeout(v, STEP_SECS, &o, &on);
+    if (!retired) {
+        r = sy_unlink(kit);
+        if (r && r != -ENOENT) return say(1, "FAILED", kit, "cannot retire the old kit file");
     }
-    if (o && on) (void)sy_write_all(2, o, (long)on);
-    mm_free(o);
-    if (rc || tp_sha_file(tmp, hex)) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", "the prep image did not build"); }
-    tp_puts(&k, "image_sha\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
-    if (k.bad || !k.b) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
+    if (image_ok) {
+        /* the self lines and the image_sha line of the verified kit still describe ROOT and the image */
+        tp_put(&k, old + oself + 1, obody - oself - 1);
+    } else {
+        c = tp_closure(root, product, "tools/tlib.cx", why, sizeof why);
+        if (!c) { mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", why); }
+        cn = tx_len(c, TX_ZCAP);
+        for (i = 0; i < cn; i = e + 1) {
+            char one[4400];
+            e = i;
+            while (e < cn && c[e] != '\n') e++;
+            if (e == i) continue;
+            if (tx_copy(one, sizeof one, c + i, e - i) || tp_sha_file(one, hex)) { mm_free(c); mm_free(k.b); return say(2, "UNREADABLE", "tools/tlib.cx", "a unit of its closure"); }
+            tp_puts(&k, "self\t"); tp_puts(&k, one); tp_puts(&k, "\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
+        }
+        mm_free(c);
+        {
+            char *v[] = {"sh", product, "tools/tlib.cx", "-o", tmp, 0};
+            rc = cx_runv_timeout(v, STEP_SECS, &o, &on);
+        }
+        if (o && on) (void)sy_write_all(2, o, (long)on);
+        mm_free(o);
+        if (rc || tp_sha_file(tmp, hex)) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", "tools/tlib.cx", "the prep image did not build"); }
+        tp_puts(&k, "image_sha\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
+        if (k.bad || !k.b || sy_rename(tmp, image)) { (void)sy_unlink(tmp); mm_free(k.b); return say(1, "FAILED", outdir, "cannot publish the prep image"); }
+    }
+    if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
     tp_sha(k.b, (size_t)k.n, hex);
     tp_puts(&k, "kit_sha\t"); tp_puts(&k, hex); tp_puts(&k, "\n");
-    if (k.bad || sy_rename(tmp, image) || cx_write(tmp, k.b, (size_t)k.n) || sy_rename(tmp, kit)) {
+    if (k.bad || cx_write(tmp, k.b, (size_t)k.n) || sy_rename(tmp, kit)) {
         (void)sy_unlink(tmp); mm_free(k.b);
         return say(1, "FAILED", outdir, "cannot publish the kit");
     }
     mm_free(k.b);
-    sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\t%s\n", nlib, nskip, sy_now_ms() - t0, outdir);
+    sy_printf("PREPARED\ttlib-kit\tlibs=%d\tskipped=%d\tms=%ld\tno-test-result\trebuilt=%d\timage=%s\tkit=written\t%s\n",
+              nlib, nskip, sy_now_ms() - t0, nbuilt, image_ok ? "kept" : "built", outdir);
     return 0;
 }
 
@@ -688,7 +810,7 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
 static int cmd_prep(const char *tool, const char *out, const char *kitdir, int par) {
     static char libpath[MAXLIB][4400];
     char *tl[MAXLIB];
-    char kit[4400], path[4400], rel[4400], real[4400], one[4400], want[65], hex[65], wdir[4500];
+    char kit[4400], path[4400], rel[4400], real[4400], one[4400], wdir[4500];
     char *kb, *tb;
     size_t kn = 0, tn = 0;
     long k, i, e, off, len, rl = tx_len(root, sizeof root), rn;
@@ -716,21 +838,9 @@ static int cmd_prep(const char *tool, const char *out, const char *kitdir, int p
     if (cx_fmt(kit, sizeof kit, "%s/kit.tsv", kitdir)) return 2;
     kb = cx_read(kit, &kn);
     if (!kb) return say(NOT_APPLICABLE, "NOKIT", kit, "run tools/tlib.cx kit");
-    k = tx_rfind(kb, (long)kn, "kit_sha\t", 8);
-    if (k < 0 || (k > 0 && kb[k - 1] != '\n') || (long)kn != k + 8 + 64 + 1 || kb[kn - 1] != '\n') return say(3, "TAMPERED", kit, "no final kit_sha line");
-    tp_sha(kb, (size_t)k, hex);
-    if (!mm_same(hex, kb + k + 8, 64)) return say(3, "TAMPERED", kit, "kit sha mismatch");
-    if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
-    if (tp_rc_get(kb, k, "product_sha", 0, 1, want, sizeof want) || !tx_eqz(want, product_sha)) return say(4, "STALE", kit, "the kit was built by another product: run tools/tlib.cx kit");
-    for (i = 0;; i++) {
-        r = tp_rc_get(kb, k, "self", (int)i, 1, one, sizeof one);
-        if (r > 0) break;
-        if (r < 0 || tp_rc_get(kb, k, "self", (int)i, 2, want, sizeof want)) return say(3, "TAMPERED", kit, "bad self line");
-        if (tp_sha_file(one, hex) || !tx_eqz(hex, want)) return say(4, "STALE", one, "the tlib tool changed since the kit: run tools/tlib.cx kit");
-    }
-    if (i < 1) return say(3, "TAMPERED", kit, "no self line");
-    if (cx_fmt(path, sizeof path, "%s/tlib-prep", kitdir) || tp_rc_get(kb, k, "image_sha", 0, 1, want, sizeof want)) return say(3, "TAMPERED", kit, "no image_sha line");
-    if (tp_sha_file(path, hex) || !tx_eqz(hex, want)) return say(3, "TAMPERED", path, "the prep image is not the kit's");
+    if (cx_fmt(path, sizeof path, "%s/tlib-prep", kitdir)) return 2;
+    rc = kit_verify(kb, (long)kn, kit, path, &k);
+    if (rc) return rc;
     for (;; n++) {
         r = tp_rc_get(kb, k, "lib", n, 1, one, sizeof one);
         if (r > 0) break;
