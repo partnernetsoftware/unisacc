@@ -4,6 +4,8 @@
  *
  * Real product, real packages of ROOT, a private kit directory (NEW_DIR/kit); the package cache is
  * the default one, whose entries the build verifies by structure and input sha before use.
+ *  (0) build/tlib-admit-verdicts.tsv deny candidates: each source exists, is not a prep allow-list
+ *      row, and carries verdict/class/reason (C1; no kit needed);
  *  (1) `tlib kit` leaves the tlibs, the prep image and kit.tsv, and says PREPARED once;
  *      (1b) a second kit builds nothing and leaves kit.tsv as it is; a removed tlib and a tlib
  *      with a changed byte are each built again alone, the image is kept, kit.tsv comes out equal;
@@ -19,6 +21,14 @@
  *      or whose tlib has a changed byte (rc 3) links nothing;
  *  (7) no listed tool is a release-chain tool, every listed tool exists, and the compiler's own
  *      plan for each release-chain tool does not contain the tlibpkg module.
+ *
+ * Deny-list flip (draft only; not armed; cmd_prep change is tools/tlib.cx, outside this write domain):
+ *   Today build/tlib-prep.tsv is an allow-list: cmd_prep returns NOT_APPLICABLE unless the tool is a row.
+ *   Flip: default every SOURCE/product entry through the kit; build/tlib-admit-verdicts.tsv (or a slim
+ *   build/tlib-deny.tsv derived from it) is the refuse set. cmd_prep then: if tool is denied -> rc 7
+ *   (compile from source); else try link (same verify/fresh as now). check-tlib-prep after flip:
+ *   (4') an undenied unlisted source APPLIES (rc 0 + PREPARED via=tlib); (4'') a denied source is
+ *   NOT_APPLICABLE; (0) stays. Do not arm until cc notifies; keep allow-list semantics until then.
  * Prints PASS/FAIL per case and CHECK_TLIB_PREP<TAB>failed=N; exit 0 only when 0.
  * The kit build and the two images are preparation: MEASURED lines are measurements, not results. */
 #pragma unisa use cxlib.tlibpkg
@@ -97,6 +107,47 @@ static int row_key(const char *t, long n, int nth, char *dst, long cap) {
     return 1;
 }
 
+/* 1 when KEY is field 0 of some data row of TABLE. */
+static int has_key(const char *t, long n, const char *key) {
+    long i = 0, e, off, len, kl = tx_len(key, 512);
+    while (i < n) {
+        e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e > i && t[i] != '#' && !tx_field(t + i, e - i, '\t', 0, &off, &len) && tx_same(t + i + off, len, key, kl)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* (0) deny candidates in build/tlib-admit-verdicts.tsv: exist, not allow-listed, class+reason set. */
+static void deny_candidates(const char *prep, long pn) {
+    char path[4400], src[512], verd[64], cls[64], why[512];
+    char *v;
+    size_t vn = 0;
+    long i = 0, e, o0, l0, o1, l1, o2, l2, o3, l3;
+    int rows = 0, ok = 1;
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-admit-verdicts.tsv", root)) { ck(0, "deny-candidates-path"); return; }
+    v = cx_read(path, &vn);
+    if (!v) { ck(0, "deny-candidates-readable"); return; }
+    while (i < (long)vn) {
+        e = i;
+        while (e < (long)vn && v[e] != '\n') e++;
+        if (e > i && v[i] != '#' &&
+            !tx_field(v + i, e - i, '\t', 0, &o0, &l0) && l0 > 0 && l0 < (long)sizeof src &&
+            !tx_field(v + i, e - i, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof verd &&
+            !tx_field(v + i, e - i, '\t', 2, &o2, &l2) && l2 > 0 && l2 < (long)sizeof cls &&
+            !tx_field(v + i, e - i, '\t', 3, &o3, &l3) && l3 > 0 && l3 < (long)sizeof why &&
+            !tx_copy(src, sizeof src, v + i + o0, l0) && !tx_copy(verd, sizeof verd, v + i + o1, l1) &&
+            !tx_copy(cls, sizeof cls, v + i + o2, l2) && !tx_copy(why, sizeof why, v + i + o3, l3)) {
+            rows++;
+            if (sy_exists(src) != 1 || has_key(prep, pn, src) || !tx_eqz(verd, "no-link")) ok = 0;
+        }
+        i = e + 1;
+    }
+    mm_free(v);
+    ck(ok && rows >= 5, "deny-candidates-sound-and-not-allow-listed");
+}
+
 /* Write DIR/kit.tsv from the good kit text K with the 64 hex digits after "KEY<TAB>" (occurrence
    NTH; for "self" the last field) changed in one digit; RESEAL recomputes kit_sha. */
 static int forge(const char *dir, const char *k, long kn, const char *key, int reseal) {
@@ -145,6 +196,9 @@ int main(int argc, char **argv) {
     if (sy_chdir(root)) return 2;
     t = cx_read(table, &tn);
     if (!t || row_key(t, (long)tn, 0, tool, sizeof tool)) fatal("no tool listed in build/tlib-prep.tsv");
+
+    /* (0) deny candidates: no kit */
+    deny_candidates(t, (long)tn);
 
     /* (7) first: it needs no kit */
     ok = 1;
