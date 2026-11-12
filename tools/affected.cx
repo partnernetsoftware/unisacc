@@ -493,8 +493,9 @@ static int finish(Child *C, int ex, int code, int sig) {
     return 0;
 }
 /* --prepare-materials: resolve each declared material to a canonical path before run-batch.
-   Preparable kinds: `NAME-tool:path` (-> tools/NAME.cx built native by the toolprep kit, else the product
-   under tools/bound 55; PREP_SECS 90 under the owner ceiling) and `streams` (tools/streams-material.cx: a directory of seven legacy-contract shims).
+   Preparable kinds: `NAME-tool:path` (-> tools/NAME.cx, falling back to tests/cases/NAME.cx when that file does
+   not exist, built native by the toolprep kit, else the product under tools/bound 55; PREP_SECS 90 under the
+   owner ceiling) and `streams` (tools/streams-material.cx: a directory of seven legacy-contract shims).
    Everything else stays DEFERRED with a named reason (sha256 values and any name without a producer).
    The builds run BEFORE the batch loop, at most PREP_PAR at a time, each bounded at PREP_SECS (and
    never past the run's own 54 s kill), and no build starts after PREP_BUDGET_MS from process start (the rest are DEFERRED prebuild-budget; a rerun
@@ -563,7 +564,17 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     P = &prep[nprep];
     memset(P, 0, sizeof *P);
     cx_fmt(P->name, sizeof P->name, "%s", name);
-    if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) { P->kind = PK_TOOL; cx_fmt(P->src, sizeof P->src, "tools/%.*s.cx", (int)(nl - 5), name); }
+    if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) {
+        /* A material named `<x>-tool` is the source of tools/<x>.cx.  Some fixtures live in tests/cases
+           instead (fake-gh, fake-s9, fake-release-prepare): the same name resolves there, and only there,
+           when tools/<x>.cx is absent -- one fallback, no second naming convention. */
+        char cand[600];
+        P->kind = PK_TOOL;
+        if (cx_fmt(P->src, sizeof P->src, "tools/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, cap, "source-name-too-long=%s", name); return -1; }
+        if (cx_fmt(cand, sizeof cand, "%s/%s", root, P->src) || sy_exists(cand) != 1) {
+            if (cx_fmt(P->src, sizeof P->src, "tests/cases/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, cap, "source-name-too-long=%s", name); return -1; }
+        }
+    }
     else if (tx_eqz(name, "streams")) { P->kind = PK_STREAMS; cx_fmt(P->src, sizeof P->src, "tools/streams-material.cx"); }
     else { cx_fmt(why, cap, "no-producer=%s", name); return -1; }
     if (cx_fmt(buf, sizeof buf, "%s/%s", root, P->src) || sy_exists(buf) != 1) { cx_fmt(why, cap, "source-absent=%s", P->src); return -1; }
