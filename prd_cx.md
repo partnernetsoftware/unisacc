@@ -14,6 +14,114 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 
 取数口径：2026-11-11，HEAD `6a4fa1fa6f` 私有克隆，已装 0.0.52 APE（sha `1bffabba…`）；每个数后写命令；「未测」即本次没有命令证据。
 
+## 0. cx 核心 PRD(定稿 2026-11-12)
+
+本节是 cx 核心库面(`cx.*` 与 `ext.*`)的需求定稿。逐区设计与依据在 [docs/cx/design-core.md](docs/cx/design-core.md),稳定性与版本策略在 [docs/cx/stability.md](docs/cx/stability.md),四份参照调研在 `docs/cx/ref-rust.md`、`ref-node.md`、`ref-quickjs.md`、`ref-cpython.md`。第 1 节起是 cx 侧结构(CX0 流、网模块、包层、路线),与本节并行有效,节号不变。
+
+取数口径:2026-11-12 对 `build/std-surface.tsv`(v1,412 行)的只读统计。本轮未运行任何检查工具,凡写「现状」均指表内文字,不指实跑结果。
+
+### 0.1 目标
+
+- (1) 上层(产品、工具、测试、应用)写系统程序只用 cx 核心面,不直接碰 libc 与平台 `#if`。
+- (2) 六目标(`lnx`、`osx`、`win` 乘 `x86_64`、`arm64`)同面同签名;做不到的返回 `-ENOSYS`,符号不消失。
+- (3) 面由事实表定义,变更由工具判类;何时稳定由工具判定,不由主人或任何人裁量。
+- (4) 核心保持小:只收别的包要在其上搭建、且需求不再变的接口;其余进 `ext.*`。
+- 非目标:线程与事件循环、TLS/HTTP、时区、泛型容器、编译期所有权(CX-W-4 未落地,本面不声称内存安全)。
+
+### 0.2 层与包
+
+| 包 | 高度 | 内容 | 阶段 |
+|---|---|---|---|
+| `cx.sys` | 系统调用 | fd、管道、轮询、信号观察、tty、平台识别、错误码 | 预稳定 |
+| `cx.os` | 便捷 | 文件系统、进程派生、环境、时间与 deadline | 预稳定 |
+| `cx.path` | 纯计算 | 词法路径,posix 与 win 双风格 | 预稳定 |
+| `cx.mem` | 纯计算 | 堆、带界字节、vec、map;并入 `mg_*`、`ms_*` | 预稳定 |
+| `cx.text` | 纯计算 | 带界文本、UTF-8、进制、hex/base64;并入 `tx_snprintf` | 预稳定 |
+| `cx.stream` | 组合 | reader/writer 句柄、拷贝、有界管线 | 预稳定 |
+| `ext.net` | 系统调用 | 地址、解析、TCP、UDP、Unix 域;目标 `cx.net` | 孵化 |
+| `ext.procx`、`ext.memx`、`ext.textx` | 便捷与纯计算 | 输出采集与进程树;arena;字符串构造器与 deflate | 孵化 |
+| `ext.crypto`、`ext.tsvx` | 纯计算 | 密码与 TLS 1.3 记录层;TSV 三方合并 | 扩展 |
+
+对主人假设「按 QuickJS 把 sys + os + net 做完整即够」的裁定:成立一半。系统调用高度的面确实可以很小;但 QuickJS 没有套接字,且它不需要 path、text、mem、stream 是因为 JS 自带,所以核心是 sys + os 加四个补位层,net 另从 Rust 与 Node 推导并先孵化。
+
+tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `cx.base`(连同 `cx/core`、`cx/owned.cx`);`cx.stream` 依赖 `ext.memx`。拆包与并入是稳定声明的前置。
+
+### 0.3 各区面与现状
+
+| 区 | 表内行数 | new | 含拒绝的行 | 含 unverified 的行 | 定稿要点 |
+|---|---|---|---|---|---|
+| fs | 52 | 3 | 22 | 15 | 整操作函数为首选;流式目录遍历;路径约定 UTF-8;`*at` 族不进承诺面 |
+| process | 40 | 1 | 7 | 18 | 唯一入口 `sy_spawn_t` 加 `sy_proc_*`;只收 argv;超时是退出状态字段 |
+| os-env | 19 | 7 | 0 | 4 | 平台识别三个入口;能力用 `sy_cap` 查询;改环境只在启动阶段 |
+| time | 22 | 5 | 0 | 5 | 单调钟与墙钟分开;一个 `sy_deadline_t`;日历只做 UTC |
+| sys | 46 | 6 | 23 | 16 | fd 是整数、默认不继承、EINTR 在 L0 重试;`sy_poll` 是唯一多路入口 |
+| path | 26 | 0 | 0 | 0 | 纯词法、双实现;已最接近稳定判据 |
+| text | 66 | 20 | 0 | 0 | 字节加长度;只认 UTF-8;可失败转换不静默替换 |
+| buffer | 63 | 17 | 0 | 0 | `mm_*`、`mg_buf`、`ms_slice`;容器只有 vec 与字符串键 map |
+| stream | 29 | 16 | 0 | 0 | reader/writer 加上限加句柄 deadline;关闭不吞错 |
+| net | 31 | 30 | 2 | 10 | 阻塞 TCP/UDP/Unix 域加地址值类型;每个等待带 deadline;留在 ext |
+
+全表合计:exists 308、new 108、别名 3;`unverified` 单元格 71(osx 3、win 68);拒绝单元格 58。设计对表的要求是 129 处行编辑(改 122、增 7)加表级升 v2,清单在 design-core.md 第 14 节,本轮未落表。
+
+### 0.4 错误与资源模型
+
+- 错误只有一种约定:返回值负码(`-errno` 风格),不做带载荷的错误对象,不用全局 `errno`。码在 L0 归一成一套;`sy_err_kind` 按处理方式分类,类清单可增长,调用者须留兜底分支。码是合同,消息不是。「不支持」只有 `-ENOSYS`。
+- 资源:裸 fd 是整数,不声称保护;reader、writer、map、子进程、目录是带检查的句柄或调用者拥有的结构,关闭后使用与重复关闭确定返回 `-EBADF`;每个返回资源的行在表里写明配对的关闭函数;`sy_res_live` 让泄漏可断言。
+- 阻塞:每个可能无限期等待的入口带 `sy_deadline_t`(绝对单调时刻),到期 `-ETIMEDOUT`;例外只有名字解析与普通文件读写。
+- 平台:公开函数体无平台分支,差异在 L0 的 `_os` 静态帮手与表里;拒绝分「按能力拒绝」(`cap=NAME`,封闭词表)与「未实现」,后者阻塞稳定。
+- 以上都是运行期检查或调用方合同,不是编译期所有权。
+
+### 0.5 版本与稳定性摘要
+
+- 阶段:孵化(`ext.*`)-> 预稳定(`cx.*`,版本只走 Z,打印本应的 y 或 x)-> 稳定(`1.0.0` 起,单向门)-> 弃用 -> 移除。
+- 稳定判据 S1 至 S13:面封口、全部实现、错误合同合文法、零未核、拒绝有名、用例覆盖成功失败与拒绝、六目标同候选实跑、面连续 3 个公开版且 30 天未变、有消费者且产品层 libc 计数为 0、依赖已稳定、所有权合同、机制绿、独立评审入账。
+- 判定者是 `tools/check-stable.cx`(待建):全部 ok 输出 `STABLE-READY`,集成者才提交翻转 `build/tlib-policy.tsv` 的包行并记账本;不请示主人。
+- 弃用三段:legacy(可永久)-> deprecated 带不可变编号 `CXDEPnnnn`(至少 3 个公开版且 30 天)-> 移除(X 升级,仓内调用点为 0)。安全例外由集成者决定并入账。
+- 新函数在面封口后只能先进 `ext.*`,满足提升判据再进 `cx.*`。
+
+### 0.6 验收门
+
+| 门 | 命令 | 状态 |
+|---|---|---|
+| 面与导出一致 | `sh ./unisacc.com tools/check-std-surface.cx` | 已有;须随 v2 列扩展 |
+| 接口清单与依赖闭包 | `sh ./unisacc.com tools/layer-api.cx -- --check` | 已有 |
+| 版本与内容冻结 | `sh ./unisacc.com tools/check-tlib-frozen.cx` | 已有 |
+| 棘轮(含上层禁裸 libc) | `sh ./unisacc.com tools/ratchets.cx` | 已有 |
+| 各区面批次(每行成功、失败、拒绝用例,输出 `SURF` 行) | `check-cx-sys*`、`check-cx-path` 等 | 已有批次;`SURF` 输出待加 |
+| 六目标同候选 | `release/candidate.tsv` 所指候选的 CI 证据 | 已有矩阵;按包的面批次待接入 |
+| 稳定判定 | `sh ./unisacc.com tools/check-stable.cx` | 待建 |
+
+未实跑不记 PASS;证据只绑定产生它的候选。
+
+### 0.7 路线(按依赖排序)
+
+每步是一类改动,按「一个候选只含一类大改」各占候选;与第 6、8 节的 CX0 路线(0.0.58 至 0.0.60)并行排期,具体版本由集成者按 `agentwork/dag.tsv` 定。
+
+| 序 | 内容 | 前置 | 触产品输入 |
+|---|---|---|---|
+| C1 | 表升 v2:四列、能力词表、错误文法归一、129 处行编辑落表;`check-std-surface` 同步 | 无 | 否(表与工具) |
+| C2 | 建 `tools/check-stable.cx` 与夹具,先跑出各包差距清单 | C1 | 否 |
+| C3 | 纯计算层收口:`mg_*`、`ms_*` 并入 `cx.mem`,`tx_snprintf` 并入 `cx.text`,失败合同改负码;`text`、`buffer` 两区的 new 行实现 | C1 | 是 |
+| C4 | 拆 `cx.base` 为 `cx.sys`、`cx.os`、`cx.mem`、`cx.text` 加内部包 | C3 | 否(包表;发布链冷构造不读 tlib) |
+| C5 | 错误码归一与 `sy_err_kind`、`sy_cap`、`sy_res_live`;64 位与 deadline 签名改动;`time`、`os-env` 的 new 行 | C4 | 是 |
+| C6 | win 补齐:21 行未实现的拒绝与 68 格 unverified 逐格实跑;路径 UTF-8 | C5 | 是 |
+| C7 | `stream` 的 reader/writer 实现与句柄 deadline | C5、C6 的 `sy_poll` | 是 |
+| C8 | 各区面批次输出 `SURF` 行并接入六目标 CI | C1 | 否 |
+| C9 | `ext.net` 实现与孵化;`np_exec` 孵化 | C5、C6 | 否(ext 不随产品) |
+| C10 | 首批稳定声明,预计顺序 `cx.path`、`cx.mem`、`cx.text`,再 `cx.sys`、`cx.os`、`cx.stream` | 判据全 ok | 否(策略表) |
+
+C10 没有日期。它在判据成立时发生,最早也要等面静止满 3 个公开版且 30 天。
+
+### 0.8 未决风险
+
+- (1) win 是最大缺口:核心 21 行未实现、68 格未核,且表内 win 路径入口是 A 结尾函数(按系统代码页而非 UTF-8,据单元格文字推断,未读源码)。
+- (2) 行编辑里有破坏性签名改动(`sy_stat_t`、`sy_ts_t`、`sy_spawn_t`、`sy_child_t` 等 11 行)。预稳定期允许,但仓内调用者须同候选改完;`csih` 车道依赖 `sys.net`,net 的改动先发信封。
+- (3) `cx/mem`、`cx/text` 与 `ext/memx`、`ext/textx` 的互指符号链接(第 3 节已记)会让 C3 的迁包出现双身份,须先收敛为单向。
+- (4) 标 internal 的 12 行(`rl_*`、`*at` 族、映射四项、`sy_fork_session`)的调用点数未查;若工具广泛使用,须改标 legacy。
+- (5) S6、S7 需要的证据格式(`SURF` 行、按包的六目标面批次)尚不存在,`win/arm64` 复用 x86_64 二进制的那一格在实际执行前只能记 UNKNOWN。
+- (6) 判据里的数值(3 个公开版、30 天、提升需 3 个调用单元)参照 CPython 与 Node 的做法按本仓节奏取定,无本仓数据支撑。
+- (7) 三宿主:gcc_cx 与 clang_cx 下 15 个 L0 模块不能编译(第 7 节 A6),本核心面的稳定判据只对 unisacc.com 宿主求值,不声称宿主驱动下可用。
+
 ## 1. cx 流：CX0（在 e2 之前）
 
 **定位**：`.cx` 源 -> 模块规划与导出接口 -> 每单元一份「平铺 C + 强制前导头」，再交给 e2。它是七流之外的第 8 个处理步，但**现在不是模型流**：由手写规划器代码执行，没有网、没有路由行。prd.md §3.3 写的「7 + 1」中的 1 即它。
