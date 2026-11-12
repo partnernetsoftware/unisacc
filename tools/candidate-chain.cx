@@ -37,6 +37,10 @@ static int cc_lim(const char *id, const char *scope) {
 }
 /* The default child/phase bound (phase.bound, scope *). */
 /* A caller (chain-run) passes the phase's own bound in UNISACC_CHAIN_PHASE_BOUND_S; it must lie in 1..phase.bound max. */
+/* A grouped call (--jobs-segment-s) receives the GROUP budget in that variable (the segment remainder, 1..segment-3);
+   every job inside is still bounded by the single-job value (table default phase.bound), never the group budget,
+   and the variable is rewritten to that per-job value so children (chain-step) keep the single-job ceiling. */
+static int cc_group;
 static int cc_pb(void) {
     static int pb;
     if (!pb) {
@@ -44,8 +48,13 @@ static int cc_pb(void) {
         pb = cc_lim("phase.bound", 0);
         if (e && *e) {
             char *end = 0; long v = strtol(e, &end, 10);
-            if (*end || v < 1 || v > (long)lm_max("phase.bound", 0)) die("REFUSE phase bound from caller", e);
-            pb = (int)v;
+            long cap = cc_group ? (long)cc_lim("segment", 0) - 3 : (long)lm_max("phase.bound", 0);
+            if (*end || v < 1 || v > cap) die("REFUSE phase bound from caller", e);
+            if (!cc_group) pb = (int)v;
+        }
+        if (cc_group) {
+            char s[16];
+            if (pb > (int)lm_max("phase.bound", 0) || cx_fmt(s, sizeof s, "%d", pb) || sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S", s, 1)) die("group per-job bound", 0);
         }
     }
     return pb;
@@ -2001,6 +2010,7 @@ int main(int argc, char **argv) {
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
     const char *jobs_root = 0, *jobs_ctx = 0, *jobs_build = 0, *jobs_phase = 0;
     int resume = 0, parallel = 0, i, plan_only = 0;
+    for (i = 1; i < argc; i++) if (tx_eqz(argv[i], "--jobs-segment-s")) cc_group = 1;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
     if (argc == 4 && tx_eqz(argv[1], "--chain-work")) {
