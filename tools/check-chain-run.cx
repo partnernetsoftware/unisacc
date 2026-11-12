@@ -7,6 +7,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use sys.sha
 static int bad;
 static void ck(int yes,const char *s) { sy_printf("%s\tchain-run.%s\n",yes?"PASS":"FAIL",s); if(!yes) bad++; }
@@ -279,6 +280,32 @@ static int supervise_cases(const char *plan) {
     ck(rc==9&&has(p,"BLOCKER\tphase=compare-recheck\treason=recheck-failed")&&!has(q,"compare\n")&&!has(q,"pack\n"),"failed-recheck-blocks-the-phase");
     rc=runv("compareretry","compare-retry","60",0,0,12);file_of(p,"compareretry","chain-run.tsv");file_of(q,"compareretry","memo-env");
     ck(rc==0&&has(p,"RESUME\t")&&count(q,"compare-recheck\t")==2&&count(q,"compare\ton\t")==2&&count(q,"pack-recheck\t")==1,"retried-phase-needs-a-new-recheck");
+    /* Tools of one supervised run (0.0.58): the supervisor hands its segments one epoch; a segment
+       builds chain-watch and candidate-chain from the checkout only when the natives of that epoch
+       are not recorded yet, later segments run the recorded bytes, and changed bytes are a blocker.
+       The fixture checkout's ./unisacc.com "builds" by copying this fake and logging the source. */
+    {
+        char com[4400],builds[4400],script[9400],cand[4400];int rc2;
+        if(cx_fmt(com,sizeof com,"%s/../unisacc.com",base)||cx_fmt(builds,sizeof builds,"%s/../builds",base)||
+           cx_fmt(script,sizeof script,"#!/bin/sh\nprintf '%%s\\n' \"$1\" >> '%s'\nexec cp '%s' \"$3\"\n",builds,self))return 2;
+        put(com,script);
+        put_plan(plan,"0\tsnap\t-\t4\n1\tpack\t-\t4\n");
+        char dir[4400];join(dir,base,"pin");sy_mkdir(dir,0755);join(cand,dir,"chain-run-candidate");
+        char *e1[]={"env","UNISACC_CHAIN_TOOLS_EPOCH=one",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--deadline-s","60","--","--fixture-case","fail",0};
+        char *e2[]={"env","UNISACC_CHAIN_TOOLS_EPOCH=two",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--deadline-s","60","--","--fixture-case","fail",0};
+        char **e0=e1+2;
+        rc=cx_runv_timeout(e1,20,0,0);rc2=cx_runv_timeout(e1,20,0,0);
+        ck(rc==7&&rc2==7&&count(builds,"tools/chain-watch.cx\n")==1&&count(builds,"tools/candidate-chain.cx\n")==1,"epoch-tools-built-once-and-reused");
+        size_t cn=0;char *cb=cx_read(cand,&cn),*changed=cb?malloc(cn+1):0;if(!changed)return 2;
+        if(mm_copy(changed,(long)cn+1,cb,(long)cn))return 2;changed[cn]='\n';if(cx_write(cand,changed,cn+1)||sy_chmod(cand,0755))return 2;
+        rc=cx_runv_timeout(e1,20,0,0);file_of(p,"pin","chain-run.tsv");
+        ck(rc==2&&has(p,"BLOCKER\tphase=prepare-candidate\treason=pinned-tool-changed")&&count(builds,"tools/candidate-chain.cx\n")==1,"changed-pinned-tool-is-a-blocker");
+        rc=cx_runv_timeout(e2,20,0,0);
+        ck(rc==7&&count(builds,"tools/chain-watch.cx\n")==2&&count(builds,"tools/candidate-chain.cx\n")==2,"new-epoch-builds-tools-again");
+        rc=cx_runv_timeout(e0,20,0,0);rc2=cx_runv_timeout(e0,20,0,0);
+        ck(rc==7&&rc2==7&&count(builds,"tools/candidate-chain.cx\n")==4,"no-epoch-builds-every-invocation");
+        free(cb);free(changed);
+    }
     sy_printf("CHECK_CHAIN_RUN_SUPERVISE\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }
 int main(int argc,char **argv) {

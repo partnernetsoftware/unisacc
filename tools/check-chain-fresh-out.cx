@@ -15,7 +15,13 @@
  *   (3) --resume over the same OUT reuses (rc 0);
  *   (4) a tampered seed helper is refused on resume;
  *   (5) chain-step ctx refuses a context whose source SID differs from the receipts and accepts the
- *       matching one.
+ *       matching one;
+ *   (6) OUT/chain-step.pin names the one chain-step executable of this output and it is the
+ *       producer_sha of the receipts; a changed chain-step in the checkout (the 0.0.58 stop: "seed
+ *       helper receipt mismatch" after an edit while the chain ran) is refused by the receipt when
+ *       run directly, and does not reach a resumed chain, which keeps its pinned producer; a
+ *       changed pinned executable is refused;
+ *   (7) a context directory left without context.tsv is set aside before prepare-context.
  * Marker: CHECK_CHAIN_FRESH_OUT failed=0.  Fixture only; it does not grant construction qualification. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -115,9 +121,14 @@ int main(int argc, char **argv) {
     if (cx_fmt(p, sizeof p, "%s/tools/source-package.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
     if (cx_fmt(p, sizeof p, "%s/tools/source-job-wave.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
     if (cx_fmt(p, sizeof p, "%s/a", f) || cx_write(p, "a\n", 2)) return 2;
+    /* The fixture checkout's chain-step: what "sh ROOT/unisacc.com ROOT/tools/chain-step.cx" builds
+       (-o) or runs. It lives outside the fixture repository so the drift case below can change it
+       the way an edit of the working checkout changes the real one. */
+    char stepcur[4400];
+    if (cx_fmt(stepcur, sizeof stepcur, "%s.step", f) || copyf(steptool, stepcur, 0755)) return 2;
     if (cx_fmt(script, sizeof script,
-        "#!/bin/sh\ncase \"$1\" in\n*/tools/preflight.cx) exit 0;;\n*/tools/chain-step.cx) shift 2; exec '%s' \"$@\";;\nesac\nexec sh '%s' \"$@\"\n",
-        steptool, com)) return 2;
+        "#!/bin/sh\ncase \"$1\" in\n*/tools/preflight.cx) exit 0;;\n*/tools/chain-step.cx) if [ \"$2\" = -o ]; then exec cp '%s' \"$3\"; fi; shift 2; exec '%s' \"$@\";;\nesac\nexec sh '%s' \"$@\"\n",
+        stepcur, stepcur, com)) return 2;
     if (cx_fmt(p, sizeof p, "%s/unisacc.com", f) || cx_write(p, script, strlen(script)) || sy_chmod(p, 0755)) return 2;
     if (cx_fmt(p, sizeof p, "%s/unisacc.com.build.json", f) || cx_write(p, "{}", 2)) return 2;
     if (sy_chdir(f)) return 2;
@@ -172,6 +183,41 @@ int main(int argc, char **argv) {
     if (cx_write(helper, hb, hn) || sy_chmod(helper, 0755)) return 2;
     free(hb);
     ck(run(resume, 50, 0) == 0, "restored-seed-helper-reused");
+    /* (6) 0.0.58: the receipts name chain-step itself as producer. The chain pins one chain-step
+       executable per output; an edit of the checkout's chain-step while the chain runs must not
+       change the producer of that output. */
+    char pin[4400], native[4400], pinsha[65], prod[200];
+    size_t pn = 0, sn = 0, nn = 0;
+    if (cx_fmt(pin, sizeof pin, "%s/chain-step.pin", out) || cx_fmt(native, sizeof native, "%s/chain-step.native", out)) return 2;
+    char *pb = cx_read(pin, &pn);
+    int pinned = pb && pn == 18 + 11 + 64 + 1 && !memcmp(pb, "chain-step-pin-v1\nnative_sha=", 29) && pb[pn - 1] == '\n';
+    if (pinned) { memcpy(pinsha, pb + 29, 64); pinsha[64] = 0; }
+    if (cx_fmt(p, sizeof p, "%s.receipt", helper) || cx_fmt(prod, sizeof prod, "\nproducer_sha=%s\n", pinned ? pinsha : "-")) return 2;
+    ck(pinned && has(p, prod), "step-pin-recorded-and-is-the-receipt-producer");
+    char *sb = cx_read(stepcur, &sn), *drift = sb ? malloc(sn + 1) : 0;
+    if (!drift) return 2;
+    if (mm_copy(drift, (long)sn + 1, sb, (long)sn)) return 2;
+    drift[sn] = '\n';
+    if (cx_write(stepcur, drift, sn + 1) || sy_chmod(stepcur, 0755)) return 2;
+    /* The drifted tool itself, run the old way, refuses the receipt and names the field: the
+       mismatch that stopped the chain, and proof that the receipt check is as strict as before. */
+    char *dv[] = {stepcur, "seed-helper", rev, snap, build, "/usr/bin/x86_64-linux-gnu-gcc-11", 0};
+    log = 0; rc = run(dv, 30, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE seed helper receipt mismatch") && strstr(log, "seed helper receipt differs: recorded=[producer_sha="), "drifted-step-tool-refused-and-field-named");
+    free(log);
+    log = 0; rc = run(resume, 50, &log);
+    if (rc && log) fputs(log, stdout);
+    size_t pn2 = 0; char *pb2 = cx_read(pin, &pn2);
+    ck(rc == 0 && log && strstr(log, "CHAIN\tseed-helper\treused=") && pb2 && pn2 == pn && !memcmp(pb, pb2, pn), "checkout-step-drift-keeps-pinned-producer");
+    free(log); free(pb2);
+    char *nb = cx_read(native, &nn);
+    if (!nb || cx_write(native, drift, sn + 1) || sy_chmod(native, 0755)) return 2;
+    log = 0; rc = run(resume, 50, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE chain-step pin mismatch"), "changed-pinned-step-refused");
+    free(log);
+    if (cx_write(native, nb, nn) || sy_chmod(native, 0755)) return 2;
+    ck(run(resume, 50, 0) == 0, "restored-pinned-step-reused");
+    free(nb); free(pb); free(sb); free(drift);
     char ctx[4400], rec[9000], boot[4400];
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx-bind", f) || sy_mkdir(ctx, 0755) || cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", build)) return 2;
     if (cx_fmt(p, sizeof p, "%s/context.tsv", ctx)) return 2;
@@ -183,6 +229,15 @@ int main(int argc, char **argv) {
     if (cx_fmt(rec, sizeof rec, "context-v1\ncc\t/usr/bin/cc\nbootstrap\t%s\nsource\t%s\n", boot, sid) || cx_write(p, rec, strlen(rec))) return 2;
     log = 0; rc = run(cv, 30, &log);
     ck(rc == 0 && log && strstr(log, "ctx-bind\tsource="), "ctx-bind-same-sid-accepted");
+    free(log);
+    /* (7) a context directory without context.tsv (a failed prepare-context) is set aside before
+       the controller is asked again; the fixture controller makes no context, so the step still
+       ends on the missing record, after the set-aside. */
+    char part[4400];
+    if (cx_fmt(part, sizeof part, "%s/ctx-partial", f) || sy_mkdir(part, 0755) || cx_fmt(p, sizeof p, "%s/initial-source.status", part) || cx_write(p, "rc\t142\n", 7)) return 2;
+    char *pv[] = {(char *)steptool, "ctx", rev, snap, build, part, "/usr/bin/cc", 0};
+    log = 0; rc = run(pv, 30, &log);
+    ck(rc != 0 && log && strstr(log, "CHAIN\tctx\tset-aside=") && strstr(log, "REFUSE context record missing") && sy_exists(part) == 0, "partial-context-set-aside-before-prepare");
     free(log); free(sid); free(rev);
     printf("CHECK_CHAIN_FRESH_OUT\tfailed=%d\n", failed);
     return failed ? 1 : 0;

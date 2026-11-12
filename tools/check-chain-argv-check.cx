@@ -22,11 +22,22 @@ static void fixture_case(const char *source,const char *chain,const char *front,
 static void fixture_envelope_case(const char *args_source,const char *rest_source,const char *callee,const char *seconds,const char *capacity,const char *extra,const char *name,int want){
  char source[4096];
  int rc=cx_fmt(source,sizeof source,
- "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < %s) { v[n++] = %s[i]; i++; } v[n]=0;return %s(root,v,secs);}\n"
+ "int step_run(const char *root,char **v,int secs){if(!step_out)return %s(root,v,secs);return pr_code(\"chain-step\",v,secs);}\n"
+ "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < %s) { v[n++] = %s[i]; i++; } v[n]=0;return step_run(root,v,secs);}\n"
  "int step(const char *root,char **args){ return step_secs(root,args,%s); }\n"
  "int bound_sh_secs(const char *root,char **rest,int secs){char *v[100];int n=0,i=0;while(rest[i]&&n+1<72){v[n++]=%s[i];i++;}v[n]=0;return pr_code(root,v,secs);}\n%s\n",
- capacity,args_source,callee,seconds,rest_source,extra);
+ callee,capacity,args_source,seconds,rest_source,extra);
  fixture_ck(!rc&&ca_forwarding_envelope(source)==want,name);
+}
+/* step_secs must hand its argv to step_run (the pinned chain-step or the fixture's ROOT launcher);
+   the shape before the pin, step_secs straight into bound_sh_secs, is no longer the proven one. */
+static void fixture_envelope_bypass(void){
+ const char *source=
+ "int step_run(const char *root,char **v,int secs){if(!step_out)return bound_sh_secs(root,v,secs);return pr_code(\"chain-step\",v,secs);}\n"
+ "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < 64) { v[n++] = args[i]; i++; } v[n]=0;return bound_sh_secs(root,v,secs);}\n"
+ "int step(const char *root,char **args){ return step_secs(root,args,90); }\n"
+ "int bound_sh_secs(const char *root,char **rest,int secs){char *v[100];int n=0,i=0;while(rest[i]&&n+1<72){v[n++]=rest[i];i++;}v[n]=0;return pr_code(root,v,secs);}\n";
+ fixture_ck(ca_forwarding_envelope(source)==0,"envelope-step-run-bypass-refused");
 }
 /* --tokens 只测公共结构API，不读取仓库，不编译也不执行被分析源码。 */
 static int fixture_tokens(void){
@@ -56,6 +67,7 @@ static int fixture_tokens(void){
  fixture_envelope_case("args","rest","bound_sh_secs","90","65","","envelope-copy-bound-refused",0);
  fixture_envelope_case("args","rest","bound_sh_secs","89","64","const char *decoy=\"return step_secs(root,args,90);\";","envelope-string-decoy-refused",0);
  fixture_envelope_case("args","rest","bound_sh_secs","90","64","int step(const char *root,char **args){return step_secs(root,args,90);}","envelope-function-ambiguity-refused",0);
+ fixture_envelope_bypass();
  printf("CHECK_CHAIN_ARGV_TOKENS\tfailed=%d\n",fixture_failed);return fixture_failed?1:0;
 }
 int main(int argc,char **argv){

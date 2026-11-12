@@ -184,19 +184,71 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
     v[n++] = 0;
     return runv_secs(v, 90);
 }
+/* chain-step is the producer named in the seed-helper, controller and fixedpoint receipts
+   (producer_sha/chain_sha = its own executable). Run from ROOT/tools/chain-step.cx on every call,
+   that identity followed the working checkout: any edit of chain-step.cx or of a module it uses,
+   made while a chain was running, changed the producer and the next resume refused its own
+   receipts ("seed helper receipt mismatch", 0.0.58). The chain therefore pins one executable per
+   output: OUT/chain-step.native, built once from ROOT, with OUT/chain-step.pin recording its
+   sha256. Every later call of this output runs that file and refuses when its bytes no longer
+   match the record; the checkout is not read again. A new output pins the tool anew. */
+static const char *step_out;
+static char step_native[4400];
+static void step_hash(const char *path, char hash[65]) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); die("REFUSE chain-step pin unreadable", path); }
+    free(b);
+}
+static void step_pin(const char *root, int secs) {
+    char pin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], text[4800];
+    if (step_native[0]) return;
+    if (cx_fmt(step_native, sizeof step_native, "%s/chain-step.native", step_out) || cx_fmt(pin, sizeof pin, "%s/chain-step.pin", step_out) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", step_native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step pin");
+    int lock = candidate_lock(step_native, "pin");
+    size_t n = 0; char *old = cx_read(pin, &n);
+    if (old) {
+        step_hash(step_native, hash);
+        if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash) || n != strlen(text) || memcmp(old, text, n)) die("REFUSE chain-step pin mismatch", pin);
+        free(old);
+    } else {
+        /* No record: nothing of this output was produced by a pinned tool yet (a native without
+           its record is what a killed attempt left and is replaced). */
+        char *a[] = {tool, (char *)"-o", tmp, 0};
+        if (bound_sh_secs(root, a, secs)) die("chain-step pin build", tool);
+        step_hash(tmp, hash);
+        if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash)) die("chain-step pin record", pin);
+        if (sy_chmod(tmp, 0755) || sy_rename(tmp, step_native)) die("publish chain-step native", step_native);
+        if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-step pin", pin);
+        sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\n", step_native, hash);
+    }
+    if (sy_close(lock)) die("candidate unlock", step_native);
+}
+/* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
+   argv through a fake ROOT/unisacc.com ("TOOL -- ARGS") and produce no receipt. A chain run
+   always has --out and runs the pinned executable directly. */
+static int step_run(const char *root, char **v, int secs) {
+    if (!step_out) return bound_sh_secs(root, v, secs);
+    return pr_code("chain-step", v, secs);
+}
 static int step_secs(const char *root, char **args, int secs) {
     char tool[4400];
     char *v[64];
     int n = 0, i = 0;
-    if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
-    v[n++] = tool;
-    v[n++] = (char *)"--";
+    if (step_out) {
+        step_pin(root, secs);
+        v[n++] = step_native;
+    } else {
+        if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
+        v[n++] = tool;
+        v[n++] = (char *)"--";
+    }
     while (args[i] && n + 1 < 64) {
         v[n++] = args[i];
         i++;
     }
     v[n] = 0;
-    return bound_sh_secs(root, v, secs);
+    return step_run(root, v, secs);
 }
 static int step(const char *root, char **args) { return step_secs(root, args, 90); }
 static char chain_work[4400];
@@ -1894,6 +1946,7 @@ int main(int argc, char **argv) {
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     jobs_segment_out = outdir;
+    step_out = outdir;
     if (jobs_segment_end && (!resume || !until_phase || (strcmp(until_phase,"jobs-tool") && strcmp(until_phase,"jobs-gen") && strcmp(until_phase,"jobs-tbl") && strcmp(until_phase,"jobs-net")))) die("REFUSE jobs segment target", until_phase);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
     if (recheck_only) {

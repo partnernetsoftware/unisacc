@@ -1425,6 +1425,22 @@ static void cs_ctx_bind(const char *b, const char *ctx) {
     free(sid);
 }
 
+/* Name the first line where a saved receipt and the recomputed one differ (stderr, before the
+   refusal): the refusal alone does not say which bound input moved. */
+static void cs_receipt_diff(const char *what, const char *saved, const char *expected) {
+    const char *a = saved, *b = expected;
+    while (*a || *b) {
+        const char *ae = a, *be = b;
+        while (*ae && *ae != '\n') ae++;
+        while (*be && *be != '\n') be++;
+        if (ae - a != be - b || memcmp(a, b, (size_t)(ae - a))) {
+            sy_eprintf("chain-step: %s receipt differs: recorded=[%.*s] current=[%.*s]\n", what, (int)(ae - a), a, (int)(be - b), b);
+            return;
+        }
+        a = *ae ? ae + 1 : ae; b = *be ? be + 1 : be;
+    }
+}
+
 /* seed-helper REV S B CC: compile S/seed/ident.c (the F-v2 identity helper, same source and
    flags as prepare-context) into B/identity-helper before build-objects, so the controller
    receipts can bind the source SID before ctx exists. B/identity-helper.receipt binds the
@@ -1444,7 +1460,8 @@ static int cs_seed_helper(const char *rev, const char *s, const char *b, const c
     char *old = cs_load(rec, &n);
     if (old) {
         cs_sha(out, oh);
-        if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, oh) || n != (long)strlen(expected) || memcmp(old, expected, n)) cs_die("REFUSE seed helper receipt mismatch", rec);
+        if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, oh)) cs_die("seed-helper receipt", rec);
+        if (n != (long)strlen(expected) || memcmp(old, expected, n)) { cs_receipt_diff("seed helper", old, expected); cs_die("REFUSE seed helper receipt mismatch", rec); }
         free(old); sy_printf("CHAIN\tseed-helper\treused=%s\n", out); return 0;
     }
     char *v[] = {bound, "15", (char *)cc, "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-O2", "-w", ident, "-o", tmp, 0};
@@ -1479,6 +1496,17 @@ static int cs_ctx(const char *rev, const char *s, const char *b, const char *ctx
         if(cs_run(verify,s))cs_die("REFUSE completed context identity",ctx);
         cs_ctx_bind(b,ctx);
         sy_printf("CHAIN\tctx\treused=%s\n",ctx);return 0;
+    }
+    /* prepare-context insists on making CTX itself (new-context-required). A CTX without its
+       context.tsv is what a failed or killed attempt left (0.0.58: the 8 second source measurement
+       timed out under load): it is kept as evidence under another name, never reused or removed. */
+    {   int present=sy_exists(ctx);
+        if(present<0)cs_die("REFUSE context path unreadable",ctx);
+        if(present){
+            char aside[4400];
+            if(cx_fmt(aside,sizeof aside,"%s.partial-%ld",ctx,sy_now_ms())||sy_exists(aside)!=0||sy_rename(ctx,aside))cs_die("REFUSE partial context cannot be set aside",ctx);
+            sy_printf("CHAIN\tctx\tset-aside=%s\n",aside);
+        }
     }
     a[n++]=controller;a[n++]=(char *)"prepare-context";a[n++]=(char *)s;a[n++]=boot;
     a[n++]=(char *)cc;a[n++]=(char *)ctx;a[n]=0;

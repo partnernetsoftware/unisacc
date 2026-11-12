@@ -371,6 +371,34 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
         }
     }
 }
+/* The chain's own tools are read from the working checkout, which other work keeps editing. One
+   supervised run therefore builds chain-watch and candidate-chain once: the supervisor sets
+   UNISACC_CHAIN_TOOLS_EPOCH for its segments, the first segment builds each native and records
+   "epoch + sha256" beside it (NATIVE.pin), and every later segment of the same supervisor runs
+   that file after checking its bytes against the record; a mismatch is a blocker, never a silent
+   rebuild. A new supervisor (an explicit new start, e.g. after a tool fix) has a new epoch and
+   the tools are built and recorded again. Without a supervisor there is no epoch and each
+   invocation builds its tools as before. (chain-step is pinned per output by candidate-chain,
+   because the receipts name it as their producer.) */
+static int prepare_once(const char *phase,char **prepare,const char *native) {
+    char pin[4500],hash[65],text[400]; size_t en=0,pn=0,bn=0;
+    const char *given=sy_env("UNISACC_CHAIN_TOOLS_EPOCH");
+    if(!given||!given[0]) return run(phase,prepare,0);
+    en=strlen(given)+1; char *epoch=malloc(en+1);
+    if(!epoch||en>200||strchr(given,'\n')||cx_fmt(epoch,en+1,"%s\n",given)||cx_fmt(pin,sizeof pin,"%s.pin",native)) die("tool epoch record");
+    char *old=cx_read(pin,&pn);
+    if(old&&pn>en+11&&!memcmp(old,"epoch=",6)&&!memcmp(old+6,epoch,en)) {
+        char *bytes=cx_read(native,&bn);
+        int same=bytes&&!sy_sha256_hex(bytes,(long)bn,hash)&&!cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)&&pn==strlen(text)&&!memcmp(old,text,pn);
+        free(bytes); free(old); free(epoch);
+        return same?0:blocker(phase,"pinned-tool-changed",2);
+    }
+    free(old);
+    int rc=run(phase,prepare,0); if(rc){free(epoch);return rc;}
+    char *bytes=cx_read(native,&bn);
+    if(!bytes||sy_sha256_hex(bytes,(long)bn,hash)||cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)||cx_write(pin,text,strlen(text))) die("tool pin record");
+    free(bytes); free(epoch); return 0;
+}
 /* Supervisor: one bounded segment child after another. It owns no chain state: the deadline,
    attempt, resume and segment budgets live in the child's persisted budget and stop the child
    itself (rc 3). The loop is finite (max_segments + 1) and each child is killed at its
@@ -378,6 +406,9 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
 static int supervise(int argc,char **argv,int sep,const char *runner) {
     char lock[4400],native[4400],row[600]; path(lock,"chain-supervise.lock"); int fd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(fd<0||sy_flock(fd,2|4)) die("supervisor already owns output");
+    {   char epoch[80];
+        if(cx_fmt(epoch,sizeof epoch,"%ld-%d",sy_now_ms(),(int)getpid())||sy_setenv("UNISACC_CHAIN_TOOLS_EPOCH",epoch,1)) die("tool epoch");
+    }
     if(!runner) {
         path(native,"chain-run-native");
         char *prepare[]={"sh","./unisacc.com","tools/chain-run.cx","-o",native,0}; pr_result r;
@@ -530,7 +561,7 @@ int main(int argc,char **argv) {
     if(!watch) {
         path(native_watch,"chain-run-watch");
         char *prepare[]={"sh","./unisacc.com","tools/chain-watch.cx","-o",native_watch,0};
-        if((prep_rc=run("prepare-watch",prepare,0))) return prep_rc;
+        if((prep_rc=prepare_once("prepare-watch",prepare,native_watch))) return prep_rc;
         watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0;
     }
     if(owed) {
@@ -547,7 +578,7 @@ int main(int argc,char **argv) {
     if(!candidate&&!done("pack")) {
         path(native_candidate,"chain-run-candidate");
         char *prepare[]={"sh","./unisacc.com","tools/candidate-chain.cx","-o",native_candidate,0};
-        if((prep_rc=run("prepare-candidate",prepare,0))) return prep_rc;
+        if((prep_rc=prepare_once("prepare-candidate",prepare,native_candidate))) return prep_rc;
         candidate=native_candidate;
     }
     char *v[100]; int k=0;
