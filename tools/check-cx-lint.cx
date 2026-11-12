@@ -1,6 +1,9 @@
 /* tools/check-cx-lint.cx -- fixtures for tools/cx-lint.cx (run from the repo root).
  *
  *   sh ./unisacc.com tools/check-cx-lint.cx
+ *   CHECK_BIN --anchor-controls --lint-tool /absolute/path/to/native-cx-lint
+ * The optional native checker avoids recompiling cx-lint once per fixture; the
+ * anchor-only mode skips unrelated rules/history but the default keeps all coverage.
  *
  * Writes small positive/negative .cx samples under sy_tmpdir()/cx-lint-check-PID/ (and a tests/
  * subdirectory for the R1-version refusal exemption), runs tools/cx-lint.cx on each (bounded 50 s)
@@ -24,6 +27,9 @@
 
 static char dir[4096];
 static int passed, failed, skipped;
+static const char *lint_tool;
+static int anchor_only;
+static const char *legacy_argv;
 
 static int put(const char *name, const char *body, long n, char *path, int cap) {
     int fd;
@@ -39,6 +45,7 @@ static int count_rules(const char *path, const char *filter, const char *rule) {
     char *v[] = {"sh", "./unisacc.com", "tools/cx-lint.cx", "--", (char *)path, 0, 0, 0};
     char *out = 0; size_t n = 0; char pat[64]; int c;
     if (filter) { v[4] = "--rules"; v[5] = (char *)filter; v[6] = (char *)path; }
+    if (lint_tool) { int k=0; v[k++]=(char *)lint_tool; if(filter){v[k++]="--rules";v[k++]=(char *)filter;}v[k++]=(char *)path;v[k]=0; }
     if (cx_runv_timeout(v, 50, &out, &n) || !out) return -1;
     if (cx_fmt(pat, sizeof pat, "LINT\t%s\t", rule)) return -1;
     c = (int)tx_count(out, (long)n, pat, tx_len(pat, 64));
@@ -72,12 +79,25 @@ static void history(const char *rev, const char *file, const char *name, const c
     sy_unlink(p);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    for(int i=1;i<argc;i++) {
+        if(tx_eqz(argv[i],"--anchor-controls")) anchor_only=1;
+        else if(tx_eqz(argv[i],"--lint-tool")&&i+1<argc) lint_tool=argv[++i];
+        else if(tx_eqz(argv[i],"--legacy-argv")&&i+1<argc) legacy_argv=argv[++i];
+        else {fprintf(stderr,"check-cx-lint: unknown argument %s\n",argv[i]);return 2;}
+    }
+    if(legacy_argv){
+        if(anchor_only||legacy_argv[0]!='/'){fprintf(stderr,"check-cx-lint: legacy source must be absolute and standalone\n");return 2;}
+        int n=count_rules(legacy_argv,"R4","R4-source-anchor");
+        printf("%s\tlegacy-source-anchor-refused\tfindings=%d\n",n>0?"PASS":"FAIL",n);
+        printf("CHECK_SOURCE_ANCHOR_LEGACY\tfailed=%d\n",n>0?0:1);return n>0?0:1;
+    }
     if (cx_fmt(dir, sizeof dir, "%s/cx-lint-check-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) {
         fprintf(stderr, "check-cx-lint: cannot create scratch dir\n"); return 2;
     }
     {   char sub[4400];
         if (cx_fmt(sub, sizeof sub, "%s/tests", dir) || sy_mkdir(sub, 0700)) { fprintf(stderr, "check-cx-lint: cannot create scratch tests dir\n"); return 2; } }
+    if (anchor_only) goto anchor_controls;
     /* R1-version */
     expect("v1.cx", "static const char *v = \"0.0.49\";\n", "R1-version", 1);
     expect("v2.cx", "int f(void){ return puts(\"unisacc 0.0.50 ready\"); }\n", "R1-version", 1);
@@ -161,9 +181,49 @@ int main(void) {
     expect("d5.cx", "static void die(void){ done(2); }   /* lint:allow R3-die done() exits after cleanup */\n"
                     "static void b_die(void){ done(2); }   /* lint:allow R3-die */\n", "R3-die", 1);
     expect_rules("d6.cx", "static void die(void){ }\nint f(char **v,char *o){ return sy_run(v, o, 64, 0); }\n", "R2,R3", "R3-die", 1);
+anchor_controls:
+    /* R4: old five-check shapes, alias/helper flow, and non-allowable enforcement.
+     * These are lint inputs, never compiled; each file is analysed independently. */
+    expect("anchor-expand.cx", "int f(){char *s=cx_read(\"tools/candidate-chain.cx\",&n);return strstr(s,\"int total = wf_total(front0), count = total - first;\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-limits.cx", "int f(){char *b=cx_read(\"src/parse.c\",&n);const char *contract=\"MAX_ARGS\";return strstr(b,contract)!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-deadline.cx", "int f(){char *s=cx_read(\"tools/release-build.cx\",&n);return tx_find(s,n,\"#define RB_WHOLE_DEADLINE_MS 60000\",35);}\n", "R4-source-anchor", 1);
+    expect("anchor-graph.cx", "int f(){char *b=cx_read(\"tools/graph-check.cx\",&n);return swap_all(b,\"wf_win_span\",\"skip\");}\n", "R4-source-anchor", 1);
+    expect("anchor-argv.cx", "int f(){char *s=cx_read(\"tools/chain-step.cx\",&n);return fixture_replace(s,\"a[3] = build; a[4] = 0;\",\"bad\");}\n", "R4-source-anchor", 1);
+    expect("anchor-alias.cx", "int f(){char *b=cx_read(\"src/parse.c\",&n);char *alias=b;return strstr(alias,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-helper.cx", "int scan(char *input){return strstr(input,\"whole_statement\")!=0;}\nint f(){char *b=cx_read(\"src/parse.c\",&n);return scan(b);}\n", "R4-source-anchor", 1);
+    expect("anchor-return.cx", "char *load_source(){return cx_read(\"src/parse.c\",&n);}\nint f(){char *b=load_source();return strstr(b,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-allow.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);return strstr(s,\"whole_statement\")!=0;} // lint:allow R4-source-anchor not permitted\n", "R4-source-anchor", 1);
+    expect("anchor-facts.cx", "int f(){char *facts=cx_read(\"exec/facts/calls.tsv\",&n);return tx_find(facts,n,\"call\\towner\",10);}\n", "R4-source-anchor", 0);
+    expect("anchor-behavior.cx", "int f(char **v){char *out;cx_runv_timeout(v,5,&out,&n);return strstr(out,\"PASS behavior\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-tokens.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);at_lex(s,n);return token_is(at_tok,\"callee_name\");}\n", "R4-source-anchor", 0);
+    expect("anchor-lexer.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);return tx_find(s,n,\"*/\",2);}\n", "R4-source-anchor", 0);
+    expect_rules("anchor-filter.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);return strstr(s,\"whole_statement\")!=0;}\n", "R4", "R4-source-anchor", 1);
+    expect("anchor-unknown.cx", "int f(char *p){char *s=cx_read(p,&n);return strstr(s,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-path.cx", "int f(){char *p=\"src/parse.c\";return strstr(p,\"parse.c\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-short.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);return strstr(s,\"if\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-function-alias.cx", "int f(){char *s=cx_read(\"src/parse.c\",&n);find=strstr;return find(s,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-mixed-reader.cx", "char *read_any(char *p){char *v=cx_read(p,&n);return v;}\nint f(){char *src=read_any(\"src/parse.c\");at_lex(src,n);char *facts=read_any(\"facts.tsv\");return strstr(facts,\"call row\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-scopes.cx", "int f(){char *b=cx_read(\"src/parse.c\",&n);at_lex(b,n);return 0;}\nint g(){char *b=cx_read(\"facts.tsv\",&n);return strstr(b,\"call row\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-private-source.cx", "int f(){char path[99];mkdtemp(path);cx_fmt(path,99,\"%s/source.c\",path);char *s=cx_read(path,&n);return strstr(s,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-runtime-read.cx", "int f(){char dir[99],path[99];mkdtemp(dir);char *v[]={dir,0};np_run(v,0,0,5,&r,why,99);cx_fmt(path,99,\"%s/receipt\",dir);char *s=cx_read(path,&n);return strstr(s,\"runtime result\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-private-unknown.cx", "int f(){char dir[99],path[99];mkdtemp(dir);cx_fmt(path,99,\"%s/copied.txt\",dir);char *s=cx_read(path,&n);return strstr(s,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-private-copy.cx", "int f(){char dir[99],path[99];mkdtemp(dir);char *v[]={dir,0};np_run(v,0,0,5,&r,why,99);cx_fmt(path,99,\"%s/copied.txt\",dir);char *src=cx_read(\"src/parse.c\",&n);cx_write(path,src,n);char *s=cx_read(path,&n);return strstr(s,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-stdio.cx", "char *slurp(const char *p,size_t *np){FILE *f=fopen(p,\"rb\");size_t cap=1<<26,n=0;char *b;if(!f)return 0;b=malloc(cap);n=fread(b,1,cap-1,f);fclose(f);b[n]=0;if(np)*np=n;return b;}\nint f(){char *b=slurp(\"tools/release-build.cx\",0);return strstr(b,\"#define RB_WHOLE_SRC cf_root_count()\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-unknown-helper.cx", "int raw(char *buffer){return strstr(buffer,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-result-member.cx", "np_result observe(char **v){np_result r={0};char why[99];if(np_run(v,0,0,5,&r,why,99))exit(2);return r;}\nint f(char **v){char *out=cx_read(\"src/parse.c\",&n);np_result r=observe(v);return strstr(r.out,\"runtime status\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-source-member.cx", "int f(){r=cx_read(\"src/parse.c\",&n);return strstr(r.out,\"whole_statement\")!=0;}\n", "R4-source-anchor", 1);
+    expect("anchor-reused-read-path.cx", "char *read_any(char *p){char *b=cx_read(p,&n);return b;}\nvoid path(char *p,char *a,char *b){cx_fmt(p,99,\"%s/%s\",a,b);}\nint f(){char dir[99],p[99];mkdtemp(dir);char *v[]={dir,0};np_run(v,0,0,5,&r,why,99);path(p,dir,\"source.c\");char *src=read_any(p);at_lex(src,n);path(p,dir,\"receipt\");char *rec=read_any(p);return strstr(rec,\"runtime status\")!=0;}\n", "R4-source-anchor", 0);
+    expect("anchor-data-branch.cx", "int f(char *p){const char *ext=strrchr(p,'.');int is_source=ext&&(!strcmp(ext,\".cx\")||!strcmp(ext,\".c\")||!strcmp(ext,\".h\")||!strcmp(ext,\".S\"));if(is_source){ca_tokens(p);}else{char *body=cx_read(p,&n);return strstr(body,\"data row\")!=0;}}\n", "R4-source-anchor", 0);
+    history("4a244662", "tests/check-limits.cx", "anchor-original-limits.cx", "R4-source-anchor", 1);
+    {const char *actual[]={"tests/check-limits.cx","tests/check-whole-o-deadline.cx"};
+     for(int i=0;i<2;i++){int got=count_rules(actual[i],"R4","R4-source-anchor");
+      if(!got){printf("PASS\tactual-source\t%s\n",actual[i]);passed++;}
+      else{printf("FAIL\tactual-source\t%s findings=%d\n",actual[i],got);failed++;}}}
+    if (anchor_only) goto cleanup;
     /* the 0.0.50 defect: rb_die lost its sy_exit (01ac82b13c), restored in 3d6589c0d7 */
     history("3d6589c0d7^", "tools/release-build.cx", "h-release-build-before.cx", "R3-die", 1);
     history("3d6589c0d7", "tools/release-build.cx", "h-release-build-after.cx", "R3-die", 0);
+cleanup:
     {   char sub[4400]; if (!cx_fmt(sub, sizeof sub, "%s/tests", dir)) sy_rmdir(sub); }
     sy_rmdir(dir);
     printf("CHECK_CX_LINT\tpassed=%d\tfailed=%d\tskipped=%d\n", passed, failed, skipped);

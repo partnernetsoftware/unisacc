@@ -1,9 +1,11 @@
 /* Whole-front preflight only: no e2/e3, objects, images or candidate qualification.
- * ROOT NEW_OUT [--selftest | --partition FIRST COUNT ...]
+ * ROOT NEW_OUT [--selftest | --wiring-selftest | --partition FIRST COUNT ...]
  * Keep evidence/interfaces in caller-owned NEW_OUT; never use the global temp tree.
  */
 #pragma unisa use cx0.plan
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.chainargv
+#pragma unisa use mem.bytes
 static char work[4400],paths[64][4400];
 static char *sources[64];
 static void die(const char *s){fprintf(stderr,"WF_EXPAND REFUSE %s\n",s);exit(2);}
@@ -42,29 +44,112 @@ static int evaluate(int nr,int argc,char **argv){
  int bad=n>128||partition(n,argc?argc:count,argc?argv:dynamic);
  printf("WF_EXPAND\tunits=%d\tpartition=%s\n",n,bad?"REFUSE":"PASS");return bad;
 }
-/* Fail closed if the known production wiring changes; not arbitrary C analysis. */
+/* Query function, call-argument and control-body roles, never whole-source
+ * spelling. Unknown dataflow is a named refusal rather than a guessed pass. */
+static int wf_expr(void *a,int lo,int hi,const char *text){
+ void *p=ca_tokens(text);if(!p)return 0;
+ while(lo<hi&&ca_token_is(a,lo,"(")&&ca_token_end(a,lo)==hi-1){lo++;hi--;}
+ int n=ca_token_count(p),ok=hi-lo==n;
+ for(int i=0;ok&&i<n;i++)ok=ca_token_kind(a,lo+i)==ca_token_kind(p,i)&&!strcmp(ca_token_text(a,lo+i),ca_token_text(p,i));
+ ca_tokens_free(p);return ok;
+}
+static int wf_arg(void *a,int call,int arg,const char *expr){int lo,hi;return ca_call_arg(a,call,arg,&lo,&hi)>arg&&wf_expr(a,lo,hi,expr);}
+static int wf_call(void *a,int lo,int hi,const char *name,int arg,const char *expr){
+ int found=-1;for(int i=lo;i<hi;i++)if(ca_token_is(a,i,name)&&ca_token_is(a,i+1,"(")&&wf_arg(a,i,arg,expr)){if(found>=0)return -1;found=i;}return found;
+}
+/* Find assignment RHS by its lvalue, respecting nested call/array delimiters. */
+static int wf_assign(void *a,int lo,int hi,const char *lhs,const char *rhs){
+ for(int i=lo;i<hi;i++)if(ca_token_is(a,i,"=")){
+  int begin=i-1;while(begin>=lo&&!ca_token_is(a,begin,";")&&!ca_token_is(a,begin,"{")&&!ca_token_is(a,begin,",")&&!ca_token_is(a,begin,"}"))begin--;
+  int left=begin+1;while(left<i&&!wf_expr(a,left,i,lhs))left++;
+  if(left==i)continue;int end=i+1;
+  while(end<hi&&!ca_token_is(a,end,";")&&!ca_token_is(a,end,",")){if(ca_token_is(a,end,"(")||ca_token_is(a,end,"[")){int close=ca_token_end(a,end);if(close<end)return 0;end=close;}end++;}
+  if(wf_expr(a,i+1,end,rhs))return i;
+ }return 0;
+}
+/* Return the body interval of a control with the exact condition role. */
+static int wf_control(void *a,int lo,int hi,const char *kind,const char *condition,int *body,int *end){
+ for(int i=lo;i<hi;i++)if(ca_token_is(a,i,kind)&&ca_token_is(a,i+1,"(")){
+  int close=ca_token_end(a,i+1);if(close<0||!wf_expr(a,i+2,close,condition))continue;
+  *body=close+1;if(ca_token_is(a,*body,"{"))*end=ca_token_end(a,*body);
+  else{*end=*body;while(*end<hi&&!ca_token_is(a,*end,";"))(*end)++;}
+  return *end>=*body&&*end<hi;
+ }return 0;
+}
+static int wf_require(int ok,const char *role){if(!ok)fprintf(stderr,"WF_EXPAND REFUSE unsupported-chain-dataflow %s\n",role);return !!ok;}
+static int chain_structure(const char *s,int *targets){
+ void *a=ca_tokens(s);int t,te,c,ce,v,ve,f,fe,ok=a!=0;
+ ok=ok&&ca_function(a,"wf_total",&t,&te)&&ca_function(a,"wf_tail_count",&c,&ce)&&ca_function(a,"wf_inventory",&v,&ve)&&ca_function(a,"wf_fronts",&f,&fe);
+ if(!ok){if(a)ca_tokens_free(a);return !wf_require(0,"function-definitions");}
+ int read=wf_call(a,t,te,"cx_read",0,"pt"),fmt=wf_call(a,t,te,"cx_fmt",2,"\"%s/part.tsv\"");
+ ok&=wf_require(fmt>=0&&wf_arg(a,fmt,0,"pt")&&wf_arg(a,fmt,3,"front0")&&read>fmt&&wf_arg(a,read,1,"&n")&&wf_assign(a,t,te,"b","cx_read(pt,&n)"),"part-path/read-binding");
+ int tag,tagend;
+ ok&=wf_require(wf_control(a,t,te,"if","e-i>6&&b[i]=='t'&&b[i+1]=='o'&&b[i+2]=='t'&&b[i+3]=='a'&&b[i+4]=='l'&&b[i+5]=='\\t'",&tag,&tagend)&&wf_assign(a,tag,tagend,"total","total*10+(b[k]-'0')"),"total-tag/decimal-accumulator");
+ int ret=0;for(int i=t;i<te;i++)if(ca_token_is(a,i,"return")){int e=i+1;while(e<te&&!ca_token_is(a,e,";"))e++;ret+=wf_expr(a,i+1,e,"(int)total");}
+ ok&=wf_require(ret==1,"total-return");
+ int b,e;
+ ok&=wf_require(wf_assign(a,c,ce,"total","wf_total(front0)")&&wf_assign(a,c,ce,"count","total-first")&&wf_control(a,c,ce,"if","count>cf_front_slice()",&b,&e)&&wf_assign(a,b,e+1,"count","cf_front_slice()"),"tail-count-clamp");
+ int out=wf_call(a,c,ce,"cx_fmt",0,"buf");ok&=wf_require(out>=0&&wf_arg(a,out,1,"cap")&&wf_arg(a,out,2,"\"%d\"")&&wf_arg(a,out,3,"count"),"tail-format-count");
+ ok&=wf_require(wf_assign(a,v,ve,"total","wf_total(front0)")&&wf_assign(a,v,ve,"slice","cf_front_slice()")&&wf_assign(a,v,ve,"slices","(total+slice-1)/slice"),"inventory-ceiling-division");
+ ok&=wf_require(wf_control(a,v,ve,"for","int i=0;i<slices;i++",&b,&e)&&wf_assign(a,b,e,"count","total-i*slice")&&wf_control(a,b,e,"if","count>slice",&out,&read)&&wf_assign(a,out,read+1,"count","slice"),"inventory-dynamic-count");
+ int loop,le;int front=wf_control(a,f,fe,"for","i=0;i<slices;i++",&loop,&le);
+ ok&=wf_require(front,"front-loop-bound");
+ if(front){
+  int tail=wf_call(a,loop,le,"wf_tail_count",0,"parts[0]"),offset=wf_call(a,loop,le,"cx_fmt",0,"offset");
+  ok&=wf_require(tail>=0&&wf_arg(a,tail,1,"i*cf_front_slice()")&&wf_arg(a,tail,2,"amount")&&wf_arg(a,tail,3,"sizeof amount")&&wf_control(a,loop,le,"if","i",&b,&e)&&tail>=b&&tail<e,"tail-call-guard/arguments");
+  int initial=wf_call(a,loop,le,"cx_fmt",0,"amount");
+  ok&=wf_require(initial>=0&&wf_arg(a,initial,1,"sizeof amount")&&wf_arg(a,initial,2,"\"%d\"")&&wf_arg(a,initial,3,"cf_front_slice()"),"initial-front-count");
+  ok&=wf_require(offset>=0&&wf_arg(a,offset,1,"sizeof offset")&&wf_arg(a,offset,2,"\"%d\"")&&wf_arg(a,offset,3,"i*cf_front_slice()"),"front-offset");
+  int first=wf_assign(a,loop,le,"v[n++]","offset"),second=wf_assign(a,loop,le,"v[n++]","amount"),last=wf_assign(a,loop,le,"v[n++]","0");
+  ok&=wf_require(first&&second>first&&last>second,"front-argv-offset/count/terminator");
+  int inventories=0;for(int i=loop;i<le;i++)if(ca_token_is(a,i,"wf_inventory")&&wf_arg(a,i,0,"outdir")&&wf_arg(a,i,1,"gen")&&wf_arg(a,i,2,"slug")&&wf_arg(a,i,3,"parts[0]")&&wf_arg(a,i,4,"want_stub")){
+   int guard=0;for(int j=loop;j<i;j++)if(ca_token_is(a,j,"if")&&wf_control(a,j,le,"if","!i",&b,&e)&&i>=b&&i<e)guard=1;
+   if(guard&&ca_token_is(a,i-1,"=")&&ca_token_is(a,i-2,"slices"))inventories++;
+  }
+  ok&=wf_require(inventories==2,"resume-and-new-first-inventory");
+  ok&=wf_require(wf_control(a,le+1,fe,"for","i=0;i<slices;i++",&b,&e)&&wf_assign(a,b,e+1,"v[n++]","parts[i]"),"merge-all-dynamic-parts");
+ }
+ if(targets&&ok){
+  int invloop,invend,merge,mergeend;wf_control(a,v,ve,"for","int i=0;i<slices;i++",&invloop,&invend);wf_control(a,le+1,fe,"for","i=0;i<slices;i++",&merge,&mergeend);
+  targets[0]=fmt;targets[1]=wf_call(a,t,te,"cx_read",0,"pt");targets[2]=tag-2;
+  targets[3]=wf_assign(a,t,te,"total","total*10+(b[k]-'0')")+1;
+  targets[4]=-1;for(int i=t;i<te;i++)if(ca_token_is(a,i,"return"))targets[4]=i+1;
+  targets[5]=wf_call(a,c,ce,"wf_total",0,"front0");targets[6]=wf_assign(a,c,ce,"count","cf_front_slice()")+1;
+  targets[7]=wf_call(a,c,ce,"cx_fmt",0,"buf");targets[8]=wf_call(a,v,ve,"wf_total",0,"front0");
+  targets[9]=wf_assign(a,v,ve,"slices","(total+slice-1)/slice")+1;
+  targets[10]=wf_assign(a,invloop,invend,"count","total-i*slice")+1;
+  targets[11]=wf_call(a,loop,le,"wf_tail_count",0,"parts[0]");targets[12]=wf_call(a,loop,le,"cx_fmt",0,"offset");
+  targets[13]=wf_assign(a,loop,le,"v[n++]","amount")+1;
+  targets[14]=wf_call(a,loop,le,"cx_fmt",0,"amount");
+  targets[15]=-1;for(int i=loop;i<le;i++)if(ca_token_is(a,i,"wf_inventory")){targets[15]=i;break;}
+  targets[16]=wf_assign(a,merge,mergeend+1,"v[n++]","parts[i]")+1;
+ }
+ ca_tokens_free(a);return !ok;
+}
 static int chain_check(const char *root){
- char p[4400];size_t n;path(p,root,"tools/candidate-chain.cx");char *s=cx_read(p,&n);
- int ok=s&&!memchr(s,0,n)
-  &&strstr(s,"if (cx_fmt(pt, sizeof pt, \"%s/part.tsv\", front0))")
-  &&strstr(s,"b = cx_read(pt, &n);")
-  &&strstr(s,"b[i] == 't' && b[i + 1] == 'o' && b[i + 2] == 't' && b[i + 3] == 'a' && b[i + 4] == 'l' && b[i + 5] == '\\t'")
-  &&strstr(s,"total = total * 10 + (b[k] - '0');")
-  &&strstr(s,"return (int)total;")
-  &&strstr(s,"int total = wf_total(front0), count = total - first;")
-  &&strstr(s,"if (count > cf_front_slice()) count = cf_front_slice();")
-  &&strstr(s,"cx_fmt(buf, cap, \"%d\", count)")
-  &&strstr(s,"int total = wf_total(front0), slice = cf_front_slice();")
-  &&strstr(s,"int slices = (total + slice - 1) / slice;")
-  &&strstr(s,"int count = total - i * slice;")
-  &&strstr(s,"for (i = 0; i < slices; i++) {")
-  &&strstr(s,"if (i) wf_tail_count(parts[0], i * cf_front_slice(), amount, sizeof amount);")
-  &&strstr(s,"cx_fmt(offset, sizeof offset, \"%d\", i * cf_front_slice())")
-  &&strstr(s,"v[n++] = offset; v[n++] = amount; v[n++] = 0;")
-  &&strstr(s,"if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);")
-  &&strstr(s,"for (i = 0; i < slices; i++) v[n++] = parts[i];")
-  &&!strstr(s,"const char *offs[3]")&&!strstr(s,"const char *cnts[3]");
- free(s);printf("%s\tchain-dynamic-tail-wiring\n",ok?"PASS":"FAIL");return !ok;
+ char p[4400];size_t n;path(p,root,"tools/candidate-chain.cx");char *s=cx_read(p,&n);int bad=!s||(s&&memchr(s,0,n));if(!bad)bad=chain_structure(s,0);free(s);printf("%s\tchain-dynamic-tail-wiring\n",bad?"FAIL":"PASS");return bad;
+}
+/* Re-emit token roles with layout/comment drift, then change one located role
+ * per old wiring intent. No textual fixture anchors and no production writes. */
+static char *wf_fixture(void *a,int change){
+ size_t cap=1;for(int i=0;i<ca_token_count(a);i++)cap+=strlen(ca_token_text(a,i))+40;
+ char *s=malloc(cap);if(!s)die("structure fixture allocation");size_t at=0;
+ for(int i=0;i<ca_token_count(a);i++){
+  const char *token=i==change?"unsupported_wiring":ca_token_text(a,i);int kind=ca_token_kind(a,i);
+  if(at>cap||cap-at<4)die("structure fixture bound");
+  if(i&&kind==1&&ca_token_kind(a,i-1)==1)s[at++]=' ';
+  if(kind==2||kind==3)s[at++]=kind==2?'"':'\'';
+  size_t n=strlen(token);if(mm_copy(s+at,(long)(cap-at-2),token,(long)n))die("structure token bound");at+=n;
+  if(kind==2||kind==3)s[at++]=kind==2?'"':'\'';
+  if(ca_token_is(a,i,";")||ca_token_is(a,i,"{")||ca_token_is(a,i,"}")){const char *drift="\n/* structure drift */\n";n=strlen(drift);if(mm_copy(s+at,(long)(cap-at-1),drift,(long)n))die("structure comment bound");at+=n;}
+ }s[at]=0;return s;
+}
+static int wiring_selftest(const char *root){
+ char p[4400];size_t n;path(p,root,"tools/candidate-chain.cx");char *s=cx_read(p,&n);if(!s||memchr(s,0,n))die("structure fixture source");
+ int targets[17],failed=chain_structure(s,targets);void *a=ca_tokens(s);free(s);if(failed||!a)die("structure fixture baseline");
+ char *changed=wf_fixture(a,-1);int rc=chain_structure(changed,0);free(changed);printf("%s\tchain-layout/comment-drift\n",rc?"FAIL":"PASS");failed+=!!rc;
+ for(int i=0;i<17;i++){if(targets[i]<0||targets[i]>=ca_token_count(a))die("structure fixture role missing");changed=wf_fixture(a,targets[i]);rc=chain_structure(changed,0);free(changed);printf("%s\tchain-wiring-role-%d-refused\n",rc?"PASS":"FAIL",i+1);failed+=!rc;}
+ ca_tokens_free(a);printf("CHECK_WHOLE_FRONT_WIRING\tfailed=%d\n",failed);return !!failed;
 }
 static int selftest(const char *root){
  int failed=0;char p[4400],text[512];
@@ -96,9 +181,10 @@ static int selftest(const char *root){
  printf("CHECK_WHOLE_FRONT_EXPAND\tfailed=%d\n",failed);return failed?1:0;
 }
 int main(int argc,char **argv){
- char root[4400];if(argc<3||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("usage ROOT NEW_OUT [--selftest | --partition FIRST COUNT ...]");
+ char root[4400];if(argc<3||!realpath(argv[1],root)||argv[2][0]!='/'||strlen(argv[2])>=sizeof work)die("usage ROOT NEW_OUT [--selftest | --wiring-selftest | --partition FIRST COUNT ...]");
  if(cx_fmt(work,sizeof work,"%s",argv[2])||mkdir(work,0700))die("exclusive NEW_OUT");
- if(argc==4&&!strcmp(argv[3],"--selftest"))return selftest(root);
+ if(argc==4&&!strcmp(argv[3],"--wiring-selftest"))return wiring_selftest(root);
+ if(argc==4&&!strcmp(argv[3],"--selftest")){int wiring=wiring_selftest(root);return selftest(root)||wiring;}
  if(argc>3&&(strcmp(argv[3],"--partition")||argc<6))die("partition arguments");
  int wiring=chain_check(root);int nr=roots(root),rc=evaluate(nr,argc>3?argc-4:0,argc>3?argv+4:0)||wiring;printf("CHECK_WHOLE_FRONT_EXPAND\tfailed=%d\n",rc);return rc;
 }

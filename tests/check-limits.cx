@@ -4,12 +4,13 @@
  *
  * T1 proves each net equals its own table; it cannot see two tables disagreeing.
  * The 65-source bug was exactly that: one table said 128, another still said 64.
- * Every row of exec/facts/limits.tsv names a file and the exact text it must
- * contain; all rows of one name must carry one value.  Also: the whole-o source
- * list in release-build and the object list in entry-build must be the same set. */
+ * Source consumers are checked through declarations, initializer elements,
+ * call arguments and enclosing loop bodies, never raw source substrings.
+ * Non-source facts retain their documented byte-level contracts. */
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.chainargv
 static int failed;
 static char *slurp(const char *p, size_t *np) {
     FILE *f = fopen(p, "rb"); size_t cap = 1 << 26, n = 0; char *b;
@@ -19,6 +20,102 @@ static char *slurp(const char *p, size_t *np) {
     return b;
 }
 static void bad(const char *what, const char *a, const char *b) { printf("FAIL\t%s\t%s\t%s\n", what, a, b); failed++; }
+
+/* Shared refactor-style lexer: comments and literal contents cannot impersonate
+ * declarations or calls. All ranges below are token-indexed and half open. */
+static int eq(void *a, int i, const char *s) { return ca_token_is(a, i, s); }
+static const char *word(void *a, int i) { return ca_token_text(a, i); }
+static int expression(void *a, int lo, int hi, const char *text) {
+    void *b = ca_tokens(text); int yes = b && hi - lo == ca_token_count(b);
+    for (int j = 0; yes && j < hi - lo; j++)
+        if (ca_token_kind(a, lo + j) != ca_token_kind(b, j) || strcmp(word(a, lo + j), word(b, j))) yes = 0;
+    ca_tokens_free(b); return yes;
+}
+static void *source(const char *path) {
+    char *b = slurp(path, 0); void *a = b ? ca_tokens(b) : 0; free(b);
+    if (!a) bad("source-unreadable-or-invalid", path, "-"); return a;
+}
+/* Locate a unique array declaration, not an arbitrary occurrence of its name. */
+static int initializer(void *a, const char *name, int *lo, int *hi) {
+    int found = 0;
+    for (int i = 0; i < ca_token_count(a); i++) if (eq(a, i, name) && eq(a, i + 1, "[")) {
+        int end = ca_token_end(a, i + 1);
+        if (end < 0 || !eq(a, end + 1, "=") || !eq(a, end + 2, "{")) continue;
+        int close = ca_token_end(a, end + 2); if (close < 0) return 0;
+        *lo = end + 3; *hi = close; found++;
+    }
+    return found == 1;
+}
+static int macro_value(void *a, const char *name, int *lo, int *hi) {
+    int found = 0, n = ca_token_count(a);
+    for (int i = 0; i + 3 < n; i++) if (eq(a, i, "#") && eq(a, i + 1, "define") && eq(a, i + 2, name)) {
+        int end = i + 3;
+        /* Macro replacements used here are either one constant or a call or
+         * a comma list. Stop at their grammar boundary, not a source spelling. */
+        if (eq(a, end + 1, "(")) { int close = ca_token_end(a, end + 1); if (close < 0) return 0; end = close + 1; }
+        else { end++; while (eq(a, end, ",")) end += 2; }
+        *lo = i + 3; *hi = end; found++;
+    }
+    return found == 1;
+}
+static int constant(void *a, const char *name, const char *value) {
+    int lo, hi;
+    if (macro_value(a, name, &lo, &hi)) return expression(a, lo, hi, value);
+    int found = 0, yes = 0;
+    for (int i = 0; i < ca_token_count(a); i++) if (eq(a, i, "enum") && eq(a, i + 1, "{")) {
+        int end = ca_token_end(a, i + 1);
+        for (int j = i + 2; j + 2 < end; j++) if (eq(a, j, name) && eq(a, j + 1, "=")) {
+            int k = j + 2; while (k < end && !eq(a, k, ",")) k++;
+            found++; yes = expression(a, j + 2, k, value);
+        }
+    }
+    return found == 1 && yes;
+}
+static int call(void *a, int at, const char *name, int argc, const char *x, const char *y, const char *z, const char *w, const char *v) {
+    const char *args[5] = {x,y,z,w,v}; int lo, hi;
+    if (!eq(a, at, name) || !eq(a, at + 1, "(")) return 0;
+    for (int i = 0; i < argc; i++) if (ca_call_arg(a, at, i, &lo, &hi) != argc || !expression(a, lo, hi, args[i])) return 0;
+    return 1;
+}
+static int root_loop(void *a, int entry) {
+    const char *bound = entry ? "EB_OBJ" : "RB_WHOLE_SRC";
+    int begin, finish;
+    if (!ca_function(a,entry ? "main" : "rb_whole",&begin,&finish)) return 0;
+    for (int i = begin + 1; i < finish; i++) if (eq(a, i, "for") && eq(a, i + 1, "(")) {
+        int end = ca_token_end(a, i + 1), body = end + 1;
+        if (end < 0 || !eq(a, body, "{")) continue;
+        int close = ca_token_end(a, body), semi = i + 2;
+        while (semi < end && !eq(a, semi, ";")) semi++;
+        int next = semi + 1; while (next < end && !eq(a, next, ";")) next++;
+        char condition[64]; cx_fmt(condition, sizeof condition, "i < %s", bound);
+        if (!expression(a, i + 2, semi, "i=0") || !expression(a, semi + 1, next, condition) || !expression(a, next + 1, end, "i++")) continue;
+        int path = 0, consume = 0, key = !entry, rel = !entry, unsupported = 0;
+        for (int j = body + 1; j < close; j++) {
+            if (eq(a,j,"{") || eq(a,j,"if") || eq(a,j,"while") || eq(a,j,"for") || eq(a,j,"goto") || eq(a,j,"return")) unsupported = 1;
+            if (!entry && call(a,j,"rb_cat",5,"srcs[i]","RB_FULL","argv[2]","1","cf_root_source(i)")) path++;
+            if (!entry && eq(a,j,"v") && eq(a,j+1,"[")) { int e=ca_token_end(a,j+1); if (e>=0 && expression(a,j+2,e,"n++") && eq(a,e+1,"=") && expression(a,e+2,e+6,"srcs[i]")) consume++; }
+            if (entry && eq(a,j,"keys") && expression(a,j,j+5,"keys[i]=" ) && call(a,j+5,"cf_root_key",1,"i",0,0,0,0)) key++;
+            if (entry && eq(a,j,"src_rel") && expression(a,j,j+5,"src_rel[i]=" ) && call(a,j+5,"cf_root_source",1,"i",0,0,0,0)) rel++;
+        }
+        if (unsupported) continue;
+        if (!entry && path == 1 && consume == 1) return 1;
+        if (entry && key == 1 && rel == 1) {
+            /* The initialized key/source arrays feed the following path loop.
+             * A different index, bound, alias, or unsupported control flow fails. */
+            int w = close + 5;
+            if (!expression(a,close+1,close+5,"i=0;") || !eq(a,w,"while") || !eq(a,w+1,"(")) continue;
+            int cond = ca_token_end(a,w+1), b = cond+1;
+            if (cond<0 || !expression(a,w+2,cond,"i<EB_OBJ") || !eq(a,b,"{")) continue;
+            int e=ca_token_end(a,b), joins=0, increments=0;
+            for(int j=b+1;j<e;j++) {
+                if(j==b+4 && expression(a,b+1,b+4,"int rn;") && call(a,j,"eb_join",4,"srcs_b[i]","576","root","src_rel[i]",0)) joins++;
+                if(eq(a,j,"i")&&expression(a,j,j+6,"i=i+1;")) increments++;
+            }
+            if(joins==1&&increments==1)return 1;
+        }
+    }
+    return 0;
+}
 /* Read the authority independently of the generated API, preserving ordered
  * key/source equality and rejecting duplicates rather than comparing copies. */
 static void roots_check(void) {
@@ -48,21 +145,19 @@ static void roots_check(void) {
     if (!n || n != cf_root_count()) bad("object-count", "facts", "generated");
     free(t);
     static const char *sites[] = {"tools/release-build.cx", "tools/entry-build.cx"};
-    static const char *contracts[][4] = {
-        {"#define RB_WHOLE_SRC cf_root_count()", "for (i = 0; i < RB_WHOLE_SRC; i++) {", "rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source(i));", "v[n++] = srcs[i];"},
-        {"#define EB_OBJ cf_root_count()", "for (i = 0; i < EB_OBJ; i++) {", "keys[i] = cf_root_key(i); src_rel[i] = cf_root_source(i);", "eb_join(srcs_b[i], 576, root, src_rel[i]);"}
-    };
     for (int i = 0; i < 2; i++) {
-        char *b = slurp(sites[i], 0);
-        if (!b) { bad("object-list-unreadable", sites[i], "-"); continue; }
-        if (!strstr(b, "#pragma unisa use cxlib.chainfacts")) bad("object-consumer-module", sites[i], "-");
-        for (int j = 0; j < 4; j++) if (!strstr(b, contracts[i][j])) bad("object-consumer", sites[i], contracts[i][j]);
-        if (strstr(b, "rb_whole_src[") || strstr(b, "src_rel[EB_OBJ] =") || strstr(b, "keys[EB_OBJ] =")) bad("object-local-table", sites[i], "-");
-        for (int j = 0; j < n; j++) {
-            char quoted[164]; cx_fmt(quoted, sizeof quoted, "\"%s\"", sources[j]);
-            if (strstr(b, quoted)) bad("object-local-source", sites[i], sources[j]);
+        void *a = source(sites[i]); if (!a) continue;
+        int lo, hi, module = 0;
+        for (int j=0;j<ca_token_count(a);j++) if(eq(a,j,"#")&&eq(a,j+1,"pragma")&&eq(a,j+2,"unisa")&&eq(a,j+3,"use")&&eq(a,j+4,"cxlib")&&eq(a,j+5,".")&&eq(a,j+6,"chainfacts")) module++;
+        if (module != 1) bad("object-consumer-module", sites[i], "-");
+        if (!macro_value(a, i ? "EB_OBJ" : "RB_WHOLE_SRC", &lo, &hi) || !expression(a, lo, hi, "cf_root_count()") || !root_loop(a,i)) bad("object-consumer", sites[i], "root loop wiring");
+        for (int j=0;j<ca_token_count(a);j++) if(eq(a,j+1,"[")) {
+            int end=ca_token_end(a,j+1);
+            if(eq(a,j,"rb_whole_src") || ((eq(a,j,"src_rel")||eq(a,j,"keys")) && end>=0 && eq(a,end+1,"=") && eq(a,end+2,"{"))) bad("object-local-table",sites[i],word(a,j));
         }
-        free(b);
+        for (int j=0;j<ca_token_count(a);j++) if(ca_token_kind(a,j)==2)
+            for(int k=0;k<n;k++) if(!strcmp(word(a,j),sources[k])) bad("object-local-source",sites[i],sources[k]);
+        ca_tokens_free(a);
     }
 }
 
@@ -94,79 +189,93 @@ static int ops_load(void) {
     return op_rows;
 }
 
-/* the arity list as a comma string, built from the table */
-static void ops_arity_list(char *out, size_t cap) {
-    size_t at = 0;
-    out[0] = 0;
-    for (int i = 0; i < op_rows; i++) {
-        size_t len = strlen(op_arity[i]);
-        if (at + len + (i ? 1 : 0) + 1 > cap) break;
-        if (i) out[at++] = ',';
-        for (size_t j = 0; j < len; j++) out[at++] = op_arity[i][j];
-        out[at] = 0;
+static int arities_match(void *a, const char *name) {
+    int lo,hi,r=0,ok=initializer(a,name,&lo,&hi);
+    if(ok && hi==lo+1 && eq(a,lo,"CORE_ACTION_ARITIES")) ok=macro_value(a,"CORE_ACTION_ARITIES",&lo,&hi);
+    if(ok) for(int j=lo;j<hi;){
+        if(r>=op_rows || ca_token_kind(a,j)!=1 || strcmp(word(a,j),op_arity[r++])) {ok=0;break;}
+        j++;if(j<hi){if(!eq(a,j,",")){ok=0;break;}j++;}
     }
+    return ok && r==op_rows;
 }
-
-/* Every listed file must carry the table's arity list.  The copies differ in
- * layout only -- one line, wrapped over two lines, or with spaces after the
- * commas -- so the comparison runs on a whitespace-stripped copy; a raw
- * substring test would pass on some copies and fail on others for no reason. */
-static void ops_check_arities(char *list) {
-    static const char *sites[] = {
-        "cx/core/execute.cx", "exec/c/core.h", "cx/runtime/model_decode.cx",
-        "cx/runtime/network_structure.cx", "cx/core/coregate.cx", "seed/pack.c",
-        "tools/cxlib/e2stream.cx", "tests/stream-e1-lex144.cx"
+/* In-memory controls exercise the exact declaration/initializer predicates used
+ * below; no compiler, product execution or filesystem fixture is involved. */
+static int selftest(void) {
+    static const char *constants[]={
+        "#define LIMIT 128\n",
+        "# define /* spacing */ LIMIT\t128\n",
+        "/* #define LIMIT 128 */\n#define LIMIT 127\n",
+        "const char *decoy=\"#define LIMIT 128\";\n#define LIMIT 127\n",
+        "enum { LIMIT /* declaration */ =\n128 };",
+        "/* LIMIT = 128 */ enum { LIMIT=127 };",
+        "#define LIMIT 128\n#define LIMIT 127\n"
     };
-    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
-        size_t n = 0, at = 0;
-        char *b = slurp(sites[i], &n), *flat;
-        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
-        flat = malloc(n + 1);
-        if (!flat) { bad("ops-cannot-read", sites[i], "-"); free(b); continue; }
-        for (size_t j = 0; j < n; j++) {
-            unsigned char c = (unsigned char)b[j];
-            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') flat[at++] = (char)c;
-        }
-        flat[at] = 0;
-        if (!strstr(flat, list)) bad("ops-arity-disagrees", sites[i], list);
-        free(flat);
-        free(b);
+    static const int expected[]={1,1,0,0,1,0,0};
+    for(unsigned i=0;i<sizeof constants/sizeof *constants;i++){
+        void *a=ca_tokens(constants[i]);
+        if(!a || constant(a,"LIMIT","128")!=expected[i])bad("selftest-constant","LIMIT",constants[i]);
+        ca_tokens_free(a);
+    }
+    cx_fmt(op_arity[0],8,"0");cx_fmt(op_arity[1],8,"1");cx_fmt(op_arity[2],8,"2");op_rows=3;
+    static const char *arrays[]={
+        "static const int ARITY[]={0,1,2};",
+        "static const int ARITY [ ] = { 0, /* slot */ 1,\n2 };",
+        "/* static const int ARITY[]={0,1,2}; */ static const int ARITY[]={0,9,2};",
+        "const char *decoy=\"0,1,2\"; static const int ARITY[]={0,9,2};",
+        "static const int unrelated[]={0,1,2}; static const int ARITY[]={0,9,2};",
+        "static const int ARITY[]={0,1,2,3};",
+        "#define CORE_ACTION_ARITIES 0,1,2\nstatic const int ARITY[]={CORE_ACTION_ARITIES};"
+    };
+    static const int array_expected[]={1,1,0,0,0,0,1};
+    for(unsigned i=0;i<sizeof arrays/sizeof *arrays;i++){
+        void *a=ca_tokens(arrays[i]);
+        if(!a || arities_match(a,"ARITY")!=array_expected[i])bad("selftest-arity","ARITY",arrays[i]);
+        ca_tokens_free(a);
+    }
+    printf("LIMITS_SELFTEST\tchecks=14\tfailed=%d\n",failed);return failed?1:0;
+}
+/* Compare complete initializer elements, not a numeric sequence elsewhere in
+ * a comment, string, unrelated table, or a prefix of an oversized table. */
+static void ops_check_arities(void) {
+    static const char *sites[][2] = {
+        {"cx/core/execute.cx","ARITY"}, {"exec/c/core.h","ARITY"},
+        {"cx/runtime/model_decode.cx","ARITY"}, {"cx/runtime/network_structure.cx","ARITY"},
+        {"cx/core/coregate.cx","cr_ar"}, {"seed/pack.c","ARITY"},
+        {"tools/cxlib/e2stream.cx","E2S_ARITY"}, {"tests/stream-e1-lex144.cx","arity"}
+    };
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++) {
+        void *a=source(sites[i][0]); if(!a)continue;
+        if(!arities_match(a,sites[i][1]))bad("ops-arity-disagrees",sites[i][0],sites[i][1]);
+        ca_tokens_free(a);
     }
 }
 
-/* the places that write the op count literally must equal the table's row count */
+/* Opcode upper bounds must occur in executable if conditions, not literals
+ * elsewhere. Dispatch entries are parsed as .long TARGET - TABLE records. */
 static void ops_check_counts(void) {
-    static const char *sites[] = {
-        "cx/runtime/model_decode.cx", "cx/runtime/network_structure.cx", "cx/core/coregate.cx"
-    };
-    static const char *defs[] = {"exec/c/asm/actions.h", "cx/core/execute.cx"};
-    char want[64];
-    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
-        char *b = slurp(sites[i], 0);
-        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
-        cx_fmt(want, sizeof want, "op >= %d", op_rows);
-        if (!strstr(b, want)) bad("ops-count-disagrees", sites[i], want);
-        free(b);
+    static const char *sites[]={"cx/runtime/model_decode.cx","cx/runtime/network_structure.cx","cx/core/coregate.cx"};
+    char want[32];cx_fmt(want,sizeof want,"%d",op_rows);
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
+        void *a=source(sites[i]);if(!a)continue;int seen=0;
+        for(int j=0;j<ca_token_count(a);j++)if(eq(a,j,"if")&&eq(a,j+1,"(")){
+            int end=ca_token_end(a,j+1);
+            for(int k=j+2;k+3<end;k++)if(eq(a,k,"op")&&eq(a,k+1,">")&&eq(a,k+2,"=")&&eq(a,k+3,want))seen++;
+        }
+        if(!seen)bad("ops-count-disagrees",sites[i],want);ca_tokens_free(a);
     }
-    cx_fmt(want, sizeof want, "#define OP_COUNT %d", op_rows);
-    char *b = slurp(defs[0], 0);
-    if (!b) bad("ops-cannot-read", defs[0], "-");
-    else { if (!strstr(b, want)) bad("ops-count-disagrees", defs[0], want); free(b); }
-    b = slurp(defs[1], 0);
-    if (!b) bad("ops-cannot-read", defs[1], "-");
-    else { if (!strstr(b, "int ARITY[NOP_]")) bad("ops-count-disagrees", defs[1], "int ARITY[NOP_]"); free(b); }
-    /* the two assembly dispatch tables are one entry per opcode; a short table reads past its end */
-    static const char *tabs[][2] = {
-        {"exec/c/asm/action_x86_64.S", "-Lxatable"},
-        {"exec/c/asm/action_arm64.S", "-Latable"}
-    };
-    for (unsigned i = 0; i < sizeof tabs / sizeof *tabs; i++) {
-        b = slurp(tabs[i][0], 0);
-        if (!b) { bad("ops-cannot-read", tabs[i][0], "-"); continue; }
-        int n = 0;
-        for (char *p = b; (p = strstr(p, tabs[i][1])) != 0; p += strlen(tabs[i][1])) n++;
-        if (n != op_rows) { cx_fmt(want, sizeof want, "%d", n); bad("ops-dispatch-count", tabs[i][0], want); }
-        free(b);
+    void *a=source("exec/c/asm/actions.h");
+    if(a){if(!constant(a,"OP_COUNT",want))bad("ops-count-disagrees","exec/c/asm/actions.h",want);ca_tokens_free(a);}
+    a=source("cx/core/execute.cx");
+    if(a){int seen=0;for(int j=0;j<ca_token_count(a);j++)if(eq(a,j,"ARITY")&&eq(a,j-1,"int")&&eq(a,j+1,"[")&&eq(a,j+2,"NOP_")&&eq(a,j+3,"]")&&eq(a,j+4,"="))seen++;
+        if(seen!=1)bad("ops-count-disagrees","cx/core/execute.cx","ARITY bound");ca_tokens_free(a);}
+    static const char *tabs[][2]={{"exec/c/asm/action_x86_64.S","Lxatable"},{"exec/c/asm/action_arm64.S","Latable"}};
+    for(unsigned i=0;i<sizeof tabs/sizeof *tabs;i++){
+        a=source(tabs[i][0]);if(!a)continue;int n=0,labels=0;
+        for(int j=0;j<ca_token_count(a);j++)if(eq(a,j,tabs[i][1])&&eq(a,j+1,":")){
+            labels++;int k=j+2;
+            while(eq(a,k,".")&&eq(a,k+1,"long")&&ca_token_kind(a,k+2)==1&&eq(a,k+3,"-")&&eq(a,k+4,tabs[i][1])){n++;k+=5;}
+        }
+        if(labels!=1||n!=op_rows)bad("ops-dispatch-count",tabs[i][0],want);ca_tokens_free(a);
     }
 }
 
@@ -175,24 +284,26 @@ static void ops_check_counts(void) {
  * executor order (seed and the dump/pack tools) is the printed enum order.
  * A missing name here is how e2stream silently lost INC. */
 static void ops_check_dsl_names(void) {
-    static const char *sites[] = {
-        "tools/cxlib/delta.cx", "tools/cxlib/e2stream.cx",
-        "seed/tbl.c", "tools/net-dump.cx", "tools/cxlib/netpack.cx",
-        "tools/p3-member-consume.cx", "exec/c/qprefixcheck.cx"
+    static const char *sites[][2] = {
+        {"tools/cxlib/delta.cx","dl_opnames"},{"tools/cxlib/e2stream.cx","E2S_OPS"},
+        {"seed/tbl.c","OPN"},{"tools/net-dump.cx","ND_NAME"},{"tools/cxlib/netpack.cx","NP_NAME"},
+        {"tools/p3-member-consume.cx","OPN"},{"exec/c/qprefixcheck.cx","OPN"}
     };
-    for (unsigned i = 0; i < sizeof sites / sizeof *sites; i++) {
-        char *b = slurp(sites[i], 0);
-        if (!b) { bad("ops-cannot-read", sites[i], "-"); continue; }
-        for (int r = 0; r < op_rows; r++) {
-            char quoted[48];
-            cx_fmt(quoted, sizeof quoted, "\"%s\"", op_name[r]);
-            if (!strstr(b, quoted)) bad("ops-name-missing", sites[i], op_name[r]);
+    for(unsigned i=0;i<sizeof sites/sizeof *sites;i++){
+        void *a=source(sites[i][0]);if(!a)continue;int lo,hi,seen[96]={0};
+        if(!initializer(a,sites[i][1],&lo,&hi))bad("ops-name-table",sites[i][0],sites[i][1]);
+        else for(int j=lo;j<hi;){
+            int r;for(r=0;r<op_rows;r++)if(ca_token_kind(a,j)==2&&!strcmp(word(a,j),op_name[r]))break;
+            if(r==op_rows)bad("ops-name-unknown",sites[i][0],word(a,j));else seen[r]++;
+            j++;if(j<hi){if(!eq(a,j,",")){bad("ops-name-shape",sites[i][0],sites[i][1]);break;}j++;}
         }
-        free(b);
+        for(int r=0;r<op_rows;r++)if(seen[r]!=1)bad("ops-name-missing-or-duplicate",sites[i][0],op_name[r]);
+        ca_tokens_free(a);
     }
 }
 
 int main(int argc, char **argv) {
+    if(argc==2 && !strcmp(argv[1],"--selftest"))return selftest();
     const char *path = argc > 1 ? argv[1] : "exec/facts/limits.tsv";
     char *t = slurp(path, 0), *line; char name[64] = "", value[32] = ""; int rows = 0;
     if (!t) { printf("FAIL\tcannot-read\t%s\t-\n", path); return 2; }
@@ -211,10 +322,28 @@ int main(int argc, char **argv) {
                     if (q[0] == '{' && q[1] == '}') { const char *v = f[1]; while (*v) *o++ = *v++; q += 2; } else *o++ = *q++;
                 }
                 *o = 0;
-                body = slurp(f[2], 0);
-                if (!body) bad("cannot-read", f[2], "-");
-                else if (!strstr(body, want)) bad("site-disagrees", f[2], want);
-                free(body);
+                const char *ext = strrchr(f[2], '.');
+                int is_source = ext && (!strcmp(ext,".cx") || !strcmp(ext,".c") || !strcmp(ext,".h") || !strcmp(ext,".S"));
+                if (is_source) {
+                    void *a = source(f[2]), *contract = ca_tokens(want); int ok = 0;
+                    if (a && contract) {
+                        int n = ca_token_count(contract), at = 0;
+                        if (eq(contract,0,"#") && eq(contract,1,"define")) at = 2;
+                        /* The fact declares the constant's role; the source must
+                         * contain exactly that macro or enum definition/value. */
+                        if (at == 2 && n == 4) ok = constant(a, word(contract,2), word(contract,3));
+                        else if (n == 3 && eq(contract,1,"=")) ok = constant(a,word(contract,0),word(contract,2));
+                    }
+                    if (!ok) bad("site-disagrees",f[2],want);
+                    ca_tokens_free(contract);ca_tokens_free(a);
+                } else {
+                    /* Generated net records and prose/TSV facts are data, not
+                     * executable-source evidence; their byte contract remains. */
+                    body = slurp(f[2], 0);
+                    if (!body) bad("cannot-read", f[2], "-");
+                    else if (!strstr(body, want)) bad("site-disagrees", f[2], want);
+                    free(body);
+                }
             }
         }
         line = nl ? nl + 1 : 0;
@@ -222,9 +351,7 @@ int main(int argc, char **argv) {
     roots_check();
     if (!rows) bad("no-rows", path, "-");
     if (ops_load()) {
-        char list[512];
-        ops_arity_list(list, sizeof list);
-        ops_check_arities(list);
+        ops_check_arities();
         ops_check_counts();
         ops_check_dsl_names();
     } else {

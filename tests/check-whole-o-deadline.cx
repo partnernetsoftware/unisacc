@@ -4,6 +4,7 @@
 #pragma unisa use sys.time
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.chainargv
 static char wd_root[4096],wd_work[4096],wd_fix[4096],wd_tool[4096],wd_ctor[4096],wd_pkg[4096];
 static int wd_checks,wd_bad;
 static void wd_die(const char *s){fprintf(stderr,"whole-o-deadline: %s; retained=%s\n",s,wd_work);exit(2);}
@@ -25,15 +26,59 @@ static int wd_alive(int pid){int st=wd_state(pid,0);return st&&st!='Z';}
 static int wd_group_alive(int group){DIR *d=opendir("/proc");if(!d)wd_die("/proc unreadable");struct dirent *e;int found=0;while(!found&&(e=readdir(d))){char *end;long v=strtol(e->d_name,&end,10);if(*end||v<=0)continue;int pg=0,st=wd_state((int)v,&pg);if(st&&st!='Z'&&pg==group)found=1;}closedir(d);return found;}
 static char wd_sources[128][256];
 static int wd_count;
+/* Decode the actual child-produced receipt as records, not source text or
+ * substring anchors. Views remain valid until the receipt buffer is freed. */
+struct wd_receipt_field{const char *key,*value;size_t key_n,value_n;};
+struct wd_receipt{struct wd_receipt_field field[32];int count;};
+static int wd_receipt_decode(struct wd_receipt *r,const char *s,size_t n){
+ r->count=0;if(!s||!n||memchr(s,0,n))return 0;size_t at=0;
+ while(at<n){size_t end=at,tab=n;while(end<n&&s[end]!='\n'){if(s[end]=='\t'){if(tab!=n)return 0;tab=end;}end++;}
+  if(end==n||tab==n||tab==at||r->count==32)return 0;
+  struct wd_receipt_field *f=&r->field[r->count];f->key=s+at;f->key_n=tab-at;f->value=s+tab+1;f->value_n=end-tab-1;
+  for(int i=0;i<r->count;i++)if(r->field[i].key_n==f->key_n&&!memcmp(r->field[i].key,f->key,f->key_n))return 0;
+  r->count++;at=end+1;
+ }return 1;
+}
+static int wd_receipt_is(const struct wd_receipt *r,const char *key,const char *value){
+ size_t kn=strlen(key),vn=strlen(value);for(int i=0;i<r->count;i++){const struct wd_receipt_field *f=&r->field[i];
+  if(f->key_n==kn&&!memcmp(f->key,key,kn))return f->value_n==vn&&!memcmp(f->value,value,vn);
+ }return 0;
+}
+static void wd_receipt_controls(void){
+ struct wd_receipt r;const char *good="route\twhole-o\ntool_src\tMATCH\n";
+ wd_ck(wd_receipt_decode(&r,good,strlen(good))&&wd_receipt_is(&r,"route","whole-o")&&wd_receipt_is(&r,"tool_src","MATCH"),"receipt field facts accept exact records");
+ wd_ck(!wd_receipt_is(&r,"tool_src","TOOL_SRC_MISMATCH")&&!wd_receipt_is(&r,"tool_sha","UNREADABLE"),"receipt facts reject wrong or missing status");
+ const char *dup="tool_src\tMATCH\ntool_src\tTOOL_SRC_MISMATCH\n";
+ wd_ck(!wd_receipt_decode(&r,dup,strlen(dup)),"receipt duplicate status refused");
+ const char *suffix="tool_src\tMATCHED\n";
+ wd_ck(wd_receipt_decode(&r,suffix,strlen(suffix))&&!wd_receipt_is(&r,"tool_src","MATCH"),"receipt status prefix impostor refused");
+ wd_ck(!wd_receipt_decode(&r,"tool_src\tMATCH",14),"receipt truncated record refused");
+ const char bad[4]={'k','\t',0,'\n'};wd_ck(!wd_receipt_decode(&r,bad,sizeof bad),"receipt NUL refused");
+}
+/* Compile only when this test runs: execute the production function, not a
+ * reimplementation of its validation policy. Token boundaries exclude comments
+ * and quoted decoys; unsupported definitions fail closed. */
+static void wd_deadline(void){
+ char source[4096],probe[4096],exe[4096];size_t n;int body,end,defines=0;
+ wd_path(source,wd_root,"tools/release-build.cx");char *s=wd_read(source,&n);
+ void *a=ca_tokens(s);free(s);if(!a||!ca_function(a,"rb_whole_deadline",&body,&end))wd_die("deadline function structure");
+ np_buf b={0};np_puts(&b,"#pragma unisa use sys.env\n#define RB_WHOLE_DEADLINE_MS ");
+ for(int i=0;i+3<ca_token_count(a);i++)if(ca_token_is(a,i,"#")&&ca_token_is(a,i+1,"define")&&ca_token_is(a,i+2,"RB_WHOLE_DEADLINE_MS")){
+  if(!ca_token_is(a,i+3,"60000"))wd_die("deadline ceiling value");defines++;np_puts(&b,ca_token_text(a,i+3));
+ }
+ if(defines!=1)wd_die("deadline ceiling definition");
+ np_puts(&b,"\nstatic long rb_whole_deadline(void) ");
+ for(int i=body;i<=end;i++){int kind=ca_token_kind(a,i);if(i>body&&kind==1&&ca_token_kind(a,i-1)==1)np_puts(&b," ");if(kind==2)np_puts(&b,"\"");if(kind==3)np_puts(&b,"'");np_puts(&b,ca_token_text(a,i));if(kind==2)np_puts(&b,"\"");if(kind==3)np_puts(&b,"'");}
+ ca_tokens_free(a);
+ np_puts(&b,"\nint main(int argc,char **argv){if(argc!=2)return 2;if(strcmp(argv[1],\"UNSET\")){if(sy_setenv(\"UNISACC_RB_WHOLE_MS\",argv[1],1))return 2;}else if(sy_unsetenv(\"UNISACC_RB_WHOLE_MS\"))return 2;printf(\"%ld\\n\",rb_whole_deadline());return 0;}\n");
+ wd_path(probe,wd_work,"deadline-probe.cx");wd_path(exe,wd_work,"deadline-probe");if(cx_write(probe,b.p,b.n))wd_die("deadline probe write");free(b.p);wd_compile(probe,exe,12);
+ const char *inputs[]={"UNSET","","invalid","12x","0","-1","60001","1","60000","1500"};
+ const char *want[]={"60000\n","60000\n","60000\n","60000\n","60000\n","60000\n","60000\n","1\n","60000\n","1500\n"};
+ for(int i=0;i<10;i++){char *v[]={exe,(char *)inputs[i],0};np_result r=wd_run(v,wd_root,3);wd_ck(!r.rc&&!r.errn&&r.out&&r.outn==strlen(want[i])&&!memcmp(r.out,want[i],r.outn),"production deadline default/invalid/ceiling/short override behavior");np_free(&r);}
+}
+/* Root facts are checked independently; actual dispatcher argv is checked below. */
 static void wd_static(void){
- char p[4096];size_t n;wd_path(p,wd_root,"tools/release-build.cx");char *b=wd_read(p,&n);
- wd_ck(strstr(b,"#define RB_WHOLE_DEADLINE_MS 60000")!=0,"default ceiling is60000ms");
- char *f=strstr(b,"static long rb_whole_deadline(void)"),*e=f?strstr(f,"\n}"):0;
- wd_ck(f&&e&&strstr(f,"ms < 1 || ms > RB_WHOLE_DEADLINE_MS")&&strstr(f,"if (*p ||")&&strstr(f,"return RB_WHOLE_DEADLINE_MS;"),"invalid and above-ceiling override fall back to default");
- int wiring=strstr(b,"#pragma unisa use cxlib.chainfacts")&&strstr(b,"#define RB_WHOLE_SRC cf_root_count()")
-  &&strstr(b,"for (i = 0; i < RB_WHOLE_SRC; i++) {")
-  &&strstr(b,"rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source(i));")&&strstr(b,"v[n++] = srcs[i];")&&!strstr(b,"rb_whole_src[");
- free(b);wd_path(p,wd_root,"build/chain-facts.tsv");b=wd_read(p,&n);int equal=1;
+ char p[4096];size_t n;wd_path(p,wd_root,"build/chain-facts.tsv");char *b=wd_read(p,&n);int equal=1;
  for(char *line=b;line&&*line;){char *nl=strchr(line,'\n');if(nl)*nl=0;
   if(!strncmp(line,"root\t",5)){char *key=line+5,*source=strchr(key,'\t');
    if(!source||strchr(source+1,'\t')||wd_count==128)wd_die("root fact row");*source++=0;
@@ -45,23 +90,24 @@ static void wd_static(void){
   }line=nl?nl+1:0;
  }
  free(b);equal=equal&&wd_count>0&&wd_count==cf_root_count();
- wd_ck(equal&&wiring,"actual whole-o ordered roots match independent facts and generated API");
- if(!equal||!wiring)wd_die("source count/order or consumer wiring");
+ wd_ck(equal,"actual whole-o ordered roots match independent facts and generated API");
+ if(!equal)wd_die("source count/order");
+ wd_deadline();
 }
 static void wd_case(const char *mode,const char *budget,int timeout){char out[4096],image[4096],p[4096],rev[100],snap[4096];wd_path(out,wd_fix,mode);if(mkdir(out,0700))wd_die("case directory");char *v[]={"env",0,0,0,wd_tool,"slice",wd_fix,wd_pkg,out,"--target","osx/arm64",0};char ev1[4200],ev2[100],ev3[100];(cx_fmt(ev1, sizeof ev1, "UNISACC_CTOR=%s", wd_ctor) ? exit(2) : (void)0);(cx_fmt(ev2, sizeof ev2, "UNISACC_RB_WHOLE_MS=%s", budget) ? exit(2) : (void)0);(cx_fmt(ev3, sizeof ev3, "WHOLE_FAKE_MODE=%s", mode) ? exit(2) : (void)0);v[1]=ev1;v[2]=ev2;v[3]=ev3;long long before=sy_now_ms();np_result r=wd_run(v,wd_root,8);long long elapsed=sy_now_ms()-before;wd_path(image,out,"slice-osx-arm64");wd_ck(timeout?r.rc==1:r.rc==0,timeout?"short deadline actually rejects":"fast constructor succeeds");wd_ck(elapsed<8000,"case remains below8seconds");wd_ck(timeout?(r.out&&strstr(r.out,"timeout after 1500ms")&&r.err&&strstr(r.err,"whole-o timeout")):(r.out&&strstr(r.out,"target=osx/arm64")&&strstr(r.out,"rc=0")),"dispatcher emits expected terminal status");np_free(&r);
 char *gv[]={"git","rev-parse","HEAD",0};r=wd_run(gv,wd_fix,3);if(r.rc||r.outn<40)wd_die("fixture rev");mm_copy(rev, 40, r.out, 40);rev[40]=0;np_free(&r);char snap_leaf[80];if(cx_fmt(snap_leaf,sizeof snap_leaf,"release-snap-%.10s",rev))wd_die("snapshot leaf");wd_outpath(snap,wd_fix,snap_leaf);
 (cx_fmt(p, sizeof p, "%s.argv", image) ? exit(2) : (void)0);size_t n;char *args=wd_read(p,&n),*q=args;char expected[8192];(cx_fmt(expected, sizeof expected, "CWD\t%s\nCONTAINER\t%s\nARGC\t%d\nARG\t-b\nARG\tosx/arm64\nARG\t-o\nARG\t%s\n", snap, wd_pkg, wd_count+5, image) ? exit(2) : (void)0);int equal=!strncmp(q,expected,strlen(expected));q+=equal?strlen(expected):0;for(int i=0;i<wd_count&&equal;i++){(cx_fmt(expected, sizeof expected, "ARG\t%s/%s\n", snap, wd_sources[i]) ? exit(2) : (void)0);size_t k=strlen(expected);if(strncmp(q,expected,k))equal=0;else q+=k;}wd_ck(equal&&!*q,"complete ordered root argv physical cwd and exact container");free(args);
 if(timeout){wd_ck(wd_missing(image),"timeout removes partial image");wd_path(p,out,"receipt.txt");wd_ck(wd_missing(p),"timeout publishes no success receipt");(cx_fmt(p, sizeof p, "%s.pids", image) ? exit(2) : (void)0);char *b=wd_read(p,&n);int pid=0,child=0,group=0;if(sscanf(b,"%d %d %d",&pid,&child,&group)!=3)wd_die("pid evidence");free(b);int gone=0;for(int i=0;i<30;i++){if(!wd_alive(pid)&&!wd_alive(child)&&!wd_group_alive(group)){gone=1;break;}usleep(20000);}wd_ck(gone,"constructor child and process group gone after reap");}
-else{char *img=wd_read(image,&n),h[65];cx_sha256_hex(img,n,h);wd_ck(n==strlen("whole-fixture-image\n")&&!memcmp(img,"whole-fixture-image\n",n),"success image is actual constructor output");free(img);wd_path(p,out,"receipt.txt");char *rec=wd_read(p,&n);(cx_fmt(expected, sizeof expected, "sha\t%s\n", h) ? exit(2) : (void)0);wd_ck(strstr(rec,"route\twhole-o\n")&&strstr(rec,"target\tosx/arm64\n")&&strstr(rec,"bytes\t20\n")&&strstr(rec,expected)&&strstr(rec,"rc\t0\n"),"success receipt binds actual target SHA and bytes");
+else{char *img=wd_read(image,&n),h[65];cx_sha256_hex(img,n,h);wd_ck(n==strlen("whole-fixture-image\n")&&!memcmp(img,"whole-fixture-image\n",n),"success image is actual constructor output");free(img);wd_path(p,out,"receipt.txt");char *rec=wd_read(p,&n);struct wd_receipt facts;if(!wd_receipt_decode(&facts,rec,n))wd_die("child receipt record structure");wd_ck(wd_receipt_is(&facts,"route","whole-o")&&wd_receipt_is(&facts,"target","osx/arm64")&&wd_receipt_is(&facts,"bytes","20")&&wd_receipt_is(&facts,"sha",h)&&wd_receipt_is(&facts,"rc","0"),"success receipt binds actual target SHA and bytes");
 /* tool lines.  tool_sha is the TRACKED copy in the rev's snapshot (UNREADABLE when the rev tracks none); tool_run_sha is
    the source this release-build binary was compiled from (the checkout's, by absolute path); tool_src compares them. */
-{char tp[4096],want[128],rh[65];size_t rn;wd_path(tp,wd_root,"tools/release-build.cx");char *rb=wd_read(tp,&rn);cx_sha256_hex(rb,rn,rh);(cx_fmt(want, sizeof want, "tool_run_sha\t%s\n", rh) ? exit(2) : (void)0);wd_ck(strstr(rec,want)!=0,"receipt tool_run_sha is sha256 of the source the running tool was compiled from");
-wd_path(tp,wd_fix,"tools/release-build.cx");if(wd_missing(tp)){wd_ck(strstr(rec,"tool_sha\tUNREADABLE\n")!=0,"receipt of a rev without tracked tool source records tool_sha UNREADABLE");wd_ck(strstr(rec,"tool_src\tUNCOMPARED\n")!=0&&!strstr(rec,"MISMATCH"),"unreadable snapshot tool source is UNCOMPARED not a mismatch");}
-else{size_t tn;char *tb=wd_read(tp,&tn),th[65];cx_sha256_hex(tb,tn,th);free(tb);(cx_fmt(want, sizeof want, "tool_sha\t%s\n", th) ? exit(2) : (void)0);wd_ck(strstr(rec,want)!=0&&!strstr(rec,"UNREADABLE"),"receipt tool_sha is sha256 of the snapshot's tracked tools/release-build.cx");
-if(strcmp(th,rh))wd_ck(strstr(rec,"tool_src\tTOOL_SRC_MISMATCH\n")!=0&&!strstr(rec,"tool_src\tMATCH"),"running tool differs from the snapshot's: receipt says TOOL_SRC_MISMATCH");else wd_ck(strstr(rec,"tool_src\tMATCH\n")!=0&&!strstr(rec,"MISMATCH"),"running tool equals the snapshot's: receipt says MATCH");}
+{char tp[4096],rh[65];size_t rn;wd_path(tp,wd_root,"tools/release-build.cx");char *rb=wd_read(tp,&rn);cx_sha256_hex(rb,rn,rh);wd_ck(wd_receipt_is(&facts,"tool_run_sha",rh),"receipt tool_run_sha is sha256 of the source the running tool was compiled from");
+wd_path(tp,wd_fix,"tools/release-build.cx");if(wd_missing(tp)){wd_ck(wd_receipt_is(&facts,"tool_sha","UNREADABLE"),"receipt of a rev without tracked tool source records tool_sha UNREADABLE");wd_ck(wd_receipt_is(&facts,"tool_src","UNCOMPARED"),"unreadable snapshot tool source is UNCOMPARED not a mismatch");}
+else{size_t tn;char *tb=wd_read(tp,&tn),th[65];cx_sha256_hex(tb,tn,th);free(tb);wd_ck(wd_receipt_is(&facts,"tool_sha",th),"receipt tool_sha is sha256 of the snapshot's tracked tools/release-build.cx");
+if(strcmp(th,rh))wd_ck(wd_receipt_is(&facts,"tool_src","TOOL_SRC_MISMATCH"),"running tool differs from the snapshot's: receipt says TOOL_SRC_MISMATCH");else wd_ck(wd_receipt_is(&facts,"tool_src","MATCH"),"running tool equals the snapshot's: receipt says MATCH");}
 free(rec);
 /* Three success cases walk the three states: no tracked tool source; a tracked one with other bytes; a tracked copy of
    the real source.  Each is committed in the fixture first, because only the rev's snapshot is read. */
 if(!strcmp(mode,"success")||!strcmp(mode,"success-toolsrc")){int first=!strcmp(mode,"success");wd_path(tp,wd_fix,"tools");if(first&&mkdir(tp,0700))wd_die("fixture tools mkdir");wd_path(tp,wd_fix,"tools/release-build.cx");if(first)wd_write(tp,"fixture release-build source\n");else if(cx_write(tp,rb,rn))wd_die("fixture tool copy");free(rb);char *add[]={"git","add","tools/release-build.cx",0};wd_ok(add,wd_fix,3);char *commit[]={"git","-c","user.name=fixture","-c","user.email=fixture@invalid","commit","-qm","tool source",0};wd_ok(commit,wd_fix,3);wd_case(first?"success-toolsrc":"success-toolmatch","5000",0);}else free(rb);}}}
-int main(void){if(!realpath(".",wd_root))wd_die("root");char temp[4096];wd_outpath(temp,wd_root,"whole-o-deadline-XXXXXX");if(!mkdtemp(temp)||!realpath(temp,wd_work))wd_die("physical temp");wd_static();wd_path(wd_tool,wd_work,"release-build");char src[4096];wd_path(src,wd_root,"tools/release-build.cx");wd_compile(src,wd_tool,35);wd_path(wd_ctor,wd_work,"fake-ctor");wd_path(src,wd_work,"fake.cx");wd_fakewrite(src,
+int main(void){wd_receipt_controls();if(!realpath(".",wd_root))wd_die("root");char temp[4096];wd_outpath(temp,wd_root,"whole-o-deadline-XXXXXX");if(!mkdtemp(temp)||!realpath(temp,wd_work))wd_die("physical temp");wd_static();wd_path(wd_tool,wd_work,"release-build");char src[4096];wd_path(src,wd_root,"tools/release-build.cx");wd_compile(src,wd_tool,35);wd_path(wd_ctor,wd_work,"fake-ctor");wd_path(src,wd_work,"fake.cx");wd_fakewrite(src,
 "int main(int argc,char **argv){if(argc!=WD_ARGC)return 3;char p[8192],cwd[4096];if(!getcwd(cwd,sizeof cwd))return 4;snprintf(p,sizeof p,\"%s.argv\",argv[4]);FILE *f=fopen(p,\"w\");if(!f)return 5;fprintf(f,\"CWD\\t%s\\nCONTAINER\\t%s\\nARGC\\t%d\\n\",cwd,getenv(\"UNISA_CONTAINER\"),argc);for(int i=1;i<argc;i++)fprintf(f,\"ARG\\t%s\\n\",argv[i]);fclose(f);f=fopen(argv[4],\"w\");if(!f)return 6;fputs(\"whole-fixture-image\\n\",f);fclose(f);if(!strcmp(getenv(\"WHOLE_FAKE_MODE\"),\"timeout\")){int child=fork();if(child<0)return 7;if(!child){for(int i=0;i<200;i++)usleep(100000);return 0;}snprintf(p,sizeof p,\"%s.pids\",argv[4]);f=fopen(p,\"w\");if(!f)return 8;fprintf(f,\"%d %d %d\\n\",getpid(),child,getpgrp());fclose(f);for(int i=0;i<200;i++)usleep(100000);}return 0;}\n");wd_compile(src,wd_ctor,12);wd_path(wd_fix,wd_work,"fixture");if(mkdir(wd_fix,0700))wd_die("fixture mkdir");char *init[]={"git","init","-q",0};wd_ok(init,wd_fix,3);wd_path(src,wd_fix,"tracked.txt");wd_write(src,"fixture\n");char *add[]={"git","add","tracked.txt",0};wd_ok(add,wd_fix,3);char *commit[]={"git","-c","user.name=fixture","-c","user.email=fixture@invalid","commit","-qm","fixture",0};wd_ok(commit,wd_fix,3);if(pp_copy_product(wd_root,wd_fix))wd_die("product copy");char from[4096];wd_path(from,wd_root,"unisacc.com.build.json");size_t n;char *b=wd_read(from,&n);wd_path(src,wd_fix,"unisacc.com.build.json");if(cx_write(src,b,n))wd_die("record copy");free(b);wd_path(src,wd_fix,"out");if(mkdir(src,0700))wd_die("out mkdir");wd_path(wd_pkg,wd_work,"input.pkg");wd_write(wd_pkg,"fixture-container\n");wd_case("timeout","1500",1);wd_case("success","5000",0);printf("WHOLE_O_DEADLINE_CHECK\tchecks=%d\tfailed=%d\tretained=%s\n",wd_checks,wd_bad,wd_work);return wd_bad?1:0;}

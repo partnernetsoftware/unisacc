@@ -1,0 +1,281 @@
+/* tools/check-release-sweep.cx -- 0.0.58 T8 release-sweep 正控与负控检查。
+ *
+ *   sh ./unisacc.com tools/check-release-sweep.cx [-- ROOT OUT]
+ *
+ * 覆盖：
+ * (1) native 预编译 tools/release-sweep.cx（tq_native，准备步不计 PASS）；
+ * (2) dry-run 模式：不移动源目录、不写入 archive，产出 PLANNED_MOVE / PLANNED_ARCHIVE / KEPT 及前后字节统计；
+ * (3) apply 模式：move 仅通过 rename 移入 trash、archive 复制 <=1MiB 证据小表并校验大小、keep 原位保留；
+ *     dry-run 与 apply 的源路径和 before_bytes/after_bytes 一致；
+ * (4) 进程占用跳过（SKIPPED_BUSY）：子进程占用待移动目录时跳过移动并保留原目录，排除自身进程及祖先链；
+ * (5) 负控：试图移动最近一版冻结克隆（r057）或链输出（chain057）或 release-snap-* 必拒（rc=2，原目录完好）；
+ * (6) 负控：试图移动被 --refs（账本/decide）引用的路径必拒（rc=2，原目录完好）；
+ * (7) 负控：archive 超过 1 MiB 或含 .. 路径逃逸必拒（rc=2）；
+ * (8) 负控：manifest 缺参或冲突模式必拒（rc=2）。
+ */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4096], bin[4400], bound[4400];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\trelease-sweep.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int has(const char *s, size_t n, const char *w) {
+    size_t wl = w ? (size_t)tx_len(w, 512) : 0, i;
+    if (!s || !w || !wl || n < wl) return 0;
+    for (i = 0; i + wl <= n; i++) if (!memcmp(s + i, w, wl)) return 1;
+    return 0;
+}
+
+static int run_sweep(char *const argv[], char **out, size_t *outn) {
+    char *v[32];
+    int k = 0, i;
+    v[k++] = bound;
+    v[k++] = "15";
+    v[k++] = bin;
+    for (i = 0; argv[i] && k < 30; i++) v[k++] = argv[i];
+    v[k] = 0;
+    return cx_runv_timeout(v, 18, out, outn);
+}
+
+int main(int argc, char **argv) {
+    char tool_src[4400], why[256];
+    char d_old[4400], f_old[4400], d_keep[4400], f_keep[4400], d_busy[4400], f_busy[4400];
+    char f_evid[4400], d_r057[4400], f_r057[4400], d_chain057[4400], f_chain057[4400];
+    char d_refd[4400], f_refd[4400], f_ledger[4400], f_big[4400];
+    char trash[4400], arch[4400], m_good[4400], out_dry[4400], out_app[4400];
+    char m_lat1[4400], m_lat2[4400], m_ref[4400], m_big[4400], m_esc[4400], out_neg[4400];
+    char *o = 0;
+    size_t n = 0;
+    int rc;
+
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[1][0] && argv[2][0]) {
+        if (sy_realpath(argv[1], root, sizeof root) < 0) return 2;
+        if (cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(argv[2], 0755);
+    } else if (argc == 2 && argv[1][0]) {
+        if (cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", argv[1], sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(argv[1], 0755);
+    } else {
+        char dot_trash[4400];
+        if (cx_fmt(dot_trash, sizeof dot_trash, "%s/.trash", root) ||
+            cx_fmt(work, sizeof work, "%s/release-sweep-%d-%ld", dot_trash, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot_trash, 0755);
+    }
+    if (sy_mkdir(work, 0700)) return 2;
+
+    if (cx_fmt(tool_src, sizeof tool_src, "%s/tools/release-sweep.cx", root) ||
+        cx_fmt(bin, sizeof bin, "%s/release-sweep.native", work) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+
+    if (tq_native(root, tool_src, bin, why, sizeof why) != 0) {
+        sy_printf("FAIL\trelease-sweep.build-native\t%s\n", why);
+        return 1;
+    }
+
+    if (cx_fmt(d_old, sizeof d_old, "%s/r056-old", work) ||
+        cx_fmt(f_old, sizeof f_old, "%s/data.bin", d_old) ||
+        cx_fmt(d_keep, sizeof d_keep, "%s/keep-dir", work) ||
+        cx_fmt(f_keep, sizeof f_keep, "%s/keep.txt", d_keep) ||
+        cx_fmt(d_busy, sizeof d_busy, "%s/busy-dir", work) ||
+        cx_fmt(f_busy, sizeof f_busy, "%s/busy.txt", d_busy) ||
+        cx_fmt(f_evid, sizeof f_evid, "%s/steps.tsv", work) ||
+        cx_fmt(d_r057, sizeof d_r057, "%s/r057", work) ||
+        cx_fmt(f_r057, sizeof f_r057, "%s/snap.txt", d_r057) ||
+        cx_fmt(d_chain057, sizeof d_chain057, "%s/chain057", work) ||
+        cx_fmt(f_chain057, sizeof f_chain057, "%s/ckp.tsv", d_chain057) ||
+        cx_fmt(d_refd, sizeof d_refd, "%s/s9-057-referenced", work) ||
+        cx_fmt(f_refd, sizeof f_refd, "%s/summary.tsv", d_refd) ||
+        cx_fmt(f_ledger, sizeof f_ledger, "%s/ledger-ref.tsv", work) ||
+        cx_fmt(f_big, sizeof f_big, "%s/oversize.bin", work) ||
+        cx_fmt(trash, sizeof trash, "%s/trash", work) ||
+        cx_fmt(arch, sizeof arch, "%s/evidence-archive", work) ||
+        cx_fmt(m_good, sizeof m_good, "%s/good.tsv", work) ||
+        cx_fmt(out_dry, sizeof out_dry, "%s/out-dry.tsv", work) ||
+        cx_fmt(out_app, sizeof out_app, "%s/out-apply.tsv", work) ||
+        cx_fmt(m_lat1, sizeof m_lat1, "%s/neg-r057.tsv", work) ||
+        cx_fmt(m_lat2, sizeof m_lat2, "%s/neg-chain057.tsv", work) ||
+        cx_fmt(m_ref, sizeof m_ref, "%s/neg-ref.tsv", work) ||
+        cx_fmt(m_big, sizeof m_big, "%s/neg-big.tsv", work) ||
+        cx_fmt(m_esc, sizeof m_esc, "%s/neg-esc.tsv", work) ||
+        cx_fmt(out_neg, sizeof out_neg, "%s/out-neg.tsv", work)) return 2;
+
+    if (sy_mkdir(d_old, 0700) || sy_mkdir(d_keep, 0700) || sy_mkdir(d_busy, 0700) ||
+        sy_mkdir(d_r057, 0700) || sy_mkdir(d_chain057, 0700) || sy_mkdir(d_refd, 0700)) return 2;
+
+    if (cx_write(f_old, "0123456789abcdef", 16) ||
+        cx_write(f_keep, "keep-12345", 10) ||
+        cx_write(f_busy, "busy-1234567", 12) ||
+        cx_write(f_evid, "step\tms\nsnap\t80\n", 16) ||
+        cx_write(f_r057, "r057", 4) ||
+        cx_write(f_chain057, "chain057", 8) ||
+        cx_write(f_refd, "PASS\t150\n", 9)) return 2;
+
+    {
+        char ref_text[4600];
+        if (cx_fmt(ref_text, sizeof ref_text, "2026-11-12\tS9-057\tEVIDENCE\t-\t%s/summary.tsv\tcc\n", d_refd) ||
+            cx_write(f_ledger, ref_text, strlen(ref_text))) return 2;
+    }
+
+    {
+        char body[16384];
+        if (cx_fmt(body, sizeof body,
+            "# release-sweep manifest\n"
+            "move\t%s\tr056-old\n"
+            "archive\t%s\t0.0.57/steps.tsv\n"
+            "keep\t%s\t-\n"
+            "move\t%s\tbusy-dir\n",
+            d_old, f_evid, d_keep, d_busy) ||
+            cx_write(m_good, body, strlen(body))) return 2;
+    }
+
+    /* Spawn a background holder with cwd inside d_busy so busy detection triggers */
+    {
+        int bpid;
+        {
+            char *sv[] = {bin, "--hold-busy", d_busy, 0};
+            bpid = tq_warm_start(root, 6, sv);
+        }
+        sy_sleep_ms(150);
+
+        /* (1) dry-run */
+        {
+            char *av[] = {"--manifest", m_good, "--trash", trash, "--out-manifest", out_dry,
+                          "--archive-dir", arch, "--latest", "0.0.57", "--refs", f_ledger, "--dry-run", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP\tmode=DRY_RUN\tmoved=1\tarchived=1\tkept=1\tskipped_busy=1\tbefore_bytes=54\tafter_bytes=38\n"),
+               "dry-run-summary-and-busy-skip");
+            free(o); o = 0;
+            ck(sy_exists(d_old) == 1 && sy_exists(trash) == 0 && sy_exists(out_dry) == 1,
+               "dry-run-leaves-filesystem-untouched");
+        }
+
+        /* (2) apply while busy process is still alive */
+        {
+            char moved_path[4400], arch_path[4400];
+            size_t dn = 0, an = 0;
+            char *db = 0, *ab = 0;
+            char *av[] = {"--manifest", m_good, "--trash", trash, "--out-manifest", out_app,
+                          "--archive-dir", arch, "--latest", "0.0.57", "--refs", f_ledger, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP\tmode=APPLY\tmoved=1\tarchived=1\tkept=1\tskipped_busy=1\tbefore_bytes=54\tafter_bytes=38\n"),
+               "apply-summary-matches-dry-run");
+            free(o); o = 0;
+            if (cx_fmt(moved_path, sizeof moved_path, "%s/r056-old/data.bin", trash) ||
+                cx_fmt(arch_path, sizeof arch_path, "%s/0.0.57/steps.tsv", arch)) return 2;
+            ck(sy_exists(d_old) == 0 && sy_exists(moved_path) == 1 &&
+               sy_exists(arch_path) == 1 && sy_exists(f_keep) == 1 && sy_exists(f_busy) == 1,
+               "apply-moves-to-trash-archives-and-skips-busy");
+            db = cx_read(out_dry, &dn);
+            ab = cx_read(out_app, &an);
+            ck(has(db, dn, "\tPLANNED_MOVE\t16\t0\n") && has(ab, an, "\tMOVED\t16\t0\n") &&
+               has(db, dn, "\tPLANNED_ARCHIVE\t16\t16\n") && has(ab, an, "\tARCHIVED\t16\t16\n") &&
+               has(ab, an, "\tSKIPPED_BUSY\t12\t12\n") && has(ab, an, "\tKEPT\t10\t10\n"),
+               "manifest-output-records-before-and-after-bytes");
+            free(db);
+            free(ab);
+        }
+        tq_warm_join(bpid);
+    }
+
+    /* (3) Negative control: refuse moving latest frozen clone r057 */
+    {
+        char body[4600];
+        if (cx_fmt(body, sizeof body, "move\t%s\tr057\n", d_r057) ||
+            cx_write(m_lat1, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--manifest", m_lat1, "--trash", trash, "--out-manifest", out_neg,
+                          "--latest", "0.0.57", "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 2 && sy_exists(f_r057) == 1, "refuse-move-latest-frozen-clone");
+            free(o); o = 0;
+        }
+    }
+
+    /* (4) Negative control: refuse moving latest chain output chain057 */
+    {
+        char body[4600];
+        if (cx_fmt(body, sizeof body, "move\t%s\tchain057\n", d_chain057) ||
+            cx_write(m_lat2, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--manifest", m_lat2, "--trash", trash, "--out-manifest", out_neg,
+                          "--latest", "0.0.57", "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 2 && sy_exists(f_chain057) == 1, "refuse-move-latest-chain-output");
+            free(o); o = 0;
+        }
+    }
+
+    /* (5) Negative control: refuse moving path referenced in --refs ledger */
+    {
+        char body[4600];
+        if (cx_fmt(body, sizeof body, "move\t%s\ts9-057-referenced\n", d_refd) ||
+            cx_write(m_ref, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--manifest", m_ref, "--trash", trash, "--out-manifest", out_neg,
+                          "--latest", "0.0.57", "--refs", f_ledger, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 2 && sy_exists(f_refd) == 1, "refuse-move-referenced-evidence-dir");
+            free(o); o = 0;
+        }
+    }
+
+    /* (6) Negative control: refuse archive > 1 MiB and path traversal .. */
+    {
+        size_t bsz = 1024 * 1024 + 16;
+        char *bigbuf = mm_alloc((long)bsz);
+        char body[4600];
+        if (!bigbuf) return 2;
+        memset(bigbuf, 'A', bsz);
+        if (cx_write(f_big, bigbuf, bsz)) { mm_free(bigbuf); return 2; }
+        mm_free(bigbuf);
+        if (cx_fmt(body, sizeof body, "archive\t%s\t0.0.57/oversize.bin\n", f_big) ||
+            cx_write(m_big, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--manifest", m_big, "--trash", trash, "--out-manifest", out_neg,
+                          "--archive-dir", arch, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 2, "refuse-oversize-archive-source");
+            free(o); o = 0;
+        }
+        if (cx_fmt(body, sizeof body, "archive\t%s\t../escape.tsv\n", f_evid) ||
+            cx_write(m_esc, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--manifest", m_esc, "--trash", trash, "--out-manifest", out_neg,
+                          "--archive-dir", arch, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 2, "refuse-archive-path-traversal");
+            free(o); o = 0;
+        }
+    }
+
+    /* (7) Negative control: conflicting --dry-run and --apply or missing args */
+    {
+        char *av1[] = {"--manifest", m_good, "--trash", trash, "--out-manifest", out_neg,
+                       "--dry-run", "--apply", 0};
+        char *av2[] = {"--dry-run", 0};
+        int rc1 = run_sweep(av1, &o, &n);
+        free(o); o = 0;
+        int rc2 = run_sweep(av2, &o, &n);
+        free(o); o = 0;
+        ck(rc1 == 2 && rc2 == 2, "refuse-conflicting-modes-and-missing-args");
+    }
+
+    if (argc < 3) cx_rmtree(work);
+
+    sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

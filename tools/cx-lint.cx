@@ -49,6 +49,20 @@
  *                 (release-build rb_die, 0.0.50).  An int-returning die ("return die(..)") is
  *                 not covered.  lint:allow R3-die REASON on the header line suppresses it.
  *
+ *   R4-source-anchor (cannot be allowed)
+ *     Source-path literals (.c/.h/.cx/.inc/.in), path construction, read returns,
+ *     assignments, aliases and same-file helper parameters/returns are propagated to
+ *     substring/mutation helpers. Unknown cx_read origins are refused after path
+ *     propagation settles; explicit TSV paths remain facts. Source text requires
+ *     token/AST analysis. Punctuation searches up to two bytes permit lexing.
+ *     This conservative same-file analysis is not arbitrary C: no preprocessor
+ *     expansion, general indirect calls, pointer/field aliases or cross-file summaries.
+ *     Function scopes separate locals; first-parameter read/path wrappers have
+ *     call-site summaries. Private paths require a child argv consumer or a write
+ *     from observed child output before raw reads are accepted. Source copies and
+ *     source extensions override that approximate producer contract; it is not a
+ *     proof of arbitrary child filesystem effects. Unknown reads remain refused.
+ *
  * Output:  LINT<TAB>rule<TAB>path:line<TAB>summary, then
  *          CX_LINT<TAB>files=N<TAB>findings=M<TAB>elapsed_ms=T
  * Exit 0 always; with --strict, 1 when any finding; 2 on IO errors.  A path that is ENOENT (a
@@ -420,6 +434,322 @@ static int testish_path(const char *path) {
     return tx_prefix(path + base, n - base, "check-", 6);
 }
 
+/* R4 reuses lex/is/report. Monotone name flow deliberately has no allow path.
+ * Bounded table exhaustion is itself a finding (never a silent analysis truncation). */
+#define MAXANCHOR 2048
+typedef struct { Tok name; long scope; int source; } Anchor;
+static Anchor anchor[MAXANCHOR]; static int nanchor;
+static long *anchor_scopes;
+static int *anchor_reads, *anchor_builders, *anchor_runners;
+typedef struct { const Tok *name; long first,last; int global,reads,builders,runners; } AnchorMeta;
+static AnchorMeta *anchor_meta_table; static long anchor_meta_cap;
+static long *anchor_ends,*anchor_next;
+static int anchor_slots[MAXANCHOR*2];
+static unsigned long anchor_hash(const Tok *t,long scope) {
+    unsigned long h=2166136261UL;long i;
+    for(i=0;i<t->n;i++)h=(h^(unsigned char)t->s[i])*16777619UL;
+    return h^((unsigned long)scope*2654435761UL);
+}
+static AnchorMeta *anchor_meta(const Tok *t) {
+    if(t->kind!=T_ID)return 0;
+    unsigned long s=anchor_hash(t,0)&(anchor_meta_cap-1);
+    while(anchor_meta_table[s].name&&!tx_same(t->s,t->n,anchor_meta_table[s].name->s,anchor_meta_table[s].name->n))s=(s+1)&(anchor_meta_cap-1);
+    if(!anchor_meta_table[s].name)anchor_meta_table[s].name=t;
+    return &anchor_meta_table[s];
+}
+static int anchor_lookup(const Tok *t,long scope,int create) {
+    unsigned long s=anchor_hash(t,scope)&(MAXANCHOR*2-1);int j;
+    while(anchor_slots[s]){j=anchor_slots[s]-1;if(anchor[j].scope==scope&&tx_same(t->s,t->n,anchor[j].name.s,anchor[j].name.n))return j;s=(s+1)&(MAXANCHOR*2-1);}
+    if(!create||nanchor==MAXANCHOR)return -1;
+    j=nanchor++;anchor[j].name=*t;anchor[j].scope=scope;anchor[j].source=0;anchor_slots[s]=j+1;return j;
+}
+static void anchor_release(void) {
+    mm_free(anchor_scopes);mm_free(anchor_reads);mm_free(anchor_builders);mm_free(anchor_runners);
+    mm_free(anchor_ends);mm_free(anchor_next);mm_free(anchor_meta_table);
+}
+static long anchor_close(long open);
+static void anchor_structure(void) {
+    long k, q, fn = 0,top=0; int depth = 0;long *stack=mm_alloc((ntok+1)*sizeof *stack);
+    anchor_ends=mm_alloc((ntok+1)*sizeof *anchor_ends);anchor_next=mm_alloc((ntok+1)*sizeof *anchor_next);
+    anchor_meta_cap=16;while(anchor_meta_cap<(ntok+1)*2)anchor_meta_cap*=2;
+    anchor_meta_table=mm_alloc(anchor_meta_cap*sizeof *anchor_meta_table);
+    if(!stack||!anchor_ends||!anchor_next||!anchor_meta_table){fprintf(stderr,"cx-lint: source-flow index memory\n");exit(2);}
+    memset(anchor_meta_table,0,anchor_meta_cap*sizeof *anchor_meta_table);memset(anchor_slots,0,sizeof anchor_slots);
+    for(k=0;k<ntok;k++){anchor_ends[k]=ntok;anchor_next[k]=0;}
+    for(k=0;k<ntok;k++){if(is(&toks[k],T_P,"("))stack[top++]=k;else if(is(&toks[k],T_P,")")&&top)anchor_ends[stack[--top]]=k;}
+    mm_free(stack);
+    anchor_scopes = mm_alloc((ntok+1)*sizeof *anchor_scopes);
+    anchor_reads = mm_alloc((ntok+1)*sizeof *anchor_reads);
+    anchor_builders = mm_alloc((ntok+1)*sizeof *anchor_builders);
+    anchor_runners = mm_alloc((ntok+1)*sizeof *anchor_runners);
+    if(!anchor_scopes||!anchor_reads||!anchor_builders||!anchor_runners){fprintf(stderr,"cx-lint: source-flow memory\n");exit(2);}
+    for(k=0;k<ntok;k++){anchor_scopes[k]=0;anchor_reads[k]=0;anchor_builders[k]=0;anchor_runners[k]=0;}
+    for(k=0;k<ntok;k++) {
+        if(!depth && toks[k].kind==T_ID && k+1<ntok && is(&toks[k+1],T_P,"(")) {
+            long e=anchor_close(k+1);
+            if(e+1<ntok&&is(&toks[e+1],T_P,"{")) {
+                fn=k+1; for(q=k+2;q<=e;q++)anchor_scopes[q]=fn;
+            }
+        }
+        if(is(&toks[k],T_P,"{"))depth++;
+        if(depth)anchor_scopes[k]=fn;
+        if(is(&toks[k],T_P,"}")&&--depth==0)fn=0;
+    }
+    /* Narrow structural summaries: returned cx_read(first formal), including a
+     * local temporary; and a first-output path builder calling cx_fmt/snprintf. */
+    for(k=0;k<ntok;k++)if(anchor_scopes[k]) {
+        long f=anchor_scopes[k]-1, p=f+2;
+        while(p<ntok&&!is(&toks[p],T_P,",")&&!is(&toks[p],T_P,")"))p++;
+        if(p<=f+2)continue;
+        Tok *formal=&toks[p-1];
+        if(k+2<ntok&&is(&toks[k+1],T_P,"(")&&toks[k+2].kind==T_ID&&
+           tx_same(formal->s,formal->n,toks[k+2].s,toks[k+2].n)) {
+            if(is(&toks[k],T_ID,"cx_read")) {
+                long r, result=k>=2&&is(&toks[k-1],T_P,"=")?k-2:-1;
+                for(r=k;r<ntok&&anchor_scopes[r]==f+1;r++)if(is(&toks[r],T_ID,"return")&&r+1<ntok&&
+                    (r+1==k||(result>=0&&tx_same(toks[result].s,toks[result].n,toks[r+1].s,toks[r+1].n))))anchor_reads[f]=1;
+                if(k>0&&is(&toks[k-1],T_ID,"return"))anchor_reads[f]=1;
+            }
+            if(is(&toks[k],T_ID,"fopen")&&k>=2&&is(&toks[k-1],T_P,"=")) {
+                Tok *stream=&toks[k-2]; long r;
+                for(r=k+1;r+2<ntok&&anchor_scopes[r]==f+1;r++)if(is(&toks[r],T_ID,"fread")&&is(&toks[r+1],T_P,"(")) {
+                    long e=anchor_close(r+1), a=r+2, j; int uses=0;
+                    for(j=a;j<e;j++)if(toks[j].kind==T_ID&&tx_same(stream->s,stream->n,toks[j].s,toks[j].n))uses=1;
+                    if(uses)for(j=e+1;j+1<ntok&&anchor_scopes[j]==f+1;j++)if(is(&toks[j],T_ID,"return")&&tx_same(toks[a].s,toks[a].n,toks[j+1].s,toks[j+1].n))anchor_reads[f]=1;
+                }
+            }
+            if(is(&toks[k],T_ID,"cx_fmt")||is(&toks[k],T_ID,"snprintf"))anchor_builders[f]=1;
+            if(is(&toks[k],T_ID,"np_run")||is(&toks[k],T_ID,"cx_runv_timeout"))anchor_runners[f]|=1;
+            if(is(&toks[k],T_ID,"np_run")) {
+                long e=anchor_close(k+1), j;
+                for(j=k+2;j+1<e;j++)if(is(&toks[j],T_P,"&")&&toks[j+1].kind==T_ID) {
+                    long r; for(r=e+1;r+1<ntok&&anchor_scopes[r]==f+1;r++)if(is(&toks[r],T_ID,"return")&&tx_same(toks[j+1].s,toks[j+1].n,toks[r+1].s,toks[r+1].n))anchor_runners[f]|=2;
+                }
+            }
+        }
+    }
+    /* Preserve token order and all matching definitions; cache facts, never findings. */
+    for(k=0;k<ntok;k++)if(toks[k].kind==T_ID){
+        AnchorMeta *m=anchor_meta(&toks[k]);
+        if(!anchor_scopes[k]&&!(k+1<ntok&&is(&toks[k+1],T_P,"(")))m->global=1;
+        m->reads|=anchor_reads[k];m->builders|=anchor_builders[k];m->runners|=anchor_runners[k];
+        if(k+1<ntok&&is(&toks[k+1],T_P,"(")){
+            long e=anchor_close(k+1);if(e+1<ntok&&is(&toks[e+1],T_P,"{")){
+                if(m->last)anchor_next[m->last-1]=k+1;else m->first=k+1;m->last=k+1;
+            }
+        }
+    }
+}
+static int anchor_name(const Tok *t) {
+    if(t->kind!=T_ID)return -1;
+    long at=t-toks,scope=at>=0&&at<ntok?anchor_scopes[at]:0;int j;
+    if(at>=0&&at+1<ntok&&is(&toks[at+1],T_P,"(")){
+        j=anchor_lookup(t,scope,0);if(j>=0&&(anchor[j].source&8))return j;scope=0;
+    }
+    AnchorMeta *m=anchor_meta(t);if(scope&&m->global)scope=0;
+    return anchor_lookup(t,scope,1);
+}
+static int anchor_path(const Tok *t) {
+    return t->kind == T_STR && tx_chr(t->s, t->n, '\\') < 0 &&
+        (ends(t, ".c") || ends(t, ".h") || ends(t, ".cx") || ends(t, ".inc") || ends(t, ".in"));
+}
+static long anchor_close(long open);
+static int anchor_unknown;
+static int anchor_data_branch(long call,long a,long ae) {
+    long el,q;
+    /* Exact supported refinement: ext=strrchr(PATH,'.'); flag=ext &&
+     * (!strcmp(ext,".cx") || ... .c/.h/.S); if(flag){...}else{read(PATH)}.
+     * A changed predicate remains unknown, rather than becoming an exemption. */
+    for(el=call-1;el>=0&&anchor_scopes[el]==anchor_scopes[call];el--)if(is(&toks[el],T_ID,"else")&&el+1<call&&is(&toks[el+1],T_P,"{")) {
+        long end=el+2,start=el-1,cond,flag,assign,ext,r,pathend;int d=1,mask=0,ok=1;
+        for(;end<ntok&&d;end++){if(is(&toks[end],T_P,"{"))d++;if(is(&toks[end],T_P,"}"))d--;}
+        if(call>=end||start<0||!is(&toks[start],T_P,"}"))continue;
+        d=1;for(start--;start>=0&&d;start--){if(is(&toks[start],T_P,"}"))d++;if(is(&toks[start],T_P,"{"))d--;}
+        cond=start-3;
+        if(cond<0||!is(&toks[cond],T_ID,"if")||!is(&toks[cond+1],T_P,"(")||!is(&toks[cond+3],T_P,")"))continue;
+        flag=cond+2;
+        for(assign=cond-1;assign>0;assign--)if(is(&toks[assign],T_P,"=")&&tx_same(toks[assign-1].s,toks[assign-1].n,toks[flag].s,toks[flag].n))break;
+        ext=assign+1;
+        if(assign<=0||ext+4>=cond||toks[ext].kind!=T_ID||!is(&toks[ext+1],T_P,"&")||!is(&toks[ext+2],T_P,"&")||!is(&toks[ext+3],T_P,"("))continue;
+        r=ext+4;
+        for(;;){
+            if(r+6>=cond||!is(&toks[r],T_P,"!")||!is(&toks[r+1],T_ID,"strcmp")||!is(&toks[r+2],T_P,"(")||!tx_same(toks[r+3].s,toks[r+3].n,toks[ext].s,toks[ext].n)||!is(&toks[r+4],T_P,",")||!is(&toks[r+6],T_P,")")){ok=0;break;}
+            if(is(&toks[r+5],T_STR,".cx"))mask|=1;else if(is(&toks[r+5],T_STR,".c"))mask|=2;else if(is(&toks[r+5],T_STR,".h"))mask|=4;else if(is(&toks[r+5],T_STR,".S"))mask|=8;else{ok=0;break;}
+            r+=7;if(is(&toks[r],T_P,")"))break;
+            if(!is(&toks[r],T_P,"|")||!is(&toks[r+1],T_P,"|")){ok=0;break;}r+=2;
+        }
+        if(!ok||mask!=15||!is(&toks[r+1],T_P,";"))continue;
+        for(q=assign-1;q>1;q--)if(is(&toks[q],T_P,"=")&&tx_same(toks[q-1].s,toks[q-1].n,toks[ext].s,toks[ext].n))break;
+        if(q<=1||!is(&toks[q+1],T_ID,"strrchr")||!is(&toks[q+2],T_P,"("))continue;
+        pathend=q+3;while(pathend<assign&&!is(&toks[pathend],T_P,","))pathend++;
+        if(pathend-(q+3)!=ae-a||!is(&toks[pathend+1],T_CHR,"."))continue;
+        for(r=0;r<ae-a;r++)if(toks[a+r].kind!=toks[q+3+r].kind||!tx_same(toks[a+r].s,toks[a+r].n,toks[q+3+r].s,toks[q+3+r].n))ok=0;
+        if(ok)return 1;
+    }
+    return 0;
+}
+/* Bits: source path, source/unknown bytes, declared facts path. */
+static int anchor_value(long b,long e);
+static int anchor_read_path(long call,long a,long ae) {
+    long k,h;
+    if(ae!=a+1||toks[a].kind!=T_ID)return anchor_value(a,ae);
+    for(k=call-1;k>=0&&anchor_scopes[k]==anchor_scopes[call];k--) {
+        if(is(&toks[k],T_P,"}"))break;
+        if(toks[k].kind!=T_ID||k+2>=call||!is(&toks[k+1],T_P,"("))continue;
+        long end=anchor_close(k+1), first=k+2, next;
+        if(end>=call||toks[first].kind!=T_ID||!tx_same(toks[first].s,toks[first].n,toks[a].s,toks[a].n))continue;
+        next=first+1;if(!is(&toks[next],T_P,","))continue;
+        if(is(&toks[k],T_ID,"cx_write")){int v=anchor_value(next+1,end);if(v&2)return 257;}
+        int builder=is(&toks[k],T_ID,"cx_fmt")||is(&toks[k],T_ID,"snprintf");
+        AnchorMeta *m=anchor_meta(&toks[k]);if(m&&m->builders)builder=1;
+        if(builder)return anchor_value(next+1,end);
+    }
+    return anchor_value(a,ae);
+}
+static int anchor_value(long b, long e) {
+    long k; int value = 0;
+    for (k = b; k < e; k++) {
+        if(k>b&&(is(&toks[k-1],T_P,".")||(k>b+1&&is(&toks[k-1],T_P,">")&&is(&toks[k-2],T_P,"-"))))continue;
+        int j = anchor_name(&toks[k]), v = anchor_path(&toks[k]) ? 1 :
+            toks[k].kind == T_STR && ends(&toks[k],".tsv") ? 4 : j >= 0 ? anchor[j].source : 0;
+        if (k + 1 < e && is(&toks[k+1],T_P,"(")) {
+            long end = anchor_close(k+1); int reader=is(&toks[k],T_ID,"cx_read"), result=is(&toks[k],T_ID,"cx0_plan");
+            AnchorMeta *m=anchor_meta(&toks[k]);if(m){if(m->reads)reader=1;if(m->runners&2)result=1;}
+            if(reader && end<=e) {
+                long ae=k+2; int d=0; while(ae<end){if(is(&toks[ae],T_P,"("))d++;if(is(&toks[ae],T_P,")"))d--;if(!d&&is(&toks[ae],T_P,","))break;ae++;}
+                int origin=anchor_read_path(k,k+2,ae);
+                v=(origin&256)?2:anchor_data_branch(k,k+2,ae)?128:(origin&1)?2:(origin&32)?32:(origin&4)?128:anchor_unknown?2:0;
+                k=end;
+            } else if(result&&end<=e){v=32;k=end;
+            } else if((is(&toks[k],T_ID,"ca_token_text")||is(&toks[k],T_ID,"ca_tokens"))&&end<=e){v=64;k=end;
+            } else if(is(&toks[k],T_ID,"sy_tmpdir"))v=16;
+        }
+        value |= v;
+    }
+    return value;
+}
+static int anchor_mark(long k, int value) {
+    int j = anchor_name(&toks[k]);
+    if (j < 0 || (anchor[j].source | value) == anchor[j].source) return 0;
+    anchor[j].source |= value; return 1;
+}
+static long anchor_close(long open) {
+    return open>=0&&open<ntok?anchor_ends[open]:ntok;
+}
+static long anchor_arg_end(long b, long e) {
+    long k; int d = 0;
+    for (k = b; k < e; k++) {
+        if (is(&toks[k], T_P, "(") || is(&toks[k], T_P, "[")) d++;
+        else if (is(&toks[k], T_P, ")") || is(&toks[k], T_P, "]")) d--;
+        else if (!d && is(&toks[k], T_P, ",")) return k;
+    }
+    return e;
+}
+static int anchor_builtin(const Tok *t) {
+    return is(t,T_ID,"strstr") || is(t,T_ID,"strcasestr") || is(t,T_ID,"memmem") ||
+        is(t,T_ID,"tx_find") || is(t,T_ID,"tx_contains") || is(t,T_ID,"tx_count") ||
+        is(t,T_ID,"np_count") || is(t,T_ID,"swap_all") || has(t,"replace") || has(t,"mutate");
+}
+static int anchor_sink(const Tok *t) {
+    int j=anchor_name(t);
+    return anchor_builtin(t)||(j>=0&&(anchor[j].source&8));
+}
+static int anchor_input(long call,long a,long ae) {
+    long k,q;
+    if(ae!=a+1||toks[a].kind!=T_ID)return anchor_value(a,ae);
+    for(k=call-1;k>0&&anchor_scopes[k]==anchor_scopes[call];k--) {
+        if(is(&toks[k],T_P,"}"))break; /* A sibling/control join keeps merged origins. */
+        if(!is(&toks[k],T_P,"=")||is(&toks[k+1],T_P,"=")||is(&toks[k-1],T_P,"="))continue;
+        if(toks[k-1].kind!=T_ID||!tx_same(toks[k-1].s,toks[k-1].n,toks[a].s,toks[a].n))continue;
+        for(q=k+1;q<call&&!is(&toks[q],T_P,";");q++);
+        return anchor_value(k+1,anchor_arg_end(k+1,q));
+    }
+    return anchor_value(a,ae);
+}
+static void source_anchors(void) {
+    long k, q; int changed = 1, rounds = 0;
+    for(k=0;k<ntok;k++)if(toks[k].kind==T_ID&&anchor_builtin(&toks[k]))break;
+    if(k==ntok||!rule_selected("R4-source-anchor"))return;
+    nanchor = 0; anchor_unknown = 0; anchor_structure();
+    for (k = 0; k < ntok; k++) if (toks[k].kind == T_ID && anchor_name(&toks[k]) < 0) {
+        report("R4-source-anchor", toks[k].line, "source-flow name capacity exceeded at %.*s", &toks[k]);anchor_release();return;
+    }
+    while (changed && rounds++ <= nanchor * 2 + 2) {
+        long fn = -1; int depth = 0; changed = 0;
+        for (k = 0; k < ntok; k++) {
+            if (is(&toks[k],T_P,"{")) depth++;
+            if (is(&toks[k],T_P,"}")) { if (--depth == 0) fn = -1; }
+            if(k>0&&is(&toks[k],T_P,"=")&&is(&toks[k-1],T_P,"]")) {
+                long left=k-2, end=k+1, r;
+                while(left>0&&!is(&toks[left],T_P,"["))left--;
+                while(end<ntok&&!is(&toks[end],T_P,";"))end++;
+                if(left>0&&toks[left-1].kind==T_ID) {
+                    changed|=anchor_mark(left-1,anchor_value(k+1,end));
+                    if(anchor_value(left-1,left)&32)for(r=k+1;r<end;r++)if(anchor_value(r,r+1)&16)changed|=anchor_mark(r,32);
+                }
+            }
+            if (is(&toks[k],T_ID,"return") && fn >= 0) {
+                for (q = k + 1; q < ntok && !is(&toks[q],T_P,";"); q++) ;
+                if(!anchor_reads[fn])changed |= anchor_mark(fn,anchor_value(k + 1,q));
+            }
+            if (k > 0 && k + 1 < ntok && is(&toks[k],T_P,"=") && !is(&toks[k+1],T_P,"=")) {
+                for (q = k + 1; q < ntok && !is(&toks[q],T_P,";"); q++) ;
+                q = anchor_arg_end(k+1,q);
+                changed |= anchor_mark(k - 1,anchor_value(k + 1,q));
+                if (q == k+2 && anchor_sink(&toks[k+1])) changed |= anchor_mark(k-1,8);
+            }
+            if (toks[k].kind == T_ID && k + 1 < ntok && is(&toks[k+1],T_P,"(")) {
+                long end = anchor_close(k+1), a = k+2, h;
+                if (end >= ntok) continue;
+                if (end + 1 < ntok && is(&toks[end+1],T_P,"{")) { if (!depth) fn = k; continue; }
+                if (anchor_value(a,end) && (is(&toks[k],T_ID,"cx_fmt") || is(&toks[k],T_ID,"snprintf") ||
+                    is(&toks[k],T_ID,"path") || is(&toks[k],T_ID,"join"))) changed |= anchor_mark(a,anchor_value(a,end));
+                if(is(&toks[k],T_ID,"mkdtemp"))changed |= anchor_mark(a,16);
+                if(is(&toks[k],T_ID,"mkdir")&&k>=2&&is(&toks[k-1],T_P,"(")&&is(&toks[k-2],T_ID,"if")&&end+2<ntok&&is(&toks[end+1],T_P,")")&&(ends(&toks[end+2],"die")||is(&toks[end+2],T_ID,"exit")))changed|=anchor_mark(a,16);
+                if(is(&toks[k],T_ID,"realpath")) {long ae=anchor_arg_end(a,end);if(ae+1<end)changed |= anchor_mark(ae+1,anchor_value(a,ae));}
+                if(is(&toks[k],T_ID,"np_run")||is(&toks[k],T_ID,"cx_runv_timeout"))changed |= anchor_mark(a,32);
+                if(is(&toks[k],T_ID,"cx_runv_timeout")) {long ae=anchor_arg_end(a,end);ae=anchor_arg_end(ae+1,end);if(ae+1<end){long out=ae+1;while(out<end&&toks[out].kind!=T_ID)out++;if(out<end)changed|=anchor_mark(out,32);}}
+                if(is(&toks[k],T_ID,"cx_write")) {long ae=anchor_arg_end(a,end);int content=anchor_value(ae+1,end);if(content&2)changed|=anchor_mark(a,257);else if(content&32)changed|=anchor_mark(a,32);}
+                /* Same-file direct calls: actual argument origin -> formal name. */
+                AnchorMeta *callee=anchor_meta(&toks[k]);
+                for(h=callee?callee->first-1:-1;h>=0;h=anchor_next[h]-1){
+                    long he=anchor_close(h+1),p=h+2,ab=a;
+                    if(anchor_builders[h])changed |= anchor_mark(a,anchor_value(a,end));
+                    if(anchor_runners[h])changed |= anchor_mark(a,32);
+                    if(anchor_reads[h])continue;
+                    while (p < he && ab < end) {
+                        long pe = anchor_arg_end(p,he), be = anchor_arg_end(ab,end), name = pe-1;
+                        while (name > p && toks[name].kind != T_ID) name--;
+                        changed |= anchor_mark(name,anchor_value(ab,be));
+                        {long q,actual=ab;int stars=0;for(q=p;q<pe;q++)if(is(&toks[q],T_P,"*"))stars++;
+                         while(actual<be&&toks[actual].kind!=T_ID)actual++;
+                         if(stars>=2&&actual<be)changed|=anchor_mark(actual,anchor_value(name,name+1));}
+                        p = pe+1; ab = be+1;
+                    }
+                }
+            }
+        }
+        if (!changed && !anchor_unknown) { anchor_unknown = 1; changed = 1; }
+    }
+    for (k = 0; k + 1 < ntok; k++) if (anchor_sink(&toks[k]) && is(&toks[k+1],T_P,"(")) {
+        long e = anchor_close(k+1), ae = anchor_arg_end(k+2,e), p; int delimiter = 0;
+        int origin=anchor_input(k,k+2,ae), unknown=0;
+        if(!origin&&ae==k+3&&toks[k+2].kind==T_ID&&anchor_scopes[k]) {
+            long f=anchor_scopes[k]-1, end=anchor_close(f+1), q;
+            for(q=f+2;q<end;q++)if(toks[q].kind==T_ID&&tx_same(toks[q].s,toks[q].n,toks[k+2].s,toks[k+2].n))unknown=1;
+        }
+        if (!(origin & 2)&&!unknown) continue;
+        /* Lexer punctuation searches are not source assertions or mutation anchors. */
+        for (p = ae+1; p < e; p++) if (toks[p].kind == T_STR) {
+            long c; delimiter = toks[p].n > 0 && toks[p].n <= 2 && !has(&toks[k],"replace") && !has(&toks[k],"mutate") && !is(&toks[k],T_ID,"swap_all");
+            for (c = 0; c < toks[p].n; c++) if (idc(toks[p].s[c])) delimiter = 0;
+            break;
+        }
+        if (!delimiter) {char why[256];cx_fmt(why,sizeof why,"%%.*s source-anchor input-origin=%d%s; use facts/behavior/token provenance",origin,unknown?" unknown-parameter":"");report("R4-source-anchor",toks[k].line,why,&toks[k]);}
+    }
+    anchor_release();
+}
+
 static void lint_file(const char *path) {
     int fd = sy_open_read(path); long n, k, start = 0, die_at = -1; int depth = 0; char *b;
     int versions_ok, testish;
@@ -435,6 +765,7 @@ static void lint_file(const char *path) {
     versions_ok = tx_suffix(path, tx_len(path, 4096), "cxlib/releaseversion.cx", 23);
     testish = testish_path(path);
     lex(b, n);
+    source_anchors();
     for (k = 0; k < ntok; k++) {
         if (is(&toks[k], T_P, "{")) { if (depth++ == 0) { block(start, k, versions_ok, testish); start = k; die_at = die_header(k); } }
         else if (is(&toks[k], T_P, "}") && depth > 0) {

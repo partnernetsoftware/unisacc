@@ -1,5 +1,5 @@
 /* tools/check-candidate-chain.cx -- candidate-chain 负控夹具，不跑全链。
- *   sh ./unisacc.com tools/check-candidate-chain.cx
+ *   sh ./unisacc.com tools/check-candidate-chain.cx -- ABS_OUT ABS_CACHE
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -10,6 +10,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.runnerprep
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -28,12 +29,23 @@ static int sh(const char *cmd, char *out, size_t cap) {
     free(o);
     return rc;
 }
+static const char *find_sub(const char *h, const char *n) {
+    size_t hl, nl, i;
+    if (!h || !n) return 0;
+    hl = (size_t)tx_len(h, 100000);
+    nl = (size_t)tx_len(n, 256);
+    if (!nl) return h;
+    if (hl < nl) return 0;
+    for (i = 0; i + nl <= hl; i++) if (!memcmp(h + i, n, nl)) return h + i;
+    return 0;
+}
 static int has(const char *h, const char *n) {
-    return tx_find(h, tx_len(h, 100000), n, tx_len(n, 80)) >= 0;
+    return find_sub(h, n) != 0;
 }
 
 int main(int argc, char **argv) {
-    char cwd[400], com[500], tool[500], out[65536], *o = 0;
+    char cwd[400], out[65536], *o = 0;
+    char native_tool[4400], native_generator[4400];
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
     if (argc == 4 && tx_eqz(argv[1], "--lane-split")) {
@@ -107,6 +119,20 @@ int main(int argc, char **argv) {
         printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }
+    /* One source per preparation call keeps cold builds independently bounded.
+     * The inventory stores executable paths, never an assertion result. */
+    if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
+        const char *source = tx_eqz(argv[3], "tool") ? "tools/candidate-chain.cx" :
+                             tx_eqz(argv[3], "generator") ? "tools/chain-phases-gen.cx" : 0;
+        char bin[4400], why[512]; int reused;
+        if (!source || argv[2][0] != '/' || sy_realpath(".", cwd, sizeof cwd) < 0) return 2;
+        if (sy_mkdir(argv[2], 0700) && sy_exists(argv[2]) != 1) return 2;
+        if (rn_prepare(cwd, source, argv[2], bin, sizeof bin, &reused, why, sizeof why)) {
+            fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        }
+        printf("PREPARED\tcandidate-check\t%s\t%s\tno-test-result\n", argv[3], bin);
+        return 0;
+    }
     if (argc == 4 && tx_eqz(argv[1], "--g2g3-split")) {
         char td[4400], fake[4500], trace[4500], fp[4500], cmd[20000], toolpath[4500], dir[4500];
         const char *script = "#!/bin/sh\ncase \"$*\" in *--closure-list*) i=0; while [ $i -lt ${BATCH_CLOSURES:-3} ]; do printf 'm%s.o\\t%s/src/unit%s.cx\\n' \"$i\" \"$BATCH_SNAP\" \"$i\"; i=$((i+1)); done; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\nphase=; keys=; while [ $# -gt 0 ]; do case \"$1\" in --phase) shift; phase=$1;; --objects) shift; keys=$1;; esac; shift; done\nif [ -n \"$keys\" ]; then [ ${BATCH_OBJECT_RC:-0} -eq 0 ] || exit $BATCH_OBJECT_RC; dest=\"$BATCH_FP/$phase/lnx-x86_64\"; mkdir -p \"$dest\"; old=$IFS; IFS=,; for key in $keys; do printf '\\n%s\\t1\\n' \"$key\" >> \"$dest/.chain-steps\"; done; IFS=$old; exit 0; fi\nexit ${BATCH_LINK_RC:-0}\n";
@@ -117,22 +143,22 @@ int main(int argc, char **argv) {
         if(sy_setenv("BATCH_FP",fp,1)||cx_fmt(dir,sizeof dir,"%s/build",td)||sy_mkdir(dir,0755))return 2;
         char budget[4500];size_t budget_n=0;char *budget_b=cx_read("build/g2-budget.tsv",&budget_n);
         if(!budget_b||cx_fmt(budget,sizeof budget,"%s/build/g2-budget.tsv",td)||cx_write(budget,budget_b,budget_n))return 2;
-        char *limit_row=strstr(budget_b,"\npending_keys\t");int limit=limit_row?atoi(limit_row+14):0;free(budget_b);if(limit<1)return 2;
+        const char *limit_row=find_sub(budget_b,"\npending_keys\t");int limit=limit_row?atoi(limit_row+14):0;free(budget_b);if(limit<1)return 2;
         for (int g = 2; g <= 3; g++) {
             if (cx_fmt(dir, sizeof dir, "%s/g%d", fp, g) || sy_mkdir(dir, 0755)) return 2;
         }
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g2-batch-objects-until");
         size_t zn; char *z = cx_read(trace, &zn);
-        char *first = z ? strstr(z, "--objects\t") : 0;
-        int calls=0,bounded=1;for(char *p=first;p;p=strstr(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;calls++;}
+        const char *first = z ? find_sub(z, "--objects\t") : 0;
+        int calls=0,bounded=1;for(const char *p=first;p;p=find_sub(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;calls++;}
         ck(first&&bounded&&calls==2+(cf_root_count()-1+limit-1)/limit+(3-1+limit-1)/limit&&!has(z,"--object\t")&&!has(z,"--link-only"),"g2-measured-batches-full-roots-and-closures");
         int covered = 0;
         for (int i = 0; i < cf_root_count(); i++) {
             char key[96];
             const char *name = cf_root_key(i);
             if (cx_fmt(key,sizeof key,"%s",name))return 2;
-            for(char *p=first;p;p=strstr(p+1,"--objects\t")){char *q=p+10,*end=strchr(q,'\t');size_t n=strlen(key);for(char *at=q;end&&at<end;){char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==n&&!memcmp(at,key,n)){covered++;break;}at=e+1;}}
+            for(const char *p=first;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10,*end=strchr(q,'\t');size_t n=strlen(key);for(const char *at=q;end&&at<end;){const char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==n&&!memcmp(at,key,n)){covered++;break;}at=e+1;}}
         }
         ck(covered == cf_root_count(), "g2-all-root-keys-covered"); free(z);
         if (cx_write(trace, "", 0) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g3 fresh g3-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
@@ -154,8 +180,8 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-closure-m256.o 2>&1", argv[3], toolpath, td, td, td, fp) || cx_write(trace, "", 0)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "dynamic-257-closures-until");
         z = cx_read(trace, &zn);
-        int closure_seen=0;bounded=1;for(char *p=z?strstr(z,"--objects\t"):0;p;p=strstr(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;}
-        for(int i=0;i<257;i++){char key[48];if(cx_fmt(key,sizeof key,"m%d.o",i))return 2;for(char *p=z?strstr(z,"--objects\t"):0;p;p=strstr(p+1,"--objects\t")){char *q=p+10,*end=strchr(q,'\t');for(char *at=q;end&&at<end;){char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==strlen(key)&&!memcmp(at,key,e-at)){closure_seen++;break;}at=e+1;}}}
+        int closure_seen=0;bounded=1;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;}
+        for(int i=0;i<257;i++){char key[48];if(cx_fmt(key,sizeof key,"m%d.o",i))return 2;for(const char *p=z?find_sub(z,"--objects\t"):0;p;p=find_sub(p+1,"--objects\t")){const char *q=p+10,*end=strchr(q,'\t');for(const char *at=q;end&&at<end;){const char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==strlen(key)&&!memcmp(at,key,e-at)){closure_seen++;break;}at=e+1;}}}
         ck(z&&bounded&&closure_seen==257&&has(z,"--objects\tm256.o\t")&&!has(z,"--link-only"),"dynamic-257-closures-measured-budget-full-coverage");free(z);
         printf("G2G3_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
@@ -174,8 +200,8 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 resume - 2>&1", argv[3], toolpath, td, cwd, ctor, td)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\tgen1-lnx-fixture-objects") && has(out, "RECEIPT\tgen1-lnx-fixture\t"), "gen1-resume-links");
         z = cx_read(trace, &zn);
-        char *first = z ? strstr(z, "--objects-only") : 0;
-        ck(first && !strstr(first + 1, "--objects-only") && has(z, "--link-only"), "gen1-resume-does-not-recompile"); free(z);
+        const char *first = z ? find_sub(z, "--objects-only") : 0;
+        ck(first && !find_sub(first + 1, "--objects-only") && has(z, "--link-only"), "gen1-resume-does-not-recompile"); free(z);
         sy_setenv("GEN1_LINK_RC", "37", 1);
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "gen1 link"), "gen1-link-failure-propagates");
         sy_setenv("GEN1_LINK_RC", "0", 1); sy_setenv("GEN1_OBJECT_RC", "38", 1);
@@ -189,34 +215,55 @@ int main(int argc, char **argv) {
       mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0;
       { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
     }
-    if (cx_fmt(com, sizeof com, "%s/unisacc.com", cwd) || cx_fmt(tool, sizeof tool, "%s/tools/candidate-chain.cx", cwd)) {
-        ck(0, "path"); return 1;
+    if (argc != 3 || argv[1][0] != '/' || argv[2][0] != '/') {
+        fprintf(stderr, "usage: ABS_OUT ABS_CACHE | --prepare ABS_CACHE tool|generator\n");
+        return 2;
+    }
+    (void)sy_mkdir(argv[2], 0700);
+    {
+        char why[512]; int reused, pid;
+        pid = fork();
+        if (pid < 0) return 2;
+        if (pid == 0) {
+            if (rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
+                fprintf(stderr, "check-candidate-chain: %s\n", why); _exit(2);
+            }
+            _exit(0);
+        }
+        if (rn_prepare(cwd, "tools/candidate-chain.cx", argv[2], native_tool, sizeof native_tool, &reused, why, sizeof why)) {
+            (void)sy_wait(pid, 0);
+            fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        }
+        if (sy_wait(pid, 0) != 0 ||
+            rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
+            fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        }
     }
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --plan 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=55") && has(out, "p3-models") && has(out, "g2-lnx-x86_64-obj-0") && has(out, "g2-lnx-arm64-obj-43") && has(out, "jobs-net-41-finish"), "plan"); }
     /* 链内单元前端缓存强制关:plan 首行声明;守卫夹具在调用方把开关设成 1 时仍读到 0 且 RR_TIME 无 unitcache 命中/未命中/存储行。
        守卫目录建在批次的 {out} 下,守卫自己清掉它写的文件,事后目录能被 rmdir 即无残留 */
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 sh '%s' '%s' -- --plan 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 '%s' --plan 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "ENV\tUNISACC_UNIT_CACHE=0"), "plan-unit-cache-forced-off"); }
     { char cmd[1800], gd[700];
       if (argc > 1) sy_mkdir(argv[1], 0755);   /* 批次传 {out};不带参数时退回临时目录 */
       if (cx_fmt(gd, sizeof gd, "%s/cc-ucguard-XXXXXX", argc > 1 ? argv[1] : sy_tmpdir()) || !mkdtemp(gd)) { ck(0, "ucguard-dir"); return 1; }
-      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 sh '%s' '%s' -- --uc-guard '%s' 2>&1", com, tool, gd)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "UNISACC_UNIT_CACHE=1 '%s' --uc-guard '%s' 2>&1", native_tool, gd)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "UC_GUARD\tok\tlines=0"), "chain-no-unitcache-lines");
       ck(sy_rmdir(gd) == 0, "chain-guard-leaves-nothing"); }
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "--rev"), "missing-rev"); }
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev not-a-rev --out /tmp/cc-x 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --rev not-a-rev --out '%s/invalid' 2>&1", native_tool, argv[1])) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE"), "bad-rev"); }
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 979b56e4d918894670a71080970149112499d223 --out /tmp/cc-x --bogus 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --rev 979b56e4d918894670a71080970149112499d223 --out '%s/invalid' --bogus 2>&1", native_tool, argv[1])) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "unknown"), "unknown-opt"); }
     { char cmd[1800];
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 979b56e4d918894670a71080970149112499d223 --out /tmp/cc-x --parallel 99 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --rev 979b56e4d918894670a71080970149112499d223 --out '%s/invalid' --parallel 99 2>&1", native_tool, argv[1])) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "parallel"), "parallel-range"); }
     {
       char td[320], ape[400], js[400], mk[400], srcp[400], hp[400], hash[65], sidh[65], json[800], cmd[2400];
@@ -235,7 +282,7 @@ int main(int argc, char **argv) {
           "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",
           pn, rev, sidh, hash)) { ck(0, "json"); return 1; }
       if (cx_write(js, json, tx_len(json, 800))) { ck(0, "jsonw"); return 1; }
-      if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s' && sh '%s' '%s' -- --verify-snap '%s' %s --identity-helper '%s' 2>&1", hp, com, tool, td, rev, hp)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s' && '%s' --verify-snap '%s' %s --identity-helper '%s' 2>&1", hp, native_tool, td, rev, hp)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "SNAP_OK") && has(out, "live_sid=") && has(out, "record_sid="), "snap-ok");
       if (cx_write(srcp, "src-a-tampered\n", 15)) { ck(0, "tamper-src"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "SNAP_OK"), "snap-source-sid-diff-ok");
@@ -255,13 +302,13 @@ int main(int argc, char **argv) {
       if (cx_fmt(tp, sizeof tp, "%s/tools/templates/whole-front.cx.in", cwd)) { ck(0, "tmplpath"); return 1; }
       tb = cx_read(tp, &tn);
       ck(tb && !sy_sha256_hex(tb, (long)tn, th) && tx_eqz(th, want), "template-ca2c54a6");
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check-template '%s' 2>&1", com, tool, tp)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --check-template '%s' 2>&1", native_tool, tp)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "WF_PREP_G2_TEMPLATE_OK"), "g2-prepare-template-ok");
       if (cx_fmt(td, sizeof td, "%s/cc-tmpl-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(bad, sizeof bad, "%s/whole-front.cx.in", td)) { ck(0, "tmpl-tmp"); return 1; }
       if (!tb || !tn) { ck(0, "tmpl-copy"); return 1; }
       tb[0] = (char)(tb[0] ^ 1);
       if (cx_write(bad, tb, tn)) { ck(0, "tmpl-write"); return 1; }
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check-template '%s' 2>&1", com, tool, bad)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --check-template '%s' 2>&1", native_tool, bad)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE") && has(out, "template SHA"), "g2-prepare-template-byte-refuse");
       free(tb);
     }
@@ -269,11 +316,11 @@ int main(int argc, char **argv) {
       char tp[500], *tb; size_t tn = 0;
       if (cx_fmt(tp, sizeof tp, "%s/tools/templates/whole-win-span.cx.in", cwd)) { ck(0, "wspan"); return 1; }
       tb = cx_read(tp, &tn);
-      ck(tb && tn && tx_find(tb, (long)tn, "empty stage output", 18) >= 0, "win-span-rejects-empty-non-elf");
+      ck(tb && tn && has(tb, "empty stage output"), "win-span-rejects-empty-non-elf");
       free(tb);
       if (cx_fmt(tp, sizeof tp, "%s/tools/whole-front.cx", cwd)) { ck(0, "wfpath"); return 1; }
       tb = cx_read(tp, &tn);
-      ck(tb && tn && tx_find(tb, (long)tn, "span empty opaque body", 22) >= 0, "opaque-body-nonempty");
+      ck(tb && tn && has(tb, "span empty opaque body"), "opaque-body-nonempty");
       free(tb);
     }
     {
@@ -287,14 +334,14 @@ int main(int argc, char **argv) {
       if (cx_write(bad, bs, tx_len(bs, 80)) || cx_write(good, gs, tx_len(gs, 80))) { ck(0, "nm-src"); return 1; }
       if (cx_fmt(sc, sizeof sc, "as -o '%s' '%s' && as -o '%s' '%s'", bo, bad, go, good)) { ck(0, "nm-as"); return 1; }
       if (sh(sc, out, sizeof out)) { ck(0, "nm-as-run"); return 1; }
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --worker-nm '%s' 2>&1", com, tool, bo)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --worker-nm '%s' 2>&1", native_tool, bo)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "setpgid"), "worker-nm-setpgid-refuse");
-      if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --worker-nm '%s' 2>&1", com, tool, go)) { ck(0, "fmt"); return 1; }
+      if (cx_fmt(cmd, sizeof cmd, "'%s' --worker-nm '%s' 2>&1", native_tool, go)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "WORKER_NM_OK"), "worker-nm-sy-ok");
       env = getenv("CHAIN_WORKER_O_GOOD");
       if (!env || !env[0]) sy_printf("SKIP\tcheck-candidate-chain.worker-nm-good-env\n");
       else {
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --worker-nm '%s' 2>&1", com, tool, env)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --worker-nm '%s' 2>&1", native_tool, env)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "WORKER_NM_OK"), "worker-nm-good-env");
       }
     }
@@ -309,31 +356,32 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/x' '%s/x' '%s' '%s' '%s' '%s/x' && : > '%s/x/f'", d1, d2, d3, w, outside, dctx, d1)) { ck(0, "clean-fmt"); return 1; }
         if (sh(cmd, out, sizeof out) || cx_write(ckf, done, tx_len(done, 100))) { ck(0, "clean-setup"); return 1; }
         /* 未 DONE 相位的残留被清理并打印 CLEANUP */
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, d1, d1)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' list '%s' - 2>&1; test ! -e '%s'", native_tool, o, w, d1, d1)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tlist\t"), "clean-undone-removed");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' ctx '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, dctx, dctx)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' ctx '%s' - 2>&1; test ! -e '%s'", native_tool, o, w, dctx, dctx)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tctx\t"), "ctx-kill-resume-cleaned");
         {
             char aso[700];
             if (cx_fmt(aso, sizeof aso, "%s/routes/kernel-route/asm-source/OUTPUT.s", o)) { ck(0, "fmt"); return 1; }
             if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/routes/kernel-route/asm-source' && echo x > '%s'", o, aso)) { ck(0, "fmt"); return 1; }
             if (sh(cmd, out, sizeof out)) { ck(0, "aso-setup"); return 1; }
-            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' routes '%s' - 2>&1; test ! -e '%s'", com, tool, o, w, aso, aso)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' routes '%s' - 2>&1; test ! -e '%s'", native_tool, o, w, aso, aso)) { ck(0, "fmt"); return 1; }
             ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\troutes\t"), "routes-kill-resume-cleaned");
         }
         /* 已 DONE 相位不动 */
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' doneph '%s' - 2>&1; test -d '%s/x'", com, tool, o, w, d2, d2)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' doneph '%s' - 2>&1; test -d '%s/x'", native_tool, o, w, d2, d2)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP"), "clean-done-kept");
         /* 快照树 out/chain 内、有完成收据的不动;无收据则清理 */
         if (cx_write(rc, "r\n", 2)) { ck(0, "clean-rc"); return 1; }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test -d '%s'", com, tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test -d '%s'", native_tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP"), "clean-receipt-kept");
-        if (cx_fmt(cmd, sizeof cmd, "rm -f '%s'; sh '%s' '%s' -- --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test ! -e '%s'", rc, com, tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
+        if (sy_unlink(rc)) { ck(0, "receipt-unlink"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test ! -e '%s'", native_tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\twf-prepare\t"), "clean-workdir-removed");
         /* 越界与含 .. 的路径具名拒绝,目录不被动 */
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s' - 2>&1", com, tool, o, w, outside)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' list '%s' - 2>&1", native_tool, o, w, outside)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE cleanup path outside") && has(out, outside), "clean-outside-refused");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-phase '%s' '%s' list '%s/../outside' - 2>&1; test -d '%s'", com, tool, o, w, o, outside)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' list '%s/../outside' - 2>&1; test -d '%s'", native_tool, o, w, o, outside)) { ck(0, "fmt"); return 1; }
         ck(has(out, "REFUSE cleanup path outside") && sh("true", 0, 0) == 0, "clean-dotdot-refused");
         if (cx_fmt(cmd, sizeof cmd, "test -d '%s/x' -o -d '%s'", d2, outside)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, 0, 0) == 0, "clean-refused-untouched");
@@ -344,9 +392,9 @@ int main(int argc, char **argv) {
               || cx_fmt(rec2, sizeof rec2, "%s/record.tsv", kept) || cx_fmt(ov, sizeof ov, "%s/outer", bld)) { ck(0, "job-fmt"); return 1; }
           if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' '%s' '%s' && echo leftover > '%s/partial' && echo x > '%s/start-job-gen-killed.argv.tsv' && echo rec > '%s' && echo y > '%s/start-job-gen-kept.argv.tsv'", dead, kept, ov, dead, ov, rec2, ov)) { ck(0, "job-fmt"); return 1; }
           if (sh(cmd, out, sizeof out)) { ck(0, "job-kill-setup"); return 1; }
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' gen-killed 2>&1; test ! -e '%s' && test ! -e '%s/start-job-gen-killed.argv.tsv'", com, tool, o, w, ctx, bld, dead, ov)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-job '%s' '%s' '%s' '%s' gen-killed 2>&1; test ! -e '%s' && test ! -e '%s/start-job-gen-killed.argv.tsv'", native_tool, o, w, ctx, bld, dead, ov)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\tgen-killed\t"), "job-kill-resume-cleaned");
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' gen-kept 2>&1; test -f '%s' && test -f '%s/start-job-gen-kept.argv.tsv'", com, tool, o, w, ctx, bld, rec2, ov)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-job '%s' '%s' '%s' '%s' gen-kept 2>&1; test -f '%s' && test -f '%s/start-job-gen-kept.argv.tsv'", native_tool, o, w, ctx, bld, rec2, ov)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP\tgen-kept\t"), "job-complete-kept");
           {
             char recp[700], stj[800], fnj[800], fns[800];
@@ -354,9 +402,9 @@ int main(int argc, char **argv) {
                 || cx_fmt(fnj, sizeof fnj, "%s/finish-job-tool-finpart.argv.tsv", ov) || cx_fmt(fns, sizeof fns, "%s/finish-job-tool-findone.status", ov)) { ck(0, "fmt"); return 1; }
             if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/jobs/tool-finpart' '%s/jobs/tool-findone' && echo rec > '%s' && echo s > '%s' && echo f > '%s' && echo rec > '%s/jobs/tool-findone/record.tsv' && echo ok > '%s'", ctx, ctx, recp, stj, fnj, ctx, fns)) { ck(0, "fmt"); return 1; }
             if (sh(cmd, out, sizeof out)) { ck(0, "fin-setup"); return 1; }
-            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' tool-finpart 2>&1; test ! -e '%s' && test -f '%s' && test -f '%s'", com, tool, o, w, ctx, bld, fnj, recp, stj)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-job '%s' '%s' '%s' '%s' tool-finpart 2>&1; test ! -e '%s' && test -f '%s' && test -f '%s'", native_tool, o, w, ctx, bld, fnj, recp, stj)) { ck(0, "fmt"); return 1; }
             ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\ttool-finpart\t"), "finish-kill-resume-cleaned");
-            if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-job '%s' '%s' '%s' '%s' tool-findone 2>&1; test -f '%s'", com, tool, o, w, ctx, bld, fns)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-job '%s' '%s' '%s' '%s' tool-findone 2>&1; test -f '%s'", native_tool, o, w, ctx, bld, fns)) { ck(0, "fmt"); return 1; }
             ck(sh(cmd, out, sizeof out) == 0 && !has(out, "CLEANUP\ttool-findone\t"), "finish-done-kept");
           }
         }
@@ -366,9 +414,9 @@ int main(int argc, char **argv) {
           if (cx_fmt(zck, sizeof zck, "%s/checkpoint.tsv", o) || cx_fmt(prod, sizeof prod, "%s/stub.c", o) || cx_fmt(miss, sizeof miss, "%s/missing.bin", o)) { ck(0, "zck"); return 1; }
           if (cx_write(zck, zrow, tx_len(zrow, 160))) { ck(0, "zwrite"); return 1; }
           if (cx_write(prod, "x", 1)) { ck(0, "pwrite"); return 1; }
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --ck-done '%s' gen1-osx-arm64-stub '%s' 2>&1", com, tool, o, prod)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --ck-done '%s' gen1-osx-arm64-stub '%s' 2>&1", native_tool, o, prod)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "CK_DONE\tgen1-osx-arm64-stub\tyes"), "zero-wall-with-product-done");
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --ck-done '%s' failph '%s' 2>&1", com, tool, o, miss)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --ck-done '%s' failph '%s' 2>&1", native_tool, o, miss)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "CK_DONE\tfailph\tno"), "failed-no-product-not-done");
         }
         {
@@ -380,20 +428,20 @@ int main(int argc, char **argv) {
           if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' '%s.control' '%s' '%s' && echo leftover > '%s/x' && echo y > '%s.control/z'", dead, dead, kept, kctl, dead, dead)) { ck(0, "fmt"); return 1; }
           if (sh(cmd, out, sizeof out)) { ck(0, "wf-kill-setup"); return 1; }
           if (cx_write(body, "bin", 3) || cx_write(zck, krow, tx_len(krow, 80))) { ck(0, "wf-kept-setup"); return 1; }
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-wf-dest '%s' '%s' '%s' wfkilled 2>&1; test ! -e '%s' && test ! -e '%s.control'", com, tool, o, o, dead, dead, dead)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-wf-dest '%s' '%s' '%s' wfkilled 2>&1; test ! -e '%s' && test ! -e '%s.control'", native_tool, o, o, dead, dead, dead)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\t"), "wf-dest-kill-resume-cleaned");
-          if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --clean-wf-dest '%s' '%s' '%s' wfkept 2>&1; test -d '%s' && test -f '%s'", com, tool, o, o, kept, kept, body)) { ck(0, "fmt"); return 1; }
+          if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-wf-dest '%s' '%s' '%s' wfkept 2>&1; test -d '%s' && test -f '%s'", native_tool, o, o, kept, kept, body)) { ck(0, "fmt"); return 1; }
           ck(sh(cmd, out, sizeof out) == 0 && has(out, "WF_DEST_KEPT\t"), "wf-dest-complete-kept");
         }
         cx_rmtree(td);
     }
     {
         char cmd[1800];
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --prep-path /w 1 wf-prep 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --prep-path /w 1 wf-prep 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PREP_PATH\t/w/wf-prep\n"), "gen1-prep-path-unchanged");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --prep-path /w 2 wf-span-prep 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --prep-path /w 2 wf-span-prep 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PREP_PATH\t/w/wf-span-prep-g2\n"), "gen2-prep-path-tagged");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --prep-path /w 4 wf-prep 2>&1", com, tool)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --prep-path /w 4 wf-prep 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE gen must be 1..3"), "gen-out-of-range-refused");
     }
     {
@@ -401,25 +449,27 @@ int main(int argc, char **argv) {
         const char *row = "m1.o\t/tmp/unused-phase-parser-source.cx\n";
         if (cx_fmt(td, sizeof td, "%s/cc-dynamic-phase-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(fp, sizeof fp, "%s/fixedpoint", td) || cx_fmt(gd, sizeof gd, "%s/g2", fp) || cx_fmt(manifest, sizeof manifest, "%s/lnx-x86_64.closures.tsv", gd)) { ck(0, "dynamic-phase-path"); return 1; }
         if (sy_mkdir(fp, 0755) || sy_mkdir(gd, 0755) || cx_write(manifest, row, strlen(row))) { ck(0, "dynamic-phase-setup"); return 1; }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --rev 0000000000000000000000000000000000000000 --out '%s' --until g2-lnx-x86_64-closure-m01.o 2>&1", com, tool, td)) { ck(0, "dynamic-phase-command"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --rev 0000000000000000000000000000000000000000 --out '%s' --until g2-lnx-x86_64-closure-m01.o 2>&1", native_tool, td)) { ck(0, "dynamic-phase-command"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE --until unknown phase"), "dynamic-closure-leading-zero-refused");
         cx_rmtree(td);
     }
     {
         /* pack 切片取址: 只在新位置(chain_work/gen1/...)时找得到;缺失仍拒绝;旧位置不被接受 */
-        char cmd[2400];
-        const char *w = "/tmp/cc-slice-w";
-        if (cx_fmt(cmd, sizeof cmd, "rm -rf %s; mkdir -p %s/gen1/osx-x86_64-b2 %s/gen1/win-arm64-image %s/gen1/osx-arm64 && echo x > %s/gen1/osx-x86_64-b2/image && echo y > %s/gen1/win-arm64-image/image && echo z > %s/gen1/osx-arm64/image", w, w, w, w, w, w, w)) { ck(0, "fmt"); return 1; }
+        char cmd[2400], w[600], expected[900];
+        if (cx_fmt(w, sizeof w, "%s/cc-slice-XXXXXX", argv[1]) || !mkdtemp(w)) { ck(0, "slice-dir"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/gen1/osx-x86_64-b2' '%s/gen1/win-arm64-image' '%s/gen1/osx-arm64' && echo x > '%s/gen1/osx-x86_64-b2/image' && echo y > '%s/gen1/win-arm64-image/image' && echo z > '%s/gen1/osx-arm64/image'", w, w, w, w, w, w)) { ck(0, "fmt"); return 1; }
         if (sh(cmd, out, sizeof out)) { ck(0, "slice-setup"); return 1; }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --slice-path %s osx-x86_64 2>&1", com, tool, w)) { ck(0, "fmt"); return 1; }
-        ck(sh(cmd, out, sizeof out) == 0 && has(out, "SLICE_PATH\t/tmp/cc-slice-w/gen1/osx-x86_64-b2/image"), "pack-slice-osx-new-location");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --slice-path %s win-arm64 2>&1", com, tool, w)) { ck(0, "fmt"); return 1; }
-        ck(sh(cmd, out, sizeof out) == 0 && has(out, "SLICE_PATH\t/tmp/cc-slice-w/gen1/win-arm64-image/image"), "pack-slice-win-new-location");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --slice-path %s osx-arm64 2>&1", com, tool, w)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --slice-path %s osx-x86_64 2>&1", native_tool, w)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(expected, sizeof expected, "SLICE_PATH\t%s/gen1/osx-x86_64-b2/image", w)) return 1;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, expected), "pack-slice-osx-new-location");
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --slice-path %s win-arm64 2>&1", native_tool, w)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(expected, sizeof expected, "SLICE_PATH\t%s/gen1/win-arm64-image/image", w)) return 1;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, expected), "pack-slice-win-new-location");
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --slice-path %s osx-arm64 2>&1", native_tool, w)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE missing slice image"), "pack-slice-old-location-refused");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --slice-path %s win-x86_64 2>&1", com, tool, w)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --slice-path %s win-x86_64 2>&1", native_tool, w)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE missing slice image"), "pack-slice-missing-refused");
-        sh("rm -rf /tmp/cc-slice-w", 0, 0);
+        cx_rmtree(w);
     }
     {
         char td[500], file[600], cmd[2400];
@@ -428,17 +478,17 @@ int main(int argc, char **argv) {
         const char *reasons[] = {"chain-phases order", "chain-phases timeout", "chain-phases duplicate", "chain-phases text", "chain-phases fields"};
         if (cx_fmt(td, sizeof td, "%s/cc-phases-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(file, sizeof file, "%s/phases.tsv", td)) { ck(0, "phase-tmp"); return 1; }
         for (int j = 0; j < 5; j++) {
-            if (cx_write(file, bad[j], strlen(bad[j])) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
+            if (cx_write(file, bad[j], strlen(bad[j])) || cx_fmt(cmd, sizeof cmd, "'%s' --plan --phases '%s' 2>&1", native_tool, file)) { ck(0, "phase-fixture"); return 1; }
             ck(sh(cmd, out, sizeof out) != 0 && has(out, reasons[j]), names[j]);
         }
         const char *ordered = "0\tbuild\t-\t55\t-\t-\t1\n1\tsnap\t-\t55\tbuild\t-\t1\n";
-        if (cx_write(file, ordered, strlen(ordered)) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
+        if (cx_write(file, ordered, strlen(ordered)) || cx_fmt(cmd, sizeof cmd, "'%s' --plan --phases '%s' 2>&1", native_tool, file)) { ck(0, "phase-fixture"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PHASE\t0\tbuild") && has(out, "PHASE\t1\tsnap"), "phase-order-consumed");
         cx_rmtree(td);
     }
     {
-        char generator[500], cmd[2400];
-        if (cx_fmt(generator, sizeof generator, "%s/tools/chain-phases-gen.cx", cwd) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check 2>&1", com, generator)) { ck(0, "phase-generator-path"); return 1; }
+        char cmd[2400];
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --check 2>&1", native_generator)) { ck(0, "phase-generator-path"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CHAIN_PHASES\tstatus=CHECK"), "phase-generated-table-current");
     }
     {   /* 引导安装:同内容不重写(inode/mtime 不变),异内容重写,无残留临时文件 */
@@ -447,7 +497,7 @@ int main(int argc, char **argv) {
             || cx_fmt(src, sizeof src, "%s/src", td) || cx_fmt(dst, sizeof dst, "%s/dst", td)
             || cx_fmt(tmpf, sizeof tmpf, "%s.tmp-install", dst)) { ck(0, "install-tmp"); return 1; }
         if (cx_write(src, "boot-A\n", 7)) { ck(0, "install-fixture"); return 1; }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --install-file '%s' '%s' 2>&1 && stat -c '%%i %%Y' '%s'", com, tool, src, dst, dst)) { ck(0, "fmt"); return 1; }
+        if (cx_fmt(cmd, sizeof cmd, "'%s' --install-file '%s' '%s' 2>&1 && stat -c '%%i %%Y' '%s'", native_tool, src, dst, dst)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, a, sizeof a) == 0 && has(a, "INSTALL_FILE_OK"), "install-first");
         sh("sleep 1.1", 0, 0);
         ck(sh(cmd, b, sizeof b) == 0 && tx_find(a, tx_len(a, 200), "\n", 1) >= 0 && tx_find(b, tx_len(b, 200), a + tx_find(a, tx_len(a, 200), "\n", 1) + 1, tx_len(a, 200) - tx_find(a, tx_len(a, 200), "\n", 1) - 1) >= 0, "install-same-sha-no-rewrite");

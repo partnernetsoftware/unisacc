@@ -131,6 +131,12 @@ ELF 头 (64)
 
 准备复用既有 `cxlib.runnerprep` 内容身份原生映像；`chain-phases-gen` 沿 `cxlib.toolprep` 在断言前实编生成器。准备输出只记 `PREPARED ... no-test-result`，从不保存或读取 PASS。登记器自身在加锁前准备 `tests/run.cx` 与 `tests/run-batch.cx`，缓存位于当前私有根 `out/register-native`。55 秒批次与 affected 的54秒界均未调整。
 
+`register-metadata-rollback` 保持提交档无外部材料合同：先执行 `tools/check-register.cx --prepare ROOT/out/check-register`，批次以 `--out ROOT/out/check-register --metadata-rollback` 消费自有内容身份库存；每次实际触发坏元数据、精确回滚并比较原表字节，不缓存检查结果。
+
+`candidate-chain` 检查先分别执行 `tools/check-candidate-chain.cx --prepare ROOT/out/check-candidate-chain tool` 与 `--prepare ROOT/out/check-candidate-chain generator`。每条调用只准备一个映像，输出包含 `PREPARED candidate-check KIND ABS_BIN no-test-result`；提交档批次不引入外部materials，参数为 `ABS_OUT ROOT/out/check-candidate-chain`。消费经runnerprep重新计算源码闭包与产品身份、核映像证书，再调用原生映像执行全部原 plan/refuse/snap/template/cleanup/slice/阶段表与真实生成器断言；不回退源码启动，不运行产品构造链，55秒不变。准备费用单列且不可把上轮成功当准备依据。
+
+`check-s9-nightly-run` 的私有 origin 必须在当前HEAD显式建立 `main` 后提交工作树overlay，再克隆消费。发布根可能为detached HEAD；仅提交overlay不会产生origin/main，夜跑入口同步固定引用会在运行前失败。两模式保留真实夜跑入口、假S9轻会话的结果与index断言，失败子调用stdout/stderr保全；只证明入口合同，不授予全S9或发布资格。
+
 库存准备逐个实际编译11个非空 `-funit` 对象，证书绑定产品、每个源及每个真实对象的SHA和大小。消费重新核证书、真实闭包与对象字节，再执行原排序、标签和拒绝断言；同字节排序条件仍复制真实对象，不制造空片，不缓存结论。六个既有分批均保留，依次消费，根外路径负例最后运行。
 
 `tools/slice-inventory.cx` 的直接调用还须显式 `--out ABS_DIR --index-native ABS_BIN`。ABS_BIN由同根 `cxlib.runnerprep` 准备 `tools/symindex.cx`；每次盘点在ABS_DIR下新建索引并执行 `update --verify`，不复用索引结论。现有object-source-replay调用同步迁移，消费者原45秒deadline不变。

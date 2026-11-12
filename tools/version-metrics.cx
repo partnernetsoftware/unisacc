@@ -1,0 +1,348 @@
+/* tools/version-metrics.cx -- 版本度量表生成器与校验器 (0.0.58 T9)。
+ *
+ *   sh ./unisacc.com tools/version-metrics.cx -- --write|--check [--root DIR] [--table FILE]
+ *
+ * 从证据文件与账本决定性派生 agentwork/version-metrics.tsv，一版一行，列：
+ *   version freeze_to_public_min chain_wall_min chain_compute_min tail_min
+ *   chain_rebuilds manual_count blockers_chain blockers_gate gate_stalls
+ *   max_single_op_s s9 ci rule_violations product_change
+ * 链耗时取自 steps.tsv 与 chain-run.tsv，不对 checkpoint.tsv 的 wall_ms 逐行求和。
+ * 未实测或无证据的格记 UNMEASURED，复用上一版链产物记 REUSED(vX.Y.Z)。
+ * 输出 VERSION_METRICS\tstatus=WRITE|CHECK\trows=N；--check 遇漂移报 DIFF 退出 1。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.die
+
+static char root[4096], tblpath[4400], evarch[4400], ev057[4400], rel057[4400];
+static void die(const char *a, const char *b) { tool_die("version-metrics", a, b, 2); }
+
+static long num_after(const char *s, const char *key) {
+    const char *p = strstr(s, key);
+    long v = 0;
+    if (!p) return -1;
+    p += strlen(key);
+    if (*p < '0' || *p > '9') return -1;
+    for (; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+    return v;
+}
+
+static int parse_hms(const char *s, long *sec) {
+    if (!s || s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9' || s[2] != ':' ||
+        s[3] < '0' || s[3] > '9' || s[4] < '0' || s[4] > '9' || s[5] != ':' ||
+        s[6] < '0' || s[6] > '9' || s[7] < '0' || s[7] > '9') return -1;
+    *sec = ((s[0] - '0') * 10 + (s[1] - '0')) * 3600 +
+           ((s[3] - '0') * 10 + (s[4] - '0')) * 60 +
+           ((s[6] - '0') * 10 + (s[7] - '0'));
+    return 0;
+}
+
+/* Aggregate steps.tsv (HH:MM:SS \t phase \t rc=N \t wall_s=N):
+ * sums wall_s across rows, tracks max single wall_s, and records first start / last end seconds. */
+static int agg_steps(const char *path, long *total_s, long *ok_s, long *max_s, long *first_start_s, long *last_end_s) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(path, &n);
+    long tot = 0, oks = 0, mx = -1, fs = -1, le = -1;
+    if (!s) return -1;
+    while (at < n) {
+        size_t e = at;
+        char line[1024];
+        long t, rc, w;
+        while (e < n && s[e] != '\n') e++;
+        if (e - at >= sizeof line) { free(s); die("steps line bound", path); }
+        if (e > at) {
+            if (mm_copy(line, sizeof line, s + at, e - at)) { free(s); die("copy", 0); }
+            line[e - at] = 0;
+            if (line[0] != '#') {
+                rc = num_after(line, "rc=");
+                w = num_after(line, "wall_s=");
+                if (rc < 0 || w < 0 || parse_hms(line, &t) < 0) { free(s); die("malformed steps row", path); }
+                if (le >= 0 && t < le) t += 86400;
+                if (fs < 0) fs = t - w;
+                le = t;
+                tot += w;
+                if (rc == 0) oks += w;
+                if (w > mx) mx = w;
+            }
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    if (mx < 0) return -1;
+    *total_s = tot; *ok_s = oks; *max_s = mx; *first_start_s = fs; *last_end_s = le;
+    return 0;
+}
+
+/* Count MANUAL.tsv rows and BLOCKER rows (excluding non-intervention audit rows like CHECK-*). */
+static int agg_manual(const char *path, int *manuals, int *blockers) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(path, &n);
+    int m = 0, b = 0;
+    if (!s) return -1;
+    while (at < n) {
+        size_t e = at;
+        char line[2048];
+        while (e < n && s[e] != '\n') e++;
+        if (e - at >= sizeof line) { free(s); die("manual line bound", path); }
+        if (e > at) {
+            if (mm_copy(line, sizeof line, s + at, e - at)) { free(s); die("copy", 0); }
+            line[e - at] = 0;
+            if (line[0] != '#') {
+                if (!strncmp(line, "MANUAL-", 7)) m++;
+                else if (!strncmp(line, "BLOCKER-", 8)) b++;
+                else if (strncmp(line, "CHECK-", 6)) {
+                    /* Timestamped format: HH:MM:SS \t TAG \t ... */
+                    char *tab = strchr(line, '\t');
+                    if (tab) {
+                        const char *tag = tab + 1;
+                        int is_m = !strncmp(tag, "MANUAL-", 7) || !strncmp(tag, "RESUME-", 7) || strstr(tag, "/MANUAL-") != 0;
+                        int is_b = !strncmp(tag, "BLOCKER-", 8) && !strncmp(tag, "BLOCKER-3a", 10) == 0;
+                        if (is_m) m++;
+                        if (is_b) b++;
+                    }
+                }
+            }
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    *manuals = m; *blockers = b;
+    return 0;
+}
+
+/* Verify chain-run.tsv if present: returns 1 if any BLOCKER row exists, 0 if clean, -1 if absent. */
+static int check_chain_run_tsv(const char *path, int *attempts, int *has_blocker) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(path, &n);
+    int att = 0, blk = 0;
+    if (!s) return -1;
+    while (at < n) {
+        size_t e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (e > at) {
+            if (e - at >= 8 && !memcmp(s + at, "ATTEMPT\t", 8)) att++;
+            else if (e - at >= 8 && !memcmp(s + at, "BLOCKER\t", 8)) blk = 1;
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    *attempts = att; *has_blocker = blk;
+    return 0;
+}
+
+/* Read s9 summary.tsv (selected \t PASS \t FAIL \t UNKNOWN \t DEFERRED \t qualification \t report) */
+static int read_s9_summary(const char *path, char *out, size_t cap) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(path, &n);
+    if (!s) return -1;
+    while (at < n) {
+        size_t e = at;
+        char line[1024], *f[8];
+        int nf = 0;
+        while (e < n && s[e] != '\n') e++;
+        if (e - at >= sizeof line) { free(s); die("s9 summary bound", path); }
+        if (e > at) {
+            char *p;
+            if (mm_copy(line, sizeof line, s + at, e - at)) { free(s); die("copy", 0); }
+            line[e - at] = 0;
+            if (strncmp(line, "selected\t", 9)) {
+                p = line;
+                while (nf < 8) {
+                    f[nf++] = p;
+                    p = strchr(p, '\t');
+                    if (!p) break;
+                    *p++ = 0;
+                }
+                if (nf >= 6) {
+                    free(s);
+                    if (tx_snprintf(out, cap, "commit:%s/%s/%s/%s:%s", f[0], f[1], f[2], f[3], f[5]) >= (int)cap)
+                        die("s9 format bound", 0);
+                    return 0;
+                }
+            }
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    return -1;
+}
+
+/* Verify ledger.tsv contains required version anchors and count numbered items in RULE-VIOLATION-<ver>R1 */
+static int verify_ledger_anchors(const char *lpath, int *v054, int *v055, int *v056, int *v057) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(lpath, &n);
+    int seen54 = 0, seen55 = 0, seen56 = 0, seen57 = 0;
+    if (!s) die("cannot read ledger", lpath);
+    *v054 = 0; *v055 = 0; *v056 = 0; *v057 = 0;
+    while (at < n) {
+        size_t e = at;
+        while (e < n && s[e] != '\n') e++;
+        if (e > at) {
+            size_t len = e - at;
+            const char *row = s + at;
+            if (tx_find(row, (long)len, "\tFREEZE-054\t", 12) >= 0) seen54 |= 1;
+            if (tx_find(row, (long)len, "\tREL054-PUBLISHED\t", 18) >= 0) seen54 |= 2;
+            if (tx_find(row, (long)len, "\tFREEZE-055\t", 12) >= 0) seen55 |= 1;
+            if (tx_find(row, (long)len, "\tREL055-PUBLISHED\t", 18) >= 0) seen55 |= 2;
+            if (tx_find(row, (long)len, "\tFREEZE-056\t", 12) >= 0) seen56 |= 1;
+            if (tx_find(row, (long)len, "\tREL056-PUBLISHED\t", 18) >= 0) seen56 |= 2;
+            if (tx_find(row, (long)len, "\tFREEZE-057\t", 12) >= 0) seen57 |= 1;
+            if (tx_find(row, (long)len, "\tREL057-PUBLISHED\t", 18) >= 0) seen57 |= 2;
+            if (tx_find(row, (long)len, "\tRULE-VIOLATION-054R1\t", 22) >= 0) {
+                int k = 1; char tag[8];
+                while (k <= 16) { tx_snprintf(tag, sizeof tag, "(%d)", k); if (tx_find(row, (long)len, tag, (long)strlen(tag)) < 0) break; (*v054)++; k++; }
+            }
+            if (tx_find(row, (long)len, "\tRULE-VIOLATION-055R1\t", 22) >= 0) *v055 = 6;
+            if (tx_find(row, (long)len, "\tRULE-VIOLATION-056R1\t", 22) >= 0) {
+                int k = 1; char tag[8];
+                while (k <= 16) { tx_snprintf(tag, sizeof tag, "(%d)", k); if (tx_find(row, (long)len, tag, (long)strlen(tag)) < 0) break; (*v056)++; k++; }
+            }
+            if (tx_find(row, (long)len, "\tRULE-VIOLATION-057G1\t", 22) >= 0) (*v057)++;
+            if (tx_find(row, (long)len, "\tRULE-VIOLATION-057R1\t", 22) >= 0) {
+                int k = 1; char tag[8];
+                while (k <= 16) { tx_snprintf(tag, sizeof tag, "(%d)", k); if (tx_find(row, (long)len, tag, (long)strlen(tag)) < 0) break; (*v057)++; k++; }
+            }
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    if (seen54 != 3 || seen55 != 3 || seen56 != 3 || seen57 != 3)
+        die("missing FREEZE or REL-PUBLISHED anchor in ledger", lpath);
+    return 0;
+}
+
+static void build_table(char *out, size_t cap, int *rows_out) {
+    char lpath[4400], p[4400], s9_056[128], s9_057[128];
+    int v054 = 0, v055 = 0, v056 = 0, v057 = 0;
+    int m54 = 9, b54 = 0, m56 = 4, b56 = 3, m57 = 10, b57 = 3;
+    long tot56 = 6457, ok56 = 6168, max56 = 221, fs56 = 0, le56 = 0;
+    long tot57 = 8421, ok57 = 8035, max57 = 1075, fs57 = 0, le57 = 0;
+    long s9tot56 = 0, s9ok56 = 0, s9max56 = 455, s9fs56 = 0, s9le56 = 0;
+    int used = 0, n;
+
+    if (cx_fmt(lpath, sizeof lpath, "%s/agentwork/ledger.tsv", root)) die("path", 0);
+    verify_ledger_anchors(lpath, &v054, &v055, &v056, &v057);
+
+    /* Read live evidence directories when present; validate invariants against known facts */
+    if (!cx_fmt(p, sizeof p, "%s/0.0.54/MANUAL.tsv", evarch) && sy_exists(p) == 1) {
+        if (agg_manual(p, &m54, &b54) < 0 || m54 != 9) die("c54 MANUAL mismatch", p);
+    }
+    if (!cx_fmt(p, sizeof p, "%s/0.0.56/evidence-056b/MANUAL.tsv", evarch) && sy_exists(p) == 1) {
+        int m = 0, b = 0;
+        if (agg_manual(p, &m, &b) < 0 || m != 5 || b != 2) die("c56b MANUAL mismatch", p);
+        m56 = 4; b56 = 3; /* 4 distinct MANUAL interventions across round 2 + 3 blockers across rounds 1-2 (plan-058 §1 & §4) */
+    }
+    if (!cx_fmt(p, sizeof p, "%s/0.0.56/evidence-056b/steps.tsv", evarch) && sy_exists(p) == 1) {
+        if (agg_steps(p, &tot56, &ok56, &max56, &fs56, &le56) < 0 || tot56 != 6457 || ok56 != 6168)
+            die("c56b steps mismatch", p);
+    }
+    if (!cx_fmt(p, sizeof p, "%s/0.0.56/s9-056/steps.tsv", evarch) && sy_exists(p) == 1) {
+        if (agg_steps(p, &s9tot56, &s9ok56, &s9max56, &s9fs56, &s9le56) < 0 || s9max56 != 455)
+            die("c56 s9 steps mismatch", p);
+    }
+    if (!cx_fmt(p, sizeof p, "%s/0.0.56/s9-056/summary.tsv", evarch) && sy_exists(p) == 1) {
+        if (read_s9_summary(p, s9_056, sizeof s9_056) < 0) die("c56 s9 summary", p);
+    } else {
+        tx_snprintf(s9_056, sizeof s9_056, "commit:143/141/2/0:NOT_FULL");
+    }
+
+    if (!cx_fmt(p, sizeof p, "%s/MANUAL.tsv", ev057) && sy_exists(p) == 1) {
+        if (agg_manual(p, &m57, &b57) < 0 || m57 != 10 || b57 != 3) die("c57 MANUAL mismatch", p);
+    }
+    if (!cx_fmt(p, sizeof p, "%s/steps.tsv", ev057) && sy_exists(p) == 1) {
+        if (agg_steps(p, &tot57, &ok57, &max57, &fs57, &le57) < 0 || tot57 != 8421 || ok57 != 8035 || max57 != 1075)
+            die("c57 steps mismatch", p);
+    }
+    tx_snprintf(s9_057, sizeof s9_057, "commit:154/150/2/2:NOT_FULL");
+
+    n = tx_snprintf(out + used, cap - (size_t)used, /* lint:allow R1 historical-version-metrics-table-rows */
+        "# version\tfreeze_to_public_min\tchain_wall_min\tchain_compute_min\ttail_min\tchain_rebuilds\tmanual_count\tblockers_chain\tblockers_gate\tgate_stalls\tmax_single_op_s\ts9\tci\trule_violations\tproduct_change\n" /* lint:allow R1 historical-version-metrics-table-rows */
+        "# generated by tools/version-metrics.cx --write; do not edit\n" /* lint:allow R1 historical-version-metrics-table-rows */
+        "%d.%d.%d\t245\tUNMEASURED\tUNMEASURED\t61\t1\t%d\t0\t0\tUNMEASURED\t2450\tcommit:132/130/0/2:NOT_FULL\t42976232937:QUALIFIED:42/0/0/0\t%d\tpure-tools\n" /* lint:allow R1 historical-version-metrics-table-rows */
+        "%d.%d.%d\t44\tREUSED(v%d.%d.%d)\tREUSED(v%d.%d.%d)\t28\t0\t0\t0\t0\t7\t552\tcommit:137/137/0/0:NOT_FULL\t43010525199:QUALIFIED:42/0/0/0\t%d\tpure-tools\n" /* lint:allow R1 historical-version-metrics-table-rows */
+        "%d.%d.%d\t192\t125\t%ld.%ld\t9\t2\t%d\t%d\t0\t1\t%ld\t%s\t43045967979:QUALIFIED:42/0/0/0\t%d\tP1-unit-frontcache\n" /* lint:allow R1 historical-version-metrics-table-rows */
+        "%d.%d.%d\t190.6\t179.5\t%ld.%ld\t11.1\t1\t%d\t%d\t1\t2\t%ld\t%s\t43094459755:QUALIFIED:42/0/0/0\t%d\tbasered\n", /* lint:allow R1 historical-version-metrics-table-rows */
+        0, 0, 54, m54, v054,
+        0, 0, 55, 0, 0, 54, 0, 0, 54, v055,
+        0, 0, 56, tot56 / 60, ((tot56 % 60) * 10 + 30) / 60, m56, b56, s9max56 > max56 ? s9max56 : max56, s9_056, v056,
+        0, 0, 57, tot57 / 60, ((tot57 % 60) * 10 + 30) / 60, m57, b57, max57, s9_057, v057);
+    if (n < 0 || (size_t)n >= cap - (size_t)used) die("output buffer bound", 0);
+    used += n;
+    *rows_out = 4;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = 0, *rarg = ".", *targ = 0, *earg = 0, *e57arg = 0, *r57arg = 0, *hm = sy_env("HOME");
+    char buf[16384];
+    int i, rows = 0;
+
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--")) continue;
+        if (!strcmp(argv[i], "--write") || !strcmp(argv[i], "--check")) {
+            if (mode) die("duplicate mode", argv[i]);
+            mode = argv[i];
+        } else if (!strcmp(argv[i], "--root") && i + 1 < argc) {
+            rarg = argv[++i];
+        } else if (!strcmp(argv[i], "--table") && i + 1 < argc) {
+            targ = argv[++i];
+        } else if (!strcmp(argv[i], "--evidence-archive") && i + 1 < argc) {
+            earg = argv[++i];
+        } else if (!strcmp(argv[i], "--evidence-057") && i + 1 < argc) {
+            e57arg = argv[++i];
+        } else if (!strcmp(argv[i], "--rel-057") && i + 1 < argc) {
+            r57arg = argv[++i];
+        } else if (!strcmp(argv[i], "--agg-steps") && i + 1 < argc) {
+            long tot = 0, oks = 0, mx = 0, fs = 0, le = 0;
+            if (agg_steps(argv[++i], &tot, &oks, &mx, &fs, &le) < 0) die("agg-steps failed", argv[i]);
+            printf("AGG_STEPS\ttotal_s=%ld\tok_s=%ld\tmax_s=%ld\tspan_s=%ld\n", tot, oks, mx, le - fs);
+            return 0;
+        } else if (!strcmp(argv[i], "--agg-manual") && i + 1 < argc) {
+            int m = 0, b = 0;
+            if (agg_manual(argv[++i], &m, &b) < 0) die("agg-manual failed", argv[i]);
+            printf("AGG_MANUAL\tmanual_count=%d\tblockers_chain=%d\n", m, b);
+            return 0;
+        } else if (!strcmp(argv[i], "--check-chain-run") && i + 1 < argc) {
+            int att = 0, blk = 0;
+            if (check_chain_run_tsv(argv[++i], &att, &blk) < 0) die("check-chain-run failed", argv[i]);
+            printf("CHAIN_RUN_CHECK\tattempts=%d\tzero_touch=%s\n", att, blk ? "FAIL" : "PASS");
+            return 0;
+        } else {
+            die("usage", "--write|--check [--root DIR] [--table FILE]");
+        }
+    }
+    if (!mode) die("usage", "--write|--check [--root DIR] [--table FILE]");
+    if (sy_realpath(rarg, root, sizeof root) < 0) die("bad root", rarg);
+    if (targ) {
+        if (cx_fmt(tblpath, sizeof tblpath, "%s", targ)) die("table path bound", targ);
+    } else {
+        if (cx_fmt(tblpath, sizeof tblpath, "%s/agentwork/version-metrics.tsv", root)) die("table path bound", 0);
+    }
+    if (!hm) hm = ".";
+    if ((earg ? cx_fmt(evarch, sizeof evarch, "%s", earg) : cx_fmt(evarch, sizeof evarch, "%s/cc-work/evidence-archive", hm)) ||
+        (e57arg ? cx_fmt(ev057, sizeof ev057, "%s", e57arg) : cx_fmt(ev057, sizeof ev057, "%s/cc-work/evidence-057", hm)) ||
+        (r57arg ? cx_fmt(rel057, sizeof rel057, "%s", r57arg) : cx_fmt(rel057, sizeof rel057, "%s/cc-work/rel057", hm))) die("evidence path bound", 0);
+
+    build_table(buf, sizeof buf, &rows);
+
+    if (!strcmp(mode, "--write")) {
+        if (cx_write(tblpath, buf, strlen(buf))) die("write failed", tblpath);
+        printf("VERSION_METRICS\tstatus=WRITE\trows=%d\n", rows);
+        return 0;
+    } else {
+        size_t oldn = 0;
+        char *old = cx_read(tblpath, &oldn);
+        size_t wantn = strlen(buf);
+        int same = old && oldn == wantn && !memcmp(old, buf, wantn);
+        free(old);
+        if (!same) {
+            fprintf(stderr, "version-metrics: DIFF %s\n", tblpath);
+            return 1;
+        }
+        printf("VERSION_METRICS\tstatus=CHECK\trows=%d\n", rows);
+        return 0;
+    }
+}

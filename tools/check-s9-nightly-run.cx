@@ -20,6 +20,7 @@ static int runv(char **v, const char *cwd, int sec, char *out, int cap) {
     int rc;
     if (np_run(v, cwd, 0, sec, &r, why, sizeof why)) die(why);
     rc = r.rc;
+    if (rc) fprintf(stderr, "NIGHTLY_CHILD rc=%d cwd=%s\n%s\n%s\n", rc, cwd, r.out ? r.out : "", r.err ? r.err : "");
     if (out && cap > 0) {
         size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
         if (r.out && n && mm_copy(out, cap, r.out, (long)n)) die("copy");
@@ -52,11 +53,16 @@ int main(int argc, char **argv) {
     /* origin = 本检出 HEAD 的共享克隆(含 cx/ 库与 tools/s9-nightly.cx),分支 main */
     {
         char *g1[] = {"git", "clone", "-q", "--shared", root, org, 0};
+        char *g2[] = {"git", "-C", org, "checkout", "-q", "-B", "main", 0};
         char *g4[] = {"git", "clone", "-q", org, cl, 0};
         char *cp2[] = {"cp", com, cl, 0};
         char *b1[] = {"sh", com, src, "-o", fake, 0};
         rc = runv(g1, dir, 30, buf, sizeof buf);
         ck(rc == 0, "origin-commit");
+        /* A release root can be detached; the entry consumes origin/main,
+         * so publish the overlay there rather than on an unreachable HEAD. */
+        rc = runv(g2, dir, 10, buf, sizeof buf);
+        ck(rc == 0, "origin-main");
         /* 门里补丁只暂存未提交:克隆拿到的是 HEAD,故把被测根工作树版本覆盖进 origin 并在 origin 提交
          * (夜跑入口会把克隆 reset 到 origin/main,只覆盖克隆会被抹掉) */
         {
@@ -75,9 +81,9 @@ int main(int argc, char **argv) {
         rc = runv(g4, dir, 20, buf, sizeof buf);
         ck(rc == 0, "clone");
         runv(cp2, dir, 10, buf, sizeof buf);
-        /* 冷编译是耗时主因(单跑 22s 中约 20s;s9 并行负载下超 55s,0.0.56 提交档两批 FAIL)。
-         * 夜跑入口与克隆内 s9-nightly 两个编译与假 s9 编译互不依赖:并行预热后一并等待,墙钟取最长者而非三者之和。
-         * 预热结果不读;入口仍自己运行并判定,预热失败只损失省下的时间。 */
+        /* Compile preparation is not a verdict. The release-session failures were
+         * missing origin/main on detached fixtures, fixed above; retain warming
+         * only to keep compilation outside the timed fake execution. */
         if (pass || fm) {
             char ctool[4400];
             /* 与真跑同形的命令(无参数,工具立即报用法退出),使运行缓存持有编译;-o 预热不进运行缓存 */
@@ -89,10 +95,10 @@ int main(int argc, char **argv) {
             /* 运行缓存按产品路径分键:克隆内的夜跑用克隆自己的 unisacc.com,预热须同路径 */
             if (cx_fmt(ctool, sizeof ctool, "%s/tools/s9-nightly.cx", cl) || cx_fmt(clcom, sizeof clcom, "%s/%s", cl, "unisacc" ".com")) die("fmt");
             p1 = tq_warm_start(root, 40, w1);
-            p2 = tq_warm_start(root, 40, w2);
-            rc = runv(b1, root, 30, buf, sizeof buf);
             tq_warm_join(p1);
+            p2 = tq_warm_start(root, 40, w2);
             tq_warm_join(p2);
+            rc = runv(b1, root, 30, buf, sizeof buf);
         } else rc = runv(b1, root, 30, buf, sizeof buf);
         ck(rc == 0, "fake-compile");
     }

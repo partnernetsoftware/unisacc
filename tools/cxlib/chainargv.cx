@@ -5,7 +5,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #define AT_MAX 100000
-struct at_tok { char s[1024]; int line, string; };
+struct at_tok { char s[1024]; int line, string, character; };
 struct at_src { struct at_tok *t; int n; };
 static int at_bad, at_calls, at_diagnostics, at_diagnostic_mismatch;
 static const char *at_expected_diagnostic;
@@ -18,8 +18,8 @@ static struct at_src at_lex(const char *p){
  if(p[0]=='/'&&p[1]=='*'){p+=2;while(*p&&!(p[0]=='*'&&p[1]=='/')){if(*p++=='\n')line++;}if(!*p){at_diag("REFUSE",line,"unterminated comment");break;}p+=2;continue;}
  if(a.n==AT_MAX){at_diag("REFUSE",line,"token capacity");break;}
  if(a.n==capacity){int next=capacity*2;if(next>AT_MAX)next=AT_MAX;struct at_tok *grown=realloc(a.t,next*sizeof *a.t);if(!grown){free(a.t);exit(2);}a.t=grown;capacity=next;}
- struct at_tok *t=&a.t[a.n++];t->line=line;t->string=0;int n=0;
- if(*p=='"'||*p=='\''){int q=*p++;t->string=q=='"';while(*p&&*p!=q){if(n>=1020){at_diag("REFUSE",line,"token bound");break;}if(*p=='\\'&&p[1]){t->s[n++]=*p++;}t->s[n++]=*p++;}if(*p)p++;else at_diag("REFUSE",line,"unterminated literal");}
+ struct at_tok *t=&a.t[a.n++];t->line=line;t->string=0;t->character=0;int n=0;
+ if(*p=='"'||*p=='\''){int q=*p++;t->string=q=='"';t->character=q=='\'';while(*p&&*p!=q){if(n>=1020){at_diag("REFUSE",line,"token bound");break;}if(*p=='\\'&&p[1]){t->s[n++]=*p++;}t->s[n++]=*p++;}if(*p)p++;else at_diag("REFUSE",line,"unterminated literal");}
  else if(at_id(*p)){while(at_id(*p)){if(n>=1020){at_diag("REFUSE",line,"identifier bound");break;}t->s[n++]=*p++;}}
  else {t->s[n++]=*p++;if((t->s[0]=='+'&&*p=='+')||(t->s[0]=='&'&&*p=='&')||(t->s[0]=='!'&&*p=='=')||(t->s[0]=='='&&*p=='=')){t->s[n++]=*p++;}}
  t->s[n]=0;
@@ -93,10 +93,14 @@ static int at_expr(struct at_src *a,int lo,int hi,struct at_arg *v){
  if(!t->string&&!at_role(t->s)&&strcmp(t->s,"0"))return 0;
  if(cx_fmt(v->value,sizeof v->value,"%s",t->s))return 0;return 1;
 }
+/* Parser diagnostics may name a slash-separated set sharing one signature. */
+static const char *at_needs(const char *diagnostic,const char *cmd){
+ const char *needs=strstr(diagnostic," needs ");if(!needs)return 0;const char *p=diagnostic;size_t n=strlen(cmd);
+ while(p<needs){const char *end=p;while(end<needs&&*end!='/')end++;if((size_t)(end-p)==n&&!strncmp(p,cmd,n))return needs+7;p=end+1;}return 0;
+}
 static int at_contract(struct at_src *c,const char *cmd,char labels[20][64],int *minimum){
- char prefix[160];cx_fmt(prefix,sizeof prefix,"%s needs ",cmd);
- for(int i=0;i<c->n;i++)if(c->t[i].string){const char *p=0;if(!strncmp(c->t[i].s,prefix,strlen(prefix)))p=c->t[i].s+strlen(prefix);
- else if(!strncmp(c->t[i].s,"usage: ",7)){const char *q=c->t[i].s+7;size_t n=strlen(cmd);if(!strncmp(q,cmd,n)&&q[n]==' ')p=q+n+1;}
+ for(int i=0;i<c->n;i++)if(c->t[i].string){const char *p=at_needs(c->t[i].s,cmd);
+ if(!p&&!strncmp(c->t[i].s,"usage: ",7)){const char *q=c->t[i].s+7;size_t n=strlen(cmd);if(!strncmp(q,cmd,n)&&q[n]==' ')p=q+n+1;}
  if(!p)continue;
  /* Require a real argc rejection guard in this parser before its diagnostic. */
  *minimum=0;for(int z=i-1;z>=0&&z>i-250;z--)if(at_eq(c,z,"argc")&&(at_eq(c,z+1,"<")||at_eq(c,z+1,"!="))&&c->t[z+2].s[0]>='0'&&c->t[z+2].s[0]<='9'){int m=atoi(c->t[z+2].s);if(!*minimum||m<*minimum)*minimum=m;if(at_eq(c,z+1,"<"))break;}
@@ -115,8 +119,8 @@ static int at_option(struct at_src *c,const char *s){
  }return 0;
 }
 static int at_bindings(struct at_src *c,const char *cmd,char labels[20][64],int k){
- char prefix[160];cx_fmt(prefix,sizeof prefix,"%s needs ",cmd);int diagnostic=-1;
- for(int i=0;i<c->n;i++)if(c->t[i].string&&!strncmp(c->t[i].s,prefix,strlen(prefix))){diagnostic=i;break;}
+ int diagnostic=-1;
+ for(int i=0;i<c->n;i++)if(c->t[i].string&&at_needs(c->t[i].s,cmd)){diagnostic=i;break;}
  if(diagnostic<0){
  const char *function="main";
  for(int i=0;i<c->n;i++)if(c->t[i].string&&!strcmp(c->t[i].s,cmd)){
@@ -182,6 +186,7 @@ static void at_check(struct at_src *callee,struct at_arg *v,int n,int whole){
  }
  at_calls++;
 }
+static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,struct at_arg *commands,int capacity);
 static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  for(int call=0;call<a->n;call++){
  int isstep=at_eq(a,call,"step")||at_eq(a,call,"step_secs");int iswhole=at_eq(a,call,"bound_sh_secs");
@@ -193,13 +198,16 @@ static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  /* Locate the lexical declaration of precisely this array. */
  int decl=-1;for(int j=call-1;j>=2;j--)if(at_eq(a,j,name)&&at_eq(a,j+1,"[")&&at_eq(a,j-1,"*")&&at_eq(a,j-2,"char")){decl=j;break;}
  if(decl<0){if(isstep)at_diag("REFUSE",a->t[call].line,"array declaration unavailable");continue;}
- struct at_arg v[128];int n=0,unknown=0,terminated=0;
+ struct at_arg v[128],commands[32];int n=0,unknown=0,terminated=0,ncommands=0;
  int close=at_end(a,decl+1,"[","]"),j=close+1;
  if(at_eq(a,j,"=")&&at_eq(a,j+1,"{")){
- int end=at_end(a,j+1,"{","}");int lo=j+2;for(int z=lo;z<=end;z++)if(at_eq(a,z,",")||z==end){if(lo==z){lo=z+1;continue;}if(n==128||!at_expr(a,lo,z,&v[n]))unknown=1;else if(!strcmp(v[n].value,"0"))terminated=1;else n++;lo=z+1;}j=end+1;
+ int end=at_end(a,j+1,"{","}");int lo=j+2;for(int z=lo;z<=end;z++)if(at_eq(a,z,",")||z==end){if(lo==z){lo=z+1;continue;}
+ if(n==128)unknown=1;
+ else if(!at_expr(a,lo,z,&v[n])){if(n==0&&(ncommands=at_queue_commands(a,decl,call,lo,z,commands,32))>0){v[n++]=commands[0];}else unknown=1;}
+ else if(!strcmp(v[n].value,"0"))terminated=1;else n++;lo=z+1;}j=end+1;
  }
  for(;j<call;j++){
- if(at_eq(a,j,"n")&&at_eq(a,j+1,"=")&&at_eq(a,j+2,"0")&&(at_eq(a,j+3,";")||at_eq(a,j+3,","))){n=0;terminated=0;unknown=0;}
+ if(at_eq(a,j,"n")&&at_eq(a,j+1,"=")&&at_eq(a,j+2,"0")&&(at_eq(a,j+3,";")||at_eq(a,j+3,","))){n=0;terminated=0;unknown=0;ncommands=0;}
  if(at_eq(a,j,name)&&!at_eq(a,j+1,"[")&&(at_eq(a,j-1,"(")||at_eq(a,j-1,",")))unknown=1;
  if(!at_eq(a,j,name)||!at_eq(a,j+1,"["))continue;
  /* Reading an array is harmless; writes through a passed alias are not supported. */
@@ -212,7 +220,7 @@ static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  else {
  if(!strcmp(v[idx].value,"span_roots")&&(!at_tail_loop(a,j,"cf_root_count()")||!at_eq(a,z-2,"i")))unknown=1;
  if(!strcmp(v[idx].value,"parts")&&n>2&&!strcmp(v[2].value,"merge")&&(!at_tail_loop(a,j,"slices")||!at_eq(a,z-2,"i")||!at_partition_flow(a)))unknown=1;
- if(idx==0)n=0;if(idx!=n)unknown=1;n=idx+1;terminated=0;
+ if(idx==0){n=0;ncommands=0;}if(idx!=n)unknown=1;n=idx+1;terminated=0;
  }
  j=z;
  }
@@ -220,18 +228,189 @@ static void at_scan(struct at_src *a,struct at_src *step,struct at_src *whole){
  if(iswhole&&(n==0||strcmp(v[0].value,"wft"))){if(unknown&&at_find(a,decl,call,"wft")>=0)at_diag("REFUSE",a->t[call].line,"unknown whole-front envelope construction");continue;}
  if(iswhole&&n>2&&!strcmp(v[2].value,"front")&&(at_find(a,decl,call,"offset")>=0||at_find(a,decl,call,"amount")>=0)&&!at_partition_flow(a)){at_diag("REFUSE",a->t[call].line,"unsupported dynamic partition construction");continue;}
  if(unknown||!terminated){at_diag("REFUSE",a->t[call].line,"unsupported array construction or missing terminator");continue;}
- at_check(isstep?step:whole,v,n,iswhole);
+ if(ncommands){for(int q=0;q<ncommands;q++){v[0]=commands[q];at_check(isstep?step:whole,v,n,iswhole);}}
+ else at_check(isstep?step:whole,v,n,iswhole);
  }
 }
-static int at_run(const char *candidate,const char *chain,const char *front){
+/* 测试专用结构变异：按调用及 argv 下标事实交换绑定，不依赖空白或源码片段。
+ * 仅支持 cs_build 的直接 argv 转发及 physical 的 ROOT/PKG 绑定；歧义拒绝。 */
+static int at_swap_binding(struct at_src *a,int whole){
+ int first=-1,second=-1,matches=0,build_call=-1;
+ if(!whole)for(int i=0;i<a->n;i++)if(a->t[i].string&&at_needs(a->t[i].s,"build")){
+ int ret=at_find(a,i+1,a->n,"return");if(ret<0||build_call>=0)return 0;build_call=ret+1;
+ }
+ for(int i=0;i+8<a->n;i++){
+ if(!whole&&i==build_call&&at_eq(a,i,"cs_build")&&at_eq(a,i-1,"return")&&at_eq(a,i+1,"(")){
+ int end=at_end(a,i+1,"(",")"),x=-1,y=-1;
+ for(int j=i+2;j+3<end;j++)if(at_eq(a,j,"argv")&&at_eq(a,j+1,"[")&&at_eq(a,j+3,"]")){if(at_eq(a,j+2,"2"))x=j+2;if(at_eq(a,j+2,"3"))y=j+2;}
+ if(x>=0&&y>=0){first=x;second=y;matches++;}
+ }
+ if(whole&&at_eq(a,i,"physical")&&at_eq(a,i+1,"(")&&at_eq(a,i+2,"argv")&&at_eq(a,i+3,"[")&&at_eq(a,i+5,"]")&&at_eq(a,i+6,",")){
+ if(at_eq(a,i+4,"2")&&at_eq(a,i+7,"root")){if(first>=0)return 0;first=i+4;}
+ if(at_eq(a,i+4,"3")&&at_eq(a,i+7,"pkg")){if(second>=0)return 0;second=i+4;}
+ }
+ }
+ if(first<0||second<0||(!whole&&matches!=1))return 0;
+ struct at_tok saved=a->t[first];a->t[first]=a->t[second];a->t[second]=saved;return 1;
+}
+static int at_envelopes(struct at_src *a);
+static int at_run(const char *candidate,const char *chain,const char *front,int mutation){
  at_bad=0;at_calls=0;at_diagnostics=0;at_diagnostic_mismatch=0;struct at_src a=at_lex(candidate),b=at_lex(chain),c=at_lex(front);
+ if(mutation&&!at_swap_binding(mutation==2?&c:&b,mutation==2)){free(a.t);free(b.t);free(c.t);at_diag("REFUSE",0,"fixture binding structure unavailable or ambiguous");return 2;}
  /* Envelope implementations are part of the proof, not just their names. */
- if(!strstr(candidate,"v[n++] = args[i]")||!strstr(candidate,"return bound_sh_secs(root, v, secs)")||!strstr(candidate,"return step_secs(root, args, 55)")||!strstr(candidate,"v[n++] = rest[i]"))at_diag("REFUSE",0,"unsupported forwarding envelope");
+ if(!at_envelopes(&a))at_diag("REFUSE",0,"unsupported forwarding envelope");
  at_scan(&a,&b,&c);if(!at_calls)at_diag("REFUSE",0,"no supported calls");
  printf("CHAIN_ARGV_CHECK\tcalls=%d\tstatus=%s\n",at_calls,at_bad?"REFUSE":"PASS");free(a.t);free(b.t);free(c.t);return at_bad;
 }
 int ca_check(const char *candidate, const char *chain, const char *front, const char *expected, int *diagnostics, int *mismatch) {
- at_expected_diagnostic=expected; int rc=at_run(candidate,chain,front);
+ at_expected_diagnostic=expected; int rc=at_run(candidate,chain,front,0);
  if(diagnostics)*diagnostics=at_diagnostics; if(mismatch)*mismatch=at_diagnostic_mismatch;
  at_expected_diagnostic=0; return rc;
+}
+int ca_check_binding_swap(const char *candidate,const char *chain,const char *front,int whole,const char *expected,int *diagnostics,int *mismatch){
+ at_expected_diagnostic=expected;int rc=at_run(candidate,chain,front,whole?2:1);
+ if(diagnostics)*diagnostics=at_diagnostics;if(mismatch)*mismatch=at_diagnostic_mismatch;
+ at_expected_diagnostic=0;return rc;
+}
+/* 公共只读结构接口：句柄独占词法副本，调用者负责释放。非通用 C 类型分析器。
+ * 注释被跳过；字面量与语法 token 分离；非法词法、括号及过深嵌套拒绝。 */
+void ca_tokens_free(void *tokens){struct at_src *a=tokens;if(a){free(a->t);free(a);}}
+int ca_token_count(void *tokens){struct at_src *a=tokens;return a?a->n:0;}
+const char *ca_token_text(void *tokens,int i){struct at_src *a=tokens;return a&&i>=0&&i<a->n?a->t[i].s:"";}
+int ca_token_kind(void *tokens,int i){struct at_src *a=tokens;if(!a||i<0||i>=a->n)return -1;return a->t[i].string?2:(a->t[i].character?3:(at_id(a->t[i].s[0])?1:0));}
+int ca_token_is(void *tokens,int i,const char *s){int k=ca_token_kind(tokens,i);return k>=0&&k<2&&s&&!strcmp(ca_token_text(tokens,i),s);}
+int ca_token_end(void *tokens,int start){
+ int stack[1024],depth=0,n=ca_token_count(tokens);
+ if(!ca_token_is(tokens,start,"(")&&!ca_token_is(tokens,start,"[")&&!ca_token_is(tokens,start,"{"))return -1;
+ for(int i=start;i<n;i++){
+ if(ca_token_kind(tokens,i)!=0)continue;const char *s=ca_token_text(tokens,i);
+ if(!strcmp(s,"(")||!strcmp(s,"[")||!strcmp(s,"{")){if(depth==1024)return -1;stack[depth++]=s[0];}
+ else if(!strcmp(s,")")||!strcmp(s,"]")||!strcmp(s,"}")){
+ if(!depth)return -1;int open=stack[--depth];if((open=='('&&s[0]!=')')||(open=='['&&s[0]!=']')||(open=='{'&&s[0]!='}'))return -1;if(!depth)return i;
+ }
+ }return -1;
+}
+void *ca_tokens(const char *source){
+ if(!source)return 0;int bad=at_bad,diagnostics=at_diagnostics,mismatch=at_diagnostic_mismatch;const char *expected=at_expected_diagnostic;
+ at_bad=0;at_expected_diagnostic=0;struct at_src parsed=at_lex(source);int failed=at_bad;
+ at_bad=bad;at_diagnostics=diagnostics;at_diagnostic_mismatch=mismatch;at_expected_diagnostic=expected;
+ struct at_src *a=malloc(sizeof *a);if(!a){free(parsed.t);return 0;}*a=parsed;
+ for(int i=0;!failed&&i<a->n;i++)if(ca_token_kind(a,i)==0){
+ if(ca_token_is(a,i,"(")||ca_token_is(a,i,"[")||ca_token_is(a,i,"{")){int end=ca_token_end(a,i);if(end<0)failed=1;else i=end;}
+ else if(ca_token_is(a,i,")")||ca_token_is(a,i,"]")||ca_token_is(a,i,"}"))failed=1;
+ }
+ if(failed){ca_tokens_free(a);return 0;}return a;
+}
+int ca_function(void *tokens,const char *name,int *body,int *end){
+ int found=0,b=-1,e=-1,n=ca_token_count(tokens);if(body)*body=-1;if(end)*end=-1;if(!name)return 0;
+ for(int i=0;i<n;i++){
+ if(ca_token_is(tokens,i,"{")){int close=ca_token_end(tokens,i);if(close<0)return 0;i=close;continue;}
+ if(!ca_token_is(tokens,i,name)||!ca_token_is(tokens,i+1,"("))continue;
+ int close=ca_token_end(tokens,i+1);if(close<0)return 0;
+ if(ca_token_is(tokens,close+1,"{")){b=close+1;e=ca_token_end(tokens,b);if(e<0)return 0;found++;i=e;}
+ }
+ if(found!=1)return 0;if(body)*body=b;if(end)*end=e;return 1;
+}
+int ca_call_arg(void *tokens,int call,int arg,int *lo,int *hi){
+ if(lo)*lo=-1;if(hi)*hi=-1;if(ca_token_kind(tokens,call)!=1||!ca_token_is(tokens,call+1,"("))return -1;
+ int end=ca_token_end(tokens,call+1);if(end<0)return -1;int start=call+2,count=0;
+ if(start==end)return arg<0?0:-1;
+ for(int i=start;i<=end;i++){
+ if(i<end&&(ca_token_is(tokens,i,"(")||ca_token_is(tokens,i,"[")||ca_token_is(tokens,i,"{"))){int close=ca_token_end(tokens,i);if(close<0||close>=end)return -1;i=close;continue;}
+ if(i==end||ca_token_is(tokens,i,",")){if(start==i)return -1;if(count==arg){if(lo)*lo=start;if(hi)*hi=i;}count++;start=i+1;}
+ }
+ return arg>=count?-1:count;
+}
+/* 包络支持域：唯一命名函数、直接三参数转发、带容量界限的顺序复制循环。
+ * 逐项检查函数/调用/下标/循环角色，不以源码片段或全文 token 序列作证。 */
+static int at_env_atom(void *a,int lo,int hi,const char *name){return hi==lo+1&&ca_token_is(a,lo,name);}
+static int at_env_index(void *a,int lo,int hi,const char *array,const char *index){
+ return hi==lo+4&&ca_token_is(a,lo,array)&&ca_token_is(a,lo+1,"[")&&ca_token_is(a,hi-1,"]")&&at_env_atom(a,lo+2,hi-1,index);
+}
+static int at_env_forward(void *a,const char *function,const char *callee,const char *second,const char *third,int returned){
+ int body,end,found=0;if(!ca_function(a,function,&body,&end))return 0;
+ for(int i=body+1;i<end;i++)if(ca_token_is(a,i,callee)&&ca_token_is(a,i+1,"(")){
+ int lo,hi;if(ca_call_arg(a,i,0,&lo,&hi)!=3) return 0;
+ if(returned&&!ca_token_is(a,i-1,"return"))return 0;
+ if(returned&&!at_env_atom(a,lo,hi,"root"))return 0;
+ if(ca_call_arg(a,i,1,&lo,&hi)!=3||!at_env_atom(a,lo,hi,second))return 0;
+ if(ca_call_arg(a,i,2,&lo,&hi)!=3||!at_env_atom(a,lo,hi,third))return 0;
+ if(returned&&!ca_token_is(a,ca_token_end(a,i+1)+1,";"))return 0;found++;
+ }
+ return found==1;
+}
+static int at_env_copy(void *a,const char *function,const char *source,const char *capacity){
+ int body,end,loops=0,terminated=0,nzero=0,izero=0,loopend=-1;if(!ca_function(a,function,&body,&end))return 0;
+ for(int i=body+1;i<end;i++){
+ if(ca_token_is(a,i,"n")&&ca_token_is(a,i+1,"=")&&ca_token_is(a,i+2,"0"))nzero++;
+ if(ca_token_is(a,i,"i")&&ca_token_is(a,i+1,"=")&&ca_token_is(a,i+2,"0"))izero++;
+ if(!ca_token_is(a,i,"while")||!ca_token_is(a,i+1,"("))continue;
+ int close=ca_token_end(a,i+1),join=-1;if(close<0||!ca_token_is(a,close+1,"{"))return 0;
+ for(int j=i+2;j<close;j++)if(ca_token_is(a,j,"&&")){if(join>=0)return 0;join=j;}
+ if(join<0||!at_env_index(a,i+2,join,source,"i"))return 0;
+ /* RHS is the bounded append capacity fact: n + 1 < capacity. */
+ int lo=join+1;if(close-lo!=5||!ca_token_is(a,lo,"n")||!ca_token_is(a,lo+1,"+")||!ca_token_is(a,lo+2,"1")||!ca_token_is(a,lo+3,"<")||!ca_token_is(a,lo+4,capacity))return 0;
+ int lb=close+1,le=ca_token_end(a,lb),copies=0,increments=0;if(le<0)return 0;
+ for(int j=lb+1;j<le;j++){
+ if(ca_token_is(a,j,"i")&&ca_token_is(a,j+1,"++")&&ca_token_is(a,j+2,";"))increments++;
+ if(!ca_token_is(a,j,"v")||!ca_token_is(a,j+1,"["))continue;
+ int sub=ca_token_end(a,j+1);if(sub<0||!ca_token_is(a,sub+1,"="))return 0;
+ if(sub!=j+4||!ca_token_is(a,j+2,"n")||!ca_token_is(a,j+3,"++"))return 0;
+ int rhs=sub+2,semi=rhs;while(semi<le&&!ca_token_is(a,semi,";"))semi++;
+ if(semi==le||!at_env_index(a,rhs,semi,source,"i"))return 0;copies++;j=semi;
+ }
+ if(copies!=1||increments!=1)return 0;loops++;loopend=le;i=le;
+ }
+ if(loops!=1||nzero!=1||izero!=1)return 0;
+ for(int i=loopend+1;i<end;i++)if(ca_token_is(a,i,"v")&&ca_token_is(a,i+1,"[")){
+ int sub=ca_token_end(a,i+1);if(sub<0)return 0;
+ if(ca_token_is(a,sub+1,"=")){if(!at_env_index(a,i,sub+1,"v","n")||!ca_token_is(a,sub+2,"0")||!ca_token_is(a,sub+3,";"))return 0;terminated++;}
+ }
+ return terminated==1;
+}
+static int at_envelopes(struct at_src *a){
+ return at_env_copy(a,"step_secs","args","64")&&at_env_forward(a,"step_secs","bound_sh_secs","v","secs",1)&&
+ at_env_forward(a,"step","step_secs","args","55",1)&&at_env_copy(a,"bound_sh_secs","rest","72")&&
+ at_env_forward(a,"bound_sh_secs","pr_code","v","secs",0);
+}
+int ca_forwarding_envelope(const char *source){void *a=ca_tokens(source);if(!a)return 0;int ok=at_envelopes(a);ca_tokens_free(a);return ok;}
+/* 有限常量命令队列：table literals -> for(index=0;index<N;index++) ->
+ * const char *alias=table[index] -> argv[0]=alias。枚举每个命令核合同，不给alias通用角色。 */
+static int at_queue_commands(struct at_src *a,int decl,int call,int lo,int hi,struct at_arg *commands,int capacity){
+ while(lo<hi&&ca_token_is(a,lo,"(")){int close=ca_token_end(a,lo);if(close<0||close>=hi)return 0;lo=close+1;}
+ if(hi!=lo+1||ca_token_kind(a,lo)!=1)return 0;const char *alias=ca_token_text(a,lo);
+ int loop=-1,body=-1;
+ for(int i=0;i<decl;i++)if(ca_token_is(a,i,"for")&&ca_token_is(a,i+1,"(")){
+ int close=ca_token_end(a,i+1);if(close<0||!ca_token_is(a,close+1,"{"))continue;
+ int end=ca_token_end(a,close+1);if(close+1<decl&&call<end){loop=i;body=close+1;}
+ }
+ if(loop<0)return 0;int close=ca_token_end(a,loop+1),s1=-1,s2=-1;
+ for(int i=loop+2;i<close;i++)if(ca_token_is(a,i,";")){if(s1<0)s1=i;else if(s2<0)s2=i;else return 0;}
+ if(s1<0||s2<0)return 0;int init=loop+2;if(ca_token_is(a,init,"int"))init++;
+ if(s1-init!=3||ca_token_kind(a,init)!=1||!ca_token_is(a,init+1,"=")||!ca_token_is(a,init+2,"0"))return 0;
+ const char *index=ca_token_text(a,init);
+ if(s2-s1!=4||!ca_token_is(a,s1+1,index)||!ca_token_is(a,s1+2,"<")||ca_token_kind(a,s1+3)!=1)return 0;
+ const char *bound=ca_token_text(a,s1+3);for(int i=0;bound[i];i++)if(bound[i]<'0'||bound[i]>'9')return 0;
+ int count=atoi(bound);if(count<1||count>capacity||close-s2!=3||!ca_token_is(a,s2+1,index)||!ca_token_is(a,s2+2,"++"))return 0;
+ int binding=-1,table_use=-1;
+ for(int i=body+1;i<decl;i++)if(ca_token_is(a,i,alias)&&ca_token_is(a,i+1,"=")){
+ if(binding>=0||!ca_token_is(a,i-1,"*")||!ca_token_is(a,i-2,"char")||!ca_token_is(a,i-3,"const"))return 0;
+ int end=ca_token_end(a,i+3);if(!ca_token_is(a,i+3,"[")||end<0||!at_env_index(a,i+2,end+1,ca_token_text(a,i+2),index)||!ca_token_is(a,end+1,";"))return 0;
+ binding=i;table_use=i+2;
+ }
+ if(binding<0)return 0;const char *table=ca_token_text(a,table_use);int table_decl=-1,table_end=-1;
+ for(int i=3;i<loop;i++)if(ca_token_is(a,i,table)&&ca_token_is(a,i+1,"[")&&ca_token_is(a,i-1,"*")&&ca_token_is(a,i-2,"char")&&ca_token_is(a,i-3,"const")){
+ if(table_decl>=0)return 0;int sub=ca_token_end(a,i+1);if(sub<0||sub!=i+2||!ca_token_is(a,sub+1,"=")||!ca_token_is(a,sub+2,"{"))return 0;
+ table_decl=i;int b=sub+2;table_end=ca_token_end(a,b);if(table_end<0)return 0;int n=0;
+ for(int j=b+1;j<table_end;){if(n==capacity||ca_token_kind(a,j)!=2)return 0;
+ if(!at_expr(a,j,j+1,&commands[n++]))return 0;j++;if(j<table_end){if(!ca_token_is(a,j,","))return 0;j++;}}
+ if(n!=count)return 0;
+ }
+ if(table_decl<0)return 0;
+ for(int i=table_end+1;i<call;i++)if(ca_token_is(a,i,table)&&i!=table_use)return 0;
+ for(int i=body+1;i<call;i++){
+ if(ca_token_is(a,i,index)&&(ca_token_is(a,i+1,"=")||ca_token_is(a,i+1,"++")||ca_token_is(a,i+1,"-")))return 0;
+ if(i>binding&&ca_token_is(a,i,alias)&&(ca_token_is(a,i+1,"=")||ca_token_is(a,i+1,"++")))return 0;
+ }
+ return count;
 }

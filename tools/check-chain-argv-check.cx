@@ -1,6 +1,10 @@
-/* 轻夹具：直接复用核对器实现；正控读取真实三个源码，负控仅变异内存副本。
+/* 轻夹具：真实三源正控；负控在真实候选后追加独立调用事实，不寻找源码片段。
  * 不创建快照、不启动编译器、不运行链。未知构造须 REFUSE，不能当跳过成功。
- * 用法：check-chain-argv-check [ROOT]；进程内复用实现，无子编译。 */
+ * 原九种调用拒绝意图及 G2 三负控由最小行为样本覆盖；两个被调方负控变异真实结构。
+ * 支持边界：有限 argv/角色域及有界常量命令队列逐项合同核对；不声称是通用 C AST。
+ * refactor 的 parse_args/sites 面向调用且依赖独立工具进程，不能表达数组构造；
+ * 因而复用核对器已有词法、括号和绑定分析，不另建源码文本锚。
+ * 用法：check-chain-argv-check [ROOT | --tokens]；进程内复用实现，无子编译。 */
 #pragma unisa use cxlib.chainargv
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -10,37 +14,89 @@
 #pragma unisa use sys.posix
 static int fixture_failed;
 static void fixture_ck(int ok,const char *name){printf("%s\tcheck-chain-argv-check.%s\n",ok?"PASS":"FAIL",name);if(!ok)fixture_failed++;}
-static char *fixture_replace(const char *s,const char *from,const char *to){
- const char *p=strstr(s,from);if(!p)return 0;size_t a=p-s,b=strlen(from),c=strlen(to),n=strlen(s);char *r=malloc(n-b+c+1);if(!r)return 0;
- if(mm_copy(r,n-b+c+1,s,a)||mm_copy(r+a,n-b+c+1-a,to,c)||mm_copy(r+a+c,n-a-b+1,p+b,n-a-b+1)){free(r);return 0;}return r;
+static void fixture_case(const char *source,const char *chain,const char *front,const char *body,const char *name,const char *diagnostic){
+ size_t n=strlen(source),m=strlen(body);char *changed=malloc(n+m+64);if(!changed){fixture_ck(0,"fixture-allocation");return;}
+ if(cx_fmt(changed,n+m+64,"%s\nvoid fixture_probe(void){%s}\n",source,body)){free(changed);fixture_ck(0,"fixture-construction");return;}
+ int diagnostics=0,mismatch=0;int rc=ca_check(changed,chain,front,diagnostic,&diagnostics,&mismatch);fixture_ck(diagnostic?(rc==2&&diagnostics>0&&!mismatch):(rc==0&&!diagnostics),name);free(changed);
 }
-static void fixture_case(const char *source,const char *chain,const char *front,const char *from,const char *to,const char *name,const char *diagnostic){
- char *changed=fixture_replace(source,from,to);if(!changed){fixture_ck(0,"mutation-anchor-missing");return;}
- int diagnostics=0,mismatch=0;int rc=ca_check(changed,chain,front,diagnostic,&diagnostics,&mismatch);fixture_ck(rc==2&&diagnostics>0&&!mismatch,name);free(changed);
+static void fixture_envelope_case(const char *args_source,const char *rest_source,const char *callee,const char *seconds,const char *capacity,const char *extra,const char *name,int want){
+ char source[4096];
+ int rc=cx_fmt(source,sizeof source,
+ "int step_secs(const char *root,char **args,int secs){char *v[64];int n=0,i=0;while (args[i] && n + 1 < %s) { v[n++] = %s[i]; i++; } v[n]=0;return %s(root,v,secs);}\n"
+ "int step(const char *root,char **args){ return step_secs(root,args,%s); }\n"
+ "int bound_sh_secs(const char *root,char **rest,int secs){char *v[100];int n=0,i=0;while(rest[i]&&n+1<72){v[n++]=%s[i];i++;}v[n]=0;return pr_code(root,v,secs);}\n%s\n",
+ capacity,args_source,callee,seconds,rest_source,extra);
+ fixture_ck(!rc&&ca_forwarding_envelope(source)==want,name);
+}
+/* --tokens 只测公共结构API，不读取仓库，不编译也不执行被分析源码。 */
+static int fixture_tokens(void){
+ void *t=ca_tokens("/* int decoy(){ bad(); } */ const char *s=\"int decoy(){bad();}\"; int probe(int x){return outer(inner(x,2),a[slot(1,2)],\",)\",')');}");
+ int body=-1,end=-1,lo=-1,hi=-1;fixture_ck(t&&ca_function(t,"probe",&body,&end)&&ca_token_is(t,body,"{")&&ca_token_is(t,end,"}"),"tokens-function-body");
+ fixture_ck(t&&!ca_function(t,"decoy",0,0),"tokens-comment-string-decoys");
+ int call=-1;for(int i=0;i<ca_token_count(t);i++)if(ca_token_is(t,i,"outer"))call=i;
+ int argc=ca_call_arg(t,call,1,&lo,&hi);fixture_ck(argc==4&&ca_token_is(t,lo,"a")&&ca_token_is(t,hi-1,"]"),"tokens-nested-arguments");
+ argc=ca_call_arg(t,call,2,&lo,&hi);fixture_ck(argc==4&&hi==lo+1&&ca_token_kind(t,lo)==2&&!ca_token_is(t,lo,",)"),"tokens-string-kind");
+ argc=ca_call_arg(t,call,3,&lo,&hi);fixture_ck(argc==4&&hi==lo+1&&ca_token_kind(t,lo)==3&&!ca_token_is(t,lo,")"),"tokens-character-kind");
+ fixture_ck(ca_token_kind(t,-1)==-1&&!strcmp(ca_token_text(t,-1),"")&&ca_token_end(t,-1)==-1&&ca_call_arg(t,call,4,0,0)==-1,"tokens-invalid-index");
+ ca_tokens_free(t);
+ t=ca_tokens("int probe(void){return 1;} int probe(void){return 2;}");fixture_ck(t&&!ca_function(t,"probe",&body,&end)&&body==-1&&end==-1,"tokens-ambiguous-function");ca_tokens_free(t);
+ t=ca_tokens("int probe(void);");fixture_ck(t&&!ca_function(t,"probe",0,0),"tokens-prototype-not-definition");ca_tokens_free(t);
+ t=ca_tokens("int probe(){ f(a,,b); }");call=-1;for(int i=0;i<ca_token_count(t);i++)if(ca_token_is(t,i,"f"))call=i;
+ fixture_ck(t&&ca_call_arg(t,call,0,&lo,&hi)==-1,"tokens-empty-argument-refused");ca_tokens_free(t);
+ t=ca_tokens("int probe(){return (1];}");fixture_ck(!t,"tokens-mismatched-delimiter-refused");ca_tokens_free(t);
+ t=ca_tokens("/* unterminated");fixture_ck(!t,"tokens-comment-refused");ca_tokens_free(t);
+ t=ca_tokens("\"unterminated");fixture_ck(!t,"tokens-string-refused");ca_tokens_free(t);
+ t=ca_tokens("'unterminated");fixture_ck(!t,"tokens-character-refused");ca_tokens_free(t);
+ fixture_ck(!ca_tokens(0),"tokens-null-refused");
+ fixture_envelope_case("args","rest","bound_sh_secs","55","64","/* formatting and comment decoy: v[n++]=wrong[i]; */","envelope-structure-positive",1);
+ fixture_envelope_case("rest","rest","bound_sh_secs","55","64","","envelope-args-copy-role-refused",0);
+ fixture_envelope_case("args","args","bound_sh_secs","55","64","","envelope-rest-copy-role-refused",0);
+ fixture_envelope_case("args","rest","unknown_bound","55","64","","envelope-forward-call-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","54","64","","envelope-step-deadline-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","55","65","","envelope-copy-bound-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","54","64","const char *decoy=\"return step_secs(root,args,55);\";","envelope-string-decoy-refused",0);
+ fixture_envelope_case("args","rest","bound_sh_secs","55","64","int step(const char *root,char **args){return step_secs(root,args,55);}","envelope-function-ambiguity-refused",0);
+ printf("CHECK_CHAIN_ARGV_TOKENS\tfailed=%d\n",fixture_failed);return fixture_failed?1:0;
 }
 int main(int argc,char **argv){
- if(argc!=1&&argc!=2){fprintf(stderr,"usage: check-chain-argv-check [ROOT]\n");return 2;}
+ if(argc==2&&!strcmp(argv[1],"--tokens"))return fixture_tokens();
+ if(argc!=1&&argc!=2){fprintf(stderr,"usage: check-chain-argv-check [ROOT | --tokens]\n");return 2;}
  if(argc==2&&sy_chdir(argv[1])){fprintf(stderr,"REFUSE\tfixture ROOT unreadable\n");return 2;}
  size_t n;char *a=cx_read("tools/candidate-chain.cx",&n),*b=cx_read("tools/chain-step.cx",&n),*c=cx_read("tools/whole-front.cx",&n);
  if(!a||!b||!c){fprintf(stderr,"REFUSE\tfixture source unreadable\n");free(a);free(b);free(c);return 2;}
  int baseline=ca_check(a,b,c,0,0,0);fixture_ck(baseline==0,"real-source-positive");
  if(baseline){free(a);free(b);free(c);printf("CHECK_CHAIN_ARGV_CHECK\tfailed=%d\tnegative_controls=NOT_RUN-baseline-refused\n",fixture_failed);return 1;}
- fixture_case(a,b,c,"a[3] = build; a[4] = 0;","a[3] = 0; a[4] = 0;","missing-positional","callee argc guard rejects missing argument");
- fixture_case(a,b,c,"a[1] = (char *)rev; a[2] = snap; a[3] = build;","a[1] = snap; a[2] = (char *)rev; a[3] = build;","swapped-positionals","positional role/order mismatch");
- fixture_case(a,b,c,"a[n++]=\"--identity-helper\";a[n++]=(char *)helper;","a[n++]=(char *)helper;","blocker3-bare-helper","bare helper or unexpected positional argument");
- fixture_case(a,b,c,"a[n++]=(char *)snap;a[n++]=(char *)pkg;","a[n++]=(char *)pkg;a[n++]=(char *)snap;","g2-fixedpoint-swapped-positionals","positional role/order mismatch");
- fixture_case(a,b,c,"a[n++]=\"--identity-helper\";a[n++]=(char *)helper;","a[n++]=\"--identity-helper\";","g2-fixedpoint-missing-helper-value","missing option value");
- fixture_case(a,b,c,"if(step(root,a))die(keys?\"fixedpoint objects\":\"fixedpoint link\",phase);","if(unknown_step(root,a))die(keys?\"fixedpoint objects\":\"fixedpoint link\",phase);","g2-fixedpoint-unknown-wrapper","relevant argv escapes through unknown wrapper");
- fixture_case(a,b,c,"a[1] = (char *)rev; a[2] = snap; a[3] = build;","a[1] = unknown_builder(rev); a[2] = snap; a[3] = build;","unknown-construction-refused","unsupported array construction or missing terminator");
- fixture_case(a,b,c,"v[n++] = (char *)snap; v[n++] = (char *)pkg; v[n++] = (char *)ctor;","v[n++] = (char *)pkg; v[n++] = (char *)snap; v[n++] = (char *)ctor;","whole-front-swapped-positionals","positional role/order mismatch");
- fixture_case(a,b,c,"if (step(root, a)) die(\"build\", build);","if (unknown_step(root, a)) die(\"build\", build);","unknown-wrapper-refused","relevant argv escapes through unknown wrapper");
- fixture_case(a,b,c,"v[n++] = offset; v[n++] = amount;","v[n++] = amount; v[n++] = offset;","dynamic-front-swap","positional role/order mismatch");
- fixture_case(a,b,c,"i < slices; i++) v[n++] = parts[i];","i < unknown_slices; i++) v[n++] = parts[i];","dynamic-merge-bound-refused","unsupported array construction or missing terminator");
- fixture_case(a,b,c,"i < cf_root_count(); i++) v[n++] = span_roots[i];","i < cf_root_count()+1; i++) v[n++] = span_roots[i];","dynamic-roots-bound-refused","unsupported array construction or missing terminator");
- char *callee=fixture_replace(b,"return cs_build(argv[2], argv[3], argv[4]);","return cs_build(argv[3], argv[2], argv[4]);");
+ /* 同一构造域的正对照，避免负控因样本自身不受支持而伪通过。 */
+ fixture_case(a,b,c,"char *a[]={\"build\",rev,snap,build,0};step(root,a);","build-fact-positive",0);
+ fixture_case(a,b,c,"char *v[]={wft,\"--\",\"prepare\",snap,pkg,ctor,objs,nout,0};bound_sh_secs(root,v,45);","prepare-fact-positive",0);
+ fixture_case(a,b,c,"char *v[]={wft,\"--\",\"front\",prep,target,part,offset,amount,0};bound_sh_secs(root,v,45);","front-fact-positive",0);
+ fixture_case(a,b,c,"char *v[128];int n=0;v[n++]=wft;v[n++]=\"--\";v[n++]=\"merge\";v[n++]=prep;v[n++]=target;v[n++]=phase;for(i=0;i<slices;i++)v[n++]=parts[i];v[n++]=0;bound_sh_secs(root,v,45);","merge-bound-positive",0);
+ fixture_case(a,b,c,"char *v[128];int n=0;v[n++]=wft;v[n++]=\"--\";v[n++]=\"span\";v[n++]=prep;v[n++]=target;v[n++]=input;v[n++]=dest;v[n++]=first;v[n++]=last;for(i=0;i<cf_root_count();i++)v[n++]=span_roots[i];v[n++]=0;bound_sh_secs(root,v,45);","roots-bound-positive",0);
+ /* 常量队列经有界for和局部别名进入argv[0]，每个命令单独核对被调方合同。 */
+ fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build,0};step(root,a);}","queue-commands-positive",0);
+ fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build};step(root,a);}","queue-missing-terminator-refused","unsupported array construction or missing terminator");
+ fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,snap,rev,build,0};step(root,a);}","queue-swapped-positionals-refused","positional role/order mismatch");
+ fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"unknown_queue\"};for(int qi=0;qi<2;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build,0};step(root,a);}","queue-second-command-unknown-refused","callee parser outside support domain");
+ fixture_case(a,b,c,"const char *queue[]={\"wave-objects\",\"wave-runner\"};for(int qi=0;qi<3;qi++){const char *command=queue[qi];char *a[]={command,rev,snap,build,0};step(root,a);}","queue-bound-mismatch-refused","unsupported array construction or missing terminator");
+ fixture_case(a,b,c,"char *a[]={\"build\",rev,snap,0};step(root,a);","missing-positional","callee argc guard rejects missing argument");
+ fixture_case(a,b,c,"char *a[]={\"build\",snap,rev,build,0};step(root,a);","swapped-positionals","positional role/order mismatch");
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,helper,\"--link-only\",0};step(root,a);","blocker3-bare-helper","bare helper or unexpected positional argument");
+ fixture_case(a,b,c,"char *a[]={\"build\",unknown_builder(rev),snap,build,0};step(root,a);","unknown-construction-refused","unsupported array construction or missing terminator");
+ fixture_case(a,b,c,"char *v[]={wft,\"--\",\"prepare\",pkg,snap,ctor,objs,nout,0};bound_sh_secs(root,v,45);","whole-front-swapped-positionals","positional role/order mismatch");
+ fixture_case(a,b,c,"char *a[]={\"build\",rev,snap,build,0};unknown_step(root,a);","unknown-wrapper-refused","relevant argv escapes through unknown wrapper");
+ fixture_case(a,b,c,"char *v[]={wft,\"--\",\"front\",prep,target,part,amount,offset,0};bound_sh_secs(root,v,45);","dynamic-front-swap","positional role/order mismatch");
+ fixture_case(a,b,c,"char *v[128];int n=0;v[n++]=wft;v[n++]=\"--\";v[n++]=\"merge\";v[n++]=prep;v[n++]=target;v[n++]=phase;for(i=0;i<unknown_slices;i++)v[n++]=parts[i];v[n++]=0;bound_sh_secs(root,v,45);","dynamic-merge-bound-refused","unsupported array construction or missing terminator");
+ fixture_case(a,b,c,"char *v[128];int n=0;v[n++]=wft;v[n++]=\"--\";v[n++]=\"span\";v[n++]=prep;v[n++]=target;v[n++]=input;v[n++]=dest;v[n++]=first;v[n++]=last;for(i=0;i<cf_root_count()+1;i++)v[n++]=span_roots[i];v[n++]=0;bound_sh_secs(root,v,45);","dynamic-roots-bound-refused","unsupported array construction or missing terminator");
+ /* G2 fp_call 的对象/链接同一参数前缀及 helper 选项事实；不依赖其排版。 */
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,\"--identity-helper\",helper,\"--objects\",keys,0};step(root,a);","g2-fixedpoint-objects-positive",0);
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,\"--identity-helper\",helper,\"--link-only\",0};step(root,a);","g2-fixedpoint-link-positive",0);
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,pkg,snap,gen1,fp,\"--phase\",phase,\"--target\",target,\"--identity-helper\",helper,\"--link-only\",0};step(root,a);","g2-fixedpoint-swapped-positionals","positional role/order mismatch");
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,\"--link-only\",\"--identity-helper\",0};step(root,a);","g2-fixedpoint-missing-helper-value","missing option value");
+ fixture_case(a,b,c,"char *a[]={\"fixedpoint\",rev,snap,pkg,gen1,fp,\"--phase\",phase,\"--target\",target,\"--identity-helper\",helper,\"--objects\",keys,0};unknown_step(root,a);","g2-fixedpoint-unknown-wrapper","relevant argv escapes through unknown wrapper");
  int diagnostics=0,mismatch=0;const char *expected="callee forwarding/signature order differs from parser contract";
- fixture_ck(callee&&ca_check(a,callee,c,expected,&diagnostics,&mismatch)==2&&diagnostics>0&&!mismatch,"callee-position-swap-refused");free(callee);
- char *parser=fixture_replace(c,"physical(argv[2],root);physical(argv[3],pkg);","physical(argv[3],root);physical(argv[2],pkg);");
- fixture_ck(parser&&ca_check(a,b,parser,expected,&diagnostics,&mismatch)==2&&diagnostics>0&&!mismatch,"callee-whole-position-swap-refused");free(parser);
+ int rc=ca_check_binding_swap(a,b,c,0,expected,&diagnostics,&mismatch);
+ fixture_ck(rc==2&&diagnostics>0&&!mismatch,"callee-position-swap-refused");
+ rc=ca_check_binding_swap(a,b,c,1,expected,&diagnostics,&mismatch);
+ fixture_ck(rc==2&&diagnostics>0&&!mismatch,"callee-whole-position-swap-refused");
  free(a);free(b);free(c);printf("CHECK_CHAIN_ARGV_CHECK\tfailed=%d\n",fixture_failed);return fixture_failed?1:0;
 }

@@ -1,0 +1,260 @@
+/* tools/check-version-metrics.cx -- tools/version-metrics.cx 的检查。
+ *
+ *   sh ./unisacc.com tools/check-version-metrics.cx [-- WORK]
+ *
+ * 覆盖：
+ * (1) check-tree: 对入库 agentwork/version-metrics.tsv 执行 --check rc=0 且 rows=4；
+ * (2) columns-and-057-row: 表含 15 列且 0.0.54..0.0.57 四行俱全，0.0.57 行等于 plan-058 §1 指标；
+ * (3) write-twice: 隔离目录内两次 --write 产出逐字节相同，且等于入库表；
+ * (4) neg-row-edit: 篡改一字节后 --check 返回 rc=1 并报 DIFF，且不覆盖原文件；
+ * (5) neg-row-drop: 删去末行后 --check 返回 rc=1 并报 DIFF；
+ * (6) neg-missing: 目标文件不存在时 --check 返回 rc=1 并报 DIFF；
+ * (7) agg-steps: --agg-steps 对 steps.tsv 夹具按行求和并取最长单操作秒，不按 checkpoint wall_ms 累加；
+ * (8) agg-manual-and-chain-run: --agg-manual 区分 MANUAL/RESUME 与 BLOCKER 及 CHECK，--check-chain-run 识别 BLOCKER；
+ * (9) neg-bad-steps: 畸形 steps.tsv 行被具名拒绝 rc=2；
+ * (10) neg-usage: 缺模式或未知选项返回 rc=2。
+ * 输出 PASS/FAIL 与 CHECK_VERSION_METRICS\tfailed=N。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+
+static int failed;
+static char root[4096], work[4400], bin[4400], why[512];
+static const char *OD = "out";
+
+static void die(const char *s) { tool_die("check-version-metrics", s, 0, 2); }
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\tcheck-version-metrics.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run_bin(char **v, char *out, size_t cap, int *rc) {
+    np_result r = {0};
+    int tr = np_run(v, root, 0, 30, &r, why, sizeof why);
+    if (tr || r.residue) { np_free(&r); return -1; }
+    *rc = r.rc;
+    if (out && cap > 0) {
+        size_t n = 0;
+        out[0] = 0;
+        if (r.out && r.outn > 0) {
+            n = r.outn < cap - 1 ? r.outn : cap - 1;
+            if (mm_copy(out, (long)cap, r.out, (long)n)) die("copy");
+            out[n] = 0;
+        }
+        if (r.err && r.errn > 0 && n + 1 < cap) {
+            size_t m = r.errn < cap - 1 - n ? r.errn : cap - 1 - n;
+            if (mm_copy(out + n, (long)(cap - n), r.err, (long)m)) die("copy");
+            out[n + m] = 0;
+        }
+    }
+    np_free(&r);
+    return 0;
+}
+
+static int count_tabs(const char *s, size_t len) {
+    int c = 0;
+    size_t i;
+    for (i = 0; i < len; i++) if (s[i] == '\t') c++;
+    return c;
+}
+
+int main(int argc, char **argv) {
+    char tbl1[4400], tbl2[4400], stepsf[4400], badsteps[4400], manf[4400], crf1[4400], crf2[4400], out[8192];
+    char *tree = 0, *a = 0, *b = 0, *m = 0;
+    size_t tn = 0, an = 0, bn = 0, i;
+    int rc = -1;
+
+    if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
+    if (argc >= 2 && strcmp(argv[1], "--")) {
+        if (cx_fmt(work, sizeof work, "%s/vm-fixture-%d", argv[1], sy_pid())) die("work path");
+        sy_mkdir(argv[1], 0700);
+    } else if (argc >= 3 && !strcmp(argv[1], "--")) {
+        if (cx_fmt(work, sizeof work, "%s/vm-fixture-%d", argv[2], sy_pid())) die("work path");
+        sy_mkdir(argv[2], 0700);
+    } else {
+        char odir[4200];
+        if (cx_fmt(odir, sizeof odir, "%s/%s", root, OD)) die("out path");
+        sy_mkdir(odir, 0700);
+        if (cx_fmt(work, sizeof work, "%s/%s/check-version-metrics-%d", root, OD, sy_pid())) die("work path");
+    }
+    if (sy_mkdir(work, 0700)) die("mkdir work");
+    if (cx_fmt(bin, sizeof bin, "%s/version-metrics.native", work) ||
+        cx_fmt(tbl1, sizeof tbl1, "%s/vm1.tsv", work) ||
+        cx_fmt(tbl2, sizeof tbl2, "%s/vm2.tsv", work) ||
+        cx_fmt(stepsf, sizeof stepsf, "%s/steps.tsv", work) ||
+        cx_fmt(badsteps, sizeof badsteps, "%s/bad-steps.tsv", work) ||
+        cx_fmt(manf, sizeof manf, "%s/MANUAL.tsv", work) ||
+        cx_fmt(crf1, sizeof crf1, "%s/chain-run-pass.tsv", work) ||
+        cx_fmt(crf2, sizeof crf2, "%s/chain-run-fail.tsv", work)) die("fmt paths");
+
+    if (tq_native(root, "tools/version-metrics.cx", bin, why, sizeof why)) die(why);
+
+    /* (1) check-tree */
+    {
+        char *v[] = {bin, "--check", "--root", root, 0};
+        ck(run_bin(v, out, sizeof out, &rc) == 0 && rc == 0 && strstr(out, "VERSION_METRICS\tstatus=CHECK\trows=4") != 0, "check-tree");
+    }
+
+    /* (2) columns-and-057-row */
+    tree = cx_read("agentwork/version-metrics.tsv", &tn);
+    {
+        char want54[64], want55[64], want56[64], want057[256];
+        int cols_ok = 1, rows = 0;
+        size_t at = 0;
+        tx_snprintf(want54, sizeof want54, "\n%d.%d.%d\t245\t", 0, 0, 54);
+        tx_snprintf(want55, sizeof want55, "\n%d.%d.%d\t44\tREUSED(v%d.%d.%d)\t", 0, 0, 55, 0, 0, 54);
+        tx_snprintf(want56, sizeof want56, "\n%d.%d.%d\t192\t125\t107.6\t", 0, 0, 56);
+        tx_snprintf(want057, sizeof want057, "\n%d.%d.%d\t190.6\t179.5\t140.4\t11.1\t1\t10\t3\t1\t2\t1075\tcommit:154/150/2/2:NOT_FULL\t43094459755:QUALIFIED:42/0/0/0\t9\tbasered\n", 0, 0, 57);
+        while (tree && at < tn) {
+            size_t e = at;
+            while (e < tn && tree[e] != '\n') e++;
+            if (e > at && tree[at] != '#') {
+                rows++;
+                if (count_tabs(tree + at, e - at) != 14) cols_ok = 0;
+            }
+            at = e < tn ? e + 1 : e;
+        }
+        ck(tree != 0 && rows == 4 && cols_ok &&
+           strstr(tree, want54) != 0 &&
+           strstr(tree, want55) != 0 &&
+           strstr(tree, want56) != 0 &&
+           strstr(tree, want057) != 0, "columns-and-057-row");
+    }
+
+    /* (3) write-twice + write-equals-tree */
+    {
+        char *v1[] = {bin, "--write", "--root", root, "--table", tbl1, 0};
+        char *v2[] = {bin, "--write", "--root", root, "--table", tbl2, 0};
+        char *vc[] = {bin, "--check", "--root", root, "--table", tbl1, 0};
+        int rc1 = -1, rc2 = -1, rcc = -1;
+        run_bin(v1, out, sizeof out, &rc1);
+        run_bin(v2, out, sizeof out, &rc2);
+        run_bin(vc, out, sizeof out, &rcc);
+        a = cx_read(tbl1, &an);
+        b = cx_read(tbl2, &bn);
+        ck(rc1 == 0 && rc2 == 0 && rcc == 0 && a && b && an > 0 && an == bn && !memcmp(a, b, an), "write-twice-deterministic");
+        ck(tree && a && tn == an && !memcmp(tree, a, tn), "write-equals-tree");
+    }
+
+    /* (4) neg-row-edit */
+    if (a && an > 10) {
+        size_t fz = 0;
+        char *after = 0;
+        char *vc[] = {bin, "--check", "--root", root, "--table", tbl1, 0};
+        m = malloc(an);
+        if (!m || mm_copy(m, (long)an, a, (long)an)) die("alloc");
+        for (i = an - 1; i > 0; i--) {
+            if (m[i] >= '0' && m[i] <= '9') { m[i] = m[i] == '9' ? '0' : (char)(m[i] + 1); break; }
+        }
+        if (cx_write(tbl1, m, an)) die("write mutated");
+        run_bin(vc, out, sizeof out, &rc);
+        after = cx_read(tbl1, &fz);
+        ck(rc == 1 && strstr(out, "version-metrics: DIFF") != 0 && !strstr(out, "status=CHECK") &&
+           after && fz == an && !memcmp(after, m, an), "neg-row-edit-refused-no-overwrite");
+        free(after);
+    } else ck(0, "neg-row-edit-refused-no-overwrite");
+
+    /* (5) neg-row-drop */
+    if (a && an > 20) {
+        size_t cut = an - 1;
+        char *vc[] = {bin, "--check", "--root", root, "--table", tbl1, 0};
+        while (cut > 0 && a[cut - 1] != '\n') cut--;
+        if (cut > 0 && !cx_write(tbl1, a, cut)) {
+            run_bin(vc, out, sizeof out, &rc);
+            ck(rc == 1 && strstr(out, "version-metrics: DIFF") != 0, "neg-row-drop-refused");
+        } else ck(0, "neg-row-drop-refused");
+    } else ck(0, "neg-row-drop-refused");
+
+    /* (6) neg-missing */
+    {
+        char missing[4400];
+        if (cx_fmt(missing, sizeof missing, "%s/no-such-table.tsv", work)) die("fmt");
+        {
+            char *vc[] = {bin, "--check", "--root", root, "--table", missing, 0};
+            run_bin(vc, out, sizeof out, &rc);
+            ck(rc == 1 && strstr(out, "version-metrics: DIFF") != 0 && sy_exists(missing) == 0, "neg-missing-refused");
+        }
+    }
+
+    /* (7) agg-steps: sum wall_s, track max_s, compute span */
+    {
+        const char *sbody =
+            "01:01:00\tsnap\trc=0\twall_s=50\n"
+            "01:03:00\tbuild\trc=2\twall_s=30\n"
+            "01:08:00\tpack\trc=0\twall_s=280\n";
+        char *vs[] = {bin, "--agg-steps", stepsf, 0};
+        if (cx_write(stepsf, sbody, strlen(sbody))) die("write stepsf");
+        run_bin(vs, out, sizeof out, &rc);
+        ck(rc == 0 && strstr(out, "AGG_STEPS\ttotal_s=360\tok_s=330\tmax_s=280\tspan_s=470") != 0, "agg-steps-fixture");
+    }
+
+    /* (8) agg-manual and check-chain-run */
+    {
+        const char *mbody =
+            "01:09:57\tRESUME-1\tsnap\tretry\n"
+            "01:14:45\tBLOCKER-1/MANUAL-2\tjobs\tclean\n"
+            "02:07:40\tBLOCKER-3\tg2\tbatch\n"
+            "02:10:05\tBLOCKER-3a\tg2\tfollowup\n"
+            "CHECK-44\taudit\tok\n";
+        const char *cr_pass = "ATTEMPT\t1\tphase=snap\trc=0\tresidue=0\nATTEMPT\t2\tphase=pack\trc=0\tresidue=0\n";
+        const char *cr_fail = "ATTEMPT\t1\tphase=snap\trc=124\tresidue=1\nBLOCKER\tphase=snap\treason=surviving-processes\trc=2\n";
+        char *vm[] = {bin, "--agg-manual", manf, 0};
+        char *vc1[] = {bin, "--check-chain-run", crf1, 0};
+        char *vc2[] = {bin, "--check-chain-run", crf2, 0};
+        int rc1 = -1, rc2 = -1, rc3 = -1;
+        char out1[1024], out2[1024], out3[1024];
+        if (cx_write(manf, mbody, strlen(mbody)) ||
+            cx_write(crf1, cr_pass, strlen(cr_pass)) ||
+            cx_write(crf2, cr_fail, strlen(cr_fail))) die("write manual/cr");
+        run_bin(vm, out1, sizeof out1, &rc1);
+        run_bin(vc1, out2, sizeof out2, &rc2);
+        run_bin(vc2, out3, sizeof out3, &rc3);
+        ck(rc1 == 0 && strstr(out1, "AGG_MANUAL\tmanual_count=2\tblockers_chain=2") != 0 &&
+           rc2 == 0 && strstr(out2, "CHAIN_RUN_CHECK\tattempts=2\tzero_touch=PASS") != 0 &&
+           rc3 == 0 && strstr(out3, "CHAIN_RUN_CHECK\tattempts=1\tzero_touch=FAIL") != 0, "agg-manual-and-chain-run");
+    }
+
+    /* (9) neg-bad-steps */
+    {
+        const char *bad = "not-a-timestamp\tsnap\trc=0\twall_s=10\n";
+        char *vb[] = {bin, "--agg-steps", badsteps, 0};
+        if (cx_write(badsteps, bad, strlen(bad))) die("write badsteps");
+        run_bin(vb, out, sizeof out, &rc);
+        ck(rc == 2 && strstr(out, "malformed steps row") != 0, "neg-bad-steps-rc2");
+    }
+
+    /* (10) neg-usage */
+    {
+        char *vu1[] = {bin, 0};
+        char *vu2[] = {bin, "--write", "--check", 0};
+        char *vu3[] = {bin, "--unknown-flag", 0};
+        int r1 = -1, r2 = -1, r3 = -1;
+        run_bin(vu1, out, sizeof out, &r1);
+        run_bin(vu2, out, sizeof out, &r2);
+        run_bin(vu3, out, sizeof out, &r3);
+        ck(r1 == 2 && r2 == 2 && r3 == 2, "neg-usage-rc2");
+    }
+
+    /* Clean up files created inside work dir using sy_unlink + sy_rmdir (no rm) */
+    sy_unlink(bin);
+    sy_unlink(tbl1);
+    sy_unlink(tbl2);
+    sy_unlink(stepsf);
+    sy_unlink(badsteps);
+    sy_unlink(manf);
+    sy_unlink(crf1);
+    sy_unlink(crf2);
+    sy_rmdir(work);
+    free(tree); free(a); free(b); free(m);
+
+    printf("CHECK_VERSION_METRICS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
