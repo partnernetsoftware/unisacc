@@ -1,0 +1,134 @@
+/* tools/check-tlib-batch.cx -- batch entries linked from the tlib kit (tests/run-batch.cx, build/tlib-prep.tsv).
+ *
+ *   sh ./unisacc.com tools/check-tlib-batch.cx -- ROOT WORKDIR (WORKDIR below ROOT/out, as run-batch needs)
+ *
+ * (1) every row of build/tlib-prep.tsv names an existing source and carries a measurement text, and no row
+ *     is a release-chain tool;
+ * (2) tests/run-batch.cx on the first listed source that is the entry of a registered batch, with a kit
+ *     present and a plain environment: exit 0 and status=PASS, and the entry was linked from the kit (the
+ *     run says so on standard error);
+ * (3) the same batch with a release-chain marker in the environment: exit 0 and status=PASS as well, and
+ *     nothing was linked from the kit (the release chain builds from source);
+ * (4) the two runs give the same verdict fields (status, rc, transport, marker).
+ * Prints PASS/FAIL per case and CHECK_TLIB_BATCH<TAB>failed=N; exit 0 only when 0. Needs the kit
+ * (`sh ./unisacc.com tools/tlib.cx -- kit`); without it case (2) fails rather than passing unrun. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400];
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-batch.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int field(const char *l, long n, int idx, char *dst, long cap) {
+    long off, len;
+    if (tx_field(l, n, '\t', idx, &off, &len) || len >= cap) return -1;
+    if (mm_copy(dst, (size_t)cap, l + off, (size_t)len)) return -1;
+    dst[len] = 0;
+    return 0;
+}
+
+/* The BATCH_RUN line of the output S as its tab fields 1..4 (id, status, rc, transport) in DST; 0 when there is none. */
+static int verdict(const char *s, long n, char *dst, long cap) {
+    long i = 0, e, off, len, w = 0;
+    int f;
+    while (s && i < n) {
+        e = i;
+        while (e < n && s[e] != 0x0a) e++;
+        if (!tx_field(s + i, e - i, 0x09, 0, &off, &len) && tx_same(s + i + off, len, "BATCH_RUN", 9)) {
+            for (f = 1; f <= 4; f++) {
+                if (tx_field(s + i, e - i, 0x09, f, &off, &len) || w + len + 2 >= cap) return 0;
+                if (mm_copy(dst + w, (size_t)(cap - w), s + i + off, (size_t)len)) return 0;
+                w += len;
+                dst[w++] = 0x09;
+            }
+            dst[w] = 0;
+            return 1;
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* Field NTH of the verdict text V equals WANT. */
+static int vfield(const char *v, int nth, const char *want) {
+    long off, len;
+    return !tx_field(v, tx_len(v, 600), 0x09, nth, &off, &len) && tx_same(v + off, len, want, tx_len(want, 64));
+}
+
+/* run-batch for ID with ENVSET ("NAME=value") or 0; both streams captured separately. */
+static int batch(const char *id, const char *envset, int slot, char **o, size_t *on, char **e, size_t *en) {
+    char product[4400], parent[4400], outf[4400], errf[4400], line[300];
+    char *v[16], *said = 0;
+    size_t sn = 0;
+    int k = 0, rc;
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(parent, sizeof parent, "%s/%d", work, slot) ||
+        cx_fmt(outf, sizeof outf, "%s.out", parent) || cx_fmt(errf, sizeof errf, "%s.err", parent)) return -1;
+    (void)sy_mkdir(work, 0755);
+    (void)sy_mkdir(parent, 0755);
+    if (cx_fmt(line, sizeof line, "%s", envset ? envset : "UNISACC_CHECK_NONE=1")) return -1;
+    v[k++] = "sh"; v[k++] = "-c"; v[k++] = "export \"$1\"; shift; o=$1; e=$2; shift 2; exec \"$@\" >\"$o\" 2>\"$e\"";
+    v[k++] = "sh"; v[k++] = line; v[k++] = outf; v[k++] = errf;
+    v[k++] = "sh"; v[k++] = product; v[k++] = "tests/run-batch.cx"; v[k++] = "--"; v[k++] = root; v[k++] = parent; v[k++] = (char *)id; v[k] = 0;
+    rc = cx_runv_timeout(v, 100, &said, &sn);
+    mm_free(said);
+    *o = cx_read(outf, on);
+    *e = cx_read(errf, en);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    static const char *const chain_tools[] = {"tools/chain-run.cx", "tools/release-build.cx", "tools/candidate-chain.cx", "tools/selfhost.cx",
+                                              "tools/kernel-build.cx", "tools/product-build.cx", "tools/source-job-wave.cx", "tools/pc-wave.cx", 0};
+    char path[4400], id[128] = "", entry[512], key[512], meas[512], impl[32], mode[32], mats[64], bid[128];
+    char *t, *b, *o1 = 0, *e1 = 0, *o2 = 0, *e2 = 0;
+    size_t tn = 0, bn = 0, o1n = 0, e1n = 0, o2n = 0, e2n = 0;
+    long i, e, j, f;
+    char v1[600], v2[600];
+    int rows = 0, bad = 0, c, rc1 = -1, rc2 = -1, ok1 = 0, ok2 = 0;
+    if (argc < 3 || sy_realpath(argv[1], root, sizeof root) < 0 || sy_chdir(root) || cx_fmt(work, sizeof work, "%s", argv[2])) return 2;
+    if (cx_fmt(path, sizeof path, "%s/build/tlib-prep.tsv", root)) return 2;
+    t = cx_read(path, &tn);
+    if (cx_fmt(path, sizeof path, "%s/tests/batches.tsv", root)) return 2;
+    b = cx_read(path, &bn);
+    if (!t || !b) { sy_printf("check-tlib-batch: unreadable table\nCHECK_TLIB_BATCH\tfailed=1\n"); return 1; }
+    for (i = 0; i < (long)tn; i = e + 1) {
+        e = i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (e == i || t[i] == '#') continue;
+        rows++;
+        if (field(t + i, e - i, 0, key, sizeof key) || field(t + i, e - i, 1, meas, sizeof meas) || !meas[0] || sy_exists(key) != 1) { bad++; continue; }
+        for (c = 0; chain_tools[c]; c++) if (tx_eqz(key, chain_tools[c])) bad++;
+        for (j = 0; j < (long)bn && !id[0]; j = f + 1) {
+            f = j;
+            while (f < (long)bn && b[f] != '\n') f++;
+            if (f == j || b[j] == '#' || field(b + j, f - j, 8, entry, sizeof entry) || !tx_eqz(entry, key)) continue;
+            if (!field(b + j, f - j, 1, impl, sizeof impl) && tx_eqz(impl, "IMPLEMENTED") && !field(b + j, f - j, 4, mode, sizeof mode) && tx_eqz(mode, "SOURCE") &&
+                !field(b + j, f - j, 7, mats, sizeof mats) && tx_eqz(mats, "-") && !field(b + j, f - j, 0, bid, sizeof bid)) tx_copy(id, sizeof id, bid, tx_len(bid, sizeof bid));
+        }
+    }
+    ck(rows > 0 && !bad, "table-rows-sound");
+    if (!id[0]) { ck(0, "a-listed-batch-exists"); sy_printf("CHECK_TLIB_BATCH\tfailed=%d\n", failed); return 1; }
+    rc1 = batch(id, 0, 1, &o1, &o1n, &e1, &e1n);
+    v1[0] = v2[0] = 0;
+    ok1 = verdict(o1, (long)o1n, v1, sizeof v1);
+    ok2 = verdict(o2, (long)o2n, v2, sizeof v2);
+    ck(rc1 == 0 && ok1 && vfield(v1, 1, "status=PASS"), "listed-batch-passes-with-kit");
+    rc2 = batch(id, "UNISACC_CTOR=c", 2, &o2, &o2n, &e2, &e2n);
+    ck(rc2 == 0 && ok2 && vfield(v2, 1, "status=PASS"), "chain-environment-batch-passes");
+    /* the run that linked from the kit says so on standard error; the chain-environment run says nothing of the kind */
+    ck(e1n > e2n, "kit-run-linked-and-chain-run-did-not");
+    {   /* the verdict fields, from status= up to the candidate hash, are equal */
+        ck(ok1 && ok2 && tx_eqz(v1, v2), "same-verdict-both-ways");
+    }
+    sy_printf("CHECK_TLIB_BATCH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
