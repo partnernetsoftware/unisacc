@@ -920,11 +920,10 @@ static int sjw(const char *s, const char *ctx, const char *b, const char *phase,
     char tool[4400], firsts[16], counts[16];
     char *v[12];
     int n = 0;
-    if (cx_fmt(tool, sizeof tool, "%s/tools/source-job-wave.cx", s)) die("path", "sjw");
+    if (cx_fmt(tool, sizeof tool, "%s/source-job-wave-O2.elf", b)) die("path", "sjw");
     if (cx_fmt(firsts, sizeof firsts, "%d", first)) die("fmt", "first");
     if (cx_fmt(counts, sizeof counts, "%d", count)) die("fmt", "count");
     v[n++] = tool;
-    v[n++] = (char *)"--";
     v[n++] = (char *)s;
     v[n++] = (char *)ctx;
     v[n++] = (char *)b;
@@ -934,7 +933,7 @@ static int sjw(const char *s, const char *ctx, const char *b, const char *phase,
     v[n++] = counts;
     v[n++] = (char *)act;
     v[n++] = 0;
-    return bound_sh(s, v);
+    return pr_code_at("source-job-wave",v,s,55);
 }
 /* --touch paths are repository-relative dependency inputs, not output selectors. */
 static const char *touches[48];
@@ -1551,18 +1550,36 @@ int main(int argc, char **argv) {
     }
     preflight(root, "post-snap", rev, build, snap, pkg);
 
-    if (!(resume && ck_done(outdir, "build"))) {
+    if(sy_setenv("UNISACC_IDENTITY_HELPER",helper,1))die("env","controller identity helper");
+    /* Independent receipts recover child success before the outer mark. */
+    if (!(resume && ck_done(outdir,"build-objects"))) {
+        long t0=sy_now_ms();
+        char *a[]={"build-objects",(char *)rev,snap,build,0};
+        if(step(root,a))die("build-objects",build);
+        mark(outdir,"build-objects",sy_now_ms()-t0);
+    } else {sy_printf("RESUME\tbuild-objects\n");if(until_phase && !strcmp(until_phase,"build-objects"))exit(0);}
+    if (!(resume && ck_done(outdir,"build"))) {
         long t0 = sy_now_ms();
         char *a[5];
         a[0] = (char *)"build"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = 0;
         if (step(root, a)) die("build", build);
-        mark(outdir, "build", sy_now_ms() - t0);
-    } else sy_printf("RESUME\tbuild\n");
+        mark(outdir,"build",sy_now_ms()-t0);
+    } else {sy_printf("RESUME\tbuild\n");if(until_phase && !strcmp(until_phase,"build"))exit(0);}
 
+    const char *wave_builds[]={"wave-objects","wave-runner"};
+    for(int wi=0;wi<2;wi++){
+        const char *tag=wave_builds[wi];
+        if(!(resume && ck_done(outdir,tag))){
+            long began=sy_now_ms();char *a[]={(char *)tag,(char *)rev,snap,build,0};
+            if(step(root,a))die(tag,build);mark(outdir,tag,sy_now_ms()-began);
+        }else {sy_printf("RESUME\t%s\n",tag);if(until_phase&&!strcmp(until_phase,tag))exit(0);}
+    }
     if (!(resume && ck_done(outdir, "ctx"))) {
         long t0 = sy_now_ms();
         char *a[7];
-        clean_phase_path(outdir, "ctx", ctx, 0);
+        char context_record[4400];
+        if(cx_fmt(context_record,sizeof context_record,"%s/context.tsv",ctx))die("path","context record");
+        if(fsize(context_record)<0)clean_phase_path(outdir,"ctx",ctx,0);
         a[0] = (char *)"ctx"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = ctx; a[5] = (char *)cc; a[6] = 0;
         if (step(root, a)) die("ctx", ctx);
         mark(outdir, "ctx", sy_now_ms() - t0);

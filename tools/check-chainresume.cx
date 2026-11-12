@@ -4,6 +4,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use sys.time
+#pragma unisa use sys.posix
 static const char *OD="out";
 static int run(char **v){return cx_runv_timeout(v,12,0,0);}
 int main(int ac,char **av){
@@ -41,6 +42,7 @@ int main(int ac,char **av){
  cx_fmt(p,sizeof p,"%s/outer/list.stdout",build);cx_write(p,"tool-a\tx\ntool-b\tx\ntool-c\tx\ntool-d\tx\ntool-e\tx\n",45);
  cx_fmt(script,sizeof script,"#!/bin/sh\nfor a do last=$a; done\nprintf '%%s\\n' \"$last\" >> '%s/trace'\ncase $last in start-job) printf identity > '%s/prepared';; finish-job) test \"$(cat '%s/prepared')\" = identity || exit 37;; *) exit 38;; esac\n",dir,dir,dir);
  cx_fmt(p,sizeof p,"%s/unisacc.com",fake);cx_write(p,script,strlen(script));
+ cx_fmt(p,sizeof p,"%s/source-job-wave-O2.elf",build);cx_write(p,script,strlen(script));sy_chmod(p,0755);
  char *job[]={av[3],"--jobs",fake,ctx,build,"tool","--job-index","0","--out",out,"--resume","--until","jobs-tool-0-start",0};
  if(run(job))return 1;
  cx_fmt(p,sizeof p,"%s/prepared",dir);cx_write(p,"changed",7);job[12]="jobs-tool-0-finish";
@@ -48,5 +50,45 @@ int main(int ac,char **av){
  cx_write(p,"identity",8);if(run(job))return 1;
  cx_fmt(p,sizeof p,"%s/trace",dir);size_t tn=0;char *trace=cx_read(p,&tn),*first=trace?strstr(trace,"start-job\n"):0;
  if(!first||strstr(first+1,"start-job\n")||!strstr(trace,"finish-job\n"))return 1;
- printf("PASS\tuntil-start-once-finish-keeps-output\n");printf("CHECK_CHAINRESUME\tfailed=0\n");free(trace);return 0;
+ printf("PASS\tuntil-start-once-finish-keeps-output\n");free(trace);
+ /* Child-success/outer-mark interruption: no outer checkpoint is written here.
+    Re-enter the receipt-aware real step twice; completed fake compiler work must run once. */
+ char source[4400],bb[4400],helper[4400],boot[4400],controller[4400],context[4400],env[4600];
+ cx_fmt(source,sizeof source,"%s/controller-source",dir);cx_fmt(bb,sizeof bb,"%s/controller-build",dir);
+ sy_mkdir(source,0755);sy_mkdir(bb,0755);cx_fmt(p,sizeof p,"%s/tools",source);sy_mkdir(p,0755);
+ cx_fmt(p,sizeof p,"%s/tools/source-package.cx",source);cx_write(p,"fixture-source",14);
+ cx_fmt(p,sizeof p,"%s/tools/source-job-wave.cx",source);cx_write(p,"fixture-wave",12);
+ cx_fmt(p,sizeof p,"%s/a",source);cx_write(p,"a",1);
+ cx_fmt(helper,sizeof helper,"%s/helper",dir);
+ const char *hs="#!/bin/sh\nset -- $(sha256sum \"$1/a\")\nprintf '%s\\n' \"$1\"\n";
+ cx_write(helper,hs,strlen(hs));sy_chmod(helper,0755);
+ cx_fmt(controller,sizeof controller,"%s/controller-template",dir);
+ cx_fmt(script,sizeof script,"#!/bin/sh\ncase $1 in prepare-context) mkdir -p \"$5\"; printf 'context-v1\\ncc\\t%%s\\nbootstrap\\t%%s\\n' \"$4\" \"$3\" > \"$5/context.tsv\"; printf 'prepare\\n' >> '%s/context-trace';; --verify-context) test -s \"$3/context.tsv\" || exit 9; printf 'verify\\n' >> '%s/context-trace';; *) exit 8;; esac\n",dir,dir);
+ cx_write(controller,script,strlen(script));sy_chmod(controller,0755);
+ cx_fmt(boot,sizeof boot,"%s/Root41-bootstrap.com",bb);
+ cx_fmt(script,sizeof script,"#!/bin/sh\nif test \"$1\" = -cx-plan; then printf '0\\t%%s\\tcx.h\\n' \"$2\"; exit; fi\nkind=link; dest=; prev=; for a do test \"$a\" != -c || kind=objects; if test \"$prev\" = -o; then dest=$a; fi; prev=$a; done\ntest -n \"$dest\" || exit 8\nprintf '%%s\\n' \"$kind\" >> '%s/compiler-trace'\nif test \"$kind\" = objects; then printf object > \"$dest\"; else cp '%s' \"$dest\"; chmod +x \"$dest\"; fi\n",dir,controller);
+ cx_write(boot,script,strlen(script));sy_chmod(boot,0755);
+ cx_fmt(env,sizeof env,"UNISACC_IDENTITY_HELPER=%s",helper);
+ char *objects[]={"env",env,av[1],"build-objects",text,source,bb,0};
+ char *link[]={"env",env,av[1],"build",text,source,bb,0};
+ if(run(objects)||run(objects)||run(link)||run(link))return 1;
+ cx_fmt(p,sizeof p,"%s/compiler-trace",dir);size_t cn=0;char *ct=cx_read(p,&cn);
+ if(!ct||strcmp(ct,"objects\nlink\n"))return 1;free(ct);
+ printf("PASS\tcontroller-split-interrupt-resume-no-repeat\n");
+ char *waveobjects[]={"env",env,av[1],"wave-objects",text,source,bb,0};
+ char *wavelink[]={"env",env,av[1],"wave-runner",text,source,bb,0};
+ if(run(waveobjects)||run(waveobjects)||run(wavelink)||run(wavelink))return 1;
+ cx_fmt(p,sizeof p,"%s/compiler-trace",dir);ct=cx_read(p,&cn);
+ if(!ct||strcmp(ct,"objects\nlink\nobjects\nlink\n"))return 1;free(ct);
+ printf("PASS\twave-split-interrupt-resume-no-repeat\n");
+ cx_fmt(context,sizeof context,"%s/controller-ctx",dir);sy_mkdir(context,0755);
+ char *prep[]={av[1],"ctx",text,source,bb,context,"/usr/bin/cc",0};
+ if(run(prep)||run(prep))return 1;
+ cx_fmt(p,sizeof p,"%s/context-trace",dir);ct=cx_read(p,&cn);
+ if(!ct||strcmp(ct,"prepare\nverify\n"))return 1;free(ct);
+ printf("PASS\tcontroller-context-native-resume\n");
+ prep[6]="/changed/cc";if(!run(prep))return 1;
+ printf("PASS\tcontroller-context-changed-request-refused\n");
+ cx_fmt(p,sizeof p,"%s/a",source);cx_write(p,"changed",7);
+ if(!run(objects))return 1;printf("PASS\tcontroller-changed-source-refused\n");printf("CHECK_CHAINRESUME\tfailed=0\n");return 0;
 }

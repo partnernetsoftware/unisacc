@@ -1,0 +1,110 @@
+/* chain-run's single-flight Linux child owner. No PID is accepted from evidence text.
+ * pidfds close the stat/kill PID-reuse race. The caller starts no concurrent jobs.
+ * Execution and cleanup share one monotonic bound; two seconds are reserved for cleanup.
+ */
+#pragma unisa module chainrunproc
+#pragma unisa dock
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.netpack
+#pragma unisa use sysx.reaper
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#define CR_MAX 1024
+typedef struct { int pid,pg,fd; long long start; } cr_identity;
+static int cr_stat(int pid,int *pp,int *pg,long long *start,char *state) {
+ char p[80],b[2048]; if(cx_fmt(p,sizeof p,"/proc/%d/stat",pid))return -1;
+ int fd=open(p,O_RDONLY,0);if(fd<0)return errno==ENOENT||errno==ESRCH?1:-1;
+ int n=read(fd,b,sizeof b-1);int closed=close(fd);if(n<=0||closed||n==(int)sizeof b-1)return -1;b[n]=0;
+ char *q=strrchr(b,')');if(!q||q[1]!=' '||!q[2])return -1;*state=q[2];q+=3;
+ long long v[19];for(int i=0;i<19;i++){while(*q==' ')q++;char *e=0;errno=0;v[i]=strtoll(q,&e,10);if(q==e||errno==ERANGE||(*e&&*e!=' '&&*e!='\n'))return -1;q=e;}
+ *pp=v[0];*pg=v[1];*start=v[18];return 0;
+}
+static int cr_live(cr_identity *e) {
+ int pp,pg;long long st;char state;
+ int observed=cr_stat(e->pid,&pp,&pg,&st,&state);if(observed)return observed==1?0:-1;
+ if(st!=e->start||state=='Z'||state=='X')return 0;
+ e->pg=pg; /* A descendant may setsid/setpgid; starttime and pidfd remain its identity. */
+ return 1;
+}
+static int cr_add(cr_identity *e,int *n,int pid,int pg,long long st) {
+ for(int i=0;i<*n;i++)if(e[i].pid==pid&&e[i].start==st)return 0;
+ if(*n==CR_MAX)return -1;
+#if defined(__linux__)
+ int fd=__syscall6(434,pid,0,0,0,0);if(fd<0){int pp2,pg2;long long st2;char state2;return cr_stat(pid,&pp2,&pg2,&st2,&state2)==1?0:-1;}
+ int pp,actualpg;long long actual;char state;
+ int observed=cr_stat(pid,&pp,&actualpg,&actual,&state);
+ if(observed||actual!=st||actualpg!=pg){close(fd);return observed<0?-1:0;}
+ e[*n].pid=pid;e[*n].pg=pg;e[*n].start=st;e[*n].fd=fd;(*n)++;return 0;
+#else
+ return -1;
+#endif
+}
+static int cr_signal(cr_identity *e,int sig) {
+ int live=cr_live(e);if(live<=0)return live;
+#if defined(__linux__)
+ return __syscall6(424,e->fd,sig,0,0,0)<0?-1:0;
+#else
+ return -1;
+#endif
+}
+/* Only descendants of a verified held identity or newly adopted children of
+ * this single-flight owner are admitted. Preexisting direct children are refused
+ * before spawn, never swept. A vanished/reused parent is not an ownership edge. */
+static int cr_scan(cr_identity *e,int *n,int own,long long earliest,int before) {
+ DIR *d=opendir("/proc");if(!d)return -1;struct dirent *de;int bad=0;
+ while(1){errno=0;de=readdir(d);if(!de){if(errno)bad=1;break;}if(de->d_name[0]<'0'||de->d_name[0]>'9')continue;
+ int pid=atoi(de->d_name),pp,pg;long long st;char state;
+ if(pid<=1||pid==own)continue;
+ int observed=cr_stat(pid,&pp,&pg,&st,&state);if(observed<0){bad=1;break;}if(observed==1||state=='Z'||state=='X')continue;
+ int member=pp==own;if(before&&member){bad=1;break;}
+ if(!member)for(int i=0;i<*n;i++)if(e[i].pid==pp){int live=cr_live(&e[i]);if(live<0)bad=1;else if(live)member=1;break;}
+ if(member&&st>=earliest&&cr_add(e,n,pid,pg,st)){bad=1;break;}
+ }
+ if(closedir(d))bad=1;return bad?-1:0;
+}
+static int cr_alive(cr_identity *e,int n){int k=0;for(int i=0;i<n;i++){int live=cr_live(&e[i]);if(live<0)return -1;k+=live;}return k;}
+int cr_run(const char *label,char **v,int bound,pr_result *r) {
+ memset(r,0,sizeof *r);r->rc=-1;
+ if(bound<1||bound>55){cx_fmt(r->why,sizeof r->why,"%s invalid phase bound",label);return -1;}
+ long hard=sy_now_ms()+(long)bound*1000,execute=hard-(bound>=3?2000:bound*500);
+ cr_identity e[CR_MAX];int n=0,own=getpid();
+ if(rp_subreaper()||cr_scan(e,&n,own,0,1)){cx_fmt(r->why,sizeof r->why,"%s ownership unavailable or concurrent child",label);return -1;}
+ int po[2]={-1,-1},pe[2]={-1,-1},gate[2]={-1,-1};
+ if(pipe(po)||pipe(pe)||pipe(gate)){for(int i=0;i<2;i++){if(po[i]>=0)close(po[i]);if(pe[i]>=0)close(pe[i]);if(gate[i]>=0)close(gate[i]);}cx_fmt(r->why,sizeof r->why,"%s pipe failed",label);return -1;}
+ int pid=fork();if(pid<0){for(int i=0;i<2;i++){close(po[i]);close(pe[i]);close(gate[i]);}cx_fmt(r->why,sizeof r->why,"%s fork failed",label);return -1;}
+ if(!pid){setpgid(0,0);close(po[0]);close(pe[0]);close(gate[1]);char go;int z=read(gate[0],&go,1);close(gate[0]);if(z!=1)_exit(126);dup2(po[1],1);dup2(pe[1],2);close(po[1]);close(pe[1]);execvp(v[0],v);_exit(127);}
+ close(gate[0]);close(po[1]);close(pe[1]);setpgid(pid,pid);
+ int pp,pg;long long start=0;char state;int bad=cr_stat(pid,&pp,&pg,&start,&state)||pp!=own||pg!=pid||cr_add(e,&n,pid,pg,start);
+ if(!bad&&write(gate[1],"g",1)!=1)bad=1;if(close(gate[1]))bad=1;
+ int oo=1,oe=1;
+ if(fcntl(po[0],F_SETFL,O_NONBLOCK)<0){bad=1;close(po[0]);oo=0;}
+ if(fcntl(pe[0],F_SETFL,O_NONBLOCK)<0){bad=1;close(pe[0]);oe=0;}
+ np_buf o={0},err={0};int reaped=0,st=0,timeout=0,cleanup=bad;char buf[16384];long scan=0;
+ while(1){long now=sy_now_ms();
+  if(oo){int k=read(po[0],buf,sizeof buf);if(k>0)np_put(&o,buf,k);else if(!k||(errno!=EAGAIN&&errno!=EINTR)){close(po[0]);oo=0;}}
+  if(oe){int k=read(pe[0],buf,sizeof buf);if(k>0)np_put(&err,buf,k);else if(!k||(errno!=EAGAIN&&errno!=EINTR)){close(pe[0]);oe=0;}}
+  if(now>=scan){if(cr_scan(e,&n,own,start,0))bad=cleanup=1;scan=now+5;}
+  if(!reaped){int w=waitpid(pid,&st,WNOHANG);if(w==pid)reaped=1;}
+  int alive=cr_alive(e,n);
+  if(alive<0)bad=cleanup=1;
+  if(reaped&&!alive&&!oo&&!oe)break;
+  if(!cleanup&&now>=execute){timeout=cleanup=1;}
+  if(cleanup){for(int i=0;i<n;i++)if(cr_signal(&e[i],19))bad=1;
+   if(cr_scan(e,&n,own,start,0))bad=1;
+   for(int i=0;i<n;i++)if(cr_signal(&e[i],SIGKILL))bad=1;
+  }
+  if(now>=hard){if(alive)bad=1;break;}
+  usleep(1000);
+ }
+ if(oo)close(po[0]);if(oe)close(pe[0]);
+ for(int i=0;i<n;i++){int status;waitpid(e[i].pid,&status,WNOHANG);}
+ r->residue=cr_alive(e,n);if(bad&&!r->residue)r->residue=-1;
+ /* Test-only uncertainty: real cleanup still runs; no fictitious PID is signalled. */
+ const char *fault=getenv("UNISACC_CHAINRUN_FAULT");
+ if(timeout&&fault&&!strcmp(fault,"unconfirmed"))r->residue=-1;
+ for(int i=0;i<n;i++)close(e[i].fd);
+ r->out=o.p;r->outn=o.n;r->err=err.p;r->errn=err.n;r->timed_out=timeout;
+ if(reaped)r->rc=WIFSIGNALED(st)?-WTERMSIG(st):WEXITSTATUS(st);
+ cx_fmt(r->why,sizeof r->why,"%s owner-pid=%d pgid=%d start=%lld cleanup=%d residue=%d bound=%d",label,pid,pid,start,cleanup,r->residue,bound);
+ return timeout||bad?-1:0;
+}

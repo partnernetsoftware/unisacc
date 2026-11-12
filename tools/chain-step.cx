@@ -3,8 +3,16 @@
  * 用法（全部在主树仓根跑；ROOT 一律是冻结快照 S，不是主树）：
  *   sh ./unisacc.com tools/chain-step.cx -- label   REV S PKG OUT          打印将做的事，不执行
  *   sh ./unisacc.com tools/chain-step.cx -- snap    REV OUT                生成/复用 S=out/release-snap-<rev10>
- *   sh ./unisacc.com tools/chain-step.cx -- build   REV S B                现编 controller 到 B
- *   sh ./unisacc.com tools/chain-step.cx -- ctx     REV S B CTX CC          prepare-context
+ *   sh ./unisacc.com tools/chain-step.cx -- build-objects REV S B          编译可恢复 controller 对象
+ *   sh ./unisacc.com tools/chain-step.cx -- build   REV S B                验证对象收据并链接 controller
+ *   sh ./unisacc.com tools/chain-step.cx -- ctx     REV S B CTX CC          复用 controller，恢复已完成 context
+ * build/build-objects require UNISACC_IDENTITY_HELPER=absolute F-v2 helper.
+ * Each .o/.elf.receipt binds actual source/bootstrap/input/output SHA256;
+ * mismatched receipts and legacy snapshots retain fail-closed refusal.
+ *   wave-objects REV S B / wave-runner REV S B: independently compile/link
+ *   source-job-wave-O2.o/.elf with the same SHA receipts; run before host/list.
+ *   Object compilation names every -cx-plan closure path explicitly because
+ *   plain -c uses per-unit semantics. Each invocation writes .argv.tsv evidence.
  *   sh ./unisacc.com tools/chain-step.cx -- host    S CTX B                 source-job-wave host
  *   sh ./unisacc.com tools/chain-step.cx -- list    S CTX B                 source-job-wave list（核 131）
  *   sh ./unisacc.com tools/chain-step.cx -- wave    S CTX B PHASE FIRST N   start-job 再 finish-job
@@ -1137,63 +1145,105 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     return cs_fp_five(g2, g3, pkg);
 }
 
-static int cs_build(const char *rev, const char *s, const char *b) {
-    (void)rev;
-    char boot[4400], cc_src[4400], cc_out[4400], bound[4400];
-    char *v[10];
-    int n = 0;
-    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", s)) cs_die("path", s);
-    if (cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", b)) cs_die("path", b);
-    if (cs_file_size(boot) < 0) cs_die("bootstrap missing", boot);
-    if (cx_fmt(cc_src, sizeof cc_src, "%s/tools/source-package.cx", s)) cs_die("path", s);
-    if (cx_fmt(cc_out, sizeof cc_out, "%s/source-package-O2.elf", b)) cs_die("path", b);
-    v[n++] = bound;
-    v[n++] = (char *)"55";
-    v[n++] = (char *)"sh";
-    v[n++] = boot;
-    v[n++] = (char *)"-O2";
-    v[n++] = cc_src;
-    v[n++] = (char *)"-o";
-    v[n++] = cc_out;
-    v[n] = 0;
-    if (cs_run(v, b)) cs_die("controller build", cc_out);
-    cs_expect_file(cc_out, "controller");
-    return 0;
+/* Independent object/link receipts close the child-success / outer-mark gap. */
+static int cs_build(const char *rev, const char *s, const char *b, int objects, int wave) {
+    char boot[4400], src[4400], obj[4400], out[4400], rec[4400], lock[4400];
+    char source[65], bootstrap[65], input[65], output[65], self[65], identity[2048], expected[2300];
+    long n=0;
+    const char *name=wave?"source-job-wave":"source-package";
+    if(cx_fmt(boot,sizeof boot,"%s/Root41-bootstrap.com",b)||cx_fmt(src,sizeof src,"%s/tools/%s.cx",s,name)||cx_fmt(obj,sizeof obj,"%s/%s-O2.o",b,name)||cx_fmt(out,sizeof out,"%s/%s-O2.%s",b,name,objects?"o":"elf")||cx_fmt(rec,sizeof rec,"%s.receipt",out)||cx_fmt(lock,sizeof lock,"%s.lock",out))cs_die("build path",b);
+    int fd=sy_open(lock,O_RDWR|O_CREAT,0600);
+    if(fd<0||sy_flock(fd,2|4))cs_die("REFUSE live controller owner",out);
+    cs_fp_helper=getenv("UNISACC_IDENTITY_HELPER");
+    cs_source(s,source);cs_sha(boot,bootstrap);cs_sha("/proc/self/exe",self);
+    if(objects)cs_sha(src,input);else {
+        char object_rec[4400], source_input[65];long on=0;
+        cs_sha(src,source_input);cs_sha(obj,input);
+        if(cx_fmt(object_rec,sizeof object_rec,"%s.receipt",obj))cs_die("object receipt path",obj);
+        char *object_saved=cs_load(object_rec,&on);
+        if(cx_fmt(expected,sizeof expected,"chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=objects\ninput_sha=%s\noutput_sha=%s\n",rev,s,source,bootstrap,self,source_input,input)||!object_saved||on!=(long)strlen(expected)||memcmp(object_saved,expected,on))cs_die("REFUSE controller object receipt mismatch",object_rec);
+        free(object_saved);
+    }
+    if(cx_fmt(identity,sizeof identity,"chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=%s\ninput_sha=%s\n",rev,s,source,bootstrap,self,objects?"objects":"link",input))cs_die("build identity",b);
+    char *old=cs_load(rec,&n);
+    if(old){
+        cs_sha(out,output);
+        if(cx_fmt(expected,sizeof expected,"%soutput_sha=%s\n",identity,output)||n!=(long)strlen(expected)||memcmp(old,expected,n))cs_die("REFUSE controller receipt mismatch",rec);
+        free(old);sy_close(fd);sy_printf("CHAIN\tcontroller-%s\treused=%s\n",objects?"objects":"link",out);return 0;
+    }
+    char *v[140];int k=0;pr_result plan;memset(&plan,0,sizeof plan);
+    v[k++]="sh";v[k++]=boot;v[k++]="-O2";
+    if(objects){
+        /* -c defaults to -funit: explicitly name every planned module body. */
+        char *pv[]={"sh",boot,"-cx-plan",src,0};
+        if(pr_run("controller closure",pv,s,0,10,&plan)||plan.rc||!plan.out||!plan.outn||plan.out[plan.outn-1]!='\n'||memchr(plan.out,0,plan.outn))cs_die("REFUSE controller closure plan",src);
+        v[k++]="-c";int units=0;
+        for(char *p=plan.out;*p;){
+            char *end=strchr(p,'\n'), *tab=strchr(p,'\t');
+            if(!end||!tab||tab>=end||units>=128)cs_die("REFUSE controller closure row",src);
+            *tab=0;char index[20];if(cx_fmt(index,sizeof index,"%d",units)||strcmp(index,p))cs_die("REFUSE controller closure order",src);
+            char *path=tab+1,*tail=strchr(path,'\t');if(!tail||tail>end)tail=end;
+            *tail=0;if(!*path)cs_die("REFUSE controller closure path",src);
+            v[k++]=path;units++;p=end+1;
+        }
+        if(!units)cs_die("REFUSE empty controller closure",src);
+    }else v[k++]=obj;
+    v[k++]="-o";v[k++]=out;v[k]=0;
+    char argvfile[4400];long argv_cap=1,argv_at=0;
+    for(int ai=0;ai<k;ai++)argv_cap+=strlen(v[ai])+32;
+    char *argvtext=malloc(argv_cap);if(!argvtext)cs_die("alloc",out);argvtext[0]=0;
+    for(int ai=0;ai<k;ai++){char ix[32];if(cx_fmt(ix,sizeof ix,"%d\t",ai))cs_die("argv index",out);cs_puts(argvtext,argv_cap,&argv_at,ix);cs_puts(argvtext,argv_cap,&argv_at,v[ai]);cs_puts(argvtext,argv_cap,&argv_at,"\n");}
+    if(cx_fmt(argvfile,sizeof argvfile,"%s.argv.tsv",out))cs_die("argv path",out);
+    cs_save(argvfile,argvtext,argv_at);free(argvtext);
+    if(cs_run(v,s))cs_die("controller build",out);
+    pr_free(&plan);
+    char after[65];cs_source(s,after);if(strcmp(source,after))cs_die("REFUSE controller source changed",s);
+    cs_sha(boot,after);if(strcmp(bootstrap,after))cs_die("REFUSE controller bootstrap changed",boot);
+    cs_sha(out,output);
+    if(cx_fmt(expected,sizeof expected,"%soutput_sha=%s\n",identity,output))cs_die("build receipt",rec);
+    char temporary[4400];if(cx_fmt(temporary,sizeof temporary,"%s.new",rec))cs_die("receipt path",rec);
+    cs_save(temporary,expected,strlen(expected));if(sy_rename(temporary,rec))cs_die("publish controller receipt",rec);
+    sy_close(fd);cs_expect_file(out,"controller");return 0;
 }
 
 static int cs_ctx(const char *rev, const char *s, const char *b, const char *ctx, const char *cc) {
     (void)rev;
-    char boot[4400];
+    char boot[4400], controller[4400];
     char *a[10];
     int n = 0;
-    if (cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", b)) cs_die("path", b);
-    a[n++] = (char *)"prepare-context"; a[n++] = (char *)s; a[n++] = boot;
-    a[n++] = (char *)cc; a[n++] = (char *)ctx; a[n] = 0;
-    if (cs_tool(s, "tools/source-package.cx", a)) cs_die("prepare-context", ctx);
+    if (cx_fmt(boot,sizeof boot,"%s/Root41-bootstrap.com",b)||cx_fmt(controller,sizeof controller,"%s/source-package-O2.elf",b))cs_die("path",b);
+    char record[4400];long rn=0;
+    if(cx_fmt(record,sizeof record,"%s/context.tsv",ctx))cs_die("path",ctx);
+    char *saved=cs_load(record,&rn);
+    if(saved){
+        char *record_cc=cs_span_value(saved,"cc"), *record_boot=cs_span_value(saved,"bootstrap");
+        if(!record_cc||!record_boot||strcmp(record_cc,cc)||strcmp(record_boot,boot))cs_die("REFUSE context requested inputs changed",ctx);
+        free(record_cc);free(record_boot);free(saved);
+        char *verify[]={controller,"--verify-context",(char *)s,(char *)ctx,0};
+        if(cs_run(verify,s))cs_die("REFUSE completed context identity",ctx);
+        sy_printf("CHAIN\tctx\treused=%s\n",ctx);return 0;
+    }
+    a[n++]=controller;a[n++]=(char *)"prepare-context";a[n++]=(char *)s;a[n++]=boot;
+    a[n++]=(char *)cc;a[n++]=(char *)ctx;a[n]=0;
+    if(cs_run(a,s))cs_die("prepare-context",ctx);
     return 0;
 }
 
 static int cs_wave(const char *s, const char *ctx, const char *b, const char *phase,
                    const char *first, const char *count) {
-    char *a[12];
-    int n = 0;
-    a[n++] = (char *)s; a[n++] = (char *)ctx; a[n++] = (char *)b;
-    a[n++] = (char *)"wave"; a[n++] = (char *)phase; a[n++] = (char *)first;
-    a[n++] = (char *)count; a[n++] = (char *)"start-job"; a[n] = 0;
-    if (cs_tool(s, "tools/source-job-wave.cx", a)) cs_die("wave start-job", phase);
-    n = 0;
-    a[n++] = (char *)s; a[n++] = (char *)ctx; a[n++] = (char *)b;
-    a[n++] = (char *)"wave"; a[n++] = (char *)phase; a[n++] = (char *)first;
-    a[n++] = (char *)count; a[n++] = (char *)"finish-job"; a[n] = 0;
-    if (cs_tool(s, "tools/source-job-wave.cx", a)) cs_die("wave finish-job", phase);
+    char runner[4400];if(cx_fmt(runner,sizeof runner,"%s/source-job-wave-O2.elf",b))cs_die("path",b);
+    char *a[]={runner,(char *)s,(char *)ctx,(char *)b,"wave",(char *)phase,(char *)first,(char *)count,"start-job",0};
+    if(cs_run(a,s))cs_die("wave start-job",phase);
+    a[8]="finish-job";
+    if(cs_run(a,s))cs_die("wave finish-job",phase);
     return 0;
 }
 
 static int cs_simple_wave(const char *s, const char *ctx, const char *b, const char *what) {
-    char *a[8];
-    int n = 0;
-    a[n++] = (char *)s; a[n++] = (char *)ctx; a[n++] = (char *)b; a[n++] = (char *)what; a[n] = 0;
-    return cs_tool(s, "tools/source-job-wave.cx", a);
+    char runner[4400];
+    if(cx_fmt(runner,sizeof runner,"%s/source-job-wave-O2.elf",b))cs_die("path",b);
+    char *a[]={runner,(char *)s,(char *)ctx,(char *)b,(char *)what,0};
+    return cs_run(a,s);
 }
 
 /* release-build.cx 的两个动作都要先经过它自己的 --rev 前缀；argv[0] 是启动器
@@ -1276,9 +1326,17 @@ int main(int argc, char **argv) {
         sy_eprintf("usage: chain-step snap|build|ctx|host|list|wave|final|p3|slice|pack|smoke|check ...\n");
         return 2;
     }
+    if(tx_eqz(argv[1],"wave-objects")||tx_eqz(argv[1],"wave-runner")){
+        if(argc!=5)cs_die("wave-objects/wave-runner needs REV S B",0);
+        return cs_build(argv[2],argv[3],argv[4],tx_eqz(argv[1],"wave-objects"),1);
+    }
+    if(tx_eqz(argv[1],"build-objects")){
+        if(argc!=5)cs_die("build-objects needs REV S B",0);
+        return cs_build(argv[2],argv[3],argv[4],1,0);
+    }
     if (tx_eqz(argv[1], "build")) {
         if (argc < 5) cs_die("build needs REV S B", 0);
-        return cs_build(argv[2], argv[3], argv[4]);
+        return cs_build(argv[2],argv[3],argv[4],0,0);
     }
     if (tx_eqz(argv[1], "ctx")) {
         if (argc < 7) cs_die("ctx needs REV S B CTX CC", 0);

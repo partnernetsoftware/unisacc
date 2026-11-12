@@ -23,6 +23,14 @@ static int fake(int argc,char **argv) {
     if(!strcmp(mode,"slow")) { sy_sleep_ms(2200); return 124; }
     join(p,out,"once");
     if(!strcmp(mode,"resume")&&!sy_exists(p)) { put(p,"timeout\n"); return 137; }
+    if((!strcmp(mode,"tree")||!strcmp(mode,"dirty"))&&!sy_exists(p)) {
+        put(p,"started\n");int child=fork();if(child<0)return 2;
+        if(!child){sy_setpgid(0,0);int grand=fork();if(grand<0)_exit(2);if(grand)_exit(0);
+            char leaf[4400],id[100];join(leaf,out,"residual-pid");cx_fmt(id,sizeof id,"%d\n",getpid());put(leaf,id);
+            for(int t=0;t<3000;t++){sy_sleep_ms(10);join(leaf,out,"residual-alive");put(leaf,"live\n");}_exit(0);
+        }
+        sy_sleep_ms(10000);return 124;
+    }
     if(!strcmp(mode,"missing")) return 0;
     join(p,out,"checkpoint.tsv"); f=fopen(p,"ab");fprintf(f,"DONE\t%s\twall_ms=1\tsha=-\n",phase);fclose(f);
     if(!strcmp(mode,"receipt-race")&&!strcmp(phase,"snap")) return 137;
@@ -39,7 +47,9 @@ static int call(const char *name,const char *mode,const char *deadline,const cha
     char *v[24]={runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--candidate",self,"--watch",self,"--deadline-s",(char*)deadline,"--max-resumes",(char*)maxr,0};
     int k=13;if(extra) v[k++]=(char*)extra;
     v[k++]="--";v[k++]="--fixture-case";v[k++]=(char*)mode;v[k]=0;
-    char *o=0;size_t n=0;int rc=cx_runv_timeout(v,12,&o,&n);
+    char *o=0;size_t n=0;int rc;
+    if(!strcmp(mode,"dirty")){char *ev[28]={"env","UNISACC_CHAINRUN_FAULT=unconfirmed",0};for(int j=0;j<=k;j++)ev[j+2]=v[j];rc=cx_runv_timeout(ev,12,&o,&n);}
+    else rc=cx_runv_timeout(v,12,&o,&n);
     char p[4400];join(p,dir,"check.stdout"); if(o) { if(cx_write(p,o,n)) exit(2);free(o); } return rc;
 }
 int main(int argc,char **argv) {
@@ -83,5 +93,20 @@ int main(int argc,char **argv) {
     join(p,base,"live");sy_mkdir(p,0755);join(p,base,"live/heartbeat.tsv");
     char hb[300];cx_fmt(hb,sizeof hb,"%ld\tsnap\t%d\t%ld\tstart\n",sy_wall_s(),sy_pid(),sy_getpgid(0));put(p,hb);
     ck(call("live","ok","30","3",0)==2,"live-heartbeat-refused");
+    char plan[4400];join(plan,base,"../build/chain-phases.tsv");
+    put(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
+    ck(call("budget","ok","30","3",0)==0,"phase-budget-accepted");
+    join(p,base,"budget/chain-run.tsv");ck(has(p,"bound=3")&&has(p,"bound=4")&&has(p,"bound=5"),"phase-budget-read-not-fixed-55");
+    ck(call("tree","tree","30","3",0)==0,"real-residue-tree-cleaned-resumed");
+    join(p,base,"tree/chain-run.tsv");ck(has(p,"cleanup=1 residue=0")&&has(p,"RESUME\t"),"cleanup-terminal-proof-before-resume");
+    join(p,base,"tree/residual-pid");size_t pn=0;char *pb=cx_read(p,&pn);int residual=pb?atoi(pb):0;free(pb);
+    ck(residual>1&&sy_getpgid(residual)<0,"escaped-grandchild-gone");
+    ck(call("dirty","dirty","30","3",0)==2,"cleanup-unconfirmed-refused");
+    join(p,base,"dirty/chain-run.tsv");ck(has(p,"reason=surviving-processes")&&!has(p,"RESUME\t"),"unclean-never-resumed");
+    put(plan,"0\tsnap\t-\t56\n1\tpack\t-\t55\n");
+    ck(call("overbound","ok","30","3",0)==2,"over-55-refused-before-child");
+    join(p,base,"overbound/calls");ck(!sy_exists(p),"overbound-no-child-executed");
+    put(plan,"0\tsnap\t-\t0\n1\tpack\t-\t55\n");
+    ck(call("zerobound","ok","30","3",0)==2,"zero-bound-refused");
     sy_printf("CHECK_CHAIN_RUN\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }

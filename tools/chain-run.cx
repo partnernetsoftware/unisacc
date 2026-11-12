@@ -14,10 +14,22 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.chainrunproc
 
 static const char *out;
 static long end_ms;
 static int attempts, resumes, max_attempts=4096, max_resumes=3;
+static int phase_bound=55;
+static void die(const char *s);
+static void validate_plan(void) {
+    FILE *f=fopen("build/chain-phases.tsv","rb");if(!f)die("phase table");
+    char line[5000],phase[256],domain[4400],extra;int order,bound,count=0;
+    while(fgets(line,sizeof line,f)) {
+        if(line[0]=='#')continue;
+        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d %c",&order,phase,domain,&bound,&extra)!=4||order!=count++||bound<1||bound>55)die("phase table invalid");
+    }
+    if(ferror(f)||!count||fclose(f))die("phase table invalid");
+}
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
 static void append(const char *file,const char *s) {
@@ -50,7 +62,7 @@ static char *watch_argv[8];
 static int observe(void) {
     long left=(end_ms-sy_now_ms())/1000;
     if(left<1) return blocker("chain-watch","deadline",3);
-    pr_result r; int t=pr_run("chain-watch",watch_argv,0,0,left<55?(int)left:55,&r);
+    pr_result r; int t=cr_run("chain-watch",watch_argv,left<55?(int)left:55,&r);
     pr_echo(&r);
     char p[4400]; path(p,"chain-run-watch.stdout");
     if(cx_write(p,r.out?r.out:"",r.outn)) die("watch evidence");
@@ -89,7 +101,9 @@ static int run(const char *phase,char **v,char *fresh_output) {
         FILE *av=fopen(argv_path,"wb"); if(!av) die("argv evidence");
         for(int ai=0;v[ai];ai++) if(fprintf(av,"%s\n",v[ai])<0) die("argv evidence");
         if(fclose(av)) die("argv close");
-        pr_result r; int t=pr_run(phase,v,0,0,left<55?(int)left:55,&r);
+        int call_bound=left<phase_bound?(int)left:phase_bound;
+        pr_result r; int t=cr_run(phase,v,call_bound,&r);
+        append("chain-run.tsv",r.why); append("chain-run.tsv","\n");
         char name[100],p[4400],row[512];
         cx_fmt(name,sizeof name,"chain-run-%d.stdout",attempts); path(p,name); if(cx_write(p,r.out?r.out:"",r.outn)) die("stdout evidence");
         cx_fmt(name,sizeof name,"chain-run-%d.stderr",attempts); path(p,name); if(cx_write(p,r.err?r.err:"",r.errn)) die("stderr evidence");
@@ -97,7 +111,7 @@ static int run(const char *phase,char **v,char *fresh_output) {
         int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc);
         int retry=(t && r.timed_out)||(!t && (r.rc==-9 || r.rc==-15 || r.rc==124 || r.rc==137 || r.rc==143));
         int residue=r.residue; pr_free(&r);
-        cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\n",attempts,phase,rc,residue); append("chain-run.tsv",row);
+        cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\tbound=%d\n",attempts,phase,rc,residue,call_bound); append("chain-run.tsv",row);
         if(residue) return blocker(phase,"surviving-processes",2);
         if(!rc) return 0;
         if(!retry) return blocker(phase,"first-failure",rc);
@@ -214,6 +228,7 @@ int main(int argc,char **argv) {
         if(sy_exists(safe_out) && (sy_realpath(safe_out,resolved,sizeof resolved)<0 || strncmp(resolved,safe_parent,strlen(safe_parent)))) die("output symlink outside repository out");
         *q=c; if(!c) break;
     }
+    validate_plan(); /* Reject every over-bound row before executing even preparation. */
     sy_mkdir(out,0755);
     char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");
@@ -267,8 +282,9 @@ int main(int argc,char **argv) {
     while(fgets(line,sizeof line,table)) {
         if(line[0]=='#') continue;
         int order,bound; char domain[4400];
-        if(sscanf(line,"%d\t%255s\t%4399s\t%d",&order,phase,domain,&bound)!=4||order!=count++||bound!=55) die("phase table invalid");
-        if(rehearse&&strcmp(phase,"snap")&&strcmp(phase,"build")&&strcmp(phase,"ctx")) continue;
+        if(sscanf(line,"%d\t%255s\t%4399s\t%d",&order,phase,domain,&bound)!=4||order!=count++||bound<1||bound>55) die("phase table invalid");
+        phase_bound=bound;
+        if(rehearse&&strcmp(phase,"snap")&&strcmp(phase,"build-objects")&&strcmp(phase,"build")&&strcmp(phase,"wave-objects")&&strcmp(phase,"wave-runner")&&strcmp(phase,"ctx")) continue;
         /* G2 obj-N are legacy explicit --until boundaries, not normal scheduler work.
            The following closure-prepare/closure/objects/link targets keep --objects batched. */
         if(!strncmp(phase,"g2-lnx-x86_64-obj-",18)||!strncmp(phase,"g2-lnx-arm64-obj-",17)) continue;

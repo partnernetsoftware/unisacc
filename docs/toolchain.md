@@ -140,3 +140,17 @@ SFT-FIX 根因是 `pp_copy_product` 在split成员复制前就写入build记录�
 
 REG-PREP 重基补丁独立基为 `67fb47417b7c053217a1aa1d307eb9ab9a5bef9b`。该基线已包含 A2p 的 `cxlib.chainfacts` 动态阶段计数、事实漂移负例及 phasesgen 独立预编译；重基保留这些实现与登记/调用参数，不再迁入旧475/485或按表行数反推预期的实现。原始基线日志仅作历史记录，不代表本基线执行结果。
 
+
+## K10 有界逐相与进程所有权
+
+`chain-run` 在创建会话及执行准备前验证整个 `build/chain-phases.tsv`，每相预算必须在1..55秒；调用实际使用该行预算，总deadline与尝试/恢复次数持久保存，换进程不重置。动态front继承所属静态相预算，不扩大55秒。
+
+工具面局部模块 `cxlib.chainrunproc` 使用真实fork返回PID、PGID与/proc starttime，且每个身份持有Linux pidfd；不从日志或heartbeat文本获取清理目标。spawn前要求single-flight且启用subreaper，根进程经门管道等待身份固定后才exec；接管的孤儿必须是本runner的子进程。仅对经身份重核的pidfd发STOP/KILL，避免PID复用与其他窗口误杀。执行和清理共享单调时钟上界，预留最多2秒有界整树清理，核实终态零存活才允许有限恢复。pidfd不可用、身份容量超限或清理不确定均具名阻塞，不降级到裸PID/group kill。`UNISACC_CHAINRUN_FAULT=unconfirmed`只用于轻夹具：真实清理照常完成，再将终态标不确定以测试拒续；不制造PID、不跳过清理、不模拟成功。
+
+仓外OUT仍在任何子调用前拒绝；chainfix-r的repo/out与软链约束不放宽。此工具变更不修改产品输入，不代表真链或产品资格通过。
+
+K10静态顺序为 `snap → build-objects → build → wave-objects → wave-runner → ctx`，总488相。两个对象相先以 `-cx-plan SOURCE`取得完整闭包，再将全部路径显式作为聚合 `-O2 -c` roots（普通单根 `-c` 默认funit会丢依赖，因此不能使用）；链接相只链接已校验的聚合对象。controller/wave的对象与ELF各有独立SHA收据和真实argv表，收据原子rename发布，输出/源码/bootstrap/producer不符拒绝，不用timeout作为进展。outer mark间中断后只核收据，不重复已完成编译；对象阶段与链接阶段分别checkpoint。ctx直接运行已编controller，已有完整context仅核输入请求及原controller验证。wave在独立相预编为原生runner，逐job启动不再源码冷编source-job-wave，内层旧58秒预算亦收口55秒。
+
+新增工具名已在完整git历史查重：`tools/cxlib/chainrunproc.cx`、`tools/check-chainrunproc.cx`此前均无历史；实际编译库存 `tests/tools-compile-sources.tsv`、行为批次与覆盖登记同步新增，20261110库存是历史快照不回写成当日盘点。真链、实际controller冷编耗时、跨宿主以及产品资格均未实跑；轻假链只证明预算/身份/恢复边界，不证明真实每相余量。
+
+本次最终交付基为 `1e269c53bbbb7cd9e9819f808db604fd8aac17b8`，其后只叠完整替代包 `c57-g2batch-r4.patch` SHA256 `5a6a75aeab09667d0bbd72e4a7c3f3ec889a705fc09bf0ecfd5c36bfa4a7e2f3`，不重复叠旧R3/R2。K10保留生产语义与G2身份恢复；十项cx与阶段表对照已验R2树同字节。依定稿验收，本次在新父树真实 `tests/run-batch` 新跑chainresume(13项,daily)、chainrunproc(7项,commit)、chain-run(29项,commit)，均输出BATCH_RUN status=PASS、rc=0、transport=0且精确marker匹配；准备仅PREPARED。修复重导表尾重复chainresume/coverage登记，保留主线CHECK_CHAINRESUME合同，不删断言、不改tier/55秒。另新跑生成--check及fresh apply检查；账本独立TSV，不入patch，不跑真链/广门。

@@ -1,0 +1,25 @@
+/* Real pipe handshakes, real protected child and sibling; no sleeping to infer liveness. */
+#pragma unisa use cxlib.chainrunproc
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+static int bad;
+static void check(int yes,const char *name){printf("%s\tchainrunproc.%s\n",yes?"PASS":"FAIL",name);if(!yes)bad++;}
+int main(void){
+ char *ok[]={"sh","-c","printf stdout; printf stderr >&2",0};pr_result r;
+ int t=cr_run("short",ok,3,&r);check(!t&&!r.rc&&!r.residue&&r.out&&!strcmp(r.out,"stdout")&&r.err&&!strcmp(r.err,"stderr"),"short-child-output");pr_free(&r);
+ check(cr_run("invalid",ok,56,&r)!=0,"overbound-before-spawn");pr_free(&r);
+ int gate[2],ready[2];if(pipe(gate)||pipe(ready))return 2;
+ int protected=fork();if(protected<0)return 2;
+ if(!protected){close(gate[1]);close(ready[0]);write(ready[1],"r",1);close(ready[1]);char b;int n=read(gate[0],&b,1);_exit(n==1?0:9);}
+ close(gate[0]);close(ready[1]);char b;if(read(ready[0],&b,1)!=1)return 2;close(ready[0]);
+ t=cr_run("protected",ok,3,&r);check(t!=0&&strstr(r.why,"concurrent child"),"existing-child-refused-before-spawn");pr_free(&r);
+ int status=0;check(waitpid(protected,&status,WNOHANG)==0,"existing-child-not-touched");
+ int worker=fork();if(worker<0)return 2;
+ if(!worker){close(gate[1]);char *tree[]={"sh","-c","sleep 20 & exit 0",0};pr_result rr;int rc=cr_run("orphan",tree,2,&rr);int pass=rc&&rr.timed_out&&rr.residue==0&&strstr(rr.why,"cleanup=1");pr_free(&rr);_exit(pass?0:1);}
+ if(waitpid(worker,&status,0)!=worker)return 2;check(WIFEXITED(status)&&!WEXITSTATUS(status),"orphan-tree-cleaned-at-bound");
+ check(waitpid(protected,&status,WNOHANG)==0,"other-runner-sibling-not-collected");
+ if(write(gate[1],"q",1)!=1)return 2;close(gate[1]);if(waitpid(protected,&status,0)!=protected)return 2;
+ check(WIFEXITED(status)&&!WEXITSTATUS(status),"protected-child-normal-exit-handshake");
+ printf("CHECK_CHAINRUNPROC\tfailed=%d\n",bad);return bad?1:0;
+}
