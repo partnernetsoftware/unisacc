@@ -1,0 +1,454 @@
+/* tools/check-bg-candidate.cx -- tools/bg-candidate.cx on private fixture candidates and a fake chain.
+ *
+ *   sh ./unisacc.com tools/check-bg-candidate.cx [-- ROOT OUT]
+ *
+ * Nothing here starts a real chain: `start` is always given --chain, the native image of this
+ * program, which plays chain-run (it is entered through its --rev argument). The fixture
+ * candidates of (2) to (4) are written by this program as files, with an owner pid no process has.
+ * (1) start: the chain receives --supervise, --segment-s, --max-segments and --deadline-s; the
+ *     OWNER row names the pid and process group the fake chain itself observed, a group of its own
+ *     and not this check's; while it runs status says RUNNING, a second start of the same revision
+ *     and a start of another revision are refused and add no OWNER row; after it ends an EXIT row
+ *     and the seal exist, status says DONE with the APE sha; a chain that exits non-zero is FAILED
+ *     with its rc; a chain that outlives deadline plus slack is killed, recorded as such, and its
+ *     process is gone; a bad revision and a relative --chain are usage errors;
+ * (2) status: DONE with the APE sha, UNOWNED, ORPHANED, FAILED for a missing phase and for a
+ *     blocker after the terminal row, the phase counts, and the single-revision form;
+ * (3) promote --check: a complete candidate is accepted and its APE path and sha, source SID and
+ *     pack inputs are printed, with no file of the candidate changed; refused are a revision with
+ *     no candidate, an owner row or a chain identity of another revision, a candidate that is
+ *     incomplete (missing phase, no EXIT row, non-zero rc, still running), a chain that was not
+ *     the source chain, a changed plan, and each tampered receipt (checkpoint, context, APE
+ *     bytes, a pack input, a removed seal); promote without --check does nothing and is rc 2;
+ * (4) prune: without a trash directory nothing moves; --dry-run moves nothing; with one, the
+ *     oldest candidates are renamed into it and every file is still there with the same bytes; a
+ *     live candidate is kept even at --keep 0; an existing target is left alone.
+ * Both images are built once (tq_native, PREPARED lines, not results). The work directory is
+ * left in place: this check removes nothing either. */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define P 4400
+#define DEAD 2147483646
+#define PLAN "# fixture phases\n0\tsnap\t-\t55\t-\t-\t1\n1\tctx\t-\t55\tsnap\t-\t1\n2\tcompare\touter\t55\tctx\t-\t1\n3\tpack\touter\t55\tcompare\t-\t1\n"
+#define SID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define REV_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define REV_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+#define REV_C "cccccccccccccccccccccccccccccccccccccccc"
+#define REV_D "dddddddddddddddddddddddddddddddddddddddd"
+#define REV_E "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+static int failed;
+static char root[4096], work[P], bin[P], self[P], fxroot[P];
+static char *last;
+static size_t lastn;
+static const char *leaves[] = {"chain-run.identity", "plan.tsv", "checkpoint.tsv", "chain-run.tsv", "ape-final/ape-receipt.txt", "ctx/context.tsv", 0};
+
+static void ck(int ok, const char *name) {
+    if (!ok) {
+        failed++;
+        if (last) sy_printf("%s", last);
+    }
+    sy_printf("%s\tbgc.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int join(char *joined, const char *head, const char *tail) { return cx_fmt(joined, P, "%s/%s", head, tail); }
+static int put(const char *dir, const char *leaf, const char *body) {
+    char p[P];
+    return join(p, dir, leaf) || cx_write(p, body, (size_t)tx_len(body, TX_ZCAP));
+}
+static int sha_text(const char *msg, char hex[65]) { return sy_sha256_hex(msg, tx_len(msg, TX_ZCAP), hex); }
+static int sha_file(const char *dir, const char *leaf, char hex[65]) {
+    char hp[P];
+    size_t n = 0;
+    char *blob;
+    int bad;
+    if (join(hp, dir, leaf) || !(blob = cx_read(hp, &n))) return -1;
+    bad = sy_sha256_hex(blob, (long)n, hex);
+    mm_free(blob);
+    return bad;
+}
+static int present(const char *dir, const char *leaf) {
+    char p[P];
+    return !join(p, dir, leaf) && sy_exists(p) == 1;
+}
+
+/* What a finished chain leaves in its output: identity, checkpoint, terminal row, pack and context. */
+static int chain_files(const char *dir, const char *rev, int phases, int blocker) {
+    static const char *phase[] = {"snap", "ctx", "compare", "pack"};
+    char t[3 * P], d[P], plan[65], a[65], b[65], c[65];
+    long at = 0;
+    int i;
+    if (sha_text(PLAN, plan) || sha_text("pkg", a) || sha_text("slice", b) || sha_text("fake-ape", c)) return -1;
+    if (cx_fmt(t, sizeof t, "rev=%s\nmode=full\ncandidate=source\nplan=%s\ndeadline-s=9000\n", rev, plan) || put(dir, "chain-run.identity", t)) return -1;
+    t[0] = 0;
+    for (i = 0; i < phases; i++) {
+        if (cx_fmt(t + at, (long)sizeof t - at, "DONE\t%s\twall_ms=%d\tsha=-\n", phase[i], i + 1)) return -1;
+        at = tx_len(t, sizeof t);
+    }
+    if (put(dir, "checkpoint.tsv", t)) return -1;
+    if (put(dir, "chain-run.tsv", blocker ? "PREPARED\tpack\tnot=PASS\nBLOCKER\tphase=scheduler\treason=fixture\trc=3\tattempts=1\tresumes=0\n"
+                                          : "SEGMENT\t1\tn=1\tstart\nPREPARED\tpack\tnot=PASS\nSUPERVISE\t1\titeration=1\trc=0\tresidue=0\n")) return -1;
+    if (join(d, dir, "ape-final") || (sy_mkdir(d, 0755) && sy_exists(d) != 1)) return -1;
+    if (join(d, dir, "in") || (sy_mkdir(d, 0755) && sy_exists(d) != 1)) return -1;
+    if (join(d, dir, "ctx") || (sy_mkdir(d, 0755) && sy_exists(d) != 1)) return -1;
+    if (put(dir, "in/p3.pkg", "pkg") || put(dir, "in/entry.elf", "slice") || put(dir, "ape-final/unisacc-next.com", "fake-ape")) return -1;
+    if (cx_fmt(t, sizeof t,
+               "p3\t%s/in/p3.pkg\tsha=%s\tbytes=3\nlnx/x86_64\t%s/in/entry.elf\tsha=%s\tbytes=5\ncache-manager-mode\tEXPLICIT_INPUTS\n"
+               "unisacc-next.com\t%s/ape-final/unisacc-next.com\tsha=%s\tbytes=8\n",
+               dir, a, dir, b, dir, c) || put(dir, "ape-final/ape-receipt.txt", t)) return -1;
+    return put(dir, "ctx/context.tsv", "source-package-context-v2\nstatus\tPREPARED_CONTEXT_ONLY\nsource\t" SID "\n");
+}
+
+/* ---- the fake chain: this program entered as "SELF --rev R --out DIR ... -- --fixture-case MODE" ---- */
+
+static int fake(int argc, char **argv) {
+    const char *out = 0, *rev = 0, *mode = "ok";
+    char t[8192];
+    long at = 0;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--out") && i + 1 < argc) out = argv[i + 1];
+        if (tx_eqz(argv[i], "--rev") && i + 1 < argc) rev = argv[i + 1];
+        if (tx_eqz(argv[i], "--fixture-case") && i + 1 < argc) mode = argv[i + 1];
+        if (cx_fmt(t + at, (long)sizeof t - at, "ARG\t%s\n", argv[i])) return 2;
+        at = tx_len(t, sizeof t);
+    }
+    if (!out || !rev || put(out, "fake-argv.tsv", t)) return 2;
+    if (cx_fmt(t, sizeof t, "FAKE\tpid=%d\tpgid=%ld\n", sy_pid(), sy_getpgid(0)) || put(out, "fake.tsv", t)) return 2;
+    if (tx_eqz(mode, "fail")) {
+        if (put(out, "checkpoint.tsv", "DONE\tsnap\twall_ms=1\tsha=-\n") ||
+            put(out, "chain-run.tsv", "BLOCKER\tphase=ctx\treason=fixture\trc=3\tattempts=1\tresumes=0\n")) return 2;
+        return 3;
+    }
+    if (tx_eqz(mode, "hang")) {
+        for (i = 0; i < 300; i++) (void)sy_sleep_ms(100);
+        return 0;
+    }
+    if (tx_eqz(mode, "slow"))
+        for (i = 0; i < 25; i++) (void)sy_sleep_ms(100);
+    return chain_files(out, rev, 4, 0) ? 2 : 0;
+}
+
+/* ---- fixture candidates ------------------------------------------------------------------- */
+
+static int seal(const char *dir, int pid) {
+    char t[4096], hex[65];
+    long at = 0;
+    int i;
+    for (i = 0; leaves[i]; i++) {
+        if (sha_file(dir, leaves[i], hex) || cx_fmt(t + at, (long)sizeof t - at, "SEAL\t%d\t%s\t%s\n", pid, leaves[i], hex)) return -1;
+        at = tx_len(t, sizeof t);
+    }
+    return put(dir, "seal.tsv", t);
+}
+/* A candidate directory BASE/NAME as a finished source chain left it. OWNER_REV and IDENT_REV are
+   the revisions its owner row and chain identity name; EXIT_RC < 0 writes no EXIT row. */
+static int candidate(const char *b, const char *name, const char *owner_rev, const char *ident_rev, long epoch, int pid, int exit_rc,
+                     int phases, int blocker, const char *chain) {
+    char dir[P], t[1024];
+    if (join(dir, b, name) || (sy_mkdir(b, 0755) && sy_exists(b) != 1) || sy_mkdir(dir, 0755)) return -1;
+    if (put(dir, "plan.tsv", PLAN) || chain_files(dir, ident_rev, phases, blocker)) return -1;
+    if (owner_rev) {
+        if (cx_fmt(t, sizeof t, "OWNER\t%ld\t%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=9000\tchain=%s\n", epoch, owner_rev, DEAD - 1, pid, pid, chain) ||
+            put(dir, "owner.tsv", t)) return -1;
+    }
+    if (exit_rc >= 0) {
+        if (cx_fmt(t, sizeof t, "EXIT\t%ld\tpid=%d\trc=%d\twhy=exited\n", epoch + 60, pid, exit_rc) || put(dir, "exit.tsv", t)) return -1;
+    }
+    return seal(dir, pid);
+}
+static int good(const char *b, const char *rev, long epoch) { return candidate(b, rev, rev, rev, epoch, DEAD, 0, 4, 0, "source"); }
+
+/* ---- running the tool ---------------------------------------------------------------------- */
+
+static int tool(const char *b, const char *a0, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
+    const char *a[6];
+    char *v[16];
+    int k = 0, i;
+    a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3; a[4] = a4; a[5] = a5;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin;
+    for (i = 0; i < 6 && a[i]; i++) v[k++] = (char *)a[i];
+    v[k++] = "--root"; v[k++] = fxroot;
+    v[k++] = "--base"; v[k++] = (char *)b;
+    v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+/* bin start --rev R --deadline-s D --slack-s S --chain SELF --root .. --base B -- --fixture-case MODE */
+static int start(const char *b, const char *rev, const char *mode, const char *deadline, const char *slack) {
+    char *v[24];
+    int k = 0;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = bin; v[k++] = "start"; v[k++] = "--rev"; v[k++] = (char *)rev;
+    v[k++] = "--deadline-s"; v[k++] = (char *)deadline; v[k++] = "--slack-s"; v[k++] = (char *)slack;
+    v[k++] = "--chain"; v[k++] = self; v[k++] = "--root"; v[k++] = fxroot; v[k++] = "--base"; v[k++] = (char *)b;
+    v[k++] = "--"; v[k++] = "--fixture-case"; v[k++] = (char *)mode; v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+/* Where in the N bytes of tool output or fixture rows a TAB field (or a line) begins with PIECE;
+   PIECE may run over several fields. -1 when no field begins with it. */
+static long field_at(const char *hay, long n, const char *piece) {
+    long pn = tx_len(piece, P), i;
+    for (i = 0; i + pn <= n; i++)
+        if ((i == 0 || hay[i - 1] == '\t' || hay[i - 1] == '\n') && mm_same(hay + i, piece, pn)) return i;
+    return -1;
+}
+/* Lines in which, for every given piece, some field begins with it (a null piece ends the list). */
+static int count_in(const char *hay, long n, const char *w0, const char *w1, const char *w2, const char *w3) {
+    const char *want[4];
+    long i = 0, e;
+    int hits = 0, k;
+    want[0] = w0; want[1] = w1; want[2] = w2; want[3] = w3;
+    while (hay && i < n) {
+        int ok = 1;
+        e = i;
+        while (e < n && hay[e] != '\n') e++;
+        for (k = 0; k < 4 && want[k] && ok; k++) ok = field_at(hay + i, e - i, want[k]) >= 0;
+        if (ok && e > i) hits++;
+        i = e + 1;
+    }
+    return hits;
+}
+static int lines(const char *w0, const char *w1, const char *w2, const char *w3) { return count_in(last, (long)lastn, w0, w1, w2, w3); }
+static int rows(const char *dir, const char *leaf, const char *w0, const char *w1, const char *w2) {
+    char p[P];
+    size_t n = 0;
+    char *tsv;
+    int hits;
+    if (join(p, dir, leaf) || !(tsv = cx_read(p, &n))) return -1;
+    hits = count_in(tsv, (long)n, w0, w1, w2, 0);
+    mm_free(tsv);
+    return hits;
+}
+/* The rest of the first field that begins with KEY, up to the next TAB or line end. */
+static int value(const char *line0, long n, const char *key, char *out, long cap) {
+    long at = field_at(line0, n, key), e;
+    if (at < 0) return -1;
+    at += tx_len(key, P);
+    e = at;
+    while (e < n && line0[e] != '\t' && line0[e] != '\n') e++;
+    return tx_copy(out, cap, line0 + at, e - at);
+}
+static int number(const char *s) {
+    int v = 0, i;
+    for (i = 0; s[i] >= '0' && s[i] <= '9' && i < 9; i++) v = v * 10 + (s[i] - '0');
+    return i ? v : -1;
+}
+/* Bounded wait for LEAF to appear in DIR: at most TURNS steps of 100 ms. */
+static int await(const char *dir, const char *leaf, int turns) {
+    int i;
+    for (i = 0; i < turns; i++) {
+        if (present(dir, leaf)) return 1;
+        (void)sy_sleep_ms(100);
+    }
+    return present(dir, leaf);
+}
+static int refused(const char *b, const char *rev, const char *reason) {
+    char want[128];
+    int rc = tool(b, "promote", "--check", "--rev", rev, 0, 0);
+    return !cx_fmt(want, sizeof want, "reason=%s", reason) && rc == 1 && lines("PROMOTE_CHECK\tREFUSE", want, 0, 0) == 1 && lines("NEED\t", 0, 0, 0) == 0 &&
+           lines("PROMOTE_CHECK\tOK", 0, 0, 0) == 0;
+}
+
+int main(int argc, char **argv) {
+    char src[P], why[256], b1[P], bh[P], b2[P], b3[P], b4[P], trash[P], none[P], dir[P], dh[P], t[2 * P], ape[65];
+    char s_pid[32], s_pgid[32], f_pid[32], before[6][65], after[65], aside[P];
+    int rc, rc2, pid = -1, i, hung = -1;
+
+    if (argc > 1 && tx_eqz(argv[1], "--rev")) return fake(argc, argv);
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/bgc-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char o[P], b[P];
+        if (join(o, root, "out") || join(b, o, "b1") || cx_fmt(work, sizeof work, "%s/check-%d-%ld", b, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(o, 0755);
+        (void)sy_mkdir(b, 0755);
+    }
+    if (sy_mkdir(work, 0755) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (join(bin, work, "bg-candidate.native") || join(self, work, "fake-chain.native") || join(fxroot, work, "root") || join(b1, work, "b1") ||
+        join(bh, work, "bh") || join(b2, work, "b2") || join(b3, work, "b3") || join(b4, work, "b4") || join(trash, work, "trash") ||
+        join(none, work, "no-such-trash")) return 2;
+    if (join(src, root, "tools/bg-candidate.cx") || tq_native(root, src, bin, why, sizeof why)) {
+        sy_printf("FAIL\tbgc.build-native\t%s\n", why);
+        return 1;
+    }
+    if (join(src, root, "tools/check-bg-candidate.cx") || tq_native(root, src, self, why, sizeof why)) {
+        sy_printf("FAIL\tbgc.build-fake-chain\t%s\n", why);
+        return 1;
+    }
+    if (sy_mkdir(fxroot, 0755) || join(dir, fxroot, "build") || sy_mkdir(dir, 0755) || put(fxroot, "build/chain-phases.tsv", PLAN) || sha_text("fake-ape", ape)) {
+        sy_printf("FAIL\tbgc.fixture-prepare\n");
+        return 1;
+    }
+
+    /* (1) start. The chain that must be killed runs in a base of its own, beside the others. */
+    rc = start(bh, REV_C, "hang", "1", "1");
+    ck(rc == 0 && lines("BG_CANDIDATE\tSTARTED", "rev=" REV_C, 0, 0) == 1, "start-hang-accepted");
+    rc = start(b1, REV_A, "slow", "30", "5");
+    ck(rc == 0 && lines("BG_CANDIDATE\tSTARTED", "rev=" REV_A, "hard_s=35", 0) == 1, "start-accepted");
+    s_pid[0] = 0;
+    s_pgid[0] = 0;
+    f_pid[0] = 0;
+    if (last) { (void)value(last, (long)lastn, "pid=", s_pid, sizeof s_pid); (void)value(last, (long)lastn, "pgid=", s_pgid, sizeof s_pgid); }
+    pid = number(s_pid);
+    if (join(dir, b1, REV_A)) return 2;
+    ck(pid > 1 && rows(dir, "owner.tsv", "OWNER\t", REV_A "\t", "chain=override") == 1 && !cx_fmt(t, sizeof t, "pid=%s\tpgid=%s\t", s_pid, s_pgid) &&
+       rows(dir, "owner.tsv", t, 0, 0) == 1, "start-owner-row-recorded");
+    ck(await(dir, "fake.tsv", 50) && !cx_fmt(t, sizeof t, "pid=%s\tpgid=%s", s_pid, s_pgid) && rows(dir, "fake.tsv", "FAKE\t", t, 0) == 1 &&
+       tx_eqz(s_pid, s_pgid) && (long)pid != sy_getpgid(0), "start-owner-is-the-chain-own-group");
+    ck(rows(dir, "fake-argv.tsv", "ARG\t--supervise", 0, 0) == 1 && rows(dir, "fake-argv.tsv", "ARG\t--segment-s", 0, 0) == 1 &&
+       rows(dir, "fake-argv.tsv", "ARG\t--max-segments", 0, 0) == 1 && rows(dir, "fake-argv.tsv", "ARG\t--deadline-s", 0, 0) == 1 &&
+       rows(dir, "fake-argv.tsv", "ARG\t" REV_A, 0, 0) == 1 && rows(dir, "fake-argv.tsv", "ARG\t--fixture-case", 0, 0) == 1,
+       "start-chain-gets-segments-and-supervisor");
+    ck(sha_file(dir, "plan.tsv", after) == 0 && sha_text(PLAN, before[0]) == 0 && tx_eqz(after, before[0]), "start-copies-the-plan");
+    rc = tool(b1, "status", 0, 0, 0, 0, 0);
+    ck(rc == 0 && lines("BG_CANDIDATE\t" REV_A, "state=RUNNING", "rc=none:", "ape_sha=-") == 1, "status-running");
+    rc = start(b1, REV_A, "ok", "30", "5");
+    rc2 = start(b1, REV_B, "ok", "30", "5");
+    ck(rc == 1 && rc2 == 1 && lines("REFUSE", "reason=another-candidate-running", "rev=" REV_A, 0) == 1 && rows(dir, "owner.tsv", "OWNER\t", 0, 0) == 1 &&
+       !present(b1, REV_B), "start-refused-while-owner-alive");
+    ck(refused(b1, REV_A, "still-running"), "promote-refuses-running");
+    ck(await(dir, "seal.tsv", 150) && rows(dir, "exit.tsv", "EXIT\t", "rc=0", "why=exited") == 1 && !cx_fmt(t, sizeof t, "pid=%s\t", s_pid) &&
+       rows(dir, "exit.tsv", t, 0, 0) == 1 && rows(dir, "seal.tsv", "SEAL\t", 0, 0) == 6, "exit-row-and-seal-after-rc0");
+    rc = tool(b1, "status", REV_A, 0, 0, 0, 0);
+    ck(rc == 0 && !cx_fmt(t, sizeof t, "ape_sha=%s", ape) && lines("BG_CANDIDATE\t" REV_A, "state=DONE", "phases=4/4", t) == 1 && lines("last=pack", "rc=0", 0, 0) == 1,
+       "status-done-after-chain");
+    ck(refused(b1, REV_A, "chain-override"), "promote-refuses-non-source-chain");
+    rc = start(b1, REV_B, "fail", "30", "5");
+    if (join(dir, b1, REV_B)) return 2;
+    ck(rc == 0 && await(dir, "exit.tsv", 100) && rows(dir, "exit.tsv", "EXIT\t", "rc=3", 0) == 1 && !present(dir, "seal.tsv"), "failed-chain-exit-row-no-seal");
+    rc = tool(b1, "status", REV_B, 0, 0, 0, 0);
+    ck(rc == 0 && lines("BG_CANDIDATE\t" REV_B, "state=FAILED", "phases=1/4", "rc=3") == 1, "status-failed-chain");
+    ck(refused(b1, REV_B, "chain-failed"), "promote-refuses-failed-chain");
+    if (join(dh, bh, REV_C)) return 2;
+    ck(await(dh, "exit.tsv", 150) && rows(dh, "exit.tsv", "EXIT\t", "rc=124", "why=deadline-killed") == 1, "deadline-kill-recorded");
+    {
+        char *o = 0;
+        size_t n = 0;
+        char p[P];
+        if (!join(p, dh, "fake.tsv") && (o = cx_read(p, &n)) && !value(o, (long)n, "pid=", f_pid, sizeof f_pid)) hung = number(f_pid);
+        mm_free(o);
+        for (i = 0; i < 30 && hung > 1 && sy_getpgid(hung) >= 0; i++) (void)sy_sleep_ms(100);
+    }
+    ck(hung > 1 && sy_getpgid(hung) < 0, "deadline-kill-leaves-no-process");
+    rc = tool(bh, "status", 0, 0, 0, 0, 0);
+    ck(rc == 0 && lines("BG_CANDIDATE\t" REV_C, "state=FAILED", "rc=124", 0) == 1, "status-killed-chain-failed");
+    rc = tool(b1, "start", "--rev", "abc", "--chain", self, 0);
+    rc2 = tool(b1, "start", "--rev", REV_D, "--chain", "fake-chain.native", 0);
+    ck(rc == 2 && rc2 == 2 && !present(b1, REV_D) && tool(b1, "start", 0, 0, 0, 0, 0) == 2 && tool(b1, "frobnicate", 0, 0, 0, 0, 0) == 2, "start-usage-rc2");
+
+    /* (2) status on written candidates */
+    rc = good(b2, REV_A, 100);
+    rc |= candidate(b2, REV_B, 0, REV_B, 200, DEAD, 0, 4, 0, "source");
+    rc |= candidate(b2, REV_C, REV_C, REV_C, 300, DEAD, -1, 4, 0, "source");
+    rc |= candidate(b2, REV_D, REV_D, REV_D, 400, DEAD, 0, 3, 0, "source");
+    rc |= candidate(b2, REV_E, REV_E, REV_E, 500, DEAD, 0, 4, 1, "source");
+    rc2 = tool(b2, "status", 0, 0, 0, 0, 0);
+    ck(!rc && rc2 == 0 && lines("BG_STATUS", "candidates=5", 0, 0) == 1 && !cx_fmt(t, sizeof t, "ape_sha=%s", ape) &&
+       lines("BG_CANDIDATE\t" REV_A, "state=DONE", "phases=4/4", t) == 1, "status-done-with-ape-sha");
+    ck(lines("BG_CANDIDATE\t" REV_B, "state=UNOWNED", "ape_sha=-", 0) == 1 && lines("BG_CANDIDATE\t" REV_C, "state=ORPHANED", "rc=none:", "ape_sha=-") == 1,
+       "status-unowned-and-orphaned");
+    ck(lines("BG_CANDIDATE\t" REV_D, "state=FAILED", "phases=3/4", "last=compare") == 1 && lines("BG_CANDIDATE\t" REV_E, "state=FAILED", "phases=4/4", "ape_sha=-") == 1,
+       "status-failed-missing-phase-and-blocker");
+    rc2 = tool(b2, "status", "ffffffffffffffffffffffffffffffffffffffff", 0, 0, 0, 0);
+    i = lines("BG_CANDIDATE\t", 0, 0, 0);
+    rc = tool(b2, "status", REV_D, 0, 0, 0, 0);
+    ck(rc == 0 && lines("BG_CANDIDATE\t", 0, 0, 0) == 1 && lines("BG_CANDIDATE\t" REV_D, 0, 0, 0) == 1 && rc2 == 1 && i == 0, "status-one-revision");
+
+    /* (3) promote --check */
+    if (join(dir, b2, REV_A)) return 2;
+    for (i = 0; leaves[i]; i++) (void)sha_file(dir, leaves[i], before[i]);
+    rc = tool(b2, "promote", "--check", "--rev", REV_A, 0, 0);
+    ck(rc == 0 && lines("PROMOTE_CHECK\tOK", "rev=" REV_A, "phases=4/4", "not=PUBLISHED") == 1 && !cx_fmt(t, sizeof t, "%s/ape-final/unisacc-next.com\tsha=%s\tbytes=8", dir, ape) &&
+       lines("NEED\tape\t", t, 0, 0) == 1 && lines("NEED\tsource_sid\t" SID, 0, 0, 0) == 1 && lines("NEED\tinput\t", 0, 0, 0) == 2 &&
+       lines("NEED\tinput\tp3\t", "bytes=3", 0, 0) == 1 && lines("NEED\tinput\tlnx/x86_64\t", "bytes=5", 0, 0) == 1, "promote-check-accepts-and-prints-needs");
+    for (i = 0, rc = 0; leaves[i]; i++) rc |= sha_file(dir, leaves[i], after) || !tx_eqz(after, before[i]);
+    ck(!rc && !present(dir, "promoted") && rows(dir, "owner.tsv", "OWNER\t", 0, 0) == 1 && rows(dir, "exit.tsv", "EXIT\t", 0, 0) == 1, "promote-check-writes-nothing");
+    rc = tool(b2, "promote", "--rev", REV_A, 0, 0, 0);
+    ck(rc == 2 && lines("PROMOTE_CHECK", 0, 0, 0) == 0 && lines("NEED\t", 0, 0, 0) == 0, "promote-without-check-rc2");
+    ck(refused(b2, "ffffffffffffffffffffffffffffffffffffffff", "no-candidate"), "promote-refuses-absent-revision");
+    ck(refused(b2, REV_B, "unowned") && refused(b2, REV_C, "no-exit-record") && refused(b2, REV_D, "phases-incomplete") && refused(b2, REV_E, "no-prepared-row"),
+       "promote-refuses-incomplete");
+    rc = candidate(b3, REV_A, REV_B, REV_A, 110, DEAD, 0, 4, 0, "source");
+    rc |= candidate(b3, REV_B, REV_B, REV_A, 110, DEAD, 0, 4, 0, "source");
+    rc |= candidate(b3, REV_C, REV_C, REV_C, 110, DEAD, 3, 4, 0, "source");
+    rc |= candidate(b3, REV_D, REV_D, REV_D, 110, sy_pid(), -1, 4, 0, "source");
+    rc |= candidate(b3, REV_E, REV_E, REV_E, 110, DEAD, 0, 4, 0, "override");
+    ck(!rc && refused(b3, REV_A, "rev-mismatch") && lines("detail=owner", 0, 0, 0) == 1 && refused(b3, REV_B, "rev-mismatch") && lines("detail=identity", 0, 0, 0) == 1,
+       "promote-refuses-mismatched-revision");
+    ck(refused(b3, REV_C, "chain-failed") && refused(b3, REV_D, "still-running") && refused(b3, REV_E, "chain-override"), "promote-refuses-failed-running-override");
+    /* Each tampering starts from a candidate that promote accepts. */
+    rc = good(b4, REV_A, 100) | good(b4, REV_B, 100) | good(b4, REV_C, 100) | good(b4, REV_D, 100) | good(b4, REV_E, 100);
+    rc2 = 0;
+    for (i = 0; i < 5; i++) {
+        static const char *r[] = {REV_A, REV_B, REV_C, REV_D, REV_E};
+        rc2 |= tool(b4, "promote", "--check", "--rev", r[i], 0, 0);
+    }
+    ck(!rc && !rc2, "tamper-fixtures-accepted-before");
+    if (join(dir, b4, REV_A)) return 2;
+    rc = put(dir, "checkpoint.tsv", "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tctx\twall_ms=2\tsha=-\nDONE\tcompare\twall_ms=3\tsha=-\nDONE\tpack\twall_ms=4\tsha=-\nDONE\textra\twall_ms=5\tsha=-\n");
+    ck(!rc && refused(b4, REV_A, "receipt-tampered") && lines("detail=checkpoint.tsv", 0, 0, 0) == 1, "promote-refuses-tampered-checkpoint");
+    if (join(dir, b4, REV_B)) return 2;
+    rc = put(dir, "ctx/context.tsv", "source-package-context-v2\nsource\tffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n");
+    ck(!rc && refused(b4, REV_B, "receipt-tampered") && lines("detail=ctx/context.tsv", 0, 0, 0) == 1, "promote-refuses-tampered-source-sid");
+    if (join(dir, b4, REV_C)) return 2;
+    rc = put(dir, "ape-final/unisacc-next.com", "fake-apf");
+    rc2 = tool(b4, "status", REV_C, 0, 0, 0, 0);
+    ck(!rc && rc2 == 0 && lines("state=FAILED", "ape_sha=-", 0, 0) == 1 && refused(b4, REV_C, "pack-receipt-mismatch"), "promote-refuses-tampered-ape-bytes");
+    if (join(dir, b4, REV_D)) return 2;
+    rc = put(dir, "in/entry.elf", "slicf");
+    ck(!rc && refused(b4, REV_D, "input-mismatch") && lines("detail=lnx/x86_64", 0, 0, 0) == 1, "promote-refuses-tampered-pack-input");
+    if (join(dir, b4, REV_E)) return 2;
+    rc = put(dir, "plan.tsv", PLAN "4\textra\t-\t55\tpack\t-\t1\n");
+    ck(!rc && refused(b4, REV_E, "plan-mismatch"), "promote-refuses-changed-plan");
+    if (join(dir, b4, REV_E) || join(t, dir, "seal.tsv") || join(aside, dir, "seal-aside.tsv")) return 2;
+    rc = put(dir, "plan.tsv", PLAN) || sy_rename(t, aside);
+    ck(!rc && refused(b4, REV_E, "seal-missing"), "promote-refuses-missing-seal");
+
+    /* (4) prune. b2 holds five dead candidates, epochs 100 to 500, one of them unowned. */
+    for (i = 0; leaves[i]; i++) if (join(dir, b2, REV_A) || sha_file(dir, leaves[i], before[i])) return 2;
+    rc = tool(b2, "prune", "--keep", "1", "--trash", none, 0);
+    ck(rc == 0 && lines("PRUNE\tSKIP", "reason=no-trash-dir", 0, 0) == 3 && lines("PRUNE\tKEEP\t" REV_E, "reason=newest", 0, 0) == 1 &&
+       lines("PRUNE\tKEEP\t" REV_B, "reason=unowned", 0, 0) == 1 && lines("BG_PRUNE", "moved=0", "skipped=3", "deleted=0") == 1 && present(b2, REV_A) &&
+       present(b2, REV_C) && present(b2, REV_D) && !present(work, "no-such-trash"), "prune-without-trash-moves-nothing");
+    rc = sy_mkdir(trash, 0755);
+    rc2 = tool(b2, "prune", "--keep", "1", "--trash", trash, "--dry-run");
+    ck(!rc && rc2 == 0 && lines("PRUNE\tWOULD_MOVE", 0, 0, 0) == 3 && lines("PRUNE\tMOVED", 0, 0, 0) == 0 && present(b2, REV_A) && present(b2, REV_C) &&
+       present(b2, REV_D) && !present(trash, "b1-" REV_A "-100"), "prune-dry-run-moves-nothing");
+    rc = join(dir, trash, "b1-" REV_C "-300") || sy_mkdir(dir, 0755);
+    rc2 = tool(b2, "prune", "--keep", "1", "--trash", trash, 0);
+    ck(!rc && rc2 == 0 && lines("PRUNE\tMOVED", 0, 0, 0) == 2 && lines("PRUNE\tMOVED\t" REV_A, "state=DONE", 0, 0) == 1 &&
+       lines("PRUNE\tMOVED\t" REV_D, 0, 0, 0) == 1 && lines("PRUNE\tSKIP\t" REV_C, "reason=target-exists", 0, 0) == 1 &&
+       lines("BG_PRUNE", "moved=2", "skipped=1", "deleted=0") == 1, "prune-moves-oldest-into-trash");
+    ck(!present(b2, REV_A) && !present(b2, REV_D) && present(b2, REV_C) && present(b2, REV_E) && present(b2, REV_B) && present(trash, "b1-" REV_D "-400"),
+       "prune-keeps-newest-unowned-and-blocked-target");
+    rc = join(dir, trash, "b1-" REV_A "-100");
+    for (i = 0; leaves[i] && !rc; i++) rc = sha_file(dir, leaves[i], after) || !tx_eqz(after, before[i]);
+    ck(!rc && present(dir, "owner.tsv") && present(dir, "exit.tsv") && present(dir, "seal.tsv") && present(dir, "ape-final/unisacc-next.com") &&
+       present(dir, "in/p3.pkg") && present(dir, "in/entry.elf"), "prune-moved-candidate-keeps-every-file");
+    rc = tool(b3, "prune", "--keep", "0", "--trash", trash, 0);
+    ck(rc == 0 && lines("PRUNE\tKEEP\t" REV_D, "state=RUNNING", "reason=live", 0) == 1 && lines("PRUNE\tMOVED", 0, 0, 0) == 4 && present(b3, REV_D) &&
+       lines("BG_PRUNE", "deleted=0", 0, 0) == 1, "prune-never-moves-a-live-candidate");
+    rc = tool(b2, "prune", "--keep", "x", 0, 0, 0);
+    rc2 = tool(b2, "prune", "--trash", "relative", 0, 0, 0);
+    ck(rc == 2 && rc2 == 2 && present(b2, REV_C), "prune-usage-rc2");
+
+    mm_free(last);
+    last = 0;
+    sy_printf("CHECK_BG_CANDIDATE\tfailed=%d\twork=%s\n", failed, work);
+    return failed ? 1 : 0;
+}

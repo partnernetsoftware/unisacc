@@ -1,0 +1,640 @@
+/* tools/bg-candidate.cx -- B1 background candidate line: prove candidates before the freeze, so a
+ * release promotes an already proven candidate instead of starting the chain after the freeze.
+ *
+ *   sh ./unisacc.com tools/bg-candidate.cx -- start --rev HEX40 [--deadline-s N] [--segment-s N]
+ *        [--max-segments N] [--slack-s N] [--chain ABS_EXEC] [COMMON] [-- chain-run candidate options]
+ *   sh ./unisacc.com tools/bg-candidate.cx -- status [REV] [COMMON]
+ *   sh ./unisacc.com tools/bg-candidate.cx -- promote --check --rev HEX40 [COMMON]
+ *   sh ./unisacc.com tools/bg-candidate.cx -- prune [--keep N] [--trash ABS] [--dry-run] [COMMON]
+ *   COMMON: [--root ABS] (default: the current directory)  [--base ABS] (default: ROOT/out/b1)
+ *
+ * A candidate is the directory BASE/<rev>: the --out of one tools/chain-run.cx run, cold from
+ * source, with segments and the supervisor, exactly like a release chain. This tool adds no
+ * build step and changes no chain input; it only starts the chain, records who owns it, and
+ * reads what the chain wrote.
+ *
+ * start    makes BASE/<rev>, copies ROOT/build/chain-phases.tsv to plan.tsv (the plan the chain
+ *          binds into its identity) and starts a guard process in its own session. The guard runs
+ *            sh ./unisacc.com tools/chain-run.cx -- --rev R --out BASE/R --deadline-s D
+ *               --supervise --segment-s S --max-segments M [-- options]
+ *          (or ABS_EXEC with the same arguments) in its own process group, writes one OWNER row
+ *          to owner.tsv before the chain is released, waits for it with a hard limit of D plus
+ *          the slack (600 s unless --slack-s; the group is killed at the limit), writes one EXIT row to exit.tsv, and after
+ *          rc 0 writes seal.tsv: the sha256 of every receipt promote reads. Output of the chain
+ *          goes to bg.log. start returns as soon as the OWNER row exists. Refused: a candidate
+ *          whose owner is still alive, and any other candidate in BASE that is still running.
+ *          A finished or failed candidate may be started again: chain-run resumes its own output
+ *          under its persisted budget.
+ * status   one BG_CANDIDATE line per candidate: state, phases done/total, last phase, pid, pgid,
+ *          rc, and for DONE the APE sha. States: RUNNING (owner alive, no EXIT row), DONE (rc 0,
+ *          every plan phase DONE, the PREPARED pack row is the last terminal row, the pack
+ *          receipt matches the APE bytes), FAILED (an EXIT row and not DONE), ORPHANED (owner
+ *          gone without an EXIT row), UNOWNED (no OWNER row).
+ * promote  --check only; nothing is published, moved or written. Refuses (rc 1, one
+ *          PROMOTE_CHECK REFUSE line with the reason) unless the candidate is DONE, its owner,
+ *          directory and chain identity name REV, the identity is a full source chain, plan.tsv
+ *          is the plan the identity names, every sealed receipt still has its sealed sha, every
+ *          input the pack receipt lists still has its recorded sha and size, and the context
+ *          names a source SID. Then prints what the release tail needs: NEED lines for the APE
+ *          (path, sha, bytes), the source SID and every pack input.
+ *          The APE of a chain carries the version of release/candidate.tsv at REV; the release
+ *          version is written by `release-run --pack` from the listed slices, without a rebuild.
+ * prune    keeps every running candidate and the N newest others (default 3); each older one is
+ *          renamed into the trash directory (default $HOME/cc-work/trash) as b1-<rev>-<epoch>.
+ *          No trash directory, an existing target or a failed rename: the candidate stays where
+ *          it is and the line says why. This tool has no code path that removes a file.
+ * Exit: 0 ok, 1 refused, 2 usage or an unreadable input.
+ * Limits of this version: liveness is "the recorded pid or its group exists", so a recycled pid
+ * reads as alive; nothing starts a candidate by itself (no commit hook, no timer).
+ * Check: tools/check-bg-candidate.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define BG_PATH 4400
+#define BG_MAXC 256
+static long bg_slack_s = 600;
+
+typedef struct {
+    char rev[41], dir[BG_PATH];
+    long epoch, deadline_s;
+    int owned, guard, pid, pgid, override;
+    int has_exit, rc, live;
+    int total, donec, prepared, pack_ok;
+    char last[256], why[64], ape[BG_PATH], ape_sha[65];
+    long ape_bytes;
+    const char *state;
+} Cand;
+
+static char root[BG_PATH], base[BG_PATH];
+static const char *seal_leaf[] = {"chain-run.identity", "plan.tsv", "checkpoint.tsv", "chain-run.tsv",
+                                  "ape-final/ape-receipt.txt", "ctx/context.tsv", 0};
+
+static void die(const char *what, const char *arg) {
+    sy_eprintf("bg-candidate: %s%s%s\n", what, arg ? " " : "", arg ? arg : "");
+    sy_exit(2);
+}
+static void join(char *p, const char *a, const char *b) {
+    if (cx_fmt(p, BG_PATH, "%s/%s", a, b)) die("path bound", b);
+}
+static int is_hex(const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return s[n] == 0;
+}
+static char *slurp(const char *dir, const char *leaf, size_t *n) {
+    char p[BG_PATH];
+    join(p, dir, leaf);
+    *n = 0;
+    return cx_read(p, n);
+}
+static int file_sha(const char *path, char hex[65], long *bytes) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    int bad;
+    if (!b) return -1;
+    bad = sy_sha256_hex(b, (long)n, hex);
+    free(b);
+    if (bytes) *bytes = (long)n;
+    return bad ? -1 : 0;
+}
+static void append_row(const char *dir, const char *leaf, const char *row) {
+    char p[BG_PATH];
+    int fd;
+    join(p, dir, leaf);
+    fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0 || sy_write_all(fd, row, (long)strlen(row)) || sy_close(fd)) die("cannot append", p);
+}
+/* The last line of TEXT that starts with TAG, copied without its newline. 0 when there is none. */
+static const char *last_row(const char *text, const char *tag, char *row, size_t cap) {
+    const char *s = text, *found = 0;
+    size_t tn = strlen(tag), n;
+    while (s && *s) {
+        const char *e = strchr(s, '\n');
+        if (!strncmp(s, tag, tn)) found = s;
+        s = e ? e + 1 : 0;
+    }
+    if (!found) return 0;
+    n = strcspn(found, "\n");
+    if (n >= cap) n = cap - 1;
+    if (mm_copy(row, (long)cap, found, (long)n)) die("row copy bound", tag);
+    row[n] = 0;
+    return found;
+}
+static int alive(int pid, int pgid) {
+    if (pid > 0 && sy_getpgid(pid) >= 0) return 1;
+    if (pgid > 1 && kill(-pgid, 0) == 0) return 1;
+    return 0;
+}
+static int phase_done(const char *checkpoint, const char *phase) {
+    char needle[300];
+    const char *s = checkpoint;
+    size_t n;
+    if (cx_fmt(needle, sizeof needle, "DONE\t%s\t", phase)) return 0;
+    n = strlen(needle);
+    while (s && *s) {
+        if (!strncmp(s, needle, n)) return 1;
+        s = strchr(s, '\n');
+        if (s) s++;
+    }
+    return 0;
+}
+/* The pack receipt names the APE with its sha and size; the bytes on disk must agree. */
+static int pack_check(Cand *c) {
+    char file[BG_PATH], want[65], key[80], row[BG_PATH + 400];
+    size_t n = 0;
+    long bytes = -1, have = 0;
+    char *b = slurp(c->dir, "ape-final/ape-receipt.txt", &n);
+    int ok;
+    if (!b) return 0;
+    ok = last_row(b, "unisacc-next.com\t", row, sizeof row) != 0;
+    free(b);
+    if (!ok || sscanf(row, "%79s\t%4399s\tsha=%64s\tbytes=%ld", key, file, want, &bytes) != 4 || bytes <= 0) return 0;
+    join(c->ape, c->dir, "ape-final/unisacc-next.com");
+    if (strcmp(file, c->ape) || file_sha(c->ape, c->ape_sha, &have)) return 0;
+    c->ape_bytes = have;
+    return have == bytes && !strcmp(c->ape_sha, want);
+}
+static void load(Cand *c, const char *rev) {
+    char row[1024], chain[16];
+    size_t n = 0;
+    char *b;
+    memset(c, 0, sizeof *c);
+    if (cx_fmt(c->rev, sizeof c->rev, "%s", rev)) die("revision bound", rev);
+    join(c->dir, base, rev);
+    c->rc = -1;
+    if ((b = slurp(c->dir, "owner.tsv", &n))) {
+        char r[41];
+        if (last_row(b, "OWNER\t", row, sizeof row) &&
+            sscanf(row, "OWNER\t%ld\t%40s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=%ld\tchain=%15s",
+                   &c->epoch, r, &c->guard, &c->pid, &c->pgid, &c->deadline_s, chain) == 7) {
+            c->owned = 1;
+            c->override = strcmp(chain, "source") != 0;
+            if (strcmp(r, rev)) c->owned = 2; /* an owner row for another revision */
+        }
+        free(b);
+    }
+    if (c->owned && (b = slurp(c->dir, "exit.tsv", &n))) {
+        long at;
+        int pid, rc;
+        if (last_row(b, "EXIT\t", row, sizeof row) && sscanf(row, "EXIT\t%ld\tpid=%d\trc=%d\twhy=%63s", &at, &pid, &rc, c->why) == 4 &&
+            pid == c->pid) {
+            c->has_exit = 1;
+            c->rc = rc;
+        }
+        free(b);
+    }
+    c->live = c->owned && !c->has_exit && (alive(c->pid, c->pgid) || alive(c->guard, 0));
+    {
+        char *plan = slurp(c->dir, "plan.tsv", &n), *ck = slurp(c->dir, "checkpoint.tsv", &n);
+        char *s = plan;
+        while (s && *s) {
+            char *e = strchr(s, '\n'), id[256];
+            int order;
+            if (*s != '#' && *s != '\n' && sscanf(s, "%d\t%255s", &order, id) == 2) {
+                c->total++;
+                if (ck && phase_done(ck, id)) c->donec++;
+            }
+            s = e ? e + 1 : 0;
+        }
+        if (ck && last_row(ck, "DONE\t", row, sizeof row)) (void)sscanf(row, "DONE\t%255s", c->last);
+        free(plan);
+        free(ck);
+    }
+    if ((b = slurp(c->dir, "chain-run.tsv", &n))) {
+        const char *done = last_row(b, "PREPARED\tpack\t", row, sizeof row);
+        const char *block = last_row(b, "BLOCKER\t", row, sizeof row);
+        const char *sup = last_row(b, "SUPERVISE\tBLOCKER\t", row, sizeof row);
+        c->prepared = done && (!block || block < done) && (!sup || sup < done);
+        free(b);
+    }
+    c->pack_ok = pack_check(c);
+    if (!c->owned) c->state = "UNOWNED";
+    else if (c->live) c->state = "RUNNING";
+    else if (!c->has_exit) c->state = "ORPHANED";
+    else if (c->owned == 1 && c->rc == 0 && c->total > 0 && c->donec == c->total && c->prepared && c->pack_ok) c->state = "DONE";
+    else c->state = "FAILED";
+}
+/* The 40-hex directory names under BASE, oldest name order as the directory gives them. */
+static int list(char names[][41], int cap) {
+    long size = 8192;
+    char *b;
+    int fd = sy_open_read(base), r, i, off = 0, count = 0;
+    if (fd < 0) return sy_exists(base) == 0 ? 0 : -1;
+    for (;;) {
+        b = mm_alloc(size);
+        if (!b) die("memory", base);
+        r = sy_dir_names(fd, b, (int)size);
+        if (r != -ENOSPC) break;
+        mm_free(b);
+        size *= 2;
+        if (size > 16777216) die("directory too large", base);
+    }
+    sy_close(fd);
+    if (r < 0) { mm_free(b); return -1; }
+    for (i = 0; i < r; i++) {
+        const char *name = b + off;
+        off += (int)strlen(name) + 1;
+        if (strlen(name) != 40 || !is_hex(name, 40)) continue;
+        if (count == cap) die("too many candidates in", base);
+        if (mm_copy(names[count++], 41, name, 41)) die("name copy bound", name);
+    }
+    mm_free(b);
+    return count;
+}
+static void show(const Cand *c) {
+    sy_printf("BG_CANDIDATE\t%s\tstate=%s\tphases=%d/%d\tlast=%s\tpid=%d\tpgid=%d\trc=%s%d\tape_sha=%s\n", c->rev, c->state, c->donec,
+              c->total, c->last[0] ? c->last : "-", c->pid, c->pgid, c->has_exit ? "" : "none:", c->has_exit ? c->rc : 0,
+              !strcmp(c->state, "DONE") ? c->ape_sha : "-");
+}
+
+/* ---- start ---------------------------------------------------------------------------------- */
+
+static void seal(const char *dir, int pid) {
+    char text[8192], p[BG_PATH], tmp[BG_PATH], hex[65];
+    long at = 0;
+    int i;
+    for (i = 0; seal_leaf[i]; i++) {
+        join(p, dir, seal_leaf[i]);
+        if (file_sha(p, hex, 0) && cx_fmt(hex, sizeof hex, "MISSING")) return;
+        if (cx_fmt(text + at, sizeof text - at, "SEAL\t%d\t%s\t%s\n", pid, seal_leaf[i], hex)) return;
+        at += (long)strlen(text + at);
+    }
+    join(p, dir, "seal.tsv");
+    join(tmp, dir, "seal.tsv.new");
+    if (!cx_write(tmp, text, (size_t)at)) (void)sy_rename(tmp, p);
+}
+/* The guard: session leader, owns the chain's process group, never returns. */
+static void guard(int report, char **v, const char *dir, const char *rev, long deadline_s, int override) {
+    char p[BG_PATH], row[600];
+    int gate[2], log, null, pid, exited = 0, code = 0, sig = 0, rc = -1, w = 0;
+    long hard_s = deadline_s + bg_slack_s, end, i, turns;
+    const char *why = "exited";
+    (void)sy_setsid();
+    join(p, dir, "bg.log");
+    log = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    null = sy_open("/dev/null", O_RDONLY, 0);
+    if (log < 0 || null < 0 || pipe(gate)) _exit(2);
+    dup2(null, 0); dup2(log, 1); dup2(log, 2);
+    close(null); close(log);
+    pid = fork();
+    if (pid < 0) _exit(2);
+    if (!pid) {
+        char go;
+        setpgid(0, 0);
+        close(report); close(gate[1]);
+        if (read(gate[0], &go, 1) != 1) _exit(126);
+        close(gate[0]);
+        if (sy_chdir(root)) _exit(126);
+        execvp(v[0], v);
+        _exit(127);
+    }
+    close(gate[0]);
+    setpgid(pid, pid);
+    /* Ownership is on disk before the chain runs its first instruction. */
+    if (cx_fmt(row, sizeof row, "OWNER\t%ld\t%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=%ld\tchain=%s\n", sy_wall_s(), rev, sy_pid(), pid, pid,
+               deadline_s, override ? "override" : "source")) _exit(2);
+    append_row(dir, "owner.tsv", row);
+    if (cx_fmt(row, sizeof row, "%d %d %d\n", sy_pid(), pid, pid) || sy_write_all(report, row, (long)strlen(row))) { kill(-pid, SIGKILL); _exit(2); }
+    close(report);
+    if (write(gate[1], "g", 1) != 1) { kill(-pid, SIGKILL); _exit(2); }
+    close(gate[1]);
+    end = sy_now_ms() + hard_s * 1000;
+    turns = hard_s * 4 + 16;
+    for (i = 0; i < turns; i++) {
+        w = sy_wait_status(pid, 1, &exited, &code, &sig);
+        if (w == pid || w < 0 || sy_now_ms() >= end) break;
+        (void)sy_sleep_ms(500);
+    }
+    if (w == pid) {
+        rc = exited ? code : 128 + sig;
+        if (!exited) why = "signal";
+    } else if (w < 0) {
+        rc = 125; why = "wait-error";
+    } else {
+        kill(-pid, SIGKILL);
+        (void)sy_wait_status(pid, 0, 0, 0, 0);
+        rc = 124; why = "deadline-killed";
+    }
+    if (kill(-pid, 0) == 0) { /* the chain left members of its group behind: not a clean end */
+        kill(-pid, SIGKILL);
+        if (rc == 0) { rc = 123; why = "residue-killed"; }
+    }
+    if (cx_fmt(row, sizeof row, "EXIT\t%ld\tpid=%d\trc=%d\twhy=%s\n", sy_wall_s(), pid, rc, why)) _exit(2);
+    append_row(dir, "exit.tsv", row);
+    if (rc == 0) seal(dir, pid);
+    _exit(0);
+}
+static long number(const char *s, long lo, long hi, const char *name) {
+    long v = 0;
+    int i;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9' || i > 8) die("not a number:", name);
+        v = v * 10 + (s[i] - '0');
+    }
+    if (!i || v < lo || v > hi) die("out of range:", name);
+    return v;
+}
+static int cmd_start(const char *rev, const char *chain, long deadline_s, long segment_s, long segments, char **extra, int nextra) {
+    static char names[BG_MAXC][41];
+    static Cand c;
+    char dir[BG_PATH], plan[BG_PATH], copy[BG_PATH], a[65], b[65], sd[24], ss[24], sm[24], line[200];
+    char *v[120];
+    int k = 0, i, n, pfd[2], pid, got = 0, ids[3];
+    if (!rev) die("start needs --rev HEX40", 0);
+    if (chain && chain[0] != '/') die("--chain must be an absolute executable", chain);
+    if (!chain) {
+        char p[BG_PATH];
+        join(p, root, "unisacc.com");
+        if (sy_exists(p) != 1) die("no product at", p);
+        join(p, root, "tools/chain-run.cx");
+        if (sy_exists(p) != 1) die("no chain-run at", p);
+    }
+    if (sy_mkdir(base, 0755) && sy_exists(base) != 1) {
+        char parent[BG_PATH];
+        join(parent, root, "out");
+        (void)sy_mkdir(parent, 0755);
+        if (sy_mkdir(base, 0755) && sy_exists(base) != 1) die("cannot make", base);
+    }
+    n = list(names, BG_MAXC);
+    if (n < 0) die("cannot list", base);
+    for (i = 0; i < n; i++) {
+        load(&c, names[i]);
+        if (c.live) {
+            sy_printf("BG_CANDIDATE\tREFUSE\treason=%s\trev=%s\tpid=%d\tpgid=%d\n", strcmp(names[i], rev) ? "another-candidate-running" : "live-owner",
+                      names[i], c.pid, c.pgid);
+            return 1;
+        }
+    }
+    join(dir, base, rev);
+    if (sy_mkdir(dir, 0755) && sy_exists(dir) != 1) die("cannot make", dir);
+    join(plan, root, "build/chain-phases.tsv");
+    join(copy, dir, "plan.tsv");
+    if (file_sha(plan, a, 0)) die("cannot read", plan);
+    if (sy_exists(copy) == 1) {
+        if (file_sha(copy, b, 0)) die("cannot read", copy);
+        if (strcmp(a, b)) { sy_printf("BG_CANDIDATE\tREFUSE\treason=plan-changed\trev=%s\n", rev); return 1; }
+    } else if (sy_copy(plan, copy, 0644)) die("cannot copy plan to", copy);
+    if (cx_fmt(sd, sizeof sd, "%ld", deadline_s) || cx_fmt(ss, sizeof ss, "%ld", segment_s) || cx_fmt(sm, sizeof sm, "%ld", segments)) die("number bound", 0);
+    if (chain) v[k++] = (char *)chain;
+    else {
+        v[k++] = "sh";
+        v[k++] = "./unisacc.com"; /* lint:allow R1-product the argv of a release chain, run from ROOT like chain-run itself */
+        v[k++] = "tools/chain-run.cx";
+        v[k++] = "--";
+    }
+    v[k++] = "--rev"; v[k++] = (char *)rev; v[k++] = "--out"; v[k++] = dir; v[k++] = "--deadline-s"; v[k++] = sd;
+    v[k++] = "--supervise"; v[k++] = "--segment-s"; v[k++] = ss; v[k++] = "--max-segments"; v[k++] = sm;
+    if (nextra) {
+        v[k++] = "--";
+        for (i = 0; i < nextra; i++) {
+            if (k >= 118) die("too many chain options", 0);
+            v[k++] = extra[i];
+        }
+    }
+    v[k] = 0;
+    if (pipe(pfd)) die("pipe", 0);
+    pid = fork();
+    if (pid < 0) die("fork", 0);
+    if (!pid) {
+        close(pfd[0]);
+        guard(pfd[1], v, dir, rev, deadline_s, chain != 0);
+        _exit(2);
+    }
+    close(pfd[1]);
+    for (i = 0; i < (int)sizeof line - 1;) {
+        long r = read(pfd[0], line + i, sizeof line - 1 - i);
+        if (r <= 0) break;
+        i += (int)r;
+    }
+    line[i] = 0;
+    close(pfd[0]);
+    got = sscanf(line, "%d %d %d", &ids[0], &ids[1], &ids[2]);
+    if (got != 3) {
+        sy_printf("BG_CANDIDATE\tREFUSE\treason=guard-did-not-report\trev=%s\n", rev);
+        return 2;
+    }
+    sy_printf("BG_CANDIDATE\tSTARTED\trev=%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=%ld\thard_s=%ld\tout=%s\n", rev, ids[0], ids[1], ids[2],
+              deadline_s, deadline_s + bg_slack_s, dir);
+    return 0;
+}
+
+/* ---- status --------------------------------------------------------------------------------- */
+
+static int cmd_status(const char *only) {
+    static char names[BG_MAXC][41];
+    static Cand c;
+    int n = list(names, BG_MAXC), i, shown = 0;
+    if (n < 0) die("cannot list", base);
+    for (i = 0; i < n; i++) {
+        if (only && strcmp(only, names[i])) continue;
+        load(&c, names[i]);
+        show(&c);
+        shown++;
+    }
+    sy_printf("BG_STATUS\tcandidates=%d\tbase=%s\n", shown, base);
+    return only && !shown ? 1 : 0;
+}
+
+/* ---- promote --check ------------------------------------------------------------------------ */
+
+static int refuse(const char *rev, const char *reason, const char *detail) {
+    sy_printf("PROMOTE_CHECK\tREFUSE\trev=%s\treason=%s%s%s\n", rev, reason, detail ? "\tdetail=" : "", detail ? detail : "");
+    return 1;
+}
+static int has_line(const char *text, const char *line) {
+    const char *s = text;
+    size_t n = strlen(line);
+    while (s && *s) {
+        if (!strncmp(s, line, n) && (s[n] == '\n' || s[n] == 0)) return 1;
+        s = strchr(s, '\n');
+        if (s) s++;
+    }
+    return 0;
+}
+static int cmd_promote(const char *rev) {
+    static Cand c;
+    char p[BG_PATH], hex[65], want[80], row[BG_PATH + 400], sid[65];
+    size_t n = 0;
+    char *b, *s;
+    int i, inputs = 0;
+    if (!rev) die("promote needs --rev HEX40", 0);
+    join(p, base, rev);
+    if (sy_exists(p) != 1) return refuse(rev, "no-candidate", 0);
+    load(&c, rev);
+    if (!c.owned) return refuse(rev, "unowned", 0);
+    if (c.owned != 1) return refuse(rev, "rev-mismatch", "owner");
+    if (c.live) return refuse(rev, "still-running", 0);
+    if (!c.has_exit) return refuse(rev, "no-exit-record", 0);
+    if (c.rc) return refuse(rev, "chain-failed", c.why);
+    if (c.override) return refuse(rev, "chain-override", 0);
+    if (!(b = slurp(c.dir, "chain-run.identity", &n))) return refuse(rev, "no-identity", 0);
+    if (cx_fmt(want, sizeof want, "rev=%s", rev)) die("revision bound", rev);
+    if (!has_line(b, want)) { free(b); return refuse(rev, "rev-mismatch", "identity"); }
+    if (!has_line(b, "mode=full") || !has_line(b, "candidate=source")) { free(b); return refuse(rev, "identity-not-full-source", 0); }
+    join(p, c.dir, "plan.tsv");
+    if (file_sha(p, hex, 0) || cx_fmt(want, sizeof want, "plan=%s", hex)) { free(b); return refuse(rev, "no-plan", 0); }
+    if (!has_line(b, want)) { free(b); return refuse(rev, "plan-mismatch", 0); }
+    free(b);
+    if (!c.total || c.donec != c.total) return refuse(rev, "phases-incomplete", c.last[0] ? c.last : 0);
+    if (!c.prepared) return refuse(rev, "no-prepared-row", 0);
+    /* Every receipt read here must still be the bytes the guard sealed when the chain ended. */
+    if (!(b = slurp(c.dir, "seal.tsv", &n))) return refuse(rev, "seal-missing", 0);
+    for (i = 0; seal_leaf[i]; i++) {
+        char line[BG_PATH];
+        join(p, c.dir, seal_leaf[i]);
+        if (file_sha(p, hex, 0)) { free(b); return refuse(rev, "receipt-missing", seal_leaf[i]); }
+        if (cx_fmt(line, sizeof line, "SEAL\t%d\t%s\t%s", c.pid, seal_leaf[i], hex)) die("seal bound", 0);
+        if (!has_line(b, line)) { free(b); return refuse(rev, "receipt-tampered", seal_leaf[i]); }
+    }
+    free(b);
+    if (!c.pack_ok) return refuse(rev, "pack-receipt-mismatch", 0);
+    /* Every input of the pack: the slices and the package the release tail repacks. */
+    if (!(b = slurp(c.dir, "ape-final/ape-receipt.txt", &n))) return refuse(rev, "receipt-missing", "ape-receipt");
+    for (s = b; s && *s;) {
+        char *e = strchr(s, '\n'), key[80], file[BG_PATH], sha[65];
+        long bytes = -1, have = 0;
+        if (e) *e = 0;
+        if (strlen(s) < sizeof row && sscanf(s, "%79s\t%4399s\tsha=%64s\tbytes=%ld", key, file, sha, &bytes) == 4) {
+            if (file_sha(file, hex, &have) || have != bytes || strcmp(hex, sha)) {
+                if (cx_fmt(row, sizeof row, "%s", key)) row[0] = 0;
+                free(b);
+                return refuse(rev, "input-mismatch", row);
+            }
+            inputs++;
+        }
+        if (e) *e = '\n';
+        s = e ? e + 1 : 0;
+    }
+    if (inputs < 2) { free(b); return refuse(rev, "receipt-incomplete", 0); }
+    {
+        char *ctx = slurp(c.dir, "ctx/context.tsv", &n);
+        int ok = ctx && last_row(ctx, "source\t", row, sizeof row) && sscanf(row, "source\t%64s", sid) == 1 && is_hex(sid, 64);
+        free(ctx);
+        if (!ok) { free(b); return refuse(rev, "no-source-sid", 0); }
+    }
+    sy_printf("PROMOTE_CHECK\tOK\trev=%s\tphases=%d/%d\tinputs=%d\tnot=PUBLISHED\tnot=PASS\n", rev, c.donec, c.total, inputs);
+    sy_printf("NEED\tape\t%s\tsha=%s\tbytes=%ld\n", c.ape, c.ape_sha, c.ape_bytes);
+    sy_printf("NEED\tsource_sid\t%s\n", sid);
+    for (s = b; s && *s;) {
+        char *e = strchr(s, '\n'), key[80], file[BG_PATH], sha[65];
+        long bytes = -1;
+        if (e) *e = 0;
+        if (sscanf(s, "%79s\t%4399s\tsha=%64s\tbytes=%ld", key, file, sha, &bytes) == 4 && strcmp(key, "unisacc-next.com"))
+            sy_printf("NEED\tinput\t%s\t%s\tsha=%s\tbytes=%ld\n", key, file, sha, bytes);
+        s = e ? e + 1 : 0;
+    }
+    free(b);
+    sy_printf("NEXT\tthe release version is written from these inputs by tools/release-run.cx --pack; no chain phase is rerun\n");
+    return 0;
+}
+
+/* ---- prune ---------------------------------------------------------------------------------- */
+
+static int cmd_prune(long keep, const char *trash, int dry) {
+    static char names[BG_MAXC][41];
+    static Cand c[BG_MAXC];
+    static int order[BG_MAXC];
+    char auto_trash[BG_PATH], target[BG_PATH];
+    sy_stat_t st;
+    int n = list(names, BG_MAXC), i, j, kept = 0, moved = 0, skipped = 0, have_trash = 0, rc;
+    if (n < 0) die("cannot list", base);
+    if (!trash) {
+        const char *home = getenv("HOME");
+        if (home && home[0] == '/' && !cx_fmt(auto_trash, sizeof auto_trash, "%s/cc-work/trash", home)) trash = auto_trash;
+    }
+    if (trash) {
+        rc = sy_stat(trash, &st);
+        if (!rc && st.kind == 'd') have_trash = 1;
+        else if (rc && rc != -ENOENT) die("cannot stat trash directory", trash);
+    }
+    for (i = 0; i < n; i++) { load(&c[i], names[i]); order[i] = i; }
+    for (i = 1; i < n; i++) /* newest first */
+        for (j = i; j > 0 && c[order[j]].epoch > c[order[j - 1]].epoch; j--) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    for (i = 0; i < n; i++) {
+        Cand *x = &c[order[i]];
+        const char *why = 0;
+        if (x->live) why = "live";
+        else if (!x->owned) why = "unowned";
+        else if (kept < keep) { why = "newest"; kept++; }
+        if (why) { sy_printf("PRUNE\tKEEP\t%s\tstate=%s\treason=%s\n", x->rev, x->state, why); continue; }
+        if (!have_trash) { sy_printf("PRUNE\tSKIP\t%s\tstate=%s\treason=no-trash-dir\n", x->rev, x->state); skipped++; continue; }
+        if (cx_fmt(target, sizeof target, "%s/b1-%s-%ld", trash, x->rev, x->epoch)) die("path bound", trash);
+        rc = sy_exists(target);
+        if (rc) { sy_printf("PRUNE\tSKIP\t%s\tstate=%s\treason=%s\n", x->rev, x->state, rc == 1 ? "target-exists" : "target-unreadable"); skipped++; continue; }
+        if (dry) { sy_printf("PRUNE\tWOULD_MOVE\t%s\tstate=%s\tto=%s\n", x->rev, x->state, target); continue; }
+        if (sy_rename(x->dir, target)) { sy_printf("PRUNE\tSKIP\t%s\tstate=%s\treason=rename-failed\n", x->rev, x->state); skipped++; continue; }
+        sy_printf("PRUNE\tMOVED\t%s\tstate=%s\tto=%s\n", x->rev, x->state, target);
+        moved++;
+    }
+    sy_printf("BG_PRUNE\tcandidates=%d\tmoved=%d\tskipped=%d\tdeleted=0\ttrash=%s\n", n, moved, skipped, have_trash ? trash : "-");
+    return 0;
+}
+
+static int usage(void) {
+    sy_eprintf("usage: bg-candidate start --rev HEX40 [--deadline-s N] [--segment-s N] [--max-segments N] [--chain ABS] [-- options]\n"
+               "       bg-candidate status [REV]\n"
+               "       bg-candidate promote --check --rev HEX40\n"
+               "       bg-candidate prune [--keep N] [--trash ABS] [--dry-run]\n"
+               "       common: [--root ABS] [--base ABS]\n");
+    return 2;
+}
+int main(int argc, char **argv) {
+    const char *cmd = argc > 1 ? argv[1] : 0, *rev = 0, *chain = 0, *trash = 0, *only = 0, *root_arg = ".", *base_arg = 0;
+    long deadline_s = 9000, segment_s = 270, segments = 120, keep = 3;
+    int i, check = 0, dry = 0, nextra = 0;
+    char **extra = 0;
+    if (!cmd) return usage();
+    for (i = 2; i < argc; i++) {
+        const char *a = argv[i], *b = i + 1 < argc ? argv[i + 1] : 0;
+        if (!strcmp(a, "--")) { extra = argv + i + 1; nextra = argc - i - 1; break; }
+        if (!strcmp(a, "--check")) { check = 1; continue; }
+        if (!strcmp(a, "--dry-run")) { dry = 1; continue; }
+        if (a[0] != '-' && !only) { only = a; continue; }
+        if (!b) return usage();
+        i++;
+        if (!strcmp(a, "--rev")) rev = b;
+        else if (!strcmp(a, "--root")) root_arg = b;
+        else if (!strcmp(a, "--base")) base_arg = b;
+        else if (!strcmp(a, "--chain")) chain = b;
+        else if (!strcmp(a, "--trash")) trash = b;
+        else if (!strcmp(a, "--deadline-s")) deadline_s = number(b, 1, 36000, a);
+        else if (!strcmp(a, "--segment-s")) segment_s = number(b, 1, 270, a);
+        else if (!strcmp(a, "--max-segments")) segments = number(b, 1, 4096, a);
+        else if (!strcmp(a, "--slack-s")) bg_slack_s = number(b, 1, 3600, a);
+        else if (!strcmp(a, "--keep")) keep = number(b, 0, BG_MAXC, a);
+        else return usage();
+    }
+    if (sy_realpath(root_arg, root, sizeof root) < 0) die("cannot resolve root", root_arg);
+    if (base_arg) {
+        if (base_arg[0] != '/' || cx_fmt(base, sizeof base, "%s", base_arg)) die("--base must be an absolute path", base_arg);
+    } else join(base, root, "out/b1");
+    if (rev && (strlen(rev) != 40 || !is_hex(rev, 40))) die("--rev must be 40 lowercase hex digits", rev);
+    if (only && (strlen(only) != 40 || !is_hex(only, 40))) return usage();
+    if (trash && trash[0] != '/') die("--trash must be an absolute path", trash);
+    if (!strcmp(cmd, "start")) {
+        if (only || check || dry || trash) return usage();
+        return cmd_start(rev, chain, deadline_s, segment_s, segments, extra, nextra);
+    }
+    if (nextra || extra || chain) return usage();
+    if (!strcmp(cmd, "status")) return rev || check || dry || trash ? usage() : cmd_status(only);
+    if (!strcmp(cmd, "promote")) {
+        if (only || dry || trash) return usage();
+        if (!check) {
+            sy_eprintf("bg-candidate: promote only has --check; publishing is the release tail's step, not this tool's\n");
+            return 2;
+        }
+        return cmd_promote(rev);
+    }
+    if (!strcmp(cmd, "prune")) return rev || only || check ? usage() : cmd_prune(keep, trash, dry);
+    return usage();
+}
