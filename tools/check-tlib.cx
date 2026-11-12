@@ -42,6 +42,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
@@ -123,6 +124,39 @@ static int link_to(const char *target, const char *rel) {
     char p[4400];
     if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
     return sy_symlink(target, p);
+}
+
+/* Populate fx/tools for kit mode without a single symlink to ROOT/tools.
+ * A whole-tree tools->ROOT/tools makes -cx-plan resolve sys.posix as tools/sys/sys/posix.cx
+ * (dirname(tools/sys/proc.cx)+/sys/posix). Mirror tools entries; for sys, mirror cx/sys files
+ * and add tools/sys/sys -> tools/sys so that path still reaches posix.cx. Fixture-only. */
+static int link_tools_for_kit(const char *tools_dir, const char *cx_sys) {
+    char dst[4400], src[4400], sysdir[4400];
+    sy_dir_t d;
+    if (dir("tools") || dir("tools/sys")) return -1;
+    if (sy_dir_open(&d, tools_dir)) return -1;
+    while (sy_dir_next(&d) == 1) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..") || tx_eqz(d.name, "sys")) continue;
+        if (cx_fmt(src, sizeof src, "%s/%s", tools_dir, d.name) || cx_fmt(dst, sizeof dst, "tools/%s", d.name)) {
+            sy_dir_close(&d);
+            return -1;
+        }
+        if (link_to(src, dst)) { sy_dir_close(&d); return -1; }
+    }
+    sy_dir_close(&d);
+    if (sy_dir_open(&d, cx_sys)) return -1;
+    while (sy_dir_next(&d) == 1) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (cx_fmt(src, sizeof src, "%s/%s", cx_sys, d.name) || cx_fmt(dst, sizeof dst, "tools/sys/%s", d.name)) {
+            sy_dir_close(&d);
+            return -1;
+        }
+        if (link_to(src, dst)) { sy_dir_close(&d); return -1; }
+    }
+    sy_dir_close(&d);
+    if (cx_fmt(sysdir, sizeof sysdir, "%s/tools/sys", fx)) return -1;
+    if (cx_fmt(dst, sizeof dst, "%s/sys", sysdir)) return -1;
+    return sy_symlink(sysdir, dst);
 }
 
 static char sha_a[65], sha_b[65], sha_c[65];
@@ -284,37 +318,46 @@ int main(int argc, char **argv) {
     if (prep) { sy_printf("FAIL\ttlib.fixture-prepare\n"); return 1; }
     sy_printf("PREPARED\tfixture\tms=%ld\tmode=%s\tno-test-result\n", sy_now_ms() - t0, mode_s);
 
-    /* (1) dependency first */
+    /* (1)(2): asserted only in mode=all|build|kit (same multiset as legacy tlib + tlib-kit).
+     * mode=link|refuse still need ta/tb: build quietly without ck (PREPARED, not results). */
     {
         char *a[] = {"build", "fx.b", "--out", out1, "--cache", cache, 0};
-        rc = run(tlib, a);
-        ck(rc == 5, "dependent-refused-before-dependency-is-built");
-    }
-    /* (2) build, check, cache */
-    {
-        char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
+        char *ba[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
         char *c[] = {"check", ta, "--fresh", 0};
         char *b[] = {"build", "fx.b", "--out", out1, "--cache", cache, 0};
-        char *first = 0;
-        size_t firstn = 0, n2 = 0;
-        char *second;
+        int assert12 = (mode == MODE_ALL || mode == MODE_BUILD || mode == MODE_KIT);
         rc = run(tlib, a);
-        ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "units=", "2") && !field("TLIB_BUILD", "content_sha=", c1, sizeof c1) && sy_exists(ta) == 1, "cold-build");
-        rc = run(tlib, c);
-        ck(rc == 0 && is("TLIB_CHECK", "content_sha=", c1), "check-structure-and-fresh");
-        first = cx_read(ta, &firstn);
-        rc = run(tlib, a);
-        second = cx_read(ta, &n2);
-        ck(rc == 0 && is("TLIB_BUILD", "cache=", "HIT") && is("TLIB_BUILD", "content_sha=", c1) && first && second && firstn == n2 && mm_same(first, second, (long)n2), "second-build-is-cache-hit-same-bytes");
-        mm_free(first);
-        mm_free(second);
-        /* damage the cache entry: it must not be used */
-        if (cx_fmt(cpath, sizeof cpath, "%s/fx.a/%s.tlib", cache, c1) || cx_fmt(kpath, sizeof kpath, "%s.bad", cpath) ||
-            damage(cpath, kpath, -40) || sy_rename(kpath, cpath)) prep = 1;
-        rc = run(tlib, a);
-        ck(!prep && rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "content_sha=", c1), "damaged-cache-entry-not-used");
-        rc = run(tlib, b);
-        ck(rc == 0 && is("TLIB_BUILD", "units=", "1") && sy_exists(tb) == 1, "dependent-build-after-dependency");
+        if (assert12) ck(rc == 5, "dependent-refused-before-dependency-is-built");
+        rc = run(tlib, ba);
+        if (assert12)
+            ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "units=", "2") && !field("TLIB_BUILD", "content_sha=", c1, sizeof c1) && sy_exists(ta) == 1, "cold-build");
+        else if (rc || field("TLIB_BUILD", "content_sha=", c1, sizeof c1) || sy_exists(ta) != 1) {
+            sy_printf("FAIL\ttlib.fixture-tlibs\n");
+            return 1;
+        }
+        if (assert12) {
+            char *first = 0;
+            size_t firstn = 0, n2 = 0;
+            char *second;
+            rc = run(tlib, c);
+            ck(rc == 0 && is("TLIB_CHECK", "content_sha=", c1), "check-structure-and-fresh");
+            first = cx_read(ta, &firstn);
+            rc = run(tlib, ba);
+            second = cx_read(ta, &n2);
+            ck(rc == 0 && is("TLIB_BUILD", "cache=", "HIT") && is("TLIB_BUILD", "content_sha=", c1) && first && second && firstn == n2 && mm_same(first, second, (long)n2), "second-build-is-cache-hit-same-bytes");
+            mm_free(first);
+            mm_free(second);
+            if (cx_fmt(cpath, sizeof cpath, "%s/fx.a/%s.tlib", cache, c1) || cx_fmt(kpath, sizeof kpath, "%s.bad", cpath) ||
+                damage(cpath, kpath, -40) || sy_rename(kpath, cpath)) prep = 1;
+            rc = run(tlib, ba);
+            ck(!prep && rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "content_sha=", c1), "damaged-cache-entry-not-used");
+            rc = run(tlib, b);
+            ck(rc == 0 && is("TLIB_BUILD", "units=", "1") && sy_exists(tb) == 1, "dependent-build-after-dependency");
+        } else {
+            rc = run(tlib, b);
+            if (rc || sy_exists(tb) != 1) { sy_printf("FAIL\ttlib.fixture-tlibs\n"); return 1; }
+            sy_printf("PREPARED\ttlib-fixture-tlibs\tmode=%s\tno-test-result\n", mode_s);
+        }
     }
     /* (3) manifest */
     if (mode == MODE_ALL || mode == MODE_BUILD) {
@@ -486,8 +529,12 @@ int main(int argc, char **argv) {
         char *cf[] = {"check", ta, "--fresh", 0};
         int r1, r2, r3, r4, n1, n2, n3, n4, kept1, kept2, kept3;
         long tk;
-        prep = cx_fmt(tools_dir, sizeof tools_dir, "%s/tools", root) || cx_fmt(kitfile, sizeof kitfile, "%s/kit.tsv", out1) ||
-               cx_fmt(img, sizeof img, "%s/tlib-prep", out1) || link_to(tools_dir, "tools");
+        {
+            char cx_sys[4400];
+            prep = cx_fmt(tools_dir, sizeof tools_dir, "%s/tools", root) || cx_fmt(cx_sys, sizeof cx_sys, "%s/cx/sys", root) ||
+                   cx_fmt(kitfile, sizeof kitfile, "%s/kit.tsv", out1) || cx_fmt(img, sizeof img, "%s/tlib-prep", out1) ||
+                   link_tools_for_kit(tools_dir, cx_sys);
+        }
         r1 = prep ? -1 : run(tlib, k);
         n1 = lines("TLIB_BUILD");
         kept1 = is("PREPARED", "rebuilt=", "0") && is("PREPARED", "image=", "built") && is("PREPARED", "skipped=", "1");
@@ -529,8 +576,10 @@ int main(int argc, char **argv) {
         ck(r3 == 4, "link-refuses-stale-tlib");
         rc = run(tlib, a);
         ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && !field("TLIB_BUILD", "content_sha=", c2, sizeof c2) && !tx_eqz(c1, c2), "rebuild-after-source-change-new-content-sha");
+        /* mode=refuse skips (5), so srcbin may be absent; fa_one rewrite is behaviour-equal (x+1 vs 1+x). */
+        prep |= tq_native(root, main_cx, srcbin, why, sizeof why);
         rc = run(tlib, l);
-        ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-rebuild-behaves-as-before");
+        ck(!prep && rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-rebuild-behaves-as-before");
     }
     /* (8) excluded */
     if (mode == MODE_ALL || mode == MODE_REFUSE) {

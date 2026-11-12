@@ -1,0 +1,48 @@
+/* tools/check-tlib-assert-bag.cx -- self-check for tools/tlib-assert-bag.cx (static extract + compare).
+ *
+ *   sh ./unisacc.com tools/check-tlib-assert-bag.cx [-- ROOT]
+ *
+ * No tlib kit, no BATCH_RUN of tlib batches. Writes bags under sy_tmpdir and compares identical copies.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-assert-bag.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    char tool[4600], a[4600], b[4600], dir[4400], ct[4600], ctp[4600];
+    char *out = 0;
+    size_t outn = 0;
+    int rc;
+    char *v[12];
+    if (tx_snprintf(dir, sizeof dir, "%s/tlib-assert-bag-%d", sy_tmpdir(), sy_pid()) < 0) return 2;
+    if (sy_mkdir(dir, 0700)) return 2;
+    if (tx_snprintf(tool, sizeof tool, "%s/tools/tlib-assert-bag.cx", root) < 0 ||
+        tx_snprintf(ct, sizeof ct, "%s/tools/check-tlib.cx", root) < 0 ||
+        tx_snprintf(ctp, sizeof ctp, "%s/tools/check-tlib-prep.cx", root) < 0 ||
+        tx_snprintf(a, sizeof a, "%s/a.bag", dir) < 0 ||
+        tx_snprintf(b, sizeof b, "%s/b.bag", dir) < 0) return 2;
+    v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = tool; v[3] = "--"; v[4] = "static"; v[5] = ct; v[6] = ctp; v[7] = 0;
+    rc = cx_runv_timeout(v, 40, &out, &outn);
+    ck(rc == 0 && out && tx_find(out, (long)outn, "BAG\t", 4) >= 0, "static-extracts-bag");
+    if (rc == 0 && out) ck(!cx_write(a, out, outn) && !cx_write(b, out, outn), "bag-files-written");
+    mm_free(out); out = 0; outn = 0;
+    v[4] = "compare"; v[5] = a; v[6] = b; v[7] = 0;
+    rc = cx_runv_timeout(v, 20, &out, &outn);
+    ck(rc == 0 && out && tx_find(out, (long)outn, "diff=0", 6) >= 0, "identical-bags-compare-ok");
+    if (out) sy_printf("%.*s", (int)outn, out);
+    mm_free(out);
+    sy_printf("CHECK_TLIB_ASSERT_BAG\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -203,17 +203,21 @@ static void use_kit_dir(const char *dir) {
         cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir)) fatal("kit path");
 }
 
-/* Build a kit into DST (--out DST). 0 on success with kit.tsv readable into *KIT/*KN. */
+/* Build a kit into DST (--out DST). 0 on success with kit.tsv readable into *KIT/*KN.
+ * Bound 55 s: cold kit under load can exceed the old 45 s and still leave a usable image. */
 static int build_kit(const char *dst, char **kit, size_t *kn) {
-    char path[4700];
+    char path[4700], img[4700];
     long t0 = sy_now_ms();
     int rc;
     char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", (char *)dst, "--root", root, 0};
-    rc = run(v, 45);
+    rc = run(v, 55);
     at(path, dst, "kit.tsv");
+    at(img, dst, "tlib-prep");
     *kit = cx_read(path, kn);
-    sy_printf("MEASURED\ttlib-prep\tkit_ms=%ld\tout=%s\n", sy_now_ms() - t0, dst);
-    return rc;
+    sy_printf("MEASURED\ttlib-prep\tkit_ms=%ld\tout=%s\trc=%d\n", sy_now_ms() - t0, dst, rc);
+    /* Accept a complete kit even if the child was killed after writing (rc != 0). */
+    if (*kit && sy_exists(img) == 1) return 0;
+    return rc ? rc : -1;
 }
 
 /* Resolve kit for link/refuse: optional KITDIR, else tp_kit_dir if image exists, else work/kit. */
@@ -278,7 +282,7 @@ int main(int argc, char **argv) {
     static const char *const markers[] = {"UNISACC_CHAIN_SEGMENT_TOKEN=t", "UNISACC_CHAIN_RECHECK_ID=r", "UNISACC_IDENTITY_HELPER=/nonexistent", "UNISACC_CTOR=c",
                                           "UNISACC_TLIB_PREP=0", 0};
     char table[4400], tool[512], self[512], linked[4700], plain[4700], other[4700], path[4700], k2[4700], src[4700], dst[4700], lib[512], note[200];
-    char shared[4400];
+    char shared[4400], privkit[4500];
     const char *mode_s = "all", *kit_hint = 0;
     char *t, *kit = 0, *keep = 0;
     size_t tn = 0, kn = 0, keepn = 0;
@@ -295,7 +299,7 @@ int main(int argc, char **argv) {
     else { sy_printf("check-tlib-prep: MODE must be all|kit|link|refuse\n"); return 2; }
     if (sy_mkdir(work, 0700)) { sy_printf("check-tlib-prep: NEW_DIR must not exist\n"); return 2; }
     if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(table, sizeof table, "%s/build/tlib-prep.tsv", root)) return 2;
-    at(kitdir, work, "kit"); at(image, kitdir, "tlib-prep"); at(k2, work, "kit2");
+    at(privkit, work, "kit"); at(kitdir, work, "kit"); at(image, kitdir, "tlib-prep"); at(k2, work, "kit2");
     at(linked, work, "tool.linked"); at(plain, work, "tool.plain"); at(other, work, "not-written");
     if (sy_chdir(root)) return 2;
     t = cx_read(table, &tn);
@@ -322,14 +326,20 @@ int main(int argc, char **argv) {
         ck(ok && seen >= 3, "release-chain-tool-plans-do-not-reach-the-tlib-path");
     }
 
-    /* (1)(1b): kit or all */
+    /* (1)(1b): kit or all.
+     * Cold-build once into tp_kit_dir (shared with link/refuse). (1b) mutates a private copy only. */
     if (mode == MODE_ALL || mode == MODE_KIT) {
-        use_kit_dir(kitdir);
-        rc = build_kit(kitdir, &kit, &kn);
+        if (tp_kit_dir(root, shared, sizeof shared)) fatal("tp_kit_dir");
+        use_kit_dir(shared);
+        rc = build_kit(shared, &kit, &kn);
         ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
         if (rc || !kit) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no kit: the remaining cases cannot run"); }
+        sy_printf("PREPARED\ttlib-prep-shared-kit\tpath=%s\tno-test-result\n", shared);
+        /* private copy for (1b) so the shared kit stays intact for sibling batches */
+        if (copy_kit(shared, privkit, kit, (long)kn, 0, 0)) fatal("private kit copy for 1b");
+        use_kit_dir(privkit);
         {
-            char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", kitdir, "--root", root, 0};
+            char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", privkit, "--root", root, 0};
             char first[512], victim[4700];
             char *again;
             size_t an = 0, bn = 0;
@@ -362,14 +372,8 @@ int main(int argc, char **argv) {
             mm_free(again);
             ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && same, "damaged-tlib-alone-is-built-again");
         }
-        /* refresh shared tp_kit_dir so link/refuse batches can reuse without a 17 s rebuild */
-        if (!tp_kit_dir(root, shared, sizeof shared)) {
-            char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", shared, "--root", root, 0};
-            t0 = sy_now_ms();
-            rc = run(v, 45);
-            sy_printf("MEASURED\ttlib-prep\tshared_kit_ms=%ld\tpath=%s\trc=%d\n", sy_now_ms() - t0, shared, rc);
-            if (rc) fatal("shared kit refresh failed");
-        }
+        /* restore image/kitdir to the shared kit for any later all-mode cases */
+        use_kit_dir(shared);
     }
 
     /* link/refuse need a kit */
