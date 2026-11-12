@@ -1,0 +1,250 @@
+#pragma unisa module fwdmark
+#pragma unisa use compiler.fwdsig
+/* Forward marks: the forwardable signature of a host function, carried through a unit
+   object so a separate link can build the same stub the one-step image route builds.
+   No libc and no include.
+   Compile side (fk_mark): an e3 output made under \0cli/run-forward is the USLFW1
+   side-car: the tape without its function `.extern` lines, then one (name, USLSIG3) slot
+   per undefined function. fk_mark gives back the unit tape: every slot's `.extern NAME`
+   line where e3 would have put it (before `.extern __init`), and before those one inert
+       .bss __unisa_fw1_<sig>_<name> 1
+   line per slot that may be forwarded. <sig> is v|f (variadic or not), then the result as
+   isvoid, kind, width, unsigned (one hex digit each), then kind and width per argument.
+   A slot is not marked when its signature does not decode, passes a struct by value or a
+   callback, or when the unit's own source prototypes the name (that name belongs to
+   another unit; unresolved, it stays a link error). With mark 0 no slot is marked: a .cx
+   unit's undefined names are its imports, which other unit objects define.
+   Link side (fk_stub): the marks tapelink noted whose names no unit defines become stub
+   text through fwd_emit, the same text the image route writes. */
+
+static int fk_hex(int v) { return v < 10 ? 48 + v : 87 + v; }
+static int fk_val(int c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    return -1;
+}
+static void fk_put(unsigned char *o, long *at, const char *s, long n) {
+    long k;
+    for (k = 0; k < n; k++) o[*at + k] = (unsigned char)s[k];
+    *at = *at + n;
+}
+static int fk_tail(const unsigned char *t, long n, const char *lit, long ln) {
+    long k;
+    if (n < ln) return 0;
+    for (k = 0; k < ln; k++) if (t[n - ln + k] != (unsigned char)lit[k]) return 0;
+    return 1;
+}
+/* The unit's source text, or 0 (stdin, unreadable, larger than 1 MiB): no text, no
+   prototype seen. */
+static char *fk_text(const char *src, long *n) {
+    int sy_open_read(const char *);
+    long sy_reg_size(int);
+    int sy_read_full(int, void *, long);
+    int sy_close(int);
+    void *mm_alloc(long);
+    void mm_free(void *);
+    char *text;
+    long sz;
+    int fd;
+    *n = 0;
+    if (!src || !src[0] || (src[0] == '-' && src[1] == 0)) return 0;
+    fd = sy_open_read(src);
+    if (fd < 0) return 0;
+    sz = sy_reg_size(fd);
+    if (sz < 0 || sz > 1048576L) { sy_close(fd); return 0; }
+    text = (char *)mm_alloc(sz + 1);
+    if (!text) { sy_close(fd); return 0; }
+    if (sz > 0 && sy_read_full(fd, text, sz)) { sy_close(fd); mm_free(text); return 0; }
+    sy_close(fd);
+    text[sz] = 0;
+    *n = sz;
+    return text;
+}
+/* One slot at *at: its name, and the mark signature in sig (0 length: do not mark).
+   1 = malformed side-car. */
+static int fk_slot(const unsigned char *b, unsigned long long n, unsigned long long *at,
+                   const char *text, long tn, const char **nm, int *nl, char *sig, int *sn) {
+    USForwardSig s;
+    unsigned long long l, sl;
+    int bad, k, ok;
+    if (us_fw_u64(b, n, at, &l) || l == 0 || l > 1024 || l > n - *at) return 1;
+    *nm = (const char *)b + *at;
+    *nl = (int)l;
+    *at = *at + l;
+    if (us_fw_u64(b, n, at, &sl) || sl > n - *at) return 1;
+    bad = us_forward_sig_decode(b + *at, sl, *nm, l, &s);
+    *at = *at + sl;
+    *sn = 0;
+    if (fw_undef(bad, s.structbyval, s.ret.structbyval, s.n)) return 0;
+    ok = s.ret.kind >= 0 && s.ret.kind < 16 && s.ret.width >= 0 && s.ret.width < 16;
+    for (k = 0; k < s.n; k++)
+        if (s.args[k].callback || s.args[k].kind < 0 || s.args[k].kind > 15 || s.args[k].width < 0 || s.args[k].width > 15) ok = 0;
+    if (!ok || (text && uu_role_of(text, tn, *nm, *nl) == 1)) return 0;
+    sig[0] = s.variadic ? 'v' : 'f';
+    sig[1] = s.ret.isvoid ? '1' : '0';
+    sig[2] = (char)fk_hex(s.ret.kind);
+    sig[3] = (char)fk_hex(s.ret.width);
+    sig[4] = s.ret.uns ? '1' : '0';
+    for (k = 0; k < s.n; k++) {
+        sig[5 + 2 * k] = (char)fk_hex(s.args[k].kind);
+        sig[6 + 2 * k] = (char)fk_hex(s.args[k].width);
+    }
+    *sn = 5 + 2 * s.n;
+    return 0;
+}
+
+/* 0 and the unit tape in *out (mm_alloc; the caller frees), 1 no side-car head,
+   2 malformed side-car, 4 out of memory. */
+int fk_mark(const unsigned char *b, long bn, const char *src, int mark, unsigned char **out, long *outn) {
+    void *mm_alloc(long);
+    void mm_free(void *);
+    unsigned long long n, at, tl, cnt, ccwc, r, slots;
+    unsigned char *o;
+    char *text;
+    char sig[80];
+    const char *nm;
+    long tn, oat, ins, cap;
+    int nl, sn, pass;
+    if (!out || !outn || bn < 0) return 2;
+    *out = 0;
+    *outn = 0;
+    n = (unsigned long long)bn;
+    if (fw_side_head(b, n)) return 1;
+    at = 7;
+    if (us_fw_u64(b, n, &at, &tl) || us_fw_u64(b, n, &at, &cnt) || us_fw_u64(b, n, &at, &ccwc) ||
+        fw_side_bad(ccwc, tl, n, at) || tl > 2147483647ULL || cnt > 65536) return 2;
+    slots = at + tl;
+    /* every slot adds at most `.extern NAME\n` and one mark line */
+    cap = (long)tl + (long)cnt * (9 + 17 + 80 + 4) + 1;
+    r = 0;
+    at = slots;
+    text = 0;
+    tn = 0;
+    while (r < cnt) {
+        if (fk_slot(b, n, &at, 0, 0, &nm, &nl, sig, &sn)) return 2;
+        cap = cap + 2 * (long)nl;
+        r = r + 1;
+    }
+    o = (unsigned char *)mm_alloc(cap);
+    if (!o) return 4;
+    if (cnt && mark) text = fk_text(src, &tn);
+    ins = (long)tl;
+    if (fk_tail(b + (slots - tl), (long)tl, ".extern __init\n.end\n", 20)) ins = (long)tl - 20;
+    else if (fk_tail(b + (slots - tl), (long)tl, ".end\n", 5)) ins = (long)tl - 5;
+    oat = 0;
+    fk_put(o, &oat, (const char *)b + (slots - tl), ins);
+    for (pass = 0; pass < 2; pass++) {
+        r = 0;
+        at = slots;
+        while (r < cnt) {
+            (void)fk_slot(b, n, &at, text, tn, &nm, &nl, sig, &sn);
+            if (pass == 0 && sn > 0 && mark) {
+                fk_put(o, &oat, ".bss __unisa_fw1_", 17);
+                fk_put(o, &oat, sig, sn);
+                fk_put(o, &oat, "_", 1);
+                fk_put(o, &oat, nm, nl);
+                fk_put(o, &oat, " 1\n", 3);
+            }
+            if (pass == 1) {
+                fk_put(o, &oat, ".extern ", 8);
+                fk_put(o, &oat, nm, nl);
+                fk_put(o, &oat, "\n", 1);
+            }
+            r = r + 1;
+        }
+    }
+    fk_put(o, &oat, (const char *)b + (slots - tl) + ins, (long)tl - ins);
+    if (text) mm_free(text);
+    *out = o;
+    *outn = oat;
+    return 0;
+}
+
+/* One mark text (after `.bss `) into a stub. 0 emitted, 1 malformed, 2 fwd_emit declined. */
+static int fk_emit(char *m, int ml) {
+    int fwd_emit(char *, int, int, int *, int *, int *, int, int, int, int);
+    int fwd_emit_var(char *, int, int, int *, int *, int, int, int, int);
+    int fwd_pclear(void);
+    int kk[33];
+    int ww[33];
+    int uu[33];
+    int e, k, np, made;
+    e = 12;
+    while (e < ml && m[e] != 95) e = e + 1;
+    if (e >= ml - 1 || e < 17 || ((e - 17) & 1) || (e - 17) / 2 > 32 || (m[12] != 'v' && m[12] != 'f')) return 1;
+    for (k = 13; k < e; k++) if (fk_val(m[k]) < 0) return 1;
+    np = (e - 17) / 2;
+    for (k = 0; k < np; k++) {
+        kk[k] = fk_val(m[17 + 2 * k]);
+        ww[k] = fk_val(m[18 + 2 * k]);
+        uu[k] = 0;
+    }
+    if (m[12] == 'v')
+        made = fwd_emit_var(m + e + 1, ml - e - 1, np, kk, ww, fk_val(m[13]), fk_val(m[14]), fk_val(m[15]), fk_val(m[16]));
+    else
+        made = fwd_emit(m + e + 1, ml - e - 1, np, kk, ww, uu, fk_val(m[13]), fk_val(m[14]), fk_val(m[15]), fk_val(m[16]));
+    fwd_pclear();
+    return made ? 0 : 2;
+}
+static int fk_same_name(char *a, int an, char *b, int bn) {
+    int i, j, k;
+    i = 12;
+    while (i < an && a[i] != 95) i = i + 1;
+    j = 12;
+    while (j < bn && b[j] != 95) j = j + 1;
+    if (an - i != bn - j) return 0;
+    for (k = 0; k < an - i; k++) if (a[i + k] != b[j + k]) return 0;
+    return 1;
+}
+
+/* Stub text for every noted mark whose name is still undefined. The count of stubs and
+   the text in *out (mm_alloc; the caller frees); 0 when there is none; -1 a malformed mark,
+   -2 a signature fwd_emit does not forward, -4 out of memory. tgt is the fact-table target. */
+int fk_stub(const char *tgt, unsigned char **out, long *outn) {
+    int tl_fwd(int, char **);
+    void fwd_reset(void);
+    void fwd_set_ccw(int);
+    void fwd_set_target(const char *);
+    int fwd_count(void);
+    char *fwd_text(void);
+    int fwd_emit_libs(void);
+    void *mm_alloc(long);
+    char *m;
+    char *p;
+    char *t;
+    int i, j, ml, pl, dup, made, rc, n, k;
+    if (!out || !outn) return -1;
+    *out = 0;
+    *outn = 0;
+    made = 0;
+    i = 0;
+    while ((ml = tl_fwd(i, &m)) >= 0) {
+        i = i + 1;
+        if (ml == 0) continue;
+        dup = 0;
+        for (j = 0; j < i - 1 && !dup; j++) {
+            pl = tl_fwd(j, &p);
+            if (pl > 0 && fk_same_name(m, ml, p, pl)) dup = 1;
+        }
+        if (dup) continue;
+        if (!made) {
+            fwd_reset();
+            fwd_set_ccw(0);
+            fwd_set_target(tgt);
+        }
+        rc = fk_emit(m, ml);
+        if (rc) return 0 - rc;
+        made = made + 1;
+    }
+    if (!made) return 0;
+    fwd_emit_libs();
+    n = fwd_count();
+    t = fwd_text();
+    p = (char *)mm_alloc((long)n + 1);
+    if (!p) return -4;
+    for (k = 0; k < n; k++) p[k] = t[k];
+    p[n] = 0;
+    *out = (unsigned char *)p;
+    *outn = (long)n;
+    return made;
+}
