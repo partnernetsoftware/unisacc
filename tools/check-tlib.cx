@@ -1,11 +1,16 @@
 /* tools/check-tlib.cx -- tools/tlib.cx on a private fixture tree (no unit of this checkout is packed here;
  * the real cx.base build is tools/check-tlib-base.cx).
  *
- *   sh ./unisacc.com tools/check-tlib.cx [-- ROOT OUT [kit]]
+ *   sh ./unisacc.com tools/check-tlib.cx [-- ROOT OUT [MODE]]
  *
- * Without the third argument: every case but (6b) (batch tlib). With "kit": the fixture, (1), (2)
- * and (6b) only (batch tlib-kit); the two lines share the fixture and stay inside one batch
- * budget each.
+ * MODE (DEBT-TLIB-BATCH-SPLIT; default all = legacy batch tlib):
+ *   all     every case but (6b)
+ *   kit     fixture + (1)(2)(6b) only (batch tlib-kit)
+ *   build   fixture + (1)(2)(3)(4)
+ *   link    fixture + (1)(2) + (5)(5a-d)
+ *   refuse  fixture + (1)(2) + (6)(6a)(7)(8)(9)(10)
+ * Each split mode rebuilds the fixture and (1)(2) so it stays self-contained under 25 s without
+ * materials (commit tier forbids materials). Assertion names across build+link+refuse+kit equal all+kit.
  *
  * Fixture: package fx.a@0.2.1 (fa/one.cx, fa/two.cx; fa/bad.cx excluded), fx.b@0.1.0 (fb/three.cx,
  * depends on fx.a@0.2.0), fx.c (a unit that uses the excluded fa/bad.cx), and a tool t/main.cx.
@@ -42,7 +47,10 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
+enum { MODE_ALL = 0, MODE_KIT = 1, MODE_BUILD = 2, MODE_LINK = 3, MODE_REFUSE = 4 };
+
 static int failed;
+static int mode;
 static char root[4096], work[4400], fx[4400], tlib[4400], lapi[4400];
 static char *last;
 static size_t lastn;
@@ -208,8 +216,16 @@ int main(int argc, char **argv) {
     char ta[4400], tb[4400], ta1[4400], tam[4400], main_cx[4400], bad_cx[4400], srcbin[4400], tlbin[4400], manifest[4400];
     char c1[65], c2[65], kpath[4400], cpath[4400];
     int rc, prep = 0;
-    int kit_mode = argc >= 4 && tx_eqz(argv[3], "kit");
+    const char *mode_s = "all";
     long t0 = sy_now_ms();
+
+    if (argc >= 4 && argv[3][0]) mode_s = argv[3];
+    if (tx_eqz(mode_s, "all")) mode = MODE_ALL;
+    else if (tx_eqz(mode_s, "kit")) mode = MODE_KIT;
+    else if (tx_eqz(mode_s, "build")) mode = MODE_BUILD;
+    else if (tx_eqz(mode_s, "link")) mode = MODE_LINK;
+    else if (tx_eqz(mode_s, "refuse")) mode = MODE_REFUSE;
+    else { sy_printf("check-tlib: MODE must be all|kit|build|link|refuse\n"); return 2; }
 
     if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
     if (argc >= 3 && argv[2][0]) {
@@ -266,7 +282,7 @@ int main(int argc, char **argv) {
     prep |= put("t/needbad.cx", "#pragma unisa use fa.bad\nint main(void) { return fa_bad(); }\n");
     prep |= cx_fmt(sha_a, 65, "PENDING") || cx_fmt(sha_b, 65, "PENDING") || cx_fmt(sha_c, 65, "PENDING") || manifests("0.2.1");
     if (prep) { sy_printf("FAIL\ttlib.fixture-prepare\n"); return 1; }
-    sy_printf("PREPARED\tfixture\tms=%ld\tno-test-result\n", sy_now_ms() - t0);
+    sy_printf("PREPARED\tfixture\tms=%ld\tmode=%s\tno-test-result\n", sy_now_ms() - t0, mode_s);
 
     /* (1) dependency first */
     {
@@ -301,7 +317,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && is("TLIB_BUILD", "units=", "1") && sy_exists(tb) == 1, "dependent-build-after-dependency");
     }
     /* (3) manifest */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_BUILD) {
         char *a[] = {"inspect", ta, "--api", 0};
         size_t mn = 0;
         char *m;
@@ -311,7 +327,7 @@ int main(int argc, char **argv) {
         mm_free(m);
     }
     /* (4) tamper */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_BUILD) {
         char *c[] = {"check", tam, 0};
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", tam, "--tlib", tb, 0};
         int r1, r2, r3, r4, r5;
@@ -331,7 +347,7 @@ int main(int argc, char **argv) {
         ck(!prep && r5 == 3 && sy_exists(tlbin) == 0, "link-refuses-tampered-tlib");
     }
     /* (5) link equals source build */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_LINK) {
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
         rc = run(tlib, l);
         prep = tq_native(root, main_cx, srcbin, why, sizeof why);
@@ -340,7 +356,7 @@ int main(int argc, char **argv) {
     }
     /* (5a) a .cx program taking strdup from <string.h> links (the source route forwards it to the host;
        a .cx unit object carries no forward mark, so the link supplies a body) and behaves as the source build */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_LINK) {
         char sd_cx[4400], sd_src[4400], sd_tl[4400];
         prep = cx_fmt(sd_cx, sizeof sd_cx, "%s/t/strdup.cx", fx) || cx_fmt(sd_src, sizeof sd_src, "%s/strdup.src", work) ||
                cx_fmt(sd_tl, sizeof sd_tl, "%s/strdup.tl", work) ||
@@ -354,7 +370,7 @@ int main(int argc, char **argv) {
     }
     /* (5b) the tool names only the dependent package; the dependency is given first on the line.
        The product takes archives in one pass each, in order, so link must put fx.b before fx.a. */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_LINK) {
         char only[4400], onlybin[4400];
         char *o = 0;
         size_t on = 0;
@@ -370,7 +386,7 @@ int main(int argc, char **argv) {
     /* (5c) one runtime state: a FILE opened in the tool and written by a packed unit keeps the
        write, and stdout written from both sides keeps its order; (5d) a second root unit named
        with --with is compiled and linked with the first. */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_LINK) {
         char stdio_cx[4400], sbin[4400], tbin[4400], f1[4400], f2[4400], two_cx[4400], extra_cx[4400], twobin[4400];
         char *oa = 0, *ob = 0;
         size_t na = 0, nb = 0;
@@ -400,7 +416,7 @@ int main(int argc, char **argv) {
         mm_free(oa);
     }
     /* (6) versions */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char *ok1[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.1.0", "--require", "fx.a@0.2.1", "--require", "fx.b@0.1.0", 0};
         char *old[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.3.0", 0};
         char *maj[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@1.0.0", 0};
@@ -423,7 +439,7 @@ int main(int argc, char **argv) {
     /* (6a) a versioned (frozen) package: its key and freshness do not name the product build.
        fx.a gets a ninth-field sha; a build, then check --fresh with another product file stays fresh
        (an unfrozen package would be STALE). A frozen fx.b over unfrozen fx.a is refused. */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char o3[4400], c3[4400], t3[4400], junk[4400], fz[4400];
         int rb, rf, rj, rg, rv;
         if (cx_fmt(o3, sizeof o3, "%s/o3", work) || cx_fmt(c3, sizeof c3, "%s/c3", work) || cx_fmt(t3, sizeof t3, "%s/fx.a@0.2.1.tlib", o3) ||
@@ -461,7 +477,7 @@ int main(int argc, char **argv) {
     /* (6b) incremental kit over the fixture packages (fx.c never builds: it is skipped each time).
        The tool's own sources are reached through a tools link; its image is built once.
        Runs only as the kit line (third argument "kit", batch tlib-kit), after (1) and (2). */
-    if (kit_mode) {
+    if (mode == MODE_KIT) {
         char *k[] = {"kit", "--out", out1, "--cache", cache, 0};
         char tools_dir[4400], kitfile[4400], img[4400], c3[65];
         const char *two0 = "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n";
@@ -499,7 +515,7 @@ int main(int argc, char **argv) {
         ck(!prep && r4 == 0 && n4 == 1 && rc == 0 && !field("TLIB_CHECK", "content_sha=", c3, sizeof c3) && tx_eqz(c1, c3), "restored-source-gives-the-first-content-sha");
     }
     /* (7) stale */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char *cf[] = {"check", ta, "--fresh", 0};
         char *cs[] = {"check", ta, 0};
         char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
@@ -517,7 +533,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-rebuild-behaves-as-before");
     }
     /* (8) excluded */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char *l[] = {"link", bad_cx, "-o", tlbin, "--tlib", ta, 0};
         char *b[] = {"build", "fx.c", "--out", out1, "--cache", cache, 0};
         int r1 = run(tlib, l), r2 = run(tlib, b);
@@ -525,14 +541,14 @@ int main(int argc, char **argv) {
         ck(r2 == 6, "build-refuses-unit-that-needs-excluded-unit");
     }
     /* (9) interface changed, manifest not regenerated */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
         prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return 1 + x; }\nint fa_extra(void) { return 2; }\n");
         rc = run(tlib, a);
         ck(!prep && rc == 4, "build-refuses-interface-change-without-manifest");
     }
     /* (10) usage */
-    if (!kit_mode) {
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
         char *u1[] = {"frobnicate", "x", 0};
         char *u2[] = {"link", main_cx, "--tlib", ta, 0};
         char *u3[] = {"build", "no.such", "--out", out1, "--cache", cache, 0};
@@ -542,6 +558,6 @@ int main(int argc, char **argv) {
 
     mm_free(last);
     if (argc < 3) cx_rmtree(work);
-    sy_printf("CHECK_TLIB\tfailed=%d\telapsed_ms=%ld\n", failed, sy_now_ms() - t0);
+    sy_printf("CHECK_TLIB\tfailed=%d\tmode=%s\telapsed_ms=%ld\n", failed, mode_s, sy_now_ms() - t0);
     return failed ? 1 : 0;
 }

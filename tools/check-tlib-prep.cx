@@ -1,9 +1,20 @@
 /* tools/check-tlib-prep.cx -- the tlib kit and the prepare path that links listed tools from it.
  *
- *   sh ./unisacc.com tools/check-tlib-prep.cx [-- ROOT NEW_DIR]
+ *   sh ./unisacc.com tools/check-tlib-prep.cx [-- ROOT NEW_DIR [MODE [KITDIR]]]
  *
- * Real product, real packages of ROOT, a private kit directory (NEW_DIR/kit); the package cache is
- * the default one, whose entries the build verifies by structure and input sha before use.
+ * MODE (DEBT-TLIB-BATCH-SPLIT):
+ *   all     every case (legacy; over the 25 s budget; assertion baseline)
+ *   kit     (1)(1b); builds a private kit, then refreshes tp_kit_dir for sibling batches
+ *   link    (2)(3); uses KITDIR, else tp_kit_dir if the image exists, else builds once
+ *   refuse  (0)(4)(5)(6)(7); same kit resolve; (6) tampers a private copy only
+ *
+ * Commit-tier batches may not declare materials (testplan commit-materials). Sibling batches
+ * therefore share one kit via tp_kit_dir (CACHE/kit/<sha of ROOT>), the same location prep-cache
+ * consumers already read. Optional argv KITDIR is for a later materials-bound path when the
+ * scheduler can supply it without violating commit-materials.
+ *
+ * Real product, real packages of ROOT, a private work directory; the package cache is the default
+ * one, whose entries the build verifies by structure and input sha before use.
  *  (0) build/tlib-admit-verdicts.tsv deny candidates: each source exists, is not a prep allow-list
  *      row, and carries verdict/class/reason (C1; no kit needed);
  *  (1) `tlib kit` leaves the tlibs, the prep image and kit.tsv, and says PREPARED once;
@@ -41,7 +52,10 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
+enum { MODE_ALL = 0, MODE_KIT = 1, MODE_LINK = 2, MODE_REFUSE = 3 };
+
 static int failed;
+static int mode;
 static char root[4096], work[4400], product[4400], kitdir[4500], image[4600];
 static char *last;
 static size_t lastn;
@@ -179,129 +193,63 @@ static int forge(const char *dir, const char *k, long kn, const char *key, int r
     return i ? 1 : 0;
 }
 
-int main(int argc, char **argv) {
-    /* product-build.cx was archived (CHAIN-ARCHIVE); live slice builder is release-build.cx. */
-    static const char *const chain_tools[] = {"tools/chain-run.cx", "tools/release-build.cx", "tools/candidate-chain.cx", "tools/selfhost.cx",
-                                              "tools/kernel-build.cx", "tools/source-job-wave.cx", "tools/pc-wave.cx", 0};
-    static const char *const markers[] = {"UNISACC_CHAIN_SEGMENT_TOKEN=t", "UNISACC_CHAIN_RECHECK_ID=r", "UNISACC_IDENTITY_HELPER=/nonexistent", "UNISACC_CTOR=c",
-                                          "UNISACC_TLIB_PREP=0", 0};
-    char table[4400], tool[512], self[512], linked[4700], plain[4700], other[4700], path[4700], k2[4700], src[4700], dst[4700], lib[512], note[200];
-    char *t, *kit, *keep = 0;
-    size_t tn = 0, kn = 0, keepn = 0;
-    long t0;
-    int rc, rc2, i, ok, seen;
-    if (argc >= 3) { if (sy_realpath(argv[1], root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s", argv[2])) return 2; }
-    else if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s/check-tlib-prep-%d", sy_tmpdir(), sy_pid())) return 2;
-    if (sy_mkdir(work, 0700)) { sy_printf("check-tlib-prep: NEW_DIR must not exist\n"); return 2; }
-    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(table, sizeof table, "%s/build/tlib-prep.tsv", root)) return 2;
-    at(kitdir, work, "kit"); at(image, kitdir, "tlib-prep"); at(k2, work, "kit2");
-    at(linked, work, "tool.linked"); at(plain, work, "tool.plain"); at(other, work, "not-written");
-    if (sy_chdir(root)) return 2;
-    t = cx_read(table, &tn);
-    if (!t || row_key(t, (long)tn, 0, tool, sizeof tool)) fatal("no tool listed in build/tlib-prep.tsv");
+/* Point kitdir/image at DIR (absolute kit directory with tlib-prep image). */
+static void use_kit_dir(const char *dir) {
+    if (cx_fmt(kitdir, sizeof kitdir, "%s", dir) || cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir)) fatal("kit path");
+}
 
-    /* (0) deny candidates: no kit */
-    deny_candidates(t, (long)tn);
+/* Build a kit into DST (--out DST). 0 on success with kit.tsv readable into *KIT/*KN. */
+static int build_kit(const char *dst, char **kit, size_t *kn) {
+    char path[4700];
+    long t0 = sy_now_ms();
+    int rc;
+    char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", (char *)dst, "--root", root, 0};
+    rc = run(v, 45);
+    at(path, dst, "kit.tsv");
+    *kit = cx_read(path, kn);
+    sy_printf("MEASURED\ttlib-prep\tkit_ms=%ld\tout=%s\n", sy_now_ms() - t0, dst);
+    return rc;
+}
 
-    /* (7) first: it needs no kit */
-    ok = 1;
-    for (i = 0; !row_key(t, (long)tn, i, self, sizeof self); i++) {
-        int c;
-        if (sy_exists(self) != 1) ok = 0;
-        for (c = 0; chain_tools[c]; c++) if (tx_eqz(self, chain_tools[c])) ok = 0;
+/* Resolve kit for link/refuse: optional KITDIR, else tp_kit_dir if image exists, else work/kit. */
+static int resolve_kit(const char *hint, char **kit, size_t *kn) {
+    char shared[4400], path[4700], img[4700];
+    if (hint && hint[0]) {
+        use_kit_dir(hint);
+        at(path, kitdir, "kit.tsv");
+        *kit = cx_read(path, kn);
+        return (*kit && sy_exists(image) == 1) ? 0 : -1;
     }
-    ck(ok && i > 0, "listed-tools-exist-and-none-is-a-release-chain-tool");
-    ok = 1; seen = 0;
-    for (i = 0; chain_tools[i]; i++) {
-        char *v[] = {"sh", product, "-cx-plan", (char *)chain_tools[i], 0};
-        if (sy_exists(chain_tools[i]) != 1) continue;
-        seen++;
-        if (run(v, 20) != 0 || !has(chain_tools[i]) || has("tlibpkg")) ok = 0;
+    if (!tp_kit_dir(root, shared, sizeof shared) &&
+        !cx_fmt(img, sizeof img, "%s/tlib-prep", shared) && sy_exists(img) == 1) {
+        use_kit_dir(shared);
+        at(path, kitdir, "kit.tsv");
+        *kit = cx_read(path, kn);
+        if (*kit) {
+            sy_printf("PREPARED\ttlib-prep-kit-reuse\tpath=%s\tno-test-result\n", shared);
+            return 0;
+        }
     }
-    ck(ok && seen >= 3, "release-chain-tool-plans-do-not-reach-the-tlib-path");
+    at(path, work, "kit");
+    use_kit_dir(path);
+    if (build_kit(kitdir, kit, kn) || !*kit || sy_exists(image) != 1) return -1;
+    return 0;
+}
 
-    /* (1) */
-    t0 = sy_now_ms();
-    {   char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", kitdir, "--root", root, 0};
-        rc = run(v, 45);
-    }
-    at(path, kitdir, "kit.tsv");
-    kit = cx_read(path, &kn);
-    ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
-    sy_printf("MEASURED\ttlib-prep\tkit_ms=%ld\n", sy_now_ms() - t0);
-    if (rc || !kit) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no kit: the remaining cases cannot run"); }
-
-    /* (1b): the kit is incremental */
-    {
-        char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", kitdir, "--root", root, 0};
-        char first[512], victim[4700];
-        char *again;
-        size_t an = 0, bn = 0;
-        char *lb;
-        int same;
-        t0 = sy_now_ms();
-        rc = run(v, 45);
-        sy_printf("MEASURED\ttlib-prep\tkit_nothing_to_do_ms=%ld\n", sy_now_ms() - t0);
-        again = cx_read(path, &an);
-        same = again && an == kn && mm_same(again, kit, (long)kn);
-        mm_free(again);
-        ck(rc == 0 && has("kit=unchanged") && has("rebuilt=0") && has("image=kept") && count("TLIB_BUILD\t") == 0 && same, "second-kit-builds-nothing-and-writes-nothing");
-        if (tp_rc_get(kit, (long)kn, "lib", 0, 1, first, sizeof first)) fatal("the kit lists no tlib");
-        at(victim, kitdir, first);
-        ok = sy_unlink(victim) == 0;
-        rc = run(v, 45);
-        again = cx_read(path, &an);
-        same = again && an == kn && mm_same(again, kit, (long)kn);
-        mm_free(again);
-        ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && has("kit=written") && same && sy_exists(victim) == 1,
-           "missing-tlib-alone-is-built-again-image-kept");
-        lb = cx_read(victim, &bn);
-        if (lb && bn > 64) lb[bn - 9] ^= 1;
-        ok = lb && bn > 64 && !cx_write(victim, lb, bn);
-        mm_free(lb);
-        rc = run(v, 45);
-        again = cx_read(path, &an);
-        same = again && an == kn && mm_same(again, kit, (long)kn);
-        mm_free(again);
-        ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && same, "damaged-tlib-alone-is-built-again");
-    }
-
-    /* (4) (5): refusals, nothing written */
-    if (cx_fmt(self, sizeof self, "%s/tools/check-tlib-prep.cx", root)) return 2;
-    rc = prep(0, kitdir, self, other);
-    ck(rc == 7 && lastn == 0 && sy_exists(other) != 1, "unlisted-source-does-not-apply-silently");
-    ok = 1;
-    for (i = 0; markers[i]; i++) {
-        rc = prep(markers[i], kitdir, tool, other);
-        if (rc != 7 || !has("REFUSED") || sy_exists(other) == 1) ok = 0;
-    }
-    ck(ok, "chain-markers-and-opt-out-refuse-and-write-nothing");
-    {
-        const char *before = tp_prep_forbidden(), *named, *opted;
-        (void)sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN", "t", 1);
-        named = tp_prep_forbidden();
-        (void)sy_unsetenv("UNISACC_CHAIN_SEGMENT_TOKEN");
-        (void)sy_setenv("UNISACC_TLIB_PREP", "0", 1);
-        opted = tp_prep_forbidden();
-        (void)sy_setenv("UNISACC_TLIB_PREP", "1", 1);
-        ok = !before && named && opted && !tp_prep_forbidden();
-        (void)sy_unsetenv("UNISACC_TLIB_PREP");
-        if (cx_fmt(note, sizeof note, "%s", named ? named : "")) note[0] = 0;
-        ck(ok && !tp_prep_forbidden() && tx_find(note, tx_len(note, sizeof note), "SEGMENT", 7) >= 0, "guard-names-the-marker-and-clears-with-it");
-    }
-
-    /* a second kit directory with the same members: (2) links from it, (6) then breaks it */
-    ok = sy_mkdir(k2, 0700) == 0;
-    at(src, kitdir, "tlib-prep"); at(dst, k2, "tlib-prep");
-    if (ok && sy_copy(src, dst, 0700)) ok = 0;
-    lib[0] = 0;
+/* Copy SRC kit directory into DST (image + every lib\t member + kit.tsv). */
+static int copy_kit(const char *src, const char *dst, const char *kit, long kn, char *lib_out, long lib_cap) {
+    char s[4700], d[4700], cur[512];
+    int ok = sy_mkdir(dst, 0700) == 0;
+    int i;
+    at(s, src, "tlib-prep"); at(d, dst, "tlib-prep");
+    if (ok && sy_copy(s, d, 0700)) ok = 0;
+    if (lib_out) lib_out[0] = 0;
     for (i = 0; ok; i++) {
-        char cur[512];
         long j = 0, e, off, len, n = 0;
         int hit = 0;
-        while (j < (long)kn && !hit) {
+        while (j < kn && !hit) {
             e = j;
-            while (e < (long)kn && kit[e] != '\n') e++;
+            while (e < kn && kit[e] != '\n') e++;
             if (e - j > 4 && tx_same(kit + j, 4, "lib\t", 4)) {
                 if (n == i) { hit = 1; if (tx_field(kit + j, e - j, '\t', 1, &off, &len) || tx_copy(cur, sizeof cur, kit + j + off, len)) ok = 0; }
                 n++;
@@ -309,55 +257,218 @@ int main(int argc, char **argv) {
             j = e + 1;
         }
         if (!hit || !ok) break;
-        at(src, kitdir, cur); at(dst, k2, cur);
-        if (sy_copy(src, dst, 0600) || cx_fmt(lib, sizeof lib, "%s", cur)) ok = 0;
+        at(s, src, cur); at(d, dst, cur);
+        if (sy_copy(s, d, 0600)) ok = 0;
+        if (lib_out && lib_cap && cx_fmt(lib_out, (size_t)lib_cap, "%s", cur)) ok = 0;
     }
-    at(path, k2, "kit.tsv");
-    if (ok && cx_write(path, kit, kn)) ok = 0;
-    ck(ok && i > 0 && lib[0], "second-kit-directory-copied");
+    at(d, dst, "kit.tsv");
+    if (ok && cx_write(d, kit, (size_t)kn)) ok = 0;
+    return ok && i > 0 ? 0 : 1;
+}
 
-    /* (2) (3) */
-    t0 = sy_now_ms();
-    rc = prep(0, k2, tool, linked);
-    if (cx_fmt(path, sizeof path, "%s.tlibwork", linked)) return 2;
-    ck(rc == 0 && count("PREPARED\ttlib-prep\t") == 1 && sy_exists(linked) == 1 && sy_exists(path) != 1, "listed-tool-linked-from-the-kit");
-    sy_printf("MEASURED\ttlib-prep\tlink_ms=%ld\t%s\n", sy_now_ms() - t0, tool);
-    if (rc && last) (void)sy_write_all(1, last, (long)lastn);
-    t0 = sy_now_ms();
-    {   char *v[] = {"sh", product, tool, "-o", plain, 0};
-        rc = run(v, 40);
-    }
-    sy_printf("MEASURED\ttlib-prep\tsource_build_ms=%ld\t%s\n", sy_now_ms() - t0, tool);
-    ok = rc == 0 && sy_exists(plain) == 1 && sy_exists(linked) == 1;
-    for (i = 0; ok && i < 2; i++) {
-        char *a[] = {plain, i ? "--no-such-option-for-any-tool" : 0, 0};
-        char *b[] = {linked, i ? "--no-such-option-for-any-tool" : 0, 0};
-        rc = run(a, 15);
-        mm_free(keep);
-        keepn = lastn;
-        keep = mm_alloc(keepn + 1);
-        if (!keep || (keepn && mm_copy(keep, keepn + 1, last, keepn))) fatal("memory");
-        rc2 = run(b, 15);
-        if (rc != rc2 || keepn != lastn || (keepn && !mm_same(keep, last, (long)keepn))) ok = 0;
-    }
-    ck(ok, "linked-image-behaves-as-the-source-build");
+int main(int argc, char **argv) {
+    /* product-build.cx was archived (CHAIN-ARCHIVE); live slice builder is release-build.cx. */
+    static const char *const chain_tools[] = {"tools/chain-run.cx", "tools/release-build.cx", "tools/candidate-chain.cx", "tools/selfhost.cx",
+                                              "tools/kernel-build.cx", "tools/source-job-wave.cx", "tools/pc-wave.cx", 0};
+    static const char *const markers[] = {"UNISACC_CHAIN_SEGMENT_TOKEN=t", "UNISACC_CHAIN_RECHECK_ID=r", "UNISACC_IDENTITY_HELPER=/nonexistent", "UNISACC_CTOR=c",
+                                          "UNISACC_TLIB_PREP=0", 0};
+    char table[4400], tool[512], self[512], linked[4700], plain[4700], other[4700], path[4700], k2[4700], src[4700], dst[4700], lib[512], note[200];
+    char shared[4400];
+    const char *mode_s = "all", *kit_hint = 0;
+    char *t, *kit = 0, *keep = 0;
+    size_t tn = 0, kn = 0, keepn = 0;
+    long t0;
+    int rc, rc2, i, ok, seen;
+    if (argc >= 3) { if (sy_realpath(argv[1], root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s", argv[2])) return 2; }
+    else if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(work, sizeof work, "%s/check-tlib-prep-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (argc >= 4 && argv[3][0]) mode_s = argv[3];
+    if (argc >= 5 && argv[4][0]) kit_hint = argv[4];
+    if (tx_eqz(mode_s, "all")) mode = MODE_ALL;
+    else if (tx_eqz(mode_s, "kit")) mode = MODE_KIT;
+    else if (tx_eqz(mode_s, "link")) mode = MODE_LINK;
+    else if (tx_eqz(mode_s, "refuse")) mode = MODE_REFUSE;
+    else { sy_printf("check-tlib-prep: MODE must be all|kit|link|refuse\n"); return 2; }
+    if (sy_mkdir(work, 0700)) { sy_printf("check-tlib-prep: NEW_DIR must not exist\n"); return 2; }
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(table, sizeof table, "%s/build/tlib-prep.tsv", root)) return 2;
+    at(kitdir, work, "kit"); at(image, kitdir, "tlib-prep"); at(k2, work, "kit2");
+    at(linked, work, "tool.linked"); at(plain, work, "tool.plain"); at(other, work, "not-written");
+    if (sy_chdir(root)) return 2;
+    t = cx_read(table, &tn);
+    if (!t || row_key(t, (long)tn, 0, tool, sizeof tool)) fatal("no tool listed in build/tlib-prep.tsv");
+    sy_printf("PREPARED\ttlib-prep-mode\tmode=%s\tno-test-result\n", mode_s);
 
-    /* (6): one fault at a time in the directory that just linked */
-    if (lib[0] && sy_exists(linked) == 1) {
-        size_t ln = 0;
-        char *lb;
-        at(path, k2, "kit.tsv");
-        ck(!forge(k2, kit, (long)kn, "product_sha", 0) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1, "edited-kit-file-is-tampered");
-        ck(!forge(k2, kit, (long)kn, "product_sha", 1) && prep(0, k2, tool, other) == 4 && sy_exists(other) != 1, "kit-of-another-product-is-stale");
-        ck(!forge(k2, kit, (long)kn, "self", 1) && prep(0, k2, tool, other) == 4 && sy_exists(other) != 1, "kit-of-other-tlib-tool-sources-is-stale");
-        ck(!forge(k2, kit, (long)kn, "image_sha", 1) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1, "image-that-is-not-the-kits-is-tampered");
-        at(dst, k2, lib);
-        lb = cx_read(dst, &ln);
-        if (lb && ln > 64) lb[ln - 9] ^= 1;
-        ck(lb && ln > 64 && !cx_write(path, kit, kn) && !cx_write(dst, lb, ln) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1,
-           "tlib-with-a-changed-byte-is-tampered");
-        mm_free(lb);
+    /* (0)(7): refuse or all; no kit */
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
+        deny_candidates(t, (long)tn);
+        ok = 1;
+        for (i = 0; !row_key(t, (long)tn, i, self, sizeof self); i++) {
+            int c;
+            if (sy_exists(self) != 1) ok = 0;
+            for (c = 0; chain_tools[c]; c++) if (tx_eqz(self, chain_tools[c])) ok = 0;
+        }
+        ck(ok && i > 0, "listed-tools-exist-and-none-is-a-release-chain-tool");
+        ok = 1; seen = 0;
+        for (i = 0; chain_tools[i]; i++) {
+            char *v[] = {"sh", product, "-cx-plan", (char *)chain_tools[i], 0};
+            if (sy_exists(chain_tools[i]) != 1) continue;
+            seen++;
+            if (run(v, 20) != 0 || !has(chain_tools[i]) || has("tlibpkg")) ok = 0;
+        }
+        ck(ok && seen >= 3, "release-chain-tool-plans-do-not-reach-the-tlib-path");
     }
-    sy_printf("CHECK_TLIB_PREP\tfailed=%d\n", failed);
+
+    /* (1)(1b): kit or all */
+    if (mode == MODE_ALL || mode == MODE_KIT) {
+        use_kit_dir(kitdir);
+        rc = build_kit(kitdir, &kit, &kn);
+        ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
+        if (rc || !kit) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no kit: the remaining cases cannot run"); }
+        {
+            char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", kitdir, "--root", root, 0};
+            char first[512], victim[4700];
+            char *again;
+            size_t an = 0, bn = 0;
+            char *lb;
+            int same;
+            t0 = sy_now_ms();
+            rc = run(v, 45);
+            sy_printf("MEASURED\ttlib-prep\tkit_nothing_to_do_ms=%ld\n", sy_now_ms() - t0);
+            at(path, kitdir, "kit.tsv");
+            again = cx_read(path, &an);
+            same = again && an == kn && mm_same(again, kit, (long)kn);
+            mm_free(again);
+            ck(rc == 0 && has("kit=unchanged") && has("rebuilt=0") && has("image=kept") && count("TLIB_BUILD\t") == 0 && same, "second-kit-builds-nothing-and-writes-nothing");
+            if (tp_rc_get(kit, (long)kn, "lib", 0, 1, first, sizeof first)) fatal("the kit lists no tlib");
+            at(victim, kitdir, first);
+            ok = sy_unlink(victim) == 0;
+            rc = run(v, 45);
+            again = cx_read(path, &an);
+            same = again && an == kn && mm_same(again, kit, (long)kn);
+            mm_free(again);
+            ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && has("kit=written") && same && sy_exists(victim) == 1,
+               "missing-tlib-alone-is-built-again-image-kept");
+            lb = cx_read(victim, &bn);
+            if (lb && bn > 64) lb[bn - 9] ^= 1;
+            ok = lb && bn > 64 && !cx_write(victim, lb, bn);
+            mm_free(lb);
+            rc = run(v, 45);
+            again = cx_read(path, &an);
+            same = again && an == kn && mm_same(again, kit, (long)kn);
+            mm_free(again);
+            ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && same, "damaged-tlib-alone-is-built-again");
+        }
+        /* refresh shared tp_kit_dir so link/refuse batches can reuse without a 17 s rebuild */
+        if (!tp_kit_dir(root, shared, sizeof shared)) {
+            char *v[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", shared, "--root", root, 0};
+            t0 = sy_now_ms();
+            rc = run(v, 45);
+            sy_printf("MEASURED\ttlib-prep\tshared_kit_ms=%ld\tpath=%s\trc=%d\n", sy_now_ms() - t0, shared, rc);
+            if (rc) fatal("shared kit refresh failed");
+        }
+    }
+
+    /* link/refuse need a kit */
+    if (mode == MODE_LINK || mode == MODE_REFUSE) {
+        mm_free(kit);
+        kit = 0;
+        kn = 0;
+        if (resolve_kit(kit_hint, &kit, &kn)) fatal("no kit for link/refuse (run mode=kit first, or pass KITDIR)");
+    }
+
+    /* (4)(5): refuse or all */
+    if (mode == MODE_ALL || mode == MODE_REFUSE) {
+        if (mode == MODE_ALL && (!kit || !kn)) fatal("internal: kit missing before refuse cases");
+        if (cx_fmt(self, sizeof self, "%s/tools/check-tlib-prep.cx", root)) return 2;
+        rc = prep(0, kitdir, self, other);
+        ck(rc == 7 && lastn == 0 && sy_exists(other) != 1, "unlisted-source-does-not-apply-silently");
+        ok = 1;
+        for (i = 0; markers[i]; i++) {
+            rc = prep(markers[i], kitdir, tool, other);
+            if (rc != 7 || !has("REFUSED") || sy_exists(other) == 1) ok = 0;
+        }
+        ck(ok, "chain-markers-and-opt-out-refuse-and-write-nothing");
+        {
+            const char *before = tp_prep_forbidden(), *named, *opted;
+            (void)sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN", "t", 1);
+            named = tp_prep_forbidden();
+            (void)sy_unsetenv("UNISACC_CHAIN_SEGMENT_TOKEN");
+            (void)sy_setenv("UNISACC_TLIB_PREP", "0", 1);
+            opted = tp_prep_forbidden();
+            (void)sy_setenv("UNISACC_TLIB_PREP", "1", 1);
+            ok = !before && named && opted && !tp_prep_forbidden();
+            (void)sy_unsetenv("UNISACC_TLIB_PREP");
+            if (cx_fmt(note, sizeof note, "%s", named ? named : "")) note[0] = 0;
+            ck(ok && !tp_prep_forbidden() && tx_find(note, tx_len(note, sizeof note), "SEGMENT", 7) >= 0, "guard-names-the-marker-and-clears-with-it");
+        }
+    }
+
+    /* (2)(3)(+ second-kit copy) and (6): need a private copy for tamper */
+    if (mode == MODE_ALL || mode == MODE_LINK || mode == MODE_REFUSE) {
+        if (!kit || !kn) fatal("internal: kit missing before link/refuse kit copy");
+        ok = !copy_kit(kitdir, k2, kit, (long)kn, lib, sizeof lib);
+        if (mode == MODE_ALL || mode == MODE_LINK)
+            ck(ok && lib[0], "second-kit-directory-copied");
+        else if (!ok || !lib[0]) fatal("cannot copy kit for refuse tamper cases");
+
+        if (mode == MODE_ALL || mode == MODE_LINK) {
+            /* point image at the copy's prep binary for prep() calls that use k2 */
+            char img_save[4600];
+            if (cx_fmt(img_save, sizeof img_save, "%s", image)) return 2;
+            if (cx_fmt(image, sizeof image, "%s/tlib-prep", k2)) return 2;
+            t0 = sy_now_ms();
+            rc = prep(0, k2, tool, linked);
+            if (cx_fmt(path, sizeof path, "%s.tlibwork", linked)) return 2;
+            ck(rc == 0 && count("PREPARED\ttlib-prep\t") == 1 && sy_exists(linked) == 1 && sy_exists(path) != 1, "listed-tool-linked-from-the-kit");
+            sy_printf("MEASURED\ttlib-prep\tlink_ms=%ld\t%s\n", sy_now_ms() - t0, tool);
+            if (rc && last) (void)sy_write_all(1, last, (long)lastn);
+            t0 = sy_now_ms();
+            {   char *v[] = {"sh", product, tool, "-o", plain, 0};
+                rc = run(v, 40);
+            }
+            sy_printf("MEASURED\ttlib-prep\tsource_build_ms=%ld\t%s\n", sy_now_ms() - t0, tool);
+            ok = rc == 0 && sy_exists(plain) == 1 && sy_exists(linked) == 1;
+            for (i = 0; ok && i < 2; i++) {
+                char *a[] = {plain, i ? "--no-such-option-for-any-tool" : 0, 0};
+                char *b[] = {linked, i ? "--no-such-option-for-any-tool" : 0, 0};
+                rc = run(a, 15);
+                mm_free(keep);
+                keepn = lastn;
+                keep = mm_alloc(keepn + 1);
+                if (!keep || (keepn && mm_copy(keep, keepn + 1, last, keepn))) fatal("memory");
+                rc2 = run(b, 15);
+                if (rc != rc2 || keepn != lastn || (keepn && !mm_same(keep, last, (long)keepn))) ok = 0;
+            }
+            ck(ok, "linked-image-behaves-as-the-source-build");
+            if (cx_fmt(image, sizeof image, "%s", img_save)) return 2;
+        }
+
+        if (mode == MODE_ALL || mode == MODE_REFUSE) {
+            if (lib[0]) {
+                size_t ln = 0;
+                char *lb;
+                char img_save[4600];
+                if (cx_fmt(img_save, sizeof img_save, "%s", image)) return 2;
+                if (cx_fmt(image, sizeof image, "%s/tlib-prep", k2)) return 2;
+                at(path, k2, "kit.tsv");
+                ck(!forge(k2, kit, (long)kn, "product_sha", 0) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1, "edited-kit-file-is-tampered");
+                ck(!forge(k2, kit, (long)kn, "product_sha", 1) && prep(0, k2, tool, other) == 4 && sy_exists(other) != 1, "kit-of-another-product-is-stale");
+                ck(!forge(k2, kit, (long)kn, "self", 1) && prep(0, k2, tool, other) == 4 && sy_exists(other) != 1, "kit-of-other-tlib-tool-sources-is-stale");
+                ck(!forge(k2, kit, (long)kn, "image_sha", 1) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1, "image-that-is-not-the-kits-is-tampered");
+                at(dst, k2, lib);
+                lb = cx_read(dst, &ln);
+                if (lb && ln > 64) lb[ln - 9] ^= 1;
+                ck(lb && ln > 64 && !cx_write(path, kit, kn) && !cx_write(dst, lb, ln) && prep(0, k2, tool, other) == 3 && sy_exists(other) != 1,
+                   "tlib-with-a-changed-byte-is-tampered");
+                mm_free(lb);
+                if (cx_fmt(image, sizeof image, "%s", img_save)) return 2;
+            }
+        }
+    }
+
+    mm_free(kit);
+    mm_free(keep);
+    mm_free(last);
+    mm_free(t);
+    sy_printf("CHECK_TLIB_PREP\tfailed=%d\tmode=%s\n", failed, mode_s);
     return failed ? 1 : 0;
 }
