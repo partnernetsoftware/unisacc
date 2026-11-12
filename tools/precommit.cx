@@ -145,6 +145,92 @@ static int freeze_gate(void) {
 /* 子进程闸(0.0.50 L):对本次 staged 的 .cx 索引内容跑 tools/cx-lint.cx。R2(R2-timeout/R2-sep,缺 -- 分隔或无界的
  * 子进程调用)有发现即 blocked;R1(第二真相源)只打印不拦。索引 blob 写到 sy_tmpdir()/precommit-lint-PID/<原路径>,
  * 保留目录结构让 cx-lint 的 tests/ 判定仍成立。cwd 下没有 ./unisacc.com 或 tools/cx-lint.cx(夹具仓)时跳过,打印 lint=absent。 */
+/* tlib 版本化门(0.0.58 A2):暂存区若含 build/tlib-packages.tsv 任一包 roots 下的 .cx,调用
+ * tools/check-tlib-frozen.cx -- --fast ROOT PKG... 只算受影响包的 content sha。当前分级为
+ * report-only 一个提交周期:不匹配时输出 TLIB_BUMP_NEEDED<TAB>PKG 与 layer-api --bump PKG 提示,
+ * 不增加 blocked。 */
+static int tlib_item(const char *s, long n, long idx, const char **o, long *l) {
+    long off = 0, len = 0;
+    if (n == 1 && s[0] == '-') return 1;
+    if (n <= 0 || idx >= tx_fields(s, n, ';')) return 1;
+    if (tx_field(s, n, ';', idx, &off, &len) || len <= 0) return 1;
+    *o = s + off; *l = len;
+    return 0;
+}
+static int in_root(const char *path, long pl, const char *rt, long rl) {
+    if (rl <= 0) return 0;
+    if (pl == rl && tx_same(path, pl, rt, rl)) return 1;
+    if (pl > rl && path[rl] == '/' && tx_prefix(path, pl, rt, rl)) {
+        long j;
+        for (j = rl + 1; j < pl; j++) if (path[j] == '/') return 0;
+        return 1;
+    }
+    return 0;
+}
+static int tlib_frozen_gate(const char *names, long sn) {
+    const char *wt = sy_env("GIT_WORK_TREE"), *root = (wt && wt[0]) ? wt : ".";
+    char tp[1200], fp[1200], cp[1200], pkgs[32][64], *av[40], *t, *rows;
+    size_t tn = 0; long i = 0, e, at, rn = 0; int npkg = 0, k, blocked = 0;
+    if (cx_fmt(tp, sizeof tp, "%s/build/tlib-packages.tsv", root) ||
+        cx_fmt(fp, sizeof fp, "%s/tools/check-tlib-frozen.cx", root) ||
+        cx_fmt(cp, sizeof cp, "%s/unisacc.com", root)) return 0;
+    if (sy_exists(tp) != 1) return 0;
+    if (sy_exists(fp) != 1) {
+        if (sy_exists("./tools/check-tlib-frozen.cx") != 1) return 0;
+        tx_copy(fp, sizeof fp, "tools/check-tlib-frozen.cx", 26);
+    }
+    if (sy_exists(cp) != 1) {
+        if (sy_exists("./unisacc.com") != 1) return 0;
+        tx_copy(cp, sizeof cp, "./unisacc.com", 13);
+    }
+    t = (char *)cx_read(tp, &tn);
+    if (!t) return 0;
+    while (i < (long)tn && npkg < 32) {
+        long po, pl, ro, rl, z_o, zl;
+        e = i; while (e < (long)tn && t[e] != '\n') e++;
+        if (e > i && t[i] != '#' &&
+            !tx_field(t + i, e - i, '\t', 0, &po, &pl) &&
+            !tx_field(t + i, e - i, '\t', 3, &ro, &rl) &&
+            !tx_field(t + i, e - i, '\t', 8, &z_o, &zl) &&
+            zl == 64 && pl > 0 && pl < 64) {
+            int hit = 0; long idx;
+            for (idx = 0; !hit; idx++) {
+                const char *rt; long rtl;
+                if (tlib_item(t + i + ro, rl, idx, &rt, &rtl)) break;
+                for (at = 0; at < sn; ) {
+                    long nl = tx_len(names + at, sn - at);
+                    if (nl <= 0) break;
+                    if (in_root(names + at, nl, rt, rtl)) { hit = 1; break; }
+                    at += nl + 1;
+                }
+            }
+            if (hit && !tx_copy(pkgs[npkg], 64, t + i + po, pl)) npkg++;
+        }
+        i = e + 1;
+    }
+    mm_free(t);
+    if (!npkg) return 0;
+    k = 0;
+    av[k++] = "sh"; av[k++] = cp; av[k++] = fp; av[k++] = "--"; av[k++] = "--fast"; av[k++] = (char *)root;
+    for (i = 0; i < npkg; i++) av[k++] = pkgs[i];
+    av[k] = 0;
+    slurp_okrc = 1; rows = slurp(av, &rn); slurp_okrc = 0;
+    if (!rows) { sy_eprintf("precommit: tools/check-tlib-frozen.cx --fast did not run\n"); return 0; }
+    for (at = 0; at < rn; ) {
+        long le = tx_chr(rows + at, rn - at, '\n'), l = le < 0 ? rn - at : le, po, pl;
+        if (tx_prefix(rows + at, l, "FROZEN\t", 7) && tx_find(rows + at, l, "\tMISMATCH", 9) >= 0 &&
+            !tx_field(rows + at, l, '\t', 1, &po, &pl)) {
+            sy_printf("TLIB_BUMP_NEEDED\t%.*s\trun: sh ./unisacc.com tools/layer-api.cx -- --bump %.*s\n",
+                      (int)pl, rows + at + po, (int)pl, rows + at + po);
+            sy_eprintf("precommit: TLIB_BUMP_NEEDED %.*s (report-only): sh ./unisacc.com tools/layer-api.cx -- --bump %.*s\n",
+                       (int)pl, rows + at + po, (int)pl, rows + at + po);
+        }
+        at += l + 1;
+    }
+    mm_free(rows);
+    return blocked;
+}
+
 static int mkdirs(char *path) {   /* 逐级建目录;已存在视为成功 */
     long i;
     for (i = 1; path[i]; i++) if (path[i] == '/') { path[i] = 0; if (sy_mkdir(path, 0700) && sy_exists(path) != 1) { path[i] = '/'; return -1; } path[i] = '/'; }
@@ -274,6 +360,7 @@ int main(void) {
     blocked += freeze_gate();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();
+    blocked += tlib_frozen_gate(names, sn);
     blocked += lint_gate(names, sn, &lint_absent);
     if (lint_absent) sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
     /* 不再因「只改 tools/tests」而短路:cxtrunc/cxapis/outdep 本来就面向 tools/tests(fable 咨询 2026-11-08)。 */
