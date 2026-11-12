@@ -49,6 +49,7 @@
 #pragma unisa use cxlib.allsession
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.testplan
+#pragma unisa use cxlib.limits
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 /* Concurrency ceiling and fallback live in exec/facts/limits.tsv, so the number exists once.
@@ -257,7 +258,8 @@ static int wt_diff(const char *a,size_t an,const char *b,size_t bn,np_buf *out){
 #define DOM_WT 2ULL
 #define DOM_HS 4ULL
 #define DOM_USER 8ULL          /* first bit available to mi:<name> */
-#define DOM_MAXM 61
+#define DOM_HEAVY (1ULL<<63)   /* counted domain: at most s9.heavy.width of these run at once (not exclusive) */
+#define DOM_MAXM 60
 static char g_dommat[DOM_MAXM][64];
 static int g_ndommat;
 static unsigned long long g_dommask[131];   /* indexed like argv order; set per wave */
@@ -283,6 +285,8 @@ static unsigned long long domain_of(const char *tab, size_t tn, const char *id) 
                     if (!strcmp(t, "serial")) mask |= DOM_SERIAL;
                     else if (!strcmp(t, "wt")) mask |= DOM_WT;
                     else if (!strcmp(t, "hs")) mask |= DOM_HS;
+                    else if (!strcmp(t, "heavy")) mask |= DOM_HEAVY;
+                    else if (strncmp(t, "mi:", 3) || !t[3]) die("domain-token-malformed", id);
                     else if (!strncmp(t, "mi:", 3) && t[3]) {
                         int m;
                         for (m = 0; m < g_ndommat; m++) if (!strcmp(g_dommat[m], t + 3)) break;
@@ -295,6 +299,38 @@ static unsigned long long domain_of(const char *tab, size_t tn, const char *id) 
         at = e + 1;
     }
     return 0;
+}
+/* Placement predicate shared by the real wave loop and the domain-sim control.  A job may start when its
+   exclusive bits (everything but DOM_HEAVY) miss every running job's bits and, if it is heavy, fewer than
+   CAP heavy jobs run.  Returns the first unstarted job in argv order that may start, or -1. */
+static int pick_next(int count,const char *started,const char *running,int active,int active_max,int cap){
+ if(active>=active_max)return -1;
+ unsigned long long busy=0;int nheavy=0;
+ for(int k=0;k<count;k++)if(running[k]){busy|=g_dommask[k]&~DOM_HEAVY;if(g_dommask[k]&DOM_HEAVY)nheavy++;}
+ for(int j=0;j<count;j++){if(started[j])continue;
+  if(g_dommask[j]&busy)continue;
+  if((g_dommask[j]&DOM_HEAVY)&&nheavy>=cap)continue;
+  return j;}
+ return -1;
+}
+static int heavy_cap(void){double v=lm_get("s9.heavy.width",0);if(v<1)die("limit-s9.heavy.width","-");return (int)v;}
+/* domain-sim TABLE WINDOW ID...: unit-time simulation of the placement loop with the real table parser. */
+static int cmd_domain_sim(int argc,char **argv){
+ if(argc<5)die("usage","domain-sim TABLE WINDOW ID...");
+ int window=atoi(argv[3]),count=argc-4;if(window<1||count>WAVE_JOBS_MAX)die("domain-sim-shape",argv[3]);
+ size_t tn=0;char *tab=cx_read(argv[2],&tn);if(!tab)die("domain-sim-table",argv[2]);
+ for(int i=0;i<count;i++)g_dommask[i]=domain_of(tab,tn,argv[4+i]);
+ char started[WAVE_JOBS_MAX]={0},running[WAVE_JOBS_MAX]={0};int left=count,active=0,maxall=0,maxheavy=0,maxlight=0,cap=heavy_cap();
+ if(window>WAVE_JOBS_MAX)window=WAVE_JOBS_MAX;
+ for(int i=0;i<count;i++)if(g_dommask[i]&DOM_SERIAL)window=1;
+ while(left){int j;
+  while((j=pick_next(count,started,running,active,window,cap))>=0){started[j]=1;running[j]=1;active++;}
+  if(active==0)die("domain-sim-stuck","-");
+  {int nh=0,nl=0;for(int k=0;k<count;k++)if(running[k]){if(g_dommask[k]&DOM_HEAVY)nh++;else nl++;}
+   if(active>maxall)maxall=active;if(nh>maxheavy)maxheavy=nh;if(nl>maxlight)maxlight=nl;}
+  for(int k=0;k<count;k++)if(running[k]){running[k]=0;active--;left--;}}
+ printf("DOMAIN_SIM\tjobs=%d\twindow=%d\tcap=%d\tmax_active=%d\tmax_heavy=%d\tmax_light=%d\n",count,window,cap,maxall,maxheavy,maxlight);
+ free(tab);return 0;
 }
 static void spawn(Job *j,const char *wavedir,const as_manifest *m){ char *v[80];char storage[33][4400];int n=0,s=0;char secs[16];char native[4400],h[65],self[4096];{int z=snprintf(secs,sizeof secs,"%d",j->seconds);if(z<0||(size_t)z>=sizeof secs){fprintf(stderr,"bound-format\n");exit(2);}};
  if(m->has_executor){join(native,sizeof native,session,"executor/run-batch");if(as_sha_file(native,0,h,0,why,sizeof why)||strcmp(h,m->runner_sha))die("runner-sha-mismatch",native);}
@@ -367,17 +403,14 @@ static int cmd_wave(int argc,char **argv){
  /* Launch in argv order while the window has room AND the next job's mask is disjoint from every
     running job's mask.  A job that cannot start yet waits for a neighbour to finish, so a
     conflicting pair never overlaps even when the window itself would allow it. */
- {int done[131];memset(done,0,sizeof done);int next_launch=0,active=0,left=count;
-  while(left){int launched=0;
-   while(active<active_max&&next_launch<count){int j2=next_launch;unsigned long long busy=0;int k2,free_slot=1;
-    for(k2=0;k2<count;k2++)if(!done[k2]&&job[k2].pid>0&&!job[k2].t1&&k2!=j2)busy|=g_dommask[k2];
-    if(g_dommask[j2]&busy){/* conflicting with a running job: try the next one instead */next_launch++;continue;}
-    spawn(&job[j2],wavedir,&m);done[j2]=1;next_launch++;active++;launched=1;(void)free_slot;}
-   /* if nothing could start and nothing is running, we are stuck: start the head anyway */
-   if(!launched&&active==0&&next_launch<count){spawn(&job[next_launch],wavedir,&m);done[next_launch]=1;next_launch++;active++;}
+ {char started[131],running[131];memset(started,0,sizeof started);memset(running,0,sizeof running);int active=0,left=count,cap=heavy_cap(),j2;
+  while(left){
+   while((j2=pick_next(count,started,running,active,active_max,cap))>=0){spawn(&job[j2],wavedir,&m);started[j2]=1;running[j2]=1;active++;}
+   /* nothing placeable and nothing running cannot happen with a sound table; start the head anyway */
+   if(active==0){for(j2=0;j2<count&&started[j2];j2++);if(j2<count){spawn(&job[j2],wavedir,&m);started[j2]=1;running[j2]=1;active++;}}
    int st2;pid_t pid2;do{pid2=waitpid(-1,&st2,0);}while(pid2<0&&errno==EINTR);if(pid2<0)die("waitpid",0);
    {int f2=-1;for(int i2=0;i2<count;i2++)if(job[i2].pid==pid2&&!job[i2].t1)f2=i2;if(f2<0)continue;
-    job[f2].t1=as_now();job[f2].bound_rc=WIFEXITED(st2)?WEXITSTATUS(st2):128+(WIFSIGNALED(st2)?WTERMSIG(st2):0);left--;active--;}}}
+    running[f2]=0;job[f2].t1=as_now();job[f2].bound_rc=WIFEXITED(st2)?WEXITSTATUS(st2):128+(WIFSIGNALED(st2)?WTERMSIG(st2):0);left--;active--;}}}
  long long w1=as_now();
  int wt_gate_failed=0;
  if(!shared_wt){wt_scan(root,&wan,&wta);
@@ -530,6 +563,7 @@ int main(int argc,char **argv){
     printf("WT_EPOCH\t%s\tmoved=%d\tscans=%d\tscan_ns=%lld\tslices=%d\trecord=%s\n",moved?"CHANGED":"STABLE",moved,g_wt_scans,scan_ns,argc-5,rec);if(moved&&paths.n)fwrite(paths.p,1,paths.n,stdout);
     free(a);free(now.p);free(paths.p);free(r.p);return moved?2:0;
  }
+ if(tx_eqz(argv[1], "domain-sim"))return cmd_domain_sim(argc,argv);
  if(tx_eqz(argv[1], "init"))return cmd_init(argc,argv);if(tx_eqz(argv[1], "material"))return cmd_material(argc,argv);if(tx_eqz(argv[1], "wave"))return cmd_wave(argc,argv);if(tx_eqz(argv[1], "pending"))return cmd_pending(argc,argv);
  if(tx_eqz(argv[1], "executor"))return cmd_executor(argc,argv);if(tx_eqz(argv[1], "start"))return cmd_start(argc,argv);if(tx_eqz(argv[1], "run"))return cmd_run(argc,argv);if(tx_eqz(argv[1], "finish"))return cmd_finish(argc,argv);
  die("usage","init|material|wave|pending|executor|start|run|finish ...");return 2;
