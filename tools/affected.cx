@@ -555,29 +555,33 @@ static int prep_verify(Prep *P) {
     free(s);
     return ok;
 }
+/* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
+   absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
+   resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
+static int prep_source(const char *name, int kind, char *src, long cap, char *why, int whycap) {
+    long nl = tx_len(name, 256);
+    char cand[600];
+    if (kind == 2) { cx_fmt(why, whycap, "unpreparable=sha256-value:%s", name); return -1; }
+    if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) {
+        if (cx_fmt(src, cap, "tools/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, whycap, "source-name-too-long=%s", name); return -1; }
+        if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) {
+            if (cx_fmt(src, cap, "tests/cases/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, whycap, "source-name-too-long=%s", name); return -1; }
+        }
+    } else if (tx_eqz(name, "streams")) { if (cx_fmt(src, cap, "tools/streams-material.cx")) return -1; }
+    else { cx_fmt(why, whycap, "no-producer=%s", name); return -1; }
+    if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) { cx_fmt(why, whycap, "source-absent=%s", src); return -1; }
+    return 0;
+}
 /* register NAME when it is preparable; returns its slot or -1 (with WHY set) */
 static int prep_plan(const char *name, int kind, char *why, int cap) {
-    int k = prep_find(name); Prep *P; char h[65], buf[600]; long nl = tx_len(name, 256);
+    int k = prep_find(name); Prep *P; char h[65], buf[600];
     if (k >= 0) return k;
-    if (kind == 2) { cx_fmt(why, cap, "unpreparable=sha256-value:%s", name); return -1; }
     if (nprep >= 32) { cx_fmt(why, cap, "too-many-materials"); return -1; }
     P = &prep[nprep];
     memset(P, 0, sizeof *P);
     cx_fmt(P->name, sizeof P->name, "%s", name);
-    if (nl > 5 && tx_eqz(name + nl - 5, "-tool")) {
-        /* A material named `<x>-tool` is the source of tools/<x>.cx.  Some fixtures live in tests/cases
-           instead (fake-gh, fake-s9, fake-release-prepare): the same name resolves there, and only there,
-           when tools/<x>.cx is absent -- one fallback, no second naming convention. */
-        char cand[600];
-        P->kind = PK_TOOL;
-        if (cx_fmt(P->src, sizeof P->src, "tools/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, cap, "source-name-too-long=%s", name); return -1; }
-        if (cx_fmt(cand, sizeof cand, "%s/%s", root, P->src) || sy_exists(cand) != 1) {
-            if (cx_fmt(P->src, sizeof P->src, "tests/cases/%.*s.cx", (int)(nl - 5), name)) { cx_fmt(why, cap, "source-name-too-long=%s", name); return -1; }
-        }
-    }
-    else if (tx_eqz(name, "streams")) { P->kind = PK_STREAMS; cx_fmt(P->src, sizeof P->src, "tools/streams-material.cx"); }
-    else { cx_fmt(why, cap, "no-producer=%s", name); return -1; }
-    if (cx_fmt(buf, sizeof buf, "%s/%s", root, P->src) || sy_exists(buf) != 1) { cx_fmt(why, cap, "source-absent=%s", P->src); return -1; }
+    P->kind = tx_eqz(name, "streams") ? PK_STREAMS : PK_TOOL;
+    if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
     if (closure_sha(P->src, P->closure)) { cx_fmt(why, cap, "closure-unreadable=%s", P->src); return -1; }
     if (P->kind == PK_STREAMS) {   /* the shims call tools/streams-e1-frame.cx at run time: its closure is part of the identity */
         char h2[65], both[140];
@@ -819,6 +823,7 @@ static int users(const char *file) {
 }
 
 static int closure_dump;
+static int materials_dump;   /* --materials-dump: report each declared material's resolved source and stop */
 static const char *layer;   /* --layer NAME: see build/batch-packages.tsv */
 static void usage(void) {
     fprintf(stderr, "usage: affected.cx -- (--since REV | --files F... | --ids ID... | --layer NAME) [--list-only | --run [-j N]] | --users FILE | --closure-dump\n");
@@ -849,6 +854,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--layer") && a + 1 < argc) {
             static const char *known[] = {"base", "ext", "stream", "compiler", "driver", "chain", "release", "all", 0}; int q;
             layer = argv[a + 1]; a += 2;
@@ -869,6 +875,21 @@ int main(int argc, char **argv) {
             a += 2;
         }
         else usage();
+    }
+    if (materials_dump) {   /* the source each declared material resolves to, and nothing built */
+        if (src || mode_run) usage();
+        load_registry();
+        for (b = 0; b < nbatch; b++) {
+            const char *at = batch[b].materials; tp_material_decl d; int rc2;
+            if (tx_eqz(at, "-")) continue;
+            while ((rc2 = tp_material_next(&at, &d)) > 0) {
+                char src[600], why[200];
+                if (prep_source(d.name, d.kind, src, (long)sizeof src, why, (int)sizeof why))
+                    printf("MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", batch[b].id, d.name, why);
+                else printf("MATERIAL\t%s\t%s\t%s\n", batch[b].id, d.name, src);
+            }
+        }
+        return 0;
     }
     if (closure_dump) {   /* the facts tools/batch-packages-gen.cx builds build/batch-packages.tsv from */
         if (src || mode_run) usage();
