@@ -116,6 +116,34 @@ int main(int argc, char **argv) {
             if (cx_write(p, bad_tables[i], strlen(bad_tables[i]))) return 2;
             ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE chain-phases"), "seven-column-invalid-fields-refused");
         }
+        /* The constructor step's watchdog is the snapshot's own tools/bound, frozen with the rev.
+           0.0.58: the step bound had been raised to 90 while the frozen watchdog still took 1..60,
+           so gen1 objects died on its usage line. Three fake snapshots: one takes 1..60 (the step
+           must run under 60), one takes 1..95 (the step bound itself), one takes 1..30 (refused). */
+        {
+            static const int limits[3] = {60, 95, 30};
+            char ctorp[4600], wtrace[4600], script[1200], gcmd[14000];
+            const char *fakector = "#!/bin/sh\ncase \"$*\" in *--objects-only*) exit 0;; esac\nexit 99\n";
+            if (cx_fmt(ctorp, sizeof ctorp, "%s/wd-ctor", td) || cx_write(ctorp, fakector, strlen(fakector))) return 2;
+            for (int i = 0; i < 3; i++) {
+                char snapd[4600], toolsd[4600], boundp[4600], outd[4600], want[40];
+                if (cx_fmt(snapd, sizeof snapd, "%s/wd-snap-%d", td, limits[i]) || cx_fmt(toolsd, sizeof toolsd, "%s/tools", snapd) ||
+                    cx_fmt(boundp, sizeof boundp, "%s/bound", toolsd) || cx_fmt(outd, sizeof outd, "%s/wd-out-%d", td, limits[i]) ||
+                    cx_fmt(wtrace, sizeof wtrace, "%s/wd-trace-%d", td, limits[i]) ||
+                    sy_mkdir(snapd, 0755) || sy_mkdir(toolsd, 0755) || sy_mkdir(outd, 0755)) return 2;
+                if (cx_fmt(script, sizeof script,
+                        "#!/bin/sh\nif [ \"$1\" -gt %d ]; then echo 'usage: bound SECONDS(1..%d) COMMAND' >&2; exit 2; fi\nprintf '%%s\\n' \"$1\" >> '%s'\nshift\nexec \"$@\"\n",
+                        limits[i], limits[i], wtrace) || cx_write(boundp, script, strlen(script)) || sy_chmod(boundp, 0755)) return 2;
+                if (cx_fmt(gcmd, sizeof gcmd, "'%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
+                           candidate, outd, snapd, ctorp, outd)) return 2;
+                int grc = sh(gcmd, out, sizeof out);
+                size_t wn = 0; char *w = cx_read(wtrace, &wn);
+                if (limits[i] == 60) ck(grc == 0 && has(out, "status=UNTIL") && has(out, "CTOR_BOUND\tsnapshot-watchdog=60") && w && wn == 6 && !memcmp(w, "60\n60\n", 6), "ctor-step-under-frozen-watchdog-range");
+                else if (limits[i] == 95) { if (cx_fmt(want, sizeof want, "90\n90\n")) return 2; ck(grc == 0 && has(out, "status=UNTIL") && !has(out, "CTOR_BOUND") && w && wn == strlen(want) && !memcmp(w, want, wn), "ctor-step-bound-when-watchdog-takes-it"); }
+                else ck(grc != 0 && has(out, "REFUSE snapshot watchdog accepts neither the step bound nor 60") && !w, "ctor-watchdog-below-60-refused");
+                free(w);
+            }
+        }
         printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }

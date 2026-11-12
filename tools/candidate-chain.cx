@@ -160,13 +160,30 @@ static int ctor_exec(const char *ctor) {
     if (!sy_stat(ctor, &st) && st.kind == 'f' && (st.mode & 07777) == 0755) return 0;
     return sy_chmod(ctor, 0755);
 }
+/* The watchdog of a constructor step is SNAP/tools/bound: a frozen input of the rev, with the
+   range that rev was frozen with. A rev frozen before the temporary 55 -> 90 raise accepts
+   1..60 and answers 90 with its usage line (0.0.58, gen1-lnx-arm64-objects: rc 2 in 0.4 s,
+   nothing built). The chain asks the snapshot's own watchdog once whether it takes the step
+   bound; if not, the step runs under 60, the largest value every frozen watchdog accepts.
+   Never more than the step bound, and a watchdog that takes neither is a refusal. */
+static int ctor_bound_secs(const char *bound, int want) {
+    static int known;
+    if (known) return known;
+    char secbuf[8];
+    char *probe[] = {(char *)bound, secbuf, (char *)"true", 0};
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", want)) die("fmt", "secs");
+    if (!runv_secs(probe, 30)) return known = want;
+    if (want <= 60 || cx_fmt(secbuf, sizeof secbuf, "%d", 60) || runv_secs(probe, 30)) die("REFUSE snapshot watchdog accepts neither the step bound nor 60", bound);
+    sy_printf("CTOR_BOUND\tsnapshot-watchdog=60\tstep-bound=%d\treason=frozen-range\n", want);
+    return known = 60;
+}
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target, const char *phase) {
     char bound[4400], secbuf[8];
     char *v[24];
     int n = 0;
     if (ctor_exec(ctor)) die("chmod ctor", ctor);
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", snap)) die("path", "bound");
-    if (cx_fmt(secbuf, sizeof secbuf, "%d", 90)) die("fmt", "secs");
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", ctor_bound_secs(bound, 90))) die("fmt", "secs");
     v[n++] = bound;
     v[n++] = secbuf;
     v[n++] = (char *)"sh";
