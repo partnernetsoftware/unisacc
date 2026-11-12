@@ -71,17 +71,23 @@ static int tlib_step(const char *script,char *const w[],int secs){
  for(i=0;w[i]&&k<15;i++)a[k++]=w[i];
  a[k]=0;int tr=np_run(a,root,0,secs+2,&r,why,sizeof why);int rc=tr?-1:r.rc;np_free(&r);return rc;
 }
+static const char *tlib_why=0;   /* set only when a listed entry was attempted and fell back to source */
+static int tlib_rc=0;
 static int tlib_image(const char *entry,char *img,size_t cap){
  char bound[4400],tool[4400],product[4400];long t0=sy_now_ms();int tries;
  if(tp_prep_forbidden()||!tlib_listed(selected.entry))return 0;
- if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(tool,sizeof tool,"%s/out/tlib/tlib-prep",root)||cx_fmt(product,sizeof product,"%s/unisacc.com",root))return 0;
- if(cx_fmt(img,cap,"%s/.tlibimg-%s-%d",parent,selected.id,(int)sy_pid()))return 0;
+ if(cx_fmt(bound,sizeof bound,"%s/tools/bound",root)||cx_fmt(tool,sizeof tool,"%s/out/tlib/tlib-prep",root)||cx_fmt(product,sizeof product,"%s/unisacc.com",root)){tlib_why="path";return 0;}
+ if(cx_fmt(img,cap,"%s/.tlibimg-%s-%d",parent,selected.id,(int)sy_pid())){tlib_why="path";return 0;}
+ tlib_why="link-failed";
  for(tries=0;tries<2;tries++){
   char *pw[]={bound,tool,(char *)entry,img,root,0};
   char *kw[]={bound,product,"tools/tlib.cx","kit",0};
   int rc=sy_exists(tool)==1?tlib_step("[ -x \"$3\" ] || exit 7; exec \"$2\" \"$1\" \"$3\" prep \"$4\" -o \"$5\" --root \"$6\"",pw,20):7;
+  tlib_rc=rc;
   if(!rc&&sy_exists(img)==1)return 1;
-  if(tries||sy_now_ms()-t0>40000||tlib_step("exec \"$2\" \"$1\" sh \"$3\" \"$4\" -- \"$5\"",kw,25)!=0)break;
+  if(tries){tlib_why="link-failed";break;}
+  if(sy_now_ms()-t0>40000){tlib_why="kit-refresh-timeout";break;}
+  if(tlib_step("exec \"$2\" \"$1\" sh \"$3\" \"$4\" -- \"$5\"",kw,25)!=0){tlib_why="kit-refresh-failed";break;}
  }
  (void)sy_unlink(img);return 0;
 }
@@ -106,9 +112,10 @@ int main(int argc,char **argv){
  char timg[4400];long tl0=sy_now_ms();char **run_args=args;char *targs[72];int via_tlib=0;
  if(tx_eqz(selected.mode,"SOURCE")&&tx_eqz(selected.headers,"product")&&tlib_image(entry,timg,sizeof timg)){
   int k=0,i;targs[k++]=timg;for(i=argbase;i<na;i++)targs[k++]=args[i];targs[k]=0;run_args=targs;via_tlib=1;}
+ if(!via_tlib&&tlib_why)fprintf(stderr,"run-batch: tlib=fallback:%d:%s\n",tlib_rc,tlib_why);
  {long spent=(sy_now_ms()-tl0)/1000;seconds=spent>=seconds-3?3:(int)(seconds-spent);}
  int transport=np_run(run_args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
- if(via_tlib){(void)sy_unlink(timg);fprintf(stderr,"run-batch: entry linked from the tlib kit\n");}
+ if(via_tlib){(void)sy_unlink(timg);fprintf(stderr,"run-batch: entry linked from the tlib kit\nrun-batch: tlib=linked\n");}
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
     caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
  if(transport){int st;while(waitpid(-1,&st,WNOHANG)>0);}
