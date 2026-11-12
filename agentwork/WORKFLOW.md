@@ -70,6 +70,8 @@ INTAKE → LOCATE → [DECIDE] → IMPL → VERIFY → REVIEW → INTEGRATE → 
 ## 8 并发与冲突
 读并行、写按 domain 串行;冲突域只有三类:工作树、候选/材料身份、harness。runner 持 `agentwork/locks.tsv`(domain→占用项)。
 
+**按任务图并发推进(`agentwork/dag.tsv`,工具 `tools/dag.cx`)**:集成者每轮先跑 `sh ./unisacc.com tools/dag.cx -- plan --max N`,把输出里每个 `PLAN START` 节点**同时**派发出去(各带该行的 write_domain 与 acceptance),不逐个串行等;派发即 `dag.cx -- mark ID RUNNING`,节点的 acceptance 实跑通过并落提交后 `mark ID DONE SHA`,然后立刻再跑一轮 plan。`HOLD domain/shared` 表示与在跑节点写域相交,等对方 DONE;`WAIT` 表示依赖未完。共享登记表(batches/coverage/tools-compile-sources)在 S7 DONE 之前算同一个冲突域。改图后跑 `dag.cx -- check`(无环、依赖存在、DONE 的提交在 git 中)。
+
 ## 9 度量与淘汰
 每次 JUDGE/IMPL 记录 token、时间、是否 INVALID、`verified` 条数;按"角色×模型"统计产出(DONE 数/消耗),低产组合降级或淘汰。
 

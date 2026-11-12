@@ -123,6 +123,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 模块关系图（全图/子图/差分） | `sh ./unisacc.com tools/symindex.cx -- graph [FILE...]` / `-- delta FILE...` | 节点=文件、边=use/call；给 FILE 只出该文件的正向 use 闭包 + 反向 users |
 | 文档断链 | `sh ./unisacc.com tools/doc-links.cx -- --tracked` | 归档后修链 |
 | 只提交自己的行 | `sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed PATH KEY` | 多人同改文件（prd/batches/coverage） |
+| 任务图并发推进 | `sh ./unisacc.com tools/dag.cx -- ready`、`plan --max N`、`check`、`mark ID STATUS [SHA]` | 图在 `agentwork/dag.tsv`；plan 选出写域两两不相交的就绪节点（RUNNING 占域并计入 N），共享登记表在 `#shared` 闸节点（S7）DONE 前合为一个冲突域；两个带通配的写域按字面前缀保守判相交；批次 `dag`（`tools/check-dag.cx`） |
 | 提交器出补丁 | `sh ./unisacc.com tools/submit-patch.cx -- OUT.patch [OWN_ID]`；检查 `tools/check-submit-patch.cx` | 私有克隆 git add -A 后 full-index 补丁(序号后缀不覆盖)、sha、tools/*.cx 逐个 -c、新增 .cx 走 newcx-check、batches/coverage 只含 OWN_ID 且 IMPLEMENTED 的 check 存在、须含 index 行；一行 SUBMIT_PATCH |
 | 研发耗时账本 | `sh ./unisacc.com tools/devtime.cx -- append ...` / `-- report [FILE]`；表 `agentwork/devtime.tsv`；检查 `tools/check-devtime.cx` | 列 task_id/窗口/开始/交付/落地/类别/备注；类别六种；report 按类总秒与占比，未记 UNMEASURED |
 | 版本度量表（0.0.58 T9） | `sh ./unisacc.com tools/version-metrics.cx -- --write\|--check [--root DIR] [--table FILE]`；表 `agentwork/version-metrics.tsv`；检查 `tools/check-version-metrics.cx`（批 `version-metrics`） | 从 `steps.tsv`/`chain-run.tsv`/`MANUAL.tsv`/`ledger.tsv` 派生每版 15 列指标（0.0.54..0.0.57 回填），不对 checkpoint `wall_ms` 逐行求和；`--check` 守漂移 |

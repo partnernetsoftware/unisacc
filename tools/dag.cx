@@ -1,0 +1,554 @@
+/* tools/dag.cx -- the task graph agentwork/dag.tsv: which nodes can run now, and which of them
+ * can run at the same time.
+ *
+ *   sh ./unisacc.com tools/dag.cx -- ready
+ *   sh ./unisacc.com tools/dag.cx -- plan [--max N]
+ *   sh ./unisacc.com tools/dag.cx -- check [--no-git]
+ *   sh ./unisacc.com tools/dag.cx -- mark ID STATUS [SHA]
+ *   common options: [--table FILE] (default ROOT/agentwork/dag.tsv)  [--root ROOT] (default .)
+ *
+ * Table: one header line, then one node per line, eight TAB fields:
+ *   id  title  status  deps  write_domain  owner  acceptance  commit
+ *   status        TODO | READY | RUNNING | DONE | BLOCKED
+ *   deps          "-" or node ids separated by ","
+ *   write_domain  path globs separated by ";" ("*" stays inside one path component, "**" crosses
+ *                 them, a trailing "/" means the whole directory)
+ *   acceptance    the command whose result decides DONE
+ *   commit        "-" or the hex sha (7 to 40 digits) of the commit that landed the node
+ * A line "#shared<TAB>GATE<TAB>globs" names the shared tables: until node GATE is DONE, two nodes
+ * that each write any path under those globs are in one conflict domain even when they write
+ * different tables. Once GATE is DONE a write to a path named exactly by those globs conflicts
+ * with nothing. Other "#" lines are comments.
+ *
+ * ready  one READY line per node whose deps are all DONE and whose status is not DONE.
+ * plan   RUNNING nodes keep their domains and count toward N (KEEP). Then, in table order, each
+ *        node that is TODO or READY with all deps DONE is START when its write_domain is disjoint
+ *        from every KEEP and START node and fewer than N are selected; otherwise HOLD with the
+ *        reason (domain, shared, max). A BLOCKED node is HOLD blocked; a node with unfinished deps
+ *        is WAIT. Two RUNNING nodes whose domains meet are reported as OVERLAP. N defaults to 4.
+ *        Two globs that both carry wildcards are judged disjoint only when neither literal prefix
+ *        is a prefix of the other, so a pair may be held that could have run, never the reverse.
+ * check  rc 1 with one ERR line per finding: header and field shape, duplicate id, unknown status,
+ *        a dep that is not a node, a cycle, DONE without a commit, RUNNING or DONE before its
+ *        deps are DONE, and (unless --no-git) a DONE commit that ROOT's git does not have.
+ *        plan, ready and mark refuse a table with any finding except the git one.
+ * mark   rewrites that node's status and commit in place (DONE needs SHA or a commit already in
+ *        the row; any other status sets commit to "-"). The new table is checked before it is
+ *        written, and the write is a rename of ROOT/out/dag-mark-PID.tmp.
+ * Exit: 0 ok, 1 a finding or a refused mark, 2 usage or an unreadable input.
+ * Check: tools/check-dag.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define DG_MAXN 512
+#define DG_MAXL 32
+#define DG_FCAP 900
+#define DG_HEADER "id\ttitle\tstatus\tdeps\twrite_domain\towner\tacceptance\tcommit"
+
+enum { ST_TODO, ST_READY, ST_RUNNING, ST_DONE, ST_BLOCKED, ST_N };
+enum { F_ID, F_TITLE, F_STATUS, F_DEPS, F_DOMAIN, F_OWNER, F_ACCEPT, F_COMMIT, F_N };
+
+typedef struct { long off, len; } DgSpan;
+typedef struct {
+    DgSpan line, f[F_N];
+    DgSpan depname[DG_MAXL], glob[DG_MAXL];
+    int dep[DG_MAXL];
+    int status, ndepname, ndep, nglob, unmet;
+} DgNode;
+
+static const char *st_name[ST_N] = {"TODO", "READY", "RUNNING", "DONE", "BLOCKED"};
+static const char *col_name[F_N] = {"id", "title", "status", "deps", "write_domain", "owner", "acceptance", "commit"};
+
+static char *buf;
+static long bufn;
+static DgNode nd[DG_MAXN];
+static int nn;
+static DgSpan shared[DG_MAXL], gate;
+static int nshared, has_gate, gate_idx;
+static int errs;
+static char root[4096];
+
+/* A span as a terminated string; six calls may be live at once. */
+static const char *z(DgSpan s) {
+    static char ring[6][DG_FCAP + 4];
+    static int at;
+    char *o = ring[at];
+    at = (at + 1) % 6;
+    if (tx_copy(o, DG_FCAP + 4, buf + s.off, s.len)) o[0] = 0;
+    return o;
+}
+
+static void err(const char *kind, const char *a, const char *b) {
+    errs++;
+    sy_printf("ERR\t%s\t%s\t%s\n", kind, a, b);
+}
+
+static int seq(DgSpan a, DgSpan b) { return tx_same(buf + a.off, a.len, buf + b.off, b.len); }
+static int seqz(DgSpan a, const char *s) { return tx_same(buf + a.off, a.len, s, tx_len(s, 4096)); }
+
+/* S split at SEP into OUT: the count, or -1 on an empty item or more than CAP items. */
+static int split(DgSpan s, int sep, DgSpan *out, int cap) {
+    long i = s.off, end = s.off + s.len, e;
+    int k = 0;
+    while (i <= end) {
+        e = i;
+        while (e < end && buf[e] != sep) e++;
+        if (e == i || k == cap) return -1;
+        out[k].off = i;
+        out[k].len = e - i;
+        k++;
+        i = e + 1;
+    }
+    return k;
+}
+
+static int find(DgSpan id) {
+    int i;
+    for (i = 0; i < nn; i++) if (seq(nd[i].f[F_ID], id)) return i;
+    return -1;
+}
+
+static int findz(const char *id) {
+    int i;
+    for (i = 0; i < nn; i++) if (seqz(nd[i].f[F_ID], id)) return i;
+    return -1;
+}
+
+static int is_hex(const char *s, long n) {
+    long i;
+    if (n < 7 || n > 40) return 0;
+    for (i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int glob_ok(DgSpan g) {
+    const char *p = buf + g.off;
+    long i;
+    if (p[0] == '/') return 0;
+    for (i = 0; i < g.len; i++) {
+        if (p[i] == ' ' || p[i] == ',') return 0;
+        if (p[i] == '.' && i + 1 < g.len && p[i + 1] == '.' && (i == 0 || p[i - 1] == '/') &&
+            (i + 2 == g.len || p[i + 2] == '/')) return 0;
+    }
+    return 1;
+}
+
+static void directive(long off, long n, const char *where) {
+    long o, l;
+    if (has_gate) { err("schema-shared", where, "more than one #shared line"); return; }
+    if (tx_fields(buf + off, n, '\t') != 3 || tx_field(buf + off, n, '\t', 1, &o, &l) || l == 0 || l > DG_FCAP) {
+        err("schema-shared", where, "#shared takes a gate id and a glob list");
+        return;
+    }
+    gate.off = off + o;
+    gate.len = l;
+    has_gate = 1;
+    if (!tx_field(buf + off, n, '\t', 2, &o, &l) && l > 0) {
+        DgSpan s;
+        int k;
+        s.off = off + o;
+        s.len = l;
+        nshared = split(s, ';', shared, DG_MAXL);
+        for (k = 0; k < nshared; k++) if (!glob_ok(shared[k])) nshared = -1;
+    }
+    if (nshared <= 0) { nshared = 0; err("schema-shared", where, "bad glob list"); }
+}
+
+static void row(long off, long n, const char *where) {
+    DgNode *d;
+    long o, l, i;
+    int f, k;
+    if (tx_fields(buf + off, n, '\t') != F_N) { err("schema-fields", where, "a row has exactly eight TAB fields"); return; }
+    if (tx_chr(buf + off, n, '\r') >= 0) { err("schema-fields", where, "carriage return in a row"); return; }
+    if (nn == DG_MAXN) { err("schema-capacity", where, "more than 512 nodes"); return; }
+    d = &nd[nn];
+    d->line.off = off;
+    d->line.len = n;
+    d->ndepname = d->ndep = d->nglob = d->unmet = 0;
+    for (f = 0; f < F_N; f++) {
+        if (tx_field(buf + off, n, '\t', f, &o, &l) || l == 0 || l > DG_FCAP) { err("schema-field", where, col_name[f]); return; }
+        d->f[f].off = off + o;
+        d->f[f].len = l;
+    }
+    for (i = 0; i < d->f[F_ID].len; i++) {
+        int c = buf[d->f[F_ID].off + i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) {
+            err("schema-id", where, "an id is letters, digits, dot, underscore, dash");
+            return;
+        }
+    }
+    if (seqz(d->f[F_ID], "-")) { err("schema-id", where, "an id cannot be -"); return; }
+    if (find(d->f[F_ID]) >= 0) { err("duplicate-id", z(d->f[F_ID]), where); return; }
+    d->status = -1;
+    for (k = 0; k < ST_N; k++) if (seqz(d->f[F_STATUS], st_name[k])) d->status = k;
+    if (d->status < 0) { err("schema-status", z(d->f[F_ID]), z(d->f[F_STATUS])); return; }
+    if (!seqz(d->f[F_DEPS], "-")) {
+        d->ndepname = split(d->f[F_DEPS], ',', d->depname, DG_MAXL);
+        if (d->ndepname < 0) { d->ndepname = 0; err("schema-deps", z(d->f[F_ID]), z(d->f[F_DEPS])); return; }
+    }
+    d->nglob = split(d->f[F_DOMAIN], ';', d->glob, DG_MAXL);
+    for (k = 0; k < d->nglob; k++) if (!glob_ok(d->glob[k])) d->nglob = -1;
+    if (d->nglob <= 0) { d->nglob = 0; err("schema-write-domain", z(d->f[F_ID]), z(d->f[F_DOMAIN])); return; }
+    if (seqz(d->f[F_ACCEPT], "-")) { err("schema-acceptance", z(d->f[F_ID]), "a node needs an acceptance command"); return; }
+    if (!seqz(d->f[F_COMMIT], "-") && !is_hex(buf + d->f[F_COMMIT].off, d->f[F_COMMIT].len)) {
+        err("schema-commit", z(d->f[F_ID]), z(d->f[F_COMMIT]));
+        return;
+    }
+    nn++;
+}
+
+static void parse(void) {
+    long i = 0, e, ln = 0;
+    int header = 0;
+    nn = 0;
+    nshared = 0;
+    has_gate = 0;
+    gate_idx = -1;
+    while (i < bufn) {
+        char where[40];
+        e = i;
+        while (e < bufn && buf[e] != '\n') e++;
+        ln++;
+        if (cx_fmt(where, sizeof where, "line %ld", ln)) where[0] = 0;
+        if (e > i) {
+            if (buf[i] == '#') {
+                if (tx_prefix(buf + i, e - i, "#shared\t", 8)) directive(i, e - i, where);
+            } else if (!header) {
+                header = 1;
+                if (!tx_same(buf + i, e - i, DG_HEADER, tx_len(DG_HEADER, 256)))
+                    err("schema-header", where, "expected id title status deps write_domain owner acceptance commit");
+            } else row(i, e - i, where);
+        }
+        i = e + 1;
+    }
+    if (!header) err("schema-header", "-", "the table has no header line");
+}
+
+static int color[DG_MAXN], stack[DG_MAXN], sp;
+
+/* 1 when a cycle through node I was found (and reported). */
+static int dfs(int i) {
+    int k;
+    color[i] = 1;
+    stack[sp++] = i;
+    for (k = 0; k < nd[i].ndep; k++) {
+        int j = nd[i].dep[k];
+        if (color[j] == 1) {
+            char path[2048];
+            long at = 0;
+            int s = 0, t;
+            while (stack[s] != j) s++;
+            path[0] = 0;
+            for (t = s; t <= sp; t++) {
+                DgSpan id = nd[t < sp ? stack[t] : j].f[F_ID];
+                if (at + id.len + 4 >= (long)sizeof path) break;
+                if (t > s) { path[at++] = '-'; path[at++] = '>'; }
+                (void)mm_copy(path + at, (long)sizeof path - at, buf + id.off, id.len);
+                at += id.len;
+                path[at] = 0;
+            }
+            err("cycle", z(nd[j].f[F_ID]), path);
+            return 1;
+        }
+        if (color[j] == 0 && dfs(j)) return 1;
+    }
+    sp--;
+    color[i] = 2;
+    return 0;
+}
+
+/* Deps, the shared gate, cycles and the status rules. */
+static void validate(void) {
+    int i, k, cyc = 0;
+    for (i = 0; i < nn; i++)
+        for (k = 0; k < nd[i].ndepname; k++) {
+            int j = find(nd[i].depname[k]);
+            if (j < 0) err("missing-dep", z(nd[i].f[F_ID]), z(nd[i].depname[k]));
+            else if (j == i) { err("cycle", z(nd[i].f[F_ID]), "a node cannot depend on itself"); cyc = 1; }
+            else nd[i].dep[nd[i].ndep++] = j;
+        }
+    if (has_gate) {
+        gate_idx = find(gate);
+        if (gate_idx < 0) err("missing-shared-gate", z(gate), "#shared names a node that is not in the table");
+    }
+    for (i = 0; i < nn; i++) color[i] = 0;
+    for (i = 0; i < nn && !cyc; i++) {
+        sp = 0;
+        if (color[i] == 0 && dfs(i)) cyc = 1;
+    }
+    for (i = 0; i < nn; i++) {
+        for (k = 0; k < nd[i].ndep; k++) if (nd[nd[i].dep[k]].status != ST_DONE) nd[i].unmet++;
+        if (nd[i].status == ST_DONE && seqz(nd[i].f[F_COMMIT], "-"))
+            err("done-without-sha", z(nd[i].f[F_ID]), "a DONE node names the commit that landed it");
+        if (!cyc && (nd[i].status == ST_DONE || nd[i].status == ST_RUNNING))
+            for (k = 0; k < nd[i].ndep; k++)
+                if (nd[nd[i].dep[k]].status != ST_DONE)
+                    err("status-before-deps", z(nd[i].f[F_ID]), z(nd[nd[i].dep[k]].f[F_ID]));
+    }
+}
+
+static int git_has(DgSpan sha) {
+    char spec[80];
+    char *v[8];
+    char *out = 0;
+    size_t on = 0;
+    int rc;
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", z(sha))) return 0;
+    v[0] = "git"; v[1] = "-C"; v[2] = root; v[3] = "cat-file"; v[4] = "-e"; v[5] = spec; v[6] = 0;
+    rc = cx_runv_timeout(v, 10, &out, &on);
+    mm_free(out);
+    return rc == 0;
+}
+
+static void git_check(int only) {
+    int i;
+    for (i = 0; i < nn; i++)
+        if ((only < 0 || only == i) && nd[i].status == ST_DONE && !seqz(nd[i].f[F_COMMIT], "-") && !git_has(nd[i].f[F_COMMIT]))
+            err("sha-not-in-git", z(nd[i].f[F_ID]), z(nd[i].f[F_COMMIT]));
+}
+
+/* ---- write domains ---- */
+
+static int wild_at(const char *p, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (p[i] == '*' || p[i] == '?' || p[i] == '[') return (int)i;
+    return -1;
+}
+
+/* 1 when pattern P ("*", "**", "?") matches the whole path S. */
+static int gmatch(const char *p, long pn, const char *s, long sn) {
+    while (pn > 0) {
+        if (p[0] == '*') {
+            int deep = pn > 1 && p[1] == '*';
+            long skip = deep ? 2 : 1, k;
+            if (deep && pn > 2 && p[2] == '/' && gmatch(p + 3, pn - 3, s, sn)) return 1;
+            for (k = 0; k <= sn; k++) {
+                if (gmatch(p + skip, pn - skip, s + k, sn - k)) return 1;
+                if (k < sn && !deep && s[k] == '/') break;
+            }
+            return 0;
+        }
+        if (sn == 0) return 0;
+        if (p[0] == '?') { if (s[0] == '/') return 0; }
+        else if (p[0] != s[0]) return 0;
+        p++; pn--; s++; sn--;
+    }
+    return sn == 0;
+}
+
+/* 1 unless no path can be under both globs. */
+static int overlap(DgSpan a, DgSpan b) {
+    const char *pa = buf + a.off, *pb = buf + b.off;
+    int da = pa[a.len - 1] == '/', db = pb[b.len - 1] == '/';
+    int wa = wild_at(pa, a.len), wb = wild_at(pb, b.len);
+    long la = wa >= 0 ? wa : a.len, lb = wb >= 0 ? wb : b.len;
+    if (wa < 0 && !da && wb < 0 && !db) return tx_same(pa, a.len, pb, b.len);
+    if (wa < 0 && !da) {
+        if (wb >= 0 && tx_chr(pb, b.len, '[') < 0 && !db) return gmatch(pb, b.len, pa, a.len);
+        return tx_prefix(pa, a.len, pb, lb);
+    }
+    if (wb < 0 && !db) return overlap(b, a);
+    return la <= lb ? tx_prefix(pb, lb, pa, la) : tx_prefix(pa, la, pb, lb);
+}
+
+static int touches_shared(DgSpan g) {
+    int k;
+    for (k = 0; k < nshared; k++) if (overlap(g, shared[k])) return 1;
+    return 0;
+}
+
+/* 1 when G is one exact path and the shared globs name it. */
+static int in_shared(DgSpan g) {
+    return wild_at(buf + g.off, g.len) < 0 && buf[g.off + g.len - 1] != '/' && touches_shared(g);
+}
+
+static int node_shared(int i) {
+    int k;
+    for (k = 0; k < nd[i].nglob; k++) if (touches_shared(nd[i].glob[k])) return 1;
+    return 0;
+}
+
+/* 0 disjoint, 1 two globs meet, 2 both write the shared tables while the gate is open. */
+static int conflict(int a, int b, int gate_done) {
+    int i, k;
+    for (i = 0; i < nd[a].nglob; i++)
+        for (k = 0; k < nd[b].nglob; k++)
+            if (overlap(nd[a].glob[i], nd[b].glob[k]) &&
+                !(gate_done && in_shared(nd[a].glob[i]) && in_shared(nd[b].glob[k]))) return 1;
+    if (!gate_done && node_shared(a) && node_shared(b)) return 2;
+    return 0;
+}
+
+/* ---- subcommands ---- */
+
+static int do_ready(void) {
+    int i, n = 0;
+    for (i = 0; i < nn; i++)
+        if (nd[i].unmet == 0 && nd[i].status != ST_DONE) {
+            n++;
+            sy_printf("READY\t%s\t%s\t%s\t%s\n", z(nd[i].f[F_ID]), st_name[nd[i].status], z(nd[i].f[F_OWNER]), z(nd[i].f[F_TITLE]));
+        }
+    sy_printf("DAG_READY\tcount=%d\tnodes=%d\n", n, nn);
+    return 0;
+}
+
+static int do_plan(long max) {
+    static int sel[DG_MAXN];
+    int ns = 0, i, k, keep = 0, start = 0, hold = 0, wait = 0, over = 0;
+    int gate_done = gate_idx >= 0 && nd[gate_idx].status == ST_DONE;
+    for (i = 0; i < nn; i++) {
+        if (nd[i].status != ST_RUNNING) continue;
+        for (k = 0; k < ns; k++) {
+            int c = conflict(sel[k], i, gate_done);
+            if (c) {
+                over++;
+                sy_printf("PLAN\tOVERLAP\t%s\t%s\t%s\n", z(nd[sel[k]].f[F_ID]), z(nd[i].f[F_ID]), c == 2 ? "shared" : "domain");
+            }
+        }
+        sel[ns++] = i;
+        keep++;
+        sy_printf("PLAN\tKEEP\t%s\t%s\t%s\n", z(nd[i].f[F_ID]), z(nd[i].f[F_OWNER]), z(nd[i].f[F_DOMAIN]));
+    }
+    for (i = 0; i < nn; i++) {
+        int c = 0, with = -1;
+        if (nd[i].status == ST_RUNNING || nd[i].status == ST_DONE) continue;
+        if (nd[i].unmet) {
+            wait++;
+            sy_printf("PLAN\tWAIT\t%s\t", z(nd[i].f[F_ID]));
+            for (k = 0, c = 0; k < nd[i].ndep; k++)
+                if (nd[nd[i].dep[k]].status != ST_DONE) sy_printf("%s%s", c++ ? "," : "", z(nd[nd[i].dep[k]].f[F_ID]));
+            sy_printf("\n");
+            continue;
+        }
+        if (nd[i].status == ST_BLOCKED) {
+            hold++;
+            sy_printf("PLAN\tHOLD\t%s\tblocked\t-\n", z(nd[i].f[F_ID]));
+            continue;
+        }
+        for (k = 0; k < ns && !c; k++) {
+            c = conflict(sel[k], i, gate_done);
+            if (c) with = sel[k];
+        }
+        if (c) {
+            hold++;
+            sy_printf("PLAN\tHOLD\t%s\t%s\t%s\n", z(nd[i].f[F_ID]), c == 2 ? "shared" : "domain", z(nd[with].f[F_ID]));
+        } else if (ns >= max) {
+            hold++;
+            sy_printf("PLAN\tHOLD\t%s\tmax\t-\n", z(nd[i].f[F_ID]));
+        } else {
+            sel[ns++] = i;
+            start++;
+            sy_printf("PLAN\tSTART\t%s\t%s\t%s\t%s\n", z(nd[i].f[F_ID]), z(nd[i].f[F_OWNER]), z(nd[i].f[F_DOMAIN]), z(nd[i].f[F_ACCEPT]));
+        }
+    }
+    sy_printf("DAG_PLAN\tmax=%ld\tkeep=%d\tstart=%d\thold=%d\twait=%d\toverlap=%d\tshared_gate=%s:%s\n", max, keep, start, hold, wait, over,
+              gate_idx >= 0 ? z(nd[gate_idx].f[F_ID]) : "none", gate_idx >= 0 ? st_name[nd[gate_idx].status] : "-");
+    return 0;
+}
+
+static int do_mark(const char *table, const char *id, const char *status, const char *sha) {
+    char line[F_N * (DG_FCAP + 2)], tmp[4400], dir[4400], from[16], commit[48];
+    char *nb, *old = buf;
+    long ln, nbn, at, end;
+    int i = findz(id), st = -1, k;
+    for (k = 0; k < ST_N; k++) if (tx_eqz(status, st_name[k])) st = k;
+    if (st < 0) { sy_eprintf("dag: unknown status %s\n", status); return 2; }
+    if (sha && st != ST_DONE) { sy_eprintf("dag: a commit is given only with DONE\n"); return 2; }
+    if (sha && !is_hex(sha, tx_len(sha, 64))) { sy_eprintf("dag: not a commit sha: %s\n", sha); return 2; }
+    if (i < 0) { err("unknown-node", id, "-"); return 1; }
+    if (tx_copy(from, sizeof from, st_name[nd[i].status], tx_len(st_name[nd[i].status], 16))) return 2;
+    if (st != ST_DONE) sha = "-";
+    else if (!sha) sha = z(nd[i].f[F_COMMIT]);
+    if (tx_copy(commit, sizeof commit, sha, tx_len(sha, 64))) return 2;
+    if (cx_fmt(line, sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", z(nd[i].f[F_ID]), z(nd[i].f[F_TITLE]), st_name[st],
+               z(nd[i].f[F_DEPS]), z(nd[i].f[F_DOMAIN]), z(nd[i].f[F_OWNER]), z(nd[i].f[F_ACCEPT]), commit)) return 2;
+    ln = tx_len(line, (long)sizeof line);
+    at = nd[i].line.off;
+    end = at + nd[i].line.len;
+    nbn = at + ln + (bufn - end);
+    nb = mm_alloc(nbn + 1);
+    if (!nb) return 2;
+    if (mm_copy(nb, nbn, old, at) || mm_copy(nb + at, nbn - at, line, ln) || mm_copy(nb + at + ln, nbn - at - ln, old + end, bufn - end)) return 2;
+    buf = nb;
+    bufn = nbn;
+    errs = 0;
+    parse();
+    validate();
+    i = findz(id);
+    if (!errs && i >= 0) git_check(i);
+    if (errs || i < 0) {
+        sy_printf("DAG_MARK\t%s\trefused\tfrom=%s\tto=%s\terrors=%d\n", id, from, st_name[st], errs);
+        return 1;
+    }
+    if (cx_fmt(dir, sizeof dir, "%s/out", root) || cx_fmt(tmp, sizeof tmp, "%s/dag-mark-%d.tmp", dir, sy_pid())) return 2;
+    (void)sy_mkdir(dir, 0755);
+    if (cx_write(tmp, buf, (size_t)bufn)) { sy_eprintf("dag: cannot write %s\n", tmp); return 2; }
+    if (sy_rename(tmp, table)) {
+        (void)sy_unlink(tmp);
+        sy_eprintf("dag: cannot replace %s\n", table);
+        return 2;
+    }
+    sy_printf("DAG_MARK\t%s\tok\tfrom=%s\tto=%s\tcommit=%s\n", id, from, st_name[st], commit);
+    return 0;
+}
+
+static int usage(void) {
+    sy_eprintf("dag: usage: ready | plan [--max N] | check [--no-git] | mark ID STATUS [SHA]   [--table FILE] [--root ROOT]\n");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    const char *pos[5], *targ = 0, *rarg = ".";
+    char table[4400];
+    size_t n = 0;
+    long max = 4;
+    int np = 0, k, nogit = 0, rc;
+    for (k = 1; k < argc; k++) {
+        if (tx_eqz(argv[k], "--table") && k + 1 < argc) targ = argv[++k];
+        else if (tx_eqz(argv[k], "--root") && k + 1 < argc) rarg = argv[++k];
+        else if (tx_eqz(argv[k], "--no-git")) nogit = 1;
+        else if (tx_eqz(argv[k], "--max") && k + 1 < argc) {
+            const char *m = argv[++k];
+            long i, v = 0, ml = tx_len(m, 16);
+            if (ml < 1 || ml > 6) return usage();
+            for (i = 0; i < ml; i++) {
+                if (m[i] < '0' || m[i] > '9') return usage();
+                v = v * 10 + (m[i] - '0');
+            }
+            if (v < 1) return usage();
+            max = v;
+        } else if (argv[k][0] == '-' && argv[k][1] == '-') return usage();
+        else if (np < 4) pos[np++] = argv[k];
+        else return usage();
+    }
+    if (np < 1) return usage();
+    if (sy_realpath(rarg, root, sizeof root) < 0) { sy_eprintf("dag: bad root %s\n", rarg); return 2; }
+    if (targ) { if (tx_copy(table, sizeof table, targ, tx_len(targ, 8192))) return 2; }
+    else if (cx_fmt(table, sizeof table, "%s/agentwork/dag.tsv", root)) return 2;
+    buf = cx_read(table, &n);
+    if (!buf) { sy_eprintf("dag: cannot read %s\n", table); return 2; }
+    bufn = (long)n;
+    parse();
+    validate();
+    if (tx_eqz(pos[0], "check") && np == 1) {
+        if (!nogit) git_check(-1);
+        sy_printf("DAG_CHECK\t%s\tnodes=%d\terrors=%d\tgit=%s\n", errs ? "FAIL" : "ok", nn, errs, nogit ? "skipped" : "checked");
+        return errs ? 1 : 0;
+    }
+    if (tx_eqz(pos[0], "ready") && np == 1) rc = 0;
+    else if (tx_eqz(pos[0], "plan") && np == 1) rc = 1;
+    else if (tx_eqz(pos[0], "mark") && (np == 3 || np == 4)) rc = 2;
+    else return usage();
+    if (errs) {
+        sy_printf("DAG_CHECK\tFAIL\tnodes=%d\terrors=%d\tgit=skipped\n", nn, errs);
+        return 1;
+    }
+    if (rc == 0) return do_ready();
+    if (rc == 1) return do_plan(max);
+    return do_mark(table, pos[1], pos[2], np == 4 ? pos[3] : 0);
+}
