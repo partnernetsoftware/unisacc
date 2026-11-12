@@ -13,18 +13,18 @@ macOS：镜像声明最低版本13.0；本次在26.5.1实测，13.0本身未实�
 
 目录说明：[docs/REPO-MAP.md](docs/REPO-MAP.md)。
 
-Windows x86-64: CI uses PowerShell to launch `unisacc.com` without renaming it; see [Windows使用](plans/release-notes-0.0.46.md#windows使用) for the verified invocation and helper.
-Windows arm64: CI copies `slice-win-arm64` to an `.exe` and sets `UNISA_CONTAINER` to `pkg.bin` before compilation; see [Windows使用](plans/release-notes-0.0.46.md#windows使用).
+Windows x86-64: CI uses PowerShell to launch `unisacc.com` without renaming it; see [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) for the verified invocation and helper.
+Windows arm64: CI copies `slice-win-arm64` to an `.exe` and sets `UNISA_CONTAINER` to `pkg.bin` before compilation; see [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases).
 Verify downloads against `SHA256SUMS` from the Release. Uninstall by deleting
 the downloaded files; roll back by restoring the previous Release's files.
 
 ## What is not claimed
 
-- Windows原生自举尚未声明；本机macOS arm64已实测固定包、44根编译器裸片gen2==gen3，详见[证据](research/c48-native-selfhost/report.md)。这不是重建NN、宿主工具或完整六片APE的自举证明。
+- Windows原生自举尚未声明；本机macOS arm64已实测固定包、44根编译器裸片gen2==gen3（见 [prd.md](prd.md)）。这不是重建NN、宿主工具或完整六片APE的自举证明。
 - Windows stdio-crossunit and stream-pipe cover portable subsets; POSIX
   sub-checks were not run and are not counted as passed.
-- Full-batch qualification is separate from native CI; see the
-  [release notes](plans/release-notes-0.0.46.md) for the s8b final state.
+- Full-batch qualification is separate from native CI; see
+  [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) and [plans/release-notes-0.0.58.md](plans/release-notes-0.0.58.md) for the session state.
 
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
@@ -37,7 +37,7 @@ reports QUALIFIED 42/0 across six targets (identity, version, hello, default
 run, stdio-crossunit, stream-pipe and smoke). Windows stdio-crossunit and
 stream-pipe cover only the portable subset, not the POSIX sub-checks.
 Windows arm64 uses the shipped `slice-win-arm64` with `pkg.bin` and an explicit
-`UNISA_CONTAINER`. See the [release notes](plans/release-notes-0.0.46.md) for
+`UNISA_CONTAINER`. See [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) for
 artifact identities, platform limits and the final full-batch session state.
 `-o` writes ELF, Mach-O with an ad-hoc signature, or PE32+; the default `-run`
 executes in memory on Linux and from a private temporary file on macOS.
@@ -49,7 +49,7 @@ calling convention is not SysV or AAPCS64).
 裸 `-c` 默认宿主目标并写 `.o`，可用 `-o` 指定路径。非 Linux 的 `-c` 使用已有 unit 合同：
 Mach-O/COFF 容器只携带 unit tape，供 unisacc 自己链接，不是系统链接器对象。
 `-c --tapebin` 与 `-S` 保留显式 tape 输出。当前 main 的裸 `-S` 在两种 macOS slice 上按本片平台预定义 C 宏；其余宿主保留 lnx/x86_64 默认。显式目标、已有 tape/tapebin 的来源路由及裸 `-S -o bare.s` 的 tape 输出合同保留。公开 0.0.47 原资产未含此开发修复，身份见
-[本地记录](plans/root-identity.md)与[发布记录](archive/docs-2026-11b/plans/release-notes-0.0.47.md)。
+[本地记录](plans/root-identity.md)与[发布记录](https://github.com/partnernetsoftware/unisacc/releases)。
 `-c -b T -funit` 显式选择 unit 对象；`unisacc a.o
 b.a [-o prog]` links unit objects and archives, and `unisacc ar rcs|t|x` writes
 them (measured: two unit objects plus an archive, linked and run). The product
@@ -61,12 +61,12 @@ objdump -d` read the ELF objects. The archived reference compiler is what wrote
 ELF, Mach-O and COFF objects and GNU assembly for all six targets; assembly text
 for Mach-O and COFF, Intel syntax and inline `asm` are not scheduled (moved to
 the 0.1.x appendix). The design and the back-end facts behind it are in
-[docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) (published) and [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) (published). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+[docs/toolchain.md](docs/toolchain.md) and [prd.md](prd.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
 c-testsuite corpus compile and run (`realprog`, `tools`, `corpus` gates), and
-since 0.0.18 so does the kilo editor; processes (`fork`, `execvp`, `waitpid`, `pipe`, `dup2`, `getcwd`, `sys/wait.h`) arrived in 0.0.19 on Linux and macOS. Lua is in the `realprog` passing baseline; SQLite still needs `pwd.h` (see `tests/realprog.sh`). The language-side gaps are complex
+since 0.0.18 so does the kilo editor; processes (`fork`, `execvp`, `waitpid`, `pipe`, `dup2`, `getcwd`, `sys/wait.h`) arrived in 0.0.19 on Linux and macOS. Lua is in the `realprog` passing baseline; SQLite still needs `pwd.h` (`sh ./unisacc.com tests/run.cx -- --smoke|--all`). The language-side gaps are complex
 types and trigraphs, and the bundled C library is a documented subset;
 all are itemised in [the limitations table](#known-limitations) below. unisacc is a
 **model-driven compiler (fact tables → generators → VM programs)**。默认产品在通用
@@ -88,8 +88,7 @@ sequence. Parameterised template rows expand using build-time facts into a
 complete finite transition table, from which generators construct the VM's
 transition/action program. 历史经典参考工具的 `--check-net` 通过穷举声明的有限域
 核对构造表示与表相等；它不是当前产品开关。展开器、事实绑定与打包器属于构建时
-可信基。这种相等性检查不证明表正确实现 C99。The classic C and Python implementations are archived
-(`archive/reference-c/`, `archive/reference-py/`) and kept only for
+可信基。这种相等性检查不证明表正确实现 C99。The classic C and Python implementations are retired and kept only in the repository archive for
 comparison; there is no classic fallback build any more, and a model refusal
 never silently retries through another route.
 
@@ -104,33 +103,23 @@ There are exactly two product names, and they mean two different things:
 
 The N22 bootstrap contract starts with a host-built `unisacc-seed.com`, rebuilds
 the compiler with that seed, then rebuilds it with the second generation; all
-three SHA-256 values must match. The [original N22 receipts](archive/plans/v0.0.13.md)
-retain the exact historical candidates, hashes and build lineage. They do not
+three SHA-256 values must match. Historical N22 receipts do not
 qualify the current candidate.
 
-The 0.0.46 `unisacc.com` is built from the CX chain, not the old C reference.
-The c46-3 construction and fixed-point evidence are recorded in the
-[release notes](plans/release-notes-0.0.46.md): objects, kernels, five generic
-slices, product and package were compared independently; Windows arm64 has
-its own G2/G3 checker and receipts. Native Windows self-hosting is not claimed.
+The `unisacc.com` product is built from the CX chain (`tools/candidate-chain.cx` and `tools/chain-run.cx`), not the old C reference.
+Construction and fixed-point evidence are recorded in
+[GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) and [prd_release.md](prd_release.md): objects, kernels, slices,
+product and package are compared independently; Windows arm64 has
+its own G2/G3 checker (`tools/check-win-arm64-fixedpoint.cx`) and receipts. Native Windows self-hosting is not claimed.
 Build inputs, constructor identities and released artifacts must not be
 interchanged with historical candidates.
 Two steps of the object route are still open: the model driver's `-c -b`
 reaches `lnx/x86_64` and `lnx/arm64` only, and it writes no assembly text
-([candidate to product](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md)).
+(see [prd.md](prd.md)).
 
-`archive/chain-legacy/tools/product-build.cx`, `tools/hostseed-step*.cx` and `selfhost-mixed` (archived)
-still compile or link the archived C reference, so they cannot run. They
-retire with the switch; see the retirement table in that plan. The Python-running
-`exec/c/buildcompiler.sh` (with the Makefile's `com`, `model-com` and `comboot-*`
-targets) and `release/tools/seal_candidate.sh` are already archived under
-`archive/reference-py/`.
-`tools/kernel-build.cx` ([kernels](tools/kernels.md)) does not reference archived
-sources. `tools/package-refresh.cx` ([packages](tools/packages.md)) still compares
-`exec/c/core.c`, which is archived, so it too must be reworked before the
-switch's package refresh. `unisacc-next.com` is only a build-directory output
-name. The live Python left on any path is listed in
-[python residue](archive/plans/2026-10-30/python-residue-2026-10-30.md).
+`tools/hostseed-step.cx` and `tools/hostseed-step-nativefirst.cx` are legacy bootstrap helpers; the active construction chain runs through `tools/chain-step.cx`, `tools/candidate-chain.cx` and `tools/chain-run.cx`.
+`tools/kernel-build.cx` ([kernels](tools/kernels.md)) and [packages](tools/packages.md) document kernel and package construction. `unisacc-next.com` is only a build-directory output
+name. Live Python debt is tracked in [prd.md](prd.md).
 
 Published versions, their sizes, SHA-256 and acceptance receipts:
 [GitHub releases](https://github.com/partnernetsoftware/unisacc/releases), with
@@ -192,7 +181,7 @@ needs travel inside it.
   （无 `.s` 输出）与 `-c --tapebin` 保留中间 tape。`-S -b lnx/ARCH -o FILE.s`
   asks for GNU assembly, which the model product does not write yet (`NOT_IMPLEMENTED
   object`, exit 2). `unisacc as` takes the subset its own back end defines (plus
-  `.text/.data/.bss`, `.globl`, `.byte/.ascii/.zero`); other instructions, Intel
+  `.text`, `.data`, `.bss`, `.globl`, `.byte/.ascii/.zero`); other instructions, Intel
   syntax, inline `asm` and the tape text are refused by name. `-c -b lnx/ARCH` writes
   an ELF object: a whole-program object links with GNU `ld` on its own, while `cc`
   cannot link it (`_start` collides with the crt and the calling convention is not
@@ -222,9 +211,7 @@ and `--link-only` for splitting a build into bounded batches, is in the comment
 at the top of the tool. Turning that candidate into the six-target product is
 one `tools/release-build.cx` run per slice (P3 package plus the slice; `whole-o`
 for osx/win, `objects` for lnx), then `tools/release-ape.cx -- pack` for the
-five-slice APE and `-- smoke` before anyone installs it. The steps are listed in
-[archive/plans/2026-11-01/candidate-to-product-2026-10-30.md](archive/plans/2026-11-01/candidate-to-product-2026-10-30.md),
-and the historical five-slice candidate was built this way:
+APE and `-- smoke` before anyone installs it (see [prd_release.md](prd_release.md)):
 
 ```bash
 sh ./unisacc.com tools/release-build.cx -- p3 ROOT SRC_PKG OUT_PKG
@@ -236,13 +223,9 @@ The lnx slices are `<slice>/entry.elf`: the APE carries one package at its end
 and every slice reads it through `UNISA_CONTAINER`, so a slice that still ends
 in `UNIPKG1` (a `candidate`) is refused rather than silently stripped.
 
-The classic route is archived: `unisacc.c`, `src/*.c` and the C sources of the
-old driver are in `archive/reference-c/`; `tests/build_ref.sh`,
-`tests/export_ref.sh` and `tests/release.sh` are in
-`archive/testing-c43-legacy/tests/`. `make com` and `make classic-com` no
-longer exist; `exec/c/buildcompiler.sh` is archived under `archive/reference-py/`. The generated
-`kernel/weight.<stage>.inc` and `kernel/dense.<stage>.inc` keep the 18 classic
-nets' data; the default product's shared networks remain in its separate P3
+The classic C and Python route and legacy shell suites are retired (`make com` and `make classic-com` no
+longer exist). The generated files in `kernel/` (`tools/kernel-emit.cx`) keep the 18 classic
+nets' data; the default product's shared networks remain in its separate P3/P4
 package. CI only re-runs tests.
 
 ## How the decisions are made
@@ -250,7 +233,7 @@ package. CI only re-runs tests.
 > **Shell = model decoder + VM executor + model data + host bindings.**
 
 The default model product compiles through a **seven-stream byte pipeline**
-(below). The **classic seed/reference (decision-network instance)** is a
+(below). The **classic seed and reference (decision-network instance)** is a
 separate route: the walker, symbol table, relocation arithmetic and image
 writers are ordinary code. Its fact nets use cube networks at ask points,
 with one kernel for all of them (`embed -> gemv -> ReLU -> gemv -> argmax`,
@@ -314,7 +297,7 @@ entry check and is caught downstream (measured on a stdio program: 10667 of 1067
 | `combo` | op(87) x os(3) x arch(2) | 15 heads | 522 | 121 |
 | **total** | | | **8,770** | **569** |
 
-*Frozen text. It was generated by `python3 -m unisa docs` and checked by `tests/docs.sh`; both are archived (`archive/reference-py/unisa/docgen.py`, `archive/testing-c43-legacy/tests/docs.sh`). Nothing regenerates or checks this table today.*
+*Frozen text from the historical Python doc generator and legacy doc check. Nothing regenerates or checks this table today.*
 <!-- stages:end -->
 
 The last two are a control arm: the lowering asks neither. In this historical
@@ -331,16 +314,13 @@ is always 0 or 1; evaluating that integer network requires no multiply or float.
 function on a finite domain, so "the net equals the table" is decided by
 enumerating every key (the total is in the table above). That proves the net
 equals the *table*; whether the table is right about C is checked separately,
-against the system compiler（历史入口为 `archive/testing-c43-legacy/tests/hostreferee.cx type`；`difftest` 为经典参考对照术语，不是当前产品开关）。
+against the system compiler（`difftest` 为经典参考对照术语，不是当前产品开关；现行测试入口为 `sh ./unisacc.com tests/run.cx -- --smoke|--all`）。
 
 ## Develop it (the CX tools)
 
 Development runs on the installed compiler itself: every tool is a `.cx`
 file run directly with `sh ./unisacc.com FILE.cx -- ARGS` (the default mode is
-run). The Python seed `unisa/` is archived at `archive/reference-py/unisa/`
-(manifest: [archive/reference-py/README.md](archive/reference-py/README.md)),
-and the classic C reference at `archive/reference-c/`
-([archive/reference-c/README.md](archive/reference-c/README.md)); both are kept
+run). The historical Python seed and classic C reference are retired and kept in the archive
 for comparison only. Each tool's usage is in the comment at the top of its file.
 
 ```bash
@@ -368,8 +348,7 @@ stages, drive, bind); `tools/entry-build.cx` builds a candidate from it.
 `tests/cxinclude.cx`, `tests/cxapis.cx` and `tests/cxtrunc.cx` hold those
 counts so they only go down (`sh ./unisacc.com -run tests/cxinclude.cx -- --check`;
 on 2026-10-30 it still fails, with 29 files above their baseline).
-Python still left on live paths is listed in
-[plans/python-residue-2026-10-30.md](archive/plans/2026-10-30/python-residue-2026-10-30.md).
+Python still left on live paths is tracked in [prd.md](prd.md).
 
 `iterate/` holds development tools written in C (a weight constructor and a
 kernel-data generator); they are not part of the product.
@@ -379,12 +358,11 @@ kernel-data generator); they are not part of the product.
 The current entry is `sh ./unisacc.com tests/run.cx -- --smoke|--all|--list`
 (registry `tests/batches.tsv`, coverage list `tests/coverage.tsv`); `--smoke`
 is local only, and `--all` fails while coverage is incomplete. The rest of
-this section describes the old suites, now archived under
-`archive/testing-c43-legacy/tests/` (`all.sh` was their entry), and is kept
-as history: in the old `tests/all.sh`, each suite's verdict was its exit status, and
+this section describes the historical pre-0.0.43 suites (now retired) and is kept
+as background: in that old harness, each suite's verdict was its exit status, and
 each got a watchdog so no suite could hang the run. **Testing happens on this
-desk, not on GitHub**: macOS natively, Linux in a local Lima VM
-(`tests/linux.sh`), Windows 11 in a local UTM machine (`tests/crossnative.sh`).
+desk, not on GitHub**: macOS natively, Linux in a local Lima VM,
+Windows 11 in a local UTM machine.
 CI is a second opinion, not the test loop: the local suites run first, and
 `.github/workflows/ci.yml` re-checks them on a machine nobody has been
 editing. Training is **not** in it:
@@ -402,9 +380,9 @@ in a twentieth of a second.
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `stages` | every decision net the Python front end asks, the C front end asks too — the only suite that can see a hand-written rule that happens to agree with the table |
 | `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
-| `multi` | two translation units compiled into one program, against `cc a.c b.c`.  Both ORDERS are run (`m1 m2` and `m2 m1`), because a file-scope `static` used to be registered when its definition was reached, so a header whose first function calls one defined below it spelled the call without its unit suffix and only the order that reached the definition first worked.  `tests/multi/fwd1.c` and `fwd2.c` are that case on its own, and `static1.c`/`static2.c` are two units with same-named statics that must NOT merge |
+| `multi` | two translation units compiled into one program, against `cc a.c b.c`.  Both ORDERS are run (`m1 m2` and `m2 m1`), because a file-scope `static` used to be registered when its definition was reached, so a header whose first function calls one defined below it spelled the call without its unit suffix and only the order that reached the definition first worked (`fwd1.c`/`fwd2.c`, and `static1.c`/`static2.c` with same-named statics that must NOT merge) |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
-| `fb12-multi` | the fixture DIRECTORY suite, `tests/fb12/*/` through `tests/fb12multi.sh`, one case per real-world defect (23 miniz round trip, 27 signature pool, 28 multi-unit static declarator, 30 label naming, 34 arm64 fallback, 35/36 `__has_feature`, 22 multiple `-I`, 24 nested quoted include).  It runs in the gate's `--com` block only: each fixture needs an executable compiler, and the fixtures' expected values come from the host `cc` |
+| `fb12-multi` | the multi-unit fixture directory suite, one case per real-world defect (23 miniz round trip, 27 signature pool, 28 multi-unit static declarator, 30 label naming, 34 arm64 fallback, 35/36 `__has_feature`, 22 multiple `-I`, 24 nested quoted include).  It runs in the gate's `--com` block only: each fixture needs an executable compiler, and the fixtures' expected values come from the host `cc` |
 | `closure` | the image `unisacc -b` writes is byte-identical to the Python back end's, for every probe on all six targets (this is a check of the C back end against the seed, not a proof of C semantics) |
 | `nativeboot` | `unisacc` builds itself and the result rebuilds itself to the same bytes — no Python anywhere |
 | `ablate` | each net's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
@@ -415,38 +393,48 @@ in a twentieth of a second.
 | `datashape` | generated programs whose globals are declared in one order and allocated in another; the suite asserts the shape is present before it asserts the bytes match |
 | `bigclosure` | the closure on the compiler itself — the largest input there is, and the only one ever big enough to break the back end while every probe stayed green |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
-| `realprog` | real PROGRAMS by other people, pinned (kilo, jsmn, cJSON, Lua 5.4.7, SQLite 3.49.1), built by unisacc and by `cc` from the same sources and run the same way; bytes and exit status must agree; `tests/realprog.baseline.list` is the ratchet (2 of 6 passed in 0.0.16, 3 of 6 in 0.0.17 with `unistd.h`, and the current baseline names five: kilo, jsmn-simple, jsmn-dump, cjson and lua; SQLite still needs `pwd.h`) |
+| `realprog` | real PROGRAMS by other people, pinned (kilo, jsmn, cJSON, Lua 5.4.7, SQLite 3.49.1), built by unisacc and by `cc` from the same sources and run the same way; bytes and exit status must agree (2 of 6 passed in 0.0.16, 3 of 6 in 0.0.17 with `unistd.h`, and the baseline names five: kilo, jsmn-simple, jsmn-dump, cjson and lua; SQLite still needs `pwd.h`) |
 | `elfobj` | `-c -b lnx/ARCH` writes a relocatable ELF: sections, allowed relocation types, `.text`/`.data` equal to the image outside relocated fields, ld.lld links both architectures, GNU ld links and the arm64 programs run in the Lima VM and print what the image prints |
-| `subtract-safety` | nothing outside `archive/` imports a module or names a path whose only copy is archived; `AGENTS.md`/`CLAUDE.md` resolve to a non-empty file without a link cycle (both 0.0.15 incidents are rebuilt by `--selftest` and must be caught) |
+| `subtract-safety` | nothing in the live tree imports a module or names a path whose only copy is archived (`tools/check-archive-refs.cx`); `AGENTS.md`/`CLAUDE.md` resolve to a non-empty file without a link cycle |
 | `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
 ## Layout
 
 ```
 src/unisacc.cx    compiler entry; six layers beside it (host, packmodel, executor, stages, drive, bind)
-cx/               CX modules: L0 text/mem/sys, then core, runtime, driver, compiler
+cx/               CX modules: L0 text, mem, sys, path, stream, then core, runtime, driver, compiler
+ext/              extension packages (sysx, memx, textx, crypto, tsvx)
 exec/             production model declarations, fact tables (exec/facts) and constructors
+seed/             C bootstrap helpers (gen.c, tbl.c, net.c, pack.c, ident.c)
 kernel/           generated classic fact data + integer inference kernel, as C (tools/kernel-emit.cx)
 include/          the bundled C99 headers and the .cx prelude (cx-nested.h, generated cx-flat.h)
 weights/          the constructed weights (built.uns2) and the tables as data (gold/*.tsv)
-tools/            CX build and generator tools (entry-build, facts-gen, kernel-emit, gold-table, ...)
+build/            package manifests, layer APIs, limits and phase tables
+tools/            CX build, check and generator tools (entry-build, facts-gen, ratchets, ...)
+tests/            the CX contract suite: tests/run.cx, tests/batches.tsv, tests/coverage.tsv
+agentwork/        workflow spec (WORKFLOW.md), task items (items.tsv), DAG (dag.tsv) and ledger (ledger.tsv)
+release/          candidate records, CI qualification and release evidence
+docs/             repository map (docs/REPO-MAP.md), toolchain design and specifications
+plans/            active version plans and release notes
+research/         design studies and papers
+apps/             companion applications (apps/csih)
+ujs/              parallel JS/WASM product line (Paper B)
+adapter/          WASM/table adapters
+flownet/          flow network descriptors
 iterate/          development tools in C (weight constructor, kernel-data generator); not the product
-tests/            the new CX contract suite: tests/run.cx, tests/batches.tsv, tests/coverage.tsv
-archive/          archived: reference-py/ (Python seed), reference-c/ (classic C), testing-c43-legacy/ (old suites)
+examples/         sample C programs and benchmarks (with bench/, m4/, scripts/, skills/)
 prd.md            current product state, architecture, roadmap and history index
 ```
 
-Current design and status are in [prd §0.3](prd.md#pipeline-design); older
-measured findings and failed predictions remain in [the archive](archive/s17-migration-log-20260928.md).
+Full directory inventory: [docs/REPO-MAP.md](docs/REPO-MAP.md). Current design and status are in [prd §0.3](prd.md#pipeline-design).
 
 ## Historical corpus and library observations
 
-The results below describe earlier classic/reference measurements, retained
+The results below describe earlier classic and reference measurements, retained
 for the defects they exposed. They are not the current candidate's acceptance
-snapshot; `tests/corpus.baseline` now requires 216 passes. Current candidate
-receipts are linked above.
+snapshot (current corpus and library checks run through `sh ./unisacc.com tests/run.cx -- --smoke|--all`).
 
-`tests/corpus.sh` runs c-testsuite, 220 single-file C programs this project had
+The historical `corpus` suite ran c-testsuite, 220 single-file C programs this project had
 no hand in writing:
 
 ```
@@ -462,10 +450,9 @@ program — and was **zero** in this snapshot, so the next one to appear was an 
 rather than another entry in an old backlog. `knownfail` is the list we are
 deliberately not chasing: floating point, GCC extensions, `_Generic`, and one
 place where this subset evaluates `int` arithmetic at 64 bits on purpose.
-`tests/corpus.baseline` is a ratchet, so `pass` may only go up.
 
 But a corpus of single files written *for compilers* is not the same as
-library code written *to be used*. `tests/tools.sh` runs the other kind —
+library code written *to be used*. The historical `tools` suite ran the other kind —
 crypto-algorithms, tiny-AES-c and tiny-regex-c: eleven entries, every one of
 them several files, with their own known-answer tests, none of it floating
 point:
@@ -511,7 +498,7 @@ enumeration over the whole domain.
 
 ## UJS（平行 JS 产品）
 
-开箱：**浏览器 / Node / Bun** `wasm_run`；Python 仅在 `ujs/construct/` 做出货。
+开箱：**浏览器 / Node / Bun** `wasm_run`；Python 仅在 `ujs/` 构造侧做出货。
 
 ```js
 import { bootRuntime, wasm_run } from "./ujs/core/wasm_run.js";
@@ -525,9 +512,9 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 | 开箱 | [`ujs/README.md`](ujs/README.md) · Host [`ujs/uxe/HOST_ABI.md`](ujs/uxe/HOST_ABI.md) |
 | 论文 B | [`research/ujs-paper-outline.md`](research/ujs-paper-outline.md) · [`research/README.md`](research/README.md) |
 | 演示 | `cd ujs && npm run demo` |
-| 验收 | `./tests/ujs.sh` · `cd ujs && npm run test:uxe:all` |
+| 验收 | `cd ujs && npm run test:uxe:all` |
 | 本地产物 | `python3 -m ujs web-build` |
-| 发版附件 | `./ujs/scripts/release-artifacts.sh` → `dist/`（上传 GitHub Release） |
+| 发版附件 | `ujs` 发布脚本 → `dist/`（上传 GitHub Release） |
 
 与 C 线共享构造代数；**不**把 Web 并入 `unisa` 交付范围。
 
@@ -549,8 +536,8 @@ fixed-package model-driver self-hosting retain their separate evidence scopes.
 ## C99 coverage
 
 <!-- c99-ledger:begin -->
-Clause coverage from [archive/testing-c43-legacy/tests/c99/clauses.tsv](archive/testing-c43-legacy/tests/c99/clauses.tsv), one row per normative subclause of
-ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are excluded:
+Clause coverage (historical c99 clause ledger, one row per normative subclause of
+ISO/IEC 9899:1999 + TC1-TC3, WG14 N1256; headings and informative clauses are excluded):
 
 | Part | Subclauses | Covered | Partial | Unsupported | Covered |
 |---|---|---|---|---|---|
@@ -560,11 +547,8 @@ ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are e
 | Annexes F, G | 19 | 0 | 0 | 19 | 0% |
 <!-- c99-ledger:end -->
 
-This table is frozen text. Its check, `tests/c99ledger.py` (gate `c99-ledger`), verified that
-every listed probe existed and ran in a gate suite, that no language clause was left unmapped, and
-that this table matched the ledger. The check, the ledger and the old gate are archived under
-`archive/testing-c43-legacy/tests/` (`c99ledger.py`, `c99/clauses.tsv`); nothing runs them today.
-The current coverage list is [tests/coverage.tsv](tests/coverage.tsv).
+This table is frozen historical text from the pre-0.0.43 clause ledger.
+The current active coverage list is [tests/coverage.tsv](tests/coverage.tsv).
 
 ## Known limitations
 
@@ -575,11 +559,11 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 
 | Limitation | What happens | Reproduce |
 |---|---|---|
-| 22 classes of C99 diagnostic gaps (A: 12, B: 10) | Eight class-A cases were measured as accepted with wrong output: `duplicate-case`, `case-outside-switch`, `struct-redefinition`, `conflicting-typedef`, `conflicting-function-types`, `enumerator-redeclared`, `float-subscript`, `return-pointer-as-int`. Full list and evidence in the [release notes](plans/release-notes-0.0.46.md). Check constraints separately with `gcc -std=c99 -pedantic-errors` | see release notes |
+| 22 classes of C99 diagnostic gaps (A: 12, B: 10) | Eight class-A cases were measured as accepted with wrong output: `duplicate-case`, `case-outside-switch`, `struct-redefinition`, `conflicting-typedef`, `conflicting-function-types`, `enumerator-redeclared`, `float-subscript`, `return-pointer-as-int`. Full list and evidence in [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) and `tests/negative-domain-matrix.tsv`. Check constraints separately with `gcc -std=c99 -pedantic-errors` | see `tests/negative-domain-matrix.tsv` |
 | `__LINE__` before a line continuation (C99 6.10.8) | A token that sits BEFORE a backslash-newline on the same line reads one line too high (`int m = __LINE__; int \\` then ` n = __LINE__;` gives `3 3` where gcc gives `2 3`); diagnostics at such a token are off by one the same way.  Tokens after the join, and every later line, are right | the two-line example |
 | No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected; the 0.0.20 reference names it (`not covered: complex types`, with an `UNCOVERED` record), released compilers say `expected ';'` or `unknown identifier`; `<complex.h>` is not provided | `double _Complex z = 1.0;` |
 | No trigraph replacement (C99 5.2.1.1) | `"a??=b"` stays `a??=b`; C99 requires `??=` to become `#` in translation phase 1 (gcc/clang also skip it unless `-trigraphs`) | `printf("%s", "??=")` |
-| ~~No `__LINE__` / `__FILE__`~~ -- **supported as of 0.0.13** | Both work on the reference.  `__LINE__` is the PHYSICAL line of the token -- spliced headers and continuations notwithstanding -- and inside a macro body it is the line of the INVOCATION, which is what gcc and clang report; `tests/c/n17-line.c` is the six-value probe (`9 1010 11 12 15 16`, identical to cc).  `__FILE__` is the path as given on the command line, and reaches the front end through the `\0cli/source` resource when the driver passes no SRCPATH.  This row is kept, struck through, rather than deleted because it was the external trial's most-reported omission | `printf("%d %s\n", __LINE__, __FILE__)` |
+| ~~No `__LINE__` / `__FILE__`~~ -- **supported as of 0.0.13** | Both work on the reference.  `__LINE__` is the PHYSICAL line of the token -- spliced headers and continuations notwithstanding -- and inside a macro body it is the line of the INVOCATION, which is what gcc and clang report (`9 1010 11 12 15 16`, identical to cc).  `__FILE__` is the path as given on the command line, and reaches the front end through the `\0cli/source` resource when the driver passes no SRCPATH.  This row is kept, struck through, rather than deleted because it was the external trial's most-reported omission | `printf("%d %s\n", __LINE__, __FILE__)` |
 | `long double` is `double` | `sizeof(long double) == 8`; no extended precision | `printf("%d", (int)sizeof(long double))` |
 | Private calling convention between generated code | Not SysV / AAPCS64: arguments are pushed on the tape stack left to right, `r9` is the frame pointer, the result is in `rax`, the caller pops.  **Unstable** -- it follows the regmap and abi tables and external code must not rely on it.  Interop with outside code goes through libunisacc's carriers, not through this convention.  [prd W-16](prd.md) | `examples/apps/xgui.c` writes a raw syscall stub by hand and must save `r9`, `rcx` and `r11`, because `r9` doubles as syscall argument 6 and `syscall` clobbers `rcx`/`r11` |
 | Windows product host calls remain a named boundary | `include/unisacc_ffi.h` has macOS, Linux and Windows loader branches. The reference Windows back end has conditional imports, but the current product route rejects `.hostaddr`/`.hostcall` by name until its Win64 bridge matches the reference; it must not emit a wrong image | a Windows program using `__hostcall` |
@@ -596,6 +580,6 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 Two things that look like limitations and are not.  `-ftrim-libc` is on by
 default and keeps library bodies only when a program reaches them by identifier
 closure, so a symbol reached solely through a bundled header's macro expansion
-can be reported undefined ([R13-0 #03](archive/testing-c43-legacy/tests/difftest.com.knownfail)).  And the
+can be reported undefined (pass `-fno-trim-libc` to keep every library body).  And the
 model compiler refuses to compile rather than falling back to the classic path,
 by design.
