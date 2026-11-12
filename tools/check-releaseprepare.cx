@@ -20,6 +20,25 @@ int main(int argc,char **argv){
  path(p,state,"upstream-evidence.tsv");size_t n;char *e=cx_read(p,&n);ck(!e||!strstr(e,"\tPASS\t"),"failed preparation cannot issue PASS");free(e);
  ck(rp_verify_upstream(state,config,assets)!=0,"test driver never qualifies upstream");
  size_t z=strlen(text);if(z+3>=sizeof text)die("mutation capacity");text[z]='#';text[z+1]='\n';text[z+2]=0;put(config,text);r=run(prepare,root);ck(r.rc==2,"changed configuration refuses resume");np_free(&r);
+ /* chain_adopt: nothing is launched; identity, compare and the final pack row are machine-checked. */
+ {const char *leaf[]={"adopt-none","adopt-rev","adopt-nopack","adopt-value","adopt-good"};char base[30000],ident[6000],wrong[6000];
+  z=strlen(text);text[z-2]=0;if(!strstr(text,"test_driver\t")||cx_fmt(base,sizeof base,"%s",text))die("adopt base config");
+  if(cx_fmt(ident,sizeof ident,"rev=%s\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",rev,root)||cx_fmt(wrong,sizeof wrong,"rev=0000000000000000000000000000000000000000\nmode=full\ncandidate=source\nctor=-\nroot=%s\n",root))die("adopt identity");
+  for(int i=0;i<5;i++){
+   char st[4400],cf[4400],as[4400],ch[4400],leafcfg[200];path(st,argv[2],leaf[i]);path(as,st,"rr/layout");if(cx_fmt(leafcfg,sizeof leafcfg,"%s.tsv",leaf[i]))die("adopt leaf");path(cf,argv[2],leafcfg);if(cx_fmt(leafcfg,sizeof leafcfg,"%s.chain",leaf[i]))die("adopt leaf");path(ch,argv[2],leafcfg);if(sy_mkdir(ch,0700))die("adopt chain dir");
+   char *at=strstr(base,"chain_out\t"),*end=at?strchr(at,'\n'):0;if(!at||!end)die("adopt chain_out");
+   np_buf c={0};np_put(&c,base,(size_t)(at-base));np_puts(&c,"chain_out\t");np_puts(&c,ch);np_puts(&c,end);np_puts(&c,"chain_adopt\t");np_puts(&c,i==3?"yes":"external-chain-run");np_puts(&c,"\n");put(cf,c.p);free(c.p);
+   if(i){path(p,ch,"chain-run.identity");put(p,i==1?wrong:ident);path(p,ch,"chain-run.tsv");put(p,"ATTEMPT\t1\tphase=x\trc=124\tresidue=1\nBLOCKER\tphase=x\treason=fixture\trc=2\tattempts=1\tresumes=0\n");path(p,ch,"checkpoint.tsv");put(p,i==2?"DONE\tcompare\twall_ms=1\tsha=-\n":"DONE\tcompare\twall_ms=1\tsha=-\nDONE\tpack\twall_ms=1\tsha=-\n");}
+   char *adopt[]={argv[3],"--prepare",st,cf,as,"--authorize-external-operations",0};r=run(adopt,root);
+   if(i==0)ck(r.rc==2&&r.err&&strstr(r.err,"chain adopt identity unreadable"),"adopt without chain output refused");
+   if(i==1)ck(r.rc==2&&r.err&&strstr(r.err,"not a full source run of build_rev"),"adopt of another revision refused");
+   if(i==2)ck(r.rc==2&&r.err&&strstr(r.err,"does not end at DONE pack"),"adopt of chain without final pack refused");
+   if(i==3)ck(r.rc==2&&r.err&&strstr(r.err,"chain_adopt value"),"adopt value other than external-chain-run refused");
+   if(i==4){ck(r.out&&strstr(r.out,"chain=ADOPTED\tblockers=1\tlaunched=0"),"adopt passes identity and discloses BLOCKER count");ck(r.rc==2&&r.err&&strstr(r.err,"compiler.p4.pkg"),"adopted chain still needs real sources");
+    path(p,st,"chain-adopt.tsv");char *a=cx_read(p,&n);ck(a&&strstr(a,"blockers\t1\n"),"adopt record retained");free(a);path(p,st,"upstream-evidence.tsv");ck(sy_exists(p)!=1,"adopt alone issues no upstream evidence");}
+   np_free(&r);
+  }
+ }
  char rr[4400],src[4400],table[4400],source_table[4400],binding[4400],h[65];path(rr,argv[2],"resume-pack");path(src,argv[2],"resume-src");if(sy_mkdir(rr,0700)||sy_mkdir(src,0700))die("resume fixture");path(table,rr,"initial.tsv");path(source_table,argv[1],"release/candidate.tsv");if(sy_copy(source_table,table,0600)<0)die("initial candidate copy");
  const char *roles[]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};np_buf bind={0};if(cx_fmt(text,sizeof text,"%s\n%s\n%s\n%s\n0000000000000000000000000000000000000000000000000000000000000000\n",root,table,src,snap))die("resume binding");np_puts(&bind,text);cx_sha256_hex("fixture\n",8,h);
  for(int i=0;i<10;i++){path(p,src,roles[i]);put(p,"fixture\n");np_puts(&bind,roles[i]);np_puts(&bind,"\t");np_puts(&bind,h);np_puts(&bind,"\n");}path(binding,rr,"pack-inputs.tsv");if(cx_write(binding,bind.p,bind.n))die("resume binding write");free(bind.p);
