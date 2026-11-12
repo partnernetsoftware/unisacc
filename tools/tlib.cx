@@ -548,9 +548,10 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
 /* link's --with sources: further root units of the same program (absolute paths). */
 static const char *with_src[16];
 static int nwith;
+static char withbuf[1024];
 
 static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char **req, int nreq, const char *work, int par) {
-    static char *av[MAXJOB + MAXLIB + 8];
+    static char *av[MAXJOB + 2 * MAXLIB + 8];
     static char alias[MAXLIB][4400];
     char why[512], rel[4400], real[4400], wdir[4400], obj[4400], mem[4400];
     char *c, *o = 0;
@@ -676,6 +677,15 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
                 if ((r && r != -ENOENT) || sy_symlink(libs[i].path, alias[i])) return say(1, "FAILED", alias[i], "cannot place the archive alias");
                 av[k++] = alias[i];
             }
+        /* the product takes an archive's members in one pass at the place it is named, so a member
+           needed by an object of an earlier archive in the list (a unit that calls up the rank order,
+           e.g. a lower package's function that names a higher one) is never taken.  Name the whole
+           run of archives a second time: the second pass finds what the first left open, and a
+           member taken already is not taken twice. */
+        {
+            int first = k - nlibs, q;
+            for (q = 0; q < nlibs; q++) av[k++] = av[first + q];
+        }
     }
     av[k++] = "-o"; av[k++] = (char *)out; av[k] = 0;
     rc = cx_runv_timeout(av, STEP_SECS, &o, &on);
@@ -884,7 +894,20 @@ static int cmd_prep(const char *tool, const char *out, const char *kitdir, int p
     for (i = 0; i < (long)tn && !listed; i = e + 1) {
         e = i;
         while (e < (long)tn && tb[e] != '\n') e++;
-        if (e > i && tb[i] != '#' && !tx_field(tb + i, e - i, '\t', 0, &off, &len) && tx_same(tb + i + off, len, rel, rn)) listed = 1;
+        if (e > i && tb[i] != '#' && !tx_field(tb + i, e - i, '\t', 0, &off, &len) && tx_same(tb + i + off, len, rel, rn)) {
+            long wo, wl;
+            listed = 1;
+            /* field 3 (optional): further root units of the same program, blank separated, ROOT-relative */
+            if (!tx_field(tb + i, e - i, '\t', 3, &wo, &wl) && wl > 0 && wl < (long)sizeof withbuf && tx_copy(withbuf, sizeof withbuf, tb + i + wo, wl) == 0) {
+                char *w = withbuf;
+                while (*w && nwith < 16) {
+                    while (*w == ' ') *w++ = 0;
+                    if (!*w) break;
+                    with_src[nwith++] = w;
+                    while (*w && *w != ' ') w++;
+                }
+            }
+        }
     }
     mm_free(tb);
     if (!listed) return NOT_APPLICABLE;
