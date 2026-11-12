@@ -82,13 +82,21 @@ static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd,
 static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\taffected.%s\n", ok ? "PASS" : "FAIL", name); }
 
+/* ROOT's product and this tool by absolute path, so a fixture cwd can still run them. */
+static char root_abs[4096], tool_abs[4400], prod_abs[4400];
+static const char *part_wanted = "all";
+static int want(const char *part) { return tx_eqz(part_wanted, "all") || tx_eqz(part_wanted, part); }
 /* sh ./unisacc.com tools/affected.cx -- ARGS...; stdout into OUT; the exit code, or -1 */
+static const char *tool_cwd = 0;   /* 0 = the caller's cwd; a fixture case points it at its tree */
 static int tool(char **args, char *out, long cap) {
     char *argv[16]; int i = 0, k, ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    argv[i++] = "sh"; argv[i++] = "./unisacc.com"; argv[i++] = "tools/affected.cx"; argv[i++] = "--";
+    argv[i++] = "sh";
+    argv[i++] = prod_abs;
+    argv[i++] = tool_abs;
+    argv[i++] = "--";
     for (k = 0; args[k] && i < 15; k++) argv[i++] = args[k];
     argv[i] = 0;
-    pid = spawn_pipe_bounded(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    pid = spawn_pipe_bounded(argv, tool_cwd, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
     if (pid < 0) return -1;
     while (n < cap - 1 && (r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
     out[n] = 0;
@@ -109,26 +117,56 @@ static long num(const char *out, const char *key) {
     while (out[at] >= '0' && out[at] <= '9') v = v * 10 + (out[at++] - '0');
     return v;
 }
-/* AFFECTED lines other than this check's own batch (affected-tool names the same paths in its literals) */
+/* AFFECTED lines other than this check's own batches.  The check file names the paths it probes, so
+   affected-tool, and now its split batches affected-tiers/list/run, are its own rows and not evidence that
+   some other batch writes that path. */
+static int own(const char *line, long n) {
+    static const char *mine[] = {"affected-tool", "affected-tiers", "affected-list", "affected-run", 0};
+    int k; char pre[64];
+    for (k = 0; mine[k]; k++) {
+        int pl = (int)strlen(mine[k]);
+        if (9 + pl + 1 >= (int)sizeof pre) continue;
+        if (cx_fmt(pre, sizeof pre, "AFFECTED\t%s\t", mine[k])) continue;
+        if (tx_prefix(line, n, pre, 9 + pl + 1)) return 1;
+    }
+    return 0;
+}
 static int others(const char *out) {
     long at = 0, n = tx_len(out, OUTCAP); int c = 0;
     while (at < n) {
         long e = at;
         while (e < n && out[e] != '\n') e++;
-        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9) && !tx_prefix(out + at, e - at, "AFFECTED\taffected-tool\t", 23)) c++;
+        if (tx_prefix(out + at, e - at, "AFFECTED\t", 9) && !own(out + at, e - at)) c++;
         at = e + 1;
     }
     return c;
 }
 
-int main(void) {
+
+int main(int argc, char **argv) {
     static char o[OUTCAP], p[OUTCAP];
     int rc, rc2;
+    {   int k;
+        for (k = 1; k < argc; k++) {
+            if (tx_eqz(argv[k], "--part") && k + 1 < argc) { part_wanted = argv[++k]; continue; }
+            /* a batch row passes its args as space-free tokens, so a bare part name is the same request */
+            if (tx_eqz(argv[k], "all") || tx_eqz(argv[k], "tiers") || tx_eqz(argv[k], "list") || tx_eqz(argv[k], "run")) { part_wanted = argv[k]; continue; }
+            if (tx_eqz(argv[k], "--")) continue;
+            printf("usage: check-affected.cx [--part all|tiers|list|run]\n");
+            return 2;
+        }
+    }
+    if (sy_realpath(".", root_abs, sizeof root_abs) < 0) { printf("FAIL\taffected.root\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (cx_fmt(prod_abs, sizeof prod_abs, "%s/unisacc.com", root_abs) || cx_fmt(tool_abs, sizeof tool_abs, "%s/tools/affected.cx", root_abs)) return 2;
+    if (!want("tiers") && !want("list") && !want("run")) { printf("FAIL\taffected.part-name\nCHECK_AFFECTED\tfailed=1\n"); return 2; }
+    if (want("tiers")) {
     { char *a[]={"--files","tools/tape-gap.cx","--tier","commit",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"AFFECTED\ttape-gap-tool\t"),"tier-commit-retains-source"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","daily",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-daily-includes-commit-id"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","release",0};rc=tool(a,o,OUTCAP);ck(rc==0&&has(o,"SELECTED\ttape-gap-tool\n"),"tier-release-includes-commit-id"); }
     { char *a[]={"--files","tools/tape-gap.cx","--tier","unknown",0};rc=tool(a,o,OUTCAP);ck(rc==2,"unknown-tier-refused"); }
     { char *a[]={"--ids","tape-gap-tool","--tier","commit","--run","--hard-deadline-ms","0",0};rc=tool(a,o,OUTCAP);ck(rc==3&&!has(o,"BATCH_RUN"),"tier-run-hard-deadline"); }
+    }
+    if (want("list")) {
     {   char *a[] = {"--files", "cx/sys/time.cx", 0};
         rc = tool(a, o, OUTCAP);
         ck(rc == 0 && has(o, "AFFECTED\tcx-l0-sys-spawn\twhy=cx/sys/time.cx\tvia=use\n"), "time-via-net-use");
@@ -157,6 +195,8 @@ int main(void) {
         rc = tool(a, o, OUTCAP);
         ck(rc == 0 && has(o, "USER\ttools/check-cx-sys-spawn.cx\n") && !has(o, "USER\ttools/check-core-alu.cx\n") && num(o, "\tusers=") >= 1, "users-reverse");
     }
+    }
+    if (want("run")) {
     {   char *a[] = {"--ids", "tape-gap-tool", "refactor-tool", "--run", "--start-deadline-ms", "0", 0};
         rc = tool(a, o, OUTCAP);
         ck(rc == 3 && has(o, "DEFERRED\ttape-gap-tool\tstart-deadline\n") && has(o, "DEFERRED\trefactor-tool\tstart-deadline\n")
@@ -173,13 +213,17 @@ int main(void) {
     }
     {   /* A material named `<x>-tool` whose source is not tools/<x>.cx must resolve to tests/cases/<x>.cx:
            release-exec's fake-gh / fake-s9 fixtures live there, and before that fallback existed the batch
-           was DEFERRED with prepare-failed=source-absent=tools/fake-gh.cx.  Start deadline 0 keeps the case
-           to the prebuild (no batch runs), and the named reasons are what the resolution produces. */
-        char *a[] = {"--ids", "release-exec", "--run", "--prepare-materials", "--start-deadline-ms", "0", 0};
+           was DEFERRED with prepare-failed=source-absent=tools/fake-gh.cx.  --materials-dump answers exactly
+           what the build path resolves to (one shared function) and builds nothing, so this case costs one
+           registry read instead of five cold compiles. */
+        char *a[] = {"--materials-dump", 0};
         rc = tool(a, o, OUTCAP);
-        ck(!has(o, "source-absent=tests/cases/") && has(o, "PREPARED\tfake-gh-tool\t") && has(o, "PREPARED\tfake-s9-tool\t")
-           && !has(o, "DEFERRED\trelease-exec\tprepare-failed=") && !has(o, "BATCH_RUN"), "material-falls-back-to-tests-cases");
+        ck(rc == 0 && has(o, "MATERIAL\trelease-exec\tfake-gh-tool\ttests/cases/fake-gh.cx\n")
+           && has(o, "MATERIAL\trelease-exec\tfake-s9-tool\ttests/cases/fake-s9.cx\n")
+           && has(o, "MATERIAL\trelease-exec\trelease-oneshot-tool\ttools/release-oneshot.cx\n"), "material-falls-back-to-tests-cases");
     }
+    }
+    if (want("list")) {
     {   /* cross-targets reads its unit list at run time, so no use/literal edge reaches src/host.cx,
            cx/sys/ or include/: the guard table must select all three split batches for each of those
            subtrees.  A guard row per split id is what makes a src/-only change still run the sweep. */
@@ -228,6 +272,7 @@ int main(void) {
           ck(rc == 0 && has(p, "AFFECTED\tsource-job-union\twhy=exec/tapeframe/frame-result.tsv\tvia=table\n")
              && !has(p, "AFFECTED\ttape-gap-tool\t"), "new-static-frame-reaches-real-consumer"); }
     }
-    printf("CHECK_AFFECTED\tfailed=%d\n", failed);
+    }
+    printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);
     return failed ? 1 : 0;
 }
