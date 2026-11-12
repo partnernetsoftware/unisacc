@@ -491,6 +491,6 @@ int main(int argc, char **argv) {
     if (interrupted) return interrupted;
     return WIFEXITED(status) ? WEXITSTATUS(status) : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 2;
 usage:
-    fprintf(stderr, "usage: bound [--status FILE] SECONDS(1..60) COMMAND [ARG...]\n");
+    fprintf(stderr, "usage: bound [--status FILE] SECONDS(1..95) COMMAND [ARG...]\n");
     return 2;
 }

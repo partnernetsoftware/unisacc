@@ -3,7 +3,7 @@
  *   sh ./unisacc.com tools/candidate-chain.cx -- --plan
  *   sh ./unisacc.com tools/candidate-chain.cx -- --rev REV --out DIR [--resume] [--parallel N] [--cc PATH]
  *
- * Each child is bounded to 55 seconds. Independent start/finish waves honor
+ * Each child is bounded to 90 seconds. Independent start/finish waves honor
  * --parallel (default 4) and retain per-job checkpoints. --jobs ROOT CTX BUILD
  * PHASE --job-index N runs one resumable job; --touch REL selects affected nets.
  * --baseline-ctx BASE accepts unchanged jobs only through verified adoption.
@@ -89,7 +89,7 @@ static void candidate_lock_fd(int fd, const char *path) {
         int rc = sy_flock(fd, 2 | 4);
         if (!rc) break;
         if (rc != -EWOULDBLOCK && rc != -EAGAIN && rc != -EINTR) die("candidate lock", path);
-        if (sy_now_ms() - start + candidate_lock_wait_ms >= 55000) die("candidate lock deadline", path);
+        if (sy_now_ms() - start + candidate_lock_wait_ms >= 90000) die("candidate lock deadline", path);
         usleep(1000);
     }
     candidate_lock_wait_ms += sy_now_ms() - start;
@@ -106,7 +106,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     char com[4400];
     char *v[128+28];
     int n = 0, i = 0;
-    if (secs < 1 || secs > 60) die("bound secs", "1..60");
+    if (secs < 1 || secs > 95) die("bound secs", "1..95");
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
     v[n++] = (char *)"sh";
     v[n++] = com;
@@ -118,7 +118,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     int lock = -1;
     if (rest[0] && strstr(rest[0], "/tools/whole-front.cx") && rest[1] && rest[2] && rest[3])
         lock = candidate_lock(!strcmp(rest[2], "prepare") ? rest[7] : rest[3], "prep");
-    int budget = 55 - (int)((candidate_lock_wait_ms + 999) / 1000);
+    int budget = 90 - (int)((candidate_lock_wait_ms + 999) / 1000);
     if (budget < 1) die("candidate lock/call deadline", rest[0]);
     if (secs > budget) secs = budget;
     int rc = pr_code(rest[0] ? rest[0] : "sh", v, secs);
@@ -126,7 +126,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     if (lock >= 0 && sy_close(lock)) die("candidate unlock", rest[0]);
     return rc;
 }
-static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
+static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 90); }
 /* Run tools/preflight.cx at one hook point (entry, post-snap, pre-p3, post-p3) under --strict:
    only that hook's rules from build/preflight-rules.tsv; a variable the chain has produced by
    then but missing is a FAIL, and a SKIP is a failure too. Any failure stops the chain here,
@@ -148,7 +148,7 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     v[n++] = tool; v[n++] = (char *)"--"; v[n++] = rules;
     v[n++] = a_root; v[n++] = a_build; v[n++] = a_snap; v[n++] = a_rev; v[n++] = a_pkg;
     v[n++] = a_hook; v[n++] = (char *)"--strict"; v[n] = 0;
-    if (bound_sh_secs(root, v, 55)) die("REFUSE preflight", hook);
+    if (bound_sh_secs(root, v, 90)) die("REFUSE preflight", hook);
     sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
 }
 /* Make CTOR executable (0755) only when its mode differs. An unconditional chmod moves the
@@ -166,7 +166,7 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
     int n = 0;
     if (ctor_exec(ctor)) die("chmod ctor", ctor);
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", snap)) die("path", "bound");
-    if (cx_fmt(secbuf, sizeof secbuf, "%d", 55)) die("fmt", "secs");
+    if (cx_fmt(secbuf, sizeof secbuf, "%d", 90)) die("fmt", "secs");
     v[n++] = bound;
     v[n++] = secbuf;
     v[n++] = (char *)"sh";
@@ -182,7 +182,7 @@ static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, co
     v[n++] = (char *)target;
     v[n++] = (char *)phase;
     v[n++] = 0;
-    return runv_secs(v, 55);
+    return runv_secs(v, 90);
 }
 static int step_secs(const char *root, char **args, int secs) {
     char tool[4400];
@@ -198,7 +198,7 @@ static int step_secs(const char *root, char **args, int secs) {
     v[n] = 0;
     return bound_sh_secs(root, v, secs);
 }
-static int step(const char *root, char **args) { return step_secs(root, args, 55); }
+static int step(const char *root, char **args) { return step_secs(root, args, 90); }
 static char chain_work[4400];
 static int derived_shape(const char *snap, const char *extra, const char *extra_skip, char fp[65]);
 /* 0.0.49: osx=front/merge/stub; win=front/merge then st_span units/e3/prune-elf. */
@@ -641,7 +641,7 @@ static void load_chain_phases(const char *root) {
         for (q = v[1]; *q; q++) if (!((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_')) die("REFUSE chain-phases id", path);
         for (j = 0; j < g_nphases; j++) if (!strcmp(g_phases[j], v[1])) die("REFUSE chain-phases duplicate", path);
         if (!*v[2] || strlen(v[2]) >= 80) die("REFUSE chain-phases exclusive_dir", path);
-        if (strcmp(v[3], "55")) die("REFUSE chain-phases timeout", path);
+        if (strcmp(v[3], "90")) die("REFUSE chain-phases timeout", path);
         if (strcmp(v[6], "1") && strcmp(v[6], "2") && strcmp(v[6], "3") && strcmp(v[6], "4")) die("REFUSE chain-phases parallelism", path);
         if (!*v[4] || strlen(v[4]) >= 4400 || !*v[5] || strlen(v[5]) >= 80) die("REFUSE chain-phases deps/lane", path);
         deps[g_nphases] = v[4]; lanes[g_nphases] = v[5]; domains[g_nphases] = v[2];
@@ -684,16 +684,16 @@ static void plan(void) {
     int i;
     sy_printf("CANDIDATE_CHAIN\tplan\tphases=%d\n", g_nphases);
     for (i = 0; i < g_nphases; i++)
-        sy_printf("PHASE\t%d\t%s\tchild_bound=55\n", i, g_phases[i]);
+        sy_printf("PHASE\t%d\t%s\tchild_bound=90\n", i, g_phases[i]);
     sy_printf("NOTE\tgen1 six slices PREPARED before g2; g2/g3 linux objects then link\n");
     sy_printf("NOTE\tosx=whole-front A1/A2/B; win=st_span three phases; Mac B serial\n");
-    sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=55\n");
-    sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=55\n");
-    sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=55\n");
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=90\n");
+    sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=90\n");
+    sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=90\n");
     sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=45\n");
-    sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=55\n", cf_root_count());
-    sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=55\n");
-    sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=55\n");
+    sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=90\n", cf_root_count());
+    sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=90\n");
+    sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=90\n");
 }
 
 static int hex40(const char *s) {
@@ -1040,7 +1040,7 @@ static int warmup_tools(const char *root) {
         char *a[3];
         if (cx_fmt(p, sizeof p, "%s/%s", root, w[i])) die("path", w[i]);
         a[0] = p; a[1] = (char *)"-c"; a[2] = 0;
-        if (bound_sh_secs(root, a, 55)) die("warmup", w[i]);
+        if (bound_sh_secs(root, a, 90)) die("warmup", w[i]);
         sy_printf("WARMUP\t%s\n", w[i]);
     }
     return 0;
@@ -1063,7 +1063,7 @@ static int sjw(const char *s, const char *ctx, const char *b, const char *phase,
     v[n++] = counts;
     v[n++] = (char *)act;
     v[n++] = 0;
-    return pr_code_at("source-job-wave",v,s,55);
+    return pr_code_at("source-job-wave",v,s,90);
 }
 /* --touch paths are repository-relative dependency inputs, not output selectors. */
 static const char *touches[48];
@@ -1079,7 +1079,7 @@ static void select_nets(const char *s) {
     v[n++] = "sh"; v[n++] = com; v[n++] = toolpath; v[n++] = "--"; v[n++] = "--root"; v[n++] = (char *)s; v[n++] = "--touch";
     for (int i = 0; i < ntouch; i++) v[n++] = (char *)touches[i];
     v[n] = 0; pr_result r;
-    if (pr_run("net-deps-touch", v, 0, 0, 55, &r) || r.rc) die("REFUSE net-deps --touch", s);
+    if (pr_run("net-deps-touch", v, 0, 0, 90, &r) || r.rc) die("REFUSE net-deps --touch", s);
     if (!r.out || !r.outn || r.out[r.outn - 1] != '\n' || memchr(r.out, 0, r.outn) || memchr(r.out, '\r', r.outn)) die("REFUSE net-deps wire", s);
     char *p = r.out; int footer = 0; nselected = 0;
     while (*p) {
@@ -1143,7 +1143,7 @@ static void verify_segment_jobs(const char *outdir,const char *s,const char *ctx
     if(!segment_verified_count)return;
     if(cx_fmt(path,sizeof path,"%s/segment-verify.ids",outdir)||cx_write(path,list,used)||cx_fmt(controller,sizeof controller,"%s/source-package-O2.elf",build))die("segment verify list",outdir);
     char *v[]={controller,"reuse-batch",(char *)s,(char *)ctx,path,0};long began=sy_now_ms();
-    if(pr_code_at("segment-reuse-batch",v,s,55))die("REFUSE segment job identity/bytes",path);
+    if(pr_code_at("segment-reuse-batch",v,s,90))die("REFUSE segment job identity/bytes",path);
     sy_printf("SEGMENT_VERIFY\tjobs=%d\twall_ms=%ld\tscope=process-only\n",segment_verified_count,sy_now_ms()-began);
 }
 static void verify_reuse(const char *s, const char *ctx, const char *b, const char *id) {
@@ -1152,11 +1152,11 @@ static void verify_reuse(const char *s, const char *ctx, const char *b, const ch
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", b)) die("path", id);
     if (baseline_ctx && !job_has_record(ctx, id)) {
         char *a[] = {controller, "adopt-job", (char *)s, (char *)ctx, (char *)baseline_ctx, (char *)id, 0};
-        if (pr_code_at("adopt-job", a, s, 55)) die("REFUSE adoption identity/bytes", id);
+        if (pr_code_at("adopt-job", a, s, 90)) die("REFUSE adoption identity/bytes", id);
         return; /* adopt-job already performs the canonical final verification. */
     }
     char *v[] = {controller, "reuse-job", (char *)s, (char *)ctx, (char *)id, 0};
-    if (pr_code_at("reuse-job", v, s, 55)) die("REFUSE unchanged job identity/bytes", id);
+    if (pr_code_at("reuse-job", v, s, 90)) die("REFUSE unchanged job identity/bytes", id);
     sy_printf("REUSED\t%s\tidentity-and-bytes-verified\n", id);
 }
 static void invalidate_job(const char *outdir, const char *ctx, const char *b, const char *id) {
@@ -1401,7 +1401,7 @@ static void final_proof(const char *root, const char *ctx, const char *build, co
     }
     char line[256]; if (cx_fmt(line, sizeof line, "%s\n%s", id, index == 0 ? "tool-compilerpack\ntool-pack\n" : "") || cx_write(idsfile, line, strlen(line))) die("final ids", idsfile);
     char *v[] = {controller, "verify-jobs", (char *)root, (char *)ctx, idsfile, 0}; pr_result r;
-    if (pr_run("final net verification", v, root, 0, 55, &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
+    if (pr_run("final net verification", v, root, 0, 90, &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
     if (!r.out || strncmp(r.out, "VERIFY_JOBS\t", 12) || !strchr(r.out, '\n') || strchr(r.out, '\n')[1]) { pr_free(&r); die("final verification wire", id); }
     final_fingerprint(ctx, id + 4, after);
     if (strcmp(before, after)) { pr_free(&r); die("final artifacts changed during verification", id); }
@@ -1432,7 +1432,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
         !sm_sha(controller, vhash) && !cx_fmt(vkey, sizeof vkey, "verify-context\n%s\n%s\n%s\n%s\n%s\n%s\n", vhash, root, ctx, cch, bsh, brh) && !derived_shape(root, ctx, "jobs", vshape)) vmemo = 1;
     if (vmemo && !sm_value_get(vkey, vshape, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
     else {
-        if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
+        if (pr_code_at("final context", v, root, 90)) die("final current SID/context", ctx);
         char again[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", again) && !strcmp(again, vshape)) sm_value_put(vkey, vshape, verified); else vmemo = 0;
     }
@@ -1446,7 +1446,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
     {   /* The closing bracket is the same question: a hit needs the same key and the listing as it is now. */
         char after[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", after) && !sm_value_get(vkey, after, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
-        else if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
+        else if (pr_code_at("final context", v, root, 90)) die("final current SID/context changed", ctx);
     }
     sy_printf("FINAL\tmodels=%d\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n", cf_net_count());
     return 0;
@@ -1558,7 +1558,7 @@ static int uc_guard(const char *root, const char *dir) {
     static const char sa[] = "int bf(int);\nint main(void){ return bf(1) - 2; }\n", sb[] = "int bf(int x){ return x + 1; }\n";
     if (cx_write(a, sa, sizeof sa - 1) || cx_write(b, sb, sizeof sb - 1)) return -1;
     if (cx_fmt(cmd, sizeof cmd, "UNISACC_RR_TIME=1 UNISACC_E3CACHE='%s/uc-guard-cache' sh '%s/unisacc.com' '%s' '%s' -o '%s/uc-guard.bin' 2>'%s'", dir, root, a, b, dir, err)) return -1;
-    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, 55)) return -1; }
+    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, 90)) return -1; }
     e = cx_read(err, &en);
     if (!e) return -1;
     for (k = 0; k < 3; k++) {
@@ -1760,7 +1760,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--recheck-only")) { recheck_only = 1; continue; }
         if (tx_eqz(argv[i], "--jobs-segment-s") && i + 1 < argc) {
             const char *p = argv[++i]; char *end = 0; long secs = strtol(p, &end, 10);
-            if (!*p || *end || secs < 55 || secs > 267) die("REFUSE jobs segment 55..267", p);
+            if (!*p || *end || secs < 90 || secs > 267) die("REFUSE jobs segment 90..267", p);
             jobs_segment_end = sy_now_ms() + secs * 1000; continue;
         }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
@@ -1864,7 +1864,7 @@ int main(int argc, char **argv) {
     if (jobs_root) {
         if (!strcmp(jobs_phase, "final")) {
             if (!outdir || !*outdir) die("REFUSE final --out required", 0);
-            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=%d\tchild_bound=55\n", cf_net_count()); return 0; }
+            if (plan_only) { sy_printf("FINAL_PLAN\tmodels=%d\tchild_bound=90\n", cf_net_count()); return 0; }
             if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
             if (jobs_index >= 0) {
                 char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", jobs_index)) die("phase", "final");
@@ -1994,7 +1994,7 @@ int main(int argc, char **argv) {
         if(step(root,a))die("build-objects",build);
         mark(outdir,"build-objects",sy_now_ms()-t0);
     } else {sy_printf("RESUME\tbuild-objects\n");if(until_phase && !strcmp(until_phase,"build-objects"))exit(0);}
-    /* The controller image no longer fits one 55 second phase from source: build-front stops at
+    /* The controller image no longer fits one 90 second phase from source: build-front stops at
        the bootstrap's phase checkpoint under its own receipt, build finishes from it. */
     if (!(resume && ck_done(outdir,"build-front"))) {
         long t0=sy_now_ms();
@@ -2312,7 +2312,7 @@ int main(int argc, char **argv) {
         v[n++] = (char *)"pack"; v[n++] = (char *)"--cache-manager-osx"; v[n++] = (char *)cm64; v[n++] = (char *)cmarm;
         v[n++] = packed; v[n++] = pkg; v[n++] = win64; v[n++] = lnx64; v[n++] = lnxarm;
         v[n++] = osx64; v[n++] = osxarm; v[n++] = winarm; v[n++] = 0;
-        if (bound_sh_secs(root, v, 55)) die("pack", packed);
+        if (bound_sh_secs(root, v, 90)) die("pack", packed);
         if (chdir(root)) die("chdir root", root);
         mark(outdir, "pack", sy_now_ms() - t0);
     } else sy_printf("RESUME\tpack\n");
