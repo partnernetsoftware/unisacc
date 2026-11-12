@@ -1,0 +1,280 @@
+/* tools/reg-gen.cx -- generate the registration tables from per-owner manifests.
+ *
+ *   sh ./unisacc.com tools/reg-gen.cx -- MODE [--root DIR] [TABLE]
+ *
+ * Why: three shared tables (tests/batches.tsv, tests/coverage.tsv, tests/tools-compile-sources.tsv) are
+ * appended to by every patch, so patches conflict at the table tails.  A manifest tests/reg/OWNER.reg holds
+ * lines `TABLE<TAB>ROW` (ROW verbatim, key = its first column); tests/reg/_headers.reg holds `TABLE<TAB>HEADER`.
+ * The tables are the manifests' rows, each table sorted in C byte order (whole line, unsigned bytes) under its
+ * header, so two patches that add rows in different manifests never touch the same file or line.
+ *
+ * Modes (ROOT defaults to the current directory):
+ *   --explode  read the three tables, write the manifests (owner: batches -> id, coverage -> id after the first
+ *              '.', tools-compile-sources -> basename without check- and .cx; a shared owner shares a file)
+ *   --write    read every manifest, write the three tables
+ *   --check    generate in memory, compare with the tables on disk: REG_GEN<TAB>SAME or REG_GEN<TAB>DIFF table=T
+ *   --emit T   print the generated table T (batches, coverage, tools-compile-sources) to stdout
+ * Refused (exit 2, named): a duplicate key within one table, a row with the wrong column count (14, 5, 2),
+ * an unknown table name, a manifest line without a TAB, a missing or repeated header.  Exit 1 on DIFF. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define NT 3
+static const char *tname[NT] = {"batches", "coverage", "tools-compile-sources"};
+static const char *tfile[NT] = {"tests/batches.tsv", "tests/coverage.tsv", "tests/tools-compile-sources.tsv"};
+static const int tcols[NT] = {14, 5, 2};
+static const int thdr[NT] = {1, 1, 0};
+
+typedef struct { const char *p; long n; int t; long seq; const char *own; long on; } Row;
+
+static Row *rows; static long nrows, caprows;
+static const char *hdr[NT]; static long hdrn[NT];
+static char root[1024] = ".";
+
+/* create or truncate PATH for writing (generated files are replaced as a whole) */
+static int wopen(const char *path) { return sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+
+static void die(const char *a, const char *b) { sy_printf("reg-gen: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+
+static char *slurp(const char *path, long *n) {
+    int fd = sy_open_read(path); long cap = 65536, len = 0; char *b;
+    if (fd < 0) return 0;
+    b = mm_alloc(cap + 1);
+    if (!b) die("out of memory", 0);
+    for (;;) {
+        long r;
+        if (len == cap) { char *g = mm_grow(b, 2 * cap + 1); if (!g) die("out of memory", 0); b = g; cap *= 2; }
+        r = sy_read(fd, b + len, cap - len);
+        if (r < 0) die("read failed", path);
+        if (r == 0) break;
+        len += r;
+    }
+    sy_close(fd);
+    b[len] = 0; *n = len;
+    return b;
+}
+
+static void path2(char *out, const char *a, const char *b) {
+    long la = tx_len(a, 1000), lb = tx_len(b, 1000);
+    if (la + lb + 2 > 2000) die("path too long", a);
+    tx_copy(out, la + 1, a, la); out[la] = '/'; tx_copy(out + la + 1, lb + 1, b, lb); out[la + 1 + lb] = 0;
+}
+
+static void addrow(const char *p, long n, int t, const char *own, long on) {
+    if (nrows == caprows) {
+        long nc = caprows ? 2 * caprows : 4096;
+        Row *g = caprows ? mm_grow(rows, nc * (long)sizeof *rows) : mm_alloc(nc * (long)sizeof *rows);
+        if (!g) die("out of memory", 0);
+        rows = g; caprows = nc;
+    }
+    rows[nrows].p = p; rows[nrows].n = n; rows[nrows].t = t; rows[nrows].seq = nrows;
+    rows[nrows].own = own; rows[nrows].on = on; nrows++;
+}
+
+static int tindex(const char *s, long n) {
+    int i;
+    for (i = 0; i < NT; i++) if (n == tx_len(tname[i], 64) && tx_same(s, n, tname[i], n)) return i;
+    return -1;
+}
+
+static int cols(const char *p, long n) { long i; int c = 1; for (i = 0; i < n; i++) if (p[i] == '\t') c++; return c; }
+
+/* ---- sorting: merge sort on an index-free Row array, by (table, whole line bytes) or (owner, seq) ---- */
+static int by_line(const Row *a, const Row *b) {
+    if (a->t != b->t) return a->t - b->t;
+    return tx_cmp(a->p, a->n, b->p, b->n);
+}
+static int by_owner(const Row *a, const Row *b) {
+    int c = tx_cmp(a->own, a->on, b->own, b->on);
+    if (c) return c;
+    return a->seq < b->seq ? -1 : a->seq > b->seq;
+}
+static void msort(Row *v, Row *tmp, long n, int (*cmp)(const Row *, const Row *)) {
+    long m, i, j, k;
+    if (n < 2) return;
+    m = n / 2;
+    msort(v, tmp, m, cmp); msort(v + m, tmp, n - m, cmp);
+    for (i = 0, j = m, k = 0; i < m || j < n; )
+        tmp[k++] = (j >= n || (i < m && cmp(&v[i], &v[j]) <= 0)) ? v[i++] : v[j++];
+    for (i = 0; i < n; i++) v[i] = tmp[i];
+}
+static void sortrows(int (*cmp)(const Row *, const Row *)) {
+    Row *tmp = mm_alloc((nrows + 1) * (long)sizeof *rows);
+    if (!tmp) die("out of memory", 0);
+    msort(rows, tmp, nrows, cmp);
+    mm_free(tmp);
+}
+
+/* Validate: columns, duplicate keys (rows are sorted by line, so same-key rows are adjacent only when the
+ * key is not a prefix issue; compare every pair of neighbours by key after a key sort is not needed because
+ * a TAB sorts below every printable byte, hence equal keys are adjacent). */
+static void validate(void) {
+    long i;
+    for (i = 0; i < nrows; i++) {
+        long k = tx_chr(rows[i].p, rows[i].n, '\t');
+        if (cols(rows[i].p, rows[i].n) != tcols[rows[i].t]) die("wrong column count", tname[rows[i].t]);
+        if (k <= 0) die("empty key", tname[rows[i].t]);
+        if (i > 0 && rows[i - 1].t == rows[i].t) {
+            long k0 = tx_chr(rows[i - 1].p, rows[i - 1].n, '\t');
+            if (k0 == k && tx_same(rows[i - 1].p, k, rows[i].p, k)) {
+                char key[256]; long m = k < 255 ? k : 255;
+                tx_copy(key, m + 1, rows[i].p, m); key[m] = 0;
+                die("duplicate key", key);
+            }
+        }
+    }
+}
+
+static void gen_sorted(void) { sortrows(by_line); validate(); }
+
+/* ---- reading ---- */
+static void load_tables(void) {
+    int t;
+    for (t = 0; t < NT; t++) {
+        char path[2100]; long n, at = 0; char *b; int first = 1;
+        path2(path, root, tfile[t]);
+        b = slurp(path, &n);
+        if (!b) die("cannot read", path);
+        while (at < n) {
+            long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+            if (first && thdr[t]) { hdr[t] = b + at; hdrn[t] = ln; }
+            else addrow(b + at, ln, t, 0, 0);
+            first = 0; at += ln + 1;
+        }
+    }
+}
+
+static void load_manifests(void) {
+    char dir[2100], names[262144]; int fd, cnt, i; const char *nm = names;
+    path2(dir, root, "tests/reg");
+    fd = sy_open_read(dir);
+    if (fd < 0) die("cannot open manifest directory", dir);
+    cnt = sy_dir_names(fd, names, (int)sizeof names);
+    sy_close(fd);
+    if (cnt < 0) die("cannot list manifest directory", dir);
+    for (i = 0; i < cnt; i++, nm += tx_len(nm, 4096) + 1) {
+        long ln = tx_len(nm, 4096), n, at = 0; char path[2200], *b;
+        if (ln < 5 || !tx_same(nm + ln - 4, 4, ".reg", 4)) continue;
+        path2(path, dir, nm);
+        b = slurp(path, &n);
+        if (!b) die("cannot read", path);
+        while (at < n) {
+            long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e, tab = tx_chr(b + at, l, '\t');
+            int t;
+            if (tab < 0) die("manifest line without TAB", path);
+            t = tindex(b + at, tab);
+            if (t < 0) die("unknown table name", path);
+            if (ln == 12 && tx_same(nm, 12, "_headers.reg", 12)) {
+                if (!thdr[t] || hdr[t]) die("missing or repeated header", tname[t]);
+                hdr[t] = b + at + tab + 1; hdrn[t] = l - tab - 1;
+            } else addrow(b + at + tab + 1, l - tab - 1, t, 0, 0);
+            at += l + 1;
+        }
+    }
+    for (i = 0; i < NT; i++) if (thdr[i] && !hdr[i]) die("no header for table", tname[i]);
+}
+
+/* ---- output ---- */
+static void put(int fd, const char *p, long n) { if (sy_write_all(fd, p, n) < 0) die("write failed", 0); }
+
+static void emit_table(int fd, int t) {
+    long i;
+    if (thdr[t]) { put(fd, hdr[t], hdrn[t]); put(fd, "\n", 1); }
+    for (i = 0; i < nrows; i++) if (rows[i].t == t) { put(fd, rows[i].p, rows[i].n); put(fd, "\n", 1); }
+}
+
+static int tab_eq(int t) {
+    char path[2100], tmp[2100]; long n = 0, pos = 0, i; char *b; int fd, same = 1;
+    path2(path, root, tfile[t]);
+    b = slurp(path, &n);
+    if (!b) return 0;
+    (void)tmp;
+    /* compare the generated bytes with the file without building a copy: walk the same sequence */
+    #define CMP(p_, n_) do { if (pos + (n_) > n || !tx_same(b + pos, (n_), (p_), (n_))) same = 0; pos += (n_); } while (0)
+    if (thdr[t]) { CMP(hdr[t], hdrn[t]); CMP("\n", 1); }
+    for (i = 0; i < nrows && same; i++) if (rows[i].t == t) { CMP(rows[i].p, rows[i].n); CMP("\n", 1); }
+    (void)fd;
+    return same && pos == n;
+}
+
+static void owner_of(Row *r, int *pt) {
+    const char *p = r->p; long k = tx_chr(p, r->n, '\t'), s = 0, e;
+    *pt = r->t;
+    if (r->t == 0) { r->own = p; r->on = k; return; }
+    if (r->t == 1) { long d = tx_chr(p, k, '.'); if (d >= 0) s = d + 1; r->own = p + s; r->on = k - s; return; }
+    {   long sl = tx_rfind(p, k, "/", 1); s = sl < 0 ? 0 : sl + 1; e = k;
+        if (k - s > 6 && tx_same(p + s, 6, "check-", 6)) s += 6;
+        if (e - s > 3 && tx_same(p + e - 3, 3, ".cx", 3)) e -= 3;
+        r->own = p + s; r->on = e - s; }
+}
+
+static int mkdir_ok(const char *d) { int rc = sy_mkdir(d, 0755); return rc == 0 || rc == -EEXIST; }
+
+static void explode(void) {
+    char dir[2100]; long i = 0; int t;
+    load_tables();
+    for (i = 0; i < nrows; i++) { int dummy; owner_of(&rows[i], &dummy); }
+    gen_sorted();
+    path2(dir, root, "tests/reg");
+    if (!mkdir_ok(dir)) die("cannot create", dir);
+    {   char path[2200]; int fd; path2(path, dir, "_headers.reg");
+        fd = wopen(path); if (fd < 0) die("cannot write", path);
+        for (t = 0; t < NT; t++) if (thdr[t]) { put(fd, tname[t], tx_len(tname[t], 64)); put(fd, "\t", 1); put(fd, hdr[t], hdrn[t]); put(fd, "\n", 1); }
+        sy_close(fd); }
+    sortrows(by_owner);
+    for (i = 0; i < nrows; ) {
+        long j = i; char name[512], path[2800]; int fd; long on = rows[i].on;
+        while (j < nrows && rows[j].on == on && tx_same(rows[j].own, on, rows[i].own, on)) j++;
+        if (on <= 0 || on > 200) die("bad owner name", 0);
+        { long q; for (q = 0; q < on; q++) { char c = rows[i].own[q]; name[q] = (c == '/' || c == ' ') ? '_' : c; } }
+        if (on == 8 && tx_same(name, 8, "_headers", 8)) die("owner name collides with _headers", 0);
+        tx_copy(name + on, 5, ".reg", 4); name[on + 4] = 0;
+        path2(path, dir, name);
+        fd = wopen(path); if (fd < 0) die("cannot write", path);
+        for (; i < j; i++) { put(fd, tname[rows[i].t], tx_len(tname[rows[i].t], 64)); put(fd, "\t", 1); put(fd, rows[i].p, rows[i].n); put(fd, "\n", 1); }
+        sy_close(fd);
+    }
+    sy_printf("REG_GEN\texploded rows=%ld\n", nrows);
+}
+
+static int eq(const char *s, const char *lit) { long n = tx_len(lit, 64); return tx_len(s, 64) == n && tx_same(s, n, lit, n); }
+
+int main(int argc, char **argv) {
+    int a, t, mode = 0, only = -1;
+    for (a = 1; a < argc; a++) {
+        if (eq(argv[a], "--explode")) mode = 1;
+        else if (eq(argv[a], "--write")) mode = 2;
+        else if (eq(argv[a], "--check")) mode = 3;
+        else if (eq(argv[a], "--emit")) mode = 4;
+        else if (argv[a][0] == '-' && !eq(argv[a], "--root")) die("unknown option", argv[a]);
+        else if (eq(argv[a], "--root")) {
+            if (a + 1 >= argc || tx_len(argv[a + 1], 1000) > 900) die("--root needs DIR", 0);
+            tx_copy(root, 1024, argv[a + 1], tx_len(argv[a + 1], 1000)); root[tx_len(argv[a + 1], 1000)] = 0; a++;
+        } else {
+            only = tindex(argv[a], tx_len(argv[a], 64));
+            if (only < 0) die("unknown table name", argv[a]);
+        }
+    }
+    if (!mode) die("usage: --explode|--write|--check|--emit TABLE [--root DIR]", 0);
+    if (mode == 1) { explode(); return 0; }
+    load_manifests();
+    gen_sorted();
+    if (mode == 4) { if (only < 0) die("--emit needs a table name", 0); emit_table(1, only); return 0; }
+    if (mode == 2) {
+        for (t = 0; t < NT; t++) {
+            char path[2100]; int fd; path2(path, root, tfile[t]);
+            fd = wopen(path); if (fd < 0) die("cannot write", path);
+            emit_table(fd, t); sy_close(fd);
+        }
+        sy_printf("REG_GEN\twritten rows=%ld\n", nrows);
+        return 0;
+    }
+    {   int bad = 0;
+        for (t = 0; t < NT; t++) if (!tab_eq(t)) { sy_printf("REG_GEN\tDIFF table=%s\n", tname[t]); bad = 1; }
+        if (!bad) sy_printf("REG_GEN\tSAME rows=%ld\n", nrows);
+        return bad;
+    }
+}

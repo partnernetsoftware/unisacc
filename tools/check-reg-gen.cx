@@ -1,0 +1,175 @@
+/* tools/check-reg-gen.cx -- tools/reg-gen.cx on private fixtures (the real tables are never touched).
+ *
+ *   sh ./unisacc.com tools/check-reg-gen.cx
+ *
+ *  (1) round trip: unsorted tables -> --explode -> --write gives sorted tables and --check says SAME;
+ *  (2) the --emit of a table is in C byte order;
+ *  (3) a row added in the middle gives the same output however the rows are spread over manifests and in
+ *      whatever order they are written, and it lands between its neighbours;
+ *  (4) a duplicate key, a wrong column count and an unknown table name are refused (exit 2, named);
+ *  (5) --check reports DIFF (exit 1) when a table on disk is not what the manifests generate.
+ * Prints PASS/FAIL per case and CHECK_REG_GEN<TAB>failed=N; exit 0 only when 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int failed;
+static char *out_buf;
+static size_t out_n;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\treg-gen.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static void fatal(const char *what) {
+    sy_printf("check-reg-gen: %s\nCHECK_REG_GEN\tfailed=%d\n", what, failed + 1);
+    exit(1);
+}
+
+static int run(const char *mode, const char *root, const char *tab) {
+    char *v[16]; int k = 0;
+    mm_free(out_buf); out_buf = 0; out_n = 0;
+    v[k++] = "sh"; v[k++] = "-c"; v[k++] = "exec \"$@\" 2>&1"; v[k++] = "sh";
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/reg-gen.cx"; v[k++] = "--";
+    v[k++] = (char *)mode;
+    if (tab) v[k++] = (char *)tab;
+    v[k++] = "--root"; v[k++] = (char *)root; v[k] = 0;
+    return cx_runv_timeout(v, 50, &out_buf, &out_n);
+}
+
+static int has(const char *w) { return out_buf && tx_find(out_buf, (long)out_n, w, tx_len(w, 256)) >= 0; }
+
+static void mkd(const char *d) { int rc = sy_mkdir(d, 0755); if (rc != 0 && rc != -EEXIST) fatal("mkdir"); }
+
+static void put_file(const char *path, const char *text) {
+    int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) fatal("cannot write fixture");
+    sy_write_all(fd, text, tx_len(text, 100000));
+    sy_close(fd);
+}
+
+/* One fixture row per table: key K, filler columns. */
+static void brow(char *dst, const char *k) {   /* 14 columns */
+    if (cx_fmt(dst, 400, "%s\ta\tb\tc\td\te\tf\tg\th\ti\tj\tk\tl\tm", k)) fatal("row bound");
+}
+static void crow(char *dst, const char *k) {   /* 5 columns */
+    if (cx_fmt(dst, 400, "%s\ta\tb\tc\td", k)) fatal("row bound");
+}
+
+/* A manifest line "TABLE<TAB>ROW\n" appended to buf. */
+static void mline(char *buf, const char *table, const char *row) {
+    long n = tx_len(buf, 8000);
+    if (cx_fmt(buf + n, 8000 - n, "%s\t%s\n", table, row)) fatal("manifest bound");
+}
+
+static const char *bhead = "id\tc2\tc3\tc4\tc5\tc6\tc7\tc8\tc9\tc10\tc11\tc12\tc13\tc14";
+static const char *chead = "id\tl\ti\te\ts";
+
+static void headers(const char *root) {
+    char buf[1000], path[600]; buf[0] = 0;
+    if (cx_fmt(buf, 1000, "batches\t%s\ncoverage\t%s\n", bhead, chead)) fatal("hdr bound");
+    if (cx_fmt(path, 600, "%s/tests/reg/_headers.reg", root)) fatal("path bound");
+    put_file(path, buf);
+}
+
+static void mk_root(const char *root) {
+    char d[600];
+    mkd(root);
+    if (cx_fmt(d, 600, "%s/tests", root)) fatal("path bound");
+    mkd(d);
+    if (cx_fmt(d, 600, "%s/tests/reg", root)) fatal("path bound");
+    mkd(d);
+}
+
+static void manifest(const char *root, const char *name, const char *text) {
+    char path[600];
+    if (cx_fmt(path, 600, "%s/tests/reg/%s.reg", root, name)) fatal("path bound");
+    put_file(path, text);
+}
+
+static int lines_sorted(void) {
+    /* line 1 is the header; every later line must not sort below its predecessor */
+    long at = 0, pl = -1, pa = 0; int n = 0;
+    while (out_buf && at < (long)out_n) {
+        long e = tx_chr(out_buf + at, (long)out_n - at, '\n'), l = e < 0 ? (long)out_n - at : e;
+        if (n >= 2 && tx_cmp(out_buf + pa, pl, out_buf + at, l) > 0) return 0;
+        pa = at; pl = l; n++;
+        at += l + 1;
+    }
+    return n >= 3;
+}
+
+int main(int argc, char **argv) {
+    char base[300], r1[400], r2[400], r3[400], r4[400], buf[8000], row[400], first[20000];
+    long i;
+    (void)argc; (void)argv;
+    if (cx_fmt(base, 300, "%s/check-reg-gen-%d", "out", sy_pid())) fatal("path bound");
+    mkd("out");
+    mkd(base);
+
+    /* (1) round trip on unsorted tables */
+    if (cx_fmt(r1, 400, "%s/a", base)) fatal("path bound");
+    mk_root(r1);
+    {   char path[600], t[4000]; t[0] = 0;
+        if (cx_fmt(t, 4000, "%s\n", bhead)) fatal("bound");
+        brow(row, "zz-last"); i = tx_len(t, 4000); cx_fmt(t + i, 4000 - i, "%s\n", row);
+        brow(row, "aa-first"); i = tx_len(t, 4000); cx_fmt(t + i, 4000 - i, "%s\n", row);
+        brow(row, "mm-mid"); i = tx_len(t, 4000); cx_fmt(t + i, 4000 - i, "%s\n", row);
+        cx_fmt(path, 600, "%s/tests/batches.tsv", r1); put_file(path, t);
+        t[0] = 0; cx_fmt(t, 4000, "%s\n", chead);
+        crow(row, "x.beta"); i = tx_len(t, 4000); cx_fmt(t + i, 4000 - i, "%s\n", row);
+        crow(row, "x.alpha"); i = tx_len(t, 4000); cx_fmt(t + i, 4000 - i, "%s\n", row);
+        cx_fmt(path, 600, "%s/tests/coverage.tsv", r1); put_file(path, t);
+        cx_fmt(path, 600, "%s/tests/tools-compile-sources.tsv", r1); put_file(path, "tools/z.cx\tregular\ntools/a.cx\tregular\n"); }
+    ck(run("--explode", r1, 0) == 0, "explode");
+    ck(run("--write", r1, 0) == 0, "write");
+    ck(run("--check", r1, 0) == 0 && has("SAME"), "check-same-after-explode-write");
+    ck(run("--emit", r1, "batches") == 0 && lines_sorted(), "emit-c-byte-order");
+
+    /* (3) middle insert, two spreads of the same rows over manifests, different write orders */
+    if (cx_fmt(r2, 400, "%s/b", base) || cx_fmt(r3, 400, "%s/c", base)) fatal("path bound");
+    mk_root(r2); mk_root(r3); headers(r2); headers(r3);
+    buf[0] = 0; brow(row, "k1"); mline(buf, "batches", row); brow(row, "k3"); mline(buf, "batches", row); manifest(r2, "p", buf);
+    buf[0] = 0; brow(row, "k2"); mline(buf, "batches", row); manifest(r2, "q", buf);
+    buf[0] = 0; brow(row, "k3"); mline(buf, "batches", row); brow(row, "k2"); mline(buf, "batches", row); manifest(r3, "q", buf);
+    buf[0] = 0; brow(row, "k1"); mline(buf, "batches", row); manifest(r3, "p", buf);
+    {   char c1[300], c2[300]; long n1, n2;
+        ck(run("--emit", r2, "batches") == 0, "emit-spread-1");
+        n1 = (long)out_n; tx_copy(first, 20000, out_buf, n1 < 19999 ? n1 : 19999);
+        ck(run("--emit", r3, "batches") == 0, "emit-spread-2");
+        n2 = (long)out_n;
+        ck(n1 == n2 && tx_same(first, n1, out_buf, n2), "middle-insert-order-independent");
+        { long a1 = tx_find(out_buf, n2, "k1\t", 3), a2 = tx_find(out_buf, n2, "k2\t", 3), a3 = tx_find(out_buf, n2, "k3\t", 3);
+          ck(a1 >= 0 && a1 < a2 && a2 < a3, "middle-insert-between-neighbours"); }
+        (void)c1; (void)c2; }
+
+    /* (4) refusals */
+    if (cx_fmt(r4, 400, "%s/d", base)) fatal("path bound");
+    mk_root(r4); headers(r4);
+    buf[0] = 0; brow(row, "k1"); mline(buf, "batches", row); manifest(r4, "p", buf);
+    buf[0] = 0; brow(row, "k1"); mline(buf, "batches", row); manifest(r4, "dup", buf);
+    ck(run("--check", r4, 0) == 2 && has("duplicate key"), "refuse-duplicate-key");
+    buf[0] = 0; brow(row, "k1"); mline(buf, "batches", row); manifest(r4, "dup", "");
+    manifest(r4, "dup", buf);
+    manifest(r4, "dup", "batches\tk9\tonly-two\n");
+    ck(run("--check", r4, 0) == 2 && has("wrong column count"), "refuse-wrong-columns");
+    manifest(r4, "dup", "nosuch\tk9\tx\n");
+    ck(run("--check", r4, 0) == 2 && has("unknown table name"), "refuse-unknown-table");
+
+    /* (5) DIFF when the disk table is not the generated one */
+    manifest(r4, "dup", "");
+    {   char path[600], t[600];
+        cx_fmt(path, 600, "%s/tests/batches.tsv", r4);
+        cx_fmt(t, 600, "%s\n", bhead); put_file(path, t);
+        cx_fmt(path, 600, "%s/tests/coverage.tsv", r4);
+        cx_fmt(t, 600, "%s\n", chead); put_file(path, t);
+        cx_fmt(path, 600, "%s/tests/tools-compile-sources.tsv", r4); put_file(path, ""); }
+    ck(run("--check", r4, 0) == 1 && has("DIFF table=batches"), "check-diff");
+
+    sy_printf("CHECK_REG_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
