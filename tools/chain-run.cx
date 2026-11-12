@@ -3,6 +3,18 @@
  * [--candidate ABS_EXEC] [--watch ABS_EXEC] [-- child candidate options]
  * Overrides are native executables with the same argv protocol (also used by the fake fixture).
  * Persisted deadline/retry/attempt budgets are shared by subsequent invocations, not reset.
+ * Segments (T11): [--segment-s 1..270] bounds one invocation. A phase is started only when its
+ * whole bound fits before the segment end, so an expiring segment has no child to kill: it writes
+ * a SEGMENT row and exits 75 (continue). [--max-segments N] is persisted with the budget; the
+ * total deadline, attempts and resumes are never reset by a new segment. A retry whose watch
+ * observation does not fit is carried as "owed" and settled first by the next segment.
+ * [--supervise] (needs both options; [--runner ABS_EXEC] overrides the native self-build) runs
+ * segments one after another until rc is not 75, the persisted caps stop it, or a segment overruns.
+ * SHA memo (T11): phases get UNISACC_CHAIN_SHAMEMO(_ID), bound to this output's identity; compare
+ * and pack are each preceded by a memo-less "<phase>-recheck" attempt (candidate --recheck-only).
+ * [--no-sha-memo] turns it off for all phases. [--memo-derived] additionally lets candidate-chain
+ * reuse the verify-context verdict and the prepared closure plan (off by default: both tools
+ * depend on host state outside the listed trees; see docs/toolchain.md).
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -20,9 +32,12 @@ static const char *out;
 static long end_ms;
 static int attempts, resumes, max_attempts=4096, max_resumes=3;
 static int phase_bound=55, parallel=4;
-typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound; char phase[256]; } task;
+typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
 static int probing; static char pending[256];
+#define RC_SEGMENT 75
+static long seg_end_ms; static int segment_s, segments, max_segments, owed;
+static char memo_path[4400], memo_id[65]; static int memo_derived;
 static void die(const char *s);
 static int lookup(const char *id) { for(int i=0;i<plan_count;i++)if(!strcmp(plan[i].id,id))return i;return -1; }
 static void validate_plan(void) {
@@ -59,11 +74,19 @@ static void append(const char *file,const char *s) {
 }
 static int blocker(const char *phase,const char *why,int rc) {
     char s[1024]; if(cx_fmt(s,sizeof s,"BLOCKER\tphase=%s\treason=%s\trc=%d\tattempts=%d\tresumes=%d\n",phase,why,rc,attempts,resumes)) die("blocker bound");
-    append("chain-run.tsv",s); sy_printf("%s",s); return rc;
+    append("chain-run.tsv",s); sy_printf("%s",s);
+    /* 75 is reserved for a cleanly expired segment; a child's own 75 is a blocker, not a continue. */
+    return rc==RC_SEGMENT?2:rc;
 }
 static void save(void) {
     char p[4400], tmp[4400], s[256]; path(p,"chain-run.budget"); path(tmp,"chain-run.budget.new");
-    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
+    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel,segments,max_segments,owed)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
+}
+/* A child whose whole bound does not end before the segment does is not started. */
+static int seg_fits(int bound) { return !seg_end_ms||sy_now_ms()+(long)bound*1000<=seg_end_ms; }
+static int segment_expired(const char *next) {
+    char s[600]; if(cx_fmt(s,sizeof s,"SEGMENT\t%ld\tn=%d\texpired\tnext=%s\tattempts=%d\tresumes=%d\towed=%d\n",sy_wall_s(),segments,next,attempts,resumes,owed)) die("segment bound");
+    append("chain-run.tsv",s); sy_printf("CHAIN_RUN\tSEGMENT\tcontinue\tn=%d\tnext=%s\n",segments,next); return RC_SEGMENT;
 }
 static int done(const char *phase) {
     char p[4400], needle[300]; size_t n=0; path(p,"checkpoint.tsv"); char *b=cx_read(p,&n);
@@ -83,6 +106,9 @@ static char *watch_argv[8];
 static int observe(void) {
     long left=(end_ms-sy_now_ms())/1000;
     if(left<1) return blocker("chain-watch","deadline",3);
+    /* The read-only observation is capped by the segment (never extended); no segment time left
+       means the caller carries it to the next segment. */
+    if(seg_end_ms){long seg=(seg_end_ms-sy_now_ms())/1000;if(seg<1)return RC_SEGMENT;if(seg<left)left=seg;}
     pr_result r; int t=cr_run("chain-watch",watch_argv,left<55?(int)left:55,&r);
     pr_echo(&r);
     char p[4400]; path(p,"chain-run-watch.stdout");
@@ -113,10 +139,26 @@ static int verify_pack(void) {
 /* No polling: each loop executes one bounded child or consumes a finite phase entry. */
 /* Only the forked owner scans /proc. The scheduler never owns a cr_run tree. */
 typedef struct { int rc,retry,residue; } outcome;
+/* With the memo on, compare and pack are each preceded by their own bounded attempt
+   "<phase>-recheck": candidate --recheck-only walks every earlier re-check with the memo
+   removed and builds nothing. Only after it returns 0 is the phase itself started, and any
+   retry of the phase needs a new one. Without the memo the phase call is that full walk. */
+static int memo_on(const char *phase) { (void)phase; return memo_path[0]!=0; }
+static int needs_recheck(const char *phase) { return memo_path[0]&&(!strcmp(phase,"compare")||!strcmp(phase,"pack")); }
+static int is_recheck(const char *label) { size_t n=strlen(label); return n>8&&!strcmp(label+n-8,"-recheck"); }
 static void result_path(char *p,int a,const char *suffix) { char leaf[100];cx_fmt(leaf,sizeof leaf,"chain-run-%d.%s",a,suffix);path(p,leaf); }
 static void execute(const char *phase,char **v,int bound,int a) {
     char p[4400];result_path(p,a,"argv");FILE *f=fopen(p,"wb");if(!f)_exit(2);
     for(int i=0;v[i];i++)fprintf(f,"%s\n",v[i]);if(fclose(f))_exit(2);
+    /* The environment is rebuilt for every child: an inherited memo never reaches a phase, and a
+       recheck attempt never sees one. */
+    int pre=0;for(int i=0;v[i];i++)if(!strcmp(v[i],"--recheck-only"))pre=1;
+    if(pre){if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO")||sy_unsetenv("UNISACC_CHAIN_SHAMEMO_ID")||sy_setenv("UNISACC_CHAIN_RECHECK_ID",memo_id,1))_exit(2);}
+    else if(memo_on(phase)){if(sy_setenv("UNISACC_CHAIN_SHAMEMO",memo_path,1)||sy_setenv("UNISACC_CHAIN_SHAMEMO_ID",memo_id,1)||sy_unsetenv("UNISACC_CHAIN_RECHECK_ID"))_exit(2);}
+    else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO")||sy_unsetenv("UNISACC_CHAIN_SHAMEMO_ID")||sy_unsetenv("UNISACC_CHAIN_RECHECK_ID"))_exit(2);
+    /* Derived memos (verify-context verdict, closure-list plan) only on --memo-derived, never inherited. */
+    if(!pre&&memo_on(phase)&&memo_derived){if(sy_setenv("UNISACC_CHAIN_SHAMEMO_DERIVED","1",1))_exit(2);}
+    else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO_DERIVED"))_exit(2);
     pr_result r;int t=cr_run(phase,v,bound,&r);
     result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
     result_path(p,a,"stderr");if(cx_write(p,r.err?r.err:"",r.errn))_exit(2);
@@ -131,7 +173,7 @@ static outcome collect(int pid,int a,const char *phase,int bound) {
     outcome r={127,0,0};char p[4400];size_t n=0;result_path(p,a,"result");char *b=cx_read(p,&n);
     if(WIFEXITED(st)&&!WEXITSTATUS(st)&&b)sscanf(b,"%d %d %d",&r.rc,&r.retry,&r.residue);free(b);
     result_path(p,a,"why");b=cx_read(p,&n);if(b){append("chain-run.tsv",b);append("chain-run.tsv","\n");free(b);}
-    char row[600];cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\tbound=%d\n",a,phase,r.rc,r.residue,bound);append("chain-run.tsv",row);return r;
+    char row[600];cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\tbound=%d\tmemo=%s\n",a,phase,r.rc,r.residue,bound,memo_on(phase)&&!is_recheck(phase)?"on":"off");append("chain-run.tsv",row);return r;
 }
 static int run(const char *phase,char **v,char *fresh_output) {
     if(probing){if(tx_copy(pending,sizeof pending,phase,strlen(phase)))die("pending phase");return -100;}
@@ -139,9 +181,10 @@ static int run(const char *phase,char **v,char *fresh_output) {
         long left=(end_ms-sy_now_ms())/1000;
         if(left<1) return blocker(phase,"deadline",3);
         if(attempts>=max_attempts) return blocker(phase,"attempts-exhausted",3);
+        int call_bound=left<phase_bound?(int)left:phase_bound;
+        if(!seg_fits(call_bound)) return segment_expired(phase);
         attempts++; save();
         if(fresh_output&&cx_fmt(fresh_output,4400,"%s/%s-%d",out,phase,attempts)) die("fresh output bound");
-        int call_bound=left<phase_bound?(int)left:phase_bound;
         int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,call_bound,attempts);
         outcome o=collect(owner,attempts,phase,call_bound);
         int rc=o.rc,retry=o.retry,residue=o.residue;char row[512];
@@ -150,7 +193,9 @@ static int run(const char *phase,char **v,char *fresh_output) {
         if(!retry) return blocker(phase,"first-failure",rc);
         if(sy_now_ms()>=end_ms) return blocker(phase,"deadline",3);
         if(resumes>=max_resumes) return blocker(phase,"resumes-exhausted",3);
-        int observed=observe(); if(observed) return observed;
+        int observed=observe();
+        if(observed==RC_SEGMENT){owed=1;save();return segment_expired(phase);}
+        if(observed) return observed;
         resumes++;if(parallel>1)parallel--;save();
         cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tphase=%s\trc=%d\n",sy_wall_s(),resumes,phase,rc); append("chain-run.tsv",row);
         /* A kill can race the phase receipt: never ask --until for a target it will skip. */
@@ -216,15 +261,26 @@ static int ready(task *t) {
     for(int i=0;i<plan_count;i++)if(plan[i].pid&&((strcmp(t->domain,"-")&&!strcmp(t->domain,plan[i].domain))||(strcmp(t->lane,"-")&&!strcmp(t->lane,plan[i].lane))||t->width==1||plan[i].width==1))return 0;
     return 1;
 }
+/* One finished attempt. The assertions are the ones the scheduler always made; a recheck
+   attempt differs only in that its success arms the phase instead of expecting a checkpoint. */
+static void settle(task *t,outcome r,int *stop,int *retrying) {
+    int pre=t->recheck==1; t->recheck=0;
+    if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
+    else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
+    else if(r.retry){*retrying=1;t->state=0;}
+    else if(pre){t->recheck=2;t->state=0;}
+    else if(!done(t->phase)){if(!*stop)*stop=blocker(t->phase,"missing-checkpoint",2);}
+    else t->state=done(t->id)?2:0;
+}
 static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
-    int active=0,stop=0,retrying=0;
+    int active=0,stop=0,retrying=0;const char *held=0;
     for(int i=0;i<plan_count;i++) {
         task *t=&plan[i];
         if(!strncmp(t->id,"g2-lnx-x86_64-obj-",18)||!strncmp(t->id,"g2-lnx-arm64-obj-",17))t->state=2;
         if(rehearse&&strcmp(t->id,"snap")&&strcmp(t->id,"build-objects")&&strcmp(t->id,"build")&&strcmp(t->id,"wave-objects")&&strcmp(t->id,"wave-runner")&&strcmp(t->id,"ctx"))t->state=2;
     }
     for(;;) {
-        int remaining=0;
+        int remaining=0;held=0;
         for(int i=0;i<plan_count;i++) {
             task *t=&plan[i];if(t->state==2)continue;remaining++;
             if(t->pid||stop||retrying||active>=parallel||active>=t->width||!ready(t))continue;
@@ -235,10 +291,17 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             long left=(end_ms-sy_now_ms())/1000;
             if(left<1){stop=blocker(t->phase,"deadline",3);continue;}
             if(attempts>=max_attempts){stop=blocker(t->phase,"attempts-exhausted",3);continue;}
-            t->attempt=++attempts;save();t->state=1;
-            v[target]=t->phase;v[tail]=0;
-            if(strcmp(t->lane,"-")){v[tail]="--lane";v[tail+1]=t->lane;v[tail+2]=0;}
             int bound=left<t->bound?(int)left:t->bound;
+            /* Segment end: ready work that does not fit is held, never started and killed. */
+            if(!seg_fits(bound)){if(!held)held=t->id;continue;}
+            t->attempt=++attempts;save();t->state=1;
+            int pre=needs_recheck(t->phase)&&t->recheck!=2,end=tail;
+            t->recheck=pre?1:0;
+            if(cx_fmt(t->label,sizeof t->label,pre?"%s-recheck":"%s",t->phase))die("label bound");
+            v[target]=t->phase;
+            if(strcmp(t->lane,"-")){v[end++]="--lane";v[end++]=t->lane;}
+            if(pre)v[end++]="--recheck-only";
+            v[end]=0;
             t->call_bound=bound;
             t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,bound,t->attempt);
             active++;
@@ -248,13 +311,16 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             if(retrying){
                 if(sy_now_ms()>=end_ms)return blocker("scheduler","deadline",3);
                 if(resumes>=max_resumes)return blocker("scheduler","resumes-exhausted",3);
-                int rc=observe();if(rc)return rc;
+                int rc=observe();
+                if(rc==RC_SEGMENT){owed=1;save();return segment_expired("scheduler-resume");}
+                if(rc)return rc;
                 resumes++;if(parallel>1)parallel--;save();
                 char row[200];cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tparallel=%d\n",sy_wall_s(),resumes,parallel);append("chain-run.tsv",row);retrying=0;continue;
             }
             if(!remaining)return 0;
             int unfinished=0;for(int i=0;i<plan_count;i++)if(plan[i].state!=2)unfinished++;
             if(!unfinished)return 0;
+            if(held)return segment_expired(held);
             return blocker("scheduler","dependencies-stalled",2);
         }
         /* Drain available owner completions before dispatching more work. */
@@ -264,26 +330,61 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
                 task *t=&plan[i];char p[4400];result_path(p,t->attempt,"result");
                 if(!sy_exists(p)) {
                     int st=0;int q=waitpid(t->pid,&st,WNOHANG);if(!q)continue;if(q<0&&errno==EINTR)continue;
-                    if(q>0&&WIFEXITED(st)&&!WEXITSTATUS(st)&&sy_exists(p)) { outcome r=collect(t->pid,t->attempt,t->phase,t->call_bound);t->pid=0;active--;got=1;
-                        if(r.residue){if(!stop)stop=blocker(t->phase,"surviving-processes",2);}
-                        else if(r.rc&&!r.retry){if(!stop)stop=blocker(t->phase,"first-failure",r.rc);}
-                        else if(r.retry){retrying=1;t->state=0;}
-                        else if(!done(t->phase)){if(!stop)stop=blocker(t->phase,"missing-checkpoint",2);}
-                        else t->state=done(t->id)?2:0;
+                    if(q>0&&WIFEXITED(st)&&!WEXITSTATUS(st)&&sy_exists(p)) { outcome r=collect(t->pid,t->attempt,t->label,t->call_bound);t->pid=0;active--;got=1;
+                        settle(t,r,&stop,&retrying);
                         continue;
                     }
                     t->pid=0;active--;if(!stop)stop=blocker(t->phase,"owner-result-missing",2);got=1;continue;
                 }
-                outcome r=collect(t->pid,t->attempt,t->phase,t->call_bound);t->pid=0;active--;got=1;
-                if(r.residue){if(!stop)stop=blocker(t->phase,"surviving-processes",2);}
-                else if(r.rc&&!r.retry){if(!stop)stop=blocker(t->phase,"first-failure",r.rc);}
-                else if(r.retry){retrying=1;t->state=0;}
-                else if(!done(t->phase)){if(!stop)stop=blocker(t->phase,"missing-checkpoint",2);}
-                else t->state=done(t->id)?2:0;
+                outcome r=collect(t->pid,t->attempt,t->label,t->call_bound);t->pid=0;active--;got=1;
+                settle(t,r,&stop,&retrying);
             }
             if(!got)sy_sleep_ms(2);
         }
     }
+}
+/* Supervisor: one bounded segment child after another. It owns no chain state: the deadline,
+   attempt, resume and segment budgets live in the child's persisted budget and stop the child
+   itself (rc 3). The loop is finite (max_segments + 1) and each child is killed at its
+   segment + 10 s backstop, which is a blocker, never a continue. */
+static int supervise(int argc,char **argv,int sep,const char *runner) {
+    char lock[4400],native[4400],row[600]; path(lock,"chain-supervise.lock"); int fd=sy_open(lock,O_RDWR|O_CREAT,0644);
+    if(fd<0||sy_flock(fd,2|4)) die("supervisor already owns output");
+    if(!runner) {
+        path(native,"chain-run-native");
+        char *prepare[]={"sh","./unisacc.com","tools/chain-run.cx","-o",native,0}; pr_result r;
+        int t=pr_run("prepare-runner",prepare,0,0,phase_bound,&r);
+        if(t||r.rc||r.residue){pr_echo(&r);pr_free(&r);append("chain-run.tsv","SUPERVISE\tBLOCKER\treason=prepare-runner\n");sy_printf("SUPERVISE\tBLOCKER\treason=prepare-runner\n");return 2;}
+        pr_free(&r); runner=native;
+    }
+    char *v[160]; int k=0; v[k++]=(char*)runner;
+    for(int i=1;i<argc;i++) {
+        if(i<sep) { /* only runner options, never the candidate's own arguments after "--" */
+            if(!strcmp(argv[i],"--supervise")) continue;
+            if(!strcmp(argv[i],"--runner")) { i++; continue; }
+        }
+        if(k>=158) die("argument bound"); v[k++]=argv[i];
+    }
+    v[k]=0;
+    for(int n=1;n<=max_segments+1;n++) {
+        pr_result r; int t=pr_run("segment",v,0,0,segment_s+10,&r); pr_echo(&r);
+        int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc),residue=r.residue; pr_free(&r);
+        if(cx_fmt(row,sizeof row,"SUPERVISE\t%ld\titeration=%d\trc=%d\tresidue=%d\n",sy_wall_s(),n,rc,residue)) die("supervise bound");
+        append("chain-run.tsv",row);
+        if(t||residue){append("chain-run.tsv","SUPERVISE\tBLOCKER\treason=segment-overrun-or-residue\n");sy_printf("SUPERVISE\tBLOCKER\treason=segment-overrun-or-residue\trc=%d\n",rc);return 2;}
+        if(rc!=RC_SEGMENT) { sy_printf("SUPERVISE\tSTOP\titerations=%d\trc=%d\n",n,rc); return rc; }
+        /* rc 75 alone is not enough: the segment's own expiry row must be the evidence just before ours. */
+        char p[4400]; size_t size=0; path(p,"chain-run.tsv"); char *text=cx_read(p,&size); int proved=0;
+        if(text) {
+            char *mine=strstr(text,row),*at=mine;
+            while(mine&&strstr(mine+1,row)) { mine=strstr(mine+1,row); at=mine; }
+            if(at&&at>text) { char *line=at-1; while(line>text&&line[-1]!='\n') line--; proved=!strncmp(line,"SEGMENT\t",8)&&strstr(line,"\texpired\t")&&strstr(line,"\texpired\t")<at; }
+        }
+        free(text);
+        if(!proved){append("chain-run.tsv","SUPERVISE\tBLOCKER\treason=continue-without-expiry-row\n");sy_printf("SUPERVISE\tBLOCKER\treason=continue-without-expiry-row\n");return 2;}
+    }
+    append("chain-run.tsv","SUPERVISE\tBLOCKER\treason=segments-exhausted\n");sy_printf("SUPERVISE\tBLOCKER\treason=segments-exhausted\n");
+    return 3;
 }
 int main(int argc,char **argv) {
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
@@ -292,11 +393,14 @@ int main(int argc,char **argv) {
         char *fixture[]={argv[3],"--partition-fixture",argv[4],(char*)out,(char*)out,0,0};
         return fronts("gen1-osx-x86_64","fixture",fixture,5);
     }
-    const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0;
-    int rehearse=0, extra=argc, i; long seconds=5400;
+    const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0,*runner=0;
+    int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=5400, entered=sy_now_ms();
     for(i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--")) { extra=i+1; break; }
         if(!strcmp(argv[i],"--rehearse")) { rehearse=1; continue; }
+        if(!strcmp(argv[i],"--supervise")) { supervising=1; continue; }
+        if(!strcmp(argv[i],"--no-sha-memo")) { memo=0; continue; }
+        if(!strcmp(argv[i],"--memo-derived")) { memo_derived=1; continue; }
         if(i+1>=argc) die("missing value");
         const char *a=argv[i],*b=argv[++i];
         if(!strcmp(a,"--rev")) rev=b;
@@ -306,6 +410,9 @@ int main(int argc,char **argv) {
         else if(!strcmp(a,"--deadline-s")) seconds=number(b);
         else if(!strcmp(a,"--parallel")) { parallel=(int)number(b);if(parallel>4)die("parallel must be 1..4"); }
         else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
+        else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>270)die("segment must be 1..270 seconds"); }
+        else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>4096)die("max segments must be 1..4096"); }
+        else if(!strcmp(a,"--runner")) runner=b;
         else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
         else if(!strcmp(a,"--rehearse-ctor")) ctor=b;
         else if(!strcmp(a,"--rehearse-objects")) objs=b;
@@ -338,7 +445,15 @@ int main(int argc,char **argv) {
         *q=c; if(!c) break;
     }
     validate_plan(); /* Reject every over-bound row before executing even preparation. */
+    if(supervising&&(!segment_s||!max_segments)) die("--supervise requires --segment-s and --max-segments");
+    if(runner&&(!supervising||runner[0]!='/')) die("--runner ABS_EXEC is a --supervise option");
+    if(segment_s) {
+        /* A phase whose bound exceeds the segment could never start: refuse before any child. */
+        for(i=0;i<plan_count;i++) if(plan[i].bound>segment_s) die("segment shorter than a phase bound");
+        if((!watch||!candidate||(supervising&&!runner))&&segment_s<phase_bound) die("segment shorter than the native preparation bound");
+    }
     sy_mkdir(out,0755);
+    if(supervising) return supervise(argc,argv,extra<argc||!strcmp(argv[argc-1],"--")?extra-1:argc,runner);
     char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");
     char identity[16000],p[4400];
@@ -358,9 +473,26 @@ int main(int argc,char **argv) {
         if(old && done("pack")) { free(old); return blocker("pack","unowned-existing-pack",2); } free(old);
         path(p,"chain-run.identity"); if(cx_write(p,identity,used)) die("identity write");
     }
+    if(memo) {
+        /* The memo is bound to this output's identity; another run's memo can never hit. */
+        char idhex[65]; if(sy_sha256_hex(identity,(long)used,idhex)||cx_fmt(memo_id,sizeof memo_id,"%s",idhex)) die("memo identity");
+        path(memo_path,"chain-sha.memo");
+    }
     path(p,"chain-run.budget"); old=cx_read(p,&n);
-    if(old) { int ma,mr,width; if(sscanf(old,"%ld %d %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr,&width)!=6||ma!=max_attempts||mr!=max_resumes||attempts<0||resumes<0||width<1||width>4) die("budget mismatch");if(width<parallel)parallel=width; free(old); }
+    if(old) {
+        /* 6 fields: a budget written before segments existed (no segment was ever counted). */
+        int ma,mr,width,seg=0,mseg=max_segments,ow=0; int fields=sscanf(old,"%ld %d %d %d %d %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr,&width,&seg,&mseg,&ow);
+        if((fields!=6&&fields!=9)||ma!=max_attempts||mr!=max_resumes||mseg!=max_segments||attempts<0||resumes<0||seg<0||(ow!=0&&ow!=1)||width<1||width>4) die("budget mismatch");
+        segments=seg;owed=ow;if(width<parallel)parallel=width; free(old);
+    }
     else { end_ms=sy_now_ms()+seconds*1000; save(); }
+    if(segment_s) {
+        /* The cap and the count are persisted: a new invocation continues them, it never resets them. */
+        if(max_segments&&segments>=max_segments) return blocker("segment","segments-exhausted",3);
+        segments++; seg_end_ms=entered+(long)segment_s*1000; save();
+        char row[200]; if(cx_fmt(row,sizeof row,"SEGMENT\t%ld\tn=%d\tstart\tsegment-s=%d\tmax=%d\n",sy_wall_s(),segments,segment_s,max_segments)) die("segment bound");
+        append("chain-run.tsv",row);
+    }
     int wi=0;
     if(watch) watch_argv[wi++]=(char*)watch;
     else { watch_argv[wi++]="sh"; watch_argv[wi++]="./unisacc.com"; watch_argv[wi++]="tools/chain-watch.cx"; watch_argv[wi++]="--"; }
@@ -373,13 +505,24 @@ int main(int argc,char **argv) {
         if((prep_rc=run("prepare-watch",prepare,0))) return prep_rc;
         watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0;
     }
+    if(owed) {
+        /* The previous segment ended between a retryable failure and its observation: settle the
+           same accounting now, before any new work. */
+        if(sy_now_ms()>=end_ms) return blocker("segment","deadline",3);
+        if(resumes>=max_resumes) return blocker("segment","resumes-exhausted",3);
+        int settled=observe();
+        if(settled==RC_SEGMENT) return segment_expired("owed-resume");
+        if(settled) return settled;
+        resumes++;if(parallel>1)parallel--;owed=0;save();
+        char row[200];cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tparallel=%d\towed=settled\n",sy_wall_s(),resumes,parallel);append("chain-run.tsv",row);
+    }
     if(!candidate&&!done("pack")) {
         path(native_candidate,"chain-run-candidate");
         char *prepare[]={"sh","./unisacc.com","tools/candidate-chain.cx","-o",native_candidate,0};
         if((prep_rc=run("prepare-candidate",prepare,0))) return prep_rc;
         candidate=native_candidate;
     }
-    char *v[96]; int k=0;
+    char *v[100]; int k=0;
     if(candidate) v[k++]=(char*)candidate;
     else { v[k++]="sh"; v[k++]="./unisacc.com"; v[k++]="tools/candidate-chain.cx"; v[k++]="--"; }
     v[k++]="--rev"; v[k++]=(char*)rev; v[k++]="--out"; v[k++]=(char*)out; v[k++]="--resume";
@@ -402,7 +545,7 @@ int main(int argc,char **argv) {
     if(!pack) return blocker("pack","absent-final-phase",2);
     if(!verify_pack()) return blocker("pack","missing-or-corrupt-pack-receipt",2);
     /* chain-watch is observational only; its loose DONE match is not completion authority. */
-    if((rc=observe())) return rc;
+    if((rc=observe())) return rc==RC_SEGMENT?segment_expired("chain-watch"):rc;
     append("chain-run.tsv","PREPARED\tpack\tnot=PASS\n"); sy_printf("CHAIN_RUN\tPREPARED\tnot=PASS\n");
     sy_close(lockfd); return 0;
 }

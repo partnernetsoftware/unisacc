@@ -21,6 +21,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.shamemo
 #pragma unisa use sys.posix
 
 static void die(const char *a, const char *b) {
@@ -174,6 +175,7 @@ static int step_secs(const char *root, char **args, int secs) {
 }
 static int step(const char *root, char **args) { return step_secs(root, args, 55); }
 static char chain_work[4400];
+static int derived_shape(const char *snap, const char *extra, const char *extra_skip, char fp[65]);
 /* 0.0.49: osx=front/merge/stub; win=front/merge then st_span units/e3/prune-elf. */
 static char span_roots[128][4400];
 static int load_span_roots(const char *prep) {
@@ -842,11 +844,31 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
     if (sy_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
     char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
     pr_result result; long began = sy_now_ms();
+    /* T11: on a re-entry of a prepared closure the plan is recomputed only to be compared with
+       the manifest. With the memo on, the earlier comparison is reused while the launcher, the
+       package and the constructor hash the same (memoized per file) and every entry of the frozen
+       snapshot (but its out/) has unchanged metadata, and only when the manifest bytes are still
+       the plan that was compared. Anything else recomputes the plan as before. */
+    char ckey[14000], h1[65], h2[65], h3[65], cshape[65], cwant[65], chave[65]; int cmemo = 0, reused = 0;
+    memset(&result, 0, sizeof result);
+    if (resume && ck_done(outdir, prepare) && sm_enabled() && !sm_sha(com, h1) && !sm_sha(pkg, h2) && !sm_sha(ctor, h3) &&
+        !cx_fmt(ckey, sizeof ckey, "closure-list\n%s\n%s\n%s\n%s\n%s\n%s\n", h1, h2, h3, target, snap, dest) && !derived_shape(snap, 0, 0, cshape)) {
+        cmemo = 1;
+        if (!sm_value_get(ckey, cshape, cwant)) {
+            size_t mn = 0; char *mt = cx_read(manifest, &mn);
+            if (mt && mn && mt[mn - 1] == '\n' && !memchr(mt, 0, mn) && !sy_sha256_hex(mt, (long)mn, chave) && !strcmp(chave, cwant)) { result.out = mt; result.outn = mn; reused = 1; }
+            else free(mt);
+        }
+    }
+    if (reused) sy_printf("CLOSURE_PLAN\t%s\tmemo=unchanged-launcher-package-constructor-snapshot\n", prepare);
+    else {
     if (pr_run(prepare, list, 0, 0, 55, &result) || result.rc || result.residue) { pr_echo(&result); pr_free(&result); die("closure list", slug); }
     if (result.outn && (!result.out || result.out[result.outn - 1] != '\n' || memchr(result.out, 0, result.outn))) { pr_free(&result); die("closure list text", slug); }
+    }
     size_t oldn = 0; char *old = cx_read(manifest, &oldn);
     if (resume && ck_done(outdir, prepare)) {
         if (!old || oldn != result.outn || memcmp(old, result.out, oldn)) { free(old); pr_free(&result); die("REFUSE closure plan changed", manifest); }
+        if (cmemo && !reused) { char again[65]; if (!derived_shape(snap, 0, 0, again) && !strcmp(again, cshape) && !sy_sha256_hex(result.out, (long)result.outn, chave)) sm_value_put(ckey, cshape, chave); }
     } else if (cx_write(manifest, result.out ? result.out : "", result.outn)) { free(old); pr_free(&result); die("closure manifest", manifest); }
     free(old);
     int count = 0, requested = 0;
@@ -1159,7 +1181,89 @@ static int wave_phase(const char *outdir, const char *s, const char *ctx, const 
     }
     return 0;
 }
+/* T11 memo gate. chain-run hands the memo (file and identity) to every phase except compare
+   and pack. This process uses it, and lets chain-step inherit it, only for a bounded --until
+   call that is neither of those two; in every other case both variables are removed, so the
+   re-check before compare and before pack reads and hashes every byte. */
+static int derived_on;
+/* VALUE of row KEY in CTX/context.tsv ("KEY<TAB>VALUE"), 0 or -1. */
+static int context_value(const char *ctx, const char *key, char *out, long cap) {
+    char path[4400], needle[80]; size_t n = 0;
+    if (cx_fmt(path, sizeof path, "%s/context.tsv", ctx) || cx_fmt(needle, sizeof needle, "%s\t", key)) return -1;
+    char *text = cx_read(path, &n), *at = text; int rc = -1;
+    while (at && *at) {
+        char *e = strchr(at, 0x0a);
+        if (!e) break;
+        if (!strncmp(at, needle, strlen(needle))) { *e = 0; rc = cx_fmt(out, cap, "%s", at + strlen(needle)) ? -1 : 0; break; }
+        at = e + 1;
+    }
+    free(text); return rc;
+}
+static void chain_memo_off(const char *reason) {
+    sm_close(); derived_on = 0;
+    if (!sy_env("UNISACC_CHAIN_SHAMEMO") && !sy_env("UNISACC_CHAIN_SHAMEMO_ID")) return;
+    if (sy_unsetenv("UNISACC_CHAIN_SHAMEMO") || sy_unsetenv("UNISACC_CHAIN_SHAMEMO_ID") || sy_env("UNISACC_CHAIN_SHAMEMO") || sy_env("UNISACC_CHAIN_SHAMEMO_ID"))
+        die("REFUSE sha memo not removable", reason);
+    sy_printf("SHAMEMO\tchain\toff\treason=%s\n", reason);
+}
+/* --recheck-only (compare or pack): walk every earlier re-check with the memo removed, build
+   nothing, stop in front of the phase and leave a receipt bound to the checkpoint bytes and the
+   memo identity. The phase call that follows may use the memo for its own walk only when that
+   receipt is still current (no checkpoint row since) and it consumes it: one full re-check
+   authorizes one compare or pack call. Without a current receipt the call itself is the full,
+   memo-less re-check, exactly as before. */
+static int recheck_only;
+static int recheck_text(const char *outdir, const char *until, const char *id, char *text, long cap) {
+    char cp[4400], hash[65]; size_t n = 0;
+    if (cx_fmt(cp, sizeof cp, "%s/checkpoint.tsv", outdir)) return -1;
+    char *b = cx_read(cp, &n);
+    if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); return -1; }
+    free(b);
+    return cx_fmt(text, cap, "recheck-v1\tbefore=%s\tcheckpoint=%s\tmemo=%s\n", until, hash, id && id[0] ? id : "-");
+}
+static void recheck_leave(const char *outdir, const char *until) {
+    char file[4400], tmp[4500], text[400];
+    if (!recheck_only || !until_phase || !tx_eqz(until, until_phase)) return;
+    if (cx_fmt(file, sizeof file, "%s/recheck-%s.receipt", outdir, until) || cx_fmt(tmp, sizeof tmp, "%s.new", file) ||
+        recheck_text(outdir, until, sy_env("UNISACC_CHAIN_RECHECK_ID"), text, sizeof text) ||
+        cx_write(tmp, text, strlen(text)) || sy_rename(tmp, file)) die("recheck receipt", until);
+    sy_printf("RECHECK\tbefore=%s\tfull=1\tmemo=off\tbuilt=0\n", until);
+    exit(0);
+}
+static int recheck_consume(const char *outdir, const char *until, const char *id) {
+    char file[4400], used[4500], want[400]; size_t n = 0;
+    if (cx_fmt(file, sizeof file, "%s/recheck-%s.receipt", outdir, until) || cx_fmt(used, sizeof used, "%s.used", file) || recheck_text(outdir, until, id, want, sizeof want)) return 0;
+    char *have = cx_read(file, &n);
+    int ok = have && n == strlen(want) && !memcmp(have, want, n);
+    free(have);
+    if (fsize(file) >= 0 && sy_rename(file, used)) die("recheck receipt consume", file);
+    return ok;
+}
+static void chain_memo(const char *until, const char *outdir) {
+    const char *file = sy_env("UNISACC_CHAIN_SHAMEMO"), *id = sy_env("UNISACC_CHAIN_SHAMEMO_ID");
+    if (recheck_only) { chain_memo_off("recheck-only"); return; }
+    if (!file && !id) return;
+    if (!file || !file[0] || !id || !id[0]) { chain_memo_off("incomplete-memo-environment"); return; }
+    if (!until) { chain_memo_off("unbounded-call"); return; }
+    if ((tx_eqz(until, "compare") || tx_eqz(until, "pack")) && !recheck_consume(outdir, until, id)) { chain_memo_off("no-current-full-recheck-before-compare-or-pack"); return; }
+    if (sm_open(file, id)) { chain_memo_off("memo-unavailable"); return; }
+    /* The two derived memos (verify-context verdict, closure-list plan) are off unless the runner
+       asks for them: both tools also depend on host state the listing cannot see (see docs). */
+    derived_on = sy_env("UNISACC_CHAIN_SHAMEMO_DERIVED") && tx_eqz(sy_env("UNISACC_CHAIN_SHAMEMO_DERIVED"), "1");
+    sy_printf("SHAMEMO\tchain\ton\tuntil=%s\tderived=%d\n", until, derived_on);
+}
+/* A derived check memoized over whole-tree metadata: KEY names the tool bytes and arguments,
+   the fingerprint lists every entry of the frozen snapshot (all but its out/) and of EXTRA (all
+   but EXTRA_SKIP). 0 with FP set when the trees can be fingerprinted, else 1 (run the tool). */
+static int derived_shape(const char *snap, const char *extra, const char *extra_skip, char fp[65]) {
+    char a[65], b[65], text[200];
+    if (!sm_enabled() || !derived_on || sm_tree_meta(snap, "out", a)) return 1;
+    if (extra) { if (sm_tree_meta(extra, extra_skip, b)) return 1; } else if (cx_fmt(b, sizeof b, "-")) return 1;
+    if (cx_fmt(text, sizeof text, "%s\n%s\n", a, b) || sy_sha256_hex(text, (long)strlen(text), fp)) return 1;
+    return 0;
+}
 static void final_hash(const char *path, char hash[65]) {
+    if (sm_enabled() && !sm_sha(path, hash)) return;
     size_t n = 0; char *p = cx_read(path, &n);
     if (!p || sy_sha256_hex(p, (long)n, hash)) { free(p); die("final hash", path); }
     free(p);
@@ -1248,7 +1352,24 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
     char controller[4400];
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", build)) die("path", "final");
     char *v[] = {controller, "--verify-context", (char *)root, (char *)ctx, 0};
-    if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
+    /* T11: the controller's verdict is reused only while the controller bytes, every entry of the
+       frozen snapshot (but its out/) and every entry of CTX (but its jobs/) carry unchanged
+       metadata; otherwise, and always in the full re-check before compare and pack, it runs. */
+    char vkey[9200], vhash[65], vshape[65], vgot[65]; int vmemo = 0;
+    char verified[65];   /* the stored verdict token: sha256 of the line a live run prints */
+    if (sy_sha256_hex("VERIFIED\tsource-package-context-v2", 34, verified)) die("verdict token", ctx);
+    /* Also keyed: the bytes of the context compiler and of the bootstrap product with its build
+       record, which the controller hashes but which live outside both listings. */
+    char ccp[4400], bsp[4400], bsr[4500], cch[65], bsh[65], brh[65] = "-";
+    if (sm_enabled() && derived_on && !context_value(ctx, "cc", ccp, sizeof ccp) && !context_value(ctx, "bootstrap", bsp, sizeof bsp) &&
+        !cx_fmt(bsr, sizeof bsr, "%s.build.json", bsp) && !sm_sha(ccp, cch) && !sm_sha(bsp, bsh) && (fsize(bsr) < 0 || !sm_sha(bsr, brh)) &&
+        !sm_sha(controller, vhash) && !cx_fmt(vkey, sizeof vkey, "verify-context\n%s\n%s\n%s\n%s\n%s\n%s\n", vhash, root, ctx, cch, bsh, brh) && !derived_shape(root, ctx, "jobs", vshape)) vmemo = 1;
+    if (vmemo && !sm_value_get(vkey, vshape, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
+    else {
+        if (pr_code_at("final context", v, root, 55)) die("final current SID/context", ctx);
+        char again[65];
+        if (vmemo && !derived_shape(root, ctx, "jobs", again) && !strcmp(again, vshape)) sm_value_put(vkey, vshape, verified); else vmemo = 0;
+    }
     for (int i = 0; i < cf_net_count(); i++) {
         char tag[80]; if (cx_fmt(tag, sizeof tag, "final-net-%d", i)) die("phase", "final");
         long started = sy_now_ms(); int reuse = resume && ck_done(outdir, tag);
@@ -1256,7 +1377,11 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
         if (!reuse) mark(outdir, tag, sy_now_ms() - started);
         else if (until_phase && !strcmp(tag, until_phase)) exit(0);
     }
-    if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
+    {   /* The closing bracket is the same question: a hit needs the same key and the listing as it is now. */
+        char after[65];
+        if (vmemo && !derived_shape(root, ctx, "jobs", after) && !sm_value_get(vkey, after, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
+        else if (pr_code_at("final context", v, root, 55)) die("final current SID/context changed", ctx);
+    }
     sy_printf("FINAL\tmodels=%d\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n", cf_net_count());
     return 0;
 }
@@ -1547,6 +1672,17 @@ int main(int argc, char **argv) {
             sy_printf("UC_GUARD\t%s\tlines=%d\n", g == 0 ? "ok" : "REFUSE", g);
             return g == 0 ? 0 : 3;
         }
+        if (tx_eqz(argv[i], "--memo-gate") && i + 2 < argc) {
+            /* 夹具入口: --memo-gate UNTIL|- OUT [recheck],对当前环境跑一次备忘门(与正式入口同一函数),打印结论;
+               第四个词为 recheck 时改走 --recheck-only 的收据落盘(同一函数),不走任何复核或构造 */
+            const char *gu = tx_eqz(argv[i + 1], "-") ? 0 : argv[i + 1];
+            if (i + 3 < argc && tx_eqz(argv[i + 3], "recheck")) { recheck_only = 1; until_phase = gu; chain_memo(gu, argv[i + 2]); recheck_leave(argv[i + 2], gu ? gu : "-"); return 3; }
+            chain_memo(gu, argv[i + 2]);
+            sy_printf("MEMO_GATE\tuntil=%s\tenabled=%d\tderived=%d\tinherit=%d\n", argv[i + 1], sm_enabled(), derived_on,
+                      sy_env("UNISACC_CHAIN_SHAMEMO") != 0 || sy_env("UNISACC_CHAIN_SHAMEMO_ID") != 0);
+            return 0;
+        }
+        if (tx_eqz(argv[i], "--recheck-only")) { recheck_only = 1; continue; }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--baseline-ctx") && i + 1 < argc) { baseline_ctx = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--job-index") && i + 1 < argc) {
@@ -1678,6 +1814,15 @@ int main(int argc, char **argv) {
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
+    if (recheck_only) {
+        /* Only for the two phases that require it, only when everything before them is complete:
+           the walk below then re-checks and cannot construct. */
+        int limit = until_phase ? chain_phase_index(until_phase) : -1;
+        if (!resume || lane_phase || ntouch || !until_phase || (!tx_eqz(until_phase, "compare") && !tx_eqz(until_phase, "pack")) || limit < 0)
+            die("REFUSE --recheck-only needs --resume --until compare|pack", until_phase);
+        for (int pi = 0; pi < limit; pi++) if (!ck_done(outdir, g_phases[pi])) die("REFUSE --recheck-only before an unfinished phase", g_phases[pi]);
+    }
+    chain_memo(until_phase, outdir);
     if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
     if (!lane_phase) hb(outdir, "chain", "start");
     chain_paths(root, rev, snap);
@@ -2032,6 +2177,9 @@ int main(int argc, char **argv) {
                 gen_slice_phase(root, outdir, helper, rev, snap, pkg, gen1, fp, pg, pt, resume);
     }
 
+    /* From here on nothing may rest on the memo: compare and pack are full re-checks. */
+    recheck_leave(outdir, "compare");
+    if (!sm_enabled() || !until_phase || !tx_eqz(until_phase, "pack")) chain_memo_off("reached-compare");
     if (!(resume && ck_done(outdir, "compare"))) {
         long t0 = sy_now_ms();
         char *a[11];
@@ -2041,6 +2189,8 @@ int main(int argc, char **argv) {
         mark(outdir, "compare", sy_now_ms() - t0);
     } else sy_printf("RESUME\tcompare\n");
 
+    recheck_leave(outdir, "pack");
+    chain_memo_off("reached-pack");
     if (!(resume && ck_done(outdir, "pack"))) {
         long t0 = sy_now_ms();
         char ape_tool[4400], packed[4400], win64[4400], lnx64[4400], lnxarm[4400], osx64[4400], osxarm[4400], winarm[4400];

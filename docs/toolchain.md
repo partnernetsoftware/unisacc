@@ -166,3 +166,21 @@ K9-r3四批实际输出BATCH_RUN status=PASS、rc=0、transport=0，精确marker
 K9-r4基为origin/main `02057cd64887801e8d315610a1da90efb77db020`，已含G2-r4及K10-r3，不重叠依赖。门报新增截断调用改为检查tx_copy返回值；lane夹具不再复制snapshot布局，改消费候选只读`--chain-work ROOT REV`查询，该查询与真实执行共用chain_paths推导，不拼拆路径字面绕门。所有31项断言保留。定向cxtrunc对三文件0调用、outdep对candidate及lane两批0输出字面，基线未改；46/31/10/7四组在该树与当前已装产品真实run-batch新跑PASS。证据保留本克隆out/k9-r4，不经仓外中转；未跑真链、广门或性能目标。
 
 K9-r5仍基`02057cd64887801e8d315610a1da90efb77db020`，完整保留K9-r4行为，只迁入AnchorBan58已验证的`tools/check-graph-check.cx`结构变异组件。该组件复用既有refactor find调用/参数事实，以generation=1参数筛选两个Win span，不再假设所有wf_win_span字面调用都属于gen1；refactor、chainargv及生产文件不随组件迁移。原route-real必须0、Win-as-Mac必须拒绝且route_mismatch=8与指定stub/units诊断均不放宽。新树真实graph-check批次29/0且BATCH_RUN PASS；全量tools/ratchets.cx实际13/0（28511ms），未改任何棘轮基线。证据在本克隆out/k9-r5，未跑真链或额外广验。
+
+## 0.0.58 T11：分段、监督器与续跑备忘
+
+依据 cc 2026-11-12 裁定：每次重入仍全量复核，不采用「只复核直接依赖」。实现分三件，全部在 `1e269c53+G2-r4+K10-r3+K9-r3` 之上。
+
+(1) 分段：`chain-run --segment-s N`(1..270)。派发前要求相的整段预算在段结束前放得下，放不下就不启动，所以到期的段没有要杀的子进程；它写 `SEGMENT ... expired next=相` 并以 75 退出。75 只表示「干净到期可续」，子进程自己返回 75 记 BLOCKER 并改为 2。`chain-run.budget` 扩成九个字段(加段数、段上限、欠账)，旧的六字段文件照读；总 deadline、尝试、恢复、段数跨段不重置，上限与落盘值不符即拒绝。重试所需的 chain-watch 观察放不进段时记欠账，下一段先结清(观察、计一次恢复、降一路)再派新活。段比任一相预算短，在任何子进程和预算文件之前拒绝。
+
+(2) 监督器：`chain-run --supervise --segment-s N --max-segments M`。它不持有链状态，只逐段起子进程(默认先把 chain-run 编成 `OUT/chain-run-native`，`--runner ABS` 可替换)，子进程 rc 非 75 即停并原样返回；循环最多 M+1 次，每段另有 N+10 秒的兜底，兜底触发或有残留记 BLOCKER 不续；rc 75 还须 `chain-run.tsv` 里紧邻的 SEGMENT expired 行为证。
+
+(3) 备忘：`tools/cxlib/shamemo.cx`，文件 `OUT/chain-sha.memo`，首行带身份(版本加 `chain-run.identity` 的 sha)，身份不符的整份改名留存、不信任；每行带对身份、元数据、sha、路径的校验值，坏行忽略。文件 SHA 命中条件是 dev、inode、大小、mtime(秒加纳秒)、ctime(秒加纳秒)全同；只在实际读过字节且读前读后 lstat 一致时记录，mtime 或 ctime 距今不足 2 秒的不记录。整树值(源码 SID、verify-context 结论、闭包计划)以「除顶层 out/ 之外每个条目的元数据清单」为指纹，清单全同才复用；含年轻条目、悬空或指向树外的软链的树不可备忘。使用点：`chain-step fixedpoint` 的 `cs_sha`/`cs_source`(compare 相强制关闭)、`candidate-chain` 的 final 指纹、`jobs_ok` 两次 verify-context、已准备闭包的 closure-list 复算。
+
+compare 与 pack 之前的完整复核：备忘开启时 chain-run 在这两个相之前各派一次独立有界尝试 `<相>-recheck`(`candidate-chain --recheck-only`)：去掉备忘环境、要求此前所有相已 DONE、照常走完全部复核、不构造，在相位入口前写 `OUT/recheck-<相>.receipt`(绑定当时 checkpoint.tsv 的 sha 与备忘身份)后退出。随后的相位调用只有在收据仍然当期时才让自己的重入复核使用备忘，并消费该收据；相位重试必须重新复核。没有当期收据(含直接调用 candidate-chain、`--no-sha-memo`)时，相位调用本身就是不用备忘的完整复核，与此前相同。compare 的比较器与 pack 的打包步骤始终不带备忘环境。
+
+边界：备忘是冻结运行内的元数据身份，不是 ABA 保证(时钟回拨到同一纳秒且同 inode 的改写无法察觉)；verify-context 与 closure-list 的备忘假定这两个工具的输出只取决于各自字节、参数、冻结快照树与 ctx(除 jobs/)，该假定经读源码核对后不成立(见下),所以这两项派生备忘默认关闭,只有 `chain-run --memo-derived` 才开;文件 SHA 备忘与源码 SID 备忘默认开。
+
+派生备忘前提的源码核对(2026-11-12,对 `tools/source-package.cx --verify-context` 与 `tools/entry-build.cx --closure-list` 逐函数追踪):(a) verify-context 的结论还取决于上下文里记录的宿主编译器文件字节与 bootstrap 产品及其 build.json(都在两份清单之外;开启时已把这三份文件的 SHA 并入备忘键)、`tools/bound` 的宿主缓存二进制(`$BOUND_CACHE` 或 `$TMPDIR/unisacc-bound-UID`,不验字节)、`PATH` 里的 uname/id/openssl、`UNISACC_NP_FAULT` 等环境变量、6 至 8 秒时限以及文件类型与权限位;不读 `CTX/jobs`,不直接读 `ROOT/out`。(b) closure-list 打印的计划内容由快照树(include、src、cx、ext 与 cxroot.tsv)、构造器与包决定,DEST 里的对象、收据、`.chain-steps` 都不读;但实际执行的驱动来自 `~/.cache/unisacc` 的解包缓存(不验字节)与运行缓存(以容器 stat 身份为键),`tools/bound` 同上,符号级 use 存在时 `TMPDIR` 会进入打印路径(当前树没有),且 576 字符以上的路径被静默丢弃。两者都不是「自身字节、参数、快照树与 ctx」的纯函数,差别集中在宿主缓存、环境与时限上:它们会让一次真实运行失败或换一个驱动,而备忘命中看不到。源码 SID 的身份助手(`seed/ident.c` 默认模式)不读环境,只遍历快照树并拒绝指向树外的软链,符合整树清单前提。夹具批次 `sha-memo`、`sha-memo-chain`、`chain-run-segments`、`chain-run-supervise` 不跑真链；真实整链与 R3 未跑。
+
+默认设置(派生备忘关)的实测开销(chain057 私有副本,备忘已建):主流程 `--until kernels-g3` 35.61/35.35 秒,与无备忘 35.1 秒持平,未达 15 秒目标;lane g3-lnx-arm64 5.25/5.48 秒;final 前段 8.09 秒。`--memo-derived` 开时主流程 9.55/9.85 秒。剩余开销集中在 verify-context 两次(约 13 秒)与 closure-list 四次(约 16 秒),要降须让这两个工具把宿主缓存、环境与时限纳入可验证的身份,不能靠元数据备忘。

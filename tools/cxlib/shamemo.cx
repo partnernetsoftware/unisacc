@@ -1,0 +1,333 @@
+/* shamemo.cx -- persistent, out-of-process memo of verified file SHA-256 (T11, 0.0.58).
+ *
+ * A re-entry still visits every entry it re-checked before: the caller walks the same
+ * trees and compares the same identities.  The memo only answers "what was this file's
+ * content SHA" when the file was hashed earlier in the same chain output AND its
+ * metadata is unchanged since: device, inode, size, mtime (s+ns) and ctime (s+ns).
+ * Anything else is a miss and the bytes are read and hashed again.
+ *
+ * Identity and invalidation:
+ *   - the memo file starts with "shamemo-v1 <ID>"; ID = sha256(version, binding).  A file
+ *     whose first line differs is renamed aside (kept as evidence) and the memo restarts
+ *     empty, so a memo of another run, revision or format never produces a hit;
+ *   - every row carries a check value over (ID, metadata, sha, path); a torn or edited
+ *     row fails it and is ignored (counted in rejected);
+ *   - a row is written only after the bytes were hashed and lstat before and after the
+ *     read agreed; a file whose mtime or ctime is younger than SM_RACY_S seconds is
+ *     hashed but not recorded;
+ *   - the newest row of a path wins; a metadata difference is a miss (counted in stale).
+ * ctime is not settable by the owner, so "content changed, mtime restored" is a miss.
+ * This is a frozen-run stat identity, not an ABA guarantee: callers must not use the
+ * memo for the compare and pack re-checks (chain-run never passes it to those phases).
+ *
+ * Disabled (sm_open not called, or failed): sm_sha hashes the bytes every time.
+ * Check: tools/check-shamemo.cx. */
+#pragma unisa module shamemo
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define SM_VERSION "shamemo-v1"
+#define SM_RACY_S 2
+typedef struct { char *path; unsigned long dev, ino; long size, ms, mn, cs, cn; char sha[65]; } sm_row;
+static sm_row *sm_rows;
+static long sm_count, sm_cap;
+static char sm_file[4400], sm_id[65];
+static int sm_fd = -1;
+static long sm_hits, sm_misses, sm_stale, sm_rejected, sm_recorded;
+typedef struct { char key[65], fp[65], value[65]; } sm_val;
+static sm_val *sm_vals;
+static long sm_vcount, sm_vcap;
+static int sm_vparse(const char *p);
+
+static void sm_meta(const struct stat *st, sm_row *r) {
+    r->dev = (unsigned long)st->st_dev; r->ino = (unsigned long)st->st_ino; r->size = (long)st->st_size;
+    r->ms = (long)st->st_mtime; r->mn = (long)st->st_mtime_nsec; r->cs = (long)st->st_ctime; r->cn = (long)st->st_ctime_nsec;
+}
+static int sm_same(const sm_row *a, const sm_row *b) {
+    return a->dev == b->dev && a->ino == b->ino && a->size == b->size && a->ms == b->ms && a->mn == b->mn && a->cs == b->cs && a->cn == b->cn;
+}
+/* "dev ino size ms mn cs cn sha" as text, then the 16-hex check over ID, that text and PATH. */
+static int sm_fields(const sm_row *r, char *text, long cap) {
+    return cx_fmt(text, cap, "%lu\t%lu\t%ld\t%ld\t%ld\t%ld\t%ld\t%s", r->dev, r->ino, r->size, r->ms, r->mn, r->cs, r->cn, r->sha);
+}
+static int sm_check(const char *fields, const char *path, char out[17]) {
+    char hex[65]; long n = (long)strlen(sm_id) + (long)strlen(fields) + (long)strlen(path) + 3;
+    char *b = malloc((size_t)n + 1);
+    if (!b) return -1;
+    if (cx_fmt(b, n + 1, "%s\n%s\n%s\n", sm_id, fields, path) || sy_sha256_hex(b, n, hex)) { free(b); return -1; }
+    free(b); memcpy(out, hex, 16); out[16] = 0; return 0;
+}
+static int sm_push(const sm_row *r, const char *path) {
+    if (sm_count == sm_cap) {
+        long cap = sm_cap ? sm_cap * 2 : 256; sm_row *next = realloc(sm_rows, (size_t)cap * sizeof *next);
+        if (!next) return -1;
+        sm_rows = next; sm_cap = cap;
+    }
+    long n = (long)strlen(path); char *copy = malloc((size_t)n + 1);
+    if (!copy) return -1;
+    if (mm_copy(copy, n + 1, path, n + 1)) { free(copy); return -1; }
+    sm_rows[sm_count] = *r; sm_rows[sm_count].path = copy; sm_count++; return 0;
+}
+static long sm_num(char **p, int *bad) {
+    char *e = 0; errno = 0; long v = strtol(*p, &e, 10);
+    if (e == *p || errno || *e != '\t' || v < 0) { *bad = 1; return 0; }
+    *p = e + 1; return v;
+}
+static unsigned long sm_unum(char **p, int *bad) {
+    char *e = 0; errno = 0; unsigned long v = strtoul(*p, &e, 10);
+    if (e == *p || errno || *e != '\t' || **p == '-') { *bad = 1; return 0; }
+    *p = e + 1; return v;
+}
+/* One complete line (no newline).  Returns 1 accepted, 0 rejected. */
+static int sm_parse(char *line) {
+    sm_row r; int bad = 0; char *p = line, fields[400], want[17];
+    if (strncmp(p, "R\t", 2)) return 0;
+    p += 2;
+    r.dev = sm_unum(&p, &bad); if (bad) return 0;
+    r.ino = sm_unum(&p, &bad); if (bad) return 0;
+    r.size = sm_num(&p, &bad); if (bad) return 0;
+    r.ms = sm_num(&p, &bad); if (bad) return 0;
+    r.mn = sm_num(&p, &bad); if (bad) return 0;
+    r.cs = sm_num(&p, &bad); if (bad) return 0;
+    r.cn = sm_num(&p, &bad); if (bad) return 0;
+    if (strlen(p) < 64 + 1 + 16 + 1 + 1 || p[64] != '\t' || p[64 + 1 + 16] != '\t') return 0;
+    for (int i = 0; i < 64; i++) if (!((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) return 0;
+    memcpy(r.sha, p, 64); r.sha[64] = 0;
+    char *check = p + 65, *path = p + 65 + 17;
+    if (path[0] != '/' || sm_fields(&r, fields, sizeof fields) || sm_check(fields, path, want) || strncmp(check, want, 16)) return 0;
+    return sm_push(&r, path) ? 0 : 1;
+}
+void sm_close(void) {
+    for (long i = 0; i < sm_count; i++) free(sm_rows[i].path);
+    free(sm_rows); sm_rows = 0; sm_count = sm_cap = 0;
+    free(sm_vals); sm_vals = 0; sm_vcount = sm_vcap = 0;
+    if (sm_fd >= 0) sy_close(sm_fd);
+    sm_fd = -1; sm_file[0] = 0;
+}
+/* Enable the memo at FILE (absolute) for BINDING.  0 enabled; -1 not enabled (sm_sha then
+   hashes every time).  A foreign or unreadable memo is renamed aside, never trusted. */
+int sm_open(const char *file, const char *binding) {
+    char header[160], seed[4600]; size_t n = 0;
+    sm_close(); sm_hits = sm_misses = sm_stale = sm_rejected = sm_recorded = 0;
+    if (!file || file[0] != '/' || !binding || !binding[0] || strpbrk(file, "\t\r\n")) return -1;
+    if (cx_fmt(seed, sizeof seed, "%s\n%s\n", SM_VERSION, binding) || sy_sha256_hex(seed, (long)strlen(seed), sm_id)) return -1;
+    if (cx_fmt(header, sizeof header, "%s\t%s\n", SM_VERSION, sm_id) || cx_fmt(sm_file, sizeof sm_file, "%s", file)) return -1;
+    struct stat st;
+    if (!lstat(file, &st)) {
+        long hn = (long)strlen(header);
+        char *text = S_ISREG(st.st_mode) ? cx_read(file, &n) : 0;
+        if (!text || (long)n < hn || memcmp(text, header, (size_t)hn)) {
+            char aside[4500];
+            free(text);
+            if (cx_fmt(aside, sizeof aside, "%s.rejected-%d-%ld", file, (int)getpid(), sy_now_ms()) || sy_rename(file, aside)) { sm_file[0] = 0; return -1; }
+            sm_rejected++;
+        } else {
+            char *p = text + hn;
+            while (*p) {
+                char *e = strchr(p, '\n');
+                if (!e) { sm_rejected++; break; }   /* torn last append */
+                *e = 0;
+                if (strncmp(p, SM_VERSION "\t", sizeof SM_VERSION) && !(strncmp(p, "V\t", 2) ? sm_parse(p) : sm_vparse(p + 2))) sm_rejected++;
+                p = e + 1;
+            }
+            free(text);
+        }
+    } else if (errno != ENOENT) { sm_file[0] = 0; return -1; }
+    sm_fd = sy_open(file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (sm_fd < 0) { sm_fd = -1; sm_file[0] = 0; return -1; }
+    sy_stat_t now;
+    if (sy_fstat(sm_fd, &now) || (now.size == 0 && sy_write_all(sm_fd, header, (long)strlen(header)))) { sm_close(); return -1; }
+    return 0;
+}
+int sm_enabled(void) { return sm_fd >= 0; }
+static int sm_hash(const char *path, long size, char out[65]) {
+    char *b = size > 0 ? malloc((size_t)size) : 0;
+    if (size > 0 && !b) return -1;
+    if (size > 0) {
+        int fd = sy_open(path, O_RDONLY, 0);
+        if (fd < 0 || sy_read_full(fd, b, size) || sy_close(fd)) { free(b); return -1; }
+    }
+    int rc = sy_sha256_hex(b, size, out);
+    free(b); return rc ? -1 : 0;
+}
+/* SHA-256 of regular file PATH into OUT.  0, or -1 (missing, not a regular file, read error,
+   or the file changed while it was read).  A hit needs identical dev/ino/size/mtime/ctime. */
+int sm_sha(const char *path, char out[65]) {
+    struct stat before, after; sm_row want, got;
+    if (!path || lstat(path, &before) || !S_ISREG(before.st_mode)) return -1;
+    sm_meta(&before, &want);
+    if (sm_fd >= 0 && path[0] == '/') {
+        for (long i = sm_count - 1; i >= 0; i--) if (!strcmp(sm_rows[i].path, path)) {
+            if (sm_same(&sm_rows[i], &want)) { memcpy(out, sm_rows[i].sha, 65); sm_hits++; return 0; }
+            sm_stale++; break;
+        }
+    }
+    sm_misses++;
+    if (sm_hash(path, want.size, out)) return -1;
+    if (lstat(path, &after) || !S_ISREG(after.st_mode)) return -1;
+    sm_meta(&after, &got);
+    if (!sm_same(&want, &got)) return -1;
+    if (sm_fd < 0 || path[0] != '/' || strpbrk(path, "\t\r\n")) return 0;
+    long now = sy_wall_s();
+    if (now - want.ms < SM_RACY_S || now - want.cs < SM_RACY_S) return 0;
+    char fields[400], check[17], line[5200];
+    memcpy(want.sha, out, 65);
+    if (sm_fields(&want, fields, sizeof fields) || sm_check(fields, path, check) || cx_fmt(line, sizeof line, "R\t%s\t%s\t%s\n", fields, check, path)) return 0;
+    /* One O_APPEND write per row: concurrent lanes interleave whole rows; a torn row fails its check. */
+    if (!sy_write_all(sm_fd, line, (long)strlen(line)) && !sm_push(&want, path)) sm_recorded++;
+    return 0;
+}
+/* ---- derived values over a whole tree ------------------------------------------------
+ * sm_tree_meta lists every entry below ROOT (except the one top-level name SKIP) with its
+ * metadata and returns the SHA-256 of that listing: 0 with OUT set; 1 when the tree cannot
+ * be memoized (an entry younger than SM_RACY_S, a symlink that resolves, or when dangling
+ * names a place, outside ROOT or inside SKIP, a special file); -1 on error.  Nothing is
+ * skipped silently.
+ * sm_value_get/put keep one derived 64-hex VALUE per KEY, valid only while the caller's
+ * FINGERPRINT (normally sm_tree_meta) is identical; the newest row of a key wins. */
+typedef struct { char *p; long n, cap; } sm_text;
+static int sm_add(sm_text *t, const char *s) {
+    long n = (long)strlen(s);
+    if (t->n + n + 1 > t->cap) {
+        long cap = t->cap ? t->cap * 2 : 65536; while (cap < t->n + n + 1) cap *= 2;
+        char *next = realloc(t->p, (size_t)cap); if (!next) return -1;
+        t->p = next; t->cap = cap;
+    }
+    if (mm_copy(t->p + t->n, t->cap - t->n, s, n + 1)) return -1;
+    t->n += n; return 0;
+}
+static int sm_namecmp(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+/* Where symlink LINK points, by its text alone: "." and ".." folded, nothing resolved.  0 or -1. */
+static int sm_lexical(const char *link, char *out, long cap) {
+    char text[4400], joined[8900]; long n = (long)readlink(link, text, sizeof text - 1);
+    if (n <= 0) return -1;
+    text[n] = 0;
+    if (text[0] == '/') { if (cx_fmt(joined, sizeof joined, "%s", text)) return -1; }
+    else {
+        const char *slash = strrchr(link, '/'); if (!slash) return -1;
+        if (cx_fmt(joined, sizeof joined, "%.*s/%s", (int)(slash - link), link, text)) return -1;
+    }
+    long used = 0; out[0] = 0;
+    for (char *p = joined; *p;) {
+        while (*p == '/') p++;
+        char *e = p; while (*e && *e != '/') e++;
+        long len = (long)(e - p);
+        if (len == 2 && p[0] == '.' && p[1] == '.') { if (!used) return -1; while (used && out[used - 1] != '/') used--; if (used) used--; out[used] = 0; }
+        else if (len && !(len == 1 && p[0] == '.')) {
+            if (used + len + 2 > cap) return -1;
+            out[used++] = '/';
+            if (mm_copy(out + used, cap - used, p, len)) return -1;
+            used += len; out[used] = 0;
+        }
+        p = e;
+    }
+    return used ? 0 : -1;
+}
+static int sm_walk(const char *root, long rootn, const char *skip, const char *dir, long now, sm_text *t) {
+    DIR *dp = opendir(dir); struct dirent *e; char **names = 0; long count = 0, cap = 0; int rc = 0;
+    if (!dp) return -1;
+    while ((e = readdir(dp))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!dir[rootn] && skip && !strcmp(e->d_name, skip)) continue;
+        if (strpbrk(e->d_name, "\t\r\n")) { rc = 1; break; }
+        if (count == cap) { cap = cap ? cap * 2 : 64; char **next = realloc(names, (size_t)cap * sizeof *names); if (!next) { rc = -1; break; } names = next; }
+        long n = (long)strlen(e->d_name); names[count] = malloc((size_t)n + 1);
+        if (!names[count]) { rc = -1; break; }
+        if (mm_copy(names[count++], n + 1, e->d_name, n + 1)) { rc = -1; break; }
+    }
+    if (closedir(dp) && !rc) rc = -1;
+    if (!rc) qsort(names, (size_t)count, sizeof *names, sm_namecmp);
+    for (long i = 0; i < count && !rc; i++) {
+        char p[4400], line[5200], target[4400]; struct stat st; sm_row r;
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, names[i]) || lstat(p, &st)) { rc = -1; break; }
+        sm_meta(&st, &r);
+        if (S_ISDIR(st.st_mode)) {
+            if (cx_fmt(line, sizeof line, "D\t%s\t%lu\t%lu\n", p + rootn + 1, r.dev, r.ino) || sm_add(t, line)) { rc = -1; break; }
+            rc = sm_walk(root, rootn, skip, p, now, t);
+            continue;
+        }
+        if (now - r.ms < SM_RACY_S || now - r.cs < SM_RACY_S) { rc = 1; break; }
+        if (S_ISREG(st.st_mode)) {
+            if (cx_fmt(line, sizeof line, "F\t%s\t%lu\t%lu\t%lu\t%ld\t%ld\t%ld\t%ld\t%ld\n", p + rootn + 1, r.dev, r.ino, (unsigned long)st.st_nlink, r.size, r.ms, r.mn, r.cs, r.cn) || sm_add(t, line)) rc = -1;
+        } else if (S_ISLNK(st.st_mode)) {
+            long k = sy_realpath(p, target, sizeof target);
+            /* Dangling: there are no bytes to change, but the place it names must be inside the
+               listing too, so that creating the target shows up as a new entry. Every symlink on
+               the way is itself an entry of this walk and is held to the same rule. */
+            if (k < 0 && sm_lexical(p, target, sizeof target)) { rc = 1; break; }
+            if (strncmp(target, root, (size_t)rootn) || target[rootn] != '/') { rc = 1; break; }
+            if (skip) { long sn = (long)strlen(skip); if (!strncmp(target + rootn + 1, skip, (size_t)sn) && (target[rootn + 1 + sn] == '/' || !target[rootn + 1 + sn])) { rc = 1; break; } }
+            if (cx_fmt(line, sizeof line, "L\t%s\t%lu\t%lu\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\n", p + rootn + 1, r.dev, r.ino, r.size, r.ms, r.mn, r.cs, r.cn, target + rootn + 1) || sm_add(t, line)) rc = -1;
+        } else rc = 1;
+    }
+    for (long i = 0; i < count; i++) free(names[i]);
+    free(names); return rc;
+}
+int sm_tree_meta(const char *root, const char *skip, char out[65]) {
+    char real[4400]; sm_text t = {0, 0, 0};
+    if (!root || sy_realpath(root, real, sizeof real) < 0 || strcmp(real, root)) return -1;
+    if (sm_add(&t, "tree-meta-v1\n")) return -1;
+    int rc = sm_walk(root, (long)strlen(root), skip, root, sy_wall_s(), &t);
+    if (!rc && sy_sha256_hex(t.p, t.n, out)) rc = -1;
+    free(t.p); return rc;
+}
+static int sm_hex64(const char *s) {
+    for (int i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0;
+    return 1;
+}
+static int sm_vcheck(const sm_val *v, char out[17]) {
+    char text[400], hex[65];
+    if (cx_fmt(text, sizeof text, "%s\nV\n%s\n%s\n%s\n", sm_id, v->key, v->fp, v->value) || sy_sha256_hex(text, (long)strlen(text), hex)) return -1;
+    memcpy(out, hex, 16); out[16] = 0; return 0;
+}
+static int sm_vpush(const sm_val *v) {
+    if (sm_vcount == sm_vcap) {
+        long cap = sm_vcap ? sm_vcap * 2 : 16; sm_val *next = realloc(sm_vals, (size_t)cap * sizeof *next);
+        if (!next) return -1;
+        sm_vals = next; sm_vcap = cap;
+    }
+    sm_vals[sm_vcount++] = *v; return 0;
+}
+/* "V key64 fp64 value64 check16" (after the "V\t" prefix).  1 accepted, 0 rejected. */
+static int sm_vparse(const char *p) {
+    sm_val v; char want[17];
+    if (strlen(p) != 64 * 3 + 16 + 3 || p[64] != '\t' || p[129] != '\t' || p[194] != '\t') return 0;
+    memcpy(v.key, p, 64); v.key[64] = 0; memcpy(v.fp, p + 65, 64); v.fp[64] = 0; memcpy(v.value, p + 130, 64); v.value[64] = 0;
+    if (!sm_hex64(v.key) || !sm_hex64(v.fp) || !sm_hex64(v.value) || sm_vcheck(&v, want) || strncmp(p + 195, want, 16)) return 0;
+    return sm_vpush(&v) ? 0 : 1;
+}
+static int sm_vkey(const char *key, char out[65]) { return sy_sha256_hex(key, (long)strlen(key), out) ? -1 : 0; }
+/* 0 hit (OUT set); 1 miss. */
+int sm_value_get(const char *key, const char *fingerprint, char out[65]) {
+    char k[65];
+    if (sm_fd < 0 || !key || !fingerprint || strlen(fingerprint) != 64 || sm_vkey(key, k)) return 1;
+    for (long i = sm_vcount - 1; i >= 0; i--) if (!strcmp(sm_vals[i].key, k)) {
+        if (!strcmp(sm_vals[i].fp, fingerprint)) { memcpy(out, sm_vals[i].value, 65); sm_hits++; return 0; }
+        sm_stale++; break;
+    }
+    sm_misses++; return 1;
+}
+int sm_value_put(const char *key, const char *fingerprint, const char *value) {
+    sm_val v; char check[17], line[300];
+    if (sm_fd < 0 || !key || !fingerprint || !value || strlen(fingerprint) != 64 || strlen(value) != 64 || !sm_hex64(fingerprint) || !sm_hex64(value) || sm_vkey(key, v.key)) return -1;
+    memcpy(v.fp, fingerprint, 65); memcpy(v.value, value, 65);
+    if (sm_vcheck(&v, check) || cx_fmt(line, sizeof line, "V\t%s\t%s\t%s\t%s\n", v.key, v.fp, v.value, check)) return -1;
+    if (sy_write_all(sm_fd, line, (long)strlen(line)) || sm_vpush(&v)) return -1;
+    sm_recorded++; return 0;
+}
+void sm_stats(long *hits, long *misses, long *stale, long *rejected, long *recorded) {
+    if (hits) *hits = sm_hits;
+    if (misses) *misses = sm_misses;
+    if (stale) *stale = sm_stale;
+    if (rejected) *rejected = sm_rejected;
+    if (recorded) *recorded = sm_recorded;
+}
+void sm_report(const char *label) {
+    sy_printf("SHAMEMO\t%s\tenabled=%d\thits=%ld\tmisses=%ld\tstale=%ld\trejected=%ld\trecorded=%ld\n", label, sm_fd >= 0, sm_hits, sm_misses, sm_stale, sm_rejected, sm_recorded);
+}

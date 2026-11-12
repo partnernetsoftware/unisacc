@@ -1425,6 +1425,20 @@ s9三档命令完成还不等于FULL，须核实际候选消费者及daily完整
 批次需要调用者提供预编译 `release-oneshot-tool`、`fake-gh-tool`、`fake-s9-tool`、
 `release-decide-tool`、`release-layout-tool`，避免把多个工具的冷编译计入 55 秒夹具界。
 
+0.0.58 资产门禁在每次实际 CI dispatch 前重新查询 REST release id 和
+`releases/ID/assets?per_page=100&page=1`，保留 HTTP 头及名称、大小、digest、state。
+任何 Link 分页头、截断行、重复、额外、缺失或非 uploaded 项均拒绝触发；
+远端大小和 sha256 必须逐项匹配本地候选，不能用 upload 返回成功或历史 checkpoint 替代。
+应上传集合沿 candidate.tsv 七角色及 standalone-sha256.tsv 六目标生成，六片另与 APE
+逐字节核对；无新增工具名或编译库存项，现有 release-exec 批次扩展缺 win-arm64、
+错候选、错内容、错大小、重复及分页假 GH 场景，断言 workflow run trace 为零。
+已有 CI 身份、RUNNING/FAILED dispatch 均不盲重触发。真实网络及产品资格不由夹具证明。
+新增 `release-assetguard` 批次使用同一检查的 `--assetguard` 模式，55秒界不变；
+原 `release-exec` 默认八场景及原断言保留。资产专批另覆盖缺digest、API失败、
+分页截断、draft-check已DONE恢复后重查及十四资产（七角色+六片+manifest）正负控。
+六片名称由releaseoneshotpack唯一权威表提供，prepare/upload/public与门禁复用。
+
+
 工具编译库存以实时 Git 索引为准，每片至多八源。本增量纳入四个 tools cx 后为
 767 源、96 片，范围 `tools-compile-000..095`；`096` 将是空片，不能登记。
 清单已补 `tools/check-whole-front-expand.cx`，新增假CLI在 tests/cases，不计入tools库存。

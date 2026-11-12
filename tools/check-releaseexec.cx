@@ -7,6 +7,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.releaseoneshotpack
 static int failed;
 static const char *root, *out, *one, *gh, *s9, *decide, *layout;
 static char assets[4400], table[4400];
@@ -30,6 +31,7 @@ static void make_layout(const char *dir,const char *rev,int mode) {
  unsigned char pkg[20]={'P',' ','4','\n','U','N','I','P','K','G','1','\n',4,0,0,0,0,0,0,0};
  path(p,source,"pkg.bin");if(mode==6)pkg[4]='X';if(cx_write(p,pkg,sizeof pkg))die("package write");
  path(p,source,"unisacc.com");put(p,mode==7?"#!/bin/sh\nprintf 'unisacc 9.9.9\\n'\n":"#!/bin/sh\nprintf 'unisacc 1.2.3\\n'\n");hashfile(p,h);
+ if(mode==9||mode==10){char installed[4400];path(installed,root,"unisacc.com");if(sy_copy(installed,p,0755)<0)die("copy installed APE");hashfile(p,h);}
  if(cx_fmt(record,sizeof record,"{\"product_digest\": \"%s\", \"schema\":1, \"version\": \"%s\", \"commit\": \"%s\"}\n",h,mode==7?"9.9.9":"1.2.3",rev))die("record");path(p,source,"unisacc.com.build.json");put(p,record);path(p,source,"slice-win-arm64");put(p,"fixture arm64\n");
  char *text=get(table),*at=text?strchr(text,'\n'):0;if(!at)die("candidate template");at++;for(int col=0;col<21;col++){char *end=strchr(at,col==20?'\n':'\t');if(!end)die("candidate fields");if(col==2)memcpy(at,rev,40);if(col>=8&&col<=14&&!(col%2)){const char *names[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json"};path(p,source,names[(col-8)/2]);hashfile(p,h);memcpy(at,h,64);}at=end+1;}put(table,text);free(text);
  char *v[]={(char*)layout,"--candidate",table,source,assets,0};must(v);
@@ -47,8 +49,15 @@ static void scenario(const char *name,const char *marker,int deadline,int mode) 
  np_result r={0};char why[600];char *head[]={"git","-C",repo,"rev-parse","HEAD",0};if(np_run(head,root,0,5,&r,why,sizeof why)||r.rc||r.outn!=41)die("revision");memcpy(rev,r.out,40);rev[40]=0;np_free(&r);
  make_layout(dir,rev,mode);
  config(cfg,repo,fake,rev,deadline);if(marker){path(p,fake,marker);put(p,"1\n");}
- if(mode>=4){path(p,fake,"qualified");put(p,"1\n");}
+ if(mode>=4&&mode<9){path(p,fake,"qualified");put(p,"1\n");}
  char *plan[]={(char*)one,"--dry-run",table,assets,state,0};if(call(plan,root))die("dry-run setup");
+ if(mode==9||mode==10){
+     char ape[4400],standalone[4400],exports[4400],q[4400],h[65],row[400];np_buf manifest={0};
+     path(ape,assets,"unisacc.com");path(standalone,state,"standalone");if(rop_pack(ape,standalone))die("fixture six exports");
+     path(exports,fake,"exports");if(sy_mkdir(exports,0700))die("fixture exports mkdir");
+     for(int i=0;i<6;i++){path(p,standalone,rop_name(i));hashfile(p,h);if(cx_fmt(row,sizeof row,"%s\t%s\n",rop_name(i),h))die("fixture manifest");np_puts(&manifest,row);path(q,exports,rop_name(i));if(sy_copy(p,q,0755)<0)die("fixture export copy");}
+     path(p,state,"standalone-sha256.tsv");put(p,manifest.p);path(p,exports,"standalone-sha256.tsv");put(p,manifest.p);free(manifest.p);
+ }
  int rc=execute(state,cfg);path(p,state,"exec.tsv");char *log=get(p);if(!log)die("execution checkpoint missing");
  if(mode==0){ck(rc!=0,"fixture-qualification-refused");ck(strstr(log,"upload\tDONE")!=0,"seven-upload-success");ck(strstr(log,"ci-observe\tFAILED")!=0,"fake-log-not-real-qualification");char *start=strstr(log,"s9-commit\tRUNNING"),*ci=strstr(log,"ci-observe\tFAILED"),*end=strstr(log,"s9-commit\tDONE");ck(start&&ci&&end&&start<ci&&ci<end,"CI-and-s9-overlap");}
  if(mode==1){ck(rc==1,"upload-failure-status");ck(strstr(log,"upload\tFAILED")&&!strstr(log,"ci-dispatch\tRUNNING"),"upload-failure-stops-before-CI");}
@@ -57,6 +66,18 @@ static void scenario(const char *name,const char *marker,int deadline,int mode) 
  if(mode==4){ck(rc==1&&strstr(log,"draft-readback\tDONE")&&strstr(log,"decide\tFAILED"),"readback-then-UNKNOWN-decision-refusal");path(p,state,"decide.out");char *s=get(p);ck(s&&strstr(s,"RELEASE_DECIDE")&&strstr(s,"NOT_QUALIFIED"),"real-decide-output-retained");free(s);ck(!strstr(log,"publish\tRUNNING"),"UNKNOWN-upstream-blocks-public-preconditions");}
  if(mode==5){ck(rc==1&&strstr(log,"draft-readback\tFAILED")&&!strstr(log,"decide\tRUNNING"),"sha-corrupt-readback-refused-before-decision");}
  if(mode==6||mode==7){ck(rc==1&&strstr(log,"draft-readback\tFAILED")&&!strstr(log,"decide\tRUNNING"),mode==6?"invalid-package-footer-refused":"wrong-version-refused");}
+ if(mode==9){ck(strstr(log,"ci-dispatch\tDONE")!=0,"fourteen-assets-allow-dispatch");path(p,state,"assetguard.tsv");char *seal=get(p);ck(seal&&!strcmp(seal,"REMOTE_COMPLETE\n"),"fourteen-assets-remote-complete");free(seal);}
+ if(mode==11){
+     char *cut=strstr(log,"ci-dispatch\tRUNNING");if(!cut)die("resume dispatch boundary");*cut=0;path(p,state,"exec.tsv");put(p,log);
+     path(p,fake,"assetapi");if(sy_unlink(p))die("remove own API marker");path(p,fake,"assetmissing");put(p,"1\n");
+     ck(execute(state,cfg)==1,"resume-DONE-draft-rechecks-remote");
+     path(p,fake,"log");char *trace=get(p);ck(trace&&strstr(trace,"assets?per_page=100&page=1")&&!strstr(trace,"workflow run"),"resume-remote-query-and-zero-CI-trace");free(trace);
+ }
+ if(mode==8||mode==10){
+     ck(rc==1&&!strstr(log,"ci-dispatch\tDONE"),"assetguard-refuses-before-dispatch");
+     path(p,fake,"log");char *trace=get(p);ck(trace&&!strstr(trace,"workflow run"),"assetguard-CI-trace-zero");free(trace);
+     ck(execute(state,cfg)!=0,"assetguard-resume-no-blind-dispatch");
+ }
  free(log);path(p,fake,"public");ck(sy_exists(p)!=1,"no-real-or-fake-publication");
  if(mode==0){path(p,assets,"pkg.bin");size_t n=0;char *saved=cx_read(p,&n);if(!saved)die("save package");put(p,"changed\n");ck(execute(state,cfg)==2,"changed-asset-identity-refused");if(cx_write(p,saved,n))die("restore package");free(saved);
  char *text=get(cfg);if(!text)die("config read");np_buf changed={0};np_puts(&changed,text);np_puts(&changed,"# changed configuration identity\n");put(cfg,changed.p);free(text);free(changed.p);ck(execute(state,cfg)==2,"changed-config-identity-refused");}
@@ -68,17 +89,33 @@ static void s9_resume(void) {
  char *wrong[]={"env",env,(char*)s9,(char*)root,"--resume",run,"--tier","daily",0};ck(call(wrong,root)==2,"s9-wrong-tier-identity-refused");
 }
 int main(int argc,char **argv) {
- if(argc!=8){fprintf(stderr,"needs ROOT NEW_OUT ONESHOT FAKE_GH FAKE_S9 DECIDE RELEASE_LAYOUT, all prebuilt\n");return 77;}
- for(int i=1;i<argc;i++)if(argv[i][0]!='/')die("absolute paths required");root=argv[1];out=argv[2];one=argv[3];gh=argv[4];s9=argv[5];decide=argv[6];layout=argv[7];if(sy_mkdir(out,0700))die("NEW_OUT must not exist");
+ int assetmode=argc==9&&!strcmp(argv[8],"--assetguard");
+ if(argc!=8&&!assetmode){fprintf(stderr,"needs ROOT NEW_OUT ONESHOT FAKE_GH FAKE_S9 DECIDE RELEASE_LAYOUT [--assetguard], all prebuilt\n");return 77;}
+ for(int i=1;i<8;i++)if(argv[i][0]!='/')die("absolute paths required");root=argv[1];out=argv[2];one=argv[3];gh=argv[4];s9=argv[5];decide=argv[6];layout=argv[7];if(sy_mkdir(out,0700))die("NEW_OUT must not exist");
  path(table,out,"candidate.tsv");
  const char *names[]={"unisacc.com","pkg.bin","slice-win-arm64","unisacc.com.build.json","build.json","asset.zip","SHA256SUMS"};
  np_buf b={0};const char *zero="0000000000000000000000000000000000000000000000000000000000000000";
  np_puts(&b,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\nfixture/repo\tv1.2.3\t1111111111111111111111111111111111111111\t1.2.3\tcandidate-native.yml\tmain\t0");
  for(int i=0;i<7;i++){np_puts(&b,"\t");np_puts(&b,names[i]);np_puts(&b,"\t");np_puts(&b,zero);}
  np_puts(&b,"\n");put(table,b.p);free(b.p);
+ if(!assetmode){
  scenario("success-safe-stop",0,20,0);scenario("upload-failure","uploadfail",20,1);scenario("CI-failure","cifail",20,2);scenario("deadline","pending",1,3);
  scenario("UNKNOWN-decision","qualified",20,4);scenario("corrupt-readback","corrupt",20,5);
  scenario("invalid-footer","qualified",20,6);scenario("wrong-version","qualified",20,7);
  s9_resume();
+ }else{
+ scenario("missing-win-arm64","assetmissing",20,8);
+ scenario("wrong-candidate","assetcandidate",20,8);
+ scenario("wrong-content","assetdigest",20,8);
+ scenario("wrong-size","assetsize",20,8);
+ scenario("duplicate-asset","assetduplicate",20,8);
+ scenario("pagination","assetpage",20,8);
+ scenario("API-failure","assetapi",20,8);
+ scenario("missing-digest","assetnodigest",20,8);
+ scenario("truncated-page","assettruncated",20,8);
+ scenario("resume-DONE-draft","assetapi",20,11);
+ scenario("fourteen-complete",0,20,9);
+ scenario("fourteen-missing-winarm","assetmissingexport",20,10);
+ }
  printf("CHECK_RELEASE_EXEC\tfailed=%d\tscope=FAKE_ONLY_isolated-fixture\tqualification=NOT_RELEASE_QUALIFIED\n",failed);return failed?1:0;
 }

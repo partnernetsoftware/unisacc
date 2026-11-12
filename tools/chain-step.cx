@@ -50,6 +50,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.shamemo
 #pragma unisa use sys.posix
 
 static const char *g_self;
@@ -110,10 +111,24 @@ static void cs_expect_file(const char *p, const char *what) {
     sy_printf("CHAIN\t%s\tfile=%s\tbytes=%ld\n", what, p, n);
 }
 
+/* T11: a re-entry re-checks every entry as before; cxlib.shamemo only supplies the SHA of a
+   regular file hashed earlier in this chain output whose dev/ino/size/mtime/ctime are unchanged.
+   It is enabled by chain-run's environment and never for the compare phase (see cs_memo). A
+   miss, a symlink, a changing file or the running image fall through to the plain read below. */
+static void cs_memo_report(void) { if (sm_enabled()) sm_report("fixedpoint"); }
+static void cs_memo(const char *phase) {
+    const char *file = sy_env("UNISACC_CHAIN_SHAMEMO"), *id = sy_env("UNISACC_CHAIN_SHAMEMO_ID");
+    if (!file || !file[0] || !id || !id[0]) return;
+    if (tx_eqz(phase, "compare")) { sy_printf("SHAMEMO\tfixedpoint\toff\treason=compare-is-a-full-recheck\n"); return; }
+    if (sm_open(file, id)) sy_printf("SHAMEMO\tfixedpoint\toff\treason=memo-unavailable\n");
+    else sy_atexit(cs_memo_report);
+}
 static void cs_sha(const char *p, char out[65]) {
-    long n = cs_file_size(p), at = 0;
+    long n, at = 0;
     int fd;
     char *b;
+    if (sm_enabled() && strcmp(p, "/proc/self/exe") && !sm_sha(p, out)) return;
+    n = cs_file_size(p);
     if (n < 0) cs_die("sha256 read", p);
     b = n > 0 ? malloc((size_t)n) : 0;
     if (n > 0) {
@@ -668,12 +683,22 @@ static void cs_source(const char *s, char out[65]) {
     char *text = 0, before[65], after[65]; size_t n = 0; int k;
     if (!cs_fp_helper) cs_die("REFUSE --identity-helper required", s);
     cs_sha(cs_fp_helper, before);
+    /* The SID is the helper's hash of the frozen tree S. With the memo on, every entry of S
+       (all but its top-level out/, where the chain itself writes) is still visited and its
+       metadata listed; the helper's earlier answer is reused only for an identical listing and
+       the same helper bytes. A young entry or a symlink leaving S makes the tree unmemoizable. */
+    char key[4600], shape[65]; int memo = 0;
+    if (sm_enabled() && !cx_fmt(key, sizeof key, "source-sid\n%s\n%s\n", before, s) && !sm_tree_meta(s, "out", shape)) {
+        memo = 1;
+        if (!sm_value_get(key, shape, out)) return;
+    }
     char *v[] = {(char *)cs_fp_helper, (char *)s, 0};
     int rc = cx_runv_timeout(v, 8, &text, &n);
     cs_sha(cs_fp_helper, after);
     if (rc || strcmp(before, after) || !text || n != 65 || text[64] != '\n') cs_die("REFUSE F-v2 source identity", s);
     for (k = 0; k < 64; k++) { if (!((text[k] >= '0' && text[k] <= '9') || (text[k] >= 'a' && text[k] <= 'f'))) cs_die("REFUSE source SID wire", s); out[k] = text[k]; }
     out[64] = 0; free(text);
+    if (memo) { char again[65]; if (!sm_tree_meta(s, "out", again) && !strcmp(shape, again)) sm_value_put(key, shape, out); }
 }
 static void cs_fp_idtext(char *id, long cap, long *at, const char *rev, const char *phase, const char *target,
     const char *source, const char *ph, const char *ch, const char *ah) {
@@ -1023,6 +1048,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
                          const char *target, const char *phase, int resume, const char *object, int link) {
     char dir[4400], sub[4400], ctor[4400], rec[4400], g2[4400], g3[4400];
     int g, i, selected = -1, compare = tx_eqz(phase, "compare");
+    if (!cs_fp_active) cs_memo(phase);  /* once per process, before the first identity is read */
     cs_fp_active = 1;
     if (cx_fmt(g2, sizeof g2, "%s/g2", out) || cx_fmt(g3, sizeof g3, "%s/g3", out)) cs_die("path", out);
     for (i = 0; i < 6; i++) if (target && tx_eqz(target, cs_fp_targets[i])) selected = i;
@@ -1325,6 +1351,18 @@ int main(int argc, char **argv) {
     if (argc < 3) {
         sy_eprintf("usage: chain-step snap|build|ctx|host|list|wave|final|p3|slice|pack|smoke|check ...\n");
         return 2;
+    }
+    if (tx_eqz(argv[1], "memo-probe")) {
+        /* 夹具入口: memo-probe PHASE HELPER TREE FILE DIR —— 与 fixedpoint 同一个备忘门(cs_memo)、
+           同一组读法(cs_sha、cs_tree、cs_source),打印三个身份与备忘计数;不构造任何东西。 */
+        char fh[65], th[65], sid[65]; long hits = 0, misses = 0, stale = 0, rejected = 0, recorded = 0;
+        if (argc != 7) cs_die("memo-probe needs PHASE HELPER TREE FILE DIR", 0);
+        cs_memo(argv[2]); cs_fp_helper = argv[3];
+        cs_sha(argv[5], fh); cs_tree(argv[6], 0, th); cs_source(argv[4], sid);
+        sm_stats(&hits, &misses, &stale, &rejected, &recorded);
+        sy_printf("MEMO_PROBE\tphase=%s\tenabled=%d\tfile=%s\ttree=%s\tsid=%s\thits=%ld\tmisses=%ld\tstale=%ld\trejected=%ld\trecorded=%ld\n",
+                  argv[2], sm_enabled(), fh, th, sid, hits, misses, stale, rejected, recorded);
+        return 0;
     }
     if(tx_eqz(argv[1],"wave-objects")||tx_eqz(argv[1],"wave-runner")){
         if(argc!=5)cs_die("wave-objects/wave-runner needs REV S B",0);

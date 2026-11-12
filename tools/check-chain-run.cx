@@ -30,6 +30,13 @@ static int fake(int argc,char **argv) {
     const char *out=0,*phase=0,*mode="ok"; int i;
     for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
     if(!out||!phase) return 0; /* watch */
+    for(i=1;i<argc;i++) if(!strcmp(argv[i],"--recheck-only")) {
+        /* the runner's full re-check attempt before compare/pack: no checkpoint, no phase work */
+        char rp[4400];const char *m=getenv("UNISACC_CHAIN_SHAMEMO"),*id=getenv("UNISACC_CHAIN_RECHECK_ID");
+        { const char *dv=getenv("UNISACC_CHAIN_SHAMEMO_DERIVED");join(rp,out,"derived-env");FILE *df=fopen(rp,"ab");fprintf(df,"%s-recheck\t%s\n",phase,dv?dv:"0");fclose(df); }
+        join(rp,out,"memo-env");FILE *rf=fopen(rp,"ab");fprintf(rf,"%s-recheck\t%s\t%s\t%s\n",phase,m?"on":"off",m?m:"-",id?id:"-");fclose(rf);
+        return !strcmp(mode,"recheck-fail")?9:0;
+    }
     if(!strncmp(mode,"parallel",8)||!strcmp(mode,"siblings")) {
         char trace[4400],row[600];join(trace,out,"events");int fd=sy_open(trace,O_WRONLY|O_CREAT|O_APPEND,0644);
         cx_fmt(row,sizeof row,"START\t%s\t%ld\n",phase,sy_now_ms());sy_write_all(fd,row,strlen(row));
@@ -47,6 +54,13 @@ static int fake(int argc,char **argv) {
         sy_sleep_ms(150);cx_fmt(row,sizeof row,"END\t%s\t%ld\n",phase,sy_now_ms());sy_write_all(fd,row,strlen(row));sy_close(fd);
     }
     char p[4400]; join(p,out,"calls"); FILE *f=fopen(p,"ab"); fprintf(f,"%s\n",phase); fclose(f);
+    { /* what the runner handed this phase: memo path and identity, or nothing */
+        const char *m=getenv("UNISACC_CHAIN_SHAMEMO"),*id=getenv("UNISACC_CHAIN_SHAMEMO_ID");
+        join(p,out,"memo-env"); f=fopen(p,"ab"); fprintf(f,"%s\t%s\t%s\t%s\n",phase,m?"on":"off",m?m:"-",id?id:"-"); fclose(f);
+        const char *dv=getenv("UNISACC_CHAIN_SHAMEMO_DERIVED"); join(p,out,"derived-env"); f=fopen(p,"ab"); fprintf(f,"%s\t%s\n",phase,dv?dv:"0"); fclose(f);
+    }
+    if(!strcmp(mode,"compare-retry")&&!strcmp(phase,"compare")){char once[4400];join(once,out,"compare-once");if(!sy_exists(once)){put(once,"1");return 137;}}
+    if(!strcmp(mode,"seg")) sy_sleep_ms(1100); /* longer than segment minus bound (5 s - 4 s): the next phase cannot fit */
     if(!strcmp(mode,"fail")) { fprintf(stderr,"FIRST_REAL_FAILURE\n"); return 7; }
     if(!strcmp(mode,"exhaust")) return 124;
     if(!strcmp(mode,"slow")) { sy_sleep_ms(2200); return 124; }
@@ -101,9 +115,143 @@ static int events(const char *name,int serial,int retry) {
     fclose(f);for(int i=0;i<7;i++)if(ended[i]!=1||starts[i]!=(retry&&i==1?2:1))valid=0;
     return valid&&!live&&(serial?peak==1:peak==4);
 }
+/* T11 segment/supervisor/memo-routing cases: `--segments ROOT OUT [RUNNER]` (batch chain-run-segments). */
+static int runv(const char *name,const char *mode,const char *deadline,const char **opts,const char **env,int secs) {
+    char dir[4400];join(dir,base,name);sy_mkdir(dir,0755);
+    char *v[48];int k=0;
+    if(env){v[k++]="env";for(int i=0;env[i];i++)v[k++]=(char*)env[i];}
+    v[k++]=runner;v[k++]="--rev";v[k++]="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";v[k++]="--out";v[k++]=dir;v[k++]="--candidate";v[k++]=self;v[k++]="--watch";v[k++]=self;
+    v[k++]="--deadline-s";v[k++]=(char*)deadline;v[k++]="--max-resumes";v[k++]="3";
+    for(int i=0;opts&&opts[i];i++)v[k++]=(char*)opts[i];
+    v[k++]="--";v[k++]="--fixture-case";v[k++]=(char*)mode;v[k]=0;
+    char *o=0;size_t n=0;int rc=cx_runv_timeout(v,secs,&o,&n);
+    static int serial;char p[4400],leaf[80];cx_fmt(leaf,sizeof leaf,"check-%d.stdout",++serial);char d2[4400];join(d2,base,name);join(p,d2,leaf);
+    if(o){if(cx_write(p,o,n))exit(2);free(o);}return rc;
+}
+static int count(const char *file,const char *needle) {
+    size_t n=0;char *b=cx_read(file,&n);int k=0;if(!b)return -1;
+    for(char *s=b;(s=strstr(s,needle));s+=strlen(needle))k++;free(b);return k;
+}
+typedef struct { long end; int attempts,resumes,ma,mr,width,segments,mseg,owed,fields; } budget_row;
+static budget_row budget_of(const char *name) {
+    char p[4400],d[4400];join(d,base,name);join(p,d,"chain-run.budget");size_t n=0;char *b=cx_read(p,&n);budget_row r;memset(&r,0,sizeof r);
+    if(b)r.fields=sscanf(b,"%ld %d %d %d %d %d %d %d %d",&r.end,&r.attempts,&r.resumes,&r.ma,&r.mr,&r.width,&r.segments,&r.mseg,&r.owed);free(b);return r;
+}
+static void file_of(char *p,const char *name,const char *leaf) { char d[4400];join(d,base,name);join(p,d,leaf); }
+static int segment_cases(const char *plan) {
+    char p[4400],q[4400];budget_row b1,b2;
+    const char *seg[]={"--segment-s","5","--max-segments","9",0};
+    /* four serial phases, bound 4, each fake phase takes 1.1 s: exactly one phase fits a 5 s segment */
+    put(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    int rc=runv("seg","seg","60",seg,0,12);
+    ck(rc==75,"segment-expiry-rc75");
+    file_of(p,"seg","chain-run.tsv");file_of(q,"seg","calls");
+    ck(has(p,"\tn=1\tstart\tsegment-s=5\tmax=9\n")&&has(p,"\tn=1\texpired\tnext=a\t"),"segment-expiry-row-names-next");
+    ck(!has(p,"BLOCKER")&&count(p,"\trc=0\tresidue=0\t")==1&&count(p,"ATTEMPT\t")==1&&has(p,"cleanup=0 residue=0"),"segment-expiry-clean-no-child-killed");
+    ck(count(q,"\n")==1&&has(q,"snap\n"),"segment-ran-only-what-fit");
+    b1=budget_of("seg");ck(b1.fields==9&&b1.segments==1&&b1.mseg==9&&b1.attempts==1&&!b1.owed,"segment-budget-persisted");
+    rc=runv("seg","seg","60",seg,0,12);b2=budget_of("seg");
+    ck(rc==75&&count(q,"\n")==2&&count(q,"snap\n")==1&&has(q,"a\n"),"continued-segment-skips-completed-phase");
+    ck(b2.end==b1.end&&b1.end>0,"total-deadline-not-reset-across-segments");
+    ck(b2.segments==2&&b2.attempts==2,"segment-and-attempt-counts-continue");
+    rc=runv("seg","seg","60",seg,0,12);ck(rc==75,"third-segment-continues");
+    rc=runv("seg","seg","60",seg,0,12);
+    ck(rc==0&&has(p,"PREPARED\tpack"),"final-segment-prepared");
+    ck(count(q,"\n")==4&&count(q,"snap\n")==1&&count(q,"a\n")==1&&count(q,"b\n")==1&&count(q,"pack\n")==1,"every-phase-exactly-once-across-segments");
+    ck(count(p,"\texpired\t")==3&&count(p,"\tstart\tsegment-s=5")==4&&budget_of("seg").end==b1.end,"segment-rows-and-deadline-stable");
+    /* the persisted total deadline governs a later segment: a segment is not a fresh deadline */
+    rc=runv("segdl","seg","60",seg,0,12);b1=budget_of("segdl");
+    {
+        char row[200],bp[4400];file_of(bp,"segdl","chain-run.budget");
+        cx_fmt(row,sizeof row,"%ld %d %d %d %d %d %d %d %d\n",sy_now_ms()-1,b1.attempts,b1.resumes,b1.ma,b1.mr,b1.width,b1.segments,b1.mseg,b1.owed);put(bp,row);
+    }
+    int rc2=runv("segdl","seg","60",seg,0,12);file_of(p,"segdl","chain-run.tsv");file_of(q,"segdl","calls");
+    ck(rc==75&&rc2==3&&has(p,"reason=deadline")&&count(q,"\n")==1,"passed-total-deadline-stops-next-segment");
+    ck(runv("segdl","seg","60",seg,0,12)==3&&count(q,"\n")==1,"deadline-stop-is-not-reset-by-reinvocation");
+    /* segment cap */
+    const char *cap[]={"--segment-s","5","--max-segments","2",0},*raised[]={"--segment-s","5","--max-segments","5",0};
+    rc=runv("segcap","seg","60",cap,0,12);rc2=runv("segcap","seg","60",cap,0,12);
+    int rc3=runv("segcap","seg","60",cap,0,12);file_of(p,"segcap","chain-run.tsv");file_of(q,"segcap","calls");
+    ck(rc==75&&rc2==75&&rc3==3&&has(p,"reason=segments-exhausted"),"segment-cap-stops-rc3");
+    ck(count(q,"\n")==2&&budget_of("segcap").segments==2,"segment-cap-no-phase-after-cap");
+    ck(runv("segcap","seg","60",raised,0,12)==2&&count(q,"\n")==2,"segment-cap-cannot-be-raised");
+    /* the attempt cap is shared by all segments */
+    const char *att[]={"--segment-s","5","--max-segments","9","--max-attempts","2",0};
+    rc=runv("segatt","seg","60",att,0,12);rc2=runv("segatt","seg","60",att,0,12);rc3=runv("segatt","seg","60",att,0,12);
+    file_of(p,"segatt","chain-run.tsv");file_of(q,"segatt","calls");
+    /* attempt 1 in segment 1, attempt 2 in segment 2; the cap then stops segment 2 itself with work left */
+    ck(rc==75&&rc2==3&&rc3==3&&count(p,"reason=attempts-exhausted")==2&&count(q,"\n")==2&&budget_of("segatt").attempts==2,"attempt-cap-shared-across-segments");
+    /* a segment no phase could ever fit is refused before any child or state */
+    const char *tiny[]={"--segment-s","3",0};
+    ck(runv("segtiny","seg","60",tiny,0,12)==2,"segment-shorter-than-bound-refused");
+    file_of(q,"segtiny","calls");file_of(p,"segtiny","chain-run.budget");ck(!sy_exists(q)&&!sy_exists(p),"segment-refusal-before-child-and-budget");
+    const char *huge[]={"--segment-s","271",0};
+    ck(runv("seghuge","seg","60",huge,0,12)==2,"segment-over-270-refused");
+    /* an owed resume (segment ended between a retryable failure and its observation) is settled first */
+    rc=runv("segowed","seg","60",seg,0,12);b1=budget_of("segowed");
+    {
+        char row[200],bp[4400];file_of(bp,"segowed","chain-run.budget");
+        cx_fmt(row,sizeof row,"%ld %d %d %d %d %d %d %d 1\n",b1.end,b1.attempts,b1.resumes,b1.ma,b1.mr,b1.width,b1.segments,b1.mseg);put(bp,row);
+    }
+    rc2=runv("segowed","seg","60",seg,0,12);b2=budget_of("segowed");file_of(p,"segowed","chain-run.tsv");
+    ck(rc==75&&rc2==75&&has(p,"\towed=settled\n")&&b2.resumes==b1.resumes+1&&!b2.owed&&b2.width==b1.width-1,"owed-resume-settled-before-new-work");
+    sy_printf("CHECK_CHAIN_RUN_SEGMENTS\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
+}
+/* `--supervise ROOT OUT [RUNNER]` (batch chain-run-supervise): the supervisor, and the full re-check
+   attempt the runner places before compare and before pack. */
+static int supervise_cases(const char *plan) {
+    char p[4400],q[4400];int rc;
+    put(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    /* supervisor: segments continue without a caller, each phase once, caps still stop it */
+    const char *sup[]={"--supervise","--runner",runner,"--segment-s","5","--max-segments","9",0};
+    rc=runv("sup","seg","60",sup,0,25);file_of(p,"sup","chain-run.tsv");file_of(q,"sup","calls");
+    ck(rc==0&&has(p,"PREPARED\tpack"),"supervisor-continues-to-prepared");
+    ck(count(q,"\n")==4&&count(q,"snap\n")==1&&count(q,"a\n")==1&&count(q,"b\n")==1&&count(q,"pack\n")==1,"supervisor-no-phase-repeated");
+    ck(count(p,"SUPERVISE\t")==4&&count(p,"\trc=75\tresidue=0\n")==3&&count(p,"\texpired\t")==3&&budget_of("sup").segments==4,"supervisor-one-row-per-segment");
+    const char *supcap[]={"--supervise","--runner",runner,"--segment-s","5","--max-segments","2",0};
+    rc=runv("supcap","seg","60",supcap,0,25);file_of(p,"supcap","chain-run.tsv");file_of(q,"supcap","calls");
+    ck(rc==3&&has(p,"reason=segments-exhausted")&&count(q,"\n")==2,"supervisor-stops-at-segment-cap");
+    const char *supbare[]={"--supervise","--runner",runner,0};
+    ck(runv("supbare","seg","60",supbare,0,12)==2,"supervisor-requires-segment-and-cap");
+    file_of(q,"supbare","calls");ck(!sy_exists(q),"supervisor-refusal-before-child");
+    /* a failing phase is a stop, never a continue */
+    rc=runv("supfail","fail","60",sup,0,25);file_of(p,"supfail","chain-run.tsv");
+    ck(rc==7&&has(p,"reason=first-failure")&&count(p,"SUPERVISE\t")==1,"supervisor-stops-on-first-failure");
+    /* memo routing and the full re-check before compare and pack */
+    put(plan,"0\tsnap\t-\t4\n1\tcompare\t-\t4\n2\tpack\t-\t4\n");
+    rc=runv("memo","ok","60",0,0,12);file_of(p,"memo","chain-run.tsv");file_of(q,"memo","memo-env");
+    {
+        char idp[4400],hex[65],want[400],mp[4400];size_t n=0;file_of(idp,"memo","chain-run.identity");file_of(mp,"memo","chain-sha.memo");
+        char *id=cx_read(idp,&n);if(!id||sy_sha256_hex(id,(long)n,hex))return 2;free(id);
+        cx_fmt(want,sizeof want,"snap\ton\t%s\t%s\n",mp,hex);
+        ck(rc==0&&has(q,want),"memo-bound-to-output-identity");
+        /* order is the contract: recheck (memo removed) immediately before each of the two phases */
+        cx_fmt(want,sizeof want,"compare-recheck\toff\t-\t%s\ncompare\ton\t%s\t%s\npack-recheck\toff\t-\t%s\npack\ton\t%s\t%s\n",hex,mp,hex,hex,mp,hex);
+        ck(has(q,want)&&count(q,"-recheck\t")==2,"full-recheck-without-memo-runs-before-compare-and-before-pack");
+    }
+    ck(has(p,"phase=snap\trc=0\tresidue=0\tbound=4\tmemo=on\n")&&has(p,"phase=compare-recheck\trc=0\tresidue=0\tbound=4\tmemo=off\n")&&has(p,"phase=pack-recheck\trc=0\tresidue=0\tbound=4\tmemo=off\n")&&count(p,"ATTEMPT\t")==5,"recheck-is-its-own-bounded-attempt");
+    file_of(q,"memo","derived-env");ck(!has(q,"\t1\n")&&has(q,"snap\t0\n"),"derived-memo-off-by-default");
+    const char *derived[]={"--memo-derived",0};
+    rc=runv("memoderived","ok","60",derived,0,12);file_of(q,"memoderived","derived-env");
+    ck(rc==0&&has(q,"snap\t1\n")&&has(q,"compare-recheck\t0\n")&&has(q,"compare\t1\n")&&has(q,"pack-recheck\t0\n")&&has(q,"pack\t1\n"),"derived-memo-only-with-flag-and-never-in-recheck");
+    const char *forged[]={"UNISACC_CHAIN_SHAMEMO=/forged/memo","UNISACC_CHAIN_SHAMEMO_ID=forged","UNISACC_CHAIN_RECHECK_ID=forged","UNISACC_CHAIN_SHAMEMO_DERIVED=1",0};
+    rc=runv("memoenv","ok","60",0,forged,12);file_of(q,"memoenv","memo-env");
+    ck(rc==0&&has(q,"compare-recheck\toff\t-\t")&&has(q,"pack-recheck\toff\t-\t")&&!has(q,"forged"),"inherited-memo-environment-never-reaches-a-phase");
+    file_of(q,"memoenv","derived-env");ck(!has(q,"\t1\n"),"inherited-derived-opt-in-never-reaches-a-phase");
+    const char *nomemo[]={"--no-sha-memo",0};
+    rc=runv("memooff","ok","60",nomemo,forged,12);file_of(q,"memooff","memo-env");
+    ck(rc==0&&has(q,"snap\toff\t-\t-\n")&&has(q,"compare\toff\t-\t-\n")&&has(q,"pack\toff\t-\t-\n")&&!has(q,"-recheck"),"no-sha-memo-phase-call-is-the-full-walk");
+    rc=runv("recheckfail","recheck-fail","60",0,0,12);file_of(p,"recheckfail","chain-run.tsv");file_of(q,"recheckfail","calls");
+    ck(rc==9&&has(p,"BLOCKER\tphase=compare-recheck\treason=recheck-failed")&&!has(q,"compare\n")&&!has(q,"pack\n"),"failed-recheck-blocks-the-phase");
+    rc=runv("compareretry","compare-retry","60",0,0,12);file_of(p,"compareretry","chain-run.tsv");file_of(q,"compareretry","memo-env");
+    ck(rc==0&&has(p,"RESUME\t")&&count(q,"compare-recheck\t")==2&&count(q,"compare\ton\t")==2&&count(q,"pack-recheck\t")==1,"retried-phase-needs-a-new-recheck");
+    sy_printf("CHECK_CHAIN_RUN_SUPERVISE\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
+}
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--rev")) return fake(argc,argv);
     if(argc==2&&argv[1][0]=='/') return 0; /* fake watch */
+    int segment_mode=argc>1&&!strcmp(argv[1],"--segments")?1:argc>1&&!strcmp(argv[1],"--supervise")?2:0;
+    if(segment_mode){argv[1]=argv[0];argv++;argc--;}
     if(sy_realpath(".",root,sizeof root)<0||sy_realpath(argv[0],self,sizeof self)<0) return 2;
     char temp[4400];
     if(argc<3||sy_realpath(argv[1],root,sizeof root)<0||argv[2][0]!='/'||cx_fmt(temp,sizeof temp,"%s/chain-run-%ld",argv[2],sy_now_ms()))return 2;
@@ -117,6 +265,7 @@ int main(int argc,char **argv) {
     char p[4400];join(p,base,"build");sy_mkdir(p,0755);join(p,base,"build/chain-phases.tsv");put(p,"# fake phases\n0\tsnap\t-\t55\n1\tctx\t-\t55\n2\tg2-lnx-x86_64-obj-0\t-\t55\n3\tg2-lnx-x86_64-obj-1\t-\t55\n4\tg2-lnx-x86_64-closure-prepare\t-\t55\n5\tg2-lnx-x86_64-closure\t-\t55\n6\tg2-lnx-x86_64-objects\t-\t55\n7\tg2-lnx-x86_64\t-\t55\n8\tg2-lnx-arm64-obj-0\t-\t55\n9\tg2-lnx-arm64-objects\t-\t55\n10\tpack\t-\t55\n");
     if(sy_chdir(base))return 2;
     join(p,base,"out");sy_mkdir(p,0755);if(sy_realpath(p,base,sizeof base)<0)return 2;
+    if(segment_mode){char plan[4400];join(plan,base,"../build/chain-phases.tsv");return segment_mode==1?segment_cases(plan):supervise_cases(plan);}
     ck(call("resume","resume","30","3",0)==0,"killed-resume");
     join(p,base,"resume/chain-run.tsv");ck(has(p,"RESUME\t")&&has(p,"PREPARED\tpack"),"persisted-evidence");
     ck(call("exhaust","exhaust","30","2",0)==3,"exhausted-rc3");

@@ -1,0 +1,269 @@
+/* check-shamemo: cxlib.shamemo hit rule and every invalidation, on real files.  usage: OUT_ABS
+ * Files are aged past the memo's racy window once (SM_RACY_S) before the first record. */
+#pragma unisa use cxlib.shamemo
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+static int bad;
+static void ck(int yes, const char *s) { sy_printf("%s\tshamemo.%s\n", yes ? "PASS" : "FAIL", s); if (!yes) bad++; }
+static char base[4400];
+static void join(char *p, const char *leaf) { if (cx_fmt(p, 4400, "%s/%s", base, leaf)) exit(2); }
+static void put(const char *p, const char *s) { if (cx_write(p, s, strlen(s))) exit(2); }
+static void want(const char *s, char hex[65]) { if (sy_sha256_hex(s, (long)strlen(s), hex)) exit(2); }
+static long H, M, S, R, W;
+static void stats(void) { sm_stats(&H, &M, &S, &R, &W); }
+/* ---- `--chain OUT CANDIDATE_CHAIN_NATIVE CHAIN_STEP_NATIVE`: the two chain tools' own memo gates and
+ * read paths, through their fixture entries (--memo-gate, memo-probe); nothing is constructed. */
+static char *runv(char **v) { char *o = 0; size_t n = 0; cx_runv_timeout(v, 20, &o, &n); return o; }
+static int field(const char *o, const char *key, char *dst, long cap) {
+    char needle[80]; if (!o || cx_fmt(needle, sizeof needle, "\t%s=", key)) return 0;
+    const char *p = strstr(o, needle); if (!p) return 0;
+    p += strlen(needle); long n = 0; while (p[n] && p[n] != '\t' && p[n] != '\n') n++;
+    if (n >= cap) return 0;
+    if (mm_copy(dst, cap, p, n)) return 0;
+    dst[n] = 0; return 1;
+}
+static int lines(const char *p) { size_t n = 0; char *b = cx_read(p, &n); int k = 0; if (!b) return 0; for (size_t i = 0; i < n; i++) if (b[i] == '\n') k++; free(b); return k; }
+static char memo_env[4500], id_env[200], calls[4400], helper[4400], src[4400], pkg[4400], art[4400];
+static char *probe(const char *step, const char *phase, int with_memo, const char *id) {
+    char ide[200]; cx_fmt(ide, sizeof ide, "UNISACC_CHAIN_SHAMEMO_ID=%s", id ? id : "fixture-identity");
+    char *v[16]; int k = 0;
+    v[k++] = "env"; v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_SHAMEMO"; v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_SHAMEMO_ID";
+    if (with_memo) { v[k++] = memo_env; v[k++] = ide; }
+    v[k++] = (char *)step; v[k++] = "memo-probe"; v[k++] = (char *)phase; v[k++] = helper; v[k++] = src; v[k++] = pkg; v[k++] = art; v[k] = 0;
+    return runv(v);
+}
+static char *gate(const char *candidate, const char *until, const char *gout, int file, int id, const char *recheck_id) {
+    char *v[24], rid[200]; int k = 0;   /* id: 1 identity only, 2 identity plus the derived-memo opt-in */
+    v[k++] = "env"; v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_SHAMEMO"; v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_SHAMEMO_ID"; v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_RECHECK_ID";
+    v[k++] = "-u"; v[k++] = "UNISACC_CHAIN_SHAMEMO_DERIVED";
+    if (file) v[k++] = memo_env;
+    if (id) v[k++] = id_env;
+    if (id == 2) v[k++] = "UNISACC_CHAIN_SHAMEMO_DERIVED=1";
+    if (recheck_id) { cx_fmt(rid, sizeof rid, "UNISACC_CHAIN_RECHECK_ID=%s", recheck_id); v[k++] = rid; }
+    v[k++] = (char *)candidate; v[k++] = "--memo-gate"; v[k++] = (char *)until; v[k++] = (char *)gout;
+    if (recheck_id) v[k++] = "recheck";
+    v[k] = 0;
+    return runv(v);
+}
+static int chain_cases(const char *outroot, const char *candidate, const char *step) {
+    char dir[4400], p[4400], q[4400], o1[4400], s1[4400];
+    if (outroot[0] != '/' || candidate[0] != '/' || step[0] != '/' || cx_fmt(dir, sizeof dir, "%s/shamemo-chain-%ld", outroot, sy_now_ms())) return 2;
+    sy_mkdir(outroot, 0755); sy_mkdir(dir, 0755); if (sy_realpath(dir, base, sizeof base) < 0) return 2;
+    join(p, "chain-sha.memo"); cx_fmt(memo_env, sizeof memo_env, "UNISACC_CHAIN_SHAMEMO=%s", p); cx_fmt(id_env, sizeof id_env, "UNISACC_CHAIN_SHAMEMO_ID=fixture-identity");
+    join(calls, "helper.calls"); join(helper, "helper.sh"); join(src, "S"); join(pkg, "pkg"); join(art, "art");
+    sy_mkdir(src, 0755); sy_mkdir(art, 0755); join(p, "S/src"); sy_mkdir(p, 0755); join(p, "S/out"); sy_mkdir(p, 0755);
+    join(s1, "S/src/a.c"); put(s1, "int a;\n"); join(p, "S/b"); put(p, "b\n"); join(p, "S/out/work"); put(p, "w\n");
+    put(pkg, "package-bytes"); join(o1, "art/o1"); put(o1, "object-1"); join(p, "art/o2"); put(p, "object-2");
+    {   /* the stand-in identity helper: counts its runs, prints a fixed 64-hex SID */
+        char text[5000];
+        if (cx_fmt(text, sizeof text, "#!/bin/sh\necho run >> '%s'\necho 2222222222222222222222222222222222222222222222222222222222222222\n", calls)) return 2;
+        put(helper, text); if (sy_chmod(helper, 0755)) return 2;
+    }
+    long t0 = sy_wall_s() - 100; if (sy_set_mtime(o1, t0) || sy_set_mtime(s1, t0)) return 2;
+    sy_sleep_ms(2200);  /* age every fixture past the racy window */
+    char f1[65], t1[65], sid1[65], f[65], t[65], sid[65], n1[20], n2[20], en[8];
+    char *o = probe(step, "g2", 1, 0);
+    ck(field(o, "enabled", en, sizeof en) && !strcmp(en, "1") && field(o, "file", f1, 65) && field(o, "tree", t1, 65) && field(o, "sid", sid1, 65) && lines(calls) == 1, "step-first-reentry-reads-everything");
+    ck(field(o, "hits", n1, sizeof n1) && !strcmp(n1, "1") && field(o, "recorded", n2, sizeof n2) && !strcmp(n2, "5"), "step-first-reentry-records-file-tree-helper-sid"); free(o);
+    o = probe(step, "g2", 1, 0);
+    ck(field(o, "file", f, 65) && field(o, "tree", t, 65) && field(o, "sid", sid, 65) && !strcmp(f, f1) && !strcmp(t, t1) && !strcmp(sid, sid1), "step-memo-reentry-same-identities");
+    ck(field(o, "misses", n1, sizeof n1) && !strcmp(n1, "0") && field(o, "hits", n2, sizeof n2) && !strcmp(n2, "5") && lines(calls) == 1, "step-memo-reentry-all-entries-hit-helper-not-rerun"); free(o);
+    /* compare: same environment, memo refused, every byte read, helper run */
+    o = probe(step, "compare", 1, 0);
+    ck(o && strstr(o, "SHAMEMO\tfixedpoint\toff\treason=compare-is-a-full-recheck\n") && field(o, "enabled", en, sizeof en) && !strcmp(en, "0"), "step-compare-refuses-memo");
+    ck(field(o, "file", f, 65) && field(o, "tree", t, 65) && field(o, "sid", sid, 65) && !strcmp(f, f1) && !strcmp(t, t1) && !strcmp(sid, sid1) && lines(calls) == 2 && field(o, "hits", n1, sizeof n1) && !strcmp(n1, "0"), "step-compare-full-recheck-helper-rerun"); free(o);
+    o = probe(step, "g2", 0, 0);
+    ck(field(o, "enabled", en, sizeof en) && !strcmp(en, "0") && lines(calls) == 3, "step-without-environment-no-memo"); free(o);
+    /* another run's identity: the memo is set aside, nothing hits */
+    o = probe(step, "g2", 1, "another-run");
+    ck(field(o, "hits", n1, sizeof n1) && !strcmp(n1, "1") && field(o, "rejected", n2, sizeof n2) && !strcmp(n2, "1") && lines(calls) == 4 && field(o, "tree", t, 65) && !strcmp(t, t1), "step-foreign-identity-no-persisted-hit"); free(o);
+    o = probe(step, "g2", 1, 0); free(o);   /* rebuild this identity's memo (helper run 5) */
+    o = probe(step, "g2", 1, 0);
+    ck(field(o, "misses", n1, sizeof n1) && !strcmp(n1, "0") && lines(calls) == 5, "step-memo-rebuilt-after-foreign"); free(o);
+    /* an artifact rewritten in place, same size, mtime restored: memo-on must see the new content */
+    put(o1, "OBJECT-1"); if (sy_set_mtime(o1, t0)) return 2;
+    o = probe(step, "g2", 1, 0); char tm[65], tc[65];
+    ck(field(o, "tree", tm, 65) && strcmp(tm, t1) && field(o, "stale", n1, sizeof n1) && !strcmp(n1, "1"), "step-changed-artifact-detected-with-memo-on"); free(o);
+    o = probe(step, "compare", 1, 0);
+    ck(field(o, "tree", tc, 65) && !strcmp(tc, tm), "step-memo-on-equals-full-recheck-after-change"); free(o);
+    /* a source file rewritten in place, same size, mtime restored: the SID is not taken from the memo */
+    int before = lines(calls);
+    put(s1, "int b;\n"); if (sy_set_mtime(s1, t0)) return 2;
+    o = probe(step, "g2", 1, 0);
+    ck(lines(calls) == before + 1, "step-changed-source-reruns-helper"); free(o);
+    /* candidate-chain gate: the memo for a bounded phase; for compare and pack only with a current,
+       unconsumed full-recheck receipt (same checkpoint bytes, same memo identity) */
+    char gout[4400], cp[4400], rcpt[4400], used[4400];
+    join(gout, "gate-out"); sy_mkdir(gout, 0755); join(cp, "gate-out/checkpoint.tsv"); put(cp, "DONE\tsnap\twall_ms=1\tsha=-\n");
+    join(rcpt, "gate-out/recheck-compare.receipt"); join(used, "gate-out/recheck-compare.receipt.used");
+    o = gate(candidate, "jobs-net", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=jobs-net\tenabled=1\tderived=0\tinherit=1\n") && strstr(o, "SHAMEMO\tchain\ton\tuntil=jobs-net\tderived=0\n"), "chain-bounded-phase-uses-file-memo-derived-off-by-default"); free(o);
+    o = gate(candidate, "jobs-net", gout, 1, 2, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=jobs-net\tenabled=1\tderived=1\tinherit=1\n"), "chain-derived-memo-only-on-explicit-opt-in"); free(o);
+    o = gate(candidate, "compare", gout, 1, 2, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n"), "chain-derived-opt-in-does-not-bypass-recheck"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n") && strstr(o, "reason=no-current-full-recheck-before-compare-or-pack\n"), "chain-compare-without-recheck-is-memo-less"); free(o);
+    o = gate(candidate, "pack", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=pack\tenabled=0\tderived=0\tinherit=0\n") && strstr(o, "reason=no-current-full-recheck-before-compare-or-pack\n"), "chain-pack-without-recheck-is-memo-less"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, "fixture-identity");
+    ck(o && strstr(o, "SHAMEMO\tchain\toff\treason=recheck-only\n") && strstr(o, "RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0\n") && sy_exists(rcpt), "chain-recheck-runs-memo-less-and-leaves-receipt"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=1\tderived=0\tinherit=1\n") && !sy_exists(rcpt) && sy_exists(used), "chain-compare-after-recheck-uses-memo-and-consumes-receipt"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n"), "chain-one-recheck-authorizes-one-call"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, "fixture-identity"); free(o);
+    put(cp, "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tlater\twall_ms=1\tsha=-\n");
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n") && !sy_exists(rcpt), "chain-receipt-stale-after-a-checkpoint-row"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, "another-run"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n"), "chain-receipt-of-another-memo-identity-refused"); free(o);
+    o = gate(candidate, "pack", gout, 1, 1, "fixture-identity"); free(o);
+    o = gate(candidate, "compare", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=compare\tenabled=0\tderived=0\tinherit=0\n"), "chain-pack-receipt-does-not-authorize-compare"); free(o);
+    o = gate(candidate, "pack", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=pack\tenabled=1\tderived=0\tinherit=1\n"), "chain-pack-after-recheck-uses-memo"); free(o);
+    o = gate(candidate, "-", gout, 1, 1, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=-\tenabled=0\tderived=0\tinherit=0\n") && strstr(o, "reason=unbounded-call\n"), "chain-unbounded-call-removes-memo"); free(o);
+    o = gate(candidate, "jobs-net", gout, 1, 0, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=jobs-net\tenabled=0\tderived=0\tinherit=0\n") && strstr(o, "reason=incomplete-memo-environment\n"), "chain-memo-without-identity-refused"); free(o);
+    o = gate(candidate, "jobs-net", gout, 0, 0, 0);
+    ck(o && strstr(o, "MEMO_GATE\tuntil=jobs-net\tenabled=0\tderived=0\tinherit=0\n") && !strstr(o, "SHAMEMO"), "chain-no-environment-no-memo"); free(o);
+    sy_printf("CHECK_SHAMEMO_CHAIN\tfailed=%d\tevidence=%s\n", bad, base);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    char memo[4400], a[4400], b[4400], c[4400], d[4400], e[4400], fresh[4400], tmp[4400], got[65], exp[65], dir[4400];
+    if (argc == 5 && !strcmp(argv[1], "--chain")) return chain_cases(argv[2], argv[3], argv[4]);
+    if (argc != 2 || argv[1][0] != '/' || cx_fmt(dir, sizeof dir, "%s/shamemo-%ld", argv[1], sy_now_ms())) return 2;
+    sy_mkdir(argv[1], 0755); sy_mkdir(dir, 0755); if (sy_realpath(dir, base, sizeof base) < 0) return 2;
+    join(memo, "sha.memo"); join(a, "a"); join(b, "b"); join(c, "c"); join(d, "d"); join(e, "e"); join(fresh, "fresh"); join(tmp, "d.new");
+    put(a, "alpha-1"); put(b, "bravo-1"); put(c, "charlie"); put(d, "delta-1"); put(e, "echo-01");
+    char tree[4400], tx[4400], ty[4400], tz[4400], tl[4400], tmemo[4400], f1[65], f2[65], f3[65];
+    join(tree, "tree"); join(tmemo, "tree.memo"); sy_mkdir(tree, 0755);
+    join(tx, "tree/sub"); sy_mkdir(tx, 0755); join(tx, "tree/out"); sy_mkdir(tx, 0755);
+    join(tx, "tree/x"); join(ty, "tree/sub/y"); join(tz, "tree/out/z"); join(tl, "tree/l");
+    put(tx, "xray-1"); put(ty, "yankee1"); put(tz, "zulu-1"); if (symlink("x", tl)) return 2;
+    /* three more trees, each with one symlink the fingerprint must refuse; aged with everything else */
+    char te[4400], ts[4400], td[4400], leaf[4400];
+    join(te, "tree-esc"); join(ts, "tree-skip"); join(td, "tree-dang"); sy_mkdir(te, 0755); sy_mkdir(ts, 0755); sy_mkdir(td, 0755);
+    join(leaf, "tree-esc/k"); put(leaf, "k"); join(leaf, "tree-esc/esc"); if (symlink(a, leaf)) return 2;
+    join(leaf, "tree-skip/held"); sy_mkdir(leaf, 0755); join(leaf, "tree-skip/held/z"); put(leaf, "z"); join(leaf, "tree-skip/k"); put(leaf, "k");
+    join(leaf, "tree-skip/in"); if (symlink("held/z", leaf)) return 2;
+    join(leaf, "tree-dang/k"); put(leaf, "k"); join(leaf, "tree-dang/dang"); if (symlink("missing", leaf)) return 2;
+    char tdo[4400]; join(tdo, "tree-dang-out"); sy_mkdir(tdo, 0755);
+    join(leaf, "tree-dang-out/k"); put(leaf, "k"); join(leaf, "tree-dang-out/dang"); if (symlink("../../nowhere/missing", leaf)) return 2;
+    long t0 = sy_wall_s() - 100;
+    if (sy_set_mtime(a, t0) || sy_set_mtime(b, t0) || sy_set_mtime(c, t0) || sy_set_mtime(d, t0) || sy_set_mtime(e, t0)) return 2;
+    /* disabled: plain hashing, nothing recorded */
+    want("alpha-1", exp);
+    ck(!sm_enabled() && !sm_sha(a, got) && !strcmp(got, exp) && !sy_exists(memo), "disabled-hashes-no-file");
+    ck(sm_sha(base, got) == -1, "directory-refused");
+    join(tmp, "absent"); ck(sm_sha(tmp, got) == -1, "missing-refused"); join(tmp, "d.new");
+    /* racy window: a young file is hashed but never recorded */
+    ck(!sm_open(memo, "run=one") && sm_enabled(), "open-new");
+    put(fresh, "young"); want("young", exp);
+    ck(!sm_sha(fresh, got) && !strcmp(got, exp), "young-hashed"); stats(); ck(H == 0 && M == 1 && W == 0, "young-not-recorded");
+    sy_sleep_ms(2200);  /* age a..e past SM_RACY_S (their ctime is the sy_set_mtime call above) */
+    const char *paths[] = {a, b, c, d, e}; const char *texts[] = {"alpha-1", "bravo-1", "charlie", "delta-1", "echo-01"};
+    int ok = 1;
+    for (int i = 0; i < 5; i++) { want(texts[i], exp); if (sm_sha(paths[i], got) || strcmp(got, exp)) ok = 0; }
+    stats(); ck(ok && H == 0 && M == 6 && W == 5, "first-pass-all-miss-recorded");
+    ok = 1; for (int i = 0; i < 5; i++) { want(texts[i], exp); if (sm_sha(paths[i], got) || strcmp(got, exp)) ok = 0; }
+    stats(); ck(ok && H == 5, "same-process-hit");
+    sm_close();
+    /* a new process image of the memo: persisted rows hit, bytes are not read */
+    ck(!sm_open(memo, "run=one"), "reopen"); ok = 1;
+    for (int i = 0; i < 5; i++) { want(texts[i], exp); if (sm_sha(paths[i], got) || strcmp(got, exp)) ok = 0; }
+    stats(); ck(ok && H == 5 && M == 0 && R == 0, "persisted-unchanged-hit");
+    /* (1) content changed, same size, mtime restored: ctime differs -> miss, new sha */
+    put(a, "alpha-2"); if (sy_set_mtime(a, t0)) return 2;
+    want("alpha-2", exp); ck(!sm_sha(a, got) && !strcmp(got, exp), "content-changed-mtime-restored-new-sha");
+    stats(); ck(H == 5 && M == 1 && S == 1, "content-changed-mtime-restored-miss");
+    /* (2) size changed */
+    put(b, "bravo-1-longer"); want("bravo-1-longer", exp);
+    ck(!sm_sha(b, got) && !strcmp(got, exp), "size-changed-new-sha"); stats(); ck(H == 5 && S == 2, "size-changed-miss");
+    /* (3) mtime changed only (same bytes) */
+    if (sy_set_mtime(c, t0 + 7)) return 2;
+    want("charlie", exp); ck(!sm_sha(c, got) && !strcmp(got, exp), "mtime-changed-rehash"); stats(); ck(H == 5 && S == 3, "mtime-changed-miss");
+    /* (4) inode replaced: same bytes, same size, same mtime, renamed over */
+    put(tmp, "delta-1"); if (sy_set_mtime(tmp, t0) || sy_rename(tmp, d)) return 2;
+    want("delta-1", exp); ck(!sm_sha(d, got) && !strcmp(got, exp), "inode-replaced-rehash"); stats(); ck(H == 5 && S == 4, "inode-replaced-miss");
+    /* untouched entry still hits */
+    want("echo-01", exp); ck(!sm_sha(e, got) && !strcmp(got, exp), "untouched-sha"); stats(); ck(H == 6, "untouched-still-hit");
+    sm_close();
+    /* (5) a row whose recorded sha was edited fails its check: rejected, true sha returned */
+    {
+        size_t n = 0; char *text = cx_read(memo, &n), needle[4500]; if (!text || cx_fmt(needle, sizeof needle, "\t%s\n", e)) return 2;
+        char *row = strstr(text, needle); if (!row) return 2;
+        while (row > text && row[-1] != '\n') row--;
+        /* R dev ino size ms mn cs cn SHA check path: the sha is the 9th field */
+        char *f = row; for (int k = 0; k < 8; k++) f = strchr(f, '\t') + 1;
+        f[0] = f[0] == '0' ? '1' : '0';
+        if (cx_write(memo, text, n)) return 2; free(text);
+    }
+    ck(!sm_open(memo, "run=one"), "reopen-after-edit"); stats(); ck(R == 1, "edited-row-rejected");
+    want("echo-01", exp); ck(!sm_sha(e, got) && !strcmp(got, exp), "edited-row-true-sha"); stats(); ck(H == 0 && M == 1, "edited-row-miss");
+    sm_close();
+    /* (6) memo identity mismatch: nothing hits, the foreign memo is kept aside, not trusted */
+    ck(!sm_open(memo, "run=two"), "open-other-binding"); stats(); ck(R == 1, "foreign-memo-rejected");
+    want("echo-01", exp); ck(!sm_sha(e, got) && !strcmp(got, exp), "foreign-memo-true-sha"); stats(); ck(H == 0 && M == 1, "foreign-memo-no-hit");
+    {
+        DIR *dp = opendir(base); struct dirent *de; int aside = 0;
+        if (!dp) return 2;
+        while ((de = readdir(dp))) if (!strncmp(de->d_name, "sha.memo.rejected-", 18)) aside++;
+        closedir(dp); ck(aside == 1, "foreign-memo-kept-aside");
+    }
+    sm_close();
+    /* (7) not a memo at all (garbage first line) */
+    put(memo, "garbage\n"); ck(!sm_open(memo, "run=two"), "open-garbage"); stats(); ck(R == 1 && H == 0, "garbage-memo-rejected");
+    sm_close();
+    /* whole-tree metadata fingerprint and the derived value it guards */
+    char v1[65]; want("derived-value-one", v1);
+    ck(!sm_open(tmemo, "run=tree"), "tree-open");
+    ck(!sm_tree_meta(tree, "out", f1) && !sm_tree_meta(tree, "out", f2) && !strcmp(f1, f2), "tree-fingerprint-stable");
+    ck(sm_value_get("sid", f1, got) == 1, "value-miss-before-put");
+    ck(!sm_value_put("sid", f1, v1) && !sm_value_get("sid", f1, got) && !strcmp(got, v1), "value-hit-after-put");
+    sm_close(); ck(!sm_open(tmemo, "run=tree") && !sm_value_get("sid", f1, got) && !strcmp(got, v1), "value-persisted-hit");
+    ck(sm_value_get("other-key", f1, got) == 1, "value-other-key-miss");
+    put(tz, "zulu-2-changed"); ck(!sm_tree_meta(tree, "out", f2) && !strcmp(f1, f2), "tree-skip-subtree-ignored");
+    put(ty, "yankee2"); if (sy_set_mtime(ty, t0)) return 2;
+    ck(sm_tree_meta(tree, "out", f2) == 1, "tree-young-entry-not-memoizable");
+    sy_sleep_ms(2200);
+    ck(!sm_tree_meta(tree, "out", f2) && strcmp(f1, f2), "tree-content-changed-mtime-restored-new-fingerprint");
+    ck(sm_value_get("sid", f2, got) == 1, "value-miss-on-changed-tree");
+    {
+        char extra[4400];
+        join(extra, "tree/sub/new"); put(extra, "n"); ck(sm_tree_meta(tree, "out", f3) == 1, "tree-added-entry-young");
+        if (sy_unlink(extra)) return 2;
+        ck(!sm_tree_meta(tree, "out", f3) && !strcmp(f3, f2) && strcmp(f3, f1), "tree-after-removal-is-current-not-old-fingerprint");
+        ck(sm_tree_meta(te, "out", f3) == 1, "tree-symlink-leaving-root-not-memoizable");
+        ck(sm_tree_meta(ts, "held", f3) == 1 && !sm_tree_meta(ts, "k", f3), "tree-symlink-into-skipped-subtree-not-memoizable");
+        ck(!sm_tree_meta(td, "out", f3), "tree-dangling-symlink-naming-a-place-inside-memoizable");
+        ck(sm_tree_meta(tdo, "out", f3) == 1, "tree-dangling-symlink-naming-a-place-outside-not-memoizable");
+        join(extra, "tree-esc/esc"); if (sy_unlink(extra)) return 2;
+        ck(!sm_tree_meta(te, "out", f3), "tree-without-escaping-symlink-memoizable");
+    }
+    sm_close();
+    /* an edited value row fails its check */
+    {
+        size_t n = 0; char *text = cx_read(tmemo, &n), *row = text ? strstr(text, "\nV\t") : 0; if (!row) return 2;
+        row[3 + 65 + 65] = row[3 + 65 + 65] == '1' ? '2' : '1';
+        if (cx_write(tmemo, text, n)) return 2; free(text);
+    }
+    ck(!sm_open(tmemo, "run=tree"), "tree-reopen-after-edit"); stats(); ck(R == 1 && sm_value_get("sid", f1, got) == 1, "edited-value-row-rejected");
+    sm_close();
+    ck(!sm_open(tmemo, "run=other") && sm_value_get("sid", f1, got) == 1, "value-foreign-memo-no-hit");
+    sm_close();
+    ck(sm_open("relative.memo", "x") == -1 && !sm_enabled(), "relative-memo-path-refused");
+    ck(sm_open(memo, "") == -1 && !sm_enabled(), "empty-binding-refused");
+    sy_printf("CHECK_SHAMEMO\tfailed=%d\tevidence=%s\n", bad, base);
+    return bad ? 1 : 0;
+}
