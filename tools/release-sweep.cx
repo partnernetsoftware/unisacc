@@ -2,20 +2,34 @@
  *
  *   sh ./unisacc.com tools/release-sweep.cx -- --manifest FILE --trash DIR --out-manifest OUT.tsv
  *       [--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run|--apply]
+ *   sh ./unisacc.com tools/release-sweep.cx -- --scan --rules FILE --root ROOT --cache DIR [--kit DIR]
+ *       [--trash-scan DIR] --trash DIR --out-manifest OUT.tsv [--dry-run|--apply]
+ *
+ * 两种输入：
+ *   --manifest  按手写清单执行（每行 action\tsource\t[dest_rel]，action = move | archive | keep）。
+ *   --scan      按规则事实表 tools/release-sweep-rules.tsv 现扫目录，把范围自动填成行。
+ *               规则表列：id\tunder\tpattern\taction\targ\tallow_tmp；under 取 out | tlib-cache |
+ *               tlib-kit | tmp | trash；pattern 是该 under 下的名字 glob（先匹配者胜，所以例外写在
+ *               it 精化的模式之上）；action = move | keep | list；arg 是 move-older-than/list 的天数。
+ *               保留规则全部在表里，本文件不写死任何发布物的名字。
  *
  * 规则与合同：
- * (1) 按清单执行：输入 --manifest FILE，每行 action\tsource\t[dest_rel]。
- *     action 取值：move（移动到 --trash DIR）、archive（复制证据小表到 evidence-archive/<版本>/）、keep（显式保留）。
- * (2) 只 mv 不删：move 动作只通过 sy_rename 移入 trash（同名冲突自动追加唯一后缀），绝不 unlink/rmdir/rm，且拒绝触碰 /tmp。
- * (3) 保留最近一版冻结克隆与链输出（供下一版彩排用）：若指定 --latest VER（如 0.0.57），试图 move 最近一版的
- *     冻结克隆（r057 / r-<VER>）、链输出（chain057 / out057）、release-snap-* 或 evidence-<VER> 必被具名拒绝（exit 2，不执行任何移动）。
- *     若指定 --refs FILE（如账本、decide、发布说明），试图 move 被其引用的路径必被具名拒绝（exit 2，不执行任何移动）。
- * (4) 证据小表复制到 evidence-archive/<版本>/：archive 动作只允许复制 <= 1 MiB 的常规文件（steps.tsv、MANUAL.tsv、
- *     summary.tsv、decide*.txt、evid.tsv、STATUS.txt 等），按字节复制并校验大小。
- * (5) 跳过有进程占用的目录：对每个待 move 路径，用 pgrep -f 与 /proc 扫描（排除本进程 pid 及本进程祖先链），
- *     若发现活跃进程占用则记 SKIPPED_BUSY 并跳过移动。
- * (6) 产出清单 TSV 与前后大小：写出 --out-manifest OUT.tsv（列 action\tsource\tdest\tstatus\tbefore_bytes\tafter_bytes），
- *     并在标准输出汇总 RELEASE_SWEEP\tmode=DRY_RUN|APPLY\tmoved=N\tarchived=N\tkept=N\tskipped_busy=N\tbefore_bytes=B\tafter_bytes=A。
+ * (1) 只 mv 不删：move 动作只通过 sy_rename 移入 --trash DIR（同名冲突自动追加唯一后缀），绝不
+ *     unlink/rmdir/rm，且拒绝 --trash/--out-manifest/--archive-dir 落在 /tmp。manifest 里出现 /tmp
+ *     路径直接拒；--scan 对 /tmp 与 trash 只 list，不动 —— 跨目录移动由主人下令，不由工具自选。
+ * (2) 保留最近一版冻结克隆与链输出（供下一版彩排用）：指定 --latest VER（如 0.0.57）时，试图 move
+ *     最近一版的冻结克隆（r057 / r-<VER>）、链输出（chain057 / out057）、release-snap-* 或
+ *     evidence-<VER> 必被具名拒绝（exit 2，不执行任何移动）。--refs FILE（账本、decide、发布说明）
+ *     引用的路径同样拒绝。
+ * (3) 证据小表复制到 evidence-archive/<版本>/：archive 只复制 <= 1 MiB 的常规文件（steps.tsv、
+ *     MANUAL.tsv、summary.tsv、decide*.txt、evid.tsv、STATUS.txt 等），按字节复制并校验大小。
+ * (4) 跳过有进程占用的目录：对每个待 move 路径，用 pgrep -f 与 /proc 扫描（排除本进程 pid 及本进程
+ *     祖先链），若发现活跃进程占用则记 SKIPPED_BUSY 并跳过移动。
+ * (5) 产出清单 TSV 与前后大小：--out-manifest OUT.tsv 列 action\tsource\tdest\tstatus\tbefore_bytes\tafter_bytes；
+ *     标准输出汇总 RELEASE_SWEEP\tmode=DRY_RUN|APPLY\tmoved=N\tarchived=N\tkept=N\tskipped_busy=N\tbefore_bytes=B\tafter_bytes=A。
+ * (6) --scan 另给分类清单：每个 class 一行 RELEASE_SWEEP_CLASS\tclass\trows=N\tmove=N\tlist=N\tkeep=N\tbytes=B\treclaimable=R，
+ *     末行 RELEASE_SWEEP_SCAN\trules=N\trows=N\tlisted=N\tkept=N。没有任何规则命中的 out 条目记 out-unruled 且
+ *     reclaimable=0：范围要显形，不能静默漏掉。
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -28,12 +42,16 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.die
 
-#define MAX_ROWS 512
+#define MAX_ROWS 1024
+#define MAX_RULES 64
+#define MAX_KEEP 128
 #define MAX_REFS 16
 #define MAX_EVID_BYTES (1024 * 1024)
+#define RECEIPT_HEAD 16384
 
 typedef struct {
     char action[32];
+    char cls[40];
     char src[4096];
     char dst_rel[1024];
     char final_dst[4400];
@@ -42,10 +60,39 @@ typedef struct {
     long after_bytes;
 } SweepRow;
 
+/* One row of the rules fact table (tools/release-sweep-rules.tsv): which entries of which root go
+   where.  Nothing about the publish leaves is a literal in this file. */
+typedef struct {
+    char id[40];
+    char under[24]; /* out | tlib-cache | tlib-kit | tmp | trash */
+    char pattern[512];
+    char action[24]; /* move | keep | list | move-expired | move-stale-kit | move-older-than */
+    long arg;       /* older-than days for move-older-than / list */
+    int allow_tmp;  /* a /tmp row may move only when the rule says so */
+} SweepRule;
+
 static SweepRow rows[MAX_ROWS];
 static int nrows;
+static SweepRule rules[MAX_RULES];
+static int nrules;
+static char keep_paths[MAX_KEEP][4400];
+static int nkeep;
 static const char *ref_files[MAX_REFS];
 static int nrefs;
+/* scan mode: --scan fills ROWS from the rules instead of reading a --manifest */
+static int scan_mode;
+static int scan_dry;
+static int listed_only;
+static char scan_root[4096];
+static char cache_root[4400];
+static char kit_current[4400];
+static char namebuf_a[262144];
+static char namebuf_b[65536];
+static char trash_scan[4400];
+static char rules_path[4400];
+
+static const char *base_name(const char *p);
+
 
 static void die(const char *a, const char *b) { tool_die("release-sweep", a, b, 2); }
 
@@ -315,6 +362,300 @@ static const char *base_name(const char *p) {
     for (; *p; p++) if (*p == '/') b = p + 1;
     return b;
 }
+/* ---- scan: fill ROWS from the rules fact table instead of a hand-written manifest ---- */
+
+/* glob over one path component: '*' spans anything, '?' one byte. */
+static int pat_match(const char *pat, const char *s) {
+    const char *star = 0, *sp = 0;
+    while (*s) {
+        if (*pat == '*') { star = pat++; sp = s; continue; }
+        if (*pat == '?' || *pat == *s) { pat++; s++; continue; }
+        if (star) { pat = star + 1; s = ++sp; continue; }
+        return 0;
+    }
+    while (*pat == '*') pat++;
+    return !*pat;
+}
+
+static int rule_find(const char *under, const char *name) {
+    int i;
+    for (i = 0; i < nrules; i++)
+        if (!strcmp(rules[i].under, under) && pat_match(rules[i].pattern, name)) return i;
+    return -1;
+}
+
+static void load_rules(const char *path) {
+    size_t n = 0, at = 0;
+    char *s = cx_read(path, &n);
+    if (!s) die("cannot read rules table", path);
+    nrules = 0;
+    while (at < n) {
+        size_t e = at;
+        char line[4096], *f[6];
+        int nf = 0;
+        while (e < n && s[e] != '\n') e++;
+        if (e - at >= sizeof line) { free(s); die("rules line bound", path); }
+        if (e > at) {
+            char *p;
+            if (mm_copy(line, sizeof line, s + at, e - at)) { free(s); die("copy", 0); }
+            line[e - at] = 0;
+            if (line[0] != '#' && nrules < MAX_RULES) {
+                p = line;
+                while (nf < 6) {
+                    f[nf++] = p;
+                    p = strchr(p, '\t');
+                    if (!p) break;
+                    *p++ = 0;
+                }
+                if (nf < 4 || !f[0][0] || !f[1][0] || !f[2][0] || !f[3][0]) { free(s); die("malformed rules row", f[0]); }
+                if (cx_fmt(rules[nrules].id, sizeof rules[nrules].id, "%s", f[0]) ||
+                    cx_fmt(rules[nrules].under, sizeof rules[nrules].under, "%s", f[1]) ||
+                    cx_fmt(rules[nrules].pattern, sizeof rules[nrules].pattern, "%s", f[2]) ||
+                    cx_fmt(rules[nrules].action, sizeof rules[nrules].action, "%s", f[3])) { free(s); die("field bound", f[0]); }
+                rules[nrules].arg = nf > 4 && f[4][0] ? atol(f[4]) : 0;
+                rules[nrules].allow_tmp = nf > 5 && f[5][0] == '1';
+                nrules++;
+            }
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(s);
+    if (!nrules) die("rules table is empty", path);
+}
+
+static void scan_add(const char *cls, const char *action, const char *src, const char *dst_rel) {
+    if (nrows >= MAX_ROWS) die("too many scan rows", cls);
+    if (cx_fmt(rows[nrows].action, sizeof rows[nrows].action, "%s", action) ||
+        cx_fmt(rows[nrows].cls, sizeof rows[nrows].cls, "%s", cls) ||
+        cx_fmt(rows[nrows].src, sizeof rows[nrows].src, "%s", src) ||
+        cx_fmt(rows[nrows].dst_rel, sizeof rows[nrows].dst_rel, "%s", dst_rel && dst_rel[0] ? dst_rel : "-"))
+        die("scan row bound", src);
+    nrows++;
+}
+
+/* The content sha a tlib names in its receipt head, or -1.  The cache is keyed by it, so a cache entry
+   is "current" exactly when the kit's tlib of the same package carries the same sha. */
+static int tlib_content_sha(const char *path, char hex[65]) {
+    static char buf[RECEIPT_HEAD];
+    int fd;
+    long n;
+    const char *k;
+    hex[0] = 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return -1;
+    n = sy_read(fd, buf, sizeof buf - 1);
+    sy_close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    for (k = buf; *k; k++) {
+        if (*k != '\n' && k != buf) continue;
+        if (!strncmp(k + 1, "content_sha\t", 12)) {
+            const char *h = k + 13;
+            if (strlen(h) < 65) return -1;
+            mm_copy(hex, 65, h, 64);
+            hex[64] = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void keep_add(const char *p) {
+    if (nkeep >= MAX_KEEP) die("too many kept paths", p);
+    if (cx_fmt(keep_paths[nkeep], sizeof keep_paths[nkeep], "%s", p)) die("kept path bound", p);
+    nkeep++;
+}
+
+static int keep_has(const char *p) {
+    int i;
+    for (i = 0; i < nkeep; i++) if (!strcmp(keep_paths[i], p)) return 1;
+    return 0;
+}
+
+static int keep_has_sha(const char *hex) {
+    int i;
+    for (i = 0; i < nkeep; i++) if (!strcmp(keep_paths[i], hex)) return 1;
+    return 0;
+}
+
+/* ROOT/out: one row per top-level entry whose name matches an `out` rule; the first matching rule wins,
+   so a retire list writes the exceptions above the patterns it refines. */
+static void scan_out(void) {
+    char dir[4400], full[8800], nbuf[131072];
+    int fd, cnt, pos = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/out", scan_root)) die("path bound", scan_root);
+    fd = sy_open(dir, O_RDONLY, 0);
+    if (fd < 0) return;
+    cnt = sy_dir_names(fd, nbuf, (int)sizeof nbuf);
+    sy_close(fd);
+    if (cnt <= 0) return;
+    while (pos < (int)sizeof nbuf && cnt > 0) {
+        long len = tx_len(nbuf + pos, (long)sizeof nbuf - pos);
+        if (len <= 0) break;
+        if (cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + pos) == 0) {
+            int r = rule_find("out", nbuf + pos);
+            if (r >= 0) {
+                if (!strcmp(rules[r].action, "keep")) { keep_add(full); scan_add("out", "keep", full, "-"); }
+                else if (!strcmp(rules[r].action, "list")) scan_add("out", "list", full, "-");
+                else scan_add("out", "move", full, nbuf + pos);
+            }
+            else scan_add("out-unruled", "list", full, "-");
+        }
+        pos += (int)len + 1;
+        cnt--;
+    }
+}
+
+/* CACHE/kit/<sha>: the kit of this ROOT is the one to keep; every other kit directory is a leftover of a
+   different checkout path. */
+static void scan_kit(const char *cache, const char *keep_dir) {
+    char dir[4400], full[8800], nbuf[65536];
+    int fd, cnt, pos = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/kit", cache)) die("path bound", cache);
+    fd = sy_open(dir, O_RDONLY, 0);
+    if (fd < 0) return;
+    cnt = sy_dir_names(fd, nbuf, (int)sizeof nbuf);
+    sy_close(fd);
+    if (cnt <= 0) return;
+    while (pos < (int)sizeof nbuf && cnt > 0) {
+        long len = tx_len(nbuf + pos, (long)sizeof nbuf - pos);
+        if (len <= 0) break;
+        if (cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + pos) == 0) {
+            if (keep_dir && keep_dir[0] && !strcmp(full, keep_dir)) { keep_add(full); scan_add("tlib-kit", "keep", full, "-"); }
+            else scan_add("tlib-kit", "move", full, nbuf + pos);
+        }
+        pos += (int)len + 1;
+        cnt--;
+    }
+}
+
+/* CACHE/<pkg>/<content-sha>.tlib and <input-sha>.key: keep an entry when its sha is the one the current
+   kit's tlib of that package carries (the tlib's own content sha, or a key pointing at it). */
+static void scan_cache(const char *cache) {
+    char dir[4400], full[8800], nbuf[65536];
+    int dfd, pkgcnt, pp = 0;
+    dfd = sy_open(cache, O_RDONLY, 0);
+    if (dfd < 0) return;
+    pkgcnt = sy_dir_names(dfd, nbuf, (int)sizeof nbuf);
+    sy_close(dfd);
+    while (pp < (int)sizeof nbuf && pkgcnt > 0) {
+        long plen = tx_len(nbuf + pp, (long)sizeof nbuf - pp);
+        char pdir[4400], pbuf[131072];
+        int fd, cnt, pos = 0;
+        if (plen <= 0) break;
+        if (!strcmp(nbuf + pp, "kit")) { pp += (int)plen + 1; pkgcnt--; continue; }
+        if (cx_fmt(pdir, sizeof pdir, "%s/%s", cache, nbuf + pp)) { pp += (int)plen + 1; pkgcnt--; continue; }
+        fd = sy_open(pdir, O_RDONLY, 0);
+        if (fd < 0) { pp += (int)plen + 1; pkgcnt--; continue; }
+        cnt = sy_dir_names(fd, pbuf, (int)sizeof pbuf);
+        sy_close(fd);
+        while (pos < (int)sizeof pbuf && cnt > 0) {
+            long len = tx_len(pbuf + pos, (long)sizeof pbuf - pos);
+            if (len <= 0) break;
+            if (cx_fmt(full, sizeof full, "%s/%s", pdir, pbuf + pos) == 0) {
+                int cur;
+                long nl = tx_len(pbuf + pos, 4096);
+                if (nl > 5 && !strcmp(pbuf + pos + nl - 5, ".tlib")) {
+                    char hex[65];
+                    cur = tlib_content_sha(full, hex) == 0 && keep_has_sha(hex);
+                    if (cur) { keep_add(full); scan_add("tlib-cache", "keep", full, "-"); }
+                    else scan_add("tlib-cache", "move", full, pbuf + pos);
+                } else if (nl > 4 && !strcmp(pbuf + pos + nl - 4, ".key")) {
+                    char kb[80];
+                    int kfd = sy_open_read(full);
+                    long kn = kfd >= 0 ? sy_read(kfd, kb, (long)sizeof kb - 1) : -1;
+                    if (kfd >= 0) sy_close(kfd);
+                    if (kn >= 64) {
+                        kb[kn] = 0;
+                        kb[64] = 0;
+                        cur = keep_has_sha(kb);
+                    } else cur = 0;
+                    if (cur) { keep_add(full); scan_add("tlib-cache", "keep", full, "-"); }
+                    else scan_add("tlib-cache", "move", full, pbuf + pos);
+                }
+            }
+            pos += (int)len + 1;
+            cnt--;
+        }
+        pp += (int)plen + 1;
+        pkgcnt--;
+    }
+}
+
+/* /tmp and the trash are outside the checkout: rows there are listed unless the rule says otherwise, so a
+   dry run can show them without the tool ever calling rename on a path it does not own. */
+static void scan_under(const char *under, const char *dirpath, long now) {
+    char full[8800], nbuf[65536];
+    int fd, cnt, pos = 0;
+    fd = sy_open(dirpath, O_RDONLY, 0);
+    if (fd < 0) return;
+    cnt = sy_dir_names(fd, nbuf, (int)sizeof nbuf);
+    sy_close(fd);
+    if (cnt <= 0) return;
+    while (pos < (int)sizeof nbuf && cnt > 0) {
+        long len = tx_len(nbuf + pos, (long)sizeof nbuf - pos);
+        if (len <= 0) break;
+        if (cx_fmt(full, sizeof full, "%s/%s", dirpath, nbuf + pos) == 0) {
+            int r = rule_find(under, nbuf + pos);
+            if (r >= 0) {
+                sy_stat_t st;
+                int movable = rules[r].allow_tmp;
+                int old = 1;
+                if (sy_lstat(full, &st) == 0 && rules[r].arg > 0) old = st.mtime >= 0 && (now - st.mtime) >= rules[r].arg * 86400;
+                if (!old) { pos += (int)len + 1; cnt--; continue; }
+                if (!strcmp(rules[r].action, "move") && movable) scan_add(under, "move", full, nbuf + pos);
+                else scan_add(under, "list", full, "-");
+            }
+        }
+        pos += (int)len + 1;
+        cnt--;
+    }
+}
+
+/* The kit directory this ROOT uses: CACHE/kit/<sha256 of the root path>.  Kept a second copy of that rule
+   here would be a second truth source, so the scan takes it from --kit or the caller prints it. */
+static void scan_all(const char *rules_path) {
+    long now = sy_wall_s();
+    load_rules(rules_path);
+    nrows = 0;
+    nkeep = 0;
+    scan_out();
+    if (kit_current[0]) {
+        char hex[65];
+        char ktsv[8800];
+        int i;
+        for (i = 0; i < nrules; i++)
+            if (!strcmp(rules[i].under, "tlib-kit")) break;
+        /* the kit's own tlibs decide which cache entries are current */
+        if (cx_fmt(ktsv, sizeof ktsv, "%s/kit.tsv", kit_current) == 0) {
+            size_t tn = 0;
+            char *t = cx_read(ktsv, &tn);
+            if (t) {
+                size_t at = 0;
+                while (at < tn) {
+                    size_t e = at;
+                    while (e < tn && t[e] != '\n') e++;
+                    if (e > at + 4 && !strncmp(t + at, "lib\t", 4)) {
+                        char f[4400];
+                        long l = (long)(e - at) - 4;
+                        if (l > 0 && l < (long)sizeof f) {
+                            mm_copy(f, sizeof f, t + at + 4, (size_t)l);
+                            f[l] = 0;
+                            if (cx_fmt(ktsv, sizeof ktsv, "%s/%s", kit_current, f) == 0 && tlib_content_sha(ktsv, hex) == 0)
+                                keep_add(hex);
+                        }
+                    }
+                    at = e < tn ? e + 1 : e;
+                }
+                free(t);
+            }
+        }
+        scan_kit(cache_root, kit_current);
+        scan_cache(cache_root);
+    }
+    scan_under("tmp", "/tmp", now);
+    if (trash_scan[0]) scan_under("trash", trash_scan, now);
+}
 
 static void parse_manifest(const char *mpath, const char *latest) {
     size_t n = 0, at = 0;
@@ -369,11 +710,12 @@ static void parse_manifest(const char *mpath, const char *latest) {
 
 int main(int argc, char **argv) {
     const char *mpath = 0, *trash = 0, *outm = 0, *archdir = 0, *latest = 0;
+    const char *rules_in = 0, *root_in = 0, *cache_in = 0, *kit_in = 0, *trash_in = 0;
     int apply = 0, mode_set = 0, i;
-    int moved = 0, archived = 0, kept = 0, skipped_busy = 0;
+    int moved = 0, archived = 0, kept = 0, skipped_busy = 0, listed = 0;
     long total_before = 0, total_after = 0;
     char *outbuf;
-    size_t outcap = 131072, outused = 0;
+    size_t outcap = 262144, outused = 0;
 
     if (argc > 2 && !strcmp(argv[1], "--hold-busy")) {
         (void)sy_chdir(argv[2]);
@@ -402,19 +744,58 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--refs") && i + 1 < argc) {
             if (nrefs >= MAX_REFS) die("too many --refs files", argv[i + 1]);
             ref_files[nrefs++] = argv[++i];
+        } else if (!strcmp(argv[i], "--scan")) {
+            scan_mode = 1;
+        } else if (!strcmp(argv[i], "--rules") && i + 1 < argc) {
+            rules_in = argv[++i];
+        } else if (!strcmp(argv[i], "--root") && i + 1 < argc) {
+            root_in = argv[++i];
+        } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) {
+            cache_in = argv[++i];
+        } else if (!strcmp(argv[i], "--kit") && i + 1 < argc) {
+            kit_in = argv[++i];
+        } else if (!strcmp(argv[i], "--trash-scan") && i + 1 < argc) {
+            trash_in = argv[++i];
         } else {
-            die("usage", "--manifest FILE --trash DIR --out-manifest OUT.tsv [--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run|--apply]");
+            die("usage", "--manifest FILE | --scan --rules FILE --root ROOT --cache DIR --kit DIR "
+                         "[--trash-scan DIR]; --trash DIR --out-manifest OUT.tsv "
+                         "[--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run|--apply]");
         }
     }
-    if (!mpath || !trash || !outm)
-        die("usage", "--manifest FILE --trash DIR --out-manifest OUT.tsv [--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run|--apply]");
+    if (!trash || !outm)
+        die("usage", "--manifest FILE | --scan --rules FILE --root ROOT --cache DIR --kit DIR "
+                     "[--trash-scan DIR]; --trash DIR --out-manifest OUT.tsv "
+                     "[--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run|--apply]");
     if (is_tmp_path(trash) || is_tmp_path(outm) || (archdir && is_tmp_path(archdir)))
         die("refusing /tmp path", trash);
 
-    parse_manifest(mpath, latest);
+    if (scan_mode) {
+        if (mpath) die("conflicting source: --scan with --manifest", mpath);
+        if (!rules_in || !root_in || !cache_in) die("scan needs --rules, --root and --cache", rules_in ? rules_in : "-");
+        if (sy_realpath(root_in, scan_root, sizeof scan_root) < 0) die("unreadable scan root", root_in);
+        if (cx_fmt(cache_root, sizeof cache_root, "%s", cache_in)) die("path bound", cache_in);
+        if (kit_in && cx_fmt(kit_current, sizeof kit_current, "%s", kit_in)) die("path bound", kit_in);
+        if (trash_in && cx_fmt(trash_scan, sizeof trash_scan, "%s", trash_in)) die("path bound", trash_in);
+        if (cx_fmt(rules_path, sizeof rules_path, "%s", rules_in)) die("path bound", rules_in);
+        scan_all(rules_path);
+    } else {
+        if (!mpath) die("usage", "--manifest FILE is required unless --scan is given");
+        parse_manifest(mpath, latest);
+    }
 
     if (apply && mkdir_p(trash) < 0) die("cannot create trash dir", trash);
-
+    if (apply && scan_mode) {
+        /* A scan row is moved only when this checkout owns it: ROOT/out, this ROOT's tlib cache and its
+           kit.  /tmp and the trash are listed, never moved: a cross-directory move is the owner's call. */
+        size_t rl = strlen(scan_root), cl = strlen(cache_root);
+        for (i = 0; i < nrows; i++) {
+            SweepRow *r = &rows[i];
+            int mine;
+            if (strcmp(r->action, "move")) continue;
+            mine = !strncmp(r->src, scan_root, rl) || (cl && !strncmp(r->src, cache_root, cl));
+            if (!mine) { if (cx_fmt(r->action, sizeof r->action, "list")) die("fmt", 0); }
+        }
+    }
     for (i = 0; i < nrows; i++) {
         SweepRow *r = &rows[i];
         long b = path_bytes(r->src);
@@ -422,7 +803,13 @@ int main(int argc, char **argv) {
         r->before_bytes = b;
         total_before += b;
 
-        if (!strcmp(r->action, "keep")) {
+        if (!strcmp(r->action, "list")) {
+            if (cx_fmt(r->final_dst, sizeof r->final_dst, "%s", r->src) ||
+                cx_fmt(r->status, sizeof r->status, "LISTED")) die("fmt", 0);
+            r->after_bytes = b;
+            total_after += b;
+            listed++;
+        } else if (!strcmp(r->action, "keep")) {
             if (cx_fmt(r->final_dst, sizeof r->final_dst, "%s", r->src) ||
                 cx_fmt(r->status, sizeof r->status, "KEPT")) die("fmt", 0);
             r->after_bytes = b;
@@ -507,5 +894,34 @@ int main(int argc, char **argv) {
 
     printf("RELEASE_SWEEP\tmode=%s\tmoved=%d\tarchived=%d\tkept=%d\tskipped_busy=%d\tbefore_bytes=%ld\tafter_bytes=%ld\n",
            apply ? "APPLY" : "DRY_RUN", moved, archived, kept, skipped_busy, total_before, total_after);
-    return 0;
+    /* Per-class totals: the reclaimable bytes are what a move/list row still occupies and a keep row does
+       not.  A separate line keeps the summary contract above byte-for-byte as it was. */
+    if (scan_mode) {
+        static char seen[32][40];
+        int nseen = 0, j, k2;
+        for (i = 0; i < nrows; i++) {
+            SweepRow *r = &rows[i];
+            int hit = 0;
+            for (k2 = 0; k2 < nseen; k2++) if (!strcmp(seen[k2], r->cls)) hit = 1;
+            if (!hit && nseen < 32) { cx_fmt(seen[nseen], sizeof seen[nseen], "%s", r->cls); nseen++; }
+        }
+        for (j = 0; j < nseen; j++) {
+            int n_row = 0, n_move = 0, n_list = 0, n_keep = 0;
+            long b_row = 0, b_free = 0;
+            for (i = 0; i < nrows; i++) {
+                SweepRow *r = &rows[i];
+                if (strcmp(r->cls, seen[j])) continue;
+                n_row++;
+                b_row += r->before_bytes;
+                if (!strcmp(r->action, "keep")) n_keep++;
+                else if (!strcmp(r->action, "list")) { n_list++; b_free += r->before_bytes; }
+                else { n_move++; b_free += r->before_bytes; }
+            }
+            /* an unruled entry has no decision yet: it is listed, never counted as reclaimable */
+            if (!strcmp(seen[j], "out-unruled")) b_free = 0;
+            printf("RELEASE_SWEEP_CLASS\t%s\trows=%d\tmove=%d\tlist=%d\tkeep=%d\tbytes=%ld\treclaimable=%ld\n",
+                   seen[j], n_row, n_move, n_list, n_keep, b_row, b_free);
+        }
+        printf("RELEASE_SWEEP_SCAN\trules=%d\trows=%d\tlisted=%d\tkept=%d\n", nrules, nrows, listed, kept);
+    }
 }

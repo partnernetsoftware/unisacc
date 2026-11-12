@@ -274,6 +274,49 @@ int main(int argc, char **argv) {
         ck(rc1 == 2 && rc2 == 2, "refuse-conflicting-modes-and-missing-args");
     }
 
+    /* (8) scan 正控：规则表把 out 分成保留、移动、未定三类，分类汇总给出可回收字节 */
+    {
+        char sroot[4400], scache[4400], skit[4400], skitp[4400], srules[4400], sout[4400], strash[4400];
+        char s_keep[4400], s_move[4400], s_none[4400], s_out[4400];
+        char body[8192];
+        if (cx_fmt(sroot, sizeof sroot, "%s/scan-root", work) ||
+            cx_fmt(scache, sizeof scache, "%s/scan-cache", work) ||
+            cx_fmt(skit, sizeof skit, "%s/scan-cache/kit/AAAA", work) ||
+            cx_fmt(skitp, sizeof skitp, "%s/scan-cache/kit", work) ||
+            cx_fmt(srules, sizeof srules, "%s/scan-rules.tsv", work) ||
+            cx_fmt(sout, sizeof sout, "%s/scan-out.tsv", work) ||
+            cx_fmt(strash, sizeof strash, "%s/scan-trash", work) ||
+            cx_fmt(s_out, sizeof s_out, "%s/out", sroot) ||
+            cx_fmt(s_keep, sizeof s_keep, "%s/keepme", s_out) ||
+            cx_fmt(s_move, sizeof s_move, "%s/moveme", s_out) ||
+            cx_fmt(s_none, sizeof s_none, "%s/norule", s_out)) return 2;
+        if (sy_mkdir(sroot, 0700) || sy_mkdir(scache, 0700) || sy_mkdir(skitp, 0700) || sy_mkdir(skit, 0700) || sy_mkdir(s_out, 0700)) return 2;
+        if (sy_mkdir(s_keep, 0700) || sy_mkdir(s_move, 0700) || sy_mkdir(s_none, 0700)) return 2;
+        {
+            char fx[4400];
+            if (cx_fmt(fx, sizeof fx, "%s/x.bin", s_move) || cx_write(fx, "0123456789", 10)) return 2;
+        }
+        if (cx_fmt(body, sizeof body,
+            "# scan rules\n"
+            "K\tout\tkeepme\tkeep\t\t\n"
+            "M\tout\tmoveme\tmove\t\t\n") || cx_write(srules, body, strlen(body))) return 2;
+        {
+            char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                          "--kit", skit, "--trash", strash, "--out-manifest", sout, "--dry-run", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tout\trows=2\tmove=1\tlist=0\tkeep=1\t"),
+               "scan-classifies-out-by-rules");
+            /* the unruled entry is listed, never counted as reclaimable */
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tout-unruled\trows=1\tmove=0\tlist=1\tkeep=0\t") &&
+               has(o, n, "\treclaimable=0\n") && has(o, n, "RELEASE_SWEEP_SCAN\trules=2\trows=3\n") == 0 &&
+               has(o, n, "RELEASE_SWEEP_SCAN\trules=2\t"),
+               "scan-lists-unruled-without-reclaiming-it");
+            free(o); o = 0;
+            ck(sy_exists(s_keep) == 1 && sy_exists(s_move) == 1 && sy_exists(strash) == 0,
+               "scan-dry-run-leaves-filesystem-untouched");
+        }
+    }
+
     if (argc < 3) cx_rmtree(work);
 
     sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
