@@ -20,6 +20,12 @@
  * computed again afterwards (an input that changed during the build refuses), then image and certificate
  * are renamed into place, image first.  Old identities are left alone: the caller owns CACHE_DIR.
  *
+ * Tape-library path (0.0.58): a build first asks the kit image ROOT/out/tlib/tlib-prep (`tools/tlib.cx
+ * kit` builds it), under tools/bound for RN_KIT_SECS; when it links the source from fresh tlibs (source
+ * listed in ROOT/build/tlib-prep.tsv, kit verified, no release-chain environment) the image is that link and
+ * the PREPARED line carries via=tlib.  Identity, certificate, the recheck after the build and the
+ * publish are the same on both paths; without a usable kit the product compiles as before.
+ *
  * This is preparation, never a result: one PREPARED line on stdout, no batch verdict is stored or read.
  * A failure returns -1 with a named reason in WHY and prepares nothing; there is no fallback to
  * `sh PRODUCT SOURCE`, so one command never has two timing contracts.
@@ -35,6 +41,7 @@
 #pragma unisa use mem.bytes
 
 #define RN_PLAN_SECS 20
+#define RN_KIT_SECS 20
 #define RN_BUILD_SECS 40
 #define RN_IDCAP (1L << 18)
 
@@ -141,7 +148,7 @@ static int rn_certified(const char *bin, const char *cert, const char **reason) 
 
 int rn_prepare(const char *root, const char *source, const char *cache_dir, char *bin, size_t bincap, int *reused, char *why, size_t wl) {
     char id[65], again[65], dir[4400], cert[4500], tmp[4500], tmpc[4600], bound[4400], product[4400], secs[16], hex[66], leaf[200];
-    const char *base, *reason = "fresh";
+    const char *base, *reason = "fresh", *via = 0;
     char *out = 0; long outn = 0, ln; int units = 0, rc, r;
     if (reused) *reused = 0;
     if (!root || !source || !cache_dir || !bin || bincap < 64) return rn_fail(why, wl, "arguments", 0);
@@ -165,7 +172,21 @@ int rn_prepare(const char *root, const char *source, const char *cache_dir, char
     }
     r = sy_mkdir(dir, 0700);
     if (r < 0 && r != -EEXIST) { bin[0] = 0; return rn_fail(why, wl, "identity-dir", dir); }
-    {   char *v[] = {"sh", product, (char *)source, "-o", tmp, 0};
+    /* Tape-library path first: the kit image links listed sources from fresh tlibs and decides that
+       itself (tools/tlib.cx prep).  Anything else -- no kit, source not listed, stale kit,
+       release-chain environment, a failed link -- compiles as before. */
+    {   char image[4400], ksecs[16];
+        rc = -1;
+        if (!cx_fmt(image, sizeof image, "%s/out/tlib/tlib-prep", root) && !cx_fmt(ksecs, sizeof ksecs, "%d", RN_KIT_SECS) && sy_exists(image) == 1) {
+            char *v[] = {image, "prep", (char *)source, "-o", tmp, "--root", (char *)root, 0};
+            rc = rn_run(bound, ksecs, v, root, &out, &outn);
+            free(out); out = 0; outn = 0;
+            if (rc == 0 && sy_exists(tmp) == 1) via = "tlib";
+            else rc = -1;
+        }
+    }
+    if (rc) {
+        char *v[] = {"sh", product, (char *)source, "-o", tmp, 0};
         rc = rn_run(bound, secs, v, root, &out, &outn);
     }
     if (rc || sy_exists(tmp) != 1) {
@@ -185,6 +206,7 @@ int rn_prepare(const char *root, const char *source, const char *cache_dir, char
         (void)sy_unlink(tmp); (void)sy_unlink(tmpc); bin[0] = 0;
         return rn_fail(why, wl, "publish", dir);
     }
-    sy_printf("PREPARED\trunner-native\tidentity=%s\tunits=%d\treused=0\treason=%s\tno-test-result\t%s\n", id, units, reason, source);
+    if (via) sy_printf("PREPARED\trunner-native\tidentity=%s\tunits=%d\treused=0\treason=%s\tno-test-result\tvia=%s\t%s\n", id, units, reason, via, source);
+    else sy_printf("PREPARED\trunner-native\tidentity=%s\tunits=%d\treused=0\treason=%s\tno-test-result\t%s\n", id, units, reason, source);
     return 0;
 }

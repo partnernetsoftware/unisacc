@@ -18,6 +18,16 @@
  * A failed or overrun build returns -1 with the exit code in WHY; the compiler's own messages have
  * already gone to this process's stderr (the child inherits it).
  *
+ * Tape-library path (0.0.58): before the compile, the kit image ROOT/out/tlib/tlib-prep (built by
+ * `tools/tlib.cx kit`) is asked to link the tool from fresh tlibs: `tlib-prep prep TOOL -o BIN`, under
+ * tools/bound for TQ_KIT_SECS.  The image decides everything (tool listed in ROOT/build/tlib-prep.tsv,
+ * kit and tlibs verified and fresh, no release-chain environment: tools/tlib.cx, cxlib.tlibpkg).  When
+ * it exits 0 the PREPARED line carries via=tlib and the image is a link of the same units instead of the
+ * one-invocation `-o` output; in every other case (no kit, tool not listed, stale or refused kit, a
+ * failed link) the compile below runs exactly as before and its PREPARED line is unchanged.  Still
+ * preparation only, still no result.  No module is used for this on purpose: measured 2026-11-12, one
+ * more `use` here cost every check that uses this module about 2 s of cold compile.
+ *
  * tq_warm_start / tq_warm_join: a tool that itself issues `sh PRODUCT x -- ARG` pays that compile inside
  * the asserted step.  The check may issue the same command in the background while it builds the tool:
  * the product's run cache then holds the compile when the tool asks.  The warm run is bounded by
@@ -36,6 +46,7 @@
 #pragma unisa use sys.io
 
 #define TQ_PREP_SECS 40
+#define TQ_KIT_SECS 20
 #define TQ_WARM_MAXARGS 24
 
 int tq_native(const char *root, const char *tool, const char *bin, char *why, size_t wl) {
@@ -49,6 +60,21 @@ int tq_native(const char *root, const char *tool, const char *bin, char *why, si
         cx_fmt(secs, sizeof secs, "%d", TQ_PREP_SECS)) {
         (void)cx_fmt(why, wl, "tool-prepare path bound");
         return -1;
+    }
+    {   /* the kit's own image decides (listed tool, kit and tlibs fresh, no release-chain environment);
+           a root without a kit exits 7 in the shell and nothing else is started */
+        char image[4400], limit[16];
+        char *said = 0;
+        size_t saidn = 0;
+        if (!cx_fmt(image, sizeof image, "%s/out/tlib/tlib-prep", root) && !cx_fmt(limit, sizeof limit, "%d", TQ_KIT_SECS)) {
+            char *v[] = {"sh", "-c", "[ -x \"$3\" ] || exit 7; exec \"$@\"", "sh", bound, limit, image, "prep", (char *)tool, "-o", (char *)bin, "--root", (char *)root, 0};
+            rc = cx_runv_timeout(v, TQ_KIT_SECS + 2, &said, &saidn);
+            free(said);
+            if (rc == 0) {
+                sy_printf("PREPARED\ttool-native\tbound_s=%d\tno-test-result\tvia=tlib\t%s\n", TQ_KIT_SECS, tool);
+                return 0;
+            }
+        }
     }
     {
         char *v[] = {bound, secs, "sh", product, (char *)tool, "-o", (char *)bin, 0};
