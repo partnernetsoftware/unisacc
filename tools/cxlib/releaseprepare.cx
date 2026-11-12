@@ -95,7 +95,21 @@ static void rp_bind(int create){
 }
 static int rp_freeze(int create){
  char *o=0;char *git[]={"git","-C",(char*)rp_root,"rev-parse",(char*)(create?"HEAD":rp_need("build_rev")),0};int rc=rp_cmd("freeze-head",git,&o);if(rc)return rc;
- int ok=o&&strlen(o)==41&&!strncmp(o,rp_need("build_rev"),40)&&o[40]=='\n';free(o);if(!ok)rp_die("ROOT revision differs from BUILD_REV");
+ int ok=o&&strlen(o)==41&&!strncmp(o,rp_need("build_rev"),40)&&o[40]=='\n';free(o);
+ if(!ok&&create){
+  /* Bind by identity, not HEAD: HEAD may be ahead only when BUILD_REV is its ancestor and
+     tools/freeze-plan.cx head-delta classifies every changed path as non-product. */
+  char com[4400],tool[4400];rp_path(com,rp_root,"unisacc.com");rp_path(tool,rp_root,"tools/freeze-plan.cx"); // lint:allow R1-product the ROOT checkout product classifies its own HEAD delta, same as the chain child below
+  char *hd[]={"sh",com,tool,"--","head-delta",(char*)rp_root,(char*)rp_need("build_rev"),0};
+  np_buf so={0},se={0};int residue=0;long end=sy_now_ms()+55000;if(end>rp_mono_end)end=rp_mono_end;
+  if(rp_subreaper()!=0)return 2;int hrc=rp_capture(hd,rp_root,end,&so,&se,&residue);
+  np_puts(&so,"");rp_put("freeze-delta.tsv",so.p);free(se.p);
+  if(hrc==142||hrc==125){free(so.p);return 3;}
+  if(hrc==1){sy_eprintf("%s",so.p);free(so.p);rp_die("ROOT HEAD is ahead of BUILD_REV with product-input or unclassified changes, or BUILD_REV is not its ancestor");}
+  ok=hrc==0&&strstr(so.p,"HEAD_DELTA\tstatus=OK\t")!=0;free(so.p);if(!ok)rp_die("head-delta classification failed");
+  sy_printf("RELEASE_PREPARE\tfreeze=HEAD_AHEAD_NONPRODUCT\n");
+ }
+ if(!ok)rp_die("ROOT revision differs from BUILD_REV");
  char *sid[]={(char*)rp_need("identity_helper"),(char*)(create?rp_root:rp_need("snap")),0};rc=rp_cmd("freeze-sid",sid,&o);if(rc)return rc;
  if(!o||strlen(o)<64||!rcand_hex(o,64)||(o[64]&&strcmp(o+64,"\n")))rp_die("SID output");for(int i=0;i<64;i++)rp_sid[i]=o[i];rp_sid[64]=0;free(o);
  char row[14000];if(cx_fmt(row,sizeof row,"BUILD_REV\t%s\nsource_sid\t%s\nconstructor\t%s\nconstructor_sha256\t%s\n",rp_need("build_rev"),rp_sid,rp_need("constructor"),rp_ctor))rp_die("freeze capacity");if(!rp_equal("freeze.tsv",row,create))rp_die("freeze changed");return 0;

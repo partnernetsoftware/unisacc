@@ -16,13 +16,17 @@ static void ck(int ok, const char *name) {
     if (ok) sy_printf("PASS\tcheck-freeze-plan.%s\n", name);
     else { failed++; sy_printf("FAIL\tcheck-freeze-plan.%s\n", name); }
 }
+/* run output of the latest sh() (child stdout, never source text) and the caller buffer it was copied to */
+static char *ran; static const char *ran_copy;
 static int sh(const char *cmd, char *out, size_t cap) {
-    char *v[] = {"sh", "-c", (char *)cmd, 0}; char *o = 0; size_t n = 0;
-    int rc = cx_runv_timeout(v, 50, &o, &n);
-    if (out) { out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; } }
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; size_t n = 0;
+    int rc = cx_runv_timeout(v, 50, &ran, &n);
+    ran_copy = 0;
+    if (out) { out[0] = 0; if (ran && n < cap) { mm_copy(out, cap, ran, n); out[n] = 0; ran_copy = out; } }
     return rc;
 }
-static int has(const char *h, const char *n) { return tx_find(h, tx_len(h, 100000), n, tx_len(n, 100)) >= 0; }
+/* H must be the buffer the latest sh() filled; the search runs on that run output itself */
+static int has(const char *h, const char *n) { return h && h == ran_copy && tx_find(ran, tx_len(ran, 100000), n, tx_len(n, 100)) >= 0; }
 static int putf(const char *rel, const char *body) {
     char p[500]; if (cx_fmt(p, sizeof p, "%s/%s", td, rel)) return 1;
     return cx_write(p, body, tx_len(body, 8000));
@@ -56,6 +60,14 @@ int main(void) {
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.wide --draft draft.wide", td, com, tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) != 0 && has(out, "WIDE") && has(out, "tools"), "prefix-too-wide"); }
+
+    /* 负控: 产品输入清单含未归类路径 -> plan 与 check 都拒并点名 */
+    putf("ident.unc", "src/a.dat\tabc\nweird/x.dat\tdef\n");
+    { char cmd[1800];
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p uncout && sh '%s' '%s' -- plan . uncout --ident-list ident.unc 2>&1", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "UNCLASSIFIED\tweird/x.dat") && has(out, "UNCLASSIFIED_PRODUCT_INPUT"), "unclassified-refused-at-plan");
+      if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' '%s' -- check --ident-list ident.unc --draft draft.ok 2>&1", td, com, tool)) { ck(0, "fmt"); return 1; }
+      ck(sh(cmd, out, sizeof out) != 0 && has(out, "UNCLASSIFIED\tweird/x.dat"), "unclassified-refused-at-check"); }
 
     /* 负控3: 启动清单缺文件 */
     putf("boot.ok", "ident.ok\n");
