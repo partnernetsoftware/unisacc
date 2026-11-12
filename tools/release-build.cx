@@ -8,7 +8,9 @@
    --no-compress-flat keeps cx-flat.h raw while the rest still compresses.
    Resumable p3: add --phase PHASE --run ABS_RUN. Invoke each phase under
    tools/bound 55: guard-init once, guard-0 through guard-39 (all observation
-   keys of each model), models, resources, assemble. Keep all other arguments
+   keys of each model), opguard, models, resources, assemble. opguard runs the
+   kernel base check and seals need_base under the binding; models refuses
+   without that seal or when it disagrees with the nets. Keep all other arguments
    identical. ROOT/nets are canonical absolute read-only inputs. OUT must be a
    regular file directly in RUN; checker, proofs and opguard outputs stay there.
    Original context records are never rewritten after copying material.
@@ -420,6 +422,14 @@ static char *rb_phase_read(const char *name, size_t *n) {
         memcmp(proof + 65, sha, 64) || proof[129] != '\n') rb_die("phase proof mismatch");
     mm_free(proof); return p;
 }
+/* The models phase accepts only a same-binding opguard seal whose verdict equals NEED. */
+static void rb_opguard_require(int need) {
+    char want[32]; size_t n; char *got;
+    if (cx_fmt(want, sizeof want, "need_base=%d\n", need)) rb_die("opguard verdict");
+    got = rb_phase_read("opguard", &n);
+    if (n != strlen(want) || memcmp(got, want, n)) rb_die("opguard seal disagrees with nets; rerun the opguard phase");
+    mm_free(got);
+}
 static void rb_nets_guard(const char *nets, const char *root) {
     char ctx[RB_FULL], conf[RB_FULL], helper[RB_FULL], bnd[RB_FULL], got[80] = {0}, want[80] = {0};
     char *text, *v[6];
@@ -562,7 +572,7 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
         { char *v[4] = {rb_t1, tp, np, 0}; if (rb_pipe("phase all-key T1 shard", v, root, 0, 0)) rb_die("phase T1 failed"); }
         rb_phase_seal(key, rb_binding, 64);
     } else if (!tx_eqz(rb_phase, "guard-init")) {
-        if (!tx_eqz(rb_phase, "models") && !tx_eqz(rb_phase, "resources") && !tx_eqz(rb_phase, "assemble")) rb_die("unknown p3 phase");
+        if (!tx_eqz(rb_phase, "opguard") && !tx_eqz(rb_phase, "models") && !tx_eqz(rb_phase, "resources") && !tx_eqz(rb_phase, "assemble")) rb_die("unknown p3 phase");
         for (i = 0; i < cf_p3_guard_count(); i++) {
             char key[32]; if (cx_fmt(key, sizeof key, "guard-%d", i)) rb_die("phase guard key");
             e = rb_phase_read(key, &en); if (en != 64 || memcmp(e, rb_binding, 64)) rb_die("phase guard incomplete"); mm_free(e);
@@ -617,7 +627,33 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
             at = hs + 1 + (long)stored;
         }
     }
-    if (rb_need_base) rb_base_check(rb_root, body, pkg);
+    /* Phased runs never assemble the kernel base here: the opguard phase did it under this
+       binding and sealed its verdict. The seal must exist, carry this binding and state the
+       need_base value recomputed just now from the same nets. */
+    if (rb_phase) rb_opguard_require(rb_need_base);
+    else if (rb_need_base) rb_base_check(rb_root, body, pkg);
+}
+
+/* opguard phase: recompute need_base from the bound nets, run the full base check when
+   needed, then seal the verdict (proof = binding + digest of the verdict bytes). */
+static void rb_opguard_phase(const unsigned char *body, const CxPackage *pkg,
+                             long d_start, long m_start, const char *nets, const char *routes) {
+    static char names[64][64];
+    char path[RB_FULL], rec[32]; long i; int need = 0;
+    if (pkg->m != cf_p3_guard_count() || pkg->m > 64) rb_die("--nets model record count");
+    if (rb_route_names(routes, body, d_start, m_start, pkg->m, names)) rb_die("--nets routes");
+    for (i = 0; i < pkg->m; i++) {
+        size_t tn; char *text;
+        if (!names[i][0]) rb_die("--nets unbound model");
+        if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("nets path");
+        text = cx_read(path, &tn);
+        if (!text) rb_die(path);
+        if (rb_ops_known() && rb_net_new_op(text, tn)) need = 1;
+        mm_free(text);
+    }
+    if (need) rb_base_check(rb_root, body, pkg);
+    if (cx_fmt(rec, sizeof rec, "need_base=%d\n", need)) rb_die("opguard verdict");
+    rb_phase_seal("opguard", rec, (long)strlen(rec));
 }
 
 static int rb_p3(int argc, char **argv) {
@@ -705,6 +741,12 @@ static int rb_p3(int argc, char **argv) {
         if (!strncmp(rb_phase, "guard-", 6)) {
             cxpl_release(pkg, rb_drop); mm_free(file);
             sy_printf("release-build\tp3-phase\t%s\tbinding=%s\n", rb_phase, rb_binding); return 0;
+        }
+        if (tx_eqz(rb_phase, "opguard")) {
+            rb_root = argv[2]; rb_arity_load(argv[2]);
+            rb_opguard_phase(body, pkg, line_end, ms, nets, routes);
+            cxpl_release(pkg, rb_drop); mm_free(file);
+            sy_printf("release-build\tp3-phase\topguard\tbinding=%s\n", rb_binding); return 0;
         }
         if (tx_eqz(rb_phase, "models")) {
             RbBuf models = {0}; rb_root = argv[2]; rb_arity_load(argv[2]);

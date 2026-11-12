@@ -16,7 +16,10 @@
  * Persistent preparation, one separately bounded command per stage:
  *   --prepare copy REPO SNAP SRC NETS ROUTES CTOR ORACLE NEW_MAT
  *   --prepare build MAT
- *   --prepare guard-init|guard-0..39|models|resources|assemble MAT
+ *   --prepare guard-init|guard-0..39|opguard|models|resources|assemble MAT
+ * A split producer needs opguard before models; its opguard and opguard.proof
+ * join the seal (both or neither), ctor-* cases then drive the opguard phase and
+ * missing-/tamper-opguard[.proof] require the models phase to refuse.
  *   --prepare seal MAT
  * Copy excludes generated ROOT/out and .git, preserves original records and
  * copies every complete net/table result. Producer source/cxlib stays in MAT.
@@ -77,13 +80,20 @@ static int call(const char *phase, const char *r, const char *n, const char *u,
 static int contains(const pr_result *r, const char *s) {
     return (r->out && strstr(r->out, s)) || (r->err && strstr(r->err, s));
 }
+static const char *opguard_names[] = {"opguard", "opguard.proof"};
+/* 2 when RUN holds both opguard seal files, 0 when neither, -1 when only one. */
+static int opguard_files(const char *dir) {
+    char p[4400]; sy_stat_t st; int have = 0;
+    for (int i = 0; i < 2; i++) { path(p, dir, opguard_names[i]); if (!sy_lstat(p, &st)) { if (st.kind != 'f') return -1; have++; } }
+    return have == 1 ? -1 : have;
+}
 static int check_case(int argc, char **argv) {
     const char *name, *target = 0; int missing = 0, tamper = 0, known = 0;
     const char *files[] = {"epoch", "binding", "binding.proof", "t1-net-check",
         "guard-0.proof", "models", "models.proof", "resources", "resources.proof"};
     char p[4400], saved[4400], lock[4400], real[4400], expected[65], before[65], after[65];
     char alias[4400], ctor_sha[65], marker[4600]; char *original = 0; size_t original_n = 0;
-    pr_result result = {0}; int i, fd, transport, restored = 1; sy_stat_t st;
+    pr_result result = {0}; int i, fd, transport, restored = 1, split, seal_target = 0; sy_stat_t st;
     if (argc != 11 || strcmp(argv[1], "--case"))
         return not_run("usage --case NAME TOOL ROOT SRC NETS ROUTES RUN CTOR ORACLE");
     name = argv[2]; tool = argv[3]; root = argv[4]; source = argv[5];
@@ -98,6 +108,13 @@ static int check_case(int argc, char **argv) {
         if (sy_stat(p, &st) || st.kind != 'f') return not_run(files[i]);
         if ((!strncmp(name, "missing-", 8) && !strcmp(name + 8, files[i])) ||
             (!strncmp(name, "tamper-", 7) && !strcmp(name + 7, files[i]))) target = files[i];
+    }
+    /* Split-producer material carries the sealed kernel base verdict; half a seal is refused. */
+    split = opguard_files(run);
+    if (split < 0) { fprintf(stderr, "release-ctor: opguard seal is half present\n"); return 1; }
+    for (i = 0; split && i < 2; i++) {
+        if ((!strncmp(name, "missing-", 8) && !strcmp(name + 8, opguard_names[i])) ||
+            (!strncmp(name, "tamper-", 7) && !strcmp(name + 7, opguard_names[i]))) { target = opguard_names[i]; seal_target = 1; }
     }
     missing = !strncmp(name, "missing-", 8); tamper = !strncmp(name, "tamper-", 7);
     known = target || !strcmp(name, "assemble") || !strcmp(name, "ctor-positive") ||
@@ -149,7 +166,11 @@ static int check_case(int argc, char **argv) {
         }
         if (restored) {
             const char *phase = "assemble", *r = root, *n = nets, *u = run, *out = output, *c = ctor;
-            if (!strncmp(name, "ctor-", 5)) phase = "models";
+            /* The constructor is consumed where the kernel base is assembled: the opguard
+               phase of a split producer, the models phase of an unsplit one. A missing or
+               changed opguard seal must stop the models phase. */
+            if (!strncmp(name, "ctor-", 5)) phase = split ? "opguard" : "models";
+            if (seal_target) phase = "models";
             if (!strcmp(name, "ctor-missing")) c = "";
             if (!strcmp(name, "ctor-invalid")) c = "/nonexistent-explicit-constructor";
             if (!strcmp(name, "duplicate-init")) phase = "guard-init";
@@ -198,6 +219,17 @@ static int material_seal(const char *mat, char seal[65]) {
     }
     for (int i = 0; i < 40; i++) for (int proof = 0; proof < 2; proof++) {
         if (cx_fmt(key, sizeof key, "run/guard-%d%s", i, proof ? ".proof" : "")) { free(bytes.p); return -1; }
+        path(p, mat, key);
+        if (digest(p, sha)) { free(bytes.p); return -1; }
+        np_puts(&bytes, key); np_puts(&bytes, "\t"); np_puts(&bytes, sha); np_puts(&bytes, "\n");
+    }
+    /* Material from the split producer also seals the opguard verdict and its proof.
+       Older material has neither and keeps its seal; exactly one present is refused. */
+    path(p, mat, "run");
+    int split = opguard_files(p);
+    if (split < 0) { free(bytes.p); return -2; }
+    for (int i = 0; split && i < 2; i++) {
+        if (cx_fmt(key, sizeof key, "run/%s", opguard_names[i])) { free(bytes.p); return -1; }
         path(p, mat, key);
         if (digest(p, sha)) { free(bytes.p); return -1; }
         np_puts(&bytes, key); np_puts(&bytes, "\t"); np_puts(&bytes, sha); np_puts(&bytes, "\n");
@@ -304,7 +336,7 @@ static int prepare_material(int argc, char **argv) {
             if (sy_exists(p) || cx_fmt(map, sizeof map, "release-ctor-location\t%s\nrelease-ctor-proof\t%s\n", location, seal) || cx_write(p, map, strlen(map))) return 2;
             printf("MATERIAL_MAP\t%s\tidentity=%s\tstatus=PREPARED\n", p, seal);
         } else {
-            int allowed = !strcmp(stage, "guard-init") || !strcmp(stage, "models") || !strcmp(stage, "resources") || !strcmp(stage, "assemble");
+            int allowed = !strcmp(stage, "guard-init") || !strcmp(stage, "opguard") || !strcmp(stage, "models") || !strcmp(stage, "resources") || !strcmp(stage, "assemble");
             if (!strncmp(stage, "guard-", 6) && strcmp(stage, "guard-init")) {
                 char *end; long i = strtol(stage + 6, &end, 10); allowed = !*end && i >= 0 && i < 40;
             }
@@ -361,7 +393,9 @@ int main(int argc, char **argv) {
         if (fd < 0) return not_run("RUN already held or unavailable");
         if (sy_close(fd)) return 2;
         material_lock_held = 1; int rc = 77;
-        if (material_seal(mat, before)) { not_run("sealed release-ctor material unavailable"); goto done; }
+        int sealed = material_seal(mat, before);
+        if (sealed == -2) { fprintf(stderr, "release-ctor: opguard seal is half present\n"); rc = 1; goto done; }
+        if (sealed) { not_run("sealed release-ctor material unavailable"); goto done; }
         if (strlen(argv[5]) != 64 || strcmp(before, argv[5])) { fprintf(stderr, "release-ctor: material seal mismatch\n"); rc = 1; goto done; }
         material_args(mat, storage, args, argv[2]); rc = check_case(11, args);
         if (material_seal(mat, after) || strcmp(before, after)) { fprintf(stderr, "release-ctor: material changed during case\n"); rc = 1; goto done; }
