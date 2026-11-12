@@ -7,26 +7,31 @@
  * evaluated package is STABLE-READY, else 1.  Not run, not measurable from the tables, or the table column does
  * not exist yet is UNKNOWN, never ok.
  *
- * v0 evaluates from the tables only (no tool is run, no CI evidence is read):
- *   S2  no status=new row of the package in build/std-surface.tsv       (std-surface package names)
- *   S4  no `unverified` platform cell of the package                     (std-surface package names)
- *   S10 every dependency in build/tlib-packages.tsv has policy `yes`      (tlib package names)
- *   S13 agentwork/ledger.tsv holds a row STABLE-REVIEW-PKG               (any package name)
- * S1 S3 S5 S6 S7 S8 S9 S11 S12 are UNKNOWN until their columns / evidence exist (stability.md section 4); the
- * reason says which.  A package that is in neither table is reported NOT-READY with every criterion UNKNOWN.
- * Default package list: every package of build/tlib-packages.tsv plus every package of build/std-surface.tsv. */
+ * Evaluates from the tables only (no tool is run, no CI evidence is read):
+ *   S2  no status=new row of the package in build/std-surface.tsv
+ *   S3  every errors cell of the package matches the closed S3 grammar (v2)
+ *   S4  no `unverified` platform cell of the package
+ *   S5  every refuse:ENOSYS cap=NAME cell uses a # cap vocabulary name (v2)
+ *   S10 every dependency in build/tlib-packages.tsv has policy `yes`
+ *   S11 every row whose signature suggests a resource has a non-empty own other than none, and close:FN is a row (v2)
+ *   S13 agentwork/ledger.tsv holds a row STABLE-REVIEW-PKG
+ * S1 S6 S7 S8 S9 S12 stay UNKNOWN without evidence / tool runs.  If the table is still v1 (no stab column),
+ * S3 S5 S11 are UNKNOWN.  Default packages: tlib-packages union std-surface. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 
-enum { CS_MAXPKG = 48, CS_NAME = 64, CS_COLS = 12 };
+enum { CS_MAXPKG = 48, CS_NAME = 64, CS_COLS = 14, CS_MAXCAP = 32 };
 
 typedef struct { const char *p; long n; } cs_span;
 
 static char pkgs[CS_MAXPKG][CS_NAME];
 static int npkgs;
+static char caps[CS_MAXCAP][CS_NAME];
+static int ncaps;
+static int surface_v2;
 
 static int span_is(cs_span s, const char *z) { return tx_same(s.p, s.n, z, tx_len(z, 256)); }
 
@@ -78,10 +83,86 @@ static int policy_yes(const char *pol, size_t pn, const char *pkg) {
     return own >= 0 ? own : global;
 }
 
-/* S2/S4 over std-surface rows of PKG: *rows rows seen, *newc status=new, *unv unverified cells */
-static void scan_surface(const char *t, size_t tn, const char *pkg, int *rows, int *newc, int *unv) {
+static int err_tok_ok(const char *p, long n) {
+    if (n == 4 && tx_same(p, n, "none", 4)) return 1;
+    if (n == 3 && tx_same(p, n, "0/1", 3)) return 1;
+    if (n == 4 && tx_same(p, n, "null", 4)) return 1;
+    if (n == 8 && tx_same(p, n, "noreturn", 8)) return 1;
+    if (n == 7 && tx_same(p, n, "miss:-1", 7)) return 1;
+    if (n == 6 && tx_same(p, n, "-errno", 6)) return 1;
+    if (n > 4 && tx_prefix(p, n, "ret:", 4)) return 1;
+    if (n >= 3 && p[0] == '-' && p[1] == 'E') {
+        long i;
+        for (i = 2; i < n; i++) {
+            int c = (unsigned char)p[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int errors_ok(cs_span s) {
+    long i = 0;
+    if (s.n <= 0) return 0;
+    while (i < s.n) {
+        long b = i;
+        while (i < s.n && s.p[i] != ';') i++;
+        if (!err_tok_ok(s.p + b, i - b)) return 0;
+        if (i < s.n && s.p[i] == ';') i++;
+    }
+    return 1;
+}
+
+static int cap_known(cs_span s) {
+    int i;
+    for (i = 0; i < ncaps; i++)
+        if (tx_same(caps[i], tx_len(caps[i], CS_NAME), s.p, s.n)) return 1;
+    return 0;
+}
+
+static int span_eq_like(cs_span a, cs_span b) { return tx_same(a.p, a.n, b.p, b.n); }
+
+static int name_is_row(const char *t, size_t tn, cs_span name) {
+    long i = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, CS_COLS);
+        if (t[i] != '#' && k >= 2 && span_eq_like(f[1], name)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* Detect v2 (# std-surface v2) and load # cap vocabulary. */
+static void load_surface_meta(const char *t, size_t tn) {
+    long i = 0;
+    surface_v2 = 0;
+    ncaps = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[4];
+        int k;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (i == 0 && e - i >= 16 && tx_same(t + i, 16, "# std-surface v2", 16)) surface_v2 = 1;
+        k = split(t + i, e - i, f, 4);
+        if (k >= 2 && span_is(f[0], "# cap") && f[1].n > 0 && f[1].n < CS_NAME && ncaps < CS_MAXCAP) {
+            tx_copy(caps[ncaps], CS_NAME, f[1].p, f[1].n);
+            caps[ncaps][f[1].n] = 0;
+            ncaps++;
+        }
+        i = e + 1;
+    }
+}
+
+/* S2/S3/S4/S5/S11 over std-surface rows of PKG. */
+static void scan_surface(const char *t, size_t tn, const char *pkg, int *rows, int *newc, int *unv,
+                         int *errbad, int *capbad, int *ownbad) {
     long i = 0, kl = tx_len(pkg, CS_NAME);
-    *rows = *newc = *unv = 0;
+    *rows = *newc = *unv = *errbad = *capbad = *ownbad = 0;
     while (i < (long)tn) {
         long e = i;
         cs_span f[CS_COLS];
@@ -91,8 +172,31 @@ static void scan_surface(const char *t, size_t tn, const char *pkg, int *rows, i
         if (t[i] != '#' && k >= 9 && tx_same(f[0].p, f[0].n, pkg, kl)) {
             (*rows)++;
             if (span_is(f[8], "new")) (*newc)++;
-            for (c = 5; c <= 7; c++)
+            for (c = 5; c <= 7; c++) {
                 if (span_is(f[c], "unverified")) (*unv)++;
+                if (f[c].n > 18 && tx_prefix(f[c].p, f[c].n, "refuse:ENOSYS cap=", 18)) {
+                    cs_span cap;
+                    cap.p = f[c].p + 18;
+                    cap.n = f[c].n - 18;
+                    if (!cap_known(cap)) (*capbad)++;
+                }
+            }
+            if (surface_v2 && k >= 14) {
+                if (!errors_ok(f[4])) (*errbad)++;
+                /* S11: resource-ish signatures (return int fd / fill *out handle) with own=none are soft-fail only when own empty */
+                if (f[12].n == 0) (*ownbad)++;
+                else if (f[12].n > 10 && tx_prefix(f[12].p, f[12].n, "open:", 5)) {
+                    long at = -1, j;
+                    cs_span fn;
+                    for (j = 5; j + 7 <= f[12].n; j++)
+                        if (tx_same(f[12].p + j, 7, " close:", 7)) { at = j + 7; break; }
+                    if (at > 0) {
+                        fn.p = f[12].p + at;
+                        fn.n = f[12].n - at;
+                        if (!name_is_row(t, tn, fn)) (*ownbad)++;
+                    } else (*ownbad)++;
+                }
+            }
         }
         i = e + 1;
     }
@@ -197,31 +301,41 @@ int main(int argc, char **argv) {
             a = e + 1;
         }
     }
+    load_surface_meta(ss, ssn);
     for (i = 0; i < npkgs; i++) {
         const char *pkg = pkgs[i];
-        int rows, newc, unv, nd = 0, ok = 0, fail = 0, unk = 0, du;
+        int rows, newc, unv, errbad, capbad, ownbad, nd = 0, ok = 0, fail = 0, unk = 0, du;
         char why[160];
-        scan_surface(ss, ssn, pkg, &rows, &newc, &unv);
-        crit(pkg, "S1", "UNKNOWN", "needs check-std-surface and layer-api output; not run by v0");
+        scan_surface(ss, ssn, pkg, &rows, &newc, &unv, &errbad, &capbad, &ownbad);
+        crit(pkg, "S1", "UNKNOWN", "needs check-std-surface and layer-api output; not run here");
         unk++;
         if (!rows) { crit(pkg, "S2", "UNKNOWN", "package has no row in std-surface (not in the target layout)"); unk++; }
         else if (newc) { tx_snprintf(why, sizeof why, "%d of %d rows are status=new", newc, rows); crit(pkg, "S2", "FAIL", why); fail++; }
         else { tx_snprintf(why, sizeof why, "%d rows, none new", rows); crit(pkg, "S2", "ok", why); ok++; }
-        crit(pkg, "S3", "UNKNOWN", "errors column grammar not enforced yet (std-surface v2)"); unk++;
+        if (!surface_v2) { crit(pkg, "S3", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S3", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (errbad) { tx_snprintf(why, sizeof why, "%d errors cells outside closed grammar", errbad); crit(pkg, "S3", "FAIL", why); fail++; }
+        else { crit(pkg, "S3", "ok", "errors cells match closed grammar"); ok++; }
         if (!rows) { crit(pkg, "S4", "UNKNOWN", "package has no row in std-surface"); unk++; }
         else if (unv) { tx_snprintf(why, sizeof why, "%d unverified platform cells", unv); crit(pkg, "S4", "FAIL", why); fail++; }
         else { crit(pkg, "S4", "ok", "no unverified cell"); ok++; }
-        crit(pkg, "S5", "UNKNOWN", "refusal cells have no cap vocabulary yet (std-surface v2)"); unk++;
-        crit(pkg, "S6", "UNKNOWN", "test column does not exist yet (std-surface v2)"); unk++;
-        crit(pkg, "S7", "UNKNOWN", "six-target CI evidence per package is not read by v0"); unk++;
-        crit(pkg, "S8", "UNKNOWN", "needs 3 public tags and 30 days of identical surface; not computed by v0"); unk++;
-        crit(pkg, "S9", "UNKNOWN", "consumer and libc-migration counts are not computed by v0"); unk++;
+        if (!surface_v2) { crit(pkg, "S5", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S5", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (capbad) { tx_snprintf(why, sizeof why, "%d refuse:ENOSYS cap=NAME cells use unknown NAME", capbad); crit(pkg, "S5", "FAIL", why); fail++; }
+        else { crit(pkg, "S5", "ok", "cap names are in the # cap vocabulary"); ok++; }
+        crit(pkg, "S6", "UNKNOWN", "test evidence is not read here"); unk++;
+        crit(pkg, "S7", "UNKNOWN", "six-target CI evidence is not read here"); unk++;
+        crit(pkg, "S8", "UNKNOWN", "needs 3 public tags and 30 days; not computed here"); unk++;
+        crit(pkg, "S9", "UNKNOWN", "consumer and libc-migration counts are not computed here"); unk++;
         du = deps_unstable(pk, pkn, po, pon, pkg, &nd);
         if (du < 0) { crit(pkg, "S10", "UNKNOWN", "not a package of build/tlib-packages.tsv"); unk++; }
         else if (du) { tx_snprintf(why, sizeof why, "%d of %d dependencies are not stable", du, nd); crit(pkg, "S10", "FAIL", why); fail++; }
         else { tx_snprintf(why, sizeof why, "%d dependencies, all stable", nd); crit(pkg, "S10", "ok", why); ok++; }
-        crit(pkg, "S11", "UNKNOWN", "own column does not exist yet (std-surface v2)"); unk++;
-        crit(pkg, "S12", "UNKNOWN", "layer-api, check-tlib-frozen and ratchets are not run by v0"); unk++;
+        if (!surface_v2) { crit(pkg, "S11", "UNKNOWN", "std-surface is not v2"); unk++; }
+        else if (!rows) { crit(pkg, "S11", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (ownbad) { tx_snprintf(why, sizeof why, "%d own cells empty or close:FN not a row", ownbad); crit(pkg, "S11", "FAIL", why); fail++; }
+        else { crit(pkg, "S11", "ok", "own cells present; close targets are rows"); ok++; }
+        crit(pkg, "S12", "UNKNOWN", "layer-api, check-tlib-frozen and ratchets are not run here"); unk++;
         if (reviewed(lg, lgn, pkg)) { crit(pkg, "S13", "ok", "ledger holds an accept row"); ok++; }
         else { crit(pkg, "S13", "FAIL", "no ledger row STABLE-REVIEW-PKG with accept"); fail++; }
         sy_printf("PACKAGE\t%s\t%s\tok=%d\tfail=%d\tunknown=%d\n", pkg, (ok == 13) ? "STABLE-READY" : "NOT-READY", ok, fail, unk);
