@@ -1,5 +1,7 @@
 #pragma unisa module fs
 #pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 /* L0 sys/fs: directories, modes and stat (plans/cx-layers.md). Errors are
    returned, never hidden: 0 or a value on success, -errno on failure.
    No #include: <sys/stat.h>, <fcntl.h> and errno come with the implicit
@@ -507,4 +509,176 @@ static int sy_access_os(const char *path, int mode) {
 int sy_access(const char *path, int mode) {
     if (!path || !path[0]) return -EINVAL;
     return sy_access_os(path, mode);
+}
+
+/* ---- W3: whole-file and directory-tree completion (build/std-surface.tsv cx.os rows) ---- */
+
+/* mkdir -p (Rust create_dir_all; Node mkdir recursive).  Every missing ancestor is made with MODE.
+   0 (an existing directory counts), -ENOTDIR when PATH or an ancestor exists and is not a directory,
+   else -errno.  Both '/' and (Windows) '\\' separate components. */
+int sy_mkdir_all(const char *path, int mode) {
+    char buf[4096];
+    long n, i;
+    int rc;
+    sy_stat_t st;
+    if (!path || !path[0]) return -EINVAL;
+    n = (long)strlen(path);
+    if (n >= (long)sizeof buf) return -ENAMETOOLONG;
+    if (mm_copy(buf, (long)sizeof buf, path, n + 1)) return -ENAMETOOLONG;
+    while (n > 1 && (buf[n - 1] == '/' || buf[n - 1] == '\\')) buf[--n] = 0;
+    for (i = 1; i <= n; i++) {
+        if (buf[i] != '/' && buf[i] != '\\' && buf[i] != 0) continue;
+        {
+            char keep = buf[i];
+            buf[i] = 0;
+            rc = sy_mkdir(buf, mode);
+            if (rc == -EEXIST || rc == -EISDIR) {
+                if (sy_stat(buf, &st) != 0 || st.kind != 'd') return -ENOTDIR;
+                rc = 0;
+            }
+            buf[i] = keep;
+            if (rc != 0) return rc;
+        }
+    }
+    return 0;
+}
+
+/* Read all of PATH into a new buffer (*OUT, free with mm_free; one 0 byte follows the data and is not
+   counted in *N).  MAX > 0 bounds the size: a larger file is -EFBIG, nothing allocated.  -errno
+   otherwise; -ENOMEM when the buffer cannot be had. */
+int sy_read_file(const char *path, unsigned char **out, int64_t *n, int64_t max) {
+    int fd;
+    sy_stat_t st;
+    int64_t cap, got = 0;
+    unsigned char *buf;
+    if (!path || !out || !n) return -EINVAL;
+    *out = 0;
+    *n = 0;
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) return fd;
+    cap = 4096;
+    if (sy_fstat(fd, &st) == 0 && st.kind == 'f' && st.size > 0) cap = (int64_t)st.size + 1;
+    if (max > 0 && cap > max + 1) cap = max + 1;
+    buf = (unsigned char *)mm_alloc((size_t)cap + 1);
+    if (!buf) { sy_close(fd); return -ENOMEM; }
+    for (;;) {
+        long r;
+        if (got == cap) {
+            unsigned char *nb;
+            int64_t nc = cap * 2;
+            if (max > 0 && got > max) break;
+            nb = (unsigned char *)mm_alloc((size_t)nc + 1);
+            if (!nb) { mm_free(buf); sy_close(fd); return -ENOMEM; }
+            if (mm_copy(nb, (long)nc, buf, (long)got)) { mm_free(nb); mm_free(buf); sy_close(fd); return -EIO; }
+            mm_free(buf);
+            buf = nb;
+            cap = nc;
+        }
+        r = sy_read(fd, buf + got, (long)(cap - got));
+        if (r < 0) { mm_free(buf); sy_close(fd); return (int)r; }
+        if (r == 0) break;
+        got += r;
+        if (max > 0 && got > max) break;
+    }
+    sy_close(fd);
+    if (max > 0 && got > max) { mm_free(buf); return -EFBIG; }
+    buf[got] = 0;
+    *out = buf;
+    *n = got;
+    return 0;
+}
+
+static int sy_put_all(int fd, const void *buf, int64_t n) {
+    const unsigned char *p = (const unsigned char *)buf;
+    while (n > 0) {
+        long w = write(fd, p, (size_t)(n > (1 << 30) ? (1 << 30) : n));
+        if (w < 0) { if (errno == EINTR) continue; return sy_fail(); }
+        if (w == 0) return -EIO;
+        p += w;
+        n -= w;
+    }
+    return 0;
+}
+
+static int sy_put_file(const char *path, const void *buf, int64_t n, int mode, int flags) {
+    int fd, rc;
+    if (!path || !path[0] || n < 0 || (n > 0 && !buf)) return -EINVAL;
+    fd = sy_open(path, O_WRONLY | O_CREAT | flags, mode);
+    if (fd < 0) return fd;
+    rc = sy_put_all(fd, buf, n);
+    if (sy_close(fd) != 0 && rc == 0) rc = -EIO;
+    return rc;
+}
+
+/* Create or truncate PATH (MODE when created) and write N bytes.  0, or -errno.  Not atomic. */
+int sy_write_file(const char *path, const void *buf, int64_t n, int mode) {
+    return sy_put_file(path, buf, n, mode, O_TRUNC);
+}
+
+/* Append N bytes to PATH, creating it with MODE.  0, or -errno. */
+int sy_append_file(const char *path, const void *buf, int64_t n, int mode) {
+    return sy_put_file(path, buf, n, mode, O_APPEND);
+}
+
+static int sy_tmp_name(char *out, int cap, const char *dir, const char *prefix, const char *tag) {
+    static unsigned long ctr;
+    unsigned long v;
+    int i, k = 0, n = 0;
+    const char *a = dir;
+    const char *al = "abcdefghijklmnopqrstuvwxyz0123456789";
+    ctr++;
+    v = ctr * 2654435761UL + (unsigned long)getpid() * 40503UL + (unsigned long)(size_t)&v;
+    if (cap < 2) return -ERANGE;
+    if (a && a[0]) {
+        for (i = 0; a[i]; i++) { if (n + 1 >= cap) return -ERANGE; out[n++] = a[i]; }
+        if (out[n - 1] != '/' && out[n - 1] != '\\') { if (n + 1 >= cap) return -ERANGE; out[n++] = '/'; }
+    }
+    for (i = 0; prefix && prefix[i]; i++) { if (n + 1 >= cap) return -ERANGE; out[n++] = prefix[i]; }
+    for (i = 0; tag && tag[i]; i++) { if (n + 1 >= cap) return -ERANGE; out[n++] = tag[i]; }
+    for (k = 0; k < 8; k++) {
+        if (n + 1 >= cap) return -ERANGE;
+        out[n++] = al[v % 36];
+        v = v / 36 + v * 31 + 7;
+    }
+    out[n] = 0;
+    return 0;
+}
+
+/* Replace PATH with N bytes: write a sibling temporary, fsync, rename over PATH.  On failure PATH is
+   untouched and the temporary is removed.  0, or -errno. */
+int sy_write_atomic(const char *path, const void *buf, int64_t n, int mode) {
+    char tmp[4352];
+    int fd, rc, tries;
+    if (!path || !path[0] || n < 0 || (n > 0 && !buf)) return -EINVAL;
+    if (strlen(path) > 4000) return -ENAMETOOLONG;
+    for (tries = 0; tries < 16; tries++) {
+        rc = sy_tmp_name(tmp, sizeof tmp, 0, path, ".tmp.");
+        if (rc) return rc;
+        fd = sy_open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode);
+        if (fd == -EEXIST) continue;
+        if (fd < 0) return fd;
+        rc = sy_put_all(fd, buf, n);
+        if (rc == 0) rc = sy_fsync(fd);
+        if (sy_close(fd) != 0 && rc == 0) rc = -EIO;
+        if (rc == 0) rc = sy_rename(tmp, path);
+        if (rc != 0) sy_unlink(tmp);
+        return rc;
+    }
+    return -EEXIST;
+}
+
+/* Make a fresh directory (mode 0700) DIR/PREFIXxxxxxxxx and write its path into PATH (CAP bytes).
+   0, -ERANGE when PATH is too small, else -errno. */
+int sy_mkdtemp(const char *dir, const char *prefix, char *path, int cap) {
+    int tries, rc;
+    if (!path || cap < 1 || !dir || !dir[0]) return -EINVAL;
+    for (tries = 0; tries < 32; tries++) {
+        rc = sy_tmp_name(path, cap, dir, prefix ? prefix : "", "");
+        if (rc) { path[0] = 0; return rc; }
+        rc = sy_mkdir(path, 0700);
+        if (rc == 0) return 0;
+        if (rc != -EEXIST) { path[0] = 0; return rc; }
+    }
+    path[0] = 0;
+    return -EEXIST;
 }
