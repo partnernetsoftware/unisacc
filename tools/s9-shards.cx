@@ -175,9 +175,13 @@ static int wt_epoch_ok(const char *session,const char *leaf){
    writes RUN/agg-part-K-N (exclusive, never overwritten).  "aggregate ROOT RUN --merge N" reads the N parts,
    re-derives the cheap per-slice fingerprints (done record hash, start present, session.tsv hash) and the
    sealed inputs hash, refuses on any mismatch, missing or duplicate slice, then runs the same tail as the
-   unsharded aggregate.  A batch belongs to exactly one slice, so per-batch states are disjoint across parts and
-   merging is a union.  A part is staged evidence of a real verification, not a cached verdict: receipts are
-   re-verified by the part that owns the slice, and the merge does not trust a part whose slice files changed. */
+   unsharded aggregate.  A part is staged evidence of a real verification, not a cached verdict: receipts are
+   re-verified by the part that owns the slice, and the merge does not trust a part whose slice files changed.
+   A batch is listed by its original slice and, after "retry", also by each retry slice; those slices may fall
+   in different parts.  A part may report a batch only if it owns a slice listing it, at most once, and must
+   report every batch of each started slice it owns.  Rows of one batch are folded the way the unsharded pass
+   folds its slices: counters add up (so a FAIL of the original slice is never hidden by a retry), and the last
+   verdict is the one of the part holding the highest (latest retry) slice, never PASS once any FAIL is counted. */
 static void slice_fp(const s9_slice *s,char out[200]){
  char p[4400],sh[65]="-",ss[65]="-";size_t n;slice_path(p,s,"done");char *d=as_read(p,0,&n,sw,sizeof sw);if(d){cx_sha256_hex(d,n,sh);free(d);}
  slice_path(p,s,"start");int st=present(p);char session[4400];path(session,sd,s->leaf);path(p,session,"session.tsv");if(present(p)&&as_sha_file(p,0,ss,0,sw,sizeof sw))fail("slice-fp");
@@ -185,9 +189,10 @@ static void slice_fp(const s9_slice *s,char out[200]){
 }
 static void agg_inputs_sha(char h[65]){char p[4400];path(p,sd,"inputs");if(as_sha_file(p,0,h,0,sw,sizeof sw))fail("inputs-sha");}
 static void agg_part_name(char *p,int part,int nparts){char leaf[64];if(cx_fmt(leaf,sizeof leaf,"agg-part-%d-%d",part,nparts))fail("format-bound");path(p,sd,leaf);}
-static int slice_of_batch(int i){for(int k=0;k<nslices;k++)if(as_inlist(slices[k].ids,reg.b[i].id))return k;return -1;}
+/* Highest slice owned by part pi that lists batch i (original or retry), -1 when the part owns none. */
+static int part_top_slice(int i,int pi,int nparts){int top=-1;for(int k=0;k<nslices;k++)if(k%nparts==pi&&as_inlist(slices[k].ids,reg.b[i].id))top=k;return top;}
 static void agg_merge_parts(int nparts,as_state *states,int *waves,const char *nonce){
- int *covered=calloc((size_t)nslices+1,sizeof(int));if(!covered)fail("allocation");char ih[65];agg_inputs_sha(ih);
+ int *covered=calloc((size_t)nslices+1,sizeof(int)),*top=calloc((size_t)reg.nb+1,sizeof(int));char *got=calloc((size_t)reg.nb*(size_t)nparts+1,1);if(!covered||!top||!got)fail("allocation");for(int i=0;i<reg.nb;i++)top[i]=-1;char ih[65];agg_inputs_sha(ih);
  for(int pi=0;pi<nparts;pi++){
   char p[4400];agg_part_name(p,pi,nparts);size_t n;char *t=as_read(p,0,&n,sw,sizeof sw);if(!t)fail("agg-part-missing");if(!n||t[n-1]!='\n')fail("agg-part-wire");
   int seen_end=0,stage=0;size_t at=0;
@@ -201,12 +206,17 @@ static void agg_merge_parts(int nparts,as_state *states,int *waves,const char *n
    if(!strcmp(f[0],"slice")){int k=-1;if(nf!=3)fail("agg-part-slice");for(int q=0;q<nslices;q++)if(!strcmp(slices[q].leaf,f[1]))k=q;
     if(k<0||k%nparts!=pi||covered[k])fail("agg-part-slice-owner");char fp[200];slice_fp(&slices[k],fp);if(strcmp(fp,f[2]))fail("agg-part-slice-changed");covered[k]=1;continue;}
    if(!strcmp(f[0],"state")){long long v[7];if(nf!=8)fail("agg-part-state");for(int q=1;q<7;q++)if(as_digits(f[q],&v[q]))fail("agg-part-state");if(strlen(f[7])!=1)fail("agg-part-state");
-    if(v[1]>=reg.nb)fail("agg-part-state-index");int i=(int)v[1];int k=slice_of_batch(i);if(k<0||k%nparts!=pi)fail("agg-part-state-owner");
-    as_state *s=&states[i];s->pass=(int)v[2];s->fail=(int)v[3];s->unknown=(int)v[4];s->refused=(int)v[5];s->attempts=(int)v[6];s->last=f[7][0]=='-'?0:f[7][0];continue;}
+    if(v[1]>=reg.nb)fail("agg-part-state-index");int i=(int)v[1];int k=part_top_slice(i,pi,nparts);if(k<0)fail("agg-part-state-owner");
+    if(got[(size_t)i*(size_t)nparts+(size_t)pi])fail("agg-part-state-duplicate");got[(size_t)i*(size_t)nparts+(size_t)pi]=1;
+    as_state *s=&states[i];s->pass+=(int)v[2];s->fail+=(int)v[3];s->unknown+=(int)v[4];s->refused+=(int)v[5];s->attempts+=(int)v[6];char last=f[7][0]=='-'?0:f[7][0];if(last&&k>top[i]){s->last=last;top[i]=k;}continue;}
    if(!strcmp(f[0],"END")&&nf==1){seen_end=1;continue;}
    fail("agg-part-line");}
   if(!seen_end)fail("agg-part-end");free(t);}
- for(int k=0;k<nslices;k++)if(!covered[k])fail("agg-part-slice-uncovered");free(covered);
+ for(int k=0;k<nslices;k++)if(!covered[k])fail("agg-part-slice-uncovered");
+ /* A started slice counts an attempt for each of its batches, so its owning part must have reported each one. */
+ for(int k=0;k<nslices;k++){char p[4400];slice_path(p,&slices[k],"start");if(!present(p))continue;for(int i=0;i<reg.nb;i++)if(as_inlist(slices[k].ids,reg.b[i].id)&&!got[(size_t)i*(size_t)nparts+(size_t)(k%nparts)])fail("agg-part-state-missing");}
+ for(int i=0;i<reg.nb;i++)if(states[i].fail&&states[i].last=='P')states[i].last='U';
+ free(covered);free(top);free(got);
 }
 static int aggregate(int part,int nparts,int merge){
  freeze_check();load_plan();as_manifest parent;if(as_load(sd,&parent,sw,sizeof sw))fail("parent");as_state *states=calloc((size_t)reg.nb,sizeof *states);if(!states)fail("allocation");
@@ -317,6 +327,45 @@ static int wt_epoch_controls(void){
  path(p,sd,"inputs");if(unlink(p)||rmdir(sess))fail("control-clean");
  printf("S9_CONTROL\twt-epoch-consumer-stable-moved-unlisted-tampered-foreign-missing\tchecked=%d\n",bad?0:1);return bad;
 }
+/* Merge controls for retried batches, on a private two-part fixture (no product verdict).
+   Slices 0..2 are originals of fixture-0..2; slice 3 retries slice 2 and slice 4 retries slice 1, so with two
+   parts each retried batch has its original and its retry in different parts, once in each read order.
+   mode 0: accepted and the retry verdict is the effective one; mode 1: accepted but an original FAIL stays bad;
+   mode 2: refused with exactly the named reason. */
+static int agg_merge_case(const char *base,const char *name,int mode,const char *want,const char *rows0,const char *rows1,int omit_slice,int bad_nonce){
+ char nonce[65],err[4400],p[4400],ih[65];memset(nonce,'0',64);nonce[64]=0;if(cx_fmt(sd,sizeof sd,"%s/%s",base,name))fail("copy-bound");if(mkdir(sd,0700))fail("control-dir");
+ path(p,sd,"inputs");save(p,"fixture-inputs\n",15);agg_inputs_sha(ih);for(int k=0;k<nslices;k++){slice_path(p,&slices[k],"start");save(p,"fixture\n",8);}
+ for(int pi=0;pi<2;pi++){np_buf b={0};np_puts(&b,"S9_AGG_PART\tv1\nnonce\t");if(bad_nonce&&pi==1){np_puts(&b,"1");np_put(&b,nonce,63);}else np_put(&b,nonce,64);np_puts(&b,"\ninputs\t");np_puts(&b,ih);np_puts(&b,"\npart\t");np_putll(&b,pi);np_puts(&b,"\t2\n");
+  for(int k=0;k<nslices;k++)if(k%2==pi&&k!=omit_slice){char fp[200];slice_fp(&slices[k],fp);np_puts(&b,"slice\t");np_puts(&b,slices[k].leaf);np_puts(&b,"\t");np_puts(&b,fp);np_puts(&b,"\n");}
+  np_puts(&b,"waves\t0\n");np_puts(&b,pi?rows1:rows0);np_puts(&b,"END\n");agg_part_name(p,pi,2);save(p,b.p,b.n);free(b.p);}
+ path(err,sd,"stderr");fflush(stdout);pid_t c=fork();if(c<0)fail("control-fork");
+ if(!c){int fd=open(err,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0||dup2(fd,2)<0)_exit(9);as_state *st=calloc((size_t)reg.nb,sizeof *st);int waves=0;if(!st)_exit(9);agg_merge_parts(2,st,&waves,nonce);
+  int ok=st[0].attempts==1&&st[0].last=='P'&&!state_bad(&st[0])&&st[1].attempts==2&&st[2].attempts==2&&st[1].unknown==2&&st[2].unknown==2;for(int i=3;i<reg.nb;i++)if(st[i].attempts||st[i].last)ok=0;
+  if(mode==0)ok=ok&&st[1].last=='P'&&st[2].last=='P'&&!state_bad(&st[1])&&!state_bad(&st[2]);
+  else ok=ok&&mode==1&&st[1].fail==1&&st[2].fail==1&&st[1].last!='P'&&st[2].last!='P'&&state_bad(&st[1])&&state_bad(&st[2]);
+  _exit(ok?0:7);}
+ int status;if(waitpid(c,&status,0)!=c||!WIFEXITED(status))fail("control-wait");size_t en=0;char *e=as_read(err,0,&en,sw,sizeof sw);char needle[200];if(cx_fmt(needle,sizeof needle,"s9: REFUSE %s ",want?want:"-"))fail("format-bound");
+ int ok=mode==2?WEXITSTATUS(status)==2&&e&&has_bytes(e,en,needle):WEXITSTATUS(status)==0&&(!e||!en);if(!ok&&e&&en)fwrite(e,1,en,stderr);free(e);
+ if(unlink(err))fail("control-clean");path(p,sd,"inputs");if(unlink(p))fail("control-clean");for(int k=0;k<nslices;k++){slice_path(p,&slices[k],"start");if(unlink(p))fail("control-clean");}for(int pi=0;pi<2;pi++){agg_part_name(p,pi,2);if(unlink(p))fail("control-clean");}if(rmdir(sd))fail("control-clean");
+ printf("S9_CONTROL\t%s\tchecked=%d\n",name,ok?1:0);return ok?0:1;
+}
+static int agg_merge_controls(void){
+ int bad=0;char base[4400];if(cx_fmt(base,sizeof base,"%s",sd))fail("copy-bound");
+ const char *leafs[]={"slice-0-0","slice-0-1","slice-0-2","slice-0-2-retry","slice-0-1-retry"};const int owner[]={0,1,2,2,1};nslices=5;
+ for(int k=0;k<nslices;k++){memset(&slices[k],0,sizeof slices[k]);if(cx_fmt(slices[k].leaf,sizeof slices[k].leaf,"%s",leafs[k])||cx_fmt(slices[k].ids,sizeof slices[k].ids,"%s",reg.b[owner[k]].id))fail("copy-bound");}
+ /* part 0 owns slices 0,2,4 (fixture-0, original of fixture-2, retry of fixture-1); part 1 owns slices 1,3. */
+ #define S9_ROW(i,f,l) "state\t" #i "\t0\t" #f "\t1\t0\t1\t" l "\n"
+ const char *good0=S9_ROW(0,0,"P") S9_ROW(1,0,"P") S9_ROW(2,0,"U"),*good1=S9_ROW(1,0,"U") S9_ROW(2,0,"P");
+ bad+=agg_merge_case(base,"agg-merge-retry-cross-part-accepted-retry-state-effective",0,0,good0,good1,-1,0);
+ bad+=agg_merge_case(base,"agg-merge-retry-of-fail-stays-fail",1,0,S9_ROW(0,0,"P") S9_ROW(1,0,"P") S9_ROW(2,1,"F"),S9_ROW(1,1,"F") S9_ROW(2,0,"P"),-1,0);
+ bad+=agg_merge_case(base,"agg-merge-forged-state-from-non-owner-part-refused",2,"agg-part-state-owner",good0,S9_ROW(1,0,"U") S9_ROW(2,0,"P") S9_ROW(0,0,"P"),-1,0);
+ bad+=agg_merge_case(base,"agg-merge-duplicate-state-refused",2,"agg-part-state-duplicate",good0,S9_ROW(1,0,"U") S9_ROW(2,0,"P") S9_ROW(2,0,"P"),-1,0);
+ bad+=agg_merge_case(base,"agg-merge-missing-retry-state-refused",2,"agg-part-state-missing",good0,S9_ROW(1,0,"U"),-1,0);
+ bad+=agg_merge_case(base,"agg-merge-uncovered-retry-slice-refused",2,"agg-part-slice-uncovered",good0,good1,3,0);
+ bad+=agg_merge_case(base,"agg-merge-nonce-mismatch-refused",2,"agg-part-nonce",good0,good1,-1,1);
+ #undef S9_ROW
+ nslices=0;if(cx_fmt(sd,sizeof sd,"%s",base))fail("copy-bound");return bad;
+}
 static int controls(void){
  int bad=0;char tmp[]="/tmp/s9-controls-XXXXXX";if(!mkdtemp(tmp))fail("controls-temp");if(cx_fmt(sd,sizeof sd,"%s",tmp))fail("copy-bound");
  reg.nb=15;reg.b=calloc((size_t)reg.nb,sizeof *reg.b);if(!reg.b)fail("allocation");char ids[15][32];
@@ -373,6 +422,7 @@ static int controls(void){
  /* Resume must not duplicate START; PID reuse must not look in-flight. */
  if(unlink(p))fail("control-unlink");np_buf stale={0};np_putll(&stale,getpid());np_puts(&stale,"\t");np_putll(&stale,getpid());np_puts(&stale,"\t1\t");np_put(&stale,nonce,64);np_puts(&stale,"\t1\n");save(p,stale.p,stale.n);free(stale.p);if(running(&x))bad++;
  bad+=wt_epoch_controls();
+ bad+=agg_merge_controls();
  if(unlink(p))fail("control-clean");path(p,sd,"nonce");if(unlink(p)||rmdir(sd))fail("control-clean");free(reg.b);printf("S9_CONTROLS\tfailed=%d\n",bad);return bad?1:0;
 }
 static int operate(int argc,char **argv){
