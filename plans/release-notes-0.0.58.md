@@ -1,10 +1,10 @@
 # unisacc 0.0.58 -- 发布说明
 
-状态:**未公开草稿**。同候选 CI 已 QUALIFIED,但 s9 commit 档仍是 FAIL(见「s9 的如实经过」),release-decide 不放行,所以没有提交 Y、没有 tag v0.0.58、没有公开、本机根未换。本文件按新候选 F 如实重写,公开前还要按最终结果再改。未实跑的项一律写未跑。
+状态:公开发布(GitHub Release v0.0.58,Latest)。同候选 CI QUALIFIED,s9 commit 档 PASS(NOT_FULL,仅 12 个 osx 批本机不适用),release-decide QUALIFIED YES unknown=0 fail=0。未实跑的项一律写未跑。
 
 - 冻结 rev F `2a46e1a4275a616628f3a8965e9a749aa5bdfe40`(标签 v0.0.58-src;父提交 9a34cb97b4,不在任何分支上,见账本 FREEZE-058B)。
 - 提交 X `7b551b85d50bf22ed0d597ad09afa1debd04e334`(只含 release/candidate.tsv)。
-- 提交 Y:未做。
+- 提交 Y:tag v0.0.58 所指提交(本文件随 Y 提交;候选表回填 ci_run_id=43247952428)。
 - 候选 APE `unisacc.com` sha256 `3744eacfa6b2472de8b18ef3d64ffad6f6a47f956d62e4a43760dee6e768632e`,6751268 字节,`--version` 实测 `unisacc 0.0.58`。
 - git 范围 `v0.0.57..Y`。
 
@@ -28,8 +28,8 @@
 | 打包 | release-run --pack PACK_OK,源 SID VERIFIED | out/rel058/pack2.log,out/rel058/rr2 |
 | 七资产 | 草稿读回逐件同字节,SHA256SUMS 6/6 OK,release-layout --check PASS;公开后再次读回见下 | out/rel058/draft-readback2,out/rel058/public-readback |
 | 同候选原生 CI | 运行 43247952428(检出 X,ape_sha256 3744eacf,release_tag v0.0.58):CANDIDATE_QUALIFY verdict=QUALIFIED pass=42 fail=0 not_run=0 invalid=0;win/x86_64 与 win/arm64 的 stream-pipe 格本次 PASS | out/rel058/ci-run2.log |
-| s9 commit 档 | 最近一轮 FAIL:selected=217 failed_or_unknown=2 qualification=NOT_FULL(cx-lint FAIL,fixedpoint-sample UNKNOWN) | out/rel058/s9-merge-r4c.txt,out/rel058/s9-clone3/out/s9-run |
-| release-decide | 上次运行 NOT_QUALIFIED unknown=1 fail=1(步 4 s9 FAIL);s9 未过,本轮未重跑 | out/rel058/release-decide.txt |
+| s9 commit 档 | 最终一轮 `S9 COMMIT_ONLY tier=commit host_scope=lnx/x86_64 selected=223 status=PASS failed_or_unknown=0 pending=0 qualification=NOT_FULL`,not_applicable=12(osx) | out/rel058/s9-merge-r7.txt,out/rel058/s9-clone6/out/s9-run |
+| release-decide | 步 1 至 8 全 PASS,`QUALIFIED YES unknown=0 fail=0`,rc=0;步 8 用的是公开前的草稿读回(7 件逐件同字节,SHA256SUMS 6/6),公开后另做公开读回 | out/rel058/release-decide2.txt,out/rel058/draft-readback3 |
 
 win 的真实 PE 只由同候选 CI 判定(本机没有 Windows 宿主),该 CI 已通过。
 
@@ -41,6 +41,9 @@ win 的真实 PE 只由同候选 CI 判定(本机没有 Windows 宿主),该 CI �
 - 第二轮(克隆 out/rel058/s9-clone2,提交 7b15d69d2d,同一候选 APE 3744eacf):第一次 RUN(s9-run)作废,克隆根的 unisacc.com 没有执行位(由 layout 拷入时为 0644,准备疏漏),凡经 exec 调产品的批都失败(xs-bound-width、include-shadow、entry-receipt-head、release-ctor-fast 等),不计。补执行位后新 RUN(s9-run2):selected=217,FAIL,failed_or_unknown=3,cx-reaper 仍 14/20 FAIL(余量 1000 也不够),另 fixedpoint-sample、tlib-prep 为 UNKNOWN。
 - cx-reaper 的真正成因:上限计数用 `awk ... /proc/[0-9]*/status`,波次里有进程在 glob 与读取之间退出,gawk 读不到文件即致命退出,计数为空,上限变成绝对值 1000,低于本用户现有约 1240 个线程,于是所有 spawn 失败(np_run pid=-1)。余量从 200 改 1000 因而无效。修正 `0341f9a157`:改经 `cat ... 2>/dev/null | awk` 读取,计数为空时不设上限,NOTE 打印实际上限;断言未改,单跑 20/0。gawk 遇缺失文件致命退出已实测;s9 中的那次消失未直接观测到(帮手的标准错误未被捕获),属强推断。
 - 第三轮(克隆 out/rel058/s9-clone3,提交 7b15d69d2d 加 `0341f9a157` 的 check-reaper 修正;不在 main HEAD,因为其时 main HEAD 含 b00ff0cb5b,其 tests/batches.tsv 第 995 行 std-surface-v2 的覆盖号在 tests/coverage.tsv 里不存在,s9 init 拒绝 registry-metadata unknown-coverage):selected=217,FAIL,failed_or_unknown=2。cx-reaper PASS。register-metadata-rollback 与 candidate-chain 超时,在封存重试切片中 PASS。剩下两项在同一切片 slice-0-22:cx-lint FAIL(85 项中 1 项,check-anchor-private-unknown.cx 的子编译报 `no such file for #include "/tmp/ua-cxif-43d8279d347795c4.h"`),fixedpoint-sample UNKNOWN(超时);该切片因含 FAIL 被 retry 拒(sticky-fail),无法封存重试。cx-lint 安静单跑 85/0。产品写 ua-cxif 接口头是「临时文件加 rename」原子写,产品本身不删除它;共享 /tmp 里是谁在两步之间删掉了它未查明。判断为共享环境干扰而非候选回归,但未证实,所以不记 PASS。
+- 第四轮(克隆 out/rel058/s9-clone4,main 1741a7f69d,无本地补丁;起这轮前补了 b00ff0cb5b 漏提交的 interfaces.std-surface-v2 覆盖行 `1741a7f69d`):整轮被拒 frozen-input-changed。成因:tlib-prep FAIL,`62cf6fedab` 引入的 use_kit_dir(kitdir) 用 kitdir 格式化自身把它清空,kit 以 `--out ""` 把 .tlib 写进克隆根。修正 `b2fab66bf0`(经独立缓冲复制),候选 APE 克隆内单跑 failed=0。
+- 第五轮(克隆 out/rel058/s9-clone5,main b2fab66bf0):init 被拒,`6f7835b4b4` 登记的 iface-gap 批的覆盖行未入库;补行 `aa15da4a0b`。
+- 第六轮,即最终一轮(克隆 out/rel058/s9-clone6,main aa15da4a0b,无本地补丁,unisacc.com 为候选 APE 3744eacf 且有执行位):整棵 s9 进程树用私有 TMPDIR(克隆内 out/tmp),避免共享 /tmp 的同名文件(如 ua-cxif-*.h)被别的进程删掉。这是隔离措施;第三轮 cx-lint FAIL 的确切成因未证实,共享 /tmp 冲突的假设也未验证。结果 PASS:selected=223,failed_or_unknown=0;register-metadata-rollback、fixedpoint-sample、real-input-check、tlib、tlib-prep 五批首跑超时 UNKNOWN,在封存重试切片中 PASS,时限与断言未改。
 - tlib 与 tlib-prep 安静单跑约 52.5 与 48.7 秒,贴近 55 秒批预算(DEBT-TLIB-BATCH-SPLIT,未拆)。
 - 12 个 osx 批本机 NOT_APPLICABLE,qualification 记 NOT_FULL;osx 由 CI 的 osx 格覆盖,s9 本身不称全量。
 - 之前更早一个候选(9a34 构造,X=931fa623)在 s9 上的 3 FAIL 加 1 UNKNOWN 已由 S9FIX-058 四项修复处理:(1) chain-phases-gen 检查改读生成器输出的限时(`ee846a2298`);(2) productpkg-dir-identity 夹具改为固定桩(`d396838926`);(3) batch-packages 重生成并由 register 自动重生成(`8ff69ecace`);(4) chain-batchkeys 预算 55 改 90,由 LIMIT-90-TEMP 覆盖。
@@ -73,4 +76,4 @@ win 的真实 PE 只由同候选 CI 判定(本机没有 Windows 宿主),该 CI �
 
 ## 撤回与回滚
 
-当前没有公开动作,无需撤回;草稿 v0.0.58 与七资产保留。日后公开后若要撤回:`gh release edit v0.0.58 --draft=true -R partnernetsoftware/unisacc`;彻底撤回再删 tag:`git push origin :refs/tags/v0.0.58` 与 `git tag -d v0.0.58`。本机根回退:`sh ./unisacc.com tools/install-ape.cx -- ROOT <v0.0.57 公开 APE> c116a52ff62a427929334d728bcb7946860b120d3faebbb6ee0fdb2c3fa2d985 --write`。候选表回退到 0.0.57 记录:取 `git show 99fc0b48a2:release/candidate.tsv`。
+撤回公开:`gh release edit v0.0.58 --draft=true -R partnernetsoftware/unisacc`;彻底撤回再删 tag:`git push origin :refs/tags/v0.0.58` 与 `git tag -d v0.0.58`。本机根回退:`sh ./unisacc.com tools/install-ape.cx -- ROOT <v0.0.57 公开 APE> c116a52ff62a427929334d728bcb7946860b120d3faebbb6ee0fdb2c3fa2d985 --write`。候选表回退到 0.0.57 记录:取 `git show 99fc0b48a2:release/candidate.tsv`。
