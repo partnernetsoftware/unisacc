@@ -10,8 +10,9 @@
 #pragma unisa use sys.sha
 static int bad;
 static void ck(int yes,const char *s) { sy_printf("%s\tchain-run.%s\n",yes?"PASS":"FAIL",s); if(!yes) bad++; }
-static void put(const char *p,const char *s) {
-    if(strstr(p,"chain-phases.tsv")) {
+static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s)))exit(2); }
+/* Callers explicitly choose the phase-table grammar; paths never select behavior. */
+static void put_plan(const char *p,const char *s) {
         FILE *f=fopen(p,"wb");if(!f)exit(2);char prev[256]="-";
         while(*s){const char *e=strchr(s,'\n');if(!e)exit(2);char line[14000];size_t n=e-s;if(tx_copy(line,sizeof line,s,n))exit(2);
             int order,bound;char id[256],domain[4400];
@@ -20,12 +21,34 @@ static void put(const char *p,const char *s) {
                 if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\n",order,id,domain,bound,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
                 else fprintf(f,"%s\n",line);
             }s=e+1;
-        }if(fclose(f))exit(2);return;
-    }
-    if(cx_write(p,s,strlen(s)))exit(2);
+        }if(fclose(f))exit(2);
 }
 static void join(char *p,const char *a,const char *b) { if(cx_fmt(p,4400,"%s/%s",a,b)) exit(2); }
-static int has(const char *p,const char *s) { size_t n=0;char *b=cx_read(p,&n);int yes=b&&strstr(b,s);free(b);return yes; }
+static int protocol_word(int c) { return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'; }
+/* These files are line/field evidence, not arbitrary text. Accept only the wire alphabet
+   and match complete identifier components while retaining every requested separator. */
+static int has(const char *p,const char *s) {
+    size_t n=0,q=strlen(s);char *b=cx_read(p,&n);int yes=0;
+    if(!b||!q){free(b);return 0;}
+    long rows=tx_fields(b,(long)n,'\n');
+    for(long row=0;row<rows;row++) {
+        long ro,rn;if(tx_field(b,(long)n,'\n',row,&ro,&rn)){free(b);return 0;}
+        long fields=tx_fields(b+ro,rn,'\t');
+        for(long field=0;field<fields;field++) {
+            long fo,fn;if(tx_field(b+ro,rn,'\t',field,&fo,&fn)){free(b);return 0;}
+            for(long i=0;i<fn;i++){int c=(unsigned char)b[ro+fo+i];
+                if(!protocol_word(c)&&c!='-'&&c!='/'&&c!='.'&&c!=':'&&c!='='&&c!='+'&&c!=','&&c!=' '){free(b);return 0;}
+            }
+        }
+    }
+    for(size_t at=0;at<n;) {
+        size_t end=at+1;int word=protocol_word((unsigned char)b[at]);
+        while(word&&end<n&&protocol_word((unsigned char)b[end]))end++;
+        if(q<=n-at&&!memcmp(b+at,s,q)&&(!protocol_word((unsigned char)s[q-1])||at+q==n||!protocol_word((unsigned char)b[at+q]))){yes=1;break;}
+        at=end;
+    }
+    free(b);return yes;
+}
 static int fake(int argc,char **argv) {
     const char *out=0,*phase=0,*mode="ok"; int i;
     for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
@@ -75,6 +98,17 @@ static int fake(int argc,char **argv) {
         sy_sleep_ms(10000);return 124;
     }
     if(!strcmp(mode,"missing")) return 0;
+    if(!strncmp(mode,"jobs-",5)&&!strcmp(phase,"jobs-tool")) {
+        join(p,out,"checkpoint.tsv");f=fopen(p,"ab");fprintf(f,"DONE\tjobs-tool-0-start\tx\n");fclose(f);
+        if(!strcmp(mode,"jobs-forged"))return 75;
+        if(!strcmp(mode,"jobs-internal"))return 76;
+        char once[4400];join(once,out,"jobs-once");
+        if(!strcmp(mode,"jobs-expire")&&!sy_exists(once)) {
+            put(once,"1");size_t n=0;char *cp=cx_read(p,&n),hash[65];if(!cp||sy_sha256_hex(cp,(long)n,hash))return 2;free(cp);
+            printf("CANDIDATE_SEGMENT\t%s\t%s\n",getenv("UNISACC_CHAIN_SEGMENT_TOKEN"),hash);return 75;
+        }
+        f=fopen(p,"ab");fprintf(f,"DONE\tjobs-tool-0-finish\tx\n");fclose(f);
+    }
     join(p,out,"checkpoint.tsv"); f=fopen(p,"ab");fprintf(f,"DONE\t%s\twall_ms=1\tsha=-\n",phase);fclose(f);
     if(!strcmp(mode,"receipt-race")&&!strcmp(phase,"snap")) return 137;
     if(!strcmp(phase,"pack")) {
@@ -142,7 +176,7 @@ static int segment_cases(const char *plan) {
     char p[4400],q[4400];budget_row b1,b2;
     const char *seg[]={"--segment-s","5","--max-segments","9",0};
     /* four serial phases, bound 4, each fake phase takes 1.1 s: exactly one phase fits a 5 s segment */
-    put(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
     int rc=runv("seg","seg","60",seg,0,12);
     ck(rc==75,"segment-expiry-rc75");
     file_of(p,"seg","chain-run.tsv");file_of(q,"seg","calls");
@@ -201,7 +235,7 @@ static int segment_cases(const char *plan) {
    attempt the runner places before compare and before pack. */
 static int supervise_cases(const char *plan) {
     char p[4400],q[4400];int rc;
-    put(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
     /* supervisor: segments continue without a caller, each phase once, caps still stop it */
     const char *sup[]={"--supervise","--runner",runner,"--segment-s","5","--max-segments","9",0};
     rc=runv("sup","seg","60",sup,0,25);file_of(p,"sup","chain-run.tsv");file_of(q,"sup","calls");
@@ -218,10 +252,10 @@ static int supervise_cases(const char *plan) {
     rc=runv("supfail","fail","60",sup,0,25);file_of(p,"supfail","chain-run.tsv");
     ck(rc==7&&has(p,"reason=first-failure")&&count(p,"SUPERVISE\t")==1,"supervisor-stops-on-first-failure");
     /* memo routing and the full re-check before compare and pack */
-    put(plan,"0\tsnap\t-\t4\n1\tcompare\t-\t4\n2\tpack\t-\t4\n");
+    put_plan(plan,"0\tsnap\t-\t4\n1\tcompare\t-\t4\n2\tpack\t-\t4\n");
     rc=runv("memo","ok","60",0,0,12);file_of(p,"memo","chain-run.tsv");file_of(q,"memo","memo-env");
     {
-        char idp[4400],hex[65],want[400],mp[4400];size_t n=0;file_of(idp,"memo","chain-run.identity");file_of(mp,"memo","chain-sha.memo");
+        char idp[4400],hex[65],want[9000],mp[4400];size_t n=0;file_of(idp,"memo","chain-run.identity");file_of(mp,"memo","chain-sha.memo");
         char *id=cx_read(idp,&n);if(!id||sy_sha256_hex(id,(long)n,hex))return 2;free(id);
         cx_fmt(want,sizeof want,"snap\ton\t%s\t%s\n",mp,hex);
         ck(rc==0&&has(q,want),"memo-bound-to-output-identity");
@@ -262,10 +296,15 @@ int main(int argc,char **argv) {
     }
     if(argc>3) { if(sy_realpath(argv[3],runner,sizeof runner)<0)return 2; }
     else { join(runner,base,"runner");char com[4400],src[4400];join(com,root,"unisacc.com");join(src,root,"tools/chain-run.cx");char *v[]={"sh",com,src,"-o",runner,0};if(cx_runv_timeout(v,40,0,0))return 2; }
-    char p[4400];join(p,base,"build");sy_mkdir(p,0755);join(p,base,"build/chain-phases.tsv");put(p,"# fake phases\n0\tsnap\t-\t55\n1\tctx\t-\t55\n2\tg2-lnx-x86_64-obj-0\t-\t55\n3\tg2-lnx-x86_64-obj-1\t-\t55\n4\tg2-lnx-x86_64-closure-prepare\t-\t55\n5\tg2-lnx-x86_64-closure\t-\t55\n6\tg2-lnx-x86_64-objects\t-\t55\n7\tg2-lnx-x86_64\t-\t55\n8\tg2-lnx-arm64-obj-0\t-\t55\n9\tg2-lnx-arm64-objects\t-\t55\n10\tpack\t-\t55\n");
+    char p[4400];join(p,base,"build");sy_mkdir(p,0755);join(p,base,"build/chain-phases.tsv");put_plan(p,"# fake phases\n0\tsnap\t-\t55\n1\tctx\t-\t55\n2\tg2-lnx-x86_64-obj-0\t-\t55\n3\tg2-lnx-x86_64-obj-1\t-\t55\n4\tg2-lnx-x86_64-closure-prepare\t-\t55\n5\tg2-lnx-x86_64-closure\t-\t55\n6\tg2-lnx-x86_64-objects\t-\t55\n7\tg2-lnx-x86_64\t-\t55\n8\tg2-lnx-arm64-obj-0\t-\t55\n9\tg2-lnx-arm64-objects\t-\t55\n10\tpack\t-\t55\n");
     if(sy_chdir(base))return 2;
     join(p,base,"out");sy_mkdir(p,0755);if(sy_realpath(p,base,sizeof base)<0)return 2;
     if(segment_mode){char plan[4400];join(plan,base,"../build/chain-phases.tsv");return segment_mode==1?segment_cases(plan):supervise_cases(plan);}
+    char protocol[4400];join(protocol,base,"protocol-evidence");
+    put(protocol,"ATTEMPT\tphase=snapshot\trc=0\n");
+    ck(!has(protocol,"phase=snap")&&has(protocol,"phase=snapshot"),"protocol-field-component-boundaries");
+    put(protocol,"ATTEMPT\tphase=snap\trc=0\001\n");
+    ck(!has(protocol,"rc=0"),"protocol-unknown-wire-byte-refused");
     ck(call("resume","resume","30","3",0)==0,"killed-resume");
     join(p,base,"resume/chain-run.tsv");ck(has(p,"RESUME\t")&&has(p,"PREPARED\tpack"),"persisted-evidence");
     ck(call("exhaust","exhaust","30","2",0)==3,"exhausted-rc3");
@@ -292,7 +331,7 @@ int main(int argc,char **argv) {
     char hb[300];cx_fmt(hb,sizeof hb,"%ld\tsnap\t%d\t%ld\tstart\n",sy_wall_s(),sy_pid(),sy_getpgid(0));put(p,hb);
     ck(call("live","ok","30","3",0)==2,"live-heartbeat-refused");
     char plan[4400];join(plan,base,"../build/chain-phases.tsv");
-    put(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
+    put_plan(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
     ck(call("budget","ok","30","3",0)==0,"phase-budget-accepted");
     join(p,base,"budget/chain-run.tsv");ck(has(p,"bound=3")&&has(p,"bound=4")&&has(p,"bound=5"),"phase-budget-read-not-fixed-55");
     ck(call("tree","tree","30","3",0)==0,"real-residue-tree-cleaned-resumed");
@@ -301,12 +340,12 @@ int main(int argc,char **argv) {
     ck(residual>1&&sy_getpgid(residual)<0,"escaped-grandchild-gone");
     ck(call("dirty","dirty","30","3",0)==2,"cleanup-unconfirmed-refused");
     join(p,base,"dirty/chain-run.tsv");ck(has(p,"reason=surviving-processes")&&!has(p,"RESUME\t"),"unclean-never-resumed");
-    put(plan,"0\tsnap\t-\t56\n1\tpack\t-\t55\n");
+    put_plan(plan,"0\tsnap\t-\t56\n1\tpack\t-\t55\n");
     ck(call("overbound","ok","30","3",0)==2,"over-55-refused-before-child");
     join(p,base,"overbound/calls");ck(!sy_exists(p),"overbound-no-child-executed");
-    put(plan,"0\tsnap\t-\t0\n1\tpack\t-\t55\n");
+    put_plan(plan,"0\tsnap\t-\t0\n1\tpack\t-\t55\n");
     ck(call("zerobound","ok","30","3",0)==2,"zero-bound-refused");
-    put(plan,"0\tsnap\troot\t3\t-\t-\t4\n1\ta\ta\t3\tsnap\ta\t4\n2\tb\tb\t3\tsnap\tb\t4\n3\tc\tc\t3\tsnap\tc\t4\n4\td\td\t3\tsnap\td\t4\n5\te\ta\t3\tsnap\te\t4\n6\tpack\tfinal\t3\ta,b,c,d,e\t-\t4\n");
+    put_plan(plan,"0\tsnap\troot\t3\t-\t-\t4\n1\ta\ta\t3\tsnap\ta\t4\n2\tb\tb\t3\tsnap\tb\t4\n3\tc\tc\t3\tsnap\tc\t4\n4\td\td\t3\tsnap\td\t4\n5\te\ta\t3\tsnap\te\t4\n6\tpack\tfinal\t3\ta,b,c,d,e\t-\t4\n");
     ck(call("parallel","parallel","30","3",0)==0,"dependency-parallel-four");
     ck(events("parallel",0,0),"dependency-order-domain-exclusion-four-cap");
     ck(call("parallel-one","parallel-one","30","3",0)==0,"parallel-one-equivalent-coverage");
@@ -321,9 +360,18 @@ int main(int argc,char **argv) {
     ck(events("parallel-timeout",0,1),"restart-no-phase-reexecution");
     join(p,base,"parallel-timeout/chain-run.budget");size_t bn=0;char *budget=cx_read(p,&bn);long deadline;int attempt,resume,ma,mr,width;
     ck(budget&&sscanf(budget,"%ld %d %d %d %d %d",&deadline,&attempt,&resume,&ma,&mr,&width)==6&&width==3&&resume==1,"restart-load-cannot-rise");free(budget);
-    put(plan,"0\tsnap\t-\t3\tunknown\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
+    put_plan(plan,"0\tsnap\t-\t3\tunknown\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
     ck(call("unknown-dep","ok","30","3",0)==2,"unknown-dependency-rejected");join(p,base,"unknown-dep/calls");ck(!sy_exists(p),"unknown-dependency-before-child");
-    put(plan,"0\tsnap\t-\t3\tpack\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
+    put_plan(plan,"0\tsnap\t-\t3\tpack\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
     ck(call("cycle","ok","30","3",0)==2,"cycle-dependency-rejected");join(p,base,"cycle/calls");ck(!sy_exists(p),"cycle-before-child");
+    put_plan(plan,"0\tsnap\t-\t55\n1\tjobs-tool-0-start\t-\t55\n2\tjobs-tool-0-finish\t-\t55\n3\tjobs-tool\t-\t55\n4\tpack\t-\t55\n");
+    const char *jseg[]={"--segment-s","120","--max-segments","9",0};
+    ck(runv("jobs","jobs-ok","600",jseg,0,12)==0,"jobs-group-multiple-phases-one-process");
+    file_of(p,"jobs","calls");ck(count(p,"jobs-tool\n")==1&&!has(p,"jobs-tool-0-"),"jobs-no-per-phase-prefix-reentry");
+    ck(runv("jobsexpire","jobs-expire","600",jseg,0,12)==75,"jobs-clean-boundary-continues");
+    budget_row jb=budget_of("jobsexpire");ck(jb.resumes==0,"jobs-clean-boundary-not-retry");
+    ck(runv("jobsexpire","jobs-expire","600",jseg,0,12)==0,"jobs-next-segment-finishes-group");
+    ck(runv("jobsforged","jobs-forged","600",jseg,0,12)==2,"jobs-unproven-75-blocks");
+    ck(runv("jobsinternal","jobs-internal","600",jseg,0,12)==2,"jobs-internal-code-not-forgeable");
     sy_printf("CHECK_CHAIN_RUN\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }

@@ -2,10 +2,22 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
 #pragma unisa use sys.sha
+#pragma unisa use mem.bytes
 #pragma unisa use text.text
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.chainfacts
 static const char *OD="out";
+static int count_trace_line(const char *b, size_t n, const char *want) {
+ size_t wl = strlen(want), at = 0; int c = 0;
+ while (b && at < n) {
+  size_t e = at;
+  while (e < n && b[e] != '\n') e++;
+  if (e - at == wl && !memcmp(b + at, want, wl)) c++;
+  at = e < n ? e + 1 : e;
+ }
+ return c;
+}
 static int run(char **v){return cx_runv_timeout(v,12,0,0);}
 int main(int ac,char **av){
  if(ac!=4)return 2;
@@ -48,8 +60,8 @@ int main(int ac,char **av){
  cx_fmt(p,sizeof p,"%s/prepared",dir);cx_write(p,"changed",7);job[12]="jobs-tool-0-finish";
  if(!run(job))return 1;printf("PASS\tuntil-finish-identity-change-refused\n");
  cx_write(p,"identity",8);if(run(job))return 1;
- cx_fmt(p,sizeof p,"%s/trace",dir);size_t tn=0;char *trace=cx_read(p,&tn),*first=trace?strstr(trace,"start-job\n"):0;
- if(!first||strstr(first+1,"start-job\n")||!strstr(trace,"finish-job\n"))return 1;
+ cx_fmt(p,sizeof p,"%s/trace",dir);size_t tn=0;char *trace=cx_read(p,&tn);
+ if(!trace||count_trace_line(trace,tn,"start-job")!=1||count_trace_line(trace,tn,"finish-job")<1)return 1;
  printf("PASS\tuntil-start-once-finish-keeps-output\n");free(trace);
  /* Child-success/outer-mark interruption: no outer checkpoint is written here.
     Re-enter the receipt-aware real step twice; completed fake compiler work must run once. */
@@ -63,7 +75,7 @@ int main(int ac,char **av){
  const char *hs="#!/bin/sh\nset -- $(sha256sum \"$1/a\")\nprintf '%s\\n' \"$1\"\n";
  cx_write(helper,hs,strlen(hs));sy_chmod(helper,0755);
  cx_fmt(controller,sizeof controller,"%s/controller-template",dir);
- cx_fmt(script,sizeof script,"#!/bin/sh\ncase $1 in prepare-context) mkdir -p \"$5\"; printf 'context-v1\\ncc\\t%%s\\nbootstrap\\t%%s\\n' \"$4\" \"$3\" > \"$5/context.tsv\"; printf 'prepare\\n' >> '%s/context-trace';; --verify-context) test -s \"$3/context.tsv\" || exit 9; printf 'verify\\n' >> '%s/context-trace';; *) exit 8;; esac\n",dir,dir);
+ cx_fmt(script,sizeof script,"#!/bin/sh\ncase $1 in prepare-context) mkdir -p \"$5\"; set -- \"$@\" $(sha256sum \"$2/a\"); printf 'context-v1\\ncc\\t%%s\\nbootstrap\\t%%s\\nsource\\t%%s\\n' \"$4\" \"$3\" \"$6\" > \"$5/context.tsv\"; printf 'prepare\\n' >> '%s/context-trace';; --verify-context) test -s \"$3/context.tsv\" || exit 9; printf 'verify\\n' >> '%s/context-trace';; *) exit 8;; esac\n",dir,dir);
  cx_write(controller,script,strlen(script));sy_chmod(controller,0755);
  cx_fmt(boot,sizeof boot,"%s/Root41-bootstrap.com",bb);
  cx_fmt(script,sizeof script,"#!/bin/sh\nif test \"$1\" = -cx-plan; then printf '0\\t%%s\\tcx.h\\n' \"$2\"; exit; fi\nkind=link; dest=; prev=; for a do test \"$a\" != -c || kind=objects; if test \"$prev\" = -o; then dest=$a; fi; prev=$a; done\ntest -n \"$dest\" || exit 8\nprintf '%%s\\n' \"$kind\" >> '%s/compiler-trace'\nif test \"$kind\" = objects; then printf object > \"$dest\"; else cp '%s' \"$dest\"; chmod +x \"$dest\"; fi\n",dir,controller);
@@ -90,5 +102,30 @@ int main(int ac,char **av){
  prep[6]="/changed/cc";if(!run(prep))return 1;
  printf("PASS\tcontroller-context-changed-request-refused\n");
  cx_fmt(p,sizeof p,"%s/a",source);cx_write(p,"changed",7);
+ /* The real segment consumer batches every DONE job once, then reuses only that process set. */
+ cx_fmt(p,sizeof p,"%s/outer/list.stdout",build);FILE *lf=fopen(p,"wb");if(!lf)return 2;
+ fprintf(lf,"JOB\tSTATE\n");for(int i=0;i<cf_tool_count();i++)fprintf(lf,"tool-%d\tx\n",i);
+ for(int i=0;i<cf_net_count();i++){fprintf(lf,"gen-%d\tx\ntbl-%d\tx\nnet-%d\tx\n",i,i,i);}
+ for(int i=0;i<6;i++)fprintf(lf,"route-target-%d\tPLANNED_NOT_READY\n",i);
+ fprintf(lf,"declare-package\tPLANNED_NOT_READY\npack\tPLANNED_NOT_READY\nseal\tPLANNED_NOT_READY\nNOT_CLAIMED\tno-qualification\n");if(fclose(lf))return 2;
+ cx_fmt(p,sizeof p,"%s/checkpoint.tsv",out);
+ const char *cp="DONE\tjobs-tool-0-finish\tx\nDONE\tjobs-gen-1-finish\tx\nDONE\tjobs-net-41-finish\tx\n";
+ cx_write(p,cp,strlen(cp));
+ cx_fmt(script,sizeof script,"#!/bin/sh\ntest \"$1\" = reuse-batch || exit 31\nprintf 'batch\\n' >> '%s/segment-trace'\ntest \"$(cat '%s/prepared')\" = identity || exit 37\ntest \"$(cat \"$4\")\" = \"$(printf 'tool-0\\ngen-1\\nnet-41')\" || exit 38\n",dir,dir);
+ cx_fmt(p,sizeof p,"%s/source-package-O2.elf",build);cx_write(p,script,strlen(script));sy_chmod(p,0755);
+ char *seg[]={av[3],"--segment-jobs-fixture",fake,out,ctx,build,0};
+ if(run(seg)||run(seg))return 1;
+ cx_fmt(p,sizeof p,"%s/segment-trace",dir);ct=cx_read(p,&cn);
+ if(!ct||strcmp(ct,"batch\nbatch\n"))return 1;free(ct);
+ printf("PASS\tsegment-batch-all-done-once-per-process\n");
+ printf("PASS\tsegment-mixed-job-and-planned-declarations\n");
+ cx_fmt(p,sizeof p,"%s/outer/list.stdout",build);FILE *extra=fopen(p,"ab");if(!extra)return 2;fputs("unknown-job\tIMPLEMENTED_DRAFT_NOT_RUN\n",extra);fclose(extra);
+ if(!run(seg))return 1;printf("PASS\tsegment-unknown-executable-kind-refused\n");
+ extra=fopen(p,"wb");if(!extra)return 2;fprintf(extra,"JOB\tSTATE\n");for(int i=0;i<cf_tool_count();i++)fprintf(extra,"tool-%d\tx\n",i);
+ for(int i=0;i<cf_net_count();i++)fprintf(extra,"gen-%d\tx\ntbl-%d\tx\nnet-%d\tx\n",i,i,i);fclose(extra);
+ cx_fmt(p,sizeof p,"%s/prepared",dir);cx_write(p,"changed",7);
+ if(!run(seg))return 1;printf("PASS\tsegment-new-process-tamper-refused\n");
+ cx_write(p,"identity",8);cx_fmt(p,sizeof p,"%s/outer/list.stdout",build);cx_write(p,"tool-0\tx\n",9);
+ if(!run(seg))return 1;printf("PASS\tsegment-incomplete-authority-refused\n");
  if(!run(objects))return 1;printf("PASS\tcontroller-changed-source-refused\n");printf("CHECK_CHAINRESUME\tfailed=0\n");return 0;
 }

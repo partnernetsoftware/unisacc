@@ -50,7 +50,23 @@ static int install_if_changed(const char *dst, const char *bytes, size_t n, int 
 }
 /* Child exit as the old cx_runv_timeout callers read it: the code, 128+signal, or 124 on a timeout
    (now also named on stderr by cxlib.procrun). stdout and stderr are echoed after the child ends. */
+/* A segment contains many independently bounded children, never a longer child. */
+static long jobs_segment_end;
+static const char *jobs_segment_out;
+static void segment_admit(int secs) {
+    if (jobs_segment_end && sy_now_ms() + (long)secs * 1000 > jobs_segment_end) {
+        char p[4400], hash[65]; size_t n = 0;
+        const char *token = sy_env("UNISACC_CHAIN_SEGMENT_TOKEN");
+        if (!token || !jobs_segment_out || cx_fmt(p, sizeof p, "%s/checkpoint.tsv", jobs_segment_out)) die("segment identity", 0);
+        char *b = cx_read(p, &n);
+        if (!b || sy_sha256_hex(b, (long)n, hash)) { free(b); die("segment checkpoint", p); }
+        free(b);
+        sy_printf("CANDIDATE_SEGMENT\t%s\t%s\n", token, hash);
+        exit(75);
+    }
+}
 static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
+    segment_admit(secs);
     pr_result r;
     int t = pr_run(label, v, cwd, 0, secs, &r);
     if (t && r.timed_out) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 124; }
@@ -1081,7 +1097,48 @@ static int net_selected(const char *id) {
     for (int i = 0; i < nselected; i++) if (!strcmp(selected[i], id)) return 1;
     return 0;
 }
+/* Only a successful canonical batch in this process can populate this set. */
+#define SEGMENT_JOB_CAP 512
+static char segment_verified[SEGMENT_JOB_CAP][160];
+static int segment_verified_count;
+static void verify_segment_jobs(const char *outdir,const char *s,const char *ctx,const char *build) {
+    if (!jobs_segment_end) return;
+    char path[4400],list[SEGMENT_JOB_CAP*161],controller[4400],seen[SEGMENT_JOB_CAP][160];size_t n=0;int used=0,count=0,indices[4]={0};
+    int total=cf_tool_count()+3*cf_net_count();if(total>SEGMENT_JOB_CAP)die("segment job capacity",0);
+    if(cx_fmt(path,sizeof path,"%s/outer/list.stdout",build))die("segment job list",build);
+    char *wire=cx_read(path,&n);
+    if(!wire||!n||wire[n-1]!='\n'||memchr(wire,0,n))die("REFUSE segment job list",path);
+    for(char *p=wire;*p;) {
+        char *e=strchr(p,'\n'),*tab=memchr(p,'\t',e-p);
+        if(!tab)die("REFUSE segment job row",path);
+        if(p==wire&&!strncmp(p,"JOB\t",4)){p=e+1;continue;}
+        *tab=0;const char *phases[]={"tool","gen","tbl","net"};int found=0;
+        for(int k=0;k<4;k++) {size_t z=strlen(phases[k]);if(strncmp(p,phases[k],z)||p[z]!='-')continue;
+            found=1;if(count>=total||strlen(p)>=160)die("REFUSE segment job extent",p);
+            for(int j=0;j<count;j++)if(!strcmp(seen[j],p))die("REFUSE duplicate segment job",p);
+            if(cx_fmt(seen[count],160,"%s",p))die("segment job id",p);
+            char tag[80];if(cx_fmt(tag,sizeof tag,"jobs-%s-%d-finish",phases[k],indices[k]++))die("segment phase",p);
+            if(ck_done(outdir,tag)) {
+                if(segment_verified_count>=total||cx_fmt(segment_verified[segment_verified_count],160,"%s",p))die("segment job extent",p);
+                for(int j=0;j<segment_verified_count;j++)if(!strcmp(segment_verified[j],p))die("REFUSE duplicate segment job",p);
+                int z=snprintf(list+used,sizeof list-used,"%s\n",p);if(z<0||(size_t)z>=sizeof list-used)die("segment list bound",p);used+=z;segment_verified_count++;
+            }
+            break;
+        }
+        /* The authoritative list also declares planned routes/package rows. Like wave_phase,
+           project only the four executable job kinds; their exact extents remain mandatory. */
+        if(!found&&strncmp(tab+1,"PLANNED_NOT_READY\t",18)&&strncmp(tab+1,"PLANNED_NOT_READY\n",18)&&strcmp(p,"NOT_CLAIMED"))die("REFUSE unknown executable job kind",p);
+        if(found)count++;p=e+1;
+    }
+    free(wire);if(count!=cf_tool_count()+3*cf_net_count()||indices[0]!=cf_tool_count()||indices[1]!=cf_net_count()||indices[2]!=cf_net_count()||indices[3]!=cf_net_count())die("REFUSE segment job count",path);
+    if(!segment_verified_count)return;
+    if(cx_fmt(path,sizeof path,"%s/segment-verify.ids",outdir)||cx_write(path,list,used)||cx_fmt(controller,sizeof controller,"%s/source-package-O2.elf",build))die("segment verify list",outdir);
+    char *v[]={controller,"reuse-batch",(char *)s,(char *)ctx,path,0};long began=sy_now_ms();
+    if(pr_code_at("segment-reuse-batch",v,s,55))die("REFUSE segment job identity/bytes",path);
+    sy_printf("SEGMENT_VERIFY\tjobs=%d\twall_ms=%ld\tscope=process-only\n",segment_verified_count,sy_now_ms()-began);
+}
 static void verify_reuse(const char *s, const char *ctx, const char *b, const char *id) {
+    for(int i=0;i<segment_verified_count;i++)if(!strcmp(segment_verified[i],id)){sy_printf("REUSED\t%s\tverified-in-this-process\n",id);return;}
     char controller[4400];
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", b)) die("path", id);
     if (baseline_ctx && !job_has_record(ctx, id)) {
@@ -1645,6 +1702,15 @@ int main(int argc, char **argv) {
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
+    if (argc == 6 && tx_eqz(argv[1], "--segment-jobs-fixture")) {
+        jobs_segment_end=sy_now_ms()+267000;
+        verify_segment_jobs(argv[3],argv[2],argv[4],argv[5]);
+        for(int i=0;i<segment_verified_count;i++) {
+            verify_reuse(argv[2],argv[4],argv[5],segment_verified[i]);
+            verify_reuse(argv[2],argv[4],argv[5],segment_verified[i]);
+        }
+        sy_printf("SEGMENT_JOBS_FIXTURE\tverified=%d\n",segment_verified_count);return 0;
+    }
     if (argc == 6 && tx_eqz(argv[1], "--partition-fixture")) {
         if (tx_copy(chain_work, sizeof chain_work, argv[4], strlen(argv[4]))) die("fixture path", argv[4]);
         until_phase = tx_eqz(argv[5], "-") ? 0 : argv[5];
@@ -1683,6 +1749,11 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (tx_eqz(argv[i], "--recheck-only")) { recheck_only = 1; continue; }
+        if (tx_eqz(argv[i], "--jobs-segment-s") && i + 1 < argc) {
+            const char *p = argv[++i]; char *end = 0; long secs = strtol(p, &end, 10);
+            if (!*p || *end || secs < 55 || secs > 267) die("REFUSE jobs segment 55..267", p);
+            jobs_segment_end = sy_now_ms() + secs * 1000; continue;
+        }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--baseline-ctx") && i + 1 < argc) { baseline_ctx = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--job-index") && i + 1 < argc) {
@@ -1813,6 +1884,8 @@ int main(int argc, char **argv) {
         if (!u && !known_closure_phase(outdir, until_phase) && !known_front_phase(root, rev, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
+    jobs_segment_out = outdir;
+    if (jobs_segment_end && (!resume || !until_phase || (strcmp(until_phase,"jobs-tool") && strcmp(until_phase,"jobs-gen") && strcmp(until_phase,"jobs-tbl") && strcmp(until_phase,"jobs-net")))) die("REFUSE jobs segment target", until_phase);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
     if (recheck_only) {
         /* Only for the two phases that require it, only when everything before them is complete:
@@ -1895,7 +1968,16 @@ int main(int argc, char **argv) {
     }
     preflight(root, "post-snap", rev, build, snap, pkg);
 
-    if(sy_setenv("UNISACC_IDENTITY_HELPER",helper,1))die("env","controller identity helper");
+    /* ctx/identity-helper only exists after ctx (phase 5); the controller phases before it use
+       the seed helper built from the same seed/ident.c, CC and flags under its own receipt, and
+       ctx later refuses any controller receipt whose source_sha differs from its SID. */
+    {
+        char seed[4400];
+        if (cx_fmt(seed, sizeof seed, "%s/identity-helper", build)) die("path", "seed helper");
+        char *a[] = {"seed-helper", (char *)rev, snap, build, (char *)cc, 0};
+        if (step(root, a)) die("seed-helper", seed);
+        if (sy_setenv("UNISACC_IDENTITY_HELPER", seed, 1)) die("env", "controller identity helper");
+    }
     /* Independent receipts recover child success before the outer mark. */
     if (!(resume && ck_done(outdir,"build-objects"))) {
         long t0=sy_now_ms();
@@ -1956,6 +2038,7 @@ int main(int argc, char **argv) {
     } else sy_printf("RESUME\twarmup\n");
 
     select_nets(snap);
+    verify_segment_jobs(outdir,snap,ctx,build);
     if (ntouch || !(resume && ck_done(outdir, "jobs-tool"))) {
         long t0 = sy_now_ms();
         if (wave_phase(outdir, snap, ctx, build, "tool", cf_tool_count(), resume)) die("jobs-tool", "wave");

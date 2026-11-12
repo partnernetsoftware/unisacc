@@ -6,7 +6,9 @@
  *   sh ./unisacc.com tools/chain-step.cx -- build-objects REV S B          编译可恢复 controller 对象
  *   sh ./unisacc.com tools/chain-step.cx -- build   REV S B                验证对象收据并链接 controller
  *   sh ./unisacc.com tools/chain-step.cx -- ctx     REV S B CTX CC          复用 controller，恢复已完成 context
- * build/build-objects require UNISACC_IDENTITY_HELPER=absolute F-v2 helper.
+ *   sh ./unisacc.com tools/chain-step.cx -- seed-helper REV S B CC     B/identity-helper(+receipt) before build-objects
+ * build/build-objects require UNISACC_IDENTITY_HELPER=absolute F-v2 helper
+ * (the chain passes B/identity-helper; ctx then checks each receipt's source_sha equals its SID).
  * Each .o/.elf.receipt binds actual source/bootstrap/input/output SHA256;
  * mismatched receipts and legacy snapshots retain fail-closed refusal.
  *   wave-objects REV S B / wave-runner REV S B: independently compile/link
@@ -1190,7 +1192,7 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
         if(cx_fmt(expected,sizeof expected,"chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=objects\ninput_sha=%s\noutput_sha=%s\n",rev,s,source,bootstrap,self,source_input,input)||!object_saved||on!=(long)strlen(expected)||memcmp(object_saved,expected,on))cs_die("REFUSE controller object receipt mismatch",object_rec);
         free(object_saved);
     }
-    if(cx_fmt(identity,sizeof identity,"chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=%s\ninput_sha=%s\n",rev,s,source,bootstrap,self,objects?"objects":"link",input))cs_die("build identity",b);
+    if(cx_fmt(identity,sizeof identity,"chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=%s\ninput_sha=%s\n",rev,s,source,bootstrap,self,objects?"objects":"link-from-source",input))cs_die("build identity",b);
     char *old=cs_load(rec,&n);
     if(old){
         cs_sha(out,output);
@@ -1213,7 +1215,13 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
             v[k++]=path;units++;p=end+1;
         }
         if(!units)cs_die("REFUSE empty controller closure",src);
-    }else v[k++]=obj;
+    }else{
+        /* Linking the -c object alone leaves libc-forwarded symbols (pread) unresolved in the
+           product linker (0.0.59 product item). Build the executable from the entry source in one
+           step, as the 0.0.57 chain did; the object and its receipt stay as the verified precheck
+           (input_sha above binds them into this receipt). */
+        v[k++]=src;
+    }
     v[k++]="-o";v[k++]=out;v[k]=0;
     char argvfile[4400];long argv_cap=1,argv_at=0;
     for(int ai=0;ai<k;ai++)argv_cap+=strlen(v[ai])+32;
@@ -1232,6 +1240,66 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
     sy_close(fd);cs_expect_file(out,"controller");return 0;
 }
 
+/* The controller receipts are measured before ctx exists, with the seed helper (seed-helper).
+   Once ctx has measured S with its own helper, every controller receipt present in B must name
+   the same source SID; a disagreement refuses instead of carrying two identities forward. */
+static void cs_ctx_bind(const char *b, const char *ctx) {
+    static const char *names[] = {"source-package-O2.o", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf"};
+    char p[4400]; long n = 0;
+    if (cx_fmt(p, sizeof p, "%s/context.tsv", ctx)) cs_die("path", ctx);
+    char *saved = cs_load(p, &n);
+    if (!saved) cs_die("REFUSE context record missing", p);
+    char *sid = cs_span_value(saved, "source");
+    free(saved);
+    for (int i = 0; i < 4; i++) {
+        char want[128];
+        if (cx_fmt(p, sizeof p, "%s/%s.receipt", b, names[i]) || cx_fmt(want, sizeof want, "\nsource_sha=%s\n", sid)) cs_die("path", b);
+        char *r = cs_load(p, &n);
+        if (!r) continue;
+        if (!strstr(r, want)) cs_die("REFUSE controller receipt source differs from context SID", p);
+        free(r);
+    }
+    sy_printf("CHAIN\tctx-bind\tsource=%s\n", sid);
+    free(sid);
+}
+
+/* seed-helper REV S B CC: compile S/seed/ident.c (the F-v2 identity helper, same source and
+   flags as prepare-context) into B/identity-helper before build-objects, so the controller
+   receipts can bind the source SID before ctx exists. B/identity-helper.receipt binds the
+   ident.c, seed/sha256.h (its only local include), CC, bound and producer bytes plus the output; a mismatching receipt refuses. */
+static int cs_seed_helper(const char *rev, const char *s, const char *b, const char *cc) {
+    char rs[4400], ident[4400], bound[4400], out[4400], tmp[4400], rec[4400], rect[4400];
+    char ih[65], hh[65], ch[65], bh[65], self[65], oh[65], identity[6000], expected[6200], hdr[4400];
+    long n = 0;
+    if (sy_realpath(s, rs, sizeof rs) < 0) cs_die("realpath", s);
+    if (cc[0] != '/') cs_die("REFUSE absolute CC required", cc);
+    if (cx_fmt(hdr, sizeof hdr, "%s/seed/sha256.h", rs)) cs_die("seed-helper path", rs);
+    if (cx_fmt(ident, sizeof ident, "%s/seed/ident.c", rs) || cx_fmt(bound, sizeof bound, "%s/tools/bound", rs) ||
+        cx_fmt(out, sizeof out, "%s/identity-helper", b) || cx_fmt(tmp, sizeof tmp, "%s.new", out) ||
+        cx_fmt(rec, sizeof rec, "%s.receipt", out) || cx_fmt(rect, sizeof rect, "%s.new", rec)) cs_die("seed-helper path", b);
+    cs_sha(ident, ih); cs_sha(hdr, hh); cs_sha(cc, ch); cs_sha(bound, bh); cs_sha("/proc/self/exe", self);
+    if (cx_fmt(identity, sizeof identity, "chain-seed-helper-v1\nrev=%s\nroot=%s\nident_sha=%s\nsha256_h_sha=%s\ncc=%s\ncc_sha=%s\nbound_sha=%s\nproducer_sha=%s\nflags=-std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w\n", rev, rs, ih, hh, cc, ch, bh, self)) cs_die("seed-helper identity", b);
+    char *old = cs_load(rec, &n);
+    if (old) {
+        cs_sha(out, oh);
+        if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, oh) || n != (long)strlen(expected) || memcmp(old, expected, n)) cs_die("REFUSE seed helper receipt mismatch", rec);
+        free(old); sy_printf("CHAIN\tseed-helper\treused=%s\n", out); return 0;
+    }
+    char *v[] = {bound, "15", (char *)cc, "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-O2", "-w", ident, "-o", tmp, 0};
+    if (cs_run(v, rs)) cs_die("seed helper compile", tmp);
+    char after[65];
+    cs_sha(ident, after); if (strcmp(ih, after)) cs_die("REFUSE seed helper source changed", ident);
+    cs_sha(hdr, after); if (strcmp(hh, after)) cs_die("REFUSE seed helper header changed", hdr);
+    cs_sha(cc, after); if (strcmp(ch, after)) cs_die("REFUSE seed helper CC changed", cc);
+    if (sy_rename(tmp, out)) cs_die("publish seed helper", out);
+    cs_sha(out, oh);
+    if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, oh)) cs_die("seed-helper receipt", rec);
+    cs_save(rect, expected, strlen(expected)); if (sy_rename(rect, rec)) cs_die("publish seed helper receipt", rec);
+    cs_expect_file(out, "seed-helper");
+    sy_printf("CHAIN\tseed-helper\tbuilt=%s\tsha=%s\n", out, oh);
+    return 0;
+}
+
 static int cs_ctx(const char *rev, const char *s, const char *b, const char *ctx, const char *cc) {
     (void)rev;
     char boot[4400], controller[4400];
@@ -1247,11 +1315,13 @@ static int cs_ctx(const char *rev, const char *s, const char *b, const char *ctx
         free(record_cc);free(record_boot);free(saved);
         char *verify[]={controller,"--verify-context",(char *)s,(char *)ctx,0};
         if(cs_run(verify,s))cs_die("REFUSE completed context identity",ctx);
+        cs_ctx_bind(b,ctx);
         sy_printf("CHAIN\tctx\treused=%s\n",ctx);return 0;
     }
     a[n++]=controller;a[n++]=(char *)"prepare-context";a[n++]=(char *)s;a[n++]=boot;
     a[n++]=(char *)cc;a[n++]=(char *)ctx;a[n]=0;
     if(cs_run(a,s))cs_die("prepare-context",ctx);
+    cs_ctx_bind(b,ctx);
     return 0;
 }
 
@@ -1367,6 +1437,10 @@ int main(int argc, char **argv) {
     if(tx_eqz(argv[1],"wave-objects")||tx_eqz(argv[1],"wave-runner")){
         if(argc!=5)cs_die("wave-objects/wave-runner needs REV S B",0);
         return cs_build(argv[2],argv[3],argv[4],tx_eqz(argv[1],"wave-objects"),1);
+    }
+    if(tx_eqz(argv[1],"seed-helper")){
+        if(argc!=6)cs_die("seed-helper needs REV S B CC",0);
+        return cs_seed_helper(argv[2],argv[3],argv[4],argv[5]);
     }
     if(tx_eqz(argv[1],"build-objects")){
         if(argc!=5)cs_die("build-objects needs REV S B",0);

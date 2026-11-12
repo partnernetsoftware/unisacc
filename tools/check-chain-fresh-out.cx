@@ -1,0 +1,182 @@
+/* tools/check-chain-fresh-out.cx -- the real candidate-chain from a completely fresh OUT through
+ * build-objects, build, wave-objects and wave-runner (the four phases before ctx), in a tiny git
+ * fixture.  Regression for R3 (0.0.58): the controller phases read ctx/identity-helper, which only
+ * ctx (phase 5) produces, so every fresh chain died at build-objects with "sha256 read".
+ *
+ *   sh ./unisacc.com tools/check-chain-fresh-out.cx -- /ABS/OUT /ABS/chain-step-tool /ABS/candidate-chain-tool
+ *
+ * Real: tools/candidate-chain.cx and tools/chain-step.cx of this checkout, the phase table
+ * build/chain-phases.tsv, seed/ident.c, tools/bound, the installed ./unisacc.com as compiler and the
+ * system CC.  Fake: the fixture root's unisacc.com is a wrapper that answers preflight.cx with 0
+ * (preflight rules belong to the real tree, not to the fixture) and forwards everything else to the
+ * real ./unisacc.com; the controller sources are trivial programs.  Checks:
+ *   (1) fresh OUT --until wave-runner: rc 0, DONE rows for the four phases, OUT/ctx absent;
+ *   (2) seed helper receipt present; all four controller receipts carry source_sha = seed helper SID;
+ *   (3) --resume over the same OUT reuses (rc 0);
+ *   (4) a tampered seed helper is refused on resume;
+ *   (5) chain-step ctx refuses a context whose source SID differs from the receipts and accepts the
+ *       matching one.
+ * Marker: CHECK_CHAIN_FRESH_OUT failed=0.  Fixture only; it does not grant construction qualification. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+
+static const char *OD = "out";
+static int failed;
+static void ck(int ok, const char *what) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+static int run(char **v, int secs, char **out) {
+    /* stderr joins stdout so the named refusals are part of the captured text. */
+    char *w[80]; int k = 0;
+    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$0\" \"$@\" 2>&1";
+    for (int i = 0; v[i] && k < 79; i++) w[k++] = v[i];
+    w[k] = 0;
+    size_t n = 0; char *o = 0;
+    int rc = cx_runv_timeout(w, secs, &o, &n);
+    if (out) *out = o; else { if (rc && o) fwrite(o, 1, n, stdout); free(o); }
+    return rc;
+}
+static int copyf(const char *from, const char *to, int mode) {
+    size_t n = 0; char *b = cx_read(from, &n);
+    if (!b) return 1;
+    int rc = cx_write(to, b, n); free(b);
+    return rc || sy_chmod(to, mode);
+}
+static int has_line_prefix(const char *b, size_t n, const char *prefix) {
+    size_t pl = strlen(prefix), at = 0;
+    while (b && at < n) {
+        size_t e = at;
+        while (e < n && b[e] != '\n') e++;
+        if (e - at >= pl && !memcmp(b + at, prefix, pl)) return 1;
+        at = e < n ? e + 1 : e;
+    }
+    return 0;
+}
+static int has_substr_bytes(const char *b, size_t n, const char *needle) {
+    size_t nl = strlen(needle), i;
+    if (!b || !nl || n < nl) return 0;
+    for (i = 0; i + nl <= n; i++) if (!memcmp(b + i, needle, nl)) return 1;
+    return 0;
+}
+static int has_line_exact(const char *b, size_t n, const char *line, size_t ll) {
+    size_t at = 0;
+    while (b && at < n) {
+        size_t e = at;
+        while (e < n && b[e] != '\n') e++;
+        if (e - at == ll && !memcmp(b + at, line, ll)) return 1;
+        at = e < n ? e + 1 : e;
+    }
+    return 0;
+}
+static int has(const char *file, const char *needle) {
+    size_t n = 0; char *b = cx_read(file, &n);
+    size_t nl;
+    int ok = 0;
+    if (b && needle && needle[0]) {
+        const char *q = needle[0] == '\n' ? needle + 1 : needle;
+        nl = strlen(q);
+        if (nl > 0 && q[nl - 1] == '\n') ok = has_line_exact(b, n, q, nl - 1);
+        else ok = has_line_prefix(b, n, q);
+    }
+    free(b); return ok;
+}
+
+int main(int argc, char **argv) {
+    char root[4400], com[4400], f[4400], p[4400], q[4400], script[9000];
+    if (argc != 4 || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/') { fprintf(stderr, "usage: check-chain-fresh-out /ABS/OUT /ABS/chain-step-tool /ABS/candidate-chain-tool\n"); return 2; }
+    const char *steptool = argv[2], *cand = argv[3];
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(f, sizeof f, "%s/chain-fresh-%ld", argv[1], sy_now_ms())) return 2;
+    /* run-batch names OUT but leaves it to the check to create. */
+    if (sy_mkdir(argv[1], 0755) && sy_exists(argv[1]) != 1) { fprintf(stderr, "check-chain-fresh-out: cannot create OUT %s\n", argv[1]); return 2; }
+    if (sy_mkdir(f, 0755)) { fprintf(stderr, "check-chain-fresh-out: fixture exists or cannot be made: %s\n", f); return 2; }
+    static const char *dirs[] = {"seed", "tools", "build", "cx", "cx/compiler", 0};
+    for (int i = 0; dirs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, dirs[i]) || sy_mkdir(p, 0755)) return 2; }
+    /* tools/bound builds its watchdog from tools/bound.c and cx/compiler/boundgate.cx of the same tree. */
+    static const char *same[] = {"tools/bound", "seed/ident.c", "seed/sha256.h", "build/chain-phases.tsv", "tools/bound.c", "cx/compiler/boundgate.cx", 0};
+    for (int i = 0; same[i]; i++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", root, same[i]) || cx_fmt(q, sizeof q, "%s/%s", f, same[i]) || copyf(p, q, i == 0 ? 0755 : 0644)) return 2;
+    }
+    /* seed/ident.c (F-v2) walks this fixed package layout and refuses a missing root, so the fixture
+       holds one placeholder per package and per support file it names. */
+    static const char *more[] = {"include", "cx/sys", "cx/mem", "cx/text", "cx/core", "cx/driver", "cx/runtime", "src", "exec",
+                                 "weights", "kernel", "iterate", "iterate/kernel", "tools/cxlib", 0};
+    for (int i = 0; more[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, more[i]) || sy_mkdir(p, 0755)) return 2; }
+    static const char *holders[] = {"include/fixture.h", "cx/sys/fixture.cx", "cx/mem/fixture.cx", "cx/text/fixture.cx", "cx/core/fixture.cx",
+                                    "cx/driver/fixture.cx", "cx/runtime/fixture.cx", "src/fixture.c", "exec/fixture.tsv", "weights/fixture.tsv",
+                                    "kernel/fixture.tsv", "iterate/kernel/typekw.tsv", "tools/cxbin", "tools/safedel.cx", "tools/lib.sh",
+                                    "tools/build_ref.sh", "tools/export_ref.sh", "tools/refshim.h", "tools/reffoot.h", "tools/sourceflat.cx",
+                                    "tools/ape-pack.cx", "tools/release-ape.cx", "tools/cxlib/releaseversion.cx", 0};
+    for (int i = 0; holders[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s", f, holders[i]) || cx_write(p, "fixture\n", 8)) return 2; }
+    static const char prog[] = "int main(void) { return 0; }\n";
+    if (cx_fmt(p, sizeof p, "%s/tools/source-package.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tools/source-job-wave.cx", f) || cx_write(p, prog, sizeof prog - 1)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/a", f) || cx_write(p, "a\n", 2)) return 2;
+    if (cx_fmt(script, sizeof script,
+        "#!/bin/sh\ncase \"$1\" in\n*/tools/preflight.cx) exit 0;;\n*/tools/chain-step.cx) shift 2; exec '%s' \"$@\";;\nesac\nexec sh '%s' \"$@\"\n",
+        steptool, com)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com", f) || cx_write(p, script, strlen(script)) || sy_chmod(p, 0755)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com.build.json", f) || cx_write(p, "{}", 2)) return 2;
+    if (sy_chdir(f)) return 2;
+    char *init[] = {"git", "init", "-q", 0}, *add[] = {"git", "add", "a", "seed", "tools", "build", "cx", "include", "src", "exec", "weights", "kernel", "iterate", 0};
+    char *commit[] = {"git", "-c", "user.name=fixture", "-c", "user.email=fixture@invalid", "commit", "-qm", "fixture", 0};
+    char *revv[] = {"git", "rev-parse", "HEAD", 0}, *rev = 0;
+    if (run(init, 10, 0) || run(add, 10, 0) || run(commit, 10, 0) || run(revv, 5, &rev) || !rev || strlen(rev) != 41) return 2;
+    rev[40] = 0;
+    char out[4400], *log = 0;
+    /* chain-step snap insists on the fixture repository's own OD directory (inside OUT, not the checkout's). */
+    if (cx_fmt(out, sizeof out, "%s/%s/chain", f, OD)) return 2;
+    if (sy_mkdir(OD, 0755)) return 2;
+    if (sy_exists(out) == 1) return 2;
+    char *chain[] = {(char *)cand, "--rev", rev, "--out", out, "--until", "wave-runner", 0};
+    int rc = run(chain, 50, &log);
+    if (rc && log) fputs(log, stdout);
+    ck(!rc && log && !has_substr_bytes(log, strlen(log), "ctx/identity-helper"), "fresh-out-until-wave-runner-rc0");
+    free(log);
+    if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", out)) return 2;
+    ck(has(p, "DONE\tbuild-objects\t") && has(p, "DONE\tbuild\t") && has(p, "DONE\twave-objects\t") && has(p, "DONE\twave-runner\t"), "fresh-out-four-controller-phases-done");
+    if (cx_fmt(p, sizeof p, "%s/ctx", out)) return 2;
+    ck(sy_exists(p) == 0, "fresh-out-no-ctx-before-ctx-phase");
+    char snap[4400], build[4400], helper[4400], want[200];
+    if (cx_fmt(snap, sizeof snap, "%s/%s/release-snap-%.10s", f, OD, rev) || cx_fmt(build, sizeof build, "%s/build", out) || cx_fmt(helper, sizeof helper, "%s/identity-helper", build)) return 2;
+    if (cx_fmt(p, sizeof p, "%s.receipt", helper)) return 2;
+    ck(has(p, "chain-seed-helper-v1\n") && has(p, "\noutput_sha="), "seed-helper-receipt");
+    char *hv[] = {helper, snap, 0}, *sid = 0;
+    if (run(hv, 10, &sid) || !sid || strlen(sid) != 65) { ck(0, "seed-helper-sid"); return 1; }
+    sid[64] = 0;
+    if (cx_fmt(want, sizeof want, "\nsource_sha=%s\n", sid)) return 2;
+    static const char *recs[] = {"source-package-O2.o", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf", 0};
+    int all = 1;
+    for (int i = 0; recs[i]; i++) { if (cx_fmt(p, sizeof p, "%s/%s.receipt", build, recs[i]) || !has(p, want)) all = 0; }
+    ck(all, "controller-receipts-bind-seed-sid");
+    char *resume[] = {(char *)cand, "--rev", rev, "--out", out, "--resume", "--until", "wave-runner", 0};
+    ck(run(resume, 50, 0) == 0, "resume-reuses");
+    /* build is DONE, so the resume above returned early; drop the outer marks so the next resume re-enters
+       the seed step and the receipts (the receipt is the authority, not the checkpoint). */
+    if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", out) || cx_fmt(q, sizeof q, "%s/checkpoint.tsv.kept", out) || sy_rename(p, q)) return 2;
+    size_t hn = 0; char *hb = cx_read(helper, &hn);
+    if (!hb || cx_write(helper, "tampered", 8)) return 2;
+    log = 0; rc = run(resume, 50, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE seed helper receipt mismatch"), "tampered-seed-helper-refused");
+    free(log);
+    if (cx_write(helper, hb, hn) || sy_chmod(helper, 0755)) return 2;
+    free(hb);
+    ck(run(resume, 50, 0) == 0, "restored-seed-helper-reused");
+    char ctx[4400], rec[9000], boot[4400];
+    if (cx_fmt(ctx, sizeof ctx, "%s/ctx-bind", f) || sy_mkdir(ctx, 0755) || cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", build)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/context.tsv", ctx)) return 2;
+    if (cx_fmt(rec, sizeof rec, "context-v1\ncc\t/usr/bin/cc\nbootstrap\t%s\nsource\t%064d\n", boot, 0) || cx_write(p, rec, strlen(rec))) return 2;
+    char *cv[] = {(char *)steptool, "ctx", rev, snap, build, ctx, "/usr/bin/cc", 0};
+    log = 0; rc = run(cv, 30, &log);
+    ck(rc != 0 && log && strstr(log, "REFUSE controller receipt source differs from context SID"), "ctx-bind-other-sid-refused");
+    free(log);
+    if (cx_fmt(rec, sizeof rec, "context-v1\ncc\t/usr/bin/cc\nbootstrap\t%s\nsource\t%s\n", boot, sid) || cx_write(p, rec, strlen(rec))) return 2;
+    log = 0; rc = run(cv, 30, &log);
+    ck(rc == 0 && log && strstr(log, "ctx-bind\tsource="), "ctx-bind-same-sid-accepted");
+    free(log); free(sid); free(rev);
+    printf("CHECK_CHAIN_FRESH_OUT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

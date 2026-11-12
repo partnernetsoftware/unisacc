@@ -38,6 +38,12 @@ static int probing; static char pending[256];
 #define RC_SEGMENT 75
 static long seg_end_ms; static int segment_s, segments, max_segments, owed;
 static char memo_path[4400], memo_id[65]; static int memo_derived;
+static int amortize_jobs=1;
+static const char *jobs_group(const char *id) {
+    const char *groups[]={"jobs-tool","jobs-gen","jobs-tbl","jobs-net"};
+    for(int i=0;i<4;i++){size_t n=strlen(groups[i]);if(!strncmp(id,groups[i],n)&&(id[n]==0||id[n]=='-'))return groups[i];}
+    return 0;
+}
 static void die(const char *s);
 static int lookup(const char *id) { for(int i=0;i<plan_count;i++)if(!strcmp(plan[i].id,id))return i;return -1; }
 static void validate_plan(void) {
@@ -143,7 +149,7 @@ typedef struct { int rc,retry,residue; } outcome;
    "<phase>-recheck": candidate --recheck-only walks every earlier re-check with the memo
    removed and builds nothing. Only after it returns 0 is the phase itself started, and any
    retry of the phase needs a new one. Without the memo the phase call is that full walk. */
-static int memo_on(const char *phase) { (void)phase; return memo_path[0]!=0; }
+static int memo_on(const char *phase) { return memo_path[0]&&!(amortize_jobs&&jobs_group(phase)); }
 static int needs_recheck(const char *phase) { return memo_path[0]&&(!strcmp(phase,"compare")||!strcmp(phase,"pack")); }
 static int is_recheck(const char *label) { size_t n=strlen(label); return n>8&&!strcmp(label+n-8,"-recheck"); }
 static void result_path(char *p,int a,const char *suffix) { char leaf[100];cx_fmt(leaf,sizeof leaf,"chain-run-%d.%s",a,suffix);path(p,leaf); }
@@ -159,11 +165,22 @@ static void execute(const char *phase,char **v,int bound,int a) {
     /* Derived memos (verify-context verdict, closure-list plan) only on --memo-derived, never inherited. */
     if(!pre&&memo_on(phase)&&memo_derived){if(sy_setenv("UNISACC_CHAIN_SHAMEMO_DERIVED","1",1))_exit(2);}
     else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO_DERIVED"))_exit(2);
-    pr_result r;int t=cr_run(phase,v,bound,&r);
+    int grouped=0;for(int i=0;v[i];i++)if(!strcmp(v[i],"--jobs-segment-s"))grouped=1;
+    char token[300];cx_fmt(token,sizeof token,"%d:%s",a,phase);
+    if(grouped&&sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
+    long started=sy_now_ms();pr_result r;int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
     result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
     result_path(p,a,"stderr");if(cx_write(p,r.err?r.err:"",r.errn))_exit(2);
-    result_path(p,a,"why");if(cx_write(p,r.why,strlen(r.why)))_exit(2);
+    char timing[200];cx_fmt(timing,sizeof timing,"\nATTEMPT_TIME\tphase=%s\twall_ms=%ld",phase,sy_now_ms()-started);
+    char why[2000];if(cx_fmt(why,sizeof why,"%s%s",r.why,timing))_exit(2);
+    result_path(p,a,"why");if(cx_write(p,why,strlen(why)))_exit(2);
     int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc);
+    if(grouped&&!t&&rc==76)rc=2;
+    if(grouped&&!t&&rc==75&&!r.residue) {
+        char cp[4400],hash[65],want[450];size_t size=0;path(cp,"checkpoint.tsv");char *bytes=cx_read(cp,&size);
+        if(bytes&&!sy_sha256_hex(bytes,(long)size,hash)&&!cx_fmt(want,sizeof want,"CANDIDATE_SEGMENT\t%s\t%s\n",token,hash)&&r.out&&strstr(r.out,want))rc=76;
+        free(bytes);
+    }
     int retry=(t&&r.timed_out)||(!t&&(r.rc==-9||r.rc==-15||r.rc==124||r.rc==137||r.rc==143));
     char row[100];cx_fmt(row,sizeof row,"%d %d %d\n",rc,retry,r.residue);
     char final[4400];result_path(p,a,"result.new");result_path(final,a,"result");if(cx_write(p,row,strlen(row))||sy_rename(p,final))_exit(2);pr_free(&r);_exit(0);
@@ -266,6 +283,7 @@ static int ready(task *t) {
 static void settle(task *t,outcome r,int *stop,int *retrying) {
     int pre=t->recheck==1; t->recheck=0;
     if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
+    else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;if(!*stop)*stop=RC_SEGMENT;}
     else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
     else if(r.retry){*retrying=1;t->state=0;}
     else if(pre){t->recheck=2;t->state=0;}
@@ -288,10 +306,19 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             pending[0]=0;probing=1;int fr=rehearse?0:fronts(t->id,rev,v,target);probing=0;
             if(fr&&fr!=-100){stop=fr;continue;}
             const char *next=pending[0]?pending:t->id;if(tx_copy(t->phase,sizeof t->phase,next,strlen(next)))die("phase bound");
+            const char *group=amortize_jobs?jobs_group(t->id):0;
+            if(group&&tx_copy(t->phase,sizeof t->phase,group,strlen(group)))die("job group bound");
             long left=(end_ms-sy_now_ms())/1000;
             if(left<1){stop=blocker(t->phase,"deadline",3);continue;}
             if(attempts>=max_attempts){stop=blocker(t->phase,"attempts-exhausted",3);continue;}
             int bound=left<t->bound?(int)left:t->bound;
+            char group_seconds[16];
+            if(group) {
+                long available=seg_end_ms?(seg_end_ms-sy_now_ms())/1000:270;
+                if(available>270)available=270;if(available>left)available=left;
+                if(available<58){if(!held)held=t->id;continue;}
+                bound=(int)available;cx_fmt(group_seconds,sizeof group_seconds,"%d",bound-3);
+            }
             /* Segment end: ready work that does not fit is held, never started and killed. */
             if(!seg_fits(bound)){if(!held)held=t->id;continue;}
             t->attempt=++attempts;save();t->state=1;
@@ -301,13 +328,14 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             v[target]=t->phase;
             if(strcmp(t->lane,"-")){v[end++]="--lane";v[end++]=t->lane;}
             if(pre)v[end++]="--recheck-only";
+            if(group){v[end++]="--jobs-segment-s";v[end++]=group_seconds;}
             v[end]=0;
             t->call_bound=bound;
             t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,bound,t->attempt);
             active++;
         }
         if(!active) {
-            if(stop)return stop;
+            if(stop)return stop==RC_SEGMENT?segment_expired("jobs-group"):stop;
             if(retrying){
                 if(sy_now_ms()>=end_ms)return blocker("scheduler","deadline",3);
                 if(resumes>=max_resumes)return blocker("scheduler","resumes-exhausted",3);
@@ -428,7 +456,7 @@ int main(int argc,char **argv) {
         if(objs[0]!='/'||sy_stat(objs,&st)||st.kind!='d') die("rehearse objects missing or not absolute");
         if(pkg[0]!='/'||sy_stat(pkg,&st)||st.size<=0) die("rehearse pkg missing or not absolute");
     }
-    for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--lane")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")) die("reserved candidate option");
+    for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--lane")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")||!strcmp(argv[i],"--jobs-segment-s")) die("reserved candidate option");
     char safe_root[4400],safe_out[4400],safe_parent[4400];
     if(sy_realpath(".",safe_root,sizeof safe_root)<0 || cx_fmt(safe_parent,sizeof safe_parent,"%s/out/",safe_root)) die("output root");
     if(sy_exists("out")) {
