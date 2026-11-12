@@ -1,0 +1,181 @@
+/* tests/stream/xs-bound-width.cx -- the byte bound a product call hands to xs_open, under every
+ * target's own `long` width.
+ *
+ *   sh ./unisacc.com tests/stream/xs-bound-width.cx -- OUT             # product ./unisacc.com
+ *   sh ./unisacc.com tests/stream/xs-bound-width.cx -- OUT PRODUCT     # another candidate
+ *
+ * xs_open(&h, bound) takes a long and refuses bound <= 0 (result 4). On win a long is 32 bits, so the
+ * literal 0x7fffffffffffffffL arrives as -1: `unisacc stream STAGE` and every route through
+ * cx/compiler/routepipe.cx then stop with rc 1 before any stage runs (0.0.58 candidate, CI run
+ * 43219651302, win/x86_64 and win/arm64 stream-pipe).
+ *
+ * What runs here, per target of the six:
+ *   sites    every xs_open call in src/, cx/, ext/ (tools/refactor.cx sites over the tracked files),
+ *            its second argument copied into a probe: main returns how many of them a callee taking
+ *            `long` sees below 2147483647. The probe is compiled for the target through
+ *            stream e2 | e1 | e3 --raw and the resulting tape is run here with -run. Expect 0.
+ *   control  the same probe with the old literal: 1 on win/x86_64 and win/arm64 (the instrument sees
+ *            the defect), 0 on the four LP64 targets.
+ * The tape carries the target's type widths (a win `long` parameter is a 4-byte load), and it is the
+ * host that executes it: this is the target's front end and integer model, not its PE image. The real
+ * win run of `stream` stays with the stream-pipe cell of candidate-native CI.
+ * A bound that is not a self-contained constant expression does not compile in the probe: that is a
+ * FAIL here, and the check has to learn the new form before the call can enter the product.
+ * Prints PASS/FAIL per assertion and XS_BOUND_WIDTH_SUMMARY; a last line XS_BOUND_WIDTH only when
+ * nothing failed; rc 1 on any FAIL. Scratch: OUT/xs-bound-width/ (overwritten, not removed); OUT is
+ * the batch's {out} argument and has to be given. */
+#pragma unisa use cxlib.netpack
+
+#define XB_MAXSITE 32
+
+static const char *xb_targets[] = {"win/x86_64", "win/arm64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64"};
+static const char *xb_old = "0x7fffffffffffffffL";
+static char xb_prod[4400];
+static char xb_root[4400];
+static char xb_out[4400];
+static char xb_dir[4400];
+static char xb_arg[XB_MAXSITE][160];
+static char xb_where[XB_MAXSITE][200];
+static int xb_nsite;
+static int xb_passed, xb_failed;
+
+static void xb_die(const char *s) { fprintf(stderr, "xs-bound-width: %s\n", s); exit(2); }
+static void xb_ck(int ok, const char *label, const char *tgt, int got) {
+    printf("%s\t%s\t%s\tgot=%d\n", ok ? "PASS" : "FAIL", label, tgt, got);
+    if (ok) xb_passed++; else xb_failed++;
+}
+/* One shell line in CWD, 20 s bound; the rc, or -1 on transport. Stdout is handed over when asked. */
+static int xb_sh(const char *cmd, const char *cwd, char **out, size_t *outn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int rc;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    if (np_run(av, cwd, 0, 20, &r, why, sizeof why)) { fprintf(stderr, "xs-bound-width: transport %s: %s\n", why, cmd); np_free(&r); return -1; }
+    if (r.rc && r.errn) fprintf(stderr, "%.*s", (int)(r.errn > 600 ? 600 : r.errn), r.err);
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+
+/* The second argument of the call text "xs_open(A, B)": B without its outer blanks. 0 when taken. */
+static int xb_second(const char *call, size_t n, char *o, size_t cap) {
+    size_t i = 0, a, b;
+    int depth = 0;
+    while (i < n && call[i] != '(') i++;
+    if (i >= n) return 1;
+    i++;
+    while (i < n && !(call[i] == ',' && depth == 0)) {
+        if (call[i] == '(') depth++;
+        if (call[i] == ')') { if (!depth) return 1; depth--; }
+        i++;
+    }
+    if (i >= n) return 1;
+    a = i + 1;
+    b = a;
+    depth = 0;
+    while (b < n && !(call[b] == ')' && depth == 0)) {
+        if (call[b] == ',' && depth == 0) return 1;
+        if (call[b] == '(') depth++;
+        if (call[b] == ')') depth--;
+        b++;
+    }
+    if (b >= n) return 1;
+    while (a < b && call[a] == ' ') a++;
+    while (b > a && call[b - 1] == ' ') b--;
+    if (b == a) return 1;
+    return cx_fmt(o, cap, "%.*s", (int)(b - a), call + a) ? 1 : 0;
+}
+
+/* The product call sites: rows FILE:LINE<TAB>CALL of refactor.cx sites, product trees only, and
+   not the definition in cx/stream/pipe.cx. */
+static void xb_sites(void) {
+    char cmd[9200];
+    char *out = 0;
+    size_t n = 0, at = 0;
+    if (cx_fmt(cmd, sizeof cmd, "exec sh %s tools/refactor.cx -- sites xs_open --tracked", xb_prod)) xb_die("cmd");
+    if (xb_sh(cmd, xb_root, &out, &n) != 0 || !out) xb_die("refactor.cx sites failed");
+    while (at < n) {
+        size_t e = at, tab;
+        while (e < n && out[e] != '\n') e++;
+        tab = at;
+        while (tab < e && out[tab] != '\t') tab++;
+        if (tab < e && (!strncmp(out + at, "src/", 4) || !strncmp(out + at, "cx/", 3) || !strncmp(out + at, "ext/", 4)) &&
+            strncmp(out + at, "cx/stream/pipe.cx:", 18)) {
+            if (xb_nsite >= XB_MAXSITE) xb_die("more call sites than XB_MAXSITE");
+            if (cx_fmt(xb_where[xb_nsite], sizeof xb_where[0], "%.*s", (int)(tab - at), out + at)) xb_die("site path bound");
+            if (xb_second(out + tab + 1, e - tab - 1, xb_arg[xb_nsite], sizeof xb_arg[0])) {
+                fprintf(stderr, "xs-bound-width: cannot take the bound of %s\n", xb_where[xb_nsite]);
+                xb_die("call shape");
+            }
+            printf("SITE\t%s\t%s\n", xb_where[xb_nsite], xb_arg[xb_nsite]);
+            xb_nsite++;
+        }
+        at = e + 1;
+    }
+    free(out);
+}
+
+/* Write NAME.c: main returns how many of the N bounds a `long` parameter sees below 2^31 - 1. */
+static void xb_probe(const char *name, const char **args, int n) {
+    char src[XB_MAXSITE * 200 + 400], path[4400];
+    size_t at;
+    int i;
+    if (cx_fmt(src, sizeof src, "static int low(long b){ return b < 2147483647L; }\nint main(void){\n    int r = 0;\n")) xb_die("probe bound");
+    for (i = 0; i < n; i++) {
+        at = strlen(src);
+        if (cx_fmt(src + at, sizeof src - at, "    r = r + low(%s);\n", args[i])) xb_die("probe bound");
+    }
+    at = strlen(src);
+    if (cx_fmt(src + at, sizeof src - at, "    return r;\n}\n") || cx_fmt(path, sizeof path, "%s/%s.c", xb_dir, name)) xb_die("probe bound");
+    if (cx_write(path, src, strlen(src))) xb_die("probe write");
+}
+
+/* NAME.c for target T: e2 | e1 | e3 --raw, then run the tape. The program's rc, or -1 - stage. */
+static int xb_run(const char *name, const char *t) {
+    static const char *stage[] = {"e2", "e1", "e3"};
+    char cmd[9800], tag[80], in[200], outp[200];
+    int k;
+    size_t i;
+    if (cx_fmt(tag, sizeof tag, "%s-%s", name, t)) xb_die("tag");
+    for (i = 0; tag[i]; i++) if (tag[i] == '/') tag[i] = '-';
+    if (cx_fmt(in, sizeof in, "%s.c", name)) xb_die("in");
+    for (k = 0; k < 3; k++) {
+        if (cx_fmt(outp, sizeof outp, k == 2 ? "%s.tape" : "%s.%d", tag, k)) xb_die("out");
+        if (cx_fmt(cmd, sizeof cmd, "exec %s stream %s --target %s --level 0 --source %s.c%s < %s > %s", xb_prod, stage[k], t, name, k == 2 ? " --raw" : "", in, outp)) xb_die("cmd");
+        if (xb_sh(cmd, xb_dir, 0, 0) != 0) return -1 - k;
+        if (cx_fmt(in, sizeof in, "%s", outp)) xb_die("in");
+    }
+    if (cx_fmt(cmd, sizeof cmd, "exec %s -run %s.tape", xb_prod, tag)) xb_die("cmd");
+    return xb_sh(cmd, xb_dir, 0, 0);
+}
+
+int main(int argc, char **argv) {
+    const char *args[XB_MAXSITE];
+    char cmd[9200];
+    int shift, i, t, got, win;
+    setvbuf(stdout, 0, _IOLBF, 0);
+    shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0;
+    if (argc < 2 + shift) xb_die("usage: xs-bound-width.cx -- OUT [PRODUCT]");
+    if (!realpath(argc > 2 + shift ? argv[2 + shift] : "./unisacc.com", xb_prod)) xb_die("product path");
+    if (!realpath(".", xb_root) || cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/xs-bound-width'", argv[1 + shift])) xb_die("root or scratch path");
+    if (xb_sh(cmd, xb_root, 0, 0) != 0 || !realpath(argv[1 + shift], xb_out)) xb_die("scratch");
+    if (cx_fmt(xb_dir, sizeof xb_dir, "%s/xs-bound-width", xb_out)) xb_die("scratch path");
+    xb_sites();
+    if (xb_nsite < 1) { printf("FAIL\tsites\tno product xs_open call found\n"); xb_failed++; }
+    for (i = 0; i < xb_nsite; i++) args[i] = xb_arg[i];
+    xb_probe("sites", args, xb_nsite);
+    xb_probe("control", &xb_old, 1);
+    for (t = 0; t < 6 && xb_nsite > 0; t++) {
+        win = !strncmp(xb_targets[t], "win/", 4);
+        got = xb_run("sites", xb_targets[t]);
+        xb_ck(got == 0, "sites: every product bound is at least 2^31-1 as a long", xb_targets[t], got);
+        got = xb_run("control", xb_targets[t]);
+        xb_ck(got == (win ? 1 : 0), win ? "control: the 64-bit literal is below 2^31-1 as a win long (defect seen)" : "control: the 64-bit literal fits an LP64 long", xb_targets[t], got);
+    }
+    printf("XS_BOUND_WIDTH_SUMMARY\tsites=%d\tpass=%d\tfailed=%d\n", xb_nsite, xb_passed, xb_failed);
+    if (xb_failed) return 1;
+    puts("XS_BOUND_WIDTH");
+    return 0;
+}
