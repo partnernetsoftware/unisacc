@@ -150,16 +150,21 @@ static int escape_root(void *ud) {
    of 200 was consumed by that work during s9 waves (np_run pid=-1, 14 of 20
    assertions failed, 2026-11-13). Advisory: a host without prlimit prints NOTE. */
 static void cap_nproc(void) {
-    char cmd[256];
+    char cmd[512];
     char *av[] = { "sh", "-c", cmd, 0 };
     int fd, pid, n, i, done = 0;
     const int wait_bound_polls = 250;   /* x 20 ms: the prlimit helper gets 5 s, then it is killed */
     /* The kernel counts threads against RLIMIT_NPROC, so the budget is the
-       user's thread count + 1000, not its process count. */
+       user's thread count + 1000, not its process count. The status files
+       are read through cat: a process that exits between the glob and the
+       read made gawk stop fatally, the count came out empty and the cap
+       became an absolute 1000, below the user's live thread count, so every
+       spawn failed (np_run pid=-1) whenever other work churned processes.
+       An empty count now skips the cap instead of applying a wrong one. */
     tx_snprintf(cmd, sizeof cmd,
-                "prlimit --pid %d --nproc=$(( $(awk '/^Uid:/{u=$2} "
-                "/^Threads:/{if(u=='$(id -u)')s+=$2} "
-                "END{print s}' /proc/[0-9]*/status) + 1000 ))",
+                "n=$(cat /proc/[0-9]*/status 2>/dev/null | awk '/^Uid:/{u=$2} "
+                "/^Threads:/{if(u=='$(id -u)')s+=$2} END{print s+0}'); "
+                "[ \"$n\" -gt 0 ] && prlimit --pid %d --nproc=$((n + 1000)) && echo $((n + 1000))",
                 sy_pid());
     pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
     if (pid <= 0) { printf("NOTE\treaper\tprlimit unavailable\n"); return; }
@@ -168,9 +173,17 @@ static void cap_nproc(void) {
         if (n != -EAGAIN) { done = 1; break; }
         sy_sleep_ms(20);
     }
-    sy_close(fd);
-    if (!done) { sy_kill(pid); printf("NOTE\treaper\tprlimit did not finish\n"); return; }
-    printf("NOTE\treaper\tnproc capped at uid count + 1000\n");
+    if (!done) { sy_close(fd); sy_kill(pid); printf("NOTE\treaper\tprlimit did not finish\n"); return; }
+    {
+        /* the helper has exited, so this read sees the whole output or EOF */
+        char cap[32];
+        long got = sy_read(fd, cap, (long)sizeof cap - 1);
+        sy_close(fd);
+        if (got <= 0) { printf("NOTE\treaper\tnproc not capped (no thread count)\n"); return; }
+        cap[got] = 0;
+        if (got > 0 && cap[got - 1] == '\n') cap[got - 1] = 0;
+        printf("NOTE\treaper\tnproc capped at uid count + 1000 = %s\n", cap);
+    }
 }
 
 /* Kill everything this check started, whichever path reached it. */
