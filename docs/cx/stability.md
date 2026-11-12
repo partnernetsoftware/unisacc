@@ -2,7 +2,7 @@
 
 本文规定 cx 包(`cx.*` 与 `ext.*`)的阶段、各阶段允许的变更、宣布稳定的判据、弃用周期,以及由谁判定。逐区设计在 [design-core.md](design-core.md),需求摘要在 [prd_cx.md](../../prd_cx.md) 第 0 节。
 
-核心结论:**何时稳定不由主人决定,也不由任何人凭判断决定。判据由工具 `tools/check-stable.cx` 求值;只有它输出 `STABLE-READY` 时,集成者才提交翻转 `build/tlib-policy.tsv` 的那一行。**
+核心结论:**何时稳定不由主人决定,也不由任何人凭判断决定。判据由工具 `tools/stable-eval.cx` 求值;只有它输出 `STABLE-READY` 时,集成者才提交翻转 `build/tlib-policy.tsv` 的那一行。**
 
 引用写法同 design-core.md:R、N、Q、P 指四份参照调研,`R6(4)` 表示该文第 6 节第 (4) 条;`[未核]` 表示未实测。
 
@@ -35,7 +35,7 @@
 
 ## 3 什么算破坏
 
-写成清单并由 `layer-api --bump` 与 `check-stable` 判类。从 R6(5)、P5.1;拒 N5.3 的「按生态后果判断」,原因是后果判断不可机检。
+写成清单并由 `layer-api --bump` 与 `stable-eval` 判类。从 R6(5)、P5.1;拒 N5.3 的「按生态后果判断」,原因是后果判断不可机检。
 
 | 类 | 变更 |
 |---|---|
@@ -58,7 +58,7 @@
 | S3 错误合同 | 每行 `errors` 列符合封闭文法:`none`、`0/1`、`null`、`noreturn`、`miss:-1`、`-errno`、`-E名字`,以分号连接,可带 `ret:说明` | 读表,正则 |
 | S4 零未核 | 该包行的三个平台单元格没有 `unverified` | 读表 |
 | S5 拒绝有名 | 每个拒绝单元格形如 `refuse:ENOSYS cap=NAME`,NAME 在表头 `# cap` 词表内。「本版未实现」一类不合格 | 读表 |
-| S6 用例覆盖 | 每行 `test` 列指向 `tests/batches.tsv` 的已登记批次;该批的证据日志里对该行有至少一条成功用例;`errors` 列每个具名码至少一条失败用例;每个拒绝单元格在对应目标上有一条断言 `-ENOSYS` 的用例 | 检查按统一格式输出 `SURF<TAB>名字<TAB>ok|err:-E名字|refuse`,`check-stable` 从候选证据目录汇总 |
+| S6 用例覆盖 | 每行 `test` 列指向 `tests/batches.tsv` 的已登记批次;该批的证据日志里对该行有至少一条成功用例;`errors` 列每个具名码至少一条失败用例;每个拒绝单元格在对应目标上有一条断言 `-ENOSYS` 的用例 | 检查按统一格式输出 `SURF<TAB>名字<TAB>ok|err:-E名字|refuse`,`stable-eval` 从候选证据目录汇总 |
 | S7 六目标同候选 | `release/candidate.tsv` 所指候选的 CI 证据里,该包的面批次在 `lnx`、`osx`、`win` 乘 `x86_64`、`arm64` 六格都有实跑结果且通过 | 读候选表与证据;某格只是复用另一格二进制而未在该系统执行的,记 UNKNOWN |
 | S8 面静止 | 该包的 `api_sha` 与表内该包各行的名字、签名、`errors`、`own` 四列,在最近连续 3 个公开版本的 tag 上逐字相同,且首末两个 tag 相隔不少于 30 天 | `git show TAG:路径` 取历史内容比对;tag 取 `v0.0.N` 形式的公开版 |
 | S9 有消费者且上层已离开 libc | (a) 每个非 legacy、非 internal 的行在本包与其检查之外至少有 1 个调用单元;(b) 产品层(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)在 `tests/cxlibc.tsv` 的直接 libc 计数为 0 | (a) `tools/refactor.cx sites` 或 symindex 计数;(b) 读棘轮表 |
@@ -83,7 +83,7 @@
 | 段 | 表内标记 | 行为 | 最短停留 | 版本类 |
 |---|---|---|---|---|
 | (1) 软弃用 | `stab=legacy` | 只在表与接口说明里标注并写明替代;不发警告;仍有测试;调用点计数进棘轮,只降不升 | 无;可以永久停留 | Z |
-| (2) 弃用 | `stab=deprecated:CXDEPnnnn` | `check-stable --callers` 与 `tools/precommit.cx` 对每个调用点报告(构造期警告,不阻断) | 3 个公开版且 30 天 | Y |
+| (2) 弃用 | `stab=deprecated:CXDEPnnnn` | `stable-eval --callers` 与 `tools/precommit.cx` 对每个调用点报告(构造期警告,不阻断) | 3 个公开版且 30 天 | Y |
 | (3) 移除 | 行移入 `# removed` 墓碑段,保留编号、原签名、移除版本 | 名字从 layer-api 消失 | 不适用 | X |
 
 规则:
@@ -109,18 +109,18 @@
 - 提升是一次 Y 升级:目标 `cx.*` 包加行;原 `ext.*` 模块路径留别名,不改函数名。若目标包已稳定,提升进去的行直接是 `stab=stable`,因此提升判据比 S8 的 3 个版本短但加了调用者数量。
 - 反向路径:稳定包里的行退出核心,只能走第 5 节的弃用周期。从 P6(12):进入比退出难。
 
-## 7 判定工具 tools/check-stable.cx
+## 7 判定工具 tools/stable-eval.cx
 
-该工具尚未建立。本节是它的合同。建立时按本仓规则:先 `git log --all --oneline -- tools/check-stable.cx` 查名字历史(本轮 `ls` 未见同名文件,完整历史未查),带 `--fixtures` 自检,登记批次 `stable-gate`,在 `prd.md` 能力速查补一行。
+该工具尚未建立。本节是它的合同。建立时按本仓规则:先 `git log --all --oneline -- tools/stable-eval.cx` 查名字历史(本轮 `ls` 未见同名文件,完整历史未查),带 `--fixtures` 自检,登记批次 `stable-gate`,在 `prd.md` 能力速查补一行。
 
 调用:
 
 ```
-sh ./unisacc.com tools/check-stable.cx -- [--pkg PKG]... [--root ROOT] [--candidate FILE] [--evidence DIR]
-sh ./unisacc.com tools/check-stable.cx -- --verify [--root ROOT]
-sh ./unisacc.com tools/check-stable.cx -- --callers NAME
-sh ./unisacc.com tools/check-stable.cx -- --declare PKG [--root ROOT]
-sh ./unisacc.com tools/check-stable.cx -- --fixtures
+sh ./unisacc.com tools/stable-eval.cx -- [--pkg PKG]... [--root ROOT] [--candidate FILE] [--evidence DIR]
+sh ./unisacc.com tools/stable-eval.cx -- --verify [--root ROOT]
+sh ./unisacc.com tools/stable-eval.cx -- --callers NAME
+sh ./unisacc.com tools/stable-eval.cx -- --declare PKG [--root ROOT]
+sh ./unisacc.com tools/stable-eval.cx -- --fixtures
 ```
 
 输入:
@@ -164,14 +164,14 @@ STABLE_VERDICT<TAB>PKG<TAB>STABLE-READY|NOT-READY<TAB>failed=N<TAB>unknown=M<TAB
 
 - (1) 任何代理或集成者随时可以跑默认模式,看差哪几条。
 - (2) 输出 `STABLE-READY` 后,集成者跑 `--declare PKG`,把它写出的三处改动连同账本行作为一个提交推送。提交说明写包名、`api_sha`、候选身份。
-- (3) 账本行:id `STABLE-DECLARE-PKG`,事件写判据全 ok、`api_sha`、候选;证据列写 `check-stable` 的输出路径。回滚办法写明:在含该声明的公开版发布之前,可用一个提交把策略行改回 `no`、版本改回;公开版发布之后不可回滚,只能走弃用周期。
+- (3) 账本行:id `STABLE-DECLARE-PKG`,事件写判据全 ok、`api_sha`、候选;证据列写 `stable-eval` 的输出路径。回滚办法写明:在含该声明的公开版发布之前,可用一个提交把策略行改回 `no`、版本改回;公开版发布之后不可回滚,只能走弃用周期。
 - (4) 不向主人请示。主人的作用止于批准本策略文本;此后改判据本身才需要改本文,并在账本留行。
 - (5) 没有 `STABLE-READY` 输出而翻转策略行的提交,由 `--verify` 在提交前检查里报红(该包判据不成立即违例)。
 - (6) 稳定声明按包逐个做,不要求六个核心包同一天达标;顺序受 S10 约束:无上游的包先行,`cx.os`、`cx.stream` 在其依赖之后。拆包后各包的实际依赖边未核(`cx.path` 现登记依赖 `cx.base`,落到拆出的哪一包待查)。
 
 ## 9 未核实与取值依据
 
-- (1) `tools/check-stable.cx` 不存在,第 7 节全部是待实现的合同。
+- (1) `tools/stable-eval.cx` 不存在,第 7 节全部是待实现的合同。
 - (2) S6 的 `SURF` 行格式是新约定,现有检查都不输出它;现有面检查(`check-cx-sys*`、`check-cx-path` 等)对每行每码的覆盖程度未统计。
 - (3) S7 所需的「按包的面批次在六目标 CI 上实跑」现状未核;`docs/cx/prd.md` 记有 `win/arm64` 复用 `win/x86_64` 的 PE,按本文该格在未实际执行前记 UNKNOWN。
 - (4) S8 的 3 个版本与 30 天、第 5 节的 3 个版本与 30 天、第 6 节的 2 个版本与 3 个调用单元,是参照 P5.2(至少两个版本)、N5.5(实验期至少跨一个大版本)后按本仓发布节奏取的值,没有本仓数据支撑;调整须改本文。

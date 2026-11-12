@@ -1,0 +1,232 @@
+/* tools/stable-eval.cx -- evaluate the stability criteria S1..S13 of docs/cx/stability.md per package.
+ *
+ *   sh ./unisacc.com tools/stable-eval.cx [-- ROOT [PKG...]]
+ *
+ * Nobody declares a package stable by judgment: this tool prints, per package and criterion, ok | FAIL | UNKNOWN
+ * with a reason, and the package line STABLE-READY only when all thirteen are ok.  Exit 0 only when every
+ * evaluated package is STABLE-READY, else 1.  Not run, not measurable from the tables, or the table column does
+ * not exist yet is UNKNOWN, never ok.
+ *
+ * v0 evaluates from the tables only (no tool is run, no CI evidence is read):
+ *   S2  no status=new row of the package in build/std-surface.tsv       (std-surface package names)
+ *   S4  no `unverified` platform cell of the package                     (std-surface package names)
+ *   S10 every dependency in build/tlib-packages.tsv has policy `yes`      (tlib package names)
+ *   S13 agentwork/ledger.tsv holds a row STABLE-REVIEW-PKG               (any package name)
+ * S1 S3 S5 S6 S7 S8 S9 S11 S12 are UNKNOWN until their columns / evidence exist (stability.md section 4); the
+ * reason says which.  A package that is in neither table is reported NOT-READY with every criterion UNKNOWN.
+ * Default package list: every package of build/tlib-packages.tsv plus every package of build/std-surface.tsv. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+enum { CS_MAXPKG = 48, CS_NAME = 64, CS_COLS = 12 };
+
+typedef struct { const char *p; long n; } cs_span;
+
+static char pkgs[CS_MAXPKG][CS_NAME];
+static int npkgs;
+
+static int span_is(cs_span s, const char *z) { return tx_same(s.p, s.n, z, tx_len(z, 256)); }
+
+static int split(const char *p, long n, cs_span *out, int max) {
+    int k = 0;
+    long i, start = 0;
+    for (i = 0; i <= n; i++)
+        if (i == n || p[i] == '\t') {
+            if (k < max) { out[k].p = p + start; out[k].n = i - start; }
+            k++;
+            start = i + 1;
+        }
+    return k;
+}
+
+static void add_pkg(cs_span s) {
+    int i;
+    if (s.n <= 0 || s.n >= CS_NAME || npkgs >= CS_MAXPKG) return;
+    for (i = 0; i < npkgs; i++)
+        if (tx_same(pkgs[i], tx_len(pkgs[i], CS_NAME), s.p, s.n)) return;
+    tx_copy(pkgs[npkgs], CS_NAME, s.p, s.n);
+    pkgs[npkgs][s.n] = 0;
+    npkgs++;
+}
+
+static char *load(const char *root, const char *rel, size_t *n) {
+    char path[4600];
+    tx_snprintf(path, sizeof path, "%s/%s", root, rel);
+    return cx_read(path, n);
+}
+
+/* policy: global `stable` row and per-package rows; yes only when the row says so */
+static int policy_yes(const char *pol, size_t pn, const char *pkg) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    int global = 0, own = -1;
+    while (i < (long)pn) {
+        long e = i;
+        cs_span f[3];
+        int k;
+        while (e < (long)pn && pol[e] != '\n') e++;
+        k = split(pol + i, e - i, f, 3);
+        if (pol[i] != '#' && k >= 2) {
+            int yes = span_is(f[1], "yes");
+            if (span_is(f[0], "stable")) global = yes;
+            else if (tx_same(f[0].p, f[0].n, pkg, kl)) own = yes;
+        }
+        i = e + 1;
+    }
+    return own >= 0 ? own : global;
+}
+
+/* S2/S4 over std-surface rows of PKG: *rows rows seen, *newc status=new, *unv unverified cells */
+static void scan_surface(const char *t, size_t tn, const char *pkg, int *rows, int *newc, int *unv) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    *rows = *newc = *unv = 0;
+    while (i < (long)tn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k, c;
+        while (e < (long)tn && t[e] != '\n') e++;
+        k = split(t + i, e - i, f, CS_COLS);
+        if (t[i] != '#' && k >= 9 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            (*rows)++;
+            if (span_is(f[8], "new")) (*newc)++;
+            for (c = 5; c <= 7; c++)
+                if (span_is(f[c], "unverified")) (*unv)++;
+        }
+        i = e + 1;
+    }
+}
+
+/* S10: dependencies of PKG in the tlib table; -1 not a tlib package, else the count of deps without policy yes */
+static int deps_unstable(const char *pk, size_t pn, const char *pol, size_t poln, const char *pkg, int *ndeps) {
+    long i = 0, kl = tx_len(pkg, CS_NAME);
+    *ndeps = 0;
+    while (i < (long)pn) {
+        long e = i;
+        cs_span f[CS_COLS];
+        int k;
+        while (e < (long)pn && pk[e] != '\n') e++;
+        k = split(pk + i, e - i, f, CS_COLS);
+        if (pk[i] != '#' && k >= 6 && tx_same(f[0].p, f[0].n, pkg, kl)) {
+            long d = 0, bad = 0;
+            while (d < f[5].n) {
+                long de = d;
+                char dep[CS_NAME];
+                long at = -1;
+                while (de < f[5].n && f[5].p[de] != ';') de++;
+                if (de - d > 0 && !(de - d == 1 && f[5].p[d] == '-')) {
+                    long j;
+                    for (j = d; j < de; j++)
+                        if (f[5].p[j] == '@') { at = j; break; }
+                    if (at < 0) at = de;
+                    if (at - d < CS_NAME) {
+                        tx_copy(dep, CS_NAME, f[5].p + d, at - d);
+                        dep[at - d] = 0;
+                        (*ndeps)++;
+                        if (!policy_yes(pol, poln, dep)) bad++;
+                    }
+                }
+                d = de + 1;
+            }
+            return (int)bad;
+        }
+        i = e + 1;
+    }
+    return -1;
+}
+
+/* S13: a ledger row whose id is STABLE-REVIEW-<pkg> with an `accept` event */
+static int reviewed(const char *lg, size_t ln, const char *pkg) {
+    char id[CS_NAME + 16];
+    long i = 0, il;
+    tx_snprintf(id, sizeof id, "STABLE-REVIEW-%s", pkg);
+    il = tx_len(id, sizeof id);
+    while (i < (long)ln) {
+        long e = i;
+        cs_span f[4];
+        int k;
+        while (e < (long)ln && lg[e] != '\n') e++;
+        k = split(lg + i, e - i, f, 4);
+        if (k >= 3 && tx_same(f[1].p, f[1].n, id, il) && tx_find(f[2].p, f[2].n, "accept", 6) >= 0) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static void crit(const char *pkg, const char *id, const char *verdict, const char *why) {
+    sy_printf("CRITERION\t%s\t%s\t%s\t%s\n", pkg, id, verdict, why);
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    size_t ssn = 0, pkn = 0, pon = 0, lgn = 0;
+    char *ss = load(root, "build/std-surface.tsv", &ssn);
+    char *pk = load(root, "build/tlib-packages.tsv", &pkn);
+    char *po = load(root, "build/tlib-policy.tsv", &pon);
+    char *lg = load(root, "agentwork/ledger.tsv", &lgn);
+    int i, ready_all = 1;
+    if (!ss || !pk) {
+        sy_eprintf("stable-eval: cannot read build/std-surface.tsv or build/tlib-packages.tsv under %s\n", root);
+        return 2;
+    }
+    if (!po) { po = ""; pon = 0; }
+    if (!lg) { lg = ""; lgn = 0; }
+    if (argc > 2) {
+        for (i = 2; i < argc; i++) {
+            cs_span s;
+            s.p = argv[i];
+            s.n = tx_len(argv[i], CS_NAME);
+            add_pkg(s);
+        }
+    } else {
+        long a = 0;
+        while (a < (long)pkn) {
+            long e = a;
+            cs_span f[2];
+            while (e < (long)pkn && pk[e] != '\n') e++;
+            if (pk[a] != '#' && split(pk + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+        a = 0;
+        while (a < (long)ssn) {
+            long e = a;
+            cs_span f[2];
+            while (e < (long)ssn && ss[e] != '\n') e++;
+            if (ss[a] != '#' && split(ss + a, e - a, f, 2) >= 2) add_pkg(f[0]);
+            a = e + 1;
+        }
+    }
+    for (i = 0; i < npkgs; i++) {
+        const char *pkg = pkgs[i];
+        int rows, newc, unv, nd = 0, ok = 0, fail = 0, unk = 0, du;
+        char why[160];
+        scan_surface(ss, ssn, pkg, &rows, &newc, &unv);
+        crit(pkg, "S1", "UNKNOWN", "needs check-std-surface and layer-api output; not run by v0");
+        unk++;
+        if (!rows) { crit(pkg, "S2", "UNKNOWN", "package has no row in std-surface (not in the target layout)"); unk++; }
+        else if (newc) { tx_snprintf(why, sizeof why, "%d of %d rows are status=new", newc, rows); crit(pkg, "S2", "FAIL", why); fail++; }
+        else { tx_snprintf(why, sizeof why, "%d rows, none new", rows); crit(pkg, "S2", "ok", why); ok++; }
+        crit(pkg, "S3", "UNKNOWN", "errors column grammar not enforced yet (std-surface v2)"); unk++;
+        if (!rows) { crit(pkg, "S4", "UNKNOWN", "package has no row in std-surface"); unk++; }
+        else if (unv) { tx_snprintf(why, sizeof why, "%d unverified platform cells", unv); crit(pkg, "S4", "FAIL", why); fail++; }
+        else { crit(pkg, "S4", "ok", "no unverified cell"); ok++; }
+        crit(pkg, "S5", "UNKNOWN", "refusal cells have no cap vocabulary yet (std-surface v2)"); unk++;
+        crit(pkg, "S6", "UNKNOWN", "test column does not exist yet (std-surface v2)"); unk++;
+        crit(pkg, "S7", "UNKNOWN", "six-target CI evidence per package is not read by v0"); unk++;
+        crit(pkg, "S8", "UNKNOWN", "needs 3 public tags and 30 days of identical surface; not computed by v0"); unk++;
+        crit(pkg, "S9", "UNKNOWN", "consumer and libc-migration counts are not computed by v0"); unk++;
+        du = deps_unstable(pk, pkn, po, pon, pkg, &nd);
+        if (du < 0) { crit(pkg, "S10", "UNKNOWN", "not a package of build/tlib-packages.tsv"); unk++; }
+        else if (du) { tx_snprintf(why, sizeof why, "%d of %d dependencies are not stable", du, nd); crit(pkg, "S10", "FAIL", why); fail++; }
+        else { tx_snprintf(why, sizeof why, "%d dependencies, all stable", nd); crit(pkg, "S10", "ok", why); ok++; }
+        crit(pkg, "S11", "UNKNOWN", "own column does not exist yet (std-surface v2)"); unk++;
+        crit(pkg, "S12", "UNKNOWN", "layer-api, check-tlib-frozen and ratchets are not run by v0"); unk++;
+        if (reviewed(lg, lgn, pkg)) { crit(pkg, "S13", "ok", "ledger holds an accept row"); ok++; }
+        else { crit(pkg, "S13", "FAIL", "no ledger row STABLE-REVIEW-PKG with accept"); fail++; }
+        sy_printf("PACKAGE\t%s\t%s\tok=%d\tfail=%d\tunknown=%d\n", pkg, (ok == 13) ? "STABLE-READY" : "NOT-READY", ok, fail, unk);
+        if (ok != 13) ready_all = 0;
+    }
+    sy_printf("CHECK_STABLE\t%s\tpackages=%d\n", ready_all ? "STABLE-READY" : "NOT-READY", npkgs);
+    return ready_all ? 0 : 1;
+}

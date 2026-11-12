@@ -75,7 +75,7 @@ tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `
 
 - 阶段:孵化(`ext.*`)-> 预稳定(`cx.*`,版本只走 Z,打印本应的 y 或 x)-> 稳定(`1.0.0` 起,单向门)-> 弃用 -> 移除。
 - 稳定判据 S1 至 S13:面封口、全部实现、错误合同合文法、零未核、拒绝有名、用例覆盖成功失败与拒绝、六目标同候选实跑、面连续 3 个公开版且 30 天未变、有消费者且产品层 libc 计数为 0、依赖已稳定、所有权合同、机制绿、独立评审入账。
-- 判定者是 `tools/check-stable.cx`(待建):全部 ok 输出 `STABLE-READY`,集成者才提交翻转 `build/tlib-policy.tsv` 的包行并记账本;不请示主人。
+- 判定者是 `tools/stable-eval.cx`(待建):全部 ok 输出 `STABLE-READY`,集成者才提交翻转 `build/tlib-policy.tsv` 的包行并记账本;不请示主人。
 - 弃用三段:legacy(可永久)-> deprecated 带不可变编号 `CXDEPnnnn`(至少 3 个公开版且 30 天)-> 移除(X 升级,仓内调用点为 0)。安全例外由集成者决定并入账。
 - 新函数在面封口后只能先进 `ext.*`,满足提升判据再进 `cx.*`。
 
@@ -89,7 +89,7 @@ tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `
 | 棘轮(含上层禁裸 libc) | `sh ./unisacc.com tools/ratchets.cx` | 已有 |
 | 各区面批次(每行成功、失败、拒绝用例,输出 `SURF` 行) | `check-cx-sys*`、`check-cx-path` 等 | 已有批次;`SURF` 输出待加 |
 | 六目标同候选 | `release/candidate.tsv` 所指候选的 CI 证据 | 已有矩阵;按包的面批次待接入 |
-| 稳定判定 | `sh ./unisacc.com tools/check-stable.cx` | 待建 |
+| 稳定判定 | `sh ./unisacc.com tools/stable-eval.cx` | 待建 |
 
 未实跑不记 PASS;证据只绑定产生它的候选。
 
@@ -100,7 +100,7 @@ tlib 侧现状与此不符:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 仍合在 `
 | 序 | 内容 | 前置 | 触产品输入 |
 |---|---|---|---|
 | C1 | 表升 v2:四列、能力词表、错误文法归一、129 处行编辑落表;`check-std-surface` 同步 | 无 | 否(表与工具) |
-| C2 | 建 `tools/check-stable.cx` 与夹具,先跑出各包差距清单 | C1 | 否 |
+| C2 | 建 `tools/stable-eval.cx` 与夹具,先跑出各包差距清单 | C1 | 否 |
 | C3 | 纯计算层收口:`mg_*`、`ms_*` 并入 `cx.mem`,`tx_snprintf` 并入 `cx.text`,失败合同改负码;`text`、`buffer` 两区的 new 行实现 | C1 | 是 |
 | C4 | 拆 `cx.base` 为 `cx.sys`、`cx.os`、`cx.mem`、`cx.text` 加内部包 | C3 | 否(包表;发布链冷构造不读 tlib) |
 | C5 | 错误码归一与 `sy_err_kind`、`sy_cap`、`sy_res_live`;64 位与 deadline 签名改动;`time`、`os-env` 的 new 行 | C4 | 是 |
