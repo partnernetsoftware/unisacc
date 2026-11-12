@@ -489,7 +489,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
 | `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
-| `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.53）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
+| `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（docs/REPO-MAP.md、glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
 | `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、docs-2026-11/（2026-11 文档清理移入的 plans 与 research，索引 INDEX.md）、prd 历史 |
@@ -506,22 +506,22 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="work-tree"></a>
 ### 9.1 思维树（当前节点；每轮先读，事实/阻塞/下一动作原位更新）
 
-**当前已发布：0.0.53**（tag `v0.0.53`，候选表 `release/candidate.tsv`）。APE sha256 `0842748d9663fbf97329d7ee4bfeeea0dceac2ed2a0e41d06c9290ef6985f6e2`（6,529,476 B），构造源 `7f2f32cfde`，源 SID `4001d3e2…` 与 0.0.52 相同：产品输入零改动，六片、kernel、P4（`56efea53`）复用 0.0.52 链产物，本版没有重跑两代不动点。同候选六目标原生 CI QUALIFIED 42 / 0（运行 42914663896）。s9 只跑了 commit 档：128 选 124 PASS、FAIL 2、UNKNOWN 2，NOT_FULL；daily / release 档未跑，**全批资格 NOT_QUALIFIED**。已知缺口照 [plans/release-notes-0.0.53.md](plans/release-notes-0.0.53.md)：整链未从干净状态重跑（A1 一条命令不成立，0.0.52 有 5 处手工介入）、stages 批红 13 项、e3 空 body 修复未入、g2 / p3 拆分未入、yb-all 顺延、M1-M4 模型层未开工。
+**当前已发布：0.0.57**（tag `v0.0.57` -> `99fc0b48a2`，候选表 `release/candidate.tsv`，发布说明 [plans/release-notes-0.0.57.md](plans/release-notes-0.0.57.md)）。APE sha256 前缀 `c116a52f`（6,648,004 B）；构造源 `60acc817b8`，源 SID `25e41517`；整链重建一轮，链内 compare 全 same。产品字节与 0.0.56 相同，仅版本串不同；唯一产品输入改动是 basered 基线红清零。同候选六目标原生 CI 运行 43094459755 QUALIFIED 42 / 0 / 0 / 0（pass / fail / not_run / invalid）。公开无认证读回 6/6，`--version` 为 `unisacc 0.0.57`。s9 提交档实测：选 154，PASS 150、FAIL 2、UNKNOWN 2，NOT_FULL；FAIL 为 `s9-nightly-run-pass`、`s9-nightly-run-fail`（与 0.0.56 同批同检查项，s9split 的修复在真实会话未生效），UNKNOWN 为 `register-metadata-rollback`、`candidate-chain` 的 55 秒超时，四批原因未定，未修，未重跑。release-decide 步 4 记 FAIL 重裁，**全批资格 NOT_QUALIFIED**（unknown=0 fail=1）；s9 daily 713 批与 release 41 批至今没有跑通过一次。
 
-**本机已装根**：0.0.52 APE（`1bffabba…`，6,529,460 B）；其 `unisacc.com.build.json` 里的 commit / sources_sha256 仍是 `bc5b04bf14` / `a811885e…`（0.0.51 的值，2026-11-11 读文件所见），与 0.0.52 构造源 `23e6a567dd` 不符，未查原因。
+**本机已装根**：0.0.57 APE（`c116a52f`，`install-ape` 写 `plans/root-identity.md` 身份块与 `ape-receipt.txt`）。
 
-**当前版本：0.0.54，主题「梳理与提速」**（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`）：
-- 梳理：prd 系列（本文、[prd_cx.md](prd_cx.md)、prd_hist.md、glossary）以 §3 为唯一结构定义。
-- 提速：每层 / 每流 / 每网的运行速度与开发回路（构造链相位、s9、集成门、单流测试、增量网构造、冷编）。基线数字全在 §3，线索在 §9.5。产品输入改动至多一类。
-- 不做：cx 流网的设计实现（CX0 进表变网、20 个骨架网落行为、CX0 成为第 8 个模型流）顺延 **0.0.56/0.0.57**（原定 0.0.55，VER055-SPEED 改判），范围与验收见 prd_cx.md §6/§8。
-- 计划文件 `plans/v0.0.54-unisacc.md` 尚未建；任务以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准。
+**当前版本：0.0.58，进行中**（计划见 `plans/v0.0.58-unisacc.md`，定稿于 2026-11-12，基线 main `1e269c53bb`）：
+- 唯一产品改动 P1：规划器单源（prd_cx.md 55-1）。`cx/compiler/cxmod.cx` 由 `cx/cx0/plan.cx` 标记区经 `tools/cx0-extract.cx --target product` 生成并受逐字门约束，`CXM_MAXU` 三处同取 128 并入 `exec/facts/limits.tsv`，壳剖面表 `exec/facts/cx0-shell.tsv`。产品必然换 SID，六片不再与 0.0.57 同字节；P1 不含 55-2、55-3、55-4。
+- 工具与测试：T1 G2 预算分批、T2 chain-run 逐相预算（K10）、T3 按目标 4 路并行（K9）、T4 字面锚点禁用（anchorban）、T5 发布尾部自动化、T6 资产齐全后触发 CI（assetguard）、T7 safe-ff、T8 release-tidy、T9 版本度量（metrics）、T10 本文回写、T11 续跑复核开销与分段、T12 s9 提交档四批修复（s9red）、sweep。
+- 目标：冻结到公开不超过 100 分钟（硬线 120）、人工介入 0、chain-run 零接触 PASS、单次操作不超过 300 秒。即使全部达标，全批资格仍是 NOT_QUALIFIED。
+- 任务以 `agentwork/items.tsv`、进度以 `agentwork/ledger.tsv`、相位耗时以 `agentwork/phase-times.tsv` 为准。
 
-三个最大阻塞（2026-11-11）：
-- **全批资格**：s9 daily（650 批）/ release（41 批）档至今没有跑通过一次；commit 档首步 252.7 s 贴 300 s 上限。
-- **链不能一条命令过**：35 相位里 osx / win 片靠工具层分相，0.0.52 手工介入 5 处；修复（0.0.53 M1-M5）后没有从干净状态重跑验证。
-- **改一张表的回路太长**：增量网构造只有演练，没接候选链；全量 131 作业 276.9 s，之后还要 routes、p3、六片三代。
+阻塞（2026-11-12）：
+- **全批资格**：s9 daily / release 档未跑通过；提交档 0.0.57 为 150 / 2 / 2。
+- **链零接触未验**：T1 至 T3、T11 尚未落 main，R3 整链彩排尚未做；`g2-budget-gen` 批次门内 FAIL 原因未定。
+- **补丁队列冲突**：anchorban 与 g2batch 在 `tools/check-chain-argv-check.cx` 真冲突，s9red 与 k9 在 `tools/check-candidate-chain.cx` 真冲突，须按序重导。
 
-往期发布（0.0.49 至 0.0.52）的身份与经过见各版发布说明与 [prd_release.md](prd_release.md)；2026-11-11 自本节删去的旧段落索引在 [prd_hist.md](prd_hist.md) 末节。
+往期发布（0.0.49 至 0.0.56）的身份与经过见各版发布说明与 [prd_release.md](prd_release.md)；2026-11-11 自本节删去的旧段落索引在 [prd_hist.md](prd_hist.md) 末节。
 
 <a id="product-map"></a>
 ### 9.6 产品全景表（生成块；`tools/product-map.cx -- --write` 重算，勿手改；位置在 §9.1 与 §9.2 之间是历史原因）
@@ -619,8 +619,8 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 | 房间 | 当前事实 | 入口 |
 |---|---|---|
 | 任务队列 | `agentwork/items.tsv`（owner 列=tmux 窗口名；只有 READY 项被 omp-workflow 自动续跑）；进度追加在 `agentwork/ledger.tsv` | [agentwork/WORKFLOW.md](agentwork/WORKFLOW.md) |
-| 当前发布 | 0.0.53（§9.1）；旧候选资格不迁移 | [0.0.53 发布说明](plans/release-notes-0.0.53.md)、[prd_release.md](prd_release.md) |
-| 当前版本 | 0.0.54「梳理与提速」；0.0.55 为提速，cx 流网 0.0.56/0.0.57 | §9.1、§9.5、[prd_cx.md](prd_cx.md) §6、`agentwork/items.tsv` |
+| 当前发布 | 0.0.57（§9.1），tag v0.0.57 -> 99fc0b48a2；旧候选资格不迁移 | [0.0.57 发布说明](plans/release-notes-0.0.57.md)、[prd_release.md](prd_release.md) |
+| 当前版本 | 0.0.58 进行中（P1 规划器单源 + 工具）；0.0.59 = P59 实例化 + 门批量化；0.0.60 = P60 CX0 事实表 + 列车式发布 | §9.1、§9.5、[prd_cx.md](prd_cx.md) §6、`agentwork/items.tsv` |
 | 结构总表 | 五层、六片、7 + 1 流、网四口径、执行器、格式、事实表、构造链、测试 | §3（唯一权威）；cx 侧在 [prd_cx.md](prd_cx.md) |
 | 新入口 | `src/unisacc.cx` 六层（host/packmodel/executor/stages/drive/bind）；`src/core`、`src/runtime` 指向 `cx/` | [plans/cx-modules.md](plans/cx-modules.md)、§5 |
 | 流/网 | 7 + 1 流；18 金表网 / 20 cx 侧模块 / 42 构造网 / 40 模型 | §0、§3.3、§3.4 |
@@ -639,45 +639,52 @@ net	librarypartition	-	construction net: generator librarypartition/gen args -	-
 逐版发布历史见 [prd_release.md](prd_release.md) §往期发布；0.0.43 见 [plans/release-0.0.43.md](plans/release-0.0.43.md)，0.0.45 及 0.0.48 至 0.0.53 见 `plans/release-notes-<版本>.md`。0.0.47 逻辑分布普查结论与 0.0.48.1/0.0.49 收尾记录已迁入 [prd_hist.md](prd_hist.md)。
 
 ### 9.4 路线
-- **0.0.43 – 0.0.53**：已收口并发布（计划 `plans/v0.0.4x*.md`、`v0.0.5x-unisacc.md`，发布说明 `plans/release-notes-*.md`）；agent harness（cx-csih）仍归 csih 车道。
-- **0.0.54**：梳理与提速（§9.1、§9.5）。
-- **0.0.55**：提速（VER055-SPEED 改判，见 9.7）；cx 流网设计与实现顺延 0.0.56/0.0.57（prd_cx.md §6/§8）；模型层 M1-M4 以 cx 侧骨架网为落点，随 0.0.57 裁定。
+- **0.0.43 – 0.0.57**：已收口并发布（计划 `plans/v0.0.4x*.md`、`v0.0.5x-unisacc.md`，发布说明 `plans/release-notes-*.md`）；agent harness（cx-csih）仍归 csih 车道。
+- **0.0.58**：进行中，唯一产品改动为规划器单源 P1（55-1），其余为工具与测试（§9.1、§9.5）。
+- **0.0.59**：P59 解析状态实例化（55-2）加门批量化、main 健康检查、夜跑彩排。
+- **0.0.60**：P60 CX0 事实表入库与第 8 流（55-4）加列车式发布；骨架网第一批随之裁定（prd_cx.md B2 55-4..55-6）。
 - **0.1.x**：Clang/GCC/TinyCC 接入 `.cx`（共用前端 + 后端插件）；gcc_cx / clang_cx 宿主现状见 prd_cx.md 开篇。
 
 <a id="optimization-leads"></a>
-### 9.5 提速线索（0.0.54；基线数字一律引 §3，不在此重复）
+### 9.5 提速线索（0.0.58；基线数字一律引 §3，不在此重复）
 
-| 对象 | 现耗时（§） | 线索 |
+| 对象 | 现状 | 线索与归属 |
 |---|---|---|
-| L3 nets 构造 | 131 作业 276.9 s（§3.4） | BASE-6 增量接进候选链：`net-deps --touch` 选网，只重建波及网 |
-| 构造链 g1-g3 | 每片 49-142 s，三代六片（§3.7） | 六片按冲突域并行；osx / win 分相接进自动相位；干净状态整链重跑并计墙钟 |
-| e2 / e1（冷编） | 9 单元 1.83 s，占 27%（§3.3） | 单元前端结果按内容身份缓存（唯一一项产品输入改动的候选） |
-| e3 | 单次最大相位 1.88 s（§3.3）；链内 35.7-39.5 s 贴 45 s 闸 | 0.0.54 不动产品；yb-all（执行器检查点）另候选 |
-| s9 | commit 档首步 252.7 s；daily 未跑通（§3.8） | 首步再分片；daily 分夜跑满一次并入 phase-times |
-| 集成门 | 81-95 s / 补丁（0.0.48 数据，§3.8） | 棘轮按路径增量、native 工具缓存；重测基线 |
-| 单流测试回路 | `check-stages` 10.7 s 且红 13 项（§3.3） | 先修红，再做「改表 -> p3-swap -> 单流 golden」一条命令 |
-| L0 / APE 体积 | 头 42.2% 未压缩、padding 7.1%（§3.0） | 属产品输入大改，不进 0.0.54 |
+| 冻结到公开 | 0.0.57 实测 190.6 分钟（冻结 01:07 起链至 04:18 公开） | 目标不超过 100 分钟（硬线 120）；T1 至 T3、T11 合计压缩，以 R3 整链彩排实测为准 |
+| G2 预算分批 | 0.0.57 手工续跑，BLOCKER-3 至 MANUAL-5 | T1：逐键 journal 续跑（`c57-g2batch-r3`）；先定 `g2-budget-gen` 批次门内 FAIL 的原因 |
+| chain-run 预算与所有权 | 逐相预算不持久，进程所有权靠人工 | T2：逐相预算、持久 deadline、进程所有权（K10） |
+| 相位并行 | 按目标串行 | T3：按目标最多 4 路并行，七列相位表（K9） |
+| 续跑复核开销 | 五个观测点 13 至 169 秒，总量 UNMEASURED | T11：实测每次重入固定开销，超 15 秒则做带身份与失效规则的持久备忘；chain-run 增段秒数与监督器自动续段（每段不超过 280 秒） |
+| 发布尾部 | 17 相命令已有，缺 CONFIG 与 dry-run | T5：对 rel057 材料 dry-run；T6：资产齐全后才触发 CI（assetguard） |
+| s9 | 0.0.57 提交档 150 PASS / 2 FAIL / 2 UNKNOWN，NOT_QUALIFIED；daily 713 批、release 41 批至今没有跑通过一次 | T12：四批修复（s9red），冻结前应落、不卡冻结；daily / release 整档属 0.0.59 门批量化 |
+| 字面锚点 | 五域共 68 处发现 | T4：cx-lint R4 禁用，计数入表只降不升 |
+| 版本度量 | 无统一表 | T9：`agentwork/version-metrics.tsv` 加生成器，回填 0.0.54 至 0.0.57 |
+| L0 / APE 体积 | 头 42.2% 未压缩、padding 7.1%（§3.0） | 属产品输入大改，不进 0.0.58 |
 
 ### 9.7 未来计划（路线与入口；细节见各版 plans 文件，数字未标出处者为估计）
 
-- **0.0.55 提速**：开发回路根治 D1-D8、P1 产品内单元前端缓存（本版唯一产品输入大改）、T3 增量网接链与相位表、一条命令发布；从 0.0.56 前移两项不触产品输入的提速工具：`unisacc-loader.com` 外置加载器（按带 sha 清单加载外置片与 NN 模型，改表或重编单片不重打 APE 即实测）与按目标独立可执行 `unisacc-{lnx,osx,win}64-{x86,arm}[.exe]`（量化 L0 启动器开销），均在可砍线上。详见 `plans/v0.0.55-unisacc.md`（由提速计划落成，尚未生成）。
-- **0.0.56**：cx 规划器单源与实例化、cx-tri 三宿主一致性门（prd_cx.md §8 B2 55-1..55-3）；交叉编译结构调查（用户程序出码是否链入预编原生对象、nativeabi/symbols 模型作用、e3 类型网是否按目标区分，结论写回 §3）；目标可外部扩展的设计（目标枚举与路由数据驱动，外部包按 manifest 追加模型、路由、预定义、头文件，与 prd_cx.md B3-B5 外置分层合并）；承接 0.0.55 外置加载器作为 L0 booter 原型。详见 `plans/v0.0.56-unisacc.md`。
-- **0.0.57**：cx 入表与第 8 流、骨架网第一批（prd_cx.md B2 55-4..55-6）。
-- **0.0.58 及以后**：
+排序依据（主人愿景）：在稳步推进功能的基础上，优先做对提升整体开发迭代速度有用的项。每版只留一项产品或功能改动，其余槽位给缩短冻结到公开、减少人工、门吞吐、左移检查、并行化与增量复用。
+
+- **0.0.58（进行中）**：唯一产品改动 P1 规划器单源（prd_cx.md 55-1，补丁 `c58-planner`）；工具侧 T1 至 T12（G2 预算分批、chain-run 逐相预算、按目标 4 路并行、字面锚点禁用、发布尾部自动化、assetguard、s9 红批修复、版本度量、续跑复核开销）。目标：冻结到公开不超过 100 分钟（硬线 120）、人工介入 0、chain-run 零接触。详见 `plans/v0.0.58-unisacc.md`。
+- **0.0.59**：P59 解析状态实例化（prd_cx.md 55-2，去掉对工作进程隔离的依赖）；门批量化（门栈批量与门脚本迁移）、main 健康检查与令牌池、夜跑彩排；items 整表清账（H4）、贴线批次（H5）。
+- **0.0.60**：P60 CX0 事实表入库与第 8 流（prd_cx.md 55-4，及 cx-tri 三宿主门 55-3 视矩阵结果）；列车式发布（固定节拍，随车搭载已绿的工具与产品改动）。
+- **0.0.61 及以后**：
+  - 目标可外部扩展的设计（目标枚举与路由数据驱动，外部包按 manifest 追加模型、路由、预定义、头文件，与 prd_cx.md B3-B5 外置分层合并）；交叉编译结构调查（用户程序出码是否链入预编原生对象、nativeabi/symbols 模型作用、e3 类型网是否按目标区分，结论写回 §3）。
+  - 外置加载器 `unisacc-loader.com` 与按目标独立可执行（量化 L0 启动器开销），原属 0.0.55 可砍线，未落地，重新排期。
   - N0 APE 头压缩（省约 36%，单独立版）。
-  - 新目标 lnx-x86-32 先于 lnx-arm-32，以扩展包形式提供，依赖目标可外部扩展；交叉出码到 32 位，编译器本身不在 32 位运行；主要改 L3 lower/elf 模型、enc 表、syscall 分派节、e2 预定义、e3 类型布局、L4 头；ARM32 编码为大头。
+  - 新目标 lnx-x86-32 先于 lnx-arm-32，以扩展包形式提供，依赖目标可外部扩展；交叉出码到 32 位，编译器本身不在 32 位运行；ARM32 编码为大头。
   - 链接单元 CX-W-1。
-  - yb-all 待 0.0.55 测量后定。
+  - yb-all 待门与链提速后测量再定。
 
 ## 10. 子文档与归档索引（树）
 
 ```
 prd.md                 当前状态（本文件，只写当前事实；结构点唯一定义在 §3）
-├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.55 路线
+├─ prd_cx.md           cx 侧结构：三宿主、CX0 流、cx 侧网模块、包层、0.0.58 至 0.0.60 路线
 ├─ prd_release.md      发布与 CI 手册、0.0.48/0.0.49 教训、往期发布身份
 ├─ prd_hist.md         历史完成记录与证据（只读；新记录写 agentwork/ledger.tsv）
 ├─ docs/glossary.md    术语层（T1-T5）的逐处核实
-├─ plans/              各版计划与发布说明（最新 v0.0.53-unisacc.md、release-notes-0.0.53.md）
+├─ plans/              各版计划与发布说明（最新 v0.0.58-unisacc.md、release-notes-0.0.57.md）
 ├─ build/graph.tsv     构造图事实表（graph-check 读）；build/product-map.tsv 全景表
 ├─ agentwork/          任务看板 items.tsv、账本 ledger.tsv、phase-times.tsv、WORKFLOW.md
 └─ archive/            旧实现与旧文档（见下）
