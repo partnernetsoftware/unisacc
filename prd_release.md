@@ -43,7 +43,7 @@
 | 4 | 提交 X 后共享检出未快进，后续补丁的集成门基线过期 | 集成者在私有克隆推了 X，共享检出仍在旧 HEAD | 发布提交 X/Y 推送后立即在共享检出 `git merge --ff-only origin/main` 并检查返回码（§6 已有规则，本版再犯） | 账本 2026-11-10 `C49-TOOLS-READY-CDX HANDOFF`（baseline 以 35cfdd1e 重算）；具体返工次数未测 |
 | 5 | Win 分相 worker 静默 rc=2 | worker 模板选错：span 相必须用 `whole-win-span` 模板，不是 `whole-front` | 分相模板按相位名选，`whole-front.cx` 对模板/相位不匹配应具名拒绝 | 提交 `ba945f3238`（模板 whole-front/whole-win-span）；具体失败日志在 `out/c49-slow-cdx-979b56e4/`（本文未逐条核，未测） |
 | 6 | P3 相位贴 60s（计划 §1b 记 P3 59s）、gen1 osx/x86_64 首次超时 76.558s | 每相位重复 freeze 拷贝 6.5MB 已装 APE（`release-build` 冻结 16.827s 为其中一例） | 冻结一次、各相位复用同一快照；0.0.50 G0 持久检查点 + `--resume` | `agentwork/phase-times.tsv` 第 39、54 行；计划 §1b；「每相位拷 6.5MB」的逐相位耗时未单测 |
-| 7 | G0 在不同物理根复现：Linux 片 SHA 相同，Mac 合并帧差 6643B | 帧/收据依赖物理根（疑 `#line` 路径），产品产物不依赖 | cmp 判据分层：帧/收据允许依赖根，切片/内核/P4/APE 绝不允许；`build/graph.tsv` 增 `root_dependent` 列，新增 `check-root-independent` | 计划 [plans/v0.0.50-unisacc.md](plans/v0.0.50-unisacc.md) §1b |
+| 7 | G0 在不同物理根复现：Linux 片 SHA 相同，Mac 合并帧差 6643B | 帧/收据依赖物理根（疑 `#line` 路径），产品产物不依赖 | cmp 判据分层：帧/收据允许依赖根，切片/内核/P4/APE 绝不允许；`build/graph.tsv` 增 `root_dependent` 列，新增 `check-root-independent` | 计划 [archive/docs-2026-11b/plans/v0.0.50-unisacc.md](archive/docs-2026-11b/plans/v0.0.50-unisacc.md) §1b |
 | 8 | 与 0.0.48 镜像结构对照 28 处差异 | 源码不同，跨版本结构对照无判别力 | 等价证据只用同源小规模 oracle（中等程序默认 vs 分相镜像 cmp0）+ 两代不动点 + CI；跨版本对照只作信息记录 | 发布说明「已知限制」；计划 §1 |
 | 9 | 冻结 -> 公开十余小时，计算之和约 31 分钟 | 相位间人工/代理间隙、临时设计 Mac/Win 分相方案 X、工具缺陷返工 | 0.0.50 §0：一条命令到草稿 release ≤20 分钟 | 发布说明「已知限制」；计划 §0 |
 
@@ -55,7 +55,7 @@
 | 2 | 候选链 worker.o 出现 `setpgid` libc 外部引用,六片 g1 链接不过,先被判为产品回归 | 链准备的 worker 源与 0.0.49 不同(模板 `st_includebase(0,0)` 改 `include`、编译带 `-I include`),编译器本身无差异(同一 min.cx 两版输出逐字节相同) | 判「产品回归」前先做同源最小对照;链在 wf-prepare 后断言 worker.o 外部引用只许 `sy_*`;模板按 SHA 钉入收据 | `out/c050-y0/y0-setpgid-regression.md`;items `Y0-SETPGID-REGRESSION` |
 | 3 | 后备候选的记录 `commit` 该写什么 | 产品字节来自 979b56e4,打包时 main 头已前进且含未进产品的 Y-0 | 候选表/记录 `commit` 永远写真实构造源;main 头只出现在提交 X/Y 与 CI 的 `-f commit`;发布说明写清两者关系 | 0.0.50 发布说明「身份与证据」 |
 | 4 | 独立资产 slice-win-arm64 没有注入工具,0.0.49 时靠临时程序 | 注入只在 ape-pack 内存里做 | `tools/version-inject.cx` + `check-version-inject`(批次 version-inject) | 提交 `114ef751be` |
-| 5 | 后备路径从接手到公开 50 分钟(CI 10 分钟),主路径 Y-0 链自 11-09 起多次停摆未完成 | 停摆无人察觉、隐性前提、门后回归(0.0.51 计划 1b) | 0.0.51 第零批 W/PF/RA/LD 先于任何产品候选 | [plans/v0.0.51-unisacc.md](plans/v0.0.51-unisacc.md) 1b |
+| 5 | 后备路径从接手到公开 50 分钟(CI 10 分钟),主路径 Y-0 链自 11-09 起多次停摆未完成 | 停摆无人察觉、隐性前提、门后回归(0.0.51 计划 1b) | 0.0.51 第零批 W/PF/RA/LD 先于任何产品候选 | [archive/docs-2026-11b/plans/v0.0.51-unisacc.md](archive/docs-2026-11b/plans/v0.0.51-unisacc.md) 1b |
 
 ## 3d. 0.0.51 发布教训
 
@@ -116,7 +116,7 @@
 |---|---|---|
 | 0.0.43 | 历史 | [plans/release-0.0.43.md](plans/release-0.0.43.md) |
 | 0.0.45 | 公开预发布 | [plans/release-notes-0.0.45.md](plans/release-notes-0.0.45.md) |
-| 0.0.47 | 已发布 | [plans/release-notes-0.0.47.md](plans/release-notes-0.0.47.md) |
+| 0.0.47 | 已发布 | [archive/docs-2026-11b/plans/release-notes-0.0.47.md](archive/docs-2026-11b/plans/release-notes-0.0.47.md) |
 | 0.0.48 | 正式版，CI 42/0（运行 42545543777），APE sha256 `559705097427cf8f…` | [plans/release-notes-0.0.48.md](plans/release-notes-0.0.48.md) |
 | 0.0.48.1 | macOS 签名/公证草稿（v0.0.48.1-osx-launch-rc1，CI 42555350465 42/0，DMG 6e25e7c9…）；未作为正式版公开 | [plans/release-notes-0.0.48.1.md](plans/release-notes-0.0.48.1.md)、[prd_hist.md](prd_hist.md)「0.0.49 收尾」 |
 | 0.0.50 | 正式版（2026-11-10，tag `v0.0.50` 指向提交 Y `31c5886469`），CI 42/0（运行 42767415154，提交 X `114ef751be`），APE sha256 `76ed4200aaaf71b2…`；后备候选：产品字节同 0.0.49 源 `979b56e4` 六片只换版本串，Y-0 因 setpgid 回归留 0.0.51；s9 三档未跑 | [plans/release-notes-0.0.50.md](plans/release-notes-0.0.50.md) |

@@ -33,7 +33,7 @@
 |---|---|---|---|
 | `prd.md` | 当前状态与路线(思维树、记忆宫殿、能力速查),先读它;§8 为目录表 | 否 | 多人,用 `commit-own --keyed` |
 | `prd_hist.md`、`prd_release.md` | 状态历史与发布段落 | 否 | 主线 |
-| `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.50-unisacc.md`(0.0.50 记录)、`v0.0.51-unisacc.md`(增量、自含、一键)、`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.46` 至 `0.0.48` 与 `0.0.53` 至 `0.0.55`。过期的进 `archive/plans/`,2026-11 文档清理移走的在 `archive/docs-2026-11/plans/`(见下) | 否 | 主线,交接单不再写带日期的 plans |
+| `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.46`、`0.0.48` 与 `0.0.53` 至 `0.0.57`。过期的进 `archive/plans/`,2026-11 文档清理移走的在 `archive/docs-2026-11/plans/`,第二轮在 `archive/docs-2026-11b/`(含 `v0.0.50`、`v0.0.51` 计划与 `release-notes-0.0.47`,见其 INDEX.md) | 否 | 主线,交接单不再写带日期的 plans |
 | `docs/` | 契约与说明:`glossary.md`、`toolchain.md`、`tapebin-v1*.md/tsv`、`tape-vs-wasm.md`、`host-interop.md`、`cx-spec-draft.md`、`docs/cx/`、本页 | 否 | 主线 |
 | `README.md`、`spec.md`、`ARCHITECTURE.md` | 用户视角入口、条款全文、早期架构叙述(含历史段落,以 `prd.md` 为准) | 否 | 主线 |
 | `AGENTS.md`、`CLAUDE.md` | 协作与工作规则 | 否 | 主人/集成者 |
@@ -58,7 +58,7 @@
 ## 我想做 X,去哪里
 | 想做 | 去 |
 |---|---|
-| 看现在做到哪、有什么阻塞 | `prd.md` §9、`plans/v0.0.51-unisacc.md`、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
+| 看现在做到哪、有什么阻塞 | `prd.md` §9、`plans/v0.0.52-unisacc.md`、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
 | 找一个工具 | `prd.md` 能力速查,或 `ls tools | grep 关键字` |
 | 看候选构造图与隐性前提 | `build/graph.tsv`、`build/preflight-rules.tsv`、`tools/graph-check.cx` |
 | 改一张解析/约束表 | 改 `exec/parse2/*.tsv` -> `tools/a12-cycle.cx` -> `tools/affected.cx --files 表` |

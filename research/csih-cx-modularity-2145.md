@@ -102,7 +102,7 @@ source_hash, generator
 | **0.0.41（K6 主叶）** | `unisa/` → C 参考对拍；K6-9 等真审主叶 | **旁注并行、不挡、不改 gate 身份** |
 | **41 样例旁注** | CXIF / `.cx` 模块边界 **材料**（本刀） | research 可验收；**不**进 `tests/gate.sh` 产品套件 |
 | **0.0.42（K7 + 无 py/cc/sh 全链）** | 清点 + 全链验收 | **CXIF 执行器接线 / 模块门闩** 候选挂 **42+**，须另授；**不得**把本旁注样例静默升成 41 产品闸 |
-| **Paper A** | 构造 + T1 | 已有 derive-purify：cx-lab/CXIF 完稿 **≠ A 闸**（`research/notes/paper-a-derive-purify-cx-lab-include-free-not-a-gate-20261011-0139.md`）；本刀不重切 |
+| **Paper A** | 构造 + T1 | 已有 derive-purify：cx-lab/CXIF 完稿 **≠ A 闸**（`archive/docs-2026-11b/research/notes/paper-a-derive-purify-cx-lab-include-free-not-a-gate-20261011-0139.md`）；本刀不重切 |
 
 **分账句（可摘进计划旁注）：**  
 > CXIF cols 边界样例 = **41 可验收旁注材料**；**不是** 0.0.41 K6 产品义务，**不是** Softguess/T1/矩阵闸；工具链门闩与全链验收候选记 **42+ 另授**。

@@ -74,7 +74,7 @@
 
 ## 5. 文档重灾区（按 stage 次数，需逐处判定后替换）
 
-`research/ujs-paper.md`(25) · `README.md`(22) · `iterate/construct/README.md`(21) · `tests/k2translate.handoff.md`(16) · `research/unisacc-paper.en.md`(15) · `research/r20-2-reject-samples.md`(15) · `iterate/kernel/README.md`(15) · `exec/c/PACKAGE.md`(15) · `prd.md`(14) · `research/t2-coverage-design.md`(13) · `research/notes/paper-a-gate722-suite-to-stage-model-map-20261013.md`(13)
+`research/ujs-paper.md`(25) · `README.md`(22) · `iterate/construct/README.md`(21) · `tests/k2translate.handoff.md`(16) · `research/unisacc-paper.en.md`(15) · `research/r20-2-reject-samples.md`(15) · `iterate/kernel/README.md`(15) · `exec/c/PACKAGE.md`(15) · `prd.md`(14) · `research/t2-coverage-design.md`(13) · `archive/docs-2026-11b/research/notes/paper-a-gate722-suite-to-stage-model-map-20261013.md`(13)
 
 **替换规则**：每处 `stage` 先判定是 L1（流）还是 L2（网），再替换为 `stream` / `net`；无法判定的**不得盲改**，标 `TODO(term)` 集中裁。
 
