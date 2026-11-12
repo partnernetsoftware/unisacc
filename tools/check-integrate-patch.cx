@@ -13,7 +13,10 @@
 #pragma unisa use sys.time
 static int checks,failed;static char why[1000];static long deadline;
 static void die(const char *s){fprintf(stderr,"check-integrate-patch: %s\n",s);exit(2);}
-static int sub(const char *h,const char *n){size_t m=strlen(n);if(!h)return 0;for(;*h;h++)if(!strncmp(h,n,m))return 1;return 0;}
+/* 表文件按整行/整字段精确比较(不做子串扫描) */
+static int has_line(const char *s,const char *line){size_t m=strlen(line);if(!s)return 0;while(*s){size_t k=0;while(s[k]&&s[k]!='\n')k++;if(k==m&&!memcmp(s,line,m))return 1;s+=k;if(*s)s++;}return 0;}
+static int has_field(const char *s,const char *tok){size_t m=strlen(tok);if(!s)return 0;while(*s){size_t k=0;while(s[k]&&s[k]!='\n'&&s[k]!='\t')k++;if(k==m&&!memcmp(s,tok,m))return 1;s+=k;if(*s)s++;}return 0;}
+static const char *rc_nocache;   /* 非空时作为额外环境变量传给 --resume */
 static void ck(int ok,const char *s){checks++;printf("%s\t%s\n",ok?"PASS":"FAIL",s);if(!ok)failed++;}
 static void path(char *p,size_t c,const char *a,const char *b){if(cx_fmt(p,c,"%s/%s",a,b))die("path");}
 static void put(const char *p,const char *s,size_t n){if(cx_write(p,s,n))die("write");}
@@ -31,7 +34,7 @@ static void fixture(const char *top,const char *native,const char *productroot,i
  char *head[]={"git","-C",root,"rev-parse","HEAD",0};r=run(head,0,12);if(r.rc)die("head");char before[65];if(r.outn>=sizeof before)die("head-bound");if(mm_copy(before,sizeof before,r.out,(long)r.outn))die("head-copy-bound");before[r.outn]=0;np_free(&r);
  char *apply[]={(char*)native,root,patch,dest,"--prepare-only",0};r=run(apply,0,55);ck(r.rc==(conflict?1:0),conflict?"non-table-conflict-is-nonzero":"real-stale-patch-threeway-prepare");ck(r.out&&!strstr(r.out,"READY_TO_COMMIT")&&!strstr(r.out,"GATES_ONLY"),"prepare-never-claims-gate-pass");if(!conflict)ck(r.out&&strstr(r.out,"status=PREPARED"),"prepared-phase-explicit");np_free(&r);
  r=run(head,0,12);ck(!r.rc&&r.out&&!strcmp(r.out,before),"source-HEAD-unchanged");np_free(&r);char *clean[]={"git","-C",root,"diff","--exit-code","HEAD",0};r=run(clean,0,12);ck(!r.rc&&!r.outn,"source-index-and-working-tree-unchanged");np_free(&r);
- if(!conflict){for(int k=0;k<4;k++){path(p,sizeof p,dest,am_path(k));size_t n;char *s=cx_read(p,&n);ck(s&&sub(s,"ours")&&sub(s,"theirs"),"both-table-sides-preserved");free(s);}char *hb[]={"git","-C",dest,"symbolic-ref","--short","HEAD",0};r=run(hb,0,12);ck(!r.rc&&r.out&&!strcmp(r.out,"main\n"),"candidate-HEAD-is-main");np_free(&r);r=run(apply,0,55);ck(r.rc==2,"existing-target-refused");np_free(&r);
+ if(!conflict){for(int k=0;k<4;k++){path(p,sizeof p,dest,am_path(k));size_t n;char *s=cx_read(p,&n);ck(s&&has_field(s,"ours")&&has_field(s,"theirs"),"both-table-sides-preserved");free(s);}char *hb[]={"git","-C",dest,"symbolic-ref","--short","HEAD",0};r=run(hb,0,12);ck(!r.rc&&r.out&&!strcmp(r.out,"main\n"),"candidate-HEAD-is-main");np_free(&r);r=run(apply,0,55);ck(r.rc==2,"existing-target-refused");np_free(&r);
   /* Resume must validate the frozen index/tree before attempting any gates. */path(p,sizeof p,dest,"plain.txt");put(p,"tampered\n",9);char *resume[]={(char*)native,"--resume",dest,0};r=run(resume,0,30);ck(r.rc==2&&r.err&&strstr(r.err,"candidate-unstaged-changes"),"resume-rejects-changed-input");np_free(&r);
  }else{char *u[]={"git","-C",dest,"ls-files","--unmerged",0};r=run(u,0,12);ck(!r.rc&&r.out&&strstr(r.out," 1\tplain.txt")&&strstr(r.out," 2\tplain.txt")&&strstr(r.out," 3\tplain.txt"),"non-table-three-sides-retained-in-index");np_free(&r);}
 }
@@ -154,7 +157,7 @@ static void rc_go(const char *top,const char *native,const char *root,const char
  char dest[4400],menv[4600],cenv[4600],lbl[200];static int seq;if(cx_fmt(dest,sizeof dest,"%s/rc-dest-%d",top,++seq)||cx_fmt(menv,sizeof menv,"S4_MARK=%s",mark)||cx_fmt(cenv,sizeof cenv,"INTEGRATE_RATCHET_CACHE_DIR=%s/ratchet-cache",rc_outdir))die("rc-path");
  int b0=mark_count(mark,1),h0=mark_count(mark,0);
  { char *ap[]={(char*)native,(char*)root,(char*)patch,dest,"--prepare-only",0};np_result r=run(ap,0,30);int rc=r.rc;np_free(&r);if(rc)die("rc-prepare"); }
- { char *rs[]={"env",menv,cenv,(char*)native,"--resume",dest,0};np_result r=run(rs,0,50);int hit=r.out&&strstr(r.out,"ratchets-base=CACHE_HIT")!=0;
+ { char *rs[]={"env",menv,cenv,rc_nocache?(char*)rc_nocache:(char*)"RC_X=1",(char*)native,"--resume",dest,0};np_result r=run(rs,0,50);int hit=r.out&&strstr(r.out,"ratchets-base=CACHE_HIT")!=0;
    int db=mark_count(mark,1)-b0,dh=mark_count(mark,0)-h0;
    if(cx_fmt(lbl,sizeof lbl,"ratchet-cache %s: base runs %d head runs %d hit %d",name,db,dh,hit))die("lbl");
    ck(db==want_base&&dh==want_head&&hit==want_hit,lbl);
@@ -213,7 +216,8 @@ static void ratchet_cache(const char *top,const char *native,const char *product
  put(mark,"",0);
  if(which>=8){preflight_case(top,native,root,patch,mark,which-8);return;}
  rc_go(top,native,root,patch,mark,"cold miss runs base and head once each",1,1,0);
- if(which==1)rc_go(top,native,root,patch,mark,"same key hit runs head only once",0,1,1);
+ if(which==1){rc_go(top,native,root,patch,mark,"same key hit runs head only once",0,1,1);
+  rc_nocache="INTEGRATE_NO_RATCHET_CACHE=1";rc_go(top,native,root,patch,mark,"INTEGRATE_NO_RATCHET_CACHE forces full pair: base and head rerun, no hit",1,1,0);rc_nocache=0;}
  else if(which==2){rc_sh("for f in \"$1\"/*; do printf 'garbage\\n' > \"$f\"; done",cdir);
   rc_go(top,native,root,patch,mark,"corrupted entry reruns base",1,1,0);}
  else if(which==3){rc_flip(root);rc_go(top,native,root,patch,mark,"changed product digest reruns base",1,1,0);}
@@ -247,10 +251,10 @@ static void prep_resume(const char *top,const char *native,const char *productro
  char *limited[]={"env","INTEGRATE_FAKE_PREP_MAX=3",(char*)native,"--test-prepare",dest,0};
  char *full[]={(char*)native,"--test-prepare",dest,0};
  prep_step("prepare budget stop is PENDING next_phase=prepare, not REFUSE",first,3,0,3,"status=PENDING\tnext_phase=prepare",0);
- { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&sub(s,"\nphase\t0\n"),"pending prepare receipt keeps phase 0");free(s); }
+ { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&has_line(s,"phase\t0"),"pending prepare receipt keeps phase 0");free(s); }
  prep_step("real --resume verifies identity, skips 3 recorded tools, compiles 3 more",resume,3,3,3,"status=PENDING\tnext_phase=prepare",0);
  prep_step("third call skips 6 and finishes the last 2",limited,0,6,2,"INTEGRATE_TEST_PREPARE\tdone=1",0);
- { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&sub(s,"\nphase\t1\n"),"finished prepare advances receipt to phase 1");free(s); }
+ { path(p,sizeof p,dest,".git/integrate/receipt.tsv");size_t n;char *s=cx_read(p,&n);ck(s&&has_line(s,"phase\t1"),"finished prepare advances receipt to phase 1");free(s); }
  prep_step("all recorded and unchanged: nothing recompiled",full,0,8,0,"skipped=8\tcompiled=0",0);
  /* 负例:产物 sha 不符 -> 只重编该工具 */
  rc_sh("set -- \"$1\"/.git/integrate/compile-out.d/*.bin; [ $# -eq 8 ] && printf 'garbage\\n' > \"$1\"",dest);
@@ -293,10 +297,6 @@ int main(int argc,char **argv){
  else if(sy_realpath(argv[2],native,sizeof native)<0||sy_realpath(argv[3],root,sizeof root)<0)die("arguments");
  if(land_only){if(rc_which==7)ck(sy_exists(native)==1,"rc native prepared (PREPARED only, no verdict)");else if(rc_which==8)prep_resume(temp,native,root);else if(rc_only)ratchet_cache(temp,native,root,rc_which-1);else if(aff_only)aff_resume(temp,native,root);else land_real(temp,native,root);printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
  fixture(temp,native,root,0);fixture(temp,native,root,1);entry_neg(temp,native,root);freeze_and_compile_neg(temp,native,root);registry_neg(temp,native);
- /* 基线棘轮缓存合同:键含基线树id与产品摘要,命中须过ratchet_valid,head侧永远现跑,可用环境变量关闭回完整双扫 */
- {char sp[4400];path(sp,sizeof sp,root,"tools/integrate-patch.cx");size_t sn;char *ss=cx_read(sp,&sn);
-  ck(ss&&sub(ss,"integrate-ratchet-cache/%s-%s.base.stdout\",bt,product")!=0,"ratchet cache key = baseline tree + product digest");
-  ck(ss&&sub(ss,"if(ratchet_valid(cs,cn)){char bp[5000]")!=0,"ratchet cache hit must pass ratchet_valid");
-  ck(ss&&sub(ss,"INTEGRATE_NO_RATCHET_CACHE")!=0&&sub(ss,"headonly")!=0,"full pair path kept behind INTEGRATE_NO_RATCHET_CACHE; head always scanned");
-  free(ss);}
+ /* 基线棘轮缓存合同(键=基线树+产品摘要、命中须校验、head 永远现跑、环境变量关闭回双扫)
+    由 --rc-cold/hit/corrupt/product/input/tool 行为批次验证,不再对 integrate-patch.cx 源码做文本锚定。 */
  printf("INTEGRATE_PATCH_MATERIALS\t%s\n",temp);printf("INTEGRATE_PATCH_CHECK\tchecks=%d\tfailed=%d\n",checks,failed);return failed?1:0;}
