@@ -14,3 +14,5 @@
 | research/c48-native-selfhost | research/c48-native-selfhost | 23 | 0.0.48 X3 原生不动点原始记录;prd_hist、v0.0.48 计划、items 的引用已改指本处 |
 | research/c48-base-single-net | research/c48-base-single-net | 8 | 0.0.48 BASE-3 三网全键验证记录;引用已改指本处 |
 | research/c48-base-incremental | research/c48-base-incremental | 345 | 0.0.48 BASE-6 增量骨架演练记录(分 8 批移入);引用已改指本处 |
+| plans/v0.0.44.md | plans/v0.0.44.md | 1 | 0.0.44 版计划(434 KB);tools/README、procguard 注释、paper-d 引用已改指本处;items 与 ledger 保留历史路径 |
+| plans/w5-patches | plans/w5-patches | 11 | 0.0.45 W5 补丁(已落地),items 引用已改指本处 |

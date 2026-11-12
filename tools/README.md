@@ -187,7 +187,7 @@ product/OS state, so first is not an OS-cold or cache-cleared observation.
 Startup, preprocessing/modules, construction, loading, binding, inference,
 user execution, output, validation and cleanup are not measured separately;
 all remain UNMEASURED. Four samples do not estimate p95. This supplies the
-current baseline for [C44-RUN-REUSE-01](../plans/v0.0.44.md), not a cache-hit,
+current baseline for [C44-RUN-REUSE-01](../archive/research-2026-11d/plans/v0.0.44.md), not a cache-hit,
 phase-cost or acceleration claim. The run-reuse mechanism remains unimplemented.
 
 `run-watchdog-bench.cx` independently compares a guarded resolved `/bin/true`
