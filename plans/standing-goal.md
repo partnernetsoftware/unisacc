@@ -11,7 +11,7 @@
 3. 风险预案:磁盘(<8G 即清)、失控进程(procguard dry 扫)、候选与产品输入差异。
 4. 成本/进展/速度:有串行瓶颈就拆并行;有重复劳动就造工具。
 5. 归档清理:过期 plans、items/ledger 已完成项、/tmp 自有目录。
-6. 产品设计轮转评审(每轮一个主题,fable 子代理读码后给 ≤10 行结论,写 plans/design-review-log.md):
+6. 产品设计轮转评审(每轮一个主题,fable 子代理读码后给 ≤10 行结论,写 archive/docs-2026-11c/plans/design-review-log.md):
    ① 生产可用定义与外部语料 ② 金标循环与独立 oracle ③ 「NN」名实与 VM 字节码 ④ 身份系统统一(内容寻址 DAG)
    ⑤ 引导与信任债(host C、Python)⑥ 流水线失败模式与诊断质量 ⑦ 切片接口面与 ISA 薄层 ⑧ 工具/棘轮体量(toolsloc 增长)
 

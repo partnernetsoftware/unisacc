@@ -58,7 +58,7 @@
 ## 我想做 X,去哪里
 | 想做 | 去 |
 |---|---|
-| 看现在做到哪、有什么阻塞 | `prd.md` §9、`plans/v0.0.52-unisacc.md`、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
+| 看现在做到哪、有什么阻塞 | `prd.md` §9、`archive/docs-2026-11c/plans/v0.0.52-unisacc.md`、`agentwork/items.tsv`、`agentwork/ledger.tsv` |
 | 找一个工具 | `prd.md` 能力速查,或 `ls tools | grep 关键字` |
 | 看候选构造图与隐性前提 | `build/graph.tsv`、`build/preflight-rules.tsv`、`tools/graph-check.cx` |
 | 改一张解析/约束表 | 改 `exec/parse2/*.tsv` -> `tools/a12-cycle.cx` -> `tools/affected.cx --files 表` |
