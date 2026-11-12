@@ -1,0 +1,254 @@
+/* check-link-dce.cx -- the link drops functions nothing reaches, and only then forgets what
+ * they alone name.
+ *
+ *   sh ./unisacc.com tests/check-link-dce.cx -- WORK              # product ./unisacc.com
+ *   sh ./unisacc.com tests/check-link-dce.cx -- WORK PRODUCT      # another candidate
+ *
+ * WORK is a new directory (created here, refused when it exists). The product is run there
+ * with UNISA_JOBS=1. Everything asserted is product behaviour: exit codes, exact stderr,
+ * program output, and which of the fixture's own function labels the linked tape carries.
+ *
+ *   A  dead.c: dead() calls zz_missing (prototyped, never defined) and nothing calls dead().
+ *      The object links alone, quietly; the image prints "live 3\n". Two links are the same
+ *      bytes. The linked tape has the labels live and main and no label dead.
+ *   B  full.c has an uncalled spare() and nothing missing: the linked tape keeps spare.
+ *   C  reach.c: main calls zz_missing. Refused with exactly
+ *      "link: undefined reference to zz_missing\n", rc 1, no output file.
+ *   D  addr.c: keep() is never called but returns the address of dead(). An address taken
+ *      anywhere is a root, so the link is refused as in C.
+ *   E  init.c: a global function pointer is initialised with dead. Refused as in C.
+ *   F  mixed.c: dead() names zz_dead_only first, main names zz_live. The refusal names
+ *      zz_live, the one a reachable function wants.
+ *   G  cycle.c: d1 and d2 call each other, d2 calls zz_missing, nothing calls either. Links;
+ *      prints "cycle 5\n".
+ *   H  two objects: a.o calls f from b.o; b.o also has g (calls zz_missing) and h (calls g
+ *      and f), both uncalled. Links and prints "f 6\n"; the same through an archive of b.o.
+ *   I  fwd.c: a host forward (pread, declared by <unistd.h>) beside a dead function with a
+ *      missing name. The stub still joins: prints "4\n".
+ *   J  other targets (-c -b T -funit dead.c, then link): rc 0 and an image for lnx/arm64,
+ *      osx/x86_64, osx/arm64, win/x86_64, win/arm64. Those images are NOT_RUN.
+ * Prints PASS/FAIL per assertion and a last line CHECK_LINK_DCE failed=N; rc 1 on any FAIL.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.hostid
+
+static int ld_failed;
+static char ld_prod[4400];
+static char ld_dir[4400];
+static char *ld_env[] = {"UNISA_JOBS=1", 0};
+static const char ld_refused[] = "link: undefined reference to zz_missing\n";
+
+static void ld_ck(int ok, const char *label) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    if (!ok) ld_failed++;
+}
+static void ld_die(const char *s) { fprintf(stderr, "check-link-dce: %s errno=%d\n", s, errno); exit(2); }
+static void ld_path(char *o, size_t cap, const char *rel) {
+    if (cx_fmt(o, cap, "%s/%s", ld_dir, rel)) ld_die("path");
+}
+static void ld_put(const char *rel, const char *s) {
+    char p[4400];
+    ld_path(p, sizeof p, rel);
+    if (cx_write(p, s, strlen(s))) ld_die(rel);
+}
+/* One shell line in WORK, 30 s bound. The rc (or -1 on transport); stdout and stderr are
+   handed over when asked. */
+static int ld_sh(const char *cmd, char **out, size_t *outn, char **err, size_t *errn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int t;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    t = np_run(av, ld_dir, ld_env, 30, &r, why, sizeof why);
+    if (t) { fprintf(stderr, "check-link-dce: transport %s: %s\n", why, cmd); np_free(&r); return -1; }
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    if (err) { *err = r.err; *errn = r.errn; r.err = 0; }
+    np_free(&r);
+    return r.rc;
+}
+/* PRODUCT ARGS: rc, and stderr when asked. The tool's own launcher exports a relative
+   UNISA_CONTAINER; the product under test must find its own package. */
+static int ld_cc(const char *args, char **err, size_t *errn) {
+    char cmd[9000];
+    if (cx_fmt(cmd, sizeof cmd, "exec env -u UNISA_CONTAINER %s %s", ld_prod, args)) ld_die("cmd");
+    return ld_sh(cmd, 0, 0, err, errn);
+}
+static int ld_is(const char *b, size_t n, const char *want) { return b && n == strlen(want) && !memcmp(b, want, n); }
+static int ld_same(const char *a, const char *b) {
+    char pa[4400], pb[4400];
+    size_t na, nb;
+    char *ba, *bb;
+    int same;
+    ld_path(pa, sizeof pa, a);
+    ld_path(pb, sizeof pb, b);
+    ba = cx_read(pa, &na);
+    bb = cx_read(pb, &nb);
+    same = ba && bb && na > 0 && na == nb && !memcmp(ba, bb, na);
+    free(ba);
+    free(bb);
+    return same;
+}
+static int ld_absent(const char *rel) {
+    char p[4400];
+    struct stat st;
+    ld_path(p, sizeof p, rel);
+    errno = 0;
+    if (!lstat(p, &st)) return 0;
+    if (errno != ENOENT) ld_die("existence");
+    return 1;
+}
+/* Lines of the text file REL that are exactly LINE; -1 when it cannot be read. */
+static int ld_lines(const char *rel, const char *line) {
+    char p[4400];
+    size_t n, i, e, ln = strlen(line);
+    char *b;
+    int hits = 0;
+    ld_path(p, sizeof p, rel);
+    b = cx_read(p, &n);
+    if (!b) return -1;
+    for (i = 0; i < n; i = e + 1) {
+        for (e = i; e < n && b[e] != '\n'; e++) {}
+        if (e - i == ln && !memcmp(b + i, line, ln)) hits++;
+    }
+    free(b);
+    return hits;
+}
+/* Run an image of the native target: exact stdout and rc 0. */
+static void ld_run(const char *img, const char *want, const char *label) {
+    char cmd[600];
+    char *out = 0;
+    size_t outn = 0;
+    int rc;
+    if (cx_fmt(cmd, sizeof cmd, "chmod 700 %s && exec ./%s", img, img)) ld_die("run");
+    rc = ld_sh(cmd, &out, &outn, 0, 0);
+    ld_ck(rc == 0 && ld_is(out, outn, want), label);
+    free(out);
+}
+/* -c SRC, then link the object alone: rc 0 and quiet, then the image's output. */
+static void ld_links(const char *stem, const char *want, const char *tag) {
+    char a[600], lab[200], img[80];
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    if (cx_fmt(a, sizeof a, "-c %s.c -o %s.o", stem, stem) || cx_fmt(img, sizeof img, "%s.img", stem)) ld_die("args");
+    rc = ld_cc(a, 0, 0);
+    cx_fmt(lab, sizeof lab, "%s.compile rc0", tag);
+    ld_ck(rc == 0, lab);
+    if (cx_fmt(a, sizeof a, "%s.o -o %s", stem, img)) ld_die("args");
+    rc = ld_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "%s.link rc0 quiet", tag);
+    ld_ck(rc == 0 && errn == 0, lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err);
+    cx_fmt(lab, sizeof lab, "%s.run exact output", tag);
+    if (rc == 0) ld_run(img, want, lab);
+    else ld_ck(0, lab);
+}
+/* -c SRC, then link the object alone: refused with exactly WANT, rc 1, no image. */
+static void ld_refuses(const char *stem, const char *want, const char *tag) {
+    char a[600], lab[200], img[80];
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    if (cx_fmt(a, sizeof a, "-c %s.c -o %s.o", stem, stem) || cx_fmt(img, sizeof img, "%s.img", stem)) ld_die("args");
+    rc = ld_cc(a, 0, 0);
+    cx_fmt(lab, sizeof lab, "%s.compile rc0", tag);
+    ld_ck(rc == 0, lab);
+    if (cx_fmt(a, sizeof a, "%s.o -o %s", stem, img)) ld_die("args");
+    rc = ld_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "%s.link refused, exact line, no output", tag);
+    ld_ck(rc == 1 && ld_is(err, errn, want) && ld_absent(img), lab);
+    if (!(rc == 1 && ld_is(err, errn, want)) && errn) fwrite(err, 1, errn, stderr);
+    free(err);
+}
+static void ld_cross(const char *tgt, const char *tag) {
+    char a[600], lab[200], obj[64], img[64];
+    char *err = 0;
+    size_t errn = 0;
+    int rc;
+    if (cx_fmt(obj, sizeof obj, "dead-%s.o", tag) || cx_fmt(img, sizeof img, "dead-%s.img", tag)) ld_die("name");
+    if (cx_fmt(a, sizeof a, "-c -b %s -funit dead.c -o %s", tgt, obj)) ld_die("args");
+    rc = ld_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "J.compile %s rc0", tgt);
+    ld_ck(rc == 0, lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err); err = 0;
+    if (cx_fmt(a, sizeof a, "%s -o %s", obj, img)) ld_die("args");
+    rc = ld_cc(a, &err, &errn);
+    cx_fmt(lab, sizeof lab, "J.link %s rc0, image written", tgt);
+    ld_ck(rc == 0 && !ld_absent(img), lab);
+    if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+    free(err);
+    printf("NOT_RUN\tJ.run %s\timage of a non-native target\n", tgt);
+}
+
+int main(int argc, char **argv) {
+    char *err = 0;
+    size_t errn = 0;
+    int rc, native;
+    if (argc < 2) { fprintf(stderr, "usage: check-link-dce WORK [PRODUCT]\n"); return 2; }
+    if (cx_fmt(ld_dir, sizeof ld_dir, "%s", argv[1])) ld_die("work");
+    if (argc > 2) { if (cx_fmt(ld_prod, sizeof ld_prod, "%s", argv[2])) ld_die("product"); }
+    else {
+        char cwd[4096];
+        if (!getcwd(cwd, sizeof cwd) || cx_fmt(ld_prod, sizeof ld_prod, "sh %s/unisacc.com", cwd)) ld_die("product");
+    }
+    if (mkdir(ld_dir, 0700)) ld_die("WORK must be a new directory");
+    native = tn_self() && !strcmp(tn_self(), "lnx/x86_64");
+    ld_put("dead.c", "#include <stdio.h>\nint zz_missing(int);\nint dead(int x){return zz_missing(x)+1;}\nint live(int x){return x+2;}\nint main(void){printf(\"live %d\\n\",live(1));return 0;}\n");
+    ld_put("full.c", "#include <stdio.h>\nint spare(int x){return x+9;}\nint live(int x){return x+2;}\nint main(void){printf(\"live %d\\n\",live(1));return 0;}\n");
+    ld_put("reach.c", "int zz_missing(int);\nint main(void){return zz_missing(1);}\n");
+    ld_put("addr.c", "int zz_missing(int);\nint dead(int x){return zz_missing(x);}\nint (*keep(void))(int){return dead;}\nint main(void){return 0;}\n");
+    ld_put("init.c", "int zz_missing(int);\nint dead(int x){return zz_missing(x);}\nint (*fp)(int)=dead;\nint main(void){return 0;}\n");
+    ld_put("mixed.c", "int zz_dead_only(int);\nint zz_live(int);\nint dead(int x){return zz_dead_only(x);}\nint main(void){return zz_live(1);}\n");
+    ld_put("cycle.c", "#include <stdio.h>\nint zz_missing(int);\nint d2(int);\nint d1(int x){return x?d2(x-1):0;}\nint d2(int x){return d1(x)+zz_missing(x);}\nint main(void){printf(\"cycle %d\\n\",5);return 0;}\n");
+    ld_put("a.c", "#include <stdio.h>\nint f(int);\nint main(void){printf(\"f %d\\n\",f(2));return 0;}\n");
+    ld_put("b.c", "int zz_missing(int);\nint f(int x){return x*3;}\nint g(int x){return zz_missing(x);}\nint h(int x){return g(x)+f(x);}\n");
+    ld_put("fwd.c", "#include <unistd.h>\n#include <fcntl.h>\n#include <stdio.h>\nint zz_missing(int);\nint dead(int x){return zz_missing(x);}\nint main(void){char b[8];int fd=open(\"fwd.c\",0);long n=pread(fd,b,4,0);printf(\"%ld\\n\",n);return n==4?0:1;}\n");
+    if (!native) {
+        printf("NOT_RUN\tA-I\thost target is not lnx/x86_64\n");
+    } else {
+        /* A */
+        ld_links("dead", "live 3\n", "A");
+        rc = ld_cc("dead.o -o dead2.img", 0, 0);
+        ld_ck(rc == 0 && ld_same("dead.img", "dead2.img"), "A.relink same bytes");
+        rc = ld_cc("-S dead.o -o dead.s", 0, 0);
+        ld_ck(rc == 0 && ld_lines("dead.s", "live:") == 1 && ld_lines("dead.s", "main:") == 1 && ld_lines("dead.s", "dead:") == 0,
+              "A.tape keeps live and main, drops dead");
+        /* B */
+        ld_links("full", "live 3\n", "B");
+        rc = ld_cc("-S full.o -o full.s", 0, 0);
+        ld_ck(rc == 0 && ld_lines("full.s", "spare:") == 1 && ld_lines("full.s", "live:") == 1, "B.tape nothing missing, the uncalled function stays");
+        /* C D E F */
+        ld_refuses("reach", ld_refused, "C");
+        ld_refuses("addr", ld_refused, "D");
+        ld_refuses("init", ld_refused, "E");
+        ld_refuses("mixed", "link: undefined reference to zz_live\n", "F");
+        /* G */
+        ld_links("cycle", "cycle 5\n", "G");
+        /* H */
+        rc = ld_cc("-c a.c -o a.o", 0, 0) || ld_cc("-c b.c -o b.o", 0, 0);
+        ld_ck(rc == 0, "H.compile two units rc0");
+        rc = ld_cc("a.o b.o -o ab.img", &err, &errn);
+        ld_ck(rc == 0 && errn == 0, "H.link objects rc0 quiet");
+        if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+        free(err); err = 0;
+        if (rc == 0) ld_run("ab.img", "f 6\n", "H.run f from b.o");
+        else ld_ck(0, "H.run f from b.o");
+        rc = ld_cc("ar rcs lib.a b.o", 0, 0) || ld_cc("a.o lib.a -o al.img", &err, &errn);
+        ld_ck(rc == 0 && errn == 0, "H.link archive rc0 quiet");
+        if (rc != 0 && errn) fwrite(err, 1, errn, stderr);
+        free(err); err = 0;
+        if (rc == 0) ld_run("al.img", "f 6\n", "H.run f from the archive member");
+        else ld_ck(0, "H.run f from the archive member");
+        /* I */
+        ld_links("fwd", "4\n", "I");
+    }
+    ld_cross("lnx/arm64", "la");
+    ld_cross("osx/x86_64", "ox");
+    ld_cross("osx/arm64", "oa");
+    ld_cross("win/x86_64", "wx");
+    ld_cross("win/arm64", "wa");
+    printf("CHECK_LINK_DCE failed=%d\n", ld_failed);
+    return ld_failed ? 1 : 0;
+}
