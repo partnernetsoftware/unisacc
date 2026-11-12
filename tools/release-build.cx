@@ -8,10 +8,14 @@
    --no-compress-flat keeps cx-flat.h raw while the rest still compresses.
    Resumable p3: add --phase PHASE --run ABS_RUN. Invoke each phase under
    tools/bound 55: guard-init once, guard-0 through guard-39 (all observation
-   keys of each model), opguard, models, resources, assemble. opguard runs the
-   kernel base check and seals need_base under the binding; models refuses
-   without that seal or when it disagrees with the nets. Keep all other arguments
-   identical. ROOT/nets are canonical absolute read-only inputs. OUT must be a
+   keys of each model), opguard-prep, opguard-x86_64, opguard-arm64, models,
+   resources, assemble. Each opguard-<ISA> phase runs the kernel base check for
+   that one ISA and seals its verdict (need_base, the ISA and the digest of the
+   packaged kernel base it compared) under the binding; models refuses unless
+   both seals exist and equal what it recomputes from the same nets and package.
+   opguard-prep seals nothing: it checks that the route refuses an existing
+   output and thereby has the constructor translate the route tool ahead of the
+   per-ISA phases. Keep all other arguments identical. ROOT/nets are canonical absolute read-only inputs. OUT must be a
    regular file directly in RUN; checker, proofs and opguard outputs stay there.
    Original context records are never rewritten after copying material.
    Every phase rechecks current source SID and SHA256 of the actual tool,
@@ -344,31 +348,46 @@ static int rb_net_new_op(const char *t, size_t n) {
 static int rb_need_base;
 static const char *rb_root;
 static const char *rb_phase, *rb_run;
-/* Every \0kernel/<isa> resource of PKG must equal tools/kernel-route.cx's output from ROOT. */
-static void rb_base_check(const char *root, const unsigned char *body, const CxPackage *pkg) {
-    static const char *isa[2] = {"x86_64", "arm64"};
+static const char *rb_isa[2] = {"x86_64", "arm64"};
+/* The ISA named by an opguard-<ISA> phase, else 0. */
+static const char *rb_opguard_isa(void) {
+    int j;
+    if (!rb_phase || strncmp(rb_phase, "opguard-", 8)) return 0;
+    for (j = 0; j < 2; j++) if (tx_eqz(rb_phase + 8, rb_isa[j])) return rb_isa[j];
+    return 0;
+}
+static void rb_ctor(char ctor[RB_FULL]) {
+    const char *ctor_env = sy_env("UNISACC_CTOR");
+    if (!ctor_env || !ctor_env[0] || sy_realpath(ctor_env, ctor, RB_FULL) < 0)
+        rb_die("opguard needs explicit UNISACC_CTOR (D-0.0.50: no implicit ROOT constructor)");
+}
+/* Every \0kernel/<isa> resource of PKG must equal tools/kernel-route.cx's output from ROOT.
+   ONLY is 0 for both ISAs in one route call (the unsplit path), or names the one ISA a
+   split phase assembles and compares. */
+static void rb_base_check(const char *root, const unsigned char *body, const CxPackage *pkg, const char *only) {
+    const char **isa = rb_isa;
     char out[RB_FULL], bnd[RB_FULL], kf[RB_FULL]; int j, i; long nk;
     if (rb_phase) {
-        if (cx_fmt(out, sizeof out, "%s/p3-opguard-%d", rb_run, sy_pid())) rb_die("opguard path");
+        if (!only || cx_fmt(out, sizeof out, "%s/p3-opguard-%s-%d", rb_run, only, sy_pid())) rb_die("opguard path");
     } else {
+        if (only) rb_die("opguard path");
         if (cx_fmt(out, sizeof out, "%s/out", root) || (sy_mkdir(out, 0755) && !sy_exists(out))) rb_die("opguard out");
         if (cx_fmt(out, sizeof out, "%s/out/p3-opguard-%d", root, sy_pid())) rb_die("opguard path");
     }
     if (cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("opguard path");
-    { const char *ctor_env = sy_env("UNISACC_CTOR");
-      char ctor[RB_FULL];
+    { char ctor[RB_FULL];
       char *d[18];
       int m = 0;
-      if (!ctor_env || !ctor_env[0] || sy_realpath(ctor_env, ctor, RB_FULL) < 0)
-          rb_die("opguard needs explicit UNISACC_CTOR (D-0.0.50: no implicit ROOT constructor)");
+      rb_ctor(ctor);
       d[m++] = "sh"; d[m++] = bnd; d[m++] = "55"; d[m++] = "sh"; d[m++] = ctor;
       d[m++] = "tools/kernel-route.cx"; d[m++] = "--"; d[m++] = (char *)root; d[m++] = out;
       d[m++] = "--constructor"; d[m++] = ctor;
-      d[m++] = "--isa"; d[m++] = "x86_64"; d[m++] = "--isa"; d[m++] = "arm64";
+      for (j = 0; j < 2; j++) if (!only || tx_eqz(only, isa[j])) { d[m++] = "--isa"; d[m++] = (char *)isa[j]; }
       d[m] = 0;
       if (rb_pipe("opguard kernel-route", d, root, 0, 0)) rb_die("opguard kernel-route"); }
     for (j = 0; j < 2; j++) {
         size_t kn; char *kb; int hit = 0;
+        if (only && !tx_eqz(only, isa[j])) continue;
         if (cx_fmt(kf, sizeof kf, "%s/%s.kernel", out, isa[j]) || !(kb = cx_read(kf, &kn))) rb_die("opguard kernel read");
         nk = 8 + (long)strlen(isa[j]);
         for (i = 0; i < pkg->nr; i++) {
@@ -422,13 +441,49 @@ static char *rb_phase_read(const char *name, size_t *n) {
         memcmp(proof + 65, sha, 64) || proof[129] != '\n') rb_die("phase proof mismatch");
     mm_free(proof); return p;
 }
-/* The models phase accepts only a same-binding opguard seal whose verdict equals NEED. */
-static void rb_opguard_require(int need) {
-    char want[32]; size_t n; char *got;
-    if (cx_fmt(want, sizeof want, "need_base=%d\n", need)) rb_die("opguard verdict");
-    got = rb_phase_read("opguard", &n);
-    if (n != strlen(want) || memcmp(got, want, n)) rb_die("opguard seal disagrees with nets; rerun the opguard phase");
-    mm_free(got);
+/* One ISA's verdict bytes. With NEED it names the digest of every packaged \0kernel/<ISA>
+   base (the bytes the opguard phase compared with the route output), so a seal cannot stand
+   in for the other ISA or for a package carrying a different base. */
+static void rb_opguard_verdict(char *rec, int cap, int need, const char *isa,
+                               const unsigned char *body, const CxPackage *pkg) {
+    RbBuf k = {0}; char sha[65]; int i, hit = 0; long nk = 8 + (long)strlen(isa);
+    if (!need) { if (cx_fmt(rec, cap, "need_base=0\tisa=%s\n", isa)) rb_die("opguard verdict"); return; }
+    for (i = 0; i < pkg->nr; i++) {
+        const unsigned char *nm = body + pkg->res[i].name;
+        if (pkg->res[i].n != nk || nm[0] || !mm_same(nm + 1, "kernel/", 7) || !mm_same(nm + 8, isa, nk - 8)) continue;
+        if (pkg->res[i].codec) rb_die("opguard: packaged kernel base is not raw");
+        rb_put(&k, body + pkg->res[i].data, pkg->res[i].len); hit = 1;
+    }
+    if (!hit) rb_die("opguard: package has no kernel base");
+    cx_sha256_hex(k.p, (size_t)k.n, sha); mm_free(k.p);
+    if (cx_fmt(rec, cap, "need_base=1\tisa=%s\tkernel=%s\n", isa, sha)) rb_die("opguard verdict");
+}
+/* The models phase accepts only same-binding opguard seals, one per ISA, each equal to the
+   verdict recomputed now from NEED and this package. */
+static void rb_opguard_require(int need, const unsigned char *body, const CxPackage *pkg) {
+    char want[160], key[40]; size_t n; char *got; int j;
+    for (j = 0; j < 2; j++) {
+        rb_opguard_verdict(want, (int)sizeof want, need, rb_isa[j], body, pkg);
+        if (cx_fmt(key, sizeof key, "opguard-%s", rb_isa[j])) rb_die("opguard key");
+        got = rb_phase_read(key, &n);
+        if (n != strlen(want) || memcmp(got, want, n)) rb_die("opguard seal disagrees with nets or package; rerun the opguard phases");
+        mm_free(got);
+    }
+}
+/* opguard-prep: the route must refuse an output directory that already exists (RUN itself).
+   The call also makes the explicit constructor translate the route tool once, so that cost
+   is not paid inside a per-ISA phase. Nothing is sealed and no verdict depends on it. */
+static void rb_route_prepare(const char *root) {
+    char bnd[RB_FULL], ctor[RB_FULL]; char *d[12]; int m = 0, t; pr_result r;
+    if (cx_fmt(bnd, sizeof bnd, "%s/tools/bound", root)) rb_die("opguard path");
+    rb_ctor(ctor);
+    d[m++] = "sh"; d[m++] = bnd; d[m++] = "55"; d[m++] = "sh"; d[m++] = ctor;
+    d[m++] = "tools/kernel-route.cx"; d[m++] = "--"; d[m++] = (char *)root; d[m++] = (char *)rb_run;
+    d[m++] = "--constructor"; d[m++] = ctor; d[m] = 0;
+    t = pr_run("opguard-prep kernel-route", d, root, 0, (int)(rb_pipe_deadline() / 1000), &r);
+    if (t) { sy_eprintf("release-build: opguard-prep: %s\n", r.why); pr_free(&r); rb_die("opguard-prep kernel-route"); }
+    if (!r.rc) { pr_free(&r); rb_die("opguard-prep: kernel-route accepted an existing output directory"); }
+    pr_free(&r);
 }
 static void rb_nets_guard(const char *nets, const char *root) {
     char ctx[RB_FULL], conf[RB_FULL], helper[RB_FULL], bnd[RB_FULL], got[80] = {0}, want[80] = {0};
@@ -572,7 +627,7 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
         { char *v[4] = {rb_t1, tp, np, 0}; if (rb_pipe("phase all-key T1 shard", v, root, 0, 0)) rb_die("phase T1 failed"); }
         rb_phase_seal(key, rb_binding, 64);
     } else if (!tx_eqz(rb_phase, "guard-init")) {
-        if (!tx_eqz(rb_phase, "opguard") && !tx_eqz(rb_phase, "models") && !tx_eqz(rb_phase, "resources") && !tx_eqz(rb_phase, "assemble")) rb_die("unknown p3 phase");
+        if (!tx_eqz(rb_phase, "opguard-prep") && !rb_opguard_isa() && !tx_eqz(rb_phase, "models") && !tx_eqz(rb_phase, "resources") && !tx_eqz(rb_phase, "assemble")) rb_die("unknown p3 phase");
         for (i = 0; i < cf_p3_guard_count(); i++) {
             char key[32]; if (cx_fmt(key, sizeof key, "guard-%d", i)) rb_die("phase guard key");
             e = rb_phase_read(key, &en); if (en != 64 || memcmp(e, rb_binding, 64)) rb_die("phase guard incomplete"); mm_free(e);
@@ -627,19 +682,20 @@ static void rb_emit_models(RbBuf *out, const unsigned char *body, const CxPackag
             at = hs + 1 + (long)stored;
         }
     }
-    /* Phased runs never assemble the kernel base here: the opguard phase did it under this
-       binding and sealed its verdict. The seal must exist, carry this binding and state the
-       need_base value recomputed just now from the same nets. */
-    if (rb_phase) rb_opguard_require(rb_need_base);
-    else if (rb_need_base) rb_base_check(rb_root, body, pkg);
+    /* Phased runs never assemble the kernel base here: the opguard-<ISA> phases did it under
+       this binding and sealed their verdicts. Both seals must exist, carry this binding and
+       state the need_base value recomputed just now from the same nets. */
+    if (rb_phase) rb_opguard_require(rb_need_base, body, pkg);
+    else if (rb_need_base) rb_base_check(rb_root, body, pkg, 0);
 }
 
-/* opguard phase: recompute need_base from the bound nets, run the full base check when
-   needed, then seal the verdict (proof = binding + digest of the verdict bytes). */
-static void rb_opguard_phase(const unsigned char *body, const CxPackage *pkg,
+/* opguard phases: recompute need_base from the bound nets. ISA 0 is opguard-prep; otherwise
+   run the base check for that ISA when needed, then seal its verdict (proof = binding +
+   digest of the verdict bytes). */
+static void rb_opguard_phase(const char *isa, const unsigned char *body, const CxPackage *pkg,
                              long d_start, long m_start, const char *nets, const char *routes) {
     static char names[64][64];
-    char path[RB_FULL], rec[32]; long i; int need = 0;
+    char path[RB_FULL], rec[160], key[40]; long i; int need = 0;
     if (pkg->m != cf_p3_guard_count() || pkg->m > 64) rb_die("--nets model record count");
     if (rb_route_names(routes, body, d_start, m_start, pkg->m, names)) rb_die("--nets routes");
     for (i = 0; i < pkg->m; i++) {
@@ -651,9 +707,11 @@ static void rb_opguard_phase(const unsigned char *body, const CxPackage *pkg,
         if (rb_ops_known() && rb_net_new_op(text, tn)) need = 1;
         mm_free(text);
     }
-    if (need) rb_base_check(rb_root, body, pkg);
-    if (cx_fmt(rec, sizeof rec, "need_base=%d\n", need)) rb_die("opguard verdict");
-    rb_phase_seal("opguard", rec, (long)strlen(rec));
+    if (!isa) { if (need) rb_route_prepare(rb_root); return; }
+    if (need) rb_base_check(rb_root, body, pkg, isa);
+    rb_opguard_verdict(rec, (int)sizeof rec, need, isa, body, pkg);
+    if (cx_fmt(key, sizeof key, "opguard-%s", isa)) rb_die("opguard key");
+    rb_phase_seal(key, rec, (long)strlen(rec));
 }
 
 static int rb_p3(int argc, char **argv) {
@@ -742,11 +800,11 @@ static int rb_p3(int argc, char **argv) {
             cxpl_release(pkg, rb_drop); mm_free(file);
             sy_printf("release-build\tp3-phase\t%s\tbinding=%s\n", rb_phase, rb_binding); return 0;
         }
-        if (tx_eqz(rb_phase, "opguard")) {
+        if (tx_eqz(rb_phase, "opguard-prep") || rb_opguard_isa()) {
             rb_root = argv[2]; rb_arity_load(argv[2]);
-            rb_opguard_phase(body, pkg, line_end, ms, nets, routes);
+            rb_opguard_phase(rb_opguard_isa(), body, pkg, line_end, ms, nets, routes);
             cxpl_release(pkg, rb_drop); mm_free(file);
-            sy_printf("release-build\tp3-phase\topguard\tbinding=%s\n", rb_binding); return 0;
+            sy_printf("release-build\tp3-phase\t%s\tbinding=%s\n", rb_phase, rb_binding); return 0;
         }
         if (tx_eqz(rb_phase, "models")) {
             RbBuf models = {0}; rb_root = argv[2]; rb_arity_load(argv[2]);

@@ -151,11 +151,20 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     if (bound_sh_secs(root, v, 55)) die("REFUSE preflight", hook);
     sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
 }
+/* Make CTOR executable (0755) only when its mode differs. An unconditional chmod moves the
+   file's ctime on every resume even when nothing changes, and the constructor's translation
+   cache is keyed on its identity: every tool it had already translated was then translated
+   again in the next phase (measured on p3-opguard: about 21 of 53 seconds). */
+static int ctor_exec(const char *ctor) {
+    sy_stat_t st;
+    if (!sy_stat(ctor, &st) && st.kind == 'f' && (st.mode & 07777) == 0755) return 0;
+    return sy_chmod(ctor, 0755);
+}
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target, const char *phase) {
     char bound[4400], secbuf[8];
     char *v[24];
     int n = 0;
-    if (sy_chmod(ctor, 0755)) die("chmod ctor", ctor);
+    if (ctor_exec(ctor)) die("chmod ctor", ctor);
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", snap)) die("path", "bound");
     if (cx_fmt(secbuf, sizeof secbuf, "%d", 55)) die("fmt", "secs");
     v[n++] = bound;
@@ -2101,7 +2110,7 @@ int main(int argc, char **argv) {
             char ctor[4400], ch[65];
             size_t cn = 0; char *cb;
             if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-            if (sy_chmod(ctor, 0755)) die("chmod ctor", ctor);
+            if (ctor_exec(ctor)) die("chmod ctor", ctor);
             if (sy_setenv("UNISACC_CTOR", ctor, 1)) die("env", "UNISACC_CTOR");
             cb = cx_read(ctor, &cn);
             if (!cb || sy_sha256_hex(cb, (long)cn, ch)) { free(cb); die("ctor sha", ctor); }
