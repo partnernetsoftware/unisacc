@@ -1216,6 +1216,8 @@ sh ./unisacc.com tools/integrate-patch.cx -- ROOT PATCH ~/unisacc-integration [-
 sh ./unisacc.com tools/integrate-patch.cx -- --resume ~/unisacc-integration
 ```
 
+`--stop-after N`（N为1至5，也可 `--resume CLONE --stop-after N`）为门前快检：跑完第N个gate阶段即打印 `INTEGRATE_PREFLIGHT status=PREFLIGHT_OK` 并退出，不写 ready.tsv，不报READY；N越界为 `stop-after-range`；不带该参数时行为与120秒/55秒限额不变。
+
 `--prepare-only` 只产生 `PREPARED`、`qualification=NOT_QUALIFIED`，不是PASS。只有真实gate完成才报告 `READY_TO_COMMIT`、`qualification=GATES_ONLY`，不是全产品或全批资格；不自动commit/push。每次调用原120秒总限额、子进程最多55秒保持不变，预算未完阶段可报告PENDING，不冒称成功。
 
 父已观测的**首轮历史版本**保留：泛型17/0、3.36秒；领域28/0、10.09秒；integrator真实夹具17/0、47.16秒。后续函数指针schema导出曾被当前编译器拒绝，已改为纯值schema参数；去除平方级路径及不必要hex拷贝并加入checked-copy后的**最终版本**由父真实验收：泛型17/0、3.33秒；领域33/0、10.36秒；integrator真实夹具17/0、43.06秒，均在各自55秒预算内。这些仅证明对应工具/夹具检查，不授全产品或全批资格。

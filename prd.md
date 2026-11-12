@@ -273,6 +273,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | 0.0.55 新工具:链批量键校验 | `sh ./unisacc.com tools/check-chain-batchkeys.cx` | 核 chain-step 批量键(fixedpoint `--objects K1,K2,...`)与单键 `--object` 同一路径 |
 | 0.0.55 chain-step 批量对象 | `sh ./unisacc.com tools/chain-step.cx -- fixedpoint ... --objects K1,K2,...` | 按序对每键走与单键 `--object` 同一 cs_fixedpoint,一次启动多键 |
 | 0.0.55 entry-build 收据头 | `sh ./unisacc.com tools/entry-build.cx ...` | receipt.txt 头只写一次:既有头与本次逐字相同不重写,可续跑 |
+| 0.0.58 集成门前快检 S2 | `sh ./unisacc.com tools/integrate-patch.cx -- ROOT PATCH DEST --stop-after N`（N为1至5；`--resume DEST --stop-after N` 续停） | 跑到第N个gate阶段后只打印 `INTEGRATE_PREFLIGHT status=PREFLIGHT_OK`，不写ready.tsv/READY；N越界报 `stop-after-range`；批次 `integrate-patch-preflight-stop/-resume` |
 | 0.0.55 integrate-patch prepare 续跑 | `sh ./unisacc.com tools/integrate-patch.cx prepare ...`（中断后同命令重跑） | tree 冻结后每个工具编译完记 .git/integrate/prepare-do,续跑跳过已完成项;`--land CLONE` 落提交 |
 | 0.0.55 s9-nightly 续跑 | `sh ./unisacc.com tools/s9-nightly.cx -- ROOT RUN --tier commit\|daily --resume`（在途,未入 main,以 s9-nightly-fake 夹具与 check-s9-nightly 为准,落地后核实） | 夜跑中断后按已完成批次续跑 |
 | 0.0.55 selfcheck / slot | 未作为独立 tools 落地:selfcheck 为 D1 的 tests/*.cx 棘轮接口调整;slot 未见于 v0.0.54..main | 勿当现成工具调用 |

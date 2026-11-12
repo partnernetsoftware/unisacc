@@ -160,6 +160,35 @@ static void rc_go(const char *top,const char *native,const char *root,const char
    if(!(db==want_base&&dh==want_head&&hit==want_hit)){fprintf(stderr,"rc-resume rc=%d\n",r.rc);if(r.errn)fwrite(r.err,1,r.errn>2000?2000:r.errn,stderr);if(r.outn)fwrite(r.out,1,r.outn>2000?2000:r.outn,stderr);}
    np_free(&r); }
 }
+/* 门前快检(--stop-after):行为级检查,只复用 native 构造产物,不缓存结论。
+   which 0=stop(新建即停 + 范围负例),1=resume(prepare-only 后分段续停)。 */
+static int preflight_has(const char *dest,const char *name){char p[4700];if(cx_fmt(p,sizeof p,"%s/.git/integrate/%s",dest,name))die("pf-path");return sy_exists(p)==1;}
+static void preflight_case(const char *top,const char *native,const char *root,const char *patch,const char *mark,int which){
+ char dest[4400],bad[4400],menv[4600],cenv[4600];
+ if(cx_fmt(dest,sizeof dest,"%s/pf-dest-%d",top,which)||cx_fmt(bad,sizeof bad,"%s/pf-bad-%d",top,which)||cx_fmt(menv,sizeof menv,"S4_MARK=%s",mark)||cx_fmt(cenv,sizeof cenv,"INTEGRATE_RATCHET_CACHE_DIR=%s/ratchet-cache",rc_outdir))die("pf-path");
+ if(which==0){
+  { char *v[]={(char*)native,(char*)root,(char*)patch,bad,"--stop-after","9",0};np_result r=run(v,0,20);ck(r.rc==2&&r.err&&strstr(r.err,"stop-after-range")&&sy_exists(bad)==0,"stop-after out of range is a named error before any clone");np_free(&r); }
+  { char *v[]={(char*)native,(char*)root,(char*)patch,bad,"--stop-after","0",0};np_result r=run(v,0,20);ck(r.rc==2&&r.err&&strstr(r.err,"stop-after-range"),"stop-after zero is a named error");np_free(&r); }
+  int b0=mark_count(mark,1),h0=mark_count(mark,0);
+  { char *v[]={"env",menv,cenv,(char*)native,(char*)root,(char*)patch,dest,"--stop-after","3",0};np_result r=run(v,0,50);
+    int good=r.rc==0&&r.out&&strstr(r.out,"status=PREFLIGHT_OK")&&!strstr(r.out,"READY_TO_COMMIT")&&!strstr(r.out,"GATES_ONLY");
+    ck(good,"stop-after 3 prints PREFLIGHT_OK and never READY");
+    if(!good){fprintf(stderr,"pf-stop rc=%d\n",r.rc);if(r.errn)fwrite(r.err,1,r.errn>2000?2000:r.errn,stderr);if(r.outn)fwrite(r.out,1,r.outn>2000?2000:r.outn,stderr);}
+    np_free(&r); }
+  ck(!preflight_has(dest,"ready.tsv"),"preflight leaves no ready.tsv");
+  ck(mark_count(mark,1)-b0==1&&mark_count(mark,0)-h0==1,"stop-after 3 ran base and head ratchets once each");
+ }else{
+  { char *ap[]={(char*)native,(char*)root,(char*)patch,dest,"--prepare-only",0};np_result r=run(ap,0,30);int rc=r.rc;np_free(&r);if(rc)die("pf-prepare"); }
+  int b0=mark_count(mark,1),h0=mark_count(mark,0);
+  { char *v[]={"env",menv,cenv,(char*)native,"--resume",dest,"--stop-after","1",0};np_result r=run(v,0,40);ck(r.rc==0&&r.out&&strstr(r.out,"status=PREFLIGHT_OK"),"resume stop-after 1 reaches PREFLIGHT_OK");np_free(&r); }
+  ck(mark_count(mark,1)-b0==0&&mark_count(mark,0)-h0==0,"stop-after 1 runs no ratchet");
+  { char *v[]={"env",menv,cenv,(char*)native,"--resume",dest,"--stop-after","3",0};np_result r=run(v,0,50);ck(r.rc==0&&r.out&&strstr(r.out,"status=PREFLIGHT_OK"),"resume continues to stop-after 3");np_free(&r); }
+  ck(mark_count(mark,1)-b0==1&&mark_count(mark,0)-h0==1,"resume ran ratchets once each");
+  { char *v[]={"env",menv,cenv,(char*)native,"--resume",dest,"--stop-after","2",0};np_result r=run(v,0,40);ck(r.rc==0&&r.out&&strstr(r.out,"status=PREFLIGHT_OK"),"completed phases are not rerun");np_free(&r); }
+  ck(mark_count(mark,1)-b0==1&&mark_count(mark,0)-h0==1,"no extra ratchet run after completed phase");
+  ck(!preflight_has(dest,"ready.tsv"),"resume preflight leaves no ready.tsv");
+ }
+}
 /* 改产品摘要:翻转根产品中非本机平台(Darwinarm64)启动行的一个字符,页脚/布局保持有效 */
 static char *rc_find(char *s,size_t n,const char *pat,size_t pn){for(size_t i=0;i+pn<=n;i++)if(!memcmp(s+i,pat,pn))return s+i;return 0;}
 static void rc_flip(const char *root){char p[4400];size_t n;path(p,sizeof p,root,"unisacc.com");char *s=cx_read(p,&n);if(!s)die("rc-flip-read");char *q=rc_find(s,n,"Darwinarm64) o=",15);char *k=q?rc_find(q,(size_t)(s+n-q)," k=",3):0;if(!k)die("rc-flip-anchor");k[3]=k[3]=='0'?'1':'0';put(p,s,n);free(s);}
@@ -181,6 +210,7 @@ static void ratchet_cache(const char *top,const char *native,const char *product
  path(p,sizeof p,other,"plain.txt");put(p,"patched\n",8);commit(other);
  { char *dv[]={"git","-C",other,"diff","--full-index","HEAD^","HEAD",0};np_result r=run(dv,0,12);if(r.rc)die("rc-diff");put(patch,r.out,r.outn);np_free(&r); }
  put(mark,"",0);
+ if(which>=8){preflight_case(top,native,root,patch,mark,which-8);return;}
  rc_go(top,native,root,patch,mark,"cold miss runs base and head once each",1,1,0);
  if(which==1)rc_go(top,native,root,patch,mark,"same key hit runs head only once",0,1,1);
  else if(which==2){rc_sh("for f in \"$1\"/*; do printf 'garbage\\n' > \"$f\"; done",cdir);
@@ -250,7 +280,7 @@ static void registry_neg(const char *top,const char *native){
 int main(int argc,char **argv){
  deadline=sy_now_ms()+55000;
  int aff_only=argc==2&&!strcmp(argv[1],"--affected-only");
- int rc_which=0;{static const char *fl[]={"--rc-cold","--rc-hit","--rc-corrupt","--rc-product","--rc-input","--rc-tool","--rc-prepare","--prep-resume"};for(int i=0;i<8;i++)if(argc==3&&!strcmp(argv[2],fl[i]))rc_which=i+1;}int rc_only=rc_which>0;
+ int rc_which=0;{static const char *fl[]={"--rc-cold","--rc-hit","--rc-corrupt","--rc-product","--rc-input","--rc-tool","--rc-prepare","--prep-resume","--preflight-stop","--preflight-resume"};for(int i=0;i<10;i++)if(argc==3&&!strcmp(argv[2],fl[i]))rc_which=i+1;}int rc_only=rc_which>0;
  static char rc_outabs[4096];
  if(rc_only){sy_mkdir(argv[1],0700);if(sy_realpath(argv[1],rc_outabs,sizeof rc_outabs)<0)die("rc-outdir");rc_outdir=rc_outabs;argc=2;}   /* {out} 可能是相对路径:子进程 cwd 不同,须先取绝对路径 */   /* 批次形态 {out};--rc-X */
  int land_only=(argc==2&&!strcmp(argv[1],"--land-only"))||aff_only||rc_only;
