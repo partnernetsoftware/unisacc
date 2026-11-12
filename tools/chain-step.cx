@@ -4,7 +4,8 @@
  *   sh ./unisacc.com tools/chain-step.cx -- label   REV S PKG OUT          打印将做的事，不执行
  *   sh ./unisacc.com tools/chain-step.cx -- snap    REV OUT                生成/复用 S=out/release-snap-<rev10>
  *   sh ./unisacc.com tools/chain-step.cx -- build-objects REV S B          编译可恢复 controller 对象
- *   sh ./unisacc.com tools/chain-step.cx -- build   REV S B                验证对象收据并链接 controller
+ *   sh ./unisacc.com tools/chain-step.cx -- build-front REV S B            验证对象收据,源码路线第一遍停在相位检查点(UNISACC_PHASE=A)
+ *   sh ./unisacc.com tools/chain-step.cx -- build   REV S B                验证对象与前段收据,从检查点续完 controller(UNISACC_PHASE=B)
  *   sh ./unisacc.com tools/chain-step.cx -- ctx     REV S B CTX CC          复用 controller，恢复已完成 context
  *   sh ./unisacc.com tools/chain-step.cx -- seed-helper REV S B CC     B/identity-helper(+receipt) before build-objects
  * build/build-objects require UNISACC_IDENTITY_HELPER=absolute F-v2 helper
@@ -1173,11 +1174,14 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
     return cs_fp_five(g2, g3, pkg);
 }
 
+static int cs_build_split(const char *rev, const char *s, const char *b, int front);
 /* Independent object/link receipts close the child-success / outer-mark gap. */
 static int cs_build(const char *rev, const char *s, const char *b, int objects, int wave) {
     char boot[4400], src[4400], obj[4400], out[4400], rec[4400], lock[4400];
     char source[65], bootstrap[65], input[65], output[65], self[65], identity[2048], expected[2300];
     long n=0;
+    /* The controller image finishes from the build-front checkpoint (cs_build_split below). */
+    if(!objects&&!wave)return cs_build_split(rev,s,b,0);
     const char *name=wave?"source-job-wave":"source-package";
     if(cx_fmt(boot,sizeof boot,"%s/Root41-bootstrap.com",b)||cx_fmt(src,sizeof src,"%s/tools/%s.cx",s,name)||cx_fmt(obj,sizeof obj,"%s/%s-O2.o",b,name)||cx_fmt(out,sizeof out,"%s/%s-O2.%s",b,name,objects?"o":"elf")||cx_fmt(rec,sizeof rec,"%s.receipt",out)||cx_fmt(lock,sizeof lock,"%s.lock",out))cs_die("build path",b);
     int fd=sy_open(lock,O_RDWR|O_CREAT,0600);
@@ -1217,9 +1221,10 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
         if(!units)cs_die("REFUSE empty controller closure",src);
     }else{
         /* Linking the -c object alone leaves libc-forwarded symbols (pread) unresolved in the
-           product linker (0.0.59 product item). Build the executable from the entry source in one
-           step, as the 0.0.57 chain did; the object and its receipt stay as the verified precheck
-           (input_sha above binds them into this receipt). */
+           product linker (0.0.59 product item). Build the executable from the entry source; the
+           object and its receipt stay as the verified precheck (input_sha above binds them into
+           this receipt). Only the wave runner still does this in one step (about 16 seconds);
+           the controller goes through cs_build_split (build-front, build). */
         v[k++]=src;
     }
     v[k++]="-o";v[k++]=out;v[k]=0;
@@ -1240,18 +1245,175 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
     sy_close(fd);cs_expect_file(out,"controller");return 0;
 }
 
+/* The controller executable in two bounded phases (build-front, build).
+   Linking the -c object alone leaves host-forwarded symbols (pread) unresolved in the product
+   linker, and the one-step build from the entry source no longer fits one 55 second phase. The
+   bootstrap has its own checkpoint between its two passes: UNISACC_PHASE=A stops after the first
+   pass, having written the framed units to UNISACC_PHASE_OUT (with a .sha256 receipt of the file)
+   and the host-forwarding stub to TMPDIR/unisacc-forward-entry.c; UNISACC_PHASE=B restores both
+   and finishes the image. The argv is the one-step argv in both phases, and the image is byte for
+   byte the one-step image (measured on 9a34cb97b4: e386c0c8... three ways).
+   build-front owns PHASE A: receipt binds rev/root/source/bootstrap/producer, the verified object
+   (input_sha), the checkpoint (output_sha, equal to the product's own .sha256) and the stub.
+   build owns PHASE B: it rechecks the object and front receipts against the files, runs in a new
+   private TMPDIR holding only the bound stub, and binds the front receipt into its own receipt.
+   No cache or scratch file of phase A reaches phase B outside those two bound inputs. */
+#define CS_FWD_STUB "unisacc-forward-entry.c"
+static void cs_ctl_object(const char *rev, const char *s, const char *src, const char *obj, const char *source, const char *bootstrap, const char *self, char input[65]) {
+    char object_rec[4400], source_input[65], expected[2300]; long on = 0;
+    cs_sha(src, source_input); cs_sha(obj, input);
+    if (cx_fmt(object_rec, sizeof object_rec, "%s.receipt", obj)) cs_die("object receipt path", obj);
+    char *object_saved = cs_load(object_rec, &on);
+    if (cx_fmt(expected, sizeof expected, "chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=objects\ninput_sha=%s\noutput_sha=%s\n", rev, s, source, bootstrap, self, source_input, input) || !object_saved || on != (long)strlen(expected) || memcmp(object_saved, expected, on)) cs_die("REFUSE controller object receipt mismatch", object_rec);
+    free(object_saved);
+}
+/* The checkpoint must equal the product's own receipt of it, and the stub must be present. */
+static void cs_ctl_material(const char *mat, const char *stub, char mat_sha[65], char stub_sha[65]) {
+    char matrec[4400]; long n = 0;
+    if (cx_fmt(matrec, sizeof matrec, "%s.sha256", mat)) cs_die("checkpoint receipt path", mat);
+    if (cs_file_size(mat) <= 8) cs_die("REFUSE controller checkpoint missing", mat);
+    if (cs_file_size(stub) <= 0) cs_die("REFUSE controller forwarding stub missing", stub);
+    cs_sha(mat, mat_sha); cs_sha(stub, stub_sha);
+    char *saved = cs_load(matrec, &n);
+    if (!saved || n != 65 || saved[64] != '\n' || memcmp(saved, mat_sha, 64)) cs_die("REFUSE controller checkpoint differs from product receipt", matrec);
+    free(saved);
+}
+static void cs_ctl_fresh(const char *p) {
+    int e = sy_exists(p);
+    if (e < 0) cs_die("REFUSE controller scratch state", p);
+    if (e == 1 && cx_rmtree(p)) cs_die("controller scratch cleanup", p);
+    if (sy_mkdir(p, 0700)) cs_die("mkdir", p);
+}
+static void cs_ctl_absent(const char *p) {
+    int e = sy_exists(p);
+    if (e < 0) cs_die("REFUSE controller stale state", p);
+    if (e == 1 && sy_unlink(p)) cs_die("controller stale cleanup", p);
+}
+/* Run the one-step argv under one phase of the checkpoint; argv and phase environment are
+   written beside DEST as evidence, and the environment is put back afterwards. */
+static int cs_ctl_run(const char *s, const char *boot, const char *src, const char *out, const char *dest, const char *tmp, const char *phase, const char *in, const char *po) {
+    char argvfile[4400], text[20000]; long at = 0;
+    char *v[] = {"sh", (char *)boot, "-O2", (char *)src, "-o", (char *)out, 0};
+    const char *names[] = {"TMPDIR", "UNISACC_PHASE", "UNISACC_PHASE_IN", "UNISACC_PHASE_OUT"};
+    const char *values[] = {tmp, phase, in, po};
+    text[0] = 0;
+    for (int i = 0; v[i]; i++) { char ix[32]; if (cx_fmt(ix, sizeof ix, "%d\t", i)) cs_die("argv index", dest); cs_puts(text, sizeof text, &at, ix); cs_puts(text, sizeof text, &at, v[i]); cs_puts(text, sizeof text, &at, "\n"); }
+    for (int i = 0; i < 4; i++) { cs_puts(text, sizeof text, &at, "env\t"); cs_puts(text, sizeof text, &at, names[i]); cs_puts(text, sizeof text, &at, "="); cs_puts(text, sizeof text, &at, values[i]); cs_puts(text, sizeof text, &at, "\n"); }
+    if (cx_fmt(argvfile, sizeof argvfile, "%s.argv.tsv", dest)) cs_die("argv path", dest);
+    cs_save(argvfile, text, at);
+    const char *before = sy_env("TMPDIR"); char saved_tmp[4400]; int had = before != 0;
+    if (had && cx_fmt(saved_tmp, sizeof saved_tmp, "%s", before)) cs_die("TMPDIR bound", dest);
+    for (int i = 0; i < 4; i++) if (sy_setenv(names[i], values[i], 1)) cs_die("controller phase environment", names[i]);
+    int rc = cs_run(v, s);
+    if ((had ? sy_setenv("TMPDIR", saved_tmp, 1) : sy_unsetenv("TMPDIR")) || sy_setenv("UNISACC_PHASE", "", 1) || sy_setenv("UNISACC_PHASE_IN", "", 1) || sy_setenv("UNISACC_PHASE_OUT", "", 1)) cs_die("controller phase environment", "restore");
+    return rc;
+}
+/* The front receipt as the files now say it. 1: checkpoint mode (the stub is there; OUTPUT is the
+   checkpoint). 0: image mode (no host-forwarded symbol, so the first pass did not stop and wrote
+   the whole image; OUTPUT is that image and there is no stub). The saved receipt text decides:
+   a stub added or removed afterwards yields the other mode's text and is refused. */
+static int cs_ctl_front_text(char *dst, long cap, const char *rev, const char *s, const char *source, const char *bootstrap, const char *self, const char *input, const char *mat, const char *stub, const char *out, char mat_sha[65], char stub_sha[65]) {
+    int e = sy_exists(stub);
+    if (e < 0) cs_die("REFUSE controller stub state", stub);
+    if (e == 1) cs_ctl_material(mat, stub, mat_sha, stub_sha);
+    else {
+        if (cs_file_size(out) <= 0) cs_die("REFUSE controller front product missing", out);
+        cs_sha(out, mat_sha);
+        if (cx_fmt(stub_sha, 65, "-")) cs_die("front receipt", out);
+    }
+    if (cx_fmt(dst, cap, "chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=front-from-source\ninput_sha=%s\nmode=%s\noutput_sha=%s\nstub_sha=%s\n", rev, s, source, bootstrap, self, input, e == 1 ? "checkpoint" : "image", mat_sha, stub_sha)) cs_die("front receipt", mat);
+    return e == 1;
+}
+static int cs_build_split(const char *rev, const char *s, const char *b, int front) {
+    char boot[4400], src[4400], obj[4400], out[4400], mat[4400], matrec[4400], stub[4400], frec[4400], rec[4400], lock[4400], tmp[4400], tmpstub[4500];
+    char source[65], bootstrap[65], input[65], self[65], mat_sha[65], stub_sha[65], after[65], output[65], front_sha[65], expected[2600], identity[2400];
+    long n = 0;
+    if (cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", b) || cx_fmt(src, sizeof src, "%s/tools/source-package.cx", s) || cx_fmt(obj, sizeof obj, "%s/source-package-O2.o", b) ||
+        cx_fmt(out, sizeof out, "%s/source-package-O2.elf", b) || cx_fmt(mat, sizeof mat, "%s/source-package-O2.phase", b) || cx_fmt(matrec, sizeof matrec, "%s.sha256", mat) ||
+        cx_fmt(stub, sizeof stub, "%s/source-package-O2.stub.c", b) || cx_fmt(frec, sizeof frec, "%s.receipt", mat) || cx_fmt(rec, sizeof rec, "%s.receipt", out) ||
+        cx_fmt(lock, sizeof lock, "%s.lock", front ? mat : out) || cx_fmt(tmp, sizeof tmp, "%s/source-package-O2.%s-tmp", b, front ? "front" : "link") ||
+        cx_fmt(tmpstub, sizeof tmpstub, "%s/" CS_FWD_STUB, tmp)) cs_die("build path", b);
+    int fd = sy_open(lock, O_RDWR | O_CREAT, 0600);
+    if (fd < 0 || sy_flock(fd, 2 | 4)) cs_die("REFUSE live controller owner", front ? mat : out);
+    cs_fp_helper = getenv("UNISACC_IDENTITY_HELPER");
+    cs_source(s, source); cs_sha(boot, bootstrap); cs_sha("/proc/self/exe", self);
+    cs_ctl_object(rev, s, src, obj, source, bootstrap, self, input);
+    if (front) {
+        char *old = cs_load(frec, &n);
+        if (old) {
+            cs_ctl_front_text(expected, sizeof expected, rev, s, source, bootstrap, self, input, mat, stub, out, mat_sha, stub_sha);
+            if (n != (long)strlen(expected) || memcmp(old, expected, n)) cs_die("REFUSE controller front receipt mismatch", frec);
+            free(old); sy_close(fd); sy_printf("CHAIN\tcontroller-front\treused=%s\n", mat); return 0;
+        }
+        /* No front receipt: a link receipt here was made from another front and is refused; an
+           image without either receipt is what a killed attempt left and is made again. */
+        if (sy_exists(rec) != 0) cs_die("REFUSE controller receipt without front receipt", rec);
+        cs_ctl_absent(out); cs_ctl_absent(mat); cs_ctl_absent(matrec); cs_ctl_absent(stub); cs_ctl_fresh(tmp);
+        if (cs_ctl_run(s, boot, src, out, mat, tmp, "A", "", mat)) cs_die("controller front", mat);
+        int stopped = sy_exists(tmpstub), imaged = sy_exists(out);
+        if (stopped < 0 || imaged < 0 || stopped == imaged) cs_die("REFUSE controller front left neither or both of stub and image", out);
+        if (stopped) {
+            long sn = 0; char *sb = cs_load(tmpstub, &sn);
+            if (!sb || sn <= 0) cs_die("REFUSE controller forwarding stub missing", tmpstub);
+            cs_save(stub, sb, sn); free(sb);
+        } else { cs_ctl_absent(mat); cs_ctl_absent(matrec); }
+        cs_source(s, after); if (strcmp(source, after)) cs_die("REFUSE controller source changed", s);
+        cs_sha(boot, after); if (strcmp(bootstrap, after)) cs_die("REFUSE controller bootstrap changed", boot);
+        if (cs_ctl_front_text(expected, sizeof expected, rev, s, source, bootstrap, self, input, mat, stub, out, mat_sha, stub_sha) != stopped) cs_die("REFUSE controller front changed", mat);
+        char temporary[4400]; if (cx_fmt(temporary, sizeof temporary, "%s.new", frec)) cs_die("receipt path", frec);
+        cs_save(temporary, expected, strlen(expected)); if (sy_rename(temporary, frec)) cs_die("publish controller front receipt", frec);
+        sy_close(fd); cs_expect_file(stopped ? mat : out, stopped ? "controller-front" : "controller-front-image"); return 0;
+    }
+    char *fsaved = cs_load(frec, &n);
+    if (!fsaved) cs_die("REFUSE controller front receipt missing", frec);
+    int checkpoint = cs_ctl_front_text(expected, sizeof expected, rev, s, source, bootstrap, self, input, mat, stub, out, mat_sha, stub_sha);
+    if (n != (long)strlen(expected) || memcmp(fsaved, expected, n)) cs_die("REFUSE controller front receipt mismatch", frec);
+    free(fsaved);
+    if (sy_sha256_hex(expected, (long)strlen(expected), front_sha)) cs_die("sha256", frec);
+    if (cx_fmt(identity, sizeof identity, "chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=link-from-source\ninput_sha=%s\nfront_sha=%s\n", rev, s, source, bootstrap, self, input, front_sha)) cs_die("build identity", b);
+    char *old = cs_load(rec, &n);
+    if (old) {
+        cs_sha(out, output);
+        if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, output) || n != (long)strlen(expected) || memcmp(old, expected, n)) cs_die("REFUSE controller receipt mismatch", rec);
+        free(old); sy_close(fd); sy_printf("CHAIN\tcontroller-link\treused=%s\n", out); return 0;
+    }
+    if (checkpoint) {
+        cs_ctl_absent(out); cs_ctl_fresh(tmp);
+        long sn = 0; char *sb = cs_load(stub, &sn);
+        if (!sb) cs_die("REFUSE controller forwarding stub missing", stub);
+        cs_save(tmpstub, sb, sn); free(sb);
+        cs_sha(tmpstub, after); if (strcmp(stub_sha, after)) cs_die("REFUSE controller forwarding stub copy differs", tmpstub);
+        if (cs_ctl_run(s, boot, src, out, out, tmp, "B", mat, "")) cs_die("controller build", out);
+        cs_source(s, after); if (strcmp(source, after)) cs_die("REFUSE controller source changed", s);
+        cs_sha(boot, after); if (strcmp(bootstrap, after)) cs_die("REFUSE controller bootstrap changed", boot);
+        char mat_after[65], stub_after[65];
+        cs_ctl_material(mat, stub, mat_after, stub_after);
+        cs_sha(tmpstub, after);
+        if (strcmp(mat_sha, mat_after) || strcmp(stub_sha, stub_after) || strcmp(stub_sha, after)) cs_die("REFUSE controller front changed during build", mat);
+        cs_sha(out, output);
+    } else {
+        /* Image mode: the front receipt already binds this image; nothing is left to run. */
+        if (cx_fmt(output, sizeof output, "%s", mat_sha)) cs_die("build receipt", rec);
+        sy_printf("CHAIN\tcontroller-link\tfront-image=%s\n", out);
+    }
+    if (cx_fmt(expected, sizeof expected, "%soutput_sha=%s\n", identity, output)) cs_die("build receipt", rec);
+    char temporary[4400]; if (cx_fmt(temporary, sizeof temporary, "%s.new", rec)) cs_die("receipt path", rec);
+    cs_save(temporary, expected, strlen(expected)); if (sy_rename(temporary, rec)) cs_die("publish controller receipt", rec);
+    sy_close(fd); cs_expect_file(out, "controller"); return 0;
+}
+
 /* The controller receipts are measured before ctx exists, with the seed helper (seed-helper).
    Once ctx has measured S with its own helper, every controller receipt present in B must name
    the same source SID; a disagreement refuses instead of carrying two identities forward. */
 static void cs_ctx_bind(const char *b, const char *ctx) {
-    static const char *names[] = {"source-package-O2.o", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf"};
+    static const char *names[] = {"source-package-O2.o", "source-package-O2.elf", "source-job-wave-O2.o", "source-job-wave-O2.elf", "source-package-O2.phase"};
     char p[4400]; long n = 0;
     if (cx_fmt(p, sizeof p, "%s/context.tsv", ctx)) cs_die("path", ctx);
     char *saved = cs_load(p, &n);
     if (!saved) cs_die("REFUSE context record missing", p);
     char *sid = cs_span_value(saved, "source");
     free(saved);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         char want[128];
         if (cx_fmt(p, sizeof p, "%s/%s.receipt", b, names[i]) || cx_fmt(want, sizeof want, "\nsource_sha=%s\n", sid)) cs_die("path", b);
         char *r = cs_load(p, &n);
@@ -1445,6 +1607,10 @@ int main(int argc, char **argv) {
     if(tx_eqz(argv[1],"build-objects")){
         if(argc!=5)cs_die("build-objects needs REV S B",0);
         return cs_build(argv[2],argv[3],argv[4],1,0);
+    }
+    if(tx_eqz(argv[1],"build-front")){
+        if(argc!=5)cs_die("build-front needs REV S B",0);
+        return cs_build_split(argv[2],argv[3],argv[4],1);
     }
     if (tx_eqz(argv[1], "build")) {
         if (argc < 5) cs_die("build needs REV S B", 0);
