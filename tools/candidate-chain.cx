@@ -699,18 +699,57 @@ static void clean_fp_phase(const char *outdir, const char *fp, const char *phase
 /* Existing --objects API accepts at most 256 keys; checkpoints remain per key.
    Always re-enter chain-step on resume: it verifies provenance and completed
    object bytes before adopting them. --until truncates the batch, not coverage. */
-static void fp_batch(const char *root, const char *rev, const char *snap, const char *pkg,
-                     const char *gen1, const char *fp, const char *helper,
-                     const char *target, const char *phase, const char *keys, int resume) {
-    char *a[18]; int n = 0;
-    a[n++] = "fixedpoint"; a[n++] = (char *)rev; a[n++] = (char *)snap; a[n++] = (char *)pkg;
-    a[n++] = (char *)gen1; a[n++] = (char *)fp; a[n++] = "--phase"; a[n++] = (char *)phase;
-    a[n++] = "--target"; a[n++] = (char *)target; a[n++] = "--identity-helper"; a[n++] = (char *)helper;
-    if (keys) { a[n++] = "--objects"; a[n++] = (char *)keys; }
-    else a[n++] = "--link-only";
-    if (resume) a[n++] = "--resume";
-    a[n] = 0;
-    if (step(root, a)) die(keys ? "fixedpoint objects" : "fixedpoint link", phase);
+static int fp_pending_limit(const char *root) {
+    char path[4400],line[256];long values[4];int row=0;
+    const char *names[]={"budget_ms","cold_key_ms","warm_key_ms","pending_keys"};
+    if(cx_fmt(path,sizeof path,"%s/build/g2-budget.tsv",root))die("budget path",root);
+    FILE *f=fopen(path,"rb");if(!f)die("budget open",path);
+    while(fgets(line,sizeof line,f)){
+        if(line[0]=='#')continue;if(row>=4)die("budget rows",path);
+        char *p=strchr(line,'\t');if(!p)die("budget field",path);*p++=0;
+        if(strcmp(line,names[row]))die("budget field",path);
+        long n=0;if(*p<'0'||*p>'9')die("budget number",path);
+        while(*p>='0'&&*p<='9'){if(n>1000000)die("budget bound",path);n=n*10+*p++-'0';}
+        if(strcmp(p,"\n")||n<1)die("budget number",path);values[row++]=n;
+    }
+    if(ferror(f)||fclose(f)||row!=4||values[0]!=55000||values[1]>=values[0]||values[3]!=1+(values[0]-values[1]-1)/values[2])die("REFUSE derived budget",path);
+    return values[3];
+}
+static void fp_call(const char *root,const char *rev,const char *snap,const char *pkg,
+                    const char *gen1,const char *fp,const char *helper,
+                    const char *target,const char *phase,const char *keys,int resume){
+    char *a[18];int n=0;
+    a[n++]="fixedpoint";a[n++]=(char *)rev;a[n++]=(char *)snap;a[n++]=(char *)pkg;a[n++]=(char *)gen1;a[n++]=(char *)fp;
+    a[n++]="--phase";a[n++]=(char *)phase;a[n++]="--target";a[n++]=(char *)target;a[n++]="--identity-helper";a[n++]=(char *)helper;
+    if(keys){a[n++]="--objects";a[n++]=(char *)keys;}else a[n++]="--link-only";
+    if(resume)a[n++]="--resume";a[n]=0;if(step(root,a))die(keys?"fixedpoint objects":"fixedpoint link",phase);
+}
+static void fp_batch(const char *root,const char *rev,const char *snap,const char *pkg,
+                     const char *gen1,const char *fp,const char *helper,
+                     const char *target,const char *phase,const char *keys,int resume){
+    if(!keys){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,0,resume);return;}
+    int limit=fp_pending_limit(root),pending=0,used=0;char batch[12288],path[4400],slug[80],first[160];size_t sn=0;
+    const char *end=strchr(keys,',');int len=end?(int)(end-keys):(int)strlen(keys);
+    if(cx_fmt(first,sizeof first,"%.*s",len,keys))die("first key",keys);
+    /* Recover any in-flight key and validate the complete phase seal once,
+     * before trusting its committed-key markers for budget accounting. The
+     * first cold key is isolated, so its preparation can never crowd a batch. */
+    fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,first,resume);
+    if(cx_fmt(slug,sizeof slug,"%s",target))die("batch target",target);for(int j=0;slug[j];j++)if(slug[j]=='/')slug[j]='-';
+    if(cx_fmt(path,sizeof path,"%s/%s/%s/.chain-steps",fp,phase,slug))die("batch steps",fp);
+    char *steps=cx_read(path,&sn);if(!steps)die("batch committed steps",path);
+    const char *p=end?end+1:keys+len;
+    while(*p){
+        const char *e=strchr(p,',');len=e?(int)(e-p):(int)strlen(p);char needle[160];
+        if(len<1||cx_fmt(needle,sizeof needle,"\n%.*s\t",len,p))die("batch key",p);
+        if(!strstr(steps,needle)){
+            if(pending==limit||pending==256){fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);used=0;pending=0;}
+            int z=snprintf(batch+used,sizeof batch-used,"%s%.*s",pending?",":"",len,p);
+            if(z<0||z>=sizeof batch-used)die("batch buffer",p);used+=z;pending++;
+        }
+        p=e?e+1:p+len;
+    }
+    free(steps);if(pending)fp_call(root,rev,snap,pkg,gen1,fp,helper,target,phase,batch,1);
 }
 static void g2_closures(const char *root, const char *outdir, const char *rev, const char *snap, const char *pkg,
                         const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,

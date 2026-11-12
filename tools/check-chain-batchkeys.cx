@@ -40,9 +40,8 @@ static int fp(const char *extra1, const char *extra2, const char *extra3, const 
     return rc;
 }
 int main(void) {
-    char cmd[4400];
+    char snap[4400],out[4400],gen[4400],sub[4400],helper[4400],marker[4400],record[4400];
     int rc;
-    np_result r = {0};
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd");
     fp("--objects", "m1.o,m2.o,m1.o", 0, "REFUSE duplicate object key", "dup-key");
     fp("--objects", "m1.o,,m2.o", 0, "REFUSE objects list", "empty-key");
@@ -50,22 +49,16 @@ int main(void) {
     fp("--objects", "A.o,m2.o", 0, "REFUSE object key", "bad-char-key");
     fp("--objects", "m1.o", "--link-only", "REFUSE --objects with --object/--link-only", "with-link-only");
     /* 假快照 + 已存在未记录的 slice 目录: 首键必须拒绝, 且不写 phase-0.tsv */
-    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s && cd %s && rm -rf release-snap-deadbeefde chain-batchkeys-fp && printf '#!/bin/sh\\necho 0000000000000000000000000000000000000000000000000000000000000000\\n' > chain-batchkeys-helper.sh && chmod +x chain-batchkeys-helper.sh && mkdir -p release-snap-deadbeefde chain-batchkeys-fp/g2/lnx-x86_64 && printf %%s %s > release-snap-deadbeefde/.release-rev", OD, OD, REV)) die("cmd");
-    {
-        char *v[] = {"sh", "-c", cmd, 0};
-        if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) die("fixture");
-        np_free(&r);
-    }
+    if(sy_mkdir(OD,0755)&&errno!=EEXIST)die("fixture parent");
+    if(cx_fmt(snap,sizeof snap,"%s/release-snap-deadbeefde",OD)||cx_fmt(out,sizeof out,"%s/chain-batchkeys-fp",OD)||cx_fmt(gen,sizeof gen,"%s/g2",out)||cx_fmt(sub,sizeof sub,"%s/lnx-x86_64",gen)||cx_fmt(helper,sizeof helper,"%s/chain-batchkeys-helper.sh",OD)||cx_fmt(marker,sizeof marker,"%s/.release-rev",snap)||cx_fmt(record,sizeof record,"%s/phase-0.tsv",gen))die("fixture path");
+    struct stat st;const char *owned[]={snap,out,helper};for(int i=0;i<3;i++){if(!lstat(owned[i],&st)||errno!=ENOENT)die("REFUSE existing/nonprivate fixture");}
+    const char *body="#!/bin/sh\nprintf '0000000000000000000000000000000000000000000000000000000000000000\\n'\n";
+    if(sy_mkdir(snap,0755)||sy_mkdir(out,0755)||sy_mkdir(gen,0755)||sy_mkdir(sub,0755)||cx_write(marker,REV,40)||cx_write(helper,body,strlen(body))||chmod(helper,0700))die("fixture");
     rc = fp("--objects", "m1.o,m2.o", 0, "REFUSE unrecorded/existing phase", "existing-unrecorded");
     (void)rc;
-    {
-        char c2[512];
-        char *v[] = {"sh", "-c", c2, 0};
-        if (cx_fmt(c2, sizeof c2, "cd %s && test ! -e chain-batchkeys-fp/g2/phase-0.tsv; r=$?; rm -rf release-snap-deadbeefde chain-batchkeys-fp chain-batchkeys-helper.sh; exit $r", OD)) die("cmd");
-        if (np_run(v, root, 0, 20, &r, why, sizeof why)) die("cleanup");
-        ck(r.rc == 0, "no-phase-record-written");
-        np_free(&r);
-    }
+    ck(lstat(record,&st)&&errno==ENOENT,"no-phase-record-written");
+    /* Remove only the exact files and empty directories owned by this run. */
+    if(unlink(marker)||unlink(helper)||rmdir(sub)||rmdir(gen)||rmdir(out)||rmdir(snap))die("fixture cleanup");
     printf("CHECK_CHAIN_BATCHKEYS\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

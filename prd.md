@@ -55,6 +55,14 @@
 
 **替代发生在哪一步**：逻辑 -> 事实表 这一步把决策从代码里拿出来；表 -> 网 是等价的执行形式转换。覆盖度的度量看「决策进表的比例」，现状见 [prd_hist.md](prd_hist.md)「0.0.47 逻辑分布普查结论」（源码中机制代码约 49%，是后续推进空间）。
 
+构造链 Linux g2/g3 根键与动态 closure 的待编预算由 `build/g2-budget-facts.tsv` 经 `tools/g2-budget-gen.cx --write|--check` 生成 `build/g2-budget.tsv`。证据冻结rev `60acc817b86b0605016f38604ec0dbea5fac4d8d`，首键含准备44.4秒=44400ms，后续host.o完整检查点wall_ms=8116；不是对象行的ns。严格小于55秒公式 `1+(55000-44400-1)/8116` 推导最多2个待编键；首键单独运行并核整体phase身份，剩余已完成键不重算。首键达到预算、零/负测量具名拒绝。逐键日志绑定root/rev/源/pkg/constructor/target及artifact路径，全部备份SHA核完才恢复该键对象/cache/rr与追加收据、检查点；备份保留到原phase全树身份通过，恢复可幂等重入，已提交seal不回滚。轻夹具 `tools/check-g2-budget-gen.cx ROOT OUT COMPILER` 覆盖预算、漂移、根/closure SIGKILL、异输入、备份坏SHA与陈旧对象拒绝，不替代真链。
+
+G2日志身份计算不能先于原有目录状态拒绝：没有phase记录却已有slice目录时，先报 `REFUSE unrecorded/existing phase`，不抢先读取尚未提供的pkg/constructor。`check-chain-batchkeys.cx`原七条拒绝/无记录断言保持，夹具仅操作本次自有文件与空目录，不删除已有现场。
+
+G2的 `fp_call` 仍属于 `chainargv` 现有局部char指针数组、n++追加、空终止与step包装支持域；真实正控核19处调用。负控必须锚定真实构造：保留bare-helper检测，并覆盖G2位置互换、helper缺值和未知包装拒绝；不通过新增白名单或改guard顺序跳过检测。
+
+G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_BUDGET_GEN` 后必须是行尾或TAB，不能用空格代替。真实批次验收同时核子进程rc、唯一标记和产品身份不变；负控的预期REFUSE日志完整保留，不据直接夹具rc0冒充批次PASS。
+
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
 ## 1. unisacc.com 是什么
@@ -159,7 +167,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 | SPEED-049-A 两代抽样 | `sh ./unisacc.com tools/fixedpoint-sample.cx -- sample --seed N UNITS GEN2 GEN3`；`-- release` 拒 `--sample`；`-- wave PART OUT`；夹具 `tools/check-fixedpoint-sample.cx`；链内开关 `tools/chain-step.cx fixedpoint … --sample --non-release`（979b56e4d9） | 非发布候选确定性抽样(收据 SAMPLED);发布候选强制 FULL;拆波拼接=一次跑。chain-step 默认完整两代，`--sample` 不配 `--non-release` 按发布候选拒绝（check `chain-step-release-forbids-sample`）；0.0.49 发布候选按 FULL 跑，g2==g3（发布说明）。gen1–gen3 整链并行端到端墙钟 UNMEASURED（`agentwork/phase-times.tsv` 第 11 行） |
 | C49 X全闭包分相构造 | `tools/whole-front.cx` prepare/front/merge/stub/span；固定点由 `tools/chain-step.cx fixedpoint --span-driver/--span-prepared/--span-index` 逐步接纳 | 真实85单元32/32/21，Mac真实桩后units..e3与prune..elf，Win三段；子相总45秒，来源与checkpoint实际哈希重核；当代Ctor与P4显式绑定，旧env-B路径不用，原生CI资格独立 |
 | GEN1 Linux 对象/链接分相 | `entry-build.cx --objects-only` 后接同输入/目录的 `--link-only`；候选链 `--until gen1-lnx-{x86_64,arm64}-objects` 后 `--resume` | 两次子调用各55秒；对象相覆盖全部根与动态闭包；链接仍核全部对象缓存身份，缺失/陈旧拒绝，不回退编译。原 `gen1-lnx-*` 检查点代表链接完成；轻夹具 `check-candidate-chain.cx -- --gen1-split NEW_PARENT ABS_PRODUCT`，不跑真实构造 |
-| G2-BATCH 与 G3 Linux 对象/链接分相 | 候选链沿 `chain-step.cx --objects KEY,...`，44根一次调用；动态闭包按清单每批最多256键；`--until g3-lnx-{x86_64,arm64}-objects` 后 `--resume` | G2原逐键检查点及动态 `closure-mN.o` 边界保留，G3新增对象相检查点，链接独立 `--link-only`；每子调用55秒，续跑仍进入固定点身份核验，不以调度检查点冒充对象有效。轻夹具 `check-candidate-chain.cx -- --g2g3-split NEW_PARENT ABS_PRODUCT`；不代表真实构造、端到端提速或产品资格 |
+| G2-BATCH 与 G3 Linux 对象/链接分相 | 候选链沿 `chain-step.cx --objects KEY,...`，根键和动态闭包均经实测预算拆调用；`build/g2-budget-facts.tsv` -> `g2-budget-gen.cx --write|--check` -> `build/g2-budget.tsv` | 首键隔离核phase seal并恢复同身份未提交键，剩余仅投递待编键，当前测量推导最多2待编键/子调用；逐键与动态closure检查点、完整44根覆盖及独立link-only不变。写前日志完整SHA验证后恢复，原phase全树断言与55秒界不变；夹具 `check-g2-budget-gen.cx ROOT OUT COMPILER`，不认证真链或六目标资格 |
 | 分相结构合并及独立边界 | `tools/check-whole-front.cx`；`tools/check-wholefrontmerge.cx`，批次whole-front/wholefrontmerge | 原9项合同保留；另实测3项多属性顺序/opaque字节、非相邻重复拒绝无输出、零单位双空编码；模块检查不冒充产品等价或候选资格 |
 | 分片测试：显式绑定 slice/pkg 启动 | `tools/test-loader.cx`（`--slice ABS --models ABS --identity ABS`、`--net STAGE=ABS --swap-tool ABS` 单网替换、`--e2-adapter`）；检查 `tools/check-test-loader.cx`（批 test-loader-com，需 5 个 `TEST_LOADER_*` 绝对路径环境绑定） | 开发证据，不是发布资格；缺绑定非零，不回落读 `./unisacc.com`；规格见 plans/test-loader-com.md |
 | 波次哪些批不能同跑 | `sh ./unisacc.com tests/check-wave-domains.cx`（批次 `wave-domains`） | `tests/wave-domains.tsv` 每行 `id<TAB>domains<TAB>reason<TAB>evidence`；domains 取 `serial`（独占一波）/`wt`（写共享路径）/`hs`（写 harness 三树）/`mi:<材料名>`，空=无约束；all-waves 按掩码两两不相交放置 |

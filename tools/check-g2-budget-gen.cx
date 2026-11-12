@@ -1,0 +1,48 @@
+/* Narrow real-function fixture: generator drift/boundary and killed-key journal
+ * recovery under the existing v4 phase identity. Never runs a constructor. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+static void fail(const char *s){fprintf(stderr,"check-g2-budget-gen: %s\n",s);exit(1);}
+static void put(const char *p,const char *s){if(cx_write(p,s,strlen(s)))fail(p);}
+static int run(char **v){pr_result r;int z=pr_run(v[0],v,0,0,45,&r);pr_echo(&r);int rc=z?2:r.rc;if(r.residue)rc=2;pr_free(&r);return rc;}
+int main(int argc,char **argv){
+    if(argc!=4)return 2;const char *root=argv[1],*out=argv[2],*compiler=argv[3];
+    if(sy_mkdir(out,0755)&&errno!=EEXIST)fail("mkdir");
+    char gen[4400],facts[4400],table[4400],probe[4400],exe[4400],source[4400];
+    if(cx_fmt(gen,sizeof gen,"%s/tools/g2-budget-gen.cx",root)||cx_fmt(facts,sizeof facts,"%s/facts.tsv",out)||cx_fmt(table,sizeof table,"%s/table.tsv",out)||cx_fmt(probe,sizeof probe,"%s/probe.cx",out)||cx_fmt(exe,sizeof exe,"%s/probe",out)||cx_fmt(source,sizeof source,"%s/tools/chain-step.cx",root))fail("path");
+    char *g[]={"sh",(char *)compiler,gen,"--","--write",facts,table,0};
+    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t8116\tfixture\n");if(run(g))fail("derive measured");
+    size_t n;char *b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t2\n"))fail("measured boundary");free(b);
+    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t10600\tfixture\n");g[4]="--check";if(run(g)!=1)fail("measurement drift accepted");g[4]="--write";if(run(g))fail("strict boundary derive");
+    b=cx_read(table,&n);if(!b||!strstr(b,"pending_keys\t1\n"))fail("exact deadline must split");free(b);
+    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t55000\tfixture\nwarm_key_ms\t8116\tfixture\n");if(run(g)!=2)fail("cold deadline accepted");
+    put(facts,"budget_ms\t55000\tfixture\ncold_key_ms\t44400\tfixture\nwarm_key_ms\t0\tfixture\n");if(run(g)!=2)fail("zero measurement accepted");
+    char *prod[]={"sh",(char *)compiler,gen,"--","--check",0};if(run(prod))fail("production generation drift");
+    b=cx_read(source,&n);if(!b)fail("source");char *main=strstr(b,"int main(int argc, char **argv) {");if(!main)fail("source main");*main=0;
+    /* Kill inside the real recovery loop after its first atomic restore.
+     * This instrumentation exists only in the generated private probe. */
+    char *recover=strstr(b,"static int cs_fp_jrecover("),*cut=recover?strstr(recover,"free(b);\n    }"):0;if(!cut)fail("recovery injection site");
+    const char *injection="if(sy_env(\"G2_FIXTURE_RECOVERY_KILL\")&&i==0)kill(getpid(),SIGKILL);";
+    size_t pre=cut-b,ins=strlen(injection),oldlen=strlen(b);char *instrumented=malloc(oldlen+ins+1);if(!instrumented)fail("injection allocation");if(mm_copy(instrumented,oldlen+ins+1,b,pre)||mm_copy(instrumented+pre,oldlen+ins+1-pre,injection,ins)||mm_copy(instrumented+pre+ins,oldlen+1-pre,cut,oldlen-pre+1))fail("injection copy");free(b);b=instrumented;
+    const char *tail=
+    "\nint main(int argc,char **argv){\n"
+    " char sub[4400],rec[4400],pkg[4400],ctor[4400],p[4400],binding[65];const char *rev=\"0123456789012345678901234567890123456789\";\n"
+    " if(argc<3)return 2;snprintf(sub,sizeof sub,\"%s/artifact\",argv[1]);snprintf(rec,sizeof rec,\"%s/phase-0.tsv\",argv[1]);snprintf(pkg,sizeof pkg,\"%s/pkg\",argv[1]);snprintf(ctor,sizeof ctor,\"%s/ctor\",argv[1]);cs_fp_helper=ctor;memset(cs_fp_source,'a',64);cs_fp_source[64]=0;\n"
+    " if(argc==4){cs_fp_jbinding(argv[2],rev,pkg,ctor,sub,\"g2\",\"lnx/x86_64\",binding);if(!strcmp(argv[3],\"verify\")){cs_fp_record(argv[2],rev,pkg,ctor,sub,rec,1,0,\"g2\",\"lnx/x86_64\");return 0;}if(!strcmp(argv[3],\"recover\")||!strcmp(argv[3],\"recover-kill\")){if(!strcmp(argv[3],\"recover-kill\"))sy_setenv(\"G2_FIXTURE_RECOVERY_KILL\",\"1\",1);cs_fp_jrecover(sub,rec,binding);return 0;}cs_fp_jbegin(sub,rec,argv[3],binding);snprintf(p,sizeof p,\"%s/%s\",sub,argv[3]);cs_save(p,\"partial\",7);snprintf(p,sizeof p,\"%s/receipt.txt\",sub);cs_save(p,\"partial timing\",14);snprintf(p,sizeof p,\"%s/.chain-steps.tmp\",sub);cs_save(p,\"partial marker\",14);kill(getpid(),SIGKILL);return 3;}\n"
+    " sy_mkdir(sub,0755);cs_save(pkg,\"package\",7);cs_save(ctor,\"constructor\",11);snprintf(p,sizeof p,\"%s/drive.o\",sub);cs_save(p,\"completed\",9);snprintf(p,sizeof p,\"%s/drive.o.cache\",sub);cs_save(p,\"sealed-cache\",12);snprintf(p,sizeof p,\"%s/receipt.txt\",sub);cs_save(p,\"committed timing\",16);cs_fp_step(sub,\"drive.o\",1,1);cs_fp_record(argv[2],rev,pkg,ctor,sub,rec,0,1,\"g2\",\"lnx/x86_64\");\n"
+    " cs_fp_jbinding(argv[2],rev,pkg,ctor,sub,\"g2\",\"lnx/x86_64\",binding);const char *keys[]={\"stages.o\",\"m0.o\"};for(int i=0;i<2;i++){char *v[]={argv[0],argv[1],argv[2],(char *)keys[i],0};char *text=0;size_t bytes=0;int rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=137)return 10;v[3]=\"recover\";cs_save(pkg,\"foreign\",7);rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=2)return 15;cs_save(pkg,\"package\",7);char side[4400];cs_fp_jpath(side,sizeof side,rec,\"0\");long savedn=0;char *saved=cs_load(side,&savedn);cs_save(side,\"1corrupt\",8);rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=2)return 16;cs_save(side,saved,savedn);free(saved);v[3]=\"recover-kill\";rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=137)return 19;if(!cs_fp_jrecover(sub,rec,binding)||!cs_fp_jrecover(sub,rec,binding))return 11;cs_fp_record(argv[2],rev,pkg,ctor,sub,rec,1,0,\"g2\",\"lnx/x86_64\");cs_fp_jclear(rec);if(!cs_fp_step(sub,\"drive.o\",0,0)||cs_fp_step(sub,keys[i],0,0))return 12;snprintf(p,sizeof p,\"%s/%s\",sub,keys[i]);if(sy_exists(p))return 13;cs_fp_jbegin(sub,rec,keys[i],binding);cs_save(p,\"complete\",8);cs_fp_step(sub,keys[i],1,1);cs_fp_record(argv[2],rev,pkg,ctor,sub,rec,0,1,\"g2\",\"lnx/x86_64\");if(!cs_fp_jrecover(sub,rec,binding))return 17;cs_fp_record(argv[2],rev,pkg,ctor,sub,rec,1,0,\"g2\",\"lnx/x86_64\");cs_fp_jclear(rec);}\n"
+    " cs_save(pkg,\"different package\",17);char *v[]={argv[0],argv[1],argv[2],\"verify\",0};char *text=0;size_t bytes=0;int rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=2)return 14;cs_save(pkg,\"package\",7);snprintf(p,sizeof p,\"%s/drive.o\",sub);cs_save(p,\"stale object\",12);rc=cx_runv_timeout(v,5,&text,&bytes);free(text);if(rc!=2)return 18;printf(\"JOURNAL_KILL_RESUME roots=1 closures=1 identity_reject=1 backup_sha_reject=1 idempotent=1 committed_no_rollback=1 stale_object_reject=1\\n\");return 0;}\n";
+    size_t bn=strlen(b),tn=strlen(tail);char *all=malloc(bn+tn+1);if(!all)fail("alloc");if(mm_copy(all,bn+tn+1,b,bn)||mm_copy(all+bn,tn+1,tail,tn+1)||cx_write(probe,all,bn+tn))fail("probe write");free(b);free(all);
+    char *build[]={"sh",(char *)compiler,probe,"-o",exe,0};if(run(build))fail("probe compile");
+    char *v[]={exe,(char *)out,(char *)root,0};if(run(v))fail("kill resume");
+    if(cx_fmt(source,sizeof source,"%s/tools/candidate-chain.cx",root)||cx_fmt(probe,sizeof probe,"%s/batch-probe.cx",out)||cx_fmt(exe,sizeof exe,"%s/batch-probe",out))fail("batch path");
+    b=cx_read(source,&n);if(!b)fail("batch source");char *start=strstr(b,"static int fp_pending_limit("),*stop=strstr(b,"static void g2_closures(");if(!start||!stop||stop<=start)fail("batch functions");*stop=0;
+    const char *head="#pragma unisa use sys.fs\nstatic int calls;static void die(const char *a,const char *b){fprintf(stderr,\"%s %s\\n\",a,b);exit(2);}\nstatic int step(const char *root,char **a){const char *keys=0;for(int i=0;a[i];i++)if(!strcmp(a[i],\"--objects\"))keys=a[i+1];const char *want[]={\"drive.o\",\"m1.o,m2.o\",\"m3.o\"};if(calls>2||!keys||strcmp(keys,want[calls]))return 1;calls++;return 0;}\n";
+    tail="\nint main(int argc,char **argv){if(argc!=3)return 2;fp_batch(argv[1],\"rev\",\"snap\",\"pkg\",\"ctor\",argv[2],\"helper\",\"lnx/x86_64\",\"g2\",\"drive.o,host.o,m0.o,m1.o,m2.o,m3.o\",1);if(calls!=3)return 1;printf(\"BATCH_PENDING completed=3 pending=3 calls=3\\n\");return 0;}\n";
+    size_t hn=strlen(head);bn=strlen(start);tn=strlen(tail);all=malloc(hn+bn+tn+1);if(!all)fail("batch allocation");if(mm_copy(all,hn+bn+tn+1,head,hn)||mm_copy(all+hn,bn+tn+1,start,bn)||mm_copy(all+hn+bn,tn+1,tail,tn+1)||cx_write(probe,all,hn+bn+tn))fail("batch write");free(b);free(all);
+    char dir[4400],mark[4400];if(cx_fmt(dir,sizeof dir,"%s/g2",out))fail("batch dir");sy_mkdir(dir,0755);if(cx_fmt(dir,sizeof dir,"%s/g2/lnx-x86_64",out))fail("batch dir");sy_mkdir(dir,0755);if(cx_fmt(mark,sizeof mark,"%s/.chain-steps",dir))fail("batch mark");put(mark,"\ndrive.o\t1\n\nhost.o\t1\n\nm0.o\t1\n");
+    if(run(build))fail("batch compile");v[1]=(char *)root;v[2]=(char *)out;if(run(v))fail("batch pending accounting");
+    printf("CHECK_G2_BUDGET_GEN\tboundary=PASS drift=PASS kill_resume=PASS foreign_identity=PASS\n");return 0;
+}

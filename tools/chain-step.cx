@@ -937,6 +937,69 @@ static int cs_fp_accept_span(const char *s,const char *pkg,const char *ctor,cons
     for(i=0;i<cs_span_count;i++){if(cx_fmt(from,sizeof from,"%s/.span-%d-%d.ok",dir,target,i+1)||cx_fmt(to,sizeof to,"%s/adopt-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);if(cx_fmt(from,sizeof from,"%s.control/ready.tsv",cs_span_dirs[i])||cx_fmt(to,sizeof to,"%s/span-%d.tsv",sub,i+1))cs_die("evidence",sub);cs_copy(from,to);}
     return 1;
 }
+/* A key may be killed after entry-build appends timing but before cache/phase
+ * commit. Journal only its mutable files, never unrelated completed objects.
+ * The old phase seal authenticates rollback; a newer seal must validate before
+ * the journal is retired. All journal publication and restores are atomic. */
+static void cs_fp_jpath(char *p, long cap, const char *rec, const char *leaf) {
+    if (cx_fmt(p, cap, "%s.pending.%s", rec, leaf)) cs_die("journal path", rec);
+}
+static void cs_fp_jfile(char *p, long cap, const char *sub, const char *key, int i) {
+    if (i == 0) { if(cx_fmt(p,cap,"%s/receipt.txt",sub))cs_die("journal path",sub); }
+    else if (i == 1) { if(cx_fmt(p,cap,"%s/.chain-steps",sub))cs_die("journal path",sub); }
+    else if (cx_fmt(p,cap,"%s/%s%s",sub,key,i==2?"":i==3?".cache":i==4?".rr":".unused"))cs_die("journal path",sub);
+}
+static void cs_fp_jclear(const char *rec) {
+    char p[4400], leaf[32];
+    cs_fp_jpath(p,sizeof p,rec,"ready"); if(unlink(p)&&errno!=ENOENT)cs_die("journal retire",p);
+    for(int i=0;i<5;i++){if(cx_fmt(leaf,sizeof leaf,"%d",i))cs_die("journal index",rec);cs_fp_jpath(p,sizeof p,rec,leaf);if(unlink(p)&&errno!=ENOENT)cs_die("journal retire",p);}
+}
+static void cs_fp_jbinding(const char *s,const char *rev,const char *pkg,const char *ctor,const char *sub,const char *phase,const char *target,char h[65]){
+    char ph[65],ch[65],id[32768];long at=0;cs_sha(pkg,ph);cs_sha(ctor,ch);
+    cs_fp_idtext(id,sizeof id,&at,rev,phase,target,cs_fp_source,ph,ch,"pending-key-v1");
+    const char *paths[]={s,pkg,ctor,sub};for(int i=0;i<4;i++){cs_puts(id,sizeof id,&at,paths[i]);cs_puts(id,sizeof id,&at,"\n");}
+    if(sy_sha256_hex(id,at,h))cs_die("journal identity",sub);
+}
+static void cs_fp_jbegin(const char *sub,const char *rec,const char *key,const char *binding) {
+    char p[4400],src[4400],leaf[32],seal[65],ready[1024],h[65];long n,at=0;
+    cs_sha(rec,seal);cs_puts(ready,sizeof ready,&at,key);cs_puts(ready,sizeof ready,&at,"\n");
+    cs_puts(ready,sizeof ready,&at,seal);cs_puts(ready,sizeof ready,&at,"\n");cs_puts(ready,sizeof ready,&at,binding);cs_puts(ready,sizeof ready,&at,"\n");
+    for(int i=0;i<5;i++){
+        cs_fp_jfile(src,sizeof src,sub,key,i);n=0;char *b=cs_load(src,&n);
+        if(!b&&errno!=ENOENT)cs_die("journal read",src);
+        if(cx_fmt(leaf,sizeof leaf,"%d",i))cs_die("journal index",rec);cs_fp_jpath(p,sizeof p,rec,leaf);
+        char *copy=malloc(n+1);if(!copy)cs_die("journal allocation",src);copy[0]=b?'1':'0';
+        for(long j=0;b&&j<n;j++)copy[j+1]=b[j];cs_save(p,copy,n+1);free(copy);free(b);
+        cs_sha(p,h);cs_puts(ready,sizeof ready,&at,h);cs_puts(ready,sizeof ready,&at,"\n");
+    }
+    cs_fp_jpath(p,sizeof p,rec,"ready");cs_save(p,ready,at);
+}
+static int cs_fp_jrecover(const char *sub,const char *rec,const char *binding) {
+    char p[4400],dst[4400],leaf[32],seal[65],h[65];long n=0;
+    cs_fp_jpath(p,sizeof p,rec,"ready");char *r=cs_load(p,&n);if(!r){if(errno!=ENOENT)cs_die("journal read",p);return 0;}
+    char *e=strchr(r,'\n');if(!e||e==r||strlen(e+1)!=7*65)cs_die("REFUSE journal format",p);*e=0;
+    for(char *k=r;*k;k++)if(!((*k>='a'&&*k<='z')||(*k>='0'&&*k<='9')||*k=='.'||*k=='_'))cs_die("REFUSE journal key",p);
+    if(!strcmp(r,".")||!strcmp(r,".."))cs_die("REFUSE journal key",p);
+    for(int i=0;i<7;i++){for(int j=0;j<64;j++){char c=e[1+i*65+j];if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))cs_die("REFUSE journal hash",p);}if(e[65+i*65]!='\n')cs_die("REFUSE journal format",p);}
+    if(strncmp(binding,e+66,64))cs_die("REFUSE journal input identity",p);
+    cs_sha(rec,seal);if(strncmp(seal,e+1,64)){free(r);return 1;}
+    /* Validate every backup before mutating any file; backups remain until
+     * restored bytes pass the unchanged whole-tree phase identity check. */
+    char *back[5];long sizes[5];
+    for(int i=0;i<5;i++){
+        if(cx_fmt(leaf,sizeof leaf,"%d",i))cs_die("journal index",rec);cs_fp_jpath(p,sizeof p,rec,leaf);
+        sizes[i]=0;back[i]=cs_load(p,&sizes[i]);char *b=back[i];n=sizes[i];
+        if(!b||n<1||(b[0]!='0'&&b[0]!='1')||(b[0]=='0'&&n!=1))cs_die("REFUSE journal backup",p);
+        if(sy_sha256_hex(b,n,h)||strncmp(h,e+1+(i+2)*65,64))cs_die("REFUSE journal backup SHA",p);
+    }
+    for(int i=0;i<5;i++){
+        char *b=back[i];cs_fp_jfile(dst,sizeof dst,sub,r,i);
+        if(b[0]=='1')cs_save(dst,b+1,sizes[i]-1);else if(unlink(dst)&&errno!=ENOENT)cs_die("journal restore",dst);free(b);
+    }
+    if(cx_fmt(dst,sizeof dst,"%s/.chain-steps.tmp",sub))cs_die("journal path",sub);
+    if(unlink(dst)&&errno!=ENOENT)cs_die("journal restore",dst);
+    free(r);return 1;
+}
 /* Closure keys are emitted by entry-build --closure-list. Keep every write
    inside the normal fixedpoint receipt boundary; never inject into its tree. */
 static int cs_fp_closure_key(const char *object) {
@@ -998,12 +1061,27 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
                 if (!cs_fp_step(dep, "link", 0, 0)) cs_die("REFUSE incomplete constructor", dep);
             }
             const char *step = kernel ? "kernels" : i < 2 ? (object ? object : "link") : "whole-o";
+            int journal = 0;char binding[65];
+            if (resume && object && sy_exists(rec)) {
+                cs_fp_jbinding(s,rev,pkg,ctor,sub,g==2?"g2":"g3",cs_fp_targets[i],binding);
+                journal = cs_fp_jrecover(sub,rec,binding);
+            }
             if (compare || (resume && sy_exists(rec))) {
                 cs_fp_record(s, rev, pkg, ctor, sub, rec, 1, 0, kernel ? (g == 2 ? "kernels-g2" : "kernels-g3") : (g == 2 ? "g2" : "g3"), kernel ? "kernel-route" : cs_fp_targets[i]);
+                if(journal)cs_fp_jclear(rec);
                 if (compare) { if (!cs_fp_step(sub, kernel ? "kernels" : i < 2 ? "link" : "whole-o", 0, 0)) cs_die("REFUSE incomplete phase", sub); continue; }
                 if (cs_fp_step(sub, step, 0, 0)) continue;
                 if (cs_fp_step(sub, "link", 0, 0)) cs_die("REFUSE modifying linked slice", sub);
             } else if (sy_exists(sub) || sy_exists(rec)) cs_die("REFUSE unrecorded/existing phase", sub);
+            if(object){
+                /* Keep the existing/unrecorded refusal ahead of input reads. */
+                if(!(resume&&sy_exists(rec)))cs_fp_jbinding(s,rev,pkg,ctor,sub,g==2?"g2":"g3",cs_fp_targets[i],binding);
+                if(!sy_exists(rec)){
+                    if(sy_mkdir(sub,0755)&&errno!=EEXIST)cs_die("mkdir",sub);
+                    cs_fp_record(s,rev,pkg,ctor,sub,rec,0,0,g==2?"g2":"g3",cs_fp_targets[i]);
+                }
+                cs_fp_jbegin(sub,rec,object,binding);
+            }
             start = sy_now_ms();
             char before_source[65], before_pkg[65], before_ctor[65];
             if (cx_fmt(before_source, sizeof before_source, "%s", cs_fp_source)) cs_die("identity", s);
@@ -1052,6 +1130,7 @@ static int cs_fixedpoint(const char *rev, const char *s, const char *pkg, const 
             if (strcmp(before_source, cs_fp_source) || strcmp(before_pkg, after_pkg) || strcmp(before_ctor, after_ctor)) cs_die("REFUSE phase inputs changed", sub);
             cs_fp_step(sub, step, sy_now_ms() - start, 1);
             cs_fp_record(s, rev, pkg, ctor, sub, rec, 0, sy_now_ms() - start, kernel ? (g == 2 ? "kernels-g2" : "kernels-g3") : (g == 2 ? "g2" : "g3"), kernel ? "kernel-route" : cs_fp_targets[i]);
+            if(object)cs_fp_jclear(rec);
         }
     }
     if (!compare) return 0;

@@ -37,11 +37,15 @@ int main(int argc, char **argv) {
     const char *rev = "979b56e4d918894670a71080970149112499d223";
     if (argc == 4 && tx_eqz(argv[1], "--g2g3-split")) {
         char td[4400], fake[4500], trace[4500], fp[4500], cmd[20000], toolpath[4500], dir[4500];
-        const char *script = "#!/bin/sh\ncase \"$*\" in *--closure-list*) i=0; while [ $i -lt ${BATCH_CLOSURES:-3} ]; do printf 'm%s.o\\t%s/src/unit%s.cx\\n' \"$i\" \"$BATCH_SNAP\" \"$i\"; i=$((i+1)); done; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\ncase \"$*\" in *--objects*) exit ${BATCH_OBJECT_RC:-0};; *--link-only*) exit ${BATCH_LINK_RC:-0};; esac\nexit 99\n";
+        const char *script = "#!/bin/sh\ncase \"$*\" in *--closure-list*) i=0; while [ $i -lt ${BATCH_CLOSURES:-3} ]; do printf 'm%s.o\\t%s/src/unit%s.cx\\n' \"$i\" \"$BATCH_SNAP\" \"$i\"; i=$((i+1)); done; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\nphase=; keys=; while [ $# -gt 0 ]; do case \"$1\" in --phase) shift; phase=$1;; --objects) shift; keys=$1;; esac; shift; done\nif [ -n \"$keys\" ]; then [ ${BATCH_OBJECT_RC:-0} -eq 0 ] || exit $BATCH_OBJECT_RC; dest=\"$BATCH_FP/$phase/lnx-x86_64\"; mkdir -p \"$dest\"; old=$IFS; IFS=,; for key in $keys; do printf '\\n%s\\t1\\n' \"$key\" >> \"$dest/.chain-steps\"; done; IFS=$old; exit 0; fi\nexit ${BATCH_LINK_RC:-0}\n";
         if (sy_realpath(".", cwd, sizeof cwd) < 0 || cx_fmt(td, sizeof td, "%s/g2g3-split-XXXXXX", argv[2]) || !mkdtemp(td) ||
             cx_fmt(fake, sizeof fake, "%s/unisacc.com", td) || cx_fmt(trace, sizeof trace, "%s/trace", td) ||
             cx_fmt(fp, sizeof fp, "%s/fixedpoint", td) || cx_fmt(toolpath, sizeof toolpath, "%s/tools/candidate-chain.cx", cwd)) return 2;
         if (cx_write(fake, script, strlen(script)) || sy_mkdir(fp, 0755) || sy_setenv("BATCH_TRACE", trace, 1) || sy_setenv("BATCH_SNAP", td, 1)) return 2;
+        if(sy_setenv("BATCH_FP",fp,1)||cx_fmt(dir,sizeof dir,"%s/build",td)||sy_mkdir(dir,0755))return 2;
+        char budget[4500];size_t budget_n=0;char *budget_b=cx_read("build/g2-budget.tsv",&budget_n);
+        if(!budget_b||cx_fmt(budget,sizeof budget,"%s/build/g2-budget.tsv",td)||cx_write(budget,budget_b,budget_n))return 2;
+        char *limit_row=strstr(budget_b,"\npending_keys\t");int limit=limit_row?atoi(limit_row+14):0;free(budget_b);if(limit<1)return 2;
         for (int g = 2; g <= 3; g++) {
             if (cx_fmt(dir, sizeof dir, "%s/g%d", fp, g) || sy_mkdir(dir, 0755)) return 2;
         }
@@ -49,21 +53,20 @@ int main(int argc, char **argv) {
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g2-batch-objects-until");
         size_t zn; char *z = cx_read(trace, &zn);
         char *first = z ? strstr(z, "--objects\t") : 0;
-        char *second = first ? strstr(first + 1, "--objects\t") : 0;
-        ck(first && second && !strstr(second + 1, "--objects\t") && has(first, "drive.o,host.o,stages.o,") && has(first, "rescache.o,drivestream.o") && has(second, "m0.o,m1.o,m2.o") && !has(z, "--object\t") && !has(z, "--link-only"), "g2-two-batches-full-roots-and-closures");
+        int calls=0,bounded=1;for(char *p=first;p;p=strstr(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;calls++;}
+        ck(first&&bounded&&calls==2+(cf_root_count()-1+limit-1)/limit+(3-1+limit-1)/limit&&!has(z,"--object\t")&&!has(z,"--link-only"),"g2-measured-batches-full-roots-and-closures");
         int covered = 0;
         for (int i = 0; i < cf_root_count(); i++) {
             char key[96];
             const char *name = cf_root_key(i);
-            if (cx_fmt(key, sizeof key, "%s%s%s", i ? "," : "", name,
-                       i + 1 == cf_root_count() ? "\t" : ",")) return 2;
-            if (first && strstr(first, key)) covered++;
+            if (cx_fmt(key,sizeof key,"%s",name))return 2;
+            for(char *p=first;p;p=strstr(p+1,"--objects\t")){char *q=p+10,*end=strchr(q,'\t');size_t n=strlen(key);for(char *at=q;end&&at<end;){char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==n&&!memcmp(at,key,n)){covered++;break;}at=e+1;}}
         }
         ck(covered == cf_root_count(), "g2-all-root-keys-covered"); free(z);
         if (cx_write(trace, "", 0) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g3 fresh g3-lnx-x86_64-objects 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "g3-objects-until");
         z = cx_read(trace, &zn);
-        ck(z && has(z, "--phase\tg3") && has(z, "--objects\t") && has(z, "m0.o,m1.o,m2.o") && !has(z, "--link-only"), "g3-objects-before-link"); free(z);
+        ck(z && has(z, "--phase\tg3") && has(z, "--objects\t") && has(z, "m0.o") && has(z,"m1.o") && has(z,"m2.o") && !has(z, "--link-only"), "g3-objects-before-link"); free(z);
         if (cx_write(trace, "", 0) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g3 resume - 2>&1", argv[3], toolpath, td, td, td, fp)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\tg3-lnx-x86_64-objects") && has(out, "RECEIPT\tg3-lnx-x86_64\t"), "g3-resume-links");
         z = cx_read(trace, &zn);
@@ -75,10 +78,13 @@ int main(int argc, char **argv) {
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "fixedpoint objects"), "g3-object-failure-propagates");
         z = cx_read(trace, &zn); ck(z && !has(z, "--link-only"), "g3-object-failure-stops-link"); free(z);
         sy_setenv("BATCH_OBJECT_RC", "0", 1); sy_setenv("BATCH_CLOSURES", "257", 1);
+        if(cx_fmt(dir,sizeof dir,"%s/g2/lnx-x86_64/.chain-steps",fp)||cx_write(dir,"",0))return 2;
         if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --g2g3-fixture '%s' '%s' '%s' '%s' g2 fresh g2-lnx-x86_64-closure-m256.o 2>&1", argv[3], toolpath, td, td, td, fp) || cx_write(trace, "", 0)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "status=UNTIL"), "dynamic-257-closures-until");
         z = cx_read(trace, &zn);
-        ck(z && has(z, "m254.o,m255.o") && has(z, "--objects\tm256.o\t") && !has(z, "--link-only"), "dynamic-closure-batches-cap-256"); free(z);
+        int closure_seen=0;bounded=1;for(char *p=z?strstr(z,"--objects\t"):0;p;p=strstr(p+1,"--objects\t")){char *q=p+10;int nk=1;while(*q&&*q!='\t'&&*q!='\n'){if(*q==',')nk++;q++;}if(nk>limit)bounded=0;}
+        for(int i=0;i<257;i++){char key[48];if(cx_fmt(key,sizeof key,"m%d.o",i))return 2;for(char *p=z?strstr(z,"--objects\t"):0;p;p=strstr(p+1,"--objects\t")){char *q=p+10,*end=strchr(q,'\t');for(char *at=q;end&&at<end;){char *e=memchr(at,',',end-at);if(!e)e=end;if((size_t)(e-at)==strlen(key)&&!memcmp(at,key,e-at)){closure_seen++;break;}at=e+1;}}}
+        ck(z&&bounded&&closure_seen==257&&has(z,"--objects\tm256.o\t")&&!has(z,"--link-only"),"dynamic-257-closures-measured-budget-full-coverage");free(z);
         printf("G2G3_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }
