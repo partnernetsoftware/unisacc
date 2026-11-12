@@ -663,11 +663,34 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
     }
     mm_free(c);
     if (nsrc < 1) return say(1, "FAILED", rel, "empty closure");
-    if (run_jobs(nsrc, par)) return say(1, "FAILED", rel, "a source unit did not compile");
+    /* A .cx unit object carries no forward marks (its undefined names are imports of other
+       units), and the installed product's unit route gives a .c object none either, so a libc
+       function such as strdup that a .cx program takes from <string.h> stays undefined in a
+       separate link although the one-step source route forwards it to the host. The link
+       carries a body for it instead: a .c shim unit over the carried malloc, whose blocks the
+       program's carried free accepts. When the product marks unit objects (cx/compiler/fwdmark.cx
+       reaches the installed product), the host stub replaces this shim. */
+    {
+        char shimc[4400], shimo[4400];
+        static const char shim_text[] =
+            "#include <stdlib.h>\n#include <string.h>\n"
+            "char *strdup(const char *s) {\n"
+            "    unsigned long n = 0, i;\n    char *d;\n"
+            "    if (!s) return 0;\n"
+            "    while (s[n]) n++;\n"
+            "    d = (char *)malloc(n + 1);\n"
+            "    if (!d) return 0;\n"
+            "    for (i = 0; i <= n; i++) d[i] = s[i];\n"
+            "    return d;\n}\n";
+        if (cx_fmt(shimc, sizeof shimc, "%s/tl-libc-forward.c", wdir) || cx_fmt(shimo, sizeof shimo, "%s/tl-libc-forward.o", wdir) ||
+            cx_write(shimc, shim_text, sizeof shim_text - 1) || set_compile(nsrc, shimc, shimo, RT_USER))
+            return say(1, "FAILED", wdir, "cannot place the libc forward shim");
+    }
+    if (run_jobs(nsrc + 1, par)) return say(1, "FAILED", rel, "a source unit did not compile");
     t1 = sy_now_ms();
     k = 0;
     av[k++] = "sh"; av[k++] = product;
-    for (i = 0; i < nsrc; i++) av[k++] = jobs[i].v[6];
+    for (i = 0; i <= nsrc; i++) av[k++] = jobs[i].v[6];
     /* The product resolves archives in argument order, one pass each: a tlib must come before the
        tlibs it depends on, or the members its objects need are never taken. rank = length of the
        longest dependency chain below a tlib; highest rank first. */
