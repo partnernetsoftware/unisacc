@@ -13,9 +13,17 @@
  *   other kill (signal 9/15, child rc 124/137/143)                .       .      +1      -1 (min 1)
  *   non-retryable rc, surviving processes                         .       .       .       .   (blocker, stops)
  *   supervisor kills a segment at its backstop                    .       .       .       .   (blocker, stops)
+ *   width.recover.clean clean attempts in a row below the
+ *     requested width (widens +1, at most width.recover.max)      .       .       .      +1
  * Every retry is preceded by the watch observation; a retry whose observation does not fit the
  * segment is owed and settled, with the same accounting, by the next segment. A KILL row records
- * load1 of /proc/loadavg as evidence. No counter is ever reset and the width never rises. A
+ * load1 of /proc/loadavg as evidence. No counter is ever reset. The width never rises by a new
+ * invocation or option; it rises only by the recovery rule (C1): a derate answers a loaded
+ * machine, and a load that has passed must not keep the rest of the chain serial (0.0.58: three
+ * kills in gen1 left 4459 s of attempts, every later lane, at width 1). An attempt is clean when
+ * it ends with rc 0 or a verified yield/job boundary; any retry sets the run of clean attempts
+ * back to 0. Each recovery writes a WIDEN row; the run of clean attempts and the number of
+ * recoveries persist in chain-run.widen (absent = 0 0), never above the requested width. A
  * maximum (attempts, resumes, segments) may only be raised, up to its build/limits.tsv max, by
  * [--budget-raise LEDGER-ID] naming a row of agentwork/ledger.tsv; it writes a RAISE row.
  * Output identity (LIM-S3): rev, mode, candidate, rehearse inputs, root, watch, argv and the plan
@@ -53,6 +61,7 @@ static long end_ms;
 /* Defaults come from build/limits.tsv (cxlib.limits) at the top of main. */
 static int attempts, resumes, kills, max_attempts, max_resumes;
 static int phase_bound, parallel=4, segment_cap;
+static int ceiling, clean, widens, widen_need, widen_max;
 typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound,recheck; char phase[256],label[280]; } task;
 static task plan[2048]; static int plan_count;
 static int probing; static char pending[256];
@@ -139,6 +148,29 @@ static void save(void) {
     char p[4400], tmp[4400], s[256]; path(p,"chain-run.budget"); path(tmp,"chain-run.budget.new");
     if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d %d %d %d %d v2\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel,segments,max_segments,owed,kills)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
 }
+/* Width recovery state: "clean widens". Written only while the width is below the requested one,
+   so a run that was never derated has no such file. */
+static void save_widen(void) {
+    char p[4400], tmp[4400], s[64]; path(p,"chain-run.widen"); path(tmp,"chain-run.widen.new");
+    if(cx_fmt(s,sizeof s,"%d %d\n",clean,widens)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save widen");
+}
+static void load_widen(void) {
+    char p[4400]; size_t n=0; path(p,"chain-run.widen"); char *b=cx_read(p,&n); char extra;
+    if(!b) return;
+    if(sscanf(b,"%d %d%c",&clean,&widens,&extra)!=3||extra!='\n'||clean<0||widens<0) die("widen record");
+    free(b);
+}
+/* One attempt ended cleanly. Below the requested width this counts toward a recovery. */
+static void clean_attempt(void) {
+    if(parallel>=ceiling||widens>=widen_max) return;
+    clean++;
+    if(clean<widen_need) { save_widen(); return; }
+    char row[200]; int run_len=clean;
+    widens++; clean=0; save_widen(); parallel++; save();
+    if(cx_fmt(row,sizeof row,"WIDEN\t%ld\t%d\tparallel=%d\tclean=%d\n",sy_wall_s(),widens,parallel,run_len)) die("widen row bound");
+    append("chain-run.tsv",row);
+}
+static void retry_resets_clean(void) { if(clean) { clean=0; save_widen(); } }
 /* A child whose whole bound does not end before the segment does is not started. */
 static int seg_fits(int bound) { return !seg_end_ms||sy_now_ms()+(long)bound*1000<=seg_end_ms; }
 static int segment_expired(const char *next) {
@@ -188,6 +220,7 @@ static int account_retry(const char *who,int kind,const char *detail,int with_wi
     int observed=observe();
     if(observed==RC_SEGMENT){owed=kind==2?2:1;save();return RC_SEGMENT;}
     if(observed) return observed;
+    retry_resets_clean();
     char row[700];
     if(bound_kill) {
         char load[32]="-";size_t n=0;char *b=cx_read("/proc/loadavg",&n);
@@ -396,13 +429,13 @@ static int ready(task *t) {
 static void settle(task *t,outcome r,int *stop,int *retrying) {
     int pre=t->recheck==1; t->recheck=0;
     if(r.residue){if(!*stop)*stop=blocker(t->label,"surviving-processes",2);}
-    else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;if(!*stop)*stop=RC_SEGMENT;}
-    else if(r.rc==77&&!pre){t->state=0;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);}
+    else if(r.rc==76&&amortize_jobs&&jobs_group(t->phase)){t->state=0;clean_attempt();if(!*stop)*stop=RC_SEGMENT;}
+    else if(r.rc==77&&!pre){t->state=0;char row[400];if(!cx_fmt(row,sizeof row,"YIELD\t%ld\tphase=%s\tattempt=%d\n",sy_wall_s(),t->phase,t->attempt))append("chain-run.tsv",row);clean_attempt();}
     else if(r.rc&&!r.retry){if(!*stop)*stop=blocker(t->label,pre?"recheck-failed":"first-failure",r.rc);}
     else if(r.retry){if(r.retry!=2)*retrying=1;else if(!*retrying)*retrying=2;t->state=0;}
-    else if(pre){t->recheck=2;t->state=0;}
+    else if(pre){t->recheck=2;t->state=0;clean_attempt();}
     else if(!done(t->phase)){if(!*stop)*stop=blocker(t->phase,"missing-checkpoint",2);}
-    else t->state=done(t->id)?2:0;
+    else {t->state=done(t->id)?2:0;clean_attempt();}
 }
 static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
     int active=0,stop=0,retrying=0;const char *held=0;
@@ -559,6 +592,7 @@ static int supervise(int argc,char **argv,int sep,const char *runner) {
 int main(int argc,char **argv) {
     phase_bound=lim_int("phase.bound"); segment_cap=lim_int("segment");
     max_attempts=lim_int("attempts"); max_resumes=lim_int("resumes");
+    widen_need=lim_int("width.recover.clean"); widen_max=lim_int("width.recover.max");
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
     if(argc==5&&!strcmp(argv[1],"--partition-fixture")) {
         out=argv[2]; partition_work=out; end_ms=sy_now_ms()+30000;
@@ -593,6 +627,7 @@ int main(int argc,char **argv) {
         else die("unknown option");
     }
     if(!rev||strlen(rev)!=40||!out||out[0]!='/') die("--rev HEX40 --out ABS required");
+    ceiling=parallel; /* the requested width: recovery never goes above it */
     for(i=0;i<40;i++) if(!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex");
     if(rehearse&&(!ctor||!objs||!pkg)) die("rehearse requires explicit prepared ctor, objects and pkg");
     if(rehearse) {
@@ -668,6 +703,7 @@ int main(int argc,char **argv) {
         }
         segments=seg;owed=ow;kills=kl;if(width<parallel)parallel=width; free(old);
         if(raised) save();
+        load_widen();
     }
     else { end_ms=sy_now_ms()+seconds*1000; save(); }
     {

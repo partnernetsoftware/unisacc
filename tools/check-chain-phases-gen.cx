@@ -91,6 +91,36 @@ int main(int argc, char **argv) {
     {char want[160],*snap=b?strstr(b,"\n0\tsnap\touter\t"):0;int lim=snap?atoi(snap+14):0;
      SP(want,sizeof want,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t%d\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\t-\t-\t-\n",lim);
      ck(lim>0 && tree && strstr(tree,"\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n") && strstr(tree,want), "dependency-and-parallelism-facts");
+     /* C1: the closure-class phases of the two lnx targets are parallel by table. In each of g2 and g3,
+        the closure-prepare and closure rows of x86_64 and of arm64 are in different lanes and exclusive
+        dirs, width 4, and no row of one target depends on a closure row of the other; the scheduler may
+        therefore run the pair side by side (tools/chain-run.cx ready()). */
+     {int pair_ok=tree!=0;
+      for(int g=2;g<=3&&pair_ok;g++) for(int t=0;t<2&&pair_ok;t++) {
+          const char *arch=t?"arm64":"x86_64",*other=t?"x86_64":"arm64";char row[400],first[200],cross[80];
+          if(g==2) SP(first,sizeof first,"gen1-lnx-x86_64");
+          else if(t) SP(first,sizeof first,"g2-lnx-x86_64,g2-lnx-arm64");
+          else SP(first,sizeof first,"g2-lnx-x86_64");
+          SP(row,sizeof row,"\tg%d-lnx-%s-closure-prepare\tg%d-lnx-%s\t%d\t%s\tg%d-lnx-%s\t4\t",g,arch,g,arch,lim,first,g,arch);
+          if(!strstr(tree,row)) pair_ok=0;
+          SP(row,sizeof row,"\tg%d-lnx-%s-closure\tg%d-lnx-%s\t%d\tg%d-lnx-%s-closure-prepare\tg%d-lnx-%s\t4\t",g,arch,g,arch,lim,g,arch,g,arch);
+          if(!strstr(tree,row)) pair_ok=0;
+          /* no dependency list names the other target's closure rows of the same generation */
+          SP(cross,sizeof cross,"g%d-lnx-%s-closure",g,other);
+          for(const char *line=tree;line&&*line&&pair_ok;) {
+              const char *e=strchr(line,'\n');size_t len=e?(size_t)(e-line):strlen(line);char own[80];
+              SP(own,sizeof own,"\tg%d-lnx-%s",g,arch);
+              const char *hit=line;
+              while((hit=strstr(hit,cross))&&hit<line+len) {
+                  /* a row of this target (its id starts right after the order column) naming the other target's closure */
+                  const char *tab=memchr(line,'\t',len);
+                  if(tab&&!strncmp(tab,own,strlen(own))) pair_ok=0;
+                  hit++;
+              }
+              line=e?e+1:0;
+          }
+      }
+      ck(pair_ok, "lnx-closure-pairs-in-separate-lanes-without-cross-dependency");}
      /* The residue rule of a phase is a generated column triple; the kernels rows carry the 0.0.58 rule. */
      ck(tree && strstr(tree,"\tkernels-g2\touter\t") && strstr(tree,"\t1\tscrub\tfixedpoint/g2/phase-6.tsv\tfixedpoint/g2/kernel-route,fixedpoint/g2/*.kernel\n")
         && strstr(tree,"\t1\tscrub\tfixedpoint/g3/phase-6.tsv\tfixedpoint/g3/kernel-route,fixedpoint/g3/*.kernel\n"), "residue-facts-in-table");}

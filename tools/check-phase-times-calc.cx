@@ -33,6 +33,94 @@ static int calc(const char *run, const char *tbl, const char *extra, char *out, 
     out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
     return rc;
 }
+/* 0.0.58 链(rev 2a46e1a427)的缩减记录 tests/fixtures/chain-c58/durations.tsv 配现行 build/chain-phases.tsv:
+ * 相位表允许的并行在同一批实测耗时下值多少墙钟。入库时的值(C1,2026-11-13):串行合计 8689.6 秒,关键路径 4989.8 秒,
+ * 宽度 4 模拟 5258.4 秒,宽度 1 模拟 8689.6 秒(即 0.0.58 降宽到 1 之后的走法),差 3431.2 秒。
+ * 断言取界而不取等:相位表以后改好(关键路径或模拟墙钟变短)仍通过,改坏(变长)即失败。 */
+static char big[262144];
+/* 行首为 ROW 的那一行里 KEY 后面的 "S.D" 秒数,以十分之一秒返回;没有则 -1。 */
+static long tenths(const char *text, const char *row, const char *key) {
+    size_t n = tx_len(text, sizeof big), rn = tx_len(row, 300), kn = tx_len(key, 100), at = 0;
+    while (at + rn <= n) {
+        long i = tx_find(text + at, n - at, row, rn);
+        if (i < 0) return -1;
+        at += (size_t)i;
+        if (at == 0 || text[at - 1] == '\n') break;
+        at++;
+    }
+    if (at + rn > n) return -1;
+    size_t end = at; while (end < n && text[end] != '\n') end++;
+    long k = tx_find(text + at, end - at, key, kn);
+    if (k < 0) return -1;
+    const char *p = text + at + k + kn; long v = 0; int digits = 0;
+    for (; *p >= '0' && *p <= '9'; p++) { v = v * 10 + (*p - '0'); digits++; }
+    if (!digits || *p != '.' || p[1] < '0' || p[1] > '9') return -1;
+    return v * 10 + (p[1] - '0');
+}
+static int sim_real(int width, const char *extra) {
+    char cmd[900]; char *o = 0; size_t n = 0;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/phase-times-calc.cx -- tests/fixtures/chain-c58/durations.tsv build/chain-phases.tsv --sim %d %s 2>&1", width, extra);
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    big[0] = 0; if (o && n < sizeof big) { mm_copy(big, sizeof big, o, n); big[n] = 0; }
+    return rc;
+}
+static long sim_at(const char *id, const char *key) { char row[300]; cx_fmt(row, sizeof row, "SIMPHASE\t%s\t", id); return tenths(big, row, key); }
+/* 两个相位在模拟里重叠的十分之一秒数(不重叠为 0,缺行为 -1)。 */
+static long overlap(const char *a, const char *b) {
+    long as = sim_at(a, "start_s="), ae = sim_at(a, "end_s="), bs = sim_at(b, "start_s="), be = sim_at(b, "end_s=");
+    if (as < 0 || ae < 0 || bs < 0 || be < 0) return -1;
+    long lo = as > bs ? as : bs, hi = ae < be ? ae : be;
+    return hi > lo ? hi - lo : 0;
+}
+static void c58_cases(void) {
+    int rc = sim_real(1, "");
+    long sum1 = tenths(big, "SIM\twidth=1\t", "wall_s="), cp = tenths(big, "CRITICAL\t", "cp_s=");
+    ck(rc == 0 && has(big, "sum_s=8689.6") && sum1 == 86896, "c58-width-one-is-the-serial-sum-8689.6");
+    ck(cp > 0 && cp <= 49898, "c58-critical-path-not-longer-than-4989.8");
+    rc = sim_real(4, "--phases");
+    long sim4 = tenths(big, "SIM\twidth=4\t", "wall_s=");
+    ck(rc == 0 && sim4 >= cp && sim4 <= 52584, "c58-width-four-wall-not-longer-than-5258.4");
+    ck(sim4 > 0 && sum1 - sim4 >= 34312, "c58-parallel-lanes-save-at-least-3431.2-of-8689.6");
+    sy_printf("NOTE\tc58\tserial_s=%ld.%ld\tcritical_s=%ld.%ld\tsim_width4_s=%ld.%ld\tsaved_s=%ld.%ld\n", sum1 / 10, sum1 % 10, cp / 10, cp % 10, sim4 / 10, sim4 % 10, (sum1 - sim4) / 10, (sum1 - sim4) % 10);
+    /* 两个 lnx 目标的 closure 类相位在模拟里并排跑:g2 两个 closure-prepare 同时起步,其余三对各有重叠。 */
+    ck(sim_at("g2-lnx-x86_64-closure-prepare", "start_s=") >= 0 && sim_at("g2-lnx-x86_64-closure-prepare", "start_s=") == sim_at("g2-lnx-arm64-closure-prepare", "start_s=")
+       && overlap("g2-lnx-x86_64-closure-prepare", "g2-lnx-arm64-closure-prepare") >= 3000, "c58-g2-closure-prepare-of-both-lnx-targets-concurrent");
+    ck(overlap("g2-lnx-x86_64-closure", "g2-lnx-arm64-closure") > 0 && overlap("g3-lnx-x86_64-closure-prepare", "g3-lnx-arm64-closure-prepare") > 0
+       && overlap("g3-lnx-x86_64-closure", "g3-lnx-arm64-closure") > 0, "c58-other-closure-pairs-overlap");
+    /* 依赖序与 lane 互斥对整张表逐行核:有模拟行的相位不早于它每个有模拟行的依赖结束;同 lane 的两相不重叠。 */
+    {   size_t n = 0; char *tb = cx_read("build/chain-phases.tsv", &n); int rows = 0, dep_bad = 0, lane_bad = 0;
+        static char ids[1024][80], lanes[1024][80]; int ni = 0;
+        for (char *at = tb; tb && *at;) {
+            char *e = at; while (*e && *e != '\n') e++;
+            char save = *e; *e = 0;
+            if (at[0] && at[0] != '#' && ni < 1024) {
+                char *f[11]; int k = 0; f[k++] = at;
+                for (char *p = at; *p && k < 11; p++) if (*p == '\t') { *p = 0; f[k++] = p + 1; }
+                if (k >= 7 && tx_len(f[1], 100) < 80 && tx_len(f[5], 100) < 80) {
+                    long s = sim_at(f[1], "start_s=");
+                    cx_fmt(ids[ni], 80, "%s", f[1]); cx_fmt(lanes[ni], 80, "%s", f[5]); ni++;
+                    if (s >= 0) {
+                        rows++;
+                        for (char *d = f[4]; *d && !tx_eqz(f[4], "-");) {
+                            char *c = d; while (*c && *c != ',') c++;
+                            char sv = *c; *c = 0;
+                            long de = sim_at(d, "end_s=");
+                            if (de > s) dep_bad++;
+                            if (!sv) break;
+                            d = c + 1;
+                        }
+                    }
+                }
+            }
+            *e = save; at = save ? e + 1 : e;
+        }
+        for (int i = 0; i < ni; i++) for (int j = i + 1; j < ni; j++)
+            if (!tx_eqz(lanes[i], "-") && tx_eqz(lanes[i], lanes[j]) && overlap(ids[i], ids[j]) > 0) lane_bad++;
+        ck(tb && rows >= 100 && dep_bad == 0, "c58-sim-keeps-every-dependency-edge");
+        ck(ni >= 400 && lane_bad == 0, "c58-sim-same-lane-phases-never-overlap");
+    }
+}
 
 int main(void) {
     char out[8192];
@@ -78,6 +166,47 @@ int main(void) {
       char *v[] = {"sh", "-c", cmd, 0};
       int r2 = cx_runv_timeout(v, 50, &o, &n);
       ck(r2 == 0 && o && has(o, "PHASE_TIMES_CALC\trc=0"), "real-phase-table-parses"); }
+    /* C1 并行度三问。夹具记录带属主行(start= 为滴答,每秒 100):a [10,20) b [20,40) c [20,25) d [41,51) zz [51,54)。
+     * 同时 1 次的秒数 10+15+10+3 = 38,同时 2 次 5,忙 43,峰值 2,均值 48/43 = 1.11;KILL 之后 d 在宽度 3 下跑,WIDEN 之后回到 4。 */
+    put("c.tsv", "a owner-pid=1 pgid=1 start=1000 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=a\twall_ms=10000\n"
+                 "b owner-pid=2 pgid=2 start=2000 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=b\twall_ms=20000\n"
+                 "c owner-pid=3 pgid=3 start=2000 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=c\twall_ms=5000\n"
+                 "KILL\t5\t1\tparallel=3\tload1=1.0\tphase=c\trc=124\n"
+                 "d owner-pid=4 pgid=4 start=4100 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=d\twall_ms=10000\n"
+                 "WIDEN\t6\t1\tparallel=4\tclean=8\n"
+                 "zz owner-pid=5 pgid=5 start=5100 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=zz\twall_ms=3000\n");
+    rc = calc("c.tsv", "t.tsv", "--sim 4", out, sizeof out);
+    ck(rc == 0 && has(out, "CONCURRENCY\ttimed_attempts=5\tbusy_s=43.0\tc1_s=38.0\tc2_s=5.0\tc3_s=0.0\tc4_s=0.0\tc5plus_s=0.0\tpeak=2\tmean=1.11"), "concurrency-by-overlap");
+    ck(has(out, "BYWIDTH\twidth_rows=2\tw4_s=38.0\tw3_s=10.0\tw2_s=0.0\tw1_s=0.0"), "attempt-time-by-width-in-effect");
+    ck(has(out, "SIM\twidth=4\twall_s=48.0\tunplaced_s=3.0\tpeak=1"), "sim-width-one-phases-stay-serial");
+    rc = calc("r.tsv", "t.tsv", "", out, sizeof out);
+    ck(rc == 0 && has(out, "CONCURRENCY\ttimed_attempts=0\tbusy_s=UNMEASURED") && !has(out, "SIM\t"), "no-owner-rows-concurrency-unmeasured");
+    /* 同一记录换成带 lane 的表:b 与 c 各占一条 lane(宽度 4),a 与 d 独占。宽度 4 时 a 10 -> b、c 并行 20 -> d 10,加未入表 3 = 43;
+     * 宽度 1 退回串行 48;b 与 c 同一条 lane 时也是 48(同 lane 不并行)。 */
+    put("l.tsv", "0\ta\touter\t90\t-\t-\t1\n1\tb\tb\t90\ta\tb\t4\n2\tc\tc\t90\ta\tc\t4\n3\td\touter\t90\tb,c\t-\t1\n");
+    rc = calc("c.tsv", "l.tsv", "--sim 4 --phases", out, sizeof out);
+    ck(rc == 0 && has(out, "SIM\twidth=4\twall_s=43.0\tunplaced_s=3.0\tpeak=2"), "sim-lanes-run-side-by-side");
+    ck(has(out, "SIMPHASE\tb\tstart_s=10.0\tend_s=30.0") && has(out, "SIMPHASE\tc\tstart_s=10.0\tend_s=15.0") && has(out, "SIMPHASE\td\tstart_s=30.0\tend_s=40.0"), "sim-dependency-order-and-exclusive-phase");
+    ck(has(out, "PHASE\tb\ttotal_s=20.0\tattempts=1\tfinish_s=30.0\tcritical=1\tlane=b\twidth=4") && has(out, "PHASE\tc\ttotal_s=5.0\tattempts=1\tfinish_s=15.0\tcritical=0\tlane=c\twidth=4"), "phase-rows-with-critical-flag");
+    rc = calc("c.tsv", "l.tsv", "--sim 1", out, sizeof out);
+    ck(rc == 0 && has(out, "SIM\twidth=1\twall_s=48.0\tunplaced_s=3.0\tpeak=1"), "sim-width-one-is-the-serial-sum");
+    put("s.tsv", "0\ta\touter\t90\t-\t-\t1\n1\tb\tb\t90\ta\tb\t4\n2\tc\tc\t90\ta\tb\t4\n3\td\touter\t90\tb,c\t-\t1\n");
+    rc = calc("c.tsv", "s.tsv", "--sim 4", out, sizeof out);
+    ck(rc == 0 && has(out, "SIM\twidth=4\twall_s=48.0\tunplaced_s=3.0\tpeak=1"), "sim-same-lane-never-overlaps");
+    rc = calc("c.tsv", "l.tsv", "--sim 5", out, sizeof out);
+    ck(rc == 2 && has(out, "--sim width must be 1..4"), "refuse-sim-width-out-of-range");
+    put("w5.tsv", "0\ta\touter\t90\t-\t-\t5\n");
+    rc = calc("c.tsv", "w5.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "parallelism must be 1..4"), "refuse-table-width-out-of-range");
+    /* 缩减记录:每相一行合计;再喂回去,合计与关键路径不变。 */
+    {   char ex2[600], path[400]; size_t n = 0;
+        cx_fmt(ex2, sizeof ex2, "--emit-durations '%s/e.tsv'", dir);
+        rc = calc("r.tsv", "t.tsv", ex2, out, sizeof out);
+        cx_fmt(path, sizeof path, "%s/e.tsv", dir); char *b = cx_read(path, &n);
+        ck(rc == 0 && has(out, "EMIT\trows=5") && b && has(b, "ATTEMPT_TIME\tphase=a\twall_ms=15000\n") && has(b, "ATTEMPT_TIME\tphase=unplaced-serial\twall_ms=3000\n"), "emit-reduced-record");
+        rc = calc("e.tsv", "t.tsv", "", out, sizeof out);
+        ck(rc == 0 && has(out, "sum_s=53.0") && has(out, "CRITICAL\tcp_s=48.0"), "reduced-record-keeps-sum-and-critical-path"); }
+    c58_cases();
     sy_printf("CHECK_PHASE_TIMES_CALC\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

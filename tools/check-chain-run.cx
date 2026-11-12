@@ -197,6 +197,16 @@ static void put_budget(const char *name,budget_row r) {
     put(bp,row);
 }
 static void file_of(char *p,const char *name,const char *leaf) { char d[4400];join(d,base,name);join(p,d,leaf); }
+/* whole-file equality, and "the first FIRST lies before the first THEN" in one evidence file */
+static int same_text(const char *name,const char *leaf,const char *want) {
+    char p[4400];file_of(p,name,leaf);size_t n=0;char *b=cx_read(p,&n);int yes=b&&n==strlen(want)&&!memcmp(b,want,n);free(b);return yes;
+}
+static int before_in(const char *file,const char *first,const char *then) {
+    size_t n=0;char *b=cx_read(file,&n);if(!b)return 0;
+    char *x=strstr(b,first),*y=strstr(b,then);int yes=x&&y&&x<y;free(b);return yes;
+}
+static void put_widen(const char *name,const char *text) { char p[4400];file_of(p,name,"chain-run.widen");put(p,text); }
+static int limits_cases(const char *plan);
 static int segment_cases(const char *plan) {
     char p[4400],q[4400];budget_row b1,b2;
     const char *seg[]={"--segment-s","5","--max-segments","9",0};
@@ -248,6 +258,43 @@ static int segment_cases(const char *plan) {
     { budget_row owing=b1;owing.owed=1;put_budget("segowed",owing); }
     rc2=runv("segowed","seg","60",seg,0,12);b2=budget_of("segowed");file_of(p,"segowed","chain-run.tsv");
     ck(rc==75&&rc2==75&&has(p,"\towed=settled\n")&&b2.resumes==b1.resumes+1&&b2.kills==b1.kills&&!b2.owed&&b2.width==b1.width-1,"owed-resume-settled-before-new-work");
+    return limits_cases(plan);
+}
+/* C1 width recovery across segments (batch chain-run-supervise): the run of clean attempts and the number
+   of recoveries are persisted (chain-run.widen), so the eighth clean attempt may be in a later
+   invocation. Four serial phases, bound 4, one phase per 5 s segment as in segment_cases. */
+static void widen_cases(const char *plan) {
+    char p[4400],q[4400];int rc,rc2;
+    const char *seg[]={"--segment-s","5","--max-segments","9",0};
+    put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
+    {
+        const char *two[]={"--segment-s","5","--max-segments","9","--parallel","2",0};
+        budget_row w1,w2;
+        rc=runv("segwiden","seg","60",seg,0,12);w1=budget_of("segwiden");
+        { budget_row low=w1;low.width=3;put_budget("segwiden",low); } put_widen("segwiden","7 0\n");
+        rc2=runv("segwiden","seg","60",seg,0,12);w2=budget_of("segwiden");file_of(p,"segwiden","chain-run.tsv");
+        ck(rc==75&&rc2==75&&w1.width==4&&w2.width==4&&count(p,"WIDEN\t")==1&&has(p,"\t1\tparallel=4\tclean=8\n")&&same_text("segwiden","chain-run.widen","0 1\n"),"clean-run-continues-across-segments-and-recovers");
+        ck(w2.attempts==w1.attempts+1&&w2.resumes==w1.resumes&&w2.kills==w1.kills&&w2.end==w1.end,"recovery-touches-no-other-counter");
+        /* the number of recoveries is capped (width.recover.max = 6): at the cap the width stays */
+        { budget_row low=w2;low.width=3;put_budget("segwiden",low); } put_widen("segwiden","7 6\n");
+        rc=runv("segwiden","seg","60",seg,0,12);
+        ck(rc==75&&budget_of("segwiden").width==3&&count(p,"WIDEN\t")==1&&same_text("segwiden","chain-run.widen","7 6\n"),"recovery-count-capped");
+        /* never above the requested width: at --parallel 2 a persisted clean run changes nothing */
+        { budget_row low=budget_of("segwiden");low.width=2;put_budget("segwiden",low); } put_widen("segwiden","7 0\n");
+        rc=runv("segwiden","seg","60",two,0,12);
+        ck(rc==0&&budget_of("segwiden").width==2&&count(p,"WIDEN\t")==1&&has(p,"PREPARED\tpack")&&same_text("segwiden","chain-run.widen","7 0\n"),"recovery-never-above-the-requested-width");
+        /* a retry (here an owed resume, 3 -> 2) sets the clean run back to 0 before new work counts 1 */
+        rc=runv("segwreset","seg","60",seg,0,12);w1=budget_of("segwreset");
+        { budget_row low=w1;low.width=3;low.owed=1;put_budget("segwreset",low); } put_widen("segwreset","7 0\n");
+        rc2=runv("segwreset","seg","60",seg,0,12);w2=budget_of("segwreset");file_of(p,"segwreset","chain-run.tsv");
+        ck(rc==75&&rc2==75&&w2.width==2&&w2.resumes==w1.resumes+1&&!has(p,"WIDEN\t")&&same_text("segwreset","chain-run.widen","1 0\n"),"retry-resets-the-clean-run");
+        /* a malformed recovery record is refused before any child */
+        file_of(q,"segwreset","calls");int calls=count(q,"\n");put_widen("segwreset","7\n");
+        ck(calls==2&&runv("segwreset","seg","60",seg,0,12)==2&&count(q,"\n")==calls,"malformed-recovery-record-refused-before-child");
+    }
+}
+static int limits_cases(const char *plan) {
+    char p[4400],q[4400];int rc,rc2;budget_row b1,b2;
     /* LIM-S3: limits are not identity. A phase bound or build/limits.tsv change between segments of
        one run is accepted (same-dir resume, LIMITS row, budgets continue); a plan semantics change is
        refused before any child. */
@@ -277,6 +324,7 @@ static int segment_cases(const char *plan) {
    attempt the runner places before compare and before pack. */
 static int supervise_cases(const char *plan) {
     char p[4400],q[4400];int rc;
+    widen_cases(plan); /* here, not in the two other batches of this file, to keep each under its 55 s */
     put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
     /* supervisor: segments continue without a caller, each phase once, caps still stop it */
     const char *sup[]={"--supervise","--runner",runner,"--segment-s","5","--max-segments","9",0};
@@ -428,6 +476,8 @@ int main(int argc,char **argv) {
         k1=budget_of("boundkill");join(p,base,"boundkill/chain-run.tsv");
         ck(k1.fields==11&&k1.version==2&&k1.kills==1&&k1.resumes==0&&k1.mr==0&&k1.width==3&&k1.attempts==5,"bound-kill-counts-a-kill-not-a-resume"); /* snap twice, ctx, pack-recheck, pack */
         ck(count(p,"KILL\t")==1&&has(p,"\tparallel=3\tload1=")&&has(p,"ATTEMPT\t1\tphase=snap\trc=124\t")&&!has(p,"RESUME\t")&&has(p,"PREPARED\tpack"),"bound-kill-row-with-load-evidence");
+        /* C1 width recovery: four clean attempts after the kill are fewer than width.recover.clean (8): counted, no recovery */
+        ck(same_text("boundkill","chain-run.widen","4 0\n")&&!has(p,"WIDEN\t"),"fewer-clean-attempts-than-the-limit-do-not-widen");
         /* another kill (the child died of signal 9) with no resume left: a real failure consumes a resume */
         ck(call("realfail","resume","30","0",0)==3,"real-failure-needs-a-resume");
         k2=budget_of("realfail");join(q,base,"realfail/chain-run.tsv");
@@ -450,6 +500,19 @@ int main(int argc,char **argv) {
         ck(call("boundkill","boundkill","30","0",0)==0,"owed-kill-settled");
         k2=budget_of("boundkill");
         ck(count(p,"KILL\t")==2&&has(p,"\towed=settled\n")&&!has(p,"RESUME\t")&&k2.kills==k1.kills+1&&k2.resumes==0&&k2.width==k1.width-1&&!k2.owed,"owed-kill-costs-a-kill-not-a-resume");
+        ck(same_text("boundkill","chain-run.widen","0 0\n"),"a-retry-sets-the-clean-run-back-to-zero");
+        /* C1: one bound kill (4 -> 3), then eight clean attempts in a row (snap again, a1..a7): the
+           width is 4 again from the ninth on. The row sits between a7 and a8; a kill is still a kill. */
+        put_plan(plan,"0\tsnap\t-\t3\n1\ta1\t-\t3\n2\ta2\t-\t3\n3\ta3\t-\t3\n4\ta4\t-\t3\n5\ta5\t-\t3\n6\ta6\t-\t3\n7\ta7\t-\t3\n8\ta8\t-\t3\n9\tpack\t-\t3\n");
+        ck(call("widen","boundkill","30","0",0)==0,"width-recovery-run-completes");
+        k2=budget_of("widen");join(q,base,"widen/chain-run.tsv");
+        ck(count(q,"KILL\t")==1&&has(q,"\tparallel=3\tload1=")&&count(q,"WIDEN\t")==1&&has(q,"\t1\tparallel=4\tclean=8\n"),"eight-clean-attempts-recover-one-unit-of-width");
+        ck(k2.width==4&&k2.kills==1&&k2.resumes==0&&k2.version==2&&k2.fields==11&&same_text("widen","chain-run.widen","0 1\n"),"recovery-persisted-kill-counter-kept");
+        ck(before_in(q,"phase=a7\trc=0\t","WIDEN\t")&&before_in(q,"WIDEN\t","phase=a8\trc=0\t"),"recovery-row-after-the-eighth-clean-attempt");
+        ck(call("widen","boundkill","30","0",0)==0&&budget_of("widen").width==4&&count(q,"WIDEN\t")==1&&same_text("widen","chain-run.widen","0 1\n"),"recovery-not-repeated-by-reinvocation");
+        /* a run that was never derated keeps no recovery state at all */
+        { char w[4400];join(w,base,"budget/chain-run.widen");ck(!sy_exists(w)&&budget_of("budget").width==4,"undisturbed-run-has-no-recovery-state"); }
+        put_plan(plan,"0\tsnap\t-\t3\n1\tctx\t-\t4\n2\tpack\t-\t5\n");
         /* a maximum is raised only by a recorded ledger row; never lowered, never above the limits table */
         char ledger[4400],ld[4400];join(ld,base,"../agentwork");sy_mkdir(ld,0755);join(ledger,base,"../agentwork/ledger.tsv");
         put(ledger,"2026-11-13\tFIXTURE-OTHER\tunrelated row\t-\t-\tfixture\n");
