@@ -110,12 +110,21 @@ int main(int argc, char **argv) {
             "0\ta\touter\t90\t-\t-\t5\n",
             "0\ta\tbogus\t90\t-\t-\t1\n",
             "0\ta\touter\t90\tb\t-\t1\n1\tb\touter\t90\ta\t-\t1\n",
-            "0\ta\touter\t90\t-\t-\t1\n1\tb\touter\t90\ta,a\t-\t1\n"
+            "0\ta\touter\t90\t-\t-\t1\n1\tb\touter\t90\ta,a\t-\t1\n",
+            "0\ta\touter\t120\t-\t-\t1\n"  /* 120 is only the kernels-* override row, never a default row */
         };
         if (cx_fmt(p, sizeof p, "%s/bad-phases.tsv", td) || cx_fmt(cmd, sizeof cmd, "'%s' --phases '%s' --plan 2>&1", candidate, p)) return 2;
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 8; i++) {
             if (cx_write(p, bad_tables[i], strlen(bad_tables[i]))) return 2;
             ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE chain-phases"), "seven-column-invalid-fields-refused");
+        }
+        /* The per-phase bound is handed down by the caller (chain-run) in UNISACC_CHAIN_PHASE_BOUND_S:
+           within 1..phase.bound max it is used, above the max it is refused, never silently the default. */
+        {   char pcmd[9000];
+            if (cx_fmt(pcmd, sizeof pcmd, "UNISACC_CHAIN_PHASE_BOUND_S=100 '%s' --phases '%s' --plan 2>&1", candidate, phases)) return 2;
+            ck(sh(pcmd, out, sizeof out) == 0 && has(out, "child_bound=100"), "caller-phase-bound-used");
+            if (cx_fmt(pcmd, sizeof pcmd, "UNISACC_CHAIN_PHASE_BOUND_S=121 '%s' --phases '%s' --plan 2>&1", candidate, phases)) return 2;
+            ck(sh(pcmd, out, sizeof out) != 0 && has(out, "REFUSE phase bound from caller"), "caller-phase-bound-above-max-refused");
         }
         /* The constructor step's watchdog is the snapshot's own tools/bound, frozen with the rev.
            0.0.58: the step bound had been raised to 90 while the frozen watchdog still took 1..60,
@@ -141,7 +150,7 @@ int main(int argc, char **argv) {
                 size_t wn = 0; char *w = cx_read(wtrace, &wn);
                 if (limits[i] == 60) ck(grc == 0 && has(out, "status=UNTIL") && has(out, "CTOR_BOUND\tsnapshot-watchdog=60") && w && wn == 6 && !memcmp(w, "60\n60\n", 6), "ctor-step-under-frozen-watchdog-range");
                 else if (limits[i] == 95) { if (cx_fmt(want, sizeof want, "90\n90\n")) return 2; ck(grc == 0 && has(out, "status=UNTIL") && !has(out, "CTOR_BOUND") && w && wn == strlen(want) && !memcmp(w, want, wn), "ctor-step-bound-when-watchdog-takes-it"); }
-                else ck(grc != 0 && has(out, "REFUSE snapshot watchdog accepts neither the step bound nor 60") && !w, "ctor-watchdog-below-60-refused");
+                else ck(grc != 0 && has(out, "REFUSE snapshot watchdog accepts neither the step bound nor the frozen range") && !w, "ctor-watchdog-below-60-refused");
                 free(w);
             }
         }

@@ -36,7 +36,20 @@ static int cc_lim(const char *id, const char *scope) {
     return (int)v;
 }
 /* The default child/phase bound (phase.bound, scope *). */
-static int cc_pb(void) { static int pb; if (!pb) pb = cc_lim("phase.bound", 0); return pb; }
+/* A caller (chain-run) passes the phase's own bound in UNISACC_CHAIN_PHASE_BOUND_S; it must lie in 1..phase.bound max. */
+static int cc_pb(void) {
+    static int pb;
+    if (!pb) {
+        const char *e = getenv("UNISACC_CHAIN_PHASE_BOUND_S");
+        pb = cc_lim("phase.bound", 0);
+        if (e && *e) {
+            char *end = 0; long v = strtol(e, &end, 10);
+            if (*end || v < 1 || v > (long)lm_max("phase.bound", 0)) die("REFUSE phase bound from caller", e);
+            pb = (int)v;
+        }
+    }
+    return pb;
+}
 static long fsize(const char *p) {
     sy_stat_t st;
     if (sy_stat(p, &st)) return -1;
@@ -121,7 +134,7 @@ static void candidate_lock_fd(int fd, const char *path) {
         int rc = sy_flock(fd, 2 | 4);
         if (!rc) break;
         if (rc != -EWOULDBLOCK && rc != -EAGAIN && rc != -EINTR) die("candidate lock", path);
-        if (sy_now_ms() - start + candidate_lock_wait_ms >= 90000) die("candidate lock deadline", path);
+        if (sy_now_ms() - start + candidate_lock_wait_ms >= cc_pb() * 1000L) die("candidate lock deadline", path);
         usleep(1000);
     }
     candidate_lock_wait_ms += sy_now_ms() - start;
@@ -138,7 +151,7 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
     char com[4400];
     char *v[128+28];
     int n = 0, i = 0;
-    if (secs < 1 || secs > 95) die("bound secs", "1..95");
+    if (secs < 1 || secs > (int)lm_max("phase.bound", 0)) die("REFUSE bound secs above phase.bound max", 0);
     if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) die("path", "com");
     v[n++] = (char *)"sh";
     v[n++] = com;
@@ -205,9 +218,10 @@ static int ctor_bound_secs(const char *bound, int want) {
     char *probe[] = {(char *)bound, secbuf, (char *)"true", 0};
     if (cx_fmt(secbuf, sizeof secbuf, "%d", want)) die("fmt", "secs");
     if (!runv_secs(probe, 30)) return known = want;
-    if (want <= 60 || cx_fmt(secbuf, sizeof secbuf, "%d", 60) || runv_secs(probe, 30)) die("REFUSE snapshot watchdog accepts neither the step bound nor 60", bound);
-    sy_printf("CTOR_BOUND\tsnapshot-watchdog=60\tstep-bound=%d\treason=frozen-range\n", want);
-    return known = 60;
+    int frozen = cc_lim("ctor.frozen", 0);
+    if (want <= frozen || cx_fmt(secbuf, sizeof secbuf, "%d", frozen) || runv_secs(probe, 30)) die("REFUSE snapshot watchdog accepts neither the step bound nor the frozen range", bound);
+    sy_printf("CTOR_BOUND\tsnapshot-watchdog=%d\tstep-bound=%d\treason=frozen-range\n", frozen, want);
+    return known = frozen;
 }
 static int bound_ctor_eb(const char *snap, const char *ctor, const char *ebt, const char *pkg, const char *gout, const char *target, const char *phase) {
     char bound[4400], secbuf[8];
@@ -436,7 +450,7 @@ static void wf_stub(const char *root, const char *outdir, char *wft, char *prep,
     wf_scrub_dest(outdir, dest);
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
-    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
     mark(outdir, tag, sy_now_ms() - t0);
 }
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
@@ -473,7 +487,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
             v[n++] = wft; v[n++] = (char *)"--";
             v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
             v[n++] = offset; v[n++] = amount; v[n++] = 0;
-            if (bound_sh_secs(root, v, 45)) die(tag, parts[i]);
+            if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, parts[i]);
             if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
             mark(outdir, tag, 0);
         }
@@ -487,7 +501,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
         for (i = 0; i < slices; i++) v[n++] = parts[i];
         v[n++] = 0;
-        if (bound_sh_secs(root, v, 45)) die(tag, phase);
+        if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, phase);
         mark(outdir, tag, 0);
     } else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
     if (!want_stub) return 0;
@@ -514,7 +528,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, 45);
+        n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die("wf-span-prep", nout);
     } else sy_printf("WF_SPAN_PREP_EXISTING\t%s\n", rec);
@@ -591,7 +605,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     v[n++] = (char *)first; v[n++] = (char *)last;
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
-    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -652,7 +666,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
-    if (bound_sh_secs(root, v, 45)) die(tag, dest);
+    if (bound_sh_secs(root, v, cc_lim("cmd.front", 0))) die(tag, dest);
     mark(outdir, tag, 0);
     return 0;
 }
@@ -697,7 +711,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
         v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
         if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
         if (sy_chdir(snap)) die("chdir", snap);
-        n = bound_sh_secs(root, v, 45);
+        n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
         if (sy_chdir(saved)) die("chdir", saved);
         if (n) die(ptag, nout);
     }
@@ -817,7 +831,7 @@ static void plan(void) {
     sy_printf("DYNAMIC_PHASE\tg2-lnx-x86_64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-x86_64.closures.tsv\tchild_bound=%d\n", cc_pb());
     sy_printf("DYNAMIC_PHASE\tg2-lnx-arm64-closure-mN.o\tmanifest=fixedpoint/g2/lnx-arm64.closures.tsv\tchild_bound=%d\n", cc_pb());
     sy_printf("DYNAMIC_PHASE\tg3-lnx-TARGET-closure-mN.o\tmanifest=fixedpoint/g3/TARGET.closures.tsv\tchild_bound=%d\n", cc_pb());
-    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=45\n");
+    sy_printf("DYNAMIC_PHASE\tgenN-TARGET-frontK\tmanifest=out/chain-front-genN-slug.tsv\tenumeration=after-front0-only\tstatic-table=not-complete-subphase-inventory\tchild_bound=%d\n", cc_lim("cmd.front", 0));
     sy_printf("FP_BATCH\tflag=--objects\troots=%d\tclosure_batch_max=256\tlink=--link-only\tchild_bound=%d\n", cf_root_count(), cc_pb());
     sy_printf("GEN1_ENTRY\tphase=objects\tflag=--objects-only\tcheckpoint=gen1-lnx-TARGET-objects\tchild_bound=%d\n", cc_pb());
     sy_printf("GEN1_ENTRY\tphase=link\tflag=--link-only\tcheckpoint=gen1-lnx-TARGET\tverify=all-object-cache-identities\tchild_bound=%d\n", cc_pb());
@@ -1862,7 +1876,7 @@ int main(int argc, char **argv) {
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
     if (argc == 6 && tx_eqz(argv[1], "--segment-jobs-fixture")) {
-        jobs_segment_end=sy_now_ms()+267000;
+        jobs_segment_end=sy_now_ms()+(cc_lim("segment", 0)-3)*1000L;
         verify_segment_jobs(argv[3],argv[2],argv[4],argv[5]);
         for(int i=0;i<segment_verified_count;i++) {
             verify_reuse(argv[2],argv[4],argv[5],segment_verified[i]);
@@ -2380,7 +2394,7 @@ int main(int argc, char **argv) {
                 v[n++] = (char *)"--template"; v[n++] = tmpl; v[n++] = 0;
                 if (sy_realpath(".", saved, sizeof saved) < 0) die("cwd", ".");
                 if (sy_chdir(snap)) die("chdir", snap);
-                n = bound_sh_secs(root, v, 45);
+                n = bound_sh_secs(root, v, cc_lim("cmd.front", 0));
                 if (sy_chdir(saved)) die("chdir", saved);
                 if (n) die("wf-prepare", nout);
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
