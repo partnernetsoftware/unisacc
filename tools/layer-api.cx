@@ -176,8 +176,30 @@ static int set_row(const char *name, const char *ver, const char *api, const cha
     return 0;
 }
 
+/* build/tlib-policy.tsv: 1 when PKG is declared stable (row PKG, else row `stable`, else yes; missing file = yes). */
+static int pkg_stable(const char *name) {
+    char tp[4400], *t;
+    size_t tn = 0;
+    long i = 0, e, o, l, o2, l2;
+    int glob = 1, per = -1;
+    if (cx_fmt(tp, sizeof tp, "%s/build/tlib-policy.tsv", root) || !(t = cx_read(tp, &tn))) return 1;
+    while (i < (long)tn) {
+        e = i;
+        while (e < (long)tn && t[e] != '\n') e++;
+        if (t[i] != '#' && !tx_field(t + i, e - i, '\t', 0, &o, &l) && !tx_field(t + i, e - i, '\t', 1, &o2, &l2)) {
+            int yes = l2 == 3 && tx_same(t + i + o2, l2, "yes", 3);
+            if (l == 6 && tx_same(t + i + o, l, "stable", 6)) glob = yes;
+            else if (l == tx_len(name, 128) && tx_same(t + i + o, l, name, l)) per = yes;
+        }
+        i = e + 1;
+    }
+    mm_free(t);
+    return per >= 0 ? per : glob;
+}
+
 /* --bump: class from the api diff against the committed manifest (unchanged -> z, additive -> y,
-   breaking -> x), then version, api_sha, content sha and the manifest are rewritten together. */
+   breaking -> x), then version, api_sha, content sha and the manifest are rewritten together.
+   Pre-stable (build/tlib-policy.tsv) caps the class at z. */
 static int one_bump(const char *name) {
     char why[512], path[4400], dir[4400], hex[65], fz[65], nv[40], cur[65], *api, *old;
     long an = 0;
@@ -218,6 +240,10 @@ static int one_bump(const char *name) {
     }
     if (!cur[0]) { what = "adopt"; tx_copy(nv, sizeof nv, pk.version, tx_len(pk.version, 32)); }
     else {
+        if (cls != 3 && !pkg_stable(name)) {
+            sy_printf("BUMP\t%s\tpre-stable class=z (would be %s)\n", name, cls == 1 ? "x" : "y");
+            cls = 3;
+        }
         if (cls == 1) { v[0]++; v[1] = 0; v[2] = 0; what = "major"; }
         else if (cls == 2) { v[1]++; v[2] = 0; what = "minor"; }
         else { v[2]++; what = "patch"; }
