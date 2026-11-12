@@ -19,6 +19,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.poll
+#pragma unisa use sys.posix
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 #define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
@@ -288,6 +289,99 @@ static int lint_gate(const char *names, long sn, int *absent) {
     return blocked;
 }
 
+/* 登记配对闸(REG-CLOSED-GATE):暂存区改了 tests/batches.tsv 或 tests/coverage.tsv 时,按索引内容(不是工作树)
+ * 重新求值注册表规则,只拦「本次提交新引入或遗留」的 unknown-coverage 批次。求值直接调用 tests/run.cx --list
+ * (即 s9 init 用的同一解析器 tp_analyze):在临时根下放索引版两张表和 run.cx 副本,其余顶层条目与 tests/ 其余条目
+ * 软链回工作树。HEAD 版同法求值,同一 id 在 HEAD 已未覆盖则不归咎。run.cx 不在 cwd(夹具仓)时跳过。 */
+static int cov_blob(const char *rev, const char *path, char **out, long *n) {
+    char spec[160]; char *v[] = {"git", "show", spec, 0};
+    if (cx_fmt(spec, sizeof spec, "%s:%s", rev, path)) return 1;
+    *out = slurp(v, n);
+    return *out ? 0 : 1;
+}
+static int cov_link_dir(const char *src, const char *dst, const char *skip1, const char *skip2, const char *skip3) {
+    sy_dir_t d; int rc = sy_dir_open(&d, src);
+    if (rc) return rc;
+    while (sy_dir_next(&d) == 1) {
+        char s[1500], t[1500];
+        if (tx_eqz(d.name, skip1) || tx_eqz(d.name, skip2) || tx_eqz(d.name, skip3) || tx_eqz(d.name, ".git")) continue;
+        if (cx_fmt(s, sizeof s, "%s/%s", src, d.name) || cx_fmt(t, sizeof t, "%s/%s", dst, d.name)) continue;
+        sy_symlink(s, t);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+static void cov_clean(const char *tag) {
+    sy_dir_t d; char dir[1200], t[1500], u[1500];
+    if (cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
+    if (!sy_dir_open(&d, t)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", t, d.name)) sy_unlink(u); sy_dir_close(&d); }
+    sy_rmdir(t);
+    if (!sy_dir_open(&d, dir)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", dir, d.name)) sy_unlink(u); sy_dir_close(&d); }
+    sy_rmdir(dir);
+}
+/* 求值一版:返回 0=解析通过或非 unknown-coverage 类拒绝;1=unknown-coverage,*idv 放首个 id;-1=没跑 */
+static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, long cn, char *idv, int idcap) {
+    char dir[1200], tdir[1300], p[1500], cwd[1100]; long a;
+    if (sy_cwd(cwd, sizeof cwd) || cx_fmt(dir, sizeof dir, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag)) return -1;
+    if (cx_fmt(tdir, sizeof tdir, "%s/tests", dir) || sy_mkdir(dir, 0700) || sy_mkdir(tdir, 0700)) return -1;
+    cov_link_dir(cwd, dir, "tests", "", "");
+    { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx"); }
+    { size_t sz = 0; char *src; if (cx_fmt(p, sizeof p, "%s/tests/run.cx", cwd)) return -1;
+      src = (char *)cx_read(p, &sz); if (!src) return -1;
+      if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir) || cx_write(p, src, sz)) return -1; }
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", dir) || cx_write(p, reg, (size_t)rn)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir) || cx_write(p, cov, (size_t)cn)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir)) return -1;
+    { int ofd, pid, ex = 0, code = 0, sig = 0; char *b = mm_alloc(1 << 20); long total = 0, r;
+      char *ev[] = {"sh", "-c", "exec sh ./unisacc.com \"$0\" -- --list 2>&1", p, 0};
+      if (!b) return -1;
+      pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
+      if (pid < 0) { mm_free(b); return -1; }
+      { long deadline = sy_now_ms() + 30000;
+        for (;;) { sy_pollfd_t pf; long left = deadline - sy_now_ms(); pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
+          if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
+          r = sy_read(ofd, b + total, (1 << 20) - 1 - total); if (r <= 0) break; total += r; if (total >= (1 << 20) - 2) break; } }
+      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0;
+      a = tx_find(b, total, "unknown-coverage row=", 21);
+      idv[0] = 0;
+      if (a >= 0) { long q = tx_find(b + a, total - a, " id=", 4), k = 0;
+        if (q >= 0) { q += a + 4; while (q + k < total && b[q + k] != '\n' && k < idcap - 1) { idv[k] = b[q + k]; k++; } idv[k] = 0; }
+        mm_free(b); return 1; }
+      if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0 && tx_find(b, total, "REFUSE", 6) < 0) { mm_free(b); return -1; }
+      mm_free(b); return 0; }
+}
+static int cov_gate(void) {
+    char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
+    if (sy_exists("tests/run.cx") != 1) return 0;
+    if (cov_blob("", "tests/batches.tsv", &ir, &irn) || cov_blob("", "tests/coverage.tsv", &ic, &icn)) return 0;
+    ri = cov_eval("idx", ir, irn, ic, icn, id, sizeof id);
+    cov_clean("idx");
+    if (ri != 1) return 0;
+    if (!cov_blob("HEAD", "tests/batches.tsv", &hr, &hrn) && !cov_blob("HEAD", "tests/coverage.tsv", &hc, &hcn)) {
+        rh = cov_eval("head", hr, hrn, hc, hcn, hid, sizeof hid);
+        cov_clean("head");
+    }
+    if (rh == 1 && tx_eqz(hid, id)) return 0;   /* HEAD 已未覆盖:既存,不归咎 */
+    { char key[160]; long at = 0, kn = 0; key[0] = 0;   /* 取该批次覆盖列里第一个索引 coverage.tsv 没有的键 */
+      while (at < irn) { long e = tx_chr(ir + at, irn - at, '\n'), l = e < 0 ? irn - at : e, fo, fl;
+        if (l > 0 && ir[at] != '#' && !tx_field(ir + at, l, '\t', 0, &fo, &fl) && tx_same(ir + at + fo, fl, id, tx_len(id, 160)) &&
+            !tx_field(ir + at, l, '\t', 10, &fo, &fl)) {
+            long ki, nk = tx_fields(ir + at + fo, fl, ',');
+            for (ki = 0; ki < nk; ki++) { long ko, kl; char kk[160];
+              if (tx_field(ir + at + fo, fl, ',', ki, &ko, &kl) || kl <= 0 || kl >= 150) continue;
+              mm_copy(kk, sizeof kk, ir + at + fo + ko, (size_t)kl); kk[kl] = 0;
+              { long cat = 0; int has = 0; while (cat < icn) { long ce = tx_chr(ic + cat, icn - cat, '\n'), cl = ce < 0 ? icn - cat : ce, co, cfl;
+                  if (cl > 0 && ic[cat] != '#' && !tx_field(ic + cat, cl, '\t', 0, &co, &cfl) && tx_same(ic + cat + co, cfl, kk, kl)) { has = 1; break; }
+                  cat += cl + 1; }
+                if (!has) { mm_copy(key, sizeof key, kk, (size_t)kl + 1); kn = kl; break; } } } break; }
+        at += l + 1; }
+      (void)kn;
+      sy_eprintf("precommit: BLOCKED registry unknown-coverage: batch id=%s in the staged tests/batches.tsv has no coverage row %s in the staged tests/coverage.tsv (missing row is in tests/coverage.tsv)\n", id, key[0] ? key : "?");
+      sy_eprintf("precommit: commit batches.tsv and coverage.tsv rows together: sh ./unisacc.com tools/commit-own.cx -- -m MSG --keyed tests/batches.tsv %s --keyed tests/coverage.tsv %s\n", id, key[0] ? key : "KEY");
+    }
+    return 1;
+}
+
 int main(void) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     char *gv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", "--", "*.cx", 0};
@@ -327,6 +421,7 @@ int main(void) {
       if (!mnames) { sy_eprintf("precommit: git diff --cached (metadata) failed\n"); return 1; }
       if (msn > 0) {
           char *lout; long ln;
+          blocked += cov_gate();
           lout = slurp(lv, &ln);
           if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
