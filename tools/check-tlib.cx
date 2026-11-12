@@ -1,0 +1,362 @@
+/* tools/check-tlib.cx -- tools/tlib.cx on a private fixture tree (no unit of this checkout is packed here;
+ * the real cx.base build is tools/check-tlib-base.cx).
+ *
+ *   sh ./unisacc.com tools/check-tlib.cx [-- ROOT OUT]
+ *
+ * Fixture: package fx.a@0.2.1 (fa/one.cx, fa/two.cx; fa/bad.cx excluded), fx.b@0.1.0 (fb/three.cx,
+ * depends on fx.a@0.2.0), fx.c (a unit that uses the excluded fa/bad.cx), and a tool t/main.cx.
+ *  (1) a dependent package is refused while its dependency tlib is not built (rc 5);
+ *  (2) cold build, structure check and freshness check; the second build is a cache HIT and gives the
+ *      same bytes; a damaged cache entry is not used (rebuild, same content sha);
+ *  (3) the manifest member equals build/layer-api/PKG.tsv;
+ *  (4) tamper: one flipped object byte, one flipped receipt byte, a changed header owner field and an
+ *      appended byte are each TAMPERED (rc 3), for check and for link;
+ *  (5) link with the tlibs behaves as the source build: same stdout and exit code, for two argument sets;
+ *  (6) versions: --require at the same major and not newer is accepted (0.1.0, 0.2.1 against 0.2.1); a
+ *      newer minor (0.3.0) and another major (1.0.0) are refused (rc 5); a tlib whose dependency is
+ *      not provided is refused; a dependency provided at another major is refused (major mismatch);
+ *  (7) stale: a changed unit source is refused by check --fresh and by link (rc 4) while the structure
+ *      check still passes; after a rebuild the content sha differs and the link works again;
+ *  (8) a tool whose closure needs an excluded unit is refused at link (rc 6); a package whose unit needs
+ *      an excluded unit is refused at build (rc 6);
+ *  (9) an interface change without a new manifest is refused at build (rc 4);
+ * (10) bad usage is rc 2.
+ * tools/tlib.cx and tools/layer-api.cx are built once each (tq_native: PREPARED lines, not results). */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char root[4096], work[4400], fx[4400], tlib[4400], lapi[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+/* Run BIN with the NULL-ended arguments, then "--root FX"; stdout kept in last. */
+static int run(const char *bin, char *const args[]) {
+    char *v[40];
+    int k = 0, i;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = (char *)bin;
+    for (i = 0; args[i] && k < 36; i++) v[k++] = args[i];
+    v[k++] = "--root";
+    v[k++] = fx;
+    v[k] = 0;
+    return cx_runv_timeout(v, 30, &last, &lastn);
+}
+
+/* The value of KEY= on the first output line whose first field is TAG, into DST. 0, or -1. */
+static int field(const char *tag, const char *key, char *dst, long cap) {
+    long i = 0, e, o, l, f, kl = tx_len(key, 64);
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, tag, tx_len(tag, 64)))
+            for (f = 1; !tx_field(last + i, e - i, '\t', f, &o, &l); f++)
+                if (l > kl && tx_prefix(last + i + o, l, key, kl)) return tx_copy(dst, cap, last + i + o + kl, l - kl) ? -1 : 0;
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int is(const char *tag, const char *key, const char *want) {
+    char got[256];
+    return !field(tag, key, got, sizeof got) && tx_eqz(got, want);
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int dir(const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return sy_mkdir(p, 0755);
+}
+
+static int link_to(const char *target, const char *rel) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) return -1;
+    return sy_symlink(target, p);
+}
+
+static char sha_a[65], sha_b[65], sha_c[65];
+
+static int table(const char *ver_a) {
+    char t[2048];
+    if (cx_fmt(t, sizeof t,
+               "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\n"
+               "fx.a\t%s\t%s\tfa\tfa/bad.cx=fixture-excluded\t-\tfixture\n"
+               "fx.b\t0.1.0\t%s\tfb\t-\tfx.a@0.2.0\tfixture\n"
+               "fx.c\t0.1.0\t%s\tfc\t-\tfx.a@0.2.0\tfixture\n", ver_a, sha_a, sha_b, sha_c)) return -1;
+    return put("build/tlib-packages.tsv", t);
+}
+
+/* Regenerate the fixture manifests and put their shas in the table (fx.a at VER_A). 0, or -1. */
+static int manifests(const char *ver_a) {
+    char *a[] = {"--write", 0};
+    char *keep;
+    size_t keepn;
+    int rc;
+    if (table(ver_a)) return -1;
+    rc = run(lapi, a);
+    keep = last; keepn = lastn;
+    if (rc) return -1;
+    {
+        /* the three LAYER_API lines carry api_sha=; field() reads the first line of a tag, so walk by line */
+        long i = 0, e, o, l, f;
+        while (i < (long)keepn) {
+            char pkg[32], sha[65];
+            e = i;
+            while (e < (long)keepn && keep[e] != '\n') e++;
+            pkg[0] = 0; sha[0] = 0;
+            if (!tx_field(keep + i, e - i, '\t', 0, &o, &l) && tx_same(keep + i + o, l, "LAYER_API", 9) &&
+                !tx_field(keep + i, e - i, '\t', 1, &o, &l) && !tx_copy(pkg, sizeof pkg, keep + i + o, l))
+                for (f = 2; !tx_field(keep + i, e - i, '\t', f, &o, &l); f++)
+                    if (l == 72 && tx_prefix(keep + i + o, l, "api_sha=", 8) && tx_copy(sha, 65, keep + i + o + 8, 64)) return -1;
+            if (sha[0]) {
+                char *dst = tx_eqz(pkg, "fx.a") ? sha_a : tx_eqz(pkg, "fx.b") ? sha_b : tx_eqz(pkg, "fx.c") ? sha_c : 0;
+                if (dst && tx_copy(dst, 65, sha, 64)) return -1;
+            }
+            i = e + 1;
+        }
+    }
+    return table(ver_a);
+}
+
+/* Copy tlib FROM to TO with the byte at offset AT (negative: from the end) xor-ed with 1, or with one
+   byte appended when AT is 0. 0, or -1. */
+static int damage(const char *from, const char *to, long at) {
+    size_t n = 0;
+    char *b = cx_read(from, &n), *g;
+    int rc;
+    if (!b || n < 200) { mm_free(b); return -1; }
+    if (at == 0) {
+        g = mm_grow(b, (long)n + 1);
+        if (!g) { mm_free(b); return -1; }
+        b = g;
+        b[n++] = '\n';
+    } else {
+        if (at < 0) at = (long)n + at;
+        if (at < 0 || at >= (long)n) { mm_free(b); return -1; }
+        b[at] = (char)(b[at] ^ 1);
+    }
+    rc = cx_write(to, b, n);
+    mm_free(b);
+    return rc;
+}
+
+/* Run program BIN with ARG; stdout into OUT (malloc'd). The exit code. */
+static int prog(const char *bin, const char *arg, char **out, size_t *n) {
+    char *v[4];
+    v[0] = (char *)bin; v[1] = (char *)arg; v[2] = 0;
+    *out = 0; *n = 0;
+    return cx_runv_timeout(v, 10, out, n);
+}
+
+static int same_behaviour(const char *a, const char *b, const char *arg) {
+    char *oa, *ob;
+    size_t na, nb;
+    int ra = prog(a, arg, &oa, &na), rb = prog(b, arg, &ob, &nb);
+    int ok = ra == rb && ra >= 0 && ra < 124 && na == nb && na > 0 && oa && ob && mm_same(oa, ob, (long)na);
+    mm_free(oa);
+    mm_free(ob);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    char src[4400], why[256], product[4400], out1[4400], out2[4400], cache[4400];
+    char ta[4400], tb[4400], ta1[4400], tam[4400], main_cx[4400], bad_cx[4400], srcbin[4400], tlbin[4400], manifest[4400];
+    char c1[65], c2[65], kpath[4400], cpath[4400];
+    int rc, prep = 0;
+    long t0 = sy_now_ms();
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/tlib-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/tlib-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    if (sy_mkdir(work, 0700) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(fx, sizeof fx, "%s/fx", work) || cx_fmt(tlib, sizeof tlib, "%s/tlib.native", work) || cx_fmt(lapi, sizeof lapi, "%s/layer-api.native", work) ||
+        cx_fmt(product, sizeof product, "%s/unisacc.com", root) || cx_fmt(out1, sizeof out1, "%s/o1", work) || cx_fmt(out2, sizeof out2, "%s/o2", work) ||
+        cx_fmt(cache, sizeof cache, "%s/cache", work) || cx_fmt(ta, sizeof ta, "%s/fx.a@0.2.1.tlib", out1) || cx_fmt(tb, sizeof tb, "%s/fx.b@0.1.0.tlib", out1) ||
+        cx_fmt(ta1, sizeof ta1, "%s/fx.a@1.0.0.tlib", out2) || cx_fmt(tam, sizeof tam, "%s/damaged.tlib", work) ||
+        cx_fmt(main_cx, sizeof main_cx, "%s/t/main.cx", fx) || cx_fmt(bad_cx, sizeof bad_cx, "%s/t/needbad.cx", fx) ||
+        cx_fmt(srcbin, sizeof srcbin, "%s/main.src", work) || cx_fmt(tlbin, sizeof tlbin, "%s/main.tl", work) ||
+        cx_fmt(manifest, sizeof manifest, "%s/build/layer-api/fx.a.tsv", fx)) return 2;
+    if (cx_fmt(src, sizeof src, "%s/tools/tlib.cx", root) || tq_native(root, src, tlib, why, sizeof why) ||
+        cx_fmt(src, sizeof src, "%s/tools/layer-api.cx", root) || tq_native(root, src, lapi, why, sizeof why)) {
+        sy_printf("FAIL\ttlib.build-native\t%s\n", why);
+        return 1;
+    }
+
+    prep |= sy_mkdir(fx, 0755) || dir("build") || dir("fa") || dir("fb") || dir("fc") || dir("t");
+    prep |= link_to(product, "unisacc.com") || link_to("../fa", "fb/fa") || link_to("../fa", "fc/fa") || link_to("../fa", "t/fa") || link_to("../fb", "t/fb");
+    prep |= put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return x + 1; }\n");
+    prep |= put("fa/two.cx", "#pragma unisa module two\n#pragma unisa use one\ntypedef struct { int a; int b; } FaPair;\nint fa_two(int x) { return fa_one(x) * 2; }\n");
+    prep |= put("fa/bad.cx", "#pragma unisa module bad\nint fa_bad(void) { return 7; }\n");
+    prep |= put("fb/three.cx", "#pragma unisa module three\n#pragma unisa use fa.two\nint fb_three(int x) { return fa_two(x) + 3; }\n");
+    prep |= put("fc/uses.cx", "#pragma unisa module uses\n#pragma unisa use fa.bad\nint fc_uses(void) { return fa_bad(); }\n");
+    prep |= put("t/main.cx", "#pragma unisa use fa.two\n#pragma unisa use fb.three\n"
+                             "int main(int argc, char **argv) {\n    int n = argc > 1 ? (int)argv[1][0] : 1;\n"
+                             "    printf(\"two=%d three=%d\\n\", fa_two(n), fb_three(n));\n    return (fa_two(n) + fb_three(n)) % 100;\n}\n");
+    prep |= put("t/needbad.cx", "#pragma unisa use fa.bad\nint main(void) { return fa_bad(); }\n");
+    prep |= cx_fmt(sha_a, 65, "PENDING") || cx_fmt(sha_b, 65, "PENDING") || cx_fmt(sha_c, 65, "PENDING") || manifests("0.2.1");
+    if (prep) { sy_printf("FAIL\ttlib.fixture-prepare\n"); return 1; }
+    sy_printf("PREPARED\tfixture\tms=%ld\tno-test-result\n", sy_now_ms() - t0);
+
+    /* (1) dependency first */
+    {
+        char *a[] = {"build", "fx.b", "--out", out1, "--cache", cache, 0};
+        rc = run(tlib, a);
+        ck(rc == 5, "dependent-refused-before-dependency-is-built");
+    }
+    /* (2) build, check, cache */
+    {
+        char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
+        char *c[] = {"check", ta, "--fresh", 0};
+        char *b[] = {"build", "fx.b", "--out", out1, "--cache", cache, 0};
+        char *first = 0;
+        size_t firstn = 0, n2 = 0;
+        char *second;
+        rc = run(tlib, a);
+        ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "units=", "2") && !field("TLIB_BUILD", "content_sha=", c1, sizeof c1) && sy_exists(ta) == 1, "cold-build");
+        rc = run(tlib, c);
+        ck(rc == 0 && is("TLIB_CHECK", "content_sha=", c1), "check-structure-and-fresh");
+        first = cx_read(ta, &firstn);
+        rc = run(tlib, a);
+        second = cx_read(ta, &n2);
+        ck(rc == 0 && is("TLIB_BUILD", "cache=", "HIT") && is("TLIB_BUILD", "content_sha=", c1) && first && second && firstn == n2 && mm_same(first, second, (long)n2), "second-build-is-cache-hit-same-bytes");
+        mm_free(first);
+        mm_free(second);
+        /* damage the cache entry: it must not be used */
+        if (cx_fmt(cpath, sizeof cpath, "%s/fx.a/%s.tlib", cache, c1) || cx_fmt(kpath, sizeof kpath, "%s.bad", cpath) ||
+            damage(cpath, kpath, -40) || sy_rename(kpath, cpath)) prep = 1;
+        rc = run(tlib, a);
+        ck(!prep && rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && is("TLIB_BUILD", "content_sha=", c1), "damaged-cache-entry-not-used");
+        rc = run(tlib, b);
+        ck(rc == 0 && is("TLIB_BUILD", "units=", "1") && sy_exists(tb) == 1, "dependent-build-after-dependency");
+    }
+    /* (3) manifest */
+    {
+        char *a[] = {"inspect", ta, "--api", 0};
+        size_t mn = 0;
+        char *m;
+        rc = run(tlib, a);
+        m = cx_read(manifest, &mn);
+        ck(rc == 0 && m && mn > 0 && mn == lastn && mm_same(m, last, (long)mn), "manifest-member-equals-layer-api");
+        mm_free(m);
+    }
+    /* (4) tamper */
+    {
+        char *c[] = {"check", tam, 0};
+        char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", tam, "--tlib", tb, 0};
+        int r1, r2, r3, r4, r5;
+        prep = damage(ta, tam, -40);          /* inside the last object */
+        r1 = run(tlib, c);
+        r5 = run(tlib, l);
+        prep |= damage(ta, tam, 8 + 60 + 20); /* inside the receipt */
+        r2 = run(tlib, c);
+        prep |= damage(ta, tam, 8 + 16);      /* mtime field of the first header */
+        r3 = run(tlib, c);
+        prep |= damage(ta, tam, 0);           /* one byte appended */
+        r4 = run(tlib, c);
+        ck(!prep && r1 == 3, "tampered-object-byte-refused");
+        ck(!prep && r2 == 3, "tampered-receipt-byte-refused");
+        ck(!prep && r3 == 3, "tampered-header-field-refused");
+        ck(!prep && r4 == 3, "appended-byte-refused");
+        ck(!prep && r5 == 3 && sy_exists(tlbin) == 0, "link-refuses-tampered-tlib");
+    }
+    /* (5) link equals source build */
+    {
+        char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
+        rc = run(tlib, l);
+        prep = tq_native(root, main_cx, srcbin, why, sizeof why);
+        ck(rc == 0 && is("TLIB_LINK", "src_units=", "1") && is("TLIB_LINK", "tlib_units=", "3"), "link-with-tlibs");
+        ck(!prep && same_behaviour(srcbin, tlbin, "A") && same_behaviour(srcbin, tlbin, "z"), "linked-program-behaves-as-source-build");
+    }
+    /* (6) versions */
+    {
+        char *ok1[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.1.0", "--require", "fx.a@0.2.1", "--require", "fx.b@0.1.0", 0};
+        char *old[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@0.3.0", 0};
+        char *maj[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, "--require", "fx.a@1.0.0", 0};
+        char *nodep[] = {"link", main_cx, "-o", tlbin, "--tlib", tb, 0};
+        char *b1[] = {"build", "fx.a", "--out", out2, "--cache", cache, 0};
+        char *mm[] = {"link", main_cx, "-o", tlbin, "--tlib", ta1, "--tlib", tb, 0};
+        int r1 = run(tlib, ok1), r2 = run(tlib, old), r3 = run(tlib, maj), r4 = run(tlib, nodep), r5, r6;
+        ck(r1 == 0, "minor-compatible-accepted");
+        ck(r2 == 5, "provider-too-old-refused");
+        ck(r3 == 5, "major-mismatch-refused");
+        ck(r4 == 5, "dependency-not-provided-refused");
+        prep = manifests("1.0.0");
+        r5 = run(tlib, b1);
+        r6 = run(tlib, mm);
+        ck(!prep && r5 == 0 && sy_exists(ta1) == 1 && r6 == 5, "dependency-at-another-major-refused");
+        prep = manifests("0.2.1");
+        rc = run(tlib, ok1);
+        ck(!prep && rc == 0, "table-restored-link-ok");
+    }
+    /* (7) stale */
+    {
+        char *cf[] = {"check", ta, "--fresh", 0};
+        char *cs[] = {"check", ta, 0};
+        char *l[] = {"link", main_cx, "-o", tlbin, "--tlib", ta, "--tlib", tb, 0};
+        char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
+        int r1, r2, r3;
+        prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return 1 + x; }\n");
+        r1 = run(tlib, cf);
+        r2 = run(tlib, cs);
+        r3 = run(tlib, l);
+        ck(!prep && r1 == 4 && r2 == 0, "source-change-is-stale-structure-still-ok");
+        ck(r3 == 4, "link-refuses-stale-tlib");
+        rc = run(tlib, a);
+        ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && !field("TLIB_BUILD", "content_sha=", c2, sizeof c2) && !tx_eqz(c1, c2), "rebuild-after-source-change-new-content-sha");
+        rc = run(tlib, l);
+        ck(rc == 0 && same_behaviour(srcbin, tlbin, "A"), "link-after-rebuild-behaves-as-before");
+    }
+    /* (8) excluded */
+    {
+        char *l[] = {"link", bad_cx, "-o", tlbin, "--tlib", ta, 0};
+        char *b[] = {"build", "fx.c", "--out", out1, "--cache", cache, 0};
+        int r1 = run(tlib, l), r2 = run(tlib, b);
+        ck(r1 == 6, "link-refuses-closure-with-excluded-unit");
+        ck(r2 == 6, "build-refuses-unit-that-needs-excluded-unit");
+    }
+    /* (9) interface changed, manifest not regenerated */
+    {
+        char *a[] = {"build", "fx.a", "--out", out1, "--cache", cache, 0};
+        prep = put("fa/one.cx", "#pragma unisa module one\nint fa_one(int x) { return 1 + x; }\nint fa_extra(void) { return 2; }\n");
+        rc = run(tlib, a);
+        ck(!prep && rc == 4, "build-refuses-interface-change-without-manifest");
+    }
+    /* (10) usage */
+    {
+        char *u1[] = {"frobnicate", "x", 0};
+        char *u2[] = {"link", main_cx, "--tlib", ta, 0};
+        char *u3[] = {"build", "no.such", "--out", out1, "--cache", cache, 0};
+        int r1 = run(tlib, u1), r2 = run(tlib, u2), r3 = run(tlib, u3);
+        ck(r1 == 2 && r2 == 2 && r3 == 2, "usage-rc2");
+    }
+
+    mm_free(last);
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_TLIB\tfailed=%d\telapsed_ms=%ld\n", failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

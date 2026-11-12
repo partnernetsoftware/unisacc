@@ -1,0 +1,643 @@
+/* tools/tlib.cx -- tape-library (tlib) packages: build, check, inspect, link.
+ *
+ *   sh ./unisacc.com tools/tlib.cx -- build PKG [--out DIR] [--cache DIR] [--jobs N] [--no-cache]
+ *   sh ./unisacc.com tools/tlib.cx -- check FILE.tlib [--fresh]
+ *   sh ./unisacc.com tools/tlib.cx -- inspect FILE.tlib [--api|--receipt]
+ *   sh ./unisacc.com tools/tlib.cx -- link TOOL.cx -o OUT --tlib FILE.tlib... [--require PKG@X.Y.Z...]
+ *                                      [--work DIR] [--jobs N]
+ *   common: [--root ROOT] [--product FILE]      (default ROOT is ".", product ROOT/unisacc.com)
+ *
+ * A tlib is the product's own ar archive, named PKG@X.Y.Z.tlib:
+ *   __.S.receipt   key/value TSV: pkg, version, target, flags, product_sha, api_sha, input_sha,
+ *                  dep (pkg, required, provider, content sha), excluded (path, reason),
+ *                  unit (path, source sha, member, object sha), content_sha, receipt_sha
+ *   __.S.api       the interface manifest, byte-equal to ROOT/build/layer-api/PKG.tsv
+ *   <unit>.o       one object tape per unit, from `product -c -funit UNIT` run at ROOT
+ * The product linker skips members whose name begins "__.S", so the two metadata members do not
+ * change a linked image. The product takes archives by the ".a" suffix only, so link passes each
+ * tlib through a PKG.a symlink in its work directory.
+ *
+ * build    refuses when a unit's use closure leaves the package and its declared dependencies
+ *          (rc 6 when it needs an excluded unit), when the manifest differs from
+ *          build/layer-api/PKG.tsv or the table's api_sha, or when a dependency tlib is absent
+ *          from --out. The result goes to DIR/PKG@X.Y.Z.tlib (default ROOT/out/tlib) and to the
+ *          cache CACHE/PKG/<content-sha>.tlib (default ~/.cache/unisacc/tlib). The cache is asked
+ *          by the input sha (package, version, target, flags, product sha, dependency content shas,
+ *          exclusions, unit paths and source shas) and an entry is used only when it verifies and
+ *          its receipt carries exactly that input sha.
+ * check    structure: the receipt sha, every object sha, the manifest sha, the content sha, no
+ *          member outside the receipt, canonical member headers. --fresh adds: same version,
+ *          target, product sha, exclusions, unit set and source shas as ROOT now, and the manifest
+ *          equal to build/layer-api.
+ * link     verifies every tlib (structure, then versions, then freshness), takes the use closure
+ *          of TOOL.cx from the product's -cx-plan, compiles the units no tlib provides (in
+ *          parallel) and links them with the tlibs.
+ * Version rule: a provider satisfies a requirement (a dep line of another tlib, or --require)
+ * when the major is equal and minor.patch is not older.
+ *
+ * Exit: 0 ok; 1 a build, compile or link step failed; 2 usage or unreadable input; 3 TAMPERED;
+ *       4 STALE; 5 INCOMPATIBLE (major mismatch, provider too old, or dependency not provided);
+ *       6 EXCLUDED (the closure needs a unit the package excludes).
+ * The release chain and gen1/g2/g3 never read a tlib: they build cold from source.
+ * Check: tools/check-tlib.cx, tools/check-tlib-base.cx. */
+#pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.hostid
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define FLAGS "-c -funit"
+#define STEP_SECS 55
+#define MAXLIB 8
+#define MAXJOB 256
+
+typedef struct {
+    char path[4400];
+    char *b;
+    long n;
+    const char *rc;
+    long rn;
+    char pkg[64], ver[32], content[65], input[65], api[65];
+    int nunit;
+} Lib;
+
+typedef struct { char *v[8]; int pid; int state; int rc; long t0; } Job;
+
+static char root[4096], product[4400], product_sha[65];
+static TpPkg pk;
+static TpPkg depk;
+static Lib libs[MAXLIB];
+static int nlibs;
+static Job jobs[MAXJOB];
+static char jobtext[MAXJOB][2][600];
+
+static int say(int rc, const char *cls, const char *what, const char *detail) {
+    sy_eprintf("tlib: %s\t%s\t%s\n", cls, what ? what : "", detail ? detail : "");
+    return rc;
+}
+
+static int mkdirs(const char *path) {
+    char p[4400];
+    long n = tx_len(path, sizeof p), i;
+    if (n <= 0 || tx_copy(p, sizeof p, path, n)) return -1;
+    for (i = 1; i <= n; i++) {
+        if (p[i] == '/' || p[i] == 0) {
+            int c = p[i], r;
+            p[i] = 0;
+            r = sy_mkdir(p, 0755);
+            if (r && r != -EEXIST) { sy_stat_t st; if (sy_stat(p, &st) || st.kind != 'd') return -1; }
+            p[i] = (char)c;
+        }
+    }
+    return 0;
+}
+
+/* Run the jobs, at most PAR at a time, each killed STEP_SECS after it started (rc 142).
+   0 when every job exited 0. */
+static int run_jobs(int n, int par) {
+    int next = 0, running = 0, done = 0, i, bad = 0;
+    long deadline_ms = (long)STEP_SECS * 1000;   /* per job, from its own start */
+    if (par < 1) par = 1;
+    for (i = 0; i < n; i++) jobs[i].state = 0;
+    while (done < n) {
+        int moved = 0;
+        while (running < par && next < n) {
+            int pid = sy_spawn(jobs[next].v);
+            if (pid <= 0) { jobs[next].state = 2; jobs[next].rc = 127; done++; bad = 1; }
+            else { jobs[next].pid = pid; jobs[next].state = 1; jobs[next].t0 = sy_now_ms(); running++; }
+            next++;
+            moved = 1;
+        }
+        for (i = 0; i < next; i++) {
+            int ex = 0, code = 0, sig = 0, r;
+            if (jobs[i].state != 1) continue;
+            r = sy_wait_status(jobs[i].pid, 1, &ex, &code, &sig);
+            if (r == 0) {
+                if (sy_now_ms() - jobs[i].t0 <= deadline_ms) continue;
+                (void)sy_kill(jobs[i].pid);
+                jobs[i].rc = 142;
+            } else jobs[i].rc = r < 0 ? 127 : ex ? code : 128 + sig;
+            jobs[i].state = 2;
+            running--;
+            done++;
+            moved = 1;
+            if (jobs[i].rc) {
+                bad = 1;
+                sy_eprintf("tlib: step rc=%d: %s %s\n", jobs[i].rc, jobs[i].v[2] ? jobs[i].v[2] : "", jobs[i].v[4] ? jobs[i].v[4] : "");
+            }
+        }
+        if (!moved) (void)sy_sleep_ms(4);
+    }
+    return bad;
+}
+
+/* Job K compiles UNIT (ROOT-relative or absolute) into OBJ. */
+static int set_compile(int k, const char *unit, const char *obj) {
+    if (k >= MAXJOB || cx_fmt(jobtext[k][0], 600, "%s", unit) || cx_fmt(jobtext[k][1], 600, "%s", obj)) return -1;
+    jobs[k].v[0] = "sh"; jobs[k].v[1] = product; jobs[k].v[2] = "-c"; jobs[k].v[3] = "-funit";
+    jobs[k].v[4] = jobtext[k][0]; jobs[k].v[5] = "-o"; jobs[k].v[6] = jobtext[k][1]; jobs[k].v[7] = 0;
+    return 0;
+}
+
+static int rc_field(const Lib *L, const char *key, int nth, int field, char *dst, long cap) {
+    return tp_rc_get(L->rc, L->rn, key, nth, field, dst, cap);
+}
+
+/* Structure check of a loaded tlib; fills the receipt fields of L. 0, or 3 after naming the fault. */
+static int verify(Lib *L) {
+    char hex[65], nm[300], want[65], member[300], one[8];
+    const char *d;
+    long len, k, at = 0;
+    TpBuf ct;
+    int i, r, nobj = 0, nmeta = 0;
+    ct.b = 0; ct.n = 0; ct.cap = 0; ct.bad = 0;
+    if (tp_ar_canon(L->b, L->n)) return say(3, "TAMPERED", L->path, "not a canonical product archive");
+    if (tp_ar_find(L->b, L->n, "__.S.receipt", &L->rc, &L->rn)) return say(3, "TAMPERED", L->path, "no receipt member");
+    k = tx_rfind(L->rc, L->rn, "receipt_sha\t", 12);
+    if (k < 0 || (k > 0 && L->rc[k - 1] != '\n') || L->rn != k + 12 + 64 + 1 || L->rc[L->rn - 1] != '\n')
+        return say(3, "TAMPERED", L->path, "receipt has no final receipt_sha line");
+    tp_sha(L->rc, (size_t)k, hex);
+    if (!mm_same(hex, L->rc + k + 12, 64)) return say(3, "TAMPERED", L->path, "receipt sha mismatch");
+    if (rc_field(L, "tlib", 0, 1, one, sizeof one) || !tx_eqz(one, "1") ||
+        rc_field(L, "pkg", 0, 1, L->pkg, sizeof L->pkg) || rc_field(L, "version", 0, 1, L->ver, sizeof L->ver) ||
+        rc_field(L, "api_sha", 0, 1, L->api, sizeof L->api) || rc_field(L, "input_sha", 0, 1, L->input, sizeof L->input) ||
+        rc_field(L, "content_sha", 0, 1, L->content, sizeof L->content))
+        return say(3, "TAMPERED", L->path, "receipt lacks a required field");
+    if (tp_ar_find(L->b, L->n, "__.S.api", &d, &len)) return say(3, "TAMPERED", L->path, "no manifest member");
+    tp_sha(d, (size_t)len, hex);
+    if (!tx_eqz(hex, L->api)) return say(3, "TAMPERED", L->path, "manifest sha mismatch");
+    tp_puts(&ct, L->pkg); tp_puts(&ct, "\t"); tp_puts(&ct, L->ver); tp_puts(&ct, "\napi\t"); tp_puts(&ct, L->api); tp_puts(&ct, "\n");
+    for (i = 0;; i++) {
+        r = rc_field(L, "unit", i, 3, member, sizeof member);
+        if (r > 0) break;
+        if (r < 0 || rc_field(L, "unit", i, 4, want, sizeof want)) { mm_free(ct.b); return say(3, "TAMPERED", L->path, "bad unit line"); }
+        if (tp_ar_find(L->b, L->n, member, &d, &len)) { mm_free(ct.b); return say(3, "TAMPERED", member, "object member missing"); }
+        tp_sha(d, (size_t)len, hex);
+        if (!tx_eqz(hex, want)) { mm_free(ct.b); return say(3, "TAMPERED", member, "object sha mismatch"); }
+        tp_puts(&ct, member); tp_puts(&ct, "\t"); tp_puts(&ct, want); tp_puts(&ct, "\n");
+    }
+    L->nunit = i;
+    while ((r = tp_ar_next(L->b, L->n, &at, nm, sizeof nm, &d, &len)) == 0) {
+        if (tx_prefixz(nm, "__.S", 4)) nmeta++;
+        else nobj++;
+    }
+    if (r < 0 || nobj != L->nunit || nmeta != 2 || ct.bad || !ct.b) {
+        mm_free(ct.b);
+        return say(3, "TAMPERED", L->path, "member set differs from the receipt");
+    }
+    tp_sha(ct.b, (size_t)ct.n, hex);
+    mm_free(ct.b);
+    if (!tx_eqz(hex, L->content)) return say(3, "TAMPERED", L->path, "content sha mismatch");
+    return 0;
+}
+
+static int load_lib(Lib *L, const char *path) {
+    size_t n = 0;
+    if (sy_realpath(path, L->path, sizeof L->path) < 0) return say(2, "UNREADABLE", path, "no such tlib");
+    L->b = cx_read(L->path, &n);
+    L->n = (long)n;
+    if (!L->b || L->n < 8) return say(2, "UNREADABLE", path, "cannot read");
+    return verify(L);
+}
+
+static int ensure_product_sha(void) {
+    if (product_sha[0]) return 0;
+    return tp_sha_file(product, product_sha);
+}
+
+/* Freshness of a verified tlib against ROOT now. 0, or 4 after naming what moved. */
+static int fresh(Lib *L) {
+    char why[512], a[600], b[600], path[4400];
+    const char *d;
+    long len;
+    size_t fn = 0;
+    char *f;
+    int i;
+    if (tp_load(root, L->pkg, &pk, why, sizeof why)) return say(4, "STALE", L->pkg, why);
+    if (!tx_eqz(pk.version, L->ver)) return say(4, "STALE", L->pkg, "the table carries another version");
+    if (rc_field(L, "target", 0, 1, a, sizeof a) || !tx_eqz(a, tn_self())) return say(4, "STALE", L->pkg, "built for another target");
+    if (rc_field(L, "flags", 0, 1, a, sizeof a) || !tx_eqz(a, FLAGS)) return say(4, "STALE", L->pkg, "built with other flags");
+    if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
+    if (rc_field(L, "product_sha", 0, 1, a, sizeof a) || !tx_eqz(a, product_sha)) return say(4, "STALE", L->pkg, "built by another product");
+    if (!tx_eqz(pk.api_sha, L->api)) return say(4, "STALE", L->pkg, "the table carries another api_sha");
+    if (cx_fmt(path, sizeof path, "%s/build/layer-api/%s.tsv", root, L->pkg)) return 2;
+    f = cx_read(path, &fn);
+    if (tp_ar_find(L->b, L->n, "__.S.api", &d, &len) || !f || (long)fn != len || !mm_same(f, d, len)) {
+        mm_free(f);
+        return say(4, "STALE", L->pkg, "manifest differs from build/layer-api");
+    }
+    mm_free(f);
+    if (L->nunit != pk.nunit) return say(4, "STALE", L->pkg, "the unit set changed");
+    for (i = 0; i < pk.nunit; i++) {
+        if (rc_field(L, "unit", i, 1, a, sizeof a) || !tx_eqz(a, pk.unit[i])) return say(4, "STALE", pk.unit[i], "the unit set changed");
+        if (rc_field(L, "unit", i, 2, a, sizeof a) || tp_sha_file(pk.unit[i], b) || !tx_eqz(a, b)) return say(4, "STALE", pk.unit[i], "source changed");
+    }
+    for (i = 0;; i++) {
+        int r = rc_field(L, "excluded", i, 1, a, sizeof a);
+        if (r > 0) break;
+        if (r < 0 || i >= pk.nexcl || !tx_eqz(a, pk.excl[i])) return say(4, "STALE", L->pkg, "the exclusions changed");
+    }
+    if (i != pk.nexcl) return say(4, "STALE", L->pkg, "the exclusions changed");
+    return 0;
+}
+
+/* Version rules across the loaded tlibs, then each --require. 0, or 5. */
+static int compat(char **req, int nreq) {
+    char dpkg[64], dver[32], msg[256];
+    int i, j, k, r;
+    for (i = 0; i < nlibs; i++)
+        for (j = i + 1; j < nlibs; j++)
+            if (tx_eqz(libs[i].pkg, libs[j].pkg)) return say(5, "INCOMPATIBLE", libs[i].pkg, "provided twice");
+    for (i = 0; i <= nlibs; i++) {
+        for (k = 0;; k++) {
+            const char *who = i < nlibs ? libs[i].pkg : "--require";
+            if (i < nlibs) {
+                r = rc_field(&libs[i], "dep", k, 1, dpkg, sizeof dpkg);
+                if (r > 0) break;
+                if (r < 0 || rc_field(&libs[i], "dep", k, 2, dver, sizeof dver)) return say(3, "TAMPERED", libs[i].path, "bad dep line");
+            } else {
+                long at;
+                if (k >= nreq) break;
+                at = tx_chr(req[k], tx_len(req[k], 256), '@');
+                if (at <= 0 || tx_copy(dpkg, sizeof dpkg, req[k], at) || tx_copy(dver, sizeof dver, req[k] + at + 1, tx_len(req[k] + at + 1, 64)))
+                    return say(2, "USAGE", req[k], "--require wants PKG@X.Y.Z");
+            }
+            for (j = 0; j < nlibs && !tx_eqz(libs[j].pkg, dpkg); j++) {}
+            if (j == nlibs) return say(5, "INCOMPATIBLE", dpkg, "required but not provided");
+            r = tp_ver_compat(libs[j].ver, dver);
+            if (r) {
+                if (cx_fmt(msg, sizeof msg, "%s: %s requires %s, provided %s", r == 1 ? "major mismatch" : r == 2 ? "provider too old" : "bad version",
+                           who, dver, libs[j].ver)) msg[0] = 0;
+                return say(r < 0 ? 2 : 5, r < 0 ? "USAGE" : "INCOMPATIBLE", dpkg, msg);
+            }
+        }
+    }
+    return 0;
+}
+
+static int cmd_check(const char *file, int want_fresh) {
+    int rc = load_lib(&libs[0], file);
+    if (!rc && want_fresh) rc = fresh(&libs[0]);
+    if (!rc) sy_printf("TLIB_CHECK\t%s\t%s\tok\tunits=%d\t%s\tcontent_sha=%s\n", libs[0].pkg, libs[0].ver, libs[0].nunit,
+                       want_fresh ? "structure+fresh" : "structure", libs[0].content);
+    return rc;
+}
+
+static int cmd_inspect(const char *file, const char *part) {
+    char nm[300];
+    const char *d;
+    long len, at = 0;
+    int rc = load_lib(&libs[0], file), r;
+    if (rc) return rc;
+    if (part) {
+        if (tp_ar_find(libs[0].b, libs[0].n, part, &d, &len)) return say(3, "TAMPERED", part, "member missing");
+        return sy_write_all(1, d, len) ? 1 : 0;
+    }
+    sy_printf("TLIB\t%s\t%s\tunits=%d\tbytes=%ld\n", libs[0].pkg, libs[0].ver, libs[0].nunit, libs[0].n);
+    if (sy_write_all(1, libs[0].rc, libs[0].rn)) return 1;
+    while ((r = tp_ar_next(libs[0].b, libs[0].n, &at, nm, sizeof nm, &d, &len)) == 0)
+        sy_printf("MEMBER\t%s\t%ld\n", nm, len);
+    return r < 0 ? 3 : 0;
+}
+
+/* 0 when LINES (one path per line) stay inside pk and the dependency packages; the first
+   outsider is reported. 6 for an excluded unit, 1 for any other outsider. */
+static int closure_inside(const char *unit, const char *lines, TpPkg *deps, int ndeps) {
+    long n = tx_len(lines, TX_ZCAP), i = 0, e;
+    int d;
+    while (i < n) {
+        char one[4400];
+        int in = 0, x;
+        e = i;
+        while (e < n && lines[e] != '\n') e++;
+        if (e > i && !tx_copy(one, sizeof one, lines + i, e - i)) {
+            if (tp_find_unit(&pk, one) >= 0) in = 1;
+            for (d = 0; d < ndeps && !in; d++) if (tp_find_unit(&deps[d], one) >= 0) in = 1;
+            if (!in) {
+                x = tp_find_excl(&pk, one);
+                for (d = 0; d < ndeps && x < 0; d++) x = tp_find_excl(&deps[d], one);
+                sy_eprintf("tlib: %s\t%s\tneeds %s\n", x >= 0 ? "EXCLUDED" : "OUTER", unit, one);
+                return x >= 0 ? 6 : 1;
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+
+static TpPkg bdeps[TP_MAXD];
+
+static int cmd_build(const char *pkg, const char *outdir, const char *cache, int par, int use_cache) {
+    char why[512], path[4400], stage[4400], dst[4400], cdir[4400], cpath[4400], kpath[4400], hex[65], input[65], content[65], apisha[65];
+    char member[TP_MAXU][TP_NAME];
+    char *api, *f;
+    long an = 0, t0 = sy_now_ms(), t1;
+    size_t fn = 0;
+    TpBuf in, rcp, ct;
+    int i, rows = 0, rc;
+    in.b = 0; in.n = 0; in.cap = 0; in.bad = 0;
+    rcp = in; ct = in;
+    if (tp_load(root, pkg, &pk, why, sizeof why)) return say(2, "UNREADABLE", pkg, why);
+    if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
+    if (mkdirs(outdir)) return say(2, "UNREADABLE", outdir, "cannot create the output directory");
+    /* identity lines shared by the input sha and the receipt */
+    tp_puts(&in, "tlib\t1\npkg\t"); tp_puts(&in, pk.pkg);
+    tp_puts(&in, "\nversion\t"); tp_puts(&in, pk.version);
+    tp_puts(&in, "\ntarget\t"); tp_puts(&in, tn_self());
+    tp_puts(&in, "\nflags\t" FLAGS "\nproduct_sha\t"); tp_puts(&in, product_sha); tp_puts(&in, "\n");
+    nlibs = 0;
+    for (i = 0; i < pk.ndep; i++) {
+        Lib *L = &libs[nlibs];
+        if (tp_load(root, pk.dep_pkg[i], &bdeps[i], why, sizeof why)) return say(2, "UNREADABLE", pk.dep_pkg[i], why);
+        if (cx_fmt(path, sizeof path, "%s/%s@%s.tlib", outdir, bdeps[i].pkg, bdeps[i].version)) return 2;
+        if (sy_exists(path) != 1) return say(5, "INCOMPATIBLE", path, "dependency tlib not built: build it first");
+        rc = load_lib(L, path);
+        if (rc) return rc;
+        nlibs++;
+        rc = tp_ver_compat(L->ver, pk.dep_ver[i]);
+        if (rc) return say(5, "INCOMPATIBLE", pk.dep_pkg[i], rc == 1 ? "major mismatch with the dependency" : "dependency provider too old");
+        tp_puts(&in, "dep\t"); tp_puts(&in, pk.dep_pkg[i]); tp_puts(&in, "\t"); tp_puts(&in, pk.dep_ver[i]);
+        tp_puts(&in, "\t"); tp_puts(&in, L->ver); tp_puts(&in, "\t"); tp_puts(&in, L->content); tp_puts(&in, "\n");
+    }
+    /* fresh() reloads pk for each dependency: run it after the lines above, then restore pk. */
+    for (i = 0; i < nlibs; i++) { rc = fresh(&libs[i]); if (rc) return rc; }
+    if (tp_load(root, pkg, &pk, why, sizeof why)) return say(2, "UNREADABLE", pkg, why);
+    for (i = 0; i < pk.nexcl; i++) {
+        tp_puts(&in, "excluded\t"); tp_puts(&in, pk.excl[i]); tp_puts(&in, "\t"); tp_puts(&in, pk.excl_why[i]); tp_puts(&in, "\n");
+    }
+    for (i = 0; i < pk.nunit; i++) {
+        char *c = tp_closure(root, product, pk.unit[i], why, sizeof why);
+        if (!c) return say(1, "FAILED", pk.unit[i], why);
+        rc = closure_inside(pk.unit[i], c, bdeps, pk.ndep);
+        mm_free(c);
+        if (rc) return rc;
+        if (tp_member_name(pk.unit[i], member[i], TP_NAME)) return say(1, "FAILED", pk.unit[i], "member name too long");
+    }
+    /* input sha: the identity lines and every unit's path and source sha */
+    {
+        TpBuf t;
+        t.b = 0; t.n = 0; t.cap = 0; t.bad = 0;
+        tp_put(&t, in.b, in.n);
+        for (i = 0; i < pk.nunit; i++) {
+            if (tp_sha_file(pk.unit[i], hex)) { mm_free(t.b); return say(2, "UNREADABLE", pk.unit[i], "cannot read the unit"); }
+            tp_puts(&t, "unit\t"); tp_puts(&t, pk.unit[i]); tp_puts(&t, "\t"); tp_puts(&t, hex); tp_puts(&t, "\n");
+        }
+        if (t.bad || in.bad) { mm_free(t.b); return say(1, "FAILED", pkg, "out of memory"); }
+        tp_sha(t.b, (size_t)t.n, input);
+        mm_free(t.b);
+    }
+    if (cx_fmt(dst, sizeof dst, "%s/%s@%s.tlib", outdir, pk.pkg, pk.version) ||
+        cx_fmt(cdir, sizeof cdir, "%s/%s", cache, pk.pkg) || cx_fmt(kpath, sizeof kpath, "%s/%s.key", cdir, input)) return 2;
+    if (use_cache) {
+        f = cx_read(kpath, &fn);
+        if (f && fn == 65 && f[64] == '\n') {
+            Lib *L = &libs[MAXLIB - 1];
+            f[64] = 0;
+            if (!cx_fmt(cpath, sizeof cpath, "%s/%s.tlib", cdir, f) && sy_exists(cpath) == 1 && !load_lib(L, cpath) &&
+                tx_eqz(L->input, input) && tx_eqz(L->content, f) && tx_eqz(L->pkg, pk.pkg) && tx_eqz(L->ver, pk.version)) {
+                if (sy_copy(cpath, dst, 0644)) { mm_free(f); return say(1, "FAILED", dst, "cannot copy from the cache"); }
+                sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcache=HIT\tcontent_sha=%s\t%s\n",
+                          pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, L->content, dst);
+                mm_free(f);
+                return 0;
+            }
+            sy_eprintf("tlib: cache entry for %s did not verify for this input: rebuilding\n", pk.pkg);
+        }
+        mm_free(f);
+    }
+    /* cold build */
+    if (cx_fmt(stage, sizeof stage, "%s/.stage-%s-%d", outdir, pk.pkg, sy_pid()) || mkdirs(stage)) return say(1, "FAILED", outdir, "cannot create the stage directory");
+    for (i = 0; i < pk.nunit; i++) {
+        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i]) || set_compile(i, pk.unit[i], path)) return say(1, "FAILED", pk.unit[i], "path too long");
+    }
+    if (run_jobs(pk.nunit, par)) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "a unit did not compile"); }
+    t1 = sy_now_ms();
+    api = tp_api(product, &pk, &an, &rows, why, sizeof why);
+    if (!api) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, why); }
+    tp_sha(api, (size_t)an, apisha);
+    if (cx_fmt(path, sizeof path, "%s/build/layer-api/%s.tsv", root, pk.pkg)) return 2;
+    f = cx_read(path, &fn);
+    if (!f || (long)fn != an || !mm_same(f, api, an) || !tx_eqz(apisha, pk.api_sha)) {
+        mm_free(f); mm_free(api); (void)cx_rmtree(stage);
+        return say(4, "STALE", pkg, "interface differs from build/layer-api or the table's api_sha: run tools/layer-api.cx --write and bump the version");
+    }
+    mm_free(f);
+    /* receipt */
+    tp_put(&rcp, in.b, in.n);
+    tp_puts(&rcp, "api_sha\t"); tp_puts(&rcp, apisha); tp_puts(&rcp, "\ninput_sha\t"); tp_puts(&rcp, input); tp_puts(&rcp, "\n");
+    tp_puts(&ct, pk.pkg); tp_puts(&ct, "\t"); tp_puts(&ct, pk.version); tp_puts(&ct, "\napi\t"); tp_puts(&ct, apisha); tp_puts(&ct, "\n");
+    for (i = 0; i < pk.nunit; i++) {
+        char src[65];
+        if (cx_fmt(path, sizeof path, "%s/%s", stage, member[i]) || tp_sha_file(path, hex) || tp_sha_file(pk.unit[i], src)) {
+            (void)cx_rmtree(stage);
+            return say(1, "FAILED", pk.unit[i], "object or source unreadable after the compile");
+        }
+        tp_puts(&rcp, "unit\t"); tp_puts(&rcp, pk.unit[i]); tp_puts(&rcp, "\t"); tp_puts(&rcp, src); tp_puts(&rcp, "\t");
+        tp_puts(&rcp, member[i]); tp_puts(&rcp, "\t"); tp_puts(&rcp, hex); tp_puts(&rcp, "\n");
+        tp_puts(&ct, member[i]); tp_puts(&ct, "\t"); tp_puts(&ct, hex); tp_puts(&ct, "\n");
+    }
+    if (rcp.bad || ct.bad) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "out of memory"); }
+    tp_sha(ct.b, (size_t)ct.n, content);
+    tp_puts(&rcp, "content_sha\t"); tp_puts(&rcp, content); tp_puts(&rcp, "\n");
+    tp_sha(rcp.b, (size_t)rcp.n, hex);
+    tp_puts(&rcp, "receipt_sha\t"); tp_puts(&rcp, hex); tp_puts(&rcp, "\n");
+    {
+        static char *av[TP_MAXU + 12];
+        static char mpath[TP_MAXU + 2][4400];
+        char ar[4400];
+        char *o = 0;
+        size_t on = 0;
+        int k = 0;
+        if (cx_fmt(mpath[0], 4400, "%s/__.S.receipt", stage) || cx_fmt(mpath[1], 4400, "%s/__.S.api", stage) ||
+            cx_fmt(ar, sizeof ar, "%s/pack.a", stage) ||
+            cx_write(mpath[0], rcp.b, (size_t)rcp.n) || cx_write(mpath[1], api, (size_t)an)) {
+            (void)cx_rmtree(stage);
+            return say(1, "FAILED", stage, "cannot write the metadata members");
+        }
+        av[k++] = "sh"; av[k++] = product; av[k++] = "ar"; av[k++] = "rcs"; av[k++] = ar; av[k++] = mpath[0]; av[k++] = mpath[1];
+        for (i = 0; i < pk.nunit; i++) {
+            if (cx_fmt(mpath[i + 2], 4400, "%s/%s", stage, member[i])) { (void)cx_rmtree(stage); return 1; }
+            av[k++] = mpath[i + 2];
+        }
+        av[k] = 0;
+        rc = cx_runv_timeout(av, STEP_SECS, &o, &on);
+        mm_free(o);
+        if (rc) { (void)cx_rmtree(stage); return say(1, "FAILED", pkg, "product ar failed"); }
+        /* verify what was packed before anything is published */
+        {
+            Lib *L = &libs[MAXLIB - 1];
+            rc = load_lib(L, ar);
+            if (rc || !tx_eqz(L->content, content) || !tx_eqz(L->input, input)) {
+                (void)cx_rmtree(stage);
+                return say(1, "FAILED", pkg, "the packed archive did not verify");
+            }
+            if (sy_copy(ar, dst, 0644)) { (void)cx_rmtree(stage); return say(1, "FAILED", dst, "cannot write the tlib"); }
+            if (use_cache) {
+                char tmp[4400], keyline[70];
+                if (mkdirs(cdir) || cx_fmt(cpath, sizeof cpath, "%s/%s.tlib", cdir, content) ||
+                    cx_fmt(tmp, sizeof tmp, "%s/.tmp-%d", cdir, sy_pid()) || cx_fmt(keyline, sizeof keyline, "%s\n", content) ||
+                    sy_copy(ar, tmp, 0644) || sy_rename(tmp, cpath) ||
+                    cx_write(tmp, keyline, 65) || sy_rename(tmp, kpath))
+                    sy_eprintf("tlib: cache not updated under %s (the tlib itself is written)\n", cdir);
+            }
+            sy_printf("TLIB_BUILD\t%s\t%s\tunits=%d\tbytes=%ld\tms=%ld\tcompile_ms=%ld\tjobs=%d\tcache=MISS\tcontent_sha=%s\t%s\n",
+                      pk.pkg, pk.version, pk.nunit, L->n, sy_now_ms() - t0, t1 - t0, par, content, dst);
+        }
+    }
+    mm_free(api);
+    (void)cx_rmtree(stage);
+    return 0;
+}
+
+static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char **req, int nreq, const char *work, int par) {
+    static char *av[MAXJOB + MAXLIB + 8];
+    static char alias[MAXLIB][4400];
+    char why[512], rel[4400], real[4400], wdir[4400], obj[4400], mem[4400];
+    char *c, *o = 0;
+    size_t on = 0;
+    long n, i = 0, e, rl = tx_len(root, sizeof root), t0 = sy_now_ms(), tv, t1, t2;
+    int k, rc, nsrc = 0, ntape = 0, r;
+    nlibs = 0;
+    for (k = 0; k < ntl; k++) {
+        rc = load_lib(&libs[nlibs], tl[k]);
+        if (rc) return rc;
+        nlibs++;
+    }
+    rc = compat(req, nreq);
+    if (rc) return rc;
+    for (k = 0; k < nlibs; k++) { rc = fresh(&libs[k]); if (rc) return rc; }
+    tv = sy_now_ms();
+    r = sy_realpath(tool, real, sizeof real);
+    if (r < 0) return say(2, "UNREADABLE", tool, "no such source");
+    if (r > rl && tx_prefix(real, r, root, rl) && real[rl] == '/') { if (tx_copy(rel, sizeof rel, real + rl + 1, r - rl - 1)) return 2; }
+    else if (tx_copy(rel, sizeof rel, real, r)) return 2;
+    if (work) { if (tx_copy(wdir, sizeof wdir, work, tx_len(work, sizeof wdir))) return 2; }
+    else if (cx_fmt(wdir, sizeof wdir, "%s.tlibwork", out)) return 2;
+    if (mkdirs(wdir)) return say(2, "UNREADABLE", wdir, "cannot create the work directory");
+    c = tp_closure(root, product, rel, why, sizeof why);
+    if (!c) return say(1, "FAILED", rel, why);
+    n = tx_len(c, TX_ZCAP);
+    while (i < n) {
+        char one[4400], x[TP_NAME + 8];
+        int provided = 0;
+        e = i;
+        while (e < n && c[e] != '\n') e++;
+        if (e > i) {
+            if (tx_copy(one, sizeof one, c + i, e - i)) return say(1, "FAILED", rel, "closure path too long");
+            for (k = 0; k < nlibs && !provided; k++) {
+                int u;
+                for (u = 0; u < libs[k].nunit && !provided; u++)
+                    if (!rc_field(&libs[k], "unit", u, 1, x, sizeof x) && tx_eqz(x, one)) provided = 1;
+                for (u = 0; !provided; u++) {
+                    r = rc_field(&libs[k], "excluded", u, 1, x, sizeof x);
+                    if (r) break;
+                    if (tx_eqz(x, one)) {
+                        char reason[64];
+                        if (rc_field(&libs[k], "excluded", u, 2, reason, sizeof reason)) reason[0] = 0;
+                        sy_eprintf("tlib: EXCLUDED\t%s\tneeds %s, which %s excludes (%s): build this tool from source\n", rel, one, libs[k].pkg, reason);
+                        return 6;
+                    }
+                }
+            }
+            if (provided) ntape++;
+            else {
+                if (cx_fmt(mem, sizeof mem, "%s", one)) return 2;
+                for (k = 0; mem[k]; k++) if (mem[k] == '/') mem[k] = '.';
+                if (cx_fmt(obj, sizeof obj, "%s/%s.o", wdir, mem[0] == '.' ? mem + 1 : mem) || set_compile(nsrc, one, obj))
+                    return say(1, "FAILED", one, "too many source units or path too long");
+                nsrc++;
+            }
+        }
+        i = e + 1;
+    }
+    mm_free(c);
+    if (nsrc < 1) return say(1, "FAILED", rel, "empty closure");
+    if (run_jobs(nsrc, par)) return say(1, "FAILED", rel, "a source unit did not compile");
+    t1 = sy_now_ms();
+    k = 0;
+    av[k++] = "sh"; av[k++] = product;
+    for (i = 0; i < nsrc; i++) av[k++] = jobs[i].v[6];
+    for (i = 0; i < nlibs; i++) {
+        if (cx_fmt(alias[i], 4400, "%s/%s.a", wdir, libs[i].pkg)) return 2;
+        r = sy_unlink(alias[i]);
+        if ((r && r != -ENOENT) || sy_symlink(libs[i].path, alias[i])) return say(1, "FAILED", alias[i], "cannot place the archive alias");
+        av[k++] = alias[i];
+    }
+    av[k++] = "-o"; av[k++] = (char *)out; av[k] = 0;
+    rc = cx_runv_timeout(av, STEP_SECS, &o, &on);
+    if (o && on) (void)sy_write_all(2, o, (long)on);
+    mm_free(o);
+    if (rc) return say(1, "FAILED", rel, "the product link failed");
+    t2 = sy_now_ms();
+    sy_printf("TLIB_LINK\t%s\tsrc_units=%d\ttlib_units=%d\ttlibs=%d\tverify_ms=%ld\tcompile_ms=%ld\tlink_ms=%ld\ttotal_ms=%ld\t%s\n",
+              rel, nsrc, ntape, nlibs, tv - t0, t1 - tv, t2 - t1, t2 - t0, out);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cmd = argc > 1 ? argv[1] : 0, *subject = 0, *rarg = ".", *parg = 0, *outarg = 0, *cachearg = 0, *work = 0, *part = 0;
+    char outdir[4400], cache[4400];
+    char *tl[MAXLIB], *req[16];
+    int ntl = 0, nreq = 0, par = 4, use_cache = 1, want_fresh = 0, k, bad = 0;
+    for (k = 2; k < argc && !bad; k++) {
+        if (tx_eqz(argv[k], "--root") && k + 1 < argc) rarg = argv[++k];
+        else if (tx_eqz(argv[k], "--product") && k + 1 < argc) parg = argv[++k];
+        else if ((tx_eqz(argv[k], "--out") || tx_eqz(argv[k], "-o")) && k + 1 < argc) outarg = argv[++k];
+        else if (tx_eqz(argv[k], "--cache") && k + 1 < argc) cachearg = argv[++k];
+        else if (tx_eqz(argv[k], "--work") && k + 1 < argc) work = argv[++k];
+        else if (tx_eqz(argv[k], "--jobs") && k + 1 < argc) {
+            const char *d = argv[++k];
+            par = 0;
+            while (*d >= '0' && *d <= '9' && par <= 16) par = par * 10 + (*d++ - '0');
+            if (*d || par < 1 || par > 16) bad = 1;
+        }
+        else if (tx_eqz(argv[k], "--tlib") && k + 1 < argc && ntl < MAXLIB - 1) tl[ntl++] = argv[++k];
+        else if (tx_eqz(argv[k], "--require") && k + 1 < argc && nreq < 16) req[nreq++] = argv[++k];
+        else if (tx_eqz(argv[k], "--no-cache")) use_cache = 0;
+        else if (tx_eqz(argv[k], "--fresh")) want_fresh = 1;
+        else if (tx_eqz(argv[k], "--api")) part = "__.S.api";
+        else if (tx_eqz(argv[k], "--receipt")) part = "__.S.receipt";
+        else if (argv[k][0] != '-' && !subject) subject = argv[k];
+        else bad = 1;
+    }
+    if (!cmd || !subject || bad ||
+        !(tx_eqz(cmd, "build") || tx_eqz(cmd, "check") || tx_eqz(cmd, "inspect") || tx_eqz(cmd, "link")) ||
+        (tx_eqz(cmd, "link") && (!outarg || ntl < 1))) {
+        sy_eprintf("tlib: usage: build PKG [--out DIR] [--cache DIR] [--jobs N] [--no-cache] | check FILE [--fresh] | "
+                   "inspect FILE [--api|--receipt] | link TOOL.cx -o OUT --tlib FILE... [--require PKG@X.Y.Z...] [--work DIR] [--jobs N]; "
+                   "common: [--root ROOT] [--product FILE]\n");
+        return 2;
+    }
+    /* Paths given relative to the caller's directory are resolved before the move to ROOT. */
+    {
+        static char abs_subject[4400], abs_out[4400], abs_work[4400], cwd[4096];
+        static char abs_tl[MAXLIB][4400];
+        if (sy_cwd(cwd, sizeof cwd) < 0) return say(2, "UNREADABLE", ".", "no current directory");
+        if (!tx_eqz(cmd, "build") && subject[0] != '/') {
+            if (cx_fmt(abs_subject, sizeof abs_subject, "%s/%s", cwd, subject)) return 2;
+            subject = abs_subject;
+        }
+        if (outarg && outarg[0] != '/') { if (cx_fmt(abs_out, sizeof abs_out, "%s/%s", cwd, outarg)) return 2; outarg = abs_out; }
+        if (work && work[0] != '/') { if (cx_fmt(abs_work, sizeof abs_work, "%s/%s", cwd, work)) return 2; work = abs_work; }
+        if (cachearg && cachearg[0] != '/') { if (cx_fmt(cache, sizeof cache, "%s/%s", cwd, cachearg)) return 2; }
+        else if (cachearg) { if (cx_fmt(cache, sizeof cache, "%s", cachearg)) return 2; }
+        else if (cx_fmt(cache, sizeof cache, "%s/.cache/unisacc/tlib", sy_env_or("HOME", "."))) return 2;
+        for (k = 0; k < ntl; k++)
+            if (tl[k][0] != '/') { if (cx_fmt(abs_tl[k], 4400, "%s/%s", cwd, tl[k])) return 2; tl[k] = abs_tl[k]; }
+    }
+    if (sy_realpath(rarg, root, sizeof root) < 0) return say(2, "UNREADABLE", rarg, "bad root");
+    if (parg) { if (sy_realpath(parg, product, sizeof product) < 0) return say(2, "UNREADABLE", parg, "bad product"); }
+    else if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) return 2;
+    if (sy_chdir(root)) return say(2, "UNREADABLE", root, "cannot enter the root");
+    if (tx_eqz(cmd, "check")) return cmd_check(subject, want_fresh);
+    if (tx_eqz(cmd, "inspect")) return cmd_inspect(subject, part);
+    if (tx_eqz(cmd, "link")) return cmd_link(subject, outarg, tl, ntl, req, nreq, work, par);
+    if (outarg) { if (cx_fmt(outdir, sizeof outdir, "%s", outarg)) return 2; }
+    else if (cx_fmt(outdir, sizeof outdir, "%s/out/tlib", root)) return 2;
+    return cmd_build(subject, outdir, cache, par, use_cache);
+}

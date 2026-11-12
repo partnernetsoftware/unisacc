@@ -1,0 +1,220 @@
+/* tools/check-tlib-base.cx -- the real packages of this checkout as tape libraries.
+ *
+ *   sh ./unisacc.com tools/check-tlib-base.cx [-- ROOT OUT [PKG...]]
+ *
+ * Builds each PKG (default: cx.base; dependencies must come first on the line) cold from ROOT's
+ * sources into a private output directory and a private cache, then asserts, per package:
+ *  (1) the cold build succeeds and reports a cache MISS (nothing of an earlier run is reused);
+ *  (2) check --fresh accepts it: structure, and identity against ROOT's sources and product;
+ *  (3) its manifest member equals ROOT/build/layer-api/PKG.tsv byte for byte;
+ *  (4) a second build is a cache HIT with the same content sha;
+ * and for the set:
+ *  (5) a probe program (file write/read, sha256, text and memory helpers) linked against the tlibs
+ *      prints the same line and exits with the same code as its source build, for two inputs;
+ *  (6) a program whose closure needs the excluded cx/sys/dlcall.cx is refused at link (rc 6).
+ * One MEASURED line per package (units, bytes, cold build ms) and one for the probe link; they are
+ * measurements, not results. tools/tlib.cx is built once (tq_native: PREPARED, not a result). */
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXP 6
+
+static int failed;
+static char root[4096], work[4400], tlib[4400];
+static char *last;
+static size_t lastn;
+
+static void ck(int ok, const char *pkg, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\ttlib-base.%s.%s\n", ok ? "PASS" : "FAIL", pkg, name);
+}
+
+static int run(char *const args[]) {
+    char *v[48];
+    int k = 0, i;
+    mm_free(last);
+    last = 0;
+    lastn = 0;
+    v[k++] = tlib;
+    for (i = 0; args[i] && k < 44; i++) v[k++] = args[i];
+    v[k++] = "--root";
+    v[k++] = root;
+    v[k] = 0;
+    return cx_runv_timeout(v, 40, &last, &lastn);
+}
+
+static int field(const char *tag, const char *key, char *dst, long cap) {
+    long i = 0, e, o, l, f, kl = tx_len(key, 64);
+    while (last && i < (long)lastn) {
+        e = i;
+        while (e < (long)lastn && last[e] != '\n') e++;
+        if (!tx_field(last + i, e - i, '\t', 0, &o, &l) && tx_same(last + i + o, l, tag, tx_len(tag, 64)))
+            for (f = 1; !tx_field(last + i, e - i, '\t', f, &o, &l); f++)
+                if (l > kl && tx_prefix(last + i + o, l, key, kl)) return tx_copy(dst, cap, last + i + o + kl, l - kl) ? -1 : 0;
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int is(const char *tag, const char *key, const char *want) {
+    char got[256];
+    return !field(tag, key, got, sizeof got) && tx_eqz(got, want);
+}
+
+static int put(const char *rel, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", work, rel)) return -1;
+    return cx_write(p, text, (size_t)tx_len(text, TX_ZCAP));
+}
+
+static int link_dir(const char *under_root, const char *rel) {
+    char target[4400], p[4400];
+    if (cx_fmt(target, sizeof target, "%s/%s", root, under_root) || cx_fmt(p, sizeof p, "%s/%s", work, rel)) return -1;
+    return sy_symlink(target, p);
+}
+
+static int prog(const char *bin, const char *a1, const char *a2, char **out, size_t *n) {
+    char *v[4];
+    v[0] = (char *)bin; v[1] = (char *)a1; v[2] = (char *)a2; v[3] = 0;
+    *out = 0; *n = 0;
+    return cx_runv_timeout(v, 10, out, n);
+}
+
+static int same_behaviour(const char *a, const char *b, const char *a1, const char *a2) {
+    char *oa, *ob;
+    size_t na, nb;
+    int ra = prog(a, a1, a2, &oa, &na), rb = prog(b, a1, a2, &ob, &nb);
+    int ok = ra == rb && ra >= 10 && ra < 60 && na == nb && na > 0 && oa && ob && mm_same(oa, ob, (long)na);
+    if (!ok) sy_printf("NOTE\tprobe\tsource rc=%d bytes=%ld\ttlib rc=%d bytes=%ld\n", ra, (long)na, rb, (long)nb);
+    mm_free(oa);
+    mm_free(ob);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    static char path[MAXP][4400];
+    char src[4400], why[256], outdir[4400], cache[4400], probe[4400], need[4400], srcbin[4400], tlbin[4400], tdir[4400], manifest[4400];
+    char ver[32], sha1[65], sha2[65], units[16], bytes[24], ms[24];
+    const char *pkgs[MAXP];
+    int npkg = 0, rc, prep = 0, i, built = 0;
+    long t0 = sy_now_ms();
+
+    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
+    if (argc >= 3 && argv[2][0]) {
+        (void)sy_mkdir(argv[2], 0755);
+        if (cx_fmt(work, sizeof work, "%s/tlib-base-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    } else {
+        char dot[4400];
+        if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/tlib-base-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
+        (void)sy_mkdir(dot, 0755);
+    }
+    for (i = 3; i < argc && npkg < MAXP; i++) if (argv[i][0]) pkgs[npkg++] = argv[i];
+    if (!npkg) pkgs[npkg++] = "cx.base";
+    if (sy_mkdir(work, 0700) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (cx_fmt(tlib, sizeof tlib, "%s/tlib.native", work) || cx_fmt(outdir, sizeof outdir, "%s/o", work) || cx_fmt(cache, sizeof cache, "%s/cache", work) ||
+        cx_fmt(tdir, sizeof tdir, "%s/t", work) || cx_fmt(probe, sizeof probe, "%s/probe.cx", tdir) || cx_fmt(need, sizeof need, "%s/need.cx", tdir) ||
+        cx_fmt(srcbin, sizeof srcbin, "%s/probe.src", work) || cx_fmt(tlbin, sizeof tlbin, "%s/probe.tl", work) ||
+        cx_fmt(src, sizeof src, "%s/tools/tlib.cx", root)) return 2;
+    if (tq_native(root, src, tlib, why, sizeof why)) {
+        sy_printf("FAIL\ttlib-base.build-native\t%s\n", why);
+        return 1;
+    }
+
+    for (i = 0; i < npkg; i++) {
+        char *b[] = {"build", (char *)pkgs[i], "--out", outdir, "--cache", cache, 0};
+        size_t mn = 0;
+        char *m;
+        rc = run(b);
+        ck(rc == 0 && is("TLIB_BUILD", "cache=", "MISS") && !field("TLIB_BUILD", "content_sha=", sha1, sizeof sha1), pkgs[i], "cold-build-from-source");
+        if (rc || field("TLIB_BUILD", "units=", units, sizeof units) || field("TLIB_BUILD", "bytes=", bytes, sizeof bytes) || field("TLIB_BUILD", "ms=", ms, sizeof ms)) continue;
+        /* the version is the table's: read it back from the tool's own line (field 2) */
+        {
+            long o, l;
+            long e = tx_chr(last, (long)lastn, '\n');
+            if (e < 0 || tx_field(last, e, '\t', 2, &o, &l) || tx_copy(ver, sizeof ver, last + o, l)) continue;
+        }
+        sy_printf("MEASURED\t%s@%s\tunits=%s\tbytes=%s\tcold_build_ms=%s\tjobs=4\tno-test-result\n", pkgs[i], ver, units, bytes, ms);
+        if (cx_fmt(path[i], 4400, "%s/%s@%s.tlib", outdir, pkgs[i], ver) || cx_fmt(manifest, sizeof manifest, "%s/build/layer-api/%s.tsv", root, pkgs[i])) return 2;
+        built++;
+        {
+            char *c[] = {"check", path[i], "--fresh", 0};
+            rc = run(c);
+            ck(rc == 0 && is("TLIB_CHECK", "content_sha=", sha1) && is("TLIB_CHECK", "units=", units), pkgs[i], "check-structure-and-fresh");
+        }
+        {
+            char *a[] = {"inspect", path[i], "--api", 0};
+            rc = run(a);
+            m = cx_read(manifest, &mn);
+            ck(rc == 0 && m && mn > 0 && mn == lastn && mm_same(m, last, (long)mn), pkgs[i], "manifest-member-equals-layer-api");
+            mm_free(m);
+        }
+        rc = run(b);
+        ck(rc == 0 && is("TLIB_BUILD", "cache=", "HIT") && !field("TLIB_BUILD", "content_sha=", sha2, sizeof sha2) && tx_eqz(sha1, sha2), pkgs[i], "second-build-cache-hit-same-content");
+    }
+
+    /* probe: only modules of the cx layer, no child process helper of the prelude */
+    prep |= sy_mkdir(tdir, 0755) || link_dir("cx/sys", "t/sys") || link_dir("cx/text", "t/text") || link_dir("cx/mem", "t/mem");
+    prep |= put("t/probe.cx",
+                "#pragma unisa use sys.fs\n#pragma unisa use sys.io\n#pragma unisa use sys.sha\n#pragma unisa use sys.env\n"
+                "#pragma unisa use sys.time\n#pragma unisa use text.text\n#pragma unisa use mem.bytes\n#pragma unisa use mem.heap\n"
+                "int main(int argc, char **argv) {\n"
+                "    char hex[65], path[4400], back[256];\n"
+                "    const char *text = argc > 2 ? argv[2] : \"tape library probe\";\n"
+                "    long n = tx_len(text, 200), got;\n"
+                "    int fd;\n"
+                "    char *copy = mm_alloc(n + 1);\n"
+                "    if (argc < 2 || n < 0 || !copy || mm_copy(copy, n + 1, text, n)) return 2;\n"
+                "    copy[n] = 0;\n"
+                "    if (sy_sha256_hex(copy, n, hex)) return 3;\n"
+                "    if (cx_fmt(path, sizeof path, \"%s/probe.txt\", argv[1])) return 4;\n"
+                "    (void)sy_unlink(path);\n"
+                "    fd = sy_open_new(path, 0644);\n"
+                "    if (fd < 0 || sy_write_all(fd, copy, n) || sy_close(fd)) return 5;\n"
+                "    fd = sy_open_read(path);\n"
+                "    got = sy_reg_size(fd);\n"
+                "    if (fd < 0 || got != n || sy_read_full(fd, back, got) || sy_close(fd)) return 6;\n"
+                "    sy_printf(\"sha=%s size=%ld same=%d fields=%ld count=%ld exists=%d home=%d\\n\", hex, got, mm_same(back, copy, n),\n"
+                "              tx_fields(text, n, ' '), tx_count(text, n, \"e\", 1), sy_exists(path), sy_env_or(\"HOME\", \"\")[0] != 0);\n"
+                "    mm_free(copy);\n"
+                "    return (int)(n % 50) + 10;\n"
+                "}\n");
+    prep |= put("t/need.cx", "#pragma unisa use sys.dlcall\nint main(void) { return 0; }\n");
+    if (prep || built != npkg) {
+        sy_printf("FAIL\ttlib-base.probe-prepare\tprep=%d built=%d of %d\n", prep, built, npkg);
+        failed++;
+    } else {
+        char *l[8 + 2 * MAXP];
+        char *x[8 + 2 * MAXP];
+        long tl0;
+        int k = 0, j = 0, r6;
+        l[k++] = "link"; l[k++] = probe; l[k++] = "-o"; l[k++] = tlbin;
+        x[j++] = "link"; x[j++] = need; x[j++] = "-o"; x[j++] = tlbin;
+        for (i = 0; i < npkg; i++) { l[k++] = "--tlib"; l[k++] = path[i]; x[j++] = "--tlib"; x[j++] = path[i]; }
+        l[k] = 0;
+        x[j] = 0;
+        r6 = run(x);
+        ck(r6 == 6 && sy_exists(tlbin) == 0, "set", "link-refuses-closure-with-excluded-unit");
+        tl0 = sy_now_ms();
+        rc = run(l);
+        tl0 = sy_now_ms() - tl0;
+        ck(rc == 0 && sy_exists(tlbin) == 1, "set", "probe-links-against-tlibs");
+        if (!rc && !field("TLIB_LINK", "tlib_units=", units, sizeof units)) {
+            long ts0 = sy_now_ms();
+            prep = tq_native(root, probe, srcbin, why, sizeof why);
+            sy_printf("MEASURED\tprobe\ttlib_link_ms=%ld\tsource_build_ms=%ld\ttlib_units=%s\tno-test-result\n", tl0, sy_now_ms() - ts0, units);
+            ck(!prep && same_behaviour(srcbin, tlbin, work, "tape library probe") && same_behaviour(srcbin, tlbin, work, "one two three four five e e e"),
+               "set", "probe-behaves-as-source-build");
+        }
+    }
+
+    mm_free(last);
+    if (argc < 3) cx_rmtree(work);
+    sy_printf("CHECK_TLIB_BASE\tfailed=%d\telapsed_ms=%ld\n", failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}
