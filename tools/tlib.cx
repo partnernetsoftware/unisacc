@@ -426,7 +426,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
         nlibs++;
         rc = tp_ver_compat(L->ver, pk.dep_ver[i]);
         if (rc) return say(5, "INCOMPATIBLE", pk.dep_pkg[i], rc == 1 ? "major mismatch with the dependency" : "dependency provider too old");
-        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], L->ver, L->content);
+        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], L->ver, L->api);
     }
     /* fresh() reloads pk for each dependency: run it after the lines above, then restore pk. */
     for (i = 0; i < nlibs; i++) { rc = fresh(&libs[i]); if (rc) return rc; }
@@ -709,7 +709,7 @@ static int cmd_link(const char *tool, const char *out, char **tl, int ntl, char 
    When everything is kept and the kit lists exactly these tlibs, nothing is written at all.
    Otherwise the old kit.tsv is removed before the first tlib or the image changes, so a kit file
    never describes another image or another set of tlibs. */
-typedef struct { char pkg[64], ver[32], content[65]; } KitLib;
+typedef struct { char pkg[64], ver[32], content[65], api[65]; } KitLib;
 static KitLib kitlibs[MAXLIB];
 
 /* The kit text KB[0..KN): its kit_sha, the product, every `self` unit and the image at IMAGE.
@@ -757,7 +757,7 @@ static int kit_keep(const char *pkg, const char *outdir, int ndone) {
     for (i = 0; i < pk.ndep; i++) {
         for (d = 0; d < ndone && !tx_eqz(kitlibs[d].pkg, pk.dep_pkg[i]); d++) {}
         if (d == ndone) { mm_free(in.b); return say(5, "INCOMPATIBLE", pk.dep_pkg[i], "dependency not settled before its user: order the table"); }
-        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], kitlibs[d].ver, kitlibs[d].content);
+        put_dep(&in, pk.dep_pkg[i], pk.dep_ver[i], kitlibs[d].ver, kitlibs[d].api);
     }
     put_excl(&in, &pk);
     rc = input_sha(&in, &pk, input);
@@ -807,7 +807,8 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
             else {   /* pk is the package, libs[MAXLIB - 1] its tlib (kept, built or taken from the cache) */
                 KitLib *K = &kitlibs[nlib];
                 if (cx_fmt(K->pkg, sizeof K->pkg, "%s", pk.pkg) || cx_fmt(K->ver, sizeof K->ver, "%s", pk.version) ||
-                    cx_fmt(K->content, sizeof K->content, "%s", libs[MAXLIB - 1].content)) return 2;
+                    cx_fmt(K->content, sizeof K->content, "%s", libs[MAXLIB - 1].content) ||
+                    cx_fmt(K->api, sizeof K->api, "%s", libs[MAXLIB - 1].api)) return 2;
                 tp_puts(&k, "lib\t"); tp_puts(&k, pk.pkg); tp_puts(&k, "@"); tp_puts(&k, pk.version); tp_puts(&k, ".tlib\n");
                 nlib++;
             }
@@ -1001,10 +1002,10 @@ int main(int argc, char **argv) {
     if (tx_eqz(cmd, "inspect")) return cmd_inspect(subject, part);
     if (tx_eqz(cmd, "link")) return cmd_link(subject, outarg, tl, ntl, req, nreq, work, par);
     if (tx_eqz(cmd, "prep")) {
-        /* one compile at a time unless asked: the callers already run one prepare per batch slot */
+        /* default --jobs 4 (par); a dependency enters the input sha by its api_sha: objects depend on the interface only */
         if (kitarg) { if (cx_fmt(outdir, sizeof outdir, "%s", kitarg)) return 2; }
         else if (cx_fmt(outdir, sizeof outdir, "%s/out/tlib", root)) return 2;
-        return cmd_prep(subject, outarg, outdir, jobs_given ? par : 1);
+        return cmd_prep(subject, outarg, outdir, par);
     }
     if (outarg) { if (cx_fmt(outdir, sizeof outdir, "%s", outarg)) return 2; }
     else if (cx_fmt(outdir, sizeof outdir, "%s/out/tlib", root)) return 2;
