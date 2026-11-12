@@ -35,6 +35,12 @@
  * a SEGMENT row and exits 75 (continue). [--max-segments N] is persisted with the budget; the
  * total deadline, attempts and resumes are never reset by a new segment. A retry whose watch
  * observation does not fit is carried as "owed" and settled first by the next segment.
+ * Call plan (cxlib.chaincall, shared with candidate-chain's validators): each call is RUN (a plain
+ * phase under its own bound), RUN_GROUP (a job group: --jobs-segment-s S, exported bound S, owner
+ * bound S + 3) or YIELD. YIELD: the smallest useful call (a plain phase: its bound; a group: one
+ * single-job bound + 3) does not fit the rest of the segment; nothing is issued, a HOLD row names
+ * the phase, what it needs and what is left, and the segment ends with rc 75. Work that a whole
+ * new segment could not start either stops as a "deadline" blocker.
  * [--supervise] (needs both options; [--runner ABS_EXEC] overrides the native self-build) runs
  * segments one after another until rc is not 75, the persisted caps stop it, or a segment overruns.
  * SHA memo (T11): phases get UNISACC_CHAIN_SHAMEMO(_ID), bound to this output's identity; compare
@@ -55,8 +61,12 @@
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.chainrunproc
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chaincall
 
 static const char *out;
+/* Every child call (its owner bound, exported bound, group seconds, or no call at all) is decided
+   by cxlib.chaincall, the same unit candidate-chain validates with. */
+static ccp_limits call_limits;
 static long end_ms;
 /* Defaults come from build/limits.tsv (cxlib.limits) at the top of main. */
 static int attempts, resumes, kills, max_attempts, max_resumes;
@@ -69,11 +79,8 @@ static int probing; static char pending[256];
 static long seg_end_ms; static int segment_s, segments, max_segments, owed;
 static char memo_path[4400], memo_id[65]; static int memo_derived;
 static int amortize_jobs=1;
-static const char *jobs_group(const char *id) {
-    const char *groups[]={"jobs-tool","jobs-gen","jobs-tbl","jobs-net"};
-    for(int i=0;i<4;i++){size_t n=strlen(groups[i]);if(!strncmp(id,groups[i],n)&&(id[n]==0||id[n]=='-'))return groups[i];}
-    return 0;
-}
+/* The group names are cxlib.chaincall's: the same list candidate-chain accepts as a group target. */
+static const char *jobs_group(const char *id) { return ccp_group_of(id); }
 static void die(const char *s);
 static int lookup(const char *id) { for(int i=0;i<plan_count;i++)if(!strcmp(plan[i].id,id))return i;return -1; }
 static void validate_plan(void) {
@@ -171,8 +178,9 @@ static void clean_attempt(void) {
     append("chain-run.tsv",row);
 }
 static void retry_resets_clean(void) { if(clean) { clean=0; save_widen(); } }
-/* A child whose whole bound does not end before the segment does is not started. */
-static int seg_fits(int bound) { return !seg_end_ms||sy_now_ms()+(long)bound*1000<=seg_end_ms; }
+/* Whole seconds to the segment end (0 when it has passed), or -1 without a segment. A child whose
+   whole bound does not end before the segment does is not started: ccp_call_plan answers CCP_YIELD. */
+static long seg_left(void) { if(!seg_end_ms)return -1; long ms=seg_end_ms-sy_now_ms(); return ms<0?0:ms/1000; }
 static int segment_expired(const char *next) {
     char s[600]; if(cx_fmt(s,sizeof s,"SEGMENT\t%ld\tn=%d\texpired\tnext=%s\tattempts=%d\tresumes=%d\towed=%d\n",sy_wall_s(),segments,next,attempts,resumes,owed)) die("segment bound");
     append("chain-run.tsv",s); sy_printf("CHAIN_RUN\tSEGMENT\tcontinue\tn=%d\tnext=%s\n",segments,next); return RC_SEGMENT;
@@ -263,7 +271,8 @@ static int memo_on(const char *phase) { return memo_path[0]&&!(amortize_jobs&&jo
 static int needs_recheck(const char *phase) { return memo_path[0]&&(!strcmp(phase,"compare")||!strcmp(phase,"pack")); }
 static int is_recheck(const char *label) { size_t n=strlen(label); return n>8&&!strcmp(label+n-8,"-recheck"); }
 static void result_path(char *p,int a,const char *suffix) { char leaf[100];cx_fmt(leaf,sizeof leaf,"chain-run-%d.%s",a,suffix);path(p,leaf); }
-static void execute(const char *phase,char **v,int bound,int a) {
+static void execute(const char *phase,char **v,const ccp_plan *call,int a) {
+    int bound=call->bound;
     char p[4400];result_path(p,a,"argv");FILE *f=fopen(p,"wb");if(!f)_exit(2);
     for(int i=0;v[i];i++)fprintf(f,"%s\n",v[i]);if(fclose(f))_exit(2);
     /* The environment is rebuilt for every child: an inherited memo never reaches a phase, and a
@@ -275,19 +284,21 @@ static void execute(const char *phase,char **v,int bound,int a) {
     /* Derived memos (verify-context verdict, closure-list plan) only on --memo-derived, never inherited. */
     if(!pre&&memo_on(phase)&&memo_derived){if(sy_setenv("UNISACC_CHAIN_SHAMEMO_DERIVED","1",1))_exit(2);}
     else if(sy_unsetenv("UNISACC_CHAIN_SHAMEMO_DERIVED"))_exit(2);
-    int grouped=0;for(int i=0;v[i];i++)if(!strcmp(v[i],"--jobs-segment-s"))grouped=1;
+    int grouped=call->kind==CCP_RUN_GROUP;
     char token[300];cx_fmt(token,sizeof token,"%d:%s",a,phase);
     if(sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN",token,1))_exit(2);
     long started=sy_now_ms();pr_result r;
     /* A plain phase is told when its attempt ends: 14 seconds before the bound, 12 before the
        owner starts killing (bound - 2). A candidate whose next call would not fit yields
-       instead (see below). Rechecks, job groups and very short bounds get no such end. */
+       instead (see below). Rechecks, job groups and very short bounds get no such end
+       (cxlib.chaincall: end_s is 0 for a group and for a bound under 30). */
     {   char at_end[40];
-        if(grouped||pre||bound<30){if(sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS"))_exit(2);}
-        else if(cx_fmt(at_end,sizeof at_end,"%ld",started+(long)(bound-14)*1000)||sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS",at_end,1))_exit(2);
+        if(grouped||pre||!call->end_s){if(sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS"))_exit(2);}
+        else if(cx_fmt(at_end,sizeof at_end,"%ld",started+(long)call->end_s*1000)||sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS",at_end,1))_exit(2);
     }
-    {   char pb[16];  /* the per-phase bound travels to the children; none keeps a hidden default */
-        if(cx_fmt(pb,sizeof pb,"%d",bound)||sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S",pb,1))_exit(2);
+    {   char pb[16];  /* the exported bound travels to the children; none keeps a hidden default.
+                         A plain phase: its own bound; a group: the group budget (= --jobs-segment-s). */
+        if(cx_fmt(pb,sizeof pb,"%d",call->env_bound)||sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S",pb,1))_exit(2);
     }
     int t=grouped?cr_segment(phase,v,bound,&r):cr_run(phase,v,bound,&r);
     result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
@@ -336,11 +347,12 @@ static int run(const char *phase,char **v,char *fresh_output) {
         long left=(end_ms-sy_now_ms())/1000;
         if(left<1) return blocker(phase,"deadline",3);
         if(attempts>=max_attempts) return blocker(phase,"attempts-exhausted",3);
-        int call_bound=left<phase_bound?(int)left:phase_bound;
-        if(!seg_fits(call_bound)) return segment_expired(phase);
+        ccp_plan call;
+        if(ccp_call_plan(&call_limits,0,phase_bound,seg_left(),left,&call)==CCP_YIELD) return segment_expired(phase);
+        int call_bound=call.bound;
         attempts++; save();
         if(fresh_output&&cx_fmt(fresh_output,4400,"%s/%s-%d",out,phase,attempts)) die("fresh output bound");
-        int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,call_bound,attempts);
+        int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,&call,attempts);
         outcome o=collect(owner,attempts,phase,call_bound);
         int rc=o.rc,retry=o.retry,residue=o.residue;char row[512];
         if(residue) return blocker(phase,"surviving-processes",2);
@@ -438,7 +450,7 @@ static void settle(task *t,outcome r,int *stop,int *retrying) {
     else {t->state=done(t->id)?2:0;clean_attempt();}
 }
 static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
-    int active=0,stop=0,retrying=0;const char *held=0;
+    int active=0,stop=0,retrying=0,hold_row=0;const char *held=0; /* hold_row: one HOLD evidence row per invocation */
     for(int i=0;i<plan_count;i++) {
         task *t=&plan[i];
         if(!strncmp(t->id,"g2-lnx-x86_64-obj-",18)||!strncmp(t->id,"g2-lnx-arm64-obj-",17))t->state=2;
@@ -458,16 +470,25 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             long left=(end_ms-sy_now_ms())/1000;
             if(left<1){stop=blocker(t->phase,"deadline",3);continue;}
             if(attempts>=max_attempts){stop=blocker(t->phase,"attempts-exhausted",3);continue;}
-            int bound=left<t->bound?(int)left:t->bound;
-            char group_seconds[16];
-            if(group) {
-                long available=seg_end_ms?(seg_end_ms-sy_now_ms())/1000:segment_cap;
-                if(available>segment_cap)available=segment_cap;if(available>left)available=left;
-                if(available<58){if(!held)held=t->id;continue;}
-                bound=(int)available;cx_fmt(group_seconds,sizeof group_seconds,"%d",bound-3);
+            /* One decision for the call (cxlib.chaincall): a plain phase under its own bound, a job
+               group under what is left of the segment, or nothing. Segment end: ready work whose
+               smallest useful call does not fit (a group: one single-job bound plus the reserve) is
+               held, never started and killed, and never issued for the candidate to refuse; the
+               segment ends cleanly (rc 75) and the next one starts it. Work that would not fit a
+               whole new segment either is short of the total deadline, not of the segment. */
+            ccp_plan call;char group_seconds[16];
+            if(ccp_call_plan(&call_limits,group!=0,t->bound,seg_left(),left,&call)==CCP_YIELD) {
+                ccp_plan fresh;
+                if(ccp_call_plan(&call_limits,group!=0,t->bound,segment_s?(long)segment_s:-1,left,&fresh)==CCP_YIELD){stop=blocker(t->phase,"deadline",3);continue;}
+                if(!held)held=t->id;
+                if(!hold_row) {
+                    char row[500];hold_row=1;
+                    if(!cx_fmt(row,sizeof row,"HOLD\t%ld\tphase=%s\tneed=%d\tsegment_left=%ld\n",sy_wall_s(),t->phase,ccp_need(&call_limits,group!=0,t->bound),seg_left()))append("chain-run.tsv",row);
+                }
+                continue;
             }
-            /* Segment end: ready work that does not fit is held, never started and killed. */
-            if(!seg_fits(bound)){if(!held)held=t->id;continue;}
+            int bound=call.bound;
+            if(group&&cx_fmt(group_seconds,sizeof group_seconds,"%d",call.group_s))die("group seconds bound");
             t->attempt=++attempts;save();t->state=1;
             int pre=needs_recheck(t->phase)&&t->recheck!=2,end=tail;
             t->recheck=pre?1:0;
@@ -478,7 +499,7 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
             if(group){v[end++]="--jobs-segment-s";v[end++]=group_seconds;}
             v[end]=0;
             t->call_bound=bound;
-            t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,bound,t->attempt);
+            t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,&call,t->attempt);
             active++;
         }
         if(!active) {
@@ -591,6 +612,7 @@ static int supervise(int argc,char **argv,int sep,const char *runner) {
 }
 int main(int argc,char **argv) {
     phase_bound=lim_int("phase.bound"); segment_cap=lim_int("segment");
+    if(ccp_limits_load(&call_limits)) die("call limits");
     max_attempts=lim_int("attempts"); max_resumes=lim_int("resumes");
     widen_need=lim_int("width.recover.clean"); widen_max=lim_int("width.recover.max");
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
@@ -617,7 +639,7 @@ int main(int argc,char **argv) {
         else if(!strcmp(a,"--parallel")) { parallel=(int)number(b);if(parallel>4)die("parallel must be 1..4"); }
         else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
         else if(!strcmp(a,"--segment-s")) { segment_s=(int)number(b);if(segment_s>segment_cap){char m[64];cx_fmt(m,sizeof m,"segment must be 1..%d seconds",segment_cap);die(m);} }
-        else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>4096)die("max segments must be 1..4096"); }
+        else if(!strcmp(a,"--max-segments")) { max_segments=(int)number(b);if(max_segments>(int)lm_max("bg.segments",0))die("max segments above the bg.segments max of build/limits.tsv"); } /* the range bg-candidate hands down */
         else if(!strcmp(a,"--runner")) runner=b;
         else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
         else if(!strcmp(a,"--budget-raise")) raise_id=b;
@@ -658,6 +680,11 @@ int main(int argc,char **argv) {
     if(segment_s) {
         /* A phase whose bound exceeds the segment could never start: refuse before any child. */
         for(i=0;i<plan_count;i++) if(plan[i].bound>segment_s) die("segment shorter than a phase bound");
+        /* Likewise a job group that not even a whole segment could start (it would be held forever). */
+        for(i=0;i<plan_count;i++) if(amortize_jobs&&jobs_group(plan[i].id)) {
+            ccp_plan whole;
+            if(ccp_call_plan(&call_limits,1,plan[i].bound,segment_s,segment_cap,&whole)==CCP_YIELD) die("segment shorter than a job group");
+        }
         if((!watch||!candidate||(supervising&&!runner))&&segment_s<phase_bound) die("segment shorter than the native preparation bound");
     }
     sy_mkdir(out,0755);
@@ -720,6 +747,12 @@ int main(int argc,char **argv) {
         /* The cap and the count are persisted: a new invocation continues them, it never resets them. */
         if(max_segments&&segments>=max_segments) return blocker("segment","segments-exhausted",3);
         segments++; seg_end_ms=entered+(long)segment_s*1000; save();
+        {   /* Test-only: the first segment of an output starts with part of itself already spent, so a
+               fixture can place a phase at a segment tail without waiting for it. It can only
+               shorten that one segment. */
+            const char *spent=sy_env("UNISACC_CHAINRUN_SEGMENT_SPENT_MS");
+            if(spent&&*spent&&segments==1) { long ms=number(spent); if(ms>=(long)segment_s*1000) die("segment spent seam"); seg_end_ms-=ms; }
+        }
         char row[200]; if(cx_fmt(row,sizeof row,"SEGMENT\t%ld\tn=%d\tstart\tsegment-s=%d\tmax=%d\n",sy_wall_s(),segments,segment_s,max_segments)) die("segment bound");
         append("chain-run.tsv",row);
     }

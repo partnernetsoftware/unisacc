@@ -24,6 +24,7 @@
 #pragma unisa use cxlib.shamemo
 #pragma unisa use sys.posix
 #pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chaincall
 
 static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
@@ -40,7 +41,14 @@ static int cc_lim(const char *id, const char *scope) {
 /* A grouped call (--jobs-segment-s) receives the GROUP budget in that variable (the segment remainder, 1..segment-3);
    every job inside is still bounded by the single-job value (table default phase.bound), never the group budget,
    and the variable is rewritten to that per-job value so children (chain-step) keep the single-job ceiling. */
+/* What is accepted here is decided by cxlib.chaincall (ccp_accept_bound, ccp_accept_group), the unit
+   chain-run plans its calls with: the runner never issues a call this validator refuses. */
 static int cc_group;
+static ccp_limits *cc_call_limits(void) {
+    static ccp_limits l; static int loaded;
+    if (!loaded) { if (ccp_limits_load(&l)) die("unknown limit id", "phase.bound/segment"); loaded = 1; }
+    return &l;
+}
 static int cc_pb(void) {
     static int pb;
     if (!pb) {
@@ -48,13 +56,12 @@ static int cc_pb(void) {
         pb = cc_lim("phase.bound", 0);
         if (e && *e) {
             char *end = 0; long v = strtol(e, &end, 10);
-            long cap = cc_group ? (long)cc_lim("segment", 0) - 3 : (long)lm_max("phase.bound", 0);
-            if (*end || v < 1 || v > cap) die("REFUSE phase bound from caller", e);
+            if (*end || !ccp_accept_bound(cc_call_limits(), cc_group, v)) die("REFUSE phase bound from caller", e);
             if (!cc_group) pb = (int)v;
         }
         if (cc_group) {
             char s[16];
-            if (pb > (int)lm_max("phase.bound", 0) || cx_fmt(s, sizeof s, "%d", pb) || sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S", s, 1)) die("group per-job bound", 0);
+            if (!ccp_accept_bound(cc_call_limits(), 0, pb) || cx_fmt(s, sizeof s, "%d", pb) || sy_setenv("UNISACC_CHAIN_PHASE_BOUND_S", s, 1)) die("group per-job bound", 0);
         }
     }
     return pb;
@@ -2031,7 +2038,7 @@ int main(int argc, char **argv) {
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
     /* Test seam: explicit paths, no snapshot preparation or real construction. */
     if (argc == 6 && tx_eqz(argv[1], "--segment-jobs-fixture")) {
-        jobs_segment_end=sy_now_ms()+(cc_lim("segment", 0)-3)*1000L;
+        jobs_segment_end=sy_now_ms()+ccp_group_max(cc_call_limits())*1000L;
         verify_segment_jobs(argv[3],argv[2],argv[4],argv[5]);
         for(int i=0;i<segment_verified_count;i++) {
             verify_reuse(argv[2],argv[4],argv[5],segment_verified[i]);
@@ -2105,7 +2112,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--recheck-only")) { recheck_only = 1; continue; }
         if (tx_eqz(argv[i], "--jobs-segment-s") && i + 1 < argc) {
             const char *p = argv[++i]; char *end = 0; long secs = strtol(p, &end, 10);
-            if (!*p || *end || secs < cc_pb() || secs > cc_lim("segment", 0) - 3) die("REFUSE jobs segment phase.bound..segment-3", p);
+            if (!*p || *end || !ccp_accept_group(cc_call_limits(), cc_pb(), secs)) die("REFUSE jobs segment phase.bound..segment-3", p);
             jobs_segment_end = sy_now_ms() + secs * 1000; continue;
         }
         if (tx_eqz(argv[i], "--phases") && i + 1 < argc) { phases_file = argv[++i]; continue; }
@@ -2240,7 +2247,7 @@ int main(int argc, char **argv) {
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     jobs_segment_out = outdir;
     step_out = outdir;
-    if (jobs_segment_end && (!resume || !until_phase || (strcmp(until_phase,"jobs-tool") && strcmp(until_phase,"jobs-gen") && strcmp(until_phase,"jobs-tbl") && strcmp(until_phase,"jobs-net")))) die("REFUSE jobs segment target", until_phase);
+    if (jobs_segment_end && (!resume || !ccp_group_target(until_phase))) die("REFUSE jobs segment target", until_phase);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
     if (recheck_only) {
         /* Only for the two phases that require it, only when everything before them is complete:

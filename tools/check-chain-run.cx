@@ -9,6 +9,8 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use sys.sha
+#pragma unisa use cxlib.chaincall
+#pragma unisa use cxlib.limits
 static int bad;
 static void ck(int yes,const char *s) { sy_printf("%s\tchain-run.%s\n",yes?"PASS":"FAIL",s); if(!yes) bad++; }
 static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s)))exit(2); }
@@ -61,6 +63,26 @@ static int fake(int argc,char **argv) {
         { const char *dv=getenv("UNISACC_CHAIN_SHAMEMO_DERIVED");join(rp,out,"derived-env");FILE *df=fopen(rp,"ab");fprintf(df,"%s-recheck\t%s\n",phase,dv?dv:"0");fclose(df); }
         join(rp,out,"memo-env");FILE *rf=fopen(rp,"ab");fprintf(rf,"%s-recheck\t%s\t%s\t%s\n",phase,m?"on":"off",m?m:"-",id?id:"-");fclose(rf);
         return !strcmp(mode,"recheck-fail")?9:0;
+    }
+    if(!strcmp(mode,"tail")) {
+        /* What candidate-chain checks about the call it is handed, by the same functions
+           (cxlib.chaincall): the exported bound and, for a group, --jobs-segment-s. Every call and
+           its verdict is recorded; a refused call fails as the real candidate does (rc 2). */
+        ccp_limits l;const char *e=getenv("UNISACC_CHAIN_PHASE_BOUND_S"),*gs=0;char tp[4400];
+        for(i=1;i<argc;i++)if(!strcmp(argv[i],"--jobs-segment-s")&&i+1<argc)gs=argv[++i];
+        if(ccp_limits_load(&l))return 2;
+        long env=e?strtol(e,0,10):0,secs=gs?strtol(gs,0,10):0;
+        int ok=e&&ccp_accept_bound(&l,gs!=0,env)&&(!gs||ccp_accept_group(&l,l.phase_default,secs));
+        join(tp,out,"tail-calls");FILE *tf=fopen(tp,"ab");fprintf(tf,"%s\tenv=%ld\tgroup=%ld\t%s\n",phase,env,secs,ok?"accept":"REFUSE");fclose(tf);
+        if(!ok){fprintf(stderr,"fake-candidate: REFUSE call\n");return 2;}
+        if(gs) { /* a group call completes every member phase of its group */
+            size_t tn=0,pl=strlen(phase);char *tb=cx_read("build/chain-phases.tsv",&tn);if(!tb)return 2;
+            join(tp,out,"checkpoint.tsv");FILE *cf=fopen(tp,"ab");
+            for(char *s=tb;*s;){char *nl=strchr(s,'\n');if(!nl)break;char id[256];int order;
+                if(*s!='#'&&sscanf(s,"%d %255s",&order,id)==2&&!strncmp(id,phase,pl)&&id[pl]=='-')fprintf(cf,"DONE\t%s\tx\n",id);
+                s=nl+1;}
+            fclose(cf);free(tb);
+        }
     }
     if(!strncmp(mode,"parallel",8)||!strcmp(mode,"siblings")) {
         char trace[4400],row[600];join(trace,out,"events");int fd=sy_open(trace,O_WRONLY|O_CREAT|O_APPEND,0644);
@@ -320,11 +342,93 @@ static int limits_cases(const char *plan) {
     }
     sy_printf("CHECK_CHAIN_RUN_SEGMENTS\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }
+/* The number after KEY in the first row of FILE that starts with ROW, or -1. */
+static long row_number(const char *file,const char *row,const char *key) {
+    size_t n=0;char *b=cx_read(file,&n);long v=-1;if(!b)return -1;
+    for(char *s=b;s&&*s;){char *nl=strchr(s,'\n');
+        if(!strncmp(s,row,strlen(row))){ /* KEY starts a tab-separated field of that row */
+            for(char *f=s;f&&(!nl||f<nl);){if(!strncmp(f,key,strlen(key))){v=strtol(f+strlen(key),0,10);break;}char *t=strchr(f,'\t');f=t&&(!nl||t<nl)?t+1:0;}
+            break;}
+        s=nl?nl+1:0;}
+    free(b);return v;
+}
+/* tail-calls of the fake candidate: every call accepted; a group call carries the same seconds in
+   the exported bound and in --jobs-segment-s, at least one single-job bound. Returns the number
+   of group calls, or -1. */
+static int tail_calls_ok(const char *file,int per_job) {
+    size_t n=0;char *b=cx_read(file,&n);int groups=0;if(!b)return -1;
+    for(char *s=b;*s;){char *nl=strchr(s,'\n');if(!nl){groups=-1;break;}
+        char id[256],verdict[32];long env=0,secs=0;*nl=0;
+        if(sscanf(s,"%255s env=%ld group=%ld %31s",id,&env,&secs,verdict)!=4||strcmp(verdict,"accept")){groups=-1;break;}
+        if(secs){if(env!=secs||secs<per_job){groups=-1;break;}groups++;}
+        s=nl+1;}
+    free(b);return groups;
+}
+/* C3-CALL-PLAN: a job group that becomes ready at the tail of a segment (0.0.59: jobs-tool with 62 s
+   of a 270 s segment left was issued with --jobs-segment-s 59 and refused, rc 2, chain stopped).
+   The real runner, supervised, on a 30-phase table with the four job groups, against a fake
+   candidate that validates each call with the functions candidate-chain uses. The first segment
+   starts with most of its 270 s spent (test seam), so jobs-tool becomes ready with about 59, 91
+   and 100 s left: with 59 and 91 nothing is issued, the segment ends cleanly and the next one
+   starts the group; with 100 the group runs at once. No call is refused in any of them. */
+static void tail_cases(const char *plan) {
+    char p[4400],q[4400],name[40],env[80];
+    put_plan(plan,"0\tsnap\t-\t5\n1\tctx\t-\t5\n2\tbuild\t-\t5\n3\twarmup\t-\t5\n4\tkernels-g1\t-\t5\n"
+        "5\tjobs-tool-0-start\t-\t90\n6\tjobs-tool-0-finish\t-\t90\n7\tjobs-tool-1-start\t-\t90\n8\tjobs-tool-1-finish\t-\t90\n"
+        "9\tjobs-tool-2-start\t-\t90\n10\tjobs-tool-2-finish\t-\t90\n11\tjobs-tool-3-start\t-\t90\n12\tjobs-tool-3-finish\t-\t90\n13\tjobs-tool\t-\t90\n"
+        "14\tjobs-gen-0\t-\t90\n15\tjobs-gen-1\t-\t90\n16\tjobs-gen-2\t-\t90\n17\tjobs-gen-3\t-\t90\n18\tjobs-gen-4\t-\t90\n19\tjobs-gen-5\t-\t90\n20\tjobs-gen\t-\t90\n"
+        "21\tjobs-tbl-0\t-\t90\n22\tjobs-tbl-1\t-\t90\n23\tjobs-tbl-2\t-\t90\n24\tjobs-tbl\t-\t90\n"
+        "25\tjobs-net-0\t-\t90\n26\tjobs-net-1\t-\t90\n27\tjobs-net\t-\t90\n28\tcompare\t-\t5\n29\tpack\t-\t5\n");
+    ccp_limits l;if(ccp_limits_load(&l))exit(2);
+    int need=ccp_need(&l,1,l.phase_default);
+    /* the call the old rule issued at 62 s left (58 <= left: --jobs-segment-s left-3) is one the validator refuses */
+    ck(need==l.phase_default+l.reserve&&!ccp_accept_group(&l,l.phase_default,62-l.reserve),"tail-old-issued-call-59-is-refused");
+    const char *sup[]={"--supervise","--runner",runner,"--segment-s","270","--max-segments","9",0};
+    const int left[]={59,91,100};
+    for(int k=0;k<3;k++) {
+        const char *envv[]={env,0};char label[80];
+        /* 600 ms above the wanted second, so the handful of fast phases before the group does not cross it */
+        if(cx_fmt(name,sizeof name,"tail%d",left[k])||cx_fmt(env,sizeof env,"UNISACC_CHAINRUN_SEGMENT_SPENT_MS=%d",(270-left[k])*1000-600))exit(2);
+        int rc=runv(name,"tail","600",sup,envv,40);file_of(p,name,"chain-run.tsv");file_of(q,name,"calls");
+        cx_fmt(label,sizeof label,"tail-%d-run-completes-prepared",left[k]);ck(rc==0&&has(p,"PREPARED\tpack"),label);
+        cx_fmt(label,sizeof label,"tail-%d-no-blocker-no-refused-call",left[k]);
+        { char tc[4400];file_of(tc,name,"tail-calls");ck(!has(p,"BLOCKER")&&count(p,"\trc=2\t")==0&&tail_calls_ok(tc,l.phase_default)==4&&count(tc,"REFUSE")==0,label); }
+        cx_fmt(label,sizeof label,"tail-%d-every-phase-and-group-once",left[k]);
+        ck(count(q,"\n")==11&&count(q,"snap\n")==1&&count(q,"kernels-g1\n")==1&&count(q,"jobs-tool\n")==1&&count(q,"jobs-gen\n")==1&&count(q,"jobs-tbl\n")==1&&count(q,"jobs-net\n")==1&&count(q,"compare\n")==1&&count(q,"pack\n")==1&&!has(q,"jobs-tool-0-"),label);
+        long held=row_number(p,"HOLD\t","segment_left="),needed=row_number(p,"HOLD\t","need=");
+        long bound=row_number(p,"ATTEMPT\t6\tphase=jobs-tool\t","bound=");
+        if(left[k]<need) {
+            cx_fmt(label,sizeof label,"tail-%d-group-held-not-issued",left[k]);
+            ck(count(p,"HOLD\t")==1&&has(p,"\tphase=jobs-tool\tneed=")&&needed==need&&held<=left[k]&&held>=left[k]-9&&held<need,label);
+            cx_fmt(label,sizeof label,"tail-%d-segment-ends-cleanly-rc75",left[k]);
+            ck(count(p,"\texpired\t")==1&&has(p,"\tn=1\texpired\tnext=jobs-tool-0-start\t")&&count(p,"\trc=75\tresidue=0\n")==1&&count(p,"SUPERVISE\t")==2,label);
+            cx_fmt(label,sizeof label,"tail-%d-group-starts-in-next-segment",left[k]);
+            ck(before_in(p,"\tn=2\tstart\t","\tphase=jobs-tool\trc=0\t")&&before_in(p,"\tn=1\texpired\t","\tphase=jobs-tool\trc=0\t")&&count(p,"\tphase=jobs-tool\trc=")==1&&bound>=need&&bound<=l.segment,label);
+        } else {
+            cx_fmt(label,sizeof label,"tail-%d-group-runs-in-the-same-segment",left[k]);
+            ck(count(p,"HOLD\t")==0&&count(p,"\texpired\t")==0&&count(p,"SUPERVISE\t")==1&&bound>=need&&bound<=left[k],label);
+        }
+    }
+    /* bg-candidate -> chain-run: the largest --segment-s, --max-segments and --deadline-s bg-candidate
+       accepts (build/limits.tsv: segment, bg.segments, bg.deadline max) are accepted here, on the same
+       table; one more segment than that is refused before any child. */
+    {
+        char ss[24],sm[24],sd[24],over[24];
+        if(cx_fmt(ss,sizeof ss,"%d",(int)lm_max("segment",0))||cx_fmt(sm,sizeof sm,"%d",(int)lm_max("bg.segments",0))||cx_fmt(sd,sizeof sd,"%d",(int)lm_max("bg.deadline",0))||cx_fmt(over,sizeof over,"%d",(int)lm_max("bg.segments",0)+1))exit(2);
+        const char *widest[]={"--supervise","--runner",runner,"--segment-s",ss,"--max-segments",sm,0};
+        const char *beyond[]={"--supervise","--runner",runner,"--segment-s",ss,"--max-segments",over,0};
+        int rc=runv("bgwidest","tail",sd,widest,0,40);file_of(p,"bgwidest","chain-run.tsv");
+        ck(rc==0&&has(p,"PREPARED\tpack")&&!has(p,"BLOCKER")&&count(p,"SUPERVISE\t")==1,"bg-candidate-widest-options-accepted");
+        ck(runv("bgbeyond","tail",sd,beyond,0,12)==2,"max-segments-above-table-max-refused");
+        file_of(q,"bgbeyond","calls");ck(!sy_exists(q),"max-segments-refusal-before-child");
+    }
+}
 /* `--supervise ROOT OUT [RUNNER]` (batch chain-run-supervise): the supervisor, and the full re-check
    attempt the runner places before compare and before pack. */
 static int supervise_cases(const char *plan) {
     char p[4400],q[4400];int rc;
     widen_cases(plan); /* here, not in the two other batches of this file, to keep each under its 55 s */
+    tail_cases(plan);
     put_plan(plan,"0\tsnap\t-\t4\n1\ta\t-\t4\n2\tb\t-\t4\n3\tpack\t-\t4\n");
     /* supervisor: segments continue without a caller, each phase once, caps still stop it */
     const char *sup[]={"--supervise","--runner",runner,"--segment-s","5","--max-segments","9",0};

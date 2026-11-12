@@ -12,6 +12,8 @@
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use sys.posix
 #pragma unisa use cxlib.runnerprep
+#pragma unisa use cxlib.limits
+#pragma unisa use cxlib.chaincall
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -42,6 +44,169 @@ static const char *find_sub(const char *h, const char *n) {
 }
 static int has(const char *h, const char *n) {
     return find_sub(h, n) != 0;
+}
+/* C3-CALL-PLAN. chain-run decides every child call with cxlib.chaincall (ccp_call_plan) and
+   candidate-chain accepts with the same unit (ccp_accept_bound, ccp_accept_group). 0.0.59 stopped
+   three times on a call one side issued and the other refused; the last one was a job group
+   issued with --jobs-segment-s 59 at the tail of a segment. Exhaustive over the REAL phase table:
+   every distinct kind of row (domain, timeout, grouped, lane, width) plus the runner's own
+   front/preparation calls, every whole second 1..segment left in the segment, and the grid of
+   total-deadline seconds (with and without a segment):
+     the answer is RUN, RUN_GROUP or YIELD;
+     every issued call passes the validator (the unit's own and an oracle written here from the table);
+     YIELD only when no useful valid call fits what is left;
+     a whole segment starts every kind (no starvation);
+     more time left never turns an issued call into a YIELD.
+   Then the real candidate-chain is asked about every exported bound and every --jobs-segment-s
+   value of the whole range, and must answer exactly as the unit does. */
+static int cp_grouped_id(const char *id) {
+    const char *groups[] = {"jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net"};
+    for (int i = 0; i < 4; i++) { size_t n = strlen(groups[i]); if (!strncmp(id, groups[i], n) && (id[n] == 0 || id[n] == '-')) return 1; }
+    return 0;
+}
+static char cp_key[96][200];
+static int cp_grp[96], cp_bound[96], cp_kinds;
+static void cp_kind(const char *key, int grouped, int bound) {
+    for (int i = 0; i < cp_kinds; i++) if (!strcmp(cp_key[i], key)) return;
+    if (cp_kinds == 96 || tx_copy(cp_key[cp_kinds], 200, key, strlen(key))) { cp_kinds = -1000; return; }
+    cp_grp[cp_kinds] = grouped; cp_bound[cp_kinds] = bound; cp_kinds++;
+}
+static void call_plan_cases(const char *candidate, const char *phases, const char *td) {
+    static char out[65536];
+    ccp_limits L; int loaded = !ccp_limits_load(&L);
+    int seg = (int)lm_get("segment", 0), pmax = (int)lm_max("phase.bound", 0), pdef = (int)lm_get("phase.bound", 0);
+    ck(loaded && L.segment == seg && L.phase_max == pmax && L.phase_default == pdef && L.reserve == 3 && ccp_group_max(&L) == seg - 3 && pdef >= 1 && pmax >= pdef,
+       "call-plan-limits-are-the-limits-table");
+    if (!loaded) return;
+    /* kinds of the real table */
+    size_t tn = 0; char *tb = cx_read(phases, &tn); int rows = 0, over = 0, has_group = 0, has_override = 0, has_lane = 0, has_serial = 0, bad_names = 0, targets = 0;
+    for (char *ln = tb; tb && ln && *ln;) {
+        char *nl = strchr(ln, '\n'); if (nl) *nl = 0;
+        if (*ln != '#' && *ln) {
+            char *f[8] = {0}; int k = 0; char *q = ln; f[k++] = q;
+            while (*q && k < 8) if (*q++ == '\t') { q[-1] = 0; f[k++] = q; }
+            if (k >= 7) {
+                int grp = cp_grouped_id(f[1]), bound = atoi(f[3]); char key[200];
+                rows++;
+                if (bound < 1 || bound > (int)lm_max("phase.bound", f[1])) over++;
+                /* group naming: the runner's group call and the candidate's group target are one list */
+                if ((ccp_group_of(f[1]) != 0) != grp || (grp && !ccp_group_target(ccp_group_of(f[1]))) || ccp_group_target(f[1]) != (grp && !strcmp(ccp_group_of(f[1]), f[1]))) bad_names++;
+                if (ccp_group_target(f[1])) targets++;
+                if (grp) has_group = 1;
+                if (bound > pdef) has_override = 1;
+                if (strcmp(f[5], "-")) has_lane = 1;
+                if (!strcmp(f[6], "1")) has_serial = 1;
+                if (cx_fmt(key, sizeof key, "%s/%s/%s/%s/w%s", f[2], f[3], grp ? "group" : "single", strcmp(f[5], "-") ? "lane" : "nolane", f[6])) over++;
+                else cp_kind(key, grp, bound);
+            }
+        }
+        ln = nl ? nl + 1 : 0;
+    }
+    free(tb);
+    /* the runner's own serial calls (run(): preparation and the front slices of the runtime inventory) use the table default */
+    cp_kind("runner-front-and-preparation/default/single", 0, pdef);
+    ck(tb && rows >= 100 && !over && cp_kinds >= 5 && has_group && has_override && has_lane && has_serial, "call-plan-kinds-cover-the-real-phase-table");
+    ck(tb && !bad_names && targets == 4 && !ccp_group_of("jobs-toolx") && !ccp_group_target("jobs-tool-0-start") && !ccp_group_target(0), "call-plan-group-names-one-list-for-issuer-and-target-validator");
+    long cases = 0; int bad_shape = 0, bad_accept = 0, bad_yield = 0, bad_starve = 0, bad_mono = 0, bad_need = 0, bad_grid = 0, bad_owner = 0, bad_child = 0;
+    int owner_plain = (int)lm_max("phase.bound", 0), owner_group = (int)lm_max("segment", 0), grid_pairs = 0;
+    const long far = 1000000;
+    for (int i = 0; i < cp_kinds; i++) {
+        int g = cp_grp[i], b = cp_bound[i], prev_kind = CCP_YIELD, prev_bound = 0;
+        for (int r = 1; r <= seg; r++) {
+            ccp_plan p; int k = ccp_call_plan(&L, g, b, r, far, &p); cases++;
+            if (k != p.kind || !(k == CCP_YIELD || k == (g ? CCP_RUN_GROUP : CCP_RUN))) bad_shape++;
+            if (k == CCP_YIELD) {
+                if (p.bound || p.env_bound || p.group_s || p.end_s) bad_shape++;
+                /* no useful valid call fits: a plain phase needs its own bound; a group needs some S the validator takes with S + reserve <= r */
+                if (!g && b <= r) bad_yield++;
+                if (g) for (int s = 1; s + 3 <= r; s++) if (s >= pdef && s <= seg - 3) bad_yield++;
+                if (ccp_accept(&L, &p)) bad_accept++;
+            } else {
+                int oracle = g ? (p.group_s >= pdef && p.group_s <= seg - 3 && p.env_bound >= 1 && p.env_bound <= seg - 3 && p.bound <= seg && p.group_s + 3 <= p.bound && p.end_s == 0)
+                               : (p.env_bound >= 1 && p.env_bound <= pmax && p.bound == p.env_bound && p.bound == b && p.group_s == 0 && p.end_s == (b < 30 ? 0 : b - 14));
+                if (!oracle || p.bound > r || !ccp_accept(&L, &p) || !ccp_accept_bound(&L, g, p.env_bound) || (g && !ccp_accept_group(&L, pdef, p.group_s))) bad_accept++;
+                if (p.bound < prev_bound) bad_mono++;
+                /* the owner (cxlib.chainrunproc: cr_run 1..phase.bound max, cr_segment 1..segment max) takes the bound;
+                   a plain phase is told to end before the owner starts killing (bound - 2) */
+                if (p.bound < 1 || p.bound > (g ? owner_group : owner_plain) || (p.end_s && p.end_s + 2 >= p.bound)) bad_owner++;
+                /* what reaches chain-step (cs_phase_bound, 1..phase.bound max): a plain phase's exported bound,
+                   inside a group the single-job value candidate-chain rewrites the variable to */
+                { int child = g ? pdef : p.env_bound; if (child < 1 || child > pmax || !ccp_accept_bound(&L, 0, child)) bad_child++; }
+            }
+            if (prev_kind != CCP_YIELD && k == CCP_YIELD) bad_mono++;
+            if ((k == CCP_YIELD) != (r < ccp_need(&L, g, b))) bad_need++;
+            if (r == seg && k == CCP_YIELD) bad_starve++;
+            prev_kind = k; prev_bound = p.bound;
+        }
+        /* the total deadline as second dimension, with a segment (r) and without (-1); the plan depends on
+           (grouped, bound) only, so this grid runs once per distinct pair of them */
+        int repeated = 0;
+        for (int j = 0; j < i; j++) if (cp_grp[j] == g && cp_bound[j] == b) repeated = 1;
+        if (!repeated) grid_pairs++;
+        for (int d = 1; !repeated && d <= seg + 30; d++) for (int r = -1; r <= seg; r++) {
+            if (!r) continue;
+            ccp_plan p; int k = ccp_call_plan(&L, g, b, r, d, &p); cases++;
+            long room = r < 0 || d < r ? d : r;
+            if (g) {
+                long avail = room > seg ? seg : room; int want = avail >= pdef + 3;
+                if ((k == CCP_RUN_GROUP) != want || (!want && k != CCP_YIELD)) bad_grid++;
+                else if (want && (p.bound != avail || p.group_s != avail - 3 || p.env_bound != p.group_s || !ccp_accept(&L, &p))) bad_grid++;
+            } else {
+                long bb = d < b ? d : b; int want = r < 0 || bb <= r;
+                if ((k == CCP_RUN) != want || (!want && k != CCP_YIELD)) bad_grid++;
+                else if (want && (p.bound != bb || p.env_bound != bb || !ccp_accept(&L, &p))) bad_grid++;
+            }
+        }
+    }
+    ck(cp_kinds > 0 && !bad_shape, "call-plan-answer-is-run-run-group-or-yield");
+    ck(cp_kinds > 0 && !bad_accept, "call-plan-every-issued-call-passes-the-validator");
+    ck(cp_kinds > 0 && !bad_yield && !bad_need, "call-plan-yield-only-when-no-valid-call-fits");
+    ck(cp_kinds > 0 && !bad_starve, "call-plan-whole-segment-starts-every-phase-kind");
+    ck(cp_kinds > 0 && !bad_mono, "call-plan-more-time-never-turns-run-into-yield");
+    ck(cp_kinds > 0 && grid_pairs >= 3 && !bad_grid, "call-plan-deadline-grid-with-and-without-segment");
+    ck(cp_kinds > 0 && !bad_owner, "call-plan-owner-bound-within-chainrunproc-caps-and-end-before-kill");
+    ck(cp_kinds > 0 && !bad_child, "call-plan-bound-reaching-chain-step-within-its-range");
+    /* the 0.0.59 stop itself: 62 s left; the old rule issued --jobs-segment-s 59 */
+    {   ccp_plan p; int k = ccp_call_plan(&L, 1, pdef, 62, far, &p);
+        ccp_plan q; int k2 = ccp_call_plan(&L, 1, pdef, pdef + 3, far, &q);
+        ccp_plan z; int k3 = ccp_call_plan(&L, 1, pdef, pdef + 2, far, &z);
+        ck(k == CCP_YIELD && !ccp_accept_group(&L, pdef, 59) && k2 == CCP_RUN_GROUP && q.group_s == pdef && q.bound == pdef + 3 && k3 == CCP_YIELD,
+           "call-plan-group-at-62s-left-yields-and-threshold-is-one-job-plus-reserve");
+        /* the next stop the old rule held in store: a segment that starts with a group pending has segment-1 s
+           left; the old rule exported that remainder (269) as the bound, above the validator's segment-3 */
+        ccp_plan w; int k4 = ccp_call_plan(&L, 1, pdef, seg - 1, far, &w);
+        ck(k4 == CCP_RUN_GROUP && !ccp_accept_bound(&L, 1, seg - 1) && w.bound == seg - 1 && w.env_bound == seg - 4 && w.group_s == seg - 4 && ccp_accept(&L, &w),
+           "call-plan-group-at-segment-start-exports-the-group-seconds-not-the-remainder");
+    }
+    /* the real candidate-chain answers as the unit does, over the whole range of both channels */
+    {   char script[4500], body[9000], cmd[9200]; int real = 0, wrong = 0, lines = 0;
+        if (cx_fmt(script, sizeof script, "%s/call-plan.sh", td) ||
+            cx_fmt(body, sizeof body,
+                   "c='%s'; p='%s'\n"
+                   "t() { case \"$o\" in *REFUSE*) f=1;; *) f=0;; esac; echo \"$1 $2 $rc $f\"; }\n"
+                   "i=0; while [ $i -le %d ]; do o=$(env UNISACC_CHAIN_PHASE_BOUND_S=$i \"$c\" --phases \"$p\" --jobs-segment-s $i --plan 2>&1 >/dev/null); rc=$?; t G $i; i=$((i+1)); done\n"
+                   "i=0; while [ $i -le %d ]; do o=$(env UNISACC_CHAIN_PHASE_BOUND_S=$i \"$c\" --phases \"$p\" --jobs-segment-s %d --plan 2>&1 >/dev/null); rc=$?; t E $i; i=$((i+1)); done\n"
+                   "i=0; while [ $i -le %d ]; do o=$(env UNISACC_CHAIN_PHASE_BOUND_S=$i \"$c\" --phases \"$p\" --plan 2>&1 >/dev/null); rc=$?; t S $i; i=$((i+1)); done\n",
+                   candidate, phases, seg + 2, seg + 2, pdef, pmax + 5) ||
+            cx_write(script, body, strlen(body)) || cx_fmt(cmd, sizeof cmd, "sh '%s' 2>&1", script)) { ck(0, "call-plan-real-script"); return; }
+        int rc = sh(cmd, out, sizeof out);
+        for (char *ln = out; *ln;) {
+            char *nl = strchr(ln, '\n'); char kind; int v, code, refused, want;
+            if (!nl) { wrong++; break; }
+            *nl = 0; lines++;
+            if (sscanf(ln, "%c %d %d %d", &kind, &v, &code, &refused) != 4) wrong++;
+            else {
+                want = kind == 'G' ? (ccp_accept_bound(&L, 1, v) && ccp_accept_group(&L, pdef, v))
+                     : kind == 'E' ? ccp_accept_bound(&L, 1, v)
+                     : kind == 'S' ? ccp_accept_bound(&L, 0, v) : -1;
+                real++;
+                if (want < 0 || (want ? (code != 0 || refused) : (code == 0 || !refused))) wrong++;
+            }
+            ln = nl + 1;
+        }
+        ck(rc == 0 && !wrong && real == lines && real == (seg + 3) * 2 + pmax + 6, "call-plan-real-candidate-accepts-exactly-what-the-unit-accepts");
+        sy_printf("CALL_PLAN\tkinds=%d\tgrid_pairs=%d\tcases=%ld\treal_calls=%d\n", cp_kinds, grid_pairs, cases, real);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -162,6 +327,7 @@ int main(int argc, char **argv) {
                 free(tb);
                 ck(tb && kinds >= 2 && !bad, "all-phase-kinds-accept-exported-bound");
             }
+            call_plan_cases(candidate, phases, td);
         }
         /* The constructor step's watchdog is the snapshot's own tools/bound, frozen with the rev.
            0.0.58: the step bound had been raised to 90 while the frozen watchdog still took 1..60,

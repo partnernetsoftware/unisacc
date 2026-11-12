@@ -1,0 +1,97 @@
+/* The one place that says which child call the chain runner may issue and which call the candidate
+ * accepts. chain-run decides with ccp_call_plan; candidate-chain (and the fixtures) accept with
+ * ccp_accept_bound / ccp_accept_group. Both sides read the same ccp_limits, so a call the runner
+ * issues passes the validator by construction (0.0.59: three starts in a row stopped on a call one
+ * side issued and the other refused).
+ *
+ * Call kinds:
+ *   CCP_RUN        one phase under its own bound B: owner bound = exported bound = B.
+ *   CCP_RUN_GROUP  a job group (--jobs-segment-s S): the owner bound is S + reserve, the exported
+ *                  bound is the group budget S, and every job inside keeps the single-job value
+ *                  (phase_default). Useful only when S >= phase_default: one job plus the reserve.
+ *   CCP_YIELD      no useful call fits what is left of the segment (or of the total deadline):
+ *                  nothing is issued; the runner holds the phase and ends the segment (rc 75).
+ * Pure: no clock, no environment, no table. Times are whole seconds.
+ */
+#pragma unisa module chaincall
+#pragma unisa use cxlib.limits
+
+enum { CCP_YIELD = 0, CCP_RUN = 1, CCP_RUN_GROUP = 2 };
+/* reserve: seconds between the end of a group's own budget and its owner's bound (the owner starts
+   killing two seconds before the bound). end_margin/end_min: a plain phase with a bound of at
+   least end_min is told to stop end_margin seconds before its bound. */
+typedef struct { int phase_default, phase_max, segment, reserve, end_margin, end_min; } ccp_limits;
+/* bound: the owner's bound; env_bound: UNISACC_CHAIN_PHASE_BOUND_S; group_s: --jobs-segment-s
+   (0 for a plain phase); end_s: seconds after the start at which a plain phase is told to end
+   (0: not told). */
+typedef struct { int kind, bound, env_bound, group_s, end_s; } ccp_plan;
+
+/* The job group a phase id belongs to (the group itself or one of its "GROUP-..." members), or 0.
+   The runner issues a group call exactly for these, with --until GROUP; the candidate accepts
+   --jobs-segment-s only for --until naming one of them (ccp_group_target). */
+const char *ccp_group_of(const char *id) {
+    static const char *groups[] = {"jobs-tool", "jobs-gen", "jobs-tbl", "jobs-net"};
+    for (int i = 0; i < 4; i++) {
+        size_t n = strlen(groups[i]);
+        if (!strncmp(id, groups[i], n) && (id[n] == 0 || id[n] == '-')) return groups[i];
+    }
+    return 0;
+}
+int ccp_group_target(const char *until) {
+    const char *g = until ? ccp_group_of(until) : 0;
+    return g && !strcmp(g, until);
+}
+/* The limits both tools run under (build/limits.tsv through cxlib.limits). -1: an id is unknown. */
+int ccp_limits_load(ccp_limits *l) {
+    double d = lm_get("phase.bound", 0), m = lm_max("phase.bound", 0), s = lm_get("segment", 0);
+    if (d < 1 || m < d || s < 1) return -1;
+    l->phase_default = (int)d; l->phase_max = (int)m; l->segment = (int)s;
+    l->reserve = 3; l->end_margin = 14; l->end_min = 30;
+    return s - l->reserve < d ? -1 : 0;
+}
+/* The largest group budget: a whole segment less the reserve. */
+int ccp_group_max(const ccp_limits *l) { return l->segment - l->reserve; }
+/* Validator of the exported bound: a plain phase 1..phase_max, a group call 1..group max. */
+int ccp_accept_bound(const ccp_limits *l, int grouped, long env_bound) {
+    return env_bound >= 1 && env_bound <= (grouped ? (long)ccp_group_max(l) : (long)l->phase_max);
+}
+/* Validator of --jobs-segment-s: at least one job (per_job seconds), at most the group max. */
+int ccp_accept_group(const ccp_limits *l, long per_job, long group_s) {
+    return per_job >= 1 && group_s >= per_job && group_s <= (long)ccp_group_max(l);
+}
+/* Seconds a call needs before the segment end to be useful: the phase's own bound, or for a group
+   one single-job bound plus the reserve. */
+int ccp_need(const ccp_limits *l, int grouped, int per_job_bound) {
+    return grouped ? l->phase_default + l->reserve : per_job_bound;
+}
+/* Everything the receiving side checks about one issued call (candidate-chain: the exported bound
+   and the group seconds; the owner in cxlib.chainrunproc: its bound). 1: accepted. */
+int ccp_accept(const ccp_limits *l, const ccp_plan *p) {
+    if (p->kind == CCP_RUN)
+        return p->group_s == 0 && p->bound == p->env_bound && ccp_accept_bound(l, 0, p->env_bound);
+    if (p->kind == CCP_RUN_GROUP)
+        return p->bound >= 1 && p->bound <= l->segment && p->group_s + l->reserve <= p->bound &&
+               ccp_accept_bound(l, 1, p->env_bound) && ccp_accept_group(l, l->phase_default, p->group_s);
+    return 0;
+}
+/* The decision. per_job_bound: the phase's own bound (its table row); segment_left: whole seconds
+   to the segment end, negative when there is no segment; deadline_left: whole seconds to the total
+   deadline. Returns p->kind. A CCP_YIELD plan has every other field 0. */
+int ccp_call_plan(const ccp_limits *l, int grouped, int per_job_bound, long segment_left, long deadline_left, ccp_plan *p) {
+    long room = deadline_left;
+    p->kind = CCP_YIELD; p->bound = p->env_bound = p->group_s = p->end_s = 0;
+    if (segment_left >= 0 && segment_left < room) room = segment_left;
+    if (grouped) {
+        if (room > l->segment) room = l->segment;
+        if (room < ccp_need(l, 1, per_job_bound)) return p->kind;
+        p->kind = CCP_RUN_GROUP; p->bound = (int)room; p->group_s = p->env_bound = (int)room - l->reserve;
+        return p->kind;
+    }
+    /* A plain phase runs under its own bound, shortened only by the total deadline; it is never
+       started when that bound does not end before the segment does. */
+    long bound = deadline_left < per_job_bound ? deadline_left : per_job_bound;
+    if (bound < 1 || bound > l->phase_max || (segment_left >= 0 && bound > segment_left)) return p->kind;
+    p->kind = CCP_RUN; p->bound = p->env_bound = (int)bound;
+    p->end_s = bound < l->end_min ? 0 : (int)bound - l->end_margin;
+    return p->kind;
+}
