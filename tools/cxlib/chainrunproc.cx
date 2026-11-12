@@ -14,7 +14,10 @@ typedef struct { int pid,pg,fd; long long start; } cr_identity;
 static int cr_stat(int pid,int *pp,int *pg,long long *start,char *state) {
  char p[80],b[2048]; if(cx_fmt(p,sizeof p,"/proc/%d/stat",pid))return -1;
  int fd=open(p,O_RDONLY,0);if(fd<0)return errno==ENOENT||errno==ESRCH?1:-1;
- int n=read(fd,b,sizeof b-1);int closed=close(fd);if(n<=0||closed||n==(int)sizeof b-1)return -1;b[n]=0;
+ int n=read(fd,b,sizeof b-1),read_error=errno;int closed=close(fd);
+ if(closed)return -1;
+ if(n<0&&(read_error==ENOENT||read_error==ESRCH))return 1;
+ if(n<=0||n==(int)sizeof b-1)return -1;b[n]=0;
  char *q=strrchr(b,')');if(!q||q[1]!=' '||!q[2])return -1;*state=q[2];q+=3;
  long long v[19];for(int i=0;i<19;i++){while(*q==' ')q++;char *e=0;errno=0;v[i]=strtoll(q,&e,10);if(q==e||errno==ERANGE||(*e&&*e!=' '&&*e!='\n'))return -1;q=e;}
  *pp=v[0];*pg=v[1];*start=v[18];return 0;
@@ -30,7 +33,7 @@ static int cr_add(cr_identity *e,int *n,int pid,int pg,long long st) {
  for(int i=0;i<*n;i++)if(e[i].pid==pid&&e[i].start==st)return 0;
  if(*n==CR_MAX)return -1;
 #if defined(__linux__)
- int fd=__syscall6(434,pid,0,0,0,0);if(fd<0){int pp2,pg2;long long st2;char state2;return cr_stat(pid,&pp2,&pg2,&st2,&state2)==1?0:-1;}
+ int fd=__syscall6(434,pid,0,0,0,0);if(fd<0){int pp2,pg2;long long st2;char state2;int gone=cr_stat(pid,&pp2,&pg2,&st2,&state2);return gone==1||(!gone&&(st2!=st||state2=='Z'||state2=='X'))?0:-1;}
  int pp,actualpg;long long actual;char state;
  int observed=cr_stat(pid,&pp,&actualpg,&actual,&state);
  if(observed||actual!=st||actualpg!=pg){close(fd);return observed<0?-1:0;}
@@ -42,7 +45,7 @@ static int cr_add(cr_identity *e,int *n,int pid,int pg,long long st) {
 static int cr_signal(cr_identity *e,int sig) {
  int live=cr_live(e);if(live<=0)return live;
 #if defined(__linux__)
- return __syscall6(424,e->fd,sig,0,0,0)<0?-1:0;
+ int rc=__syscall6(424,e->fd,sig,0,0,0);return rc<0&&rc!=-ESRCH?-1:0;
 #else
  return -1;
 #endif

@@ -9,6 +9,7 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use sys.posix
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -35,6 +36,77 @@ int main(int argc, char **argv) {
     char cwd[400], com[500], tool[500], out[65536], *o = 0;
     size_t n = 0;
     const char *rev = "979b56e4d918894670a71080970149112499d223";
+    if (argc == 4 && tx_eqz(argv[1], "--lane-split")) {
+        char td[4400], run[4500], phases[4500], candidate[4500], cmd[24000], p[4500], checkpoint[4500], work[4500];
+        const char *revision = "979b56e4d918894670a71080970149112499d223";
+        if (sy_mkdir(argv[2], 0700) && !sy_exists(argv[2])) return 2;
+        if (sy_realpath(".", cwd, sizeof cwd) < 0 || cx_fmt(td, sizeof td, "%s/lane-split-XXXXXX", argv[2]) || !mkdtemp(td) ||
+            sy_realpath(td, p, sizeof p) < 0 || tx_copy(td, sizeof td, p, strlen(p)) ||
+            cx_fmt(run, sizeof run, "%s/run", td) || sy_mkdir(run, 0755) || cx_fmt(checkpoint, sizeof checkpoint, "%s/checkpoint.tsv", run) ||
+            cx_fmt(phases, sizeof phases, "%s/build/chain-phases.tsv", cwd) || sy_realpath(argv[3], candidate, sizeof candidate) < 0) return 2;
+        if (cx_fmt(cmd,sizeof cmd,"'%s' --chain-work '%s' %s",candidate,td,revision) || sh(cmd,out,sizeof out)) return 2;
+        size_t work_n=strlen(out);
+        if (!work_n || out[work_n-1]!='\n' || strchr(out,'\n')!=out+work_n-1 || tx_copy(work,sizeof work,out,work_n-1)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane gen1-lnx-arm64 --until gen1-lnx-arm64 --resume 2>&1", td, candidate, phases, revision, run)) return 2;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "lane dependency incomplete: p3") && !has(out, "PREFLIGHT"), "lane-missing-p3-no-preparation");
+        if (cx_fmt(p, sizeof p, "%s/compiler.p4.pkg", run) || cx_write(p, "package", 7) || cx_write(checkpoint, "DONE\tp3\tx\n", 10)) return 2;
+        if (cx_fmt(p, sizeof p, "%s/ctx", run) || sy_mkdir(p, 0755) || cx_fmt(p, sizeof p, "%s/ctx/identity-helper", run) || cx_write(p, "helper", 6)) return 2;
+        ck(sh(cmd, out, sizeof out) != 0 && has(out, "lane dependency incomplete: build") && !has(out, "RECEIPT"), "lane-does-not-fill-missing-build");
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/gen1/lnx-x86_64' '%s/wf-prep' '%s/wf-span-prep' '%s/wf-prep-g2' '%s/wf-span-prep-g2' '%s/wf-prep-g3' '%s/wf-span-prep-g3' '%s/fixedpoint/g2/lnx-x86_64' '%s/fixedpoint/g3/lnx-x86_64'", run, work, work, work, work, work, work, run, run) || sh(cmd, out, sizeof out)) return 2;
+        const char *rows = "DONE\tp3\tx\nDONE\tgen1-lnx-x86_64\tx\nDONE\tg2-lnx-x86_64\tx\nDONE\tg3-lnx-x86_64\tx\nDONE\twf-prepare\tx\nDONE\twf-span-prep\tx\nDONE\twf-prep-g2\tx\nDONE\twf-span-prep-g2\tx\nDONE\twf-prep-g3\tx\nDONE\twf-span-prep-g3\tx\n";
+        if (cx_write(checkpoint, rows, strlen(rows))) return 2;
+        for (int g = 1; g <= 3; g++) {
+            if (g == 1 ? cx_fmt(p, sizeof p, "%s/gen1/lnx-x86_64/candidate", run) : cx_fmt(p, sizeof p, "%s/fixedpoint/g%d/lnx-x86_64/candidate", run, g)) return 2;
+            if (cx_write(p, "constructor", 11)) return 2;
+            for (int span = 0; span < 2; span++) {
+                char lane[80], prep[4500], lock[4600];
+                const char *base = span ? "wf-span-prep" : "wf-prep";
+                if (g == 1 ? cx_fmt(prep, sizeof prep, "%s/%s", work, base) : cx_fmt(prep, sizeof prep, "%s/%s-g%d", work, base, g)) return 2;
+                if (g == 1 ? cx_fmt(lane, sizeof lane, "%s", span ? "wf-span-prep" : "wf-prepare") : cx_fmt(lane, sizeof lane, "%s-g%d", base, g)) return 2;
+                if (cx_fmt(p, sizeof p, "%s/receipt.txt", prep) || cx_write(p, "prepared", 8) || cx_fmt(lock, sizeof lock, "%s.candidate-prepare-owner.lock", prep)) return 2;
+                if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane %s --until %s --resume 2>&1", td, candidate, phases, revision, run, lane, lane)) return 2;
+                ck(sh(cmd, out, sizeof out) == 0 && has(out, "RESUME\t") && !has(out, "RECEIPT"), "prepare-lane-only-resumes-own-node");
+                ck(sy_exists(lock), "prepare-lane-uses-shared-owner-lock");
+                int fd = sy_open(lock, O_WRONLY | O_CLOEXEC, 0);
+                ck(fd >= 0 && !sy_flock(fd, 2 | 4), "prepare-lock-released-after-invocation");
+                if (fd >= 0) sy_close(fd);
+            }
+        }
+        size_t saved_n = 0; char *saved = cx_read(checkpoint, &saved_n);
+        ck(saved && saved_n == strlen(rows) && !memcmp(saved, rows, saved_n), "lane-no-sibling-checkpoints"); free(saved);
+        if (cx_fmt(p, sizeof p, "%s/heartbeat.tsv", run)) return 2;
+        ck(!sy_exists(p), "lane-does-not-touch-global-heartbeat");
+        /* First prepare uses a fake launcher, not a completed prepare checkpoint. */
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/tools/templates'", td) || sh(cmd, out, sizeof out)) return 2;
+        size_t template_n = 0; char *template_bytes = cx_read("tools/templates/whole-front.cx.in", &template_n);
+        if (!template_bytes || cx_fmt(p, sizeof p, "%s/tools/templates/whole-front.cx.in", td) || cx_write(p, template_bytes, template_n)) return 2;
+        free(template_bytes);
+        const char *fake_prepare = "#!/bin/sh\n[ \"$3\" = prepare ] || exit 91\nmkdir -p \"$8\" || exit 92\nprintf prepared > \"$8/receipt.txt\"\n";
+        if (cx_fmt(p, sizeof p, "%s/unisacc.com", td) || cx_write(p, fake_prepare, strlen(fake_prepare))) return 2;
+        if (cx_fmt(p, sizeof p, "%s/wf-prep/receipt.txt", work) || sy_unlink(p)) return 2;
+        const char *initial_rows = "DONE\tp3\tx\nDONE\tgen1-lnx-x86_64\tx\n";
+        if (cx_write(checkpoint, initial_rows, strlen(initial_rows)) || cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane wf-prepare --until wf-prepare --resume 2>&1", td, candidate, phases, revision, run)) return 2;
+        ck(sh(cmd, out, sizeof out) == 0 && has(out, "RECEIPT\twf-prepare\t") && has(out, "status=UNTIL"), "gen1-first-prepare-publishes-canonical-tag");
+        saved = cx_read(checkpoint, &saved_n);
+        ck(saved && has(saved, "DONE\twf-prepare\t") && !has(saved, "wf-prep-g1") && !has(saved, "gen1-osx"), "gen1-first-prepare-no-alias-or-sibling-mark");
+        free(saved);
+        const char *bad_tables[] = {
+            "0\ta\touter\t55\tmissing\t-\t1\n",
+            "0\ta\touter\t55\ta\t-\t1\n",
+            "0\ta\touter\t55\t-\tmissing\t1\n",
+            "0\ta\touter\t55\t-\t-\t5\n",
+            "0\ta\tbogus\t55\t-\t-\t1\n",
+            "0\ta\touter\t55\tb\t-\t1\n1\tb\touter\t55\ta\t-\t1\n",
+            "0\ta\touter\t55\t-\t-\t1\n1\tb\touter\t55\ta,a\t-\t1\n"
+        };
+        if (cx_fmt(p, sizeof p, "%s/bad-phases.tsv", td) || cx_fmt(cmd, sizeof cmd, "'%s' --phases '%s' --plan 2>&1", candidate, p)) return 2;
+        for (int i = 0; i < 7; i++) {
+            if (cx_write(p, bad_tables[i], strlen(bad_tables[i]))) return 2;
+            ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE chain-phases"), "seven-column-invalid-fields-refused");
+        }
+        printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
+        return failed ? 1 : 0;
+    }
     if (argc == 4 && tx_eqz(argv[1], "--g2g3-split")) {
         char td[4400], fake[4500], trace[4500], fp[4500], cmd[20000], toolpath[4500], dir[4500];
         const char *script = "#!/bin/sh\ncase \"$*\" in *--closure-list*) i=0; while [ $i -lt ${BATCH_CLOSURES:-3} ]; do printf 'm%s.o\\t%s/src/unit%s.cx\\n' \"$i\" \"$BATCH_SNAP\" \"$i\"; i=$((i+1)); done; exit 0;; esac\nprintf '%s\\t' \"$@\" >> \"$BATCH_TRACE\"\nprintf '\\n' >> \"$BATCH_TRACE\"\nphase=; keys=; while [ $# -gt 0 ]; do case \"$1\" in --phase) shift; phase=$1;; --objects) shift; keys=$1;; esac; shift; done\nif [ -n \"$keys\" ]; then [ ${BATCH_OBJECT_RC:-0} -eq 0 ] || exit $BATCH_OBJECT_RC; dest=\"$BATCH_FP/$phase/lnx-x86_64\"; mkdir -p \"$dest\"; old=$IFS; IFS=,; for key in $keys; do printf '\\n%s\\t1\\n' \"$key\" >> \"$dest/.chain-steps\"; done; IFS=$old; exit 0; fi\nexit ${BATCH_LINK_RC:-0}\n";
@@ -351,14 +423,16 @@ int main(int argc, char **argv) {
     }
     {
         char td[500], file[600], cmd[2400];
-        const char *bad[] = {"1\tsnap\t-\t55\n", "0\tsnap\t-\t56\n", "0\tsnap\t-\t55\n1\tsnap\t-\t55\n", "0\tsnap\t-\t55", "0\tsnap\t-\t55\textra\n"};
+        const char *bad[] = {"1\tsnap\t-\t55\t-\t-\t1\n", "0\tsnap\t-\t56\t-\t-\t1\n", "0\tsnap\t-\t55\t-\t-\t1\n1\tsnap\t-\t55\t-\t-\t1\n", "0\tsnap\t-\t55\t-\t-\t1", "0\tsnap\t-\t55\t-\t-\t1\textra\n"};
         const char *names[] = {"phase-order-refused", "phase-bound-refused", "phase-duplicate-refused", "phase-missing-lf-refused", "phase-extra-field-refused"};
+        const char *reasons[] = {"chain-phases order", "chain-phases timeout", "chain-phases duplicate", "chain-phases text", "chain-phases fields"};
         if (cx_fmt(td, sizeof td, "%s/cc-phases-XXXXXX", sy_tmpdir()) || !mkdtemp(td) || cx_fmt(file, sizeof file, "%s/phases.tsv", td)) { ck(0, "phase-tmp"); return 1; }
         for (int j = 0; j < 5; j++) {
             if (cx_write(file, bad[j], strlen(bad[j])) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
-            ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE"), names[j]);
+            ck(sh(cmd, out, sizeof out) != 0 && has(out, reasons[j]), names[j]);
         }
-        if (cx_write(file, "0\tbuild\t-\t55\n1\tsnap\t-\t55\n", strlen("0\tbuild\t-\t55\n1\tsnap\t-\t55\n")) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
+        const char *ordered = "0\tbuild\t-\t55\t-\t-\t1\n1\tsnap\t-\t55\tbuild\t-\t1\n";
+        if (cx_write(file, ordered, strlen(ordered)) || cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --plan --phases '%s' 2>&1", com, tool, file)) { ck(0, "phase-fixture"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PHASE\t0\tbuild") && has(out, "PHASE\t1\tsnap"), "phase-order-consumed");
         cx_rmtree(td);
     }

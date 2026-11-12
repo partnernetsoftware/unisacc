@@ -19,16 +19,37 @@
 static const char *out;
 static long end_ms;
 static int attempts, resumes, max_attempts=4096, max_resumes=3;
-static int phase_bound=55;
+static int phase_bound=55, parallel=4;
+typedef struct { char id[256],domain[4400],deps[4400],lane[256]; int bound,width,state,pid,attempt,call_bound; char phase[256]; } task;
+static task plan[2048]; static int plan_count;
+static int probing; static char pending[256];
 static void die(const char *s);
+static int lookup(const char *id) { for(int i=0;i<plan_count;i++)if(!strcmp(plan[i].id,id))return i;return -1; }
 static void validate_plan(void) {
     FILE *f=fopen("build/chain-phases.tsv","rb");if(!f)die("phase table");
-    char line[5000],phase[256],domain[4400],extra;int order,bound,count=0;
+    char line[14000],extra;int order;
     while(fgets(line,sizeof line,f)) {
         if(line[0]=='#')continue;
-        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d %c",&order,phase,domain,&bound,&extra)!=4||order!=count++||bound<1||bound>55)die("phase table invalid");
+        if(plan_count==2048)die("phase count"); task *t=&plan[plan_count];
+        if(!strchr(line,'\n')||sscanf(line,"%d\t%255s\t%4399s\t%d\t%4399s\t%255s\t%d %c",&order,t->id,t->domain,&t->bound,t->deps,t->lane,&t->width,&extra)!=7||order!=plan_count||t->bound<1||t->bound>55||t->width<1||t->width>4||lookup(t->id)>=0)die("phase table invalid");
+        plan_count++;
     }
-    if(ferror(f)||!count||fclose(f))die("phase table invalid");
+    if(ferror(f)||!plan_count||fclose(f))die("phase table invalid");
+    for(int i=0;i<plan_count;i++) {
+        char deps[4400];if(tx_copy(deps,sizeof deps,plan[i].deps,strlen(plan[i].deps)))die("dependency bound");char *s=deps;
+        if(strcmp(s,"-"))while(s){char *e=strchr(s,',');if(e)*e++=0;int d=lookup(s);if(d<0||d==i)die("phase dependency invalid");s=e;}
+        if(strcmp(plan[i].lane,"-")&&lookup(plan[i].lane)<0)die("phase lane invalid");
+    }
+    int visited[2048]={0},left=plan_count;
+    while(left) {
+        int progress=0;
+        for(int i=0;i<plan_count;i++)if(!visited[i]) {
+            char deps[4400];if(tx_copy(deps,sizeof deps,plan[i].deps,strlen(plan[i].deps)))die("dependency bound");char *s=deps;int ready=1;
+            if(strcmp(s,"-"))while(s){char *e=strchr(s,',');if(e)*e++=0;if(!visited[lookup(s)])ready=0;s=e;}
+            if(ready){visited[i]=1;left--;progress=1;}
+        }
+        if(!progress)die("phase dependency cycle");
+    }
 }
 static void die(const char *s) { fprintf(stderr,"chain-run: %s\n",s); exit(2); }
 static void path(char *p, const char *leaf) { if(cx_fmt(p,4400,"%s/%s",out,leaf)) die("path bound"); }
@@ -42,7 +63,7 @@ static int blocker(const char *phase,const char *why,int rc) {
 }
 static void save(void) {
     char p[4400], tmp[4400], s[256]; path(p,"chain-run.budget"); path(tmp,"chain-run.budget.new");
-    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
+    if(cx_fmt(s,sizeof s,"%ld %d %d %d %d %d\n",end_ms,attempts,resumes,max_attempts,max_resumes,parallel)||cx_write(tmp,s,strlen(s))||sy_rename(tmp,p)) die("save budget");
 }
 static int done(const char *phase) {
     char p[4400], needle[300]; size_t n=0; path(p,"checkpoint.tsv"); char *b=cx_read(p,&n);
@@ -90,35 +111,47 @@ static int verify_pack(void) {
     free(b); return ok;
 }
 /* No polling: each loop executes one bounded child or consumes a finite phase entry. */
+/* Only the forked owner scans /proc. The scheduler never owns a cr_run tree. */
+typedef struct { int rc,retry,residue; } outcome;
+static void result_path(char *p,int a,const char *suffix) { char leaf[100];cx_fmt(leaf,sizeof leaf,"chain-run-%d.%s",a,suffix);path(p,leaf); }
+static void execute(const char *phase,char **v,int bound,int a) {
+    char p[4400];result_path(p,a,"argv");FILE *f=fopen(p,"wb");if(!f)_exit(2);
+    for(int i=0;v[i];i++)fprintf(f,"%s\n",v[i]);if(fclose(f))_exit(2);
+    pr_result r;int t=cr_run(phase,v,bound,&r);
+    result_path(p,a,"stdout");if(cx_write(p,r.out?r.out:"",r.outn))_exit(2);
+    result_path(p,a,"stderr");if(cx_write(p,r.err?r.err:"",r.errn))_exit(2);
+    result_path(p,a,"why");if(cx_write(p,r.why,strlen(r.why)))_exit(2);
+    int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc);
+    int retry=(t&&r.timed_out)||(!t&&(r.rc==-9||r.rc==-15||r.rc==124||r.rc==137||r.rc==143));
+    char row[100];cx_fmt(row,sizeof row,"%d %d %d\n",rc,retry,r.residue);
+    char final[4400];result_path(p,a,"result.new");result_path(final,a,"result");if(cx_write(p,row,strlen(row))||sy_rename(p,final))_exit(2);pr_free(&r);_exit(0);
+}
+static outcome collect(int pid,int a,const char *phase,int bound) {
+    int st=0;while(waitpid(pid,&st,0)<0){if(errno==ECHILD)break;if(errno!=EINTR)die("owner wait");}
+    outcome r={127,0,0};char p[4400];size_t n=0;result_path(p,a,"result");char *b=cx_read(p,&n);
+    if(WIFEXITED(st)&&!WEXITSTATUS(st)&&b)sscanf(b,"%d %d %d",&r.rc,&r.retry,&r.residue);free(b);
+    result_path(p,a,"why");b=cx_read(p,&n);if(b){append("chain-run.tsv",b);append("chain-run.tsv","\n");free(b);}
+    char row[600];cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\tbound=%d\n",a,phase,r.rc,r.residue,bound);append("chain-run.tsv",row);return r;
+}
 static int run(const char *phase,char **v,char *fresh_output) {
+    if(probing){if(tx_copy(pending,sizeof pending,phase,strlen(phase)))die("pending phase");return -100;}
     for(;;) {
         long left=(end_ms-sy_now_ms())/1000;
         if(left<1) return blocker(phase,"deadline",3);
         if(attempts>=max_attempts) return blocker(phase,"attempts-exhausted",3);
         attempts++; save();
         if(fresh_output&&cx_fmt(fresh_output,4400,"%s/%s-%d",out,phase,attempts)) die("fresh output bound");
-        char argv_path[4400],argv_leaf[100]; cx_fmt(argv_leaf,sizeof argv_leaf,"chain-run-%d.argv",attempts); path(argv_path,argv_leaf);
-        FILE *av=fopen(argv_path,"wb"); if(!av) die("argv evidence");
-        for(int ai=0;v[ai];ai++) if(fprintf(av,"%s\n",v[ai])<0) die("argv evidence");
-        if(fclose(av)) die("argv close");
         int call_bound=left<phase_bound?(int)left:phase_bound;
-        pr_result r; int t=cr_run(phase,v,call_bound,&r);
-        append("chain-run.tsv",r.why); append("chain-run.tsv","\n");
-        char name[100],p[4400],row[512];
-        cx_fmt(name,sizeof name,"chain-run-%d.stdout",attempts); path(p,name); if(cx_write(p,r.out?r.out:"",r.outn)) die("stdout evidence");
-        cx_fmt(name,sizeof name,"chain-run-%d.stderr",attempts); path(p,name); if(cx_write(p,r.err?r.err:"",r.errn)) die("stderr evidence");
-        pr_echo(&r);
-        int rc=t?(r.timed_out?124:127):(r.rc<0?128-r.rc:r.rc);
-        int retry=(t && r.timed_out)||(!t && (r.rc==-9 || r.rc==-15 || r.rc==124 || r.rc==137 || r.rc==143));
-        int residue=r.residue; pr_free(&r);
-        cx_fmt(row,sizeof row,"ATTEMPT\t%d\tphase=%s\trc=%d\tresidue=%d\tbound=%d\n",attempts,phase,rc,residue,call_bound); append("chain-run.tsv",row);
+        int owner=fork();if(owner<0)die("owner fork");if(!owner)execute(phase,v,call_bound,attempts);
+        outcome o=collect(owner,attempts,phase,call_bound);
+        int rc=o.rc,retry=o.retry,residue=o.residue;char row[512];
         if(residue) return blocker(phase,"surviving-processes",2);
         if(!rc) return 0;
         if(!retry) return blocker(phase,"first-failure",rc);
         if(sy_now_ms()>=end_ms) return blocker(phase,"deadline",3);
         if(resumes>=max_resumes) return blocker(phase,"resumes-exhausted",3);
         int observed=observe(); if(observed) return observed;
-        resumes++; save();
+        resumes++;if(parallel>1)parallel--;save();
         cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tphase=%s\trc=%d\n",sy_wall_s(),resumes,phase,rc); append("chain-run.tsv",row);
         /* A kill can race the phase receipt: never ask --until for a target it will skip. */
         if(done(phase)) return 0;
@@ -177,6 +210,81 @@ static int fronts(const char *outer,const char *rev,char **v,int target) {
     }
     return 0;
 }
+static int ready(task *t) {
+    char deps[4400];if(tx_copy(deps,sizeof deps,t->deps,strlen(t->deps)))die("dependency bound");char *s=deps;
+    if(strcmp(s,"-"))while(s){char *e=strchr(s,',');if(e)*e++=0;if(!done(s))return 0;s=e;}
+    for(int i=0;i<plan_count;i++)if(plan[i].pid&&((strcmp(t->domain,"-")&&!strcmp(t->domain,plan[i].domain))||(strcmp(t->lane,"-")&&!strcmp(t->lane,plan[i].lane))||t->width==1||plan[i].width==1))return 0;
+    return 1;
+}
+static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
+    int active=0,stop=0,retrying=0;
+    for(int i=0;i<plan_count;i++) {
+        task *t=&plan[i];
+        if(!strncmp(t->id,"g2-lnx-x86_64-obj-",18)||!strncmp(t->id,"g2-lnx-arm64-obj-",17))t->state=2;
+        if(rehearse&&strcmp(t->id,"snap")&&strcmp(t->id,"build-objects")&&strcmp(t->id,"build")&&strcmp(t->id,"wave-objects")&&strcmp(t->id,"wave-runner")&&strcmp(t->id,"ctx"))t->state=2;
+    }
+    for(;;) {
+        int remaining=0;
+        for(int i=0;i<plan_count;i++) {
+            task *t=&plan[i];if(t->state==2)continue;remaining++;
+            if(t->pid||stop||retrying||active>=parallel||active>=t->width||!ready(t))continue;
+            if(done(t->id)){t->state=2;continue;}
+            pending[0]=0;probing=1;int fr=rehearse?0:fronts(t->id,rev,v,target);probing=0;
+            if(fr&&fr!=-100){stop=fr;continue;}
+            const char *next=pending[0]?pending:t->id;if(tx_copy(t->phase,sizeof t->phase,next,strlen(next)))die("phase bound");
+            long left=(end_ms-sy_now_ms())/1000;
+            if(left<1){stop=blocker(t->phase,"deadline",3);continue;}
+            if(attempts>=max_attempts){stop=blocker(t->phase,"attempts-exhausted",3);continue;}
+            t->attempt=++attempts;save();t->state=1;
+            v[target]=t->phase;v[tail]=0;
+            if(strcmp(t->lane,"-")){v[tail]="--lane";v[tail+1]=t->lane;v[tail+2]=0;}
+            int bound=left<t->bound?(int)left:t->bound;
+            t->call_bound=bound;
+            t->pid=fork();if(t->pid<0)die("owner fork");if(!t->pid)execute(t->phase,v,bound,t->attempt);
+            active++;
+        }
+        if(!active) {
+            if(stop)return stop;
+            if(retrying){
+                if(sy_now_ms()>=end_ms)return blocker("scheduler","deadline",3);
+                if(resumes>=max_resumes)return blocker("scheduler","resumes-exhausted",3);
+                int rc=observe();if(rc)return rc;
+                resumes++;if(parallel>1)parallel--;save();
+                char row[200];cx_fmt(row,sizeof row,"RESUME\t%ld\t%d\tparallel=%d\n",sy_wall_s(),resumes,parallel);append("chain-run.tsv",row);retrying=0;continue;
+            }
+            if(!remaining)return 0;
+            int unfinished=0;for(int i=0;i<plan_count;i++)if(plan[i].state!=2)unfinished++;
+            if(!unfinished)return 0;
+            return blocker("scheduler","dependencies-stalled",2);
+        }
+        /* Drain available owner completions before dispatching more work. */
+        int got=0;
+        while(!got) {
+            for(int i=0;i<plan_count;i++)if(plan[i].pid) {
+                task *t=&plan[i];char p[4400];result_path(p,t->attempt,"result");
+                if(!sy_exists(p)) {
+                    int st=0;int q=waitpid(t->pid,&st,WNOHANG);if(!q)continue;if(q<0&&errno==EINTR)continue;
+                    if(q>0&&WIFEXITED(st)&&!WEXITSTATUS(st)&&sy_exists(p)) { outcome r=collect(t->pid,t->attempt,t->phase,t->call_bound);t->pid=0;active--;got=1;
+                        if(r.residue){if(!stop)stop=blocker(t->phase,"surviving-processes",2);}
+                        else if(r.rc&&!r.retry){if(!stop)stop=blocker(t->phase,"first-failure",r.rc);}
+                        else if(r.retry){retrying=1;t->state=0;}
+                        else if(!done(t->phase)){if(!stop)stop=blocker(t->phase,"missing-checkpoint",2);}
+                        else t->state=done(t->id)?2:0;
+                        continue;
+                    }
+                    t->pid=0;active--;if(!stop)stop=blocker(t->phase,"owner-result-missing",2);got=1;continue;
+                }
+                outcome r=collect(t->pid,t->attempt,t->phase,t->call_bound);t->pid=0;active--;got=1;
+                if(r.residue){if(!stop)stop=blocker(t->phase,"surviving-processes",2);}
+                else if(r.rc&&!r.retry){if(!stop)stop=blocker(t->phase,"first-failure",r.rc);}
+                else if(r.retry){retrying=1;t->state=0;}
+                else if(!done(t->phase)){if(!stop)stop=blocker(t->phase,"missing-checkpoint",2);}
+                else t->state=done(t->id)?2:0;
+            }
+            if(!got)sy_sleep_ms(2);
+        }
+    }
+}
 int main(int argc,char **argv) {
     /* Explicit synthetic-only seam: same scheduler/inventory, no product preparation. */
     if(argc==5&&!strcmp(argv[1],"--partition-fixture")) {
@@ -196,6 +304,7 @@ int main(int argc,char **argv) {
         else if(!strcmp(a,"--candidate")) candidate=b;
         else if(!strcmp(a,"--watch")) watch=b;
         else if(!strcmp(a,"--deadline-s")) seconds=number(b);
+        else if(!strcmp(a,"--parallel")) { parallel=(int)number(b);if(parallel>4)die("parallel must be 1..4"); }
         else if(!strcmp(a,"--max-attempts")) max_attempts=(int)number(b);
         else if(!strcmp(a,"--max-resumes")) { if(!strcmp(b,"0")) max_resumes=0; else max_resumes=(int)number(b); }
         else if(!strcmp(a,"--rehearse-ctor")) ctor=b;
@@ -212,7 +321,7 @@ int main(int argc,char **argv) {
         if(objs[0]!='/'||sy_stat(objs,&st)||st.kind!='d') die("rehearse objects missing or not absolute");
         if(pkg[0]!='/'||sy_stat(pkg,&st)||st.size<=0) die("rehearse pkg missing or not absolute");
     }
-    for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")) die("reserved candidate option");
+    for(i=extra;i<argc;i++) if(!strcmp(argv[i],"--out")||!strcmp(argv[i],"--rev")||!strcmp(argv[i],"--until")||!strcmp(argv[i],"--lane")||!strcmp(argv[i],"--plan")||!strcmp(argv[i],"--jobs")) die("reserved candidate option");
     char safe_root[4400],safe_out[4400],safe_parent[4400];
     if(sy_realpath(".",safe_root,sizeof safe_root)<0 || cx_fmt(safe_parent,sizeof safe_parent,"%s/out/",safe_root)) die("output root");
     if(sy_exists("out")) {
@@ -250,7 +359,7 @@ int main(int argc,char **argv) {
         path(p,"chain-run.identity"); if(cx_write(p,identity,used)) die("identity write");
     }
     path(p,"chain-run.budget"); old=cx_read(p,&n);
-    if(old) { int ma,mr; if(sscanf(old,"%ld %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr)!=5||ma!=max_attempts||mr!=max_resumes||attempts<0||resumes<0) die("budget mismatch"); free(old); }
+    if(old) { int ma,mr,width; if(sscanf(old,"%ld %d %d %d %d %d",&end_ms,&attempts,&resumes,&ma,&mr,&width)!=6||ma!=max_attempts||mr!=max_resumes||attempts<0||resumes<0||width<1||width>4) die("budget mismatch");if(width<parallel)parallel=width; free(old); }
     else { end_ms=sy_now_ms()+seconds*1000; save(); }
     int wi=0;
     if(watch) watch_argv[wi++]=(char*)watch;
@@ -277,25 +386,7 @@ int main(int argc,char **argv) {
     if(heartbeat_live()) return blocker("heartbeat","live-owner",2);
     for(i=extra;i<argc;i++) { if(k>=90) die("argument bound"); v[k++]=argv[i]; }
     v[k++]="--until"; int target=k++; v[k]=0;
-    FILE *table=fopen("build/chain-phases.tsv","rb"); if(!table) die("phase table");
-    char line[5000],phase[256]; int count=0,pack=0,rc=0;
-    while(fgets(line,sizeof line,table)) {
-        if(line[0]=='#') continue;
-        int order,bound; char domain[4400];
-        if(sscanf(line,"%d\t%255s\t%4399s\t%d",&order,phase,domain,&bound)!=4||order!=count++||bound<1||bound>55) die("phase table invalid");
-        phase_bound=bound;
-        if(rehearse&&strcmp(phase,"snap")&&strcmp(phase,"build-objects")&&strcmp(phase,"build")&&strcmp(phase,"wave-objects")&&strcmp(phase,"wave-runner")&&strcmp(phase,"ctx")) continue;
-        /* G2 obj-N are legacy explicit --until boundaries, not normal scheduler work.
-           The following closure-prepare/closure/objects/link targets keep --objects batched. */
-        if(!strncmp(phase,"g2-lnx-x86_64-obj-",18)||!strncmp(phase,"g2-lnx-arm64-obj-",17)) continue;
-        /* Existing checkpoints are consumed without calling --until on an already skipped target. */
-        if(!rehearse&&!done(phase)) { rc=fronts(phase,rev,v,target); if(rc) break; }
-        if(!done(phase)) { v[target]=phase; rc=run(phase,v,0); if(rc) break; }
-        if(!done(phase)) { rc=blocker(phase,"missing-checkpoint",2); break; }
-        if(!strcmp(phase,"pack")) { pack=1; break; }
-        if(rehearse&&!strcmp(phase,"ctx")) break;
-    }
-    fclose(table); if(rc) return rc;
+    int rc=schedule(rev,v,target,k,rehearse),pack=done("pack");if(rc)return rc;
     if(rehearse) {
         char snap[4400],prep[4400],front[4400],helper[4400],com[4400],tool[4400],tmpl[4400];
         char root[4400]; if(sy_realpath(".",root,sizeof root)<0) die("root");

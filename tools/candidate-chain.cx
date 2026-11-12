@@ -63,6 +63,28 @@ static int pr_code(const char *label, char **v, int secs) { return pr_code_at(la
 static int runv_secs(char **v, int secs) { return pr_code(v[0], v, secs); }
 /* "sh ROOT/unisacc.com REST..." bounded by SECS: a thin call of pr_run, which owns the process
    group and kills it at the bound (the tools/bound wrapper this used to add is no longer needed). */
+/* Locks live beside prepared directories, never inside a directory scrubbed by
+ * preparation. Close-on-exec keeps ownership in the candidate parent. */
+static long candidate_lock_wait_ms;
+static void candidate_lock_fd(int fd, const char *path) {
+    long start = sy_now_ms();
+    for (;;) {
+        int rc = sy_flock(fd, 2 | 4);
+        if (!rc) break;
+        if (rc != -EWOULDBLOCK && rc != -EAGAIN && rc != -EINTR) die("candidate lock", path);
+        if (sy_now_ms() - start + candidate_lock_wait_ms >= 55000) die("candidate lock deadline", path);
+        usleep(1000);
+    }
+    candidate_lock_wait_ms += sy_now_ms() - start;
+}
+static int candidate_lock(const char *base, const char *domain) {
+    char p[4500];
+    if (cx_fmt(p, sizeof p, "%s.candidate-%s.lock", base, domain)) die("lock path", base);
+    int fd = sy_open(p, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) die("candidate lock", p);
+    candidate_lock_fd(fd, p);
+    return fd;
+}
 static int bound_sh_secs(const char *root, char **rest, int secs) {
     char com[4400];
     char *v[128+28];
@@ -76,7 +98,16 @@ static int bound_sh_secs(const char *root, char **rest, int secs) {
         i++;
     }
     v[n] = 0;
-    return pr_code(rest[0] ? rest[0] : "sh", v, secs);
+    int lock = -1;
+    if (rest[0] && strstr(rest[0], "/tools/whole-front.cx") && rest[1] && rest[2] && rest[3])
+        lock = candidate_lock(!strcmp(rest[2], "prepare") ? rest[7] : rest[3], "prep");
+    int budget = 55 - (int)((candidate_lock_wait_ms + 999) / 1000);
+    if (budget < 1) die("candidate lock/call deadline", rest[0]);
+    if (secs > budget) secs = budget;
+    int rc = pr_code(rest[0] ? rest[0] : "sh", v, secs);
+    candidate_lock_wait_ms = 0;
+    if (lock >= 0 && sy_close(lock)) die("candidate unlock", rest[0]);
+    return rc;
 }
 static int bound_sh(const char *root, char **rest) { return bound_sh_secs(root, rest, 55); }
 /* Run tools/preflight.cx at one hook point (entry, post-snap, pre-p3, post-p3) under --strict:
@@ -179,6 +210,7 @@ static void span_prep_tag(char *buf, long cap, int gen) {
 }
 static void wf_scrub_dest(const char *outdir, const char *dest);
 static const char *until_phase;
+static const char *lane_phase;
 /* part.tsv is the authority for partitioning: 32 units per child, WF_MAX=128 unchanged.
    Existing front0/1/2 names survive; a fourth child is scheduled only when total > 96. */
 static int wf_total(const char *front0) {
@@ -395,7 +427,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     char *v[128+28];
     int n = 0, i;
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
-    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); return 0; }
     wf_scrub_dest(outdir, dest);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
@@ -428,6 +460,16 @@ static int wf_mac_b(const char *root, const char *outdir, const char *helper, in
     if (sb[sn - 1] == '\n') sb[--sn] = 0;
     if (tx_copy(stub, sizeof stub, sb, (long)sn)) { free(sb); die("stub copy", stubp); }
     free(sb);
+    /* A sibling Mac lane may have replaced the shared forward file since this
+     * target's stub checkpoint. Restore its recorded bytes under mac-stub lock. */
+    if (lane_phase) {
+        char original_prep[4400], expected[4400], copy[4400]; size_t n = 0;
+        prep_dir(original_prep, sizeof original_prep, gen, "wf-prep");
+        if (cx_fmt(expected, sizeof expected, "%s/tmp/unisacc-forward-entry.c", original_prep) || strcmp(stub, expected) || cx_fmt(copy, sizeof copy, "%s/stub.c", stubdir)) die("REFUSE forward stub path", stub);
+        char *bytes = cx_read(copy, &n);
+        if (!bytes || !n || install_if_changed(stub, bytes, n, 0)) { free(bytes); die("restore forward stub", stub); }
+        free(bytes);
+    }
     if (cx_fmt(be3, sizeof be3, "%s/gen%d/%s-b-units-e3", chain_work, gen, slug)) die("path", "be3");
     if (cx_fmt(img, sizeof img, "%s/gen%d/%s-b2", chain_work, gen, slug)) die("path", "b2");
     if ((gen == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s-b-units-e3", slug) : cx_fmt(tag, sizeof tag, "gen%d-%s-b-units-e3", gen, slug))) die("fmt", slug);
@@ -445,7 +487,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     char *v[128+28];
     int n = 0, i;
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
-    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); return 0; }
+    if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); return 0; }
     wf_scrub_dest(outdir, dest);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
@@ -487,7 +529,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
     char *v[16];
     int n = 0;
     prep_dir(nout, sizeof nout, gen, "wf-prep");
-    if (cx_fmt(ptag, sizeof ptag, "wf-prep-g%d", gen)) die("fmt", "wf-prep-g");
+    if (gen == 1 ? cx_fmt(ptag, sizeof ptag, "wf-prepare") : cx_fmt(ptag, sizeof ptag, "wf-prep-g%d", gen)) die("fmt", "wf-prep-g");
     if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout)) die("path", "wfgrec");
     if (ck_done(outdir, ptag) && fsize(rec) >= 0) { sy_printf("RESUME\t%s\n", ptag); return 0; }
     clean_phase_path(outdir, ptag, nout, rec);
@@ -520,8 +562,10 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
     if (resume && ck_done(outdir, ptag)) { sy_printf("RESUME\t%s\n", ptag); return; }
     if (cx_fmt(objs, sizeof objs, "%s/g%d/lnx-x86_64", fp, gen) || cx_fmt(ctor, sizeof ctor, "%s/candidate", objs)) die("path", ptag);
     if (fsize(ctor) < 0) die("REFUSE missing g-constructor", ctor);
-    if (wf_prepare_gen(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-prep-gen", ptag);
-    if (wf_span_prep(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-span-prep-gen", ptag);
+    if (!lane_phase) {
+        if (wf_prepare_gen(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-prep-gen", ptag);
+        if (wf_span_prep(root, outdir, helper, gen, snap, pkg, ctor, objs)) die("wf-span-prep-gen", ptag);
+    }
     if (wf_fronts(root, outdir, helper, gen, g_mt_target[ti], g_mt_slug[ti], ti < 2)) die(ptag, outdir);
     if (ti < 2) {
         if (wf_mac_b(root, outdir, helper, gen, g_mt_target[ti], g_mt_slug[ti])) die(ptag, outdir);
@@ -546,28 +590,65 @@ static char g_phasebuf[512][80];
 static const char *g_phases[512];
 static int g_nphases;
 static const char *phases_file;
+static int chain_phase_index(const char *id) {
+    for (int i = 0; i < g_nphases; i++) if (!strcmp(id, g_phases[i])) return i;
+    return -1;
+}
 static void load_chain_phases(const char *root) {
     char path[4400]; size_t n = 0; char *s, *p;
+    char *deps[512], *lanes[512], *domains[512];
     if (phases_file) { if (cx_fmt(path, sizeof path, "%s", phases_file)) die("path", "phases"); }
     else if (cx_fmt(path, sizeof path, "%s/build/chain-phases.tsv", root)) die("path", "phases");
     s = cx_read(path, &n);
     if (!s || !n || s[n - 1] != '\n' || memchr(s, 0, n) || memchr(s, '\r', n)) die("REFUSE chain-phases text", path);
     p = s; g_nphases = 0;
     while (*p) {
-        char *e = strchr(p, '\n'), *v[4], *q; int fields = 1, j; char order[20];
+        char *e = strchr(p, '\n'), *v[7], *q; int fields = 1, j; char order[20];
         *e = 0;
         if (*p == '#') { p = e + 1; continue; }
         v[0] = p;
-        for (q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 4) die("REFUSE chain-phases fields", path); v[fields++] = q + 1; }
-        if (fields != 4 || g_nphases == 512) die("REFUSE chain-phases fields/count", path);
+        for (q = p; *q; q++) if (*q == '\t') { *q = 0; if (fields == 7) die("REFUSE chain-phases fields", path); v[fields++] = q + 1; }
+        if (fields != 7 || g_nphases == 512) die("REFUSE chain-phases fields/count", path);
         if (cx_fmt(order, sizeof order, "%d", g_nphases) || strcmp(v[0], order)) die("REFUSE chain-phases order", path);
         if (!*v[1] || strlen(v[1]) >= 80) die("REFUSE chain-phases id", path);
         for (q = v[1]; *q; q++) if (!((*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_')) die("REFUSE chain-phases id", path);
         for (j = 0; j < g_nphases; j++) if (!strcmp(g_phases[j], v[1])) die("REFUSE chain-phases duplicate", path);
-        if (strcmp(v[2], "-") && strcmp(v[2], "outer")) die("REFUSE chain-phases exclusive_dir", path);
+        if (!*v[2] || strlen(v[2]) >= 80) die("REFUSE chain-phases exclusive_dir", path);
         if (strcmp(v[3], "55")) die("REFUSE chain-phases timeout", path);
+        if (strcmp(v[6], "1") && strcmp(v[6], "2") && strcmp(v[6], "3") && strcmp(v[6], "4")) die("REFUSE chain-phases parallelism", path);
+        if (!*v[4] || strlen(v[4]) >= 4400 || !*v[5] || strlen(v[5]) >= 80) die("REFUSE chain-phases deps/lane", path);
+        deps[g_nphases] = v[4]; lanes[g_nphases] = v[5]; domains[g_nphases] = v[2];
         if (cx_fmt(g_phasebuf[g_nphases], 80, "%s", v[1])) die("phase id", path);
         g_phases[g_nphases] = g_phasebuf[g_nphases]; g_nphases++; p = e + 1;
+    }
+    for (int i = 0; i < g_nphases; i++) {
+        if (strcmp(domains[i], "-") && strcmp(domains[i], "outer") && chain_phase_index(domains[i]) < 0) die("REFUSE chain-phases exclusive_dir", domains[i]);
+        if (strcmp(lanes[i], "-") && chain_phase_index(lanes[i]) < 0) die("REFUSE chain-phases lane", lanes[i]);
+        if (!strcmp(deps[i], "-")) continue;
+        char *at = deps[i]; int seen[512] = {0};
+        while (at) {
+            char *end = strchr(at, ','); if (end) *end = 0;
+            int d = chain_phase_index(at);
+            if (d < 0 || d == i || seen[d]) die("REFUSE chain-phases dependency", at);
+            seen[d] = 1;
+            if (end) *end++ = ',';
+            at = end;
+        }
+    }
+    int visited[512] = {0}, left = g_nphases;
+    while (left) {
+        int progress = 0;
+        for (int i = 0; i < g_nphases; i++) if (!visited[i]) {
+            int ready = 1; char *at = deps[i];
+            if (strcmp(at, "-")) while (at) {
+                char *end = strchr(at, ','); if (end) *end = 0;
+                if (!visited[chain_phase_index(at)]) ready = 0;
+                if (end) *end++ = ',';
+                at = end;
+            }
+            if (ready) { visited[i] = 1; left--; progress = 1; }
+        }
+        if (!progress) die("REFUSE chain-phases dependency cycle", path);
     }
     free(s); if (!g_nphases) die("REFUSE empty chain-phases", path);
 }
@@ -625,7 +706,7 @@ static int ck_complete(const char *dir, const char *phase, const char *product) 
 static void hb(const char *dir, const char *phase, const char *ev) {
     char p[4400], line[800];
     int fd;
-    if (cx_fmt(p, sizeof p, "%s/heartbeat.tsv", dir)) die("path", dir);
+    if (lane_phase ? cx_fmt(p, sizeof p, "%s/heartbeat-%s.tsv", dir, lane_phase) : cx_fmt(p, sizeof p, "%s/heartbeat.tsv", dir)) die("path", dir);
     if (cx_fmt(line, sizeof line, "%ld\t%s\t%d\t%ld\t%s\n", sy_wall_s(), phase, sy_pid(), sy_getpgid(0), ev)) die("fmt", phase);
     fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("heartbeat", p);
@@ -636,7 +717,9 @@ static void mark(const char *dir, const char *phase, long wall) {
     if (cx_fmt(p, sizeof p, "%s/checkpoint.tsv", dir)) die("path", dir);
     if (cx_fmt(line, sizeof line, "DONE\t%s\twall_ms=%ld\tsha=-\n", phase, wall)) die("fmt", phase);
     fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0 || sy_write_all(fd, line, tx_len(line, 800)) || sy_close(fd)) die("checkpoint", p);
+    if (fd < 0) die("checkpoint", p);
+    candidate_lock_fd(fd, p);
+    if (sy_write_all(fd, line, tx_len(line, 800)) || sy_flock(fd, 8) || sy_close(fd)) die("checkpoint", p);
     hb(dir, phase, "end");
     sy_printf("RECEIPT\t%s\twall_ms=%ld\n", phase, wall);
     if (until_phase && tx_eqz(phase, until_phase)) {
@@ -1310,6 +1393,116 @@ static int uc_guard(const char *root, const char *dir) {
     return n;
 }
 
+/* A lane never prepares inputs or visits sibling targets. Each whole-front call
+ * locks its prepared TMPDIR; the two Mac lanes also share a generation-specific
+ * stub lock across front/stub/B, because the real forward stub lives in prep/tmp. */
+static void lane_need(const char *outdir, const char *phase, const char *product) {
+    if (!ck_complete(outdir, phase, product)) die("REFUSE lane dependency incomplete", phase);
+}
+static int run_lane(const char *root, const char *outdir, const char *rev,
+    const char *snap, const char *build, const char *pkg, const char *gen1,
+    const char *fp, const char *helper, int resume) {
+    const char *slugs[] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+    const char *targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    char tag[100], dep[100], product[4400], prep[4400], tmp[4400];
+    int gen = 0, ti = -1;
+    if (!resume || ntouch || jobs_index >= 0) die("REFUSE lane requires --resume without touch/job-index", lane_phase);
+    int prepare_gen = 0, span_prepare = 0;
+    for (int g = 1; g <= 3; g++) {
+        if (g == 1 ? cx_fmt(tag, sizeof tag, "wf-prepare") : cx_fmt(tag, sizeof tag, "wf-prep-g%d", g)) die("prepare lane", lane_phase);
+        if (!strcmp(tag, lane_phase)) prepare_gen = g;
+        span_prep_tag(tag, sizeof tag, g);
+        if (!strcmp(tag, lane_phase)) { prepare_gen = g; span_prepare = 1; }
+    }
+    if (prepare_gen) {
+        char objs[4400], ctor[4400];
+        if (until_phase && strcmp(until_phase, lane_phase)) die("REFUSE prepare lane until", lane_phase);
+        lane_need(outdir, "p3", pkg);
+        if (prepare_gen == 1) {
+            if (cx_fmt(dep, sizeof dep, "gen1-lnx-x86_64") || cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("prepare dependency", lane_phase);
+        } else if (cx_fmt(dep, sizeof dep, "g%d-lnx-x86_64", prepare_gen) || cx_fmt(objs, sizeof objs, "%s/g%d/lnx-x86_64", fp, prepare_gen)) die("prepare dependency", lane_phase);
+        if (cx_fmt(ctor, sizeof ctor, "%s/candidate", objs)) die("prepare constructor", lane_phase);
+        lane_need(outdir, dep, ctor);
+        prep_dir(prep, sizeof prep, prepare_gen, span_prepare ? "wf-span-prep" : "wf-prep");
+        int lock = candidate_lock(prep, "prepare-owner");
+        int rc = span_prepare ? wf_span_prep(root, outdir, helper, prepare_gen, snap, pkg, ctor, objs) : wf_prepare_gen(root, outdir, helper, prepare_gen, snap, pkg, ctor, objs);
+        if (sy_close(lock)) die("prepare unlock", prep);
+        return rc;
+    }
+    for (int g = 1; g <= 3; g++) for (int t = 0; t < 6; t++) {
+        if (g == 1 ? cx_fmt(tag, sizeof tag, "gen1-%s", slugs[t]) : cx_fmt(tag, sizeof tag, "g%d-%s", g, slugs[t])) die("lane tag", lane_phase);
+        if (!strcmp(tag, lane_phase)) { gen = g; ti = t; }
+    }
+    if (!gen) die("REFUSE unknown lane", lane_phase);
+    if (until_phase && strcmp(until_phase, lane_phase)) {
+        /* WF subphases use genN, even when the outer lane uses gN. */
+        if (cx_fmt(tag, sizeof tag, "gen%d-%s-", gen, slugs[ti]) || cx_fmt(dep, sizeof dep, "%s-", lane_phase)) die("lane prefix", lane_phase);
+        if (strncmp(until_phase, tag, strlen(tag)) && strncmp(until_phase, dep, strlen(dep))) die("REFUSE until outside lane", until_phase);
+    }
+    lane_need(outdir, "p3", pkg);
+    if (fsize(helper) <= 0) die("REFUSE missing lane identity helper", helper);
+    if (gen == 1 && ti < 2) {
+        lane_need(outdir, "build", "");
+        if (cx_fmt(product, sizeof product, "%s/Root41-bootstrap.com", build)) die("lane ctor", build);
+        if (fsize(product) <= 0) die("REFUSE missing bootstrap constructor", product);
+    } else {
+        int cg = gen == 1 ? 1 : ti < 2 ? gen - 1 : gen;
+        if (cg == 1) {
+            if (cx_fmt(dep, sizeof dep, "gen1-lnx-x86_64") || cx_fmt(product, sizeof product, "%s", gen1)) die("lane dependency", lane_phase);
+        } else if (cx_fmt(dep, sizeof dep, "g%d-lnx-x86_64", cg) || cx_fmt(product, sizeof product, "%s/g%d/lnx-x86_64/candidate", fp, cg)) die("lane dependency", lane_phase);
+        lane_need(outdir, dep, product);
+        if (gen == 3) {
+            if (cx_fmt(dep, sizeof dep, "g2-%s", slugs[ti])) die("lane previous target", lane_phase);
+            lane_need(outdir, dep, "");
+        }
+        if (ti >= 2) {
+            prep_dir(prep, sizeof prep, gen, "wf-prep");
+            if (cx_fmt(product, sizeof product, "%s/receipt.txt", prep)) die("lane prep", prep);
+            if (gen == 1 ? cx_fmt(dep, sizeof dep, "wf-prepare") : cx_fmt(dep, sizeof dep, "wf-prep-g%d", gen)) die("lane prep", prep);
+            lane_need(outdir, dep, product);
+            prep_dir(prep, sizeof prep, gen, "wf-span-prep");
+            span_prep_tag(dep, sizeof dep, gen);
+            if (cx_fmt(product, sizeof product, "%s/receipt.txt", prep)) die("lane prep", prep);
+            lane_need(outdir, dep, product);
+        }
+    }
+    if (cx_fmt(tmp, sizeof tmp, "%s/tmp-%s", outdir, lane_phase)) die("lane tmp", lane_phase);
+    if (sy_mkdir(tmp, 0700) && fsize(tmp) < 0) die("lane tmp", tmp);
+    if (sy_setenv("TMPDIR", tmp, 1) || sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("lane environment", lane_phase);
+    hb(outdir, lane_phase, "start");
+    int mac_lock = -1;
+    if (ti == 2 || ti == 3) {
+        prep_dir(prep, sizeof prep, gen, "wf-prep");
+        mac_lock = candidate_lock(prep, "mac-stub");
+    }
+    if (gen == 1 && ti < 2) {
+        char gout[4400], parent[4400], ctor[4400], ebt[4400];
+        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || cx_fmt(ebt, sizeof ebt, "%s/tools/entry-build.cx", snap)) die("lane entry", lane_phase);
+        sy_mkdir(parent, 0755);
+        if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("lane output", gout);
+        if (sy_setenv("UNISACC_CTOR", ctor, 1) || sy_setenv("UNISA_CONTAINER", pkg, 1) || sy_chdir(snap)) die("lane entry environment", snap);
+        gen1_entry(outdir, snap, ctor, ebt, pkg, gout, targets[ti], lane_phase, resume);
+    } else if (ti < 2) {
+        run_g2_lnx(root, outdir, rev, snap, pkg, gen1, fp, helper, targets[ti], slugs[ti], gen, resume);
+    } else if (gen == 1) {
+        if (wf_fronts(root, outdir, helper, gen, targets[ti], slugs[ti], ti < 4)) die("lane fronts", lane_phase);
+        if (ti < 4) {
+            if (wf_mac_b(root, outdir, helper, gen, targets[ti], slugs[ti])) die("lane Mac B", lane_phase);
+        } else if (wf_win_span(root, outdir, helper, gen, targets[ti], slugs[ti])) die("lane Windows span", lane_phase);
+    } else gen_slice_phase(root, outdir, helper, rev, snap, pkg, gen1, fp, gen, ti - 2, resume);
+    if (mac_lock >= 0 && sy_close(mac_lock)) die("lane Mac unlock", lane_phase);
+    return 0;
+}
+
+/* Read-only path query and execution use the same derivation. Fixtures consume
+ * this entry instead of duplicating the snapshot layout below their own OUT. */
+static void chain_paths(const char *root, const char *rev, char *snap) {
+    if (strlen(rev) != 40) die("revision hex", rev);
+    for (int i=0;i<40;i++) if (!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex",rev);
+    if (cx_fmt(snap,4400,"%s/out/release-snap-%.10s",root,rev) ||
+        cx_fmt(chain_work,sizeof chain_work,"%s/out/chain",snap)) die("path","chain workspace");
+}
+
 int main(int argc, char **argv) {
     const char *rev = 0, *outdir = 0, *cc = "/usr/bin/x86_64-linux-gnu-gcc-11";
     const char *vs_dir = 0, *vs_rev = 0, *idhelp = 0, *cm64 = 0, *cmarm = 0, *boot = 0, *wnm = 0;
@@ -1317,6 +1510,12 @@ int main(int argc, char **argv) {
     int resume = 0, parallel = 0, i, plan_only = 0;
     char root[4400], snap[4400], build[4400], ctx[4400], routes[4400], pkg[4400], fp[4400], gen1[4400], helper[4400];
     if (sy_realpath(".", root, sizeof root) < 0) die("cwd", ".");
+    if (argc == 4 && tx_eqz(argv[1], "--chain-work")) {
+        if (sy_realpath(argv[2], root, sizeof root) < 0) die("workspace root", argv[2]);
+        chain_paths(root, argv[3], snap);
+        sy_printf("%s\n", chain_work);
+        return 0;
+    }
     /* 链内产物不得依赖单元前端缓存(plans/unit-frontcache.md):强制关,子进程继承;设不上或读回不是 0 即拒绝 */
     if (sy_setenv("UNISACC_UNIT_CACHE", "0", 1) || !sy_env("UNISACC_UNIT_CACHE") || !tx_eqz(sy_env("UNISACC_UNIT_CACHE"), "0"))
         die("REFUSE unit cache not forced off", "UNISACC_UNIT_CACHE");
@@ -1340,6 +1539,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--lane") && i + 1 < argc) { if (lane_phase) die("REFUSE duplicate lane", 0); lane_phase = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--plan")) { plan_only = 1; sy_printf("ENV\tUNISACC_UNIT_CACHE=0\n"); continue; }
         if (tx_eqz(argv[i], "--uc-guard") && i + 1 < argc) {
             /* 夹具入口: --uc-guard DIR,在本进程已强制的环境下跑一次守卫 */
@@ -1472,16 +1672,15 @@ int main(int argc, char **argv) {
     }
     if (!rev || !hex40(rev)) die("REFUSE --rev 40-hex required", rev);
     if (until_phase) {
-        int u = 0, pi;
+        int u = lane_phase && !strcmp(lane_phase, until_phase), pi;
         for (pi = 0; pi < g_nphases; pi++) if (tx_eqz(g_phases[pi], until_phase)) u = 1;
         if (!u && !known_closure_phase(outdir, until_phase) && !known_front_phase(root, rev, until_phase)) die("REFUSE --until unknown phase; closure names require a prepared manifest", until_phase);
     }
     if (!outdir || !*outdir) die("REFUSE --out required", 0);
     if (sy_mkdir(outdir, 0755) && fsize(outdir) < 0) die("mkdir", outdir);
-    if (uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
-    hb(outdir, "chain", "start");
-    if (cx_fmt(snap, sizeof snap, "%s/out/release-snap-%.10s", root, rev)) die("path", "snap");
-    if (cx_fmt(chain_work, sizeof chain_work, "%s/out/chain", snap)) die("path", "chain");
+    if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
+    if (!lane_phase) hb(outdir, "chain", "start");
+    chain_paths(root, rev, snap);
     if (cx_fmt(build, sizeof build, "%s/build", outdir)) die("path", "build");
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("path", "ctx");
     if (cx_fmt(routes, sizeof routes, "%s/routes", outdir)) die("path", "routes");
@@ -1489,6 +1688,7 @@ int main(int argc, char **argv) {
     if (cx_fmt(fp, sizeof fp, "%s/fixedpoint", outdir)) die("path", "fp");
     if (cx_fmt(gen1, sizeof gen1, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "gen1");
     if (cx_fmt(helper, sizeof helper, "%s/identity-helper", ctx)) die("path", "helper");
+    if (lane_phase) return run_lane(root, outdir, rev, snap, build, pkg, gen1, fp, helper, resume);
 
     sy_printf("CANDIDATE_CHAIN\trev=%s\tout=%s\tresume=%d\tparallel=%d\n", rev, outdir, resume, parallel);
     if (parallel > 1)

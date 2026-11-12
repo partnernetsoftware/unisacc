@@ -154,3 +154,15 @@ K10静态顺序为 `snap → build-objects → build → wave-objects → wave-r
 新增工具名已在完整git历史查重：`tools/cxlib/chainrunproc.cx`、`tools/check-chainrunproc.cx`此前均无历史；实际编译库存 `tests/tools-compile-sources.tsv`、行为批次与覆盖登记同步新增，20261110库存是历史快照不回写成当日盘点。真链、实际controller冷编耗时、跨宿主以及产品资格均未实跑；轻假链只证明预算/身份/恢复边界，不证明真实每相余量。
 
 本次最终交付基为 `1e269c53bbbb7cd9e9819f808db604fd8aac17b8`，其后只叠完整替代包 `c57-g2batch-r4.patch` SHA256 `5a6a75aeab09667d0bbd72e4a7c3f3ec889a705fc09bf0ecfd5c36bfa4a7e2f3`，不重复叠旧R3/R2。K10保留生产语义与G2身份恢复；十项cx与阶段表对照已验R2树同字节。依定稿验收，本次在新父树真实 `tests/run-batch` 新跑chainresume(13项,daily)、chainrunproc(7项,commit)、chain-run(29项,commit)，均输出BATCH_RUN status=PASS、rc=0、transport=0且精确marker匹配；准备仅PREPARED。修复重导表尾重复chainresume/coverage登记，保留主线CHECK_CHAINRESUME合同，不删断言、不改tier/55秒。另新跑生成--check及fresh apply检查；账本独立TSV，不入patch，不跑真链/广门。
+
+## K9 定稿T3依赖与批次合同
+
+494相七列表保留deps、lane与事实并行度，六共享prepare先行；Linux对象/闭包/链接各55秒。目标最多4路，parallel1完整覆盖；独立fork owner与pidfd/starttime保护兄弟，失败停止派发并收齐在途，超时仅持久降载。prep逐调用锁及Mac stub/B锁保留，短命/proc终态竞态最小修正保留，G2 guard协议不倒退。
+
+K9-r3重导在1e269c53+完整G2-r4+K10-r3之上，保全K10去重的chainresume批次及CHECK_CHAINRESUME合同。既有chain-run、chain-phases-gen、chainrunproc及新增candidate-chain-lanes登记均按tests/run-batch真实新跑，55秒不变；候选原生映像按材料声明准备，PREPARED不是结果。该轮精确结果记独立ledger-r3。未跑真链、产品构造、广门或性能目标；不授产品资格。
+
+K9-r3四批实际输出BATCH_RUN status=PASS、rc=0、transport=0，精确marker分别CHECK_CHAIN_RUN(46)、LANE_SPLIT(31)、CHECK_CHAIN_PHASES_GEN(10)、CHECK_CHAINRUNPROC(7)。新增lane专批依赖原生工具材料，按既有材料合同登记daily，不降档任何既有commit项；首次预检拒绝及lane输出父目录未创建的失败日志保留，后者仅补夹具创建自己的OUT后重新实跑通过，不删断言或放宽预算。
+
+K9-r4基为origin/main `02057cd64887801e8d315610a1da90efb77db020`，已含G2-r4及K10-r3，不重叠依赖。门报新增截断调用改为检查tx_copy返回值；lane夹具不再复制snapshot布局，改消费候选只读`--chain-work ROOT REV`查询，该查询与真实执行共用chain_paths推导，不拼拆路径字面绕门。所有31项断言保留。定向cxtrunc对三文件0调用、outdep对candidate及lane两批0输出字面，基线未改；46/31/10/7四组在该树与当前已装产品真实run-batch新跑PASS。证据保留本克隆out/k9-r4，不经仓外中转；未跑真链、广门或性能目标。
+
+K9-r5仍基`02057cd64887801e8d315610a1da90efb77db020`，完整保留K9-r4行为，只迁入AnchorBan58已验证的`tools/check-graph-check.cx`结构变异组件。该组件复用既有refactor find调用/参数事实，以generation=1参数筛选两个Win span，不再假设所有wf_win_span字面调用都属于gen1；refactor、chainargv及生产文件不随组件迁移。原route-real必须0、Win-as-Mac必须拒绝且route_mismatch=8与指定stub/units诊断均不放宽。新树真实graph-check批次29/0且BATCH_RUN PASS；全量tools/ratchets.cx实际13/0（28511ms），未改任何棘轮基线。证据在本克隆out/k9-r5，未跑真链或额外广验。

@@ -2,6 +2,15 @@
  *
  *   sh ./unisacc.com tools/check-graph-check.cx
  *
+ *   sh ./unisacc.com tools/check-graph-check.cx -- --mutation-only [SOURCE]
+ * The narrow mode only consumes refactor call facts and checks mutation hits 1/1/2;
+ * it does not invoke graph-check. Whitespace/newlines are supported, comments inside
+ * call arguments are unsupported by refactor and explicitly rejected, not a graph regression.
+ * With no arguments all original graph and route assertions run.
+ * --route-only runs just the existing route cases, including real Win-as-Mac rejection.
+ * GRAPH_CHECK_TOOL may name an existing absolute native graph-check executable; absent
+ * that override, every graph invocation retains the normal unisacc.com source runner.
+ *
  * Writes small graphs, a fake chain-step.cx (the three six-target constants) and a hardwire table
  * under sy_tmpdir()/graph-check-PID/, runs tools/graph-check.cx on each (bounded 50 s) and asserts
  * exit code and summary fields: consistent graph -> rc 0 / order_mismatch=0; a cycle, a dangling
@@ -14,8 +23,9 @@
  * (stub run but not declared), with the two calls swapped (order), and with a declared phase the
  * chain never runs -> one named ROUTE_MISMATCH row each.  The real build/graph.tsv against the real
  * tools/candidate-chain.cx must give route_mismatch=0, and against a copy whose two Win targets are
- * routed like Mac (stub on, st_span calls gone: the 2026-11-10 defect) route_mismatch=8 with the
- * stub and units rows named.  Old cases run with --no-route.
+ * routed like Mac (stub on, generation-1 span calls omitted: the 2026-11-10 defect) route_mismatch=8
+ * with the stub and units rows named.  Real-source mutations consume refactor call/argument facts,
+ * not fixed source spellings; no product source is changed.  Old cases run with --no-route.
  * Prints CHECK_GRAPH_CHECK<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -63,7 +73,16 @@ static const char *domains = 0;   /* 0: a path that does not exist (strict mode)
 static int run(const char *graph, const char *chain, const char *hardwire, const char *route, char **out, size_t *n) {
     char *v[] = {"sh", "./unisacc.com", "tools/graph-check.cx", "--", "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire,
                  "--domains", (char *)(domains ? domains : "/nonexistent/order-domains.tsv"), route ? "--route" : "--no-route", (char *)route, 0};
-    int rc = cx_runv_timeout(v, 50, out, n);
+    const char *native = sy_env("GRAPH_CHECK_TOOL");
+    int rc;
+    if (native) {
+        char *nv[] = {(char *)native, "--graph", (char *)graph, "--chain", (char *)chain, "--hardwire", (char *)hardwire,
+                      "--domains", (char *)(domains ? domains : "/nonexistent/order-domains.tsv"), route ? "--route" : "--no-route", (char *)route, 0};
+        if (native[0] != '/' || sy_exists(native) != 1) {
+            fprintf(stderr, "check-graph-check: GRAPH_CHECK_TOOL must be an existing absolute path\n"); return -1;
+        }
+        rc = cx_runv_timeout(nv, 50, out, n);
+    } else rc = cx_runv_timeout(v, 50, out, n);
     if (!*out) return -1;
     return rc;
 }
@@ -121,13 +140,6 @@ static long route_field(const char *graph, const char *route, const char *key) {
     if (out) mm_free(out);
     return m;
 }
-/* overwrite every FROM in b[0..n) by TO (same length); the number of hits */
-static int swap_all(char *b, long n, const char *from, const char *to) {
-    long fl = tx_len(from, 128), i = 0; int hits = 0;
-    if (fl != tx_len(to, 128)) return -1;
-    for (;;) { long at = tx_find(b + i, n - i, from, fl), k; if (at < 0) break; at += i; for (k = 0; k < fl; k++) b[at + k] = to[k]; i = at + fl; hits++; }
-    return hits;
-}
 /* ---- order domains ---- */
 static const char *DOM_HDR = "constant\tfile\tline_hint\tdomain\tfrozen_order\treason\tevidence\n";
 static const char *FROZEN6 = "lnx-arm64,lnx-x86_64,osx-arm64,osx-x86_64,win-arm64,win-x86_64";
@@ -178,8 +190,9 @@ static void domain_cases(void) {
         else { printf("FAIL\tdomain-real\trc=%d\n%s\n", rc, out ? out : "(none)"); failed++; }
         if (out) mm_free(out); }
 }
-static void route_cases(void) {
+static void route_cases(const char *source, int mutation_only) {
     static char g[1 << 14], src[1 << 13]; char gp[4400], gp2[4400], rp[4400];
+    if (!mutation_only) {
     if (cx_fmt(g, sizeof g, "%s%s%s", HDR, SIX, ROUTE_GRAPH) || put("route.tsv", g, gp, sizeof gp)
         || cx_fmt(g, sizeof g, "%s%s%sgen1.osx-arm64.image\tslice-phase\tosx-arm64\tfreeze\tprune + image\ti\to\t1\t44\te\t-\tno\tstages\t1\n", HDR, SIX, ROUTE_GRAPH)
         || put("route-extra.tsv", g, gp2, sizeof gp2)) { printf("FAIL\troute-fixtures\twrite\n"); failed++; return; }
@@ -218,29 +231,105 @@ static void route_cases(void) {
         if (fns >= 2 && evs >= 12) { printf("PASS\troute-real-recognized\troute_fns=%ld\troute_events=%ld\n", fns, evs); passed++; }
         else { printf("FAIL\troute-real-recognized\twant route_fns>=2 route_events>=12, got %ld %ld\n", fns, evs); failed++; } }
     route_expect("route-real", "build/graph.tsv", "tools/candidate-chain.cx", 0, 0, 0);
-    {   size_t n = 0; char *b = cx_read("tools/candidate-chain.cx", &n); int h1, h2, h3;
-        if (!b) { printf("FAIL\troute-real-win-as-mac\tcannot read tools/candidate-chain.cx\n"); failed++; return; }
-        h1 = swap_all(b, (long)n, "\"win-x86_64\", 0)", "\"win-x86_64\", 1)");
-        h2 = swap_all(b, (long)n, "\"win-arm64\", 0)", "\"win-arm64\", 1)");
-        h3 = swap_all(b, (long)n, "(wf_win_span(root, outdir", "(wf_win_skip(root, outdir");
-        if (h1 != 1 || h2 != 1 || h3 != 2 || cx_fmt(rp, sizeof rp, "%s/chain-win-as-mac.cx", dir) || cx_write(rp, b, n)) {
-            printf("FAIL\troute-real-win-as-mac\tanchors moved in tools/candidate-chain.cx (hits %d %d %d, want 1 1 2) or write failed\n", h1, h2, h3); failed++; free(b); return;
+    }
+    {   size_t n = 0, facts_n = 0; char *b = cx_read(source, &n), *facts = 0, *mut = 0;
+        char rules[4400]; long p = 0, copied = 0, used = 0; int hits[3] = {0, 0, 0}, bad = 0;
+        /* refactor owns lexical scanning, balanced calls and argument selection.  Its offsets
+           refer to the original source; consume them in order, not as source-text anchors.
+           Generation 1 excludes the dynamic later-generation span call. */
+        const char *body =
+            "stub-x64\twf_fronts\t-\t7\twf_fronts($1, $2, $3, $4, $5, $6, 1)\t-\tsafe\tany\t$6=\"win-x86_64\"\n"
+            "stub-arm64\twf_fronts\t-\t7\twf_fronts($1, $2, $3, $4, $5, $6, 1)\t-\tsafe\tany\t$6=\"win-arm64\"\n"
+            "omit-span\twf_win_span\t-\t6\t0\t-\tsafe\tany\t$4=1\n";
+        if (!b || put("win-as-mac-rules.tsv", body, rules, sizeof rules)) {
+            printf("FAIL\troute-real-win-as-mac\tread source or write rules failed\n"); failed++; free(b); return;
         }
-        free(b);
+        {   char *av[] = {"sh", "./unisacc.com", "tools/refactor.cx", "--", "find", rules, (char *)source, 0};
+            if (cx_runv_timeout(av, 50, &facts, &facts_n) != 0 || !facts) bad = 1;
+        }
+        /* Replacement rendering can change whitespace and length.  Decode refactor's TSV
+           escaping and assemble a fresh copy; no constant-width assumptions remain. */
+        if (!bad) mut = mm_alloc((long)n + (long)facts_n + 1);
+        if (!mut) bad = 1;
+        while (!bad && p < (long)facts_n) {
+            long q = p, off, len, at, on = 0, rn = 0, k; int which = -1;
+            char *orig, *rep;
+            while (q < (long)facts_n && facts[q] != '\n') q++;
+            if (tx_fields(facts + p, q - p, '\t') != 10) { bad = 1; break; }
+            tx_field(facts + p, q - p, '\t', 4, &off, &len);
+            if (tx_same(facts + p + off, len, "rule", 4)) { p = q + 1; continue; } /* header */
+            if (tx_same(facts + p + off, len, "stub-x64", 8)) which = 0;
+            if (tx_same(facts + p + off, len, "stub-arm64", 10)) which = 1;
+            if (tx_same(facts + p + off, len, "omit-span", 9)) which = 2;
+            if (which < 0) { bad = 1; break; }
+            tx_field(facts + p, q - p, '\t', 2, &off, &len); at = strtol(facts + p + off, 0, 10);
+            tx_field(facts + p, q - p, '\t', 7, &off, &len);
+            orig = mm_alloc(len + 1);
+            if (!orig) { bad = 1; break; }
+            for (k = 0; k < len; k++) {
+                char c = facts[p + off + k];
+                if (c == '\\' && k + 1 < len) { c = facts[p + off + ++k]; c = c == 'n' ? '\n' : c == 't' ? '\t' : c; }
+                orig[on++] = c;
+            }
+            tx_field(facts + p, q - p, '\t', 8, &off, &len);
+            rep = mm_alloc(len + 1);
+            if (!rep) { mm_free(orig); bad = 1; break; }
+            for (k = 0; k < len; k++) {
+                char c = facts[p + off + k];
+                if (c == '\\' && k + 1 < len) { c = facts[p + off + ++k]; c = c == 'n' ? '\n' : c == 't' ? '\t' : c; }
+                rep[rn++] = c;
+            }
+            if (at < copied || at > (long)n || on > (long)n - at || !tx_same(b + at, on, orig, on)) bad = 1;
+            else {
+                for (k = copied; k < at; k++) mut[used++] = b[k];
+                for (k = 0; k < rn; k++) mut[used++] = rep[k];
+                copied = at + on; hits[which]++;
+            }
+            mm_free(orig); mm_free(rep); p = q + 1;
+        }
+        if (!bad) { while (copied < (long)n) mut[used++] = b[copied++]; mut[used] = 0; }
+        sy_unlink(rules); free(b); if (facts) mm_free(facts);
+        if (bad || hits[0] != 1 || hits[1] != 1 || hits[2] != 2
+            || cx_fmt(rp, sizeof rp, "%s/chain-win-as-mac.cx", dir) || cx_write(rp, mut, used)) {
+            printf("FAIL\troute-real-win-as-mac\tMUTATION_UNSUPPORTED_OR_INVALID: refactor requires comment-free call arguments and facts 1 1 2 (got %d %d %d), or write failed\n", hits[0], hits[1], hits[2]);
+            failed++; if (mut) mm_free(mut); return;
+        }
+        mm_free(mut);
+        if (mutation_only) {
+            printf("PASS\tmutation-only\tstub-x64=%d\tstub-arm64=%d\tomit-span=%d\n", hits[0], hits[1], hits[2]);
+            passed++; sy_unlink(rp); return;
+        }
         {   long base = route_field("build/graph.tsv", "tools/candidate-chain.cx", "route_mismatch=");
             route_expect("route-real-win-as-mac", "build/graph.tsv", rp, base + 8, "ROUTE_MISMATCH\twin-x86_64\tstub\tgraph=absent (", "ROUTE_MISMATCH\twin-arm64\tunits\tgraph=gen1.win-arm64.units (build/graph.tsv:"); }
         sy_unlink(rp);
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char g[1 << 14]; long k;
+    int mutation_only = argc >= 2 && tx_eqz(argv[1], "--mutation-only");
+    int route_only = argc == 2 && tx_eqz(argv[1], "--route-only");
+    const char *source = argc == 3 ? argv[2] : "tools/candidate-chain.cx";
+    if (argc != 1 && !route_only && (!mutation_only || argc > 3)) {
+        fprintf(stderr, "usage: check-graph-check [--mutation-only [SOURCE] | --route-only]\n"); return 2;
+    }
     if (cx_fmt(dir, sizeof dir, "%s/graph-check-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) {
         fprintf(stderr, "check-graph-check: cannot create scratch dir\n"); return 2;
+    }
+    if (mutation_only) {
+        route_cases(source, 1); sy_rmdir(dir);
+        printf("CHECK_GRAPH_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
+        return failed ? 1 : 0;
     }
     if (put("chain-ok.cx", CHAIN_OK, chain_ok, sizeof chain_ok) || put("chain-bad.cx", CHAIN_BAD, chain_bad, sizeof chain_bad)
         || put("hit.txt", "a\nsh unisacc.com x\nb\n", hit, sizeof hit)) { fprintf(stderr, "check-graph-check: fixtures\n"); return 2; }
     if (cx_fmt(g, sizeof g, "id\tfile\tpattern\tnote\nX1\t%s\tunisacc.com\tfixture\n", hit) || put("hardwire.tsv", g, hard, sizeof hard)) return 2;
+    if (route_only) {
+        route_cases("tools/candidate-chain.cx", 0);
+        sy_unlink(chain_ok); sy_unlink(chain_bad); sy_unlink(hit); sy_unlink(hard); sy_rmdir(dir);
+        printf("CHECK_GRAPH_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
+        return failed ? 1 : 0;
+    }
 
     /* 1 consistent */
     if (cx_fmt(g, sizeof g, "# c\n%s%s", HDR, SIX)) return 2;
@@ -298,7 +387,7 @@ int main(void) {
           printf("RECORD\treal\trc=%d\torder_mismatch=%ld\thardwire=%ld\tedges=%ld\n", rc, field(out, n, "order_mismatch="), field(out, n, "hardwire="), field(out, n, "edges="));
       } else { printf("FAIL\treal-structure\trc=%d\n", rc); failed++; }
       if (out) mm_free(out); }
-    route_cases();
+    route_cases("tools/candidate-chain.cx", 0);
 
     sy_unlink(chain_ok); sy_unlink(chain_bad); sy_unlink(hit); sy_unlink(hard); sy_rmdir(dir);
     printf("CHECK_GRAPH_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);

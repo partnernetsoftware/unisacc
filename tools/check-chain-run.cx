@@ -10,13 +10,42 @@
 #pragma unisa use sys.sha
 static int bad;
 static void ck(int yes,const char *s) { sy_printf("%s\tchain-run.%s\n",yes?"PASS":"FAIL",s); if(!yes) bad++; }
-static void put(const char *p,const char *s) { if(cx_write(p,s,strlen(s))) exit(2); }
+static void put(const char *p,const char *s) {
+    if(strstr(p,"chain-phases.tsv")) {
+        FILE *f=fopen(p,"wb");if(!f)exit(2);char prev[256]="-";
+        while(*s){const char *e=strchr(s,'\n');if(!e)exit(2);char line[14000];size_t n=e-s;if(tx_copy(line,sizeof line,s,n))exit(2);
+            int order,bound;char id[256],domain[4400];
+            if(*line=='#')fprintf(f,"%s\n",line);
+            else { int tabs=0;for(char *q=line;*q;q++)if(*q=='\t')tabs++;
+                if(tabs==3&&sscanf(line,"%d %255s %4399s %d",&order,id,domain,&bound)==4){fprintf(f,"%d\t%s\t%s\t%d\t%s\t-\t1\n",order,id,domain,bound,prev);if(!strstr(id,"-obj-")&&tx_copy(prev,sizeof prev,id,strlen(id)))exit(2);}
+                else fprintf(f,"%s\n",line);
+            }s=e+1;
+        }if(fclose(f))exit(2);return;
+    }
+    if(cx_write(p,s,strlen(s)))exit(2);
+}
 static void join(char *p,const char *a,const char *b) { if(cx_fmt(p,4400,"%s/%s",a,b)) exit(2); }
 static int has(const char *p,const char *s) { size_t n=0;char *b=cx_read(p,&n);int yes=b&&strstr(b,s);free(b);return yes; }
 static int fake(int argc,char **argv) {
     const char *out=0,*phase=0,*mode="ok"; int i;
     for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
     if(!out||!phase) return 0; /* watch */
+    if(!strncmp(mode,"parallel",8)||!strcmp(mode,"siblings")) {
+        char trace[4400],row[600];join(trace,out,"events");int fd=sy_open(trace,O_WRONLY|O_CREAT|O_APPEND,0644);
+        cx_fmt(row,sizeof row,"START\t%s\t%ld\n",phase,sy_now_ms());sy_write_all(fd,row,strlen(row));
+        if(!strcmp(mode,"siblings")) {
+            char mark[4400],leaf[300];cx_fmt(leaf,sizeof leaf,"ready-%s",phase);join(mark,out,leaf);put(mark,"ready\n");
+            if(!strcmp(phase,"a")) {
+                int ready=0;for(int n=0;n<1000;n++){ready=1;const char *ids[]={"b","c","d"};for(int j=0;j<3;j++){cx_fmt(leaf,sizeof leaf,"ready-%s",ids[j]);join(mark,out,leaf);if(!sy_exists(mark))ready=0;}if(ready)break;sy_sleep_ms(2);}
+                sy_close(fd);return ready?7:9;
+            }
+            if(!strcmp(phase,"b")||!strcmp(phase,"c")||!strcmp(phase,"d")) {
+                join(mark,out,"chain-run.tsv");int observed=0;for(int n=0;n<1000;n++){if(has(mark,"reason=first-failure")){observed=1;break;}sy_sleep_ms(2);}if(!observed){sy_close(fd);return 9;}
+            }
+        }
+        if(!strcmp(mode,"parallel-timeout")&&!strcmp(phase,"a")){char once[4400];join(once,out,"timeout-once");if(!sy_exists(once)){put(once,"1");sy_sleep_ms(4000);sy_close(fd);return 124;}}
+        sy_sleep_ms(150);cx_fmt(row,sizeof row,"END\t%s\t%ld\n",phase,sy_now_ms());sy_write_all(fd,row,strlen(row));sy_close(fd);
+    }
     char p[4400]; join(p,out,"calls"); FILE *f=fopen(p,"ab"); fprintf(f,"%s\n",phase); fclose(f);
     if(!strcmp(mode,"fail")) { fprintf(stderr,"FIRST_REAL_FAILURE\n"); return 7; }
     if(!strcmp(mode,"exhaust")) return 124;
@@ -44,13 +73,33 @@ static int fake(int argc,char **argv) {
 static char root[4400],base[4400],self[4400],runner[4400];
 static int call(const char *name,const char *mode,const char *deadline,const char *maxr,const char *extra) {
     char dir[4400];join(dir,base,name);sy_mkdir(dir,0755);
-    char *v[24]={runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--candidate",self,"--watch",self,"--deadline-s",(char*)deadline,"--max-resumes",(char*)maxr,0};
+    char *v[28]={runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--candidate",self,"--watch",self,"--deadline-s",(char*)deadline,"--max-resumes",(char*)maxr,0};
     int k=13;if(extra) v[k++]=(char*)extra;
+    if(!strcmp(mode,"parallel-one")){v[k++]="--parallel";v[k++]="1";}
     v[k++]="--";v[k++]="--fixture-case";v[k++]=(char*)mode;v[k]=0;
     char *o=0;size_t n=0;int rc;
     if(!strcmp(mode,"dirty")){char *ev[28]={"env","UNISACC_CHAINRUN_FAULT=unconfirmed",0};for(int j=0;j<=k;j++)ev[j+2]=v[j];rc=cx_runv_timeout(ev,12,&o,&n);}
     else rc=cx_runv_timeout(v,12,&o,&n);
     char p[4400];join(p,dir,"check.stdout"); if(o) { if(cx_write(p,o,n)) exit(2);free(o); } return rc;
+}
+static int events(const char *name,int serial,int retry) {
+    char p[4400],dir[4400],line[600],kind[20],id[256];join(dir,base,name);join(p,dir,"events");FILE *f=fopen(p,"rb");if(!f)return 0;
+    int live=0,peak=0,valid=1,starts[7]={0},ended[7]={0};const char *ids[]={"snap","a","b","c","d","e","pack"};
+    while(fgets(line,sizeof line,f)) {
+        long when;if(sscanf(line,"%19s %255s %ld",kind,id,&when)!=3){valid=0;break;}int k=-1;for(int i=0;i<7;i++)if(!strcmp(ids[i],id))k=i;if(k<0){valid=0;break;}
+        if(!strcmp(kind,"START")) {
+            if(k>0&&!ended[0])valid=0;
+            if(k==6)for(int i=1;i<6;i++)if(!ended[i])valid=0;
+            if(k==5&&starts[1]-(retry?1:0)>ended[1])valid=0;
+            /* A real timeout has no END event; its next attempt follows owner cleanup. */
+            if(retry&&k==1&&starts[k]==1)live--;
+            starts[k]++;live++;if(live>peak)peak=live;
+        } else if(!strcmp(kind,"END")){ended[k]++;live--;}
+        else valid=0;
+        if(live<0||live>4)valid=0;
+    }
+    fclose(f);for(int i=0;i<7;i++)if(ended[i]!=1||starts[i]!=(retry&&i==1?2:1))valid=0;
+    return valid&&!live&&(serial?peak==1:peak==4);
 }
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--rev")) return fake(argc,argv);
@@ -108,5 +157,24 @@ int main(int argc,char **argv) {
     join(p,base,"overbound/calls");ck(!sy_exists(p),"overbound-no-child-executed");
     put(plan,"0\tsnap\t-\t0\n1\tpack\t-\t55\n");
     ck(call("zerobound","ok","30","3",0)==2,"zero-bound-refused");
+    put(plan,"0\tsnap\troot\t3\t-\t-\t4\n1\ta\ta\t3\tsnap\ta\t4\n2\tb\tb\t3\tsnap\tb\t4\n3\tc\tc\t3\tsnap\tc\t4\n4\td\td\t3\tsnap\td\t4\n5\te\ta\t3\tsnap\te\t4\n6\tpack\tfinal\t3\ta,b,c,d,e\t-\t4\n");
+    ck(call("parallel","parallel","30","3",0)==0,"dependency-parallel-four");
+    ck(events("parallel",0,0),"dependency-order-domain-exclusion-four-cap");
+    ck(call("parallel-one","parallel-one","30","3",0)==0,"parallel-one-equivalent-coverage");
+    ck(events("parallel-one",1,0),"serial-same-phase-set-once");
+    ck(call("parallel-timeout","parallel-timeout","30","3",0)==0,"parallel-timeout-retry");
+    ck(events("parallel-timeout",0,1),"completed-siblings-never-repeated");
+    join(p,base,"parallel-timeout/chain-run.tsv");ck(has(p,"parallel=3")&&has(p,"bound=3")&&!has(p,"bound=55"),"timeout-reduces-width-not-bound");
+    ck(has(p,"cleanup=1 residue=0"),"parallel-real-timeout-cleanup-proved");
+    ck(call("siblings","siblings","30","3",0)==7,"failure-preserves-running-siblings");
+    join(p,base,"siblings/checkpoint.tsv");ck(has(p,"DONE\tb\t")&&has(p,"DONE\tc\t")&&has(p,"DONE\td\t")&&!has(p,"DONE\tpack\t")&&!has(p,"DONE\te\t"),"siblings-finish-no-new-dispatch");
+    ck(call("parallel-timeout","parallel-timeout","30","3",0)==0,"restart-keeps-completed-work");
+    ck(events("parallel-timeout",0,1),"restart-no-phase-reexecution");
+    join(p,base,"parallel-timeout/chain-run.budget");size_t bn=0;char *budget=cx_read(p,&bn);long deadline;int attempt,resume,ma,mr,width;
+    ck(budget&&sscanf(budget,"%ld %d %d %d %d %d",&deadline,&attempt,&resume,&ma,&mr,&width)==6&&width==3&&resume==1,"restart-load-cannot-rise");free(budget);
+    put(plan,"0\tsnap\t-\t3\tunknown\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
+    ck(call("unknown-dep","ok","30","3",0)==2,"unknown-dependency-rejected");join(p,base,"unknown-dep/calls");ck(!sy_exists(p),"unknown-dependency-before-child");
+    put(plan,"0\tsnap\t-\t3\tpack\t-\t4\n1\tpack\t-\t3\tsnap\t-\t4\n");
+    ck(call("cycle","ok","30","3",0)==2,"cycle-dependency-rejected");join(p,base,"cycle/calls");ck(!sy_exists(p),"cycle-before-child");
     sy_printf("CHECK_CHAIN_RUN\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
 }
