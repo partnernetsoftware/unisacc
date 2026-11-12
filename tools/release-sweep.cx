@@ -64,12 +64,17 @@ typedef struct {
    where.  Nothing about the publish leaves is a literal in this file. */
 typedef struct {
     char id[40];
-    char under[24]; /* out | tlib-cache | tlib-kit | tmp | trash */
+    char under[24];  /* out | tlib-cache | tlib-kit | tmp | trash */
     char pattern[512];
-    char action[24]; /* move | keep | list | move-expired | move-stale-kit | move-older-than */
-    long arg;       /* older-than days for move-older-than / list */
-    int allow_tmp;  /* a /tmp row may move only when the rule says so */
+    char action[24]; /* move | keep | list */
+    long arg;        /* move: entries younger than ARG minutes are kept (0 = no age rule) */
+    int allow_tmp;   /* 1: this /tmp row may move when --tmp is given; 0: listed only */
 } SweepRule;
+
+/* Everything a scan row needs to be judged again after the rules table has been read: the age test is a
+   keep rule ("recent enough that an owner may still be working in it"), so it runs here, not in a
+   literal in the source. */
+#define RECENT_MINUTES_DEFAULT 120
 
 static SweepRow rows[MAX_ROWS];
 static int nrows;
@@ -90,6 +95,10 @@ static char namebuf_a[262144];
 static char namebuf_b[65536];
 static char trash_scan[4400];
 static char rules_path[4400];
+static char tmp_dir[4400] = "/tmp"; /* the directory the `tmp` rules scan; --tmp-dir redirects it */
+static int tmp_move_allowed;  /* --tmp: the /tmp rows a rule marks allow_tmp may move */
+static long recent_minutes = RECENT_MINUTES_DEFAULT; /* @recent-minutes in the rules table */
+static char param_recent[32];
 
 static const char *base_name(const char *p);
 
@@ -399,7 +408,14 @@ static void load_rules(const char *path) {
             char *p;
             if (mm_copy(line, sizeof line, s + at, e - at)) { free(s); die("copy", 0); }
             line[e - at] = 0;
-            if (line[0] != '#' && nrules < MAX_RULES) {
+            if (line[0] == '@') {
+                /* @name<TAB>value: thresholds the rules use, so the age window is a table edit */
+                const char *v = strchr(line, '\t');
+                if (v && !strncmp(line, "@recent-minutes", 15)) {
+                    long m = atol(v + 1);
+                    if (m >= 0) recent_minutes = m;
+                }
+            } else if (line[0] != '#' && nrules < MAX_RULES) {
                 p = line;
                 while (nf < 6) {
                     f[nf++] = p;
@@ -480,7 +496,7 @@ static int keep_has_sha(const char *hex) {
 
 /* ROOT/out: one row per top-level entry whose name matches an `out` rule; the first matching rule wins,
    so a retire list writes the exceptions above the patterns it refines. */
-static void scan_out(void) {
+static void scan_out(long now) {
     char dir[4400], full[8800], nbuf[131072];
     int fd, cnt, pos = 0;
     if (cx_fmt(dir, sizeof dir, "%s/out", scan_root)) die("path bound", scan_root);
@@ -494,12 +510,69 @@ static void scan_out(void) {
         if (len <= 0) break;
         if (cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + pos) == 0) {
             int r = rule_find("out", nbuf + pos);
+            /* a nested rule set (out/<sub>) means this level is a container, not a leaf: its entries carry
+               the decision, so the container itself is neither kept nor moved as a whole */
+            {
+                char sub[64];
+                int nested = 0, q;
+                if (cx_fmt(sub, sizeof sub, "out/%s", nbuf + pos) == 0)
+                    for (q = 0; q < nrules; q++) if (!strcmp(rules[q].under, sub)) nested = 1;
+                if (nested) {
+                    scan_nested(nbuf + pos);
+                    pos += (int)len + 1;
+                    cnt--;
+                    continue;
+                }
+            }
+            sy_stat_t ost;
+            int fresh = 0;
+            if (recent_minutes > 0 && sy_lstat(full, &ost) == 0 && ost.mtime >= 0)
+                fresh = (now - ost.mtime) < recent_minutes * 60;
             if (r >= 0) {
                 if (!strcmp(rules[r].action, "keep")) { keep_add(full); scan_add("out", "keep", full, "-"); }
                 else if (!strcmp(rules[r].action, "list")) scan_add("out", "list", full, "-");
+                else if (fresh) scan_add("out-recent", "keep", full, "-");
                 else scan_add("out", "move", full, nbuf + pos);
+            } else if (fresh) {
+                /* unruled but younger than the window: a peer may still be working in it */
+                scan_add("out-recent", "keep", full, "-");
+            } else {
+                /* no rule and no age excuse: default move, so nothing in out/ stays undecided */
+                scan_add("out", "move", full, nbuf + pos);
             }
-            else scan_add("out-unruled", "list", full, "-");
+        }
+        pos += (int)len + 1;
+        cnt--;
+    }
+}
+
+/* A rule whose `under` names a subdirectory of out (out/b1) decides the entries below it, so a single
+   publish leaf can be kept while its siblings go.  The row's dest keeps the parent's name:
+   out/b1/xyz -> trash/b1/xyz. */
+static void scan_nested(const char *sub) {
+    char dir[4400], full[8800], nbuf[65536], pref[4096];
+    int fd, cnt, pos = 0;
+    if (cx_fmt(pref, sizeof pref, "out/%s", sub) || cx_fmt(dir, sizeof dir, "%s/%s", scan_root, pref))
+        die("path bound", sub);
+    fd = sy_open(dir, O_RDONLY, 0);
+    if (fd < 0) return;
+    cnt = sy_dir_names(fd, nbuf, (int)sizeof nbuf);
+    sy_close(fd);
+    if (cnt <= 0) return;
+    while (pos < (int)sizeof nbuf && cnt > 0) {
+        long len = tx_len(nbuf + pos, (long)sizeof nbuf - pos);
+        char under[64], dst[1024];
+        if (len <= 0) break;
+        if (cx_fmt(under, sizeof under, "out/%s", sub) == 0 && cx_fmt(full, sizeof full, "%s/%s", dir, nbuf + pos) == 0 &&
+            cx_fmt(dst, sizeof dst, "%s/%s", sub, nbuf + pos) == 0) {
+            int r = rule_find(under, nbuf + pos);
+            if (r >= 0) {
+                if (!strcmp(rules[r].action, "keep")) { keep_add(full); scan_add("out", "keep", full, "-"); }
+                else if (!strcmp(rules[r].action, "list")) scan_add("out", "list", full, "-");
+                else scan_add("out", "move", full, dst);
+            } else {
+                scan_add("out", "move", full, dst);
+            }
         }
         pos += (int)len + 1;
         cnt--;
@@ -599,12 +672,14 @@ static void scan_under(const char *under, const char *dirpath, long now) {
             int r = rule_find(under, nbuf + pos);
             if (r >= 0) {
                 sy_stat_t st;
-                int movable = rules[r].allow_tmp;
-                int old = 1;
-                if (sy_lstat(full, &st) == 0 && rules[r].arg > 0) old = st.mtime >= 0 && (now - st.mtime) >= rules[r].arg * 86400;
-                if (!old) { pos += (int)len + 1; cnt--; continue; }
-                if (!strcmp(rules[r].action, "move") && movable) scan_add(under, "move", full, nbuf + pos);
-                else scan_add(under, "list", full, "-");
+                int not_old = 0;
+                if (sy_lstat(full, &st) == 0 && rules[r].arg > 0)
+                    not_old = !(st.mtime >= 0 && (now - st.mtime) >= rules[r].arg * 86400);
+                /* a /tmp row moves only when the rule allows it AND the caller passed --tmp: the flag is
+                   the owner's explicit order, the rule says which names that order covers */
+                if (not_old || strcmp(rules[r].action, "move") || !rules[r].allow_tmp || !tmp_move_allowed)
+                    scan_add(under, "list", full, "-");
+                else scan_add(under, "move", full, nbuf + pos);
             }
         }
         pos += (int)len + 1;
@@ -619,7 +694,7 @@ static void scan_all(const char *rules_path) {
     load_rules(rules_path);
     nrows = 0;
     nkeep = 0;
-    scan_out();
+    scan_out(now);
     if (kit_current[0]) {
         char hex[65];
         char ktsv[8800];
@@ -653,7 +728,7 @@ static void scan_all(const char *rules_path) {
         scan_kit(cache_root, kit_current);
         scan_cache(cache_root);
     }
-    scan_under("tmp", "/tmp", now);
+    scan_under("tmp", tmp_dir, now);
     if (trash_scan[0]) scan_under("trash", trash_scan, now);
 }
 
@@ -756,6 +831,10 @@ int main(int argc, char **argv) {
             kit_in = argv[++i];
         } else if (!strcmp(argv[i], "--trash-scan") && i + 1 < argc) {
             trash_in = argv[++i];
+        } else if (!strcmp(argv[i], "--tmp")) {
+            tmp_move_allowed = 1;
+        } else if (!strcmp(argv[i], "--tmp-dir") && i + 1 < argc) {
+            if (cx_fmt(tmp_dir, sizeof tmp_dir, "%s", argv[++i])) die("path bound", argv[i]);
         } else {
             die("usage", "--manifest FILE | --scan --rules FILE --root ROOT --cache DIR --kit DIR "
                          "[--trash-scan DIR]; --trash DIR --out-manifest OUT.tsv "
@@ -786,13 +865,15 @@ int main(int argc, char **argv) {
     if (apply && mkdir_p(trash) < 0) die("cannot create trash dir", trash);
     if (apply && scan_mode) {
         /* A scan row is moved only when this checkout owns it: ROOT/out, this ROOT's tlib cache and its
-           kit.  /tmp and the trash are listed, never moved: a cross-directory move is the owner's call. */
-        size_t rl = strlen(scan_root), cl = strlen(cache_root);
+           kit.  A /tmp row is moved only under --tmp, and then only because the rules marked it.
+           Everything else is listed: a cross-directory move is the owner's call. */
+        size_t rl = strlen(scan_root), cl = strlen(cache_root), tl2 = strlen(tmp_dir);
         for (i = 0; i < nrows; i++) {
             SweepRow *r = &rows[i];
             int mine;
             if (strcmp(r->action, "move")) continue;
-            mine = !strncmp(r->src, scan_root, rl) || (cl && !strncmp(r->src, cache_root, cl));
+            mine = !strncmp(r->src, scan_root, rl) || (cl && !strncmp(r->src, cache_root, cl)) ||
+                   (tmp_move_allowed && tl2 && !strncmp(r->src, tmp_dir, tl2));
             if (!mine) { if (cx_fmt(r->action, sizeof r->action, "list")) die("fmt", 0); }
         }
     }

@@ -295,28 +295,71 @@ int main(int argc, char **argv) {
         {
             char fx[4400];
             if (cx_fmt(fx, sizeof fx, "%s/x.bin", s_move) || cx_write(fx, "0123456789", 10)) return 2;
+            /* norule 也要老于保留窗口，否则它只会被当成在途产物保留 */
+            if (sy_set_mtime(s_move, sy_wall_s() - 3 * 86400) || sy_set_mtime(s_none, sy_wall_s() - 3 * 86400)) return 2;
         }
         if (cx_fmt(body, sizeof body,
+            "@recent-minutes\t120\n"
             "# scan rules\n"
-            "K\tout\tkeepme\tkeep\t\t\n"
-            "M\tout\tmoveme\tmove\t\t\n") || cx_write(srules, body, strlen(body))) return 2;
+            "K\tout\tkeepme\tkeep\t\t\n") || cx_write(srules, body, strlen(body))) return 2;
+        /* 先造一个“最近”的条目：它在窗口内，必须 keep 而不是 move */
+        {
+            char fresh_dir[4400];
+            if (cx_fmt(fresh_dir, sizeof fresh_dir, "%s/fresh", s_out) || sy_mkdir(fresh_dir, 0700) ||
+                sy_set_mtime(fresh_dir, sy_wall_s())) return 2;
+        }
         {
             char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
                           "--kit", skit, "--trash", strash, "--out-manifest", sout, "--dry-run", 0};
             rc = run_sweep(av, &o, &n);
-            ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tout\trows=2\tmove=1\tlist=0\tkeep=1\t"),
-               "scan-classifies-out-by-rules");
-            /* the unruled entry is listed, never counted as reclaimable */
-            ck(has(o, n, "RELEASE_SWEEP_CLASS\tout-unruled\trows=1\tmove=0\tlist=1\tkeep=0\t") &&
-               has(o, n, "\treclaimable=0\n") && has(o, n, "RELEASE_SWEEP_SCAN\trules=2\trows=3\n") == 0 &&
-               has(o, n, "RELEASE_SWEEP_SCAN\trules=2\t"),
-               "scan-lists-unruled-without-reclaiming-it");
+            /* keepme 由规则保留；moveme 与 norule 无规则且已老 -> 默认 move；fresh 在窗口内 -> keep */
+            ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\tout\trows=3\tmove=2\tlist=0\tkeep=1\t"),
+               "scan-unruled-defaults-to-move");
+            ck(has(o, n, "RELEASE_SWEEP_CLASS\tout-recent\trows=1\tmove=0\tlist=0\tkeep=1\t"),
+               "scan-recent-entry-kept-not-moved");
+            ck(has(o, n, "RELEASE_SWEEP_SCAN\trules=1\t"), "scan-summary-counts-rules");
             free(o); o = 0;
-            ck(sy_exists(s_keep) == 1 && sy_exists(s_move) == 1 && sy_exists(strash) == 0,
+            ck(sy_exists(s_keep) == 1 && sy_exists(s_move) == 1 && sy_exists(s_none) == 1 && sy_exists(strash) == 0,
                "scan-dry-run-leaves-filesystem-untouched");
         }
+        /* apply: 无规则的条目真被移进 trash，保留项原样不动 */
+        {
+            char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                          "--kit", skit, "--trash", strash, "--out-manifest", sout, "--apply", 0};
+            rc = run_sweep(av, &o, &n);
+            ck(rc == 0 && sy_exists(s_move) == 0 && sy_exists(s_keep) == 1 && sy_exists(strash) == 1,
+               "scan-apply-moves-unruled-and-keeps-the-explicit-keep");
+            free(o); o = 0;
+        }
+        /* /tmp 语义：不给 --tmp 时只列；给 --tmp 且规则 allow_tmp=1 时才 move */
+        {
+            char tdir[4400], tfile[4400], touth[4400], ttrash[4400];
+            char tb[4096];
+            if (cx_fmt(tdir, sizeof tdir, "%s/scan-tmp", work) || sy_mkdir(tdir, 0700)) return 2;
+            if (cx_fmt(tfile, sizeof tfile, "%s/unisacc-tlib-stage-x", tdir) || sy_mkdir(tfile, 0700)) return 2;
+            if (cx_fmt(touth, sizeof touth, "%s/scan-tmp-out.tsv", work) ||
+                cx_fmt(ttrash, sizeof ttrash, "%s/scan-tmp-trash", work)) return 2;
+            if (cx_fmt(tb, sizeof tb,
+                "T\ttmp\tunisacc-tlib-stage-*\tmove\t0\t1\n") || cx_write(srules, tb, strlen(tb))) return 2;
+            {
+                char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                              "--kit", skit, "--tmp-dir", tdir, "--trash", ttrash,
+                              "--out-manifest", touth, "--dry-run", 0};
+                rc = run_sweep(av, &o, &n);
+                ck(rc == 0 && has(o, n, "RELEASE_SWEEP_CLASS\ttmp\trows=1\tmove=0\tlist=1\t"),
+                   "scan-tmp-listed-without-the-flag");
+                free(o); o = 0;
+            }
+            {
+                char *av[] = {"--scan", "--rules", srules, "--root", sroot, "--cache", scache,
+                              "--kit", skit, "--tmp-dir", tdir, "--tmp", "--trash", ttrash,
+                              "--out-manifest", touth, "--apply", 0};
+                rc = run_sweep(av, &o, &n);
+                ck(rc == 0 && sy_exists(tfile) == 0, "scan-tmp-moves-only-under-the-flag");
+                free(o); o = 0;
+            }
+        }
     }
-
     if (argc < 3) cx_rmtree(work);
 
     sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
