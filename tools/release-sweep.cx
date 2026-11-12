@@ -787,7 +787,7 @@ int main(int argc, char **argv) {
     const char *mpath = 0, *trash = 0, *outm = 0, *archdir = 0, *latest = 0;
     const char *rules_in = 0, *root_in = 0, *cache_in = 0, *kit_in = 0, *trash_in = 0;
     int apply = 0, mode_set = 0, i;
-    int moved = 0, archived = 0, kept = 0, skipped_busy = 0, listed = 0;
+    int moved = 0, archived = 0, kept = 0, skipped_busy = 0, listed = 0, gone = 0;
     long total_before = 0, total_after = 0;
     char *outbuf;
     size_t outcap = 262144, outused = 0;
@@ -880,7 +880,18 @@ int main(int argc, char **argv) {
     for (i = 0; i < nrows; i++) {
         SweepRow *r = &rows[i];
         long b = path_bytes(r->src);
-        if (b < 0) die("source path absent", r->src);
+        if (b < 0) {
+            /* A scan row can vanish between the directory read and this loop: every window shares out/,
+               so a peer deleting its own leaf is not this tool's failure.  A manifest row is named by
+               hand, so a missing source there is still an error. */
+            if (!scan_mode) die("source path absent", r->src);
+            if (cx_fmt(r->final_dst, sizeof r->final_dst, "-") ||
+                cx_fmt(r->status, sizeof r->status, "GONE")) die("fmt", 0);
+            r->before_bytes = 0;
+            r->after_bytes = 0;
+            gone++;
+            continue;
+        }
         r->before_bytes = b;
         total_before += b;
 
@@ -1003,6 +1014,6 @@ int main(int argc, char **argv) {
             printf("RELEASE_SWEEP_CLASS\t%s\trows=%d\tmove=%d\tlist=%d\tkeep=%d\tbytes=%ld\treclaimable=%ld\n",
                    seen[j], n_row, n_move, n_list, n_keep, b_row, b_free);
         }
-        printf("RELEASE_SWEEP_SCAN\trules=%d\trows=%d\tlisted=%d\tkept=%d\n", nrules, nrows, listed, kept);
+        printf("RELEASE_SWEEP_SCAN\trules=%d\trows=%d\tlisted=%d\tkept=%d\tgone=%d\n", nrules, nrows, listed, kept, gone);
     }
 }
