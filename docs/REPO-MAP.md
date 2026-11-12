@@ -33,8 +33,8 @@
 |---|---|---|---|
 | `prd.md` | 当前状态与路线(思维树、记忆宫殿、能力速查),先读它;§8 为目录表 | 否 | 多人,用 `commit-own --keyed` |
 | `prd_hist.md`、`prd_release.md` | 状态历史与发布段落 | 否 | 主线 |
-| `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.46`、`0.0.48` 与 `0.0.53` 至 `0.0.57`。过期的进 `archive/plans/`,2026-11 文档清理移走的在 `archive/docs-2026-11/plans/`,第二轮在 `archive/docs-2026-11b/`(含 `v0.0.50`、`v0.0.51` 计划与 `release-notes-0.0.47`,见其 INDEX.md) | 否 | 主线,交接单不再写带日期的 plans |
-| `docs/` | 契约与说明:`glossary.md`、`toolchain.md`、`tapebin-v1*.md/tsv`、`tape-vs-wasm.md`、`host-interop.md`、`cx-spec-draft.md`、`docs/cx/`、本页 | 否 | 主线 |
+| `plans/` | 版本计划与设计记录(约 90 个文件)。现行:`v0.0.52-unisacc.md`(模型层迭代占位)、`y-design-050.md`(Y 包设计)、`rechunk-design.md`、`standing-goal.md`、`design-review-log.md`;`release-notes-0.0.48` 与 `0.0.57` 至 `0.0.58`(0.0.46、0.0.55、0.0.56 的说明在 `archive/docs-2026-11d/plans/`,见其 INDEX.md)。过期的进 `archive/plans/`,2026-11 文档清理移走的在 `archive/docs-2026-11/plans/`,第二轮在 `archive/docs-2026-11b/`(含 `v0.0.50`、`v0.0.51` 计划与 `release-notes-0.0.47`,见其 INDEX.md) | 否 | 主线,交接单不再写带日期的 plans |
+| `docs/` | 契约与说明:`glossary.md`、`toolchain.md`、`tapebin-v1*.md/tsv`、`host-interop.md`、`cx-spec-draft.md`、`docs/cx/`、本页 | 否 | 主线 |
 | `README.md`、`spec.md`、`ARCHITECTURE.md` | 用户视角入口、条款全文、早期架构叙述(含历史段落,以 `prd.md` 为准) | 否 | 主线 |
 | `AGENTS.md`、`CLAUDE.md` | 协作与工作规则 | 否 | 主人/集成者 |
 | 根文件 `cxroot.tsv`、`Makefile`、`ape-receipt.txt` | cx 根登记、薄入口 make、APE 回执 | 否 | 主线 |

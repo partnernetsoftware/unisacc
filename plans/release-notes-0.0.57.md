@@ -4,7 +4,7 @@
 
 ## 是什么
 
-面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.57 是一个工具面为主的版本:唯一一类产品改动是 basered(两处基线红转绿的卫生修复,不改编译行为);其余是第一波构造链、发布与 s9 工具(gen1split、g2g3split、chain-run、factscount、wfcheck、k7exec、s9split、t57-1、ib55-1)。本版首次用真实整链检验这些工具,结果有好有坏,见「整链、阻塞与人工介入全表」。上一发布版见 `plans/release-notes-0.0.56.md`。
+面向 C99 的编译器,自己写出 ELF、Mach-O、PE,可编译自身;产品形态为单文件 `unisacc.com`。0.0.57 是一个工具面为主的版本:唯一一类产品改动是 basered(两处基线红转绿的卫生修复,不改编译行为);其余是第一波构造链、发布与 s9 工具(gen1split、g2g3split、chain-run、factscount、wfcheck、k7exec、s9split、t57-1、ib55-1)。本版首次用真实整链检验这些工具,结果有好有坏,见「整链、阻塞与人工介入全表」。上一发布版见 GitHub Release 0.0.56 页。
 
 ## 身份与证据
 
