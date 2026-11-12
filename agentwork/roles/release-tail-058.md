@@ -24,6 +24,7 @@ sh ./unisacc.com tools/bg-candidate.cx -- promote --check --rev 2a46e1a4275a6166
 ```
 sh ./unisacc.com tools/release-run.cx -- --pack ROOT release/candidate.tsv out/rel058/src out/rel058/rr2
 ```
+说明(csr 审查补): ROOT 即本仓库(不建私有克隆,主人规则);工具的"private clone"只是版本不符时的提示;可选 `--snap DIR`;release-run 不执行 gh/CI/s9/install/sweep,其打印的 create --draft 与 CI 占位行不要照用,第 4-5 步沿用已有草稿并用完整 workflow run。
 记候选 APE sha、字节、`--version` 为 unisacc 0.0.58、SOURCES_SID VERIFIED。回填的 candidate.tsv 取 out/rel058/rr2/candidate.tsv。
 
 ## 3 提交 X(只含 release/candidate.tsv)
