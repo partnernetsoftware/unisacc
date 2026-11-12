@@ -253,7 +253,7 @@ static int fresh(Lib *L) {
     if (rc_field(L, "target", 0, 1, a, sizeof a) || !tx_eqz(a, tn_self())) return say(4, "STALE", L->pkg, "built for another target");
     if (rc_field(L, "flags", 0, 1, a, sizeof a) || !tx_eqz(a, FLAGS)) return say(4, "STALE", L->pkg, "built with other flags");
     if (ensure_product_sha()) return say(2, "UNREADABLE", product, "cannot read the product");
-    if (rc_field(L, "product_sha", 0, 1, a, sizeof a) || !tx_eqz(a, product_sha)) return say(4, "STALE", L->pkg, "built by another product");
+    if (!tp_is_frozen(&pk) && (rc_field(L, "product_sha", 0, 1, a, sizeof a) || !tx_eqz(a, product_sha))) return say(4, "STALE", L->pkg, "built by another product");
     if (!tx_eqz(pk.api_sha, L->api)) return say(4, "STALE", L->pkg, "the table carries another api_sha");
     if (cx_fmt(path, sizeof path, "%s/build/layer-api/%s.tsv", root, L->pkg)) return 2;
     f = cx_read(path, &fn);
@@ -362,12 +362,18 @@ static int closure_inside(const char *unit, const char *lines, TpPkg *deps, int 
 
 static TpPkg bdeps[TP_MAXD];
 
+/* Object-format number of the product's tlib objects; bump by hand when the format changes. */
+#define PRODUCT_ABI "1"
+
 /* The identity lines that open both the input text and the receipt of package P. */
 static void put_head(TpBuf *in, const TpPkg *p) {
     tp_puts(in, "tlib\t1\npkg\t"); tp_puts(in, p->pkg);
     tp_puts(in, "\nversion\t"); tp_puts(in, p->version);
     tp_puts(in, "\ntarget\t"); tp_puts(in, tn_self());
-    tp_puts(in, "\nflags\t" FLAGS "\nproduct_sha\t"); tp_puts(in, product_sha); tp_puts(in, "\n");
+    tp_puts(in, "\nflags\t" FLAGS "\n");
+    /* a versioned (frozen) package's key names the object-format number, not the product build */
+    if (tp_is_frozen(p)) { tp_puts(in, "product_abi\t" PRODUCT_ABI "\nbaseline\t"); tp_puts(in, p->frozen); tp_puts(in, "\n"); }
+    else { tp_puts(in, "product_sha\t"); tp_puts(in, product_sha); tp_puts(in, "\n"); }
 }
 
 static void put_dep(TpBuf *in, const char *pkg, const char *required, const char *provided, const char *content) {
@@ -419,6 +425,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     for (i = 0; i < pk.ndep; i++) {
         Lib *L = &libs[nlibs];
         if (tp_load(root, pk.dep_pkg[i], &bdeps[i], why, sizeof why)) return say(2, "UNREADABLE", pk.dep_pkg[i], why);
+        if (tp_is_frozen(&pk) && !tp_is_frozen(&bdeps[i])) return say(5, "INCOMPATIBLE", pk.dep_pkg[i], "a versioned package may depend only on versioned packages");
         if (cx_fmt(path, sizeof path, "%s/%s@%s.tlib", outdir, bdeps[i].pkg, bdeps[i].version)) return 2;
         if (sy_exists(path) != 1) return say(5, "INCOMPATIBLE", path, "dependency tlib not built: build it first");
         rc = load_lib(L, path);
@@ -480,6 +487,7 @@ static int cmd_build(const char *pkg, const char *outdir, const char *cache, int
     mm_free(f);
     /* receipt */
     tp_put(&rcp, in.b, in.n);
+    if (tp_is_frozen(&pk)) { tp_puts(&rcp, "product_sha\t"); tp_puts(&rcp, product_sha); tp_puts(&rcp, "\n"); }   /* provenance only */
     tp_puts(&rcp, "api_sha\t"); tp_puts(&rcp, apisha); tp_puts(&rcp, "\ninput_sha\t"); tp_puts(&rcp, input); tp_puts(&rcp, "\n");
     tp_puts(&ct, pk.pkg); tp_puts(&ct, "\t"); tp_puts(&ct, pk.version); tp_puts(&ct, "\napi\t"); tp_puts(&ct, apisha); tp_puts(&ct, "\n");
     for (i = 0; i < pk.nunit; i++) {
@@ -985,7 +993,7 @@ int main(int argc, char **argv) {
         if (work && work[0] != '/') { if (cx_fmt(abs_work, sizeof abs_work, "%s/%s", cwd, work)) return 2; work = abs_work; }
         if (cachearg && cachearg[0] != '/') { if (cx_fmt(cache, sizeof cache, "%s/%s", cwd, cachearg)) return 2; }
         else if (cachearg) { if (cx_fmt(cache, sizeof cache, "%s", cachearg)) return 2; }
-        else if (cx_fmt(cache, sizeof cache, "%s/.cache/unisacc/tlib", sy_env_or("HOME", "."))) return 2;
+        else if (tp_cache_dir(cache, sizeof cache)) return 2;
         for (k = 0; k < ntl; k++)
             if (tl[k][0] != '/') { if (cx_fmt(abs_tl[k], 4400, "%s/%s", cwd, tl[k])) return 2; tl[k] = abs_tl[k]; }
         {
@@ -1004,11 +1012,24 @@ int main(int argc, char **argv) {
     if (tx_eqz(cmd, "prep")) {
         /* default --jobs 4 (par); a dependency enters the input sha by its api_sha: objects depend on the interface only */
         if (kitarg) { if (cx_fmt(outdir, sizeof outdir, "%s", kitarg)) return 2; }
-        else if (cx_fmt(outdir, sizeof outdir, "%s/out/tlib", root)) return 2;
+        else if (tp_kit_dir(root, outdir, sizeof outdir)) return 2;
         return cmd_prep(subject, outarg, outdir, par);
     }
     if (outarg) { if (cx_fmt(outdir, sizeof outdir, "%s", outarg)) return 2; }
-    else if (cx_fmt(outdir, sizeof outdir, "%s/out/tlib", root)) return 2;
-    if (tx_eqz(cmd, "kit")) return cmd_kit(outdir, cache, par, use_cache);
+    else if (tp_kit_dir(root, outdir, sizeof outdir)) return 2;
+    if (tx_eqz(cmd, "kit")) {
+        int kr = cmd_kit(outdir, cache, par, use_cache);
+        /* compatibility until the other consumers read tp_kit_dir: ROOT/out/tlib -> the kit dir
+           (a real directory left there is moved to out/tlib.legacy-PID once) */
+        if (kr == 0 && !outarg) {
+            char link[4400], old[4400];
+            sy_stat_t st;
+            if (cx_fmt(link, sizeof link, "%s/out/tlib", root) || cx_fmt(old, sizeof old, "%s/out/tlib.legacy-%d", root, sy_pid())) return 2;
+            if (sy_lstat(link, &st) == 0 && st.kind == 'd') (void)sy_rename(link, old);
+            if (sy_lstat(link, &st) == 0 && st.kind == 'l') (void)sy_unlink(link);
+            if (sy_lstat(link, &st) != 0) (void)sy_symlink(outdir, link);
+        }
+        return kr;
+    }
     return cmd_build(subject, outdir, cache, par, use_cache);
 }

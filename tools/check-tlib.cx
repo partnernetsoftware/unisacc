@@ -119,13 +119,15 @@ static int link_to(const char *target, const char *rel) {
 
 static char sha_a[65], sha_b[65], sha_c[65];
 
+static char frozen_a[80], frozen_b[80];   /* "" or "\t\t<sha>": the empty opaque field and the frozen field */
+
 static int table(const char *ver_a) {
     char t[2048];
     if (cx_fmt(t, sizeof t,
                "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\n"
-               "fx.a\t%s\t%s\tfa\tfa/bad.cx=fixture-excluded\t-\tfixture\n"
-               "fx.b\t0.1.0\t%s\tfb\t-\tfx.a@0.2.0\tfixture\n"
-               "fx.c\t0.1.0\t%s\tfc\t-\tfx.a@0.2.0\tfixture\n", ver_a, sha_a, sha_b, sha_c)) return -1;
+               "fx.a\t%s\t%s\tfa\tfa/bad.cx=fixture-excluded\t-\tfixture%s\n"
+               "fx.b\t0.1.0\t%s\tfb\t-\tfx.a@0.2.0\tfixture%s\n"
+               "fx.c\t0.1.0\t%s\tfc\t-\tfx.a@0.2.0\tfixture\n", ver_a, sha_a, frozen_a, sha_b, frozen_b, sha_c)) return -1;
     return put("build/tlib-packages.tsv", t);
 }
 
@@ -403,6 +405,44 @@ int main(int argc, char **argv) {
         prep = manifests("0.2.1");
         rc = run(tlib, ok1);
         ck(!prep && rc == 0, "table-restored-link-ok");
+    }
+    /* (6a) a versioned (frozen) package: its key and freshness do not name the product build.
+       fx.a gets a ninth-field sha; a build, then check --fresh with another product file stays fresh
+       (an unfrozen package would be STALE). A frozen fx.b over unfrozen fx.a is refused. */
+    if (!kit_mode) {
+        char o3[4400], c3[4400], t3[4400], junk[4400], fz[4400];
+        int rb, rf, rj, rg, rv;
+        if (cx_fmt(o3, sizeof o3, "%s/o3", work) || cx_fmt(c3, sizeof c3, "%s/c3", work) || cx_fmt(t3, sizeof t3, "%s/fx.a@0.2.1.tlib", o3) ||
+            cx_fmt(junk, sizeof junk, "%s/other-product", work) || cx_fmt(fz, sizeof fz, "%s", "0000000000000000000000000000000000000000000000000000000000000000")) return 2;
+        prep = put("../other-product", "not the product, only another sha\n");
+        cx_fmt(frozen_a, sizeof frozen_a, "\t\t%s", fz);
+        prep |= manifests("0.2.1");
+        {
+            char *b3[] = {"build", "fx.a", "--out", o3, "--cache", c3, 0};
+            char *k3[] = {"check", t3, "--fresh", "--product", junk, 0};
+            char *k4[] = {"check", t3, "--fresh", 0};
+            rb = run(tlib, b3);
+            rf = run(tlib, k3);
+            rj = run(tlib, k4);
+        }
+        ck(!prep && rb == 0 && sy_exists(t3) == 1, "frozen-build-ok");
+        ck(rj == 0 && rf == 0, "frozen-fresh-independent-of-product-sha");
+        {
+            char *k5[] = {"inspect", t3, 0};
+            rv = run(tlib, k5);
+            ck(rv == 0 && last && tx_find(last, (long)lastn, "product_sha\t", 12) >= 0 && tx_find(last, (long)lastn, "product_abi\t", 12) >= 0, "frozen-receipt-keeps-product-sha-as-provenance");
+        }
+        frozen_a[0] = 0;
+        cx_fmt(frozen_b, sizeof frozen_b, "\t\t%s", fz);
+        prep = manifests("0.2.1");
+        {
+            char *b4[] = {"build", "fx.b", "--out", o3, "--cache", c3, 0};
+            rg = run(tlib, b4);
+        }
+        ck(!prep && rg == 5, "frozen-refuses-unfrozen-dependency");
+        frozen_b[0] = 0;
+        prep = manifests("0.2.1");
+        ck(!prep, "frozen-table-restored");
     }
     /* (6b) incremental kit over the fixture packages (fx.c never builds: it is skipped each time).
        The tool's own sources are reached through a tools link; its image is built once.

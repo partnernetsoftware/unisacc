@@ -53,6 +53,7 @@ typedef struct {
     int ndep;
     char dep_pkg[TP_MAXD][64];
     char dep_ver[TP_MAXD][32];
+    char frozen[65];   /* '-' or a sha256: a frozen package's input key and freshness do not name the product */
 } TpPkg;
 
 typedef struct { char *b; long n; long cap; int bad; } TpBuf;
@@ -247,6 +248,24 @@ int tp_load(const char *root, const char *pkg, TpPkg *p, char *why, long wl) {
                             }
                             p->nopq++;
                         }
+                }
+                /* optional ninth field: '-' or a sha256 (frozen); parse only, absent means '-' */
+                p->frozen[0] = '-'; p->frozen[1] = 0;
+                {
+                    long zo = 0, zl = 0;
+                    if (!tx_field(b + i, e - i, '\t', 8, &zo, &zl) && zl > 0 &&
+                        !(zl == 1 && b[i + zo] == '-')) {
+                        long h;
+                        int hex = zl == 64;
+                        for (h = 0; hex && h < zl; h++) {
+                            char c = b[i + zo + h];
+                            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) hex = 0;
+                        }
+                        if (!hex || tx_copy(p->frozen, sizeof p->frozen, b + i + zo, zl)) {
+                            mm_free(b);
+                            return tp_fail(why, wl, "bad frozen field for ", pkg);
+                        }
+                    }
                 }
                 for (k = 0;; k++) {
                     long at;
@@ -622,4 +641,22 @@ int tp_rc_get(const char *r, long n, const char *key, int nth, int field, char *
         i = e + 1;
     }
     return 1;
+}
+
+/* 1 when package P is frozen (its table row carries a sha256 in the ninth field). */
+int tp_is_frozen(const TpPkg *p) { return p->frozen[0] && !(p->frozen[0] == '-' && !p->frozen[1]); }
+
+/* The tlib cache root: UNISACC_TLIB_CACHE, else ~/.cache/unisacc/tlib. 0, or -1 when too long. */
+int tp_cache_dir(char *dst, long cap) {
+    const char *v = sy_env("UNISACC_TLIB_CACHE");
+    if (v && v[0]) return cx_fmt(dst, (size_t)cap, "%s", v) ? -1 : 0;
+    return cx_fmt(dst, (size_t)cap, "%s/.cache/unisacc/tlib", sy_env_or("HOME", ".")) ? -1 : 0;
+}
+
+/* The kit directory of the checkout at absolute ROOT: CACHE/kit/<sha256 of the root path>. 0, or -1. */
+int tp_kit_dir(const char *root, char *dst, long cap) {
+    char c[4096], hex[65];
+    if (tp_cache_dir(c, sizeof c)) return -1;
+    tp_sha(root, (size_t)tx_len(root, TX_ZCAP), hex);
+    return cx_fmt(dst, (size_t)cap, "%s/kit/%s", c, hex) ? -1 : 0;
 }
