@@ -495,14 +495,14 @@ static int finish(Child *C, int ex, int code, int sig) {
    Preparable kinds: `NAME-tool:path` (-> tools/NAME.cx built native by the toolprep kit, else the product
    under tools/bound 55).  Everything else stays DEFERRED with a named reason (sha256 values, `streams`
    whose only producer here is a shim that fails tests/streams.cx reject contracts, and any name without a producer).
-   The builds run BEFORE the batch loop, at most PREP_PAR at a time, each bounded at PREP_SECS, and the
-   whole phase stops starting builds after PREP_BUDGET_MS (the rest are DEFERRED prebuild-budget; a rerun
+   The builds run BEFORE the batch loop, at most PREP_PAR at a time, each bounded at PREP_SECS (and
+   never past the run's own 54 s kill), and no build starts after PREP_BUDGET_MS from process start (the rest are DEFERRED prebuild-budget; a rerun
    resumes from the cache).  Identity = sha256 over the source use/literal closure plus the product sha;
    the result lives at out/prep-cache/NAME-ID16.{bin,rcpt}; a hit is re-verified by the file's own sha256.
    A receipt is never a PASS and a PASS is never cached. */
 #define PREP_PAR 3
 #define PREP_SECS 55
-#define PREP_BUDGET_MS 50000
+#define PREP_BUDGET_MS 38000
 typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[4400], src[600], why[200], sha[65], closure[65]; long ms; int cached; } Prep;
 enum { PK_TOOL = 1 };
 enum { PS_TODO = 0, PS_READY, PS_FAILED };
@@ -569,7 +569,7 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     if (prep_verify(P)) { P->state = PS_READY; P->cached = 1; }
     return nprep++;
 }
-typedef struct { int pid, ofd, efd, job; long t0; char tmp[4400]; Buf out, err; } PJob;
+typedef struct { int pid, ofd, efd, job, secs; long t0; char tmp[4400]; Buf out, err; } PJob;
 static int prep_start(PJob *J, int k) {
     Prep *P = &prep[k]; char product[4400], bound[4400], image[4400], srcabs[4400], pid_s[32];
     char *av[16]; int n = 0;
@@ -578,8 +578,13 @@ static int prep_start(PJob *J, int k) {
         || cx_fmt(pid_s, sizeof pid_s, "%d", sy_pid())
         || cx_fmt(J->tmp, sizeof J->tmp, "%s/%s-%s.%s.tmp", cachedir, P->name, P->id, pid_s)) return -1;
     {
-        static const char *script = "[ -x \"$2\" ] && \"$1\" 20 \"$2\" prep \"$3\" -o \"$4\" --root \"$5\" && exit 0; exec \"$1\" 55 sh \"$6\" \"$3\" -o \"$4\"";
-        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)script; av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product;
+        static char s_all[16], s_kit[16];
+        static const char *script = "[ -x \"$2\" ] && \"$1\" \"$8\" \"$2\" prep \"$3\" -o \"$4\" --root \"$5\" && exit 0; exec \"$1\" \"$7\" sh \"$6\" \"$3\" -o \"$4\"";
+        long left = (hard_deadline - (sy_now_ms() - t_main)) / 1000 - 2;   /* a build never outlives the run's own kill deadline */
+        J->secs = left < PREP_SECS ? (int)left : PREP_SECS;
+        if (J->secs < 6) return -2;
+        if (cx_fmt(s_all, sizeof s_all, "%d", J->secs) || cx_fmt(s_kit, sizeof s_kit, "%d", J->secs < 20 ? J->secs : 20)) return -1;
+        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)script; av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
     }
     av[n] = 0;
     J->job = k; J->t0 = sy_now_ms(); J->out.p = 0; J->out.n = J->out.cap = 0; J->err = J->out;
@@ -613,8 +618,11 @@ static void prebuild(const int *sel, int nsel) {
         sy_pollfd_t fds[2 * PREP_PAR]; int who[2 * PREP_PAR], isout[2 * PREP_PAR], nf = 0, m;
         while (nact < PREP_PAR && nextt < ntodo) {
             Prep *P = &prep[todo[nextt]];
-            if (sy_now_ms() - t0 >= PREP_BUDGET_MS) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "prebuild-budget=%s", P->name); deferred++; nextt++; continue; }
-            if (prep_start(&job[nact], todo[nextt]) < 0) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "spawn-failed=%s", P->name); failed++; nextt++; continue; }
+            if (sy_now_ms() - t_main >= PREP_BUDGET_MS) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "prebuild-budget=%s", P->name); deferred++; nextt++; continue; }
+            {   int sr = prep_start(&job[nact], todo[nextt]);
+                if (sr == -2) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "prebuild-budget=%s", P->name); deferred++; nextt++; continue; }
+                if (sr < 0) { P->state = PS_FAILED; cx_fmt(P->why, sizeof P->why, "spawn-failed=%s", P->name); failed++; nextt++; continue; }
+            }
             nact++; nextt++;
         }
         if (!nact) continue;
@@ -633,13 +641,13 @@ static void prebuild(const int *sel, int nsel) {
             if (isout[m]) job[c].ofd = -1; else job[c].efd = -1;
         }
         for (k = 0; k < nact; k++) {
-            int ex = 0, code = 0, sig = 0, over = sy_now_ms() - job[k].t0 > (PREP_SECS + 3) * 1000L;
+            int ex = 0, code = 0, sig = 0, over = sy_now_ms() - job[k].t0 > (job[k].secs + 3) * 1000L;
             if (over && (job[k].ofd >= 0 || job[k].efd >= 0)) {
                 char rep[128]; (void)kill_tree(job[k].pid, 0, 0, rep, sizeof rep);
                 if (job[k].ofd >= 0) sy_close(job[k].ofd);
                 if (job[k].efd >= 0) sy_close(job[k].efd);
                 job[k].ofd = job[k].efd = -1;
-                cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "build-timeout-%ds=%s", PREP_SECS, prep[job[k].job].name);
+                cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "build-timeout-%ds=%s", job[k].secs, prep[job[k].job].name);
                 (void)sy_wait_status(job[k].pid, 0, &ex, &code, &sig); prep_done(&job[k], 0); failed++;
                 job[k] = job[nact - 1]; nact--; k--; continue;
             }
@@ -684,10 +692,7 @@ static int run(const int *sel, int nsel, int jobs) {
         if (sy_mkdir(outparent, 0755) < 0) die("cannot make out/affected-PID");
     }
     printf("RUN_DIR\t%s\tjobs=%d\n", outparent + root_n + 1, jobs);
-    if (prep_on) {   /* materials first (bounded, up to PREP_PAR at once); the batch deadlines count from here */
-        prebuild(sel, nsel);
-        t_main = sy_now_ms();
-    }
+    if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once); the run's 45/54 s deadlines still count from process start */
     while (next < nsel || nrun) {
         sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
         long now = sy_now_ms();
@@ -818,6 +823,10 @@ int main(int argc, char **argv) {
         else usage();
     }
     if (src != 1 && src != 100) usage();
+    if (prep_on) {   /* the prebuild shares the 60 s command window: leave the kill sweep room to finish inside it */
+        if (start_deadline == 45000) start_deadline = 36000;
+        if (hard_deadline == 54000) hard_deadline = 42000;
+    }
     load_registry();
     if (!jobs) { int c = sy_ncpu(); jobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }
     if (src == 100) {   /* --ids: run (or list) exactly these */
