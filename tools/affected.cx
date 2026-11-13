@@ -29,6 +29,11 @@
    <TAB>elapsed_ms=..  No batch is started after 45 s; batches still running at 54 s are killed with their
    process groups (Linux: descendants found with pgrep -P) -- both are reported DEFERRED<TAB>id, to be run
    again with --ids.  A batch that declares materials is DEFERRED (run-batch needs them supplied).
+   AFFECTED_RUN also carries kit_ms=, prep_ms= and run_ms=: kit is the tlib kit pre-build, prep is the
+   material pre-build, run is start-to-finish of the batches; the three add up to elapsed_ms.  They exist
+   for tools/batch-cost.cx to attribute cold builds and link time, and change no decision.
+   tests/run-batch.cx prints BATCH_TIMING after BATCH_RUN with prep_ms/link_ms/run_ms/norm_ms/total_ms and
+   kit=hot|cold|fallback, so a single batch's phases are attributable without parsing its stderr.
    rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
    2 usage, registry or I/O error.
   Tier depth: the literal-hop depth follows --tier.  commit keeps the registry read cheap for every commit:
@@ -754,7 +759,7 @@ static void kit_prepare(void) {
 static int run(const int *sel, int nsel, int jobs) {
     Child ch[MAXJOBS]; int nrun = 0, next = 0, pass = 0, fail = 0, deferred = 0, k, m;
     char runner[4400], candidate[4400];
-    long t0 = sy_now_ms();
+    long t_start = sy_now_ms(), t0 = t_start, kit_ms = 0, prep_ms = 0;
     sy_child_subreaper();   /* orphans of a killed batch become our children, so the sweep can see them */
     if (cx_fmt(runner, sizeof runner, "%s/tests/run-batch.cx", root) || cx_fmt(candidate, sizeof candidate, "%s/unisacc.com", root)
         || cx_fmt(outparent, sizeof outparent, "%s/out/affected-%d", root, sy_pid())) die("path too long");
@@ -764,12 +769,17 @@ static int run(const int *sel, int nsel, int jobs) {
         if (sy_mkdir(outparent, 0755) < 0) die("cannot make out/affected-PID");
     }
     printf("RUN_DIR\t%s\tjobs=%d\n", outparent + root_n + 1, jobs);
-    kit_prepare();   /* the tlib kit once, before any batch: -j N batches then find it fresh and link from it */
-    t0 = sy_now_ms();   /* the kit step has its own 40 s bound: a stale kit (after a cx.base change) must not eat the batches' deadline, or a 20 s check is judged killed-at-deadline */
-    /* 同理,kit 消耗的时间不能从批次的 36/42 秒里扣:两个 deadline 都从 kit 之后重新计时。
+    {   long k0 = sy_now_ms();
+        kit_prepare();   /* the tlib kit once, before any batch: -j N batches then find it fresh and link from it */
+        kit_ms = sy_now_ms() - k0;
+    }
+    /* kit 与材料的时间都不从批次的 36/42 秒里扣:两个 deadline 从这里重新计时。
        实测:kit 重建吃满 40 秒时,后面的批全被 start-deadline / killed-at-deadline 丢掉。 */
-    t_main = t0;
-    if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once); the run's 45/54 s deadlines still count from process start */
+    t0 = sy_now_ms(); t_main = t0;
+    {   long p0 = sy_now_ms();
+        if (prep_on) prebuild(sel, nsel);   /* materials first (bounded, up to PREP_PAR at once) */
+        prep_ms = sy_now_ms() - p0;
+    }
     while (next < nsel || nrun) {
         sy_pollfd_t fds[2 * MAXJOBS]; int who[2 * MAXJOBS], isout[2 * MAXJOBS], nf = 0;
         long now = sy_now_ms();
@@ -829,7 +839,8 @@ static int run(const int *sel, int nsel, int jobs) {
             ch[k] = ch[nrun - 1]; nrun--; k--;
         }
     }
-    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\n", pass, fail, deferred, sy_now_ms() - t0);
+    printf("AFFECTED_RUN\tpass=%d\tfail=%d\tdeferred=%d\telapsed_ms=%ld\tkit_ms=%ld\tprep_ms=%ld\trun_ms=%ld\n",
+           pass, fail, deferred, sy_now_ms() - t_start, kit_ms, prep_ms, sy_now_ms() - t0 - prep_ms);
     return fail ? 1 : deferred ? 3 : 0;
 }
 
