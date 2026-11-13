@@ -61,6 +61,11 @@ function check(cmd: string, cwd: string): string | null {
     let k = 0;
     while (k < w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k])) k++;
     const first = (w[k] ?? "").replace(/^.*\//, "");
+    // 项目所有者 2026-11-13:只在 ~/repos/unisacc 里工作;禁止克隆/worktree/外部工作目录/out/ 下建子树
+    if (first === "git" && (w[k + 1] === "clone" || (w[k + 1] === "worktree" && w[k + 2] === "add")))
+      return "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
+    if (first === "mkdir" && w.slice(k + 1).some((a) => /(^|\/)out\/[^\s]+|\/work(\/|$)|^~\/work|cc-work/.test(a)))
+      return "mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录";
     if (["git", "gh", "mux"].includes(first)) continue;
     const args = w.slice(k + 1);
     const fileArgs = () => args.filter((a) => !a.startsWith("-") && a !== "");
@@ -95,7 +100,7 @@ try {
   if (!cmd) process.exit(0);
   const why = check(cmd, input?.cwd ?? "");
   if (why) {
-    console.error(`GUARD-EDIT-V1 拒绝:${why}。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 out/ 或 /tmp。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...`);
+    console.error(`GUARD-EDIT-V1 拒绝:${why}。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。追加账本请用 sh ./unisacc.com tools/ledger-add.cx -- --add ...`);
     process.exit(2);
   }
 } catch {
