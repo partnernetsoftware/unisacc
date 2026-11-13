@@ -373,10 +373,10 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
    首次从 ROOT/tools/entry-build.cx 拷入,OUT/entry-build.pin 记工具名、输出目录与 src_sha;之后每次核对
    副本字节与输出目录,变了拒绝 "REFUSE chain-tool pin mismatch",pin 被拷到别的输出目录拒绝
    "REFUSE chain-tool pin dir mismatch"。检出内 entry-build.cx 之后再改不影响本输出。 */
-static const char *eb_pinned(const char *root, const char *outdir, char *copy, size_t cap) {
+static const char *src_pinned(const char *root, const char *outdir, const char *name, char *copy, size_t cap) {
     char src[4400], pin[4400], tmp[4400], pintmp[4400], hash[65], text[9000];
-    if (cx_fmt(src, sizeof src, "%s/tools/entry-build.cx", root) || cx_fmt(copy, cap, "%s/entry-build.pin.cx", outdir) ||
-        cx_fmt(pin, sizeof pin, "%s/entry-build.pin", outdir) || cx_fmt(tmp, sizeof tmp, "%s.new", copy) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
+    if (cx_fmt(src, sizeof src, "%s/tools/%s.cx", root, name) || cx_fmt(copy, cap, "%s/%s.pin.cx", outdir, name) ||
+        cx_fmt(pin, sizeof pin, "%s/%s.pin", outdir, name) || cx_fmt(tmp, sizeof tmp, "%s.new", copy) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin)) die("path", "eb pin");
     int lock = candidate_lock(copy, "pin");
     size_t n = 0; char *old = cx_read(pin, &n);
     if (old) {
@@ -393,12 +393,25 @@ static const char *eb_pinned(const char *root, const char *outdir, char *copy, s
         if (cx_write(tmp, sb, sn) || sy_rename(tmp, copy)) die("publish eb pin copy", copy);
         free(sb);
         step_hash(copy, hash);
-        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=entry-build\nout=%s\nsrc_sha=%s\nnative_sha=-\n", outdir, hash)) die("eb pin record", pin);
+        if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=-\n", name, outdir, hash)) die("eb pin record", pin);
         if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
-        sy_printf("CHAIN_TOOL_PIN\ttool=entry-build\tbuilt=%s\tsha=%s\n", copy, hash);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, copy, hash);
     }
     if (sy_close(lock)) die("candidate unlock", copy);
     return copy;
+}
+static const char *eb_pinned(const char *root, const char *outdir, char *copy, size_t cap) {
+    return src_pinned(root, outdir, "entry-build", copy, cap);
+}
+/* DSG-DRV1 第 2 片: kernel-route 与 asm-source 同样钉源码副本,路径经环境变量交给 chain-step
+   (chain-step 的两处 kernel-route 取用点与 kernel-route 取 asm-source 的取用点读这两个变量,未设置时退回快照)。 */
+static void kr_pin_env(const char *root, const char *outdir) {
+    char kr[4400], as[4400], probe[4400];
+    /* 夹具根没有这两个源文件(fresh-out 等只造最小假根):不钉,环境变量不设,chain-step 退回快照路径 */
+    if (cx_fmt(probe, sizeof probe, "%s/tools/kernel-route.cx", root) || fsize(probe) < 0) return;
+    if (cx_fmt(probe, sizeof probe, "%s/tools/asm-source.cx", root) || fsize(probe) < 0) return;
+    if (!src_pinned(root, outdir, "kernel-route", kr, sizeof kr) || !src_pinned(root, outdir, "asm-source", as, sizeof as)) die("path", "kr pin");
+    if (sy_setenv("UNISACC_KERNEL_ROUTE_SRC", kr, 1) || sy_setenv("UNISACC_ASM_SOURCE_SRC", as, 1)) die("env", "kr pin");
 }
 /* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
    argv through a fake ROOT/unisacc.com ("TOOL -- ARGS") and produce no receipt. A chain run
@@ -413,6 +426,7 @@ static int step_secs(const char *root, char **args, int secs) {
     int n = 0, i = 0;
     if (step_out) {
         step_pin(root, secs);
+        kr_pin_env(root, step_out);
         v[n++] = step_native;
     } else {
         if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
@@ -2189,6 +2203,14 @@ int main(int argc, char **argv) {
         char cp[4400];
         eb_pinned(argv[2], argv[3], cp, sizeof cp);
         sy_printf("EB_PIN\t%s\n", cp);
+        return 0;
+    }
+    if (argc == 5 && tx_eqz(argv[1], "--src-pin-fixture")) {
+        /* 夹具入口: --src-pin-fixture ROOT OUT NAME,钉 NAME(kernel-route 或 asm-source)源码副本并打印路径 */
+        char cp[4400];
+        if (!tx_eqz(argv[4], "kernel-route") && !tx_eqz(argv[4], "asm-source")) die("REFUSE not a source-pinned tool", argv[4]);
+        src_pinned(argv[2], argv[3], argv[4], cp, sizeof cp);
+        sy_printf("SRC_PIN\t%s\n", cp);
         return 0;
     }
     if (argc == 9 && tx_eqz(argv[1], "--g2g3-fixture")) {

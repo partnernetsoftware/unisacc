@@ -153,6 +153,52 @@ int main(int argc, char **argv) {
         ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), "entry-build-changed-dir-refused");
         free(l); free(cb); free(pb);
     }
+    /* kernel-route 与 asm-source 源码钉(DSG-DRV1 第 2 片):--src-pin-fixture ROOT OUT NAME */
+    {
+        const char *names[2] = {"kernel-route", "asm-source"};
+        for (int k = 0; k < 2; k++) {
+            const char *nm = names[k];
+            char kroot[4400], ktools[4400], ksrc[4400], ko1[4400], ko2[4400], kcp[4400], kcp2[4400], kpin[4400], kpin2[4400], lab[200];
+            if (cx_fmt(kroot, sizeof kroot, "%s/kroot-%s", od, nm) || cx_fmt(ktools, sizeof ktools, "%s/tools", kroot) ||
+                cx_fmt(ksrc, sizeof ksrc, "%s/tools/%s.cx", kroot, nm) || cx_fmt(ko1, sizeof ko1, "%s/kout1-%s", od, nm) ||
+                cx_fmt(ko2, sizeof ko2, "%s/kout2-%s", od, nm) || cx_fmt(kcp, sizeof kcp, "%s/%s.pin.cx", ko1, nm) ||
+                cx_fmt(kcp2, sizeof kcp2, "%s/%s.pin.cx", ko2, nm) || cx_fmt(kpin, sizeof kpin, "%s/%s.pin", ko1, nm) ||
+                cx_fmt(kpin2, sizeof kpin2, "%s/%s.pin", ko2, nm)) return 2;
+            sy_mkdir(kroot, 0755); sy_mkdir(ktools, 0755); sy_mkdir(ko1, 0755); sy_mkdir(ko2, 0755);
+            char *v1 = "int main(void){ return 0; }\n", *v2 = "int main(void){ return 3; }\n";
+            if (cx_write(ksrc, v1, strlen(v1))) return 2;
+            char *l = 0;
+            char *ev[] = {(char *)cc, "--src-pin-fixture", kroot, ko1, (char *)nm, 0};
+            int rc = run(ev, 50, &l);
+            size_t cn = 0; char *cb = cx_read(kcp, &cn);
+            size_t pn = 0; char *pb = cx_read(kpin, &pn);
+            cx_fmt(lab, sizeof lab, "%s-first-pin-copy-recorded", nm);
+            ck(rc == 0 && cb && cn == strlen(v1) && !memcmp(cb, v1, cn) && pb && has_sub(pb, "\nsrc_sha="), lab);
+            free(l);
+            if (cx_write(ksrc, v2, strlen(v2))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            size_t cn2 = 0; char *cb2 = cx_read(kcp, &cn2);
+            cx_fmt(lab, sizeof lab, "%s-checkout-edit-keeps-pin", nm);
+            ck(rc == 0 && cb2 && cn2 == strlen(v1) && !memcmp(cb2, v1, cn2), lab);
+            free(l); free(cb2);
+            if (cx_write(kcp, v2, strlen(v2))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-changed-input-refused", nm);
+            ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin mismatch"), lab);
+            free(l);
+            if (cx_write(kcp, v1, strlen(v1))) return 2;
+            l = 0; rc = run(ev, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-restored-input-reused", nm);
+            ck(rc == 0, lab);
+            free(l);
+            if (cx_write(kcp2, v1, strlen(v1)) || cx_write(kpin2, pb, pn)) return 2;
+            char *ev2[] = {(char *)cc, "--src-pin-fixture", kroot, ko2, (char *)nm, 0};
+            l = 0; rc = run(ev2, 50, &l);
+            cx_fmt(lab, sizeof lab, "%s-changed-dir-refused", nm);
+            ck(rc != 0 && l && has_sub(l, "REFUSE chain-tool pin dir mismatch"), lab);
+            free(l); free(cb); free(pb);
+        }
+    }
     printf("CHECK_CHAIN_TOOL_PIN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

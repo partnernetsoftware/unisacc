@@ -308,16 +308,27 @@ static int cs_routes_declare(const char *ctx, const char *models, const char *di
     sy_printf("PREPARED\tchain-declaration\t%s\trows=%ld\n", rp, rows);
     return 0;
 }
+/* DSG-DRV1 第 2 片: kernel-route 源码取钉住副本(UNISACC_KERNEL_ROUTE_SRC,由 candidate-chain 按输出目录钉 HEAD),
+   未设置(夹具/直接调用)退回快照 s;非零按退出类处理:124(超时)透传,其余(含 rc 2 确定性缺陷)die。 */
+static int cs_kr_tool(const char *s, char *tool, size_t cap) {
+    const char *p = sy_env("UNISACC_KERNEL_ROUTE_SRC");
+    if (p && *p) return cx_fmt(tool, cap, "%s", p);
+    return cx_fmt(tool, cap, "%s/tools/kernel-route.cx", s);
+}
+static void cs_kr_rc(int rc, const char *kdir) {
+    if (rc == 124) { sy_eprintf("chain-step: kernel-route hit its bound: %s\n", kdir); sy_exit(124); }
+    if (rc) cs_die("kernel-route", kdir);
+}
 /* kernels/: kernel-route 现编两 ISA。 */
 static int cs_routes_kernels(const char *s, const char *out) {
     char kdir[4400], iso[4400], launcher[4400], tool[4400], p[4400], h[65], to[4400];
     char *v[8]; int n = 0, a;
     if (cx_fmt(kdir, sizeof kdir, "%s/kernel-route", out)) cs_die("path", out);
     if (cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", s)) cs_die("path", s);
-    if (cx_fmt(tool, sizeof tool, "%s/tools/kernel-route.cx", s)) cs_die("path", s);
+    if (cs_kr_tool(s, tool, sizeof tool)) cs_die("path", s);
     v[n++] = (char *)"sh"; v[n++] = launcher; v[n++] = tool; v[n++] = (char *)"--";
     v[n++] = (char *)s; v[n++] = kdir; v[n] = 0;
-    if (cs_run(v, ".")) cs_die("kernel-route", kdir);
+    cs_kr_rc(cs_run(v, "."), kdir);
     if (cx_fmt(p, sizeof p, "%s/kernels", out)) cs_die("path", out);
     if (sy_mkdir(p, 0755) && cs_file_size(p) < 0) cs_die("mkdir", p);
     for (a = 0; a < 2; a++) {
@@ -835,13 +846,13 @@ static int cs_fp_kernels(const char *s, const char *dir, const char *ctor, const
     if (sy_realpath(ctor, actual_ctor, sizeof actual_ctor) < 0) cs_die("REFUSE kernel constructor resolution", ctor);
     {int fd;char hdr[4];fd=sy_open(ctor,O_RDONLY,0);if(fd<0||sy_read_full(fd,hdr,4)||sy_close(fd)||memcmp(hdr,"\177ELF",4))cs_die("REFUSE kernel phase requires native ELF constructor",ctor);}
     if (cx_fmt(kdir, sizeof kdir, "%s/kernel-route", dir)) cs_die("path", dir);
-    if (cx_fmt(tool, sizeof tool, "%s/tools/kernel-route.cx", s)) cs_die("path", s);
+    if (cs_kr_tool(s, tool, sizeof tool)) cs_die("path", s);
     cs_sha(ctor, declared);
     if (sy_setenv("UNISA_CONTAINER", pkg, 1)) cs_die("kernel package", pkg);
     v[n++] = (char *)ctor; v[n++] = tool; v[n++] = (char *)"--";
     v[n++] = (char *)s; v[n++] = kdir; v[n++] = "--constructor"; v[n++] = (char *)ctor;
     v[n++] = "--constructor-sha"; v[n++] = declared; v[n++] = "--package"; v[n++] = (char *)pkg; v[n] = 0;
-    if (cs_run(v, ".")) cs_die("kernel-route", kdir);
+    cs_kr_rc(cs_run(v, "."), kdir);
     if (cx_fmt(receipt, sizeof receipt, "%s/route.tsv", kdir) || cx_fmt(needle, sizeof needle, "\nconstructor_sha\t%s\n", declared)) cs_die("receipt path", kdir);
     /* Equal bytes do not imply equal generation roles: require the explicit selector too. */
     if (cx_fmt(selector, sizeof selector, "\nconstructor\t%s\nconstructor_path\t%s\n", actual_ctor, actual_ctor)) cs_die("receipt constructor path", ctor);
