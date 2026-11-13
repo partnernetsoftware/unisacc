@@ -35,10 +35,10 @@ int main(void) {
     int rc;
     if (!mkdtemp(d)) { printf("FAIL\tcheck-post-publish-check.mkdtemp\n"); return 1; }
     put(d, "fgit.sh", "D=$1; shift\ncase \"$*\" in\n*ls-remote*refs/heads/main*) cat \"$D/main.txt\";;\n*ls-remote*refs/tags*) cat \"$D/tags.txt\"; exit 0;;\n*merge-base*) echo abcdef0123456789;;\n*log*) printf 'aaaaaaaaaa one\\nbbbbbbbbbb two\\n';;\nesac\n");
-    put(d, "fgh.sh", "D=$1; shift\n[ -f \"$D/ghfail\" ] && exit 1\ncase \"$*\" in\n*\"--json assets\"*) cat \"$D/assets.txt\";;\n*\"--json body\"*) cat \"$D/body.txt\";;\nesac\n");
+    put(d, "fgh.sh", "D=$1; shift\n[ -f \"$D/ghfail\" ] && exit 1\ncase \"$*\" in\n*\"releases/tags\"*) cat \"$D/assets.txt\";;\n*\"release download\"*) while [ $# -gt 0 ]; do [ \"$1\" = -D ] && O=$2; shift; done; cp \"$D\"/dl/* \"$O\"/;;\n*\"--json body\"*) cat \"$D/body.txt\";;\nesac\n");
     put(d, "cand.tsv", "repo\ttag\tape\tape_sha256\tpkg\tpkg_sha256\nr\tv9.9.9\tu.com\taa11\tpkg.bin\tbb22\n");
     put(d, "notes.md", "# T\n\nline3\n");
-    put(d, "body.txt", "# T\n\nline3\n");
+    put(d, "body.txt", "# T\n\nline3\n\n");
     put(d, "assets.txt", "u.com\tsha256:aa11\npkg.bin\tsha256:bb22\n");
     put(d, "main.txt", M "\trefs/heads/main\n");
     put(d, "tags.txt", T "\trefs/tags/v9.9.9\n");
@@ -57,14 +57,30 @@ int main(void) {
     put(d, "assets.txt", "u.com\tsha256:ffff\npkg.bin\tsha256:bb22\n");
     rc = pc(d, "--expect-main " M, out, sizeof out);
     ck(rc == 1 && strstr(out, "assets\tDIFF\tpairs=2 match=1 digest-differs=1"), "asset_digest_diff_rc1");
+    /* real gh 2.45 shape: asset digest field empty -> UNKNOWN, never OK or DIFF */
+    put(d, "assets.txt", "u.com\t\npkg.bin\t\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 3 && strstr(out, "assets\tUNKNOWN") && strstr(out, "missing=2") && !strstr(out, "assets\tOK"), "digest_absent_unknown_rc3");
+    /* --download: assets hashed locally from downloaded files (sha256 of 'a\n' and 'b\n') */
+    (void)system("true");
+    cx_fmt(c, sizeof c, "mkdir -p %s/dl", d); (void)system(c);
+    put(d, "cand.tsv", "repo\ttag\tape\tape_sha256\tpkg\tpkg_sha256\nr\tv9.9.9\tu.com\t87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7\tpkg.bin\t0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f\n");
+    cx_fmt(c, sizeof c, "%s/dl/u.com", d); put(d, "dl/u.com", "a\n");
+    put(d, "dl/pkg.bin", "b\n");
+    rc = pc(d, "--download --expect-main " M, out, sizeof out);
+    ck(rc == 0 && strstr(out, "assets\tOK\tpairs=2 match=2"), "download_ok_rc0");
+    put(d, "dl/pkg.bin", "c\n");
+    rc = pc(d, "--download --expect-main " M, out, sizeof out);
+    ck(rc == 1 && strstr(out, "assets\tDIFF\tpairs=2 match=1 digest-differs=1"), "download_diff_rc1");
+    put(d, "cand.tsv", "repo\ttag\tape\tape_sha256\tpkg\tpkg_sha256\nr\tv9.9.9\tu.com\taa11\tpkg.bin\tbb22\n");
     put(d, "assets.txt", "pkg.bin\tsha256:bb22\n");
     rc = pc(d, "--expect-main " M, out, sizeof out);
     ck(rc == 3 && strstr(out, "assets\tUNKNOWN") && strstr(out, "missing=1"), "asset_missing_unknown_rc3");
     put(d, "assets.txt", "u.com\tsha256:aa11\npkg.bin\tsha256:bb22\n");
-    put(d, "body.txt", "# T\n\nline3 changed\n");
+    put(d, "body.txt", "# T\n\nline3 changed\n\n");
     rc = pc(d, "--expect-main " M, out, sizeof out);
     ck(rc == 1 && strstr(out, "body\tDIFF"), "body_diff_rc1");
-    put(d, "body.txt", "# T\n\nline3\n");
+    put(d, "body.txt", "# T\n\nline3\n\n");
     put(d, "tags.txt", T "\trefs/tags/v9.9.9-src\n");
     rc = pc(d, "--expect-main " M, out, sizeof out);
     ck(rc == 3 && strstr(out, "tag\tUNKNOWN\ttag-absent") && !strstr(out, "DIFF"), "src_tag_not_tag_unknown_rc3");
