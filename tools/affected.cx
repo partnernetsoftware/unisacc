@@ -174,14 +174,38 @@ static int lookup(const char *key, const char *given, int create) {
     }
 }
 /* REL repo-relative (or absolute): its node */
+/* 同一次运行里同一拼写只 realpath 一次、同一字面量 token 只 stat 一次:
+   1034 个批共享大量同名源(尤其 cx/sys/*),不做记忆时每批都要重做这些系统调用。 */
+static char *spell[8192]; static int spell_node[8192];
+static int spell_get(const char *rel) {
+    unsigned long h = hash(rel) & 8191; int i;
+    for (i = 0; i < 8192; i++) {
+        unsigned long s = (h + (unsigned long)i) & 8191;
+        if (!spell[s]) return -1;
+        if (tx_eqz(spell[s], rel)) return spell_node[s];
+    }
+    return -1;
+}
+static void spell_put(const char *rel, int ni) {
+    unsigned long h = hash(rel) & 8191; int i;
+    for (i = 0; i < 8192; i++) {
+        unsigned long s = (h + (unsigned long)i) & 8191;
+        if (!spell[s]) { spell[s] = keep(rel, tx_len(rel, 8192)); spell_node[s] = ni; return; }
+        if (tx_eqz(spell[s], rel)) { spell_node[s] = ni; return; }
+    }
+}
 static int path_node(const char *rel, int create) {
-    char abs[8192], real[4096]; int r; const char *given = rel;
+    char abs[8192], real[4096]; int r, cached; const char *given = rel;
+    if (rel[0] != '/' && (cached = spell_get(rel)) >= 0) return cached;
     if (rel[0] == '/') { if (cx_fmt(abs, sizeof abs, "%s", rel)) die("path too long"); }
     else if (cx_fmt(abs, sizeof abs, "%s/%s", root, rel)) die("path too long");
     if (rel[0] == '/' && tx_prefix(rel, tx_len(rel, 8192), root, root_n) && rel[root_n] == '/') given = rel + root_n + 1;
     r = sy_realpath(abs, real, sizeof real);
     if (r < 0 && r != -ENOENT && r != -ENOTDIR) fprintf(stderr, "NOTE\trealpath\t%s\terr=%d\n", rel, r);
-    return lookup(r >= 0 ? real : abs, given, create);
+    {   int ni = lookup(r >= 0 ? real : abs, given, create);
+        if (create && rel[0] != '/') spell_put(rel, ni);
+        return ni;
+    }
 }
 static const char *display(int ni) {
     const char *k = node[ni].key;
