@@ -1,12 +1,19 @@
 /* tests/stream/cand-unit-compile.cx -- a candidate product compiles the unit objects its own next
  * generation needs (the chain's g2 closure phase), before any chain is started.
  *
- *   sh ./unisacc.com tests/stream/cand-unit-compile.cx -- OUT CAND
+ *   sh ./unisacc.com tests/stream/cand-unit-compile.cx -- OUT BASE CAND
  *
  * OUT   scratch directory (OUT/cand-unit-compile, overwritten).
+ * BASE  the command of the 0.0.58 product, e.g. "sh /path/unisacc.com".
  * CAND  the command of the candidate product, e.g. /path/_b1/lnx-x86_64/candidate.
  * Run from the repository root with UNISA_JOBS=1 and without UNISA_CONTAINER. Without CAND the
  * check refuses (rc 2): its batch row stays PLANNED until the candidate is installed.
+ *
+ * C units that call a function of another unit with a struct by value in its signature (the
+ * second candidate still rejected them, 0.0.58 compiles them). Embedded fixtures: sret.c and
+ * n1.c (struct returned), sarg.c and n2.c (struct passed), hdr.c (both, prototypes from the
+ * included user header s.h). For lnx/x86_64 and lnx/arm64 each is compiled -c -b T -funit by
+ * BASE and by CAND: both rc 0, CAND without a diagnostic, and the two objects the same bytes.
  *
  * Every source is compiled as the chain compiles a closure member:
  *   CAND -O2 -c -b lnx/x86_64 -funit FILE -o OUT/cand-unit-compile/N.o
@@ -26,7 +33,17 @@ static const char *cu_fixed[] = {
     "src/drive.cx", "src/drivelink.cx", "src/drivestream.cx",
     "cx/runtime/tape_frame.cx", "tools/limits-gen.cx"
 };
+static const char *cu_fix[][2] = {
+    {"s.h", "typedef struct { const unsigned char *p; long n; } S;\nS foo(void);\nlong bar(S);\n"},
+    {"sret.c", "typedef struct { const unsigned char *p; long n; } S;\nS foo(void);\nlong f(void) { S s = foo(); return s.n; }\n"},
+    {"sarg.c", "typedef struct { const unsigned char *p; long n; } S;\nlong foo(S);\nlong f(void) { S s; s.p = 0; s.n = 1; return foo(s); }\n"},
+    {"n1.c", "struct S { int a; };\nstruct S foo(void);\nint f(void) { struct S s = foo(); return s.a; }\n"},
+    {"n2.c", "struct S { int a; };\nint foo(struct S);\nint f(void) { struct S s; s.a = 1; return foo(s); }\n"},
+    {"hdr.c", "#include \"s.h\"\nlong f(void) { S s = foo(); return bar(s); }\n"}
+};
+static const char *cu_ctgt[] = {"lnx/x86_64", "lnx/arm64"};
 static char cu_dir[4400];
+static char cu_base[2000];
 static char cu_cand[2000];
 static int cu_passed, cu_failed, cu_n;
 
@@ -65,12 +82,33 @@ static void cu_one(const char *src) {
     free(err);
 }
 
+/* One C fixture for one target: BASE and CAND objects, both rc 0, CAND quiet, same bytes. */
+static void cu_cunit(const char *src, const char *tgt, int ti) {
+    char cmd[9000], stem[40], *err = 0;
+    size_t errn = 0, k;
+    int rb, rc, same;
+    for (k = 0; src[k] && src[k] != '.' && k < sizeof stem - 1; k++) stem[k] = src[k];
+    stem[k] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && exec env -u UNISA_CONTAINER UNISA_JOBS=1 %s -c -b %s -funit %s -o b%d-%s.o", cu_dir, cu_base, tgt, src, ti, stem)) cu_die("cmd");
+    rb = cu_sh(cmd, 0, 0, 0, 0);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && exec env -u UNISA_CONTAINER UNISA_JOBS=1 %s -c -b %s -funit %s -o c%d-%s.o", cu_dir, cu_cand, tgt, src, ti, stem)) cu_die("cmd");
+    rc = cu_sh(cmd, &err, &errn, 0, 0);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && test -s c%d-%s.o && cmp -s b%d-%s.o c%d-%s.o", cu_dir, ti, stem, ti, stem, ti, stem)) cu_die("cmd");
+    same = rb == 0 && rc == 0 && cu_sh(cmd, 0, 0, 0, 0) == 0;
+    printf("%s\tC unit, by-value struct extern: BASE rc0, CAND rc0 quiet, objects cmp same\t%s %s\tbase_rc=%d cand_rc=%d\n",
+           same && errn == 0 ? "PASS" : "FAIL", tgt, src, rb, rc);
+    if (err && errn) printf("STDERR\t%s %s\t%.*s", tgt, src, (int)(errn > 400 ? 400 : errn), err);
+    if (same && errn == 0) cu_passed++; else cu_failed++;
+    free(err);
+}
+
 int main(int argc, char **argv) {
     char cmd[4800], *list = 0, *p, *e;
-    size_t ln = 0, i;
+    size_t ln = 0, i, t;
     int shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0, streams = 0;
-    if (argc < 3 + shift) cu_die("usage: cand-unit-compile.cx -- OUT CAND (the candidate is required)");
-    if (cx_fmt(cu_dir, sizeof cu_dir, "%s/cand-unit-compile", argv[1 + shift]) || cx_fmt(cu_cand, sizeof cu_cand, "%s", argv[2 + shift])) cu_die("args");
+    if (argc < 4 + shift) cu_die("usage: cand-unit-compile.cx -- OUT BASE CAND (the candidate is required)");
+    if (cx_fmt(cu_dir, sizeof cu_dir, "%s/cand-unit-compile", argv[1 + shift]) || cx_fmt(cu_base, sizeof cu_base, "%s", argv[2 + shift]) ||
+        cx_fmt(cu_cand, sizeof cu_cand, "%s", argv[3 + shift])) cu_die("args");
     if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s' && mkdir -p '%s'", cu_dir, cu_dir) || cu_sh(cmd, 0, 0, 0, 0)) cu_die("scratch");
     if (!realpath(cu_dir, cmd)) cu_die("scratch path");
     if (cx_fmt(cu_dir, sizeof cu_dir, "%s", cmd)) cu_die("scratch path");
@@ -91,6 +129,12 @@ int main(int argc, char **argv) {
     /* item.cx and pipe.cx are the known members; fewer means the listing is not the tree's */
     if (streams < 2) { printf("FAIL\tcx/stream sources listed (at least 2)\t-\tn=%d\n", streams); cu_failed++; }
     for (i = 0; i < sizeof cu_fixed / sizeof cu_fixed[0]; i++) cu_one(cu_fixed[i]);
+    for (i = 0; i < sizeof cu_fix / sizeof cu_fix[0]; i++) {
+        char f[4600];
+        if (cx_fmt(f, sizeof f, "%s/%s", cu_dir, cu_fix[i][0]) || cx_write(f, cu_fix[i][1], strlen(cu_fix[i][1]))) cu_die("fixture write");
+    }
+    for (t = 0; t < sizeof cu_ctgt / sizeof cu_ctgt[0]; t++)
+        for (i = 1; i < sizeof cu_fix / sizeof cu_fix[0]; i++) cu_cunit(cu_fix[i][0], cu_ctgt[t], (int)t);
     printf("CAND_UNIT_COMPILE_SUMMARY\tpassed=%d\tfailed=%d\n", cu_passed, cu_failed);
     if (cu_failed) return 1;
     printf("CAND_UNIT_COMPILE\n");
