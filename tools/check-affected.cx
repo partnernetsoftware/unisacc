@@ -143,7 +143,7 @@ static int others(const char *out) {
 
 
 int main(int argc, char **argv) {
-    static char o[OUTCAP], p[OUTCAP];
+    static char o[OUTCAP], p[OUTCAP], q[OUTCAP], q2[OUTCAP];
     int rc, rc2;
     {   int k;
         for (k = 1; k < argc; k++) {
@@ -270,6 +270,26 @@ int main(int argc, char **argv) {
           rc = tool(c, p, OUTCAP);
           ck(rc == 0 && has(p, "AFFECTED\tsource-job-union\twhy=exec/tapeframe/frame-result.tsv\tvia=table\n")
              && !has(p, "AFFECTED\ttape-gap-tool\t"), "new-static-frame-reaches-real-consumer"); }
+        {   /* 被字面量点到的工具自己再点名的文件也要算进来:A -> release-ape.cx -> ape-pack.cx,
+               闭包只跟一层时这里只选出 chain-fresh-out 一批(实测改前 batches=1)。 */
+            char *c[] = {"--files", "tools/ape-pack.cx", "--list-only", 0};
+            rc = tool(c, p, OUTCAP);
+            ck(rc == 0 && has(p, "AFFECTED\trelease-ape-replacements\twhy=tools/ape-pack.cx\tvia=literal")
+               && num(p, "\tbatches=") > 1, "spawn-literal-transitive");
+        }
+        {   /* 深度随档位:commit 只多跟一层(上限 4 批,防拖慢提交),daily 与 release 无限传递并去环,
+               必须同时选中数 >= commit 档且到得了三跳批(candidate-chain 由 chain-run 点名、
+               chain-step 再点名 ape-pack 那一路)。 */
+            char *cc[] = {"--files", "tools/ape-pack.cx", "--tier", "commit", 0};
+            char *cd2[] = {"--files", "tools/ape-pack.cx", "--tier", "daily", 0};
+            char *cr[] = {"--files", "tools/ape-pack.cx", "--tier", "release", 0};
+            rc = tool(cc, p, OUTCAP); int nc = num(p, "batches=");
+            rc |= tool(cd2, q, OUTCAP); int nd = num(q, "\tbatches=");
+            rc |= tool(cr, q2, OUTCAP); int nr = num(q2, "batches=");
+            ck(rc == 0 && nc >= 1 && nc <= 4, "literal-depth-commit-capped");
+            ck(nd >= nc && nr >= nc && has(q, "AFFECTED\tcandidate-chain\t") && has(q2, "AFFECTED\tchain-run\t")
+               && !has(p, "AFFECTED\tcandidate-chain\t"), "literal-depth-daily-release-unbounded");
+        }
     }
     }
     printf("CHECK_AFFECTED\tpart=%s\tfailed=%d\n", part_wanted, failed);

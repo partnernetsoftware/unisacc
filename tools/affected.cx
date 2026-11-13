@@ -15,8 +15,10 @@
               cx/compiler/cxmod.cx does: beside the using file, else by the nearest cxroot.tsv -- cxlib.cxroot);
      literal  named inside a string literal of a root source as a repo-relative path that exists (a leading ./
               or / is dropped; a directory with two or more components matches every file below it);
-     literal-use  in the use closure of a .cx file named that way (a check that spawns a tool);
-     arg / arg-use  the same for a path token of the args field;
+    literal-use  in the use closure of a .cx file named that way (a check that spawns a tool); the file so
+             named is itself a tool, so its own path literals count too (one more hop at --tier commit, the
+             full transitive closure at every other tier -- see `Tier depth` below);
+    arg / arg-use  the same for a path token of the args field;
      table    observed exec/*.tsv generator input of an exactly named recipe/job/artifact (see below).
    Files are compared by sy_realpath, so two link spellings of one file are one file.
    Prints AFFECTED<TAB>id<TAB>why=FILE<TAB>via=KIND per batch (the strongest match, first changed file on a
@@ -29,6 +31,11 @@
    again with --ids.  A batch that declares materials is DEFERRED (run-batch needs them supplied).
    rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
    2 usage, registry or I/O error.
+  Tier depth: the literal-hop depth follows --tier.  commit keeps the registry read cheap for every commit:
+  one extra hop (a changed tool's own literals, so a two-hop defect like check-release-ape -> ape-pack is
+  still caught) but no transitive closure.  daily, release, and every invocation without --tier take the
+  full transitive closure, decycled by the (epoch, via) monotonicity in mark(): a node re-enters only when
+  its via strengthens.  An unknown tier name is a usage error.
    --users FILE: every tracked .cx (archive/ and symlinks skipped) whose use closure holds FILE, as
    USER<TAB>path, then USERS_SUMMARY<TAB>file=..<TAB>users=N<TAB>scanned=K.
    Table inputs: exec/pipeline/table-deps.tsv is net-deps' static conservative manifest closure.
@@ -336,7 +343,12 @@ static void parse(int ni) {
 
 /* ---------- closure of one batch (or one file) ---------- */
 static int dirs[4096], dirvia[4096], ndirs;
+/* 字面量传递深度随档位:commit 只多跟一层(不改「很多工具都点名同一个文件」时的提交代价),
+   daily/release/--all/默认 无限传递并靠 via 单调性去环(发布与日档要的是完整闭包)。 */
+static int lit_unlimited = 1;
 static int child_via(int v) { return v == V_SOURCE ? V_USE : v == V_LIT ? V_LITUSE : v == V_ARG ? V_ARGUSE : v; }
+static void named(const char *tok, int via);
+static void named_file(const char *tok, int via);
 static void mark(int ni, int via) {
     Node *N = &node[ni]; int k;
     if (N->mark == epoch && N->via <= via) return;
@@ -344,6 +356,17 @@ static void mark(int ni, int via) {
     if (!N->parsed) parse(ni);
     N = &node[ni];
     for (k = 0; k < N->nuse; k++) mark(N->use[k], child_via(via));
+    /* 被字面量/arg 点到的文件本身也是「工具」:它自己再点名的文件同样算进来,否则 A -> tool.cx -> B
+       这种两跳只跟一层(实测:改 tools/ape-pack.cx 只选中 chain-fresh-out 一批,check-release-ape 的
+       夹具陈旧红了数天没人发现)。
+       commit 档只再跟一层:链工具(candidate-chain/chain-step/chain-run 等)都字面量点名 ape-pack,
+       无限传递会让改 ape-pack 选中 37 个 commit 档批次,每次提交都得跑整链。
+       daily/release/--all/默认 无限传递:发布与日档要完整闭包,三跳以上也必须到。
+       去环靠 mark 的 (epoch, via) 单调性:同一节点只在其 via 变强时重入,child_via 只会变弱。 */
+    if (via == V_LIT || via == V_ARG)
+        for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via == V_ARG ? V_ARGUSE : V_LITUSE);
+    else if (lit_unlimited && (via == V_LITUSE || via == V_ARGUSE))
+        for (k = 0; k < N->ntok; k++) named_file(N->tok[k], via);
 }
 /* a path token TOK (repo-relative) named by a root, as VIA (V_LIT or V_ARG) */
 static void named(const char *tok, int via) {
@@ -358,6 +381,14 @@ static void named(const char *tok, int via) {
         return;
     }
     if (st.kind == 'f') mark(ni, via);
+}
+/* 传递层只跟「文件」:目录记号若也传递,任何提到 exec/parse2 这类目录名的工具都会把它变成整棵子树的
+   守卫,而负控用的正是一个不存在的表路径(exec/parse2/no-such-affected-table.tsv),会因此被误选中。 */
+static void named_file(const char *tok, int via) {
+    char abs[8192]; sy_stat_t st;
+    if (cx_fmt(abs, sizeof abs, "%s/%s", root, tok)) return;
+    if (sy_stat(abs, &st) < 0 || st.kind != 'f') return;
+    mark(path_node(tok, 1), via);
 }
 static void mark_root(const char *rel) {
     int ni = path_node(rel, 1), k;
@@ -852,7 +883,7 @@ int main(int argc, char **argv) {
             src += ids ? 100 : 1;
         }
         else if (tx_eqz(argv[a], "--list-only")) { mode_run = 0; a++; }
-        else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); a += 2; }
+        else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--layer") && a + 1 < argc) {
