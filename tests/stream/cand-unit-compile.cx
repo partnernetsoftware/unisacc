@@ -1,0 +1,98 @@
+/* tests/stream/cand-unit-compile.cx -- a candidate product compiles the unit objects its own next
+ * generation needs (the chain's g2 closure phase), before any chain is started.
+ *
+ *   sh ./unisacc.com tests/stream/cand-unit-compile.cx -- OUT CAND
+ *
+ * OUT   scratch directory (OUT/cand-unit-compile, overwritten).
+ * CAND  the command of the candidate product, e.g. /path/_b1/lnx-x86_64/candidate.
+ * Run from the repository root with UNISA_JOBS=1 and without UNISA_CONTAINER. Without CAND the
+ * check refuses (rc 2): its batch row stays PLANNED until the candidate is installed.
+ *
+ * Every source is compiled as the chain compiles a closure member:
+ *   CAND -O2 -c -b lnx/x86_64 -funit FILE -o OUT/cand-unit-compile/N.o
+ * and must give rc 0, an empty stderr and a non-empty object. Sources:
+ *   every cx/stream/ source (item.cx returns ms_slice by value from the imported ms_of and ms_none:
+ *   the 0.0.59 first candidate rejected it in e3 under run-forward, found only at chain phase 468),
+ *   the cx.mem modules they import, the route modules (routepipe, fwdmark, fwdsig, tapelink),
+ *   the drivers that call them (drive, drivelink, drivestream), cx/runtime/tape_frame.cx,
+ *   and one small tool (tools/limits-gen.cx).
+ * It builds no product and links nothing. Prints PASS/FAIL per source and CAND_UNIT_COMPILE_SUMMARY;
+ * a last line CAND_UNIT_COMPILE only when nothing failed; rc 1 on any FAIL. */
+#pragma unisa use cxlib.netpack
+
+static const char *cu_fixed[] = {
+    "cx/mem/grow.cx", "cx/mem/slice.cx",
+    "cx/compiler/routepipe.cx", "cx/compiler/fwdmark.cx", "cx/compiler/fwdsig.cx", "cx/compiler/tapelink.cx",
+    "src/drive.cx", "src/drivelink.cx", "src/drivestream.cx",
+    "cx/runtime/tape_frame.cx", "tools/limits-gen.cx"
+};
+static char cu_dir[4400];
+static char cu_cand[2000];
+static int cu_passed, cu_failed, cu_n;
+
+static void cu_die(const char *s) { fprintf(stderr, "cand-unit-compile: %s\n", s); exit(2); }
+/* One shell line in the current directory, 30 s bound: rc, or -1 on transport. */
+static int cu_sh(const char *cmd, char **err, size_t *errn, char **out, size_t *outn) {
+    char *av[4];
+    np_result r = {0};
+    char why[1024] = {0};
+    int rc;
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    if (np_run(av, 0, 0, 30, &r, why, sizeof why)) { np_free(&r); return -1; }
+    if (err) { *err = r.err; *errn = r.errn; r.err = 0; }
+    if (out) { *out = r.out; *outn = r.outn; r.out = 0; }
+    rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+static void cu_one(const char *src) {
+    char cmd[9000], obj[4600], *err = 0;
+    size_t errn = 0;
+    int rc, ok;
+    if (cx_fmt(obj, sizeof obj, "%s/%d.o", cu_dir, cu_n) ||
+        cx_fmt(cmd, sizeof cmd, "exec env -u UNISA_CONTAINER UNISA_JOBS=1 %s -O2 -c -b lnx/x86_64 -funit '%s' -o '%s'", cu_cand, src, obj))
+        cu_die("cmd");
+    cu_n++;
+    rc = cu_sh(cmd, &err, &errn, 0, 0);
+    ok = rc == 0 && errn == 0;
+    if (ok) {
+        if (cx_fmt(cmd, sizeof cmd, "test -s '%s'", obj)) cu_die("cmd");
+        ok = cu_sh(cmd, 0, 0, 0, 0) == 0;
+    }
+    printf("%s\tunit object rc0, no diagnostic, non-empty\t%s\trc=%d\n", ok ? "PASS" : "FAIL", src, rc);
+    if (!ok && err && errn) printf("STDERR\t%s\t%.*s", src, (int)(errn > 400 ? 400 : errn), err);
+    if (ok) cu_passed++; else cu_failed++;
+    free(err);
+}
+
+int main(int argc, char **argv) {
+    char cmd[4800], *list = 0, *p, *e;
+    size_t ln = 0, i;
+    int shift = argc >= 2 && !strcmp(argv[1], "--") ? 1 : 0, streams = 0;
+    if (argc < 3 + shift) cu_die("usage: cand-unit-compile.cx -- OUT CAND (the candidate is required)");
+    if (cx_fmt(cu_dir, sizeof cu_dir, "%s/cand-unit-compile", argv[1 + shift]) || cx_fmt(cu_cand, sizeof cu_cand, "%s", argv[2 + shift])) cu_die("args");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s' && mkdir -p '%s'", cu_dir, cu_dir) || cu_sh(cmd, 0, 0, 0, 0)) cu_die("scratch");
+    if (!realpath(cu_dir, cmd)) cu_die("scratch path");
+    if (cx_fmt(cu_dir, sizeof cu_dir, "%s", cmd)) cu_die("scratch path");
+    if (cu_sh("ls cx/stream/*.cx", 0, 0, &list, &ln) || !list) cu_die("cx/stream listing (run from the repository root)");
+    p = list;
+    e = list + ln;
+    while (p < e) {
+        char *q = p;
+        while (q < e && *q != '\n') q++;
+        if (q > p) {
+            if (q < e) *q = 0; else cu_die("listing");
+            cu_one(p);
+            streams++;
+        }
+        p = q + 1;
+    }
+    free(list);
+    /* item.cx and pipe.cx are the known members; fewer means the listing is not the tree's */
+    if (streams < 2) { printf("FAIL\tcx/stream sources listed (at least 2)\t-\tn=%d\n", streams); cu_failed++; }
+    for (i = 0; i < sizeof cu_fixed / sizeof cu_fixed[0]; i++) cu_one(cu_fixed[i]);
+    printf("CAND_UNIT_COMPILE_SUMMARY\tpassed=%d\tfailed=%d\n", cu_passed, cu_failed);
+    if (cu_failed) return 1;
+    printf("CAND_UNIT_COMPILE\n");
+    return 0;
+}
