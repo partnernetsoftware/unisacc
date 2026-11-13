@@ -1028,6 +1028,7 @@ static int system(const char *__u_cmd) {
     __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
     if (!_unisa_env) _unisa_environ_init();   /* the child gets environ as it stands now */
     __u_env = _unisa_env;
+    _u_st_flushall();   /* SPEED-17: pending stdout goes out before the child's */
 #ifdef __APPLE__
 #ifdef __x86_64__
     __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);
