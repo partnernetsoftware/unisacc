@@ -28,9 +28,10 @@
 static void co_die(const char *a, const char *b) { fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
+static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
 static int run(char **argv, char *out, long cap) {
     char *o = 0; size_t on = 0; long n; int code;
-    code = cx_runv_timeout(argv, 30, &o, &on);   /* 30 s bound; stdout captured, stderr inherited */
+    code = cx_runv_timeout(argv, (int)g_bound_s, &o, &on);   /* bound in seconds; stdout captured, stderr inherited */
     out[0] = 0;
     if (code < 0) { if (o) mm_free(o); return -1; }
     n = o ? (long)on : 0;
@@ -127,7 +128,10 @@ int main(int argc, char **argv) {
             if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
             {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
         }
-        {   char *v[] = {"git", "commit", "-q", "-m", (char *)msg, 0}; rc = run(v, out, sizeof out); }
+        {   char *v[] = {"git", "commit", "-q", "-m", (char *)msg, 0};
+            g_bound_s = 150;   /* the precommit hook alone took 32 s at load 26 (a 30 s bound killed two commits); verdict must not depend on a quiet machine */
+            rc = run(v, out, sizeof out);
+            g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
         if (rc != 0) { fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, out); return 1; }
