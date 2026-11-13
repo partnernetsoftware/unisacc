@@ -360,6 +360,58 @@ int main(int argc, char **argv) {
             }
         }
     }
+    /* (9) 保护名单:用真实规则表扫一棵仿 0.0.59 的 out/,发布证据全部 keep,只有普通条目 move(dry-run) */
+    {
+        char proot[4400], pout[4400], pcache[4400], ptrash[4400], pman[4400], prules[4400];
+        char pd[4400];
+        static const char *prot[] = {"c4", "release-snap-fbdc99ca89", "release-snap-fbdc99ca89.partial.lock",
+                                     "rel058", "sweep0059", "b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec",
+                                     "b1/v059-freeze", "b1-old/c5a8-x", "b1-old/fbdc-wfprep-reuse", 0};
+        static const char *dirs[] = {"c4", "release-snap-fbdc99ca89", "rel058", "sweep0059", "b1", "b1-old",
+                                     "b1/fbdc99ca8921514fca927781a85ec93fbb5a82ec", "b1/v059-freeze",
+                                     "b1/other", "b1-old/c5a8-x", "b1-old/fbdc-wfprep-reuse", "b1-old/zzz",
+                                     "release-snap-c5a8cc05e9", "junk", 0};
+        int i;
+        if (cx_fmt(proot, sizeof proot, "%s/prot-root", work) || cx_fmt(pout, sizeof pout, "%s/out", proot) ||
+            cx_fmt(pcache, sizeof pcache, "%s/prot-cache", work) || cx_fmt(ptrash, sizeof ptrash, "%s/prot-trash", work) ||
+            cx_fmt(pman, sizeof pman, "%s/prot-out.tsv", work) ||
+            cx_fmt(prules, sizeof prules, "%s/tools/release-sweep-rules.tsv", root)) return 2;
+        if (sy_mkdir(proot, 0700) || sy_mkdir(pcache, 0700) || sy_mkdir(pout, 0700)) return 2;
+        for (i = 0; dirs[i]; i++) {
+            if (cx_fmt(pd, sizeof pd, "%s/%s", pout, dirs[i]) || sy_mkdir(pd, 0700)) return 2;
+        }
+        {
+            char lk[4400];
+            if (cx_fmt(lk, sizeof lk, "%s/release-snap-fbdc99ca89.partial.lock", pout) || cx_write(lk, "x", 1)) return 2;
+        }
+        /* 全部造完后再把顶层老化,避免被 @recent-minutes 当成在途而掩盖规则 */
+        for (i = 0; dirs[i]; i++) {
+            if (cx_fmt(pd, sizeof pd, "%s/%s", pout, dirs[i]) || sy_set_mtime(pd, sy_wall_s() - 3 * 86400)) return 2;
+        }
+        {
+            char *av[] = {"--scan", "--rules", prules, "--root", proot, "--cache", pcache,
+                          "--trash", ptrash, "--out-manifest", pman, "--dry-run", 0};
+            char *mb = 0;
+            size_t mn = 0;
+            int bad = 0;
+            rc = run_sweep(av, &o, &n);
+            free(o); o = 0;
+            if (rc == 0) mb = (char *)cx_read(pman, &mn);
+            if (rc != 0 || !mb) bad = 1;
+            else {
+                for (i = 0; prot[i]; i++) {
+                    char want[4600];
+                    cx_fmt(want, sizeof want, "move\t%s/%s\t", pout, prot[i]);
+                    if (has(mb, mn, want)) bad++;
+                }
+                ck(has(mb, mn, "move\t") && has(mb, mn, "/out/junk\t") && has(mb, mn, "/out/b1/other\t") &&
+                   has(mb, mn, "/out/b1-old/zzz\t") && has(mb, mn, "/out/release-snap-c5a8cc05e9\t"),
+                   "protect-list-ordinary-entries-still-move");
+            }
+            ck(!bad, "protect-list-evidence-never-in-move-rows");
+            free(mb);
+        }
+    }
     if (argc < 3) cx_rmtree(work);
 
     sy_printf("CHECK_RELEASE_SWEEP\tfailed=%d\n", failed);
