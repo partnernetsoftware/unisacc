@@ -223,6 +223,12 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
 - 验收:同一提交档墙钟比改前下降,且批结果逐条不变。判据:测完把启动合计写入 build/speed-baseline.tsv 新行;若启动合计 <10 s 则本项只交测量、不改调度。工具:affected 自身计时加 run-startup-bench 的 first 796.354 作对照,不把 35 s 当实测。
 - 截止:测量 30 分。
 - 禁区:不新增长驻进程,不放宽时限,不删断言。
+- 先测结果(2026-11-13,实测,候选 e43ef368,只测未改):12 批各 3 次 `affected --ids X --run -j 1 --prepare-materials`,取 BATCH_TIMING。total 最小/中位 ms:awpath 828/842,surfline 813/846,std-surface 873/902,doc-pair 1140/1205,tlib-cover 3100/3400,xs-bound-width 4060/4071,unfreeze 4513/4611,tlib-prep 11572/11850,ledger-add 15303/15422,tlib-base 23549/24006,tlib-link 29286/29313,cx-l0-text-fmt 18630/18640(该批 FAIL,非本任务引入,未定因)。最小之和 113667。
+  - 每批固定启动成本:prep_ms 全 0,link_ms 0 至 1,norm_ms(产品前后摘要与清理)最小 779 至 831,12 批之和 9531,占总和 8.4%;轻批 awpath/surfline/std-surface/doc-pair 的 norm 占 total 的 70% 至 95%。每次 affected 调用另付 kit_ms 约 1.0 s + prep_ms 约 0.8 s(11 次单批调用 977 至 1074 / 758 至 894)。
+  - 约 800 ms 编译 first 不在 run_ms:轻批 run_ms 最小 21/39/93/309 ms 均小于 800。重批 run_ms 内编译占比 UNMEASURED(BATCH_TIMING 不分相)。norm 的 0.79 s 是产品摘要,不是编译。
+  - 外推(算术,非实测):44 批各付一次 norm 约 34.8 s;44 批各自一次调用的 kit+prep 约 79 s。判据 10 s:norm 外推超出,但那是摘要不是解释器启动;是否合并为每产品身份一次摘要由后续改 run-batch 决定,本次不改。
+  - -j 4 整体(11 批,不含 cx-l0-text-fmt):墙钟 44353 ms,AFFECTED_RUN elapsed 43824(kit 2764 prep 773 run 40287),pass=10 fail=1(tlib-prep 本次 FAIL,单批 3 次 PASS,输出含 `tlib: STALE tools.cxlib`,工作区有他人改动;未定因)。同 11 批 -j 1 total 最小之和 95037。
+  - 测时 load 2 至 4.6,4 路并行互扰,heavy 批冷热差大(awpath 首次 4159 后 828,首跑含缓存冷)。
 
 (4) SPEED-5 单元级并行,慢车道(单次 -o 在产品内)。测量步现在就能做。
 - 目标:e3 之前按单元并行 e2/e1。e3、lower、elf 仍整程序一次。
@@ -237,5 +243,10 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
 - 验收:基线里「启动内部分相」从 UNMEASURED 变为五相都有最小与中位,且五相之和与 first 796.354 ms 的差在 15% 以内;对不上就记 UNVERIFIED,不改产品。工具即该 bench。
 - 截止:30 分。
 - 禁区:不把 first 降到 28 ms 当目标(那是 repeat,不含编译)。
+- 先测结果(2026-11-13,实测,同形最小程序,全新 TMPDIR,`UNISACC_RR_TIME=1`,3 次,load 4.4,未改工具):first 墙钟 896/905/875 ms(最小 875,中位 896)。
+  - first 分相(ms,三次):推理六相合计 739.0/735.0/722.5(e2 182.7/248.3/187.3,e1 31.4/46.8/33.5,e3 248.8/225.4/272.8,prune 84.1/82.8/89.0,lower 121.3/86.8/93.3,elf 70.7/44.8/46.7);模型解压六相合计 104.4/121.1/103.5(modelcache 全 miss);construction 4.3/4.0/3.7;lookup 0.1;output 0.1。回执合计 847.9/860.3/829.9,占墙钟约 94% 至 95%。
+  - repeat:墙钟 9 至 12 ms(6 次),回执 lookup_hit=2 lookup 4.9 ms,无任何编译相。即 first-repeat 差约 865 ms 基本全是编译(推理+解压);watchdog、sh、进程、管道、运行最小程序合计 UNMEASURED,上界为 repeat 墙钟 12 ms,另有 first 墙钟减回执合计的余量 45 至 50 ms 左右。
+  - 缓存装载:first 是全新 TMPDIR(缓存空),装载无命中,repeat 的装载即上述 lookup 4.9 ms。
+  - 五相和对 first:回执合计与墙钟差在 15% 内。run-startup-bench 本身未跑(它按 8 s 界四次并有源身份观测);此处用 sh ./unisacc.com 直接对同形程序,不是该工具的输出。
 
 测量总则:每项用上表点名的工具,对照 build/speed-baseline.tsv 的 min 列。新数追加行,不改旧行。未跑记 UNMEASURED。
