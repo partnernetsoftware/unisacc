@@ -1,0 +1,85 @@
+/* tools/check-post-publish-check.cx -- fixtures for tools/post-publish-check.cx.
+ *
+ *   sh ./unisacc.com tools/check-post-publish-check.cx
+ *
+ * Fake git and fake gh (shell scripts in a mkdtemp dir, injected through --git/--gh) serve fixture files, no network.
+ * Cases: all OK (rc 0), main DIFF (rc 1), tag DIFF (rc 1), asset digest DIFF (rc 1), body DIFF (rc 1),
+ * tag absent (rc 3 UNKNOWN, a -src tag is not the tag), gh failure (rc 3), no --expect-main (rc 3), bad usage (rc 2).
+ * Prints PASS|FAIL lines and CHECK_POST_PUBLISH_CHECK<TAB>failed=N. */
+static int failed;
+static void ck(int ok, const char *n) { printf("%s\tcheck-post-publish-check.%s\n", ok ? "PASS" : "FAIL", n); if (!ok) failed++; }
+static void put(const char *d, const char *name, const char *body) {
+    char p[512]; FILE *f;
+    cx_fmt(p, sizeof p, "%s/%s", d, name);
+    f = fopen(p, "w");
+    if (!f) { printf("FAIL\tcheck-post-publish-check.write\n"); exit(1); }
+    fputs(body, f); fclose(f);
+}
+static int run(const char *cmd, char *out, size_t cap) {
+    FILE *p = popen(cmd, "r"); size_t n = 0; int rc;
+    if (!p) return -1;
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0; rc = pclose(p);
+    return WEXITSTATUS(rc);
+}
+#define M "1111111111111111111111111111111111111111"
+#define T "2222222222222222222222222222222222222222"
+#define T2 "3333333333333333333333333333333333333333"
+static int pc(const char *d, const char *extra, char *out, size_t cap) {
+    char c[2048];
+    cx_fmt(c, sizeof c, "timeout 50 sh ./unisacc.com tools/post-publish-check.cx -- --tag v9.9.9 --tag-sha " T " --candidate %s/cand.tsv --notes %s/notes.md --gh 'sh %s/fgh.sh %s' --git 'sh %s/fgit.sh %s' %s 2>&1", d, d, d, d, d, d, extra);
+    return run(c, out, cap);
+}
+int main(void) {
+    char d[] = "/tmp/ppc-XXXXXX", out[16384], c[256];
+    int rc;
+    if (!mkdtemp(d)) { printf("FAIL\tcheck-post-publish-check.mkdtemp\n"); return 1; }
+    put(d, "fgit.sh", "D=$1; shift\ncase \"$*\" in\n*ls-remote*refs/heads/main*) cat \"$D/main.txt\";;\n*ls-remote*refs/tags*) cat \"$D/tags.txt\"; exit 0;;\n*merge-base*) echo abcdef0123456789;;\n*log*) printf 'aaaaaaaaaa one\\nbbbbbbbbbb two\\n';;\nesac\n");
+    put(d, "fgh.sh", "D=$1; shift\n[ -f \"$D/ghfail\" ] && exit 1\ncase \"$*\" in\n*\"--json assets\"*) cat \"$D/assets.txt\";;\n*\"--json body\"*) cat \"$D/body.txt\";;\nesac\n");
+    put(d, "cand.tsv", "repo\ttag\tape\tape_sha256\tpkg\tpkg_sha256\nr\tv9.9.9\tu.com\taa11\tpkg.bin\tbb22\n");
+    put(d, "notes.md", "# T\n\nline3\n");
+    put(d, "body.txt", "# T\n\nline3\n");
+    put(d, "assets.txt", "u.com\tsha256:aa11\npkg.bin\tsha256:bb22\n");
+    put(d, "main.txt", M "\trefs/heads/main\n");
+    put(d, "tags.txt", T "\trefs/tags/v9.9.9\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 0 && strstr(out, "main\tOK") && strstr(out, "tag\tOK") && strstr(out, "assets\tOK\tpairs=2 match=2") && strstr(out, "body\tOK") && strstr(out, "local\tOK\tmerge-base=abcdef0123 to-migrate=2") && strstr(out, "POST_PUBLISH_LOCAL\taaaaaaaaaa one"), "all_ok_rc0");
+    /* annotated tag: direct ref differs, peeled equals */
+    put(d, "tags.txt", T2 "\trefs/tags/v9.9.9\n" T "\trefs/tags/v9.9.9^{}\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 0 && strstr(out, "tag\tOK"), "peeled_tag_ok");
+    put(d, "tags.txt", T2 "\trefs/tags/v9.9.9\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 1 && strstr(out, "tag\tDIFF"), "tag_diff_rc1");
+    put(d, "tags.txt", T "\trefs/tags/v9.9.9\n");
+    rc = pc(d, "--expect-main " T, out, sizeof out);
+    ck(rc == 1 && strstr(out, "main\tDIFF"), "main_diff_rc1");
+    put(d, "assets.txt", "u.com\tsha256:ffff\npkg.bin\tsha256:bb22\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 1 && strstr(out, "assets\tDIFF\tpairs=2 match=1 digest-differs=1"), "asset_digest_diff_rc1");
+    put(d, "assets.txt", "pkg.bin\tsha256:bb22\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 3 && strstr(out, "assets\tUNKNOWN") && strstr(out, "missing=1"), "asset_missing_unknown_rc3");
+    put(d, "assets.txt", "u.com\tsha256:aa11\npkg.bin\tsha256:bb22\n");
+    put(d, "body.txt", "# T\n\nline3 changed\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 1 && strstr(out, "body\tDIFF"), "body_diff_rc1");
+    put(d, "body.txt", "# T\n\nline3\n");
+    put(d, "tags.txt", T "\trefs/tags/v9.9.9-src\n");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 3 && strstr(out, "tag\tUNKNOWN\ttag-absent") && !strstr(out, "DIFF"), "src_tag_not_tag_unknown_rc3");
+    put(d, "tags.txt", T "\trefs/tags/v9.9.9\n");
+    rc = pc(d, "", out, sizeof out);
+    ck(rc == 3 && strstr(out, "main\tUNKNOWN"), "no_expect_main_unknown_rc3");
+    cx_fmt(c, sizeof c, "%s/ghfail", d); put(d, "ghfail", "");
+    rc = pc(d, "--expect-main " M, out, sizeof out);
+    ck(rc == 3 && strstr(out, "assets\tUNKNOWN") && strstr(out, "body\tUNKNOWN"), "gh_failure_unknown_rc3");
+    remove(c);
+    rc = pc(d, "--bogus x", out, sizeof out);
+    ck(rc == 2 && strstr(out, "usage"), "usage_rc2");
+    rc = pc(d, "--expect-main short", out, sizeof out);
+    ck(rc == 2, "bad_sha_usage_rc2");
+    cx_fmt(c, sizeof c, "rm -rf %s", d); (void)system(c);
+    printf("CHECK_POST_PUBLISH_CHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

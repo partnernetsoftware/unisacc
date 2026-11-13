@@ -1,0 +1,180 @@
+/* tools/post-publish-check.cx -- read-only post-publish verification of a release (five items).
+ *
+ *   sh ./unisacc.com tools/post-publish-check.cx -- [--expect-main SHA] [--tag v0.0.59] [--tag-sha FULLSHA]
+ *        [--notes plans/release-notes-0.0.59.md] [--candidate release/candidate.tsv] [--repo OWNER/REPO]
+ *        [--gh "CMD PREFIX"] [--git "CMD PREFIX"]
+ *
+ * Output: POST_PUBLISH<TAB>ITEM<TAB>OK|DIFF|UNKNOWN<TAB>evidence, one line per item:
+ *   main (git ls-remote origin main == --expect-main), tag (refs/tags/TAG and TAG^{} equal --tag-sha, full hash;
+ *   -src tags never match), assets (candidate.tsv name/sha256 pairs of the TAG row vs gh release assets),
+ *   body (tools/release-body-diff.cx subprocess), local (merge-base and origin/main..HEAD list, informational).
+ * Only read commands run (ls-remote, release view, log); no credential is read or printed.
+ * Exit 0 all OK, 1 any DIFF, 3 any UNKNOWN and no DIFF, 2 usage. */
+
+static int nd, nu;
+static void item(const char *name, const char *st, const char *fmt, const char *a, const char *b) {
+    printf("POST_PUBLISH\t%s\t%s\t", name, st);
+    printf(fmt, a ? a : "", b ? b : "");
+    printf("\n");
+    if (!strcmp(st, "DIFF")) nd++;
+    else if (!strcmp(st, "UNKNOWN")) nu++;
+}
+static int run(const char *cmd, char *out, size_t cap) {
+    FILE *p = popen(cmd, "r"); size_t n = 0;
+    if (!p) { out[0] = 0; return -1; }
+    while (n + 1 < cap) { size_t k = fread(out + n, 1, cap - 1 - n, p); if (!k) break; n += k; }
+    out[n] = 0;
+    return pclose(p);
+}
+static void cpyn(char *d, size_t cap, const char *s, size_t n) {
+    size_t i;
+    for (i = 0; i < n && i + 1 < cap; i++) d[i] = s[i];
+    d[i] = 0;
+}
+static char *field(char *line, int idx) { /* idx-th tab field of line, in place; NULL when absent */
+    int i; char *s = line;
+    for (i = 0; i < idx; i++) { s = strchr(s, '\t'); if (!s) return 0; s++; }
+    return s;
+}
+static int fieldeq(const char *f, const char *v) { size_t n = strlen(v); return f && !strncmp(f, v, n) && (f[n] == '\t' || f[n] == '\n' || f[n] == 0); }
+
+int main(int argc, char **argv) {
+    const char *expect = 0, *tag = "v0.0.59", *tagsha = "fbdc99ca8921514fca927781a85ec93fbb5a82ec";
+    const char *notes = "plans/release-notes-0.0.59.md", *cand = "release/candidate.tsv";
+    const char *repo = "partnernetsoftware/unisacc", *gh = "gh", *git = "git";
+    static char out[1 << 16], cmd[4096], tb[1 << 16], ev[1024];
+    char *l, *nx;
+    int k, rc;
+    for (k = 1; k < argc; k++) {
+        if (k + 1 >= argc) goto usage;
+        if (!strcmp(argv[k], "--expect-main")) expect = argv[++k];
+        else if (!strcmp(argv[k], "--tag")) tag = argv[++k];
+        else if (!strcmp(argv[k], "--tag-sha")) tagsha = argv[++k];
+        else if (!strcmp(argv[k], "--notes")) notes = argv[++k];
+        else if (!strcmp(argv[k], "--candidate")) cand = argv[++k];
+        else if (!strcmp(argv[k], "--repo")) repo = argv[++k];
+        else if (!strcmp(argv[k], "--gh")) gh = argv[++k];
+        else if (!strcmp(argv[k], "--git")) git = argv[++k];
+        else goto usage;
+    }
+    if (strspn(tag, "0123456789.v-abcdefghijklmnopqrstuvwxyz") != strlen(tag) || !*tag) goto usage;
+    if (expect && (strlen(expect) != 40 || strspn(expect, "0123456789abcdef") != 40)) goto usage;
+    if (strlen(tagsha) != 40 || strspn(tagsha, "0123456789abcdef") != 40) goto usage;
+
+    /* (1) remote main */
+    cx_fmt(cmd, sizeof cmd, "%s ls-remote origin refs/heads/main 2>/dev/null", git);
+    rc = run(cmd, out, sizeof out);
+    if (rc != 0 || strlen(out) < 40) item("main", "UNKNOWN", "ls-remote-failed", 0, 0);
+    else {
+        out[40] = 0;
+        if (!expect) item("main", "UNKNOWN", "remote=%s no --expect-main", out, 0);
+        else if (!strcmp(out, expect)) item("main", "OK", "remote=%s", out, 0);
+        else { cx_fmt(ev, sizeof ev, "remote=%s expect=%s", out, expect); item("main", "DIFF", "%s", ev, 0); }
+    }
+
+    /* (2) tag, full hash, direct ref and peeled ref */
+    cx_fmt(cmd, sizeof cmd, "%s ls-remote origin refs/tags/%s refs/tags/%s^{} 2>/dev/null", git, tag, tag);
+    rc = run(cmd, out, sizeof out);
+    if (rc != 0) item("tag", "UNKNOWN", "ls-remote-failed", 0, 0);
+    else {
+        char want1[256], want2[256], *direct = 0, *peeled = 0;
+        cx_fmt(want1, sizeof want1, "\trefs/tags/%s", tag);
+        cx_fmt(want2, sizeof want2, "\trefs/tags/%s^{}", tag);
+        for (l = out; *l; l = nx) {
+            nx = strchr(l, '\n'); if (nx) *nx++ = 0; else nx = l + strlen(l);
+            if (strlen(l) > 40 && !strcmp(l + 40, want2)) { l[40] = 0; peeled = l; }
+            else if (strlen(l) > 40 && !strcmp(l + 40, want1)) { l[40] = 0; direct = l; }
+        }
+        if (!direct && !peeled) item("tag", "UNKNOWN", "tag-absent-on-remote %s", tag, 0);
+        else {
+            const char *got = peeled ? peeled : direct;
+            cx_fmt(ev, sizeof ev, "%s -> %s expect=%s", tag, got, tagsha);
+            item("tag", !strcmp(got, tagsha) ? "OK" : "DIFF", "%s", ev, 0);
+        }
+    }
+
+    /* (3) assets vs candidate row */
+    {
+        FILE *f = fopen(cand, "rb"); size_t n = 0;
+        char *hdr, *row = 0, *h;
+        int nmatch = 0, nbad = 0, nmiss = 0, total = 0, ok = 0;
+        if (!f) { item("assets", "UNKNOWN", "candidate-unreadable %s", cand, 0); goto body; }
+        n = fread(tb, 1, sizeof tb - 1, f); tb[n] = 0; fclose(f);
+        hdr = tb;
+        for (l = tb; *l; l = nx) {
+            nx = strchr(l, '\n'); if (nx) *nx++ = 0; else nx = l + strlen(l);
+            if (l != hdr && fieldeq(field(l, 1), tag)) { row = l; break; }
+        }
+        if (!row) { item("assets", "UNKNOWN", "no-candidate-row-for %s", tag, 0); goto body; }
+        cx_fmt(cmd, sizeof cmd, "%s release view '%s' -R '%s' --json assets --jq '.assets[]|[.name,.digest]|@tsv' 2>/dev/null", gh, tag, repo);
+        rc = run(cmd, out, sizeof out);
+        if (rc != 0 || !out[0]) { item("assets", "UNKNOWN", "gh-failed-or-no-assets", 0, 0); goto body; }
+        /* walk header columns: X followed by X_sha256 */
+        for (k = 0, h = hdr; ; k++) {
+            char name[200], *e = strchr(h, '\t'), *v, *vs, *ve;
+            size_t hl = e ? (size_t)(e - h) : strlen(h), cl;
+            if (hl > 7 && !strncmp(h + hl - 7, "_sha256", 7) && k > 0) {
+                char nm[200], sh[200], want[300], *p2;
+                int found = 0;
+                v = field(row, k - 1); vs = field(row, k);
+                if (!v || !vs) { nmiss++; total++; goto nextcol; }
+                ve = strchr(v, '\t'); cl = ve ? (size_t)(ve - v) : strlen(v); cpyn(nm, sizeof nm, v, cl);
+                ve = strchr(vs, '\t'); cl = ve ? (size_t)(ve - vs) : strlen(vs); cpyn(sh, sizeof sh, vs, cl);
+                cx_fmt(want, sizeof want, "%s\tsha256:%s", nm, sh);
+                total++;
+                for (p2 = out; *p2; ) {
+                    char *e2 = strchr(p2, '\n'); size_t ln = e2 ? (size_t)(e2 - p2) : strlen(p2);
+                    if (ln == strlen(want) && !strncmp(p2, want, ln)) found = 1;
+                    else if (!strncmp(p2, nm, strlen(nm)) && p2[strlen(nm)] == '\t') { found = -1; }
+                    if (!e2) break; p2 = e2 + 1;
+                }
+                if (found == 1) nmatch++; else if (found == -1) nbad++; else nmiss++;
+                (void)name;
+            }
+        nextcol:
+            if (!e) break; h = e + 1;
+        }
+        ok = nbad == 0 && nmiss == 0 && total > 0;
+        cx_fmt(ev, sizeof ev, "pairs=%d match=%d digest-differs=%d missing=%d", total, nmatch, nbad, nmiss);
+        item("assets", ok ? "OK" : (nbad ? "DIFF" : "UNKNOWN"), "%s", ev, 0);
+    }
+
+body:
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/release-body-diff.cx -- --tag '%s' --notes '%s' --repo '%s' --gh \"%s\" 2>/dev/null", tag, notes, repo, gh);
+    rc = run(cmd, out, sizeof out);
+    {
+        char *t = strchr(out, '\n'); if (t) *t = 0;
+        t = strchr(out, '\t');
+        if (rc == 0 && t && !strncmp(t + 1, "MATCH", 5)) item("body", "OK", "%s", t + 7, 0);
+        else if (t && !strncmp(t + 1, "DIFF", 4) && strstr(t, "page_bytes=0 ")) item("body", "UNKNOWN", "release-page-empty-or-absent", 0, 0);
+        else if (t && !strncmp(t + 1, "DIFF", 4)) item("body", "DIFF", "%s", t + 6, 0);
+        else item("body", "UNKNOWN", "release-body-diff-rc=%s", rc == 0 ? "0" : "nonzero", 0);
+    }
+
+    /* (5) local vs origin/main */
+    cx_fmt(cmd, sizeof cmd, "%s merge-base origin/main HEAD 2>/dev/null", git);
+    rc = run(cmd, tb, sizeof tb);
+    if (rc != 0 || strlen(tb) < 10) item("local", "UNKNOWN", "merge-base-failed", 0, 0);
+    else {
+        char mb[16], *p2; int cnt = 0;
+        memcpy(mb, tb, 10); mb[10] = 0;
+        cx_fmt(cmd, sizeof cmd, "%s log origin/main..HEAD --oneline 2>/dev/null", git);
+        rc = run(cmd, out, sizeof out);
+        if (rc != 0) item("local", "UNKNOWN", "log-failed", 0, 0);
+        else {
+            char cs[32];
+            for (p2 = out; *p2; p2++) if (*p2 == '\n') cnt++;
+            cx_fmt(cs, sizeof cs, "%d", cnt);
+            cx_fmt(ev, sizeof ev, "merge-base=%s to-migrate=%s", mb, cs);
+            item("local", "OK", "%s", ev, 0);
+            for (l = out; *l; l = nx) {
+                nx = strchr(l, '\n'); if (nx) *nx++ = 0; else nx = l + strlen(l);
+                if (*l) printf("POST_PUBLISH_LOCAL\t%.100s\n", l);
+            }
+        }
+    }
+    return nd ? 1 : nu ? 3 : 0;
+usage:
+    fprintf(stderr, "usage: post-publish-check [--expect-main SHA40] [--tag T] [--tag-sha SHA40] [--notes F] [--candidate F] [--repo R] [--gh CMD] [--git CMD]\n");
+    return 2;
+}
