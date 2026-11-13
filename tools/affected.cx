@@ -978,7 +978,7 @@ int main(int argc, char **argv) {
         if (start_deadline == 45000) start_deadline = 36000;
         if (hard_deadline == 54000) hard_deadline = 42000;
     }
-    load_registry();
+    { long r0 = sy_now_ms(); load_registry(); fprintf(stderr, "LIST_TIMING\tregistry_ms=%ld\n", sy_now_ms() - r0); }
     if (!jobs) { int c = sy_ncpu(); jobs = c < 1 ? 4 : c > MAXJOBS ? MAXJOBS : c; }
     if (src == 100) {   /* --ids: run (or list) exactly these */
         for (k = 0; k < nfiles; k++) {
@@ -999,14 +999,23 @@ int main(int argc, char **argv) {
             at += ln + 1;
         }
     } else for (k = 0; k < nfiles; k++) changed[nch++] = path_node(files[k], 1);
-    for (b = 0; b < nbatch; b++) {
-        if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
-        int why = -1, v;
-        mark_batch(&batch[b]);
-        v = match(changed, nch, &why);
-        if (v == V_NONE) continue;
-        printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
-        sel[nsel++] = b;
+    {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b;
+        /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
+        for (b = 0; b < nbatch; b++) {
+            if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
+            int why = -1, v;
+            t0b = sy_now_ms();
+            mark_batch(&batch[b]);
+            t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b;
+            v = match(changed, nch, &why);
+            t_match += sy_now_ms() - t0b;
+            if (v == V_NONE) continue;
+            printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
+            sel[nsel++] = b;
+        }
+        t_sweep = sy_now_ms() - t_reg - t_mark - t_match;
+        fprintf(stderr, "LIST_TIMING\tmark_ms=%ld\tmatch_ms=%ld\tsweep_ms=%ld\tbatches=%d\tnodes=%d\tchanged=%d\n",
+                t_mark, t_match, t_sweep < 0 ? 0 : t_sweep, nbatch, nnode, nch);
     }
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\n", nch, nsel, nbatch);
     return mode_run ? run(sel, nsel, jobs) : 0;
