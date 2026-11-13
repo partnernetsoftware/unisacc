@@ -644,3 +644,43 @@ net-build-profile(5) ebab81cb99480f8b。最小 `.cx` 两组同为 bc353670548503
 - 验收:关时 8MB sort 与 sha 输出及镜像与现产品逐字节相同;开时输出逐字节相同,swap 内层静态条数 <=70(基线 95),同算法堆排序 5 次中位 <=3094 ms(基线 3867 的 80%);工具 tools/check-bench-gencode.cx。达不到就关着入库。
 - 截止:可区分性证明 15 分钟;实现单步不超过 5 分钟。
 - 禁区:不做跨块活跃性,不删 store,不吞 .frame,不改函数语义。
+
+## 本地重建 0.0.60(LOCAL-REBUILD)
+
+条件:2026-11-13,16 核,load1 1.4 至 4.2;构造器为已装 0.0.59(sha e43ef36832939c7f);输入为 main 941712d3d7 加 speed12b.patch。
+性质:lnx-only dev 形态,NOT_RELEASE,非发布候选,非 QUALIFIED;只到 gen1(编译器自身仍由 0.0.59 编出),未做 g2/g3、其余五目标、compare、s9、金样批次、CI。
+未安装:`install-ape` 干跑返回 `REFUSED no-UNIPKG1-footer`(dev 形态的启动头是纯脚本),ROOT/unisacc.com 未动;备份在 ROOT/unisacc.com.059(不入库)。
+
+做法(产物全部在 /tmp/unisacc-session-build-lr0060,仓内未建 out/):
+- `git archive` 解出 HEAD,副本内套 E2 补丁,`git init` 后 fetch main 与标签 v0.0.59-src2,用 `commit-tree` 建私有提交 1e4aa2dd07
+  (父为 fbdc99ca89 与 941712d3d7)。原因:构造器的构建提交 2a46e1a427 在构造源支线上、不在 main 上,而预检规则 6
+  (tools/preflight.cx:155-168)要求它是 rev 的祖先;单设 BOOTSTRAP_FROM 过不了。
+- 链输出目录放在副本之外时,被钉工具 kernel-route.pin.cx 找不到 `cxlib`(上级没有 cxroot.tsv,CX-U-7);在会话根补一份指向冻结快照的 cxroot.tsv 后通过。
+- E2 表的改动由正规链的 jobs-gen/tbl/net 重出网、final-net 合并、p3 装包,不需要单独的网工具。
+- `chain-run` 不收 `--until`,所以直接调 `candidate-chain --until`;链自带的 pack 要先过 compare,走不到,改用 `release-ape.cx dev-lnx`。
+
+实测耗时(candidate-chain,同一输出目录续跑):
+
+| 批 | 范围 | 并行 | 墙钟 s | 记录值(phase-times.tsv 行) |
+|---|---|---|---|---|
+| b1 | snap 32.6、build-objects 53.8、build-front 20.7、build 37.7 | - | 162 | 48.9/20.0/35.4(195/193/194) |
+| b2 | wave-objects 至 final,315 个相位 | 4 | 364 | snap 至 p3 共 2508.9(196,宽度 1) |
+| b2 续 | routes 与 p3 各子相 | 4 | 334 | p3 域 1065.3(203) |
+| b3 | gen1-lnx-x86_64-objects 49.9、链接 24.7 | 12 | 79 | 88.0(198) |
+
+四批合计 939 秒(含一次 routes 失败后的续跑复核);打包未单独计时。
+
+新旧对拍(各 3 次,新旧交替;数据行在 build/speed-baseline.tsv,note 以 LOCAL-REBUILD 开头):
+
+| 项 | 已装 0.0.59 最小/中位 | 本地 0060 最小/中位 | 变化(中位) |
+|---|---|---|---|
+| run-startup-bench first_e2e ms | 795.5/815.2 | 670.0/705.6 | -13.4% |
+| run-startup-bench repeat_median3 ms | 27.1/28.4 | 28.6/29.6 | 约 +1 ms |
+| ratchets.cx -o 冷编译墙钟 ms | 7835/7881 | 5352/5387 | -31.6% |
+| s8.c lib int 8 排序 ms | 4052/4105 | 1084/1089 | 3.77 倍 |
+| s11 bench.c 第 5 组 fd 1 write 次数 | 944452 | 615 | 1 次 |
+
+排序与输出两项 stdout 新旧逐字节相同(md5)。ratchets 镜像新旧不同(298f88e1463f06a9 对 f67475ce4a16a785),未逐项定因。
+repeat 路径慢约 1 ms 未定因。B 路线(只换两张 E2 网的包,`routeB/unisacc-local-b.sh`)也可运行,`-E` 输出 38,647 B,其余基准未跑。
+
+回滚:删除 /tmp/unisacc-session-build-lr0060;已装产品未变。
