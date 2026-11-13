@@ -1,0 +1,58 @@
+/* TSV row reader over a caller-owned span: allocation-free, no escaping, no quoting.
+ * Rows are LF or CRLF lines (tx_line_next); empty lines and lines starting with '#' are skipped.
+ * it->off/it->len point back into the original string. Failure: negative codes only
+ * (-EINVAL bad iterator/args, -ERANGE column miss); 1 is a row, 0 is the end.
+ */
+#pragma unisa module read
+#pragma unisa dock
+#pragma unisa use text.iter
+#pragma unisa use text.text
+static int tv_count(const char *s, long n) {
+ int c = 1; long i;
+ for (i = 0; i < n; i++) if (s[i] == '\t') c++;
+ return c;
+}
+int tv_row_next(tx_iter_t *it, int *cols) {
+ int r;
+ if (!it || !cols) return -EINVAL;
+ while ((r = tx_line_next(it)) == 1) {
+  if (it->len == 0 || it->s[it->off] == '#') continue;
+  *cols = tv_count(it->s + it->off, it->len);
+  return 1;
+ }
+ return r;
+}
+int tv_field(const tx_iter_t *it, int idx, long *off, long *len) {
+ long i, st, base;
+ int k = 0;
+ if (!it || !off || !len || it->n < 0 || it->off < 0 || it->len < 0 || it->off + it->len > it->n) return -EINVAL;
+ if (idx < 0) return -ERANGE;
+ base = it->off; st = base;
+ for (i = 0; i <= it->len; i++) {
+  if (i == it->len || it->s[base + i] == '\t') {
+   if (k == idx) { *off = st; *len = base + i - st; return 0; }
+   k++; st = base + i + 1;
+  }
+ }
+ return -ERANGE;
+}
+/* Column index of NAME in the current row (use on a header row); -ERANGE when absent, -EINVAL on bad args. */
+int tv_col(const tx_iter_t *it, const char *name, long namen) {
+ int i;
+ long o, l;
+ if (!it || !name || namen < 0) return -EINVAL;
+ for (i = 0; tv_field(it, i, &o, &l) == 0; i++)
+  if (l == namen && (namen == 0 || memcmp(it->s + o, name, (size_t)namen) == 0)) return i;
+ return -ERANGE;
+}
+int tv_expect_cols(const char *s, long n, int cols, long *bad_line) {
+ tx_iter_t it; int r, c; long line = 1, pos = 0;
+ if (bad_line) *bad_line = 0;
+ if (cols < 1 || n < 0 || (!s && n > 0)) return -EINVAL;
+ tx_iter_init(&it, s, n);
+ while ((r = tv_row_next(&it, &c)) == 1) {
+  for (; pos < it.off; pos++) if (s[pos] == '\n') line++;
+  if (c != cols) { if (bad_line) *bad_line = line; return -EINVAL; }
+ }
+ return r < 0 ? r : 0;
+}
