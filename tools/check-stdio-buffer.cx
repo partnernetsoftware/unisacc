@@ -89,6 +89,43 @@ int main(int argc, char **argv) {
         else { nfail = nfail + 1; printf("FAIL\tliteral-%s rc=%d n=%ld\n", lit[i].mode, r.rc, (long)r.outn); }
         np_free(&r);
     }
+    /* multi-object: unit A prints 2000 lines, unit B prints one more and calls exit.  Built as
+       entry-build builds objects (A -DRT_UNIT, B -DRT_EXTERN): one stream table, so the output is
+       complete (2001 lines) and the write count stays small (measured 10, budget 20). */
+    {
+        char ca[4400], cb[4400], oa[4400], ob[4400], mimg[4400], wf[4400], cmd[9000], *p;
+        const char *rt[2]; const char *srcs[2]; char *outs[2]; long k, nl = 0, nw = 0;
+        if (cx_fmt(ca, sizeof ca, "%s/tests/stdio-buffer/mo_a.c", root) || cx_fmt(cb, sizeof cb, "%s/tests/stdio-buffer/mo_b.c", root) ||
+            cx_fmt(oa, sizeof oa, "%s/a.o", work) || cx_fmt(ob, sizeof ob, "%s/b.o", work) ||
+            cx_fmt(mimg, sizeof mimg, "%s/mo.img", work) || cx_fmt(wf, sizeof wf, "%s/mo.strace", work)) die("mo path");
+        rt[0] = "-DRT_UNIT"; rt[1] = "-DRT_EXTERN"; srcs[0] = ca; srcs[1] = cb; outs[0] = oa; outs[1] = ob;
+        for (k = 0; k < 2; k = k + 1) {
+            i2 = 0;
+            v[i2++] = bound; v[i2++] = "50"; v[i2++] = com; v[i2++] = "-c"; v[i2++] = "-b"; v[i2++] = "lnx/x86_64"; v[i2++] = "-funit";
+            v[i2++] = dopt; v[i2++] = "-I"; v[i2++] = inc; v[i2++] = (char *)rt[k]; v[i2++] = "-o"; v[i2++] = outs[k]; v[i2++] = srcs[k]; v[i2] = 0;
+            if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+            if (r.rc != 0) { printf("FAIL\tmulti-object-compile\nSTDIO_BUFFER\tFAIL mo compile rc=%d\n", r.rc); np_free(&r); return 1; }
+            np_free(&r);
+        }
+        i2 = 0;
+        v[i2++] = bound; v[i2++] = "50"; v[i2++] = com; v[i2++] = "-b"; v[i2++] = "lnx/x86_64"; v[i2++] = "-o"; v[i2++] = mimg; v[i2++] = oa; v[i2++] = ob; v[i2] = 0;
+        if (np_run(v, root, 0, 55, &r, why, sizeof why)) die(why);
+        if (r.rc != 0) { printf("FAIL\tmulti-object-link\nSTDIO_BUFFER\tFAIL mo link rc=%d\n", r.rc); np_free(&r); return 1; }
+        np_free(&r);
+        run_mode(mimg, "", root, &r);
+        for (p = r.out; p < r.out + r.outn; p = p + 1) if (*p == '\n') nl = nl + 1;
+        if (r.rc == 0 && nl == 2001) { npass = npass + 1; printf("PASS\tmulti-object-complete lines=%ld\n", nl); }
+        else { nfail = nfail + 1; printf("FAIL\tmulti-object-complete rc=%d lines=%ld want 2001\n", r.rc, nl); }
+        np_free(&r);
+        if (cx_fmt(cmd, sizeof cmd, "strace -f -e trace=write -o %s %s >/dev/null 2>&1; wc -l < %s", wf, mimg, wf)) die("cmd");
+        v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+        if (np_run(v, root, 0, 30, &r, why, sizeof why)) die(why);
+        for (k = 0; k < (long)r.outn; k = k + 1) if (r.out[k] >= '0' && r.out[k] <= '9') nw = nw * 10 + (r.out[k] - '0');
+        if (r.rc != 0 || r.outn == 0) printf("WRITES\tUNVERIFIED strace unavailable\n");
+        else if (nw >= 1 && nw <= 20) { npass = npass + 1; printf("PASS\tmulti-object-writes %ld <= 20\n", nw); }
+        else { nfail = nfail + 1; printf("FAIL\tmulti-object-writes %ld want 1..20\n", nw); }
+        np_free(&r);
+    }
     printf("TTY\tUNVERIFIED line-buffer and flush-before-read on a terminal (no pty driver)\n");
     printf("STDIO_BUFFER\t%s assertions=%ld failed=%ld\n", nfail ? "FAIL" : "PASS", npass + nfail, nfail);
     return nfail ? 1 : 0;
