@@ -64,8 +64,8 @@ static int fresh_run(const char *pre, const char *sub, char *buf, long cap) {
     if (cx_fmt(cmd, sizeof cmd,
         "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/r/unisacc.com' && "
         "cp '%s/unisacc.com.build.json' '%s/r/unisacc.com.build.json' 2>/dev/null; "
-        "mkdir -p '%s/r/out' && cd '%s/r' && %s'%s' %s '%s/r'",
-        root, tmp, root, tmp, root, tmp, tmp, tmp, pre, rb_bin, sub, tmp)) return -3;
+        "cd '%s/r' && %s'%s' %s '%s/r'",
+        root, tmp, root, tmp, root, tmp, tmp, pre, rb_bin, sub, tmp)) return -3;
     sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
     if (np_run(sh, tmp, 0, 50, &r, why, sizeof why) == 0) {
         long m = (long)r.errn, o = (long)r.outn, i;
@@ -97,12 +97,22 @@ static int root_list(char *o, long cap) {
     return rc;
 }
 static char lst0[65536], lst1[65536];
+static char tmp0[4400], home0[4400], fx[4400], ftc[4400], cbase[4600];
 
 int main(void) {
     char buf[16384]; int rc;
     if (sy_cwd(root, sizeof root)) return 2;
     if (root_list(lst0, sizeof lst0)) return 2;
     if (build_rb()) { sy_eprintf("check-release-usage: release-build compile failed\n"); return 2; }
+    /* freeze 的快照落在链基目录(cxlib.chainroot cr_snap)。夹具:唯一目录下并列 home/ 与 tmp/,
+       HOME、TMPDIR 指过去,UNISACC_CHAIN_BASE 指该 TMPDIR 下的会话根;不写真实缓存链根,也不写 ROOT/out。
+       release-build 已在上面用原环境编好;原 TMPDIR 留到末尾清理 rb_dir 时恢复。 */
+    if (cx_fmt(tmp0, sizeof tmp0, "%s", sy_tmpdir()) || cx_fmt(home0, sizeof home0, "%s", sy_env_or("HOME", ""))) return 2;
+    { char fh[4400], ft[4400];
+      if (cx_fmt(fx, sizeof fx, "%s/release-usage-fx-%d", tmp0, (int)getpid()) || cx_fmt(fh, sizeof fh, "%s/home", fx) || cx_fmt(ft, sizeof ft, "%s/tmp", fx)) return 2;
+      if (sy_mkdir(fx, 0700) || sy_mkdir(fh, 0700) || sy_mkdir(ft, 0700) || sy_realpath(ft, ftc, sizeof ftc) < 0) return 2;
+      if (cx_fmt(cbase, sizeof cbase, "%s/unisacc-session-chain-usage", ftc)) return 2;
+      if (sy_setenv("HOME", fh, 1) || sy_setenv("TMPDIR", ftc, 1) || sy_setenv("UNISACC_CHAIN_BASE", cbase, 1)) return 2; }
     /* U1 */
     rc = fresh_run("", "p3", buf, sizeof buf);
     ck(rc == 1, "U1 p3 missing args exits 1 (not segv)");
@@ -115,17 +125,19 @@ int main(void) {
     ck(has(buf, "release-build\trev\t") && !has(buf, "release-build: rev"), "U2 freeze ok before refusal");
     ck(has(buf, "release-build:"), "U2 clean refusal");
     /* U8: 同快照连续 freeze,产品相同则跳过(inode/mtime/ctime 不变);产品内容变更则重写且字节同根 */
-    { char td[4400], cmd[9000]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, i;
+    { char td[4400], cmd[9000], u8base[4600]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, i;
       if (cx_fmt(td, sizeof td, "%s/release-usage-frz-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+      /* U8 自己的链基目录:其下 snap/ 里只会有这一个克隆的快照,S 就是它(快照必须在链基目录下,克隆里不得出现 out/) */
+      if (cx_fmt(u8base, sizeof u8base, "%s/unisacc-session-chain-usage-u8", ftc) || sy_setenv("UNISACC_CHAIN_BASE", u8base, 1)) return 2;
       if (cx_fmt(cmd, sizeof cmd,
-          "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/unisacc.com.build.json' '%s/r/' && mkdir -p '%s/r/out' && cd '%s/r' && "
-          "'%s' freeze . >o1 2>&1; S=$(ls -d out/release-snap-*); s1=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
+          "git clone -q --shared '%s' '%s/r' && cp '%s/unisacc.com' '%s/unisacc.com.build.json' '%s/r/' && cd '%s/r' && "
+          "'%s' freeze . >o1 2>&1; S=$(ls -d '%s'/snap/*-*); [ $(ls -d '%s'/snap/* | wc -l) = 1 ] && [ -f $S/.release-rev ] && echo U8_SNAP_AT_CHAIN_BASE; [ ! -e out ] && echo U8_NO_OUT_DIR; s1=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
           "'%s' freeze . >o2 2>&1; s2=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
           "[ \"$s1\" = \"$s2\" ] && echo U8_STAT_SAME; grep -q 'freeze-product.unchanged' o2 && echo U8_UNCHANGED_MSG; "
           "printf x >> $S/unisacc.com; '%s' freeze . >o3 2>&1; s3=$(stat -c '%%i %%y %%z' $S/unisacc.com); "
           "[ \"$s2\" != \"$s3\" ] && echo U8_STAT_CHANGED; grep -q 'freeze-product.rewritten' o3 && echo U8_REWRITTEN_MSG; "
           "cmp -s unisacc.com $S/unisacc.com && echo U8_BYTES_EQ; ls -a $S | grep -q '^.fz-' || echo U8_NO_STAGE; cd /; rm -rf '%s'",
-          root, td, root, root, td, td, td, rb_bin, rb_bin, rb_bin, td)) return 2;
+          root, td, root, root, td, td, rb_bin, u8base, u8base, rb_bin, rb_bin, td)) return 2;
       sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0; buf[0] = 0;
       if (np_run(sh, td, 0, 50, &r, why, sizeof why) == 0) {
           m = (long)r.outn; if (m > (long)sizeof buf - 1) m = sizeof buf - 1;
@@ -136,6 +148,8 @@ int main(void) {
       ck(has(buf, "U8_STAT_SAME") && has(buf, "U8_UNCHANGED_MSG"), "U8 same product: freeze skips copy, inode/mtime/ctime kept");
       ck(has(buf, "U8_STAT_CHANGED") && has(buf, "U8_REWRITTEN_MSG") && has(buf, "U8_BYTES_EQ"), "U8 changed product: snapshot rewritten, bytes equal root");
       ck(has(buf, "U8_NO_STAGE"), "U8 staging dir removed");
+      ck(has(buf, "U8_SNAP_AT_CHAIN_BASE") && has(buf, "U8_NO_OUT_DIR"), "U8 snapshot below the chain base, no out/ in the checkout");
+      if (sy_setenv("UNISACC_CHAIN_BASE", cbase, 1)) return 2;
     }
     /* U6 + U7:复用单次编译的 rb_bin,不再各编一次。 */
     { char td[4400], cmd[9000]; np_result r = {0}; char why[512] = {0}; char *sh[4]; long m, o, i;
@@ -181,7 +195,13 @@ int main(void) {
       ck(has(buf, "release-build: rev timeout after 2000 ms"), "U5 timeout named with phase and ceiling ms");
       ck(!has(buf, "release-build: rev\n"), "U5 timeout not reported as ordinary rev failure");
       if (cx_rmtree(fb)) return 2; }
+    /* 恢复原环境后清 rb_dir 与夹具根(都在原 TMPDIR 下,本进程 mkdir 的唯一目录) */
+    if (sy_setenv("TMPDIR", tmp0, 1) || sy_setenv("HOME", home0, 1) || sy_setenv("UNISACC_CHAIN_BASE", "", 1)) return 2;
     if (cx_rmtree(rb_dir)) return 2;
+    /* 夹具根含子进程在其 TMPDIR 下留的缓存,条目数超 cx_rmtree 的 1000 上限,故用 rm -rf(路径为本进程 mkdir 的唯一目录) */
+    { char *rmv[] = {"rm", "-rf", fx, 0}; np_result q = {0}; char w2[128] = {0};
+      if (np_run(rmv, 0, 0, 20, &q, w2, sizeof w2) || q.rc) { np_free(&q); return 2; }
+      np_free(&q); }
     /* U9: 失败/拒绝用例都在私有临时目录里跑,ROOT 前后清单必须一致(无新增文件) */
     if (root_list(lst1, sizeof lst1)) return 2;
     ck(tx_eqz(lst0, lst1), "U9 ROOT has no new file after failing cases");

@@ -5,6 +5,8 @@
  *   oldlock 旧 .lock 文件,rc 1,RESIDUE lock;同例加 --report 必须 rc 0
  * 末行 CHECK_SNAP_RESIDUE<TAB>assertions=N<TAB>failed=M。只读真实快照:不碰。 */
 #pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.chainroot
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use mem.heap
@@ -63,7 +65,31 @@ int main(void) {
     mm_free(o); o = 0;
     rc = run("oldlock", 1, &o, &n);
     ck(rc == 0 && o && has(o, n, "stale=1\t"), "oldlock --report: rc 0");
-    mm_free(o);
+    mm_free(o); o = 0;
+
+    /* 默认根:不给 SNAP_RESIDUE_ROOT 时扫 cr_snap(".",REV)/out/chain(cxlib.chainroot)。链基目录经
+       UNISACC_CHAIN_BASE 指到临时根下本检查自己的会话根,不碰真实缓存链根与 ROOT/out。
+       先是该处没有快照(rc 2,具名 no),再在 cr_snap 所指处造旧锁(rc 1,RESIDUE lock)。 */
+    {
+        char tc[4096], cb[4400], sn[4600], c2[9000], want[4800];
+        size_t bn;
+        if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0 || cx_fmt(cb, sizeof cb, "%s/unisacc-session-chain-snapres-%d", tc, sy_pid()) || sy_setenv("UNISACC_CHAIN_BASE", cb, 1)) return 2;
+        ck(cr_snap(".", "abcdef0123456789", 0, sn, sizeof sn) == 0, "chainroot: cr_snap");
+        bn = strlen(cb);
+        ck(!strncmp(sn, cb, bn) && !strncmp(sn + bn, "/snap/abcdef0123-", 17), "chainroot: snapshot path below the chain base");
+        if (cx_fmt(c2, sizeof c2, "sh ./unisacc.com tools/snap-residue.cx -- abcdef0123456789 %s/oldlock/o 2>&1", base)) return 2;
+        rc = cx_run_timeout(c2, 50, &o, &n);
+        ck(rc == 2 && o && cx_fmt(want, sizeof want, "snap-residue: no %s/out/chain\n", sn) == 0 && has(o, n, want), "chainroot: absent snapshot refused by name at the cr_snap path");
+        mm_free(o); o = 0;
+        if (cx_fmt(c2, sizeof c2, "set -e; mkdir -p %s/out/chain/gen1; touch -d @500000 %s/out/chain/wf-prep.candidate-prep.lock", sn, sn)) return 2;
+        ck(cx_run_timeout(c2, 30, 0, 0) == 0, "mk chainroot");
+        if (cx_fmt(c2, sizeof c2, "sh ./unisacc.com tools/snap-residue.cx -- abcdef0123456789 %s/oldlock/o", base)) return 2;
+        rc = cx_run_timeout(c2, 50, &o, &n);
+        ck(rc == 1 && o && has(o, n, "RESIDUE\tlock\t") && has(o, n, "stale=1\t"), "chainroot: residue found at the cr_snap path");
+        mm_free(o); o = 0;
+        sy_setenv("UNISACC_CHAIN_BASE", "", 1);
+        if (!cx_fmt(c2, sizeof c2, "rm -rf %s", cb)) cx_run_timeout(c2, 30, 0, 0);
+    }
 
     char cmd[4200];
     if (!cx_fmt(cmd, sizeof cmd, "rm -rf %s", base)) cx_run_timeout(cmd, 30, 0, 0);
