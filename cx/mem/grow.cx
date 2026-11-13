@@ -1,1 +1,173 @@
-../../ext/memx/grow.cx
+#pragma unisa module grow
+#pragma unisa dock
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* L0 mem/grow: an owned, growable byte buffer (a C Vec<u8>).  The caller owns the
+   mg_buf struct; its data block is heap memory from mem.heap.  Length and capacity
+   travel with the buffer, so append is bounds-checked against capacity and growth
+   doubles capacity (amortized O(1) append, not O(n^2) per-byte realloc).  Single-
+   threaded; the caller frees exactly once with mg_free.  No operation returns an
+   interior pointer that outlives the call.  On failure the buffer is unchanged.
+     mg_init(b)          zero the struct (call before any other op on an uninit b)
+     mg_reserve(b, n)    ensure cap >= n; 0, or -1 (b unchanged)
+     mg_push(b, c)       append one byte; 0, or -1
+     mg_append(b, p, n)  append n bytes; 0, or -1
+     mg_pop(b, &c)       remove the last byte into c; 0, or -1 (empty/null)
+     mg_truncate(b, n)   shorten to n bytes (no shrink); 0, or -1
+     mg_clear(b)         drop every byte, keep the block (Vec::clear); 0, or -1
+     mg_insert(b, i, c)  insert byte c at i, shift tail right (Vec::insert)
+     mg_remove(b, i, &c) remove byte at i into c, shift tail left (Vec::remove)
+     mg_free(b)          free the block and zero the struct
+     mg_move(dst, src)    drop dst if occupied, then transfer src -> dst (Rust assign)
+     mg_take(b, &p, &n, &c) hand the block out; b zeroed (Vec::into_raw_parts)
+   Speed: reserve doubles the capacity (16, 32, 64, ...), so N pushes cost O(N)
+   total, matching Rust's Vec growth.  The block is never shrunk in place. */
+
+typedef struct { unsigned char *data; long len, cap; } mg_buf;
+
+void mg_init(mg_buf *b) {
+    if (!b) return;
+    b->data = 0; b->len = 0; b->cap = 0;
+}
+
+/* Grow capacity to hold at least need bytes (need > cap).  Double from 16, or
+   exactly need when that overshoots; refuse a negative or absurd need. */
+static int mg_growto(mg_buf *b, long need) {
+    long cap = b->cap ? b->cap : 16;
+    void *p;
+    if (need <= 0) return -1;
+    while (cap < need) {
+        if (cap > 0x3fffffffffffffffL / 2) return -1;
+        cap = cap * 2;
+    }
+    p = mm_grow(b->data, cap);
+    if (!p) return -1;
+    b->data = (unsigned char *)p;
+    b->cap = cap;
+    return 0;
+}
+
+int mg_reserve(mg_buf *b, long n) {
+    if (!b || n < 0) return -1;
+    if (n <= b->cap) return 0;
+    return mg_growto(b, n);
+}
+
+int mg_push(mg_buf *b, int c) {
+    if (!b) return -1;
+    if (b->len >= b->cap && mg_growto(b, b->len + 1)) return -1;
+    b->data[b->len] = (unsigned char)(c & 255);
+    b->len = b->len + 1;
+    return 0;
+}
+
+int mg_append(mg_buf *b, const void *p, long n) {
+    void *tmp = 0;
+    long need;
+    if (!b || n < 0 || (n > 0 && !p)) return -1;
+    if (n == 0) return 0;
+    if (n > 0x7fffffffffffffffL - b->len) return -1;   /* no signed overflow */
+    need = b->len + n;
+    if (need > b->cap) {
+        /* p may point into the block being grown.  realloc may move it, so
+           copy the source before growing; a fresh block never overlaps p. */
+        unsigned long long base = (unsigned long long)(size_t)b->data;
+        unsigned long long src = (unsigned long long)(size_t)p;
+        if (b->data && src >= base && src < base + (unsigned long long)b->cap) {
+            tmp = mm_alloc(n);
+            if (!tmp) return -1;
+            if (mm_copy(tmp, n, p, n) != 0) { mm_free(tmp); return -1; }
+            p = tmp;
+        }
+        if (mg_growto(b, need)) { if (tmp) mm_free(tmp); return -1; }
+    }
+    if (mm_move(b->data + b->len, b->cap - b->len, p, n) != 0) {
+        if (tmp) mm_free(tmp);
+        return -1;
+    }
+    if (tmp) mm_free(tmp);
+    b->len = need;
+    return 0;
+}
+
+void mg_free(mg_buf *b) {
+    if (!b) return;
+    if (b->data) mm_free(b->data);
+    mg_init(b);
+}
+
+/* Move the block from SRC to DST.  Occupied DST is dropped first (Rust
+   assignment: the live destination is released before the overwrite).  SRC is
+   then zeroed, so a later mg_free(SRC) is a no-op and DST is the sole owner.
+   dst == src is a no-op.  0, or -1 (neither changed, except a failed null
+   check). */
+int mg_move(mg_buf *dst, mg_buf *src) {
+    if (!dst || !src) return -1;
+    if (dst == src) return 0;
+    mg_free(dst);
+    *dst = *src;
+    mg_init(src);
+    return 0;
+}
+
+/* Drop every byte but keep the block (Vec::clear).  len goes to 0 and the
+   allocation is retained, so a grow/clear/regrow cycle does not reallocate.
+   O(1).  0, or -1 when b is null. */
+int mg_clear(mg_buf *b) {
+    if (!b) return -1;
+    b->len = 0;
+    return 0;
+}
+
+/* Remove the last byte into *c (Vec::pop).  The byte is returned by value, not
+   pointer, so nothing dangles; len decreases by one and the block is untouched
+   (no shrink).  0, or -1 when b is null, or empty.  O(1), no allocation. */
+int mg_pop(mg_buf *b, int *c) {
+    if (!b || !c || b->len <= 0) return -1;
+    *c = b->data[b->len - 1];
+    b->len = b->len - 1;
+    return 0;
+}
+
+/* Shorten to n bytes (Vec::truncate).  Bytes after n are dropped; n < 0 or n >
+   len is refused and the buffer is unchanged.  The block is not shrunk, so this
+   is O(1).  0, or -1. */
+int mg_truncate(mg_buf *b, long n) {
+    if (!b || n < 0 || n > b->len) return -1;
+    b->len = n;
+    return 0;
+}
+
+/* Insert one byte C at INDEX, shifting the tail right (Vec::insert).  INDEX may
+   be 0..=len; inserting at len is an append.  The block may grow (doubling).
+   O(len - index).  0, or -1 (bad args, or allocation failure with b unchanged). */
+int mg_insert(mg_buf *b, long index, int c) {
+    if (!b || index < 0 || index > b->len) return -1;
+    if (b->len >= b->cap && mg_growto(b, b->len + 1)) return -1;
+    if (index < b->len)
+        { int r = mm_move(b->data + index + 1, b->cap - index - 1, b->data + index, b->len - index); (void)r; }
+    b->data[index] = (unsigned char)(c & 255);
+    b->len = b->len + 1;
+    return 0;
+}
+
+/* Remove the byte at INDEX into *C, shifting the tail left (Vec::remove).
+   INDEX must be 0..len-1; the block is not shrunk.  O(len - index).  0, or -1. */
+int mg_remove(mg_buf *b, long index, int *c) {
+    if (!b || !c || index < 0 || index >= b->len) return -1;
+    *c = b->data[index];
+    if (index + 1 < b->len)
+        { int r = mm_move(b->data + index, b->cap - index, b->data + index + 1, b->len - index - 1); (void)r; }
+    b->len = b->len - 1;
+    return 0;
+}
+
+/* Hand the block back to the caller: *data, *len, *cap receive the fields and the
+   buffer is zeroed.  The caller now owns the block and frees it with mm_free.
+   This is Rust's Vec::into_raw_parts.  0, or -1 (nothing changed). */
+int mg_take(mg_buf *b, unsigned char **data, long *len, long *cap) {
+    if (!b || !data || !len || !cap) return -1;
+    *data = b->data; *len = b->len; *cap = b->cap;
+    mg_init(b);
+    return 0;
+}
