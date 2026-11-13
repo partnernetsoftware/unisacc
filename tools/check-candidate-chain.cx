@@ -790,6 +790,30 @@ int main(int argc, char **argv) {
         if (sy_unlink(rc)) { ck(0, "receipt-unlink"); return 1; }
         if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' wf-prepare '%s' '%s' 2>&1; test ! -e '%s'", native_tool, o, w, d3, rc, d3)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "CLEANUP\twf-prepare\t"), "clean-workdir-removed");
+        /* C3-WFPREP-REUSE-FIX: 收据与本次输入相符则保留复用(rc 3,无 CLEANUP);对象收据重建后同一份收据
+           判过期并清掉整个 prepare 目录(第 7 次链停因:旧快照内 wf-prep 收据被当作已完成)。 */
+        {
+            char in[600], args[2400];
+            if (cx_fmt(in, sizeof in, "%s/in", td)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd,
+                "set -e; mkdir -p '%s/objs' '%s/snap' '%s'; I=$(realpath '%s'); for f in pkg ctor helper tmpl; do echo $f > $I/$f; done; echo first > $I/objs/receipt.txt; "
+                "s() { sha256sum \"$1\" | cut -c1-64; }; "
+                "printf 'whole-front-prepare-v1\\nstatus\\tPREPARED\\nroot\\t%%s\\npkg\\t%%s\\nctor\\t%%s\\nhelper\\t%%s\\ntemplate\\t%%s\\nobjects\\t%%s\\npkg_sha\\t%%s\\nctor_sha\\t%%s\\nhelper_sha\\t%%s\\ntemplate_sha\\t%%s\\nobject_receipt_sha\\t%%s\\n' "
+                "$I/snap $I/pkg $I/ctor $I/helper $I/tmpl $I/objs $(s $I/pkg) $(s $I/ctor) $(s $I/helper) $(s $I/tmpl) $(s $I/objs/receipt.txt) > '%s'",
+                in, in, d3, in, rc)) { ck(0, "fmt"); return 1; }
+            if (sh(cmd, out, sizeof out)) { ck(0, "stale-prep-setup"); return 1; }
+            if (cx_fmt(args, sizeof args, "--clean-stale-prep '%s' '%s' wf-prepare '%s' '%s' '%s/snap' '%s/pkg' '%s/ctor' '%s/helper' '%s/tmpl' '%s/objs'", o, w, d3, rc, in, in, in, in, in, in)) { ck(0, "fmt"); return 1; }
+            if (cx_fmt(cmd, sizeof cmd, "'%s' %s 2>&1; r=$?; test -f '%s' && exit $r", native_tool, args, rc)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 3 && !has(out, "CLEANUP") && !has(out, "WF_PREP_STALE"), "prep-matching-receipt-reused");
+            if (cx_fmt(cmd, sizeof cmd, "echo rebuilt > '%s/objs/receipt.txt'; '%s' %s 2>&1; r=$?; test ! -e '%s' && exit $r", in, native_tool, args, d3)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 0 && has(out, "WF_PREP_STALE\twf-prepare\tkey=object_receipt_sha\t") && has(out, "CLEANUP\twf-prepare\t"), "prep-stale-object-receipt-cleaned");
+            /* 无收据:本入口不动(无收据残留仍归 clean_phase_path) */
+            if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'; '%s' %s 2>&1; r=$?; test -d '%s' && exit $r", d3, native_tool, args, d3)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 3 && !has(out, "CLEANUP"), "prep-no-receipt-untouched");
+            /* 路径字段不符(换了输出目录的 pkg 路径)同样判过期 */
+            if (cx_fmt(cmd, sizeof cmd, "I=$(realpath '%s'); cp $I/pkg $I/pkg2; printf 'whole-front-prepare-v1\\nroot\\t%%s\\npkg\\t%%s\\n' $I/snap $I/pkg2 > '%s'; '%s' %s 2>&1; r=$?; test ! -e '%s' && exit $r", in, rc, native_tool, args, d3)) { ck(0, "fmt"); return 1; }
+            ck(sh(cmd, out, sizeof out) == 0 && has(out, "WF_PREP_STALE\twf-prepare\tkey=pkg\t"), "prep-stale-path-cleaned");
+        }
         /* 越界与含 .. 的路径具名拒绝,目录不被动 */
         if (cx_fmt(cmd, sizeof cmd, "'%s' --clean-phase '%s' '%s' list '%s' - 2>&1", native_tool, o, w, outside)) { ck(0, "fmt"); return 1; }
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE cleanup path outside") && has(out, outside), "clean-outside-refused");

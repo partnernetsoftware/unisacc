@@ -591,6 +591,8 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
     return 0;
 }
 static int clean_phase_path(const char *outdir, const char *phase, const char *path, const char *receipt);
+static int clean_stale_prep(const char *outdir, const char *phase, const char *path, const char *receipt,
+    const char *snap, const char *pkg, const char *ctor, const char *helper, const char *tmpl, const char *objs);
 static int wf_span_prep(const char *root, const char *outdir, const char *helper, int gen, const char *snap, const char *pkg, const char *ctor, const char *objs) {
     char wft[4400], nout[4400], tmpl[4400], rec[4400], saved[4400], ptag[80];
     char *v[16];
@@ -602,6 +604,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
     if (gen > 1) clean_phase_path(outdir, ptag, nout, rec);
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-win-span.cx.in", root)) die("path", "wtmpl");
+    clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     if (fsize(rec) < 0) {
         v[n++] = wft; v[n++] = (char *)"--";
@@ -764,6 +767,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
     if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
     if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "wtmpl");
     check_whole_front_template(tmpl);
+    clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     if (fsize(rec) < 0) {
         v[n++] = wft; v[n++] = (char *)"--";
@@ -1106,6 +1110,64 @@ static int clean_phase_path(const char *outdir, const char *phase, const char *p
     if (ck_done(outdir, phase)) return 0;
     if (fsize(path) < 0) return 0;
     if (receipt && *receipt && fsize(receipt) >= 0) return 0;
+    sy_printf("CLEANUP\t%s\t%s\n", phase, path);
+    if (cx_rmtree(path)) die("cleanup failed", path);
+    return 1;
+}
+/* prepare 收据复用前核对本次输入(C3-WFPREP-REUSE-FIX)。prepare 目录在按 rev 命名的共享快照内,
+   换输出目录重起后旧收据仍在;收据存在不等于对本次输入有效。逐项与 whole-front.cx inputs() 的
+   输入核对同口径:root/pkg/ctor/helper/template/objects 路径与 pkg/ctor/helper/template/对象收据
+   的 sha256。返回 0 为可复用,否则把首个不符的键写入 why。 */
+static int prep_field(const char *text, long n, const char *key, char *buf, long cap) {
+    char pat[80]; long k, at, e;
+    if (cx_fmt(pat, sizeof pat, "\n%s\t", key)) return 1;
+    k = tx_len(pat, 80); at = tx_find(text, n, pat, k);
+    if (at < 0) return 1;
+    at += k;
+    for (e = at; e < n && text[e] != '\n'; e++) {}
+    if (e == n || e == at || e - at >= cap) return 1;
+    if (mm_copy(buf, cap, text + at, e - at)) return 1;
+    buf[e - at] = 0;
+    return 0;
+}
+static int prep_receipt_stale(const char *rec, const char *snap, const char *pkg, const char *ctor, const char *helper,
+    const char *tmpl, const char *objs, const char **why) {
+    static const char *pk[6] = {"root", "pkg", "ctor", "helper", "template", "objects"};
+    static const char *hk[5] = {"pkg_sha", "ctor_sha", "helper_sha", "template_sha", "object_receipt_sha"};
+    const char *pv[6], *hv[5];
+    char orec[4400], want[4400], real[4400], hash[65];
+    size_t n = 0; char *text; int i;
+    if (cx_fmt(orec, sizeof orec, "%s/receipt.txt", objs)) die("path", "prep objs receipt");
+    pv[0] = snap; pv[1] = pkg; pv[2] = ctor; pv[3] = helper; pv[4] = tmpl; pv[5] = objs;
+    hv[0] = pkg; hv[1] = ctor; hv[2] = helper; hv[3] = tmpl; hv[4] = orec;
+    text = cx_read(rec, &n);
+    *why = "receipt";
+    if (!text || !n || memchr(text, 0, n)) { free(text); return 1; }
+    for (i = 0; i < 6; i++) {
+        *why = pk[i];
+        if (prep_field(text, (long)n, pk[i], want, sizeof want) || sy_realpath(pv[i], real, sizeof real) < 0 || strcmp(want, real)) { free(text); return 1; }
+    }
+    for (i = 0; i < 5; i++) {
+        size_t bn = 0; char *b = cx_read(hv[i], &bn);
+        *why = hk[i];
+        if (!b || sy_sha256_hex(b, (long)bn, hash) || prep_field(text, (long)n, hk[i], want, sizeof want) || strcmp(want, hash)) { free(b); free(text); return 1; }
+        free(b);
+    }
+    free(text);
+    *why = "";
+    return 0;
+}
+/* 收据在且与本次输入不符 -> 打 WF_PREP_STALE 并清掉整个 prepare 目录,调用点随后按无收据重做;
+   相符或无收据不动。返回 1 表示已清理。路径守卫与 clean_phase_path 相同。 */
+static int clean_stale_prep(const char *outdir, const char *phase, const char *path, const char *receipt,
+    const char *snap, const char *pkg, const char *ctor, const char *helper, const char *tmpl, const char *objs) {
+    const char *why = "";
+    if (!path || !*path) die("REFUSE cleanup empty path", phase);
+    if (has_dotdot(path) || !(under_dir(path, outdir) || (chain_work[0] && under_dir(path, chain_work))))
+        die("REFUSE cleanup path outside out/chain", path);
+    if (fsize(receipt) < 0) return 0;
+    if (!prep_receipt_stale(receipt, snap, pkg, ctor, helper, tmpl, objs, &why)) return 0;
+    sy_printf("WF_PREP_STALE\t%s\tkey=%s\t%s\n", phase, why, receipt);
     sy_printf("CLEANUP\t%s\t%s\n", phase, path);
     if (cx_rmtree(path)) die("cleanup failed", path);
     return 1;
@@ -2164,6 +2226,11 @@ int main(int argc, char **argv) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             return clean_phase_path(argv[i + 1], argv[i + 3], argv[i + 4], tx_eqz(argv[i + 5], "-") ? 0 : argv[i + 5]) ? 0 : 3;
         }
+        if (tx_eqz(argv[i], "--clean-stale-prep") && i + 11 < argc) {
+            /* 夹具入口: --clean-stale-prep OUT WORK PHASE PATH RECEIPT SNAP PKG CTOR HELPER TEMPLATE OBJECTS;清理返回 0,可复用返回 3 */
+            tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
+            return clean_stale_prep(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5], argv[i + 6], argv[i + 7], argv[i + 8], argv[i + 9], argv[i + 10], argv[i + 11]) ? 0 : 3;
+        }
         if (tx_eqz(argv[i], "--clean-job") && i + 5 < argc) {
             tx_copy(chain_work, (long)sizeof chain_work, argv[i + 2], tx_len(argv[i + 2], 4000));
             clean_stale_job(argv[i + 1], argv[i + 3], argv[i + 4], argv[i + 5]);
@@ -2571,6 +2638,11 @@ int main(int argc, char **argv) {
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
         if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
         check_whole_front_template(tmpl);
+        {
+            char wrc[4400];
+            if (cx_fmt(wrc, sizeof wrc, "%s/receipt.txt", nout)) die("path", "wrc");
+            clean_stale_prep(outdir, "wf-prepare", nout, wrc, snap, pkg, ctor, helper, tmpl, objs);
+        }
         if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
         {
             char rec[4400], saved[4400];
