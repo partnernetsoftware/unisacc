@@ -129,6 +129,39 @@ db9d0e05e3cf966b,即输出字节一致):
 测前后并对拍镜像字节。本节不声称变快。测量脚本与变体在作业临时目录 `tmp/s1c/`(bench.cx、var.cx、
 bench1.out、bench2.out、nc.h、ncs.h),未入库。
 
+### SPEED-1D 第一刀补丁:cx-flatten 去注释(2026-11-13,已装 0.0.59,输入 9699fdeed9,补丁未入库)
+
+可行性判断:两刀里第一刀最小且可出补丁;第二刀(e2 不出等长填充)要改 E2 网并重建,本窗口未做。
+补丁在作业临时目录 `tmp/speed1d.patch`(216,919 B):`tools/cx-flatten.cx` 加 `fl_strip`(块注释变一个空格,
+行注释删去,换行全留,指令内跨行注释改成续行,行尾空白删去,首行标记保留),重生成的
+`include/cx-flat.h` 409,158 -> 318,714 B(-22.1%),行数 9165 不变,故诊断行号不动。
+`git grep 'cx-flat\.h:[0-9]'` 只命中账本一条历史记录,没有断言依赖行号。
+
+关键限制(实测):隐式前导读的是包内嵌头 `\0hdr/cx-flat.h`,私有副本只能经 `-I` 进入,而 `-I` 目录不算
+系统头目录,自动裁剪不生效:最小 `.cx` 不带 `-I` 镜像 sha 635393af18a1812f,带 `-I 原样副本` 变成
+db9d0e05e3cf966b(即 SPEED-1C 实测三的未裁剪镜像)。所以下面全部是未裁剪路由的数据,
+产品路径(隐式前导+裁剪)的前后对比:UNVERIFIED,须重建产品。
+
+字节等价(A=原样副本,B=补丁后副本,均经 `-I DIR/include`):
+
+- 10 个 `tools/*.cx`(cx-flatten、ledger-add、own-diff、edit-span、register、cap-gen、speed-probe、commit-own、
+  tape-gap、ratchets)`-c -o`,`UNISACC_RUN_CACHE=0`、各自全新 TMPDIR,20 次编译 rc 全 0,A/B 对象 sha256
+  逐一相同(10/10)。
+- `tools/cx-flatten.cx -o` 镜像 681,282 B,A、B 各 3 次 sha 同为 b8472a13d1bc0e3d。
+- 独立对照:宿主 `gcc -fpreprocessed -dD -E -P` 去注释后删空白,A、B 的 sha 同为 6b8996b364eba54f。
+- 补丁在 `git archive HEAD` 副本上 `git apply` 成功,应用后 `cx-flatten --check` 输出 `SAME include/cx-flat.h 41 headers`。
+
+耗时(只有 1 个单元测完;`tools/cx-flatten.cx -o`,冷,全新 TMPDIR,各 3 次,最小/中位 ms):
+
+| 前导 | e2 | e1 | e3 | 六相合计 |
+|---|---|---|---|---|
+| A 原样 409,158 B | 982.6/1015.3 | 166.5/167.4 | 4323.3/4348.8 | 9014.8/9088.5 |
+| B 去注释 318,714 B | 933.0/948.1 | 166.2/167.1 | 4228.5/4517.9 | 8889.8/8999.5 |
+
+e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声内,不声称 e3 变快。其余 9 个单元的
+耗时:未跑(每次约 9 至 20 秒,10 单元各 3 次超出窗口,已按真实 PID 停掉在途测量)。
+`cx-flatten` 目前没有 `check-*.cx` 与批次,落地时应补(含行数不变与无注释两条断言)。
+
 ## 补测工具(已写,纪元后用)
 
 `tools/speed-probe.cx`(批次 `speed-probe`,check 6/6 PASS):输入 `JOBS.tsv`(每行 `NAME<TAB>ARGV...`,
