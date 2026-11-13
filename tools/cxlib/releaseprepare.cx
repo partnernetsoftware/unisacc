@@ -79,9 +79,21 @@ static int rp_capture(char **argv,const char *cwd,long end,np_buf *o,np_buf *e,i
  }
  if(en==sizeof err){np_puts(e,"exec/cwd handshake failed\n");return 127;}return WIFSIGNALED(st)?128+WTERMSIG(st):WEXITSTATUS(st);
 }
+/* Exit class: 0 ok, 3 retryable (deadline, kill-class rc, 125 kill-with-residue, any residue),
+ * 1 deterministic failure only. rc 1 must never be blindly re-entered by callers. */
+int rp_classify(int rc,int residue,int past_deadline){
+ if(past_deadline||residue||rc==125||rc==142||rc==124||rc==137||rc==143)return 3;
+ return rc?1:0;
+}
+/* Per-command bound in ms: default 55s; UNISACC_CHAIN_PHASE_BOUND_S (6..90) raises it to bound-5 s, never lowers. */
+long rp_bound_ms(const char *e){
+ long v=0;if(!e||!*e)return 55000;
+ for(;*e;e++){if(*e<'0'||*e>'9'||v>1000)return 55000;v=v*10+(*e-'0');}
+ if(v<6||v>90)return 55000;return (v-5)*1000>55000?(v-5)*1000:55000;
+}
 static int rp_cmd(const char *phase,char **v,char **out){
  np_buf b={0},o={0},e={0};char p[4400],leaf[200];int residue=0;
- long hard=sy_now_ms()+55000;if(hard>rp_mono_end)hard=rp_mono_end;long end=hard-2500;if(out)*out=0;if(end-sy_now_ms()<1000)return 3;
+ long hard=sy_now_ms()+rp_bound_ms(sy_env("UNISACC_CHAIN_PHASE_BOUND_S"));if(hard>rp_mono_end)hard=rp_mono_end;long end=hard-2500;if(out)*out=0;if(end-sy_now_ms()<1000)return 3;
  for(int i=0;v[i];i++){np_puts(&b,i?"\t":"ARGV\t");np_puts(&b,v[i]);}np_puts(&b,"\nSTDOUT\n");
  if(rp_subreaper()!=0)return 2;
  int rc=rp_capture(v,rp_root,end,&o,&e,&residue);
@@ -90,7 +102,7 @@ static int rp_cmd(const char *phase,char **v,char **out){
  np_puts(&b,"RESIDUE\t");np_putll(&b,residue);np_puts(&b,"\n");
  if(cx_fmt(leaf,sizeof leaf,"prepare-%s-%ld-%d-%d.log",phase,sy_now_ms(),sy_pid(),rp_seq++))rp_die("log path");rp_path(p,rp_state,leaf);rp_write(p,b.p,b.n);free(b.p);
  if(out&&!rc){if(!o.p)np_puts(&o,"");*out=o.p;}else free(o.p);
- return sy_now_ms()>=rp_mono_end||rc==142||rc==124||rc==137||rc==143?3:rc?1:0;
+ return rp_classify(rc,residue,sy_now_ms()>=rp_mono_end);
 }
 static int rp_child(const char *phase,char **v){const char *fake=rp_get("test_driver");if(fake){char *a[]={(char*)fake,(char*)phase,(char*)rp_state,(char*)rp_config,(char*)rp_assets,0};return rp_cmd(phase,a,0);}return rp_cmd(phase,v,0);}
 static void rp_bind(int create){
@@ -107,7 +119,7 @@ static int rp_freeze(int create){
      tools/freeze-plan.cx head-delta classifies every changed path as non-product. */
   char com[4400],tool[4400];rp_path(com,rp_root,"unisacc.com");rp_path(tool,rp_root,"tools/freeze-plan.cx"); // lint:allow R1-product the ROOT checkout product classifies its own HEAD delta, same as the chain child below
   char *hd[]={"sh",com,tool,"--","head-delta",(char*)rp_root,(char*)rp_need("build_rev"),0};
-  np_buf so={0},se={0};int residue=0;long end=sy_now_ms()+55000;if(end>rp_mono_end)end=rp_mono_end;
+  np_buf so={0},se={0};int residue=0;long end=sy_now_ms()+rp_bound_ms(sy_env("UNISACC_CHAIN_PHASE_BOUND_S"));if(end>rp_mono_end)end=rp_mono_end;
   if(rp_subreaper()!=0)return 2;int hrc=rp_capture(hd,rp_root,end,&so,&se,&residue);
   np_puts(&so,"");rp_put("freeze-delta.tsv",so.p);free(se.p);
   if(hrc==142||hrc==125){free(so.p);return 3;}
@@ -188,8 +200,8 @@ static int rp_prepare_run(const char *state,const char *config,const char *asset
  char *sidout=0;char *snapid[]={(char*)rp_need("identity_helper"),(char*)rp_need("snap"),0};if((rc=rp_cmd("snap-sid",snapid,&sidout)))return rc;if(!sidout||strncmp(sidout,rp_sid,64))rp_die("frozen snapshot SID differs");free(sidout);
  rp_sources(1);rp_candidate();
  char rr[4400],src[4400],table[4400],tool[4400],st[4400];rp_path(rr,state,"rr");rp_path(src,state,"src");rp_path(table,state,"candidate-init.tsv");rp_path(tool,rp_root,"tools/release-run.cx");rp_path(st,rr,"state.tsv");
- if(sy_setenv("UNISACC_IDENT_HELPER",rp_need("identity_helper"),1))rp_die("identity helper environment");
- char *pack[]={"sh",com,tool,"--","--pack",(char*)rp_root,table,src,rr,"--snap",(char*)rp_need("snap"),0};char *resume[]={"sh",com,tool,"--","--resume",rr,0};
+ char envh[4500];if(cx_fmt(envh,sizeof envh,"UNISACC_IDENT_HELPER=%s",rp_need("identity_helper")))rp_die("identity helper environment");
+ char *pack[]={"env",envh,"sh",com,tool,"--","--pack",(char*)rp_root,table,src,rr,"--snap",(char*)rp_need("snap"),0};char *resume[]={"env",envh,"sh",com,tool,"--","--resume",rr,0};
  if((rc=rp_child("pack",sy_exists(st)==1?resume:pack)))return rc;
  RcCandidate c;char why[400];rp_path(table,rr,"candidate.tsv");if(rcand_load(table,&c,why,sizeof why)||rcand_verify(&c,assets,7,why,sizeof why))rp_die("pack incomplete");
  char ape[4400],standalone[4400];rp_path(ape,assets,c.name[0]);rp_path(standalone,state,"standalone");
