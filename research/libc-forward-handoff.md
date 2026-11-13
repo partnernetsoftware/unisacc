@@ -1,7 +1,7 @@
 # libc 方向裁定：反对自研，系统有的尽量复用（移交 cc-unisacc 安排）
 
 状态：**holder 纪要，不是设计、不是测量。** 未跑任何命令、未改代码。
-本文件只记录一件事：主人对 libc 路线的裁定，与请 cc-unisacc 接手安排。
+本文件只记录一件事：项目所有者对 libc 路线的裁定，与请 cc-unisacc 接手安排。
 既有的诊断与方案在 [libc-unify-design.md](libc-unify-design.md)（design only），
 本纪要与之不重复，只做"来龙去脉 + 裁定 + 移交"三件事。
 
@@ -11,14 +11,14 @@
   静态实现（每个函数 `static`，底层只依赖少数几个裸系统调用门，按
   OS/ISA 由后端发 `syscall`/`svc`）。字节上，它被编进了六个目标的原生
   映像，且按目标近似重复。
-- 主人要求参照 tinycc / `tcc -run` 的思路：**系统已有的尽量复用（转发给
+- 项目所有者要求参照 tinycc / `tcc -run` 的思路：**系统已有的尽量复用（转发给
   系统 libc），不要自研一份 libc**，以省字节、去重复、少维护。
 - `libc-unify-design.md` 早已把这条路线列为 D2（owner's framing /
   thin shim）：Windows 转发 Win32 + 自带 fd 表，macOS 转发 libSystem，
   Linux 保持 syscall，stdio/string/math 本体保留。该文档 status 是
   design only，未动工。
 
-## 2. 主人的裁定
+## 2. 项目所有者的裁定
 
 1. 反对自研 libc；系统有的能转发就转发。
 2. 具体怎么做由 cc-unisacc 安排，不由本会话拍板。

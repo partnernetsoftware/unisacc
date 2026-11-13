@@ -1,12 +1,12 @@
 # CX 分层：底层对接包与上层（2026-10-30，cc）
 
-主人口径：CX 底层要有 libc 与 POSIX 的专用对接包；上层不再直接用 malloc、memcpy 这类操作。
+项目所有者口径：CX 底层要有 libc 与 POSIX 的专用对接包；上层不再直接用 malloc、memcpy 这类操作。
 
 ## 目录
 
 - 设计：
   - [层](#层)（L0 宿主对接 / L1 机制 / L2 驱动 / L3 工具）
-  - [只有底层能 include](#只有底层能用-include-对接-libcposix主人口径2026-10-30)（白名单 + 收口方向）
+  - [只有底层能 include](#只有底层能用-include-对接-libcposix项目所有者口径2026-10-30)（白名单 + 收口方向）
   - [棘轮](#棘轮)（`tests/cxraw.cx` 只降不升）
   - [L0 接口](#l0-接口按上表实际用法归类) · [已有与新建的 L0](#已有与新建的-l0)
   - [落地顺序](#落地顺序)
@@ -54,13 +54,13 @@
 
 两个棘轮的扫描面现在都是 `git ls-files -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'`。之前只扫 `*.cx`，`cx/runtime/lnx-x86_64.c` 完全在盲区；现在 `cx/` 下的宿主 C 与 `.c.in` 投影同样受约束。`src/`、`exec/`、`tools/` 的宿主 C 不在分层叙事内，故意不扫。`cx/cx0/compat-prefix.c.in` 是唯一因此新增的精确例外（cx0-extract 投影到 `src/cxmod.c` 的固定前导，对接携带的 `unisa_sha256.h`）。
 
-## 只有底层能用 include 对接 libc/POSIX（主人口径，2026-10-30）
+## 只有底层能用 include 对接 libc/POSIX（项目所有者口径，2026-10-30）
 
 - 能写 `#include` 的只有底层：`include/`（前导与携带头）、`tools/cxcc-hostinc/`、`cx/sys/`。名单在 `tests/cxinclude-boundary.tsv`，由 `tests/cxinclude.cx` 检查。其余单位一律用隐式前导，加上 `#pragma unisa use sys.*/text.*/mem.*`。精确例外条目现在接受 `.cx/.c/.h/.c.in`。
 - 两张表的不一致已收口（2026-10-31）：过去 `tests/cxraw-layers.tsv` 按文件逐个准许 `cx/core/kernel.cx`、`cx/runtime/process*.cx` 直接调 libc，与 include 白名单不同名。现在这些文件已迁进 `cx/sys/`，两张表都用同一个目录前缀表达 L0，剩下的精确例外只有引导期的 `src/host.cx`、`src/hostnative.cx` 和 csih 的头部表面探针。
 - 白名单外仍在 include 的（2026-10-30）：
   - `src/host.cx` 原来 3 个（`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`）。mmap、mprotect、munmap 已进 `cx/sys/mem.cx`，dlopen、dlsym、dlclose、dlerror 的地址已进 `cx/sys/dl.cx`。open 用的 `O_*` 本来就在前导里，没有再为 `<fcntl.h>` 写 include。`src/host.cx` 现在 0 个 `#include`。`tests/cxinclude.cx --check` 不再报这个文件；整次仍失败，报的是 `apps/csih`（24 个超基线、2 个低于基线），那是 csih 车道。
-  - `apps/csih`：主人定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sysx.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
+  - `apps/csih`：项目所有者定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sysx.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
     - `<sys/socket.h>`、`<netinet/in.h>`、`<arpa/inet.h>`、`<netdb.h>` 改为 `use sysx.net`；
     - `<poll.h>` 改为 `use sys.poll`，类型用 `sy_pollfd_t`，事件位用 `SY_POLL*`；
     - `<termios.h>`、`<sys/ioctl.h>` 改为 `use sys.posix` 加 `use sys.tty`；
@@ -291,7 +291,7 @@ feedback 反复指出「内存安全未触及更广的 Rust 式所有权/借用�
 
 ## prd.md 索引（2026-10-30，cc）
 
-按主人「prd.md 要做好索引」的要求，把 CX 分层重构接进现有索引体系：
+按项目所有者「prd.md 要做好索引」的要求，把 CX 分层重构接进现有索引体系：
 
 - `prd.md`「当前导航」新增一条 → [cx 分层与底层/上层重构](cx-layers.md)。
 - `docs/cx/prd.md` 索引段新增 `plans/cx-layers.md`（底层/上层分层重构）。

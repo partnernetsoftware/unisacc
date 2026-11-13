@@ -1,6 +1,6 @@
 # Paper D 意向书：`.cx` 架构上的模块化与内存安全——流／网流水线的可选安全节点
 
-**状态**：意向书（2026-09-30 政委方向；**2026-10-28 主人裁定补充**：正文以 `.cx` 架构承载模块化与内存安全，不另起第六篇）。不是草稿，也不做任何结果声称。
+**状态**：意向书（2026-09-30 政委方向；**2026-10-28 项目所有者裁定补充**：正文以 `.cx` 架构承载模块化与内存安全，不另起第六篇）。不是草稿，也不做任何结果声称。
 
 **关系**：独立成文。依赖 Paper A（[`unisacc-paper.md`](unisacc-paper.md)：流／网换控制逻辑、表到网络的精确构造）与 Paper C（[`paper-c-intent.md`](paper-c-intent.md)：管道方法）。A 只一笔带过工程载体；**模块边界、可见性、所有权／借用与分级安全保证归 D**。工程入口：[`cx/`](../cx/)、[`docs/cx/prd.md`](../docs/cx/prd.md)、[`plans/cx-modules.md`](../plans/cx-modules.md)、[`archive/research-2026-11d/plans/v0.0.44.md`](../archive/research-2026-11d/plans/v0.0.44.md)（C44-CX-MODULE／C44-CX-MEMORY）、历史条目 [`archive/plans/v0.1.x.md`](../archive/plans/v0.1.x.md) v0.1.3。
 
