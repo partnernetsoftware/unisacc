@@ -1,0 +1,110 @@
+/* tools/reg-manifest.cx -- per-batch registration manifests vs the three registry tables (DSG-REG1 step 1).
+ *
+ *   sh ./unisacc.com tools/reg-manifest.cx -- --check|--write [--root DIR]
+ *
+ * tests/manifests/<batch-id>.tsv holds exactly three lines, each "KIND<TAB>ROW":
+ *   batch<TAB>ROW      the 14-column tests/batches.tsv row (column 1 must equal the file stem)
+ *   coverage<TAB>ROW   the 5-column tests/coverage.tsv row (column 1 must equal batch column 11)
+ *   packages<TAB>ROW   the 9-column build/batch-packages.tsv row ("batch<TAB>id<TAB>...")
+ * Only batches that have a manifest are checked; the existing ~1000 legacy rows stay where they are.
+ * --check: every manifest row must be present, byte for byte, in its table.  A key (batch id, coverage id,
+ *   "batch id") that is absent prints MISSING<TAB>table<TAB>id; one present with other content prints
+ *   MISMATCH<TAB>table<TAB>id.  Exit 1 on any, 2 on a malformed manifest, else 0.
+ * --write: appends the MISSING rows to the tables (MISMATCH is never overwritten, still exit 1).  The
+ *   packages table is generated: after --write run tools/batch-packages-gen.cx --write to put the row in order. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static const char *RM_KIND[3] = {"batch", "coverage", "packages"};
+static const char *RM_TABLE[3] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv"};
+static const int RM_COLS[3] = {14, 5, 9};
+
+static int rm_cols(const char *s) { int n = 1; for (; *s; s++) if (*s == '\t') n++; return n; }
+
+/* find a line starting with KEY<TAB>; returns 0 absent, 1 equal to full ROW, 2 present but different */
+static int rm_find(const char *buf, size_t n, const char *key, const char *row) {
+    size_t kl = strlen(key), rl = strlen(row), i = 0;
+    while (i < n) {
+        size_t e = i; while (e < n && buf[e] != '\n') e++;
+        if (e - i > kl && !memcmp(buf + i, key, kl) && buf[i + kl] == '\t') return (e - i == rl && !memcmp(buf + i, row, rl)) ? 1 : 2;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static int rm_one(const char *root, const char *file, const char *stem, int write, int *bad) {
+    char path[4400], rows[3][8192], key[3][600]; int got[3] = {0, 0, 0}; size_t sz = 0; char *m; size_t i = 0; int k, rc = 0;
+    if (cx_fmt(path, sizeof path, "%s/tests/manifests/%s", root, file)) return 2;
+    m = (char *)cx_read(path, &sz);
+    if (!m) { sy_printf("MALFORMED\t%s\tunreadable\n", file); return 2; }
+    while (i < sz) {
+        size_t e = i, t; char ln[8300]; int found = -1;
+        while (e < sz && m[e] != '\n') e++;
+        if (e == i) { i = e + 1; continue; }
+        if (e - i >= sizeof ln) { sy_printf("MALFORMED\t%s\tline too long\n", file); return 2; }
+        memcpy(ln, m + i, e - i); ln[e - i] = 0; i = e + 1;
+        for (t = 0; ln[t] && ln[t] != '\t'; t++) {}
+        for (k = 0; k < 3; k++) if (strlen(RM_KIND[k]) == t && !memcmp(ln, RM_KIND[k], t)) found = k;
+        if (found < 0 || !ln[t] || got[found]) { sy_printf("MALFORMED\t%s\tbad or duplicate kind line\n", file); return 2; }
+        if (rm_cols(ln + t + 1) != RM_COLS[found]) { sy_printf("MALFORMED\t%s\t%s needs %d columns\n", file, RM_KIND[found], RM_COLS[found]); return 2; }
+        strcpy(rows[found], ln + t + 1); got[found] = 1;
+    }
+    if (!(got[0] && got[1] && got[2])) { sy_printf("MALFORMED\t%s\tneed batch, coverage and packages lines\n", file); return 2; }
+    { size_t sl = strlen(stem);
+      if (strncmp(rows[0], stem, sl) || rows[0][sl] != '\t') { sy_printf("MALFORMED\t%s\tbatch id is not the file stem\n", file); return 2; }
+      if (cx_fmt(key[0], sizeof key[0], "%s", stem) || cx_fmt(key[2], sizeof key[2], "batch\t%s", stem)) return 2;
+      if (strncmp(rows[2], key[2], strlen(key[2])) || rows[2][strlen(key[2])] != '\t') { sy_printf("MALFORMED\t%s\tpackages row is not for this batch\n", file); return 2; }
+      { /* coverage id = batch column 11 and coverage column 1 */
+        char *c = rows[0]; int f; for (f = 1; f < 11 && c; f++) { c = strchr(c, '\t'); if (c) c++; }
+        if (!c) return 2;
+        { char *ce = strchr(c, '\t'); size_t cl = ce ? (size_t)(ce - c) : strlen(c);
+          if (cl >= sizeof key[1]) return 2;
+          memcpy(key[1], c, cl); key[1][cl] = 0;
+          if (strncmp(rows[1], key[1], cl) || rows[1][cl] != '\t') { sy_printf("MALFORMED\t%s\tcoverage id differs from batch column 11\n", file); return 2; } } } }
+    for (k = 0; k < 3; k++) {
+        char tp[4400]; size_t tn = 0; char *tb; int r;
+        if (cx_fmt(tp, sizeof tp, "%s/%s", root, RM_TABLE[k])) return 2;
+        tb = (char *)cx_read(tp, &tn);
+        if (!tb) { sy_printf("MALFORMED\t%s\ttable %s unreadable\n", file, RM_TABLE[k]); return 2; }
+        r = rm_find(tb, tn, key[k], rows[k]);
+        if (r == 2) { sy_printf("MISMATCH\t%s\t%s\n", RM_TABLE[k], stem); (*bad)++; }
+        else if (r == 0) {
+            sy_printf("MISSING\t%s\t%s\n", RM_TABLE[k], stem);
+            if (write) {
+                size_t rl = strlen(rows[k]); char *nb = (char *)mm_alloc(tn + rl + 2); int nl = (tn > 0 && tb[tn - 1] != '\n');
+                if (!nb) return 2;
+                memcpy(nb, tb, tn); if (nl) nb[tn] = '\n';
+                memcpy(nb + tn + nl, rows[k], rl); nb[tn + nl + rl] = '\n';
+                if (cx_write(tp, nb, tn + nl + rl + 1)) { mm_free(nb); return 2; }
+                mm_free(nb); sy_printf("WROTE\t%s\t%s\n", RM_TABLE[k], stem);
+            } else (*bad)++;
+        }
+    }
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *root = "."; int write = 0, check = 0, a, bad = 0, n = 0, hard = 0; char dir[4400]; sy_dir_t d;
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--check")) check = 1;
+        else if (!strcmp(argv[a], "--write")) write = 1;
+        else if (!strcmp(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
+    }
+    if (check == write) { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
+    if (cx_fmt(dir, sizeof dir, "%s/tests/manifests", root) || sy_dir_open(&d, dir)) { sy_printf("REG_MANIFEST\tno manifest dir\n"); return 2; }
+    while (sy_dir_next(&d) == 1) {
+        size_t l = strlen(d.name); char stem[300];
+        if (l < 5 || l > 290 || strcmp(d.name + l - 4, ".tsv")) continue;
+        memcpy(stem, d.name, l - 4); stem[l - 4] = 0;
+        if (rm_one(root, d.name, stem, write, &bad)) hard = 1;
+        n++;
+    }
+    sy_dir_close(&d);
+    sy_printf("REG_MANIFEST\tmanifests=%d\tbad=%d\thard=%d\n", n, bad, hard);
+    return hard ? 2 : (bad ? 1 : 0);
+}

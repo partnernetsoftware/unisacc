@@ -46,6 +46,7 @@
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use mem.heap
 #pragma unisa use cxlib.runnerprep
 
 static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
@@ -288,6 +289,28 @@ int main(int argc, char **argv) {
             return 4;
         }
         printf("REGISTER\tid=%s\tbatch_packages=REGENERATED\n", id);
+        /* DSG-REG1: also leave the per-batch manifest tests/manifests/ID.tsv (checked by tools/reg-manifest.cx,
+           so a later commit that carries one of the three rows without the others is caught). */
+        {   size_t pn = 0; char *pb = (char *)cx_read("build/batch-packages.tsv", &pn), key[600], mp[700], *m;
+            size_t i = 0, kl, bl = strlen(brow), cl = strlen(crow), ml;
+            if (!pb || cx_fmt(key, sizeof key, "batch\t%s\t", id) || cx_fmt(mp, sizeof mp, "tests/manifests/%s.tsv", id)) { printf("REGISTER\tid=%s\tmanifest=SKIPPED\n", id); return 0; }
+            kl = strlen(key);
+            while (i < pn) {
+                size_t e = i; while (e < pn && pb[e] != '\n') e++;
+                if (e - i > kl && !memcmp(pb + i, key, kl)) {
+                    ml = 6 + bl + 9 + cl + 9 + (e - i) + 1; m = (char *)mm_alloc(ml + 1);
+                    if (!m) break;
+                    memcpy(m, "batch\t", 6); memcpy(m + 6, brow, bl);
+                    memcpy(m + 6 + bl, "coverage\t", 9); memcpy(m + 15 + bl, crow, cl);
+                    memcpy(m + 15 + bl + cl, "packages\t", 9); memcpy(m + 24 + bl + cl, pb + i, e - i); m[24 + bl + cl + (e - i)] = '\n';
+                    sy_mkdir("tests/manifests", 0755);
+                    printf("REGISTER\tid=%s\tmanifest=%s\n", id, cx_write(mp, m, ml) ? "WRITE_FAILED" : "WRITTEN");
+                    mm_free(m); return 0;
+                }
+                i = e + 1;
+            }
+            printf("REGISTER\tid=%s\tmanifest=SKIPPED\n", id);
+        }
     }
     return 0;
 }

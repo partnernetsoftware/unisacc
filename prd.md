@@ -119,6 +119,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 批量机械改写 | `refactor.cx -- find/apply/sweep` | 每文件改前改后验证，不过即还原 |
 | C47 whole函数来源 | `tools/whole-function-origin.cx -- MATERIAL UNITS FRAMES CONFIG WATCH OUTPUT NEWDIR [--sidecar]`；`tools/module-byte-map.cx -- --whole-context …` | 校验normalized帧地图及同位置快照；后改写、区间外与跨上下文保持UNKNOWN，stub单列SYNTHETIC；非排他所有权 |
 | C47双段观察消费 | `lower-row-origin.cx`、`encoder-record-origin.cx`、`arm-encoder-record-origin.cx` 的显式 `--watch-bundle`；共享 `cxlib.watchbundle`，登记 `register.cx … --args '分号分隔参数'` | 两段最多2M条/128MiB，旧单文件预算不变；manifest/execution/每段SHA及连续序号全核，新证书绑定实际manifest；有界拼接，非恒定内存 |
+| 登记清单配对 | `tools/reg-manifest.cx -- --check/--write`:`tests/manifests/ID.tsv` 三行(batch/coverage/packages)对批次表、覆盖表、batch-packages 三处逐字核对,缺哪张表点名 MISSING,内容不同 MISMATCH;`register.cx` 成功后自动写清单;夹具 `check-reg-manifest.cx`,批次 reg-manifest |
 | 归档过期 ledger/items 行 | `sh ./unisacc.com tools/archive-records.cx -- [--cutoff YYYY-MM-DD] [--write]`；检查 `tools/check-archive-records.cx` | 默认干跑；`--write` 把早于 cutoff 的 ledger 行与无存活引用的 DONE/CLOSED items 追加到 `archive/work/`；SLICE-CHANGE 不动；写前写后核 sha |
 | 候选独有五批入口(C4B) | `sh ./unisacc.com tools/candidate-evidence.cx -- --ape APE --out DIR [--dry-run\|--only ID]`;检查 `tools/check-candidate-evidence.cx`(批 `candidate-evidence`);输出 CAND_EVIDENCE 行,未跑记 UNRUN |
 | 停链定因只读 | `sh ./unisacc.com tools/chain-verdict.cx -- --dir 链输出目录`;检查 `tools/check-chain-verdict.cx`(批 `chain-verdict`) | 取最后失败尝试,一行 TSV:phase/attempt/rc/stderr 首行/tools 源码 file:line/class(rc2 或 REFUSE=DETERMINISTIC,-9 -15 124 137 142 143=RETRYABLE,其余 UNKNOWN) |
