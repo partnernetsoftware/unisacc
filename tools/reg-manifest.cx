@@ -16,12 +16,30 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
+#pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
 static const char *RM_KIND[3] = {"batch", "coverage", "packages"};
 static const char *RM_TABLE[3] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv"};
 static const int RM_COLS[3] = {14, 5, 9};
+
+static int rm_index;   /* --index: read manifests and tables from the git index (git show :PATH), not the work tree */
+
+/* read ROOT/REL from the work tree, or REL from the index; caller frees; 0 when unreadable */
+static char *rm_read(const char *root, const char *rel, size_t *n) {
+    char p[4400];
+    *n = 0;
+    if (rm_index) {
+        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0};
+        if (cx_fmt(spec, sizeof spec, ":%s", rel)) return 0;
+        if (cx_runv_timeout(v, 20, &o, n) != 0) { mm_free(o); *n = 0; return 0; }
+        return o;
+    }
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
+    return (char *)cx_read(p, n);
+}
 
 static int rm_cols(const char *s) { int n = 1; for (; *s; s++) if (*s == '\t') n++; return n; }
 
@@ -38,20 +56,20 @@ static int rm_find(const char *buf, size_t n, const char *key, const char *row) 
 
 static int rm_one(const char *root, const char *file, const char *stem, int write, int *bad) {
     char path[4400], rows[3][8192], key[3][600]; int got[3] = {0, 0, 0}; size_t sz = 0; char *m; size_t i = 0; int k, rc = 0;
-    if (cx_fmt(path, sizeof path, "%s/tests/manifests/%s", root, file)) return 2;
-    m = (char *)cx_read(path, &sz);
+    if (cx_fmt(path, sizeof path, "tests/manifests/%s", file)) return 2;
+    m = rm_read(root, path, &sz);
     if (!m) { sy_printf("MALFORMED\t%s\tunreadable\n", file); return 2; }
     while (i < sz) {
         size_t e = i, t; char ln[8300]; int found = -1;
         while (e < sz && m[e] != '\n') e++;
         if (e == i) { i = e + 1; continue; }
         if (e - i >= sizeof ln) { sy_printf("MALFORMED\t%s\tline too long\n", file); return 2; }
-        memcpy(ln, m + i, e - i); ln[e - i] = 0; i = e + 1;
+        mm_copy(ln, sizeof ln, m + i, e - i); ln[e - i] = 0; i = e + 1;
         for (t = 0; ln[t] && ln[t] != '\t'; t++) {}
         for (k = 0; k < 3; k++) if (strlen(RM_KIND[k]) == t && !memcmp(ln, RM_KIND[k], t)) found = k;
         if (found < 0 || !ln[t] || got[found]) { sy_printf("MALFORMED\t%s\tbad or duplicate kind line\n", file); return 2; }
         if (rm_cols(ln + t + 1) != RM_COLS[found]) { sy_printf("MALFORMED\t%s\t%s needs %d columns\n", file, RM_KIND[found], RM_COLS[found]); return 2; }
-        strcpy(rows[found], ln + t + 1); got[found] = 1;
+        mm_copy(rows[found], sizeof rows[found], ln + t + 1, strlen(ln + t + 1) + 1); got[found] = 1;
     }
     if (!(got[0] && got[1] && got[2])) { sy_printf("MALFORMED\t%s\tneed batch, coverage and packages lines\n", file); return 2; }
     { size_t sl = strlen(stem);
@@ -63,12 +81,12 @@ static int rm_one(const char *root, const char *file, const char *stem, int writ
         if (!c) return 2;
         { char *ce = strchr(c, '\t'); size_t cl = ce ? (size_t)(ce - c) : strlen(c);
           if (cl >= sizeof key[1]) return 2;
-          memcpy(key[1], c, cl); key[1][cl] = 0;
+          mm_copy(key[1], sizeof key[1], c, cl); key[1][cl] = 0;
           if (strncmp(rows[1], key[1], cl) || rows[1][cl] != '\t') { sy_printf("MALFORMED\t%s\tcoverage id differs from batch column 11\n", file); return 2; } } } }
     for (k = 0; k < 3; k++) {
         char tp[4400]; size_t tn = 0; char *tb; int r;
         if (cx_fmt(tp, sizeof tp, "%s/%s", root, RM_TABLE[k])) return 2;
-        tb = (char *)cx_read(tp, &tn);
+        tb = rm_read(root, RM_TABLE[k], &tn);
         if (!tb) { sy_printf("MALFORMED\t%s\ttable %s unreadable\n", file, RM_TABLE[k]); return 2; }
         r = rm_find(tb, tn, key[k], rows[k]);
         if (r == 2) { sy_printf("MISMATCH\t%s\t%s\n", RM_TABLE[k], stem); (*bad)++; }
@@ -77,8 +95,8 @@ static int rm_one(const char *root, const char *file, const char *stem, int writ
             if (write) {
                 size_t rl = strlen(rows[k]); char *nb = (char *)mm_alloc(tn + rl + 2); int nl = (tn > 0 && tb[tn - 1] != '\n');
                 if (!nb) return 2;
-                memcpy(nb, tb, tn); if (nl) nb[tn] = '\n';
-                memcpy(nb + tn + nl, rows[k], rl); nb[tn + nl + rl] = '\n';
+                mm_copy(nb, tn + rl + 2, tb, tn); if (nl) nb[tn] = '\n';
+                mm_copy(nb + tn + nl, rl + 2, rows[k], rl); nb[tn + nl + rl] = '\n';
                 if (cx_write(tp, nb, tn + nl + rl + 1)) { mm_free(nb); return 2; }
                 mm_free(nb); sy_printf("WROTE\t%s\t%s\n", RM_TABLE[k], stem);
             } else (*bad)++;
@@ -92,15 +110,33 @@ int main(int argc, char **argv) {
     for (a = 1; a < argc; a++) {
         if (!strcmp(argv[a], "--check")) check = 1;
         else if (!strcmp(argv[a], "--write")) write = 1;
+        else if (!strcmp(argv[a], "--index")) rm_index = 1;
         else if (!strcmp(argv[a], "--root") && a + 1 < argc) root = argv[++a];
         else { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
     }
     if (check == write) { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
+    if (rm_index) {   /* index mode (read-only): names from git ls-files, rows from index blobs */
+        char *lv[] = {"git", "ls-files", "--", "tests/manifests", 0}, *o = 0; size_t on = 0, i = 0;
+        if (write || cx_runv_timeout(lv, 20, &o, &on) != 0) { sy_printf("REG_MANIFEST\tindex listing failed\n"); return 2; }
+        while (i < on) {
+            size_t e = i, l, b = 0; char stem[300], file[300];
+            while (e < on && o[e] != '\n') e++;
+            { const char *pre = "tests/manifests/"; size_t pl = strlen(pre);
+              if (e - i > pl + 4 && !memcmp(o + i, pre, pl) && !memcmp(o + e - 4, ".tsv", 4) && e - i - pl < 290) {
+                  l = e - i - pl; mm_copy(file, sizeof file, o + i + pl, l); file[l] = 0; mm_copy(stem, sizeof stem, file, l - 4); stem[l - 4] = 0;
+                  if (rm_one(root, file, stem, 0, &bad)) hard = 1;
+                  n++; (void)b; } }
+            i = e + 1;
+        }
+        mm_free(o);
+        sy_printf("REG_MANIFEST\tmanifests=%d\tbad=%d\thard=%d\n", n, bad, hard);
+        return hard ? 2 : (bad ? 1 : 0);
+    }
     if (cx_fmt(dir, sizeof dir, "%s/tests/manifests", root) || sy_dir_open(&d, dir)) { sy_printf("REG_MANIFEST\tno manifest dir\n"); return 2; }
     while (sy_dir_next(&d) == 1) {
         size_t l = strlen(d.name); char stem[300];
         if (l < 5 || l > 290 || strcmp(d.name + l - 4, ".tsv")) continue;
-        memcpy(stem, d.name, l - 4); stem[l - 4] = 0;
+        mm_copy(stem, sizeof stem, d.name, l - 4); stem[l - 4] = 0;
         if (rm_one(root, d.name, stem, write, &bad)) hard = 1;
         n++;
     }

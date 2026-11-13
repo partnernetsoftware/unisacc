@@ -13,7 +13,9 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
+#pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
 static int failed;
@@ -63,10 +65,43 @@ static void tables(const char *root, int b, int c, int p, const char *crow) {
     put(root, "build/batch-packages.tsv", p ? t : "# h\n");
 }
 
+/* precommit manifest gate (DSG-REG1 step 2): temp git repo; tables other than the staged ones are already committed,
+ * so the gate fires on the manifest or batch-packages.tsv alone (no run.cx --list involved). */
+static int shq(const char *cmd) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; mm_free(out_buf); out_buf = 0; out_n = 0;
+    return cx_runv_timeout(v, 55, &out_buf, &out_n);
+}
+static void pc_cases(void) {
+    char td[400], cwd[400], cmd[2400]; char *o = 0; size_t n = 0; int rc, i; char *v[] = {"pwd", 0};
+    if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) fatal("pwd");
+    mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0;
+    if (cx_fmt(td, sizeof td, "%s/rm-pc-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) fatal("tmpdir");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir -p tests/manifests build && "
+               "ln -s '%s/unisacc.com' unisacc.com && ln -s '%s/tools' tools && ln -s '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv", td, cwd, cwd, cwd, cwd) || shq(cmd)) fatal("pc fixture");
+    put(td, "tests/batches.tsv", "id\n" "fx\tIMPLEMENTED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.cx\t-\tl.fx\trc0:FX\tproduct\tcommit\n");
+    put(td, "tests/coverage.tsv", "id\n");   /* coverage row absent on purpose */
+    put(td, "build/batch-packages.tsv", "# h\n" "batch\tfx\tall\t-\t-\t-\t-\t-\t-\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv tests/coverage.tsv build/batch-packages.tsv && git commit -q --no-verify -m base", td) || shq(cmd)) fatal("pc base");
+    put(td, "tests/manifests/fx.tsv", MAN);
+    put(td, "other.txt", "x\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add other.txt && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && !has("BLOCKED registration manifest"), "precommit-unrelated-commit-unaffected");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/manifests/fx.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    rc = shq(cmd); ck(rc == 1 && has("BLOCKED registration manifest") && has("MISSING\ttests/coverage.tsv\tfx"), "precommit-missing-coverage-refused-naming-table");
+    put(td, "tests/coverage.tsv", "id\n" "l.fx\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/coverage.tsv && git commit -q --no-verify -m cov && git reset -q && git add tests/manifests/fx.tsv build/batch-packages.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && !has("BLOCKED registration manifest"), "precommit-all-three-present-passes");
+    /* the index, not the work tree, is what counts: restage the packages table without the row */
+    put(td, "build/batch-packages.tsv", "# h\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add build/batch-packages.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    rc = shq(cmd); ck(rc == 1 && has("MISSING\tbuild/batch-packages.tsv\tfx"), "precommit-row-dropped-from-staged-table-refused");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td) || shq(cmd)) fatal("cleanup");
+}
+
 int main(void) {
     char root[600], d[800]; int rc;
-    if (cx_fmt(root, sizeof root, "out/check-reg-manifest-%d", sy_pid())) fatal("root");
-    mkd("out"); mkd(root);
+    if (cx_fmt(root, sizeof root, "%s/check-reg-manifest-%d", sy_tmpdir(), sy_pid())) fatal("root");
+    mkd(root);
     if (cx_fmt(d, sizeof d, "%s/tests", root)) fatal("d"); mkd(d);
     if (cx_fmt(d, sizeof d, "%s/tests/manifests", root)) fatal("d"); mkd(d);
     if (cx_fmt(d, sizeof d, "%s/build", root)) fatal("d"); mkd(d);
@@ -85,6 +120,7 @@ int main(void) {
     rc = run("--write", root); ck(rc == 1 && has("MISMATCH\ttests/coverage.tsv\tfx") && !has("WROTE\ttests/coverage"), "mismatch-refused-not-overwritten");
     put(root, "tests/manifests/fx.tsv", "batch\tfx\tonly\n");
     rc = run("--check", root); ck(rc == 2 && has("MALFORMED"), "malformed-manifest-exit2");
+    pc_cases();
     sy_printf("CHECK_REG_MANIFEST\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
