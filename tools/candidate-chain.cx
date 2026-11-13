@@ -407,9 +407,14 @@ static const char *eb_pinned(const char *root, const char *outdir, char *copy, s
    (chain-step 的两处 kernel-route 取用点与 kernel-route 取 asm-source 的取用点读这两个变量,未设置时退回快照)。 */
 static void kr_pin_env(const char *root, const char *outdir) {
     char kr[4400], as[4400], probe[4400];
-    /* 夹具根没有这两个源文件(fresh-out 等只造最小假根):不钉,环境变量不设,chain-step 退回快照路径 */
-    if (cx_fmt(probe, sizeof probe, "%s/tools/kernel-route.cx", root) || fsize(probe) < 0) return;
-    if (cx_fmt(probe, sizeof probe, "%s/tools/asm-source.cx", root) || fsize(probe) < 0) return;
+    /* 真实链下源副本缺失一律拒绝(rc 2,点名驱动);只有显式夹具开关 UNISACC_PIN_FIXTURE=1 才允许退回快照路径并打印 PIN_FALLBACK */
+    static const char *drv[2] = {"kernel-route", "asm-source"};
+    for (int k = 0; k < 2; k++) {
+        if (cx_fmt(probe, sizeof probe, "%s/tools/%s.cx", root, drv[k])) die("path", "kr pin");
+        if (fsize(probe) >= 0) continue;
+        if (sy_env("UNISACC_PIN_FIXTURE") && tx_eqz(sy_env("UNISACC_PIN_FIXTURE"), "1")) { sy_printf("PIN_FALLBACK\ttool=%s\treason=fixture-root-without-source\n", drv[k]); return; }
+        die("REFUSE chain-tool pin source missing", drv[k]);
+    }
     if (!src_pinned(root, outdir, "kernel-route", kr, sizeof kr) || !src_pinned(root, outdir, "asm-source", as, sizeof as)) die("path", "kr pin");
     if (sy_setenv("UNISACC_KERNEL_ROUTE_SRC", kr, 1) || sy_setenv("UNISACC_ASM_SOURCE_SRC", as, 1)) die("env", "kr pin");
 }
@@ -2203,6 +2208,12 @@ int main(int argc, char **argv) {
         char cp[4400];
         eb_pinned(argv[2], argv[3], cp, sizeof cp);
         sy_printf("EB_PIN\t%s\n", cp);
+        return 0;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--kr-pin-env-fixture")) {
+        /* 夹具入口: --kr-pin-env-fixture ROOT OUT,只跑 kr_pin_env(源副本缺失的拒绝/回退合同) */
+        kr_pin_env(argv[2], argv[3]);
+        sy_printf("KR_PIN_ENV\tok\n");
         return 0;
     }
     if (argc == 5 && tx_eqz(argv[1], "--src-pin-fixture")) {
