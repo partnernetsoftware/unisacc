@@ -229,6 +229,20 @@ e2 最小值降 5.0%,合计最小值降 1.4%;e3 中位数 B 反而高,在噪声�
   - 外推(算术,非实测):44 批各付一次 norm 约 34.8 s;44 批各自一次调用的 kit+prep 约 79 s。判据 10 s:norm 外推超出,但那是摘要不是解释器启动;是否合并为每产品身份一次摘要由后续改 run-batch 决定,本次不改。
   - -j 4 整体(11 批,不含 cx-l0-text-fmt):墙钟 44353 ms,AFFECTED_RUN elapsed 43824(kit 2764 prep 773 run 40287),pass=10 fail=1(tlib-prep 本次 FAIL,单批 3 次 PASS,输出含 `tlib: STALE tools.cxlib`,工作区有他人改动;未定因)。同 11 批 -j 1 total 最小之和 95037。
   - 测时 load 2 至 4.6,4 路并行互扰,heavy 批冷热差大(awpath 首次 4159 后 828,首跑含缓存冷)。
+- SPEED-7 定因与方案(2026-11-13,实测,候选 e43ef368,APE 单文件 6856916 B,load 1.4 至 1.9;入库的 run-batch/affected/productpkg 未改,补丁待集成者核):
+  - norm_ms 是什么:`tests/run-batch.cx` 第 131 行的 `product_digest(root,after)`,即 `tools/cxlib/productpkg.cx` 的 `pp_product_digest`。APE 布局下它做三件事:`pp_layout` 整文件读一遍找 UNIPKG1 尾(16 至 18 ms);`pp_file_hex` 再整读一遍(16 至 17 ms);用序曲的软件 `cx_sha256_hex` 逐字节算 6.86 MB(734 至 779 ms,约 9 MB/s)。不起子进程、不调 shell。800 ms 的原因就是软件摘要;同一块字节走 `sys.sha` 的内核 AF_ALG 是 38 至 39 ms,两者十六进制逐位相同(探针 5 轮 same=1)。
+  - 分步骤(5 轮,最小/中位 ms):layout 16/17,read 16/16,soft_sha 734/735,kernel_sha 38/38,pp_product_digest 整体 771/775,lstat 千次 1/1。
+  - 漏计:运行前那次 `product_digest(root,before)` 在 `t_prep` 之前,不进 BATCH_TIMING 的任何一相。所以每批真实固定成本是两次摘要约 1.55 s,不是 norm 的 0.79 s。实测:直接跑 run-batch surfline,墙钟 2044/2054 ms 而 total_ms 只有 805/810。
+  - 这项摘要守什么:前后两次整产品摘要相等才判 PASS,防的是批次运行期间(含被杀进程树的孤儿,所以 after 排在收割之后)有人改写了被测产品;另把 before 作为 `candidate=` 写进 BATCH_RUN,把结论绑到确切字节。两条都要求读真实字节。
+  - 候选对照:
+    - (A) `pp_file_hex` 对 >=65536 B 的成员走 `sy_sha256_hex`,失败回落软件实现(与 run-batch 自带的 `digest()`、`tp_sha` 同形)。收益实测:摘要 771 -> 73 ms,norm 784 -> 74,单批墙钟 2044 -> 645 ms。安全性不变:算法、输入字节、前后比较、symlink 拒绝都没动,只换了算 SHA-256 的实现,内核路失败即回落。改动面:productpkg.cx 加 1 条 use、改 1 行;所有调用者(zero-wave、preflight、package-refresh 等)同时受益。选它。
+    - (B) 同一次 affected 调用内按 (dev,inode,size,mtime_ns,ctime_ns) 复用摘要。不选:stat 相同不证明字节相同(mmap 写回、改后恢复时间戳),会把「逐字节未变」降成「元数据未变」,削弱了上面那条性质;(A) 之后剩余收益上限只有约 75 ms x 2。
+    - (C) affected 算好摘要传给 run-batch、run-batch 只验长度。不选:after 必须在批跑完后重读,传入值只能替代 before,而 before 若不由 run-batch 自己读,就不能证明它起跑时产品是那份字节。
+    - (D) `pp_product_digest` 里 `pp_layout` 被调两次(自身一次、`pp_member_list` 一次),各整读一遍;合成一次可再省约 17 ms x 2 次摘要(推算)。可随 (A) 之后做,未做原型。
+  - prep 约 0.8 s 的原因相同:`tools/affected.cx` `prebuild()` 无条件 `file_sha(ROOT/unisacc.com)`,走软件 `cx_sha256_hex`,即使没有任何材料要建。改成 `tp_sha`(cxlib.tlibpkg 已导出,内核路加回落)一行:prep_ms 755/772 -> 59/59(各 3 次,单批 surfline)。
+  - kit 约 1.0 s:命中路(rebuilt=0 reused=17 kit=unchanged)墙钟 972/987,tlib.cx 自报 ms=675/682,余约 300 ms 是 sh 加产品启动加键计算(tlib 只打用法 164 ms)。675 ms 内部是 `ensure_product_sha`、17 个 tlib 的 `kit_keep`(load_lib 验字节、fresh 重算源闭包、input_sha)与 `kit_verify`,逐步占比 UNMEASURED。进程内单算 kit 键并看 kit.tsv 在不在只要 120/122 ms(4 轮)。方案(未做原型):affected 先在进程内 `tp_kit_dir` 加 `sy_exists(kit.tsv)`,在就不起 `tlib kit` 子进程;安全性靠每批链接时 `tlib prep` 仍按原样验 kit_sha、产品 sha 与 tlib.cx 闭包(cmd_prep 注释所述 3/4 退出码),坏 kit 仍会落到 fallback 或拒绝。收益上限约 0.85 s 每次调用(推算)。须先确认 kit_keep 的 STALE 重建职责在命中键下确实冗余,再改。
+  - 合计:单批 affected 调用 elapsed 3798/3807 ms;只打 prep 补丁 3113/3142(实测);再加 (A) 约 1.7 s(推算:3113 减两次摘要 1.4 s);再跳过命中的 kit 约 0.85 s(推算)。339 批提交档每批省 1.4 s 约 475 s 的 CPU 时间(算术外推,非实测;-j 4 下墙钟约四分之一)。
+  - 补丁与原型(仓外,未入库):`$CLAUDE_JOB_DIR/tmp/speed7-productpkg-kernel-sha.patch`(20 行)、`speed7-affected-prep-kernel-sha.patch`(11 行),即 `/home/devali/.claude/jobs/2798e440/tmp/`;探针 `w/tools/normbench.cx`、`w/tools/kitkeybench.cx`。未验:PP_SPLIT 布局、非 lnx/x86_64(内核路直接返回非零走回落,行为同现状)、productpkg 的 check 批次(check-productpkg 等)须在补丁入库时由 affected 实跑。
 
 (4) SPEED-5 单元级并行,慢车道(单次 -o 在产品内)。测量步现在就能做。
 - 目标:e3 之前按单元并行 e2/e1。e3、lower、elf 仍整程序一次。
